@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from typing import Any
 
 
@@ -19,10 +20,18 @@ def _reject_duplicate_object_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any
     return document
 
 
+def _reject_nonfinite_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError("non-finite JSON number")
+    return parsed
+
+
 def decode_json(content: str) -> Any:
     """Decode standard JSON without silently accepting duplicate object keys."""
     return json.loads(
         content,
         object_pairs_hook=_reject_duplicate_object_keys,
         parse_constant=_reject_nonstandard_constant,
+        parse_float=_reject_nonfinite_float,
     )

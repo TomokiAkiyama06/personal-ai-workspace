@@ -124,6 +124,19 @@ class EvaluatorResultSchemaTest(unittest.TestCase):
         self.assertIn("duplicate object key", stderr.getvalue())
         self.assertNotIn(secret_value, stderr.getvalue())
 
+    def test_cli_rejects_float_overflow_without_echoing_content(self):
+        secret_value = "do-not-echo-this-json"
+        document = '{"issue_text": "' + secret_value + '", "wall_clock_ms": 1e999}'
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "overflow.json"
+            path.write_text(document, encoding="utf-8")
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                result = main([str(path)])
+        self.assertEqual(result, 1)
+        self.assertIn("non-standard numeric constant", stderr.getvalue())
+        self.assertNotIn(secret_value, stderr.getvalue())
+
     def test_unexpected_properties_are_rejected_without_mutating_input(self):
         result = self.load_fixture(FIXTURES / "valid" / "complete.json")
         changed = deepcopy(result)
