@@ -49,7 +49,9 @@ never retry internally.
 The interface contains only public candidate identity fields. Credentials, provider clients,
 raw provider errors, runtime execution, and worktree/test-runner behavior are intentionally
 outside this module. Concrete adapters must obtain credentials through a private Backend
-dependency and convert errors to stable public `error_code` values.
+dependency and convert errors to `CandidateErrorCode` values; raw provider errors
+must remain private. This benchmark-only `CandidateAdapter` contract is separate
+from the production [Agent Adapter](../docs/ARCHITECTURE.md#7-agent-adapter).
 
 ## Validator
 

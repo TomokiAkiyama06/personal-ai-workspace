@@ -6,6 +6,7 @@ load credentials, connect to a provider, execute tools, or manage worktrees.
 
 from __future__ import annotations
 
+import json
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -13,12 +14,40 @@ from enum import StrEnum
 from math import isfinite
 from numbers import Real
 from threading import Lock
+from types import MappingProxyType
 from typing import Any
+
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError
 
 
 def _require_text(value: str, field_name: str) -> None:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{field_name} must be a non-empty string")
+
+
+def _copy_json_value(value: Any) -> Any:
+    """Copy a JSON value while rejecting non-JSON mapping keys and values."""
+
+    if isinstance(value, Mapping):
+        if not all(isinstance(key, str) for key in value):
+            raise TypeError("input_schema mappings must use string keys")
+        return {key: _copy_json_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_copy_json_value(item) for item in value]
+    return value
+
+
+def _freeze_json_value(value: Any) -> Any:
+    """Recursively make a copied JSON value read-only."""
+
+    if isinstance(value, dict):
+        return MappingProxyType(
+            {key: _freeze_json_value(item) for key, item in value.items()}
+        )
+    if isinstance(value, list):
+        return tuple(_freeze_json_value(item) for item in value)
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,8 +94,17 @@ class ToolDefinition:
         _require_text(self.description, "description")
         if not isinstance(self.input_schema, Mapping):
             raise TypeError("input_schema must be a mapping")
-        if self.input_schema.get("type") != "object":
+        snapshot = _copy_json_value(self.input_schema)
+        try:
+            json.dumps(snapshot, allow_nan=False)
+            Draft202012Validator.check_schema(snapshot)
+        except (SchemaError, TypeError, ValueError):
+            raise ValueError(
+                "input_schema must be a valid JSON-serializable Draft 2020-12 JSON Schema"
+            ) from None
+        if snapshot.get("type") != "object":
             raise ValueError("input_schema must declare an object JSON Schema")
+        object.__setattr__(self, "input_schema", _freeze_json_value(snapshot))
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,6 +261,18 @@ class CandidateStatus(StrEnum):
     TIMED_OUT = "timed_out"
 
 
+class CandidateErrorCode(StrEnum):
+    """Stable public failure classifications that never contain provider detail."""
+
+    BACKEND_CANCELLED = "backend_cancelled"
+    PROVIDER_UNAVAILABLE = "provider_unavailable"
+    RATE_LIMITED = "rate_limited"
+    INVALID_REQUEST = "invalid_request"
+    TOOL_FAILURE = "tool_failure"
+    DEADLINE_EXCEEDED = "deadline_exceeded"
+    INTERNAL_ERROR = "internal_error"
+
+
 @dataclass(frozen=True, slots=True)
 class Usage:
     """Normalized usage reported only when the runtime makes it available."""
@@ -249,7 +299,7 @@ class CandidateResult:
 
     status: CandidateStatus
     output: str | None = None
-    error_code: str | None = None
+    error_code: CandidateErrorCode | None = None
     retryable: bool = False
     usage: Usage = field(default_factory=Usage)
 
@@ -270,7 +320,8 @@ class CandidateResult:
                 raise ValueError("a non-completed result cannot contain output")
             if self.error_code is None:
                 raise ValueError("a non-completed result requires error_code")
-            _require_text(self.error_code, "error_code")
+            if not isinstance(self.error_code, CandidateErrorCode):
+                raise TypeError("error_code must be a CandidateErrorCode")
         if self.status is CandidateStatus.CANCELLED and self.retryable:
             raise ValueError("a cancelled attempt cannot be retryable")
 

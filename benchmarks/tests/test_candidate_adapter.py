@@ -9,6 +9,7 @@ from benchmarks.candidate_adapter import (
     CancellationReason,
     CancellationToken,
     CandidateAdapter,
+    CandidateErrorCode,
     CandidateIdentity,
     CandidateRequest,
     CandidateResult,
@@ -38,7 +39,8 @@ class RecordingAdapter(CandidateAdapter):
         self.calls.append((request, control))
         if control.cancellation.cancelled:
             return CandidateResult(
-                CandidateStatus.CANCELLED, error_code="backend_cancelled"
+                CandidateStatus.CANCELLED,
+                error_code=CandidateErrorCode.BACKEND_CANCELLED,
             )
         return CandidateResult(
             CandidateStatus.COMPLETED,
@@ -87,11 +89,44 @@ class CandidateAdapterContractTest(unittest.TestCase):
         self.assertEqual(request.context_limits.max_context_tokens, 32_768)
         self.assertEqual(request.context_limits.max_output_tokens, 4_096)
 
+    def test_tool_schema_is_a_deep_immutable_snapshot(self):
+        schema = {
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+        }
+        tool = ToolDefinition("read_file", "Read a repository file.", schema)
+        schema["properties"]["path"]["type"] = "integer"
+        schema["required"].append("recursive")
+
+        self.assertEqual(tool.input_schema["properties"]["path"]["type"], "string")
+        self.assertEqual(tool.input_schema["required"], ("path",))
+        with self.assertRaises(TypeError):
+            tool.input_schema["properties"]["path"]["type"] = "integer"
+
+    def test_invalid_complete_tool_schema_is_rejected(self):
+        with self.assertRaises(ValueError):
+            ToolDefinition("bad", "Bad schema.", {"type": "object", "required": 1})
+
     def test_backend_controls_retry_attempts(self):
         policy = RetryPolicy(max_attempts=2)
         self.assertTrue(policy.allows_attempt(1))
         self.assertTrue(policy.allows_attempt(2))
         self.assertFalse(policy.allows_attempt(3))
+
+    def test_backend_does_not_retry_non_retryable_or_exhausted_results(self):
+        policy = RetryPolicy(max_attempts=2)
+        retryable = CandidateResult(
+            CandidateStatus.FAILED,
+            error_code=CandidateErrorCode.PROVIDER_UNAVAILABLE,
+            retryable=True,
+        )
+        non_retryable = CandidateResult(
+            CandidateStatus.FAILED,
+            error_code=CandidateErrorCode.INVALID_REQUEST,
+        )
+        self.assertFalse(policy.should_retry(1, non_retryable))
+        self.assertFalse(policy.should_retry(2, retryable))
 
     def test_backend_controls_timeout_and_cancellation(self):
         token = CancellationToken()
@@ -118,6 +153,46 @@ class CandidateAdapterContractTest(unittest.TestCase):
         with self.assertRaises(TypeError):
             CancellationToken().cancel("may-contain-private-content")  # type: ignore[arg-type]
 
+    def test_duplicate_tool_names_are_rejected(self):
+        tool = example_request().tools[0]
+        with self.assertRaises(ValueError):
+            CandidateRequest(
+                task_id="PAW-duplicate-tool",
+                prompt=PromptConfig(system="Follow policy.", task="Fix the issue."),
+                tools=(tool, tool),
+                context_limits=ContextLimits(32_768, 4_096),
+            )
+
+    def test_candidate_result_invariants_are_enforced(self):
+        cases = (
+            (CandidateStatus.COMPLETED, None, None, False),
+            (
+                CandidateStatus.COMPLETED,
+                "output",
+                CandidateErrorCode.INTERNAL_ERROR,
+                False,
+            ),
+            (
+                CandidateStatus.FAILED,
+                "output",
+                CandidateErrorCode.INTERNAL_ERROR,
+                False,
+            ),
+            (CandidateStatus.FAILED, None, None, False),
+            (
+                CandidateStatus.CANCELLED,
+                None,
+                CandidateErrorCode.BACKEND_CANCELLED,
+                True,
+            ),
+        )
+        for status, output, error_code, retryable in cases:
+            with (
+                self.subTest(status=status, retryable=retryable),
+                self.assertRaises(ValueError),
+            ):
+                CandidateResult(status, output, error_code, retryable)
+
     def test_candidate_identity_has_no_secret_or_credential_extension_point(self):
         public_fields = {item.name for item in fields(CandidateIdentity)}
         self.assertEqual(
@@ -131,10 +206,17 @@ class CandidateAdapterContractTest(unittest.TestCase):
         self.assertNotIn("exception", result_fields)
         self.assertNotIn("error_message", result_fields)
         failed = CandidateResult(
-            CandidateStatus.FAILED, error_code="provider_unavailable", retryable=True
+            CandidateStatus.FAILED,
+            error_code=CandidateErrorCode.PROVIDER_UNAVAILABLE,
+            retryable=True,
         )
         self.assertTrue(failed.retryable)
         self.assertTrue(RetryPolicy(max_attempts=2).should_retry(1, failed))
+        with self.assertRaises(TypeError):
+            CandidateResult(
+                CandidateStatus.FAILED,
+                error_code="provider error containing private content",  # type: ignore[arg-type]
+            )
 
 
 if __name__ == "__main__":
