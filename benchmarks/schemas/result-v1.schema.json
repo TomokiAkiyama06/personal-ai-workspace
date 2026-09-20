@@ -129,7 +129,7 @@
       "additionalProperties": false
     },
     "metrics": {
-      "description": "Numeric measurements collected by the evaluator when available. Durations are milliseconds, token_count is a token count, and peak_vram_bytes is bytes.",
+      "description": "Numeric measurements collected by the evaluator when available. Durations are milliseconds, token_count is a token count, diff_size is changed lines, and peak_vram_bytes is bytes.",
       "type": "object",
       "properties": {
         "wall_clock_ms": {
@@ -137,6 +137,14 @@
           "minimum": 0
         },
         "token_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "agent_steps": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "diff_size": {
           "type": "integer",
           "minimum": 0
         },

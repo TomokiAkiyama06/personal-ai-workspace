@@ -66,6 +66,8 @@ Result JSONは、Evaluator version、Task ID、Candidateのmodel/runtime/quantiz
 | --- | --- |
 | `wall_clock_ms` | 実行時間 |
 | `token_count` | token数 |
+| `agent_steps` | Agent step数 |
+| `diff_size` | 変更行数 |
 | `tool_failures` | Tool失敗回数 |
 | `peak_vram_bytes` | Peak VRAM |
 | `human_correction_ms` | 人間による修正時間 |

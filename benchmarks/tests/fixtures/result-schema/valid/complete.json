@@ -66,6 +66,8 @@
   "metrics": {
     "wall_clock_ms": 1234.5,
     "token_count": 4567,
+    "agent_steps": 12,
+    "diff_size": 84,
     "tool_failures": 0,
     "peak_vram_bytes": 987654321,
     "human_correction_ms": 0
