@@ -1,3 +1,1 @@
-markdown-it-py==3.0.0
-mdurl==0.1.2
-PyYAML==6.0.3
+pre-commit==4.6.2
