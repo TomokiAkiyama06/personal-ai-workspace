@@ -35,7 +35,7 @@ def error_reason(error) -> str:
     if error.validator == "minItems":
         return "array must contain at least one item"
     if error.validator == "minimum":
-        return "number must not be negative"
+        return f"number must be at least {error.validator_value}"
     return f"validation failed ({error.validator})"
 
 

@@ -76,6 +76,13 @@ class EvaluatorResultSchemaTest(unittest.TestCase):
             with self.subTest(path=path.name):
                 self.assertTrue(validate_document(self.load_fixture(path), self.schema))
 
+    def test_minimum_error_uses_the_schema_constraint(self):
+        result = self.load_fixture(FIXTURES / "invalid" / "negative-metric.json")
+        self.assertIn(
+            "$.metrics.peak_vram_bytes: number must be at least 0",
+            validate_document(result, self.schema),
+        )
+
     def test_errors_do_not_repeat_rejected_values(self):
         result = self.load_fixture(FIXTURES / "valid" / "complete.json")
         secret_value = "do-not-repeat-this-value"
