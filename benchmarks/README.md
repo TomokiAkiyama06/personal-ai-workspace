@@ -51,3 +51,26 @@ python3 -m venv .venv
 
 複数fileを一度に指定できます。すべてvalidなら終了code 0、入力が不正なら1、bundled schemaを
 利用できない場合は2を返します。エラーはJSON pathと理由を表示し、拒否した入力値は表示しません。
+
+## Evaluator Result schema v1
+
+Result JSONは、Task ID、Candidateのmodel/runtime/quantization、`FAIL_TO_PASS`と`PASS_TO_PASS`、
+各Evaluator checkの結果、計測値を保存します。checkの種別は`build`、`unit`、`integration`、`lint`、
+`type`、`security`、`forbidden_changes`です。statusは`passed`、`failed`、`not_run`、`error`で表します。
+
+`metrics`では、取得できた場合に次を保存できます。durationの単位はミリ秒、VRAMはbytesです。
+
+| Field | 内容 |
+| --- | --- |
+| `wall_clock_ms` | 実行時間 |
+| `token_count` | token数 |
+| `tool_failures` | Tool失敗回数 |
+| `peak_vram_bytes` | Peak VRAM |
+| `human_correction_ms` | 人間による修正時間 |
+
+Runtimeで取得できないmetricは、`metrics`から省略できます。これは計測不能と0を区別するためです。
+Result schema validatorもTask schema validatorと同じ終了code・値を出力しないエラー方針を使います。
+
+```bash
+.venv/bin/python -m benchmarks.validate_result benchmarks/tests/fixtures/result-schema/valid/complete.json
+```

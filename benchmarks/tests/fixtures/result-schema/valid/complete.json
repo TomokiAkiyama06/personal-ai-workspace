@@ -1,0 +1,57 @@
+{
+  "schema_version": "1.0",
+  "task_id": "history-link-validation",
+  "candidate": {
+    "model": "example-coder-32b",
+    "runtime": "example-runtime",
+    "quantization": "bf16"
+  },
+  "test_outcomes": {
+    "fail_to_pass": "passed",
+    "pass_to_pass": "passed"
+  },
+  "check_results": [
+    {
+      "id": "build",
+      "type": "build",
+      "status": "passed"
+    },
+    {
+      "id": "unit",
+      "type": "unit",
+      "status": "passed"
+    },
+    {
+      "id": "integration",
+      "type": "integration",
+      "status": "passed"
+    },
+    {
+      "id": "lint",
+      "type": "lint",
+      "status": "passed"
+    },
+    {
+      "id": "type",
+      "type": "type",
+      "status": "passed"
+    },
+    {
+      "id": "security",
+      "type": "security",
+      "status": "passed"
+    },
+    {
+      "id": "forbidden-changes",
+      "type": "forbidden_changes",
+      "status": "passed"
+    }
+  ],
+  "metrics": {
+    "wall_clock_ms": 1234.5,
+    "token_count": 4567,
+    "tool_failures": 0,
+    "peak_vram_bytes": 987654321,
+    "human_correction_ms": 0
+  }
+}

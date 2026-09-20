@@ -1,0 +1,15 @@
+{
+  "schema_version": "1.0",
+  "task_id": "spec-add-health-endpoint",
+  "candidate": {
+    "model": "remote-candidate",
+    "runtime": "remote-runtime",
+    "quantization": "provider-managed"
+  },
+  "test_outcomes": {
+    "fail_to_pass": "not_run",
+    "pass_to_pass": "error"
+  },
+  "check_results": [],
+  "metrics": {}
+}

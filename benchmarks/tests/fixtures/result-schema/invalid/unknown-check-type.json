@@ -1,0 +1,21 @@
+{
+  "schema_version": "1.0",
+  "task_id": "unknown-check-type",
+  "candidate": {
+    "model": "example-coder-32b",
+    "runtime": "example-runtime",
+    "quantization": "bf16"
+  },
+  "test_outcomes": {
+    "fail_to_pass": "passed",
+    "pass_to_pass": "passed"
+  },
+  "check_results": [
+    {
+      "id": "unknown",
+      "type": "other",
+      "status": "passed"
+    }
+  ],
+  "metrics": {}
+}

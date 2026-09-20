@@ -1,0 +1,150 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/TomokiAkiyama06/personal-ai-workspace/benchmarks/schemas/result-v1.schema.json",
+  "title": "Personal AI Workspace evaluator result",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "task_id",
+    "candidate",
+    "test_outcomes",
+    "check_results",
+    "metrics"
+  ],
+  "properties": {
+    "schema_version": {
+      "description": "Version of this evaluator result schema.",
+      "const": "1.0"
+    },
+    "task_id": {
+      "description": "Identifier of the benchmark task that produced this result.",
+      "type": "string",
+      "minLength": 1
+    },
+    "candidate": {
+      "$ref": "#/$defs/candidate"
+    },
+    "test_outcomes": {
+      "$ref": "#/$defs/test_outcomes"
+    },
+    "check_results": {
+      "description": "Results of evaluator checks. A missing check result is distinct from a recorded not_run status.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/check_result"
+      }
+    },
+    "metrics": {
+      "$ref": "#/$defs/metrics"
+    }
+  },
+  "$defs": {
+    "candidate": {
+      "type": "object",
+      "required": [
+        "model",
+        "runtime",
+        "quantization"
+      ],
+      "properties": {
+        "model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "runtime": {
+          "type": "string",
+          "minLength": 1
+        },
+        "quantization": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "check_type": {
+      "enum": [
+        "build",
+        "unit",
+        "integration",
+        "lint",
+        "type",
+        "security",
+        "forbidden_changes"
+      ]
+    },
+    "check_status": {
+      "enum": [
+        "passed",
+        "failed",
+        "not_run",
+        "error"
+      ]
+    },
+    "test_outcomes": {
+      "type": "object",
+      "required": [
+        "fail_to_pass",
+        "pass_to_pass"
+      ],
+      "properties": {
+        "fail_to_pass": {
+          "$ref": "#/$defs/check_status"
+        },
+        "pass_to_pass": {
+          "$ref": "#/$defs/check_status"
+        }
+      },
+      "additionalProperties": false
+    },
+    "check_result": {
+      "type": "object",
+      "required": [
+        "id",
+        "type",
+        "status"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "type": {
+          "$ref": "#/$defs/check_type"
+        },
+        "status": {
+          "$ref": "#/$defs/check_status"
+        }
+      },
+      "additionalProperties": false
+    },
+    "metrics": {
+      "description": "Numeric measurements collected by the evaluator when available. Durations are milliseconds, token_count is a token count, and peak_vram_bytes is bytes.",
+      "type": "object",
+      "properties": {
+        "wall_clock_ms": {
+          "type": "number",
+          "minimum": 0
+        },
+        "token_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tool_failures": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "peak_vram_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "human_correction_ms": {
+          "type": "number",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

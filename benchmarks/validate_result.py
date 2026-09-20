@@ -1,4 +1,4 @@
-"""Validate benchmark task JSON without executing or resolving its references."""
+"""Validate benchmark evaluator result JSON without executing evaluator checks."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from jsonschema.exceptions import SchemaError
 from benchmarks.json_input import decode_json
 from benchmarks.schema_validation import validate_document as _validate_document
 
-SCHEMA_PATH = Path(__file__).parent / "schemas" / "task-v1.schema.json"
+SCHEMA_PATH = Path(__file__).parent / "schemas" / "result-v1.schema.json"
 
 
 def load_schema(path: Path = SCHEMA_PATH) -> dict[str, Any]:
@@ -25,7 +25,7 @@ def load_schema(path: Path = SCHEMA_PATH) -> dict[str, Any]:
 
 
 def validate_document(document: Any, schema: dict[str, Any] | None = None) -> list[str]:
-    """Return stable, value-free errors for a decoded benchmark task."""
+    """Return stable, value-free errors for a decoded evaluator result."""
     return _validate_document(document, schema if schema is not None else load_schema())
 
 
@@ -44,7 +44,9 @@ def _load_document(path: Path) -> tuple[Any | None, str | None]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Validate benchmark task JSON files.")
+    parser = argparse.ArgumentParser(
+        description="Validate evaluator result JSON files."
+    )
     parser.add_argument("files", nargs="+", type=Path)
     arguments = parser.parse_args(argv)
 

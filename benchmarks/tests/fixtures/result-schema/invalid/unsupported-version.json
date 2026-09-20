@@ -1,0 +1,15 @@
+{
+  "schema_version": "2.0",
+  "task_id": "future-result",
+  "candidate": {
+    "model": "example-coder-32b",
+    "runtime": "example-runtime",
+    "quantization": "bf16"
+  },
+  "test_outcomes": {
+    "fail_to_pass": "passed",
+    "pass_to_pass": "passed"
+  },
+  "check_results": [],
+  "metrics": {}
+}
