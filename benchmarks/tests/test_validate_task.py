@@ -122,20 +122,25 @@ class BenchmarkTaskSchemaTest(unittest.TestCase):
 
     def test_cli_rejects_duplicate_keys_without_echoing_content(self):
         secret_value = "do-not-echo-this-json"
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "duplicate-key.json"
-            path.write_text(
-                '{"hidden_checks": [{"body": "'
-                + secret_value
-                + '"}], "hidden_checks": []}',
-                encoding="utf-8",
-            )
-            stderr = io.StringIO()
-            with redirect_stderr(stderr):
-                result = main([str(path)])
-        self.assertEqual(result, 1)
-        self.assertIn("duplicate object key", stderr.getvalue())
-        self.assertNotIn(secret_value, stderr.getvalue())
+        documents = (
+            '{"hidden_checks": [{"body": "'
+            + secret_value
+            + '"}], "hidden_checks": []}',
+            '{"hidden_checks": [{"reference_id": "'
+            + secret_value
+            + '", "reference_id": "replacement"}]}',
+        )
+        for document in documents:
+            with self.subTest(document=document):
+                with tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / "duplicate-key.json"
+                    path.write_text(document, encoding="utf-8")
+                    stderr = io.StringIO()
+                    with redirect_stderr(stderr):
+                        result = main([str(path)])
+                self.assertEqual(result, 1)
+                self.assertIn("duplicate object key", stderr.getvalue())
+                self.assertNotIn(secret_value, stderr.getvalue())
 
 
 if __name__ == "__main__":
