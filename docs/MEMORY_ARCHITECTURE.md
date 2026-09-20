@@ -715,6 +715,18 @@ machine-readable metadataもRecovery Projectionへ含める。
 
 Raw Conversation全文、DB dump、WAL、credential等はGitへ保存しない。
 
+### User削除とRecovery履歴
+
+User削除の30日保留期限到達時は、通常のMemory削除とは区別して、
+対象のPrivate Memory・個人metadataをCurrent Projection、Recovery Git履歴、管理下の復旧用コピーから消去する。
+対象と履歴消去範囲を明示したHuman Approval、および消去検証を必要とする。
+未承認のhistory rewrite / force pushは実行せず、消去未完了・期限未達はOwnerへ通知する。
+
+古いRecovery / DB backupから復旧する場合も、復元元とは独立した最新の削除状態を適用し、
+消去済みUserの個人データを再生成しない。確認できなければ通常運用を再開しない。
+Audit保持と共有Project / Repositoryの存続はUser削除と分離する。
+詳細は [REQUIREMENTS.md](../REQUIREMENTS.md) の「User Deletion Retention」に従う。
+
 ## Shared Memory permissions
 
 [FIXED]

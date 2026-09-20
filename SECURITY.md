@@ -4,7 +4,9 @@
 
 Do **not** report security vulnerabilities, credentials, tokens, private memory, or recovery data in a public GitHub issue.
 
-Please use GitHub's private vulnerability reporting / Security Advisory flow for this repository when available.
+Please [report a vulnerability privately through GitHub](https://github.com/TomokiAkiyama06/personal-ai-workspace/security/advisories/new). Sign in to GitHub to submit a report to the repository maintainers.
+
+Private vulnerability reporting is enabled for this repository (verified on 2026-09-20).
 
 Include:
 

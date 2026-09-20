@@ -1,5 +1,5 @@
 blank_issues_enabled: true
 contact_links:
   - name: Security vulnerability
-    url: https://github.com/TomokiAkiyama06/personal-ai-workspace/security
-    about: 脆弱性はPublic IssueではなくSecurity経由で報告してください。
+    url: https://github.com/TomokiAkiyama06/personal-ai-workspace/security/advisories/new
+    about: GitHubにログインして、脆弱性を管理者へ非公開で報告してください。

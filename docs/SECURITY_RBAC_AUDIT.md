@@ -1,6 +1,6 @@
 # Security / RBAC / Audit — Personal AI Workspace
 
-更新日: 2026-09-15
+更新日: 2026-09-20
 
 ## 1. Roles
 ### User
@@ -8,6 +8,12 @@ Chat、Agent利用、自分のWorkspace/GitHub/Memory、PR作成。
 
 ### Admin
 User権限 + Usage / Audit / System Prompt / Model / Routing / Permission / Config管理。
+
+### Owner
+Adminの全権限を含むシステムの最終所有者。原則1名。
+Adminの追加/削除、Owner権限の移譲、最後のAdmin削除防止に関わる操作、全体復旧/非常時設定はOwnerのみ。
+削除待ちUserの30日以内の復元と、Backup機能の有効/無効、Backup先、Backup専用Credential、Backup方式・Backup関連の重要Security設定の変更もOwnerのみ。
+詳細は [REQUIREMENTS.md](../REQUIREMENTS.md) の「Owner / Admin の役割分離」「User Deletion Retention」「Backup Authority」に従う。
 
 ### System
 Backend内部identity。人間ログイン不可。
@@ -24,6 +30,7 @@ Backend内部identity。人間ログイン不可。
 /admin/config
 ```
 Frontend表示だけでなくBackendでRole check。
+Admin向けAPI内でも、Adminの追加/削除やOwner権限移譲等のOwner専用操作は、操作単位でOwnerを要求する。
 
 ## 3. Merge authority
 原則Human-only。

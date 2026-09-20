@@ -1228,6 +1228,24 @@ OS側も:
 - Audit Logは削除せず、必要に応じて `Deleted User` 等へ匿名化して保持する。
 - Project / RepositoryはUser削除とは分離し、必要な所有権移譲を行って残す。
 
+完全削除は稼働DB / 個人用Filesだけでなく、削除対象個人データを含む
+Current Recovery Projection、Recovery Git履歴、管理下のclone/cache、DB backup/WAL等の復旧用コピーにも適用する。
+User削除の期限到達時は、通常のMemory削除とは区別し、これらの履歴・コピーの消去まで行う。
+
+削除操作のHuman Approvalでは、対象User、対象Recovery Repository、履歴消去と復元不能になる範囲を明示する。
+期限到達時は承認済み範囲の消去を実行し、history rewrite / force push等を未承認で実行しない。
+通常のMemory削除でGit履歴を残せるのは、このUser完全削除要件に抵触しない範囲に限る。
+
+消去と検証が完了するまで `Deleted` / 完全削除済みと表示しない。
+消去失敗や承認不足時はアクセスを失効した `Pending deletion` を維持し、
+30日期限の未達、失敗理由、再試行状態をOwnerへ通知する。保留期間を延長してよいという意味ではない。
+Git history rewriteだけでprovider側の保持コピーまで消えたとは判断せず、未確認の消去を完了表示しない。
+
+復旧時にも削除済み個人データを再生成しない。
+Private Memory本文等を含まない最小限の削除記録を保持し、Recovery Import / DB restoreでは
+復元元とは独立した最新の削除状態を確認・適用してから通常運用を再開する。
+削除状態を確認できない場合は復旧を完了扱いしない。具体的な消去・検証・削除記録の保管方式は実装時に選ぶ。
+
 ## 8. Git / GitHub
 
 ### [FIXED] GitHub認証方式
@@ -1435,7 +1453,10 @@ CodeのSource of TruthはGit Repository。Repo Memoryには可能なら`commit_s
 ### [FIXED] Role
 - User
 - Admin
+- Owner（Adminの全権限を含むシステム最終所有者。原則1名）
 - System（人間ログイン不可）
+
+Owner専用操作とAdminの日常運用権限は、後述の「Owner / Admin の役割分離」に従う。
 
 ### [FIXED] Admin-only
 - Global System Prompt
@@ -2853,6 +2874,10 @@ PostgreSQL本体はNVMeに置く。
 ローカル復旧用としてHDDへDB backupを保存できる設計を維持するが、
 V1の外部backup先としてDBそのものをGitへpushしない。
 
+定期DB backupの運用とは別に、schema / data migrationを行う更新では、
+後述のDeployment要件に従い、検証済みのDB復旧点を必須とする。
+ローカルで取得可能な復旧点でよく、Off-server PostgreSQL backupをV1必須にはしない。
+
 #### Accepted residual risk
 
 サーバー全損時:
@@ -3022,6 +3047,9 @@ generated_at: ...
 
 完全消去:
 - Recovery Git history rewrite等、通常削除とは別の処理が必要
+- Userの30日保留期限到達時は「User Deletion Retention」に従い、削除対象の履歴・復旧用コピーも消去する
+- 履歴・コピーの消去検証前に完全削除済みと表示しない
+- 古いRecovery / DB backupからの復旧でも、最新の削除状態を適用し削除済み個人データを再生成しない
 
 この違いをUI / Policy上で明示する。
 
@@ -3102,16 +3130,22 @@ Pre-update checks
   ↓
 Running Taskをsafe drain / checkpoint
   ↓
+DB writerの停止 / 書込み遮断（schema / data migration時）
+  ↓
 Recovery Projectionを最新化
   ↓
 DB migration precheck
+  ↓
+整合したDB復旧点の取得 / 復元検証（schema / data migration時）
+  ↓
+Application / schema / data migration適用
   ↓
 New version起動
   ↓
 Health check
   ↓
 Success: Queue再開
-Failure: Rollback
+Failure: DB / ApplicationをRollbackし、正常性確認後のみQueue再開
 ```
 
 #### Release types
@@ -3148,6 +3182,18 @@ V1ではProductionの自動更新を行わない。
 - current version / target version
 - required runtime / dependency availability
 
+Schema / data migrationを含む場合は、DB変更前に以下を必須とする。
+
+- 整合したDB backup / snapshot等の復旧点と、対応する既知の正常application version
+- 復旧点の読出し可能性・schema/version整合性と、隔離環境で検証した復元手順
+- 復旧点取得 / 検証 / migration / 必要なrollbackを通じたDB writerの停止または書込み遮断
+
+Taskだけでなく、Memory Worker、Journal、projection job、API等のDB書込みも対象にする。
+復旧点取得失敗、容量不足、復元検証失敗等の場合はmigrationを開始しない。
+復旧点と検証結果を記録し、DB dump / WAL / snapshotはRecovery Gitへ保存しない。
+Recovery Projectionの最新化はDB復旧点の代替にならない。
+DBを変更しないapplication / model updateには、このDB復旧点要件を追加しない。
+
 #### Task handling
 
 通常Updateでは:
@@ -3163,6 +3209,7 @@ Critical Security Updateでは、必要に応じてsafe drainを待たず `Stop 
 Application releaseは複数versionを保持し、直前のknown-good versionへ戻せるようにする。
 
 DB migrationを伴う場合は、可能な限りBackward-compatible migrationを採用する。
+Transactional migrationも利用可能だが、COMMIT後のhealth check失敗等に備えるDB復旧点の代替にはしない。
 
 例:
 1. 新schema / column追加
@@ -3171,6 +3218,10 @@ DB migrationを伴う場合は、可能な限りBackward-compatible migrationを
 4. 十分な検証後に旧schema削除
 
 Application binaryだけを戻してDB schema incompatibleになる設計を避ける。
+Migration途中または更新後のhealth checkで失敗した場合は、必要に応じてDBを復旧点へ戻し、
+対応する既知の正常applicationを起動する。
+DBとapplicationの正常性・互換性、および最新のUser削除状態の適用を確認できた場合のみ、Queue / Task / DB writerを再開する。
+復元に失敗した場合は保守状態を維持してOwner/Adminへ通知する。
 
 #### Deployment implementation
 
