@@ -1,0 +1,12 @@
+{
+  "schema_version": "2.0",
+  "task_id": "future-version",
+  "kind": "spec",
+  "repository": {
+    "locator": "example/public-project",
+    "starting_commit": "7777777777777777777777777777777777777777"
+  },
+  "issue_text": "This task uses an unsupported schema version.",
+  "visible_checks": [],
+  "hidden_checks": []
+}

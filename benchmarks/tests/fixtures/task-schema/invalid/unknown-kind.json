@@ -1,0 +1,12 @@
+{
+  "schema_version": "1.0",
+  "task_id": "unknown-kind",
+  "kind": "other",
+  "repository": {
+    "locator": "example/public-project",
+    "starting_commit": "6666666666666666666666666666666666666666"
+  },
+  "issue_text": "This task uses an unsupported kind.",
+  "visible_checks": [],
+  "hidden_checks": []
+}

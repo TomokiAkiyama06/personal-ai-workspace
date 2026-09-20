@@ -1,6 +1,7 @@
 """Offline checks for the repository's documentation and CI support files."""
 
 from pathlib import Path
+import json
 import os
 import re
 import subprocess
@@ -106,7 +107,7 @@ UniqueKeyLoader.add_implicit_resolver(
     list("tTfF"),
 )
 
-TEXT_SUFFIXES = {".md", ".yaml", ".yml", ".py", ".txt"}
+TEXT_SUFFIXES = {".json", ".md", ".yaml", ".yml", ".py", ".txt"}
 TEXT_NAMES = {".gitignore", ".gitattributes", ".editorconfig", "LICENSE", "CODEOWNERS"}
 CONFLICT_MARKER = re.compile(r"^(?:<{7,}|={7,}|>{7,}|\|{7,})(?:\s|$)")
 MARKDOWN = MarkdownIt("commonmark").enable("table")
@@ -188,6 +189,11 @@ def validate(root, paths):
                 mark = getattr(error, "problem_mark", None)
                 line = mark.line + 1 if mark is not None else 1
                 errors.append(f"{path}:{line}: YAML {getattr(error, 'problem', str(error))}")
+        if path.suffix.lower() == ".json":
+            try:
+                json.loads(content)
+            except json.JSONDecodeError as error:
+                errors.append(f"{path}:{error.lineno}: JSON {error.msg}")
     return checked, errors
 
 

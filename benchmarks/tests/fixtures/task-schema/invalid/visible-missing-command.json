@@ -1,0 +1,17 @@
+{
+  "schema_version": "1.0",
+  "task_id": "missing-visible-command",
+  "kind": "spec",
+  "repository": {
+    "locator": "example/public-project",
+    "starting_commit": "8888888888888888888888888888888888888888"
+  },
+  "issue_text": "The visible check is incomplete.",
+  "visible_checks": [
+    {
+      "id": "unit-tests",
+      "type": "unit"
+    }
+  ],
+  "hidden_checks": []
+}

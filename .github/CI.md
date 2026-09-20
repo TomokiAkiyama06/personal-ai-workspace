@@ -4,12 +4,15 @@
 Required Check として指定できる job 名は `Repository checks` に固定する。
 Ruleset の変更はこの workflow の追加には含めない。
 
-現在の文書中心の Repository では以下を検証する。
+Repositoryでは以下を検証する。
 
-- Git 管理対象の Markdown / YAML / Python / text と主要設定ファイルの末尾空白、merge conflict marker
+- Git 管理対象の JSON / Markdown / YAML / Python / text と主要設定ファイルの末尾空白、merge conflict marker
 - Markdown のリンク・画像・参照リンクが指す Git 管理対象ファイルまたはその親ディレクトリの存在
 - YAML の構文、重複した mapping key、安全な読み取り
+- JSON の構文
 - 検証スクリプトが正常な文書を許容し、破損した入力を検出する回帰テスト
+- `benchmarks/`のPython codeに対するRuff format / lint
+- Benchmark Task schema、fixture、validator CLIのtest
 
 Markdown の行末の 2 個以上のスペースによる改行は許容する。
 conflict marker の検出対象は、行頭で `<` / `=` / `>` / `|` の同一記号が 7 文字以上連続し、空白または行末が続く場合とする。
@@ -23,11 +26,14 @@ YAML は mapping の merge 展開を 10,000 entries 以下に制限し、循環�
 さらに、merge を含む mapping の展開項目数の累計を YAML ファイル全体で 100,000 entries 以下に制限する。
 複数 document を含むファイルでも累計はリセットせず、上限超過となる mapping の展開前に拒否する。
 これは merge の指数展開を抑える制限であり、通常の sequence alias は参照を共有するため対象外とする。
-Application の build / format / lint / test はコード構成の確定後に追加する（PAW-004）。
+他のApplication codeのbuild / format / lint / testは各領域のコード構成確定後に追加する（PAW-004）。
 
 GitHub Actions と Git の pre-commit hook は、[.pre-commit-config.yaml](../.pre-commit-config.yaml) の同じ hook を実行する。
-共通 entry の [run_ci.py](scripts/run_ci.py) は回帰テストと Repository 検証を順に実行し、どちらかの失敗を commit 拒否として返す。
+共通 entry の [run_ci.py](scripts/run_ci.py) はBenchmark codeのformat / lint、回帰テスト、
+Benchmark schema test、Repository検証を順に実行し、いずれかの失敗をcommit拒否として返す。
 検証ライブラリの version は hook の `additional_dependencies` に固定し、pre-commit が専用環境へ導入する。
+同じversionを [requirements-ci.txt](requirements-ci.txt) にも固定し、standalone validatorを実行する
+virtual environmentへ明示的に導入できるようにする。
 
 Python 3.13 以上で初回セットアップする場合:
 

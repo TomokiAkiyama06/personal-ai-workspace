@@ -9,6 +9,8 @@ repos:
           - markdown-it-py==3.0.0
           - mdurl==0.1.2
           - PyYAML==6.0.3
+          - jsonschema==4.26.0
+          - ruff==0.16.8
         always_run: true
         pass_filenames: false
         require_serial: true

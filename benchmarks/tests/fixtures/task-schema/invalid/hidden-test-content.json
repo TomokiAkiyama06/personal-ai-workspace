@@ -1,0 +1,19 @@
+{
+  "schema_version": "1.0",
+  "task_id": "hidden-content",
+  "kind": "historical",
+  "repository": {
+    "locator": "example/public-project",
+    "starting_commit": "9999999999999999999999999999999999999999"
+  },
+  "issue_text": "The hidden check incorrectly embeds test content.",
+  "visible_checks": [],
+  "hidden_checks": [
+    {
+      "id": "hidden-case",
+      "type": "acceptance",
+      "reference_id": "hidden:example:case",
+      "body": "Hidden test source must not be stored in the task manifest."
+    }
+  ]
+}
