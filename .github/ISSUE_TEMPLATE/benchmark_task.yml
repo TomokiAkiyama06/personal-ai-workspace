@@ -1,0 +1,35 @@
+name: Benchmark task
+description: Benchmark / Evaluator用の評価Task
+title: "[Benchmark] "
+labels: ["area: benchmark"]
+body:
+  - type: textarea
+    id: task
+    attributes:
+      label: Task
+      description: Candidate modelへ与える課題。
+    validations:
+      required: true
+  - type: textarea
+    id: start
+    attributes:
+      label: Starting state
+      description: Repo / commit / fixture / injected bug等。
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance / Hidden checks
+      description: 公開してよいAcceptance Criteria。Hidden test本文そのものは書かないでください。
+  - type: textarea
+    id: metrics
+    attributes:
+      label: Metrics
+      value: |
+        - Resolved@1
+        - FAIL_TO_PASS
+        - PASS_TO_PASS
+        - Wall clock
+        - Peak VRAM
+        - Human correction time

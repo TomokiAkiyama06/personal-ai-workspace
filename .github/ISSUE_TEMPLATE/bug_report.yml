@@ -1,0 +1,38 @@
+name: Bug report
+description: 不具合・回帰の報告
+title: "[Bug] "
+labels: ["type: bug"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: 概要
+      description: 何が起きているか簡潔に記載してください。
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 再現手順
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期待する動作
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: 環境
+      description: OS / commit / model / runtime等。Secretは書かないでください。
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Secret・Token・Private Memoryを除去して貼ってください。

@@ -1,0 +1,65 @@
+# Secrets / environment
+.env
+.env.*
+!.env.example
+secrets/
+credentials/
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node / frontend
+node_modules/
+.next/
+dist/
+build/
+coverage/
+
+# IDE / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Logs / runtime
+*.log
+logs/
+.cache/
+tmp/
+temp/
+runtime/
+
+# Local AI model weights / caches
+models/
+model-cache/
+*.safetensors
+*.gguf
+*.ggml
+*.onnx
+*.pt
+*.pth
+
+# Local datasets / benchmark artifacts
+datasets/
+data/private/
+artifacts/
+benchmark-results/private/
+
+# Agent worktrees / local state
+worktrees/
+.personal-ai-local/
+
+# Recovery data MUST remain outside the public repository
+recovery/
+recovery-repo/
+memory-projection-private/
