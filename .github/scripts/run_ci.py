@@ -8,7 +8,11 @@ import sys
 def main():
     root = Path(__file__).resolve().parents[2]
     commands = (
+        [sys.executable, "-m", "ruff", "format", "--check", "benchmarks"],
+        [sys.executable, "-m", "ruff", "check", "benchmarks"],
         [sys.executable, "-m", "unittest", "discover", "-s", ".github/scripts",
+         "-p", "test_*.py", "-v"],
+        [sys.executable, "-m", "unittest", "discover", "-s", "benchmarks/tests",
          "-p", "test_*.py", "-v"],
         [sys.executable, ".github/scripts/check_repository.py"],
     )

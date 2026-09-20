@@ -1,0 +1,22 @@
+{
+  "schema_version": "1.0",
+  "task_id": "spec-add-health-endpoint",
+  "kind": "spec",
+  "repository": {
+    "locator": "example/public-project",
+    "starting_commit": "3333333333333333333333333333333333333333"
+  },
+  "issue_text": "Add the health endpoint described in the repository requirements.",
+  "visible_checks": [
+    {
+      "id": "unit-tests",
+      "type": "unit",
+      "command": [
+        "python3",
+        "-m",
+        "unittest"
+      ]
+    }
+  ],
+  "hidden_checks": []
+}

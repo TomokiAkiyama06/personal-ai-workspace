@@ -1,0 +1,148 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/TomokiAkiyama06/personal-ai-workspace/benchmarks/schemas/task-v1.schema.json",
+  "title": "Personal AI Workspace benchmark task",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "task_id",
+    "kind",
+    "repository",
+    "issue_text",
+    "visible_checks",
+    "hidden_checks"
+  ],
+  "properties": {
+    "schema_version": {
+      "description": "Version of this task manifest schema.",
+      "const": "1.0"
+    },
+    "task_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "kind": {
+      "enum": [
+        "historical",
+        "spec",
+        "injected_bug"
+      ]
+    },
+    "repository": {
+      "description": "Repository reference only. Task authors must not embed credentials; this schema does not inspect locator contents.",
+      "$ref": "#/$defs/repository"
+    },
+    "issue_text": {
+      "description": "Task text supplied to the candidate.",
+      "type": "string",
+      "minLength": 1
+    },
+    "visible_checks": {
+      "description": "Executable checks that may be disclosed to the candidate.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/visible_check"
+      }
+    },
+    "hidden_checks": {
+      "description": "Evaluator-only metadata. Hidden source, commands, and paths are forbidden.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/hidden_check"
+      }
+    }
+  },
+  "$defs": {
+    "repository": {
+      "type": "object",
+      "required": [
+        "locator",
+        "starting_commit"
+      ],
+      "properties": {
+        "locator": {
+          "type": "string",
+          "minLength": 1
+        },
+        "starting_commit": {
+          "type": "string",
+          "minLength": 1
+        },
+        "known_good_commit": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "check_type": {
+      "enum": [
+        "build",
+        "syntax",
+        "lint",
+        "type",
+        "unit",
+        "integration",
+        "regression",
+        "acceptance",
+        "security",
+        "forbidden_changes"
+      ]
+    },
+    "visible_check": {
+      "type": "object",
+      "required": [
+        "id",
+        "type",
+        "command"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "type": {
+          "$ref": "#/$defs/check_type"
+        },
+        "command": {
+          "type": "array",
+          "minItems": 1,
+          "prefixItems": [
+            {
+              "type": "string",
+              "minLength": 1
+            }
+          ],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "hidden_check": {
+      "type": "object",
+      "required": [
+        "id",
+        "type",
+        "reference_id"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "type": {
+          "$ref": "#/$defs/check_type"
+        },
+        "reference_id": {
+          "description": "Opaque identifier resolved outside this manifest by a future evaluator.",
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

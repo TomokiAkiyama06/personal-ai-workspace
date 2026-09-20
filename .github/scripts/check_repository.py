@@ -1,6 +1,7 @@
 """Offline checks for the repository's documentation and CI support files."""
 
 from pathlib import Path
+import json
 import os
 import re
 import subprocess
@@ -106,10 +107,23 @@ UniqueKeyLoader.add_implicit_resolver(
     list("tTfF"),
 )
 
-TEXT_SUFFIXES = {".md", ".yaml", ".yml", ".py", ".txt"}
+TEXT_SUFFIXES = {".json", ".md", ".yaml", ".yml", ".py", ".txt"}
 TEXT_NAMES = {".gitignore", ".gitattributes", ".editorconfig", "LICENSE", "CODEOWNERS"}
 CONFLICT_MARKER = re.compile(r"^(?:<{7,}|={7,}|>{7,}|\|{7,})(?:\s|$)")
 MARKDOWN = MarkdownIt("commonmark").enable("table")
+
+
+def reject_nonstandard_json_constant(_constant):
+    raise ValueError("non-standard numeric constant")
+
+
+def reject_duplicate_json_object_keys(pairs):
+    document = {}
+    for key, value in pairs:
+        if key in document:
+            raise ValueError("duplicate JSON object key")
+        document[key] = value
+    return document
 
 
 def check_markdown(root, path, content, tracked_targets):
@@ -188,6 +202,19 @@ def validate(root, paths):
                 mark = getattr(error, "problem_mark", None)
                 line = mark.line + 1 if mark is not None else 1
                 errors.append(f"{path}:{line}: YAML {getattr(error, 'problem', str(error))}")
+        if path.suffix.lower() == ".json":
+            try:
+                json.loads(
+                    content,
+                    object_pairs_hook=reject_duplicate_json_object_keys,
+                    parse_constant=reject_nonstandard_json_constant,
+                )
+            except json.JSONDecodeError as error:
+                errors.append(f"{path}:{error.lineno}: JSON {error.msg}")
+            except ValueError:
+                errors.append(
+                    f"{path}:1: JSON non-standard numeric constant or duplicate object key"
+                )
     return checked, errors
 
 

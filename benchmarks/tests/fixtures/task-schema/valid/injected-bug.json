@@ -1,0 +1,18 @@
+{
+  "schema_version": "1.0",
+  "task_id": "injected-timeout-cleanup",
+  "kind": "injected_bug",
+  "repository": {
+    "locator": "git@github.com:example/public-project.git",
+    "starting_commit": "4444444444444444444444444444444444444444"
+  },
+  "issue_text": "Restore cleanup after a timed-out operation.",
+  "visible_checks": [],
+  "hidden_checks": [
+    {
+      "id": "timeout-cleanup",
+      "type": "acceptance",
+      "reference_id": "hidden:cleanup:timeout"
+    }
+  ]
+}

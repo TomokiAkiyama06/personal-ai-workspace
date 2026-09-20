@@ -1,7 +1,8 @@
 # Repository のディレクトリ構造
 
 現在の Repository は要件・設計文書、GitHub 運用と CI、Application と Benchmark / Evaluator の配置先で構成します。
-`apps/`・`benchmarks/`・`evaluator/` は README による役割の整理までで、Application や評価基盤の実装はまだ始めていません。
+`apps/`・`evaluator/` は README による役割の整理までです。`benchmarks/`にはTask schemaと
+そのvalidator、test fixtureを配置しています。
 
 ## 現在の構造
 
@@ -43,7 +44,18 @@ personal-ai-workspace/
 │  └─ web/
 │     └─ README.md
 ├─ benchmarks/
-│  └─ README.md
+│  ├─ README.md
+│  ├─ __init__.py
+│  ├─ schemas/
+│  │  └─ task-v1.schema.json
+│  ├─ validate_task.py
+│  └─ tests/
+│     ├─ __init__.py
+│     ├─ test_validate_task.py
+│     └─ fixtures/
+│        └─ task-schema/
+│           ├─ invalid/
+│           └─ valid/
 ├─ docs/
 │  ├─ ARCHITECTURE.md
 │  ├─ BENCHMARK_EVALUATOR.md

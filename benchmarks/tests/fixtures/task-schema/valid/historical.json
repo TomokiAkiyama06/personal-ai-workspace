@@ -1,0 +1,29 @@
+{
+  "schema_version": "1.0",
+  "task_id": "history-link-validation",
+  "kind": "historical",
+  "repository": {
+    "locator": "https://github.com/example/public-project.git",
+    "starting_commit": "1111111111111111111111111111111111111111",
+    "known_good_commit": "2222222222222222222222222222222222222222"
+  },
+  "issue_text": "Reject local documentation links whose targets are not tracked.",
+  "visible_checks": [
+    {
+      "id": "repository-tests",
+      "type": "regression",
+      "command": [
+        "python3",
+        "-m",
+        "unittest"
+      ]
+    }
+  ],
+  "hidden_checks": [
+    {
+      "id": "untracked-link-case",
+      "type": "acceptance",
+      "reference_id": "hidden:link-validation:untracked-target"
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "schema_version": "1.0",
+  "kind": "spec",
+  "repository": {
+    "locator": "example/public-project",
+    "starting_commit": "5555555555555555555555555555555555555555"
+  },
+  "issue_text": "Add the specified behavior.",
+  "visible_checks": [],
+  "hidden_checks": []
+}
