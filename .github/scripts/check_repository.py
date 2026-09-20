@@ -73,6 +73,7 @@ def check_markdown(root, path, content):
             if url.scheme or url.netloc or not url.path:
                 continue
             link_path = unquote(url.path)
+            # GitHub renders leading-slash links relative to the repository root.
             target = ((root / link_path.lstrip("/")) if link_path.startswith("/")
                       else (root / path).parent / link_path).resolve()
             line = block.map[0] + 1 if block.map else 1

@@ -247,4 +247,5 @@ jobs:
             actions: read
 
           claude_args: |
-            --max-turns 30
+            --max-turns 40
+            --allowedTools "Bash(git diff:*),Bash(git status:*),Bash(git log:*),Bash(gh pr diff:*),Bash(gh pr view:*)"

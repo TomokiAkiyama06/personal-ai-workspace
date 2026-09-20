@@ -13,6 +13,7 @@ Ruleset の変更はこの workflow の追加には含めない。
 
 Markdown の行末の 2 個以上のスペースによる改行は許容する。
 リンク検証は Markdown の構文として書かれたリンクを対象とし、コード例中のリンクは除外する。
+先頭が `/` のリンクは、[GitHub の文書表示仕様](https://docs.github.com/en/get-started/writing-on-github/getting-started-with-writing-and-formatting-on-github/basic-writing-and-formatting-syntax#relative-links)に従い Repository root から解決する。
 外部 URL への通信、見出し fragment、HTML のリンク属性は検証対象外とする。
 Application の build / format / lint / test はコード構成の確定後に追加する（PAW-004）。
 
