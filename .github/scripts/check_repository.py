@@ -16,12 +16,15 @@ class UniqueKeyLoader(yaml.SafeLoader):
     """Safe YAML loading with duplicate keys rejected before merge expansion."""
 
     MAX_MERGE_ENTRIES = 10_000
+    MAX_TOTAL_MERGE_ENTRIES = 100_000
 
     def __init__(self, stream):
         super().__init__(stream)
         self.checked_mapping_nodes = set()
         self.merge_sizes = {}
         self.measuring_merge_nodes = set()
+        # A loader handles one YAML file, including all of its documents.
+        self.total_merge_entries = 0
 
     def construct_document(self, node):
         self.checked_mapping_nodes.clear()
@@ -65,7 +68,13 @@ class UniqueKeyLoader(yaml.SafeLoader):
         if node in self.checked_mapping_nodes:
             return
         if any(key.tag == "tag:yaml.org,2002:merge" for key, _ in node.value):
-            self.merge_size(node)
+            self.total_merge_entries += self.merge_size(node)
+            if self.total_merge_entries > self.MAX_TOTAL_MERGE_ENTRIES:
+                raise ConstructorError(
+                    None, None,
+                    f"total merge expansion exceeds {self.MAX_TOTAL_MERGE_ENTRIES} entries",
+                    node.start_mark,
+                )
         self.checked_mapping_nodes.add(node)
         seen = set()
         for key_node, _ in node.value:
