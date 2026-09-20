@@ -47,6 +47,7 @@ uv pip install --python .venv/bin/python -r .github/requirements-ci.txt
 
 初回の依存導入にはネットワーク接続が必要となる。
 [installer](scripts/install_hooks.py) は `core.hooksPath` や既存の `pre-commit` / `pre-commit.legacy` がある場合、その設定を上書きせず停止する。
+依存環境の準備に成功してから既存 hook の有無を再確認し、Git hook を作成する。依存導入が失敗した場合は hook を残さず、同じ installer で再試行できる。
 linked worktree の hook は元 Repository と共有するため、インストールに使う `.venv` は削除予定の一時ディレクトリではなく、継続利用する場所へ置く。
 通常の `git commit` では、[pre-commit の仕様](https://pre-commit.com/#pre-commit)に従い未stageの変更を一時退避し、stage済みの内容で全検証を実行してから復元する。
 `--no-verify` 等の Git の明示的な回避機能まで禁止する仕組みではない。
