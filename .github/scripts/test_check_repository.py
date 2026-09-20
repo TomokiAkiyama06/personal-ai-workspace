@@ -133,6 +133,28 @@ class RepositoryChecksTest(unittest.TestCase):
         errors = self.check({"config.yml": "node: &node {<<: *node}\n"})
         self.assertTrue(any("recursive YAML merge" in error for error in errors), errors)
 
+    def test_yaml_total_merge_budget_spans_all_documents(self):
+        # Four 10-fold expansions allocate 11,110 entries across their mappings.
+        base = "n0: &n0 {x: 1}\n" + "".join(
+            f"n{i}: &n{i} {{<<: [{', '.join([f'*n{i-1}'] * 10)}]}}\n"
+            for i in range(1, 5)
+        )
+        base += "".join(f"copy{i}: {{<<: *n4}}\n" for i in range(8))
+        remainder = ", ".join(["*n3"] * 8 + ["*n2"] * 8 + ["*n1"] * 9)
+        base += f"boundary: {{<<: [{remainder}]}}\n"  # 100,000 total entries.
+        # Ordinary alias references share objects; they add no merge allocation.
+        base += "references: [*n4, *n4]\n"
+        for suffix, expected in (
+            ("", False),
+            ("overflow: {<<: *n0}\n", True),
+            ("---\noverflow: {<<: {x: 1}}\n", True),
+        ):
+            with self.subTest(suffix=suffix):
+                errors = self.check({"config.yml": base + suffix})
+                self.assertEqual(bool(errors), expected, errors)
+                if expected:
+                    self.assertIn("total merge expansion exceeds 100000", errors[0])
+
     def test_trailing_whitespace_and_conflict_markers_are_rejected(self):
         for name, content, expected in (
             ("README.md", "single space \n", "trailing whitespace"),

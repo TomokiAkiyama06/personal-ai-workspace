@@ -18,6 +18,8 @@ Markdown の行末の 2 個以上のスペースによる改行は許容する�
 symlink のリンク先も Git 管理対象である必要がある。
 外部 URL への通信、見出し fragment、HTML のリンク属性は検証対象外とする。
 YAML は mapping の merge 展開を 10,000 entries 以下に制限し、循環する merge は拒否する。
+さらに、merge を含む mapping の展開項目数の累計を YAML ファイル全体で 100,000 entries 以下に制限する。
+複数 document を含むファイルでも累計はリセットせず、上限超過となる mapping の展開前に拒否する。
 これは merge の指数展開を抑える制限であり、通常の sequence alias は参照を共有するため対象外とする。
 Application の build / format / lint / test はコード構成の確定後に追加する（PAW-004）。
 
