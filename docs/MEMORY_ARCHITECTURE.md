@@ -83,18 +83,18 @@ Markdown Projection再生成
 
 これにより、DBとMarkdownを別々に手動修正する二重管理を避ける。
 
-## 5. Memory専用Git
+## 5. Dedicated Recovery Repository
 
-Markdown Projectionの履歴が必要な場合、
-Personal AI Workspace専用のGit Repositoryを利用してよい。
+Markdown Projectionは、Personal AI Workspace専用の
+Dedicated Recovery Repository内で履歴管理する。
 
 ```text
 /srv/personal-ai/memory/
         ↓
-Internal Memory Git
+Dedicated Recovery Repository / memory/
 ```
 
-このGitは以下とは無関係:
+このRepositoryは以下のProject Repoとは無関係:
 
 ```text
 /home/<user>/workspace/ExampleProject/.git
@@ -287,13 +287,13 @@ Global / Owner Security Policy等の強制Policyは下位Scopeでoverride不可�
 
 ### Memory Context Budget
 
-[OPEN]
+[BENCHMARK]
 
 具体的なtoken上限は現時点では決めない。
 
 Context Windowだけでなく、KV CacheのVRAM消費、dtype / quantization、
 同時実行数、Agent並列数、推論バックエンド、利用可能VRAM等に強く依存するため、
-Local model / Runtime / GPU Scheduler設計時に別途決定する。
+Local model / Runtime / GPU SchedulerのBenchmark後に決定する。
 
 Retrieval PipelineはTop-N等で制御可能な構造だけ先に用意する。
 
@@ -649,13 +649,15 @@ Memory管理UIで同期済み / 整理中 / GPU待ち / 失敗等を表示可能
 [FIXED]
 
 MemoryのGitバックアップでは、PostgreSQL dump / WALは扱わない。
-Gitへ保存するのはMemory Markdown Projectionのみとする。
+Memory本文はMemory Markdown Projectionとして保存する。
+scope / status / version / relation / provenance等、再構築に必要なmachine-readable metadataもRecovery Projectionへ含める。
+Memory以外の復旧用データは、後述のDedicated Recovery Repositoryの定義に従う。
 
 ```text
 PostgreSQL
   → Markdown Projection
       → Scheduled Batch
-          → Memory専用 Private Repository
+          → Dedicated Recovery Repository
 ```
 
 このRepositoryはProject Repoとは完全に独立する。

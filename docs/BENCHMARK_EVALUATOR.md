@@ -1,7 +1,7 @@
 # Benchmark / Evaluator Design
 
 更新日: 2026-09-16
-Status: [FIXED DIRECTION / DETAILS OPEN]
+Status: [FIXED DIRECTION / BENCHMARK DETAILS]
 
 ## Purpose
 
@@ -92,7 +92,7 @@ Agent harness差で公開ベンチマーク値が大きく変動し得るため�
 9. Result report UI / export
 10. Seed benchmark execution
 
-## Open
+## [BENCHMARK] Deferred details
 
 - Seed benchmark task数
 - 最初に使うRepo
