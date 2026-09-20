@@ -169,6 +169,32 @@ class RepositoryChecksTest(unittest.TestCase):
                 errors = self.check({name: content})
                 self.assertTrue(any(expected in error for error in errors), errors)
 
+    def test_conflict_separator_is_rejected_in_tracked_text(self):
+        for name in ("example.py", "sample.txt", "config.yml", "config.yaml",
+                     ".gitignore", ".gitattributes", "LICENSE", "CODEOWNERS"):
+            with self.subTest(name=name):
+                errors = self.check({name: "Heading\n=======\n"})
+                self.assertTrue(any("merge conflict marker" in error for error in errors), errors)
+
+    def test_markdown_separator_requires_an_actual_setext_heading(self):
+        for content, rejected in (
+            ("=======\n", True),
+            ("Paragraph\n\n=======\n", True),
+            ("# Heading\n=======\n", True),
+            ("```text\nHeading\n=======\n```\n", True),
+            ("Heading\n=======\n", False),
+            ("Heading\ncontinued title\n=======\n", False),
+            ("Heading\n=======\n\n=======\n", True),
+            ("Heading\u2028continued\n=======\n", False),
+            ("Heading\u2028continued\n<<<<<<< HEAD\n =======\n", True),
+            ("Heading\u2028continued\n||||||| base\n =======\n", True),
+            ("Heading\u2028continued\n>>>>>>> other\n =======\n", True),
+        ):
+            with self.subTest(content=content):
+                errors = self.check({"README.md": content})
+                self.assertEqual(any("merge conflict marker" in error for error in errors),
+                                 rejected, errors)
+
     def test_untracked_files_are_not_implicitly_scanned(self):
         (self.root / "untracked.md").write_text("bad whitespace \n", encoding="utf-8")
         self.assertEqual(self.check({"README.md": "# Valid\n"}), [])
