@@ -108,7 +108,7 @@ UniqueKeyLoader.add_implicit_resolver(
 
 TEXT_SUFFIXES = {".md", ".yaml", ".yml", ".py", ".txt"}
 TEXT_NAMES = {".gitignore", ".gitattributes", ".editorconfig", "LICENSE", "CODEOWNERS"}
-CONFLICT_MARKER = re.compile(r"^(?:<{7}|>{7}|\|{7})(?:\s|$)")
+CONFLICT_MARKER = re.compile(r"^(?:<{7}|={7}|>{7}|\|{7})(?:\s|$)")
 MARKDOWN = MarkdownIt("commonmark").enable("table")
 
 
@@ -164,8 +164,14 @@ def validate(root, paths):
             errors.append(f"{path}: cannot read UTF-8 text ({type(error).__name__})")
             continue
         markdown = path.suffix.lower() == ".md"
-        for number, line in enumerate(content.splitlines(), 1):
-            if CONFLICT_MARKER.match(line):
+        # Seven equals signs are also a valid Markdown Setext heading underline.
+        setext_lines = {
+            token.map[1] for token in MARKDOWN.parse(content)
+            if token.type == "heading_open" and token.markup == "=" and token.map
+        } if markdown else set()
+        for number, line in enumerate(content.split("\n"), 1):
+            setext_underline = line.startswith("=======") and number in setext_lines
+            if CONFLICT_MARKER.match(line) and not setext_underline:
                 errors.append(f"{path}:{number}: merge conflict marker")
             stripped = line.rstrip(" \t")
             trailing = line[len(stripped):]
