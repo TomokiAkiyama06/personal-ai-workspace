@@ -113,7 +113,7 @@ canonical copyではない。
 
 ## Backup boundary
 
-- Private Git is the external fallback for Memory Markdown Projection.
+- The dedicated Recovery Repository is the external fallback for Memory Markdown Projection and other defined recovery state.
 - PostgreSQL dumps/WAL are not committed to Git.
 - Local DB recovery may use the 8TB HDD.
 - Full off-server DB backup is a future extension, not a V1 requirement.

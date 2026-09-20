@@ -24,10 +24,10 @@ Status: [FREEZE CANDIDATE]
 - Exact Credential Vault implementation -> IMPLEMENTATION_CHOICE, security requirements already fixed
 - Benchmark seed task count / hidden-test storage / runtime details -> BENCHMARK
 
-## Next action
+## OPEN ITEMS review
 
-旧 `OPEN ITEMS` を一つずつ棚卸しし、
-本当にRequirements blockingなものだけを残す。
+旧 `OPEN ITEMS` の棚卸し結果は `REQUIREMENTS.md` の
+「決定・延期済み項目」へ反映済み。
 
 
 

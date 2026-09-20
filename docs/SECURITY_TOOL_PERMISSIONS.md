@@ -1,7 +1,7 @@
 # Security / Tool Permissions
 
 更新日: 2026-09-20
-Status: [FIXED DIRECTION / APPROVAL BOUNDARY OPEN]
+Status: [FIXED]
 
 ## Core model
 
@@ -34,7 +34,7 @@ LLMは自身のpromptやTool requestによって権限を拡張できない。
 通常の低リスク操作はPolicy内で自動許可する。
 destructive / privileged / permission-changing / credential-sensitive等の危険操作はHuman Approval対象とする。
 
-具体的なApproval matrixは次の要件定義項目で確定する。
+具体的なApproval matrixは以下のApproval levelsに従う。
 
 
 

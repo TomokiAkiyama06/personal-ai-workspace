@@ -1,7 +1,7 @@
 # Personal AI Workspace - Model Candidates
 
 更新日: 2026-09-16\
-Status: [OPEN / BENCHMARK REQUIRED]
+Status: [BENCHMARK]
 
 ## 1. Selection policy
 

@@ -1,7 +1,7 @@
 # Observability / System Health
 
 更新日: 2026-09-20\
-Status: [FIXED BASELINE / RETENTION OPEN]
+Status: [FIXED BASELINE / IMPLEMENTATION CHOICE]
 
 ## Principles
 
@@ -54,15 +54,13 @@ Abnormal:
 - non-modal banner for sustained ERROR
 - modal/dialog only for CRITICAL situations that require immediate user action
 
-## Open: metrics retention
+## [IMPLEMENTATION_CHOICE] Storage details
 
-To decide next:
-- which metrics are persisted
-- raw sampling interval
-- retention duration
-- aggregation / downsampling
-- log retention
-- per-user visibility boundary
+固定済みのretention / downsamplingと権限境界を満たす範囲で、以下は実装時に決定する。
+
+- 永続化するmetricsの具体的なsubset
+- Observability storage implementation
+- 権限内でのUser別表示方法
 
 
 

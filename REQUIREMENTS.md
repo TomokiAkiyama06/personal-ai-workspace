@@ -853,11 +853,12 @@ Memory同期状態をUIで確認可能にする。
 
 ### [FIXED] Memory Markdown Backup / Backup Authority
 
-MemoryのGitバックアップは、DBバックアップとは分離する。
+MemoryのGitバックアップは、DBバックアップとは分離し、後述のDedicated Recovery Repositoryへ保存する。
 
 #### Gitへ保存するもの
 
-Gitへ保存するのは **Memory Markdown Projectionのみ** とする。
+MemoryデータとしてGitへ保存するのは **Memory Markdown Projectionのみ** とする。
+Memory以外の復旧用データは、後述のDedicated Recovery Repositoryの定義に従う。
 
 - PostgreSQL dumpはGitへ保存しない
 - WALはGitへ保存しない
@@ -876,7 +877,7 @@ Markdown Projection
    ↓
 Batch Job
    ↓
-Memory専用 Private Repository
+Dedicated Recovery Repository
 ```
 
 Gitへの保存はSource of Truthではなく、
@@ -1411,7 +1412,7 @@ Memoryは **PostgreSQL + Markdownのハイブリッド方式** とする。
 - PostgreSQL: 構造化Memory / metadata / permission / versionの正本
 - pgvector: semantic index
 - Markdown: 人間が普段すぐ確認できる常時生成ビュー
-- Memory専用Git: Markdownの履歴管理に利用可能
+- Dedicated Recovery Repository: Memory Markdown Projectionの履歴管理とWorkspace復旧に利用
 - **Project / RepositoryのGitとは完全に分離する**
 
 重要な制約:
@@ -1440,7 +1441,7 @@ Memory Markdown Projection
   ├─ shared/
   └─ decisions/
        │
-       └─ Memory専用Git（任意）
+       └─ Dedicated Recovery Repository
 ```
 
 Memory Markdownは常時生成・更新し、ユーザーがすぐ読める状態を維持する。
@@ -1667,14 +1668,15 @@ Coding MVP後。
 ## 21. 開発フェーズ
 
 1. Requirements（現在）
-2. Core Backend
-3. Local Agent PoC
-4. GitHub / IDE
-5. サブスクIntegration
-6. Memory
-7. Multi-agent
-8. GPU Manager
-9. Artifacts
+2. Benchmark / Evaluator Harness・Model選定
+3. Core Backend
+4. Local Agent PoC
+5. GitHub / IDE
+6. サブスクIntegration
+7. Memory
+8. Multi-agent
+9. GPU Manager
+10. Artifacts
 
 ## 22. 正本文書構成
 
@@ -1694,22 +1696,38 @@ docs/
     └── NNNN-*.md
 ```
 
-## 23. OPEN ITEMS
+## 23. 決定・延期済み項目
 
-- Memory最終Source of Truth
-- Local coding model実機選定
-- vLLM / SGLang / llama.cpp役割
-- Desktop / Backend framework
-- 認証方式
-- Credential vault
-- サブスク正式認証分離方式
-- IDE拡張V1範囲
-- Auto Router条件
-- Local retry / escalation閾値
-- Adminが閲覧できる会話本文範囲
-- Audit retention
-- Shared Memory権限
-- Artifact優先度
+旧 `OPEN ITEMS` は、後続の確定要件と
+`docs/REQUIREMENTS_FREEZE_REVIEW.md` に基づき、以下へ整理済み。
+
+### [FIXED]
+
+- MemoryのOperational Source of TruthはPostgreSQL。Recovery GitはDisaster Recovery Source。
+- Password / Passkey / Session PolicyとGitHub認証方式。
+- Codex / ClaudeはWorkspace全体のSystem-level Connectionとし、GitHubはUserごとに分離。
+- Agent routingの既定値はLocal-first。Loop検知後は別アプローチを試し、解決しなければCodex / Claude等へEscalate。
+- Owner / Adminは通常の管理操作だけで他UserのPrivate Raw Conversation本文を自由に閲覧できない。
+- Audit / Security eventは長期保持。
+- Shared MemoryのRead / Write / Delete / Restore / Promotion権限。
+
+### [BENCHMARK]
+
+- Local coding modelの実機選定。
+- vLLM / SGLang / llama.cpp等のRuntime候補と比較値。
+
+### [IMPLEMENTATION_CHOICE]
+
+- Desktop / Backend frameworkの最終選択。
+- Credential Vaultの具体製品・storage方式。
+- Provider仕様と利用規約を満たすCodex / Claudeの具体的な認証実装。
+- Benchmark結果とRuntime要件を満たす推論Backendの統合方式。
+- Auto RouterやLocal retry / escalationに使う具体的な閾値。
+
+### [FUTURE]
+
+- Dedicated IDE Extension。
+- Artifact / Slide generation。
 
 ## 24. 既存資料の出自
 
@@ -2643,7 +2661,7 @@ Shell / Tool操作はRisk levelを区別する。
 通常のread / build / test / scoped write等はPolicyの範囲内で自動実行可能とし、
 destructive / privileged / permission-changing / credential-sensitive等の危険操作はHuman Approval対象とする。
 
-具体的なApproval境界は別途確定する。
+具体的なApproval境界は、後述の固定済みTool approval boundaryに従う。
 
 RoleごとのTool CapabilityはBackend Policyとして強制し、
 LLM自身の指示やpromptによって権限を拡張できない。
