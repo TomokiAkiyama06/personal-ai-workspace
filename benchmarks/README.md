@@ -38,6 +38,19 @@ Task JSONの必須fieldは次のとおりです。
 PAW-013で定義します。Schema validationはlocatorやcommitの存在確認、credentialの検出を行いません。
 Task authorは[Security Policy](../SECURITY.md)に従い、credentialをlocatorへ保存してはいけません。
 
+## Candidate adapter interface
+
+[`candidate_adapter.py`](candidate_adapter.py) defines the provider-neutral boundary used by
+future Local, Codex, and Claude candidate implementations. A request fixes the system/task
+prompt, JSON Schema tool declarations, and token limits. The Backend supplies a one-attempt
+timeout and cancellation token, and owns retry decisions through `RetryPolicy`; adapters must
+never retry internally.
+
+The interface contains only public candidate identity fields. Credentials, provider clients,
+raw provider errors, runtime execution, and worktree/test-runner behavior are intentionally
+outside this module. Concrete adapters must obtain credentials through a private Backend
+dependency and convert errors to stable public `error_code` values.
+
 ## Validator
 
 standalone CLIはprojectの安定したvirtual environmentへCI依存を導入して実行します。
