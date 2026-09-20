@@ -54,9 +54,11 @@ python3 -m venv .venv
 
 ## Evaluator Result schema v1
 
-Result JSONは、Task ID、Candidateのmodel/runtime/quantization、`FAIL_TO_PASS`と`PASS_TO_PASS`、
-各Evaluator checkの結果、計測値を保存します。checkの種別は`build`、`unit`、`integration`、`lint`、
-`type`、`security`、`forbidden_changes`です。statusは`passed`、`failed`、`not_run`、`error`で表します。
+Result JSONは、Evaluator version、Task ID、Candidateのmodel/runtime/quantization、`FAIL_TO_PASS`と
+`PASS_TO_PASS`、各Evaluator checkの結果、計測値を保存します。checkの種別は`build`、`syntax`、`unit`、
+`integration`、`lint`、`type`、`regression`、`acceptance`、`security`、`forbidden_changes`です。statusは
+`passed`、`failed`、`not_run`、`error`で表します。`check_results[].id`は対応するTaskの
+`visible_checks`または`hidden_checks`の`id`を使い、Result内で重複してはいけません。
 
 `metrics`では、取得できた場合に次を保存できます。durationの単位はミリ秒、VRAMはbytesです。
 
@@ -70,6 +72,8 @@ Result JSONは、Task ID、Candidateのmodel/runtime/quantization、`FAIL_TO_PAS
 
 Runtimeで取得できないmetricは、`metrics`から省略できます。これは計測不能と0を区別するためです。
 Result schema validatorもTask schema validatorと同じ終了code・値を出力しないエラー方針を使います。
+量子化をしないCandidateは`quantization`へ`none`を、Runtime側で詳細を公開しないCandidateは
+`provider-managed`を記録します。
 
 ```bash
 .venv/bin/python -m benchmarks.validate_result benchmarks/tests/fixtures/result-schema/valid/complete.json

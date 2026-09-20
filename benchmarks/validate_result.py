@@ -26,7 +26,23 @@ def load_schema(path: Path = SCHEMA_PATH) -> dict[str, Any]:
 
 def validate_document(document: Any, schema: dict[str, Any] | None = None) -> list[str]:
     """Return stable, value-free errors for a decoded evaluator result."""
-    return _validate_document(document, schema if schema is not None else load_schema())
+    errors = _validate_document(
+        document, schema if schema is not None else load_schema()
+    )
+    if not isinstance(document, dict):
+        return errors
+    check_results = document.get("check_results")
+    if not isinstance(check_results, list):
+        return errors
+    seen_ids: set[str] = set()
+    for index, check in enumerate(check_results):
+        if not isinstance(check, dict) or not isinstance(check.get("id"), str):
+            continue
+        check_id = check["id"]
+        if check_id in seen_ids:
+            errors.append(f"$.check_results[{index}].id: duplicate check id")
+        seen_ids.add(check_id)
+    return errors
 
 
 def _load_document(path: Path) -> tuple[Any | None, str | None]:

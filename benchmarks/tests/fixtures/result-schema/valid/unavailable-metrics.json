@@ -1,5 +1,6 @@
 {
   "schema_version": "1.0",
+  "evaluator_version": "1.0.0",
   "task_id": "spec-add-health-endpoint",
   "candidate": {
     "model": "remote-candidate",

@@ -5,6 +5,7 @@
   "type": "object",
   "required": [
     "schema_version",
+    "evaluator_version",
     "task_id",
     "candidate",
     "test_outcomes",
@@ -15,6 +16,11 @@
     "schema_version": {
       "description": "Version of this evaluator result schema.",
       "const": "1.0"
+    },
+    "evaluator_version": {
+      "description": "Version of the evaluator harness that produced this result.",
+      "type": "string",
+      "minLength": 1
     },
     "task_id": {
       "description": "Identifier of the benchmark task that produced this result.",
@@ -65,10 +71,13 @@
     "check_type": {
       "enum": [
         "build",
+        "syntax",
         "unit",
         "integration",
         "lint",
         "type",
+        "regression",
+        "acceptance",
         "security",
         "forbidden_changes"
       ]
@@ -106,6 +115,7 @@
       ],
       "properties": {
         "id": {
+          "description": "Identifier matching a visible_checks or hidden_checks id in the benchmark task.",
           "type": "string",
           "minLength": 1
         },

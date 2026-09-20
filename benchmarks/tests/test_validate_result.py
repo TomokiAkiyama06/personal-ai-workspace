@@ -33,10 +33,13 @@ class EvaluatorResultSchemaTest(unittest.TestCase):
             {check["type"] for check in result["check_results"]},
             {
                 "build",
+                "syntax",
                 "unit",
                 "integration",
                 "lint",
                 "type",
+                "regression",
+                "acceptance",
                 "security",
                 "forbidden_changes",
             },
@@ -55,6 +58,16 @@ class EvaluatorResultSchemaTest(unittest.TestCase):
     def test_metric_fields_can_be_absent_when_not_collected(self):
         result = self.load_fixture(FIXTURES / "valid" / "unavailable-metrics.json")
         self.assertEqual(validate_document(result, self.schema), [])
+
+    def test_duplicate_check_ids_are_rejected(self):
+        result = self.load_fixture(FIXTURES / "valid" / "complete.json")
+        duplicate = deepcopy(result["check_results"][0])
+        duplicate["type"] = "unit"
+        result["check_results"].append(duplicate)
+        self.assertIn(
+            "$.check_results[10].id: duplicate check id",
+            validate_document(result, self.schema),
+        )
 
     def test_invalid_fixtures_are_rejected(self):
         paths = sorted((FIXTURES / "invalid").glob("*.json"))
