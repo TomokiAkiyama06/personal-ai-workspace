@@ -7,11 +7,15 @@ Backlogの安定IDとGitHub Issueの対応表。状態は上記日時のスナ�
 
 ## Source
 
-正本名: `docs/IMPLEMENTATION_BACKLOG.md`（更新日: 2026-09-20）。
-今回の登録では、提供されたRepository直下の未commitファイル `IMPLEMENTATION_BACKLOG.md` を参照した。
-このPRは対応表のみを追加し、Backlogファイル自体は含めない。
+正本: [IMPLEMENTATION_BACKLOG.md](IMPLEMENTATION_BACKLOG.md)（更新日: 2026-09-20）。
+登録時に参照した提供ファイルをRepository内へ保存し、各Issueの本文・依存関係を原文から再検証できるようにした。
 
-参照ファイルのSHA-256: `5d4c3ab95da26376d97fcb7aa27799f3fe9fa523630f4577f1075168c398447c`
+- 登録時入力のSHA-256: `5d4c3ab95da26376d97fcb7aa27799f3fe9fa523630f4577f1075168c398447c`
+- 格納版のSHA-256: `b5adbd6fd0e4735342733dd81569e7d06036f77ec5ffcc7aecada6ab910f9d3a`
+
+格納時の差分は、3行目の更新日のMarkdown改行記法を「行末space 2文字」からbackslashへ置き換えた点のみ。
+表示とGoal / Acceptance Criteria / Depends on / Needsは変えていない。
+各IssueのSource欄には、登録時入力の情報とSHA-256を履歴として保持している。
 
 Goal本文がない項目は「原文にGoal本文の記載なし」と明記し、Acceptance Criteriaは原文を維持した。
 Needs未記載の27件は、登録時のUser確認に従い `not specified` として扱い、needsラベルを追加していない。
