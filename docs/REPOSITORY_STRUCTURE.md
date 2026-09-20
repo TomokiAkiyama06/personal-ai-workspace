@@ -22,7 +22,8 @@ personal-ai-workspace/
 │  │  ├─ check_repository.py
 │  │  ├─ install_hooks.py
 │  │  ├─ run_ci.py
-│  │  └─ test_check_repository.py
+│  │  ├─ test_check_repository.py
+│  │  └─ test_install_hooks.py
 │  └─ workflows/
 │     ├─ ci.yml
 │     └─ claude-review.yml
