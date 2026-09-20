@@ -80,7 +80,10 @@ class WorktreeRunner:
             self._git("worktree", "add", "--detach", str(worktree), commit)
         except Exception:
             self._write_event(run, "creation_failed")
-            shutil.rmtree(run_directory, ignore_errors=True)
+            # Retain the evaluator-owned log, but remove a checkout or Git
+            # registration left behind by a partially failed `worktree add`.
+            self._git("worktree", "remove", "--force", str(worktree), check=False)
+            shutil.rmtree(worktree, ignore_errors=True)
             raise
         with self._lock:
             self._runs[run_id] = worktree
@@ -100,7 +103,7 @@ class WorktreeRunner:
             raise ValueError("command must contain non-empty strings")
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be greater than zero")
-        if not run.path.is_dir():
+        if not self._is_owned_run(run) or not run.path.is_dir():
             raise WorktreeRunnerError("worktree is not available")
 
         started = time.monotonic()
@@ -118,6 +121,7 @@ class WorktreeRunner:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 start_new_session=True,
+                env=self._candidate_environment(),
             )
             with self._lock:
                 self._processes[run.run_id] = process
@@ -130,7 +134,7 @@ class WorktreeRunner:
             except subprocess.TimeoutExpired:
                 status = "timed_out"
                 self._terminate(process)
-                stdout, stderr = process.communicate()
+                stdout, stderr = self._drain_after_termination(process)
             with self._lock:
                 if run.run_id in self._cancelled:
                     status = "cancelled"
@@ -151,6 +155,10 @@ class WorktreeRunner:
     def cancel(self, run: WorktreeRun) -> None:
         """Request cancellation of an active run; ``execute`` performs cleanup."""
         with self._lock:
+            if not self._is_owned_run(run):
+                raise WorktreeRunnerError(
+                    "refusing to cancel a worktree not owned by this runner"
+                )
             self._cancelled.add(run.run_id)
             process = self._processes.get(run.run_id)
         self._write_event(run, "cancellation_requested")
@@ -164,13 +172,21 @@ class WorktreeRunner:
                 "refusing to clean a worktree not owned by this runner"
             )
         self._write_event(run, "cleanup_started", reason=reason)
-        if run.path.exists():
+        try:
+            # `git worktree remove` also drops the administrative entry when a
+            # candidate has already deleted its checkout.
             result = self._git(
                 "worktree", "remove", "--force", str(run.path), check=False
             )
             if result.returncode != 0 and run.path.exists():
                 raise WorktreeRunnerError("git could not remove the isolated worktree")
-        self._write_event(run, "cleanup_finished", reason=reason)
+            self._write_event(run, "cleanup_finished", reason=reason)
+        finally:
+            # Cleanup is terminal: remove in-memory ownership and cancellation
+            # state so a long-lived runner does not retain every completed run.
+            with self._lock:
+                self._runs.pop(run.run_id, None)
+                self._cancelled.discard(run.run_id)
 
     def _assert_repository(self) -> None:
         result = subprocess.run(
@@ -184,7 +200,11 @@ class WorktreeRunner:
             raise WorktreeRunnerError("repository must be a Git working tree")
 
     def _resolve_commit(self, starting_commit: str) -> str:
-        if not starting_commit:
+        if (
+            not isinstance(starting_commit, str)
+            or not starting_commit
+            or starting_commit.startswith("-")
+        ):
             raise ValueError("starting_commit is required")
         result = self._git("rev-parse", "--verify", f"{starting_commit}^{{commit}}")
         return result.stdout.decode("ascii").strip()
@@ -216,6 +236,8 @@ class WorktreeRunner:
         record = {
             "event": event,
             "run_id": run.run_id,
+            "candidate_id": run.candidate_id,
+            "commit": run.commit,
             "timestamp": time.time(),
             **details,
         }
@@ -232,6 +254,28 @@ class WorktreeRunner:
             for key, value in os.environ.items()
             if not key.startswith("GIT_")
         }
+
+    @staticmethod
+    def _candidate_environment() -> dict[str, str]:
+        """Prevent a caller's Git selectors from escaping the worktree."""
+        return WorktreeRunner._git_environment()
+
+    @staticmethod
+    def _drain_after_termination(
+        process: subprocess.Popen[bytes], timeout_seconds: float = 2
+    ) -> tuple[bytes, bytes]:
+        """Drain pipes briefly without letting escaped children block cleanup."""
+        try:
+            return process.communicate(timeout=timeout_seconds)
+        except subprocess.TimeoutExpired as error:
+            stdout = error.output or b""
+            stderr = error.stderr or b""
+            if process.stdout is not None:
+                process.stdout.close()
+            if process.stderr is not None:
+                process.stderr.close()
+            process.wait()
+            return stdout, stderr
 
     @staticmethod
     def _terminate(process: subprocess.Popen[bytes]) -> None:
