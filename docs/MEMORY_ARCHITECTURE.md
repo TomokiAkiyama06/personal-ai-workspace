@@ -649,7 +649,8 @@ Memory管理UIで同期済み / 整理中 / GPU待ち / 失敗等を表示可能
 [FIXED]
 
 MemoryのGitバックアップでは、PostgreSQL dump / WALは扱わない。
-MemoryデータとしてGitへ保存するのはMemory Markdown Projectionのみとする。
+Memory本文はMemory Markdown Projectionとして保存する。
+scope / status / version / relation / provenance等、再構築に必要なmachine-readable metadataもRecovery Projectionへ含める。
 Memory以外の復旧用データは、後述のDedicated Recovery Repositoryの定義に従う。
 
 ```text

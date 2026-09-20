@@ -857,7 +857,9 @@ MemoryのGitバックアップは、DBバックアップとは分離し、後述
 
 #### Gitへ保存するもの
 
-MemoryデータとしてGitへ保存するのは **Memory Markdown Projectionのみ** とする。
+Memory本文は **Memory Markdown Projection** として保存する。
+Memoryのscope / status / version / relation / provenance等、再構築に必要なmachine-readable metadataも
+Recovery Projectionへ含める。
 Memory以外の復旧用データは、後述のDedicated Recovery Repositoryの定義に従う。
 
 - PostgreSQL dumpはGitへ保存しない
@@ -1727,7 +1729,7 @@ docs/
 ### [FUTURE]
 
 - Dedicated IDE Extension。
-- Artifact / Slide generation。
+- Artifact / Slide generation（Coding MVP後）。
 
 ## 24. 既存資料の出自
 
