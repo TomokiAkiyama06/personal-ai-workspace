@@ -38,6 +38,19 @@ Task JSONの必須fieldは次のとおりです。
 PAW-013で定義します。Schema validationはlocatorやcommitの存在確認、credentialの検出を行いません。
 Task authorは[Security Policy](../SECURITY.md)に従い、credentialをlocatorへ保存してはいけません。
 
+## Isolated worktree runner
+
+`benchmarks.worktree_runner.WorktreeRunner` is evaluator infrastructure for starting a
+candidate process from a specified commit.  Each `create()` call resolves the commit,
+creates a detached worktree below an evaluator-owned runs directory, and retains a
+JSONL lifecycle log outside the worktree.  `execute()` removes that worktree after a
+normal exit, timeout, or cancellation; its log remains available for audit.
+
+The runner does not execute visible or hidden checks and does not select a model.  It
+does not persist command text, stdout, or stderr because those fields can contain
+credentials.  It records only lifecycle events, exit status, duration, and byte counts.
+PAW-013 owns check execution and hidden-test isolation.
+
 ## Validator
 
 standalone CLIはprojectの安定したvirtual environmentへCI依存を導入して実行します。
