@@ -53,6 +53,23 @@ class RepositoryChecksTest(unittest.TestCase):
         errors = self.check({"README.md": "[outside](../outside.md)\n"})
         self.assertTrue(any("leaves repository" in error for error in errors), errors)
 
+    def test_existing_untracked_link_targets_are_rejected(self):
+        for name in ("untracked.md", ".git/config", ".github/scripts/__pycache__/cache.pyc"):
+            target = self.root / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("untracked\n", encoding="utf-8")
+        for destination in ("untracked.md", ".git/", ".github/scripts/__pycache__/"):
+            with self.subTest(destination=destination):
+                errors = self.check({"README.md": f"[link]({destination})\n"})
+                self.assertTrue(any("not tracked" in error for error in errors), errors)
+
+    def test_tracked_symlink_cannot_link_to_untracked_content(self):
+        (self.root / "untracked.md").write_text("untracked\n", encoding="utf-8")
+        (self.root / "alias.md").symlink_to("untracked.md")
+        (self.root / "README.md").write_text("[link](alias.md)\n", encoding="utf-8")
+        _, errors = validate(self.root, [Path("README.md"), Path("alias.md")])
+        self.assertTrue(any("not tracked" in error for error in errors), errors)
+
     def test_symlinked_sources_are_not_read_outside_repository(self):
         (self.root / "README.md").symlink_to(self.root.parent / "outside.md")
         _, errors = validate(self.root, [Path("README.md")])
@@ -88,6 +105,33 @@ class RepositoryChecksTest(unittest.TestCase):
             "a: &a\n  x: a\nb:\n  <<: &b\n    <<: *a\n    x: b\nc: *b\n"
         )})
         self.assertEqual(errors, [])
+
+    def test_yaml_exponential_merge_expansion_is_rejected_before_allocation(self):
+        content = "n0: &n0 {x: 1}\n" + "".join(
+            f"n{i}: &n{i} {{<<: [*n{i-1}, *n{i-1}]}}\n" for i in range(1, 15)
+        )
+        loader = UniqueKeyLoader(content)
+        self.addCleanup(loader.dispose)
+        root = loader.get_single_node()
+        final_mapping = root.value[-1][1]
+        with self.assertRaisesRegex(yaml.constructor.ConstructorError, "exceeds 10000"):
+            loader.construct_document(root)
+        # The vulnerable loader allocated 16,384 entries here from 383 bytes.
+        self.assertEqual(len(final_mapping.value), 1)
+
+    def test_yaml_merge_expansion_boundary_and_cycles(self):
+        base = "n0: &n0 {x: 1}\n" + "".join(
+            f"n{i}: &n{i} {{<<: [*n{i-1}, *n{i-1}]}}\n" for i in range(1, 14)
+        )
+        for extra, expected in (("", False), (", *n0", True)):
+            with self.subTest(expanded_entries=10000 + bool(extra)):
+                content = base + f"limit: {{<<: [*n13, *n10, *n9, *n8, *n4{extra}]}}\n"
+                errors = self.check({"config.yml": content})
+                self.assertEqual(bool(errors), expected, errors)
+                if expected:
+                    self.assertIn("exceeds 10000", errors[0])
+        errors = self.check({"config.yml": "node: &node {<<: *node}\n"})
+        self.assertTrue(any("recursive YAML merge" in error for error in errors), errors)
 
     def test_trailing_whitespace_and_conflict_markers_are_rejected(self):
         for name, content, expected in (

@@ -1,6 +1,7 @@
 """Offline checks for the repository's documentation and CI support files."""
 
 from pathlib import Path
+import os
 import re
 import subprocess
 import sys
@@ -14,15 +15,57 @@ from yaml.constructor import ConstructorError
 class UniqueKeyLoader(yaml.SafeLoader):
     """Safe YAML loading with duplicate keys rejected before merge expansion."""
 
+    MAX_MERGE_ENTRIES = 10_000
+
     def __init__(self, stream):
         super().__init__(stream)
         self.checked_mapping_nodes = set()
+        self.merge_sizes = {}
+        self.measuring_merge_nodes = set()
+
+    def construct_document(self, node):
+        self.checked_mapping_nodes.clear()
+        self.merge_sizes.clear()
+        self.measuring_merge_nodes.clear()
+        return super().construct_document(node)
+
+    def merge_size(self, node):
+        """Count merge entries without allocating expanded alias lists."""
+        if node in self.merge_sizes:
+            return self.merge_sizes[node]
+        if node in self.measuring_merge_nodes:
+            raise ConstructorError(None, None, "recursive YAML merge", node.start_mark)
+        self.measuring_merge_nodes.add(node)
+        size = 0
+        for key, value in node.value:
+            if key.tag == "tag:yaml.org,2002:merge":
+                sources = value.value if isinstance(value, yaml.SequenceNode) else [value]
+                for source in sources:
+                    # Invalid merge targets are reported by PyYAML itself.
+                    if isinstance(source, yaml.MappingNode):
+                        size += self.merge_size(source)
+                        self.check_merge_size(size, node)
+            else:
+                size += 1
+                self.check_merge_size(size, node)
+        self.measuring_merge_nodes.remove(node)
+        self.merge_sizes[node] = size
+        return size
+
+    def check_merge_size(self, size, node):
+        if size > self.MAX_MERGE_ENTRIES:
+            raise ConstructorError(
+                None, None, f"merge expansion exceeds {self.MAX_MERGE_ENTRIES} entries",
+                node.start_mark,
+            )
 
     def flatten_mapping(self, node):
         # flatten_mapping also visits merge aliases and mutates their nodes.
         # Check original keys once, before any inherited keys are inserted.
         if node in self.checked_mapping_nodes:
             return
+        if any(key.tag == "tag:yaml.org,2002:merge" for key, _ in node.value):
+            self.merge_size(node)
         self.checked_mapping_nodes.add(node)
         seen = set()
         for key_node, _ in node.value:
@@ -60,7 +103,7 @@ CONFLICT_MARKER = re.compile(r"^(?:<{7}|>{7}|\|{7})(?:\s|$)")
 MARKDOWN = MarkdownIt("commonmark").enable("table")
 
 
-def check_markdown(root, path, content):
+def check_markdown(root, path, content, tracked_targets):
     """Check local link paths, excluding fragments, HTML, and external URLs."""
     errors = []
     for block in MARKDOWN.parse(content):
@@ -74,18 +117,28 @@ def check_markdown(root, path, content):
                 continue
             link_path = unquote(url.path)
             # GitHub renders leading-slash links relative to the repository root.
-            target = ((root / link_path.lstrip("/")) if link_path.startswith("/")
-                      else (root / path).parent / link_path).resolve()
+            destination_path = ((root / link_path.lstrip("/")) if link_path.startswith("/")
+                                else (root / path).parent / link_path)
+            logical_target = Path(os.path.abspath(destination_path))
+            target = destination_path.resolve()
             line = block.map[0] + 1 if block.map else 1
             if not target.is_relative_to(root):
                 errors.append(f"{path}:{line}: local link leaves repository: {destination}")
             elif not target.exists():
                 errors.append(f"{path}:{line}: local link target missing: {destination}")
+            elif logical_target not in tracked_targets or target not in tracked_targets:
+                errors.append(f"{path}:{line}: local link target is not tracked: {destination}")
     return errors
 
 
 def validate(root, paths):
     root = root.resolve()
+    paths = list(paths)
+    tracked_files = {root / path for path in paths}
+    tracked_targets = tracked_files | {
+        parent for path in tracked_files for parent in path.parents
+        if parent.is_relative_to(root)
+    }
     errors = []
     checked = 0
     for path in paths:
@@ -112,7 +165,7 @@ def validate(root, paths):
             if trailing and not hard_break:
                 errors.append(f"{path}:{number}: trailing whitespace")
         if markdown:
-            errors.extend(check_markdown(root, path, content))
+            errors.extend(check_markdown(root, path, content, tracked_targets))
         if path.suffix.lower() in {".yaml", ".yml"}:
             try:
                 list(yaml.load_all(content, Loader=UniqueKeyLoader))

@@ -7,14 +7,18 @@ Ruleset の変更はこの workflow の追加には含めない。
 現在の文書中心の Repository では以下を検証する。
 
 - Git 管理対象の Markdown / YAML / Python / text と主要設定ファイルの末尾空白、merge conflict marker
-- Markdown のリンク・画像・参照リンクが指す Repository 内のファイルまたはディレクトリの存在
+- Markdown のリンク・画像・参照リンクが指す Git 管理対象ファイルまたはその親ディレクトリの存在
 - YAML の構文、重複した mapping key、安全な読み取り
 - 検証スクリプトが正常な文書を許容し、破損した入力を検出する回帰テスト
 
 Markdown の行末の 2 個以上のスペースによる改行は許容する。
 リンク検証は Markdown の構文として書かれたリンクを対象とし、コード例中のリンクは除外する。
 先頭が `/` のリンクは、[GitHub の文書表示仕様](https://docs.github.com/en/get-started/writing-on-github/getting-started-with-writing-and-formatting-on-github/basic-writing-and-formatting-syntax#relative-links)に従い Repository root から解決する。
+存在していても未追跡ファイル、`.git/`、生成された `__pycache__/` 等へのリンクは拒否する。
+symlink のリンク先も Git 管理対象である必要がある。
 外部 URL への通信、見出し fragment、HTML のリンク属性は検証対象外とする。
+YAML は mapping の merge 展開を 10,000 entries 以下に制限し、循環する merge は拒否する。
+これは merge の指数展開を抑える制限であり、通常の sequence alias は参照を共有するため対象外とする。
 Application の build / format / lint / test はコード構成の確定後に追加する（PAW-004）。
 
 Python 3.13 でローカル実行する場合:
