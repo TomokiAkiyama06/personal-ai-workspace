@@ -8,7 +8,9 @@ check実行、Hidden Test参照の解決、隔離実行は行いません。
 [Implementation Backlog](../docs/IMPLEMENTATION_BACKLOG.md) に従います。
 
 - [PAW-010 — Benchmark Task Schema](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/7)：Task の機械可読な形式を定義する。PAW-001 に依存する。
+- [PAW-011 — Evaluator Result Schema](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/8)：Evaluator の判定結果と計測値の形式を定義する。
 - [PAW-012 — 隔離 Worktree Runner](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/9)：同一の開始状態から候補 Agent を実行する。
+- [PAW-013 — Test / Hidden Acceptance Runner](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/10)：Visible TestとHidden Testを分離して実行する。
 - [PAW-015 — Candidate Adapter Interface](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/12)：モデルや Runtime の違いを共通 Interface で扱う。
 - [PAW-016 — Seed Benchmark Dataset](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/13)：仕様と検証可能な挙動に基づく初期評価セットを作る。
 
@@ -33,7 +35,8 @@ Task JSONの必須fieldは次のとおりです。
 
 `visible_checks`と`hidden_checks`は空配列を許容します。Hidden Test本文、command、path、Credentialを
 `hidden_checks`へ保存してはいけません。`reference_id`の保存先や解決方法、Candidateからの隔離方法は
-PAW-013で定義します。Schema validationはlocatorやcommitの存在確認を行いません。
+PAW-013で定義します。Schema validationはlocatorやcommitの存在確認、credentialの検出を行いません。
+Task authorは[Security Policy](../SECURITY.md)に従い、credentialをlocatorへ保存してはいけません。
 
 ## Validator
 

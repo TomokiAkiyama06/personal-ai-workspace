@@ -29,7 +29,7 @@
       ]
     },
     "repository": {
-      "description": "Repository reference only; credentials must not be embedded.",
+      "description": "Repository reference only. Task authors must not embed credentials; this schema does not inspect locator contents.",
       "$ref": "#/$defs/repository"
     },
     "issue_text": {
