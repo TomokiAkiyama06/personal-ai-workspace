@@ -1,0 +1,35 @@
+name: Feature request
+description: 機能追加・改善案
+title: "[Feature] "
+labels: ["type: feature"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 解決したい問題
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 提案
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance Criteria
+      description: 完了と判断できる条件があれば記載してください。
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - agent
+        - memory
+        - backend
+        - frontend
+        - security
+        - infra
+        - benchmark
+        - docs
