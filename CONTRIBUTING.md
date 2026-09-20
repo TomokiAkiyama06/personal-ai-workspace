@@ -8,6 +8,7 @@ Contributions are welcome. This project is still in early development, so large 
 2. Read `AGENTS.md`.
 3. Check related design documents under `docs/`.
 4. Prefer an Issue for behavior or architecture changes that are not already specified.
+5. Follow the [CI and pre-commit setup](.github/CI.md) to install the commit hook before making changes.
 
 ## Pull requests
 
