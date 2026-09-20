@@ -5,8 +5,7 @@ import subprocess
 import sys
 
 
-def main():
-    root = Path(__file__).resolve().parents[2]
+def check_existing_hooks(root):
     hooks_path = subprocess.run(
         ["git", "config", "--get", "core.hooksPath"], cwd=root, capture_output=True,
     )
@@ -26,10 +25,23 @@ def main():
         if path.exists() or path.is_symlink():
             print(f"Refusing to overwrite existing Git hook: {path}", file=sys.stderr)
             return 1
-    return subprocess.run(
-        [sys.executable, "-m", "pre_commit", "install", "--install-hooks",
-         "--hook-type", "pre-commit"], cwd=root,
-    ).returncode
+    return 0
+
+
+def install(root):
+    # Prepare dependencies before installing a hook so failures remain retryable.
+    for command in (("install-hooks",), ("install", "--hook-type", "pre-commit")):
+        conflict = check_existing_hooks(root)
+        if conflict:
+            return conflict
+        result = subprocess.run([sys.executable, "-m", "pre_commit", *command], cwd=root)
+        if result.returncode:
+            return result.returncode
+    return 0
+
+
+def main():
+    return install(Path(__file__).resolve().parents[2])
 
 
 if __name__ == "__main__":
