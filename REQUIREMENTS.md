@@ -858,7 +858,8 @@ MemoryのGitバックアップは、DBバックアップとは分離し、後述
 #### Gitへ保存するもの
 
 Memory本文は **Memory Markdown Projection** として保存する。
-Memoryのversion / relation等、再構築に必要なmachine-readable metadataもRecovery Projectionへ含める。
+Memoryのscope / status / version / relation / provenance等、再構築に必要なmachine-readable metadataも
+Recovery Projectionへ含める。
 Memory以外の復旧用データは、後述のDedicated Recovery Repositoryの定義に従う。
 
 - PostgreSQL dumpはGitへ保存しない
