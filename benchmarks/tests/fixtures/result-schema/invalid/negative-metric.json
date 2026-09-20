@@ -1,0 +1,18 @@
+{
+  "schema_version": "1.0",
+  "evaluator_version": "1.0.0",
+  "task_id": "negative-metric",
+  "candidate": {
+    "model": "example-coder-32b",
+    "runtime": "example-runtime",
+    "quantization": "bf16"
+  },
+  "test_outcomes": {
+    "fail_to_pass": "failed",
+    "pass_to_pass": "passed"
+  },
+  "check_results": [],
+  "metrics": {
+    "peak_vram_bytes": -1
+  }
+}
