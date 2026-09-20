@@ -20,11 +20,14 @@ personal-ai-workspace/
 │  ├─ requirements-ci.txt
 │  ├─ scripts/
 │  │  ├─ check_repository.py
+│  │  ├─ install_hooks.py
+│  │  ├─ run_ci.py
 │  │  └─ test_check_repository.py
 │  └─ workflows/
 │     ├─ ci.yml
 │     └─ claude-review.yml
 ├─ .gitignore
+├─ .pre-commit-config.yaml
 ├─ AGENTS.md
 ├─ CONTRIBUTING.md
 ├─ LICENSE
