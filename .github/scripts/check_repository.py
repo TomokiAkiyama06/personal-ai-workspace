@@ -117,6 +117,15 @@ def reject_nonstandard_json_constant(_constant):
     raise ValueError("non-standard numeric constant")
 
 
+def reject_duplicate_json_object_keys(pairs):
+    document = {}
+    for key, value in pairs:
+        if key in document:
+            raise ValueError("duplicate JSON object key")
+        document[key] = value
+    return document
+
+
 def check_markdown(root, path, content, tracked_targets):
     """Check local link paths, excluding fragments, HTML, and external URLs."""
     errors = []
@@ -195,11 +204,17 @@ def validate(root, paths):
                 errors.append(f"{path}:{line}: YAML {getattr(error, 'problem', str(error))}")
         if path.suffix.lower() == ".json":
             try:
-                json.loads(content, parse_constant=reject_nonstandard_json_constant)
+                json.loads(
+                    content,
+                    object_pairs_hook=reject_duplicate_json_object_keys,
+                    parse_constant=reject_nonstandard_json_constant,
+                )
             except json.JSONDecodeError as error:
                 errors.append(f"{path}:{error.lineno}: JSON {error.msg}")
             except ValueError:
-                errors.append(f"{path}:1: JSON non-standard numeric constant")
+                errors.append(
+                    f"{path}:1: JSON non-standard numeric constant or duplicate object key"
+                )
     return checked, errors
 
 

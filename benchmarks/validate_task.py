@@ -18,8 +18,21 @@ def _reject_nonstandard_constant(_constant: str) -> None:
     raise ValueError("non-standard numeric constant")
 
 
+def _reject_duplicate_object_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    document = {}
+    for key, value in pairs:
+        if key in document:
+            raise ValueError("duplicate JSON object key")
+        document[key] = value
+    return document
+
+
 def _decode_json(content: str) -> Any:
-    return json.loads(content, parse_constant=_reject_nonstandard_constant)
+    return json.loads(
+        content,
+        object_pairs_hook=_reject_duplicate_object_keys,
+        parse_constant=_reject_nonstandard_constant,
+    )
 
 
 def load_schema(path: Path = SCHEMA_PATH) -> dict[str, Any]:
@@ -77,7 +90,10 @@ def _load_document(path: Path) -> tuple[Any | None, str | None]:
     except json.JSONDecodeError as error:
         return None, f"JSON syntax error at line {error.lineno}, column {error.colno}"
     except ValueError:
-        return None, "JSON contains a non-standard numeric constant"
+        return (
+            None,
+            "JSON contains a non-standard numeric constant or duplicate object key",
+        )
     except (OSError, UnicodeError) as error:
         return None, f"cannot read UTF-8 JSON ({type(error).__name__})"
 

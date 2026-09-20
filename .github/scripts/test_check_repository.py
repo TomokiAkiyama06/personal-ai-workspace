@@ -108,6 +108,9 @@ class RepositoryChecksTest(unittest.TestCase):
                     errors,
                 )
 
+        errors = self.check({"invalid.json": '{"key": 1, "key": 2}\n'})
+        self.assertTrue(any("duplicate object key" in error for error in errors), errors)
+
     def test_yaml_merge_overrides_are_valid(self):
         errors = self.check({"config.yml": (
             "defaults: &defaults\n  timeout: 10\njob:\n"
