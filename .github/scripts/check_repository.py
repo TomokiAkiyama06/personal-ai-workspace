@@ -108,7 +108,7 @@ UniqueKeyLoader.add_implicit_resolver(
 
 TEXT_SUFFIXES = {".md", ".yaml", ".yml", ".py", ".txt"}
 TEXT_NAMES = {".gitignore", ".gitattributes", ".editorconfig", "LICENSE", "CODEOWNERS"}
-CONFLICT_MARKER = re.compile(r"^(?:<{7}|={7}|>{7}|\|{7})(?:\s|$)")
+CONFLICT_MARKER = re.compile(r"^(?:<{7,}|={7,}|>{7,}|\|{7,})(?:\s|$)")
 MARKDOWN = MarkdownIt("commonmark").enable("table")
 
 

@@ -176,6 +176,27 @@ class RepositoryChecksTest(unittest.TestCase):
                 errors = self.check({name: "Heading\n=======\n"})
                 self.assertTrue(any("merge conflict marker" in error for error in errors), errors)
 
+    def test_conflict_marker_widths_and_setext_headings(self):
+        for width in (7, 9, 32):
+            for symbol in ("<", "=", ">", "|"):
+                for name in ("README.md", "example.py", "sample.txt", "config.yml"):
+                    with self.subTest(width=width, symbol=symbol, name=name):
+                        label = "" if symbol == "=" else " revision"
+                        errors = self.check({name: symbol * width + label + "\n"})
+                        self.assertTrue(any("merge conflict marker" in error for error in errors),
+                                        errors)
+            for diff3 in (False, True):
+                with self.subTest(width=width, diff3=diff3):
+                    content = "<" * width + " HEAD\nours\n"
+                    if diff3:
+                        content += "|" * width + " base\noriginal\n"
+                    content += "=" * width + "\ntheirs\n" + ">" * width + " topic\n"
+                    errors = self.check({"README.md": content})
+                    self.assertTrue(any("merge conflict marker" in error for error in errors),
+                                    errors)
+            with self.subTest(width=width, valid_setext=True):
+                self.assertEqual(self.check({"README.md": "Heading\n" + "=" * width + "\n"}), [])
+
     def test_markdown_separator_requires_an_actual_setext_heading(self):
         for content, rejected in (
             ("=======\n", True),

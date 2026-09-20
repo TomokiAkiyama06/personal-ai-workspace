@@ -12,6 +12,7 @@ Ruleset の変更はこの workflow の追加には含めない。
 - 検証スクリプトが正常な文書を許容し、破損した入力を検出する回帰テスト
 
 Markdown の行末の 2 個以上のスペースによる改行は許容する。
+conflict marker の検出対象は、行頭で `<` / `=` / `>` / `|` の同一記号が 7 文字以上連続し、空白または行末が続く場合とする。
 `=======` は conflict marker として拒否するが、Markdown の Setext 見出しとして解析された実際の下線行は許容する。
 リンク検証は Markdown の構文として書かれたリンクを対象とし、コード例中のリンクは除外する。
 先頭が `/` のリンクは、[GitHub の文書表示仕様](https://docs.github.com/en/get-started/writing-on-github/getting-started-with-writing-and-formatting-on-github/basic-writing-and-formatting-syntax#relative-links)に従い Repository root から解決する。
