@@ -51,6 +51,21 @@ does not persist command text, stdout, or stderr because those fields can contai
 credentials.  It records only lifecycle events, exit status, duration, and byte counts.
 PAW-013 owns check execution and hidden-test isolation.
 
+## Test / hidden acceptance runner
+
+`benchmarks.test_runner.TestRunner` executes visible checks supplied by the task and
+hidden checks resolved from an evaluator-owned `HiddenCheckRegistry`.  The manifest
+continues to contain only the opaque `reference_id`; the registry and its command
+content are never placed in the candidate worktree or durable check log.  A check
+record includes its status, timeout, exit code, duration, and a bounded-output digest
+and byte count.  Raw stdout/stderr stay in memory for the trusted evaluator caller,
+so credentials emitted by a command do not become durable logs.
+
+The runner is a data/process boundary, not a hostile-code sandbox.  Production must
+run candidate code and private evaluator storage under separately enforced OS or
+container permissions.  The proposed boundary is recorded in
+[Decision 0001](../docs/decisions/0001-hidden-check-boundary.md).
+
 ## Validator
 
 standalone CLIはprojectの安定したvirtual environmentへCI依存を導入して実行します。
