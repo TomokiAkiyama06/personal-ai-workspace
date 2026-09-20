@@ -14,9 +14,17 @@ from jsonschema.exceptions import SchemaError
 SCHEMA_PATH = Path(__file__).parent / "schemas" / "task-v1.schema.json"
 
 
+def _reject_nonstandard_constant(_constant: str) -> None:
+    raise ValueError("non-standard numeric constant")
+
+
+def _decode_json(content: str) -> Any:
+    return json.loads(content, parse_constant=_reject_nonstandard_constant)
+
+
 def load_schema(path: Path = SCHEMA_PATH) -> dict[str, Any]:
     """Load the bundled schema and verify that the schema itself is valid."""
-    schema = json.loads(path.read_text(encoding="utf-8"))
+    schema = _decode_json(path.read_text(encoding="utf-8"))
     Draft202012Validator.check_schema(schema)
     return schema
 
@@ -65,9 +73,11 @@ def validate_document(document: Any, schema: dict[str, Any] | None = None) -> li
 
 def _load_document(path: Path) -> tuple[Any | None, str | None]:
     try:
-        return json.loads(path.read_text(encoding="utf-8")), None
+        return _decode_json(path.read_text(encoding="utf-8")), None
     except json.JSONDecodeError as error:
         return None, f"JSON syntax error at line {error.lineno}, column {error.colno}"
+    except ValueError:
+        return None, "JSON contains a non-standard numeric constant"
     except (OSError, UnicodeError) as error:
         return None, f"cannot read UTF-8 JSON ({type(error).__name__})"
 
@@ -79,7 +89,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         schema = load_schema()
-    except (OSError, UnicodeError, json.JSONDecodeError, SchemaError) as error:
+    except (OSError, UnicodeError, ValueError, SchemaError) as error:
         print(f"benchmark schema is unusable ({type(error).__name__})", file=sys.stderr)
         return 2
 

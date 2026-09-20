@@ -113,6 +113,10 @@ CONFLICT_MARKER = re.compile(r"^(?:<{7,}|={7,}|>{7,}|\|{7,})(?:\s|$)")
 MARKDOWN = MarkdownIt("commonmark").enable("table")
 
 
+def reject_nonstandard_json_constant(_constant):
+    raise ValueError("non-standard numeric constant")
+
+
 def check_markdown(root, path, content, tracked_targets):
     """Check local link paths, excluding fragments, HTML, and external URLs."""
     errors = []
@@ -191,9 +195,11 @@ def validate(root, paths):
                 errors.append(f"{path}:{line}: YAML {getattr(error, 'problem', str(error))}")
         if path.suffix.lower() == ".json":
             try:
-                json.loads(content)
+                json.loads(content, parse_constant=reject_nonstandard_json_constant)
             except json.JSONDecodeError as error:
                 errors.append(f"{path}:{error.lineno}: JSON {error.msg}")
+            except ValueError:
+                errors.append(f"{path}:1: JSON non-standard numeric constant")
     return checked, errors
 
 

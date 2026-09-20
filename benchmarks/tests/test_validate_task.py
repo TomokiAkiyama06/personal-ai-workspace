@@ -61,6 +61,23 @@ class BenchmarkTaskSchemaTest(unittest.TestCase):
         self.assertTrue(errors)
         self.assertNotIn(secret_value, "\n".join(errors))
 
+    def test_visible_command_allows_empty_arguments_but_not_an_empty_program(self):
+        task = self.load_fixture(FIXTURES / "valid" / "spec.json")
+        task["visible_checks"][0]["command"] = ["python3", "-c", ""]
+        self.assertEqual(validate_document(task, self.schema), [])
+
+        task["visible_checks"][0]["command"] = [""]
+        self.assertIn(
+            "$.visible_checks[0].command[0]: string must not be empty",
+            validate_document(task, self.schema),
+        )
+
+        task["visible_checks"][0]["command"] = []
+        self.assertIn(
+            "$.visible_checks[0].command: array must contain at least one item",
+            validate_document(task, self.schema),
+        )
+
     def test_cli_reports_valid_and_invalid_files(self):
         valid_path = FIXTURES / "valid" / "spec.json"
         invalid_path = FIXTURES / "invalid" / "unknown-kind.json"
@@ -83,6 +100,25 @@ class BenchmarkTaskSchemaTest(unittest.TestCase):
         self.assertEqual(result, 1)
         self.assertIn("JSON syntax error", stderr.getvalue())
         self.assertNotIn(secret_value, stderr.getvalue())
+
+    def test_cli_rejects_nonstandard_json_constants_without_echoing_content(self):
+        secret_value = "do-not-echo-this-json"
+        for constant in ("NaN", "Infinity", "-Infinity"):
+            with (
+                self.subTest(constant=constant),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                path = Path(directory) / "nonstandard.json"
+                path.write_text(
+                    '{"issue_text": "' + secret_value + '", "value": ' + constant + "}",
+                    encoding="utf-8",
+                )
+                stderr = io.StringIO()
+                with redirect_stderr(stderr):
+                    result = main([str(path)])
+            self.assertEqual(result, 1)
+            self.assertIn("non-standard numeric constant", stderr.getvalue())
+            self.assertNotIn(secret_value, stderr.getvalue())
 
 
 if __name__ == "__main__":

@@ -100,6 +100,14 @@ class RepositoryChecksTest(unittest.TestCase):
         self.assertTrue(any("JSON" in error for error in errors), errors)
         self.assertNotIn(secret, "\n".join(errors))
 
+        for constant in ("NaN", "Infinity", "-Infinity"):
+            with self.subTest(constant=constant):
+                errors = self.check({"invalid.json": '{"value": ' + constant + "}\n"})
+                self.assertTrue(
+                    any("JSON non-standard numeric constant" in error for error in errors),
+                    errors,
+                )
+
     def test_yaml_merge_overrides_are_valid(self):
         errors = self.check({"config.yml": (
             "defaults: &defaults\n  timeout: 10\njob:\n"
