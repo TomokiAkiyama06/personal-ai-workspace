@@ -25,6 +25,7 @@ from paw_backend.identity.diagnostics import (
 
 from .identity_support import (
     ROLE_PASSWORD,
+    ROOT,
     T0,
     PostgresIdentityTestCase,
     migrate,
@@ -268,7 +269,7 @@ class WebRoleTest(RoleSplitTestCase):
             ),
             RESTRICT_VIOLATION,
         )
-        recovery = await self.operator.recover_owner()
+        recovery = await self.operator.recover_owner(operator=ROOT)
         self.assertEqual(
             (await self.redeemer.redeem(recovery.token)).purpose, TokenPurpose.RECOVERY
         )
@@ -326,7 +327,7 @@ class WebRoleTest(RoleSplitTestCase):
 class OperatorRoleTest(RoleSplitTestCase):
     async def test_the_operator_role_can_set_up_recover_and_replace(self):
         setup = await self.operator.setup_owner("boss")
-        recovery = await self.operator.recover_owner()
+        recovery = await self.operator.recover_owner(operator=ROOT)
         await self.execute("UPDATE users SET status = 'deleted'")
 
         replacement = await self.operator.setup_owner(
@@ -347,7 +348,7 @@ class OperatorRoleTest(RoleSplitTestCase):
 
     async def test_the_web_role_redeems_what_the_operator_role_recovered(self):
         await self.operator.setup_owner("boss")
-        recovery = await self.operator.recover_owner()
+        recovery = await self.operator.recover_owner(operator=ROOT)
 
         redemption = await self.redeemer.redeem(recovery.token)
 

@@ -219,12 +219,22 @@ def _redact_mapping(
     total = 0
     out: dict[str, object] = {}
 
+    last_suffix: dict[str, int] = {}
+
     def put(key: str, item: object) -> None:
         # Two keys can redact to the same text: never let one overwrite another.
-        candidate, suffix = key, 1
-        while candidate in out:
+        # Each text remembers the last suffix it used, so a run of equal keys
+        # (all the unsupported ones, say) costs one step each, not a rescan.
+        if key not in out:
+            out[key] = item
+            return
+        suffix = last_suffix.get(key, 1)
+        while True:
             suffix += 1
             candidate = f"{key}#{suffix}"
+            if candidate not in out:
+                break
+        last_suffix[key] = suffix
         out[candidate] = item
 
     for key, item in value.items():
@@ -234,6 +244,7 @@ def _redact_mapping(
                 total += 1
             break
         if not isinstance(key, str):
+            budget.nodes -= 1  # an entry like any other: the budget bounds them
             put(UNSUPPORTED, UNSUPPORTED)
             total += 1
             continue
