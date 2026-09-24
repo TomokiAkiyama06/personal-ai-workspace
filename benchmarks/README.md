@@ -297,7 +297,13 @@ do not become durable logs.
   leader before the final group kill.  A listing is adopted only if the leader was still
   its own unreaped child after it (so it was taken while the group id was reserved),
   and the listing after a vanished leader is dropped when some process now holds the
-  leader's own number (the id was reused, so that group is a stranger's).
+  leader's own number (the id was reused, so that group is a stranger's).  If the
+  leader turns out to have been collected after a listing was read (a reaper acting
+  between the table read and the ownership check, including in the last look of the
+  setup-failure cleanup), or at a group signal since it was last observed, the
+  untrusted listing is dropped and the snapshot of the vanished leader's group is taken
+  at once, exactly as if the loss had been seen when it happened; the leader is not
+  merely marked released, so a member forked just before the loss is not forgotten.
 - Without a recorded start time (no `/proc`) the runner has no identity to check, so it
   sends no signal to the check's group and cannot stop it: a check that exceeds the
   timeout is reported `timed_out` but keeps running, and one that finishes is still
@@ -305,8 +311,9 @@ do not become durable logs.
 - **Documented residuals** (not closable in-process; see Decision 0001): a process that
   daemonizes (double fork plus `setsid`) can outlive the check; a check-then-signal gap
   of microseconds remains because a process group cannot be signalled through a pidfd,
-  and the last look at the group after a vanished leader assumes its id was not reused
-  within one polling interval (50 ms) by a group whose leader has already gone; a
+  and the snapshot of a vanished leader's group assumes its id was not reused, by a
+  group whose leader has already gone, since the leader was last observed (one polling
+  interval of 50 ms; after a timeout, the drain of up to `drain_seconds`); a
   member forked into the group only after the leader was reaped and the last look was
   taken, or by members that have all exited before the signal, is missed.
   Containing descendants reliably needs a PID namespace or a cgroup (`cgroup.kill`).

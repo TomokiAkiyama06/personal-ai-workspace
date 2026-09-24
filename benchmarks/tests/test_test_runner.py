@@ -704,18 +704,120 @@ class TestRunnerTest(unittest.TestCase):
         self.addCleanup(process.kill)
         leader = test_runner._Leader(process)
         own = dict(leader.members)
+        listings = []
 
         def reaped_during_the_listing():
-            os.kill(process.pid, signal.SIGKILL)
-            os.waitpid(process.pid, 0)  # a concurrent reaper
-            # By now the id could be anyone's: this looks like a member.
-            return {process.pid + 1: ("S", 1, process.pid, 5)}
+            if not listings:
+                os.kill(process.pid, signal.SIGKILL)
+                os.waitpid(process.pid, 0)  # a concurrent reaper
+                # By now the id could be anyone's: this looks like a member.
+                listings.append("racy")
+                return {process.pid + 1: ("S", 1, process.pid, 5)}
+            # The snapshot taken once the loss was noticed: the reaped leader's
+            # number is held by a stranger, so the group is not ours.
+            listings.append("fresh")
+            return {process.pid: ("S", 1, process.pid, leader.start + 7)}
 
         with mock.patch.object(
             test_runner, "_process_table", reaped_during_the_listing
         ):
             leader.refresh(force=True)
+        self.assertEqual(listings, ["racy", "fresh"])
         self.assertEqual(leader.members, own)
+        self.assertTrue(leader.released and leader.status_lost)
+
+    def leader_with_a_late_member(self):
+        """A leader (still unreaped, as a zombie) that has not recorded a member
+        its check forked afterwards."""
+        pid_file = self.pid_file()
+        go = self.root / "go"
+        process = subprocess.Popen(
+            [sys.executable, "-c", FORK_WHEN_TOLD_THEN_EXIT, str(pid_file), str(go)],
+            start_new_session=True,
+        )
+        self.addCleanup(process.wait)
+        self.addCleanup(process.kill)
+        leader = test_runner._Leader(process)
+        leader.refresh_seconds = 1e9  # nothing is recorded unless it is forced
+        go.write_text("")
+        child = self.read_pid(pid_file)
+        # The zombie still reserves the group id.
+        self.assertTrue(wait_until(lambda: not is_running(process.pid)))
+        self.assertNotIn(child, leader.members)
+        return process, leader, child
+
+    def reaped_after_the_first_listing(self, process, reused_number_after=None):
+        """A ``_process_table`` whose first listing is followed at once by a
+        concurrent reaper collecting ``process``: the leader is lost after the table
+        was read and before the ownership check that trusts it.  Later listings are
+        real, or show the leader's number held by a stranger."""
+        real_table = test_runner._process_table
+        listings = []
+
+        def table():
+            snapshot = real_table()
+            listings.append(snapshot)
+            if len(listings) == 1:
+                os.waitpid(process.pid, 0)
+            elif reused_number_after is not None:
+                snapshot = {**snapshot, process.pid: reused_number_after}
+            return snapshot
+
+        return mock.patch.object(test_runner, "_process_table", table)
+
+    def test_a_leader_reaped_after_the_listing_still_yields_a_group_snapshot(self):
+        process, leader, child = self.leader_with_a_late_member()
+
+        with self.reaped_after_the_first_listing(process):
+            leader.refresh(force=True)
+
+        # The listing itself is not trusted, but the loss is noticed and the
+        # snapshot of the vanished leader's group is taken at once.
+        self.assertEqual(leader.members.get(child), test_runner._start_time(child))
+        self.assertTrue(leader.released and leader.status_lost)
+
+    def test_the_snapshot_after_such_a_loss_ignores_a_reused_number(self):
+        process, leader, child = self.leader_with_a_late_member()
+        own = dict(leader.members)
+        stranger = ("S", 1, process.pid, leader.start + 7)
+
+        with self.reaped_after_the_first_listing(process, stranger):
+            leader.refresh(force=True)
+
+        self.assertEqual(leader.members, own)
+        self.assertNotIn(child, leader.members)
+        self.assertTrue(leader.released and leader.status_lost)
+
+    def test_a_leader_found_reaped_at_a_signal_still_gets_its_group_snapshot(self):
+        process, leader, child = self.leader_with_a_late_member()
+        os.waitpid(process.pid, 0)  # a concurrent reaper; nobody saw it happen
+        self.assertFalse(leader.released)
+        started = test_runner._start_time(child)
+
+        leader.signal_group(signal.SIGKILL)
+
+        self.assertTrue(
+            wait_until(lambda: not is_running(child)),
+            "a group member forked before the loss was noticed survived",
+        )
+        self.assertEqual(leader.members.get(child), started)
+        self.assertTrue(leader.released and leader.status_lost)
+
+    def test_a_member_is_not_lost_when_the_leader_is_reaped_during_the_last_look(
+        self,
+    ):
+        # The setup failure path: the last look at the group reads the table, and
+        # a concurrent reaper collects the leader before the look can check that
+        # it still owns the id.  The child forked since must still be stopped.
+        process, leader, child = self.leader_with_a_late_member()
+
+        with self.reaped_after_the_first_listing(process):
+            test_runner._stop_unsupervised(process, leader.start, leader)
+
+        self.assertTrue(
+            wait_until(lambda: not is_running(child)),
+            "a group member forked before the setup failed was left running",
+        )
 
     def spawn_unsupervised(self):
         process = subprocess.Popen(

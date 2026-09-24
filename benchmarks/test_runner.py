@@ -533,9 +533,12 @@ class _Leader:
     ours unless the id was reused within one polling interval.  Whether the leader is
     still ours is re-checked at every signal, because a reaper can act at any time
     after it was observed.  A listing is only adopted if the leader was still our own
-    unreaped child after it, so it was taken while the group id was reserved.  A
-    leader without a recorded start time cannot be told from a stranger holding its
-    number: its group is never signalled.
+    unreaped child after it, so it was taken while the group id was reserved.  When
+    the leader turns out to have been collected after a listing was read (or, at a
+    signal, since it was last observed), that listing is dropped and the snapshot of
+    the vanished leader is taken instead, so a member forked just before the loss is
+    not forgotten.  A leader without a recorded start time cannot be told from a
+    stranger holding its number: its group is never signalled.
     """
 
     refresh_seconds = 0.2
@@ -555,11 +558,13 @@ class _Leader:
         """Record the group's current members.
 
         Trusted only while the leader is unreaped, so the listing is adopted only if
-        the leader still is after it.  ``gone``: the leader is known to be reaped
-        (this is the last look).  The group id is then reserved only for as long as
-        a member exists, so whatever is in the group is ours, unless a process
-        holds the leader's own number: then the number was reused and its group is
-        a stranger's.
+        the leader still is after it.  If it is not (it was collected after the table
+        was read), the listing is dropped and the last look at the vanished leader's
+        group is taken now instead.  ``gone``: the leader is known to be reaped (this
+        is that last look).  The group id is then reserved only for as long as a
+        member exists, so whatever is in the group is ours, unless a process holds
+        the leader's own number: then the number was reused and its group is a
+        stranger's.
         """
         now = time.monotonic()
         if self.released or (
@@ -578,6 +583,10 @@ class _Leader:
         if gone or self._still_ours():
             for pid, started in found.items():
                 self.members.setdefault(pid, started)
+        elif self.start is not None:
+            # Collected between reading the table and now: the listing cannot be
+            # trusted, but the group may hold a member forked just before.
+            self._release(status_lost=self.process.returncode is None)
 
     def _release(self, *, status_lost: bool) -> None:
         """Stop assuming the leader reserves the group id (after a last look)."""
@@ -642,9 +651,12 @@ class _Leader:
             self.process.returncode is not None or not self._still_ours()
         ):
             # Reaped (by us, or by someone else since it was last observed): the
-            # group id is no longer reserved.  Too late for a last look.
-            self.released = True
-            self.status_lost = self.status_lost or self.process.returncode is None
+            # group id is no longer reserved.  The snapshot of the vanished leader's
+            # group is taken now, as it would have been had the loss been seen when
+            # it happened: the id is assumed not to have been reused since the
+            # leader was last observed, which was recently (a polling interval, or
+            # the drain after a timeout).
+            self._release(status_lost=self.process.returncode is None)
         if self.released and not any(
             state not in "ZX" and self.owns(pid, pgrp, started)
             for pid, (state, _, pgrp, started) in _process_table().items()
