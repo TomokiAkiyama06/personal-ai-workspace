@@ -29,9 +29,14 @@ requires_postgres = unittest.skipUnless(
 )
 
 
-def migrate(revision: str = "head", *, downgrade: bool = False) -> None:
-    """Run Alembic against the test database (synchronously; no event loop)."""
-    with paw_environment(PAW_DATABASE_URL=TEST_DATABASE_URL):
+def migrate(
+    revision: str = "head", *, downgrade: bool = False, **environment: str
+) -> None:
+    """Run Alembic against the test database (synchronously; no event loop).
+
+    ``environment`` adds variables such as ``PAW_APP_DATABASE_ROLE``.
+    """
+    with paw_environment(PAW_DATABASE_URL=TEST_DATABASE_URL, **environment):
         config = offline_config(io.StringIO())
         if downgrade:
             alembic_command.downgrade(config, revision)

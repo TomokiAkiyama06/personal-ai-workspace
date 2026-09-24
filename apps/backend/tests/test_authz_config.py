@@ -4,7 +4,6 @@ import io
 import unittest
 
 from alembic import command
-from alembic.script import ScriptDirectory
 from pydantic import ValidationError
 
 from paw_backend.authz.diagnostics import AuditTableAccess
@@ -16,16 +15,11 @@ URL = "postgresql://paw:s3cr3t-pw@db.internal/paw"
 MIGRATION_URL = "postgresql://owner:0wner-pw@db.internal/paw"
 
 
-def audit_revision_range() -> str:
-    """Only the audit migration: later revisions create tables (and grants) too."""
-    scripts = ScriptDirectory.from_config(offline_config(io.StringIO()))
-    return f"{scripts.get_revision('0025').down_revision}:0025"
-
-
 def offline_upgrade_sql(**environment: str) -> str:
+    """The SQL of the audit migration (0025) only, whatever migrations follow it."""
     output = io.StringIO()
     with paw_environment(PAW_DATABASE_URL=URL, **environment):
-        command.upgrade(offline_config(output), audit_revision_range(), sql=True)
+        command.upgrade(offline_config(output), "0025", sql=True)
     return output.getvalue()
 
 

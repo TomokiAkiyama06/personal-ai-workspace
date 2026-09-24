@@ -243,9 +243,15 @@ class ConcurrencyTest(PostgresTaskTestCase):
             await worker.commit()
 
         event = await pending
-        self.assertEqual(event.step_name, "work")
-        step = (await self.service.restore(task_id)).current_step
-        self.assertEqual(step.status, StepStatus.SUCCEEDED)
+        # Stop Now found the step already finished, so it interrupted nothing and
+        # must not say it did.
+        self.assertIsNone(event.step_name)
+        snapshot = await self.service.restore(task_id)
+        self.assertEqual(snapshot.current_step.status, StepStatus.SUCCEEDED)
+        self.assertEqual(
+            [log.message for log in snapshot.recent_logs],
+            ["Stop Now: no step was running"],
+        )
 
 
 @requires_postgres

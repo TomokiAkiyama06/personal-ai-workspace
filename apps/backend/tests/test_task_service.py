@@ -301,8 +301,52 @@ class TransitionTest(PostgresTaskTestCase):
         snapshot = await self.service.restore(task_id)
         self.assertIsNone(snapshot.current_step)
         self.assertEqual(
-            [log.message for log in snapshot.recent_logs], ["Stop Now: no step"]
+            [log.message for log in snapshot.recent_logs],
+            ["Stop Now: no step was running"],
         )
+        self.assertIsNone(snapshot.last_event.step_name)
+
+    async def test_stop_now_after_the_step_finished_does_not_call_it_interrupted(self):
+        for finished_as in (
+            StepStatus.SUCCEEDED,
+            StepStatus.FAILED,
+            StepStatus.INTERRUPTED,
+        ):
+            with self.subTest(step=finished_as.value):
+                task_id = await self.task_in_state(S.RUNNING)
+                step = await self.service.begin_step(task_id, "run-tests", attempt=1)
+                await self.service.finish_step(task_id, step.id, finished_as)
+
+                event = await self.service.execute(
+                    task_id, C.STOP_NOW, actor=self.user, reason="just in case"
+                )
+                self.assertEqual(event.to_state, S.CANCELLED)
+                self.assertIsNone(event.step_name)
+                snapshot = await self.service.restore(task_id)
+                # The finished step keeps the outcome its worker recorded.
+                self.assertEqual(snapshot.current_step.status, finished_as)
+                (log,) = snapshot.recent_logs
+                self.assertEqual(
+                    log.message, "Stop Now: no step was running (reason: just in case)"
+                )
+                self.assertNotIn("interrupted", log.message)
+
+    async def test_fail_after_the_step_finished_names_no_step(self):
+        task_id = await self.task_in_state(S.RUNNING)
+        step = await self.service.begin_step(task_id, "run-tests", attempt=1)
+        await self.service.finish_step(task_id, step.id, StepStatus.FAILED)
+        event = await self.service.execute(task_id, C.FAIL, actor=self.system)
+        self.assertIsNone(event.step_name)
+        self.assertEqual(
+            (await self.service.restore(task_id)).current_step.status, StepStatus.FAILED
+        )
+
+    async def test_other_commands_still_name_the_latest_step(self):
+        task_id = await self.task_in_state(S.RUNNING)
+        step = await self.service.begin_step(task_id, "run-tests", attempt=1)
+        await self.service.finish_step(task_id, step.id, StepStatus.SUCCEEDED)
+        event = await self.service.execute(task_id, C.PAUSE, actor=self.user)
+        self.assertEqual(event.step_name, "run-tests")
 
     async def test_cancel_and_stop_now_events_are_distinguishable(self):
         cancelled = await self.task_in_state(S.RUNNING)
