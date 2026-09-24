@@ -493,6 +493,17 @@ class RetrievalRunnerTest(unittest.TestCase):
                 self.assertNotIn("SECRET-TEXT", str(context.exception))
                 self.assertNotIn("user:a", str(context.exception))
 
+    def test_duplicate_or_nonstandard_json_in_a_dataset_is_rejected(self):
+        document = json.dumps(self._document())
+        texts = (
+            document[:-1] + ', "memories": []}',
+            document.replace('"fresh": true', '"fresh": true, "fresh": false', 1),
+            document.replace('"fresh": true', '"fresh": NaN', 1),
+        )
+        for text in texts:
+            with self.subTest(text=text[-30:]), self.assertRaises(ValueError):
+                self._load_from_text(text)
+
     def test_duplicate_ids_are_rejected(self):
         document = self._document()
         document["memories"].append(dict(document["memories"][0]))

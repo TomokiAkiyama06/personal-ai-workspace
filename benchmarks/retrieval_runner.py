@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import inspect
-import json
 import math
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
+from benchmarks.json_input import decode_json
 from benchmarks.metrics_collector import MetricsCollector
 from benchmarks.retrieval_metrics import (
     mean,
@@ -193,7 +193,7 @@ def load_dataset(path: str) -> RetrievalDataset:
     and the field; memory text is never echoed.
     """
     with open(path, encoding="utf-8") as f:
-        data = _object(json.load(f), "dataset")
+        data = _object(decode_json(f.read()), "dataset")
     _reject_unknown_fields(data, _DATASET_FIELDS, "dataset")
 
     memories_data = data.get("memories")
