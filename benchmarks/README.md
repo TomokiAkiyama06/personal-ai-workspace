@@ -84,6 +84,12 @@ do not become durable logs.
   it a window of microseconds remains between the check and `kill`.  The check's
   leader is left unreaped until the last process-group signal, so the group id cannot
   be reused before it.
+- If something else reaps the check's leader (the evaluator ignores `SIGCHLD`, or
+  another reaper collects it), its exit status is lost, so the check is reported as
+  `error` with no exit code, never as `passed`.  Its pid may also be reused as an
+  unrelated process group id, so the group is signalled only while a process recorded
+  earlier as its member (same pid and start time) is still in it; otherwise nothing is
+  sent.  Members are recorded every 0.2 s while the leader runs.
 - A check command needs a non-empty `argv[0]`; later arguments may be any string,
   including `""` (for example `("python3", "-c", "")`), as the task schema allows.
 - The check log directory is created `0700` and the log `0600` at creation, opened
