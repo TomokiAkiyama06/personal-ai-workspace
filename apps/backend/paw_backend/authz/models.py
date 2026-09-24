@@ -42,6 +42,8 @@ class AuditEventRecord(Base):
     resource_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
     project_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
     repo_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    # "inherit" or "override" for a repository resource, else NULL.
+    repo_acl: Mapped[str | None] = mapped_column(Text)
     decision: Mapped[str] = mapped_column(Text)
     reason: Mapped[str] = mapped_column(Text)
     # Set for a change of a user's system role: the role before and after.

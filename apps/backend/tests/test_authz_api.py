@@ -21,6 +21,10 @@ from .authz_support import (
     P1,
     P2,
     P3,
+    REPO,
+    REPO2,
+    REPO3,
+    REPO4,
     SECRET,
     U1,
     FailingSink,
@@ -283,6 +287,70 @@ class ResolverTest(unittest.TestCase):
             with self.subTest(bad=bad):
                 with self.assertRaises(TypeError):
                     require_capability(bad)
+
+
+class RepositoryRouteTest(unittest.TestCase):
+    """A repository route resolves the repo and its ACL (async) for the policy."""
+
+    def get(self, who, project_id, repo_id, path="files"):
+        app, sink, calls = make_test_app(who)
+        with make_client(app) as client:
+            response = client.get(f"/test/projects/{project_id}/repos/{repo_id}/{path}")
+        return response, sink, calls
+
+    def test_an_inherit_repository_follows_the_project_role(self):
+        for role, status in (
+            (ProjectRole.VIEWER, 403),
+            (ProjectRole.CONTRIBUTOR, 200),
+            (ProjectRole.MANAGER, 200),
+        ):
+            with self.subTest(role=role.value):
+                who = principal(SystemRole.USER, projects={P1: role})
+                response, sink, _ = self.get(who, P1, REPO)
+                self.assertEqual(response.status_code, status)
+                (event,) = sink.events
+                self.assertEqual(
+                    (event.repo_id, event.repo_acl, event.project_id),
+                    (REPO, "inherit", P1),
+                )
+
+    def test_a_non_member_is_refused_on_an_inherit_repository(self):
+        response, sink, calls = self.get(principal(SystemRole.USER), P1, REPO)
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(error_without_request_id(response), FORBIDDEN)
+        self.assertEqual(sink.events[0].reason, "not_project_member")
+        self.assertEqual(calls, [])
+
+    def test_a_read_only_override_stops_even_a_manager_from_writing(self):
+        manager = principal(SystemRole.USER, projects={P1: ProjectRole.MANAGER})
+        response, sink, calls = self.get(manager, P1, REPO2)
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(calls, [])
+        (event,) = sink.events
+        self.assertEqual(
+            (event.reason, event.repo_id, event.repo_acl),
+            ("repo_acl_forbids", REPO2, "override"),
+        )
+        # An "access denied" repository refuses everything.
+        response, sink, _ = self.get(manager, P1, REPO4)
+        self.assertEqual(response.status_code, 403)
+
+    def test_a_repository_of_another_project_cannot_be_reached_through_this_one(self):
+        # REPO3 is stored under P2; the user is a Manager of P1 only.
+        manager = principal(SystemRole.USER, projects={P1: ProjectRole.MANAGER})
+        response, sink, calls = self.get(manager, P1, REPO3)
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(sink.events[0].reason, "repo_acl_mismatch")
+        self.assertEqual(calls, [])
+
+    def test_a_resolver_that_forgot_the_acl_is_refused_not_treated_as_inherit(self):
+        manager = principal(SystemRole.USER, projects={P1: ProjectRole.MANAGER})
+        app, sink, calls = make_test_app(manager)
+        with make_client(app) as client:
+            response = client.get(f"/test/forgetful/{P1}/{REPO}")
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(sink.events[0].reason, "repo_acl_unresolved")
+        self.assertEqual(calls, [])
 
 
 class AllowedTest(unittest.TestCase):

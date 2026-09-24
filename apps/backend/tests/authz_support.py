@@ -15,6 +15,8 @@ from paw_backend.authz import (
     Principal,
     ProjectRole,
     ProjectState,
+    RepoAcl,
+    RepoPermission,
     Resource,
     SystemRole,
     install_authz,
@@ -35,6 +37,7 @@ U1, U2, U3 = uid(1), uid(2), uid(3)
 P1, P2, P3 = uid(101), uid(102), uid(103)
 AGENT = uid(201)
 REPO = uid(301)
+REPO2, REPO3, REPO4 = uid(302), uid(303), uid(304)
 CHAT = uid(401)
 
 
@@ -51,6 +54,28 @@ def project(
     project_id: uuid.UUID = P1, state: ProjectState = ProjectState.ACTIVE
 ) -> Resource:
     return Resource.project(project_id, state)
+
+
+def repo_resource(
+    allowed=None,
+    *,
+    project_id: uuid.UUID = P1,
+    repo_id: uuid.UUID = REPO,
+    acl_project_id: uuid.UUID | None = None,
+    state: ProjectState = ProjectState.ACTIVE,
+) -> Resource:
+    """A repository resource; ``allowed=None`` is ``inherit``, else an override.
+
+    ``acl_project_id`` is the project the repository is stored under (default:
+    ``project_id``); pass another to model a forged project / repository pair.
+    """
+    stored_project = acl_project_id or project_id
+    acl = (
+        RepoAcl.inherit(repo_id, stored_project)
+        if allowed is None
+        else RepoAcl.override(repo_id, stored_project, allowed)
+    )
+    return Resource.repository(project_id, state, acl)
 
 
 class StaticProvider:
@@ -113,6 +138,46 @@ async def stored_project_resource(connection: HTTPConnection) -> Resource:
     return Resource.project(project_id, state)
 
 
+# The stored repositories: id -> (project it belongs to, permissions the ACL
+# override keeps; None = inherit).
+READ_ONLY = frozenset({RepoPermission.READ})
+REPOSITORIES = {
+    REPO: (P1, None),  # inherit
+    REPO2: (P1, READ_ONLY),  # read-only override
+    REPO3: (P2, None),  # belongs to ANOTHER project
+    REPO4: (P1, frozenset()),  # access denied
+}
+
+
+async def stored_repository_resource(connection: HTTPConnection) -> Resource:
+    """Async resolver of a repository route: loads the repository and its ACL.
+
+    The project comes from the URL (the one the user is a member of); the ACL
+    is bound to the project the repository is stored under.
+    """
+    await asyncio.sleep(0)
+    project_id = uuid.UUID(connection.path_params["project_id"])
+    repo_id = uuid.UUID(connection.path_params["repo_id"])
+    stored_project, allowed = REPOSITORIES[repo_id]
+    acl = (
+        RepoAcl.inherit(repo_id, stored_project)
+        if allowed is None
+        else RepoAcl.override(repo_id, stored_project, allowed)
+    )
+    return Resource.repository(project_id, ProjectState.ACTIVE, acl)
+
+
+def forgetful_repository_resource(connection: HTTPConnection) -> Resource:
+    """A resolver that names the repository but forgot to load its ACL."""
+    return Resource(
+        kind="repository",
+        id=connection.path_params["repo_id"],
+        project_id=connection.path_params["project_id"],
+        repo_id=connection.path_params["repo_id"],
+        project_state=ProjectState.ACTIVE,
+    )
+
+
 def broken_resource(connection: HTTPConnection) -> Resource:
     raise RuntimeError(SECRET)
 
@@ -158,6 +223,34 @@ def add_test_routes(app: FastAPI) -> list[str]:
     async def stored_task_route(project_id: str) -> dict[str, str]:
         calls.append(f"stored:{project_id}")
         return {"ok": project_id}
+
+    @app.get(
+        "/test/projects/{project_id}/repos/{repo_id}/files",
+        dependencies=[
+            Depends(
+                require_capability(
+                    Capability.PROJECT_REPO_WRITE, stored_repository_resource
+                )
+            )
+        ],
+    )
+    async def repo_write_route(project_id: str, repo_id: str) -> dict[str, str]:
+        calls.append(f"repo:{repo_id}")
+        return {"ok": repo_id}
+
+    @app.get(
+        "/test/forgetful/{project_id}/{repo_id}",
+        dependencies=[
+            Depends(
+                require_capability(
+                    Capability.PROJECT_READ, forgetful_repository_resource
+                )
+            )
+        ],
+    )
+    async def forgetful_route(project_id: str, repo_id: str) -> dict[str, str]:
+        calls.append("forgetful")
+        return {}
 
     @app.get(
         "/test/broken/{project_id}",

@@ -36,6 +36,7 @@ from paw_backend.authz import (
     PostgresAuditSink,
     ProjectRole,
     Reason,
+    RepoPermission,
     Resource,
     SystemRole,
 )
@@ -50,6 +51,7 @@ from paw_backend.db import Base, Database
 from .authz_support import (
     AGENT,
     P1,
+    REPO,
     U1,
     U2,
     StaticDirectory,
@@ -57,6 +59,7 @@ from .authz_support import (
     add_test_routes,
     principal,
     project,
+    repo_resource,
 )
 from .support import make_client, make_settings, paw_environment
 from .test_migrations import offline_config
@@ -236,6 +239,26 @@ class AppendOnlyTest(AuditPostgresTestCase):
         self.assertEqual(
             (row.decision, row.reason, row.client_request_id),
             ("allow", "granted_by_system_role", "req-1"),
+        )
+
+    async def test_a_repository_decision_row_keeps_the_repo_and_the_acl_kind(self):
+        contributor = principal(
+            SystemRole.USER, user_id=U1, projects={P1: ProjectRole.CONTRIBUTOR}
+        )
+        authorizer = Authorizer(PostgresAuditSink(self.database))
+        write = Capability.PROJECT_REPO_WRITE
+        await authorizer.authorize(contributor, write, repo_resource())
+        await authorizer.authorize(
+            contributor, write, repo_resource({RepoPermission.READ})
+        )
+        inherit, override = await self.rows()
+        self.assertEqual(
+            (inherit.repo_id, inherit.repo_acl, inherit.decision),
+            (REPO, "inherit", "allow"),
+        )
+        self.assertEqual(
+            (override.repo_id, override.repo_acl, override.reason),
+            (REPO, "override", "repo_acl_forbids"),
         )
 
     async def test_recorded_at_is_the_database_clock_not_the_applications(self):

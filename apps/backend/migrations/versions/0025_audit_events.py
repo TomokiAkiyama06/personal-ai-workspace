@@ -116,6 +116,7 @@ def upgrade() -> None:
         sa.Column("resource_id", sa.Uuid(), nullable=True),
         sa.Column("project_id", sa.Uuid(), nullable=True),
         sa.Column("repo_id", sa.Uuid(), nullable=True),
+        sa.Column("repo_acl", sa.Text(), nullable=True),
         sa.Column("decision", sa.Text(), nullable=False),
         sa.Column("reason", sa.Text(), nullable=False),
         sa.Column("old_role", sa.Text(), nullable=True),
