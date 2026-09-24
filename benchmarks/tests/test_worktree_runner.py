@@ -658,6 +658,174 @@ class WorktreeRunnerTest(unittest.TestCase):
         self.assertFalse(run.path.exists())
         self.assertNotIn(run.run_id, self.runner._runs)
 
+    # A child that nobody supervises ----------------------------------------------
+
+    @contextlib.contextmanager
+    def spy_on_signals(self, passthrough):
+        """Record every signal sent by number; deliver them only if ``passthrough``."""
+        calls = []
+        real_killpg, real_kill, real_popen_kill = (
+            os.killpg,
+            os.kill,
+            subprocess.Popen.kill,
+        )
+
+        def killpg(pgid, number):
+            calls.append(("killpg", pgid, int(number)))
+            if passthrough:
+                real_killpg(pgid, number)
+
+        def kill(pid, number):
+            calls.append(("kill", pid, int(number)))
+            if passthrough:
+                real_kill(pid, number)
+
+        def popen_kill(process):
+            calls.append(("Popen.kill", process.pid, int(signal.SIGKILL)))
+            if passthrough:
+                real_popen_kill(process)
+
+        with (
+            mock.patch.object(os, "killpg", killpg),
+            mock.patch.object(os, "kill", kill),
+            mock.patch.object(subprocess.Popen, "kill", popen_kill),
+        ):
+            yield calls
+
+    def fail_to_build_the_leader(self, action, seen):
+        """Stand in for ``_Leader``: run ``action`` on the just-launched child, then
+        fail as descriptor exhaustion would."""
+
+        def fail(process):
+            seen.append(process.pid)
+            action(process)
+            raise OSError(errno.EMFILE, "Too many open files")
+
+        return mock.patch.object(worktree_runner, "_Leader", fail)
+
+    def test_a_child_reaped_elsewhere_is_not_signalled_when_no_leader_can_be_built(
+        self,
+    ):
+        # The child was collected by somebody else (SIGCHLD ignored, a concurrent
+        # reaper) before the leader could be built, so its pid and process group
+        # id may already belong to an unrelated process: nothing may be sent.
+        run = self.runner.create("reaped-elsewhere", self.commit)
+        seen = []
+
+        def reap(process):
+            os.waitpid(process.pid, 0)  # waits for the exit, then collects it
+
+        with (
+            self.spy_on_signals(passthrough=False) as calls,
+            self.fail_to_build_the_leader(reap, seen),
+            self.assertRaises(OSError),
+        ):
+            self.runner.execute(run, [sys.executable, "-c", "pass"], PATIENCE)
+
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(calls, [], "a reaped child's number was signalled")
+        self.assertFalse(run.path.exists())
+        self.assertNotIn(run.run_id, self.runner._runs)
+
+    def test_a_live_child_and_its_group_are_killed_when_no_leader_can_be_built(self):
+        run = self.runner.create("no-leader", self.commit)
+        pid_file = self.pid_file()
+        script = (
+            "import os, sys, time\n"
+            "if os.fork() == 0:\n"
+            "    open(sys.argv[1] + '.tmp', 'w').write(str(os.getpid()))\n"
+            "    os.replace(sys.argv[1] + '.tmp', sys.argv[1])\n"
+            "    time.sleep(60)\n"
+            "    os._exit(0)\n"
+            "time.sleep(60)\n"
+        )
+        seen = []
+
+        def publish(process):
+            # The member is running in the candidate's group by now.
+            self.assertTrue(wait_until(pid_file.exists))
+
+        with (
+            self.spy_on_signals(passthrough=True) as calls,
+            self.fail_to_build_the_leader(publish, seen),
+            self.assertRaises(OSError),
+        ):
+            self.runner.execute(
+                run, [sys.executable, "-c", script, str(pid_file)], PATIENCE
+            )
+
+        (leader,) = seen
+        member = self.read_pid(pid_file)
+        for pid in (leader, member):
+            self.assertTrue(wait_until(lambda pid=pid: not is_running(pid)))
+        # Only the child's own group was signalled, and it was killed.
+        self.assertIn(("killpg", leader, int(signal.SIGKILL)), calls)
+        self.assertEqual({pid for _, pid, _ in calls}, {leader}, calls)
+        self.assertFalse(run.path.exists())
+
+    def spawn_unsupervised(self):
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            start_new_session=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+        def clean_up():
+            with contextlib.suppress(OSError):
+                os.kill(process.pid, signal.SIGKILL)
+                os.waitpid(process.pid, 0)
+            for stream in (process.stdout, process.stderr):
+                stream.close()
+
+        self.addCleanup(clean_up)
+        self.assertTrue(
+            wait_until(lambda: WorktreeRunner._start_time(process.pid) is not None)
+        )
+        return process
+
+    def test_stopping_an_unsupervised_child_needs_its_recorded_identity(self):
+        process = self.spawn_unsupervised()
+        started = WorktreeRunner._start_time(process.pid)
+
+        # Another process now has this pid (same number, other start time).
+        with self.spy_on_signals(passthrough=True) as calls:
+            WorktreeRunner._stop_unsupervised(process, started + 1)
+        self.assertEqual(calls, [])
+        time.sleep(0.3)
+        self.assertTrue(
+            is_running(process.pid), "a process with another identity was killed"
+        )
+
+    def test_a_reaped_child_is_not_signalled_even_without_a_recorded_start_time(self):
+        # Without /proc no start time is known, so only "still our unreaped child"
+        # can tell that the number was released.
+        process = subprocess.Popen(
+            [sys.executable, "-c", "pass"],
+            start_new_session=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        os.waitpid(process.pid, 0)  # somebody else collected it
+
+        with self.spy_on_signals(passthrough=False) as calls:
+            WorktreeRunner._stop_unsupervised(process, None)
+
+        self.assertEqual(calls, [])
+        self.assertTrue(process.stdout.closed and process.stderr.closed)
+
+    def test_an_unsupervised_child_with_its_recorded_identity_is_killed_and_reaped(
+        self,
+    ):
+        process = self.spawn_unsupervised()
+        started = WorktreeRunner._start_time(process.pid)
+
+        with self.spy_on_signals(passthrough=True) as calls:
+            WorktreeRunner._stop_unsupervised(process, started)
+        self.assertIn(("killpg", process.pid, int(signal.SIGKILL)), calls)
+        self.assertEqual(process.returncode, -signal.SIGKILL)
+        self.assertTrue(process.stdout.closed and process.stderr.closed)
+
     def test_a_metadata_entry_replaced_by_a_file_is_removed(self):
         run = self.runner.create("admin-file", self.commit)
         admin = self.runner._runs[run.run_id].admin_directory
