@@ -66,9 +66,12 @@ from .test_migrations import offline_config
 
 TEST_DATABASE_URL = os.environ.get("PAW_TEST_DATABASE_URL")
 NOW = datetime(2001, 1, 1, 12, 0, tzinfo=UTC)
-# Dummy credentials of the throw-away test roles.
-APP_ROLE = "paw_authz_test_app_025"
-OTHER_ROLE = "paw_authz_test_other_025"
+# Dummy credentials of the throw-away test roles. PostgreSQL roles are cluster-wide, so
+# a fixed name would collide when two test runs share one server (parallel jobs, several
+# working trees): every run uses its own suffix.
+_RUN_ID = uuid.uuid4().hex[:10]
+APP_ROLE = f"paw_authz_test_app_{_RUN_ID}"
+OTHER_ROLE = f"paw_authz_test_other_{_RUN_ID}"
 ROLE_PASSWORD = "dummy-test-password-025"
 
 
