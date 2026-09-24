@@ -56,6 +56,7 @@ personal-ai-workspace/
 │  │  │  ├─ errors.py
 │  │  │  ├─ events.py
 │  │  │  ├─ middleware.py
+│  │  │  ├─ security.py
 │  │  │  ├─ server.py
 │  │  │  └─ api/
 │  │  │     ├─ __init__.py
@@ -67,6 +68,7 @@ personal-ai-workspace/
 │  │  ├─ pyproject.toml
 │  │  └─ tests/
 │  │     ├─ __init__.py
+│  │     ├─ fake_postgres.py
 │  │     ├─ support.py
 │  │     ├─ test_config.py
 │  │     ├─ test_database.py
@@ -76,6 +78,7 @@ personal-ai-workspace/
 │  │     ├─ test_middleware.py
 │  │     ├─ test_migrations.py
 │  │     ├─ test_postgres_integration.py
+│  │     ├─ test_security.py
 │  │     └─ test_server.py
 │  ├─ cli/
 │  │  └─ README.md

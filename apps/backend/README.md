@@ -43,7 +43,8 @@ apps/backend/
 │  ├─ db.py                # 非同期 Engine / Session、Readiness 確認
 │  ├─ events.py            # プロセス内 Event Bus と Heartbeat
 │  ├─ errors.py            # 共通の Error Response
-│  ├─ middleware.py        # Request ID、Security Header
+│  ├─ middleware.py        # Request ID、Host 検証、Security Header
+│  ├─ security.py          # Host / Origin の判定
 │  └─ api/
 │     ├─ deps.py           # FastAPI Dependency
 │     └─ v1/               # /api/v1 の Router（health、events）
@@ -76,7 +77,8 @@ Test と Lint は Repository の CI と同じコマンドです。
 
 Repository 全体の検証は `python .github/scripts/run_ci.py` です（[CI](../../.github/CI.md) を参照）。
 実 PostgreSQL に対する Test は `PAW_TEST_DATABASE_URL` を設定した場合だけ実行し、未設定では Skip します。
-この Test は Migration を `head` へ上げて `base` へ戻すため、使い捨ての Database を指定してください。
+GitHub Actions は使い捨ての PostgreSQL を起動してこの変数を渡すため、CI ではこれらの Test も実行されます。
+この Test は Migration を `head` へ上げて `base` へ戻すため、ローカルでも使い捨ての Database を指定してください。
 
 ## 設定
 
@@ -88,12 +90,16 @@ Repository 全体の検証は `python .github/scripts/run_ci.py` です（[CI](.
 | `PAW_HOST` / `PAW_PORT` | `127.0.0.1` / `8000` | Listen する Address |
 | `PAW_TLS_CERTFILE` / `PAW_TLS_KEYFILE` | なし | 両方を指定すると Uvicorn が HTTPS を終端する |
 | `PAW_ALLOW_PLAINTEXT_HTTP` | `false` | Loopback 以外で TLS なしの起動を許可する（下記） |
-| `PAW_HSTS_MAX_AGE_SECONDS` | `31536000` | `Strict-Transport-Security` の max-age。`0` で Header を付けない |
+| `PAW_HSTS_MAX_AGE_SECONDS` | `31536000` | `Strict-Transport-Security` の max-age。HTTPS の Response にだけ付ける。`0` で付けない |
+| `PAW_ALLOWED_HOSTS` | `localhost,127.0.0.1,[::1]` | 許可する `Host`（Comma 区切り、Port なし）。Reverse Proxy 経由では公開 Host 名を含める |
+| `PAW_ALLOWED_ORIGINS` | 空 | WebSocket を開いてよい Origin（Comma 区切り、例 `https://paw.example.org`） |
+| `PAW_SHUTDOWN_TIMEOUT_SECONDS` | `5` | 停止時に開いたままの SSE / WebSocket を待つ秒数。超えると切断する |
 | `PAW_DATABASE_URL` | なし | `postgresql://` または `postgresql+psycopg://`。未設定でも起動する |
 | `PAW_DATABASE_TIMEOUT_SECONDS` | `3` | 接続と Readiness 確認の Timeout |
 | `PAW_DATABASE_POOL_SIZE` | `5` | Connection Pool のサイズ |
 | `PAW_EVENT_HEARTBEAT_SECONDS` | `15` | `system.heartbeat` の間隔 |
 | `PAW_EVENT_QUEUE_SIZE` | `100` | 接続ごとの Event Queue。溢れた場合は古い Event を捨てる |
+| `PAW_EVENT_MAX_SUBSCRIBERS` | `100` | 同時に接続できる SSE / WebSocket の数。超えた接続は SSE が 503、WebSocket が Close Code 1013 |
 | `PAW_LOG_LEVEL` | `info` | Uvicorn の Log Level |
 
 ## HTTPS
@@ -106,6 +112,13 @@ TLS の終端は次のどちらかで行います。
 
 Loopback 以外の Address で TLS なしに起動しようとすると、`PAW_ALLOW_PLAINTEXT_HTTP=true` がない限り起動を拒否します。
 証明書の発行と更新は Deployment の課題で、この Skeleton では扱いません。
+
+`Host` Header は全 Request で検証し、許可していない値には 400（`invalid_host`）を返します（DNS Rebinding の対策）。
+既定では Loopback の名前だけを許可します。**Reverse Proxy 経由で公開する場合は、公開 Host 名を `PAW_ALLOWED_HOSTS` に追加してください。**
+Health Check が別の `Host`（Container の IP など）で Request する場合も、その値が必要です。
+
+`Strict-Transport-Security` は、HTTPS で受けた Request（Uvicorn が TLS を終端している、または信頼した Proxy が `X-Forwarded-Proto: https` を渡している）にだけ付けます。
+TLS を終端する Reverse Proxy の背後で Backend が HTTP を受ける場合は、Proxy 側で HSTS を送ってください。
 
 ## API
 
@@ -137,9 +150,10 @@ Readiness の失敗時に Log へ残すのは例外の型名だけです。
 Validation Error は `details`（位置、Message、型）を加えますが、送信された値は返しません。
 予期しない例外は Traceback を Log にだけ残し、Client には `internal_error` を返します。
 
-全 Response に `X-Request-ID`（妥当な入力値は引き継ぎ、それ以外は新規に生成）と、
-`Strict-Transport-Security`、`X-Content-Type-Options`、`X-Frame-Options`、`Content-Security-Policy`、
-`Referrer-Policy`、`Cache-Control: no-store` を付けます。
+全 HTTP Response に `X-Request-ID`（妥当な入力値は引き継ぎ、それ以外は新規に生成）と、
+`X-Content-Type-Options`、`X-Frame-Options`、`Content-Security-Policy`、`Referrer-Policy` を付けます。
+`Cache-Control: no-store` は既定値で、Endpoint が自分で設定した値（SSE の `no-cache`）は上書きしません。
+`Strict-Transport-Security` の条件は上の「HTTPS」を参照してください。
 CORS は有効にしていません。Web Client の配信 Origin が決まってから設定します。
 
 ## Event 経路
@@ -149,10 +163,18 @@ CORS は有効にしていません。Web Client の配信 Origin が決まっ�
 User、Project、Task、Memory のデータは含みません。
 
 **現在この 2 つの Endpoint は認証なしです。** Session が存在しないためです。
+そのため、システム Event 以外は配信しません。
+認証の代わりに、次の制限を入れています。
+
+- `Host` の検証（全 Endpoint）
+- WebSocket の `Origin` 検査: Browser は WebSocket に CORS を適用しないため、Server 側で検査します。
+  `Origin` が Request 自身の `Host` と同じ、または `PAW_ALLOWED_ORIGINS` にある場合だけ受け付けます。
+  それ以外の Browser からの接続は Handshake で拒否します（Close Code 1008）。`Origin` を送らない Client（CLI、Script）は対象外です。
+- 同時接続数の上限（`PAW_EVENT_MAX_SUBSCRIBERS`）と、遅い Client の古い Event の破棄
+
 PAW-022（Login / Session）は、システム Event 以外を配信する前に次を実装する必要があります。
 
-- 認証済み Session の要求
-- WebSocket の `Origin` 検査（Browser は WebSocket Handshake に CORS を適用しないため、Cookie 認証では Cross-Site Hijacking を受ける）
+- 認証済み Session の要求（`Origin` 検査は Session Cookie を使う WebSocket に必須だが、認証の代わりにはならない）
 - Event 種別ごとの認可
 
 該当箇所には `TODO(PAW-022)` を置いています。
@@ -161,6 +183,7 @@ PAW-022（Login / Session）は、システム Event 以外を配信する前に
 
 Engine は最初に使うときに作られ、その時点でも接続はしません。
 そのため PostgreSQL が停止していても Process は起動し、Liveness に応答します。
+Readiness は `PAW_DATABASE_TIMEOUT_SECONDS` で必ず応答します（Driver がその後も Query の取消を待つ場合は、Background で待ちます）。
 `Database.session()` と `paw_backend.api.deps.get_session` が Session を提供します。
 
 Alembic は `PAW_DATABASE_URL` から接続先を読み、`alembic.ini` には DB URL を書きません。
