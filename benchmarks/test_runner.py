@@ -311,10 +311,7 @@ class TestRunner:
             # No member of the check's session may outlive it, and no pipe may
             # keep this evaluator waiting.
             leader.signal_group(signal.SIGKILL)
-            try:
-                leader.process.wait(timeout=self.term_grace_seconds)
-            except subprocess.TimeoutExpired:
-                pass
+            leader.reap(self.term_grace_seconds)
 
     def _terminate(self, leader: _Leader) -> None:
         """TERM, wait for a grace period, then KILL whatever is left."""
@@ -445,6 +442,12 @@ class _Leader:
     may already belong to an unrelated group.  Then the group is signalled only
     while a process recorded earlier as its member (same pid and start time) is
     still in it; otherwise nothing is sent.
+
+    Members are recorded while the leader runs, and once more at the moment it is
+    seen to have vanished: the group id stays reserved as long as any member
+    exists, so whatever is in the group then is ours unless the id was reused
+    within one polling interval.  Whether the leader is still ours is re-checked
+    at every signal, because a reaper can act at any time after it was observed.
     """
 
     refresh_seconds = 0.2
@@ -452,6 +455,7 @@ class _Leader:
     def __init__(self, process: subprocess.Popen[bytes]):
         self.process = process
         self.pgid = process.pid
+        self.start = _start_time(process.pid)  # None without /proc
         self.released = False  # no longer guaranteed to reserve ``pgid``
         self.status_lost = False  # reaped by someone else: exit status unknown
         self.members: dict[int, int] = {}  # pid -> start time, seen in the group
@@ -470,10 +474,16 @@ class _Leader:
             if pgrp == self.pgid:
                 self.members.setdefault(pid, started)
 
+    def _release(self, *, status_lost: bool) -> None:
+        """Stop assuming the leader reserves the group id (after a last look)."""
+        self.refresh(force=True)  # catches a member forked just before the exit
+        self.released = True
+        self.status_lost = self.status_lost or status_lost
+
     def has_exited(self) -> bool:
         """Has the leader exited?  Looks without reaping it."""
         if self.process.returncode is not None:
-            self.released = True
+            self._release(status_lost=False)
             return True
         try:
             if (
@@ -485,14 +495,24 @@ class _Leader:
                 return True  # a zombie: still reserves the group id
         except ChildProcessError:
             # Someone else reaped it; its exit status is gone with it.
-            self.released = self.status_lost = True
+            self._release(status_lost=True)
             return True
         except AttributeError:  # no WNOWAIT: poll() reaps, so nothing reserves it
             if self.process.poll() is not None:
-                self.released = True
+                self._release(status_lost=False)
                 return True
         self.refresh()
         return False
+
+    def _still_ours(self) -> bool:
+        """Is the process at ``pgid`` still our own, unreaped leader?"""
+        try:
+            os.waitid(os.P_PID, self.pgid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        except ChildProcessError:
+            return False
+        except AttributeError:
+            pass
+        return self.start is None or _start_time(self.pgid) == self.start
 
     def owns(self, pid: int, pgrp: int, started: int) -> bool:
         """Is this process, seen in the table, a member of our group?"""
@@ -501,12 +521,51 @@ class _Leader:
         return not self.released or self.members.get(pid) == started
 
     def signal_group(self, number: int) -> None:
+        if not self.released and (
+            self.process.returncode is not None or not self._still_ours()
+        ):
+            # Reaped (by us, or by someone else since it was last observed): the
+            # group id is no longer reserved.  Too late for a last look.
+            self.released = True
+            self.status_lost = self.status_lost or self.process.returncode is None
         if self.released and not any(
             state not in "ZX" and self.owns(pid, pgrp, started)
             for pid, (state, _, pgrp, started) in _process_table().items()
         ):
             return  # the group id may belong to a stranger: never signal it
         _signal_group(self.pgid, number)
+
+    def reap(self, timeout: float) -> None:
+        """Collect the leader's exit status, waiting up to ``timeout`` seconds.
+
+        Reaping here rather than through ``Popen.wait`` shows whether something
+        else got there first (``ChildProcessError``): ``Popen`` would quietly
+        report 0.
+        """
+        process = self.process
+        deadline = time.monotonic() + timeout
+        while process.returncode is None:
+            try:
+                info = os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG)
+            except ChildProcessError:
+                self.released = self.status_lost = True
+                process.returncode = 0  # as Popen would; ``status_lost`` overrides it
+                return
+            except AttributeError:
+                try:
+                    process.wait(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    pass
+                return
+            if info is not None:
+                process.returncode = (
+                    info.si_status if info.si_code == os.CLD_EXITED else -info.si_status
+                )
+                self.released = True  # reaped: the id is no longer reserved
+                return
+            if time.monotonic() >= deadline:
+                return
+            time.sleep(0.01)
 
 
 def _signal_group(pgid: int, number: int) -> None:

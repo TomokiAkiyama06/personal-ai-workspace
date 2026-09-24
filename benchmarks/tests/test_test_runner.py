@@ -113,6 +113,21 @@ if os.fork() == 0:
 time.sleep(1.0)
 """
 
+# Check that forks a same-group child and exits at once, well inside the runner's
+# 0.2 s sampling interval for group members.
+FORK_AND_EXIT = """
+import os, sys, time
+pid_file = sys.argv[1]
+if os.fork() == 0:
+    with open(pid_file + '.tmp', 'w') as handle:
+        handle.write(str(os.getpid()))
+    os.replace(pid_file + '.tmp', pid_file)
+    time.sleep(60)
+    os._exit(0)
+while not os.path.exists(pid_file):
+    time.sleep(0.005)
+"""
+
 # Runs one check in a process whose SIGCHLD is ignored, so the kernel reaps every
 # child itself and the check leader's exit status can never be collected.  It
 # records each ``killpg`` the runner makes.
@@ -595,7 +610,9 @@ class TestRunnerTest(unittest.TestCase):
 
     # A leader that something else reaped ----------------------------------------
 
-    def run_with_sigchld_ignored(self, mode, pid_file="unused"):
+    def run_with_sigchld_ignored(
+        self, mode, pid_file="unused", script=BACKGROUND_THEN_EXIT
+    ):
         completed = subprocess.run(
             [
                 sys.executable,
@@ -605,7 +622,7 @@ class TestRunnerTest(unittest.TestCase):
                 str(self.root / "sigchld-log" / "results.jsonl"),
                 mode,
                 str(pid_file),
-                BACKGROUND_THEN_EXIT,
+                script,
             ],
             cwd=REPOSITORY_ROOT,
             env={**os.environ, "PYTHONPATH": str(REPOSITORY_ROOT)},
@@ -636,6 +653,88 @@ class TestRunnerTest(unittest.TestCase):
         self.assertIn(signal.SIGKILL, observed["killpg"])
         background = self.read_pid(pid_file)
         self.assertTrue(wait_until(lambda: not is_running(background)))
+
+    def test_a_member_forked_just_before_the_leader_vanished_is_still_killed(self):
+        pid_file = self.pid_file()
+        observed = self.run_with_sigchld_ignored("script", pid_file, FORK_AND_EXIT)
+        self.assertIn(signal.SIGKILL, observed["killpg"])
+        child = self.read_pid(pid_file)
+        self.assertTrue(wait_until(lambda: not is_running(child)))
+
+    @unittest.skipUnless(hasattr(os, "WNOWAIT"), "needs waitid(WNOWAIT)")
+    def test_a_leader_reaped_after_it_was_observed_does_not_reserve_its_group(self):
+        leader_process = subprocess.Popen(
+            [sys.executable, "-c", "pass"], start_new_session=True
+        )
+        self.addCleanup(leader_process.wait)
+        leader = test_runner._Leader(leader_process)
+        self.assertTrue(wait_until(leader.has_exited))  # an unreaped zombie
+        self.assertFalse(leader.released)
+        os.waitpid(leader_process.pid, 0)  # a concurrent reaper collects it
+        sent = []
+        with mock.patch.object(
+            test_runner, "_signal_group", lambda *args: sent.append(args)
+        ):
+            leader.signal_group(signal.SIGKILL)
+        self.assertEqual(sent, [])
+        self.assertTrue(leader.released and leader.status_lost)
+
+    @unittest.skipUnless(hasattr(os, "WNOWAIT"), "needs waitid(WNOWAIT)")
+    def test_a_concurrent_reaper_during_supervision_loses_the_status_and_the_signal(
+        self,
+    ):
+        # The reaper acts after the leader was seen exiting and before the final
+        # group kill.  (The group signal is spied on, not sent: the id is free.)
+        sent = []
+        real_signal_group = test_runner._Leader.signal_group
+
+        def reaper_first(leader, number):
+            if leader.process.returncode is None:
+                os.waitpid(leader.pgid, 0)
+            real_signal_group(leader, number)
+
+        check = self.python_check("quick", "raise SystemExit(4)")
+        with (
+            mock.patch.object(test_runner._Leader, "signal_group", reaper_first),
+            mock.patch.object(
+                test_runner, "_signal_group", lambda *args: sent.append(args)
+            ),
+        ):
+            (result,) = self.runner.run_visible((check,), PATIENCE)
+        self.assertEqual(sent, [])
+        # A status nobody collected is unknown, not "passed" and not "failed".
+        self.assertEqual((result.status, result.exit_code), ("error", None))
+
+    @unittest.skipUnless(hasattr(os, "WNOWAIT"), "needs waitid(WNOWAIT)")
+    def test_reap_decodes_the_exit_status_and_notices_a_reaper_that_was_first(self):
+        exited = subprocess.Popen([sys.executable, "-c", "raise SystemExit(5)"])
+        killed = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        stolen = subprocess.Popen([sys.executable, "-c", "pass"])
+        self.addCleanup(killed.kill)
+        killed.kill()
+        for process in (exited, killed, stolen):
+            self.assertTrue(wait_until(test_runner._Leader(process).has_exited))
+        os.waitpid(stolen.pid, 0)
+        results = {}
+        for name, process in (
+            ("exited", exited),
+            ("killed", killed),
+            ("stolen", stolen),
+        ):
+            leader = test_runner._Leader(process)
+            leader.reap(PATIENCE)
+            results[name] = (
+                leader.status_lost,
+                None if leader.status_lost else process.returncode,
+            )
+        self.assertEqual(
+            results,
+            {
+                "exited": (False, 5),
+                "killed": (False, -signal.SIGKILL),
+                "stolen": (True, None),
+            },
+        )
 
     def test_a_released_group_id_is_signalled_only_while_a_recorded_member_remains(
         self,
