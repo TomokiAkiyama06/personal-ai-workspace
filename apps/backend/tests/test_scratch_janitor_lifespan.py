@@ -156,11 +156,19 @@ class ShutdownTest(unittest.IsolatedAsyncioTestCase):
 
         settings, database = configured(shutdown_timeout_seconds=1)
         app = create_app(settings, database=database)
-        with patch("paw_backend.app.ScratchJanitor", Stubborn):
+        with (
+            patch("paw_backend.app.ScratchJanitor", Stubborn),
+            self.assertLogs("paw_backend.app", level="WARNING") as logs,
+        ):
             async with app.router.lifespan_context(app):
                 await asyncio.sleep(0.1)
                 started = time.monotonic()
         elapsed = time.monotonic() - started
+        # The task that was given up on is reported (its count, nothing else).
+        self.assertEqual(
+            [record.getMessage() for record in logs.records],
+            ["1 background task(s) did not stop within the shutdown timeout"],
+        )
 
         # It waits for the shutdown budget (1 s), not for the task (2 s) ...
         self.assertGreater(elapsed, 0.8)

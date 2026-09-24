@@ -166,7 +166,7 @@ class EnqueueTest(QueueTestCase):
         (task_id,) = await self.make_tasks(1)
         first = await self.queue.enqueue(task_id, now=at(0))
         await self.queue.claim_next("w1", at(1))
-        await self.queue.complete(first.id, "w1", at(2))
+        await self.queue.complete(first.id, "w1", 1, at(2))
         second = await self.queue.enqueue(task_id, now=at(3))
         self.assertNotEqual(second.id, first.id)
         self.assertEqual(await self.queue.cancel(task_id, at(4)), True)
@@ -293,7 +293,7 @@ class ClaimOrderTest(QueueTestCase):
         completed = await self.enqueue(seconds=0)
         cancelled = await self.enqueue(seconds=1)
         await self.queue.claim_next("w1", at(2))
-        await self.queue.complete(completed.id, "w1", at(3))
+        await self.queue.complete(completed.id, "w1", 1, at(3))
         await self.queue.cancel(cancelled.task_id, at(4))
         self.assertIsNone(await self.queue.claim_next("w1", at(10**6)))
 
@@ -394,7 +394,7 @@ class LeaseTest(QueueTestCase):
         ):
             with self.subTest(operation=operation.__name__):
                 with self.assertRaises(LeaseLostError) as caught:
-                    await operation(entry.id, "w1", at(62))
+                    await operation(entry.id, "w1", 1, at(62))
                 self.assertEqual(caught.exception.code, "queue_lease_lost")
         row = await self.entry_row(entry.id)
         self.assertEqual(
@@ -402,10 +402,56 @@ class LeaseTest(QueueTestCase):
             ("claimed", "w2", at(121)),
         )
 
+    async def test_a_stale_claim_of_the_same_worker_id_cannot_act_on_the_new_claim(
+        self,
+    ):
+        # A worker whose lease expired is claimed again by a worker with the SAME id
+        # (a restarted process with a stable configured id). The old execution can
+        # not be told apart by the worker id: only the claim it was given can.
+        entry = await self.enqueue()
+        first = await self.queue.claim_next("w1", at(0))
+        second = await self.queue.claim_next("w1", at(61))
+        self.assertEqual((first.claim_count, second.claim_count), (1, 2))
+        for operation in (
+            self.queue.heartbeat,
+            self.queue.release,
+            self.queue.complete,
+        ):
+            with self.subTest(operation=operation.__name__):
+                with self.assertRaises(LeaseLostError):
+                    await operation(entry.id, "w1", 1, at(62))
+        row = await self.entry_row(entry.id)
+        self.assertEqual(
+            (row["status"], row["claimed_by"], row["claim_count"]),
+            ("claimed", "w1", 2),
+        )
+        self.assertEqual(row["lease_expires_at"], at(121))
+        # The refused calls changed nothing, and the new claim works with its own
+        # generation.
+        beat = await self.queue.heartbeat(entry.id, "w1", 2, at(90))
+        self.assertEqual(beat.lease_expires_at, at(150))
+        done = await self.queue.complete(entry.id, "w1", second.claim_count, at(91))
+        self.assertEqual(
+            (done.status, done.finished_at), (QueueStatus.COMPLETED, at(91))
+        )
+
+    async def test_a_released_and_claimed_again_entry_fences_the_old_generation(self):
+        # No expiry involved: the same worker id releases and claims the entry again
+        # (a retry loop). Its delayed call from the first execution is refused.
+        entry = await self.enqueue()
+        first = await self.queue.claim_next("w1", at(0))
+        await self.queue.release(entry.id, "w1", first.claim_count, at(1))
+        second = await self.queue.claim_next("w1", at(2))
+        self.assertEqual((first.claim_count, second.claim_count), (1, 2))
+        with self.assertRaises(LeaseLostError):
+            await self.queue.complete(entry.id, "w1", first.claim_count, at(3))
+        row = await self.entry_row(entry.id)
+        self.assertEqual((row["status"], row["claim_count"]), ("claimed", 2))
+
     async def test_a_heartbeat_extends_the_lease(self):
         entry = await self.enqueue()
         await self.queue.claim_next("w1", at(0))
-        beat = await self.queue.heartbeat(entry.id, "w1", at(30))
+        beat = await self.queue.heartbeat(entry.id, "w1", 1, at(30))
         self.assertEqual(
             (beat.status, beat.claimed_by, beat.claimed_at, beat.claim_count),
             (QueueStatus.CLAIMED, "w1", at(0), 1),
@@ -424,17 +470,17 @@ class LeaseTest(QueueTestCase):
     async def test_a_heartbeat_never_shortens_the_lease(self):
         entry = await self.enqueue()
         await self.queue.claim_next("w1", at(0))
-        await self.queue.heartbeat(entry.id, "w1", at(30))
-        beat = await self.queue.heartbeat(entry.id, "w1", at(10))
+        await self.queue.heartbeat(entry.id, "w1", 1, at(30))
+        beat = await self.queue.heartbeat(entry.id, "w1", 1, at(10))
         self.assertEqual(beat.lease_expires_at, at(90))
 
     async def test_the_lease_is_lost_at_the_expiry_instant(self):
         entry = await self.enqueue()
         await self.queue.claim_next("w1", at(0))
         with self.assertRaises(LeaseLostError):
-            await self.queue.heartbeat(entry.id, "w1", at(60))
+            await self.queue.heartbeat(entry.id, "w1", 1, at(60))
         just_before = T0 + timedelta(seconds=59, microseconds=999_999)
-        beat = await self.queue.heartbeat(entry.id, "w1", just_before)
+        beat = await self.queue.heartbeat(entry.id, "w1", 1, just_before)
         self.assertEqual(beat.lease_expires_at, just_before + timedelta(seconds=60))
 
     async def test_only_the_holder_of_a_valid_lease_may_act(self):
@@ -447,7 +493,7 @@ class LeaseTest(QueueTestCase):
             self.queue.complete,
         ):
             with self.assertRaises(LeaseLostError):
-                await operation(queued_id, "w1", at(1))
+                await operation(queued_id, "w1", 1, at(1))
         await self.queue.claim_next("w1", at(2))
         # Another worker, an unknown entry.
         for operation in (
@@ -456,15 +502,27 @@ class LeaseTest(QueueTestCase):
             self.queue.complete,
         ):
             with self.assertRaises(LeaseLostError):
-                await operation(queued_id, "w2", at(3))
+                await operation(queued_id, "w2", 1, at(3))
             with self.assertRaises(LeaseLostError):
-                await operation(queued_id + 10_000, "w1", at(3))
+                await operation(queued_id + 10_000, "w1", 1, at(3))
+        # The right worker with another claim generation (a dead one or a future
+        # one) is refused as well.
+        for operation in (
+            self.queue.heartbeat,
+            self.queue.release,
+            self.queue.complete,
+        ):
+            for wrong in (2, 3, 2**31 - 1):
+                with self.subTest(operation=operation.__name__, claim_count=wrong):
+                    with self.assertRaises(LeaseLostError):
+                        await operation(queued_id, "w1", wrong, at(3))
         row = await self.entry_row(queued_id)
         self.assertEqual((row["status"], row["claimed_by"]), ("claimed", "w1"))
+        self.assertEqual((row["claim_count"], row["lease_expires_at"]), (1, at(62)))
 
     async def test_the_lease_error_reveals_neither_worker_nor_entry(self):
         with self.assertRaises(LeaseLostError) as caught:
-            await self.queue.heartbeat(987654, "secret-worker", at(0))
+            await self.queue.heartbeat(987654, "secret-worker", 1, at(0))
         message = str(caught.exception)
         self.assertEqual(message, "Queue entry is not leased to this worker")
 
@@ -476,19 +534,29 @@ class LeaseTest(QueueTestCase):
             self.queue.release,
             self.queue.complete,
         ):
-            for parameter, entry_id, worker, now in (
-                ("entry_id", 0, "w1", at(1)),
-                ("entry_id", -3, "w1", at(1)),
-                ("entry_id", True, "w1", at(1)),
-                ("entry_id", str(entry.id), "w1", at(1)),
-                ("entry_id", 1.0, "w1", at(1)),
-                ("worker_id", entry.id, "bad worker", at(1)),
-                ("worker_id", entry.id, None, at(1)),
-                ("now", entry.id, "w1", at(1).replace(tzinfo=None)),
+            for parameter, entry_id, worker, claim_count, now in (
+                ("entry_id", 0, "w1", 1, at(1)),
+                ("entry_id", -3, "w1", 1, at(1)),
+                ("entry_id", True, "w1", 1, at(1)),
+                ("entry_id", str(entry.id), "w1", 1, at(1)),
+                ("entry_id", 1.0, "w1", 1, at(1)),
+                ("worker_id", entry.id, "bad worker", 1, at(1)),
+                ("worker_id", entry.id, None, 1, at(1)),
+                ("claim_count", entry.id, "w1", 0, at(1)),
+                ("claim_count", entry.id, "w1", -1, at(1)),
+                ("claim_count", entry.id, "w1", 2**31, at(1)),
+                ("claim_count", entry.id, "w1", True, at(1)),
+                ("claim_count", entry.id, "w1", "1", at(1)),
+                ("claim_count", entry.id, "w1", 1.0, at(1)),
+                ("claim_count", entry.id, "w1", None, at(1)),
+                # The token is required: the old ``(entry, worker, now)`` call shape
+                # is rejected instead of being taken for an unfenced call.
+                ("claim_count", entry.id, "w1", at(1), None),
+                ("now", entry.id, "w1", 1, at(1).replace(tzinfo=None)),
             ):
                 with self.subTest(op=operation.__name__, parameter=parameter):
                     with self.assertRaises(InvalidQueueingArgumentError) as caught:
-                        await operation(entry_id, worker, now)
+                        await operation(entry_id, worker, claim_count, now)
                     self.assertEqual(caught.exception.parameter, parameter)
         with self.assertRaises(InvalidQueueingArgumentError) as caught:
             await self.queue.cancel("not-a-uuid", at(1))
@@ -505,7 +573,7 @@ class ReleaseCompleteCancelTest(QueueTestCase):
     async def test_release_returns_the_entry_to_the_queue(self):
         entry = await self.enqueue(P.HIGH, seconds=4)
         await self.queue.claim_next("w1", at(10))
-        released = await self.queue.release(entry.id, "w1", at(20))
+        released = await self.queue.release(entry.id, "w1", 1, at(20))
         self.assertEqual(
             released,
             QueueEntry(
@@ -531,7 +599,7 @@ class ReleaseCompleteCancelTest(QueueTestCase):
         first = await self.enqueue(seconds=1)
         second = await self.enqueue(seconds=2)
         await self.queue.claim_next("w1", at(10))
-        await self.queue.release(first.id, "w1", at(11))
+        await self.queue.release(first.id, "w1", 1, at(11))
         again = await self.queue.claim_next("w2", at(12))
         self.assertEqual(
             (again.id, again.claim_count, again.claimed_by), (first.id, 2, "w2")
@@ -543,13 +611,13 @@ class ReleaseCompleteCancelTest(QueueTestCase):
         entry = await self.enqueue()
         await self.queue.claim_next("w1", at(0))
         with self.assertRaises(LeaseLostError):
-            await self.queue.release(entry.id, "w2", at(1))
+            await self.queue.release(entry.id, "w2", 1, at(1))
         self.assertEqual((await self.entry_row(entry.id))["status"], "claimed")
 
     async def test_complete_finishes_the_entry(self):
         entry = await self.enqueue()
         await self.queue.claim_next("w1", at(10))
-        done = await self.queue.complete(entry.id, "w1", at(25))
+        done = await self.queue.complete(entry.id, "w1", 1, at(25))
         self.assertEqual(
             done,
             QueueEntry(
@@ -571,33 +639,33 @@ class ReleaseCompleteCancelTest(QueueTestCase):
     async def test_an_entry_cannot_be_completed_twice_or_after_release(self):
         entry = await self.enqueue()
         await self.queue.claim_next("w1", at(0))
-        await self.queue.complete(entry.id, "w1", at(1))
+        await self.queue.complete(entry.id, "w1", 1, at(1))
         with self.assertRaises(LeaseLostError):
-            await self.queue.complete(entry.id, "w1", at(2))
+            await self.queue.complete(entry.id, "w1", 1, at(2))
         with self.assertRaises(LeaseLostError):
-            await self.queue.heartbeat(entry.id, "w1", at(2))
+            await self.queue.heartbeat(entry.id, "w1", 1, at(2))
         with self.assertRaises(LeaseLostError):
-            await self.queue.release(entry.id, "w1", at(2))
+            await self.queue.release(entry.id, "w1", 1, at(2))
         self.assertEqual((await self.entry_row(entry.id))["finished_at"], at(1))
 
     async def test_a_released_entry_cannot_be_used_by_its_former_holder(self):
         entry = await self.enqueue()
         await self.queue.claim_next("w1", at(0))
-        await self.queue.release(entry.id, "w1", at(1))
+        await self.queue.release(entry.id, "w1", 1, at(1))
         for operation in (
             self.queue.heartbeat,
             self.queue.release,
             self.queue.complete,
         ):
             with self.assertRaises(LeaseLostError):
-                await operation(entry.id, "w1", at(2))
+                await operation(entry.id, "w1", 1, at(2))
         self.assertEqual((await self.entry_row(entry.id))["status"], "queued")
 
     async def test_completing_after_the_lease_expired_is_refused(self):
         entry = await self.enqueue()
         await self.queue.claim_next("w1", at(0))
         with self.assertRaises(LeaseLostError):
-            await self.queue.complete(entry.id, "w1", at(60))
+            await self.queue.complete(entry.id, "w1", 1, at(60))
         row = await self.entry_row(entry.id)
         self.assertEqual((row["status"], row["finished_at"]), ("claimed", None))
 
@@ -631,7 +699,7 @@ class ReleaseCompleteCancelTest(QueueTestCase):
             self.queue.complete,
         ):
             with self.assertRaises(LeaseLostError):
-                await operation(entry.id, "w1", at(6))
+                await operation(entry.id, "w1", 1, at(6))
         self.assertIsNone(await self.queue.claim_next("w2", at(10**6)))
 
     async def test_cancel_reports_false_when_there_is_nothing_to_cancel(self):
@@ -647,7 +715,7 @@ class ReleaseCompleteCancelTest(QueueTestCase):
         done = await self.enqueue()
         other = await self.enqueue(seconds=1)
         await self.queue.claim_next("w1", at(2))
-        await self.queue.complete(done.id, "w1", at(3))
+        await self.queue.complete(done.id, "w1", 1, at(3))
         self.assertIs(await self.queue.cancel(done.task_id, at(4)), False)
         self.assertEqual((await self.entry_row(done.id))["status"], "completed")
         self.assertEqual((await self.entry_row(other.id))["status"], "queued")
@@ -673,7 +741,10 @@ class ConcurrencyTest(QueueTestCase):
                 self.assertEqual(row["claim_count"], 1)
                 self.assertEqual(row["claimed_by"], winners[0].claimed_by)
             await self.queue.complete(
-                entry.id, winners[0].claimed_by, at(1000 + round_number)
+                entry.id,
+                winners[0].claimed_by,
+                winners[0].claim_count,
+                at(1000 + round_number),
             )
 
     async def test_many_claimers_share_many_entries_without_overlap(self):
@@ -751,7 +822,7 @@ class ConcurrencyTest(QueueTestCase):
         self.assertIsNone(row["lease_expires_at"])
         if claimed is not None:
             with self.assertRaises(LeaseLostError):
-                await self.queue.complete(entry.id, "w1", at(6))
+                await self.queue.complete(entry.id, "w1", 1, at(6))
         self.assertIsNone(await self.queue.claim_next("w2", at(10**6)))
 
 
@@ -822,7 +893,9 @@ class TrustedClockTest(QueueTestCase):
                 text("SELECT id FROM queue_entries WHERE id = :id FOR UPDATE"),
                 {"id": claimed.id},
             )
-            heartbeat = asyncio.create_task(production.heartbeat(claimed.id, "w1"))
+            heartbeat = asyncio.create_task(
+                production.heartbeat(claimed.id, "w1", claimed.claim_count)
+            )
             # It is blocked on the row, and then the lease runs out while it waits.
             await self.until(
                 "SELECT count(*) > 0 FROM pg_locks "
@@ -859,9 +932,24 @@ class TrustedClockTest(QueueTestCase):
         for name, call in (
             ("enqueue", lambda now: production.enqueue(other_task, now=now)),
             ("claim_next", lambda now: production.claim_next("w2", now)),
-            ("heartbeat", lambda now: production.heartbeat(claimed.id, "w1", now)),
-            ("release", lambda now: production.release(claimed.id, "w1", now)),
-            ("complete", lambda now: production.complete(claimed.id, "w1", now)),
+            (
+                "heartbeat",
+                lambda now: production.heartbeat(
+                    claimed.id, "w1", claimed.claim_count, now
+                ),
+            ),
+            (
+                "release",
+                lambda now: production.release(
+                    claimed.id, "w1", claimed.claim_count, now
+                ),
+            ),
+            (
+                "complete",
+                lambda now: production.complete(
+                    claimed.id, "w1", claimed.claim_count, now
+                ),
+            ),
             ("cancel", lambda now: production.cancel(claimed.task_id, now)),
         ):
             # A valid time, a far-future time, a naive time and a non-time: none of
@@ -887,14 +975,14 @@ class TrustedClockTest(QueueTestCase):
 
         await self.expire_lease(claimed.id)
         with self.assertRaises(LeaseLostError):
-            await production.heartbeat(claimed.id, "w1")
+            await production.heartbeat(claimed.id, "w1", claimed.claim_count)
         reclaimed = await production.claim_next("w2")
         self.assertEqual(
             (reclaimed.id, reclaimed.claimed_by, reclaimed.claim_count),
             (claimed.id, "w2", 2),
         )
         with self.assertRaises(LeaseLostError):
-            await production.complete(claimed.id, "w1")
+            await production.complete(claimed.id, "w1", claimed.claim_count)
 
     async def test_release_and_complete_are_refused_after_expiry_on_the_database_clock(
         self,
@@ -908,12 +996,12 @@ class TrustedClockTest(QueueTestCase):
             with self.subTest(operation=operation.__name__):
                 await self.owner_sql("TRUNCATE queue_entries")
                 claimed = await self.claimed_entry(production)
-                await operation(claimed.id, "w1")  # alive: allowed
+                await operation(claimed.id, "w1", claimed.claim_count)  # alive: allowed
                 await self.owner_sql("TRUNCATE queue_entries")
                 claimed = await self.claimed_entry(production)
                 await self.expire_lease(claimed.id)
                 with self.assertRaises(LeaseLostError):
-                    await operation(claimed.id, "w1")
+                    await operation(claimed.id, "w1", claimed.claim_count)
 
     async def test_a_lease_that_is_still_live_on_the_database_clock_is_kept(self):
         production = self.production_queue()
@@ -924,7 +1012,7 @@ class TrustedClockTest(QueueTestCase):
             id=claimed.id,
         )
         self.assertIsNone(await production.claim_next("w2"))
-        beat = await production.heartbeat(claimed.id, "w1")
+        beat = await production.heartbeat(claimed.id, "w1", claimed.claim_count)
         # a heartbeat never shortens a lease
         self.assertGreater(
             beat.lease_expires_at - beat.claimed_at, timedelta(minutes=59)
@@ -941,7 +1029,7 @@ class TrustedClockTest(QueueTestCase):
             id=claimed.id,
         )
         before = await self.database_time()
-        beat = await production.heartbeat(claimed.id, "w1")
+        beat = await production.heartbeat(claimed.id, "w1", claimed.claim_count)
         after = await self.database_time()
         self.assertGreaterEqual(beat.lease_expires_at, before + timedelta(seconds=60))
         self.assertLessEqual(beat.lease_expires_at, after + timedelta(seconds=60))
@@ -952,7 +1040,7 @@ class TrustedClockTest(QueueTestCase):
         before = await self.database_time()
         entry = await production.enqueue(first)
         claimed = await production.claim_next("w1")
-        completed = await production.complete(claimed.id, "w1")
+        completed = await production.complete(claimed.id, "w1", claimed.claim_count)
         await production.enqueue(second)
         cancelled = await production.cancel(second)
         after = await self.database_time()

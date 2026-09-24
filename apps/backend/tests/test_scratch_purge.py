@@ -449,6 +449,35 @@ class RetentionWorkflowTest(PostgresScratchTestCase):
             (row["project_id"], row["task_id"]), (self.project_id, task_id)
         )
 
+    async def test_deleting_a_task_keeps_the_relation_of_a_pinned_item(self):
+        # Decision 0013: the task id stays as a plain UUID. The deletion of the
+        # task is neither blocked by the item nor does it delete the pinned item.
+        task_id = self.seed_task()
+        item = await self.add(task_id=task_id)
+        await self.store.pin(self.project_id, item.id)
+
+        self.delete_task(task_id)
+        self.clock.advance(hours=30)
+
+        self.assertEqual(await self.store.purge_expired(), PurgeResult(0, 1, False))
+        kept = await self.store.get(self.project_id, item.id)
+        self.assertEqual(
+            (kept.project_id, kept.task_id, kept.pinned),
+            (self.project_id, task_id, True),
+        )
+        (listed,) = await self.store.list_items(self.project_id, task_id=task_id)
+        self.assertEqual(listed.id, item.id)
+
+    async def test_an_unpinned_item_of_a_deleted_task_still_expires(self):
+        task_id = self.seed_task()
+        item = await self.add(task_id=task_id)
+        self.delete_task(task_id)
+        self.clock.advance(hours=24)
+
+        self.assertEqual(await self.store.purge_expired(), PurgeResult(1, 0, False))
+
+        self.assertFalse(self.exists(item.id))
+
     async def test_scratch_items_are_never_written_to_long_term_memory(self):
         self.seed_memory()
         before = self.table_count("memory_versions"), self.table_count("memories")

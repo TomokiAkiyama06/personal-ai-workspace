@@ -23,11 +23,11 @@ import uuid
 from collections.abc import Sequence
 
 from sqlalchemy import delete, func, select
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from paw_backend.db import Database
-from paw_backend.tasks.errors import TaskNotFoundError
+from paw_backend.tasks.errors import StaleAttemptError, TaskNotFoundError
+from paw_backend.tasks.models import TaskRow
 from paw_backend.tasks.queueing.domain import (
     DEFAULT_LOOP_POLICY,
     FailureRecord,
@@ -37,10 +37,10 @@ from paw_backend.tasks.queueing.domain import (
 )
 from paw_backend.tasks.queueing.errors import InvalidQueueingArgumentError
 from paw_backend.tasks.queueing.models import FailureSignatureRow
-from paw_backend.tasks.queueing.sql import FOREIGN_KEY_VIOLATION, sqlstate
 from paw_backend.tasks.queueing.validation import (
     MAX_SIGNATURE_MESSAGE_CHARS,
     check_approach,
+    check_attempt,
     check_error_class,
     check_message,
     check_step_name,
@@ -60,7 +60,9 @@ def normalize_failure_message(message: str) -> str:
     """Reduce a failure message to a stable form so that repeats compare equal.
 
     ``message`` must be a ``str`` (``InvalidQueueingArgumentError("message")``
-    otherwise); it may be empty and may contain any characters. Steps, in this
+    otherwise); it may be empty and may contain any characters except surrogate
+    code points (U+D800 to U+DFFF, which UTF-8 cannot encode; they raise the same
+    error, wherever they are in the text, without echoing it). Steps, in this
     exact order:
 
     1. Keep only the first ``MAX_SIGNATURE_MESSAGE_CHARS`` (2000) characters.
@@ -100,7 +102,10 @@ def failure_signature(error_class: str, step: str, message: str) -> str:
     Validation (before hashing): ``validation.check_error_class``,
     ``validation.check_step_name``, ``validation.check_message``; failures raise
     ``InvalidQueueingArgumentError`` naming ``error_class`` / ``step`` /
-    ``message``. Deterministic: the same inputs always give the same signature.
+    ``message``. That includes text that cannot be encoded as UTF-8 (a lone
+    surrogate code point in any of the three): the typed error is raised instead
+    of a ``UnicodeEncodeError`` from the hashing below, and the text is not echoed.
+    Deterministic: the same inputs always give the same signature.
     """
     check_error_class(error_class)
     check_step_name(step)
@@ -166,10 +171,21 @@ class LoopDetector:
     """Stores a bounded failure window per task and evaluates it.
 
     Nothing is kept in process memory: the window lives in
-    ``loop_failure_signatures`` (columns ``seq``, ``task_id``, ``approach``,
-    ``signature``, ``created_at``; ``seq`` orders the records). Unknown tasks
-    raise ``TaskNotFoundError`` (foreign key violation SQLSTATE 23503; any other
-    ``IntegrityError`` propagates).
+    ``loop_failure_signatures`` (columns ``seq``, ``task_id``, ``attempt``,
+    ``approach``, ``signature``, ``created_at``; ``seq`` orders the records).
+    Unknown tasks raise ``TaskNotFoundError``.
+
+    Attempts (Decision 0007, section 8). A failure belongs to one ATTEMPT of the
+    task: ``record_failure`` names the attempt the reporting worker was started
+    for (``TaskEvent.attempt``, the same number the PAW-032 step / log / tool
+    writes carry), stores it in the row and is refused with ``StaleAttemptError``
+    unless it is the task's current attempt (``tasks.attempt``, which Restart
+    increments). A delayed report of an abandoned attempt therefore never enters
+    the new attempt's history. Only the failures of the task's CURRENT attempt
+    are ever assessed (``history``, ``assess`` and the result of
+    ``record_failure``): the moment Restart commits, the new attempt starts with an
+    empty history, whether or not ``clear_previous_attempts`` has run yet, and
+    that cleanup only deletes rows that are no longer read.
     """
 
     def __init__(
@@ -188,67 +204,103 @@ class LoopDetector:
         self,
         task_id: uuid.UUID,
         *,
+        attempt: int,
         error_class: str,
         step: str,
         message: str,
         approach: int = 0,
     ) -> LoopAssessment:
-        """Record one failure and return the assessment including it.
+        """Record one failure of ``attempt`` and return the assessment including it.
 
-        In ONE transaction: insert a row with ``failure_signature(error_class,
-        step, message)`` and ``approach``; delete the task's oldest rows so that
-        at most ``policy.window_size`` remain (the newest by ``seq`` are kept);
-        then return ``evaluate_loop`` of the remaining rows (oldest first). The
-        raw ``message`` (and ``error_class`` / ``step``) is never stored or
-        logged. Concurrent calls for the SAME task (``clear`` included) are
-        serialised for the whole transaction by ``SELECT pg_advisory_xact_lock(...)``
-        keyed by the task id: otherwise transactions that cannot see each other's
-        rows would each skip the deletion and the window bound would be broken. Every
-        argument is validated before the database is used
-        (``validation.check_uuid("task_id", ...)``, ``check_approach``, and the
-        checks named in ``failure_signature``). Not idempotent: calling twice
-        records two failures.
+        ``attempt`` (required, an ``int`` from 1; ``validation.check_attempt``) is
+        the task attempt the reporting worker works for. In ONE transaction: take
+        the task's failure lock, lock the task row ``FOR SHARE`` and compare
+        ``attempt`` with ``tasks.attempt``; raise ``TaskNotFoundError`` for an
+        unknown task and ``StaleAttemptError`` when the attempt is not the current
+        one (nothing is written). The share lock is held to the end of the
+        transaction, so a Restart (which updates the task row) cannot commit
+        between the check and the commit of the row: a stored failure always
+        belongs to the attempt that was current when it committed. Then insert a
+        row with ``failure_signature(error_class, step, message)``, ``attempt`` and
+        ``approach``; delete the task's oldest rows so that at most
+        ``policy.window_size`` remain (the newest by ``seq`` are kept; the rows of
+        the current attempt are always newer than those of an older one); then
+        return ``evaluate_loop`` of the remaining rows of ``attempt`` (oldest
+        first; rows of older attempts that a ``clear_previous_attempts`` has not
+        removed yet are not counted). The raw ``message``
+        (and ``error_class`` / ``step``) is never stored or logged. Concurrent
+        calls for the SAME task (``clear`` included) are serialised for the whole
+        transaction by ``SELECT pg_advisory_xact_lock(...)`` keyed by the task id:
+        otherwise transactions that cannot see each other's rows would each skip
+        the deletion and the window bound would be broken. Every argument is
+        validated before the database is used
+        (``validation.check_uuid("task_id", ...)``, ``check_attempt``,
+        ``check_approach``, and the checks named in ``failure_signature``). Not
+        idempotent: calling twice records two failures.
         """
         check_uuid("task_id", task_id)
+        check_attempt(attempt)
         check_approach(approach)
         signature = failure_signature(error_class, step, message)
-        try:
-            async with self._database.session() as session, session.begin():
-                await self._lock_failures(session, task_id)
-                session.add(
-                    FailureSignatureRow(
-                        task_id=task_id, approach=approach, signature=signature
-                    )
+        async with self._database.session() as session, session.begin():
+            await self._lock_failures(session, task_id)
+            await self._require_current_attempt(session, task_id, attempt)
+            session.add(
+                FailureSignatureRow(
+                    task_id=task_id,
+                    attempt=attempt,
+                    approach=approach,
+                    signature=signature,
                 )
-                await session.flush()
-                newest = (
-                    select(FailureSignatureRow.seq)
-                    .where(FailureSignatureRow.task_id == task_id)
-                    .order_by(FailureSignatureRow.seq.desc())
-                    .limit(self._policy.window_size)
+            )
+            await session.flush()
+            newest = (
+                select(FailureSignatureRow.seq)
+                .where(FailureSignatureRow.task_id == task_id)
+                .order_by(FailureSignatureRow.seq.desc())
+                .limit(self._policy.window_size)
+            )
+            await session.execute(
+                delete(FailureSignatureRow).where(
+                    FailureSignatureRow.task_id == task_id,
+                    FailureSignatureRow.seq.not_in(newest),
                 )
-                await session.execute(
-                    delete(FailureSignatureRow).where(
-                        FailureSignatureRow.task_id == task_id,
-                        FailureSignatureRow.seq.not_in(newest),
-                    )
-                )
-                history = await self._read_history(session, task_id)
-        except IntegrityError as error:
-            if sqlstate(error) == FOREIGN_KEY_VIOLATION:
-                raise TaskNotFoundError() from None
-            raise
+            )
+            history = await self._read_history(session, task_id)
         return evaluate_loop(history, self._policy)
+
+    @staticmethod
+    async def _require_current_attempt(
+        session: AsyncSession, task_id: uuid.UUID, attempt: int
+    ) -> None:
+        """Lock the task row ``FOR SHARE`` and require ``attempt`` to be current.
+
+        ``FOR SHARE`` conflicts with the ``FOR NO KEY UPDATE`` that every PAW-032
+        command (Restart included) takes, so the two run one after the other; it
+        does not conflict with the ``FOR KEY SHARE`` of foreign-key checks or with
+        other ``record_failure`` calls (which the failure lock serialises anyway).
+        """
+        current = (
+            await session.execute(
+                select(TaskRow.attempt)
+                .where(TaskRow.id == task_id)
+                .with_for_update(read=True)
+            )
+        ).scalar_one_or_none()
+        if current is None:
+            raise TaskNotFoundError()
+        if current != attempt:
+            raise StaleAttemptError()
 
     @staticmethod
     async def _lock_failures(session: AsyncSession, task_id: uuid.UUID) -> None:
         """Take the task's failure lock until the end of the transaction.
 
         Every transaction that writes the task's rows (``record_failure`` and
-        ``clear``) takes it first, so they run one after the other. Without it,
-        transactions that cannot see each other's uncommitted rows would each skip
-        the window deletion, and a ``clear`` would return before an in-flight
-        ``record_failure`` commits and leave that (stale) failure behind.
+        ``clear_previous_attempts``) takes it first, so they run one after the
+        other. Without it, transactions that cannot see each other's uncommitted
+        rows would each skip the window deletion, and two deletions of overlapping
+        rows could wait for each other.
         """
         await session.execute(
             select(
@@ -262,17 +314,24 @@ class LoopDetector:
     async def _read_history(
         session: AsyncSession, task_id: uuid.UUID
     ) -> tuple[FailureRecord, ...]:
+        """The stored failures of the task's CURRENT attempt, oldest first."""
         rows = await session.execute(
             select(FailureSignatureRow.signature, FailureSignatureRow.approach)
-            .where(FailureSignatureRow.task_id == task_id)
+            .join(TaskRow, TaskRow.id == FailureSignatureRow.task_id)
+            .where(
+                FailureSignatureRow.task_id == task_id,
+                FailureSignatureRow.attempt == TaskRow.attempt,
+            )
             .order_by(FailureSignatureRow.seq)
         )
         return tuple(FailureRecord(signature, approach) for signature, approach in rows)
 
     async def history(self, task_id: uuid.UUID) -> tuple[FailureRecord, ...]:
-        """The stored window, oldest first (at most ``policy.window_size``).
+        """The stored window of the task's current attempt, oldest first (at most
+        ``policy.window_size``).
 
-        Empty for a task without failures (also for an unknown task). Read-only.
+        Empty for a task without failures in its current attempt (also for an
+        unknown task, and right after a Restart). Read-only.
         """
         check_uuid("task_id", task_id)
         async with self._database.session() as session, session.begin():
@@ -283,22 +342,35 @@ class LoopDetector:
         number of times without new failures returns equal results."""
         return evaluate_loop(await self.history(task_id), self._policy)
 
-    async def clear(self, task_id: uuid.UUID) -> int:
-        """Delete the task's stored failures (for example on Restart) and return
-        how many rows were deleted (0 when there were none).
+    async def clear_previous_attempts(self, task_id: uuid.UUID) -> int:
+        """Delete the failures of the attempts BEFORE the task's current one (the
+        cleanup after a Restart) and return how many rows were deleted (0 when
+        there were none, also for an unknown task).
+
+        The failures of the current attempt (and of a later one) are never
+        deleted: after Restart has committed, the new attempt may already have
+        recorded failures, and those are valid. The current attempt is read by the
+        same statement (``tasks.attempt``, which only grows), so a Restart that
+        commits meanwhile can only make the cleanup delete less. Nothing depends
+        on the cleanup for correctness (the older rows are not read, and the window
+        deletion of ``record_failure`` drops them as newer rows arrive); it keeps
+        the table small.
 
         Serialised with ``record_failure`` of the SAME task by the same per-task
-        lock, held for the whole transaction: a ``record_failure`` that is still
-        in flight commits first and its row is deleted too, one that starts
-        later waits for the clear. So ``clear`` never returns while an earlier
-        failure is still going to appear (a failure recorded after the clear
-        belongs to the new history)."""
+        lock, held for the whole transaction, so a recording in flight commits
+        first or waits for the cleanup. Call it after the Restart command has
+        committed: before it, no attempt is older than the one Restart supersedes,
+        so nothing of that attempt is deleted."""
         check_uuid("task_id", task_id)
         async with self._database.session() as session, session.begin():
             await self._lock_failures(session, task_id)
+            current_attempt = (
+                select(TaskRow.attempt).where(TaskRow.id == task_id).scalar_subquery()
+            )
             result = await session.execute(
                 delete(FailureSignatureRow).where(
-                    FailureSignatureRow.task_id == task_id
+                    FailureSignatureRow.task_id == task_id,
+                    FailureSignatureRow.attempt < current_attempt,
                 )
             )
             return result.rowcount

@@ -18,7 +18,11 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from paw_backend.db import Base
 from paw_backend.tasks.queueing import models as queueing_models
-from paw_backend.tasks.queueing.validation import MAX_APPROACH, MAX_CONSUMED
+from paw_backend.tasks.queueing.validation import (
+    MAX_APPROACH,
+    MAX_ATTEMPT,
+    MAX_CONSUMED,
+)
 
 from .queueing_support import PostgresQueueingTestCase, at, requires_postgres
 from .support import paw_environment
@@ -416,14 +420,15 @@ class BudgetConstraintTest(PostgresQueueingTestCase):
 
 @requires_postgres
 class FailureSignatureConstraintTest(PostgresQueueingTestCase):
-    async def insert(self, task_id, signature=SIGNATURE, approach=0) -> None:
+    async def insert(self, task_id, signature=SIGNATURE, approach=0, attempt=1) -> None:
         async with self.database.engine.begin() as connection:
             await connection.execute(
                 text(
                     "INSERT INTO loop_failure_signatures "
-                    "(task_id, approach, signature) VALUES (:t, :a, :s)"
+                    "(task_id, attempt, approach, signature) "
+                    "VALUES (:t, :n, :a, :s)"
                 ),
-                {"t": task_id, "a": approach, "s": signature},
+                {"t": task_id, "n": attempt, "a": approach, "s": signature},
             )
 
     async def test_valid_rows_are_ordered_by_seq(self):
@@ -448,6 +453,29 @@ class FailureSignatureConstraintTest(PostgresQueueingTestCase):
             with self.subTest(bad=bad), self.assertRaises(IntegrityError):
                 await self.insert(task_id, approach=bad)
 
+    async def test_the_attempt_is_a_positive_32_bit_integer(self):
+        (task_id,) = await self.make_tasks(1)
+        for bad in (0, -1):
+            with self.subTest(bad=bad), self.assertRaises(IntegrityError):
+                await self.insert(task_id, attempt=bad)
+        with self.assertRaises(DBAPIError):  # does not even fit the column
+            await self.insert(task_id, attempt=MAX_ATTEMPT + 1)
+        await self.insert(task_id, attempt=MAX_ATTEMPT)
+        rows = await self.rows("SELECT attempt FROM loop_failure_signatures")
+        self.assertEqual([row["attempt"] for row in rows], [MAX_ATTEMPT])
+
+    async def test_the_attempt_must_be_given(self):
+        (task_id,) = await self.make_tasks(1)
+        with self.assertRaises(IntegrityError):
+            async with self.database.engine.begin() as connection:
+                await connection.execute(
+                    text(
+                        "INSERT INTO loop_failure_signatures "
+                        "(task_id, approach, signature) VALUES (:t, 0, :s)"
+                    ),
+                    {"t": task_id, "s": SIGNATURE},
+                )
+
     async def test_a_row_cannot_reference_a_missing_task(self):
         with self.assertRaises(IntegrityError):
             await self.insert(uuid.uuid4())
@@ -459,7 +487,7 @@ class FailureSignatureConstraintTest(PostgresQueueingTestCase):
         )
         self.assertEqual(
             [c["column_name"] for c in columns],
-            ["seq", "task_id", "approach", "signature", "created_at"],
+            ["seq", "task_id", "attempt", "approach", "signature", "created_at"],
         )
 
 

@@ -19,7 +19,14 @@ from paw_backend.research.providers import (
     normalize_title,
 )
 
-from .research_support import NOW, SECRET, hit, malformed_hits
+from .research_support import (
+    NOW,
+    SECRET,
+    Tripwire,
+    hit,
+    hostile_containers,
+    malformed_hits,
+)
 
 JST = timezone(timedelta(hours=9))
 
@@ -297,6 +304,59 @@ class NormalizeHitsTest(unittest.TestCase):
 
         (result,) = normalize([MyHit("https://a.example/1", private_source=False)])
         self.assertEqual(result.source.locator, "https://a.example/1")
+
+
+class HostileContainerTest(unittest.TestCase):
+    """The container of a response is inspected without running its code.
+
+    Only an exact ``list`` or ``tuple`` is a response. A subclass (or an object
+    whose ``__class__`` says so) can override ``__len__``, ``__iter__`` and
+    ``__getitem__``; those hooks would run adapter code, unguarded, inside the
+    broker (raising, or lying about the length so that the limit is bypassed).
+    Such a response is invalid, and no hook of it is ever called.
+    """
+
+    def test_a_container_with_hostile_hooks_is_an_invalid_response(self):
+        calls = Tripwire()
+        # Within the limit (the hooks of the container would run) and over it
+        # (a length that lies would hide it).
+        for count in (2, 5):
+            hits = [hit(f"https://a.example/{n}") for n in range(count)]
+            for label, response in hostile_containers(hits, calls).items():
+                with self.subTest(response=label, hits=count), calls.armed():
+                    with self.assertRaises(InvalidProviderResponseError):
+                        normalize(response, limit=2)
+        self.assertEqual(calls, [])
+
+    def test_a_length_that_lies_cannot_bypass_the_limit(self):
+        class Liar(list):
+            def __len__(self):
+                return 0
+
+        five = Liar(hit(f"https://a.example/{n}") for n in range(5))
+        with self.assertRaises(InvalidProviderResponseError):
+            normalize(five, limit=2)
+        # The same hits in a real list are over the limit for the same reason.
+        with self.assertRaises(InvalidProviderResponseError):
+            normalize(list(five), limit=2)
+
+    def test_a_subclass_without_hooks_is_not_a_response_either(self):
+        class Plain(list):
+            pass
+
+        class PlainTuple(tuple):
+            pass
+
+        one = hit("https://a.example/1")
+        for response in (Plain([one]), PlainTuple((one,))):
+            with self.subTest(response=type(response).__name__):
+                with self.assertRaises(InvalidProviderResponseError):
+                    normalize(response)
+
+    def test_an_exact_list_and_tuple_are_still_accepted(self):
+        one = hit("https://a.example/1")
+        self.assertEqual(urls(normalize([one])), ["https://a.example/1"])
+        self.assertEqual(urls(normalize((one,))), ["https://a.example/1"])
 
 
 class MalformedTypedHitTest(unittest.TestCase):

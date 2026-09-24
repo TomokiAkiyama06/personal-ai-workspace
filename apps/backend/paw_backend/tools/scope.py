@@ -40,8 +40,12 @@ Repositories
     touches, because that is what the repository's ACL is decided on: a call
     that names one (a ``REPOSITORY`` target, which must be in the working set),
     and a path that lies in the worktree of one, **after symlinks are
-    resolved** (a path inside nested repositories touches each of them). A host
-    or URL does not name a repository.
+    resolved** (a path inside nested repositories touches each of them), and a
+    URL that lies below a **remote the backend registered for a repository**
+    (``ScopedRepository.remotes``). A host does not name a repository. In a call
+    that touches a repository, a URL that lies below no registered remote is
+    refused: the endpoint the executor is given must belong to a repository
+    whose ACL was decided (Decision 0006, section 8).
 """
 
 import asyncio
@@ -68,6 +72,7 @@ MAX_ROOTS = 32
 MAX_HOSTS = 128
 MAX_PROJECTS = 32
 MAX_REPOSITORIES = 32
+MAX_REMOTES = 8  # URLs registered for one repository
 MAX_CREDENTIAL_HANDLES = 64
 
 _FORBIDDEN_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"})
@@ -219,12 +224,63 @@ def normalise_repository(value: object) -> uuid.UUID:
         raise TargetError("target repository is not valid") from None
 
 
+def _safe_tail(tail: str) -> bool:
+    """Whether the URL path ``tail`` cannot climb out of the path it follows.
+
+    A ``..`` segment (also ``...``, ``. .`` and the like), a backslash (WHATWG
+    treats it as a slash), a path parameter (``..;x``) and a percent-encoded
+    ``.`` ``/`` ``\\`` all make a server (or a client) read another path than
+    the one that was compared, so such a tail is never "below" anything.
+    """
+    if "\\" in tail or ";" in tail or _PERCENT_SEPARATOR.search(tail):
+        return False
+    return all(segment.strip(" .") for segment in tail.split("/") if segment)
+
+
+def normalise_remote(value: object) -> str:
+    """The canonical remote URL of a repository, or :class:`TargetError`.
+
+    It is a canonical ``http(s)`` URL (:func:`normalise_url`) that names a path
+    on the host (a whole host is not a repository), has no query, no trailing
+    slash and cannot climb out of that path. Every spelling the executor may be
+    given (``.../repo``, ``.../repo.git``) is a remote of its own: nothing is
+    guessed.
+    """
+    url, _host = normalise_url(value)
+    _scheme, _, rest = url.partition("://")
+    _authority, _, path = rest.partition("/")
+    path = path.rstrip("/")
+    if "?" in url or not path or not _safe_tail(path):
+        raise TargetError("target remote is not valid")
+    return url.rstrip("/")
+
+
+def url_within(url: str, remote: str) -> bool:
+    """Whether the canonical ``url`` addresses ``remote`` or a path below it.
+
+    Comparison is exact on the canonical form (scheme, host, then path
+    segments): ``.../repo-evil`` and ``.../repo.git`` are not below
+    ``.../repo``, and a path that can leave the remote (:func:`_safe_tail`) is
+    not below it. The query is not part of the path and is ignored.
+    """
+    path = url.split("?", 1)[0]
+    if path == remote:
+        return True
+    if not path.startswith(remote + "/"):
+        return False
+    return _safe_tail(path[len(remote) + 1 :])
+
+
 class TargetKind(StrEnum):
     PATH = "path"
     HOST = "host"
     PROJECT = "project"
     CREDENTIAL = "credential"
     REPOSITORY = "repository"
+    # Only ever the ``offending`` marker of a classification (a URL that lies
+    # below no remote of a repository the call touches); a call's URL argument
+    # is a HOST target, and the URL itself is passed to ``classify_targets``.
+    URL = "url"
 
 
 @dataclass(frozen=True, slots=True)
@@ -258,12 +314,20 @@ class ScopedRepository:
     the authorization layer then refuses every call on the repository
     (``repo_acl_unresolved``), it is never read as ``inherit``. A given ACL
     must be this repository's, in this project.
+
+    ``remotes`` are the URLs the backend knows address this repository (its git
+    remote, its API base; each spelling is listed, see :func:`normalise_remote`).
+    A URL argument of a call is attributed to the repository whose remote it lies
+    below (:func:`url_within`), so that the endpoint an executor is given is
+    authorized against the ACL of the repository it belongs to. A repository
+    with no remote registered owns no URL.
     """
 
     repo_id: uuid.UUID
     project_id: uuid.UUID
     root: str | None = None
     acl: RepoAcl | None = None
+    remotes: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "repo_id", to_uuid(self.repo_id, "repo_id"))
@@ -279,6 +343,15 @@ class ScopedRepository:
                 raise TypeError("acl must be a RepoAcl or None")
             if acl.repo_id != self.repo_id or acl.project_id != self.project_id:
                 raise ValueError("the ACL belongs to another repository")
+        remotes = _collection(self.remotes, "remotes")
+        if len(remotes) > MAX_REMOTES:
+            raise ValueError("a repository has too many remotes")
+        normalised: list[str] = []
+        for remote in remotes:
+            canonical = normalise_remote(remote)
+            if canonical not in normalised:
+                normalised.append(canonical)
+        object.__setattr__(self, "remotes", tuple(normalised))
 
 
 @dataclass(frozen=True, slots=True)
@@ -410,13 +483,23 @@ async def classify_targets(
     resolver: PathResolver,
     *,
     timeout_seconds: float = 3.0,
+    urls: Iterable[object] = (),
 ) -> Classification:
     """Where ``targets`` lie relative to ``scope`` (may raise PathResolutionError).
 
-    A repository is touched when the call names it (a ``REPOSITORY`` target) or
+    A repository is touched when the call names it (a ``REPOSITORY`` target),
     when a path of the call, **after symlinks are resolved**, is the root of the
-    repository or below it. A path inside several repositories (a nested one)
-    touches each of them, so the strictest ACL applies.
+    repository or below it, or when a URL of the call lies below one of its
+    registered remotes. A call that touches several repositories (a path in a
+    nested one, a URL of another one) touches each of them, so the strictest ACL
+    applies.
+
+    ``urls`` are the URL arguments of the call (their hosts are among
+    ``targets``). Once a call touches a repository, a URL that lies below no
+    remote of any repository of the working set is refused
+    (``OUT_OF_SCOPE`` / ``TargetKind.URL``): it could be any repository of the
+    same host, whose ACL nobody decided. A call that touches no repository keeps
+    to the host check.
     """
     targets = list(targets)
     hosts_of_call = {t.value for t in targets if t.kind is TargetKind.HOST}
@@ -460,6 +543,16 @@ async def classify_targets(
             # the same call reaches (a credential is never sent elsewhere).
             if valid_hosts is None or not hosts_of_call <= valid_hosts:
                 outside.append(TargetKind.CREDENTIAL)
+    unbound_url = False
+    for url in urls:
+        canonical = normalise_url(url)[0]
+        owners = {
+            repository.repo_id
+            for repository in scope.repositories
+            if any(url_within(canonical, remote) for remote in repository.remotes)
+        }
+        touched.update(owners)
+        unbound_url = unbound_url or not owners
     repositories = tuple(r.repo_id for r in scope.repositories if r.repo_id in touched)
     if outside:
         return Classification(ScopeStatus.OUT_OF_SCOPE, outside[0], repositories)
@@ -467,4 +560,6 @@ async def classify_targets(
         return Classification(
             ScopeStatus.HOST_OUT_OF_SCOPE, TargetKind.HOST, repositories
         )
+    if unbound_url and touched:
+        return Classification(ScopeStatus.OUT_OF_SCOPE, TargetKind.URL, repositories)
     return Classification(ScopeStatus.IN_SCOPE, None, repositories)

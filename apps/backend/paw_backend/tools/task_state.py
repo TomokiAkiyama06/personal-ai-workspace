@@ -15,6 +15,12 @@ failed or cancelled task can be retried or restarted later; that makes the task
 ``ACTIVE`` again, **not** the approvals that were revoked when it ended (the new
 run asks again).
 
+That check is only the early answer. It can be overtaken by the end of the task
+(a terminal transition committing between the check and the use), so the store
+checks again **in the transaction that consumes the approval**, reading the task
+row locked (:func:`lock_task_activity`, ``ApprovalStore.consume(...,
+require_active_task=True)``): the use and the end are then ordered, never crossed.
+
 The default provider knows no task, so nothing that needs an approval may run:
 fail closed until a real provider (:class:`PostgresTaskActivity`) is installed,
 as with ``BudgetProvider``.
@@ -23,6 +29,9 @@ as with ``BudgetProvider``.
 import uuid
 from enum import StrEnum
 from typing import Protocol
+
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from paw_backend.db import Database
 from paw_backend.tasks.domain import TERMINAL_STATES, TaskState
@@ -38,6 +47,33 @@ class TaskActivityProvider(Protocol):
     async def check(self, task_id: uuid.UUID) -> TaskActivity:
         """Can ``task_id`` still act? Must read the *current* state."""
         ...
+
+
+def activity_of(state: object) -> TaskActivity:
+    """What a stored task state means: ``UNKNOWN`` for a state this code does not
+    know (never read as alive)."""
+    try:
+        task_state = TaskState(state)
+    except ValueError:
+        return TaskActivity.UNKNOWN
+    return TaskActivity.ENDED if task_state in TERMINAL_STATES else TaskActivity.ACTIVE
+
+
+async def lock_task_activity(session: AsyncSession, task_id: uuid.UUID) -> TaskActivity:
+    """The task's current state, read with its row **locked** (``FOR SHARE``).
+
+    Inside a transaction this serialises the caller with a terminal transition:
+    a transition that is in flight makes this wait for its commit and then read
+    the new state; one that starts later waits for the caller's transaction to
+    end. So what the caller does next in that transaction is ordered before, or
+    after, the end of the task, never across it. A row lock needs the UPDATE
+    privilege on ``tasks``, which the application role has (PAW-032).
+    """
+    rows = await session.execute(
+        text("SELECT state FROM tasks WHERE id = :id FOR SHARE"), {"id": task_id}
+    )
+    state = rows.scalar_one_or_none()
+    return TaskActivity.UNKNOWN if state is None else activity_of(state)
 
 
 class FailClosedTaskActivity:
@@ -61,10 +97,4 @@ class PostgresTaskActivity:
             {"id": task_id},
             timeout_seconds=self._timeout_seconds,
         )
-        if not rows:
-            return TaskActivity.UNKNOWN
-        try:
-            state = TaskState(rows[0][0])
-        except ValueError:
-            return TaskActivity.UNKNOWN
-        return TaskActivity.ENDED if state in TERMINAL_STATES else TaskActivity.ACTIVE
+        return TaskActivity.UNKNOWN if not rows else activity_of(rows[0][0])

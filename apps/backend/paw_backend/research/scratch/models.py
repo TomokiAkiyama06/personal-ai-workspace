@@ -16,9 +16,12 @@ issue); the store just records ``promotion_state``.
   end (at most one hour) so that a crashed worker cannot keep an item alive.
 
 ``project_id`` and ``created_by`` are plain UUID columns: the projects and users
-tables do not exist yet. ``task_id`` is a real foreign key to ``tasks.id``
-(``ON DELETE SET NULL``: deleting a task must neither be blocked by, nor delete,
-pinned research; the project relation stays).
+tables do not exist yet. ``task_id`` is a plain UUID column too, with no foreign
+key to ``tasks.id`` (Proposed decision 0013): deleting a task is never blocked by
+research (RESTRICT would), pinned research is never deleted with it (CASCADE
+would) and the item keeps its Project / Task relation (SET NULL lost it). That the
+task exists, in the same project, is checked by ``ScratchStore.add`` under a row
+lock; afterwards the id is a record of which task the item was made for.
 
 Allowed values are ``text`` columns with CHECK constraints. The migration
 repeats the literals; ``tests/test_scratch_migration.py`` fails when the two
@@ -42,7 +45,6 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from paw_backend.db import Base
-from paw_backend.tasks.models import TaskRow
 
 TABLE_NAMES = ("research_scratch_items", "research_scratch_leases")
 
@@ -115,9 +117,8 @@ class ScratchItemRow(Base):
 
     id: Mapped[UUID] = mapped_column(primary_key=True, server_default=_UUID_DEFAULT)
     project_id: Mapped[UUID]
-    task_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey(TaskRow.id, ondelete="SET NULL")
-    )
+    # No foreign key (0013): see the module doc.
+    task_id: Mapped[UUID | None]
     created_by: Mapped[UUID]
     query: Mapped[str | None] = mapped_column(Text)
     title: Mapped[str | None] = mapped_column(Text)
