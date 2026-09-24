@@ -65,6 +65,22 @@ if not exit_early:
     time.sleep(60)
 """
 
+# Candidate that moves its own run directory (the parent of its working directory)
+# to ``sys.argv[1]``; with ``sys.argv[2]`` it then plants a symlink at the old path
+# pointing there, and with ``lock`` it makes the destination's parent unwritable.
+MOVE_RUN_DIRECTORY = """
+import os, sys
+from pathlib import Path
+run_directory = Path.cwd().parent
+os.chdir('/')
+destination = sys.argv[1]
+os.rename(run_directory, destination)
+if len(sys.argv) > 2 and sys.argv[2] == 'lock':
+    os.chmod(os.path.dirname(destination), 0o500)
+elif len(sys.argv) > 2:
+    os.symlink(sys.argv[2], run_directory)
+"""
+
 # Candidate that leaves a background process in its process group and stays alive
 # long enough for the runner to record that group's members before it exits.
 BACKGROUND_THEN_EXIT = """
@@ -1070,6 +1086,127 @@ class WorktreeRunnerTest(unittest.TestCase):
                 self.assertRaisesRegex(ValueError, "outside the source repository"),
             ):
                 WorktreeRunner(repository, self.repository / "benchmark-runs")
+
+    # A run directory the candidate moved ------------------------------------------
+
+    def run_that_moves_its_directory(self, destination, *extra):
+        run = self.runner.create("candidate-a", self.commit)
+        result = self.runner.execute(
+            run,
+            [sys.executable, "-c", MOVE_RUN_DIRECTORY, str(destination), *extra],
+            PATIENCE,
+        )
+        return run, result
+
+    def assert_lifecycle_ended_with(self, run, last_event):
+        names = [event["event"] for event in self.events(run)]
+        self.assertEqual(names[-2:], ["cleanup_started", last_event], names)
+        if last_event == "cleanup_incomplete":
+            self.assertNotIn("cleanup_finished", names)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "needs Linux /proc")
+    def test_a_renamed_run_directory_is_found_and_removed(self):
+        runs = self.runner.runs_directory
+        # Renamed in place, next to where it was.
+        run, result = self.run_that_moves_its_directory(runs / "renamed-by-candidate")
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(list(runs.iterdir()), [])
+        self.assert_lifecycle_ended_with(run, "cleanup_finished")
+        self.assert_only_the_main_worktree_remains(run)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "needs Linux /proc")
+    def test_a_run_directory_moved_elsewhere_is_found_and_removed(self):
+        elsewhere = self.root / "elsewhere"
+        elsewhere.mkdir()
+        run, result = self.run_that_moves_its_directory(elsewhere / "stolen")
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(list(elsewhere.iterdir()), [])
+        self.assertEqual(list(self.runner.runs_directory.iterdir()), [])
+        self.assert_lifecycle_ended_with(run, "cleanup_finished")
+        self.assert_only_the_main_worktree_remains(run)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "needs Linux /proc")
+    def test_a_symlink_planted_at_the_old_path_is_removed_not_followed(self):
+        victim = self.root / "victim"
+        victim.mkdir()
+        (victim / "precious.txt").write_text("precious\n", encoding="utf-8")
+        run, _ = self.run_that_moves_its_directory(self.root / "stolen", str(victim))
+        self.assertEqual(
+            (victim / "precious.txt").read_text(encoding="utf-8"), "precious\n"
+        )
+        self.assertFalse((self.root / "stolen").exists())
+        self.assertEqual(list(self.runner.runs_directory.iterdir()), [])
+        self.assert_lifecycle_ended_with(run, "cleanup_finished")
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "needs Linux /proc")
+    @unittest.skipIf(os.geteuid() == 0, "root ignores directory permissions")
+    def test_a_run_directory_that_cannot_be_removed_is_reported_incomplete(self):
+        locked = self.root / "locked"
+        locked.mkdir()
+        self.addCleanup(locked.chmod, 0o700)
+        run = self.runner.create("candidate-a", self.commit)
+        with self.assertRaises(WorktreeRunnerError):
+            self.runner.execute(
+                run,
+                [
+                    sys.executable,
+                    "-c",
+                    MOVE_RUN_DIRECTORY,
+                    str(locked / "stolen"),
+                    "lock",
+                ],
+                PATIENCE,
+            )
+        # What could be removed was: the contents are gone, only the emptied
+        # directory (whose parent is read-only) is left, and Git's record is pruned.
+        self.assertEqual(list((locked / "stolen").iterdir()), [])
+        self.assert_lifecycle_ended_with(run, "cleanup_incomplete")
+        self.assert_only_the_main_worktree_remains()
+        self.assertEqual(self.runner._runs, {})
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "needs Linux /proc")
+    def test_a_run_directory_that_cannot_be_located_is_never_reported_finished(self):
+        real_readlink = os.readlink
+
+        def readlink(path, *args, **kwargs):
+            if str(path).startswith("/proc/self/fd/"):
+                raise OSError(errno.ENOENT, "no /proc")
+            return real_readlink(path, *args, **kwargs)
+
+        with mock.patch.object(os, "readlink", readlink):
+            # In place: the original path is still the directory we made, so it
+            # can be removed and reported finished even without /proc.
+            in_place = self.runner.create("candidate-a", self.commit)
+            self.runner.execute(in_place, [sys.executable, "-c", "pass"], PATIENCE)
+            self.assert_lifecycle_ended_with(in_place, "cleanup_finished")
+
+            # Moved: nothing says where it went, so it cannot be claimed removed.
+            moved = self.runner.create("candidate-b", self.commit)
+            destination = self.root / "unused-name"
+            with self.assertRaises(WorktreeRunnerError):
+                self.runner.execute(
+                    moved,
+                    [sys.executable, "-c", MOVE_RUN_DIRECTORY, str(destination)],
+                    PATIENCE,
+                )
+        self.assertTrue(destination.exists())
+        self.assert_lifecycle_ended_with(moved, "cleanup_incomplete")
+        self.assert_only_the_main_worktree_remains()
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "needs Linux /proc")
+    def test_run_directory_handles_are_closed_after_every_outcome(self):
+        def open_descriptors():
+            return len(os.listdir("/proc/self/fd"))
+
+        before = open_descriptors()
+        self.runner.execute(
+            self.runner.create("candidate-a", self.commit),
+            [sys.executable, "-c", "pass"],
+            PATIENCE,
+        )
+        self.run_that_moves_its_directory(self.root / "stolen")
+        self.runner.cleanup(self.runner.create("candidate-b", self.commit))
+        self.assertEqual(open_descriptors(), before)
 
     # A leader that something else reaped ----------------------------------------
 

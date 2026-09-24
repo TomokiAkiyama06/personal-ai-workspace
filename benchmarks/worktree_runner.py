@@ -197,6 +197,17 @@ class _RunState:
     admin_directory: Path | None = None
     log_identity: tuple[int, int] | None = None
     log_size: int = 0
+    # A handle on the run directory and its identity, taken at creation: they
+    # follow the directory if a candidate renames or moves it.
+    directory_fd: int | None = None
+    directory_identity: tuple[int, int] | None = None
+
+    def close_directory(self) -> None:
+        if self.directory_fd is not None:
+            try:
+                os.close(self.directory_fd)
+            finally:
+                self.directory_fd = None
 
 
 class _PipeDrain:
@@ -302,6 +313,11 @@ class WorktreeRunner:
         )
         run = WorktreeRun(run_id, candidate_id, commit, state.worktree, state.log_path)
         os.mkdir(run_directory, 0o700)
+        state.directory_fd = os.open(
+            run_directory, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+        )
+        info = os.fstat(state.directory_fd)
+        state.directory_identity = (info.st_dev, info.st_ino)
         with self._lock:
             self._runs[run_id] = state
         try:
@@ -323,6 +339,7 @@ class WorktreeRunner:
             finally:
                 with self._lock:
                     self._runs.pop(run_id, None)
+                state.close_directory()
             raise
         return run
 
@@ -423,7 +440,12 @@ class WorktreeRunner:
             )
         log_error = self._try_event(run, "cleanup_started", reason=reason)
         try:
-            self._remove_checkout(state)
+            try:
+                self._remove_checkout(state)
+            except WorktreeRunnerError:
+                # Never claim success for a checkout that is still on disk.
+                self._try_event(run, "cleanup_incomplete", reason=reason)
+                raise
             log_error = log_error or self._try_event(
                 run, "cleanup_finished", reason=reason
             )
@@ -433,6 +455,7 @@ class WorktreeRunner:
             with self._lock:
                 self._runs.pop(run.run_id, None)
                 self._cancelled.discard(run.run_id)
+            state.close_directory()
         if log_error is not None:
             raise log_error
 
@@ -617,18 +640,78 @@ class WorktreeRunner:
         )
 
     def _remove_checkout(self, state: _RunState) -> None:
-        """Remove the run directory and Git's record of its worktree."""
+        """Remove the run directory, wherever it now is, and Git's record of it.
+
+        Removes everything it can, then raises ``WorktreeRunnerError`` if any part
+        of the run directory could not be found or removed.
+        """
+        info = self._lstat(state.run_directory)
+        still_in_place = (
+            info is not None and (info.st_dev, info.st_ino) == state.directory_identity
+        )
+        where, moved = self._locate_run_directory(state)
         # A candidate may have locked, moved, emptied or deleted its checkout.
         self._git(
             "worktree", "remove", "--force", "--force", str(state.worktree), check=False
         )
-        if state.run_directory.is_symlink():
-            state.run_directory.unlink()
+        complete = self._remove_tree(state.run_directory)
+        if where == "unknown":
+            # A directory that may have moved cannot be followed: only a
+            # directory still in place is known to be gone.
+            complete = complete and still_in_place
+        elif where == "moved":
+            complete = self._remove_moved_directory(state, moved) and complete
+        try:
+            self._remove_admin_entry(state)
+        finally:
+            if not complete:
+                raise WorktreeRunnerError("could not remove the isolated worktree")
+
+    @staticmethod
+    def _locate_run_directory(state: _RunState) -> tuple[str, Path | None]:
+        """Where the run directory is: ``("moved", path)``, ``("in place", None)``,
+        ``("deleted", None)`` or ``("unknown", None)``.
+
+        The descriptor opened at creation follows the directory if a candidate
+        renames or moves it, and Linux reports its current path in ``/proc``.
+        """
+        try:
+            target = os.readlink(f"/proc/self/fd/{state.directory_fd}")
+        except (OSError, TypeError):
+            return "unknown", None
+        if target.endswith(" (deleted)"):
+            return "deleted", None
+        if Path(target) == state.run_directory:
+            return "in place", None
+        return "moved", Path(target)
+
+    @staticmethod
+    def _lstat(path: Path) -> os.stat_result | None:
+        try:
+            return os.lstat(path)
+        except OSError:
+            return None
+
+    @staticmethod
+    def _remove_tree(path: Path) -> bool:
+        """Remove ``path`` without following a symlink; True if nothing remains."""
+        if path.is_symlink():
+            path.unlink()
         else:
-            shutil.rmtree(state.run_directory, ignore_errors=True)
-        if os.path.lexists(state.run_directory):
-            raise WorktreeRunnerError("could not remove the isolated worktree")
-        self._remove_admin_entry(state)
+            shutil.rmtree(path, ignore_errors=True)
+        return not os.path.lexists(path)
+
+    def _remove_moved_directory(self, state: _RunState, moved: Path) -> bool:
+        """Remove the run directory a candidate moved to ``moved`` (identity checked)."""
+        info = self._lstat(moved)
+        if (
+            info is None
+            or not stat.S_ISDIR(info.st_mode)
+            or (info.st_dev, info.st_ino) != state.directory_identity
+        ):
+            return info is None  # gone already, or no longer the directory we opened
+        shutil.rmtree(moved, ignore_errors=True)
+        return not os.path.lexists(moved)
 
     def _remove_admin_entry(self, state: _RunState) -> None:
         """Drop this run's ``.git/worktrees/<id>`` if Git could not.
