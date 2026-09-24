@@ -28,6 +28,7 @@ from paw_backend.authz.diagnostics import (
     warn_if_tool_approval_tables_are_mutable,
 )
 from paw_backend.db import Database
+from paw_backend.tasks import Actor, TaskCommand, TaskService
 from paw_backend.tools import (
     ApprovalLevel,
     ApprovalStatus,
@@ -36,7 +37,9 @@ from paw_backend.tools import (
     OpenLimits,
     OpenOutcome,
     PostgresApprovalStore,
+    PostgresTaskActivity,
     RevokeOutcome,
+    TaskActivity,
 )
 
 from .support import make_settings, paw_environment
@@ -209,6 +212,17 @@ class ApplicationRoleTest(RoleTestCase):
         self.assertEqual(history[0].summary, new.summary)
         record = await store.get(new.approval_id)
         self.assertEqual(record.status, ApprovalStatus.CONSUMED)
+
+    async def test_the_role_can_read_the_state_of_a_task(self):
+        # The broker asks whether a task can still act before it opens or uses
+        # an approval; the role that runs it must be able to read `tasks`.
+        tasks = TaskService(self.app_db)
+        activity = PostgresTaskActivity(self.app_db)
+        created = await tasks.create_task(project_id=U1, created_by=U1, title="t")
+        self.assertEqual(await activity.check(created.task_id), TaskActivity.ACTIVE)
+        await tasks.execute(created.task_id, TaskCommand.CANCEL, actor=Actor.system())
+        self.assertEqual(await activity.check(created.task_id), TaskActivity.ENDED)
+        self.assertEqual(await activity.check(uuid.uuid4()), TaskActivity.UNKNOWN)
 
     async def test_concurrent_requests_hold_the_cap_for_the_role_too(self):
         limits = OpenLimits(max_pending=3, rejection_cooldown=timedelta(minutes=5))

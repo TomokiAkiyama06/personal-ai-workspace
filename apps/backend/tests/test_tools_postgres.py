@@ -9,6 +9,7 @@ the single winner among concurrent callers on separate connection pools.
 """
 
 import asyncio
+import contextlib
 import hashlib
 import unittest
 import uuid
@@ -19,15 +20,26 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from paw_backend.authz import SystemRole
+from paw_backend.tasks import (
+    TERMINAL_STATES,
+    Actor,
+    TaskCommand,
+    TaskService,
+    TaskState,
+    WaitReason,
+)
 from paw_backend.tools import (
     ApprovalLevel,
     ApprovalOutcome,
     ApprovalService,
+    ApprovalStatus,
     BrokerReason,
     ConsumeOutcome,
     OpenLimits,
     OpenOutcome,
     PostgresApprovalStore,
+    PostgresTaskActivity,
+    TaskActivity,
     Verdict,
 )
 
@@ -978,3 +990,277 @@ class CrossProcessTest(PostgresTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+C = TaskCommand
+# Every state of the task lifecycle, and the commands that lead there.
+PATHS_TO_STATES = {
+    TaskState.QUEUED: [],
+    TaskState.RUNNING: [(C.START, {})],
+    TaskState.WAITING: [
+        (C.START, {}),
+        (C.WAIT, {"wait_reason": WaitReason.APPROVAL}),
+    ],
+    TaskState.PAUSED: [(C.START, {}), (C.PAUSE, {})],
+    TaskState.EVALUATING: [(C.START, {}), (C.BEGIN_EVALUATION, {})],
+    TaskState.COMPLETED: [
+        (C.START, {}),
+        (C.BEGIN_EVALUATION, {}),
+        (C.COMPLETE, {}),
+    ],
+    TaskState.FAILED: [(C.FAIL, {})],
+    TaskState.CANCELLED: [(C.CANCEL, {})],
+}
+
+
+class TaskFixture(PostgresTestCase):
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        self.tasks = TaskService(self.new_database())
+
+    async def new_task(self, tasks: TaskService | None = None) -> uuid.UUID:
+        created = await (tasks or self.tasks).create_task(
+            project_id=P1, created_by=U1, title="A task with approvals"
+        )
+        return created.task_id
+
+    async def drive(self, task_id, steps, tasks: TaskService | None = None):
+        for command, arguments in steps:
+            await (tasks or self.tasks).execute(
+                task_id, command, actor=Actor.system(), **arguments
+            )
+
+
+@requires_postgres
+class PostgresTaskActivityTest(TaskFixture):
+    """The broker's view of a task is the real ``tasks`` row."""
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        self.activity = PostgresTaskActivity(self.new_database())
+
+    async def test_every_state_of_the_lifecycle_is_active_or_ended(self):
+        self.assertEqual(set(PATHS_TO_STATES), set(TaskState))  # none forgotten
+        for state, steps in PATHS_TO_STATES.items():
+            with self.subTest(state=state.value):
+                task_id = await self.new_task()
+                await self.drive(task_id, steps)
+                expected = (
+                    TaskActivity.ENDED
+                    if state in TERMINAL_STATES
+                    else TaskActivity.ACTIVE
+                )
+                self.assertEqual(await self.activity.check(task_id), expected)
+
+    async def test_a_task_that_is_started_again_is_active_again(self):
+        for state, command in (
+            (TaskState.FAILED, C.RETRY),
+            (TaskState.FAILED, C.RESTART),
+            (TaskState.CANCELLED, C.RESTART),
+        ):
+            with self.subTest(state=state.value, command=command.value):
+                task_id = await self.new_task()
+                await self.drive(task_id, PATHS_TO_STATES[state])
+                self.assertEqual(await self.activity.check(task_id), TaskActivity.ENDED)
+                await self.drive(task_id, [(command, {})])
+                self.assertEqual(
+                    await self.activity.check(task_id), TaskActivity.ACTIVE
+                )
+
+    async def test_a_task_that_does_not_exist_is_unknown(self):
+        self.assertEqual(await self.activity.check(uuid.uuid4()), TaskActivity.UNKNOWN)
+
+
+class FakeDatabase:
+    def __init__(self, rows=None, error=None):
+        self.rows, self.error, self.calls = rows, error, []
+
+    async def fetch_abortable(self, sql, params=None, *, timeout_seconds=None):
+        self.calls.append((sql, params, timeout_seconds))
+        if self.error is not None:
+            raise self.error
+        return self.rows
+
+
+class TaskActivityMappingTest(unittest.IsolatedAsyncioTestCase):
+    async def test_only_a_state_the_lifecycle_knows_is_an_answer(self):
+        task_id = uuid.uuid4()
+        for rows, expected in (
+            ([], TaskActivity.UNKNOWN),
+            ([("weird",)], TaskActivity.UNKNOWN),
+            ([(None,)], TaskActivity.UNKNOWN),
+            ([("Completed",)], TaskActivity.UNKNOWN),  # exact values only
+            ([("completed",)], TaskActivity.ENDED),
+            ([("running",)], TaskActivity.ACTIVE),
+        ):
+            with self.subTest(rows=rows):
+                database = FakeDatabase(rows)
+                activity = PostgresTaskActivity(database, timeout_seconds=1.5)
+                self.assertEqual(await activity.check(task_id), expected)
+                # the id is bound by the driver, and the read is bounded
+                ((sql, params, timeout),) = database.calls
+                self.assertEqual(params, {"id": task_id})
+                self.assertNotIn(str(task_id), sql)
+                self.assertEqual(timeout, 1.5)
+
+    async def test_a_database_failure_is_not_turned_into_an_answer(self):
+        activity = PostgresTaskActivity(FakeDatabase(error=ConnectionError("down")))
+        with self.assertRaises(ConnectionError):
+            await activity.check(uuid.uuid4())
+
+
+class RevokeDownStore(PostgresApprovalStore):
+    """The real store, except that revoking a task's approvals can fail."""
+
+    down = False
+
+    async def revoke_task(self, task_id, *, now):
+        if self.down:
+            raise ConnectionError("the database went away")
+        return await super().revoke_task(task_id, now=now)
+
+
+@requires_postgres
+class TaskEndPathsTest(TaskFixture):
+    """Every way a task ends, with the real TaskService, tables and provider.
+
+    There is no "expired" task state (the lifecycle ends in completed, failed
+    or cancelled); an approval runs out by its own ``expires_at``.
+    """
+
+    ENDS = {
+        TaskState.COMPLETED: PATHS_TO_STATES[TaskState.COMPLETED],
+        TaskState.FAILED: PATHS_TO_STATES[TaskState.FAILED],
+        TaskState.CANCELLED: PATHS_TO_STATES[TaskState.CANCELLED],
+    }
+
+    async def wire(self):
+        """A broker, approval service and TaskService that revokes on task end."""
+        self.store = RevokeDownStore(self.new_database())
+        self.h = Harness(
+            approvals=self.store,
+            clock=Clock(),
+            task_activity=PostgresTaskActivity(self.new_database()),
+        )
+        self.tasks = TaskService(
+            self.new_database(), listeners=[self.h.service.revoke_on_task_end]
+        )
+        self.task_id = await self.new_task()
+        self.context = make_context(task_id=self.task_id)
+        self.user = principal(SystemRole.USER, U1)
+        self.pending = await self.request("pending")
+        self.approved = await self.request("approved")
+        await self.h.service.approve(self.approved.approval_id, self.user)
+
+    async def request(self, name, approval_id=None):
+        return await self.h.broker.request(
+            make_call(
+                "repo.delete_tree", {"path": f"{ROOT}/{name}"}, context=self.context
+            ),
+            approval_id=approval_id,
+        )
+
+    async def statuses(self):
+        return [
+            (await self.store.get(d.approval_id)).status
+            for d in (self.pending, self.approved)
+        ]
+
+    async def rows_of_task(self) -> int:
+        async with self.database.engine.begin() as connection:
+            return (
+                await connection.execute(
+                    text("SELECT count(*) FROM tool_approvals WHERE task_id = :t"),
+                    {"t": self.task_id},
+                )
+            ).scalar_one()
+
+    async def test_each_end_revokes_the_approvals_and_the_broker_refuses_the_task(self):
+        for state, steps in self.ENDS.items():
+            with self.subTest(end=state.value):
+                await self.wire()
+                await self.drive(self.task_id, steps)
+                self.assertEqual(
+                    await self.statuses(),
+                    [ApprovalStatus.REVOKED, ApprovalStatus.REVOKED],
+                )
+                for decision, name in (
+                    (self.pending, "pending"),
+                    (self.approved, "approved"),
+                ):
+                    used = await self.request(name, decision.approval_id)
+                    self.assertEqual(
+                        (used.verdict, used.reason),
+                        (Verdict.DENY, BrokerReason.TASK_NOT_ACTIVE),
+                    )
+                rows = [e for e in self.h.sink.events if e.reason == "task_ended"]
+                self.assertEqual(len(rows), 2)
+
+    async def test_a_failed_revocation_is_reported_and_the_approval_still_cannot_run(
+        self,
+    ):
+        for state, steps in self.ENDS.items():
+            with self.subTest(end=state.value):
+                await self.wire()
+                self.store.down = True
+                with self.assertLogs("paw_backend.tasks.service", "WARNING") as logs:
+                    with self.assertLogs("paw_backend.tools.approvals", "ERROR"):
+                        await self.drive(self.task_id, steps)
+                # reported by type; the message of the driver is not
+                text_logged = "\n".join(logs.output)
+                self.assertIn("ApprovalRevocationError", text_logged)
+                self.assertNotIn("went away", text_logged)
+                # the task did end, though, and the approvals are still open
+                activity = await self.h.task_activity.check(self.task_id)
+                self.assertEqual(activity, TaskActivity.ENDED)
+                self.assertEqual(
+                    await self.statuses(),
+                    [ApprovalStatus.PENDING, ApprovalStatus.APPROVED],
+                )
+                # ... yet the approved call is refused, and not used up
+                before = await self.rows_of_task()
+                used = await self.request("approved", self.approved.approval_id)
+                self.assertEqual(
+                    (used.verdict, used.reason, used.invocation),
+                    (Verdict.DENY, BrokerReason.TASK_NOT_ACTIVE, None),
+                )
+                asked = await self.request("something-else")
+                self.assertEqual(asked.reason, BrokerReason.TASK_NOT_ACTIVE)
+                self.assertEqual(await self.rows_of_task(), before)  # nothing opened
+                self.assertEqual(
+                    await self.statuses(),
+                    [ApprovalStatus.PENDING, ApprovalStatus.APPROVED],
+                )
+                # revoking again once the database is back finishes the job
+                self.store.down = False
+                self.assertEqual(await self.h.service.revoke_task(self.task_id), 2)
+                self.assertEqual(
+                    await self.statuses(),
+                    [ApprovalStatus.REVOKED, ApprovalStatus.REVOKED],
+                )
+
+    async def test_a_task_that_is_started_again_needs_new_approvals(self):
+        for failing in (False, True):
+            with self.subTest(revocation_fails_at_the_end=failing):
+                await self.wire()
+                self.store.down = failing
+                with (
+                    self.assertLogs("paw_backend", "WARNING")
+                    if failing
+                    else contextlib.nullcontext()
+                ):
+                    await self.drive(self.task_id, self.ENDS[TaskState.FAILED])
+                self.store.down = False
+                await self.drive(self.task_id, [(C.RETRY, {})])  # failed -> queued
+                self.assertEqual(
+                    await self.statuses(),
+                    [ApprovalStatus.REVOKED, ApprovalStatus.REVOKED],
+                )
+                used = await self.request("approved", self.approved.approval_id)
+                self.assertEqual(
+                    (used.verdict, used.reason),
+                    (Verdict.DENY, BrokerReason.APPROVAL_REVOKED),
+                )
+                fresh = await self.request("approved")  # the run asks again
+                self.assertEqual(fresh.verdict, Verdict.NEEDS_APPROVAL)
+                self.assertNotEqual(fresh.approval_id, self.approved.approval_id)

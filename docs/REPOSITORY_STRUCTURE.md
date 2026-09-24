@@ -107,6 +107,7 @@ personal-ai-workspace/
 │  │  │  │  └─ scratch/
 │  │  │  │     ├─ __init__.py
 │  │  │  │     ├─ errors.py
+│  │  │  │     ├─ janitor.py
 │  │  │  │     ├─ limits.py
 │  │  │  │     ├─ models.py
 │  │  │  │     ├─ records.py
@@ -142,7 +143,8 @@ personal-ai-workspace/
 │  │  │  │  ├─ policy.py
 │  │  │  │  ├─ registry.py
 │  │  │  │  ├─ runner.py
-│  │  │  │  └─ scope.py
+│  │  │  │  ├─ scope.py
+│  │  │  │  └─ task_state.py
 │  │  │  └─ api/
 │  │  │     ├─ __init__.py
 │  │  │     ├─ deps.py
@@ -193,6 +195,10 @@ personal-ai-workspace/
 │  │     ├─ test_research_registry.py
 │  │     ├─ test_scratch_concurrency.py
 │  │     ├─ test_scratch_grants.py
+│  │     ├─ test_scratch_janitor.py
+│  │     ├─ test_scratch_janitor_lifespan.py
+│  │     ├─ test_scratch_janitor_postgres.py
+│  │     ├─ test_scratch_janitor_settings.py
 │  │     ├─ test_scratch_migration.py
 │  │     ├─ test_scratch_purge.py
 │  │     ├─ test_scratch_records.py
@@ -274,6 +280,7 @@ personal-ai-workspace/
 │     ├─ 0005-owner-setup-and-recovery.md
 │     ├─ 0006-tool-broker-policy.md
 │     ├─ 0007-task-queue-budget-and-loop-policy.md
+│     ├─ 0012-research-provider-adapter-policy.md
 │     └─ README.md
 └─ evaluator/
    └─ README.md

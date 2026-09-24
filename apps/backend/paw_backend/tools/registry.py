@@ -14,8 +14,12 @@ in a way that would let it skip a check:
   takes a credential handle is a ``credential-use`` tool (it cannot hide
   behind a ``read`` declaration);
 * a project-local ``write`` / ``destructive`` tool must name what it touches
-  with a *required* path, host, URL or project argument (an optional one can be
-  left out, and a call without targets looks "in scope");
+  with a *required* path, host, URL, project or repository argument (an optional
+  one can be left out, and a call without targets looks "in scope");
+* a tool whose PAW-025 capability writes to a repository (``project.repo.write``,
+  ``project.pr.create``) must require the **path or the repository** it changes:
+  only those two tie a call to a repository, and so to that repository's ACL
+  (``broker.py``); a host or URL does not name one;
 * a tool declares the arguments it accepts. Anything else in a call is
   refused, so a model cannot smuggle a ``"capability": "read"`` or an
   ``"approved": true`` next to the real arguments.
@@ -27,7 +31,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from types import MappingProxyType
 
-from paw_backend.authz import Capability
+from paw_backend.authz import Capability, RepoPermission
+from paw_backend.authz.capabilities import REPO_PERMISSION_OF
 from paw_backend.tools.capabilities import ApprovalLevel, Environment, ToolCapability
 
 TOOL_NAME_PATTERN = r"[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*"
@@ -47,6 +52,7 @@ class ArgumentKind(StrEnum):
     URL = "url"  # an http(s) URL: its host must be a task host
     HOST = "host"  # a host name: must be a task host
     PROJECT = "project"  # a project id: must be a project of the task
+    REPOSITORY = "repository"  # a repository id: must be in the task's working set
     CREDENTIAL_HANDLE = "credential_handle"  # an opaque handle, never plaintext
     TEXT = "text"  # free text, bounded
     INTEGER = "integer"
@@ -59,6 +65,7 @@ TARGET_KINDS = frozenset(
         ArgumentKind.URL,
         ArgumentKind.HOST,
         ArgumentKind.PROJECT,
+        ArgumentKind.REPOSITORY,
     }
 )
 
@@ -175,6 +182,13 @@ class ToolSpec:
             and not required & TARGET_KINDS
         ):
             raise ValueError("a write tool must require what it touches")
+        if REPO_PERMISSION_OF.get(
+            self.authz_capability
+        ) is RepoPermission.WRITE and not required & {
+            ArgumentKind.PATH,
+            ArgumentKind.REPOSITORY,
+        }:
+            raise ValueError("a repository write must require its path or repository")
         if self.returns_credential_plaintext and (
             ToolCapability.CREDENTIAL_USE not in caps
         ):

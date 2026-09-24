@@ -171,6 +171,62 @@ class ConsistencyTest(unittest.TestCase):
     def test_only_a_credential_tool_can_return_credential_plaintext(self):
         self.refused(returns_credential_plaintext=True)
 
+    def test_a_repository_write_must_require_the_path_or_repository_it_changes(self):
+        # Only a path (in a repository's worktree) or a repository argument ties
+        # a call to a repository ACL: a host, URL or project does not.
+        writes = (Capability.PROJECT_REPO_WRITE, Capability.PROJECT_PR_CREATE)
+        naming = {
+            "url": ArgumentSpec(A.URL),
+            "project": ArgumentSpec(A.PROJECT),
+            "text": ArgumentSpec(A.TEXT),
+        }
+        for authz in writes:
+            for label, args in {
+                "no arguments": {},
+                "url, project, text": naming,
+                "an optional path": {
+                    **naming,
+                    "p": ArgumentSpec(A.PATH, required=False),
+                },
+                "an optional repository": {
+                    **naming,
+                    "r": ArgumentSpec(A.REPOSITORY, required=False),
+                },
+            }.items():
+                with self.subTest(authz=authz.value, label=label):
+                    with self.assertRaises(ValueError):
+                        ToolSpec(
+                            "git.push",
+                            frozenset({C.WRITE, C.NETWORK}),
+                            authz,
+                            args or {"u": ArgumentSpec(A.URL)},
+                            environment=Environment.HOST,
+                        )
+            for kind in (A.PATH, A.REPOSITORY):
+                with self.subTest(authz=authz.value, kind=kind):
+                    tool = ToolSpec(
+                        "git.push",
+                        frozenset({C.WRITE, C.NETWORK}),
+                        authz,
+                        {"u": ArgumentSpec(A.URL), "t": ArgumentSpec(kind)},
+                    )
+                    self.assertIs(tool.authz_capability, authz)
+
+    def test_other_capabilities_do_not_have_to_name_a_repository(self):
+        for authz in (
+            Capability.PROJECT_READ,
+            Capability.PROJECT_TASK_RUN,
+            Capability.PROJECT_MEMORY_USE,
+            Capability.PROJECT_CHAT,
+        ):
+            with self.subTest(authz=authz.value):
+                tool = spec(
+                    caps=frozenset({C.READ, C.NETWORK}),
+                    authz=authz,
+                    args={"u": ArgumentSpec(A.URL)},
+                )
+                self.assertIs(tool.authz_capability, authz)
+
 
 class ArgumentDeclarationTest(unittest.TestCase):
     def test_argument_names_are_validated(self):

@@ -11,7 +11,7 @@ capability, not here.
 import re
 import unicodedata
 from types import MappingProxyType
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from paw_backend.research.providers.contract import MAX_LOCATOR_CHARS
 from paw_backend.research.providers.errors import InvalidLocatorError
@@ -95,8 +95,34 @@ def _has_forbidden_character(raw: str) -> bool:
     )
 
 
+# A proxy in front of a server can decode a query name more than once, so a name
+# is decoded until it stops changing, at most this many times.
+_MAX_NAME_DECODINGS = 4
+
+
+# A decoded name that holds one of these was more than one parameter (or a value)
+# for a parser that decodes first: ``%26access_token`` is ``&access_token``.
+_QUERY_DELIMITERS = frozenset("&;=#")
+
+
+def _name_layers(name: str) -> list[str]:
+    """Every reading of ``name``: as written, then decoded once more each time."""
+    layers = [name]
+    for _ in range(_MAX_NAME_DECODINGS):
+        decoded = unquote(layers[-1], errors="replace")
+        if decoded == layers[-1]:
+            break
+        layers.append(decoded)
+    return layers
+
+
 def _is_dropped_parameter(name: str) -> bool:
-    lowered = name.lower()
+    layers = _name_layers(name)
+    if any(_QUERY_DELIMITERS.intersection(layer) for layer in layers[1:]):
+        # Not a name at any layer that decodes it: never keep it (it may carry a
+        # credential parameter behind an encoded delimiter).
+        return True
+    lowered = layers[-1].lower()
     return (
         lowered.startswith(TRACKING_PARAMETER_PREFIXES)
         or lowered in TRACKING_PARAMETERS
@@ -143,11 +169,14 @@ def canonicalize_locator(raw: str) -> str:
        (the text before the first ``=``) is a tracking parameter (see
        ``TRACKING_PARAMETER_PREFIXES`` / ``TRACKING_PARAMETERS``) or a
        credential parameter (``CREDENTIAL_PARAMETERS``), compared
-       case-insensitively, are dropped; the rest are sorted by ``(name, value)``
-       (``value`` is the text after the first ``=``, ``""`` if there is none;
-       plain string comparison; a piece keeps its own spelling, so ``flag`` stays
-       ``flag`` and ``a=`` stays ``a=``) and joined with ``&``. If nothing is
-       left there is no ``?``.
+       case-insensitively after the name is percent-decoded (repeatedly, at most
+       ``_MAX_NAME_DECODINGS`` times, as a proxy might), are dropped, and so is any
+       piece whose name holds ``&``, ``;``, ``=`` or ``#`` once decoded (it was more
+       than one parameter for a parser that decodes first); the rest
+       are sorted by ``(name, value)`` (``value`` is the text after the first
+       ``=``, ``""`` if there is none; plain string comparison; a piece keeps
+       its own spelling, so ``flag`` stays ``flag`` and ``a=`` stays ``a=``) and
+       joined with ``&``. If nothing is left there is no ``?``.
     10. The result is ``<scheme>://<host>[:<port>]<path>[?<query>]`` and must
         have at most ``MAX_LOCATOR_CHARS`` characters (escaping can make it
         longer than the input), otherwise ``InvalidLocatorError``.
