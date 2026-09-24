@@ -1,9 +1,10 @@
-# Backend の配置先
+# Backend
 
-Personal AI Workspace の Core Backend を置くディレクトリです。
-現在は配置と役割を示す README のみで、Application の実装はまだ始めていません。
+Personal AI Workspace の Core Backend です。
+[PAW-020](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/17) で、後続の Issue が載る最小の Application Skeleton を実装しました。
+認証、User、RBAC、Task、Memory はまだ実装していません（PAW-021 以降）。
 
-[Architecture](../../docs/ARCHITECTURE.md) に基づき、以下の機能を Backend 側で扱います。
+[Architecture](../../docs/ARCHITECTURE.md) に基づき、最終的に以下の機能を Backend 側で扱います。
 
 - Core API と Session、Project / Repository の管理
 - Authentication、RBAC、Capability による権限判定
@@ -14,11 +15,176 @@ Personal AI Workspace の Core Backend を置くディレクトリです。
 [Web](../web/README.md) と [CLI](../cli/README.md) は同じ Backend API を利用します。
 権限の最終判定は Backend が行います。
 Core Backend は GPU 非依存とし、Local Model Runtime を停止できる構造にします。
-具体的な Service / Package の分割は、Framework と実装フェーズに合わせて選定します。
 
-最初の実装 Issue は [PAW-020 — Backend Application Skeleton](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/17) です。
-同 Issue は PAW-017 の Model 比較 Run に依存します。
-言語、Framework、依存 Package はこの配置の整備では選定していません。
+## 技術構成
 
-Acceptance Criteria は [Implementation Backlog](../../docs/IMPLEMENTATION_BACKLOG.md)、
+[Decision 0003](../../docs/decisions/0003-backend-cli-web-implementation-stack.md) で承認された構成です。
+
+| 領域 | 選択 |
+| --- | --- |
+| 言語 / Framework | Python 3.13、FastAPI + Uvicorn、Pydantic v2 |
+| DB | PostgreSQL、SQLAlchemy 2.x（async）+ psycopg 3、Alembic |
+| Test / Lint | 標準 `unittest`、Ruff |
+| Package 管理 | uv + `pyproject.toml`（依存は完全一致で固定） |
+
+pgvector は Memory Schema の Issue（PAW-040）で導入します。
+
+## 構成
+
+```text
+apps/backend/
+├─ pyproject.toml          # 依存（完全一致で固定）と Ruff 設定
+├─ alembic.ini             # Alembic 設定（DB URL は持たない）
+├─ migrations/             # env.py と Revision（0001 は空の Baseline）
+├─ paw_backend/
+│  ├─ app.py               # create_app(settings)
+│  ├─ config.py            # PAW_ 環境変数から読む Settings
+│  ├─ server.py            # Uvicorn 起動（TLS 設定）
+│  ├─ db.py                # 非同期 Engine / Session、Readiness 確認
+│  ├─ events.py            # プロセス内 Event Bus と Heartbeat
+│  ├─ errors.py            # 共通の Error Response
+│  ├─ middleware.py        # Request ID、Security Header
+│  └─ api/
+│     ├─ deps.py           # FastAPI Dependency
+│     └─ v1/               # /api/v1 の Router（health、events）
+└─ tests/                  # unittest
+```
+
+新しい機能は `api/v1/` に Router を追加して `api/v1/__init__.py` へ登録します。
+ORM Model は `paw_backend.db.Base` を継承し、Alembic Revision で Schema を変更します。
+
+## 開発
+
+`uv` と Python 3.13 が必要です。`.venv` は `.gitignore` 済みです。
+
+```bash
+cd apps/backend
+uv venv --python 3.13 .venv
+uv pip install --python .venv/bin/python -e . --group dev
+
+export PAW_DATABASE_URL=postgresql://USER:PASSWORD@localhost:5432/paw
+.venv/bin/alembic upgrade head
+.venv/bin/python -m paw_backend          # または .venv/bin/paw-backend
+```
+
+Test と Lint は Repository の CI と同じコマンドです。
+
+```bash
+.venv/bin/python -m unittest discover -s tests -t .
+.venv/bin/ruff format --check . && .venv/bin/ruff check .
+```
+
+Repository 全体の検証は `python .github/scripts/run_ci.py` です（[CI](../../.github/CI.md) を参照）。
+実 PostgreSQL に対する Test は `PAW_TEST_DATABASE_URL` を設定した場合だけ実行し、未設定では Skip します。
+この Test は Migration を `head` へ上げて `base` へ戻すため、使い捨ての Database を指定してください。
+
+## 設定
+
+設定はすべて `PAW_` から始まる環境変数で渡します。Repository に Secret や既定の認証情報は置きません。
+不正な値による起動エラーには、値（DB URL のパスワード等）を含めません。
+
+| 変数 | 既定値 | 内容 |
+| --- | --- | --- |
+| `PAW_HOST` / `PAW_PORT` | `127.0.0.1` / `8000` | Listen する Address |
+| `PAW_TLS_CERTFILE` / `PAW_TLS_KEYFILE` | なし | 両方を指定すると Uvicorn が HTTPS を終端する |
+| `PAW_ALLOW_PLAINTEXT_HTTP` | `false` | Loopback 以外で TLS なしの起動を許可する（下記） |
+| `PAW_HSTS_MAX_AGE_SECONDS` | `31536000` | `Strict-Transport-Security` の max-age。`0` で Header を付けない |
+| `PAW_DATABASE_URL` | なし | `postgresql://` または `postgresql+psycopg://`。未設定でも起動する |
+| `PAW_DATABASE_TIMEOUT_SECONDS` | `3` | 接続と Readiness 確認の Timeout |
+| `PAW_DATABASE_POOL_SIZE` | `5` | Connection Pool のサイズ |
+| `PAW_EVENT_HEARTBEAT_SECONDS` | `15` | `system.heartbeat` の間隔 |
+| `PAW_EVENT_QUEUE_SIZE` | `100` | 接続ごとの Event Queue。溢れた場合は古い Event を捨てる |
+| `PAW_LOG_LEVEL` | `info` | Uvicorn の Log Level |
+
+## HTTPS
+
+[要件](../../REQUIREMENTS.md)どおり、Backend の Port を Public Internet へ直接公開しません。
+TLS の終端は次のどちらかで行います。
+
+1. Uvicorn が終端する: `PAW_TLS_CERTFILE` と `PAW_TLS_KEYFILE` を指定します。
+2. Reverse Proxy（`tailscale serve`、Caddy など）が終端する: Backend は `127.0.0.1` だけで Listen します。
+
+Loopback 以外の Address で TLS なしに起動しようとすると、`PAW_ALLOW_PLAINTEXT_HTTP=true` がない限り起動を拒否します。
+証明書の発行と更新は Deployment の課題で、この Skeleton では扱いません。
+
+## API
+
+Endpoint は `/api/v1` 以下です。OpenAPI Schema は `/api/v1/openapi.json` で取得できます（Swagger UI は配信しません）。
+
+| Endpoint | 内容 |
+| --- | --- |
+| `GET /api/v1/health` | Liveness。DB を確認しない。常に `{"status": "ok"}` |
+| `GET /api/v1/health/ready` | Readiness。DB へ `SELECT 1` を実行する |
+| `GET /api/v1/events/stream` | Server-Sent Events |
+| `WebSocket /api/v1/events/ws` | WebSocket |
+
+Readiness は 200 または 503 で、Body の形は同じです。
+
+```json
+{"status": "unavailable", "checks": {"database": "unavailable"}}
+```
+
+`checks.database` は `ok`、`unavailable`、`not_configured` のいずれかです。
+接続文字列、Host、認証情報は Response にも Log にも出しません。
+Readiness の失敗時に Log へ残すのは例外の型名だけです。
+
+エラーはすべて次の形式です。`code` は機械可読な固定値、`request_id` は `X-Request-ID` Header と同じ値です。
+
+```json
+{"error": {"code": "not_found", "message": "Not Found", "request_id": "..."}}
+```
+
+Validation Error は `details`（位置、Message、型）を加えますが、送信された値は返しません。
+予期しない例外は Traceback を Log にだけ残し、Client には `internal_error` を返します。
+
+全 Response に `X-Request-ID`（妥当な入力値は引き継ぎ、それ以外は新規に生成）と、
+`Strict-Transport-Security`、`X-Content-Type-Options`、`X-Frame-Options`、`Content-Security-Policy`、
+`Referrer-Policy`、`Cache-Control: no-store` を付けます。
+CORS は有効にしていません。Web Client の配信 Origin が決まってから設定します。
+
+## Event 経路
+
+`paw_backend.events.EventBus` はプロセス内の Fan-out です。永続化と再送はなく、接続後に発行された Event だけを受け取ります。
+この Skeleton が発行する Event は `system.connected`（接続直後に 1 回）と `system.heartbeat`（一定間隔）だけです。
+User、Project、Task、Memory のデータは含みません。
+
+**現在この 2 つの Endpoint は認証なしです。** Session が存在しないためです。
+PAW-022（Login / Session）は、システム Event 以外を配信する前に次を実装する必要があります。
+
+- 認証済み Session の要求
+- WebSocket の `Origin` 検査（Browser は WebSocket Handshake に CORS を適用しないため、Cookie 認証では Cross-Site Hijacking を受ける）
+- Event 種別ごとの認可
+
+該当箇所には `TODO(PAW-022)` を置いています。
+
+## Database と Migration
+
+Engine は最初に使うときに作られ、その時点でも接続はしません。
+そのため PostgreSQL が停止していても Process は起動し、Liveness に応答します。
+`Database.session()` と `paw_backend.api.deps.get_session` が Session を提供します。
+
+Alembic は `PAW_DATABASE_URL` から接続先を読み、`alembic.ini` には DB URL を書きません。
+どのディレクトリからでも実行できます。
+
+```bash
+alembic -c apps/backend/alembic.ini upgrade head          # 適用
+alembic -c apps/backend/alembic.ini upgrade head --sql    # SQL の出力のみ（DB 接続は不要）
+alembic -c apps/backend/alembic.ini revision -m "説明"    # 新しい Revision
+```
+
+## 依存 Package
+
+依存は `pyproject.toml` で完全一致に固定しています。
+CI は pre-commit の専用環境で Test を実行するため、同じ Version を
+[.pre-commit-config.yaml](../../.pre-commit-config.yaml) の `additional_dependencies` と
+[requirements-ci.txt](../../.github/requirements-ci.txt) にも書きます。
+3 か所の一致と、Backend が import する Package の宣言漏れは
+[test_dependency_pins.py](../../.github/scripts/test_dependency_pins.py) が検査します。
+依存を追加・更新する場合は 3 か所を同時に変更してください。
+
+## 今後の Issue
+
+[PAW-021](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/18)（Owner Setup）、PAW-022（Login / Session）、
+PAW-025（RBAC）、PAW-032（Task Lifecycle）、PAW-040（Memory Schema）はこの Skeleton の上に実装します。
+受け入れ基準は [Implementation Backlog](../../docs/IMPLEMENTATION_BACKLOG.md)、
 実装時に選択できる事項は [Requirements Freeze Review](../../docs/REQUIREMENTS_FREEZE_REVIEW.md) を参照してください。
