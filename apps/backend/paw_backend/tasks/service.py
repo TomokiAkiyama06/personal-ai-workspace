@@ -29,6 +29,7 @@ worker gets ``StaleAttemptError`` and cannot touch the new attempt.
 import json
 import logging
 import math
+import sys
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime
@@ -87,6 +88,9 @@ MAX_LOG_MESSAGE_LENGTH = 8000
 MAX_INPUT_BYTES = 256 * 1024
 # Objects and lists inside each other, counting the top-level object as the first.
 MAX_INPUT_DEPTH = 32
+# PostgreSQL stores every JSONB number as ``numeric``, which holds at most this many
+# digits before the decimal point ("value overflows numeric format" beyond it).
+MAX_INPUT_INTEGER_DIGITS = 131072
 MAX_RESTORE_LOGS = 1000
 MAX_RESTORE_TOOL_INVOCATIONS = 100
 _TRUNCATED = "...[truncated]"
@@ -144,14 +148,33 @@ class _JsonInputCheck:
     to fail at flush time as a database error.
 
     The work is bounded by ``MAX_INPUT_DEPTH`` (which also stops cycles) and by
-    a budget of ``MAX_INPUT_BYTES``: every value costs at least as much as its
-    shortest JSON encoding, so an over-budget value is refused without being
-    encoded, whatever memory it shares (``[x, x]`` nested deeply). Errors state
-    the rule that was broken and never the offending value.
+    a budget of ``MAX_INPUT_BYTES``. Every occurrence of a value is charged what
+    the encoder will write for it: numbers, booleans and ``null`` exactly (an
+    integer by its decimal length, so one integer that is referenced many times
+    costs what its digits cost each time), text by its length (its encoding is at
+    most 12 times longer), and objects and lists by their brackets. The
+    separators are not charged, so the charge never exceeds the encoded length
+    and an over-budget value is refused without being encoded, whatever memory it
+    shares (``[x, x]`` nested deeply). The final length check on the encoded
+    value stays authoritative. Integers have at most ``MAX_INPUT_INTEGER_DIGITS``
+    digits (what PostgreSQL ``numeric`` holds), or fewer if the interpreter
+    limits the digits it turns into text (``sys.get_int_max_str_digits``); a
+    larger one is refused from its bit length, never converted to text. Errors
+    state the rule that was broken and never the offending value.
     """
 
     def __init__(self) -> None:
         self._budget = MAX_INPUT_BYTES
+        interpreter_limit = sys.get_int_max_str_digits()  # 0 means no limit
+        self._digit_limit = (
+            min(MAX_INPUT_INTEGER_DIGITS, interpreter_limit)
+            if interpreter_limit
+            else MAX_INPUT_INTEGER_DIGITS
+        )
+        # An integer with more bits than this has more digits than the limit
+        # (log2(10) is 3.3219..., so this is never below the bits of a number
+        # that fits).
+        self._digit_limit_bits = self._digit_limit * 3322 // 1000 + 1
 
     def check_object(self, value: object) -> None:
         if type(value) is not dict:
@@ -180,14 +203,40 @@ class _JsonInputCheck:
                     self._check(item, depth + 1)
         elif kind is str:
             self._check_text(value)
+        elif kind is int:
+            self._spend(self._integer_length(value))
         elif kind is float:
             if not math.isfinite(value):
                 raise InvalidCommandArgumentError("input numbers must be finite")
-            self._spend(1)
-        elif kind is int or kind is bool or value is None:
-            self._spend(1)
+            self._spend(len(repr(value)))  # what json.dumps writes for a float
+        elif kind is bool:
+            self._spend(4 if value else 5)  # true / false
+        elif value is None:
+            self._spend(4)  # null
         else:
             raise InvalidCommandArgumentError(_INPUT_NOT_JSON)
+
+    def _integer_length(self, value: int) -> int:
+        """The characters ``json.dumps`` writes for ``value``, sign included.
+
+        Only a number that already passed the bit-length test is turned into
+        text, so the conversion is bounded by the digit limit.
+        """
+        if value.bit_length() > self._digit_limit_bits:
+            raise self._too_many_digits()
+        try:
+            length = len(str(value))
+        except ValueError:
+            # Only a few digits over the interpreter's own limit get this far.
+            raise self._too_many_digits() from None
+        if length - (value < 0) > self._digit_limit:
+            raise self._too_many_digits()
+        return length
+
+    def _too_many_digits(self) -> InvalidCommandArgumentError:
+        return InvalidCommandArgumentError(
+            f"input integers must have at most {self._digit_limit} digits"
+        )
 
     def _check_text(self, value: object) -> None:
         if type(value) is not str:
@@ -315,8 +364,9 @@ class TaskService:
         """Create a queued task (attempt 1) and its ``create`` event.
 
         ``input`` must be a plain JSON object that PostgreSQL JSONB can hold
-        (finite numbers, no NUL or surrogate characters, at most
-        ``MAX_INPUT_DEPTH`` levels and ``MAX_INPUT_BYTES`` bytes); otherwise
+        (finite numbers, integers of at most ``MAX_INPUT_INTEGER_DIGITS`` digits,
+        no NUL or surrogate characters, at most ``MAX_INPUT_DEPTH`` levels and
+        ``MAX_INPUT_BYTES`` bytes); otherwise
         ``InvalidCommandArgumentError`` is raised before anything is written.
         """
         title = _text("title", title, MAX_TITLE_LENGTH)
@@ -834,18 +884,13 @@ class TaskService:
 
         The value is walked first (``_JsonInputCheck``: plain JSON types only,
         finite numbers, text without NUL or surrogates, bounded depth and work),
-        so nothing that JSONB would refuse at flush time reaches the database.
+        so nothing that JSONB would refuse at flush time reaches the database
+        and the encoder only sees a value that fits the byte budget (its digit
+        limit for integers included, so it cannot raise ``ValueError`` either).
         """
         value = {} if value is None else value
         _JsonInputCheck().check_object(value)
-        try:
-            encoded = json.dumps(value, allow_nan=False)
-        except ValueError:
-            # After the walk only the interpreter's limit on the number of digits
-            # of an integer can still stop the encoder.
-            raise InvalidCommandArgumentError(
-                "input must contain only JSON numbers that can be encoded"
-            ) from None
+        encoded = json.dumps(value, allow_nan=False)
         if len(encoded) > MAX_INPUT_BYTES:
             raise InvalidCommandArgumentError(_INPUT_TOO_LARGE)
         return value
