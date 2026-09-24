@@ -68,7 +68,8 @@ if not exit_early:
 
 # Check that leaves a descendant whose SIGTERM handler needs ~0.3 s to finish its
 # cleanup.  ``orphan``: an orphaned member of the check's process group.
-# ``session``: a child in its own session.  The check itself dies on SIGTERM.
+# ``session``: a child in its own session.  ``daemon``: a double fork plus setsid, so
+# it is neither in the group nor below the check.  The check itself dies on SIGTERM.
 SLOW_TERM_CLEANUP = """
 import os, signal, sys, time
 mode, pid_file, done = sys.argv[1:4]
@@ -90,10 +91,14 @@ if child == 0:
     if mode == 'session':
         os.setsid()
         install_handler_and_wait()
+    elif mode == 'daemon':
+        os.setsid()
+        if os.fork() == 0:
+            install_handler_and_wait()
     elif os.fork() == 0:
         install_handler_and_wait()
     os._exit(0)
-if mode == 'orphan':
+if mode in ('orphan', 'daemon'):
     os.waitpid(child, 0)
 while not os.path.exists(pid_file):
     time.sleep(0.01)
@@ -171,6 +176,60 @@ else:
 result = runner.run_visible((CheckDefinition('check', 'unit', command),), 30)[0]
 print(json.dumps({'status': result.status, 'exit_code': result.exit_code,
                   'killpg': killpg_calls}))
+"""
+
+# Check that starts a process outside its own process group and, by default, exits at
+# once: the process is re-parented before any periodic look at the process tree could
+# have recorded it.  ``session``: a new program in a session of its own with its output
+# discarded.  ``daemon``: a double fork plus setsid, the classic daemon.  With a third
+# argument the check blocks instead of exiting.
+ESCAPES_THEN_EXITS = """
+import os, subprocess, sys, time
+mode, pid_file = sys.argv[1:3]
+block = len(sys.argv) > 3
+
+def publish(pid):
+    with open(pid_file + '.tmp', 'w') as handle:
+        handle.write(str(pid))
+    os.replace(pid_file + '.tmp', pid_file)
+
+if mode == 'session':
+    null = subprocess.DEVNULL
+    child = subprocess.Popen(
+        [sys.executable, '-c', 'import time; time.sleep(60)'],
+        start_new_session=True, stdin=null, stdout=null, stderr=null,
+    )
+    publish(child.pid)
+else:
+    if os.fork() == 0:
+        os.setsid()
+        if os.fork() == 0:
+            publish(os.getpid())
+            time.sleep(60)
+        os._exit(0)
+    while not os.path.exists(pid_file):
+        time.sleep(0.005)
+if block:
+    time.sleep(60)
+"""
+
+# Check that starts a program with an EMPTY environment (so it carries no marker of
+# the check) in a session of its own, and lingers until ``go`` exists (at most 20 s).
+SCRUBBED_ESCAPED_CHILD = """
+import os, sys, time
+pid_file, go = sys.argv[1:3]
+program = (
+    'import os, sys, time\\n'
+    'open(sys.argv[1] + ".tmp", "w").write(str(os.getpid()))\\n'
+    'os.replace(sys.argv[1] + ".tmp", sys.argv[1])\\n'
+    'time.sleep(60)\\n'
+)
+if os.fork() == 0:
+    os.setsid()
+    os.execve(sys.executable, [sys.executable, '-c', program, pid_file], {})
+deadline = time.monotonic() + 20
+while not os.path.exists(go) and time.monotonic() < deadline:
+    time.sleep(0.005)
 """
 
 # Check that ignores SIGTERM itself, so only SIGKILL after the grace period ends it.
@@ -710,9 +769,13 @@ class TestRunnerTest(unittest.TestCase):
             if not listings:
                 os.kill(process.pid, signal.SIGKILL)
                 os.waitpid(process.pid, 0)  # a concurrent reaper
-                # By now the id could be anyone's: this looks like a member.
+                # By now the id could be anyone's: this looks like a member, and
+                # like a child of the leader.
                 listings.append("racy")
-                return {process.pid + 1: ("S", 1, process.pid, 5)}
+                return {
+                    process.pid + 1: ("S", 1, process.pid, 5),
+                    process.pid + 2: ("S", process.pid, process.pid + 2, 6),
+                }
             # The snapshot taken once the loss was noticed: the reaped leader's
             # number is held by a stranger, so the group is not ours.
             listings.append("fresh")
@@ -724,6 +787,7 @@ class TestRunnerTest(unittest.TestCase):
             leader.refresh(force=True)
         self.assertEqual(listings, ["racy", "fresh"])
         self.assertEqual(leader.members, own)
+        self.assertEqual(leader.descendants, {})
         self.assertTrue(leader.released and leader.status_lost)
 
     def leader_with_a_late_member(self):
@@ -1071,7 +1135,7 @@ class TestRunnerTest(unittest.TestCase):
 
     def test_descendants_may_finish_their_term_handlers_within_the_grace_period(self):
         self.runner.term_grace_seconds = 10
-        for mode in ("orphan", "session"):
+        for mode in ("orphan", "session", "daemon"):
             with self.subTest(mode=mode):
                 pid_file = self.pid_file(f"{mode}.pid")
                 done = self.root / f"{mode}.done"
@@ -1115,6 +1179,213 @@ class TestRunnerTest(unittest.TestCase):
         self.assertEqual((result.status, result.exit_code), ("passed", 0))
         grandchild = self.read_pid(pid_file)
         self.assertTrue(wait_until(lambda: not is_running(grandchild)))
+
+    # Processes that left the check's group ----------------------------------------
+
+    def test_a_process_that_left_the_group_is_killed_when_the_check_exits(self):
+        # The check starts it in a session of its own (or double-forks a daemon) and
+        # returns at once, so it is re-parented before the runner could have seen
+        # it below the check.  Only what it inherited (its environment) shows it.
+        self.runner.drain_seconds = 0.3
+        for mode in ("session", "daemon"):
+            with self.subTest(mode=mode):
+                pid_file = self.pid_file(f"{mode}.pid")
+                check = self.python_check(
+                    f"escapes-{mode}", ESCAPES_THEN_EXITS, mode, pid_file
+                )
+
+                (result,) = self.runner.run_visible((check,), PATIENCE)
+
+                self.assertEqual((result.status, result.exit_code), ("passed", 0))
+                child = self.read_pid(pid_file)
+                self.assertTrue(
+                    wait_until(lambda child=child: not is_running(child)),
+                    "a process outside the check's group outlived a passing check",
+                )
+
+    def test_timeout_kills_a_daemonized_process(self):
+        self.runner.term_grace_seconds = 0.3
+        self.runner.drain_seconds = 0.3
+        pid_file = self.pid_file()
+        check = self.python_check(
+            "daemon", ESCAPES_THEN_EXITS, "daemon", pid_file, "block"
+        )
+
+        (result,) = self.runner.run_visible((check,), 2.0)
+
+        self.assertEqual(result.status, "timed_out")
+        daemon = self.read_pid(pid_file)
+        self.assertTrue(wait_until(lambda: not is_running(daemon)))
+
+    def test_an_escaped_process_is_killed_when_the_setup_fails(self):
+        pid_file = self.pid_file()
+
+        def fail_once_it_escaped(process, limit):
+            self.assertTrue(wait_until(pid_file.exists))
+            raise OSError(errno.EMFILE, "Too many open files")
+
+        check = self.python_check("escapes", ESCAPES_THEN_EXITS, "session", pid_file)
+        with mock.patch.object(test_runner, "_OutputCapture", fail_once_it_escaped):
+            (result,) = self.runner.run_visible((check,), PATIENCE)
+
+        self.assertEqual(result.status, "error")
+        child = self.read_pid(pid_file)
+        self.assertTrue(wait_until(lambda: not is_running(child)))
+
+    def test_a_process_the_group_signal_reaches_is_not_signalled_a_second_time(self):
+        # The leader and its group members get their signals through the group.  A
+        # second, individual signal could interrupt a TERM handler that is already
+        # running, so only what is outside the group is signalled by itself.
+        self.runner.term_grace_seconds = 0.3
+        pid_file = self.pid_file()
+        check = self.python_check(
+            "orphan", ORPHANED_TERM_IGNORING_CHILD, pid_file, "wait"
+        )
+        calls = []
+        real_signal_identified = test_runner._signal_identified
+
+        def spy(pid, started, number):
+            calls.append((pid, int(number)))
+            real_signal_identified(pid, started, number)
+
+        with mock.patch.object(test_runner, "_signal_identified", spy):
+            (result,) = self.runner.run_visible((check,), 2.0)
+
+        self.assertEqual(result.status, "timed_out")
+        member = self.read_pid(pid_file)
+        self.assertTrue(wait_until(lambda: not is_running(member)))
+        self.assertEqual(calls, [])
+
+    def spawn_scrubbed_escapee(self):
+        """A check leader that started a marker-less process in its own session."""
+        pid_file = self.pid_file()
+        go = self.root / "go"
+        process = subprocess.Popen(
+            [sys.executable, "-c", SCRUBBED_ESCAPED_CHILD, str(pid_file), str(go)],
+            start_new_session=True,
+        )
+        self.addCleanup(process.wait)
+        self.addCleanup(process.kill)
+        return process, pid_file, go
+
+    def test_a_descendant_outside_the_group_is_recorded_while_the_leader_runs(self):
+        process, pid_file, go = self.spawn_scrubbed_escapee()
+        leader = test_runner._Leader(process, "unrelated-token")
+        escapee = self.read_pid(pid_file)
+
+        leader.refresh(force=True)
+
+        started = test_runner._start_time(escapee)
+        self.assertEqual(leader.descendants.get(escapee), started)
+        self.assertNotIn(escapee, leader.members)  # a session of its own
+        self.assertEqual(test_runner._marked_processes("unrelated-token"), {})
+        # The check exits; the process is re-parented and only the record finds it.
+        go.write_text("")
+        self.assertTrue(wait_until(leader.has_exited))
+        self.assertNotEqual(
+            test_runner._parse_stat(Path(f"/proc/{escapee}/stat").read_bytes())[1],
+            process.pid,
+        )
+
+        leader.kill_spawned()
+
+        self.assertTrue(wait_until(lambda: not is_running(escapee)))
+
+    def test_a_descendant_seen_while_the_check_ran_is_killed_when_it_exits(self):
+        # The escapee carries no marker, so only the record made while the check
+        # was running can find it.  The check is held back until the runner has
+        # recorded it, so nothing depends on timing.
+        pid_file = self.pid_file()
+        go = self.root / "go"
+        real_refresh = test_runner._Leader.refresh
+
+        def refresh_then_release_the_check(leader, *args, **kwargs):
+            real_refresh(leader, *args, **kwargs)
+            if pid_file.exists() and int(pid_file.read_text()) in getattr(
+                leader, "descendants", {}
+            ):
+                go.write_text("")
+
+        check = self.python_check("scrubbed", SCRUBBED_ESCAPED_CHILD, pid_file, go)
+        with (
+            mock.patch.object(test_runner._Leader, "refresh_seconds", 0),
+            mock.patch.object(
+                test_runner._Leader, "refresh", refresh_then_release_the_check
+            ),
+        ):
+            (result,) = self.runner.run_visible((check,), PATIENCE)
+
+        self.assertEqual((result.status, result.exit_code), ("passed", 0))
+        escapee = self.read_pid(pid_file)
+        self.assertTrue(
+            wait_until(lambda: not is_running(escapee)),
+            "a descendant recorded while the check ran outlived a passing check",
+        )
+
+    def test_descendants_that_have_gone_are_forgotten(self):
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            start_new_session=True,
+        )
+        self.addCleanup(process.wait)
+        self.addCleanup(process.kill)
+        leader = test_runner._Leader(process)
+        pid = process.pid
+        own = ("S", 1, pid, leader.start)
+
+        def listing(*others):
+            return mock.patch.object(
+                test_runner,
+                "_process_table",
+                return_value={pid: own, **dict(others)},
+            )
+
+        with listing(
+            (pid + 1, ("S", pid, pid + 1, 7)), (pid + 2, ("S", 1, pid + 2, 8))
+        ):
+            leader.refresh(force=True)
+        # A child, in a session of its own; not a stranger's process.
+        self.assertEqual(leader.descendants, {pid + 1: 7})
+
+        with listing((pid + 1, ("S", 1, pid + 1, 7))):  # re-parented: still ours
+            leader.refresh(force=True)
+        self.assertEqual(leader.descendants, {pid + 1: 7})
+
+        with listing((pid + 1, ("S", 1, pid + 1, 99))):  # the pid was reused
+            leader.refresh(force=True)
+        self.assertEqual(leader.descendants, {})
+
+        with listing():
+            leader.refresh(force=True)
+        self.assertEqual(leader.descendants, {})
+
+    def test_processes_are_marked_by_the_exact_token_only(self):
+        token = "0123456789abcdef"
+        name = test_runner._TOKEN_VARIABLE
+
+        def spawn(environment):
+            process = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(60)"], env=environment
+            )
+            self.addCleanup(process.wait)
+            self.addCleanup(process.kill)
+            self.assertTrue(wait_until(lambda: test_runner._start_time(process.pid)))
+            return process
+
+        marked = spawn({"A": "1", name: token, "B": "2"})
+        spawn({name: token + "0"})  # another check whose token starts the same
+        spawn({name: token[:-1]})  # ... and one that is a prefix of ours
+        spawn({"X" + name: token})  # another variable that ends the same
+        spawn({name: "other", "NOTE": f"{name}={token}"})  # inside another value
+        spawn({})
+        zombie = spawn({name: token})
+        zombie.kill()
+        self.assertTrue(wait_until(lambda: not is_running(zombie.pid)))
+
+        found = test_runner._marked_processes(token)
+
+        self.assertEqual(found, {marked.pid: test_runner._start_time(marked.pid)})
+        self.assertEqual(test_runner._marked_processes(None), {})
 
     # Process identity ----------------------------------------------------------
 
@@ -1399,11 +1670,16 @@ class TestRunnerTest(unittest.TestCase):
         self.assertEqual(result.status, "passed")
         environment = json.loads(report.read_text(encoding="utf-8"))
         self.assertEqual(set(environment) & set(secrets), set())
-        # Python may add LC_CTYPE itself when coercing a C locale.
+        # Python may add LC_CTYPE itself when coercing a C locale.  The marker is
+        # the one addition: a random token that lets the runner recognise what a
+        # check started, wherever it went.
+        marker = test_runner._TOKEN_VARIABLE
         self.assertLessEqual(
             set(environment),
-            set(test_runner._CHECK_ENVIRONMENT_ALLOWLIST) | {"HOME", "LC_CTYPE"},
+            set(test_runner._CHECK_ENVIRONMENT_ALLOWLIST)
+            | {"HOME", "LC_CTYPE", marker},
         )
+        self.assertRegex(environment[marker], r"^[0-9a-f]{32}$")
         self.assertEqual(environment["PATH"], os.environ["PATH"])
         home = Path(environment["HOME"])
         self.assertNotEqual(home, Path.home())

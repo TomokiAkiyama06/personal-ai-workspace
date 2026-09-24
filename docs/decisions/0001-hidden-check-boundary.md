@@ -46,7 +46,10 @@ What the attacker can still do, and why the Python runners cannot close it:
   they are only checked for tampering (identity, size, links), not protected; the
   candidate's worktree shares the main repository's `.git`.
 - **Outlive or evade process cleanup.**  A process that daemonizes (double fork plus
-  `setsid`) leaves both the process group and the parent chain and cannot be found.
+  `setsid`) leaves both the process group and the parent chain.  The test runner finds
+  it only by the random marker variable in its inherited environment (and by the
+  processes it recorded below the check while the check ran), which a process defeats
+  by starting with an empty environment: such a process cannot be found.
   Signalling by pid or group id is inherently check-then-act: a pid can be reused between
   the last identity check and the signal, and a process group cannot be signalled through
   a pidfd, so a window of microseconds remains.  Members forked into a group after its

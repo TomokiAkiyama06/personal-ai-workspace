@@ -13,6 +13,7 @@ import hashlib
 import json
 import math
 import os
+import secrets
 import selectors
 import signal
 import stat
@@ -24,6 +25,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 _MAX_CAPTURE_BYTES = 64 * 1024
+# Every check's environment carries this variable with a random value of its own.
+# A process keeps its initial environment when it is re-parented, leaves the check's
+# process group, or starts a session of its own, so the variable is how the runner
+# recognises what a check started even where no process tree leads back to it.
+_TOKEN_VARIABLE = "PAW_CHECK_RUN"
+_MAX_ENVIRONMENT_BYTES = 1024 * 1024
 # The only inherited check variables.  Checks execute candidate code, so
 # credentials and every ``GIT_*`` selector are dropped; HOME is a private
 # temporary directory per check.
@@ -151,11 +158,16 @@ class TestRunner:
     This avoids creating a credential store while still preserving evidence that
     output was captured.
 
-    Each check runs in its own session with an allowlisted environment.  Output is
-    bounded while the check runs, and on timeout the check's process group and the
-    processes below it are terminated, then killed after ``term_grace_seconds``.
-    A check that daemonizes (double fork plus ``setsid``) cannot be found from
-    here; production needs a container or cgroup for that.
+    Each check runs in its own session with an allowlisted environment, plus a
+    random marker variable.  Output is bounded while the check runs.  On timeout
+    the check's process group, the processes below it, and every process that still
+    carries the marker are terminated, then killed after ``term_grace_seconds``; when
+    the check ends any other way (it exits, or its setup fails) whatever is left of
+    those is killed, including processes that left the group (own session, double
+    fork plus ``setsid``).  That covers a process that keeps its environment or was
+    seen below the check while it ran; one that replaced its environment and was
+    re-parented unseen cannot be found from here.  Production needs a container or
+    cgroup for that.
     """
 
     term_grace_seconds = 2.0
@@ -223,6 +235,7 @@ class TestRunner:
         stdout = b""
         stderr = b""
         stdout_bytes = stderr_bytes = 0
+        token = secrets.token_hex(16)
         try:
             with tempfile.TemporaryDirectory(
                 prefix="paw-check-home-", ignore_cleanup_errors=True
@@ -234,14 +247,14 @@ class TestRunner:
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     start_new_session=True,
-                    env=_check_environment(home),
+                    env=_check_environment(home, token),
                 )
                 # The child's identity (pid plus start time), recorded before
                 # anything else can go wrong.
                 started_at = _start_time(process.pid)
                 leader: _Leader | None = None
                 try:
-                    leader = _Leader(process)
+                    leader = _Leader(process, token)
                     capture = _OutputCapture(process, _MAX_CAPTURE_BYTES)
                 except BaseException:
                     # The child is running and nothing supervises it yet: never
@@ -320,9 +333,10 @@ class TestRunner:
                     capture.pump(self.poll_seconds)
             return timed_out
         finally:
-            # No member of the check's session may outlive it, and no pipe may
-            # keep this evaluator waiting.
+            # Nothing the check started may outlive it, whether it stayed in the
+            # group or not, and no pipe may keep this evaluator waiting.
             leader.signal_group(signal.SIGKILL)
+            leader.kill_spawned()
             leader.reap(self.term_grace_seconds)
 
     def _terminate(self, leader: _Leader, capture: _OutputCapture) -> None:
@@ -335,8 +349,10 @@ class TestRunner:
         # Snapshot first: children that started their own session are not in the
         # process group, and they are re-parented once their parent dies.  Each is
         # recorded with its start time, so a recycled pid is never mistaken for it.
+        # The leader has been recording the ones below it while it ran; the marker
+        # finds the rest.
         leader.refresh(force=True)
-        tracked = _descendant_pids(leader.pgid)
+        tracked = leader.spawned()
         leader.signal_group(signal.SIGTERM)
         for pid, started in tracked.items():
             _signal_identified(pid, started, signal.SIGTERM)
@@ -432,13 +448,17 @@ def _validate_check(check: CheckDefinition) -> None:
         raise ValueError("check command needs a non-empty program and string arguments")
 
 
-def _check_environment(home: str) -> dict[str, str]:
-    """An explicit allowlist: no credentials, no ``GIT_*``, private HOME."""
-    environment = {
-        key: os.environ[key]
-        for key in _CHECK_ENVIRONMENT_ALLOWLIST
-        if key in os.environ
-    }
+def _check_environment(home: str, token: str) -> dict[str, str]:
+    """An explicit allowlist: no credentials, no ``GIT_*``, private HOME, and the
+    check's marker (first, so a bounded read of a process's environment sees it)."""
+    environment = {_TOKEN_VARIABLE: token}
+    environment.update(
+        {
+            key: os.environ[key]
+            for key in _CHECK_ENVIRONMENT_ALLOWLIST
+            if key in os.environ
+        }
+    )
     environment["HOME"] = home
     return environment
 
@@ -468,7 +488,8 @@ def _stop_unsupervised(
     it: without a recorded identity nothing can show that the number is still ours,
     so nothing is sent.  A constructed ``leader`` is used when there is one: it
     takes a last look at the group (members forked since it was built), knows the
-    members, and re-checks its own identity at every signal.
+    members and the processes outside the group that it started, and re-checks its
+    own identity at every signal.
     """
     # The descriptors go first: under descriptor exhaustion (the usual reason to be
     # here) the identity checks below need a free one to read ``/proc``.
@@ -482,6 +503,7 @@ def _stop_unsupervised(
     if identified and leader is not None:
         leader.look()
         leader.signal_group(signal.SIGKILL)
+        leader.kill_spawned()
         leader.reap(5)
     elif identified and _is_unreaped_child(process.pid, started_at):
         # Its own session, so its pid is the group id, and being unreaped reserves it.
@@ -539,23 +561,31 @@ class _Leader:
     the vanished leader is taken instead, so a member forked just before the loss is
     not forgotten.  A leader without a recorded start time cannot be told from a
     stranger holding its number: its group is never signalled.
+
+    The processes below the leader are recorded the same way (``descendants``), with
+    the same trust rule: they include the ones that started a session of their own,
+    which the group does not.  ``spawned`` adds every process that carries the check's
+    marker, which finds what was re-parented before a look could record it.
     """
 
     refresh_seconds = 0.2
+    kill_rounds = 20
 
-    def __init__(self, process: subprocess.Popen[bytes]):
+    def __init__(self, process: subprocess.Popen[bytes], token: str | None = None):
         self.process = process
+        self.token = token
         self.pgid = process.pid
         self.start = _start_time(process.pid)  # None without /proc
         self.released = False  # no longer guaranteed to reserve ``pgid``
         self.status_lost = False  # reaped by someone else: exit status unknown
         self.zombie_seen = False  # its members were recorded while it was a zombie
         self.members: dict[int, int] = {}  # pid -> start time, seen in the group
+        self.descendants: dict[int, int] = {}  # pid -> start time, seen below it
         self._refreshed = 0.0
         self.refresh(force=True)
 
     def refresh(self, force: bool = False, *, gone: bool = False) -> None:
-        """Record the group's current members.
+        """Record the group's current members and the processes below the leader.
 
         Trusted only while the leader is unreaped, so the listing is adopted only if
         the leader still is after it.  If it is not (it was collected after the table
@@ -564,7 +594,8 @@ class _Leader:
         is that last look).  The group id is then reserved only for as long as a
         member exists, so whatever is in the group is ours, unless a process holds
         the leader's own number: then the number was reused and its group is a
-        stranger's.
+        stranger's.  Nothing below a reaped leader can be told from a stranger's, so
+        only the group is recorded then.
         """
         now = time.monotonic()
         if self.released or (
@@ -580,13 +611,26 @@ class _Leader:
             for pid, (_, _, pgrp, started) in table.items()
             if pgrp == self.pgid
         }
-        if gone or self._still_ours():
-            for pid, started in found.items():
-                self.members.setdefault(pid, started)
+        if gone:
+            self._record_members(found)
+        elif self._still_ours():
+            self._record_members(found)
+            # Forget the ones that are gone (or whose pid was reused) so the record
+            # stays as small as the process table.
+            self.descendants = {
+                pid: started
+                for pid, started in self.descendants.items()
+                if pid in table and table[pid][3] == started
+            }
+            self.descendants.update(_descendant_pids(self.pgid, table))
         elif self.start is not None:
             # Collected between reading the table and now: the listing cannot be
             # trusted, but the group may hold a member forked just before.
             self._release(status_lost=self.process.returncode is None)
+
+    def _record_members(self, found: dict[int, int]) -> None:
+        for pid, started in found.items():
+            self.members.setdefault(pid, started)
 
     def _release(self, *, status_lost: bool) -> None:
         """Stop assuming the leader reserves the group id (after a last look)."""
@@ -663,6 +707,41 @@ class _Leader:
         ):
             return  # the group id may belong to a stranger: never signal it
         _signal_group(self.pgid, number)
+
+    def spawned(self, table: dict[int, tuple[str, int, int, int]] | None = None):
+        """pid -> start time of what the check started outside the reach of its group
+        signals: the processes recorded below the leader while it ran, and every live
+        process carrying the check's marker.  The leader and the members its group
+        signals reach are left out, so a signal is not sent to them twice.  Identity
+        is checked by whoever signals."""
+        if table is None:
+            table = _process_table()
+        found = dict(self.descendants)
+        found.update(_marked_processes(self.token, table))
+        return {
+            pid: started
+            for pid, started in found.items()
+            if pid not in table or not self.owns(pid, table[pid][2], table[pid][3])
+        }
+
+    def kill_spawned(self) -> None:
+        """SIGKILL what the check started outside its group, and go on until none of
+        it is left running: a process that was just killed cannot fork again, but
+        one that forked before the signal reached it may have left a child."""
+        for _ in range(self.kill_rounds):
+            table = _process_table()
+            alive = {
+                pid: started
+                for pid, started in self.spawned(table).items()
+                if pid in table
+                and table[pid][3] == started
+                and table[pid][0] not in "ZX"
+            }
+            if not alive:
+                return
+            for pid, started in alive.items():
+                _signal_identified(pid, started, signal.SIGKILL)
+            time.sleep(0.01)
 
     def reap(self, timeout: float) -> None:
         """Collect the leader's exit status, waiting up to ``timeout`` seconds.
@@ -769,9 +848,43 @@ def _process_table() -> dict[int, tuple[str, int, int, int]]:
     return table
 
 
-def _descendant_pids(root: int) -> dict[int, int]:
+def _marked_processes(
+    token: str | None, table: dict[int, tuple[str, int, int, int]] | None = None
+) -> dict[int, int]:
+    """pid -> start time of the live processes whose initial environment carries the
+    check's marker, wherever they are in the process tree (Linux ``/proc``).
+
+    The whole variable is matched (name and exact value), so another check's marker
+    is never taken for ours.  Only the marker is looked for: nothing else of another
+    process's environment is kept.  Processes whose environment cannot be read (another
+    user's, or not dumpable) are skipped, and so is one that replaced its environment
+    when it started.
+    """
+    if token is None:
+        return {}
+    if table is None:
+        table = _process_table()
+    needle = b"\0" + f"{_TOKEN_VARIABLE}={token}".encode() + b"\0"
+    found: dict[int, int] = {}
+    for pid, (state, _, _, started) in table.items():
+        if state in "ZX":
+            continue
+        try:
+            with open(f"/proc/{pid}/environ", "rb") as handle:
+                environment = handle.read(_MAX_ENVIRONMENT_BYTES)
+        except OSError:
+            continue
+        if needle in b"\0" + environment + b"\0":
+            found[pid] = started
+    return found
+
+
+def _descendant_pids(
+    root: int, table: dict[int, tuple[str, int, int, int]] | None = None
+) -> dict[int, int]:
     """Best-effort process tree below ``root``: pid -> start time (Linux ``/proc``)."""
-    table = _process_table()
+    if table is None:
+        table = _process_table()
     children: dict[int, list[int]] = {}
     for pid, (_, ppid, _, _) in table.items():
         children.setdefault(ppid, []).append(pid)
