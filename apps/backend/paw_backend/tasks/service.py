@@ -35,7 +35,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import select, text, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.exc import StaleDataError
@@ -92,7 +92,15 @@ MAX_INPUT_DEPTH = 32
 # digits before the decimal point ("value overflows numeric format" beyond it).
 MAX_INPUT_INTEGER_DIGITS = 131072
 MAX_RESTORE_LOGS = 1000
+# ``restore`` returns every tool call of the current step that is still started
+# (a backend must be able to resume or abort each of them) plus at most this many
+# of the latest finished ones.
 MAX_RESTORE_TOOL_INVOCATIONS = 100
+# A step runs at most this many tool calls at once. ``begin_tool_invocation``
+# refuses the next one, which keeps what ``restore`` returns bounded even though
+# it never drops a started call.
+# PROVISIONAL: not set by the requirements; awaiting human confirmation (README).
+MAX_ACTIVE_TOOL_INVOCATIONS = 1000
 _TRUNCATED = "...[truncated]"
 
 # Called after a transition has been committed, with the event that was written.
@@ -594,7 +602,9 @@ class TaskService:
 
         Only the tool's name and the call's status are kept, never its arguments
         or output. The Tool Broker (PAW-031) may pass its own ``invocation_id``
-        so that both sides name the same call.
+        so that both sides name the same call. A step has at most
+        ``MAX_ACTIVE_TOOL_INVOCATIONS`` calls started at once; another one raises
+        ``TaskStepError`` until one of them finishes.
         """
         tool_name = _text("tool_name", tool_name, MAX_NAME_LENGTH)
         async with self._database.session() as session, session.begin():
@@ -609,6 +619,16 @@ class TaskService:
                 )
             if step.status is not StepStatus.RUNNING:
                 raise TaskStepError("The step is not running")
+            active = await session.scalar(
+                select(func.count())
+                .select_from(TaskToolInvocationRow)
+                .where(
+                    TaskToolInvocationRow.step_id == step.id,
+                    TaskToolInvocationRow.status == ToolInvocationStatus.STARTED,
+                )
+            )
+            if active >= MAX_ACTIVE_TOOL_INVOCATIONS:
+                raise TaskStepError("The step already runs too many tool calls")
             row = TaskToolInvocationRow(
                 id=invocation_id or uuid.uuid4(),
                 task_id=task.id,
@@ -757,7 +777,9 @@ class TaskService:
         """Rebuild the task's picture from the database alone.
 
         Read in one repeatable-read transaction so that state, current step,
-        logs and worktree / review / PR state belong to the same moment.
+        logs and worktree / review / PR state belong to the same moment. The
+        snapshot lists every started tool call of the current step and the
+        latest ``MAX_RESTORE_TOOL_INVOCATIONS`` finished ones.
         """
         if not 0 <= log_limit <= MAX_RESTORE_LOGS:
             raise InvalidCommandArgumentError(
@@ -797,19 +819,7 @@ class TaskService:
                 .all()
             )
             invocations = (
-                (
-                    await session.execute(
-                        select(TaskToolInvocationRow)
-                        .where(TaskToolInvocationRow.step_id == step.id)
-                        .order_by(
-                            TaskToolInvocationRow.started_at.desc(),
-                            TaskToolInvocationRow.id.desc(),
-                        )
-                        .limit(MAX_RESTORE_TOOL_INVOCATIONS)
-                    )
-                )
-                .scalars()
-                .all()
+                await self._restorable_invocations(session, step.id)
                 if step is not None
                 else []
             )
@@ -848,8 +858,50 @@ class TaskService:
                 previous_attempts=tuple(
                     _attempt(row) for row in attempts if row is not current
                 ),
-                tool_invocations=tuple(_tool(row) for row in reversed(invocations)),
+                tool_invocations=tuple(_tool(row) for row in invocations),
             )
+
+    @staticmethod
+    async def _restorable_invocations(
+        session: AsyncSession, step_id: int
+    ) -> list[TaskToolInvocationRow]:
+        """Every started call of the step and its latest finished ones, oldest first.
+
+        A started call is never dropped, however many calls started after it
+        (the number of started calls is bounded when they begin, see
+        ``MAX_ACTIVE_TOOL_INVOCATIONS``); only the finished history is cut off.
+        """
+        started = (
+            (
+                await session.execute(
+                    select(TaskToolInvocationRow).where(
+                        TaskToolInvocationRow.step_id == step_id,
+                        TaskToolInvocationRow.status == ToolInvocationStatus.STARTED,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        finished = (
+            (
+                await session.execute(
+                    select(TaskToolInvocationRow)
+                    .where(
+                        TaskToolInvocationRow.step_id == step_id,
+                        TaskToolInvocationRow.status != ToolInvocationStatus.STARTED,
+                    )
+                    .order_by(
+                        TaskToolInvocationRow.started_at.desc(),
+                        TaskToolInvocationRow.id.desc(),
+                    )
+                    .limit(MAX_RESTORE_TOOL_INVOCATIONS)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return sorted([*started, *finished], key=lambda row: (row.started_at, row.id))
 
     async def history(
         self, task_id: uuid.UUID, *, after_seq: int = 0, limit: int = 500

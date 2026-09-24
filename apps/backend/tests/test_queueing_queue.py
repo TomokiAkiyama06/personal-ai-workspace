@@ -5,8 +5,10 @@ import asyncio
 import unittest
 import uuid
 from datetime import timedelta, timezone
+from pathlib import Path
 
-from sqlalchemy import text
+from sqlalchemy import select, text
+from sqlalchemy.dialects import postgresql
 
 from paw_backend.tasks import TaskNotFoundError
 from paw_backend.tasks.queueing import (
@@ -70,6 +72,59 @@ class ConstructorTest(unittest.TestCase):
                 with self.assertRaises(InvalidQueueingArgumentError) as caught:
                     TaskQueue(object(), allow_explicit_now=bad)
                 self.assertEqual(caught.exception.parameter, "allow_explicit_now")
+
+
+class ClockContractTest(unittest.TestCase):
+    """The clock the queue really uses is the one its documents propose.
+
+    Decision 0007 (Proposed, awaiting human approval) and the README must not
+    describe a different policy than the code applies: approving a text that says
+    ``now()`` would approve a lease expiry judged by the time the transaction
+    started, which is stale after a wait for a row lock.
+    """
+
+    REPOSITORY = Path(__file__).resolve().parents[3]
+
+    def decision_section(self, number: int) -> str:
+        text = (
+            self.REPOSITORY / "docs/decisions/0007-task-queue-budget-and-loop-policy.md"
+        ).read_text(encoding="utf-8")
+        start = text.index(f"### {number}. ")
+        return text[start : text.index("\n### ", start)]
+
+    def test_an_instant_is_one_reading_of_clock_timestamp_in_a_cte(self):
+        current, lease_end = TaskQueue(object())._instants(None)
+        sql = str(select(current, lease_end).compile(dialect=postgresql.dialect()))
+        # The instant and the lease end both refer to the ONE reading in the CTE:
+        # written into the statement twice, the function would be read twice.
+        self.assertEqual(sql.count("WITH clock AS"), 1)
+        self.assertEqual(sql.count("clock_timestamp()"), 1)
+        self.assertEqual(sql.count("FROM clock"), 2)
+        for transaction_time in ("now()", "transaction_timestamp", "current_timestamp"):
+            self.assertNotIn(transaction_time, sql.lower())
+
+    def test_decision_0007_proposes_the_clock_the_queue_uses(self):
+        section = self.decision_section(6)
+        for phrase in (
+            "`clock_timestamp()`",
+            "CTE",
+            "SELECT ... FOR UPDATE",
+            "`heartbeat` / `release` / `complete`",
+        ):
+            self.assertIn(phrase, section)
+        # `now()` is named only as what was NOT chosen.
+        self.assertNotIn("Database の時計（`now()`）", section)
+        self.assertIn("`now()` は採らない", section)
+
+    def test_the_readme_describes_the_same_clock(self):
+        readme = (self.REPOSITORY / "apps/backend/README.md").read_text(
+            encoding="utf-8"
+        )
+        start = readme.index("**時計。**")
+        paragraph = readme[start : readme.index("\n**行ロック。**", start)]
+        for phrase in ("`clock_timestamp()`", "CTE", "SELECT ... FOR UPDATE"):
+            self.assertIn(phrase, paragraph)
+        self.assertNotIn("`now()` を使い", paragraph)
 
 
 @requires_postgres
