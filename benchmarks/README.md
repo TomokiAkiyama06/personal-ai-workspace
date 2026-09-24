@@ -69,10 +69,15 @@ do not become durable logs.
   `LC_CTYPE` and `TZ` are inherited, plus a private temporary `HOME` removed after the
   check.  Credential variables and every `GIT_*` selector are dropped.
 - On timeout the check's process group and the processes found below it in `/proc`
-  get `SIGTERM`, then `SIGKILL` after `term_grace_seconds` (2 s); pipe reading stops
-  after `drain_seconds` (1 s).  Leftover group members are also killed when a check
-  exits normally.  A process that daemonizes (double fork plus `setsid`) cannot be
-  found and can outlive the check; only a container or cgroup contains that.
+  get `SIGTERM`.  The grace period (`term_grace_seconds`, 2 s) applies to all of them,
+  not only the leader: the runner waits until the leader has exited and no group member
+  or known descendant is still running, so a descendant finishing its `SIGTERM` handler
+  is not cut short.  Whatever remains when it ends gets `SIGKILL`, and pipe reading
+  stops after `drain_seconds` (1 s).  Leftover group members are also killed when a
+  check exits normally.  A process that daemonizes (double fork plus `setsid`) cannot
+  be found and can outlive the check; only a container or cgroup contains that.
+- A check command needs a non-empty `argv[0]`; later arguments may be any string,
+  including `""` (for example `("python3", "-c", "")`), as the task schema allows.
 - The check log directory is created `0700` and the log `0600` at creation, opened
   with `O_NOFOLLOW`, and refused (`TestRunnerError`) if it is a symlink, has extra
   hard links, is not owned by the evaluator, or sits in a group/other-writable
