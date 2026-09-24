@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from paw_backend.app import create_app
 from paw_backend.errors import ApiError
 
-from .support import make_settings
+from .support import make_client, make_settings
 
 
 class Payload(BaseModel):
@@ -32,7 +32,7 @@ def build_client() -> TestClient:
         raise RuntimeError("internal detail that must not reach the client")
 
     app.include_router(router)
-    return TestClient(app)
+    return make_client(app)
 
 
 class ErrorResponseTest(unittest.TestCase):

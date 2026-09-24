@@ -120,6 +120,51 @@ class SettingsTest(unittest.TestCase):
             with self.subTest(host=host):
                 self.assertEqual(make_settings(host=host).binds_loopback_only, loopback)
 
+    def test_new_defaults_are_restrictive(self):
+        settings = settings_from_env()
+        self.assertEqual(settings.allowed_hosts, ["localhost", "127.0.0.1", "[::1]"])
+        self.assertEqual(settings.allowed_origins, [])
+        self.assertEqual(settings.event_max_subscribers, 100)
+        self.assertEqual(settings.shutdown_timeout_seconds, 5)
+
+    def test_hosts_and_origins_are_comma_separated_and_normalized(self):
+        settings = settings_from_env(
+            PAW_ALLOWED_HOSTS="Workspace.Example.org, localhost,[::1]",
+            PAW_ALLOWED_ORIGINS="https://App.example.org:443,http://localhost:5173/",
+        )
+        self.assertEqual(
+            settings.allowed_hosts, ["workspace.example.org", "localhost", "[::1]"]
+        )
+        self.assertEqual(
+            settings.allowed_origins,
+            ["https://app.example.org", "http://localhost:5173"],
+        )
+
+    def test_invalid_hosts_and_origins_are_rejected(self):
+        for name, value in (
+            ("PAW_ALLOWED_HOSTS", ""),
+            ("PAW_ALLOWED_HOSTS", "*"),
+            ("PAW_ALLOWED_HOSTS", "https://workspace.example.org"),
+            ("PAW_ALLOWED_HOSTS", "workspace.example.org:443"),
+            ("PAW_ALLOWED_HOSTS", "workspace.example.org/path"),
+            ("PAW_ALLOWED_ORIGINS", "workspace.example.org"),
+            ("PAW_ALLOWED_ORIGINS", "https://a.example.org/x"),
+            ("PAW_ALLOWED_ORIGINS", "null"),
+        ):
+            with self.subTest(name=name, value=value):
+                with self.assertRaises(ValidationError):
+                    settings_from_env(**{name: value})
+
+    def test_rejects_out_of_range_limits(self):
+        for name, value in (
+            ("PAW_EVENT_MAX_SUBSCRIBERS", "0"),
+            ("PAW_SHUTDOWN_TIMEOUT_SECONDS", "0"),
+            ("PAW_SHUTDOWN_TIMEOUT_SECONDS", "1000"),
+        ):
+            with self.subTest(name=name, value=value):
+                with self.assertRaises(ValidationError):
+                    settings_from_env(**{name: value})
+
     def test_settings_are_immutable(self):
         with self.assertRaises(ValidationError):
             make_settings().port = 1

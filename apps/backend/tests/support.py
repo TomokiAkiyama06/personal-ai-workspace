@@ -4,6 +4,9 @@ import asyncio
 import os
 from unittest.mock import patch
 
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
 from paw_backend.config import Settings
 from paw_backend.db import Database, DatabaseStatus
 
@@ -19,6 +22,17 @@ def make_settings(**overrides) -> Settings:
     """Build Settings from ``overrides`` only, ignoring any ``PAW_*`` in the env."""
     with paw_environment():
         return Settings(**overrides)
+
+
+# TestClient always dials `ws://testserver` for relative WebSocket paths, so the
+# tests spell the URL out to send a Host header that the default settings allow.
+WEBSOCKET_URL = "ws://localhost/api/v1/events/ws"
+
+
+def make_client(app: FastAPI, **kwargs) -> TestClient:
+    """A TestClient that talks to ``localhost``, a Host the default settings allow."""
+    kwargs.setdefault("base_url", "http://localhost")
+    return TestClient(app, **kwargs)
 
 
 class FakeDatabase(Database):
@@ -52,9 +66,9 @@ async def read_sse(app, path: str, chunks: int, limit: float = 5.0):
         "path": path,
         "raw_path": path.encode(),
         "query_string": b"",
-        "headers": [(b"host", b"testserver")],
+        "headers": [(b"host", b"localhost")],
         "client": ("127.0.0.1", 50000),
-        "server": ("testserver", 80),
+        "server": ("localhost", 80),
     }
     disconnected = asyncio.Event()
     start = None

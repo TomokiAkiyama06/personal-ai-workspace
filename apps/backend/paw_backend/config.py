@@ -4,16 +4,20 @@ Every value comes from a ``PAW_``-prefixed environment variable. Nothing is
 read from files in the repository, and no secret has a default value.
 """
 
+import re
 from ipaddress import ip_address
 from pathlib import Path
-from typing import Self
+from typing import Annotated, Self
 
 from pydantic import Field, SecretStr, field_validator, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
 
+from paw_backend.security import normalize_origin
+
 _DRIVER = "postgresql+psycopg"
+_HOST = re.compile(r"\[[0-9a-f:.]+\]|[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?")
 
 
 class Settings(BaseSettings):
@@ -34,10 +38,23 @@ class Settings(BaseSettings):
     tls_certfile: Path | None = None
     tls_keyfile: Path | None = None
     allow_plaintext_http: bool = False
+    # Sent only on HTTPS responses; see SecurityHeadersMiddleware.
     hsts_max_age_seconds: int = Field(default=31_536_000, ge=0)
     # Seconds Uvicorn waits for open connections (SSE, WebSocket) on shutdown
     # before it cancels them.
     shutdown_timeout_seconds: int = Field(default=5, ge=1, le=300)
+
+    # Host header allow-list (comma-separated in the environment). The default
+    # only serves loopback names; a reverse-proxy deployment must list the
+    # public host name. Without this check DNS rebinding can reach the API.
+    allowed_hosts: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["localhost", "127.0.0.1", "[::1]"], min_length=1
+    )
+    # Extra origins that may open the event WebSocket (comma-separated). An
+    # origin equal to the request's own Host is always accepted; other browser
+    # origins are refused. Requests without an Origin header (non-browser
+    # clients) are not affected.
+    allowed_origins: Annotated[list[str], NoDecode] = Field(default_factory=list)
 
     # PostgreSQL. ``None`` keeps the app running; readiness then reports
     # ``not_configured`` instead of the process refusing to start.
@@ -48,6 +65,7 @@ class Settings(BaseSettings):
     # Event path (SSE / WebSocket).
     event_heartbeat_seconds: float = Field(default=15.0, gt=0)
     event_queue_size: int = Field(default=100, ge=1)
+    event_max_subscribers: int = Field(default=100, ge=1)
 
     log_level: str = "info"
 
@@ -69,6 +87,34 @@ class Settings(BaseSettings):
             raise ValueError(f"database_url must use postgresql:// or {_DRIVER}://")
         url = url.set(drivername=_DRIVER)
         return SecretStr(url.render_as_string(hide_password=False))
+
+    @field_validator("allowed_hosts", "allowed_origins", mode="before")
+    @classmethod
+    def _split_comma_separated(cls, value: object) -> object:
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return value
+
+    @field_validator("allowed_hosts")
+    @classmethod
+    def _validate_hosts(cls, value: list[str]) -> list[str]:
+        hosts = [host.strip().lower() for host in value]
+        if not all(_HOST.fullmatch(host) for host in hosts):
+            raise ValueError(
+                "allowed_hosts entries must be host names or IP addresses "
+                "without scheme, port or path"
+            )
+        return hosts
+
+    @field_validator("allowed_origins")
+    @classmethod
+    def _validate_origins(cls, value: list[str]) -> list[str]:
+        origins = [normalize_origin(origin) for origin in value]
+        if None in origins:
+            raise ValueError(
+                "allowed_origins entries must look like https://host[:port]"
+            )
+        return [origin for origin in origins if origin is not None]
 
     @field_validator("log_level")
     @classmethod

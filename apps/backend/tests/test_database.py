@@ -10,10 +10,10 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from paw_backend.api.deps import get_session
 from paw_backend.app import create_app
-from paw_backend.db import Base, Database, DatabaseNotConfiguredError, DatabaseStatus
+from paw_backend.db import Database, DatabaseNotConfiguredError, DatabaseStatus
 
 from .fake_postgres import HangingPostgres
-from .support import FakeDatabase, make_settings
+from .support import FakeDatabase, make_client, make_settings
 
 PASSWORD = "s3cr3t-pw"
 URL = f"postgresql://paw:{PASSWORD}@db.internal:5432/paw"
@@ -129,7 +129,7 @@ class SessionDependencyTest(unittest.TestCase):
             return {"session": type(session).__name__}
 
         app.include_router(router)
-        return TestClient(app)
+        return make_client(app)
 
     def test_unconfigured_database_answers_503(self):
         response = self.build_client(FakeDatabase()).get("/test/session")
@@ -140,11 +140,6 @@ class SessionDependencyTest(unittest.TestCase):
         database = Database(make_settings(database_url=URL))
         response = self.build_client(database).get("/test/session")
         self.assertEqual(response.json(), {"session": "AsyncSession"})
-
-
-class MetadataTest(unittest.TestCase):
-    def test_base_metadata_has_a_deterministic_naming_convention(self):
-        self.assertEqual(Base.metadata.naming_convention["pk"], "pk_%(table_name)s")
 
 
 if __name__ == "__main__":

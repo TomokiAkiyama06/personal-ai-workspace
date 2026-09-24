@@ -56,16 +56,29 @@ class Subscription:
         return await self._queue.get()
 
 
-class EventBus:
-    """Fan-out of published events to every current subscriber."""
+class EventBusFull(Exception):
+    """The bus already has its maximum number of subscribers."""
 
-    def __init__(self, queue_size: int = 100) -> None:
+
+class EventBus:
+    """Fan-out of published events to every current subscriber.
+
+    The number of subscribers is capped: every connected client holds a queue
+    and a task, so an unbounded number would let a client exhaust memory.
+    """
+
+    def __init__(self, queue_size: int = 100, max_subscribers: int = 100) -> None:
         self._queue_size = queue_size
+        self._max_subscribers = max_subscribers
         self._subscriptions: set[Subscription] = set()
 
     @property
     def subscriber_count(self) -> int:
         return len(self._subscriptions)
+
+    @property
+    def is_full(self) -> bool:
+        return len(self._subscriptions) >= self._max_subscribers
 
     def publish(self, event: Event) -> None:
         for subscription in tuple(self._subscriptions):
@@ -73,6 +86,9 @@ class EventBus:
 
     @contextmanager
     def subscribe(self) -> Iterator[Subscription]:
+        """Register a subscriber; raises ``EventBusFull`` at the cap."""
+        if self.is_full:
+            raise EventBusFull
         subscription = Subscription(self._queue_size)
         self._subscriptions.add(subscription)
         try:

@@ -13,7 +13,11 @@ from paw_backend.config import Settings
 from paw_backend.db import Database
 from paw_backend.errors import ERROR_RESPONSES, register_error_handlers
 from paw_backend.events import EventBus, publish_heartbeats
-from paw_backend.middleware import RequestIdMiddleware, SecurityHeadersMiddleware
+from paw_backend.middleware import (
+    HostValidationMiddleware,
+    RequestIdMiddleware,
+    SecurityHeadersMiddleware,
+)
 
 
 def create_app(
@@ -29,7 +33,9 @@ def create_app(
     """
     settings = settings or Settings()
     database = database or Database(settings)
-    event_bus = event_bus or EventBus(settings.event_queue_size)
+    event_bus = event_bus or EventBus(
+        settings.event_queue_size, settings.event_max_subscribers
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -60,10 +66,14 @@ def create_app(
     app.state.event_bus = event_bus
 
     register_error_handlers(app)
-    # Added last = outermost. Request ID wraps everything, so the error
-    # middleware inside it can read the ID and every response carries it.
+    # Added last = outermost. Request ID wraps everything, so the middleware
+    # inside it can read the ID and every response carries it; the security
+    # headers also cover the Host-validation error.
+    app.add_middleware(HostValidationMiddleware, allowed_hosts=settings.allowed_hosts)
     app.add_middleware(
-        SecurityHeadersMiddleware, hsts_max_age_seconds=settings.hsts_max_age_seconds
+        SecurityHeadersMiddleware,
+        hsts_max_age_seconds=settings.hsts_max_age_seconds,
+        tls_enabled=settings.tls_enabled,
     )
     app.add_middleware(RequestIdMiddleware)
 

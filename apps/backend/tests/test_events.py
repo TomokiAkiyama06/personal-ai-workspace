@@ -2,13 +2,25 @@ import asyncio
 import json
 import unittest
 
-from fastapi.testclient import TestClient
 from pydantic import ValidationError
+from starlette.websockets import WebSocketDisconnect
 
 from paw_backend.app import create_app
-from paw_backend.events import Event, EventBus, EventType, publish_heartbeats
+from paw_backend.events import (
+    Event,
+    EventBus,
+    EventBusFull,
+    EventType,
+    publish_heartbeats,
+)
 
-from .support import make_settings, read_sse, wait_until
+from .support import (
+    WEBSOCKET_URL,
+    make_client,
+    make_settings,
+    read_sse,
+    wait_until,
+)
 
 
 def heartbeat() -> Event:
@@ -67,6 +79,18 @@ class EventBusTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await slow.get(), events[1])
             self.assertEqual(await slow.get(), events[2])
 
+    async def test_subscriber_cap_is_enforced_and_released(self):
+        bus = EventBus(max_subscribers=2)
+        with bus.subscribe(), bus.subscribe():
+            self.assertTrue(bus.is_full)
+            with self.assertRaises(EventBusFull):
+                with bus.subscribe():
+                    self.fail("a third subscriber must be refused")
+            self.assertEqual(bus.subscriber_count, 2)
+        self.assertFalse(bus.is_full)
+        with bus.subscribe():
+            self.assertEqual(bus.subscriber_count, 1)
+
     async def test_heartbeat_publisher_emits_system_heartbeats(self):
         bus = EventBus()
         with bus.subscribe() as subscription:
@@ -84,8 +108,8 @@ class EventBusTest(unittest.IsolatedAsyncioTestCase):
 class WebSocketEventsTest(unittest.TestCase):
     def test_websocket_receives_connected_then_heartbeat(self):
         app = create_app(make_settings(event_heartbeat_seconds=0.02))
-        with TestClient(app) as client:
-            with client.websocket_connect("/api/v1/events/ws") as websocket:
+        with make_client(app) as client:
+            with client.websocket_connect(WEBSOCKET_URL) as websocket:
                 connected = websocket.receive_json()
                 beat = websocket.receive_json()
         self.assertEqual(connected["type"], "system.connected")
@@ -94,8 +118,8 @@ class WebSocketEventsTest(unittest.TestCase):
 
     def test_client_messages_are_ignored(self):
         app = create_app(make_settings(event_heartbeat_seconds=0.02))
-        with TestClient(app) as client:
-            with client.websocket_connect("/api/v1/events/ws") as websocket:
+        with make_client(app) as client:
+            with client.websocket_connect(WEBSOCKET_URL) as websocket:
                 websocket.receive_json()
                 websocket.send_text("ignored")
                 websocket.send_bytes(b"ignored")
@@ -104,14 +128,92 @@ class WebSocketEventsTest(unittest.TestCase):
     def test_disconnect_removes_the_subscription(self):
         app = create_app(make_settings(event_heartbeat_seconds=0.02))
         bus = app.state.event_bus
-        with TestClient(app) as client:
-            with client.websocket_connect("/api/v1/events/ws") as websocket:
+        with make_client(app) as client:
+            with client.websocket_connect(WEBSOCKET_URL) as websocket:
                 websocket.receive_json()
                 self.assertEqual(bus.subscriber_count, 1)
             self.assertTrue(
                 asyncio.run(wait_until(lambda: bus.subscriber_count == 0)),
                 "subscription was not released after the client disconnected",
             )
+
+
+class WebSocketOriginTest(unittest.TestCase):
+    def connect(self, origin: str | None = None, **settings):
+        client = make_client(create_app(make_settings(**settings)))
+        headers = {} if origin is None else {"Origin": origin}
+        with client.websocket_connect(WEBSOCKET_URL, headers=headers) as websocket:
+            return websocket.receive_json()["type"]
+
+    def test_clients_without_an_origin_header_are_accepted(self):
+        self.assertEqual(self.connect(), "system.connected")
+
+    def test_the_requests_own_origin_is_accepted(self):
+        self.assertEqual(self.connect("http://localhost"), "system.connected")
+        self.assertEqual(self.connect("https://localhost"), "system.connected")
+
+    def test_listed_origins_are_accepted(self):
+        allowed = {"allowed_origins": "https://app.example.org:8443"}
+        self.assertEqual(
+            self.connect("https://app.example.org:8443", **allowed), "system.connected"
+        )
+
+    def test_cross_origin_browser_handshakes_are_refused(self):
+        allowed = {"allowed_origins": "https://app.example.org"}
+        for origin in (
+            "https://evil.example",
+            "http://localhost.evil.example",
+            "http://localhost:9999",
+            "https://app.example.org:8443",
+            "null",
+            "not an origin",
+        ):
+            with self.subTest(origin=origin):
+                with self.assertRaises(WebSocketDisconnect) as caught:
+                    self.connect(origin, **allowed)
+                self.assertEqual(caught.exception.code, 1008)
+
+    def test_a_refused_handshake_does_not_subscribe(self):
+        app = create_app(make_settings())
+        with self.assertRaises(WebSocketDisconnect):
+            with make_client(app).websocket_connect(
+                WEBSOCKET_URL, headers={"Origin": "https://evil.example"}
+            ):
+                pass
+        self.assertEqual(app.state.event_bus.subscriber_count, 0)
+
+
+class SubscriberCapTest(unittest.TestCase):
+    def test_sse_over_the_cap_gets_a_503_error_body(self):
+        app = create_app(make_settings(event_max_subscribers=1))
+        with app.state.event_bus.subscribe():
+            response = make_client(app).get("/api/v1/events/stream")
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["error"]["code"], "event_capacity_reached")
+        self.assertEqual(
+            response.json()["error"]["request_id"], response.headers["x-request-id"]
+        )
+
+    def test_websocket_over_the_cap_is_closed_with_1013(self):
+        app = create_app(make_settings(event_max_subscribers=1))
+        with app.state.event_bus.subscribe():
+            with make_client(app).websocket_connect(WEBSOCKET_URL) as websocket:
+                with self.assertRaises(WebSocketDisconnect) as caught:
+                    websocket.receive_json()
+            # The refused client did not take a slot; only the held one remains.
+            self.assertEqual(app.state.event_bus.subscriber_count, 1)
+        self.assertEqual(caught.exception.code, 1013)
+
+    def test_a_slot_is_available_again_after_a_client_leaves(self):
+        app = create_app(make_settings(event_max_subscribers=1))
+        client = make_client(app)
+        with client.websocket_connect(WEBSOCKET_URL) as websocket:
+            websocket.receive_json()
+        self.assertTrue(
+            asyncio.run(wait_until(lambda: app.state.event_bus.subscriber_count == 0))
+        )
+        with client.websocket_connect(WEBSOCKET_URL) as websocket:
+            self.assertEqual(websocket.receive_json()["type"], "system.connected")
 
 
 class ServerSentEventsTest(unittest.IsolatedAsyncioTestCase):

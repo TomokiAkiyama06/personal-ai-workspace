@@ -15,13 +15,12 @@ import os
 import unittest
 
 from alembic import command
-from fastapi.testclient import TestClient
 from sqlalchemy import text
 
 from paw_backend.app import create_app
 from paw_backend.db import Database, DatabaseStatus
 
-from .support import make_settings, paw_environment
+from .support import make_client, make_settings, paw_environment
 from .test_migrations import offline_config
 
 TEST_DATABASE_URL = os.environ.get("PAW_TEST_DATABASE_URL")
@@ -43,7 +42,7 @@ class PostgresIntegrationTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_readiness_endpoint_is_ok(self):
         def request():
-            with TestClient(create_app(self.settings)) as client:
+            with make_client(create_app(self.settings)) as client:
                 return client.get("/api/v1/health/ready")
 
         response = await asyncio.to_thread(request)

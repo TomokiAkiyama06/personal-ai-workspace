@@ -1,12 +1,10 @@
 import logging
 import unittest
 
-from fastapi.testclient import TestClient
-
 from paw_backend.app import create_app
 from paw_backend.db import Database, DatabaseStatus
 
-from .support import FakeDatabase, make_settings
+from .support import FakeDatabase, make_client, make_settings
 
 PASSWORD = "s3cr3t-pw"
 
@@ -16,7 +14,7 @@ class LivenessTest(unittest.TestCase):
         for status in DatabaseStatus:
             with self.subTest(status=status):
                 app = create_app(make_settings(), database=FakeDatabase(status))
-                response = TestClient(app).get("/api/v1/health")
+                response = make_client(app).get("/api/v1/health")
                 self.assertEqual(response.status_code, 200)
                 self.assertEqual(response.json(), {"status": "ok"})
 
@@ -25,7 +23,7 @@ class LivenessTest(unittest.TestCase):
             database_url=f"postgresql://paw:{PASSWORD}@127.0.0.1:1/paw"
         )
         # Entering the client context runs the lifespan (application startup).
-        with TestClient(create_app(settings)) as client:
+        with make_client(create_app(settings)) as client:
             response = client.get("/api/v1/health")
         self.assertEqual(response.status_code, 200)
 
@@ -33,7 +31,7 @@ class LivenessTest(unittest.TestCase):
 class ReadinessTest(unittest.TestCase):
     def get_ready(self, database: Database):
         app = create_app(make_settings(), database=database)
-        return TestClient(app).get("/api/v1/health/ready")
+        return make_client(app).get("/api/v1/health/ready")
 
     def test_ready_when_the_database_answers(self):
         response = self.get_ready(FakeDatabase(DatabaseStatus.OK))
@@ -60,7 +58,7 @@ class ReadinessTest(unittest.TestCase):
 
     def test_default_database_without_url_reports_not_configured(self):
         app = create_app(make_settings())
-        response = TestClient(app).get("/api/v1/health/ready")
+        response = make_client(app).get("/api/v1/health/ready")
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["checks"], {"database": "not_configured"})
 
@@ -72,7 +70,7 @@ class ReadinessTest(unittest.TestCase):
         )
         app = create_app(settings)
         with self.assertLogs("paw_backend.db", level=logging.WARNING) as logs:
-            response = TestClient(app).get("/api/v1/health/ready")
+            response = make_client(app).get("/api/v1/health/ready")
 
         self.assertEqual(response.status_code, 503)
         self.assertEqual(
