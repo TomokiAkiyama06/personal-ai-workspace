@@ -9,9 +9,11 @@ differ from the ones the application declares.
 """
 
 import ast
+import os
 from pathlib import Path
 import re
 import sys
+import tempfile
 import tomllib
 import unittest
 
@@ -46,6 +48,36 @@ def requirements_ci():
     return [parse_pin(line) for line in lines if line.strip()]
 
 
+# Only the backend's own code is scanned. A developer's `.venv` (the README
+# tells them to create one in apps/backend), caches and other hidden or
+# generated directories contain third-party code that is not ours.
+SCANNED_DIRECTORIES = ("paw_backend", "tests", "migrations")
+FIRST_PARTY = {"paw_backend", "tests", "migrations"}
+
+
+def imported_third_party_packages(backend):
+    """Normalized names of the third-party packages the backend code imports."""
+    imported = set()
+    for directory in SCANNED_DIRECTORIES:
+        for folder, subfolders, files in os.walk(backend / directory):
+            subfolders[:] = [
+                name
+                for name in subfolders
+                if not name.startswith(".") and name != "__pycache__"
+            ]
+            for name in files:
+                if not name.endswith(".py"):
+                    continue
+                path = Path(folder, name)
+                for node in ast.walk(ast.parse(path.read_text(), str(path))):
+                    if isinstance(node, ast.Import):
+                        imported.update(a.name.split(".")[0] for a in node.names)
+                    elif isinstance(node, ast.ImportFrom) and not node.level:
+                        imported.add(node.module.split(".")[0])
+    third_party = imported - set(sys.stdlib_module_names) - FIRST_PARTY
+    return {re.sub(r"[-_.]+", "-", name) for name in third_party}
+
+
 def backend_pins():
     project = tomllib.loads((BACKEND / "pyproject.toml").read_text())
     specs = project["project"]["dependencies"] + project["dependency-groups"]["dev"]
@@ -71,17 +103,39 @@ class DependencyPinsTest(unittest.TestCase):
 
     def test_backend_imports_only_declared_third_party_packages(self):
         declared = {name for name, _, _ in backend_pins()}
-        first_party = {"paw_backend", "tests", "migrations"}
-        imported = set()
-        for path in BACKEND.rglob("*.py"):
-            for node in ast.walk(ast.parse(path.read_text(), str(path))):
-                if isinstance(node, ast.Import):
-                    imported.update(alias.name.split(".")[0] for alias in node.names)
-                elif isinstance(node, ast.ImportFrom) and not node.level:
-                    imported.add(node.module.split(".")[0])
-        third_party = imported - set(sys.stdlib_module_names) - first_party
-        undeclared = {re.sub(r"[-_.]+", "-", name) for name in third_party} - declared
+        undeclared = imported_third_party_packages(BACKEND) - declared
         self.assertEqual(undeclared, set(), "imported but not pinned in pyproject.toml")
+
+
+class ImportScanTest(unittest.TestCase):
+    def write(self, root, relative, source):
+        path = Path(root, relative)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(source)
+
+    def test_scans_only_the_backend_code_directories(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.write(directory, "paw_backend/app.py", "import fastapi\nimport os\n")
+            self.write(directory, "tests/test_x.py", "from httpx import Client\n")
+            self.write(directory, "migrations/env.py", "from alembic import context\n")
+            # None of these belong to the backend, however they got there.
+            self.write(directory, ".venv/lib/site.py", "import numpy\n")
+            self.write(directory, "paw_backend/.hidden/x.py", "import pandas\n")
+            self.write(directory, "paw_backend/__pycache__/y.py", "import scipy\n")
+            self.write(directory, "build/z.py", "import requests\n")
+            found = imported_third_party_packages(Path(directory))
+        self.assertEqual(found, {"fastapi", "httpx", "alembic"})
+
+    def test_first_party_and_relative_imports_are_not_third_party(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.write(
+                directory,
+                "tests/test_x.py",
+                "from paw_backend.app import create_app\nfrom .support import x\n"
+                "from tests import support\nimport pydantic_settings\n",
+            )
+            found = imported_third_party_packages(Path(directory))
+        self.assertEqual(found, {"pydantic-settings"})
 
 
 if __name__ == "__main__":
