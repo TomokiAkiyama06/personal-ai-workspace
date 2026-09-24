@@ -1,18 +1,18 @@
-"""Pure rules of the provenance store (PAW-052): no database, no clock, no I/O.
+"""THROWAWAY reference implementation of rules.py (never committed)."""
 
-Five small functions. Each is a stub with an exact contract; the tests in
-``tests/test_provenance_rules.py`` pin every rule with concrete values.
-"""
-
+import hashlib
+import unicodedata
 from collections.abc import Sequence
 from uuid import UUID
 
+from paw_backend.research.provenance.errors import (
+    InputProblem,
+    InvalidProvenanceInputError,
+)
 from paw_backend.research.provenance.records import (
-    Claim,
     EntityKind,
-    Relation,
     SourceLink,
-    SourceLinkInput,
+    Stance,
     TracedClaim,
 )
 
@@ -42,7 +42,11 @@ def normalize_claim_text(text: str) -> str:
         normalize_claim_text("a\\u00a0b\\r\\nc")            == "a b c"
         normalize_claim_text("x") == normalize_claim_text(normalize_claim_text("X"))
     """
-    raise NotImplementedError("PAW-052 stub")
+    if not isinstance(text, str):
+        raise TypeError("text must be a str")
+    value = unicodedata.normalize("NFKC", text).casefold()
+    value = unicodedata.normalize("NFKC", value)
+    return " ".join(value.split())
 
 
 def claim_fingerprint(text: str) -> str:
@@ -61,7 +65,7 @@ def claim_fingerprint(text: str) -> str:
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         claim_fingerprint("ABC  ") == claim_fingerprint("abc")
     """
-    raise NotImplementedError("PAW-052 stub")
+    return hashlib.sha256(normalize_claim_text(text).encode("utf-8")).hexdigest()
 
 
 def order_pair(first: UUID, second: UUID) -> tuple[UUID, UUID]:
@@ -77,12 +81,14 @@ def order_pair(first: UUID, second: UUID) -> tuple[UUID, UUID]:
         one = UUID(int=1); two = UUID(int=2)
         order_pair(two, one) == (one, two)
     """
-    raise NotImplementedError("PAW-052 stub")
+    if not isinstance(first, UUID) or not isinstance(second, UUID):
+        raise TypeError("ids must be UUIDs")
+    if first == second:
+        raise ValueError("ids must differ")
+    return (first, second) if first.int < second.int else (second, first)
 
 
-def merge_duplicate_sources(
-    links: Sequence[SourceLinkInput],
-) -> tuple[SourceLinkInput, ...]:
+def merge_duplicate_sources(links):
     """Merge the entries of one ``record_claim`` call that name the same source.
 
     Two entries name the same source when ``(source.locator,
@@ -104,7 +110,15 @@ def merge_duplicate_sources(
     Example: entries ``[A(supports), B(supports), A(supports)]`` give
     ``(A, B)``; ``[A(supports), A(contradicts)]`` raises.
     """
-    raise NotImplementedError("PAW-052 stub")
+    seen = {}
+    for link in links:
+        key = (link.source.locator, link.source.content_hash)
+        first = seen.get(key)
+        if first is None:
+            seen[key] = link
+        elif first.stance is not link.stance:
+            raise InvalidProvenanceInputError("sources", InputProblem.CONFLICT)
+    return tuple(seen.values())
 
 
 def order_links(links: Sequence[SourceLink]) -> tuple[SourceLink, ...]:
@@ -119,12 +133,13 @@ def order_links(links: Sequence[SourceLink]) -> tuple[SourceLink, ...]:
     ``(supports, 09:00)``, ``(supports, 11:00)`` come out as
     ``(supports, 11:00)``, ``(supports, 09:00)``, ``(contradicts, 10:00)``.
     """
-    raise NotImplementedError("PAW-052 stub")
+    ranked = sorted(links, key=lambda link: link.source.id.int)
+    ranked.sort(key=lambda link: link.source.fetched_at, reverse=True)
+    ranked.sort(key=lambda link: 0 if link.stance is Stance.SUPPORTS else 1)
+    return tuple(ranked)
 
 
-def order_relations(
-    entity: EntityKind, entity_id: UUID, relations: Sequence[Relation]
-) -> tuple[Relation, ...]:
+def order_relations(entity, entity_id, relations):
     """The relations that involve the claim or source ``entity_id``, in display order.
 
     * Keep a relation only when ``relation.entity is entity`` and ``entity_id``
@@ -137,14 +152,22 @@ def order_relations(
     * Returns a new tuple; the input is not modified. Nothing matching gives
       ``()``.
     """
-    raise NotImplementedError("PAW-052 stub")
+    unique = {}
+    for relation in relations:
+        if relation.entity is not entity:
+            continue
+        if entity_id not in (relation.low_id, relation.high_id):
+            continue
+        unique.setdefault((relation.low_id, relation.high_id), relation)
+    return tuple(
+        sorted(
+            unique.values(),
+            key=lambda r: (r.kind.value, r.other(entity_id).int),
+        )
+    )
 
 
-def assemble_traced_claims(
-    claims: Sequence[Claim],
-    links: Sequence[SourceLink],
-    relations: Sequence[Relation],
-) -> tuple[TracedClaim, ...]:
+def assemble_traced_claims(claims, links, relations):
     """Group flat query results into one :class:`TracedClaim` per claim.
 
     * The result has one ``TracedClaim`` per claim, in the order of ``claims``.
@@ -158,4 +181,20 @@ def assemble_traced_claims(
     * A claim without links or relations gets empty tuples.
     * Inputs are not modified. Empty ``claims`` gives ``()``.
     """
-    raise NotImplementedError("PAW-052 stub")
+    by_claim = {}
+    for link in links:
+        by_claim.setdefault(link.claim_id, {}).setdefault(link.source.id, link)
+    result = []
+    seen = set()
+    for claim in claims:
+        if claim.id in seen:
+            continue
+        seen.add(claim.id)
+        result.append(
+            TracedClaim(
+                claim=claim,
+                links=order_links(list(by_claim.get(claim.id, {}).values())),
+                relations=order_relations(EntityKind.CLAIM, claim.id, relations),
+            )
+        )
+    return tuple(result)

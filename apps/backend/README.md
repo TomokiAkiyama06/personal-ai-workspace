@@ -1433,7 +1433,8 @@ Endpoint は次の Issue の仕事です。次の対応を提案します（未�
 
 `rules.py`（純粋な規則）と `queries.py`（DB の文）は、仕様（Contract と Test）を先に固定し、その Test だけを合格基準にして書く前提の Module です。
 それ以外（Model、Migration、`validation.py`、`records.py`、`store.py`、Test）は仕様の側が書いています。
-**［未記入: `rules.py` と `queries.py` を誰が実装したかは、人間の Orchestrator が確認した後にこの 1 文を書き換えます。］**
+**最終的な実装は Claude の参照実装です。** ローカルの Qwen3-Coder-30B-A3B に、16 関数の実装を 2 回（各約 265 回の Tool 呼び出し）任せましたが、収束しませんでした（1 回目は SQL の文の構文を壊し、2 回目も構文エラーが残り、全 Test の Module が Import できない状態でした）。
+AGENTS.md のとおり、同じ失敗を繰り返したのでエスカレーションし、仕様の Docstring を保ったまま、Claude の参照実装（変異 76 個のうち 75 個を Test が検出。残る 1 個は同値）に置き換えています。ローカルモデルの成果物は、最終物に含まれていません。
 
 ### 制限と未確認の点
 

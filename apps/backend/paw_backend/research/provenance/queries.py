@@ -1,55 +1,32 @@
-"""The database statements of the provenance store (PAW-052).
+"""THROWAWAY reference implementation of queries.py (never committed)."""
 
-Nine small functions, each one job. They run inside a transaction that
-``ProvenanceStore`` opens (``session``); they never commit, never open their own
-transaction and never sleep or retry. The store validates every argument, reads
-the clock once and takes the locks before it calls them, so these functions can
-trust their arguments (already-validated values, ids that exist in the project).
+from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert
 
-Rules that hold for all of them:
-
-* Use SQLAlchemy Core with the table objects of ``models.py`` (``SOURCES``,
-  ``CLAIMS``, ``CLAIM_SOURCES``, ``CLAIM_USES``) and ``relation_table`` from
-  ``mapping.py``; bind every value as a parameter (never format a value into
-  SQL); build results with the helpers of ``mapping.py``.
-* Every statement is restricted to ``project_id`` (``WHERE ... project_id =
-  :project_id``): rows of another project are invisible. The database also
-  refuses a link between two projects (composite foreign keys), but do not rely
-  on it.
-* The application role may only SELECT and INSERT (no UPDATE, no DELETE), so
-  "create it if it is absent" is ``INSERT ... ON CONFLICT ... DO NOTHING`` (use
-  ``sqlalchemy.dialects.postgresql.insert(...).on_conflict_do_nothing(
-  index_elements=[...])``) followed, when nothing was inserted, by a SELECT of
-  the existing row. Never ``ON CONFLICT DO UPDATE``.
-* Errors: raise only the ones documented here. Catch nothing else; a database
-  error propagates unchanged.
-"""
-
-from collections.abc import Sequence
-from datetime import datetime
-from uuid import UUID
-
-from sqlalchemy.ext.asyncio import AsyncSession
-
+from paw_backend.research.provenance.errors import (
+    ClaimNotFoundError,
+    ProvenanceConflictError,
+    SourceNotFoundError,
+)
+from paw_backend.research.provenance.mapping import (
+    claim_from_row,
+    link_from_row,
+    relation_from_row,
+    relation_table,
+    source_from_row,
+)
+from paw_backend.research.provenance.models import (
+    CLAIM_SOURCES,
+    CLAIM_USES,
+    CLAIMS,
+    SOURCES,
+)
 from paw_backend.research.provenance.records import (
-    Claim,
-    EntityKind,
-    Reference,
-    Relation,
-    RelationKind,
-    Source,
-    SourceInput,
     SourceLink,
-    Stance,
 )
 
 
-async def ensure_source(
-    session: AsyncSession,
-    project_id: UUID,
-    source: SourceInput,
-    created_at: datetime,
-) -> tuple[Source, bool]:
+async def ensure_source(session, project_id, source, created_at):
     """Record ``source`` in ``project_id`` unless it is already recorded.
 
     A source is identified by ``(project_id, locator, content_hash)`` (the
@@ -67,19 +44,47 @@ async def ensure_source(
     If the insert did nothing and the row cannot be read back, raise
     ``SourceNotFoundError()`` (cannot happen in practice).
     """
-    raise NotImplementedError("PAW-052 stub")
+    statement = (
+        insert(SOURCES)
+        .values(
+            project_id=project_id,
+            locator=source.locator,
+            source_type=source.source_type.value,
+            title=source.title,
+            content_hash=source.content_hash,
+            fetched_at=source.fetched_at,
+            published_at=source.published_at,
+            created_at=created_at,
+        )
+        .on_conflict_do_nothing(
+            index_elements=["project_id", "locator", "content_hash"]
+        )
+        .returning(*SOURCES.c)
+    )
+    row = (await session.execute(statement)).mappings().first()
+    if row is not None:
+        return source_from_row(row), True
+    existing = (
+        (
+            await session.execute(
+                select(SOURCES).where(
+                    SOURCES.c.project_id == project_id,
+                    SOURCES.c.locator == source.locator,
+                    SOURCES.c.content_hash == source.content_hash,
+                )
+            )
+        )
+        .mappings()
+        .first()
+    )
+    if existing is None:
+        raise SourceNotFoundError()
+    return source_from_row(existing), False
 
 
 async def ensure_claim(
-    session: AsyncSession,
-    project_id: UUID,
-    *,
-    created_by: UUID,
-    task_id: UUID | None,
-    text: str,
-    fingerprint: str,
-    created_at: datetime,
-) -> tuple[Claim, bool]:
+    session, project_id, *, created_by, task_id, text, fingerprint, created_at
+):
     """Record a claim in ``project_id`` unless the same claim is already recorded.
 
     A claim is identified by ``(project_id, text_fingerprint)``. Insert a row
@@ -96,17 +101,40 @@ async def ensure_claim(
     If the insert did nothing and the row cannot be read back, raise
     ``ClaimNotFoundError()`` (cannot happen in practice).
     """
-    raise NotImplementedError("PAW-052 stub")
+    statement = (
+        insert(CLAIMS)
+        .values(
+            project_id=project_id,
+            task_id=task_id,
+            created_by=created_by,
+            claim_text=text,
+            text_fingerprint=fingerprint,
+            created_at=created_at,
+        )
+        .on_conflict_do_nothing(index_elements=["project_id", "text_fingerprint"])
+        .returning(*CLAIMS.c)
+    )
+    row = (await session.execute(statement)).mappings().first()
+    if row is not None:
+        return claim_from_row(row), True
+    existing = (
+        (
+            await session.execute(
+                select(CLAIMS).where(
+                    CLAIMS.c.project_id == project_id,
+                    CLAIMS.c.text_fingerprint == fingerprint,
+                )
+            )
+        )
+        .mappings()
+        .first()
+    )
+    if existing is None:
+        raise ClaimNotFoundError()
+    return claim_from_row(existing), False
 
 
-async def link_claim_source(
-    session: AsyncSession,
-    project_id: UUID,
-    claim_id: UUID,
-    source: Source,
-    stance: Stance,
-    created_at: datetime,
-) -> tuple[SourceLink, bool]:
+async def link_claim_source(session, project_id, claim_id, source, stance, created_at):
     """Record that ``source`` has ``stance`` towards the claim ``claim_id``.
 
     One row per ``(claim_id, source.id)`` in ``research_claim_sources`` (columns
@@ -123,17 +151,42 @@ async def link_claim_source(
 
     ``source`` and the claim exist in ``project_id`` (the store checked).
     """
-    raise NotImplementedError("PAW-052 stub")
+    statement = (
+        insert(CLAIM_SOURCES)
+        .values(
+            claim_id=claim_id,
+            source_id=source.id,
+            project_id=project_id,
+            stance=stance.value,
+            created_at=created_at,
+        )
+        .on_conflict_do_nothing(index_elements=["claim_id", "source_id"])
+        .returning(CLAIM_SOURCES.c.created_at)
+    )
+    row = (await session.execute(statement)).first()
+    if row is not None:
+        return SourceLink(claim_id, source, stance, created_at), True
+    existing = (
+        (
+            await session.execute(
+                select(CLAIM_SOURCES.c.stance, CLAIM_SOURCES.c.created_at).where(
+                    CLAIM_SOURCES.c.claim_id == claim_id,
+                    CLAIM_SOURCES.c.source_id == source.id,
+                    CLAIM_SOURCES.c.project_id == project_id,
+                )
+            )
+        )
+        .mappings()
+        .one()
+    )
+    if existing["stance"] != stance.value:
+        raise ProvenanceConflictError()
+    return SourceLink(claim_id, source, stance, existing["created_at"]), False
 
 
 async def add_claim_use(
-    session: AsyncSession,
-    project_id: UUID,
-    claim_id: UUID,
-    reference: Reference,
-    created_by: UUID,
-    created_at: datetime,
-) -> bool:
+    session, project_id, claim_id, reference, created_by, created_at
+):
     """Record that the answer or task ``reference`` used the claim ``claim_id``.
 
     One row per ``(claim_id, reference.kind, reference.id)`` in
@@ -143,19 +196,25 @@ async def add_claim_use(
     row, False when it already existed (nothing changes: the first record, with
     its ``created_by`` and ``created_at``, stays).
     """
-    raise NotImplementedError("PAW-052 stub")
+    statement = (
+        insert(CLAIM_USES)
+        .values(
+            claim_id=claim_id,
+            ref_kind=reference.kind.value,
+            ref_id=reference.id,
+            project_id=project_id,
+            created_by=created_by,
+            created_at=created_at,
+        )
+        .on_conflict_do_nothing(index_elements=["claim_id", "ref_kind", "ref_id"])
+        .returning(CLAIM_USES.c.claim_id)
+    )
+    return (await session.execute(statement)).first() is not None
 
 
 async def insert_relation(
-    session: AsyncSession,
-    project_id: UUID,
-    entity: EntityKind,
-    kind: RelationKind,
-    low_id: UUID,
-    high_id: UUID,
-    created_by: UUID,
-    created_at: datetime,
-) -> tuple[Relation, bool]:
+    session, project_id, entity, kind, low_id, high_id, created_by, created_at
+):
     """Record the symmetric relation ``kind`` between two claims or two sources.
 
     ``entity`` selects the table (``relation_table(entity)``); ``low_id <
@@ -170,23 +229,59 @@ async def insert_relation(
     * A relation of the other ``kind`` exists: change nothing and raise
       ``ProvenanceConflictError()``.
     """
-    raise NotImplementedError("PAW-052 stub")
+    table = relation_table(entity)
+    statement = (
+        insert(table)
+        .values(
+            low_id=low_id,
+            high_id=high_id,
+            project_id=project_id,
+            kind=kind.value,
+            created_by=created_by,
+            created_at=created_at,
+        )
+        .on_conflict_do_nothing(index_elements=["low_id", "high_id"])
+        .returning(*table.c)
+    )
+    row = (await session.execute(statement)).mappings().first()
+    if row is not None:
+        return relation_from_row(entity, row), True
+    existing = (
+        (
+            await session.execute(
+                select(table).where(
+                    table.c.project_id == project_id,
+                    table.c.low_id == low_id,
+                    table.c.high_id == high_id,
+                )
+            )
+        )
+        .mappings()
+        .one()
+    )
+    if existing["kind"] != kind.value:
+        raise ProvenanceConflictError()
+    return relation_from_row(entity, existing), False
 
 
-async def fetch_claim(
-    session: AsyncSession, project_id: UUID, claim_id: UUID
-) -> Claim | None:
+async def fetch_claim(session, project_id, claim_id):
     """The claim ``claim_id`` of ``project_id``, or ``None`` when there is no
     such claim in that project (a claim of another project is ``None`` too)."""
-    raise NotImplementedError("PAW-052 stub")
+    row = (
+        (
+            await session.execute(
+                select(CLAIMS).where(
+                    CLAIMS.c.project_id == project_id, CLAIMS.c.id == claim_id
+                )
+            )
+        )
+        .mappings()
+        .first()
+    )
+    return None if row is None else claim_from_row(row)
 
 
-async def fetch_reference_claims(
-    session: AsyncSession,
-    project_id: UUID,
-    reference: Reference,
-    limit: int,
-) -> tuple[list[Claim], bool]:
+async def fetch_reference_claims(session, project_id, reference, limit):
     """The claims that the answer or task ``reference`` used, in ``project_id``.
 
     Join ``research_claim_uses`` (``ref_kind``, ``ref_id``, ``project_id``) with
@@ -196,12 +291,26 @@ async def fetch_reference_claims(
     know). A reference nobody used gives ``([], False)``; uses recorded in
     another project are invisible. ``limit`` is 1 or more.
     """
-    raise NotImplementedError("PAW-052 stub")
+    statement = (
+        select(CLAIMS)
+        .join(
+            CLAIM_USES,
+            (CLAIM_USES.c.claim_id == CLAIMS.c.id)
+            & (CLAIM_USES.c.project_id == CLAIMS.c.project_id),
+        )
+        .where(
+            CLAIM_USES.c.project_id == project_id,
+            CLAIM_USES.c.ref_kind == reference.kind.value,
+            CLAIM_USES.c.ref_id == reference.id,
+        )
+        .order_by(CLAIMS.c.created_at, CLAIMS.c.id)
+        .limit(limit + 1)
+    )
+    rows = (await session.execute(statement)).mappings().all()
+    return [claim_from_row(row) for row in rows[:limit]], len(rows) > limit
 
 
-async def fetch_claim_links(
-    session: AsyncSession, project_id: UUID, claim_ids: Sequence[UUID]
-) -> list[SourceLink]:
+async def fetch_claim_links(session, project_id, claim_ids):
     """Every source link of the given claims, with the full source.
 
     Join ``research_claim_sources`` with ``research_sources`` (same
@@ -211,15 +320,30 @@ async def fetch_claim_links(
     unspecified. Empty ``claim_ids`` returns ``[]`` without touching the
     database. Claims of another project yield nothing.
     """
-    raise NotImplementedError("PAW-052 stub")
+    if not claim_ids:
+        return []
+    statement = (
+        select(
+            CLAIM_SOURCES.c.claim_id,
+            CLAIM_SOURCES.c.stance,
+            CLAIM_SOURCES.c.created_at.label("linked_at"),
+            *SOURCES.c,
+        )
+        .join(
+            SOURCES,
+            (SOURCES.c.id == CLAIM_SOURCES.c.source_id)
+            & (SOURCES.c.project_id == CLAIM_SOURCES.c.project_id),
+        )
+        .where(
+            CLAIM_SOURCES.c.project_id == project_id,
+            CLAIM_SOURCES.c.claim_id.in_(list(claim_ids)),
+        )
+    )
+    rows = (await session.execute(statement)).mappings().all()
+    return [link_from_row(row) for row in rows]
 
 
-async def fetch_relations(
-    session: AsyncSession,
-    project_id: UUID,
-    entity: EntityKind,
-    ids: Sequence[UUID],
-) -> list[Relation]:
+async def fetch_relations(session, project_id, entity, ids):
     """Every relation of ``entity`` (claims or sources) that has one of ``ids``
     as ``low_id`` or as ``high_id``, in ``project_id``.
 
@@ -227,4 +351,12 @@ async def fetch_relations(
     order of the result is unspecified. Empty ``ids`` returns ``[]`` without
     touching the database.
     """
-    raise NotImplementedError("PAW-052 stub")
+    if not ids:
+        return []
+    table = relation_table(entity)
+    statement = select(table).where(
+        table.c.project_id == project_id,
+        (table.c.low_id.in_(list(ids))) | (table.c.high_id.in_(list(ids))),
+    )
+    rows = (await session.execute(statement)).mappings().all()
+    return [relation_from_row(entity, row) for row in rows]
