@@ -252,7 +252,11 @@ do not become durable logs.
   `WNOWAIT`) with that start time: a child that something else already reaped may have
   had its pid, which is also its process group id, reused, so then nothing is sent and
   nothing is waited for.  Once the leader object exists its guarded signalling
-  (recorded members, identity re-check at every signal) is used instead.
+  (recorded members, identity re-check at every signal) is used instead, after one
+  last unthrottled look at the group: a member the check forked since the leader was
+  built is recorded even if another reaper collected the leader in the meantime.  The
+  pipes are closed first, so the identity checks can still read `/proc` under
+  descriptor exhaustion.
 - Descendants are tracked by identity, not by pid alone (pid plus the start time in
   `/proc/<pid>/stat`).  Before every `SIGTERM`/`SIGKILL` the identity is re-checked, and
   a pid now held by a different process is dropped and neither signalled nor waited
@@ -272,13 +276,17 @@ do not become durable logs.
   while the leader runs, once more when it is first seen as a zombie (which still
   reserves the group id), and once more at the moment it is seen to have vanished, so a
   child forked just before the exit is still known even if another reaper collects the
-  leader before the final group kill.
+  leader before the final group kill.  A listing is adopted only if the leader was still
+  its own unreaped child after it (so it was taken while the group id was reserved),
+  and the listing after a vanished leader is dropped when some process now holds the
+  leader's own number (the id was reused, so that group is a stranger's).
 - **Documented residuals** (not closable in-process; see Decision 0001): a process that
   daemonizes (double fork plus `setsid`) can outlive the check; a check-then-signal gap
   of microseconds remains because a process group cannot be signalled through a pidfd,
-  and the last look at the group assumes its id was not reused within one polling
-  interval (50 ms) of the leader vanishing; a member forked into the group only after
-  the leader was reaped, by members that have all exited before the signal, is missed.
+  and the last look at the group after a vanished leader assumes its id was not reused
+  within one polling interval (50 ms) by a group whose leader has already gone; a
+  member forked into the group only after the leader was reaped and the last look was
+  taken, or by members that have all exited before the signal, is missed.
   Containing descendants reliably needs a PID namespace or a cgroup (`cgroup.kill`).
 - A check command needs a non-empty `argv[0]`; later arguments may be any string,
   including `""` (for example `("python3", "-c", "")`), as the task schema allows.

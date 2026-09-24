@@ -465,10 +465,18 @@ def _stop_unsupervised(
     concurrent reaper), and its pid, which is also its process group id, may then
     belong to an unrelated process.  So nothing is signalled or waited for unless
     the child is still our own unreaped child with the recorded start time.  A
-    constructed ``leader`` is used when there is one: it also knows the group's
-    members and re-checks its own identity at every signal.
+    constructed ``leader`` is used when there is one: it takes a last look at the
+    group (members forked since it was built), knows the members, and re-checks its
+    own identity at every signal.
     """
+    # The descriptors go first: under descriptor exhaustion (the usual reason to be
+    # here) the identity checks below need a free one to read ``/proc``.
+    for stream in (process.stdout, process.stderr):
+        if stream is not None:
+            with contextlib.suppress(OSError):
+                stream.close()
     if leader is not None:
+        leader.look()
         leader.signal_group(signal.SIGKILL)
         leader.reap(5)
     elif _is_unreaped_child(process.pid, started_at):
@@ -480,10 +488,6 @@ def _stop_unsupervised(
         # Reaped elsewhere: its status is gone.  Recording that keeps ``Popen`` from
         # waiting for (or reaping) whatever holds the number now.
         process.returncode = 0
-    for stream in (process.stdout, process.stderr):
-        if stream is not None:
-            with contextlib.suppress(OSError):
-                stream.close()
 
 
 def _is_unreaped_child(pid: int, started_at: int | None) -> bool:
@@ -515,8 +519,10 @@ class _Leader:
     Members are recorded while the leader runs, once more when it is first seen as a
     zombie, and once more at the moment it is seen to have vanished: the group id
     stays reserved as long as any member exists, so whatever is in the group then is
-    ours unless the id was reused within one polling interval.  Whether the leader is still ours is re-checked
-    at every signal, because a reaper can act at any time after it was observed.
+    ours unless the id was reused within one polling interval.  Whether the leader is
+    still ours is re-checked at every signal, because a reaper can act at any time
+    after it was observed.  A listing is only adopted if the leader was still our own
+    unreaped child after it, so it was taken while the group id was reserved.
     """
 
     refresh_seconds = 0.2
@@ -532,23 +538,50 @@ class _Leader:
         self._refreshed = 0.0
         self.refresh(force=True)
 
-    def refresh(self, force: bool = False) -> None:
-        """Record the group's current members (only meaningful while unreaped)."""
+    def refresh(self, force: bool = False, *, gone: bool = False) -> None:
+        """Record the group's current members.
+
+        Trusted only while the leader is unreaped, so the listing is adopted only if
+        the leader still is after it.  ``gone``: the leader is known to be reaped
+        (this is the last look).  The group id is then reserved only for as long as
+        a member exists, so whatever is in the group is ours, unless a process
+        holds the leader's own number: then the number was reused and its group is
+        a stranger's.
+        """
         now = time.monotonic()
         if self.released or (
             not force and now - self._refreshed < self.refresh_seconds
         ):
             return
         self._refreshed = now
-        for pid, (_, _, pgrp, started) in _process_table().items():
-            if pgrp == self.pgid:
+        table = _process_table()
+        if gone and self.pgid in table:
+            return
+        found = {
+            pid: started
+            for pid, (_, _, pgrp, started) in table.items()
+            if pgrp == self.pgid
+        }
+        if gone or self._still_ours():
+            for pid, started in found.items():
                 self.members.setdefault(pid, started)
 
     def _release(self, *, status_lost: bool) -> None:
         """Stop assuming the leader reserves the group id (after a last look)."""
-        self.refresh(force=True)  # catches a member forked just before the exit
+        self.refresh(force=True, gone=True)  # catches a member forked just before
         self.released = True
         self.status_lost = self.status_lost or status_lost
+
+    def look(self) -> None:
+        """Take one last, unthrottled look at the group before it is signalled.
+
+        For a caller that never supervised the leader: members forked since the
+        leader was built are not recorded yet, and if another reaper has collected
+        the leader by now they would be lost.  ``has_exited`` takes the zombie and
+        the vanished snapshots; a leader that is still running is listed here.
+        """
+        self.has_exited()
+        self.refresh(force=True)
 
     def has_exited(self) -> bool:
         """Has the leader exited?  Looks without reaping it."""

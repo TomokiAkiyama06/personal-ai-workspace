@@ -128,6 +128,24 @@ while not os.path.exists(pid_file):
     time.sleep(0.005)
 """
 
+# Check that forks a same-group child only once ``go`` exists, then lingers for
+# ``linger`` seconds (default: exits at once).  The child is a group member that no
+# earlier look at the group could have seen.
+FORK_WHEN_TOLD_THEN_EXIT = """
+import os, sys, time
+pid_file, go = sys.argv[1:3]
+linger = float(sys.argv[3]) if len(sys.argv) > 3 else 0
+while not os.path.exists(go):
+    time.sleep(0.005)
+if os.fork() == 0:
+    with open(pid_file + '.tmp', 'w') as handle:
+        handle.write(str(os.getpid()))
+    os.replace(pid_file + '.tmp', pid_file)
+    time.sleep(60)
+    os._exit(0)
+time.sleep(linger)
+"""
+
 # Runs one check in a process whose SIGCHLD is ignored, so the kernel reaps every
 # child itself and the check leader's exit status can never be collected.  It
 # records each ``killpg`` the runner makes.
@@ -577,6 +595,126 @@ class TestRunnerTest(unittest.TestCase):
                 # Only the child's own group was signalled, and it was killed.
                 self.assertIn(("killpg", leader, int(signal.SIGKILL)), calls)
                 self.assertEqual({pid for _, pid, _ in calls}, {leader}, calls)
+
+    def test_a_member_forked_after_the_leader_was_built_dies_when_the_setup_fails(
+        self,
+    ):
+        # The leader (built while the check was still starting) recorded no member.
+        # The check then forks a same-group child and exits, and something else
+        # reaps it before the capture fails: only a look taken at the failure can
+        # still find the child, and it must not be left running.
+        pid_file = self.pid_file()
+        go = self.root / "go"
+
+        def fork_reap_fail(process, limit):
+            go.write_text("")
+            self.assertTrue(wait_until(pid_file.exists))
+            os.waitpid(process.pid, 0)  # a concurrent reaper collects the leader
+            raise OSError(errno.EMFILE, "Too many open files")
+
+        check = self.python_check("late-fork", FORK_WHEN_TOLD_THEN_EXIT, pid_file, go)
+        with mock.patch.object(test_runner, "_OutputCapture", fork_reap_fail):
+            (result,) = self.runner.run_visible((check,), PATIENCE)
+
+        self.assertEqual(result.status, "error")
+        child = self.read_pid(pid_file)
+        self.assertTrue(
+            wait_until(lambda: not is_running(child)),
+            "a group member forked before the setup failed was left running",
+        )
+
+    def test_a_late_member_is_found_while_the_leader_is_an_unreaped_zombie(self):
+        # No reaper involved: the leader is a zombie (it still reserves the group
+        # id) when the setup fails, and the member it forked is still recorded.
+        pid_file = self.pid_file()
+        go = self.root / "go"
+
+        def fork_and_fail(process, limit):
+            go.write_text("")
+            self.assertTrue(wait_until(pid_file.exists))
+            self.assertTrue(wait_until(lambda: not is_running(process.pid)))
+            raise OSError(errno.EMFILE, "Too many open files")
+
+        check = self.python_check("late-fork", FORK_WHEN_TOLD_THEN_EXIT, pid_file, go)
+        with mock.patch.object(test_runner, "_OutputCapture", fork_and_fail):
+            (result,) = self.runner.run_visible((check,), PATIENCE)
+
+        self.assertEqual(result.status, "error")
+        child = self.read_pid(pid_file)
+        self.assertTrue(wait_until(lambda: not is_running(child)))
+
+    def test_a_last_look_records_a_member_forked_since_the_leader_was_built(self):
+        pid_file = self.pid_file()
+        go = self.root / "go"
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                FORK_WHEN_TOLD_THEN_EXIT,
+                str(pid_file),
+                str(go),
+                "60",
+            ],
+            start_new_session=True,
+        )
+        self.addCleanup(process.wait)
+        self.addCleanup(process.kill)
+        leader = test_runner._Leader(process)
+        leader.refresh_seconds = 1e9  # only an unthrottled look can record anything
+        go.write_text("")
+        child = self.read_pid(pid_file)
+
+        self.assertNotIn(child, leader.members)
+        leader.look()
+
+        self.assertEqual(leader.members[child], test_runner._start_time(child))
+        self.assertFalse(leader.released)
+
+    def test_the_last_look_at_a_vanished_leader_ignores_a_reused_number(self):
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            start_new_session=True,
+        )
+        self.addCleanup(process.wait)
+        self.addCleanup(process.kill)
+        leader = test_runner._Leader(process)
+        own = dict(leader.members)
+        self.assertEqual(set(own), {process.pid})
+        # The leader's number is held by another process, which leads a group of
+        # its own with a member: neither belongs to us.
+        stranger = {
+            process.pid: ("S", 1, process.pid, leader.start + 7),
+            process.pid + 1: ("S", process.pid, process.pid, leader.start + 8),
+        }
+        with (
+            mock.patch.object(os, "waitid", side_effect=ChildProcessError),
+            mock.patch.object(test_runner, "_process_table", return_value=stranger),
+        ):
+            self.assertTrue(leader.has_exited())
+        self.assertEqual(leader.members, own)
+        self.assertTrue(leader.released and leader.status_lost)
+
+    def test_a_listing_taken_while_the_leader_was_reaped_is_not_adopted(self):
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            start_new_session=True,
+        )
+        self.addCleanup(process.wait)
+        self.addCleanup(process.kill)
+        leader = test_runner._Leader(process)
+        own = dict(leader.members)
+
+        def reaped_during_the_listing():
+            os.kill(process.pid, signal.SIGKILL)
+            os.waitpid(process.pid, 0)  # a concurrent reaper
+            # By now the id could be anyone's: this looks like a member.
+            return {process.pid + 1: ("S", 1, process.pid, 5)}
+
+        with mock.patch.object(
+            test_runner, "_process_table", reaped_during_the_listing
+        ):
+            leader.refresh(force=True)
+        self.assertEqual(leader.members, own)
 
     def spawn_unsupervised(self):
         process = subprocess.Popen(
