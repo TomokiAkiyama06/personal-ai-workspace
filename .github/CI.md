@@ -11,8 +11,10 @@ Repositoryでは以下を検証する。
 - YAML の構文、重複した mapping key、安全な読み取り
 - JSON の構文
 - 検証スクリプトが正常な文書を許容し、破損した入力を検出する回帰テスト
-- `benchmarks/`のPython codeに対するRuff format / lint
+- `benchmarks/`と`apps/backend/`のPython codeに対するRuff format / lint
 - Benchmark Task schema、fixture、validator CLIのtest
+- Backendのtest（`apps/backend/tests`。設定、Health、Error Response、Security Header、SSE / WebSocketのEvent経路、Migration設定）
+- Backend依存のversionが`apps/backend/pyproject.toml`、hook環境、`requirements-ci.txt`で一致すること
 
 Markdown の行末の 2 個以上のスペースによる改行は許容する。
 conflict marker の検出対象は、行頭で `<` / `=` / `>` / `|` の同一記号が 7 文字以上連続し、空白または行末が続く場合とする。
@@ -26,14 +28,20 @@ YAML は mapping の merge 展開を 10,000 entries 以下に制限し、循環�
 さらに、merge を含む mapping の展開項目数の累計を YAML ファイル全体で 100,000 entries 以下に制限する。
 複数 document を含むファイルでも累計はリセットせず、上限超過となる mapping の展開前に拒否する。
 これは merge の指数展開を抑える制限であり、通常の sequence alias は参照を共有するため対象外とする。
-他のApplication codeのbuild / format / lint / testは各領域のコード構成確定後に追加する（PAW-004）。
+BackendのtestはDocker等を使わず、実PostgreSQLへのtestは環境変数`PAW_TEST_DATABASE_URL`が設定された場合だけ実行する。
+CIではSecretを参照しないため未設定となり、それらのtestはSkipされる。
+Web / CLIのbuild / format / lint / testは各領域のコード構成確定後に追加する（PAW-004）。
 
 GitHub Actions と Git の pre-commit hook は、[.pre-commit-config.yaml](../.pre-commit-config.yaml) の同じ hook を実行する。
-共通 entry の [run_ci.py](scripts/run_ci.py) はBenchmark codeのformat / lint、回帰テスト、
-Benchmark schema test、Repository検証を順に実行し、いずれかの失敗をcommit拒否として返す。
-検証ライブラリの version は hook の `additional_dependencies` に固定し、pre-commit が専用環境へ導入する。
+共通 entry の [run_ci.py](scripts/run_ci.py) はBenchmark codeとBackend codeのformat / lint、回帰テスト、
+Benchmark schema test、Backend test、Repository検証を順に実行し、いずれかの失敗をcommit拒否として返す。
+検証ライブラリとBackendの実行・test依存の version は hook の `additional_dependencies` に固定し、pre-commit が専用環境へ導入する。
 同じversionを [requirements-ci.txt](requirements-ci.txt) にも固定し、standalone validatorを実行する
 virtual environmentへ明示的に導入できるようにする。
+Backendの依存は [pyproject.toml](../apps/backend/pyproject.toml) にも同じversionで固定する。
+3か所の一致と、Backendが直接importするPackageの宣言漏れは
+[test_dependency_pins.py](scripts/test_dependency_pins.py) が検証する。
+Backendの依存を追加・更新する場合は、この3か所を同時に変更する。
 
 Python 3.13 以上で初回セットアップする場合:
 
