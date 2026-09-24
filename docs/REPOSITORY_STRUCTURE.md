@@ -123,6 +123,7 @@ personal-ai-workspace/
 │  └─ decisions/
 │     ├─ 0002-start-workspace-implementation-before-model-comparison.md
 │     ├─ 0003-backend-cli-web-implementation-stack.md
+│     ├─ 0004-rbac-capability-and-audit-policy.md
 │     └─ README.md
 └─ evaluator/
    └─ README.md
