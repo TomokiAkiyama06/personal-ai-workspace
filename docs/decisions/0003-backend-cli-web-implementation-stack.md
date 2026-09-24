@@ -4,7 +4,7 @@
 - Date: 2026-09-24
 - Scope: PAW-020 と、それ以降の `apps/backend`・`apps/cli`・`apps/web`
 - Supersedes: なし
-- Approval: 2026-09-24、Humanが作業Session内で、提案した構成（Python + FastAPI + PostgreSQL）を承認
+- Approval: 2026-09-24、Humanが作業Session内で、提示された選択肢「Python + FastAPI + PostgreSQL」を承認（下記の「承認範囲」）
 
 ## 背景
 
@@ -13,6 +13,17 @@
 PAW-020 の受け入れ基準は、HTTPS REST API、WebSocket / SSE、PostgreSQL接続、Health endpoint、
 config / migration / testの基本構成である。
 [REQUIREMENTS.md](../../REQUIREMENTS.md) は Client を Tauri + React + TypeScript（`[PROVISIONAL]`）、Mobile を Web / PWA としている。
+
+## 承認範囲
+
+Humanが承認したのは、承認時に提示した次の選択肢です。
+Backend / CLI は Python 3.13 と FastAPI、SQLAlchemy 2 + psycopg 3 + Alembic、PostgreSQL、
+Web は React + TypeScript + Vite、既存の Ruff / unittest / CI との一貫性。
+
+下表のうち上記に含まれない項目（Uvicorn、Pydantic、uv と `pyproject.toml`、pnpm、Vitest、Web の Lint / Format Tool、
+DesktopのTauriとMobile PWAでWeb Appを再利用する方針）は、**実装Issueが選ぶ既定値**で、
+この承認では確定しません。実装Issueは、理由を示せば新しいDecisionなしで変更できます。
+Tauri / PWA は [REQUIREMENTS.md](../../REQUIREMENTS.md) の `[PROVISIONAL]` のままです。
 
 ## 提案
 
@@ -43,4 +54,5 @@ Application codeのFormat / Lint / TestはCIへ追加する（PAW-004で予定�
 ## 承認後の扱い
 
 承認されたため、PAW-020 でこの構成のSkeletonとCIを追加し、[Repository構造](../REPOSITORY_STRUCTURE.md) を更新する。
-Web側のLint / Format Toolは、PAW-060 で確定する。
+Web側のLint / Format Toolは、Web実装の最初のIssue（PAW-060）で、CIへ追加するコマンドとあわせて選ぶ。
+PAW-060 のAcceptance Criteriaには含まれないため、選定はそのIssueの実装詳細として扱う。
