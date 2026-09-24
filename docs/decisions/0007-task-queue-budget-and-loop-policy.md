@@ -75,11 +75,26 @@ Command（PAW-032 の `wait` / `fail`）を発行するのは Orchestrator（PAW
 - 明示の時刻は Test のための継ぎ目（`TaskQueue(..., allow_explicit_now=True)`）に限る。本番の Queue は呼び出し側の時刻を拒否する。
 - Lease の長さ（既定 60 秒、最大 86,400 秒）は、Preset の数値と同じく仮の値である。
 
+### 7. Lease の世代（Fencing token）
+
+- Lease は Entry の `id` と Worker の id だけでは識別できない。Lease が切れた Worker の Entry が**同じ Worker id**に再び Claim される（設定で id を固定した Process の再起動など）と、まだ動いている古い実行が、`claimed_by` も新しい Lease の期限も満たし、新しい Claim の Heartbeat・返却・完了を行えてしまう。
+- そこで `claim_count`（Claim のたびに 1 増え、減らず、戻らない。Reclaim と返却後の再 Claim も数える。Schema は変わらない）を Lease の世代とする。`claim_next` が返す `QueueEntry.claim_count` を、`heartbeat` / `release` / `complete` が**必須の引数**として受け取り、Entry の現在の `claim_count` と違う世代は Worker id が同じでも `LeaseLostError` にする。
+- 世代の引数を任意にしない（省略した呼び出しだけが保護されなくなる）。呼び出し側の互換は、Orchestrator（PAW-034）がまだ無いため、Queue の Test だけである。
+
+### 8. Loop の失敗記録の試行（Attempt）による Fencing
+
+- 失敗の記録（`LoopDetector.record_failure`）は、Task の ID だけでは、どの試行の報告かを区別できない。Restart が新しい試行を始め、履歴の `clear` が終わった後に、古い試行の Worker が遅れて報告すると、その失敗が新しい試行の Window に入り、数件で `TRY_ALTERNATIVE` / `ESCALATE` を誤って引き起こす。
+- そこで `record_failure` に**必須の** `attempt`（報告する Worker が開始された試行の番号。PAW-032 の Step・Log・Tool の書き込みが持つ `attempt` と同じ）を加え、`tasks.attempt`（Restart が増やす既存の Counter）と違えば `StaleAttemptError` で拒否して何も書かない。新しい状態・Column・Migration は要らない。
+- 確認と書き込みの間に Restart が割り込まないよう、`record_failure` は Task の行を `FOR SHARE` で Lock して Transaction の終わりまで持つ（PAW-032 の Command は `FOR NO KEY UPDATE` を取るため、直列になる）。Restart が待つ時間は 1 回の記録の Transaction の間だけである。
+- Orchestrator（PAW-034）の順序は、**Restart の Command が Commit された後に `clear`** とする。Restart の前に Commit された古い試行の失敗は、その `clear` が削除する。
+
 ## 選定理由
 
 - 数値は、1 台の GPU Server で個人〜小規模チームが使うことを想定した、桁を合わせるための仮の値であり、実測に基づかない。
   Benchmark（PAW-016 / 017）と実運用の記録で見直す前提で、データとして 1 か所に置いた。
 - Budget 超過を Loop より優先するのは、Escalation が予算を追加で消費するため。
+- Lease の世代に `claim_count` を使うのは、既存の列で足り（Migration も Grant も変えない）、Claim のたびに必ず増え、Worker の id・時刻・乱数のような呼び出し側の値に頼らずに、古い Claim を判別できるため。
+- 試行の Fencing に PAW-032 の `tasks.attempt` を使うのは、Restart が既に増やす唯一の Counter で、Step・Log・Tool の書き込みも同じ規則（古い試行は `StaleAttemptError`）で拒否しているため。失敗の行へ試行の Column を足して現在の試行だけを読む案は、Schema・Grant・履歴の読み取りを変える割に、`clear` を Restart の後に呼ぶ規則で足りるため採らない。
 - Lease の時計を Database に一本化するのは、複数の Process（Worker）が同じ Entry を巡って競うため、判定の基準が呼び出し側ごとに違うと Lease の排他が成り立たないため。
 
 ## 代替案
@@ -87,6 +102,7 @@ Command（PAW-032 の `wait` / `fail`）を発行するのは Orchestrator（PAW
 - 数値を Preset に固定せず、Admin が設定する: Preset の名前を要件が定める以上、まず既定の値が要る。設定 UI と認可は別の Issue。
 - 超過時にすべて `FAIL` にする: 人間が上限を上げて続けられなくなる。`retries` だけを `FAIL` にした。
 - Aging を入れる: 要件に規則がなく、`LOW` の待ち時間の上限を決める必要がある。
+- Worker id に Process 固有の値（PID、起動時刻）を含めさせる: 呼び出し側の規則に頼ることになり、Queue が古い Claim を拒否する保証にならない。別の Token 列を追加する案は、Claim のたびに増える `claim_count` で足りるため採らない。
 - 呼び出し側が時刻を渡す（または Process の時計を使う）: 時計のずれや誤った時刻で Lease を奪える。Constructor で時計を注入する案は、Test の呼び出しの書き換えが大きいため、既定で拒否する引数の継ぎ目を選んだ。
 
 ## 承認後の扱い

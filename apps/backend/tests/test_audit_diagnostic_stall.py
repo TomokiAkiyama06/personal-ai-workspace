@@ -105,6 +105,42 @@ class FetchAbortableTest(unittest.IsolatedAsyncioTestCase):
             await asyncio.gather(first, return_exceptions=True)
             self.assertTrue(await wait_until(lambda: not database._probes, limit=3))
 
+    async def test_waiting_for_a_slot_and_running_share_one_deadline(self):
+        async with HangingPostgres() as server:
+            database = Database(settings_for(server, database_pool_size=1))
+            self.addAsyncCleanup(database.dispose)
+            # Holds the only slot for ~1s (its own limit), then gives it up.
+            holder = asyncio.create_task(
+                database.execute_abortable("SELECT 1", timeout_seconds=1.0)
+            )
+            try:
+                self.assertTrue(await wait_until(lambda: server.logins == 1))
+                started = time.monotonic()
+                with self.assertRaises(TimeoutError):
+                    # Gets the slot after ~1s and the statement then stalls. One
+                    # limit for the whole call: it ends at ~2s, not at ~1s + 2s.
+                    await database.execute_abortable("SELECT 1", timeout_seconds=2.0)
+                elapsed = time.monotonic() - started
+            finally:
+                await asyncio.gather(holder, return_exceptions=True)
+            self.assertEqual(server.logins, 2)  # it did get the slot and connect
+            self.assertGreater(elapsed, 1.5)  # it really waited for the slot first
+            self.assertLess(elapsed, 2.6)  # not slot wait + a second full limit
+            self.assertTrue(await wait_until(lambda: not database._probes, limit=3))
+
+    async def test_a_call_with_no_time_left_does_not_open_a_connection(self):
+        async with HangingPostgres(answer_queries=True) as server:
+            database = Database(settings_for(server, database_pool_size=1))
+            self.addAsyncCleanup(database.dispose)
+            with self.assertRaises(TimeoutError):
+                await database.execute_abortable("SELECT 1", timeout_seconds=0)
+            await asyncio.sleep(0.3)
+            self.assertEqual(server.logins, 0)
+            self.assertEqual(database._probes, set())
+            # The only slot was given back: the next call runs.
+            self.assertEqual(await database.fetch_abortable("SELECT 1"), [(1,)])
+            self.assertEqual(server.logins, 1)
+
     async def test_dispose_aborts_a_query_in_flight(self):
         async with HangingPostgres() as server:
             database = Database(settings_for(server, shutdown_timeout_seconds=2))

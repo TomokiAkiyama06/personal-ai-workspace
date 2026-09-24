@@ -25,6 +25,8 @@ MAX_SIGNATURE_MESSAGE_CHARS = 2000  # only this prefix of a message is examined
 DEFAULT_LEASE_SECONDS = 60
 MAX_LEASE_SECONDS = 86_400
 MAX_ENTRY_ID = 2**63 - 1
+MAX_CLAIM_COUNT = 2**31 - 1  # ``queue_entries.claim_count`` is a 32-bit integer
+MAX_ATTEMPT = 2**31 - 1  # ``tasks.attempt`` is a 32-bit integer
 
 _WORKER_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@/-]*")
 _CONTROL_CHARACTER = re.compile(r"[\x00-\x1f\x7f]")
@@ -62,6 +64,16 @@ def check_amount(name: str, value: Any) -> int:
 def check_entry_id(value: Any) -> int:
     """A queue entry id: an ``int`` from 1 to ``MAX_ENTRY_ID``."""
     return check_int("entry_id", value, minimum=1, maximum=MAX_ENTRY_ID)
+
+
+def check_claim_count(value: Any) -> int:
+    """A claim generation: an ``int`` from 1 (first claim) to ``MAX_CLAIM_COUNT``."""
+    return check_int("claim_count", value, minimum=1, maximum=MAX_CLAIM_COUNT)
+
+
+def check_attempt(value: Any) -> int:
+    """A task attempt number: an ``int`` from 1 to ``MAX_ATTEMPT``."""
+    return check_int("attempt", value, minimum=1, maximum=MAX_ATTEMPT)
 
 
 def check_approach(value: Any) -> int:

@@ -148,9 +148,12 @@ class Database:
         ``timeout_seconds`` (default ``database_timeout_seconds``) passes, the
         caller is cancelled, or the database is disposed, the connection's socket is
         shut down instead of asking a possibly stalled server to cancel the
-        query (see ``_abort``). Raises ``TimeoutError`` at the deadline and the
-        driver's error if the connection fails. ``params`` are bound by the
-        driver (``%(name)s`` placeholders), never formatted into ``sql``.
+        query (see ``_abort``). The limit is ONE deadline for the whole call:
+        waiting for a free slot (see ``__init__``) and running the statement
+        share it, so a call never takes longer than ``timeout_seconds``. Raises
+        ``TimeoutError`` at the deadline and the driver's error if the
+        connection fails. ``params`` are bound by the driver (``%(name)s``
+        placeholders), never formatted into ``sql``.
 
         A write that is aborted may or may not have been committed: the caller
         learns only that it did not finish in time.
@@ -162,7 +165,10 @@ class Database:
             if timeout_seconds is None
             else timeout_seconds
         )
-        # Waiting for a free slot counts against the same limit.
+        # ONE deadline for the whole call: waiting for a free slot and running
+        # the statement share the limit (the query gets only what is left).
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + limit
         await asyncio.wait_for(self._abortable_slots.acquire(), limit)
         try:
             query = asyncio.create_task(self._query(sql, params))
@@ -171,7 +177,7 @@ class Database:
             # Retrieve the outcome so that asyncio does not log it as unhandled.
             query.add_done_callback(lambda task: task.cancelled() or task.exception())
             try:
-                await asyncio.wait({query}, timeout=limit)
+                await asyncio.wait({query}, timeout=max(0.0, deadline - loop.time()))
             finally:
                 if not query.done():  # timed out, or this caller was cancelled
                     self._abort(query)
