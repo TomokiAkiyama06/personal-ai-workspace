@@ -613,6 +613,19 @@ License や `robots.txt` に関する項目はありません。要件と設計�
 - Query の最小化と Secret の除去は PAW-053 の責任です。`private_source` はその Filter が使います。
 - 全ての入力（Query、件数、文字数、Provider 数）に上限があります。Registry は 32 Provider までです。
 
+### 実装の由来と制約
+
+- `locator.py` と `normalize.py` は、Local の Qwen3-Coder（30B-A3B）が実装したものを、レビューで見つけた不具合の修正込みで取り込んでいます。
+  修正した不具合は、`%` の直後の非 ASCII を変換しない、`?é=` の `=` を落とす、KELVIN SIGN が ASCII の Host になる、入力の長さを最後に検査するため 20 MB の入力の拒否に数秒かかる、例外の Context に入力が残る、`hasattr` による偽の Hit の受理、広すぎる `except` です。
+- `registry.py` と `broker.py` は、Local Model が仕様どおりに実装できなかったため、仕様を書いた側の参照実装を整えたものです。
+- Timeout は協調的です。Adapter が Cancel を無視する、または Event Loop を止める同期処理をする場合、Broker は止められません。
+- 未決事項（人間の判断が必要）:
+  1. License と `robots.txt` の項目は、要件に定義がないため `SourceMetadata` にありません。
+  2. 不正な Hit が 1 つでもあると、その Provider の Response 全体を `invalid_response` にします（Adapter の不具合を隠さないため）。
+  3. 複数 Provider の結果は交互に並べ、正規化した URL の最初の 1 件を残します（要件に統合の規則がありません）。
+  4. Credential 用の Query Parameter の一覧は Best effort です。
+  5. IPv6 と非 ASCII の Host は拒否し、名前解決はしません。`network` Capability、SSRF、`robots.txt` は呼び出し元（Tool Broker、PAW-031）と個々の Adapter の責任です。
+
 ### Test
 
 `apps/backend/tests/test_research_*.py` です。標準 `unittest` だけで、DB も Network も使いません。
