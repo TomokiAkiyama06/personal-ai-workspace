@@ -8,10 +8,10 @@ from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import create_async_engine
 
+# Import every module that defines ORM models here so that autogenerate sees
+# them.
+import paw_backend.tasks.models  # noqa: F401
 from paw_backend.config import Settings
-
-# Import every module that defines ORM models before this line once models
-# exist, so that autogenerate sees them. (None exist in the skeleton.)
 from paw_backend.db import Base
 
 config = context.config

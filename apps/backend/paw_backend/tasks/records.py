@@ -1,0 +1,163 @@
+"""Immutable value objects returned by the task service.
+
+They are plain dataclasses, independent of SQLAlchemy, so that a snapshot can
+be handed to the API layer (or serialised) without exposing ORM rows.
+"""
+
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import StrEnum
+from typing import Any
+
+from paw_backend.tasks.domain import (
+    Actor,
+    Interruption,
+    TaskCommand,
+    TaskState,
+    WaitReason,
+    interruption_of,
+)
+
+
+class StepStatus(StrEnum):
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    # Cut short by Stop Now or by a graceful stop.
+    INTERRUPTED = "interrupted"
+
+
+class LogLevel(StrEnum):
+    DEBUG = "debug"
+    INFO = "info"
+    WARNING = "warning"
+    ERROR = "error"
+
+
+class ReviewStatus(StrEnum):
+    NOT_STARTED = "not_started"
+    IN_REVIEW = "in_review"
+    APPROVED = "approved"
+    CHANGES_REQUESTED = "changes_requested"
+
+
+class EvaluationResult(StrEnum):
+    """Result of the machine evaluation (tests, Evaluator) of an attempt."""
+
+    NOT_RUN = "not_run"
+    PASSED = "passed"
+    FAILED = "failed"
+
+
+class PullRequestState(StrEnum):
+    DRAFT = "draft"
+    OPEN = "open"
+    MERGED = "merged"
+    CLOSED = "closed"
+
+
+@dataclass(frozen=True, slots=True)
+class WorktreeState:
+    branch: str | None = None
+    path: str | None = None
+    head_commit: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewState:
+    review_status: ReviewStatus = ReviewStatus.NOT_STARTED
+    evaluation_result: EvaluationResult = EvaluationResult.NOT_RUN
+
+
+@dataclass(frozen=True, slots=True)
+class PullRequestInfo:
+    number: int
+    url: str
+    state: PullRequestState
+
+
+@dataclass(frozen=True, slots=True)
+class AttemptSnapshot:
+    """Worktree / review / pull request state of one attempt of a task."""
+
+    number: int
+    worktree: WorktreeState
+    review: ReviewState
+    pull_request: PullRequestInfo | None
+
+
+@dataclass(frozen=True, slots=True)
+class StepInfo:
+    sequence: int
+    name: str
+    status: StepStatus
+    started_at: datetime
+    finished_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class LogEntry:
+    seq: int
+    attempt: int
+    level: LogLevel
+    message: str
+    created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class TaskEvent:
+    """One row of the append-only task history.
+
+    ``seq`` increases monotonically across all tasks. ``step_name`` is the
+    latest step at the time of the event; for Stop Now and Fail it is the step
+    that was interrupted. ``task_version`` is the task version after the event.
+    """
+
+    seq: int
+    task_id: uuid.UUID
+    attempt: int
+    command: TaskCommand
+    from_state: TaskState | None
+    to_state: TaskState
+    wait_reason: WaitReason | None
+    actor: Actor
+    reason: str | None
+    step_name: str | None
+    detail: dict[str, Any] | None
+    task_version: int
+    created_at: datetime
+
+    @property
+    def interruption(self) -> Interruption | None:
+        """Graceful (Pause, Cancel), immediate (Stop Now) or ``None``."""
+        return interruption_of(self.command)
+
+
+@dataclass(frozen=True, slots=True)
+class TaskSnapshot:
+    """Everything a new process or a reconnecting client needs to see a task.
+
+    Built only from the database by ``TaskService.restore``.
+    """
+
+    id: uuid.UUID
+    project_id: uuid.UUID
+    created_by: uuid.UUID
+    title: str
+    input: dict[str, Any]
+    starting_commit: str | None
+    state: TaskState
+    wait_reason: WaitReason | None
+    version: int
+    agent: str | None
+    model: str | None
+    attempt: AttemptSnapshot
+    retry_count: int
+    current_step: StepInfo | None
+    recent_logs: tuple[LogEntry, ...]
+    last_event: TaskEvent
+    created_at: datetime
+    updated_at: datetime
+    # Earlier attempts (oldest first); Restart keeps them as history.
+    previous_attempts: tuple[AttemptSnapshot, ...] = field(default=())
