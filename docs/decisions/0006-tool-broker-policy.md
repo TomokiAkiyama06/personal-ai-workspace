@@ -78,6 +78,18 @@ Credential の Plaintext を Agent に渡さないこと、Backend が最終判�
 3. **承認と消費の Role の分離は、この Decision の範囲では実装しない。** Application の Role が 1 つの間は、Application の Process が侵害されれば、その User の名前で承認を書ける（Database では防げない）。
    Agent の Runtime へ Application の Role の接続を渡さないことが前提。承認の Endpoint（PAW-022 / 023）ができる時に、別 Role または `SECURITY DEFINER` 関数で分離する。
 
+### 8. Repository の ACL
+
+要件の「Project / Repo Permission Inheritance」は、Repository ごとの ACL override（`read` / `write` / `agent`）で、Project の Member でも Repository を読み取り専用や Agent 禁止にできると定める。
+独立 Review が、Broker は Project の Resource で認可するため、この override が Tool の呼び出しに効かないと指摘した。実装は次を選んだ。要件は「どの Repository に触れる呼び出しか」の決め方を定めていない。
+
+1. **触れる Repository は Backend が決める。** Orchestrator が Task の作業対象（Working Set）を `TaskScope.repositories`（Repository の ID、Project、Worktree の Path、解決済みの ACL）として呼び出しごとに作る。Model の出力は Repository の ID を名指しできるだけで、ACL を指定できない。
+2. **触れる Repository の決め方:** 呼び出しが `repository` 引数（作業対象の ID のみ）で名指しするか、Symlink を解決した後の Path が Repository の Worktree の中にあるとき。入れ子の Repository は両方に触れる（厳しい ACL が効く）。**Host / URL は Repository を表さない**（同じ Host に多くの Repository があるため）。
+3. 触れる Repository があれば、その Repository の `Resource.repository(...)` で認可する（override は Project の Role を狭めるだけで広げない、Agent は `agent` を持たない Repository を操作できない、は PAW-025 の規則のまま）。**ACL が不明（`None`）なら拒否**し、`inherit` とは読まない。ACL は承認を使うときにも再判定する。
+4. **Repository への書き込み**（`project.repo.write` / `project.pr.create`）の Tool は、触れる Repository を Path か `repository` の必須引数で宣言しなければならず（Registry が検査）、作業対象のどの Repository にも触れない呼び出しは拒否する（`repository_not_identified`）。
+   根拠は要件の Multi-Repo Task の「Write 範囲は Task Working Set として明示・制御する」「Agent が「ついでに」別 Repo を書き換えてはならない」。読み取りと Agent 実行は触れる Repository がなければ Project の Resource で判定する（Read 範囲は比較的広く取ってよい、と要件にある）。
+5. **Human に判断を求める点:** (a) 書き込みだけを「Repository を特定できなければ拒否」にしたこと（読み取りと `project.task.run` は Project の Resource のまま）。(b) 入れ子の Repository を「両方の ACL に従う」にしたこと。(c) Host から Repository を推定せず、リモートに書く Tool に `repository` 引数を求めること。
+
 ## 既知の制限と後続の課題
 
 - Symlink の確認と使用の間の競合（TOCTOU）、DNS Rebinding、Redirect は Executor の責務（[README](../../apps/backend/README.md) の「Executor の契約」）。
@@ -85,7 +97,7 @@ Credential の Plaintext を Agent に渡さないこと、Backend が最終判�
 - 却下の Cooldown は Hash 単位で、引数を変えた別の呼び出しは止めない（件数の上限が量を抑える）。
 - 引数のない Tool は承認を開けない。承認が要る Tool は、何をするかを表す引数を必須にする。
 - Credential の検出は形のわかる Format と代入の形だけ。
-- Task の Scope・Grant・Project の状態は、Orchestrator が呼び出しごとに現在の値から作る（Broker は渡された Context を信頼する）。
+- Task の Scope（作業対象の Repository とその ACL を含む）・Grant・Project の状態は、Orchestrator が呼び出しごとに現在の値から作る（Broker は渡された Context を信頼する）。Path も `repository` 引数もない Tool は、Repository の ACL では判定できない。
 
 ## リスク
 

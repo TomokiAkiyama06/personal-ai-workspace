@@ -39,6 +39,7 @@ from .tools_store_contract import LIMITS, StoreContract, new_approval
 from .tools_support import (
     NOW,
     P1,
+    REPO,
     ROOT,
     TASK,
     U1,
@@ -57,6 +58,7 @@ U3 = uuid.UUID(int=3)
 DELETE = {"path": f"{ROOT}/build"}
 MERGE = {
     "remote": "https://github.com/org/repo.git",
+    "repository": str(REPO),
     "credential": "cred_" + "a1" * 16,
     "pull_request": 7,
 }
@@ -796,7 +798,11 @@ class ApprovalSummaryTest(unittest.IsolatedAsyncioTestCase):
     async def test_the_path_and_query_of_an_external_url_are_shown(self):
         record = await self.open(
             "issues.create",
-            {"url": "https://example.org/issues?data=SECRETBYTES", "title": "hello"},
+            {
+                "url": "https://example.org/issues?data=SECRETBYTES",
+                "repository": str(REPO),
+                "title": "hello",
+            },
         )
         self.assertEqual(
             record.summary,
@@ -804,16 +810,25 @@ class ApprovalSummaryTest(unittest.IsolatedAsyncioTestCase):
                 SummaryItem(
                     "url", "url", "https://example.org/issues?data=SECRETBYTES"
                 ),
+                SummaryItem("repository", "repository", str(REPO)),
                 SummaryItem("title", "text", "hello"),
             ),
         )
-        self.assertEqual(record.targets, (Target(TargetKind.HOST, "example.org"),))
+        self.assertEqual(
+            record.targets,
+            (
+                Target(TargetKind.HOST, "example.org"),
+                Target(TargetKind.REPOSITORY, str(REPO)),
+            ),
+        )
 
     async def test_every_kind_of_argument_appears_in_declared_order(self):
         spec = ToolSpec(
             "db.drop_data",
             frozenset({ToolCapability.DESTRUCTIVE}),
-            Capability.PROJECT_REPO_WRITE,
+            # Not a repository write (that must name its repository): what is
+            # tested here is only how the arguments are shown.
+            Capability.PROJECT_TASK_RUN,
             {
                 "project": ArgumentSpec(ArgumentKind.PROJECT),
                 "confirm": ArgumentSpec(ArgumentKind.BOOLEAN),
@@ -838,7 +853,9 @@ class ApprovalSummaryTest(unittest.IsolatedAsyncioTestCase):
         spec = ToolSpec(
             "db.migrate",
             frozenset({ToolCapability.DESTRUCTIVE}),
-            Capability.PROJECT_REPO_WRITE,
+            # Not a repository write (that must name its repository): what is
+            # tested here is only how the arguments are shown.
+            Capability.PROJECT_TASK_RUN,
             {
                 "project": ArgumentSpec(ArgumentKind.PROJECT),
                 "sql": ArgumentSpec(ArgumentKind.TEXT, max_length=2000),

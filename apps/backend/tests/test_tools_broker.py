@@ -11,6 +11,8 @@ from paw_backend.authz import (
     ProjectRole,
     ProjectState,
     Reason,
+    RepoAcl,
+    RepoPermission,
     SystemRole,
 )
 from paw_backend.tools import (
@@ -22,6 +24,7 @@ from paw_backend.tools import (
     BudgetStatus,
     Environment,
     InMemoryApprovalStore,
+    ScopedRepository,
     TaskContext,
     ToolBroker,
     ToolCall,
@@ -46,6 +49,7 @@ from .tools_support import (
     OTHER_HANDLE,
     P1,
     P2,
+    REPO,
     ROOT,
     TASK,
     U1,
@@ -68,7 +72,11 @@ GITHUB_TOKEN = "ghp_" + "a1B2" * 9
 READ = {"path": f"{ROOT}/src/a.py"}
 WRITE = {"path": f"{ROOT}/src/a.py", "content": "print(1)"}
 FETCH = {"url": "https://github.com/org/repo"}
-PUSH = {"remote": "https://github.com/org/repo.git", "credential": HANDLE}
+PUSH = {
+    "remote": "https://github.com/org/repo.git",
+    "repository": str(REPO),
+    "credential": HANDLE,
+}
 MERGE = {**PUSH, "pull_request": 7}
 
 
@@ -109,7 +117,14 @@ class DecisionLevelsTest(unittest.IsolatedAsyncioTestCase):
             ("tests.run", {"selector": "unit"}),
             ("web.fetch", FETCH),
             ("git.push", PUSH),
-            ("issues.create", {"url": "https://api.github.com/x", "title": "t"}),
+            (
+                "issues.create",
+                {
+                    "url": "https://api.github.com/x",
+                    "repository": str(REPO),
+                    "title": "t",
+                },
+            ),
         ]
         for tool, arguments in cases:
             with self.subTest(tool=tool):
@@ -153,7 +168,12 @@ class DecisionLevelsTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_an_external_write_beyond_the_task_hosts_needs_approval(self):
         decision = await self.request(
-            "issues.create", {"url": "https://example.org/issues", "title": "t"}
+            "issues.create",
+            {
+                "url": "https://example.org/issues",
+                "repository": str(REPO),
+                "title": "t",
+            },
         )
         self.assertEqual(
             (decision.verdict, decision.reason, decision.level),
@@ -389,7 +409,7 @@ class TaskScopeEnforcementTest(unittest.IsolatedAsyncioTestCase):
                 self.assertNotEqual(target.value, "github.com")
                 await self.deny(
                     "git.push",
-                    {"remote": url, "credential": HANDLE},
+                    {**PUSH, "remote": url},
                     R.CREDENTIAL_OUT_OF_SCOPE,
                 )
 
@@ -447,7 +467,7 @@ class TaskScopeEnforcementTest(unittest.IsolatedAsyncioTestCase):
             with self.subTest(remote=remote):
                 decision = await self.deny(
                     "git.push",
-                    {"remote": remote, "credential": HANDLE},
+                    {**PUSH, "remote": remote},
                     R.CREDENTIAL_OUT_OF_SCOPE,
                     context=context,
                 )
@@ -457,11 +477,7 @@ class TaskScopeEnforcementTest(unittest.IsolatedAsyncioTestCase):
         merge = await self.h.broker.request(
             make_call(
                 "git.merge",
-                {
-                    "remote": "https://example.org/x",
-                    "credential": HANDLE,
-                    "pull_request": 7,
-                },
+                {**PUSH, "remote": "https://example.org/x", "pull_request": 7},
                 context=context,
             )
         )
@@ -1003,6 +1019,432 @@ class AuthorizationTest(unittest.IsolatedAsyncioTestCase):
             make_call("repo.read_file", READ, correlation_id="x")
         )
         self.assertIsInstance(bad.correlation_id, uuid.UUID)
+
+
+class RepositoryAclTest(unittest.IsolatedAsyncioTestCase):
+    """A call on a repository is decided on that repository's ACL (finding of the
+    review of PR #74: a plain project resource never carried one)."""
+
+    P = RepoPermission
+    A = uid_a = uuid.UUID(int=711)  # a repository whose worktree is ROOT/a
+    B = uid_b = uuid.UUID(int=712)  # a repository whose worktree is ROOT/b
+
+    def scope(self, acl_a=None, acl_b=None, **overrides):
+        """Two repositories of P1; ``None`` means the ACL is not resolved."""
+        return make_scope(
+            repositories=[
+                ScopedRepository(self.A, P1, f"{ROOT}/a", acl_a),
+                ScopedRepository(self.B, P1, f"{ROOT}/b", acl_b),
+            ],
+            **overrides,
+        )
+
+    @staticmethod
+    def override(repo_id, *allowed):
+        return RepoAcl.override(repo_id, P1, allowed)
+
+    def inherit(self, repo_id):
+        return RepoAcl.inherit(repo_id, P1)
+
+    def context(self, acl_a, acl_b=None, **overrides):
+        return make_context(
+            scope=self.scope(acl_a, acl_b or self.inherit(self.B)), **overrides
+        )
+
+    async def decide(self, tool, arguments, context, h=None):
+        h = h or Harness()
+        return await h.broker.request(make_call(tool, arguments, context=context))
+
+    def assertDenied(self, decision, authz_reason):
+        self.assertEqual(
+            (decision.verdict, decision.reason, decision.authz_reason),
+            (Verdict.DENY, R.AUTHZ_DENIED, authz_reason),
+        )
+
+    async def test_the_authorizer_is_asked_about_the_repository_and_its_acl(self):
+        seen = []
+
+        class Spy:
+            def __init__(self, inner):
+                self.inner = inner
+
+            async def authorize_agent_action(
+                self, delegator, grant, cap, resource, **kw
+            ):
+                seen.append((cap, resource))
+                return await self.inner.authorize_agent_action(
+                    delegator, grant, cap, resource, **kw
+                )
+
+        h = Harness()
+        h.broker._authorizer = Spy(h.authorizer)
+        acl = self.override(self.A, self.P.READ, self.P.WRITE, self.P.AGENT)
+        decision = await self.decide(
+            "repo.write_file",
+            {"path": f"{ROOT}/a/x.py", "content": "1"},
+            self.context(acl),
+            h,
+        )
+        self.assertTrue(decision.allowed)
+        ((capability, resource),) = seen
+        self.assertEqual(capability, Capability.PROJECT_REPO_WRITE)
+        self.assertEqual(
+            (resource.kind, resource.repo_id, resource.project_id, resource.repo_acl),
+            ("repository", self.A, P1, acl),
+        )
+        self.assertEqual(resource.project_state, ProjectState.ACTIVE)
+        # and the decision is audited with the repository it was about
+        (row,) = [e for e in h.sink.events if e.action == "project.repo.write"]
+        self.assertEqual(
+            (row.resource_kind, row.repo_id, row.repo_acl, row.decision),
+            ("repository", self.A, "override", "allow"),
+        )
+
+    async def test_a_read_only_override_stops_a_write_by_a_contributor(self):
+        context = self.context(self.override(self.A, self.P.READ, self.P.AGENT))
+        write = await self.decide(
+            "repo.write_file", {"path": f"{ROOT}/a/x.py", "content": "1"}, context
+        )
+        self.assertDenied(write, Reason.REPO_ACL_FORBIDS)
+        self.assertEqual(write.level, ApprovalLevel.SCOPED_AUTO)
+        read = await self.decide("repo.read_file", {"path": f"{ROOT}/a/x.py"}, context)
+        self.assertEqual((read.verdict, read.reason), (Verdict.ALLOW, R.AUTO))
+
+    async def test_an_override_that_keeps_no_agent_access_denies_the_agent(self):
+        context = self.context(self.override(self.A, self.P.READ, self.P.WRITE))
+        for tool, arguments in (
+            ("repo.write_file", {"path": f"{ROOT}/a/x.py", "content": "1"}),
+            ("repo.read_file", {"path": f"{ROOT}/a/x.py"}),
+        ):
+            with self.subTest(tool=tool):
+                self.assertDenied(
+                    await self.decide(tool, arguments, context),
+                    Reason.REPO_ACL_FORBIDS,
+                )
+
+    async def test_an_override_that_denies_access_denies_every_call(self):
+        context = self.context(self.override(self.A))
+        for tool, arguments in (
+            ("repo.write_file", {"path": f"{ROOT}/a/x.py", "content": "1"}),
+            ("repo.read_file", {"path": f"{ROOT}/a/x.py"}),
+            ("repo.delete_tree", {"path": f"{ROOT}/a/build"}),
+        ):
+            with self.subTest(tool=tool):
+                self.assertDenied(
+                    await self.decide(tool, arguments, context),
+                    Reason.REPO_ACL_FORBIDS,
+                )
+
+    async def test_an_acl_that_is_not_resolved_denies(self):
+        # The scope holds the repository but not its ACL: never "inherit".
+        h = Harness()
+        context = make_context(scope=self.scope(None, None))
+        for tool, arguments in (
+            ("repo.write_file", {"path": f"{ROOT}/a/x.py", "content": "1"}),
+            ("repo.read_file", {"path": f"{ROOT}/b/x.py"}),
+        ):
+            with self.subTest(tool=tool):
+                self.assertDenied(
+                    await self.decide(tool, arguments, context, h),
+                    Reason.REPO_ACL_UNRESOLVED,
+                )
+        rows = [e for e in h.sink.events if e.decision == "deny" and e.repo_id]
+        self.assertEqual(
+            [(e.repo_id, e.repo_acl, e.reason) for e in rows],
+            [
+                (self.A, None, "repo_acl_unresolved"),
+                (self.B, None, "repo_acl_unresolved"),
+            ],
+        )
+
+    async def test_inherit_and_a_full_override_follow_the_project_role(self):
+        for acl in (
+            self.inherit(self.A),
+            self.override(self.A, self.P.READ, self.P.WRITE, self.P.AGENT),
+        ):
+            with self.subTest(inherits=acl.inherits):
+                context = self.context(acl)
+                write = await self.decide(
+                    "repo.write_file",
+                    {"path": f"{ROOT}/a/x.py", "content": "1"},
+                    context,
+                )
+                self.assertEqual(
+                    (write.verdict, write.reason), (Verdict.ALLOW, R.SCOPED_AUTO)
+                )
+        # an override never widens: a Viewer stays unable to write
+        viewer = self.context(
+            self.override(self.A, self.P.READ, self.P.WRITE, self.P.AGENT),
+            delegator_id=U2,
+        )
+        self.assertDenied(
+            await self.decide(
+                "repo.write_file", {"path": f"{ROOT}/a/x.py", "content": "1"}, viewer
+            ),
+            Reason.CAPABILITY_NOT_GRANTED,
+        )
+
+    async def test_the_other_repository_of_the_working_set_is_not_affected(self):
+        context = self.context(self.override(self.A, self.P.READ, self.P.AGENT))
+        b = await self.decide(
+            "repo.write_file", {"path": f"{ROOT}/b/x.py", "content": "1"}, context
+        )
+        self.assertTrue(b.allowed)
+        self.assertDenied(
+            await self.decide(
+                "repo.write_file", {"path": f"{ROOT}/a/x.py", "content": "1"}, context
+            ),
+            Reason.REPO_ACL_FORBIDS,
+        )
+
+    async def test_a_remote_tool_names_its_repository_and_meets_its_acl(self):
+        context = self.context(self.override(self.A, self.P.READ, self.P.AGENT))
+        arguments = {**PUSH, "repository": str(self.A)}
+        for tool in ("git.push", "git.merge"):
+            with self.subTest(tool=tool):
+                call = (
+                    {**arguments, "pull_request": 7}
+                    if tool == "git.merge"
+                    else arguments
+                )
+                self.assertDenied(
+                    await self.decide(tool, call, context), Reason.REPO_ACL_FORBIDS
+                )
+        self.assertDenied(
+            await self.decide(
+                "issues.create",
+                {
+                    "url": "https://api.github.com/x",
+                    "repository": str(self.A),
+                    "title": "t",
+                },
+                context,
+            ),
+            Reason.REPO_ACL_FORBIDS,
+        )
+        writable = await self.decide(
+            "git.push", {**PUSH, "repository": str(self.B)}, context
+        )
+        self.assertEqual(
+            (writable.verdict, writable.reason), (Verdict.ALLOW, R.SCOPED_AUTO)
+        )
+
+    async def test_a_repository_outside_the_working_set_cannot_be_named(self):
+        h = Harness()
+        stranger = uuid.UUID(int=799)
+        decision = await self.decide(
+            "git.push", {**PUSH, "repository": str(stranger)}, self.context(None), h
+        )
+        self.assertEqual(
+            (decision.verdict, decision.reason, decision.level),
+            (Verdict.DENY, R.REPOSITORY_OUT_OF_SCOPE, ApprovalLevel.DENY),
+        )
+        self.assertEqual([e.action for e in h.sink.events], ["tool.git.push"])
+        for bad in ("not-a-uuid", str(self.A).upper(), 7, None):
+            with self.subTest(value=bad):
+                self.assertEqual(
+                    (
+                        await self.decide(
+                            "git.push", {**PUSH, "repository": bad}, self.context(None)
+                        )
+                    ).reason,
+                    R.INVALID_TARGET if isinstance(bad, str) else R.INVALID_ARGUMENTS,
+                )
+
+    async def test_a_repository_id_may_be_given_as_a_uuid_and_is_kept_canonical(self):
+        decision = await self.decide(
+            "git.push", {**PUSH, "repository": self.B}, self.context(None)
+        )
+        self.assertTrue(decision.allowed)
+        self.assertEqual(decision.invocation.arguments["repository"], str(self.B))
+
+    async def test_a_repository_write_that_touches_no_repository_is_denied(self):
+        h = Harness()
+        context = self.context(self.inherit(self.A))
+        # inside the task's root, but in no repository of the working set
+        decision = await self.decide(
+            "repo.write_file", {"path": f"{ROOT}/scratch/x", "content": "1"}, context, h
+        )
+        self.assertEqual(
+            (decision.verdict, decision.reason, decision.authz_reason),
+            (Verdict.DENY, R.REPOSITORY_NOT_IDENTIFIED, None),
+        )
+        self.assertEqual([e.action for e in h.sink.events], ["tool.repo.write_file"])
+        # a scope with no working set cannot write to a repository at all
+        empty = make_context(scope=make_scope(repositories=[]))
+        self.assertEqual(
+            (await self.decide("repo.write_file", WRITE, empty, h)).reason,
+            R.REPOSITORY_NOT_IDENTIFIED,
+        )
+        # reading there is decided on the project, as before
+        read = await self.decide(
+            "repo.read_file", {"path": f"{ROOT}/scratch/x"}, context
+        )
+        self.assertEqual((read.verdict, read.reason), (Verdict.ALLOW, R.AUTO))
+
+    async def test_the_path_is_attributed_after_symlinks_are_resolved(self):
+        # ROOT/a/link (writable repository A) really is inside B (read-only).
+        resolver = DictResolver({f"{ROOT}/a/link": f"{ROOT}/b"})
+        context = self.context(
+            self.inherit(self.A), self.override(self.B, self.P.READ, self.P.AGENT)
+        )
+        h = Harness(path_resolver=resolver)
+        self.assertDenied(
+            await self.decide(
+                "repo.write_file",
+                {"path": f"{ROOT}/a/link/x.py", "content": "1"},
+                context,
+                h,
+            ),
+            Reason.REPO_ACL_FORBIDS,
+        )
+        ok = await self.decide(
+            "repo.write_file", {"path": f"{ROOT}/a/x.py", "content": "1"}, context, h
+        )
+        self.assertTrue(ok.allowed)
+
+    async def test_a_nested_repository_is_decided_on_every_repository_it_is_in(self):
+        outer, inner = uuid.UUID(int=721), uuid.UUID(int=722)
+        read_only = self.P.READ, self.P.AGENT
+        cases = {
+            # the strictest of the two decides, whichever one it is
+            "inner is read-only": (
+                self.inherit(outer),
+                self.override(inner, *read_only),
+            ),
+            "outer is read-only": (
+                self.override(outer, *read_only),
+                self.inherit(inner),
+            ),
+        }
+        for name, (outer_acl, inner_acl) in cases.items():
+            with self.subTest(name):
+                context = make_context(
+                    scope=make_scope(
+                        repositories=[
+                            ScopedRepository(outer, P1, f"{ROOT}/o", outer_acl),
+                            ScopedRepository(inner, P1, f"{ROOT}/o/inner", inner_acl),
+                        ]
+                    )
+                )
+                self.assertDenied(
+                    await self.decide(
+                        "repo.write_file",
+                        {"path": f"{ROOT}/o/inner/x", "content": "1"},
+                        context,
+                    ),
+                    Reason.REPO_ACL_FORBIDS,
+                )
+                outside_inner = await self.decide(
+                    "repo.write_file", {"path": f"{ROOT}/o/x", "content": "1"}, context
+                )
+                self.assertEqual(outside_inner.allowed, name == "inner is read-only")
+
+    async def test_a_repository_of_another_project_needs_that_projects_grant(self):
+        directory = StaticDirectory(
+            principal(
+                SystemRole.USER,
+                U1,
+                {P1: ProjectRole.CONTRIBUTOR, P2: ProjectRole.CONTRIBUTOR},
+            )
+        )
+        other = uuid.UUID(int=731)
+        scope = make_scope(
+            projects={P1: ProjectState.ACTIVE, P2: ProjectState.ACTIVE},
+            repositories=[
+                ScopedRepository(other, P2, f"{ROOT}/p2", RepoAcl.inherit(other, P2))
+            ],
+        )
+        arguments = {"path": f"{ROOT}/p2/x", "content": "1"}
+        h = Harness(directory=directory)
+        narrow = make_context(scope=scope)  # the grant covers P1 only
+        self.assertDenied(
+            await self.decide("repo.write_file", arguments, narrow, h),
+            Reason.AGENT_PROJECT_NOT_GRANTED,
+        )
+        broad = make_context(scope=scope, grant=make_grant(projects={P1, P2}))
+        self.assertTrue(
+            (await self.decide("repo.write_file", arguments, broad, h)).allowed
+        )
+
+    async def test_a_repository_that_denies_never_opens_an_approval(self):
+        h = Harness()
+        context = self.context(self.override(self.A, self.P.READ, self.P.AGENT))
+        decision = await self.decide(
+            "repo.delete_tree", {"path": f"{ROOT}/a/build"}, context, h
+        )
+        self.assertDenied(decision, Reason.REPO_ACL_FORBIDS)
+        self.assertIsNone(decision.approval_id)
+        self.assertEqual(len(h.approvals._records), 0)
+
+    async def test_an_approval_is_not_used_after_the_acl_narrowed(self):
+        h = Harness()
+        arguments = {"path": f"{ROOT}/a/build"}
+        pending = await self.decide(
+            "repo.delete_tree", arguments, self.context(self.inherit(self.A)), h
+        )
+        self.assertEqual(pending.verdict, Verdict.NEEDS_APPROVAL)
+        result = await h.service.approve(
+            pending.approval_id, principal(SystemRole.USER, U1)
+        )
+        self.assertTrue(result)
+        narrowed = self.context(self.override(self.A, self.P.READ, self.P.AGENT))
+        refused = await h.broker.request(
+            make_call("repo.delete_tree", arguments, context=narrowed),
+            approval_id=pending.approval_id,
+        )
+        self.assertDenied(refused, Reason.REPO_ACL_FORBIDS)
+        record = await h.approvals.get(pending.approval_id)
+        self.assertEqual(record.status.value, "approved")  # not consumed
+        used = await h.broker.request(
+            make_call(
+                "repo.delete_tree",
+                arguments,
+                context=self.context(self.inherit(self.A)),
+            ),
+            approval_id=pending.approval_id,
+        )
+        self.assertEqual(
+            (used.verdict, used.reason), (Verdict.ALLOW, R.APPROVAL_CONSUMED)
+        )
+
+    async def test_an_explicit_project_is_decided_as_well_as_the_repository(self):
+        scope = self.scope(self.inherit(self.A), self.inherit(self.B))
+        h = Harness()
+        arguments = {"project": str(P1), "path": f"{ROOT}/a/x"}
+        ok = await self.decide(
+            "project.export", arguments, make_context(scope=scope), h
+        )
+        self.assertTrue(ok.allowed)
+        kinds = [
+            (e.resource_kind, e.repo_id)
+            for e in h.sink.events
+            if e.action == "project.repo.write"
+        ]
+        self.assertEqual(kinds, [("repository", self.A), ("project", None)])
+
+    async def test_a_capability_that_is_not_about_a_repository_stays_project_level(
+        self,
+    ):
+        # project.chat has no repository permission: the policy would refuse a
+        # repository resource for it, so the call is decided on the project.
+        spec = ToolSpec(
+            "chat.note",
+            frozenset({ToolCapability.WRITE}),
+            Capability.PROJECT_CHAT,
+            {"path": ArgumentSpec(ArgumentKind.PATH)},
+        )
+        h = Harness(registry=ToolRegistry([spec]))
+        context = make_context(
+            scope=self.scope(self.override(self.A), None),
+            grant=make_grant(Capability.PROJECT_CHAT),
+        )
+        decision = await h.broker.request(
+            make_call("chat.note", {"path": f"{ROOT}/a/x"}, context=context)
+        )
+        self.assertTrue(decision.allowed)
+        (row,) = [e for e in h.sink.events if e.action == "project.chat"]
+        self.assertEqual((row.resource_kind, row.repo_id), ("project", None))
 
 
 class BudgetTest(unittest.IsolatedAsyncioTestCase):

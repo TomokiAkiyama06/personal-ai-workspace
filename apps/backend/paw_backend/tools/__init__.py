@@ -68,6 +68,7 @@ from paw_backend.tools.scope import (
     LexicalPathResolver,
     PathResolver,
     RealpathResolver,
+    ScopedRepository,
     TargetError,
     TaskScope,
 )
@@ -107,6 +108,7 @@ __all__ = [
     "RealpathResolver",
     "RevokeOutcome",
     "ScopeStatus",
+    "ScopedRepository",
     "StepUpVerifier",
     "SummaryItem",
     "TargetError",

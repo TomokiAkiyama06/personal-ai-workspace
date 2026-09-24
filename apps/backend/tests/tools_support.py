@@ -11,6 +11,7 @@ from paw_backend.authz import (
     InMemoryAuditSink,
     ProjectRole,
     ProjectState,
+    RepoAcl,
     SystemRole,
 )
 from paw_backend.tools import (
@@ -22,6 +23,7 @@ from paw_backend.tools import (
     Environment,
     InMemoryApprovalStore,
     LexicalPathResolver,
+    ScopedRepository,
     TaskContext,
     TaskScope,
     ToolBroker,
@@ -35,6 +37,9 @@ from paw_backend.tools import (
 from .authz_support import AGENT, P1, P2, U1, U2, StaticDirectory, principal, uid
 
 ROOT = "/srv/paw-test/worktree"
+# The repository of P1 that the default task scope holds: its worktree is ROOT
+# and it inherits its project's permissions.
+REPO = uid(701)
 HANDLE = "cred_" + "a1" * 16
 OTHER_HANDLE = "cred_" + "b2" * 16
 TASK = uid(501)
@@ -87,13 +92,19 @@ def sample_specs() -> list[ToolSpec]:
             "issues.create",
             frozenset({C.WRITE, C.NETWORK}),
             Capability.PROJECT_PR_CREATE,
-            _args(url=A.URL, title=ArgumentSpec(A.TEXT, max_length=200)),
+            _args(
+                url=A.URL,
+                repository=A.REPOSITORY,
+                title=ArgumentSpec(A.TEXT, max_length=200),
+            ),
         ),
         ToolSpec(
             "git.push",
             frozenset({C.WRITE, C.NETWORK, C.CREDENTIAL_USE}),
             Capability.PROJECT_PR_CREATE,
-            _args(remote=A.URL, credential=A.CREDENTIAL_HANDLE),
+            _args(
+                remote=A.URL, repository=A.REPOSITORY, credential=A.CREDENTIAL_HANDLE
+            ),
         ),
         ToolSpec(
             "git.merge",
@@ -101,6 +112,7 @@ def sample_specs() -> list[ToolSpec]:
             Capability.PROJECT_REPO_WRITE,
             _args(
                 remote=A.URL,
+                repository=A.REPOSITORY,
                 credential=A.CREDENTIAL_HANDLE,
                 pull_request=ArgumentSpec(A.INTEGER, minimum=1, maximum=10**6),
             ),
@@ -169,6 +181,7 @@ def make_scope(**overrides) -> TaskScope:
         "projects": {P1: ProjectState.ACTIVE},
         # HANDLE is a GitHub credential: valid for GitHub hosts only.
         "credential_handles": {HANDLE: ["github.com", "api.github.com"]},
+        "repositories": [ScopedRepository(REPO, P1, ROOT, RepoAcl.inherit(REPO, P1))],
     }
     arguments.update(overrides)
     return TaskScope(**arguments)
@@ -341,6 +354,7 @@ __all__ = [
     "OTHER_HANDLE",
     "P1",
     "P2",
+    "REPO",
     "ROOT",
     "TASK",
     "U1",

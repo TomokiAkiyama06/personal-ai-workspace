@@ -4,10 +4,11 @@ import pathlib
 import tempfile
 import unittest
 
-from paw_backend.authz import ProjectState
+from paw_backend.authz import ProjectState, RepoAcl, RepoPermission
 from paw_backend.tools import (
     LexicalPathResolver,
     RealpathResolver,
+    ScopedRepository,
     ScopeStatus,
     TargetError,
     TaskScope,
@@ -20,11 +21,22 @@ from paw_backend.tools.scope import (
     normalise_host,
     normalise_path,
     normalise_project,
+    normalise_repository,
     normalise_url,
     path_within,
 )
 
-from .tools_support import HANDLE, OTHER_HANDLE, P1, P2, ROOT, DictResolver, make_scope
+from .authz_support import uid
+from .tools_support import (
+    HANDLE,
+    OTHER_HANDLE,
+    P1,
+    P2,
+    REPO,
+    ROOT,
+    DictResolver,
+    make_scope,
+)
 
 BASE = ROOT
 
@@ -304,6 +316,101 @@ class ProjectNormalisationTest(unittest.TestCase):
                     normalise_project(raw)
 
 
+class RepositoryNormalisationTest(unittest.TestCase):
+    def test_only_canonical_uuids(self):
+        self.assertEqual(normalise_repository(str(REPO)), REPO)
+        self.assertEqual(normalise_repository(REPO), REPO)
+        for raw in (str(REPO).upper(), str(REPO).replace("-", ""), "r1", "", None, 5):
+            with self.subTest(raw=raw):
+                with self.assertRaises(TargetError):
+                    normalise_repository(raw)
+
+
+class ScopedRepositoryTest(unittest.TestCase):
+    def test_ids_and_root_are_normalised(self):
+        repository = ScopedRepository(str(REPO), str(P1), f"{ROOT}//a/./b/")
+        self.assertEqual(
+            (
+                repository.repo_id,
+                repository.project_id,
+                repository.root,
+                repository.acl,
+            ),
+            (REPO, P1, f"{ROOT}/a/b", None),
+        )
+        self.assertIsNone(ScopedRepository(REPO, P1).root)  # a remote-only repository
+
+    def test_a_root_must_be_a_real_absolute_path(self):
+        for root in ("/", "relative/root", f"{ROOT}/..", "~", "", 5):
+            with self.subTest(root=root):
+                with self.assertRaises((ValueError, TypeError)):
+                    ScopedRepository(REPO, P1, root)
+
+    def test_ids_must_be_canonical_uuids(self):
+        for repo_id, project_id in (("r1", P1), (REPO, "p1"), (None, P1), (REPO, None)):
+            with self.subTest(repo_id=repo_id, project_id=project_id):
+                with self.assertRaises(ValueError):
+                    ScopedRepository(repo_id, project_id)
+
+    def test_the_acl_must_be_this_repositorys_in_this_project(self):
+        other = uid(999)
+        for acl in (
+            RepoAcl.inherit(other, P1),  # another repository
+            RepoAcl.inherit(REPO, P2),  # the same id in another project
+        ):
+            with self.subTest(acl=acl):
+                with self.assertRaises(ValueError):
+                    ScopedRepository(REPO, P1, ROOT, acl)
+        for acl in ("inherit", {"allowed": []}, 0):
+            with self.subTest(acl=acl):
+                with self.assertRaises(TypeError):
+                    ScopedRepository(REPO, P1, ROOT, acl)
+        allowed = RepoAcl.override(REPO, P1, {RepoPermission.READ})
+        self.assertIs(ScopedRepository(REPO, P1, ROOT, allowed).acl, allowed)
+
+    def test_a_repository_cannot_be_changed(self):
+        with self.assertRaises(AttributeError):
+            ScopedRepository(REPO, P1, ROOT).acl = None
+
+
+class TaskScopeRepositoriesTest(unittest.TestCase):
+    def test_the_working_set_is_kept_in_order_and_looked_up_by_id(self):
+        one, two = (
+            ScopedRepository(uid(1), P1, f"{ROOT}/one"),
+            ScopedRepository(uid(2), P1),
+        )
+        scope = make_scope(repositories=[one, two])
+        self.assertEqual(scope.repositories, (one, two))
+        self.assertIs(scope.repository(uid(2)), two)
+        self.assertIsNone(scope.repository(uid(3)))
+        self.assertEqual(make_scope(repositories=[]).repositories, ())
+
+    def test_invalid_working_sets_are_refused(self):
+        one = ScopedRepository(uid(1), P1)
+        for label, repositories, error in (
+            ("a repository listed twice", [one, one], ValueError),
+            (
+                "another project than the scope's",
+                [ScopedRepository(uid(2), P2)],
+                ValueError,
+            ),
+            ("not a repository", [{"repo_id": uid(2)}], TypeError),
+            ("a bare string", "repositories", TypeError),
+            ("not a collection", None, TypeError),
+            (
+                "too many",
+                [ScopedRepository(uid(1000 + i), P1) for i in range(33)],
+                ValueError,
+            ),
+        ):
+            with self.subTest(label):
+                with self.assertRaises(error):
+                    make_scope(repositories=repositories)
+        # the limit itself is fine
+        many = [ScopedRepository(uid(1000 + i), P1) for i in range(32)]
+        self.assertEqual(len(make_scope(repositories=many).repositories), 32)
+
+
 class TaskScopeTest(unittest.TestCase):
     def test_a_scope_is_normalised_when_it_is_built(self):
         scope = TaskScope(
@@ -483,6 +590,88 @@ class ClassifyTest(unittest.IsolatedAsyncioTestCase):
             (result.status, result.offending),
             (ScopeStatus.OUT_OF_SCOPE, TargetKind.CREDENTIAL),
         )
+
+    async def test_the_repositories_a_call_touches_are_reported_in_scope_order(self):
+        a, b, c = uid(11), uid(12), uid(13)
+        scope = make_scope(
+            repositories=[
+                ScopedRepository(a, P1, f"{ROOT}/a"),
+                ScopedRepository(b, P1, f"{ROOT}/b"),
+                ScopedRepository(c, P1),  # remote only: no worktree
+            ]
+        )
+        cases = [
+            ([self.path(f"{ROOT}/b/x"), self.path(f"{ROOT}/a")], [a, b]),
+            ([Target(TargetKind.REPOSITORY, str(c))], [c]),
+            ([self.path(f"{ROOT}/a/x"), Target(TargetKind.REPOSITORY, str(a))], [a]),
+            ([self.path(f"{ROOT}/a-other/x"), self.path(f"{ROOT}/elsewhere")], []),
+            ([Target(TargetKind.HOST, "github.com")], []),  # a host names none
+            ([], []),
+        ]
+        for targets, expected in cases:
+            with self.subTest(targets=targets):
+                result = await self.classify(targets, scope)
+                self.assertEqual(result.status, ScopeStatus.IN_SCOPE)
+                self.assertEqual(list(result.repositories), expected)
+
+    async def test_a_repository_is_touched_by_the_resolved_path_not_the_spelling(self):
+        a, b = uid(11), uid(12)
+        scope = make_scope(
+            repositories=[
+                ScopedRepository(a, P1, f"{ROOT}/a"),
+                ScopedRepository(b, P1, f"{ROOT}/b"),
+            ]
+        )
+        resolver = DictResolver({f"{ROOT}/a/link": f"{ROOT}/b/deep"})
+        result = await self.classify(
+            [self.path(f"{ROOT}/a/link/x")], scope, resolver=resolver
+        )
+        self.assertEqual(list(result.repositories), [b])
+        # the root of a repository behind a symlink is resolved as well
+        resolver = DictResolver({f"{ROOT}/a": "/data/a"})
+        moved = make_scope(
+            path_roots=[ROOT, "/data"],
+            repositories=[ScopedRepository(a, P1, f"{ROOT}/a")],
+        )
+        result = await self.classify(
+            [self.path("/data/a/x"), self.path(f"{ROOT}/b")], moved, resolver=resolver
+        )
+        self.assertEqual(list(result.repositories), [a])
+        # `/srv/x/a-evil` is not below `/srv/x/a`
+        result = await self.classify([self.path(f"{ROOT}/a-evil/x")], scope)
+        self.assertEqual(list(result.repositories), [])
+
+    async def test_a_repository_outside_the_working_set_is_out_of_scope(self):
+        result = await self.classify([Target(TargetKind.REPOSITORY, str(uid(99)))])
+        self.assertEqual(
+            (result.status, result.offending, result.repositories),
+            (ScopeStatus.OUT_OF_SCOPE, TargetKind.REPOSITORY, ()),
+        )
+        # one repository outside beats one inside, and the inside one is still reported
+        result = await self.classify(
+            [
+                Target(TargetKind.REPOSITORY, str(REPO)),
+                Target(TargetKind.REPOSITORY, str(uid(99))),
+            ]
+        )
+        self.assertEqual(
+            (result.status, result.offending, result.repositories),
+            (ScopeStatus.OUT_OF_SCOPE, TargetKind.REPOSITORY, (REPO,)),
+        )
+
+    async def test_a_repository_root_that_cannot_be_resolved_is_a_failure(self):
+        class FailsForRepositoryRoot:
+            async def resolve(self, path):
+                if path == f"{ROOT}/a":
+                    raise OSError("boom /secret/place")
+                return path
+
+        scope = make_scope(repositories=[ScopedRepository(uid(11), P1, f"{ROOT}/a")])
+        with self.assertRaises(PathResolutionError) as caught:
+            await self.classify(
+                [self.path(f"{ROOT}/x")], scope, resolver=FailsForRepositoryRoot()
+            )
+        self.assertEqual(str(caught.exception), "OSError")
 
     async def test_a_target_that_is_out_of_scope_beats_a_host_that_is(self):
         result = await self.classify(

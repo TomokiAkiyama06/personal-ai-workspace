@@ -15,7 +15,13 @@ narrow what the previous one allowed:
    :class:`~.policy.ToolPolicy`; ``DENY`` ends the call;
 4. the PAW-025 authorization decision for the tool's capability: the delegating
    user's rights intersected with the agent grant. The broker adds to this and
-   never replaces it: an approval cannot make an operation the agent may not do;
+   never replaces it: an approval cannot make an operation the agent may not do.
+   A call that touches a repository of the task's working set (it names the
+   repository, or a path lies in its worktree) is decided on that **repository**
+   with its resolved ACL, so a read-only override or a "no agents" override
+   applies; an ACL the backend could not resolve denies. A repository write
+   that touches no repository of the working set is denied
+   (``repository_not_identified``);
 5. the task budget (:class:`~.budget.BudgetProvider`); unknown means denied;
 6. ``AUTO`` / ``SCOPED_AUTO`` are allowed; ``APPROVAL`` / ``STRONG_APPROVAL``
    need an approval bound to this exact call: without one a request is opened
@@ -40,9 +46,11 @@ from paw_backend.authz import (
     Authorizer,
     Decision,
     Reason,
+    RepoPermission,
     Resource,
     Scope,
 )
+from paw_backend.authz.capabilities import REPO_PERMISSION_OF
 from paw_backend.tools.approval_types import (
     ApprovalBinding,
     ApprovalEvent,
@@ -76,6 +84,7 @@ from paw_backend.tools.interfaces import require_async_method
 from paw_backend.tools.policy import DEFAULT_TOOL_POLICY, ToolPolicy
 from paw_backend.tools.registry import ToolRegistry, ToolSpec
 from paw_backend.tools.scope import (
+    Classification,
     PathResolutionError,
     PathResolver,
     RealpathResolver,
@@ -94,6 +103,7 @@ _OUT_OF_SCOPE_REASON = {
     TargetKind.HOST: BrokerReason.HOST_OUT_OF_SCOPE,
     TargetKind.PROJECT: BrokerReason.PROJECT_OUT_OF_SCOPE,
     TargetKind.CREDENTIAL: BrokerReason.CREDENTIAL_OUT_OF_SCOPE,
+    TargetKind.REPOSITORY: BrokerReason.REPOSITORY_OUT_OF_SCOPE,
 }
 _CONSUME_REASON = {
     ConsumeOutcome.NOT_FOUND: BrokerReason.APPROVAL_NOT_FOUND,
@@ -307,7 +317,9 @@ class ToolBroker:
                 call_hash=call_hash,
             )
 
-        denied = await self._authorize(spec, parsed, context, correlation_id)
+        denied = await self._authorize(
+            spec, parsed, context, classification, correlation_id
+        )
         if denied is not None:
             reason, authz_reason = denied
             return self._refuse(
@@ -379,22 +391,58 @@ class ToolBroker:
     # --------------------------------------------------------- authorization
 
     def _resources(
-        self, spec: ToolSpec, parsed: ParsedArguments, context: TaskContext
-    ) -> list[Resource]:
-        match CAPABILITIES[spec.authz_capability].scope:
+        self,
+        spec: ToolSpec,
+        parsed: ParsedArguments,
+        context: TaskContext,
+        classification: Classification,
+    ) -> list[Resource] | BrokerReason:
+        """What the call is about, for the authorization decision (or the reason
+        it cannot be decided)."""
+        capability = spec.authz_capability
+        match CAPABILITIES[capability].scope:
             case Scope.PROJECT:
+                resources: list[Resource] = []
+                if capability in REPO_PERMISSION_OF:
+                    # A repository the call touches is decided on its own ACL
+                    # (a project resource never carries one).
+                    for repo_id in classification.repositories:
+                        repository = context.scope.repository(repo_id)
+                        assert repository is not None  # classified from this scope
+                        state = context.scope.projects[repository.project_id]
+                        resources.append(
+                            Resource.repository(
+                                repository.project_id, state, repository.acl
+                            )
+                            if repository.acl is not None
+                            # The ACL is unknown: the policy denies it, and it is
+                            # never read as "inherit".
+                            else Resource(
+                                kind="repository",
+                                id=repository.repo_id,
+                                project_id=repository.project_id,
+                                repo_id=repository.repo_id,
+                                project_state=state,
+                            )
+                        )
+                    if (
+                        not resources
+                        and REPO_PERMISSION_OF[capability] is RepoPermission.WRITE
+                    ):
+                        return BrokerReason.REPOSITORY_NOT_IDENTIFIED
                 projects: list[uuid.UUID] = []
                 for target in parsed.targets:
                     if target.kind is TargetKind.PROJECT:
                         project_id = uuid.UUID(target.value)
                         if project_id not in projects:
                             projects.append(project_id)
-                if not projects:
+                if not projects and not resources:
                     projects = [context.primary_project_id]
-                return [
+                resources.extend(
                     Resource.project(project_id, context.scope.projects[project_id])
                     for project_id in projects
-                ]
+                )
+                return resources
             case Scope.SELF:
                 return [Resource.owned_by(context.delegator_id, "tool_target")]
             case _:
@@ -405,10 +453,14 @@ class ToolBroker:
         spec: ToolSpec,
         parsed: ParsedArguments,
         context: TaskContext,
+        classification: Classification,
         correlation_id: uuid.UUID,
     ) -> tuple[BrokerReason, Reason | None] | None:
         """``None`` when allowed, else the reason (and the PAW-025 reason)."""
-        for resource in self._resources(spec, parsed, context):
+        resources = self._resources(spec, parsed, context, classification)
+        if isinstance(resources, BrokerReason):
+            return resources, None
+        for resource in resources:
             try:
                 decision = await self._authorizer.authorize_agent_action(
                     context.delegator_id,
