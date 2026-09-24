@@ -1,4 +1,4 @@
-"""Agent Task lifecycle: tasks, attempts, steps, logs and the event history (PAW-032).
+"""Agent Task lifecycle: tasks, attempts, steps, tool calls, logs and events (PAW-032).
 
 Revision ID: 0032
 Revises: 0025
@@ -37,6 +37,7 @@ REVIEW_STATUSES = ("not_started", "in_review", "approved", "changes_requested")
 EVALUATION_RESULTS = ("not_run", "passed", "failed")
 PR_STATES = ("draft", "open", "merged", "closed")
 STEP_STATUSES = ("running", "succeeded", "failed", "interrupted")
+TOOL_STATUSES = ("started", "succeeded", "failed", "interrupted")
 LOG_LEVELS = ("debug", "info", "warning", "error")
 
 
@@ -152,6 +153,36 @@ def upgrade() -> None:
     )
 
     op.create_table(
+        "task_tool_invocations",
+        sa.Column("id", sa.Uuid(), nullable=False),
+        sa.Column("task_id", sa.Uuid(), nullable=False),
+        sa.Column("step_id", sa.BigInteger(), nullable=False),
+        sa.Column("tool_name", sa.String(length=100), nullable=False),
+        sa.Column("status", sa.String(length=24), nullable=False),
+        sa.Column("started_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("finished_at", sa.DateTime(timezone=True), nullable=True),
+        sa.PrimaryKeyConstraint("id", name=op.f("pk_task_tool_invocations")),
+        sa.ForeignKeyConstraint(
+            ["task_id"],
+            ["tasks.id"],
+            name=op.f("fk_task_tool_invocations_task_id_tasks"),
+        ),
+        sa.ForeignKeyConstraint(
+            ["step_id"],
+            ["task_steps.id"],
+            name=op.f("fk_task_tool_invocations_step_id_task_steps"),
+        ),
+        _in("status", TOOL_STATUSES, "ck_task_tool_invocations_status_valid"),
+        sa.CheckConstraint(
+            "(status = 'started') = (finished_at IS NULL)",
+            name=op.f("ck_task_tool_invocations_finished_matches_status"),
+        ),
+    )
+    op.create_index(
+        op.f("ix_task_tool_invocations_step_id"), "task_tool_invocations", ["step_id"]
+    )
+
+    op.create_table(
         "task_logs",
         sa.Column("seq", sa.BigInteger(), sa.Identity(), nullable=False),
         sa.Column("task_id", sa.Uuid(), nullable=False),
@@ -225,6 +256,7 @@ def downgrade() -> None:
     op.drop_table("task_events")
     op.execute("DROP FUNCTION task_events_reject_change()")
     op.drop_table("task_logs")
+    op.drop_table("task_tool_invocations")
     op.drop_table("task_steps")
     op.drop_table("task_attempts")
     op.drop_table("tasks")
