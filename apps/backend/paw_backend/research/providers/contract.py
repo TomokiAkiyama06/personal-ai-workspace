@@ -208,6 +208,9 @@ class ProviderHit:
     comes from a private source (for example a private GitHub repository) so
     that the Research Privacy Filter (PAW-053) can rely on it.
     There is no field for a provider name or a raw payload.
+
+    The constructor validates, but the broker does not trust that it ran: every
+    field of a received hit is read and validated again (``revalidate_hit``).
     """
 
     locator: str
@@ -235,7 +238,8 @@ class ProviderDocument:
 
     Like ``ProviderHit`` but ``text`` may hold up to ``MAX_DOCUMENT_CHARS``
     characters and there is no locator: the broker attaches the locator that
-    was requested. ``private_source`` has no default here either.
+    was requested. ``private_source`` has no default here either. The broker
+    validates the fields again (``revalidate_document``).
     """
 
     title: str = ""

@@ -7,14 +7,16 @@ objects and merge the answers of several providers.
 
 import hashlib
 from collections.abc import Sequence
-from dataclasses import replace
+from dataclasses import fields, replace
 from datetime import UTC, datetime
 
 from paw_backend.research.providers.contract import (
+    ProviderDocument,
     ProviderHit,
     ProviderKind,
     ResearchItem,
     SourceMetadata,
+    SourceType,
 )
 from paw_backend.research.providers.errors import (
     InvalidLocatorError,
@@ -48,18 +50,105 @@ def normalize_title(title: str) -> str:
     return " ".join(title.split())
 
 
-def published_utc(value: datetime | None) -> datetime | None:
-    """``value`` in UTC (``None`` stays ``None``), or ``InvalidProviderResponseError``.
+def published_utc(value: object) -> datetime | None:
+    """``value`` as a plain UTC ``datetime`` (``None`` stays ``None``), or invalid.
 
-    A time the constructors would refuse (``datetime.max`` at UTC-01:00 is beyond
-    UTC's range) can still reach here in an object that was built around them; it
-    is the provider's invalid response, never an ``OverflowError`` for the caller.
+    ``value`` is untrusted. It must be ``None`` or an aware ``datetime`` that UTC
+    can express (``datetime.max`` at UTC-01:00 cannot); anything else, and any
+    failure of the conversion, is ``InvalidProviderResponseError``. The result is
+    an exact ``datetime`` (never a subclass) whose methods are the standard
+    library's: the conversion uses the ``datetime`` methods directly, so a
+    subclass cannot run its own code. Only ``value.tzinfo`` is the provider's
+    code (``utcoffset``); whatever it raises is the provider's invalid response.
     """
     if value is None:
         return None
+    if not issubclass(type(value), datetime):
+        raise InvalidProviderResponseError()
     try:
-        return value.astimezone(UTC)
-    except (OverflowError, ValueError):
+        offset = datetime.utcoffset(value)
+        converted = None if offset is None else datetime.astimezone(value, UTC)
+    except Exception:  # only the provider's tzinfo runs here (see the docstring)
+        raise InvalidProviderResponseError() from None
+    if converted is None:  # naive
+        raise InvalidProviderResponseError()
+    return datetime.combine(datetime.date(converted), datetime.timetz(converted))
+
+
+def _plain_str(value: object) -> str:
+    """An exact ``str`` copy of ``value``, made without running its class's code.
+
+    A ``str`` subclass can override ``__len__``, ``encode`` and more;
+    ``str.__str__`` copies the characters and runs none of that. The constructors
+    then check the bounds on the copy, so a subclass cannot lie about its length.
+    """
+    if not issubclass(type(value), str):
+        raise InvalidProviderResponseError()
+    return str.__str__(value)
+
+
+def _exactly(value: object, expected: type) -> object:
+    if type(value) is not expected:
+        raise InvalidProviderResponseError()
+    return value
+
+
+def _read_fields(cls: type, value: object) -> dict[str, object]:
+    """The slot values of ``value``, read through ``cls`` and not through its class.
+
+    ``ProviderHit`` and ``ProviderDocument`` are slotted dataclasses: each field
+    is a ``member_descriptor`` on ``cls``, which reads the slot directly. A
+    subclass's properties and ``__getattribute__`` are never run, nothing is read
+    twice, and a slot that was never set (a constructor that did not call
+    ``super().__init__``) is an ``AttributeError`` that we translate.
+    ``issubclass(type(...))`` is used instead of ``isinstance`` because an object
+    can claim any ``__class__``.
+    """
+    if not issubclass(type(value), cls):
+        raise InvalidProviderResponseError()
+    try:
+        return {f.name: getattr(cls, f.name).__get__(value) for f in fields(cls)}
+    except AttributeError:
+        raise InvalidProviderResponseError() from None
+
+
+def _plain_fields(raw: dict[str, object]) -> dict[str, object]:
+    """The fields that a hit and a document share, as plain values (or invalid)."""
+    return {
+        "title": _plain_str(raw["title"]),
+        "text": _plain_str(raw["text"]),
+        "published_at": published_utc(raw["published_at"]),
+        "source_type": _exactly(raw["source_type"], SourceType),
+        "private_source": _exactly(raw["private_source"], bool),
+    }
+
+
+def revalidate_hit(value: object) -> ProviderHit:
+    """A clean ``ProviderHit`` with the field values of ``value``, or invalid.
+
+    ``isinstance(value, ProviderHit)`` only proves the class. The object may
+    have been built around its constructor (``object.__setattr__``, a subclass
+    that sets nothing, ...), so its fields are read once (see ``_read_fields``),
+    copied into plain values and validated again by the ``ProviderHit``
+    constructor itself (types, bounds, UTF-8, ``published_at`` in UTC).
+    Everything that fails, for whatever reason, is ``InvalidProviderResponseError``
+    (fixed message): nothing of the value, and no exception text, is kept.
+    """
+    raw = _read_fields(ProviderHit, value)
+    locator = _plain_str(raw["locator"])
+    plain = _plain_fields(raw)
+    try:
+        return ProviderHit(locator, **plain)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        raise InvalidProviderResponseError() from None
+
+
+def revalidate_document(value: object) -> ProviderDocument:
+    """Like ``revalidate_hit`` for a fetched ``ProviderDocument`` (no locator)."""
+    plain = _plain_fields(_read_fields(ProviderDocument, value))
+    try:
+        return ProviderDocument(**plain)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
         raise InvalidProviderResponseError() from None
 
 
@@ -76,12 +165,16 @@ def normalize_hits(
     ``hits`` is untrusted (whatever the adapter returned). It must be a ``list``
     or a ``tuple`` (a ``str``, ``bytes``, ``dict``, ``set``, generator or
     ``None`` is not) with at most ``limit`` elements, and every element must be
-    a ``ProviderHit``. All elements are checked, and every locator is
-    canonicalised, BEFORE anything is returned. Any violation, including a
-    locator that ``canonicalize_locator`` rejects, raises
-    ``InvalidProviderResponseError`` (fixed message) and yields no item at all:
-    a response is accepted or rejected as a whole. Only ``InvalidLocatorError``
-    is converted; other exceptions (a bug) propagate.
+    a ``ProviderHit`` whose live field values are valid: each one is validated
+    again by ``revalidate_hit`` (an object built around the constructor, with
+    unset slots or values of the wrong type or length, is not a valid hit). All
+    elements are checked, and every locator is canonicalised, BEFORE anything is
+    returned. Any violation, including a locator that ``canonicalize_locator``
+    rejects, raises ``InvalidProviderResponseError`` (fixed message) and yields no
+    item at all: a response is accepted or rejected as a whole. Only
+    ``InvalidLocatorError`` is converted (and what the validation of untrusted
+    objects catches); other exceptions (a bug in the trusted arguments)
+    propagate.
 
     ``provider_id``, ``kind``, ``limit`` and ``retrieved_at`` come from the
     broker and are trusted; ``retrieved_at`` is already UTC.
@@ -99,16 +192,16 @@ def normalize_hits(
     """
     if not isinstance(hits, list | tuple) or len(hits) > limit:
         raise InvalidProviderResponseError()
-    # Exactly ``ProviderHit`` (or a subclass): an object that merely has the same
-    # attributes could lack ``private_source`` and silently count as public.
-    if not all(isinstance(hit, ProviderHit) for hit in hits):
-        raise InvalidProviderResponseError()
+    # ``isinstance`` proves the class and nothing else: an object built around
+    # the constructor may lack slots or hold values of the wrong type. Every hit
+    # is read once and validated again (``revalidate_hit``); everything below
+    # works on those clean copies, never on the provider's objects.
+    clean = [revalidate_hit(hit) for hit in hits]
     try:
-        locators = [canonicalize_locator(hit.locator) for hit in hits]
+        locators = [canonicalize_locator(hit.locator) for hit in clean]
     except InvalidLocatorError:
         raise InvalidProviderResponseError() from None
 
-    published = [published_utc(hit.published_at) for hit in hits]  # all, first
     return tuple(
         ResearchItem(
             SourceMetadata(
@@ -119,12 +212,12 @@ def normalize_hits(
                 retrieved_at=retrieved_at,
                 content_hash=compute_content_hash(hit.text),
                 source_type=hit.source_type,
-                published_at=published_at,
+                published_at=hit.published_at,
                 private_source=hit.private_source,
             ),
             hit.text,
         )
-        for hit, locator, published_at in zip(hits, locators, published, strict=True)
+        for hit, locator in zip(clean, locators, strict=True)
     )
 
 
