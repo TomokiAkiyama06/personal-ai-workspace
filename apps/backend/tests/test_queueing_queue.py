@@ -62,6 +62,15 @@ class ConstructorTest(unittest.TestCase):
                     TaskQueue(object(), lease_seconds=bad)
                 self.assertEqual(caught.exception.parameter, "lease_seconds")
 
+    def test_the_explicit_time_switch_is_a_real_bool(self):
+        TaskQueue(object(), allow_explicit_now=True)
+        TaskQueue(object(), allow_explicit_now=False)
+        for bad in (1, 0, "yes", "", None):
+            with self.subTest(bad=repr(bad)):
+                with self.assertRaises(InvalidQueueingArgumentError) as caught:
+                    TaskQueue(object(), allow_explicit_now=bad)
+                self.assertEqual(caught.exception.parameter, "allow_explicit_now")
+
 
 @requires_postgres
 class EnqueueTest(QueueTestCase):
@@ -304,7 +313,8 @@ class ClaimOrderTest(QueueTestCase):
             ("worker_id", "x" * 101, at(0)),
             ("now", "w1", at(0).replace(tzinfo=None)),
             ("now", "w1", "2030-01-01T00:00:00Z"),
-            ("now", "w1", None),
+            # (``now=None`` is not invalid: it means the database clock, see
+            # TrustedClockTest.)
         ):
             with self.subTest(parameter=parameter, worker=worker):
                 with self.assertRaises(InvalidQueueingArgumentError) as caught:
@@ -326,7 +336,7 @@ class LeaseTest(QueueTestCase):
         entry = await self.enqueue()
         claimed = await self.queue.claim_next("w1", at(0))
         self.assertEqual(claimed.lease_expires_at, at(60))
-        short = TaskQueue(self.database, lease_seconds=5)
+        short = self.new_queue(lease_seconds=5)
         other = await self.enqueue(seconds=1)
         claimed = await short.claim_next("w1", at(30))
         self.assertEqual((claimed.id, claimed.lease_expires_at), (other.id, at(35)))
@@ -743,6 +753,243 @@ class ConcurrencyTest(QueueTestCase):
             with self.assertRaises(LeaseLostError):
                 await self.queue.complete(entry.id, "w1", at(6))
         self.assertIsNone(await self.queue.claim_next("w2", at(10**6)))
+
+
+@requires_postgres
+class TrustedClockTest(QueueTestCase):
+    """A production queue never takes a time from its caller: the database clock
+    decides what is expired, and stamps every time it stores."""
+
+    def production_queue(self, **kwargs) -> TaskQueue:
+        """A queue as production builds it: no explicit time is accepted."""
+        return TaskQueue(self.new_database(), **kwargs)
+
+    async def database_time(self):
+        return await self.scalar("SELECT clock_timestamp()")
+
+    async def claimed_entry(self, queue: TaskQueue, worker: str = "w1") -> QueueEntry:
+        (task_id,) = await self.make_tasks(1)
+        await queue.enqueue(task_id)
+        claimed = await queue.claim_next(worker)
+        self.assertEqual((claimed.task_id, claimed.claimed_by), (task_id, worker))
+        return claimed
+
+    async def until(self, sql: str, **parameters) -> None:
+        """Poll a query that returns a boolean until it is true (30 s at most)."""
+        for _ in range(600):
+            if await self.scalar(sql, **parameters):
+                return
+            await asyncio.sleep(0.05)
+        self.fail("the condition was not reached in time")
+
+    async def expire_lease(self, entry_id: int) -> None:
+        """The lease ran out on the database clock (moved, never slept)."""
+        await self.owner_sql(
+            "UPDATE queue_entries SET claimed_at = now() - interval '2 minutes', "
+            "lease_expires_at = now() - interval '1 second' WHERE id = :id",
+            id=entry_id,
+        )
+
+    async def test_a_caller_supplied_future_time_cannot_steal_a_live_lease(self):
+        entry = await self.enqueue()
+        await self.queue.claim_next("w1", at(0))  # w1 holds the lease until at(60)
+        # A queue as production builds it, called by a worker whose clock is far ahead.
+        production = TaskQueue(self.database)
+        with self.assertRaises(InvalidQueueingArgumentError) as caught:
+            await production.claim_next("w2", at(10**6))
+        self.assertEqual(caught.exception.parameter, "now")
+        row = await self.entry_row(entry.id)
+        self.assertEqual((row["claimed_by"], row["claim_count"]), ("w1", 1))
+        # The database clock (which is before at(60)) says the lease is alive.
+        self.assertIsNone(await production.claim_next("w2"))
+        row = await self.entry_row(entry.id)
+        self.assertEqual((row["claimed_by"], row["claim_count"]), ("w1", 1))
+
+    async def test_expiry_is_judged_after_the_wait_for_the_row_lock(self):
+        # The heartbeat starts while the lease is alive and then waits for a row
+        # lock past the lease end. The transaction start time (``now()``) would say
+        # "alive"; the time of the decision (``clock_timestamp()``) says expired.
+        production = self.production_queue()
+        claimed = await self.claimed_entry(production)
+        await self.owner_sql(
+            "UPDATE queue_entries SET claimed_at = clock_timestamp() - interval "
+            "'1 minute', lease_expires_at = clock_timestamp() + interval '3 seconds' "
+            "WHERE id = :id",
+            id=claimed.id,
+        )
+        async with self.database.engine.connect() as holder:
+            await holder.execute(
+                text("SELECT id FROM queue_entries WHERE id = :id FOR UPDATE"),
+                {"id": claimed.id},
+            )
+            heartbeat = asyncio.create_task(production.heartbeat(claimed.id, "w1"))
+            # It is blocked on the row, and then the lease runs out while it waits.
+            await self.until(
+                "SELECT count(*) > 0 FROM pg_locks "
+                "WHERE locktype = 'transactionid' AND NOT granted"
+            )
+            await self.until(
+                "SELECT clock_timestamp() > lease_expires_at FROM queue_entries "
+                "WHERE id = :id",
+                id=claimed.id,
+            )
+            await holder.rollback()
+            with self.assertRaises(LeaseLostError):
+                async with asyncio.timeout(30):
+                    await heartbeat
+
+    async def test_a_production_queue_rejects_every_caller_supplied_time(self):
+        production = self.production_queue()
+        claimed = await self.claimed_entry(production)
+        (other_task,) = await self.make_tasks(1)
+        for name, call in (
+            ("enqueue", lambda now: production.enqueue(other_task, now=now)),
+            ("claim_next", lambda now: production.claim_next("w2", now)),
+            ("heartbeat", lambda now: production.heartbeat(claimed.id, "w1", now)),
+            ("release", lambda now: production.release(claimed.id, "w1", now)),
+            ("complete", lambda now: production.complete(claimed.id, "w1", now)),
+            ("cancel", lambda now: production.cancel(claimed.task_id, now)),
+        ):
+            # A valid time, a far-future time, a naive time and a non-time: none of
+            # them is accepted, so none can be used to influence the outcome.
+            for now in (at(0), at(10**6), at(0).replace(tzinfo=None), "2030-01-01"):
+                with self.subTest(operation=name, now=repr(now)):
+                    with self.assertRaises(InvalidQueueingArgumentError) as caught:
+                        await call(now)
+                    self.assertEqual(caught.exception.parameter, "now")
+        row = await self.entry_row(claimed.id)
+        self.assertEqual(
+            (row["status"], row["claimed_by"], row["claim_count"]), ("claimed", "w1", 1)
+        )
+        self.assertEqual(await self.scalar("SELECT count(*) FROM queue_entries"), 1)
+
+    async def test_the_database_clock_decides_that_a_lease_expired(self):
+        production = self.production_queue()
+        claimed = await self.claimed_entry(production, "w1")
+        self.assertEqual(
+            claimed.lease_expires_at - claimed.claimed_at, timedelta(seconds=60)
+        )
+        self.assertIsNone(await production.claim_next("w2"))
+
+        await self.expire_lease(claimed.id)
+        with self.assertRaises(LeaseLostError):
+            await production.heartbeat(claimed.id, "w1")
+        reclaimed = await production.claim_next("w2")
+        self.assertEqual(
+            (reclaimed.id, reclaimed.claimed_by, reclaimed.claim_count),
+            (claimed.id, "w2", 2),
+        )
+        with self.assertRaises(LeaseLostError):
+            await production.complete(claimed.id, "w1")
+
+    async def test_release_and_complete_are_refused_after_expiry_on_the_database_clock(
+        self,
+    ):
+        production = self.production_queue()
+        for operation in (
+            production.heartbeat,
+            production.release,
+            production.complete,
+        ):
+            with self.subTest(operation=operation.__name__):
+                await self.owner_sql("TRUNCATE queue_entries")
+                claimed = await self.claimed_entry(production)
+                await operation(claimed.id, "w1")  # alive: allowed
+                await self.owner_sql("TRUNCATE queue_entries")
+                claimed = await self.claimed_entry(production)
+                await self.expire_lease(claimed.id)
+                with self.assertRaises(LeaseLostError):
+                    await operation(claimed.id, "w1")
+
+    async def test_a_lease_that_is_still_live_on_the_database_clock_is_kept(self):
+        production = self.production_queue()
+        claimed = await self.claimed_entry(production, "w1")
+        await self.owner_sql(
+            "UPDATE queue_entries SET lease_expires_at = now() + interval '1 hour' "
+            "WHERE id = :id",
+            id=claimed.id,
+        )
+        self.assertIsNone(await production.claim_next("w2"))
+        beat = await production.heartbeat(claimed.id, "w1")
+        # a heartbeat never shortens a lease
+        self.assertGreater(
+            beat.lease_expires_at - beat.claimed_at, timedelta(minutes=59)
+        )
+
+    async def test_heartbeat_extends_a_short_lease_to_the_database_time_plus_the_lease(
+        self,
+    ):
+        production = self.production_queue()
+        claimed = await self.claimed_entry(production)
+        await self.owner_sql(
+            "UPDATE queue_entries SET lease_expires_at = now() + interval '1 second' "
+            "WHERE id = :id",
+            id=claimed.id,
+        )
+        before = await self.database_time()
+        beat = await production.heartbeat(claimed.id, "w1")
+        after = await self.database_time()
+        self.assertGreaterEqual(beat.lease_expires_at, before + timedelta(seconds=60))
+        self.assertLessEqual(beat.lease_expires_at, after + timedelta(seconds=60))
+
+    async def test_the_database_clock_stamps_every_stored_time(self):
+        production = self.production_queue(lease_seconds=90)
+        (first, second) = await self.make_tasks(2)
+        before = await self.database_time()
+        entry = await production.enqueue(first)
+        claimed = await production.claim_next("w1")
+        completed = await production.complete(claimed.id, "w1")
+        await production.enqueue(second)
+        cancelled = await production.cancel(second)
+        after = await self.database_time()
+
+        self.assertTrue(cancelled)
+        self.assertLessEqual(before, entry.enqueued_at)
+        self.assertLessEqual(entry.enqueued_at, claimed.claimed_at)
+        self.assertEqual(
+            claimed.lease_expires_at - claimed.claimed_at, timedelta(seconds=90)
+        )
+        self.assertLessEqual(claimed.claimed_at, completed.finished_at)
+        self.assertLessEqual(completed.finished_at, after)
+        self.assertIsNone(completed.lease_expires_at)
+        (row,) = await self.rows(
+            "SELECT * FROM queue_entries WHERE task_id = :t", t=second
+        )
+        self.assertEqual(row["status"], "cancelled")
+        self.assertLessEqual(completed.finished_at, row["finished_at"])
+        self.assertLessEqual(row["finished_at"], after)
+
+    async def test_the_order_still_follows_priority_then_arrival_on_the_database_clock(
+        self,
+    ):
+        production = self.production_queue()
+        tasks = await self.make_tasks(4)
+        normal_first = await production.enqueue(tasks[0])
+        low = await production.enqueue(tasks[1], priority=P.LOW)
+        high = await production.enqueue(tasks[2], priority=P.HIGH)
+        normal_second = await production.enqueue(tasks[3])
+        self.assertLessEqual(normal_first.enqueued_at, normal_second.enqueued_at)
+        claimed = [await production.claim_next("w1") for _ in range(4)]
+        self.assertEqual(
+            [entry.id for entry in claimed],
+            [high.id, normal_first.id, normal_second.id, low.id],
+        )
+        self.assertIsNone(await production.claim_next("w1"))
+
+    async def test_none_means_the_database_clock_also_for_a_queue_with_the_test_seam(
+        self,
+    ):
+        (task_id,) = await self.make_tasks(1)
+        before = await self.database_time()
+        entry = await self.queue.enqueue(task_id, now=None)
+        claimed = await self.queue.claim_next("w1", None)
+        after = await self.database_time()
+        self.assertEqual(claimed.id, entry.id)
+        self.assertLessEqual(before, entry.enqueued_at)
+        self.assertLessEqual(claimed.claimed_at, after)
+        self.assertEqual(
+            claimed.lease_expires_at - claimed.claimed_at, timedelta(seconds=60)
+        )
 
 
 if __name__ == "__main__":

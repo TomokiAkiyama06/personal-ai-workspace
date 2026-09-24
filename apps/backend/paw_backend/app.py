@@ -21,6 +21,7 @@ from paw_backend.middleware import (
     RequestIdMiddleware,
     SecurityHeadersMiddleware,
 )
+from paw_backend.research.scratch import ScratchJanitor, ScratchStore
 
 
 def create_app(
@@ -55,16 +56,23 @@ def create_app(
         token_check = asyncio.create_task(
             warn_if_tokens_can_be_minted(database, settings.database_timeout_seconds)
         )
+        background = {audit_check, token_check}
         try:
+            # Expired Research Scratch items are only hidden until something
+            # deletes them (PAW-050): purge them regularly, from the start on.
+            if database.configured and settings.scratch_purge_interval_seconds > 0:
+                janitor = ScratchJanitor(
+                    ScratchStore(database),
+                    interval_seconds=settings.scratch_purge_interval_seconds,
+                )
+                background.add(asyncio.create_task(janitor.run()))
             yield
         finally:
             # Cancelling aborts each diagnostic's own connection (it does not wait
             # for a stalled server to answer), and the wait is bounded anyway.
-            for check in (audit_check, token_check):
-                check.cancel()
-            await asyncio.wait(
-                {audit_check, token_check}, timeout=settings.shutdown_timeout_seconds
-            )
+            for task in background:
+                task.cancel()
+            await asyncio.wait(background, timeout=settings.shutdown_timeout_seconds)
             heartbeat.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await heartbeat

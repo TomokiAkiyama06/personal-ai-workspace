@@ -44,6 +44,13 @@ def check_int(name: str, value: Any, *, minimum: int, maximum: int) -> int:
     return value
 
 
+def check_bool(name: str, value: Any) -> bool:
+    """Only ``True`` / ``False`` (no truthy values)."""
+    if not isinstance(value, bool):
+        _reject(name)
+    return value
+
+
 def check_amount(name: str, value: Any) -> int:
     """A non-negative integer amount of at most ``MAX_RECORD_AMOUNT``.
 

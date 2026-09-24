@@ -18,6 +18,7 @@ from paw_backend.tools.runner import DEFAULT_EXECUTION_TIMEOUT
 from .authz_support import SECRET, FailingSink, principal
 from .tools_support import (
     HANDLE,
+    REPO,
     ROOT,
     TASK,
     U1,
@@ -30,7 +31,11 @@ from .tools_support import (
 R = BrokerReason
 GITHUB_TOKEN = "ghp_" + "a1B2" * 9
 READ = {"path": f"{ROOT}/src/a.py"}
-PUSH = {"remote": "https://github.com/org/repo.git", "credential": HANDLE}
+PUSH = {
+    "remote": "https://github.com/org/repo.git",
+    "repository": str(REPO),
+    "credential": HANDLE,
+}
 
 
 class BrokerNeverExecutesTest(unittest.IsolatedAsyncioTestCase):

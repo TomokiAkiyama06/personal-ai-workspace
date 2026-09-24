@@ -40,8 +40,8 @@
    **守れないもの:** Schema の Owner と Superuser、Web の Role が Token を使用済みにして Owner を締め出すこと（`owner-recover` で回復する可用性の問題）、
    そして PAW-022 / PAW-023 が追加する Password と Passkey の Table を Application が書けること（Application の侵害で認証情報を変えられる可能性は残る）。
 6. **Recovery は管理コマンドだけ。** 確認フラグ（`--confirm-owner-recovery`）を要求し、未使用の Token をすべて無効にして新しい Token を発行し、Audit に残す。
-   要件（`[FIXED]`）は Ubuntu の sudo 経由の Recovery なので、**`owner-recover` は実効 uid が 0（root。`sudo` が実行する User）でなければ拒否する**（`RecoveryNotPrivilegedError`、Audit に deny `not_privileged`、何も変更しない）。
-   `SUDO_UID` は環境変数で誰でも設定できるため認可に使わず、実行した Process の uid と `SUDO_UID` を Token の行に数値で記録し、stderr に出す（調査の手掛かり）。
+   要件（`[FIXED]`）は Ubuntu の sudo 経由の Recovery なので、**`owner-recover` は実効 uid が 0（root。`sudo` が実行する User）でなければ拒否する**（`RecoveryNotPrivilegedError`、Audit に deny `not_privileged`、何も変更しない）。root かどうかは `OwnerOperator.recover_owner` が**自分の Process の `os.geteuid()` を読んで**決め、呼び出し側が渡した Identity は受け取らない（受け取れば、Library として呼ぶ非 root の Process が `OperatorIdentity(uid=0)` を渡して迂回できるため。Review の指摘）。
+   `SUDO_UID` は環境変数で誰でも設定できるため認可に使わず、実行した Process の uid と `SUDO_UID` を（上と同じ、Service 自身の読み取りで）Token の行に数値で記録し、stderr に出す（調査の手掛かり）。`setup_owner` も呼び出し側からの Identity を受け取らない（記録を偽装させないため）。
    この確認は、DB の認証情報を持つ Process が誤って実行することを防ぐもので、**境界そのものではない**。境界は `PAW_OPERATOR_DATABASE_URL` を root だけが読めるファイルに置くこと。root の Process や User Namespace の中の uid 0 は通る。
    PAW-025 の `AuditEvent` に自由な項目がないため、Audit の Event へは Token の `audit_ref` から Join する。Audit に専用の項目を足すかは決めていない。
    `owner-setup`（初回の Owner 作成）には OS User の確認を付けていない（要件は Recovery だけを sudo と定めている）。付けるかは人間が決める。
