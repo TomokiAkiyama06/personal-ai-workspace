@@ -16,6 +16,7 @@ from paw_backend.tools import (
     ApprovalEventKind,
     ApprovalLevel,
     ApprovalOutcome,
+    ApprovalRevocationError,
     ApprovalService,
     ApprovalStatus,
     ArgumentKind,
@@ -24,8 +25,10 @@ from paw_backend.tools import (
     BudgetStatus,
     Environment,
     FailClosedStepUp,
+    FailClosedTaskActivity,
     InMemoryApprovalStore,
     SummaryItem,
+    TaskActivity,
     TaskScope,
     ToolCapability,
     ToolRegistry,
@@ -39,10 +42,12 @@ from .tools_store_contract import LIMITS, StoreContract, new_approval
 from .tools_support import (
     NOW,
     P1,
+    REPO,
     ROOT,
     TASK,
     U1,
     U2,
+    FakeTaskActivity,
     Harness,
     StepUp,
     make_call,
@@ -57,6 +62,7 @@ U3 = uuid.UUID(int=3)
 DELETE = {"path": f"{ROOT}/build"}
 MERGE = {
     "remote": "https://github.com/org/repo.git",
+    "repository": str(REPO),
     "credential": "cred_" + "a1" * 16,
     "pull_request": 7,
 }
@@ -796,7 +802,11 @@ class ApprovalSummaryTest(unittest.IsolatedAsyncioTestCase):
     async def test_the_path_and_query_of_an_external_url_are_shown(self):
         record = await self.open(
             "issues.create",
-            {"url": "https://example.org/issues?data=SECRETBYTES", "title": "hello"},
+            {
+                "url": "https://example.org/issues?data=SECRETBYTES",
+                "repository": str(REPO),
+                "title": "hello",
+            },
         )
         self.assertEqual(
             record.summary,
@@ -804,16 +814,25 @@ class ApprovalSummaryTest(unittest.IsolatedAsyncioTestCase):
                 SummaryItem(
                     "url", "url", "https://example.org/issues?data=SECRETBYTES"
                 ),
+                SummaryItem("repository", "repository", str(REPO)),
                 SummaryItem("title", "text", "hello"),
             ),
         )
-        self.assertEqual(record.targets, (Target(TargetKind.HOST, "example.org"),))
+        self.assertEqual(
+            record.targets,
+            (
+                Target(TargetKind.HOST, "example.org"),
+                Target(TargetKind.REPOSITORY, str(REPO)),
+            ),
+        )
 
     async def test_every_kind_of_argument_appears_in_declared_order(self):
         spec = ToolSpec(
             "db.drop_data",
             frozenset({ToolCapability.DESTRUCTIVE}),
-            Capability.PROJECT_REPO_WRITE,
+            # Not a repository write (that must name its repository): what is
+            # tested here is only how the arguments are shown.
+            Capability.PROJECT_TASK_RUN,
             {
                 "project": ArgumentSpec(ArgumentKind.PROJECT),
                 "confirm": ArgumentSpec(ArgumentKind.BOOLEAN),
@@ -838,7 +857,9 @@ class ApprovalSummaryTest(unittest.IsolatedAsyncioTestCase):
         spec = ToolSpec(
             "db.migrate",
             frozenset({ToolCapability.DESTRUCTIVE}),
-            Capability.PROJECT_REPO_WRITE,
+            # Not a repository write (that must name its repository): what is
+            # tested here is only how the arguments are shown.
+            Capability.PROJECT_TASK_RUN,
             {
                 "project": ArgumentSpec(ArgumentKind.PROJECT),
                 "sql": ArgumentSpec(ArgumentKind.TEXT, max_length=2000),
@@ -1178,6 +1199,266 @@ class ApprovalRevocationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             (record.status, record.step_up_verified), (ApprovalStatus.APPROVED, True)
         )
+
+
+class RevokeFailingStore(InMemoryApprovalStore):
+    """The in-memory store, except that revoking a task's approvals can fail."""
+
+    error: Exception | None = None
+
+    async def revoke_task(self, task_id, *, now):
+        if self.error is not None:
+            raise self.error
+        return await super().revoke_task(task_id, now=now)
+
+
+class TaskEvent:
+    """What ``TaskService`` hands to a listener (only the fields read here)."""
+
+    def __init__(self, task_id, to_state, from_state=None):
+        self.task_id = task_id
+        self.to_state = to_state
+        self.from_state = from_state
+
+
+class TaskEndTest(unittest.IsolatedAsyncioTestCase):
+    """What happens to the approvals of a task that ended, on every path.
+
+    The task lifecycle has three terminal states (completed, failed, cancelled)
+    and no "expired" one; an approval runs out by its own ``expires_at``. The
+    revocation runs after the terminal transition committed, so it may fail
+    with nothing to retry it: the broker must not honour such an approval.
+    """
+
+    async def asyncSetUp(self):
+        self.store = RevokeFailingStore()
+        self.h = Harness(approvals=self.store)
+        self.user = principal(SystemRole.USER, U1)
+
+    async def open(self, path="build", h=None):
+        h = h or self.h
+        decision = await h.broker.request(
+            make_call("repo.delete_tree", {"path": f"{ROOT}/{path}"})
+        )
+        self.assertEqual(decision.verdict, Verdict.NEEDS_APPROVAL)
+        return decision
+
+    async def approved(self, path="build", h=None):
+        h = h or self.h
+        decision = await self.open(path, h)
+        result = await h.service.approve(decision.approval_id, self.user)
+        self.assertEqual(result.outcome, ApprovalOutcome.APPROVED)
+        return decision
+
+    async def use(self, decision, path="build", h=None):
+        return await (h or self.h).broker.request(
+            make_call("repo.delete_tree", {"path": f"{ROOT}/{path}"}),
+            approval_id=decision.approval_id,
+        )
+
+    async def status(self, decision, h=None):
+        return (await (h or self.h).approvals.get(decision.approval_id)).status
+
+    async def test_each_terminal_state_revokes_and_no_other_state_does(self):
+        from paw_backend.tasks import TERMINAL_STATES, TaskState
+
+        self.assertEqual(
+            TERMINAL_STATES,
+            {TaskState.COMPLETED, TaskState.FAILED, TaskState.CANCELLED},
+        )
+        for state in TaskState:
+            with self.subTest(state=state.value):
+                h = Harness(approvals=RevokeFailingStore())
+                pending = await self.open("a", h)
+                approved = await self.approved("b", h)
+                await h.service.revoke_on_task_end(TaskEvent(TASK, state))
+                expected = (
+                    (ApprovalStatus.REVOKED, ApprovalStatus.REVOKED)
+                    if state in TERMINAL_STATES
+                    else (ApprovalStatus.PENDING, ApprovalStatus.APPROVED)
+                )
+                self.assertEqual(
+                    (await self.status(pending, h), await self.status(approved, h)),
+                    expected,
+                )
+
+    async def test_leaving_a_terminal_state_revokes_what_survived_the_end(self):
+        # Retry / Restart re-open a failed or cancelled task: an approval that
+        # is still open then belongs to the run that ended.
+        from paw_backend.tasks import TaskState
+
+        for old in (TaskState.FAILED, TaskState.CANCELLED):
+            with self.subTest(old=old.value):
+                h = Harness(approvals=RevokeFailingStore())
+                approved = await self.approved("a", h)
+                await h.service.revoke_on_task_end(
+                    TaskEvent(TASK, TaskState.QUEUED, from_state=old)
+                )
+                self.assertEqual(await self.status(approved, h), ApprovalStatus.REVOKED)
+        # ... and a transition between live states touches nothing
+        h = Harness(approvals=RevokeFailingStore())
+        approved = await self.approved("a", h)
+        await h.service.revoke_on_task_end(
+            TaskEvent(TASK, TaskState.RUNNING, from_state=TaskState.WAITING)
+        )
+        self.assertEqual(await self.status(approved, h), ApprovalStatus.APPROVED)
+
+    async def test_a_store_failure_is_raised_without_its_message_never_counted_as_zero(
+        self,
+    ):
+        from paw_backend.tasks import TERMINAL_STATES
+
+        pending = await self.open()
+        self.store.error = ConnectionError(SECRET)
+        with self.assertLogs(level="ERROR") as logs:
+            with self.assertRaises(ApprovalRevocationError) as caught:
+                await self.h.service.revoke_task(TASK)
+        self.assertNotIn(SECRET, str(caught.exception))
+        self.assertIsNone(caught.exception.__cause__)
+        self.assertTrue(caught.exception.__suppress_context__)
+        self.assertNotIn(SECRET, "\n".join(logs.output))
+        self.assertIn("ConnectionError", "\n".join(logs.output))
+        for state in TERMINAL_STATES:  # the listener does not swallow it either
+            with self.subTest(state=state.value):
+                with self.assertLogs(level="ERROR"):
+                    with self.assertRaises(ApprovalRevocationError):
+                        await self.h.service.revoke_on_task_end(TaskEvent(TASK, state))
+        # a live task never reaches the store, so it cannot fail either
+        from paw_backend.tasks import TaskState
+
+        await self.h.service.revoke_on_task_end(TaskEvent(TASK, TaskState.RUNNING))
+        self.assertEqual(await self.status(pending), ApprovalStatus.PENDING)
+        # revoking is idempotent: once the store is back it finishes the job
+        self.store.error = None
+        self.assertEqual(await self.h.service.revoke_task(TASK), 1)
+        self.assertEqual(await self.h.service.revoke_task(TASK), 0)
+
+    async def test_an_approval_left_open_is_unusable_once_the_task_ended(self):
+        approved = await self.approved()
+        self.store.error = ConnectionError("down")
+        self.h.task_activity.answer = TaskActivity.ENDED
+        with self.assertLogs(level="ERROR"):
+            with self.assertRaises(ApprovalRevocationError):
+                await self.h.service.revoke_task(TASK)
+        # the store still says "approved" ...
+        self.assertEqual(await self.status(approved), ApprovalStatus.APPROVED)
+        # ... and the broker still refuses, without using the approval up
+        used = await self.use(approved)
+        self.assertEqual(
+            (used.verdict, used.reason, used.approval_id),
+            (Verdict.DENY, R.TASK_NOT_ACTIVE, approved.approval_id),
+        )
+        self.assertIsNone(used.invocation)
+        self.assertEqual(await self.status(approved), ApprovalStatus.APPROVED)
+        # no new request is opened for a task that ended either
+        before = len(self.store._records)
+        again = await self.open_after_end("other")
+        self.assertEqual(
+            (again.verdict, again.reason), (Verdict.DENY, R.TASK_NOT_ACTIVE)
+        )
+        self.assertIsNone(again.approval_id)
+        self.assertEqual(len(self.store._records), before)
+        self.assertEqual(self.h.executor.invocations, [])
+
+    async def open_after_end(self, path, h=None):
+        return await (h or self.h).broker.request(
+            make_call("repo.delete_tree", {"path": f"{ROOT}/{path}"})
+        )
+
+    async def test_while_the_task_is_alive_an_approval_is_used_as_before(self):
+        approved = await self.approved()
+        used = await self.use(approved)
+        self.assertEqual(
+            (used.verdict, used.reason), (Verdict.ALLOW, R.APPROVAL_CONSUMED)
+        )
+        self.assertEqual(self.h.task_activity.checks, [TASK, TASK])  # open + use
+
+    async def test_a_task_that_is_not_known_or_answers_nonsense_denies(self):
+        approved = await self.approved()
+        cases = {
+            "unknown task": (FakeTaskActivity(TaskActivity.UNKNOWN), R.TASK_UNKNOWN),
+            "not an answer": (FakeTaskActivity("active"), R.TASK_STATE_UNAVAILABLE),
+            "not even a string": (FakeTaskActivity(True), R.TASK_STATE_UNAVAILABLE),
+            "no provider": (FailClosedTaskActivity(), R.TASK_UNKNOWN),
+        }
+        for label, (provider, reason) in cases.items():
+            with self.subTest(label):
+                h = Harness(approvals=self.store, task_activity=provider)
+                used = await self.use(approved, h=h)
+                opened = await self.open_after_end("x", h)
+                self.assertEqual((used.verdict, used.reason), (Verdict.DENY, reason))
+                self.assertEqual(
+                    (opened.verdict, opened.reason), (Verdict.DENY, reason)
+                )
+                self.assertEqual(await self.status(approved), ApprovalStatus.APPROVED)
+
+    async def test_a_provider_that_fails_is_a_denial_without_its_message(self):
+        approved = await self.approved()
+        h = Harness(
+            approvals=self.store,
+            task_activity=FakeTaskActivity(error=ConnectionError(SECRET)),
+        )
+        with self.assertLogs(level="ERROR") as logs:
+            used = await self.use(approved, h=h)
+        self.assertEqual(
+            (used.verdict, used.reason), (Verdict.DENY, R.TASK_STATE_UNAVAILABLE)
+        )
+        self.assertNotIn(SECRET, "\n".join(logs.output))
+        self.assertIn("ConnectionError", "\n".join(logs.output))
+        self.assertEqual(await self.status(approved), ApprovalStatus.APPROVED)
+
+    async def test_a_provider_that_never_answers_is_a_denial(self):
+        class Hangs:
+            async def check(self, task_id):
+                await asyncio.Event().wait()
+
+        h = Harness(approvals=self.store, task_activity=Hangs(), timeout_seconds=0.05)
+        opened = await self.open_after_end("x", h)
+        self.assertEqual(
+            (opened.verdict, opened.reason), (Verdict.DENY, R.TASK_STATE_UNAVAILABLE)
+        )
+
+    async def test_a_call_that_needs_no_approval_does_not_ask_about_the_task(self):
+        self.h.task_activity.answer = TaskActivity.ENDED
+        for tool, arguments in (
+            ("repo.read_file", {"path": f"{ROOT}/a.py"}),
+            ("repo.write_file", {"path": f"{ROOT}/a.py", "content": "1"}),
+        ):
+            with self.subTest(tool=tool):
+                decision = await self.h.broker.request(make_call(tool, arguments))
+                self.assertTrue(decision.allowed)
+        self.assertEqual(self.h.task_activity.checks, [])
+
+    async def test_the_question_is_about_the_task_of_the_call(self):
+        other = uuid.UUID(int=502)
+        await self.h.broker.request(
+            make_call(
+                "repo.delete_tree",
+                {"path": f"{ROOT}/b"},
+                context=make_context(task_id=other),
+            )
+        )
+        self.assertEqual(self.h.task_activity.checks, [other])
+
+    async def test_an_approval_that_ran_out_is_neither_revoked_nor_usable(self):
+        approved = await self.approved()
+        self.h.clock.advance(hours=2)  # past the hour an approval lives
+        self.assertEqual(await self.h.service.revoke_task(TASK), 0)
+        self.assertNotEqual(await self.status(approved), ApprovalStatus.REVOKED)
+        used = await self.use(approved)
+        self.assertEqual(
+            (used.verdict, used.reason), (Verdict.DENY, R.APPROVAL_EXPIRED)
+        )
+        # and once its task has ended, the task is what the broker names
+        self.h.task_activity.answer = TaskActivity.ENDED
+        used = await self.use(approved)
+        self.assertEqual((used.verdict, used.reason), (Verdict.DENY, R.TASK_NOT_ACTIVE))
+
+    async def test_a_broker_needs_a_working_provider_interface(self):
+        for provider in (object(), FakeTaskActivity, lambda task_id: None):
+            with self.subTest(provider=repr(provider)[:30]):
+                with self.assertRaises(TypeError):
+                    Harness(task_activity=provider)
 
 
 class HashInputsAndUndeclaredArgumentsTest(unittest.IsolatedAsyncioTestCase):

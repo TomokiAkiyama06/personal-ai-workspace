@@ -48,15 +48,23 @@ class BrokerReason(StrEnum):
     PATH_OUT_OF_SCOPE = "path_out_of_scope"
     HOST_OUT_OF_SCOPE = "host_out_of_scope"
     PROJECT_OUT_OF_SCOPE = "project_out_of_scope"
+    REPOSITORY_OUT_OF_SCOPE = "repository_out_of_scope"
     CREDENTIAL_OUT_OF_SCOPE = "credential_out_of_scope"
     PATH_RESOLUTION_UNAVAILABLE = "path_resolution_unavailable"
     # --- DENY: authorization, policy, budget ---
+    # A repository write that names no repository of the working set: there is
+    # no repository ACL to consult (see ``ToolBroker``, step 4).
+    REPOSITORY_NOT_IDENTIFIED = "repository_not_identified"
     AUTHZ_DENIED = "authz_denied"
     AUTHZ_UNAVAILABLE = "authz_unavailable"
     POLICY_DENIED = "policy_denied"
     BUDGET_EXCEEDED = "budget_exceeded"
     BUDGET_UNKNOWN = "budget_unknown"
     BUDGET_UNAVAILABLE = "budget_unavailable"
+    # --- DENY: the task of an approval cannot act (ended / unknown / unreadable) ---
+    TASK_NOT_ACTIVE = "task_not_active"
+    TASK_UNKNOWN = "task_unknown"
+    TASK_STATE_UNAVAILABLE = "task_state_unavailable"
     # --- DENY: approvals ---
     APPROVAL_NOT_FOUND = "approval_not_found"
     APPROVAL_MISMATCH = "approval_mismatch"

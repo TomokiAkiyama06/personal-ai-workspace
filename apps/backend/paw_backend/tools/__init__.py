@@ -28,6 +28,7 @@ from paw_backend.tools.approval_types import (
 from paw_backend.tools.approvals import (
     ApprovalOutcome,
     ApprovalResult,
+    ApprovalRevocationError,
     ApprovalService,
     FailClosedStepUp,
     StepUpVerifier,
@@ -68,8 +69,15 @@ from paw_backend.tools.scope import (
     LexicalPathResolver,
     PathResolver,
     RealpathResolver,
+    ScopedRepository,
     TargetError,
     TaskScope,
+)
+from paw_backend.tools.task_state import (
+    FailClosedTaskActivity,
+    PostgresTaskActivity,
+    TaskActivity,
+    TaskActivityProvider,
 )
 
 __all__ = [
@@ -82,6 +90,7 @@ __all__ = [
     "ApprovalOutcome",
     "ApprovalRecord",
     "ApprovalResult",
+    "ApprovalRevocationError",
     "ApprovalService",
     "ApprovalStatus",
     "ApprovalStore",
@@ -97,6 +106,7 @@ __all__ = [
     "ExecutionStatus",
     "FailClosedBudgetProvider",
     "FailClosedStepUp",
+    "FailClosedTaskActivity",
     "InMemoryApprovalStore",
     "LexicalPathResolver",
     "NewApproval",
@@ -104,12 +114,16 @@ __all__ = [
     "OpenOutcome",
     "PathResolver",
     "PostgresApprovalStore",
+    "PostgresTaskActivity",
     "RealpathResolver",
     "RevokeOutcome",
     "ScopeStatus",
+    "ScopedRepository",
     "StepUpVerifier",
     "SummaryItem",
     "TargetError",
+    "TaskActivity",
+    "TaskActivityProvider",
     "TaskContext",
     "TaskScope",
     "ToolBroker",
