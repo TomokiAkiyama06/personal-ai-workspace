@@ -5,6 +5,7 @@ import unittest
 from jsonschema import SchemaError
 
 from benchmarks.memory_worker_metrics import (
+    MEMORY_SCOPES,
     MemoryComparison,
     MemoryRecord,
     SchemaAdherence,
@@ -43,6 +44,17 @@ class MemoryRecordTest(unittest.TestCase):
         # Test supersedes validation
         with self.assertRaises(TypeError):
             MemoryRecord("key", "user", "confirmed", 123)
+
+    def test_scope_must_be_a_defined_visibility_class(self):
+        # REQUIREMENTS.md: scope is User / Project / Repo / Shared. A topic such
+        # as "schedule" or a different spelling must not be scorable as a scope.
+        self.assertEqual(MEMORY_SCOPES, {"user", "project", "repo", "shared"})
+        for scope in sorted(MEMORY_SCOPES):
+            self.assertEqual(MemoryRecord("k", scope, "confirmed", None).scope, scope)
+        for scope in ("schedule", "user_preferences", "User", "user "):
+            with self.subTest(scope=scope), self.assertRaises(ValueError) as caught:
+                MemoryRecord("k", scope, "confirmed", None)
+            self.assertNotIn(scope, str(caught.exception))
 
     def test_memory_record_equality(self):
         record1 = MemoryRecord("key1", "user", "confirmed", None)

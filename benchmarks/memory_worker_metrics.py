@@ -16,11 +16,18 @@ def normalize_content(text: str) -> str:
     return " ".join(unicodedata.normalize("NFKC", text).casefold().split())
 
 
+# The visibility classes a memory can have (REQUIREMENTS.md: "scope（User / Project /
+# Repo / Shared）"). Keep in step with ``scope.enum`` in
+# ``schemas/memory-worker-output-v1.schema.json`` (a test checks it).
+MEMORY_SCOPES = frozenset({"user", "project", "repo", "shared"})
+
+
 @dataclass(frozen=True)
 class MemoryRecord:
     """A memory record.
 
-    ``key`` identifies the memory (matching is by key). ``content`` is the extracted
+    ``key`` identifies the memory (matching is by key). ``scope`` is one of
+    ``MEMORY_SCOPES``, so a topic label cannot earn scope credit. ``content`` is the extracted
     fact; a gold record without content is not scored on content. ``conflicts_with``
     lists the keys of memories this one conflicts with.
     """
@@ -37,6 +44,10 @@ class MemoryRecord:
             raise TypeError("key must be a non-empty string")
         if not isinstance(self.scope, str) or not self.scope:
             raise TypeError("scope must be a non-empty string")
+        if self.scope not in MEMORY_SCOPES:
+            raise ValueError(
+                f"scope must be one of: {', '.join(sorted(MEMORY_SCOPES))}"
+            )
         if not isinstance(self.state, str) or not self.state:
             raise TypeError("state must be a non-empty string")
         if self.state not in {"confirmed", "inferred"}:

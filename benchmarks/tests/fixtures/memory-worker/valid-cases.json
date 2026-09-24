@@ -6,7 +6,7 @@
             "gold": [
                 {
                     "key": "favorite_color",
-                    "scope": "user_preferences",
+                    "scope": "user",
                     "state": "confirmed",
                     "supersedes": null
                 }
@@ -18,13 +18,13 @@
             "gold": [
                 {
                     "key": "meeting_time",
-                    "scope": "schedule",
+                    "scope": "project",
                     "state": "confirmed",
                     "supersedes": null
                 },
                 {
                     "key": "meeting_location",
-                    "scope": "schedule",
+                    "scope": "project",
                     "state": "confirmed",
                     "supersedes": null
                 }

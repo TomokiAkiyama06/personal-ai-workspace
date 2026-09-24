@@ -7,7 +7,7 @@ VALID_OUTPUT = json.dumps(
         "memories": [
             {
                 "key": "favorite_color",
-                "scope": "user_preferences",
+                "scope": "user",
                 "state": "confirmed",
                 "supersedes": None,
             }

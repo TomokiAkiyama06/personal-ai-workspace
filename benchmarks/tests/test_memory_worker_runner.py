@@ -6,7 +6,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from benchmarks.memory_worker_metrics import MemoryRecord, schema_adherence
+from benchmarks.memory_worker_metrics import (
+    MEMORY_SCOPES,
+    MemoryRecord,
+    schema_adherence,
+)
 from benchmarks.memory_worker_runner import (
     MemoryWorkerCase,
     _output_schema,
@@ -61,7 +65,7 @@ class MemoryWorkerRunnerTest(unittest.TestCase):
         )
         self.assertEqual(len(case1.gold), 1)
         self.assertEqual(case1.gold[0].key, "favorite_color")
-        self.assertEqual(case1.gold[0].scope, "user_preferences")
+        self.assertEqual(case1.gold[0].scope, "user")
         self.assertEqual(case1.gold[0].state, "confirmed")
         self.assertIsNone(case1.gold[0].supersedes)
 
@@ -109,7 +113,7 @@ class MemoryWorkerRunnerTest(unittest.TestCase):
             "memories": [
                 {
                     "key": "test_key",
-                    "scope": "test_scope",
+                    "scope": "user",
                     "state": "confirmed",
                     "supersedes": null
                 }
@@ -120,7 +124,7 @@ class MemoryWorkerRunnerTest(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0].key, "test_key")
-        self.assertEqual(result[0].scope, "test_scope")
+        self.assertEqual(result[0].scope, "user")
         self.assertEqual(result[0].state, "confirmed")
         self.assertIsNone(result[0].supersedes)
 
@@ -140,7 +144,7 @@ class MemoryWorkerRunnerTest(unittest.TestCase):
             "memories": [
                 {
                     "key": "test_key",
-                    "scope": "test_scope",
+                    "scope": "user",
                     "state": "confirmed",
                     "supersedes": null,
                     "extra_field": "should_not_be_here"
@@ -150,6 +154,71 @@ class MemoryWorkerRunnerTest(unittest.TestCase):
         """
         result = parse_worker_output(extra_property)
         self.assertIsNone(result)
+
+    def test_worker_output_scope_is_limited_to_the_visibility_classes(self):
+        base = {"key": "k", "state": "confirmed", "supersedes": None}
+        for scope in ("user", "project", "repo", "shared"):
+            with self.subTest(accepted=scope):
+                raw = json.dumps({"memories": [dict(base, scope=scope)]})
+                self.assertEqual(
+                    parse_worker_output(raw),
+                    [MemoryRecord("k", scope, "confirmed", None)],
+                )
+        # Topic labels and other spellings are not scope classes.
+        for scope in ("schedule", "user_preferences", "User", ""):
+            with self.subTest(rejected=scope):
+                raw = json.dumps({"memories": [dict(base, scope=scope)]})
+                self.assertIsNone(parse_worker_output(raw))
+                self.assertEqual(schema_adherence([raw], _output_schema()).valid, 0)
+
+    def test_output_schema_scope_enum_is_the_record_validation_set(self):
+        scope_schema = _output_schema()["properties"]["memories"]["items"][
+            "properties"
+        ]["scope"]
+        self.assertEqual(sorted(scope_schema["enum"]), sorted(MEMORY_SCOPES))
+        self.assertEqual(len(scope_schema["enum"]), len(MEMORY_SCOPES))
+
+    def test_gold_with_an_undefined_scope_is_a_dataset_error(self):
+        document = {
+            "cases": [
+                {
+                    "id": "c1",
+                    "input": "text",
+                    "gold": [{"key": "k", "scope": "schedule", "state": "confirmed"}],
+                }
+            ]
+        }
+        with self.assertRaises(ValueError) as caught:
+            self._load_from_text(json.dumps(document))
+        message = str(caught.exception)
+        self.assertIn("case 'c1'", message)
+        self.assertIn("scope must be one of", message)
+        self.assertNotIn("schedule", message)
+
+    def test_a_topic_label_as_scope_is_a_schema_failure_not_scope_credit(self):
+        cases = [
+            MemoryWorkerCase("c0", "x", (MemoryRecord("k", "user", "confirmed", None),))
+        ]
+        raw = json.dumps(
+            {
+                "memories": [
+                    {
+                        "key": "k",
+                        "scope": "user_preferences",
+                        "state": "confirmed",
+                        "supersedes": None,
+                    }
+                ]
+            }
+        )
+
+        report = run_benchmark(MockWorker([raw]), cases)
+
+        self.assertFalse(report.cases[0].schema_valid)
+        self.assertEqual(report.cases[0].comparison.matched, 0)
+        self.assertEqual(report.metrics["schema_adherence_rate"], 0.0)
+        self.assertEqual(report.metrics["extraction_recall"], 0.0)
+        self.assertIsNone(report.metrics["scope_accuracy"])
 
     def test_run_benchmark_perfect_worker(self):
         cases = load_cases("benchmarks/tests/fixtures/memory-worker/valid-cases.json")
@@ -161,7 +230,7 @@ class MemoryWorkerRunnerTest(unittest.TestCase):
                 "memories": [
                     {
                         "key": "favorite_color",
-                        "scope": "user_preferences",
+                        "scope": "user",
                         "state": "confirmed",
                         "supersedes": null
                     }
@@ -171,13 +240,13 @@ class MemoryWorkerRunnerTest(unittest.TestCase):
                 "memories": [
                     {
                         "key": "meeting_time",
-                        "scope": "schedule",
+                        "scope": "project",
                         "state": "confirmed",
                         "supersedes": null
                     },
                     {
                         "key": "meeting_location",
-                        "scope": "schedule",
+                        "scope": "project",
                         "state": "confirmed",
                         "supersedes": null
                     }
@@ -215,7 +284,7 @@ class MemoryWorkerRunnerTest(unittest.TestCase):
                 "memories": [
                     {
                         "key": "favorite_color",
-                        "scope": "user_preferences",
+                        "scope": "user",
                         "state": "confirmed",
                         "supersedes": null
                     }
@@ -225,7 +294,7 @@ class MemoryWorkerRunnerTest(unittest.TestCase):
                 "memories": [
                     {
                         "key": "meeting_time",
-                        "scope": "schedule",
+                        "scope": "project",
                         "state": "inferred",
                         "supersedes": null
                     }
@@ -264,7 +333,7 @@ class MemoryWorkerRunnerTest(unittest.TestCase):
                 "memories": [
                     {
                         "key": "favorite_color",
-                        "scope": "user_preferences",
+                        "scope": "user",
                         "state": "confirmed",
                         "supersedes": null
                     }
@@ -558,7 +627,7 @@ class MemoryWorkerRunnerTest(unittest.TestCase):
         class KeyWorker:
             def extract(self, input_text):
                 return VALID_OUTPUT.replace("favorite_color", "k").replace(
-                    "user_preferences", "user"
+                    "user", "user"
                 )
 
         # The runner reads the clock twice per case: before and after extract().
@@ -634,7 +703,7 @@ VALID_OUTPUT = json.dumps(
         "memories": [
             {
                 "key": "favorite_color",
-                "scope": "user_preferences",
+                "scope": "user",
                 "state": "confirmed",
                 "supersedes": None,
             }

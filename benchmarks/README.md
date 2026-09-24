@@ -306,6 +306,10 @@ GPU telemetryが必要な場合は `NvidiaSmiGpuSampler` を注入します。�
 算出する指標は、抽出Recall、不要Memory率、Scope / Confirmed・Inferred / Supersedesの正解率、
 JSON Schema遵守率、latency（mean / p50 / p95、nearest-rank）です。
 `extraction_recall`はkey単位の一致で、抽出した事実の正しさは見ません。
+`scope`は要件の可視範囲class（`user` / `project` / `repo` / `shared`。`REQUIREMENTS.md`のScope）だけを受け付けます。
+Worker出力はschemaの`enum`でschema不適合になり、Goldはcase loaderでcase fileの不備（終了code 1）になります。
+このため`schedule`や`user_preferences`のような話題ラベルは、Goldとの一致でscope_accuracyを得られません。
+`session`と、Inferred Preferenceの例にある`project_group`は、Memory抽出Workerの出力に含めるかが未決定のため受け付けません（追加はschemaの`enum`と`MEMORY_SCOPES`の同時変更です）。
 Gold recordが`content`を持つ場合は、`exact_recall`（keyと内容の両方が一致）と`content_accuracy`
 （key一致したもののうち内容が一致した割合。NFKC・大文字小文字・空白を正規化して比較）を併せて確認してください。
 `conflicts_with`（衝突するMemoryのkey）は`conflict_accuracy`で採点し、どちらかが衝突を宣言したkey一致ペアだけを対象にします。

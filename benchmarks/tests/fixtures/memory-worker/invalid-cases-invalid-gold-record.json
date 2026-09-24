@@ -6,7 +6,7 @@
             "gold": [
                 {
                     "key": "",
-                    "scope": "test_scope",
+                    "scope": "user",
                     "state": "confirmed",
                     "supersedes": null
                 }

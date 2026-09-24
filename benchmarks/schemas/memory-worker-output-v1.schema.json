@@ -13,7 +13,7 @@
                     },
                     "scope": {
                         "type": "string",
-                        "minLength": 1
+                        "enum": ["user", "project", "repo", "shared"]
                     },
                     "state": {
                         "type": "string",
