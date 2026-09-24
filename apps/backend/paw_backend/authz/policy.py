@@ -8,24 +8,33 @@ malformed input, unmapped role, non-member of a project) ends in a denial with
 a stable reason code.
 
 Prompts, model output and tool arguments are never inputs to a decision. The
-callers pass a typed :class:`Capability`, a :class:`Resource` the backend
-resolved itself, and a :class:`Principal` (or, for an agent, the delegating
-user's principal plus an :class:`AgentGrant` the backend built).
+callers pass a typed :class:`Capability` (a plain string is *not* accepted, not
+even an exact name: see ``capabilities.parse_capability``), a
+:class:`Resource` the backend resolved itself, and a :class:`Principal` (or,
+for an agent, the delegating user's principal plus an :class:`AgentGrant` the
+backend built).
+
+These functions are internal building blocks: they are not exported from
+``paw_backend.authz`` because they record nothing. Code outside this package
+authorizes through :class:`~paw_backend.authz.authorizer.Authorizer`.
 """
 
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
 
-from paw_backend.authz.capabilities import (
-    CAPABILITIES,
-    Capability,
-    Scope,
-    coerce_capability,
-)
+from paw_backend.authz.capabilities import CAPABILITIES, Capability, Scope
 from paw_backend.authz.roles import ProjectRole, SystemRole
-from paw_backend.authz.subjects import AgentGrant, Principal, Resource
+from paw_backend.authz.subjects import (
+    ALL_PROJECTS,
+    AgentGrant,
+    Principal,
+    ProjectState,
+    Resource,
+    to_uuid,
+)
 
 
 class Reason(StrEnum):
@@ -45,6 +54,11 @@ class Reason(StrEnum):
     AGENT_CAPABILITY_FORBIDDEN = "agent_capability_forbidden"
     AGENT_CAPABILITY_NOT_GRANTED = "agent_capability_not_granted"
     AGENT_PROJECT_NOT_GRANTED = "agent_project_not_granted"
+    DELEGATOR_NOT_ACTIVE = "delegator_not_active"
+    REPO_ACL_NOT_SUPPORTED = "repo_acl_not_supported"
+    PROJECT_STATE_FORBIDS = "project_state_forbids"
+    ROLE_CHANGE_NOT_ALLOWED = "role_change_not_allowed"
+    SELF_ROLE_CHANGE = "self_role_change"
     AUDIT_UNAVAILABLE = "audit_unavailable"
 
 
@@ -54,6 +68,11 @@ class Decision:
     reason: Reason
     # ``None`` when the requested capability does not exist.
     capability: Capability | None = None
+
+    def __bool__(self) -> bool:
+        # ``if await authorizer.authorize(...)`` must mean "allowed". Without
+        # this every Decision, a denial included, would be truthy.
+        return self.allowed
 
     @classmethod
     def allow(cls, reason: Reason, capability: Capability) -> "Decision":
@@ -179,21 +198,46 @@ DEFAULT_POLICY = Policy(
 )
 
 
+# What a project may still be used for in each lifecycle state
+# (``REQUIREMENTS.md`` "Project lifecycle"). ``None`` = everything its roles allow.
+_STATE_ALLOWS: MappingProxyType[ProjectState, frozenset[Capability] | None] = (
+    MappingProxyType(
+        {
+            ProjectState.ACTIVE: None,
+            # Read-only: no new Task, repository change or Project Memory update.
+            ProjectState.ARCHIVED: frozenset(
+                {Capability.PROJECT_READ, Capability.PROJECT_LIFECYCLE_MANAGE}
+            ),
+            # Access stopped; only the lifecycle operation (restore) remains.
+            ProjectState.PENDING_DELETION: frozenset(
+                {Capability.PROJECT_LIFECYCLE_MANAGE}
+            ),
+        }
+    )
+)
+
+
 def decide(
     principal: Principal | None,
-    capability: Capability | str,
+    capability: Capability,
     resource: Resource | None,
     *,
     policy: Policy = DEFAULT_POLICY,
 ) -> Decision:
     """Decide whether ``principal`` may exercise ``capability`` on ``resource``."""
-    cap = coerce_capability(capability)
-    if cap is None:
+    # Not `Capability | str`: a name is never interpreted here, not even an exact one.
+    if not isinstance(capability, Capability):
         return Decision.deny(Reason.UNKNOWN_CAPABILITY, None)
+    cap = capability
     if not isinstance(principal, Principal):
         return Decision.deny(Reason.UNAUTHENTICATED, cap)
     if not isinstance(resource, Resource):
         return Decision.deny(Reason.INVALID_RESOURCE, cap)
+    if resource.repo_id is not None:
+        # A repository can be access-denied (or read-only) inside a project the
+        # user belongs to, and repo ACLs do not exist yet: refuse rather than
+        # answer from the project role alone.
+        return Decision.deny(Reason.REPO_ACL_NOT_SUPPORTED, cap)
 
     role = principal.system_role
     match CAPABILITIES[cap].scope:
@@ -213,8 +257,11 @@ def decide(
             return Decision.allow(Reason.GRANTED_TO_RESOURCE_OWNER, cap)
 
         case Scope.PROJECT:
-            if resource.project_id is None:
+            if resource.project_id is None or resource.project_state is None:
                 return Decision.deny(Reason.INVALID_RESOURCE, cap)
+            state_allows = _STATE_ALLOWS.get(resource.project_state, frozenset())
+            if state_allows is not None and cap not in state_allows:
+                return Decision.deny(Reason.PROJECT_STATE_FORBIDS, cap)
             if policy.system_role_allows(role, cap):
                 return Decision.allow(Reason.GRANTED_BY_SYSTEM_ROLE, cap)
             # A system role alone never opens a project (membership is by
@@ -233,7 +280,7 @@ def decide(
 def decide_agent(
     delegator: Principal | None,
     grant: AgentGrant,
-    capability: Capability | str,
+    capability: Capability,
     resource: Resource | None,
     *,
     policy: Policy = DEFAULT_POLICY,
@@ -241,11 +288,12 @@ def decide_agent(
     """Decide an action an agent performs on behalf of ``delegator``.
 
     The agent's effective capabilities are the *intersection* of what the
-    delegating user may do and what the grant lists. So an agent can never do
-    what its user cannot, whatever the grant says, and a grant never widens a
-    user. Privileged capabilities (role / permission changes, workspace
-    configuration, Owner operations) are refused for every agent, in line with
-    "self privilege escalation" being DENY in ``docs/SECURITY_TOOL_PERMISSIONS.md``.
+    delegating user may do and what the grant lists, and only capabilities
+    marked ``delegable`` can ever be delegated. So an agent can never do what
+    its user cannot, whatever the grant says, and a grant never widens a user.
+    Role and permission changes, workspace configuration and Owner operations
+    are not delegable ("self privilege escalation" is DENY in
+    ``docs/SECURITY_TOOL_PERMISSIONS.md``).
     """
     user_decision = decide(delegator, capability, resource, policy=policy)
     if not user_decision.allowed:
@@ -253,13 +301,63 @@ def decide_agent(
     cap = user_decision.capability
     if cap is None or not isinstance(grant, AgentGrant):
         return Decision.deny(Reason.AGENT_CAPABILITY_NOT_GRANTED, cap)
-    if CAPABILITIES[cap].privileged:
+    if not CAPABILITIES[cap].delegable:
         return Decision.deny(Reason.AGENT_CAPABILITY_FORBIDDEN, cap)
     if cap not in grant.capabilities:
         return Decision.deny(Reason.AGENT_CAPABILITY_NOT_GRANTED, cap)
-    if grant.project_ids is not None and (
+    if grant.project_ids is not ALL_PROJECTS and (
         not isinstance(resource, Resource)
         or resource.project_id not in grant.project_ids
     ):
         return Decision.deny(Reason.AGENT_PROJECT_NOT_GRANTED, cap)
     return user_decision
+
+
+def decide_role_change(
+    actor: Principal | None,
+    target_role: SystemRole,
+    new_role: SystemRole | None,
+    *,
+    target_user_id: uuid.UUID | None = None,
+    policy: Policy = DEFAULT_POLICY,
+) -> Decision:
+    """Decide whether ``actor`` may change a user from ``target_role`` to ``new_role``.
+
+    ``new_role=None`` removes (deactivates) the user. ``admin.users.manage`` is
+    not enough on its own: which capability is needed depends on the roles
+    involved, so an Admin cannot promote, demote, remove or take over an Admin
+    or the Owner (``REQUIREMENTS.md`` "Owner / Admin の役割分離").
+
+    * a change involving Owner: ``owner.ownership.transfer`` (Owner only);
+    * a change involving Admin: ``owner.admins.manage`` (Owner only);
+    * a change between ordinary users: ``admin.users.manage``;
+    * the internal ``system`` identity is never assigned or removed here;
+    * nobody changes their own role.
+    """
+    manage = Capability.ADMIN_USERS_MANAGE
+    if not isinstance(actor, Principal):
+        return Decision.deny(Reason.UNAUTHENTICATED, manage)
+    if not isinstance(target_role, SystemRole) or not (
+        new_role is None or isinstance(new_role, SystemRole)
+    ):
+        return Decision.deny(Reason.ROLE_CHANGE_NOT_ALLOWED, manage)
+    involved = {target_role} | ({new_role} if new_role is not None else set())
+    if SystemRole.SYSTEM in involved:
+        # The internal identity is not assigned or removed by this call.
+        return Decision.deny(Reason.ROLE_CHANGE_NOT_ALLOWED, manage)
+    if SystemRole.OWNER in involved:
+        needed = Capability.OWNER_OWNERSHIP_TRANSFER
+    elif SystemRole.ADMIN in involved:
+        needed = Capability.OWNER_ADMINS_MANAGE
+    elif involved == {SystemRole.USER}:
+        needed = manage
+    else:  # unreachable: every SystemRole is handled above
+        return Decision.deny(Reason.ROLE_CHANGE_NOT_ALLOWED, manage)
+    if target_user_id is not None:
+        try:
+            is_self = to_uuid(target_user_id, "target_user_id") == actor.user_id
+        except ValueError:
+            return Decision.deny(Reason.ROLE_CHANGE_NOT_ALLOWED, needed)
+        if is_self:
+            return Decision.deny(Reason.SELF_ROLE_CHANGE, needed)
+    return decide(actor, needed, Resource.system(), policy=policy)

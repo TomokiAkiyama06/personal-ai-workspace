@@ -23,7 +23,9 @@ target_metadata = Base.metadata
 
 
 def _database_url() -> str:
-    url = Settings().database_url
+    settings = Settings()
+    # A separate migration role (the owner of the schema) is optional.
+    url = settings.migration_database_url or settings.database_url
     if url is None:
         raise SystemExit("PAW_DATABASE_URL is not set; cannot run migrations.")
     return url.get_secret_value()

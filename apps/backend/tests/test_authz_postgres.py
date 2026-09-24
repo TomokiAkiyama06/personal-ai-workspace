@@ -2,24 +2,32 @@
 
 Skipped unless ``PAW_TEST_DATABASE_URL`` is set (see
 ``test_postgres_integration.py``). Each test starts from a freshly migrated
-database and returns it to ``base`` afterwards.
+database and returns it to ``base`` afterwards. The role tests create two
+NON-superuser roles (dropped again afterwards); the test user must be allowed
+to create roles.
 """
 
 import asyncio
 import io
+import logging
 import os
+import time
 import unittest
+import uuid
 from datetime import UTC, datetime, timedelta
+from unittest.mock import patch
 
 import psycopg.errors
 from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
 from sqlalchemy import select, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
 
 from paw_backend.app import create_app
 from paw_backend.authz import (
+    ALL_PROJECTS,
     AgentGrant,
     Authorizer,
     Capability,
@@ -31,43 +39,69 @@ from paw_backend.authz import (
     SystemRole,
 )
 from paw_backend.authz.audit import build_event
+from paw_backend.authz.diagnostics import (
+    read_audit_table_access,
+    warn_if_audit_table_is_mutable,
+)
 from paw_backend.authz.models import AuditEventRecord
 from paw_backend.db import Base, Database
 
-from .authz_support import StaticProvider, add_test_routes, principal
+from .authz_support import (
+    AGENT,
+    P1,
+    U1,
+    StaticDirectory,
+    StaticProvider,
+    add_test_routes,
+    principal,
+    project,
+)
 from .support import make_client, make_settings, paw_environment
 from .test_migrations import offline_config
 
 TEST_DATABASE_URL = os.environ.get("PAW_TEST_DATABASE_URL")
-NOW = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
+NOW = datetime(2001, 1, 1, 12, 0, tzinfo=UTC)
+# Dummy credentials of the throw-away test roles.
+APP_ROLE = "paw_authz_test_app_025"
+OTHER_ROLE = "paw_authz_test_other_025"
+ROLE_PASSWORD = "dummy-test-password-025"
 
 
-def migrate(action: str, revision: str) -> None:
+def migrate(action: str, revision: str, **environment: str) -> None:
     """Run Alembic against the test database (``env.py`` reads the URL)."""
-    with paw_environment(PAW_DATABASE_URL=TEST_DATABASE_URL):
+    variables = {"PAW_DATABASE_URL": TEST_DATABASE_URL, **environment}
+    with paw_environment(**variables):
         config = offline_config(io.StringIO())
         getattr(command, action)(config, revision)
+
+
+def url_for_role(role: str) -> str:
+    url = make_url(TEST_DATABASE_URL).set(username=role, password=ROLE_PASSWORD)
+    return url.render_as_string(hide_password=False)
 
 
 @unittest.skipUnless(TEST_DATABASE_URL, "PAW_TEST_DATABASE_URL is not set")
 class AuditPostgresTestCase(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        await asyncio.to_thread(migrate, "downgrade", "base")
         await asyncio.to_thread(migrate, "upgrade", "head")
         self.addAsyncCleanup(asyncio.to_thread, migrate, "downgrade", "base")
         self.database = Database(make_settings(database_url=TEST_DATABASE_URL))
         self.addAsyncCleanup(self.database.dispose)
 
-    async def scalar(self, sql: str):
-        async with self.database.session() as session:
+    async def scalar(self, sql: str, database: Database | None = None):
+        async with (database or self.database).session() as session:
             return (await session.execute(text(sql))).scalar()
 
-    async def rows(self) -> list[AuditEventRecord]:
-        async with self.database.session() as session:
+    async def rows(self, database: Database | None = None) -> list[AuditEventRecord]:
+        async with (database or self.database).session() as session:
             query = select(AuditEventRecord).order_by(AuditEventRecord.occurred_at)
             return list((await session.execute(query)).scalars())
 
-    async def execute_rejected(self, sql: str) -> DBAPIError:
-        async with self.database.session() as session:
+    async def execute_rejected(
+        self, sql: str, database: Database | None = None
+    ) -> DBAPIError:
+        async with (database or self.database).session() as session:
             with self.assertRaises(DBAPIError) as caught:
                 await session.execute(text(sql))
                 await session.commit()
@@ -103,6 +137,29 @@ class MigrationTest(AuditPostgresTestCase):
             "tr_audit_events_reject_truncate:A,tr_audit_events_reject_update_delete:A",
         )
 
+    async def test_ids_are_uuid_columns_and_the_server_clock_column_exists(self):
+        columns = await self.scalar(
+            "SELECT string_agg(column_name || ' ' || data_type || ' ' || "
+            "is_nullable, ',' ORDER BY column_name) FROM information_schema.columns "
+            "WHERE table_name = 'audit_events' AND column_name IN "
+            "('id', 'correlation_id', 'actor_id', 'agent_id', 'resource_id', "
+            "'project_id', 'repo_id', 'recorded_at', 'client_request_id')"
+        )
+        self.assertEqual(
+            columns,
+            "actor_id uuid YES,agent_id uuid YES,client_request_id text YES,"
+            "correlation_id uuid NO,id uuid NO,project_id uuid YES,"
+            "recorded_at timestamp with time zone NO,repo_id uuid YES,"
+            "resource_id uuid YES",
+        )
+        self.assertEqual(
+            await self.scalar(
+                "SELECT column_default FROM information_schema.columns "
+                "WHERE table_name = 'audit_events' AND column_name = 'recorded_at'"
+            ),
+            "now()",
+        )
+
     async def test_downgrade_removes_the_table_and_the_function(self):
         await asyncio.to_thread(migrate, "downgrade", "0025-1")
         self.assertIsNone(await self.scalar("SELECT to_regclass('audit_events')"))
@@ -135,9 +192,9 @@ class MigrationTest(AuditPostgresTestCase):
 
     async def test_the_decision_column_only_accepts_allow_and_deny(self):
         error = await self.execute_rejected(
-            "INSERT INTO audit_events (id, occurred_at, action, resource_kind, "
-            "decision, reason) VALUES (gen_random_uuid(), now(), 'a', 'system', "
-            "'maybe', 'r')"
+            "INSERT INTO audit_events (id, correlation_id, occurred_at, action, "
+            "resource_kind, decision, reason) VALUES (gen_random_uuid(), "
+            "gen_random_uuid(), now(), 'a', 'system', 'maybe', 'r')"
         )
         self.assertIsInstance(error.orig, psycopg.errors.CheckViolation)
 
@@ -149,9 +206,9 @@ class AppendOnlyTest(AuditPostgresTestCase):
         )
         event = build_event(
             decision,
-            principal=principal(SystemRole.ADMIN, user_id="admin-1"),
+            principal=principal(SystemRole.ADMIN, user_id=U1),
             resource=Resource.system(),
-            request_id="req-1",
+            client_request_id="req-1",
             occurred_at=NOW,
         )
         await PostgresAuditSink(self.database).record(event)
@@ -162,27 +219,39 @@ class AppendOnlyTest(AuditPostgresTestCase):
     async def test_the_sink_stores_every_field_of_the_event(self):
         row = await self.record_one()
         self.assertEqual(
-            (row.id, row.occurred_at, row.actor_id, row.actor_role, row.agent_id),
-            (self.event.event_id, NOW, "admin-1", "admin", None),
+            (row.id, row.correlation_id, row.occurred_at),
+            (self.event.event_id, self.event.correlation_id, NOW),
+        )
+        self.assertEqual(
+            (row.actor_id, row.actor_role, row.agent_id), (U1, "admin", None)
         )
         self.assertEqual(
             (row.action, row.resource_kind, row.resource_id, row.project_id),
             ("admin.audit.view", "system", None, None),
         )
         self.assertEqual(
-            (row.decision, row.reason, row.request_id),
+            (row.decision, row.reason, row.client_request_id),
             ("allow", "granted_by_system_role", "req-1"),
         )
+
+    async def test_recorded_at_is_the_database_clock_not_the_applications(self):
+        before = datetime.now(UTC) - timedelta(seconds=5)
+        row = await self.record_one()  # occurred_at was claimed to be in 2001
+        self.assertEqual(row.occurred_at, NOW)
+        self.assertGreater(row.recorded_at, before)
+        self.assertLess(row.recorded_at, datetime.now(UTC) + timedelta(seconds=5))
 
     async def test_update_is_rejected_and_the_row_is_unchanged(self):
         await self.record_one()
         error = await self.execute_rejected(
-            "UPDATE audit_events SET decision = 'deny', actor_id = 'someone-else'"
+            "UPDATE audit_events SET decision = 'deny', reason = 'edited'"
         )
         self.assertIsInstance(error.orig, psycopg.errors.RestrictViolation)
         self.assertIn("append-only", str(error.orig))
         (row,) = await self.rows()
-        self.assertEqual((row.decision, row.actor_id), ("allow", "admin-1"))
+        self.assertEqual(
+            (row.decision, row.reason), ("allow", "granted_by_system_role")
+        )
 
     async def test_delete_is_rejected_and_the_row_is_still_there(self):
         await self.record_one()
@@ -215,8 +284,8 @@ class AppendOnlyTest(AuditPostgresTestCase):
         await self.execute_rejected("DELETE FROM audit_events")
         await PostgresAuditSink(self.database).record(
             build_event(
-                Decision.deny(Reason.UNAUTHENTICATED, Capability.CHAT_USE),
-                principal=None,
+                Decision.deny(Reason.CAPABILITY_NOT_GRANTED, Capability.CHAT_USE),
+                principal=principal(),
                 resource=Resource.system(),
                 occurred_at=NOW,
             )
@@ -224,98 +293,348 @@ class AppendOnlyTest(AuditPostgresTestCase):
         self.assertEqual([row.decision for row in await self.rows()], ["allow", "deny"])
 
 
+class RoleSplitTest(AuditPostgresTestCase):
+    """The application role can append and read, and cannot undo the guard."""
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        # Registered after the base cleanups, so it runs before the downgrade.
+        self.addAsyncCleanup(self.drop_roles)
+        await self.drop_roles()
+        for role in (APP_ROLE, OTHER_ROLE):
+            await self.execute_committed(
+                f"CREATE ROLE {role} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE "
+                f"PASSWORD '{ROLE_PASSWORD}'"
+            )
+        # Re-run the audit migration so that it grants to the application role.
+        await asyncio.to_thread(migrate, "downgrade", "base")
+        await asyncio.to_thread(
+            migrate, "upgrade", "head", PAW_APP_DATABASE_ROLE=APP_ROLE
+        )
+        self.app_db = Database(make_settings(database_url=url_for_role(APP_ROLE)))
+        self.other_db = Database(make_settings(database_url=url_for_role(OTHER_ROLE)))
+        self.addAsyncCleanup(self.app_db.dispose)
+        self.addAsyncCleanup(self.other_db.dispose)
+
+    async def execute_committed(self, sql: str) -> None:
+        async with self.database.session() as session:
+            await session.execute(text(sql))
+            await session.commit()
+
+    async def drop_roles(self) -> None:
+        for role in (APP_ROLE, OTHER_ROLE):
+            exists = await self.scalar(
+                f"SELECT count(*) FROM pg_roles WHERE rolname = '{role}'"
+            )
+            if exists:
+                await self.execute_committed(f"DROP OWNED BY {role}")
+                await self.execute_committed(f"DROP ROLE {role}")
+
+    async def test_the_application_role_can_append_and_read(self):
+        event = build_event(
+            Decision.allow(Reason.GRANTED_BY_SYSTEM_ROLE, Capability.ADMIN_AUDIT_VIEW),
+            principal=principal(SystemRole.ADMIN, user_id=U1),
+            resource=Resource.system(),
+            occurred_at=NOW,
+        )
+        await PostgresAuditSink(self.app_db).record(event)
+        (row,) = await self.rows(self.app_db)
+        self.assertEqual(row.id, event.event_id)
+
+    async def test_the_application_role_cannot_rewrite_the_trail(self):
+        await PostgresAuditSink(self.app_db).record(
+            build_event(
+                Decision.deny(Reason.CAPABILITY_NOT_GRANTED, Capability.CHAT_USE),
+                principal=principal(),
+                resource=Resource.system(),
+                occurred_at=NOW,
+            )
+        )
+        for sql in (
+            "UPDATE audit_events SET decision = 'allow'",
+            "DELETE FROM audit_events",
+            "TRUNCATE audit_events",
+            "ALTER TABLE audit_events DISABLE TRIGGER "
+            "tr_audit_events_reject_update_delete",
+            "ALTER TABLE audit_events DISABLE TRIGGER ALL",
+            "DROP TRIGGER tr_audit_events_reject_truncate ON audit_events",
+            "ALTER TABLE audit_events ALTER COLUMN reason TYPE varchar(3)",
+            "ALTER TABLE audit_events ADD COLUMN note text",
+            "ALTER TABLE audit_events DROP COLUMN reason",
+            "ALTER TABLE audit_events RENAME TO not_audit",
+            "CREATE RULE hide AS ON INSERT TO audit_events DO INSTEAD NOTHING",
+            "DROP TABLE audit_events",
+            f"ALTER TABLE audit_events OWNER TO {APP_ROLE}",
+        ):
+            with self.subTest(sql=sql):
+                error = await self.execute_rejected(sql, self.app_db)
+                self.assertIsInstance(error.orig, psycopg.errors.InsufficientPrivilege)
+        # It cannot hand itself more privileges either (PostgreSQL only warns
+        # and grants nothing when the grantor has no grant option) ...
+        async with self.app_db.session() as session:
+            await session.execute(
+                text(f"GRANT UPDATE, DELETE, TRUNCATE ON audit_events TO {APP_ROLE}")
+            )
+            await session.commit()
+        access = await read_audit_table_access(self.app_db)
+        self.assertTrue(access.protected)
+        # ... and nothing changed: still one row, still 'deny', triggers intact.
+        (row,) = await self.rows()
+        self.assertEqual(row.decision, "deny")
+        self.assertEqual(
+            await self.scalar(
+                "SELECT count(*) FROM pg_trigger "
+                "WHERE tgrelid = 'audit_events'::regclass AND NOT tgisinternal "
+                "AND tgenabled = 'A'"
+            ),
+            2,
+        )
+
+    async def test_public_has_no_access_to_the_table(self):
+        # OTHER_ROLE exists but was not granted anything.
+        error = await self.execute_rejected(
+            "SELECT count(*) FROM audit_events", self.other_db
+        )
+        self.assertIsInstance(error.orig, psycopg.errors.InsufficientPrivilege)
+        insert = await self.execute_rejected(
+            "INSERT INTO audit_events (id, correlation_id, occurred_at, action, "
+            "resource_kind, decision, reason) VALUES (gen_random_uuid(), "
+            "gen_random_uuid(), now(), 'a', 'system', 'deny', 'r')",
+            self.other_db,
+        )
+        self.assertIsInstance(insert.orig, psycopg.errors.InsufficientPrivilege)
+
+    async def test_the_diagnostic_is_silent_for_the_restricted_role(self):
+        access = await read_audit_table_access(self.app_db)
+        self.assertIsNotNone(access)
+        self.assertTrue(access.protected)
+        self.assertEqual(
+            (access.owns, access.can_update, access.can_delete, access.can_truncate),
+            (False, False, False, False),
+        )
+        with self.assertNoLogs("paw_backend.authz.diagnostics", level="WARNING"):
+            await warn_if_audit_table_is_mutable(self.app_db, 3)
+
+    async def test_the_diagnostic_warns_when_the_user_owns_the_table(self):
+        access = await read_audit_table_access(self.database)
+        self.assertFalse(access.protected)
+        self.assertTrue(access.owns)
+        with self.assertLogs("paw_backend.authz.diagnostics", level="WARNING") as logs:
+            await warn_if_audit_table_is_mutable(self.database, 3)
+        (line,) = logs.output
+        self.assertIn("owner=True", line)
+        self.assertIn("PAW_APP_DATABASE_ROLE", line)
+        # No role name, password or connection detail in the message.
+        for secret in (APP_ROLE, ROLE_PASSWORD, "postgresql://"):
+            self.assertNotIn(secret, line)
+
+    async def test_the_diagnostic_warns_for_a_role_that_may_update(self):
+        await self.execute_committed(f"GRANT UPDATE ON audit_events TO {APP_ROLE}")
+        access = await read_audit_table_access(self.app_db)
+        self.assertEqual(
+            (access.owns, access.can_update, access.can_delete, access.can_truncate),
+            (False, True, False, False),
+        )
+        with self.assertLogs("paw_backend.authz.diagnostics", level="WARNING"):
+            await warn_if_audit_table_is_mutable(self.app_db, 3)
+
+    async def test_the_diagnostic_never_raises_when_the_database_is_unreachable(self):
+        unreachable = Database(
+            make_settings(
+                database_url="postgresql://x:y@127.0.0.1:1/nothing",
+                database_timeout_seconds=1,
+            )
+        )
+        self.addAsyncCleanup(unreachable.dispose)
+        with self.assertNoLogs("paw_backend.authz.diagnostics", level="WARNING"):
+            await warn_if_audit_table_is_mutable(unreachable, 2)
+
+
+class MigrationUrlTest(AuditPostgresTestCase):
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        self.addAsyncCleanup(self.drop_role)
+        await self.drop_role()
+        async with self.database.session() as session:
+            await session.execute(
+                text(
+                    f"CREATE ROLE {APP_ROLE} LOGIN NOSUPERUSER NOCREATEDB "
+                    f"NOCREATEROLE PASSWORD '{ROLE_PASSWORD}'"
+                )
+            )
+            await session.commit()
+        await asyncio.to_thread(migrate, "downgrade", "base")
+
+    async def drop_role(self) -> None:
+        exists = await self.scalar(
+            f"SELECT count(*) FROM pg_roles WHERE rolname = '{APP_ROLE}'"
+        )
+        if exists:
+            for sql in (f"DROP OWNED BY {APP_ROLE}", f"DROP ROLE {APP_ROLE}"):
+                async with self.database.session() as session:
+                    await session.execute(text(sql))
+                    await session.commit()
+
+    async def test_the_application_role_cannot_run_the_migrations(self):
+        with self.assertRaises(Exception) as caught:
+            await asyncio.to_thread(
+                migrate, "upgrade", "head", PAW_DATABASE_URL=url_for_role(APP_ROLE)
+            )
+        self.assertIn("permission denied", str(caught.exception))
+
+    async def test_migrations_run_as_the_migration_role_when_one_is_configured(self):
+        await asyncio.to_thread(
+            migrate,
+            "upgrade",
+            "head",
+            PAW_DATABASE_URL=url_for_role(APP_ROLE),  # cannot create tables
+            PAW_MIGRATION_DATABASE_URL=TEST_DATABASE_URL,  # the schema owner
+            PAW_APP_DATABASE_ROLE=APP_ROLE,
+        )
+        owner = await self.scalar(
+            "SELECT pg_get_userbyid(relowner) FROM pg_class "
+            "WHERE oid = 'audit_events'::regclass"
+        )
+        self.assertEqual(owner, await self.scalar("SELECT current_user"))
+        self.assertNotEqual(owner, APP_ROLE)
+
+
 class AuthorizerOnPostgresTest(AuditPostgresTestCase):
-    async def test_every_decision_becomes_a_row(self):
+    async def test_every_persisted_decision_becomes_a_row(self):
         ticks = iter(NOW + timedelta(seconds=n) for n in range(100))
+        contributor = principal(
+            SystemRole.USER, user_id=U1, projects={P1: ProjectRole.CONTRIBUTOR}
+        )
         authorizer = Authorizer(
-            PostgresAuditSink(self.database), clock=lambda: next(ticks)
+            PostgresAuditSink(self.database),
+            directory=StaticDirectory(contributor),
+            clock=lambda: next(ticks),
         )
-        user = principal(SystemRole.USER, user_id="u1", p1=ProjectRole.CONTRIBUTOR)
-        grant = AgentGrant("agent-7", frozenset({Capability.PROJECT_TASK_RUN}))
+        grant = AgentGrant(
+            AGENT, frozenset({Capability.PROJECT_TASK_RUN}), ALL_PROJECTS
+        )
+        correlation = uuid.uuid4()
         await authorizer.authorize(
-            user, Capability.PROJECT_READ, Resource.project("p1"), request_id="r1"
+            contributor,
+            Capability.PROJECT_REPO_WRITE,
+            project(P1),
+            correlation_id=correlation,
+            client_request_id="r1",
         )
         await authorizer.authorize(
-            user, Capability.ADMIN_USERS_MANAGE, Resource.system()
+            contributor, Capability.ADMIN_USERS_MANAGE, Resource.system()
         )
-        await authorizer.authorize(None, Capability.CHAT_USE, Resource.system())
         await authorizer.authorize_agent_action(
-            user, grant, Capability.PROJECT_REPO_WRITE, Resource.project("p1")
+            U1, grant, Capability.PROJECT_REPO_WRITE, project(P1)
         )
+        # Not persisted: an allowed read, and an unauthenticated attempt.
+        await authorizer.authorize(contributor, Capability.PROJECT_READ, project(P1))
+        with self.assertLogs("paw_backend.authz.authorizer", level="INFO"):
+            await authorizer.authorize(None, Capability.CHAT_USE, Resource.system())
         rows = await self.rows()  # ordered by occurred_at, one second apart
         self.assertEqual(
             [(r.actor_id, r.agent_id, r.action, r.decision, r.reason) for r in rows],
             [
-                ("u1", None, "project.read", "allow", "granted_by_project_role"),
-                ("u1", None, "admin.users.manage", "deny", "capability_not_granted"),
-                (None, None, "chat.use", "deny", "unauthenticated"),
+                (U1, None, "project.repo.write", "allow", "granted_by_project_role"),
+                (U1, None, "admin.users.manage", "deny", "capability_not_granted"),
                 (
-                    "u1",
-                    "agent-7",
+                    U1,
+                    AGENT,
                     "project.repo.write",
                     "deny",
                     "agent_capability_not_granted",
                 ),
             ],
         )
-        self.assertEqual(rows[0].request_id, "r1")
+        self.assertEqual(
+            (rows[0].correlation_id, rows[0].client_request_id), (correlation, "r1")
+        )
 
-    async def test_a_privileged_action_is_denied_when_the_audit_table_is_unusable(self):
+    async def test_an_action_is_denied_when_the_audit_table_is_unusable(self):
         await asyncio.to_thread(migrate, "downgrade", "base")
         authorizer = Authorizer(PostgresAuditSink(self.database))
         with self.assertLogs("paw_backend.authz.authorizer", level="WARNING") as logs:
-            privileged = await authorizer.authorize(
+            required = await authorizer.authorize(
                 principal(SystemRole.OWNER),
                 Capability.ADMIN_CONFIG_MANAGE,
                 Resource.system(),
             )
-            ordinary = await authorizer.authorize(
-                principal(SystemRole.USER, user_id="u1"),
-                Capability.CHAT_USE,
-                Resource.owned_by("u1", "chat"),
+            side_effect = await authorizer.authorize(
+                principal(SystemRole.USER, projects={P1: ProjectRole.CONTRIBUTOR}),
+                Capability.PROJECT_REPO_WRITE,
+                project(P1),
             )
-        self.assertEqual(privileged.reason, Reason.AUDIT_UNAVAILABLE)
-        self.assertTrue(ordinary.allowed)
+        read = await authorizer.authorize(
+            principal(SystemRole.USER, projects={P1: ProjectRole.VIEWER}),
+            Capability.PROJECT_READ,
+            project(P1),
+        )
+        self.assertEqual(required.reason, Reason.AUDIT_UNAVAILABLE)
+        self.assertEqual(side_effect.reason, Reason.AUDIT_UNAVAILABLE)
+        self.assertTrue(read.allowed)  # reads are not audited, so not blocked
         self.assertIn("ProgrammingError", "\n".join(logs.output))
 
-    async def test_http_decisions_are_persisted_with_the_request_id(self):
+    async def test_startup_warns_when_the_application_owns_the_audit_table(self):
+        settings = make_settings(database_url=TEST_DATABASE_URL)  # the schema owner
+
+        def start_and_wait_for_the_check() -> list[str]:
+            with self.assertLogs("paw_backend.authz.diagnostics", "WARNING") as logs:
+                with make_client(create_app(settings)):
+                    deadline = time.monotonic() + 5
+                    while not logs.records and time.monotonic() < deadline:
+                        time.sleep(0.05)
+            return logs.output
+
+        (line,) = await asyncio.to_thread(start_and_wait_for_the_check)
+        self.assertIn("owner=True", line)
+        self.assertIn("append-only guard", line)
+
+    async def test_http_decisions_are_persisted_but_unauthenticated_ones_are_not(self):
         settings = make_settings(database_url=TEST_DATABASE_URL)
+        # The startup diagnostic (tested above) would warn about the test user.
+        self.enterContext(
+            patch.object(
+                logging.getLogger("paw_backend.authz.diagnostics"), "disabled", True
+            )
+        )
 
         def requests():
             app = create_app(settings)
             add_test_routes(app)
             statuses = []
             with make_client(app) as client:
-                statuses.append(
-                    client.get(
-                        "/test/admin", headers={"X-Request-ID": "req-a"}
-                    ).status_code
-                )
+                headers = {"X-Request-ID": "req-a"}
+                with self.assertLogs("paw_backend.authz.authorizer", level="INFO"):
+                    for _ in range(20):
+                        statuses.append(
+                            client.get("/test/admin", headers=headers).status_code
+                        )
                 app.state.principal_provider = StaticProvider(
-                    principal(SystemRole.USER, user_id="u1")
+                    principal(SystemRole.USER, user_id=U1)
                 )
-                statuses.append(
-                    client.get(
-                        "/test/admin", headers={"X-Request-ID": "req-b"}
-                    ).status_code
+                headers = {"X-Request-ID": "req-b"}
+                statuses.append(client.get("/test/admin", headers=headers).status_code)
+                app.state.principal_provider = StaticProvider(
+                    principal(SystemRole.OWNER, user_id=U1)
                 )
-                statuses.append(
-                    client.get(
-                        "/test/chat", headers={"X-Request-ID": "req-c"}
-                    ).status_code
-                )
+                headers = {"X-Request-ID": "req-c"}
+                statuses.append(client.get("/test/admin", headers=headers).status_code)
             return statuses
 
-        self.assertEqual(await asyncio.to_thread(requests), [401, 403, 200])
+        statuses = await asyncio.to_thread(requests)
+        self.assertEqual(statuses, [401] * 20 + [403, 200])
         rows = await self.rows()
+        # 20 anonymous requests left no rows; only the two authenticated ones did.
         self.assertEqual(
-            sorted((r.request_id, r.actor_id, r.decision, r.reason) for r in rows),
+            sorted(
+                (r.client_request_id, r.actor_id, r.decision, r.reason) for r in rows
+            ),
             [
-                ("req-a", None, "deny", "unauthenticated"),
-                ("req-b", "u1", "deny", "capability_not_granted"),
-                ("req-c", "u1", "allow", "granted_by_system_role"),
+                ("req-b", U1, "deny", "capability_not_granted"),
+                ("req-c", U1, "allow", "granted_by_system_role"),
             ],
         )
+        self.assertEqual(len({r.correlation_id for r in rows}), 2)
 
 
 if __name__ == "__main__":

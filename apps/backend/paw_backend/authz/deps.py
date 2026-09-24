@@ -6,20 +6,28 @@ provider yields nobody, so every endpoint protected with
 :func:`install_authz`); nothing else in this package changes.
 """
 
+import inspect
+import logging
+import uuid
 from collections.abc import Awaitable, Callable
 from typing import Annotated, Protocol
 
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI
+from starlette import status
+from starlette.exceptions import WebSocketException
 from starlette.requests import HTTPConnection
 
 from paw_backend.authz.audit import AuditSink, PostgresAuditSink
 from paw_backend.authz.authorizer import Authorizer
 from paw_backend.authz.capabilities import Capability
 from paw_backend.authz.policy import Reason
+from paw_backend.authz.principals import NoPrincipalDirectory, PrincipalDirectory
 from paw_backend.authz.subjects import Principal, Resource
 from paw_backend.config import Settings
 from paw_backend.db import Database
 from paw_backend.errors import ApiError
+
+logger = logging.getLogger(__name__)
 
 
 class PrincipalProvider(Protocol):
@@ -41,7 +49,9 @@ class UnauthenticatedProvider:
         return None
 
 
-ResourceResolver = Callable[[Request], Resource]
+# Builds the Resource of a request, from ids the backend trusts. May be sync or
+# async (a project's state has to be read from the database).
+ResourceResolver = Callable[[HTTPConnection], Resource | Awaitable[Resource]]
 
 
 def install_authz(
@@ -50,12 +60,14 @@ def install_authz(
     settings: Settings,
     database: Database,
     principal_provider: PrincipalProvider | None = None,
+    principal_directory: PrincipalDirectory | None = None,
     audit_sink: AuditSink | None = None,
 ) -> None:
     """Attach the provider and the authorizer to ``app.state``."""
     app.state.principal_provider = principal_provider or UnauthenticatedProvider()
     app.state.authorizer = Authorizer(
         audit_sink or PostgresAuditSink(database),
+        directory=principal_directory or NoPrincipalDirectory(),
         timeout_seconds=settings.database_timeout_seconds,
     )
 
@@ -74,51 +86,86 @@ def require_capability(
 ) -> Callable[..., Awaitable[Principal]]:
     """Dependency that lets a request through only if the backend allows it.
 
-    ``resource`` is a fixed :class:`Resource` (default: the workspace itself)
-    or a function of the request that builds one from the route's path
-    parameters. It must return ids the backend trusts; a malformed id makes
-    the resolver raise ``ValueError`` and the request is denied.
+    Works for HTTP and WebSocket routes (a WebSocket is refused before it is
+    accepted, with close code 1008, or 1013 when auditing is unavailable).
 
-    Answers 401 (``unauthorized``) when nobody is authenticated and 403
-    (``forbidden``) when the user may not do this. Both bodies are fixed, and
-    neither reveals which rule denied the request. If a privileged action
-    cannot be audited the answer is 503. The decision is audited either way.
+    ``resource`` is a fixed :class:`Resource` (default: the workspace itself)
+    or a function of the connection (sync or async) that builds one from the
+    route's path parameters and stored state. If the resolver raises, the
+    request is denied (and audited) rather than turned into an unaudited 500.
+
+    HTTP answers: 401 (``unauthorized``) when nobody is authenticated, 403
+    (``forbidden``) when the user may not do this, 503 when an action that
+    must be audited cannot be. The bodies are fixed and never say which rule
+    denied the request.
     """
+    if not isinstance(capability, Capability):
+        raise TypeError("require_capability needs a Capability member")
 
     async def dependency(
-        request: Request,
+        connection: HTTPConnection,
         authorizer: Annotated[Authorizer, Depends(get_authorizer)],
         provider: Annotated[PrincipalProvider, Depends(get_principal_provider)],
     ) -> Principal:
-        principal = await provider.get_principal(request)
+        principal = await provider.get_principal(connection)
         try:
-            target = _resolve(resource, request)
-        except ValueError:
+            target = await _resolve(resource, connection)
+        except Exception as error:  # a broken resolver must not skip the audit
+            # A malformed id (ValueError) is a client mistake; anything else is a bug.
+            logger.log(
+                logging.INFO if isinstance(error, ValueError) else logging.WARNING,
+                "Resource resolver failed (%s)",
+                type(error).__name__,
+            )
             target = None
         decision = await authorizer.authorize(
             principal,
             capability,
             target,
-            request_id=getattr(request.state, "request_id", None),
+            correlation_id=_correlation_id(connection),
+            client_request_id=getattr(connection.state, "request_id", None),
         )
         if decision.allowed and principal is not None:
             return principal
-        if decision.reason is Reason.UNAUTHENTICATED:
-            raise ApiError(401, "unauthorized", "Authentication required")
-        if decision.reason is Reason.AUDIT_UNAVAILABLE:
-            raise ApiError(
-                503, "service_unavailable", "Service temporarily unavailable"
-            )
-        raise ApiError(403, "forbidden", "Permission denied")
+        raise _refusal(connection, decision.reason)
 
+    # Lets tests (and reviewers) find every guarded route.
+    dependency.paw_capability = capability  # type: ignore[attr-defined]
     return dependency
 
 
-def _resolve(
-    resource: Resource | ResourceResolver | None, request: Request
+def _correlation_id(connection: HTTPConnection) -> uuid.UUID:
+    """One server-generated id per request, shared by all its decisions."""
+    existing = getattr(connection.state, "audit_correlation_id", None)
+    if isinstance(existing, uuid.UUID):
+        return existing
+    created = uuid.uuid4()
+    connection.state.audit_correlation_id = created
+    return created
+
+
+async def _resolve(
+    resource: Resource | ResourceResolver | None, connection: HTTPConnection
 ) -> Resource:
     if resource is None:
         return Resource.system()
     if isinstance(resource, Resource):
         return resource
-    return resource(request)
+    result = resource(connection)
+    if inspect.isawaitable(result):
+        result = await result
+    return result
+
+
+def _refusal(connection: HTTPConnection, reason: Reason) -> Exception:
+    unauthenticated = reason is Reason.UNAUTHENTICATED
+    unavailable = reason is Reason.AUDIT_UNAVAILABLE
+    if connection.scope["type"] == "websocket":
+        if unavailable:
+            return WebSocketException(code=status.WS_1013_TRY_AGAIN_LATER)
+        return WebSocketException(code=status.WS_1008_POLICY_VIOLATION)
+    if unauthenticated:
+        return ApiError(401, "unauthorized", "Authentication required")
+    if unavailable:
+        return ApiError(503, "service_unavailable", "Service temporarily unavailable")
+    return ApiError(403, "forbidden", "Permission denied")

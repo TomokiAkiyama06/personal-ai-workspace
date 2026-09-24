@@ -1,10 +1,16 @@
 """The capabilities the backend can authorize.
 
-A capability is one named action. Its :class:`Scope` says what part of the
-resource decides the outcome, and ``privileged`` marks the actions that change
-who may do what or the configuration of the whole workspace: they are never
-delegated to an agent and are denied when the audit trail cannot be written
-(see ``authorizer.py``).
+A capability is one named action. Every capability has an explicit entry in
+``CAPABILITIES`` with three properties:
+
+* ``scope``: what part of the resource decides the outcome (:class:`Scope`);
+* ``delegable``: whether an agent may ever exercise it on a user's behalf.
+  There is **no default**: a new capability cannot be added without deciding
+  this, and only the ones marked ``True`` can be delegated (an allowlist);
+* ``audit``: how decisions are recorded (:class:`AuditMode`). The default is
+  ``REQUIRED``: every decision is persisted and an allowed action is denied if
+  the audit write fails. Only an explicit allowlist of read-only capabilities
+  uses ``DENIED_ONLY``.
 
 The tool-level capabilities of the Tool Broker (read / write / execute /
 network / credential-use / destructive) are a separate, later layer (PAW-031);
@@ -68,57 +74,66 @@ class Capability(StrEnum):
     PROJECT_LIFECYCLE_MANAGE = "project.lifecycle.manage"
 
 
+class AuditMode(StrEnum):
+    # Every decision is persisted. If the write fails, an allow becomes a denial.
+    REQUIRED = "required"
+    # Read-only capabilities: only denials are persisted (best effort), allowed
+    # reads are not, and an audit failure never blocks the read.
+    DENIED_ONLY = "denied_only"
+
+
 @dataclass(frozen=True, slots=True)
 class CapabilityInfo:
     scope: Scope
-    privileged: bool = False
+    # No default on purpose: see the module docstring.
+    delegable: bool
+    audit: AuditMode = AuditMode.REQUIRED
 
 
-_SELF = CapabilityInfo(Scope.SELF)
-_SYSTEM = CapabilityInfo(Scope.SYSTEM)
-_PRIVILEGED_SYSTEM = CapabilityInfo(Scope.SYSTEM, privileged=True)
-_PROJECT = CapabilityInfo(Scope.PROJECT)
-_PRIVILEGED_PROJECT = CapabilityInfo(Scope.PROJECT, privileged=True)
+def _info(scope: Scope, *, delegable: bool, read_only: bool = False) -> CapabilityInfo:
+    audit = AuditMode.DENIED_ONLY if read_only else AuditMode.REQUIRED
+    return CapabilityInfo(scope, delegable=delegable, audit=audit)
+
 
 C = Capability
 CAPABILITIES: MappingProxyType[Capability, CapabilityInfo] = MappingProxyType(
     {
-        C.CHAT_USE: _SELF,
-        C.AGENT_USE: _SELF,
-        C.WORKSPACE_USE: _SELF,
-        C.GITHUB_USE: _SELF,
-        C.MEMORY_USE: _SELF,
-        C.PR_CREATE: _SELF,
-        C.SHARED_MEMORY_READ: _SYSTEM,
-        C.SHARED_MEMORY_MANAGE: _PRIVILEGED_SYSTEM,
-        C.ADMIN_USERS_MANAGE: _PRIVILEGED_SYSTEM,
-        C.ADMIN_USAGE_VIEW: _PRIVILEGED_SYSTEM,
-        C.ADMIN_QUOTA_MANAGE: _PRIVILEGED_SYSTEM,
-        C.ADMIN_AUDIT_VIEW: _PRIVILEGED_SYSTEM,
-        C.ADMIN_SYSTEM_PROMPT_MANAGE: _PRIVILEGED_SYSTEM,
-        C.ADMIN_MODELS_MANAGE: _PRIVILEGED_SYSTEM,
-        C.ADMIN_ROUTING_MANAGE: _PRIVILEGED_SYSTEM,
-        C.ADMIN_PERMISSIONS_MANAGE: _PRIVILEGED_SYSTEM,
-        C.ADMIN_CONFIG_MANAGE: _PRIVILEGED_SYSTEM,
-        C.ADMIN_PROJECTS_MANAGE: _PRIVILEGED_SYSTEM,
-        C.OWNER_ADMINS_MANAGE: _PRIVILEGED_SYSTEM,
-        C.OWNER_OWNERSHIP_TRANSFER: _PRIVILEGED_SYSTEM,
-        C.OWNER_RECOVERY_MANAGE: _PRIVILEGED_SYSTEM,
-        C.OWNER_USER_RESTORE: _PRIVILEGED_SYSTEM,
-        C.OWNER_BACKUP_MANAGE: _PRIVILEGED_SYSTEM,
-        C.PROJECT_READ: _PROJECT,
-        C.PROJECT_CHAT: _PROJECT,
-        C.PROJECT_TASK_RUN: _PROJECT,
-        C.PROJECT_REPO_WRITE: _PROJECT,
-        C.PROJECT_AGENT_USE: _PROJECT,
-        C.PROJECT_PR_CREATE: _PROJECT,
-        C.PROJECT_MEMORY_USE: _PROJECT,
-        C.PROJECT_MEMORY_MANAGE: _PROJECT,
-        C.PROJECT_SETTINGS_MANAGE: _PROJECT,
-        C.PROJECT_REPO_ADD: _PROJECT,
-        C.PROJECT_MEMBERS_MANAGE: _PRIVILEGED_PROJECT,
-        C.PROJECT_AGENT_POLICY_MANAGE: _PRIVILEGED_PROJECT,
-        C.PROJECT_LIFECYCLE_MANAGE: _PRIVILEGED_PROJECT,
+        C.CHAT_USE: _info(Scope.SELF, delegable=True),
+        C.AGENT_USE: _info(Scope.SELF, delegable=True),
+        C.WORKSPACE_USE: _info(Scope.SELF, delegable=True),
+        C.GITHUB_USE: _info(Scope.SELF, delegable=True),
+        C.MEMORY_USE: _info(Scope.SELF, delegable=True),
+        C.PR_CREATE: _info(Scope.SELF, delegable=True),
+        C.SHARED_MEMORY_READ: _info(Scope.SYSTEM, delegable=True, read_only=True),
+        C.SHARED_MEMORY_MANAGE: _info(Scope.SYSTEM, delegable=False),
+        C.ADMIN_USERS_MANAGE: _info(Scope.SYSTEM, delegable=False),
+        C.ADMIN_USAGE_VIEW: _info(Scope.SYSTEM, delegable=False),
+        C.ADMIN_QUOTA_MANAGE: _info(Scope.SYSTEM, delegable=False),
+        C.ADMIN_AUDIT_VIEW: _info(Scope.SYSTEM, delegable=False),
+        C.ADMIN_SYSTEM_PROMPT_MANAGE: _info(Scope.SYSTEM, delegable=False),
+        C.ADMIN_MODELS_MANAGE: _info(Scope.SYSTEM, delegable=False),
+        C.ADMIN_ROUTING_MANAGE: _info(Scope.SYSTEM, delegable=False),
+        C.ADMIN_PERMISSIONS_MANAGE: _info(Scope.SYSTEM, delegable=False),
+        C.ADMIN_CONFIG_MANAGE: _info(Scope.SYSTEM, delegable=False),
+        C.ADMIN_PROJECTS_MANAGE: _info(Scope.SYSTEM, delegable=False),
+        C.OWNER_ADMINS_MANAGE: _info(Scope.SYSTEM, delegable=False),
+        C.OWNER_OWNERSHIP_TRANSFER: _info(Scope.SYSTEM, delegable=False),
+        C.OWNER_RECOVERY_MANAGE: _info(Scope.SYSTEM, delegable=False),
+        C.OWNER_USER_RESTORE: _info(Scope.SYSTEM, delegable=False),
+        C.OWNER_BACKUP_MANAGE: _info(Scope.SYSTEM, delegable=False),
+        C.PROJECT_READ: _info(Scope.PROJECT, delegable=True, read_only=True),
+        C.PROJECT_CHAT: _info(Scope.PROJECT, delegable=True),
+        C.PROJECT_TASK_RUN: _info(Scope.PROJECT, delegable=True),
+        C.PROJECT_REPO_WRITE: _info(Scope.PROJECT, delegable=True),
+        C.PROJECT_AGENT_USE: _info(Scope.PROJECT, delegable=True),
+        C.PROJECT_PR_CREATE: _info(Scope.PROJECT, delegable=True),
+        C.PROJECT_MEMORY_USE: _info(Scope.PROJECT, delegable=True),
+        C.PROJECT_MEMORY_MANAGE: _info(Scope.PROJECT, delegable=False),
+        C.PROJECT_SETTINGS_MANAGE: _info(Scope.PROJECT, delegable=False),
+        C.PROJECT_REPO_ADD: _info(Scope.PROJECT, delegable=False),
+        C.PROJECT_MEMBERS_MANAGE: _info(Scope.PROJECT, delegable=False),
+        C.PROJECT_AGENT_POLICY_MANAGE: _info(Scope.PROJECT, delegable=False),
+        C.PROJECT_LIFECYCLE_MANAGE: _info(Scope.PROJECT, delegable=False),
     }
 )
 del C
@@ -131,17 +146,17 @@ if _undeclared:
 del _undeclared
 
 
-def coerce_capability(value: object) -> Capability | None:
-    """Return the capability named by ``value``, or ``None`` if there is none.
+def parse_capability(name: object) -> Capability | None:
+    """Boundary helper: the capability with exactly this name, or ``None``.
 
-    Exact match only (no case folding or trimming), so a string produced by a
-    model can never be interpreted into a capability it did not name exactly.
+    The authorization functions take :class:`Capability` members only. Code
+    that has a *name* (stored in a Task record, say) converts it here, once,
+    at the edge. Exact match only, no case folding or trimming, so a name a
+    model produced can never be read as a capability it did not spell out.
     """
-    if isinstance(value, Capability):
-        return value
-    if isinstance(value, str):
+    if isinstance(name, str):
         try:
-            return Capability(value)
+            return Capability(name)
         except ValueError:
             return None
     return None
