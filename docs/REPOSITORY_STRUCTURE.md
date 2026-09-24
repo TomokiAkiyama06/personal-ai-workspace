@@ -70,6 +70,7 @@ personal-ai-workspace/
 │  │     ├─ __init__.py
 │  │     ├─ fake_postgres.py
 │  │     ├─ support.py
+│  │     ├─ teardown_child.py
 │  │     ├─ test_config.py
 │  │     ├─ test_database.py
 │  │     ├─ test_errors.py

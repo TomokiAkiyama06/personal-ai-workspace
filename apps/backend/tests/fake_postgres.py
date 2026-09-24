@@ -1,9 +1,12 @@
-"""A minimal PostgreSQL wire-protocol server that accepts logins and then hangs.
+"""A minimal PostgreSQL wire-protocol server for stalled and healthy databases.
 
-It authenticates every client (``trust``) and answers nothing after that, so a
-query never completes and psycopg's query cancellation is never confirmed.
-This is the situation in which a driver-level cancel wait can outlast the
-readiness timeout. No PostgreSQL installation is needed.
+It authenticates every client (``trust``). By default it then answers nothing,
+so a query never completes and psycopg's query cancellation is never
+confirmed: the situation in which a driver-level cancel wait can outlast the
+readiness timeout. With ``login=False`` it does not even answer the startup
+message; with ``answer_queries=True`` it answers ``SELECT 1`` like a healthy
+server. ``logins`` counts the connections that sent a startup message.
+No PostgreSQL installation is needed.
 """
 
 import asyncio
@@ -13,7 +16,42 @@ _SSL_REQUEST = 80877103
 _CANCEL_REQUEST = 80877102
 
 
-async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+def _message(kind: bytes, body: bytes = b"") -> bytes:
+    return kind + struct.pack("!I", 4 + len(body)) + body
+
+
+_ROW_DESCRIPTION = _message(  # one int4 column
+    b"T",
+    struct.pack("!H", 1) + b"?column?\x00" + struct.pack("!IHIhih", 0, 0, 23, 4, -1, 0),
+)
+# The reply to `SELECT 1` as psycopg sends it: one simple-protocol Query.
+_SELECT_1_REPLY = b"".join(
+    (
+        _ROW_DESCRIPTION,
+        _message(b"D", struct.pack("!HI", 1, 1) + b"1"),  # DataRow
+        _message(b"C", b"SELECT 1\x00"),  # CommandComplete
+        _message(b"Z", b"I"),  # ReadyForQuery
+    )
+)
+
+
+async def _answer_queries(reader: asyncio.StreamReader, writer) -> None:
+    """Answer every simple ``Query`` until the client terminates."""
+    while True:
+        kind, length = struct.unpack("!cI", await reader.readexactly(5))
+        await reader.readexactly(length - 4)
+        if kind == b"X":  # Terminate
+            return
+        if kind == b"Q":
+            writer.write(_SELECT_1_REPLY)
+            await writer.drain()
+
+
+async def _handle(
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    server: "HangingPostgres",
+) -> None:
     """Serve one connection until the peer (or the test) closes it."""
     try:
         length, code = struct.unpack("!II", await reader.readexactly(8))
@@ -25,6 +63,10 @@ async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) ->
             await reader.read()  # never confirm a cancellation
             return
         await reader.readexactly(length - 8)  # startup parameters
+        server.logins += 1
+        if not server._login:
+            await reader.read()  # never answer the startup message
+            return
         version = b"server_version\x0017.0\x00"
         writer.write(
             b"R"
@@ -39,8 +81,11 @@ async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) ->
             + b"I"  # ReadyForQuery
         )
         await writer.drain()
-        await reader.read()  # ignore every query
-    except (asyncio.IncompleteReadError, ConnectionError):
+        if server._answer_queries:
+            await _answer_queries(reader, writer)
+        else:
+            await reader.read()  # ignore every query
+    except (asyncio.IncompleteReadError, ConnectionError, struct.error):
         pass
     finally:
         writer.close()
@@ -49,12 +94,17 @@ async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) ->
 class HangingPostgres:
     """``async with HangingPostgres() as server:`` then use ``server.port``."""
 
+    def __init__(self, login: bool = True, answer_queries: bool = False) -> None:
+        self._login = login
+        self._answer_queries = answer_queries
+        self.logins = 0  # connections that sent a startup message
+
     async def __aenter__(self) -> "HangingPostgres":
         self._writers: list[asyncio.StreamWriter] = []
 
         async def handle(reader, writer):
             self._writers.append(writer)
-            await _handle(reader, writer)
+            await _handle(reader, writer, self)
 
         self._server = await asyncio.start_server(handle, "127.0.0.1", 0)
         self.port: int = self._server.sockets[0].getsockname()[1]

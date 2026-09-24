@@ -83,6 +83,10 @@ class Settings(BaseSettings):
     # The role the application connects as. The audit migration grants it
     # INSERT and SELECT on ``audit_events`` (and nothing else on it).
     app_database_role: str | None = None
+    # How long a readiness result (also a failure) is reused. Together with
+    # single flight it caps the probe connections an unauthenticated
+    # /health/ready can cause at one per interval; 0 turns the reuse off.
+    database_readiness_cache_seconds: float = Field(default=1.0, ge=0, le=60)
 
     # Event path (SSE / WebSocket).
     event_heartbeat_seconds: float = Field(default=15.0, gt=0)
