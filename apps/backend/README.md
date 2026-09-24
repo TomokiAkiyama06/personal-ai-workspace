@@ -213,6 +213,34 @@ alembic -c apps/backend/alembic.ini upgrade head --sql    # SQL の出力のみ�
 alembic -c apps/backend/alembic.ini revision -m "説明"    # 新しい Revision
 ```
 
+### Migration は Application の Role に権限を与える（Contributor 向けの規則）
+
+Migration と Application が別の Role のとき（推奨の構成）、Table の Owner は Migration の Role です。
+Migration が何も与えなければ、Application は `permission denied` になります。
+**Table を作るすべての Migration は、その Table ごとに `grant_app_privileges` を呼びます**。必要最小限の権限だけを選んでください。
+
+```python
+from paw_backend.db_roles import grant_app_privileges
+
+
+def upgrade() -> None:
+    op.create_table("tasks", ...)
+    # 既定は SELECT のみ。INSERT / UPDATE / DELETE は必要なときだけ指定する。
+    grant_app_privileges(
+        op, "tasks", select=True, insert=True, update_columns=("status", "updated_at")
+    )
+```
+
+- 引数: `grant_app_privileges(op, table, *, select=True, insert=False, update=False, delete=False, update_columns=None)`。
+  `update_columns` を指定すると、その列だけに `UPDATE (列, ...)` を与えます（`update=True` とは併用できません）。
+- `PAW_APP_DATABASE_ROLE` を環境から読みます。**未設定（Role を分けない開発）のときは何も与えず、エラーにもしません**（`PUBLIC` の権限だけは外します）。
+  設定されているときは名前を検証し（`public`、`pg_*`、`postgres` などは拒否）、Role が存在しなければ Migration を失敗させます（Table も残りません）。
+- DELETE は `delete=True` のときだけ、TRUNCATE、ALTER、DROP、GRANT OPTION は与えません。識別子は検証したうえで Quote し、SQL の文字列に埋め込みません。
+- UUID の主キーを使う Table に Sequence の権限は要りません。Sequence を使う Table を作る場合は、その Migration で明示的に権限を与えてください。
+- 例外: Migration の Role だけが使う Table は、Module に `NO_APP_GRANTS = {"table": "理由（15 文字以上）"}` を書きます。
+- `tests/test_migration_grants.py` が、`migrations/versions/` のすべての Migration を調べます。
+  `op.create_table`（または生の `CREATE TABLE`）で作った Table に `grant_app_privileges` も `NO_APP_GRANTS` もない Migration があると失敗します。
+
 ## 認可（RBAC / Capability）と Audit
 
 権限の判定は Backend だけが行います。Frontend の表示、Client が送る Header・Query・Body、Prompt、Model の出力は判定の入力になりません。
