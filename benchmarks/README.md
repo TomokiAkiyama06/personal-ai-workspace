@@ -65,6 +65,29 @@ python3 -m venv .venv
 複数fileを一度に指定できます。すべてvalidなら終了code 0、入力が不正なら1、bundled schemaを
 利用できない場合は2を返します。エラーはJSON pathと理由を表示し、拒否した入力値は表示しません。
 
+## Retrieval benchmark
+
+`benchmarks.retrieval_runner`はACL付きのDatasetに対してRetrieverを実行し、次の指標を算出します。
+Recall@K、MRR、nDCG@K、Permission Leakage（必須要件は合計0）、
+stale / superseded / Scope誤選択率、latency（mean / p50 / p95、nearest-rank）です。
+順位指標の定義は`benchmarks.retrieval_metrics`にあり、Retrieverの返すidの重複は2件目以降を捨て、
+Datasetにないidは権限外として数えます。Retrieverが例外を出したqueryは指標0の失敗queryとして続行します
+（記録するのは例外の型だけです）。latencyは`retrieve`の呼び出しだけを計測します。
+
+```bash
+python -m benchmarks.run_retrieval_benchmark \
+  --dataset benchmarks/tests/fixtures/retrieval/valid_dataset.json \
+  --retriever benchmarks.tests.fixture_retrievers:make_retriever \
+  -k 5 --output report.json
+```
+
+`--retriever`は`module:factory`で、引数なしのfactoryが
+`retrieve(query_text, requester_principals, k) -> ids`を持つobjectを返します。
+importしたmoduleは呼び出し元の権限で実行されるため、信頼できるcodeだけを指定してください。
+Reportには文章、ACL、requester principal、例外messageを含めません。終了codeは、成功が0、Datasetの不備が1、
+Retrieverの指定・戻り値やReport出力の不備、`-k`の指定誤りが2です。
+Datasetの正式な形式はSeed Benchmark Dataset（PAW-016）で確定するため、現在の形式は暫定です。
+
 ## Evaluator Result schema v1
 
 Result JSONは、Evaluator version、Task ID、Candidateのmodel/runtime/quantization、`FAIL_TO_PASS`と
