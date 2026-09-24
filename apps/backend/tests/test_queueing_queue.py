@@ -838,6 +838,20 @@ class TrustedClockTest(QueueTestCase):
                 async with asyncio.timeout(30):
                     await heartbeat
 
+    async def test_a_lease_is_granted_from_one_reading_of_the_clock(self):
+        # ``claimed_at`` and the end of the lease come from the same reading, so
+        # they are exactly ``lease_seconds`` apart on every claim.
+        production = self.production_queue(lease_seconds=60)
+        for task_id in await self.make_tasks(60):
+            await production.enqueue(task_id)
+        claimed = []
+        for index in range(60):
+            claimed.append(await production.claim_next(f"w{index}"))
+        for entry in claimed:
+            self.assertEqual(
+                entry.lease_expires_at - entry.claimed_at, timedelta(seconds=60)
+            )
+
     async def test_a_production_queue_rejects_every_caller_supplied_time(self):
         production = self.production_queue()
         claimed = await self.claimed_entry(production)
