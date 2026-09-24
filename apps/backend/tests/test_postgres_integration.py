@@ -26,6 +26,16 @@ from .test_migrations import offline_config
 TEST_DATABASE_URL = os.environ.get("PAW_TEST_DATABASE_URL")
 
 
+class CiProvidesPostgresTest(unittest.TestCase):
+    @unittest.skipUnless(os.environ.get("CI") == "true", "enforced on CI only")
+    def test_ci_sets_the_database_url_so_integration_tests_cannot_be_skipped(self):
+        # A green CI run must mean the PostgreSQL tests below actually ran.
+        self.assertTrue(
+            TEST_DATABASE_URL,
+            "CI must set PAW_TEST_DATABASE_URL (see .github/workflows/ci.yml)",
+        )
+
+
 @unittest.skipUnless(TEST_DATABASE_URL, "PAW_TEST_DATABASE_URL is not set")
 class PostgresIntegrationTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
