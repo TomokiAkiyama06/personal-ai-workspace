@@ -120,6 +120,7 @@ Gold recordが`content`を持つ場合は、`exact_recall`（keyと内容の両�
 `conflicts_with`（衝突するMemoryのkey）は`conflict_accuracy`で採点し、どちらかが衝突を宣言したkey一致ペアだけを対象にします。
 Goldに`content` / `conflicts_with`がなければ、対応する指標は`null`または従来と同じ値になります。
 case fileの未知のfield（`supercedes`や`conflict_with`のような綴り誤り）は、黙って無視せず不備（終了code 1）として拒否します。
+case fileとWorker出力のJSONは、既存のvalidatorと同じ厳格なdecoder（`benchmarks.json_input.decode_json`）で読み、同じ名前のmemberの重複や`NaN`などの非標準の定数は、後の値で上書きせずに拒否します（Worker出力はschema不適合として数えます）。
 `unneeded`はGoldに一致しない予測と、同じkeyの2回目以降の予測の合計で、予測件数を超えません。
 Workerが例外を出したcaseは、予測なしの失敗caseとして記録して続行します（記録するのは例外の型だけです）。
 factoryが`extract(input_text)`を持たないobjectを返した場合は、全caseが失敗した報告にせず、実行前にエラー（終了code 2）にします。

@@ -14,6 +14,7 @@ from typing import Protocol
 
 from jsonschema import Draft202012Validator
 
+from benchmarks.json_input import decode_json
 from benchmarks.memory_worker_metrics import (
     MemoryComparison,
     MemoryRecord,
@@ -86,7 +87,7 @@ def load_cases(path: str) -> list[MemoryWorkerCase]:
     Every malformed input raises ``ValueError`` naming only the case id and field.
     """
     with open(path, encoding="utf-8") as f:
-        data = json.load(f)
+        data = decode_json(f.read())
 
     data = _require_object(data, "JSON document")
     _reject_unknown_fields(data, _TOP_FIELDS, "JSON document")
@@ -161,8 +162,8 @@ def _output_schema() -> dict[str, object]:
 def parse_worker_output(raw: str) -> list[MemoryRecord] | None:
     """Parse raw worker output; return ``None`` unless it is valid JSON matching the schema."""
     try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError:
+        parsed = decode_json(raw)
+    except ValueError:  # malformed, duplicate keys, or non-standard constants
         return None
     if not _output_validator().is_valid(parsed):
         return None

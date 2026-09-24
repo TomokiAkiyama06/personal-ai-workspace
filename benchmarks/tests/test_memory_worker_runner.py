@@ -334,6 +334,42 @@ class MemoryWorkerRunnerTest(unittest.TestCase):
                     self._load_from_text(json.dumps(document))
                 self.assertIn(message, str(context.exception))
 
+    def test_duplicate_or_nonstandard_json_in_a_cases_file_is_rejected(self):
+        duplicate_scope = (
+            '{"cases": [{"id": "c", "input": "x", "gold": [{"key": "k", "scope": "a", '
+            '"scope": "b", "state": "confirmed"}]}]}'
+        )
+        texts = (
+            '{"cases": [{"id": "c", "input": "x", "gold": []}], "cases": []}',
+            duplicate_scope,
+            '{"cases": [{"id": "c", "input": NaN, "gold": []}]}',
+        )
+        for text in texts:
+            with self.subTest(text=text[:40]), self.assertRaises(ValueError):
+                self._load_from_text(text)
+
+    def test_worker_output_with_duplicate_members_is_schema_invalid(self):
+        valid = json.dumps(
+            {
+                "memories": [
+                    {
+                        "key": "k",
+                        "scope": "user",
+                        "state": "confirmed",
+                        "supersedes": None,
+                    }
+                ]
+            }
+        )
+        duplicated = (
+            '{"memories": [{"key": "k", "key": "other", "scope": "user", '
+            '"state": "confirmed", "supersedes": null}]}'
+        )
+        self.assertIsNotNone(parse_worker_output(valid))
+        self.assertIsNone(parse_worker_output(duplicated))
+        adherence = schema_adherence([valid, duplicated], _output_schema())
+        self.assertEqual((adherence.valid, adherence.total), (1, 2))
+
     def test_misspelled_or_unknown_fields_are_rejected_not_ignored(self):
         gold = {"key": "k", "scope": "user", "state": "confirmed"}
         case = {"id": "c1", "input": "text", "gold": [gold]}

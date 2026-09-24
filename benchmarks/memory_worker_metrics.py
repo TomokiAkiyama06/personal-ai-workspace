@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-import json
 import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from jsonschema import Draft202012Validator
+
+from benchmarks.json_input import decode_json
 
 
 def normalize_content(text: str) -> str:
@@ -178,8 +179,8 @@ def schema_adherence(
     valid = 0
     for output in raw_outputs:
         try:
-            parsed = json.loads(output)
-        except json.JSONDecodeError:
+            parsed = decode_json(output)
+        except ValueError:  # malformed, duplicate keys, or non-standard constants
             continue
         if validator.is_valid(parsed):
             valid += 1
