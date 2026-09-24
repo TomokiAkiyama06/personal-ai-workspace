@@ -28,6 +28,7 @@ worker gets ``StaleAttemptError`` and cannot touch the new attempt.
 
 import json
 import logging
+import math
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime
@@ -84,6 +85,8 @@ MAX_REASON_LENGTH = 500
 MAX_NAME_LENGTH = 100
 MAX_LOG_MESSAGE_LENGTH = 8000
 MAX_INPUT_BYTES = 256 * 1024
+# Objects and lists inside each other, counting the top-level object as the first.
+MAX_INPUT_DEPTH = 32
 MAX_RESTORE_LOGS = 1000
 MAX_RESTORE_TOOL_INVOCATIONS = 100
 _TRUNCATED = "...[truncated]"
@@ -117,6 +120,84 @@ _FINISHED_TOOL_STATUSES = frozenset(
         ToolInvocationStatus.INTERRUPTED,
     }
 )
+
+
+_INPUT_TOO_LARGE = f"input must be a JSON object of at most {MAX_INPUT_BYTES} bytes"
+_INPUT_NOT_JSON = (
+    "input must contain only JSON values "
+    "(objects with text keys, lists, text, numbers, booleans and null)"
+)
+
+
+class _JsonInputCheck:
+    """Walk a caller-supplied ``input`` once, before it is encoded or stored.
+
+    Only what ``json.loads`` produces is accepted (exactly ``dict`` with ``str``
+    keys, ``list``, ``str``, ``int``, ``float``, ``bool`` and ``None``), so that
+    the stored value is the value the caller passed and not a coercion of it
+    (integer keys, tuples). PostgreSQL JSONB additionally refuses NaN / Infinity,
+    NUL and surrogate characters, which the encoder would otherwise let through
+    to fail at flush time as a database error.
+
+    The work is bounded by ``MAX_INPUT_DEPTH`` (which also stops cycles) and by
+    a budget of ``MAX_INPUT_BYTES``: every value costs at least as much as its
+    shortest JSON encoding, so an over-budget value is refused without being
+    encoded, whatever memory it shares (``[x, x]`` nested deeply). Errors state
+    the rule that was broken and never the offending value.
+    """
+
+    def __init__(self) -> None:
+        self._budget = MAX_INPUT_BYTES
+
+    def check_object(self, value: object) -> None:
+        if type(value) is not dict:
+            raise InvalidCommandArgumentError("input must be a JSON object")
+        self._check(value, 1)
+
+    def _spend(self, cost: int) -> None:
+        self._budget -= cost
+        if self._budget < 0:
+            raise InvalidCommandArgumentError(_INPUT_TOO_LARGE)
+
+    def _check(self, value: object, depth: int) -> None:
+        kind = type(value)
+        if kind is dict or kind is list:
+            if depth > MAX_INPUT_DEPTH:
+                raise InvalidCommandArgumentError(
+                    f"input must be nested at most {MAX_INPUT_DEPTH} levels"
+                )
+            self._spend(2)  # the brackets
+            if kind is dict:
+                for key, item in value.items():
+                    self._check_text(key)
+                    self._check(item, depth + 1)
+            else:
+                for item in value:
+                    self._check(item, depth + 1)
+        elif kind is str:
+            self._check_text(value)
+        elif kind is float:
+            if not math.isfinite(value):
+                raise InvalidCommandArgumentError("input numbers must be finite")
+            self._spend(1)
+        elif kind is int or kind is bool or value is None:
+            self._spend(1)
+        else:
+            raise InvalidCommandArgumentError(_INPUT_NOT_JSON)
+
+    def _check_text(self, value: object) -> None:
+        if type(value) is not str:
+            raise InvalidCommandArgumentError(_INPUT_NOT_JSON)
+        self._spend(len(value) + 2)  # the quotes
+        if "\x00" in value:
+            raise InvalidCommandArgumentError("input text must not contain NUL")
+        if not value.isascii():
+            try:
+                value.encode("utf-8")
+            except UnicodeEncodeError:
+                raise InvalidCommandArgumentError(
+                    "input text must be valid Unicode (no surrogate characters)"
+                ) from None
 
 
 def _text(name: str, value: str, limit: int) -> str:
@@ -206,7 +287,13 @@ class TaskService:
         agent: str | None = None,
         model: str | None = None,
     ) -> TaskEvent:
-        """Create a queued task (attempt 1) and its ``create`` event."""
+        """Create a queued task (attempt 1) and its ``create`` event.
+
+        ``input`` must be a plain JSON object that PostgreSQL JSONB can hold
+        (finite numbers, no NUL or surrogate characters, at most
+        ``MAX_INPUT_DEPTH`` levels and ``MAX_INPUT_BYTES`` bytes); otherwise
+        ``InvalidCommandArgumentError`` is raised before anything is written.
+        """
         title = _text("title", title, MAX_TITLE_LENGTH)
         input = self._checked_input(input)
         now = utcnow()
@@ -699,15 +786,24 @@ class TaskService:
 
     @staticmethod
     def _checked_input(value: dict[str, Any] | None) -> dict[str, Any]:
+        """Return ``value`` if PostgreSQL JSONB can hold it exactly, else raise.
+
+        The value is walked first (``_JsonInputCheck``: plain JSON types only,
+        finite numbers, text without NUL or surrogates, bounded depth and work),
+        so nothing that JSONB would refuse at flush time reaches the database.
+        """
         value = {} if value is None else value
+        _JsonInputCheck().check_object(value)
         try:
-            encoded = json.dumps(value)
-        except (TypeError, ValueError):
-            raise InvalidCommandArgumentError("input must be a JSON object") from None
-        if not isinstance(value, dict) or len(encoded) > MAX_INPUT_BYTES:
+            encoded = json.dumps(value, allow_nan=False)
+        except ValueError:
+            # After the walk only the interpreter's limit on the number of digits
+            # of an integer can still stop the encoder.
             raise InvalidCommandArgumentError(
-                f"input must be a JSON object of at most {MAX_INPUT_BYTES} bytes"
-            )
+                "input must contain only JSON numbers that can be encoded"
+            ) from None
+        if len(encoded) > MAX_INPUT_BYTES:
+            raise InvalidCommandArgumentError(_INPUT_TOO_LARGE)
         return value
 
     @staticmethod

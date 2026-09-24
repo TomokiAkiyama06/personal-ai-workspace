@@ -3,9 +3,14 @@
 Skipped unless ``PAW_TEST_DATABASE_URL`` is set (see test_postgres_integration).
 """
 
+import json
 import logging
 import unittest
 import uuid
+from collections import OrderedDict
+from datetime import datetime
+from decimal import Decimal
+from unittest import mock
 
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
@@ -31,6 +36,8 @@ from paw_backend.tasks import (
     WaitReason,
     WorktreeState,
 )
+from paw_backend.tasks import service as service_module
+from paw_backend.tasks.service import MAX_INPUT_BYTES, MAX_INPUT_DEPTH
 
 from .task_support import PostgresTaskTestCase, requires_postgres
 from .test_task_domain import EXPECTED
@@ -100,6 +107,140 @@ class CreateTaskTest(PostgresTaskTestCase):
     async def test_title_at_the_limit_is_accepted(self):
         task_id = await self.create_task(title="t" * 200)
         self.assertEqual((await self.service.restore(task_id)).title, "t" * 200)
+
+    async def assert_input_rejected(self, value, *, secret: str = "") -> None:
+        """``input`` is refused with the typed error and nothing is written."""
+        count = "SELECT count(*) FROM tasks WHERE project_id = :project_id"
+        before = await self.scalar(count, project_id=self.project_id)
+        with self.assertRaises(InvalidCommandArgumentError) as caught:
+            await self.create_task(input=value)
+        if secret:
+            self.assertNotIn(secret, str(caught.exception))
+        self.assertEqual(await self.scalar(count, project_id=self.project_id), before)
+
+    async def test_non_finite_numbers_in_input_are_rejected_before_the_database(
+        self,
+    ):
+        # json.dumps writes these as NaN / Infinity, which PostgreSQL JSONB
+        # refuses at flush time (a DataError), so they must be caught earlier.
+        cases = {
+            "nan": {"x": float("nan")},
+            "infinity": {"x": float("inf")},
+            "negative infinity": {"x": float("-inf")},
+            "in a list": {"x": [1, 2.5, float("nan")]},
+            "deeply nested": {"a": [{"b": [{"c": float("-inf")}]}]},
+        }
+        for name, value in cases.items():
+            with self.subTest(name):
+                await self.assert_input_rejected(value)
+
+    async def test_text_that_jsonb_cannot_hold_is_rejected_in_keys_and_values(self):
+        # NUL and unpaired surrogates fail at flush time too; an emoji written as
+        # two surrogate code points is not valid Unicode text either.
+        cases = {
+            "NUL in a value": {"x": "a\x00b"},
+            "NUL in a key": {"a\x00": 1},
+            "NUL nested": {"x": [{"y": "\x00"}]},
+            "lone surrogate": {"x": "\ud800"},
+            "surrogate in a key": {"\udfff": 1},
+            "surrogate pair as code points": {"x": chr(0xD83D) + chr(0xDE00)},
+        }
+        for name, value in cases.items():
+            with self.subTest(name):
+                await self.assert_input_rejected(value)
+
+    async def test_input_that_is_not_plain_json_is_rejected_without_coercion(self):
+        # json.dumps would silently turn these into JSON (keys into strings,
+        # tuples into arrays); the input must already be what it will be stored as.
+        cases = {
+            "integer key": {1: "a"},
+            "boolean key": {True: "a"},
+            "none key": {None: "a"},
+            "tuple key": {(1, 2): "a"},
+            "tuple value": {"x": (1, 2)},
+            "set": {"x": {1, 2}},
+            "bytes": {"x": b"abc"},
+            "decimal": {"x": Decimal("1.5")},
+            "datetime": {"x": datetime(2026, 1, 1)},
+            "arbitrary object": {"x": object()},
+            "dict subclass": OrderedDict(x=1),
+            "list at the top": [1, 2],
+            "text at the top": "abc",
+        }
+        for name, value in cases.items():
+            with self.subTest(name):
+                await self.assert_input_rejected(value)
+
+    async def test_finite_json_values_are_stored_and_restored_unchanged(self):
+        value = {
+            "prompt": '日本語 \U0001f600 \x01 tab\t quote" back\\slash',
+            "numbers": [0, -1, 10**30, 1.5, 0.1, 2.0, 1e-300],
+            "flags": [True, False, None],
+            "nested": {"a": {"b": [[], {}, [[{"c": "d"}]]]}},
+            "": "empty key",
+        }
+        task_id = await self.create_task(input=value)
+        restored = (await self.service.restore(task_id)).input
+        self.assertEqual(restored, value)
+        # Booleans stay booleans and integers stay integers.
+        self.assertIs(restored["flags"][0], True)
+        self.assertIsInstance(restored["numbers"][2], int)
+
+    async def test_input_nesting_is_limited_and_cycles_are_rejected(self):
+        def nested(levels: int) -> dict:
+            value: dict = {}
+            for _ in range(levels - 1):
+                value = {"a": value}
+            return value  # ``levels`` objects inside each other
+
+        at_limit = nested(MAX_INPUT_DEPTH)
+        task_id = await self.create_task(input=at_limit)
+        self.assertEqual((await self.service.restore(task_id)).input, at_limit)
+
+        cyclic_dict: dict = {}
+        cyclic_dict["self"] = cyclic_dict
+        cyclic_list: list = []
+        cyclic_list.append(cyclic_list)
+        cases = {
+            "one level too deep": nested(MAX_INPUT_DEPTH + 1),
+            "far too deep": nested(5000),
+            "lists count as levels": {"a": [[[[[[nested(MAX_INPUT_DEPTH)]]]]]]},
+            "cyclic dict": cyclic_dict,
+            "cyclic list": {"x": cyclic_list},
+        }
+        for name, value in cases.items():
+            with self.subTest(name):
+                await self.assert_input_rejected(value)
+
+    async def test_input_size_is_bounded_at_the_limit_and_by_element_count(self):
+        overhead = len(json.dumps({"b": ""}))
+        at_limit = {"b": "x" * (MAX_INPUT_BYTES - overhead)}
+        self.assertEqual(len(json.dumps(at_limit)), MAX_INPUT_BYTES)
+        task_id = await self.create_task(input=at_limit)
+        self.assertEqual((await self.service.restore(task_id)).input, at_limit)
+
+        secret = "SECRET-MARKER"
+        cases = {
+            "one byte over": {"b": "x" * (MAX_INPUT_BYTES - overhead + 1)},
+            "many small elements": {"a": [1] * MAX_INPUT_BYTES},
+            "many small keys": {str(n): 0 for n in range(MAX_INPUT_BYTES // 2)},
+            "escaped text counts as encoded": {"b": "é" * (MAX_INPUT_BYTES // 6)},
+            "one huge text": {"b": secret * MAX_INPUT_BYTES},
+        }
+        for name, value in cases.items():
+            with self.subTest(name):
+                await self.assert_input_rejected(value, secret=secret)
+
+    async def test_a_huge_shared_structure_is_rejected_before_it_is_encoded(self):
+        # 24 shallow levels of ``[x, x]`` hold about 10**8 values that share
+        # memory; encoding them would need gigabytes, so the check has to give up
+        # after a bounded amount of work and never reach the encoder.
+        value = [1] * 10
+        for _ in range(24):
+            value = [value, value]
+        with mock.patch.object(service_module.json, "dumps") as dumps:
+            await self.assert_input_rejected({"x": value})
+        dumps.assert_not_called()
 
 
 @requires_postgres
