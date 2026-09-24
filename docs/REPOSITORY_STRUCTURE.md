@@ -114,7 +114,8 @@ Core Backend は GPU 非依存とし、Local Model Runtime を停止できる構
 PAW-010 は PAW-001 に依存します。Backend の最小 Application Skeleton である PAW-020 は Backlog 上は Model 比較 Run の PAW-017 に依存しますが、
 [Decision 0002](decisions/0002-start-workspace-implementation-before-model-comparison.md)（Approved）により、PAW-017 の完了を待たずに着手できます。
 
-言語、Framework や Deployment の具体方式は [Requirements Freeze Review](REQUIREMENTS_FREEZE_REVIEW.md) の実装時選択として扱い、
+Backend / CLI / Web の言語と Framework は [Decision 0003](decisions/0003-backend-cli-web-implementation-stack.md)（Approved）で決まっています（承認範囲は決定を参照）。
+Deployment の具体方式など、それ以外は [Requirements Freeze Review](REQUIREMENTS_FREEZE_REVIEW.md) の実装時選択として扱い、
 該当 Issue で決めた構成に合わせてこの文書を更新します。
 
 ## Runtime データとの境界

@@ -1720,7 +1720,7 @@ docs/
 
 ### [IMPLEMENTATION_CHOICE]
 
-- Desktop / Backend frameworkの最終選択。
+- Desktop / Backend frameworkの最終選択。（Backend は [Decision 0003](docs/decisions/0003-backend-cli-web-implementation-stack.md) で決定済み。Desktop は未決）
 - Credential Vaultの具体製品・storage方式。
 - Provider仕様と利用規約を満たすCodex / Claudeの具体的な認証実装。
 - Benchmark結果とRuntime要件を満たす推論Backendの統合方式。
