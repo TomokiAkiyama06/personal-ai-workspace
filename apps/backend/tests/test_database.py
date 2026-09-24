@@ -1,7 +1,11 @@
 import asyncio
 import logging
+import os
+import subprocess
+import sys
 import time
 import unittest
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Depends
@@ -13,7 +17,7 @@ from paw_backend.app import create_app
 from paw_backend.db import Database, DatabaseNotConfiguredError, DatabaseStatus
 
 from .fake_postgres import HangingPostgres
-from .support import FakeDatabase, make_client, make_settings
+from .support import FakeDatabase, make_client, make_settings, wait_until
 
 PASSWORD = "s3cr3t-pw"
 URL = f"postgresql://paw:{PASSWORD}@db.internal:5432/paw"
@@ -92,12 +96,7 @@ class ReadinessTimeoutTest(unittest.IsolatedAsyncioTestCase):
         self.assertLess(elapsed, self.TIMEOUT + 0.5, "check() waited for the cancel")
 
     async def test_returns_at_the_timeout_when_the_server_stops_answering(self):
-        # Real psycopg against a server that logs in and then ignores queries:
-        # the cancel request is never confirmed and psycopg waits ~10 s for it.
-        # Its background warnings about the abandoned cancel are not under test.
-        psycopg_logger = logging.getLogger("psycopg")
-        self.addCleanup(psycopg_logger.setLevel, psycopg_logger.level)
-        psycopg_logger.setLevel(logging.CRITICAL)
+        # Real psycopg against a server that logs in and then ignores queries.
         async with HangingPostgres() as server:
             database = self.database(f"postgresql://paw:pw@127.0.0.1:{server.port}/paw")
             started = time.monotonic()
@@ -105,16 +104,149 @@ class ReadinessTimeoutTest(unittest.IsolatedAsyncioTestCase):
                 status = await database.check()
             elapsed = time.monotonic() - started
 
-        self.assertEqual(status, DatabaseStatus.UNAVAILABLE)
-        self.assertLess(elapsed, self.TIMEOUT + 1.0)
+            self.assertEqual(status, DatabaseStatus.UNAVAILABLE)
+            self.assertLess(elapsed, self.TIMEOUT + 1.0)
+            # The abandoned probe ends by itself, quickly: its socket was shut
+            # down, so psycopg never starts its (up to ten seconds long) wait
+            # for the server to confirm a query cancellation.
+            self.assertTrue(
+                await wait_until(lambda: not database._probes, limit=2),
+                "the timed-out probe is still running",
+            )
 
-    async def test_a_probe_cancelled_after_the_timeout_leaves_no_task_behind(self):
+    async def test_a_probe_that_is_still_connecting_is_cancelled(self):
+        # The server accepts the TCP connection but never answers the login.
+        async with HangingPostgres(login=False) as server:
+            database = self.database(f"postgresql://paw:pw@127.0.0.1:{server.port}/paw")
+            with self.assertLogs("paw_backend.db", level=logging.WARNING):
+                status = await database.check()
+            self.assertEqual(status, DatabaseStatus.UNAVAILABLE)
+            self.assertTrue(await wait_until(lambda: not database._probes, limit=2))
+
+    async def test_a_probe_aborted_after_the_timeout_leaves_no_task_behind(self):
         database = self.database()
         database._ping = lambda: asyncio.sleep(60)
         with self.assertLogs("paw_backend.db", level=logging.WARNING):
             await database.check()
         await asyncio.sleep(0.05)  # let the cancellation finish
-        self.assertEqual(database._cancelling, set())
+        self.assertEqual(database._probes, set())
+
+
+class DisposeTest(unittest.IsolatedAsyncioTestCase):
+    """``dispose()`` must not leave probes for ``asyncio.run`` to wait for."""
+
+    async def test_dispose_stops_a_probe_that_is_running_a_query(self):
+        async with HangingPostgres() as server:
+            database = Database(
+                make_settings(
+                    database_url=f"postgresql://paw:pw@127.0.0.1:{server.port}/paw",
+                    database_timeout_seconds=30,
+                    shutdown_timeout_seconds=2,
+                )
+            )
+            check = asyncio.create_task(database.check())
+            self.assertTrue(
+                await wait_until(lambda: database._probe_connections, limit=3),
+                "the probe never reached its query",
+            )
+
+            started = time.monotonic()
+            with self.assertLogs("paw_backend.db", level=logging.WARNING):
+                await database.dispose()
+                status = await asyncio.wait_for(check, 1)
+
+        self.assertLess(time.monotonic() - started, 1.0)
+        self.assertEqual(status, DatabaseStatus.UNAVAILABLE)
+        self.assertEqual(database._probes, set())
+
+    async def test_aborting_a_probe_twice_never_falls_back_to_cancellation(self):
+        # A timed-out check() aborts its probe and dispose() aborts it again
+        # before the probe has had a chance to run. The second shutdown of the
+        # socket fails with ENOTCONN; cancelling then would start psycopg's
+        # query cancellation, which is exactly what abort exists to avoid.
+        async with HangingPostgres() as server:
+            database = Database(
+                make_settings(
+                    database_url=f"postgresql://paw:pw@127.0.0.1:{server.port}/paw",
+                    database_timeout_seconds=30,
+                )
+            )
+            check = asyncio.create_task(database.check())
+            self.assertTrue(await wait_until(lambda: database._probe_connections))
+            (probe,) = database._probes
+
+            database._abort(probe)
+            database._abort(probe)
+
+            self.assertEqual(probe.cancelling(), 0)
+            with self.assertLogs("paw_backend.db", level=logging.WARNING):
+                self.assertEqual(await check, DatabaseStatus.UNAVAILABLE)
+
+    async def test_dispose_is_bounded_when_a_probe_ignores_abort_and_cancel(self):
+        release = asyncio.Event()
+        self.addCleanup(release.set)  # lets the stuck probe end with the test
+
+        class Stubborn(Database):
+            async def _ping(self):
+                while not release.is_set():
+                    try:
+                        await asyncio.sleep(0.02)
+                    except asyncio.CancelledError:
+                        pass  # like a cancel that is blocked in a thread
+
+        database = Stubborn(
+            make_settings(
+                database_url=URL,
+                database_timeout_seconds=30,
+                shutdown_timeout_seconds=1,
+            )
+        )
+        check = asyncio.create_task(database.check())
+        await asyncio.sleep(0.05)
+
+        started = time.monotonic()
+        with self.assertLogs("paw_backend.db", level=logging.WARNING) as logs:
+            await database.dispose()
+        elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, 1.5, "dispose() waited for the stuck probe")
+        self.assertIn("did not stop", "\n".join(logs.output))
+        release.set()
+        await check
+
+
+class ProcessTeardownTest(unittest.TestCase):
+    """The process must exit promptly after a probe timed out on a stalled server.
+
+    Runs in a child process because the delay is in ``asyncio.run``'s shutdown
+    (it waits for threads and tasks that are still running), which cannot be
+    observed from inside the loop. ``libpq_fallback`` makes psycopg behave as
+    with a libpq older than 17, where a query cancellation blocks a thread.
+    """
+
+    def run_child(self, mode: str) -> float:
+        environment = {k: v for k, v in os.environ.items() if not k.startswith("PAW_")}
+        started = time.monotonic()
+        try:
+            result = subprocess.run(
+                [sys.executable, "-m", "tests.teardown_child", mode],
+                cwd=Path(__file__).resolve().parents[1],
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+        except subprocess.TimeoutExpired:
+            self.fail(f"the process ({mode}) did not exit after dispose()")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("done", result.stdout)
+        return time.monotonic() - started
+
+    def test_exit_is_prompt_with_query_cancellation_via_libpq_17(self):
+        self.assertLess(self.run_child("cancel_safe"), 8)
+
+    def test_exit_is_prompt_when_libpq_cancels_from_a_thread(self):
+        self.assertLess(self.run_child("libpq_fallback"), 8)
 
 
 class SessionDependencyTest(unittest.TestCase):

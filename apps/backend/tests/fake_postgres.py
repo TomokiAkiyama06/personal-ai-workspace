@@ -3,7 +3,8 @@
 It authenticates every client (``trust``) and answers nothing after that, so a
 query never completes and psycopg's query cancellation is never confirmed.
 This is the situation in which a driver-level cancel wait can outlast the
-readiness timeout. No PostgreSQL installation is needed.
+readiness timeout. With ``login=False`` it does not even answer the startup
+message. No PostgreSQL installation is needed.
 """
 
 import asyncio
@@ -13,7 +14,9 @@ _SSL_REQUEST = 80877103
 _CANCEL_REQUEST = 80877102
 
 
-async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+async def _handle(
+    reader: asyncio.StreamReader, writer: asyncio.StreamWriter, login: bool
+) -> None:
     """Serve one connection until the peer (or the test) closes it."""
     try:
         length, code = struct.unpack("!II", await reader.readexactly(8))
@@ -25,6 +28,9 @@ async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) ->
             await reader.read()  # never confirm a cancellation
             return
         await reader.readexactly(length - 8)  # startup parameters
+        if not login:
+            await reader.read()  # never answer the startup message
+            return
         version = b"server_version\x0017.0\x00"
         writer.write(
             b"R"
@@ -49,12 +55,15 @@ async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) ->
 class HangingPostgres:
     """``async with HangingPostgres() as server:`` then use ``server.port``."""
 
+    def __init__(self, login: bool = True) -> None:
+        self._login = login
+
     async def __aenter__(self) -> "HangingPostgres":
         self._writers: list[asyncio.StreamWriter] = []
 
         async def handle(reader, writer):
             self._writers.append(writer)
-            await _handle(reader, writer)
+            await _handle(reader, writer, self._login)
 
         self._server = await asyncio.start_server(handle, "127.0.0.1", 0)
         self.port: int = self._server.sockets[0].getsockname()[1]
