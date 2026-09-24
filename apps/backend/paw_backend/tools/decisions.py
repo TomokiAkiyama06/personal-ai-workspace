@@ -63,7 +63,13 @@ class BrokerReason(StrEnum):
     APPROVAL_EXPIRED = "approval_expired"
     APPROVAL_ALREADY_USED = "approval_already_used"
     APPROVAL_REJECTED = "approval_rejected"
+    APPROVAL_REVOKED = "approval_revoked"
     APPROVAL_UNAVAILABLE = "approval_unavailable"
+    # No approval is opened: too many are waiting for this task and user, the
+    # same call was rejected a moment ago, or nothing readable can be shown.
+    APPROVAL_LIMIT_REACHED = "approval_limit_reached"
+    APPROVAL_COOLDOWN = "approval_cooldown"
+    APPROVAL_NOT_DISPLAYABLE = "approval_not_displayable"
     # --- DENY: the record of the decision could not be written ---
     AUDIT_UNAVAILABLE = "audit_unavailable"
     # --- audit rows written after an allowed call ran (never a decision) ---

@@ -12,7 +12,12 @@ never be handed this service**. Even so, the rules do not rest on that:
   :class:`StepUpVerifier` (PAW-023) confirms it. With no verifier installed the
   default fails closed: such an approval stays pending;
 * what is granted is one exact call (see ``approval_types``), once, before it
-  expires.
+  expires;
+* an approval can be revoked before it is used, by the user or an Admin / Owner,
+  and it is revoked when its task ends (:meth:`ApprovalService.revoke_on_task_end`).
+
+A user who is not the delegating user is told the approval does not exist (no
+oracle for other users' approvals); the audit row records ``not_authorised``.
 
 Approving and rejecting change no external state, so their audit row is written
 after the change is stored and a failure to write it is logged, not fatal: the
@@ -25,28 +30,20 @@ import inspect
 import logging
 import uuid
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Protocol
 
-from paw_backend.authz import AuditSink, Principal
+from paw_backend.authz import AuditSink, Principal, SystemRole
 from paw_backend.tools.approval_types import (
-    ApprovalBinding,
     ApprovalEvent,
     ApprovalEventKind,
-    ApprovalHistoryEntry,
     ApprovalRecord,
-    ApprovalStatus,
     ApprovalStore,
-    ConsumeOutcome,
     DecideOutcome,
-    DecideResult,
-    NewApproval,
-    OpenResult,
-    diagnose_consume,
+    RevokeOutcome,
     diagnose_decide,
-    is_expired,
 )
 from paw_backend.tools.audit import build_tool_event, record_event
 from paw_backend.tools.capabilities import ApprovalLevel
@@ -103,148 +100,17 @@ class FailClosedStepUp:
         return False
 
 
-class InMemoryApprovalStore:
-    """Approvals kept in memory: a test double with the same rules as PostgreSQL.
-
-    Not for production (nothing survives a restart and it cannot be shared
-    between processes); it holds at most ``max_records`` approvals.
-    """
-
-    def __init__(self, *, max_records: int = 10_000) -> None:
-        self._records: dict[uuid.UUID, ApprovalRecord] = {}
-        self._history: list[ApprovalHistoryEntry] = []
-        self._lock = asyncio.Lock()
-        self._max_records = max_records
-
-    def _log(
-        self,
-        approval_id: uuid.UUID,
-        kind: ApprovalEventKind,
-        now: datetime,
-        *,
-        actor_user_id: uuid.UUID | None = None,
-        agent_id: uuid.UUID | None = None,
-    ) -> None:
-        self._history.append(
-            ApprovalHistoryEntry(
-                seq=len(self._history) + 1,
-                approval_id=approval_id,
-                kind=kind,
-                actor_user_id=actor_user_id,
-                agent_id=agent_id,
-                occurred_at=now,
-            )
-        )
-
-    def _expire(self, record: ApprovalRecord, now: datetime) -> ApprovalRecord:
-        """Mark an open, timed-out approval ``expired`` (with history)."""
-        if record.status in (
-            ApprovalStatus.PENDING,
-            ApprovalStatus.APPROVED,
-        ) and is_expired(record, now):
-            record = replace(record, status=ApprovalStatus.EXPIRED)
-            self._records[record.approval_id] = record
-            self._log(record.approval_id, ApprovalEventKind.EXPIRED, now)
-        return record
-
-    async def open_request(self, new: NewApproval, *, now: datetime) -> OpenResult:
-        async with self._lock:
-            for record in list(self._records.values()):
-                if record.call_hash != new.call_hash:
-                    continue
-                record = self._expire(record, now)
-                if record.status in (ApprovalStatus.PENDING, ApprovalStatus.APPROVED):
-                    return OpenResult(record, created=False)
-            if len(self._records) >= self._max_records:
-                raise RuntimeError("the in-memory approval store is full")
-            record = ApprovalRecord(
-                approval_id=new.approval_id,
-                task_id=new.task_id,
-                project_id=new.project_id,
-                agent_id=new.agent_id,
-                requester_user_id=new.requester_user_id,
-                tool=new.tool,
-                level=new.level,
-                call_hash=new.call_hash,
-                targets=new.targets,
-                status=ApprovalStatus.PENDING,
-                created_at=now,
-                expires_at=new.expires_at,
-            )
-            if record.expires_at <= record.created_at:
-                raise ValueError("an approval must expire after it is created")
-            self._records[record.approval_id] = record
-            self._log(
-                record.approval_id,
-                ApprovalEventKind.REQUESTED,
-                now,
-                agent_id=new.agent_id,
-            )
-            return OpenResult(record, created=True)
-
-    async def get(self, approval_id: uuid.UUID) -> ApprovalRecord | None:
-        return self._records.get(approval_id)
-
-    async def decide(
-        self,
-        approval_id: uuid.UUID,
-        *,
-        approver_id: uuid.UUID,
-        approve: bool,
-        now: datetime,
-    ) -> DecideResult:
-        async with self._lock:
-            record = self._records.get(approval_id)
-            outcome = diagnose_decide(record, approver_id, now)
-            if record is None:
-                return DecideResult(outcome)
-            if outcome is DecideOutcome.EXPIRED:
-                self._expire(record, now)
-            if outcome is not DecideOutcome.DECIDED:
-                return DecideResult(outcome)
-            status = ApprovalStatus.APPROVED if approve else ApprovalStatus.REJECTED
-            record = replace(
-                record, status=status, approver_id=approver_id, decided_at=now
-            )
-            self._records[approval_id] = record
-            kind = ApprovalEventKind.APPROVED if approve else ApprovalEventKind.REJECTED
-            self._log(approval_id, kind, now, actor_user_id=approver_id)
-            return DecideResult(DecideOutcome.DECIDED, record)
-
-    async def consume(
-        self, approval_id: uuid.UUID, binding: ApprovalBinding, *, now: datetime
-    ) -> ConsumeOutcome:
-        async with self._lock:
-            record = self._records.get(approval_id)
-            outcome = diagnose_consume(record, binding, now)
-            if record is None:
-                return outcome
-            if outcome is ConsumeOutcome.EXPIRED:
-                self._expire(record, now)
-            if outcome is not ConsumeOutcome.CONSUMED:
-                return outcome
-            self._records[approval_id] = replace(
-                record, status=ApprovalStatus.CONSUMED, consumed_at=now
-            )
-            self._log(
-                approval_id,
-                ApprovalEventKind.CONSUMED,
-                now,
-                agent_id=binding.agent_id,
-            )
-            return ConsumeOutcome.CONSUMED
-
-    async def history(self, approval_id: uuid.UUID) -> list[ApprovalHistoryEntry]:
-        return [h for h in self._history if h.approval_id == approval_id]
-
-
 class ApprovalOutcome(StrEnum):
     APPROVED = "approved"
     REJECTED = "rejected"
+    REVOKED = "revoked"
+    # Also what a stranger is told: the existence of another user's approval is
+    # not revealed (the audit row still says ``not_authorised``).
     NOT_FOUND = "not_found"
     NOT_PENDING = "not_pending"
+    NOT_OPEN = "not_open"  # revoking an approval that is already finished
     EXPIRED = "expired"
-    NOT_AUTHORISED = "not_authorised"  # not the user the agent works for
+    NOT_AUTHORISED = "not_authorised"  # kept for the audit reason
     SELF_APPROVAL = "self_approval"  # the requesting agent itself
     STEP_UP_REQUIRED = "step_up_required"
     UNAVAILABLE = "unavailable"  # the store failed
@@ -258,7 +124,11 @@ class ApprovalResult:
 
     @property
     def decided(self) -> bool:
-        return self.outcome in (ApprovalOutcome.APPROVED, ApprovalOutcome.REJECTED)
+        return self.outcome in (
+            ApprovalOutcome.APPROVED,
+            ApprovalOutcome.REJECTED,
+            ApprovalOutcome.REVOKED,
+        )
 
     def __bool__(self) -> bool:
         return self.decided
@@ -269,11 +139,17 @@ _DECIDE_TO_OUTCOME = {
     DecideOutcome.NOT_PENDING: ApprovalOutcome.NOT_PENDING,
     DecideOutcome.EXPIRED: ApprovalOutcome.EXPIRED,
     DecideOutcome.NOT_AUTHORISED: ApprovalOutcome.NOT_AUTHORISED,
+    DecideOutcome.STEP_UP_REQUIRED: ApprovalOutcome.STEP_UP_REQUIRED,
 }
+# Task states after which nothing the task was approved for should stay usable.
+_TASK_END_STATES = frozenset({"cancelled", "failed", "completed"})
+# Who may revoke someone else's approval: revoking only takes rights away, so
+# the administrators may do it on the user's behalf.
+_MAY_REVOKE_ANY = frozenset({SystemRole.ADMIN, SystemRole.OWNER})
 
 
 class ApprovalService:
-    """Approve or reject a pending approval, as the human it belongs to."""
+    """Approve, reject or revoke an approval, as the human it belongs to."""
 
     def __init__(
         self,
@@ -285,7 +161,12 @@ class ApprovalService:
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         timeout_seconds: float = 3.0,
     ) -> None:
-        for name, count in (("get", 1), ("decide", 1)):
+        for name, count in (
+            ("get", 1),
+            ("decide", 1),
+            ("revoke", 1),
+            ("revoke_task", 1),
+        ):
             require_async_method(store, name, count)
         require_async_method(audit, "record", 1)
         self._step_up: StepUpVerifier = step_up or FailClosedStepUp()
@@ -308,6 +189,141 @@ class ApprovalService:
     ) -> ApprovalResult:
         return await self._decide(approval_id, approver, approve=False)
 
+    async def revoke(self, approval_id: uuid.UUID, actor: Principal) -> ApprovalResult:
+        """Withdraw a pending or approved approval before it is used.
+
+        The delegating user may, and so may an Admin or Owner (revoking only
+        takes rights away). Anybody else is told the approval does not exist.
+        """
+        if not isinstance(approval_id, uuid.UUID) or not isinstance(actor, Principal):
+            return ApprovalResult(ApprovalOutcome.INVALID)
+        now = self._clock()
+        try:
+            record = await self._store.get(approval_id)
+        except Exception as error:
+            logger.error("Approval lookup failed (%s)", type(error).__name__)
+            return ApprovalResult(ApprovalOutcome.UNAVAILABLE, approval_id)
+        audit_reason: ApprovalOutcome
+        if record is None:
+            outcome = audit_reason = ApprovalOutcome.NOT_FOUND
+        elif actor.user_id == record.agent_id or (
+            actor.user_id != record.requester_user_id
+            and actor.system_role not in _MAY_REVOKE_ANY
+        ):
+            outcome, audit_reason = (
+                ApprovalOutcome.NOT_FOUND,
+                ApprovalOutcome.NOT_AUTHORISED,
+            )
+        else:
+            try:
+                revoked = await self._store.revoke(
+                    approval_id, actor_id=actor.user_id, now=now
+                )
+            except Exception as error:
+                logger.error("Approval revoke failed (%s)", type(error).__name__)
+                revoked = None
+            outcome = audit_reason = {
+                RevokeOutcome.REVOKED: ApprovalOutcome.REVOKED,
+                RevokeOutcome.NOT_FOUND: ApprovalOutcome.NOT_FOUND,
+                RevokeOutcome.NOT_OPEN: ApprovalOutcome.NOT_OPEN,
+            }.get(revoked, ApprovalOutcome.UNAVAILABLE)
+        if record is not None and outcome is ApprovalOutcome.REVOKED:
+            await self._emit(ApprovalEventKind.REVOKED, record, now)
+        await self._audit_row(
+            "tool.approval.revoke",
+            outcome is ApprovalOutcome.REVOKED,
+            audit_reason.value,
+            approval_id,
+            None if record is None else record.project_id,
+            actor,
+            now,
+        )
+        return ApprovalResult(outcome, approval_id)
+
+    async def revoke_task(self, task_id: uuid.UUID) -> int:
+        """Revoke every open approval of a task (it ended); returns how many.
+
+        A system action: nobody's approval may outlive its task. Wire
+        :meth:`revoke_on_task_end` into ``TaskService(listeners=[...])``.
+        """
+        if not isinstance(task_id, uuid.UUID):
+            raise TypeError("task_id must be a UUID")
+        now = self._clock()
+        try:
+            ids = await self._store.revoke_task(task_id, now=now)
+        except Exception as error:
+            logger.error("Task approval revoke failed (%s)", type(error).__name__)
+            return 0
+        for approval_id in ids:
+            try:
+                record = await self._store.get(approval_id)
+            except Exception:
+                record = None
+            if record is not None:
+                await self._emit(ApprovalEventKind.REVOKED, record, now)
+            await self._audit_row(
+                "tool.approval.revoke",
+                True,
+                "task_ended",
+                approval_id,
+                None if record is None else record.project_id,
+                None,
+                now,
+            )
+        return len(ids)
+
+    async def revoke_on_task_end(self, event: object) -> None:
+        """A ``TaskService`` listener: a task that was cancelled, failed or
+        completed keeps no usable approval. Reads only ``task_id`` and
+        ``to_state`` of the event."""
+        task_id = getattr(event, "task_id", None)
+        state = getattr(event, "to_state", None)
+        if isinstance(task_id, uuid.UUID) and getattr(state, "value", state) in (
+            _TASK_END_STATES
+        ):
+            await self.revoke_task(task_id)
+
+    async def _emit(
+        self, kind: ApprovalEventKind, record: ApprovalRecord, now: datetime
+    ) -> None:
+        await self._listeners.emit(
+            ApprovalEvent(
+                kind=kind,
+                approval_id=record.approval_id,
+                task_id=record.task_id,
+                tool=record.tool,
+                level=record.level,
+                occurred_at=now,
+            )
+        )
+
+    async def _audit_row(
+        self,
+        action: str,
+        allowed: bool,
+        reason: str,
+        approval_id: uuid.UUID,
+        project_id: uuid.UUID | None,
+        actor: Principal | None,
+        now: datetime,
+    ) -> None:
+        await record_event(
+            self._audit,
+            build_tool_event(
+                action=action,
+                allowed=allowed,
+                reason=reason,
+                correlation_id=uuid.uuid4(),
+                occurred_at=now,
+                resource_kind="tool_approval",
+                resource_id=approval_id,
+                project_id=project_id,
+                actor_id=None if actor is None else actor.user_id,
+                actor_role=None if actor is None else actor.system_role.value,
+            ),
+            self._timeout_seconds,
+        )
+
     async def _decide(
         self, approval_id: uuid.UUID, approver: Principal, *, approve: bool
     ) -> ApprovalResult:
@@ -322,41 +338,33 @@ class ApprovalService:
             logger.error("Approval lookup failed (%s)", type(error).__name__)
             return ApprovalResult(ApprovalOutcome.UNAVAILABLE, approval_id)
 
-        outcome = await self._outcome(record, approval_id, approver, approve, now)
+        internal = await self._outcome(record, approval_id, approver, approve, now)
+        # A stranger is told "not found", not that the approval exists.
+        outcome = (
+            ApprovalOutcome.NOT_FOUND
+            if internal is ApprovalOutcome.NOT_AUTHORISED
+            else internal
+        )
         result = ApprovalResult(outcome, approval_id)
         if record is not None and outcome in (
             ApprovalOutcome.APPROVED,
             ApprovalOutcome.REJECTED,
         ):
-            await self._listeners.emit(
-                ApprovalEvent(
-                    kind=(
-                        ApprovalEventKind.APPROVED
-                        if outcome is ApprovalOutcome.APPROVED
-                        else ApprovalEventKind.REJECTED
-                    ),
-                    approval_id=approval_id,
-                    task_id=record.task_id,
-                    tool=record.tool,
-                    level=record.level,
-                    occurred_at=now,
-                )
+            await self._emit(
+                ApprovalEventKind.APPROVED
+                if outcome is ApprovalOutcome.APPROVED
+                else ApprovalEventKind.REJECTED,
+                record,
+                now,
             )
-        await record_event(
-            self._audit,
-            build_tool_event(
-                action="tool.approval.approve" if approve else "tool.approval.reject",
-                allowed=result.decided,
-                reason=outcome.value,
-                correlation_id=uuid.uuid4(),
-                occurred_at=now,
-                resource_kind="tool_approval",
-                resource_id=approval_id,
-                project_id=None if record is None else record.project_id,
-                actor_id=approver.user_id,
-                actor_role=approver.system_role.value,
-            ),
-            self._timeout_seconds,
+        await self._audit_row(
+            "tool.approval.approve" if approve else "tool.approval.reject",
+            result.decided,
+            internal.value,
+            approval_id,
+            None if record is None else record.project_id,
+            approver,
+            now,
         )
         return result
 
@@ -374,16 +382,23 @@ class ApprovalService:
             return ApprovalOutcome.SELF_APPROVAL
         if approver.user_id != record.requester_user_id:
             return ApprovalOutcome.NOT_AUTHORISED
+        stepped_up = False
         if (
             approve
             and record.level is ApprovalLevel.STRONG_APPROVAL
-            and diagnose_decide(record, approver.user_id, now) is DecideOutcome.DECIDED
-            and not await self._stepped_up(approver.user_id, approval_id)
+            and diagnose_decide(record, approver.user_id, now, step_up_verified=True)
+            is DecideOutcome.DECIDED
         ):
-            return ApprovalOutcome.STEP_UP_REQUIRED
+            if not await self._stepped_up(approver.user_id, approval_id):
+                return ApprovalOutcome.STEP_UP_REQUIRED
+            stepped_up = True
         try:
             result = await self._store.decide(
-                approval_id, approver_id=approver.user_id, approve=approve, now=now
+                approval_id,
+                approver_id=approver.user_id,
+                approve=approve,
+                now=now,
+                step_up_verified=stepped_up,
             )
         except Exception as error:
             logger.error("Approval update failed (%s)", type(error).__name__)

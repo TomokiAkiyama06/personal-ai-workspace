@@ -22,6 +22,7 @@ from types import MappingProxyType
 
 from paw_backend.authz import AgentGrant
 from paw_backend.authz.subjects import to_uuid
+from paw_backend.tools.approval_types import SummaryItem, summary_value
 from paw_backend.tools.capabilities import ApprovalLevel, ToolCapability
 from paw_backend.tools.credentials import (
     contains_credential_plaintext,
@@ -130,6 +131,8 @@ class ParsedArguments:
     # The normalised values are the call's content: never part of a repr / log.
     values: Mapping[str, object] = field(repr=False)
     targets: tuple[Target, ...]
+    # Every provided argument as the approver sees it (bounded, redacted).
+    summary: tuple[SummaryItem, ...] = field(default=(), repr=False)
 
 
 def parse_arguments(
@@ -147,6 +150,7 @@ def parse_arguments(
     base = scope.path_roots[0] if scope.path_roots else None
     values: dict[str, object] = {}
     targets: list[Target] = []
+    summary: list[SummaryItem] = []
     total_chars = 0
     for name, argument in spec.arguments.items():  # declared order: deterministic
         if name not in arguments:
@@ -161,9 +165,19 @@ def parse_arguments(
                 raise ArgumentError(BrokerReason.INVALID_ARGUMENTS)
         value, target = _parse_value(argument, raw, base)
         values[name] = value
+        summary.append(
+            SummaryItem(name, argument.kind.value, summary_value(_shown(value)))
+        )
         if target is not None:
             targets.append(target)
-    return ParsedArguments(MappingProxyType(values), tuple(targets))
+    return ParsedArguments(MappingProxyType(values), tuple(targets), tuple(summary))
+
+
+def _shown(value: object) -> str:
+    """The normalised value as text (a bool as ``true`` / ``false``)."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
 
 
 def _parse_value(argument, value: object, base: str | None):

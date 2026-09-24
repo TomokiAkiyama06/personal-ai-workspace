@@ -9,6 +9,7 @@ names.
 import asyncio
 import io
 import unittest
+from pathlib import Path
 
 from alembic import command
 from alembic.autogenerate import compare_metadata
@@ -26,6 +27,13 @@ from .test_migrations import offline_config
 REVISION = "0031"
 PREVIOUS = "0040"
 FUNCTION = "tool_approval_events_reject_change"
+FUNCTIONS = (
+    "tool_approvals_check_insert",
+    "tool_approvals_check_update",
+    "tool_approvals_reject_removal",
+    FUNCTION,
+)
+MIGRATIONS = Path(__file__).resolve().parents[1] / "migrations" / "versions"
 
 
 def only_tool_objects(obj, name, type_, reflected, compare_to):
@@ -90,17 +98,47 @@ class OfflineMigrationTest(unittest.TestCase):
         self.assertNotIn("FOREIGN KEY(task_id)", sql)
         self.assertNotIn("FOREIGN KEY(requester_user_id)", sql)
 
-    def test_downgrade_drops_the_history_table_before_its_function(self):
+    def test_downgrade_drops_each_table_before_the_functions_of_its_triggers(self):
         sql = self.render("down", f"{REVISION}:{PREVIOUS}")
         self.assertLess(
             sql.index("DROP TABLE tool_approval_events"),
             sql.index(f"DROP FUNCTION {FUNCTION}()"),
         )
         self.assertLess(
-            sql.index(f"DROP FUNCTION {FUNCTION}()"),
             sql.index("DROP TABLE tool_approvals"),
+            sql.index("DROP FUNCTION tool_approvals_check_insert()"),
         )
+        for function in FUNCTIONS:
+            self.assertEqual(sql.count(f"DROP FUNCTION {function}()"), 1)
         self.assertIn(f"UPDATE alembic_version SET version_num='{PREVIOUS}'", sql)
+
+    def test_upgrade_installs_every_guard_as_enable_always(self):
+        sql = self.render("up", f"{PREVIOUS}:{REVISION}")
+        for name, table in (
+            ("tool_approvals_created_pending", "tool_approvals"),
+            ("tool_approvals_state_machine", "tool_approvals"),
+            ("tool_approvals_no_delete", "tool_approvals"),
+            ("tool_approvals_no_truncate", "tool_approvals"),
+            ("tool_approval_events_append_only", "tool_approval_events"),
+            ("tool_approval_events_no_truncate", "tool_approval_events"),
+        ):
+            self.assertIn(f"CREATE TRIGGER {name}", sql)
+            self.assertIn(f"ALTER TABLE {table} ENABLE ALWAYS TRIGGER {name}", sql)
+        self.assertIn("BEFORE TRUNCATE ON tool_approval_events", sql)
+        self.assertIn("BEFORE INSERT ON tool_approvals", sql)
+        self.assertIn("BEFORE UPDATE ON tool_approvals", sql)
+
+    def test_the_grants_are_one_marked_block_and_only_grant_when_a_role_is_named(self):
+        sql = self.render("up", f"{PREVIOUS}:{REVISION}")
+        # nothing for PUBLIC, and no role named: no GRANT at all
+        self.assertIn(
+            "REVOKE ALL ON tool_approvals, tool_approval_events FROM PUBLIC", sql
+        )
+        self.assertNotIn("GRANT", sql)
+        source = (MIGRATIONS / "0031_tool_approvals.py").read_text()
+        block = source.split("# GRANTS: least privilege", 1)[1]
+        self.assertEqual(source.count("GRANT "), block.count("GRANT "))  # only in it
+        self.assertIn("paw_backend.db_roles.grant_app_privileges", block)
 
 
 @requires_postgres
@@ -217,17 +255,46 @@ class DatabaseMigrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("'approved'", definition)
         self.assertNotIn("'consumed'", definition)
 
-    async def test_the_trigger_is_installed_on_the_history_table_only(self):
+    async def test_the_guards_are_installed_on_the_right_tables(self):
         triggers = await self.scalars(
-            "SELECT tgname FROM pg_trigger WHERE NOT tgisinternal "
-            "AND tgrelid = 'tool_approval_events'::regclass"
+            "SELECT tgname || ':' || tgenabled::text FROM pg_trigger "
+            "WHERE NOT tgisinternal AND tgrelid = 'tool_approval_events'::regclass "
+            "ORDER BY tgname"
         )
-        self.assertEqual(triggers, ["tool_approval_events_append_only"])
-        none = await self.scalars(
-            "SELECT tgname FROM pg_trigger WHERE NOT tgisinternal "
-            "AND tgrelid = 'tool_approvals'::regclass"
+        self.assertEqual(
+            triggers,
+            [
+                "tool_approval_events_append_only:A",
+                "tool_approval_events_no_truncate:A",
+            ],
         )
-        self.assertEqual(none, [])
+        triggers = await self.scalars(
+            "SELECT tgname || ':' || tgenabled::text FROM pg_trigger "
+            "WHERE NOT tgisinternal AND tgrelid = 'tool_approvals'::regclass "
+            "ORDER BY tgname"
+        )
+        self.assertEqual(
+            triggers,
+            [
+                "tool_approvals_created_pending:A",
+                "tool_approvals_no_delete:A",
+                "tool_approvals_no_truncate:A",
+                "tool_approvals_state_machine:A",
+            ],
+        )
+
+    async def test_nothing_is_granted_to_public(self):
+        tables = "('tool_approvals', 'tool_approval_events')"
+        # grantee 0 is PUBLIC; the ACL exists (the owner's own rights are in it)
+        public = await self.scalars(
+            f"SELECT count(*) FROM pg_class c, aclexplode(c.relacl) a "
+            f"WHERE c.relname IN {tables} AND a.grantee = 0"
+        )
+        listed = await self.scalars(
+            f"SELECT count(DISTINCT c.relname) FROM pg_class c, aclexplode(c.relacl) a "
+            f"WHERE c.relname IN {tables}"
+        )
+        self.assertEqual((public, listed), ([0], [2]))
 
 
 if __name__ == "__main__":

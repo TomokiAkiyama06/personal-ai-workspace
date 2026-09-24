@@ -1,11 +1,13 @@
 import asyncio
 import contextlib
 import dataclasses
+import hashlib
 import unittest
 import uuid
 from datetime import timedelta
 
 from paw_backend.authz import (
+    Capability,
     InMemoryAuditSink,
     ProjectRole,
     SystemRole,
@@ -16,18 +18,24 @@ from paw_backend.tools import (
     ApprovalOutcome,
     ApprovalService,
     ApprovalStatus,
+    ArgumentKind,
+    ArgumentSpec,
     BrokerReason,
     BudgetStatus,
+    Environment,
     FailClosedStepUp,
     InMemoryApprovalStore,
+    SummaryItem,
     TaskScope,
+    ToolCapability,
     ToolRegistry,
+    ToolSpec,
     Verdict,
 )
 from paw_backend.tools.scope import Target, TargetKind
 
 from .authz_support import AGENT, SECRET, FailingSink, StaticDirectory, principal
-from .tools_store_contract import StoreContract, new_approval
+from .tools_store_contract import LIMITS, StoreContract, new_approval
 from .tools_support import (
     NOW,
     P1,
@@ -44,6 +52,7 @@ from .tools_support import (
 )
 
 R = BrokerReason
+GITHUB_TOKEN = "ghp_" + "a1B2" * 9
 U3 = uuid.UUID(int=3)
 DELETE = {"path": f"{ROOT}/build"}
 MERGE = {
@@ -60,10 +69,10 @@ class InMemoryStoreTest(StoreContract, unittest.IsolatedAsyncioTestCase):
 
     async def test_the_test_double_is_bounded(self):
         small = InMemoryApprovalStore(max_records=2)
-        await small.open_request(new_approval(), now=NOW)
-        await small.open_request(new_approval(), now=NOW)
+        await small.open_request(new_approval(), now=NOW, limits=LIMITS)
+        await small.open_request(new_approval(), now=NOW, limits=LIMITS)
         with self.assertRaises(RuntimeError):
-            await small.open_request(new_approval(), now=NOW)
+            await small.open_request(new_approval(), now=NOW, limits=LIMITS)
 
 
 class NewApprovalTest(unittest.TestCase):
@@ -420,7 +429,15 @@ class ApprovalFlowTest(unittest.IsolatedAsyncioTestCase):
             for method in (self.h.service.approve, self.h.service.reject):
                 with self.subTest(who=who.system_role, method=method.__name__):
                     result = await method(pending.approval_id, who)
-                    self.assertEqual(result.outcome, ApprovalOutcome.NOT_AUTHORISED)
+                    # told "not found": no oracle for other users' approvals
+                    self.assertEqual(result.outcome, ApprovalOutcome.NOT_FOUND)
+        rows = [
+            (e.action, e.decision, e.reason)
+            for e in self.h.sink.events
+            if e.action.startswith("tool.approval.")
+        ]
+        self.assertEqual(len(rows), 6)
+        self.assertEqual({r[1:] for r in rows}, {("deny", "not_authorised")})
         self.assertEqual(
             (await self.h.approvals.get(pending.approval_id)).status,
             ApprovalStatus.PENDING,
@@ -562,10 +579,13 @@ class ApprovalFlowTest(unittest.IsolatedAsyncioTestCase):
         )
         again = await service.approve(strong.approval_id, self.user)  # already decided
         self.assertEqual(again.outcome, ApprovalOutcome.NOT_PENDING)
-        stranger = await service.approve(
-            (await self.open_merge()).approval_id, principal(SystemRole.OWNER, U3)
+        other_merge = await self.h.broker.request(
+            make_call("git.merge", {**MERGE, "pull_request": 8})
         )
-        self.assertEqual(stranger.outcome, ApprovalOutcome.NOT_AUTHORISED)
+        stranger = await service.approve(
+            other_merge.approval_id, principal(SystemRole.OWNER, U3)
+        )
+        self.assertEqual(stranger.outcome, ApprovalOutcome.NOT_FOUND)
         self.assertEqual(step_up.calls, [])
 
     # -- the approval never widens anything --
@@ -750,6 +770,466 @@ class ApprovalFlowTest(unittest.IsolatedAsyncioTestCase):
             ),
             (U1, "user", None, "tool_approval", P1),
         )
+
+
+class ApprovalSummaryTest(unittest.IsolatedAsyncioTestCase):
+    """What the approver is shown: every argument, bounded and redacted."""
+
+    async def asyncSetUp(self):
+        self.h = Harness()
+
+    async def open(self, tool, arguments, harness=None):
+        h = harness or self.h
+        decision = await h.broker.request(make_call(tool, arguments))
+        self.assertEqual(decision.verdict, Verdict.NEEDS_APPROVAL, decision)
+        return await h.approvals.get(decision.approval_id)
+
+    async def test_a_text_argument_is_shown_although_it_is_no_target(self):
+        record = await self.open(
+            "host.install_package", {"package": "evil-backdoor==1.0"}
+        )
+        self.assertEqual(record.targets, ())  # nothing typed to show ...
+        self.assertEqual(  # ... yet the approver sees what is installed
+            record.summary, (SummaryItem("package", "text", "evil-backdoor==1.0"),)
+        )
+
+    async def test_the_path_and_query_of_an_external_url_are_shown(self):
+        record = await self.open(
+            "issues.create",
+            {"url": "https://example.org/issues?data=SECRETBYTES", "title": "hello"},
+        )
+        self.assertEqual(
+            record.summary,
+            (
+                SummaryItem(
+                    "url", "url", "https://example.org/issues?data=SECRETBYTES"
+                ),
+                SummaryItem("title", "text", "hello"),
+            ),
+        )
+        self.assertEqual(record.targets, (Target(TargetKind.HOST, "example.org"),))
+
+    async def test_every_kind_of_argument_appears_in_declared_order(self):
+        spec = ToolSpec(
+            "db.drop_data",
+            frozenset({ToolCapability.DESTRUCTIVE}),
+            Capability.PROJECT_REPO_WRITE,
+            {
+                "project": ArgumentSpec(ArgumentKind.PROJECT),
+                "confirm": ArgumentSpec(ArgumentKind.BOOLEAN),
+                "rows": ArgumentSpec(ArgumentKind.INTEGER, minimum=0, maximum=99),
+                "note": ArgumentSpec(ArgumentKind.TEXT, required=False),
+            },
+        )
+        h = Harness(registry=ToolRegistry([spec]))
+        record = await self.open(
+            "db.drop_data", {"rows": 7, "confirm": True, "project": str(P1)}, h
+        )
+        self.assertEqual(
+            [(i.name, i.kind, i.value) for i in record.summary],
+            [
+                ("project", "project", str(P1)),
+                ("confirm", "boolean", "true"),
+                ("rows", "integer", "7"),
+            ],
+        )
+
+    async def test_a_long_value_is_cut_and_carries_its_length_and_hash(self):
+        spec = ToolSpec(
+            "db.migrate",
+            frozenset({ToolCapability.DESTRUCTIVE}),
+            Capability.PROJECT_REPO_WRITE,
+            {
+                "project": ArgumentSpec(ArgumentKind.PROJECT),
+                "sql": ArgumentSpec(ArgumentKind.TEXT, max_length=2000),
+            },
+        )
+        h = Harness(registry=ToolRegistry([spec]))
+        sql = "DROP TABLE users; " + "x" * 981  # 999 chars
+        record = await self.open("db.migrate", {"project": str(P1), "sql": sql}, h)
+        shown = record.summary[1].value
+        digest = hashlib.sha256(sql.encode()).hexdigest()[:12]
+        self.assertEqual(shown, sql[:256] + f"...[999 chars, sha256:{digest}]")
+        self.assertLessEqual(len(shown), 320)
+        self.assertTrue(shown.startswith("DROP TABLE users;"))
+
+    async def test_the_summary_never_holds_credential_plaintext(self):
+        record = await self.open(
+            "host.install_package", {"package": "tool --password hunter2hunter2"}
+        )
+        (item,) = record.summary
+        self.assertEqual(item.value, "tool --password [REDACTED]")
+        self.assertNotIn("hunter2", repr(record.summary))
+        # what would hold a token never gets this far (the call is denied) ...
+        denied = await self.h.broker.request(
+            make_call("host.install_package", {"package": "tool " + GITHUB_TOKEN})
+        )
+        self.assertEqual(denied.reason, R.CREDENTIAL_PLAINTEXT_IN_ARGUMENTS)
+        # ... and a summary that did hold one cannot be built at all
+        with self.assertRaises(ValueError):
+            SummaryItem("package", "text", GITHUB_TOKEN)
+        with self.assertRaises(ValueError):
+            new_approval(summary=())
+
+    async def test_control_and_direction_characters_are_shown_as_escapes(self):
+        record = await self.open(
+            "host.install_package", {"package": "a\nb\u202eevil\u200bc"}
+        )
+        (item,) = record.summary
+        self.assertEqual(item.value, "a\\u000ab\\u202eevil\\u200bc")
+
+    async def test_the_summary_is_kept_with_the_request_in_the_history(self):
+        record = await self.open("host.install_package", {"package": "ripgrep"})
+        (first,) = await self.h.approvals.history(record.approval_id)
+        self.assertEqual(first.summary, record.summary)
+
+    async def test_an_approval_nobody_can_read_is_refused(self):
+        spec = ToolSpec(
+            "host.reboot",
+            frozenset({ToolCapability.EXECUTE}),
+            Capability.PROJECT_TASK_RUN,
+            {"reason": ArgumentSpec(ArgumentKind.TEXT, required=False)},
+            environment=Environment.HOST,
+        )
+        h = Harness(registry=ToolRegistry([spec]))
+        decision = await h.broker.request(make_call("host.reboot", {}))
+        self.assertEqual(
+            (decision.verdict, decision.reason, decision.level),
+            (Verdict.DENY, R.APPROVAL_NOT_DISPLAYABLE, ApprovalLevel.APPROVAL),
+        )
+        self.assertEqual(len(h.approvals._records), 0)
+        self.assertEqual(h.events, [])
+        # with an argument it can be shown, so it can be asked
+        shown = await h.broker.request(make_call("host.reboot", {"reason": "kernel"}))
+        self.assertEqual(shown.verdict, Verdict.NEEDS_APPROVAL)
+
+
+class ApprovalLimitsTest(unittest.IsolatedAsyncioTestCase):
+    """Pending approvals are bounded and a rejection is not forgotten at once."""
+
+    def delete(self, n: int, **kw):
+        return make_call("repo.delete_tree", {"path": f"{ROOT}/build{n}"}, **kw)
+
+    async def test_pending_approvals_are_capped_per_task_and_user(self):
+        h = Harness(max_pending_approvals=3)
+        decisions = [await h.broker.request(self.delete(n)) for n in range(6)]
+        self.assertEqual(
+            [(d.verdict, d.reason) for d in decisions],
+            [(Verdict.NEEDS_APPROVAL, R.APPROVAL_REQUIRED)] * 3
+            + [(Verdict.DENY, R.APPROVAL_LIMIT_REACHED)] * 3,
+        )
+        self.assertEqual(len(h.approvals._records), 3)
+        self.assertEqual(len(h.events), 3)  # no event for a refused request
+        self.assertTrue(all(d.approval_id is None for d in decisions[3:]))
+        # the same call is still found, not refused
+        again = await h.broker.request(self.delete(0))
+        self.assertEqual(
+            (again.verdict, again.reason), (Verdict.NEEDS_APPROVAL, R.APPROVAL_PENDING)
+        )
+        # another task is not affected
+        other = make_context(task_id=uuid.UUID(int=502))
+        ok = await h.broker.request(self.delete(0, context=other))
+        self.assertEqual(ok.verdict, Verdict.NEEDS_APPROVAL)
+
+    async def test_three_hundred_distinct_calls_open_only_the_default_cap(self):
+        h = Harness()
+        decisions = [await h.broker.request(self.delete(n)) for n in range(300)]
+        self.assertEqual(
+            sum(d.verdict is Verdict.NEEDS_APPROVAL for d in decisions), 10
+        )
+        self.assertEqual(
+            {d.reason for d in decisions if d.verdict is Verdict.DENY},
+            {R.APPROVAL_LIMIT_REACHED},
+        )
+        self.assertEqual(len(h.approvals._records), 10)
+        self.assertEqual(len(h.events), 10)
+
+    async def test_a_decided_or_revoked_approval_frees_its_place(self):
+        h = Harness(max_pending_approvals=2)
+        user = principal(SystemRole.USER, U1)
+        first = await h.broker.request(self.delete(0))
+        second = await h.broker.request(self.delete(1))
+        self.assertEqual(
+            (await h.broker.request(self.delete(2))).reason, R.APPROVAL_LIMIT_REACHED
+        )
+        await h.service.revoke(first.approval_id, user)
+        self.assertEqual(
+            (await h.broker.request(self.delete(2))).verdict, Verdict.NEEDS_APPROVAL
+        )
+        self.assertEqual(
+            (await h.broker.request(self.delete(3))).reason, R.APPROVAL_LIMIT_REACHED
+        )
+        await h.service.reject(second.approval_id, user)
+        self.assertEqual(
+            (await h.broker.request(self.delete(3))).verdict, Verdict.NEEDS_APPROVAL
+        )
+
+    async def test_a_rejected_call_is_not_asked_again_at_once(self):
+        h = Harness()
+        user = principal(SystemRole.USER, U1)
+        for round_ in range(5):  # the reviewer's loop: reject, ask again, repeat
+            asked = await h.broker.request(self.delete(0))
+            if round_ == 0:
+                self.assertEqual(asked.reason, R.APPROVAL_REQUIRED)
+                await h.service.reject(asked.approval_id, user)
+            else:
+                self.assertEqual(
+                    (asked.verdict, asked.reason, asked.approval_id),
+                    (Verdict.DENY, R.APPROVAL_COOLDOWN, None),
+                )
+        self.assertEqual(len(h.approvals._records), 1)
+        self.assertEqual(len(h.events), 2)  # requested, rejected: nothing more
+        h.clock.advance(minutes=4, seconds=59)
+        self.assertEqual(
+            (await h.broker.request(self.delete(0))).reason, R.APPROVAL_COOLDOWN
+        )
+        h.clock.advance(seconds=2)
+        fresh = await h.broker.request(self.delete(0))
+        self.assertEqual(
+            (fresh.verdict, fresh.reason), (Verdict.NEEDS_APPROVAL, R.APPROVAL_REQUIRED)
+        )
+
+    async def test_the_cooldown_only_holds_back_the_rejected_call(self):
+        h = Harness()
+        asked = await h.broker.request(self.delete(0))
+        await h.service.reject(asked.approval_id, principal(SystemRole.USER, U1))
+        other = await h.broker.request(self.delete(1))
+        self.assertEqual(other.verdict, Verdict.NEEDS_APPROVAL)
+
+    async def test_limits_are_configurable_within_bounds(self):
+        from datetime import timedelta
+
+        h = Harness(rejection_cooldown=timedelta(hours=2))
+        asked = await h.broker.request(self.delete(0))
+        await h.service.reject(asked.approval_id, principal(SystemRole.USER, U1))
+        h.clock.advance(hours=1, minutes=59)
+        self.assertEqual(
+            (await h.broker.request(self.delete(0))).reason, R.APPROVAL_COOLDOWN
+        )
+        for kwargs in (
+            {"max_pending_approvals": 0},
+            {"max_pending_approvals": 101},
+            {"max_pending_approvals": True},
+            {"max_pending_approvals": "10"},
+            {"rejection_cooldown": timedelta(seconds=59)},
+            {"rejection_cooldown": timedelta(hours=25)},
+            {"rejection_cooldown": 300},
+        ):
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaises(ValueError):
+                    Harness(**kwargs)
+        Harness(max_pending_approvals=1, rejection_cooldown=timedelta(minutes=1))
+        Harness(max_pending_approvals=100, rejection_cooldown=timedelta(hours=24))
+
+    async def test_concurrent_requests_cannot_exceed_the_cap(self):
+        h = Harness(max_pending_approvals=4)
+        decisions = await asyncio.gather(
+            *(h.broker.request(self.delete(n)) for n in range(25))
+        )
+        self.assertEqual(sum(d.verdict is Verdict.NEEDS_APPROVAL for d in decisions), 4)
+        self.assertEqual(len(h.approvals._records), 4)
+
+
+class ApprovalRevocationTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.h = Harness()
+        self.user = principal(SystemRole.USER, U1)
+        self.call = make_call("repo.delete_tree", DELETE)
+
+    async def pending(self):
+        decision = await self.h.broker.request(self.call)
+        self.assertEqual(decision.verdict, Verdict.NEEDS_APPROVAL)
+        return decision
+
+    async def test_the_user_can_withdraw_a_pending_or_an_approved_request(self):
+        for approve_first in (False, True):
+            with self.subTest(approved=approve_first):
+                h = Harness()
+                pending = await h.broker.request(self.call)
+                if approve_first:
+                    await h.service.approve(pending.approval_id, self.user)
+                result = await h.service.revoke(pending.approval_id, self.user)
+                self.assertEqual(result.outcome, ApprovalOutcome.REVOKED)
+                self.assertTrue(result)
+                used = await h.broker.request(
+                    self.call, approval_id=pending.approval_id
+                )
+                self.assertEqual(
+                    (used.verdict, used.reason), (Verdict.DENY, R.APPROVAL_REVOKED)
+                )
+                self.assertEqual(
+                    [e.kind for e in h.events][-1], ApprovalEventKind.REVOKED
+                )
+                again = await h.service.revoke(pending.approval_id, self.user)
+                self.assertEqual(again.outcome, ApprovalOutcome.NOT_OPEN)
+
+    async def test_an_admin_or_owner_may_revoke_for_the_user(self):
+        for role in (SystemRole.ADMIN, SystemRole.OWNER):
+            with self.subTest(role=role):
+                h = Harness()
+                pending = await h.broker.request(self.call)
+                result = await h.service.revoke(
+                    pending.approval_id, principal(role, U3)
+                )
+                self.assertEqual(result.outcome, ApprovalOutcome.REVOKED)
+                record = await h.approvals.get(pending.approval_id)
+                self.assertEqual(
+                    (record.status, record.revoked_by), (ApprovalStatus.REVOKED, U3)
+                )
+
+    async def test_nobody_else_can_revoke_and_learns_nothing(self):
+        pending = await self.pending()
+        for who in (
+            principal(SystemRole.USER, U2),
+            principal(SystemRole.USER, AGENT),
+            principal(SystemRole.OWNER, AGENT),
+        ):
+            with self.subTest(who=who.user_id, role=who.system_role):
+                result = await self.h.service.revoke(pending.approval_id, who)
+                self.assertEqual(result.outcome, ApprovalOutcome.NOT_FOUND)
+        self.assertEqual(
+            (await self.h.approvals.get(pending.approval_id)).status,
+            ApprovalStatus.PENDING,
+        )
+        missing = await self.h.service.revoke(uuid.uuid4(), self.user)
+        self.assertEqual(missing.outcome, ApprovalOutcome.NOT_FOUND)
+        for bad in (("x", self.user), (pending.approval_id, U1), (None, None)):
+            self.assertEqual(
+                (await self.h.service.revoke(*bad)).outcome, ApprovalOutcome.INVALID
+            )
+
+    async def test_a_revocation_is_audited(self):
+        pending = await self.pending()
+        await self.h.service.revoke(pending.approval_id, principal(SystemRole.USER, U2))
+        await self.h.service.revoke(pending.approval_id, self.user)
+        rows = [
+            (e.action, e.decision, e.reason, e.actor_id)
+            for e in self.h.sink.events
+            if e.action == "tool.approval.revoke"
+        ]
+        self.assertEqual(
+            rows,
+            [
+                ("tool.approval.revoke", "deny", "not_authorised", U2),
+                ("tool.approval.revoke", "allow", "revoked", U1),
+            ],
+        )
+
+    async def test_the_approvals_of_a_task_that_ended_are_revoked(self):
+        from paw_backend.tasks import TaskState
+
+        class Event:
+            def __init__(self, task_id, to_state):
+                self.task_id = task_id
+                self.to_state = to_state
+
+        other_context = make_context(task_id=uuid.UUID(int=502))
+        mine = await self.pending()
+        approved = await self.h.broker.request(
+            make_call("repo.delete_tree", {"path": f"{ROOT}/other"})
+        )
+        await self.h.service.approve(approved.approval_id, self.user)
+        elsewhere = await self.h.broker.request(
+            make_call("repo.delete_tree", DELETE, context=other_context)
+        )
+        self.h.events.clear()
+
+        await self.h.service.revoke_on_task_end(Event(TASK, TaskState.RUNNING))
+        self.assertEqual(self.h.events, [])  # a running task keeps its approvals
+        for state in (TaskState.CANCELLED, TaskState.FAILED):
+            await self.h.service.revoke_on_task_end(Event(TASK, state))
+        self.assertEqual(
+            sorted(e.approval_id for e in self.h.events),
+            sorted([mine.approval_id, approved.approval_id]),
+        )
+        self.assertEqual({e.kind for e in self.h.events}, {ApprovalEventKind.REVOKED})
+        for decision in (mine, approved):
+            used = await self.h.broker.request(
+                make_call("repo.delete_tree", {"path": f"{ROOT}/other"})
+                if decision is approved
+                else self.call,
+                approval_id=decision.approval_id,
+            )
+            self.assertEqual(used.reason, R.APPROVAL_REVOKED)
+        self.assertEqual(
+            (await self.h.approvals.get(elsewhere.approval_id)).status,
+            ApprovalStatus.PENDING,
+        )
+        rows = [e for e in self.h.sink.events if e.reason == "task_ended"]
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(all(e.actor_id is None and e.decision == "allow" for e in rows))
+
+    async def test_only_a_task_id_and_a_state_are_read_from_the_event(self):
+        pending = await self.pending()
+        for event in (object(), None, "cancelled", type("E", (), {"task_id": TASK})()):
+            await self.h.service.revoke_on_task_end(event)
+        self.assertEqual(
+            (await self.h.approvals.get(pending.approval_id)).status,
+            ApprovalStatus.PENDING,
+        )
+        with self.assertRaises(TypeError):
+            await self.h.service.revoke_task("not-a-uuid")
+
+    async def test_a_strong_approval_records_its_step_up(self):
+        h = Harness()
+        pending = await h.broker.request(make_call("git.merge", MERGE))
+        await h.service.approve(pending.approval_id, self.user)
+        record = await h.approvals.get(pending.approval_id)
+        self.assertEqual(
+            (record.status, record.step_up_verified), (ApprovalStatus.APPROVED, True)
+        )
+
+
+class HashInputsAndUndeclaredArgumentsTest(unittest.IsolatedAsyncioTestCase):
+    async def test_the_same_call_of_another_task_user_or_agent_has_its_own_approval(
+        self,
+    ):
+        directory = StaticDirectory(
+            principal(SystemRole.USER, U1, {P1: ProjectRole.CONTRIBUTOR}),
+            principal(SystemRole.USER, U2, {P1: ProjectRole.CONTRIBUTOR}),
+        )
+        h = Harness(directory=directory)
+        contexts = {
+            "same": make_context(),
+            "task": make_context(task_id=uuid.UUID(int=502)),
+            "user": make_context(delegator_id=U2),
+            "agent": make_context(
+                grant=dataclasses.replace(make_grant(), agent_id=uuid.UUID(int=999))
+            ),
+        }
+        decisions = {
+            label: await h.broker.request(
+                make_call("repo.delete_tree", DELETE, context=ctx)
+            )
+            for label, ctx in contexts.items()
+        }
+        for label, decision in decisions.items():
+            with self.subTest(label=label):
+                self.assertEqual(
+                    (decision.verdict, decision.reason),
+                    (Verdict.NEEDS_APPROVAL, R.APPROVAL_REQUIRED),
+                )
+        self.assertEqual(len({d.approval_id for d in decisions.values()}), 4)
+        self.assertEqual(len({d.call_hash for d in decisions.values()}), 4)
+        self.assertEqual(len(h.approvals._records), 4)
+
+    async def test_an_undeclared_argument_is_refused_even_when_the_count_matches(self):
+        h = Harness()
+        cases = [
+            ("tests.run", {"selectr": "unit"}),  # one declared, one given: misspelt
+            ("flag.toggle", {"enabled": True, "cont": 1}),
+            ("repo.read_file", {"paht": f"{ROOT}/a"}),
+            ("repo.write_file", {"path": f"{ROOT}/a", "contents": "x"}),
+            ("web.fetch", {"URL": "https://github.com/x"}),
+        ]
+        for tool, arguments in cases:
+            with self.subTest(tool=tool, arguments=list(arguments)):
+                decision = await h.broker.request(make_call(tool, arguments))
+                self.assertEqual(
+                    (decision.verdict, decision.reason),
+                    (Verdict.DENY, R.INVALID_ARGUMENTS),
+                )
+        self.assertEqual(h.executor.invocations, [])
 
 
 class ServiceConstructionTest(unittest.TestCase):

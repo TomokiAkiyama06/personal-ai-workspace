@@ -691,7 +691,10 @@ class AuthorizerOnPostgresTest(AuditPostgresTestCase):
                         time.sleep(0.05)
             return logs.output
 
-        (line,) = await asyncio.to_thread(start_and_wait_for_the_check)
+        output = await asyncio.to_thread(start_and_wait_for_the_check)
+        # The check of the tool approval tables (PAW-031) warns as well; this
+        # test is about the audit trail.
+        (line,) = [entry for entry in output if "audit_events" in entry]
         self.assertIn("owner=True", line)
         self.assertIn("append-only guard", line)
 

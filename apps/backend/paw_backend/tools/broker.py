@@ -50,6 +50,8 @@ from paw_backend.tools.approval_types import (
     ApprovalStore,
     ConsumeOutcome,
     NewApproval,
+    OpenLimits,
+    OpenOutcome,
     OpenResult,
 )
 from paw_backend.tools.approvals import ApprovalListeners, Listener
@@ -99,6 +101,11 @@ _CONSUME_REASON = {
     ConsumeOutcome.EXPIRED: BrokerReason.APPROVAL_EXPIRED,
     ConsumeOutcome.ALREADY_USED: BrokerReason.APPROVAL_ALREADY_USED,
     ConsumeOutcome.REJECTED: BrokerReason.APPROVAL_REJECTED,
+    ConsumeOutcome.REVOKED: BrokerReason.APPROVAL_REVOKED,
+}
+_OPEN_REFUSAL_REASON = {
+    OpenOutcome.TOO_MANY_PENDING: BrokerReason.APPROVAL_LIMIT_REACHED,
+    OpenOutcome.COOLING_DOWN: BrokerReason.APPROVAL_COOLDOWN,
 }
 
 
@@ -116,6 +123,8 @@ class ToolBroker:
         budget: BudgetProvider | None = None,
         path_resolver: PathResolver | None = None,
         approval_ttl: timedelta = DEFAULT_APPROVAL_TTL,
+        max_pending_approvals: int = 10,
+        rejection_cooldown: timedelta = timedelta(minutes=5),
         listeners: Sequence[Listener] = (),
         timeout_seconds: float = 3.0,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
@@ -139,6 +148,9 @@ class ToolBroker:
             raise ValueError("approval_ttl must be between 1 minute and 24 hours")
         if not timeout_seconds > 0:
             raise ValueError("timeout_seconds must be positive")
+        # At most this many open approvals per (task, user), and a rejected call
+        # is not asked again for the cooldown (both bounded, see OpenLimits).
+        self._limits = OpenLimits(max_pending_approvals, rejection_cooldown)
         self._registry = registry
         self._policy = policy
         self._authorizer = authorizer
@@ -443,21 +455,42 @@ class ToolBroker:
         correlation_id: uuid.UUID,
     ) -> BrokerDecision:
         now = self._clock()
-        new = NewApproval(
-            approval_id=uuid.uuid4(),
-            task_id=context.task_id,
-            project_id=context.primary_project_id,
-            agent_id=context.grant.agent_id,
-            requester_user_id=context.delegator_id,
-            tool=spec.name,
-            level=level,
-            call_hash=call_hash,
-            targets=parsed.targets,
-            expires_at=now + self._approval_ttl,
-        )
+        if not parsed.summary:
+            # A human cannot judge a call they are shown nothing of.
+            return self._refuse(
+                BrokerReason.APPROVAL_NOT_DISPLAYABLE,
+                correlation_id,
+                tool=spec.name,
+                level=level,
+                call_hash=call_hash,
+            )
+        try:
+            new = NewApproval(
+                approval_id=uuid.uuid4(),
+                task_id=context.task_id,
+                project_id=context.primary_project_id,
+                agent_id=context.grant.agent_id,
+                requester_user_id=context.delegator_id,
+                tool=spec.name,
+                level=level,
+                call_hash=call_hash,
+                targets=parsed.targets,
+                summary=parsed.summary,
+                expires_at=now + self._approval_ttl,
+            )
+        except ValueError:
+            return self._refuse(
+                BrokerReason.APPROVAL_NOT_DISPLAYABLE,
+                correlation_id,
+                tool=spec.name,
+                level=level,
+                call_hash=call_hash,
+            )
         try:
             async with asyncio.timeout(self._timeout_seconds):
-                opened = await self._approvals.open_request(new, now=now)
+                opened = await self._approvals.open_request(
+                    new, now=now, limits=self._limits
+                )
         except Exception as error:
             logger.error("Approval request failed (%s)", type(error).__name__)
             return self._refuse(
@@ -467,7 +500,19 @@ class ToolBroker:
                 level=level,
                 call_hash=call_hash,
             )
-        if not isinstance(opened, OpenResult) or opened.record.call_hash != call_hash:
+        if isinstance(opened, OpenResult) and opened.outcome in _OPEN_REFUSAL_REASON:
+            return self._refuse(
+                _OPEN_REFUSAL_REASON[opened.outcome],
+                correlation_id,
+                tool=spec.name,
+                level=level,
+                call_hash=call_hash,
+            )
+        if (
+            not isinstance(opened, OpenResult)
+            or opened.record is None
+            or opened.record.call_hash != call_hash
+        ):
             logger.error("Approval store returned an unexpected record")
             return self._refuse(
                 BrokerReason.APPROVAL_UNAVAILABLE,

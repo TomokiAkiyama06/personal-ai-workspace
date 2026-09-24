@@ -7,10 +7,15 @@ user ids are plain UUID columns without foreign keys, as in the task tables:
 the users and projects tables do not exist yet, and an approval must stay
 readable as evidence when a task is archived.
 
-The invariants that make an approval trustworthy are CHECK constraints as well
-as code: only the delegating user can be the approver, never the agent; an
-approval is consumed only once it was decided; at most one open approval
-exists per exact call.
+The invariants that make an approval trustworthy are enforced by the database
+as well as by code (migration ``0031``): CHECK constraints (only the delegating
+user can be the approver, never the agent; a strong approval carries a
+step-up; at most one open approval exists per exact call) and triggers that
+allow only the legal state changes (``pending`` -> ``approved`` / ``rejected`` /
+``revoked`` / ``expired``, ``approved`` -> ``consumed`` / ``revoked`` /
+``expired``), keep everything that identifies the call immutable, and refuse
+DELETE and TRUNCATE. Triggers are not visible to Alembic's autogenerate, so
+``tests/test_tools_migration.py`` checks them.
 """
 
 import uuid
@@ -20,6 +25,7 @@ from typing import Any
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -62,15 +68,25 @@ class ToolApprovalRow(Base):
     level: Mapped[str] = mapped_column(String(24))
     # SHA-256 of tool + normalised arguments + task + requester.
     call_hash: Mapped[str] = mapped_column(String(64))
-    # What the approver is shown: normalised paths / hosts / projects, not
-    # content. [{"kind": "path", "value": "/srv/..."}]
+    # The typed targets of the call: normalised paths / hosts / projects.
+    # [{"kind": "path", "value": "/srv/..."}]
     targets: Mapped[list[dict[str, Any]]] = mapped_column(JSONB)
+    # What the approver is shown: every argument by name with a bounded,
+    # redacted value. [{"name": "package", "kind": "text", "value": "..."}]
+    summary: Mapped[list[dict[str, Any]]] = mapped_column(JSONB)
     status: Mapped[str] = mapped_column(String(24))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     approver_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # A strong approval was granted after a confirmed step-up (PAW-023).
+    step_up_verified: Mapped[bool] = mapped_column(
+        Boolean, server_default=text("false")
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # NULL with ``revoked_at`` set: revoked by the system (the task ended).
+    revoked_by: Mapped[uuid.UUID | None] = mapped_column(Uuid)
 
     __table_args__ = (
         _in("status", ApprovalStatus, "status_valid"),
@@ -84,7 +100,8 @@ class ToolApprovalRow(Base):
             name="approver_is_delegating_user",
         ),
         CheckConstraint(
-            "status <> 'pending' OR (approver_id IS NULL AND decided_at IS NULL)",
+            "status <> 'pending' OR (approver_id IS NULL AND decided_at IS NULL"
+            " AND NOT step_up_verified)",
             name="pending_is_undecided",
         ),
         CheckConstraint(
@@ -96,6 +113,22 @@ class ToolApprovalRow(Base):
             "(status = 'consumed') = (consumed_at IS NOT NULL)",
             name="consumed_matches_status",
         ),
+        CheckConstraint(
+            "(status = 'revoked') = (revoked_at IS NOT NULL)"
+            " AND (revoked_by IS NULL OR revoked_at IS NOT NULL)",
+            name="revoked_matches_status",
+        ),
+        # A strong approval is granted only with a step-up.
+        CheckConstraint(
+            "level <> 'strong_approval' OR status NOT IN ('approved', 'consumed')"
+            " OR step_up_verified",
+            name="strong_needs_step_up",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(summary) = 'array'"
+            " AND jsonb_array_length(summary) BETWEEN 1 AND 16",
+            name="summary_shape",
+        ),
         # At most one open approval per exact call: a repeated request finds it.
         Index(
             "uq_tool_approvals_open_call",
@@ -104,6 +137,8 @@ class ToolApprovalRow(Base):
             postgresql_where=text("status IN ('pending', 'approved')"),
         ),
         Index("ix_tool_approvals_task_id", "task_id", "created_at"),
+        # The cooldown after a rejection looks calls up by their hash.
+        Index("ix_tool_approvals_call_hash", "call_hash", "status"),
     )
 
 
@@ -117,12 +152,21 @@ class ToolApprovalEventRow(Base):
     actor_user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
     agent_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # What was requested (the ``requested`` row only).
+    summary: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB)
 
     __table_args__ = (
         _in("kind", ApprovalEventKind, "kind_valid"),
+        # A human decides (approved / rejected); a revocation is by a human or
+        # by the system; every other change has no human actor.
         CheckConstraint(
-            "(kind IN ('approved', 'rejected')) = (actor_user_id IS NOT NULL)",
+            "kind = 'revoked' OR (kind IN ('approved', 'rejected'))"
+            " = (actor_user_id IS NOT NULL)",
             name="user_matches_kind",
+        ),
+        CheckConstraint(
+            "(kind = 'requested') = (summary IS NOT NULL)",
+            name="summary_matches_kind",
         ),
         CheckConstraint(
             "(kind IN ('requested', 'consumed')) = (agent_id IS NOT NULL)",

@@ -7,6 +7,7 @@ narrows the PAW-025 authorization decision and never widens it. See
 ``apps/backend/README.md`` ("Tool Broker / Capability Policy").
 """
 
+from paw_backend.tools.approval_memory import InMemoryApprovalStore
 from paw_backend.tools.approval_store import PostgresApprovalStore
 from paw_backend.tools.approval_types import (
     ApprovalBinding,
@@ -19,13 +20,16 @@ from paw_backend.tools.approval_types import (
     ConsumeOutcome,
     DecideOutcome,
     NewApproval,
+    OpenLimits,
+    OpenOutcome,
+    RevokeOutcome,
+    SummaryItem,
 )
 from paw_backend.tools.approvals import (
     ApprovalOutcome,
     ApprovalResult,
     ApprovalService,
     FailClosedStepUp,
-    InMemoryApprovalStore,
     StepUpVerifier,
 )
 from paw_backend.tools.broker import ToolBroker
@@ -96,11 +100,15 @@ __all__ = [
     "InMemoryApprovalStore",
     "LexicalPathResolver",
     "NewApproval",
+    "OpenLimits",
+    "OpenOutcome",
     "PathResolver",
     "PostgresApprovalStore",
     "RealpathResolver",
+    "RevokeOutcome",
     "ScopeStatus",
     "StepUpVerifier",
+    "SummaryItem",
     "TargetError",
     "TaskContext",
     "TaskScope",
