@@ -165,6 +165,26 @@ open(sys.argv[1], 'w').close()
 time.sleep(60)
 """
 
+# Candidate whose SIGTERM handler writes 1 MiB (far more than a pipe holds) before
+# it records that it finished: it can only finish if its output is being drained.
+NOISY_TERM_HANDLER = """
+import os, signal, sys, time
+ready, done = sys.argv[1:3]
+
+def cleanup(signum, frame):
+    sys.stdout.buffer.write(b'x' * (1 << 20))
+    sys.stdout.buffer.flush()
+    with open(done, 'w') as handle:
+        handle.write('cleaned')
+    os._exit(0)
+
+signal.signal(signal.SIGTERM, cleanup)
+with open(ready + '.tmp', 'w') as handle:
+    handle.write('ready')
+os.replace(ready + '.tmp', ready)
+time.sleep(60)
+"""
+
 # Candidate that leaves a descendant whose SIGTERM handler needs ~0.3 s to finish
 # its cleanup.  ``orphan``: an orphaned member of the candidate's process group.
 # ``session``: a child in its own session.  The candidate itself dies on SIGTERM.
@@ -525,6 +545,50 @@ class WorktreeRunnerTest(unittest.TestCase):
         self.assertFalse(run.path.exists())
         child = self.read_pid(pid_file)
         self.assertTrue(wait_until(lambda: not is_running(child)))
+
+    def test_a_term_handler_that_writes_a_lot_can_finish_within_the_grace_period(self):
+        self.runner.term_grace_seconds = 20
+        run = self.runner.create("noisy-handler", self.commit)
+        ready = self.root / "noisy-ready"
+        done = self.root / "noisy-done"
+        worker, box = self.execute_in_thread(
+            run, [sys.executable, "-c", NOISY_TERM_HANDLER, str(ready), str(done)]
+        )
+        self.assertTrue(wait_until(ready.exists), "the handler was never installed")
+        self.runner.cancel(run)
+        worker.join(timeout=PATIENCE)
+
+        self.assertFalse(worker.is_alive())
+        result = box["result"]
+        self.assertEqual(result.status, "cancelled")
+        # Its cleanup finished (it was not killed while blocked on a full pipe)
+        # and everything it wrote was counted.
+        self.assertEqual(done.read_text(), "cleaned")
+        self.assertGreaterEqual(result.stdout_bytes, 1 << 20)
+        self.assertEqual(result.exit_code, 0)
+
+    def test_a_failing_log_write_does_not_stop_cleanup(self):
+        run = self.runner.create("full-disk", self.commit)
+        log_inode = run.log_path.stat().st_ino
+        real_write = os.write
+
+        def failing_write(descriptor, data):
+            if os.fstat(descriptor).st_ino == log_inode:
+                raise OSError(errno.ENOSPC, "No space left on device")
+            return real_write(descriptor, data)
+
+        with (
+            mock.patch.object(worktree_runner.os, "write", failing_write),
+            self.assertRaises(WorktreeRunnerError) as caught,
+        ):
+            self.runner.cleanup(run)
+
+        # The failure is reported as ours, without the operating system's text.
+        self.assertNotIn("space", str(caught.exception))
+        # ... but the checkout, its Git metadata and the ownership are gone.
+        self.assertFalse(run.path.exists())
+        self.assertNotIn(str(run.path), self.git("worktree", "list").stdout)
+        self.assertNotIn(run.run_id, self.runner._runs)
 
     def test_cancel_kills_a_group_member_that_ignores_sigterm(self):
         self.runner.term_grace_seconds = 0.3

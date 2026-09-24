@@ -91,7 +91,8 @@ being benchmarked.
   `/proc`.  The grace period (`term_grace_seconds`, 2 s) applies to all of them, not
   only the leader: the runner waits until the leader has exited *and* no group member
   or known descendant is still running, so a descendant finishing its `SIGTERM` handler
-  is not cut short.  Whatever is left when the period ends gets `SIGKILL`, and reading
+  is not cut short.  Output keeps being drained during the grace period, so a handler
+  that writes more than a pipe holds is not blocked (and killed) on a full pipe.  Whatever is left when the period ends gets `SIGKILL`, and reading
   the pipes stops after `drain_seconds` (1 s).  Leftover members of the candidate's
   process group are also killed when it exits normally.
 - Descendants are tracked by identity, not by pid alone (pid plus the start time in
@@ -191,6 +192,11 @@ make the lifecycle log tamper-proof**.  What the runner does:
   single-link, evaluator-owned, owner-only file of the expected size.  Replacement,
   truncation, extra appended lines, and extra hard links raise `WorktreeRunnerError`
   (checkout removal still completes).
+- A write that fails (a full disk, an I/O error) is reported as `WorktreeRunnerError`
+  too, without the operating system's message, so `cleanup()` still removes the
+  checkout, its Git metadata and the in-memory ownership before it raises.  The failed
+  append leaves the file at an unexpected size, so later appends are refused by the
+  integrity check instead of writing after a torn record.
 
 What remains: a candidate that guesses or lists `logs_directory` can still open the
 log for writing as the same user, and changes made after the final append are not

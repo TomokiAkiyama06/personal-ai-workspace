@@ -559,7 +559,7 @@ class WorktreeRunner:
                 if drain.open:
                     drain.pump(min(self.poll_seconds, deadline - now))
             if status != "completed":
-                self._terminate(leader)
+                self._terminate(leader, drain)
                 until = time.monotonic() + self.drain_seconds
                 while drain.open and time.monotonic() < until:
                     drain.pump(self.poll_seconds)
@@ -571,8 +571,13 @@ class WorktreeRunner:
             drain.close()
             leader.reap(self.term_grace_seconds)
 
-    def _terminate(self, leader: _Leader) -> None:
-        """TERM, wait for a grace period, then KILL whatever is left."""
+    def _terminate(self, leader: _Leader, drain: _PipeDrain) -> None:
+        """TERM, wait for a grace period, then KILL whatever is left.
+
+        The candidate's output keeps being drained during the grace period: a TERM
+        handler that writes more than a pipe holds would otherwise block on the
+        full pipe, never finish, and be killed.
+        """
         # Snapshot first: children that started their own session are not in the
         # process group, and they are re-parented once their parent dies.  Each is
         # recorded with its start time, so a recycled pid is never mistaken for it.
@@ -588,7 +593,10 @@ class WorktreeRunner:
         while time.monotonic() < deadline:
             if leader.has_exited() and not self._anything_alive(leader, tracked):
                 break
-            time.sleep(0.02)
+            if drain.open:
+                drain.pump(0.02)
+            else:
+                time.sleep(0.02)
         leader.signal_group(signal.SIGKILL)
         for pid, started in tracked.items():
             self._signal_identified(pid, started, signal.SIGKILL)
@@ -929,7 +937,10 @@ class WorktreeRunner:
         except OSError:
             raise WorktreeRunnerError("lifecycle log cannot be opened safely") from None
         try:
-            info = os.fstat(descriptor)
+            try:
+                info = os.fstat(descriptor)
+            except OSError:
+                raise WorktreeRunnerError("lifecycle log cannot be written") from None
             if (
                 not stat.S_ISREG(info.st_mode)
                 or info.st_uid != os.geteuid()
@@ -945,8 +956,13 @@ class WorktreeRunner:
             ):
                 raise WorktreeRunnerError("lifecycle log failed its integrity check")
             written = 0
-            while written < len(line):
-                written += os.write(descriptor, line[written:])
+            try:
+                while written < len(line):
+                    written += os.write(descriptor, line[written:])
+            except OSError:
+                # A full disk or an I/O error must not escape as a raw OSError:
+                # callers (cleanup above all) only expect WorktreeRunnerError.
+                raise WorktreeRunnerError("lifecycle log cannot be written") from None
             state.log_identity = (info.st_dev, info.st_ino)
             state.log_size = info.st_size + len(line)
         finally:
