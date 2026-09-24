@@ -100,7 +100,11 @@ class Database:
         return self._sessions()
 
     async def _ping(self) -> None:
-        """One ``SELECT 1`` on a dedicated connection that ``_abort`` can drop.
+        """One ``SELECT 1`` on a dedicated connection that ``_abort`` can drop."""
+        await self._query("SELECT 1")
+
+    async def _query(self, sql: str) -> list[tuple]:
+        """Run one read-only statement on a dedicated, abortable connection.
 
         The probe deliberately does not use the pool: it must not occupy a pool
         slot while the server is stalled, and it needs to own its connection
@@ -117,10 +121,45 @@ class Database:
         probe = asyncio.current_task()
         self._probe_connections[probe] = connection
         try:
-            await connection.execute("SELECT 1")
+            cursor = await connection.execute(sql)
+            return await cursor.fetchall() if cursor.description else []
         finally:
             self._probe_connections.pop(probe, None)
             await connection.close()
+
+    async def fetch_abortable(
+        self, sql: str, *, timeout_seconds: float | None = None
+    ) -> list[tuple]:
+        """Run a short read-only ``sql`` that never outlives its limit or ``dispose()``.
+
+        For diagnostics and other non-request work that must not be able to
+        hold up shutdown: the statement runs on its own connection, and when
+        ``timeout_seconds`` (default ``database_timeout_seconds``) passes, the
+        caller is cancelled, or the database is disposed, the connection's socket is
+        shut down instead of asking a possibly stalled server to cancel the
+        query (see ``_abort``). Raises ``TimeoutError`` at the deadline and the
+        driver's error if the connection fails.
+        """
+        if not self.configured:
+            raise DatabaseNotConfiguredError("PAW_DATABASE_URL is not set")
+        limit = (
+            self._settings.database_timeout_seconds
+            if timeout_seconds is None
+            else timeout_seconds
+        )
+        query = asyncio.create_task(self._query(sql))
+        self._probes.add(query)
+        query.add_done_callback(self._probes.discard)
+        # Retrieve the outcome so that asyncio does not log it as unhandled.
+        query.add_done_callback(lambda task: task.cancelled() or task.exception())
+        try:
+            await asyncio.wait({query}, timeout=limit)
+        finally:
+            if not query.done():  # timed out, or this caller was cancelled
+                self._abort(query)
+        if not query.done():
+            raise TimeoutError
+        return query.result()
 
     async def check(self) -> DatabaseStatus:
         """Run ``SELECT 1``. Never raises and never reports connection details.
