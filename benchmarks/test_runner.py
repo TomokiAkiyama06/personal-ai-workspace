@@ -316,17 +316,20 @@ class TestRunner:
         """TERM, wait for a grace period, then KILL whatever is left."""
         # Snapshot first: children that started their own session are not in the
         # process group, and they are re-parented once their parent dies.
-        escaped = _descendant_pids(process.pid)
+        tracked = set(_descendant_pids(process.pid))
         _signal_group(process.pid, signal.SIGTERM)
-        for pid in escaped:
+        for pid in tracked:
             _signal_process(pid, signal.SIGTERM)
-        try:
-            process.wait(timeout=self.term_grace_seconds)
-        except subprocess.TimeoutExpired:
-            pass
-        # Even after the leader exited, group members may have ignored TERM.
+        # The grace period belongs to everything the check started, not just its
+        # leader: a leader that exits promptly must not cut short a descendant
+        # that is still running its TERM handler.
+        deadline = time.monotonic() + self.term_grace_seconds
+        while time.monotonic() < deadline:
+            if process.poll() is not None and not _anything_alive(process.pid, tracked):
+                break
+            time.sleep(0.02)
         _signal_group(process.pid, signal.SIGKILL)
-        for pid in escaped:
+        for pid in tracked:
             _signal_process(pid, signal.SIGKILL)
         try:
             process.wait(timeout=self.term_grace_seconds)
@@ -396,10 +399,17 @@ class TestRunner:
 def _validate_check(check: CheckDefinition) -> None:
     if not check.id or not check.type:
         raise ValueError("check ID and type must be non-empty")
-    if not check.command or not all(
-        isinstance(item, str) and item for item in check.command
+    command = check.command
+    # ``argv[0]`` must name a program; later arguments may be any string, as the
+    # task schema allows (for example ``("python3", "-c", "")``).
+    if (
+        not isinstance(command, Sequence)
+        or isinstance(command, (str, bytes))
+        or not command
+        or not all(isinstance(item, str) and "\0" not in item for item in command)
+        or not command[0]
     ):
-        raise ValueError("check command must contain non-empty strings")
+        raise ValueError("check command needs a non-empty program and string arguments")
 
 
 def _check_environment(home: str) -> dict[str, str]:
@@ -437,22 +447,30 @@ def _signal_process(pid: int, number: int) -> None:
         pass
 
 
-def _descendant_pids(root: int) -> list[int]:
-    """Best-effort process tree below ``root`` (Linux ``/proc``)."""
-    children: dict[int, list[int]] = {}
+def _process_table() -> dict[int, tuple[str, int, int]]:
+    """pid -> (state, ppid, pgrp) from Linux ``/proc``; empty elsewhere."""
+    table: dict[int, tuple[str, int, int]] = {}
     try:
         entries = os.listdir("/proc")
     except OSError:
-        return []
+        return table
     for entry in entries:
         if not entry.isdigit():
             continue
         try:
             with open(f"/proc/{entry}/stat", "rb") as handle:
                 fields = handle.read().rsplit(b")", 1)[1].split()
-            children.setdefault(int(fields[1]), []).append(int(entry))
+            table[int(entry)] = (fields[0].decode(), int(fields[1]), int(fields[2]))
         except (OSError, IndexError, ValueError):
             continue
+    return table
+
+
+def _descendant_pids(root: int) -> list[int]:
+    """Best-effort process tree below ``root`` (Linux ``/proc``)."""
+    children: dict[int, list[int]] = {}
+    for pid, (_, ppid, _) in _process_table().items():
+        children.setdefault(ppid, []).append(pid)
     found: list[int] = []
     pending = [root]
     while pending:
@@ -460,3 +478,18 @@ def _descendant_pids(root: int) -> list[int]:
             found.append(child)
             pending.append(child)
     return found
+
+
+def _anything_alive(pgid: int, tracked: set[int]) -> bool:
+    """Is any tracked process, or any member of ``pgid``, still running?"""
+    table = _process_table()
+    if not table:  # no /proc: probe the process group itself
+        try:
+            os.killpg(pgid, 0)
+        except (ProcessLookupError, PermissionError):
+            return False
+        return True
+    return any(
+        state not in "ZX" and (pid in tracked or pgrp == pgid)
+        for pid, (state, _, pgrp) in table.items()
+    )

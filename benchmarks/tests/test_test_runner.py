@@ -60,6 +60,40 @@ if not exit_early:
     time.sleep(60)
 """
 
+# Check that leaves a descendant whose SIGTERM handler needs ~0.3 s to finish its
+# cleanup.  ``orphan``: an orphaned member of the check's process group.
+# ``session``: a child in its own session.  The check itself dies on SIGTERM.
+SLOW_TERM_CLEANUP = """
+import os, signal, sys, time
+mode, pid_file, done = sys.argv[1:4]
+
+def install_handler_and_wait():
+    def cleanup(signum, frame):
+        time.sleep(0.3)
+        with open(done, 'w') as handle:
+            handle.write('cleaned')
+        os._exit(0)
+    signal.signal(signal.SIGTERM, cleanup)
+    with open(pid_file + '.tmp', 'w') as handle:
+        handle.write(str(os.getpid()))
+    os.replace(pid_file + '.tmp', pid_file)
+    time.sleep(60)
+
+child = os.fork()
+if child == 0:
+    if mode == 'session':
+        os.setsid()
+        install_handler_and_wait()
+    elif os.fork() == 0:
+        install_handler_and_wait()
+    os._exit(0)
+if mode == 'orphan':
+    os.waitpid(child, 0)
+while not os.path.exists(pid_file):
+    time.sleep(0.01)
+time.sleep(60)
+"""
+
 # Check that ignores SIGTERM itself, so only SIGKILL after the grace period ends it.
 TERM_IGNORING_LEADER = """
 import signal, sys, time
@@ -371,6 +405,57 @@ class TestRunnerTest(unittest.TestCase):
         self.assertTrue(ready.exists(), "the check never installed its handler")
         self.assertEqual(result.status, "timed_out")
         self.assertEqual(result.exit_code, -signal.SIGKILL)
+
+    def test_program_must_be_named_but_arguments_may_be_empty(self):
+        empty_argument = CheckDefinition(
+            "empty-arg", "unit", (sys.executable, "-c", "")
+        )
+        (result,) = self.runner.run_visible((empty_argument,), PATIENCE)
+        self.assertEqual((result.status, result.exit_code), ("passed", 0))
+        registry = HiddenCheckRegistry({"private:empty": empty_argument})
+        (hidden,) = self.runner.run_hidden(("private:empty",), registry, PATIENCE)
+        self.assertEqual(hidden.status, "passed")
+
+        for command in ((), ("",), ("", "-c", "pass"), (sys.executable, 1), ("a\0b",)):
+            with (
+                self.subTest(command=command),
+                self.assertRaises(ValueError),
+            ):
+                self.runner.run_visible((CheckDefinition("bad", "unit", command),), 1)
+
+    def test_descendants_may_finish_their_term_handlers_within_the_grace_period(self):
+        self.runner.term_grace_seconds = 10
+        for mode in ("orphan", "session"):
+            with self.subTest(mode=mode):
+                pid_file = self.pid_file(f"{mode}.pid")
+                done = self.root / f"{mode}.done"
+                check = self.python_check(
+                    f"slow-{mode}", SLOW_TERM_CLEANUP, mode, pid_file, done
+                )
+
+                (result,) = self.runner.run_visible((check,), 2.0)
+
+                self.assertEqual(result.status, "timed_out")
+                self.assertTrue(done.exists(), "the TERM handler was cut short")
+                self.assertEqual(done.read_text(encoding="utf-8"), "cleaned")
+
+    def test_a_descendant_that_ignores_sigterm_is_killed_only_after_the_grace_period(
+        self,
+    ):
+        self.runner.term_grace_seconds = 1.0
+        pid_file = self.pid_file()
+        check = self.python_check(
+            "stubborn-child", ORPHANED_TERM_IGNORING_CHILD, pid_file, "wait"
+        )
+
+        started = time.monotonic()
+        (result,) = self.runner.run_visible((check,), 2.0)
+
+        # The check dies on TERM at once; its descendant ignores TERM, so the
+        # whole grace period has to run out before SIGKILL.
+        self.assertGreaterEqual(time.monotonic() - started, 2.0 + 1.0)
+        self.assertEqual(result.status, "timed_out")
+        self.assertTrue(wait_until(lambda: not is_running(self.read_pid(pid_file))))
 
     def test_a_process_left_behind_by_a_finished_check_is_killed(self):
         self.runner.drain_seconds = 0.3
