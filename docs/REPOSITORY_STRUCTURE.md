@@ -46,7 +46,8 @@ personal-ai-workspace/
 │  │  │  ├─ env.py
 │  │  │  ├─ script.py.mako
 │  │  │  └─ versions/
-│  │  │     └─ 0001_baseline.py
+│  │  │     ├─ 0001_baseline.py
+│  │  │     └─ 0050_research_scratch_store.py
 │  │  ├─ paw_backend/
 │  │  │  ├─ __init__.py
 │  │  │  ├─ __main__.py
@@ -58,17 +59,28 @@ personal-ai-workspace/
 │  │  │  ├─ middleware.py
 │  │  │  ├─ security.py
 │  │  │  ├─ server.py
-│  │  │  └─ api/
+│  │  │  ├─ api/
+│  │  │  │  ├─ __init__.py
+│  │  │  │  ├─ deps.py
+│  │  │  │  └─ v1/
+│  │  │  │     ├─ __init__.py
+│  │  │  │     ├─ events.py
+│  │  │  │     └─ health.py
+│  │  │  └─ research/
 │  │  │     ├─ __init__.py
-│  │  │     ├─ deps.py
-│  │  │     └─ v1/
+│  │  │     └─ scratch/
 │  │  │        ├─ __init__.py
-│  │  │        ├─ events.py
-│  │  │        └─ health.py
+│  │  │        ├─ errors.py
+│  │  │        ├─ limits.py
+│  │  │        ├─ models.py
+│  │  │        ├─ records.py
+│  │  │        ├─ service.py
+│  │  │        └─ validation.py
 │  │  ├─ pyproject.toml
 │  │  └─ tests/
 │  │     ├─ __init__.py
 │  │     ├─ fake_postgres.py
+│  │     ├─ scratch_support.py
 │  │     ├─ support.py
 │  │     ├─ teardown_child.py
 │  │     ├─ test_config.py
@@ -79,6 +91,15 @@ personal-ai-workspace/
 │  │     ├─ test_middleware.py
 │  │     ├─ test_migrations.py
 │  │     ├─ test_postgres_integration.py
+│  │     ├─ test_scratch_concurrency.py
+│  │     ├─ test_scratch_migration.py
+│  │     ├─ test_scratch_purge.py
+│  │     ├─ test_scratch_records.py
+│  │     ├─ test_scratch_schema.py
+│  │     ├─ test_scratch_service_validation.py
+│  │     ├─ test_scratch_store_items.py
+│  │     ├─ test_scratch_store_use.py
+│  │     ├─ test_scratch_validation.py
 │  │     ├─ test_security.py
 │  │     └─ test_server.py
 │  ├─ cli/

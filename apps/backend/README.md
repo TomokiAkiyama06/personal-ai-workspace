@@ -4,6 +4,7 @@ Personal AI Workspace の Core Backend です。
 [PAW-020](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/17) で、後続の Issue が載る最小の Application Skeleton を実装しました。
 認証と User はまだ実装していません（PAW-021 以降）。
 RBAC と Audit（PAW-025）、Task の Lifecycle と永続化（[PAW-032](#agent-task-lifecycle)、HTTP の Endpoint はまだありません）、Memory の PostgreSQL Schema（[PAW-040](#memory--conversation-schema)）を実装済みです。Memory の保存・整理・検索の処理は PAW-041 以降です。
+Research の一時保存（[PAW-050](#research-scratch-store)、24 時間 TTL、HTTP の Endpoint はまだありません）も実装済みです。
 
 [Architecture](../../docs/ARCHITECTURE.md) に基づき、最終的に以下の機能を Backend 側で扱います。
 
@@ -37,7 +38,7 @@ Python 側の Package（`pgvector-python`）は使わず、`paw_backend/memory/v
 apps/backend/
 ├─ pyproject.toml          # 依存（完全一致で固定）と Ruff 設定
 ├─ alembic.ini             # Alembic 設定（DB URL は持たない）
-├─ migrations/             # env.py と Revision（0001 は空の Baseline、0040 は Memory Schema）
+├─ migrations/             # env.py と Revision（0001 は空の Baseline、0040 は Memory Schema、0050 は Research Scratch）
 ├─ paw_backend/
 │  ├─ app.py               # create_app(settings)
 │  ├─ config.py            # PAW_ 環境変数から読む Settings
@@ -50,6 +51,7 @@ apps/backend/
 │  ├─ authz/               # Role・Capability・認可の判定と Audit Event（PAW-025）
 │  ├─ tasks/               # Agent Task の状態遷移と永続化（PAW-032）
 │  ├─ memory/              # Memory / Conversation の Model、ACL 条件、vector 型（PAW-040）
+│  ├─ research/scratch/    # Research Scratch Store: 24 時間 TTL の一時保存（PAW-050）
 │  └─ api/
 │     ├─ deps.py           # FastAPI Dependency
 │     └─ v1/               # /api/v1 の Router（health、events）
@@ -489,6 +491,82 @@ ANN Index（HNSW / IVFFlat）はまだありません。Model が決まった後
 Model と Migration の一致は Test が検証します（Alembic の autogenerate の差分が空であること、Model から作った Schema と Migration の Catalog が同じであること）。
 制約名は `paw_backend.db.Base` の命名規則に従います。
 
+## Research Scratch Store
+
+[PAW-050](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/42)（Revision `0050`）で実装しました。
+`paw_backend/research/scratch/` は、Web / Research の調査結果を **`created_at + 24 時間`** だけ置く一時保存です。
+**Long-term Memory とは別の Table** で、どちらの向きにも Foreign Key はありません。Long-term Memory へ自動では保存しません（[要件](../../REQUIREMENTS.md)の「Memory promotion」）。
+**HTTP の Endpoint はありません。** `ScratchStore` は `TaskService` と同じく認可を行わず、権限の確認は呼び出す側（API 層）の仕事です。
+
+| ファイル | 内容 |
+| --- | --- |
+| `models.py` | `research_scratch_items`、`research_scratch_leases` の Model |
+| `limits.py` | TTL と各種の上限（Test が DB の CHECK 制約との一致を検証） |
+| `records.py`、`errors.py` | 返す値（`ScratchItem`、`Lease`、`PurgeResult`）と型付きの Error |
+| `validation.py` | 引数の検証（DB を使わない純粋関数） |
+| `service.py` | `ScratchStore`（Clock は注入） |
+
+### Table
+
+| Table | 内容 |
+| --- | --- |
+| `research_scratch_items` | 調査結果 1 件。`query`、`title`、`summary`、`content`（`summary` か `content` のどちらかは必須）、`source_metadata`（JSON Object。URL、種別、`fetched_at`、`published_at`、抽出した Claim など。16 KiB まで）、`created_at`、`expires_at`、`pinned`、`promotion_state`（`none` / `pending` / `promoted` / `rejected`）、`promotion_requested_at` |
+| `research_scratch_leases` | 「今使っている」印。`(item_id, holder_id)` が Key。`holder_id` は Task や Worker の実行の UUID |
+
+- **TTL**: `expires_at = created_at + interval '24 hours'` を CHECK 制約で強制します（Generated Column は `timestamptz + interval` が immutable ではないため使えません）。`expires_at` は変更しません。延期は TTL の延長ではなく削除の保留です。
+- **Project / Task の関係**: `project_id` は素の UUID（projects の Table がまだありません）、`task_id` は `tasks.id` への Foreign Key（`ON DELETE SET NULL`。Task を消しても、Task の削除が調査結果に止められることも、Pin 済みの調査結果が消えることもなく、Project の関係は残る）。`add` は Task が存在し、その `project_id` が同じであることを確認します。存在しない Task と他の Project の Task は区別しません。
+- 全ての Method は `project_id` を受け取り、その Project の中だけで Item を探します。他の Project の ID は「存在しない」と同じ扱いです。
+
+### 削除の延期
+
+次のどれかに当てはまる Item は削除を延期します（**exempt**）。
+
+- **Pin 済み**（`pinned`）。要件の「User が明示保存」も Pin で表します。
+- **Memory 昇格の確認中**（`promotion_state = 'pending'`）。
+- **使用中**（`expires_at > now` の Lease が 1 つ以上ある）。
+
+Item は `now < expires_at` または exempt のとき **見える**（visible）ことにします。見えない Item は、`purge_expired` がまだ行を消していなくても、全ての Method で「存在しない」（`ScratchItemNotFoundError`）です。
+挙動が Janitor の実行時刻に左右されないようにするためです。期限切れで exempt でない Item は、Pin も Lease も昇格要求もできません（復活させない）。
+最後の exempt 理由が終わる（Unpin、Lease の終了・Release、昇格の解決）と、期限切れの Item は見えなくなり、次の `purge_expired` が削除します。延期用の別の状態や Queue はありません。
+
+- **Lease**: `acquire_use` が `lease_seconds`（既定 300、1〜3600）の Lease を作ります。同じ Holder の再取得は更新（短くもできる）、Holder ごとに別の行、同時に有効な Lease は 1 Item に 16 まで（`ScratchLeaseLimitError`）。
+  Lease は `[leased_at, expires_at)` の間だけ有効で、更新も Release もされなければ最長 1 時間（CHECK 制約）で終わります。落ちた Worker が Item を固定し続けることはありません。期限切れの Lease は次の `acquire_use` が消します。`release_use` は何度呼んでも、Item が既に消えていても Error になりません。
+- **昇格**: `request_promotion` で `pending`（`none` と `rejected` から。`pending` は何もしない。`promoted` は `ScratchStateError`）。`resolve_promotion(outcome)` で `promoted` / `rejected`（`pending` のときだけ。同じ結果の再実行は何もしない。それ以外は `ScratchStateError`）。Store は Memory Candidate を作りません。それは昇格の Flow の仕事です。
+
+### Purge と同時実行
+
+`purge_expired(now=None, batch_size=500)` は全 Project を対象に、`expires_at <= now` で exempt でない行を最大 `batch_size`（1〜5000）件、1 Transaction で削除します。`PurgeResult(purged, deferred, has_more)` の意味は次のとおりです。
+
+- `purged`: 削除した行数。`deferred`: 期限切れで exempt のために残っている行数（複数の理由があっても 1）。`has_more`: バッチに入りきらなかった削除対象が残っている（呼び出し側は繰り返す）。
+- 古い exempt の行がバッチを埋めて削除対象を飢えさせないよう、exempt の行は選択の段階で除外します。
+
+同時実行の規則（`service.py` の冒頭にも書いています）。
+
+1. Item / Lease を変える操作は、先に Item の行を `SELECT ... FOR UPDATE` で Lock します（待ちます）。Lock 待ちは `lock_timeout_ms`（既定 5000）で `ScratchBusyError` になります。読み取り（`get`、`list_items`）は Lock も待ちもしません。
+2. `purge_expired` は待たずに `FOR UPDATE ... SKIP LOCKED` で候補を Lock し、**別の Statement** で exempt を再確認して削除します。Purge の Snapshot の後に Commit された Lease / Pin も見えるため、Purge より前に取得された Item は消えません。Lock 中の行は飛ばされ（数にも入らない）、次の呼び出しが扱います。Purge が先に Lock した場合、待っていた操作は「存在しない」になります。
+3. 2 つの Purge が同時に動いても、各行は 1 回だけ削除されます。
+
+### 呼び出し側の認可（提案）
+
+Endpoint は次の Issue の仕事です。次の対応を提案します（未強制）。読み取り（`get`、`list_items`）は `project.read`。`add`、`acquire_use`、`release_use`、`pin`、`unpin` は `project.task.run`。
+`request_promotion` は `project.memory.use`、`resolve_promotion` は `project.memory.manage`（Agent へ委任できない: 調査結果を Agent の判断だけで Long-term Memory へ送らないため）。`purge_expired` は Backend 自身の Janitor だけ（User も Agent も呼べない）。
+
+### 上限と入力の検証
+
+`query` 1000 文字、`title` 500、`summary` 8000、`content` 100000（Unicode の Code Point）、`source_metadata` は Compact な UTF-8 JSON で 16384 Byte・深さ 6・Key 128 文字。
+整数は ±(2^53 - 1)、浮動小数点は有限で 0 か 1e-6 以上 1e15 未満（PostgreSQL は数値を 10 進で持つため、極端な指数で Size の上限が意味を失うのを防ぐ）。
+型は変換しません（`"false"` は真偽値でなく、`bool` は `int` でなく、UUID の文字列は UUID でない）。NUL と UTF-8 にできない文字は拒否します。
+Error の Message は固定文字列（Field 名と理由の語彙）で、入力の内容・ID・DB の Message を含みません。DB の Error（接続断など）は加工せず伝わりますが、SQL の引数を含みうるため、呼び出し側は `str(error)` を User へ見せないでください。
+
+### 制限と未確認の点
+
+- 昇格の確認中（`pending`）に期限はありません。確認の Flow が止まると、その Item は残り続けます（`promotion_requested_at` で見つけられます）。期限を付けるかは要判断です。
+- Purge を定期的に呼ぶ Janitor は含みません。`purge_expired` を呼ぶだけで、Scheduler は別の Issue です。
+- Claim と Source の対応（Evidence / Provenance）は PAW-052 です。ここでは `source_metadata` に置くだけで、構造化しません。
+- 1 Project あたりの Item 数の上限（Quota）は持ちません。
+- Purge の「Snapshot の後に Commit された Lease」の Race は、実際の同時実行では起こしにくい時間窓です。Test は `purge_probe`（Test 用の接続点）で、その瞬間に exempt が現れる状況を決定的に再現して確認しています。
+- Migration `0050` の `down_revision` は `0040` です。他の Revision と同じく、統合時に 1 本の鎖へつなぎ直します。
+
 ## 依存 Package
 
 依存は `pyproject.toml` で完全一致に固定しています。
@@ -502,7 +580,7 @@ CI は pre-commit の専用環境で Test を実行するため、同じ Version
 ## 今後の Issue
 
 [PAW-021](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/18)（Owner Setup）、PAW-022（Login / Session）、
-RBAC（PAW-025）、Task Lifecycle（PAW-032）、Memory Schema（PAW-040）は、この Skeleton の上に実装済みです。
+RBAC（PAW-025）、Task Lifecycle（PAW-032）、Memory Schema（PAW-040）、Research Scratch Store（PAW-050）は、この Skeleton の上に実装済みです。
 Memory の保存・整理・検索は PAW-041 以降で、Memory Schema の上に実装します。
 受け入れ基準は [Implementation Backlog](../../docs/IMPLEMENTATION_BACKLOG.md)、
 実装時に選択できる事項は [Requirements Freeze Review](../../docs/REQUIREMENTS_FREEZE_REVIEW.md) を参照してください。
