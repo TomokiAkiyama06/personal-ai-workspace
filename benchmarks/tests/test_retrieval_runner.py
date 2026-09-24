@@ -546,6 +546,36 @@ class RetrievalRunnerTest(unittest.TestCase):
             with self.subTest(result=repr(result)), self.assertRaises(TypeError):
                 run_benchmark(FixedRetriever(result), self._dataset(1), k=1)
 
+    def test_an_invalid_id_beyond_the_cutoff_is_still_rejected(self):
+        for result in (["m1", 5], ["m1", None], ["m1", "x", 5.0]):
+            with self.subTest(result=result), self.assertRaises(TypeError):
+                run_benchmark(FixedRetriever(result), self._dataset(1), k=1)
+
+    def test_misspelled_or_unknown_dataset_fields_are_rejected_not_ignored(self):
+        def with_memory(**extra):
+            document = self._document()
+            document["memories"][0].update(extra)
+            return document
+
+        def with_query(**extra):
+            document = self._document()
+            document["queries"][0].update(extra)
+            return document
+
+        documents = (
+            (with_memory(fresh_=True), "fresh_"),
+            (with_memory(statuss="active"), "statuss"),
+            (with_query(relevant_id=["m1"]), "relevant_id"),
+            (with_query(principals=["user:a"]), "principals"),
+            (dict(self._document(), memory=[]), "memory"),
+        )
+        for document, name in documents:
+            with self.subTest(field=name), self.assertRaises(ValueError) as context:
+                self._load_from_text(json.dumps(document))
+            self.assertIn("unknown field(s)", str(context.exception))
+            self.assertIn(name, str(context.exception))
+            self.assertNotIn("SECRET-TEXT", str(context.exception))
+
     def test_only_the_first_k_ids_are_scored(self):
         dataset = self._dataset(1)
 

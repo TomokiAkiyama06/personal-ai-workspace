@@ -92,6 +92,20 @@ def _object(value: object, where: str) -> dict:
     return value
 
 
+def _reject_unknown_fields(item: dict, allowed: frozenset[str], where: str) -> None:
+    """Reject misspelled or unsupported fields instead of silently ignoring them."""
+    unknown = sorted(str(name) for name in item if name not in allowed)
+    if unknown:
+        raise ValueError(f"{where} has unknown field(s): {', '.join(unknown)}")
+
+
+_DATASET_FIELDS = frozenset({"memories", "queries"})
+_MEMORY_FIELDS = frozenset({"id", "text", "acl", "status", "fresh", "scope"})
+_QUERY_FIELDS = frozenset(
+    {"id", "text", "requester_principals", "scope", "relevant_ids"}
+)
+
+
 def _string(item: dict, name: str, where: str) -> str:
     value = item.get(name)
     if not isinstance(value, str) or not value:
@@ -115,6 +129,7 @@ def _string_list(item: dict, name: str, where: str, *, allow_empty: bool) -> lis
 def _parse_memory(item: object, index: int) -> RetrievalMemory:
     where = f"memory at index {index}"
     item = _object(item, where)
+    _reject_unknown_fields(item, _MEMORY_FIELDS, where)
     memory_id = _string(item, "id", where)
     where = f"memory {memory_id}"
     status = _string(item, "status", where)
@@ -137,6 +152,7 @@ def _parse_query(
 ) -> RetrievalQuery:
     where = f"query at index {index}"
     item = _object(item, where)
+    _reject_unknown_fields(item, _QUERY_FIELDS, where)
     query_id = _string(item, "id", where)
     where = f"query {query_id}"
     principals = frozenset(
@@ -178,6 +194,7 @@ def load_dataset(path: str) -> RetrievalDataset:
     """
     with open(path, encoding="utf-8") as f:
         data = _object(json.load(f), "dataset")
+    _reject_unknown_fields(data, _DATASET_FIELDS, "dataset")
 
     memories_data = data.get("memories")
     if not isinstance(memories_data, list) or not memories_data:
@@ -280,6 +297,10 @@ def _score_queries(
 
         if isinstance(retrieved, (str, bytes)) or not isinstance(retrieved, Sequence):
             raise TypeError("retrieve() must return a sequence of memory ids")
+        # Validate EVERY returned id before truncating to k, so a malformed adapter
+        # cannot hide an invalid value beyond the cutoff.
+        if not all(isinstance(memory_id, str) for memory_id in retrieved):
+            raise TypeError("retrieve() must return only string memory ids")
         ranked = list(dict.fromkeys(retrieved))[:k]
         stale_ids = {m.id for m in dataset.memories if not m.fresh}
         superseded_ids = {m.id for m in dataset.memories if m.status != "active"}

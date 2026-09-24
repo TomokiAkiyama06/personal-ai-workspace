@@ -84,6 +84,7 @@ stale / superseded / Scope誤選択率が0にならず、指標が矛盾する�
 呼べない場合（メソッドがない、引数が合わない）は、全queryが失敗した報告にせず、実行前にエラーにします。
 stale / superseded / Scope誤選択率の分母は、`k`ではなく、実際に返した上位k件以内の件数です
 （返却数が少ないRetrieverは、少ない件数の中での混入率になります。候補間で返却数が違う場合は`k`を揃えて比較してください）。
+Datasetの未知のfield（綴り誤り）は、黙って無視せず不備（終了code 1）として拒否します。`retrieve`が返すidは、`k`で切る前に全件が文字列であることを検証します。
 memoryの`status`は、要件で定義された`active`・`superseded`・`deprecated`・`history`です（`active`以外は、返すと誤選択として数えます）。
 Datasetの`fresh`は真偽値、`acl`・`requester_principals`・`relevant_ids`は文字列のlistで、
 違う型は暗黙に変換せずDataset不備として扱います。
