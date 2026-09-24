@@ -46,7 +46,8 @@ personal-ai-workspace/
 │  │  │  ├─ env.py
 │  │  │  ├─ script.py.mako
 │  │  │  └─ versions/
-│  │  │     └─ 0001_baseline.py
+│  │  │     ├─ 0001_baseline.py
+│  │  │     └─ 0033_task_queue_budget_loop.py
 │  │  ├─ paw_backend/
 │  │  │  ├─ __init__.py
 │  │  │  ├─ __main__.py
@@ -58,6 +59,17 @@ personal-ai-workspace/
 │  │  │  ├─ middleware.py
 │  │  │  ├─ security.py
 │  │  │  ├─ server.py
+│  │  │  ├─ tasks/
+│  │  │  │  └─ queueing/
+│  │  │  │     ├─ __init__.py
+│  │  │  │     ├─ budget.py
+│  │  │  │     ├─ domain.py
+│  │  │  │     ├─ errors.py
+│  │  │  │     ├─ escalation.py
+│  │  │  │     ├─ loop.py
+│  │  │  │     ├─ models.py
+│  │  │  │     ├─ task_queue.py
+│  │  │  │     └─ validation.py
 │  │  │  └─ api/
 │  │  │     ├─ __init__.py
 │  │  │     ├─ deps.py
@@ -69,6 +81,7 @@ personal-ai-workspace/
 │  │  └─ tests/
 │  │     ├─ __init__.py
 │  │     ├─ fake_postgres.py
+│  │     ├─ queueing_support.py
 │  │     ├─ support.py
 │  │     ├─ teardown_child.py
 │  │     ├─ test_config.py
@@ -79,6 +92,14 @@ personal-ai-workspace/
 │  │     ├─ test_middleware.py
 │  │     ├─ test_migrations.py
 │  │     ├─ test_postgres_integration.py
+│  │     ├─ test_queueing_budget.py
+│  │     ├─ test_queueing_domain.py
+│  │     ├─ test_queueing_escalation.py
+│  │     ├─ test_queueing_flow.py
+│  │     ├─ test_queueing_loop.py
+│  │     ├─ test_queueing_loop_db.py
+│  │     ├─ test_queueing_queue.py
+│  │     ├─ test_queueing_schema.py
 │  │     ├─ test_security.py
 │  │     └─ test_server.py
 │  ├─ cli/
