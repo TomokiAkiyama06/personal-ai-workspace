@@ -2,7 +2,8 @@
 
 Personal AI Workspace の Core Backend です。
 [PAW-020](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/17) で、後続の Issue が載る最小の Application Skeleton を実装しました。
-認証、User、RBAC、Task、Memory はまだ実装していません（PAW-021 以降）。
+認証、User、RBAC、Memory はまだ実装していません（PAW-021 以降）。
+Task は [Lifecycle と永続化（PAW-032）](#agent-task-lifecycle)だけを実装済みで、HTTP の Endpoint はまだありません。
 
 [Architecture](../../docs/ARCHITECTURE.md) に基づき、最終的に以下の機能を Backend 側で扱います。
 
@@ -45,6 +46,7 @@ apps/backend/
 │  ├─ errors.py            # 共通の Error Response
 │  ├─ middleware.py        # Request ID、Host 検証、Security Header
 │  ├─ security.py          # Host / Origin の判定
+│  ├─ tasks/               # Agent Task の状態遷移と永続化（PAW-032）
 │  └─ api/
 │     ├─ deps.py           # FastAPI Dependency
 │     └─ v1/               # /api/v1 の Router（health、events）
@@ -195,6 +197,75 @@ alembic -c apps/backend/alembic.ini upgrade head --sql    # SQL の出力のみ�
 alembic -c apps/backend/alembic.ini revision -m "説明"    # 新しい Revision
 ```
 
+## Agent Task Lifecycle
+
+PAW-032 で実装しました。`paw_backend/tasks/` は Task の状態遷移（`domain.py`、DB なしの純粋な規則）と、その永続化（`models.py`、`service.py`、Migration `0032`）です。
+**HTTP の Endpoint はありません。** 認証と RBAC（PAW-022 / PAW-025）が先に必要なためです。
+`TaskService` は認可を行いません。Endpoint を作る側が、権限を確認してから認証済み User を `Actor` として渡します。
+Queue、Budget、Loop 検知（PAW-033）と DAG Orchestration（PAW-034）は含みません。
+
+### 状態
+
+| 状態 | 意味 |
+| --- | --- |
+| `queued` | 実行待ち |
+| `running` | 実行中 |
+| `waiting` | 判断・承認・Resource の待ち。理由は `wait_reason`（`user` / `approval` / `resource`）で、`waiting` のときだけ値を持つ（DB の CHECK 制約） |
+| `paused` | 安全な区切りで停止中 |
+| `evaluating` | Test / Evaluator / Review 中 |
+| `completed` | 完了（何も受け付けない） |
+| `failed` | 実行不能または評価失敗 |
+| `cancelled` | User または Policy により中止 |
+
+### Command と遷移
+
+Command は、Operator の 6 操作（Pause / Resume / Cancel / Retry / Restart / Stop Now）と、Orchestrator・Worker・Policy が進行を報告する Event（Start / Wait / Unblock / Begin evaluation / Complete / Fail）です。
+遷移表は `domain.TRANSITIONS` の 1 か所にあり、表にない組み合わせは `IllegalTransitionError` になります。
+
+| 状態 | 受け付ける Command（遷移先） |
+| --- | --- |
+| `queued` | start（running）、fail（failed）、cancel（cancelled） |
+| `running` | wait（waiting）、begin_evaluation（evaluating）、fail（failed）、pause（paused）、cancel（cancelled）、stop_now（cancelled） |
+| `waiting` | unblock（running）、fail（failed）、cancel（cancelled）、stop_now（cancelled） |
+| `paused` | resume（running）、cancel（cancelled） |
+| `evaluating` | complete（completed）、fail（failed）、cancel（cancelled）、stop_now（cancelled） |
+| `completed` | なし |
+| `failed` | retry（queued）、restart（queued） |
+| `cancelled` | restart（queued） |
+
+Operator の 6 操作は次のように解釈しています（[要件](../../REQUIREMENTS.md)の「Task pause / cancel / retry / restart」）。
+
+- **Pause / Resume**: Pause は実行中の Task だけが対象で、現在の安全な区切りでの停止です。Step は Backend が閉じず、Worker が区切りで `finish_step` を呼びます。Resume は `paused` から `running` へ戻します。
+- **Cancel（graceful）**: Task を終了します。branch / worktree / 途中成果は保持します（削除は別の操作）。実行中の Step は Worker が自分で閉じます。
+- **Stop Now（immediate）**: 緊急停止です。Cancel と同じ `cancelled` になりますが、実行中の Step を即座に `interrupted` にし、停止理由と中断した Step を Task Log と履歴 Event へ残します。実行中に何かが動きうる状態（running / waiting / evaluating）だけが対象で、queued と paused には Cancel を使います。成果物は削除しません。
+  Cancel と Stop Now の違いは Event の Command（`TaskEvent.interruption` が `graceful` / `immediate`）で判別できます。
+- **Retry**: `failed` の Task を、失敗した Step から同じ試行（同じ branch / worktree / Log）で再実行します。`queued` へ戻り、`retry_count` を 1 増やし、Agent / Model を切り替えられます（履歴 Event の `detail` に旧値と新値を残す）。
+- **Restart**: `failed` または `cancelled` の Task を、元の `starting_commit` と Task `input` から最初からやり直します。試行番号（`attempt`）を 1 増やし、新しい branch / worktree / Review / PR の状態を持つ空の試行を作ります。旧試行は `task_attempts` と Step・Log に残り、`TaskSnapshot.previous_attempts` から見えます。
+
+### 永続化
+
+| Table | 内容 |
+| --- | --- |
+| `tasks` | 現在の状態、`wait_reason`、`version`、試行番号、`retry_count`、Agent / Model、`starting_commit`、`input`（Restart の基準） |
+| `task_attempts` | 試行ごとの branch / worktree / head commit、Review 状態、Evaluator 結果、PR の番号・URL・状態 |
+| `task_steps` | Step の実行記録。試行内で最新の行が current step。試行内で `running` は高々 1 つ（Partial Unique Index） |
+| `task_logs` | 試行ごとの Log（`debug` / `info` / `warning` / `error`） |
+| `task_events` | Append-only の履歴。全遷移について、Command、遷移前後の状態、`wait_reason`、Actor（`user` / `system` / `policy` と User の UUID）、理由、その時点の Step 名、`task_version` |
+
+- `project_id`、`created_by`、`actor_id` は UUID だけを持ち、外部キーはありません。users と projects の Table がまだ存在しないためです（Table が入るときに外部キーを追加します）。
+- `task_events` は DB の Trigger が UPDATE と DELETE を拒否します。Application からも履歴は書き換えられません。
+- 列挙値は Text と CHECK 制約で保持します。Migration に値の一覧を直接書くため、値を増やすときは新しい Revision を追加してください。
+
+### 同時実行と復元
+
+- 状態を変える Command は 1 Transaction です。`tasks.version` を使った `UPDATE ... WHERE version = <読んだ値>` で更新するため、同じ Version を読んだ 2 つの Command は片方しか成功せず、もう片方は Event も含めて Rollback され `TaskConflictError` になります。
+  呼び出し側が以前に見た Version を `expected_version` に渡すと、古い判断は後から届いても拒否されます。Step / Log / 試行状態の記録は Version を変えません。
+- `TaskService.restore(task_id)` は DB だけから Snapshot（状態、current step、直近の Log、worktree / review / PR の状態、直近の Event）を作ります。1 つの Repeatable Read Transaction で読むため、同じ時点の値です。
+  状態は Process のメモリに持たないので、Client が切断しても、Backend が再起動しても、別の Process が同じ値を返します。
+- `TaskService(database, listeners=[...])` の Listener は Commit 後に、書き込まれた `TaskEvent` を受け取ります。Audit（PAW-025）の接続点です。Listener の失敗は Command を失敗させず、例外の型名だけを Log に残します。
+  取りこぼしを避けたい Consumer は `task_events` を `seq` で読んでください（`TaskService.history(task_id, after_seq=...)`）。
+- 実行中 Task の Runtime 状態（実行中 Process など）の復旧は、要件どおり V1 では保証しません。
+
 ## 依存 Package
 
 依存は `pyproject.toml` で完全一致に固定しています。
@@ -208,6 +279,6 @@ CI は pre-commit の専用環境で Test を実行するため、同じ Version
 ## 今後の Issue
 
 [PAW-021](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/18)（Owner Setup）、PAW-022（Login / Session）、
-PAW-025（RBAC）、PAW-032（Task Lifecycle）、PAW-040（Memory Schema）はこの Skeleton の上に実装します。
+PAW-025（RBAC）、PAW-040（Memory Schema）はこの Skeleton の上に実装します。
 受け入れ基準は [Implementation Backlog](../../docs/IMPLEMENTATION_BACKLOG.md)、
 実装時に選択できる事項は [Requirements Freeze Review](../../docs/REQUIREMENTS_FREEZE_REVIEW.md) を参照してください。
