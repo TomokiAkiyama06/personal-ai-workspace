@@ -1,7 +1,12 @@
 # 設計判断の記録
 
 重要な仕様・設計判断の提案と、承認された判断の経緯を保存するディレクトリです。
-現在は配置を示す README のみで、この整備による新しい設計判断の承認や Application 実装はありません。
+承認済みの判断は次の表のとおりです。
+
+| Decision | 内容 | Status |
+| --- | --- | --- |
+| [0002](0002-start-workspace-implementation-before-model-comparison.md) | Workspace本体の実装をModel比較Runより先に始める | Approved |
+| [0003](0003-backend-cli-web-implementation-stack.md) | Backend / CLI / Web の実装スタック | Approved（承認範囲は本文を参照） |
 
 運用は [AGENTS.md](../../AGENTS.md) の「仕様変更」に従います。
 
@@ -10,3 +15,5 @@
 
 実装時選択や Benchmark 後に決める事項は [Requirements Freeze Review](../REQUIREMENTS_FREEZE_REVIEW.md)、
 作業の順序と依存関係は [Implementation Backlog](../IMPLEMENTATION_BACKLOG.md) を参照してください。
+ただし、承認済みのDecisionはBacklogの順序より優先します。たとえば [Decision 0002](0002-start-workspace-implementation-before-model-comparison.md) は、
+PAW-020 以降の着手をPAW-017の完了から切り離しています。
