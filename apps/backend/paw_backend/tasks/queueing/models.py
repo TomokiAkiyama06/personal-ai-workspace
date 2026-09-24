@@ -174,12 +174,14 @@ class BudgetUsageRow(Base):
 
 
 class FailureSignatureRow(Base):
-    """One recorded failure: a signature hash and the approach; never the message."""
+    """One recorded failure: a signature hash, the approach and the task attempt it
+    was reported for; never the message."""
 
     __tablename__ = "loop_failure_signatures"
 
     seq: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
     task_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tasks.id"))
+    attempt: Mapped[int] = mapped_column(Integer)
     approach: Mapped[int] = mapped_column(Integer)
     signature: Mapped[str] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(
@@ -188,6 +190,7 @@ class FailureSignatureRow(Base):
 
     __table_args__ = (
         Index(None, "task_id", "seq"),
+        CheckConstraint("attempt >= 1", name="attempt_positive"),
         CheckConstraint(
             f"approach >= 0 AND approach <= {MAX_APPROACH}", name="approach_in_range"
         ),

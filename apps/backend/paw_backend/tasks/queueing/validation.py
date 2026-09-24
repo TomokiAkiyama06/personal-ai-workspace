@@ -31,6 +31,10 @@ MAX_ATTEMPT = 2**31 - 1  # ``tasks.attempt`` is a 32-bit integer
 _WORKER_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@/-]*")
 _CONTROL_CHARACTER = re.compile(r"[\x00-\x1f\x7f]")
 _SIGNATURE = re.compile(r"[0-9a-f]{64}")
+# A lone surrogate code point (U+D800 to U+DFFF): a Python ``str`` can hold it (for
+# example from the JSON text ``"\ud800"`` or ``errors="surrogateescape"``), but it
+# is not Unicode text and cannot be encoded as UTF-8.
+_SURROGATE = re.compile("[\ud800-\udfff]")
 
 
 def _reject(parameter: str) -> NoReturn:
@@ -114,12 +118,14 @@ def check_worker_id(value: Any) -> str:
 
 
 def check_label(name: str, value: Any, *, maximum: int) -> str:
-    """A non-blank ``str`` of at most ``maximum`` characters, no control characters."""
+    """A non-blank ``str`` of at most ``maximum`` characters, no control characters
+    and no surrogate code points (text that UTF-8 cannot encode)."""
     if (
         not isinstance(value, str)
         or not value.strip()
         or len(value) > maximum
         or _CONTROL_CHARACTER.search(value) is not None
+        or _SURROGATE.search(value) is not None
     ):
         _reject(name)
     return value
@@ -134,9 +140,13 @@ def check_step_name(value: Any) -> str:
 
 
 def check_message(value: Any) -> str:
-    """Any ``str`` (possibly empty, multi-line). Length is not limited here:
-    only the first ``MAX_SIGNATURE_MESSAGE_CHARS`` characters are ever used."""
-    if not isinstance(value, str):
+    """Any ``str`` (possibly empty, multi-line) that UTF-8 can encode. Length is not
+    limited here: only the first ``MAX_SIGNATURE_MESSAGE_CHARS`` characters are ever
+    used, but the whole text is checked for surrogate code points (also the part
+    that is cut off, so the result does not depend on where the cut falls). Other
+    control characters, NUL included, are accepted: the message is only hashed and
+    never stored."""
+    if not isinstance(value, str) or _SURROGATE.search(value) is not None:
         _reject("message")
     return value
 

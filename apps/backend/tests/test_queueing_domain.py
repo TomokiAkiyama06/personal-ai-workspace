@@ -456,6 +456,32 @@ class ValidationTest(unittest.TestCase):
             with self.subTest(bad=repr(bad)):
                 self.assertRejects("message", v.check_message, bad)
 
+    def test_text_that_utf8_cannot_encode_is_rejected_everywhere(self):
+        # A lone surrogate code point (for example from the JSON text "\\ud800") is
+        # a valid Python str, but ``str.encode("utf-8")`` raises on it.
+        for bad in (
+            "\ud800",
+            "\udfff",
+            "a\ud800",
+            "\udc00b",
+            "ab\udbffcd",
+            "\ud83d\ude00",  # a surrogate PAIR written as two str characters
+            "x" * 5000 + "\ud800",  # beyond the 2000 characters that are used
+        ):
+            with self.subTest(bad=ascii(bad[-3:])):
+                self.assertRejects("message", v.check_message, bad)
+                self.assertRejects("error_class", v.check_error_class, bad[-50:])
+                self.assertRejects("step", v.check_step_name, bad[-50:])
+        # The neighbours of the surrogate range and astral characters are text.
+        for good in ("\ud7ff", "\ue000", "\U0001f600", "caf\u00e9"):
+            with self.subTest(good=ascii(good)):
+                self.assertEqual(v.check_message(good), good)
+                self.assertEqual(v.check_error_class(good), good)
+                self.assertEqual(v.check_step_name(good), good)
+
+    def test_a_message_may_contain_nul_because_it_is_only_hashed(self):
+        self.assertEqual(v.check_message("a\x00b"), "a\x00b")
+
     def test_members_must_be_enum_members_not_their_values(self):
         self.assertIs(
             v.check_member("kind", BudgetKind.STEPS, BudgetKind), BudgetKind.STEPS
