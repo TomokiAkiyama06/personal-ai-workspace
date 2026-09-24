@@ -19,7 +19,9 @@ in a way that would let it skip a check:
 * a tool whose PAW-025 capability writes to a repository (``project.repo.write``,
   ``project.pr.create``) must require the **path or the repository** it changes:
   only those two tie a call to a repository, and so to that repository's ACL
-  (``broker.py``); a host or URL does not name one;
+  (``broker.py``); a host does not name one, and a URL does so only when it
+  lies below a remote the backend registered for a repository (``scope.py``), so
+  a tool cannot declare its way into a repository with a URL alone;
 * a tool declares the arguments it accepts. Anything else in a call is
   refused, so a model cannot smuggle a ``"capability": "read"`` or an
   ``"approved": true`` next to the real arguments.

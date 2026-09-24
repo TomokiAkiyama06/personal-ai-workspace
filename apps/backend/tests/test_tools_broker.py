@@ -120,7 +120,7 @@ class DecisionLevelsTest(unittest.IsolatedAsyncioTestCase):
             (
                 "issues.create",
                 {
-                    "url": "https://api.github.com/x",
+                    "url": "https://api.github.com/repos/org/repo/issues",
                     "repository": str(REPO),
                     "title": "t",
                 },
@@ -1029,15 +1029,39 @@ class RepositoryAclTest(unittest.IsolatedAsyncioTestCase):
     A = uid_a = uuid.UUID(int=711)  # a repository whose worktree is ROOT/a
     B = uid_b = uuid.UUID(int=712)  # a repository whose worktree is ROOT/b
 
+    @staticmethod
+    def remote(name):
+        """The git remote of the repository ``org/<name>``."""
+        return f"https://github.com/org/{name}.git"
+
     def scope(self, acl_a=None, acl_b=None, **overrides):
-        """Two repositories of P1; ``None`` means the ACL is not resolved."""
+        """Two repositories of P1; ``None`` means the ACL is not resolved. Each
+        one registers the URLs that address it (its git remote and its API)."""
         return make_scope(
             repositories=[
-                ScopedRepository(self.A, P1, f"{ROOT}/a", acl_a),
-                ScopedRepository(self.B, P1, f"{ROOT}/b", acl_b),
+                ScopedRepository(
+                    repo_id,
+                    P1,
+                    f"{ROOT}/{name}",
+                    acl,
+                    remotes=[
+                        f"https://github.com/org/{name}",
+                        self.remote(name),
+                        f"https://api.github.com/repos/org/{name}",
+                    ],
+                )
+                for repo_id, name, acl in (
+                    (self.A, "a", acl_a),
+                    (self.B, "b", acl_b),
+                )
             ],
             **overrides,
         )
+
+    def push(self, repo_id, remote_of=None):
+        """A ``git.push`` of ``repo_id`` (the remote of another one, if given)."""
+        name = remote_of or ("a" if repo_id == self.A else "b")
+        return {**PUSH, "repository": str(repo_id), "remote": self.remote(name)}
 
     @staticmethod
     def override(repo_id, *allowed):
@@ -1199,7 +1223,7 @@ class RepositoryAclTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_remote_tool_names_its_repository_and_meets_its_acl(self):
         context = self.context(self.override(self.A, self.P.READ, self.P.AGENT))
-        arguments = {**PUSH, "repository": str(self.A)}
+        arguments = self.push(self.A)
         for tool in ("git.push", "git.merge"):
             with self.subTest(tool=tool):
                 call = (
@@ -1214,7 +1238,7 @@ class RepositoryAclTest(unittest.IsolatedAsyncioTestCase):
             await self.decide(
                 "issues.create",
                 {
-                    "url": "https://api.github.com/x",
+                    "url": "https://api.github.com/repos/org/a/issues",
                     "repository": str(self.A),
                     "title": "t",
                 },
@@ -1222,12 +1246,134 @@ class RepositoryAclTest(unittest.IsolatedAsyncioTestCase):
             ),
             Reason.REPO_ACL_FORBIDS,
         )
-        writable = await self.decide(
-            "git.push", {**PUSH, "repository": str(self.B)}, context
-        )
+        writable = await self.decide("git.push", self.push(self.B), context)
         self.assertEqual(
             (writable.verdict, writable.reason), (Verdict.ALLOW, R.SCOPED_AUTO)
         )
+
+    async def test_a_remote_of_another_repository_is_decided_on_that_repository(self):
+        # Finding of the review of PR #74: the call names the writable B, but its
+        # remote is the read-only A on the same allowed host. The endpoint the
+        # executor gets is A's, so A's ACL decides too.
+        context = self.context(self.override(self.A, self.P.READ, self.P.AGENT))
+        for remote in (
+            "https://github.com/org/a.git",
+            "https://github.com/org/a.git/info/refs?service=git-receive-pack",
+            "https://github.com/org/a",
+            "https://api.github.com/repos/org/a/git/refs",
+        ):
+            for tool in ("git.push", "git.merge"):
+                with self.subTest(tool=tool, remote=remote):
+                    call = {**self.push(self.B), "remote": remote}
+                    if tool == "git.merge":
+                        call["pull_request"] = 7
+                    h = Harness()
+                    self.assertDenied(
+                        await self.decide(tool, call, context, h),
+                        Reason.REPO_ACL_FORBIDS,
+                    )
+                    self.assertEqual(len(h.approvals._records), 0)
+        # its own remote (and the API of its repository) stays allowed
+        for remote in (self.remote("b"), "https://api.github.com/repos/org/b/git/refs"):
+            with self.subTest(remote=remote):
+                ok = await self.decide(
+                    "git.push", {**self.push(self.B), "remote": remote}, context
+                )
+                self.assertEqual(
+                    (ok.verdict, ok.reason), (Verdict.ALLOW, R.SCOPED_AUTO)
+                )
+
+    async def test_the_authorizer_is_asked_about_every_repository_the_call_reaches(
+        self,
+    ):
+        seen = []
+
+        class Spy:
+            def __init__(self, inner):
+                self.inner = inner
+
+            async def authorize_agent_action(
+                self, delegator, grant, cap, resource, **kw
+            ):
+                seen.append(resource.repo_id)
+                return await self.inner.authorize_agent_action(
+                    delegator, grant, cap, resource, **kw
+                )
+
+        h = Harness()
+        h.broker._authorizer = Spy(h.authorizer)
+        # A and B are both writable: the mismatch is allowed, on both ACLs
+        decision = await self.decide(
+            "git.push",
+            self.push(self.B, remote_of="a"),
+            self.context(self.inherit(self.A)),
+            h,
+        )
+        self.assertTrue(decision.allowed)
+        self.assertEqual(seen, [self.A, self.B])
+
+    async def test_a_remote_that_is_no_repository_of_the_working_set_is_denied(self):
+        # An allowed host, but not a repository of the task: nobody resolved its
+        # ACL, so the write cannot be authorized (and no approval is opened).
+        for remote in (
+            "https://github.com/org/c.git",
+            "https://github.com/org/b-evil.git",
+            "https://github.com/org/b.git.evil/x",
+            "https://github.com/org/B.git",
+            "https://github.com/org/b/../c",
+            "https://github.com/org/b/%2e%2e/c",
+            "https://github.com/org/b/..%2fc",
+            "https://github.com/org/b/x\\..\\..\\c",
+            "https://api.github.com/repos/org/c/issues",
+        ):
+            for tool in ("git.push", "git.merge"):
+                with self.subTest(tool=tool, remote=remote):
+                    call = {**self.push(self.B), "remote": remote}
+                    if tool == "git.merge":
+                        call["pull_request"] = 7
+                    h = Harness()
+                    decision = await self.decide(tool, call, self.context(None), h)
+                    self.assertEqual(
+                        (decision.verdict, decision.reason, decision.level),
+                        (Verdict.DENY, R.REMOTE_NOT_IN_REPOSITORY, ApprovalLevel.DENY),
+                    )
+                    self.assertIsNone(decision.invocation)
+                    self.assertEqual(len(h.approvals._records), 0)
+                    (row,) = h.sink.events
+                    self.assertEqual(
+                        (row.action, row.decision, row.reason),
+                        (f"tool.{tool}", "deny", "remote_not_in_repository"),
+                    )
+
+    async def test_a_repository_that_registered_no_remote_owns_no_url(self):
+        scope = make_scope(
+            repositories=[ScopedRepository(self.B, P1, f"{ROOT}/b", None, remotes=[])]
+        )
+        decision = await self.decide(
+            "git.push", self.push(self.B), make_context(scope=scope)
+        )
+        self.assertEqual(
+            (decision.verdict, decision.reason),
+            (Verdict.DENY, R.REMOTE_NOT_IN_REPOSITORY),
+        )
+
+    async def test_a_read_of_a_repositorys_url_meets_that_repositorys_acl(self):
+        # No `repository` argument: the URL alone says which repository it reads.
+        context = self.context(self.override(self.A, self.P.READ))  # no `agent`
+        self.assertDenied(
+            await self.decide(
+                "web.fetch", {"url": "https://github.com/org/a/blob/main/x"}, context
+            ),
+            Reason.REPO_ACL_FORBIDS,
+        )
+        # another repository's URL and a URL of no repository (a plain host
+        # check, as before) are not affected
+        for url in ("https://github.com/org/b/blob/main/x", "https://github.com/org/c"):
+            with self.subTest(url=url):
+                decision = await self.decide("web.fetch", {"url": url}, context)
+                self.assertEqual(
+                    (decision.verdict, decision.reason), (Verdict.ALLOW, R.SCOPED_AUTO)
+                )
 
     async def test_a_repository_outside_the_working_set_cannot_be_named(self):
         h = Harness()
@@ -1253,7 +1399,7 @@ class RepositoryAclTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_repository_id_may_be_given_as_a_uuid_and_is_kept_canonical(self):
         decision = await self.decide(
-            "git.push", {**PUSH, "repository": self.B}, self.context(None)
+            "git.push", {**self.push(self.B), "repository": self.B}, self.context(None)
         )
         self.assertTrue(decision.allowed)
         self.assertEqual(decision.invocation.arguments["repository"], str(self.B))

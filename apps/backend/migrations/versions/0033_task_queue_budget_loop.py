@@ -6,9 +6,9 @@ Create Date: 2026-09-24
 
 ``queue_entries``: waiting / running work with a lease, at most one active entry
 per task. ``budget_usages``: consumption and limit per task and budget item.
-``loop_failure_signatures``: a bounded window of failure hashes per task (never
-the failure message). All reference ``tasks.id`` (revision ``0032``) with real
-foreign keys.
+``loop_failure_signatures``: a bounded window of failure hashes per task, each
+with the task attempt it belongs to (never the failure message). All reference
+``tasks.id`` (revision ``0032``) with real foreign keys.
 
 Privileges of the application role (``PAW_APP_DATABASE_ROLE``, see
 ``paw_backend.db_roles``): each table gets the least the services need, chosen
@@ -205,6 +205,10 @@ def upgrade() -> None:
         "loop_failure_signatures",
         sa.Column("seq", sa.BigInteger(), sa.Identity(), nullable=False),
         sa.Column("task_id", sa.Uuid(), nullable=False),
+        # The task attempt (``tasks.attempt``, which Restart increments) the
+        # failure was reported for: only the task's current attempt is assessed,
+        # and the cleanup after a Restart deletes only older attempts.
+        sa.Column("attempt", sa.Integer(), nullable=False),
         sa.Column("approach", sa.Integer(), nullable=False),
         sa.Column("signature", sa.String(length=64), nullable=False),
         sa.Column(
@@ -218,6 +222,10 @@ def upgrade() -> None:
             ["task_id"],
             ["tasks.id"],
             name=op.f("fk_loop_failure_signatures_task_id_tasks"),
+        ),
+        sa.CheckConstraint(
+            "attempt >= 1",
+            name=op.f("ck_loop_failure_signatures_attempt_positive"),
         ),
         sa.CheckConstraint(
             f"approach >= 0 AND approach <= {MAX_APPROACH}",
@@ -234,10 +242,15 @@ def upgrade() -> None:
         ["task_id", "seq"],
     )
     # record_failure INSERTs a row and DELETEs the rows that fall out of the
-    # bounded window; clear DELETEs a task's rows (Restart). That is the only
+    # bounded window; ``clear_previous_attempts`` DELETEs the rows of the attempts
+    # before the task's current one (cleanup after a Restart). That is the only
     # place in PAW-033 where the application deletes, because this table is a
     # sliding window of hashes, not history (the durable record of what happened
     # is ``task_events``). No UPDATE: a stored failure is never edited.
+    # ``record_failure`` also reads ``tasks.attempt`` and locks that row
+    # ``FOR SHARE`` (attempt fence), and the reads and the cleanup compare with
+    # ``tasks.attempt``; that needs only the SELECT and the column-level UPDATE
+    # that revision 0032 already granted on ``tasks``.
     grant_app_privileges(
         op, "loop_failure_signatures", select=True, insert=True, delete=True
     )

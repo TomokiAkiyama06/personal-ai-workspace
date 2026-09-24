@@ -115,3 +115,68 @@ class HangingPostgres:
         for writer in self._writers:
             writer.close()  # ends the handlers, which wait for the peer
         await self._server.wait_closed()
+
+
+class FreezableProxy:
+    """A TCP proxy in front of a REAL PostgreSQL that can go silent mid-session.
+
+    ``async with FreezableProxy(host, port) as proxy:`` then connect to
+    ``proxy.port``. Until ``freeze()`` it forwards every byte both ways. From
+    then on it forwards nothing in either direction (an established connection
+    stalls, and so does a new one, a query cancellation included) but keeps
+    every socket open: the server "accepted the connection but does not answer",
+    at a moment the test chooses, after the statements before it succeeded.
+    """
+
+    def __init__(self, upstream_host: str, upstream_port: int) -> None:
+        self._upstream = (upstream_host, upstream_port)
+        self._forwarding = asyncio.Event()
+        self._forwarding.set()
+        self._tasks: set[asyncio.Task] = set()
+        self._writers: list[asyncio.StreamWriter] = []
+
+    def freeze(self) -> None:
+        self._forwarding.clear()
+
+    async def __aenter__(self) -> "FreezableProxy":
+        self._server = await asyncio.start_server(self._serve, "127.0.0.1", 0)
+        self.port: int = self._server.sockets[0].getsockname()[1]
+        return self
+
+    async def __aexit__(self, *exc_info) -> None:
+        self._server.close()
+        for task in self._tasks:
+            task.cancel()
+        for writer in self._writers:
+            writer.close()
+        await asyncio.gather(*self._tasks, return_exceptions=True)
+        await self._server.wait_closed()
+
+    async def _serve(
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        self._writers.append(writer)
+        upstream_reader, upstream_writer = await asyncio.open_connection(
+            *self._upstream
+        )
+        self._writers.append(upstream_writer)
+        for source, target in (
+            (reader, upstream_writer),
+            (upstream_reader, writer),
+        ):
+            task = asyncio.create_task(self._pump(source, target))
+            self._tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
+
+    async def _pump(
+        self, source: asyncio.StreamReader, target: asyncio.StreamWriter
+    ) -> None:
+        try:
+            while data := await source.read(65536):
+                await self._forwarding.wait()  # frozen: hold the bytes back
+                target.write(data)
+                await target.drain()
+        except ConnectionError:
+            pass
+        finally:
+            target.close()

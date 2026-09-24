@@ -21,9 +21,11 @@ from paw_backend.tools.scope import (
     normalise_host,
     normalise_path,
     normalise_project,
+    normalise_remote,
     normalise_repository,
     normalise_url,
     path_within,
+    url_within,
 )
 
 from .authz_support import uid
@@ -372,6 +374,102 @@ class ScopedRepositoryTest(unittest.TestCase):
         with self.assertRaises(AttributeError):
             ScopedRepository(REPO, P1, ROOT).acl = None
 
+    def test_remotes_are_normalised_and_deduplicated(self):
+        repository = ScopedRepository(
+            REPO,
+            P1,
+            remotes=[
+                "HTTPS://GitHub.com:443/org/repo/",
+                "https://github.com/org/repo",
+                "https://github.com/org/repo.git",
+            ],
+        )
+        self.assertEqual(
+            repository.remotes,
+            ("https://github.com/org/repo", "https://github.com/org/repo.git"),
+        )
+        self.assertEqual(ScopedRepository(REPO, P1).remotes, ())
+
+    def test_a_remote_must_name_one_repository_path_on_a_host(self):
+        for remote in (
+            "https://github.com",  # a whole host is not a repository
+            "https://github.com/",
+            "https://github.com/org/repo?x=1",
+            "https://github.com/org/../other",
+            "https://github.com/org/%2e%2e/other",
+            "https://github.com/org\\repo",
+            "ssh://github.com/org/repo",
+            "https://user@github.com/org/repo",
+            "github.com/org/repo",
+            "",
+            None,
+            5,
+        ):
+            with self.subTest(remote=remote):
+                with self.assertRaises((ValueError, TypeError)):
+                    ScopedRepository(REPO, P1, remotes=[remote])
+
+    def test_remotes_are_bounded_and_not_a_string(self):
+        with self.assertRaises(TypeError):
+            ScopedRepository(REPO, P1, remotes="https://github.com/org/repo")
+        many = [f"https://github.com/org/r{i}" for i in range(9)]
+        with self.assertRaises(ValueError):
+            ScopedRepository(REPO, P1, remotes=many)
+        self.assertEqual(len(ScopedRepository(REPO, P1, remotes=many[:8]).remotes), 8)
+
+
+class UrlWithinTest(unittest.TestCase):
+    REMOTE = "https://github.com/org/repo"
+
+    def test_a_url_is_within_its_remote_and_below_it(self):
+        for url in (
+            "https://github.com/org/repo",
+            "https://github.com/org/repo/info/refs",
+            "https://github.com/org/repo/info/refs?service=git-receive-pack",
+            "https://github.com/org/repo?ref=/../other",  # a query is not a path
+            "https://github.com/org/repo/a.b/.hidden/c",
+        ):
+            with self.subTest(url=url):
+                self.assertTrue(url_within(url, self.REMOTE))
+
+    def test_a_url_of_another_repository_is_not_within(self):
+        for url in (
+            "https://github.com/org/repo2",
+            "https://github.com/org/repo-evil",
+            "https://github.com/org/repo.git",  # another spelling: list it
+            "https://github.com/org/Repo",  # case-sensitive
+            "https://github.com/org",
+            "https://github.com/org/other",
+            "https://github.com.evil.com/org/repo",
+            "http://github.com/org/repo",
+            "https://api.github.com/org/repo",
+            "https://github.com/x/org/repo",
+        ):
+            with self.subTest(url=url):
+                self.assertFalse(url_within(url, self.REMOTE))
+
+    def test_a_path_that_can_leave_the_repository_is_not_within(self):
+        for url in (
+            "https://github.com/org/repo/../other",
+            "https://github.com/org/repo/x/../../other",
+            "https://github.com/org/repo/./x",
+            "https://github.com/org/repo/.../x",
+            "https://github.com/org/repo/%2e%2e/other",
+            "https://github.com/org/repo/%2E./other",
+            "https://github.com/org/repo/..%2fother",
+            "https://github.com/org/repo/..;x/other",  # a path parameter
+            "https://github.com/org/repo/x%5c..%5cother",
+            "https://github.com/org/repo/..\\other",  # WHATWG: a backslash is a slash
+        ):
+            with self.subTest(url=url):
+                self.assertFalse(url_within(url, self.REMOTE))
+
+    def test_normalise_remote_gives_the_canonical_prefix(self):
+        self.assertEqual(
+            normalise_remote("https://GitHub.COM/org/Repo.git/"),
+            "https://github.com/org/Repo.git",
+        )
+
 
 class TaskScopeRepositoriesTest(unittest.TestCase):
     def test_the_working_set_is_kept_in_order_and_looked_up_by_id(self):
@@ -640,6 +738,107 @@ class ClassifyTest(unittest.IsolatedAsyncioTestCase):
         # `/srv/x/a-evil` is not below `/srv/x/a`
         result = await self.classify([self.path(f"{ROOT}/a-evil/x")], scope)
         self.assertEqual(list(result.repositories), [])
+
+    async def test_a_url_below_a_remote_touches_that_repository(self):
+        a, b = uid(11), uid(12)
+        scope = make_scope(
+            repositories=[
+                ScopedRepository(a, P1, remotes=["https://github.com/org/a"]),
+                ScopedRepository(b, P1, remotes=["https://github.com/org/b"]),
+            ]
+        )
+        cases = [
+            (["https://github.com/org/a"], [a]),
+            (["https://github.com/org/b/info/refs"], [b]),
+            (["https://github.com/org/a", "https://github.com/org/b"], [a, b]),
+        ]
+        for urls, expected in cases:
+            with self.subTest(urls=urls):
+                hosts = [Target(TargetKind.HOST, "github.com")]
+                result = await self.classify(hosts, scope, urls=urls)
+                self.assertEqual(
+                    (result.status, list(result.repositories)),
+                    (ScopeStatus.IN_SCOPE, expected),
+                )
+
+    async def test_a_url_of_no_working_set_repository_is_refused_when_one_is_touched(
+        self,
+    ):
+        a = uid(11)
+        scope = make_scope(
+            repositories=[
+                ScopedRepository(
+                    a, P1, f"{ROOT}/a", remotes=["https://github.com/org/a"]
+                )
+            ]
+        )
+        hosts = [Target(TargetKind.HOST, "github.com")]
+        touching = [
+            [Target(TargetKind.REPOSITORY, str(a))],
+            [self.path(f"{ROOT}/a/x")],
+        ]
+        for touched in touching:
+            for url in (
+                "https://github.com/org/c",  # a repository outside the working set
+                "https://github.com/org/a/../c",  # a path that leaves the remote
+                "https://github.com/org/a-evil",
+            ):
+                with self.subTest(touched=touched, url=url):
+                    result = await self.classify(hosts + touched, scope, urls=[url])
+                    self.assertEqual(
+                        (result.status, result.offending, result.repositories),
+                        (ScopeStatus.OUT_OF_SCOPE, TargetKind.URL, (a,)),
+                    )
+        # ... but a call that touches no repository keeps to the host check
+        result = await self.classify(hosts, scope, urls=["https://github.com/org/c"])
+        self.assertEqual(
+            (result.status, result.offending, result.repositories),
+            (ScopeStatus.IN_SCOPE, None, ()),
+        )
+        # a repository with no remote registered owns no URL at all
+        bare = make_scope(repositories=[ScopedRepository(a, P1, f"{ROOT}/a")])
+        result = await self.classify(
+            hosts + [self.path(f"{ROOT}/a/x")], bare, urls=["https://github.com/org/a"]
+        )
+        self.assertEqual(
+            (result.status, result.offending),
+            (ScopeStatus.OUT_OF_SCOPE, TargetKind.URL),
+        )
+
+    async def test_a_host_or_path_out_of_scope_is_reported_before_the_remote(self):
+        a = uid(11)
+        scope = make_scope(
+            repositories=[
+                ScopedRepository(
+                    a, P1, f"{ROOT}/a", remotes=["https://github.com/org/a"]
+                )
+            ]
+        )
+        touched = Target(TargetKind.REPOSITORY, str(a))
+        result = await self.classify(
+            [touched, Target(TargetKind.HOST, "evil.example")],
+            scope,
+            urls=["https://evil.example/x"],
+        )
+        self.assertEqual(
+            (result.status, result.offending),
+            (ScopeStatus.HOST_OUT_OF_SCOPE, TargetKind.HOST),
+        )
+        result = await self.classify(
+            [touched, self.path("/etc/passwd"), Target(TargetKind.HOST, "github.com")],
+            scope,
+            urls=["https://github.com/org/c"],
+        )
+        self.assertEqual(
+            (result.status, result.offending),
+            (ScopeStatus.OUT_OF_SCOPE, TargetKind.PATH),
+        )
+
+    async def test_urls_that_are_not_normalised_are_refused(self):
+        for url in ("github.com/org/a", "https://user@github.com/org/a", "", None, 5):
+            with self.subTest(url=url):
+                with self.assertRaises(TargetError):
+                    await self.classify([], urls=[url])
 
     async def test_a_repository_outside_the_working_set_is_out_of_scope(self):
         result = await self.classify([Target(TargetKind.REPOSITORY, str(uid(99)))])

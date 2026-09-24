@@ -77,7 +77,10 @@ class ModelsMetadataTest(unittest.TestCase):
                     self.assertTrue(index.name.startswith(f"ix_{table.name}_"))
                     self.assertLessEqual(len(index.name), 63)
 
-    def test_foreign_keys_lead_only_to_tasks_and_to_the_items_table(self):
+    def test_the_only_foreign_key_is_from_a_lease_to_its_item(self):
+        # Decision 0013: task_id is a plain UUID, not a foreign key to tasks
+        # (SET NULL lost the relation, RESTRICT blocked deleting a task, CASCADE
+        # deleted pinned research).
         targets = {}
         for table in self.scratch_tables():
             for constraint in table.constraints:
@@ -85,14 +88,11 @@ class ModelsMetadataTest(unittest.TestCase):
                     targets[(table.name, constraint.referred_table.name)] = (
                         constraint.ondelete
                     )
-        self.assertEqual(
-            targets,
-            {(ITEMS, "tasks"): "SET NULL", (LEASES, ITEMS): "CASCADE"},
-        )
+        self.assertEqual(targets, {(LEASES, ITEMS): "CASCADE"})
 
-    def test_project_and_user_ids_are_plain_uuid_columns(self):
+    def test_project_task_and_user_ids_are_plain_uuid_columns(self):
         items = Base.metadata.tables[ITEMS]
-        for column_name in ("project_id", "created_by"):
+        for column_name in ("project_id", "task_id", "created_by"):
             with self.subTest(column_name):
                 column = items.columns[column_name]
                 self.assertEqual(type(column.type).__name__, "Uuid")
@@ -338,10 +338,7 @@ class ScratchMigrationDatabaseTest(unittest.TestCase):
 
     def scratch_catalog(self) -> dict[str, list[tuple]]:
         """The catalog of a schema built from the models with ``create_all``."""
-        # The tasks table is created too: the items table has a foreign key to it.
-        tables = [Base.metadata.tables["tasks"]] + [
-            Base.metadata.tables[name] for name in TABLE_NAMES
-        ]
+        tables = [Base.metadata.tables[name] for name in TABLE_NAMES]
         with self.engine.begin() as connection:
             connection.execute(text(f"DROP SCHEMA IF EXISTS {SCRATCH_SCHEMA} CASCADE"))
             connection.execute(text(f"CREATE SCHEMA {SCRATCH_SCHEMA}"))
@@ -372,7 +369,11 @@ class ScratchMigrationDatabaseTest(unittest.TestCase):
         names = {row[1] for row in migrated["constraints"]}
         self.assertIn("ck_research_scratch_items_expires_at_matches_ttl", names)
         self.assertIn("ck_research_scratch_leases_lease_window", names)
-        self.assertIn("fk_research_scratch_items_task_id_tasks", names)
+        self.assertNotIn("fk_research_scratch_items_task_id_tasks", names)
+        self.assertEqual(
+            {name for name in names if name.startswith("fk_")},
+            {"fk_research_scratch_leases_item_id_research_scratch_items"},
+        )
         self.assertIn(
             "fk_research_scratch_leases_item_id_research_scratch_items", names
         )

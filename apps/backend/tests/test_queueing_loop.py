@@ -1,13 +1,17 @@
 """Failure signatures and loop evaluation: pure functions, no database."""
 
+import hashlib
+import json
 import re
 import unittest
+import uuid
 
 from paw_backend.tasks.queueing import (
     DEFAULT_LOOP_POLICY,
     FailureRecord,
     InvalidQueueingArgumentError,
     LoopAssessment,
+    LoopDetector,
     LoopPolicy,
     LoopVerdict,
     evaluate_loop,
@@ -177,6 +181,67 @@ class SignatureTest(unittest.TestCase):
                     failure_signature(*args)
                 self.assertEqual(caught.exception.parameter, parameter)
                 self.assertNotIn(secret, str(caught.exception))
+
+    def test_text_that_utf8_cannot_encode_raises_the_typed_error_not_a_raw_one(self):
+        # ``json.loads`` yields a lone surrogate for the JSON string "\\ud800".
+        lone = json.loads('"\\ud800"')
+        self.assertEqual(lone, "\ud800")
+        secret = "hunter2-token"
+        cases = [
+            ("message", ("E", "s", lone)),
+            ("message", ("E", "s", secret + lone)),
+            ("message", ("E", "s", "m" * 3000 + lone)),  # beyond the used prefix
+            ("error_class", (secret + lone, "s", "m")),
+            ("step", ("E", secret + lone, "m")),
+        ]
+        for parameter, args in cases:
+            with self.subTest(parameter=parameter, args=ascii(args)[-40:]):
+                with self.assertRaises(InvalidQueueingArgumentError) as caught:
+                    failure_signature(*args)
+                error = caught.exception
+                self.assertEqual(error.parameter, parameter)
+                self.assertNotIn(secret, str(error) + repr(error))
+                self.assertIsNone(error.__cause__)
+                self.assertIsNone(error.__context__)  # no UnicodeEncodeError inside
+        with self.assertRaises(InvalidQueueingArgumentError) as caught:
+            normalize_failure_message(lone)
+        self.assertEqual(caught.exception.parameter, "message")
+
+    def test_a_signature_of_valid_text_is_computed_from_its_utf8_encoding(self):
+        text = "caf\u00e9 \U0001f600 timeout"
+        expected = hashlib.sha256(
+            f"E\x1fs\x1f{normalize_failure_message(text)}".encode()
+        ).hexdigest()
+        self.assertEqual(failure_signature("E", "s", text), expected)
+
+
+class RecordFailureValidationTest(unittest.IsolatedAsyncioTestCase):
+    """``record_failure`` refuses unencodable text before it touches the database:
+    the detector is built on an object that is not a database, so any database use
+    would fail with another error than the typed one."""
+
+    async def test_unencodable_text_is_refused_with_the_typed_error(self):
+        detector = LoopDetector(object())
+        lone = json.loads('"\\ud800"')
+        secret = "hunter2-token"
+        cases = [
+            ("message", dict(message=secret + lone)),
+            ("message", dict(message="m" * 3000 + lone)),
+            ("error_class", dict(error_class=secret + lone)),
+            ("step", dict(step=secret + lone)),
+            ("error_class", dict(error_class="E\x00")),
+            ("step", dict(step="s\x00")),
+        ]
+        for parameter, overrides in cases:
+            arguments = dict(attempt=1, error_class="E", step="s", message="m")
+            arguments.update(overrides)
+            with self.subTest(parameter=parameter, overrides=ascii(overrides)[-40:]):
+                with self.assertRaises(InvalidQueueingArgumentError) as caught:
+                    await detector.record_failure(uuid.uuid4(), **arguments)
+                error = caught.exception
+                self.assertEqual(error.parameter, parameter)
+                self.assertNotIn(secret, str(error) + repr(error))
+                self.assertIsNone(error.__context__)
 
 
 class EvaluateLoopTest(unittest.TestCase):
