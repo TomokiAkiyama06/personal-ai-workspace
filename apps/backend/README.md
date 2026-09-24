@@ -475,23 +475,29 @@ Tool は自分の Capability class を `ToolSpec` で宣言します（Backend �
 Level は `ToolPolicy` が「Capability class × Environment × Scope の状態」から決め、Tool の Level は class ごとの Level のうち**最も厳しいもの**です（`ToolSpec.min_level` は引き上げだけができ、下げられません）。
 表にない組み合わせは `DENY` です（既定拒否）。`DEFAULT_TOOL_POLICY` の 36 マスは `tests/test_tools_policy.py` が 1 マスずつ文字列で固定しています。
 
-| Capability | 範囲内（Project-local） | 範囲外の Host | 範囲外（Path / Project / Credential） | Host 全体の環境 |
+| Capability | 範囲内（Project-local） | 範囲外の Host | 範囲外（Path / Project / Credential） | Host 全体の環境（範囲内） |
 | --- | --- | --- | --- | --- |
-| `read` | `AUTO` | `DENY` | `DENY` | `AUTO` |
+| `read` | `AUTO` | `APPROVAL`（正確な URL を見て決める） | `DENY` | `AUTO` |
 | `write` | `SCOPED_AUTO` | `APPROVAL`（Task Scope を超える外部 write） | `DENY` | `APPROVAL` |
 | `execute` | `SCOPED_AUTO` | `DENY` | `DENY` | `APPROVAL` |
-| `network` | `SCOPED_AUTO` | `APPROVAL` | `DENY` | `SCOPED_AUTO`（範囲外の Host は `APPROVAL`） |
+| `network` | `SCOPED_AUTO` | `APPROVAL` | `DENY` | `APPROVAL` |
 | `credential-use` | `SCOPED_AUTO` | `DENY` | `DENY` | `STRONG_APPROVAL` |
 | `destructive` | `APPROVAL` | `DENY` | `DENY` | `STRONG_APPROVAL` |
 
-- 例: `web.fetch`（read + network）は範囲外の Host なら `DENY`、Issue 作成（write + network）は範囲外の Host なら `APPROVAL`、`git.merge` は `min_level=STRONG_APPROVAL` で `STRONG_APPROVAL`。
-- **Task Scope の範囲外は Policy で許可できません。** `ToolPolicy` は、範囲外（`out_of_scope`）を `DENY` 以外にする表を作れません（`ValueError`）。Host だけは、Task の Host を超える外部 write を `APPROVAL` にします（要件の「通常 Task scope を超える外部 write」）。
-- Host 全体の環境（package、service、firewall、mount）を変える Tool は `environment=Environment.HOST` を宣言します。宣言は Tool 側で、呼び出しでは選べません。
+- 例: `web.fetch`（read + network）も Issue 作成（write + network）も、Task の Host の外なら `APPROVAL`。`git.merge` は `min_level=STRONG_APPROVAL` で `STRONG_APPROVAL`。Credential を使う呼び出しは、Host が Task の Host でも、その Credential の使える Host でなければ `DENY`（下の Credential）。
+- **Task Scope の範囲外は Policy で許可できません。** `ToolPolicy` は、範囲外（`out_of_scope`）を `DENY` 以外にする表を作れません（`ValueError`）。Host だけは、Task の Host を超える読み取り・外部 write を `APPROVAL` にします（要件の「通常 Task scope を超える外部 write」）。
+- Host 全体の環境（package、service、firewall、proxy、mount）を変える Tool は `environment=Environment.HOST` を宣言します。宣言は Tool 側で、呼び出しでは選べません。この環境では読み取り以外は `APPROVAL` 以上です。
 - **Credential plaintext の取得は常に `DENY` です**（下の Credential）。
 
-要件の表との違い（いずれも**より厳しい方向**）:
-build / test / lint などの実行は `SCOPED_AUTO` としています（実行は Project のコードを走らせ、書き込みもできるため。人の確認が要らない点は `AUTO` と同じです）。
-Task Scope 内の一時ファイルの削除も `destructive` として `APPROVAL` にしています（`SCOPED_AUTO` にするには「一時ファイルだけを消す」Tool を別に宣言する必要があり、まだ決めていません）。
+**要件との違い。** 表は次のように解釈しています。要件の表と同じにはなっていない点（**厳しい方向と、Tool 側の宣言に頼る方向の両方**）を隠さず書きます。判断は [Decision 0006](../../docs/decisions/0006-tool-broker-policy.md)（Proposed、Human の承認待ち）に提案しています。
+
+- 厳しい方向:
+  build / test / lint などの実行は `SCOPED_AUTO`（実行は Project のコードを走らせ、書き込みもできるため。人の確認が要らない点は `AUTO` と同じ）。
+  Task Scope 内の一時ファイルの削除も `destructive` なので `APPROVAL`（`SCOPED_AUTO` にするには「一時ファイルだけを消す」Tool を別に宣言する必要があり、まだ決めていない）。
+  Task の Host の外への Web の読み取りは、要件の「Web / Docs の read-only 取得: `AUTO`」と違い `APPROVAL`（Host の指定がなければ、どの Host へも行ける）。
+- **緩い方向（Tool 側の宣言が前提）:**
+  Task Scope 内の `credential-use`（handle を使う）は `SCOPED_AUTO` です。要件の `STRONG_APPROVAL` の項は Credential の**登録・更新・削除**で、使用は分類されていません（AI 専用 Branch への push と PR 作成は `SCOPED_AUTO`）。Credential を管理する Tool は `min_level=STRONG_APPROVAL` を宣言してください（Agent には委任できない操作です）。
+  Host 全体の `sudo` / 特権操作は、要件では `STRONG_APPROVAL` ですが、表は `HOST` 環境の `write` / `execute` を `APPROVAL` にしています。特権の Tool は `min_level=STRONG_APPROVAL` を宣言する必要があります（表は Tool の中身を知りません）。
 
 ### 判定の順序
 
@@ -499,10 +505,11 @@ Task Scope 内の一時ファイルの削除も `destructive` として `APPROVA
 
 1. 呼び出しの形。`ToolCall` でなければ `invalid_call`。Tool 名は登録済みの名前と**完全一致**だけ（大文字小文字、空白、Zero-width、Unicode の見た目が近い文字は別の名前）。なければ `unknown_tool`。
 2. `returns_credential_plaintext` の Tool は `credential_plaintext_denied`。引数を Tool の宣言（`ArgumentSpec`）と照合します。宣言にない引数、足りない必須の引数、型の違い（`"true"` は bool でなく、`True` は int でない）、長さや範囲の超過は `invalid_arguments`。Path / Host / URL / Project / Credential handle は正規化して `invalid_target` または下の理由で拒否します。文字列に Credential の平文があれば `credential_plaintext_in_arguments`。
+   **長さの検査は Credential の走査より先**です（Tool の宣言した `max_length`、Path / URL / Host / handle は種別ごとの上限）。1 回の呼び出しの文字列の合計にも上限（262,144 文字）があり、超えたものは走査も正規化もしません。
 3. 対象を Task Scope と比べ（Symlink を解決）、Level を決めます。`DENY` なら `path_out_of_scope` / `host_out_of_scope` / `project_out_of_scope` / `credential_out_of_scope` / `policy_denied`。
 4. 認可（PAW-025 の `authorize_agent_action`）。委任元 User の権限と `AgentGrant` の積集合で、拒否は `authz_denied`（`authz_reason` に PAW-025 の理由）。Authorizer が失敗または想定外の答えなら `authz_unavailable`。
 5. Task Budget（`BudgetProvider`）。超過は `budget_exceeded`、不明は `budget_unknown`、Provider の失敗・Timeout・想定外の答えは `budget_unavailable`。
-6. `AUTO` / `SCOPED_AUTO` は `ALLOW`（`auto` / `scoped_auto`）。`APPROVAL` / `STRONG_APPROVAL` は下の Approval。
+6. `AUTO` / `SCOPED_AUTO` は `ALLOW`（`auto` / `scoped_auto`）。`APPROVAL` / `STRONG_APPROVAL` は下の Approval（承認者に見せられない呼び出し、Open な承認が多すぎる、直前に却下された、は `approval_not_displayable` / `approval_limit_reached` / `approval_cooldown`）。
 
 判定は `AuditSink` へ記録します（下の Audit）。**記録できない `ALLOW` は `DENY`（`audit_unavailable`）になります。**
 Approval の要求（`NEEDS_APPROVAL`）を作る前に、Path・認可・Budget の判定が済んでいるため、実行できない呼び出しの承認要求は作りません。
@@ -510,8 +517,8 @@ Approval の要求（`NEEDS_APPROVAL`）を作る前に、Path・認可・Budget
 ### Tool Registry
 
 `ToolRegistry` は起動時に一度だけ `ToolSpec` の一覧から作り、追加・置換・削除の方法がありません。`ToolSpec` は Tool 名、Capability class、対応する PAW-025 の Capability（必須）、引数の宣言、Environment、`min_level`、`requires_budget`（既定 `True`）を持ちます。
-宣言の整合性は生成時に検査します。**Host / URL の引数を持つ Tool は `network`、Credential handle の引数を持つ Tool は `credential-use` でなければならず**、Project-local の `write` / `destructive` は触る対象（Path / Host / URL / Project の引数）を宣言しなければなりません
-（対象のない書き込みは、常に「範囲内」に見えるため）。Tool 名は `unknown` と `approval*` を使えません（Audit の action と衝突するため）。
+宣言の整合性は生成時に検査します。**Host / URL の引数を持つ Tool は `network`、Credential handle の引数を持つ Tool は `credential-use` でなければならず**、Project-local の `write` / `destructive` は触る対象（Path / Host / URL / Project の**必須**の引数）を宣言しなければなりません
+（対象のない書き込みは、常に「範囲内」に見えるため。省略できる引数は対象を宣言したことになりません）。`network` は必須の Host / URL、`credential-use` は必須の handle が要ります。Tool 名は `unknown` と `approval*` を使えません（Audit の action と衝突するため）。
 
 ### Task Scope と正規化の契約
 
@@ -529,11 +536,15 @@ Approval の要求（`NEEDS_APPROVAL`）を作る前に、Path・認可・Budget
 ### Credential
 
 - **平文は Agent の引数にも結果にも入れません。** 使うときは不透明な handle だけで、handle を解決して Credential を付けるのは Executor（Backend 内部）です。Tool の引数が handle であり、その handle が Task の使える handle に入っていることを Broker が確認します（`credential_out_of_scope`）。
-- 引数の文字列に Credential の平文があれば `DENY` します（GitHub Token、`github_pat_`、`sk-` の Key、AWS Access Key ID、Slack Token、JWT、Bearer / Basic、PEM の秘密鍵、`user:password@` 付きの URL）。Zero-width 文字や全角文字で隠した形も検出します。
+- **handle は、使える Host に束縛されています。** `TaskScope.credential_handles` は `{handle: その Credential の使える Host の集合}` です。同じ呼び出しが触れる Host のどれかがその集合に含まれなければ `credential_out_of_scope`（DENY。承認では許可できません）。Task が両方の Host に触れられても、GitHub の handle を別の Service へ送る呼び出しは通りません。Host のない呼び出し（何も送らない）には影響しません。
+- 引数の文字列に Credential の平文があれば `DENY` します。形のわかる Format: GitHub（`ghp_` など、`github_pat_`）、GitLab、`sk-` の Key、Stripe、AWS の Key ID、Google の API Key と OAuth Token、Slack の Token と Webhook、npm、PyPI、Hugging Face、SendGrid、Docker、DigitalOcean、JWT、Bearer / Basic、PEM / PGP の秘密鍵、`user:password@` 付きの URL。
+  Token は Key 名に連結していても（`MYTOKEN_ghp_...`、`OPENAI_API_KEY_sk-...`、`key_AKIA...`）検出します（`_` の直前は英数字でなければよい。`disk-...` のような単語の途中は一致させません）。Zero-width 文字や全角文字で隠した形も検出します。
   ソースコードで普通に出る `password = "..."` は引数では拒否しません（Agent がコードを書けなくなるため）。
-- **結果は、返す前と Log へ出す前に Redact します。** 検出した Credential、`password` / `token` / `api_key` / `secret` / `authorization` などの Key の値、JSON のデータでない Object（`repr` に何が入るか分からないため）は固定の Marker（`[REDACTED]` / `[UNSUPPORTED]`）になります。
+- **結果は、返す前と Log へ出す前に Redact します。** 検出した Credential のほか、`.env`・JSON・YAML・ini・`--password x` の代入の形（`DB_PASSWORD=...`、`AWS_SECRET_ACCESS_KEY=...`、`{"db_password": "..."}`。Key 名の前後に語が付いてよく、引用符つきの値は空白を含めて）は**値だけ**を `[REDACTED]` にします（Key 名は残ります）。Dict の Key 自体も Redact します。
+  `password` / `token` / `api_key` / `secret` / `authorization` / `credential` などを含む Key の下の、数値・bool 以外の値は中身によらず置き換えます。JSON のデータでない Object（`repr` に何が入るか分からないため）は固定の Marker（`[UNSUPPORTED]`）です。
+  1 つの結果は読み取りに上限（100,000 値、4,000,000 文字）があり、超えた分は `[TRUNCATED]` 1 つになります（200 万要素の List の Redact に 8.9 秒かかった問題への歯止め）。
 - 平文を返す Tool（`returns_credential_plaintext=True`）は、登録しても**常に** `credential_plaintext_denied` です。Approval を渡しても変わりません。
-- **限界:** 検出は形のわかる Format だけの Best Effort で、すべての Secret を見つけることはできません。本来の防御は、Credential を Agent の Context に入れない構造（handle のみ）です。
+- **限界:** 検出は形のわかる Format と代入の形だけの Best Effort で、すべての Secret を見つけることはできません（値が別の行にある YAML、Encode された Secret など）。本来の防御は、Credential を Agent の Context に入れない構造（handle のみ）です。
 
 ### Approval
 
@@ -542,12 +553,16 @@ Approval の要求（`NEEDS_APPROVAL`）を作る前に、Path・認可・Budget
 
 | 段階 | 内容 |
 | --- | --- |
-| Hash | `call_hash` は Tool、**正規化した**引数、Task、Requester（User と Agent）の SHA-256。同じ呼び出しの別の書き方は同じ Hash、引数を 1 つ変えれば別の Hash |
+| 承認者に見せるもの | 呼び出しの**全引数**を名前つきで（`summary`）。値は Redact・制御文字と方向制御文字を `\uXXXX` に Escape し、256 文字で切ります（切ったものには全長と SHA-256 の先頭 12 桁が付き、Hash が束縛するのは全文です）。**読める `summary` がない呼び出し（引数がない Tool）の承認は開かず**、`approval_not_displayable` にします |
+| Hash | `call_hash` は Tool、**正規化した**引数、Task、Requester（User と Agent）の SHA-256。同じ呼び出しの別の書き方は同じ Hash、引数を 1 つ変えれば別の Hash。別の Task・User・Agent の同じ呼び出しは別の承認になります |
+| 件数 | (Task, User) ごとに Open な（pending と、承認済みで未使用の）承認は `max_pending_approvals`（既定 10、1〜100）まで。超えたら `approval_limit_reached`（Event も行も作りません）。同じ呼び出しの再要求は数えません。(Task, User) の Advisory Lock で直列化するため、並行 Request でも超えません |
+| 却下の後 | 却下した呼び出しは `rejection_cooldown`（既定 5 分、1 分〜24 時間）の間 `approval_cooldown`。引数を 1 つ変えれば別の呼び出しですが、件数の上限が量を抑えます |
 | 単回 | 承認は 1 回だけ使えます（実行が失敗しても消費済みです）。`UPDATE ... WHERE status = 'approved' AND expires_at > now AND`（Task、Agent、User、Tool、Level、Hash がすべて一致）の 1 文で消費するため、同時に何個の呼び出しが来ても 1 つだけが成功します（再利用は `approval_already_used`） |
 | 期限 | 作成から `approval_ttl`（既定 1 時間、1 分〜24 時間）。期限ちょうども期限切れです。期限切れは `approval_expired` |
 | 別の呼び出し | 引数・Tool・Task・Agent・User・Level のどれかが違えば `approval_mismatch`（承認は消費されません） |
-| 承認できる人 | Agent が働いている **User 本人だけ**（`ApprovalService.approve / reject`、引数は人間の `Principal`）。Agent 自身の ID は `self_approval`、他の人は Admin / Owner でも `not_authorised`。DB の CHECK 制約も、承認者が委任元 User であること、Agent が User と別であることを保証します |
-| `STRONG_APPROVAL` | 承認のとき `StepUpVerifier.verify(user_id, approval_id)` が**明示的な `True`** を返す必要があります（PAW-023 が実装）。Verifier がない、`False`、例外、Timeout、`True` 以外の答えは `step_up_required` で、承認は保留のままです |
+| 承認できる人 | Agent が働いている **User 本人だけ**（`ApprovalService.approve / reject`、引数は人間の `Principal`）。Agent 自身の ID は `self_approval`。他の人は Admin / Owner でも、存在を教えず `not_found`（Audit には `not_authorised`）。DB の CHECK 制約も、承認者が委任元 User であること、Agent が User と別であることを保証します |
+| `STRONG_APPROVAL` | 承認のとき `StepUpVerifier.verify(user_id, approval_id)` が**明示的な `True`** を返す必要があります（PAW-023 が実装）。Verifier がない、`False`、例外、Timeout、`True` 以外の答えは `step_up_required` で、承認は保留のままです。Store の `decide` も `step_up_verified` を受け取り、Step-up なしには強い承認を保存しません（`step_up_verified` の列と CHECK 制約。Store を直接呼ぶ側にも効きます） |
+| 取り消し | `ApprovalService.revoke`。委任元 User と、Admin / Owner（権利を減らす方向だけなので代われる）。pending・承認済みで未使用の承認だけ。Task が終わったら（`cancelled` / `failed` / `completed`）その Task の Open な承認は自動で取り消されます（`TaskService(listeners=[approval_service.revoke_on_task_end])`）。使うときは `approval_revoked` |
 | 使うとき | 認可・Scope・Budget を**もう一度**判定します。承認は権限を広げません。拒否された使用は承認を消費しません |
 
 `ApprovalService` は Broker と**別の Object**です。Agent の Runtime へは Broker（または Runner）だけを渡し、`ApprovalService` は渡さないでください（渡さなくても上の規則が守られますが、それが最初の防御です）。
@@ -557,13 +572,27 @@ Approval の要求（`NEEDS_APPROVAL`）を作る前に、Path・認可・Budget
 
 | Table | 内容 |
 | --- | --- |
-| `tool_approvals` | 承認の現在の状態（`pending` / `approved` / `rejected` / `consumed` / `expired`）、Task・Project・Agent・User、Tool、Level、`call_hash`、承認者に見せる対象（正規化した Path / Host / Project。**内容は持たない**）、期限 |
-| `tool_approval_events` | Append-only の履歴（`requested` / `approved` / `rejected` / `consumed` / `expired`）。Trigger が UPDATE と DELETE を拒否（`task_events` と同じ） |
+| `tool_approvals` | 承認の現在の状態（`pending` / `approved` / `rejected` / `consumed` / `revoked` / `expired`）、Task・Project・Agent・User、Tool、Level、`call_hash`、型つきの対象（正規化した Path / Host / Project）、**`summary`**、期限、`step_up_verified`、取り消した人と時刻 |
+| `tool_approval_events` | Append-only の履歴（`requested`（`summary` つき）/ `approved` / `rejected` / `consumed` / `revoked` / `expired`） |
 
 - 開いている承認は Exact な呼び出しごとに 1 つ（`call_hash` の Partial Unique Index）。Task、Project、Agent、User の ID に Foreign Key はありません（`task_events` と同じ方針）。
 - 状態の変更と履歴の行は同じ Transaction です。期限切れは、変更しようとした時に `expired` へ移し、履歴に残します。
-- `ApprovalListeners`（`ToolBroker(listeners=[...])`、`ApprovalService(listeners=[...])`）は、要求・承認・却下・消費が保存された**後**に `ApprovalEvent`（ID と Enum だけ）を受け取ります。Task を `waiting` にする Orchestrator の接続点です。Listener の失敗や遅延は承認を失敗させず、例外の型名だけを Log に残します。
-- テスト用に `InMemoryApprovalStore`（同じ規則。件数の上限つき。本番用ではありません）があります。
+- `ApprovalListeners`（`ToolBroker(listeners=[...])`、`ApprovalService(listeners=[...])`）は、要求・承認・却下・消費・取り消しが保存された**後**に `ApprovalEvent`（ID と Enum だけ）を受け取ります。Task を `waiting` にする Orchestrator の接続点です。Listener の失敗や遅延は承認を失敗させず、例外の型名だけを Log に残します。
+- テスト用に `InMemoryApprovalStore`（`approval_memory.py`。同じ規則。件数の上限つき。本番用ではありません）があります。両方の Store に同じ Test（`tests/tools_store_contract.py`）を実行します。
+
+**DB が守る規則（Migration 0031）。** Application の Bug や侵害でも、次は Database が拒否します（Trigger はすべて `ENABLE ALWAYS`で、`session_replication_role = replica` でも効きます）。
+
+- 承認の行は `pending` で作る（それ以外の INSERT を拒否）。
+- 状態の変更は `pending` → `approved` / `rejected` / `revoked` / `expired` と `approved` → `consumed` / `revoked` / `expired` だけ。それぞれが自分の列だけを変える。Replay（`consumed` → `approved`）、`expires_at` の延長、`call_hash` / Tool / Level / 対象 / `summary` の書き換えは拒否。
+- 承認・履歴の DELETE と TRUNCATE、履歴の UPDATE は拒否。
+- CHECK 制約: 承認者は委任元 User だけで Agent ではない、強い承認は Step-up つき、`summary` は 1〜16 件の配列。
+
+**Application の Role の権限（Migration の末尾の 1 ブロック）。** `PUBLIC` には何も与えません。`PAW_APP_DATABASE_ROLE` があれば、`tool_approvals` に SELECT・INSERT と**状態の列だけ**の UPDATE、履歴に SELECT・INSERT だけを与えます（DELETE・TRUNCATE・識別する列の UPDATE はなし）。
+非 Superuser の Role で、書き換え、Replay、TRUNCATE、Trigger の無効化、他人を承認者にする UPDATE を試して拒否されることを Test しています（`tests/test_tools_postgres_roles.py`）。起動時の診断（`warn_about_loose_privileges`）は、承認の 2 つの Table への過剰な権限（Owner、全体の UPDATE、DELETE、TRUNCATE）と不足（INSERT できない）を警告します。
+
+**承認と消費の Role の分離（実装しない。理由）。** Agent 側の Process が承認できない、を Database の権限で保証するには、承認する Process と Agent 側の Process が別の Role で接続する必要があります。
+今の構成は Application の Role が 1 つで、その Role は合法な遷移（`pending` → `approved`）を実行できるため、**Application の Process が侵害されれば、その User の名前で承認を書ける**（承認者は委任元 User でなければならず、強い承認は `step_up_verified` を偽るだけ）ことは、Database では防げません。
+分離には、承認の Endpoint 用の別 Role（と、その接続を持つ別 Process）が要ります。認証（PAW-022）と Step-up（PAW-023）の Endpoint ができる時に、承認の Endpoint だけが `UPDATE (status = 'approved' ...)` を実行できる構成（別 Role、または `SECURITY DEFINER` 関数）へ進めてください（Decision 0006 の後続の課題）。それまでは、Agent の Runtime に Application の Role の接続を渡さず、Broker だけを渡すことが前提です。
 
 ### Audit
 
@@ -571,9 +600,9 @@ Approval の要求（`NEEDS_APPROVAL`）を作る前に、Path・認可・Budget
 
 | 項目 | 値 |
 | --- | --- |
-| `action` | `tool.<登録済みの Tool 名>`。登録されていない名前は `tool.unknown`（名前は保存しません）。承認は `tool.approval.approve` / `tool.approval.reject` |
+| `action` | `tool.<登録済みの Tool 名>`。登録されていない名前は `tool.unknown`（名前は保存しません）。承認は `tool.approval.approve` / `tool.approval.reject` / `tool.approval.revoke` |
 | `resource_kind` / `resource_id` | Tool の呼び出しは `task` / Task の ID、承認は `tool_approval` / 承認の ID |
-| `actor_id` / `agent_id` | 委任元 User / Agent（承認の記録では承認した人、`agent_id` なし） |
+| `actor_id` / `agent_id` | 委任元 User / Agent（承認の記録では承認・却下・取り消した人、`agent_id` なし。Task の終了による取り消しは `actor_id` なし、reason `task_ended`） |
 | `decision` / `reason` | `allow` / `deny` と `BrokerReason` の値。`AuditEvent.decision` は 2 値のため、承認待ちは `deny` + `approval_required`、承認を使った実行は `allow` + `approval_consumed`。実行後に `executed` / `execution_failed` の行を追加 |
 | `correlation_id` | 呼び出しごと。同じ呼び出しの PAW-025 の認可の行と共通 |
 
@@ -585,23 +614,37 @@ Tool の実行を伴う記録（許可と実行後）は Fail-closed で、許�
 
 | Protocol | 実装 | 既定 |
 | --- | --- | --- |
-| `ToolExecutor.execute(invocation)` | 各 Tool の実装（別 Issue） | なし（`ToolRunner` に必須） |
+| `ToolExecutor.execute(invocation)` | 各 Tool の実装（別 Issue） | なし（`ToolRunner` に必須）。契約は下の「Executor の契約」 |
 | `BudgetProvider.check / charge` | PAW-033 | `FailClosedBudgetProvider`（予算なし = 予算が必要な Tool は拒否）。`check` は何も消費せず、同時の呼び出しは上限を少し超えうる。厳密な上限には PAW-033 が原子的な予約を追加する |
 | `StepUpVerifier.verify` | PAW-023 | `FailClosedStepUp`（Step-up の承認はできない） |
 | `PathResolver.resolve` | Deployment | `RealpathResolver`。`LexicalPathResolver` は Symlink のない環境の Test 用 |
 
+`ToolRunner(execution_timeout=)` の既定は 600 秒（最大 24 時間。`None` は不可）。実行後の記録（Audit と Budget の Charge）は `finally` で `asyncio.shield` して書くため、Task が Cancel されても、実行後の処理が失敗しても残ります。
+
 Adapter は Broker / Runner / Service の生成時に検査します（Async Method か、必要な引数の数か）。間違った Adapter は生成時に `TypeError` です。
+
+### Executor の契約
+
+Broker は呼び出しの**前**に判定します。次は、実際に実行する Executor（別 Issue）が守ることを前提にしています。
+
+- **File**: `TaskScope.path_roots` の外へ Symlink をたどらずに開く（`openat2` の `RESOLVE_BENEATH`、`O_NOFOLLOW` など）。Broker の Symlink の確認は呼び出しの前で、確認後に変わりうる（TOCTOU）。
+- **Network**: `ToolInvocation.arguments` の URL の Host に接続する。**Redirect は自動でたどらず**（たどるなら、移動先の Host を Task の Host と handle の使える Host で再確認する）、**DNS は接続時に引いた IP を確認する**（DNS Rebinding、Loopback・Private・Link-local への接続の拒否）。Broker は名前を字句で確認するだけで、名前が指す IP は見ません。
+- **Credential**: handle を解決して付けるのは Executor だけ。handle が使える Host にだけ Credential を付ける。平文を結果や Log に出さない（出ても Runner が Redact する）。
+- **Memory / Project の ACL**: Project や Memory を読む Tool は、Broker が確認した Project の Scope の中だけを、PAW-040 の ACL 条件（`readable_memory_versions`）つきで読む。Broker は Project の Scope を確認するが、Memory 単位の ACL は Tool の中の責務。
+- **TaskContext は呼び出しごとの新しい Snapshot**: Orchestrator は Task の Scope・Grant・Project の状態を**呼び出しごとに**現在の値から作って渡す（Project の Archive、Task の Scope の変更、Grant の縮小が次の呼び出しから効く）。Broker は渡された Context をそのまま信頼します。
 
 ### 既知の制限と判断
 
 - **承認が広げるのは Level だけです。** 委任できない Capability（`admin.*` など）を持つ Tool は、承認があっても `authz_denied` です（PAW-025 の許可リストのまま。Decision 0004 が PAW-031 に残した点として、この実装は「Approval で委任不可の操作を Agent に許す仕組みは作らない」を選んでいます）。
-- 承認できるのは委任元 User だけで、Admin / Owner が他の User の Task を承認する仕組みはありません。
-- 外部 write の許可は `TaskScope.hosts` だけで表しています（Issue 作成や PR 作成といった「目的」の単位ではありません）。Web の読み取りも、Task の Host に含まれない Host は `DENY` です。
-- 承認の対象として見せるのは正規化した Path / Host / Project です。File の内容や Command の引数の全文は承認 UI に出せません（Audit と同じく内容を保存しないため）。
-- Approval の期限は 1 つです（承認してから使うまでの猶予は別にありません）。承認が遅れると、使える時間は残りだけです。
-- `ToolRunner` は Task Cancel などの `CancelledError` では実行後の記録を書きません（Cancel は例外のまま伝わります）。
+- 承認できるのは委任元 User だけで、Admin / Owner が他の User の Task を承認する仕組みはありません（取り消しはできます）。
+- 外部 write と外部の読み取りの許可は `TaskScope.hosts` と、承認（正確な URL を見て 1 回）で表しています。Issue 作成や PR 作成といった「目的」の単位ではありません。
+- 承認者の表示は各引数の 256 文字までです。長い値は全長と Hash の先頭だけが付きます。承認 UI（PAW-022 以降）は `summary` を表示してください。
+- 引数のない Tool（`host.reboot` など）は承認を開けません（`approval_not_displayable`）。承認が要る Tool は、何をするかを表す引数（対象、理由）を必須にしてください。
+- Approval の期限は 1 つです（承認してから使うまでの猶予は別にありません）。期限は Application の時計で比較します（Database の時計ではありません。複数の Host の時計のずれ、Test の時計の注入のため）。
+- 却下の Cooldown は Hash 単位で、引数を変えた別の呼び出しは止めません（件数の上限が量を抑えます）。
 - `check` と `charge` の間の競合、Symlink の確認と使用の間の競合（TOCTOU）、Credential 検出が Best Effort であることは上に書いたとおりです。
 - Model の出力から `ToolCall` を作る Adapter は JSON を `benchmarks/json_input.decode_json` と同じ厳密さ（重複 Key、`NaN` を拒否）で読んでください。Broker は Mapping を受け取り、Key と値の型を上の規則で検査します。
+- **後続の課題:** 承認する Process と Agent 側の Process の Role の分離（上）、承認 UI と一覧の Endpoint（PAW-022）、`SECURITY DEFINER` 関数による遷移の限定、Database の時計での期限、`TaskService` への `revoke_on_task_end` の配線（PAW-034）、共通 Helper（`paw_backend.db_roles.grant_app_privileges`）による GRANT の置き換え。
 
 ## Memory / Conversation Schema
 

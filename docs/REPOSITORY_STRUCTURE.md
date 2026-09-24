@@ -61,6 +61,7 @@ personal-ai-workspace/
 │  │  │  ├─ server.py
 │  │  │  ├─ tools/
 │  │  │  │  ├─ __init__.py
+│  │  │  │  ├─ approval_memory.py
 │  │  │  │  ├─ approval_store.py
 │  │  │  │  ├─ approval_types.py
 │  │  │  │  ├─ approvals.py
@@ -106,6 +107,7 @@ personal-ai-workspace/
 │  │     ├─ test_tools_migration.py
 │  │     ├─ test_tools_policy.py
 │  │     ├─ test_tools_postgres.py
+│  │     ├─ test_tools_postgres_roles.py
 │  │     ├─ test_tools_registry.py
 │  │     ├─ test_tools_runner.py
 │  │     ├─ test_tools_scope.py
@@ -155,6 +157,7 @@ personal-ai-workspace/
 │     ├─ 0002-start-workspace-implementation-before-model-comparison.md
 │     ├─ 0003-backend-cli-web-implementation-stack.md
 │     ├─ 0004-rbac-capability-and-audit-policy.md
+│     ├─ 0006-tool-broker-policy.md
 │     └─ README.md
 └─ evaluator/
    └─ README.md

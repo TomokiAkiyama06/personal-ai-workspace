@@ -870,6 +870,42 @@ class CrossProcessTest(PostgresTestCase):
         refused = await stores[1].open_request(again, now=NOW, limits=LIMITS)
         self.assertEqual(refused.outcome, OpenOutcome.COOLING_DOWN)
 
+    async def test_a_cancelled_task_revokes_its_approvals_through_the_task_service(
+        self,
+    ):
+        from paw_backend.tasks import Actor, TaskCommand, TaskService
+
+        clock = Clock()
+        h = Harness(approvals=PostgresApprovalStore(self.new_database()), clock=clock)
+        tasks = TaskService(
+            self.new_database(), listeners=[h.service.revoke_on_task_end]
+        )
+        created = await tasks.create_task(
+            project_id=P1, created_by=U1, title="Delete the build"
+        )
+        context = make_context(task_id=created.task_id)
+        call = make_call("repo.delete_tree", DELETE, context=context)
+        pending = await h.broker.request(call)
+        self.assertEqual(pending.verdict, Verdict.NEEDS_APPROVAL)
+        approved = await h.broker.request(
+            make_call("repo.delete_tree", {"path": f"{ROOT}/other"}, context=context)
+        )
+        await h.service.approve(approved.approval_id, principal(SystemRole.USER, U1))
+
+        await tasks.execute(created.task_id, TaskCommand.CANCEL, actor=Actor.user(U1))
+
+        for decision, arguments in (
+            (pending, DELETE),
+            (approved, {"path": f"{ROOT}/other"}),
+        ):
+            record = await h.approvals.get(decision.approval_id)
+            self.assertEqual(record.status.value, "revoked")
+            used = await h.broker.request(
+                make_call("repo.delete_tree", arguments, context=context),
+                approval_id=decision.approval_id,
+            )
+            self.assertEqual(used.reason, BrokerReason.APPROVAL_REVOKED)
+
     async def test_the_state_survives_a_restart(self):
         # "Restart" = every object is rebuilt from the database alone.
         clock = Clock()

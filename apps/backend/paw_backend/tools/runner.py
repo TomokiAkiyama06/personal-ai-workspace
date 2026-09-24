@@ -14,9 +14,11 @@ the normalised invocation to the injected :class:`ToolExecutor`. The runner then
   task around it is cancelled, or something after it fails.
 
 The executor receives a credential only as an opaque handle in the arguments.
-Resolving it, opening files confined to the scope's roots and enforcing the
-network policy are the executor's job (sandboxing is out of scope of the
-broker).
+Resolving it, opening files confined to the scope's roots (no symlink out of
+them), connecting only to the URL's host (no automatic redirect, and a check of
+the IP it resolves to: no loopback / private / link-local target) and
+enforcing the ACLs of what it reads are the executor's job (sandboxing is out
+of scope of the broker). See "Executor の契約" in ``apps/backend/README.md``.
 """
 
 import asyncio
