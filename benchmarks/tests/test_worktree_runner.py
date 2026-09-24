@@ -9,6 +9,7 @@ import sys
 import tempfile
 import threading
 import time
+import tracemalloc
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -56,6 +57,15 @@ while not os.path.exists(pid_file):
     time.sleep(0.01)
 if not exit_early:
     time.sleep(60)
+"""
+
+# Candidate that ignores SIGTERM itself, so only SIGKILL after the grace period
+# ends it.  It signals readiness once the handler is installed.
+TERM_IGNORING_LEADER = """
+import signal, sys, time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+open(sys.argv[1], 'w').close()
+time.sleep(60)
 """
 
 
@@ -256,6 +266,28 @@ class WorktreeRunnerTest(unittest.TestCase):
             (result.stdout_bytes, result.stderr_bytes), (3_000_000, 65_536)
         )
 
+    def test_output_is_not_buffered_in_memory_while_the_candidate_runs(self):
+        run = self.runner.create("candidate-a", self.commit)
+        size = 64 * 1024 * 1024
+        tracemalloc.start()
+        try:
+            result = self.runner.execute(
+                run,
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys; sys.stdout.buffer.write(b'x' * int(sys.argv[1]))",
+                    str(size),
+                ],
+                PATIENCE,
+            )
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        self.assertEqual(result.stdout_bytes, size)
+        # Buffering the whole stream would need at least ``size`` bytes.
+        self.assertLess(peak, 8 * 1024 * 1024)
+
     def test_endless_output_is_drained_until_the_timeout(self):
         run = self.runner.create("noisy", self.commit)
         script = (
@@ -333,6 +365,21 @@ class WorktreeRunnerTest(unittest.TestCase):
         self.assertEqual(box["result"].status, "cancelled")
         self.assertTrue(wait_until(lambda: not is_running(child)))
         self.assertFalse(run.path.exists())
+
+    def test_cancel_kills_a_leader_that_ignores_sigterm_after_the_grace_period(self):
+        self.runner.term_grace_seconds = 0.3
+        run = self.runner.create("stubborn-leader", self.commit)
+        ready = self.root / "handler-installed"
+        worker, box = self.execute_in_thread(
+            run, [sys.executable, "-c", TERM_IGNORING_LEADER, str(ready)]
+        )
+        self.assertTrue(wait_until(ready.exists), "the handler was never installed")
+        self.runner.cancel(run)
+        worker.join(timeout=PATIENCE)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(box["result"].status, "cancelled")
+        self.assertEqual(box["result"].exit_code, -signal.SIGKILL)
 
     def test_a_process_left_behind_by_a_finished_candidate_is_killed(self):
         self.runner.drain_seconds = 0.3
