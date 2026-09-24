@@ -1,6 +1,7 @@
 import asyncio
 import time
 import unittest
+from unittest.mock import patch
 
 from paw_backend.authz import SystemRole
 from paw_backend.tools import (
@@ -12,6 +13,7 @@ from paw_backend.tools import (
     Verdict,
 )
 from paw_backend.tools.credentials import MAX_RESULT_NODES
+from paw_backend.tools.runner import DEFAULT_EXECUTION_TIMEOUT
 
 from .authz_support import SECRET, FailingSink, principal
 from .tools_support import (
@@ -180,6 +182,33 @@ class ExecutorFailureTest(unittest.IsolatedAsyncioTestCase):
             (ExecutionStatus.FAILED, "TimeoutError"),
         )
 
+    async def test_a_cancelled_run_is_still_recorded_and_charged(self):
+        started = asyncio.Event()
+
+        class Blocks:
+            async def execute(self, invocation):
+                started.set()
+                await asyncio.Event().wait()
+
+        h = Harness(executor=Blocks())
+        task = asyncio.create_task(h.runner.run(make_call("repo.read_file", READ)))
+        await asyncio.wait_for(started.wait(), 10)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        last = [e for e in h.sink.events if e.action == "tool.repo.read_file"][-1]
+        self.assertEqual((last.decision, last.reason), ("allow", "execution_failed"))
+        self.assertEqual(h.budget.charges, [(TASK, "repo.read_file")])
+
+    async def test_a_failure_after_the_call_ran_is_still_recorded_and_charged(self):
+        h = Harness()
+        with patch("paw_backend.tools.runner.redact_value", side_effect=ValueError):
+            with self.assertRaises(ValueError):
+                await h.runner.run(make_call("repo.read_file", READ))
+        last = [e for e in h.sink.events if e.action == "tool.repo.read_file"][-1]
+        self.assertEqual((last.decision, last.reason), ("allow", "executed"))
+        self.assertEqual(h.budget.charges, [(TASK, "repo.read_file")])
+
     async def test_a_failing_budget_charge_does_not_change_the_outcome(self):
         class ChargeFails(FakeBudget):
             async def charge(self, task_id, tool):
@@ -297,10 +326,17 @@ class RunnerConstructionTest(unittest.TestCase):
                     ToolRunner(h.broker, executor)
         with self.assertRaises(TypeError):
             ToolRunner("broker", FakeExecutor())
-        for timeout in (0, -1):
-            with self.assertRaises(ValueError):
-                ToolRunner(h.broker, FakeExecutor(), execution_timeout=timeout)
+        for timeout in (0, -1, None, "5", True, 86_401, float("nan")):
+            with self.subTest(timeout=timeout):
+                with self.assertRaises(ValueError):
+                    ToolRunner(h.broker, FakeExecutor(), execution_timeout=timeout)
         ToolRunner(h.broker, FakeExecutor(), execution_timeout=1.5)
+        ToolRunner(h.broker, FakeExecutor(), execution_timeout=86_400)
+
+    def test_a_call_is_bounded_by_default(self):
+        h = Harness()
+        self.assertEqual(h.runner._execution_timeout, DEFAULT_EXECUTION_TIMEOUT)
+        self.assertEqual(DEFAULT_EXECUTION_TIMEOUT, 600.0)
 
     def test_only_an_allowed_call_can_be_recorded_as_executed(self):
         async def check():

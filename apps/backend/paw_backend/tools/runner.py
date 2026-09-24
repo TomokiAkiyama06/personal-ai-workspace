@@ -9,7 +9,9 @@ the normalised invocation to the injected :class:`ToolExecutor`. The runner then
 * redacts the result (recognisable credentials, values under keys such as
   ``password`` / ``api_key``, anything that is not plain JSON data) before it is
   returned or logged,
-* reports the call to the broker (audit row and budget charge).
+* reports the call to the broker (audit row and budget charge) in a ``finally``,
+  shielded from cancellation: a call that ran is recorded and charged even if the
+  task around it is cancelled, or something after it fails.
 
 The executor receives a credential only as an opaque handle in the arguments.
 Resolving it, opening files confined to the scope's roots and enforcing the
@@ -56,19 +58,29 @@ class ToolOutcome:
     error_type: str | None = None
 
 
+# A call may not run for ever: this bounds it until PAW-033's runtime budget
+# takes over (a shorter limit is passed per runner).
+DEFAULT_EXECUTION_TIMEOUT = 600.0
+MAX_EXECUTION_TIMEOUT = 86_400.0
+
+
 class ToolRunner:
     def __init__(
         self,
         broker: ToolBroker,
         executor: ToolExecutor,
         *,
-        execution_timeout: float | None = None,
+        execution_timeout: float = DEFAULT_EXECUTION_TIMEOUT,
     ) -> None:
         if not isinstance(broker, ToolBroker):
             raise TypeError("broker must be a ToolBroker")
         require_async_method(executor, "execute", 1)
-        if execution_timeout is not None and not execution_timeout > 0:
-            raise ValueError("execution_timeout must be positive")
+        if (
+            isinstance(execution_timeout, bool)
+            or not isinstance(execution_timeout, int | float)
+            or not 0 < execution_timeout <= MAX_EXECUTION_TIMEOUT
+        ):
+            raise ValueError("execution_timeout must be between 0 and 24 hours")
         self._broker = broker
         self._executor = executor
         self._execution_timeout = execution_timeout
@@ -80,16 +92,29 @@ class ToolRunner:
         invocation = decision.invocation
         if not decision.allowed or invocation is None:
             return ToolOutcome(decision, ExecutionStatus.NOT_EXECUTED)
+        succeeded = False
+        error_type: str | None = None
         try:
-            async with asyncio.timeout(self._execution_timeout):
-                raw = await self._executor.execute(invocation)
-        except Exception as error:
-            error_type = type(error).__name__
-            logger.error("Tool execution failed (%s) for %s", error_type, decision.tool)
-            await self._broker.record_execution(decision, succeeded=False)
+            try:
+                async with asyncio.timeout(self._execution_timeout):
+                    raw = await self._executor.execute(invocation)
+            except Exception as error:
+                error_type = type(error).__name__
+                logger.error(
+                    "Tool execution failed (%s) for %s", error_type, decision.tool
+                )
+            else:
+                succeeded = True
+        finally:
+            # The call ran (or was cut short): it is recorded and charged even if
+            # this task is cancelled meanwhile (the record is shielded), and
+            # before anything below can fail.
+            await asyncio.shield(
+                self._broker.record_execution(decision, succeeded=succeeded)
+            )
+        if not succeeded:
             return ToolOutcome(decision, ExecutionStatus.FAILED, error_type=error_type)
         result, redactions = redact_value(raw)
-        await self._broker.record_execution(decision, succeeded=True)
         return ToolOutcome(
             decision, ExecutionStatus.COMPLETED, result=result, redactions=redactions
         )
