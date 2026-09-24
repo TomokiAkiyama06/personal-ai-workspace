@@ -36,6 +36,7 @@ class FlowTest(PostgresQueueingTestCase):
     async def fail_step(self, task_id, approach: int):
         assessment = await self.loop_detector.record_failure(
             task_id,
+            attempt=1,
             error_class="AssertionError",
             step="run_tests",
             message="assert result == 42",
@@ -151,7 +152,12 @@ class FlowTest(PostgresQueueingTestCase):
         )
         for _ in range(3):
             assessment = await self.loop_detector.record_failure(
-                task_id, error_class="E", step="s", message="same", approach=1
+                task_id,
+                attempt=1,
+                error_class="E",
+                step="s",
+                message="same",
+                approach=1,
             )
         self.assertEqual(assessment.verdict, LoopVerdict.ESCALATE)
         self.assertEqual(

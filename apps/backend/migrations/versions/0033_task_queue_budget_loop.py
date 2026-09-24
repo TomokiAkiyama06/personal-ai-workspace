@@ -238,6 +238,9 @@ def upgrade() -> None:
     # place in PAW-033 where the application deletes, because this table is a
     # sliding window of hashes, not history (the durable record of what happened
     # is ``task_events``). No UPDATE: a stored failure is never edited.
+    # ``record_failure`` also reads ``tasks.attempt`` and locks that row
+    # ``FOR SHARE`` (attempt fence); that needs only the SELECT and the
+    # column-level UPDATE that revision 0032 already granted on ``tasks``.
     grant_app_privileges(
         op, "loop_failure_signatures", select=True, insert=True, delete=True
     )

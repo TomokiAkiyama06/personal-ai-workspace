@@ -57,9 +57,9 @@ class TaskStepError(TaskError):
 class StaleAttemptError(TaskError):
     """The caller works for an attempt that is no longer the task's current one.
 
-    Raised for step, tool, log and attempt-state bookkeeping after a Restart
-    started a newer attempt. Nothing is written, so a superseded worker cannot
-    disturb the new attempt.
+    Raised for step, tool, log and attempt-state bookkeeping (and for the loop
+    failure records of PAW-033) after a Restart started a newer attempt. Nothing
+    is written, so a superseded worker cannot disturb the new attempt.
     """
 
     code = "stale_attempt"

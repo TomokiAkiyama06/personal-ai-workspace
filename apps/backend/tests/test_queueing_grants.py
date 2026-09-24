@@ -285,7 +285,7 @@ class AppRolePrivilegesTest(AsAppRole, PostgresQueueingTestCase):
         await self.budget.set_preset(task_id, BudgetPreset.STANDARD)
         await self.budget.record(task_id, BudgetKind.TOKENS, 5)
         await self.loop_detector.record_failure(
-            task_id, error_class="E", step="s", message="m"
+            task_id, attempt=1, error_class="E", step="s", message="m"
         )
         before = await self.snapshot()
 
@@ -330,7 +330,7 @@ class AppRolePrivilegesTest(AsAppRole, PostgresQueueingTestCase):
         (task_id,) = await self.make_tasks(1)
         for _ in range(12):
             await self.loop_detector.record_failure(
-                task_id, error_class="E", step="s", message="m"
+                task_id, attempt=1, error_class="E", step="s", message="m"
             )
         self.assertEqual(
             await self.scalar("SELECT count(*) FROM loop_failure_signatures"), 10

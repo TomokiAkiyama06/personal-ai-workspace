@@ -81,12 +81,20 @@ Command（PAW-032 の `wait` / `fail`）を発行するのは Orchestrator（PAW
 - そこで `claim_count`（Claim のたびに 1 増え、減らず、戻らない。Reclaim と返却後の再 Claim も数える。Schema は変わらない）を Lease の世代とする。`claim_next` が返す `QueueEntry.claim_count` を、`heartbeat` / `release` / `complete` が**必須の引数**として受け取り、Entry の現在の `claim_count` と違う世代は Worker id が同じでも `LeaseLostError` にする。
 - 世代の引数を任意にしない（省略した呼び出しだけが保護されなくなる）。呼び出し側の互換は、Orchestrator（PAW-034）がまだ無いため、Queue の Test だけである。
 
+### 8. Loop の失敗記録の試行（Attempt）による Fencing
+
+- 失敗の記録（`LoopDetector.record_failure`）は、Task の ID だけでは、どの試行の報告かを区別できない。Restart が新しい試行を始め、履歴の `clear` が終わった後に、古い試行の Worker が遅れて報告すると、その失敗が新しい試行の Window に入り、数件で `TRY_ALTERNATIVE` / `ESCALATE` を誤って引き起こす。
+- そこで `record_failure` に**必須の** `attempt`（報告する Worker が開始された試行の番号。PAW-032 の Step・Log・Tool の書き込みが持つ `attempt` と同じ）を加え、`tasks.attempt`（Restart が増やす既存の Counter）と違えば `StaleAttemptError` で拒否して何も書かない。新しい状態・Column・Migration は要らない。
+- 確認と書き込みの間に Restart が割り込まないよう、`record_failure` は Task の行を `FOR SHARE` で Lock して Transaction の終わりまで持つ（PAW-032 の Command は `FOR NO KEY UPDATE` を取るため、直列になる）。Restart が待つ時間は 1 回の記録の Transaction の間だけである。
+- Orchestrator（PAW-034）の順序は、**Restart の Command が Commit された後に `clear`** とする。Restart の前に Commit された古い試行の失敗は、その `clear` が削除する。
+
 ## 選定理由
 
 - 数値は、1 台の GPU Server で個人〜小規模チームが使うことを想定した、桁を合わせるための仮の値であり、実測に基づかない。
   Benchmark（PAW-016 / 017）と実運用の記録で見直す前提で、データとして 1 か所に置いた。
 - Budget 超過を Loop より優先するのは、Escalation が予算を追加で消費するため。
 - Lease の世代に `claim_count` を使うのは、既存の列で足り（Migration も Grant も変えない）、Claim のたびに必ず増え、Worker の id・時刻・乱数のような呼び出し側の値に頼らずに、古い Claim を判別できるため。
+- 試行の Fencing に PAW-032 の `tasks.attempt` を使うのは、Restart が既に増やす唯一の Counter で、Step・Log・Tool の書き込みも同じ規則（古い試行は `StaleAttemptError`）で拒否しているため。失敗の行へ試行の Column を足して現在の試行だけを読む案は、Schema・Grant・履歴の読み取りを変える割に、`clear` を Restart の後に呼ぶ規則で足りるため採らない。
 - Lease の時計を Database に一本化するのは、複数の Process（Worker）が同じ Entry を巡って競うため、判定の基準が呼び出し側ごとに違うと Lease の排他が成り立たないため。
 
 ## 代替案
