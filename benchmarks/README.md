@@ -200,6 +200,12 @@ make the lifecycle log tamper-proof**.  What the runner does:
   If only the record of the outcome (`completed` / `timed_out` / `cancelled`) cannot be
   written, cleanup still runs and `execute()` then raises that `WorktreeRunnerError`
   instead of returning a result the durable log does not contain.
+- If the output drain cannot be set up after the launch (descriptor exhaustion), or the
+  supervisor cannot be built, the child is killed and reaped before the worktree is
+  removed, instead of running on without a timeout.
+- A removal that fails for a filesystem reason (a Git metadata entry replaced by a
+  plain file is simply removed; a permission error is not) is reported as
+  `cleanup_incomplete` and `WorktreeRunnerError`, never as a raw `OSError`.
 
 What remains: a candidate that guesses or lists `logs_directory` can still open the
 log for writing as the same user, and changes made after the final append are not

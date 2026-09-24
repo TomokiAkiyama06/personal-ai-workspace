@@ -456,7 +456,14 @@ class WorktreeRunner:
                 start_new_session=True,
                 env=self._candidate_environment(state),
             )
-            leader = _Leader(process)
+            try:
+                leader = _Leader(process)
+            except BaseException:
+                # The child is running and nothing supervises it yet: never leave
+                # it behind a removed worktree. It is our own unreaped child, so
+                # its pid is still its process group id.
+                self._stop_unsupervised(process)
+                raise
             status, drain = self._supervise(run.run_id, leader, timeout_seconds)
             # If something else reaped the leader (SIGCHLD ignored, another
             # reaper) its exit status is lost; ``returncode`` would read 0.
@@ -517,10 +524,15 @@ class WorktreeRunner:
         try:
             try:
                 self._remove_checkout(state)
-            except WorktreeRunnerError:
-                # Never claim success for a checkout that is still on disk.
+            except (WorktreeRunnerError, OSError) as error:
+                # Never claim success for a checkout that is still on disk, and
+                # never let a raw OSError skip the record of that.
                 self._try_event(run, "cleanup_incomplete", reason=reason)
-                raise
+                if isinstance(error, WorktreeRunnerError):
+                    raise
+                raise WorktreeRunnerError(
+                    "could not remove the isolated worktree"
+                ) from None
             log_error = log_error or self._try_event(
                 run, "cleanup_finished", reason=reason
             )
@@ -538,11 +550,14 @@ class WorktreeRunner:
         self, run_id: str, leader: _Leader, timeout_seconds: float
     ) -> tuple[str, _PipeDrain]:
         """Drain output until exit, deadline or cancellation, then contain it."""
-        drain = _PipeDrain(leader.process)
+        drain: _PipeDrain | None = None
         deadline = time.monotonic() + timeout_seconds
         status = "completed"
         exited_at: float | None = None
         try:
+            # Inside the ``try``: if the drain cannot be built (descriptor
+            # exhaustion, say) the ``finally`` below still stops the child.
+            drain = _PipeDrain(leader.process)
             while True:
                 now = time.monotonic()
                 with self._lock:
@@ -574,8 +589,28 @@ class WorktreeRunner:
             # Whatever happened, no member of the candidate's session may outlive
             # the run, and no pipe may keep this evaluator waiting.
             leader.signal_group(signal.SIGKILL)
-            drain.close()
+            if drain is not None:
+                drain.close()
+            else:
+                for stream in (leader.process.stdout, leader.process.stderr):
+                    if stream is not None:
+                        with contextlib.suppress(OSError):
+                            stream.close()
             leader.reap(self.term_grace_seconds)
+
+    @staticmethod
+    def _stop_unsupervised(process: subprocess.Popen[bytes]) -> None:
+        """Kill and reap a just-started child that no supervisor took over."""
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(process.pid, signal.SIGKILL)
+        with contextlib.suppress(OSError):
+            process.kill()
+        with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+            process.wait(timeout=5)
+        for stream in (process.stdout, process.stderr):
+            if stream is not None:
+                with contextlib.suppress(OSError):
+                    stream.close()
 
     def _terminate(self, leader: _Leader, drain: _PipeDrain) -> None:
         """TERM, wait for a grace period, then KILL whatever is left.
@@ -780,10 +815,13 @@ class WorktreeRunner:
     @staticmethod
     def _remove_tree(path: Path) -> bool:
         """Remove ``path`` without following a symlink; True if nothing remains."""
-        if path.is_symlink():
-            path.unlink()
-        else:
-            shutil.rmtree(path, ignore_errors=True)
+        try:
+            if path.is_symlink():
+                path.unlink()
+            else:
+                shutil.rmtree(path, ignore_errors=True)
+        except OSError:
+            return False
         return not os.path.lexists(path)
 
     def _remove_moved_directory(self, state: _RunState, moved: Path) -> bool:
@@ -808,9 +846,17 @@ class WorktreeRunner:
         if admin is None or not os.path.lexists(admin):
             return
         expected_parent = self._common_git_directory / "worktrees"
-        if admin.is_symlink() or admin.resolve().parent != expected_parent:
-            raise WorktreeRunnerError("unexpected Git worktree metadata location")
-        shutil.rmtree(admin)
+        try:
+            if admin.is_symlink() or admin.resolve().parent != expected_parent:
+                raise WorktreeRunnerError("unexpected Git worktree metadata location")
+            if admin.is_dir():
+                shutil.rmtree(admin)
+            else:
+                admin.unlink()  # a candidate replaced the entry by a plain file
+        except OSError:
+            raise WorktreeRunnerError(
+                "could not remove the Git worktree metadata"
+            ) from None
         try:
             os.rmdir(expected_parent)  # as Git does once the last entry is gone
         except OSError:

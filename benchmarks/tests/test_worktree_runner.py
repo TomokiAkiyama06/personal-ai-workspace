@@ -6,6 +6,7 @@ import errno
 import inspect
 import json
 import os
+import shutil
 import signal
 import stat
 import subprocess
@@ -623,6 +624,83 @@ class WorktreeRunnerTest(unittest.TestCase):
         self.assertNotIn("completed", events)
         self.assertEqual(events[-2:], ["cleanup_started", "cleanup_finished"])
         self.assertNotIn(run.run_id, self.runner._runs)
+
+    def test_the_child_is_stopped_when_the_supervisor_cannot_be_set_up(self):
+        # After the launch, building the output drain can still fail (for example
+        # EMFILE under descriptor exhaustion). The candidate must not be left
+        # running with its worktree removed from under it.
+        run = self.runner.create("no-drain", self.commit)
+        pid_file = self.pid_file()
+        script = (
+            "import os, sys, time\n"
+            "open(sys.argv[1] + '.tmp', 'w').write(str(os.getpid()))\n"
+            "os.replace(sys.argv[1] + '.tmp', sys.argv[1])\n"
+            "time.sleep(60)\n"
+        )
+
+        def no_descriptors(process):
+            raise OSError(errno.EMFILE, "Too many open files")
+
+        with (
+            mock.patch.object(worktree_runner, "_PipeDrain", no_descriptors),
+            self.assertRaises(OSError),
+        ):
+            self.runner.execute(
+                run, [sys.executable, "-c", script, str(pid_file)], PATIENCE
+            )
+
+        # A live child publishes its pid within moments; a child that was stopped
+        # in time never does. Either way it must not be left running.
+        wait_until(pid_file.exists, 3)
+        if pid_file.exists():
+            child = self.read_pid(pid_file)
+            self.assertTrue(wait_until(lambda: not is_running(child)))
+        self.assertFalse(run.path.exists())
+        self.assertNotIn(run.run_id, self.runner._runs)
+
+    def test_a_metadata_entry_replaced_by_a_file_is_removed(self):
+        run = self.runner.create("admin-file", self.commit)
+        admin = self.runner._runs[run.run_id].admin_directory
+        shutil.rmtree(admin)
+        admin.write_text("not a directory\n")
+
+        self.runner.cleanup(run)  # no raw NotADirectoryError
+
+        self.assertFalse(os.path.lexists(admin))
+        self.assertFalse(run.path.exists())
+        events = [event["event"] for event in self.events(run)]
+        self.assertEqual(events[-2:], ["cleanup_started", "cleanup_finished"])
+
+    def test_a_removal_that_fails_is_reported_as_incomplete(self):
+        run = self.runner.create("stuck-admin", self.commit)
+        admin = self.runner._runs[run.run_id].admin_directory
+        real_rmtree = shutil.rmtree
+
+        def stuck(path, *args, **kwargs):
+            if Path(path) == admin:
+                raise PermissionError(errno.EACCES, "Permission denied")
+            return real_rmtree(path, *args, **kwargs)
+
+        real_git = self.runner._git
+
+        def git_leaves_its_metadata(*arguments, **options):
+            result = real_git(*arguments, **options)
+            if arguments[:2] == ("worktree", "remove"):
+                admin.mkdir(parents=True, exist_ok=True)  # Git could not drop it
+            return result
+
+        with (
+            mock.patch.object(self.runner, "_git", git_leaves_its_metadata),
+            mock.patch.object(worktree_runner.shutil, "rmtree", stuck),
+            self.assertRaises(WorktreeRunnerError) as caught,
+        ):
+            self.runner.cleanup(run)
+
+        self.assertNotIn("Permission", str(caught.exception))
+        events = [event["event"] for event in self.events(run)]
+        self.assertEqual(events[-2:], ["cleanup_started", "cleanup_incomplete"])
+        self.assertNotIn(run.run_id, self.runner._runs)
+        real_rmtree(admin, ignore_errors=True)  # leave nothing behind
 
     def test_a_failing_log_close_does_not_stop_cleanup(self):
         # close(2) can report a delayed write error; the descriptor is released
