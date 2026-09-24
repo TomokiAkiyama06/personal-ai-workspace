@@ -16,9 +16,10 @@ MIGRATION_URL = "postgresql://owner:0wner-pw@db.internal/paw"
 
 
 def offline_upgrade_sql(**environment: str) -> str:
+    """The SQL of the audit migration (0025) only, whatever migrations follow it."""
     output = io.StringIO()
     with paw_environment(PAW_DATABASE_URL=URL, **environment):
-        command.upgrade(offline_config(output), "head", sql=True)
+        command.upgrade(offline_config(output), "0025", sql=True)
     return output.getvalue()
 
 
@@ -128,7 +129,10 @@ class OfflineMigrationSqlTest(unittest.TestCase):
     def test_the_app_role_gets_insert_and_select_only_and_is_quoted(self):
         sql = offline_upgrade_sql(PAW_APP_DATABASE_ROLE="paw_app")
         self.assertIn('GRANT INSERT, SELECT ON audit_events TO "paw_app"', sql)
-        self.assertEqual(sql.count("GRANT"), 1)
+        # Exactly one grant on the audit table. Other revisions (users and
+        # setup_tokens, tool approvals, queue tables, ...) grant on their own
+        # tables, which is not the audit table's business.
+        self.assertEqual(sql.count("ON audit_events TO"), 1)
         self.assertLess(sql.index("REVOKE ALL"), sql.index("GRANT INSERT"))
 
     def test_the_role_keeps_its_case_because_it_is_quoted(self):
@@ -158,11 +162,17 @@ class OfflineMigrationSqlTest(unittest.TestCase):
 
     def test_a_migration_role_without_an_app_role_is_warned_about(self):
         with self.assertLogs("paw_backend.migrations.0025", level="WARNING") as logs:
-            offline_upgrade_sql(PAW_MIGRATION_DATABASE_URL=MIGRATION_URL)
+            with self.assertLogs("paw_backend.db_roles", level="WARNING") as generic:
+                offline_upgrade_sql(PAW_MIGRATION_DATABASE_URL=MIGRATION_URL)
         (line,) = logs.output
         self.assertIn("PAW_APP_DATABASE_ROLE", line)
         self.assertIn("refused (503)", line)
         self.assertNotIn("0wner-pw", line)
+        # The shared helper says the same for the table it was asked about. (It
+        # also says it for every other table the migrations up to head create:
+        # only the audit table's line is this test's business.)
+        (helper_line,) = [line for line in generic.output if "audit_events" in line]
+        self.assertNotIn("0wner-pw", "\n".join(generic.output))
 
     def test_no_warning_when_the_role_is_set_or_no_split_is_configured(self):
         with self.assertNoLogs("paw_backend.migrations.0025", level="WARNING"):

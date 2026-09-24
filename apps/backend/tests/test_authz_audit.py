@@ -16,7 +16,9 @@ from paw_backend.authz import (
     Decision,
     InMemoryAuditSink,
     ProjectRole,
+    ProjectState,
     Reason,
+    RepoPermission,
     Resource,
     SystemRole,
 )
@@ -25,6 +27,7 @@ from paw_backend.authz.audit import build_event
 from .authz_support import (
     AGENT,
     P1,
+    REPO,
     SECRET,
     U1,
     U2,
@@ -33,6 +36,7 @@ from .authz_support import (
     StaticDirectory,
     principal,
     project,
+    repo_resource,
 )
 from .test_authz_policy import READ_ONLY_CAPS, resource_for
 
@@ -68,6 +72,7 @@ class EventSchemaTest(unittest.TestCase):
                 "resource_id",
                 "project_id",
                 "repo_id",
+                "repo_acl",
                 "decision",
                 "reason",
                 "old_role",
@@ -205,6 +210,51 @@ class EmissionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             (event.action, event.decision, event.reason),
             ("project.read", "deny", "not_project_member"),
+        )
+
+    async def test_a_repository_decision_records_the_repo_and_how_its_acl_resolved(
+        self,
+    ):
+        sink = InMemoryAuditSink()
+        checker = authorizer(sink)
+        contributor = principal(SystemRole.USER, projects={P1: ProjectRole.CONTRIBUTOR})
+        write = Capability.PROJECT_REPO_WRITE
+        await checker.authorize(contributor, write, repo_resource())
+        await checker.authorize(
+            contributor, write, repo_resource({RepoPermission.READ})
+        )
+        await checker.authorize(contributor, write, project(P1))
+        inherit, override, plain = sink.events
+        self.assertEqual(
+            (inherit.repo_id, inherit.repo_acl, inherit.decision),
+            (REPO, "inherit", "allow"),
+        )
+        self.assertEqual(
+            (override.repo_id, override.repo_acl, override.decision, override.reason),
+            (REPO, "override", "deny", "repo_acl_forbids"),
+        )
+        self.assertEqual((plain.repo_id, plain.repo_acl), (None, None))
+
+    async def test_an_unresolved_repository_is_recorded_as_a_denial_without_an_acl(
+        self,
+    ):
+        sink = InMemoryAuditSink()
+        unresolved = Resource(
+            kind="repository",
+            id=REPO,
+            project_id=P1,
+            repo_id=REPO,
+            project_state=ProjectState.ACTIVE,
+        )
+        await authorizer(sink).authorize(
+            principal(SystemRole.USER, projects={P1: ProjectRole.MANAGER}),
+            Capability.PROJECT_READ,
+            unresolved,
+        )
+        (event,) = sink.events
+        self.assertEqual(
+            (event.repo_id, event.repo_acl, event.reason),
+            (REPO, None, "repo_acl_unresolved"),
         )
 
     async def test_an_agents_allowed_read_is_recorded_unlike_a_humans(self):

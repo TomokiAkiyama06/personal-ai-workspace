@@ -14,24 +14,10 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
 
+from paw_backend.db_roles import validate_role_name
 from paw_backend.security import normalize_origin
 
 _DRIVER = "postgresql+psycopg"
-# A plain (unquoted-style) PostgreSQL identifier; it is still quoted when used.
-_ROLE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,62}")
-# Names PostgreSQL gives a special meaning even when quoted: "public" is the
-# pseudo-role PUBLIC (everyone), and pg_* / postgres are reserved or built-in.
-_RESERVED_ROLES = frozenset(
-    {
-        "public",
-        "none",
-        "postgres",
-        "user",
-        "current_user",
-        "current_role",
-        "session_user",
-    }
-)
 _HOST = re.compile(r"\[[0-9a-f:.]+\]|[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?")
 
 
@@ -81,8 +67,18 @@ class Settings(BaseSettings):
     # a role that cannot alter or drop the append-only audit trail.
     migration_database_url: SecretStr | None = None
     # The role the application connects as. The audit migration grants it
-    # INSERT and SELECT on ``audit_events`` (and nothing else on it).
+    # INSERT and SELECT on ``audit_events`` (and nothing else on it). Migration
+    # ``0021`` grants it only what redeeming an Owner token needs (SELECT, and
+    # UPDATE of a few columns), so it cannot create tokens or change roles.
     app_database_role: str | None = None
+    # The server-local management commands (Owner setup / recovery, PAW-021)
+    # connect with this URL instead: a role that may create Owner tokens, which
+    # the web application's role may not. Unset: they use ``database_url``
+    # (a single-role setup, where the application could create tokens too).
+    operator_database_url: SecretStr | None = None
+    # The role named by ``operator_database_url``; migration ``0021`` grants it
+    # the privileges of the management commands.
+    operator_database_role: str | None = None
     # How long a readiness result (also a failure) is reused. Together with
     # single flight it caps the probe connections an unauthenticated
     # /health/ready can cause at one per interval; 0 turns the reuse off.
@@ -93,6 +89,12 @@ class Settings(BaseSettings):
     event_queue_size: int = Field(default=100, ge=1)
     event_max_subscribers: int = Field(default=100, ge=1)
 
+    # Initial Owner setup / recovery tokens (PAW-021). A token is single-use and
+    # expires after this many seconds; a token that was tried this many times
+    # is locked out for good.
+    setup_token_ttl_seconds: int = Field(default=1_800, ge=60, le=14_400)
+    setup_token_max_attempts: int = Field(default=5, ge=1, le=20)
+
     log_level: str = "info"
 
     @field_validator(
@@ -100,14 +102,21 @@ class Settings(BaseSettings):
         "tls_keyfile",
         "database_url",
         "migration_database_url",
+        "operator_database_url",
         "app_database_role",
+        "operator_database_role",
         mode="before",
     )
     @classmethod
     def _empty_string_means_unset(cls, value: object) -> object:
         return None if value == "" else value
 
-    @field_validator("database_url", "migration_database_url", mode="after")
+    @field_validator(
+        "database_url",
+        "migration_database_url",
+        "operator_database_url",
+        mode="after",
+    )
     @classmethod
     def _normalize_database_url(cls, value: SecretStr | None) -> SecretStr | None:
         if value is None:
@@ -121,16 +130,11 @@ class Settings(BaseSettings):
         url = url.set(drivername=_DRIVER)
         return SecretStr(url.render_as_string(hide_password=False))
 
-    @field_validator("app_database_role")
+    @field_validator("app_database_role", "operator_database_role")
     @classmethod
     def _valid_role_name(cls, value: str | None) -> str | None:
-        if value is not None and (
-            _ROLE.fullmatch(value) is None
-            or value.lower() in _RESERVED_ROLES
-            or value.lower().startswith("pg_")
-        ):
-            raise ValueError("app_database_role is not a valid PostgreSQL role name")
-        return value
+        # The same rules the migrations apply (see paw_backend.db_roles).
+        return None if value is None else validate_role_name(value)
 
     @field_validator("allowed_hosts", "allowed_origins", mode="before")
     @classmethod
