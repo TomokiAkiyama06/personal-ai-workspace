@@ -86,10 +86,21 @@ do not become durable logs.
   be reused before it.
 - If something else reaps the check's leader (the evaluator ignores `SIGCHLD`, or
   another reaper collects it), its exit status is lost, so the check is reported as
-  `error` with no exit code, never as `passed`.  Its pid may also be reused as an
-  unrelated process group id, so the group is signalled only while a process recorded
-  earlier as its member (same pid and start time) is still in it; otherwise nothing is
-  sent.  Members are recorded every 0.2 s while the leader runs.
+  `error` with no exit code, never as `passed`.  The runner reaps the leader itself, so
+  it notices a reaper that got there first at any point, and it re-checks at every group
+  signal that the leader is still its own unreaped child (pid and start time).  Once it
+  is not, its pid may be reused as an unrelated process group id, so the group is
+  signalled only while a process recorded earlier as its member (same pid and start
+  time) is still in it; otherwise nothing is sent.  Members are recorded every 0.2 s
+  while the leader runs and once more at the moment it is seen to have vanished, so a
+  child forked just before the exit is still known.
+- **Documented residuals** (not closable in-process; see Decision 0001): a process that
+  daemonizes (double fork plus `setsid`) can outlive the check; a check-then-signal gap
+  of microseconds remains because a process group cannot be signalled through a pidfd,
+  and the last look at the group assumes its id was not reused within one polling
+  interval (50 ms) of the leader vanishing; a member forked into the group only after
+  the leader was reaped, by members that have all exited before the signal, is missed.
+  Containing descendants reliably needs a PID namespace or a cgroup (`cgroup.kill`).
 - A check command needs a non-empty `argv[0]`; later arguments may be any string,
   including `""` (for example `("python3", "-c", "")`), as the task schema allows.
 - The check log directory is created `0700` and the log `0600` at creation, opened
