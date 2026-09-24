@@ -38,6 +38,30 @@ def _copy_json_value(value: Any) -> Any:
     return value
 
 
+_INVALID_SCHEMA_MESSAGE = (
+    "input_schema must be a valid JSON-serializable Draft 2020-12 JSON Schema"
+)
+
+
+def _snapshot_json_schema(schema: Mapping[str, Any]) -> dict[str, Any]:
+    """Return a validated private copy of a tool input schema.
+
+    Raises ``TypeError`` for non-string mapping keys and ``ValueError`` for any
+    value that is not a finite, acyclic, valid Draft 2020-12 JSON Schema.
+    """
+
+    try:
+        snapshot = _copy_json_value(schema)
+    except RecursionError:
+        raise ValueError(_INVALID_SCHEMA_MESSAGE) from None
+    try:
+        json.dumps(snapshot, allow_nan=False)
+        Draft202012Validator.check_schema(snapshot)
+    except (SchemaError, TypeError, ValueError, RecursionError):
+        raise ValueError(_INVALID_SCHEMA_MESSAGE) from None
+    return snapshot
+
+
 def _freeze_json_value(value: Any) -> Any:
     """Recursively make a copied JSON value read-only."""
 
@@ -83,7 +107,13 @@ class PromptConfig:
 
 @dataclass(frozen=True, slots=True)
 class ToolDefinition:
-    """Provider-neutral tool declaration using a JSON Schema input contract."""
+    """Provider-neutral tool declaration using a JSON Schema input contract.
+
+    ``input_schema`` is validated and replaced by a deep read-only snapshot, so
+    later changes to the supplied mapping never reach a candidate.  ``TypeError``
+    is raised for a non-mapping schema or non-string keys; ``ValueError`` for a
+    schema that is not a valid, finite, acyclic JSON Schema of type ``object``.
+    """
 
     name: str
     description: str
@@ -94,14 +124,7 @@ class ToolDefinition:
         _require_text(self.description, "description")
         if not isinstance(self.input_schema, Mapping):
             raise TypeError("input_schema must be a mapping")
-        snapshot = _copy_json_value(self.input_schema)
-        try:
-            json.dumps(snapshot, allow_nan=False)
-            Draft202012Validator.check_schema(snapshot)
-        except (SchemaError, TypeError, ValueError):
-            raise ValueError(
-                "input_schema must be a valid JSON-serializable Draft 2020-12 JSON Schema"
-            ) from None
+        snapshot = _snapshot_json_schema(self.input_schema)
         if snapshot.get("type") != "object":
             raise ValueError("input_schema must declare an object JSON Schema")
         object.__setattr__(self, "input_schema", _freeze_json_value(snapshot))

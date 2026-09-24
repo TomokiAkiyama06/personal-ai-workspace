@@ -163,6 +163,39 @@ class CandidateAdapterContractTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             ToolDefinition("bad", "Bad schema.", {"type": "object", "required": 1})
 
+    def test_tool_schema_must_be_finite_acyclic_json_schema(self):
+        circular: dict = {"type": "object"}
+        circular["properties"] = circular
+        too_deep: dict = {"type": "object"}
+        node = too_deep
+        for _ in range(5_000):
+            node["properties"] = {}
+            node = node["properties"]
+        invalid = {
+            "nan default": {"type": "object", "default": float("nan")},
+            "infinite bound": {
+                "type": "object",
+                "properties": {"n": {"type": "number", "maximum": float("inf")}},
+            },
+            "non-json value": {"type": "object", "default": object()},
+            "unknown type name": {
+                "type": "object",
+                "properties": {"a": {"type": "strng"}},
+            },
+            "circular reference": circular,
+            "excessive nesting": too_deep,
+        }
+        for label, schema in invalid.items():
+            with (
+                self.subTest(label),
+                self.assertRaisesRegex(ValueError, "valid JSON-serializable"),
+            ):
+                ToolDefinition("bad", "Bad schema.", schema)
+        with self.assertRaisesRegex(TypeError, "string keys"):
+            ToolDefinition("bad", "Bad schema.", {"type": "object", 1: "x"})
+        with self.assertRaisesRegex(TypeError, "must be a mapping"):
+            ToolDefinition("bad", "Bad schema.", ["type", "object"])  # type: ignore[arg-type]
+
     def test_backend_controls_retry_attempts(self):
         policy = RetryPolicy(max_attempts=2)
         self.assertTrue(policy.allows_attempt(1))
