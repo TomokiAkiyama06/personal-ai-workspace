@@ -24,7 +24,7 @@ jobs:
       # for this job and is not reachable from outside the runner, so the
       # password below is not a secret.
       postgres:
-        image: postgres:18
+        image: pgvector/pgvector:pg18
         env:
           POSTGRES_PASSWORD: paw-ci-throwaway
         ports:
