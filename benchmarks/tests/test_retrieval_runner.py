@@ -1,0 +1,496 @@
+"""Tests for the retrieval dataset loader and benchmark runner."""
+
+import json
+import unittest
+
+from benchmarks.metrics_collector import MetricsCollector
+from benchmarks.retrieval_runner import (
+    RetrievalDataset,
+    RetrievalMemory,
+    RetrievalQuery,
+    load_dataset,
+    run_benchmark,
+    visible_memory_ids,
+)
+
+
+class FakeRetriever:
+    """A fake retriever for testing purposes."""
+
+    def __init__(self, results):
+        self.results = results  # Map of query_id -> list of memory_ids
+
+    def retrieve(self, query_text, requester_principals, k):
+        return self.results.get(query_text, [])
+
+
+class PerfectRetriever:
+    """A retriever that returns perfect results for testing."""
+
+    def __init__(self, dataset):
+        self.dataset = dataset
+
+    def retrieve(self, query_text, requester_principals, k):
+        # Find the query by text
+        for query in self.dataset.queries:
+            if query.text == query_text:
+                return list(query.relevant_ids)[:k]
+        return []
+
+
+class LeakingRetriever:
+    """A retriever that leaks memory it shouldn't be able to see."""
+
+    def __init__(self, dataset, leaked_ids):
+        self.dataset = dataset
+        self.leaked_ids = leaked_ids
+
+    def retrieve(self, query_text, requester_principals, k):
+        # Find the query by text
+        for query in self.dataset.queries:
+            if query.text == query_text:
+                # Return relevant ids + leaked ids
+                result = list(query.relevant_ids)
+                result.extend(self.leaked_ids)
+                return result[:k]
+        return []
+
+
+class StaleRetriever:
+    """A retriever that returns stale (non-fresh) results."""
+
+    def __init__(self, dataset, stale_ids):
+        self.dataset = dataset
+        self.stale_ids = stale_ids
+
+    def retrieve(self, query_text, requester_principals, k):
+        # Find the query by text
+        for query in self.dataset.queries:
+            if query.text == query_text:
+                # Return relevant ids + stale ids
+                result = list(query.relevant_ids)
+                result.extend(self.stale_ids)
+                return result[:k]
+        return []
+
+
+class SupersededRetriever:
+    """A retriever that returns superseded (non-active) results."""
+
+    def __init__(self, dataset, superseded_ids):
+        self.dataset = dataset
+        self.superseded_ids = superseded_ids
+
+    def retrieve(self, query_text, requester_principals, k):
+        # Find the query by text
+        for query in self.dataset.queries:
+            if query.text == query_text:
+                # Return relevant ids + superseded ids
+                result = list(query.relevant_ids)
+                result.extend(self.superseded_ids)
+                return result[:k]
+        return []
+
+
+class WrongScopeRetriever:
+    """A retriever that returns wrong-scope results."""
+
+    def __init__(self, dataset, wrong_scope_ids):
+        self.dataset = dataset
+        self.wrong_scope_ids = wrong_scope_ids
+
+    def retrieve(self, query_text, requester_principals, k):
+        # Find the query by text
+        for query in self.dataset.queries:
+            if query.text == query_text:
+                # Return relevant ids + wrong scope ids
+                result = list(query.relevant_ids)
+                result.extend(self.wrong_scope_ids)
+                return result[:k]
+        return []
+
+
+class ErroringRetriever:
+    """A retriever that raises an error for one query."""
+
+    def __init__(self, error_query_id):
+        self.error_query_id = error_query_id
+
+    def retrieve(self, query_text, requester_principals, k):
+        if query_text == self.error_query_id:
+            raise RuntimeError("Simulated error")
+        return []
+
+
+class RetrievalRunnerTest(unittest.TestCase):
+    def setUp(self):
+        """Set up test fixtures."""
+        # Create a simple valid dataset for testing
+        self.valid_dataset = RetrievalDataset(
+            memories=(
+                RetrievalMemory(
+                    id="mem1",
+                    text="Memory 1 content",
+                    acl=frozenset(["user:alice", "user:bob"]),
+                    status="active",
+                    fresh=True,
+                    scope="project:p1",
+                ),
+                RetrievalMemory(
+                    id="mem2",
+                    text="Memory 2 content",
+                    acl=frozenset(["user:alice"]),
+                    status="active",
+                    fresh=True,
+                    scope="project:p1",
+                ),
+                RetrievalMemory(
+                    id="mem3",
+                    text="Memory 3 content",
+                    acl=frozenset(["user:charlie"]),
+                    status="superseded",
+                    fresh=False,
+                    scope="project:p2",
+                ),
+            ),
+            queries=(
+                RetrievalQuery(
+                    id="q1",
+                    text="What is project p1?",
+                    requester_principals=frozenset(["user:alice"]),
+                    scope="project:p1",
+                    relevant_ids=frozenset(["mem1"]),
+                ),
+            ),
+        )
+
+    def test_visible_memory_ids(self):
+        """Test visibility rule."""
+        # mem1 is visible to user:alice (both have common ACL)
+        # mem2 is visible to user:alice (has matching ACL)
+        # mem3 is NOT visible to user:alice (different ACL)
+        visible = visible_memory_ids(self.valid_dataset, self.valid_dataset.queries[0])
+        self.assertIn("mem1", visible)
+        self.assertIn("mem2", visible)
+        self.assertNotIn("mem3", visible)
+        self.assertEqual(len(visible), 2)
+
+    def test_load_dataset_valid_fixture(self):
+        """Test loading a valid dataset fixture."""
+        dataset = load_dataset("benchmarks/tests/fixtures/retrieval/valid_dataset.json")
+        self.assertEqual(len(dataset.memories), 3)
+        self.assertEqual(len(dataset.queries), 2)
+
+        # Check memory properties
+        mem1 = next(m for m in dataset.memories if m.id == "mem1")
+        self.assertEqual(mem1.text, "Memory 1 content")
+        self.assertEqual(mem1.status, "active")
+        self.assertTrue(mem1.fresh)
+        self.assertEqual(mem1.scope, "project:p1")
+
+        # Check query properties
+        q1 = next(q for q in dataset.queries if q.id == "q1")
+        self.assertEqual(q1.text, "What is project p1?")
+        self.assertEqual(q1.scope, "project:p1")
+        self.assertEqual(q1.relevant_ids, frozenset(["mem1", "mem2"]))
+
+    def test_load_dataset_empty_memories(self):
+        """Test loading dataset with empty memories."""
+        with self.assertRaises(ValueError) as context:
+            load_dataset("benchmarks/tests/fixtures/retrieval/empty_memories.json")
+        self.assertIn(
+            "Dataset must contain at least one memory", str(context.exception)
+        )
+
+    def test_load_dataset_empty_queries(self):
+        """Test loading dataset with empty queries."""
+        with self.assertRaises(ValueError) as context:
+            load_dataset("benchmarks/tests/fixtures/retrieval/empty_queries.json")
+        self.assertIn("Dataset must contain at least one query", str(context.exception))
+
+    def test_load_dataset_invalid_status(self):
+        """Test loading dataset with invalid memory status."""
+        with self.assertRaises(ValueError) as context:
+            load_dataset("benchmarks/tests/fixtures/retrieval/invalid_status.json")
+        self.assertIn("Invalid status for memory mem1", str(context.exception))
+
+    def test_load_dataset_invisible_relevant(self):
+        """Test loading dataset where a relevant ID is not visible to requester."""
+        with self.assertRaises(ValueError) as context:
+            load_dataset("benchmarks/tests/fixtures/retrieval/invisible_relevant.json")
+        self.assertIn("not visible to requester principals", str(context.exception))
+
+    def test_perfect_retriever(self):
+        """Test with a perfect retriever."""
+        retriever = PerfectRetriever(self.valid_dataset)
+        report = run_benchmark(retriever, self.valid_dataset, k=2)
+
+        # Should have perfect scores
+        self.assertEqual(report.metrics["recall_at_k"], 1.0)
+        self.assertEqual(report.metrics["mrr"], 1.0)
+        self.assertEqual(report.metrics["ndcg_at_k"], 1.0)
+        self.assertEqual(report.metrics["permission_leakage_total"], 0)
+
+    def test_leaking_retriever(self):
+        """Test with a retriever that leaks memory."""
+        leaking_retriever = LeakingRetriever(
+            self.valid_dataset, ["mem3"]
+        )  # mem3 is not visible
+        report = run_benchmark(leaking_retriever, self.valid_dataset, k=2)
+
+        # Should have leakage
+        self.assertGreater(report.metrics["permission_leakage_total"], 0)
+
+    def test_stale_retriever(self):
+        """Test with a retriever that returns stale results."""
+        dataset_with_stale = RetrievalDataset(
+            memories=(
+                RetrievalMemory(
+                    id="mem1",
+                    text="Memory 1 content",
+                    acl=frozenset(["user:alice"]),
+                    status="active",
+                    fresh=True,
+                    scope="project:p1",
+                ),
+                RetrievalMemory(
+                    id="mem2",
+                    text="Memory 2 content",
+                    acl=frozenset(["user:alice"]),
+                    status="active",
+                    fresh=False,  # Stale
+                    scope="project:p1",
+                ),
+            ),
+            queries=(
+                RetrievalQuery(
+                    id="q1",
+                    text="What is project p1?",
+                    requester_principals=frozenset(["user:alice"]),
+                    scope="project:p1",
+                    relevant_ids=frozenset(["mem1"]),
+                ),
+            ),
+        )
+
+        stale_retriever = StaleRetriever(dataset_with_stale, ["mem2"])  # mem2 is stale
+        report = run_benchmark(stale_retriever, dataset_with_stale, k=2)
+
+        # Should have stale rate > 0
+        self.assertGreater(report.metrics["stale_rate"], 0.0)
+
+    def test_superseded_retriever(self):
+        """Test with a retriever that returns superseded results."""
+        dataset_with_superseded = RetrievalDataset(
+            memories=(
+                RetrievalMemory(
+                    id="mem1",
+                    text="Memory 1 content",
+                    acl=frozenset(["user:alice"]),
+                    status="active",
+                    fresh=True,
+                    scope="project:p1",
+                ),
+                RetrievalMemory(
+                    id="mem2",
+                    text="Memory 2 content",
+                    acl=frozenset(["user:alice"]),
+                    status="superseded",  # Superseded
+                    fresh=False,
+                    scope="project:p1",
+                ),
+            ),
+            queries=(
+                RetrievalQuery(
+                    id="q1",
+                    text="What is project p1?",
+                    requester_principals=frozenset(["user:alice"]),
+                    scope="project:p1",
+                    relevant_ids=frozenset(["mem1"]),
+                ),
+            ),
+        )
+
+        superseded_retriever = SupersededRetriever(
+            dataset_with_superseded, ["mem2"]
+        )  # mem2 is superseded
+        report = run_benchmark(superseded_retriever, dataset_with_superseded, k=2)
+
+        # Should have superseded rate > 0
+        self.assertGreater(report.metrics["superseded_rate"], 0.0)
+
+    def test_wrong_scope_retriever(self):
+        """Test with a retriever that returns wrong-scope results."""
+        dataset_with_scopes = RetrievalDataset(
+            memories=(
+                RetrievalMemory(
+                    id="mem1",
+                    text="Memory 1 content",
+                    acl=frozenset(["user:alice"]),
+                    status="active",
+                    fresh=True,
+                    scope="project:p1",
+                ),
+                RetrievalMemory(
+                    id="mem2",
+                    text="Memory 2 content",
+                    acl=frozenset(["user:alice"]),
+                    status="active",
+                    fresh=True,
+                    scope="project:p2",  # Different scope
+                ),
+            ),
+            queries=(
+                RetrievalQuery(
+                    id="q1",
+                    text="What is project p1?",
+                    requester_principals=frozenset(["user:alice"]),
+                    scope="project:p1",
+                    relevant_ids=frozenset(["mem1"]),
+                ),
+            ),
+        )
+
+        wrong_scope_retriever = WrongScopeRetriever(
+            dataset_with_scopes, ["mem2"]
+        )  # mem2 is wrong scope
+        report = run_benchmark(wrong_scope_retriever, dataset_with_scopes, k=2)
+
+        # Should have scope mismatch rate > 0
+        self.assertGreater(report.metrics["scope_mismatch_rate"], 0.0)
+
+    def test_duplicate_ids_dropped(self):
+        """Test that duplicate IDs are dropped."""
+
+        class DuplicateRetriever:
+            def retrieve(self, query_text, requester_principals, k):
+                return ["mem1", "mem1", "mem2"]  # Duplicates
+
+        retriever = DuplicateRetriever()
+        report = run_benchmark(retriever, self.valid_dataset, k=2)
+
+        # Should still process correctly (duplicates dropped)
+        self.assertEqual(
+            report.metrics["recall_at_k"], 1.0
+        )  # If mem1 and mem2 are relevant
+
+    def test_unknown_id_counted_as_leakage(self):
+        """Test that unknown IDs are counted as leakage."""
+
+        class UnknownIdRetriever:
+            def retrieve(self, query_text, requester_principals, k):
+                return ["mem1", "unknown_id"]  # One known, one unknown
+
+        retriever = UnknownIdRetriever()
+        report = run_benchmark(retriever, self.valid_dataset, k=2)
+
+        # Should have leakage count of 1
+        self.assertEqual(report.metrics["permission_leakage_total"], 1)
+
+    def test_erroring_retriever(self):
+        """Test that a retriever raising an error doesn't break the whole benchmark."""
+        erroring_retriever = ErroringRetriever("What is project p1?")
+        report = run_benchmark(erroring_retriever, self.valid_dataset, k=2)
+
+        # One query should fail (have error_type)
+        failed_query = None
+        for query in report.queries:
+            if query["error_type"] is not None:
+                failed_query = query
+                break
+
+        self.assertIsNotNone(failed_query)
+        self.assertEqual(failed_query["error_type"], "RuntimeError")
+
+    @staticmethod
+    def _dataset(query_count):
+        memory = RetrievalMemory(
+            id="m1",
+            text="TEXT-m1",
+            acl=frozenset({"user:a"}),
+            status="active",
+            fresh=True,
+            scope="project",
+        )
+        queries = tuple(
+            RetrievalQuery(
+                id=f"q{index}",
+                text=f"QTEXT-{index}",
+                requester_principals=frozenset({"user:a"}),
+                scope="project",
+                relevant_ids=frozenset({"m1"}),
+            )
+            for index in range(query_count)
+        )
+        return RetrievalDataset(memories=(memory,), queries=queries)
+
+    def test_latency_statistics_use_nearest_rank_percentiles(self):
+        dataset = self._dataset(10)
+        # The runner reads the clock twice per query: before and after retrieve().
+        readings = iter(
+            value
+            for milliseconds in range(1, 11)
+            for value in (0.0, milliseconds / 1000)
+        )
+        report = run_benchmark(
+            FixedRetriever(["m1"]), dataset, k=1, clock=lambda: next(readings)
+        )
+
+        self.assertAlmostEqual(report.queries[2]["latency_ms"], 3.0)
+        self.assertAlmostEqual(report.metrics["latency_ms_mean"], 5.5)
+        self.assertAlmostEqual(report.metrics["latency_ms_p50"], 5.0)
+        self.assertAlmostEqual(report.metrics["latency_ms_p95"], 10.0)
+
+    def test_latency_excludes_scoring_time(self):
+        dataset = self._dataset(1)
+        readings = iter([0.0, 0.004])
+        report = run_benchmark(
+            FixedRetriever(["m1"]), dataset, k=1, clock=lambda: next(readings)
+        )
+        self.assertAlmostEqual(report.queries[0]["latency_ms"], 4.0)
+
+    def test_report_to_dict_is_json_serializable_without_text(self):
+        dataset = self._dataset(2)
+        report = run_benchmark(FixedRetriever(["m1"]), dataset, k=1)
+
+        data = report.to_dict()
+        serialized = json.dumps(data)
+
+        for text in ("TEXT-m1", "QTEXT-0", "QTEXT-1", "user:a"):
+            self.assertNotIn(text, serialized)
+        self.assertEqual(json.loads(serialized)["metrics"]["k"], 1)
+        self.assertEqual(len(data["queries"]), 2)
+        self.assertNotIn("resources", data)
+
+    def test_metrics_collector_resources_are_reported(self):
+        dataset = self._dataset(2)
+        collector = MetricsCollector(gpu_poll_interval_s=None)
+
+        class CountingRetriever(FixedRetriever):
+            def retrieve(self, query_text, requester_principals, k):
+                collector.record_step()
+                return super().retrieve(query_text, requester_principals, k)
+
+        report = run_benchmark(
+            CountingRetriever(["m1"]), dataset, k=1, metrics_collector=collector
+        )
+
+        self.assertEqual(report.resources["agent_steps"], 2)
+        self.assertEqual(report.to_dict()["resources"]["agent_steps"], 2)
+
+    def test_malformed_retriever_output_is_not_hidden_as_a_retriever_failure(self):
+        dataset = self._dataset(1)
+        with self.assertRaises(TypeError):
+            run_benchmark(FixedRetriever([5]), dataset, k=1)
+
+
+class FixedRetriever:
+    def __init__(self, ids):
+        self.ids = ids
+
+    def retrieve(self, query_text, requester_principals, k):
+        return self.ids
+
+
+if __name__ == "__main__":
+    unittest.main()
