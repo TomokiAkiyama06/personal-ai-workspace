@@ -207,7 +207,14 @@ make the lifecycle log tamper-proof**.  What the runner does:
   nothing is signalled unless it is still the runner's own unreaped child (`waitid`
   with `WNOWAIT`) with that start time.  A child that something else already reaped
   may have had its pid, which is also its process group id, reused, so then nothing is
-  sent and nothing is waited for.
+  sent and nothing is waited for.  A child with no recorded start time (no `/proc`, or
+  the read failed) is not signalled at all, because `waitid` alone cannot tell it from
+  another direct child that was given the same pid.
+- Without a recorded start time (no `/proc`) the runner has no identity to check, so it
+  sends no signal to the candidate's group and cannot stop it: a candidate that exceeds
+  the timeout (or is cancelled) is reported `timed_out` (or `cancelled`) but keeps
+  running, and one that finishes is still reported with its real exit status.
+  Production needs a container or cgroup there.
 - A removal that fails for a filesystem reason (a Git metadata entry replaced by a
   plain file is simply removed; a permission error is not) is reported as
   `cleanup_incomplete` and `WorktreeRunnerError`, never as a raw `OSError`.

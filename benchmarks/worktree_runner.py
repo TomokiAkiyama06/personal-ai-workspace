@@ -108,6 +108,8 @@ class _Leader:
     exists, so whatever is in the group then is ours unless the id was reused
     within one polling interval.  Whether the leader is still ours is re-checked
     at every signal, because a reaper can act at any time after it was observed.
+    A leader without a recorded start time cannot be told from a stranger holding
+    its number: its group is never signalled.
     """
 
     refresh_seconds = 0.2
@@ -175,6 +177,8 @@ class _Leader:
         return not self.released or self.members.get(pid) == started
 
     def signal_group(self, number: int) -> None:
+        if self.start is None:
+            return  # no recorded identity: nothing shows the number is still ours
         if not self.released and (
             self.process.returncode is not None or not self._still_ours()
         ):
@@ -605,8 +609,9 @@ class WorktreeRunner:
         launched.  The child may already have been reaped by someone else
         (``SIGCHLD`` ignored, a concurrent reaper), and its pid, which is also its
         process group id, may then belong to an unrelated process.  So nothing is
-        signalled or waited for unless the child is still our own unreaped child
-        with the recorded start time.
+        signalled or waited for unless the child has a recorded start time and is
+        still our own unreaped child with it: without a recorded identity nothing
+        can show that the number is still ours, so nothing is sent.
         """
         if cls._is_unreaped_child(process.pid, started_at):
             # Its own session, so its pid is the group id, and being unreaped
@@ -615,9 +620,9 @@ class WorktreeRunner:
             with contextlib.suppress(OSError, subprocess.TimeoutExpired):
                 process.wait(timeout=5)
         elif process.returncode is None:
-            # Reaped elsewhere: its status is gone.  Recording that keeps
-            # ``Popen`` from waiting for (or reaping) whatever holds the number
-            # now.
+            # Reaped elsewhere, or not provably ours: nothing is sent.  Recording
+            # that keeps ``Popen`` from waiting for (or reaping) whatever holds
+            # the number now.
             process.returncode = 0
         for stream in (process.stdout, process.stderr):
             if stream is not None:
@@ -631,14 +636,20 @@ class WorktreeRunner:
 
         An unreaped child keeps its pid from being reused; once it was reaped (by
         us or by someone else) the number may belong to an unrelated process.
+        ``waitid`` alone cannot tell: if the original child was reaped and its pid
+        went to another direct child of ours, ``waitid`` describes that one.  So a
+        start time recorded at launch is required; without one (no ``/proc``, or
+        the read failed) the child is not provably ours and the answer is no.
         """
+        if started_at is None:
+            return False
         try:
             os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
         except ChildProcessError:
             return False
         except AttributeError:
             pass  # no WNOWAIT: only the start time can tell
-        return started_at is None or cls._start_time(pid) == started_at
+        return cls._start_time(pid) == started_at
 
     def _terminate(self, leader: _Leader, drain: _PipeDrain) -> None:
         """TERM, wait for a grace period, then KILL whatever is left.
