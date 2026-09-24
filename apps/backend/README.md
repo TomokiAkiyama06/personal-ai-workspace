@@ -414,7 +414,7 @@ Runtime と GPU 時間の単位は整数の秒、他は個数です。記録す�
   要件は Unlimited に別の数値の上限を定めていないため、設けていません。
 - 子 Agent が親の Budget を超えないこと（[要件](../../REQUIREMENTS.md)）は、Sub-Agent を扱う PAW-034 の責務です。
 
-**Preset の値は仮の値です。** 要件は Preset の名前だけを定め、数値を定めていません（具体的な閾値は実装時の選択）。次の値は、人間の確認が必要な**仮置き**です。
+**Preset の値は仮の値です。** 要件は Preset の名前だけを定め、数値を定めていません（具体的な閾値は実装時の選択）。次の値は、人間の確認が必要な**仮置き**で、[Decision 0007](../../docs/decisions/0007-task-queue-budget-and-loop-policy.md)（Proposed、承認前）として提案しています。値は `domain.PRESET_LIMITS` のデータなので、承認された値に変えても Migration は要りません。
 
 | 種類 | Standard | Long | Unlimited |
 | --- | --- | --- | --- |
@@ -437,7 +437,7 @@ Budget の Preset とは無関係に動きます。
   Orchestrator は `TRY_ALTERNATIVE` の後に `approach` を 1 増やして次の失敗を記録します（0 が元の方法、1 が最初の代替）。新しい `approach` は、その中で改めて 3 回繰り返すまで `ESCALATE` になりません。
 - 判定は Deterministic で、同じ履歴には常に同じ結果を返します（`evaluate_loop` は純粋関数）。`LoopDetector.record_failure` は履歴へ追記し、1 Task あたり `window_size` 件を超えた古い行を消します。同じ Task への同時の記録は直列化されます。
   Restart で新しい試行を始めるときは `clear(task_id)` で履歴を消してください。
-- 閾値（3 回、Window 10、代替 1 回）は仮の値です（要件は具体的な閾値を実装時の選択としています）。
+- 閾値（3 回、Window 10、代替 1 回）は仮の値です（要件は具体的な閾値を実装時の選択としています）。[Decision 0007](../../docs/decisions/0007-task-queue-budget-and-loop-policy.md)（Proposed）で承認を求めています。
 
 ### 次の行動（Escalation の判断）
 
@@ -451,6 +451,7 @@ Budget の Preset とは無関係に動きます。
 | それ以外 | `CONTINUE` |
 
 `WAIT_FOR_USER` は PAW-032 の `wait`（`WaitReason.USER`）、`FAIL` は `fail` に対応します（`domain.ACTION_TASK_COMMANDS`）。Command を発行するのは Orchestrator（PAW-034）で、この Module は発行しません。
+この対応（`retries` は `FAIL`、他は `WAIT_FOR_USER`、Budget を Loop より優先）も [Decision 0007](../../docs/decisions/0007-task-queue-budget-and-loop-policy.md)（Proposed）で承認を求めています。
 Budget 超過のときに Escalation しないのは、使い切った予算をさらに使うためです。`Waiting for Resource` は GPU の Scheduler（PAW-036）の担当で、ここでは使いません。
 
 ### 実装の出自
@@ -461,7 +462,7 @@ Budget 超過のときに Escalation しないのは、使い切った予算を�
 
 ### 未確定の事項と制限
 
-人間の確認が必要なもの（要件に定めがないため、仮に置いた値・選択です）。
+人間の確認が必要なもの（要件に定めがないため、仮に置いた値・選択です。**[Decision 0007](../../docs/decisions/0007-task-queue-budget-and-loop-policy.md) は Proposed で、承認されるまで暫定です**）。
 
 - **Preset の数値。** 上の表は仮置きです。
 - **Loop の閾値。** 3 回、Window 10、代替 1 回は仮の値です。
