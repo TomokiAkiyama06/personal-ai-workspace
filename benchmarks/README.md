@@ -73,6 +73,13 @@ stale / superseded / Scope誤選択率、latency（mean / p50 / p95、nearest-ra
 順位指標の定義は`benchmarks.retrieval_metrics`にあり、Retrieverの返すidの重複は2件目以降を捨て、
 Datasetにないidは権限外として数えます。Retrieverが例外を出したqueryは指標0の失敗queryとして続行します
 （記録するのは例外の型だけです）。latencyは`retrieve`の呼び出しだけを計測します。
+CPU時間は、`retrieve`の呼び出し中にこのprocessが使ったCPU時間（`cpu_ms`、平均は`cpu_ms_mean`、合計は`cpu_ms_total`）です。
+Retrieverがin-processで動く場合だけ含まれ、外部のServiceが使うCPU時間は見えません。GPU・VRAMは、`--collect-resources`で
+`MetricsCollector`を使うと、wall clockとVRAM・GPU utilizationのpeakが`resources`に入ります（付けない場合は含みません）。
+`retrieve`は文字列のsequence（list・tuple）を返す必要があり、単一のid文字列（`"mem1"`）などは不正な戻り値として終了code 2にします。
+返されたidは、重複を除いた上位`k`件だけを採点します（`k`を超える分を末尾に足しても、どの指標も上がりません）。
+Datasetのrelevantなmemoryは、active・fresh・queryと同じScopeである必要があります。そうでないと、正解をそのまま返しても
+stale / superseded / Scope誤選択率が0にならず、指標が矛盾するためDataset不備として拒否します。
 失敗したqueryの数は`failed_queries`に出ます。Retrieverが`retrieve(query_text, principals, k)`を
 呼べない場合（メソッドがない、引数が合わない）は、全queryが失敗した報告にせず、実行前にエラーにします。
 stale / superseded / Scope誤選択率の分母は、`k`ではなく、実際に返した上位k件以内の件数です

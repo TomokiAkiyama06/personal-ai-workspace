@@ -522,6 +522,66 @@ class RetrievalRunnerTest(unittest.TestCase):
             self.assertEqual(metrics[name], 0.0, name)
         self.assertEqual(metrics["permission_leakage_total"], 0)
 
+    def test_relevance_labels_must_be_consistent_with_the_misselection_metrics(self):
+        for change, label in (
+            ({"status": "superseded"}, "superseded"),
+            ({"status": "deprecated"}, "deprecated"),
+            ({"fresh": False}, "stale"),
+            ({"scope": "another-scope"}, "wrong scope"),
+        ):
+            with self.subTest(label=label):
+                document = self._document()
+                document["memories"][0].update(change)
+                with self.assertRaises(ValueError) as context:
+                    self._load_from_text(json.dumps(document))
+                self.assertIn(
+                    "relevant memory m1 must be active, fresh and in the query's scope",
+                    str(context.exception),
+                )
+                self.assertNotIn("SECRET-TEXT", str(context.exception))
+
+    def test_retriever_results_must_be_a_sequence_of_ids(self):
+        for result in ("m1", b"m1", {"m1"}, iter(["m1"]), None, 5):
+            with self.subTest(result=repr(result)), self.assertRaises(TypeError):
+                run_benchmark(FixedRetriever(result), self._dataset(1), k=1)
+
+    def test_only_the_first_k_ids_are_scored(self):
+        dataset = self._dataset(1)
+
+        at_one = run_benchmark(FixedRetriever(["x", "m1"]), dataset, k=1).metrics
+        at_two = run_benchmark(FixedRetriever(["x", "m1"]), dataset, k=2).metrics
+
+        self.assertEqual((at_one["recall_at_k"], at_one["mrr"]), (0.0, 0.0))
+        self.assertEqual((at_two["recall_at_k"], at_two["mrr"]), (1.0, 0.5))
+
+    def test_cpu_time_is_reported_per_query_and_aggregated(self):
+        readings = iter([0.0, 0.002, 0.0, 0.004])
+
+        report = run_benchmark(
+            FixedRetriever(["m1"]),
+            self._dataset(2),
+            k=1,
+            cpu_clock=lambda: next(readings),
+        )
+
+        self.assertAlmostEqual(report.queries[0]["cpu_ms"], 2.0)
+        self.assertAlmostEqual(report.queries[1]["cpu_ms"], 4.0)
+        self.assertAlmostEqual(report.metrics["cpu_ms_mean"], 3.0)
+        self.assertAlmostEqual(report.metrics["cpu_ms_total"], 6.0)
+
+    def test_failed_queries_still_report_cpu_time(self):
+        class Raising:
+            def retrieve(self, query_text, requester_principals, k):
+                raise RuntimeError("boom")
+
+        readings = iter([1.0, 1.003])
+
+        report = run_benchmark(
+            Raising(), self._dataset(1), k=1, cpu_clock=lambda: next(readings)
+        )
+
+        self.assertAlmostEqual(report.queries[0]["cpu_ms"], 3.0)
+
     def test_retrievers_without_the_required_interface_are_rejected(self):
         class NoMethod:
             pass

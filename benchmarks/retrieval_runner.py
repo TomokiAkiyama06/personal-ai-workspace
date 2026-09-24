@@ -151,11 +151,20 @@ def _parse_query(
             raise ValueError(
                 f"{where} requests memory {relevant_id} that is not visible to its requester"
             )
+    scope = _string(item, "scope", where)
+    for relevant_id in sorted(relevant_ids):
+        memory = memories[relevant_id]
+        if memory.status != "active" or not memory.fresh or memory.scope != scope:
+            raise ValueError(
+                f"{where}: relevant memory {relevant_id} must be active, fresh and in the "
+                "query's scope, or a perfect result would also count as stale, "
+                "superseded or wrong-scope"
+            )
     return RetrievalQuery(
         id=query_id,
         text=_string(item, "text", where),
         requester_principals=principals,
-        scope=_string(item, "scope", where),
+        scope=scope,
         relevant_ids=relevant_ids,
     )
 
@@ -225,14 +234,20 @@ def _score_queries(
     dataset: RetrievalDataset,
     k: int,
     clock: Callable[[], float],
+    cpu_clock: Callable[[], float],
 ) -> tuple[list[dict], list[float]]:
-    """Run every query once and return its result records and latencies (ms)."""
+    """Run every query once and return its result records and latencies (ms).
+
+    Only the first ``k`` distinct ids a retriever returns are scored, so a retriever
+    cannot inflate a metric by appending results beyond the requested cutoff.
+    """
     query_results = []
     total_latencies = []
 
     for query in dataset.queries:
         visible_ids = visible_memory_ids(dataset, query)
         started = clock()
+        cpu_started = cpu_clock()
         try:
             retrieved = retriever.retrieve(
                 query.text, tuple(sorted(query.requester_principals)), k
@@ -244,6 +259,7 @@ def _score_queries(
                 {
                     "id": query.id,
                     "latency_ms": latency_ms,
+                    "cpu_ms": (cpu_clock() - cpu_started) * 1000,
                     "recall_at_k": 0.0,
                     "mrr": 0.0,
                     "ndcg_at_k": 0.0,
@@ -256,9 +272,12 @@ def _score_queries(
             )
             continue
         latency_ms = (clock() - started) * 1000
+        cpu_ms = (cpu_clock() - cpu_started) * 1000
         total_latencies.append(latency_ms)
 
-        ranked = list(dict.fromkeys(retrieved))
+        if isinstance(retrieved, (str, bytes)) or not isinstance(retrieved, Sequence):
+            raise TypeError("retrieve() must return a sequence of memory ids")
+        ranked = list(dict.fromkeys(retrieved))[:k]
         stale_ids = {m.id for m in dataset.memories if not m.fresh}
         superseded_ids = {m.id for m in dataset.memories if m.status != "active"}
         scope_mismatch_ids = {m.id for m in dataset.memories if m.scope != query.scope}
@@ -266,6 +285,7 @@ def _score_queries(
             {
                 "id": query.id,
                 "latency_ms": latency_ms,
+                "cpu_ms": cpu_ms,
                 "recall_at_k": recall_at_k(ranked, query.relevant_ids, k),
                 "mrr": reciprocal_rank(ranked, query.relevant_ids),
                 "ndcg_at_k": ndcg_at_k(ranked, query.relevant_ids, k),
@@ -288,9 +308,14 @@ def run_benchmark(
     *,
     k: int,
     clock: Callable[[], float] = time.monotonic,
+    cpu_clock: Callable[[], float] = time.process_time,
     metrics_collector: MetricsCollector | None = None,
 ) -> RetrievalReport:
     """Run a benchmark on a retrieval system.
+
+    ``cpu_ms`` is the CPU time of this process while ``retrieve`` ran (it includes
+    the retriever only when it runs in-process; an external service's CPU time is
+    not visible here). GPU / VRAM come from ``metrics_collector``.
 
     The collector is always stopped, also when scoring raises, so a periodic GPU
     sampling thread is never leaked.
@@ -299,7 +324,9 @@ def run_benchmark(
     if metrics_collector is not None:
         metrics_collector.start()
     try:
-        query_results, total_latencies = _score_queries(retriever, dataset, k, clock)
+        query_results, total_latencies = _score_queries(
+            retriever, dataset, k, clock, cpu_clock
+        )
     finally:
         if metrics_collector is not None:
             metrics_collector.stop()
@@ -334,6 +361,8 @@ def run_benchmark(
         "latency_ms_mean": latency_mean,
         "latency_ms_p50": latency_p50,
         "latency_ms_p95": latency_p95,
+        "cpu_ms_mean": mean([qr["cpu_ms"] for qr in query_results]),
+        "cpu_ms_total": sum(qr["cpu_ms"] for qr in query_results),
         "failed_queries": sum(1 for qr in query_results if qr["error_type"]),
         "k": k,
     }

@@ -124,6 +124,31 @@ class RunRetrievalBenchmarkTest(unittest.TestCase):
         self.assertEqual(stdout, "")
         self.assertEqual(stderr, "retriever returned an invalid result (TypeError)\n")
 
+    def test_a_single_id_string_is_an_invalid_result(self):
+        code, stdout, stderr = run_cli(
+            "--dataset",
+            VALID_DATASET,
+            "--retriever",
+            "benchmarks.tests.fixture_retrievers:make_string_retriever",
+        )
+
+        self.assertEqual(code, 2)
+        self.assertEqual(stdout, "")
+        self.assertEqual(stderr, "retriever returned an invalid result (TypeError)\n")
+
+    def test_resources_are_recorded_only_when_requested(self):
+        _, without, _ = run_cli("--dataset", VALID_DATASET, "--retriever", RETRIEVER)
+        code, with_resources, _ = run_cli(
+            "--dataset", VALID_DATASET, "--retriever", RETRIEVER, "--collect-resources"
+        )
+
+        without_report = json.loads(without)
+        self.assertNotIn("resources", without_report)
+        self.assertEqual(code, 0)
+        report = json.loads(with_resources)
+        self.assertGreaterEqual(report["resources"]["wall_clock_ms"], 0)
+        self.assertGreaterEqual(report["metrics"]["cpu_ms_total"], 0)
+
     def test_unwritable_output_exits_with_two(self):
         with tempfile.TemporaryDirectory() as directory:
             code, _, stderr = run_cli(

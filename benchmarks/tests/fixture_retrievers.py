@@ -31,3 +31,7 @@ def make_wrong_signature_retriever():
 
 def make_failing_retriever():
     raise RuntimeError("model init failed: token=SECRET-TOKEN")
+
+
+def make_string_retriever():
+    return FixedRetriever("mem1")

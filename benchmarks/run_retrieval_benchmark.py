@@ -15,6 +15,7 @@ import json
 import sys
 from pathlib import Path
 
+from benchmarks.metrics_collector import MetricsCollector, NvidiaSmiGpuSampler
 from benchmarks.retrieval_runner import (
     load_dataset,
     run_benchmark,
@@ -57,6 +58,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--output", type=Path, help="write the JSON report to this file, not stdout"
     )
+    parser.add_argument(
+        "--collect-resources",
+        action="store_true",
+        help="record wall clock and, when nvidia-smi is available, peak VRAM / GPU "
+        "utilization under 'resources'",
+    )
     arguments = parser.parse_args(argv)
 
     try:
@@ -72,7 +79,14 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     try:
-        report = run_benchmark(retriever, dataset, k=arguments.k)
+        collector = (
+            MetricsCollector(gpu_sampler=NvidiaSmiGpuSampler())
+            if arguments.collect_resources
+            else None
+        )
+        report = run_benchmark(
+            retriever, dataset, k=arguments.k, metrics_collector=collector
+        )
     except (TypeError, ValueError) as error:
         print(
             f"retriever returned an invalid result ({type(error).__name__})",
