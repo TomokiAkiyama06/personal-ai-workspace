@@ -8,7 +8,13 @@ decided by the concrete adapters and the Backend Tool Broker ``network``
 capability, not here.
 """
 
+import re
+import unicodedata
 from types import MappingProxyType
+from urllib.parse import urlsplit
+
+from paw_backend.research.providers.contract import MAX_LOCATOR_CHARS
+from paw_backend.research.providers.errors import InvalidLocatorError
 
 # Query parameters that only track a visitor are removed. A parameter is dropped
 # when its name, compared case-insensitively, starts with one of the prefixes or
@@ -58,6 +64,44 @@ CREDENTIAL_PARAMETERS = frozenset(
 )
 # A port equal to the default of its scheme is not part of the canonical form.
 DEFAULT_PORTS = MappingProxyType({"http": 80, "https": 443})
+
+# A host is at most 253 characters of dot-separated labels (RFC 1035).
+MAX_HOST_CHARS = 253
+_HOST_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+# One pass over a path or query: an existing ``%xx`` escape, or a run of
+# non-ASCII characters. Scanning once means that a ``%`` never hides what
+# follows it (``%%e6`` contains the escape ``%e6``).
+_ESCAPE_OR_NON_ASCII = re.compile(r"%([0-9A-Fa-f]{2})|([^\x00-\x7f]+)")
+_FORBIDDEN_CATEGORIES = frozenset({"Cc", "Cs"})
+
+
+def _escape(text: str) -> str:
+    """Upper-case the hex digits of ``%xx`` escapes and percent-encode non-ASCII."""
+
+    def replace(match: re.Match[str]) -> str:
+        if match.group(1) is not None:
+            return "%" + match.group(1).upper()
+        return "".join(f"%{byte:02X}" for byte in match.group(2).encode("utf-8"))
+
+    return _ESCAPE_OR_NON_ASCII.sub(replace, text)
+
+
+def _has_forbidden_character(raw: str) -> bool:
+    return any(
+        char.isspace()
+        or char == "\\"
+        or unicodedata.category(char) in _FORBIDDEN_CATEGORIES
+        for char in raw
+    )
+
+
+def _is_dropped_parameter(name: str) -> bool:
+    lowered = name.lower()
+    return (
+        lowered.startswith(TRACKING_PARAMETER_PREFIXES)
+        or lowered in TRACKING_PARAMETERS
+        or lowered in CREDENTIAL_PARAMETERS
+    )
 
 
 def canonicalize_locator(raw: str) -> str:
@@ -112,4 +156,50 @@ def canonicalize_locator(raw: str) -> str:
     is idempotent: ``canonicalize_locator(canonicalize_locator(x))`` equals
     ``canonicalize_locator(x)``.
     """
-    raise NotImplementedError("PAW-051 stub")
+    if not isinstance(raw, str):
+        raise TypeError("raw must be a str")
+    # The length limit comes first: everything below is linear in the input and
+    # must not run on an arbitrarily large string.
+    if not raw or len(raw) > MAX_LOCATOR_CHARS or _has_forbidden_character(raw):
+        raise InvalidLocatorError()
+
+    try:
+        parts = urlsplit(raw)
+        port = parts.port
+    except ValueError:
+        # ``from None``: the ValueError text can quote the input.
+        raise InvalidLocatorError() from None
+    if parts.scheme not in DEFAULT_PORTS:  # ``urlsplit`` lower-cases the scheme
+        raise InvalidLocatorError()
+    # A non-ASCII authority is rejected before ``hostname`` lower-cases it:
+    # ``str.lower`` maps some non-ASCII characters (KELVIN SIGN) to ASCII.
+    if "@" in parts.netloc or not parts.netloc.isascii():
+        raise InvalidLocatorError()
+
+    host = (parts.hostname or "").removesuffix(".")
+    if (
+        not host
+        or len(host) > MAX_HOST_CHARS
+        or not all(_HOST_LABEL.fullmatch(label) for label in host.split("."))
+    ):
+        raise InvalidLocatorError()
+    if port == 0:
+        raise InvalidLocatorError()
+
+    authority = host
+    if port is not None and port != DEFAULT_PORTS[parts.scheme]:
+        authority = f"{host}:{port}"
+
+    pieces = []
+    for piece in parts.query.split("&"):
+        name, equals, value = piece.partition("=")
+        if piece and not _is_dropped_parameter(name):
+            pieces.append((_escape(name), _escape(value), equals))
+    pieces.sort(key=lambda piece: (piece[0], piece[1]))
+    query = "&".join(f"{name}{equals}{value}" for name, value, equals in pieces)
+
+    path = _escape(parts.path) or "/"
+    result = f"{parts.scheme}://{authority}{path}" + (f"?{query}" if query else "")
+    if len(result) > MAX_LOCATOR_CHARS:
+        raise InvalidLocatorError()
+    return result

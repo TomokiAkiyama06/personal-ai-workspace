@@ -5,13 +5,22 @@ answered; they turn untrusted ``ProviderHit`` objects into ``ResearchItem``
 objects and merge the answers of several providers.
 """
 
+import hashlib
 from collections.abc import Sequence
-from datetime import datetime
+from dataclasses import replace
+from datetime import UTC, datetime
 
 from paw_backend.research.providers.contract import (
+    ProviderHit,
     ProviderKind,
     ResearchItem,
+    SourceMetadata,
 )
+from paw_backend.research.providers.errors import (
+    InvalidLocatorError,
+    InvalidProviderResponseError,
+)
+from paw_backend.research.providers.locator import canonicalize_locator
 
 
 def compute_content_hash(text: str) -> str:
@@ -22,7 +31,9 @@ def compute_content_hash(text: str) -> str:
     ``"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"``.
     A ``text`` that is not a ``str`` raises ``TypeError``.
     """
-    raise NotImplementedError("PAW-051 stub")
+    if not isinstance(text, str):
+        raise TypeError("text must be a str")
+    return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def normalize_title(title: str) -> str:
@@ -32,7 +43,9 @@ def normalize_title(title: str) -> str:
     ``"Hello world"``; a blank title becomes ``""``. Nothing else changes (case,
     punctuation and non-ASCII text are kept). A non-``str`` raises ``TypeError``.
     """
-    raise NotImplementedError("PAW-051 stub")
+    if not isinstance(title, str):
+        raise TypeError("title must be a str")
+    return " ".join(title.split())
 
 
 def normalize_hits(
@@ -69,7 +82,38 @@ def normalize_hits(
     ``published_at`` converted to UTC (``astimezone(timezone.utc)``; ``None``
     stays ``None``). An empty ``hits`` gives ``()``.
     """
-    raise NotImplementedError("PAW-051 stub")
+    if not isinstance(hits, list | tuple) or len(hits) > limit:
+        raise InvalidProviderResponseError()
+    # Exactly ``ProviderHit`` (or a subclass): an object that merely has the same
+    # attributes could lack ``private_source`` and silently count as public.
+    if not all(isinstance(hit, ProviderHit) for hit in hits):
+        raise InvalidProviderResponseError()
+    try:
+        locators = [canonicalize_locator(hit.locator) for hit in hits]
+    except InvalidLocatorError:
+        raise InvalidProviderResponseError() from None
+
+    return tuple(
+        ResearchItem(
+            SourceMetadata(
+                provider_kind=kind,
+                provider_id=provider_id,
+                locator=locator,
+                title=normalize_title(hit.title),
+                retrieved_at=retrieved_at,
+                content_hash=compute_content_hash(hit.text),
+                source_type=hit.source_type,
+                published_at=(
+                    None
+                    if hit.published_at is None
+                    else hit.published_at.astimezone(UTC)
+                ),
+                private_source=hit.private_source,
+            ),
+            hit.text,
+        )
+        for hit, locator in zip(hits, locators, strict=True)
+    )
 
 
 def merge_items(
@@ -95,4 +139,22 @@ def merge_items(
     Example: batches ``[a1, a2, a3]`` and ``[b1, b2]`` with ``max_results=4``
     give ``([a1, b1, a2, b2], True)``. Empty input gives ``((), False)``.
     """
-    raise NotImplementedError("PAW-051 stub")
+    if isinstance(max_results, bool) or not isinstance(max_results, int):
+        raise TypeError("max_results must be an int")
+    if max_results < 1:
+        raise ValueError("max_results must be at least 1")
+
+    longest = max((len(batch) for batch in batches), default=0)
+    kept: dict[str, ResearchItem] = {}  # insertion order is the merged order
+    for rank in range(longest):
+        for batch in batches:
+            if rank >= len(batch):
+                continue
+            item = batch[rank]
+            first = kept.setdefault(item.source.locator, item)
+            if item.source.private_source and not first.source.private_source:
+                kept[item.source.locator] = replace(
+                    first, source=replace(first.source, private_source=True)
+                )
+    merged = tuple(kept.values())
+    return merged[:max_results], len(merged) > max_results
