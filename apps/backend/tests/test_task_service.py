@@ -388,6 +388,83 @@ class UnstorableTextTest(PostgresTaskTestCase):
 
 
 @requires_postgres
+class AttemptStateLimitsTest(PostgresTaskTestCase):
+    """``update_attempt`` refuses what its columns cannot hold, with a typed error."""
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        self.task_id = await self.task_in_state(S.RUNNING)
+
+    async def assert_refused(self, **groups) -> None:
+        before = await self.service.restore(self.task_id)
+        with self.assertRaises(InvalidCommandArgumentError):
+            await self.service.update_attempt(self.task_id, attempt=1, **groups)
+        self.assertEqual(await self.service.restore(self.task_id), before)
+
+    async def test_worktree_and_pull_request_text_is_accepted_at_the_column_limit(
+        self,
+    ):
+        worktree = WorktreeState("b" * 255, "p" * 1024, "c" * 64)
+        pull_request = PullRequestInfo(12, "u" * 2048, PullRequestState.OPEN)
+        await self.service.update_attempt(
+            self.task_id, attempt=1, worktree=worktree, pull_request=pull_request
+        )
+        attempt = (await self.service.restore(self.task_id)).attempt
+        self.assertEqual(attempt.worktree, worktree)
+        self.assertEqual(attempt.pull_request, pull_request)
+
+    async def test_limits_count_characters_not_bytes(self):
+        worktree = WorktreeState("日" * 255, "é" * 1024, "😀" * 64)
+        await self.service.update_attempt(self.task_id, attempt=1, worktree=worktree)
+        self.assertEqual(
+            (await self.service.restore(self.task_id)).attempt.worktree, worktree
+        )
+
+    async def test_one_character_over_the_column_limit_is_refused(self):
+        secret = "SECRET-MARKER"
+        cases = {
+            "branch": {"worktree": WorktreeState(branch="b" * 256)},
+            "path": {"worktree": WorktreeState(path="p" * 1025)},
+            "head_commit": {"worktree": WorktreeState(head_commit="c" * 65)},
+            "url": {
+                "pull_request": PullRequestInfo(12, "u" * 2049, PullRequestState.OPEN)
+            },
+            "long text that carries a marker": {
+                "worktree": WorktreeState(branch=secret * 100)
+            },
+        }
+        for name, groups in cases.items():
+            with self.subTest(name):
+                before = await self.service.restore(self.task_id)
+                with self.assertRaises(InvalidCommandArgumentError) as caught:
+                    await self.service.update_attempt(self.task_id, attempt=1, **groups)
+                self.assertNotIn(secret, str(caught.exception))
+                self.assertEqual(await self.service.restore(self.task_id), before)
+
+    async def test_pull_request_number_must_fit_the_integer_column(self):
+        for number in (1, 2**31 - 1):
+            with self.subTest(f"accepted {number}"):
+                pull_request = PullRequestInfo(
+                    number, "https://example.test/pr", PullRequestState.OPEN
+                )
+                await self.service.update_attempt(
+                    self.task_id, attempt=1, pull_request=pull_request
+                )
+                attempt = (await self.service.restore(self.task_id)).attempt
+                self.assertEqual(attempt.pull_request, pull_request)
+
+        # A number is a positive integer of at most 2**31 - 1: neither a bool
+        # (which is an int in Python) nor text nor a float is accepted.
+        for number in (0, -1, 2**31, 2**63, True, "12", 12.0):
+            with self.subTest(f"refused {number!r}"):
+                await self.assert_refused(
+                    pull_request=PullRequestInfo(
+                        number, "https://example.test/other", PullRequestState.OPEN
+                    )
+                )
+
+
+@requires_postgres
 class TransitionTest(PostgresTaskTestCase):
     async def test_database_follows_the_transition_table_for_every_state_and_command(
         self,

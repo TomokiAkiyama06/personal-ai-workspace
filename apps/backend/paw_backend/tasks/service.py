@@ -122,6 +122,10 @@ _FINISHED_TOOL_STATUSES = frozenset(
 )
 
 
+# The largest value of the ``INTEGER`` column ``task_attempts.pr_number``.
+MAX_PULL_REQUEST_NUMBER = 2**31 - 1
+_ATTEMPT_COLUMNS = TaskAttemptRow.__table__.c
+
 _INPUT_TOO_LARGE = f"input must be a JSON object of at most {MAX_INPUT_BYTES} bytes"
 _INPUT_NOT_JSON = (
     "input must contain only JSON values "
@@ -211,8 +215,14 @@ def _storable(name: str, value: str) -> str:
     return value
 
 
-def _optional_storable(name: str, value: str | None) -> str | None:
-    return None if value is None else _storable(name, value)
+def _column_text(name: str, value: str | None, column: str) -> None:
+    """Check a value of ``task_attempts.<column>`` (length from the model)."""
+    if value is None:
+        return
+    limit = _ATTEMPT_COLUMNS[column].type.length
+    if len(value) > limit:
+        raise InvalidCommandArgumentError(f"{name} must be at most {limit} characters")
+    _storable(name, value)
 
 
 def _text(name: str, value: str, limit: int) -> str:
@@ -642,15 +652,25 @@ class TaskService:
         Each group that is given replaces the stored one; groups left as ``None``
         are unchanged. Allowed in any task state (a pull request can be merged
         after the task completed) but only for the current attempt
-        (``StaleAttemptError`` otherwise). Text that PostgreSQL cannot store (NUL,
-        surrogate characters) raises ``InvalidCommandArgumentError``.
+        (``StaleAttemptError`` otherwise). Text longer than its column or that
+        PostgreSQL cannot store (NUL, surrogate characters), and a pull request
+        number that is not an integer from 1 to ``MAX_PULL_REQUEST_NUMBER``, raise
+        ``InvalidCommandArgumentError``.
         """
         if worktree is not None:
-            _optional_storable("worktree branch", worktree.branch)
-            _optional_storable("worktree path", worktree.path)
-            _optional_storable("worktree head_commit", worktree.head_commit)
+            _column_text("worktree branch", worktree.branch, "branch")
+            _column_text("worktree path", worktree.path, "worktree_path")
+            _column_text("worktree head_commit", worktree.head_commit, "head_commit")
         if pull_request is not None:
-            _storable("pull request url", pull_request.url)
+            number = pull_request.number
+            # ``bool`` is an ``int`` in Python; a float or text would be coerced by
+            # the driver.
+            if type(number) is not int or not 1 <= number <= MAX_PULL_REQUEST_NUMBER:
+                raise InvalidCommandArgumentError(
+                    f"pull request number must be an integer from 1 to "
+                    f"{MAX_PULL_REQUEST_NUMBER}"
+                )
+            _column_text("pull request url", pull_request.url, "pr_url")
         async with self._database.session() as session, session.begin():
             task = await self._require_task(session, task_id, lock=True)
             self._require_current_attempt(task, attempt)
