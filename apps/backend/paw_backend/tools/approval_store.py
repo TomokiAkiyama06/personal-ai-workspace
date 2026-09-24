@@ -24,7 +24,11 @@ update matches nothing, the row is read again only to *explain* the refusal
 Opening a request is serialised **per (task, user)** by a transaction-scoped
 advisory lock, so that the cap on open approvals holds under concurrency (a
 count followed by an insert would let simultaneous requests all pass). The
-lock is taken before the count and released with the transaction.
+lock is taken before the count and released with the transaction. With
+``require_active_task`` the task's row is then read **locked** (``FOR SHARE``)
+in the same transaction, like ``consume``: a request is never inserted for a
+task whose end was committed, so the revocation that follows that end (which
+only sees what was committed before it) cannot miss it.
 
 The database enforces the same rules once more with triggers and CHECK
 constraints (migration ``0031``): a wrong statement from a buggy or
@@ -189,7 +193,12 @@ class PostgresApprovalStore:
         self._revoke_timeout_seconds = revoke_timeout_seconds
 
     async def open_request(
-        self, new: NewApproval, *, now: datetime, limits: OpenLimits
+        self,
+        new: NewApproval,
+        *,
+        now: datetime,
+        limits: OpenLimits,
+        require_active_task: bool = False,
     ) -> OpenResult:
         cooldown_start = now - limits.rejection_cooldown
         for _ in range(_OPEN_ATTEMPTS):
@@ -201,6 +210,21 @@ class PostgresApprovalStore:
                     text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
                     {"key": f"tool_approvals:{new.task_id}:{new.requester_user_id}"},
                 )
+                if require_active_task:
+                    # The task row is read **locked** in this very transaction,
+                    # as ``consume`` does: an end that is in flight is waited
+                    # for (and seen here), one that starts later waits for this
+                    # transaction, so its revocation finds the request we insert.
+                    # A check made before could be overtaken by the end, whose
+                    # revocation had then already found nothing: the request
+                    # created afterwards would be open for an ended task.
+                    activity = await lock_task_activity(session, new.task_id)
+                    if activity is not TaskActivity.ACTIVE:
+                        return OpenResult(
+                            OpenOutcome.TASK_NOT_ACTIVE
+                            if activity is TaskActivity.ENDED
+                            else OpenOutcome.TASK_UNKNOWN
+                        )
                 await _mark_expired(session, now, call_hash=new.call_hash)
                 existing = (
                     await session.execute(

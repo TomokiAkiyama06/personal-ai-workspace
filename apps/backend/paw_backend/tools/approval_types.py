@@ -71,6 +71,10 @@ class OpenOutcome(StrEnum):
     EXISTING = "existing"  # an open request for this exact call already exists
     TOO_MANY_PENDING = "too_many_pending"  # the task / user has too many open ones
     COOLING_DOWN = "cooling_down"  # this exact call was rejected a moment ago
+    # Only with ``require_active_task``: the task has ended, or is not known;
+    # nothing was created (and no existing request is handed out either).
+    TASK_NOT_ACTIVE = "task_not_active"
+    TASK_UNKNOWN = "task_unknown"
 
 
 class DecideOutcome(StrEnum):
@@ -313,14 +317,23 @@ class ApprovalStore(Protocol):
 
     ``consume(..., require_active_task=True)`` must check that the approval's
     task can still act **in the same atomic step as the consumption** and
-    consume nothing otherwise (``TASK_NOT_ACTIVE`` / ``TASK_UNKNOWN``). A check
-    made before the call is not enough: the task can end in between, and an
-    approval that a consumption wins from the revocation that follows the end
-    would then be used for a task that already ended (Decision 0006, section 9).
+    consume nothing otherwise (``TASK_NOT_ACTIVE`` / ``TASK_UNKNOWN``); and
+    ``open_request(..., require_active_task=True)`` must do the same **in the
+    same atomic step as the insert**, creating (or handing out) nothing for an
+    ended or unknown task (``OpenOutcome.TASK_NOT_ACTIVE`` / ``TASK_UNKNOWN``).
+    A check made before the call is not enough: the task can end in between. A
+    consumption could then win from the revocation that follows the end, and a
+    request created after that revocation would be one that nothing revokes
+    (Decision 0006, section 9).
     """
 
     async def open_request(
-        self, new: NewApproval, *, now: datetime, limits: OpenLimits
+        self,
+        new: NewApproval,
+        *,
+        now: datetime,
+        limits: OpenLimits,
+        require_active_task: bool = False,
     ) -> OpenResult: ...
 
     async def get(self, approval_id: uuid.UUID) -> ApprovalRecord | None: ...

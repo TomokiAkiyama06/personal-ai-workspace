@@ -849,20 +849,16 @@ class CrossProcessTest(PostgresTestCase):
             Harness(approvals=store, clock=clock, max_pending_approvals=4)
             for store in stores
         ]
-        decisions = await asyncio.gather(
-            *(
-                harnesses[i % 3].broker.request(
-                    make_call(
-                        "repo.delete_tree",
-                        {"path": f"{ROOT}/cap-{i}"},
-                        context=make_context(task_id=uuid.uuid4()),
-                    )
-                )
-                for i in range(1)
+        # tasks the database has: the store checks the task when it opens a request
+        single = await harnesses[0].broker.request(
+            make_call(
+                "repo.delete_tree",
+                {"path": f"{ROOT}/cap-0"},
+                context=await self.live_context(),
             )
         )
-        self.assertEqual(decisions[0].verdict, Verdict.NEEDS_APPROVAL)
-        task_context = make_context(task_id=uuid.uuid4())
+        self.assertEqual(single.verdict, Verdict.NEEDS_APPROVAL)
+        task_context = await self.live_context()
         decisions = await asyncio.gather(
             *(
                 harnesses[i % 3].broker.request(
@@ -1302,8 +1298,34 @@ class EndsTheTaskAfterAnswering:
         return activity
 
 
+class LockWaits:
+    """Drive transactions in a fixed order: a step starts only once the previous
+    one is provably blocked on a lock (``pg_stat_activity``)."""
+
+    async def lock_waiters(self) -> int:
+        async with self.database.engine.begin() as connection:
+            return (
+                await connection.execute(
+                    text(
+                        "SELECT count(*) FROM pg_stat_activity WHERE datname = "
+                        "current_database() AND wait_event_type = 'Lock'"
+                    )
+                )
+            ).scalar_one()
+
+    async def wait_for_lock_waiters(self, count: int, *unless_done) -> None:
+        """Until ``count`` backends wait on a lock, or one of ``unless_done`` (a
+        task that should have been blocked) has finished: then the caller's
+        assertion says what went wrong, instead of a time-out."""
+        async with asyncio.timeout(10):
+            while await self.lock_waiters() < count:
+                if any(task.done() for task in unless_done):
+                    return
+                await asyncio.sleep(0.02)
+
+
 @requires_postgres
-class ConsumeRacesWithTaskEndTest(TaskFixture):
+class ConsumeRacesWithTaskEndTest(LockWaits, TaskFixture):
     """Using an approval and the end of its task are ordered, never crossed.
 
     Finding of the review of PR #74: the task-state check and the consumption
@@ -1342,27 +1364,6 @@ class ConsumeRacesWithTaskEndTest(TaskFixture):
 
     async def status(self):
         return (await self.store.get(self.approval_id)).status
-
-    async def lock_waiters(self) -> int:
-        async with self.database.engine.begin() as connection:
-            return (
-                await connection.execute(
-                    text(
-                        "SELECT count(*) FROM pg_stat_activity WHERE datname = "
-                        "current_database() AND wait_event_type = 'Lock'"
-                    )
-                )
-            ).scalar_one()
-
-    async def wait_for_lock_waiters(self, count: int, *unless_done) -> None:
-        """Until ``count`` backends wait on a lock, or one of ``unless_done`` (a
-        task that should have been blocked) has finished: then the caller's
-        assertion says what went wrong, instead of a time-out."""
-        async with asyncio.timeout(10):
-            while await self.lock_waiters() < count:
-                if any(task.done() for task in unless_done):
-                    return
-                await asyncio.sleep(0.02)
 
     async def test_a_task_that_ends_after_the_check_cannot_have_its_approval_used(
         self,
@@ -1471,6 +1472,171 @@ class ConsumeRacesWithTaskEndTest(TaskFixture):
         # and every other caller of ``consume``)
         new = await self.approved(ended)
         self.assertEqual(await self.use(new), ConsumeOutcome.CONSUMED)
+
+
+@requires_postgres
+class OpenRacesWithTaskEndTest(LockWaits, TaskFixture):
+    """Opening an approval request and the end of its task are ordered, never crossed.
+
+    Finding of the review of PR #74: the broker read the task as ``ACTIVE`` and
+    the request was inserted afterwards, in another transaction. A terminal
+    transition that committed in between had its revocation (which runs after
+    the commit) find nothing, and the request created next was open for an
+    ended task: it could be approved, and once the task was started again a
+    worker could use it before the listener of that transition revoked it. The
+    insert now reads the task row **locked** in its own transaction. Each test
+    drives real transactions in a fixed order.
+    """
+
+    async def wire(self):
+        self.store = PostgresApprovalStore(self.new_database())
+        self.provider = EndsTheTaskAfterAnswering(
+            PostgresTaskActivity(self.new_database()), self.end_the_task
+        )
+        self.h = Harness(
+            approvals=self.store, clock=Clock(), task_activity=self.provider
+        )
+        # no listener: the revocation after the end is run by the test
+        self.tasks = TaskService(self.new_database())
+        self.task_id = await self.new_task()
+        self.context = make_context(task_id=self.task_id)
+
+    async def end_the_task(self):
+        await self.tasks.execute(self.task_id, C.CANCEL, actor=Actor.system())
+
+    async def request(self, path="build"):
+        return await self.h.broker.request(
+            make_call(
+                "repo.delete_tree", {"path": f"{ROOT}/{path}"}, context=self.context
+            )
+        )
+
+    async def statuses(self, task_id=None):
+        async with self.database.engine.begin() as connection:
+            rows = await connection.execute(
+                text(
+                    "SELECT status FROM tool_approvals WHERE task_id = :id "
+                    "ORDER BY created_at, id"
+                ),
+                {"id": self.task_id if task_id is None else task_id},
+            )
+            return [ApprovalStatus(row[0]) for row in rows]
+
+    async def test_a_task_that_ends_after_the_check_gets_no_request(self):
+        await self.wire()
+        self.provider.armed = True
+        asked = await self.request()
+        # the check said ACTIVE and the task ended before the insert: refused,
+        # and nothing was created for the ended task
+        self.assertEqual(
+            (asked.verdict, asked.reason, asked.approval_id, asked.invocation),
+            (Verdict.DENY, BrokerReason.TASK_NOT_ACTIVE, None, None),
+        )
+        self.assertEqual(
+            await self.provider.inner.check(self.task_id), TaskActivity.ENDED
+        )
+        self.assertEqual(await self.statuses(), [])
+        # the revocation that follows the end has nothing to take away, and
+        # there is nothing for a task that is started again to pick up
+        self.assertEqual(await self.h.service.revoke_task(self.task_id), 0)
+        await self.drive(self.task_id, [(C.RESTART, {})])
+        self.assertEqual(await self.statuses(), [])
+
+    async def test_a_request_waits_for_an_end_that_is_in_flight_and_then_refuses(self):
+        await self.wire()
+        async with self.database.engine.connect() as ending:
+            # the terminal transition holds the task row and has not committed
+            await ending.execute(
+                text("UPDATE tasks SET state = 'cancelled' WHERE id = :id"),
+                {"id": self.task_id},
+            )
+            asked = asyncio.create_task(self.request())
+            # (the broker read ``ACTIVE``: the end is not committed yet)
+            await self.wait_for_lock_waiters(1, asked)
+            self.assertFalse(asked.done(), "the request did not wait for the end")
+            await ending.commit()
+        decision = await asked
+        self.assertEqual(
+            (decision.verdict, decision.reason, decision.approval_id),
+            (Verdict.DENY, BrokerReason.TASK_NOT_ACTIVE, None),
+        )
+        self.assertEqual(await self.statuses(), [])
+
+    async def test_an_end_waits_for_a_request_in_flight_and_its_revocation_finds_it(
+        self,
+    ):
+        await self.wire()
+        async with self.database.engine.connect() as holder:
+            # a lock on the table blocks the insert of the request, which has
+            # by then read the task (and holds its lock)
+            await holder.execute(
+                text("LOCK TABLE tool_approvals IN SHARE ROW EXCLUSIVE MODE")
+            )
+            asked = asyncio.create_task(self.request())
+            await self.wait_for_lock_waiters(1, asked)
+            end = asyncio.create_task(self.end_the_task())
+            await self.wait_for_lock_waiters(2, asked, end)
+            self.assertFalse(end.done(), "the end did not wait for the request")
+            await holder.rollback()
+        decision = await asked
+        await end
+        # the request came first, so it stands; the end came second and the
+        # revocation after it finds the request and takes it away
+        self.assertEqual(
+            (decision.verdict, decision.reason),
+            (Verdict.NEEDS_APPROVAL, BrokerReason.APPROVAL_REQUIRED),
+        )
+        self.assertEqual(await self.statuses(), [ApprovalStatus.PENDING])
+        self.assertEqual(await self.h.service.revoke_task(self.task_id), 1)
+        self.assertEqual(await self.statuses(), [ApprovalStatus.REVOKED])
+
+    async def test_the_store_checks_the_task_only_when_asked_to_and_reads_it_live(
+        self,
+    ):
+        await self.wire()
+        alive = self.task_id
+        ended = await self.new_task()
+        await self.tasks.execute(ended, C.CANCEL, actor=Actor.system())
+        with_flag = {"require_active_task": True}
+
+        async def open_for(task_id, **arguments):
+            new = new_approval(task_id=task_id)
+            opened = await self.store.open_request(
+                new, now=NOW, limits=LIMITS, **arguments
+            )
+            return new, opened
+
+        # a live task: created
+        first, opened = await open_for(alive, **with_flag)
+        self.assertEqual(opened.outcome, OpenOutcome.CREATED)
+        # an ended task, and a task the database does not have: nothing is
+        # created, and nothing is written for it
+        for label, task_id, outcome in (
+            ("ended", ended, OpenOutcome.TASK_NOT_ACTIVE),
+            ("unknown", uuid.uuid4(), OpenOutcome.TASK_UNKNOWN),
+        ):
+            with self.subTest(label):
+                new, opened = await open_for(task_id, **with_flag)
+                self.assertEqual((opened.outcome, opened.record), (outcome, None))
+                self.assertIsNone(await self.store.get(new.approval_id))
+                self.assertEqual(await self.store.history(new.approval_id), [])
+                self.assertEqual(await self.statuses(task_id), [])
+        # the request that was open when its task ended (the revocation failed)
+        # is not handed out again either ...
+        await self.tasks.execute(alive, C.CANCEL, actor=Actor.system())
+        again = new_approval(task_id=alive, call_hash=first.call_hash)
+        handed = await self.store.open_request(
+            again, now=NOW, limits=LIMITS, **with_flag
+        )
+        self.assertEqual(
+            (handed.outcome, handed.record), (OpenOutcome.TASK_NOT_ACTIVE, None)
+        )
+        # ... and without the flag the store looks at no task (the contract
+        # tests and every other caller of ``open_request``)
+        handed = await self.store.open_request(again, now=NOW, limits=LIMITS)
+        self.assertEqual(handed.outcome, OpenOutcome.EXISTING)
+        new, opened = await open_for(ended)
+        self.assertEqual(opened.outcome, OpenOutcome.CREATED)
 
 
 @requires_postgres

@@ -257,6 +257,31 @@ class ApplicationRoleTest(RoleTestCase):
                     expected,
                 )
 
+    async def test_the_role_can_lock_the_task_row_when_it_opens_a_request(self):
+        # Opening a request reads the task row locked (FOR SHARE) in the
+        # transaction that inserts: the same privileges as using an approval.
+        tasks = TaskService(self.app_db)
+        live = (
+            await tasks.create_task(project_id=U1, created_by=U1, title="t")
+        ).task_id
+        ended = (
+            await tasks.create_task(project_id=U1, created_by=U1, title="t")
+        ).task_id
+        await tasks.execute(ended, TaskCommand.CANCEL, actor=Actor.system())
+        for task_id, expected in (
+            (live, OpenOutcome.CREATED),
+            (ended, OpenOutcome.TASK_NOT_ACTIVE),
+            (uuid.uuid4(), OpenOutcome.TASK_UNKNOWN),
+        ):
+            with self.subTest(expected=expected.value):
+                opened = await self.store.open_request(
+                    new_approval(task_id=task_id),
+                    now=NOW,
+                    limits=LIMITS,
+                    require_active_task=True,
+                )
+                self.assertEqual(opened.outcome, expected)
+
     async def test_concurrent_requests_hold_the_cap_for_the_role_too(self):
         limits = OpenLimits(max_pending=3, rejection_cooldown=timedelta(minutes=5))
         task_id = uuid.uuid4()

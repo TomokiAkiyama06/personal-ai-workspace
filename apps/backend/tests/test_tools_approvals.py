@@ -653,7 +653,9 @@ class ApprovalFlowTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_failing_approval_store_denies_without_its_message(self):
         class Failing(InMemoryApprovalStore):
-            async def open_request(self, new, *, now):
+            async def open_request(
+                self, new, *, now, limits, require_active_task=False
+            ):
                 raise ConnectionError(SECRET)
 
             async def consume(
@@ -675,7 +677,9 @@ class ApprovalFlowTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_store_that_answers_nonsense_denies(self):
         class Nonsense(InMemoryApprovalStore):
-            async def open_request(self, new, *, now):
+            async def open_request(
+                self, new, *, now, limits, require_active_task=False
+            ):
                 return "created"
 
             async def consume(
@@ -694,9 +698,9 @@ class ApprovalFlowTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_store_that_returns_another_calls_request_denies(self):
         class Wrong(InMemoryApprovalStore):
-            async def open_request(self, new, *, now):
+            async def open_request(self, new, **arguments):
                 other = dataclasses.replace(new, call_hash="0" * 64)
-                return await super().open_request(other, now=now)
+                return await super().open_request(other, **arguments)
 
         h = Harness(approvals=Wrong())
         with self.assertLogs(level="ERROR"):
@@ -1584,7 +1588,65 @@ class TaskEndTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             (used.verdict, used.reason), (Verdict.ALLOW, R.APPROVAL_CONSUMED)
         )
-        self.assertEqual(truth.checks, [TASK])
+        # the store asks in the step that opens and in the step that consumes
+        # (it used to ask only when consuming)
+        self.assertEqual(truth.checks, [TASK, TASK])
+
+    async def test_a_task_that_ends_between_the_check_and_the_request_opens_nothing(
+        self,
+    ):
+        # The broker's own check answers ACTIVE, and then the task ends: what
+        # the store sees, in the step that inserts, is the end. (In production
+        # the store reads the task row locked in that transaction; see
+        # test_tools_postgres.OpenRacesWithTaskEndTest.)
+        for answer, reason in (
+            (TaskActivity.ENDED, R.TASK_NOT_ACTIVE),
+            (TaskActivity.UNKNOWN, R.TASK_UNKNOWN),
+        ):
+            with self.subTest(answer=answer.value):
+                truth = FakeTaskActivity()
+                store = InMemoryApprovalStore(task_activity=truth)
+                h = Harness(approvals=store)  # the broker's provider says ACTIVE
+                truth.answer = answer  # the task ends after the broker's check
+                asked = await self.open_after_end("a", h)
+                self.assertEqual(
+                    (asked.verdict, asked.reason, asked.approval_id),
+                    (Verdict.DENY, reason, None),
+                )
+                self.assertEqual(h.task_activity.checks, [TASK])  # the broker's own
+                self.assertEqual(truth.checks, [TASK])  # the store's, at the insert
+                self.assertEqual(store._records, {})
+                self.assertEqual(store._history, [])
+                self.assertEqual(await h.service.revoke_task(TASK), 0)
+
+    async def test_a_request_that_was_open_when_the_task_ended_is_not_handed_out(self):
+        # (the revocation failed, and the broker's own check is the one that is
+        # overtaken): the store names the task, it does not return the request
+        truth = FakeTaskActivity()
+        store = InMemoryApprovalStore(task_activity=truth)
+        h = Harness(approvals=store)
+        first = await self.open("a", h)
+        truth.answer = TaskActivity.ENDED
+        again = await self.open_after_end("a", h)
+        self.assertEqual(
+            (again.verdict, again.reason, again.approval_id),
+            (Verdict.DENY, R.TASK_NOT_ACTIVE, None),
+        )
+        self.assertEqual(await self.status(first, h), ApprovalStatus.PENDING)
+
+    async def test_the_broker_asks_the_store_to_check_the_task_when_it_opens(self):
+        class Spy(InMemoryApprovalStore):
+            calls: list = []
+
+            async def open_request(self, new, **arguments):
+                self.calls.append(arguments)
+                return await super().open_request(new, **arguments)
+
+        store = Spy()
+        h = Harness(approvals=store)
+        await self.open("a", h)
+        (arguments,) = store.calls
+        self.assertIs(arguments["require_active_task"], True)
 
     async def test_the_broker_asks_the_store_to_check_the_task_when_it_consumes(self):
         class Spy(InMemoryApprovalStore):
