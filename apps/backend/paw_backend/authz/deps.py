@@ -97,7 +97,10 @@ def require_capability(
     stored one, so a repository of another project cannot borrow this project's
     membership. A resolver that names a repository without its ACL is refused.
     If the resolver raises, the request is denied (and audited) rather than
-    turned into an unaudited 500.
+    turned into an unaudited 500. The resolver only runs for an authenticated
+    user: an anonymous request is refused (401) first, so it cannot make the
+    backend load project or repository state, and its (unpersisted) denial
+    names an unknown resource.
 
     HTTP answers: 401 (``unauthorized``) when nobody is authenticated, 403
     (``forbidden``) when the user may not do this, 503 when an action that
@@ -113,16 +116,19 @@ def require_capability(
         provider: Annotated[PrincipalProvider, Depends(get_principal_provider)],
     ) -> Principal:
         principal = await provider.get_principal(connection)
-        try:
-            target = await _resolve(resource, connection)
-        except Exception as error:  # a broken resolver must not skip the audit
-            # A malformed id (ValueError) is a client mistake; anything else is a bug.
-            logger.log(
-                logging.INFO if isinstance(error, ValueError) else logging.WARNING,
-                "Resource resolver failed (%s)",
-                type(error).__name__,
-            )
-            target = None
+        target: Resource | None = None
+        # Nobody is always UNAUTHENTICATED whatever the resource is, so an
+        # anonymous request must not make the resolver load state from storage.
+        if principal is not None:
+            try:
+                target = await _resolve(resource, connection)
+            except Exception as error:  # a broken resolver must not skip the audit
+                # A malformed id (ValueError) is a client mistake; else a bug.
+                logger.log(
+                    logging.INFO if isinstance(error, ValueError) else logging.WARNING,
+                    "Resource resolver failed (%s)",
+                    type(error).__name__,
+                )
         decision = await authorizer.authorize(
             principal,
             capability,
