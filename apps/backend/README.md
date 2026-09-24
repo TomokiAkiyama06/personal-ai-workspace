@@ -1210,9 +1210,9 @@ Service は、Rule 関数の戻り値を、契約に照らして確認してか�
 | `lifecycle.py` | `next_candidate_state`、`check_deletable`、`check_restorable`、`apply_changes`、`changed_fields`、`plan_edit`、`draft_from_candidate` |
 | `precedence.py` | `subject_covers`、`overriding_policy_ids`、`resolve_effective_view` |
 
-**実装の由来:** この 2 つの Module は、契約（Docstring と手計算した例）と Test を先に定め、関数本体を別に実装する方式で作りました。
-誰が実装したかは、人間の Orchestrator が確認してから、この段落に追記します（現時点では未記載）。
-この Commit の時点では、上の関数本体は未実装（`NotImplementedError("PAW-046 stub")`）で、これらを通る Test は失敗します。実装後にこの一文を削除します。
+**実装の由来:** この 2 つの Module の関数本体（10 個）は、ローカルの Qwen3-Coder-30B-A3B が、契約（Docstring と手計算した例）と Test だけを仕様として実装しました（1 回の実行、約 190 回の Tool 呼び出し）。Claude が書いた契約と Test（507 件）を、実 PostgreSQL の全体の CI（2,885 件）で通ることを確認しました。
+Review で、`resolve_effective_view` の仕様の Docstring が Model によって書き換えられていたため、元の Docstring に戻しています（本体の振る舞いは変えていません）。空の作業 File（`APPROVED`、`REJECTED`）も残していたので削除しました。
+Model の実装は、Test を通すことに必要な範囲で素直な書き方です。Model が書いた部分と、Claude が書いた部分（Model、Service、Validation、Migration、Test、Decision 0009）の境界は、上の表のとおりです。
 
 ### 制限と未確認の点
 

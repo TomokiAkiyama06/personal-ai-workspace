@@ -53,7 +53,18 @@ def subject_covers(policy_subject: str, memory_subject: str) -> bool:
     ``"memory_subject"``); an invalid one raises ``InvalidSharedMemoryInputError``
     (the policy subject is checked before the memory subject).
     """
-    raise NotImplementedError("PAW-046 stub")
+    validate_subject(policy_subject, "policy_subject")
+    validate_subject(memory_subject, "memory_subject")
+
+    # Check if subjects are equal
+    if policy_subject == memory_subject:
+        return True
+
+    # Check if memory_subject starts with policy_subject followed by "."
+    if memory_subject.startswith(policy_subject + "."):
+        return True
+
+    return False
 
 
 def overriding_policy_ids(
@@ -70,7 +81,17 @@ def overriding_policy_ids(
     ``p2: merge``, ``p1: merge.permission``, ``p3: deploy`` gives
     ``("p1", "p2")``.
     """
-    raise NotImplementedError("PAW-046 stub")
+    # Use a set to track unique policy IDs
+    policy_ids = set()
+
+    # Check each memory subject against each policy
+    for memory_subject in memory_subjects:
+        for policy in policies:
+            if subject_covers(policy.subject, memory_subject):
+                policy_ids.add(policy.policy_id)
+
+    # Return sorted tuple
+    return tuple(sorted(policy_ids))
 
 
 def resolve_effective_view(
@@ -97,4 +118,46 @@ def resolve_effective_view(
     ``overridden=(OverriddenMemory(m1.memory_id, m1.version_id, ("p1",)),)`` and
     ``applied_policies=(p1,)``.
     """
-    raise NotImplementedError("PAW-046 stub")
+    # Lists to store results
+    result_memories = []
+    result_overridden = []
+    applied_policy_ids = set()
+
+    # Process each memory
+    for memory in memories:
+        # Skip deleted memories entirely
+        if memory.status is SharedMemoryStatus.DELETED:
+            continue
+
+        # Find which policies cover this memory
+        policy_ids = overriding_policy_ids(memory.policy_subjects, policies)
+
+        # If there are covering policies, this memory is overridden
+        if policy_ids:
+            overridden_memory = OverriddenMemory(
+                memory_id=memory.memory_id,
+                version_id=memory.version_id,
+                policy_ids=policy_ids,
+            )
+            result_overridden.append(overridden_memory)
+
+            # Add the policy IDs to the applied policies set
+            for policy_id in policy_ids:
+                applied_policy_ids.add(policy_id)
+        else:
+            # Memory is not overridden, add to regular memories
+            result_memories.append(memory)
+
+    # Get the applied policies in sorted order
+    applied_policies = []
+    policy_id_to_policy = {p.policy_id: p for p in policies}
+    for policy_id in sorted(applied_policy_ids):
+        if policy_id in policy_id_to_policy:
+            applied_policies.append(policy_id_to_policy[policy_id])
+
+    # Return as EffectiveSharedMemory object, not a tuple
+    return EffectiveSharedMemory(
+        memories=tuple(result_memories),
+        overridden=tuple(result_overridden),
+        applied_policies=tuple(applied_policies),
+    )

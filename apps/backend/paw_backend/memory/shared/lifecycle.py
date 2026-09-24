@@ -57,7 +57,21 @@ def next_candidate_state(
     before anything else is looked at; a ``str`` that equals a member's value is
     still not a member.
     """
-    raise NotImplementedError("PAW-046 stub")
+    # Check types first
+    if not isinstance(current, CandidateState):
+        raise TypeError()
+    if not isinstance(action, CandidateAction):
+        raise TypeError()
+
+    # Only PENDING candidates can be decided
+    if current == CandidateState.PENDING:
+        if action == CandidateAction.APPROVE:
+            return CandidateState.APPROVED
+        elif action == CandidateAction.REJECT:
+            return CandidateState.REJECTED
+    else:
+        # Any action on APPROVED/REJECTED raises CANDIDATE_NOT_PENDING
+        raise SharedMemoryStateError(StateProblem.CANDIDATE_NOT_PENDING)
 
 
 def check_deletable(current: SharedMemory) -> None:
@@ -67,7 +81,10 @@ def check_deletable(current: SharedMemory) -> None:
     ``SharedMemoryStateError(StateProblem.ALREADY_DELETED)``. Returns ``None``
     (not a boolean) when the delete is allowed.
     """
-    raise NotImplementedError("PAW-046 stub")
+    if current.status == SharedMemoryStatus.DELETED:
+        raise SharedMemoryStateError(StateProblem.ALREADY_DELETED)
+    # If we get here, the status is ACTIVE, so deletion is allowed
+    return None
 
 
 def check_restorable(current: SharedMemory) -> None:
@@ -77,7 +94,10 @@ def check_restorable(current: SharedMemory) -> None:
     ``SharedMemoryStateError(StateProblem.NOT_DELETED)``. Returns ``None`` when
     the restore is allowed.
     """
-    raise NotImplementedError("PAW-046 stub")
+    if current.status == SharedMemoryStatus.ACTIVE:
+        raise SharedMemoryStateError(StateProblem.NOT_DELETED)
+    # If we get here, the status is DELETED, so restoration is allowed
+    return None
 
 
 def apply_changes(
@@ -100,7 +120,30 @@ def apply_changes(
     ``SharedMemoryChanges(policy_subjects=())`` gives ``policy_subjects=()``
     and every other field as in ``current``.
     """
-    raise NotImplementedError("PAW-046 stub")
+    # Build the result using the changes where provided, otherwise keep current values
+    title = changes.title if changes.title is not None else current.title
+    content = changes.content if changes.content is not None else current.content
+    memory_type = (
+        changes.memory_type if changes.memory_type is not None else current.memory_type
+    )
+    importance = (
+        changes.importance if changes.importance is not None else current.importance
+    )
+    policy_subjects = (
+        changes.policy_subjects
+        if changes.policy_subjects is not None
+        else current.policy_subjects
+    )
+    reason = changes.reason
+
+    return SharedMemoryDraft(
+        memory_type=memory_type,
+        title=title,
+        content=content,
+        importance=importance,
+        policy_subjects=policy_subjects,
+        reason=reason,
+    )
 
 
 def changed_fields(current: SharedMemory, draft: SharedMemoryDraft) -> tuple[str, ...]:
@@ -115,7 +158,22 @@ def changed_fields(current: SharedMemory, draft: SharedMemoryDraft) -> tuple[str
     ``("title",)``; a different content, importance and title give
     ``("content", "importance", "title")``.
     """
-    raise NotImplementedError("PAW-046 stub")
+    changed = []
+
+    # Check each editable field
+    if current.content != draft.content:
+        changed.append("content")
+    if current.importance != draft.importance:
+        changed.append("importance")
+    if current.memory_type != draft.memory_type:
+        changed.append("memory_type")
+    if current.policy_subjects != draft.policy_subjects:
+        changed.append("policy_subjects")
+    if current.title != draft.title:
+        changed.append("title")
+
+    # Return sorted tuple
+    return tuple(sorted(changed))
 
 
 def plan_edit(
@@ -137,7 +195,24 @@ def plan_edit(
     "nothing changed": an edit of an old version is refused even if it changes
     nothing.
     """
-    raise NotImplementedError("PAW-046 stub")
+    # Check version mismatch first
+    if expected_version != current.version_number:
+        raise SharedMemoryVersionConflictError(expected_version, current.version_number)
+
+    # Check if deleted
+    if current.status == SharedMemoryStatus.DELETED:
+        raise SharedMemoryStateError(StateProblem.DELETED)
+
+    # Apply changes and check what fields changed
+    draft = apply_changes(current, changes)
+    changed = changed_fields(current, draft)
+
+    # Return None if nothing changed
+    if len(changed) == 0:
+        return None
+
+    # Return the edit plan
+    return EditPlan(draft=draft, changed_fields=changed)
 
 
 def draft_from_candidate(candidate: SharedMemoryCandidate) -> SharedMemoryDraft:
@@ -150,4 +225,11 @@ def draft_from_candidate(candidate: SharedMemoryCandidate) -> SharedMemoryDraft:
     is not looked at: whether it may be approved is
     ``next_candidate_state``'s decision.
     """
-    raise NotImplementedError("PAW-046 stub")
+    return SharedMemoryDraft(
+        memory_type=candidate.memory_type,
+        title=candidate.title,
+        content=candidate.content,
+        importance=candidate.importance,
+        policy_subjects=candidate.policy_subjects,
+        reason=candidate.reason,
+    )
