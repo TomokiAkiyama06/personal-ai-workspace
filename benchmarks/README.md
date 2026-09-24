@@ -312,7 +312,10 @@ Worker出力はschemaの`enum`でschema不適合になり、Goldはcase loader�
 `session`と、Inferred Preferenceの例にある`project_group`は、Memory抽出Workerの出力に含めるかが未決定のため受け付けません（追加はschemaの`enum`と`MEMORY_SCOPES`の同時変更です）。
 Gold recordが`content`を持つ場合は、`exact_recall`（keyと内容の両方が一致）と`content_accuracy`
 （key一致したもののうち内容が一致した割合。NFKC・大文字小文字・空白を正規化して比較）を併せて確認してください。
-`conflicts_with`（衝突するMemoryのkey）は`conflict_accuracy`で採点し、どちらかが衝突を宣言したkey一致ペアだけを対象にします。
+`conflicts_with`（衝突するMemoryのkey）は`conflict_accuracy`で採点し、Goldが`conflicts_with`を持つkey一致recordだけを対象にします。
+Goldの空配列（`[]`）は「衝突なし」というlabelで、Workerが関係を出力すれば不正解、出力しなければ正解として採点します。
+`conflicts_with`がないGoldは未labelとして採点せず、Workerが関係を出力しても評価対象は変わりません（候補の出力に依存して対象recordが増減しません）。
+Worker出力で`conflicts_with`を省略した場合と`[]`は、どちらも関係なしの宣言として扱います。
 Goldに`content` / `conflicts_with`がなければ、対応する指標は`null`または従来と同じ値になります。
 case fileの未知のfield（`supercedes`や`conflict_with`のような綴り誤り）は、黙って無視せず不備（終了code 1）として拒否します。
 case fileとWorker出力のJSONは、既存のvalidatorと同じ厳格なdecoder（`benchmarks.json_input.decode_json`）で読み、同じ名前のmemberの重複や`NaN`などの非標準の定数は、後の値で上書きせずに拒否します（Worker出力はschema不適合として数えます）。

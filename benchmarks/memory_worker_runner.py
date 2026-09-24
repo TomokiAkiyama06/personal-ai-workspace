@@ -68,9 +68,13 @@ def _parse_gold_record(record: object, case_id: str, index: int) -> MemoryRecord
     for name in ("key", "scope", "state"):
         if name not in record:
             raise ValueError(f"Invalid {where}: missing '{name}'")
-    conflicts = record.get("conflicts_with", [])
-    if not isinstance(conflicts, list):
-        raise ValueError(f"Invalid {where}: 'conflicts_with' must be a list")  # noqa: TRY004 - dataset problems are reported uniformly as ValueError.
+    # An absent label (None) is not an empty one: it is not scored on conflicts.
+    conflicts_with = None
+    if "conflicts_with" in record:
+        conflicts = record["conflicts_with"]
+        if not isinstance(conflicts, list):
+            raise ValueError(f"Invalid {where}: 'conflicts_with' must be a list")
+        conflicts_with = tuple(conflicts)
     try:
         return MemoryRecord(
             key=record["key"],
@@ -78,7 +82,7 @@ def _parse_gold_record(record: object, case_id: str, index: int) -> MemoryRecord
             state=record["state"],
             supersedes=record.get("supersedes"),
             content=record.get("content"),
-            conflicts_with=tuple(conflicts),
+            conflicts_with=conflicts_with,
         )
     except (TypeError, ValueError) as error:
         raise ValueError(f"Invalid {where}: {error}") from None
@@ -181,7 +185,9 @@ def parse_worker_output(raw: str) -> list[MemoryRecord] | None:
                 state=item["state"],
                 supersedes=item["supersedes"],
                 content=item.get("content"),
-                conflicts_with=tuple(item.get("conflicts_with", ())),
+                conflicts_with=tuple(item["conflicts_with"])
+                if "conflicts_with" in item
+                else None,
             )
             records.append(record)
         return records

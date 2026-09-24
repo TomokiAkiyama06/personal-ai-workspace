@@ -494,6 +494,84 @@ class MemoryWorkerRunnerTest(unittest.TestCase):
             (MemoryRecord("k", "user", "inferred", None, "the fact", ("other",)),),
         )
 
+    def test_gold_conflict_label_absent_and_empty_are_kept_apart(self):
+        def gold(**extra):
+            return {"key": "k", "scope": "user", "state": "inferred", **extra}
+
+        document = {
+            "cases": [
+                {
+                    "id": "c1",
+                    "input": "text",
+                    "gold": [
+                        dict(gold(), key="unlabelled"),
+                        dict(gold(conflicts_with=[]), key="no_conflict"),
+                        dict(gold(conflicts_with=["unlabelled"]), key="conflicts"),
+                    ],
+                }
+            ]
+        }
+
+        (case,) = self._load_from_text(json.dumps(document))
+
+        self.assertEqual(
+            [(record.key, record.conflicts_with) for record in case.gold],
+            [("unlabelled", None), ("no_conflict", ()), ("conflicts", ("unlabelled",))],
+        )
+
+    def test_a_null_conflict_label_is_not_the_same_as_an_absent_one(self):
+        document = {
+            "cases": [
+                {
+                    "id": "c1",
+                    "input": "text",
+                    "gold": [
+                        {
+                            "key": "k",
+                            "scope": "user",
+                            "state": "inferred",
+                            "conflicts_with": None,
+                        }
+                    ],
+                }
+            ]
+        }
+        with self.assertRaises(ValueError) as caught:
+            self._load_from_text(json.dumps(document))
+        self.assertIn("'conflicts_with' must be a list", str(caught.exception))
+
+    def test_worker_output_conflict_label_absent_and_empty_are_kept_apart(self):
+        base = {"key": "k", "scope": "user", "state": "confirmed", "supersedes": None}
+        for extra, expected in (({}, None), ({"conflicts_with": []}, ())):
+            with self.subTest(extra=extra):
+                raw = json.dumps({"memories": [dict(base, **extra)]})
+                (record,) = parse_worker_output(raw)
+                self.assertEqual(record.conflicts_with, expected)
+
+    def test_conflicts_a_worker_invents_on_unlabelled_gold_cost_nothing(self):
+        cases = self._cases(2)  # gold has no conflict label
+        invents = json.dumps(
+            {
+                "memories": [
+                    {
+                        "key": "k",
+                        "scope": "user",
+                        "state": "confirmed",
+                        "supersedes": None,
+                        "conflicts_with": ["other"],
+                    }
+                ]
+            }
+        )
+        silent = VALID_OUTPUT.replace("favorite_color", "k")
+
+        for worker in (MockWorker([invents, invents]), MockWorker([silent, silent])):
+            report = run_benchmark(worker, cases)
+            self.assertEqual(report.metrics["extraction_recall"], 1.0)
+            self.assertIsNone(report.metrics["conflict_accuracy"])
+            for result in report.cases:
+                self.assertEqual(result.comparison.conflicts_evaluated, 0)
+
     def test_worker_output_content_and_conflicts_are_parsed(self):
         raw = json.dumps(
             {

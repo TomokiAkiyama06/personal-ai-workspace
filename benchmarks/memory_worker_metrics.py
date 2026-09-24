@@ -29,7 +29,10 @@ class MemoryRecord:
     ``key`` identifies the memory (matching is by key). ``scope`` is one of
     ``MEMORY_SCOPES``, so a topic label cannot earn scope credit. ``content`` is the extracted
     fact; a gold record without content is not scored on content. ``conflicts_with``
-    lists the keys of memories this one conflicts with.
+    lists the keys of memories this one conflicts with. ``None`` (absent) is not the
+    same as ``()``: on a gold record ``None`` means "not labelled" and the record is
+    not scored on conflicts, while ``()`` labels it "conflicts with nothing" and is
+    scored. On a prediction, ``None`` and ``()`` both mean no relation was declared.
     """
 
     key: str
@@ -37,7 +40,7 @@ class MemoryRecord:
     state: str
     supersedes: str | None
     content: str | None = None
-    conflicts_with: tuple[str, ...] = ()
+    conflicts_with: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.key, str) or not self.key:
@@ -58,10 +61,13 @@ class MemoryRecord:
             not isinstance(self.content, str) or not self.content.strip()
         ):
             raise TypeError("content must be a non-empty string or None")
-        if not isinstance(self.conflicts_with, tuple) or not all(
-            isinstance(key, str) and key for key in self.conflicts_with
+        if self.conflicts_with is not None and (
+            not isinstance(self.conflicts_with, tuple)
+            or not all(isinstance(key, str) and key for key in self.conflicts_with)
         ):
-            raise TypeError("conflicts_with must be a tuple of non-empty strings")
+            raise TypeError(
+                "conflicts_with must be a tuple of non-empty strings or None"
+            )
 
 
 @dataclass(frozen=True)
@@ -113,10 +119,12 @@ def compare_memories(
                 normalize_content(gold_record.content)
                 == normalize_content(predicted_record.content)
             )
-        if gold_record.conflicts_with or predicted_record.conflicts_with:
+        # Only gold that carries a label is scored, so the set of scored records
+        # does not depend on what the worker emitted (an empty label is scored).
+        if gold_record.conflicts_with is not None:
             conflicts_evaluated += 1
             conflicts_correct += set(gold_record.conflicts_with) == set(
-                predicted_record.conflicts_with
+                predicted_record.conflicts_with or ()
             )
 
     return MemoryComparison(
@@ -141,7 +149,8 @@ def aggregate(comparisons: Sequence[MemoryComparison]) -> dict[str, float | None
     right. ``exact_recall`` also requires matching content where the gold record has
     content; ``content_accuracy`` is the share of key-matched, content-labelled gold
     memories whose content matched; ``conflict_accuracy`` is scored over key-matched
-    pairs where either side declares a conflict.
+    gold records that carry a ``conflicts_with`` label (an empty label means "no
+    conflict" and is scored; an absent label is not scored).
     """
     if not comparisons:
         raise ValueError("Cannot aggregate empty sequence of comparisons")

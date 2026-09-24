@@ -389,8 +389,16 @@ class AggregateTest(unittest.TestCase):
 
 class ContentAndConflictTest(unittest.TestCase):
     @staticmethod
-    def record(key, content=None, conflicts=(), scope="user", state="confirmed"):
-        return MemoryRecord(key, scope, state, None, content, tuple(conflicts))
+    def record(key, content=None, conflicts=None, scope="user", state="confirmed"):
+        # ``conflicts=None`` is "no conflict label"; ``[]`` is "labelled: no conflict".
+        return MemoryRecord(
+            key,
+            scope,
+            state,
+            None,
+            content,
+            None if conflicts is None else tuple(conflicts),
+        )
 
     def test_right_key_with_wrong_content_is_not_an_exact_recall(self):
         gold = [self.record("meeting_time", "Tomorrow at 3 PM")]
@@ -443,16 +451,48 @@ class ContentAndConflictTest(unittest.TestCase):
         )
         self.assertEqual(aggregate([comparison])["conflict_accuracy"], 1.0)
 
-    def test_missed_and_invented_conflicts_are_wrong(self):
-        gold = [self.record("a", conflicts=["b"]), self.record("d")]
+    def test_a_missed_conflict_is_wrong(self):
+        comparison = compare_memories(
+            [self.record("a", conflicts=["b"])], [self.record("a")]
+        )
+
+        self.assertEqual(
+            (comparison.conflicts_evaluated, comparison.conflicts_correct), (1, 0)
+        )
+        self.assertEqual(aggregate([comparison])["conflict_accuracy"], 0.0)
+
+    def test_gold_labelled_as_no_conflict_is_scored_both_ways(self):
+        gold = [self.record("a", conflicts=[]), self.record("d", conflicts=[])]
         predicted = [self.record("a"), self.record("d", conflicts=["a"])]
 
         comparison = compare_memories(gold, predicted)
 
+        # "a": no relation emitted, right. "d": an invented relation, wrong.
         self.assertEqual(
-            (comparison.conflicts_evaluated, comparison.conflicts_correct), (2, 0)
+            (comparison.conflicts_evaluated, comparison.conflicts_correct), (2, 1)
         )
-        self.assertEqual(aggregate([comparison])["conflict_accuracy"], 0.0)
+        self.assertEqual(aggregate([comparison])["conflict_accuracy"], 0.5)
+
+    def test_unlabelled_gold_is_not_scored_whatever_the_worker_emits(self):
+        gold = [self.record("a"), self.record("d")]
+        for label, predicted in (
+            ("no relation", [self.record("a"), self.record("d")]),
+            ("empty list", [self.record("a", conflicts=[]), self.record("d")]),
+            ("a relation", [self.record("a", conflicts=["d"]), self.record("d")]),
+        ):
+            with self.subTest(prediction=label):
+                comparison = compare_memories(gold, predicted)
+
+                self.assertEqual(
+                    (comparison.conflicts_evaluated, comparison.conflicts_correct),
+                    (0, 0),
+                )
+                self.assertIsNone(aggregate([comparison])["conflict_accuracy"])
+
+    def test_absent_and_empty_conflict_labels_are_different_records(self):
+        self.assertNotEqual(self.record("a"), self.record("a", conflicts=[]))
+        self.assertIsNone(self.record("a").conflicts_with)
+        self.assertEqual(self.record("a", conflicts=[]).conflicts_with, ())
 
     def test_record_validation_for_content_and_conflicts(self):
         with self.assertRaises(TypeError):
@@ -463,6 +503,7 @@ class ContentAndConflictTest(unittest.TestCase):
             MemoryRecord("k", "user", "confirmed", None, None, ["b"])
         with self.assertRaises(TypeError):
             MemoryRecord("k", "user", "confirmed", None, None, ("",))
+        self.assertIsNone(MemoryRecord("k", "user", "confirmed", None).conflicts_with)
 
 
 class SchemaAdherenceTest(unittest.TestCase):
