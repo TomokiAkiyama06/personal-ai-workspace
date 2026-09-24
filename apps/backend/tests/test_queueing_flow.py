@@ -31,7 +31,7 @@ class FlowTest(PostgresQueueingTestCase):
         self.assertEqual(claimed.id, entry.id)
         await self.service.execute(task_id, TaskCommand.START, actor=self.system)
         await self.budget.start_runtime(task_id)
-        return task_id, entry
+        return task_id, claimed
 
     async def fail_step(self, task_id, approach: int):
         assessment = await self.loop_detector.record_failure(
@@ -114,7 +114,7 @@ class FlowTest(PostgresQueueingTestCase):
         self.assertEqual(await self.apply(task_id, decision), TaskState.WAITING)
         # The worker hands the entry back; the runtime clock stops.
         self.clock.set(120)
-        await self.queue.release(entry.id, "local-worker", at(20))
+        await self.queue.release(entry.id, "local-worker", entry.claim_count, at(20))
         runtime = await self.budget.stop_runtime(task_id)
         self.assertEqual(runtime.consumed, 120)
 
@@ -128,7 +128,7 @@ class FlowTest(PostgresQueueingTestCase):
         )
         self.assertEqual((decision.action, decision.exceeded), (A.FAIL, (K.RETRIES,)))
         self.assertEqual(await self.apply(task_id, decision), TaskState.FAILED)
-        await self.queue.complete(entry.id, "local-worker", at(30))
+        await self.queue.complete(entry.id, "local-worker", entry.claim_count, at(30))
         # A human retries (PAW-032) with a bigger preset; the task is queued again.
         await self.service.execute(task_id, TaskCommand.RETRY, actor=self.user)
         await self.budget.set_preset(task_id, BudgetPreset.LONG)
