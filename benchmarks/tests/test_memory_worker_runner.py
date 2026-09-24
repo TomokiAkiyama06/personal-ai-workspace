@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from benchmarks.memory_worker_metrics import MemoryRecord, schema_adherence
 from benchmarks.memory_worker_runner import (
@@ -428,6 +429,22 @@ class MemoryWorkerRunnerTest(unittest.TestCase):
                     validate_worker(worker)
                 with self.assertRaises(TypeError):
                     run_benchmark(worker, self._cases(1))
+
+    def test_extract_with_an_uninspectable_signature_is_rejected(self):
+        class Worker:
+            def extract(self, input_text):
+                return "{}"
+
+        with (
+            patch(
+                "benchmarks.memory_worker_runner.inspect.signature",
+                side_effect=ValueError,
+            ),
+            self.assertRaises(TypeError) as context,
+        ):
+            validate_worker(Worker())
+
+        self.assertIn("no inspectable signature", str(context.exception))
 
     def test_whitespace_only_content_is_invalid_in_the_schema_and_the_parser(self):
         raw = json.dumps(

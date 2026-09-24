@@ -221,8 +221,10 @@ def validate_worker(worker: object) -> None:
         inspect.signature(method).bind("input text")
     except TypeError:
         raise TypeError("extract() must accept (input_text)") from None
-    except ValueError:  # no introspectable signature (some builtins): accept
-        pass
+    except ValueError:
+        raise TypeError(
+            "extract() has no inspectable signature; wrap it in a plain Python method"
+        ) from None
 
 
 def run_benchmark(
