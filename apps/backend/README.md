@@ -2,7 +2,8 @@
 
 Personal AI Workspace の Core Backend です。
 [PAW-020](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/17) で、後続の Issue が載る最小の Application Skeleton を実装しました。
-認証、User、RBAC、Task、Memory はまだ実装していません（PAW-021 以降）。
+認証、User、RBAC、Task はまだ実装していません（PAW-021 以降）。
+Memory は PostgreSQL の Schema だけを実装しています（[PAW-040](#memory--conversation-schema)）。保存・整理・検索の処理は PAW-041 以降です。
 
 [Architecture](../../docs/ARCHITECTURE.md) に基づき、最終的に以下の機能を Backend 側で扱います。
 
@@ -27,7 +28,8 @@ Core Backend は GPU 非依存とし、Local Model Runtime を停止できる構
 | Test / Lint | 標準 `unittest`、Ruff |
 | Package 管理 | uv + `pyproject.toml`（依存は完全一致で固定） |
 
-pgvector は Memory Schema の Issue（PAW-040）で導入します。
+pgvector は Memory Schema（PAW-040）の Migration が `vector` extension として有効にします。
+Python 側の Package（`pgvector-python`）は使わず、`paw_backend/memory/vector.py` の Column 型だけで扱います。
 
 ## 構成
 
@@ -35,7 +37,7 @@ pgvector は Memory Schema の Issue（PAW-040）で導入します。
 apps/backend/
 ├─ pyproject.toml          # 依存（完全一致で固定）と Ruff 設定
 ├─ alembic.ini             # Alembic 設定（DB URL は持たない）
-├─ migrations/             # env.py と Revision（0001 は空の Baseline）
+├─ migrations/             # env.py と Revision（0001 は空の Baseline、0040 は Memory Schema）
 ├─ paw_backend/
 │  ├─ app.py               # create_app(settings)
 │  ├─ config.py            # PAW_ 環境変数から読む Settings
@@ -45,6 +47,7 @@ apps/backend/
 │  ├─ errors.py            # 共通の Error Response
 │  ├─ middleware.py        # Request ID、Host 検証、Security Header
 │  ├─ security.py          # Host / Origin の判定
+│  ├─ memory/              # Memory / Conversation の Model、ACL 条件、vector 型（PAW-040）
 │  └─ api/
 │     ├─ deps.py           # FastAPI Dependency
 │     └─ v1/               # /api/v1 の Router（health、events）
@@ -79,6 +82,7 @@ Repository 全体の検証は `python .github/scripts/run_ci.py` です（[CI](.
 実 PostgreSQL に対する Test は `PAW_TEST_DATABASE_URL` を設定した場合だけ実行し、未設定では Skip します。
 GitHub Actions は使い捨ての PostgreSQL を起動してこの変数を渡すため、CI ではこれらの Test も実行されます。
 この Test は Migration を `head` へ上げて `base` へ戻すため、ローカルでも使い捨ての Database を指定してください。
+Database には pgvector が必要です（CI は `pgvector/pgvector:pg18` を使います）。Migration の実行には `CREATE EXTENSION` の権限が要ります。
 
 ## 設定
 
@@ -195,6 +199,54 @@ alembic -c apps/backend/alembic.ini upgrade head --sql    # SQL の出力のみ�
 alembic -c apps/backend/alembic.ini revision -m "説明"    # 新しい Revision
 ```
 
+## Memory / Conversation Schema
+
+[PAW-040](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/34)（Revision `0040`）で実装した Schema です。
+設計は [Memory Architecture](../../docs/MEMORY_ARCHITECTURE.md) と [要件](../../REQUIREMENTS.md) の Memory の節に従います。
+Repository / Service は含みません。
+
+| 層 | Table | 内容 |
+| --- | --- | --- |
+| Raw Conversation | `conversations`、`messages` | 発言、Tool 結果、Agent 結果、Task の経緯。無期限に保持し、LLM Context へ全文は入れない |
+| Session state | `session_states` | Conversation ごとの要約と作業状態（1 Conversation に 1 行） |
+| Long-term Memory | `memories`、`memory_versions`、`memory_relations`、`memory_sources`、`memory_embeddings` | 確定した知識。Version、関係、出典、Embedding |
+
+3 つの層は別の Table で、Foreign Key でつながるのは出典（`memory_sources`）だけです。
+Conversation を消しても Memory と他の出典は残り（`ON DELETE SET NULL`）、Session state と Message は一緒に消えます。
+
+**Scope と ACL。** 各 Version が `scope`（`user` / `project` / `repo` / `shared`）を持ち、Scope に対応する ID を 1 つだけ持ちます
+（`owner_user_id` / `project_id` / `repo_id`、`shared` は無し）。CHECK 制約が組み合わせを強制します。
+権限の判定は SQL で行います。`paw_backend.memory.acl` の `readable_memory_versions(principal)` を、
+`memory_versions`（と、それを Join する `memory_embeddings`、`memory_sources`、`memory_relations`）を読む全ての Query に付けます。
+Vector 検索でも、順位付けの前に付けるため、見えない行が順位に入ることはありません。
+`Principal` は User の実効的な権限（読める Project と Repo の ID）で、RBAC と Membership から Backend が決めます。
+Repo は既定で Project の権限を継承し、Repo 単位の ACL override で外された Repo は `repo_ids` に入れません。
+Memory ごとの権限の写しは持ちません（Member の変更で古くなり、漏れの原因になるため）。
+Scope 別の Index が `status = 'active'` の絞り込みとあわせて ACL 条件を支えます。
+Raw Conversation は所有者だけが読めます（`readable_conversations`）。Admin にも本文は見せません。
+
+**Version と履歴。** 編集は新しい `memory_versions` の行です。旧 Version は消さず `status`（`active` / `superseded` / `deprecated` / `history`）を変えます。
+1 つの `memories` に `active` は最大 1 行（Partial Unique Index）で、`(memory_id, version_number)` の Unique が楽観ロックを兼ねます。
+`memory_relations` が Version の関係（`supersedes`、`extends`、`conflicts_with`、`confirmed_from`、`revalidated_from`、`merged_from`）を新しい側から古い側へ持ちます。
+自分自身への関係と、同じ Version を複数の Version が supersede することは DB が拒否します。
+Scope を広げる編集は新しい Version で行うため、旧 Version は元の Scope のまま非公開です。
+`confirmation_state`（`observed` / `inferred` / `confirmed` / `rejected`）、`freshness_policy`（`permanent` / `revalidate` / `repo_commit` / `expiring` / `session_only`）と、
+方針ごとの必須項目（`verified_at`、`revalidate_after`、`commit_sha`、`expires_at`）、`actor`、`change_reason` も Version が持ちます。
+
+**User / Project / Repo の ID は Foreign Key なし。** User、Project、Repo の Table はまだありません（PAW-021 / 026 / 027）。
+`owner_user_id`、`project_id`、`repo_id`、`actor_user_id` は素の UUID Column で、DB は存在を確認しません。
+Backend は検証した ID だけを書いてください。Table ができた後の Migration で Foreign Key を追加できます。
+Task、Repo 解析、Project Decision の出典も、Table がないため `memory_sources.source_ref` の不透明な文字列です。
+
+**pgvector。** Migration が `CREATE EXTENSION IF NOT EXISTS vector` を実行します（Migration の Role に権限が必要。管理者が先に作成済みでもよい）。
+`memory_embeddings` は `(memory_version_id, embedding_model_id)` が Key で、`embedding` は **次元を固定しない** `vector` です。
+Embedding Model と次元は Benchmark（PAW-019）で決めるため、まだ決めていません。`dimensions` と実際の次元は CHECK で一致させます。
+次元の異なる Vector 同士の距離は計算できないため、近傍検索は先に 1 つの `embedding_model_id` に絞ります。
+ANN Index（HNSW / IVFFlat）はまだありません。Model が決まった後に PAW-043 が追加します。
+
+Model と Migration の一致は Test が検証します（Alembic の autogenerate の差分が空であること、Model から作った Schema と Migration の Catalog が同じであること）。
+制約名は `paw_backend.db.Base` の命名規則に従います。
+
 ## 依存 Package
 
 依存は `pyproject.toml` で完全一致に固定しています。
@@ -208,6 +260,7 @@ CI は pre-commit の専用環境で Test を実行するため、同じ Version
 ## 今後の Issue
 
 [PAW-021](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/18)（Owner Setup）、PAW-022（Login / Session）、
-PAW-025（RBAC）、PAW-032（Task Lifecycle）、PAW-040（Memory Schema）はこの Skeleton の上に実装します。
+PAW-025（RBAC）、PAW-032（Task Lifecycle）はこの Skeleton の上に実装します。
+Memory の保存・整理・検索は Memory Schema（PAW-040）の上に PAW-041 以降で実装します。
 受け入れ基準は [Implementation Backlog](../../docs/IMPLEMENTATION_BACKLOG.md)、
 実装時に選択できる事項は [Requirements Freeze Review](../../docs/REQUIREMENTS_FREEZE_REVIEW.md) を参照してください。
