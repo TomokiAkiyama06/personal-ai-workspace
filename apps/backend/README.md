@@ -45,6 +45,7 @@ apps/backend/
 │  ├─ errors.py            # 共通の Error Response
 │  ├─ middleware.py        # Request ID、Host 検証、Security Header
 │  ├─ security.py          # Host / Origin の判定
+│  ├─ authz/               # Role・Capability・認可の判定と Audit Event（PAW-025）
 │  └─ api/
 │     ├─ deps.py           # FastAPI Dependency
 │     └─ v1/               # /api/v1 の Router（health、events）
@@ -194,6 +195,92 @@ alembic -c apps/backend/alembic.ini upgrade head          # 適用
 alembic -c apps/backend/alembic.ini upgrade head --sql    # SQL の出力のみ（DB 接続は不要）
 alembic -c apps/backend/alembic.ini revision -m "説明"    # 新しい Revision
 ```
+
+## 認可（RBAC / Capability）と Audit
+
+権限の判定は Backend だけが行います。Frontend の表示、Client が送る Header・Query・Body、Prompt、Model の出力は判定の入力になりません。
+判定は型付きの入力（`Principal`、`Capability`、`Resource`）だけから決まる純粋関数で、**既定は拒否**です
+（[設計](../../docs/SECURITY_RBAC_AUDIT.md)、[Tool 権限](../../docs/SECURITY_TOOL_PERMISSIONS.md)）。
+
+| 層 | Role | 内容 |
+| --- | --- | --- |
+| System | Owner / Admin / User | Owner は Admin の全権限を含み、Admin は User の権限を含む。Owner 専用は Admin の追加・削除、Owner 権限の移譲、全体復旧、削除待ち User の復元、Backup 設定 |
+| System | System | Backend 内部の Identity。人間はログインできず、Capability を持たない |
+| Project | Manager / Contributor / Viewer | Viewer は閲覧、Contributor は Chat・Task・Repository 編集・Agent・PR、Manager は Member・Repository 追加・設定・Agent Policy・Project Memory・Archive / Delete 開始 |
+
+- Project の Role は Project ごとです。Manager である Project A の権限は Project B に及びません。
+  System Role だけでは所属していない Project を閲覧・利用できません（Owner / Admin が持つ Project の権限は、Archive / Delete 開始などの管理操作だけです）。
+- 自分のデータ（Chat、Workspace、GitHub、Memory）の Capability は、`Resource.owner_id` が本人のときだけ許可します。Owner でも他の User の Private Data は使えません。
+- 判定の全体表は `paw_backend/authz/policy.py` にあり、`tests/test_authz_policy.py` が全 Role × 全 Capability を文字列で列挙して固定しています。
+
+### Endpoint への適用
+
+```python
+from paw_backend.authz import Capability, Resource, require_capability
+
+
+# Workspace 全体の操作
+@router.get(
+    "/admin/audit",
+    dependencies=[Depends(require_capability(Capability.ADMIN_AUDIT_VIEW))],
+)
+async def audit_log(): ...
+
+
+# Project の操作は、Path Parameter から Backend が Resource を作る
+def project_of(request: Request) -> Resource:
+    return Resource.project(request.path_params["project_id"])
+
+
+@router.post(
+    "/projects/{project_id}/tasks",
+    dependencies=[Depends(require_capability(Capability.PROJECT_TASK_RUN, project_of))],
+)
+async def run_task(project_id: str): ...
+```
+
+`require_capability` は `Principal` を返すので、Endpoint の引数で受け取れます。
+
+| 状況 | Response |
+| --- | --- |
+| 認証されていない | 401 `unauthorized` |
+| 認証済みだが権限がない（Role 不足、Project の非 Member、他人のデータ、不正な ID） | 403 `forbidden`。Body は固定で、どの規則で拒否したかは含めない |
+| 特権 Capability で Audit を書けない | 503 `service_unavailable`（下記） |
+
+**現在、認証は未実装（PAW-022）なので、`require_capability` を付けた Endpoint はすべて 401 を返します。**
+既定の `UnauthenticatedProvider` が誰も認証しないためです。PAW-022 は `PrincipalProvider`（Request から有効な User の `Principal` を返す）を実装し、
+`install_authz(app, ..., principal_provider=...)` で差し替えます。Provider は保存済みのデータから `Principal` を作ることが必須で、Client が申告した Role を使ってはいけません。
+`/api/v1/events` の 2 つの Endpoint は現在も認証なしです（`TODO(PAW-022)`）。
+
+### Agent と LLM
+
+Agent の操作は、委任した人間の User の操作として判定します（`Authorizer.authorize_agent_action` / `policy.decide_agent`）。
+
+- 許可されるのは、**User 本人が許可される** かつ **`AgentGrant` に含まれる** 操作だけです（積集合）。Grant は権限を狭めるだけで、User の権限を超えることはありません。
+  User の Role を外せば、次の判定から Agent にも効きます。
+- `AgentGrant.project_ids` を指定すると、その Project の中だけに限定できます。Grant は Backend が Task の範囲から作り、Model が書いた文字列から作りません。
+- 特権 Capability（`admin.*`、`owner.*`、`shared_memory.manage`、`project.members.manage`、`project.agent_policy.manage`、`project.lifecycle.manage`）は、Grant に書いてあっても Agent には常に拒否します（自己権限昇格の禁止）。
+- Capability 名は完全一致だけです。Model が出力した名前を判定に渡しても、未知の名前は `unknown_capability` で拒否し、Audit にも入力の文字列は残しません。
+
+Tool Broker の Capability（read / write / execute / network / credential-use / destructive）と Approval は PAW-031 以降で、ここで決めた権限をさらに狭める方向にだけ働きます。
+
+### Audit Event
+
+判定のたびに 1 件の `AuditEvent` を `AuditSink` へ渡します（許可も拒否も、未認証も）。
+項目は `event_id`、`occurred_at`、`actor_id`（人間の User。Agent の操作では委任元）、`actor_role`、`agent_id`、`action`（Capability 名）、
+`resource_kind` / `resource_id` / `project_id` / `repo_id`、`decision`（`allow` / `deny`）、`reason`（固定の Reason Code）、`request_id` です。
+Secret、Prompt、本文は持ちません。ID は英数字と `._:-` の 128 文字以内に制限しています。
+
+- 保存先は `audit_events` Table（Migration `0025`）で、`PostgresAuditSink` が Request の Transaction とは別の短い Transaction で INSERT します。
+  Test 用に `InMemoryAuditSink` があります。
+- **追記専用**: Trigger が UPDATE、DELETE、TRUNCATE を拒否します（`restrict_violation`。`session_replication_role = replica` でも有効）。
+  Table の Owner や Superuser は Trigger を外せるため、運用では Migration 用の Role と、INSERT / SELECT だけを持つ実行時の Role を分けてください。
+  Downgrade は Table ごと履歴を消します。
+- **Fail-closed**: Audit を書けない（失敗または `PAW_DATABASE_TIMEOUT_SECONDS` の超過）とき、
+  特権 Capability（管理者・Owner の操作、権限を変える操作）の許可は拒否に変わり（`audit_unavailable`）、HTTP は 503 です。
+  それ以外の Capability は許可のまま続行し、失敗は Log（例外の型名だけ）に残します。Audit の障害で Workspace 全体が止まらないようにするためです。拒否は常に拒否のままです。
+- 未認証の Request も 1 件ずつ記録するため、認証前の連続アクセスはそのまま行数になります。回数制限は PAW-022（Lockout、Rate Limit）の課題です。
+- 保存するのは ID だけです。User の削除後の匿名化（`Deleted User`）は、Audit の行を書き換えず、User 側の個人情報を消して行います。
 
 ## 依存 Package
 
