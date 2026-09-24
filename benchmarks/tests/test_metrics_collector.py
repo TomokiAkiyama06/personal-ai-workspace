@@ -72,6 +72,28 @@ class MetricsCollectorTest(unittest.TestCase):
         self.assertEqual(metrics["peak_gpu_utilization_percent"], 80)
         self.assertEqual(sampler.calls, 2)
 
+    def test_gpu_sampling_latency_is_excluded_from_wall_clock(self):
+        clock = FakeClock()
+
+        class SlowGpuSampler(FakeGpuSampler):
+            def sample(self):
+                clock.value += 5.0  # simulated nvidia-smi startup latency
+                return super().sample()
+
+        sampler = SlowGpuSampler([(GpuSample(10, 20),), (GpuSample(30, 40),)])
+        collector = MetricsCollector(
+            gpu_sampler=sampler, monotonic_clock=clock, gpu_poll_interval_s=None
+        )
+        collector.start()
+        clock.value += 1.5  # the candidate's own execution time
+        collector.stop()
+
+        metrics = collector.metrics()
+        self.assertEqual(sampler.calls, 2)
+        self.assertEqual(metrics["wall_clock_ms"], 1500.0)
+        self.assertEqual(metrics["peak_vram_bytes"], 30)
+        self.assertEqual(metrics["peak_gpu_utilization_percent"], 40)
+
     def test_unavailable_optional_metrics_are_omitted(self):
         collector = MetricsCollector(gpu_poll_interval_s=None)
         collector.start()

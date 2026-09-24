@@ -111,12 +111,20 @@ class MetricsCollector:
         self._sampling_thread: threading.Thread | None = None
 
     def start(self) -> None:
-        """Start wall-clock and, when configured, periodic GPU collection."""
+        """Start wall-clock and, when configured, periodic GPU collection.
+
+        The initial GPU sample is taken before the wall-clock window opens, just
+        as :meth:`stop` takes its final sample after the window closes, so GPU
+        telemetry latency never counts towards ``wall_clock_ms``.
+        """
+        with self._lock:
+            if self._started_at is not None:
+                raise RuntimeError("metrics collection has already started")
+        self.sample_gpu()
         with self._lock:
             if self._started_at is not None:
                 raise RuntimeError("metrics collection has already started")
             self._started_at = self._clock()
-        self.sample_gpu()
         if self._gpu_sampler is not None and self._gpu_poll_interval_s is not None:
             self._sampling_thread = threading.Thread(
                 target=self._poll_gpu,
