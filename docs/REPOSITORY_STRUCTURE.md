@@ -111,7 +111,8 @@ Core Backend は GPU 非依存とし、Local Model Runtime を停止できる構
 
 実装は [Benchmark / Evaluator 設計](BENCHMARK_EVALUATOR.md) と
 [Implementation Backlog](IMPLEMENTATION_BACKLOG.md) に従い、Benchmark / Evaluator、Model 選定、Workspace 本体の順で進めます。
-PAW-010 は PAW-001 に依存し、Backend の最小 Application Skeleton である PAW-020 は Model 比較 Run の PAW-017 に依存します。
+PAW-010 は PAW-001 に依存します。Backend の最小 Application Skeleton である PAW-020 は Backlog 上は Model 比較 Run の PAW-017 に依存しますが、
+[Decision 0002](decisions/0002-start-workspace-implementation-before-model-comparison.md)（Approved）により、PAW-017 の完了を待たずに着手できます。
 
 言語、Framework や Deployment の具体方式は [Requirements Freeze Review](REQUIREMENTS_FREEZE_REVIEW.md) の実装時選択として扱い、
 該当 Issue で決めた構成に合わせてこの文書を更新します。

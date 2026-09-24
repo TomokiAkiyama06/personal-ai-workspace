@@ -10,3 +10,5 @@
 
 実装時選択や Benchmark 後に決める事項は [Requirements Freeze Review](../REQUIREMENTS_FREEZE_REVIEW.md)、
 作業の順序と依存関係は [Implementation Backlog](../IMPLEMENTATION_BACKLOG.md) を参照してください。
+ただし、承認済みのDecisionはBacklogの順序より優先します。たとえば [Decision 0002](0002-start-workspace-implementation-before-model-comparison.md) は、
+PAW-020 以降の着手をPAW-017の完了から切り離しています。
