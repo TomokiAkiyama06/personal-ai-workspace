@@ -391,6 +391,12 @@ def upgrade() -> None:
         ["conversation_id"],
         postgresql_where=sa.text("conversation_id IS NOT NULL"),
     )
+    op.create_index(
+        "ix_memory_sources_message_id",
+        "memory_sources",
+        ["message_id"],
+        postgresql_where=sa.text("message_id IS NOT NULL"),
+    )
 
     op.create_table(
         "memory_embeddings",

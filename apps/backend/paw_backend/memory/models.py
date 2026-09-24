@@ -492,10 +492,17 @@ class MemorySource(Base):
             ondelete="SET NULL (message_id)",
         ),
         Index("ix_memory_sources_memory_version_id", "memory_version_id"),
+        # Foreign key columns need an index for the referential actions: deleting
+        # a conversation or message finds its sources through these two.
         Index(
             "ix_memory_sources_conversation_id",
             "conversation_id",
             postgresql_where=text("conversation_id IS NOT NULL"),
+        ),
+        Index(
+            "ix_memory_sources_message_id",
+            "message_id",
+            postgresql_where=text("message_id IS NOT NULL"),
         ),
     )
 

@@ -24,6 +24,7 @@ from paw_backend.memory.models import (
 
 from .memory_support import (
     MemoryDatabaseTestCase,
+    foreign_keys_without_index,
     requires_postgres,
     utc,
     version_values,
@@ -833,6 +834,71 @@ class VersioningTest(MemoryDatabaseTestCase):
             select(func.count()).select_from(MemoryRelation)
         ).scalar_one()
         self.assertEqual(edges, 0)
+
+
+@requires_postgres
+class ForeignKeyIndexTest(MemoryDatabaseTestCase):
+    """Deleting a parent row must not scan the child table (referential actions)."""
+
+    def test_every_foreign_key_has_an_index_that_leads_with_its_column(self):
+        self.assertEqual(foreign_keys_without_index(self.connection), [])
+
+    def test_the_check_reports_a_foreign_key_whose_index_is_missing(self):
+        # Proves the check above can fail: remove the indexes that serve one
+        # single-column foreign key each.
+        for index, foreign_key in [
+            ("ix_memory_sources_message_id", "fk_memory_sources_message_id_messages"),
+            (
+                "ix_memory_relations_to_version_id",
+                "fk_memory_relations_to_version_id_memory_versions",
+            ),
+            (
+                "ix_memory_sources_memory_version_id",
+                "fk_memory_sources_memory_version_id_memory_versions",
+            ),
+        ]:
+            with self.subTest(index), self.connection.begin_nested() as savepoint:
+                self.connection.execute(text(f"DROP INDEX {index}"))
+                self.assertEqual(
+                    foreign_keys_without_index(self.connection), [foreign_key]
+                )
+                savepoint.rollback()
+
+    def test_a_message_lookup_in_sources_uses_the_message_index(self):
+        # The lookup a message deletion runs for ``ON DELETE SET NULL``, on a
+        # table big enough that the planner does not just scan it.
+        conversation = self.add_conversation()
+        version = self.add_version(self.add_memory())
+        for sequence in range(300):
+            message = self.add_message(conversation, sequence)
+            self.session.execute(
+                insert(MemorySource).values(
+                    memory_version_id=version,
+                    source_type="conversation",
+                    conversation_id=conversation,
+                    message_id=message,
+                )
+            )
+        self.connection.execute(
+            text(
+                "INSERT INTO memory_sources"
+                " (memory_version_id, source_type, source_ref)"
+                " SELECT :version, 'task', 'task-' || n"
+                " FROM generate_series(1, 30000) n"
+            ),
+            {"version": version},
+        )
+        self.connection.execute(text("ANALYZE memory_sources"))
+        target = self.session.execute(select(Message.id).limit(1)).scalar_one()
+
+        plan = "\n".join(
+            self.connection.execute(
+                text("EXPLAIN SELECT 1 FROM memory_sources WHERE message_id = :id"),
+                {"id": target},
+            ).scalars()
+        )
+
+        self.assertIn("ix_memory_sources_message_id", plan)
 
 
 @requires_postgres

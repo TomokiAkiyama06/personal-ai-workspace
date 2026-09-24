@@ -496,6 +496,7 @@ Vector 検索でも、順位付けの前に付けるため、見えない行が�
 Repo は既定で Project の権限を継承し、Repo 単位の ACL override で外された Repo は `repo_ids` に入れません。
 Memory ごとの権限の写しは持ちません（Member の変更で古くなり、漏れの原因になるため）。
 Scope 別の Index が `status = 'active'` の絞り込みとあわせて ACL 条件を支えます。
+どの Foreign Key にも先頭 Column の Index があり（Conversation や Message の削除が子の Table を全走査しない）、Test が全 Foreign Key を検査します。
 Raw Conversation は所有者だけが読めます（`readable_conversations`）。Admin にも本文は見せません。
 
 **Version と履歴。** 編集は新しい `memory_versions` の行です。旧 Version は消さず `status`（`active` / `superseded` / `deprecated` / `history`）を変えます。
