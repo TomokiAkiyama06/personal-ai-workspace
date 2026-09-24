@@ -36,5 +36,14 @@ Human判断が必要な内容を除いて全て進めるよう指示した。
 
 ## 承認後の扱い
 
-承認された場合、PAW-020 以降のPRは本Decisionを参照する。
-Implementation Backlogの原文は書き換えない。
+承認されたため、PAW-020 以降のPRは本Decisionを参照する。
+Implementation Backlogの各Issueの本文（Goal / Acceptance Criteria / Depends on）は書き換えない。
+一方で、Backlog・Repository構造・Decisionの目次を読むAgentが古い順序でPAW-020を止めないよう、
+次の4か所へ本Decisionへの参照注記だけを追記する。
+
+- [Implementation Backlog](../IMPLEMENTATION_BACKLOG.md) の「運用ルール」
+- [Repository構造](../REPOSITORY_STRUCTURE.md) の「配置と実装順序」
+- [設計判断の記録](README.md)
+- [Backend README](../../apps/backend/README.md)（最初の実装Issueの依存の記述）
+
+これらの注記と、各Issueの`Depends on`が食い違う場合は、承認済みのDecisionを優先する。

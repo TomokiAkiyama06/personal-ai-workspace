@@ -125,5 +125,21 @@ class PostgresTaskTestCase(unittest.IsolatedAsyncioTestCase):
         async with self.database.engine.connect() as connection:
             return (await connection.execute(text(sql), parameters)).scalar()
 
+    async def wait_for_lock_waiters(self, count: int, limit: float = 10.0) -> None:
+        """Wait until ``count`` backends are blocked on a lock held by another one.
+
+        This is how the race tests control the interleaving: a step in the
+        sequence is only started once the previous one is provably waiting.
+        """
+        async with asyncio.timeout(limit):
+            while True:
+                waiting = await self.scalar(
+                    "SELECT count(*) FROM pg_stat_activity "
+                    "WHERE datname = current_database() AND wait_event_type = 'Lock'"
+                )
+                if waiting >= count:
+                    return
+                await asyncio.sleep(0.02)
+
     async def events(self, task_id: uuid.UUID) -> list[TaskEvent]:
         return await self.service.history(task_id)

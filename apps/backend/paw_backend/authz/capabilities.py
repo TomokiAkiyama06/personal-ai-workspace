@@ -74,6 +74,29 @@ class Capability(StrEnum):
     PROJECT_LIFECYCLE_MANAGE = "project.lifecycle.manage"
 
 
+class RepoPermission(StrEnum):
+    """The permissions a repository's ACL override can grant (``REQUIREMENTS.md``)."""
+
+    READ = "read"  # view the repository and its memory
+    WRITE = "write"  # change the repository, commit, open PRs
+    AGENT = "agent"  # let an agent operate on the repository
+
+
+# Which repository permission a project capability needs when the resource is a
+# repository. A capability that is absent here is not about a single repository:
+# a resource that names a repository for it is refused.
+REPO_PERMISSION_OF: MappingProxyType[Capability, RepoPermission] = MappingProxyType(
+    {
+        Capability.PROJECT_READ: RepoPermission.READ,
+        Capability.PROJECT_MEMORY_USE: RepoPermission.READ,
+        Capability.PROJECT_REPO_WRITE: RepoPermission.WRITE,
+        Capability.PROJECT_PR_CREATE: RepoPermission.WRITE,
+        Capability.PROJECT_TASK_RUN: RepoPermission.AGENT,
+        Capability.PROJECT_AGENT_USE: RepoPermission.AGENT,
+    }
+)
+
+
 class AuditMode(StrEnum):
     # Every decision is persisted. If the write fails, an allow becomes a denial.
     REQUIRED = "required"

@@ -17,6 +17,7 @@ from paw_backend.authz.capabilities import (
     CAPABILITIES,
     AuditMode,
     Capability,
+    RepoPermission,
     Scope,
     parse_capability,
 )
@@ -34,6 +35,7 @@ from paw_backend.authz.subjects import (
     AgentGrant,
     Principal,
     ProjectState,
+    RepoAcl,
     Resource,
 )
 
@@ -58,6 +60,8 @@ __all__ = [
     "ProjectRole",
     "ProjectState",
     "Reason",
+    "RepoAcl",
+    "RepoPermission",
     "Resource",
     "Scope",
     "SystemRole",

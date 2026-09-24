@@ -10,22 +10,30 @@ This layer performs no authorisation. The API layer (PAW-022 / PAW-025) must
 decide who may issue a command before calling it, and pass the authenticated
 user as the ``Actor``.
 
-Concurrency: every change of a task's row (state, attempt, agent) increments
-``tasks.version`` and is applied with ``UPDATE ... WHERE version = <read>``. Of
-two commands that read the same version only one updates a row; the other gets
-``TaskConflictError`` and its transaction (including its event) is rolled back.
-A caller that holds a version it saw earlier passes it as ``expected_version``
-so that a stale decision is rejected even if it arrives later. Step, log and
-attempt bookkeeping does not change the version.
+Concurrency: every command, and every step / tool / attempt-state write, first
+takes the task's row lock (``SELECT ... FOR NO KEY UPDATE``) and only then reads
+what it decides on (the task's state, its latest step). They therefore run one
+after another per task. A transition cannot miss a step that a concurrent
+``begin_step`` is about to commit, and ``begin_step`` cannot start a step after
+a transition ended the task: whichever comes second sees the other's result.
+Changes of the task's row also increment ``tasks.version`` and are applied with
+``UPDATE ... WHERE version = <read>`` as a backstop; a caller that holds a version
+it saw earlier passes it as ``expected_version`` so that a stale decision is
+rejected (``TaskConflictError``) even if it arrives later.
+
+Bookkeeping by a worker (steps, tool calls, logs, attempt state) names the
+attempt it works for. Once Restart has started a newer attempt, a superseded
+worker gets ``StaleAttemptError`` and cannot touch the new attempt.
 """
 
 import json
 import logging
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
+from datetime import datetime
 from typing import Any
 
-from sqlalchemy import select, text
+from sqlalchemy import select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.exc import StaleDataError
@@ -40,6 +48,7 @@ from paw_backend.tasks.domain import (
 )
 from paw_backend.tasks.errors import (
     InvalidCommandArgumentError,
+    StaleAttemptError,
     TaskConflictError,
     TaskNotFoundError,
     TaskStepError,
@@ -50,6 +59,7 @@ from paw_backend.tasks.models import (
     TaskLogRow,
     TaskRow,
     TaskStepRow,
+    TaskToolInvocationRow,
     utcnow,
 )
 from paw_backend.tasks.records import (
@@ -62,6 +72,8 @@ from paw_backend.tasks.records import (
     StepStatus,
     TaskEvent,
     TaskSnapshot,
+    ToolInvocationInfo,
+    ToolInvocationStatus,
     WorktreeState,
 )
 
@@ -73,6 +85,7 @@ MAX_NAME_LENGTH = 100
 MAX_LOG_MESSAGE_LENGTH = 8000
 MAX_INPUT_BYTES = 256 * 1024
 MAX_RESTORE_LOGS = 1000
+MAX_RESTORE_TOOL_INVOCATIONS = 100
 _TRUNCATED = "...[truncated]"
 
 # Called after a transition has been committed, with the event that was written.
@@ -85,6 +98,13 @@ _STEP_ACTIVE_STATES = frozenset(
 )
 _FINISHED_STEP_STATUSES = frozenset(
     {StepStatus.SUCCEEDED, StepStatus.FAILED, StepStatus.INTERRUPTED}
+)
+_FINISHED_TOOL_STATUSES = frozenset(
+    {
+        ToolInvocationStatus.SUCCEEDED,
+        ToolInvocationStatus.FAILED,
+        ToolInvocationStatus.INTERRUPTED,
+    }
 )
 
 
@@ -118,8 +138,21 @@ def _event(row: TaskEventRow) -> TaskEvent:
 
 def _step(row: TaskStepRow) -> StepInfo:
     return StepInfo(
+        id=row.id,
+        attempt=row.attempt,
         sequence=row.sequence,
         name=row.name,
+        status=row.status,
+        started_at=row.started_at,
+        finished_at=row.finished_at,
+    )
+
+
+def _tool(row: TaskToolInvocationRow) -> ToolInvocationInfo:
+    return ToolInvocationInfo(
+        id=row.id,
+        step_id=row.step_id,
+        tool_name=row.tool_name,
         status=row.status,
         started_at=row.started_at,
         finished_at=row.finished_at,
@@ -234,9 +267,10 @@ class TaskService:
             )
 
         async with self._database.session() as session, session.begin():
-            task = await session.get(TaskRow, task_id)
-            if task is None:
-                raise TaskNotFoundError()
+            # Lock first, then read: whatever a concurrent begin_step commits is
+            # visible to the reads below, and whatever it has not committed
+            # cannot start after this transaction ended the task.
+            task = await self._require_task(session, task_id, lock=True)
             # A stale caller is told so before its command is judged.
             if expected_version is not None and task.version != expected_version:
                 raise TaskConflictError()
@@ -245,6 +279,10 @@ class TaskService:
             now = utcnow()
             step = await self._latest_step(session, task.id, task.attempt, lock=True)
             step_name = step.name if step is not None else None
+            step_running = step is not None and step.status is StepStatus.RUNNING
+            if command is TaskCommand.COMPLETE and step_running:
+                # Otherwise a step would stay running on a completed task.
+                raise TaskStepError("A step is still running")
             detail: dict[str, Any] = {}
 
             task.state = plan.target
@@ -269,16 +307,14 @@ class TaskService:
                     )
                 )
             # Stop Now aborts the running step on the spot and Fail ends it as
-            # failed. Pause and Cancel are graceful: the worker finishes its
-            # step itself (``finish_step``).
-            if command in (TaskCommand.STOP_NOW, TaskCommand.FAIL):
-                if step is not None and step.status is StepStatus.RUNNING:
-                    step.status = (
-                        StepStatus.INTERRUPTED
-                        if command is TaskCommand.STOP_NOW
-                        else StepStatus.FAILED
-                    )
-                    step.finished_at = now
+            # failed. Restart abandons the old attempt, so a step that a
+            # graceful Cancel left running is closed too. Pause and Cancel are
+            # graceful: the worker finishes its step itself (``finish_step``).
+            if step_running:
+                if command is TaskCommand.FAIL:
+                    await self._close_step(session, step, StepStatus.FAILED, now)
+                elif command in (TaskCommand.STOP_NOW, TaskCommand.RESTART):
+                    await self._close_step(session, step, StepStatus.INTERRUPTED, now)
             if command is TaskCommand.STOP_NOW:
                 session.add(
                     TaskLogRow(
@@ -308,17 +344,20 @@ class TaskService:
 
     # -- steps, logs and attempt state (bookkeeping by workers) --------------
 
-    async def begin_step(self, task_id: uuid.UUID, name: str) -> StepInfo:
-        """Start a step of the current attempt; it becomes the current step.
+    async def begin_step(
+        self, task_id: uuid.UUID, name: str, *, attempt: int
+    ) -> StepInfo:
+        """Start a step of ``attempt``; it becomes the current step.
 
-        Allowed while the task is running, waiting (independent safe work may
-        continue) or evaluating, and only if no other step is running.
+        ``attempt`` is the attempt the worker was started for (``TaskEvent.attempt``
+        of its Start event). Allowed while the task is running, waiting
+        (independent safe work may continue) or evaluating, and only if no other
+        step is running. Raises ``StaleAttemptError`` for a superseded attempt.
         """
         name = _text("name", name, MAX_NAME_LENGTH)
         async with self._database.session() as session, session.begin():
-            # A shared lock keeps a concurrent state change from committing
-            # between the state check and the insert.
-            task = await self._require_task(session, task_id, share_lock=True)
+            task = await self._require_task(session, task_id, lock=True)
+            self._require_current_attempt(task, attempt)
             if task.state not in _STEP_ACTIVE_STATES:
                 raise TaskStepError("A step can only start while the task is active")
             latest = await self._latest_step(session, task.id, task.attempt)
@@ -339,41 +378,127 @@ class TaskService:
                 raise TaskConflictError() from None
             return _step(row)
 
-    async def finish_step(self, task_id: uuid.UUID, status: StepStatus) -> StepInfo:
-        """Finish the running step of the current attempt.
+    async def finish_step(
+        self, task_id: uuid.UUID, step_id: int, status: StepStatus
+    ) -> StepInfo:
+        """Finish the step ``step_id`` (from ``begin_step``) as ``status``.
 
         Allowed in any task state, so a worker that was asked to stop can still
-        record how its step ended.
+        record how its step ended. Tool calls of the step that are still started
+        are marked interrupted. Raises ``StaleAttemptError`` if the step belongs
+        to an attempt that a Restart replaced, and ``TaskStepError`` if the step
+        is unknown or no longer running (for example Stop Now ended it).
         """
         if status not in _FINISHED_STEP_STATUSES:
             raise InvalidCommandArgumentError(
                 "A step is finished as succeeded, failed or interrupted"
             )
         async with self._database.session() as session, session.begin():
-            task = await self._require_task(session, task_id)
-            step = await self._latest_step(session, task.id, task.attempt, lock=True)
-            if step is None or step.status is not StepStatus.RUNNING:
-                raise TaskStepError("No step is running")
-            step.status = status
-            step.finished_at = utcnow()
+            task = await self._require_task(session, task_id, lock=True)
+            step = await session.get(TaskStepRow, step_id, with_for_update=True)
+            if step is None or step.task_id != task.id:
+                raise TaskStepError("Unknown step")
+            self._require_current_attempt(task, step.attempt)
+            if step.status is not StepStatus.RUNNING:
+                raise TaskStepError("The step is not running")
+            await self._close_step(session, step, status, utcnow())
             await session.flush()
             return _step(step)
 
-    async def add_log(
-        self, task_id: uuid.UUID, message: str, *, level: LogLevel = LogLevel.INFO
-    ) -> LogEntry:
-        """Append a log line to the current attempt (allowed in any state).
+    async def begin_tool_invocation(
+        self,
+        task_id: uuid.UUID,
+        *,
+        step_id: int,
+        tool_name: str,
+        invocation_id: uuid.UUID | None = None,
+    ) -> ToolInvocationInfo:
+        """Record that the running step ``step_id`` started a tool call.
 
+        Only the tool's name and the call's status are kept, never its arguments
+        or output. The Tool Broker (PAW-031) may pass its own ``invocation_id``
+        so that both sides name the same call.
+        """
+        tool_name = _text("tool_name", tool_name, MAX_NAME_LENGTH)
+        async with self._database.session() as session, session.begin():
+            task = await self._require_task(session, task_id, lock=True)
+            step = await session.get(TaskStepRow, step_id)
+            if step is None or step.task_id != task.id:
+                raise TaskStepError("Unknown step")
+            self._require_current_attempt(task, step.attempt)
+            if task.state not in _STEP_ACTIVE_STATES:
+                raise TaskStepError(
+                    "A tool call can only start while the task is active"
+                )
+            if step.status is not StepStatus.RUNNING:
+                raise TaskStepError("The step is not running")
+            row = TaskToolInvocationRow(
+                id=invocation_id or uuid.uuid4(),
+                task_id=task.id,
+                step_id=step.id,
+                tool_name=tool_name,
+                status=ToolInvocationStatus.STARTED,
+                started_at=utcnow(),
+            )
+            session.add(row)
+            try:
+                await session.flush()
+            except IntegrityError:
+                raise TaskConflictError() from None
+            return _tool(row)
+
+    async def finish_tool_invocation(
+        self,
+        task_id: uuid.UUID,
+        invocation_id: uuid.UUID,
+        status: ToolInvocationStatus,
+    ) -> ToolInvocationInfo:
+        """Record how a started tool call ended (allowed in any task state)."""
+        if status not in _FINISHED_TOOL_STATUSES:
+            raise InvalidCommandArgumentError(
+                "A tool call is finished as succeeded, failed or interrupted"
+            )
+        async with self._database.session() as session, session.begin():
+            task = await self._require_task(session, task_id, lock=True)
+            row = await session.get(
+                TaskToolInvocationRow, invocation_id, with_for_update=True
+            )
+            if row is None or row.task_id != task.id:
+                raise TaskStepError("Unknown tool invocation")
+            step = await session.get(TaskStepRow, row.step_id)
+            self._require_current_attempt(task, step.attempt)
+            if row.status is not ToolInvocationStatus.STARTED:
+                raise TaskStepError("The tool call is not running")
+            row.status = status
+            row.finished_at = utcnow()
+            await session.flush()
+            return _tool(row)
+
+    async def add_log(
+        self,
+        task_id: uuid.UUID,
+        message: str,
+        *,
+        attempt: int,
+        level: LogLevel = LogLevel.INFO,
+    ) -> LogEntry:
+        """Append a log line to ``attempt`` (allowed in any task state).
+
+        Raises ``StaleAttemptError`` unless ``attempt`` is the current attempt.
         Callers must not pass secrets: redaction is not done here. Messages over
         ``MAX_LOG_MESSAGE_LENGTH`` characters are truncated.
         """
         if len(message) > MAX_LOG_MESSAGE_LENGTH:
             message = message[: MAX_LOG_MESSAGE_LENGTH - len(_TRUNCATED)] + _TRUNCATED
         async with self._database.session() as session, session.begin():
+            # No lock: the row is tagged with the caller's attempt, so even when a
+            # Restart commits at the same moment the line stays with its own
+            # attempt and never lands in the new one.
             task = await self._require_task(session, task_id)
+            self._require_current_attempt(task, attempt)
             row = TaskLogRow(
                 task_id=task.id,
-                attempt=task.attempt,
+                attempt=attempt,
                 level=level,
                 message=message,
                 created_at=utcnow(),
@@ -388,18 +513,21 @@ class TaskService:
         self,
         task_id: uuid.UUID,
         *,
+        attempt: int,
         worktree: WorktreeState | None = None,
         review: ReviewState | None = None,
         pull_request: PullRequestInfo | None = None,
     ) -> AttemptSnapshot:
-        """Replace the worktree / review / pull request state of the current attempt.
+        """Replace the worktree / review / pull request state of ``attempt``.
 
         Each group that is given replaces the stored one; groups left as ``None``
-        are unchanged. Allowed in any state (a pull request can be merged after
-        the task completed).
+        are unchanged. Allowed in any task state (a pull request can be merged
+        after the task completed) but only for the current attempt
+        (``StaleAttemptError`` otherwise).
         """
         async with self._database.session() as session, session.begin():
-            task = await self._require_task(session, task_id, share_lock=True)
+            task = await self._require_task(session, task_id, lock=True)
+            self._require_current_attempt(task, attempt)
             row = (
                 await session.execute(
                     select(TaskAttemptRow).where(
@@ -472,6 +600,23 @@ class TaskService:
                 .scalars()
                 .all()
             )
+            invocations = (
+                (
+                    await session.execute(
+                        select(TaskToolInvocationRow)
+                        .where(TaskToolInvocationRow.step_id == step.id)
+                        .order_by(
+                            TaskToolInvocationRow.started_at.desc(),
+                            TaskToolInvocationRow.id.desc(),
+                        )
+                        .limit(MAX_RESTORE_TOOL_INVOCATIONS)
+                    )
+                )
+                .scalars()
+                .all()
+                if step is not None
+                else []
+            )
             last_event = (
                 await session.execute(
                     select(TaskEventRow)
@@ -507,6 +652,7 @@ class TaskService:
                 previous_attempts=tuple(
                     _attempt(row) for row in attempts if row is not current
                 ),
+                tool_invocations=tuple(_tool(row) for row in reversed(invocations)),
             )
 
     async def history(
@@ -560,14 +706,41 @@ class TaskService:
 
     @staticmethod
     async def _require_task(
-        session: AsyncSession, task_id: uuid.UUID, *, share_lock: bool = False
+        session: AsyncSession, task_id: uuid.UUID, *, lock: bool = False
     ) -> TaskRow:
+        """Load the task; ``lock`` takes the row lock that serialises writers.
+
+        ``FOR NO KEY UPDATE`` is what the UPDATE of the task row takes anyway; it
+        does not block the foreign-key checks of concurrent log / event inserts.
+        """
         task = await session.get(
-            TaskRow, task_id, with_for_update={"read": True} if share_lock else None
+            TaskRow, task_id, with_for_update={"key_share": True} if lock else None
         )
         if task is None:
             raise TaskNotFoundError()
         return task
+
+    @staticmethod
+    def _require_current_attempt(task: TaskRow, attempt: int) -> None:
+        if attempt != task.attempt:
+            raise StaleAttemptError()
+
+    @staticmethod
+    async def _close_step(
+        session: AsyncSession, step: TaskStepRow, status: StepStatus, now: datetime
+    ) -> None:
+        """End a running step; a tool call it still runs is interrupted with it."""
+        step.status = status
+        step.finished_at = now
+        await session.execute(
+            update(TaskToolInvocationRow)
+            .where(
+                TaskToolInvocationRow.step_id == step.id,
+                TaskToolInvocationRow.status == ToolInvocationStatus.STARTED,
+            )
+            .values(status=ToolInvocationStatus.INTERRUPTED, finished_at=now)
+            .execution_options(synchronize_session=False)
+        )
 
     @staticmethod
     async def _latest_step(

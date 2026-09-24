@@ -15,15 +15,30 @@ from paw_backend.authz import (
     ProjectRole,
     ProjectState,
     Reason,
+    RepoAcl,
+    RepoPermission,
     Resource,
     Scope,
     SystemRole,
     parse_capability,
 )
-from paw_backend.authz.capabilities import CapabilityInfo
+from paw_backend.authz.capabilities import REPO_PERMISSION_OF, CapabilityInfo
 from paw_backend.authz.policy import decide
 
-from .authz_support import CHAT, P1, P2, P3, REPO, U1, U2, principal, project, uid
+from .authz_support import (
+    CHAT,
+    P1,
+    P2,
+    P3,
+    REPO,
+    REPO2,
+    U1,
+    U2,
+    principal,
+    project,
+    repo_resource,
+    uid,
+)
 
 # The expected matrix is spelled out literally (not derived from the policy
 # tables) so that any change to who may do what fails a test.
@@ -531,26 +546,218 @@ class ProjectStateTest(unittest.TestCase):
             Resource(kind="project", project_id=P1, project_state="frozen")
 
 
+# The repository permission each repository-capable project capability needs.
+REPO_PERMISSION_LITERAL = {
+    "project.read": "read",
+    "project.memory.use": "read",
+    "project.repo.write": "write",
+    "project.pr.create": "write",
+    "project.task.run": "agent",
+    "project.agent.use": "agent",
+}
+
+
 class RepositoryAclTest(unittest.TestCase):
-    def test_a_resource_naming_a_repository_is_refused_until_repo_acls_exist(self):
-        # REQUIREMENTS: a repository can be "access denied" inside a project.
-        contributor = principal(SystemRole.USER, projects={P1: ProjectRole.CONTRIBUTOR})
-        with_repo = Resource.project(P1, ProjectState.ACTIVE, repo_id=REPO)
-        for capability in (Capability.PROJECT_READ, Capability.PROJECT_REPO_WRITE):
-            with self.subTest(capability=capability.value):
-                decision = decide(contributor, capability, with_repo)
-                self.assertFalse(decision.allowed)
-                self.assertEqual(decision.reason, Reason.REPO_ACL_NOT_SUPPORTED)
-        # The same action on the project itself is unaffected.
+    """Repositories inherit the project role unless an override narrows them."""
+
+    def member(self, role: ProjectRole, project_id=P1) -> Principal:
+        return principal(SystemRole.USER, projects={project_id: role})
+
+    def test_the_repository_permissions_of_the_capabilities_are_fixed(self):
+        self.assertEqual(
+            {c.value: p.value for c, p in REPO_PERMISSION_OF.items()},
+            REPO_PERMISSION_LITERAL,
+        )
+        for capability in REPO_PERMISSION_OF:
+            self.assertIs(CAPABILITIES[capability].scope, Scope.PROJECT)
+
+    def test_inherit_gives_exactly_what_the_project_role_gives(self):
+        # The same answer as on the project itself, capability by capability.
+        for role in ProjectRole:
+            who = self.member(role)
+            for capability in REPO_PERMISSION_OF:
+                with self.subTest(role=role.value, capability=capability.value):
+                    on_repo = decide(who, capability, repo_resource())
+                    on_project = decide(who, capability, project(P1))
+                    self.assertEqual(on_repo.allowed, on_project.allowed)
+                    self.assertEqual(on_repo.reason, on_project.reason)
+
+    def test_inherit_viewer_reads_but_cannot_write_contributor_writes(self):
+        viewer = self.member(ProjectRole.VIEWER)
+        contributor = self.member(ProjectRole.CONTRIBUTOR)
+        read, write = Capability.PROJECT_READ, Capability.PROJECT_REPO_WRITE
+        self.assertTrue(decide(viewer, read, repo_resource()).allowed)
+        denied = decide(viewer, write, repo_resource())
+        self.assertEqual(denied.reason, Reason.CAPABILITY_NOT_GRANTED)
+        self.assertTrue(decide(contributor, read, repo_resource()).allowed)
+        self.assertTrue(decide(contributor, write, repo_resource()).allowed)
         self.assertTrue(
-            decide(contributor, Capability.PROJECT_REPO_WRITE, project(P1)).allowed
+            decide(contributor, Capability.PROJECT_TASK_RUN, repo_resource()).allowed
         )
 
-    def test_even_the_owner_is_refused_on_a_repository_resource(self):
+    def test_a_non_member_has_nothing_on_an_inherit_repository(self):
+        outsider = principal(SystemRole.USER)
+        for capability in REPO_PERMISSION_OF:
+            with self.subTest(capability=capability.value):
+                decision = decide(outsider, capability, repo_resource())
+                self.assertEqual(decision.reason, Reason.NOT_PROJECT_MEMBER)
+        # A workspace Owner is no member either.
         owner = principal(SystemRole.OWNER)
-        stray = Resource(kind="repository", id=REPO, repo_id=REPO)
-        decision = decide(owner, Capability.ADMIN_PROJECTS_MANAGE, stray)
-        self.assertEqual(decision.reason, Reason.REPO_ACL_NOT_SUPPORTED)
+        self.assertFalse(
+            decide(owner, Capability.PROJECT_READ, repo_resource()).allowed
+        )
+
+    def test_an_override_keeps_only_its_permissions_even_for_a_manager(self):
+        manager = self.member(ProjectRole.MANAGER)
+        for kept, expected in (
+            ({RepoPermission.READ}, {"project.read", "project.memory.use"}),
+            (
+                {RepoPermission.READ, RepoPermission.WRITE},
+                {
+                    "project.read",
+                    "project.memory.use",
+                    "project.repo.write",
+                    "project.pr.create",
+                },
+            ),
+            (
+                {RepoPermission.WRITE},
+                {"project.repo.write", "project.pr.create"},
+            ),
+            (
+                {RepoPermission.AGENT},
+                {"project.task.run", "project.agent.use"},
+            ),
+            (set(), set()),  # "access denied"
+            (set(RepoPermission), set(REPO_PERMISSION_LITERAL)),
+        ):
+            allowed = {
+                c.value
+                for c in REPO_PERMISSION_OF
+                if decide(manager, c, repo_resource(kept)).allowed
+            }
+            with self.subTest(kept=sorted(p.value for p in kept)):
+                self.assertEqual(allowed, expected)
+
+    def test_a_refused_permission_is_reported_as_the_acl_forbidding_it(self):
+        manager = self.member(ProjectRole.MANAGER)
+        decision = decide(
+            manager, Capability.PROJECT_REPO_WRITE, repo_resource({RepoPermission.READ})
+        )
+        self.assertEqual(decision.reason, Reason.REPO_ACL_FORBIDS)
+        self.assertIs(decision.capability, Capability.PROJECT_REPO_WRITE)
+
+    def test_an_override_never_widens_the_project_role(self):
+        everything = set(RepoPermission)
+        viewer = self.member(ProjectRole.VIEWER)
+        for capability in (Capability.PROJECT_REPO_WRITE, Capability.PROJECT_TASK_RUN):
+            decision = decide(viewer, capability, repo_resource(everything))
+            self.assertEqual(decision.reason, Reason.CAPABILITY_NOT_GRANTED)
+        outsider = principal(SystemRole.USER)
+        self.assertEqual(
+            decide(outsider, Capability.PROJECT_READ, repo_resource(everything)).reason,
+            Reason.NOT_PROJECT_MEMBER,
+        )
+
+    def test_an_unresolved_acl_is_a_denial_never_inherit(self):
+        # The caller named a repository but did not resolve its ACL.
+        unresolved = Resource(
+            kind="repository",
+            id=REPO,
+            project_id=P1,
+            repo_id=REPO,
+            project_state=ProjectState.ACTIVE,
+        )
+        for role in (ProjectRole.MANAGER, ProjectRole.VIEWER):
+            for capability in REPO_PERMISSION_OF:
+                with self.subTest(role=role.value, capability=capability.value):
+                    decision = decide(self.member(role), capability, unresolved)
+                    self.assertFalse(decision.allowed)
+                    self.assertEqual(decision.reason, Reason.REPO_ACL_UNRESOLVED)
+        owner = principal(SystemRole.OWNER)
+        self.assertEqual(
+            decide(owner, Capability.PROJECT_READ, unresolved).reason,
+            Reason.REPO_ACL_UNRESOLVED,
+        )
+
+    def test_an_acl_of_another_project_or_repository_cannot_be_borrowed(self):
+        manager_of_p1 = self.member(ProjectRole.MANAGER, P1)
+        # The repository is stored under P2 (where it may even be "inherit"),
+        # but the request names P1, where the user is a Manager.
+        forged = repo_resource(project_id=P1, acl_project_id=P2)
+        for capability in REPO_PERMISSION_OF:
+            with self.subTest(capability=capability.value):
+                decision = decide(manager_of_p1, capability, forged)
+                self.assertFalse(decision.allowed)
+                self.assertEqual(decision.reason, Reason.REPO_ACL_MISMATCH)
+        # The mirror image: a member of P2 cannot reach it through P1's ids.
+        member_of_p2 = self.member(ProjectRole.MANAGER, P2)
+        self.assertFalse(decide(member_of_p2, Capability.PROJECT_READ, forged).allowed)
+        # An ACL resolved for another repository does not fit this one.
+        other = RepoAcl.inherit(REPO2, P1)
+        swapped = Resource(
+            kind="repository",
+            id=REPO,
+            project_id=P1,
+            repo_id=REPO,
+            project_state=ProjectState.ACTIVE,
+            repo_acl=other,
+        )
+        decision = decide(manager_of_p1, Capability.PROJECT_READ, swapped)
+        self.assertEqual(decision.reason, Reason.REPO_ACL_MISMATCH)
+
+    def test_a_restricted_repository_cannot_be_opened_through_another_ones_acl(self):
+        # The resource is REPO but the ACL is REPO2's (an inherit one): whatever
+        # it says, it is not REPO's ACL, so it decides nothing.
+        manager = self.member(ProjectRole.MANAGER)
+        inherit_of_other = RepoAcl.inherit(REPO2, P1)
+        target = Resource(
+            kind="repository",
+            id=REPO,
+            project_id=P1,
+            repo_id=REPO,
+            project_state=ProjectState.ACTIVE,
+            repo_acl=inherit_of_other,
+        )
+        decision = decide(manager, Capability.PROJECT_REPO_WRITE, target)
+        self.assertEqual(decision.reason, Reason.REPO_ACL_MISMATCH)
+
+    def test_the_project_state_still_limits_a_repository(self):
+        contributor = self.member(ProjectRole.CONTRIBUTOR)
+        archived = repo_resource(state=ProjectState.ARCHIVED)
+        self.assertTrue(decide(contributor, Capability.PROJECT_READ, archived).allowed)
+        write = decide(contributor, Capability.PROJECT_REPO_WRITE, archived)
+        self.assertEqual(write.reason, Reason.PROJECT_STATE_FORBIDS)
+        pending = repo_resource(state=ProjectState.PENDING_DELETION)
+        self.assertEqual(
+            decide(contributor, Capability.PROJECT_READ, pending).reason,
+            Reason.PROJECT_STATE_FORBIDS,
+        )
+
+    def test_a_capability_that_is_not_about_one_repository_refuses_a_repo(self):
+        manager = self.member(ProjectRole.MANAGER)
+        owner = principal(SystemRole.OWNER, user_id=U1)
+        stray = repo_resource()
+        for capability in (
+            Capability.PROJECT_CHAT,
+            Capability.PROJECT_SETTINGS_MANAGE,
+            Capability.PROJECT_REPO_ADD,
+            Capability.PROJECT_MEMBERS_MANAGE,
+            Capability.PROJECT_LIFECYCLE_MANAGE,
+            Capability.PROJECT_MEMORY_MANAGE,
+        ):
+            with self.subTest(capability=capability.value):
+                decision = decide(manager, capability, stray)
+                self.assertEqual(decision.reason, Reason.INVALID_RESOURCE)
+        # Personal and workspace-wide capabilities have no repository either.
+        for capability, resource in (
+            (Capability.CHAT_USE, Resource(kind="chat", owner_id=U1, repo_id=REPO)),
+            (Capability.ADMIN_CONFIG_MANAGE, Resource(kind="system", repo_id=REPO)),
+        ):
+            with self.subTest(capability=capability.value):
+                self.assertEqual(
+                    decide(owner, capability, resource).reason, Reason.INVALID_RESOURCE
+                )
 
 
 class ValueObjectTest(unittest.TestCase):
@@ -636,19 +843,71 @@ class ValueObjectTest(unittest.TestCase):
     def test_resource_constructors(self):
         self.assertEqual(Resource.system(), Resource(kind="system"))
         self.assertEqual(
-            Resource.project(P1, ProjectState.ARCHIVED, repo_id=REPO),
+            Resource.project(P1, ProjectState.ARCHIVED),
             Resource(
                 kind="project",
                 id=P1,
                 project_id=P1,
+                project_state=ProjectState.ARCHIVED,
+            ),
+        )
+        acl = RepoAcl.override(REPO, P1, {RepoPermission.READ})
+        self.assertEqual(
+            Resource.repository(P1, ProjectState.ARCHIVED, acl),
+            Resource(
+                kind="repository",
+                id=REPO,
+                project_id=P1,
                 repo_id=REPO,
                 project_state=ProjectState.ARCHIVED,
+                repo_acl=acl,
             ),
         )
         self.assertEqual(
             Resource.owned_by(U1, "chat", CHAT),
             Resource(kind="chat", id=CHAT, owner_id=U1),
         )
+
+    def test_repo_acl_values(self):
+        inherit = RepoAcl.inherit(str(REPO), str(P1))
+        self.assertEqual((inherit.repo_id, inherit.project_id), (REPO, P1))
+        self.assertTrue(inherit.inherits)
+        self.assertIsNone(inherit.allowed)
+        override = RepoAcl.override(
+            REPO, P1, [RepoPermission.READ, RepoPermission.READ]
+        )
+        self.assertFalse(override.inherits)
+        self.assertEqual(override.allowed, frozenset({RepoPermission.READ}))
+        self.assertEqual(RepoAcl.override(REPO, P1, []).allowed, frozenset())
+        with self.assertRaises(AttributeError):
+            override.allowed = None
+
+    def test_repo_acl_refuses_loose_input(self):
+        for bad in ("read", b"read", None, 5):
+            with self.subTest(allowed=bad):
+                with self.assertRaises(TypeError):
+                    RepoAcl.override(REPO, P1, bad)
+        for bad in (["read"], ["write", RepoPermission.READ], [None]):
+            with self.subTest(allowed=bad):
+                with self.assertRaises(ValueError):
+                    RepoAcl.override(REPO, P1, bad)
+        for bad_id in ("x", None, 5, str(REPO).upper() + "z"):
+            with self.subTest(id=bad_id):
+                with self.assertRaises(ValueError):
+                    RepoAcl.inherit(bad_id, P1)
+                with self.assertRaises(ValueError):
+                    RepoAcl.inherit(REPO, bad_id)
+
+    def test_a_repo_acl_needs_a_repository_and_a_real_acl(self):
+        acl = RepoAcl.inherit(REPO, P1)
+        with self.assertRaises(ValueError):
+            Resource(kind="project", id=P1, project_id=P1, repo_acl=acl)
+        for bad in ("inherit", {"allowed": None}, object()):
+            with self.subTest(acl=bad):
+                with self.assertRaises(ValueError):
+                    Resource.repository(P1, ProjectState.ACTIVE, bad)
+                with self.assertRaises(ValueError):
+                    Resource(kind="repository", repo_id=REPO, repo_acl=bad)
 
     def test_uid_helper_gives_distinct_canonical_uuids(self):
         self.assertNotEqual(uid(1), uid(2))

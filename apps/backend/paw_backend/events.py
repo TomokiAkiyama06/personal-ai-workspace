@@ -60,41 +60,87 @@ class EventBusFull(Exception):
     """The bus already has its maximum number of subscribers."""
 
 
+class Reservation:
+    """A subscriber slot claimed on the bus, from ``reserve()`` until ``release()``.
+
+    ``attach()`` turns it into a subscription that receives events. ``release()``
+    gives the slot back (and removes the subscription); it is safe to call any
+    number of times, so it can sit in a ``finally`` on every exit path.
+    """
+
+    def __init__(self, bus: "EventBus") -> None:
+        self._bus = bus
+        self._subscription: Subscription | None = None
+        self._released = False
+
+    def attach(self) -> Subscription:
+        if self._released:
+            raise RuntimeError("the reservation was released")
+        if self._subscription is None:
+            self._subscription = Subscription(self._bus._queue_size)
+            self._bus._subscriptions.add(self._subscription)
+        return self._subscription
+
+    def release(self) -> None:
+        if self._released:
+            return
+        self._released = True
+        if self._subscription is not None:
+            self._bus._subscriptions.discard(self._subscription)
+        self._bus._reserved -= 1
+
+
 class EventBus:
     """Fan-out of published events to every current subscriber.
 
     The number of subscribers is capped: every connected client holds a queue
     and a task, so an unbounded number would let a client exhaust memory.
+
+    A slot is claimed with ``reserve()``, which checks the cap and takes the
+    slot in one synchronous step. Nothing can run in between, so concurrent
+    requests for the last slot cannot both succeed, and the loser can be
+    turned away before it has started a response.
     """
 
     def __init__(self, queue_size: int = 100, max_subscribers: int = 100) -> None:
         self._queue_size = queue_size
         self._max_subscribers = max_subscribers
         self._subscriptions: set[Subscription] = set()
+        self._reserved = 0  # live reservations, attached or not
 
     @property
     def subscriber_count(self) -> int:
+        """Subscriptions that currently receive events."""
         return len(self._subscriptions)
 
     @property
+    def slots_in_use(self) -> int:
+        """Reservations that have not been released (attached or not)."""
+        return self._reserved
+
+    @property
     def is_full(self) -> bool:
-        return len(self._subscriptions) >= self._max_subscribers
+        return self._reserved >= self._max_subscribers
 
     def publish(self, event: Event) -> None:
         for subscription in tuple(self._subscriptions):
             subscription.put(event)
 
-    @contextmanager
-    def subscribe(self) -> Iterator[Subscription]:
-        """Register a subscriber; raises ``EventBusFull`` at the cap."""
+    def reserve(self) -> Reservation:
+        """Claim a slot; raises ``EventBusFull`` at the cap. Never awaits."""
         if self.is_full:
             raise EventBusFull
-        subscription = Subscription(self._queue_size)
-        self._subscriptions.add(subscription)
+        self._reserved += 1
+        return Reservation(self)
+
+    @contextmanager
+    def subscribe(self) -> Iterator[Subscription]:
+        """Reserve a slot and attach to it; raises ``EventBusFull`` at the cap."""
+        reservation = self.reserve()
         try:
-            yield subscription
+            yield reservation.attach()
         finally:
-            self._subscriptions.discard(subscription)
+            reservation.release()
 
 
 async def publish_heartbeats(bus: EventBus, interval_seconds: float) -> None:

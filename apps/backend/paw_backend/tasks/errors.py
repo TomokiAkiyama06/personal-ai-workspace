@@ -49,6 +49,20 @@ class TaskConflictError(TaskError):
 
 
 class TaskStepError(TaskError):
-    """A step was started or finished in a situation that does not allow it."""
+    """A step or tool invocation was started or finished where that is not allowed."""
 
     code = "task_step_error"
+
+
+class StaleAttemptError(TaskError):
+    """The caller works for an attempt that is no longer the task's current one.
+
+    Raised for step, tool, log and attempt-state bookkeeping after a Restart
+    started a newer attempt. Nothing is written, so a superseded worker cannot
+    disturb the new attempt.
+    """
+
+    code = "stale_attempt"
+
+    def __init__(self) -> None:
+        super().__init__("The task has moved on to a newer attempt")
