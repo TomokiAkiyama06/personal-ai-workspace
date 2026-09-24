@@ -270,16 +270,30 @@ Result JSONは、Evaluator version、Task ID、Candidateのmodel/runtime/quantiz
 | --- | --- |
 | `wall_clock_ms` | 実行時間 |
 | `token_count` | token数 |
+| `context_tokens` | Runtimeが報告したcontext token数 |
 | `agent_steps` | Agent step数 |
+| `retries` | Retry回数 |
+| `tool_calls` | Tool呼び出し回数 |
 | `diff_size` | 変更行数 |
 | `tool_failures` | Tool失敗回数 |
 | `peak_vram_bytes` | Peak VRAM |
+| `peak_gpu_utilization_percent` | Peak GPU utilization（%） |
 | `human_correction_ms` | 人間による修正時間 |
 
 Runtimeで取得できないmetricは、`metrics`から省略できます。これは計測不能と0を区別するためです。
 Result schema validatorもTask schema validatorと同じ終了code・値を出力しないエラー方針を使います。
 量子化をしないCandidateは`quantization`へ`none`を、Runtime側で詳細を公開しないCandidateは
 `provider-managed`を記録します。
+
+## Metrics collector
+
+`benchmarks.metrics_collector.MetricsCollector` はCandidate adapterからstep、retry、tool call、
+Runtimeが報告する累積token/context usageを受け取り、Result schemaにそのまま入れられる
+`metrics` objectへ正規化します。CollectorはProvider接続やCredentialを扱いません。
+
+GPU telemetryが必要な場合は `NvidiaSmiGpuSampler` を注入します。これは`nvidia-smi`を使って
+全GPUの使用VRAM合計と各GPU utilizationの最大値を周期的に観測します。GPUがない、または
+`nvidia-smi`が利用できない環境では、GPU metricは省略されます。
 
 ```bash
 .venv/bin/python -m benchmarks.validate_result benchmarks/tests/fixtures/result-schema/valid/complete.json
