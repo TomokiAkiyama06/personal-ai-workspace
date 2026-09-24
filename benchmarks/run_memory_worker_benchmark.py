@@ -50,7 +50,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"worker is unusable ({type(error).__name__})", file=sys.stderr)
         return 2
 
-    report = run_benchmark(worker, cases)
+    try:
+        report = run_benchmark(worker, cases)
+    except (TypeError, ValueError) as error:
+        print(
+            f"worker returned an invalid result ({type(error).__name__})",
+            file=sys.stderr,
+        )
+        return 2
+
     text = json.dumps(report.to_dict(), ensure_ascii=False, indent=2, sort_keys=True)
     if arguments.output is None:
         print(text)

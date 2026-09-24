@@ -23,3 +23,12 @@ class FixedWorker:
 
 def make_worker() -> FixedWorker:
     return FixedWorker()
+
+
+class MalformedWorker:
+    def extract(self, input_text: str):
+        return 5
+
+
+def make_malformed_worker() -> MalformedWorker:
+    return MalformedWorker()

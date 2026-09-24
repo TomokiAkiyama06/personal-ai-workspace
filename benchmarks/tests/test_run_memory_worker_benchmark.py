@@ -72,6 +72,18 @@ class RunMemoryWorkerBenchmarkTest(unittest.TestCase):
                 self.assertEqual(stdout, "")
                 self.assertEqual(stderr, f"worker is unusable ({error_type})\n")
 
+    def test_malformed_worker_output_exits_with_two(self):
+        code, stdout, stderr = run_cli(
+            "--cases",
+            VALID_CASES,
+            "--worker",
+            "benchmarks.tests.fixture_workers:make_malformed_worker",
+        )
+
+        self.assertEqual(code, 2)
+        self.assertEqual(stdout, "")
+        self.assertEqual(stderr, "worker returned an invalid result (TypeError)\n")
+
     def test_unwritable_output_exits_with_two(self):
         with tempfile.TemporaryDirectory() as directory:
             code, _, stderr = run_cli(
