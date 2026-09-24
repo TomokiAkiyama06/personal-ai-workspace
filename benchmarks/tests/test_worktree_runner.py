@@ -600,6 +600,30 @@ class WorktreeRunnerTest(unittest.TestCase):
 
         self.assert_cleanup_survives_a_failing_log("write", failing_write)
 
+    def test_a_lost_terminal_event_is_reported_after_cleanup(self):
+        # Only the record of the outcome cannot be written; the later cleanup
+        # events can. ``execute`` must not return as if the log were complete.
+        run = self.runner.create("lost-outcome", self.commit)
+        real_write = os.write
+
+        def failing_write(descriptor, data):
+            if b'"event":"completed"' in data:
+                raise OSError(errno.ENOSPC, "No space left on device")
+            return real_write(descriptor, data)
+
+        with (
+            mock.patch.object(worktree_runner.os, "write", failing_write),
+            self.assertRaises(WorktreeRunnerError) as caught,
+        ):
+            self.runner.execute(run, [sys.executable, "-c", "pass"], PATIENCE)
+
+        self.assertNotIn("space", str(caught.exception))
+        self.assertFalse(run.path.exists())  # cleanup still ran
+        events = [event["event"] for event in self.events(run)]
+        self.assertNotIn("completed", events)
+        self.assertEqual(events[-2:], ["cleanup_started", "cleanup_finished"])
+        self.assertNotIn(run.run_id, self.runner._runs)
+
     def test_a_failing_log_close_does_not_stop_cleanup(self):
         # close(2) can report a delayed write error; the descriptor is released
         # all the same.

@@ -197,6 +197,9 @@ make the lifecycle log tamper-proof**.  What the runner does:
   checkout, its Git metadata and the in-memory ownership before it raises.  The failed
   append leaves the file at an unexpected size, so later appends are refused by the
   integrity check instead of writing after a torn record.
+  If only the record of the outcome (`completed` / `timed_out` / `cancelled`) cannot be
+  written, cleanup still runs and `execute()` then raises that `WorktreeRunnerError`
+  instead of returning a result the durable log does not contain.
 
 What remains: a candidate that guesses or lists `logs_directory` can still open the
 log for writing as the same user, and changes made after the final append are not

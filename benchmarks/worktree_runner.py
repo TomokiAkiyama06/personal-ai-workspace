@@ -472,7 +472,7 @@ class WorktreeRunner:
         finally:
             # The durable record carries the same numbers as the returned
             # result (counts and time only, never output).
-            self._try_event(
+            terminal_error = self._try_event(
                 run,
                 status,
                 exit_code=exit_code,
@@ -485,6 +485,11 @@ class WorktreeRunner:
                 stderr_bytes=result.stderr_bytes if result else 0,
             )
             self.cleanup(run, reason=status)
+            if terminal_error is not None and sys.exc_info()[0] is None:
+                # Cleanup went on regardless. Nothing else is failing, so do not
+                # return a result for a run whose outcome never reached the
+                # durable log (as ``cleanup`` does for its own log failures).
+                raise terminal_error
 
     def cancel(self, run: WorktreeRun) -> None:
         """Request cancellation of an active run; ``execute`` performs cleanup.
