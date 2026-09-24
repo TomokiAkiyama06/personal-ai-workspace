@@ -17,8 +17,9 @@ Core Backend は GPU 非依存とし、Local Model Runtime を停止できる構
 具体的な Service / Package の分割は、Framework と実装フェーズに合わせて選定します。
 
 最初の実装 Issue は [PAW-020 — Backend Application Skeleton](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/17) です。
-同 Issue は PAW-017 の Model 比較 Run に依存します。
-言語、Framework、依存 Package はこの配置の整備では選定していません。
+同 Issue は Backlog 上は PAW-017 の Model 比較 Run に依存しますが、
+[Decision 0002](../../docs/decisions/0002-start-workspace-implementation-before-model-comparison.md)（Approved）により、PAW-017 の完了を待たずに着手できます。
+言語と Framework は [Decision 0003](../../docs/decisions/0003-backend-cli-web-implementation-stack.md)（Approved）で、Python 3.13 と FastAPI、PostgreSQL に決まっています。
 
 Acceptance Criteria は [Implementation Backlog](../../docs/IMPLEMENTATION_BACKLOG.md)、
 実装時に選択できる事項は [Requirements Freeze Review](../../docs/REQUIREMENTS_FREEZE_REVIEW.md) を参照してください。
