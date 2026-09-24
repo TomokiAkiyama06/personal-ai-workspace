@@ -1,0 +1,513 @@
+"""ORM models of the Memory / Conversation schema (revision ``0040``).
+
+The layers are separate tables that never share rows (MEMORY_ARCHITECTURE.md
+sections 10, 14 and REQUIREMENTS.md "Raw Conversation / Long-term Memory
+Separation"):
+
+* Raw Conversation: ``conversations`` and ``messages``. Kept forever and never
+  put into an LLM context as a whole.
+* Session state: ``session_states``, one row per conversation (a summary and
+  the working state), derived from the raw messages.
+* Long-term Memory: ``memories`` (identity), ``memory_versions`` (every edit is
+  a new row), ``memory_relations`` (version graph), ``memory_sources``
+  (provenance) and ``memory_embeddings`` (pgvector).
+
+Users, projects and repositories do not exist yet (PAW-021 / PAW-026 /
+PAW-027). Their ids are therefore **plain UUID columns without foreign keys**
+(``owner_user_id``, ``project_id``, ``repo_id``, ``actor_user_id``). Nothing in
+the database ties them to a row: the Backend must only write ids it has
+validated, and PAW-021+ may add the foreign keys in a later migration.
+
+Allowed values (status, scope, ...) are ``text`` columns with CHECK
+constraints, not PostgreSQL enum types: a value is added with an ordinary
+migration. The ``StrEnum`` classes below are the single list for the models;
+the migration repeats the literals, and the drift test compares both.
+"""
+
+from datetime import datetime, timedelta
+from enum import StrEnum
+from typing import Any
+from uuid import UUID
+
+from sqlalchemy import (
+    ARRAY,
+    BigInteger,
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    Interval,
+    SmallInteger,
+    Text,
+    UniqueConstraint,
+    func,
+    text,
+)
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import Mapped, mapped_column
+
+from paw_backend.db import Base
+from paw_backend.memory.vector import Vector
+
+
+class MemoryScope(StrEnum):
+    """Who may see a memory version; the boundary the ACL filter works on."""
+
+    USER = "user"
+    PROJECT = "project"
+    REPO = "repo"
+    SHARED = "shared"
+
+
+class MemoryStatus(StrEnum):
+    """Lifecycle of a version. Normal LLM context uses ``active`` only."""
+
+    ACTIVE = "active"
+    SUPERSEDED = "superseded"
+    DEPRECATED = "deprecated"
+    HISTORY = "history"
+
+
+class ConfirmationState(StrEnum):
+    """Inferred Preference states (MEMORY_ARCHITECTURE.md section 9)."""
+
+    OBSERVED = "observed"
+    INFERRED = "inferred"
+    CONFIRMED = "confirmed"
+    REJECTED = "rejected"
+
+
+class FreshnessPolicy(StrEnum):
+    PERMANENT = "permanent"
+    REVALIDATE = "revalidate"
+    REPO_COMMIT = "repo_commit"
+    EXPIRING = "expiring"
+    SESSION_ONLY = "session_only"
+
+
+class ActorType(StrEnum):
+    USER = "user"
+    AGENT = "agent"
+    SYSTEM = "system"
+
+
+class RelationType(StrEnum):
+    """Edges of the Memory History Graph, from the newer to the older version."""
+
+    SUPERSEDES = "supersedes"
+    EXTENDS = "extends"
+    CONFLICTS_WITH = "conflicts_with"
+    CONFIRMED_FROM = "confirmed_from"
+    REVALIDATED_FROM = "revalidated_from"
+    MERGED_FROM = "merged_from"
+
+
+class SourceType(StrEnum):
+    CONVERSATION = "conversation"
+    TASK = "task"
+    REPO_ANALYSIS = "repo_analysis"
+    USER_CONFIRMATION = "user_confirmation"
+    PROJECT_DECISION = "project_decision"
+
+
+class MessageRole(StrEnum):
+    USER = "user"
+    ASSISTANT = "assistant"
+    TOOL = "tool"
+    AGENT = "agent"
+    TASK = "task"
+
+
+def _one_of(column: str, values: type[StrEnum]) -> str:
+    literals = ", ".join(f"'{member.value}'" for member in values)
+    return f"{column} IN ({literals})"
+
+
+_UUID_DEFAULT = text("gen_random_uuid()")
+_EMPTY_OBJECT = text("'{}'::jsonb")
+
+
+def _now_column() -> Mapped[datetime]:
+    return mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+# ---------------------------------------------------------------------------
+# Raw Conversation
+# ---------------------------------------------------------------------------
+
+
+class Conversation(Base):
+    """A conversation. Private to ``owner_user_id``; not even Admin reads it."""
+
+    __tablename__ = "conversations"
+    __table_args__ = (
+        CheckConstraint(
+            "title IS NULL OR char_length(title) <= 200", name="title_length"
+        ),
+        Index(
+            "ix_conversations_owner_user_id_updated_at", "owner_user_id", "updated_at"
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=_UUID_DEFAULT)
+    owner_user_id: Mapped[UUID]
+    # Context the conversation happened in. Informational: read access to the
+    # conversation never comes from these two, only from ``owner_user_id``.
+    project_id: Mapped[UUID | None]
+    repo_id: Mapped[UUID | None]
+    title: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = _now_column()
+    updated_at: Mapped[datetime] = _now_column()
+
+
+class Message(Base):
+    """One raw event: a message, tool result, agent result or task event."""
+
+    __tablename__ = "messages"
+    __table_args__ = (
+        UniqueConstraint("conversation_id", "event_sequence"),
+        CheckConstraint(_one_of("role", MessageRole), name="role_valid"),
+        CheckConstraint("event_sequence >= 0", name="event_sequence_not_negative"),
+        CheckConstraint(
+            "jsonb_typeof(attributes) = 'object'", name="attributes_object"
+        ),
+        Index("ix_messages_conversation_id_turn_id", "conversation_id", "turn_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=_UUID_DEFAULT)
+    conversation_id: Mapped[UUID] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE")
+    )
+    # Logical order (REQUIREMENTS.md "Ordering"): never the completion time of
+    # an asynchronous worker. ``event_sequence`` is unique per conversation;
+    # the writer assigns it (PAW-041).
+    turn_id: Mapped[UUID]
+    event_sequence: Mapped[int] = mapped_column(BigInteger)
+    role: Mapped[str] = mapped_column(Text)
+    content: Mapped[str] = mapped_column(Text)
+    attributes: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, server_default=_EMPTY_OBJECT
+    )
+    created_at: Mapped[datetime] = _now_column()
+
+
+# ---------------------------------------------------------------------------
+# Session state
+# ---------------------------------------------------------------------------
+
+
+class SessionState(Base):
+    """Summary and working state of a conversation (what the next turn loads)."""
+
+    __tablename__ = "session_states"
+    __table_args__ = (
+        CheckConstraint("jsonb_typeof(state) = 'object'", name="state_object"),
+        CheckConstraint(
+            "summarized_through_sequence IS NULL OR summarized_through_sequence >= 0",
+            name="summarized_through_not_negative",
+        ),
+    )
+
+    conversation_id: Mapped[UUID] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), primary_key=True
+    )
+    summary: Mapped[str | None] = mapped_column(Text)
+    state: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=_EMPTY_OBJECT)
+    # Highest ``messages.event_sequence`` the summary covers. A writer updates
+    # only ``WHERE summarized_through_sequence IS NULL OR < new`` so that a
+    # late, older result cannot overwrite a newer one.
+    summarized_through_sequence: Mapped[int | None] = mapped_column(BigInteger)
+    updated_at: Mapped[datetime] = _now_column()
+
+
+# ---------------------------------------------------------------------------
+# Long-term Memory
+# ---------------------------------------------------------------------------
+
+
+class Memory(Base):
+    """Identity of a memory. Everything else lives on its versions."""
+
+    __tablename__ = "memories"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=_UUID_DEFAULT)
+    created_at: Mapped[datetime] = _now_column()
+
+
+# Also the list of allowed scopes: no other value satisfies one of the branches.
+_SCOPE_COLUMNS = (
+    "(scope = 'user' AND owner_user_id IS NOT NULL"
+    " AND project_id IS NULL AND repo_id IS NULL)"
+    " OR (scope = 'project' AND project_id IS NOT NULL"
+    " AND owner_user_id IS NULL AND repo_id IS NULL)"
+    " OR (scope = 'repo' AND repo_id IS NOT NULL"
+    " AND owner_user_id IS NULL AND project_id IS NULL)"
+    " OR (scope = 'shared' AND owner_user_id IS NULL"
+    " AND project_id IS NULL AND repo_id IS NULL)"
+)
+_FRESHNESS_FIELDS = (
+    "(freshness_policy <> 'revalidate'"
+    " OR (verified_at IS NOT NULL AND revalidate_after IS NOT NULL))"
+    " AND (freshness_policy <> 'expiring' OR expires_at IS NOT NULL)"
+    " AND (freshness_policy <> 'repo_commit' OR commit_sha IS NOT NULL)"
+)
+
+
+class MemoryVersion(Base):
+    """One version of a memory. A version is never edited in place.
+
+    Scope and ACL live here, per version: widening a memory (for example
+    ``user`` to ``project``) creates a new version and leaves the older, private
+    versions private. The columns that decide who may read a row are
+    ``scope`` plus exactly one of ``owner_user_id`` / ``project_id`` /
+    ``repo_id`` (none for ``shared``); ``acl.py`` builds the query condition.
+    """
+
+    __tablename__ = "memory_versions"
+    __table_args__ = (
+        UniqueConstraint("memory_id", "version_number"),
+        CheckConstraint("version_number >= 1", name="version_number_positive"),
+        CheckConstraint(_SCOPE_COLUMNS, name="scope_columns"),
+        CheckConstraint(
+            "char_length(memory_type) BETWEEN 1 AND 64", name="memory_type_length"
+        ),
+        CheckConstraint("char_length(title) BETWEEN 1 AND 200", name="title_length"),
+        CheckConstraint("char_length(content) >= 1", name="content_not_empty"),
+        CheckConstraint("importance BETWEEN 0 AND 100", name="importance_range"),
+        CheckConstraint(_one_of("status", MemoryStatus), name="status_valid"),
+        CheckConstraint(
+            _one_of("confirmation_state", ConfirmationState),
+            name="confirmation_state_valid",
+        ),
+        CheckConstraint(
+            "NOT (confirmation_state = 'rejected' AND status = 'active')",
+            name="rejected_not_active",
+        ),
+        CheckConstraint(
+            _one_of("freshness_policy", FreshnessPolicy), name="freshness_policy_valid"
+        ),
+        CheckConstraint(_FRESHNESS_FIELDS, name="freshness_fields"),
+        CheckConstraint(
+            "revalidate_after IS NULL OR revalidate_after > interval '0'",
+            name="revalidate_after_positive",
+        ),
+        CheckConstraint("on_stale IN ('lower_priority')", name="on_stale_valid"),
+        CheckConstraint(
+            "commit_sha IS NULL OR commit_sha ~ '^[0-9a-f]{40}([0-9a-f]{24})?$'",
+            name="commit_sha_format",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(attributes) = 'object'", name="attributes_object"
+        ),
+        CheckConstraint(_one_of("actor_type", ActorType), name="actor_type_valid"),
+        CheckConstraint(
+            "actor_type <> 'user' OR actor_user_id IS NOT NULL",
+            name="user_actor_has_id",
+        ),
+        # At most one active version per memory: the "current" version.
+        Index(
+            "ix_memory_versions_one_active",
+            "memory_id",
+            unique=True,
+            postgresql_where=text("status = 'active'"),
+        ),
+        # ACL filter indexes: one per scope column, over the columns the ACL
+        # condition and the ``status = active`` filter use.
+        Index(
+            "ix_memory_versions_owner_user_id_status",
+            "owner_user_id",
+            "status",
+            postgresql_where=text("owner_user_id IS NOT NULL"),
+        ),
+        Index(
+            "ix_memory_versions_project_id_status",
+            "project_id",
+            "status",
+            postgresql_where=text("project_id IS NOT NULL"),
+        ),
+        Index(
+            "ix_memory_versions_repo_id_status",
+            "repo_id",
+            "status",
+            postgresql_where=text("repo_id IS NOT NULL"),
+        ),
+        Index(
+            "ix_memory_versions_shared_status",
+            "status",
+            postgresql_where=text("scope = 'shared'"),
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=_UUID_DEFAULT)
+    memory_id: Mapped[UUID] = mapped_column(
+        ForeignKey("memories.id", ondelete="CASCADE")
+    )
+    # 1, 2, 3, ...; the unique (memory_id, version_number) doubles as the
+    # optimistic lock: two writers creating "version 13" cannot both succeed.
+    version_number: Mapped[int] = mapped_column(Integer)
+
+    # Scope and ACL. Plain UUIDs: users / projects / repos are not tables yet.
+    scope: Mapped[str] = mapped_column(Text)
+    owner_user_id: Mapped[UUID | None]
+    project_id: Mapped[UUID | None]
+    repo_id: Mapped[UUID | None]
+
+    memory_type: Mapped[str] = mapped_column(Text)
+    title: Mapped[str] = mapped_column(Text)
+    content: Mapped[str] = mapped_column(Text)
+    importance: Mapped[int] = mapped_column(SmallInteger, server_default=text("50"))
+    pinned: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+
+    status: Mapped[str] = mapped_column(Text)
+    confirmation_state: Mapped[str] = mapped_column(Text)
+
+    # Freshness (MEMORY_ARCHITECTURE.md section 11).
+    freshness_policy: Mapped[str] = mapped_column(Text)
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revalidate_after: Mapped[timedelta | None] = mapped_column(Interval)
+    revalidate_triggers: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), server_default=text("'{}'::text[]")
+    )
+    on_stale: Mapped[str] = mapped_column(Text, server_default=text("'lower_priority'"))
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    commit_sha: Mapped[str | None] = mapped_column(Text)
+    branch: Mapped[str | None] = mapped_column(Text)
+    # Set when the memory became a ``stale_candidate``; it is not invalidated.
+    stale_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    attributes: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, server_default=_EMPTY_OBJECT
+    )
+    actor_type: Mapped[str] = mapped_column(Text)
+    actor_user_id: Mapped[UUID | None]
+    change_reason: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = _now_column()
+
+
+class MemoryRelation(Base):
+    """An edge of the version graph, pointing from the newer to the older version."""
+
+    __tablename__ = "memory_relations"
+    __table_args__ = (
+        UniqueConstraint("from_version_id", "to_version_id", "relation_type"),
+        CheckConstraint(
+            _one_of("relation_type", RelationType), name="relation_type_valid"
+        ),
+        CheckConstraint(
+            "from_version_id <> to_version_id", name="not_self_referencing"
+        ),
+        Index("ix_memory_relations_to_version_id", "to_version_id"),
+        # A version is superseded by at most one version.
+        Index(
+            "ix_memory_relations_one_successor",
+            "to_version_id",
+            unique=True,
+            postgresql_where=text("relation_type = 'supersedes'"),
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=_UUID_DEFAULT)
+    from_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey("memory_versions.id", ondelete="CASCADE")
+    )
+    to_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey("memory_versions.id", ondelete="CASCADE")
+    )
+    relation_type: Mapped[str] = mapped_column(Text)
+    reason: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = _now_column()
+
+
+class MemorySource(Base):
+    """Provenance: where a version came from. A version may have many sources.
+
+    Deleting a conversation sets ``conversation_id`` / ``message_id`` to NULL and
+    keeps the version and its other sources. The deletion flow records the loss
+    in ``source_deleted_at`` (a foreign-key action cannot, and a CHECK that
+    demanded it would block the delete).
+    """
+
+    __tablename__ = "memory_sources"
+    __table_args__ = (
+        CheckConstraint(_one_of("source_type", SourceType), name="source_type_valid"),
+        # Only conversation sources use the foreign keys; the others are named
+        # by an opaque ``source_ref`` (tasks, repos and decisions are not tables yet).
+        CheckConstraint(
+            "(conversation_id IS NULL AND message_id IS NULL)"
+            " OR source_type = 'conversation'",
+            name="conversation_reference_only_for_conversation",
+        ),
+        CheckConstraint(
+            "source_type = 'conversation' OR source_ref IS NOT NULL",
+            name="other_sources_have_reference",
+        ),
+        CheckConstraint(
+            "source_ref IS NULL OR source_type <> 'conversation'",
+            name="conversation_has_no_opaque_reference",
+        ),
+        Index("ix_memory_sources_memory_version_id", "memory_version_id"),
+        Index(
+            "ix_memory_sources_conversation_id",
+            "conversation_id",
+            postgresql_where=text("conversation_id IS NOT NULL"),
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=_UUID_DEFAULT)
+    memory_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey("memory_versions.id", ondelete="CASCADE")
+    )
+    source_type: Mapped[str] = mapped_column(Text)
+    conversation_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("conversations.id", ondelete="SET NULL")
+    )
+    message_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("messages.id", ondelete="SET NULL")
+    )
+    source_ref: Mapped[str | None] = mapped_column(Text)
+    source_deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = _now_column()
+
+
+class MemoryEmbedding(Base):
+    """A vector of one memory version, made by one embedding model.
+
+    ``embedding`` has no fixed dimension (the model is not chosen yet), so rows
+    of different models can coexist; ``dimensions`` must equal the vector's real
+    dimension. A nearest-neighbour query must filter one ``embedding_model_id``
+    first and join ``memory_versions`` to apply the ACL condition before ranking.
+    No ANN index exists yet: PAW-043 adds it once the model is chosen (an HNSW
+    index needs a fixed dimension, so it will be a per-model expression index).
+    """
+
+    __tablename__ = "memory_embeddings"
+    __table_args__ = (
+        CheckConstraint(
+            "char_length(embedding_model_id) BETWEEN 1 AND 200", name="model_id_length"
+        ),
+        # A vector has at least one dimension, so this also keeps it positive.
+        CheckConstraint("vector_dims(embedding) = dimensions", name="dimensions_match"),
+        Index("ix_memory_embeddings_embedding_model_id", "embedding_model_id"),
+    )
+
+    memory_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey("memory_versions.id", ondelete="CASCADE"), primary_key=True
+    )
+    embedding_model_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    dimensions: Mapped[int] = mapped_column(Integer)
+    embedding: Mapped[list[float]] = mapped_column(Vector())
+    created_at: Mapped[datetime] = _now_column()
+
+
+TABLE_NAMES: tuple[str, ...] = (
+    Conversation.__tablename__,
+    Message.__tablename__,
+    SessionState.__tablename__,
+    Memory.__tablename__,
+    MemoryVersion.__tablename__,
+    MemoryRelation.__tablename__,
+    MemorySource.__tablename__,
+    MemoryEmbedding.__tablename__,
+)
