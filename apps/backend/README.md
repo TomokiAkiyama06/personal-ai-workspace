@@ -183,7 +183,12 @@ PAW-022（Login / Session）は、システム Event 以外を配信する前に
 
 Engine は最初に使うときに作られ、その時点でも接続はしません。
 そのため PostgreSQL が停止していても Process は起動し、Liveness に応答します。
-Readiness は `PAW_DATABASE_TIMEOUT_SECONDS` で必ず応答します（Driver がその後も Query の取消を待つ場合は、Background で待ちます）。
+Readiness は Pool を使わず、専用の接続で `SELECT 1` を実行し、`PAW_DATABASE_TIMEOUT_SECONDS` で必ず応答します。
+Timeout した Probe は、Query の取消（psycopg が Server の確認を待つ、最大約 10 秒）を行わず、接続の Socket を閉じて即座に失敗させます。
+libpq 17 未満（`psycopg[c]` とシステムの libpq など）では、取消が Thread で実行され、`asyncio.run` の終了が長時間止まるためです。
+`Database.dispose()`（Application の終了時）は、実行中の Probe を同じ方法で止め、`PAW_SHUTDOWN_TIMEOUT_SECONDS` の範囲で完了を待ちます。
+今後 Session を使う Endpoint を追加する場合、終了時に実行中だった Query の取消は psycopg の取消経路に入ります。
+その経路が終了を遅らせないことは、その Issue で確認してください。
 `Database.session()` と `paw_backend.api.deps.get_session` が Session を提供します。
 
 Alembic は `PAW_DATABASE_URL` から接続先を読み、`alembic.ini` には DB URL を書きません。
