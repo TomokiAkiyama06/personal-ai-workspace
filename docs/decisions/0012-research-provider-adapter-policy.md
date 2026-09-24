@@ -22,6 +22,7 @@ PAW-051 の実装は、動かすためにこれらを選んだ。Review（Codex�
    他の Provider の結果には影響しない（失敗の隔離）。
    Constructor を通らずに作られた `ProviderHit` / `ProviderDocument`（Slot が未設定、型や長さが不正、UTC で表せない公開日時）も同じで、Class が正しくても Field を全て読み直して検証する（`isinstance` は Field の値を保証しない）。
    Field は `ProviderHit` / `ProviderDocument` 自身の Slot から 1 度だけ読み、Subclass の Property や `__getattribute__` は呼ばない。Property だけで Field を返す Subclass は不正な Response とする（任意の例外と、読むたびに変わる値を防ぐため）。`fetch` も同じ規則を使う。
+   **失敗の分類も Adapter の Code を動かさない。** `ProviderFailure.code` は `ProviderFailure` 自身の Slot から 1 度だけ読み、Class は `type()` と `issubclass` で確かめる。Subclass の Property、`__getattribute__`、`__class__`、Metaclass の `__name__` は呼ばない。`ResearchErrorCode` そのものでない値と、未設定の Slot は `internal_error` とする（例外が `gather` から漏れて他の Provider の結果が失われるのを防ぐため）。
 2. **複数 Provider の結果の統合。** Provider（種類と名前の決定的な順）から交互に 1 件ずつ並べ、正規化した URL が同じ Hit は最初の 1 件だけを残し、件数を制限する。
    優先度や関連度による並べ替えは、要件に規則がないため行わない。
 3. **URL の正規化。** scheme は `http` / `https` だけ（両者は別のものとして扱い、`www.` は除かない）。Host は小文字の ASCII、既定の Port と Fragment を除去、`%xx` の 16 進を大文字、非 ASCII は Percent-encode、Query は `(名前, 値)` の順に並べる。

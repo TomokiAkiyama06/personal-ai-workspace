@@ -1371,6 +1371,7 @@ License や `robots.txt` に関する項目はありません。要件と設計�
 
 **例外の文言は Code にも Result にも Log にも入りません。** Log は Provider 1 つの失敗ごとに WARNING を 1 行（Provider の ID、種類、Code、例外の**型名**）出し、Query と URL は出しません。
 `ProviderFailure.code` を書き換えて文字列にしても、`internal_error` になります。
+**失敗の分類も Adapter の Code を動かしません。** Adapter が上げた例外は、`ProviderFailure` の Subclass が `code` の Property、`__getattribute__`、`__class__`、Metaclass の `__name__` を上書きして、例外を出したり読むたびに違う値を返したりできます。それが `_call_provider` の Handler から漏れると `TaskGroup` が中断し、他の Provider の成功した結果も失われます。そのため `code` は `ProviderFailure` 自身の Slot（`ProviderFailure.code`）から 1 度だけ読み（Constructor も同じ Slot へ書きます）、Class は `type()` と `issubclass` で確かめ、`ResearchErrorCode` そのものでない値、Slot が未設定（Subclass の Constructor が `super().__init__` を呼ばない）の場合は `internal_error` にします。ログの型名も `type` 自身の Descriptor から読みます。`classify_failure` は例外を出しません。
 
 `fetch(source, time_budget_seconds=30)` は、以前の結果の `SourceMetadata` から、同じ Provider の `fetch` を、`gather` と同じ隔離・Timeout・Log の規則で呼びます。制限時間は `min(登録時の timeout_seconds, time_budget_seconds)` です。Provider が登録から外れている（または種類が違う）場合は `unavailable` です。`ProviderDocument` でない Response と、Field が不正な `ProviderDocument`（上の「Constructor を通らない Hit と Document」）は `invalid_response` です。結果は 1 件の `ResearchItem`（`retrieved_at` は取得時、`private_source` は Source と文書のどちらかが True なら True）か、`errors` の 1 件です。
 
@@ -1390,7 +1391,7 @@ License や `robots.txt` に関する項目はありません。要件と設計�
 - Timeout は協調的です。Adapter が Cancel を無視する、または Event Loop を止める同期処理をする場合、Broker は止められません。
 - 未決事項（人間の判断が必要。**[Decision 0012](../../docs/decisions/0012-research-provider-adapter-policy.md) は Proposed で、承認されるまで暫定です**）:
   1. License と `robots.txt` の項目は、要件に定義がないため `SourceMetadata` にありません。
-  2. 不正な Hit が 1 つでもあると、その Provider の Response 全体を `invalid_response` にします（Adapter の不具合を隠さないため）。Constructor を通らずに作られた Hit / Document は、Field を読み直して検証し、Subclass の Property は使いません。
+  2. 不正な Hit が 1 つでもあると、その Provider の Response 全体を `invalid_response` にします（Adapter の不具合を隠さないため）。Constructor を通らずに作られた Hit / Document は、Field を読み直して検証し、Subclass の Property は使いません。Response の Container は `list` / `tuple` そのものだけで、Subclass は Hook を呼ばずに不正とします。`ProviderFailure` の分類も Subclass の Hook を呼びません（Adapter の Code を Broker の中で動かさないため）。
   3. 複数 Provider の結果は交互に並べ、正規化した URL の最初の 1 件を残します（要件に統合の規則がありません）。
   4. Credential 用の Query Parameter の一覧は Best effort です。
   5. IPv6 と非 ASCII の Host は拒否し、名前解決はしません。`network` Capability、SSRF、`robots.txt` は呼び出し元（Tool Broker、PAW-031）と個々の Adapter の責任です。

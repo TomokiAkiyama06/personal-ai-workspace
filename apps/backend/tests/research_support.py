@@ -1,7 +1,8 @@
 """Shared helpers for the research provider tests (stdlib ``unittest`` only)."""
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta, timezone
 
 from paw_backend.research.providers import (
@@ -11,10 +12,12 @@ from paw_backend.research.providers import (
     MAX_LOCATOR_CHARS,
     MAX_TITLE_CHARS,
     ProviderDocument,
+    ProviderFailure,
     ProviderHit,
     ProviderKind,
     ProviderRegistry,
     ResearchBroker,
+    ResearchErrorCode,
     SourceType,
     StaticProvider,
 )
@@ -140,6 +143,150 @@ def malformed_documents() -> dict[str, object]:
 
     documents["a subclass whose constructor sets nothing"] = NeverInitialised()
     return documents
+
+
+class Tripwire(list):
+    """The names of the hooks that ran while it was ``armed()`` (should be none).
+
+    The hostile objects below misbehave only inside ``with tripwire.armed():``, so
+    that the test runner can still print them when a test fails.
+    """
+
+    active = False
+
+    @contextmanager
+    def armed(self) -> Iterator[None]:
+        self.active = True
+        try:
+            yield
+        finally:
+            self.active = False
+
+
+def _hook(tripwire: Tripwire, base: type, name: str, behave):
+    """A hook ``name`` that is hostile while armed and the plain one otherwise."""
+
+    def hook(self, *args, **kwargs):
+        if not tripwire.active:
+            return getattr(base, name)(self, *args, **kwargs)
+        tripwire.append(name)
+        return behave()
+
+    return hook
+
+
+def _raise(name: str):
+    def behave():
+        raise RuntimeError(name)
+
+    return behave
+
+
+def hostile_failures(
+    tripwire: Tripwire,
+) -> dict[str, tuple[BaseException, ResearchErrorCode]]:
+    """Label -> ``(exception, expected classification)``.
+
+    Exceptions a provider could raise whose hooks raise or lie. Where the
+    constructor of ``ProviderFailure`` ran, its (validated) code is the
+    classification; where it did not, or the code was forged, or the exception
+    is no ``ProviderFailure``, it is ``INTERNAL_ERROR``.
+    """
+    Code = ResearchErrorCode
+
+    class RaisingCode(ProviderFailure):
+        @property
+        def code(self):
+            if not tripwire.active:
+                return ProviderFailure.code.__get__(self)
+            tripwire.append("code")
+            raise RuntimeError("code")
+
+        @code.setter
+        def code(self, value):  # ignore the constructor's assignment
+            pass
+
+    class ChangingCode(ProviderFailure):
+        @property
+        def code(self):
+            if not tripwire.active:
+                return ProviderFailure.code.__get__(self)
+            tripwire.append("code")
+            return Code.NOT_FOUND if len(tripwire) == 1 else "not a code"
+
+        @code.setter
+        def code(self, value):
+            pass
+
+    class RaisingGetattribute(ProviderFailure):
+        def __getattribute__(self, name):
+            if name == "code" and tripwire.active:
+                tripwire.append(name)
+                raise RuntimeError(name)
+            return super().__getattribute__(name)
+
+    class NeverInitialised(ProviderFailure):
+        def __init__(self) -> None:  # no slot is set
+            pass
+
+    forged = ProviderFailure(Code.RATE_LIMITED)
+    forged.code = "not a code"
+
+    class RaisingClass(RuntimeError):
+        @property
+        def __class__(self):
+            if not tripwire.active:
+                return type(self)
+            tripwire.append("__class__")
+            raise RuntimeError("__class__")
+
+    class ClaimsTimeout(RuntimeError):
+        @property
+        def __class__(self):
+            if not tripwire.active:
+                return type(self)
+            tripwire.append("__class__")
+            return TimeoutError
+
+    class RaisingName(type):
+        @property
+        def __name__(cls):
+            if not tripwire.active:
+                return type.__dict__["__name__"].__get__(cls)
+            tripwire.append("__name__")
+            raise RuntimeError("__name__")
+
+    class RaisingMetaclass(Exception, metaclass=RaisingName):
+        pass
+
+    return {
+        "a code property that raises": (
+            RaisingCode(Code.RATE_LIMITED),
+            Code.RATE_LIMITED,
+        ),
+        "a code property that changes between reads": (
+            ChangingCode(Code.UNAVAILABLE),
+            Code.UNAVAILABLE,
+        ),
+        "a __getattribute__ that raises": (
+            RaisingGetattribute(Code.NOT_FOUND),
+            Code.NOT_FOUND,
+        ),
+        "a constructor that never sets the code": (
+            NeverInitialised(),
+            Code.INTERNAL_ERROR,
+        ),
+        "a code overwritten after construction": (forged, Code.INTERNAL_ERROR),
+        "a __class__ that raises": (RaisingClass(), Code.INTERNAL_ERROR),
+        "a __class__ that claims to be a TimeoutError": (
+            ClaimsTimeout(),
+            Code.INTERNAL_ERROR,
+        ),
+        "a metaclass whose __name__ raises": (
+            RaisingMetaclass(),
+            Code.INTERNAL_ERROR,
+        ),
+    }
 
 
 def registry_of(
