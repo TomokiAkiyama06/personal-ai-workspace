@@ -1,9 +1,10 @@
-"""``ResearchBroker.gather`` with the optional pre-flight, and the privacy gate.
+"""``ResearchBroker.gather`` with the pre-flight, and the privacy gate.
 
-Without a pre-flight the broker behaves as in PAW-051; with a ``PrivacyGate`` no
-provider sees anything but the minimised, recorded query. Most of these tests
-need ``rules.py``; the ones about the pre-flight hook itself, and about the
-refusal of an unclassified context, do not.
+A broker without a pre-flight refuses to search unless it was built with the
+explicit opt-out ``unfiltered=True`` (then it behaves as in PAW-051); with a
+``PrivacyGate`` no provider sees anything but the minimised, recorded query.
+Most of these tests need ``rules.py``; the ones about the pre-flight hook
+itself, and about the refusal of an unclassified context, do not.
 """
 
 import asyncio
@@ -23,11 +24,14 @@ from paw_backend.research.privacy import (
 )
 from paw_backend.research.providers import (
     PreflightNotConfiguredError,
+    PreflightRequiredError,
     ProviderKind,
     ProviderRegistry,
     ResearchBroker,
     ResearchRequest,
     SearchPreflight,
+    SourceMetadata,
+    SourceType,
     validate_preflight,
 )
 
@@ -36,9 +40,11 @@ from .research_support import (
     SECRET,
     broker_of,
     docs,
+    document,
     fixed_clock,
     github,
     hit,
+    registry_of,
     web,
 )
 
@@ -110,8 +116,10 @@ class PreflightConstructionTest(unittest.TestCase):
         )
 
 
-class WithoutAPreflightTest(unittest.IsolatedAsyncioTestCase):
-    async def test_gather_is_unchanged(self):
+class UnfilteredBrokerTest(unittest.IsolatedAsyncioTestCase):
+    """``unfiltered=True``: the explicit opt-out, the behaviour of PAW-051."""
+
+    async def test_gather_sends_the_query_as_it_is(self):
         provider = web(hits=[hit("https://example.com/a")])
         broker = broker_of(provider)
         request = ResearchRequest("python  asyncio /etc/passwd 1234567", max_results=4)
@@ -152,6 +160,142 @@ class WithoutAPreflightTest(unittest.IsolatedAsyncioTestCase):
         request = ResearchRequest("python", kinds=frozenset({ProviderKind.DOCS}))
         with self.assertRaises(PreflightNotConfiguredError):
             await guarded(broker.gather(request, preflight_input=object()))
+
+
+class FailClosedWithoutAPreflightTest(unittest.IsolatedAsyncioTestCase):
+    """A broker that is neither configured nor ``unfiltered`` sends nothing."""
+
+    SECRET_QUERY = f"why does {SECRET} fail in /srv/billing/app.py"
+
+    def unconfigured(self, *providers, **kwargs) -> ResearchBroker:
+        return ResearchBroker(registry_of(*providers), clock=fixed_clock(), **kwargs)
+
+    async def test_the_default_broker_refuses_and_calls_no_provider(self):
+        provider = web(hits=[hit()])
+        with self.assertRaises(PreflightRequiredError):
+            await guarded(
+                self.unconfigured(provider).gather(ResearchRequest(self.SECRET_QUERY))
+            )
+        self.assertEqual(provider.search_calls, [])
+
+    async def test_every_spelling_of_no_pre_flight_refuses(self):
+        for kwargs in ({}, {"preflight": None}, {"unfiltered": False}):
+            provider_web, provider_docs = web(), docs()
+            request = ResearchRequest(self.SECRET_QUERY)
+            with self.subTest(kwargs=kwargs), self.assertRaises(PreflightRequiredError):
+                await guarded(
+                    self.unconfigured(provider_web, provider_docs, **kwargs).gather(
+                        request
+                    )
+                )
+            self.assertEqual(provider_web.search_calls, [])
+            self.assertEqual(provider_docs.search_calls, [])
+
+    async def test_it_refuses_whatever_the_registry_holds(self):
+        # The refusal does not depend on which providers happen to match: a
+        # misconfigured call site is found on its first call, not on the first
+        # call that matches a provider.
+        for providers, kinds in (
+            ((), frozenset(ProviderKind)),
+            ((web(),), frozenset({ProviderKind.DOCS})),
+        ):
+            with self.subTest(providers=len(providers)):
+                request = ResearchRequest(self.SECRET_QUERY, kinds=kinds)
+                with self.assertRaises(PreflightRequiredError):
+                    await guarded(self.unconfigured(*providers).gather(request))
+
+    async def test_a_pre_flight_input_does_not_make_it_pass(self):
+        provider = web()
+        subject = PrivacyInput([], PROJECT_ID)
+        with self.assertRaises(PreflightNotConfiguredError):
+            await guarded(
+                self.unconfigured(provider).gather(
+                    ResearchRequest(self.SECRET_QUERY), preflight_input=subject
+                )
+            )
+        self.assertEqual(provider.search_calls, [])
+
+    async def test_the_error_is_a_not_configured_error_with_a_fixed_message(self):
+        with self.assertRaises(PreflightRequiredError) as caught:
+            await guarded(
+                self.unconfigured(web()).gather(ResearchRequest(self.SECRET_QUERY))
+            )
+        self.assertIsInstance(caught.exception, PreflightNotConfiguredError)
+        message = str(caught.exception)
+        self.assertEqual(message, str(PreflightRequiredError()))
+        self.assertIn("unfiltered=True", message)
+        self.assertNotIn(SECRET, message)
+        self.assertNotIn("web-a", message)
+        self.assertEqual(caught.exception.args, (message,))
+
+    async def test_a_request_of_the_wrong_type_is_still_a_type_error(self):
+        with self.assertRaises(TypeError) as caught:
+            await guarded(self.unconfigured(web()).gather("python"))
+        self.assertNotIsInstance(caught.exception, PreflightRequiredError)
+
+    async def test_the_opt_out_sends_the_query_as_it_is(self):
+        provider = web(hits=[hit()])
+        broker = self.unconfigured(provider, unfiltered=True)
+        await guarded(broker.gather(ResearchRequest(self.SECRET_QUERY)))
+        self.assertEqual(provider.search_calls, [(self.SECRET_QUERY, 10)])
+
+    async def test_a_pre_flight_input_is_still_refused_when_unfiltered(self):
+        provider = web()
+        with self.assertRaises(PreflightNotConfiguredError) as caught:
+            await guarded(
+                self.unconfigured(provider, unfiltered=True).gather(
+                    ResearchRequest("python"), preflight_input=object()
+                )
+            )
+        self.assertNotIsInstance(caught.exception, PreflightRequiredError)
+        self.assertEqual(provider.search_calls, [])
+
+    async def test_a_configured_broker_needs_no_opt_out(self):
+        provider = web(hits=[hit()])
+        gate, _ = gate_of()
+        broker = broker_with(gate, provider)
+        await guarded(
+            broker.gather(
+                ResearchRequest("python asyncio"),
+                preflight_input=PrivacyInput([], PROJECT_ID),
+            )
+        )
+        self.assertEqual(provider.search_calls, [("python asyncio", 10)])
+
+    async def test_fetch_carries_no_query_and_works_on_any_broker(self):
+        # Decision 0010: ``fetch`` is not gated. It passes the canonical locator
+        # of an earlier result to the provider that returned it, so it neither
+        # needs a pre-flight nor ``unfiltered=True``.
+        provider = web(documents={"https://example.com/a": document(text="Body")})
+        source = SourceMetadata(
+            provider_kind=ProviderKind.WEB,
+            provider_id="web-a",
+            locator="https://example.com/a",
+            title="Old",
+            retrieved_at=NOW,
+            content_hash="sha256:" + "0" * 64,
+            source_type=SourceType.UNKNOWN,
+        )
+        result = await guarded(self.unconfigured(provider).fetch(source))
+        self.assertEqual([item.text for item in result.items], ["Body"])
+        self.assertEqual(provider.fetch_calls, ["https://example.com/a"])
+        self.assertEqual(provider.search_calls, [])
+
+    def test_the_opt_out_is_validated(self):
+        registry = registry_of(web())
+        gate, _ = gate_of()
+        for value in (1, 0, "yes", None, [], "True"):
+            with self.subTest(value=repr(value)), self.assertRaises(TypeError):
+                ResearchBroker(registry, unfiltered=value)
+        # A filter and the opt-out contradict each other.
+        with self.assertRaises(ValueError):
+            ResearchBroker(registry, preflight=gate, unfiltered=True)
+        ResearchBroker(registry, unfiltered=True)
+        ResearchBroker(registry, unfiltered=False)
+
+    def test_the_opt_out_is_keyword_only(self):
+        with self.assertRaises(TypeError):
+            ResearchBroker(registry_of(), None, None, True)  # type: ignore[misc]
 
 
 class PreflightHookTest(unittest.IsolatedAsyncioTestCase):

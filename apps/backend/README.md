@@ -1270,7 +1270,7 @@ Provider の違い（API の形、Response の形、失敗の仕方）は Broker
 | `locator.py` | `canonicalize_locator`: URL の正規化と無害化 |
 | `normalize.py` | `normalize_hits`（Provider の Response を検証して統一形式へ）、`merge_items`（交互配置・重複除去・件数制限） |
 | `registry.py` | `ProviderRegistry`: 登録時の Interface 検証、一意な名前、決定的な順序 |
-| `preflight.py` | `SearchPreflight`（Protocol）: Provider を呼ぶ前に Request を書き換える・拒否する任意の差し込み口（PAW-053 の Privacy Filter が実装する）、`PreflightNotConfiguredError` |
+| `preflight.py` | `SearchPreflight`（Protocol）: Provider を呼ぶ前に Request を書き換える・拒否する差し込み口（PAW-053 の Privacy Filter が実装する。`gather` に必須）、`PreflightNotConfiguredError` / `PreflightRequiredError` |
 | `broker.py` | `ResearchBroker.gather` / `fetch`: 並行実行、Timeout、失敗の隔離 |
 | `static.py` | `StaticProvider`: Test 用の Fake（Network を使わない） |
 
@@ -1303,7 +1303,7 @@ Registry は登録時に `name` と `kind` の形、`search` と `fetch` が `as
 
 | 項目 | 内容 |
 | --- | --- |
-| `query` | 1 〜 512 文字、空白のみ不可、改行・Tab を含む制御文字は不可。Privacy Filter（PAW-053）で最小化済みの Query を渡す。Broker は中身を見ず、書き換えない（pre-flight を設定した場合だけ、pre-flight が Query を差し替える。[Research Privacy Filter](#research-privacy-filter)） |
+| `query` | 1 〜 512 文字、空白のみ不可、改行・Tab を含む制御文字は不可。Privacy Filter（PAW-053）で最小化済みの Query を渡す。Broker は中身を見ず、書き換えない（pre-flight を設定した場合だけ、pre-flight が Query を差し替える。pre-flight の無い Broker は `unfiltered=True` を明示しない限り検索しない。[Research Privacy Filter](#research-privacy-filter)） |
 | `max_results` | 1 〜 50（既定 10）。各 Provider に頼む件数と、結果の最大件数の両方 |
 | `kinds` | `ProviderKind` の空でない `frozenset`（既定は全種類）。Provider 名では選べない |
 | `time_budget_seconds` | 1 回の `gather` 全体の上限。0 より大きく 120 以下（既定 30） |
@@ -1347,10 +1347,10 @@ License や `robots.txt` に関する項目はありません。要件と設計�
 
 ### Broker の動作
 
-`ResearchBroker(registry).gather(request)` は次のとおり動きます。
+`ResearchBroker(registry, preflight=gate).gather(request, preflight_input=...)` は次のとおり動きます（`preflight` が無く `unfiltered=True` でもない Broker の `gather` は、次の手順に入る前に `PreflightRequiredError` で拒否し、Provider を 1 つも呼びません。[Research Privacy Filter](#research-privacy-filter)）。
 
 1. `request.kinds` に合う Provider を Registry の順序（`ProviderKind` の宣言順、次に名前順。登録順には依存しない）で選びます。
-   `ResearchBroker(registry, preflight=...)` で pre-flight を設定した場合は、ここで、どの Provider も呼ぶ前に `preflight.preflight(request, kinds, preflight_input)` が走り、返された Request が以降の全ての段階で使われます（拒否は例外として `gather` から出て、Provider は呼ばれません。詳しくは [Research Privacy Filter](#research-privacy-filter)）。pre-flight を設定せず `preflight_input` も渡さなければ、この段階は何もしません。
+   `ResearchBroker(registry, preflight=...)` で pre-flight を設定した場合は、ここで、どの Provider も呼ぶ前に `preflight.preflight(request, kinds, preflight_input)` が走り、返された Request が以降の全ての段階で使われます（拒否は例外として `gather` から出て、Provider は呼ばれません。詳しくは [Research Privacy Filter](#research-privacy-filter)）。`unfiltered=True` の Broker（pre-flight が無い）では、この段階は何もせず、Query はそのまま Provider へ渡ります。
 2. **全 Provider を並行**で実行します。各 Provider の制限時間は、登録時の `timeout_seconds`（既定 10 秒、最大 120 秒）と、全体の Budget の残りの小さい方です。時間切れの Provider は Cancel し、完全に終わるまで待ってから `timeout` として報告します。`gather` が返るとき、起動した Task は残りません。
 3. Provider の例外は Provider ごとに隔離します。他の Provider の結果は失われません。`gather` を Cancel した場合は全 Provider を Cancel して `CancelledError` を伝えます。
 4. Response は Provider ごとに全体を検証します（list / tuple、件数が `limit` 以下、全要素が `ProviderHit`、全 URL が正規化できる）。1 つでも違反があれば、その Provider の結果は全て捨てて `invalid_response` にします。
@@ -1374,7 +1374,7 @@ License や `robots.txt` に関する項目はありません。要件と設計�
 
 - `network` Capability の確認は、この層の呼び出し元（Tool Broker、PAW-031）の責任です。この層は認可の判断も Network の Access もしません。
 - どの Host へ接続してよいか（SSRF、Private Address、`robots.txt`）は、具体的な Adapter と Network Policy の責任です。`canonicalize_locator` は名前を解決しません。
-- Query の最小化と Secret の除去は、Privacy Filter（PAW-053、[Research Privacy Filter](#research-privacy-filter)）が、pre-flight として行います。`private_source` は、以前の結果を Context の Piece にする `context_pieces_from_items` が使います。pre-flight を設定しない Broker は、Query をそのまま Provider へ渡します。
+- Query の最小化と Secret の除去は、Privacy Filter（PAW-053、[Research Privacy Filter](#research-privacy-filter)）が、pre-flight として行います。`private_source` は、以前の結果を Context の Piece にする `context_pieces_from_items` が使います。pre-flight を設定しない Broker の `gather` は `PreflightRequiredError` で拒否します（Fail closed）。Query をそのまま Provider へ渡すのは、`unfiltered=True` を明示した Broker だけです。
 - 全ての入力（Query、件数、文字数、Provider 数）に上限があります。Registry は 32 Provider までです。
 
 ### 実装の由来と制約
@@ -1477,13 +1477,14 @@ result = await broker.gather(
 )
 ```
 
-- `preflight` を渡さず、`preflight_input` も渡さなければ、今までと同じ動作です（PAW-051 の Test はそのまま通ります）。
-- `preflight` が無い Broker に `preflight_input` を渡すと `PreflightNotConfiguredError` です（確認されると思った Query が、確認されずに出るのを防ぐため）。
+- **`gather` は Fail closed です。** `preflight` を渡さず、`unfiltered=True` も渡さない Broker（`ResearchBroker(registry)` だけの呼び出しを含む）の `gather` は、Registry の中身にかかわらず、どの Provider も呼ぶ前に `PreflightRequiredError` を出します。Query が Privacy Filter を通らず、Audit もされずに外へ出るのを、渡し忘れで起こさないためです。例外の文言は固定で、Query も Provider 名も含みません。
+- **唯一の明示的な Opt-out は `ResearchBroker(registry, unfiltered=True)` です。** Test と、Private な情報を何も持たない呼び出し側のためのもので、Query を**そのまま**（最小化も Audit も検査もせず）全ての選ばれた Provider へ渡します。Private Source、Memory、会話、Secret から Agent が書いた Query には使わないでください。`preflight` と同時には指定できず（`ValueError`）、`bool` 以外は `TypeError` です。PAW-051 の Test は、この Opt-out で今までどおり通ります。
+- `preflight` が無い Broker（`unfiltered=True` を含む）に `preflight_input` を渡すと `PreflightNotConfiguredError` です（確認されると思った Query が、確認されずに出るのを防ぐため）。`unfiltered=True` でない Broker では、先に `PreflightRequiredError`（`PreflightNotConfiguredError` の下位の型）になります。
 - `preflight` がある Broker に `preflight_input` を渡さない（`None`）、または `PrivacyInput` でないものを渡すと、Gate は `unclassified_context` で拒否します（Default deny）。
 - Provider を選んだ後、どの Provider も呼ぶ前に、Gate が Query を最小化して Audit します。Provider が受け取る Query は、最小化した Query だけです。拒否されると、Provider は 1 つも呼ばれず、`PrivacyRefusal` が `gather` から出ます。
 - 選ばれた Provider が 1 つもなければ、何も送られないので、Gate も Audit も動きません。
 - 1 回の `gather` につき Record は 1 つです。Time Budget は pre-flight の後から数えます。
-- `ResearchBroker.fetch` は Gate を通りません（Decision 0010）。
+- **`ResearchBroker.fetch` は Gate を通りません**（Decision 0010）。`fetch` は Query を持たず、Provider が以前返した Source の Locator（正規化済み）を、その Provider へ戻すだけです。そのため、`preflight` の有無にも `unfiltered=True` にも関係なく、どの Broker でも使えます（`preflight` も `unfiltered=True` も無い Broker でも動きます）。Private な Source を取得してよいかは、Tool Broker（PAW-031）と個々の Adapter の責任です。
 
 ### 実装の由来
 

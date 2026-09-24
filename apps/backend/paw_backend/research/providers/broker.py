@@ -8,6 +8,13 @@ network I/O itself and makes no authorisation decision: the caller (the Tool
 Broker, PAW-031) must have checked the ``network`` capability before calling
 ``gather`` or ``fetch``.
 
+Privacy (PAW-053, Decision 0010). ``gather`` FAILS CLOSED: a broker that has no
+pre-flight (``preflight=None``) refuses to search, raising
+``PreflightRequiredError`` before any provider is called, unless it was built
+with the one explicit opt-out ``unfiltered=True``, which sends every query to the
+providers exactly as given, unchecked and unaudited. ``fetch`` is not affected
+(see its docstring).
+
 Logging: one WARNING per failed provider on the logger
 ``paw_backend.research.providers`` (or a child of it) with the provider id,
 kind, error code and the exception TYPE name. Never the exception text, the
@@ -47,6 +54,7 @@ from paw_backend.research.providers.normalize import (
 )
 from paw_backend.research.providers.preflight import (
     PreflightNotConfiguredError,
+    PreflightRequiredError,
     SearchPreflight,
     validate_preflight,
 )
@@ -126,8 +134,17 @@ class ResearchBroker:
 
     ``clock`` returns the current time as a timezone-aware datetime (UTC by
     default: ``datetime.now(timezone.utc)``); it is injectable for tests.
-    ``preflight`` (default ``None``: no pre-flight, the behaviour of PAW-051) is
-    an optional ``SearchPreflight``, for example the ``PrivacyGate`` of PAW-053.
+
+    ``preflight`` is a ``SearchPreflight``, for example the ``PrivacyGate`` of
+    PAW-053. ``gather`` needs one: with the default ``preflight=None`` it refuses
+    to search (``PreflightRequiredError``) and calls no provider.
+
+    ``unfiltered=True`` is the ONE explicit opt-out, for tests and for callers
+    that have nothing private to protect: the broker then sends every query to
+    the providers AS IT IS, without minimisation, without an audit record and
+    without any check. Never use it for a query that an Agent wrote from private
+    source, memory, conversation or secret text. It cannot be combined with a
+    ``preflight``.
     """
 
     def __init__(
@@ -136,17 +153,26 @@ class ResearchBroker:
         *,
         clock: Callable[[], datetime] | None = None,
         preflight: SearchPreflight | None = None,
+        unfiltered: bool = False,
     ) -> None:
         """``registry`` must be a ``ProviderRegistry`` (else ``TypeError``);
         ``preflight`` must be ``None`` or implement ``SearchPreflight`` (checked
-        with ``validate_preflight``: ``TypeError``)."""
+        with ``validate_preflight``: ``TypeError``); ``unfiltered`` must be a
+        ``bool`` (``TypeError``, no truthiness) and cannot be ``True`` together
+        with a ``preflight`` (``ValueError``). A broker with neither is accepted
+        here: it fails closed later, in ``gather``."""
         if not isinstance(registry, ProviderRegistry):
             raise TypeError("registry must be a ProviderRegistry")
+        if not isinstance(unfiltered, bool):
+            raise TypeError("unfiltered must be a bool")
         if preflight is not None:
             validate_preflight(preflight)
+            if unfiltered:
+                raise ValueError("unfiltered=True cannot be combined with a preflight")
         self._registry = registry
         self._clock = _utc_now if clock is None else clock
         self._preflight = preflight
+        self._unfiltered = unfiltered
 
     async def gather(
         self, request: ResearchRequest, *, preflight_input: object = None
@@ -156,11 +182,15 @@ class ResearchBroker:
         A ``request`` that is not a ``ResearchRequest`` raises ``TypeError``.
         Provider failures never raise; the method returns a ``ResearchResult``.
 
-        Pre-flight (PAW-053). Without a ``preflight`` and with
-        ``preflight_input=None`` nothing changes. A ``preflight_input`` given to
-        a broker without a pre-flight raises ``PreflightNotConfiguredError``
-        (the query would go out unchecked). With a pre-flight, and after step 1
-        has selected at least one provider,
+        Pre-flight (PAW-053), fail closed. A broker without a ``preflight`` that
+        was not built with ``unfiltered=True`` raises ``PreflightRequiredError``
+        (a ``PreflightNotConfiguredError``) at once, whatever the registry holds
+        and before any provider is called: the query would go out unchecked and
+        unaudited. An ``unfiltered`` broker sends ``request.query`` to every
+        selected provider as it is (the behaviour of PAW-051), but a
+        ``preflight_input`` given to it still raises ``PreflightNotConfiguredError``
+        (the caller expected a check that does not exist). With a pre-flight, and
+        after step 1 has selected at least one provider,
         ``await preflight.preflight(request, kinds, preflight_input)`` runs
         BEFORE any provider is called, where ``kinds`` is the ``frozenset`` of
         the selected providers' kinds and ``preflight_input`` is passed on as it
@@ -208,8 +238,11 @@ class ResearchBroker:
         """
         if not isinstance(request, ResearchRequest):
             raise TypeError("request must be a ResearchRequest")
-        if self._preflight is None and preflight_input is not None:
-            raise PreflightNotConfiguredError
+        if self._preflight is None:
+            if not self._unfiltered:
+                raise PreflightRequiredError
+            if preflight_input is not None:
+                raise PreflightNotConfiguredError
         entries = self._registry.select(request.kinds)
         if self._preflight is not None and entries:
             request = await self._preflight.preflight(
@@ -272,6 +305,13 @@ class ResearchBroker:
         time_budget_seconds: float = DEFAULT_TIME_BUDGET_SECONDS,
     ) -> ResearchResult:
         """Fetch the document of a source found earlier, from the same provider.
+
+        ``fetch`` carries no query: it passes the canonical locator of a source
+        that a provider returned earlier back to that provider. It is NOT gated
+        by the pre-flight (Decision 0010) and works on every broker, also one
+        without a pre-flight and without ``unfiltered=True``. Whether a private
+        source may be fetched is the concern of the Tool Broker (PAW-031) and of
+        the adapters.
 
         ``source`` must be a ``SourceMetadata`` (else ``TypeError``);
         ``time_budget_seconds`` is checked with ``validate_time_budget``

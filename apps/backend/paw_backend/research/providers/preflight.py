@@ -5,6 +5,10 @@ them is called. It may rewrite the request (the Research Privacy Filter replaces
 the query with a minimised one) or raise to refuse it, in which case no provider
 is called at all. This module only defines the boundary, so that the broker does
 not depend on any particular filter.
+
+The pre-flight is REQUIRED by ``ResearchBroker.gather``: a broker without one
+refuses to search (``PreflightRequiredError``) unless it was built with the
+explicit opt-out ``unfiltered=True`` (Decision 0010).
 """
 
 import inspect
@@ -23,6 +27,25 @@ class PreflightNotConfiguredError(Exception):
     def __init__(self) -> None:
         super().__init__(
             "a pre-flight input was given but the broker has no pre-flight"
+        )
+
+
+class PreflightRequiredError(PreflightNotConfiguredError):
+    """``gather`` was called on a broker that has no pre-flight and is not
+    ``unfiltered``.
+
+    Without a pre-flight the query would reach every provider unchecked and
+    unaudited, so the broker fails closed and calls no provider. The fix is to
+    configure a pre-flight (``ResearchBroker(registry, preflight=gate)``) or, for
+    a caller that has nothing private, to say so with ``unfiltered=True``. The
+    message is fixed and contains neither the query nor any provider name.
+    """
+
+    def __init__(self) -> None:
+        Exception.__init__(
+            self,
+            "the broker has no pre-flight: configure one, or construct it with "
+            "unfiltered=True to send queries as they are",
         )
 
 

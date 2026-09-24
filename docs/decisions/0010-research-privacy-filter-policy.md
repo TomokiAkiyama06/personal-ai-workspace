@@ -31,6 +31,7 @@ PAW-053 の実装は、動かすためにこれらを仮の値と規則で置い
   LLM 自身が悪意を持つ場合（Prompt Injection など）の完全な防御でもない。
   Context のラベルは、出所を知っている Backend のコードが付ける。ラベルの付け間違い・付け忘れは、この層では見つけられない。
 - ラベルが付いていない Context（ラベル無しの文字列、`None`、Gate を設定していない Broker への入力）は**送信を拒否する**（Default deny）。
+- **Gate を設定していない `ResearchBroker` も検索しない**（Fail closed）。`preflight` が無く `unfiltered=True` でもない Broker の `gather` は、どの Provider も呼ぶ前に `PreflightRequiredError` を出す。渡し忘れで、Query が最小化も Audit もされずに外へ出ることを防ぐため。Gate を通さずに Query を送る道は、`ResearchBroker(registry, unfiltered=True)` という**唯一の明示的な Opt-out** だけで、Test と、Private な情報を何も持たない呼び出し側のためにある。Query をそのまま送り、Audit しない。この Opt-out を Private な情報から作った Query に使ってはならない。
 
 ### 2. 写しの検出（数値は仮）
 
@@ -81,7 +82,7 @@ Draft に次の規則を、この順に適用する。各規則の正確な定�
 
 ### 6. 対象外
 
-- `ResearchBroker.fetch`（以前の結果の URL を取得する）は Gate を通さない。URL は Provider が返したもので、Query ではない。Private な Source の URL を取得してよいかは、Tool Broker（PAW-031）と個々の Adapter の責任とする。
+- `ResearchBroker.fetch`（以前の結果の URL を取得する）は Gate を通さない。URL は Provider が返したもので、Query ではない。そのため `fetch` は、Gate を設定していない Broker（`unfiltered=True` でもない Broker）でも使える。Query を送る `gather` と違い、`fetch` は `PreflightRequiredError` を出さない。Private な Source の URL を取得してよいかは、Tool Broker（PAW-031）と個々の Adapter の責任とする。
 - Provider の応答（結果の本文）の検査、Research Scratch（PAW-050）への保存時の検査は行わない。
 
 ## 選定理由
