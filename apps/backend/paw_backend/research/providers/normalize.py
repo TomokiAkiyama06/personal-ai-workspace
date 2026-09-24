@@ -162,9 +162,13 @@ def normalize_hits(
 ) -> tuple[ResearchItem, ...]:
     """Validate one provider's search response and normalise every hit.
 
-    ``hits`` is untrusted (whatever the adapter returned). It must be a ``list``
-    or a ``tuple`` (a ``str``, ``bytes``, ``dict``, ``set``, generator or
-    ``None`` is not) with at most ``limit`` elements, and every element must be
+    ``hits`` is untrusted (whatever the adapter returned). It must be EXACTLY a
+    ``list`` or a ``tuple`` (a ``str``, ``bytes``, ``dict``, ``set``, generator or
+    ``None`` is not) with at most ``limit`` elements. An instance of a subclass,
+    or an object that claims to be a list, is invalid too: ``__len__``,
+    ``__iter__`` and ``__getitem__`` of a subclass would run the adapter's code
+    here, unguarded, and could raise, or lie about the length to get past
+    ``limit``. Every element must be
     a ``ProviderHit`` whose live field values are valid: each one is validated
     again by ``revalidate_hit`` (an object built around the constructor, with
     unset slots or values of the wrong type or length, is not a valid hit). All
@@ -190,7 +194,10 @@ def normalize_hits(
     ``published_at`` converted to UTC (``astimezone(timezone.utc)``; ``None``
     stays ``None``). An empty ``hits`` gives ``()``.
     """
-    if not isinstance(hits, list | tuple) or len(hits) > limit:
+    # ``type()`` is the object's real class (``isinstance`` would also ask it for
+    # ``__class__``), and ``is`` runs no ``__eq__``. Exact types have no adapter
+    # code in ``len`` and iteration.
+    if (type(hits) is not list and type(hits) is not tuple) or len(hits) > limit:
         raise InvalidProviderResponseError()
     # ``isinstance`` proves the class and nothing else: an object built around
     # the constructor may lack slots or hold values of the wrong type. Every hit

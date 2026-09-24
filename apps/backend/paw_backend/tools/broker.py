@@ -17,11 +17,14 @@ narrow what the previous one allowed:
    user's rights intersected with the agent grant. The broker adds to this and
    never replaces it: an approval cannot make an operation the agent may not do.
    A call that touches a repository of the task's working set (it names the
-   repository, or a path lies in its worktree) is decided on that **repository**
-   with its resolved ACL, so a read-only override or a "no agents" override
-   applies; an ACL the backend could not resolve denies. A repository write
-   that touches no repository of the working set is denied
-   (``repository_not_identified``);
+   repository, a path lies in its worktree, or a URL lies below a remote the
+   backend registered for it) is decided on that **repository** with its
+   resolved ACL, so a read-only override or a "no agents" override applies; an
+   ACL the backend could not resolve denies. A URL of such a call that lies
+   below no remote of the working set is refused at step 3
+   (``remote_not_in_repository``): the executor is never given an endpoint whose
+   repository was not authorized. A repository write that touches no repository
+   of the working set is denied (``repository_not_identified``);
 5. the task budget (:class:`~.budget.BudgetProvider`); unknown means denied;
 6. ``AUTO`` / ``SCOPED_AUTO`` are allowed; ``APPROVAL`` / ``STRONG_APPROVAL``
    need an approval bound to this exact call. **The task must still be able to
@@ -31,7 +34,11 @@ narrow what the previous one allowed:
    used, whatever the store still says. Then, without an approval a request is
    opened (``NEEDS_APPROVAL``); with one it is consumed atomically (single
    use) or the call is denied with the reason (expired, replayed, for another
-   call...).
+   call...). The check before the use gives the early, precise reason; it can be
+   overtaken by the end of the task, so the store checks the task **again in the
+   same transaction that consumes** (``require_active_task``: the task row is
+   read locked), and a task that ended in between consumes nothing
+   (``task_not_active``).
 
 The decision is audited (ids and enums only). An ``ALLOW`` that cannot be
 recorded becomes a ``DENY`` (``audit_unavailable``): a tool never runs without
@@ -114,6 +121,7 @@ _OUT_OF_SCOPE_REASON = {
     TargetKind.PROJECT: BrokerReason.PROJECT_OUT_OF_SCOPE,
     TargetKind.CREDENTIAL: BrokerReason.CREDENTIAL_OUT_OF_SCOPE,
     TargetKind.REPOSITORY: BrokerReason.REPOSITORY_OUT_OF_SCOPE,
+    TargetKind.URL: BrokerReason.REMOTE_NOT_IN_REPOSITORY,
 }
 _CONSUME_REASON = {
     ConsumeOutcome.NOT_FOUND: BrokerReason.APPROVAL_NOT_FOUND,
@@ -122,6 +130,10 @@ _CONSUME_REASON = {
     ConsumeOutcome.ALREADY_USED: BrokerReason.APPROVAL_ALREADY_USED,
     ConsumeOutcome.REJECTED: BrokerReason.APPROVAL_REJECTED,
     ConsumeOutcome.REVOKED: BrokerReason.APPROVAL_REVOKED,
+    # The task ended between the broker's check and the use (the store checks it
+    # again in the step that consumes).
+    ConsumeOutcome.TASK_NOT_ACTIVE: BrokerReason.TASK_NOT_ACTIVE,
+    ConsumeOutcome.TASK_UNKNOWN: BrokerReason.TASK_UNKNOWN,
 }
 _OPEN_REFUSAL_REASON = {
     OpenOutcome.TOO_MANY_PENDING: BrokerReason.APPROVAL_LIMIT_REACHED,
@@ -301,6 +313,7 @@ class ToolBroker:
                 context.scope,
                 self._resolver,
                 timeout_seconds=self._timeout_seconds,
+                urls=parsed.urls,
             )
         except PathResolutionError as error:
             logger.warning("Path resolution failed (%s)", error)
@@ -663,7 +676,9 @@ class ToolBroker:
         )
         try:
             async with asyncio.timeout(self._timeout_seconds):
-                outcome = await self._approvals.consume(approval_id, binding, now=now)
+                outcome = await self._approvals.consume(
+                    approval_id, binding, now=now, require_active_task=True
+                )
         except Exception as error:
             logger.error("Approval use failed (%s)", type(error).__name__)
             outcome = None

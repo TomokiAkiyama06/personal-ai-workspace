@@ -8,8 +8,12 @@ deferred for pinned items, items whose promotion is pending and items with an
 active lease; a lease lasts at most one hour.
 
 ``project_id`` and ``created_by`` are plain UUIDs (the projects and users tables
-do not exist yet). ``task_id`` references ``tasks.id`` (revision 0032) with
-``ON DELETE SET NULL``.
+do not exist yet). ``task_id`` is a plain UUID too, with no foreign key to
+``tasks.id`` (Proposed decision 0013): deleting a task is never blocked by
+research, pinned research is never deleted with it and the item keeps its
+Project / Task relation (``SET NULL`` lost it, ``RESTRICT`` blocked the task
+delete, ``CASCADE`` deleted pinned research). ``ScratchStore.add`` checks that the
+task exists in the project. This revision therefore does not touch ``tasks``.
 
 The definitions repeat the ones in ``paw_backend.research.scratch.models`` on
 purpose (a migration is a frozen snapshot); ``tests/test_scratch_migration.py``
@@ -67,7 +71,6 @@ def upgrade() -> None:
         ),
         sa.Column("promotion_requested_at", sa.DateTime(timezone=True), nullable=True),
         sa.PrimaryKeyConstraint("id"),
-        sa.ForeignKeyConstraint(["task_id"], ["tasks.id"], ondelete="SET NULL"),
         sa.CheckConstraint(
             "expires_at = created_at + interval '24 hours'",
             name="expires_at_matches_ttl",

@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import dataclasses
 import hashlib
+import time
 import unittest
 import uuid
 from datetime import timedelta
@@ -12,6 +13,7 @@ from paw_backend.authz import (
     ProjectRole,
     SystemRole,
 )
+from paw_backend.tasks import TaskState
 from paw_backend.tools import (
     ApprovalEventKind,
     ApprovalLevel,
@@ -654,7 +656,9 @@ class ApprovalFlowTest(unittest.IsolatedAsyncioTestCase):
             async def open_request(self, new, *, now):
                 raise ConnectionError(SECRET)
 
-            async def consume(self, approval_id, binding, *, now):
+            async def consume(
+                self, approval_id, binding, *, now, require_active_task=False
+            ):
                 raise ConnectionError(SECRET)
 
         h = Harness(approvals=Failing())
@@ -674,7 +678,9 @@ class ApprovalFlowTest(unittest.IsolatedAsyncioTestCase):
             async def open_request(self, new, *, now):
                 return "created"
 
-            async def consume(self, approval_id, binding, *, now):
+            async def consume(
+                self, approval_id, binding, *, now, require_active_task=False
+            ):
                 return "consumed"
 
         h = Harness(approvals=Nonsense())
@@ -1333,6 +1339,175 @@ class TaskEndTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.h.service.revoke_task(TASK), 1)
         self.assertEqual(await self.h.service.revoke_task(TASK), 0)
 
+    async def stalled_service(self, store, **kwargs):
+        return ApprovalService(
+            store,
+            InMemoryAuditSink(),
+            step_up=StepUp(True),
+            clock=self.h.clock,
+            timeout_seconds=0.05,
+            **kwargs,
+        )
+
+    async def test_a_store_that_never_answers_cannot_hold_the_end_of_a_task_up(self):
+        # Finding of the review of PR #74: TaskService awaits its listeners, so a
+        # revocation that waits for a stalled database would hold up every cancel,
+        # complete and retry request after the transition was committed.
+        class Stalled(InMemoryApprovalStore):
+            async def revoke_task(self, task_id, *, now):
+                await asyncio.Event().wait()
+
+        service = await self.stalled_service(Stalled())
+        for call in (
+            service.revoke_task(TASK),
+            service.revoke_on_task_end(TaskEvent(TASK, TaskState.CANCELLED)),
+        ):
+            with self.subTest(call=call.__qualname__):
+                with self.assertLogs(level="ERROR") as logs:
+                    with self.assertRaises(ApprovalRevocationError):
+                        async with asyncio.timeout(5):  # far above the 0.05 s limit
+                            await call
+                self.assertIn("TimeoutError", "\n".join(logs.output))
+
+    async def test_a_lookup_that_never_answers_ends_the_revocation_at_the_deadline(
+        self,
+    ):
+        # The revocation is done in the store; what cannot be finished in time is
+        # the report (event, audit row). One deadline covers all of it, so a
+        # stalled lookup ends the revocation with an error instead of being
+        # waited for a second time (finding of the second review of PR #74).
+        class StalledLookup(InMemoryApprovalStore):
+            stalled = False
+
+            async def get(self, approval_id):
+                if self.stalled:
+                    await asyncio.Event().wait()
+                return await super().get(approval_id)
+
+        store = StalledLookup()
+        h = Harness(approvals=store)
+        await self.approved("a", h)
+        store.stalled = True
+        service = await self.stalled_service(store)
+        with self.assertLogs(level="ERROR") as logs:
+            with self.assertRaises(ApprovalRevocationError) as caught:
+                async with asyncio.timeout(5):  # far above the 0.05 s limit
+                    await service.revoke_task(TASK)
+        self.assertIn("TimeoutError", "\n".join(logs.output))
+        self.assertIsNone(caught.exception.__cause__)
+        self.assertEqual(
+            [r.status for r in store._records.values()], [ApprovalStatus.REVOKED]
+        )
+        store.stalled = False  # idempotent: nothing is left to revoke
+        self.assertEqual(await service.revoke_task(TASK), 0)
+
+    async def slow_store_with_open_approvals(self, count):
+        """A store whose calls each take ``STEP`` seconds once ``step`` is set."""
+
+        class SlowStore(InMemoryApprovalStore):
+            step = 0.0
+            lookups = 0
+
+            async def revoke_task(self, task_id, *, now):
+                await asyncio.sleep(self.step)
+                return await super().revoke_task(task_id, now=now)
+
+            async def get(self, approval_id):
+                self.lookups += 1
+                await asyncio.sleep(self.step)
+                return await super().get(approval_id)
+
+        store = SlowStore()
+        h = Harness(approvals=store, max_pending_approvals=100)  # the largest cap
+        for index in range(count):
+            await self.approved(f"tree{index}", h)
+        return store, h
+
+    async def test_the_whole_revocation_shares_one_deadline(self):
+        # Finding of the second review of PR #74: the limit was restarted for
+        # the store call and for every lookup, so a task with many approvals took
+        # many times the limit although each single call was inside it. Here
+        # every call takes 0.3 s of a 0.5 s limit: 1 + 4 calls would take 1.5 s.
+        limit, step, approvals = 0.5, 0.3, 4
+        store, _ = await self.slow_store_with_open_approvals(approvals)
+        store.step, store.lookups = step, 0
+        service = ApprovalService(
+            store,
+            InMemoryAuditSink(),
+            step_up=StepUp(True),
+            clock=self.h.clock,
+            timeout_seconds=limit,
+        )
+        started = time.monotonic()
+        with self.assertLogs(level="ERROR") as logs:
+            with self.assertRaises(ApprovalRevocationError) as caught:
+                await service.revoke_task(TASK)
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed, limit + 0.7)  # the old code needed 1.5 s
+        self.assertGreaterEqual(elapsed, limit - 0.05)  # it did wait for the limit
+        self.assertLessEqual(store.lookups, 1)  # the next lookup never started
+        self.assertIn("TimeoutError", "\n".join(logs.output))
+        self.assertIsNone(caught.exception.__cause__)
+        # what was stored stays; running it again finishes the job, and again
+        # finds nothing
+        store.step = 0
+        already = sum(
+            r.status is ApprovalStatus.REVOKED for r in store._records.values()
+        )
+        self.assertEqual(already + await service.revoke_task(TASK), approvals)
+        self.assertEqual(
+            {r.status for r in store._records.values()}, {ApprovalStatus.REVOKED}
+        )
+        self.assertEqual(await service.revoke_task(TASK), 0)
+
+    async def test_slow_listeners_and_audit_writes_share_the_same_deadline(self):
+        limit, step, approvals = 0.5, 0.3, 4
+        store, _ = await self.slow_store_with_open_approvals(approvals)
+
+        class SlowSink(InMemoryAuditSink):
+            async def record(self, event):
+                await asyncio.sleep(step)
+                await super().record(event)
+
+        told = []
+
+        async def slow_listener(event):
+            await asyncio.sleep(step)
+            told.append(event.kind)
+
+        service = ApprovalService(
+            store,
+            SlowSink(),
+            step_up=StepUp(True),
+            clock=self.h.clock,
+            listeners=[slow_listener],
+            timeout_seconds=limit,
+        )
+        started = time.monotonic()
+        with self.assertLogs(level="ERROR"):
+            with self.assertRaises(ApprovalRevocationError):
+                await service.revoke_task(TASK)
+        # per approval: an event (0.3 s) and an audit row (0.3 s): 2.4 s in total
+        self.assertLess(time.monotonic() - started, limit + 0.7)
+        self.assertLessEqual(len(told), 1)
+        self.assertEqual(
+            {r.status for r in store._records.values()}, {ApprovalStatus.REVOKED}
+        )
+
+    async def test_many_approvals_that_are_answered_quickly_are_all_reported(self):
+        # The one deadline is not stricter than needed: a healthy store reports
+        # every approval, one event and one audit row each.
+        store, h = await self.slow_store_with_open_approvals(25)
+        h.events.clear()
+        before = len(h.sink.events)
+        self.assertEqual(await h.service.revoke_task(TASK), 25)
+        self.assertEqual([e.kind for e in h.events], [ApprovalEventKind.REVOKED] * 25)
+        rows = h.sink.events[before:]
+        self.assertEqual(
+            [(e.action, e.decision, e.reason) for e in rows],
+            [("tool.approval.revoke", "allow", "task_ended")] * 25,
+        )
+
     async def test_an_approval_left_open_is_unusable_once_the_task_ended(self):
         approved = await self.approved()
         self.store.error = ConnectionError("down")
@@ -1372,6 +1547,73 @@ class TaskEndTest(unittest.IsolatedAsyncioTestCase):
             (used.verdict, used.reason), (Verdict.ALLOW, R.APPROVAL_CONSUMED)
         )
         self.assertEqual(self.h.task_activity.checks, [TASK, TASK])  # open + use
+
+    async def test_a_task_that_ends_between_the_check_and_the_use_consumes_nothing(
+        self,
+    ):
+        # The broker's own check answers ACTIVE, and then the task ends: what the
+        # store sees, in the step that consumes, is the end. (In production the
+        # store reads the task row locked in that transaction; see
+        # test_tools_postgres.ConsumeRacesWithTaskEndTest.)
+        for answer, reason in (
+            (TaskActivity.ENDED, R.TASK_NOT_ACTIVE),
+            (TaskActivity.UNKNOWN, R.TASK_UNKNOWN),
+        ):
+            with self.subTest(answer=answer.value):
+                truth = FakeTaskActivity()
+                store = InMemoryApprovalStore(task_activity=truth)
+                h = Harness(approvals=store)  # the broker's provider says ACTIVE
+                approved = await self.approved("a", h)
+                truth.answer = answer  # the task ends after the broker's check
+                used = await self.use(approved, "a", h)
+                self.assertEqual(
+                    (used.verdict, used.reason, used.invocation),
+                    (Verdict.DENY, reason, None),
+                )
+                self.assertEqual(h.task_activity.checks, [TASK, TASK])  # open + use
+                self.assertEqual(
+                    await self.status(approved, h), ApprovalStatus.APPROVED
+                )
+                # once the revocation runs, it still finds the approval
+                self.assertEqual(await h.service.revoke_task(TASK), 1)
+                # and a task that is alive uses it, once
+        truth = FakeTaskActivity()
+        h = Harness(approvals=InMemoryApprovalStore(task_activity=truth))
+        approved = await self.approved("a", h)
+        used = await self.use(approved, "a", h)
+        self.assertEqual(
+            (used.verdict, used.reason), (Verdict.ALLOW, R.APPROVAL_CONSUMED)
+        )
+        self.assertEqual(truth.checks, [TASK])
+
+    async def test_the_broker_asks_the_store_to_check_the_task_when_it_consumes(self):
+        class Spy(InMemoryApprovalStore):
+            calls: list = []
+
+            async def consume(self, approval_id, binding, **arguments):
+                self.calls.append(arguments)
+                return await super().consume(approval_id, binding, **arguments)
+
+        store = Spy()
+        h = Harness(approvals=store)
+        approved = await self.approved("a", h)
+        await self.use(approved, "a", h)
+        (arguments,) = store.calls
+        self.assertIs(arguments["require_active_task"], True)
+
+    async def test_a_reason_about_the_approval_itself_wins_over_the_task(self):
+        # revoked, and the task ended: the store names what is wrong with the
+        # approval (the broker's own check, before, names the task)
+        truth = FakeTaskActivity()
+        store = InMemoryApprovalStore(task_activity=truth)
+        h = Harness(approvals=store)
+        approved = await self.approved("a", h)
+        await h.service.revoke_task(TASK)
+        truth.answer = TaskActivity.ENDED
+        used = await self.use(approved, "a", h)
+        self.assertEqual(
+            (used.verdict, used.reason), (Verdict.DENY, R.APPROVAL_REVOKED)
+        )
 
     async def test_a_task_that_is_not_known_or_answers_nonsense_denies(self):
         approved = await self.approved()

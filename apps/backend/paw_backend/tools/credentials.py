@@ -21,8 +21,9 @@ _MAX_DEPTH = 32
 # Redaction reads a result on the event loop, so its work is bounded: a text
 # longer than ``MAX_TEXT_CHARS`` is cut (and counted as one redaction), and one
 # result may hold at most ``MAX_RESULT_NODES`` values and ``MAX_RESULT_CHARS``
-# characters in all; the rest is dropped and replaced by one marker. The
-# patterns are bounded as well, so their cost is linear in the length.
+# characters in all (dict keys count as well: the first key that does not fit
+# ends the read, and is not inspected); the rest is dropped and replaced by one
+# marker. The patterns are bounded as well, so their cost is linear in the length.
 MAX_TEXT_CHARS = 1_000_000
 MAX_RESULT_NODES = 100_000
 MAX_RESULT_CHARS = 4_000_000
@@ -249,7 +250,16 @@ def _redact_mapping(
             total += 1
             continue
         budget.chars -= len(key)
-        shown_key, key_count = redact_text(key) if budget.chars >= 0 else (TRUNCATED, 1)
+        if budget.chars < 0:
+            # The character budget is used up by this key. Nothing more is read:
+            # the key is not folded, scanned or redacted (that is the work the
+            # budget bounds), and neither its value nor the entries after it are
+            # looked at. One marker stands for all of it, like at the node limit.
+            budget.nodes = 0
+            put(TRUNCATED, TRUNCATED)
+            total += 1
+            break
+        shown_key, key_count = redact_text(key)
         total += key_count
         if (
             _sensitive_key(key)

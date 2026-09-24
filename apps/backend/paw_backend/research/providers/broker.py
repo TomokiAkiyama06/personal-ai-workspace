@@ -103,27 +103,48 @@ async def _call_provider(
             return _Outcome(response=await call())
     except Exception as error:
         code = classify_failure(error)
-        _log_failure(entry, code, type(error).__name__)
+        _log_failure(entry, code, _type_name(error))
         return _Outcome(code=code)
+
+
+def _type_name(error: BaseException) -> str:
+    """The name of ``type(error)``, read without running the adapter's code.
+
+    ``type(error).__name__`` would run a property that the exception's metaclass
+    may define; the descriptor of ``type`` itself returns the real name.
+    """
+    return type.__dict__["__name__"].__get__(type(error))
 
 
 def classify_failure(error: Exception) -> ResearchErrorCode:
     """Map an exception raised by a provider to a member of ``ResearchErrorCode``.
 
-    * a ``ProviderFailure`` whose ``code`` attribute is (still) a
-      ``ResearchErrorCode`` gives that code;
+    * a ``ProviderFailure`` gives the ``ResearchErrorCode`` that its constructor
+      stored (still) in ``ProviderFailure.code``;
     * a ``TimeoutError`` (``asyncio.TimeoutError`` is the same class) gives
       ``TIMEOUT``;
     * everything else gives ``INTERNAL_ERROR``, including a ``ProviderFailure``
-      whose ``code`` attribute was overwritten with something that is not a
+      whose slot is unset (a subclass constructor that did not call
+      ``super().__init__``) or was overwritten with something that is not a
       ``ResearchErrorCode``.
 
-    The text of the exception is never read: the function must not call
-    ``str()`` or ``repr()`` on it (they may raise, or contain secrets).
+    The exception is adapter code: it must not run any of it. The class is read
+    with ``type()`` and tested with ``issubclass`` (``isinstance`` would ask the
+    object for its ``__class__``), and the code is read ONCE from the slot of
+    ``ProviderFailure`` itself, never through the instance, so a subclass's
+    property, ``__getattribute__`` or ``__class__`` can neither raise nor lie.
+    This function never raises. It does not call ``str()`` or ``repr()`` on the
+    exception either (they may raise, or contain secrets).
     """
-    if isinstance(error, ProviderFailure) and isinstance(error.code, ResearchErrorCode):
-        return error.code
-    if isinstance(error, TimeoutError):
+    cls = type(error)
+    if issubclass(cls, ProviderFailure):
+        try:
+            code = ProviderFailure.code.__get__(error)
+        except AttributeError:  # the slot was never set
+            code = None
+        if type(code) is ResearchErrorCode:
+            return code
+    if issubclass(cls, TimeoutError):
         return ResearchErrorCode.TIMEOUT
     return ResearchErrorCode.INTERNAL_ERROR
 
@@ -213,8 +234,10 @@ class ResearchBroker:
         3. An ``Exception`` raised by a provider is converted with
            ``classify_failure`` into one ``ResearchError(entry.name, entry.kind,
            code)`` and logged (see the module docstring); the other providers are
-           unaffected. This is the one place where catching ``Exception`` is
-           intended. ``asyncio.CancelledError`` and other ``BaseException`` are
+           unaffected. The exception is read without running any of its own code
+           (see ``classify_failure``), so it cannot make ``gather`` raise. This is
+           the one place where catching ``Exception`` is intended.
+           ``asyncio.CancelledError`` and other ``BaseException`` are
            never swallowed: cancelling ``gather`` cancels every provider call and
            propagates.
         4. ``retrieved_at = clock()`` is read exactly once per ``gather`` call,
@@ -227,7 +250,9 @@ class ResearchBroker:
            its constructor is invalid). If it raises
            ``InvalidProviderResponseError`` the provider is reported with
            ``INVALID_RESPONSE`` (logged like any failure), contributes no item,
-           and the others are unaffected.
+           and the others are unaffected. The response must be exactly a ``list``
+           or ``tuple``: a subclass or a look-alike is invalid before any of its
+           hooks (``__len__``, ``__iter__``, ...) can run.
         6. ``merge_items`` over the successful providers' items (in registry
            order) with ``max_results=request.max_results`` gives ``items`` and
            ``truncated``.

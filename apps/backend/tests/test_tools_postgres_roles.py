@@ -224,6 +224,39 @@ class ApplicationRoleTest(RoleTestCase):
         self.assertEqual(await activity.check(created.task_id), TaskActivity.ENDED)
         self.assertEqual(await activity.check(uuid.uuid4()), TaskActivity.UNKNOWN)
 
+    async def test_the_role_can_lock_the_task_row_when_it_uses_an_approval(self):
+        # Using an approval reads the task row locked (FOR SHARE), in the same
+        # transaction that consumes: the lock needs the UPDATE privilege on
+        # `tasks` that the role has for the task lifecycle (PAW-032).
+        tasks = TaskService(self.app_db)
+        live = (
+            await tasks.create_task(project_id=U1, created_by=U1, title="t")
+        ).task_id
+        ended = (
+            await tasks.create_task(project_id=U1, created_by=U1, title="t")
+        ).task_id
+        await tasks.execute(ended, TaskCommand.CANCEL, actor=Actor.system())
+        for task_id, expected in (
+            (live, ConsumeOutcome.CONSUMED),
+            (ended, ConsumeOutcome.TASK_NOT_ACTIVE),
+            (uuid.uuid4(), ConsumeOutcome.TASK_UNKNOWN),
+        ):
+            with self.subTest(expected=expected.value):
+                new = new_approval(task_id=task_id)
+                await self.store.open_request(new, now=NOW, limits=LIMITS)
+                await self.store.decide(
+                    new.approval_id, approver_id=U1, approve=True, now=NOW
+                )
+                self.assertEqual(
+                    await self.store.consume(
+                        new.approval_id,
+                        binding_of(new),
+                        now=NOW,
+                        require_active_task=True,
+                    ),
+                    expected,
+                )
+
     async def test_concurrent_requests_hold_the_cap_for_the_role_too(self):
         limits = OpenLimits(max_pending=3, rejection_cooldown=timedelta(minutes=5))
         task_id = uuid.uuid4()
