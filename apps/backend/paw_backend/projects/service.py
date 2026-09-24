@@ -83,7 +83,12 @@ project, ``restore`` of an Archived one) succeeds, writes nothing (``updated_at`
 and the 30 days do not move) and returns the project as it is. ``begin_deletion``
 needs ``confirm_name`` to be exactly the project's name (a typed
 confirmation); the 30 days start at the clock's ``now`` and end at
-``deletion_scheduled_at``. ``restore`` is refused with
+``deletion_scheduled_at``. ``begin_deletion`` also records the request to stop
+the project's tasks (``project_task_stops``) **in the same transaction**; the
+requirement "running tasks are safe-stopped" is carried out by
+:class:`~paw_backend.projects.task_stop.ProjectTaskStopper` (Decision 0008,
+section 8), which the orchestrator calls. A repeat that changes nothing writes no
+request. ``restore`` is refused with
 :class:`DeletionWindowClosedError` at ``now >= deletion_scheduled_at`` and with
 :class:`NoManagerError` when no accepted Manager is left (the last Manager may
 leave a Pending deletion project). It returns the project as **Archived**.
@@ -112,14 +117,11 @@ The service logs nothing.
 """
 
 import uuid
-from collections.abc import AsyncIterator, Callable, Mapping
-from contextlib import asynccontextmanager
+from collections.abc import Callable, Mapping
+from contextlib import AbstractAsyncContextManager
 from datetime import datetime
 from types import MappingProxyType
 
-import psycopg.errors
-from sqlalchemy import func, select
-from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from paw_backend.authz import Authorizer, Capability, Principal, ProjectState, Resource
@@ -139,7 +141,6 @@ from paw_backend.projects.errors import (
     MemberLimitError,
     MemberNotFoundError,
     NoManagerError,
-    ProjectBusyError,
     ProjectNotFoundError,
     ProjectPermissionDeniedError,
     ProjectStateError,
@@ -163,6 +164,7 @@ from paw_backend.projects.records import (
     ProjectStatus,
     PurgeResult,
 )
+from paw_backend.projects.transaction import transaction
 from paw_backend.projects.validation import (
     validate_batch_size,
     validate_confirmation,
@@ -236,24 +238,9 @@ class ProjectService:
     def _now(self) -> datetime:
         return validate_instant("clock", self._clock())
 
-    @asynccontextmanager
-    async def _transaction(self) -> AsyncIterator[AsyncSession]:
+    def _transaction(self) -> AbstractAsyncContextManager[AsyncSession]:
         """One transaction with the service's lock timeout (module docstring)."""
-        try:
-            async with self._database.session() as session, session.begin():
-                await session.execute(
-                    select(
-                        func.set_config(
-                            "lock_timeout", str(self._lock_timeout_ms), True
-                        )
-                    )
-                )
-                yield session
-        except DBAPIError as error:
-            # Only the type of the driver's error is read, never its text.
-            if isinstance(error.orig, psycopg.errors.LockNotAvailable):
-                raise ProjectBusyError() from None
-            raise
+        return transaction(self._database, self._lock_timeout_ms)
 
     @staticmethod
     async def _load(
@@ -700,8 +687,11 @@ class ProjectService:
         (``ConfirmationMismatchError``, checked after the authorization and
         before the transition, also for a repeat). ``deletion_started_at`` is
         ``now`` and ``deletion_scheduled_at`` is ``domain.deletion_schedule(now)``.
-        A project that is Pending deletion already is returned unchanged: the
-        30 days do not restart.
+        The same transaction records the request to stop the project's tasks
+        (``store.request_task_stop``: written, or re-armed after a restore), so
+        the two are committed together or not at all; ``ProjectTaskStopper``
+        carries it out. A project that is Pending deletion already is returned
+        unchanged: the 30 days do not restart and no request is written.
         """
         confirm_name = validate_confirmation(confirm_name)
         return await self._lifecycle(
@@ -754,7 +744,7 @@ class ProjectService:
                 members = await store.list_active_members(session, project_id)
                 if not any(m.role is ProjectRole.MANAGER for m in members):
                     raise NoManagerError()
-            return await store.set_lifecycle(
+            changed = await store.set_lifecycle(
                 session,
                 project_id,
                 status=plan.new_status,
@@ -762,6 +752,12 @@ class ProjectService:
                 deletion_scheduled_at=scheduled,
                 now=now,
             )
+            if action is LifecycleAction.BEGIN_DELETION:
+                # The same transaction: the request to stop the project's tasks is
+                # durable exactly when the deletion is (Decision 0008, section 8);
+                # ``ProjectTaskStopper`` carries it out.
+                await store.request_task_stop(session, project_id, now=now)
+            return changed
 
     async def purge_expired(
         self,
@@ -781,6 +777,8 @@ class ProjectService:
         nothing. ``has_more`` says that due projects remain.
         The data of other areas (chat, memory, tasks, repositories) is **not**
         deleted here: those areas delete it for the ids in ``PurgeResult.purged``.
+        Nor are the project's tasks stopped here (that is the request that
+        ``begin_deletion`` recorded); an unprocessed request stays open.
         """
         instant = self._now() if now is None else validate_instant("now", now)
         batch_size = validate_batch_size(batch_size)

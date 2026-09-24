@@ -105,6 +105,8 @@ personal-ai-workspace/
 │  │  │  │  ├─ records.py
 │  │  │  │  ├─ service.py
 │  │  │  │  ├─ store.py
+│  │  │  │  ├─ task_stop.py
+│  │  │  │  ├─ transaction.py
 │  │  │  │  └─ validation.py
 │  │  │  ├─ research/
 │  │  │  │  ├─ __init__.py
@@ -228,6 +230,7 @@ personal-ai-workspace/
 │  │     ├─ test_projects_service_members.py
 │  │     ├─ test_projects_service_validation.py
 │  │     ├─ test_projects_store.py
+│  │     ├─ test_projects_task_stop.py
 │  │     ├─ test_projects_validation.py
 │  │     ├─ test_queueing_budget.py
 │  │     ├─ test_queueing_domain.py

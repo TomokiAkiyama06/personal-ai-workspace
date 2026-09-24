@@ -339,7 +339,7 @@ class PostgresProjectTestCase(unittest.IsolatedAsyncioTestCase):
             ).scalar_one()
 
     def snapshot(self) -> dict[str, list[tuple]]:
-        """Every row of both tables, to prove that a refused call changed nothing."""
+        """Every row of the project tables, to prove a refused call changed nothing."""
         with self.engine.connect() as connection:
             return {
                 table: [
@@ -348,7 +348,7 @@ class PostgresProjectTestCase(unittest.IsolatedAsyncioTestCase):
                         text(f"SELECT * FROM {table} ORDER BY 1, 2")
                     )
                 ]
-                for table in ("projects", "project_members")
+                for table in ("projects", "project_members", "project_task_stops")
             }
 
     # -- audit ------------------------------------------------------------------------

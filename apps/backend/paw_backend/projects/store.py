@@ -23,13 +23,18 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import and_, delete, func, insert, or_, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import NoResultFound
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from paw_backend.authz.roles import ProjectRole
 from paw_backend.identity.models import UserRow
 from paw_backend.projects.limits import DELETED_PROJECT_NAME
-from paw_backend.projects.models import ProjectMemberRow, ProjectRow
+from paw_backend.projects.models import (
+    ProjectMemberRow,
+    ProjectRow,
+    ProjectTaskStopRow,
+)
 from paw_backend.projects.records import (
     Member,
     MemberStatus,
@@ -37,10 +42,16 @@ from paw_backend.projects.records import (
     Project,
     ProjectStatus,
 )
+from paw_backend.tasks.domain import TERMINAL_STATES
+from paw_backend.tasks.models import TaskRow
 
 PROJECTS = ProjectRow.__table__
 MEMBERS = ProjectMemberRow.__table__
+TASK_STOPS = ProjectTaskStopRow.__table__
 USERS = UserRow.__table__
+# The task tables belong to PAW-032. The project module only ever READS them:
+# tasks are stopped through ``TaskService`` / ``TaskQueue``, never by an UPDATE.
+TASKS = TaskRow.__table__
 
 
 def project_from_row(row: Any) -> Project:
@@ -88,6 +99,25 @@ async def get_project(
     if for_update:
         statement = statement.with_for_update()
     row = (await session.execute(statement)).first()
+    return None if row is None else project_from_row(row)
+
+
+async def get_project_for_share(
+    session: AsyncSession, project_id: uuid.UUID
+) -> Project | None:
+    """Like :func:`get_project`, with ``SELECT ... FOR SHARE`` (waits for a writer).
+
+    Every lifecycle change locks the row ``FOR UPDATE`` first, so while this
+    transaction holds the share lock the project cannot be archived, deleted or
+    restored (concurrent share locks do not exclude each other).
+    """
+    row = (
+        await session.execute(
+            select(PROJECTS)
+            .where(PROJECTS.c.id == project_id)
+            .with_for_update(read=True)
+        )
+    ).first()
     return None if row is None else project_from_row(row)
 
 
@@ -536,3 +566,88 @@ async def user_is_active(session: AsyncSession, user_id: uuid.UUID) -> bool:
         )
     ).first()
     return row is not None
+
+
+# --- stopping the tasks of a project (Decision 0008, section 8) -----------------------
+
+
+async def request_task_stop(
+    session: AsyncSession, project_id: uuid.UUID, *, now: datetime
+) -> None:
+    """Record that the tasks of the project must be stopped (or re-arm the request).
+
+    ``INSERT ... ON CONFLICT (project_id) DO UPDATE``: the project's single row is
+    created with ``requested_at = now`` and ``processed_at = NULL``; if a row
+    exists (a deletion that was restored and is begun again) it becomes that new,
+    open request. Called in the transaction of ``begin_deletion``.
+    """
+    statement = pg_insert(TASK_STOPS).values(
+        project_id=project_id, requested_at=now, processed_at=None
+    )
+    await session.execute(
+        statement.on_conflict_do_update(
+            index_elements=[TASK_STOPS.c.project_id],
+            set_={
+                "requested_at": statement.excluded.requested_at,
+                "processed_at": None,
+            },
+        )
+    )
+
+
+async def list_open_task_stops(session: AsyncSession, limit: int) -> list[uuid.UUID]:
+    """Project ids whose request is not processed, oldest ``requested_at`` first.
+
+    At most ``limit`` ids, ties broken by id. Plain read: no lock.
+    """
+    statement = (
+        select(TASK_STOPS.c.project_id)
+        .where(TASK_STOPS.c.processed_at.is_(None))
+        .order_by(TASK_STOPS.c.requested_at, TASK_STOPS.c.project_id)
+        .limit(limit)
+    )
+    return list((await session.execute(statement)).scalars())
+
+
+async def mark_task_stop_processed(
+    session: AsyncSession, project_id: uuid.UUID, *, now: datetime
+) -> bool:
+    """Set ``processed_at = now`` of an open request; ``False`` if there is none.
+
+    A request that is processed already is left as it is (its first
+    ``processed_at`` stays), and so is a project that has no row.
+    """
+    result = await session.execute(
+        update(TASK_STOPS)
+        .where(
+            TASK_STOPS.c.project_id == project_id, TASK_STOPS.c.processed_at.is_(None)
+        )
+        .values(processed_at=now)
+    )
+    return result.rowcount > 0
+
+
+async def select_active_task_ids(
+    session: AsyncSession, project_id: uuid.UUID, limit: int
+) -> list[uuid.UUID]:
+    """Ids of the project's tasks that are not in a terminal state, oldest first.
+
+    Active means queued, running, waiting, paused or evaluating (everything but
+    completed, failed and cancelled: ``paw_backend.tasks.TERMINAL_STATES``). At
+    most ``limit`` ids, ordered by ``created_at`` then ``id``. A plain read.
+    """
+    statement = (
+        select(TASKS.c.id)
+        .where(
+            TASKS.c.project_id == project_id,
+            TASKS.c.state.notin_(sorted(TERMINAL_STATES)),
+        )
+        .order_by(TASKS.c.created_at, TASKS.c.id)
+        .limit(limit)
+    )
+    return list((await session.execute(statement)).scalars())
+
+
+async def has_active_task(session: AsyncSession, project_id: uuid.UUID) -> bool:
+    """Whether at least one task of the project is active (same rule as above)."""
+    return bool(await select_active_task_ids(session, project_id, 1))

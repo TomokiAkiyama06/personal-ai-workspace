@@ -19,6 +19,7 @@ Delete 開始時の確認操作、削除時に消すものを定めている。
 承認された内容が変わる場合は、新しい Decision から `Supersedes` する。
 
 実装は [Backend README](../../apps/backend/README.md) の「Project CRUD / Membership / Lifecycle」に書いている。
+Delete 開始時の Task 停止（8）は、PAW-026 の独立レビューの指摘（`begin_deletion` が Project の行しか更新せず、実行中の Task を止めない）への対応で、同じ Decision に加えた。
 
 ## 提案
 
@@ -86,11 +87,33 @@ Decision 0004 には、次の 4 つに対応する Capability がない。PAW-02
 `chat.use`、`memory.use` などは、Decision 0004 のとおり Project の状態と Member 資格を見ない。この Issue は Membership の Table と `roles_of` を用意するだけで、これらの Capability の判定は変えない
 （Project の Chat、Project の Memory を実装する Issue が、`roles_of` と Project の状態を使って絞る）。
 
+### 8. Delete 開始時の Task 停止（要判断）
+
+要件の「Pending deletion」は、開始時点で「実行中Taskをsafe-stop」「新規Agent Task停止」を定める。どの Command で止めるか、どの部品が行うか、Delete 開始の後に作られる Task をどうするかは、要件にも Decision 0004 にも書かれていない。
+PAW-026 のレビューで、`begin_deletion` が Project の行を更新するだけで Task を止めない点が指摘されたため、次の選択をした。
+
+1. **停止の要求を、Delete 開始と同じ Transaction に残す（Outbox）。** `begin_deletion` は、Project の状態を変える Transaction で `project_task_stops`（`project_id`、`requested_at`、`processed_at`）の行を書く。両方が Commit されるか、どちらも Commit されない。
+   すでにある行（復元してから再び Delete を開始した Project）は、新しい要求（`requested_at` を更新し、`processed_at` を消す）にする。何も書かない呼び出し（すでに Pending deletion）と、失敗した Delete 開始は行を書かない。
+   `begin_deletion` の中では止めない: Task Service と Queue は別の Transaction を持つ別の部品で、外部の Worker は Database の Transaction の中から止められないため。
+2. **Processor `ProjectTaskStopper.stop_project_tasks(project_id)` が実行する。** Orchestrator（PAW-034）が、未処理の要求（`pending_project_ids()`）の Project について、完了（`done`）まで繰り返し呼ぶ。冪等で、何度でも再実行できる。
+   - Pending deletion（と Purge 済みの Deleted）の Project の active な Task（queued / running / waiting / paused / evaluating）だけを対象にする。Active / Archived の Project の Task には触れない（復元済み、または Delete していない Project を誤って止めない）。
+   - Task の状態は直接書かない。Queue の取消（PAW-033 の `TaskQueue.cancel`）と、PAW-032 の Command（`TaskService.execute`）を使う。Actor は `policy`（自動の規則）、理由は固定文。
+   - active な Task が 1 つも残っていないときだけ、`processed_at` を書く。
+3. **停止の Command は Cancel（graceful）。** Cancel は、成果物（branch / worktree / 途中成果）を保持し、Worker が現在の Step を安全な区切りで自分で閉じられ、新しい Step は始められず、全ての active な状態で使え、復元後に Restart できる。
+   Stop Now は緊急停止（実行中の Step を即時に中断）で、queued と paused には使えず、この場面の緊急性もない。Pause は、復元されない限り誰も Resume しない Task を残し、復元先の Archived は新規 Agent Task を止める状態なので、意味がない。
+4. **Delete 開始の後に作られた Task。** `project.task.run` は Archived / Pending deletion で Authorizer が拒否する（PAW-025）ため、通常の経路では作られない。残る隙間は、認可の後、Delete 開始の Commit の前後に `TaskService.create_task`（または Retry / Restart）が実行される競合だけである。`TaskService` は Project の状態を見ない（PAW-032 の範囲）。
+   - **PAW-026 の範囲でしたこと:** Processor は Project の状態から動くため、要求が処理済みになった後で作られた Task も、再実行で止める（`test_a_task_created_after_the_deletion_began_is_stopped_on_a_rerun`）。Orchestrator は Pending deletion の Project にも通常の周期で `stop_project_tasks` を呼ぶこと。
+   - **別 Lane の変更の提案（承認が要る）:** Task Lane（PAW-032 / PAW-034）の `create_task`、Retry、Restart が、Insert（状態の変更）と同じ Transaction で Project の行を `SELECT ... FOR SHARE` で Lock し、Active 以外なら拒否する。Delete 開始（`FOR UPDATE`）と直列になり、競合が閉じる。
+     `tasks` の Module が `projects` を import しないよう、Project の状態を返す Gate（Protocol）を注入する形を勧める。Database の Trigger で拒否する案は、別 Lane の Table を変えること、Task Lane の Test が存在しない Project の ID を使うことから、この Decision では採らない。
+5. **Restore との競合。** Processor が Project の状態を読んだ後、Task の Command の前に Restore が Commit されると、復元された Project の Task を 1 件止めることがある（Restart できる）。窓は 1 つの Command の間だけで、閉じるには Task Service が Project の行と Transaction を共有する必要があり、採らない。
+6. **`tasks(project_id, state)` の Index。** `tasks.project_id` に Index がないため、Processor の一覧は Sequential Scan になる。Task 数が増えたら Task Lane で Index を足す（この Issue は他の Table を変えない）。
+
 ## 選定理由
 
 - 数値と選択は、要件が定める Lifecycle と Role を動かすための最小の仮置きで、実運用で見直す前提。
 - 墓石を残すのは、Audit と他の領域のデータが指す ID を、削除後も「削除済みの Project」として解決できるようにするため。名前と説明は個人・業務の内容を含みうるため消す。
 - 存在を明かさない応答は、UUID が推測できない前提でも、Project の存在や状態を非 Member に知らせないための多層防御。
+- Outbox は、「停止を頼んだ」ことを Project の状態と同時に永続にし（Process が落ちても消えない）、停止の完了と未完了を区別できるようにするため。停止そのものを外の部品に置くのは、Task と Queue の状態を書く唯一の経路（`TaskService` / `TaskQueue`）を保つためで、Project の側が Task の状態を書く近道をしない。
 
 ## 代替案
 
@@ -98,3 +121,6 @@ Decision 0004 には、次の 4 つに対応する Capability がない。PAW-02
 - Purge で Project の行も消す: 墓石が要らなくなるが、他の領域の `project_id` と Audit の ID が宙に浮く。
 - 招待に期限を置かない: 古い招待が残り続ける。期限は Schema に書かず、`INVITE_TTL` で変えられる。
 - Capability を今すぐ追加する: Audit できるが PAW-025 の Policy と、その網羅 Test の変更が要る。承認後の別の変更にした。
+- Delete 開始の Transaction の中で Task Service を呼んで止める: Task Service は自分の Transaction を持ち、外部の Worker は止められず、失敗しても再実行できない。Project の Transaction に Task の書き込みを混ぜると、Lock の順序も Task Lane と衝突する。
+- Outbox を持たず、Orchestrator が Pending deletion の Project を走査するだけにする: Processor は Project の状態から動くため成り立つが、停止が完了したかの記録がなく、30 日間ずっと全 Project を調べる。Outbox は完了と未完了を区別し、未処理だけを引ける（部分 Index）。ただし走査の併用は、Delete 開始の後に作られた Task を拾うために勧める（上の 4）。
+- Stop Now、または running だけ Pause する: 上の 3 のとおり採らない。

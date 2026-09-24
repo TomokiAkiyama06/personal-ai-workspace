@@ -12,6 +12,11 @@
   ``(project_id, user_id)``: a user has at most one row per project. Membership
   rows are deleted when the member leaves or is removed, an invitation is
   declined or withdrawn, and when the project is purged.
+* ``project_task_stops``: the outbox of "stop the tasks of this project", one row
+  per project. ``begin_deletion`` writes it in the SAME transaction as the
+  lifecycle change (``processed_at`` is ``NULL``); ``ProjectTaskStopper`` marks
+  it processed once no task of the project is active any more (Decision 0008,
+  section 8).
 
 ``project_members.user_id`` and ``projects.created_by`` are foreign keys to
 ``users`` (revision ``0021``). The ``project_id`` columns of other areas (tasks,
@@ -34,7 +39,7 @@ from paw_backend.identity.models import (
     UserRow,  # noqa: F401  (FK target in the metadata)
 )
 
-TABLE_NAMES = ("projects", "project_members")
+TABLE_NAMES = ("projects", "project_members", "project_task_stops")
 
 _UUID_DEFAULT = text("gen_random_uuid()")
 _ACTIVE = text("'active'")
@@ -152,3 +157,32 @@ class ProjectMemberRow(Base):
     invited_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     invite_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     joined_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ProjectTaskStopRow(Base):
+    """ "Stop the tasks of this project": written with the start of its deletion.
+
+    One row per project, so a second deletion (after a restore) re-arms the same
+    row: ``requested_at`` is the new request and ``processed_at`` is cleared.
+    ``processed_at`` is set only when the processor found no active task left;
+    while it is ``NULL`` the request is open and the partial index lists it.
+    The two instants come from the clocks of two processes (the one that began
+    the deletion and the one that stopped the tasks), so no CHECK compares them.
+    """
+
+    __tablename__ = "project_task_stops"
+    __table_args__ = (
+        # The open requests, oldest first (the orchestrator polls this).
+        Index(
+            "ix_project_task_stops_open",
+            "requested_at",
+            "project_id",
+            postgresql_where=text("processed_at IS NULL"),
+        ),
+    )
+
+    project_id: Mapped[UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True
+    )
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

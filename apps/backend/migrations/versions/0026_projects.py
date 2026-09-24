@@ -1,6 +1,6 @@
-"""Projects and project members (PAW-026).
+"""Projects, project members and the task-stop outbox (PAW-026).
 
-Two tables:
+Three tables:
 
 * ``projects``: a project. Never deleted: a purged project stays as a tombstone
   (``status = 'deleted'``, name ``Deleted Project``, no description).
@@ -14,6 +14,12 @@ Two tables:
   ``user_id`` references ``users.id`` with ``ON DELETE RESTRICT``: a user who is
   still a member (or invited) cannot be deleted, the deletion flow must remove
   the memberships first (and hand a shared project's ownership over).
+* ``project_task_stops``: the outbox of "stop the tasks of this project" (Decision
+  0008, section 8). ``ProjectService.begin_deletion`` writes (or re-arms) the
+  project's row in the same transaction as the lifecycle change;
+  ``ProjectTaskStopper`` cancels the project's active tasks through the task
+  service and sets ``processed_at`` once none is left. One row per project;
+  ``project_id`` cascades from ``projects`` like the memberships do.
 
 **Depends on revision 0021** (``users``): it must be in this revision's
 ancestry. It is (0026 follows 0050, whose chain contains 0021); the
@@ -137,8 +143,22 @@ def upgrade() -> None:
     )
     op.create_index("ix_project_members_user_id", "project_members", ["user_id"])
 
-    # Two of the three foreign keys are added by hand-written statements (the
-    # third, ``project_members.user_id``, is part of the table above). Same
+    op.create_table(
+        "project_task_stops",
+        sa.Column("project_id", sa.Uuid(), nullable=False),
+        sa.Column("requested_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("processed_at", sa.DateTime(timezone=True), nullable=True),
+        sa.PrimaryKeyConstraint("project_id"),
+    )
+    op.create_index(
+        "ix_project_task_stops_open",
+        "project_task_stops",
+        ["requested_at", "project_id"],
+        postgresql_where=sa.text("processed_at IS NULL"),
+    )
+
+    # Three of the four foreign keys are added by hand-written statements (the
+    # fourth, ``project_members.user_id``, is part of the table above). Same
     # constraints as ``models.py`` declares (names from the naming convention),
     # but spelled ``FOREIGN KEY (project_id)`` with a space: the existing offline
     # test ``test_task_persistence.OfflineMigrationTest`` searches the SQL of the
@@ -154,6 +174,11 @@ def upgrade() -> None:
         " fk_project_members_project_id_projects"
         " FOREIGN KEY (project_id) REFERENCES projects (id) ON DELETE CASCADE"
     )
+    op.execute(
+        "ALTER TABLE project_task_stops ADD CONSTRAINT"
+        " fk_project_task_stops_project_id_projects"
+        " FOREIGN KEY (project_id) REFERENCES projects (id) ON DELETE CASCADE"
+    )
 
     # Least privilege for the application role (PAW_APP_DATABASE_ROLE), exactly
     # what ``ProjectService`` executes. A project is inserted and updated (name,
@@ -164,6 +189,10 @@ def upgrade() -> None:
     # change (role), and deleted (leave, remove, decline, purge); the project and
     # the user of a row and the time of the invitation never change.
     # The service also reads ``users`` (granted by revision 0021).
+    # The outbox: ``begin_deletion`` inserts (or, for a second deletion after a
+    # restore, re-arms) a project's row, and the processor sets ``processed_at``.
+    # Nothing else changes: the project of a row and the row itself are never
+    # rewritten or deleted (a row is history: when the tasks were asked to stop).
     grant_app_privileges(
         op,
         "projects",
@@ -185,9 +214,16 @@ def upgrade() -> None:
         delete=True,
         update_columns=("role", "status", "joined_at", "invite_expires_at"),
     )
+    grant_app_privileges(
+        op,
+        "project_task_stops",
+        insert=True,
+        update_columns=("requested_at", "processed_at"),
+    )
 
 
 def downgrade() -> None:
     # Reverse order of creation; dropping a table drops its indexes.
+    op.drop_table("project_task_stops")
     op.drop_table("project_members")
     op.drop_table("projects")

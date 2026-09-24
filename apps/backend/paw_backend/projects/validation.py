@@ -149,7 +149,7 @@ def validate_offset(value: object, field: str = "offset") -> int:
 
 
 def validate_batch_size(value: object, field: str = "batch_size") -> int:
-    """A purge batch size: an ``int`` (not a ``bool``) from 1 to 500."""
+    """A batch size (purge, task stop): an ``int`` (not a ``bool``) from 1 to 500."""
     return _bounded_int(field, value, 1, MAX_PURGE_BATCH_SIZE)
 
 

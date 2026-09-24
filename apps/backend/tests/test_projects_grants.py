@@ -37,6 +37,7 @@ from . import (
     test_projects_service_lifecycle,
     test_projects_service_members,
     test_projects_store,
+    test_projects_task_stop,
 )
 from .projects_support import FakeClock, PostgresProjectTestCase
 from .support import make_settings
@@ -66,6 +67,9 @@ EXPECTED = {
         {"SELECT", "INSERT", "DELETE"},
         {"role", "status", "joined_at", "invite_expires_at"},
     ),
+    # The outbox of "stop the tasks": inserted (or re-armed) by begin_deletion,
+    # marked processed by the stopper; never deleted, never moved to another project.
+    "project_task_stops": ({"SELECT", "INSERT"}, {"requested_at", "processed_at"}),
 }
 ALL_PRIVILEGES = (
     "SELECT",
@@ -173,6 +177,7 @@ for _module in (
     test_projects_service_members,
     test_projects_service_lifecycle,
     test_projects_concurrency,
+    test_projects_task_stop,
 ):
     _prefix = _module.__name__.removeprefix("tests.test_projects_")
     for _name, _case in _database_test_classes(_module):
@@ -215,11 +220,13 @@ class AppRolePrivilegesTest(PostgresProjectTestCase):
             for name in globals()
             if name.endswith("AsAppRole") and name != "AsAppRole"
         ]
-        # Every database test class of the five modules has a twin.
+        # Every database test class of the six modules has a twin.
         self.assertGreaterEqual(len(derived), 30, derived)
         self.assertIn("StoreGetProjectTestAsAppRole", derived)
         self.assertIn("ServiceMembersAcceptInviteTestAsAppRole", derived)
         self.assertIn("ServiceLifecyclePurgeTestAsAppRole", derived)
+        self.assertIn("TaskStopStopProjectTasksTestAsAppRole", derived)
+        self.assertIn("TaskStopBeginDeletionRecordsTheStopTestAsAppRole", derived)
 
     async def test_the_service_really_runs_as_a_non_superuser_role(self):
         for database in (self.app, self.other):
@@ -240,7 +247,8 @@ class AppRolePrivilegesTest(PostgresProjectTestCase):
             row[0]
             for row in self.owner_rows(
                 "SELECT tablename FROM pg_tables WHERE schemaname = current_schema()"
-                " AND (tablename = 'projects' OR tablename = 'project_members')"
+                " AND tablename IN ('projects', 'project_members',"
+                " 'project_task_stops')"
             )
         }
         self.assertEqual(tables, set(EXPECTED))
@@ -299,11 +307,17 @@ class AppRolePrivilegesTest(PostgresProjectTestCase):
             "UPDATE project_members SET user_id = gen_random_uuid()",
             "UPDATE project_members SET project_id = gen_random_uuid()",
             "UPDATE project_members SET invited_at = now()",
+            # A stop request belongs to one project, is history (never deleted)
+            # and is written by the two project operations only.
+            "DELETE FROM project_task_stops",
+            "TRUNCATE project_task_stops",
+            "UPDATE project_task_stops SET project_id = gen_random_uuid()",
             # The schema belongs to the migration role.
             "ALTER TABLE projects ADD COLUMN extra text",
             "ALTER TABLE projects DROP CONSTRAINT ck_projects_deletion_retention",
             "DROP INDEX ix_projects_pending_deletion",
             "DROP TABLE project_members",
+            "DROP TABLE project_task_stops",
             # ``users`` is read, never written, by the project module.
             "UPDATE users SET status = 'deleted'",
             "UPDATE users SET system_role = 'admin'",
@@ -350,6 +364,41 @@ class AppRolePrivilegesTest(PostgresProjectTestCase):
             await session.execute(
                 text("DELETE FROM project_members WHERE user_id = :u"), {"u": manager}
             )
+        # The task-stop outbox: begin_deletion inserts the request (or re-arms it
+        # with the ON CONFLICT upsert), the stopper marks it processed.
+        async with self.app.session() as session, session.begin():
+            for _ in range(2):
+                await session.execute(
+                    text(
+                        "INSERT INTO project_task_stops (project_id, requested_at,"
+                        " processed_at) VALUES (:p, now(), NULL) ON CONFLICT"
+                        " (project_id) DO UPDATE SET requested_at ="
+                        " excluded.requested_at, processed_at = NULL"
+                    ),
+                    {"p": project_id},
+                )
+            await session.execute(
+                text(
+                    "UPDATE project_task_stops SET processed_at = now()"
+                    " WHERE project_id = :p AND processed_at IS NULL"
+                ),
+                {"p": project_id},
+            )
+            listed = (
+                await session.execute(
+                    text(
+                        "SELECT project_id FROM project_task_stops"
+                        " WHERE processed_at IS NULL"
+                    )
+                )
+            ).all()
+        self.assertEqual(listed, [])
+        self.assertIsNotNone(
+            self.owner_scalar(
+                "SELECT processed_at FROM project_task_stops WHERE project_id = :p",
+                p=project_id,
+            )
+        )
         self.assertGreaterEqual(selected, 2)
         self.assertEqual(self.project_row(project_id)["name"], "Renamed")
         self.assertEqual(set(self.member_rows(project_id)), {invitee})

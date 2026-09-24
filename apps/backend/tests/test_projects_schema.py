@@ -34,7 +34,7 @@ from .test_migrations import offline_config
 
 REVISION = "0026"
 SCHEMA = "paw_projects_drift_check"
-PROJECTS, MEMBERS = TABLE_NAMES
+PROJECTS, MEMBERS, STOPS = TABLE_NAMES
 T0 = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
 
 
@@ -63,7 +63,9 @@ class ModelsMetadataTest(unittest.TestCase):
         return [Base.metadata.tables[name] for name in TABLE_NAMES]
 
     def test_the_schema_has_the_expected_tables(self):
-        self.assertEqual(TABLE_NAMES, ("projects", "project_members"))
+        self.assertEqual(
+            TABLE_NAMES, ("projects", "project_members", "project_task_stops")
+        )
         for name in TABLE_NAMES:
             self.assertIn(name, Base.metadata.tables)
 
@@ -102,6 +104,7 @@ class ModelsMetadataTest(unittest.TestCase):
                 (PROJECTS, "created_by"): ("users", "SET NULL"),
                 (MEMBERS, "project_id"): (PROJECTS, "CASCADE"),
                 (MEMBERS, "user_id"): ("users", "RESTRICT"),
+                (STOPS, "project_id"): (PROJECTS, "CASCADE"),
             },
         )
 
@@ -126,10 +129,27 @@ class ModelsMetadataTest(unittest.TestCase):
             ["project_id", "user_id"],
         )
 
+    def test_the_outbox_has_one_row_per_project_and_an_index_of_the_open_ones(self):
+        stops = Base.metadata.tables[STOPS]
+        self.assertEqual([c.name for c in stops.primary_key.columns], ["project_id"])
+        self.assertEqual(
+            {c.name: c.nullable for c in stops.columns},
+            {"project_id": False, "requested_at": False, "processed_at": True},
+        )
+        (index,) = stops.indexes
+        self.assertEqual(index.name, "ix_project_task_stops_open")
+        self.assertEqual(
+            [c.name for c in index.columns], ["requested_at", "project_id"]
+        )
+        self.assertEqual(
+            str(index.dialect_options["postgresql"]["where"]), "processed_at IS NULL"
+        )
+
     def test_timestamps_have_no_default_so_the_clock_of_the_service_decides(self):
         for table, names in {
             PROJECTS: ("created_at", "updated_at"),
             MEMBERS: ("invited_at",),
+            STOPS: ("requested_at",),
         }.items():
             for name in names:
                 column = Base.metadata.tables[table].columns[name]
@@ -189,6 +209,10 @@ class OfflineMigrationTest(unittest.TestCase):
             sql.index(f"CREATE TABLE {PROJECTS} "),
             sql.index(f"CREATE TABLE {MEMBERS} "),
         )
+        self.assertLess(
+            sql.index(f"CREATE TABLE {PROJECTS} "),
+            sql.index(f"CREATE TABLE {STOPS} "),
+        )
         self.assertIn("interval '720 hours'", sql)
         self.assertIn("REFERENCES users (id) ON DELETE RESTRICT", sql)
         self.assertIn("REFERENCES projects (id) ON DELETE CASCADE", sql)
@@ -209,6 +233,9 @@ class OfflineMigrationTest(unittest.TestCase):
         self.assertLess(
             sql.index(f"DROP TABLE {MEMBERS};"), sql.index(f"DROP TABLE {PROJECTS};")
         )
+        self.assertLess(
+            sql.index(f"DROP TABLE {STOPS};"), sql.index(f"DROP TABLE {PROJECTS};")
+        )
 
     def test_the_migration_grants_the_application_role_least_privileges(self):
         sql = self.sql("upgrade", f"{previous_revision()}:{REVISION}")
@@ -216,6 +243,7 @@ class OfflineMigrationTest(unittest.TestCase):
         # exact privilege sets are proven by ``test_projects_grants``.
         self.assertIn("REVOKE ALL ON projects FROM PUBLIC", sql)
         self.assertIn("REVOKE ALL ON project_members FROM PUBLIC", sql)
+        self.assertIn("REVOKE ALL ON project_task_stops FROM PUBLIC", sql)
 
 
 def only_project_objects(obj, name, type_, reflected, compare_to) -> bool:
@@ -302,7 +330,7 @@ class ProjectMigrationDatabaseTest(unittest.TestCase):
         self.assertEqual(self.version(), [previous])
         leftovers = self.scalars(
             "SELECT indexname FROM pg_indexes WHERE schemaname = 'public'"
-            " AND (tablename = 'projects' OR tablename = 'project_members')"
+            " AND tablename IN ('projects', 'project_members', 'project_task_stops')"
         )
         self.assertEqual(leftovers, [])
         # The migration touches nothing of the layers below it.
@@ -420,12 +448,18 @@ class ProjectMigrationDatabaseTest(unittest.TestCase):
             "fk_project_members_project_id_projects",
             "fk_project_members_user_id_users",
             "pk_project_members",
+            "fk_project_task_stops_project_id_projects",
+            "pk_project_task_stops",
         ):
             self.assertIn(expected, names)
         index_definitions = {row[1]: row[2] for row in migrated["indexes"]}
         self.assertIn(
             "WHERE (status = 'pending_deletion'::text)",
             index_definitions["ix_projects_pending_deletion"],
+        )
+        self.assertIn(
+            "(requested_at, project_id) WHERE (processed_at IS NULL)",
+            index_definitions["ix_project_task_stops_open"],
         )
         self.assertEqual(
             len(migrated["columns"]),
@@ -819,6 +853,37 @@ class ConstraintsTest(MemoryDatabaseTestCase):
         )
         remaining = (
             self.session.execute(text("SELECT project_id FROM project_members"))
+            .scalars()
+            .all()
+        )
+        self.assertEqual(remaining, [other])
+
+    # -- the task-stop outbox ---------------------------------------------------------
+
+    def violates_stop(self, project, **overrides) -> str | None:
+        values = {"project_id": project, "requested_at": T0, "processed_at": None}
+        values.update(overrides)
+        return self.violation(lambda: self.insert(STOPS, **values))
+
+    def test_a_project_has_one_stop_request_and_it_must_exist(self):
+        project, other = self.project(), self.project()
+        ghost = "00000000-0000-0000-0000-00000000dead"
+        self.assertIsNone(self.violates_stop(project))
+        self.assertEqual(self.violates_stop(project), "pk_project_task_stops")
+        self.assertIsNone(self.violates_stop(other, processed_at=T0))
+        self.assertEqual(
+            self.violates_stop(ghost), "fk_project_task_stops_project_id_projects"
+        )
+
+    def test_deleting_a_project_row_removes_its_stop_request_only(self):
+        project, other = self.project(), self.project()
+        self.insert(STOPS, project_id=project, requested_at=T0, processed_at=None)
+        self.insert(STOPS, project_id=other, requested_at=T0, processed_at=None)
+        self.session.execute(
+            text("DELETE FROM projects WHERE id = :id"), {"id": project}
+        )
+        remaining = (
+            self.session.execute(text("SELECT project_id FROM project_task_stops"))
             .scalars()
             .all()
         )

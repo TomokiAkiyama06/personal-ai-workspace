@@ -38,6 +38,9 @@ MAX_LIST_LIMIT = 200
 MAX_LIST_OFFSET = 100_000
 DEFAULT_PURGE_BATCH_SIZE = 50
 MAX_PURGE_BATCH_SIZE = 500
+# Tasks one ``ProjectTaskStopper.stop_project_tasks`` call stops at most (and open
+# requests one ``pending_project_ids`` call lists at most); same upper bound.
+DEFAULT_TASK_STOP_BATCH_SIZE = 100
 DEFAULT_LOCK_TIMEOUT_MS = 3000
 MIN_LOCK_TIMEOUT_MS = 1
 MAX_LOCK_TIMEOUT_MS = 60_000

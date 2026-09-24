@@ -3,6 +3,9 @@
 See ``apps/backend/README.md`` ("Project CRUD / Membership / Lifecycle") and
 Decision 0008 (Proposed). The service performs authorization through
 ``paw_backend.authz.Authorizer``; there is no HTTP endpoint yet.
+``ProjectTaskStopper`` carries out the "stop the project's tasks" request that
+``ProjectService.begin_deletion`` records (Decision 0008, section 8); the
+orchestrator (PAW-034) calls it.
 """
 
 from paw_backend.projects.errors import (
@@ -38,6 +41,7 @@ from paw_backend.projects.records import (
     TransitionPlan,
 )
 from paw_backend.projects.service import ProjectService
+from paw_backend.projects.task_stop import ProjectTaskStopper, TaskStopResult
 
 __all__ = [
     "AlreadyInvitedError",
@@ -67,6 +71,8 @@ __all__ = [
     "ProjectService",
     "ProjectStateError",
     "ProjectStatus",
+    "ProjectTaskStopper",
     "PurgeResult",
+    "TaskStopResult",
     "TransitionPlan",
 ]
