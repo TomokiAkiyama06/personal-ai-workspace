@@ -1,10 +1,16 @@
 """The next action after budget and loop verdicts (PAW-033)."""
 
 from paw_backend.tasks.queueing.domain import (
+    BudgetKind,
+    BudgetStatus,
     BudgetVerdict,
     Decision,
+    DecisionReason,
     LoopVerdict,
+    NextAction,
 )
+from paw_backend.tasks.queueing.errors import InvalidQueueingArgumentError
+from paw_backend.tasks.queueing.validation import check_member
 
 
 def decide_next_action(
@@ -36,4 +42,32 @@ def decide_next_action(
     ``loop``, in every case. The preset plays no role: an Unlimited task whose
     budget verdict is OK still escalates on a loop.
     """
-    raise NotImplementedError("PAW-033 stub")
+    if not isinstance(budget, BudgetVerdict):
+        raise InvalidQueueingArgumentError("budget")
+    check_member("loop", loop, LoopVerdict)
+    if not isinstance(can_escalate, bool):
+        raise InvalidQueueingArgumentError("can_escalate")
+
+    if budget.status is BudgetStatus.EXCEEDED:
+        action = (
+            NextAction.FAIL
+            if BudgetKind.RETRIES in budget.exceeded
+            else NextAction.WAIT_FOR_USER
+        )
+        reason = DecisionReason.BUDGET_EXCEEDED
+    elif loop is LoopVerdict.ESCALATE and can_escalate:
+        action, reason = NextAction.ESCALATE_AGENT, DecisionReason.LOOP_ESCALATE
+    elif loop is LoopVerdict.ESCALATE:
+        action = NextAction.WAIT_FOR_USER
+        reason = DecisionReason.LOOP_ESCALATION_UNAVAILABLE
+    elif loop is LoopVerdict.TRY_ALTERNATIVE:
+        action = NextAction.TRY_ALTERNATIVE
+        reason = DecisionReason.LOOP_TRY_ALTERNATIVE
+    else:
+        action, reason = NextAction.CONTINUE, DecisionReason.NONE
+    return Decision(
+        action=action,
+        reason=reason,
+        exceeded=budget.exceeded,
+        loop_verdict=loop,
+    )

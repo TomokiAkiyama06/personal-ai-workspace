@@ -34,22 +34,47 @@ as unlimited. Only ``set_preset`` raises ``TaskNotFoundError`` for an unknown
 task.
 """
 
+import math
 import uuid
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 
+from sqlalchemy import BigInteger, cast, extract, func, literal, select, update
+from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncConnection
+
 from paw_backend.db import Database
+from paw_backend.tasks.errors import TaskNotFoundError
 from paw_backend.tasks.queueing.domain import (
+    PRESET_LIMITS,
     BudgetKind,
     BudgetPreset,
+    BudgetStatus,
     BudgetUsage,
     BudgetVerdict,
 )
-from paw_backend.tasks.queueing.errors import InvalidQueueingArgumentError
+from paw_backend.tasks.queueing.errors import (
+    BudgetNotConfiguredError,
+    InvalidQueueingArgumentError,
+)
+from paw_backend.tasks.queueing.models import BudgetUsageRow
+from paw_backend.tasks.queueing.sql import FOREIGN_KEY_VIOLATION, sqlstate
+from paw_backend.tasks.queueing.validation import (
+    MAX_CONSUMED,
+    check_amount,
+    check_member,
+    check_uuid,
+)
 
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+def _elapsed_seconds(now: datetime, since: datetime) -> int:
+    """Whole seconds from ``since`` to ``now``, rounded down, never negative."""
+    return max(math.floor((now - since).total_seconds()), 0)
 
 
 class BudgetTracker:
@@ -82,7 +107,38 @@ class BudgetTracker:
         returns. ``TaskNotFoundError`` for an unknown task (foreign key violation
         SQLSTATE 23503; other ``IntegrityError`` propagate).
         """
-        raise NotImplementedError("PAW-033 stub")
+        check_uuid("task_id", task_id)
+        check_member("preset", preset, BudgetPreset)
+        now = self._now()
+        limits = PRESET_LIMITS[preset]
+        upsert = insert(BudgetUsageRow).values(
+            [
+                {
+                    "task_id": task_id,
+                    "kind": kind,
+                    "preset": preset,
+                    "consumed": 0,
+                    "limit_value": limits[kind],
+                }
+                for kind in BudgetKind
+            ]
+        )
+        upsert = upsert.on_conflict_do_update(
+            index_elements=[BudgetUsageRow.task_id, BudgetUsageRow.kind],
+            # Consumption and a run in progress are kept.
+            set_={
+                "preset": upsert.excluded.preset,
+                "limit_value": upsert.excluded.limit_value,
+            },
+        )
+        try:
+            async with self._database.engine.begin() as connection:
+                await connection.execute(upsert)
+                return await self._read_usage(connection, task_id, now)
+        except IntegrityError as error:
+            if sqlstate(error) == FOREIGN_KEY_VIOLATION:
+                raise TaskNotFoundError() from None
+            raise
 
     async def record(
         self, task_id: uuid.UUID, kind: BudgetKind, amount: int
@@ -97,7 +153,22 @@ class BudgetTracker:
         happened); the returned ``BudgetUsage`` is the state after the increment.
         Raises ``BudgetNotConfiguredError`` if the task has no budget.
         """
-        raise NotImplementedError("PAW-033 stub")
+        check_uuid("task_id", task_id)
+        check_member("kind", kind, BudgetKind)
+        if kind is BudgetKind.RUNTIME_SECONDS:
+            raise InvalidQueueingArgumentError("kind")
+        check_amount("amount", amount)
+        add = (
+            update(BudgetUsageRow)
+            .where(BudgetUsageRow.task_id == task_id, BudgetUsageRow.kind == kind)
+            .values(consumed=func.least(BudgetUsageRow.consumed + amount, MAX_CONSUMED))
+            .returning(BudgetUsageRow.consumed, BudgetUsageRow.limit_value)
+        )
+        async with self._database.engine.begin() as connection:
+            row = (await connection.execute(add)).one_or_none()
+        if row is None:
+            raise BudgetNotConfiguredError()
+        return BudgetUsage(kind, row.consumed, row.limit_value)
 
     async def start_runtime(self, task_id: uuid.UUID) -> None:
         """Mark the task as running now (``running_since = clock()``).
@@ -106,7 +177,22 @@ class BudgetTracker:
         original ``running_since`` is kept). Raises ``BudgetNotConfiguredError``
         if there is no budget.
         """
-        raise NotImplementedError("PAW-033 stub")
+        check_uuid("task_id", task_id)
+        now = self._now()
+        start = (
+            update(BudgetUsageRow)
+            .where(
+                BudgetUsageRow.task_id == task_id,
+                BudgetUsageRow.kind == BudgetKind.RUNTIME_SECONDS,
+                BudgetUsageRow.running_since.is_(None),
+            )
+            .values(running_since=now)
+        )
+        async with self._database.engine.begin() as connection:
+            if (await connection.execute(start)).rowcount == 0:
+                # A run is already in progress (nothing to do), or there is no
+                # budget: reading the usage raises BudgetNotConfiguredError then.
+                await self._read_usage(connection, task_id, now)
 
     async def stop_runtime(self, task_id: uuid.UUID) -> BudgetUsage:
         """End the run in progress: add the elapsed seconds and clear it.
@@ -118,7 +204,40 @@ class BudgetTracker:
         The read of ``running_since`` and the write must be atomic (a second
         concurrent stop must not add the time twice).
         """
-        raise NotImplementedError("PAW-033 stub")
+        check_uuid("task_id", task_id)
+        now = self._now()
+        elapsed = func.greatest(
+            cast(
+                func.floor(
+                    extract("epoch", literal(now) - BudgetUsageRow.running_since)
+                ),
+                BigInteger,
+            ),
+            0,
+        )
+        stop = (
+            update(BudgetUsageRow)
+            .where(
+                BudgetUsageRow.task_id == task_id,
+                BudgetUsageRow.kind == BudgetKind.RUNTIME_SECONDS,
+                BudgetUsageRow.running_since.is_not(None),
+            )
+            .values(
+                consumed=func.least(BudgetUsageRow.consumed + elapsed, MAX_CONSUMED),
+                running_since=None,
+            )
+            .returning(BudgetUsageRow.consumed, BudgetUsageRow.limit_value)
+        )
+        async with self._database.engine.begin() as connection:
+            row = (await connection.execute(stop)).one_or_none()
+            if row is not None:
+                return BudgetUsage(
+                    BudgetKind.RUNTIME_SECONDS, row.consumed, row.limit_value
+                )
+            # No run in progress: report the runtime so far, or raise
+            # BudgetNotConfiguredError when the task has no budget.
+            usage = await self._read_usage(connection, task_id, now)
+        return next(item for item in usage if item.kind is BudgetKind.RUNTIME_SECONDS)
 
     async def usage(self, task_id: uuid.UUID) -> tuple[BudgetUsage, ...]:
         """The six ``BudgetUsage`` in ``BudgetKind`` declaration order.
@@ -126,7 +245,10 @@ class BudgetTracker:
         The runtime entry includes the run in progress (``consumed + elapsed``
         at ``clock()``). Read-only. ``BudgetNotConfiguredError`` if none.
         """
-        raise NotImplementedError("PAW-033 stub")
+        check_uuid("task_id", task_id)
+        now = self._now()
+        async with self._database.engine.connect() as connection:
+            return await self._read_usage(connection, task_id, now)
 
     async def check(
         self,
@@ -145,4 +267,53 @@ class BudgetTracker:
         amounts; otherwise ``InvalidQueueingArgumentError("planned")`` for the
         mapping / keys and ``InvalidQueueingArgumentError("amount")`` for a value.
         """
-        raise NotImplementedError("PAW-033 stub")
+        check_uuid("task_id", task_id)
+        extra: Mapping[BudgetKind, int] = {}
+        if planned is not None:
+            if not isinstance(planned, Mapping):
+                raise InvalidQueueingArgumentError("planned")
+            for kind, amount in planned.items():
+                check_member("planned", kind, BudgetKind)
+                check_amount("amount", amount)
+            extra = planned
+        usage = await self.usage(task_id)
+        exceeded = tuple(
+            item.kind
+            for item in usage
+            if item.limit is not None
+            and item.consumed + extra.get(item.kind, 0) > item.limit
+        )
+        status = BudgetStatus.EXCEEDED if exceeded else BudgetStatus.OK
+        return BudgetVerdict(status, exceeded, usage)
+
+    def _now(self) -> datetime:
+        """The injected clock's reading; it must be a timezone-aware ``datetime``."""
+        now = self._clock()
+        if not isinstance(now, datetime) or now.utcoffset() is None:
+            raise InvalidQueueingArgumentError("clock")
+        return now
+
+    @staticmethod
+    async def _read_usage(
+        connection: AsyncConnection, task_id: uuid.UUID, now: datetime
+    ) -> tuple[BudgetUsage, ...]:
+        """The task's six usages in ``BudgetKind`` order, a run in progress included."""
+        rows = await connection.execute(
+            select(
+                BudgetUsageRow.kind,
+                BudgetUsageRow.consumed,
+                BudgetUsageRow.limit_value,
+                BudgetUsageRow.running_since,
+            ).where(BudgetUsageRow.task_id == task_id)
+        )
+        by_kind = {row.kind: row for row in rows}
+        if not by_kind:
+            raise BudgetNotConfiguredError()
+        usage = []
+        for kind in BudgetKind:
+            row = by_kind[kind]
+            consumed = row.consumed
+            if row.running_since is not None:
+                consumed += _elapsed_seconds(now, row.running_since)
+            usage.append(BudgetUsage(kind, consumed, row.limit_value))
+        return tuple(usage)

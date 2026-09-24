@@ -45,15 +45,55 @@ any database access. Messages never contain the argument values.
 """
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
+from typing import Any
+
+from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy.exc import IntegrityError
 
 from paw_backend.db import Database
-from paw_backend.tasks.queueing.domain import Priority, QueueEntry
+from paw_backend.tasks.errors import TaskNotFoundError
+from paw_backend.tasks.queueing.domain import (
+    ACTIVE_QUEUE_STATUSES,
+    Priority,
+    QueueEntry,
+    QueueStatus,
+)
+from paw_backend.tasks.queueing.errors import LeaseLostError, TaskAlreadyQueuedError
+from paw_backend.tasks.queueing.models import QueueEntryRow
+from paw_backend.tasks.queueing.sql import (
+    FOREIGN_KEY_VIOLATION,
+    UNIQUE_VIOLATION,
+    constraint_name,
+    sqlstate,
+)
 from paw_backend.tasks.queueing.validation import (
     DEFAULT_LEASE_SECONDS,
     MAX_LEASE_SECONDS,
+    check_entry_id,
     check_int,
+    check_member,
+    check_now,
+    check_uuid,
+    check_worker_id,
 )
+
+ONE_ACTIVE_ENTRY_PER_TASK = "uq_queue_entries_one_active_per_task"
+
+
+def _entry(row: QueueEntryRow) -> QueueEntry:
+    return QueueEntry(
+        id=row.id,
+        task_id=row.task_id,
+        priority=row.priority,
+        status=row.status,
+        enqueued_at=row.enqueued_at,
+        claimed_by=row.claimed_by,
+        claimed_at=row.claimed_at,
+        lease_expires_at=row.lease_expires_at,
+        claim_count=row.claim_count,
+        finished_at=row.finished_at,
+    )
 
 
 class TaskQueue:
@@ -69,6 +109,10 @@ class TaskQueue:
     @property
     def lease_seconds(self) -> int:
         return self._lease_seconds
+
+    @property
+    def _lease(self) -> timedelta:
+        return timedelta(seconds=self._lease_seconds)
 
     async def enqueue(
         self,
@@ -94,7 +138,31 @@ class TaskQueue:
         A task whose previous entry is ``completed`` or ``cancelled`` can be
         enqueued again (after Retry / Restart); that creates a NEW entry.
         """
-        raise NotImplementedError("PAW-033 stub")
+        check_uuid("task_id", task_id)
+        check_now("now", now)
+        check_member("priority", priority, Priority)
+        try:
+            async with self._database.session() as session, session.begin():
+                row = QueueEntryRow(
+                    task_id=task_id,
+                    priority=priority,
+                    priority_rank=priority.rank,
+                    status=QueueStatus.QUEUED,
+                    enqueued_at=now,
+                    claim_count=0,
+                )
+                session.add(row)
+                await session.flush()
+                return _entry(row)
+        except IntegrityError as error:
+            if sqlstate(error) == FOREIGN_KEY_VIOLATION:
+                raise TaskNotFoundError() from None
+            if (
+                sqlstate(error) == UNIQUE_VIOLATION
+                and constraint_name(error) == ONE_ACTIVE_ENTRY_PER_TASK
+            ):
+                raise TaskAlreadyQueuedError() from None
+            raise
 
     async def claim_next(self, worker_id: str, now: datetime) -> QueueEntry | None:
         """Lease the next claimable entry to ``worker_id`` and return it, or ``None``.
@@ -108,7 +176,36 @@ class TaskQueue:
         ``worker_id``: see ``validation.check_worker_id``. A worker may hold
         several entries at once (limiting concurrency is not the queue's job).
         """
-        raise NotImplementedError("PAW-033 stub")
+        check_worker_id(worker_id)
+        check_now("now", now)
+        claimable = or_(
+            QueueEntryRow.status == QueueStatus.QUEUED,
+            and_(
+                QueueEntryRow.status == QueueStatus.CLAIMED,
+                QueueEntryRow.lease_expires_at <= now,
+            ),
+        )
+        best_first = (
+            select(QueueEntryRow)
+            .where(claimable)
+            .order_by(
+                QueueEntryRow.priority_rank, QueueEntryRow.enqueued_at, QueueEntryRow.id
+            )
+            .limit(1)
+            # A row that another claimer has locked is skipped, never waited for.
+            .with_for_update(skip_locked=True)
+        )
+        async with self._database.session() as session, session.begin():
+            row = (await session.execute(best_first)).scalar_one_or_none()
+            if row is None:
+                return None
+            row.status = QueueStatus.CLAIMED
+            row.claimed_by = worker_id
+            row.claimed_at = now
+            row.lease_expires_at = now + self._lease
+            row.claim_count += 1
+            await session.flush()
+            return _entry(row)
 
     async def heartbeat(
         self, entry_id: int, worker_id: str, now: datetime
@@ -120,7 +217,17 @@ class TaskQueue:
         Raises ``LeaseLostError`` unless the worker holds a valid lease (see the
         module docstring).
         """
-        raise NotImplementedError("PAW-033 stub")
+        check_entry_id(entry_id)
+        check_worker_id(worker_id)
+        check_now("now", now)
+        return await self._update_held(
+            entry_id,
+            worker_id,
+            now,
+            lease_expires_at=func.greatest(
+                QueueEntryRow.lease_expires_at, now + self._lease
+            ),
+        )
 
     async def release(self, entry_id: int, worker_id: str, now: datetime) -> QueueEntry:
         """Give an entry back so that another (or the same) worker can claim it.
@@ -130,7 +237,18 @@ class TaskQueue:
         the FIFO order) and ``claim_count`` are kept. Raises ``LeaseLostError``
         unless the worker holds a valid lease.
         """
-        raise NotImplementedError("PAW-033 stub")
+        check_entry_id(entry_id)
+        check_worker_id(worker_id)
+        check_now("now", now)
+        return await self._update_held(
+            entry_id,
+            worker_id,
+            now,
+            status=QueueStatus.QUEUED,
+            claimed_by=None,
+            claimed_at=None,
+            lease_expires_at=None,
+        )
 
     async def complete(
         self, entry_id: int, worker_id: str, now: datetime
@@ -141,7 +259,17 @@ class TaskQueue:
         kept as history. A completed entry is never claimable again. Raises
         ``LeaseLostError`` unless the worker holds a valid lease.
         """
-        raise NotImplementedError("PAW-033 stub")
+        check_entry_id(entry_id)
+        check_worker_id(worker_id)
+        check_now("now", now)
+        return await self._update_held(
+            entry_id,
+            worker_id,
+            now,
+            status=QueueStatus.COMPLETED,
+            finished_at=now,
+            lease_expires_at=None,
+        )
 
     async def cancel(self, task_id: uuid.UUID, now: datetime) -> bool:
         """Cancel the task's active entry (``queued`` or ``claimed``), if any.
@@ -153,4 +281,44 @@ class TaskQueue:
         cancelled, ``False`` when the task had no active entry (including an
         unknown task; that is not an error). Idempotent.
         """
-        raise NotImplementedError("PAW-033 stub")
+        check_uuid("task_id", task_id)
+        check_now("now", now)
+        cancel_active = (
+            update(QueueEntryRow)
+            .where(
+                QueueEntryRow.task_id == task_id,
+                QueueEntryRow.status.in_(ACTIVE_QUEUE_STATUSES),
+            )
+            .values(
+                status=QueueStatus.CANCELLED, finished_at=now, lease_expires_at=None
+            )
+        )
+        async with self._database.session() as session, session.begin():
+            result = await session.execute(cancel_active)
+            return result.rowcount > 0
+
+    async def _update_held(
+        self, entry_id: int, worker_id: str, now: datetime, **values: Any
+    ) -> QueueEntry:
+        """Apply ``values`` if the worker holds a valid lease, in one statement.
+
+        Raises ``LeaseLostError`` when the entry does not exist, is not claimed, is
+        claimed by another worker or its lease has expired.
+        """
+        update_held = (
+            update(QueueEntryRow)
+            .where(
+                QueueEntryRow.id == entry_id,
+                QueueEntryRow.status == QueueStatus.CLAIMED,
+                QueueEntryRow.claimed_by == worker_id,
+                QueueEntryRow.lease_expires_at > now,
+            )
+            .values(**values)
+            .returning(QueueEntryRow)
+            .execution_options(populate_existing=True)
+        )
+        async with self._database.session() as session, session.begin():
+            row = (await session.execute(update_held)).scalar_one_or_none()
+            if row is None:
+                raise LeaseLostError()
+            return _entry(row)

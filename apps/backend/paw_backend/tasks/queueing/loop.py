@@ -16,18 +16,36 @@ The detector part is split in three pure functions (``normalize_failure_message`
 in ``loop_failure_signatures`` and calls the pure functions.
 """
 
+import hashlib
 import re
+import unicodedata
 import uuid
 from collections.abc import Sequence
 
+from sqlalchemy import delete, func, select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from paw_backend.db import Database
+from paw_backend.tasks.errors import TaskNotFoundError
 from paw_backend.tasks.queueing.domain import (
     DEFAULT_LOOP_POLICY,
     FailureRecord,
     LoopAssessment,
     LoopPolicy,
+    LoopVerdict,
 )
 from paw_backend.tasks.queueing.errors import InvalidQueueingArgumentError
+from paw_backend.tasks.queueing.models import FailureSignatureRow
+from paw_backend.tasks.queueing.sql import FOREIGN_KEY_VIOLATION, sqlstate
+from paw_backend.tasks.queueing.validation import (
+    MAX_SIGNATURE_MESSAGE_CHARS,
+    check_approach,
+    check_error_class,
+    check_message,
+    check_step_name,
+    check_uuid,
+)
 
 # The patterns of ``normalize_failure_message`` (applied to case-folded text).
 UUID_PATTERN = re.compile(
@@ -59,7 +77,14 @@ def normalize_failure_message(message: str) -> str:
     The result may be the empty string. Example:
     ``"Timeout after 30s  on 0x7FFF"`` becomes ``"timeout after <n>s on <hex>"``.
     """
-    raise NotImplementedError("PAW-033 stub")
+    check_message(message)
+    text = unicodedata.normalize("NFKC", message[:MAX_SIGNATURE_MESSAGE_CHARS])
+    text = text.casefold()
+    text = UUID_PATTERN.sub("<uuid>", text)
+    text = PREFIXED_HEX_PATTERN.sub("<hex>", text)
+    text = HEX_TOKEN_PATTERN.sub("<hex>", text)
+    text = DIGITS_PATTERN.sub("<n>", text)
+    return " ".join(text.split())
 
 
 def failure_signature(error_class: str, step: str, message: str) -> str:
@@ -77,7 +102,11 @@ def failure_signature(error_class: str, step: str, message: str) -> str:
     ``InvalidQueueingArgumentError`` naming ``error_class`` / ``step`` /
     ``message``. Deterministic: the same inputs always give the same signature.
     """
-    raise NotImplementedError("PAW-033 stub")
+    check_error_class(error_class)
+    check_step_name(step)
+    check_message(message)
+    text = "\x1f".join((error_class, step, normalize_failure_message(message)))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def evaluate_loop(
@@ -109,7 +138,28 @@ def evaluate_loop(
     ``A`` in approach 0 gives TRY_ALTERNATIVE; the third ``A`` in approach 1
     gives ESCALATE; two ``A`` and then ``B`` gives CONTINUE (``repeats`` 1).
     """
-    raise NotImplementedError("PAW-033 stub")
+    if not isinstance(history, list | tuple) or not all(
+        isinstance(record, FailureRecord) for record in history
+    ):
+        raise InvalidQueueingArgumentError("history")
+    if not isinstance(policy, LoopPolicy):
+        raise InvalidQueueingArgumentError("policy")
+    if not history:
+        return LoopAssessment(LoopVerdict.CONTINUE, None, None, 0)
+
+    last = history[-1]
+    repeats = sum(
+        1
+        for record in history[-policy.window_size :]
+        if record.signature == last.signature and record.approach == last.approach
+    )
+    if repeats < policy.repeat_threshold:
+        verdict = LoopVerdict.CONTINUE
+    elif last.approach < policy.max_alternatives:
+        verdict = LoopVerdict.TRY_ALTERNATIVE
+    else:
+        verdict = LoopVerdict.ESCALATE
+    return LoopAssessment(verdict, last.signature, last.approach, repeats)
 
 
 class LoopDetector:
@@ -159,21 +209,78 @@ class LoopDetector:
         checks named in ``failure_signature``). Not idempotent: calling twice
         records two failures.
         """
-        raise NotImplementedError("PAW-033 stub")
+        check_uuid("task_id", task_id)
+        check_approach(approach)
+        signature = failure_signature(error_class, step, message)
+        try:
+            async with self._database.session() as session, session.begin():
+                # Serialise the recorders of one task: transactions that cannot see each
+                # other's rows would otherwise all skip the deletion below.
+                await session.execute(
+                    select(
+                        func.pg_advisory_xact_lock(
+                            func.hashtextextended(f"loop-failures:{task_id}", 0)
+                        )
+                    )
+                )
+                session.add(
+                    FailureSignatureRow(
+                        task_id=task_id, approach=approach, signature=signature
+                    )
+                )
+                await session.flush()
+                newest = (
+                    select(FailureSignatureRow.seq)
+                    .where(FailureSignatureRow.task_id == task_id)
+                    .order_by(FailureSignatureRow.seq.desc())
+                    .limit(self._policy.window_size)
+                )
+                await session.execute(
+                    delete(FailureSignatureRow).where(
+                        FailureSignatureRow.task_id == task_id,
+                        FailureSignatureRow.seq.not_in(newest),
+                    )
+                )
+                history = await self._read_history(session, task_id)
+        except IntegrityError as error:
+            if sqlstate(error) == FOREIGN_KEY_VIOLATION:
+                raise TaskNotFoundError() from None
+            raise
+        return evaluate_loop(history, self._policy)
+
+    @staticmethod
+    async def _read_history(
+        session: AsyncSession, task_id: uuid.UUID
+    ) -> tuple[FailureRecord, ...]:
+        rows = await session.execute(
+            select(FailureSignatureRow.signature, FailureSignatureRow.approach)
+            .where(FailureSignatureRow.task_id == task_id)
+            .order_by(FailureSignatureRow.seq)
+        )
+        return tuple(FailureRecord(signature, approach) for signature, approach in rows)
 
     async def history(self, task_id: uuid.UUID) -> tuple[FailureRecord, ...]:
         """The stored window, oldest first (at most ``policy.window_size``).
 
         Empty for a task without failures (also for an unknown task). Read-only.
         """
-        raise NotImplementedError("PAW-033 stub")
+        check_uuid("task_id", task_id)
+        async with self._database.session() as session, session.begin():
+            return await self._read_history(session, task_id)
 
     async def assess(self, task_id: uuid.UUID) -> LoopAssessment:
         """``evaluate_loop`` of ``history(task_id)``. Read-only; calling it any
         number of times without new failures returns equal results."""
-        raise NotImplementedError("PAW-033 stub")
+        return evaluate_loop(await self.history(task_id), self._policy)
 
     async def clear(self, task_id: uuid.UUID) -> int:
         """Delete the task's stored failures (for example on Restart) and return
         how many rows were deleted (0 when there were none)."""
-        raise NotImplementedError("PAW-033 stub")
+        check_uuid("task_id", task_id)
+        async with self._database.session() as session, session.begin():
+            result = await session.execute(
+                delete(FailureSignatureRow).where(
+                    FailureSignatureRow.task_id == task_id
+                )
+            )
+            return result.rowcount
