@@ -334,6 +334,29 @@ class MemoryWorkerRunnerTest(unittest.TestCase):
                     self._load_from_text(json.dumps(document))
                 self.assertIn(message, str(context.exception))
 
+    def test_misspelled_or_unknown_fields_are_rejected_not_ignored(self):
+        gold = {"key": "k", "scope": "user", "state": "confirmed"}
+        case = {"id": "c1", "input": "text", "gold": [gold]}
+        documents = (
+            (
+                {"cases": [dict(case, gold=[dict(gold, supercedes="other")])]},
+                "supercedes",
+            ),
+            (
+                {"cases": [dict(case, gold=[dict(gold, conflict_with=["a"])])]},
+                "conflict_with",
+            ),
+            ({"cases": [dict(case, gold=[dict(gold, contents="x")])]}, "contents"),
+            ({"cases": [dict(case, goal=[])]}, "goal"),
+            ({"cases": [case], "case": []}, "case"),
+        )
+        for document, name in documents:
+            with self.subTest(field=name):
+                with self.assertRaises(ValueError) as context:
+                    self._load_from_text(json.dumps(document))
+                self.assertIn("unknown field(s)", str(context.exception))
+                self.assertIn(name, str(context.exception))
+
     def test_gold_record_may_omit_supersedes_and_carry_content_and_conflicts(self):
         document = {
             "cases": [

@@ -119,6 +119,7 @@ Gold recordが`content`を持つ場合は、`exact_recall`（keyと内容の両�
 （key一致したもののうち内容が一致した割合。NFKC・大文字小文字・空白を正規化して比較）を併せて確認してください。
 `conflicts_with`（衝突するMemoryのkey）は`conflict_accuracy`で採点し、どちらかが衝突を宣言したkey一致ペアだけを対象にします。
 Goldに`content` / `conflicts_with`がなければ、対応する指標は`null`または従来と同じ値になります。
+case fileの未知のfield（`supercedes`や`conflict_with`のような綴り誤り）は、黙って無視せず不備（終了code 1）として拒否します。
 `unneeded`はGoldに一致しない予測と、同じkeyの2回目以降の予測の合計で、予測件数を超えません。
 Workerが例外を出したcaseは、予測なしの失敗caseとして記録して続行します（記録するのは例外の型だけです）。
 factoryが`extract(input_text)`を持たないobjectを返した場合は、全caseが失敗した報告にせず、実行前にエラー（終了code 2）にします。

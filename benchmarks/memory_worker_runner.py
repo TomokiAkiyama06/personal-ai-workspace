@@ -39,9 +39,28 @@ def _require_object(value: object, where: str) -> dict:
     return value
 
 
+def _reject_unknown_fields(item: dict, allowed: frozenset[str], where: str) -> None:
+    """Reject misspelled or unsupported fields instead of silently ignoring them.
+
+    A typo such as ``supercedes`` would otherwise default to "no relation" and skew
+    a score without any warning.
+    """
+    unknown = sorted(str(name) for name in item if name not in allowed)
+    if unknown:
+        raise ValueError(f"{where} has unknown field(s): {', '.join(unknown)}")
+
+
+_TOP_FIELDS = frozenset({"cases"})
+_CASE_FIELDS = frozenset({"id", "input", "gold"})
+_GOLD_FIELDS = frozenset(
+    {"key", "scope", "state", "supersedes", "content", "conflicts_with"}
+)
+
+
 def _parse_gold_record(record: object, case_id: str, index: int) -> MemoryRecord:
     where = f"gold record at index {index} in case '{case_id}'"
     record = _require_object(record, where)
+    _reject_unknown_fields(record, _GOLD_FIELDS, f"Invalid {where}:")
     for name in ("key", "scope", "state"):
         if name not in record:
             raise ValueError(f"Invalid {where}: missing '{name}'")
@@ -70,6 +89,7 @@ def load_cases(path: str) -> list[MemoryWorkerCase]:
         data = json.load(f)
 
     data = _require_object(data, "JSON document")
+    _reject_unknown_fields(data, _TOP_FIELDS, "JSON document")
     if "cases" not in data:
         raise ValueError("JSON must have a 'cases' key")
     cases = data["cases"]
@@ -82,6 +102,7 @@ def load_cases(path: str) -> list[MemoryWorkerCase]:
     seen_ids: set[str] = set()
     for index, case_data in enumerate(cases):
         case_data = _require_object(case_data, f"case at index {index}")
+        _reject_unknown_fields(case_data, _CASE_FIELDS, f"case at index {index}")
         if "id" not in case_data:
             raise ValueError("Each case must have an 'id' field")
         case_id = case_data["id"]
