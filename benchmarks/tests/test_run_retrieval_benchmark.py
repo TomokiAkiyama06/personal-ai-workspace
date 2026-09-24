@@ -95,6 +95,23 @@ class RunRetrievalBenchmarkTest(unittest.TestCase):
                 self.assertEqual(stdout, "")
                 self.assertEqual(stderr, f"retriever is unusable ({error_type})\n")
 
+    def test_retrievers_that_cannot_work_exit_with_two_and_name_only_the_type(self):
+        for factory, error_type in (
+            ("make_object_without_retrieve", "TypeError"),
+            ("make_wrong_signature_retriever", "TypeError"),
+            ("make_failing_retriever", "RuntimeError"),
+        ):
+            with self.subTest(factory=factory):
+                code, stdout, stderr = run_cli(
+                    "--dataset",
+                    VALID_DATASET,
+                    "--retriever",
+                    f"benchmarks.tests.fixture_retrievers:{factory}",
+                )
+                self.assertEqual(code, 2)
+                self.assertEqual(stdout, "")
+                self.assertEqual(stderr, f"retriever is unusable ({error_type})\n")
+
     def test_malformed_retriever_output_exits_with_two(self):
         code, stdout, stderr = run_cli(
             "--dataset",

@@ -73,6 +73,12 @@ stale / superseded / Scope誤選択率、latency（mean / p50 / p95、nearest-ra
 順位指標の定義は`benchmarks.retrieval_metrics`にあり、Retrieverの返すidの重複は2件目以降を捨て、
 Datasetにないidは権限外として数えます。Retrieverが例外を出したqueryは指標0の失敗queryとして続行します
 （記録するのは例外の型だけです）。latencyは`retrieve`の呼び出しだけを計測します。
+失敗したqueryの数は`failed_queries`に出ます。Retrieverが`retrieve(query_text, principals, k)`を
+呼べない場合（メソッドがない、引数が合わない）は、全queryが失敗した報告にせず、実行前にエラーにします。
+stale / superseded / Scope誤選択率の分母は、`k`ではなく、実際に返した上位k件以内の件数です
+（返却数が少ないRetrieverは、少ない件数の中での混入率になります。候補間で返却数が違う場合は`k`を揃えて比較してください）。
+Datasetの`fresh`は真偽値、`acl`・`requester_principals`・`relevant_ids`は文字列のlistで、
+違う型は暗黙に変換せずDataset不備として扱います。
 
 ```bash
 python -m benchmarks.run_retrieval_benchmark \

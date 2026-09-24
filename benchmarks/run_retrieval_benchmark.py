@@ -15,7 +15,11 @@ import json
 import sys
 from pathlib import Path
 
-from benchmarks.retrieval_runner import load_dataset, run_benchmark
+from benchmarks.retrieval_runner import (
+    load_dataset,
+    run_benchmark,
+    validate_retriever,
+)
 
 
 def _positive_int(value: str) -> int:
@@ -33,7 +37,9 @@ def _create_retriever(spec: str):
     if not module_name or not separator or not factory_name:
         raise ValueError("retriever must be given as module:factory")
     factory = getattr(importlib.import_module(module_name), factory_name)
-    return factory()
+    retriever = factory()
+    validate_retriever(retriever)
+    return retriever
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -61,7 +67,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         retriever = _create_retriever(arguments.retriever)
-    except (ImportError, AttributeError, ValueError, TypeError) as error:
+    except Exception as error:  # noqa: BLE001 - a factory may fail in any way; report only the type.
         print(f"retriever is unusable ({type(error).__name__})", file=sys.stderr)
         return 2
 

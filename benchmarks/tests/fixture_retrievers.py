@@ -15,3 +15,19 @@ def make_retriever():
 
 def make_malformed_retriever():
     return FixedRetriever([5])
+
+
+def make_object_without_retrieve():
+    return object()
+
+
+def make_wrong_signature_retriever():
+    class WrongSignature:
+        def retrieve(self, only_one):
+            return []
+
+    return WrongSignature()
+
+
+def make_failing_retriever():
+    raise RuntimeError("model init failed: token=SECRET-TOKEN")

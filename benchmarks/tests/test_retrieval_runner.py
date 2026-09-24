@@ -1,7 +1,9 @@
 """Tests for the retrieval dataset loader and benchmark runner."""
 
 import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from benchmarks.metrics_collector import MetricsCollector
 from benchmarks.retrieval_runner import (
@@ -10,6 +12,7 @@ from benchmarks.retrieval_runner import (
     RetrievalQuery,
     load_dataset,
     run_benchmark,
+    validate_retriever,
     visible_memory_ids,
 )
 
@@ -178,7 +181,7 @@ class RetrievalRunnerTest(unittest.TestCase):
     def test_load_dataset_valid_fixture(self):
         """Test loading a valid dataset fixture."""
         dataset = load_dataset("benchmarks/tests/fixtures/retrieval/valid_dataset.json")
-        self.assertEqual(len(dataset.memories), 3)
+        self.assertEqual(len(dataset.memories), 4)
         self.assertEqual(len(dataset.queries), 2)
 
         # Check memory properties
@@ -187,6 +190,8 @@ class RetrievalRunnerTest(unittest.TestCase):
         self.assertEqual(mem1.status, "active")
         self.assertTrue(mem1.fresh)
         self.assertEqual(mem1.scope, "project:p1")
+        mem4 = next(m for m in dataset.memories if m.id == "mem4")
+        self.assertEqual((mem4.status, mem4.fresh), ("superseded", False))
 
         # Check query properties
         q1 = next(q for q in dataset.queries if q.id == "q1")
@@ -218,7 +223,7 @@ class RetrievalRunnerTest(unittest.TestCase):
         """Test loading dataset where a relevant ID is not visible to requester."""
         with self.assertRaises(ValueError) as context:
             load_dataset("benchmarks/tests/fixtures/retrieval/invisible_relevant.json")
-        self.assertIn("not visible to requester principals", str(context.exception))
+        self.assertIn("not visible to its requester", str(context.exception))
 
     def test_perfect_retriever(self):
         """Test with a perfect retriever."""
@@ -401,6 +406,181 @@ class RetrievalRunnerTest(unittest.TestCase):
 
         self.assertIsNotNone(failed_query)
         self.assertEqual(failed_query["error_type"], "RuntimeError")
+
+    @staticmethod
+    def _load_from_text(text):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "dataset.json"
+            path.write_text(text, encoding="utf-8")
+            return load_dataset(str(path))
+
+    @staticmethod
+    def _document():
+        return {
+            "memories": [
+                {
+                    "id": "m1",
+                    "text": "SECRET-TEXT",
+                    "acl": ["user:a"],
+                    "status": "active",
+                    "fresh": True,
+                    "scope": "project",
+                }
+            ],
+            "queries": [
+                {
+                    "id": "q1",
+                    "text": "QUERY-TEXT",
+                    "requester_principals": ["user:a"],
+                    "scope": "project",
+                    "relevant_ids": ["m1"],
+                }
+            ],
+        }
+
+    def test_the_minimal_document_used_by_the_malformed_cases_is_valid(self):
+        dataset = self._load_from_text(json.dumps(self._document()))
+        self.assertEqual([m.id for m in dataset.memories], ["m1"])
+
+    def test_malformed_datasets_raise_value_error_naming_the_field(self):
+        def memory(**changes):
+            document = self._document()
+            document["memories"][0].update(changes)
+            return document
+
+        def query(**changes):
+            document = self._document()
+            document["queries"][0].update(changes)
+            return document
+
+        def without(section, field):
+            document = self._document()
+            del document[section][0][field]
+            return document
+
+        cases = (
+            (without("memories", "id"), "'id' must be a non-empty string"),
+            (without("memories", "acl"), "'acl' must be a list of non-empty strings"),
+            (memory(acl="user:a"), "'acl' must be a list of non-empty strings"),
+            (memory(acl=["user:a", "user:a"]), "'acl' must not contain duplicates"),
+            (memory(fresh="false"), "'fresh' must be a boolean"),
+            (memory(fresh=1), "'fresh' must be a boolean"),
+            (without("memories", "fresh"), "'fresh' must be a boolean"),
+            (memory(status="stale"), "Invalid status for memory m1"),
+            (memory(text=""), "'text' must be a non-empty string"),
+            (without("queries", "id"), "'id' must be a non-empty string"),
+            (
+                query(requester_principals=[]),
+                "'requester_principals' must not be empty",
+            ),
+            (
+                query(relevant_ids=["m1", "m1"]),
+                "'relevant_ids' must not contain duplicates",
+            ),
+            (query(relevant_ids=[]), "'relevant_ids' must not be empty"),
+            (query(relevant_ids=["nope"]), "references non-existent memory nope"),
+            (query(scope=5), "'scope' must be a non-empty string"),
+            ({"memories": ["x"], "queries": []}, "memory at index 0 must be an object"),
+            ([], "dataset must be an object"),
+            ({"memories": {}, "queries": []}, "at least one memory"),
+        )
+        for document, message in cases:
+            with self.subTest(message=message):
+                with self.assertRaises(ValueError) as context:
+                    self._load_from_text(json.dumps(document))
+                self.assertIn(message, str(context.exception))
+                self.assertNotIn("SECRET-TEXT", str(context.exception))
+                self.assertNotIn("user:a", str(context.exception))
+
+    def test_duplicate_ids_are_rejected(self):
+        document = self._document()
+        document["memories"].append(dict(document["memories"][0]))
+        with self.assertRaises(ValueError) as context:
+            self._load_from_text(json.dumps(document))
+        self.assertIn("Duplicate memory ID: m1", str(context.exception))
+
+        document = self._document()
+        document["queries"].append(dict(document["queries"][0]))
+        with self.assertRaises(ValueError) as context:
+            self._load_from_text(json.dumps(document))
+        self.assertIn("Duplicate query ID: q1", str(context.exception))
+
+    def test_the_valid_fixture_is_consistent_with_its_own_metrics(self):
+        """Returning exactly the relevant ids must be a uniformly perfect result."""
+        dataset = load_dataset("benchmarks/tests/fixtures/retrieval/valid_dataset.json")
+        relevant = {q.text: sorted(q.relevant_ids) for q in dataset.queries}
+
+        class Oracle:
+            def retrieve(self, query_text, requester_principals, k):
+                return relevant[query_text]
+
+        metrics = run_benchmark(Oracle(), dataset, k=5).metrics
+
+        for name in ("recall_at_k", "mrr", "ndcg_at_k"):
+            self.assertEqual(metrics[name], 1.0, name)
+        for name in ("stale_rate", "superseded_rate", "scope_mismatch_rate"):
+            self.assertEqual(metrics[name], 0.0, name)
+        self.assertEqual(metrics["permission_leakage_total"], 0)
+
+    def test_retrievers_without_the_required_interface_are_rejected(self):
+        class NoMethod:
+            pass
+
+        class WrongSignature:
+            def retrieve(self, only_one):
+                return []
+
+        class NotCallable:
+            retrieve = 5
+
+        for retriever in (NoMethod(), WrongSignature(), NotCallable()):
+            with self.subTest(retriever=type(retriever).__name__):
+                with self.assertRaises(TypeError):
+                    validate_retriever(retriever)
+                with self.assertRaises(TypeError):
+                    run_benchmark(retriever, self._dataset(1), k=1)
+
+    def test_metrics_collector_is_stopped_when_scoring_fails(self):
+        calls = []
+
+        class RecordingCollector:
+            def start(self):
+                calls.append("start")
+
+            def stop(self):
+                calls.append("stop")
+
+            def metrics(self):
+                calls.append("metrics")
+                return {}
+
+        with self.assertRaises(TypeError):
+            run_benchmark(
+                FixedRetriever([5]),
+                self._dataset(1),
+                k=1,
+                metrics_collector=RecordingCollector(),
+            )
+
+        self.assertEqual(calls, ["start", "stop"])
+
+    def test_failed_queries_are_counted(self):
+        class Flaky:
+            def __init__(self):
+                self.calls = 0
+
+            def retrieve(self, query_text, requester_principals, k):
+                self.calls += 1
+                if self.calls == 2:
+                    raise RuntimeError("boom")
+                return ["m1"]
+
+        report = run_benchmark(Flaky(), self._dataset(3), k=1)
+
+        self.assertEqual(report.metrics["failed_queries"], 1)
+        self.assertEqual(
+            [q["error_type"] for q in report.queries], [None, "RuntimeError", None]
+        )
 
     @staticmethod
     def _dataset(query_count):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import math
 import time
@@ -81,77 +82,115 @@ def visible_memory_ids(
     )
 
 
-def load_dataset(path: str) -> RetrievalDataset:
-    """Load a retrieval dataset from a JSON file."""
-    with open(path, "r", encoding="utf-8") as f:
-        data = json.load(f)
+_STATUSES = frozenset({"active", "superseded", "deprecated"})
 
-    # Validate memories
-    memories_data = data.get("memories", [])
-    if not memories_data:
-        raise ValueError("Dataset must contain at least one memory")
 
-    memory_map = {}
-    for memory_data in memories_data:
-        memory_id = memory_data["id"]
-        if not memory_id:
-            raise ValueError("Memory ID must be non-empty")
-        if memory_id in memory_map:
-            raise ValueError(f"Duplicate memory ID: {memory_id}")
-        if memory_data["status"] not in {"active", "superseded", "deprecated"}:
+def _object(value: object, where: str) -> dict:
+    if not isinstance(value, dict):
+        raise ValueError(f"{where} must be an object")  # noqa: TRY004 - dataset problems are reported uniformly as ValueError.
+    return value
+
+
+def _string(item: dict, name: str, where: str) -> str:
+    value = item.get(name)
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{where}: '{name}' must be a non-empty string")
+    return value
+
+
+def _string_list(item: dict, name: str, where: str, *, allow_empty: bool) -> list[str]:
+    value = item.get(name)
+    if not isinstance(value, list) or not all(
+        isinstance(entry, str) and entry for entry in value
+    ):
+        raise ValueError(f"{where}: '{name}' must be a list of non-empty strings")
+    if not value and not allow_empty:
+        raise ValueError(f"{where}: '{name}' must not be empty")
+    if len(set(value)) != len(value):
+        raise ValueError(f"{where}: '{name}' must not contain duplicates")
+    return value
+
+
+def _parse_memory(item: object, index: int) -> RetrievalMemory:
+    where = f"memory at index {index}"
+    item = _object(item, where)
+    memory_id = _string(item, "id", where)
+    where = f"memory {memory_id}"
+    status = _string(item, "status", where)
+    if status not in _STATUSES:
+        raise ValueError(f"Invalid status for memory {memory_id}")
+    if not isinstance(item.get("fresh"), bool):
+        raise ValueError(f"{where}: 'fresh' must be a boolean")  # noqa: TRY004 - dataset problems are reported uniformly as ValueError.
+    return RetrievalMemory(
+        id=memory_id,
+        text=_string(item, "text", where),
+        acl=frozenset(_string_list(item, "acl", where, allow_empty=True)),
+        status=status,
+        fresh=item["fresh"],
+        scope=_string(item, "scope", where),
+    )
+
+
+def _parse_query(
+    item: object, index: int, memories: dict[str, RetrievalMemory]
+) -> RetrievalQuery:
+    where = f"query at index {index}"
+    item = _object(item, where)
+    query_id = _string(item, "id", where)
+    where = f"query {query_id}"
+    principals = frozenset(
+        _string_list(item, "requester_principals", where, allow_empty=False)
+    )
+    relevant_ids = frozenset(
+        _string_list(item, "relevant_ids", where, allow_empty=False)
+    )
+    for relevant_id in sorted(relevant_ids):
+        if relevant_id not in memories:
+            raise ValueError(f"{where} references non-existent memory {relevant_id}")
+        if not memories[relevant_id].acl & principals:
             raise ValueError(
-                f"Invalid status for memory {memory_id}: {memory_data['status']}"
+                f"{where} requests memory {relevant_id} that is not visible to its requester"
             )
-        memory = RetrievalMemory(
-            id=memory_data["id"],
-            text=memory_data["text"],
-            acl=frozenset(memory_data["acl"]),
-            status=memory_data["status"],
-            fresh=bool(memory_data["fresh"]),
-            scope=memory_data["scope"],
-        )
-        memory_map[memory_id] = memory
+    return RetrievalQuery(
+        id=query_id,
+        text=_string(item, "text", where),
+        requester_principals=principals,
+        scope=_string(item, "scope", where),
+        relevant_ids=relevant_ids,
+    )
 
-    # Validate queries
-    queries_data = data.get("queries", [])
-    if not queries_data:
+
+def load_dataset(path: str) -> RetrievalDataset:
+    """Load a retrieval dataset from a JSON file.
+
+    Every malformed input raises ``ValueError`` naming only the memory or query id
+    and the field; memory text is never echoed.
+    """
+    with open(path, encoding="utf-8") as f:
+        data = _object(json.load(f), "dataset")
+
+    memories_data = data.get("memories")
+    if not isinstance(memories_data, list) or not memories_data:
+        raise ValueError("Dataset must contain at least one memory")
+    memories: dict[str, RetrievalMemory] = {}
+    for index, item in enumerate(memories_data):
+        memory = _parse_memory(item, index)
+        if memory.id in memories:
+            raise ValueError(f"Duplicate memory ID: {memory.id}")
+        memories[memory.id] = memory
+
+    queries_data = data.get("queries")
+    if not isinstance(queries_data, list) or not queries_data:
         raise ValueError("Dataset must contain at least one query")
-
-    queries = []
-    for query_data in queries_data:
-        query_id = query_data["id"]
-        if not query_id:
-            raise ValueError("Query ID must be non-empty")
-        if query_id in (q.id for q in queries):
-            raise ValueError(f"Duplicate query ID: {query_id}")
-        if not query_data["relevant_ids"]:
-            raise ValueError(f"Query {query_id} must have at least one relevant ID")
-        relevant_ids = frozenset(query_data["relevant_ids"])
-        # Check that all relevant IDs exist
-        for relevant_id in relevant_ids:
-            if relevant_id not in memory_map:
-                raise ValueError(
-                    f"Query {query_id} references non-existent memory {relevant_id}"
-                )
-            # Check visibility
-            memory = memory_map[relevant_id]
-            if not (memory.acl & frozenset(query_data["requester_principals"])):
-                raise ValueError(
-                    f"Query {query_id} requests memory {relevant_id} that is not visible "
-                    f"to requester principals {query_data['requester_principals']}"
-                )
-        query = RetrievalQuery(
-            id=query_data["id"],
-            text=query_data["text"],
-            requester_principals=frozenset(query_data["requester_principals"]),
-            scope=query_data["scope"],
-            relevant_ids=relevant_ids,
-        )
-        queries.append(query)
+    queries: dict[str, RetrievalQuery] = {}
+    for index, item in enumerate(queries_data):
+        query = _parse_query(item, index, memories)
+        if query.id in queries:
+            raise ValueError(f"Duplicate query ID: {query.id}")
+        queries[query.id] = query
 
     return RetrievalDataset(
-        memories=tuple(memory_map.values()),
-        queries=tuple(queries),
+        memories=tuple(memories.values()), queries=tuple(queries.values())
     )
 
 
@@ -164,18 +203,30 @@ class Retriever(Protocol):
         """Retrieve top-k memory IDs for a query."""
 
 
-def run_benchmark(
+def validate_retriever(retriever: object) -> None:
+    """Raise ``TypeError`` unless ``retriever.retrieve`` can take the benchmark's call.
+
+    Without this check a missing or mis-declared method would be swallowed as a
+    failure of every single query and produce an all-zero report.
+    """
+    method = getattr(retriever, "retrieve", None)
+    if not callable(method):
+        raise TypeError("retriever must provide a callable retrieve()")
+    try:
+        inspect.signature(method).bind("query", (), 1)
+    except TypeError:
+        raise TypeError("retrieve() must accept (query_text, principals, k)") from None
+    except ValueError:  # no introspectable signature (some builtins): accept
+        pass
+
+
+def _score_queries(
     retriever: Retriever,
     dataset: RetrievalDataset,
-    *,
     k: int,
-    clock: Callable[[], float] = time.monotonic,
-    metrics_collector: MetricsCollector | None = None,
-) -> RetrievalReport:
-    """Run a benchmark on a retrieval system."""
-    if metrics_collector is not None:
-        metrics_collector.start()
-
+    clock: Callable[[], float],
+) -> tuple[list[dict], list[float]]:
+    """Run every query once and return its result records and latencies (ms)."""
     query_results = []
     total_latencies = []
 
@@ -228,6 +279,31 @@ def run_benchmark(
             }
         )
 
+    return query_results, total_latencies
+
+
+def run_benchmark(
+    retriever: Retriever,
+    dataset: RetrievalDataset,
+    *,
+    k: int,
+    clock: Callable[[], float] = time.monotonic,
+    metrics_collector: MetricsCollector | None = None,
+) -> RetrievalReport:
+    """Run a benchmark on a retrieval system.
+
+    The collector is always stopped, also when scoring raises, so a periodic GPU
+    sampling thread is never leaked.
+    """
+    validate_retriever(retriever)
+    if metrics_collector is not None:
+        metrics_collector.start()
+    try:
+        query_results, total_latencies = _score_queries(retriever, dataset, k, clock)
+    finally:
+        if metrics_collector is not None:
+            metrics_collector.stop()
+
     # Compute overall metrics
     if not query_results:
         raise ValueError("No queries processed")
@@ -258,14 +334,11 @@ def run_benchmark(
         "latency_ms_mean": latency_mean,
         "latency_ms_p50": latency_p50,
         "latency_ms_p95": latency_p95,
+        "failed_queries": sum(1 for qr in query_results if qr["error_type"]),
         "k": k,
     }
 
-    if metrics_collector is not None:
-        metrics_collector.stop()
-        resources = metrics_collector.metrics()
-    else:
-        resources = None
+    resources = metrics_collector.metrics() if metrics_collector is not None else None
 
     return RetrievalReport(
         metrics=metrics,
