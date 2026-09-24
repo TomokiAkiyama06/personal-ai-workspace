@@ -1,10 +1,16 @@
 """PostgreSQL access: metadata base, lazy async engine and readiness check."""
 
 import asyncio
+import contextlib
 import logging
+import os
+import socket
+import time
 from enum import StrEnum
 
-from sqlalchemy import MetaData, text
+import psycopg
+from sqlalchemy import MetaData
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -57,8 +63,14 @@ class Database:
         self._settings = settings
         self._engine: AsyncEngine | None = None
         self._sessions: async_sessionmaker[AsyncSession] | None = None
-        # Timed-out readiness probes that are still being cancelled.
-        self._cancelling: set[asyncio.Task[None]] = set()
+        # Readiness probes that are running or being stopped, and the driver
+        # connection each one is using (see `check`).
+        self._probes: set[asyncio.Task[None]] = set()
+        self._probe_connections: dict[asyncio.Task[None], psycopg.AsyncConnection] = {}
+        # Single flight: concurrent `check()` calls share one probe, and its
+        # result is reused for `database_readiness_cache_seconds`.
+        self._flight: asyncio.Task[DatabaseStatus] | None = None
+        self._recent: tuple[float, DatabaseStatus] | None = None
 
     @property
     def configured(self) -> bool:
@@ -69,14 +81,17 @@ class Database:
         if self._engine is None:
             if self._settings.database_url is None:
                 raise DatabaseNotConfiguredError("PAW_DATABASE_URL is not set")
-            timeout = self._settings.database_timeout_seconds
             self._engine = create_async_engine(
                 self._settings.database_url.get_secret_value(),
                 pool_size=self._settings.database_pool_size,
                 pool_pre_ping=True,
-                connect_args={"connect_timeout": max(1, round(timeout))},
+                connect_args={"connect_timeout": self._connect_timeout},
             )
         return self._engine
+
+    @property
+    def _connect_timeout(self) -> int:
+        return max(1, round(self._settings.database_timeout_seconds))
 
     def session(self) -> AsyncSession:
         """Return a new session; use it as ``async with database.session()``."""
@@ -85,26 +100,78 @@ class Database:
         return self._sessions()
 
     async def _ping(self) -> None:
-        async with self.engine.connect() as connection:
-            await connection.execute(text("SELECT 1"))
+        """One ``SELECT 1`` on a dedicated connection that ``_abort`` can drop.
+
+        The probe deliberately does not use the pool: it must not occupy a pool
+        slot while the server is stalled, and it needs to own its connection
+        from the first byte so that it can be torn down (see ``_abort``).
+        """
+        # The same translation SQLAlchemy applies before it calls psycopg. The
+        # URL may already carry `connect_timeout` (or `autocommit`), so the
+        # probe's own values are merged in and win instead of being passed a
+        # second time.
+        url = make_url(self._settings.database_url.get_secret_value())
+        _, kwargs = url.get_dialect()().create_connect_args(url)
+        kwargs.update(autocommit=True, connect_timeout=self._connect_timeout)
+        connection = await psycopg.AsyncConnection.connect(**kwargs)
+        probe = asyncio.current_task()
+        self._probe_connections[probe] = connection
+        try:
+            await connection.execute("SELECT 1")
+        finally:
+            self._probe_connections.pop(probe, None)
+            await connection.close()
 
     async def check(self) -> DatabaseStatus:
         """Run ``SELECT 1``. Never raises and never reports connection details.
 
-        Returns within ``database_timeout_seconds`` even if the driver is slow
-        to give up: psycopg waits several seconds for the server to confirm a
-        query cancellation, and ``asyncio.timeout`` would wait for that too.
-        A probe that is still running at the deadline is cancelled in the
-        background instead.
+        ``/health/ready`` may be called by anyone who can reach the server, so
+        the number of connections it opens is bounded: concurrent calls share
+        one probe (single flight) and the outcome, failures included, is
+        reused for ``database_readiness_cache_seconds``. At most one probe
+        connection is opened per interval, and a stalled server is probed
+        again only after the previous probe timed out.
+
+        Every call returns within ``database_timeout_seconds``, however slowly
+        the driver gives up (see ``_abort``).
         """
         if not self.configured:
             return DatabaseStatus.NOT_CONFIGURED
+        recent = self._recent
+        if (
+            recent is not None
+            and time.monotonic() - recent[0]
+            < self._settings.database_readiness_cache_seconds
+        ):
+            return recent[1]
+        if self._flight is None:
+            self._flight = asyncio.create_task(self._run_flight())
+        flight = self._flight
+        # Unlike awaiting the task, asyncio.wait() leaves it running when this
+        # caller is cancelled: the other callers still need its result.
+        await asyncio.wait({flight})
+        return DatabaseStatus.UNAVAILABLE if flight.cancelled() else flight.result()
+
+    async def _run_flight(self) -> DatabaseStatus:
+        try:
+            status = await self._probe()
+        finally:
+            self._flight = None
+        self._recent = (time.monotonic(), status)
+        return status
+
+    async def _probe(self) -> DatabaseStatus:
+        """One probe on a dedicated connection; aborted at the deadline."""
         probe = asyncio.create_task(self._ping())
+        self._probes.add(probe)
+        probe.add_done_callback(self._probes.discard)
+        # Retrieve the outcome so that asyncio does not log it as unhandled.
+        probe.add_done_callback(lambda task: task.cancelled() or task.exception())
         try:
             await asyncio.wait({probe}, timeout=self._settings.database_timeout_seconds)
         finally:
             if not probe.done():
-                self._cancel_in_background(probe)
+                self._abort(probe)
         if not probe.done():
             logger.warning("Database readiness check failed: TimeoutError")
             return DatabaseStatus.UNAVAILABLE
@@ -117,14 +184,52 @@ class Database:
             return DatabaseStatus.UNAVAILABLE
         return DatabaseStatus.OK
 
-    def _cancel_in_background(self, probe: asyncio.Task[None]) -> None:
-        self._cancelling.add(probe)
-        probe.add_done_callback(self._cancelling.discard)
-        # Retrieve the outcome so that asyncio does not log it as unhandled.
-        probe.add_done_callback(lambda task: task.cancelled() or task.exception())
+    def _abort(self, probe: asyncio.Task[None]) -> None:
+        """Make a running probe stop now, without waiting on the server.
+
+        Cancelling a task that is inside a query makes psycopg ask the server
+        to cancel it and then wait for the answer, up to about ten seconds. A
+        stalled server never answers, and with a libpq older than 17 the
+        request is sent from a thread that ``asyncio.run`` waits for at exit.
+        Shutting down the connection's socket instead makes the pending query
+        fail at once with "server closed the connection". The task is only
+        cancelled when it has no connection yet (it is still connecting, where
+        cancellation is immediate and there is no query to cancel).
+        """
+        connection = self._probe_connections.get(probe)
+        if connection is not None:
+            # Shut down a duplicate of the descriptor: the shutdown applies to
+            # the shared socket, while the descriptor libpq owns stays open
+            # (and cannot be reused by another socket) until libpq closes it.
+            # Aborting twice is normal (a timed-out check, then dispose()); the
+            # second shutdown fails with ENOTCONN, which must not fall through
+            # to cancel(): the task is already on its way out.
+            with contextlib.suppress(OSError, psycopg.Error):
+                with socket.socket(fileno=os.dup(connection.pgconn.socket)) as sock:
+                    sock.shutdown(socket.SHUT_RDWR)
+            return
         probe.cancel()
 
     async def dispose(self) -> None:
+        """Stop readiness probes and close the pool, within the shutdown budget."""
+        probes = set(self._probes)
+        for probe in probes:
+            self._abort(probe)
+        tasks = probes | ({self._flight} if self._flight is not None else set())
+        if tasks:
+            budget = self._settings.shutdown_timeout_seconds / 2
+            _, pending = await asyncio.wait(tasks, timeout=budget)
+            for task in pending:  # last resort: cancel what did not fail on its own
+                task.cancel()
+            if pending:
+                _, stuck = await asyncio.wait(pending, timeout=budget)
+                if stuck:
+                    logger.warning(
+                        "%d readiness probe(s) did not stop within the shutdown "
+                        "timeout",
+                        len(stuck),
+                    )
+        self._recent = None
         if self._engine is not None:
             await self._engine.dispose()
             self._engine = None

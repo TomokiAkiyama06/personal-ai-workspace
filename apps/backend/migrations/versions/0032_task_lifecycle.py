@@ -1,7 +1,7 @@
 """Agent Task lifecycle: tasks, attempts, steps, logs and the event history (PAW-032).
 
 Revision ID: 0032
-Revises: 0001
+Revises: 0025
 Create Date: 2026-09-24
 
 ``project_id``, ``created_by`` and ``actor_id`` carry no foreign keys because
@@ -20,7 +20,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 revision: str = "0032"
-down_revision: str | Sequence[str] | None = "0001"
+down_revision: str | Sequence[str] | None = "0025"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
