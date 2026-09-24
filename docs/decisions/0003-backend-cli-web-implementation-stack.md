@@ -1,10 +1,10 @@
 # Backend / CLI / Web の実装スタック
 
-- Status: Proposed
+- Status: Approved
 - Date: 2026-09-24
 - Scope: PAW-020 と、それ以降の `apps/backend`・`apps/cli`・`apps/web`
 - Supersedes: なし
-- Approval: Human / Admin の承認待ち
+- Approval: 2026-09-24、Humanが作業Session内で、提案した構成（Python + FastAPI + PostgreSQL）を承認
 
 ## 背景
 
@@ -42,5 +42,5 @@ Application codeのFormat / Lint / TestはCIへ追加する（PAW-004で予定�
 
 ## 承認後の扱い
 
-承認された場合、PAW-020 でこの構成のSkeletonとCIを追加し、[Repository構造](../REPOSITORY_STRUCTURE.md) を更新する。
-承認までは `apps/` へ実装を追加しない。
+承認されたため、PAW-020 でこの構成のSkeletonとCIを追加し、[Repository構造](../REPOSITORY_STRUCTURE.md) を更新する。
+Web側のLint / Format Toolは、PAW-060 で確定する。

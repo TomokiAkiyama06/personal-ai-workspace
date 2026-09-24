@@ -1,10 +1,10 @@
 # Workspace本体の実装をModel比較Runより先に始める
 
-- Status: Proposed
+- Status: Approved
 - Date: 2026-09-24
 - Scope: [Implementation Backlog](../IMPLEMENTATION_BACKLOG.md) の順序（PAW-017 → PAW-020）
 - Supersedes: なし
-- Approval: Human / Admin の承認待ち
+- Approval: 2026-09-24、Humanが作業Session内で承認
 
 ## 背景
 
