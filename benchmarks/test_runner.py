@@ -464,10 +464,11 @@ def _stop_unsupervised(
     The child may already have been reaped by someone else (``SIGCHLD`` ignored, a
     concurrent reaper), and its pid, which is also its process group id, may then
     belong to an unrelated process.  So nothing is signalled or waited for unless
-    the child is still our own unreaped child with the recorded start time.  A
-    constructed ``leader`` is used when there is one: it takes a last look at the
-    group (members forked since it was built), knows the members, and re-checks its
-    own identity at every signal.
+    the child has a recorded start time and is still our own unreaped child with
+    it: without a recorded identity nothing can show that the number is still ours,
+    so nothing is sent.  A constructed ``leader`` is used when there is one: it
+    takes a last look at the group (members forked since it was built), knows the
+    members, and re-checks its own identity at every signal.
     """
     # The descriptors go first: under descriptor exhaustion (the usual reason to be
     # here) the identity checks below need a free one to read ``/proc``.
@@ -475,18 +476,22 @@ def _stop_unsupervised(
         if stream is not None:
             with contextlib.suppress(OSError):
                 stream.close()
-    if leader is not None:
+    identified = started_at is not None and (
+        leader is None or leader.start == started_at
+    )
+    if identified and leader is not None:
         leader.look()
         leader.signal_group(signal.SIGKILL)
         leader.reap(5)
-    elif _is_unreaped_child(process.pid, started_at):
+    elif identified and _is_unreaped_child(process.pid, started_at):
         # Its own session, so its pid is the group id, and being unreaped reserves it.
         _signal_group(process.pid, signal.SIGKILL)
         with contextlib.suppress(OSError, subprocess.TimeoutExpired):
             process.wait(timeout=5)
     elif process.returncode is None:
-        # Reaped elsewhere: its status is gone.  Recording that keeps ``Popen`` from
-        # waiting for (or reaping) whatever holds the number now.
+        # Reaped elsewhere, or not provably ours: nothing is sent.  Recording that
+        # keeps ``Popen`` from waiting for (or reaping) whatever holds the number
+        # now.
         process.returncode = 0
 
 
@@ -495,15 +500,21 @@ def _is_unreaped_child(pid: int, started_at: int | None) -> bool:
     ``started_at``?  Looks without reaping it.
 
     An unreaped child keeps its pid from being reused; once it was reaped (by us or
-    by someone else) the number may belong to an unrelated process.
+    by someone else) the number may belong to an unrelated process.  ``waitid``
+    alone cannot tell: if the original child was reaped and its pid went to another
+    direct child of ours, ``waitid`` describes that one.  So a start time recorded
+    at launch is required; without one (no ``/proc``, or the read failed) the child
+    is not provably ours and the answer is no.
     """
+    if started_at is None:
+        return False
     try:
         os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
     except ChildProcessError:
         return False
     except AttributeError:
         pass  # no WNOWAIT: only the start time can tell
-    return started_at is None or _start_time(pid) == started_at
+    return _start_time(pid) == started_at
 
 
 class _Leader:
@@ -522,7 +533,9 @@ class _Leader:
     ours unless the id was reused within one polling interval.  Whether the leader is
     still ours is re-checked at every signal, because a reaper can act at any time
     after it was observed.  A listing is only adopted if the leader was still our own
-    unreaped child after it, so it was taken while the group id was reserved.
+    unreaped child after it, so it was taken while the group id was reserved.  A
+    leader without a recorded start time cannot be told from a stranger holding its
+    number: its group is never signalled.
     """
 
     refresh_seconds = 0.2
@@ -623,6 +636,8 @@ class _Leader:
         return not self.released or self.members.get(pid) == started
 
     def signal_group(self, number: int) -> None:
+        if self.start is None:
+            return  # no recorded identity: nothing shows the number is still ours
         if not self.released and (
             self.process.returncode is not None or not self._still_ours()
         ):

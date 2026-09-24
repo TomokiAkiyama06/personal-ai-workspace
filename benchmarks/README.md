@@ -251,12 +251,15 @@ do not become durable logs.
   signalled unless it is still the runner's own unreaped child (`waitid` with
   `WNOWAIT`) with that start time: a child that something else already reaped may have
   had its pid, which is also its process group id, reused, so then nothing is sent and
-  nothing is waited for.  Once the leader object exists its guarded signalling
-  (recorded members, identity re-check at every signal) is used instead, after one
-  last unthrottled look at the group: a member the check forked since the leader was
-  built is recorded even if another reaper collected the leader in the meantime.  The
-  pipes are closed first, so the identity checks can still read `/proc` under
-  descriptor exhaustion.
+  nothing is waited for.  A child with no recorded start time (no `/proc`, or the read
+  failed) is not signalled at all, because `waitid` alone cannot tell it from another
+  direct child that was given the same pid; a leader whose start time differs from the
+  one recorded at launch is not signalled either.  Once the leader object exists its
+  guarded signalling (recorded members, identity re-check at every signal) is used
+  instead, after one last unthrottled look at the group: a member the check forked
+  since the leader was built is recorded even if another reaper collected the leader
+  in the meantime.  The pipes are closed first, so the identity checks can still read
+  `/proc` under descriptor exhaustion.
 - Descendants are tracked by identity, not by pid alone (pid plus the start time in
   `/proc/<pid>/stat`).  Before every `SIGTERM`/`SIGKILL` the identity is re-checked, and
   a pid now held by a different process is dropped and neither signalled nor waited
@@ -280,6 +283,10 @@ do not become durable logs.
   its own unreaped child after it (so it was taken while the group id was reserved),
   and the listing after a vanished leader is dropped when some process now holds the
   leader's own number (the id was reused, so that group is a stranger's).
+- Without a recorded start time (no `/proc`) the runner has no identity to check, so it
+  sends no signal to the check's group and cannot stop it: a check that exceeds the
+  timeout is reported `timed_out` but keeps running, and one that finishes is still
+  reported with its real exit status.  Production needs a container or cgroup there.
 - **Documented residuals** (not closable in-process; see Decision 0001): a process that
   daemonizes (double fork plus `setsid`) can outlive the check; a check-then-signal gap
   of microseconds remains because a process group cannot be signalled through a pidfd,

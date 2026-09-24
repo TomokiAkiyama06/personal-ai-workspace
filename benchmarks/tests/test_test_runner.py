@@ -14,6 +14,7 @@ import time
 import traceback
 import tracemalloc
 import unittest
+import warnings
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -727,7 +728,7 @@ class TestRunnerTest(unittest.TestCase):
         def clean_up():
             with contextlib.suppress(OSError):
                 os.kill(process.pid, signal.SIGKILL)
-                os.waitpid(process.pid, 0)
+                process.wait()
             for stream in (process.stdout, process.stderr):
                 stream.close()
 
@@ -748,9 +749,7 @@ class TestRunnerTest(unittest.TestCase):
             is_running(process.pid), "a process with another identity was killed"
         )
 
-    def test_a_reaped_child_is_not_signalled_even_without_a_recorded_start_time(self):
-        # Without /proc no start time is known, so only "still our unreaped child"
-        # can tell that the number was released.
+    def test_a_reaped_child_is_not_signalled_without_a_recorded_start_time(self):
         process = subprocess.Popen(
             [sys.executable, "-c", "pass"],
             start_new_session=True,
@@ -764,6 +763,141 @@ class TestRunnerTest(unittest.TestCase):
 
         self.assertEqual(calls, [])
         self.assertTrue(process.stdout.closed and process.stderr.closed)
+
+    def reused_pid_of_another_child(self):
+        """A reaped ``Popen`` whose pid now belongs to another direct child.
+
+        Models a reaper that collected the launched child and a later launch that
+        got the same pid, which ``waitid`` cannot tell apart from the original.
+        The stranger leads its own process group, as a new child would.
+        """
+        stranger = self.spawn_unsupervised()
+        original = subprocess.Popen(
+            [sys.executable, "-c", "pass"],
+            start_new_session=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        os.waitpid(original.pid, 0)  # somebody else collected it
+        original.pid = stranger.pid  # ...and its number went to the stranger
+        return original, stranger
+
+    def test_a_reused_pid_is_not_signalled_when_no_start_time_was_recorded(self):
+        # The stranger is our own child, so ``waitid`` does not fail for its pid: it
+        # is no proof that the number is still the child that was launched.
+        # Once with ``/proc`` (the read at launch failed) and once without it, where
+        # a start time can be read for nobody and "None == None" must not pass.
+        for label, no_proc in (("start unreadable", False), ("no /proc", True)):
+            with self.subTest(case=label):
+                process, stranger = self.reused_pid_of_another_child()
+                no_start_times = (
+                    mock.patch.object(test_runner, "_start_time", return_value=None)
+                    if no_proc
+                    else contextlib.nullcontext()
+                )
+                with no_start_times, self.spy_on_signals(passthrough=True) as calls:
+                    test_runner._stop_unsupervised(process, None)
+
+                self.assertEqual(calls, [])
+                time.sleep(0.3)
+                self.assertIsNone(stranger.poll(), "another child was killed")
+                self.assertEqual(process.returncode, 0)  # not waited for
+                self.assertTrue(process.stdout.closed and process.stderr.closed)
+
+    def test_a_leader_that_is_not_the_launched_child_is_not_signalled(self):
+        # The leader was built after the number changed hands, so it recorded the
+        # stranger's start time.  The launch-time identity is what counts.
+        process, stranger = self.reused_pid_of_another_child()
+        leader = test_runner._Leader(process)
+        self.assertEqual(leader.start, test_runner._start_time(stranger.pid))
+
+        for label, recorded in (
+            ("none recorded", None),
+            ("another start time", leader.start - 1),
+        ):
+            with self.subTest(launch=label):
+                with self.spy_on_signals(passthrough=True) as calls:
+                    test_runner._stop_unsupervised(process, recorded, leader)
+                self.assertEqual(calls, [])
+                self.assertIsNone(stranger.poll(), "another child was killed")
+
+    def test_no_recorded_start_time_means_the_child_is_not_provably_ours(self):
+        process = self.spawn_unsupervised()
+        started = test_runner._start_time(process.pid)
+        # Both with ``waitid(WNOWAIT)`` and where only the start time can tell.
+        for label, context in (
+            ("waitid", contextlib.nullcontext()),
+            ("no waitid", mock.patch.object(os, "waitid", side_effect=AttributeError)),
+        ):
+            with self.subTest(path=label), context:
+                self.assertFalse(test_runner._is_unreaped_child(process.pid, None))
+                self.assertFalse(
+                    test_runner._is_unreaped_child(process.pid, started + 1)
+                )
+                self.assertTrue(test_runner._is_unreaped_child(process.pid, started))
+                # No ``/proc`` at all: no start time can be read now either.
+                with mock.patch.object(test_runner, "_start_time", return_value=None):
+                    self.assertFalse(test_runner._is_unreaped_child(process.pid, None))
+
+    def test_a_leader_without_a_recorded_start_time_never_signals_its_group(self):
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            start_new_session=True,
+        )
+        self.addCleanup(process.wait)
+        self.addCleanup(process.kill)
+        with mock.patch.object(test_runner, "_start_time", return_value=None):
+            leader = test_runner._Leader(process)
+            with self.spy_on_signals(passthrough=True) as calls:
+                leader.signal_group(signal.SIGKILL)
+
+        self.assertEqual(calls, [])
+        time.sleep(0.3)
+        self.assertIsNone(process.poll(), "an unidentified group was signalled")
+        # Nothing was learnt about the leader: it is neither released nor lost.
+        self.assertFalse(leader.released or leader.status_lost)
+
+    def test_without_any_start_time_a_run_still_reports_its_real_status(self):
+        # No /proc, say.  Nothing can be signalled, but a check that finishes must
+        # still be reported as what it was, not as a lost status.
+        with mock.patch.object(test_runner, "_start_time", return_value=None):
+            passed, failed = (
+                self.runner.run_visible(
+                    (self.python_check(name, f"raise SystemExit({code})"),), PATIENCE
+                )[0]
+                for name, code in (("ok", 0), ("bad", 3))
+            )
+        self.assertEqual((passed.status, passed.exit_code), ("passed", 0))
+        self.assertEqual((failed.status, failed.exit_code), ("failed", 3))
+
+    def test_a_timed_out_check_is_left_alone_when_it_has_no_identity(self):
+        self.runner.term_grace_seconds = 0.3
+        self.runner.drain_seconds = 0.3
+        pid_file = self.pid_file()
+        script = (
+            "import os, sys, time\n"
+            "open(sys.argv[1] + '.tmp', 'w').write(str(os.getpid()))\n"
+            "os.replace(sys.argv[1] + '.tmp', sys.argv[1])\n"
+            "time.sleep(60)\n"
+        )
+        check = self.python_check("no-identity", script, pid_file)
+        with (
+            mock.patch.object(test_runner, "_start_time", return_value=None),
+            self.spy_on_signals(passthrough=True) as calls,
+            # The check is deliberately left running, so its ``Popen`` is dropped
+            # while the child is alive.
+            warnings.catch_warnings(),
+        ):
+            warnings.simplefilter("ignore", ResourceWarning)
+            (result,) = self.runner.run_visible((check,), 1)
+
+        self.assertEqual(result.status, "timed_out")
+        self.assertEqual(
+            [call for call in calls if call[2] != 0],
+            [],
+            "a group without a recorded identity was signalled",
+        )
+        self.assertTrue(is_running(self.read_pid(pid_file)))  # cleanup kills it
 
     def test_an_unsupervised_child_with_its_recorded_identity_is_killed_and_reaped(
         self,
