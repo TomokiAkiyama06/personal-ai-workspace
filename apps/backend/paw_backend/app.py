@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -22,6 +23,8 @@ from paw_backend.middleware import (
     SecurityHeadersMiddleware,
 )
 from paw_backend.research.scratch import ScratchJanitor, ScratchStore
+
+logger = logging.getLogger(__name__)
 
 
 def create_app(
@@ -68,11 +71,19 @@ def create_app(
                 background.add(asyncio.create_task(janitor.run()))
             yield
         finally:
-            # Cancelling aborts each diagnostic's own connection (it does not wait
+            # Cancelling aborts the connection each of them is using (a diagnostic
+            # its own, the janitor the one of its purge transaction: neither waits
             # for a stalled server to answer), and the wait is bounded anyway.
             for task in background:
                 task.cancel()
-            await asyncio.wait(background, timeout=settings.shutdown_timeout_seconds)
+            _, pending = await asyncio.wait(
+                background, timeout=settings.shutdown_timeout_seconds
+            )
+            if pending:  # a task that ignored its cancellation: given up on
+                logger.warning(
+                    "%d background task(s) did not stop within the shutdown timeout",
+                    len(pending),
+                )
             heartbeat.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await heartbeat

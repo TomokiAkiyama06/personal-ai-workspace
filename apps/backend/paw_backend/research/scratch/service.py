@@ -73,6 +73,11 @@ purge / lease race safe:
    ``lock_timeout_ms`` (milliseconds); a lock wait that exceeds it raises
    :class:`ScratchBusyError` (the transaction is rolled back). ``get`` and
    ``list_items`` read without locking and never wait for a row lock.
+5. ``purge_expired`` runs its transaction on an abortable connection
+   (``Database.run_abortable``, outside the pool): cancelling the call shuts the
+   connection's socket down instead of asking a possibly stalled server to cancel
+   the query, so the janitor stops with the application. The unfinished
+   transaction is rolled back by the server. The other operations use the pool.
 
 Errors
 ------
@@ -85,8 +90,8 @@ logs nothing that contains caller content.
 """
 
 import inspect
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta
 from typing import Any
@@ -177,6 +182,18 @@ def _exempt(now: datetime) -> ColumnElement[bool]:
     )
 
 
+@contextmanager
+def _busy_as_error() -> Iterator[None]:
+    """A lock wait that exceeded the lock timeout is :class:`ScratchBusyError`."""
+    try:
+        yield
+    except DBAPIError as error:
+        # Only the type of the driver's error is read, never its text.
+        if isinstance(error.orig, psycopg.errors.LockNotAvailable):
+            raise ScratchBusyError() from None
+        raise
+
+
 def _is_visible(item: ScratchItem) -> bool:
     """The module docstring's visibility rule, on a snapshot."""
     return not item.expired or bool(item.deferral_reasons)
@@ -254,24 +271,19 @@ class ScratchStore:
     def _now(self) -> datetime:
         return validate_datetime("clock", self._clock())
 
+    async def _set_lock_timeout(self, session: AsyncSession) -> None:
+        """The first statement of every changing transaction (module docstring, 4)."""
+        await session.execute(
+            select(func.set_config("lock_timeout", str(self._lock_timeout_ms), True))
+        )
+
     @asynccontextmanager
     async def _transaction(self) -> AsyncIterator[AsyncSession]:
         """One transaction with the store's lock timeout (module docstring, rule 4)."""
-        try:
+        with _busy_as_error():
             async with self._database.session() as session, session.begin():
-                await session.execute(
-                    select(
-                        func.set_config(
-                            "lock_timeout", str(self._lock_timeout_ms), True
-                        )
-                    )
-                )
+                await self._set_lock_timeout(session)
                 yield session
-        except DBAPIError as error:
-            # Only the type of the driver's error is read, never its text.
-            if isinstance(error.orig, psycopg.errors.LockNotAvailable):
-                raise ScratchBusyError() from None
-            raise
 
     @staticmethod
     async def _read(
@@ -718,6 +730,15 @@ class ScratchStore:
            transaction had them locked are not counted anywhere: the next call
            handles them).
 
+        The transaction runs on a dedicated connection that is shut down when the
+        call is cancelled or the database disposed (``Database.run_abortable``),
+        never cancelled on the server: a purge that is inside a statement when
+        PostgreSQL stalls ends at once. Cancelling therefore leaves the table as
+        it was (the server rolls the transaction back; a ``COMMIT`` that was
+        already on its way may still be applied). Every call opens a connection
+        of its own. ``ScratchBusyError`` (a lock wait beyond ``lock_timeout_ms``)
+        is raised as for the other operations.
+
         Test seam: when the store was built with ``purge_probe``, call
         ``await purge_probe(session, chosen)`` exactly once, between step 1 and
         step 2, inside the same transaction, with the transaction's
@@ -740,7 +761,9 @@ class ScratchStore:
         if instant is None:
             instant = self._now()
         purgeable = and_(_ITEMS.c.expires_at <= instant, ~_exempt(instant))
-        async with self._transaction() as session:
+
+        async def batch(session: AsyncSession) -> PurgeResult:
+            await self._set_lock_timeout(session)
             candidates = (
                 (
                     await session.execute(
@@ -771,6 +794,12 @@ class ScratchStore:
                     .where(_ITEMS.c.expires_at <= instant, _exempt(instant))
                 )
             ).scalar_one()
-        return PurgeResult(
-            purged=purged, deferred=deferred, has_more=len(candidates) > size
-        )
+            return PurgeResult(
+                purged=purged, deferred=deferred, has_more=len(candidates) > size
+            )
+
+        with _busy_as_error():
+            # On a dedicated connection that is shut down when the caller is
+            # cancelled or the database disposed, never cancelled on the server
+            # (see the docstring): the janitor must stop with the application.
+            return await self._database.run_abortable(batch)

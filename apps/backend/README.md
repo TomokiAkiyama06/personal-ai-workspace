@@ -44,7 +44,7 @@ apps/backend/
 │  ├─ app.py               # create_app(settings)
 │  ├─ config.py            # PAW_ 環境変数から読む Settings
 │  ├─ server.py            # Uvicorn 起動（TLS 設定）
-│  ├─ db.py                # 非同期 Engine / Session、Readiness 確認
+│  ├─ db.py                # 非同期 Engine / Session、Readiness 確認、中断できる接続（`fetch_abortable`、`run_abortable`）
 │  ├─ events.py            # プロセス内 Event Bus と Heartbeat
 │  ├─ errors.py            # 共通の Error Response
 │  ├─ middleware.py        # Request ID、Host 検証、Security Header
@@ -216,6 +216,7 @@ URL の Query（`connect_timeout`、`application_name` など）はそのまま�
 Timeout した Probe は、Query の取消（psycopg が Server の確認を待つ、最大約 10 秒）を行わず、接続の Socket を閉じて即座に失敗させます。
 libpq 17 未満（`psycopg[c]` とシステムの libpq など）では、取消が Thread で実行され、`asyncio.run` の終了が長時間止まるためです。
 `Database.dispose()`（Application の終了時）は、実行中の Probe を同じ方法で止め、`PAW_SHUTDOWN_TIMEOUT_SECONDS` の範囲で完了を待ちます。
+同じ仕組みの中断できる接続が、ほかに 2 つあります。1 文を実行する `fetch_abortable` / `execute_abortable`（起動時の診断、Audit の書き込み、承認の取り消し）と、複数の文を 1 Transaction で実行する `run_abortable`（Research Scratch の Purge、[PAW-050](#janitor期限切れの削除)）です。どちらも Pool を使わず、呼び出し元の Cancel と `dispose()` で接続の Socket を閉じます。`run_abortable` は Session を渡す Callback を受け取り、正常に戻れば Commit、例外なら Rollback します。
 今後 Session を使う Endpoint を追加する場合、終了時に実行中だった Query の取消は psycopg の取消経路に入ります。
 その経路が終了を遅らせないことは、その Issue で確認してください。
 `Database.session()` と `paw_backend.api.deps.get_session` が Session を提供します。
@@ -1248,12 +1249,19 @@ Test は参照実装で成り立つことを確認しながら書いたもので
 - **1 回の Tick。** `purge_expired` を 500 件の Batch で、これ以上消せる行がない（`has_more` が偽）まで呼びます。1 Tick は最大 100 Batch（5 万行）で、上限に達して残りがあれば、次の Tick は 5 秒後です。Batch は 1 Transaction なので、途中で失敗しても、済んだ Batch の削除は残ります。
 - **削除の条件は Store のまま。** 期限は Store の Clock が決めます。Pin 済み・使用中（Lease）・昇格確認中の Item は消えず、その事情が終わった後の最初の Tick で消えます。TTL は延びません。Long-term Memory には触れません。
 - **失敗。** Tick が失敗しても Loop は止まりません。WARNING に**例外の型名だけ**を出し（Message、SQL、調査内容は出さず、Traceback も付けません）、30 秒から倍にして間隔まで待ち、成功で元に戻ります。削除できた件数は INFO に出します。
-- **停止。** Lifespan の終了で Cancel し、`PAW_SHUTDOWN_TIMEOUT_SECONDS` の範囲で待ってから `Database.dispose()` を呼びます（Diagnostic と同じ）。
+- **停止。** Lifespan の終了で Cancel し、`PAW_SHUTDOWN_TIMEOUT_SECONDS` の範囲で待ってから `Database.dispose()` を呼びます（Diagnostic と同じ）。Purge が Query の途中でも、PostgreSQL が応答しなくても、Janitor はその場で終わります（下記「止まらない PostgreSQL」）。待ちを打ち切って Task を見捨てるのは、Cancel を無視する Task だけで、その数を WARNING に出します。
 - **複数 Process。** それぞれが Janitor を持ってかまいません。`purge_expired` は `SKIP LOCKED` なので、互いに待たず、同じ行を二重に消しません（`test_two_janitors_at_once_delete_every_row_exactly_once`）。
 - **権限。** `PAW_APP_DATABASE_ROLE` の Role のままで動きます。Migration `0050` の SELECT / DELETE だけを使います（`test_scratch_grants.py` が Janitor の Test もその Role で実行します）。
-- **Test。** `test_scratch_janitor.py`（Fake の Store と `sleep`）、`test_scratch_janitor_settings.py`、`test_scratch_janitor_lifespan.py`（起動する・しない、Cancel が `dispose` より先、待ちが有界）、`test_scratch_janitor_postgres.py`（実際の PostgreSQL で期限切れの行が消え、Pin・使用中・昇格確認中は残る。Application 全体でも確認）。
+- **Test。** `test_scratch_janitor.py`（Fake の Store と `sleep`）、`test_scratch_janitor_settings.py`、`test_scratch_janitor_lifespan.py`（起動する・しない、Cancel が `dispose` より先、待ちが有界）、`test_scratch_janitor_postgres.py`（実際の PostgreSQL で期限切れの行が消え、Pin・使用中・昇格確認中は残る。Application 全体でも確認。`StalledPurgeTest` は PostgreSQL の前に置いた Proxy を Purge の途中で止めて、Cancel と `dispose()` がその場で Purge を止めることを確かめます）、`test_scratch_janitor_stall.py`（応答しない PostgreSQL の Fake で、Purge の途中の Janitor が Lifespan の終了で本当に終わること、Process も遅れずに終わること）、`test_database_run_abortable.py`（`Database.run_abortable` の Commit・Rollback・同時数・Cancel）。
 
-**Janitor が止めきれない場合。** Tick が Query の途中にいるときに PostgreSQL が応答しなくなると、その Query は通常の Pool の Query と同じ方法で止まります（psycopg がサーバに Cancel を頼んで待つ。約 10 秒、libpq が 17 未満なら Interpreter が終了時に待つ Thread から）。起動時の Diagnostic は専用の接続を切って即座に止めますが、Purge は 1 Transaction の複数の文なので、その作りにはしていません。Lifespan の待ちは `PAW_SHUTDOWN_TIMEOUT_SECONDS` で有界ですが、Process の終了がそれより遅れる可能性が残ります。Tick は最初の 30 秒の後は間隔ごと（既定 1 時間に 1 回）なので、この状況に当たる時間窓は狭いものの、実際に当てた Test はありません（起動直後の Tick で同じ状況を作ると、既存の終了 Test が失敗することを確認して、最初の Tick を遅らせました）。
+**止まらない PostgreSQL。** PostgreSQL が接続を受け付けたまま応答しなくなると、通常の Pool の Query は Cancel でも止まりません（psycopg がサーバに Cancel を頼んで、答えを待ちます。約 10 秒、libpq が 17 未満なら Interpreter が終了時に待つ Thread から）。Lifespan の待ちは `PAW_SHUTDOWN_TIMEOUT_SECONDS` で打ち切れても、Task と接続は残り、Process の終了が遅れます（独立 Review の指摘）。そこで `purge_expired` は、Transaction 全体を `Database.run_abortable` で実行します。
+
+- Pool を使わない**専用の接続**で、Purge 専用の Task の中で動きます。Janitor はその Task を待つだけです。
+- Janitor の Cancel と `Database.dispose()` は、その接続の **Socket を閉じます**（起動時の Diagnostic の `fetch_abortable` と同じ仕組み）。実行中の文はすぐ失敗し、サーバー側の Transaction は接続が切れたときに Rollback されます。接続を開く途中や、SQLAlchemy が新しい接続で最初に実行する Query の途中でも同じです（接続は作った時点で登録します）。
+- `SKIP LOCKED`、行の Lock、2 つ目の文での再確認、`lock_timeout_ms` と `ScratchBusyError`、`purge_probe` は変わりません。Transaction が途中で止められても、消す文が Commit されるのは全体が成功したときだけで、次の Tick が同じ仕事をやり直します（冪等）。`COMMIT` が既にサーバーへ届いていた場合は、適用されていることがあります。
+- Test は、応答しない PostgreSQL の Fake（`HangingPostgres`）で、Lifespan の終了が待ちの上限を使い切らず Janitor が終わること、Process が遅れず終わること（libpq 17 と、17 未満の Thread による Cancel の両方）を、PostgreSQL の前に置いた Proxy で、Purge の Transaction の途中（行を選んで Lock した後）で止めた場合を確かめます。実装を Pool 経由の Transaction に戻すと、どちらも失敗します。
+
+限界: 接続は 1 Batch ごとに開いて閉じます（1 Tick に最大 100 回）。Purge には**独自の時間切れがありません**。アプリケーションが動き続けたまま PostgreSQL だけが止まると、Tick は接続が失敗するか Janitor が止められるまで待ちます（以前の Pool 経由でも同じで、この Issue では時間切れを足していません）。
 
 ### 制限と未確認の点
 
@@ -1274,7 +1282,7 @@ Test は参照実装で成り立つことを確認しながら書いたもので
 5. **認可の対応。** 上の「呼び出し側の認可（提案）」で、特に `resolve_promotion` を委任不可の `project.memory.manage` にする点。
 6. **Quota。** Item 数の上限。
 7. **Janitor の既定値。** 間隔（1 時間）、起動の 30 秒後に最初の Tick、1 Tick の上限（500 件 × 100 Batch）。仕様に数値がないため、最も単純な値を選びました。
-8. **PostgreSQL が止まったときの終了。** Tick が Query の途中で PostgreSQL が応答しなくなると、Janitor の Cancel は通常の Pool の Query と同じ経路になります（下記）。起動時の Diagnostic のように専用の接続で即座に切る作りにするか。
+8. **PostgreSQL が止まったときの終了。** Review の指摘に従い、Purge は中断できる専用の接続で行い、Cancel と `dispose()` で接続の Socket を閉じます（上の「止まらない PostgreSQL」）。残る判断は、Purge の 1 Batch に**時間切れ**を付けるか（付ければ、応答しない PostgreSQL の間も Janitor が自分で諦めて次の Tick に進みます。値は仕様にないため付けていません）と、1 Batch ごとに接続を開くコストを許すかです。
 
 ## 依存 Package
 
