@@ -1,11 +1,13 @@
 import time
 import unittest
+from unittest import mock
 
 from paw_backend.tools import (
     contains_credential_plaintext,
     is_credential_handle,
     redact_value,
 )
+from paw_backend.tools import credentials as credentials_module
 from paw_backend.tools.credentials import (
     MAX_RESULT_NODES,
     MAX_TEXT_CHARS,
@@ -459,6 +461,25 @@ class ResultBudgetTest(unittest.TestCase):
         self.assertEqual(len(redacted), MAX_RESULT_NODES)
         self.assertIn(TRUNCATED, redacted)
         self.assertEqual(count, 1)
+
+    def test_unsupported_keys_are_charged_against_the_budget(self):
+        # Every entry, including one whose key is not text, uses up a node: a
+        # mapping keyed by integers is cut like any other.
+        with mock.patch.object(credentials_module, "MAX_RESULT_NODES", 2_000):
+            redacted, count = redact_value({i: i for i in range(5_000)})
+        self.assertIn(TRUNCATED, redacted)
+        self.assertLessEqual(len(redacted), 2_001)
+        self.assertGreaterEqual(count, 1)
+
+    def test_many_unsupported_keys_do_not_cost_quadratic_time(self):
+        # Every such key redacts to the same marker and needs its own suffix.
+        with mock.patch.object(credentials_module, "MAX_RESULT_NODES", 16_000):
+            started = time.monotonic()
+            redacted, _ = redact_value({i: None for i in range(16_000)})
+            elapsed = time.monotonic() - started
+        self.assertEqual(len(redacted), 16_000)
+        self.assertEqual(len(set(redacted)), 16_000)  # none overwrote another
+        self.assertLess(elapsed, 5.0)
 
     def test_a_result_with_too_many_characters_is_cut(self):
         chunk = "a" * 100_000
