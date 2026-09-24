@@ -6,13 +6,24 @@ is registered, so a wrong adapter fails loudly instead of later producing an
 all-failed "successful" result.
 """
 
+import inspect
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 from paw_backend.research.providers.contract import (
     DEFAULT_PROVIDER_TIMEOUT_SECONDS,
+    KIND_ORDER,
+    MAX_PROVIDERS,
+    PROVIDER_NAME_PATTERN,
     ProviderKind,
     ResearchProvider,
+    validate_provider_timeout,
+)
+from paw_backend.research.providers.errors import (
+    DuplicateProviderError,
+    ProviderInterfaceError,
+    RegistryFullError,
+    UnknownProviderError,
 )
 
 
@@ -29,6 +40,17 @@ class RegisteredProvider:
     kind: ProviderKind
     timeout_seconds: float
     provider: ResearchProvider = field(repr=False, compare=False)
+
+
+def _accepts_call(method: object, *args: object, **kwargs: object) -> bool:
+    """True if ``method`` is a coroutine function that accepts this call."""
+    if not callable(method) or not inspect.iscoroutinefunction(method):
+        return False
+    try:
+        inspect.signature(method).bind(*args, **kwargs)
+    except (TypeError, ValueError):  # signature does not fit / not inspectable
+        return False
+    return True
 
 
 def validate_provider(provider: object) -> None:
@@ -52,7 +74,15 @@ def validate_provider(provider: object) -> None:
     Nothing is called on the provider except reading these attributes. The
     provider is never awaited and its values never appear in the error.
     """
-    raise NotImplementedError("PAW-051 stub")
+    name = getattr(provider, "name", None)
+    if not isinstance(name, str) or PROVIDER_NAME_PATTERN.fullmatch(name) is None:
+        raise ProviderInterfaceError("name")
+    if not isinstance(getattr(provider, "kind", None), ProviderKind):
+        raise ProviderInterfaceError("kind")
+    if not _accepts_call(getattr(provider, "search", None), "q", limit=1):
+        raise ProviderInterfaceError("search")
+    if not _accepts_call(getattr(provider, "fetch", None), "https://x/"):
+        raise ProviderInterfaceError("fetch")
 
 
 class ProviderRegistry:
@@ -63,7 +93,7 @@ class ProviderRegistry:
     """
 
     def __init__(self) -> None:
-        raise NotImplementedError("PAW-051 stub")
+        self._entries: dict[str, RegisteredProvider] = {}
 
     def register(
         self,
@@ -86,7 +116,16 @@ class ProviderRegistry:
 
         The name and kind are read from the provider once, here.
         """
-        raise NotImplementedError("PAW-051 stub")
+        validate_provider(provider)
+        validate_provider_timeout(timeout_seconds)
+        name, kind = provider.name, provider.kind  # read once, here
+        if name in self._entries:
+            raise DuplicateProviderError()
+        if len(self._entries) >= MAX_PROVIDERS:
+            raise RegistryFullError()
+        entry = RegisteredProvider(name, kind, timeout_seconds, provider)
+        self._entries[name] = entry
+        return entry
 
     def get(self, name: str) -> RegisteredProvider:
         """Return the entry registered as ``name``.
@@ -94,7 +133,12 @@ class ProviderRegistry:
         A non-``str`` raises ``TypeError``; an unknown name raises
         ``UnknownProviderError``.
         """
-        raise NotImplementedError("PAW-051 stub")
+        if not isinstance(name, str):
+            raise TypeError("name must be a str")
+        try:
+            return self._entries[name]
+        except KeyError:
+            raise UnknownProviderError() from None
 
     def select(
         self, kinds: Iterable[ProviderKind] | None = None
@@ -107,15 +151,28 @@ class ProviderRegistry:
         ordered by ``(KIND_ORDER[kind], name)`` and is not affected by later
         registrations.
         """
-        raise NotImplementedError("PAW-051 stub")
+        wanted: set[ProviderKind] | None = None
+        if kinds is not None:
+            wanted = set()
+            for kind in kinds:
+                if not isinstance(kind, ProviderKind):
+                    raise TypeError("kinds must contain only ProviderKind values")
+                wanted.add(kind)
+        selected = [
+            entry
+            for entry in self._entries.values()
+            if wanted is None or entry.kind in wanted
+        ]
+        selected.sort(key=lambda entry: (KIND_ORDER[entry.kind], entry.name))
+        return tuple(selected)
 
     def names(self) -> tuple[str, ...]:
         """All registered names, in the same order as ``select()``."""
-        raise NotImplementedError("PAW-051 stub")
+        return tuple(entry.name for entry in self.select())
 
     def __len__(self) -> int:
-        raise NotImplementedError("PAW-051 stub")
+        return len(self._entries)
 
     def __contains__(self, name: object) -> bool:
         """True if a provider is registered as ``name`` (False for a non-``str``)."""
-        raise NotImplementedError("PAW-051 stub")
+        return isinstance(name, str) and name in self._entries

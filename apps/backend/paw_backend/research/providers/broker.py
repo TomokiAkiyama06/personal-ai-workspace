@@ -14,17 +14,84 @@ kind, error code and the exception TYPE name. Never the exception text, the
 query or a locator.
 """
 
-from collections.abc import Callable
-from datetime import datetime
+import asyncio
+import logging
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
+from typing import NamedTuple
 
 from paw_backend.research.providers.contract import (
     DEFAULT_TIME_BUDGET_SECONDS,
+    ProviderDocument,
+    ProviderKind,
+    ResearchError,
+    ResearchItem,
     ResearchRequest,
     ResearchResult,
     SourceMetadata,
+    validate_time_budget,
 )
-from paw_backend.research.providers.errors import ResearchErrorCode
-from paw_backend.research.providers.registry import ProviderRegistry
+from paw_backend.research.providers.errors import (
+    InvalidProviderResponseError,
+    ProviderFailure,
+    ResearchErrorCode,
+    UnknownProviderError,
+)
+from paw_backend.research.providers.locator import canonicalize_locator
+from paw_backend.research.providers.normalize import (
+    compute_content_hash,
+    merge_items,
+    normalize_hits,
+    normalize_title,
+)
+from paw_backend.research.providers.registry import ProviderRegistry, RegisteredProvider
+
+logger = logging.getLogger(__name__)
+
+
+class _Outcome(NamedTuple):
+    """What one provider call produced: a response, or the code of its failure."""
+
+    response: object = None
+    code: ResearchErrorCode | None = None
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _log_failure(
+    entry: RegisteredProvider, code: ResearchErrorCode, exception_type: str
+) -> None:
+    """One WARNING per failed provider: identity, code and the exception TYPE only."""
+    logger.warning(
+        "research provider failed: provider=%s kind=%s code=%s exception_type=%s",
+        entry.name,
+        entry.kind.value,
+        code.value,
+        exception_type,
+    )
+
+
+async def _call_provider(
+    entry: RegisteredProvider,
+    call: Callable[[], Awaitable[object]],
+    deadline: float,
+) -> _Outcome:
+    """Run ``call()`` until the loop-time ``deadline``; never raise ``Exception``.
+
+    A provider that is not done by then is cancelled and awaited to its end (the
+    ``timeout_at`` block does this) and reported as ``TIMEOUT``. Catching
+    ``Exception`` is the point of this function: one failing provider must not
+    fail the others. ``CancelledError`` is a ``BaseException`` and propagates.
+    """
+    try:
+        async with asyncio.timeout_at(deadline):
+            return _Outcome(response=await call())
+    except Exception as error:
+        code = classify_failure(error)
+        _log_failure(entry, code, type(error).__name__)
+        return _Outcome(code=code)
 
 
 def classify_failure(error: Exception) -> ResearchErrorCode:
@@ -41,7 +108,11 @@ def classify_failure(error: Exception) -> ResearchErrorCode:
     The text of the exception is never read: the function must not call
     ``str()`` or ``repr()`` on it (they may raise, or contain secrets).
     """
-    raise NotImplementedError("PAW-051 stub")
+    if isinstance(error, ProviderFailure) and isinstance(error.code, ResearchErrorCode):
+        return error.code
+    if isinstance(error, TimeoutError):
+        return ResearchErrorCode.TIMEOUT
+    return ResearchErrorCode.INTERNAL_ERROR
 
 
 class ResearchBroker:
@@ -58,7 +129,10 @@ class ResearchBroker:
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         """``registry`` must be a ``ProviderRegistry`` (else ``TypeError``)."""
-        raise NotImplementedError("PAW-051 stub")
+        if not isinstance(registry, ProviderRegistry):
+            raise TypeError("registry must be a ProviderRegistry")
+        self._registry = registry
+        self._clock = _utc_now if clock is None else clock
 
     async def gather(self, request: ResearchRequest) -> ResearchResult:
         """Search every registered provider whose kind is in ``request.kinds``.
@@ -101,7 +175,56 @@ class ResearchBroker:
         Identity always comes from the registry entry (its snapshot ``name`` and
         ``kind``), never from the provider object at call time.
         """
-        raise NotImplementedError("PAW-051 stub")
+        if not isinstance(request, ResearchRequest):
+            raise TypeError("request must be a ResearchRequest")
+        entries = self._registry.select(request.kinds)
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        budget_end = started + request.time_budget_seconds
+        async with asyncio.TaskGroup() as group:
+            tasks = [
+                group.create_task(
+                    _call_provider(
+                        entry,
+                        # Bind ``entry`` now: it is the loop variable.
+                        lambda entry=entry: entry.provider.search(
+                            request.query, limit=request.max_results
+                        ),
+                        min(started + entry.timeout_seconds, budget_end),
+                    )
+                )
+                for entry in entries
+            ]
+        outcomes = [task.result() for task in tasks]
+
+        retrieved_at = self._clock()
+        errors: list[ResearchError] = []
+        batches: list[tuple[ResearchItem, ...]] = []
+        for entry, outcome in zip(entries, outcomes, strict=True):
+            code = outcome.code
+            if code is None:
+                try:
+                    batches.append(
+                        normalize_hits(
+                            provider_id=entry.name,
+                            kind=entry.kind,
+                            hits=outcome.response,
+                            limit=request.max_results,
+                            retrieved_at=retrieved_at,
+                        )
+                    )
+                except InvalidProviderResponseError as error:
+                    code = ResearchErrorCode.INVALID_RESPONSE
+                    _log_failure(entry, code, type(error).__name__)
+            if code is not None:
+                errors.append(ResearchError(entry.name, entry.kind, code))
+        items, truncated = merge_items(batches, max_results=request.max_results)
+        return ResearchResult(
+            items=items,
+            errors=tuple(errors),
+            providers_queried=len(entries),
+            truncated=truncated,
+        )
 
     async def fetch(
         self,
@@ -137,4 +260,59 @@ class ResearchBroker:
         private_source=source.private_source or doc.private_source),
         text=doc.text)``.
         """
-        raise NotImplementedError("PAW-051 stub")
+        if not isinstance(source, SourceMetadata):
+            raise TypeError("source must be a SourceMetadata")
+        validate_time_budget(time_budget_seconds)
+        locator = canonicalize_locator(source.locator)
+
+        try:
+            entry = self._registry.get(source.provider_id)
+        except UnknownProviderError:
+            entry = None
+        if entry is None or entry.kind != source.provider_kind:
+            return self._failed_fetch(
+                source.provider_id, source.provider_kind, ResearchErrorCode.UNAVAILABLE
+            )
+
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        outcome = await _call_provider(
+            entry,
+            lambda: entry.provider.fetch(locator),
+            started + min(entry.timeout_seconds, time_budget_seconds),
+        )
+        code = outcome.code
+        document = outcome.response
+        if code is None and not isinstance(document, ProviderDocument):
+            code = ResearchErrorCode.INVALID_RESPONSE
+            _log_failure(entry, code, InvalidProviderResponseError.__name__)
+        if code is not None:
+            return self._failed_fetch(entry.name, entry.kind, code)
+
+        published_at = document.published_at
+        item = ResearchItem(
+            SourceMetadata(
+                provider_kind=source.provider_kind,
+                provider_id=source.provider_id,
+                locator=locator,
+                title=normalize_title(document.title),
+                retrieved_at=self._clock(),
+                content_hash=compute_content_hash(document.text),
+                source_type=document.source_type,
+                published_at=None
+                if published_at is None
+                else published_at.astimezone(UTC),
+                # Conservative: private if either side says so.
+                private_source=source.private_source or document.private_source,
+            ),
+            document.text,
+        )
+        return ResearchResult(items=(item,), providers_queried=1)
+
+    @staticmethod
+    def _failed_fetch(
+        provider_id: str, kind: ProviderKind, code: ResearchErrorCode
+    ) -> ResearchResult:
+        return ResearchResult(
+            errors=(ResearchError(provider_id, kind, code),), providers_queried=1
+        )
