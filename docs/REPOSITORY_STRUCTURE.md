@@ -46,7 +46,8 @@ personal-ai-workspace/
 │  │  │  ├─ env.py
 │  │  │  ├─ script.py.mako
 │  │  │  └─ versions/
-│  │  │     └─ 0001_baseline.py
+│  │  │     ├─ 0001_baseline.py
+│  │  │     └─ 0021_owner_setup.py
 │  │  ├─ paw_backend/
 │  │  │  ├─ __init__.py
 │  │  │  ├─ __main__.py
@@ -58,6 +59,17 @@ personal-ai-workspace/
 │  │  │  ├─ middleware.py
 │  │  │  ├─ security.py
 │  │  │  ├─ server.py
+│  │  │  ├─ cli/
+│  │  │  │  ├─ __init__.py
+│  │  │  │  ├─ __main__.py
+│  │  │  │  └─ owner.py
+│  │  │  ├─ identity/
+│  │  │  │  ├─ __init__.py
+│  │  │  │  ├─ errors.py
+│  │  │  │  ├─ login_name.py
+│  │  │  │  ├─ models.py
+│  │  │  │  ├─ service.py
+│  │  │  │  └─ tokens.py
 │  │  │  └─ api/
 │  │  │     ├─ __init__.py
 │  │  │     ├─ deps.py
@@ -69,6 +81,7 @@ personal-ai-workspace/
 │  │  └─ tests/
 │  │     ├─ __init__.py
 │  │     ├─ fake_postgres.py
+│  │     ├─ identity_support.py
 │  │     ├─ support.py
 │  │     ├─ teardown_child.py
 │  │     ├─ test_config.py
@@ -76,8 +89,15 @@ personal-ai-workspace/
 │  │     ├─ test_errors.py
 │  │     ├─ test_events.py
 │  │     ├─ test_health.py
+│  │     ├─ test_identity_login_name.py
+│  │     ├─ test_identity_migration.py
+│  │     ├─ test_identity_settings.py
+│  │     ├─ test_identity_tokens.py
 │  │     ├─ test_middleware.py
 │  │     ├─ test_migrations.py
+│  │     ├─ test_owner_no_web_path.py
+│  │     ├─ test_owner_setup_cli.py
+│  │     ├─ test_owner_setup_service.py
 │  │     ├─ test_postgres_integration.py
 │  │     ├─ test_security.py
 │  │     └─ test_server.py
@@ -137,7 +157,7 @@ personal-ai-workspace/
 | [REQUIREMENTS.md](../REQUIREMENTS.md) / [AGENTS.md](../AGENTS.md) | 要件と Agent の作業ルールの正本 |
 | [docs/](./) | Architecture、各機能の設計、Backlog、Issue 対応表 |
 | [docs/decisions/](decisions/README.md) | 重要な仕様・設計判断の提案と承認経緯 |
-| [apps/backend/](../apps/backend/README.md) | Core API、認証・権限、Orchestrator、Memory、Tool Broker（現在はSkeleton: REST / Event経路、Health、DB接続、Migration） |
+| [apps/backend/](../apps/backend/README.md) | Core API、認証・権限、Orchestrator、Memory、Tool Broker（現在はSkeleton: REST / Event経路、Health、DB接続、Migration。Owner の初期設定・復旧は server-local の管理コマンド、PAW-021） |
 | [apps/web/](../apps/web/README.md) | Backend API を利用する Web UI |
 | [apps/cli/](../apps/cli/README.md) | Web と同じ Backend API を利用する CLI |
 | [benchmarks/](../benchmarks/README.md) | Benchmark Task、候補 Agent の比較、公開可能な評価用データの準備領域 |

@@ -2,8 +2,9 @@
 
 Personal AI Workspace の Core Backend です。
 [PAW-020](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/17) で、後続の Issue が載る最小の Application Skeleton を実装しました。
-認証と User はまだ実装していません（PAW-021 以降）。
-RBAC と Audit（PAW-025）、Task の Lifecycle と永続化（[PAW-032](#agent-task-lifecycle)、HTTP の Endpoint はまだありません）、Memory の PostgreSQL Schema（[PAW-040](#memory--conversation-schema)）を実装済みです。Memory の保存・整理・検索の処理は PAW-041 以降です。
+Login と Session はまだ実装していません（PAW-022 以降）。
+RBAC と Audit（PAW-025）、Task の Lifecycle と永続化（[PAW-032](#agent-task-lifecycle)、HTTP の Endpoint はまだありません）、Memory の PostgreSQL Schema（[PAW-040](#memory--conversation-schema)）、
+最小の `users` Table と Owner の初期設定・復旧のコマンド（[PAW-021](#owner-の初期設定と復旧)）を実装済みです。Memory の保存・整理・検索の処理は PAW-041 以降です。
 
 [Architecture](../../docs/ARCHITECTURE.md) に基づき、最終的に以下の機能を Backend 側で扱います。
 
@@ -37,7 +38,7 @@ Python 側の Package（`pgvector-python`）は使わず、`paw_backend/memory/v
 apps/backend/
 ├─ pyproject.toml          # 依存（完全一致で固定）と Ruff 設定
 ├─ alembic.ini             # Alembic 設定（DB URL は持たない）
-├─ migrations/             # env.py と Revision（0001 は空の Baseline、0040 は Memory Schema）
+├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0040 は Memory Schema）
 ├─ paw_backend/
 │  ├─ app.py               # create_app(settings)
 │  ├─ config.py            # PAW_ 環境変数から読む Settings
@@ -48,6 +49,8 @@ apps/backend/
 │  ├─ middleware.py        # Request ID、Host 検証、Security Header
 │  ├─ security.py          # Host / Origin の判定
 │  ├─ authz/               # Role・Capability・認可の判定と Audit Event（PAW-025）
+│  ├─ identity/            # 最小の users、Owner の初期設定・復旧と One-time Token（PAW-021）
+│  ├─ cli/                 # server-local の管理コマンド `python -m paw_backend.cli`（PAW-021）
 │  ├─ tasks/               # Agent Task の状態遷移と永続化（PAW-032）
 │  ├─ memory/              # Memory / Conversation の Model、ACL 条件、vector 型（PAW-040）
 │  └─ api/
@@ -106,6 +109,8 @@ Database には pgvector が必要です（CI は `pgvector/pgvector:pg18` を�
 | `PAW_MIGRATION_DATABASE_URL` | なし | Migration 専用の接続先（Schema の Owner の Role）。設定すると Alembic は `PAW_DATABASE_URL` の代わりにこれを使う。認可・Audit の節を参照 |
 | `PAW_APP_DATABASE_ROLE` | なし | Application が接続する PostgreSQL の Role 名（英数字と `_`、63 文字まで。`public`、`pg_` で始まる名前、`postgres` などの予約名は拒否）。Audit Table の Migration が、実在するこの Role に INSERT と SELECT だけを与える（存在しなければ Migration が失敗する） |
 | `PAW_DATABASE_READINESS_CACHE_SECONDS` | `1` | Readiness の結果（失敗を含む）を再利用する秒数。`0` で再利用しない |
+| `PAW_SETUP_TOKEN_TTL_SECONDS` | `1800` | Owner の Setup / Recovery Token の有効期間（60〜86400 秒）。[Owner の初期設定と復旧](#owner-の初期設定と復旧) |
+| `PAW_SETUP_TOKEN_MAX_ATTEMPTS` | `5` | 1 つの Token に許す試行回数（1〜20）。使い切った Token は無効になる |
 | `PAW_EVENT_HEARTBEAT_SECONDS` | `15` | `system.heartbeat` の間隔 |
 | `PAW_EVENT_QUEUE_SIZE` | `100` | 接続ごとの Event Queue。溢れた場合は古い Event を捨てる |
 | `PAW_EVENT_MAX_SUBSCRIBERS` | `100` | 同時に接続できる SSE / WebSocket の数。超えた接続は SSE が 503、WebSocket が Close Code 1013 |
@@ -270,7 +275,7 @@ Operator の 6 操作は次のように解釈しています（[要件](../../RE
 | `task_logs` | 試行ごとの Log（`debug` / `info` / `warning` / `error`） |
 | `task_events` | Append-only の履歴。全遷移について、Command、遷移前後の状態、`wait_reason`、Actor（`user` / `system` / `policy` と User の UUID）、理由、その時点の Step 名、`task_version` |
 
-- `project_id`、`created_by`、`actor_id` は UUID だけを持ち、外部キーはありません。users と projects の Table がまだ存在しないためです（Table が入るときに外部キーを追加します）。
+- `project_id`、`created_by`、`actor_id` は UUID だけを持ち、外部キーはありません。projects の Table がまだ存在せず、`users`（PAW-021、Revision `0021`）は Migration の順序が統合後に決まるためです（両方が揃った後の Revision で外部キーを追加します）。
 - `task_events` は DB の Trigger が UPDATE と DELETE を拒否します。Application からも履歴は書き換えられません。
 - 列挙値は Text と CHECK 制約で保持します。Migration に値の一覧を直接書くため、値を増やすときは新しい Revision を追加してください。
 
@@ -439,7 +444,134 @@ Application 起動時に一度、接続 User の権限を確認し、**`WARNING`
 - `tests/test_authz_routes.py` が調べるのは `/api/v1` の Route だけで、FastAPI の内部（`effective_route_contexts`）に依存します。
 - `create_app` は既定の Provider と Directory を組み込みます。PAW-022 が `install_authz` を呼んで差し替えるまで、全 Endpoint が 401 です。
 - 重要操作の Step-up 認証の項目は Audit にありません（PAW-023 で追加します）。
-- Migration `0025`、`0032`、`0040` は今は同じ `down_revision="0001"` を持ちます。統合時に 1 本の鎖へつなぎ直します。
+- Migration の鎖は `0001 → 0025 → 0032 → 0040 → 0021` です（`0021` の Revision ID は Issue 番号で、鎖の順序ではありません。統合時に並びを確認します）。
+
+## Owner の初期設定と復旧
+
+[PAW-021](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/18) で実装しました。設計は [要件](../../REQUIREMENTS.md)（Owner、Passkey Policy、Login / Session、全 Passkey を失った Owner は Ubuntu の sudo 経由で復旧）と
+[SECURITY_RBAC_AUDIT](../../docs/SECURITY_RBAC_AUDIT.md) に従います。
+
+**最初の Owner は Server 上のコマンドでだけ作れます。** 最初に Web へ来た人が Owner になることはありません。
+
+- Web にも HTTP API にも Owner を作る・復旧する経路はありません（`tests/test_owner_no_web_path.py` が固定しています）。
+- 管理コマンド `python -m paw_backend.cli` は Backend の Package の一部で、Server 上で DB の認証情報（`PAW_DATABASE_URL`）を使って実行します。
+  [`apps/cli/`](../cli/README.md) の Client は Backend の公開 HTTP API だけを呼ぶため、**最初の Owner を作れず**、復旧もできません（HTTP API に該当する経路がないためです）。
+- コマンドが作るのは Owner の行（`invited`、認証情報なし）と 1 回限りの Token だけです。Password と Passkey の登録は Token を受け取る Web 側（PAW-022 / PAW-023）が行います。
+
+### 手順
+
+前提: Backend と同じ環境変数（`PAW_DATABASE_URL` など）を読める OS User でその Server にログインし、`alembic upgrade head` を適用済みであること。
+環境変数のファイルは、Backend を動かす User だけが読める権限にしてください（`sudo -u <backend user> ...` で実行する運用を想定しています。コマンド自身は OS User を確認しません）。
+
+```bash
+# 初回。login name は小文字の英数字と . _ - （3〜64 文字。大文字は小文字へ、全角は半角へ正規化する）
+python -m paw_backend.cli owner-setup --login-name tomoki
+```
+
+- **stdout に Token だけが 1 行**出ます（`pawst1.<id>.<secret>`）。stderr に owner_id、login name、有効期限が出ます。Token は**この 1 回しか表示されません**（保存しないため再表示できません）。
+  端末のスクロールバックの記録、`tee`、CI の Log、`script` に Token を残さないでください。`TOKEN=$(...)` のように取り込めますが、Shell の履歴やプロセス一覧に出さないでください（Token は引数ではなく出力です）。
+- Token を Web の Setup 画面へ入力します（PAW-022 で実装。それまでは受け取る側がありません）。**有効期間は既定で 30 分**（`PAW_SETUP_TOKEN_TTL_SECONDS`）、使えるのは 1 回だけです。
+- Owner は Passkey が必須です（`users.passkey_required = true`）。Passkey の登録の強制は PAW-023 です。
+
+```bash
+# Owner が全 Passkey / 端末を失った、または Token を失ったとき
+python -m paw_backend.cli owner-recover --confirm-owner-recovery
+```
+
+- `owner-recover` は既存の Owner に**新しい Recovery Token を発行**し、その Owner の未使用の Token（Setup / Recovery）をすべて無効にします。確認フラグ `--confirm-owner-recovery` がないと何もしません。
+- **Token を失った場合**（Setup の直後を含む）: `owner-setup` はもう実行できません（Owner が存在するため拒否され、終了コードは 1）。`owner-recover` を実行してください。古い Token は使えなくなります。
+- **Token の有効期限が切れた場合**、**試行回数を使い切った場合**（下記）も同じです。
+- Recovery Token で Owner を復旧する Web 側は、既存の全 Session を失効させる必要があります（要件「Owner Recovery では既存 Session を全失効」）。その実装は PAW-022 です。
+
+| 終了コード | 意味 |
+| --- | --- |
+| `0` | 成功 |
+| `1` | 拒否・不正: Owner が既にいる（`owner-setup`）、復旧する Owner がいない、login name が不正、確認フラグなし、引数の誤り |
+| `2` | 環境のエラー: 設定が不正、`PAW_DATABASE_URL` 未設定、DB に接続できない・Migration 未適用・権限不足、Audit を書けない（この場合は何も変更しない） |
+
+- DB の接続先は設定（`PAW_DATABASE_URL`）からだけ読み、引数では受け取りません（`--database-url` は使えず、誤って渡された値も表示しません）。`PAW_MIGRATION_DATABASE_URL` は使いません。
+  Application が制限された Role（`PAW_APP_DATABASE_ROLE`）で動く構成でも、同じ `PAW_DATABASE_URL` で実行できます（Migration `0021` が Role に `users` と `setup_tokens` の SELECT / INSERT / UPDATE を与えます。DELETE は与えません）。
+- 出力するのは Token（stdout に 1 回）と、ID、有効期限、対処の案内だけです。Token 以外の Secret は出さず、例外のメッセージは出さず（型名だけ）、traceback も出しません。
+- `--json` はありません（Token を出す必要があり、Token を含まない JSON は目的に役立たないため）。
+
+### Token
+
+- 形式は `pawst1.<Token ID>.<Secret>`。Secret は OS の CSPRNG（`secrets`）の **32 byte（256 bit）**です。Token ID は公開してよい値で、どの行かを示し、試行の回数を Token ごとに数えるために使います。
+- DB には **Token を保存しません**。Token ごとの乱数 Salt を鍵にした HMAC-SHA256 だけを保存します（Secret が高 Entropy のため、Password 用の遅い Hash は不要です）。比較は `hmac.compare_digest`（定数時間）です。
+  Token は `IssuedToken`（`repr` に出ない）以外の場所に存在せず、Log、DB の行、Audit のどこにも入りません（Test が SQL の Log と全 Table の行を検査します）。
+- **1 回限り**。消費は `UPDATE ... WHERE used_at IS NULL AND revoked_at IS NULL AND expires_at > now` の 1 文で行うため、同時に 2 回使っても片方だけが成功します。
+  1 人の User について、未使用で無効になっていない Token は最大 1 つです（Partial Unique Index）。新しく発行すると、古い Token は先に無効にされます（`owner-recover`）。
+- **有効期限**は `PAW_SETUP_TOKEN_TTL_SECONDS`（既定 1800、60〜86400）。期限ちょうどの時刻は無効です。
+- **試行の上限**は Token ごとに `PAW_SETUP_TOKEN_MAX_ATTEMPTS`（既定 5、1〜20）です。試行は Secret を比較する**前に**予約して Commit するため、同時に大量の Request が来ても比較は上限回までしか行われません。
+  上限に達した Token は、正しい Token でも二度と使えません（`owner-recover` で新しい Token を発行してください）。
+- **失敗はすべて同じ失敗**です。`SetupTokenRejectedError`（固定の Message）は、Token が間違い・未知・形式不正・期限切れ・使用済み・無効化済み・試行上限超過・Owner でなくなった User のどれでも同じで、Message にも Cause にも違いがありません。
+  Secret の比較、HMAC の計算、試行の予約のための DB 往復は、形式不正・未知の Token でも同じ回数行います（Test が回数を検査します）。理由は Audit にだけ残ります。
+
+### Audit
+
+すべての操作を、既存の `AuditSink`（PAW-025）へ ID と列挙値だけで記録します。Login name、Token、Secret は入りません。CLI の操作の `actor_role` は `system`、`actor_id` は空です（実行した OS User は記録できません）。
+
+| `action` | `decision` / `reason` | 内容 |
+| --- | --- | --- |
+| `owner.create` | allow `created`（`new_role=owner`）/ deny `owner_exists`、`login_name_taken` | Owner の作成 |
+| `owner.setup_token.issue` | allow `issued` | Setup Token の発行（`resource_kind=setup_token`） |
+| `owner.recovery_token.issue` | allow `issued` / deny `owner_missing` | Recovery Token の発行 |
+| `owner.token.revoke` | allow `superseded` | 復旧で無効にした未使用の Token（1 つにつき 1 行） |
+| `owner.token.redeem` | allow `redeemed`（`actor_id` は Owner）/ deny `token_mismatch`、`token_expired`、`token_used`、`token_revoked`、`token_unavailable`、`user_not_eligible`、`attempts_exhausted` | Token の使用と失敗 |
+
+- **失敗した使用の Audit 行は Token ごとに最大 `max_attempts + 1` 行**です（予約した試行ごとに 1 行と、上限に達したときの `attempts_exhausted` 1 行）。上限後の試行は Audit に書かず、Log に固定の 1 行を出すだけです。
+- **未知の Token ID と形式不正の Token は DB に書かず**、Log に固定の 1 行（Token も ID も含まない）だけです。誰でも作れる行になり、Audit の Table は削除できないためです（PAW-025 の未認証の拒否と同じ方針）。
+- **Fail-closed**: 発行・使用の Audit は DB の Transaction が Commit される**前**に書きます。書けなければ Transaction を戻し、Token は作られず、表示もされません（終了コード 2）。
+  Audit の後で Commit が失敗した場合は、起きていない操作の Audit 行が残り得ます（Token は表示されません）。拒否の Audit は Best Effort で、書けなくても拒否のままです。
+
+### PAW-022 / PAW-023 との接続
+
+`paw_backend.identity.OwnerSetupService` が Web 側に使わせる API です。HTTP の Endpoint はこの Issue では追加していません。
+
+```python
+service = OwnerSetupService.from_settings(
+    settings, database, PostgresAuditSink(database)
+)
+
+
+async def set_password(
+    session: AsyncSession, redemption: Redemption
+) -> (
+    None
+): ...  # 同じ Transaction で Password を設定し、users.status を active にする、など
+
+
+redemption = await service.redeem(token_from_request, apply=set_password)
+# Redemption: user_id, token_id, purpose (setup / recovery), user_status, passkey_required
+```
+
+- `redeem` は Token を消費し、`apply` を**同じ Transaction の中で**実行してから Commit します。`apply` が例外を出すと全体を Rollback し（Token は消費されず、例外はそのまま伝わります）、消費と Password の設定は 1 つの単位になります。
+  ただし試行の予約は先に Commit されるため、入力の検証は `redeem` の前に行ってください。
+- `redeem` は User を作らず、`users.status` を変えず、Session も作りません。`invited` から `active` への移行、Password、Session（Recovery のときは既存 Session の全失効）は PAW-022、Passkey は PAW-023 の責務です。
+- Web の Endpoint は誰でも呼べる**公開 Route**になるため、`tests/test_authz_routes.py` の `PUBLIC_ROUTES` に理由付きで載せ、Client 単位の Rate Limit を付けてください。
+  未知の Token ID への試行は数える相手がなく、上限は Token ごとにしか効きません。
+- **Passkey の必須化**: `users.passkey_required` は Owner と Admin では DB の CHECK 制約で `false` にできず、`Redemption.passkey_required` も `true` です。
+  PAW-023 は、Passkey を 1 つも登録していない `passkey_required` の User に、Passkey の登録以外を許さない必要があります。
+- Owner は DB の Partial Unique Index で 1 人に制限されます。Ownership の移譲（`Authorizer.authorize_ownership_transfer`）は、同じ Transaction で先に旧 Owner を降格してから新しい Owner にしてください。
+
+### `users` と `setup_tokens`
+
+`users`: `id`（UUID）、`login_name`（正規化済み・一意）、`system_role`（`owner` / `admin` / `user`。`system` は人間の User ではなく行を持たない）、
+`status`（`invited` / `active` / `pending_deletion` / `deleted`。要件の User Lifecycle）、`passkey_required`、`created_at`、`updated_at`。
+**Password の Hash、Session、Passkey の列はありません**（PAW-022 / PAW-023 が追加します）。
+`setup_tokens`: `id`（Token ID）、`user_id`（`users` への外部キー、`ON DELETE CASCADE`）、`purpose`（`setup` / `recovery`）、`salt`、`secret_hash`、`created_at`、`expires_at`、`used_at`、`revoked_at`、`attempts`。
+列挙値と制約（login name の形式を含む）は DB の CHECK 制約でも強制します。
+
+Login name は小文字の ASCII 英数字と `.` `_` `-` だけ（3〜64 文字、先頭と末尾は英数字）です。Unicode の互換形（全角など）は NFKC で正規化し、それ以外の文字は受け付けません。
+紛らわしい文字を避けるための暫定の規則で、仕様として確定したものではありません（Open question）。
+
+### 既知の制限
+
+- Token ID を知っている人は、試行を使い切らせて正規の使用を妨げられます（Token ID は Token の一部で、通常は Token を知る人しか持ちません）。回復は `owner-recover` です。
+- 比較と DB 往復の回数は全経路で同じですが、**時間そのものは揃えていません**。既存の Token に対する失敗だけは Audit の INSERT が加わるため僅かに長く、これを観測できるのは Token ID を知る人だけです。
+- 実行した OS User は Audit に残りません（Server の `sudo` の Log などで補ってください）。コマンドが Server 上で実行されていることは確認できず、DB の認証情報を読める人が実行できる、という前提です。
+- 発行・使用の成功時は Transaction と Audit のために接続を 2 本同時に使います（Pool の既定は 5）。失敗の経路は同時に持ちません。
+- Recovery Token の使用後に Passkey と Session をどうするかの実装は PAW-022 / PAW-023 です。この Issue の範囲は、Token の発行・使用・失効と Audit までです。
 
 ## Memory / Conversation Schema
 
@@ -475,7 +607,7 @@ Scope を広げる編集は新しい Version で行うため、旧 Version は�
 `confirmation_state`（`observed` / `inferred` / `confirmed` / `rejected`）、`freshness_policy`（`permanent` / `revalidate` / `repo_commit` / `expiring` / `session_only`）と、
 方針ごとの必須項目（`verified_at`、`revalidate_after`、`commit_sha`、`expires_at`）、`actor`、`change_reason` も Version が持ちます。
 
-**User / Project / Repo の ID は Foreign Key なし。** User、Project、Repo の Table はまだありません（PAW-021 / 026 / 027）。
+**User / Project / Repo の ID は Foreign Key なし。** Project と Repo の Table はまだありません（PAW-026 / 027）。`users`（PAW-021）はありますが、Migration の順序が統合後に決まるため、この Schema からの外部キーは付けていません。
 `owner_user_id`、`project_id`、`repo_id`、`actor_user_id` は素の UUID Column で、DB は存在を確認しません。
 Backend は検証した ID だけを書いてください。Table ができた後の Migration で Foreign Key を追加できます。
 Task、Repo 解析、Project Decision の出典も、Table がないため `memory_sources.source_ref` の不透明な文字列です。
@@ -501,8 +633,9 @@ CI は pre-commit の専用環境で Test を実行するため、同じ Version
 
 ## 今後の Issue
 
-[PAW-021](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/18)（Owner Setup）、PAW-022（Login / Session）、
+[PAW-021](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/18)（Owner Setup）、
 RBAC（PAW-025）、Task Lifecycle（PAW-032）、Memory Schema（PAW-040）は、この Skeleton の上に実装済みです。
+PAW-022（Login / Session / Password）と PAW-023（Passkey / Step-up）は Owner Setup の Token を受け取る側で、まだありません。
 Memory の保存・整理・検索は PAW-041 以降で、Memory Schema の上に実装します。
 受け入れ基準は [Implementation Backlog](../../docs/IMPLEMENTATION_BACKLOG.md)、
 実装時に選択できる事項は [Requirements Freeze Review](../../docs/REQUIREMENTS_FREEZE_REVIEW.md) を参照してください。
