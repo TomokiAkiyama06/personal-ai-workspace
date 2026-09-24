@@ -5,15 +5,18 @@ from __future__ import annotations
 import inspect
 import json
 import math
+import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
 from functools import lru_cache
+from numbers import Real
 from pathlib import Path
 from typing import Protocol
 
 from jsonschema import Draft202012Validator
 
+from benchmarks.candidate_adapter import CandidateErrorCode
 from benchmarks.json_input import decode_json
 from benchmarks.memory_worker_metrics import (
     MemoryComparison,
@@ -204,6 +207,7 @@ class BenchmarkReport:
     cases: tuple[BenchmarkResult, ...]
     metrics: dict[str, float | None]
     resources: dict[str, object] | None = None
+    timeout_seconds: float | None = None
 
     def to_dict(self) -> dict[str, object]:
         """Convert report to a JSON-serializable dictionary."""
@@ -222,6 +226,8 @@ class BenchmarkReport:
         }
         if self.resources is not None:
             result["resources"] = self.resources
+        if self.timeout_seconds is not None:
+            result["timeout_seconds"] = self.timeout_seconds
         return result
 
 
@@ -249,18 +255,93 @@ def validate_worker(worker: object) -> None:
         ) from None
 
 
+# Every case gets the same deadline so candidates are compared under one timeout
+# (docs/BENCHMARK_EVALUATOR.md "Fair comparison rules"). Generous: it only has to
+# stop a stalled call, and a slow local model must not be failed by it.
+DEFAULT_TIMEOUT_SECONDS = 120.0
+
+# The public failure code the Candidate adapter interface uses for a missed
+# deadline; it is recorded as the case's ``error_type``.
+DEADLINE_EXCEEDED = CandidateErrorCode.DEADLINE_EXCEEDED.value
+
+
+def validate_timeout_seconds(value: object) -> float:
+    """Return ``value`` as a float, or raise ``ValueError`` unless it is a positive, finite number.
+
+    Same rule as ``WorktreeRunner.execute`` and ``AttemptControl``: a bool, NaN,
+    infinity or zero would otherwise mean "no deadline" or an instant failure.
+    """
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, Real)
+        or not math.isfinite(value)
+        or value <= 0
+    ):
+        raise ValueError("timeout_seconds must be a finite number above zero")
+    return float(value)
+
+
+class _ExtractCall:
+    """One ``worker.extract`` call in a daemon thread that the runner can abandon.
+
+    Python cannot interrupt a thread, so a call that misses its deadline keeps
+    running until it returns on its own; its output is never read. The thread is a
+    daemon so that it cannot keep the interpreter from exiting, and it catches
+    everything itself so no traceback (which can carry exception text) reaches
+    stderr.
+    """
+
+    def __init__(self, worker: MemoryWorker, input_text: str) -> None:
+        self._worker = worker
+        self._input_text = input_text
+        self._finished = threading.Event()
+        self._output: str = ""
+        self._error: BaseException | None = None
+        self._thread = threading.Thread(
+            target=self._run, name="memory-worker-extract", daemon=True
+        )
+
+    def _run(self) -> None:
+        try:
+            self._output = self._worker.extract(self._input_text)
+        except BaseException as error:  # noqa: BLE001 - handed to the runner's thread, which decides.
+            self._error = error
+        finally:
+            self._finished.set()
+
+    def result(self, timeout_seconds: float) -> tuple[str, str | None]:
+        """Return ``(raw_output, error_type)``; ``error_type`` is None on success."""
+        self._thread.start()
+        if not self._finished.wait(timeout_seconds):
+            return "", DEADLINE_EXCEEDED
+        error = self._error
+        if error is None:
+            return self._output, None
+        if not isinstance(error, Exception):
+            raise error  # SystemExit and the like are not "a failed case".
+        return "", type(error).__name__
+
+
 def run_benchmark(
     worker: MemoryWorker,
     cases: Sequence[MemoryWorkerCase],
     *,
     clock: Callable[[], float] = time.monotonic,
     metrics_collector: MetricsCollector | None = None,
+    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
 ) -> BenchmarkReport:
     """Run the Memory Worker benchmark over ``cases``.
 
     Latency covers only ``worker.extract``. A worker that raises is recorded as a
-    failed case with empty predictions and the run continues.
+    failed case with empty predictions and the run continues. Each call runs in a
+    helper thread with a deadline of ``timeout_seconds``: a call that has not
+    returned by then is abandoned and recorded as a failed case with
+    ``error_type`` ``"deadline_exceeded"`` (its latency is the time waited), so a
+    stalled worker costs at most ``len(cases) * timeout_seconds`` instead of
+    hanging the run. The abandoned call cannot be stopped and may still be running
+    when the next case starts.
     """
+    timeout_seconds = validate_timeout_seconds(timeout_seconds)
     validate_worker(worker)
     results: list[BenchmarkResult] = []
     raw_outputs: list[str] = []
@@ -269,12 +350,10 @@ def run_benchmark(
         metrics_collector.start()
     try:
         for case in cases:
-            error_type = None
             started = clock()
-            try:
-                raw_output = worker.extract(case.input_text)
-            except Exception as error:  # noqa: BLE001 - one failing worker call must not end the run.
-                raw_output, error_type = "", type(error).__name__
+            raw_output, error_type = _ExtractCall(worker, case.input_text).result(
+                timeout_seconds
+            )
             latency_ms = (clock() - started) * 1000
 
             raw_outputs.append(raw_output)
@@ -307,4 +386,5 @@ def run_benchmark(
         resources=metrics_collector.metrics()
         if metrics_collector is not None
         else None,
+        timeout_seconds=timeout_seconds,
     )

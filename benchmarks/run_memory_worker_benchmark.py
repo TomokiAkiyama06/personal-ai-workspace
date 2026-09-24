@@ -3,7 +3,8 @@
 The worker is supplied as ``module:factory``. The factory is called without
 arguments and must return an object with ``extract(input_text) -> str``. Only
 point ``--worker`` at trusted code: the module is imported and the factory runs
-with the caller's permissions.
+with the caller's permissions. Each ``extract`` call has a deadline
+(``--timeout-seconds``); a call that misses it is a failed case.
 """
 
 from __future__ import annotations
@@ -15,8 +16,10 @@ import sys
 from pathlib import Path
 
 from benchmarks.memory_worker_runner import (
+    DEFAULT_TIMEOUT_SECONDS,
     load_cases,
     run_benchmark,
+    validate_timeout_seconds,
     validate_worker,
 )
 from benchmarks.metrics_collector import MetricsCollector, NvidiaSmiGpuSampler
@@ -32,6 +35,15 @@ def _create_worker(spec: str):
     return worker
 
 
+def _timeout_argument(text: str) -> float:
+    try:
+        return validate_timeout_seconds(float(text))
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            "must be a finite number of seconds above zero"
+        ) from None
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run the Memory Worker benchmark.")
     parser.add_argument("--cases", required=True, type=Path, help="cases JSON file")
@@ -42,6 +54,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--output", type=Path, help="write the JSON report to this file, not stdout"
+    )
+    parser.add_argument(
+        "--timeout-seconds",
+        type=_timeout_argument,
+        default=DEFAULT_TIMEOUT_SECONDS,
+        help="deadline for each extract() call; a call that misses it is a failed "
+        f"case, not a hang (default: {DEFAULT_TIMEOUT_SECONDS:g}). Use the same "
+        "value for every candidate",
     )
     parser.add_argument(
         "--collect-resources",
@@ -69,7 +89,12 @@ def main(argv: list[str] | None = None) -> int:
             if arguments.collect_resources
             else None
         )
-        report = run_benchmark(worker, cases, metrics_collector=collector)
+        report = run_benchmark(
+            worker,
+            cases,
+            metrics_collector=collector,
+            timeout_seconds=arguments.timeout_seconds,
+        )
     except (TypeError, ValueError) as error:
         print(
             f"worker returned an invalid result ({type(error).__name__})",

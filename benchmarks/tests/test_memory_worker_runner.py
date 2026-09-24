@@ -1,7 +1,12 @@
 """Tests for the memory worker benchmark runner."""
 
+import contextlib
+import io
 import json
+import math
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -12,6 +17,7 @@ from benchmarks.memory_worker_metrics import (
     schema_adherence,
 )
 from benchmarks.memory_worker_runner import (
+    DEFAULT_TIMEOUT_SECONDS,
     MemoryWorkerCase,
     _output_schema,
     load_cases,
@@ -696,6 +702,142 @@ class MemoryWorkerRunnerTest(unittest.TestCase):
             finally:
                 os.chdir(previous)
         self.assertEqual(len(records), 1)
+
+
+class HangingWorker:
+    """Blocks inside ``extract`` until released, like a stalled inference.
+
+    Call numbers (0-based) in ``hang_on`` block; ``None`` blocks every call. The
+    wait is bounded so a broken test cannot leave a thread behind for long, and
+    ``shutdown`` releases and joins every call deterministically.
+    """
+
+    def __init__(self, hang_on=None):
+        self.hang_on = hang_on
+        self.release = threading.Event()
+        self.threads = []
+        self.calls = 0
+
+    def extract(self, input_text):
+        index = self.calls
+        self.calls += 1
+        self.threads.append(threading.current_thread())
+        if self.hang_on is None or index in self.hang_on:
+            self.release.wait(60)
+        return VALID_OUTPUT.replace("favorite_color", "k")
+
+    def shutdown(self):
+        self.release.set()
+        for thread in self.threads:
+            thread.join(10)
+
+
+class ExtractDeadlineTest(unittest.TestCase):
+    @staticmethod
+    def _cases(count):
+        return MemoryWorkerRunnerTest._cases(count)
+
+    def _hanging_worker(self, hang_on=None):
+        worker = HangingWorker(hang_on)
+        self.addCleanup(worker.shutdown)
+        return worker
+
+    def test_a_worker_that_never_returns_cannot_hang_the_run(self):
+        worker = self._hanging_worker()
+        started = time.monotonic()
+
+        report = run_benchmark(worker, self._cases(3), timeout_seconds=0.2)
+
+        # Without a deadline the run would wait for the worker's 60 s bound.
+        self.assertLess(time.monotonic() - started, 30)
+        self.assertEqual(worker.calls, 3)
+        self.assertEqual(len(report.cases), 3)
+        for result in report.cases:
+            self.assertEqual(result.error_type, "deadline_exceeded")
+            self.assertFalse(result.schema_valid)
+            self.assertEqual(result.comparison.matched, 0)
+            self.assertEqual(result.comparison.predicted_count, 0)
+            self.assertEqual(result.comparison.gold_count, 1)
+            self.assertGreaterEqual(result.latency_ms, 200)
+        self.assertEqual(report.metrics["extraction_recall"], 0.0)
+        self.assertEqual(report.metrics["schema_adherence_rate"], 0.0)
+
+    def test_each_case_gets_its_own_deadline_and_the_run_continues(self):
+        worker = self._hanging_worker(hang_on={1})
+
+        report = run_benchmark(worker, self._cases(3), timeout_seconds=2.0)
+
+        self.assertEqual(
+            [result.error_type for result in report.cases],
+            [None, "deadline_exceeded", None],
+        )
+        self.assertEqual(
+            [result.schema_valid for result in report.cases], [True, False, True]
+        )
+        self.assertEqual(report.metrics["extraction_recall"], 2 / 3)
+        self.assertEqual(report.metrics["schema_adherence_rate"], 2 / 3)
+
+    def test_the_deadline_is_reported_in_the_report(self):
+        report = run_benchmark(
+            MockWorker([VALID_OUTPUT]), self._cases(1), timeout_seconds=45
+        )
+
+        self.assertEqual(report.timeout_seconds, 45)
+        self.assertEqual(report.to_dict()["timeout_seconds"], 45)
+        default_report = run_benchmark(MockWorker([VALID_OUTPUT]), self._cases(1))
+        self.assertEqual(default_report.timeout_seconds, DEFAULT_TIMEOUT_SECONDS)
+
+    def test_a_default_deadline_applies_when_none_is_given(self):
+        self.assertTrue(math.isfinite(DEFAULT_TIMEOUT_SECONDS))
+        self.assertGreater(DEFAULT_TIMEOUT_SECONDS, 0)
+
+    def test_the_call_runs_in_a_daemon_thread_so_a_stuck_call_cannot_block_exit(self):
+        seen = []
+
+        class Recording:
+            def extract(self, input_text):
+                seen.append(threading.current_thread())
+                return VALID_OUTPUT
+
+        run_benchmark(Recording(), self._cases(1), timeout_seconds=30)
+
+        self.assertEqual(len(seen), 1)
+        self.assertIsNot(seen[0], threading.main_thread())
+        self.assertTrue(seen[0].daemon)
+
+    def test_an_invalid_deadline_is_rejected_before_the_worker_is_called(self):
+        for value in (0, -1, 0.0, math.inf, -math.inf, math.nan, True, "5", None, [1]):
+            with self.subTest(value=value):
+                worker = MockWorker([VALID_OUTPUT])
+                with self.assertRaises(ValueError) as caught:
+                    run_benchmark(worker, self._cases(1), timeout_seconds=value)
+                self.assertEqual(
+                    str(caught.exception),
+                    "timeout_seconds must be a finite number above zero",
+                )
+                self.assertEqual(worker.call_count, 0)
+
+    def test_worker_errors_are_still_reported_by_type_only_and_never_printed(self):
+        class Raising:
+            def extract(self, input_text):
+                raise KeyError("SECRET-DETAIL")
+
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            report = run_benchmark(Raising(), self._cases(1), timeout_seconds=30)
+
+        self.assertEqual(report.cases[0].error_type, "KeyError")
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertNotIn("SECRET-DETAIL", json.dumps(report.to_dict()))
+
+    def test_a_base_exception_from_the_worker_still_ends_the_run(self):
+        class Exiting:
+            def extract(self, input_text):
+                raise SystemExit(3)
+
+        with self.assertRaises(SystemExit) as caught:
+            run_benchmark(Exiting(), self._cases(1), timeout_seconds=30)
+        self.assertEqual(caught.exception.code, 3)
 
 
 VALID_OUTPUT = json.dumps(

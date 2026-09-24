@@ -7,7 +7,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from benchmarks.memory_worker_runner import DEFAULT_TIMEOUT_SECONDS
 from benchmarks.run_memory_worker_benchmark import main
+from benchmarks.tests.fixture_workers import release_hanging_workers
 
 FIXTURES = Path(__file__).parent / "fixtures" / "memory-worker"
 VALID_CASES = str(FIXTURES / "valid-cases.json")
@@ -30,7 +32,51 @@ class RunMemoryWorkerBenchmarkTest(unittest.TestCase):
         report = json.loads(stdout)
         self.assertEqual(len(report["cases"]), 2)
         self.assertEqual(report["metrics"]["schema_adherence_rate"], 1.0)
+        self.assertEqual(report["timeout_seconds"], DEFAULT_TIMEOUT_SECONDS)
         self.assertNotIn("The user mentioned", stdout)
+
+    def test_a_stalled_worker_is_cut_off_by_the_deadline(self):
+        self.addCleanup(release_hanging_workers)
+
+        code, stdout, stderr = run_cli(
+            "--cases",
+            VALID_CASES,
+            "--worker",
+            "benchmarks.tests.fixture_workers:make_hanging_worker",
+            "--timeout-seconds",
+            "0.2",
+        )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(stderr, "")
+        report = json.loads(stdout)
+        self.assertEqual(report["timeout_seconds"], 0.2)
+        self.assertEqual(
+            [case["error_type"] for case in report["cases"]],
+            ["deadline_exceeded", "deadline_exceeded"],
+        )
+        self.assertEqual(report["metrics"]["schema_adherence_rate"], 0.0)
+        self.assertEqual(report["metrics"]["extraction_recall"], 0.0)
+
+    def test_an_invalid_deadline_is_a_usage_error(self):
+        for value in ("0", "-1", "nan", "inf", "abc", ""):
+            with self.subTest(value=value):
+                stderr = io.StringIO()
+                with (
+                    contextlib.redirect_stderr(stderr),
+                    self.assertRaises(SystemExit) as caught,
+                ):
+                    main(
+                        [
+                            "--cases",
+                            VALID_CASES,
+                            "--worker",
+                            WORKER,
+                            f"--timeout-seconds={value}",
+                        ]
+                    )
+                self.assertEqual(caught.exception.code, 2)
+                self.assertIn("--timeout-seconds", stderr.getvalue())
 
     def test_report_is_written_to_the_output_file(self):
         with tempfile.TemporaryDirectory() as directory:
