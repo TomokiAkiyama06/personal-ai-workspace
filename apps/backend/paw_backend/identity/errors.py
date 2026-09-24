@@ -24,6 +24,18 @@ class OwnerAlreadyExistsError(IdentityError):
         super().__init__("an Owner already exists")
 
 
+class OwnerNotLiveError(IdentityError):
+    """An Owner row exists but is pending deletion or deleted.
+
+    Neither the initial setup nor recovery applies to it. ``status`` is the
+    enum value (``pending_deletion`` / ``deleted``), safe to show.
+    """
+
+    def __init__(self, status: str) -> None:
+        super().__init__(f"the Owner account exists but its status is {status}")
+        self.status = status
+
+
 class LoginNameTakenError(IdentityError):
     def __init__(self) -> None:
         super().__init__("the login name is already in use")
@@ -47,6 +59,18 @@ class SetupTokenRejectedError(IdentityError):
 
     def __init__(self) -> None:
         super().__init__("the token was not accepted")
+
+
+class RedeemHookError(IdentityError):
+    """The ``apply`` hook of ``redeem`` ended the transaction it was lent.
+
+    The hook may write through the session it is given, but committing, rolling
+    back or closing it would leave a consumed token without its audit event (or
+    the opposite), so ``redeem`` refuses and rolls everything back.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("the redeem hook must not commit, roll back or close")
 
 
 class AuditUnavailableError(IdentityError):

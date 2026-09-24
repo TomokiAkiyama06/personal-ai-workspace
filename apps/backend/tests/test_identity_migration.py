@@ -16,8 +16,9 @@ from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
+from pydantic import ValidationError
 from sqlalchemy import CheckConstraint, ForeignKeyConstraint, create_engine, text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from paw_backend.authz import SystemRole
 from paw_backend.db import Base
@@ -30,8 +31,6 @@ from paw_backend.identity import (
 from paw_backend.identity.models import USER_ROLES
 
 from .identity_support import (
-    APP_ROLE,
-    ROLE_PASSWORD,
     migrate,
     requires_postgres,
     sync_database_url,
@@ -168,16 +167,86 @@ class OfflineMigrationTest(unittest.TestCase):
         )
         self.assertNotIn("GRANT", sql)
 
-    def test_the_application_role_gets_no_delete_privilege(self):
+    def test_the_web_role_gets_no_insert_and_no_broad_update(self):
         sql = self.sql(
             "upgrade",
             f"{previous_revision()}:{REVISION}",
             PAW_APP_DATABASE_ROLE="paw_app",
         )
 
-        self.assertIn('GRANT SELECT, INSERT, UPDATE ON users TO "paw_app"', sql)
-        self.assertIn('GRANT SELECT, INSERT, UPDATE ON setup_tokens TO "paw_app"', sql)
+        self.assertIn('GRANT SELECT ON users, setup_tokens TO "paw_app"', sql)
+        self.assertIn('GRANT UPDATE (updated_at) ON users TO "paw_app"', sql)
+        self.assertIn(
+            'GRANT UPDATE (attempts, used_at, locked_at) ON setup_tokens TO "paw_app"',
+            sql,
+        )
+        grants = [line for line in sql.splitlines() if line.startswith("GRANT")]
+        self.assertEqual(len(grants), 3)
+        for line in grants:
+            self.assertNotIn("INSERT", line)
+            self.assertNotIn("DELETE", line)
+
+    def test_the_operator_role_may_insert_and_update_only_what_the_commands_need(
+        self,
+    ):
+        sql = self.sql(
+            "upgrade",
+            f"{previous_revision()}:{REVISION}",
+            PAW_OPERATOR_DATABASE_ROLE="paw_op",
+        )
+
+        self.assertIn('GRANT SELECT, INSERT ON users, setup_tokens TO "paw_op"', sql)
+        self.assertIn(
+            'GRANT UPDATE (system_role, updated_at) ON users TO "paw_op"', sql
+        )
+        self.assertIn('GRANT UPDATE (revoked_at) ON setup_tokens TO "paw_op"', sql)
+        self.assertIn("IF to_regclass('audit_events') IS NOT NULL", sql)
+        self.assertIn('GRANT INSERT ON audit_events TO "paw_op"', sql)
         self.assertNotIn("DELETE", sql.replace("ON DELETE CASCADE", ""))
+        self.assertNotIn('TO "paw_app"', sql)
+
+    def test_a_hostile_role_name_never_reaches_the_sql(self):
+        output = io.StringIO()
+        with paw_environment(
+            PAW_DATABASE_URL="postgresql://u:p@db.invalid/paw",
+            PAW_OPERATOR_DATABASE_ROLE='x"; DROP TABLE users; --',
+        ):
+            with self.assertRaises(ValidationError):
+                command.upgrade(offline_config(output), "head", sql=True)
+        self.assertNotIn("DROP TABLE users", output.getvalue())
+
+    def test_the_setup_token_guard_trigger_is_created_and_dropped(self):
+        up = self.sql("upgrade", f"{previous_revision()}:{REVISION}")
+        down = self.sql("downgrade", f"{REVISION}:{previous_revision()}")
+
+        self.assertIn("CREATE FUNCTION paw_guard_setup_tokens_update()", up)
+        self.assertIn(
+            "ALTER TABLE setup_tokens ENABLE ALWAYS TRIGGER "
+            "tr_setup_tokens_guard_update",
+            up,
+        )
+        self.assertIn("DROP FUNCTION paw_guard_setup_tokens_update()", down)
+
+    def test_a_shared_role_and_a_missing_operator_role_are_warned_about(self):
+        with self.assertLogs("paw_backend.migrations.0021", level="WARNING") as logs:
+            self.sql(
+                "upgrade",
+                f"{previous_revision()}:{REVISION}",
+                PAW_APP_DATABASE_ROLE="paw_same",
+                PAW_OPERATOR_DATABASE_ROLE="paw_same",
+            )
+        self.assertIn("the same role", "\n".join(logs.output))
+        with self.assertLogs("paw_backend.migrations.0021", level="WARNING") as logs:
+            self.sql(
+                "upgrade",
+                f"{previous_revision()}:{REVISION}",
+                PAW_MIGRATION_DATABASE_URL="postgresql://own:pw@db.invalid/paw",
+            )
+        text_ = "\n".join(logs.output)
+        self.assertIn("PAW_OPERATOR_DATABASE_ROLE", text_)
+        self.assertNotIn("pw@", text_)
+        with self.assertNoLogs("paw_backend.migrations.0021", level="WARNING"):
+            self.sql("upgrade", f"{previous_revision()}:{REVISION}")
 
     def test_downgrade_drops_the_tokens_before_the_users(self):
         sql = self.sql("downgrade", f"{REVISION}:{previous_revision()}")
@@ -397,6 +466,7 @@ class IdentityMigrationDatabaseTest(unittest.TestCase):
     def insert_token(self, connection, user_id, **overrides) -> uuid.UUID:
         values = {
             "id": uuid.uuid4(),
+            "audit_ref": uuid.uuid4(),
             "user_id": user_id,
             "purpose": "setup",
             "salt": bytes(16),
@@ -406,13 +476,19 @@ class IdentityMigrationDatabaseTest(unittest.TestCase):
             "used_at": None,
             "revoked_at": None,
             "attempts": 0,
+            "locked_at": None,
+            "issued_by_uid": None,
+            "issued_by_sudo_uid": None,
         }
         values.update(overrides)
         connection.execute(
             text(
-                "INSERT INTO setup_tokens VALUES (:id, :user_id, :purpose, :salt, "
-                ":secret_hash, :created_at, :expires_at, :used_at, :revoked_at, "
-                ":attempts)"
+                "INSERT INTO setup_tokens (id, audit_ref, user_id, purpose, salt, "
+                "secret_hash, created_at, expires_at, used_at, revoked_at, attempts, "
+                "locked_at, issued_by_uid, issued_by_sudo_uid) VALUES (:id, "
+                ":audit_ref, :user_id, :purpose, :salt, :secret_hash, :created_at, "
+                ":expires_at, :used_at, :revoked_at, :attempts, :locked_at, "
+                ":issued_by_uid, :issued_by_sudo_uid)"
             ),
             values,
         )
@@ -533,6 +609,10 @@ class IdentityMigrationDatabaseTest(unittest.TestCase):
             "ck_setup_tokens_expires_after_creation": {"expires_at": NOW},
             "ck_setup_tokens_attempts_not_negative": {"attempts": -1},
             "ck_setup_tokens_used_or_revoked": {"used_at": NOW, "revoked_at": NOW},
+            "ck_setup_tokens_issued_by_uid_range": {"issued_by_uid": -1},
+            "ck_setup_tokens_issued_by_sudo_uid_range": {
+                "issued_by_sudo_uid": 4_294_967_296
+            },
         }
         for constraint, overrides in cases.items():
             with self.subTest(constraint):
@@ -563,6 +643,22 @@ class IdentityMigrationDatabaseTest(unittest.TestCase):
             self.insert_token(connection, user, used_at=NOW)
             self.insert_token(connection, user, revoked_at=NOW)
 
+    def test_the_audit_reference_is_unique_and_not_the_lookup_id(self):
+        migrate("upgrade", "head")
+        ref = uuid.uuid4()
+        with self.engine.begin() as connection:
+            first = self.insert_user(connection)
+            self.insert_token(connection, first, audit_ref=ref)
+            second = self.insert_user(connection)
+
+        self.assertEqual(
+            self.violated(lambda c: self.insert_token(c, second, audit_ref=ref)),
+            "uq_setup_tokens_audit_ref",
+        )
+        self.assertEqual(
+            self.scalars("SELECT count(*) FROM setup_tokens WHERE id = audit_ref"), [0]
+        )
+
     def test_deleting_a_user_removes_the_tokens(self):
         migrate("upgrade", "head")
         with self.engine.begin() as connection:
@@ -573,75 +669,107 @@ class IdentityMigrationDatabaseTest(unittest.TestCase):
 
         self.assertEqual(self.scalars("SELECT count(*) FROM setup_tokens"), [0])
 
-    # -- the application role -----------------------------------------------
+    # -- database roles -------------------------------------------------------
+    # The privileges themselves are tested with real non-superuser roles in
+    # test_owner_token_roles.py.
 
-    def drop_role(self) -> None:
-        with self.engine.begin() as connection:
-            exists = connection.execute(
-                text("SELECT count(*) FROM pg_roles WHERE rolname = :role"),
-                {"role": APP_ROLE},
-            ).scalar()
-            if exists:
-                connection.execute(text(f"DROP OWNED BY {APP_ROLE}"))
-                connection.execute(text(f"DROP ROLE {APP_ROLE}"))
+    def test_a_missing_role_fails_the_migration_loudly(self):
+        for setting in ("PAW_APP_DATABASE_ROLE", "PAW_OPERATOR_DATABASE_ROLE"):
+            with self.subTest(setting):
+                with self.assertRaises(RuntimeError):
+                    migrate("upgrade", "head", **{setting: "paw_no_such_role_021"})
+                migrate("downgrade", "base")
 
-    def privileges(self, table: str) -> dict[str, bool]:
-        return {
-            privilege: self.scalars(
-                "SELECT has_table_privilege(:role, :table, :privilege)",
-                role=APP_ROLE,
-                table=table,
-                privilege=privilege,
-            )[0]
-            for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE")
-        }
+    # -- the trigger that guards the token rows ------------------------------
 
-    def create_role(self) -> None:
-        self.drop_role()
-        self.addCleanup(self.drop_role)
-        with self.engine.begin() as connection:
-            connection.execute(
-                text(
-                    f"CREATE ROLE {APP_ROLE} LOGIN NOSUPERUSER NOCREATEDB "
-                    f"NOCREATEROLE PASSWORD '{ROLE_PASSWORD}'"
-                )
-            )
+    def token_row(self, connection, **overrides) -> uuid.UUID:
+        user = self.insert_user(connection)
+        return self.insert_token(connection, user, **overrides)
 
-    def test_the_application_role_may_read_insert_and_update_but_not_delete(self):
-        self.create_role()
+    def refused(self, sql: str, **params) -> str:
+        """The SQLSTATE of the error ``sql`` raises (it must raise)."""
+        with self.assertRaises(DBAPIError) as caught:
+            with self.engine.begin() as connection:
+                connection.execute(text(sql), params)
+        return caught.exception.orig.sqlstate
 
-        migrate("upgrade", "head", PAW_APP_DATABASE_ROLE=APP_ROLE)
-
-        expected = {
-            "SELECT": True,
-            "INSERT": True,
-            "UPDATE": True,
-            "DELETE": False,
-            "TRUNCATE": False,
-        }
-        for table in TABLES:
-            with self.subTest(table):
-                self.assertEqual(self.privileges(table), expected)
-
-    def test_without_an_application_role_nobody_else_gets_anything(self):
-        self.create_role()
-
+    def test_a_token_row_can_only_change_as_a_token_lives(self):
         migrate("upgrade", "head")
+        with self.engine.begin() as connection:
+            token = self.token_row(connection)
+        allowed = (
+            "UPDATE setup_tokens SET attempts = attempts + 1 WHERE id = :id",
+            "UPDATE setup_tokens SET locked_at = :now WHERE id = :id",
+            "UPDATE setup_tokens SET revoked_at = :now WHERE id = :id",
+        )
+        with self.engine.begin() as connection:
+            for sql in allowed:
+                connection.execute(text(sql), {"id": token, "now": NOW})
 
-        for table in TABLES:
-            with self.subTest(table):
+        self.assertEqual(
+            self.scalars("SELECT attempts FROM setup_tokens WHERE id = :id", id=token),
+            [1],
+        )
+
+    def test_a_token_row_cannot_be_forged_or_revived_by_any_role(self):
+        migrate("upgrade", "head")
+        with self.engine.begin() as connection:
+            fresh = self.token_row(connection)
+            used = self.token_row(connection, used_at=NOW, attempts=2)
+            revoked = self.token_row(connection, revoked_at=NOW)
+            locked = self.token_row(connection, locked_at=NOW, attempts=5)
+        cases = {
+            "salt": ("UPDATE setup_tokens SET salt = :b16 WHERE id = :id", fresh),
+            "secret_hash": (
+                "UPDATE setup_tokens SET secret_hash = :b32 WHERE id = :id",
+                fresh,
+            ),
+            "expiry": (
+                "UPDATE setup_tokens SET expires_at = expires_at + interval '1 day' "
+                "WHERE id = :id",
+                fresh,
+            ),
+            "purpose": (
+                "UPDATE setup_tokens SET purpose = 'recovery' WHERE id = :id",
+                fresh,
+            ),
+            "owner of the token": (
+                "UPDATE setup_tokens SET user_id = gen_random_uuid() WHERE id = :id",
+                fresh,
+            ),
+            "audit_ref": (
+                "UPDATE setup_tokens SET audit_ref = gen_random_uuid() WHERE id = :id",
+                fresh,
+            ),
+            "issued_by_uid": (
+                "UPDATE setup_tokens SET issued_by_uid = 0 WHERE id = :id",
+                fresh,
+            ),
+            "un-use a token": (
+                "UPDATE setup_tokens SET used_at = NULL WHERE id = :id",
+                used,
+            ),
+            "un-revoke a token": (
+                "UPDATE setup_tokens SET revoked_at = NULL WHERE id = :id",
+                revoked,
+            ),
+            "un-lock a token": (
+                "UPDATE setup_tokens SET locked_at = NULL WHERE id = :id",
+                locked,
+            ),
+            "reset the attempts": (
+                "UPDATE setup_tokens SET attempts = 0 WHERE id = :id",
+                used,
+            ),
+        }
+        for name, (sql, token) in cases.items():
+            with self.subTest(name):
                 self.assertEqual(
-                    self.privileges(table),
-                    dict.fromkeys(
-                        ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE"), False
+                    self.refused(
+                        sql, id=token, b16=bytes([1]) * 16, b32=bytes([1]) * 32
                     ),
+                    "23001",  # restrict_violation
                 )
-
-    def test_a_missing_application_role_fails_the_migration_loudly(self):
-        self.drop_role()
-
-        with self.assertRaises(RuntimeError):
-            migrate("upgrade", "head", PAW_APP_DATABASE_ROLE=APP_ROLE)
 
 
 if __name__ == "__main__":

@@ -44,6 +44,9 @@ class NewToken:
 
     token: str = field(repr=False)
     token_id: uuid.UUID
+    # What audit events and logs call the token. Unrelated to ``token_id``,
+    # which is a lookup key that must never be written to either.
+    audit_ref: uuid.UUID
     salt: bytes = field(repr=False)
     secret_hash: bytes = field(repr=False)
 
@@ -55,6 +58,7 @@ def generate() -> NewToken:
     return NewToken(
         token=f"{TOKEN_PREFIX}.{token_id.hex}.{secret}",
         token_id=token_id,
+        audit_ref=uuid.uuid4(),
         salt=salt,
         secret_hash=hash_secret(salt, secret),
     )

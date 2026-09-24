@@ -16,7 +16,8 @@ from sqlalchemy.engine import make_url
 from paw_backend.authz import PostgresAuditSink
 from paw_backend.authz.audit import AuditEvent
 from paw_backend.db import Database
-from paw_backend.identity import OwnerSetupService
+from paw_backend.identity import TokenRedeemer
+from paw_backend.identity.operator import OwnerOperator
 
 from .support import make_settings, paw_environment
 from .test_migrations import offline_config
@@ -57,6 +58,17 @@ def url_for_role(role: str) -> str:
 def secret_of(token: str) -> str:
     """The secret part of ``pawst1.<id>.<secret>``."""
     return token.split(".")[2]
+
+
+def wrong_secret_for(token: str) -> str:
+    """A well-formed token for the same lookup id with another secret."""
+    prefix, token_id, _ = token.split(".")
+    return f"{prefix}.{token_id}.{'A' * 43}"
+
+
+def lookup_id_of(token: str) -> str:
+    """The lookup id (32 hex digits) of ``pawst1.<id>.<secret>``."""
+    return token.split(".")[1]
 
 
 class FakeClock:
@@ -129,6 +141,11 @@ class LogCapture:
     def text(self) -> str:
         return "\n".join(self.messages)
 
+    @property
+    def application_text(self) -> str:
+        """Only the lines the application itself logged (not the SQL echo)."""
+        return "\n".join(m for m in self.messages if m.startswith("paw_backend"))
+
 
 class PostgresIdentityTestCase(unittest.IsolatedAsyncioTestCase):
     """Migrated database per class; every test starts without users.
@@ -151,7 +168,8 @@ class PostgresIdentityTestCase(unittest.IsolatedAsyncioTestCase):
         await self.reset_users()
         self.started_at = await self.scalar("SELECT clock_timestamp()")
         self.clock = FakeClock()
-        self.service = self.make_service()
+        self.operator = self.make_operator()
+        self.redeemer = self.make_redeemer()
 
     def new_database(self, url: str | None = None) -> Database:
         """Another independent engine, as a second process would have."""
@@ -159,19 +177,26 @@ class PostgresIdentityTestCase(unittest.IsolatedAsyncioTestCase):
         self.addAsyncCleanup(database.dispose)
         return database
 
-    def make_service(
+    def make_operator(
         self, database: Database | None = None, sink=None, **options
-    ) -> OwnerSetupService:
+    ) -> OwnerOperator:
+        """The operator side (creates the Owner, issues tokens)."""
         database = database or self.database
         options.setdefault("clock", self.clock)
-        return OwnerSetupService(
-            database, sink or PostgresAuditSink(database), **options
-        )
+        return OwnerOperator(database, sink or PostgresAuditSink(database), **options)
+
+    def make_redeemer(
+        self, database: Database | None = None, sink=None, **options
+    ) -> TokenRedeemer:
+        """The web-facing side (spends tokens)."""
+        database = database or self.database
+        options.setdefault("clock", self.clock)
+        return TokenRedeemer(database, sink or PostgresAuditSink(database), **options)
 
     @contextlib.contextmanager
     def audit_failure_is_logged_by_type_only(self):
         """The block must log an audit write failure (its type, never its text)."""
-        with self.assertLogs("paw_backend.identity.service", "ERROR") as logs:
+        with self.assertLogs("paw_backend.identity.audit", "ERROR") as logs:
             yield
         text = "\n".join(logs.output)
         self.assertIn("Audit write failed (RuntimeError)", text)
@@ -226,15 +251,17 @@ class PostgresIdentityTestCase(unittest.IsolatedAsyncioTestCase):
             "SELECT count(*) FROM users WHERE system_role = 'owner'"
         )
 
-    async def gather_on_own_engines(self, count: int, make_call, **options):
+    async def gather_on_own_engines(
+        self, count: int, make_call, *, redeemer: bool = False, **options
+    ):
         """Run ``make_call(service, index)`` ``count`` times at once.
 
         Each call has its own engine (its own connections), as separate
-        processes would. Exceptions are returned, not raised.
+        processes would. ``service`` is an operator, or a redeemer with
+        ``redeemer=True``. Exceptions are returned, not raised.
         """
-        services = [
-            self.make_service(self.new_database(), **options) for _ in range(count)
-        ]
+        make = self.make_redeemer if redeemer else self.make_operator
+        services = [make(self.new_database(), **options) for _ in range(count)]
         return await asyncio.gather(
             *(make_call(service, index) for index, service in enumerate(services)),
             return_exceptions=True,

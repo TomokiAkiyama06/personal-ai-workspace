@@ -8,6 +8,7 @@ including as separate processes and as a restricted database role.
 import asyncio
 import io
 import os
+import shlex
 import subprocess
 import sys
 import unittest
@@ -19,10 +20,9 @@ from sqlalchemy import create_engine, text
 from paw_backend.authz import PostgresAuditSink
 from paw_backend.cli import owner as cli
 from paw_backend.db import Database
-from paw_backend.identity import OwnerSetupService, SetupTokenRejectedError
+from paw_backend.identity import SetupTokenRejectedError, TokenRedeemer
 
 from .identity_support import (
-    APP_ROLE,
     ROLE_PASSWORD,
     TEST_DATABASE_URL,
     migrate,
@@ -49,6 +49,9 @@ class ExitCodeTest(unittest.TestCase):
         self.assertEqual(
             (cli.EXIT_OK, cli.EXIT_REFUSED, cli.EXIT_ENVIRONMENT), (0, 1, 2)
         )
+
+    def test_a_token_that_could_not_be_delivered_has_its_own_exit_code(self):
+        self.assertEqual(cli.EXIT_TOKEN_NOT_DELIVERED, 3)
 
 
 class UsageTest(unittest.TestCase):
@@ -116,7 +119,7 @@ class EnvironmentErrorTest(unittest.TestCase):
         code, out, err = run(["owner-recover", "--confirm-owner-recovery"])
 
         self.assertEqual((code, out), (2, ""))
-        self.assertIn("PAW_DATABASE_URL is not set", err)
+        self.assertIn("PAW_OPERATOR_DATABASE_URL (or PAW_DATABASE_URL) is not set", err)
 
     def test_an_invalid_setting_is_named_but_its_value_is_not_shown(self):
         for name, value in (
@@ -158,7 +161,7 @@ class EnvironmentErrorTest(unittest.TestCase):
         self.assertNotIn("hunter2", err)
 
     def test_an_unexpected_error_shows_its_type_and_nothing_else(self):
-        async def broken(settings, arguments):
+        async def broken(settings, arguments, operator):
             raise RuntimeError("hunter2-internal-detail")
 
         with patch.object(cli, "_issue", broken):
@@ -244,7 +247,7 @@ class CliDatabaseTestCase(unittest.TestCase):
         async def go():
             database = Database(make_settings(database_url=TEST_DATABASE_URL))
             try:
-                service = OwnerSetupService(database, PostgresAuditSink(database))
+                service = TokenRedeemer(database, PostgresAuditSink(database))
                 return await service.redeem(token)
             finally:
                 await database.dispose()
@@ -437,88 +440,443 @@ class OwnerRecoverCommandTest(CliDatabaseTestCase):
         self.assertEqual(self.redeem(second).purpose.value, "recovery")
 
 
+def shell(argv: list[str], redirect: str, **environment: str):
+    """Run the real module through ``bash`` with ``redirect`` on the command."""
+    variables = {k: v for k, v in os.environ.items() if not k.startswith("PAW_")}
+    variables["PYTHONPATH"] = str(BACKEND_DIR)
+    variables.update(environment)
+    command = " ".join(
+        [shlex.quote(sys.executable), "-m", "paw_backend.cli"]
+        + [shlex.quote(a) for a in argv]
+        + [redirect]
+    )
+    if "|" in redirect:
+        command += "; exit ${PIPESTATUS[0]}"
+    return subprocess.run(
+        ["bash", "-c", command],
+        cwd=BACKEND_DIR,
+        env=variables,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+
 @requires_postgres
-class RestrictedRoleTest(CliDatabaseTestCase):
-    """The command works with PAW_DATABASE_URL under a restricted role."""
+class UndeliveredTokenTest(CliDatabaseTestCase):
+    """The change is committed before the token is written: say so when it fails."""
+
+    ENVIRONMENT = {"PAW_DATABASE_URL": TEST_DATABASE_URL}
+
+    def assert_reported(self, code: int, err: str) -> None:
+        self.assertEqual(code, 3, err)
+        self.assertIn("could not be written to stdout", err)
+        self.assertIn("owner-recover --confirm-owner-recovery", err)
+        self.assertNotIn("pawst1.", err)
+        self.assertNotIn("Traceback", err)
+        # Not the interpreter's own complaint at exit (which also changes the code).
+        self.assertNotIn("Exception ignored", err)
+        self.assertNotIn("Unexpected error", err)
+
+    def test_a_full_disk_a_closed_stdout_and_a_closed_pipe_all_exit_with_3(self):
+        for name, redirect in (
+            ("disk full", ">/dev/full"),
+            ("closed stdout", ">&-"),
+            ("closed pipe", "| head -c0"),
+        ):
+            with self.subTest(name):
+                self.execute("TRUNCATE users CASCADE")
+                self.started_at = self.scalar("SELECT clock_timestamp()")
+
+                result = shell(
+                    ["owner-setup", "--login-name", "boss"],
+                    redirect,
+                    **self.ENVIRONMENT,
+                )
+
+                self.assert_reported(result.returncode, result.stderr)
+                self.assertIn("Owner created, but", result.stderr)
+                # The change WAS made and audited, as the message says ...
+                self.assertEqual(self.scalar("SELECT count(*) FROM users"), 1)
+                self.assertIn(("owner.create", "allow", "created"), self.audit())
+                # ... and recovery is the documented way to get a token.
+                code, out, err = run(
+                    ["owner-recover", "--confirm-owner-recovery"], **self.ENVIRONMENT
+                )
+                self.assertEqual(code, 0, err)
+                self.assertEqual(
+                    self.redeem(self.token_of(out)).purpose.value, "recovery"
+                )
+
+    def test_recovery_reports_a_lost_token_too(self):
+        run(["owner-setup", "--login-name", "boss"], **self.ENVIRONMENT)
+
+        result = shell(
+            ["owner-recover", "--confirm-owner-recovery"],
+            ">/dev/full",
+            **self.ENVIRONMENT,
+        )
+
+        self.assert_reported(result.returncode, result.stderr)
+        self.assertIn("Recovery token issued, but", result.stderr)
+
+    def test_an_unwritable_stdout_object_is_reported_in_process_too(self):
+        class Broken(io.StringIO):
+            def write(self, text):
+                raise BrokenPipeError
+
+        closed = io.StringIO()
+        closed.close()
+        for name, stream in (("broken", Broken()), ("closed", closed)):
+            with self.subTest(name):
+                self.execute("TRUNCATE users CASCADE")
+                err = io.StringIO()
+                with paw_environment(**self.ENVIRONMENT):
+                    code = cli.main(
+                        ["owner-setup", "--login-name", "boss"],
+                        stdout=stream,
+                        stderr=err,
+                    )
+                self.assert_reported(code, err.getvalue())
+
+    def test_a_missing_stdout_and_stderr_do_not_crash_the_command(self):
+        closed = io.StringIO()
+        closed.close()
+        with paw_environment(**self.ENVIRONMENT):
+            with patch.object(sys, "stdout", None):
+                code = cli.main(
+                    ["owner-setup", "--login-name", "boss"], stdout=None, stderr=closed
+                )
+
+        self.assertEqual(code, 3)
+
+    def test_a_working_stdout_is_still_exit_0(self):
+        result = shell(["owner-setup", "--login-name", "boss"], "", **self.ENVIRONMENT)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.token_of(result.stdout)
+
+
+@requires_postgres
+class NonLiveOwnerCommandTest(CliDatabaseTestCase):
+    ENVIRONMENT = {"PAW_DATABASE_URL": TEST_DATABASE_URL}
 
     def setUp(self):
-        self.drop_role()
-        self.addCleanup(self.drop_role)
-        self.execute(
-            f"CREATE ROLE {APP_ROLE} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE "
-            f"PASSWORD '{ROLE_PASSWORD}'"
+        super().setUp()
+        code, out, err = run(
+            ["owner-setup", "--login-name", "boss"], **self.ENVIRONMENT
+        )
+        self.assertEqual(code, 0, err)
+        self.old_token = out.strip()
+
+    def test_setup_says_what_the_state_is_and_how_to_replace_the_account(self):
+        for status in ("pending_deletion", "deleted"):
+            with self.subTest(status):
+                self.execute("UPDATE users SET status = :s", s=status)
+
+                code, out, err = run(
+                    ["owner-setup", "--login-name", "second"], **self.ENVIRONMENT
+                )
+
+                self.assertEqual((code, out), (1, ""))
+                self.assertIn(status, err)
+                self.assertIn("--replace-non-live-owner", err)
+                self.assertIn("owner-recover cannot help", err)
+                self.assertNotIn("run owner-recover on this server", err)
+                self.assertEqual(self.scalar("SELECT count(*) FROM users"), 1)
+
+    def test_recovery_says_the_account_is_not_live_and_points_at_the_flag(self):
+        self.execute("UPDATE users SET status = 'deleted'")
+
+        code, out, err = run(
+            ["owner-recover", "--confirm-owner-recovery"], **self.ENVIRONMENT
+        )
+
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("deleted", err)
+        self.assertIn("--replace-non-live-owner", err)
+        self.assertNotIn("Run owner-setup first", err)
+
+    def test_the_flag_replaces_the_account_and_hands_over_a_new_token(self):
+        self.execute("UPDATE users SET status = 'deleted'")
+
+        code, out, err = run(
+            ["owner-setup", "--login-name", "second", "--replace-non-live-owner"],
+            **self.ENVIRONMENT,
+        )
+
+        self.assertEqual(code, 0, err)
+        token = self.token_of(out)
+        self.assertEqual(
+            [
+                tuple(r)
+                for r in self.rows(
+                    "SELECT login_name, system_role, status FROM users ORDER BY 1"
+                )
+            ],
+            [("boss", "user", "deleted"), ("second", "owner", "invited")],
+        )
+        self.assertEqual(self.redeem(token).purpose.value, "setup")
+        with self.assertRaises(SetupTokenRejectedError):
+            self.redeem(self.old_token)
+        self.assertIn(("owner.replace", "allow", "replaced"), self.audit())
+
+    def test_the_flag_never_replaces_a_live_owner(self):
+        for status in ("invited", "active"):
+            with self.subTest(status):
+                self.execute("UPDATE users SET status = :s", s=status)
+
+                code, out, err = run(
+                    [
+                        "owner-setup",
+                        "--login-name",
+                        "second",
+                        "--replace-non-live-owner",
+                    ],
+                    **self.ENVIRONMENT,
+                )
+
+                self.assertEqual((code, out), (1, ""))
+                self.assertIn("an Owner already exists", err)
+                self.assertEqual(
+                    self.rows("SELECT login_name, system_role FROM users"),
+                    [("boss", "owner")],
+                )
+
+    def test_the_flag_is_not_available_on_recovery(self):
+        code, out, _ = run(
+            ["owner-recover", "--confirm-owner-recovery", "--replace-non-live-owner"],
+            **self.ENVIRONMENT,
+        )
+
+        self.assertEqual((code, out), (1, ""))
+
+
+@requires_postgres
+class OperatorRecordCommandTest(CliDatabaseTestCase):
+    ENVIRONMENT = {"PAW_DATABASE_URL": TEST_DATABASE_URL}
+
+    def test_the_uids_are_shown_and_stored_without_being_trusted(self):
+        code, out, err = run(
+            ["owner-setup", "--login-name", "boss"], SUDO_UID="1001", **self.ENVIRONMENT
+        )
+
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"operator uid={os.geteuid()} sudo_uid=1001", err)
+        self.assertEqual(
+            [
+                tuple(r)
+                for r in self.rows(
+                    "SELECT issued_by_uid, issued_by_sudo_uid FROM setup_tokens"
+                )
+            ],
+            [(os.geteuid(), 1001)],
+        )
+
+    def test_a_malformed_sudo_uid_is_neither_stored_nor_shown(self):
+        code, out, err = run(
+            ["owner-setup", "--login-name", "boss"],
+            SUDO_UID="1001; DROP TABLE users",
+            **self.ENVIRONMENT,
+        )
+
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("sudo_uid", err)
+        self.assertNotIn("DROP", err)
+        self.assertEqual(
+            [
+                tuple(r)
+                for r in self.rows(
+                    "SELECT issued_by_uid, issued_by_sudo_uid FROM setup_tokens"
+                )
+            ],
+            [(os.geteuid(), None)],
+        )
+
+    def test_recovery_records_who_ran_it_as_well(self):
+        run(["owner-setup", "--login-name", "boss"], **self.ENVIRONMENT)
+
+        code, out, err = run(
+            ["owner-recover", "--confirm-owner-recovery"],
+            SUDO_UID="1002",
+            **self.ENVIRONMENT,
+        )
+
+        self.assertEqual(code, 0, err)
+        self.assertEqual(
+            [
+                tuple(r)
+                for r in self.rows(
+                    "SELECT issued_by_sudo_uid FROM setup_tokens "
+                    "WHERE purpose = 'recovery'"
+                )
+            ],
+            [(1002,)],
+        )
+
+
+@requires_postgres
+class OperatorUrlTest(CliDatabaseTestCase):
+    UNREACHABLE = "postgresql://nobody:hunter2-pw@127.0.0.1:1/none"
+
+    def test_the_operator_url_wins_and_needs_no_warning(self):
+        code, out, err = run(
+            ["owner-setup", "--login-name", "boss"],
+            PAW_OPERATOR_DATABASE_URL=TEST_DATABASE_URL,
+            PAW_DATABASE_URL=self.UNREACHABLE,  # what the web application uses
+        )
+
+        self.assertEqual(code, 0, err)
+        self.token_of(out)
+        self.assertNotIn("Warning", err)
+
+    def test_the_operator_url_is_the_only_one_used_when_both_are_set(self):
+        code, out, err = run(
+            ["owner-setup", "--login-name", "boss"],
+            PAW_OPERATOR_DATABASE_URL=self.UNREACHABLE,
+            PAW_DATABASE_URL=TEST_DATABASE_URL,
+        )
+
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("Database error (OperationalError)", err)
+        self.assertNotIn("hunter2", err)
+        self.assertEqual(self.scalar("SELECT count(*) FROM users"), 0)
+
+    def test_without_an_operator_url_the_database_url_is_used_with_a_warning(self):
+        code, out, err = run(
+            ["owner-setup", "--login-name", "boss"], PAW_DATABASE_URL=TEST_DATABASE_URL
+        )
+
+        self.assertEqual(code, 0, err)
+        self.token_of(out)  # the warning is not on stdout
+        self.assertIn("Warning: PAW_OPERATOR_DATABASE_URL is not set", err)
+        self.assertIn("can create Owner tokens", err)
+        self.assertNotIn(ROLE_PASSWORD, err)
+        self.assertNotIn("postgresql://", err)
+
+    def test_an_invalid_operator_url_is_named_but_not_shown(self):
+        code, out, err = run(
+            ["owner-recover", "--confirm-owner-recovery"],
+            PAW_OPERATOR_DATABASE_URL="mysql://u:hunter2-pw@h/d",
+            PAW_DATABASE_URL=TEST_DATABASE_URL,
+        )
+
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("PAW_OPERATOR_DATABASE_URL", err)
+        self.assertNotIn("hunter2", err)
+
+
+@requires_postgres
+class OperatorRoleCommandTest(CliDatabaseTestCase):
+    """The command as the operator's role; the web role cannot run it at all."""
+
+    WEB_ROLE = "paw_owner_cli_web_021"
+    OPERATOR_ROLE = "paw_owner_cli_op_021"
+
+    def roles(self):
+        return (self.WEB_ROLE, self.OPERATOR_ROLE)
+
+    def drop_roles(self):
+        for role in self.roles():
+            if self.scalar("SELECT count(*) FROM pg_roles WHERE rolname = :r", r=role):
+                self.execute(f"DROP OWNED BY {role}")
+                self.execute(f"DROP ROLE {role}")
+
+    def setUp(self):
+        self.drop_roles()
+        self.addCleanup(self.drop_roles)
+        for role in self.roles():
+            self.execute(
+                f"CREATE ROLE {role} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE "
+                f"PASSWORD '{ROLE_PASSWORD}'"
+            )
+        migrate("downgrade", "base")
+        migrate(
+            "upgrade",
+            "head",
+            PAW_APP_DATABASE_ROLE=self.WEB_ROLE,
+            PAW_OPERATOR_DATABASE_ROLE=self.OPERATOR_ROLE,
         )
         super().setUp()
-
-    def drop_role(self):
-        if self.scalar("SELECT count(*) FROM pg_roles WHERE rolname = :r", r=APP_ROLE):
-            self.execute(f"DROP OWNED BY {APP_ROLE}")
-            self.execute(f"DROP ROLE {APP_ROLE}")
-
-    def regrant(self, **environment: str) -> None:
-        """Re-run the migrations so that they grant to the application role."""
-        migrate("downgrade", "base")
-        migrate("upgrade", "head", **environment)
 
     def tearDown(self):
         # The class-level tearDown drops the schema; restore a plain one first.
         migrate("downgrade", "base")
         migrate("upgrade", "head")
 
-    def test_setup_and_recovery_work_as_the_application_role(self):
-        self.regrant(PAW_APP_DATABASE_ROLE=APP_ROLE)
-        self.started_at = self.scalar("SELECT clock_timestamp()")
-        environment = {
-            "PAW_DATABASE_URL": url_for_role(APP_ROLE),
+    def environment(self, **extra: str) -> dict[str, str]:
+        return {
+            "PAW_DATABASE_URL": url_for_role(self.WEB_ROLE),
+            "PAW_OPERATOR_DATABASE_URL": url_for_role(self.OPERATOR_ROLE),
             # The command never uses the migration role.
             "PAW_MIGRATION_DATABASE_URL": "postgresql://nobody:x@127.0.0.1:1/none",
+            **extra,
         }
 
-        code, out, err = run(["owner-setup", "--login-name", "boss"], **environment)
+    def redeem_as_web(self, token: str):
+        async def go():
+            database = Database(make_settings(database_url=url_for_role(self.WEB_ROLE)))
+            try:
+                return await TokenRedeemer(
+                    database, PostgresAuditSink(database)
+                ).redeem(token)
+            finally:
+                await database.dispose()
+
+        return asyncio.run(go())
+
+    def test_setup_recovery_and_replacement_work_as_the_operator_role(self):
+        code, out, err = run(
+            ["owner-setup", "--login-name", "boss"], **self.environment()
+        )
         self.assertEqual(code, 0, err)
         setup_token = self.token_of(out)
         code, out, err = run(
-            ["owner-recover", "--confirm-owner-recovery"], **environment
+            ["owner-recover", "--confirm-owner-recovery"], **self.environment()
         )
         self.assertEqual(code, 0, err)
         recovery_token = self.token_of(out)
 
-        self.assertEqual(self.redeem(recovery_token).purpose.value, "recovery")
+        # The web role spends what the operator role issued.
+        self.assertEqual(self.redeem_as_web(recovery_token).purpose.value, "recovery")
         with self.assertRaises(SetupTokenRejectedError):
-            self.redeem(setup_token)
-        self.assertGreaterEqual(len(self.audit()), 5)
+            self.redeem_as_web(setup_token)
+        self.execute("UPDATE users SET status = 'deleted'")
+        code, out, err = run(
+            ["owner-setup", "--login-name", "second", "--replace-non-live-owner"],
+            **self.environment(),
+        )
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.redeem_as_web(self.token_of(out)).purpose.value, "setup")
+        self.assertGreaterEqual(len(self.audit()), 8)
         self.assertNotIn(ROLE_PASSWORD, out + err)
+
+    def test_the_web_role_cannot_run_the_command(self):
+        # Only PAW_DATABASE_URL (the web role): the fallback, and it is refused.
+        code, out, err = run(
+            ["owner-setup", "--login-name", "boss"],
+            PAW_DATABASE_URL=url_for_role(self.WEB_ROLE),
+        )
+
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("Warning: PAW_OPERATOR_DATABASE_URL is not set", err)
+        self.assertIn("Database error (ProgrammingError)", err)
+        self.assertNotIn(ROLE_PASSWORD, err)
+        self.assertNotIn("permission denied", err)
+        self.assertEqual(self.scalar("SELECT count(*) FROM users"), 0)
 
     def test_the_command_refuses_when_the_role_cannot_write_the_audit_trail(self):
         # The tables are writable, the audit table is not: nothing may happen.
-        self.regrant()
-        self.execute(
-            f"GRANT SELECT, INSERT, UPDATE ON users, setup_tokens TO {APP_ROLE}"
-        )
-        self.started_at = self.scalar("SELECT clock_timestamp()")
+        self.execute(f"REVOKE INSERT ON audit_events FROM {self.OPERATOR_ROLE}")
 
         code, out, err = run(
-            ["owner-setup", "--login-name", "boss"],
-            PAW_DATABASE_URL=url_for_role(APP_ROLE),
+            ["owner-setup", "--login-name", "boss"], **self.environment()
         )
 
         self.assertEqual((code, out), (2, ""))
         self.assertIn("audit trail could not be written", err)
         self.assertEqual(self.scalar("SELECT count(*) FROM users"), 0)
         self.assertEqual(self.scalar("SELECT count(*) FROM setup_tokens"), 0)
-
-    def test_a_role_without_access_to_the_tables_is_an_environment_error(self):
-        self.regrant()
-
-        code, out, err = run(
-            ["owner-setup", "--login-name", "boss"],
-            PAW_DATABASE_URL=url_for_role(APP_ROLE),
-        )
-
-        self.assertEqual((code, out), (2, ""))
-        self.assertIn("Database error (ProgrammingError)", err)
-        self.assertNotIn(ROLE_PASSWORD, err)
-        self.assertNotIn("permission denied", err)
 
 
 if __name__ == "__main__":

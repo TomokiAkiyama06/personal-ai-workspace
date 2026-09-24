@@ -20,17 +20,25 @@ from paw_backend.authz import SystemRole
 from paw_backend.identity import (
     AuditUnavailableError,
     InvalidLoginNameError,
-    IssuedToken,
     LoginNameTakenError,
     OwnerAlreadyExistsError,
     OwnerNotFoundError,
+    OwnerNotLiveError,
+    RedeemHookError,
     Redemption,
     SetupTokenRejectedError,
     TokenPurpose,
+    TokenRedeemer,
     UserStatus,
+    limits,
     tokens,
 )
-from paw_backend.identity import service as service_module
+from paw_backend.identity.audit import IdentityAudit
+from paw_backend.identity.operator import (
+    IssuedToken,
+    OperatorIdentity,
+    OwnerOperator,
+)
 
 from .identity_support import (
     SECRET_DETAIL,
@@ -39,23 +47,19 @@ from .identity_support import (
     FlakySink,
     LogCapture,
     PostgresIdentityTestCase,
+    lookup_id_of,
     requires_postgres,
     secret_of,
+    wrong_secret_for,
 )
 
 TTL = 1800
 
 
-def wrong_secret_for(token: str) -> str:
-    """A well-formed token for the same id with another secret."""
-    prefix, token_id, _ = token.split(".")
-    return f"{prefix}.{token_id}.{'A' * 43}"
-
-
 @requires_postgres
 class SetupOwnerTest(PostgresIdentityTestCase):
     async def test_creates_the_owner_and_a_one_time_setup_token(self):
-        issued = await self.service.setup_owner("  Tomoki ")
+        issued = await self.operator.setup_owner("  Tomoki ")
 
         self.assertIsInstance(issued, IssuedToken)
         self.assertEqual(issued.login_name, "tomoki")
@@ -78,26 +82,31 @@ class SetupOwnerTest(PostgresIdentityTestCase):
         (row,) = await self.query("SELECT * FROM setup_tokens")
         self.assertEqual(
             (
-                row.id,
+                row.audit_ref,
                 row.user_id,
                 row.purpose,
                 row.created_at,
                 row.expires_at,
                 row.used_at,
                 row.revoked_at,
+                row.locked_at,
                 row.attempts,
             ),
             (
-                issued.token_id,
+                issued.audit_ref,
                 issued.user_id,
                 "setup",
                 T0,
                 T0 + timedelta(seconds=TTL),
                 None,
                 None,
+                None,
                 0,
             ),
         )
+        # The lookup id (in the token) and the audit reference are unrelated.
+        self.assertEqual(row.id.hex, lookup_id_of(issued.token))
+        self.assertNotEqual(row.id, row.audit_ref)
 
     async def test_the_users_table_has_no_password_session_or_passkey_column(self):
         columns = await self.query(
@@ -119,14 +128,14 @@ class SetupOwnerTest(PostgresIdentityTestCase):
         )
 
     async def test_the_owner_role_is_the_system_role_of_the_authorization_layer(self):
-        await self.service.setup_owner("boss")
+        await self.operator.setup_owner("boss")
 
         self.assertEqual(
             await self.scalar("SELECT system_role FROM users"), SystemRole.OWNER.value
         )
 
     async def test_the_ttl_is_configurable(self):
-        service = self.make_service(ttl_seconds=90)
+        service = self.make_operator(ttl_seconds=90)
 
         issued = await service.setup_owner("boss")
 
@@ -137,7 +146,7 @@ class SetupOwnerTest(PostgresIdentityTestCase):
         )
 
     async def test_only_a_salted_hmac_of_the_secret_is_stored(self):
-        issued = await self.service.setup_owner("boss")
+        issued = await self.operator.setup_owner("boss")
 
         (row,) = await self.query("SELECT salt, secret_hash FROM setup_tokens")
         secret = secret_of(issued.token)
@@ -151,23 +160,23 @@ class SetupOwnerTest(PostgresIdentityTestCase):
         self.assertNotIn(issued.token, stored)
 
     async def test_the_result_does_not_print_the_token(self):
-        issued = await self.service.setup_owner("boss")
+        issued = await self.operator.setup_owner("boss")
 
         self.assertNotIn(secret_of(issued.token), repr(issued))
         self.assertNotIn(secret_of(issued.token), str(issued))
 
     async def test_the_owner_passkey_requirement_is_set_and_cannot_be_cleared(self):
-        await self.service.setup_owner("boss")
+        await self.operator.setup_owner("boss")
 
         self.assertTrue(await self.scalar("SELECT passkey_required FROM users"))
         with self.assertRaises(DBAPIError):
             await self.execute("UPDATE users SET passkey_required = false")
 
     async def test_a_second_setup_is_refused_and_creates_nothing(self):
-        first = await self.service.setup_owner("boss")
+        first = await self.operator.setup_owner("boss")
 
         with self.assertRaises(OwnerAlreadyExistsError):
-            await self.service.setup_owner("someone-else")
+            await self.operator.setup_owner("someone-else")
 
         self.assertEqual(await self.owner_count(), 1)
         self.assertEqual(await self.scalar("SELECT count(*) FROM users"), 1)
@@ -175,11 +184,11 @@ class SetupOwnerTest(PostgresIdentityTestCase):
         self.assertEqual(await self.scalar("SELECT id FROM users"), first.user_id)
 
     async def test_setup_stays_closed_after_the_owner_finished_setup(self):
-        issued = await self.service.setup_owner("boss")
-        await self.service.redeem(issued.token)
+        issued = await self.operator.setup_owner("boss")
+        await self.redeemer.redeem(issued.token)
 
         with self.assertRaises(OwnerAlreadyExistsError):
-            await self.service.setup_owner("another")
+            await self.operator.setup_owner("another")
 
     async def test_a_login_name_used_by_another_user_is_refused(self):
         await self.execute(
@@ -191,7 +200,7 @@ class SetupOwnerTest(PostgresIdentityTestCase):
         )
 
         with self.assertRaises(LoginNameTakenError):
-            await self.service.setup_owner("BOSS")
+            await self.operator.setup_owner("BOSS")
 
         self.assertEqual(await self.owner_count(), 0)
         self.assertEqual(
@@ -203,13 +212,13 @@ class SetupOwnerTest(PostgresIdentityTestCase):
         for name in ("no", "has space", "", None, 7):
             with self.subTest(name):
                 with self.assertRaises(InvalidLoginNameError):
-                    await self.service.setup_owner(name)
+                    await self.operator.setup_owner(name)
 
         self.assertEqual(await self.scalar("SELECT count(*) FROM users"), 0)
         self.assertEqual(await self.audit_summary(), Counter())
 
     async def test_setup_is_audited_with_ids_and_enums_only(self):
-        issued = await self.service.setup_owner("Tomoki")
+        issued = await self.operator.setup_owner("Tomoki")
 
         rows = await self.audit_rows()
         self.assertEqual(
@@ -235,7 +244,7 @@ class SetupOwnerTest(PostgresIdentityTestCase):
         )
         self.assertEqual(
             (issue.resource_kind, issue.resource_id),
-            ("setup_token", issued.token_id),
+            ("setup_token", issued.audit_ref),
         )
         for row in rows:
             self.assertEqual((row.actor_id, row.actor_role), (None, "system"))
@@ -246,10 +255,10 @@ class SetupOwnerTest(PostgresIdentityTestCase):
         self.assertNotIn(secret_of(issued.token), dump)
 
     async def test_a_refused_setup_is_audited(self):
-        await self.service.setup_owner("boss")
+        await self.operator.setup_owner("boss")
 
         with self.assertRaises(OwnerAlreadyExistsError):
-            await self.service.setup_owner("boss2")
+            await self.operator.setup_owner("boss2")
 
         self.assertEqual(
             (await self.audit_summary())[("owner.create", "deny", "owner_exists")], 1
@@ -301,7 +310,7 @@ class SetupOwnerTest(PostgresIdentityTestCase):
 
     async def test_setup_fails_closed_when_the_audit_cannot_be_written(self):
         sink = FailingSink()
-        service = self.make_service(sink=sink)
+        service = self.make_operator(sink=sink)
 
         with LogCapture() as logs:
             with self.assertRaises(AuditUnavailableError):
@@ -313,12 +322,12 @@ class SetupOwnerTest(PostgresIdentityTestCase):
         self.assertIn("RuntimeError", logs.text)
         self.assertNotIn(SECRET_DETAIL, logs.text)
         # Nothing was left behind: the setup can simply be run again.
-        again = await self.service.setup_owner("boss")
+        again = await self.operator.setup_owner("boss")
         self.assertEqual(await self.owner_count(), 1)
         self.assertEqual(again.login_name, "boss")
 
     async def test_setup_rolls_back_when_the_audit_fails_after_its_first_event(self):
-        service = self.make_service(sink=FlakySink(self.database, allow=1))
+        service = self.make_operator(sink=FlakySink(self.database, allow=1))
 
         with self.audit_failure_is_logged_by_type_only():
             with self.assertRaises(AuditUnavailableError):
@@ -332,7 +341,7 @@ class SetupOwnerTest(PostgresIdentityTestCase):
 class RecoverOwnerTest(PostgresIdentityTestCase):
     async def test_there_is_nothing_to_recover_without_an_owner(self):
         with self.assertRaises(OwnerNotFoundError):
-            await self.service.recover_owner()
+            await self.operator.recover_owner()
 
         self.assertEqual(await self.scalar("SELECT count(*) FROM setup_tokens"), 0)
         self.assertEqual(
@@ -341,10 +350,10 @@ class RecoverOwnerTest(PostgresIdentityTestCase):
         )
 
     async def test_issues_a_recovery_token_for_the_existing_owner(self):
-        setup = await self.service.setup_owner("boss")
+        setup = await self.operator.setup_owner("boss")
         self.clock.advance(seconds=60)
 
-        recovery = await self.service.recover_owner()
+        recovery = await self.operator.recover_owner()
 
         self.assertEqual(recovery.purpose, TokenPurpose.RECOVERY)
         self.assertEqual(
@@ -355,7 +364,8 @@ class RecoverOwnerTest(PostgresIdentityTestCase):
         self.assertEqual(await self.owner_count(), 1)
         row = (
             await self.query(
-                "SELECT * FROM setup_tokens WHERE id = :id", id=recovery.token_id
+                "SELECT * FROM setup_tokens WHERE audit_ref = :ref",
+                ref=recovery.audit_ref,
             )
         )[0]
         self.assertEqual(
@@ -364,20 +374,21 @@ class RecoverOwnerTest(PostgresIdentityTestCase):
         )
 
     async def test_outstanding_tokens_are_invalidated_and_the_revoke_is_audited(self):
-        setup = await self.service.setup_owner("boss")
+        setup = await self.operator.setup_owner("boss")
         self.clock.advance(seconds=60)
 
-        recovery = await self.service.recover_owner()
+        recovery = await self.operator.recover_owner()
 
         self.assertEqual(
             await self.scalar(
-                "SELECT revoked_at FROM setup_tokens WHERE id = :id", id=setup.token_id
+                "SELECT revoked_at FROM setup_tokens WHERE audit_ref = :ref",
+                ref=setup.audit_ref,
             ),
             T0 + timedelta(seconds=60),
         )
         with self.assertRaises(SetupTokenRejectedError):
-            await self.service.redeem(setup.token)
-        redemption = await self.service.redeem(recovery.token)
+            await self.redeemer.redeem(setup.token)
+        redemption = await self.redeemer.redeem(recovery.token)
         self.assertEqual(redemption.purpose, TokenPurpose.RECOVERY)
         summary = await self.audit_summary()
         self.assertEqual(summary[("owner.token.revoke", "allow", "superseded")], 1)
@@ -386,13 +397,13 @@ class RecoverOwnerTest(PostgresIdentityTestCase):
         self.assertEqual(summary[("owner.token.redeem", "allow", "redeemed")], 1)
 
     async def test_a_second_recovery_supersedes_the_first(self):
-        await self.service.setup_owner("boss")
-        first = await self.service.recover_owner()
-        second = await self.service.recover_owner()
+        await self.operator.setup_owner("boss")
+        first = await self.operator.recover_owner()
+        second = await self.operator.recover_owner()
 
         with self.assertRaises(SetupTokenRejectedError):
-            await self.service.redeem(first.token)
-        await self.service.redeem(second.token)
+            await self.redeemer.redeem(first.token)
+        await self.redeemer.redeem(second.token)
         self.assertEqual(
             await self.scalar(
                 "SELECT count(*) FROM setup_tokens WHERE revoked_at IS NOT NULL"
@@ -401,9 +412,9 @@ class RecoverOwnerTest(PostgresIdentityTestCase):
         )
 
     async def test_at_most_one_token_is_outstanding(self):
-        await self.service.setup_owner("boss")
+        await self.operator.setup_owner("boss")
         for _ in range(3):
-            await self.service.recover_owner()
+            await self.operator.recover_owner()
 
         self.assertEqual(
             await self.scalar(
@@ -414,15 +425,16 @@ class RecoverOwnerTest(PostgresIdentityTestCase):
         )
 
     async def test_a_used_token_is_left_alone(self):
-        setup = await self.service.setup_owner("boss")
-        await self.service.redeem(setup.token)
+        setup = await self.operator.setup_owner("boss")
+        await self.redeemer.redeem(setup.token)
         used_at = await self.scalar("SELECT used_at FROM setup_tokens")
 
-        await self.service.recover_owner()
+        await self.operator.recover_owner()
 
         self.assertEqual(
             await self.scalar(
-                "SELECT used_at FROM setup_tokens WHERE id = :id", id=setup.token_id
+                "SELECT used_at FROM setup_tokens WHERE audit_ref = :ref",
+                ref=setup.audit_ref,
             ),
             used_at,
         )
@@ -432,19 +444,29 @@ class RecoverOwnerTest(PostgresIdentityTestCase):
         )
 
     async def test_an_owner_who_is_pending_deletion_cannot_be_recovered(self):
-        await self.service.setup_owner("boss")
+        await self.operator.setup_owner("boss")
         await self.execute("UPDATE users SET status = 'pending_deletion'")
 
-        with self.assertRaises(OwnerNotFoundError):
-            await self.service.recover_owner()
+        with self.assertRaises(OwnerNotLiveError) as caught:
+            await self.operator.recover_owner()
+
+        # The real state is reported, not "no Owner".
+        self.assertEqual(caught.exception.status, "pending_deletion")
+        self.assertIn("pending_deletion", str(caught.exception))
+        self.assertEqual(
+            (await self.audit_summary())[
+                ("owner.recovery_token.issue", "deny", "owner_not_live")
+            ],
+            1,
+        )
 
     async def test_an_active_owner_can_be_recovered(self):
-        setup = await self.service.setup_owner("boss")
-        await self.service.redeem(setup.token)
+        setup = await self.operator.setup_owner("boss")
+        await self.redeemer.redeem(setup.token)
         await self.execute("UPDATE users SET status = 'active'")
 
-        recovery = await self.service.recover_owner()
-        redemption = await self.service.redeem(recovery.token)
+        recovery = await self.operator.recover_owner()
+        redemption = await self.redeemer.redeem(recovery.token)
 
         self.assertEqual(
             (redemption.purpose, redemption.user_status),
@@ -452,7 +474,7 @@ class RecoverOwnerTest(PostgresIdentityTestCase):
         )
 
     async def test_concurrent_recoveries_leave_exactly_one_working_token(self):
-        await self.service.setup_owner("boss")
+        await self.operator.setup_owner("boss")
 
         results = await self.gather_on_own_engines(
             4, lambda service, index: service.recover_owner()
@@ -470,7 +492,7 @@ class RecoverOwnerTest(PostgresIdentityTestCase):
         outcomes = []
         for candidate in issued:
             try:
-                await self.service.redeem(candidate.token)
+                await self.redeemer.redeem(candidate.token)
                 outcomes.append("redeemed")
             except SetupTokenRejectedError:
                 outcomes.append("rejected")
@@ -479,8 +501,8 @@ class RecoverOwnerTest(PostgresIdentityTestCase):
         )
 
     async def test_recovery_fails_closed_when_the_audit_cannot_be_written(self):
-        setup = await self.service.setup_owner("boss")
-        service = self.make_service(sink=FailingSink())
+        setup = await self.operator.setup_owner("boss")
+        service = self.make_operator(sink=FailingSink())
 
         with self.audit_failure_is_logged_by_type_only():
             with self.assertRaises(AuditUnavailableError):
@@ -489,15 +511,37 @@ class RecoverOwnerTest(PostgresIdentityTestCase):
         # Nothing changed: the old token is still the outstanding one.
         self.assertEqual(await self.scalar("SELECT count(*) FROM setup_tokens"), 1)
         self.assertIsNone(await self.scalar("SELECT revoked_at FROM setup_tokens"))
-        await self.service.redeem(setup.token)
+        await self.redeemer.redeem(setup.token)
+
+    async def test_a_recovery_with_no_outstanding_token_still_fails_closed(self):
+        # Nothing to revoke: the issue event is the only one, so it must be
+        # stored before the commit (an event written after it would not be).
+        setup = await self.operator.setup_owner("boss")
+        await self.redeemer.redeem(setup.token)  # the only token is now used
+        broken = self.make_operator(sink=FailingSink())
+
+        with self.audit_failure_is_logged_by_type_only():
+            with self.assertRaises(AuditUnavailableError):
+                await broken.recover_owner()
+
+        self.assertEqual(await self.scalar("SELECT count(*) FROM setup_tokens"), 1)
+        self.assertEqual(
+            (await self.audit_summary())[
+                ("owner.recovery_token.issue", "allow", "issued")
+            ],
+            0,
+        )
+        # And once the audit works again, the recovery goes through.
+        await self.operator.recover_owner()
+        self.assertEqual(await self.scalar("SELECT count(*) FROM setup_tokens"), 2)
 
     async def test_a_refusal_stands_even_when_its_audit_cannot_be_written(self):
-        broken = self.make_service(sink=FailingSink())
+        broken = self.make_operator(sink=FailingSink())
 
         with self.audit_failure_is_logged_by_type_only():
             with self.assertRaises(OwnerNotFoundError):  # not AuditUnavailableError
                 await broken.recover_owner()
-            await self.service.setup_owner("boss")
+            await self.operator.setup_owner("boss")
             with self.assertRaises(OwnerAlreadyExistsError):
                 await broken.setup_owner("someone")
 
@@ -505,16 +549,16 @@ class RecoverOwnerTest(PostgresIdentityTestCase):
 @requires_postgres
 class RedeemTest(PostgresIdentityTestCase):
     async def test_a_setup_token_redeems_once(self):
-        issued = await self.service.setup_owner("boss")
+        issued = await self.operator.setup_owner("boss")
         self.clock.advance(seconds=30)
 
-        redemption = await self.service.redeem(issued.token)
+        redemption = await self.redeemer.redeem(issued.token)
 
         self.assertEqual(
             redemption,
             Redemption(
                 user_id=issued.user_id,
-                token_id=issued.token_id,
+                audit_ref=issued.audit_ref,
                 purpose=TokenPurpose.SETUP,
                 user_status=UserStatus.INVITED,
                 passkey_required=True,
@@ -525,12 +569,12 @@ class RedeemTest(PostgresIdentityTestCase):
             T0 + timedelta(seconds=30),
         )
         with self.assertRaises(SetupTokenRejectedError):
-            await self.service.redeem(issued.token)
+            await self.redeemer.redeem(issued.token)
 
     async def test_redemption_creates_no_user_and_no_session(self):
-        issued = await self.service.setup_owner("boss")
+        issued = await self.operator.setup_owner("boss")
 
-        await self.service.redeem(issued.token)
+        await self.redeemer.redeem(issued.token)
 
         self.assertEqual(await self.scalar("SELECT count(*) FROM users"), 1)
         self.assertEqual(await self.owner_count(), 1)
@@ -538,9 +582,9 @@ class RedeemTest(PostgresIdentityTestCase):
         self.assertEqual(await self.scalar("SELECT status FROM users"), "invited")
 
     async def test_redemption_is_audited_as_the_owner(self):
-        issued = await self.service.setup_owner("boss")
+        issued = await self.operator.setup_owner("boss")
 
-        await self.service.redeem(issued.token)
+        await self.redeemer.redeem(issued.token)
 
         (row,) = [
             r for r in await self.audit_rows() if r.action == "owner.token.redeem"
@@ -550,19 +594,19 @@ class RedeemTest(PostgresIdentityTestCase):
             ("allow", "redeemed", issued.user_id, "owner"),
         )
         self.assertEqual(
-            (row.resource_kind, row.resource_id), ("setup_token", issued.token_id)
+            (row.resource_kind, row.resource_id), ("setup_token", issued.audit_ref)
         )
 
     async def test_the_expiry_boundary(self):
-        issued = await self.service.setup_owner("boss")
+        issued = await self.operator.setup_owner("boss")
         self.clock.advance(seconds=TTL - 1)
-        early = await self.service.redeem(issued.token)
-        self.assertEqual(early.token_id, issued.token_id)
+        early = await self.redeemer.redeem(issued.token)
+        self.assertEqual(early.audit_ref, issued.audit_ref)
 
-        second = await self.service.recover_owner()
+        second = await self.operator.recover_owner()
         self.clock.advance(seconds=TTL)  # exactly the expiry instant
         with self.assertRaises(SetupTokenRejectedError):
-            await self.service.redeem(second.token)
+            await self.redeemer.redeem(second.token)
         self.assertEqual(
             (await self.audit_summary())[
                 ("owner.token.redeem", "deny", "token_expired")
@@ -571,19 +615,19 @@ class RedeemTest(PostgresIdentityTestCase):
         )
 
     async def test_an_expired_token_is_rejected_and_stays_unused(self):
-        issued = await self.service.setup_owner("boss")
+        issued = await self.operator.setup_owner("boss")
         self.clock.advance(hours=3)
 
         with self.assertRaises(SetupTokenRejectedError):
-            await self.service.redeem(issued.token)
+            await self.redeemer.redeem(issued.token)
 
         self.assertIsNone(await self.scalar("SELECT used_at FROM setup_tokens"))
 
     async def test_a_wrong_secret_is_rejected_and_counted(self):
-        issued = await self.service.setup_owner("boss")
+        issued = await self.operator.setup_owner("boss")
 
         with self.assertRaises(SetupTokenRejectedError):
-            await self.service.redeem(wrong_secret_for(issued.token))
+            await self.redeemer.redeem(wrong_secret_for(issued.token))
 
         self.assertEqual(await self.scalar("SELECT attempts FROM setup_tokens"), 1)
         self.assertIsNone(await self.scalar("SELECT used_at FROM setup_tokens"))
@@ -594,11 +638,11 @@ class RedeemTest(PostgresIdentityTestCase):
             1,
         )
         # The right token still works while attempts remain.
-        await self.service.redeem(issued.token)
+        await self.redeemer.redeem(issued.token)
         self.assertEqual(await self.scalar("SELECT attempts FROM setup_tokens"), 2)
 
     async def test_unknown_and_malformed_tokens_are_rejected_without_any_write(self):
-        await self.service.setup_owner("boss")
+        await self.operator.setup_owner("boss")
         before = await self.audit_summary()
         for value in [
             f"pawst1.{uuid.uuid4().hex}.{'A' * 43}",
@@ -611,22 +655,22 @@ class RedeemTest(PostgresIdentityTestCase):
         ]:
             with self.subTest(str(value)[:20]):
                 with self.assertRaises(SetupTokenRejectedError):
-                    await self.service.redeem(value)
+                    await self.redeemer.redeem(value)
 
         self.assertEqual(await self.audit_summary(), before)
         self.assertEqual(await self.scalar("SELECT attempts FROM setup_tokens"), 0)
 
     async def test_lockout_after_the_maximum_number_of_attempts(self):
-        service = self.make_service(max_attempts=3)
-        issued = await service.setup_owner("boss")
+        redeemer = self.make_redeemer(max_attempts=3)
+        issued = await self.operator.setup_owner("boss")
         wrong = wrong_secret_for(issued.token)
 
         for _ in range(3):
             with self.assertRaises(SetupTokenRejectedError):
-                await service.redeem(wrong)
+                await redeemer.redeem(wrong)
         # Locked out for good: even the correct token no longer works ...
         with self.assertRaises(SetupTokenRejectedError):
-            await service.redeem(issued.token)
+            await redeemer.redeem(issued.token)
 
         self.assertEqual(await self.scalar("SELECT attempts FROM setup_tokens"), 3)
         self.assertIsNone(await self.scalar("SELECT used_at FROM setup_tokens"))
@@ -639,21 +683,21 @@ class RedeemTest(PostgresIdentityTestCase):
         before = await self.audit_summary()
         for _ in range(5):
             with self.assertRaises(SetupTokenRejectedError):
-                await service.redeem(wrong)
+                await redeemer.redeem(wrong)
         self.assertEqual(await self.audit_summary(), before)
         self.assertEqual(await self.scalar("SELECT attempts FROM setup_tokens"), 3)
         # A new recovery token is the way out.
-        recovery = await service.recover_owner()
-        await service.redeem(recovery.token)
+        recovery = await self.operator.recover_owner()
+        await redeemer.redeem(recovery.token)
 
     async def test_the_last_permitted_attempt_can_still_succeed(self):
-        service = self.make_service(max_attempts=3)
-        issued = await service.setup_owner("boss")
+        redeemer = self.make_redeemer(max_attempts=3)
+        issued = await self.operator.setup_owner("boss")
         for _ in range(2):
             with self.assertRaises(SetupTokenRejectedError):
-                await service.redeem(wrong_secret_for(issued.token))
+                await redeemer.redeem(wrong_secret_for(issued.token))
 
-        await service.redeem(issued.token)
+        await redeemer.redeem(issued.token)
 
         summary = await self.audit_summary()
         self.assertEqual(
@@ -661,11 +705,14 @@ class RedeemTest(PostgresIdentityTestCase):
         )
 
     async def test_concurrent_wrong_guesses_never_exceed_the_maximum(self):
-        issued = await self.service.setup_owner("boss")
+        issued = await self.operator.setup_owner("boss")
         wrong = wrong_secret_for(issued.token)
 
         results = await self.gather_on_own_engines(
-            10, lambda service, index: service.redeem(wrong), max_attempts=3
+            10,
+            lambda service, index: service.redeem(wrong),
+            redeemer=True,
+            max_attempts=3,
         )
 
         self.assertTrue(
@@ -679,10 +726,13 @@ class RedeemTest(PostgresIdentityTestCase):
         )
 
     async def test_concurrent_redemptions_exactly_one_succeeds(self):
-        issued = await self.service.setup_owner("boss")
+        issued = await self.operator.setup_owner("boss")
 
         results = await self.gather_on_own_engines(
-            6, lambda service, index: service.redeem(issued.token), max_attempts=20
+            6,
+            lambda service, index: service.redeem(issued.token),
+            redeemer=True,
+            max_attempts=20,
         )
 
         redeemed = [r for r in results if isinstance(r, Redemption)]
@@ -702,26 +752,26 @@ class RedeemTest(PostgresIdentityTestCase):
 
         async def rejection(name, token, service=None):
             try:
-                await (service or self.service).redeem(token)
+                await (service or self.redeemer).redeem(token)
             except SetupTokenRejectedError as error:
                 outcomes[name] = error
             else:
                 self.fail(f"{name}: the token was accepted")
 
-        setup = await self.service.setup_owner("boss")
+        setup = await self.operator.setup_owner("boss")
         await rejection("wrong secret", wrong_secret_for(setup.token))
         await rejection("unknown id", tokens.generate().token)
         await rejection("malformed", "not-a-token")
         await rejection("not a string", None)
-        await self.service.redeem(setup.token)
+        await self.redeemer.redeem(setup.token)
         await rejection("used", setup.token)
-        revoked = await self.service.recover_owner()
-        expired = await self.service.recover_owner()
+        revoked = await self.operator.recover_owner()
+        expired = await self.operator.recover_owner()
         await rejection("revoked", revoked.token)
         self.clock.advance(hours=3)
         await rejection("expired", expired.token)
-        locked = await self.service.recover_owner()
-        strict = self.make_service(max_attempts=2)
+        locked = await self.operator.recover_owner()
+        strict = self.make_redeemer(max_attempts=2)
         await rejection(
             "wrong before the lockout", wrong_secret_for(locked.token), strict
         )
@@ -756,7 +806,7 @@ class RedeemTest(PostgresIdentityTestCase):
         self.assertEqual(len(signatures), 1, signatures)
 
     async def test_every_failure_does_the_same_comparison_and_reservation_work(self):
-        setup = await self.service.setup_owner("boss")
+        setup = await self.operator.setup_owner("boss")
         statements: list[str] = []
 
         @event.listens_for(self.database.engine.sync_engine, "before_cursor_execute")
@@ -779,7 +829,7 @@ class RedeemTest(PostgresIdentityTestCase):
                     tokens.hmac, "compare_digest", side_effect=real_compare
                 ) as compare:
                     with self.assertRaises(SetupTokenRejectedError):
-                        await self.service.redeem(token)
+                        await self.redeemer.redeem(token)
                 self.assertEqual(compare.call_count, 1)
                 reservations = [
                     s
@@ -789,7 +839,7 @@ class RedeemTest(PostgresIdentityTestCase):
                 self.assertEqual(len(reservations), 1)
 
     async def test_the_web_flow_can_finish_its_part_in_the_same_transaction(self):
-        issued = await self.service.setup_owner("boss")
+        issued = await self.operator.setup_owner("boss")
         seen = []
 
         async def apply(session, redemption):
@@ -803,21 +853,21 @@ class RedeemTest(PostgresIdentityTestCase):
                 {"id": redemption.user_id},
             )
 
-        redemption = await self.service.redeem(issued.token, apply=apply)
+        redemption = await self.redeemer.redeem(issued.token, apply=apply)
 
         self.assertEqual(seen, [redemption, T0])
         self.assertEqual(await self.scalar("SELECT status FROM users"), "active")
         self.assertEqual(await self.scalar("SELECT used_at FROM setup_tokens"), T0)
 
     async def test_a_failing_hook_rolls_the_redemption_back(self):
-        issued = await self.service.setup_owner("boss")
+        issued = await self.operator.setup_owner("boss")
 
         async def apply(session, redemption):
             await session.execute(text("UPDATE users SET status = 'active'"))
             raise ZeroDivisionError
 
         with self.assertRaises(ZeroDivisionError):
-            await self.service.redeem(issued.token, apply=apply)
+            await self.redeemer.redeem(issued.token, apply=apply)
 
         self.assertEqual(await self.scalar("SELECT status FROM users"), "invited")
         self.assertIsNone(await self.scalar("SELECT used_at FROM setup_tokens"))
@@ -825,15 +875,15 @@ class RedeemTest(PostgresIdentityTestCase):
             (await self.audit_summary())[("owner.token.redeem", "allow", "redeemed")], 0
         )
         # The token was not burned: the flow can try again.
-        await self.service.redeem(issued.token)
+        await self.redeemer.redeem(issued.token)
 
     async def test_the_hook_must_be_callable(self):
         with self.assertRaises(TypeError):
-            await self.service.redeem("x", apply="not callable")
+            await self.redeemer.redeem("x", apply="not callable")
 
     async def test_redemption_fails_closed_when_the_audit_cannot_be_written(self):
-        issued = await self.service.setup_owner("boss")
-        service = self.make_service(sink=FailingSink())
+        issued = await self.operator.setup_owner("boss")
+        service = self.make_redeemer(sink=FailingSink())
 
         with self.audit_failure_is_logged_by_type_only():
             with self.assertRaises(AuditUnavailableError):
@@ -842,20 +892,20 @@ class RedeemTest(PostgresIdentityTestCase):
         self.assertIsNone(await self.scalar("SELECT used_at FROM setup_tokens"))
 
     async def test_a_rejection_stays_a_rejection_when_the_audit_is_down(self):
-        issued = await self.service.setup_owner("boss")
-        service = self.make_service(sink=FailingSink())
+        issued = await self.operator.setup_owner("boss")
+        service = self.make_redeemer(sink=FailingSink())
 
         with self.audit_failure_is_logged_by_type_only():
             with self.assertRaises(SetupTokenRejectedError):
                 await service.redeem(wrong_secret_for(issued.token))
 
     async def test_a_token_of_a_user_who_is_no_longer_the_owner_is_rejected(self):
-        issued = await self.service.setup_owner("boss")
+        issued = await self.operator.setup_owner("boss")
         # As after an ownership transfer: the former Owner is an Admin.
         await self.execute("UPDATE users SET system_role = 'admin'")
 
         with self.assertRaises(SetupTokenRejectedError):
-            await self.service.redeem(issued.token)
+            await self.redeemer.redeem(issued.token)
 
         self.assertIsNone(await self.scalar("SELECT used_at FROM setup_tokens"))
         self.assertEqual(
@@ -866,18 +916,18 @@ class RedeemTest(PostgresIdentityTestCase):
         )
 
     async def test_a_token_of_a_user_who_is_pending_deletion_is_rejected(self):
-        issued = await self.service.setup_owner("boss")
+        issued = await self.operator.setup_owner("boss")
         await self.execute("UPDATE users SET status = 'pending_deletion'")
 
         with self.assertRaises(SetupTokenRejectedError):
-            await self.service.redeem(issued.token)
+            await self.redeemer.redeem(issued.token)
 
         self.assertIsNone(await self.scalar("SELECT used_at FROM setup_tokens"))
 
     async def test_a_token_survives_a_restart(self):
-        issued = await self.service.setup_owner("boss")
+        issued = await self.operator.setup_owner("boss")
 
-        other_process = self.make_service(self.new_database())
+        other_process = self.make_redeemer(self.new_database())
 
         redemption = await other_process.redeem(issued.token)
         self.assertEqual(redemption.user_id, issued.user_id)
@@ -888,20 +938,20 @@ class NothingSecretIsLeakedTest(PostgresIdentityTestCase):
     async def test_no_plaintext_token_reaches_a_log_a_row_or_an_audit_event(self):
         tokens_seen: list[str] = []
         with LogCapture() as logs:
-            setup = await self.service.setup_owner("boss")
+            setup = await self.operator.setup_owner("boss")
             tokens_seen.append(setup.token)
             with self.assertRaises(SetupTokenRejectedError):
-                await self.service.redeem(wrong_secret_for(setup.token))
-            await self.service.redeem(setup.token)
+                await self.redeemer.redeem(wrong_secret_for(setup.token))
+            await self.redeemer.redeem(setup.token)
             with self.assertRaises(SetupTokenRejectedError):
-                await self.service.redeem(setup.token)
-            recovery = await self.service.recover_owner()
+                await self.redeemer.redeem(setup.token)
+            recovery = await self.operator.recover_owner()
             tokens_seen.append(recovery.token)
             self.clock.advance(hours=3)
             with self.assertRaises(SetupTokenRejectedError):
-                await self.service.redeem(recovery.token)
+                await self.redeemer.redeem(recovery.token)
             with self.assertRaises(OwnerAlreadyExistsError):
-                await self.service.setup_owner("again")
+                await self.operator.setup_owner("again")
 
         # The capture is not vacuous: SQL and its parameters were logged.
         self.assertIn("INSERT INTO setup_tokens", logs.text)
@@ -914,35 +964,630 @@ class NothingSecretIsLeakedTest(PostgresIdentityTestCase):
         self.assertNotIn("A" * 43, logs.text)
 
 
+@requires_postgres
+class AuditReferenceTest(PostgresIdentityTestCase):
+    """The token's lookup id is a secret-adjacent key: it never leaves the row."""
+
+    async def lifecycle(self):
+        """A setup, wrong tries, a redemption, a recovery, an expiry and a lockout."""
+        strict = self.make_redeemer(max_attempts=2)
+        setup = await self.operator.setup_owner("boss")
+        with self.assertRaises(SetupTokenRejectedError):
+            await self.redeemer.redeem(wrong_secret_for(setup.token))
+        await self.redeemer.redeem(setup.token)
+        with self.assertRaises(SetupTokenRejectedError):
+            await self.redeemer.redeem(setup.token)
+        first = await self.operator.recover_owner()
+        second = await self.operator.recover_owner()
+        with self.assertRaises(SetupTokenRejectedError):
+            await self.redeemer.redeem(first.token)
+        for _ in range(2):
+            with self.assertRaises(SetupTokenRejectedError):
+                await strict.redeem(wrong_secret_for(second.token))
+        with self.assertRaises(SetupTokenRejectedError):
+            await strict.redeem(second.token)
+        self.clock.advance(hours=3)
+        third = await self.operator.recover_owner()
+        self.clock.advance(hours=3)
+        with self.assertRaises(SetupTokenRejectedError):
+            await self.redeemer.redeem(third.token)
+        return [setup, first, second, third]
+
+    def spellings(self, token: str) -> list[str]:
+        lookup = uuid.UUID(hex=lookup_id_of(token))
+        return [lookup.hex, str(lookup)]
+
+    async def test_no_audit_row_and_no_log_line_contains_the_lookup_id(self):
+        with LogCapture() as logs:
+            issued = await self.lifecycle()
+
+        rows = await self.audit_rows()
+        dump = "\n".join(str(tuple(row)) for row in rows)
+        self.assertGreater(len(rows), 10)  # the check is not vacuous
+        for token in issued:
+            for spelling in self.spellings(token.token):
+                with self.subTest(spelling=spelling[:8]):
+                    self.assertNotIn(spelling, dump)
+                    # The application's own log lines. (The SQL echo of the
+                    # SQLAlchemy engine carries every parameter, by design.)
+                    self.assertNotIn(spelling, logs.application_text)
+        self.assertIn("paw_backend", logs.application_text)
+
+    async def test_audit_rows_name_each_token_by_its_audit_ref_only(self):
+        issued = await self.lifecycle()
+
+        refs = {token.audit_ref for token in issued}
+        named = {
+            row.resource_id
+            for row in await self.audit_rows()
+            if row.resource_kind == "setup_token"
+        }
+        self.assertEqual(named, refs)
+        lookups = {row.id for row in await self.query("SELECT id FROM setup_tokens")}
+        self.assertEqual(lookups & refs, set())
+
+    async def test_the_redemption_carries_the_audit_ref_not_the_lookup_id(self):
+        issued = await self.operator.setup_owner("boss")
+
+        redemption = await self.redeemer.redeem(issued.token)
+
+        self.assertEqual(redemption.audit_ref, issued.audit_ref)
+        self.assertNotIn(lookup_id_of(issued.token), repr(redemption))
+        self.assertNotIn(
+            str(uuid.UUID(hex=lookup_id_of(issued.token))), repr(redemption)
+        )
+        self.assertFalse(hasattr(redemption, "token_id"))
+        self.assertFalse(hasattr(issued, "token_id"))
+
+    async def test_knowing_the_audit_ref_lets_nobody_redeem_or_lock_the_token(self):
+        # What an Admin who can read the audit trail knows: the audit_ref.
+        issued = await self.operator.setup_owner("boss")
+        known = issued.audit_ref.hex
+        secret = secret_of(issued.token)
+        before = await self.audit_summary()
+
+        for _ in range(12):
+            for attempt in (
+                f"pawst1.{known}.{'A' * 43}",  # the audit_ref as the id, a guess
+                f"pawst1.{known}.{secret}",  # even with the real secret
+            ):
+                with self.assertRaises(SetupTokenRejectedError):
+                    await self.redeemer.redeem(attempt)
+
+        # Nothing was counted, locked or written, and the Owner's token works.
+        self.assertEqual(
+            await self.query("SELECT attempts, locked_at FROM setup_tokens"),
+            [(0, None)],
+        )
+        self.assertEqual(await self.audit_summary(), before)
+        redemption = await self.redeemer.redeem(issued.token)
+        self.assertEqual(redemption.user_id, issued.user_id)
+
+
+@requires_postgres
+class HookGuardTest(PostgresIdentityTestCase):
+    """The ``apply`` hook may write, but not end the transaction it is lent."""
+
+    async def redeem_with(self, hook, redeemer=None):
+        issued = await self.operator.setup_owner("boss")
+        with self.assertRaises(Exception) as caught:
+            await (redeemer or self.redeemer).redeem(issued.token, apply=hook)
+        return issued, caught.exception
+
+    async def assert_untouched(self):
+        self.assertEqual(await self.scalar("SELECT status FROM users"), "invited")
+        self.assertIsNone(await self.scalar("SELECT used_at FROM setup_tokens"))
+        self.assertEqual(
+            (await self.audit_summary())[("owner.token.redeem", "allow", "redeemed")], 0
+        )
+
+    async def test_a_hook_that_commits_is_refused_and_nothing_is_consumed(self):
+        async def hook(session, redemption):
+            await session.execute(text("UPDATE users SET status = 'active'"))
+            await session.commit()
+
+        issued, error = await self.redeem_with(hook)
+
+        self.assertIsInstance(error, RedeemHookError)
+        await self.assert_untouched()
+        # Not burned: the flow can be repaired and try again.
+        await self.redeemer.redeem(issued.token)
+
+    async def test_a_committing_hook_cannot_beat_the_audit_failure(self):
+        # The review's case: the hook commits, then the audit sink fails. The
+        # token used to stay consumed with no audit row at all. Now the commit is
+        # refused before the audit is even attempted.
+        async def hook(session, redemption):
+            await session.execute(text("UPDATE users SET status = 'active'"))
+            await session.commit()
+
+        sink = FailingSink()
+        _, error = await self.redeem_with(hook, self.make_redeemer(sink=sink))
+
+        self.assertIsInstance(error, RedeemHookError)
+        self.assertEqual(sink.attempts, 0)
+        await self.assert_untouched()
+
+    async def test_a_hook_that_rolls_back_is_refused(self):
+        async def hook(session, redemption):
+            await session.execute(text("UPDATE users SET status = 'active'"))
+            await session.rollback()
+
+        _, error = await self.redeem_with(hook)
+
+        self.assertIsInstance(error, RedeemHookError)
+        await self.assert_untouched()
+
+    async def test_a_hook_that_closes_the_session_is_refused(self):
+        async def hook(session, redemption):
+            await session.close()
+
+        _, error = await self.redeem_with(hook)
+
+        self.assertIsInstance(error, RedeemHookError)
+        await self.assert_untouched()
+
+    async def test_a_hook_that_swallows_the_commit_error_still_redeems_normally(self):
+        async def hook(session, redemption):
+            await session.execute(text("UPDATE users SET status = 'active'"))
+            try:
+                await session.commit()
+            except RedeemHookError:
+                pass  # carries on; the transaction is still open
+
+        issued = await self.operator.setup_owner("boss")
+
+        redemption = await self.redeemer.redeem(issued.token, apply=hook)
+
+        self.assertEqual(redemption.user_id, issued.user_id)
+        self.assertEqual(await self.scalar("SELECT status FROM users"), "active")
+        self.assertIsNotNone(await self.scalar("SELECT used_at FROM setup_tokens"))
+        self.assertEqual(
+            (await self.audit_summary())[("owner.token.redeem", "allow", "redeemed")], 1
+        )
+
+    async def test_the_guard_is_only_attached_while_the_hook_runs(self):
+        issued = await self.operator.setup_owner("boss")
+        listeners = []
+
+        async def hook(session, redemption):
+            listeners.append(len(session.sync_session.dispatch.before_commit))
+            sessions.append(session)
+
+        sessions = []
+        await self.redeemer.redeem(issued.token, apply=hook)
+
+        (session,) = sessions
+        listeners.append(len(session.sync_session.dispatch.before_commit))
+        self.assertEqual(listeners, [1, 0])
+
+    async def test_the_owner_row_stays_locked_until_the_redemption_ends(self):
+        # The documented contract for PAW-022: while the hook runs, nobody else
+        # can lock (or change) the Owner's users row or the token row.
+        issued = await self.operator.setup_owner("boss")
+        states = []
+
+        async def hook(session, redemption):
+            for table in ("users", "setup_tokens"):
+                try:
+                    async with self.database.session() as other:
+                        await other.execute(
+                            text(f"SELECT 1 FROM {table} FOR UPDATE NOWAIT")
+                        )
+                    states.append((table, "free"))
+                except DBAPIError as error:
+                    states.append((table, error.orig.sqlstate))
+
+        await self.redeemer.redeem(issued.token, apply=hook)
+
+        self.assertEqual(
+            states,
+            [("users", "55P03"), ("setup_tokens", "55P03")],  # lock_not_available
+        )
+        async with self.database.session() as other:  # released afterwards
+            await other.execute(text("SELECT 1 FROM users FOR UPDATE NOWAIT"))
+
+
+@requires_postgres
+class LockoutPersistenceTest(PostgresIdentityTestCase):
+    """A lockout is stored: changing the setting later cannot reopen a token."""
+
+    async def lock_a_token(self, max_attempts: int = 3):
+        issued = await self.operator.setup_owner("boss")
+        strict = self.make_redeemer(max_attempts=max_attempts)
+        for _ in range(max_attempts):
+            with self.assertRaises(SetupTokenRejectedError):
+                await strict.redeem(wrong_secret_for(issued.token))
+        return issued
+
+    async def test_the_attempt_that_uses_the_last_one_records_the_lock(self):
+        issued = await self.lock_a_token(3)
+
+        row = (await self.query("SELECT attempts, locked_at FROM setup_tokens"))[0]
+        self.assertEqual(tuple(row), (3, T0))
+        self.assertIsNone(await self.scalar("SELECT used_at FROM setup_tokens"))
+        self.assertEqual(issued.purpose, TokenPurpose.SETUP)
+
+    async def test_raising_the_maximum_does_not_reopen_a_locked_token(self):
+        issued = await self.lock_a_token(3)
+
+        for maximum in (4, 20):
+            with self.subTest(maximum=maximum):
+                relaxed = self.make_redeemer(max_attempts=maximum)
+                with self.assertRaises(SetupTokenRejectedError):
+                    await relaxed.redeem(issued.token)
+                with self.assertRaises(SetupTokenRejectedError):
+                    await relaxed.redeem(wrong_secret_for(issued.token))
+
+        self.assertEqual(
+            await self.query("SELECT attempts, locked_at FROM setup_tokens"),
+            [(3, T0)],
+        )
+        # Recovery is the way out, as documented.
+        recovery = await self.operator.recover_owner()
+        await self.make_redeemer(max_attempts=20).redeem(recovery.token)
+
+    async def test_a_token_that_is_not_locked_follows_the_new_maximum(self):
+        issued = await self.operator.setup_owner("boss")
+        loose = self.make_redeemer(max_attempts=20)
+        for _ in range(2):
+            with self.assertRaises(SetupTokenRejectedError):
+                await loose.redeem(wrong_secret_for(issued.token))
+        self.assertIsNone(await self.scalar("SELECT locked_at FROM setup_tokens"))
+
+        tight = self.make_redeemer(max_attempts=3)
+        with self.assertRaises(SetupTokenRejectedError):
+            await tight.redeem(wrong_secret_for(issued.token))  # the 3rd: locks
+        self.assertEqual(await self.scalar("SELECT locked_at FROM setup_tokens"), T0)
+        with self.assertRaises(SetupTokenRejectedError):
+            await loose.redeem(issued.token)
+
+    async def test_the_lockout_is_audited_once_however_the_setting_changes(self):
+        issued = await self.lock_a_token(2)
+        relaxed = self.make_redeemer(max_attempts=20)
+        for _ in range(4):
+            with self.assertRaises(SetupTokenRejectedError):
+                await relaxed.redeem(wrong_secret_for(issued.token))
+
+        summary = await self.audit_summary()
+        self.assertEqual(summary[("owner.token.redeem", "deny", "token_mismatch")], 2)
+        self.assertEqual(
+            summary[("owner.token.redeem", "deny", "attempts_exhausted")], 1
+        )
+
+    async def test_a_successful_last_attempt_locks_a_token_that_is_already_used(self):
+        redeemer = self.make_redeemer(max_attempts=2)
+        issued = await self.operator.setup_owner("boss")
+        with self.assertRaises(SetupTokenRejectedError):
+            await redeemer.redeem(wrong_secret_for(issued.token))
+
+        await redeemer.redeem(issued.token)
+
+        self.assertEqual(
+            await self.query("SELECT attempts, used_at IS NOT NULL FROM setup_tokens"),
+            [(2, True)],
+        )
+        self.assertEqual(
+            (await self.audit_summary())[
+                ("owner.token.redeem", "deny", "attempts_exhausted")
+            ],
+            0,
+        )
+
+
+@requires_postgres
+class NonLiveOwnerTest(PostgresIdentityTestCase):
+    """An Owner row that is pending deletion or deleted, and the way out."""
+
+    async def owner_in(self, status: str):
+        issued = await self.operator.setup_owner("boss")
+        await self.execute("UPDATE users SET status = :s", s=status)
+        return issued
+
+    async def test_setup_reports_the_real_state_instead_of_pointing_at_recovery(self):
+        for status in ("pending_deletion", "deleted"):
+            with self.subTest(status):
+                await self.reset_users()
+                await self.owner_in(status)
+                before = await self.audit_summary()
+
+                with self.assertRaises(OwnerNotLiveError) as caught:
+                    await self.operator.setup_owner("another")
+
+                self.assertEqual(caught.exception.status, status)
+                self.assertNotIsInstance(caught.exception, OwnerAlreadyExistsError)
+                self.assertEqual(await self.scalar("SELECT count(*) FROM users"), 1)
+                after = await self.audit_summary()
+                self.assertEqual(
+                    after[("owner.create", "deny", "owner_not_live")]
+                    - before[("owner.create", "deny", "owner_not_live")],
+                    1,
+                )
+
+    async def test_recovery_reports_the_real_state_instead_of_pointing_at_setup(self):
+        for status in ("pending_deletion", "deleted"):
+            with self.subTest(status):
+                await self.reset_users()
+                await self.owner_in(status)
+
+                with self.assertRaises(OwnerNotLiveError) as caught:
+                    await self.operator.recover_owner()
+
+                self.assertEqual(caught.exception.status, status)
+                self.assertNotIsInstance(caught.exception, OwnerNotFoundError)
+
+    async def test_the_explicit_flag_replaces_the_account_in_one_audited_step(self):
+        old = await self.owner_in("deleted")
+
+        new = await self.operator.setup_owner("newboss", replace_non_live_owner=True)
+
+        rows = await self.query(
+            "SELECT id, login_name, system_role, status, passkey_required "
+            "FROM users ORDER BY login_name"
+        )
+        self.assertEqual(
+            [tuple(row) for row in rows],
+            [
+                (old.user_id, "boss", "user", "deleted", True),  # demoted, not erased
+                (new.user_id, "newboss", "owner", "invited", True),
+            ],
+        )
+        self.assertEqual(await self.owner_count(), 1)
+        # The old Owner's outstanding token is revoked: it cannot be redeemed.
+        with self.assertRaises(SetupTokenRejectedError):
+            await self.redeemer.redeem(old.token)
+        self.assertEqual((await self.redeemer.redeem(new.token)).user_id, new.user_id)
+        events = [
+            row for row in await self.audit_rows() if row.action.startswith("owner.")
+        ]
+        by_action = {}
+        for row in events:
+            by_action.setdefault(row.action, []).append(row)
+        (replace,) = by_action["owner.replace"]
+        self.assertEqual(
+            (
+                replace.decision,
+                replace.reason,
+                replace.resource_id,
+                replace.old_role,
+                replace.new_role,
+            ),
+            ("allow", "replaced", old.user_id, "owner", "user"),
+        )
+        # All the events of the replacement share one correlation id.
+        together = sorted(
+            row.action for row in events if row.correlation_id == replace.correlation_id
+        )
+        self.assertEqual(
+            together,
+            [
+                "owner.create",
+                "owner.replace",
+                "owner.setup_token.issue",
+                "owner.token.revoke",
+            ],
+        )
+        summary = await self.audit_summary()
+        self.assertEqual(summary[("owner.token.revoke", "allow", "superseded")], 1)
+        self.assertEqual(summary[("owner.create", "allow", "created")], 2)
+
+    async def test_a_live_owner_is_never_replaced_not_even_with_the_flag(self):
+        for status in ("invited", "active"):
+            with self.subTest(status):
+                await self.reset_users()
+                old = await self.owner_in(status)
+
+                with self.assertRaises(OwnerAlreadyExistsError):
+                    await self.operator.setup_owner(
+                        "another", replace_non_live_owner=True
+                    )
+
+                self.assertEqual(
+                    await self.query("SELECT id, system_role FROM users"),
+                    [(old.user_id, "owner")],
+                )
+                self.assertEqual(await self.outstanding_tokens(), 1)
+
+    async def outstanding_tokens(self) -> int:
+        return await self.scalar(
+            "SELECT count(*) FROM setup_tokens "
+            "WHERE used_at IS NULL AND revoked_at IS NULL"
+        )
+
+    async def test_the_flag_changes_nothing_when_there_is_no_owner(self):
+        issued = await self.operator.setup_owner("boss", replace_non_live_owner=True)
+
+        self.assertEqual(issued.login_name, "boss")
+        self.assertEqual(await self.owner_count(), 1)
+        self.assertEqual(
+            (await self.audit_summary())[("owner.replace", "allow", "replaced")], 0
+        )
+
+    async def test_the_replacement_cannot_reuse_the_old_login_name(self):
+        await self.owner_in("deleted")
+
+        with self.assertRaises(LoginNameTakenError):
+            await self.operator.setup_owner("boss", replace_non_live_owner=True)
+
+        # Rolled back: the old account is still the (non-live) Owner.
+        self.assertEqual(await self.scalar("SELECT system_role FROM users"), "owner")
+
+    async def test_the_replacement_fails_closed_when_the_audit_cannot_be_written(self):
+        old = await self.owner_in("deleted")
+        for allowed in (0, 1, 2):
+            with self.subTest(events_stored_first=allowed):
+                broken = self.make_operator(sink=FlakySink(self.database, allowed))
+                with self.assertRaises(AuditUnavailableError):
+                    await broken.setup_owner("newboss", replace_non_live_owner=True)
+
+                self.assertEqual(
+                    await self.query("SELECT id, system_role FROM users"),
+                    [(old.user_id, "owner")],
+                )
+                self.assertEqual(
+                    await self.scalar("SELECT count(*) FROM setup_tokens"), 1
+                )
+                self.assertEqual(
+                    await self.scalar("SELECT revoked_at IS NULL FROM setup_tokens"),
+                    True,
+                )
+
+    async def test_concurrent_replacements_produce_exactly_one_new_owner(self):
+        await self.owner_in("deleted")
+
+        results = await self.gather_on_own_engines(
+            4,
+            lambda service, index: service.setup_owner(
+                f"owner{index}", replace_non_live_owner=True
+            ),
+        )
+
+        issued = [r for r in results if isinstance(r, IssuedToken)]
+        self.assertEqual(len(issued), 1, results)
+        self.assertTrue(
+            all(
+                isinstance(r, OwnerAlreadyExistsError)
+                for r in results
+                if not isinstance(r, IssuedToken)
+            ),
+            results,
+        )
+        self.assertEqual(await self.owner_count(), 1)
+        self.assertEqual(await self.scalar("SELECT count(*) FROM users"), 2)
+
+    async def test_the_flag_must_be_a_real_boolean(self):
+        for value in ("yes", 1, None, "true"):
+            with self.subTest(value):
+                with self.assertRaises(TypeError):
+                    await self.operator.setup_owner(
+                        "boss", replace_non_live_owner=value
+                    )
+        self.assertEqual(await self.scalar("SELECT count(*) FROM users"), 0)
+
+
+@requires_postgres
+class OperatorRecordTest(PostgresIdentityTestCase):
+    """Who ran the command is recorded (numeric ids) on the token it issued."""
+
+    async def test_the_uids_are_stored_with_the_token_the_audit_refers_to(self):
+        who = OperatorIdentity(uid=1000, sudo_uid=1001)
+
+        setup = await self.operator.setup_owner("boss", operator=who)
+        recovery = await self.operator.recover_owner(operator=OperatorIdentity(0))
+
+        rows = await self.query(
+            "SELECT audit_ref, purpose, issued_by_uid, issued_by_sudo_uid "
+            "FROM setup_tokens ORDER BY created_at, purpose"
+        )
+        by_ref = {row.audit_ref: tuple(row)[1:] for row in rows}
+        self.assertEqual(by_ref[setup.audit_ref], ("setup", 1000, 1001))
+        self.assertEqual(by_ref[recovery.audit_ref], ("recovery", 0, None))
+        # An audit event reaches the uids through the token's audit_ref.
+        joined = await self.query(
+            "SELECT a.action, t.issued_by_uid, t.issued_by_sudo_uid "
+            "FROM audit_events a JOIN setup_tokens t ON t.audit_ref = a.resource_id "
+            "WHERE a.action = 'owner.setup_token.issue' AND a.recorded_at >= :since",
+            since=self.started_at,
+        )
+        self.assertEqual(
+            [tuple(r) for r in joined], [("owner.setup_token.issue", 1000, 1001)]
+        )
+
+    async def test_nothing_is_recorded_without_an_operator(self):
+        await self.operator.setup_owner("boss")
+
+        self.assertEqual(
+            await self.query(
+                "SELECT issued_by_uid, issued_by_sudo_uid FROM setup_tokens"
+            ),
+            [(None, None)],
+        )
+
+    def test_the_identity_is_read_from_the_process_and_sudo(self):
+        import os
+
+        self.assertEqual(
+            OperatorIdentity.from_environment({"SUDO_UID": "1001"}),
+            OperatorIdentity(os.geteuid(), 1001),
+        )
+        self.assertEqual(
+            OperatorIdentity.from_environment({}), OperatorIdentity(os.geteuid(), None)
+        )
+
+    def test_a_malformed_sudo_uid_is_ignored_not_trusted(self):
+        for raw in (
+            "",
+            "abc",
+            "-1",
+            "1e3",
+            " 1001",
+            "１００１",
+            "4294967296",
+            "9" * 30,
+        ):
+            with self.subTest(raw):
+                self.assertIsNone(
+                    OperatorIdentity.from_environment({"SUDO_UID": raw}).sudo_uid
+                )
+        self.assertEqual(
+            OperatorIdentity.from_environment({"SUDO_UID": "4294967295"}).sudo_uid,
+            4_294_967_295,
+        )
+
+    def test_identities_are_validated(self):
+        for uid, sudo in (
+            (-1, None),
+            (2**32, None),
+            (True, None),
+            ("0", None),
+            (0, -1),
+            (0, 2**32),
+            (0, False),
+        ):
+            with self.subTest(uid=uid, sudo=sudo):
+                with self.assertRaises(ValueError):
+                    OperatorIdentity(uid, sudo)
+        OperatorIdentity(0)
+        OperatorIdentity(4_294_967_295, 4_294_967_295)
+
+
 class ServiceConstructionTest(unittest.TestCase):
-    def build(self, **options):
+    """The arguments of both services are checked when they are built."""
+
+    def build(self, kind, **options):
         from .support import FakeDatabase
 
         class Sink:
             async def record(self, event):
                 return None
 
-        return service_module.OwnerSetupService(
-            FakeDatabase(), options.pop("sink", Sink()), **options
-        )
+        return kind(FakeDatabase(), options.pop("sink", Sink()), **options)
 
-    def test_the_ttl_and_the_attempt_limit_are_bounded(self):
-        for options in (
-            {"ttl_seconds": 59},
-            {"ttl_seconds": 86_401},
-            {"ttl_seconds": True},
-            {"ttl_seconds": 60.5},
-            {"max_attempts": 0},
-            {"max_attempts": 21},
-            {"max_attempts": False},
-            {"audit_timeout_seconds": 0},
-            {"audit_timeout_seconds": 61},
-        ):
-            with self.subTest(options):
+    def test_the_ttl_is_bounded_for_the_operator(self):
+        for ttl in (59, limits.MAX_TTL_SECONDS + 1, True, 60.5, "60"):
+            with self.subTest(ttl):
                 with self.assertRaises(ValueError):
-                    self.build(**options)
-        self.build(ttl_seconds=60, max_attempts=1)
-        self.build(ttl_seconds=86_400, max_attempts=20)
+                    self.build(OwnerOperator, ttl_seconds=ttl)
+        self.build(OwnerOperator, ttl_seconds=60)
+        self.build(OwnerOperator, ttl_seconds=14_400)
+
+    def test_the_ttl_is_capped_at_four_hours(self):
+        self.assertEqual(limits.MAX_TTL_SECONDS, 4 * 60 * 60)
+
+    def test_the_attempt_limit_is_bounded_for_the_redeemer(self):
+        for attempts in (0, 21, False, 2.5):
+            with self.subTest(attempts):
+                with self.assertRaises(ValueError):
+                    self.build(TokenRedeemer, max_attempts=attempts)
+        self.build(TokenRedeemer, max_attempts=1)
+        self.build(TokenRedeemer, max_attempts=20)
+
+    def test_the_audit_timeout_is_bounded(self):
+        for kind in (OwnerOperator, TokenRedeemer):
+            for timeout in (0, 61, "3"):
+                with self.subTest(kind=kind.__name__, timeout=timeout):
+                    with self.assertRaises(ValueError):
+                        self.build(kind, audit_timeout_seconds=timeout)
 
     def test_an_audit_sink_that_cannot_work_is_refused_up_front(self):
         class NotAsync:
@@ -953,17 +1598,34 @@ class ServiceConstructionTest(unittest.TestCase):
             async def record(self):
                 return None
 
-        for sink in (object(), NotAsync(), WrongSignature(), None):
-            with self.subTest(type(sink).__name__):
-                with self.assertRaises(TypeError):
-                    self.build(sink=sink)
+        for kind in (OwnerOperator, TokenRedeemer):
+            for sink in (object(), NotAsync(), WrongSignature(), None):
+                with self.subTest(kind=kind.__name__, sink=type(sink).__name__):
+                    with self.assertRaises(TypeError):
+                        self.build(kind, sink=sink)
 
     def test_a_clock_must_be_callable_and_timezone_aware(self):
-        with self.assertRaises(TypeError):
-            self.build(clock="now")
-        naive = self.build(clock=lambda: datetime(2030, 1, 1))
-        with self.assertRaises(ValueError):
-            naive._now()
+        for kind in (OwnerOperator, TokenRedeemer):
+            with self.subTest(kind.__name__):
+                with self.assertRaises(TypeError):
+                    self.build(kind, clock="now")
+                naive = self.build(kind, clock=lambda: datetime(2030, 1, 1))
+                with self.assertRaises(ValueError):
+                    naive._audit.now()
+
+    def test_the_web_facing_service_can_only_redeem(self):
+        public = {name for name in dir(TokenRedeemer) if not name.startswith("_")}
+
+        self.assertEqual(public, {"from_settings", "redeem"})
+
+    def test_the_operator_cannot_redeem(self):
+        public = {name for name in dir(OwnerOperator) if not name.startswith("_")}
+
+        self.assertEqual(public, {"from_settings", "recover_owner", "setup_owner"})
+
+    def test_the_audit_helper_is_shared_by_both(self):
+        self.assertIsInstance(self.build(TokenRedeemer)._audit, IdentityAudit)
+        self.assertIsInstance(self.build(OwnerOperator)._audit, IdentityAudit)
 
 
 if __name__ == "__main__":

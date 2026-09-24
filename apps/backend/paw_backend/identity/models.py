@@ -9,6 +9,12 @@ their own tables and columns.
 Owner recovery. A token is stored only as a salted HMAC (``salt`` and
 ``secret_hash``); the token itself is shown once to the operator and never
 stored.
+
+Two identifiers, never to be mixed up: ``id`` is the token's public lookup key
+(it is part of the token string, so whoever has ``id`` can spend the token's
+attempts), while ``audit_ref`` is an unrelated random UUID that is the only
+identifier of the token in audit events and logs. Nothing accepts ``audit_ref``
+as a lookup key.
 """
 
 import uuid
@@ -17,6 +23,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     CheckConstraint,
     DateTime,
@@ -37,6 +44,7 @@ from paw_backend.identity.login_name import LOGIN_NAME_SQL_PATTERN
 
 SALT_BYTES = 16
 HASH_BYTES = 32  # HMAC-SHA256
+MAX_UID = 4_294_967_295  # a 32-bit unsigned uid_t
 
 
 class UserStatus(StrEnum):
@@ -119,8 +127,11 @@ class UserRow(Base):
 class SetupTokenRow(Base):
     __tablename__ = "setup_tokens"
 
-    # The public part of the token (the token is ``<prefix>.<id>.<secret>``).
+    # The public part of the token (the token is ``<prefix>.<id>.<secret>``): a
+    # lookup key that must never reach an audit event or a log line.
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    # What audit events and logs call this token. Random and independent of ``id``.
+    audit_ref: Mapped[uuid.UUID] = mapped_column(Uuid)
     user_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE")
     )
@@ -131,11 +142,19 @@ class SetupTokenRow(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    # Redemption attempts made with this token id, successful or not. At the
-    # configured maximum the token is locked out for good.
+    # Redemption attempts made with this token id, successful or not.
     attempts: Mapped[int] = mapped_column(Integer, default=0)
+    # Set when the attempts reached the maximum in force at that time. From then
+    # on the token can never be redeemed, whatever the setting says later.
+    locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Who ran the management command that issued the token: the numeric uid, and
+    # the uid of the user who used sudo (``SUDO_UID``), when there was one. Ids
+    # only; the second one is a hint (an environment variable), not proof.
+    issued_by_uid: Mapped[int | None] = mapped_column(BigInteger)
+    issued_by_sudo_uid: Mapped[int | None] = mapped_column(BigInteger)
 
     __table_args__ = (
+        UniqueConstraint("audit_ref"),
         # A user has at most one outstanding (unused, unrevoked) token.
         Index(
             "uq_setup_tokens_one_outstanding",
@@ -150,6 +169,13 @@ class SetupTokenRow(Base):
         ),
         CheckConstraint("expires_at > created_at", name="expires_after_creation"),
         CheckConstraint("attempts >= 0", name="attempts_not_negative"),
+        CheckConstraint(
+            f"issued_by_uid BETWEEN 0 AND {MAX_UID}", name="issued_by_uid_range"
+        ),
+        CheckConstraint(
+            f"issued_by_sudo_uid BETWEEN 0 AND {MAX_UID}",
+            name="issued_by_sudo_uid_range",
+        ),
         # A token is consumed or revoked, not both.
         CheckConstraint(
             "used_at IS NULL OR revoked_at IS NULL", name="used_or_revoked"
