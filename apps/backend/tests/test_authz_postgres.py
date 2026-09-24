@@ -21,6 +21,7 @@ import psycopg.errors
 from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
+from pydantic import ValidationError
 from sqlalchemy import select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
@@ -50,6 +51,7 @@ from .authz_support import (
     AGENT,
     P1,
     U1,
+    U2,
     StaticDirectory,
     StaticProvider,
     add_test_routes,
@@ -134,7 +136,8 @@ class MigrationTest(AuditPostgresTestCase):
         # 'A' = ENABLE ALWAYS: they also fire under session_replication_role=replica.
         self.assertEqual(
             triggers,
-            "tr_audit_events_reject_truncate:A,tr_audit_events_reject_update_delete:A",
+            "tr_audit_events_force_recorded_at:A,tr_audit_events_reject_truncate:A,"
+            "tr_audit_events_reject_update_delete:A",
         )
 
     async def test_ids_are_uuid_columns_and_the_server_clock_column_exists(self):
@@ -160,13 +163,14 @@ class MigrationTest(AuditPostgresTestCase):
             "now()",
         )
 
-    async def test_downgrade_removes_the_table_and_the_function(self):
+    async def test_downgrade_removes_the_table_and_the_functions(self):
         await asyncio.to_thread(migrate, "downgrade", "0025-1")
         self.assertIsNone(await self.scalar("SELECT to_regclass('audit_events')"))
         self.assertEqual(
             await self.scalar(
-                "SELECT count(*) FROM pg_proc "
-                "WHERE proname = 'paw_reject_audit_events_change'"
+                "SELECT count(*) FROM pg_proc WHERE proname IN "
+                "('paw_reject_audit_events_change', "
+                "'paw_force_audit_events_recorded_at')"
             ),
             0,
         )
@@ -387,8 +391,25 @@ class RoleSplitTest(AuditPostgresTestCase):
                 "WHERE tgrelid = 'audit_events'::regclass AND NOT tgisinternal "
                 "AND tgenabled = 'A'"
             ),
-            2,
+            3,
         )
+
+    async def test_even_an_insert_capable_role_cannot_choose_recorded_at(self):
+        # The trigger overrides the value, so the database clock is the only one.
+        before = datetime.now(UTC) - timedelta(seconds=5)
+        async with self.app_db.session() as session:
+            await session.execute(
+                text(
+                    "INSERT INTO audit_events (id, correlation_id, occurred_at, "
+                    "recorded_at, action, resource_kind, decision, reason) VALUES "
+                    "(gen_random_uuid(), gen_random_uuid(), '2000-01-01', "
+                    "'2000-01-01', 'a', 'system', 'deny', 'r')"
+                )
+            )
+            await session.commit()
+        (row,) = await self.rows()
+        self.assertEqual(row.occurred_at, datetime(2000, 1, 1, tzinfo=UTC))
+        self.assertGreater(row.recorded_at, before)  # not 2000-01-01
 
     async def test_public_has_no_access_to_the_table(self):
         # OTHER_ROLE exists but was not granted anything.
@@ -438,6 +459,18 @@ class RoleSplitTest(AuditPostgresTestCase):
         with self.assertLogs("paw_backend.authz.diagnostics", level="WARNING"):
             await warn_if_audit_table_is_mutable(self.app_db, 3)
 
+    async def test_the_diagnostic_warns_when_the_role_cannot_insert(self):
+        # OTHER_ROLE exists but was granted nothing: every audited action would 503.
+        access = await read_audit_table_access(self.other_db)
+        self.assertTrue(access.cannot_write)
+        with self.assertLogs("paw_backend.authz.diagnostics", level="WARNING") as logs:
+            await warn_if_audit_table_is_mutable(self.other_db, 3)
+        (line,) = logs.output
+        self.assertIn("cannot INSERT into audit_events", line)
+        self.assertIn("PAW_APP_DATABASE_ROLE", line)
+        for secret in (OTHER_ROLE, ROLE_PASSWORD):
+            self.assertNotIn(secret, line)
+
     async def test_the_diagnostic_never_raises_when_the_database_is_unreachable(self):
         unreachable = Database(
             make_settings(
@@ -481,6 +514,53 @@ class MigrationUrlTest(AuditPostgresTestCase):
                 migrate, "upgrade", "head", PAW_DATABASE_URL=url_for_role(APP_ROLE)
             )
         self.assertIn("permission denied", str(caught.exception))
+
+    async def test_a_missing_app_role_fails_the_migration_loudly(self):
+        with self.assertRaises(RuntimeError) as caught:
+            await asyncio.to_thread(
+                migrate,
+                "upgrade",
+                "head",
+                PAW_APP_DATABASE_ROLE="paw_authz_missing_025",
+            )
+        self.assertIn("does not exist", str(caught.exception))
+        # ... and the migration did not half-apply.
+        self.assertIsNone(await self.scalar("SELECT to_regclass('audit_events')"))
+
+    async def test_public_can_not_be_named_as_the_app_role(self):
+        # A quoted "public" is the pseudo-role PUBLIC: it would grant everyone.
+        for name in ("public", "PUBLIC", "pg_monitor", "postgres"):
+            with self.subTest(role=name):
+                with self.assertRaises(ValidationError):
+                    await asyncio.to_thread(
+                        migrate, "upgrade", "head", PAW_APP_DATABASE_ROLE=name
+                    )
+                self.assertIsNone(
+                    await self.scalar("SELECT to_regclass('audit_events')")
+                )
+
+    async def test_migration_role_without_app_role_leaves_the_app_unable_to_write(self):
+        with self.assertLogs("paw_backend.migrations.0025", level="WARNING"):
+            await asyncio.to_thread(
+                migrate,
+                "upgrade",
+                "head",
+                PAW_DATABASE_URL=url_for_role(APP_ROLE),
+                PAW_MIGRATION_DATABASE_URL=TEST_DATABASE_URL,
+            )
+        app_db = Database(make_settings(database_url=url_for_role(APP_ROLE)))
+        self.addAsyncCleanup(app_db.dispose)
+        with self.assertLogs("paw_backend.authz.diagnostics", level="WARNING") as logs:
+            await warn_if_audit_table_is_mutable(app_db, 3)
+        self.assertIn("cannot INSERT into audit_events", "\n".join(logs.output))
+        # ... and an action that must be audited is refused, not silently run.
+        with self.assertLogs("paw_backend.authz.authorizer", level="ERROR"):
+            decision = await Authorizer(PostgresAuditSink(app_db)).authorize(
+                principal(SystemRole.OWNER),
+                Capability.ADMIN_CONFIG_MANAGE,
+                Resource.system(),
+            )
+        self.assertEqual(decision.reason, Reason.AUDIT_UNAVAILABLE)
 
     async def test_migrations_run_as_the_migration_role_when_one_is_configured(self):
         await asyncio.to_thread(
@@ -548,6 +628,32 @@ class AuthorizerOnPostgresTest(AuditPostgresTestCase):
         )
         self.assertEqual(
             (rows[0].correlation_id, rows[0].client_request_id), (correlation, "r1")
+        )
+
+    async def test_a_role_change_row_names_the_target_and_both_roles(self):
+        authorizer = Authorizer(PostgresAuditSink(self.database))
+        owner = principal(SystemRole.OWNER, user_id=U1)
+        await authorizer.authorize_role_change(
+            owner, U2, SystemRole.USER, SystemRole.ADMIN
+        )
+        await authorizer.authorize_ownership_transfer(owner, U2, SystemRole.ADMIN)
+        promoted, transferred = await self.rows()
+        self.assertEqual(
+            (
+                promoted.actor_id,
+                promoted.action,
+                promoted.resource_kind,
+                promoted.resource_id,
+            ),
+            (U1, "owner.admins.manage", "user", U2),
+        )
+        self.assertEqual((promoted.old_role, promoted.new_role), ("user", "admin"))
+        self.assertEqual(
+            (transferred.action, transferred.resource_id, transferred.decision),
+            ("owner.ownership.transfer", U2, "allow"),
+        )
+        self.assertEqual(
+            (transferred.old_role, transferred.new_role), ("admin", "owner")
         )
 
     async def test_an_action_is_denied_when_the_audit_table_is_unusable(self):

@@ -44,6 +44,9 @@ class AuditEventRecord(Base):
     repo_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
     decision: Mapped[str] = mapped_column(Text)
     reason: Mapped[str] = mapped_column(Text)
+    # Set for a change of a user's system role: the role before and after.
+    old_role: Mapped[str | None] = mapped_column(Text)
+    new_role: Mapped[str | None] = mapped_column(Text)
     # The X-Request-ID the *client* sent (validated, at most 64 characters). It
     # is only a hint for correlating with client logs; it can be forged, so use
     # ``correlation_id`` to tie rows together.

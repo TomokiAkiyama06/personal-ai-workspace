@@ -17,6 +17,7 @@ from sqlalchemy import insert
 
 from paw_backend.authz.models import AuditEventRecord
 from paw_backend.authz.policy import Decision
+from paw_backend.authz.roles import SystemRole
 from paw_backend.authz.subjects import (
     CLIENT_REQUEST_ID_PATTERN,
     KIND_PATTERN,
@@ -52,6 +53,10 @@ class AuditEvent(BaseModel):
     repo_id: uuid.UUID | None = None
     decision: Literal["allow", "deny"]
     reason: str = Field(max_length=64)
+    # For a change of a user's system role: the role before and after (enum
+    # values; ``None`` = removed). Empty for every other action.
+    old_role: str | None = Field(default=None, max_length=32)
+    new_role: str | None = Field(default=None, max_length=32)
     # What the client sent as X-Request-ID: validated and length-bounded, but
     # still client-controlled. Never use it to identify a request.
     client_request_id: str | None = Field(
@@ -69,6 +74,8 @@ def build_event(
     correlation_id: uuid.UUID | None = None,
     client_request_id: str | None = None,
     occurred_at: datetime | None = None,
+    old_role: SystemRole | None = None,
+    new_role: SystemRole | None = None,
 ) -> AuditEvent:
     """Turn a decision into an event; never raises for odd input.
 
@@ -91,6 +98,8 @@ def build_event(
         repo_id=target.repo_id,
         decision="allow" if decision.allowed else "deny",
         reason=decision.reason.value,
+        old_role=old_role.value if isinstance(old_role, SystemRole) else None,
+        new_role=new_role.value if isinstance(new_role, SystemRole) else None,
         # A value that does not look like a request ID is dropped, not stored.
         client_request_id=(
             client_request_id if is_valid_client_request_id(client_request_id) else None
@@ -139,6 +148,8 @@ class PostgresAuditSink:
             "repo_id": event.repo_id,
             "decision": event.decision,
             "reason": event.reason,
+            "old_role": event.old_role,
+            "new_role": event.new_role,
             "client_request_id": event.client_request_id,
         }
         async with self._database.session() as session:

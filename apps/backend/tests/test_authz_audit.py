@@ -70,6 +70,8 @@ class EventSchemaTest(unittest.TestCase):
                 "repo_id",
                 "decision",
                 "reason",
+                "old_role",
+                "new_role",
                 "client_request_id",
             },
         )
@@ -203,6 +205,28 @@ class EmissionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             (event.action, event.decision, event.reason),
             ("project.read", "deny", "not_project_member"),
+        )
+
+    async def test_an_agents_allowed_read_is_recorded_unlike_a_humans(self):
+        # DENIED_ONLY is for human reads; an agent never acts without a record.
+        sink = InMemoryAuditSink()
+        viewer = principal(
+            SystemRole.USER, user_id=U1, projects={P1: ProjectRole.VIEWER}
+        )
+        checker = authorizer(sink, directory=StaticDirectory(viewer))
+        grant = AgentGrant(AGENT, frozenset({Capability.PROJECT_READ}), ALL_PROJECTS)
+        self.assertTrue(
+            await checker.authorize(viewer, Capability.PROJECT_READ, project(P1))
+        )
+        self.assertEqual(sink.events, [])
+        by_agent = await checker.authorize_agent_action(
+            U1, grant, Capability.PROJECT_READ, project(P1)
+        )
+        self.assertTrue(by_agent)
+        (event,) = sink.events
+        self.assertEqual(
+            (event.actor_id, event.agent_id, event.action, event.decision),
+            (U1, AGENT, "project.read", "allow"),
         )
 
     async def test_every_other_allowed_decision_is_recorded_exactly_once(self):
@@ -349,6 +373,17 @@ class FailClosedTest(unittest.IsolatedAsyncioTestCase):
                     who, capability, resource_for(capability, who)
                 )
                 self.assertEqual(decision.reason, Reason.AUDIT_UNAVAILABLE)
+
+    async def test_an_agent_read_is_denied_when_the_audit_write_fails(self):
+        viewer = principal(
+            SystemRole.USER, user_id=U1, projects={P1: ProjectRole.VIEWER}
+        )
+        checker = authorizer(FailingSink(), directory=StaticDirectory(viewer))
+        grant = AgentGrant(AGENT, frozenset({Capability.PROJECT_READ}), ALL_PROJECTS)
+        decision = await checker.authorize_agent_action(
+            U1, grant, Capability.PROJECT_READ, project(P1)
+        )
+        self.assertEqual(decision.reason, Reason.AUDIT_UNAVAILABLE)
 
     async def test_a_denial_stays_a_denial_with_its_own_reason(self):
         for capability, resource in (

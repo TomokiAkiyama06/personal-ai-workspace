@@ -19,6 +19,19 @@ from paw_backend.security import normalize_origin
 _DRIVER = "postgresql+psycopg"
 # A plain (unquoted-style) PostgreSQL identifier; it is still quoted when used.
 _ROLE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,62}")
+# Names PostgreSQL gives a special meaning even when quoted: "public" is the
+# pseudo-role PUBLIC (everyone), and pg_* / postgres are reserved or built-in.
+_RESERVED_ROLES = frozenset(
+    {
+        "public",
+        "none",
+        "postgres",
+        "user",
+        "current_user",
+        "current_role",
+        "session_user",
+    }
+)
 _HOST = re.compile(r"\[[0-9a-f:.]+\]|[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?")
 
 
@@ -107,7 +120,11 @@ class Settings(BaseSettings):
     @field_validator("app_database_role")
     @classmethod
     def _valid_role_name(cls, value: str | None) -> str | None:
-        if value is not None and _ROLE.fullmatch(value) is None:
+        if value is not None and (
+            _ROLE.fullmatch(value) is None
+            or value.lower() in _RESERVED_ROLES
+            or value.lower().startswith("pg_")
+        ):
             raise ValueError("app_database_role is not a valid PostgreSQL role name")
         return value
 

@@ -91,7 +91,6 @@ PROJECT_MATRIX = {
 # Delegation is an allowlist: exactly these can ever be exercised by an agent.
 DELEGABLE_CAPS = {
     "chat.use",
-    "agent.use",
     "workspace.use",
     "github.use",
     "memory.use",
@@ -101,11 +100,14 @@ DELEGABLE_CAPS = {
     "project.chat",
     "project.task.run",
     "project.repo.write",
-    "project.agent.use",
     "project.pr.create",
     "project.memory.use",
 }
 NON_DELEGABLE_CAPS = {
+    # Starting agents: not delegable until PAW-032 defines derived (subset)
+    # grants for child agents.
+    "agent.use",
+    "project.agent.use",
     "shared_memory.manage",
     "admin.users.manage",
     "admin.usage.view",
@@ -603,6 +605,21 @@ class ValueObjectTest(unittest.TestCase):
                         Resource(kind="chat", id=value)
                     with self.assertRaises(ValueError):
                         Resource(kind="chat", owner_id=value)
+
+    def test_the_same_project_spelled_twice_is_refused_not_last_wins(self):
+        for roles in (
+            {str(P1): ProjectRole.VIEWER, P1: ProjectRole.MANAGER},
+            {P1: ProjectRole.MANAGER, str(P1): ProjectRole.VIEWER},
+        ):
+            with self.subTest(roles=roles):
+                with self.assertRaises(ValueError) as caught:
+                    Principal(U1, SystemRole.USER, roles)
+                self.assertNotIn(str(P1), str(caught.exception))
+        # Two different projects are of course fine.
+        both = Principal(
+            U1, SystemRole.USER, {str(P1): ProjectRole.VIEWER, P2: ProjectRole.MANAGER}
+        )
+        self.assertEqual(len(both.project_roles), 2)
 
     def test_error_does_not_echo_the_value(self):
         with self.assertRaises(ValueError) as caught:

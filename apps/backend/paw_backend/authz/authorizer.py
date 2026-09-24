@@ -8,7 +8,8 @@ Audit modes (``CAPABILITIES[...].audit``, see ``capabilities.py``):
   must not happen without a record of it. A denial stays a denial.
 * ``DENIED_ONLY`` (an explicit allowlist of read-only capabilities): allowed
   decisions are not recorded at all; denials are recorded best effort and an
-  audit failure never blocks the read.
+  audit failure never blocks the read. This never applies to an agent: agent
+  decisions are always ``REQUIRED``.
 
 Unauthenticated denials are never written to the database: anyone on the
 network could create them at will, and the table cannot be pruned. They are
@@ -31,11 +32,12 @@ from paw_backend.authz.policy import (
     Reason,
     decide,
     decide_agent,
+    decide_ownership_transfer,
     decide_role_change,
 )
 from paw_backend.authz.principals import PrincipalDirectory
 from paw_backend.authz.roles import SystemRole
-from paw_backend.authz.subjects import AgentGrant, Principal, Resource
+from paw_backend.authz.subjects import AgentGrant, Principal, Resource, to_uuid
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +85,7 @@ class Authorizer:
 
     async def authorize_agent_action(
         self,
-        delegator_id: uuid.UUID,
+        delegator_id: uuid.UUID | str,
         grant: AgentGrant,
         capability: Capability,
         resource: Resource | None,
@@ -95,15 +97,20 @@ class Authorizer:
 
         The delegating user's principal is looked up again through the
         directory on every call, so revoking a role or the user takes effect
-        on the agent's very next action. Allowed only if both that user and
-        the grant allow it (``policy.decide_agent``). The event names the user
-        as ``actor_id`` and the agent as ``agent_id``.
+        on the agent's very next action. A directory that fails or is slow
+        (bounded by the same timeout as the audit write) counts as "user not
+        active": an audited denial, never an error. Allowed only if both that
+        user and the grant allow it (``policy.decide_agent``). The event names
+        the user as ``actor_id`` and the agent as ``agent_id``.
+
+        Agent decisions are always ``REQUIRED``, whatever the capability's own
+        audit mode: an agent never acts without a recorded decision.
         """
-        principal = None
-        if self._directory is not None:
-            principal = await self._directory.get_principal_by_id(delegator_id)
-        if principal is not None and principal.user_id != delegator_id:
-            principal = None  # a directory answering for someone else is refused
+        try:
+            user_id: uuid.UUID | None = to_uuid(delegator_id, "delegator_id")
+        except ValueError:
+            user_id = None
+        principal = None if user_id is None else await self._lookup(user_id)
         if principal is None:
             decision = Decision.deny(
                 Reason.DELEGATOR_NOT_ACTIVE,
@@ -116,39 +123,82 @@ class Authorizer:
         return await self._audited(
             decision,
             principal=principal,
-            actor_id=delegator_id,
+            actor_id=user_id,
             resource=resource,
             agent=grant,
             correlation_id=correlation_id,
             client_request_id=client_request_id,
         )
 
+    async def _lookup(self, user_id: uuid.UUID) -> Principal | None:
+        """The current principal of ``user_id``; ``None`` on any failure."""
+        if self._directory is None:
+            return None
+        try:
+            async with asyncio.timeout(self._timeout_seconds):
+                principal = await self._directory.get_principal_by_id(user_id)
+        except Exception as error:
+            # Type name only; a directory error can carry connection details.
+            logger.warning("Principal lookup failed (%s)", type(error).__name__)
+            return None
+        if not isinstance(principal, Principal) or principal.user_id != user_id:
+            return None  # a directory answering for someone else is refused
+        return principal
+
     async def authorize_role_change(
         self,
         actor: Principal | None,
+        target_user_id: uuid.UUID,
         target_role: SystemRole,
         new_role: SystemRole | None,
         *,
-        target_user_id: uuid.UUID | None = None,
         correlation_id: uuid.UUID | None = None,
         client_request_id: str | None = None,
     ) -> Decision:
         """Decide a change of a user's system role (or their removal) and audit it.
 
-        See ``policy.decide_role_change``: an Admin cannot manage the Owner or
-        other Admins, and nobody changes their own role.
+        See ``policy.decide_role_change``. The event is about the target user
+        (``resource_kind="user"``, ``resource_id``) and carries the role before
+        and after. The Owner role never moves here; use
+        :meth:`authorize_ownership_transfer`.
         """
         decision = decide_role_change(
-            actor,
-            target_role,
-            new_role,
-            target_user_id=target_user_id,
-            policy=self._policy,
+            actor, target_user_id, target_role, new_role, policy=self._policy
         )
         return await self._audited(
             decision,
             principal=actor,
-            resource=Resource.system(),
+            resource=_user_resource(target_user_id),
+            old_role=target_role,
+            new_role=new_role,
+            correlation_id=correlation_id,
+            client_request_id=client_request_id,
+        )
+
+    async def authorize_ownership_transfer(
+        self,
+        actor: Principal | None,
+        new_owner_id: uuid.UUID,
+        new_owner_role: SystemRole,
+        *,
+        correlation_id: uuid.UUID | None = None,
+        client_request_id: str | None = None,
+    ) -> Decision:
+        """Decide handing the Owner role to ``new_owner_id`` and audit it once.
+
+        See ``policy.decide_ownership_transfer``: the only way the Owner role
+        moves. One decision, one event (``old_role`` is the new Owner's role
+        before, ``new_role`` is ``owner``); the actor becomes an Admin.
+        """
+        decision = decide_ownership_transfer(
+            actor, new_owner_id, new_owner_role, policy=self._policy
+        )
+        return await self._audited(
+            decision,
+            principal=actor,
+            resource=_user_resource(new_owner_id),
+            old_role=new_owner_role,
+            new_role=SystemRole.OWNER,
             correlation_id=correlation_id,
             client_request_id=client_request_id,
         )
@@ -161,6 +211,8 @@ class Authorizer:
         resource: Resource | None,
         actor_id: uuid.UUID | None = None,
         agent: AgentGrant | None = None,
+        old_role: SystemRole | None = None,
+        new_role: SystemRole | None = None,
         correlation_id: uuid.UUID | None,
         client_request_id: str | None,
     ) -> Decision:
@@ -170,6 +222,8 @@ class Authorizer:
             actor_id=actor_id,
             resource=resource,
             agent=agent,
+            old_role=old_role,
+            new_role=new_role,
             correlation_id=correlation_id,
             client_request_id=client_request_id,
             occurred_at=self._clock(),
@@ -187,7 +241,11 @@ class Authorizer:
                 event.client_request_id,
             )
             return decision
-        if decision.allowed and _audit_mode(decision) is AuditMode.DENIED_ONLY:
+        if (
+            decision.allowed
+            and agent is None  # an agent's actions are always recorded
+            and _audit_mode(decision) is AuditMode.DENIED_ONLY
+        ):
             return decision
         try:
             async with asyncio.timeout(self._timeout_seconds):
@@ -209,3 +267,11 @@ def _audit_mode(decision: Decision) -> AuditMode:
     if decision.capability is None:
         return AuditMode.REQUIRED
     return CAPABILITIES[decision.capability].audit
+
+
+def _user_resource(user_id: object) -> Resource | None:
+    """The audit resource of a user, or ``None`` if the id is malformed."""
+    try:
+        return Resource(kind="user", id=user_id)
+    except ValueError:
+        return None

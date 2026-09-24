@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 _QUERY = text(
     """
     SELECT pg_has_role(current_user, c.relowner, 'MEMBER') AS owns,
+           has_table_privilege(current_user, c.oid, 'INSERT') AS can_insert,
            has_table_privilege(current_user, c.oid, 'UPDATE') AS can_update,
            has_table_privilege(current_user, c.oid, 'DELETE') AS can_delete,
            has_table_privilege(current_user, c.oid, 'TRUNCATE') AS can_truncate
@@ -27,9 +28,15 @@ class AuditTableAccess:
     """What the connected database user may do to ``audit_events``."""
 
     owns: bool
+    can_insert: bool
     can_update: bool
     can_delete: bool
     can_truncate: bool
+
+    @property
+    def cannot_write(self) -> bool:
+        """True when the user cannot append: every audited action would be refused."""
+        return not self.can_insert
 
     @property
     def protected(self) -> bool:
@@ -64,6 +71,13 @@ async def warn_if_audit_table_is_mutable(
     except Exception as error:
         logger.info("Audit table privilege check skipped (%s)", type(error).__name__)
         return
+    if access is not None and access.cannot_write:
+        logger.warning(
+            "The application's database user cannot INSERT into audit_events: the "
+            "audit trail cannot be written, so every audited action will be "
+            "refused (503). Grant INSERT and SELECT to the application's role "
+            "(run the migration with PAW_APP_DATABASE_ROLE set)."
+        )
     if access is not None and not access.protected:
         logger.warning(
             "The application's database user is not restricted on audit_events "

@@ -99,7 +99,9 @@ C = Capability
 CAPABILITIES: MappingProxyType[Capability, CapabilityInfo] = MappingProxyType(
     {
         C.CHAT_USE: _info(Scope.SELF, delegable=True),
-        C.AGENT_USE: _info(Scope.SELF, delegable=True),
+        # Not delegable until PAW-032 defines derived (subset) grants for child
+        # agents: an agent must not start agents that hold more than it does.
+        C.AGENT_USE: _info(Scope.SELF, delegable=False),
         C.WORKSPACE_USE: _info(Scope.SELF, delegable=True),
         C.GITHUB_USE: _info(Scope.SELF, delegable=True),
         C.MEMORY_USE: _info(Scope.SELF, delegable=True),
@@ -125,7 +127,7 @@ CAPABILITIES: MappingProxyType[Capability, CapabilityInfo] = MappingProxyType(
         C.PROJECT_CHAT: _info(Scope.PROJECT, delegable=True),
         C.PROJECT_TASK_RUN: _info(Scope.PROJECT, delegable=True),
         C.PROJECT_REPO_WRITE: _info(Scope.PROJECT, delegable=True),
-        C.PROJECT_AGENT_USE: _info(Scope.PROJECT, delegable=True),
+        C.PROJECT_AGENT_USE: _info(Scope.PROJECT, delegable=False),  # see AGENT_USE
         C.PROJECT_PR_CREATE: _info(Scope.PROJECT, delegable=True),
         C.PROJECT_MEMORY_USE: _info(Scope.PROJECT, delegable=True),
         C.PROJECT_MEMORY_MANAGE: _info(Scope.PROJECT, delegable=False),

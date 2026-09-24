@@ -1,8 +1,9 @@
+import asyncio
 import unittest
+import uuid
 
 from paw_backend.authz import (
     ALL_PROJECTS,
-    CAPABILITIES,
     AgentGrant,
     Authorizer,
     Capability,
@@ -11,7 +12,6 @@ from paw_backend.authz import (
     ProjectState,
     Reason,
     Resource,
-    Scope,
     SystemRole,
 )
 from paw_backend.authz.policy import decide, decide_agent
@@ -21,6 +21,7 @@ from .authz_support import (
     P1,
     P2,
     P3,
+    SECRET,
     U1,
     U2,
     StaticDirectory,
@@ -28,6 +29,9 @@ from .authz_support import (
     project,
 )
 from .test_authz_policy import DELEGABLE_CAPS, NON_DELEGABLE_CAPS, resource_for
+
+# A UUID with hex letters, so that upper-casing it changes it.
+LETTERS = uuid.UUID("0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d")
 
 
 def grant(*capabilities: Capability, projects=ALL_PROJECTS) -> AgentGrant:
@@ -130,11 +134,7 @@ class NonDelegableTest(unittest.TestCase):
             if capability.value not in NON_DELEGABLE_CAPS:
                 continue
             with self.subTest(capability=capability.value):
-                resource = (
-                    project(P1)
-                    if CAPABILITIES[capability].scope is Scope.PROJECT
-                    else Resource.system()
-                )
+                resource = resource_for(capability, owner)
                 # The user could do it ...
                 self.assertTrue(decide(owner, capability, resource).allowed)
                 # ... the agent acting for them cannot.
@@ -155,6 +155,21 @@ class NonDelegableTest(unittest.TestCase):
             with self.subTest(capability=capability.value):
                 decision = decide_agent(
                     manager, grant(capability), capability, project(P1)
+                )
+                self.assertEqual(decision.reason, Reason.AGENT_CAPABILITY_FORBIDDEN)
+
+    def test_agents_cannot_start_agents_until_derived_grants_exist(self):
+        # PAW-032 will define subset-derivation of grants for child agents;
+        # until then a grant must not let an agent spawn agents.
+        manager = principal(SystemRole.USER, projects={P1: ProjectRole.MANAGER})
+        for capability, resource in (
+            (Capability.AGENT_USE, Resource.owned_by(U1, "agent")),
+            (Capability.PROJECT_AGENT_USE, project(P1)),
+        ):
+            with self.subTest(capability=capability.value):
+                self.assertTrue(decide(manager, capability, resource).allowed)
+                decision = decide_agent(
+                    manager, grant(capability), capability, resource
                 )
                 self.assertEqual(decision.reason, Reason.AGENT_CAPABILITY_FORBIDDEN)
 
@@ -325,6 +340,81 @@ class GrantValueTest(unittest.TestCase):
                 self.assertEqual(decision.reason, Reason.UNKNOWN_CAPABILITY)
 
 
+class DirectoryFailureTest(unittest.IsolatedAsyncioTestCase):
+    """A broken, slow or confused user store is an audited denial, not an error."""
+
+    def setUp(self):
+        self.sink = InMemoryAuditSink()
+        self.grant = grant(Capability.PROJECT_REPO_WRITE)
+        self.logs = self.enterContext(
+            self.assertLogs("paw_backend.authz.authorizer", level="WARNING")
+        )
+
+    async def act(self, authorizer, delegator):
+        return await authorizer.authorize_agent_action(
+            delegator, self.grant, Capability.PROJECT_REPO_WRITE, project(P1)
+        )
+
+    async def test_a_directory_that_raises_denies_and_is_audited(self):
+        class Raising:
+            async def get_principal_by_id(self, user_id):
+                raise ConnectionError(SECRET)
+
+        decision = await self.act(Authorizer(self.sink, directory=Raising()), U1)
+        self.assertEqual(decision.reason, Reason.DELEGATOR_NOT_ACTIVE)
+        (event,) = self.sink.events
+        self.assertEqual(
+            (event.actor_id, event.agent_id, event.decision, event.reason),
+            (U1, AGENT, "deny", "delegator_not_active"),
+        )
+        output = "\n".join(self.logs.output)
+        self.assertIn("ConnectionError", output)
+        self.assertNotIn(SECRET, output)
+
+    async def test_a_slow_directory_times_out_into_a_denial(self):
+        class Slow:
+            async def get_principal_by_id(self, user_id):
+                await asyncio.sleep(5)
+
+        authorizer = Authorizer(self.sink, directory=Slow(), timeout_seconds=0.05)
+        async with asyncio.timeout(2):
+            decision = await self.act(authorizer, U1)
+        self.assertEqual(decision.reason, Reason.DELEGATOR_NOT_ACTIVE)
+        self.assertEqual(self.sink.events[0].reason, "delegator_not_active")
+        self.assertIn("TimeoutError", "\n".join(self.logs.output))
+
+
+class DelegatorInputTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.sink = InMemoryAuditSink()
+        self.grant = grant(Capability.PROJECT_REPO_WRITE)
+
+    async def act(self, authorizer, delegator):
+        return await authorizer.authorize_agent_action(
+            delegator, self.grant, Capability.PROJECT_REPO_WRITE, project(P1)
+        )
+
+    async def test_a_delegator_that_is_not_a_uuid_is_an_audited_denial(self):
+        directory = StaticDirectory(principal(SystemRole.OWNER, user_id=LETTERS))
+        authorizer = Authorizer(self.sink, directory=directory)
+        for bad in ("u1", "", None, 5, str(LETTERS).upper(), "x" * 200):
+            with self.subTest(delegator=bad):
+                decision = await self.act(authorizer, bad)
+                self.assertEqual(decision.reason, Reason.DELEGATOR_NOT_ACTIVE)
+        self.assertEqual(directory.lookups, 0)  # never looked up
+        self.assertEqual(len(self.sink.events), 6)
+        for event in self.sink.events:
+            self.assertEqual((event.actor_id, event.agent_id), (None, AGENT))
+
+    async def test_a_directory_answering_with_something_else_is_refused(self):
+        class Confused:
+            async def get_principal_by_id(self, user_id):
+                return {"role": "owner"}
+
+        decision = await self.act(Authorizer(self.sink, directory=Confused()), U1)
+        self.assertEqual(decision.reason, Reason.DELEGATOR_NOT_ACTIVE)
+
+
 class DelegatorRevocationTest(unittest.IsolatedAsyncioTestCase):
     """The user's authority is looked up again on every agent action."""
 
@@ -341,6 +431,13 @@ class DelegatorRevocationTest(unittest.IsolatedAsyncioTestCase):
         return await self.authorizer.authorize_agent_action(
             U1, self.grant, Capability.PROJECT_REPO_WRITE, project(P1)
         )
+
+    async def test_a_canonical_string_delegator_id_works(self):
+        decision = await self.authorizer.authorize_agent_action(
+            str(U1), self.grant, Capability.PROJECT_REPO_WRITE, project(P1)
+        )
+        self.assertTrue(decision.allowed)
+        self.assertEqual(self.sink.events[0].actor_id, U1)
 
     async def test_the_agent_acts_while_its_user_holds_the_role(self):
         decision = await self.act()

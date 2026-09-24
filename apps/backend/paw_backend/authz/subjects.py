@@ -76,16 +76,15 @@ class Principal:
         object.__setattr__(self, "user_id", to_uuid(self.user_id, "user_id"))
         # Unknown roles are refused here rather than silently treated as "none".
         object.__setattr__(self, "system_role", SystemRole(self.system_role))
-        object.__setattr__(
-            self,
-            "project_roles",
-            MappingProxyType(
-                {
-                    to_uuid(project_id, "project_id"): ProjectRole(role)
-                    for project_id, role in self.project_roles.items()
-                }
-            ),
-        )
+        roles: dict[uuid.UUID, ProjectRole] = {}
+        for project_id, role in self.project_roles.items():
+            key = to_uuid(project_id, "project_id")
+            if key in roles:
+                # The same project spelled two ways (UUID and string): which role
+                # applies would depend on the order, so refuse instead.
+                raise ValueError("project_roles names the same project twice")
+            roles[key] = ProjectRole(role)
+        object.__setattr__(self, "project_roles", MappingProxyType(roles))
 
 
 @dataclass(frozen=True, slots=True)

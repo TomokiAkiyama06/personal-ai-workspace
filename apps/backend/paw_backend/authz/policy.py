@@ -313,51 +313,88 @@ def decide_agent(
     return user_decision
 
 
+def _valid_target(target_user_id: object) -> uuid.UUID | None:
+    try:
+        return to_uuid(target_user_id, "target_user_id")
+    except ValueError:
+        return None
+
+
 def decide_role_change(
     actor: Principal | None,
+    target_user_id: uuid.UUID,
     target_role: SystemRole,
     new_role: SystemRole | None,
     *,
-    target_user_id: uuid.UUID | None = None,
     policy: Policy = DEFAULT_POLICY,
 ) -> Decision:
-    """Decide whether ``actor`` may change a user from ``target_role`` to ``new_role``.
+    """Decide whether ``actor`` may change user ``target_user_id`` (currently
+    ``target_role``) to ``new_role``; ``new_role=None`` removes the user.
 
-    ``new_role=None`` removes (deactivates) the user. ``admin.users.manage`` is
-    not enough on its own: which capability is needed depends on the roles
-    involved, so an Admin cannot promote, demote, remove or take over an Admin
-    or the Owner (``REQUIREMENTS.md`` "Owner / Admin の役割分離").
+    ``admin.users.manage`` is not enough on its own: which capability is needed
+    depends on the roles involved, so an Admin cannot promote, demote, remove
+    or take over another Admin (``REQUIREMENTS.md`` "Owner / Admin の役割分離").
 
-    * a change involving Owner: ``owner.ownership.transfer`` (Owner only);
-    * a change involving Admin: ``owner.admins.manage`` (Owner only);
     * a change between ordinary users: ``admin.users.manage``;
+    * a change that involves Admin: ``owner.admins.manage`` (Owner only);
+    * **the Owner role never moves here**: that is ``decide_ownership_transfer``
+      and nothing else, so that a change of Owner is a single, audited step
+      and the workspace is never left without (or with a second) Owner;
     * the internal ``system`` identity is never assigned or removed here;
-    * nobody changes their own role.
+    * nobody changes their own role. ``target_user_id`` is required, so this
+      cannot be skipped by leaving it out.
     """
     manage = Capability.ADMIN_USERS_MANAGE
     if not isinstance(actor, Principal):
         return Decision.deny(Reason.UNAUTHENTICATED, manage)
-    if not isinstance(target_role, SystemRole) or not (
-        new_role is None or isinstance(new_role, SystemRole)
+    target = _valid_target(target_user_id)
+    if (
+        target is None
+        or not isinstance(target_role, SystemRole)
+        or not (new_role is None or isinstance(new_role, SystemRole))
     ):
         return Decision.deny(Reason.ROLE_CHANGE_NOT_ALLOWED, manage)
+    if target == actor.user_id:
+        return Decision.deny(Reason.SELF_ROLE_CHANGE, manage)
     involved = {target_role} | ({new_role} if new_role is not None else set())
     if SystemRole.SYSTEM in involved:
-        # The internal identity is not assigned or removed by this call.
         return Decision.deny(Reason.ROLE_CHANGE_NOT_ALLOWED, manage)
     if SystemRole.OWNER in involved:
-        needed = Capability.OWNER_OWNERSHIP_TRANSFER
-    elif SystemRole.ADMIN in involved:
-        needed = Capability.OWNER_ADMINS_MANAGE
-    elif involved == {SystemRole.USER}:
-        needed = manage
-    else:  # unreachable: every SystemRole is handled above
-        return Decision.deny(Reason.ROLE_CHANGE_NOT_ALLOWED, manage)
-    if target_user_id is not None:
-        try:
-            is_self = to_uuid(target_user_id, "target_user_id") == actor.user_id
-        except ValueError:
-            return Decision.deny(Reason.ROLE_CHANGE_NOT_ALLOWED, needed)
-        if is_self:
-            return Decision.deny(Reason.SELF_ROLE_CHANGE, needed)
+        return Decision.deny(
+            Reason.ROLE_CHANGE_NOT_ALLOWED, Capability.OWNER_OWNERSHIP_TRANSFER
+        )
+    needed = Capability.OWNER_ADMINS_MANAGE if SystemRole.ADMIN in involved else manage
     return decide(actor, needed, Resource.system(), policy=policy)
+
+
+def decide_ownership_transfer(
+    actor: Principal | None,
+    new_owner_id: uuid.UUID,
+    new_owner_role: SystemRole,
+    *,
+    policy: Policy = DEFAULT_POLICY,
+) -> Decision:
+    """Decide whether ``actor`` may hand the Owner role to ``new_owner_id``.
+
+    This is the only operation that moves the Owner role. It is one decision
+    (and one audit event) for the whole hand-over: the new Owner receives
+    ``owner`` and the actor becomes an Admin, so there is exactly one Owner
+    before and after. The caller applies both changes in one transaction.
+    Only the current Owner may do it, to somebody else, and only to an active
+    User or Admin (never to the internal identity, and never to an Owner, which
+    would create a second one).
+    """
+    needed = Capability.OWNER_OWNERSHIP_TRANSFER
+    permitted = decide(actor, needed, Resource.system(), policy=policy)
+    if not permitted.allowed or not isinstance(actor, Principal):
+        return permitted
+    new_owner = _valid_target(new_owner_id)
+    if (
+        new_owner is None
+        or not isinstance(new_owner_role, SystemRole)
+        or new_owner_role not in (SystemRole.USER, SystemRole.ADMIN)
+    ):
+        return Decision.deny(Reason.ROLE_CHANGE_NOT_ALLOWED, needed)
+    if new_owner == actor.user_id:
+        return Decision.deny(Reason.SELF_ROLE_CHANGE, needed)
+    return permitted

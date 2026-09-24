@@ -30,6 +30,34 @@ class RoleSettingsTest(unittest.TestCase):
                     make_settings(app_database_role=role).app_database_role, role
                 )
 
+    def test_names_postgresql_treats_specially_are_refused(self):
+        # A quoted "public" is still the pseudo-role PUBLIC: granting to it
+        # would let every role insert into the audit table.
+        for role in (
+            "public",
+            "PUBLIC",
+            "Public",
+            "postgres",
+            "Postgres",
+            "pg_write_all_data",
+            "PG_monitor",
+            "pg_",
+            "none",
+            "user",
+            "current_user",
+            "CURRENT_ROLE",
+            "session_user",
+        ):
+            with self.subTest(role=role):
+                with self.assertRaises(ValidationError) as caught:
+                    make_settings(app_database_role=role)
+                self.assertNotIn(role, str(caught.exception))
+        # Ordinary names that merely contain those words are fine.
+        for role in ("public_app", "my_postgres", "app_pg_"):
+            self.assertEqual(
+                make_settings(app_database_role=role).app_database_role, role
+            )
+
     def test_anything_that_is_not_a_plain_identifier_is_refused(self):
         for role in (
             'a"b',
@@ -71,15 +99,24 @@ class RoleSettingsTest(unittest.TestCase):
 
 class AuditTableAccessTest(unittest.TestCase):
     def test_only_an_unprivileged_non_owner_is_protected(self):
-        self.assertTrue(AuditTableAccess(False, False, False, False).protected)
+        # (owns, can_insert, can_update, can_delete, can_truncate)
+        self.assertTrue(AuditTableAccess(False, True, False, False, False).protected)
         for flags in (
-            (True, False, False, False),  # owner: can drop the triggers
-            (False, True, False, False),
-            (False, False, True, False),
-            (False, False, False, True),
+            (True, True, False, False, False),  # owner: can drop the triggers
+            (False, True, True, False, False),
+            (False, True, False, True, False),
+            (False, True, False, False, True),
         ):
             with self.subTest(flags=flags):
                 self.assertFalse(AuditTableAccess(*flags).protected)
+
+    def test_a_user_that_cannot_insert_cannot_write_the_trail(self):
+        self.assertTrue(
+            AuditTableAccess(False, False, False, False, False).cannot_write
+        )
+        self.assertFalse(
+            AuditTableAccess(False, True, False, False, False).cannot_write
+        )
 
 
 class OfflineMigrationSqlTest(unittest.TestCase):
@@ -108,6 +145,32 @@ class OfflineMigrationSqlTest(unittest.TestCase):
                 command.upgrade(offline_config(output), "head", sql=True)
         self.assertNotIn("DROP TABLE audit_events", output.getvalue())
         self.assertNotIn("GRANT", output.getvalue())
+
+    def test_recorded_at_is_forced_to_the_database_clock_by_a_trigger(self):
+        sql = offline_upgrade_sql()
+        self.assertIn("NEW.recorded_at := now()", sql)
+        self.assertIn("BEFORE INSERT ON audit_events", sql)
+        self.assertIn(
+            "ALTER TABLE audit_events ENABLE ALWAYS TRIGGER "
+            "tr_audit_events_force_recorded_at",
+            sql,
+        )
+
+    def test_a_migration_role_without_an_app_role_is_warned_about(self):
+        with self.assertLogs("paw_backend.migrations.0025", level="WARNING") as logs:
+            offline_upgrade_sql(PAW_MIGRATION_DATABASE_URL=MIGRATION_URL)
+        (line,) = logs.output
+        self.assertIn("PAW_APP_DATABASE_ROLE", line)
+        self.assertIn("refused (503)", line)
+        self.assertNotIn("0wner-pw", line)
+
+    def test_no_warning_when_the_role_is_set_or_no_split_is_configured(self):
+        with self.assertNoLogs("paw_backend.migrations.0025", level="WARNING"):
+            offline_upgrade_sql(
+                PAW_MIGRATION_DATABASE_URL=MIGRATION_URL,
+                PAW_APP_DATABASE_ROLE="paw_app",
+            )
+            offline_upgrade_sql()
 
     def test_the_offline_sql_states_the_append_only_guard(self):
         sql = offline_upgrade_sql()

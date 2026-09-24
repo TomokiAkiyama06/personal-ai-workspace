@@ -9,7 +9,13 @@ The table is protected in two layers:
 * triggers reject UPDATE, DELETE and TRUNCATE (``ENABLE ALWAYS``: they also
   fire under ``session_replication_role = replica``);
 * privileges: ``PUBLIC`` gets nothing, and the role named by
-  ``PAW_APP_DATABASE_ROLE`` (when set) gets INSERT and SELECT only.
+  ``PAW_APP_DATABASE_ROLE`` (when set) gets INSERT and SELECT only;
+* a BEFORE INSERT trigger sets ``recorded_at`` to the database clock, so even
+  an INSERT-capable role cannot choose it.
+
+What is NOT guaranteed: a role that may INSERT can still insert rows with any
+other content (actor, decision, occurred_at). The application is the only
+writer that is trusted to write true rows.
 
 The second layer is what makes "append-only" hold against the application
 itself: the role that owns the table can drop the triggers, alter the columns
@@ -21,12 +27,15 @@ split only the triggers guard against buggy DML.
 exists for development and test databases; never run it in production.
 """
 
+import logging
 from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
 
 from paw_backend.config import Settings
+
+logger = logging.getLogger("paw_backend.migrations.0025")
 
 revision: str = "0025"
 down_revision: str | Sequence[str] | None = "0001"
@@ -44,17 +53,47 @@ $$
 """
 
 
+_RECORDED_AT_FUNCTION = """
+CREATE FUNCTION paw_force_audit_events_recorded_at() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    NEW.recorded_at := now();
+    RETURN NEW;
+END;
+$$
+"""
+
+
 def _quoted_app_role() -> str | None:
     """The application role as a quoted identifier, or ``None`` if none is set.
 
-    The name is validated by ``Settings`` (letters, digits, underscore) and is
-    then quoted by the dialect's identifier preparer; it is never interpolated
-    into SQL as text.
+    The name is validated by ``Settings`` (letters, digits, underscore; not
+    ``public``, ``pg_*`` or another reserved name), must exist, and is then
+    quoted by the dialect's identifier preparer; it is never interpolated into
+    SQL as text.
     """
-    role = Settings().app_database_role
+    settings = Settings()
+    role = settings.app_database_role
     if role is None:
+        if settings.migration_database_url is not None:
+            logger.warning(
+                "PAW_MIGRATION_DATABASE_URL is set but PAW_APP_DATABASE_ROLE is not: "
+                "no role is granted access to audit_events, so the application "
+                "cannot write its audit trail and every audited action will be "
+                "refused (503) until the role is granted INSERT and SELECT."
+            )
         return None
-    return op.get_context().dialect.identifier_preparer.quote_identifier(role)
+    context = op.get_context()
+    if not context.as_sql:  # online: the role must exist, fail loudly if not
+        found = op.get_bind().execute(
+            sa.text("SELECT 1 FROM pg_roles WHERE rolname = :role"), {"role": role}
+        )
+        if found.first() is None:
+            raise RuntimeError(
+                "PAW_APP_DATABASE_ROLE names a PostgreSQL role that does not exist; "
+                "create it before running the migration."
+            )
+    return context.dialect.identifier_preparer.quote_identifier(role)
 
 
 def upgrade() -> None:
@@ -79,6 +118,8 @@ def upgrade() -> None:
         sa.Column("repo_id", sa.Uuid(), nullable=True),
         sa.Column("decision", sa.Text(), nullable=False),
         sa.Column("reason", sa.Text(), nullable=False),
+        sa.Column("old_role", sa.Text(), nullable=True),
+        sa.Column("new_role", sa.Text(), nullable=True),
         sa.Column("client_request_id", sa.Text(), nullable=True),
         sa.CheckConstraint(
             "decision IN ('allow', 'deny')",
@@ -108,6 +149,16 @@ def upgrade() -> None:
     op.execute(
         "ALTER TABLE audit_events ENABLE ALWAYS TRIGGER tr_audit_events_reject_truncate"
     )
+    op.execute(_RECORDED_AT_FUNCTION)
+    op.execute(
+        "CREATE TRIGGER tr_audit_events_force_recorded_at "
+        "BEFORE INSERT ON audit_events "
+        "FOR EACH ROW EXECUTE FUNCTION paw_force_audit_events_recorded_at()"
+    )
+    op.execute(
+        "ALTER TABLE audit_events ENABLE ALWAYS TRIGGER "
+        "tr_audit_events_force_recorded_at"
+    )
 
     op.execute("REVOKE ALL ON audit_events FROM PUBLIC")
     app_role = _quoted_app_role()
@@ -120,3 +171,4 @@ def downgrade() -> None:
     # Dropping the table removes its triggers and grants.
     op.drop_table("audit_events")
     op.execute("DROP FUNCTION paw_reject_audit_events_change()")
+    op.execute("DROP FUNCTION paw_force_audit_events_recorded_at()")
