@@ -14,6 +14,7 @@ from paw_backend.authz import models as authz_models  # noqa: F401
 from paw_backend.config import Settings
 from paw_backend.db import Base
 from paw_backend.memory import models as memory_models  # noqa: F401
+from paw_backend.research.scratch import models as scratch_models  # noqa: F401
 from paw_backend.tasks import models as task_models  # noqa: F401
 
 config = context.config
