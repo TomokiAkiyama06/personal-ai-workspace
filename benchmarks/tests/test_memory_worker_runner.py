@@ -5,6 +5,7 @@ import inspect
 import io
 import json
 import math
+import re
 import tempfile
 import threading
 import time
@@ -27,6 +28,7 @@ from benchmarks.memory_worker_runner import (
     validate_worker,
 )
 from benchmarks.metrics_collector import MetricsCollector
+from benchmarks.tests.test_memory_worker_metrics import BLANK_TEXTS
 
 # The harness has no default deadline (the value is the operator's decision), so
 # every run states one. Tests use a bound that no in-process fake worker reaches.
@@ -683,6 +685,78 @@ class MemoryWorkerRunnerTest(unittest.TestCase):
 
         self.assertIsNone(parse_worker_output(raw))
         self.assertEqual(schema_adherence([raw], _output_schema()).valid, 0)
+
+    @staticmethod
+    def _output_with(**fields):
+        record = {"key": "k", "scope": "user", "state": "confirmed", "supersedes": None}
+        return json.dumps({"memories": [dict(record, **fields)]})
+
+    def test_a_blank_key_is_invalid_in_the_schema_and_the_parser(self):
+        for blank in BLANK_TEXTS:
+            with self.subTest(key=blank):
+                raw = self._output_with(key=blank)
+                self.assertIsNone(parse_worker_output(raw))
+                self.assertEqual(schema_adherence([raw], _output_schema()).valid, 0)
+
+    def test_a_blank_conflicts_with_key_is_invalid_in_the_schema_and_the_parser(self):
+        for blank in BLANK_TEXTS:
+            with self.subTest(key=blank):
+                raw = self._output_with(conflicts_with=["other", blank])
+                self.assertIsNone(parse_worker_output(raw))
+                self.assertEqual(schema_adherence([raw], _output_schema()).valid, 0)
+
+    def test_non_blank_keys_stay_valid_in_the_schema_and_the_parser(self):
+        for key in ("k", " k ", "\u3000k", "\u200b"):
+            with self.subTest(key=key):
+                raw = self._output_with(key=key, conflicts_with=[key + "2"])
+                parsed = parse_worker_output(raw)
+                self.assertEqual([record.key for record in parsed], [key])
+                self.assertEqual(schema_adherence([raw], _output_schema()).valid, 1)
+
+    def test_the_schema_treats_exactly_the_strip_whitespace_as_blank(self):
+        # The schema pattern is evaluated by Python's re, whose \s is the same set
+        # as str.isspace()/str.strip() that MemoryRecord uses; keep them in step.
+        item = _output_schema()["properties"]["memories"]["items"]["properties"]
+        for name, subschema in (
+            ("key", item["key"]),
+            ("conflicts_with", item["conflicts_with"]["items"]),
+        ):
+            pattern = subschema["pattern"]
+            with self.subTest(field=name):
+                for codepoint in range(0x110000):
+                    character = chr(codepoint)
+                    self.assertEqual(
+                        bool(re.search(pattern, character)),
+                        bool(character.strip()),
+                        hex(codepoint),
+                    )
+
+    def test_a_blank_gold_key_is_a_case_file_error_that_does_not_echo_the_key(self):
+        gold = {"key": "k", "scope": "user", "state": "confirmed", "supersedes": None}
+        prefix = "Invalid gold record at index 0 in case 'c1': "
+        for blank in BLANK_TEXTS:
+            for record, reason in (
+                (dict(gold, key=blank), "key must be a non-empty string"),
+                (
+                    dict(gold, conflicts_with=["other", blank]),
+                    "conflicts_with must be a tuple of non-empty strings or None",
+                ),
+            ):
+                with self.subTest(record=record):
+                    document = {
+                        "cases": [{"id": "c1", "input": "text", "gold": [record]}]
+                    }
+                    with self.assertRaises(ValueError) as caught:
+                        self._load_from_text(json.dumps(document))
+                    # The whole message is fixed text, so the offending value is
+                    # never echoed.
+                    self.assertEqual(str(caught.exception), prefix + reason)
+
+    def test_a_blank_key_can_never_earn_credit_by_matching_a_blank_gold_key(self):
+        # Both sides being "   " used to count as a match; now neither side exists.
+        with self.assertRaises(TypeError):
+            MemoryRecord("   ", "user", "confirmed", None)
+        self.assertIsNone(parse_worker_output(self._output_with(key="   ")))
 
     @staticmethod
     def _cases(count):

@@ -319,6 +319,11 @@ Worker出力で`conflicts_with`を省略した場合と`[]`は、どちらも関
 Goldに`content` / `conflicts_with`がなければ、対応する指標は`null`または従来と同じ値になります。
 case fileの未知のfield（`supercedes`や`conflict_with`のような綴り誤り）は、黙って無視せず不備（終了code 1）として拒否します。
 case fileとWorker出力のJSONは、既存のvalidatorと同じ厳格なdecoder（`benchmarks.json_input.decode_json`）で読み、同じ名前のmemberの重複や`NaN`などの非標準の定数は、後の値で上書きせずに拒否します（Worker出力はschema不適合として数えます）。
+`key`、`conflicts_with`の各key、`content`は、空白だけの文字列を受け付けません（空文字列も同様）。空白だけのkeyがGoldとWorker出力の両方に現れると、無効な識別子で一致して抽出・分類の得点になるためです。
+Worker出力はschemaの`pattern`（`\S`）でschema不適合になり、Goldはcase loaderで、他の不備と同じ形式（`Invalid gold record at index N in case 'ID': key must be a non-empty string`。値は表示しません）のcase file不備（終了code 1）になります。
+ここでの空白は`str.strip()`が取り除く文字（Unicodeの空白。半角space、tab、改行、no-break space（U+00A0）、全角space（U+3000）など）で、Pythonの`re`が`\s`として扱う集合と同じです（testで全code pointについて一致を確認しています）。
+ゼロ幅文字（U+200B、U+200C、U+200D、U+2060、U+FEFFなど）は空白ではなく書式文字なので、それだけのkeyも拒否しません。keyは完全一致で比較し、trimもしないため、同じ文字列のGold keyがなければ不要Memoryとして数えるだけで、得点にはなりません。Gold作成時に目視で気付けるよう、Datasetのreviewで確認してください。
+`supersedes`は、この検証の対象外です（空文字列を含め、従来どおり文字列またはnullを受け付けます）。
 `unneeded`はGoldに一致しない予測と、同じkeyの2回目以降の予測の合計で、予測件数を超えません。
 Workerが例外を出したcaseは、予測なしの失敗caseとして記録して続行します（記録するのは例外の型だけです）。
 `extract`の各呼び出しは、runnerが強制するdeadline（`--timeout-seconds`、有限の正の数）の中で実行します。

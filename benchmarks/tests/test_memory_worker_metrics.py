@@ -14,6 +14,20 @@ from benchmarks.memory_worker_metrics import (
     schema_adherence,
 )
 
+# Text that is empty once whitespace is stripped, in the forms a dataset or a model
+# can produce.
+BLANK_TEXTS = (
+    " ",
+    "   ",
+    "\t",
+    "\n",
+    "\r\n",
+    "\u00a0",  # no-break space
+    "\u2003",  # em space
+    "\u3000",  # ideographic space
+    " \t\u00a0\u3000 ",
+)
+
 
 class MemoryRecordTest(unittest.TestCase):
     def test_memory_record_validation(self):
@@ -44,6 +58,40 @@ class MemoryRecordTest(unittest.TestCase):
         # Test supersedes validation
         with self.assertRaises(TypeError):
             MemoryRecord("key", "user", "confirmed", 123)
+
+    def test_a_key_that_is_only_whitespace_is_rejected(self):
+        # "Blank" is what str.strip() treats as whitespace (the same rule as
+        # content and the schema's \S pattern): ASCII space, tab, newline, no-break
+        # space, em space and the ideographic space, alone or mixed.
+        for blank in BLANK_TEXTS:
+            with self.subTest(key=blank):
+                with self.assertRaises(TypeError) as caught:
+                    MemoryRecord(blank, "user", "confirmed", None)
+                self.assertEqual(
+                    str(caught.exception), "key must be a non-empty string"
+                )
+                with self.assertRaises(TypeError) as caught:
+                    MemoryRecord("k", "user", "confirmed", None, None, ("a", blank))
+                self.assertNotIn(repr(blank), str(caught.exception))
+
+    def test_keys_with_visible_characters_keep_their_surrounding_whitespace(self):
+        # Matching is by exact key: only an all-blank key is invalid, and a key is
+        # never trimmed (" k " and "k" stay different identifiers).
+        record = MemoryRecord(" k\u3000", "user", "confirmed", None, None, ("\tb",))
+        self.assertEqual(record.key, " k\u3000")
+        self.assertEqual(record.conflicts_with, ("\tb",))
+
+    def test_zero_width_characters_are_not_whitespace(self):
+        # Decision: the harness rejects whitespace (Unicode White_Space, as
+        # str.isspace() defines it), not format characters. A zero-width space or
+        # joiner is not whitespace, so a key made only of them is accepted; it only
+        # matches an identical gold key and otherwise counts as unneeded.
+        for invisible in ("\u200b", "\u200c", "\u200d", "\u2060", "\ufeff"):
+            with self.subTest(codepoint=hex(ord(invisible))):
+                self.assertFalse(invisible.isspace())
+                self.assertEqual(
+                    MemoryRecord(invisible, "user", "confirmed", None).key, invisible
+                )
 
     def test_scope_must_be_a_defined_visibility_class(self):
         # REQUIREMENTS.md: scope is User / Project / Repo / Shared. A topic such

@@ -9,7 +9,7 @@
                 "properties": {
                     "key": {
                         "type": "string",
-                        "minLength": 1
+                        "pattern": "\\S"
                     },
                     "scope": {
                         "type": "string",
@@ -30,7 +30,7 @@
                         "type": "array",
                         "items": {
                             "type": "string",
-                            "minLength": 1
+                            "pattern": "\\S"
                         },
                         "uniqueItems": true
                     }

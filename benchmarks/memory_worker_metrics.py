@@ -22,11 +22,28 @@ def normalize_content(text: str) -> str:
 MEMORY_SCOPES = frozenset({"user", "project", "repo", "shared"})
 
 
+def _is_non_blank_string(value: object) -> bool:
+    """True for a ``str`` with at least one character that is not whitespace.
+
+    Whitespace is what ``str.strip()`` removes (Unicode White_Space, e.g. space, tab,
+    no-break space, the ideographic space), which is also what ``\\S`` means in the
+    schema patterns of ``schemas/memory-worker-output-v1.schema.json`` when Python's
+    ``re`` evaluates them (a test checks the two agree). Format characters such as
+    U+200B ZERO WIDTH SPACE are not whitespace, so text made only of them counts as
+    non-blank: keys are compared by exact equality and never trimmed, so such a key
+    can only match an identical gold key and is otherwise an unneeded record.
+    """
+    return isinstance(value, str) and bool(value.strip())
+
+
 @dataclass(frozen=True)
 class MemoryRecord:
     """A memory record.
 
-    ``key`` identifies the memory (matching is by key). ``scope`` is one of
+    ``key`` identifies the memory (matching is by key). ``key``, every
+    ``conflicts_with`` key and ``content`` must contain a character that is not
+    whitespace (see ``_is_non_blank_string``): a whitespace-only identifier would
+    otherwise match another one and earn credit. ``scope`` is one of
     ``MEMORY_SCOPES``, so a topic label cannot earn scope credit. ``content`` is the extracted
     fact; a gold record without content is not scored on content. ``conflicts_with``
     lists the keys of memories this one conflicts with. ``None`` (absent) is not the
@@ -43,7 +60,7 @@ class MemoryRecord:
     conflicts_with: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.key, str) or not self.key:
+        if not _is_non_blank_string(self.key):
             raise TypeError("key must be a non-empty string")
         if not isinstance(self.scope, str) or not self.scope:
             raise TypeError("scope must be a non-empty string")
@@ -57,13 +74,11 @@ class MemoryRecord:
             raise ValueError("state must be 'confirmed' or 'inferred'")
         if self.supersedes is not None and not isinstance(self.supersedes, str):
             raise TypeError("supersedes must be a string or None")
-        if self.content is not None and (
-            not isinstance(self.content, str) or not self.content.strip()
-        ):
+        if self.content is not None and not _is_non_blank_string(self.content):
             raise TypeError("content must be a non-empty string or None")
         if self.conflicts_with is not None and (
             not isinstance(self.conflicts_with, tuple)
-            or not all(isinstance(key, str) and key for key in self.conflicts_with)
+            or not all(_is_non_blank_string(key) for key in self.conflicts_with)
         ):
             raise TypeError(
                 "conflicts_with must be a tuple of non-empty strings or None"
