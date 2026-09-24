@@ -245,6 +245,8 @@ do not become durable logs.
   `drain_seconds` (1 s).  Leftover group members are also killed when a
   check exits normally.  A process that daemonizes (double fork plus `setsid`) cannot
   be found and can outlive the check; only a container or cgroup contains that.
+  If the output capture cannot be set up after the launch (descriptor exhaustion), the
+  child is killed and reaped and the check is reported as an `error`, not left running.
 - Descendants are tracked by identity, not by pid alone (pid plus the start time in
   `/proc/<pid>/stat`).  Before every `SIGTERM`/`SIGKILL` the identity is re-checked, and
   a pid now held by a different process is dropped and neither signalled nor waited

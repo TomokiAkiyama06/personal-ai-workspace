@@ -449,6 +449,33 @@ class TestRunnerTest(unittest.TestCase):
         self.assertEqual(done.read_text(), "cleaned")
         self.assertGreaterEqual(result.stdout_bytes, 1 << 20)
 
+    def test_the_child_is_stopped_when_the_capture_cannot_be_set_up(self):
+        # After the launch, building the output capture can still fail (for
+        # example EMFILE under descriptor exhaustion). The check must not be left
+        # running with nobody to supervise it.
+        pid_file = self.pid_file()
+        script = (
+            "import os, sys, time\n"
+            "open(sys.argv[1] + '.tmp', 'w').write(str(os.getpid()))\n"
+            "os.replace(sys.argv[1] + '.tmp', sys.argv[1])\n"
+            "time.sleep(60)\n"
+        )
+
+        def no_descriptors(process, limit):
+            raise OSError(errno.EMFILE, "Too many open files")
+
+        check = self.python_check("no-capture", script, pid_file)
+        with mock.patch.object(test_runner, "_OutputCapture", no_descriptors):
+            (result,) = self.runner.run_visible((check,), PATIENCE)
+
+        self.assertEqual(result.status, "error")
+        # A live child publishes its pid within moments; a child that was stopped
+        # in time never does. Either way it must not be left running.
+        wait_until(pid_file.exists, 3)
+        if pid_file.exists():
+            child = self.read_pid(pid_file)
+            self.assertTrue(wait_until(lambda: not is_running(child)))
+
     def test_timeout_kills_a_group_member_that_ignores_sigterm(self):
         self.runner.term_grace_seconds = 0.3
         pid_file = self.pid_file()

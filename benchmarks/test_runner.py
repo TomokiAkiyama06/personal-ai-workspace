@@ -8,6 +8,7 @@ to commands without exposing that mapping through this module's public results.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import math
@@ -235,8 +236,15 @@ class TestRunner:
                     start_new_session=True,
                     env=_check_environment(home),
                 )
-                leader = _Leader(process)
-                capture = _OutputCapture(process, _MAX_CAPTURE_BYTES)
+                try:
+                    leader = _Leader(process)
+                    capture = _OutputCapture(process, _MAX_CAPTURE_BYTES)
+                except BaseException:
+                    # The child is running and nothing supervises it yet: never
+                    # leave it behind. It is our own unreaped child, so its pid is
+                    # still its process group id.
+                    _stop_unsupervised(process)
+                    raise
                 try:
                     timed_out = self._supervise(leader, capture, timeout_seconds)
                     stdout, stderr = (
@@ -439,6 +447,20 @@ def _safe_stream_record(
         "sha256": hashlib.sha256(stream).hexdigest(),
         "truncated": truncated,
     }
+
+
+def _stop_unsupervised(process: subprocess.Popen[bytes]) -> None:
+    """Kill and reap a just-started child that no supervisor took over."""
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(process.pid, signal.SIGKILL)
+    with contextlib.suppress(OSError):
+        process.kill()
+    with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+        process.wait(timeout=5)
+    for stream in (process.stdout, process.stderr):
+        if stream is not None:
+            with contextlib.suppress(OSError):
+                stream.close()
 
 
 class _Leader:
