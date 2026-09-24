@@ -164,7 +164,8 @@ def operator_leaks(root: Path) -> dict[str, set[str]]:
 
 class NoWebPathTest(unittest.TestCase):
     def test_no_route_of_the_application_deals_with_owner_setup_or_recovery(self):
-        paths = sorted(route_guards(build_app()))
+        # ``route_guards`` lists every route OPERATION as (method, path, guards).
+        paths = sorted({path for _, path, _ in route_guards(build_app())})
 
         self.assertGreater(len(paths), 3)  # the inventory sees the real routes
         self.assertEqual([p for p in paths if SETUP_WORDS.search(p)], [])
