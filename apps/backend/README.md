@@ -558,14 +558,28 @@ Endpoint は次の Issue の仕事です。次の対応を提案します（未�
 型は変換しません（`"false"` は真偽値でなく、`bool` は `int` でなく、UUID の文字列は UUID でない）。NUL と UTF-8 にできない文字は拒否します。
 Error の Message は固定文字列（Field 名と理由の語彙）で、入力の内容・ID・DB の Message を含みません。DB の Error（接続断など）は加工せず伝わりますが、SQL の引数を含みうるため、呼び出し側は `str(error)` を User へ見せないでください。
 
+### 実装の経緯
+
+`validation.py` と `service.py` は、当初 Local Model（Qwen3-Coder-30B-A3B）に実装させる計画でした。仕様（Contract、Model、Migration、Test）は Claude が先に書き、Local Model の合格基準は Test だけでした。
+Local Model の試行は収束せず、構文エラーを含む部分的なコードしか作れなかったため、**この 2 つの Module は Claude の参照実装**です（人間の判断が必要な点は下記）。
+Test は参照実装で成り立つことを確認しながら書いたものです。Local Model の試行の前に確定しており、その後は変更していません。
+
 ### 制限と未確認の点
 
-- 昇格の確認中（`pending`）に期限はありません。確認の Flow が止まると、その Item は残り続けます（`promotion_requested_at` で見つけられます）。期限を付けるかは要判断です。
-- Purge を定期的に呼ぶ Janitor は含みません。`purge_expired` を呼ぶだけで、Scheduler は別の Issue です。
+- Purge を定期的に呼ぶ Janitor は含みません。`purge_expired` があるだけで、Scheduler は別の Issue です。
 - Claim と Source の対応（Evidence / Provenance）は PAW-052 です。ここでは `source_metadata` に置くだけで、構造化しません。
 - 1 Project あたりの Item 数の上限（Quota）は持ちません。
-- Purge の「Snapshot の後に Commit された Lease」の Race は、実際の同時実行では起こしにくい時間窓です。Test は `purge_probe`（Test 用の接続点）で、その瞬間に exempt が現れる状況を決定的に再現して確認しています。
+- Purge の「Snapshot の後に Commit された Lease」の Race は、実際の同時実行では起こしにくい時間窓です。Test は `purge_probe`（Test 用の接続点）で、その瞬間に exempt が現れる状況を決定的に再現して確認しています。同時実行の Test は複数回繰り返して安定を確認していますが、時間窓そのものを外部から狙って再現しているわけではありません。
 - Migration `0050` の `down_revision` は `0040` です。他の Revision と同じく、統合時に 1 本の鎖へつなぎ直します。
+
+### 人間の判断が必要な点
+
+1. **昇格の確認中（`pending`）の期限。** 期限がないため、確認の Flow が止まると、その Item は残り続けます（`promotion_requested_at` で見つけられます）。期限を付けるか。
+2. **「User が明示保存」。** [要件](../../REQUIREMENTS.md)の 4 つ目の延期理由は Pin で表しています。別の状態にするか。
+3. **Claim と Source の置き場所。** PAW-052 まで `source_metadata`（16 KiB まで）に置きます。
+4. **`tasks.id` の Foreign Key の `ON DELETE`。** `SET NULL` を選びました。`RESTRICT`（Task の削除を止める）や `CASCADE`（Pin 済みも消える）にするか。
+5. **認可の対応。** 上の「呼び出し側の認可（提案）」で、特に `resolve_promotion` を委任不可の `project.memory.manage` にする点。
+6. **Quota と Janitor。** Item 数の上限と、`purge_expired` を定期実行する仕組み。
 
 ## 依存 Package
 
