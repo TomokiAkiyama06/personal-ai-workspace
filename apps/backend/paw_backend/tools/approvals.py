@@ -18,7 +18,9 @@ never be handed this service**. Even so, the rules do not rest on that:
   for every terminal state: completed, failed, cancelled). That revocation runs
   after the terminal transition committed, so a failure of the store **is
   raised** (:class:`ApprovalRevocationError`), not counted as "nothing to
-  revoke". It cannot be retried by ``TaskService`` and it cannot roll the
+  revoke", and it is **bounded by a deadline** (``TaskService`` awaits its
+  listeners: a stalled store must not hold up cancel / complete / retry). It
+  cannot be retried by ``TaskService`` and it cannot roll the
   transition back, so the broker independently refuses to open or use an
   approval of a task that can no longer act (``task_state.py``): an approval
   that stayed live is still unusable. Decision 0006, section 9.
@@ -263,13 +265,20 @@ class ApprovalService:
         A system action: nobody's approval may outlive its task. Wire
         :meth:`revoke_on_task_end` into ``TaskService(listeners=[...])``.
         Idempotent. Raises :class:`ApprovalRevocationError` when the store
-        fails: a failure must not look like "nothing was open".
+        fails or does not answer within ``timeout_seconds``: a failure must not
+        look like "nothing was open".
         """
         if not isinstance(task_id, uuid.UUID):
             raise TypeError("task_id must be a UUID")
         now = self._clock()
         try:
-            ids = await self._store.revoke_task(task_id, now=now)
+            # ``TaskService`` awaits this after the transition committed: a store
+            # that stalls must not hold up cancel / complete / retry requests.
+            # Cancelling the call also shuts down the abortable connection of
+            # ``PostgresApprovalStore``. Whether it was done in time is unknown,
+            # like any other failure: it is raised, and can be run again.
+            async with asyncio.timeout(self._timeout_seconds):
+                ids = await self._store.revoke_task(task_id, now=now)
         except Exception as error:
             logger.error("Task approval revoke failed (%s)", type(error).__name__)
             raise ApprovalRevocationError(
@@ -277,8 +286,11 @@ class ApprovalService:
             ) from None
         for approval_id in ids:
             try:
-                record = await self._store.get(approval_id)
+                async with asyncio.timeout(self._timeout_seconds):
+                    record = await self._store.get(approval_id)
             except Exception:
+                # Only what the audit row and the event say about the approval
+                # is lost; the approval itself is revoked.
                 record = None
             if record is not None:
                 await self._emit(ApprovalEventKind.REVOKED, record, now)

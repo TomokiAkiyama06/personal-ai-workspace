@@ -12,6 +12,7 @@ from paw_backend.authz import (
     ProjectRole,
     SystemRole,
 )
+from paw_backend.tasks import TaskState
 from paw_backend.tools import (
     ApprovalEventKind,
     ApprovalLevel,
@@ -1336,6 +1337,60 @@ class TaskEndTest(unittest.IsolatedAsyncioTestCase):
         self.store.error = None
         self.assertEqual(await self.h.service.revoke_task(TASK), 1)
         self.assertEqual(await self.h.service.revoke_task(TASK), 0)
+
+    async def stalled_service(self, store, **kwargs):
+        return ApprovalService(
+            store,
+            InMemoryAuditSink(),
+            step_up=StepUp(True),
+            clock=self.h.clock,
+            timeout_seconds=0.05,
+            **kwargs,
+        )
+
+    async def test_a_store_that_never_answers_cannot_hold_the_end_of_a_task_up(self):
+        # Finding of the review of PR #74: TaskService awaits its listeners, so a
+        # revocation that waits for a stalled database would hold up every cancel,
+        # complete and retry request after the transition was committed.
+        class Stalled(InMemoryApprovalStore):
+            async def revoke_task(self, task_id, *, now):
+                await asyncio.Event().wait()
+
+        service = await self.stalled_service(Stalled())
+        for call in (
+            service.revoke_task(TASK),
+            service.revoke_on_task_end(TaskEvent(TASK, TaskState.CANCELLED)),
+        ):
+            with self.subTest(call=call.__qualname__):
+                with self.assertLogs(level="ERROR") as logs:
+                    with self.assertRaises(ApprovalRevocationError):
+                        async with asyncio.timeout(5):  # far above the 0.05 s limit
+                            await call
+                self.assertIn("TimeoutError", "\n".join(logs.output))
+
+    async def test_a_lookup_that_never_answers_cannot_hold_the_revocation_up(self):
+        class StalledLookup(InMemoryApprovalStore):
+            stalled = False
+
+            async def get(self, approval_id):
+                if self.stalled:
+                    await asyncio.Event().wait()
+                return await super().get(approval_id)
+
+        store = StalledLookup()
+        h = Harness(approvals=store)
+        await self.approved("a", h)
+        store.stalled = True
+        service = await self.stalled_service(store)
+        async with asyncio.timeout(5):
+            revoked = await service.revoke_task(TASK)
+        # the revocation is done; only what the audit row / event would say
+        # about the approval was not looked up
+        self.assertEqual(revoked, 1)
+        store.stalled = False
+        self.assertEqual(
+            [r.status for r in store._records.values()], [ApprovalStatus.REVOKED]
+        )
 
     async def test_an_approval_left_open_is_unusable_once_the_task_ended(self):
         approved = await self.approved()

@@ -1471,3 +1471,115 @@ class ConsumeRacesWithTaskEndTest(TaskFixture):
         # and every other caller of ``consume``)
         new = await self.approved(ended)
         self.assertEqual(await self.use(new), ConsumeOutcome.CONSUMED)
+
+
+@requires_postgres
+class RevocationDeadlineTest(TaskFixture):
+    """A revocation that meets a stalled statement returns, and the task still ends.
+
+    Finding of the review of PR #74: ``revoke_task`` ran on a pooled session with
+    no deadline, and ``TaskService`` awaits its listeners, so a database that
+    accepted the connection but stalled the statement held up every cancel,
+    complete and retry request after the transition had committed. The statement
+    now runs on an abortable connection (``Database.execute_abortable``: the
+    socket is shut down at the deadline). Here the stall is a row lock that
+    another transaction holds, which makes the UPDATE wait exactly like a stalled
+    statement would.
+    """
+
+    LIMIT = 0.3  # the deadline of the revocation
+    GUARD = 10  # far above it: only reached by a call that ignores the deadline
+
+    async def wire(self):
+        self.store = PostgresApprovalStore(
+            self.new_database(), revoke_timeout_seconds=self.LIMIT
+        )
+        self.h = Harness(approvals=self.store, clock=Clock())
+        self.h.service._timeout_seconds = self.LIMIT
+        self.tasks = TaskService(
+            self.new_database(), listeners=[self.h.service.revoke_on_task_end]
+        )
+        self.task_id = await self.new_task()
+        self.context = make_context(task_id=self.task_id)
+        opened = await self.h.broker.request(
+            make_call("repo.delete_tree", DELETE, context=self.context)
+        )
+        self.approval_id = opened.approval_id
+
+    async def status(self):
+        return (await self.store.get(self.approval_id)).status
+
+    @contextlib.asynccontextmanager
+    async def stalled(self):
+        """Hold the approval row, as a statement that is stalled would."""
+        async with self.database.engine.connect() as holder:
+            await holder.execute(
+                text("SELECT id FROM tool_approvals WHERE id = :id FOR UPDATE"),
+                {"id": self.approval_id},
+            )
+            try:
+                yield
+            finally:
+                await holder.rollback()
+
+    async def test_the_store_gives_up_at_its_deadline(self):
+        await self.wire()
+        started = asyncio.get_running_loop().time()
+        async with self.stalled():
+            with self.assertRaises(TimeoutError):
+                async with asyncio.timeout(self.GUARD):
+                    await self.store.revoke_task(self.task_id, now=NOW)
+            elapsed = asyncio.get_running_loop().time() - started
+        self.assertLess(elapsed, self.GUARD / 2)
+        # revoking again, once the database answers, finishes the job (idempotent);
+        # the statement that was abandoned may also have finished it by then
+        await self.store.revoke_task(self.task_id, now=NOW)
+        self.assertEqual(await self.status(), ApprovalStatus.REVOKED)
+
+    async def test_a_task_end_returns_although_its_revocation_is_stalled(self):
+        await self.wire()
+        started = asyncio.get_running_loop().time()
+        async with self.stalled():
+            with self.assertLogs("paw_backend", "WARNING") as logs:
+                async with asyncio.timeout(self.GUARD):
+                    await self.tasks.execute(
+                        self.task_id, C.CANCEL, actor=Actor.user(U1)
+                    )
+            elapsed = asyncio.get_running_loop().time() - started
+        self.assertLess(elapsed, self.GUARD / 2)
+        # the transition is committed, the failure is reported by type ...
+        text_logged = "\n".join(logs.output)
+        self.assertIn("ApprovalRevocationError", text_logged)
+        # ... and the broker refuses the approval of the ended task meanwhile
+        h = Harness(
+            approvals=self.store,
+            clock=self.h.clock,
+            task_activity=PostgresTaskActivity(self.new_database()),
+        )
+        used = await h.broker.request(
+            make_call("repo.delete_tree", DELETE, context=self.context),
+            approval_id=self.approval_id,
+        )
+        self.assertEqual(used.reason, BrokerReason.TASK_NOT_ACTIVE)
+        # revoking again, once the database answers, finishes the job
+        await self.h.service.revoke_task(self.task_id)
+        self.assertEqual(await self.status(), ApprovalStatus.REVOKED)
+
+    async def test_the_revocation_is_one_atomic_statement_with_its_history(self):
+        await self.wire()
+        second = await self.h.broker.request(
+            make_call(
+                "repo.delete_tree", {"path": f"{ROOT}/other"}, context=self.context
+            )
+        )
+        revoked = await self.store.revoke_task(self.task_id, now=NOW)
+        self.assertEqual(
+            sorted(revoked), sorted([self.approval_id, second.approval_id])
+        )
+        for approval_id in revoked:
+            history = await self.store.history(approval_id)
+            self.assertEqual(
+                [(h.kind.value, h.actor_user_id) for h in history],
+                [("requested", None), ("revoked", None)],
+            )
+        self.assertEqual(await self.store.revoke_task(self.task_id, now=NOW), [])

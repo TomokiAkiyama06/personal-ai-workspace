@@ -101,6 +101,7 @@ Credential の Plaintext を Agent に渡さないこと、Backend が最終判�
 
 1. **Task の終わりは `completed` / `failed` / `cancelled`**（`TERMINAL_STATES`）。Task の状態に `expired` はなく、承認は自分の `expires_at` で失効する。終了時に、その Task の Open な承認（pending、承認済みで未使用）を取り消す。
 2. **取り消しの失敗は握りつぶさない。** `revoke_task` は Store の失敗で `ApprovalRevocationError` を上げる（以前は `0` を返し、「Open な承認はなかった」と区別できなかった）。終了の遷移はもう Commit されているので戻せず、`TaskService` は型名だけを Log に残す。再試行は今は呼び出し側（`revoke_task` は冪等）。
+   **取り消しは時間で区切る。** `TaskService` は Listener を待つので、Statement に答えない DB が取り消しを止めると、Commit 済みの遷移の後で Cancel / Complete / Retry の要求が返らなくなる（独立 Review の指摘）。取り消しと履歴を 1 つの Statement にして、中断可能な接続（`Database.fetch_abortable`、期限で Socket を閉じる）で実行する。時間切れは失敗と同じく `ApprovalRevocationError` で、`revoke_task` を呼び直せる。`ApprovalService` は全体も `timeout_seconds` で区切る。
 3. **Broker は独立に Fail-closed で止める。** 承認を要する呼び出しは、承認を開くときも使うときも、Task の**現在の状態**（`TaskActivityProvider`）が動ける（`ACTIVE`）ときだけ進む。終了・不明・読めないなら拒否する（`task_not_active` / `task_unknown` / `task_state_unavailable`）。取り消しの成否によらず、終わった Task の承認は使えない。既定の Provider は不明を答える（本物を入れるまで承認は使えない）。
    遷移と取り消しを 1 つの Transaction にする案（`TaskService` が Tool の Table を触る）は、Task と Tool の境界を越えるため採らなかった。
    **使うときの確認と消費は 1 つの Transaction にする。** 独立 Review が、確認（読み取り）と消費が別の操作で、その間に終了の遷移が Commit されると、Commit 後の取り消しと消費が競い、消費が勝った承認が終わった Task で使われると指摘した（再現した）。`consume` は `require_active_task` を受け取り、`PostgresApprovalStore` は同じ Transaction で Task の行を `FOR SHARE` で読み直してから消費する（`ACTIVE` でなければ消費しない）。進行中の遷移は待ち、後の遷移は消費の Commit を待つので、使うことと終了は順序づけられる。Broker の確認は、理由をはっきり返す早い答えとして残す。Task の表を読む（Lock する）のは読み取りだけで、Task の状態は変えない。
