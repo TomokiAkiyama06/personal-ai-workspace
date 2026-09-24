@@ -388,10 +388,17 @@ deadlineの値は運用者が決めるもので、Harnessは既定値を持ち�
 `--timeout-seconds`（`run_benchmark`では`timeout_seconds`引数）は必須で、省略すると実行前にエラー（CLIは`the following arguments are required: --timeout-seconds`で終了code 2、`run_benchmark`は`TypeError`）になります。
 短すぎる既定値が、遅いが正しい候補を失敗caseとして記録してモデル選定を左右することを避けるためです。
 候補ごとに値を変えず、全候補へ同じ値を指定してください（[公平比較の規則](../docs/BENCHMARK_EVALUATOR.md)のTimeout）。
-deadlineまでに戻らない呼び出しは、予測なしの失敗caseとして`error_type`を`deadline_exceeded`（Candidate adapterと同じ公開code）にして次のcaseへ進むため、止まったWorkerがrun全体を止めることはなく、最悪でも`case数 × timeout`で終わります。
-そのcaseのlatencyは待った時間で、latencyの統計へも含まれます。設定したdeadlineはReportの`timeout_seconds`に記録します。
+deadlineまでに戻らない呼び出しは、予測なしの失敗caseとして`error_type`を`deadline_exceeded`（Candidate adapterと同じ公開code）にします。
+そのcaseのlatencyはdeadlineまで待った時間で、latencyの統計へも含まれます（後述の、呼び出しが終わるのを待つ時間は含みません）。設定したdeadlineはReportの`timeout_seconds`に記録します。
 `extract`は呼び出しごとのdaemon threadで実行します（main threadではありません。thread localな状態に依存するWorkerは注意してください）。
-Pythonはthreadを強制停止できないため、deadlineを過ぎた呼び出しは中止されず、Workerが自然に戻るまで動き続けて次のcaseと重なり得ます（出力は捨てます）。重なりを許さないWorkerは、自身で別processに隔離してください。
+Pythonはthreadを強制停止できないため、deadlineを過ぎた呼び出しは中止されず、Workerが自然に戻るまで動き続けます（出力は捨てます）。
+同じWorkerで`extract`が2つ重なると、共有状態の破壊、VRAMなどの資源の競合、後続caseのlatency / VRAM測定の歪み、遅れて終わる呼び出しの誤帰属が起きます。
+このためRunnerは重なりを許さず、deadlineを過ぎた呼び出しについて、次のcase（最後のcaseならReportの作成）へ進む前に、さらに`timeout_seconds`だけその呼び出しが終わるのを待ちます。この間、Workerへ次の呼び出しはしません。
+その間に終わらなければRunを止めます（`run_benchmark`は`WorkerStuckError`、CLIは`extract() had not ended N seconds after its deadline in case 'ID'; ...`をstderrへ出して終了code 2）。
+このときReportは作りません。部分的なReportはmetricsの母数を変えてしまうためです。Workerを直すか、deadlineを見直して最初からやり直してください。止まった呼び出しのthreadはdaemonなので、processの終了は妨げません。
+したがって止まったWorkerは、1 caseあたり最悪でも`2 × timeout`でRunを終わらせ（hangしません）、Reportを返したRunでは`extract`が同時に2つ動いたことがありません。
+限界: 呼び出しそのものを中止する仕組み（呼び出しごとのprocess隔離）は入れていません。Workerはfactoryが作る、modelを保持した呼び出し元processのobjectで、呼び出しごとにprocessを分けるとmodelの再読み込みがlatencyを歪め、常駐processとのIPCはWorkerの形（`extract(input_text) -> str`）を変えてしまうためです。
+Worker自身が別processへ隔離し、deadline超過時にそのprocessを止めて`extract`を戻す実装であれば、上の待ち時間の中で終わり、Runは続行します。
 factoryが`extract(input_text)`を持たないobjectを返した場合は、全caseが失敗した報告にせず、実行前にエラー（終了code 2）にします。
 
 ```bash
@@ -406,5 +413,5 @@ python -m benchmarks.run_memory_worker_benchmark \
 `--worker`は`module:factory`で、引数なしのfactoryが`extract(input_text) -> str`を持つobjectを返します。
 importしたmoduleは呼び出し元の権限で実行されるため、信頼できるcodeだけを指定してください。
 Reportには入力text、Workerの生出力、例外messageを含めません。終了codeは、成功が0、caseファイルの不備が1、
-Workerの指定やReport出力の不備が2です。`--collect-resources`を付けると、実行全体のwall clockと、`nvidia-smi`が使える環境ではVRAM・GPU utilizationのpeakを`resources`へ含めます（付けない場合は含みません）。
+Workerの指定・Workerの停止（上記）・Report出力の不備が2です。`--collect-resources`を付けると、実行全体のwall clockと、`nvidia-smi`が使える環境ではVRAM・GPU utilizationのpeakを`resources`へ含めます（付けない場合は含みません）。
 Datasetの正式な形式はSeed Benchmark Dataset（PAW-016）で確定するため、現在のcase形式は暫定です。

@@ -21,6 +21,7 @@ from benchmarks.memory_worker_metrics import (
 )
 from benchmarks.memory_worker_runner import (
     MemoryWorkerCase,
+    WorkerStuckError,
     _output_schema,
     load_cases,
     parse_worker_output,
@@ -878,22 +879,51 @@ class HangingWorker:
 
     Call numbers (0-based) in ``hang_on`` block; ``None`` blocks every call. The
     wait is bounded so a broken test cannot leave a thread behind for long, and
-    ``shutdown`` releases and joins every call deterministically.
+    ``shutdown`` releases and joins every call deterministically. A released call
+    takes ``end_delay`` more seconds to return (a stalled call that is slow to
+    wind down). ``max_running`` is the most calls ever inside ``extract`` at the
+    same time (2 means two calls overlapped); ``stalled`` is set once a call is
+    blocked.
     """
 
-    def __init__(self, hang_on=None):
+    def __init__(self, hang_on=None, end_delay=0.0):
         self.hang_on = hang_on
+        self.end_delay = end_delay
         self.release = threading.Event()
+        self.stalled = threading.Event()
         self.threads = []
         self.calls = 0
+        self.running = 0
+        self.max_running = 0
+        self._lock = threading.Lock()
 
     def extract(self, input_text):
-        index = self.calls
-        self.calls += 1
-        self.threads.append(threading.current_thread())
-        if self.hang_on is None or index in self.hang_on:
-            self.release.wait(60)
-        return VALID_OUTPUT.replace("favorite_color", "k")
+        with self._lock:
+            index = self.calls
+            self.calls += 1
+            self.running += 1
+            self.max_running = max(self.max_running, self.running)
+            self.threads.append(threading.current_thread())
+        try:
+            if self.hang_on is None or index in self.hang_on:
+                self.stalled.set()
+                self.release.wait(60)
+                time.sleep(self.end_delay)
+            return VALID_OUTPUT.replace("favorite_color", "k")
+        finally:
+            with self._lock:
+                self.running -= 1
+
+    def clock(self):
+        """Real time; a read once a call has stalled lets that call return.
+
+        The runner reads the clock right after it gave up on the call at its
+        deadline, so the release always happens after the deadline and before the
+        wait for the call to end: no sleeping, no dependence on machine speed.
+        """
+        if self.stalled.is_set():
+            self.release.set()
+        return time.monotonic()
 
     def shutdown(self):
         self.release.set()
@@ -906,35 +936,79 @@ class ExtractDeadlineTest(unittest.TestCase):
     def _cases(count):
         return MemoryWorkerRunnerTest._cases(count)
 
-    def _hanging_worker(self, hang_on=None):
-        worker = HangingWorker(hang_on)
+    def _hanging_worker(self, hang_on=None, end_delay=0.0):
+        worker = HangingWorker(hang_on, end_delay)
         self.addCleanup(worker.shutdown)
         return worker
 
-    def test_a_worker_that_never_returns_cannot_hang_the_run(self):
+    def test_a_worker_that_never_returns_stops_the_run_instead_of_hanging_it(self):
         worker = self._hanging_worker()
         started = time.monotonic()
 
-        report = run_benchmark(worker, self._cases(3), timeout_seconds=0.2)
+        with self.assertRaises(WorkerStuckError) as caught:
+            run_benchmark(worker, self._cases(3), timeout_seconds=0.2)
 
-        # Without a deadline the run would wait for the worker's 60 s bound.
+        # Without a bound on the wait the run would sit in the worker's 60 s hang.
         self.assertLess(time.monotonic() - started, 30)
-        self.assertEqual(worker.calls, 3)
-        self.assertEqual(len(report.cases), 3)
-        for result in report.cases:
-            self.assertEqual(result.error_type, "deadline_exceeded")
-            self.assertFalse(result.schema_valid)
-            self.assertEqual(result.comparison.matched, 0)
-            self.assertEqual(result.comparison.predicted_count, 0)
-            self.assertEqual(result.comparison.gold_count, 1)
-            self.assertGreaterEqual(result.latency_ms, 200)
-        self.assertEqual(report.metrics["extraction_recall"], 0.0)
-        self.assertEqual(report.metrics["schema_adherence_rate"], 0.0)
+        self.assertEqual(
+            str(caught.exception),
+            "extract() had not ended 0.2 seconds after its deadline in case 'c0'; "
+            "the run was stopped instead of starting the next case while it is "
+            "still running",
+        )
 
-    def test_each_case_gets_its_own_deadline_and_the_run_continues(self):
-        worker = self._hanging_worker(hang_on={1})
+    def test_the_next_case_is_not_started_while_a_timed_out_call_still_runs(self):
+        # The call keeps running after its deadline (Python cannot stop a thread).
+        # Starting case 2 now would overlap two extract() calls on one worker.
+        worker = self._hanging_worker()
 
-        report = run_benchmark(worker, self._cases(3), timeout_seconds=2.0)
+        with self.assertRaises(WorkerStuckError):
+            run_benchmark(worker, self._cases(3), timeout_seconds=0.2)
+
+        self.assertEqual(worker.calls, 1)
+        self.assertEqual(worker.max_running, 1)
+
+    def test_the_last_case_also_waits_for_a_timed_out_call(self):
+        # Returning a report while an abandoned call still runs would let it
+        # overlap the resource measurement and the next candidate's run.
+        worker = self._hanging_worker()
+
+        with self.assertRaises(WorkerStuckError):
+            run_benchmark(worker, self._cases(1), timeout_seconds=0.2)
+
+        self.assertEqual(worker.calls, 1)
+
+    def test_a_stopped_run_still_stops_the_metrics_collector(self):
+        events = []
+
+        class Collector:
+            def start(self):
+                events.append("start")
+
+            def stop(self):
+                events.append("stop")
+
+            def metrics(self):
+                raise AssertionError("no report is built for a stopped run")
+
+        with self.assertRaises(WorkerStuckError):
+            run_benchmark(
+                self._hanging_worker(),
+                self._cases(2),
+                timeout_seconds=0.2,
+                metrics_collector=Collector(),
+            )
+
+        self.assertEqual(events, ["start", "stop"])
+
+    def test_a_timed_out_call_that_ends_in_time_lets_the_run_continue(self):
+        # The call is released right after its deadline but needs 0.3 s more to
+        # return, far below the further 2 s the runner waits for it.
+        worker = self._hanging_worker(hang_on={1}, end_delay=0.3)
+
+        report = run_benchmark(
+            worker, self._cases(3), timeout_seconds=2.0, clock=worker.clock
+        )
 
         self.assertEqual(
             [result.error_type for result in report.cases],
@@ -945,6 +1019,38 @@ class ExtractDeadlineTest(unittest.TestCase):
         )
         self.assertEqual(report.metrics["extraction_recall"], 2 / 3)
         self.assertEqual(report.metrics["schema_adherence_rate"], 2 / 3)
+        # Case 3 started only after the timed-out call of case 2 had ended.
+        self.assertEqual(worker.calls, 3)
+        self.assertEqual(worker.max_running, 1)
+
+    def test_the_latency_of_a_timed_out_case_is_the_wait_until_the_deadline(self):
+        clock = FakeClock(100.0)
+        stalled, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+
+        class SlowToEnd:
+            def extract(self, input_text):
+                stalled.set()
+                release.wait(60)
+                clock.value += 500.0  # ending takes far longer than the deadline
+                return VALID_OUTPUT.replace("favorite_color", "k")
+
+        def clock_reading():
+            if stalled.is_set() and not release.is_set():
+                clock.value += 2.0  # the deadline passed while the call stalled
+                reading = clock.value
+                release.set()
+                return reading
+            return clock.value
+
+        report = run_benchmark(
+            SlowToEnd(), self._cases(1), timeout_seconds=2.0, clock=clock_reading
+        )
+
+        self.assertEqual(report.cases[0].error_type, "deadline_exceeded")
+        # The time spent waiting for the abandoned call to end is not the case's.
+        self.assertEqual(report.cases[0].latency_ms, 2000.0)
+        self.assertEqual(clock.value, 602.0)
 
     def test_the_deadline_is_reported_in_the_report(self):
         report = run_benchmark(

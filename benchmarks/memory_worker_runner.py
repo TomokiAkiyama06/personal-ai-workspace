@@ -288,12 +288,25 @@ def validate_timeout_seconds(value: object) -> float:
     return float(value)
 
 
-class _ExtractCall:
-    """One ``worker.extract`` call in a daemon thread that the runner can abandon.
+class WorkerStuckError(RuntimeError):
+    """A timed-out ``extract`` call had still not ended one more deadline later.
 
-    Python cannot interrupt a thread, so a call that misses its deadline keeps
-    running until it returns on its own; its output is never read. The thread is a
-    daemon so that it cannot keep the interpreter from exiting, and it catches
+    Python cannot stop a running thread, so the runner can neither cancel the call
+    nor start the next case without two calls overlapping on the same worker
+    (shared state, GPU / VRAM use that distorts the measurements, wrong
+    attribution of a late result). It stops the run instead. The message carries
+    only the case id and the number of seconds, never worker output.
+    """
+
+
+class _ExtractCall:
+    """One ``worker.extract`` call in a daemon thread with a deadline.
+
+    Python cannot interrupt a thread, so a call that misses its deadline is not
+    cancelled: it keeps running until it returns on its own, and its output is
+    never read. The runner therefore waits for it to end (``wait_until_ended``)
+    before it does anything else with the worker. The thread is a daemon so that a
+    call that never ends cannot keep the interpreter from exiting, and it catches
     everything itself so no traceback (which can carry exception text) reaches
     stderr.
     """
@@ -328,6 +341,11 @@ class _ExtractCall:
             raise error  # SystemExit and the like are not "a failed case".
         return "", type(error).__name__
 
+    def wait_until_ended(self, timeout_seconds: float) -> bool:
+        """Wait up to ``timeout_seconds`` for the call's thread to end; return whether it did."""
+        self._thread.join(timeout_seconds)
+        return not self._thread.is_alive()
+
 
 def run_benchmark(
     worker: MemoryWorker,
@@ -347,11 +365,17 @@ def run_benchmark(
     Latency covers only ``worker.extract``. A worker that raises is recorded as a
     failed case with empty predictions and the run continues. Each call runs in a
     helper thread with a deadline of ``timeout_seconds``: a call that has not
-    returned by then is abandoned and recorded as a failed case with
-    ``error_type`` ``"deadline_exceeded"`` (its latency is the time waited), so a
-    stalled worker costs at most ``len(cases) * timeout_seconds`` instead of
-    hanging the run. The abandoned call cannot be stopped and may still be running
-    when the next case starts.
+    returned by then is recorded as a failed case with ``error_type``
+    ``"deadline_exceeded"`` (its latency is the time waited until the deadline).
+
+    The timed-out call cannot be stopped, and two calls must never overlap on one
+    worker, so before the next case (or the report) the runner waits up to another
+    ``timeout_seconds`` for that call to end; the wait is not part of any case's
+    latency. If it still has not ended, the run is stopped with
+    ``WorkerStuckError`` and no report is built, since a partial one would change
+    what every metric is averaged over. A stalled worker therefore costs at most
+    ``2 * timeout_seconds`` per case, and a run that returns has never had two
+    ``extract`` calls running at once.
     """
     timeout_seconds = validate_timeout_seconds(timeout_seconds)
     validate_worker(worker)
@@ -362,11 +386,18 @@ def run_benchmark(
         metrics_collector.start()
     try:
         for case in cases:
+            call = _ExtractCall(worker, case.input_text)
             started = clock()
-            raw_output, error_type = _ExtractCall(worker, case.input_text).result(
-                timeout_seconds
-            )
+            raw_output, error_type = call.result(timeout_seconds)
             latency_ms = (clock() - started) * 1000
+            if error_type == DEADLINE_EXCEEDED and not call.wait_until_ended(
+                timeout_seconds
+            ):
+                raise WorkerStuckError(
+                    f"extract() had not ended {timeout_seconds:g} seconds after its "
+                    f"deadline in case '{case.id}'; the run was stopped instead of "
+                    "starting the next case while it is still running"
+                )
 
             raw_outputs.append(raw_output)
             predicted = parse_worker_output(raw_output)

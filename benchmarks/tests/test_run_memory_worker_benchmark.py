@@ -38,7 +38,10 @@ class RunMemoryWorkerBenchmarkTest(unittest.TestCase):
         self.assertEqual(report["timeout_seconds"], 30.0)
         self.assertNotIn("The user mentioned", stdout)
 
-    def test_a_stalled_worker_is_cut_off_by_the_deadline(self):
+    def test_a_stalled_worker_stops_the_run_with_a_clear_error(self):
+        # The stalled call cannot be stopped, so the run ends instead of starting
+        # the next case on the same worker while it is still running; no partial
+        # report is written (it would change the denominators of every metric).
         self.addCleanup(release_hanging_workers)
 
         code, stdout, stderr = run_cli(
@@ -50,16 +53,14 @@ class RunMemoryWorkerBenchmarkTest(unittest.TestCase):
             "0.2",
         )
 
-        self.assertEqual(code, 0)
-        self.assertEqual(stderr, "")
-        report = json.loads(stdout)
-        self.assertEqual(report["timeout_seconds"], 0.2)
+        self.assertEqual(code, 2)
+        self.assertEqual(stdout, "")
         self.assertEqual(
-            [case["error_type"] for case in report["cases"]],
-            ["deadline_exceeded", "deadline_exceeded"],
+            stderr,
+            "extract() had not ended 0.2 seconds after its deadline in case "
+            "'test-1'; the run was stopped instead of starting the next case "
+            "while it is still running\n",
         )
-        self.assertEqual(report["metrics"]["schema_adherence_rate"], 0.0)
-        self.assertEqual(report["metrics"]["extraction_recall"], 0.0)
 
     def test_the_deadline_is_required_and_has_no_default(self):
         stdout, stderr = io.StringIO(), io.StringIO()

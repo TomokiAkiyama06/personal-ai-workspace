@@ -5,7 +5,9 @@ arguments and must return an object with ``extract(input_text) -> str``. Only
 point ``--worker`` at trusted code: the module is imported and the factory runs
 with the caller's permissions. Each ``extract`` call has a deadline
 (``--timeout-seconds``, required: the harness chooses no default, the value is the
-operator's decision); a call that misses it is a failed case.
+operator's decision); a call that misses it is a failed case, and if it does not
+end within one more deadline the run stops with exit code 2 and no report (two
+calls never overlap on the worker).
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ import sys
 from pathlib import Path
 
 from benchmarks.memory_worker_runner import (
+    WorkerStuckError,
     load_cases,
     run_benchmark,
     validate_timeout_seconds,
@@ -95,6 +98,9 @@ def main(argv: list[str] | None = None) -> int:
             metrics_collector=collector,
             timeout_seconds=arguments.timeout_seconds,
         )
+    except WorkerStuckError as error:
+        print(error, file=sys.stderr)
+        return 2
     except (TypeError, ValueError) as error:
         print(
             f"worker returned an invalid result ({type(error).__name__})",
