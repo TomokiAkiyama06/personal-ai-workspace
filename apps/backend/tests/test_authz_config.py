@@ -128,7 +128,10 @@ class OfflineMigrationSqlTest(unittest.TestCase):
     def test_the_app_role_gets_insert_and_select_only_and_is_quoted(self):
         sql = offline_upgrade_sql(PAW_APP_DATABASE_ROLE="paw_app")
         self.assertIn('GRANT INSERT, SELECT ON audit_events TO "paw_app"', sql)
-        self.assertEqual(sql.count("GRANT"), 1)
+        # Exactly one grant on the audit table. Other revisions (users and
+        # setup_tokens, 0021) grant on their own tables, which is not the audit
+        # table's business.
+        self.assertEqual(sql.count("ON audit_events TO"), 1)
         self.assertLess(sql.index("REVOKE ALL"), sql.index("GRANT INSERT"))
 
     def test_the_role_keeps_its_case_because_it_is_quoted(self):

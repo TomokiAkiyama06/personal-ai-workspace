@@ -93,6 +93,12 @@ class Settings(BaseSettings):
     event_queue_size: int = Field(default=100, ge=1)
     event_max_subscribers: int = Field(default=100, ge=1)
 
+    # Initial Owner setup / recovery tokens (PAW-021). A token is single-use and
+    # expires after this many seconds; a token that was tried this many times
+    # is locked out for good.
+    setup_token_ttl_seconds: int = Field(default=1_800, ge=60, le=86_400)
+    setup_token_max_attempts: int = Field(default=5, ge=1, le=20)
+
     log_level: str = "info"
 
     @field_validator(
