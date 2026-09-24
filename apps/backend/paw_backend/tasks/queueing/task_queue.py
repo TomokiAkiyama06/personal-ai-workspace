@@ -40,11 +40,23 @@ worker is presumed dead; ``now`` is the trusted clock above). A reclaimed entry
 keeps its ``priority`` and ``enqueued_at``, so it sorts where it always did.
 
 Lease. A claim leases the entry to one worker until ``now + lease_seconds``. The
-worker holds a VALID lease while ``status = claimed``, ``claimed_by`` is its id
-and ``lease_expires_at > now`` (strictly: at the exact expiry instant the lease
-is already lost). Only the holder of a valid lease may ``heartbeat``,
-``release`` or ``complete``; anyone else gets ``LeaseLostError``. So at any
-instant at most one worker holds a valid lease on an entry.
+worker holds a VALID lease while ``status = claimed``, ``claimed_by`` is its id,
+the entry's ``claim_count`` is the claim generation it was given, and
+``lease_expires_at > now`` (strictly: at the exact expiry instant the lease is
+already lost). Only the holder of a valid lease may ``heartbeat``, ``release`` or
+``complete``; anyone else gets ``LeaseLostError``. So at any instant at most one
+worker holds a valid lease on an entry.
+
+Claim generation (Decision 0007, section 7). A worker id alone does not identify a
+lease: a worker whose lease expired can be claimed again by a worker with the SAME
+id (a restarted process with a stable configured id), and the old execution, still
+running, would then satisfy ``claimed_by`` and the new lease and could extend,
+release or complete the replacement's claim. So ``claim_count``, which every claim
+(also a reclaim) increases by one and nothing ever decreases or resets, is the
+FENCING TOKEN of the lease: ``claim_next`` returns it in the ``QueueEntry`` and
+``heartbeat`` / ``release`` / ``complete`` REQUIRE it (a required argument, so a
+caller cannot forget to fence). A call that presents an older generation raises
+``LeaseLostError`` and changes nothing.
 
 Row-lock semantics. ``claim_next`` must run in ONE transaction that selects the
 best claimable row with ``FOR UPDATE SKIP LOCKED`` (``ORDER BY ... LIMIT 1``) and
@@ -92,6 +104,7 @@ from paw_backend.tasks.queueing.validation import (
     DEFAULT_LEASE_SECONDS,
     MAX_LEASE_SECONDS,
     check_bool,
+    check_claim_count,
     check_entry_id,
     check_int,
     check_member,
@@ -241,7 +254,9 @@ class TaskQueue:
         ``claimed_by = worker_id``, ``claimed_at`` = the current instant,
         ``lease_expires_at`` = that instant + ``lease_seconds``,
         ``claim_count + 1``. The returned ``QueueEntry`` shows the row after the
-        update. Both statements run in one transaction, so they see one instant.
+        update; its ``claim_count`` is the claim generation the worker must present
+        to ``heartbeat`` / ``release`` / ``complete``. Both statements run in one
+        transaction, so they see one instant.
 
         ``worker_id``: see ``validation.check_worker_id``. A worker may hold
         several entries at once (limiting concurrency is not the queue's job).
@@ -285,41 +300,58 @@ class TaskQueue:
             return _entry((await session.execute(claim)).scalar_one())
 
     async def heartbeat(
-        self, entry_id: int, worker_id: str, now: datetime | None = None
+        self,
+        entry_id: int,
+        worker_id: str,
+        claim_count: int,
+        now: datetime | None = None,
     ) -> QueueEntry:
         """Extend the lease of an entry the worker holds and return it.
 
+        ``claim_count`` is the claim generation the worker was given by
+        ``claim_next`` (``QueueEntry.claim_count``; see the module docstring).
+
         The new ``lease_expires_at`` is ``max(current, now + lease_seconds)``: a
         heartbeat never shortens a lease. Everything else stays unchanged.
-        Raises ``LeaseLostError`` unless the worker holds a valid lease (see the
-        module docstring; ``now`` is the trusted clock).
+        Raises ``LeaseLostError`` unless the worker holds a valid lease of that
+        generation (see the module docstring; ``now`` is the trusted clock).
         """
         check_entry_id(entry_id)
         check_worker_id(worker_id)
+        check_claim_count(claim_count)
         current, lease_end = self._instants(now)
         return await self._update_held(
             entry_id,
             worker_id,
+            claim_count,
             current,
             lease_expires_at=func.greatest(QueueEntryRow.lease_expires_at, lease_end),
         )
 
     async def release(
-        self, entry_id: int, worker_id: str, now: datetime | None = None
+        self,
+        entry_id: int,
+        worker_id: str,
+        claim_count: int,
+        now: datetime | None = None,
     ) -> QueueEntry:
         """Give an entry back so that another (or the same) worker can claim it.
 
         The entry becomes ``queued`` again with ``claimed_by``, ``claimed_at`` and
         ``lease_expires_at`` cleared. ``priority``, ``enqueued_at`` (its place in
-        the FIFO order) and ``claim_count`` are kept. Raises ``LeaseLostError``
-        unless the worker holds a valid lease.
+        the FIFO order) and ``claim_count`` are kept (so the next claim is a newer
+        generation and this ``claim_count`` is dead). ``claim_count`` is the claim
+        generation of the module docstring. Raises ``LeaseLostError`` unless the
+        worker holds a valid lease of that generation.
         """
         check_entry_id(entry_id)
         check_worker_id(worker_id)
+        check_claim_count(claim_count)
         current, _ = self._instants(now)
         return await self._update_held(
             entry_id,
             worker_id,
+            claim_count,
             current,
             status=QueueStatus.QUEUED,
             claimed_by=None,
@@ -328,20 +360,28 @@ class TaskQueue:
         )
 
     async def complete(
-        self, entry_id: int, worker_id: str, now: datetime | None = None
+        self,
+        entry_id: int,
+        worker_id: str,
+        claim_count: int,
+        now: datetime | None = None,
     ) -> QueueEntry:
         """Finish an entry: ``status = completed``, ``finished_at`` = now.
 
         ``lease_expires_at`` is cleared; ``claimed_by`` and ``claimed_at`` are
-        kept as history. A completed entry is never claimable again. Raises
-        ``LeaseLostError`` unless the worker holds a valid lease.
+        kept as history. A completed entry is never claimable again.
+        ``claim_count`` is the claim generation of the module docstring. Raises
+        ``LeaseLostError`` unless the worker holds a valid lease of that
+        generation.
         """
         check_entry_id(entry_id)
         check_worker_id(worker_id)
+        check_claim_count(claim_count)
         current, _ = self._instants(now)
         return await self._update_held(
             entry_id,
             worker_id,
+            claim_count,
             current,
             status=QueueStatus.COMPLETED,
             finished_at=current,
@@ -378,14 +418,16 @@ class TaskQueue:
         self,
         entry_id: int,
         worker_id: str,
+        claim_count: int,
         current: ColumnElement[datetime],
         **values: Any,
     ) -> QueueEntry:
-        """Apply ``values`` if the worker holds a valid lease.
+        """Apply ``values`` if the worker holds a valid lease of this generation.
 
         Raises ``LeaseLostError`` when the entry does not exist, is not claimed, is
-        claimed by another worker or its lease has expired (``lease_expires_at <=
-        current``).
+        claimed by another worker, has been claimed again since (``claim_count``
+        differs: a stale claim of the same worker id) or its lease has expired
+        (``lease_expires_at <= current``).
 
         The row is locked FIRST, in its own statement, and the lease is judged in the
         next one. An ``UPDATE`` judges its ``WHERE`` before it waits for a row lock,
@@ -403,6 +445,7 @@ class TaskQueue:
                 QueueEntryRow.id == entry_id,
                 QueueEntryRow.status == QueueStatus.CLAIMED,
                 QueueEntryRow.claimed_by == worker_id,
+                QueueEntryRow.claim_count == claim_count,
                 QueueEntryRow.lease_expires_at > current,
             )
             .values(**values)

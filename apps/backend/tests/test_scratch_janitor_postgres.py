@@ -6,17 +6,23 @@ Skipped unless ``PAW_TEST_DATABASE_URL`` is set.
 """
 
 import asyncio
+import time
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from unittest.mock import patch
 
+from sqlalchemy import text
+from sqlalchemy.engine import make_url
+
 from paw_backend.app import create_app
+from paw_backend.db import Database
 from paw_backend.research.scratch import (
     PurgeRun,
     ScratchJanitor,
     ScratchStore,
 )
 
+from .fake_postgres import FreezableProxy
 from .memory_support import TEST_DATABASE_URL
 from .scratch_support import T0, PostgresScratchTestCase, requires_postgres
 from .support import make_settings
@@ -260,3 +266,74 @@ class ApplicationTest(PostgresScratchTestCase):
             [record.getMessage() for record in logs.records],
             ["Scratch purge removed 1 expired item(s) in 1 batch(es)"],
         )
+
+
+@requires_postgres
+class StalledPurgeTest(PostgresScratchTestCase):
+    """A real server that stops answering in the middle of a purge transaction.
+
+    A ``FreezableProxy`` sits in front of the test database. The ``purge_probe``
+    seam freezes it after the batch was selected (and locked), then runs one more
+    statement, which is never answered: the janitor is inside its purge, with
+    its rows locked, exactly when the application shuts down.
+    """
+
+    async def stalled_purge(self, proxy: FreezableProxy) -> asyncio.Task:
+        """A running ``purge_expired`` that is stuck in a frozen statement."""
+        url = make_url(TEST_DATABASE_URL).set(host="127.0.0.1", port=proxy.port)
+        database = Database(make_settings(database_url=url.render_as_string(False)))
+        self.addAsyncCleanup(database.dispose)
+        stuck = asyncio.Event()
+
+        async def probe(session, chosen):
+            proxy.freeze()
+            stuck.set()
+            await session.execute(text("SELECT 1"))  # never answered
+
+        store = ScratchStore(database, clock=self.clock, purge_probe=probe)
+        purge = self.spawn(store.purge_expired())
+        await asyncio.wait_for(stuck.wait(), DEADLINE)
+        await asyncio.sleep(0.2)  # inside the statement
+        self.assertFalse(purge.done())
+        self.database = database
+        return purge
+
+    async def test_cancelling_the_purge_stops_it_at_once_without_a_server_cancel(self):
+        first = self.seed_item(expires_at=T0 - HOUR)
+        second = self.seed_item(expires_at=T0 - 2 * HOUR)
+        async with FreezableProxy(*self.upstream()) as proxy:
+            purge = await self.stalled_purge(proxy)
+
+            started = time.monotonic()
+            purge.cancel()
+            done, pending = await asyncio.wait({purge}, timeout=DEADLINE)
+
+            # psycopg's own server-side cancellation would take about ten
+            # seconds here: the cancel request goes through the frozen proxy too.
+            self.assertLess(time.monotonic() - started, 2.0)
+            self.assertEqual(pending, set())
+            self.assertTrue(purge.cancelled())
+            await self.database.dispose()
+            self.assertEqual(self.database._probes, set())
+            self.assertEqual(self.database._probe_connections, {})
+        # Nothing was deleted: the transaction did not commit.
+        self.assertEqual(self.item_ids(), {first, second})
+
+    async def test_disposing_the_database_stops_the_purge_too(self):
+        self.seed_item(expires_at=T0 - HOUR)
+        async with FreezableProxy(*self.upstream()) as proxy:
+            purge = await self.stalled_purge(proxy)
+
+            started = time.monotonic()
+            await self.database.dispose()
+            done, pending = await asyncio.wait({purge}, timeout=DEADLINE)
+
+            self.assertLess(time.monotonic() - started, 2.0)
+            self.assertEqual(pending, set())
+            # The purge ends with an error of the aborted connection, or, when it
+            # was aborted before it had a connection, as cancelled; never a result.
+            self.assertTrue(purge.cancelled() or purge.exception() is not None)
+
+    def upstream(self) -> tuple[str, int]:
+        url = make_url(TEST_DATABASE_URL)
+        return url.host or "127.0.0.1", url.port or 5432

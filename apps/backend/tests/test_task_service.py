@@ -3,9 +3,17 @@
 Skipped unless ``PAW_TEST_DATABASE_URL`` is set (see test_postgres_integration).
 """
 
+import contextlib
+import json
 import logging
+import sys
+import tracemalloc
 import unittest
 import uuid
+from collections import OrderedDict
+from datetime import datetime
+from decimal import Decimal
+from unittest import mock
 
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
@@ -31,6 +39,12 @@ from paw_backend.tasks import (
     WaitReason,
     WorktreeState,
 )
+from paw_backend.tasks import service as service_module
+from paw_backend.tasks.service import (
+    MAX_INPUT_BYTES,
+    MAX_INPUT_DEPTH,
+    MAX_INPUT_INTEGER_DIGITS,
+)
 
 from .task_support import PostgresTaskTestCase, requires_postgres
 from .test_task_domain import EXPECTED
@@ -38,6 +52,26 @@ from .test_task_domain import EXPECTED
 C = TaskCommand
 S = TaskState
 WORKTREE = WorktreeState("agent/task-1", "/srv/worktrees/task-1", "b" * 40)
+
+
+@contextlib.contextmanager
+def int_str_digits_limit(limit: int):
+    """Run with the interpreter's integer <-> text digit limit set (0 = none)."""
+    previous = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(limit)
+    try:
+        yield
+    finally:
+        sys.set_int_max_str_digits(previous)
+
+
+def encoder_must_not_run():
+    """Fail loudly if the input is encoded, which the check has to prevent."""
+    return mock.patch.object(
+        service_module.json,
+        "dumps",
+        side_effect=AssertionError("json.dumps was reached"),
+    )
 
 
 @requires_postgres
@@ -100,6 +134,504 @@ class CreateTaskTest(PostgresTaskTestCase):
     async def test_title_at_the_limit_is_accepted(self):
         task_id = await self.create_task(title="t" * 200)
         self.assertEqual((await self.service.restore(task_id)).title, "t" * 200)
+
+    async def assert_input_rejected(self, value, *, secret: str = "") -> None:
+        """``input`` is refused with the typed error and nothing is written."""
+        count = "SELECT count(*) FROM tasks WHERE project_id = :project_id"
+        before = await self.scalar(count, project_id=self.project_id)
+        with self.assertRaises(InvalidCommandArgumentError) as caught:
+            await self.create_task(input=value)
+        if secret:
+            self.assertNotIn(secret, str(caught.exception))
+        self.assertEqual(await self.scalar(count, project_id=self.project_id), before)
+
+    async def test_non_finite_numbers_in_input_are_rejected_before_the_database(
+        self,
+    ):
+        # json.dumps writes these as NaN / Infinity, which PostgreSQL JSONB
+        # refuses at flush time (a DataError), so they must be caught earlier.
+        cases = {
+            "nan": {"x": float("nan")},
+            "infinity": {"x": float("inf")},
+            "negative infinity": {"x": float("-inf")},
+            "in a list": {"x": [1, 2.5, float("nan")]},
+            "deeply nested": {"a": [{"b": [{"c": float("-inf")}]}]},
+        }
+        for name, value in cases.items():
+            with self.subTest(name):
+                await self.assert_input_rejected(value)
+
+    async def test_text_that_jsonb_cannot_hold_is_rejected_in_keys_and_values(self):
+        # NUL and unpaired surrogates fail at flush time too; an emoji written as
+        # two surrogate code points is not valid Unicode text either.
+        cases = {
+            "NUL in a value": {"x": "a\x00b"},
+            "NUL in a key": {"a\x00": 1},
+            "NUL nested": {"x": [{"y": "\x00"}]},
+            "lone surrogate": {"x": "\ud800"},
+            "surrogate in a key": {"\udfff": 1},
+            "surrogate pair as code points": {"x": chr(0xD83D) + chr(0xDE00)},
+        }
+        for name, value in cases.items():
+            with self.subTest(name):
+                await self.assert_input_rejected(value)
+
+    async def test_input_that_is_not_plain_json_is_rejected_without_coercion(self):
+        # json.dumps would silently turn these into JSON (keys into strings,
+        # tuples into arrays); the input must already be what it will be stored as.
+        cases = {
+            "integer key": {1: "a"},
+            "boolean key": {True: "a"},
+            "none key": {None: "a"},
+            "tuple key": {(1, 2): "a"},
+            "tuple value": {"x": (1, 2)},
+            "set": {"x": {1, 2}},
+            "bytes": {"x": b"abc"},
+            "decimal": {"x": Decimal("1.5")},
+            "datetime": {"x": datetime(2026, 1, 1)},
+            "arbitrary object": {"x": object()},
+            "dict subclass": OrderedDict(x=1),
+            "list at the top": [1, 2],
+            "text at the top": "abc",
+        }
+        for name, value in cases.items():
+            with self.subTest(name):
+                await self.assert_input_rejected(value)
+
+    async def test_finite_json_values_are_stored_and_restored_unchanged(self):
+        value = {
+            "prompt": '日本語 \U0001f600 \x01 tab\t quote" back\\slash',
+            "numbers": [0, -1, 10**30, 1.5, 0.1, 2.0, 1e-300],
+            "flags": [True, False, None],
+            "nested": {"a": {"b": [[], {}, [[{"c": "d"}]]]}},
+            "": "empty key",
+        }
+        task_id = await self.create_task(input=value)
+        restored = (await self.service.restore(task_id)).input
+        self.assertEqual(restored, value)
+        # Booleans stay booleans and integers stay integers.
+        self.assertIs(restored["flags"][0], True)
+        self.assertIsInstance(restored["numbers"][2], int)
+
+    async def test_input_nesting_is_limited_and_cycles_are_rejected(self):
+        def nested(levels: int) -> dict:
+            value: dict = {}
+            for _ in range(levels - 1):
+                value = {"a": value}
+            return value  # ``levels`` objects inside each other
+
+        at_limit = nested(MAX_INPUT_DEPTH)
+        task_id = await self.create_task(input=at_limit)
+        self.assertEqual((await self.service.restore(task_id)).input, at_limit)
+
+        cyclic_dict: dict = {}
+        cyclic_dict["self"] = cyclic_dict
+        cyclic_list: list = []
+        cyclic_list.append(cyclic_list)
+        cases = {
+            "one level too deep": nested(MAX_INPUT_DEPTH + 1),
+            "far too deep": nested(5000),
+            "lists count as levels": {"a": [[[[[[nested(MAX_INPUT_DEPTH)]]]]]]},
+            "cyclic dict": cyclic_dict,
+            "cyclic list": {"x": cyclic_list},
+        }
+        for name, value in cases.items():
+            with self.subTest(name):
+                await self.assert_input_rejected(value)
+
+    async def test_input_size_is_bounded_at_the_limit_and_by_element_count(self):
+        overhead = len(json.dumps({"b": ""}))
+        at_limit = {"b": "x" * (MAX_INPUT_BYTES - overhead)}
+        self.assertEqual(len(json.dumps(at_limit)), MAX_INPUT_BYTES)
+        task_id = await self.create_task(input=at_limit)
+        self.assertEqual((await self.service.restore(task_id)).input, at_limit)
+
+        secret = "SECRET-MARKER"
+        cases = {
+            "one byte over": {"b": "x" * (MAX_INPUT_BYTES - overhead + 1)},
+            "many small elements": {"a": [1] * MAX_INPUT_BYTES},
+            "many small keys": {str(n): 0 for n in range(MAX_INPUT_BYTES // 2)},
+            "escaped text counts as encoded": {"b": "é" * (MAX_INPUT_BYTES // 6)},
+            "one huge text": {"b": secret * MAX_INPUT_BYTES},
+        }
+        for name, value in cases.items():
+            with self.subTest(name):
+                await self.assert_input_rejected(value, secret=secret)
+
+    async def test_a_huge_shared_structure_is_rejected_before_it_is_encoded(self):
+        # 24 shallow levels of ``[x, x]`` hold about 10**8 values that share
+        # memory; encoding them would need gigabytes, so the check has to give up
+        # after a bounded amount of work and never reach the encoder.
+        value = [1] * 10
+        for _ in range(24):
+            value = [value, value]
+        with mock.patch.object(service_module.json, "dumps") as dumps:
+            await self.assert_input_rejected({"x": value})
+        dumps.assert_not_called()
+
+    async def test_a_repeated_large_integer_is_refused_before_it_is_encoded(self):
+        # One 4000-digit integer that is referenced 65000 times costs almost no
+        # memory, but the encoder writes its 4000 digits every time (about 260 MB).
+        # Each occurrence must be charged the length it will be encoded to.
+        big = 10**3999
+        cases = {
+            "one integer, repeated": {"x": [big] * 65000},
+            "negative": {"x": [-big] * 65000},
+            "the same integer as many values": {
+                "x": {str(n): big for n in range(1000)}
+            },
+            "shared by two nested levels": {"x": [[big] * 300] * 300},
+        }
+        for name, value in cases.items():
+            with self.subTest(name), encoder_must_not_run():
+                await self.assert_input_rejected(value)
+
+    async def test_every_number_is_charged_by_its_encoded_length(self):
+        # ``{"k...": items}`` is built so that the check's charge is exactly
+        # ``MAX_INPUT_BYTES`` (brackets, the key with its quotes, and the encoded
+        # length of every item, measured with json.dumps): that still reaches the
+        # encoder, which refuses it on the separators. One character more is
+        # refused before anything is encoded.
+        def charging(items: list, extra: int) -> dict:
+            spent = 2 + 2 + sum(len(json.dumps(item)) for item in items)
+            return {"k" * (MAX_INPUT_BYTES - spent - 2 + extra): items}
+
+        cases = {
+            "large integers": [10**3999, -(10**3999), 10**1234, -(10**99)] * 15,
+            "integers around powers of ten": [
+                *(0, 9, 10, 99, 100, 999, 1000, -9, -10, -99, -100),
+                *(10**18 - 1, 10**18, 2**63, 2**64, -(2**64)),
+            ]
+            * 100,
+            "booleans and null": [True, False, None] * 1000,
+            "floats": [0.0, 1.5, -2.5e-300, 1.7976931348623157e308, 5e-324, 1e16] * 500,
+        }
+        for name, items in cases.items():
+            at_limit, one_over = charging(items, 0), charging(items, 1)
+            with self.subTest(name):
+                with mock.patch.object(
+                    service_module.json, "dumps", wraps=json.dumps
+                ) as dumps:
+                    await self.assert_input_rejected(at_limit)
+                self.assertEqual(dumps.call_count, 1)
+                with encoder_must_not_run():
+                    await self.assert_input_rejected(one_over)
+
+    async def test_large_integers_within_the_limits_are_stored_and_restored(self):
+        with int_str_digits_limit(4300):
+            value = {
+                "many": [10**3999, -(10**3998)] * 30,
+                "at the interpreter's digit limit": [10**4299, -(10**4299)],
+            }
+            task_id = await self.create_task(input=value)
+            self.assertEqual((await self.service.restore(task_id)).input, value)
+
+    async def test_integers_beyond_the_digit_limit_are_refused_before_encoding(self):
+        # 4300 digits is the interpreter's default limit for turning an integer
+        # into text; the encoder would refuse more (a ValueError), so the check
+        # states it as the typed error before any encoding.
+        with int_str_digits_limit(4300):
+            cases = {
+                "one digit too many": {"x": 10**4300},
+                "negative": {"x": -(10**4300)},
+                "in a list in an object": {"x": [1, [{"y": 10**4300}]]},
+                "far more than PostgreSQL can hold": {"x": 2**1_000_000},
+            }
+            for name, value in cases.items():
+                with self.subTest(name), encoder_must_not_run():
+                    await self.assert_input_rejected(value)
+
+    async def test_the_interpreters_lower_digit_limit_is_the_limit(self):
+        with int_str_digits_limit(640):
+            value = {"x": [10**639, -(10**639)]}
+            task_id = await self.create_task(input=value)
+            self.assertEqual((await self.service.restore(task_id)).input, value)
+            with self.assertRaises(InvalidCommandArgumentError) as caught:
+                await self.create_task(input={"x": 10**640})
+            self.assertEqual(
+                str(caught.exception), "input integers must have at most 640 digits"
+            )
+
+    async def test_integers_are_limited_to_the_digits_postgresql_holds(self):
+        # With the interpreter's own limit lifted, PostgreSQL's ``numeric`` is
+        # what limits an integer: MAX_INPUT_INTEGER_DIGITS digits are stored and
+        # restored, one more is refused before it is encoded.
+        with int_str_digits_limit(0):
+            for name, number in {
+                "positive": 10 ** (MAX_INPUT_INTEGER_DIGITS - 1),
+                "negative": -(10 ** (MAX_INPUT_INTEGER_DIGITS - 1)),
+            }.items():
+                with self.subTest(name):
+                    task_id = await self.create_task(input={"x": number})
+                    restored = (await self.service.restore(task_id)).input
+                    self.assertEqual(restored, {"x": number})
+            for name, number in {
+                "positive": 10**MAX_INPUT_INTEGER_DIGITS,
+                "negative": -(10**MAX_INPUT_INTEGER_DIGITS),
+            }.items():
+                with self.subTest(f"one digit too many, {name}"):
+                    with self.assertRaises(InvalidCommandArgumentError) as caught:
+                        with encoder_must_not_run():
+                            await self.create_task(input={"x": number})
+                    self.assertEqual(
+                        str(caught.exception),
+                        f"input integers must have at most "
+                        f"{MAX_INPUT_INTEGER_DIGITS} digits",
+                    )
+
+    async def test_a_huge_integer_is_refused_without_converting_it_to_text(self):
+        # Turning 2**3_000_000 (903 thousand digits) into text would allocate at
+        # least 900 kB. The refusal must come from its bit length alone.
+        with int_str_digits_limit(0):
+            value = {"x": 2**3_000_000}
+            tracemalloc.start()
+            try:
+                tracemalloc.reset_peak()
+                with (
+                    self.assertRaises(InvalidCommandArgumentError),
+                    encoder_must_not_run(),
+                ):
+                    await self.create_task(input=value)
+                peak = tracemalloc.get_traced_memory()[1]
+            finally:
+                tracemalloc.stop()
+        self.assertLess(peak, 300_000)
+
+    async def test_postgresql_refuses_more_digits_than_the_limit_states(self):
+        # The constant MAX_INPUT_INTEGER_DIGITS is PostgreSQL's own limit for the
+        # digits of a ``numeric`` (which every JSONB number is).
+        sql = text("SELECT length(CAST(:document AS jsonb)::text)")
+        with int_str_digits_limit(0):
+            fits = '{"x": 1' + "0" * (MAX_INPUT_INTEGER_DIGITS - 1) + "}"
+            too_long = '{"x": 1' + "0" * MAX_INPUT_INTEGER_DIGITS + "}"
+            async with self.database.engine.connect() as connection:
+                stored = await connection.scalar(sql, {"document": fits})
+                self.assertEqual(stored, len(fits))
+                await connection.rollback()
+                with self.assertRaises(DBAPIError) as caught:
+                    await connection.execute(sql, {"document": too_long})
+                self.assertEqual(caught.exception.orig.sqlstate, "22003")
+
+
+@requires_postgres
+class UnstorableTextTest(PostgresTaskTestCase):
+    """Text that a PostgreSQL text column cannot hold is refused up front.
+
+    NUL fails as a ``DataError`` and a surrogate code point as a
+    ``UnicodeEncodeError`` when the row is flushed, which would surface as a
+    database or encoding error instead of the typed argument error.
+    """
+
+    MARKER = "SECRET-MARKER"
+    BAD = {
+        "NUL": MARKER + "\x00",
+        "lone surrogate": MARKER + chr(0xD800),
+        "surrogate pair as code points": MARKER + chr(0xD83D) + chr(0xDE00),
+    }
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        # One task per starting point the entry points below need.
+        self.idle = await self.task_in_state(S.RUNNING)
+        self.busy = await self.task_in_state(S.RUNNING)
+        self.step = await self.service.begin_step(self.busy, "build", attempt=1)
+        self.failed = await self.task_in_state(S.FAILED)
+
+    async def assert_refused(self, task_id, call) -> None:
+        """The typed error, no echo of the text, and nothing about the task changed."""
+        before = await self.service.restore(task_id)
+        with self.assertRaises(InvalidCommandArgumentError) as caught:
+            await call()
+        self.assertNotIn(self.MARKER, str(caught.exception))
+        self.assertEqual(await self.service.restore(task_id), before)
+
+    def entry_points(self, bad: str) -> dict:
+        service = self.service
+        return {
+            "begin_step name": (
+                self.idle,
+                lambda: service.begin_step(self.idle, bad, attempt=1),
+            ),
+            "begin_tool_invocation tool_name": (
+                self.busy,
+                lambda: service.begin_tool_invocation(
+                    self.busy, step_id=self.step.id, tool_name=bad
+                ),
+            ),
+            "add_log message": (
+                self.idle,
+                lambda: service.add_log(self.idle, bad, attempt=1),
+            ),
+            "add_log message cut off by the length limit": (
+                self.idle,
+                lambda: service.add_log(self.idle, "a" * 9000 + bad, attempt=1),
+            ),
+            "execute reason": (
+                self.idle,
+                lambda: service.execute(
+                    self.idle, C.CANCEL, actor=self.user, reason=bad
+                ),
+            ),
+            "execute agent": (
+                self.failed,
+                lambda: service.execute(
+                    self.failed, C.RETRY, actor=self.user, agent=bad
+                ),
+            ),
+            "execute model": (
+                self.failed,
+                lambda: service.execute(
+                    self.failed, C.RESTART, actor=self.user, model=bad
+                ),
+            ),
+            "update_attempt branch": (
+                self.idle,
+                lambda: service.update_attempt(
+                    self.idle, attempt=1, worktree=WorktreeState(branch=bad)
+                ),
+            ),
+            "update_attempt path": (
+                self.idle,
+                lambda: service.update_attempt(
+                    self.idle, attempt=1, worktree=WorktreeState(path=bad)
+                ),
+            ),
+            "update_attempt head_commit": (
+                self.idle,
+                lambda: service.update_attempt(
+                    self.idle, attempt=1, worktree=WorktreeState(head_commit=bad)
+                ),
+            ),
+            "update_attempt pull request url": (
+                self.idle,
+                lambda: service.update_attempt(
+                    self.idle,
+                    attempt=1,
+                    pull_request=PullRequestInfo(1, bad, PullRequestState.OPEN),
+                ),
+            ),
+        }
+
+    async def test_every_text_entry_point_refuses_nul_and_surrogates(self):
+        checked = 0
+        for label, bad in self.BAD.items():
+            for name, (task_id, call) in self.entry_points(bad).items():
+                with self.subTest(f"{name}: {label}"):
+                    checked += 1
+                    await self.assert_refused(task_id, call)
+        self.assertEqual(checked, 11 * len(self.BAD))
+
+    async def test_create_task_refuses_nul_and_surrogates_in_every_text_field(self):
+        count = "SELECT count(*) FROM tasks WHERE project_id = :project_id"
+        for label, bad in self.BAD.items():
+            for field in ("title", "starting_commit", "agent", "model"):
+                with self.subTest(f"{field}: {label}"):
+                    before = await self.scalar(count, project_id=self.project_id)
+                    with self.assertRaises(InvalidCommandArgumentError) as caught:
+                        await self.create_task(**{field: bad})
+                    self.assertNotIn(self.MARKER, str(caught.exception))
+                    self.assertEqual(
+                        await self.scalar(count, project_id=self.project_id), before
+                    )
+
+    async def test_other_unusual_text_is_still_stored_unchanged(self):
+        text = '日本語 \U0001f600 \x01 tab\t newline\n quote" back\\slash é'
+        task_id = await self.create_task(
+            title=text, agent=text, model=text, starting_commit=text
+        )
+        await self.service.execute(task_id, C.START, actor=self.system)
+        await self.service.add_log(task_id, text, attempt=1)
+        await self.service.update_attempt(
+            task_id,
+            attempt=1,
+            worktree=WorktreeState(text, text, text),
+            pull_request=PullRequestInfo(1, text, PullRequestState.OPEN),
+        )
+        snapshot = await self.service.restore(task_id)
+        self.assertEqual(
+            (snapshot.title, snapshot.agent, snapshot.model, snapshot.starting_commit),
+            (text, text, text, text),
+        )
+        self.assertEqual([log.message for log in snapshot.recent_logs], [text])
+        self.assertEqual(snapshot.attempt.worktree, WorktreeState(text, text, text))
+        self.assertEqual(snapshot.attempt.pull_request.url, text)
+
+
+@requires_postgres
+class AttemptStateLimitsTest(PostgresTaskTestCase):
+    """``update_attempt`` refuses what its columns cannot hold, with a typed error."""
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        self.task_id = await self.task_in_state(S.RUNNING)
+
+    async def assert_refused(self, **groups) -> None:
+        before = await self.service.restore(self.task_id)
+        with self.assertRaises(InvalidCommandArgumentError):
+            await self.service.update_attempt(self.task_id, attempt=1, **groups)
+        self.assertEqual(await self.service.restore(self.task_id), before)
+
+    async def test_worktree_and_pull_request_text_is_accepted_at_the_column_limit(
+        self,
+    ):
+        worktree = WorktreeState("b" * 255, "p" * 1024, "c" * 64)
+        pull_request = PullRequestInfo(12, "u" * 2048, PullRequestState.OPEN)
+        await self.service.update_attempt(
+            self.task_id, attempt=1, worktree=worktree, pull_request=pull_request
+        )
+        attempt = (await self.service.restore(self.task_id)).attempt
+        self.assertEqual(attempt.worktree, worktree)
+        self.assertEqual(attempt.pull_request, pull_request)
+
+    async def test_limits_count_characters_not_bytes(self):
+        worktree = WorktreeState("日" * 255, "é" * 1024, "😀" * 64)
+        await self.service.update_attempt(self.task_id, attempt=1, worktree=worktree)
+        self.assertEqual(
+            (await self.service.restore(self.task_id)).attempt.worktree, worktree
+        )
+
+    async def test_one_character_over_the_column_limit_is_refused(self):
+        secret = "SECRET-MARKER"
+        cases = {
+            "branch": {"worktree": WorktreeState(branch="b" * 256)},
+            "path": {"worktree": WorktreeState(path="p" * 1025)},
+            "head_commit": {"worktree": WorktreeState(head_commit="c" * 65)},
+            "url": {
+                "pull_request": PullRequestInfo(12, "u" * 2049, PullRequestState.OPEN)
+            },
+            "long text that carries a marker": {
+                "worktree": WorktreeState(branch=secret * 100)
+            },
+        }
+        for name, groups in cases.items():
+            with self.subTest(name):
+                before = await self.service.restore(self.task_id)
+                with self.assertRaises(InvalidCommandArgumentError) as caught:
+                    await self.service.update_attempt(self.task_id, attempt=1, **groups)
+                self.assertNotIn(secret, str(caught.exception))
+                self.assertEqual(await self.service.restore(self.task_id), before)
+
+    async def test_pull_request_number_must_fit_the_integer_column(self):
+        for number in (1, 2**31 - 1):
+            with self.subTest(f"accepted {number}"):
+                pull_request = PullRequestInfo(
+                    number, "https://example.test/pr", PullRequestState.OPEN
+                )
+                await self.service.update_attempt(
+                    self.task_id, attempt=1, pull_request=pull_request
+                )
+                attempt = (await self.service.restore(self.task_id)).attempt
+                self.assertEqual(attempt.pull_request, pull_request)
+
+        # A number is a positive integer of at most 2**31 - 1: neither a bool
+        # (which is an int in Python) nor text nor a float is accepted.
+        for number in (0, -1, 2**31, 2**63, True, "12", 12.0):
+            with self.subTest(f"refused {number!r}"):
+                await self.assert_refused(
+                    pull_request=PullRequestInfo(
+                        number, "https://example.test/other", PullRequestState.OPEN
+                    )
+                )
 
 
 @requires_postgres

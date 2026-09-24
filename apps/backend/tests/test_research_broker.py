@@ -36,6 +36,7 @@ from .research_support import (
     NOW,
     SECRET,
     SHORT_TIMEOUT,
+    Tripwire,
     broker_of,
     docs,
     document,
@@ -43,6 +44,8 @@ from .research_support import (
     github,
     guarded,
     hit,
+    hostile_containers,
+    hostile_failures,
     malformed_documents,
     malformed_hits,
     other_tasks,
@@ -111,6 +114,31 @@ class ClassifyFailureTest(unittest.TestCase):
     def test_only_the_enum_is_ever_returned(self):
         for exc in (RuntimeError(), TimeoutError(), ProviderFailure(Code.NOT_FOUND)):
             self.assertIsInstance(classify_failure(exc), ResearchErrorCode)
+
+    def test_an_object_that_claims_to_be_a_code_is_not_a_code(self):
+        class Impostor:
+            value = "rate_limited"
+
+            @property
+            def __class__(self):
+                return ResearchErrorCode
+
+        self.assertIsInstance(Impostor(), ResearchErrorCode)  # what isinstance says
+        with self.assertRaises(TypeError):
+            ProviderFailure(Impostor())
+        failure = ProviderFailure(Code.RATE_LIMITED)
+        failure.code = Impostor()
+        self.assertIs(classify_failure(failure), Code.INTERNAL_ERROR)
+
+    def test_hooks_of_a_failure_subclass_are_never_run(self):
+        # The code is read from ``ProviderFailure``'s own slot, once: a property,
+        # ``__getattribute__`` or ``__class__`` of a subclass can neither raise
+        # nor lie. A failure whose slot is unset or forged is a generic failure.
+        calls = Tripwire()
+        for label, (failure, expected) in hostile_failures(calls).items():
+            with self.subTest(failure=label), calls.armed():
+                self.assertIs(classify_failure(failure), expected)
+        self.assertEqual(calls, [])
 
 
 class ConstructionTest(unittest.IsolatedAsyncioTestCase):
@@ -594,6 +622,31 @@ class GatherFailureIsolationTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result.errors[0].code, Code.TIMEOUT)
 
+    async def test_a_failure_with_hostile_hooks_costs_only_its_own_provider(self):
+        calls = Tripwire()
+        for label, (failure, expected) in hostile_failures(calls).items():
+            with self.subTest(failure=label):
+                with calls.armed():
+                    result = await guarded(
+                        broker_of(
+                            web(search_error=failure),
+                            docs(hits=[hit("https://d.example/1")]),
+                        ).gather(request())
+                    )
+                self.assertEqual(urls(result), ["https://d.example/1"])
+                self.assertEqual(
+                    result.errors, (error("web-a", ProviderKind.WEB, expected),)
+                )
+        self.assertEqual(calls, [])
+
+    async def test_a_hostile_failure_is_logged_by_its_real_type_name(self):
+        calls = Tripwire()
+        failure, _ = hostile_failures(calls)["a metaclass whose __name__ raises"]
+        with self.assertLogs(LOGGER, level="WARNING") as logs, calls.armed():
+            await guarded(broker_of(web(search_error=failure)).gather(request()))
+        self.assertIn("exception_type=RaisingMetaclass", "\n".join(logs.output))
+        self.assertEqual(calls, [])
+
     async def test_an_exception_that_cannot_be_printed_is_handled(self):
         result = await guarded(
             broker_of(web(search_error=EvilError()), docs(hits=[hit()])).gather(
@@ -675,6 +728,27 @@ class GatherFailureIsolationTest(unittest.IsolatedAsyncioTestCase):
                     result.errors,
                     (error("web-a", ProviderKind.WEB, Code.INVALID_RESPONSE),),
                 )
+
+    async def test_a_response_container_with_hostile_hooks_is_invalid(self):
+        # Only an exact list or tuple is a response: a subclass (or an object
+        # that claims to be one) could run the adapter's code inside the broker.
+        calls = Tripwire()
+        for count in (2, 5):  # within the limit, and over it
+            hits = [hit(f"https://a.example/{n}") for n in range(count)]
+            for label, response in hostile_containers(hits, calls).items():
+                with self.subTest(response=label, hits=count):
+                    broken = web("web-a", raw_search_response=response)
+                    healthy = docs("docs-a", hits=[hit("https://d.example/1")])
+                    with calls.armed():
+                        result = await guarded(
+                            broker_of(broken, healthy).gather(request(max_results=2))
+                        )
+                    self.assertEqual(urls(result), ["https://d.example/1"])
+                    self.assertEqual(
+                        result.errors,
+                        (error("web-a", ProviderKind.WEB, Code.INVALID_RESPONSE),),
+                    )
+        self.assertEqual(calls, [])
 
     async def test_returning_more_hits_than_the_limit_is_invalid(self):
         hits = [hit(f"https://a.example/{n}") for n in range(3)]

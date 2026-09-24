@@ -45,8 +45,10 @@ class LeaseLostError(QueueingError):
     """The worker does not hold a valid lease on the queue entry.
 
     Raised when the entry does not exist, is not claimed, is claimed by another
-    worker, was cancelled, or the worker's lease has expired. The cases are not
-    distinguished, so that the error reveals nothing about other workers.
+    worker, has been claimed again since the caller's claim (another
+    ``claim_count``, also by the same worker id), was cancelled, or the worker's
+    lease has expired. The cases are not distinguished, so that the error reveals
+    nothing about other workers.
     """
 
     code = "queue_lease_lost"

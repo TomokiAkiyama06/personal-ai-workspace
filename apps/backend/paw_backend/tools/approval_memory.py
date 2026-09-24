@@ -31,12 +31,23 @@ from paw_backend.tools.approval_types import (
     diagnose_revoke,
     is_expired,
 )
+from paw_backend.tools.task_state import TaskActivity, TaskActivityProvider
 
 _OPEN = (ApprovalStatus.PENDING, ApprovalStatus.APPROVED)
 
 
 class InMemoryApprovalStore:
-    def __init__(self, *, max_records: int = 10_000) -> None:
+    """``task_activity`` is what ``consume(..., require_active_task=True)`` asks
+    about the task. Without one the flag cannot be honoured (this double has no
+    tasks): the broker's own check before the use is then the only one."""
+
+    def __init__(
+        self,
+        *,
+        max_records: int = 10_000,
+        task_activity: TaskActivityProvider | None = None,
+    ) -> None:
+        self._task_activity = task_activity
         self._records: dict[uuid.UUID, ApprovalRecord] = {}
         self._history: list[ApprovalHistoryEntry] = []
         self._lock = asyncio.Lock()
@@ -171,7 +182,12 @@ class InMemoryApprovalStore:
             return DecideResult(DecideOutcome.DECIDED, record)
 
     async def consume(
-        self, approval_id: uuid.UUID, binding: ApprovalBinding, *, now: datetime
+        self,
+        approval_id: uuid.UUID,
+        binding: ApprovalBinding,
+        *,
+        now: datetime,
+        require_active_task: bool = False,
     ) -> ConsumeOutcome:
         async with self._lock:
             record = self._records.get(approval_id)
@@ -182,6 +198,16 @@ class InMemoryApprovalStore:
                 self._expire(record, now)
             if outcome is not ConsumeOutcome.CONSUMED:
                 return outcome
+            if require_active_task and self._task_activity is not None:
+                # Under the store's lock, so no other use interleaves. (A double
+                # has no task store to lock, which PostgreSQL does.)
+                activity = await self._task_activity.check(binding.task_id)
+                if activity is not TaskActivity.ACTIVE:
+                    return (
+                        ConsumeOutcome.TASK_NOT_ACTIVE
+                        if activity is TaskActivity.ENDED
+                        else ConsumeOutcome.TASK_UNKNOWN
+                    )
             self._records[approval_id] = replace(
                 record, status=ApprovalStatus.CONSUMED, consumed_at=now
             )

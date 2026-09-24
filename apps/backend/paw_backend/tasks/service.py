@@ -28,6 +28,8 @@ worker gets ``StaleAttemptError`` and cannot touch the new attempt.
 
 import json
 import logging
+import math
+import sys
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime
@@ -84,6 +86,11 @@ MAX_REASON_LENGTH = 500
 MAX_NAME_LENGTH = 100
 MAX_LOG_MESSAGE_LENGTH = 8000
 MAX_INPUT_BYTES = 256 * 1024
+# Objects and lists inside each other, counting the top-level object as the first.
+MAX_INPUT_DEPTH = 32
+# PostgreSQL stores every JSONB number as ``numeric``, which holds at most this many
+# digits before the decimal point ("value overflows numeric format" beyond it).
+MAX_INPUT_INTEGER_DIGITS = 131072
 MAX_RESTORE_LOGS = 1000
 MAX_RESTORE_TOOL_INVOCATIONS = 100
 _TRUNCATED = "...[truncated]"
@@ -119,10 +126,158 @@ _FINISHED_TOOL_STATUSES = frozenset(
 )
 
 
+# The largest value of the ``INTEGER`` column ``task_attempts.pr_number``.
+MAX_PULL_REQUEST_NUMBER = 2**31 - 1
+_ATTEMPT_COLUMNS = TaskAttemptRow.__table__.c
+
+_INPUT_TOO_LARGE = f"input must be a JSON object of at most {MAX_INPUT_BYTES} bytes"
+_INPUT_NOT_JSON = (
+    "input must contain only JSON values "
+    "(objects with text keys, lists, text, numbers, booleans and null)"
+)
+
+
+class _JsonInputCheck:
+    """Walk a caller-supplied ``input`` once, before it is encoded or stored.
+
+    Only what ``json.loads`` produces is accepted (exactly ``dict`` with ``str``
+    keys, ``list``, ``str``, ``int``, ``float``, ``bool`` and ``None``), so that
+    the stored value is the value the caller passed and not a coercion of it
+    (integer keys, tuples). PostgreSQL JSONB additionally refuses NaN / Infinity,
+    NUL and surrogate characters, which the encoder would otherwise let through
+    to fail at flush time as a database error.
+
+    The work is bounded by ``MAX_INPUT_DEPTH`` (which also stops cycles) and by
+    a budget of ``MAX_INPUT_BYTES``. Every occurrence of a value is charged what
+    the encoder will write for it: numbers, booleans and ``null`` exactly (an
+    integer by its decimal length, so one integer that is referenced many times
+    costs what its digits cost each time), text by its length (its encoding is at
+    most 12 times longer), and objects and lists by their brackets. The
+    separators are not charged, so the charge never exceeds the encoded length
+    and an over-budget value is refused without being encoded, whatever memory it
+    shares (``[x, x]`` nested deeply). The final length check on the encoded
+    value stays authoritative. Integers have at most ``MAX_INPUT_INTEGER_DIGITS``
+    digits (what PostgreSQL ``numeric`` holds), or fewer if the interpreter
+    limits the digits it turns into text (``sys.get_int_max_str_digits``); a
+    larger one is refused from its bit length, never converted to text. Errors
+    state the rule that was broken and never the offending value.
+    """
+
+    def __init__(self) -> None:
+        self._budget = MAX_INPUT_BYTES
+        interpreter_limit = sys.get_int_max_str_digits()  # 0 means no limit
+        self._digit_limit = (
+            min(MAX_INPUT_INTEGER_DIGITS, interpreter_limit)
+            if interpreter_limit
+            else MAX_INPUT_INTEGER_DIGITS
+        )
+        # An integer with more bits than this has more digits than the limit
+        # (log2(10) is 3.3219..., so this is never below the bits of a number
+        # that fits).
+        self._digit_limit_bits = self._digit_limit * 3322 // 1000 + 1
+
+    def check_object(self, value: object) -> None:
+        if type(value) is not dict:
+            raise InvalidCommandArgumentError("input must be a JSON object")
+        self._check(value, 1)
+
+    def _spend(self, cost: int) -> None:
+        self._budget -= cost
+        if self._budget < 0:
+            raise InvalidCommandArgumentError(_INPUT_TOO_LARGE)
+
+    def _check(self, value: object, depth: int) -> None:
+        kind = type(value)
+        if kind is dict or kind is list:
+            if depth > MAX_INPUT_DEPTH:
+                raise InvalidCommandArgumentError(
+                    f"input must be nested at most {MAX_INPUT_DEPTH} levels"
+                )
+            self._spend(2)  # the brackets
+            if kind is dict:
+                for key, item in value.items():
+                    self._check_text(key)
+                    self._check(item, depth + 1)
+            else:
+                for item in value:
+                    self._check(item, depth + 1)
+        elif kind is str:
+            self._check_text(value)
+        elif kind is int:
+            self._spend(self._integer_length(value))
+        elif kind is float:
+            if not math.isfinite(value):
+                raise InvalidCommandArgumentError("input numbers must be finite")
+            self._spend(len(repr(value)))  # what json.dumps writes for a float
+        elif kind is bool:
+            self._spend(4 if value else 5)  # true / false
+        elif value is None:
+            self._spend(4)  # null
+        else:
+            raise InvalidCommandArgumentError(_INPUT_NOT_JSON)
+
+    def _integer_length(self, value: int) -> int:
+        """The characters ``json.dumps`` writes for ``value``, sign included.
+
+        Only a number that already passed the bit-length test is turned into
+        text, so the conversion is bounded by the digit limit.
+        """
+        if value.bit_length() > self._digit_limit_bits:
+            raise self._too_many_digits()
+        try:
+            length = len(str(value))
+        except ValueError:
+            # Only a few digits over the interpreter's own limit get this far.
+            raise self._too_many_digits() from None
+        if length - (value < 0) > self._digit_limit:
+            raise self._too_many_digits()
+        return length
+
+    def _too_many_digits(self) -> InvalidCommandArgumentError:
+        return InvalidCommandArgumentError(
+            f"input integers must have at most {self._digit_limit} digits"
+        )
+
+    def _check_text(self, value: object) -> None:
+        if type(value) is not str:
+            raise InvalidCommandArgumentError(_INPUT_NOT_JSON)
+        self._spend(len(value) + 2)  # the quotes
+        _storable("input text", value)
+
+
+def _storable(name: str, value: str) -> str:
+    """Refuse text that a PostgreSQL text column or JSONB string cannot hold.
+
+    A NUL character fails at flush time as a ``DataError`` and a surrogate code
+    point (not valid Unicode) as a ``UnicodeEncodeError``; either would leak
+    instead of the typed error. The text is not echoed.
+    """
+    if "\x00" in value:
+        raise InvalidCommandArgumentError(f"{name} must not contain NUL characters")
+    if not value.isascii():
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            raise InvalidCommandArgumentError(
+                f"{name} must be valid Unicode text (no surrogate characters)"
+            ) from None
+    return value
+
+
+def _column_text(name: str, value: str | None, column: str) -> None:
+    """Check a value of ``task_attempts.<column>`` (length from the model)."""
+    if value is None:
+        return
+    limit = _ATTEMPT_COLUMNS[column].type.length
+    if len(value) > limit:
+        raise InvalidCommandArgumentError(f"{name} must be at most {limit} characters")
+    _storable(name, value)
+
+
 def _text(name: str, value: str, limit: int) -> str:
     if not value.strip() or len(value) > limit:
         raise InvalidCommandArgumentError(f"{name} must be 1 to {limit} characters")
-    return value
+    return _storable(name, value)
 
 
 def _optional_text(name: str, value: str | None, limit: int) -> str | None:
@@ -206,7 +361,14 @@ class TaskService:
         agent: str | None = None,
         model: str | None = None,
     ) -> TaskEvent:
-        """Create a queued task (attempt 1) and its ``create`` event."""
+        """Create a queued task (attempt 1) and its ``create`` event.
+
+        ``input`` must be a plain JSON object that PostgreSQL JSONB can hold
+        (finite numbers, integers of at most ``MAX_INPUT_INTEGER_DIGITS`` digits,
+        no NUL or surrogate characters, at most ``MAX_INPUT_DEPTH`` levels and
+        ``MAX_INPUT_BYTES`` bytes); otherwise
+        ``InvalidCommandArgumentError`` is raised before anything is written.
+        """
         title = _text("title", title, MAX_TITLE_LENGTH)
         input = self._checked_input(input)
         now = utcnow()
@@ -501,8 +663,10 @@ class TaskService:
 
         Raises ``StaleAttemptError`` unless ``attempt`` is the current attempt.
         Callers must not pass secrets: redaction is not done here. Messages over
-        ``MAX_LOG_MESSAGE_LENGTH`` characters are truncated.
+        ``MAX_LOG_MESSAGE_LENGTH`` characters are truncated; text PostgreSQL cannot
+        store (NUL, surrogate characters) is refused, in the cut-off part too.
         """
+        _storable("message", message)  # all of it, not only what is kept
         if len(message) > MAX_LOG_MESSAGE_LENGTH:
             message = message[: MAX_LOG_MESSAGE_LENGTH - len(_TRUNCATED)] + _TRUNCATED
         async with self._database.session() as session, session.begin():
@@ -538,8 +702,25 @@ class TaskService:
         Each group that is given replaces the stored one; groups left as ``None``
         are unchanged. Allowed in any task state (a pull request can be merged
         after the task completed) but only for the current attempt
-        (``StaleAttemptError`` otherwise).
+        (``StaleAttemptError`` otherwise). Text longer than its column or that
+        PostgreSQL cannot store (NUL, surrogate characters), and a pull request
+        number that is not an integer from 1 to ``MAX_PULL_REQUEST_NUMBER``, raise
+        ``InvalidCommandArgumentError``.
         """
+        if worktree is not None:
+            _column_text("worktree branch", worktree.branch, "branch")
+            _column_text("worktree path", worktree.path, "worktree_path")
+            _column_text("worktree head_commit", worktree.head_commit, "head_commit")
+        if pull_request is not None:
+            number = pull_request.number
+            # ``bool`` is an ``int`` in Python; a float or text would be coerced by
+            # the driver.
+            if type(number) is not int or not 1 <= number <= MAX_PULL_REQUEST_NUMBER:
+                raise InvalidCommandArgumentError(
+                    f"pull request number must be an integer from 1 to "
+                    f"{MAX_PULL_REQUEST_NUMBER}"
+                )
+            _column_text("pull request url", pull_request.url, "pr_url")
         async with self._database.session() as session, session.begin():
             task = await self._require_task(session, task_id, lock=True)
             self._require_current_attempt(task, attempt)
@@ -699,15 +880,19 @@ class TaskService:
 
     @staticmethod
     def _checked_input(value: dict[str, Any] | None) -> dict[str, Any]:
+        """Return ``value`` if PostgreSQL JSONB can hold it exactly, else raise.
+
+        The value is walked first (``_JsonInputCheck``: plain JSON types only,
+        finite numbers, text without NUL or surrogates, bounded depth and work),
+        so nothing that JSONB would refuse at flush time reaches the database
+        and the encoder only sees a value that fits the byte budget (its digit
+        limit for integers included, so it cannot raise ``ValueError`` either).
+        """
         value = {} if value is None else value
-        try:
-            encoded = json.dumps(value)
-        except (TypeError, ValueError):
-            raise InvalidCommandArgumentError("input must be a JSON object") from None
-        if not isinstance(value, dict) or len(encoded) > MAX_INPUT_BYTES:
-            raise InvalidCommandArgumentError(
-                f"input must be a JSON object of at most {MAX_INPUT_BYTES} bytes"
-            )
+        _JsonInputCheck().check_object(value)
+        encoded = json.dumps(value, allow_nan=False)
+        if len(encoded) > MAX_INPUT_BYTES:
+            raise InvalidCommandArgumentError(_INPUT_TOO_LARGE)
         return value
 
     @staticmethod

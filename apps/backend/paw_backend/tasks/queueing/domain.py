@@ -73,7 +73,11 @@ class QueueEntry:
     the status is CLAIMED. (After ``complete`` or ``cancel`` of a claimed entry
     ``claimed_by`` and ``claimed_at`` keep their last values as history and
     ``lease_expires_at`` is ``None``.) ``claim_count`` is the number of times
-    the entry has been claimed, including reclaims after an expired lease.
+    the entry has been claimed, including reclaims after an expired lease and
+    claims after a release. It only ever grows, so it is the claim generation
+    (the fencing token) of a lease: the worker that received this snapshot from
+    ``claim_next`` passes ``claim_count`` to ``heartbeat`` / ``release`` /
+    ``complete``, which refuse any other generation even from the same worker id.
     """
 
     id: int

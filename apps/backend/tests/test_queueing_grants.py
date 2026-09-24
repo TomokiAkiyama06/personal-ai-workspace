@@ -24,6 +24,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
 
 from paw_backend.db import Database
+from paw_backend.tasks import TaskCommand, TaskState
 from paw_backend.tasks.queueing import BudgetKind, BudgetPreset, Priority
 
 from . import (
@@ -285,7 +286,7 @@ class AppRolePrivilegesTest(AsAppRole, PostgresQueueingTestCase):
         await self.budget.set_preset(task_id, BudgetPreset.STANDARD)
         await self.budget.record(task_id, BudgetKind.TOKENS, 5)
         await self.loop_detector.record_failure(
-            task_id, error_class="E", step="s", message="m"
+            task_id, attempt=1, error_class="E", step="s", message="m"
         )
         before = await self.snapshot()
 
@@ -327,18 +328,26 @@ class AppRolePrivilegesTest(AsAppRole, PostgresQueueingTestCase):
         self.assertEqual((row["priority"], row["status"]), ("low", "claimed"))
 
     async def test_the_app_role_deletes_only_the_failure_window(self):
-        (task_id,) = await self.make_tasks(1)
+        task_id = await self.task_in_state(TaskState.FAILED)
         for _ in range(12):
             await self.loop_detector.record_failure(
-                task_id, error_class="E", step="s", message="m"
+                task_id, attempt=1, error_class="E", step="s", message="m"
             )
         self.assertEqual(
             await self.scalar("SELECT count(*) FROM loop_failure_signatures"), 10
         )
-        self.assertEqual(await self.loop_detector.clear(task_id), 10)
-        self.assertEqual(
-            await self.scalar("SELECT count(*) FROM loop_failure_signatures"), 0
+        # The cleanup after a Restart removes the earlier attempt and keeps the
+        # rows of the new one (both statements read tasks.attempt as the app role).
+        await self.service.execute(task_id, TaskCommand.RESTART, actor=self.user)
+        await self.loop_detector.record_failure(
+            task_id, attempt=2, error_class="E", step="s", message="m"
         )
+        # The window bound is per task: the new row pushed the oldest old one out.
+        self.assertEqual(await self.loop_detector.clear_previous_attempts(task_id), 9)
+        self.assertEqual(
+            await self.scalar("SELECT count(*) FROM loop_failure_signatures"), 1
+        )
+        self.assertEqual(len(await self.loop_detector.history(task_id)), 1)
 
     async def test_the_app_role_can_run_the_whole_lifecycle_through_a_second_process(
         self,
@@ -349,12 +358,12 @@ class AppRolePrivilegesTest(AsAppRole, PostgresQueueingTestCase):
         await budget.set_preset(task_id, BudgetPreset.LONG)
         await queue.enqueue(task_id, now=T0, priority=Priority.HIGH)
         claimed = await self.new_queue().claim_next("w1", at(1))
-        await self.new_queue().heartbeat(claimed.id, "w1", at(2))
+        await self.new_queue().heartbeat(claimed.id, "w1", claimed.claim_count, at(2))
         await budget.start_runtime(task_id)
         await budget.record(task_id, BudgetKind.STEPS, 3)
         self.clock.set(30)
         usage = await budget.stop_runtime(task_id)
-        await self.new_queue().complete(claimed.id, "w1", at(31))
+        await self.new_queue().complete(claimed.id, "w1", claimed.claim_count, at(31))
         self.assertEqual(usage.consumed, 30)
         row = await self.entry_row(claimed.id)
         self.assertEqual(row["status"], "completed")

@@ -463,7 +463,11 @@ class ResearchProvider(Protocol):
     def kind(self) -> ProviderKind: ...
 
     async def search(self, query: str, *, limit: int) -> Sequence[ProviderHit]:
-        """Return at most ``limit`` hits, best first, as a ``list`` or ``tuple``."""
+        """Return at most ``limit`` hits, best first, as a ``list`` or ``tuple``.
+
+        The type must be exactly ``list`` or ``tuple``: an instance of a subclass
+        is an invalid response (its hooks would run adapter code in the broker).
+        """
         ...
 
     async def fetch(self, locator: str) -> ProviderDocument:

@@ -179,6 +179,7 @@ personal-ai-workspace/
 │  │     ├─ teardown_child.py
 │  │     ├─ test_config.py
 │  │     ├─ test_database.py
+│  │     ├─ test_database_run_abortable.py
 │  │     ├─ test_errors.py
 │  │     ├─ test_events.py
 │  │     ├─ test_health.py
@@ -226,6 +227,7 @@ personal-ai-workspace/
 │  │     ├─ test_scratch_janitor_lifespan.py
 │  │     ├─ test_scratch_janitor_postgres.py
 │  │     ├─ test_scratch_janitor_settings.py
+│  │     ├─ test_scratch_janitor_stall.py
 │  │     ├─ test_scratch_migration.py
 │  │     ├─ test_scratch_purge.py
 │  │     ├─ test_scratch_records.py
@@ -311,6 +313,7 @@ personal-ai-workspace/
 │     ├─ 0007-task-queue-budget-and-loop-policy.md
 │     ├─ 0011-research-provenance-model.md
 │     ├─ 0012-research-provider-adapter-policy.md
+│     ├─ 0013-research-scratch-task-relation.md
 │     └─ README.md
 └─ evaluator/
    └─ README.md

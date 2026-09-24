@@ -41,12 +41,20 @@ class ProviderFailure(Exception):
     code's value. An adapter that catches its own transport errors and wants
     the Main Agent to see ``RATE_LIMITED`` or ``UNAVAILABLE`` raises this and
     discards the original text.
+
+    ``code`` is a slot of THIS class. The broker reads it through
+    ``ProviderFailure.code`` and never through the instance, so that a subclass's
+    property, ``__getattribute__`` or ``__class__`` (adapter code) cannot raise or
+    lie while a failure is classified. The constructor stores the code the same
+    way, so a subclass cannot divert it either.
     """
 
+    __slots__ = ("code",)
+
     def __init__(self, code: ResearchErrorCode) -> None:
-        if not isinstance(code, ResearchErrorCode):
+        if type(code) is not ResearchErrorCode:
             raise TypeError("code must be a ResearchErrorCode")
-        self.code = code
+        ProviderFailure.code.__set__(self, code)
         super().__init__(code.value)
 
 
