@@ -47,7 +47,8 @@ Order of every call
    type of ``actor``; nothing is authorized or read yet.
 2. The actor is authorized. A refusal is a :class:`SharedMemoryPermissionError`
    (or :class:`AutomaticPromotionRefusedError`); the database is not touched.
-3. The database is used.
+3. The database is used. A change appends its completion row to ``audit_events``
+   as the last write of its transaction (see below).
 
 The current version and deletion
 --------------------------------
@@ -70,9 +71,28 @@ version has another status, is "not found" for this service. Older versions are
   memory cannot be edited (:class:`SharedMemoryStateError`).
 * ``delete_memory``: the current version's status becomes ``deprecated``. Nothing
   is erased. ``restore_memory`` sets it back to ``active``. Who deleted or
-  restored, and when, is in the Authorizer's audit event only: its ``action``
-  (``shared_memory.delete`` or ``shared_memory.restore``) says which, its
-  ``actor_id`` who, and it is written before the status changes.
+  restored, and when, is only in the audit trail (the memory row keeps neither):
+  the Authorizer's row (the *attempt*: its ``action`` is ``shared_memory.delete``
+  or ``shared_memory.restore``, written before the status changes, so it does not
+  say that the change happened) and the completion row below.
+
+The audit trail of a change (``audit.py``, Decision 0009 section 13)
+--------------------------------------------------------------------
+Every method that changes Shared Memory (the six of the operation capabilities)
+appends one completion row to ``audit_events`` **in the transaction of the
+change**: the same ``action`` as the attempt, ``decision`` ``allow``, ``reason``
+``completed``, the acting Owner or Admin (``actor_id``, ``actor_role``), the
+resource, the transition time (``occurred_at``: the service clock, the reading
+that stamps a new version) and the ``correlation_id`` of the attempt (the service
+creates one per call and hands it to the Authorizer). So the completion row
+exists if and only if the change committed; a rollback, a failed statement or a
+failed commit takes it back, and a completion row that cannot be written takes
+the change back (fail-closed). A call that fails after the attempt (missing
+memory, wrong state, version conflict, lock timeout, failed update) leaves the
+attempt without a completion. A call that changes nothing (an edit with no
+differences) writes none. There is no failure record: it would have to be written
+after the rollback, so its absence would prove nothing. The attempt keeps its
+rules: written first, and an audit failure refuses the call.
 
 Shared Memory candidates
 ------------------------
@@ -121,7 +141,7 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import psycopg.errors
 from sqlalchemy import Select, func, insert, select, text, update
@@ -151,6 +171,7 @@ from paw_backend.memory.models import (
     SourceType,
 )
 from paw_backend.memory.shared import limits
+from paw_backend.memory.shared.audit import completion_event, record_completion
 from paw_backend.memory.shared.errors import (
     AutomaticPromotionRefusedError,
     CandidateLimitError,
@@ -399,15 +420,29 @@ class SharedMemoryService:
         _check_type("actor", actor, Principal | AgentActor)  # type: ignore[arg-type]
 
     async def _decide(
-        self, actor: Actor, capability: Capability, resource: Resource
+        self,
+        actor: Actor,
+        capability: Capability,
+        resource: Resource,
+        correlation_id: UUID | None = None,
     ) -> Decision | None:
-        """Ask the Authorizer; its answer if it is a ``Decision``, else ``None``."""
+        """Ask the Authorizer; its answer if it is a ``Decision``, else ``None``.
+
+        ``correlation_id`` is stored on the audit row of the decision, so that the
+        completion row of the change (``audit.py``) can be tied to it.
+        """
         if isinstance(actor, AgentActor):
             decision = await self._authorizer.authorize_agent_action(
-                actor.delegator_id, actor.grant, capability, resource
+                actor.delegator_id,
+                actor.grant,
+                capability,
+                resource,
+                correlation_id=correlation_id,
             )
         else:
-            decision = await self._authorizer.authorize(actor, capability, resource)
+            decision = await self._authorizer.authorize(
+                actor, capability, resource, correlation_id=correlation_id
+            )
         return decision if isinstance(decision, Decision) else None
 
     async def _authorize(
@@ -421,20 +456,26 @@ class SharedMemoryService:
         return actor.delegator_id if isinstance(actor, AgentActor) else actor.user_id
 
     async def _authorize_manage(
-        self, actor: Actor, capability: Capability, resource: Resource
-    ) -> UUID:
+        self,
+        actor: Actor,
+        capability: Capability,
+        resource: Resource,
+        correlation_id: UUID | None = None,
+    ) -> Principal:
         """Authorize a managing ``capability``; only a human Owner or Admin passes.
 
-        ``capability`` is the operation's own (there is no default): the
-        Authorizer stores it as the ``action`` of its audit row, which is how the
-        history tells a deletion from a restoration.
+        Returns that Owner or Admin. ``capability`` is the operation's own (there
+        is no default): the Authorizer stores it as the ``action`` of its audit
+        row, which is how the history tells a deletion from a restoration.
+        ``correlation_id`` (a change passes a new one) is stored on that row and
+        on the completion row of the change.
 
         The Authorizer decides first (and audits). An agent, and the ``system``
         role, are refused with :class:`AutomaticPromotionRefusedError` whatever
         the decision was; any other refusal is a permission error. Even an
         allowed decision is refused unless the principal is an Owner or Admin.
         """
-        decision = await self._decide(actor, capability, resource)
+        decision = await self._decide(actor, capability, resource, correlation_id)
         reason = (
             "invalid_decision"
             if decision is None
@@ -448,7 +489,7 @@ class SharedMemoryService:
             raise SharedMemoryPermissionError(reason)
         if actor.system_role not in MANAGER_ROLES:
             raise SharedMemoryPermissionError(reason)
-        return actor.user_id
+        return actor
 
     @asynccontextmanager
     async def _transaction(
@@ -560,6 +601,28 @@ class SharedMemoryService:
         if result.rowcount != 1:
             raise SharedMemoryBusyError
 
+    @staticmethod
+    async def _complete(
+        session: AsyncSession,
+        manager: Principal,
+        capability: Capability,
+        resource_kind: str,
+        resource_id: UUID,
+        correlation_id: UUID,
+        now: datetime,
+    ) -> None:
+        """Append the completion row of the change, in the transaction of the change.
+
+        The last write of every change: if it fails, the change is rolled back
+        with it (see ``audit.py``).
+        """
+        await record_completion(
+            session,
+            completion_event(
+                manager, capability, resource_kind, resource_id, correlation_id, now
+            ),
+        )
+
     # -- read ------------------------------------------------------------------
 
     async def _page(
@@ -657,12 +720,22 @@ class SharedMemoryService:
         """Create a shared memory (version 1). Owner or Admin only."""
         self._check_actor(actor)
         _check_type("draft", draft, SharedMemoryDraft)
-        user_id = await self._authorize_manage(
-            actor, Capability.SHARED_MEMORY_CREATE, Resource(kind=RESOURCE_MEMORY)
+        capability, correlation_id = Capability.SHARED_MEMORY_CREATE, uuid4()
+        manager = await self._authorize_manage(
+            actor, capability, Resource(kind=RESOURCE_MEMORY), correlation_id
         )
         now = self._now()
         async with self._transaction() as session:
-            memory_id = await self._insert_memory(session, draft, user_id, now)
+            memory_id = await self._insert_memory(session, draft, manager.user_id, now)
+            await self._complete(
+                session,
+                manager,
+                capability,
+                RESOURCE_MEMORY,
+                memory_id,
+                correlation_id,
+                now,
+            )
             return await self._read_current(session, memory_id, include_deleted=True)
 
     async def edit_memory(
@@ -683,10 +756,12 @@ class SharedMemoryService:
             "expected_version", expected_version, low=1, high=limits.MAX_VERSION_NUMBER
         )
         _check_type("changes", changes, SharedMemoryChanges)
-        user_id = await self._authorize_manage(
+        capability, correlation_id = Capability.SHARED_MEMORY_EDIT, uuid4()
+        manager = await self._authorize_manage(
             actor,
-            Capability.SHARED_MEMORY_EDIT,
+            capability,
             Resource(kind=RESOURCE_MEMORY, id=memory_uuid),
+            correlation_id,
         )
         now = self._now()
         async with self._transaction(memory_lock_key(memory_uuid)) as session:
@@ -711,7 +786,7 @@ class SharedMemoryService:
                             memory_uuid,
                             current.version_number + 1,
                             plan.draft,
-                            user_id,
+                            manager.user_id,
                             now,
                         )
                     )
@@ -726,6 +801,15 @@ class SharedMemoryService:
                     reason=", ".join(plan.changed_fields),
                     created_at=now,
                 )
+            )
+            await self._complete(
+                session,
+                manager,
+                capability,
+                RESOURCE_MEMORY,
+                memory_uuid,
+                correlation_id,
+                now,
             )
             return await self._read_current(session, memory_uuid, include_deleted=True)
 
@@ -758,13 +842,19 @@ class SharedMemoryService:
     ) -> SharedMemory:
         self._check_actor(actor)
         memory_uuid = validate_uuid("memory_id", memory_id)
-        await self._authorize_manage(
-            actor,
+        capability = (
             Capability.SHARED_MEMORY_DELETE
             if delete
-            else Capability.SHARED_MEMORY_RESTORE,
-            Resource(kind=RESOURCE_MEMORY, id=memory_uuid),
+            else Capability.SHARED_MEMORY_RESTORE
         )
+        correlation_id = uuid4()
+        manager = await self._authorize_manage(
+            actor,
+            capability,
+            Resource(kind=RESOURCE_MEMORY, id=memory_uuid),
+            correlation_id,
+        )
+        now = self._now()
         async with self._transaction(memory_lock_key(memory_uuid)) as session:
             current = await self._read_current(
                 session, memory_uuid, include_deleted=True
@@ -776,6 +866,15 @@ class SharedMemoryService:
                 check_restorable(current)
                 old, new = MemoryStatus.DEPRECATED, MemoryStatus.ACTIVE
             await self._set_status(session, current.version_id, old, new)
+            await self._complete(
+                session,
+                manager,
+                capability,
+                RESOURCE_MEMORY,
+                memory_uuid,
+                correlation_id,
+                now,
+            )
             return await self._read_current(session, memory_uuid, include_deleted=True)
 
     # -- candidates ------------------------------------------------------------
@@ -911,11 +1010,14 @@ class SharedMemoryService:
         note = validate_optional_text(
             "reason", reason, max_chars=limits.MAX_REASON_CHARS
         )
-        user_id = await self._authorize_manage(
+        capability, correlation_id = Capability.SHARED_MEMORY_CANDIDATE_APPROVE, uuid4()
+        manager = await self._authorize_manage(
             actor,
-            Capability.SHARED_MEMORY_CANDIDATE_APPROVE,
+            capability,
             Resource(kind=RESOURCE_CANDIDATE, id=candidate_uuid),
+            correlation_id,
         )
+        user_id = manager.user_id
         now = self._now()
         async with self._transaction() as session:
             candidate = await self._lock_candidate(session, candidate_uuid)
@@ -945,6 +1047,15 @@ class SharedMemoryService:
             await self._decide_row(
                 session, candidate_uuid, new_state, user_id, now, note, memory_id
             )
+            await self._complete(
+                session,
+                manager,
+                capability,
+                RESOURCE_CANDIDATE,
+                candidate_uuid,
+                correlation_id,
+                now,
+            )
             memory = await self._read_current(session, memory_id, include_deleted=True)
             return CandidateDecision(
                 candidate=await self._reload_candidate(session, candidate_uuid),
@@ -960,10 +1071,12 @@ class SharedMemoryService:
         note = validate_optional_text(
             "reason", reason, max_chars=limits.MAX_REASON_CHARS
         )
-        user_id = await self._authorize_manage(
+        capability, correlation_id = Capability.SHARED_MEMORY_CANDIDATE_REJECT, uuid4()
+        manager = await self._authorize_manage(
             actor,
-            Capability.SHARED_MEMORY_CANDIDATE_REJECT,
+            capability,
             Resource(kind=RESOURCE_CANDIDATE, id=candidate_uuid),
+            correlation_id,
         )
         now = self._now()
         async with self._transaction() as session:
@@ -972,7 +1085,16 @@ class SharedMemoryService:
             if new_state is not CandidateState.REJECTED:
                 raise RulesContractError("next_candidate_state")
             await self._decide_row(
-                session, candidate_uuid, new_state, user_id, now, note, None
+                session, candidate_uuid, new_state, manager.user_id, now, note, None
+            )
+            await self._complete(
+                session,
+                manager,
+                capability,
+                RESOURCE_CANDIDATE,
+                candidate_uuid,
+                correlation_id,
+                now,
             )
             return CandidateDecision(
                 candidate=await self._reload_candidate(session, candidate_uuid),

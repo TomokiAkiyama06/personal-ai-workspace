@@ -85,6 +85,7 @@ personal-ai-workspace/
 │  │  │  ├─ memory/
 │  │  │  │  └─ shared/
 │  │  │  │     ├─ __init__.py
+│  │  │  │     ├─ audit.py
 │  │  │  │     ├─ errors.py
 │  │  │  │     ├─ lifecycle.py
 │  │  │  │     ├─ limits.py
@@ -237,6 +238,7 @@ personal-ai-workspace/
 │  │     ├─ test_server.py
 │  │     ├─ test_shared_memory_audit_actions.py
 │  │     ├─ test_shared_memory_candidates.py
+│  │     ├─ test_shared_memory_completion.py
 │  │     ├─ test_shared_memory_contract.py
 │  │     ├─ test_shared_memory_effective_view.py
 │  │     ├─ test_shared_memory_grants.py

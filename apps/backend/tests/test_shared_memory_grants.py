@@ -34,6 +34,9 @@ from . import (
     test_shared_memory_candidates as candidates,
 )
 from . import (
+    test_shared_memory_completion as completion,
+)
+from . import (
     test_shared_memory_effective_view as effective_view,
 )
 from . import (
@@ -73,6 +76,9 @@ EXPECTED = {
     ),
     "memory_relations": ({"SELECT", "INSERT"}, set()),
     "memory_sources": ({"SELECT", "INSERT"}, {"source_deleted_at"}),
+    # The audit rows (revision 0025): the attempt of the Authorizer and, in the
+    # transaction of each change, its completion. Append and read, nothing else.
+    "audit_events": ({"SELECT", "INSERT"}, set()),
 }
 ALL_PRIVILEGES = (
     "SELECT",
@@ -250,6 +256,33 @@ class AnAuditFailureBlocksTheOperationAsAppRole(
     pass
 
 
+# The completion row of a change is one more INSERT into ``audit_events`` by the
+# same role, in the transaction of the change: it needs no privilege beyond the
+# ones revision 0025 grants.
+class EverySuccessfulChangeIsCompletedAsAppRole(
+    AsAppRole, completion.EverySuccessfulChangeIsCompletedTest
+):
+    pass
+
+
+class AFailedChangeIsNeverCompletedAsAppRole(
+    AsAppRole, completion.AFailedChangeIsNeverCompletedTest
+):
+    pass
+
+
+class ACompletionThatCannotBeWrittenAsAppRole(
+    AsAppRole, completion.ACompletionThatCannotBeWrittenTakesTheChangeBackTest
+):
+    pass
+
+
+class TheAttemptKeepsItsRulesAsAppRole(
+    AsAppRole, completion.TheAttemptKeepsItsRulesTest
+):
+    pass
+
+
 @requires_postgres
 class AppRolePrivilegesTest(AsyncPostgresSharedTestCase):
     async def asyncSetUp(self):
@@ -313,6 +346,37 @@ class AppRolePrivilegesTest(AsyncPostgresSharedTestCase):
                     )
                 }
                 self.assertEqual(updatable, update_columns)
+
+    async def test_the_app_role_cannot_rewrite_or_erase_the_audit_trail(self):
+        # The completion rows live in the append-only table: the role that
+        # writes them cannot change or remove them (nor can it drop the guards).
+        actor = uuid.uuid4()
+        with self.engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO audit_events (id, correlation_id, occurred_at,"
+                    " actor_id, action, resource_kind, decision, reason)"
+                    " VALUES (gen_random_uuid(), gen_random_uuid(), now(), :actor,"
+                    " 'shared_memory.delete', 'shared_memory', 'allow', 'completed')"
+                ),
+                {"actor": actor},
+            )
+        for sql in (
+            "UPDATE audit_events SET actor_id = NULL",
+            "UPDATE audit_events SET reason = 'granted_by_system_role'",
+            "DELETE FROM audit_events",
+            "TRUNCATE audit_events",
+            "DROP TRIGGER tr_audit_events_reject_update_delete ON audit_events",
+            "ALTER TABLE audit_events DISABLE TRIGGER ALL",
+        ):
+            with self.subTest(sql=sql):
+                await self.refused(self.app, sql)
+        self.assertEqual(
+            self.owner_scalar(
+                "SELECT count(*) FROM audit_events WHERE actor_id = :a", a=actor
+            ),
+            1,
+        )
 
     async def test_a_role_without_grants_reaches_no_candidate(self):
         self.seed_candidate()

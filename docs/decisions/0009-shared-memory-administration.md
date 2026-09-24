@@ -66,7 +66,8 @@
 ### 7. 削除は現在の Version の `deprecated`、復元は `active` に戻す
 
 1. 削除は、現在の Version（番号が最大）の `status` を `active` から `deprecated` にする。何も消さない。復元は `deprecated` から `active` に戻す。
-2. 削除・復元では新しい Version を作らない。誰がいつ削除・復元したかは、Authorizer の Audit Event にだけ残り（`action` が `shared_memory.delete` / `shared_memory.restore`。12 を参照）、`memory_versions` には残らない。
+2. 削除・復元では新しい Version を作らない。誰がいつ削除・復元したかは、Audit の行にだけ残り、`memory_versions` には残らない。
+   行は 2 本ある。Authorizer の試みの行（`action` が `shared_memory.delete` / `shared_memory.restore`。変更の前に書かれる。12 を参照）と、変更が Commit されたことを示す完了の行（同じ Transaction で書く。13 を参照）。
 3. 代替案は、削除・復元ごとに新しい Version を作り、`actor_user_id` と `change_reason` を Memory 側に残す方法。履歴は詳しくなるが、Version が増え、内容の同じ Version が並ぶ。
 4. PAW-040 は `memories` に DELETE 権限を与えているが、この Service は使わない。物理削除の経路（User 削除、法的な消去など）は別 Issue で決める。
 
@@ -121,7 +122,7 @@
    `shared_memory.manage` は、削除済み Memory と Candidate の閲覧（`include_deleted`、`list_candidates`、`get_candidate`）に残す。何も変えない読み取りで、`resource_kind` と `resource_id` の有無で区別できるため。
 3. 選んだ理由。次の 3 つの保証を、新しい仕組みなしに保てる。
    - 既定は拒否: 新しい Capability は `CAPABILITIES` の表（`delegable` の明示が必須。書かないと起動時に失敗する）と Owner / Admin の表にだけある。ほかの Role は持たない。
-   - Audit の行は変更が見える前に書かれる: 認可（と Audit）は Database の Transaction の前に終わる。
+   - Audit の行は変更が見える前に書かれる: 認可（と Audit）は Database の Transaction の前に終わる。この行は変更の**試み**で、変更が起きたことは示さない（13）。
    - Audit を書けなければ許可を拒否に変える: Audit Mode `REQUIRED` の既存の規則。
    拒否された試みも、試みた操作の `action` で残る。
 4. 代替案。
@@ -131,6 +132,43 @@
    - Capability が 6 つ増える。Policy を差し替えて `shared_memory.manage` だけを Grant していた Role は、変更の操作ができなくなる（拒否の方向。既定の Policy では Owner / Admin が全部持つ）。
    - 削除・復元の理由は残らない（Audit は自由な文を持たない）。
    - 閲覧（`manage`）まで分けるか、6 つより粗い分け方にするかは、**人間が決める**。
+
+### 13. 変更の完了を、変更と同じ Transaction で Audit に残す
+
+1. 問題。Authorizer の `allow` の行（試み）は、変更の前に書かれる（12）。変更が対象の欠如、状態の違い、版の競合、Lock の待ち切れ、更新の失敗で終わっても、同じ行が残り、成功した変更と区別できない。
+   行には遷移の時刻もない（実行者は `actor_id` にあるが、変更が起きたかが分からない）。削除・復元は `status` だけを変えるので、Memory の行にも実行者と時刻は残らない（7）。
+2. 提案。変更する 6 つの操作（12 の表）は、変更と**同じ Database の Transaction の中**（最後の書き込み）で、`audit_events` へ完了の行を 1 本追加する。
+
+   | 列 | 完了の行の値 |
+   | --- | --- |
+   | `action` | 試みと同じ Capability の値 |
+   | `decision`、`reason` | `allow`、`completed`（`allow` / `deny` の CHECK があるため。`reason` が試みの行と分ける） |
+   | `actor_id`、`actor_role` | 操作した Owner / Admin（人間。Agent と `system` は変更に進まない） |
+   | `resource_kind`、`resource_id` | 変えたもの。`create_memory` は作った Memory の ID。承認・却下は Candidate の ID |
+   | `occurred_at` | Service の時計の値（新しい Version の `created_at` と同じ読み。遷移の時刻） |
+   | `correlation_id` | 試みの行と同じ。Service が呼び出しごとに作り、Authorizer に渡す |
+
+   何も変えなかった呼び出し（内容が同じ編集）には完了の行を書かない。
+   結果: **完了の行がある ⇔ 変更が Commit された**。Rollback、失敗した Statement、失敗した Commit は行も戻し、完了の行を書けなければ変更も戻る（fail-closed）。
+   失敗した呼び出しは、`correlation_id` が同じ完了の行がない `allow` の行（完了のない試み）として見つかる。試みの規則（既定は拒否、変更の前に書く、書けなければ拒否）は変えない。
+3. 選んだ理由。
+   - 原子的: 変更と記録が別れる隙間がない。Commit 済みの変更の記録だけが失敗して「記録のない変更」が残ることがない。
+   - 新しい仕組みがない: 新しい Table、列、権限、Migration がない。Application の Role は `audit_events` の INSERT / SELECT をすでに持ち（PAW-025）、UPDATE / DELETE / TRUNCATE は Trigger と権限が拒否したままである。
+     Trigger で追記専用にした Audit は、Memory の行の列より強く守られる（12 の 4）。PAW-040 が `memory_versions` に許す UPDATE は `status` などの列だけで、実行者と時刻の列を足すには PAW-040 の Table と権限を変える必要がある。
+   - 実行者と時刻を、Memory の履歴として 1 か所で読める（`resource_id` と `reason = 'completed'`）。
+4. 代替案。
+   - Transaction の後に `AuditSink` へ完了（または失敗）の行を書く: Commit 済みの変更に対して書き込みが失敗しうる（Log だけになり、実行者の分からない変更が残る）。Service に Sink を持たせる必要もある。失敗の行は Rollback の後に Transaction の外で書くので、行がないことが何も証明しない。
+   - 失敗の行を書く: 上と同じ理由で採らない。失敗は「完了のない試み」から読む。
+   - `memory_versions` に実行者と時刻を持たせる、削除・復元ごとに Version を作る: 12 の 4 と同じ理由で採らない。
+   - 完了専用の Table: Table と権限が増え、Audit が 2 か所に分かれる。
+5. 限界と帰結。
+   - 完了の行は Authorizer の `AuditSink` を通らず、Service が `audit_events` に直接書く（Sink は別の Transaction で書くため）。Sink を差し替えた配備では、試みと完了が別の場所に分かれる。現在の Sink は `PostgresAuditSink` だけである。
+   - 完了の行も `decision = 'allow'` である。`action` と `decision` だけで集計すると、1 回の操作が 2 行になる。集計は `reason` で分ける。
+   - 失敗そのものの行はない。実行中の試みと、Process が落ちた試みも、完了がないので区別できない。
+   - 1 回の変更で Audit の行が 1 本増える。完了の行の書き込みが失敗したときは、変更も失敗する（Database のエラーがそのまま伝わる）。
+   - `occurred_at` は Service の時計の読み（Lock を待つ前に読む）で、`recorded_at`（Database が付ける。Transaction の開始時刻）ではない。
+   - Application の Role は `audit_events` に INSERT できるので、Application 自体が偽の行を書けることは、他の Audit の行と同じである（PAW-025 の限界）。
+   - 完了の行の値と書き方（`reason = 'completed'`、Service が直接書く）を変える場合は、新しい Decision から `Supersedes` する。
 
 ## 選定理由
 
@@ -148,6 +186,7 @@
 ## 影響
 
 - `authz/capabilities.py` と `authz/policy.py` に Capability を 6 つ加える（12）。認可の実装（PAW-025）は別の PR にあるため、この変更は加算だけにしてある。
+- 変更ごとに `audit_events` へ完了の行を 1 本、変更と同じ Transaction で書く（13）。Table と権限は増えない。
 - Migration `0046`（`shared_memory_candidates`）。Application の Role には `SELECT`、`INSERT`、決定の 5 列の `UPDATE` だけを与える。
 - HTTP の Endpoint はこの Issue では作らない。API の Issue が `SharedMemoryService` を呼ぶ。
 - 承認されたら、この Decision の Status と Approval を更新する。値や規則を変える場合は、新しい Decision から `Supersedes` する。
