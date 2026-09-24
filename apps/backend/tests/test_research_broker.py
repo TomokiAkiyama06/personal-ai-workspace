@@ -43,6 +43,8 @@ from .research_support import (
     github,
     guarded,
     hit,
+    malformed_documents,
+    malformed_hits,
     other_tasks,
     registry_of,
     web,
@@ -176,6 +178,90 @@ class UnconvertibleTimestampTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [(e.provider_id, e.code) for e in result.errors],
             [("web-a", ResearchErrorCode.INVALID_RESPONSE)],
+        )
+
+
+class MalformedTypedResponseTest(unittest.IsolatedAsyncioTestCase):
+    """A typed hit or document built around its constructor is invalid, not a crash.
+
+    ``isinstance`` succeeds for an object whose slots were never set or whose
+    values have the wrong type or size; one such response must neither raise out
+    of ``gather`` / ``fetch`` nor cost the other providers their answers.
+    """
+
+    async def test_gather_isolates_every_malformed_hit(self):
+        for label, bad in malformed_hits().items():
+            with self.subTest(malformed=label):
+                first = hit("https://example.com/first-of-the-bad-provider")
+                provider = web("web-bad", raw_search_response=[first, bad])
+                good = docs("docs-ok", hits=[hit("https://example.com/ok")])
+
+                with self.assertLogs(LOGGER, level="WARNING") as logs:
+                    result = await guarded(broker_of(provider, good).gather(request()))
+
+                self.assertEqual(len(logs.records), 1)
+                self.assertEqual(
+                    [(e.provider_id, e.code) for e in result.errors],
+                    [("web-bad", Code.INVALID_RESPONSE)],
+                )
+                self.assertEqual(
+                    urls(result), ["https://example.com/ok"], msg="all or nothing"
+                )
+                self.assertEqual(result.providers_queried, 2)
+
+    async def test_fetch_reports_every_malformed_document(self):
+        for label, bad in malformed_documents().items():
+            with self.subTest(malformed=label):
+                provider = web(raw_fetch_response=bad)
+
+                with self.assertLogs(LOGGER, level="WARNING") as logs:
+                    result = await guarded(broker_of(provider).fetch(source_of()))
+
+                self.assertEqual(len(logs.records), 1)
+                self.assertEqual(result.items, ())
+                self.assertEqual(
+                    result.errors,
+                    (error("web-a", ProviderKind.WEB, Code.INVALID_RESPONSE),),
+                )
+                self.assertEqual(result.providers_queried, 1)
+
+    async def test_the_log_has_the_type_of_the_failure_and_not_the_content(self):
+        bad = hit()
+        object.__setattr__(bad, "title", SECRET * 200)  # far over the limit
+        doc = document()
+        object.__setattr__(doc, "text", SECRET)
+        object.__setattr__(doc, "private_source", SECRET)
+        provider = web(raw_search_response=[bad], raw_fetch_response=doc)
+
+        with self.assertLogs(LOGGER, level="WARNING") as logs:
+            gathered = await guarded(broker_of(provider).gather(request()))
+            fetched = await guarded(broker_of(provider).fetch(source_of()))
+
+        for result in (gathered, fetched):
+            self.assertEqual([e.code for e in result.errors], [Code.INVALID_RESPONSE])
+            self.assertNotIn(SECRET, json.dumps(result.to_dict()))
+        self.assertEqual(len(logs.records), 2)
+        for line in logs.output:
+            self.assertIn("code=invalid_response", line)
+            self.assertIn("exception_type=InvalidProviderResponseError", line)
+            self.assertNotIn(SECRET, line)
+
+    async def test_a_valid_object_of_the_same_kind_is_still_accepted(self):
+        # The malformed table is built from these very objects.
+        provider = web(
+            hits=[hit("https://example.com/a")],
+            documents={"https://example.com/a": document()},
+        )
+        broker = broker_of(provider)
+
+        gathered = await guarded(broker.gather(request()))
+        fetched = await guarded(broker.fetch(source_of()))
+
+        self.assertEqual(
+            (gathered.errors, urls(gathered)), ((), ["https://example.com/a"])
+        )
+        self.assertEqual(
+            (fetched.errors, urls(fetched)), ((), ["https://example.com/a"])
         )
 
 
