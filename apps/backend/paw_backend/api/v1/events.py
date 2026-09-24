@@ -25,9 +25,16 @@ from starlette.websockets import WebSocketDisconnect, WebSocketDisconnected
 from paw_backend.api.deps import (
     get_event_bus,
     require_allowed_origin,
-    require_event_capacity,
+    reserve_event_slot,
 )
-from paw_backend.events import Event, EventBus, EventBusFull, EventType, Subscription
+from paw_backend.events import (
+    Event,
+    EventBus,
+    EventBusFull,
+    EventType,
+    Reservation,
+    Subscription,
+)
 
 router = APIRouter(prefix="/events", tags=["events"])
 
@@ -42,21 +49,18 @@ def _sse(event: Event) -> ServerSentEvent:
     "/stream",
     response_class=EventSourceResponse,
     summary="Server-Sent Events stream (system events only)",
-    # The capacity check runs before the response starts, so an over-cap
-    # client gets a regular 503 error body instead of a broken stream.
-    dependencies=[Depends(require_event_capacity)],
 )
 async def stream_events(
-    bus: Annotated[EventBus, Depends(get_event_bus)],
+    # Reserved before the response starts, so an over-cap client gets a regular
+    # 503 error body; released by the dependency however the request ends.
+    reservation: Annotated[Reservation, Depends(reserve_event_slot)],
 ) -> AsyncIterable[ServerSentEvent]:
     # TODO(PAW-022): require an authenticated session (see module docstring).
     # No replay: `Last-Event-ID` is ignored because events are not persisted.
-    # `subscribe()` still enforces the cap if another client took the last
-    # slot after the dependency ran; that client's stream then just ends.
-    with bus.subscribe() as subscription:
-        yield _sse(Event(type=EventType.SYSTEM_CONNECTED))
-        while True:
-            yield _sse(await subscription.get())
+    subscription = reservation.attach()
+    yield _sse(Event(type=EventType.SYSTEM_CONNECTED))
+    while True:
+        yield _sse(await subscription.get())
 
 
 async def _forward_events(websocket: WebSocket, subscription: Subscription) -> None:
@@ -103,6 +107,8 @@ async def events_websocket(
     # (see module docstring). The Origin check already ran as a dependency.
     await websocket.accept()
     try:
+        # Reserving and attaching is one synchronous step, so unlike SSE there
+        # is no window between the capacity check and the registration.
         with bus.subscribe() as subscription:
             await _serve_websocket(websocket, subscription)
     except EventBusFull:

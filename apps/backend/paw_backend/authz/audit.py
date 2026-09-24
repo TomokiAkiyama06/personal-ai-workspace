@@ -51,6 +51,9 @@ class AuditEvent(BaseModel):
     resource_id: uuid.UUID | None = None
     project_id: uuid.UUID | None = None
     repo_id: uuid.UUID | None = None
+    # How the repository's ACL was resolved: "inherit" or "override" (a repository
+    # resource only). The permissions themselves are not stored.
+    repo_acl: Literal["inherit", "override"] | None = None
     decision: Literal["allow", "deny"]
     reason: str = Field(max_length=64)
     # For a change of a user's system role: the role before and after (enum
@@ -96,6 +99,13 @@ def build_event(
         resource_id=target.id,
         project_id=target.project_id,
         repo_id=target.repo_id,
+        repo_acl=(
+            None
+            if target.repo_acl is None
+            else "inherit"
+            if target.repo_acl.inherits
+            else "override"
+        ),
         decision="allow" if decision.allowed else "deny",
         reason=decision.reason.value,
         old_role=old_role.value if isinstance(old_role, SystemRole) else None,
@@ -146,6 +156,7 @@ class PostgresAuditSink:
             "resource_id": event.resource_id,
             "project_id": event.project_id,
             "repo_id": event.repo_id,
+            "repo_acl": event.repo_acl,
             "decision": event.decision,
             "reason": event.reason,
             "old_role": event.old_role,

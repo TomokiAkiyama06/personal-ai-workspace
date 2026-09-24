@@ -9,6 +9,8 @@ GitHub Issue作成後も `PAW-xxx` を安定IDとして残し、Issue番号と�
 ## 運用ルール
 
 - 実装開始順は **Benchmark / Evaluator Harness → Model選定 → Workspace本体** を基本とする。
+  ただし [Decision 0002](decisions/0002-start-workspace-implementation-before-model-comparison.md)（Approved）により、
+  PAW-020 以降はPAW-017の完了を待たずに着手できる。各Issueの`Depends on`にあるPAW-017への依存はこのDecisionで解除する。
 - `BLOCKING` なUser判断が発生した場合は勝手に仕様を補完せず確認する。
 - Main Coding Model / Memory Worker / Research Worker / Embedding / RerankerはBenchmark後に決定する。
 - Codexを初期開発のPrimary Implementation Agentとする。
