@@ -19,16 +19,25 @@ not change a signature or a docstring.
 
 import uuid
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 
 from paw_backend.authz.roles import ProjectRole
+from paw_backend.projects.errors import IllegalTransitionError
 from paw_backend.projects.records import (
     InviteState,
     LifecycleAction,
     Member,
+    MemberStatus,
     ProjectStatus,
     TransitionPlan,
 )
+
+
+def _aware(value):
+    if not isinstance(value, datetime):
+        raise TypeError("not a datetime")
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("naive datetime")
 
 
 def plan_transition(status: ProjectStatus, action: LifecycleAction) -> TransitionPlan:
@@ -55,7 +64,31 @@ def plan_transition(status: ProjectStatus, action: LifecycleAction) -> Transitio
     False)`` (starting the deletion again does not restart the 30 days);
     ``(ACTIVE, RESTORE)`` and ``(PENDING_DELETION, UNARCHIVE)`` are illegal.
     """
-    raise NotImplementedError("PAW-026 stub")
+    if not isinstance(status, ProjectStatus) or not isinstance(action, LifecycleAction):
+        raise TypeError("status and action must be enums")
+    A, R, P, D = (
+        ProjectStatus.ACTIVE,
+        ProjectStatus.ARCHIVED,
+        ProjectStatus.PENDING_DELETION,
+        ProjectStatus.DELETED,
+    )
+    L = LifecycleAction
+    table = {
+        (A, L.ARCHIVE): (R, True),
+        (A, L.UNARCHIVE): (A, False),
+        (A, L.BEGIN_DELETION): (P, True),
+        (R, L.ARCHIVE): (R, False),
+        (R, L.UNARCHIVE): (A, True),
+        (R, L.BEGIN_DELETION): (P, True),
+        (R, L.RESTORE): (R, False),
+        (P, L.BEGIN_DELETION): (P, False),
+        (P, L.RESTORE): (R, True),
+        (P, L.PURGE): (D, True),
+    }
+    found = table.get((status, action))
+    if found is None:
+        raise IllegalTransitionError(status, action)
+    return TransitionPlan(*found)
 
 
 def deletion_schedule(started_at: datetime) -> datetime:
@@ -71,7 +104,8 @@ def deletion_schedule(started_at: datetime) -> datetime:
     ``2026-02-14T10:30:00+00:00``; ``2028-02-01T12:00:00.000001+00:00`` ->
     ``2028-03-02T12:00:00.000001+00:00`` (2028 is a leap year).
     """
-    raise NotImplementedError("PAW-026 stub")
+    _aware(started_at)
+    return (started_at + timedelta(days=30)).astimezone(UTC)
 
 
 def restore_window_open(scheduled_at: datetime, now: datetime) -> bool:
@@ -85,7 +119,9 @@ def restore_window_open(scheduled_at: datetime, now: datetime) -> bool:
     Examples: ``now`` one microsecond before ``scheduled_at`` -> ``True``;
     ``now == scheduled_at`` -> ``False``; one microsecond after -> ``False``.
     """
-    raise NotImplementedError("PAW-026 stub")
+    _aware(scheduled_at)
+    _aware(now)
+    return now < scheduled_at
 
 
 def purge_due(scheduled_at: datetime, now: datetime) -> bool:
@@ -96,7 +132,9 @@ def purge_due(scheduled_at: datetime, now: datetime) -> bool:
     of them is true and the other false. ``ValueError`` when either datetime is
     naive, ``TypeError`` when either is not a ``datetime``.
     """
-    raise NotImplementedError("PAW-026 stub")
+    _aware(scheduled_at)
+    _aware(now)
+    return now >= scheduled_at
 
 
 def invite_expiry(invited_at: datetime) -> datetime:
@@ -109,7 +147,8 @@ def invite_expiry(invited_at: datetime) -> datetime:
     Examples: ``2026-03-01T00:00:00+00:00`` -> ``2026-03-15T00:00:00+00:00``;
     ``2026-03-01T01:00:00+09:00`` -> ``2026-03-14T16:00:00+00:00``.
     """
-    raise NotImplementedError("PAW-026 stub")
+    _aware(invited_at)
+    return (invited_at + timedelta(days=14)).astimezone(UTC)
 
 
 def invite_state(existing: Member | None, now: datetime) -> InviteState:
@@ -126,7 +165,16 @@ def invite_state(existing: Member | None, now: datetime) -> InviteState:
     ``ValueError`` when ``now`` is naive; ``TypeError`` when ``now`` is not a
     ``datetime`` or ``existing`` is neither ``None`` nor a ``Member``.
     """
-    raise NotImplementedError("PAW-026 stub")
+    _aware(now)
+    if existing is None:
+        return InviteState.NONE
+    if not isinstance(existing, Member):
+        raise TypeError("existing must be a Member or None")
+    if existing.status is MemberStatus.ACTIVE:
+        return InviteState.MEMBER
+    if now < existing.invite_expires_at:
+        return InviteState.OPEN
+    return InviteState.EXPIRED
 
 
 def manager_would_remain(
@@ -153,4 +201,19 @@ def manager_would_remain(
     not count). ``[M(a)]``: remove an unknown user ``z`` -> ``True``. ``[]``
     -> ``False`` whatever the change.
     """
-    raise NotImplementedError("PAW-026 stub")
+    if not isinstance(user_id, uuid.UUID):
+        raise TypeError("user_id must be a UUID")
+    if new_role is not None and not isinstance(new_role, ProjectRole):
+        raise TypeError("new_role must be a ProjectRole or None")
+    count = 0
+    for m in members:
+        if m.status is not MemberStatus.ACTIVE:
+            continue
+        role = m.role
+        if m.user_id == user_id:
+            if new_role is None:
+                continue
+            role = new_role
+        if role is ProjectRole.MANAGER:
+            count += 1
+    return count > 0

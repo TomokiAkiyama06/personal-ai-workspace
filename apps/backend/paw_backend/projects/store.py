@@ -22,10 +22,13 @@ import uuid
 from datetime import datetime
 from typing import Any
 
+from sqlalchemy import and_, delete, func, insert, or_, select, update
+from sqlalchemy.exc import NoResultFound
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from paw_backend.authz.roles import ProjectRole
 from paw_backend.identity.models import UserRow
+from paw_backend.projects.limits import DELETED_PROJECT_NAME
 from paw_backend.projects.models import ProjectMemberRow, ProjectRow
 from paw_backend.projects.records import (
     Member,
@@ -81,7 +84,11 @@ async def get_project(
     waits for a row lock held by another transaction), which is how every
     changing operation of the service starts. Nothing else is locked.
     """
-    raise NotImplementedError("PAW-026 stub")
+    statement = select(PROJECTS).where(PROJECTS.c.id == project_id)
+    if for_update:
+        statement = statement.with_for_update()
+    row = (await session.execute(statement)).first()
+    return None if row is None else project_from_row(row)
 
 
 async def insert_project(
@@ -98,7 +105,21 @@ async def insert_project(
     default). ``created_at`` and ``updated_at`` are both ``now``; the three
     deletion columns are ``None``.
     """
-    raise NotImplementedError("PAW-026 stub")
+    row = (
+        await session.execute(
+            insert(PROJECTS)
+            .values(
+                name=name,
+                description=description,
+                status="active",
+                created_by=created_by,
+                created_at=now,
+                updated_at=now,
+            )
+            .returning(*PROJECTS.c)
+        )
+    ).one()
+    return project_from_row(row)
 
 
 async def update_settings(
@@ -114,7 +135,17 @@ async def update_settings(
     Nothing else changes (not the status). ``sqlalchemy.exc.NoResultFound`` if
     there is no such project.
     """
-    raise NotImplementedError("PAW-026 stub")
+    row = (
+        await session.execute(
+            update(PROJECTS)
+            .where(PROJECTS.c.id == project_id)
+            .values(name=name, description=description, updated_at=now)
+            .returning(*PROJECTS.c)
+        )
+    ).one_or_none()
+    if row is None:
+        raise NoResultFound()
+    return project_from_row(row)
 
 
 async def set_lifecycle(
@@ -133,7 +164,22 @@ async def set_lifecycle(
     Returns the project. The name, the description and ``deleted_at`` are not
     touched. ``sqlalchemy.exc.NoResultFound`` if there is no such project.
     """
-    raise NotImplementedError("PAW-026 stub")
+    row = (
+        await session.execute(
+            update(PROJECTS)
+            .where(PROJECTS.c.id == project_id)
+            .values(
+                status=status.value,
+                deletion_started_at=deletion_started_at,
+                deletion_scheduled_at=deletion_scheduled_at,
+                updated_at=now,
+            )
+            .returning(*PROJECTS.c)
+        )
+    ).one_or_none()
+    if row is None:
+        raise NoResultFound()
+    return project_from_row(row)
 
 
 async def mark_deleted(
@@ -147,7 +193,23 @@ async def mark_deleted(
     timestamps keep their values. ``sqlalchemy.exc.NoResultFound`` if there is
     no such project.
     """
-    raise NotImplementedError("PAW-026 stub")
+    row = (
+        await session.execute(
+            update(PROJECTS)
+            .where(PROJECTS.c.id == project_id)
+            .values(
+                status="deleted",
+                deleted_at=now,
+                updated_at=now,
+                name=DELETED_PROJECT_NAME,
+                description=None,
+            )
+            .returning(*PROJECTS.c)
+        )
+    ).one_or_none()
+    if row is None:
+        raise NoResultFound()
+    return project_from_row(row)
 
 
 async def select_due_project_ids(
@@ -161,7 +223,17 @@ async def select_due_project_ids(
     ``FOR UPDATE SKIP LOCKED``: a project another transaction holds a lock on
     is silently left out, and the statement never waits.
     """
-    raise NotImplementedError("PAW-026 stub")
+    statement = (
+        select(PROJECTS.c.id)
+        .where(
+            PROJECTS.c.status == "pending_deletion",
+            PROJECTS.c.deletion_scheduled_at <= now,
+        )
+        .order_by(PROJECTS.c.deletion_scheduled_at, PROJECTS.c.id)
+        .limit(limit)
+        .with_for_update(skip_locked=True)
+    )
+    return list((await session.execute(statement)).scalars())
 
 
 async def count_due_projects(session: AsyncSession, now: datetime) -> int:
@@ -169,7 +241,15 @@ async def count_due_projects(session: AsyncSession, now: datetime) -> int:
 
     Plain ``count``: no lock and no ``SKIP LOCKED``.
     """
-    raise NotImplementedError("PAW-026 stub")
+    statement = (
+        select(func.count())
+        .select_from(PROJECTS)
+        .where(
+            PROJECTS.c.status == "pending_deletion",
+            PROJECTS.c.deletion_scheduled_at <= now,
+        )
+    )
+    return (await session.execute(statement)).scalar_one()
 
 
 # --- members and invitations -------------------------------------------------------
@@ -179,7 +259,14 @@ async def get_member(
     session: AsyncSession, project_id: uuid.UUID, user_id: uuid.UUID
 ) -> Member | None:
     """The membership row (accepted or invited, expired or not) or ``None``."""
-    raise NotImplementedError("PAW-026 stub")
+    row = (
+        await session.execute(
+            select(MEMBERS).where(
+                MEMBERS.c.project_id == project_id, MEMBERS.c.user_id == user_id
+            )
+        )
+    ).first()
+    return None if row is None else member_from_row(row)
 
 
 async def insert_member(session: AsyncSession, member: Member) -> Member:
@@ -188,7 +275,22 @@ async def insert_member(session: AsyncSession, member: Member) -> Member:
     A row for the same ``(project_id, user_id)`` violates the primary key
     (``sqlalchemy.exc.IntegrityError``, not handled here).
     """
-    raise NotImplementedError("PAW-026 stub")
+    row = (
+        await session.execute(
+            insert(MEMBERS)
+            .values(
+                project_id=member.project_id,
+                user_id=member.user_id,
+                role=member.role.value,
+                status=member.status.value,
+                invited_at=member.invited_at,
+                invite_expires_at=member.invite_expires_at,
+                joined_at=member.joined_at,
+            )
+            .returning(*MEMBERS.c)
+        )
+    ).one()
+    return member_from_row(row)
 
 
 async def activate_invite(
@@ -205,7 +307,21 @@ async def activate_invite(
     changed: ``sqlalchemy.exc.NoResultFound`` when there is no row or it is
     ACTIVE already.
     """
-    raise NotImplementedError("PAW-026 stub")
+    row = (
+        await session.execute(
+            update(MEMBERS)
+            .where(
+                MEMBERS.c.project_id == project_id,
+                MEMBERS.c.user_id == user_id,
+                MEMBERS.c.status == "invited",
+            )
+            .values(status="active", joined_at=joined_at, invite_expires_at=None)
+            .returning(*MEMBERS.c)
+        )
+    ).one_or_none()
+    if row is None:
+        raise NoResultFound()
+    return member_from_row(row)
 
 
 async def set_member_role(
@@ -219,7 +335,21 @@ async def set_member_role(
     Only an ACTIVE row is changed (an invitation's role is never changed):
     ``sqlalchemy.exc.NoResultFound`` when there is no such ACTIVE row.
     """
-    raise NotImplementedError("PAW-026 stub")
+    row = (
+        await session.execute(
+            update(MEMBERS)
+            .where(
+                MEMBERS.c.project_id == project_id,
+                MEMBERS.c.user_id == user_id,
+                MEMBERS.c.status == "active",
+            )
+            .values(role=role.value)
+            .returning(*MEMBERS.c)
+        )
+    ).one_or_none()
+    if row is None:
+        raise NoResultFound()
+    return member_from_row(row)
 
 
 async def delete_member(
@@ -230,7 +360,12 @@ async def delete_member(
     ``True`` if a row was deleted, ``False`` if there was none. Other rows are
     never touched.
     """
-    raise NotImplementedError("PAW-026 stub")
+    result = await session.execute(
+        delete(MEMBERS).where(
+            MEMBERS.c.project_id == project_id, MEMBERS.c.user_id == user_id
+        )
+    )
+    return result.rowcount > 0
 
 
 async def delete_project_members(session: AsyncSession, project_id: uuid.UUID) -> int:
@@ -239,14 +374,22 @@ async def delete_project_members(session: AsyncSession, project_id: uuid.UUID) -
     Returns how many rows were deleted (``0`` for none). Rows of other projects
     are never touched.
     """
-    raise NotImplementedError("PAW-026 stub")
+    result = await session.execute(
+        delete(MEMBERS).where(MEMBERS.c.project_id == project_id)
+    )
+    return result.rowcount
 
 
 async def list_active_members(
     session: AsyncSession, project_id: uuid.UUID
 ) -> list[Member]:
     """The ACTIVE members of one project, ordered by ``joined_at`` then ``user_id``."""
-    raise NotImplementedError("PAW-026 stub")
+    rows = await session.execute(
+        select(MEMBERS)
+        .where(MEMBERS.c.project_id == project_id, MEMBERS.c.status == "active")
+        .order_by(MEMBERS.c.joined_at, MEMBERS.c.user_id)
+    )
+    return [member_from_row(r) for r in rows]
 
 
 async def list_open_invites(
@@ -259,7 +402,16 @@ async def list_open_invites(
     Open means ``status = 'invited'`` and ``invite_expires_at > now`` (an
     invitation whose expiry equals ``now`` is expired and is left out).
     """
-    raise NotImplementedError("PAW-026 stub")
+    rows = await session.execute(
+        select(MEMBERS)
+        .where(
+            MEMBERS.c.project_id == project_id,
+            MEMBERS.c.status == "invited",
+            MEMBERS.c.invite_expires_at > now,
+        )
+        .order_by(MEMBERS.c.invited_at, MEMBERS.c.user_id)
+    )
+    return [member_from_row(r) for r in rows]
 
 
 async def count_members(
@@ -269,7 +421,18 @@ async def count_members(
 
     Expired invitations are not counted.
     """
-    raise NotImplementedError("PAW-026 stub")
+    statement = (
+        select(func.count())
+        .select_from(MEMBERS)
+        .where(
+            MEMBERS.c.project_id == project_id,
+            or_(
+                MEMBERS.c.status == "active",
+                and_(MEMBERS.c.status == "invited", MEMBERS.c.invite_expires_at > now),
+            ),
+        )
+    )
+    return (await session.execute(statement)).scalar_one()
 
 
 # --- what one user sees ----------------------------------------------------
@@ -290,7 +453,23 @@ async def list_projects_of(
     Ordered by ``created_at`` newest first, then ``id`` ascending; ``limit`` and
     ``offset`` are applied after the ordering.
     """
-    raise NotImplementedError("PAW-026 stub")
+    statement = (
+        select(PROJECTS)
+        .join(MEMBERS, MEMBERS.c.project_id == PROJECTS.c.id)
+        .where(
+            MEMBERS.c.user_id == user_id,
+            MEMBERS.c.status == "active",
+            PROJECTS.c.status == status.value,
+        )
+    )
+    if status is ProjectStatus.PENDING_DELETION:
+        statement = statement.where(MEMBERS.c.role == "manager")
+    statement = (
+        statement.order_by(PROJECTS.c.created_at.desc(), PROJECTS.c.id)
+        .limit(limit)
+        .offset(offset)
+    )
+    return [project_from_row(r) for r in await session.execute(statement)]
 
 
 async def roles_of(
@@ -301,7 +480,16 @@ async def roles_of(
     Only projects whose status is not ``DELETED`` (invitations never count).
     An empty dict for a user without membership.
     """
-    raise NotImplementedError("PAW-026 stub")
+    rows = await session.execute(
+        select(MEMBERS.c.project_id, MEMBERS.c.role)
+        .join(PROJECTS, PROJECTS.c.id == MEMBERS.c.project_id)
+        .where(
+            MEMBERS.c.user_id == user_id,
+            MEMBERS.c.status == "active",
+            PROJECTS.c.status != "deleted",
+        )
+    )
+    return {row.project_id: ProjectRole(row.role) for row in rows}
 
 
 async def list_open_invites_of(
@@ -315,9 +503,36 @@ async def list_open_invites_of(
     the project's name, ``expires_at`` the invitation's ``invite_expires_at``.
     Ordered by ``invited_at`` then ``project_id``.
     """
-    raise NotImplementedError("PAW-026 stub")
+    rows = await session.execute(
+        select(
+            MEMBERS.c.project_id,
+            PROJECTS.c.name,
+            MEMBERS.c.role,
+            MEMBERS.c.invited_at,
+            MEMBERS.c.invite_expires_at,
+        )
+        .join(PROJECTS, PROJECTS.c.id == MEMBERS.c.project_id)
+        .where(
+            MEMBERS.c.user_id == user_id,
+            MEMBERS.c.status == "invited",
+            MEMBERS.c.invite_expires_at > now,
+            PROJECTS.c.status.in_(["active", "archived"]),
+        )
+        .order_by(MEMBERS.c.invited_at, MEMBERS.c.project_id)
+    )
+    return [
+        PendingInvite(
+            r.project_id, r.name, ProjectRole(r.role), r.invited_at, r.invite_expires_at
+        )
+        for r in rows
+    ]
 
 
 async def user_is_active(session: AsyncSession, user_id: uuid.UUID) -> bool:
     """Whether ``users`` has a row with this id and ``status = 'active'``."""
-    raise NotImplementedError("PAW-026 stub")
+    row = (
+        await session.execute(
+            select(USERS.c.id).where(USERS.c.id == user_id, USERS.c.status == "active")
+        )
+    ).first()
+    return row is not None

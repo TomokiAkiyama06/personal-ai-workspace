@@ -1446,7 +1446,8 @@ Project を持たない孤児の行がないことを確認し、`ALTER TABLE <t
 ### 実装の由来
 
 `domain.py`（7 関数）と `store.py`（20 関数）は、仕様（Docstring と `tests/test_projects_*.py`）を先に書き、関数の本体を別の実装者に埋めさせる設計です。Model、Migration、権限、`validation.py`、`service.py` は仕様の作者が実装しています。
-本体を誰がどの関数について実装したかは、人間の Orchestrator が確認した後にここへ記録します（現時点では未確認）。
+**最終的な実装は Claude の参照実装です。** ローカルの Qwen3-Coder-30B-A3B に、27 関数の実装を 2 回（各約 265 回の Tool 呼び出し）任せましたが、収束しませんでした（1 回目は `domain.py` の書式を壊し、`store.py` は未着手、2 回目は `domain.py` の Test の約半数が通らないまま、`store.py` に届きませんでした）。
+AGENTS.md のとおり、同じ失敗を繰り返したのでエスカレーションし、仕様の Docstring を保ったまま、Claude の参照実装（変異 38 個をすべて Test が検出）に置き換えています。ローカルモデルの成果物は、最終物に含まれていません。
 
 ### 制限と未確認の点
 
