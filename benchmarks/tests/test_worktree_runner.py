@@ -16,6 +16,7 @@ import time
 import tracemalloc
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from benchmarks import worktree_runner
@@ -24,6 +25,7 @@ from benchmarks.worktree_runner import WorktreeRun, WorktreeRunner, WorktreeRunn
 # Deadline for waiting on something that must happen; generous on purpose so a
 # loaded machine slows the test down instead of failing it.
 PATIENCE = 20
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 # Candidate that starts a child in its own session (so it is not in the process
 # group), publishes the child's pid, then blocks.
@@ -61,6 +63,57 @@ while not os.path.exists(pid_file):
     time.sleep(0.01)
 if not exit_early:
     time.sleep(60)
+"""
+
+# Candidate that leaves a background process in its process group and stays alive
+# long enough for the runner to record that group's members before it exits.
+BACKGROUND_THEN_EXIT = """
+import os, sys, time
+pid_file = sys.argv[1]
+if os.fork() == 0:
+    with open(pid_file + '.tmp', 'w') as handle:
+        handle.write(str(os.getpid()))
+    os.replace(pid_file + '.tmp', pid_file)
+    time.sleep(60)
+    os._exit(0)
+time.sleep(1.0)
+"""
+
+# Runs one candidate in a process whose SIGCHLD is ignored while the candidate runs,
+# so the kernel reaps the leader itself and its exit status can never be collected.
+# (Git itself cannot work with SIGCHLD ignored, so it is restored around Git calls.)
+# It records each ``killpg`` the runner makes.
+SIGCHLD_IGNORED_HARNESS = """
+import json, os, signal, sys
+from pathlib import Path
+killpg_calls = []
+real_killpg = os.killpg
+def spy(pgid, number):
+    killpg_calls.append(int(number))
+    return real_killpg(pgid, number)
+os.killpg = spy
+from benchmarks.worktree_runner import WorktreeRunner
+real_supervise = WorktreeRunner._supervise
+def supervise(self, run_id, leader, timeout):
+    signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+    try:
+        return real_supervise(self, run_id, leader, timeout)
+    finally:
+        signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+WorktreeRunner._supervise = supervise
+repository, runs, commit, mode, pid_file, background = sys.argv[1:7]
+runner = WorktreeRunner(Path(repository), Path(runs))
+runner.drain_seconds = 0.3
+run = runner.create('candidate-a', commit)
+if mode == 'fails':
+    command = [sys.executable, '-c', 'import time; time.sleep(0.5); raise SystemExit(3)']
+else:
+    command = [sys.executable, '-c', background, pid_file]
+result = runner.execute(run, command, 30)
+events = [json.loads(line) for line in run.log_path.read_text().splitlines()]
+logged = [event for event in events if event['event'] == result.status][0]
+print(json.dumps({'status': result.status, 'exit_code': result.exit_code,
+                  'logged_exit_code': logged['exit_code'], 'killpg': killpg_calls}))
 """
 
 # Candidate that ignores SIGTERM itself, so only SIGKILL after the grace period
@@ -1017,6 +1070,87 @@ class WorktreeRunnerTest(unittest.TestCase):
                 self.assertRaisesRegex(ValueError, "outside the source repository"),
             ):
                 WorktreeRunner(repository, self.repository / "benchmark-runs")
+
+    # A leader that something else reaped ----------------------------------------
+
+    def run_with_sigchld_ignored(self, mode, pid_file="unused"):
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                SIGCHLD_IGNORED_HARNESS,
+                str(self.repository),
+                str(self.root / "sigchld-runs"),
+                self.commit,
+                mode,
+                str(pid_file),
+                BACKGROUND_THEN_EXIT,
+            ],
+            cwd=REPOSITORY_ROOT,
+            env={**os.environ, "PYTHONPATH": str(REPOSITORY_ROOT)},
+            capture_output=True,
+            text=True,
+            timeout=PATIENCE * 2,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        return json.loads(completed.stdout)
+
+    def test_an_unknowable_exit_status_is_unknown_not_zero(self):
+        # ``Popen`` reads 0 when the status was reaped elsewhere; a failing
+        # candidate (exit 3) must not be reported, or logged, as exiting cleanly.
+        observed = self.run_with_sigchld_ignored("fails")
+        self.assertEqual(observed["status"], "completed")
+        self.assertIsNone(observed["exit_code"])
+        self.assertIsNone(observed["logged_exit_code"])
+
+    def test_no_group_signal_is_sent_for_a_group_id_that_may_be_reused(self):
+        observed = self.run_with_sigchld_ignored("fails")
+        # The leader vanished and no member of its group was ever seen: the
+        # group id could belong to a stranger by now, so nothing may be sent.
+        self.assertEqual(observed["killpg"], [])
+
+    def test_a_recorded_member_of_a_reaped_leaders_group_is_still_killed(self):
+        pid_file = self.pid_file()
+        observed = self.run_with_sigchld_ignored("background", pid_file)
+        self.assertIn(signal.SIGKILL, observed["killpg"])
+        background = self.read_pid(pid_file)
+        self.assertTrue(wait_until(lambda: not is_running(background)))
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "needs Linux /proc")
+    def test_a_released_group_id_is_signalled_only_while_a_recorded_member_remains(
+        self,
+    ):
+        # A stranger that is a group leader, standing in for a process that was
+        # given the reaped leader's pid as its own group id.
+        stranger = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            start_new_session=True,
+        )
+        self.addCleanup(stranger.wait)
+        self.addCleanup(stranger.kill)
+        self.assertTrue(
+            wait_until(lambda: WorktreeRunner._start_time(stranger.pid) is not None)
+        )
+        leader = worktree_runner._Leader(
+            SimpleNamespace(pid=stranger.pid, returncode=None)
+        )
+        with mock.patch.object(os, "waitid", side_effect=ChildProcessError):
+            self.assertTrue(leader.has_exited())
+        self.assertTrue(leader.released and leader.status_lost)
+
+        # Nothing recorded ever belonged to this group id: never signal it.
+        leader.members = {stranger.pid + 100000: 1}
+        leader.signal_group(signal.SIGKILL)
+        leader.members = {stranger.pid: WorktreeRunner._start_time(stranger.pid) + 1}
+        leader.signal_group(signal.SIGKILL)  # same pid, different start time
+        time.sleep(0.3)
+        self.assertIsNone(stranger.poll(), "a stranger's group was signalled")
+
+        # A member recorded earlier (same pid and start time) is still in the group.
+        leader.members = {stranger.pid: WorktreeRunner._start_time(stranger.pid)}
+        leader.signal_group(signal.SIGKILL)
+        self.assertEqual(stranger.wait(timeout=PATIENCE), -signal.SIGKILL)
 
     # Durable execution metrics ------------------------------------------------
 

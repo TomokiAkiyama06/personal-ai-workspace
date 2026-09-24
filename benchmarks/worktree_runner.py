@@ -85,6 +85,84 @@ def _valid_command(command: object) -> bool:
     )
 
 
+class _Leader:
+    """A candidate's leader process, and the safe use of its process group id.
+
+    While the leader is unreaped (running, or a zombie) its pid stays reserved as
+    the group id, so signalling the group is safe.  Once it has been reaped
+    elsewhere (``SIGCHLD`` ignored, another reaper, or no ``WNOWAIT``) that number
+    may already belong to an unrelated group.  Then the group is signalled only
+    while a process recorded earlier as its member (same pid and start time) is
+    still in it; otherwise nothing is sent.
+    """
+
+    refresh_seconds = 0.2
+
+    def __init__(self, process: subprocess.Popen[bytes]):
+        self.process = process
+        self.pgid = process.pid
+        self.released = False  # no longer guaranteed to reserve ``pgid``
+        self.status_lost = False  # reaped by someone else: exit status unknown
+        self.members: dict[int, int] = {}  # pid -> start time, seen in the group
+        self._refreshed = 0.0
+        self.refresh(force=True)
+
+    def refresh(self, force: bool = False) -> None:
+        """Record the group's current members (only meaningful while unreaped)."""
+        now = time.monotonic()
+        if self.released or (
+            not force and now - self._refreshed < self.refresh_seconds
+        ):
+            return
+        self._refreshed = now
+        for pid, (_, _, pgrp, started) in WorktreeRunner._process_table().items():
+            if pgrp == self.pgid:
+                self.members.setdefault(pid, started)
+
+    def has_exited(self) -> bool:
+        """Has the leader exited?  Looks without reaping it."""
+        if self.process.returncode is not None:
+            self.released = True
+            return True
+        try:
+            if (
+                os.waitid(
+                    os.P_PID, self.process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT
+                )
+                is not None
+            ):
+                return True  # a zombie: still reserves the group id
+        except ChildProcessError:
+            # Someone else reaped it; its exit status is gone with it.
+            self.released = self.status_lost = True
+            return True
+        except AttributeError:  # no WNOWAIT: poll() reaps, so nothing reserves it
+            if self.process.poll() is not None:
+                self.released = True
+                return True
+        self.refresh()
+        return False
+
+    def owns(self, pid: int, pgrp: int, started: int) -> bool:
+        """Is this process, seen in the table, a member of our group?"""
+        if pgrp != self.pgid:
+            return False
+        return not self.released or self.members.get(pid) == started
+
+    def signal_group(self, number: int) -> None:
+        if self.released and not any(
+            state not in "ZX" and self.owns(pid, pgrp, started)
+            for pid, (
+                state,
+                _,
+                pgrp,
+                started,
+            ) in WorktreeRunner._process_table().items()
+        ):
+            return  # the group id may belong to a stranger: never signal it
+        WorktreeRunner._signal_group(self.pgid, number)
+
+
 @dataclass(frozen=True)
 class WorktreeRun:
     """A detached candidate checkout and its durable, evaluator-owned log."""
@@ -291,8 +369,11 @@ class WorktreeRunner:
                 start_new_session=True,
                 env=self._candidate_environment(state),
             )
-            status, drain = self._supervise(run.run_id, process, timeout_seconds)
-            exit_code = process.returncode
+            leader = _Leader(process)
+            status, drain = self._supervise(run.run_id, leader, timeout_seconds)
+            # If something else reaped the leader (SIGCHLD ignored, another
+            # reaper) its exit status is lost; ``returncode`` would read 0.
+            exit_code = None if leader.status_lost else process.returncode
             result = ExecutionResult(
                 status=status,
                 exit_code=exit_code,
@@ -356,10 +437,10 @@ class WorktreeRunner:
             raise log_error
 
     def _supervise(
-        self, run_id: str, process: subprocess.Popen[bytes], timeout_seconds: float
+        self, run_id: str, leader: _Leader, timeout_seconds: float
     ) -> tuple[str, _PipeDrain]:
         """Drain output until exit, deadline or cancellation, then contain it."""
-        drain = _PipeDrain(process)
+        drain = _PipeDrain(leader.process)
         deadline = time.monotonic() + timeout_seconds
         status = "completed"
         exited_at: float | None = None
@@ -374,7 +455,7 @@ class WorktreeRunner:
                 if now >= deadline:
                     status = "timed_out"
                     break
-                if exited_at is None and self._has_exited(process):
+                if exited_at is None and leader.has_exited():
                     exited_at = now
                 if exited_at is None:
                     if not drain.open:
@@ -386,7 +467,7 @@ class WorktreeRunner:
                 if drain.open:
                     drain.pump(min(self.poll_seconds, deadline - now))
             if status != "completed":
-                self._terminate(process)
+                self._terminate(leader)
                 until = time.monotonic() + self.drain_seconds
                 while drain.open and time.monotonic() < until:
                     drain.pump(self.poll_seconds)
@@ -394,20 +475,21 @@ class WorktreeRunner:
         finally:
             # Whatever happened, no member of the candidate's session may outlive
             # the run, and no pipe may keep this evaluator waiting.
-            self._kill_group(process.pid)
+            leader.signal_group(signal.SIGKILL)
             drain.close()
             try:
-                process.wait(timeout=self.term_grace_seconds)
+                leader.process.wait(timeout=self.term_grace_seconds)
             except subprocess.TimeoutExpired:
                 pass
 
-    def _terminate(self, process: subprocess.Popen[bytes]) -> None:
+    def _terminate(self, leader: _Leader) -> None:
         """TERM, wait for a grace period, then KILL whatever is left."""
         # Snapshot first: children that started their own session are not in the
         # process group, and they are re-parented once their parent dies.  Each is
         # recorded with its start time, so a recycled pid is never mistaken for it.
-        tracked = self._descendant_pids(process.pid)
-        self._signal_group(process.pid, signal.SIGTERM)
+        leader.refresh(force=True)
+        tracked = self._descendant_pids(leader.pgid)
+        leader.signal_group(signal.SIGTERM)
         for pid, started in tracked.items():
             self._signal_identified(pid, started, signal.SIGTERM)
         # The grace period belongs to everything the candidate started, not just
@@ -415,34 +497,13 @@ class WorktreeRunner:
         # descendant that is still running its TERM handler.
         deadline = time.monotonic() + self.term_grace_seconds
         while time.monotonic() < deadline:
-            if self._has_exited(process) and not self._anything_alive(
-                process.pid, tracked
-            ):
+            if leader.has_exited() and not self._anything_alive(leader, tracked):
                 break
             time.sleep(0.02)
-        self._kill_group(process.pid)
+        leader.signal_group(signal.SIGKILL)
         for pid, started in tracked.items():
             self._signal_identified(pid, started, signal.SIGKILL)
         # The leader is reaped by the caller after its last group signal.
-
-    @staticmethod
-    def _has_exited(process: subprocess.Popen[bytes]) -> bool:
-        """Has the leader exited?  Looks without reaping it.
-
-        An unreaped leader keeps its pid, which is the candidate's process group
-        id, reserved: the final group ``SIGKILL`` cannot reach a new, unrelated
-        group that happened to be given the same number.  ``process.wait()``
-        reaps it only after that signal.
-        """
-        if process.returncode is not None:
-            return True
-        try:
-            return (
-                os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
-                is not None
-            )
-        except (AttributeError, ChildProcessError):  # no WNOWAIT, or already reaped
-            return process.poll() is not None
 
     @staticmethod
     def _signal_group(pgid: int, number: int) -> None:
@@ -536,8 +597,8 @@ class WorktreeRunner:
         return found
 
     @classmethod
-    def _anything_alive(cls, pgid: int, tracked: dict[int, int]) -> bool:
-        """Is a tracked process, or any member of ``pgid``, still running?
+    def _anything_alive(cls, leader: _Leader, tracked: dict[int, int]) -> bool:
+        """Is a tracked process, or a member of the leader's group, still running?
 
         A tracked pid now held by a process with a different start time is a
         stranger and does not count.
@@ -545,12 +606,13 @@ class WorktreeRunner:
         table = cls._process_table()
         if not table:  # no /proc: probe the process group itself
             try:
-                os.killpg(pgid, 0)
+                os.killpg(leader.pgid, 0)
             except (ProcessLookupError, PermissionError):
                 return False
             return True
         return any(
-            state not in "ZX" and (tracked.get(pid) == started or pgrp == pgid)
+            state not in "ZX"
+            and (tracked.get(pid) == started or leader.owns(pid, pgrp, started))
             for pid, (state, _, pgrp, started) in table.items()
         )
 
