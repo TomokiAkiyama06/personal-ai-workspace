@@ -34,6 +34,9 @@ PAW-051 の実装は、動かすためにこれらを選んだ。Review（Codex�
 6. **責務の境界。** `network` Capability の確認、SSRF 対策、`robots.txt` の遵守、名前解決の後の接続先の検査は、呼び出し元（Tool Broker、PAW-031）と個々の Adapter の責任とする。この層は認可の判断も Network の Access もしない。
 7. **公開日時は UTC で表せるもの。** `published_at` は Timezone つきで、UTC へ変換できる値だけを受け付ける（`datetime.max` を UTC-01:00 で表した値など、範囲を超える値は Adapter の不正な Response として扱い、`invalid_response` にする。Timezone のない値、Timezone の `utcoffset` が例外を出す値も同じ）。
 8. **Timeout は協調的。** Adapter が Cancel を無視する、または Event Loop を止める同期処理をする場合、Broker は止められない。Adapter の実装規約として、Cancel に応じる非同期の実装を求める。
+9. **Provider の名前は正規化せず、厳密な `str` の写しだけを保持する。** `name` は受け取った文字列そのものを `fullmatch` で `[a-z0-9][a-z0-9_-]{0,63}`（ASCII だけ、`$` と `IGNORECASE` なし）に照合する。全角・NFKC で同じになる文字・大文字・Zero-width 文字・空白・末尾の改行は拒否し、NFKC、小文字化、`strip` は行わない（別の名前と同じにしたり、見た目が同じ名前を別に登録させたりしないため）。
+   `str` の Subclass は中身が合えば受け付けるが、Registry が持つのは C の `str.encode` で作った**厳密な `str` の写し**で、Adapter の Object は持たない（`__hash__` の例外で `register` が失敗する、`__eq__` で一意性をすり抜ける、`__lt__` で `select()` / `gather()` が失敗する、`__str__` で Log に Credential 相当の文字が入る、のを防ぐため）。型は `type()` で読み、`__class__` で `str` / `ProviderKind` を名乗るだけの Object は `ProviderInterfaceError` とする。`kind` は `ProviderKind` の要素そのものだけを受け付ける。
+   Subclass を拒否する案もあるが、`StrEnum` の要素を名前に使う正当な使い道があり、写しなら同じ安全性が得られるので採らない。
 
 ## 選定理由
 

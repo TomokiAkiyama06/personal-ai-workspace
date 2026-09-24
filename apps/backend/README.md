@@ -220,6 +220,7 @@ Timeout した Probe は、Query の取消（psycopg が Server の確認を待�
 libpq 17 未満（`psycopg[c]` とシステムの libpq など）では、取消が Thread で実行され、`asyncio.run` の終了が長時間止まるためです。
 `Database.dispose()`（Application の終了時）は、実行中の Probe を同じ方法で止め、`PAW_SHUTDOWN_TIMEOUT_SECONDS` の範囲で完了を待ちます。
 同じ仕組みの中断できる接続が、ほかに 2 つあります。1 文を実行する `fetch_abortable` / `execute_abortable`（起動時の診断、Audit の書き込み、承認の取り消し）と、複数の文を 1 Transaction で実行する `run_abortable`（Research Scratch の Purge、[PAW-050](#janitor期限切れの削除)）です。どちらも Pool を使わず、呼び出し元の Cancel と `dispose()` で接続の Socket を閉じます。`run_abortable` は Session を渡す Callback を受け取り、正常に戻れば Commit、例外なら Rollback します。
+どちらも同時に開く接続は `PAW_DATABASE_POOL_SIZE` までで、空きがなければ待ちますが、**この空き待ちも中断できる処理の一部**です。待っている呼び出しを Cancel すると待ちがその場で終わり（空きは取りも返しもしません）、`dispose()` は待っている呼び出しを全て `DatabaseDisposedError` で失敗させます（何も実行していません）。`dispose()` の実行中に始まった呼び出しも同じ例外で拒否します。実行中の呼び出しが空きを返した直後に待っていた呼び出しが動き出して、`dispose()` が止める対象を数えた後で Transaction を始めたり、破棄した後の Engine を作り直したりすることはありません（独立 Review の指摘）。`dispose()` が戻った後は、Engine を最初の使用時に作り直すので、再び使えます。空きの管理は `paw_backend/db.py` の小さな `_Slots`（`asyncio.BoundedSemaphore` と同じく先着順で、Cancel された待ちが空きを失わず、返しすぎを拒否する。待っている呼び出しを一度に失敗させられる）です。
 今後 Session を使う Endpoint を追加する場合、終了時に実行中だった Query の取消は psycopg の取消経路に入ります。
 その経路が終了を遅らせないことは、その Issue で確認してください。
 `Database.session()` と `paw_backend.api.deps.get_session` が Session を提供します。
@@ -324,13 +325,21 @@ Operator の 6 操作は次のように解釈しています（[要件](../../RE
 - Worker の記録（Step、Tool、Log、試行状態）は、担当する試行を明示します。`begin_step(task_id, name, attempt=...)` は `StepInfo`（`id` と `attempt` を持つ）を返し、`finish_step` は `step_id` で Step を指定します。
   Restart で新しい試行が始まった後に旧試行の Worker が書き込むと `StaleAttemptError` になり、何も書き込まれません（新しい試行の Step、Log、worktree の状態は変わりません）。同じ試行の中でも、Step の ID を指定するため、Retry より前の Worker が後から新しい Step を閉じることはできません。
 - **Tool の実行状態**: 要件の「Tool execution state」のうち、Backend が再接続後に再開または中断を判断するのに必要な最小の記録だけを持ちます。
-  `begin_tool_invocation` / `finish_tool_invocation` が Tool の ID（Tool Broker が UUID を渡すこともできる）、Tool 名、状態、時刻を記録し、`restore` は現在の Step の Tool（直近 100 件）を `TaskSnapshot.tool_invocations` で返します。
+  `begin_tool_invocation` / `finish_tool_invocation` が Tool の ID（Tool Broker が UUID を渡すこともできる）、Tool 名、状態、時刻を記録し、`restore` は現在の Step の Tool を `TaskSnapshot.tool_invocations`（開始が古い順）で返します。`started` のままの Tool は、後から何件開始・終了しても**すべて**返します（Backend が再開または中断を判断できなくなる取りこぼしを避けるため）。終了済みの Tool だけは直近 100 件に絞ります。返す件数が呼び出し側の操作で際限なく増えないよう、1 つの Step で同時に `started` にできる Tool は 1000 件（`MAX_ACTIVE_TOOL_INVOCATIONS`。**暫定の値で、人間の確認待ちです**。下の「人間の判断が必要な点」）までで、1001 件目の `begin_tool_invocation` は `TaskStepError` になります（どれかが終了すると、また開始できます）。
   **引数と出力は保存しません。** 権限判定、承認、引数と結果の扱いは Tool Broker（PAW-031）の責務です。Step が終わる（Stop Now / Fail / Restart / `finish_step`）と、`started` のままの Tool は `interrupted` になります。
 - `TaskService.restore(task_id)` は DB だけから Snapshot（状態、current step、直近の Log、worktree / review / PR の状態、直近の Event）を作ります。1 つの Repeatable Read Transaction で読むため、同じ時点の値です。
   状態は Process のメモリに持たないので、Client が切断しても、Backend が再起動しても、別の Process が同じ値を返します。
 - `TaskService(database, listeners=[...])` の Listener は Commit 後に、書き込まれた `TaskEvent` を受け取ります。Audit（PAW-025）の接続点です。Listener の失敗は Command を失敗させず、例外の型名だけを Log に残します。
   取りこぼしを避けたい Consumer は `task_events` を `seq` で読んでください（`TaskService.history(task_id, after_seq=...)`）。
 - 実行中 Task の Runtime 状態（実行中 Process など）の復旧は、要件どおり V1 では保証しません。`tool_invocations` が `started` のままの Task は、Backend が再開または中断を判断するための記録で、Process が生きている保証ではありません。
+
+**人間の判断が必要な点（暫定の上限）。** 次の上限は、要件が定める値ではなく、この実装が置いた**暫定の値**です。人間が確認するまで、既定として承認済みとはみなしません。値は `paw_backend/tasks/service.py` の定数で、変えても Schema は変わりません。
+
+- `MAX_ACTIVE_TOOL_INVOCATIONS` = 1000: 1 つの Step で同時に `started` にできる Tool の呼び出しの数。`restore` が返す件数を、呼び出し側の操作で際限なく増やさないための上限です（超える `begin_tool_invocation` は `TaskStepError`）。
+- `MAX_INPUT_DEPTH` = 32: Task の `input` の入れ子の深さ。
+- `MAX_INPUT_BYTES` = 256 KiB: Task の `input` を JSON にした長さ。
+
+`MAX_RESTORE_TOOL_INVOCATIONS`（`restore` が返す終了済みの Tool の件数、100）、`MAX_RESTORE_LOGS`（1000）も、同じく要件が定めない実装の値です。
 
 ### Migration は Application の Role に権限を与える（Contributor 向けの規則）
 
@@ -403,14 +412,19 @@ Claim できるのは `queued` の Entry と、Lease が切れた（`lease_expir
 Lease が有効なのは `lease_expires_at > now` の間だけで、期限の瞬間に失われます。`heartbeat`、`release`、`complete` ができるのは有効な Lease を持つ Worker だけで、それ以外（未 Claim、他の Worker、取消済み、期限切れ、存在しない Entry）は全て同じ `LeaseLostError` です。
 そのため、同じ瞬間に有効な Lease を持つ Worker は最大 1 人です。期限を過ぎた Worker が完了を報告しても拒否されるので、Worker は期限より十分短い間隔で `heartbeat` してください。
 **Claim の世代（Fencing token）。** Lease を識別するのは Entry の `id` と Worker の id だけでは足りません。Lease が切れた Worker の Entry が、**同じ Worker id**（設定で固定した id の再起動した Process など）に再び Claim されると、まだ動いている古い実行は、`claimed_by` も新しい Lease も満たしてしまい、新しい Claim の Heartbeat・返却・完了を行えてしまいます。そこで、Claim のたびに 1 増え、減ることも戻ることもない `claim_count`（Reclaim も、`release` 後の再 Claim も数える）を Lease の世代とします。`claim_next` が返す `QueueEntry.claim_count` を、Worker は `heartbeat(entry_id, worker_id, claim_count)`、`release(...)`、`complete(...)` の**必須の引数**として渡します（省略できると、渡し忘れた呼び出しが保護されないため、必須です）。Entry の現在の `claim_count` と違う世代は、Worker id が同じでも `LeaseLostError` になり、何も変更しません。`claim_count` は 1 以上の `int` で、範囲外・`bool`・`None` は `InvalidQueueingArgumentError("claim_count")` です（[Decision 0007](../../docs/decisions/0007-task-queue-budget-and-loop-policy.md) の 7）。
-**時計。** Queue が信頼する時計は **Database の時計だけ**です。`enqueued_at`、`claimed_at`、`lease_expires_at`、`finished_at` と「Lease が切れたか」の判定は、全て SQL の中で PostgreSQL の `clock_timestamp()`（評価した瞬間の壁時計）を使います。`now()` は Transaction の開始時刻で固定されるため、行の Lock を待った後の判定に、待つ前の古い時刻が使われてしまいます。ただし、`UPDATE` は行の Lock を待つ**前**に `WHERE` を判定し、Lock を持っていた側が Rollback した場合は判定し直さないので、`clock_timestamp()` だけでは不十分です。そこで `heartbeat` / `release` / `complete` は、まず行を `SELECT ... FOR UPDATE` で Lock し（待つのはここ）、次の文で Lease の期限を `clock_timestamp()` で判定して更新します。Lease を与えるときの `claimed_at` と期限は、1 つの文の中で**時計を 1 回だけ**読んだ値（揮発性の CTE）から作るので、ちょうど `lease_seconds` 離れます（`clock_timestamp()` を 2 回書くと、2 回読まれて数マイクロ秒ずれます）。
+**時計。** Queue が信頼する時計は **Database の時計だけ**です。`enqueued_at`、`claimed_at`、`lease_expires_at`、`finished_at` と「Lease が切れたか」の判定は、全て SQL の中で PostgreSQL の `clock_timestamp()`（評価した瞬間の壁時計）を使います。`now()` は使いません（提案は [Decision 0007](../../docs/decisions/0007-task-queue-budget-and-loop-policy.md) の 6。承認待ちです）。`now()` は Transaction の開始時刻で固定されるため、行の Lock を待った後の判定に、待つ前の古い時刻が使われてしまいます。実際の動作は次のとおりです。
+- **1 つの文の中では時計を 1 回だけ読みます。** 時計を使う文は、先頭に `WITH clock AS (SELECT clock_timestamp() AS ts)` を付け、文の中の「現在の時刻」と「現在 + `lease_seconds`」は全てこの CTE の 1 つの値を参照します（揮発性の関数を含む CTE は 1 回だけ評価されます）。そのため、Lease を与えるときの `claimed_at` と期限はちょうど `lease_seconds` 離れます（`clock_timestamp()` を文の中に 2 回書くと、2 回読まれて数マイクロ秒ずれます）。
+- **文をまたぐと、文ごとに読み直します。** `claim_next` は 1 Transaction の 2 文で、先頭の行を選ぶ文（期限切れの判定）と、その行を更新する文（`claimed_at` と期限）が別々に時計を読みます。後者の値は前者の値以後です。`SKIP LOCKED` は待たず、選んだ行は自分が Lock しているので、その間に Lease の状態は変わりません。
+- **Lease を判定する更新は、行の Lock を先に取ります。** `UPDATE` は行の Lock を待つ**前**に `WHERE` を判定し、Lock を持っていた側が Rollback した場合は判定し直さないので、`clock_timestamp()` を使うだけでは不十分です。そこで `heartbeat` / `release` / `complete` は、まず行を `SELECT ... FOR UPDATE` で Lock し（待つのはこの文）、次の文で、Lock を得た後に読んだ時刻で Lease の期限を判定して更新します。
+- **Lease を判定しない文は、待つ前に読んだ時刻を保存します。** `enqueue` の `enqueued_at` と `cancel` の `finished_at` は 1 つの文で書くため、同じ Task の別の `enqueue`（未 Commit）や、`cancel` の対象行の Lock を待つと、待つ前に読んだ時刻（待った時間だけ古い値）になります。先着順と記録のための時刻で、Lease の有効・失効は決めません。
+
 Worker が各自の時計を渡す方式では、時計が進んでいる Worker や誤って未来の時刻を渡した呼び出しが、まだ有効な Lease を「切れた」と判定して Entry を奪い、同じ Task を 2 つの Worker で始めさせられます（同様に過去の時刻で待ち行列の先頭へ割り込めます）。Database の時計なら、全ての Process が 1 つの基準を共有します。
 各 Method（`enqueue`、`claim_next`、`heartbeat`、`release`、`complete`、`cancel`）の `now` は省略でき、省略（`None`）が Database の時計です。**本番のコードは `now` を渡してはいけません。** 明示の `now`（Timezone 付きの `datetime`）は Test のための継ぎ目で、`TaskQueue(database, allow_explicit_now=True)` で作った Queue だけが受け取ります。それ以外の Queue は `InvalidQueueingArgumentError("now")` で拒否するので、既定の Queue では呼び出し側が時刻を差し込めません（[Decision 0007](../../docs/decisions/0007-task-queue-budget-and-loop-policy.md) の 6）。継ぎ目は、既存の Test をそのまま使えるように、Constructor で時計を差し替える方式ではなく Method の引数で残しています。
 限界: 基準は 1 つの PostgreSQL Server の時計です。Failover などで別の Server の時計へ切り替わる場合の時計のずれは扱いません（Lease は数十秒以上なので、通常の NTP の精度では問題になりません）。`BudgetTracker` の `clock` は、Queue とは別に Process の時計を使います（Task の実行時間の測定用で、Lease の判定ではありません）。
 
 **行ロック。** `claim_next` は 1 Transaction で、Claim できる行のうち先頭を `SELECT ... ORDER BY ... LIMIT 1 FOR UPDATE SKIP LOCKED` で選び、その行を更新します。他の Transaction がロック中の行は待たずに飛ばします。
 したがって、競合する複数の Claimer が同じ Entry を得ることはなく、互いを待たず、Claim できる Entry がロック中の 1 つだけなら `None` がすぐに返ります。
-`heartbeat`、`release`、`complete` は、行を Lock してから、Worker id・Claim の世代・Lease の期限を条件にした `UPDATE ... RETURNING` を行います。`cancel` は条件付きの単一の `UPDATE` です。
+`heartbeat`、`release`、`complete` は、1 Transaction の中で、まず行を `SELECT ... FOR UPDATE` で Lock し、次に Worker id・Claim の世代・Lease の期限を条件にした `UPDATE ... RETURNING` を行います（時計の項のとおり、期限は Lock を得た後の時刻で判定します）。`cancel` は条件付きの単一の `UPDATE` で、行の Lock を先には取りません。
 Test は別々の DB 接続を持つ複数の Claimer で、同じ Entry を 2 人が得ないこと、ロック中の行を待たないことを実 PostgreSQL で確認します。
 
 ### Budget（Preset と 6 種類の上限）
@@ -987,6 +1001,15 @@ Broker は、呼び出しがどの Repository に触れるかを **Backend が�
 
 `ApprovalService` は Broker と**別の Object**です。Agent の Runtime へは Broker（または Runner）だけを渡し、`ApprovalService` は渡さないでください（渡さなくても上の規則が守られますが、それが最初の防御です）。
 
+**人の判断（承認・却下・取り消し）の Store 呼び出しは、時間で区切ります。** 独立 Review が、接続は受け付けるが Query に答えない PostgreSQL に、`approve` / `reject` / `revoke` の照会（`get`）と更新（`decide` / `revoke`）が無期限に待たされ、承認の HTTP 要求と Pool の枠が塞がると指摘しました（`revoke_task`・Step-up・Listener・Audit は区切られていました）。Pool の Session の Query を `asyncio.timeout` で取り消しても、サーバが取り消しを確認しないため約 10 秒かかり、期限になりません（実測）。そこで 2 段にしました。
+
+1. `ApprovalService` は、1 回の操作の Store 呼び出し（照会と更新）を**1 つの期限 `timeout_seconds`** で区切ります。期限は操作の開始時に 1 回だけ数え、各呼び出しには残りを渡します（呼び出しごとに数え直すと、1 回の操作が 2 倍かかります）。使い切った後は次の呼び出しを始めません。期限になれば型付きの結果 `ApprovalOutcome.UNAVAILABLE` を返し、型名だけを Log に残します（Audit 行は、照会に成功して更新まで進んだ場合に `unavailable` で残ります）。Step-up は自分の期限を持つので、この期限には数えません。
+2. `PostgresApprovalStore` の `get` / `decide` / `revoke` は、Pool を使わない**中断可能な接続**（`Database.fetch_abortable`）で、変更と履歴の行を 1 つにした CTE の **1 つの Statement**（原子的）として実行し、`decision_timeout_seconds`（既定 3 秒）で Socket を閉じます。拒否の理由を説明する読み取りや、期限切れの印付けが要る呼び出しは、それらと**1 つの期限**を分け合います。
+
+期限を過ぎた Statement は、Server 側では続きが実行されることがあります（`revoke_task` と同じ）。ただし 1 つの Statement なので、承認の行と履歴の行は**両方が反映されるか、どちらも反映されない**かで、部分的な状態にはなりません。呼び直すと真の状態が返ります（反映済みなら `not_pending` / `not_open`）。
+Test: `tests/test_tools_approvals.py` の `DecisionDeadlineTest`（応答しない Store、1 つの期限、Step-up は数えないこと、型名だけの Log）、`tests/test_tools_postgres.py` の `StalledServerTest`（応答しない Server）、`DecisionStatementsShareOneDeadlineTest`（Statement ごとの残り時間）、`DecisionDeadlineTest`（行の Lock で Statement を止めて期限で返ること、承認と履歴が食い違わないこと）。
+限界: `open_request` / `consume` / `history` は Pool の Transaction で動き、Broker が `asyncio.timeout` で区切ります。応答しない Server では約 10 秒かかることがあり、`timeout_seconds` ちょうどでは返りません（この範囲外。後続の課題）。中断可能な接続は呼び出しごとに接続を張るので、Pool の Session より重いです（承認の Endpoint は低頻度です）。
+
 #### Task の終了と承認
 
 **Task の終わりは 3 つ**です。`completed`（完了）、`failed`、`cancelled`（`paw_backend.tasks.TERMINAL_STATES`）。Task の状態に `expired` はなく、承認は自分の `expires_at` で失効します（期限後は `approval_expired`。期限切れは取り消しの対象にもなりません）。
@@ -1004,6 +1027,9 @@ Broker は、呼び出しがどの Repository に触れるかを **Backend が�
   進行中の終了の遷移があれば、その Commit を待って新しい状態を読み、後から来た遷移は消費の Transaction の終わりを待ちます。使うことと終わりの順序は決まり、またぐことがありません（順序は `tests/test_tools_postgres.py` の `ConsumeRacesWithTaskEndTest` が、本物の Transaction を決まった順に動かして確かめます）。
   行の Lock には `tasks` への UPDATE 権限が要り、Application の Role は Task の状態を更新するために持っています（`tests/test_tools_postgres_roles.py`）。approval の理由（取り消し済み、使用済み、別の呼び出し）が言える場合は、Task の理由より先にそれを返します。
   `InMemoryApprovalStore` は Task を持たないので、`task_activity=` を渡したときだけ同じ確認を Store の Lock の中で行います（Test の代役。本番は `PostgresApprovalStore`）。
+- **開くときの確認も、挿入と同じ Transaction です。** 独立 Review が、Broker が Task を `ACTIVE` と読んだ後、要求を挿入する前に終了の遷移が Commit されると、Commit の後で動く取り消しは何も見つけられず、その後に挿入された要求が終わった Task の承認として残ると指摘しました（`ApprovalService` はその要求を承認でき、Retry / Restart で Task が再び動いた後、Listener の取り消しより先に Worker が消費する窓ができます）。
+  そこで Broker は `ApprovalStore.open_request(..., require_active_task=True)` で開き、`PostgresApprovalStore` は (Task, User) ごとの advisory lock の直後、**同じ Transaction の中で Task の行を `FOR SHARE` で読み直してから**挿入します。`ACTIVE` でなければ何も作らず、同じ呼び出しの既存の要求も返さず、`OpenOutcome.TASK_NOT_ACTIVE` / `TASK_UNKNOWN`（Broker では `task_not_active` / `task_unknown`）です。
+  進行中の終了の遷移はその Commit を待って終了を読み、後から来た遷移は挿入の Commit を待つので、その遷移の後の取り消しは必ず挿入された要求を見つけます（順序は `tests/test_tools_postgres.py` の `OpenRacesWithTaskEndTest` が、本物の Transaction を決まった順に動かして確かめます。Lock の権限は消費と同じです: `tests/test_tools_postgres_roles.py`）。`InMemoryApprovalStore` は `task_activity=` を渡したときだけ、同じ確認を Store の Lock の中で行います。
 - **再び動く Task:** Retry / Restart（終了状態からの遷移）でも Listener は Open な承認を取り消します。終了時の取り消しが失敗して残った承認は、再開した Task では使えず、新しい承認を求め直します。
 - **範囲と限界:** 承認を要しない呼び出し（`AUTO` / `SCOPED_AUTO`）は Task の状態を見ません（終わった Task へ呼び出しを渡さないのは Orchestrator の責務です）。消費より前に決まった使用は有効です（消費の後に Task が終わっても、実行中の呼び出しは Task の `stop_now` / `cancel` が止めます。Executor の中の確認は Executor の責務です）。
   判断の理由は [Decision 0006](../../docs/decisions/0006-tool-broker-policy.md) の「9. Task の終了と承認」（Proposed）。
@@ -1451,7 +1477,7 @@ Test は参照実装で成り立つことを確認しながら書いたもので
 - **停止。** Lifespan の終了で Cancel し、`PAW_SHUTDOWN_TIMEOUT_SECONDS` の範囲で待ってから `Database.dispose()` を呼びます（Diagnostic と同じ）。Purge が Query の途中でも、PostgreSQL が応答しなくても、Janitor はその場で終わります（下記「止まらない PostgreSQL」）。待ちを打ち切って Task を見捨てるのは、Cancel を無視する Task だけで、その数を WARNING に出します。
 - **複数 Process。** それぞれが Janitor を持ってかまいません。`purge_expired` は `SKIP LOCKED` なので、互いに待たず、同じ行を二重に消しません（`test_two_janitors_at_once_delete_every_row_exactly_once`）。
 - **権限。** `PAW_APP_DATABASE_ROLE` の Role のままで動きます。Migration `0050` の SELECT / DELETE だけを使います（`test_scratch_grants.py` が Janitor の Test もその Role で実行します）。
-- **Test。** `test_scratch_janitor.py`（Fake の Store と `sleep`）、`test_scratch_janitor_settings.py`、`test_scratch_janitor_lifespan.py`（起動する・しない、Cancel が `dispose` より先、待ちが有界）、`test_scratch_janitor_postgres.py`（実際の PostgreSQL で期限切れの行が消え、Pin・使用中・昇格確認中は残る。Application 全体でも確認。`StalledPurgeTest` は PostgreSQL の前に置いた Proxy を Purge の途中で止めて、Cancel と `dispose()` がその場で Purge を止めることを確かめます）、`test_scratch_janitor_stall.py`（応答しない PostgreSQL の Fake で、Purge の途中の Janitor が Lifespan の終了で本当に終わること、Process も遅れずに終わること）、`test_database_run_abortable.py`（`Database.run_abortable` の Commit・Rollback・同時数・Cancel）。
+- **Test。** `test_scratch_janitor.py`（Fake の Store と `sleep`）、`test_scratch_janitor_settings.py`、`test_scratch_janitor_lifespan.py`（起動する・しない、Cancel が `dispose` より先、待ちが有界）、`test_scratch_janitor_postgres.py`（実際の PostgreSQL で期限切れの行が消え、Pin・使用中・昇格確認中は残る。Application 全体でも確認。`StalledPurgeTest` は PostgreSQL の前に置いた Proxy を Purge の途中で止めて、Cancel と `dispose()` がその場で Purge を止めることを確かめます）、`test_scratch_janitor_stall.py`（応答しない PostgreSQL の Fake で、Purge の途中の Janitor が Lifespan の終了で本当に終わること、Process も遅れずに終わること）、`test_database_run_abortable.py`（`Database.run_abortable` の Commit・Rollback・同時数・Cancel）、`test_database_slot_wait.py`（空き待ちの Cancel と `dispose()`。応答しない PostgreSQL の Fake を、`database_pool_size=1` の唯一の空きを持ったまま止まる呼び出しにして確かめます）。
 
 **止まらない PostgreSQL。** PostgreSQL が接続を受け付けたまま応答しなくなると、通常の Pool の Query は Cancel でも止まりません（psycopg がサーバに Cancel を頼んで、答えを待ちます。約 10 秒、libpq が 17 未満なら Interpreter が終了時に待つ Thread から）。Lifespan の待ちは `PAW_SHUTDOWN_TIMEOUT_SECONDS` で打ち切れても、Task と接続は残り、Process の終了が遅れます（独立 Review の指摘）。そこで `purge_expired` は、Transaction 全体を `Database.run_abortable` で実行します。
 
@@ -1525,6 +1551,13 @@ class ResearchProvider(Protocol):
 Registry は登録時に `name` と `kind` の形、`search` と `fetch` が `async def` であること、Signature が `search("q", limit=1)` と `fetch("https://x/")` を受け付けることを検証します。
 不適合な Adapter は `ProviderInterfaceError`（失敗した Member 名だけを持つ）で拒否され、あとから「全 Provider が失敗した成功 Response」になることはありません。
 `name` と `kind` は登録時に 1 度だけ読み、以後 Provider 側が変えても結果には影響しません。
+
+**名前と種類の検査（Adapter の Object の Method を動かさない）。**
+
+- `name` は、受け取った文字列そのものを `fullmatch` で `[a-z0-9][a-z0-9_-]{0,63}` に照合します。正規化した写しは照合しません。Pattern は ASCII だけで、`$` も `IGNORECASE` も使いません。そのため、全角の英数字、NFKC で ASCII と同じになる文字（合字、丸数字、Kelvin 記号、長い s など）、大文字、Zero-width 文字、前後や途中の空白、末尾の改行（`$` なら通る）は、全て `ProviderInterfaceError("name")` で拒否されます。NFKC・小文字化・`strip` で別の名前と一致させられることも、登録済みの名前と「見た目が同じ」名前が別に登録されることもありません（`test_research_registry.py` が、全 Unicode コードポイントを 1 文字目と 2 文字目に置いて、通るのが ASCII の `[a-z0-9]` / `[a-z0-9_-]` だけであることを確かめます）。
+- `str` の Subclass（`StrEnum` の要素など）は、中身が合っていれば受け付けますが、Registry が保持するのは**厳密な `str` の写し**で、Adapter が返した Object そのものではありません。Subclass が `__hash__`・`__eq__`・`__lt__`・`__str__` などを上書きしていても、登録・`select()`・`gather()` が例外で失敗すること、一意性の検査をすり抜けて同じ名前を 2 つ登録すること、Log の文字列に Credential のような文字が入ることは起きません（[PAW-051 の独立 Review の指摘](../../docs/decisions/0012-research-provider-adapter-policy.md)）。写しは C の `str.encode` で作るので、上書きされた Method は呼びません。
+- 型は `type()` で読みます（`isinstance` は Object の `__class__` を信じます）。`__class__` で `str` や `ProviderKind` を名乗るだけの Object は、`re` の `TypeError` などの別の例外ではなく、`ProviderInterfaceError("name")` / `("kind")` になります。`kind` は `ProviderKind` の要素そのものだけを受け付けます（Member を持つ Enum は継承できません）。
+- 範囲: これは Adapter が返す `name` と `kind` の話です。`ProviderRegistry.get(name)` の引数と、呼び出し元が作る `SourceMetadata.provider_id` は、呼び出し元（Tool Broker）の Code で、この層は写しません（Broker が返す値は Registry の写しです）。
 
 ### Request と Result
 
@@ -1627,6 +1660,7 @@ License や `robots.txt` に関する項目はありません。要件と設計�
   3. 複数 Provider の結果は交互に並べ、正規化した URL の最初の 1 件を残します（要件に統合の規則がありません）。
   4. Credential 用の Query Parameter の一覧は Best effort です。
   5. IPv6 と非 ASCII の Host は拒否し、名前解決はしません。`network` Capability、SSRF、`robots.txt` は呼び出し元（Tool Broker、PAW-031）と個々の Adapter の責任です。
+  6. Provider の名前は正規化せず（look-alike は拒否）、`str` の Subclass は厳密な `str` の写しにして保持します。Subclass を拒否する案は採っていません（`StrEnum` の要素を名前にできるため）。
 
 ### Test
 

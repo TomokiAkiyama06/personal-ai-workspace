@@ -653,7 +653,9 @@ class ApprovalFlowTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_failing_approval_store_denies_without_its_message(self):
         class Failing(InMemoryApprovalStore):
-            async def open_request(self, new, *, now):
+            async def open_request(
+                self, new, *, now, limits, require_active_task=False
+            ):
                 raise ConnectionError(SECRET)
 
             async def consume(
@@ -675,7 +677,9 @@ class ApprovalFlowTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_store_that_answers_nonsense_denies(self):
         class Nonsense(InMemoryApprovalStore):
-            async def open_request(self, new, *, now):
+            async def open_request(
+                self, new, *, now, limits, require_active_task=False
+            ):
                 return "created"
 
             async def consume(
@@ -694,9 +698,9 @@ class ApprovalFlowTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_store_that_returns_another_calls_request_denies(self):
         class Wrong(InMemoryApprovalStore):
-            async def open_request(self, new, *, now):
+            async def open_request(self, new, **arguments):
                 other = dataclasses.replace(new, call_hash="0" * 64)
-                return await super().open_request(other, now=now)
+                return await super().open_request(other, **arguments)
 
         h = Harness(approvals=Wrong())
         with self.assertLogs(level="ERROR"):
@@ -1584,7 +1588,65 @@ class TaskEndTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             (used.verdict, used.reason), (Verdict.ALLOW, R.APPROVAL_CONSUMED)
         )
-        self.assertEqual(truth.checks, [TASK])
+        # the store asks in the step that opens and in the step that consumes
+        # (it used to ask only when consuming)
+        self.assertEqual(truth.checks, [TASK, TASK])
+
+    async def test_a_task_that_ends_between_the_check_and_the_request_opens_nothing(
+        self,
+    ):
+        # The broker's own check answers ACTIVE, and then the task ends: what
+        # the store sees, in the step that inserts, is the end. (In production
+        # the store reads the task row locked in that transaction; see
+        # test_tools_postgres.OpenRacesWithTaskEndTest.)
+        for answer, reason in (
+            (TaskActivity.ENDED, R.TASK_NOT_ACTIVE),
+            (TaskActivity.UNKNOWN, R.TASK_UNKNOWN),
+        ):
+            with self.subTest(answer=answer.value):
+                truth = FakeTaskActivity()
+                store = InMemoryApprovalStore(task_activity=truth)
+                h = Harness(approvals=store)  # the broker's provider says ACTIVE
+                truth.answer = answer  # the task ends after the broker's check
+                asked = await self.open_after_end("a", h)
+                self.assertEqual(
+                    (asked.verdict, asked.reason, asked.approval_id),
+                    (Verdict.DENY, reason, None),
+                )
+                self.assertEqual(h.task_activity.checks, [TASK])  # the broker's own
+                self.assertEqual(truth.checks, [TASK])  # the store's, at the insert
+                self.assertEqual(store._records, {})
+                self.assertEqual(store._history, [])
+                self.assertEqual(await h.service.revoke_task(TASK), 0)
+
+    async def test_a_request_that_was_open_when_the_task_ended_is_not_handed_out(self):
+        # (the revocation failed, and the broker's own check is the one that is
+        # overtaken): the store names the task, it does not return the request
+        truth = FakeTaskActivity()
+        store = InMemoryApprovalStore(task_activity=truth)
+        h = Harness(approvals=store)
+        first = await self.open("a", h)
+        truth.answer = TaskActivity.ENDED
+        again = await self.open_after_end("a", h)
+        self.assertEqual(
+            (again.verdict, again.reason, again.approval_id),
+            (Verdict.DENY, R.TASK_NOT_ACTIVE, None),
+        )
+        self.assertEqual(await self.status(first, h), ApprovalStatus.PENDING)
+
+    async def test_the_broker_asks_the_store_to_check_the_task_when_it_opens(self):
+        class Spy(InMemoryApprovalStore):
+            calls: list = []
+
+            async def open_request(self, new, **arguments):
+                self.calls.append(arguments)
+                return await super().open_request(new, **arguments)
+
+        store = Spy()
+        h = Harness(approvals=store)
+        await self.open("a", h)
+        (arguments,) = store.calls
+        self.assertIs(arguments["require_active_task"], True)
 
     async def test_the_broker_asks_the_store_to_check_the_task_when_it_consumes(self):
         class Spy(InMemoryApprovalStore):
@@ -1701,6 +1763,212 @@ class TaskEndTest(unittest.IsolatedAsyncioTestCase):
             with self.subTest(provider=repr(provider)[:30]):
                 with self.assertRaises(TypeError):
                     Harness(task_activity=provider)
+
+
+class PausingStore(InMemoryApprovalStore):
+    """Stalls (never answers) the calls named in ``stalled``, and makes every
+    other call take ``delays[name]`` seconds; ``calls`` lists what was called."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.stalled: set[str] = set()
+        self.delays: dict[str, float] = {}
+        self.failures: dict[str, Exception] = {}
+        # calls that hold the thread (they never yield to the event loop)
+        self.blocking: dict[str, float] = {}
+        self.calls: list[str] = []
+        self.stalling = asyncio.Event()  # set once a call has begun to stall
+
+    def _hold_the_thread(self, name):
+        time.sleep(self.blocking.get(name, 0))
+
+    async def _pause(self, name):
+        self.calls.append(name)
+        if name in self.failures:
+            raise self.failures[name]
+        self._hold_the_thread(name)
+        if name in self.stalled:
+            self.stalling.set()
+            await asyncio.Event().wait()
+        await asyncio.sleep(self.delays.get(name, 0))
+
+    async def get(self, approval_id):
+        await self._pause("get")
+        return await super().get(approval_id)
+
+    async def decide(self, approval_id, **arguments):
+        await self._pause("decide")
+        return await super().decide(approval_id, **arguments)
+
+    async def revoke(self, approval_id, **arguments):
+        await self._pause("revoke")
+        return await super().revoke(approval_id, **arguments)
+
+
+class DecisionDeadlineTest(unittest.IsolatedAsyncioTestCase):
+    """A human's decision (approve / reject / revoke) does not wait for a stalled store.
+
+    Finding of the third review of PR #74: ``approve``, ``reject`` and ``revoke``
+    awaited the store's lookup and update with no deadline, so a database that
+    accepted the connection and stalled the query held the approval request
+    (and its pool slot) for ever, although ``revoke_task``, the step-up, the
+    listeners and the audit row were all bounded. The lookup and the update of
+    one operation now share ONE ``timeout_seconds`` (started once); the outcome is
+    the typed ``unavailable``, nothing is stored by the call that was cut off,
+    and the step-up (which has its own limit) is not part of it.
+    """
+
+    GUARD = 5  # far above every limit here: only reached by a call that ignores it
+    OPERATIONS = {
+        "approve": ("tool.approval.approve", "decide"),
+        "reject": ("tool.approval.reject", "decide"),
+        "revoke": ("tool.approval.revoke", "revoke"),
+    }
+
+    async def wire(self, limit=0.05, call=None, **kwargs):
+        self.store = PausingStore()
+        self.h = Harness(approvals=self.store)
+        self.user = principal(SystemRole.USER, U1)
+        self.sink = InMemoryAuditSink()
+        self.told: list = []
+        self.service = ApprovalService(
+            self.store,
+            self.sink,
+            step_up=kwargs.pop("step_up", StepUp(True)),
+            clock=self.h.clock,
+            listeners=(self.told.append,),
+            timeout_seconds=limit,
+        )
+        # a request that was opened while the store was healthy
+        opened = await self.h.broker.request(
+            call or make_call("repo.delete_tree", DELETE)
+        )
+        self.assertEqual(opened.verdict, Verdict.NEEDS_APPROVAL)
+        self.approval_id = opened.approval_id
+        self.store.calls.clear()
+
+    async def kinds(self):
+        return [e.kind for e in await self.store.history(self.approval_id)]
+
+    async def assert_untouched(self, action, *, audited=True):
+        """Nothing was stored or told by the cut-off call, and what it left in
+        the audit log says it was refused (a lookup that failed leaves no row:
+        without the approval there is nothing to attribute it to)."""
+        record = await self.store.get(self.approval_id)
+        self.assertEqual(record.status, ApprovalStatus.PENDING)
+        self.assertEqual(await self.kinds(), [ApprovalEventKind.REQUESTED])
+        self.assertEqual(self.told, [])
+        self.assertEqual(
+            [(e.action, e.decision, e.reason) for e in self.sink.events],
+            [(action, "deny", "unavailable")] if audited else [],
+        )
+
+    async def test_a_store_that_never_answers_cannot_hold_a_decision_up(self):
+        for operation, (action, update) in self.OPERATIONS.items():
+            for stalled in ("get", update):
+                with self.subTest(operation=operation, stalled=stalled):
+                    await self.wire()
+                    self.store.stalled = {stalled}
+                    started = time.monotonic()
+                    with self.assertLogs(level="ERROR") as logs:
+                        async with asyncio.timeout(self.GUARD):
+                            result = await getattr(self.service, operation)(
+                                self.approval_id, self.user
+                            )
+                    self.assertLess(time.monotonic() - started, self.GUARD / 2)
+                    self.assertEqual(
+                        (result.outcome, result.approval_id, bool(result)),
+                        (ApprovalOutcome.UNAVAILABLE, self.approval_id, False),
+                    )
+                    self.assertIn("TimeoutError", "\n".join(logs.output))
+                    # the call reached the store as far as it stalled, no further
+                    self.assertEqual(
+                        self.store.calls,
+                        ["get"] if stalled == "get" else ["get", update],
+                    )
+                    # (the store answers again: the checks below read it)
+                    self.store.stalled = set()
+                    await self.assert_untouched(action, audited=stalled != "get")
+                    # ... and the decision goes through now
+                    again = await getattr(self.service, operation)(
+                        self.approval_id, self.user
+                    )
+                    self.assertTrue(again, again)
+
+    async def test_the_lookup_and_the_update_share_one_deadline(self):
+        # every call takes 0.3 s of a 0.5 s limit: each is inside the limit, the
+        # two together are not (the old code had no limit at all; a limit that
+        # restarted for each call would let both through)
+        limit, step = 0.5, 0.3
+        for operation, (action, update) in self.OPERATIONS.items():
+            with self.subTest(operation=operation):
+                await self.wire(limit)
+                self.store.delays = {"get": step, update: step}
+                started = time.monotonic()
+                with self.assertLogs(level="ERROR"):
+                    result = await getattr(self.service, operation)(
+                        self.approval_id, self.user
+                    )
+                elapsed = time.monotonic() - started
+                self.assertEqual(result.outcome, ApprovalOutcome.UNAVAILABLE)
+                self.assertGreaterEqual(elapsed, limit - 0.05)  # it did wait
+                self.assertLess(elapsed, step * 2 + 0.3)  # and it did not wait more
+                self.assertEqual(self.store.calls, ["get", update])
+                await self.assert_untouched(action)
+                # a lookup that alone takes 0.3 s is inside the limit
+                await self.wire(limit)
+                self.store.delays = {"get": step}
+                done = await getattr(self.service, operation)(
+                    self.approval_id, self.user
+                )
+                self.assertTrue(done, done)
+
+    async def test_a_deadline_that_the_lookup_used_up_starts_no_update(self):
+        # a lookup that overran without ever yielding to the event loop (so
+        # nothing could cut it off) leaves nothing for the update
+        await self.wire(0.3)
+        self.store.blocking = {"get": 0.4}
+        with self.assertLogs(level="ERROR") as logs:
+            result = await self.service.approve(self.approval_id, self.user)
+        self.assertEqual(result.outcome, ApprovalOutcome.UNAVAILABLE)
+        self.assertIn("TimeoutError", "\n".join(logs.output))
+        self.assertEqual(self.store.calls, ["get"])  # the update never started
+        await self.assert_untouched("tool.approval.approve")
+
+    async def test_the_step_up_has_its_own_limit_and_is_not_part_of_the_store_deadline(
+        self,
+    ):
+        class SlowStepUp(StepUp):
+            async def verify(self, user_id, approval_id):
+                await asyncio.sleep(0.4)
+                return await super().verify(user_id, approval_id)
+
+        # 0.25 s for the lookup and 0.25 s for the update are inside a 0.6 s
+        # limit; the step-up's 0.4 s in between is not counted against it
+        await self.wire(0.6, make_call("git.merge", MERGE), step_up=SlowStepUp(True))
+        self.store.delays = {"get": 0.25, "decide": 0.25}
+        result = await self.service.approve(self.approval_id, self.user)
+        self.assertEqual(result.outcome, ApprovalOutcome.APPROVED, result)
+        self.assertEqual(self.store.calls, ["get", "decide"])
+
+    async def test_a_failing_store_is_reported_by_type_only(self):
+        # (the same outcome as before for a store that fails instead of stalling)
+        await self.wire()
+        self.store.failures = {"decide": ConnectionError(SECRET)}
+        with self.assertLogs(level="ERROR") as logs:
+            result = await self.service.approve(self.approval_id, self.user)
+        self.assertEqual(result.outcome, ApprovalOutcome.UNAVAILABLE)
+        self.assertNotIn(SECRET, "\n".join(logs.output))
+        self.assertIn("ConnectionError", "\n".join(logs.output))
+
+    async def test_a_caller_that_cancels_is_not_turned_into_an_outcome(self):
+        await self.wire(10)
+        self.store.stalled = {"decide"}
+        call = asyncio.create_task(self.service.approve(self.approval_id, self.user))
+        await asyncio.wait_for(self.store.stalling.wait(), self.GUARD)
+        call.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await call
 
 
 class HashInputsAndUndeclaredArgumentsTest(unittest.IsolatedAsyncioTestCase):

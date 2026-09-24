@@ -34,11 +34,11 @@ narrow what the previous one allowed:
    used, whatever the store still says. Then, without an approval a request is
    opened (``NEEDS_APPROVAL``); with one it is consumed atomically (single
    use) or the call is denied with the reason (expired, replayed, for another
-   call...). The check before the use gives the early, precise reason; it can be
-   overtaken by the end of the task, so the store checks the task **again in the
-   same transaction that consumes** (``require_active_task``: the task row is
-   read locked), and a task that ended in between consumes nothing
-   (``task_not_active``).
+   call...). The check before the request or the use gives the early, precise
+   reason; it can be overtaken by the end of the task, so the store checks the
+   task **again in the same transaction that inserts the request or consumes
+   the approval** (``require_active_task``: the task row is read locked), and a
+   task that ended in between opens or consumes nothing (``task_not_active``).
 
 The decision is audited (ids and enums only). An ``ALLOW`` that cannot be
 recorded becomes a ``DENY`` (``audit_unavailable``): a tool never runs without
@@ -138,6 +138,10 @@ _CONSUME_REASON = {
 _OPEN_REFUSAL_REASON = {
     OpenOutcome.TOO_MANY_PENDING: BrokerReason.APPROVAL_LIMIT_REACHED,
     OpenOutcome.COOLING_DOWN: BrokerReason.APPROVAL_COOLDOWN,
+    # The task ended between the broker's check and the insert (the store checks
+    # it again in the transaction that inserts).
+    OpenOutcome.TASK_NOT_ACTIVE: BrokerReason.TASK_NOT_ACTIVE,
+    OpenOutcome.TASK_UNKNOWN: BrokerReason.TASK_UNKNOWN,
 }
 
 
@@ -595,7 +599,7 @@ class ToolBroker:
         try:
             async with asyncio.timeout(self._timeout_seconds):
                 opened = await self._approvals.open_request(
-                    new, now=now, limits=self._limits
+                    new, now=now, limits=self._limits, require_active_task=True
                 )
         except Exception as error:
             logger.error("Approval request failed (%s)", type(error).__name__)

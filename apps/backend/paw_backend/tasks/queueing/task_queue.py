@@ -7,14 +7,31 @@ the orchestrator (PAW-034) pairs ``claim_next`` with the PAW-032 ``start``
 command. It performs no authorisation and offers no HTTP endpoint.
 
 Time. The DATABASE clock is the only clock the queue trusts (Decision 0007,
-section 6): every instant it compares or stores (``enqueued_at``, ``claimed_at``,
-``lease_expires_at``, ``finished_at`` and "has this lease expired?") is
-PostgreSQL's ``clock_timestamp()`` (the wall clock at the moment it is evaluated, so
-after any wait for a row lock; ``now()`` is fixed at the start of the transaction and
-would judge an expiry by a time that has already passed) evaluated inside the SQL
-statement. A worker's own clock, however skewed or wrong, therefore cannot
-make a live lease look expired (and so cannot start the same task on a second
-worker) or put an entry in front of the queue. All processes share one authority.
+section 6, Proposed): every instant it compares or stores (``enqueued_at``,
+``claimed_at``, ``lease_expires_at``, ``finished_at`` and "has this lease
+expired?") is PostgreSQL's ``clock_timestamp()`` (the wall clock at the moment it is
+evaluated) read inside the SQL statement. It is never ``now()``: that is fixed at the
+start of the transaction and would judge an expiry by a time that has already
+passed after a wait for a row lock. A worker's own clock, however skewed or wrong,
+therefore cannot make a live lease look expired (and so cannot start the same task
+on a second worker) or put an entry in front of the queue. All processes share one
+authority. Exactly how the clock is read:
+
+* ONE reading per statement. Every statement that needs the time starts with
+  ``WITH clock AS (SELECT clock_timestamp() AS ts)`` and refers to that CTE (see
+  ``_instants``), so "now" and "now + lease" of one statement come from one value
+  and ``claimed_at`` and ``lease_expires_at`` are exactly ``lease_seconds`` apart.
+* A new reading per statement. Two statements of one transaction read the clock
+  separately (``claim_next``: the statement that picks the entry judges expiry with
+  its reading, the one that updates it stamps ``claimed_at`` with a later one).
+* A lease is judged after the row lock is held. ``heartbeat`` / ``release`` /
+  ``complete`` first lock the row with ``SELECT ... FOR UPDATE`` (this is the
+  statement that may wait) and judge the lease, with a reading taken afterwards,
+  in the next statement (see ``_update_held``).
+* A statement that judges no lease keeps the reading it took before a wait:
+  ``enqueue`` (``enqueued_at``, while it waits for another uncommitted enqueue of
+  the same task) and ``cancel`` (``finished_at``, while it waits for the row lock).
+  These stamp ordering and records, and decide no lease.
 
 Every method takes an optional ``now``. ``None`` (the default, and what production
 code must always use) means the database clock. An explicit timezone-aware
@@ -64,8 +81,10 @@ then updates that row. A row that another transaction has locked is SKIPPED, not
 waited for. Hence two racing claimers never receive the same entry, a claimer
 never blocks behind another one, and if the only claimable entry is locked by
 somebody else the call returns ``None`` immediately. ``heartbeat`` / ``release``
-/ ``complete`` / ``cancel`` are single conditional ``UPDATE ... RETURNING``
-statements (atomic by themselves).
+/ ``complete`` run in one transaction of two statements: ``SELECT ... FOR UPDATE``
+of the entry (they wait here for a competing transaction), then a conditional
+``UPDATE ... RETURNING`` that judges worker, claim generation and lease. ``cancel``
+is one conditional ``UPDATE`` (atomic by itself; it takes no row lock first).
 
 Errors. Invalid arguments (including an explicit ``now`` that this queue does not
 accept) raise ``InvalidQueueingArgumentError(parameter)`` before any database
@@ -165,9 +184,11 @@ class TaskQueue:
         """The current instant and the expiry of a lease granted now, as SQL.
 
         ``now=None``: PostgreSQL's ``clock_timestamp()`` (the wall clock at the
-        moment it is evaluated, so after any wait for a row lock, unlike ``now()``,
-        which is fixed at the start of the transaction) and that plus the lease,
-        evaluated by the database. An explicit ``now`` (test
+        moment it is evaluated; ``now()`` would be the start of the transaction) and
+        that plus the lease. Both are subqueries of the CTE ``clock`` that the
+        statement using them starts with, so ONE reading serves the whole statement.
+        A statement that waits for a row lock keeps its reading from before the
+        wait (which is why ``_update_held`` locks first). An explicit ``now`` (test
         seam) is checked and bound as a value. Raises
         ``InvalidQueueingArgumentError("now")`` for an explicit ``now`` that is
         not a timezone-aware ``datetime`` or when the queue does not allow it.
@@ -176,8 +197,9 @@ class TaskQueue:
             # ONE reading of the clock per statement: ``clock_timestamp()`` written
             # twice would be read twice (the reads of a volatile function may
             # differ even within a statement), so ``claimed_at`` and the lease end
-            # would not be exactly ``lease_seconds`` apart. A volatile CTE is
-            # evaluated once however often it is referenced.
+            # would not be exactly ``lease_seconds`` apart. A CTE that contains a
+            # volatile function is evaluated (materialised) once however often it
+            # is referenced.
             sample = select(func.clock_timestamp().label("ts")).cte("clock")
             current = select(sample.c.ts).scalar_subquery()
             return current, current + self._lease
@@ -199,8 +221,8 @@ class TaskQueue:
         """Put a task in the queue and return the new entry.
 
         The entry is ``queued`` with ``enqueued_at`` = the current instant (the
-        database clock, or ``now`` under the test seam), ``claim_count = 0`` and
-        no worker. ``priority_rank`` is ``priority.rank``.
+        database clock read by this statement, or ``now`` under the test seam),
+        ``claim_count = 0`` and no worker. ``priority_rank`` is ``priority.rank``.
 
         Raises ``TaskNotFoundError`` when no task has this id (foreign key
         violation, SQLSTATE 23503), ``TaskAlreadyQueuedError`` when the task
@@ -256,7 +278,11 @@ class TaskQueue:
         ``claim_count + 1``. The returned ``QueueEntry`` shows the row after the
         update; its ``claim_count`` is the claim generation the worker must present
         to ``heartbeat`` / ``release`` / ``complete``. Both statements run in one
-        transaction, so they see one instant.
+        transaction but each reads the database clock itself: the selecting one
+        judges expiry with its reading, the updating one stamps ``claimed_at`` and
+        the lease end (exactly ``lease_seconds`` apart) with a later reading. The
+        selected row is locked by this claimer in between, so its lease cannot
+        change.
 
         ``worker_id``: see ``validation.check_worker_id``. A worker may hold
         several entries at once (limiting concurrency is not the queue's job).
@@ -391,7 +417,8 @@ class TaskQueue:
     async def cancel(self, task_id: uuid.UUID, now: datetime | None = None) -> bool:
         """Cancel the task's active entry (``queued`` or ``claimed``), if any.
 
-        Sets ``status = cancelled``, ``finished_at`` = now and clears
+        Sets ``status = cancelled``, ``finished_at`` = now (read by this statement
+        before it waits for the row lock, if it has to) and clears
         ``lease_expires_at`` (``claimed_by`` / ``claimed_at`` are kept). A worker
         that held the entry loses its lease: its next ``heartbeat`` / ``release`` /
         ``complete`` raises ``LeaseLostError``. Returns ``True`` when an entry was

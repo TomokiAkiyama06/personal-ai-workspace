@@ -59,10 +59,12 @@ def validate_provider(provider: object) -> None:
     Members are checked in this order and the first failure is reported in
     ``error.member``:
 
-    1. ``"name"``: ``provider.name`` exists and is a ``str`` that fully matches
-       ``PROVIDER_NAME_PATTERN``.
+    1. ``"name"``: ``provider.name`` exists and is a ``str`` (a subclass is
+       accepted, but stored as a plain ``str`` copy; an object that only claims
+       to be one is rejected) that fully matches ``PROVIDER_NAME_PATTERN`` as it
+       is: nothing is normalised, so look-alikes are rejected.
     2. ``"kind"``: ``provider.kind`` is a ``ProviderKind`` member (the plain string
-       ``"web"`` is not accepted).
+       ``"web"`` is not accepted, nor an object that only claims the class).
     3. ``"search"``: ``provider.search`` exists, is a coroutine function
        (``inspect.iscoroutinefunction``; a plain ``def`` returning a coroutine
        is not accepted) and its signature (``inspect.signature`` of the bound
@@ -84,12 +86,34 @@ def _identity(provider: object) -> tuple[str, ProviderKind]:
     A property can return something else on the next read, so what is checked
     here is the very value that is used afterwards (the registry stores this
     pair, and never reads the provider's identity again).
+
+    The provider is adapter code, and so is every object it returns: none of the
+    object's own methods may run in the registry or the broker.
+
+    * The class is read with ``type()`` (``isinstance`` would also believe an
+      object's ``__class__``, and ``re`` would then raise a ``TypeError``
+      instead of ``ProviderInterfaceError``). ``kind`` must be a
+      ``ProviderKind`` member itself; an enum with members cannot be subclassed.
+    * The name is checked as it was given: ``fullmatch`` reads the characters of
+      a ``str`` (also of a subclass) without calling any of its methods, and the
+      pattern is ASCII only, so a name that differs only by Unicode
+      normalisation, case, width or whitespace (including a trailing newline)
+      does not match, and nothing is normalised into a form that could equal
+      another name.
+    * What is returned is an exact ``str`` copy of the checked characters. A
+      ``str`` subclass (a ``StrEnum`` member, say) is accepted, but the object
+      itself is never stored: an overridden ``__hash__``, ``__eq__``,
+      ``__lt__`` or ``__str__`` could otherwise raise in ``register`` /
+      ``select`` / ``gather``, get past the uniqueness check, or put credential
+      text into a log line. ``str.encode`` is the C method, so the copy does not
+      call an override either (the name is ASCII here, so this cannot fail).
     """
     name = getattr(provider, "name", None)
-    if not isinstance(name, str) or PROVIDER_NAME_PATTERN.fullmatch(name) is None:
+    if not issubclass(type(name), str) or PROVIDER_NAME_PATTERN.fullmatch(name) is None:
         raise ProviderInterfaceError("name")
+    name = str.encode(name, "ascii").decode("ascii")
     kind = getattr(provider, "kind", None)
-    if not isinstance(kind, ProviderKind):
+    if type(kind) is not ProviderKind:
         raise ProviderInterfaceError("kind")
     return name, kind
 
@@ -131,7 +155,8 @@ class ProviderRegistry:
            ``RegistryFullError``.
 
         The name and kind are read from the provider once, here, and the values
-        that were validated are the ones stored.
+        that were validated are the ones stored (the name as an exact ``str``
+        copy, see ``_identity``).
         """
         name, kind = _identity(provider)  # read once, here, and validated
         _check_methods(provider)
