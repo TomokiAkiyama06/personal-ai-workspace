@@ -80,9 +80,14 @@ class AuditActionTestCase(AsyncPostgresSharedTestCase):
         return Principal(uuid4(), role)
 
     def audit_of(self, actor: Principal) -> list[dict[str, Any]]:
+        """The Authorizer's rows (the attempts) of ``actor``, not the completions.
+
+        A change also appends a completion row (reason ``completed``); those are
+        checked in ``test_shared_memory_completion.py``.
+        """
         return self.rows(
             f"SELECT {_COLUMNS} FROM audit_events WHERE actor_id = :actor"
-            " ORDER BY recorded_at, occurred_at",
+            " AND reason <> 'completed' ORDER BY recorded_at, occurred_at",
             actor=actor.user_id,
         )
 
