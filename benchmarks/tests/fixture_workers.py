@@ -11,6 +11,7 @@ VALID_OUTPUT = json.dumps(
                 "scope": "user",
                 "state": "confirmed",
                 "supersedes": None,
+                "content": "The user's favorite color is blue.",
             }
         ]
     }

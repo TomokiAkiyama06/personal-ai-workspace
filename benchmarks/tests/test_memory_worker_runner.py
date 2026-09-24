@@ -79,6 +79,7 @@ class MemoryWorkerRunnerTest(unittest.TestCase):
         )
         self.assertEqual(len(case1.gold), 1)
         self.assertEqual(case1.gold[0].key, "favorite_color")
+        self.assertEqual(case1.gold[0].content, "The user's favorite color is blue.")
         self.assertEqual(case1.gold[0].scope, "user")
         self.assertEqual(case1.gold[0].state, "confirmed")
         self.assertIsNone(case1.gold[0].supersedes)
@@ -198,7 +199,14 @@ class MemoryWorkerRunnerTest(unittest.TestCase):
                 {
                     "id": "c1",
                     "input": "text",
-                    "gold": [{"key": "k", "scope": "schedule", "state": "confirmed"}],
+                    "gold": [
+                        {
+                            "key": "k",
+                            "scope": "schedule",
+                            "state": "confirmed",
+                            "content": "the fact",
+                        }
+                    ],
                 }
             ]
         }
@@ -391,7 +399,13 @@ class MemoryWorkerRunnerTest(unittest.TestCase):
             return load_cases(str(path))
 
     def test_malformed_cases_raise_value_error_naming_the_problem(self):
-        gold = {"key": "k", "scope": "user", "state": "confirmed", "supersedes": None}
+        gold = {
+            "key": "k",
+            "scope": "user",
+            "state": "confirmed",
+            "supersedes": None,
+            "content": "the fact",
+        }
         good = {"id": "c1", "input": "text", "gold": [gold]}
         cases = (
             (
@@ -502,9 +516,122 @@ class MemoryWorkerRunnerTest(unittest.TestCase):
             (MemoryRecord("k", "user", "inferred", None, "the fact", ("other",)),),
         )
 
+    def test_gold_without_content_is_a_case_file_error_that_does_not_echo_values(self):
+        # Without a content label a gold record could only be scored on its key, so a
+        # worker that omits or invents the fact would still earn exact recall.
+        record = {"key": "k", "scope": "user", "state": "confirmed"}
+        prefix = "Invalid gold record at index 0 in case 'c1': "
+        for gold, reason in (
+            (record, "missing 'content'"),
+            (dict(record, content=None), "'content' must be a non-empty string"),
+        ):
+            with self.subTest(gold=gold):
+                document = {"cases": [{"id": "c1", "input": "text", "gold": [gold]}]}
+                with self.assertRaises(ValueError) as caught:
+                    self._load_from_text(json.dumps(document))
+                self.assertEqual(str(caught.exception), prefix + reason)
+
+    def test_one_gold_record_without_content_rejects_the_whole_dataset(self):
+        labelled = {"key": "a", "scope": "user", "state": "confirmed", "content": "x"}
+        unlabelled = {"key": "b", "scope": "user", "state": "confirmed"}
+        document = {
+            "cases": [
+                {"id": "c1", "input": "text", "gold": [labelled]},
+                {"id": "c2", "input": "text", "gold": [labelled, unlabelled]},
+            ]
+        }
+        with self.assertRaises(ValueError) as caught:
+            self._load_from_text(json.dumps(document))
+        self.assertEqual(
+            str(caught.exception),
+            "Invalid gold record at index 1 in case 'c2': missing 'content'",
+        )
+
+    def test_bundled_valid_cases_label_every_gold_record_with_content(self):
+        cases = load_cases("benchmarks/tests/fixtures/memory-worker/valid-cases.json")
+        self.assertEqual(
+            [(record.key, record.content) for case in cases for record in case.gold],
+            [
+                ("favorite_color", "The user's favorite color is blue."),
+                ("meeting_time", "The meeting is tomorrow at 3 PM."),
+                ("meeting_location", "The meeting is in room 205."),
+            ],
+        )
+
+    @staticmethod
+    def _output_for_gold(cases, content_of):
+        """One raw worker output per case: the gold keys with ``content_of(record)``."""
+        outputs = []
+        for case in cases:
+            memories = []
+            for record in case.gold:
+                memory = {
+                    "key": record.key,
+                    "scope": record.scope,
+                    "state": record.state,
+                    "supersedes": record.supersedes,
+                }
+                content = content_of(record)
+                if content is not None:
+                    memory["content"] = content
+                memories.append(memory)
+            outputs.append(json.dumps({"memories": memories}))
+        return outputs
+
+    def test_exact_recall_needs_the_extracted_fact_not_only_the_key(self):
+        cases = load_cases("benchmarks/tests/fixtures/memory-worker/valid-cases.json")
+        for label, content_of, exact, accuracy in (
+            ("gold content", lambda record: record.content, 1.0, 1.0),
+            ("fabricated content", lambda record: "an invented fact", 0.0, 0.0),
+            ("omitted content", lambda record: None, 0.0, 0.0),
+        ):
+            with self.subTest(worker=label):
+                worker = MockWorker(self._output_for_gold(cases, content_of))
+
+                report = run_benchmark(worker, cases, timeout_seconds=TIMEOUT)
+
+                self.assertEqual(report.metrics["extraction_recall"], 1.0)
+                self.assertEqual(report.metrics["exact_recall"], exact)
+                self.assertEqual(report.metrics["content_accuracy"], accuracy)
+
+    def test_exact_recall_is_unavailable_for_gold_built_without_content(self):
+        # ``load_cases`` cannot produce such gold, but a caller can build cases by
+        # hand; the key alone must not be reported as an exact recall.
+        cases = [
+            MemoryWorkerCase("c0", "x", (MemoryRecord("k", "user", "confirmed", None),))
+        ]
+        raw = json.dumps(
+            {
+                "memories": [
+                    {
+                        "key": "k",
+                        "scope": "user",
+                        "state": "confirmed",
+                        "supersedes": None,
+                        "content": "an invented fact",
+                    }
+                ]
+            }
+        )
+
+        report = run_benchmark(MockWorker([raw]), cases, timeout_seconds=TIMEOUT)
+
+        self.assertEqual(report.metrics["extraction_recall"], 1.0)
+        self.assertIsNone(report.metrics["exact_recall"])
+        self.assertIsNone(report.metrics["content_accuracy"])
+        self.assertEqual(
+            report.to_dict()["cases"][0]["comparison"]["content_unlabelled"], 1
+        )
+
     def test_gold_conflict_label_absent_and_empty_are_kept_apart(self):
         def gold(**extra):
-            return {"key": "k", "scope": "user", "state": "inferred", **extra}
+            return {
+                "key": "k",
+                "scope": "user",
+                "state": "inferred",
+                "content": "the fact",
+                **extra,
+            }
 
         document = {
             "cases": [
@@ -538,6 +665,7 @@ class MemoryWorkerRunnerTest(unittest.TestCase):
                             "key": "k",
                             "scope": "user",
                             "state": "inferred",
+                            "content": "the fact",
                             "conflicts_with": None,
                         }
                     ],
@@ -765,7 +893,13 @@ class MemoryWorkerRunnerTest(unittest.TestCase):
                     )
 
     def test_a_blank_gold_identifier_is_a_case_file_error_that_does_not_echo_it(self):
-        gold = {"key": "k", "scope": "user", "state": "confirmed", "supersedes": None}
+        gold = {
+            "key": "k",
+            "scope": "user",
+            "state": "confirmed",
+            "supersedes": None,
+            "content": "the fact",
+        }
         prefix = "Invalid gold record at index 0 in case 'c1': "
         for blank in ("", *BLANK_TEXTS):
             for record, reason in (
@@ -777,6 +911,10 @@ class MemoryWorkerRunnerTest(unittest.TestCase):
                 (
                     dict(gold, conflicts_with=["other", blank]),
                     "conflicts_with must be a tuple of non-empty strings or None",
+                ),
+                (
+                    dict(gold, content=blank),
+                    "content must be a non-empty string or None",
                 ),
             ):
                 with self.subTest(record=record):

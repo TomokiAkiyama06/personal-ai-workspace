@@ -8,7 +8,8 @@
                     "key": "favorite_color",
                     "scope": "user",
                     "state": "confirmed",
-                    "supersedes": null
+                    "supersedes": null,
+                    "content": "The user's favorite color is blue."
                 }
             ]
         },
@@ -20,13 +21,15 @@
                     "key": "meeting_time",
                     "scope": "project",
                     "state": "confirmed",
-                    "supersedes": null
+                    "supersedes": null,
+                    "content": "The meeting is tomorrow at 3 PM."
                 },
                 {
                     "key": "meeting_location",
                     "scope": "project",
                     "state": "confirmed",
-                    "supersedes": null
+                    "supersedes": null,
+                    "content": "The meeting is in room 205."
                 }
             ]
         }

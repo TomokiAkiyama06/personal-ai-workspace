@@ -48,7 +48,9 @@ class MemoryRecord:
     ``None``; an empty string is not a target and is rejected (in worker output that
     makes the whole output schema-invalid; it is not read as ``None``). ``scope`` is
     one of ``MEMORY_SCOPES``, so a topic label cannot earn scope credit. ``content``
-    is the extracted fact; a gold record without content is not scored on content.
+    is the extracted fact. A gold record should carry it (``load_cases`` requires
+    it); one without content cannot be checked, so ``aggregate`` reports
+    ``exact_recall`` as unavailable (``None``) instead of crediting the key alone.
     ``conflicts_with`` lists the keys of memories this one conflicts with. ``None``
     (absent) is not the same as ``()``: on a gold record ``None`` means "not
     labelled" and the record is not scored on conflicts, while ``()`` labels it
@@ -103,6 +105,8 @@ class MemoryComparison:
     # Counts below stay 0 when the gold data carries no content / conflict labels.
     content_evaluated: int = 0
     content_correct: int = 0
+    # Gold records (key-matched or not) that have no content to check against.
+    content_unlabelled: int = 0
     conflicts_evaluated: int = 0
     conflicts_correct: int = 0
 
@@ -125,6 +129,7 @@ def compare_memories(
             first_predicted.setdefault(record.key, record)
 
     matched = len(first_predicted)
+    content_unlabelled = sum(record.content is None for record in gold)
     scope_correct = state_correct = supersedes_correct = 0
     content_evaluated = content_correct = conflicts_evaluated = conflicts_correct = 0
     for key, predicted_record in first_predicted.items():
@@ -156,6 +161,7 @@ def compare_memories(
         supersedes_correct=supersedes_correct,
         content_evaluated=content_evaluated,
         content_correct=content_correct,
+        content_unlabelled=content_unlabelled,
         conflicts_evaluated=conflicts_evaluated,
         conflicts_correct=conflicts_correct,
     )
@@ -165,8 +171,10 @@ def aggregate(comparisons: Sequence[MemoryComparison]) -> dict[str, float | None
     """Aggregate memory comparison results across multiple test cases (micro-average).
 
     ``extraction_recall`` is key-level: it does not check that the extracted fact is
-    right. ``exact_recall`` also requires matching content where the gold record has
-    content; ``content_accuracy`` is the share of key-matched, content-labelled gold
+    right. ``exact_recall`` is the share of gold memories whose key and content both
+    matched; it is ``None`` when any gold record has no content to check, because a
+    matching key alone cannot show that the fact was extracted.
+    ``content_accuracy`` is the share of key-matched, content-labelled gold
     memories whose content matched; ``conflict_accuracy`` is scored over key-matched
     gold records that carry a ``conflicts_with`` label (an empty label means "no
     conflict" and is scored; an absent label is not scored).
@@ -184,11 +192,12 @@ def aggregate(comparisons: Sequence[MemoryComparison]) -> dict[str, float | None
     total_supersedes_correct = sum(c.supersedes_correct for c in comparisons)
     total_content_evaluated = sum(c.content_evaluated for c in comparisons)
     total_content_correct = sum(c.content_correct for c in comparisons)
+    total_content_unlabelled = sum(c.content_unlabelled for c in comparisons)
     total_conflicts_evaluated = sum(c.conflicts_evaluated for c in comparisons)
     total_conflicts_correct = sum(c.conflicts_correct for c in comparisons)
-    # A gold memory counts as exactly recalled when its key matched AND, if the
-    # gold record carries content, the content matched too.
-    total_exact = total_matched - (total_content_evaluated - total_content_correct)
+    # A gold memory counts as exactly recalled when its key AND its content matched
+    # (``content_correct`` only counts key-matched gold records). Unlabelled gold
+    # cannot be verified, so the ratio is not reported for it.
 
     # Calculate ratios
     def safe_divide(numerator: int, denominator: int) -> float | None:
@@ -200,7 +209,9 @@ def aggregate(comparisons: Sequence[MemoryComparison]) -> dict[str, float | None
         "scope_accuracy": safe_divide(total_scope_correct, total_matched),
         "state_accuracy": safe_divide(total_state_correct, total_matched),
         "supersedes_accuracy": safe_divide(total_supersedes_correct, total_matched),
-        "exact_recall": safe_divide(total_exact, total_gold_count),
+        "exact_recall": None
+        if total_content_unlabelled
+        else safe_divide(total_content_correct, total_gold_count),
         "content_accuracy": safe_divide(total_content_correct, total_content_evaluated),
         "conflict_accuracy": safe_divide(
             total_conflicts_correct, total_conflicts_evaluated

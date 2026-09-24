@@ -152,6 +152,7 @@ class CompareMemoriesTest(unittest.TestCase):
             scope_correct=2,
             state_correct=2,
             supersedes_correct=2,
+            content_unlabelled=len(gold),
         )
         self.assertEqual(result, expected)
 
@@ -174,6 +175,7 @@ class CompareMemoriesTest(unittest.TestCase):
             scope_correct=1,
             state_correct=1,
             supersedes_correct=1,
+            content_unlabelled=len(gold),
         )
         self.assertEqual(result, expected)
 
@@ -195,6 +197,7 @@ class CompareMemoriesTest(unittest.TestCase):
             scope_correct=1,
             state_correct=1,
             supersedes_correct=1,
+            content_unlabelled=len(gold),
         )
         self.assertEqual(result, expected)
 
@@ -216,6 +219,7 @@ class CompareMemoriesTest(unittest.TestCase):
             scope_correct=1,
             state_correct=1,
             supersedes_correct=1,
+            content_unlabelled=len(gold),
         )
         self.assertEqual(result, expected)
 
@@ -250,6 +254,7 @@ class CompareMemoriesTest(unittest.TestCase):
             scope_correct=0,  # Wrong scope
             state_correct=1,
             supersedes_correct=1,
+            content_unlabelled=len(gold),
         )
         self.assertEqual(result, expected)
 
@@ -270,6 +275,7 @@ class CompareMemoriesTest(unittest.TestCase):
             scope_correct=1,
             state_correct=0,  # Wrong state
             supersedes_correct=1,
+            content_unlabelled=len(gold),
         )
         self.assertEqual(result, expected)
 
@@ -290,6 +296,7 @@ class CompareMemoriesTest(unittest.TestCase):
             scope_correct=1,
             state_correct=1,
             supersedes_correct=0,  # Wrong supersedes
+            content_unlabelled=len(gold),
         )
         self.assertEqual(result, expected)
 
@@ -310,6 +317,7 @@ class CompareMemoriesTest(unittest.TestCase):
             scope_correct=1,
             state_correct=1,
             supersedes_correct=0,  # None vs value
+            content_unlabelled=len(gold),
         )
         self.assertEqual(result, expected)
 
@@ -355,6 +363,7 @@ class CompareMemoriesTest(unittest.TestCase):
             scope_correct=0,
             state_correct=0,
             supersedes_correct=0,
+            content_unlabelled=len(gold),
         )
         self.assertEqual(result, expected)
 
@@ -387,6 +396,7 @@ class CompareMemoriesTest(unittest.TestCase):
             scope_correct=1,  # Uses first prediction for correctness
             state_correct=1,
             supersedes_correct=1,
+            content_unlabelled=len(gold),
         )
         self.assertEqual(result, expected)
 
@@ -401,6 +411,8 @@ class AggregateTest(unittest.TestCase):
             scope_correct=2,
             state_correct=1,
             supersedes_correct=0,
+            content_evaluated=2,
+            content_correct=1,
         )
         comparison2 = MemoryComparison(
             gold_count=1,
@@ -410,6 +422,8 @@ class AggregateTest(unittest.TestCase):
             scope_correct=1,
             state_correct=1,
             supersedes_correct=1,
+            content_evaluated=1,
+            content_correct=1,
         )
 
         result = aggregate([comparison1, comparison2])
@@ -419,11 +433,40 @@ class AggregateTest(unittest.TestCase):
             "scope_accuracy": 3 / 3,  # 3 scope_correct / 3 matched
             "state_accuracy": 2 / 3,  # 2 state_correct / 3 matched
             "supersedes_accuracy": 1 / 3,  # 1 supersedes_correct / 3 matched
-            "exact_recall": 3 / 3,  # no content labels: key match is enough
-            "content_accuracy": None,
+            "exact_recall": 2 / 3,  # 2 of 3 gold memories: key and content matched
+            "content_accuracy": 2 / 3,  # 2 content_correct / 3 content_evaluated
             "conflict_accuracy": None,
         }
         self.assertEqual(result, expected)
+
+    def test_exact_recall_is_unavailable_when_any_gold_has_no_content(self):
+        labelled = MemoryComparison(
+            gold_count=1,
+            predicted_count=1,
+            matched=1,
+            unneeded=0,
+            scope_correct=1,
+            state_correct=1,
+            supersedes_correct=1,
+            content_evaluated=1,
+            content_correct=1,
+        )
+        unlabelled = MemoryComparison(
+            gold_count=1,
+            predicted_count=1,
+            matched=1,
+            unneeded=0,
+            scope_correct=1,
+            state_correct=1,
+            supersedes_correct=1,
+            content_unlabelled=1,
+        )
+
+        self.assertEqual(aggregate([labelled])["exact_recall"], 1.0)
+        self.assertIsNone(aggregate([labelled, unlabelled])["exact_recall"])
+        self.assertIsNone(aggregate([unlabelled])["exact_recall"])
+        # The other content metric only covers what is labelled.
+        self.assertEqual(aggregate([labelled, unlabelled])["content_accuracy"], 1.0)
 
     def test_zero_denominators(self):
         comparison = MemoryComparison(
@@ -505,7 +548,27 @@ class ContentAndConflictTest(unittest.TestCase):
         self.assertEqual(
             (comparison.content_evaluated, comparison.content_correct), (0, 0)
         )
-        self.assertEqual(aggregate([comparison])["exact_recall"], 1.0)
+        self.assertEqual(comparison.content_unlabelled, 1)
+
+    def test_a_key_match_alone_is_not_an_exact_recall_for_gold_without_content(self):
+        # Whatever the worker puts in ``content`` (or leaves out), unlabelled gold
+        # never yields exact recall 1.0: there is nothing to check the fact against.
+        for predicted in (
+            self.record("k", "an invented fact"),
+            self.record("k", None),
+        ):
+            with self.subTest(predicted_content=predicted.content):
+                metrics = aggregate([compare_memories([self.record("k")], [predicted])])
+                self.assertEqual(metrics["extraction_recall"], 1.0)
+                self.assertIsNone(metrics["exact_recall"])
+
+    def test_unlabelled_gold_counts_even_when_the_worker_missed_it(self):
+        comparison = compare_memories(
+            [self.record("labelled", "fact"), self.record("unlabelled")],
+            [self.record("labelled", "fact")],
+        )
+        self.assertEqual(comparison.content_unlabelled, 1)
+        self.assertIsNone(aggregate([comparison])["exact_recall"])
 
     def test_conflict_relations_are_compared_as_sets(self):
         gold = [self.record("a", conflicts=["b", "c"]), self.record("d")]

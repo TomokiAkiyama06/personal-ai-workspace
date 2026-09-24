@@ -65,9 +65,14 @@ def _parse_gold_record(record: object, case_id: str, index: int) -> MemoryRecord
     where = f"gold record at index {index} in case '{case_id}'"
     record = _require_object(record, where)
     _reject_unknown_fields(record, _GOLD_FIELDS, f"Invalid {where}:")
-    for name in ("key", "scope", "state"):
+    for name in ("key", "scope", "state", "content"):
         if name not in record:
             raise ValueError(f"Invalid {where}: missing '{name}'")
+    # The extracted fact is what the benchmark judges: a gold record without it could
+    # only be scored on its key, so ``exact_recall`` would be credited to a worker
+    # that omits or invents the fact.
+    if record["content"] is None:
+        raise ValueError(f"Invalid {where}: 'content' must be a non-empty string")
     # An absent label (None) is not an empty one: it is not scored on conflicts.
     conflicts_with = None
     if "conflicts_with" in record:
@@ -81,7 +86,7 @@ def _parse_gold_record(record: object, case_id: str, index: int) -> MemoryRecord
             scope=record["scope"],
             state=record["state"],
             supersedes=record.get("supersedes"),
-            content=record.get("content"),
+            content=record["content"],
             conflicts_with=conflicts_with,
         )
     except (TypeError, ValueError) as error:
@@ -91,6 +96,8 @@ def _parse_gold_record(record: object, case_id: str, index: int) -> MemoryRecord
 def load_cases(path: str) -> list[MemoryWorkerCase]:
     """Load memory worker test cases from a JSON file.
 
+    Every gold record must carry ``key``, ``scope``, ``state`` and ``content``, so
+    that ``exact_recall`` always judges the extracted fact as well as the key.
     Every malformed input raises ``ValueError`` naming only the case id and field.
     """
     with open(path, encoding="utf-8") as f:

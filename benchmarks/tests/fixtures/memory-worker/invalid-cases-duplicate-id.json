@@ -8,7 +8,8 @@
                     "key": "test_key",
                     "scope": "user",
                     "state": "confirmed",
-                    "supersedes": null
+                    "supersedes": null,
+                    "content": "Fact 1."
                 }
             ]
         },
@@ -20,7 +21,8 @@
                     "key": "test_key2",
                     "scope": "project",
                     "state": "confirmed",
-                    "supersedes": null
+                    "supersedes": null,
+                    "content": "Fact 2."
                 }
             ]
         }

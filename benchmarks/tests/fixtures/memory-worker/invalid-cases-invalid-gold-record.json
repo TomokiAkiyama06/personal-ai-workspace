@@ -8,7 +8,8 @@
                     "key": "",
                     "scope": "user",
                     "state": "confirmed",
-                    "supersedes": null
+                    "supersedes": null,
+                    "content": "Fact."
                 }
             ]
         }

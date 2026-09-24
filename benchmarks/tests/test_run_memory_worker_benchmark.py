@@ -35,6 +35,10 @@ class RunMemoryWorkerBenchmarkTest(unittest.TestCase):
         report = json.loads(stdout)
         self.assertEqual(len(report["cases"]), 2)
         self.assertEqual(report["metrics"]["schema_adherence_rate"], 1.0)
+        # The worker extracts only test-1's memory, with the gold content: 1 of 3.
+        self.assertEqual(report["metrics"]["extraction_recall"], 1 / 3)
+        self.assertEqual(report["metrics"]["exact_recall"], 1 / 3)
+        self.assertEqual(report["metrics"]["content_accuracy"], 1.0)
         self.assertEqual(report["timeout_seconds"], 30.0)
         self.assertNotIn("The user mentioned", stdout)
 
@@ -187,6 +191,25 @@ class RunMemoryWorkerBenchmarkTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(stdout, "")
         self.assertIn("Each case must have an 'id' field", stderr)
+
+    def test_gold_without_content_exits_with_one_before_the_worker_runs(self):
+        gold = {"key": "k", "scope": "user", "state": "confirmed", "supersedes": None}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "cases.json"
+            path.write_text(
+                json.dumps({"cases": [{"id": "c1", "input": "x", "gold": [gold]}]}),
+                encoding="utf-8",
+            )
+            code, stdout, stderr = run_cli(
+                "--cases", str(path), "--worker", WORKER, *DEADLINE
+            )
+
+        self.assertEqual(code, 1)
+        self.assertEqual(stdout, "")
+        self.assertEqual(
+            stderr,
+            f"{path}: Invalid gold record at index 0 in case 'c1': missing 'content'\n",
+        )
 
     def test_factories_that_do_not_return_a_worker_exit_with_two(self):
         for factory in ("make_none_worker", "make_wrong_signature_worker"):

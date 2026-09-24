@@ -367,13 +367,18 @@ JSON Schema遵守率、latency（mean / p50 / p95、nearest-rank）です。
 Worker出力はschemaの`enum`でschema不適合になり、Goldはcase loaderでcase fileの不備（終了code 1）になります。
 このため`schedule`や`user_preferences`のような話題ラベルは、Goldとの一致でscope_accuracyを得られません。
 `session`と、Inferred Preferenceの例にある`project_group`は、Memory抽出Workerの出力に含めるかが未決定のため受け付けません（追加はschemaの`enum`と`MEMORY_SCOPES`の同時変更です）。
-Gold recordが`content`を持つ場合は、`exact_recall`（keyと内容の両方が一致）と`content_accuracy`
-（key一致したもののうち内容が一致した割合。NFKC・大文字小文字・空白を正規化して比較）を併せて確認してください。
+Gold recordは`content`（抽出すべき事実）を必須とします。`content`がない（省略・`null`・空文字列・空白だけ）Goldは、case fileの不備（終了code 1、`Invalid gold record at index N in case 'ID': missing 'content'`。値は表示しません）です。
+`content`がないと、その記録はkeyだけでしか採点できず、Workerが事実を出力しない、または作り話を出力しても`exact_recall`が1.0になり、事実を評価していないのに満点に見えるためです。
+`exact_recall`は、keyと内容の両方が一致したGold memoryの割合（Goldの全件が分母）です。
+`content_accuracy`は、key一致したもののうち内容が一致した割合です（NFKC・大文字小文字・空白を正規化して比較）。
+Worker出力の`content`はschema上は任意ですが、省略した記録は内容が一致しない扱いで、`exact_recall`と`content_accuracy`では不正解です（schema遵守率には影響しません）。
+`load_cases`を通さず`MemoryWorkerCase`を直接組み立てて`content`のないGoldを渡した場合は、`exact_recall`を`null`（算出不能）にします。keyだけの一致を完全一致として報告しないためです。
+このときcaseの`comparison.content_unlabelled`に、内容を確かめられないGoldの件数が入ります。
 `conflicts_with`（衝突するMemoryのkey）は`conflict_accuracy`で採点し、Goldが`conflicts_with`を持つkey一致recordだけを対象にします。
 Goldの空配列（`[]`）は「衝突なし」というlabelで、Workerが関係を出力すれば不正解、出力しなければ正解として採点します。
 `conflicts_with`がないGoldは未labelとして採点せず、Workerが関係を出力しても評価対象は変わりません（候補の出力に依存して対象recordが増減しません）。
 Worker出力で`conflicts_with`を省略した場合と`[]`は、どちらも関係なしの宣言として扱います。
-Goldに`content` / `conflicts_with`がなければ、対応する指標は`null`または従来と同じ値になります。
+Goldに`conflicts_with`がなければ、`conflict_accuracy`は`null`（未labelの記録は採点しない）になります。
 case fileの未知のfield（`supercedes`や`conflict_with`のような綴り誤り）は、黙って無視せず不備（終了code 1）として拒否します。
 case fileとWorker出力のJSONは、既存のvalidatorと同じ厳格なdecoder（`benchmarks.json_input.decode_json`）で読み、同じ名前のmemberの重複や`NaN`などの非標準の定数は、後の値で上書きせずに拒否します（Worker出力はschema不適合として数えます）。
 `key`、`supersedes`（nullでないとき）、`conflicts_with`の各key、`content`は、空白だけの文字列を受け付けません（空文字列も同様）。空白だけのkeyやsupersedesがGoldとWorker出力の両方に現れると、存在しえない識別子で一致して抽出・分類・置換関係の得点になるためです。

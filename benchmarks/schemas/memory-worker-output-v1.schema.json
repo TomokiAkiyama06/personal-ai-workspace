@@ -24,6 +24,7 @@
                         "pattern": "\\S"
                     },
                     "content": {
+                        "description": "The extracted fact. Optional here, but the benchmark's gold records always carry it, so a record without it never counts as an exact recall.",
                         "type": "string",
                         "pattern": "\\S"
                     },
