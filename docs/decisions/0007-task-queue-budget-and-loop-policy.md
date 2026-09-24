@@ -84,9 +84,10 @@ Command（PAW-032 の `wait` / `fail`）を発行するのは Orchestrator（PAW
 ### 8. Loop の失敗記録の試行（Attempt）による Fencing
 
 - 失敗の記録（`LoopDetector.record_failure`）は、Task の ID だけでは、どの試行の報告かを区別できない。Restart が新しい試行を始め、履歴の `clear` が終わった後に、古い試行の Worker が遅れて報告すると、その失敗が新しい試行の Window に入り、数件で `TRY_ALTERNATIVE` / `ESCALATE` を誤って引き起こす。
-- そこで `record_failure` に**必須の** `attempt`（報告する Worker が開始された試行の番号。PAW-032 の Step・Log・Tool の書き込みが持つ `attempt` と同じ）を加え、`tasks.attempt`（Restart が増やす既存の Counter）と違えば `StaleAttemptError` で拒否して何も書かない。新しい状態・Column・Migration は要らない。
+- そこで `record_failure` に**必須の** `attempt`（報告する Worker が開始された試行の番号。PAW-032 の Step・Log・Tool の書き込みが持つ `attempt` と同じ）を加え、`tasks.attempt`（Restart が増やす既存の Counter）と違えば `StaleAttemptError` で拒否して何も書かない。試行の番号の Counter は PAW-032 の既存のものを使い、新しい状態は作らない。
 - 確認と書き込みの間に Restart が割り込まないよう、`record_failure` は Task の行を `FOR SHARE` で Lock して Transaction の終わりまで持つ（PAW-032 の Command は `FOR NO KEY UPDATE` を取るため、直列になる）。Restart が待つ時間は 1 回の記録の Transaction の間だけである。
-- Orchestrator（PAW-034）の順序は、**Restart の Command が Commit された後に `clear`** とする。Restart の前に Commit された古い試行の失敗は、その `clear` が削除する。
+- 失敗の行は、報告された試行の番号（`loop_failure_signatures.attempt`、1 以上の `INTEGER`、必須）を持つ（0033 は未 Merge のため、0033 の Migration に列を足した）。判定（`history`、`assess`、`record_failure` が返す判定）は、Task の**現在の試行**（`tasks.attempt`）の行だけを対象にする。Restart が Commit された瞬間から、新しい試行は空の履歴で始まり、古い試行の行と一緒に数えられない。
+- 履歴の削除は `clear(task_id)`（Task の全行）をやめ、`clear_previous_attempts(task_id)`（**現在の試行より前**の試行の行だけ）にする。Restart の Command が Commit された後、この掃除が走る前に、新しい試行が失敗を記録できる（分散した Scheduler は、Restart の Commit の直後に新しい試行を始め得る）。その失敗は有効なので、掃除は削除しない。掃除は正しさに必要ではなく（古い行は読まれず、`window_size` の上限で新しい行に押し出される）、Table を小さく保つためのもの。Orchestrator（PAW-034）は Restart の後に呼ぶが、呼ぶ順序や間隔は正しさに影響しない。
 
 ## 選定理由
 
@@ -94,7 +95,7 @@ Command（PAW-032 の `wait` / `fail`）を発行するのは Orchestrator（PAW
   Benchmark（PAW-016 / 017）と実運用の記録で見直す前提で、データとして 1 か所に置いた。
 - Budget 超過を Loop より優先するのは、Escalation が予算を追加で消費するため。
 - Lease の世代に `claim_count` を使うのは、既存の列で足り（Migration も Grant も変えない）、Claim のたびに必ず増え、Worker の id・時刻・乱数のような呼び出し側の値に頼らずに、古い Claim を判別できるため。
-- 試行の Fencing に PAW-032 の `tasks.attempt` を使うのは、Restart が既に増やす唯一の Counter で、Step・Log・Tool の書き込みも同じ規則（古い試行は `StaleAttemptError`）で拒否しているため。失敗の行へ試行の Column を足して現在の試行だけを読む案は、Schema・Grant・履歴の読み取りを変える割に、`clear` を Restart の後に呼ぶ規則で足りるため採らない。
+- 試行の Fencing に PAW-032 の `tasks.attempt` を使うのは、Restart が既に増やす唯一の Counter で、Step・Log・Tool の書き込みも同じ規則（古い試行は `StaleAttemptError`）で拒否しているため。失敗の行へ試行の Column を足して現在の試行だけを読む案は、当初は「`clear` を Restart の後に呼ぶ規則で足りる」として採らなかったが、独立したレビューで、Restart の Commit の後・`clear` の前に新しい試行が記録した失敗が、Task 全体を消す `clear` で失われる（または古い履歴と一緒に判定される）と指摘され、その規則では足りないと分かったため採る。Grant は変わらない（`tasks` の SELECT は付与済みで、行の UPDATE は不要）。Restart と掃除を 1 つの Transaction にする案は、Restart（PAW-032 の Command）と Loop（PAW-033）の境界を壊すため採らない。新しい試行の Dispatch を掃除の完了まで止める案は、Orchestrator（PAW-034）に順序の規則を課すだけで、それを守らない呼び出しを防げないため採らない。
 - Lease の時計を Database に一本化するのは、複数の Process（Worker）が同じ Entry を巡って競うため、判定の基準が呼び出し側ごとに違うと Lease の排他が成り立たないため。
 
 ## 代替案

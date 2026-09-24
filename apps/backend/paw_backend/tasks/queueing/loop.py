@@ -166,17 +166,21 @@ class LoopDetector:
     """Stores a bounded failure window per task and evaluates it.
 
     Nothing is kept in process memory: the window lives in
-    ``loop_failure_signatures`` (columns ``seq``, ``task_id``, ``approach``,
-    ``signature``, ``created_at``; ``seq`` orders the records). Unknown tasks
-    raise ``TaskNotFoundError``.
+    ``loop_failure_signatures`` (columns ``seq``, ``task_id``, ``attempt``,
+    ``approach``, ``signature``, ``created_at``; ``seq`` orders the records).
+    Unknown tasks raise ``TaskNotFoundError``.
 
     Attempts (Decision 0007, section 8). A failure belongs to one ATTEMPT of the
     task: ``record_failure`` names the attempt the reporting worker was started
     for (``TaskEvent.attempt``, the same number the PAW-032 step / log / tool
-    writes carry) and is refused with ``StaleAttemptError`` unless it is the
-    task's current attempt (``tasks.attempt``, which Restart increments). The
-    counter is the existing PAW-032 one, so no new state exists. A delayed report
-    of an abandoned attempt therefore never enters the new attempt's history.
+    writes carry), stores it in the row and is refused with ``StaleAttemptError``
+    unless it is the task's current attempt (``tasks.attempt``, which Restart
+    increments). A delayed report of an abandoned attempt therefore never enters
+    the new attempt's history. Only the failures of the task's CURRENT attempt
+    are ever assessed (``history``, ``assess`` and the result of
+    ``record_failure``): the moment Restart commits, the new attempt starts with an
+    empty history, whether or not ``clear_previous_attempts`` has run yet, and
+    that cleanup only deletes rows that are no longer read.
     """
 
     def __init__(
@@ -212,10 +216,13 @@ class LoopDetector:
         transaction, so a Restart (which updates the task row) cannot commit
         between the check and the commit of the row: a stored failure always
         belongs to the attempt that was current when it committed. Then insert a
-        row with ``failure_signature(error_class, step, message)`` and
+        row with ``failure_signature(error_class, step, message)``, ``attempt`` and
         ``approach``; delete the task's oldest rows so that at most
-        ``policy.window_size`` remain (the newest by ``seq`` are kept); then return
-        ``evaluate_loop`` of the remaining rows (oldest first). The raw ``message``
+        ``policy.window_size`` remain (the newest by ``seq`` are kept; the rows of
+        the current attempt are always newer than those of an older one); then
+        return ``evaluate_loop`` of the remaining rows of ``attempt`` (oldest
+        first; rows of older attempts that a ``clear_previous_attempts`` has not
+        removed yet are not counted). The raw ``message``
         (and ``error_class`` / ``step``) is never stored or logged. Concurrent
         calls for the SAME task (``clear`` included) are serialised for the whole
         transaction by ``SELECT pg_advisory_xact_lock(...)`` keyed by the task id:
@@ -235,7 +242,10 @@ class LoopDetector:
             await self._require_current_attempt(session, task_id, attempt)
             session.add(
                 FailureSignatureRow(
-                    task_id=task_id, approach=approach, signature=signature
+                    task_id=task_id,
+                    attempt=attempt,
+                    approach=approach,
+                    signature=signature,
                 )
             )
             await session.flush()
@@ -282,10 +292,10 @@ class LoopDetector:
         """Take the task's failure lock until the end of the transaction.
 
         Every transaction that writes the task's rows (``record_failure`` and
-        ``clear``) takes it first, so they run one after the other. Without it,
-        transactions that cannot see each other's uncommitted rows would each skip
-        the window deletion, and a ``clear`` would return before an in-flight
-        ``record_failure`` commits and leave that (stale) failure behind.
+        ``clear_previous_attempts``) takes it first, so they run one after the
+        other. Without it, transactions that cannot see each other's uncommitted
+        rows would each skip the window deletion, and two deletions of overlapping
+        rows could wait for each other.
         """
         await session.execute(
             select(
@@ -299,17 +309,24 @@ class LoopDetector:
     async def _read_history(
         session: AsyncSession, task_id: uuid.UUID
     ) -> tuple[FailureRecord, ...]:
+        """The stored failures of the task's CURRENT attempt, oldest first."""
         rows = await session.execute(
             select(FailureSignatureRow.signature, FailureSignatureRow.approach)
-            .where(FailureSignatureRow.task_id == task_id)
+            .join(TaskRow, TaskRow.id == FailureSignatureRow.task_id)
+            .where(
+                FailureSignatureRow.task_id == task_id,
+                FailureSignatureRow.attempt == TaskRow.attempt,
+            )
             .order_by(FailureSignatureRow.seq)
         )
         return tuple(FailureRecord(signature, approach) for signature, approach in rows)
 
     async def history(self, task_id: uuid.UUID) -> tuple[FailureRecord, ...]:
-        """The stored window, oldest first (at most ``policy.window_size``).
+        """The stored window of the task's current attempt, oldest first (at most
+        ``policy.window_size``).
 
-        Empty for a task without failures (also for an unknown task). Read-only.
+        Empty for a task without failures in its current attempt (also for an
+        unknown task, and right after a Restart). Read-only.
         """
         check_uuid("task_id", task_id)
         async with self._database.session() as session, session.begin():
@@ -320,29 +337,35 @@ class LoopDetector:
         number of times without new failures returns equal results."""
         return evaluate_loop(await self.history(task_id), self._policy)
 
-    async def clear(self, task_id: uuid.UUID) -> int:
-        """Delete the task's stored failures (for example on Restart) and return
-        how many rows were deleted (0 when there were none).
+    async def clear_previous_attempts(self, task_id: uuid.UUID) -> int:
+        """Delete the failures of the attempts BEFORE the task's current one (the
+        cleanup after a Restart) and return how many rows were deleted (0 when
+        there were none, also for an unknown task).
+
+        The failures of the current attempt (and of a later one) are never
+        deleted: after Restart has committed, the new attempt may already have
+        recorded failures, and those are valid. The current attempt is read by the
+        same statement (``tasks.attempt``, which only grows), so a Restart that
+        commits meanwhile can only make the cleanup delete less. Nothing depends
+        on the cleanup for correctness (the older rows are not read, and the window
+        deletion of ``record_failure`` drops them as newer rows arrive); it keeps
+        the table small.
 
         Serialised with ``record_failure`` of the SAME task by the same per-task
-        lock, held for the whole transaction: a ``record_failure`` that is still
-        in flight commits first and its row is deleted too, one that starts
-        later waits for the clear. So ``clear`` never returns while an earlier
-        failure is still going to appear (a failure recorded after the clear
-        belongs to the new history).
-
-        Call it AFTER the Restart command has committed (the new attempt is then
-        the task's current one): a failure that an old attempt reports after that
-        is refused by ``record_failure`` (``StaleAttemptError``), and one that
-        was in flight when Restart ran committed before it and is deleted here.
-        ``clear`` before Restart would leave a window in which the old attempt
-        can still record and Restart then carries that failure into the new one."""
+        lock, held for the whole transaction, so a recording in flight commits
+        first or waits for the cleanup. Call it after the Restart command has
+        committed: before it, no attempt is older than the one Restart supersedes,
+        so nothing of that attempt is deleted."""
         check_uuid("task_id", task_id)
         async with self._database.session() as session, session.begin():
             await self._lock_failures(session, task_id)
+            current_attempt = (
+                select(TaskRow.attempt).where(TaskRow.id == task_id).scalar_subquery()
+            )
             result = await session.execute(
                 delete(FailureSignatureRow).where(
-                    FailureSignatureRow.task_id == task_id
+                    FailureSignatureRow.task_id == task_id,
+                    FailureSignatureRow.attempt < current_attempt,
                 )
             )
             return result.rowcount
