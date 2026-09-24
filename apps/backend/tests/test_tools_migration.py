@@ -26,6 +26,13 @@ from .test_migrations import offline_config
 
 REVISION = "0031"
 PREVIOUS = "0033"
+
+
+def head_revision() -> str:
+    """The newest revision: later lanes add revisions on top of this one."""
+    return ScriptDirectory.from_config(offline_config(io.StringIO())).get_current_head()
+
+
 FUNCTION = "tool_approval_events_reject_change"
 FUNCTIONS = (
     "tool_approvals_check_insert",
@@ -170,7 +177,8 @@ class DatabaseMigrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.tool_tables(), set(TABLE_NAMES))
         self.assertTrue(await self.function_exists())
         self.assertEqual(
-            await self.scalars("SELECT version_num FROM alembic_version"), [REVISION]
+            await self.scalars("SELECT version_num FROM alembic_version"),
+            [head_revision()],
         )
 
         await asyncio.to_thread(migrate, PREVIOUS, downgrade=True)
