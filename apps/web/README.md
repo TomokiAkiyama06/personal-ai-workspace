@@ -10,7 +10,8 @@ Web 側で独立した認可ルールを確定する構成にはしません。
 
 最初の実装 Issue は [PAW-060 — Web UI Application Shell / Authentication UI](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/46) です。
 同 Issue は PAW-022 と PAW-023 の認証機能に依存します。
-言語、Framework、依存 Package はこの配置の整備では選定していません。
+Framework は [Decision 0003](../../docs/decisions/0003-backend-cli-web-implementation-stack.md) で React + TypeScript + Vite（Package 管理は pnpm）と決定済みです。
+Lint / Format Tool は PAW-060 で確定し、その他の依存 Package は実装時に選定します。
 
 Acceptance Criteria と後続 UI の Issue は [Implementation Backlog](../../docs/IMPLEMENTATION_BACKLOG.md)、
 Backend との境界は [Architecture](../../docs/ARCHITECTURE.md) を参照してください。
