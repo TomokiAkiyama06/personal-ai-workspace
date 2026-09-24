@@ -235,9 +235,10 @@ class TestRunner:
                     start_new_session=True,
                     env=_check_environment(home),
                 )
+                leader = _Leader(process)
                 capture = _OutputCapture(process, _MAX_CAPTURE_BYTES)
                 try:
-                    timed_out = self._supervise(process, capture, timeout_seconds)
+                    timed_out = self._supervise(leader, capture, timeout_seconds)
                     stdout, stderr = (
                         bytes(capture.data["stdout"]),
                         bytes(capture.data["stderr"]),
@@ -246,12 +247,15 @@ class TestRunner:
                     stderr_bytes = capture.total["stderr"]
                 finally:
                     capture.close()
-                exit_code = process.returncode
-                status = (
-                    "timed_out"
-                    if timed_out
-                    else ("passed" if exit_code == 0 else "failed")
-                )
+                # If something else reaped the leader (SIGCHLD ignored, another
+                # reaper), its exit status is lost: never report that as a pass.
+                exit_code = None if leader.status_lost else process.returncode
+                if timed_out:
+                    status = "timed_out"
+                elif leader.status_lost:
+                    status = "error"
+                else:
+                    status = "passed" if exit_code == 0 else "failed"
         except OSError:
             status = "error"
         return CheckExecution(
@@ -272,7 +276,7 @@ class TestRunner:
 
     def _supervise(
         self,
-        process: subprocess.Popen[bytes],
+        leader: _Leader,
         capture: _OutputCapture,
         timeout_seconds: float,
     ) -> bool:
@@ -286,7 +290,7 @@ class TestRunner:
                 if now >= deadline:
                     timed_out = True
                     break
-                if exited_at is None and _has_exited(process):
+                if exited_at is None and leader.has_exited():
                     exited_at = now
                 if exited_at is None:
                     if not capture.open:
@@ -298,7 +302,7 @@ class TestRunner:
                 if capture.open:
                     capture.pump(min(self.poll_seconds, deadline - now))
             if timed_out:
-                self._terminate(process)
+                self._terminate(leader)
                 until = time.monotonic() + self.drain_seconds
                 while capture.open and time.monotonic() < until:
                     capture.pump(self.poll_seconds)
@@ -306,19 +310,20 @@ class TestRunner:
         finally:
             # No member of the check's session may outlive it, and no pipe may
             # keep this evaluator waiting.
-            _signal_group(process.pid, signal.SIGKILL)
+            leader.signal_group(signal.SIGKILL)
             try:
-                process.wait(timeout=self.term_grace_seconds)
+                leader.process.wait(timeout=self.term_grace_seconds)
             except subprocess.TimeoutExpired:
                 pass
 
-    def _terminate(self, process: subprocess.Popen[bytes]) -> None:
+    def _terminate(self, leader: _Leader) -> None:
         """TERM, wait for a grace period, then KILL whatever is left."""
         # Snapshot first: children that started their own session are not in the
         # process group, and they are re-parented once their parent dies.  Each is
         # recorded with its start time, so a recycled pid is never mistaken for it.
-        tracked = _descendant_pids(process.pid)
-        _signal_group(process.pid, signal.SIGTERM)
+        leader.refresh(force=True)
+        tracked = _descendant_pids(leader.pgid)
+        leader.signal_group(signal.SIGTERM)
         for pid, started in tracked.items():
             _signal_identified(pid, started, signal.SIGTERM)
         # The grace period belongs to everything the check started, not just its
@@ -326,10 +331,10 @@ class TestRunner:
         # that is still running its TERM handler.
         deadline = time.monotonic() + self.term_grace_seconds
         while time.monotonic() < deadline:
-            if _has_exited(process) and not _anything_alive(process.pid, tracked):
+            if leader.has_exited() and not _anything_alive(leader, tracked):
                 break
             time.sleep(0.02)
-        _signal_group(process.pid, signal.SIGKILL)
+        leader.signal_group(signal.SIGKILL)
         for pid, started in tracked.items():
             _signal_identified(pid, started, signal.SIGKILL)
         # The leader is reaped by the caller after its last group signal.
@@ -431,23 +436,77 @@ def _safe_stream_record(
     }
 
 
-def _has_exited(process: subprocess.Popen[bytes]) -> bool:
-    """Has the leader exited?  Looks without reaping it.
+class _Leader:
+    """A check's leader process, and the safe use of its process group id.
 
-    An unreaped leader keeps its pid, which is the check's process group id,
-    reserved: the final group ``SIGKILL`` cannot reach a new, unrelated group that
-    happened to be given the same number.  ``process.wait()`` reaps it only after
-    that signal.
+    While the leader is unreaped (running, or a zombie) its pid stays reserved as
+    the group id, so signalling the group is safe.  Once it has been reaped
+    elsewhere (``SIGCHLD`` ignored, another reaper, or no ``WNOWAIT``) that number
+    may already belong to an unrelated group.  Then the group is signalled only
+    while a process recorded earlier as its member (same pid and start time) is
+    still in it; otherwise nothing is sent.
     """
-    if process.returncode is not None:
-        return True
-    try:
-        return (
-            os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
-            is not None
-        )
-    except (AttributeError, ChildProcessError):  # no WNOWAIT, or already reaped
-        return process.poll() is not None
+
+    refresh_seconds = 0.2
+
+    def __init__(self, process: subprocess.Popen[bytes]):
+        self.process = process
+        self.pgid = process.pid
+        self.released = False  # no longer guaranteed to reserve ``pgid``
+        self.status_lost = False  # reaped by someone else: exit status unknown
+        self.members: dict[int, int] = {}  # pid -> start time, seen in the group
+        self._refreshed = 0.0
+        self.refresh(force=True)
+
+    def refresh(self, force: bool = False) -> None:
+        """Record the group's current members (only meaningful while unreaped)."""
+        now = time.monotonic()
+        if self.released or (
+            not force and now - self._refreshed < self.refresh_seconds
+        ):
+            return
+        self._refreshed = now
+        for pid, (_, _, pgrp, started) in _process_table().items():
+            if pgrp == self.pgid:
+                self.members.setdefault(pid, started)
+
+    def has_exited(self) -> bool:
+        """Has the leader exited?  Looks without reaping it."""
+        if self.process.returncode is not None:
+            self.released = True
+            return True
+        try:
+            if (
+                os.waitid(
+                    os.P_PID, self.process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT
+                )
+                is not None
+            ):
+                return True  # a zombie: still reserves the group id
+        except ChildProcessError:
+            # Someone else reaped it; its exit status is gone with it.
+            self.released = self.status_lost = True
+            return True
+        except AttributeError:  # no WNOWAIT: poll() reaps, so nothing reserves it
+            if self.process.poll() is not None:
+                self.released = True
+                return True
+        self.refresh()
+        return False
+
+    def owns(self, pid: int, pgrp: int, started: int) -> bool:
+        """Is this process, seen in the table, a member of our group?"""
+        if pgrp != self.pgid:
+            return False
+        return not self.released or self.members.get(pid) == started
+
+    def signal_group(self, number: int) -> None:
+        if self.released and not any(
+            state not in "ZX" and self.owns(pid, pgrp, started)
+            for pid, (state, _, pgrp, started) in _process_table().items()
+        ):
+            return  # the group id may belong to a stranger: never signal it
+        _signal_group(self.pgid, number)
 
 
 def _signal_group(pgid: int, number: int) -> None:
@@ -537,8 +596,8 @@ def _descendant_pids(root: int) -> dict[int, int]:
     return found
 
 
-def _anything_alive(pgid: int, tracked: dict[int, int]) -> bool:
-    """Is a tracked process, or any member of ``pgid``, still running?
+def _anything_alive(leader: _Leader, tracked: dict[int, int]) -> bool:
+    """Is a tracked process, or a member of the leader's group, still running?
 
     A tracked pid now held by a process with a different start time is a stranger
     and does not count.
@@ -546,11 +605,12 @@ def _anything_alive(pgid: int, tracked: dict[int, int]) -> bool:
     table = _process_table()
     if not table:  # no /proc: probe the process group itself
         try:
-            os.killpg(pgid, 0)
+            os.killpg(leader.pgid, 0)
         except (ProcessLookupError, PermissionError):
             return False
         return True
     return any(
-        state not in "ZX" and (tracked.get(pid) == started or pgrp == pgid)
+        state not in "ZX"
+        and (tracked.get(pid) == started or leader.owns(pid, pgrp, started))
         for pid, (state, _, pgrp, started) in table.items()
     )

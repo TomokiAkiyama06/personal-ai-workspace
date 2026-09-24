@@ -15,6 +15,7 @@ import traceback
 import tracemalloc
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from benchmarks import test_runner
@@ -24,6 +25,7 @@ from benchmarks.test_runner import CheckDefinition, HiddenCheckRegistry, TestRun
 # purpose: a loaded machine must slow a test down, never fail it.  Small
 # deadlines are used only where the timeout itself is under test.
 PATIENCE = 30
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 # Check that starts a child in its own session (so it is not in the check's
 # process group), publishes the child's pid, then blocks.
@@ -95,6 +97,46 @@ if mode == 'orphan':
 while not os.path.exists(pid_file):
     time.sleep(0.01)
 time.sleep(60)
+"""
+
+# Check that leaves a background process in its process group and stays alive long
+# enough for the runner to record that group's members before it exits.
+BACKGROUND_THEN_EXIT = """
+import os, sys, time
+pid_file = sys.argv[1]
+if os.fork() == 0:
+    with open(pid_file + '.tmp', 'w') as handle:
+        handle.write(str(os.getpid()))
+    os.replace(pid_file + '.tmp', pid_file)
+    time.sleep(60)
+    os._exit(0)
+time.sleep(1.0)
+"""
+
+# Runs one check in a process whose SIGCHLD is ignored, so the kernel reaps every
+# child itself and the check leader's exit status can never be collected.  It
+# records each ``killpg`` the runner makes.
+SIGCHLD_IGNORED_HARNESS = """
+import json, os, signal, sys
+from pathlib import Path
+signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+killpg_calls = []
+real_killpg = os.killpg
+def spy(pgid, number):
+    killpg_calls.append(int(number))
+    return real_killpg(pgid, number)
+os.killpg = spy
+from benchmarks.test_runner import CheckDefinition, TestRunner
+worktree, log, mode, pid_file, background = sys.argv[1:6]
+runner = TestRunner(Path(worktree), Path(log))
+runner.drain_seconds = 0.3
+if mode == 'fails':
+    command = (sys.executable, '-c', 'raise SystemExit(3)')
+else:
+    command = (sys.executable, '-c', background, pid_file)
+result = runner.run_visible((CheckDefinition('check', 'unit', command),), 30)[0]
+print(json.dumps({'status': result.status, 'exit_code': result.exit_code,
+                  'killpg': killpg_calls}))
 """
 
 # Check that ignores SIGTERM itself, so only SIGKILL after the grace period ends it.
@@ -550,6 +592,80 @@ class TestRunnerTest(unittest.TestCase):
                 kills = [reaped for number, reaped in seen if number == signal.SIGKILL]
                 self.assertTrue(kills)
                 self.assertEqual(kills, [False] * len(kills), seen)
+
+    # A leader that something else reaped ----------------------------------------
+
+    def run_with_sigchld_ignored(self, mode, pid_file="unused"):
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                SIGCHLD_IGNORED_HARNESS,
+                str(self.worktree),
+                str(self.root / "sigchld-log" / "results.jsonl"),
+                mode,
+                str(pid_file),
+                BACKGROUND_THEN_EXIT,
+            ],
+            cwd=REPOSITORY_ROOT,
+            env={**os.environ, "PYTHONPATH": str(REPOSITORY_ROOT)},
+            capture_output=True,
+            text=True,
+            timeout=PATIENCE * 2,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        return json.loads(completed.stdout)
+
+    def test_an_unknowable_exit_status_is_an_error_not_a_pass(self):
+        # A failing check (exit 3) whose exit status is lost must never read "passed".
+        observed = self.run_with_sigchld_ignored("fails")
+        self.assertEqual(observed["status"], "error")
+        self.assertIsNone(observed["exit_code"])
+
+    def test_no_group_signal_is_sent_for_a_group_id_that_may_be_reused(self):
+        observed = self.run_with_sigchld_ignored("fails")
+        # The leader vanished and no member of its group was ever seen: the
+        # group id could belong to a stranger by now, so nothing may be sent.
+        self.assertEqual(observed["killpg"], [])
+
+    def test_a_recorded_member_of_a_reaped_leaders_group_is_still_killed(self):
+        pid_file = self.pid_file()
+        observed = self.run_with_sigchld_ignored("background", pid_file)
+        self.assertEqual(observed["status"], "error")
+        self.assertIn(signal.SIGKILL, observed["killpg"])
+        background = self.read_pid(pid_file)
+        self.assertTrue(wait_until(lambda: not is_running(background)))
+
+    def test_a_released_group_id_is_signalled_only_while_a_recorded_member_remains(
+        self,
+    ):
+        # A stranger that is a group leader, standing in for a process that was
+        # given the reaped leader's pid as its own group id.
+        stranger = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            start_new_session=True,
+        )
+        self.addCleanup(stranger.wait)
+        self.addCleanup(stranger.kill)
+        self.assertTrue(wait_until(lambda: test_runner._start_time(stranger.pid)))
+        leader = test_runner._Leader(SimpleNamespace(pid=stranger.pid, returncode=None))
+        with mock.patch.object(os, "waitid", side_effect=ChildProcessError):
+            self.assertTrue(leader.has_exited())
+        self.assertTrue(leader.released and leader.status_lost)
+
+        # Nothing recorded ever belonged to this group id: never signal it.
+        leader.members = {stranger.pid + 100000: 1}
+        leader.signal_group(signal.SIGKILL)
+        leader.members = {stranger.pid: test_runner._start_time(stranger.pid) + 1}
+        leader.signal_group(signal.SIGKILL)  # same pid, different start time
+        time.sleep(0.3)
+        self.assertIsNone(stranger.poll(), "a stranger's group was signalled")
+
+        # A member recorded earlier (same pid and start time) is still in the group.
+        leader.members = {stranger.pid: test_runner._start_time(stranger.pid)}
+        leader.signal_group(signal.SIGKILL)
+        self.assertEqual(stranger.wait(timeout=PATIENCE), -signal.SIGKILL)
 
     def test_check_environment_is_an_allowlist_without_credentials(self):
         report = self.root / "environment.json"
