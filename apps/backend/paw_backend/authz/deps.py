@@ -91,8 +91,13 @@ def require_capability(
 
     ``resource`` is a fixed :class:`Resource` (default: the workspace itself)
     or a function of the connection (sync or async) that builds one from the
-    route's path parameters and stored state. If the resolver raises, the
-    request is denied (and audited) rather than turned into an unaudited 500.
+    route's path parameters and stored state. For a repository route it loads
+    the repository and its ACL and returns ``Resource.repository(...)``: the
+    project id is the URL's (the one the user is a member of) and the ACL is the
+    stored one, so a repository of another project cannot borrow this project's
+    membership. A resolver that names a repository without its ACL is refused.
+    If the resolver raises, the request is denied (and audited) rather than
+    turned into an unaudited 500.
 
     HTTP answers: 401 (``unauthorized``) when nobody is authenticated, 403
     (``forbidden``) when the user may not do this, 503 when an action that

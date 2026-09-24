@@ -47,7 +47,12 @@ personal-ai-workspace/
 │  │  │  ├─ script.py.mako
 │  │  │  └─ versions/
 │  │  │     ├─ 0001_baseline.py
-│  │  │     └─ 0031_tool_approvals.py
+│  │  │     ├─ 0021_owner_setup.py
+│  │  │     ├─ 0025_audit_events.py
+│  │  │     ├─ 0031_tool_approvals.py
+│  │  │     ├─ 0032_task_lifecycle.py
+│  │  │     ├─ 0033_task_queue_budget_loop.py
+│  │  │     └─ 0040_memory_schema.py
 │  │  ├─ paw_backend/
 │  │  │  ├─ __init__.py
 │  │  │  ├─ __main__.py
@@ -59,6 +64,33 @@ personal-ai-workspace/
 │  │  │  ├─ middleware.py
 │  │  │  ├─ security.py
 │  │  │  ├─ server.py
+│  │  │  ├─ cli/
+│  │  │  │  ├─ __init__.py
+│  │  │  │  ├─ __main__.py
+│  │  │  │  └─ owner.py
+│  │  │  ├─ identity/
+│  │  │  │  ├─ __init__.py
+│  │  │  │  ├─ audit.py
+│  │  │  │  ├─ diagnostics.py
+│  │  │  │  ├─ errors.py
+│  │  │  │  ├─ limits.py
+│  │  │  │  ├─ login_name.py
+│  │  │  │  ├─ models.py
+│  │  │  │  ├─ operator.py
+│  │  │  │  ├─ redeemer.py
+│  │  │  │  └─ tokens.py
+│  │  │  ├─ tasks/
+│  │  │  │  └─ queueing/
+│  │  │  │     ├─ __init__.py
+│  │  │  │     ├─ budget.py
+│  │  │  │     ├─ domain.py
+│  │  │  │     ├─ errors.py
+│  │  │  │     ├─ escalation.py
+│  │  │  │     ├─ loop.py
+│  │  │  │     ├─ models.py
+│  │  │  │     ├─ sql.py
+│  │  │  │     ├─ task_queue.py
+│  │  │  │     └─ validation.py
 │  │  │  ├─ tools/
 │  │  │  │  ├─ __init__.py
 │  │  │  │  ├─ approval_memory.py
@@ -89,6 +121,8 @@ personal-ai-workspace/
 │  │  └─ tests/
 │  │     ├─ __init__.py
 │  │     ├─ fake_postgres.py
+│  │     ├─ identity_support.py
+│  │     ├─ queueing_support.py
 │  │     ├─ support.py
 │  │     ├─ teardown_child.py
 │  │     ├─ test_config.py
@@ -96,9 +130,26 @@ personal-ai-workspace/
 │  │     ├─ test_errors.py
 │  │     ├─ test_events.py
 │  │     ├─ test_health.py
+│  │     ├─ test_identity_login_name.py
+│  │     ├─ test_identity_migration.py
+│  │     ├─ test_identity_settings.py
+│  │     ├─ test_identity_tokens.py
 │  │     ├─ test_middleware.py
 │  │     ├─ test_migrations.py
+│  │     ├─ test_owner_no_web_path.py
+│  │     ├─ test_owner_setup_cli.py
+│  │     ├─ test_owner_setup_service.py
+│  │     ├─ test_owner_token_roles.py
 │  │     ├─ test_postgres_integration.py
+│  │     ├─ test_queueing_budget.py
+│  │     ├─ test_queueing_domain.py
+│  │     ├─ test_queueing_escalation.py
+│  │     ├─ test_queueing_flow.py
+│  │     ├─ test_queueing_grants.py
+│  │     ├─ test_queueing_loop.py
+│  │     ├─ test_queueing_loop_db.py
+│  │     ├─ test_queueing_queue.py
+│  │     ├─ test_queueing_schema.py
 │  │     ├─ test_security.py
 │  │     ├─ test_server.py
 │  │     ├─ test_tools_approvals.py
@@ -157,6 +208,7 @@ personal-ai-workspace/
 │     ├─ 0002-start-workspace-implementation-before-model-comparison.md
 │     ├─ 0003-backend-cli-web-implementation-stack.md
 │     ├─ 0004-rbac-capability-and-audit-policy.md
+│     ├─ 0005-owner-setup-and-recovery.md
 │     ├─ 0006-tool-broker-policy.md
 │     └─ README.md
 └─ evaluator/
@@ -170,7 +222,7 @@ personal-ai-workspace/
 | [REQUIREMENTS.md](../REQUIREMENTS.md) / [AGENTS.md](../AGENTS.md) | 要件と Agent の作業ルールの正本 |
 | [docs/](./) | Architecture、各機能の設計、Backlog、Issue 対応表 |
 | [docs/decisions/](decisions/README.md) | 重要な仕様・設計判断の提案と承認経緯 |
-| [apps/backend/](../apps/backend/README.md) | Core API、認証・権限、Orchestrator、Memory、Tool Broker（現在はSkeleton: REST / Event経路、Health、DB接続、Migration） |
+| [apps/backend/](../apps/backend/README.md) | Core API、認証・権限、Orchestrator、Memory、Tool Broker（現在はSkeleton: REST / Event経路、Health、DB接続、Migration。Owner の初期設定・復旧は server-local の管理コマンド、PAW-021） |
 | [apps/web/](../apps/web/README.md) | Backend API を利用する Web UI |
 | [apps/cli/](../apps/cli/README.md) | Web と同じ Backend API を利用する CLI |
 | [benchmarks/](../benchmarks/README.md) | Benchmark Task、候補 Agent の比較、公開可能な評価用データの準備領域 |
@@ -189,19 +241,11 @@ Core Backend は GPU 非依存とし、Local Model Runtime を停止できる構
 
 実装は [Benchmark / Evaluator 設計](BENCHMARK_EVALUATOR.md) と
 [Implementation Backlog](IMPLEMENTATION_BACKLOG.md) に従い、Benchmark / Evaluator、Model 選定、Workspace 本体の順で進めます。
-PAW-010 は PAW-001 に依存します。
-Backend の最小 Application Skeleton である PAW-020 は、Backlog 上は Model 比較 Run の PAW-017 に依存しますが、
-[Decision 0002](decisions/0002-start-workspace-implementation-before-model-comparison.md) により PAW-017 の完了を待たずに着手します。
+PAW-010 は PAW-001 に依存します。Backend の最小 Application Skeleton である PAW-020 は Backlog 上は Model 比較 Run の PAW-017 に依存しますが、
+[Decision 0002](decisions/0002-start-workspace-implementation-before-model-comparison.md)（Approved）により、PAW-017 の完了を待たずに着手できます。
 
-言語と Framework は [Decision 0003](decisions/0003-backend-cli-web-implementation-stack.md) で承認された構成に従います。
-
-| 配置 | 構成 |
-| --- | --- |
-| `apps/backend/` | Python 3.13、FastAPI + Uvicorn、Pydantic v2、PostgreSQL、SQLAlchemy 2.x + psycopg 3、Alembic、uv + `pyproject.toml` |
-| `apps/cli/` | Python（Backend の公開 HTTP API だけを呼ぶ） |
-| `apps/web/` | React + TypeScript + Vite、pnpm（Lint / Format Tool は PAW-060 で確定） |
-
-Deployment の具体方式は [Requirements Freeze Review](REQUIREMENTS_FREEZE_REVIEW.md) の実装時選択として扱い、
+Backend / CLI / Web の言語と Framework は [Decision 0003](decisions/0003-backend-cli-web-implementation-stack.md)（Approved）で決まっています（承認範囲は決定を参照）。
+Deployment の具体方式など、それ以外は [Requirements Freeze Review](REQUIREMENTS_FREEZE_REVIEW.md) の実装時選択として扱い、
 該当 Issue で決めた構成に合わせてこの文書を更新します。
 Backend の構成と起動方法は [apps/backend/README.md](../apps/backend/README.md) を参照してください。
 

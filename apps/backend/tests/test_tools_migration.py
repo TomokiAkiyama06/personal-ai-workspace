@@ -25,7 +25,7 @@ from .task_support import migrate, new_database, requires_postgres
 from .test_migrations import offline_config
 
 REVISION = "0031"
-PREVIOUS = "0040"
+PREVIOUS = "0033"
 FUNCTION = "tool_approval_events_reject_change"
 FUNCTIONS = (
     "tool_approvals_check_insert",
@@ -77,7 +77,7 @@ class OfflineMigrationTest(unittest.TestCase):
                 command.downgrade(config, revisions, sql=True)
         return output.getvalue()
 
-    def test_the_revision_follows_the_memory_schema(self):
+    def test_the_revision_follows_the_queue_schema(self):
         scripts = ScriptDirectory.from_config(offline_config(io.StringIO()))
         self.assertEqual(scripts.get_revision(REVISION).down_revision, PREVIOUS)
 
@@ -131,9 +131,8 @@ class OfflineMigrationTest(unittest.TestCase):
     def test_the_grants_are_one_marked_block_and_only_grant_when_a_role_is_named(self):
         sql = self.render("up", f"{PREVIOUS}:{REVISION}")
         # nothing for PUBLIC, and no role named: no GRANT at all
-        self.assertIn(
-            "REVOKE ALL ON tool_approvals, tool_approval_events FROM PUBLIC", sql
-        )
+        self.assertIn("REVOKE ALL ON tool_approvals FROM PUBLIC", sql)
+        self.assertIn("REVOKE ALL ON tool_approval_events FROM PUBLIC", sql)
         self.assertNotIn("GRANT", sql)
         source = (MIGRATIONS / "0031_tool_approvals.py").read_text()
         block = source.split("# GRANTS: least privilege", 1)[1]

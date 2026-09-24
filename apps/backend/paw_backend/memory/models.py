@@ -10,11 +10,13 @@ Separation"):
   the working state), derived from the raw messages.
 * Long-term Memory: ``memories`` (identity), ``memory_versions`` (every edit is
   a new row), ``memory_relations`` (version graph), ``memory_sources``
-  (provenance) and ``memory_embeddings`` (pgvector).
+  (provenance), ``embedding_models`` (each model's one dimension) and
+  ``memory_embeddings`` (pgvector).
 
 Users, projects and repositories do not exist yet (PAW-021 / PAW-026 /
 PAW-027). Their ids are therefore **plain UUID columns without foreign keys**
-(``owner_user_id``, ``project_id``, ``repo_id``, ``actor_user_id``). Nothing in
+(``owner_user_id``, ``project_id``, ``project_group_id``, ``repo_id``,
+``actor_user_id``). Nothing in
 the database ties them to a row: the Backend must only write ids it has
 validated, and PAW-021+ may add the foreign keys in a later migration.
 
@@ -36,6 +38,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     Interval,
@@ -57,6 +60,9 @@ class MemoryScope(StrEnum):
 
     USER = "user"
     PROJECT = "project"
+    # A subset of projects (for example "development projects"), as the
+    # Inferred Preference flow emits it. See ``MemoryVersion``.
+    PROJECT_GROUP = "project_group"
     REPO = "repo"
     SHARED = "shared"
 
@@ -168,6 +174,11 @@ class Message(Base):
     __tablename__ = "messages"
     __table_args__ = (
         UniqueConstraint("conversation_id", "event_sequence"),
+        # Redundant with the primary key; the composite foreign key of
+        # ``memory_sources`` needs it as its target.
+        UniqueConstraint(
+            "conversation_id", "id", name="uq_messages_conversation_id_id"
+        ),
         CheckConstraint(_one_of("role", MessageRole), name="role_valid"),
         CheckConstraint("event_sequence >= 0", name="event_sequence_not_negative"),
         CheckConstraint(
@@ -238,14 +249,16 @@ class Memory(Base):
 
 # Also the list of allowed scopes: no other value satisfies one of the branches.
 _SCOPE_COLUMNS = (
-    "(scope = 'user' AND owner_user_id IS NOT NULL"
-    " AND project_id IS NULL AND repo_id IS NULL)"
-    " OR (scope = 'project' AND project_id IS NOT NULL"
-    " AND owner_user_id IS NULL AND repo_id IS NULL)"
-    " OR (scope = 'repo' AND repo_id IS NOT NULL"
-    " AND owner_user_id IS NULL AND project_id IS NULL)"
-    " OR (scope = 'shared' AND owner_user_id IS NULL"
-    " AND project_id IS NULL AND repo_id IS NULL)"
+    "(scope = 'user' AND owner_user_id IS NOT NULL AND project_id IS NULL"
+    " AND project_group_id IS NULL AND repo_id IS NULL)"
+    " OR (scope = 'project' AND owner_user_id IS NULL AND project_id IS NOT NULL"
+    " AND project_group_id IS NULL AND repo_id IS NULL)"
+    " OR (scope = 'project_group' AND owner_user_id IS NULL AND project_id IS NULL"
+    " AND project_group_id IS NOT NULL AND repo_id IS NULL)"
+    " OR (scope = 'repo' AND owner_user_id IS NULL AND project_id IS NULL"
+    " AND project_group_id IS NULL AND repo_id IS NOT NULL)"
+    " OR (scope = 'shared' AND owner_user_id IS NULL AND project_id IS NULL"
+    " AND project_group_id IS NULL AND repo_id IS NULL)"
 )
 _FRESHNESS_FIELDS = (
     "(freshness_policy <> 'revalidate'"
@@ -262,7 +275,17 @@ class MemoryVersion(Base):
     ``user`` to ``project``) creates a new version and leaves the older, private
     versions private. The columns that decide who may read a row are
     ``scope`` plus exactly one of ``owner_user_id`` / ``project_id`` /
-    ``repo_id`` (none for ``shared``); ``acl.py`` builds the query condition.
+    ``project_group_id`` / ``repo_id`` (none for ``shared``); ``acl.py`` builds
+    the query condition.
+
+    ``project_group`` is a memory that applies to a set of projects. The
+    requirements only show it as the structured form of a free-text preference
+    ("apply to the development projects"); they define no project-group entity,
+    its membership or its permissions. The schema therefore stores just the
+    group's id (a plain UUID, like the other ids) and leaves what a group is to
+    the caller: a principal reads a group memory only when the group id is in
+    the ``project_group_ids`` the caller supplies (``acl.py``). Membership of a
+    project in a group never widens access by itself.
     """
 
     __tablename__ = "memory_versions"
@@ -328,6 +351,12 @@ class MemoryVersion(Base):
             postgresql_where=text("project_id IS NOT NULL"),
         ),
         Index(
+            "ix_memory_versions_project_group_id_status",
+            "project_group_id",
+            "status",
+            postgresql_where=text("project_group_id IS NOT NULL"),
+        ),
+        Index(
             "ix_memory_versions_repo_id_status",
             "repo_id",
             "status",
@@ -352,6 +381,7 @@ class MemoryVersion(Base):
     scope: Mapped[str] = mapped_column(Text)
     owner_user_id: Mapped[UUID | None]
     project_id: Mapped[UUID | None]
+    project_group_id: Mapped[UUID | None]
     repo_id: Mapped[UUID | None]
 
     memory_type: Mapped[str] = mapped_column(Text)
@@ -427,6 +457,16 @@ class MemorySource(Base):
     keeps the version and its other sources. The deletion flow records the loss
     in ``source_deleted_at`` (a foreign-key action cannot, and a CHECK that
     demanded it would block the delete).
+
+    ``conversation_id`` and ``message_id`` are checked as a pair: when both are
+    set, the message must belong to that conversation (composite foreign key).
+    Deleting only the message clears ``message_id`` and keeps the conversation
+    (``ON DELETE SET NULL (message_id)``). A writer that names a message must
+    also name its conversation: with a NULL conversation the pair is not
+    checked (``MATCH SIMPLE``), the database then only knows that the message
+    exists, and the deletion-flow lookup by ``conversation_id`` would miss the
+    row. No CHECK requires it because the SET NULL of a conversation deletion
+    passes through that state.
     """
 
     __tablename__ = "memory_sources"
@@ -447,11 +487,23 @@ class MemorySource(Base):
             "source_ref IS NULL OR source_type <> 'conversation'",
             name="conversation_has_no_opaque_reference",
         ),
+        ForeignKeyConstraint(
+            ["conversation_id", "message_id"],
+            ["messages.conversation_id", "messages.id"],
+            ondelete="SET NULL (message_id)",
+        ),
         Index("ix_memory_sources_memory_version_id", "memory_version_id"),
+        # Foreign key columns need an index for the referential actions: deleting
+        # a conversation or message finds its sources through these two.
         Index(
             "ix_memory_sources_conversation_id",
             "conversation_id",
             postgresql_where=text("conversation_id IS NOT NULL"),
+        ),
+        Index(
+            "ix_memory_sources_message_id",
+            "message_id",
+            postgresql_where=text("message_id IS NOT NULL"),
         ),
     )
 
@@ -471,21 +523,53 @@ class MemorySource(Base):
     created_at: Mapped[datetime] = _now_column()
 
 
+class EmbeddingModel(Base):
+    """An embedding model and its one dimension.
+
+    Which model (and so which dimension) is used is decided by the PAW-019
+    benchmark, so nothing is registered by the migration: registering a model
+    is an ordinary insert. Its dimension is fixed once embeddings use it:
+    ``memory_embeddings`` references ``(id, dimensions)``, so the database
+    refuses a vector of another dimension for the model, and refuses to change
+    or delete the model while embeddings exist.
+    """
+
+    __tablename__ = "embedding_models"
+    __table_args__ = (
+        # Redundant with the primary key; the composite foreign key of
+        # ``memory_embeddings`` needs it as its target.
+        UniqueConstraint("id", "dimensions", name="uq_embedding_models_id_dimensions"),
+        CheckConstraint("char_length(id) BETWEEN 1 AND 200", name="id_length"),
+        # 16000 is the largest dimension pgvector's ``vector`` type accepts.
+        CheckConstraint("dimensions BETWEEN 1 AND 16000", name="dimensions_range"),
+    )
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    dimensions: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = _now_column()
+
+
 class MemoryEmbedding(Base):
     """A vector of one memory version, made by one embedding model.
 
-    ``embedding`` has no fixed dimension (the model is not chosen yet), so rows
-    of different models can coexist; ``dimensions`` must equal the vector's real
-    dimension. A nearest-neighbour query must filter one ``embedding_model_id``
-    first and join ``memory_versions`` to apply the ACL condition before ranking.
-    No ANN index exists yet: PAW-043 adds it once the model is chosen (an HNSW
-    index needs a fixed dimension, so it will be a per-model expression index).
+    ``embedding`` has no fixed dimension in the column type (the model is not
+    chosen yet), but each model has exactly one (``embedding_models``): the
+    composite foreign key ``(embedding_model_id, dimensions)`` and the
+    ``vector_dims`` CHECK together make every row of a model the same size, so
+    a nearest-neighbour query that filters one ``embedding_model_id`` never
+    meets a dimension mismatch. The query must also join ``memory_versions`` to
+    apply the ACL condition before ranking. No ANN index exists yet: PAW-043
+    adds it once the model is chosen (an HNSW index needs a fixed dimension, so
+    it will be a per-model expression index).
     """
 
     __tablename__ = "memory_embeddings"
     __table_args__ = (
-        CheckConstraint(
-            "char_length(embedding_model_id) BETWEEN 1 AND 200", name="model_id_length"
+        # NO ACTION on update and delete: a model's dimension cannot change, and
+        # the model cannot be removed, while embeddings use it.
+        ForeignKeyConstraint(
+            ["embedding_model_id", "dimensions"],
+            ["embedding_models.id", "embedding_models.dimensions"],
         ),
         # A vector has at least one dimension, so this also keeps it positive.
         CheckConstraint("vector_dims(embedding) = dimensions", name="dimensions_match"),
@@ -503,6 +587,7 @@ class MemoryEmbedding(Base):
 
 TABLE_NAMES: tuple[str, ...] = (
     Conversation.__tablename__,
+    EmbeddingModel.__tablename__,
     Message.__tablename__,
     SessionState.__tablename__,
     Memory.__tablename__,

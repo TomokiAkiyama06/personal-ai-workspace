@@ -511,7 +511,7 @@ class DiagnosticsTest(RoleTestCase):
             await warn_about_loose_privileges(unreachable, 2)
 
     async def test_missing_tables_are_not_an_error(self):
-        await asyncio.to_thread(migrate, "downgrade", "0040")
+        await asyncio.to_thread(migrate, "downgrade", "0033")
         with self.assertNoLogs("paw_backend.authz.diagnostics", level="WARNING"):
             await warn_if_tool_approval_tables_are_mutable(self.owner_db, 3)
         self.assertEqual(await read_tool_table_access(self.owner_db), {})

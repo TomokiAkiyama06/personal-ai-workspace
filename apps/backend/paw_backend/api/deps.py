@@ -17,7 +17,7 @@ from starlette.websockets import WebSocket
 from paw_backend.config import Settings
 from paw_backend.db import Database, DatabaseNotConfiguredError
 from paw_backend.errors import ApiError
-from paw_backend.events import EventBus
+from paw_backend.events import EventBus, EventBusFull, Reservation
 from paw_backend.security import origin_allowed
 
 
@@ -33,12 +33,28 @@ def get_settings(connection: HTTPConnection) -> Settings:
     return connection.app.state.settings
 
 
-def require_event_capacity(bus: Annotated[EventBus, Depends(get_event_bus)]) -> None:
-    """Answer 503 before an SSE response starts when the bus is at its cap."""
-    if bus.is_full:
+async def reserve_event_slot(
+    bus: Annotated[EventBus, Depends(get_event_bus)],
+) -> AsyncIterator[Reservation]:
+    """Claim an event subscriber slot before an SSE response starts.
+
+    The slot is taken in the same synchronous step as the capacity check, so
+    two requests racing for the last slot cannot both pass; the loser gets a
+    regular 503 before any header is sent. The slot is released when the
+    request ends on any path: the stream finishing, the client disconnecting
+    (also before the stream started), an error, or cancellation. This must be
+    an ``async`` dependency so that it runs on the event loop's thread.
+    """
+    try:
+        reservation = bus.reserve()
+    except EventBusFull:
         raise ApiError(
             503, "event_capacity_reached", "Too many event subscribers; retry later"
-        )
+        ) from None
+    try:
+        yield reservation
+    finally:
+        reservation.release()
 
 
 def require_allowed_origin(

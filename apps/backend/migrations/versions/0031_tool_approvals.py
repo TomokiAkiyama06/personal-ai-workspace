@@ -42,19 +42,16 @@ enums (change a list with a new revision).
 and test use only.
 """
 
-import logging
 from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-from paw_backend.config import Settings
-
-logger = logging.getLogger("paw_backend.migrations.0031")
+from paw_backend.db_roles import grant_app_privileges
 
 revision: str = "0031"
-down_revision: str | Sequence[str] | None = "0040"
+down_revision: str | Sequence[str] | None = "0033"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -367,10 +364,8 @@ def downgrade() -> None:
 
 
 # ---------------------------------------------------------------------------
-# GRANTS: least privilege for the application role. This block is the only
-# place in this migration that talks about roles: at integration it is to be
-# replaced by the shared ``paw_backend.db_roles.grant_app_privileges`` helper
-# (PAW-025), keeping the same privileges:
+# GRANTS: least privilege for the application role, through the shared
+# ``paw_backend.db_roles.grant_app_privileges`` helper (PAW-025):
 #
 #   tool_approvals        SELECT, INSERT, and UPDATE of the state columns only
 #                         (status, approver_id, decided_at, consumed_at,
@@ -392,43 +387,8 @@ _APP_UPDATE_COLUMNS = (
 )
 
 
-def _quoted_app_role() -> str | None:
-    """The application role as a quoted identifier, or ``None`` if none is set.
-
-    The name is validated by ``Settings`` (letters, digits, underscore; not
-    ``public``, ``pg_*`` or another reserved name), must exist, and is then
-    quoted by the dialect's identifier preparer.
-    """
-    settings = Settings()
-    role = settings.app_database_role
-    if role is None:
-        if settings.migration_database_url is not None:
-            logger.warning(
-                "PAW_MIGRATION_DATABASE_URL is set but PAW_APP_DATABASE_ROLE is not: "
-                "no role is granted access to tool_approvals / tool_approval_events, "
-                "so the application cannot request or use tool approvals until the "
-                "role is granted (see the GRANTS block of this migration)."
-            )
-        return None
-    context = op.get_context()
-    if not context.as_sql:
-        found = op.get_bind().execute(
-            sa.text("SELECT 1 FROM pg_roles WHERE rolname = :role"), {"role": role}
-        )
-        if found.first() is None:
-            raise RuntimeError(
-                "PAW_APP_DATABASE_ROLE names a PostgreSQL role that does not exist; "
-                "create it before running the migration."
-            )
-    return context.dialect.identifier_preparer.quote_identifier(role)
-
-
 def _grant_app_privileges() -> None:
-    op.execute("REVOKE ALL ON tool_approvals, tool_approval_events FROM PUBLIC")
-    role = _quoted_app_role()
-    if role is None:
-        return
-    columns = ", ".join(_APP_UPDATE_COLUMNS)
-    op.execute(f"GRANT SELECT, INSERT ON tool_approvals TO {role}")
-    op.execute(f"GRANT UPDATE ({columns}) ON tool_approvals TO {role}")
-    op.execute(f"GRANT SELECT, INSERT ON tool_approval_events TO {role}")
+    grant_app_privileges(
+        op, "tool_approvals", insert=True, update_columns=_APP_UPDATE_COLUMNS
+    )
+    grant_app_privileges(op, "tool_approval_events", insert=True)

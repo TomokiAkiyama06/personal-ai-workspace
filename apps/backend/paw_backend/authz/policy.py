@@ -25,7 +25,13 @@ from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
 
-from paw_backend.authz.capabilities import CAPABILITIES, Capability, Scope
+from paw_backend.authz.capabilities import (
+    CAPABILITIES,
+    REPO_PERMISSION_OF,
+    Capability,
+    RepoPermission,
+    Scope,
+)
 from paw_backend.authz.roles import ProjectRole, SystemRole
 from paw_backend.authz.subjects import (
     ALL_PROJECTS,
@@ -55,7 +61,9 @@ class Reason(StrEnum):
     AGENT_CAPABILITY_NOT_GRANTED = "agent_capability_not_granted"
     AGENT_PROJECT_NOT_GRANTED = "agent_project_not_granted"
     DELEGATOR_NOT_ACTIVE = "delegator_not_active"
-    REPO_ACL_NOT_SUPPORTED = "repo_acl_not_supported"
+    REPO_ACL_UNRESOLVED = "repo_acl_unresolved"
+    REPO_ACL_MISMATCH = "repo_acl_mismatch"
+    REPO_ACL_FORBIDS = "repo_acl_forbids"
     PROJECT_STATE_FORBIDS = "project_state_forbids"
     ROLE_CHANGE_NOT_ALLOWED = "role_change_not_allowed"
     SELF_ROLE_CHANGE = "self_role_change"
@@ -217,6 +225,22 @@ _STATE_ALLOWS: MappingProxyType[ProjectState, frozenset[Capability] | None] = (
 )
 
 
+def _project_role_decision(
+    principal: Principal, cap: Capability, resource: Resource, policy: Policy
+) -> Decision:
+    """What the system role / project role give on the project (no repo ACL)."""
+    if policy.system_role_allows(principal.system_role, cap):
+        return Decision.allow(Reason.GRANTED_BY_SYSTEM_ROLE, cap)
+    # A system role alone never opens a project (membership is by invitation),
+    # so everything else needs a role in *this* project.
+    project_role = principal.project_roles.get(resource.project_id)
+    if project_role is None:
+        return Decision.deny(Reason.NOT_PROJECT_MEMBER, cap)
+    if policy.project_role_allows(project_role, cap):
+        return Decision.allow(Reason.GRANTED_BY_PROJECT_ROLE, cap)
+    return Decision.deny(Reason.CAPABILITY_NOT_GRANTED, cap)
+
+
 def decide(
     principal: Principal | None,
     capability: Capability,
@@ -233,14 +257,16 @@ def decide(
         return Decision.deny(Reason.UNAUTHENTICATED, cap)
     if not isinstance(resource, Resource):
         return Decision.deny(Reason.INVALID_RESOURCE, cap)
-    if resource.repo_id is not None:
-        # A repository can be access-denied (or read-only) inside a project the
-        # user belongs to, and repo ACLs do not exist yet: refuse rather than
-        # answer from the project role alone.
-        return Decision.deny(Reason.REPO_ACL_NOT_SUPPORTED, cap)
+    scope = CAPABILITIES[cap].scope
+    if resource.repo_id is not None and (
+        scope is not Scope.PROJECT or cap not in REPO_PERMISSION_OF
+    ):
+        # Only the project capabilities in REPO_PERMISSION_OF are about a single
+        # repository; naming one for anything else is a malformed resource.
+        return Decision.deny(Reason.INVALID_RESOURCE, cap)
 
     role = principal.system_role
-    match CAPABILITIES[cap].scope:
+    match scope:
         case Scope.SYSTEM:
             if policy.system_role_allows(role, cap):
                 return Decision.allow(Reason.GRANTED_BY_SYSTEM_ROLE, cap)
@@ -262,16 +288,28 @@ def decide(
             state_allows = _STATE_ALLOWS.get(resource.project_state, frozenset())
             if state_allows is not None and cap not in state_allows:
                 return Decision.deny(Reason.PROJECT_STATE_FORBIDS, cap)
-            if policy.system_role_allows(role, cap):
-                return Decision.allow(Reason.GRANTED_BY_SYSTEM_ROLE, cap)
-            # A system role alone never opens a project (membership is by
-            # invitation), so everything else needs a role in *this* project.
-            project_role = principal.project_roles.get(resource.project_id)
-            if project_role is None:
-                return Decision.deny(Reason.NOT_PROJECT_MEMBER, cap)
-            if policy.project_role_allows(project_role, cap):
-                return Decision.allow(Reason.GRANTED_BY_PROJECT_ROLE, cap)
-            return Decision.deny(Reason.CAPABILITY_NOT_GRANTED, cap)
+            acl = resource.repo_acl
+            if resource.repo_id is not None:
+                # The ACL is resolved by the caller. An unknown one is not
+                # "inherit", and one for another repository or project is not
+                # this repository's.
+                if acl is None:
+                    return Decision.deny(Reason.REPO_ACL_UNRESOLVED, cap)
+                if (
+                    acl.repo_id != resource.repo_id
+                    or acl.project_id != resource.project_id
+                ):
+                    return Decision.deny(Reason.REPO_ACL_MISMATCH, cap)
+            granted = _project_role_decision(principal, cap, resource, policy)
+            if (
+                granted.allowed
+                and acl is not None
+                and acl.allowed is not None
+                and REPO_PERMISSION_OF[cap] not in acl.allowed
+            ):
+                # An override narrows the project role, never widens it.
+                return Decision.deny(Reason.REPO_ACL_FORBIDS, cap)
+            return granted
 
     # Unreachable while every Scope is handled above; deny rather than fall through.
     return Decision.deny(Reason.CAPABILITY_NOT_GRANTED, cap)  # pragma: no cover
@@ -310,6 +348,12 @@ def decide_agent(
         or resource.project_id not in grant.project_ids
     ):
         return Decision.deny(Reason.AGENT_PROJECT_NOT_GRANTED, cap)
+    acl = resource.repo_acl if isinstance(resource, Resource) else None
+    if acl is not None and acl.allowed is not None:
+        # The user was allowed, so the ACL is resolved and belongs to this
+        # repository. `agent` is the permission to let an *agent* operate on it.
+        if RepoPermission.AGENT not in acl.allowed:
+            return Decision.deny(Reason.REPO_ACL_FORBIDS, cap)
     return user_decision
 
 
