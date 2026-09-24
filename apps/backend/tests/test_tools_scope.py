@@ -310,12 +310,14 @@ class TaskScopeTest(unittest.TestCase):
             path_roots=[f"{ROOT}/", ROOT, "/srv/other//tree"],
             hosts=["GitHub.com", "github.com."],
             projects={str(P1): "active"},
-            credential_handles=[HANDLE, HANDLE],
+            credential_handles={HANDLE: ["GitHub.com", "github.com."]},
         )
         self.assertEqual(scope.path_roots, (ROOT, "/srv/other/tree"))
         self.assertEqual(scope.hosts, frozenset({"github.com"}))
         self.assertEqual(dict(scope.projects), {P1: ProjectState.ACTIVE})
-        self.assertEqual(scope.credential_handles, frozenset({HANDLE}))
+        self.assertEqual(
+            dict(scope.credential_handles), {HANDLE: frozenset({"github.com"})}
+        )
 
     def test_invalid_scopes_are_refused(self):
         for overrides in (
@@ -327,8 +329,11 @@ class TaskScopeTest(unittest.TestCase):
             {"hosts": ["https://github.com"]},
             {"projects": {"not-a-uuid": ProjectState.ACTIVE}},
             {"projects": {P1: "deleted"}},
-            {"credential_handles": ["ghp_" + "a" * 36]},
-            {"credential_handles": ["cred_" + "A" * 32]},
+            {"credential_handles": {"ghp_" + "a" * 36: ["github.com"]}},
+            {"credential_handles": {"cred_" + "A" * 32: ["github.com"]}},
+            {"credential_handles": {HANDLE: ["*.github.com"]}},
+            {"credential_handles": {HANDLE: ["https://github.com"]}},
+            {"credential_handles": {f"cred_{i:032x}": [] for i in range(65)}},
             {"path_roots": [f"/srv/{i}" for i in range(33)]},
             {"hosts": [f"h{i}.example.com" for i in range(129)]},
         ):
@@ -340,16 +345,26 @@ class TaskScopeTest(unittest.TestCase):
         for overrides in (
             {"path_roots": ROOT},
             {"hosts": "github.com"},
-            {"credential_handles": HANDLE},
+            {"credential_handles": {HANDLE: "github.com"}},
         ):
             with self.subTest(overrides=list(overrides)):
                 with self.assertRaises(TypeError):
                     make_scope(**overrides)
 
+    def test_credential_handles_must_be_a_mapping_of_handles_to_hosts(self):
+        for value in ([HANDLE], (HANDLE,), {HANDLE}, HANDLE, None):
+            with self.subTest(value=repr(value)[:20]):
+                with self.assertRaises(TypeError):
+                    make_scope(credential_handles=value)
+
     def test_a_scope_cannot_be_changed(self):
         scope = make_scope()
         with self.assertRaises(TypeError):
             scope.projects[P2] = ProjectState.ACTIVE
+        with self.assertRaises(TypeError):
+            scope.credential_handles[OTHER_HANDLE] = frozenset()
+        with self.assertRaises(AttributeError):
+            scope.credential_handles[HANDLE].add("evil.com")
         with self.assertRaises(AttributeError):
             scope.hosts.add("evil.com")
         with self.assertRaises(AttributeError):
@@ -410,6 +425,52 @@ class ClassifyTest(unittest.IsolatedAsyncioTestCase):
                     (result.status, result.offending),
                     (ScopeStatus.HOST_OUT_OF_SCOPE, TargetKind.HOST),
                 )
+
+    async def test_a_credential_is_only_valid_for_its_own_hosts(self):
+        handle = Target(TargetKind.CREDENTIAL, HANDLE)
+        scope = make_scope(hosts=["github.com", "hooks.other-service.example"])
+        for hosts, status, offending in (
+            (["github.com"], ScopeStatus.IN_SCOPE, None),
+            (
+                ["github.com", "api.github.com"],
+                ScopeStatus.HOST_OUT_OF_SCOPE,
+                TargetKind.HOST,
+            ),
+            ([], ScopeStatus.IN_SCOPE, None),  # no host: nothing is sent anywhere
+        ):
+            with self.subTest(hosts=hosts):
+                targets = [handle, *(Target(TargetKind.HOST, h) for h in hosts)]
+                result = await self.classify(targets, scope)
+                self.assertEqual((result.status, result.offending), (status, offending))
+        # in scope for the task, but not for this credential: refused
+        result = await self.classify(
+            [handle, Target(TargetKind.HOST, "hooks.other-service.example")], scope
+        )
+        self.assertEqual(
+            (result.status, result.offending),
+            (ScopeStatus.OUT_OF_SCOPE, TargetKind.CREDENTIAL),
+        )
+        # every host of the call must be valid for the credential
+        result = await self.classify(
+            [
+                handle,
+                Target(TargetKind.HOST, "github.com"),
+                Target(TargetKind.HOST, "hooks.other-service.example"),
+            ],
+            scope,
+        )
+        self.assertEqual(result.offending, TargetKind.CREDENTIAL)
+
+    async def test_a_credential_without_hosts_is_valid_for_no_host(self):
+        scope = make_scope(credential_handles={HANDLE: []})
+        result = await self.classify(
+            [
+                Target(TargetKind.CREDENTIAL, HANDLE),
+                Target(TargetKind.HOST, "github.com"),
+            ],
+            scope,
+        )
+        self.assertEqual(result.offending, TargetKind.CREDENTIAL)
 
     async def test_a_project_or_credential_outside_the_scope(self):
         result = await self.classify([Target(TargetKind.PROJECT, str(P2))])

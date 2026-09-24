@@ -167,7 +167,8 @@ def make_scope(**overrides) -> TaskScope:
         "path_roots": [ROOT],
         "hosts": ["github.com", "api.github.com"],
         "projects": {P1: ProjectState.ACTIVE},
-        "credential_handles": [HANDLE],
+        # HANDLE is a GitHub credential: valid for GitHub hosts only.
+        "credential_handles": {HANDLE: ["github.com", "api.github.com"]},
     }
     arguments.update(overrides)
     return TaskScope(**arguments)

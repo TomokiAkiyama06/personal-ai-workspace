@@ -387,6 +387,43 @@ class TaskScopeEnforcementTest(unittest.IsolatedAsyncioTestCase):
             "git.push", {**PUSH, "credential": OTHER_HANDLE}, R.CREDENTIAL_OUT_OF_SCOPE
         )
 
+    async def test_a_credential_is_never_sent_to_a_host_it_is_not_valid_for(self):
+        # The task may talk to both hosts, but HANDLE is a GitHub credential.
+        scope = make_scope(
+            hosts=["github.com", "hooks.other-service.example", "example.org"]
+        )
+        context = make_context(scope=scope)
+        for remote in (
+            "https://hooks.other-service.example/services/x",
+            "https://example.org/x",
+            "https://github.com.evil.com/x",
+        ):
+            with self.subTest(remote=remote):
+                decision = await self.deny(
+                    "git.push",
+                    {"remote": remote, "credential": HANDLE},
+                    R.CREDENTIAL_OUT_OF_SCOPE,
+                    context=context,
+                )
+                self.assertEqual(decision.level, ApprovalLevel.DENY)
+        ok = await self.h.broker.request(make_call("git.push", PUSH, context=context))
+        self.assertEqual((ok.verdict, ok.reason), (Verdict.ALLOW, R.SCOPED_AUTO))
+        merge = await self.h.broker.request(
+            make_call(
+                "git.merge",
+                {
+                    "remote": "https://example.org/x",
+                    "credential": HANDLE,
+                    "pull_request": 7,
+                },
+                context=context,
+            )
+        )
+        self.assertEqual(
+            (merge.verdict, merge.reason), (Verdict.DENY, R.CREDENTIAL_OUT_OF_SCOPE)
+        )
+        self.assertEqual(len(self.h.approvals._records), 0)
+
     async def test_credential_use_is_by_opaque_handle_only(self):
         await self.deny(
             "git.push",

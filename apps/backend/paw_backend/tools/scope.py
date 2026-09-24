@@ -43,7 +43,7 @@ import re
 import unicodedata
 import uuid
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Protocol
@@ -230,14 +230,18 @@ class TaskScope:
 
     ``path_roots`` is ordered: the first is where a relative path resolves.
     ``projects`` maps every project the task may touch to its stored state
-    (the authorization decision needs it). ``credential_handles`` are the
-    opaque handles the task may use; the plaintext behind them is never here.
+    (the authorization decision needs it). ``credential_handles`` maps each
+    opaque handle the task may use to **the hosts that credential is valid
+    for**: a call that names a host outside that set cannot use the handle,
+    even when the task may talk to that host (a GitHub credential must not be
+    sent to an unrelated service that the task also reaches). The plaintext
+    behind a handle is never here.
     """
 
     path_roots: tuple[str, ...]
     hosts: frozenset[str]
     projects: Mapping[uuid.UUID, ProjectState]
-    credential_handles: frozenset[str] = frozenset()
+    credential_handles: Mapping[str, frozenset[str]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         roots: list[str] = []
@@ -254,20 +258,27 @@ class TaskScope:
             normalise_project(pid): ProjectState(state)
             for pid, state in self.projects.items()
         }
-        handles = _collection(self.credential_handles, "credential_handles")
-        if not all(is_credential_handle(h) for h in handles):
-            raise ValueError("credential_handles must be opaque handles")
+        if not isinstance(self.credential_handles, Mapping):
+            raise TypeError("credential_handles must map handles to their hosts")
+        handles: dict[str, frozenset[str]] = {}
+        for handle, valid_hosts in self.credential_handles.items():
+            if not is_credential_handle(handle):
+                raise ValueError("credential_handles must be opaque handles")
+            handles[handle] = frozenset(
+                normalise_host(h) for h in _collection(valid_hosts, "hosts of a handle")
+            )
         if (
             len(roots) > MAX_ROOTS
             or len(hosts) > MAX_HOSTS
             or len(projects) > MAX_PROJECTS
             or len(handles) > MAX_CREDENTIAL_HANDLES
+            or any(len(valid) > MAX_HOSTS for valid in handles.values())
         ):
             raise ValueError("the task scope is too large")
         object.__setattr__(self, "path_roots", tuple(roots))
         object.__setattr__(self, "hosts", frozenset(hosts))
         object.__setattr__(self, "projects", MappingProxyType(projects))
-        object.__setattr__(self, "credential_handles", frozenset(handles))
+        object.__setattr__(self, "credential_handles", MappingProxyType(handles))
 
 
 class PathResolver(Protocol):
@@ -321,6 +332,7 @@ async def classify_targets(
 ) -> Classification:
     """Where ``targets`` lie relative to ``scope`` (may raise PathResolutionError)."""
     targets = list(targets)
+    hosts_of_call = {t.value for t in targets if t.kind is TargetKind.HOST}
     outside: list[TargetKind] = []
     paths = [t for t in targets if t.kind is TargetKind.PATH]
     if paths:
@@ -336,7 +348,10 @@ async def classify_targets(
             if normalise_project(target.value) not in scope.projects:
                 outside.append(TargetKind.PROJECT)
         elif target.kind is TargetKind.CREDENTIAL:
-            if target.value not in scope.credential_handles:
+            valid_hosts = scope.credential_handles.get(target.value)
+            # The handle must be the task's, and must be valid for every host
+            # the same call reaches (a credential is never sent elsewhere).
+            if valid_hosts is None or not hosts_of_call <= valid_hosts:
                 outside.append(TargetKind.CREDENTIAL)
     if outside:
         return Classification(ScopeStatus.OUT_OF_SCOPE, outside[0])
