@@ -225,24 +225,36 @@ class TaskRelationTest(ScratchSchemaTestCase):
         self.assertEqual(row["project_id"], project_id)
         self.assertEqual(row["task_id"], task_id)
 
-    def test_a_task_id_must_exist(self):
-        self.assertEqual(
-            self.try_item(task_id=uuid4()),
-            "fk_research_scratch_items_task_id_tasks",
-        )
+    def test_the_task_id_is_a_plain_uuid_that_the_database_does_not_check(self):
+        # Decision 0013: there is no foreign key. That a task exists (and belongs
+        # to the project) is checked by ``ScratchStore.add`` under a row lock
+        # (``test_scratch_store_items``); a row written by other means keeps the
+        # id as it was written.
+        unknown = uuid4()
 
-    def test_deleting_a_task_keeps_the_item_and_its_project(self):
+        item_id = self.add_item(task_id=unknown)
+
+        self.assertEqual(self.item_row(item_id)["task_id"], unknown)
+
+    def test_deleting_a_task_is_not_blocked_and_keeps_the_item_relation(self):
         project_id = uuid4()
         task_id = self.add_task(project_id)
         item_id = self.add_item(project_id=project_id, task_id=task_id)
+        pinned_id = self.add_item(project_id=project_id, task_id=task_id, pinned=True)
 
-        self.session.execute(text("DELETE FROM tasks WHERE id = :id"), {"id": task_id})
+        result = self.session.execute(
+            text("DELETE FROM tasks WHERE id = :id"), {"id": task_id}
+        )
 
-        row = self.item_row(item_id)
-        self.assertIsNone(row["task_id"])
-        self.assertEqual(row["project_id"], project_id)
+        self.assertEqual(result.rowcount, 1)
+        for kept in (item_id, pinned_id):
+            with self.subTest(item=kept):
+                row = self.item_row(kept)
+                self.assertEqual(row["task_id"], task_id)
+                self.assertEqual(row["project_id"], project_id)
+        self.assertTrue(self.item_row(pinned_id)["pinned"])
 
-    def test_project_and_user_ids_are_plain_uuids_without_foreign_keys(self):
+    def test_the_items_table_has_no_foreign_key_at_all(self):
         columns = self.connection.execute(
             text(
                 "SELECT DISTINCT a.attname FROM pg_constraint con"
@@ -252,7 +264,7 @@ class TaskRelationTest(ScratchSchemaTestCase):
                 "   AND con.conrelid = 'research_scratch_items'::regclass"
             )
         ).scalars()
-        self.assertEqual(set(columns), {"task_id"})
+        self.assertEqual(set(columns), set())
 
 
 class LeaseConstraintTest(ScratchSchemaTestCase):
@@ -330,20 +342,16 @@ class SeparationFromLongTermMemoryTest(ScratchSchemaTestCase):
             )
         ).all()
 
-    def test_the_only_foreign_keys_of_the_scratch_tables_are_task_and_item(self):
+    def test_the_only_foreign_key_of_the_scratch_tables_is_lease_to_item(self):
         edges = {
             (child, parent): action
             for child, parent, action in self.foreign_keys()
             if child in self.SCRATCH or parent in self.SCRATCH
         }
 
-        # 'n' = ON DELETE SET NULL, 'c' = ON DELETE CASCADE.
+        # 'c' = ON DELETE CASCADE. No foreign key leads to ``tasks`` (0013).
         self.assertEqual(
-            edges,
-            {
-                ("research_scratch_items", "tasks"): "n",
-                ("research_scratch_leases", "research_scratch_items"): "c",
-            },
+            edges, {("research_scratch_leases", "research_scratch_items"): "c"}
         )
 
     def test_no_foreign_key_connects_scratch_and_any_memory_or_conversation_table(self):

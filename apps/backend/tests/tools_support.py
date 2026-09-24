@@ -41,6 +41,9 @@ ROOT = "/srv/paw-test/worktree"
 # The repository of P1 that the default task scope holds: its worktree is ROOT
 # and it inherits its project's permissions.
 REPO = uid(701)
+# The URL that addresses REPO (the backend registers it with the repository).
+REPO_REMOTE = "https://github.com/org/repo"
+REPO_API = "https://api.github.com/repos/org/repo"
 HANDLE = "cred_" + "a1" * 16
 OTHER_HANDLE = "cred_" + "b2" * 16
 TASK = uid(501)
@@ -182,7 +185,15 @@ def make_scope(**overrides) -> TaskScope:
         "projects": {P1: ProjectState.ACTIVE},
         # HANDLE is a GitHub credential: valid for GitHub hosts only.
         "credential_handles": {HANDLE: ["github.com", "api.github.com"]},
-        "repositories": [ScopedRepository(REPO, P1, ROOT, RepoAcl.inherit(REPO, P1))],
+        "repositories": [
+            ScopedRepository(
+                REPO,
+                P1,
+                ROOT,
+                RepoAcl.inherit(REPO, P1),
+                remotes=[REPO_REMOTE, REPO_REMOTE + ".git", REPO_API],
+            )
+        ],
     }
     arguments.update(overrides)
     return TaskScope(**arguments)

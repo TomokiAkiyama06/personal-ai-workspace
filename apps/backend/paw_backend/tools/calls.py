@@ -133,6 +133,8 @@ class ParsedArguments:
     # The normalised values are the call's content: never part of a repr / log.
     values: Mapping[str, object] = field(repr=False)
     targets: tuple[Target, ...]
+    # The canonical URL of every URL argument (a target keeps only its host).
+    urls: tuple[str, ...] = ()
     # Every provided argument as the approver sees it (bounded, redacted).
     summary: tuple[SummaryItem, ...] = field(default=(), repr=False)
 
@@ -152,6 +154,7 @@ def parse_arguments(
     base = scope.path_roots[0] if scope.path_roots else None
     values: dict[str, object] = {}
     targets: list[Target] = []
+    urls: list[str] = []
     summary: list[SummaryItem] = []
     total_chars = 0
     for name, argument in spec.arguments.items():  # declared order: deterministic
@@ -172,7 +175,11 @@ def parse_arguments(
         )
         if target is not None:
             targets.append(target)
-    return ParsedArguments(MappingProxyType(values), tuple(targets), tuple(summary))
+        if argument.kind is ArgumentKind.URL:
+            urls.append(value)
+    return ParsedArguments(
+        MappingProxyType(values), tuple(targets), tuple(urls), tuple(summary)
+    )
 
 
 def _shown(value: object) -> str:

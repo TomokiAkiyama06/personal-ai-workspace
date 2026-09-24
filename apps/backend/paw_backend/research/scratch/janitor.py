@@ -28,14 +28,22 @@ Behaviour
   every other ``BaseException``) is never caught.
 * **Stopping** is cancelling the task returned by ``asyncio.create_task(
   janitor.run())``: the loop is at ``await`` the whole time, so it stops at the
-  next suspension point. Nothing is left running and nothing is kept between
-  ticks except a failure counter. One limit: a purge that is *inside a query*
-  when PostgreSQL stalls is cancelled the way every pooled query is (psycopg asks
-  the server to cancel and waits, up to about ten seconds; with a libpq older
-  than 17 from a thread that the interpreter waits for at exit). Unlike the
-  startup diagnostics it is not on a dedicated, abortable connection: a purge is
-  several statements in one transaction. The lifespan's wait is bounded anyway
-  (see ``paw_backend.app``).
+  next suspension point, and a purge that is *inside a query* stops at once too,
+  also when PostgreSQL has stopped answering. ``purge_expired`` runs its
+  transaction with ``Database.run_abortable``: on a dedicated connection outside
+  the pool, in a task of its own, that the janitor only waits for. When the
+  janitor is cancelled (or the database is disposed) the connection's socket is
+  shut down, exactly like the startup diagnostics' connection, instead of asking
+  a stalled server to cancel the query, which it never answers (psycopg would
+  wait up to about ten seconds, and with a libpq older than 17 from a thread
+  that the interpreter waits for at exit). So the lifespan's bounded wait (see
+  ``paw_backend.app``) ends because the janitor really ended, not because it was
+  given up on. The unfinished transaction is rolled back by the server; the next
+  tick repeats the work (a purge is idempotent). Nothing is kept between ticks
+  except a failure counter. Limits: every batch opens and closes a connection of
+  its own (at most ``max_batches`` per tick); and a purge has no deadline of its
+  own, so on a server that stalls while the application keeps running the tick
+  waits until the connection fails or the janitor is stopped.
 * **Several Backend processes** may each run a janitor: ``purge_expired`` locks
   its rows with ``SKIP LOCKED``, so two of them never wait for each other and
   never delete a row twice.

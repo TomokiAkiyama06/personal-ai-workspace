@@ -489,6 +489,64 @@ class ResultBudgetTest(unittest.TestCase):
         self.assertEqual(len(redacted), 41)
         self.assertEqual(redacted[0], chunk)
 
+    def test_a_key_larger_than_the_character_budget_is_not_inspected(self):
+        # Finding of the review of PR #74: the key was replaced by the marker but
+        # still folded and scanned whole, so one huge key escaped the bound on the
+        # work a result may cost. The key text budget now ends the read.
+        scanned: list[int] = []
+        real_sensitive, real_redact = (
+            credentials_module._sensitive_key,
+            credentials_module.redact_text,
+        )
+
+        def sensitive(key):
+            scanned.append(len(key))
+            return real_sensitive(key)
+
+        def redact(text):
+            scanned.append(len(text))
+            return real_redact(text)
+
+        with (
+            mock.patch.object(credentials_module, "MAX_RESULT_CHARS", 100),
+            mock.patch.object(credentials_module, "_sensitive_key", sensitive),
+            mock.patch.object(credentials_module, "redact_text", redact),
+        ):
+            redacted, count = redact_value(
+                {"a": "x", "K" * 101: {"password": GITHUB}, "later": "y"}
+            )
+        self.assertEqual(redacted, {"a": "x", TRUNCATED: TRUNCATED})
+        self.assertEqual(count, 1)
+        # "a" and its value were read; the oversized key, the value under it and
+        # the entries after it were not looked at at all
+        self.assertEqual(scanned, [1, 1, 1])
+
+    def test_the_key_budget_is_exact(self):
+        with mock.patch.object(credentials_module, "MAX_RESULT_CHARS", 100):
+            # a key that uses the budget up exactly is still read ...
+            exact = {"K" * 100: 1}
+            self.assertEqual(redact_value(exact), (exact, 0))
+            # ... one character more is cut, whatever the key and value hold
+            for key in ("K" * 101, "DB_PASSWORD" + "x" * 90, GITHUB + "x" * 100):
+                with self.subTest(key=key[:12]):
+                    redacted, count = redact_value({key: "v", "after": "w"})
+                    self.assertEqual((redacted, count), ({TRUNCATED: TRUNCATED}, 1))
+            # the text of the earlier entries counts against the same budget
+            redacted, count = redact_value({"a" * 60: "b" * 30, "c" * 11: "d"})
+            self.assertEqual(
+                (redacted, count), ({"a" * 60: "b" * 30, TRUNCATED: TRUNCATED}, 1)
+            )
+
+    def test_a_cut_key_ends_the_read_of_the_whole_result(self):
+        with mock.patch.object(credentials_module, "MAX_RESULT_CHARS", 100):
+            redacted, count = redact_value(
+                [{"K" * 101: "v"}, {"later": GITHUB}, "and more"]
+            )
+        # one marker for the mapping, one for the rest of the list: nothing after
+        # the cut is read (so the secret in "later" is not even seen)
+        self.assertEqual(redacted, [{TRUNCATED: TRUNCATED}, TRUNCATED])
+        self.assertEqual(count, 2)
+
     def test_a_small_result_is_untouched(self):
         result = {"a": [1, 2, {"b": "c"}], "d": None}
         self.assertEqual(redact_value(result), (result, 0))
