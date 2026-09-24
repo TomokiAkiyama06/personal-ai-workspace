@@ -187,7 +187,7 @@ class CanonicalFormTest(unittest.TestCase):
                 "https://example.com/?%41CCESS_%54OKEN=SECRET": "https://example.com/",
                 "https://example.com/?to%6Ben=SECRET&q=1": "https://example.com/?q=1",
                 "https://example.com/?q=1&%61pi%5Fkey=SECRET": "https://example.com/?q=1",
-                "https://example.com/?x-amz-signature%3D=S": "https://example.com/?x-amz-signature%3D=S",
+                "https://example.com/?x-amz-signature%3D=S": "https://example.com/",
                 # decoded twice by a proxy in front of the server
                 "https://example.com/?%2561ccess_token=SECRET": "https://example.com/",
                 "https://example.com/?%252561ccess_token=SECRET": "https://example.com/",
@@ -213,6 +213,27 @@ class CanonicalFormTest(unittest.TestCase):
                 "https://example.com/?my%5Ftoken=1": "https://example.com/?my%5Ftoken=1",
             }
         )
+
+    def test_a_name_that_decodes_to_delimiters_is_dropped(self):
+        # ``%26access_token`` decodes to ``&access_token``: a proxy that decodes the
+        # URL before it parses it turns that into a real ``access_token`` parameter,
+        # so a piece whose decoded name holds a delimiter is not kept.
+        self.check(
+            {
+                "https://example.com/?%26access_token=SECRET": "https://example.com/",
+                "https://example.com/?q=1&%26token=SECRET": "https://example.com/?q=1",
+                "https://example.com/?a%3Dpassword=SECRET": "https://example.com/",
+                "https://example.com/?a%3Baccess_token=SECRET": "https://example.com/",
+                "https://example.com/?%2526access_token=SECRET": "https://example.com/",
+                "https://example.com/?x%23token=SECRET&k=v": "https://example.com/?k=v",
+            }
+        )
+        for raw in (
+            "https://example.com/?%26access_token=SECRET-VALUE",
+            "https://example.com/?ok=1&%3Bapi%5Fkey=SECRET-VALUE",
+        ):
+            with self.subTest(raw=raw):
+                self.assertNotIn("SECRET-VALUE", canonicalize_locator(raw))
 
     def test_similar_names_are_not_credential_parameters(self):
         self.check(

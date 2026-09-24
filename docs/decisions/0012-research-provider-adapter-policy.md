@@ -25,10 +25,11 @@ PAW-051 の実装は、動かすためにこれらを選んだ。Review（Codex�
 3. **URL の正規化。** scheme は `http` / `https` だけ（両者は別のものとして扱い、`www.` は除かない）。Host は小文字の ASCII、既定の Port と Fragment を除去、`%xx` の 16 進を大文字、非 ASCII は Percent-encode、Query は `(名前, 値)` の順に並べる。
    追跡用の Parameter（`utm_*`、`fbclid`、`gclid` など）を除く。空白・制御文字・バックスラッシュ・User info（`@`）・2,048 文字超の入力、IPv6 と非 ASCII の Host は拒否し、名前解決はしない。
 4. **Credential の除去。** Query の Parameter のうち Credential 用の名前（`access_token`、`token`、`api_key`、`sig`、`x-amz-signature` など、`locator.py` の一覧）を除く。
-   名前は Percent-decode（最大 4 回。Proxy が複数回 decode する場合に備える）してから、大文字小文字を区別せずに比べる。**一覧は Best effort** で、Path に入った Credential や一覧にない名前は判別できない。
+   名前は Percent-decode（最大 4 回。Proxy が複数回 decode する場合に備える）してから、大文字小文字を区別せずに比べる。decode した名前に `&`、`;`、`=`、`#` が入るものは、先に decode する Parser では別の Parameter になるので、名前として成り立たないものとして丸ごと除く。decode した名前に `&`、`;`、`=`、`#` が入るものは、先に decode する Parser では別の Parameter になるので、名前として成り立たないものとして丸ごと除く。**一覧は Best effort** で、Path に入った Credential や一覧にない名前は判別できない。
 5. **License と `robots.txt`。** 要件に定義がないため `SourceMetadata` には含めない。必要になったときに追加する。
 6. **責務の境界。** `network` Capability の確認、SSRF 対策、`robots.txt` の遵守、名前解決の後の接続先の検査は、呼び出し元（Tool Broker、PAW-031）と個々の Adapter の責任とする。この層は認可の判断も Network の Access もしない。
-7. **Timeout は協調的。** Adapter が Cancel を無視する、または Event Loop を止める同期処理をする場合、Broker は止められない。Adapter の実装規約として、Cancel に応じる非同期の実装を求める。
+7. **公開日時は UTC で表せるもの。** `published_at` は Timezone つきで、UTC へ変換できる値だけを受け付ける（`datetime.max` を UTC-01:00 で表した値など、範囲を超える値は Adapter の不正な Response として扱い、`invalid_response` にする）。
+8. **Timeout は協調的。** Adapter が Cancel を無視する、または Event Loop を止める同期処理をする場合、Broker は止められない。Adapter の実装規約として、Cancel に応じる非同期の実装を求める。
 
 ## 選定理由
 

@@ -100,18 +100,29 @@ def _has_forbidden_character(raw: str) -> bool:
 _MAX_NAME_DECODINGS = 4
 
 
-def _decoded_name(name: str) -> str:
-    """The parameter name as a query parser (or a proxy before it) would read it."""
+# A decoded name that holds one of these was more than one parameter (or a value)
+# for a parser that decodes first: ``%26access_token`` is ``&access_token``.
+_QUERY_DELIMITERS = frozenset("&;=#")
+
+
+def _name_layers(name: str) -> list[str]:
+    """Every reading of ``name``: as written, then decoded once more each time."""
+    layers = [name]
     for _ in range(_MAX_NAME_DECODINGS):
-        decoded = unquote(name, errors="replace")
-        if decoded == name:
+        decoded = unquote(layers[-1], errors="replace")
+        if decoded == layers[-1]:
             break
-        name = decoded
-    return name
+        layers.append(decoded)
+    return layers
 
 
 def _is_dropped_parameter(name: str) -> bool:
-    lowered = _decoded_name(name).lower()
+    layers = _name_layers(name)
+    if any(_QUERY_DELIMITERS.intersection(layer) for layer in layers[1:]):
+        # Not a name at any layer that decodes it: never keep it (it may carry a
+        # credential parameter behind an encoded delimiter).
+        return True
+    lowered = layers[-1].lower()
     return (
         lowered.startswith(TRACKING_PARAMETER_PREFIXES)
         or lowered in TRACKING_PARAMETERS
@@ -159,7 +170,9 @@ def canonicalize_locator(raw: str) -> str:
        ``TRACKING_PARAMETER_PREFIXES`` / ``TRACKING_PARAMETERS``) or a
        credential parameter (``CREDENTIAL_PARAMETERS``), compared
        case-insensitively after the name is percent-decoded (repeatedly, at most
-       ``_MAX_NAME_DECODINGS`` times, as a proxy might), are dropped; the rest
+       ``_MAX_NAME_DECODINGS`` times, as a proxy might), are dropped, and so is any
+       piece whose name holds ``&``, ``;``, ``=`` or ``#`` once decoded (it was more
+       than one parameter for a parser that decodes first); the rest
        are sorted by ``(name, value)`` (``value`` is the text after the first
        ``=``, ``""`` if there is none; plain string comparison; a piece keeps
        its own spelling, so ``flag`` stays ``flag`` and ``a=`` stays ``a=``) and

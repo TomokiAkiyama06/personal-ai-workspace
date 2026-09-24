@@ -48,6 +48,21 @@ def normalize_title(title: str) -> str:
     return " ".join(title.split())
 
 
+def published_utc(value: datetime | None) -> datetime | None:
+    """``value`` in UTC (``None`` stays ``None``), or ``InvalidProviderResponseError``.
+
+    A time the constructors would refuse (``datetime.max`` at UTC-01:00 is beyond
+    UTC's range) can still reach here in an object that was built around them; it
+    is the provider's invalid response, never an ``OverflowError`` for the caller.
+    """
+    if value is None:
+        return None
+    try:
+        return value.astimezone(UTC)
+    except (OverflowError, ValueError):
+        raise InvalidProviderResponseError() from None
+
+
 def normalize_hits(
     *,
     provider_id: str,
@@ -93,6 +108,7 @@ def normalize_hits(
     except InvalidLocatorError:
         raise InvalidProviderResponseError() from None
 
+    published = [published_utc(hit.published_at) for hit in hits]  # all, first
     return tuple(
         ResearchItem(
             SourceMetadata(
@@ -103,16 +119,12 @@ def normalize_hits(
                 retrieved_at=retrieved_at,
                 content_hash=compute_content_hash(hit.text),
                 source_type=hit.source_type,
-                published_at=(
-                    None
-                    if hit.published_at is None
-                    else hit.published_at.astimezone(UTC)
-                ),
+                published_at=published_at,
                 private_source=hit.private_source,
             ),
             hit.text,
         )
-        for hit, locator in zip(hits, locators, strict=True)
+        for hit, locator, published_at in zip(hits, locators, published, strict=True)
     )
 
 

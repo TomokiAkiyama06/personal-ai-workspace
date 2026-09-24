@@ -1278,7 +1278,7 @@ License や `robots.txt` に関する項目はありません。要件と設計�
 - `http` / `https` 以外、User 情報（`user:pass@`）、空白・制御文字・バックスラッシュ、不正な Port、Host が `a-z0-9-` と `.` だけで作れない場合（IPv6、`_`、非 ASCII の Host）は `InvalidLocatorError`。
 - Scheme と Host は小文字にし、Host 末尾の `.` を 1 つ取り、既定の Port（http 80、https 443）と Fragment を外し、空の Path を `/` にします。
 - Path と Query の `%xx` は大文字にし、非 ASCII の文字は UTF-8 の `%XX` にします。
-- Query は `&` で分け、追跡用（`utm_*`、`fbclid`、`gclid` など）と Credential 用（`access_token`、`token`、`api_key`、`sig` など）の Parameter を除き、`(名前, 値)` の順に並べます。除く名前の一覧は `locator.py` の定数です。名前は Percent-decode（最大 4 回）してから比べます（`%61ccess_token` も除きます）。Credential の一覧は Best effort で、Path に入った Credential は判別できません。
+- Query は `&` で分け、追跡用（`utm_*`、`fbclid`、`gclid` など）と Credential 用（`access_token`、`token`、`api_key`、`sig` など）の Parameter を除き、`(名前, 値)` の順に並べます。除く名前の一覧は `locator.py` の定数です。名前は Percent-decode（最大 4 回）してから比べます（`%61ccess_token` も除きます）。decode した名前に `&`、`;`、`=`、`#` が入るもの（`%26access_token` など、先に decode する Parser では別の Parameter になる）は、名前として成り立たないので丸ごと除きます。Credential の一覧は Best effort で、Path に入った Credential は判別できません。
 - Path の Dot Segment、末尾の `/`、`www.`、`http` と `https` の違いは正規化しません。そのため、これらだけが違う URL は別の Source として扱います。
 - 正規化の結果は 2048 文字以下で、もう一度かけても同じ結果になります。
 - 例外の文言に URL は入りません。

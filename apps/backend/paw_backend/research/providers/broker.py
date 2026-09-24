@@ -43,6 +43,7 @@ from paw_backend.research.providers.normalize import (
     merge_items,
     normalize_hits,
     normalize_title,
+    published_utc,
 )
 from paw_backend.research.providers.registry import ProviderRegistry, RegisteredProvider
 
@@ -289,7 +290,17 @@ class ResearchBroker:
         if code is not None:
             return self._failed_fetch(entry.name, entry.kind, code)
 
-        published_at = document.published_at
+        try:
+            published_at = published_utc(document.published_at)
+        except InvalidProviderResponseError:
+            _log_failure(
+                entry,
+                ResearchErrorCode.INVALID_RESPONSE,
+                InvalidProviderResponseError.__name__,
+            )
+            return self._failed_fetch(
+                entry.name, entry.kind, ResearchErrorCode.INVALID_RESPONSE
+            )
         item = ResearchItem(
             SourceMetadata(
                 provider_kind=source.provider_kind,
@@ -299,9 +310,7 @@ class ResearchBroker:
                 retrieved_at=self._clock(),
                 content_hash=compute_content_hash(document.text),
                 source_type=document.source_type,
-                published_at=None
-                if published_at is None
-                else published_at.astimezone(UTC),
+                published_at=published_at,
                 # Conservative: private if either side says so.
                 private_source=source.private_source or document.private_source,
             ),
