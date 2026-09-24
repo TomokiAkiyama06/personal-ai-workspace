@@ -5,6 +5,7 @@ import contextlib
 import logging
 import os
 import socket
+import time
 from enum import StrEnum
 
 import psycopg
@@ -66,6 +67,10 @@ class Database:
         # connection each one is using (see `check`).
         self._probes: set[asyncio.Task[None]] = set()
         self._probe_connections: dict[asyncio.Task[None], psycopg.AsyncConnection] = {}
+        # Single flight: concurrent `check()` calls share one probe, and its
+        # result is reused for `database_readiness_cache_seconds`.
+        self._flight: asyncio.Task[DatabaseStatus] | None = None
+        self._recent: tuple[float, DatabaseStatus] | None = None
 
     @property
     def configured(self) -> bool:
@@ -120,13 +125,43 @@ class Database:
     async def check(self) -> DatabaseStatus:
         """Run ``SELECT 1``. Never raises and never reports connection details.
 
-        Returns within ``database_timeout_seconds`` even if the server stalls.
-        A probe that is still running at the deadline is aborted in the
-        background (see ``_abort``); ``dispose()`` makes sure none outlives
-        the application.
+        ``/health/ready`` may be called by anyone who can reach the server, so
+        the number of connections it opens is bounded: concurrent calls share
+        one probe (single flight) and the outcome, failures included, is
+        reused for ``database_readiness_cache_seconds``. At most one probe
+        connection is opened per interval, and a stalled server is probed
+        again only after the previous probe timed out.
+
+        Every call returns within ``database_timeout_seconds``, however slowly
+        the driver gives up (see ``_abort``).
         """
         if not self.configured:
             return DatabaseStatus.NOT_CONFIGURED
+        recent = self._recent
+        if (
+            recent is not None
+            and time.monotonic() - recent[0]
+            < self._settings.database_readiness_cache_seconds
+        ):
+            return recent[1]
+        if self._flight is None:
+            self._flight = asyncio.create_task(self._run_flight())
+        flight = self._flight
+        # Unlike awaiting the task, asyncio.wait() leaves it running when this
+        # caller is cancelled: the other callers still need its result.
+        await asyncio.wait({flight})
+        return DatabaseStatus.UNAVAILABLE if flight.cancelled() else flight.result()
+
+    async def _run_flight(self) -> DatabaseStatus:
+        try:
+            status = await self._probe()
+        finally:
+            self._flight = None
+        self._recent = (time.monotonic(), status)
+        return status
+
+    async def _probe(self) -> DatabaseStatus:
+        """One probe on a dedicated connection; aborted at the deadline."""
         probe = asyncio.create_task(self._ping())
         self._probes.add(probe)
         probe.add_done_callback(self._probes.discard)
@@ -180,11 +215,12 @@ class Database:
         probes = set(self._probes)
         for probe in probes:
             self._abort(probe)
-        if probes:
+        tasks = probes | ({self._flight} if self._flight is not None else set())
+        if tasks:
             budget = self._settings.shutdown_timeout_seconds / 2
-            _, pending = await asyncio.wait(probes, timeout=budget)
-            for probe in pending:  # last resort: cancel what did not fail on its own
-                probe.cancel()
+            _, pending = await asyncio.wait(tasks, timeout=budget)
+            for task in pending:  # last resort: cancel what did not fail on its own
+                task.cancel()
             if pending:
                 _, stuck = await asyncio.wait(pending, timeout=budget)
                 if stuck:
@@ -193,6 +229,7 @@ class Database:
                         "timeout",
                         len(stuck),
                     )
+        self._recent = None
         if self._engine is not None:
             await self._engine.dispose()
             self._engine = None

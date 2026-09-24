@@ -134,6 +134,124 @@ class ReadinessTimeoutTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(database._probes, set())
 
 
+class ReadinessConcurrencyTest(unittest.IsolatedAsyncioTestCase):
+    """``/health/ready`` is reachable by anyone: probes must not multiply."""
+
+    TIMEOUT = 0.5
+
+    def database(self, port: int, **overrides) -> Database:
+        overrides.setdefault("database_timeout_seconds", self.TIMEOUT)
+        return Database(
+            make_settings(
+                database_url=f"postgresql://paw:pw@127.0.0.1:{port}/paw", **overrides
+            )
+        )
+
+    async def test_concurrent_checks_share_one_probe_connection(self):
+        async with HangingPostgres(answer_queries=True) as server:
+            database = self.database(server.port)
+
+            results = await asyncio.gather(*(database.check() for _ in range(50)))
+
+            self.assertEqual(set(results), {DatabaseStatus.OK})
+            self.assertEqual(server.logins, 1, "every check opened a connection")
+
+    async def test_a_stalled_server_is_probed_once_and_all_calls_return_in_time(self):
+        async with HangingPostgres() as server:
+            database = self.database(server.port)
+            started = time.monotonic()
+
+            with self.assertLogs("paw_backend.db", level=logging.WARNING):
+                results = await asyncio.gather(*(database.check() for _ in range(50)))
+            elapsed = time.monotonic() - started
+
+            self.assertEqual(set(results), {DatabaseStatus.UNAVAILABLE})
+            self.assertEqual(server.logins, 1)
+            self.assertLess(elapsed, self.TIMEOUT + 0.5)
+
+    async def test_the_result_is_reused_within_the_interval_and_then_refreshed(self):
+        async with HangingPostgres(answer_queries=True) as server:
+            database = self.database(server.port, database_readiness_cache_seconds=0.3)
+
+            await database.check()
+            await database.check()
+            self.assertEqual(server.logins, 1, "the result was not reused")
+
+            await asyncio.sleep(0.35)
+            await database.check()
+            self.assertEqual(server.logins, 2, "the result was never refreshed")
+
+    async def test_reuse_can_be_turned_off_but_concurrent_calls_still_share(self):
+        async with HangingPostgres(answer_queries=True) as server:
+            database = self.database(server.port, database_readiness_cache_seconds=0)
+
+            await asyncio.gather(*(database.check() for _ in range(10)))
+            self.assertEqual(server.logins, 1)
+            await database.check()
+            self.assertEqual(server.logins, 2)
+
+    async def test_a_failure_is_not_reused_beyond_the_interval(self):
+        pings = []
+
+        class FailsOnce(Database):
+            async def _ping(self):
+                pings.append(time.monotonic())
+                if len(pings) == 1:
+                    raise ConnectionError("the database is starting")
+
+        database = FailsOnce(
+            make_settings(database_url=URL, database_readiness_cache_seconds=0.2)
+        )
+
+        with self.assertLogs("paw_backend.db", level=logging.WARNING):
+            self.assertEqual(await database.check(), DatabaseStatus.UNAVAILABLE)
+            self.assertEqual(await database.check(), DatabaseStatus.UNAVAILABLE)
+        self.assertEqual(len(pings), 1, "the failure was probed again too soon")
+
+        await asyncio.sleep(0.25)
+        self.assertEqual(await database.check(), DatabaseStatus.OK)
+        self.assertEqual(len(pings), 2)
+
+    async def test_cancelling_a_waiting_request_leaves_the_shared_probe_running(self):
+        pings = []
+
+        class Slow(Database):
+            async def _ping(self):
+                pings.append(1)
+                await asyncio.sleep(0.2)
+
+        database = Slow(make_settings(database_url=URL, database_timeout_seconds=5))
+        first, second, third = (asyncio.create_task(database.check()) for _ in range(3))
+        await asyncio.sleep(0.05)
+
+        first.cancel()  # the request that started the probe goes away
+        self.assertEqual(
+            await asyncio.gather(second, third),
+            [DatabaseStatus.OK, DatabaseStatus.OK],
+        )
+        with self.assertRaises(asyncio.CancelledError):
+            await first
+        self.assertEqual(len(pings), 1)
+
+    async def test_dispose_ends_the_shared_probe_for_every_waiting_request(self):
+        async with HangingPostgres() as server:
+            database = self.database(
+                server.port, database_timeout_seconds=30, shutdown_timeout_seconds=2
+            )
+            checks = [asyncio.create_task(database.check()) for _ in range(5)]
+            self.assertTrue(await wait_until(lambda: database._probe_connections))
+
+            started = time.monotonic()
+            with self.assertLogs("paw_backend.db", level=logging.WARNING):
+                await database.dispose()
+                results = await asyncio.wait_for(asyncio.gather(*checks), 1)
+
+            self.assertLess(time.monotonic() - started, 1.0)
+            self.assertEqual(set(results), {DatabaseStatus.UNAVAILABLE})
+            self.assertEqual(server.logins, 1)
+            self.assertEqual((database._probes, database._flight), (set(), None))
+
+
 class ConnectionUrlOptionsTest(unittest.IsolatedAsyncioTestCase):
     """Options in ``PAW_DATABASE_URL`` must not collide with the probe's own."""
 

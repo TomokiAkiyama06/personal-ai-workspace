@@ -61,6 +61,10 @@ class Settings(BaseSettings):
     database_url: SecretStr | None = None
     database_timeout_seconds: float = Field(default=3.0, gt=0, le=60)
     database_pool_size: int = Field(default=5, ge=1, le=100)
+    # How long a readiness result (also a failure) is reused. Together with
+    # single flight it caps the probe connections an unauthenticated
+    # /health/ready can cause at one per interval; 0 turns the reuse off.
+    database_readiness_cache_seconds: float = Field(default=1.0, ge=0, le=60)
 
     # Event path (SSE / WebSocket).
     event_heartbeat_seconds: float = Field(default=15.0, gt=0)

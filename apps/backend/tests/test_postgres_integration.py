@@ -74,6 +74,41 @@ class PostgresIntegrationTest(unittest.IsolatedAsyncioTestCase):
         finally:
             await database.dispose()
 
+    async def test_concurrent_readiness_checks_open_one_connection(self):
+        probes = Database(self.settings)
+        monitor = Database(self.settings)
+
+        async def sessions_established() -> int:
+            # Counted by the server when a session ends, so it lags slightly.
+            async with monitor.session() as session:
+                result = await session.execute(
+                    text(
+                        "SELECT sessions FROM pg_stat_database"
+                        " WHERE datname = current_database()"
+                    )
+                )
+                return result.scalar()
+
+        async def settled() -> int:
+            # Sessions that ended a moment ago (earlier tests) may still be
+            # reported; read until the value stops changing.
+            value, unchanged = await sessions_established(), 0
+            while unchanged < 3:
+                await asyncio.sleep(0.1)
+                latest = await sessions_established()
+                value, unchanged = latest, (unchanged + 1 if latest == value else 0)
+            return value
+
+        try:
+            before = await settled()
+            results = await asyncio.gather(*(probes.check() for _ in range(50)))
+            opened = await settled() - before
+        finally:
+            await asyncio.gather(probes.dispose(), monitor.dispose())
+
+        self.assertEqual(set(results), {DatabaseStatus.OK})
+        self.assertEqual(opened, 1, "concurrent checks opened several connections")
+
     async def test_migrations_upgrade_and_downgrade(self):
         def migrate():
             # `env.py` reads PAW_DATABASE_URL; an online run needs no ini file.

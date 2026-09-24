@@ -126,6 +126,7 @@ class SettingsTest(unittest.TestCase):
         self.assertEqual(settings.allowed_origins, [])
         self.assertEqual(settings.event_max_subscribers, 100)
         self.assertEqual(settings.shutdown_timeout_seconds, 5)
+        self.assertEqual(settings.database_readiness_cache_seconds, 1.0)
 
     def test_hosts_and_origins_are_comma_separated_and_normalized(self):
         settings = settings_from_env(
@@ -158,6 +159,8 @@ class SettingsTest(unittest.TestCase):
     def test_rejects_out_of_range_limits(self):
         for name, value in (
             ("PAW_EVENT_MAX_SUBSCRIBERS", "0"),
+            ("PAW_DATABASE_READINESS_CACHE_SECONDS", "-1"),
+            ("PAW_DATABASE_READINESS_CACHE_SECONDS", "3600"),
             ("PAW_SHUTDOWN_TIMEOUT_SECONDS", "0"),
             ("PAW_SHUTDOWN_TIMEOUT_SECONDS", "1000"),
         ):
