@@ -14,7 +14,8 @@ in a way that would let it skip a check:
   takes a credential handle is a ``credential-use`` tool (it cannot hide
   behind a ``read`` declaration);
 * a project-local ``write`` / ``destructive`` tool must name what it touches
-  (a path, host, URL or project argument), or every call would look "in scope";
+  with a *required* path, host, URL or project argument (an optional one can be
+  left out, and a call without targets looks "in scope");
 * a tool declares the arguments it accepts. Anything else in a call is
   refused, so a model cannot smuggle a ``"capability": "read"`` or an
   ``"approved": true`` next to the real arguments.
@@ -147,6 +148,9 @@ class ToolSpec:
 
     def _check_consistency(self) -> None:
         kinds = {a.kind for a in self.arguments.values()}
+        # An optional argument may be left out, so it cannot be what makes a
+        # call "name what it touches": only required arguments count below.
+        required = {a.kind for a in self.arguments.values() if a.required}
         caps = self.capabilities
         if kinds & {ArgumentKind.URL, ArgumentKind.HOST} and (
             ToolCapability.NETWORK not in caps
@@ -156,21 +160,21 @@ class ToolSpec:
             ToolCapability.CREDENTIAL_USE not in caps
         ):
             raise ValueError("a tool with a credential handle uses credentials")
-        if ToolCapability.NETWORK in caps and not kinds & {
+        if ToolCapability.NETWORK in caps and not required & {
             ArgumentKind.URL,
             ArgumentKind.HOST,
         }:
-            raise ValueError("a network tool must name its host or URL")
+            raise ValueError("a network tool must require its host or URL")
         if ToolCapability.CREDENTIAL_USE in caps and (
-            ArgumentKind.CREDENTIAL_HANDLE not in kinds
+            ArgumentKind.CREDENTIAL_HANDLE not in required
         ):
-            raise ValueError("credentials are used by handle only")
+            raise ValueError("credentials are used by a required handle only")
         if (
             self.environment is Environment.PROJECT_LOCAL
             and caps & {ToolCapability.WRITE, ToolCapability.DESTRUCTIVE}
-            and not kinds & TARGET_KINDS
+            and not required & TARGET_KINDS
         ):
-            raise ValueError("a write tool must name what it touches")
+            raise ValueError("a write tool must require what it touches")
         if self.returns_credential_plaintext and (
             ToolCapability.CREDENTIAL_USE not in caps
         ):

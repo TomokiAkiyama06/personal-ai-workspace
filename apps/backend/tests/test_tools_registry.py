@@ -120,6 +120,34 @@ class ConsistencyTest(unittest.TestCase):
             caps=frozenset({C.CREDENTIAL_USE}), args={"secret": ArgumentSpec(A.TEXT)}
         )
 
+    def test_an_optional_argument_cannot_be_what_names_the_target(self):
+        optional = ArgumentSpec(A.PATH, required=False)
+        cases = {
+            "write": {"caps": {C.WRITE}, "args": {"p": optional}},
+            "destructive": {"caps": {C.DESTRUCTIVE}, "args": {"p": optional}},
+            "write, optional project": {
+                "caps": {C.WRITE},
+                "args": {"p": ArgumentSpec(A.PROJECT, required=False)},
+            },
+            "network": {
+                "caps": {C.READ, C.NETWORK},
+                "args": {"u": ArgumentSpec(A.URL, required=False)},
+            },
+            "credential": {
+                "caps": {C.CREDENTIAL_USE},
+                "args": {"c": ArgumentSpec(A.CREDENTIAL_HANDLE, required=False)},
+            },
+        }
+        for label, case in cases.items():
+            with self.subTest(label=label):
+                self.refused(caps=frozenset(case["caps"]), args=case["args"])
+        # ... one required target is enough, optional ones may come with it
+        tool = spec(
+            caps=frozenset({C.WRITE}),
+            args={"p": ArgumentSpec(A.PATH), "q": optional},
+        )
+        self.assertIn(C.WRITE, tool.capabilities)
+
     def test_a_project_local_write_must_name_what_it_touches(self):
         for caps in ({C.WRITE}, {C.DESTRUCTIVE}, {C.WRITE, C.READ}):
             with self.subTest(caps=caps):

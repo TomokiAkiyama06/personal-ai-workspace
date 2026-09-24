@@ -30,6 +30,9 @@ from paw_backend.tools.credentials import (
 from paw_backend.tools.decisions import BrokerReason
 from paw_backend.tools.registry import MAX_TEXT_LENGTH, ArgumentKind, ToolSpec
 from paw_backend.tools.scope import (
+    MAX_HOST_LENGTH,
+    MAX_PATH_LENGTH,
+    MAX_URL_LENGTH,
     Target,
     TargetError,
     TargetKind,
@@ -41,6 +44,15 @@ from paw_backend.tools.scope import (
 )
 
 HASH_VERSION = 1
+# All text arguments of one call together (each is also bounded by its kind).
+MAX_ARGUMENT_CHARS = 262_144
+_KIND_LIMITS = {
+    ArgumentKind.PATH: (MAX_PATH_LENGTH, BrokerReason.INVALID_TARGET),
+    ArgumentKind.URL: (MAX_URL_LENGTH, BrokerReason.INVALID_TARGET),
+    ArgumentKind.HOST: (MAX_HOST_LENGTH + 2, BrokerReason.INVALID_TARGET),
+    ArgumentKind.PROJECT: (64, BrokerReason.INVALID_TARGET),
+    ArgumentKind.CREDENTIAL_HANDLE: (64, BrokerReason.CREDENTIAL_HANDLE_INVALID),
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,7 +127,8 @@ class ArgumentError(Exception):
 
 @dataclass(frozen=True, slots=True)
 class ParsedArguments:
-    values: Mapping[str, object]
+    # The normalised values are the call's content: never part of a repr / log.
+    values: Mapping[str, object] = field(repr=False)
     targets: tuple[Target, ...]
 
 
@@ -134,12 +147,19 @@ def parse_arguments(
     base = scope.path_roots[0] if scope.path_roots else None
     values: dict[str, object] = {}
     targets: list[Target] = []
+    total_chars = 0
     for name, argument in spec.arguments.items():  # declared order: deterministic
         if name not in arguments:
             if argument.required:
                 raise ArgumentError(BrokerReason.INVALID_ARGUMENTS)
             continue
-        value, target = _parse_value(argument, arguments[name], base)
+        raw = arguments[name]
+        if type(raw) is str:
+            # The whole call is bounded before any text is scanned.
+            total_chars += len(raw)
+            if total_chars > MAX_ARGUMENT_CHARS:
+                raise ArgumentError(BrokerReason.INVALID_ARGUMENTS)
+        value, target = _parse_value(argument, raw, base)
         values[name] = value
         if target is not None:
             targets.append(target)
@@ -158,10 +178,17 @@ def _parse_value(argument, value: object, base: str | None):
         if type(value) is not bool:
             raise ArgumentError(BrokerReason.INVALID_ARGUMENTS)
         return value, None
-    # Every remaining kind is text. The hard limit comes first so that nothing
-    # oversized is ever scanned or normalised.
-    if type(value) is not str or len(value) > MAX_TEXT_LENGTH:
+    # Every remaining kind is text. The length limit of the kind (for text, the
+    # tool's declared ``max_length``) comes first so that nothing oversized is
+    # ever scanned or normalised.
+    if type(value) is not str:
         raise ArgumentError(BrokerReason.INVALID_ARGUMENTS)
+    if kind is ArgumentKind.TEXT:
+        limit, too_long = min(argument.max_length, MAX_TEXT_LENGTH), None
+    else:
+        limit, too_long = _KIND_LIMITS[kind]
+    if len(value) > limit:
+        raise ArgumentError(too_long or BrokerReason.INVALID_ARGUMENTS)
     if contains_credential_plaintext(value):
         raise ArgumentError(BrokerReason.CREDENTIAL_PLAINTEXT_IN_ARGUMENTS)
     try:

@@ -20,16 +20,16 @@ L = ApprovalLevel
 # Written out as strings, cell by cell, so that a change of the table is a
 # visible change of this test.
 EXPECTED = {
-    ("read", "project_local"): ("auto", "deny", "deny"),
+    ("read", "project_local"): ("auto", "approval", "deny"),
     ("write", "project_local"): ("scoped_auto", "approval", "deny"),
     ("execute", "project_local"): ("scoped_auto", "deny", "deny"),
     ("network", "project_local"): ("scoped_auto", "approval", "deny"),
     ("credential-use", "project_local"): ("scoped_auto", "deny", "deny"),
     ("destructive", "project_local"): ("approval", "deny", "deny"),
-    ("read", "host"): ("auto", "deny", "deny"),
+    ("read", "host"): ("auto", "approval", "deny"),
     ("write", "host"): ("approval", "approval", "deny"),
     ("execute", "host"): ("approval", "deny", "deny"),
-    ("network", "host"): ("scoped_auto", "approval", "deny"),
+    ("network", "host"): ("approval", "approval", "deny"),
     ("credential-use", "host"): ("strong_approval", "deny", "deny"),
     ("destructive", "host"): ("strong_approval", "deny", "deny"),
 }
@@ -78,14 +78,28 @@ class CombinationTest(unittest.TestCase):
         self.assertIs(self.level([C.READ]), L.AUTO)
         self.assertIs(self.level({C.CREDENTIAL_USE, C.NETWORK, C.WRITE}), L.SCOPED_AUTO)
 
-    def test_an_external_write_beyond_the_task_hosts_needs_approval(self):
+    def test_reaching_a_host_beyond_the_task_hosts_needs_approval_read_or_write(self):
         out = S.HOST_OUT_OF_SCOPE
         self.assertIs(self.level([C.WRITE, C.NETWORK], scope=out), L.APPROVAL)
-        # ... and an external read does not: read is denied outside the scope.
-        self.assertIs(self.level([C.READ, C.NETWORK], scope=out), L.DENY)
+        # a read is no dead end any more: a human sees the exact URL and decides
+        self.assertIs(self.level([C.READ, C.NETWORK], scope=out), L.APPROVAL)
+        self.assertIs(self.level([C.NETWORK], scope=out), L.APPROVAL)
+        # ... but never a credential, an execution or a deletion
+        self.assertIs(self.level([C.CREDENTIAL_USE, C.NETWORK], scope=out), L.DENY)
+        self.assertIs(self.level([C.EXECUTE, C.NETWORK], scope=out), L.DENY)
+        self.assertIs(self.level([C.DESTRUCTIVE, C.NETWORK], scope=out), L.DENY)
 
     def test_host_wide_changes_need_approval_or_more(self):
         self.assertIs(self.level([C.WRITE, C.EXECUTE], E.HOST), L.APPROVAL)
+        # a host-wide network tool (proxy, firewall) never runs without a human
+        self.assertIs(self.level([C.NETWORK], E.HOST), L.APPROVAL)
+        self.assertIs(self.level([C.WRITE, C.NETWORK], E.HOST), L.APPROVAL)
+        for capability in C:
+            if capability is not C.READ:
+                with self.subTest(cap=capability.value):
+                    self.assertGreaterEqual(
+                        self.level([capability], E.HOST).severity, L.APPROVAL.severity
+                    )
         self.assertIs(self.level([C.DESTRUCTIVE, C.WRITE], E.HOST), L.STRONG_APPROVAL)
         self.assertIs(self.level([C.READ], E.HOST), L.AUTO)
 

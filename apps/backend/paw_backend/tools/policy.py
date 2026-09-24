@@ -93,22 +93,25 @@ _IN, _HOST_OUT, _OUT = (
 )
 
 # (capability, environment): the levels for (in scope, host out of scope, out
-# of scope). Anything outside the task scope is denied, except that a network
-# target beyond the task's hosts needs a human ("external write beyond the task
-# scope: APPROVAL"); an external *read* of such a host stays denied, because
-# read is DENY outside the scope and a fetch is read + network.
+# of scope). Anything outside the task scope is denied, except a *host* beyond
+# the task's hosts: reaching it needs a human, who sees the exact URL (a read
+# is ``read`` + ``network``, an external write ``write`` + ``network``: both
+# ``approval``; "external write beyond the task scope: APPROVAL"). A credential
+# never goes to a host it is not valid for (``TaskScope.credential_handles``),
+# whatever the level says.
 _ROWS: dict[tuple[ToolCapability, Environment], tuple[ApprovalLevel, ...]] = {
-    (_C.READ, _LOCAL): (_A, _D, _D),
+    (_C.READ, _LOCAL): (_A, _P, _D),
     (_C.WRITE, _LOCAL): (_S, _P, _D),
     (_C.EXECUTE, _LOCAL): (_S, _D, _D),
     (_C.NETWORK, _LOCAL): (_S, _P, _D),
     (_C.CREDENTIAL_USE, _LOCAL): (_S, _D, _D),
     (_C.DESTRUCTIVE, _LOCAL): (_P, _D, _D),
-    # Host-wide changes (packages, services, firewall, mounts) need approval.
-    (_C.READ, _HOST): (_A, _D, _D),
+    # Host-wide changes (packages, services, firewall, proxies, mounts) need
+    # approval or more, network included; only a read is automatic.
+    (_C.READ, _HOST): (_A, _P, _D),
     (_C.WRITE, _HOST): (_P, _P, _D),
     (_C.EXECUTE, _HOST): (_P, _D, _D),
-    (_C.NETWORK, _HOST): (_S, _P, _D),
+    (_C.NETWORK, _HOST): (_P, _P, _D),
     (_C.CREDENTIAL_USE, _HOST): (_X, _D, _D),
     (_C.DESTRUCTIVE, _HOST): (_X, _D, _D),
 }

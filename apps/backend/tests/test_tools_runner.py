@@ -1,4 +1,5 @@
 import asyncio
+import time
 import unittest
 
 from paw_backend.authz import SystemRole
@@ -10,6 +11,7 @@ from paw_backend.tools import (
     ToolRunner,
     Verdict,
 )
+from paw_backend.tools.credentials import MAX_RESULT_NODES
 
 from .authz_support import SECRET, FailingSink, principal
 from .tools_support import (
@@ -245,6 +247,16 @@ class RedactionTest(unittest.IsolatedAsyncioTestCase):
         h = Harness(executor=FakeExecutor({"conn": Leaky()}))
         outcome = await h.runner.run(make_call("repo.read_file", READ))
         self.assertEqual(outcome.result, {"conn": "[UNSUPPORTED]"})
+
+    async def test_a_huge_result_is_cut_before_it_is_read_in_full(self):
+        h = Harness(executor=FakeExecutor(["x"] * 2_000_000))
+        started = time.monotonic()
+        outcome = await h.runner.run(make_call("repo.read_file", READ))
+        self.assertLess(time.monotonic() - started, 20.0)  # it took 8.9 s in full
+        self.assertEqual(outcome.status, ExecutionStatus.COMPLETED)
+        self.assertEqual(len(outcome.result), MAX_RESULT_NODES)
+        self.assertEqual(outcome.result[-1], "[TRUNCATED]")
+        self.assertEqual(outcome.redactions, 1)
 
     async def test_a_result_without_secrets_is_returned_as_it_is(self):
         result = {"files": ["a.py", "b.py"], "count": 2, "ok": True, "note": None}

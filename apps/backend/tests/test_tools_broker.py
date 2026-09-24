@@ -16,15 +16,21 @@ from paw_backend.authz import (
 from paw_backend.tools import (
     DEFAULT_TOOL_POLICY,
     ApprovalLevel,
+    ArgumentKind,
+    ArgumentSpec,
     BrokerReason,
     BudgetStatus,
+    Environment,
     InMemoryApprovalStore,
     TaskContext,
     ToolBroker,
     ToolCall,
+    ToolCapability,
     ToolRegistry,
+    ToolSpec,
     Verdict,
 )
+from paw_backend.tools.scope import Target, TargetKind
 
 from .authz_support import (
     AGENT,
@@ -52,6 +58,7 @@ from .tools_support import (
     make_grant,
     make_scope,
     sample_registry,
+    sample_specs,
 )
 
 R = BrokerReason
@@ -153,11 +160,33 @@ class DecisionLevelsTest(unittest.IsolatedAsyncioTestCase):
             (Verdict.NEEDS_APPROVAL, R.APPROVAL_REQUIRED, ApprovalLevel.APPROVAL),
         )
 
-    async def test_an_external_read_beyond_the_task_hosts_is_denied(self):
+    async def test_an_external_read_beyond_the_task_hosts_needs_approval(self):
         decision = await self.request("web.fetch", {"url": "https://example.org/x"})
         self.assertEqual(
-            (decision.verdict, decision.reason), (Verdict.DENY, R.HOST_OUT_OF_SCOPE)
+            (decision.verdict, decision.reason, decision.level),
+            (Verdict.NEEDS_APPROVAL, R.APPROVAL_REQUIRED, ApprovalLevel.APPROVAL),
         )
+        record = await self.h.approvals.get(decision.approval_id)
+        self.assertEqual(record.targets, (Target(TargetKind.HOST, "example.org"),))
+
+    async def test_a_host_wide_network_tool_is_never_automatic(self):
+        spec = ToolSpec(
+            "host.set_proxy",
+            frozenset({ToolCapability.WRITE, ToolCapability.NETWORK}),
+            Capability.PROJECT_TASK_RUN,
+            {"url": ArgumentSpec(ArgumentKind.URL)},
+            environment=Environment.HOST,
+        )
+        h = Harness(registry=ToolRegistry([*sample_specs(), spec]))
+        for url in ("https://github.com/proxy", "https://example.org/proxy"):
+            with self.subTest(url=url):
+                decision = await h.broker.request(
+                    make_call("host.set_proxy", {"url": url})
+                )
+                self.assertEqual(
+                    (decision.verdict, decision.level),
+                    (Verdict.NEEDS_APPROVAL, ApprovalLevel.APPROVAL),
+                )
 
     async def test_credential_plaintext_retrieval_is_always_denied(self):
         for arguments in ({"credential": HANDLE}, {"credential": OTHER_HANDLE}):
@@ -338,6 +367,8 @@ class TaskScopeEnforcementTest(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_look_alike_hosts_are_out_of_scope_not_in_scope(self):
+        # Never allowed on their own: a fetch needs a human, who is shown the
+        # host as it really is; a credential is never sent there at all.
         for url in (
             "https://github.com.evil.com/x",
             "https://evilgithub.com/x",
@@ -345,7 +376,22 @@ class TaskScopeEnforcementTest(unittest.IsolatedAsyncioTestCase):
             "https://GITHUB.COM.evil.com/",
         ):
             with self.subTest(url=url):
-                await self.deny("web.fetch", {"url": url}, R.HOST_OUT_OF_SCOPE)
+                decision = await self.h.broker.request(
+                    make_call("web.fetch", {"url": url})
+                )
+                self.assertEqual(
+                    (decision.verdict, decision.reason),
+                    (Verdict.NEEDS_APPROVAL, R.APPROVAL_REQUIRED),
+                )
+                record = await self.h.approvals.get(decision.approval_id)
+                (target,) = record.targets
+                self.assertEqual(target.kind, TargetKind.HOST)
+                self.assertNotEqual(target.value, "github.com")
+                await self.deny(
+                    "git.push",
+                    {"remote": url, "credential": HANDLE},
+                    R.CREDENTIAL_OUT_OF_SCOPE,
+                )
 
     async def test_host_case_and_trailing_dot_spellings_of_a_task_host_are_in_scope(
         self,
@@ -575,18 +621,76 @@ class InjectionSafetyTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_oversized_text_is_refused_before_it_is_scanned_or_normalised(self):
         huge = "a" * 70_000
-        for tool, arguments in (
-            ("repo.read_file", {"path": huge}),
-            ("web.fetch", {"url": "https://github.com/" + huge}),
-            ("repo.write_file", {"path": f"{ROOT}/a", "content": huge}),
-            ("git.push", {**PUSH, "credential": huge}),
+        for tool, arguments, expected in (
+            ("repo.read_file", {"path": huge}, R.INVALID_TARGET),
+            ("web.fetch", {"url": "https://github.com/" + huge}, R.INVALID_TARGET),
+            (
+                "repo.write_file",
+                {"path": f"{ROOT}/a", "content": huge},
+                R.INVALID_ARGUMENTS,
+            ),
+            ("git.push", {**PUSH, "credential": huge}, R.CREDENTIAL_HANDLE_INVALID),
         ):
             with self.subTest(tool=tool):
                 decision = await self.h.broker.request(make_call(tool, arguments))
                 self.assertEqual(
-                    (decision.verdict, decision.reason),
-                    (Verdict.DENY, R.INVALID_ARGUMENTS),
+                    (decision.verdict, decision.reason), (Verdict.DENY, expected)
                 )
+
+    async def test_the_declared_length_is_checked_before_the_credential_scan(self):
+        # 501 characters for a 500-character argument, holding a token: the
+        # length is what refuses it, so the oversized text was never scanned.
+        content = GITHUB_TOKEN + "x" * (501 - len(GITHUB_TOKEN))
+        decision = await self.h.broker.request(
+            make_call("repo.write_file", {"path": f"{ROOT}/a", "content": content})
+        )
+        self.assertEqual(
+            (decision.verdict, decision.reason), (Verdict.DENY, R.INVALID_ARGUMENTS)
+        )
+        fits = await self.h.broker.request(
+            make_call(
+                "repo.write_file",
+                {"path": f"{ROOT}/a", "content": GITHUB_TOKEN},
+            )
+        )
+        self.assertEqual(fits.reason, R.CREDENTIAL_PLAINTEXT_IN_ARGUMENTS)
+
+    async def test_all_arguments_of_one_call_are_bounded_together(self):
+        spec = ToolSpec(
+            "notes.bulk",
+            frozenset({ToolCapability.WRITE}),
+            Capability.PROJECT_REPO_WRITE,
+            {
+                "path": ArgumentSpec(ArgumentKind.PATH),
+                **{
+                    f"part{i}": ArgumentSpec(ArgumentKind.TEXT, max_length=65_536)
+                    for i in range(5)
+                },
+            },
+        )
+        h = Harness(registry=ToolRegistry([spec]))
+        parts = {f"part{i}": "a" * 60_000 for i in range(5)}
+        decision = await h.broker.request(
+            make_call("notes.bulk", {"path": f"{ROOT}/a", **parts})
+        )
+        self.assertEqual(
+            (decision.verdict, decision.reason), (Verdict.DENY, R.INVALID_ARGUMENTS)
+        )
+        smaller = {f"part{i}": "a" * 50_000 for i in range(5)}
+        ok = await h.broker.request(
+            make_call("notes.bulk", {"path": f"{ROOT}/a", **smaller})
+        )
+        self.assertEqual(ok.verdict, Verdict.ALLOW)
+
+    async def test_parsed_arguments_never_show_their_values_in_a_repr(self):
+        from paw_backend.tools.calls import parse_arguments
+
+        spec = sample_registry().get("repo.write_file")
+        parsed = parse_arguments(
+            spec, {"path": f"{ROOT}/a", "content": MARKER}, make_scope()
+        )
+        self.assertNotIn(MARKER, repr(parsed))
+        self.assertEqual(parsed.values["content"], MARKER)
 
     async def test_arguments_that_are_not_a_mapping_are_denied(self):
         for arguments in (None, [], [("path", "x")], "path", 5, b"{}", object()):
