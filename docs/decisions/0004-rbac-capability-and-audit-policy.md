@@ -27,7 +27,13 @@ Role の名前、Owner / Admin の分担、Audit の最小項目、Agent が権�
 3. 自分のデータ（Chat、Workspace、GitHub、Memory）の Capability は、所有者本人だけが使える。Owner でも他の User の Private Data は使えない。
 4. Project の状態: Archived は `project.read` と `project.lifecycle.manage` だけ、Pending deletion は `project.lifecycle.manage` だけ許可する
    （復元は Manager または Owner / Admin。Pending deletion の復元を誰に許すかは要件に明記がない）。
-5. `Resource.repo_id` を持つ判定は、Repository の ACL Override が実装されるまで常に拒否する（Project Role だけで Repository を許可しない）。
+5. Repository の ACL は呼び出す側が保存済みの値から解決して渡す（`RepoAcl`）。
+   - `inherit`（既定）は Project の Role をそのまま継承する。Override は `read` / `write` / `agent` の許可の集合を残し、Project の Role を**狭めるだけ**で広げない（要件の「Project role より狭める用途を基本とする」の解釈）。
+   - `repo_id` を持つのに ACL がない Resource は拒否する（不明な ACL を `inherit` とみなさない）。ACL は保存された `(repo_id, project_id)` に結び付け、食い違う Project / Repository の組は拒否する。
+   - Capability と Repository の権限の対応: `project.read` と `project.memory.use` は `read`、`project.repo.write` と `project.pr.create` は `write`、`project.task.run` と `project.agent.use` は `agent`。
+     Agent の操作は、Override がある Repository では `agent` の許可も要る。
+   - Override は User 単位の許可リストではなく、権限の集合として扱う（要件が User 単位の指定を定めていないため）。
+   - 上の 6 つの Capability 以外に Repository を指定した Resource、および個人・Workspace 全体の Capability に Repository を指定した Resource は不正として拒否する。
 6. Role の変更: Admin の追加・削除・変更は Owner だけ。Admin は通常の User だけを管理できる。対象の User を必ず指定し、自分自身の Role は誰も変更できない。`system` identity は割り当てない。
    Audit の行は対象の User と、変更前後の Role を持つ。
 7. **Owner の Role は所有権の移譲（`authorize_ownership_transfer`）だけが動かす。** 通常の Role 変更では Owner に関わる操作を常に拒否する。
@@ -85,6 +91,8 @@ Tool Broker の Approval（Human Approval、Step-up）で、委任不可の操�
 ## 既知の制限と後続の課題
 
 - 保存期間、Partition、古い行の退避は未実装（Table は削除できず、行数は増え続ける）。
+- Repository の ACL の保存と解決は呼び出す側（PAW-027 など）の責任で、この Backend は渡された `RepoAcl` を判定するだけである。
+  Override が Project の Role を広げてよいか、User 単位の許可リストを持つかは要件が定めておらず、Human の判断を待つ（今は狭めるだけ・権限の集合）。
 - `Scope.SELF` の Capability は Project の状態と Member 資格を見ない（Pending deletion の Project の Chat、Member から外れた後の Memory など）。PAW-026 で Project との関係をモデル化する。
 - 全 Route の保護を調べる Test は `/api/v1` だけを対象にし、FastAPI の内部に依存する。
 - `create_app` が既定の Provider と Directory を組み込み、PAW-022 が `install_authz` を呼ぶまで全 Endpoint が 401 になる。
