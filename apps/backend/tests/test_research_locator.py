@@ -177,6 +177,43 @@ class CanonicalFormTest(unittest.TestCase):
             }
         )
 
+    def test_percent_encoded_credential_names_are_removed_too(self):
+        # A query parser decodes the name back to ``access_token``: comparing the
+        # raw text must not let the secret through. Several encodings, one secret.
+        self.check(
+            {
+                "https://example.com/?%61ccess_token=SECRET": "https://example.com/",
+                "https://example.com/?access%5Ftoken=SECRET": "https://example.com/",
+                "https://example.com/?%41CCESS_%54OKEN=SECRET": "https://example.com/",
+                "https://example.com/?to%6Ben=SECRET&q=1": "https://example.com/?q=1",
+                "https://example.com/?q=1&%61pi%5Fkey=SECRET": "https://example.com/?q=1",
+                "https://example.com/?x-amz-signature%3D=S": "https://example.com/?x-amz-signature%3D=S",
+                # decoded twice by a proxy in front of the server
+                "https://example.com/?%2561ccess_token=SECRET": "https://example.com/",
+                "https://example.com/?%252561ccess_token=SECRET": "https://example.com/",
+                "https://example.com/?%25%36%31ccess_token=SECRET": "https://example.com/",
+                # tracking parameters are recognised the same way
+                "https://example.com/?%75tm_source=x&k=v": "https://example.com/?k=v",
+            }
+        )
+
+    def test_a_secret_in_an_encoded_name_never_survives_into_the_result(self):
+        for raw in (
+            "https://example.com/?%61ccess_token=SECRET-VALUE",
+            "https://example.com/?access%5Ftoken=SECRET-VALUE&q=%61",
+            "https://example.com/p?a=1&%74oken=SECRET-VALUE",
+        ):
+            with self.subTest(raw=raw):
+                self.assertNotIn("SECRET-VALUE", canonicalize_locator(raw))
+
+    def test_harmless_encoded_names_are_kept_as_they_were(self):
+        self.check(
+            {
+                "https://example.com/?caf%c3%a9=1": "https://example.com/?caf%C3%A9=1",
+                "https://example.com/?my%5Ftoken=1": "https://example.com/?my%5Ftoken=1",
+            }
+        )
+
     def test_similar_names_are_not_credential_parameters(self):
         self.check(
             {
