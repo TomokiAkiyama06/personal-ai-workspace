@@ -82,7 +82,8 @@ def visible_memory_ids(
     )
 
 
-_STATUSES = frozenset({"active", "superseded", "deprecated"})
+# The memory states defined in REQUIREMENTS.md (Memory Conflict / Versioning).
+_STATUSES = frozenset({"active", "superseded", "deprecated", "history"})
 
 
 def _object(value: object, where: str) -> dict:
@@ -225,8 +226,10 @@ def validate_retriever(retriever: object) -> None:
         inspect.signature(method).bind("query", (), 1)
     except TypeError:
         raise TypeError("retrieve() must accept (query_text, principals, k)") from None
-    except ValueError:  # no introspectable signature (some builtins): accept
-        pass
+    except ValueError:
+        raise TypeError(
+            "retrieve() has no inspectable signature; wrap it in a plain Python method"
+        ) from None
 
 
 def _score_queries(

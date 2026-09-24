@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from benchmarks.metrics_collector import MetricsCollector
 from benchmarks.retrieval_runner import (
@@ -581,6 +582,50 @@ class RetrievalRunnerTest(unittest.TestCase):
         )
 
         self.assertAlmostEqual(report.queries[0]["cpu_ms"], 3.0)
+
+    def test_history_memories_are_valid_hard_negatives_scored_as_non_active(self):
+        document = self._document()
+        document["memories"].append(
+            {
+                "id": "h1",
+                "text": "AUDIT-ONLY",
+                "acl": ["user:a"],
+                "status": "history",
+                "fresh": True,
+                "scope": "project",
+            }
+        )
+        dataset = self._load_from_text(json.dumps(document))
+
+        metrics = run_benchmark(FixedRetriever(["m1", "h1"]), dataset, k=2).metrics
+
+        self.assertEqual(
+            next(m.status for m in dataset.memories if m.id == "h1"), "history"
+        )
+        self.assertEqual(metrics["superseded_rate"], 0.5)
+        self.assertEqual(metrics["recall_at_k"], 1.0)
+
+    def test_a_history_memory_cannot_be_a_relevance_label(self):
+        document = self._document()
+        document["memories"][0]["status"] = "history"
+        with self.assertRaises(ValueError) as context:
+            self._load_from_text(json.dumps(document))
+        self.assertIn("must be active", str(context.exception))
+
+    def test_retrieve_with_an_uninspectable_signature_is_rejected(self):
+        class Retriever:
+            def retrieve(self, query_text, requester_principals, k):
+                return []
+
+        with (
+            patch(
+                "benchmarks.retrieval_runner.inspect.signature", side_effect=ValueError
+            ),
+            self.assertRaises(TypeError) as context,
+        ):
+            validate_retriever(Retriever())
+
+        self.assertIn("no inspectable signature", str(context.exception))
 
     def test_retrievers_without_the_required_interface_are_rejected(self):
         class NoMethod:
