@@ -443,10 +443,10 @@ class _Leader:
     while a process recorded earlier as its member (same pid and start time) is
     still in it; otherwise nothing is sent.
 
-    Members are recorded while the leader runs, and once more at the moment it is
-    seen to have vanished: the group id stays reserved as long as any member
-    exists, so whatever is in the group then is ours unless the id was reused
-    within one polling interval.  Whether the leader is still ours is re-checked
+    Members are recorded while the leader runs, once more when it is first seen as a
+    zombie, and once more at the moment it is seen to have vanished: the group id
+    stays reserved as long as any member exists, so whatever is in the group then is
+    ours unless the id was reused within one polling interval.  Whether the leader is still ours is re-checked
     at every signal, because a reaper can act at any time after it was observed.
     """
 
@@ -458,6 +458,7 @@ class _Leader:
         self.start = _start_time(process.pid)  # None without /proc
         self.released = False  # no longer guaranteed to reserve ``pgid``
         self.status_lost = False  # reaped by someone else: exit status unknown
+        self.zombie_seen = False  # its members were recorded while it was a zombie
         self.members: dict[int, int] = {}  # pid -> start time, seen in the group
         self._refreshed = 0.0
         self.refresh(force=True)
@@ -492,7 +493,12 @@ class _Leader:
                 )
                 is not None
             ):
-                return True  # a zombie: still reserves the group id
+                # A zombie still reserves the group id, so the group can be
+                # listed reliably now: a member forked just before the exit is
+                # recorded before a concurrent reaper can release the id.
+                self.refresh(force=not self.zombie_seen)
+                self.zombie_seen = True
+                return True
         except ChildProcessError:
             # Someone else reaped it; its exit status is gone with it.
             self._release(status_lost=True)

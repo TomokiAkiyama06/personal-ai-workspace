@@ -92,8 +92,10 @@ do not become durable logs.
   is not, its pid may be reused as an unrelated process group id, so the group is
   signalled only while a process recorded earlier as its member (same pid and start
   time) is still in it; otherwise nothing is sent.  Members are recorded every 0.2 s
-  while the leader runs and once more at the moment it is seen to have vanished, so a
-  child forked just before the exit is still known.
+  while the leader runs, once more when it is first seen as a zombie (which still
+  reserves the group id), and once more at the moment it is seen to have vanished, so a
+  child forked just before the exit is still known even if another reaper collects the
+  leader before the final group kill.
 - **Documented residuals** (not closable in-process; see Decision 0001): a process that
   daemonizes (double fork plus `setsid`) can outlive the check; a check-then-signal gap
   of microseconds remains because a process group cannot be signalled through a pidfd,

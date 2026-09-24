@@ -706,6 +706,33 @@ class TestRunnerTest(unittest.TestCase):
         self.assertEqual((result.status, result.exit_code), ("error", None))
 
     @unittest.skipUnless(hasattr(os, "WNOWAIT"), "needs waitid(WNOWAIT)")
+    def test_a_member_forked_before_a_zombie_leader_is_seen_is_still_killed(self):
+        # The leader forks a same-group child and exits inside the sampling
+        # interval, so the child is first seen when the zombie is first observed.
+        # A concurrent reaper then collects the leader before the final group kill:
+        # only a member recorded at that first observation can still be signalled.
+        pid_file = self.pid_file()
+        real_signal_group = test_runner._Leader.signal_group
+
+        def reaper_first(leader, number):
+            if leader.process.returncode is None:
+                os.waitpid(leader.pgid, 0)
+            real_signal_group(leader, number)
+
+        def kill_child():
+            try:
+                os.kill(self.read_pid(pid_file), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+        self.addCleanup(kill_child)
+        check = self.python_check("fork", FORK_AND_EXIT, pid_file)
+        with mock.patch.object(test_runner._Leader, "signal_group", reaper_first):
+            (result,) = self.runner.run_visible((check,), PATIENCE)
+        child = self.read_pid(pid_file)
+        self.assertTrue(wait_until(lambda: not is_running(child)), result)
+
+    @unittest.skipUnless(hasattr(os, "WNOWAIT"), "needs waitid(WNOWAIT)")
     def test_reap_decodes_the_exit_status_and_notices_a_reaper_that_was_first(self):
         exited = subprocess.Popen([sys.executable, "-c", "raise SystemExit(5)"])
         killed = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
