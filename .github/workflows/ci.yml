@@ -24,7 +24,10 @@ jobs:
       # for this job and is not reachable from outside the runner, so the
       # password below is not a secret.
       postgres:
-        image: pgvector/pgvector:pg18
+        # Pinned by digest like the actions below; refresh the digest deliberately
+        # (docker buildx imagetools inspect pgvector/pgvector:pg18) when bumping PostgreSQL.
+        # pgvector is required by the memory schema (PAW-040).
+        image: pgvector/pgvector:pg18@sha256:2ba9ca5f2e7daa0f0e7723cba1ee9167bab54efd3640516a44ac1a928dd67e7a
         env:
           POSTGRES_PASSWORD: paw-ci-throwaway
         ports:

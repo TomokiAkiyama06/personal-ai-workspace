@@ -8,11 +8,13 @@ from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import create_async_engine
 
-# Import every module that defines ORM models before this line, so that
-# autogenerate sees them.
-import paw_backend.memory.models  # noqa: F401
+# Import every module that defines ORM models here, so that autogenerate sees
+# them.
+from paw_backend.authz import models as authz_models  # noqa: F401
 from paw_backend.config import Settings
 from paw_backend.db import Base
+from paw_backend.memory import models as memory_models  # noqa: F401
+from paw_backend.tasks import models as task_models  # noqa: F401
 
 config = context.config
 
@@ -23,7 +25,9 @@ target_metadata = Base.metadata
 
 
 def _database_url() -> str:
-    url = Settings().database_url
+    settings = Settings()
+    # A separate migration role (the owner of the schema) is optional.
+    url = settings.migration_database_url or settings.database_url
     if url is None:
         raise SystemExit("PAW_DATABASE_URL is not set; cannot run migrations.")
     return url.get_secret_value()

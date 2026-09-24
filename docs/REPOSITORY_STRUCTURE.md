@@ -70,6 +70,7 @@ personal-ai-workspace/
 │  │     ├─ __init__.py
 │  │     ├─ fake_postgres.py
 │  │     ├─ support.py
+│  │     ├─ teardown_child.py
 │  │     ├─ test_config.py
 │  │     ├─ test_database.py
 │  │     ├─ test_errors.py
@@ -123,6 +124,7 @@ personal-ai-workspace/
 │  └─ decisions/
 │     ├─ 0002-start-workspace-implementation-before-model-comparison.md
 │     ├─ 0003-backend-cli-web-implementation-stack.md
+│     ├─ 0004-rbac-capability-and-audit-policy.md
 │     └─ README.md
 └─ evaluator/
    └─ README.md

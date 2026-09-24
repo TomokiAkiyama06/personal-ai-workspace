@@ -9,6 +9,8 @@ from fastapi import FastAPI
 
 from paw_backend import __version__
 from paw_backend.api.v1 import router as api_v1
+from paw_backend.authz import install_authz
+from paw_backend.authz.diagnostics import warn_if_audit_table_is_mutable
 from paw_backend.config import Settings
 from paw_backend.db import Database
 from paw_backend.errors import ERROR_RESPONSES, register_error_handlers
@@ -42,9 +44,17 @@ def create_app(
         heartbeat = asyncio.create_task(
             publish_heartbeats(event_bus, settings.event_heartbeat_seconds)
         )
+        # One background check (PostgreSQL may be down at startup): warn if the
+        # application's database user could rewrite the audit trail.
+        audit_check = asyncio.create_task(
+            warn_if_audit_table_is_mutable(database, settings.database_timeout_seconds)
+        )
         try:
             yield
         finally:
+            audit_check.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await audit_check
             heartbeat.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await heartbeat
@@ -64,6 +74,7 @@ def create_app(
     app.state.settings = settings
     app.state.database = database
     app.state.event_bus = event_bus
+    install_authz(app, settings=settings, database=database)
 
     register_error_handlers(app)
     # Added last = outermost. Request ID wraps everything, so the middleware

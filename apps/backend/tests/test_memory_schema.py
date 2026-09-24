@@ -46,7 +46,24 @@ class LayerSeparationTest(MemoryDatabaseTestCase):
                 "   AND child.relnamespace = 'public'::regnamespace"
             )
         ).all()
-        edges = {(child, parent): action for child, parent, action in rows}
+        # Only the Conversation / Memory layers are in scope: other subsystems (Task,
+        # audit) add their own tables and must not break this test. Links between a
+        # layer table and a foreign table, in either direction, still fail it.
+        layer_tables = {
+            "conversations",
+            "messages",
+            "session_states",
+            "memories",
+            "memory_versions",
+            "memory_relations",
+            "memory_sources",
+            "memory_embeddings",
+        }
+        edges = {
+            (child, parent): action
+            for child, parent, action in rows
+            if child in layer_tables or parent in layer_tables
+        }
 
         # 'c' = ON DELETE CASCADE, 'n' = ON DELETE SET NULL.
         self.assertEqual(

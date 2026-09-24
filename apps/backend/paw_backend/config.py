@@ -17,6 +17,21 @@ from sqlalchemy.exc import ArgumentError
 from paw_backend.security import normalize_origin
 
 _DRIVER = "postgresql+psycopg"
+# A plain (unquoted-style) PostgreSQL identifier; it is still quoted when used.
+_ROLE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,62}")
+# Names PostgreSQL gives a special meaning even when quoted: "public" is the
+# pseudo-role PUBLIC (everyone), and pg_* / postgres are reserved or built-in.
+_RESERVED_ROLES = frozenset(
+    {
+        "public",
+        "none",
+        "postgres",
+        "user",
+        "current_user",
+        "current_role",
+        "session_user",
+    }
+)
 _HOST = re.compile(r"\[[0-9a-f:.]+\]|[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?")
 
 
@@ -61,6 +76,17 @@ class Settings(BaseSettings):
     database_url: SecretStr | None = None
     database_timeout_seconds: float = Field(default=3.0, gt=0, le=60)
     database_pool_size: int = Field(default=5, ge=1, le=100)
+    # Migrations run as the role that owns the schema; when this is set Alembic
+    # uses it instead of ``database_url``, so the application itself can run as
+    # a role that cannot alter or drop the append-only audit trail.
+    migration_database_url: SecretStr | None = None
+    # The role the application connects as. The audit migration grants it
+    # INSERT and SELECT on ``audit_events`` (and nothing else on it).
+    app_database_role: str | None = None
+    # How long a readiness result (also a failure) is reused. Together with
+    # single flight it caps the probe connections an unauthenticated
+    # /health/ready can cause at one per interval; 0 turns the reuse off.
+    database_readiness_cache_seconds: float = Field(default=1.0, ge=0, le=60)
 
     # Event path (SSE / WebSocket).
     event_heartbeat_seconds: float = Field(default=15.0, gt=0)
@@ -69,12 +95,19 @@ class Settings(BaseSettings):
 
     log_level: str = "info"
 
-    @field_validator("tls_certfile", "tls_keyfile", "database_url", mode="before")
+    @field_validator(
+        "tls_certfile",
+        "tls_keyfile",
+        "database_url",
+        "migration_database_url",
+        "app_database_role",
+        mode="before",
+    )
     @classmethod
     def _empty_string_means_unset(cls, value: object) -> object:
         return None if value == "" else value
 
-    @field_validator("database_url", mode="after")
+    @field_validator("database_url", "migration_database_url", mode="after")
     @classmethod
     def _normalize_database_url(cls, value: SecretStr | None) -> SecretStr | None:
         if value is None:
@@ -87,6 +120,17 @@ class Settings(BaseSettings):
             raise ValueError(f"database_url must use postgresql:// or {_DRIVER}://")
         url = url.set(drivername=_DRIVER)
         return SecretStr(url.render_as_string(hide_password=False))
+
+    @field_validator("app_database_role")
+    @classmethod
+    def _valid_role_name(cls, value: str | None) -> str | None:
+        if value is not None and (
+            _ROLE.fullmatch(value) is None
+            or value.lower() in _RESERVED_ROLES
+            or value.lower().startswith("pg_")
+        ):
+            raise ValueError("app_database_role is not a valid PostgreSQL role name")
+        return value
 
     @field_validator("allowed_hosts", "allowed_origins", mode="before")
     @classmethod

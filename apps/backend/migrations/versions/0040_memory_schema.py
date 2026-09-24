@@ -20,7 +20,7 @@ fails when the two drift apart. Constraint names come from the naming
 convention of ``paw_backend.db.Base.metadata``.
 
 Revision ID: 0040
-Revises: 0001
+Revises: 0032
 Create Date: 2026-09-24
 """
 
@@ -31,7 +31,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 revision: str = "0040"
-down_revision: str | Sequence[str] | None = "0001"
+down_revision: str | Sequence[str] | None = "0032"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

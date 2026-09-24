@@ -29,7 +29,7 @@ YAML は mapping の merge 展開を 10,000 entries 以下に制限し、循環�
 複数 document を含むファイルでも累計はリセットせず、上限超過となる mapping の展開前に拒否する。
 これは merge の指数展開を抑える制限であり、通常の sequence alias は参照を共有するため対象外とする。
 実PostgreSQLへのBackend test（DB接続、Readiness、Migrationの`head`への適用と`base`への巻き戻し、Memory Schemaの制約・ACL filter・pgvector・ModelとMigrationの差分）は、環境変数`PAW_TEST_DATABASE_URL`が設定された場合だけ実行し、未設定ではSkipする。
-GitHub Actionsでは`repository-checks` jobの`services`で使い捨てのPostgreSQL（`pgvector/pgvector:pg18`）を起動し、この変数を渡して実行する。
+GitHub Actionsでは`repository-checks` jobの`services`で使い捨てのPostgreSQL（`pgvector/pgvector:pg18`、digestで固定）を起動し、この変数を渡して実行する。
 Memory Schema（PAW-040）が`vector` extensionを使うため、公式の`postgres:18`ではなくpgvector入りのImageを使う。Major versionは`18`で同じ。
 このContainerはjob内だけで使い、Passwordはworkflowに書いた使い捨ての値でSecretではない。
 ローカルでは`python .github/scripts/run_ci.py`の前に、使い捨てのDatabaseを指すURLを設定すると同じtestを実行できる。
