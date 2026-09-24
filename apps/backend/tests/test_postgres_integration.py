@@ -26,6 +26,11 @@ from .test_migrations import offline_config
 TEST_DATABASE_URL = os.environ.get("PAW_TEST_DATABASE_URL")
 
 
+def with_options(url: str, options: str) -> str:
+    """``url`` with extra query options appended."""
+    return f"{url}{'&' if '?' in url else '?'}{options}"
+
+
 class CiProvidesPostgresTest(unittest.TestCase):
     @unittest.skipUnless(os.environ.get("CI") == "true", "enforced on CI only")
     def test_ci_sets_the_database_url_so_integration_tests_cannot_be_skipped(self):
@@ -58,6 +63,16 @@ class PostgresIntegrationTest(unittest.IsolatedAsyncioTestCase):
         response = await asyncio.to_thread(request)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["checks"], {"database": "ok"})
+
+    async def test_readiness_works_with_options_in_the_url(self):
+        # `connect_timeout` is also set by the probe itself; the URL's value
+        # must not make the connection call fail with a duplicate argument.
+        url = with_options(TEST_DATABASE_URL, "connect_timeout=10&application_name=x")
+        database = Database(make_settings(database_url=url))
+        try:
+            self.assertEqual(await database.check(), DatabaseStatus.OK)
+        finally:
+            await database.dispose()
 
     async def test_migrations_upgrade_and_downgrade(self):
         def migrate():

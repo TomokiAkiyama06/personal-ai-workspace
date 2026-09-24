@@ -7,7 +7,9 @@ import time
 import unittest
 from pathlib import Path
 from typing import Annotated
+from unittest.mock import patch
 
+import psycopg
 from fastapi import APIRouter, Depends
 from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
@@ -130,6 +132,67 @@ class ReadinessTimeoutTest(unittest.IsolatedAsyncioTestCase):
             await database.check()
         await asyncio.sleep(0.05)  # let the cancellation finish
         self.assertEqual(database._probes, set())
+
+
+class ConnectionUrlOptionsTest(unittest.IsolatedAsyncioTestCase):
+    """Options in ``PAW_DATABASE_URL`` must not collide with the probe's own."""
+
+    OPTIONS = "?connect_timeout=10&application_name=secret-app-name"
+
+    async def test_url_options_that_the_probe_also_sets_are_merged(self):
+        async with HangingPostgres(answer_queries=True) as server:
+            database = Database(
+                make_settings(
+                    database_url=(
+                        f"postgresql://paw:pw@127.0.0.1:{server.port}/paw{self.OPTIONS}"
+                    )
+                )
+            )
+            with self.assertNoLogs("paw_backend.db", level=logging.WARNING):
+                self.assertEqual(await database.check(), DatabaseStatus.OK)
+
+    async def test_the_probes_values_win_and_other_url_options_are_kept(self):
+        captured = {}
+
+        async def connect(**kwargs):
+            captured.update(kwargs)
+            raise psycopg.OperationalError("refused")
+
+        database = Database(
+            make_settings(
+                database_url=f"postgresql://paw:pw@db.internal/paw{self.OPTIONS}",
+                database_timeout_seconds=2,
+            )
+        )
+        with (
+            patch.object(psycopg.AsyncConnection, "connect", connect),
+            self.assertLogs("paw_backend.db", level=logging.WARNING),
+        ):
+            await database.check()
+
+        self.assertEqual(captured["connect_timeout"], 2)  # not the URL's "10"
+        self.assertIs(captured["autocommit"], True)
+        self.assertEqual(captured["application_name"], "secret-app-name")
+        self.assertEqual(captured["host"], "db.internal")
+
+    async def test_options_and_credentials_never_reach_a_log(self):
+        async with HangingPostgres(login=False) as server:
+            database = Database(
+                make_settings(
+                    database_url=(
+                        f"postgresql://paw:pw@127.0.0.1:{server.port}/paw{self.OPTIONS}"
+                    ),
+                    database_timeout_seconds=0.3,
+                )
+            )
+            started = time.monotonic()
+            with self.assertLogs("paw_backend.db", level=logging.WARNING) as logs:
+                status = await database.check()
+
+        self.assertEqual(status, DatabaseStatus.UNAVAILABLE)
+        self.assertLess(time.monotonic() - started, 1.5)
+        for secret in ("secret-app-name", "connect_timeout", "pw@"):
+            self.assertNotIn(secret, "\n".join(logs.output))
 
 
 class DisposeTest(unittest.IsolatedAsyncioTestCase):

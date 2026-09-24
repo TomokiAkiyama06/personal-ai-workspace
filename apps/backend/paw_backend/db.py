@@ -101,12 +101,14 @@ class Database:
         slot while the server is stalled, and it needs to own its connection
         from the first byte so that it can be torn down (see ``_abort``).
         """
-        # The same translation SQLAlchemy applies before it calls psycopg.
+        # The same translation SQLAlchemy applies before it calls psycopg. The
+        # URL may already carry `connect_timeout` (or `autocommit`), so the
+        # probe's own values are merged in and win instead of being passed a
+        # second time.
         url = make_url(self._settings.database_url.get_secret_value())
         _, kwargs = url.get_dialect()().create_connect_args(url)
-        connection = await psycopg.AsyncConnection.connect(
-            autocommit=True, connect_timeout=self._connect_timeout, **kwargs
-        )
+        kwargs.update(autocommit=True, connect_timeout=self._connect_timeout)
+        connection = await psycopg.AsyncConnection.connect(**kwargs)
         probe = asyncio.current_task()
         self._probe_connections[probe] = connection
         try:
