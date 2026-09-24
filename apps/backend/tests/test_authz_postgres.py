@@ -707,7 +707,10 @@ class AuthorizerOnPostgresTest(AuditPostgresTestCase):
         self.assertEqual(required.reason, Reason.AUDIT_UNAVAILABLE)
         self.assertEqual(side_effect.reason, Reason.AUDIT_UNAVAILABLE)
         self.assertTrue(read.allowed)  # reads are not audited, so not blocked
-        self.assertIn("ProgrammingError", "\n".join(logs.output))
+        # The type of the driver's error (the write no longer goes through
+        # SQLAlchemy), never its message.
+        self.assertIn("UndefinedTable", "\n".join(logs.output))
+        self.assertNotIn("audit_events", "\n".join(logs.output))
 
     async def test_startup_warns_when_the_application_owns_the_audit_table(self):
         settings = make_settings(database_url=TEST_DATABASE_URL)  # the schema owner

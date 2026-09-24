@@ -41,6 +41,10 @@ def decide_next_action(
     ``Decision.exceeded`` is ``budget.exceeded`` and ``Decision.loop_verdict`` is
     ``loop``, in every case. The preset plays no role: an Unlimited task whose
     budget verdict is OK still escalates on a loop.
+
+    The mapping of the rules to actions (``FAIL`` for retries, ``WAIT_FOR_USER``
+    for the rest, the budget before the loop) is proposed in
+    docs/decisions/0007-*.md, which a human has not approved yet.
     """
     if not isinstance(budget, BudgetVerdict):
         raise InvalidQueueingArgumentError("budget")
