@@ -24,7 +24,7 @@ class FakeRetriever:
     def __init__(self, results):
         self.results = results  # Map of query_id -> list of memory_ids
 
-    def retrieve(self, query_text, requester_principals, k):
+    def retrieve(self, query_text, requester_principals, k, scopes):
         return self.results.get(query_text, [])
 
 
@@ -34,7 +34,7 @@ class PerfectRetriever:
     def __init__(self, dataset):
         self.dataset = dataset
 
-    def retrieve(self, query_text, requester_principals, k):
+    def retrieve(self, query_text, requester_principals, k, scopes):
         # Find the query by text
         for query in self.dataset.queries:
             if query.text == query_text:
@@ -49,7 +49,7 @@ class LeakingRetriever:
         self.dataset = dataset
         self.leaked_ids = leaked_ids
 
-    def retrieve(self, query_text, requester_principals, k):
+    def retrieve(self, query_text, requester_principals, k, scopes):
         # Find the query by text
         for query in self.dataset.queries:
             if query.text == query_text:
@@ -67,7 +67,7 @@ class StaleRetriever:
         self.dataset = dataset
         self.stale_ids = stale_ids
 
-    def retrieve(self, query_text, requester_principals, k):
+    def retrieve(self, query_text, requester_principals, k, scopes):
         # Find the query by text
         for query in self.dataset.queries:
             if query.text == query_text:
@@ -85,7 +85,7 @@ class SupersededRetriever:
         self.dataset = dataset
         self.superseded_ids = superseded_ids
 
-    def retrieve(self, query_text, requester_principals, k):
+    def retrieve(self, query_text, requester_principals, k, scopes):
         # Find the query by text
         for query in self.dataset.queries:
             if query.text == query_text:
@@ -103,7 +103,7 @@ class WrongScopeRetriever:
         self.dataset = dataset
         self.wrong_scope_ids = wrong_scope_ids
 
-    def retrieve(self, query_text, requester_principals, k):
+    def retrieve(self, query_text, requester_principals, k, scopes):
         # Find the query by text
         for query in self.dataset.queries:
             if query.text == query_text:
@@ -120,7 +120,7 @@ class ErroringRetriever:
     def __init__(self, error_query_id):
         self.error_query_id = error_query_id
 
-    def retrieve(self, query_text, requester_principals, k):
+    def retrieve(self, query_text, requester_principals, k, scopes):
         if query_text == self.error_query_id:
             raise RuntimeError("Simulated error")
         return []
@@ -369,7 +369,7 @@ class RetrievalRunnerTest(unittest.TestCase):
         """Test that duplicate IDs are dropped."""
 
         class DuplicateRetriever:
-            def retrieve(self, query_text, requester_principals, k):
+            def retrieve(self, query_text, requester_principals, k, scopes):
                 return ["mem1", "mem1", "mem2"]  # Duplicates
 
         retriever = DuplicateRetriever()
@@ -384,7 +384,7 @@ class RetrievalRunnerTest(unittest.TestCase):
         """Test that unknown IDs are counted as leakage."""
 
         class UnknownIdRetriever:
-            def retrieve(self, query_text, requester_principals, k):
+            def retrieve(self, query_text, requester_principals, k, scopes):
                 return ["mem1", "unknown_id"]  # One known, one unknown
 
         retriever = UnknownIdRetriever()
@@ -523,7 +523,7 @@ class RetrievalRunnerTest(unittest.TestCase):
         relevant = {q.text: sorted(q.relevant_ids) for q in dataset.queries}
 
         class Oracle:
-            def retrieve(self, query_text, requester_principals, k):
+            def retrieve(self, query_text, requester_principals, k, scopes):
                 return relevant[query_text]
 
         metrics = run_benchmark(Oracle(), dataset, k=5).metrics
@@ -613,7 +613,7 @@ class RetrievalRunnerTest(unittest.TestCase):
 
     def test_failed_queries_still_report_cpu_time(self):
         class Raising:
-            def retrieve(self, query_text, requester_principals, k):
+            def retrieve(self, query_text, requester_principals, k, scopes):
                 raise RuntimeError("boom")
 
         readings = iter([1.0, 1.003])
@@ -657,6 +657,35 @@ class RetrievalRunnerTest(unittest.TestCase):
         self.assertEqual(applicable["scope_mismatch_rate"], 0.0)
         self.assertEqual(applicable["recall_at_k"], 1.0)
         self.assertEqual(mixed_up["scope_mismatch_rate"], 0.5)
+
+    def test_the_retriever_receives_each_querys_scope_context(self):
+        document = self._document()
+        second = dict(
+            document["queries"][0],
+            id="q2",
+            scope="project",
+            allowed_scopes=["repo", "user"],
+        )
+        document["queries"][0]["allowed_scopes"] = ["user"]
+        document["queries"].append(second)
+        document["memories"][0]["scope"] = "project"
+        seen = []
+
+        class Recording:
+            def retrieve(self, query_text, requester_principals, k, scopes):
+                seen.append((query_text, tuple(requester_principals), k, tuple(scopes)))
+                return ["m1"]
+
+        run_benchmark(Recording(), self._load_from_text(json.dumps(document)), k=3)
+
+        # Same text and principals, different scope context => different inputs.
+        self.assertEqual(
+            seen,
+            [
+                ("QUERY-TEXT", ("user:a",), 3, ("project", "user")),
+                ("QUERY-TEXT", ("user:a",), 3, ("project", "repo", "user")),
+            ],
+        )
 
     def test_a_relevant_memory_outside_all_applicable_scopes_is_rejected(self):
         document = self._document()
@@ -704,7 +733,7 @@ class RetrievalRunnerTest(unittest.TestCase):
 
     def test_retrieve_with_an_uninspectable_signature_is_rejected(self):
         class Retriever:
-            def retrieve(self, query_text, requester_principals, k):
+            def retrieve(self, query_text, requester_principals, k, scopes):
                 return []
 
         with (
@@ -764,7 +793,7 @@ class RetrievalRunnerTest(unittest.TestCase):
             def __init__(self):
                 self.calls = 0
 
-            def retrieve(self, query_text, requester_principals, k):
+            def retrieve(self, query_text, requester_principals, k, scopes):
                 self.calls += 1
                 if self.calls == 2:
                     raise RuntimeError("boom")
@@ -842,9 +871,9 @@ class RetrievalRunnerTest(unittest.TestCase):
         collector = MetricsCollector(gpu_poll_interval_s=None)
 
         class CountingRetriever(FixedRetriever):
-            def retrieve(self, query_text, requester_principals, k):
+            def retrieve(self, query_text, requester_principals, k, scopes):
                 collector.record_step()
-                return super().retrieve(query_text, requester_principals, k)
+                return super().retrieve(query_text, requester_principals, k, scopes)
 
         report = run_benchmark(
             CountingRetriever(["m1"]), dataset, k=1, metrics_collector=collector
@@ -863,7 +892,7 @@ class FixedRetriever:
     def __init__(self, ids):
         self.ids = ids
 
-    def retrieve(self, query_text, requester_principals, k):
+    def retrieve(self, query_text, requester_principals, k, scopes):
         return self.ids
 
 

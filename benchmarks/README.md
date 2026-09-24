@@ -80,7 +80,9 @@ Retrieverがin-processで動く場合だけ含まれ、外部のServiceが使う
 返されたidは、重複を除いた上位`k`件だけを採点します（`k`を超える分を末尾に足しても、どの指標も上がりません）。
 Datasetのrelevantなmemoryは、active・fresh・queryのScope（`scope`と、任意の`allowed_scopes`）のいずれかに属する必要があります。
 `allowed_scopes`は、要件のUser / Project / Repo / Shared階層で、そのqueryへ正当に適用できる他のScope（たとえばRepoのqueryに対するUserやShared）を表します。
-`allowed_scopes`にも`scope`にも入らないScopeのmemoryを返すと、Scope誤選択として数えます。そうでないと、正解をそのまま返しても
+`allowed_scopes`にも`scope`にも入らないScopeのmemoryを返すと、Scope誤選択として数えます。
+Retrieverには、そのqueryに適用できるScope（`scopes`。queryの`scope`が先頭で、続けて`allowed_scopes`を昇順）を渡します。
+queryの文章とprincipalが同じでもScopeが違えば、Retrieverの入力が変わり、Scopeの扱いを候補の能力として測れます。そうでないと、正解をそのまま返しても
 stale / superseded / Scope誤選択率が0にならず、指標が矛盾するためDataset不備として拒否します。
 失敗したqueryの数は`failed_queries`に出ます。Retrieverが`retrieve(query_text, principals, k)`を
 呼べない場合（メソッドがない、引数が合わない）は、全queryが失敗した報告にせず、実行前にエラーにします。
@@ -99,7 +101,7 @@ python -m benchmarks.run_retrieval_benchmark \
 ```
 
 `--retriever`は`module:factory`で、引数なしのfactoryが
-`retrieve(query_text, requester_principals, k) -> ids`を持つobjectを返します。
+`retrieve(query_text, requester_principals, k, scopes) -> ids`を持つobjectを返します。
 importしたmoduleは呼び出し元の権限で実行されるため、信頼できるcodeだけを指定してください。
 Reportには文章、ACL、requester principal、例外messageを含めません。終了codeは、成功が0、Datasetの不備が1、
 Retrieverの指定・戻り値やReport出力の不備、`-k`の指定誤りが2です。

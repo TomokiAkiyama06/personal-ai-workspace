@@ -2,7 +2,7 @@
 
 The retriever is supplied as ``module:factory``. The factory is called without
 arguments and must return an object with
-``retrieve(query_text, requester_principals, k) -> Sequence[str]``. Only point
+``retrieve(query_text, requester_principals, k, scopes) -> Sequence[str]``. Only point
 ``--retriever`` at trusted code: the module is imported and the factory runs with
 the caller's permissions.
 """
@@ -50,7 +50,7 @@ def main(argv: list[str] | None = None) -> int:
         "--retriever",
         required=True,
         help="module:factory returning an object with "
-        "retrieve(query_text, requester_principals, k) -> ids",
+        "retrieve(query_text, requester_principals, k, scopes) -> ids",
     )
     parser.add_argument(
         "-k", type=_positive_int, default=5, help="cutoff for ranking metrics"

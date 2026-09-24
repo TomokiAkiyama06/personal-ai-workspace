@@ -244,9 +244,19 @@ class Retriever(Protocol):
     """Protocol for a retrieval system to benchmark."""
 
     def retrieve(
-        self, query_text: str, requester_principals: Sequence[str], k: int
+        self,
+        query_text: str,
+        requester_principals: Sequence[str],
+        k: int,
+        scopes: Sequence[str],
     ) -> Sequence[str]:
-        """Retrieve top-k memory IDs for a query."""
+        """Retrieve top-k memory IDs for a query.
+
+        ``scopes`` are the scopes whose memories apply to the query: its own scope
+        first, then any further allowed (inherited) scopes in sorted order. Two
+        queries with the same text and principals but different scopes therefore
+        give the retriever different inputs, as they would in production.
+        """
 
 
 def validate_retriever(retriever: object) -> None:
@@ -259,9 +269,11 @@ def validate_retriever(retriever: object) -> None:
     if not callable(method):
         raise TypeError("retriever must provide a callable retrieve()")
     try:
-        inspect.signature(method).bind("query", (), 1)
+        inspect.signature(method).bind("query", (), 1, ())
     except TypeError:
-        raise TypeError("retrieve() must accept (query_text, principals, k)") from None
+        raise TypeError(
+            "retrieve() must accept (query_text, principals, k, scopes)"
+        ) from None
     except ValueError:
         raise TypeError(
             "retrieve() has no inspectable signature; wrap it in a plain Python method"
@@ -289,7 +301,10 @@ def _score_queries(
         cpu_started = cpu_clock()
         try:
             retrieved = retriever.retrieve(
-                query.text, tuple(sorted(query.requester_principals)), k
+                query.text,
+                tuple(sorted(query.requester_principals)),
+                k,
+                (query.scope, *sorted(query.allowed_scopes - {query.scope})),
             )
         except Exception as error:  # noqa: BLE001 - one failing retriever call must not end the run.
             latency_ms = (clock() - started) * 1000

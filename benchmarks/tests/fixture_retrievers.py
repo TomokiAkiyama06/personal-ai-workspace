@@ -5,7 +5,7 @@ class FixedRetriever:
     def __init__(self, ids):
         self.ids = ids
 
-    def retrieve(self, query_text, requester_principals, k):
+    def retrieve(self, query_text, requester_principals, k, scopes):
         return self.ids
 
 
