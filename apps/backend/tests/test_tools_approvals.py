@@ -654,7 +654,9 @@ class ApprovalFlowTest(unittest.IsolatedAsyncioTestCase):
             async def open_request(self, new, *, now):
                 raise ConnectionError(SECRET)
 
-            async def consume(self, approval_id, binding, *, now):
+            async def consume(
+                self, approval_id, binding, *, now, require_active_task=False
+            ):
                 raise ConnectionError(SECRET)
 
         h = Harness(approvals=Failing())
@@ -674,7 +676,9 @@ class ApprovalFlowTest(unittest.IsolatedAsyncioTestCase):
             async def open_request(self, new, *, now):
                 return "created"
 
-            async def consume(self, approval_id, binding, *, now):
+            async def consume(
+                self, approval_id, binding, *, now, require_active_task=False
+            ):
                 return "consumed"
 
         h = Harness(approvals=Nonsense())
@@ -1372,6 +1376,73 @@ class TaskEndTest(unittest.IsolatedAsyncioTestCase):
             (used.verdict, used.reason), (Verdict.ALLOW, R.APPROVAL_CONSUMED)
         )
         self.assertEqual(self.h.task_activity.checks, [TASK, TASK])  # open + use
+
+    async def test_a_task_that_ends_between_the_check_and_the_use_consumes_nothing(
+        self,
+    ):
+        # The broker's own check answers ACTIVE, and then the task ends: what the
+        # store sees, in the step that consumes, is the end. (In production the
+        # store reads the task row locked in that transaction; see
+        # test_tools_postgres.ConsumeRacesWithTaskEndTest.)
+        for answer, reason in (
+            (TaskActivity.ENDED, R.TASK_NOT_ACTIVE),
+            (TaskActivity.UNKNOWN, R.TASK_UNKNOWN),
+        ):
+            with self.subTest(answer=answer.value):
+                truth = FakeTaskActivity()
+                store = InMemoryApprovalStore(task_activity=truth)
+                h = Harness(approvals=store)  # the broker's provider says ACTIVE
+                approved = await self.approved("a", h)
+                truth.answer = answer  # the task ends after the broker's check
+                used = await self.use(approved, "a", h)
+                self.assertEqual(
+                    (used.verdict, used.reason, used.invocation),
+                    (Verdict.DENY, reason, None),
+                )
+                self.assertEqual(h.task_activity.checks, [TASK, TASK])  # open + use
+                self.assertEqual(
+                    await self.status(approved, h), ApprovalStatus.APPROVED
+                )
+                # once the revocation runs, it still finds the approval
+                self.assertEqual(await h.service.revoke_task(TASK), 1)
+                # and a task that is alive uses it, once
+        truth = FakeTaskActivity()
+        h = Harness(approvals=InMemoryApprovalStore(task_activity=truth))
+        approved = await self.approved("a", h)
+        used = await self.use(approved, "a", h)
+        self.assertEqual(
+            (used.verdict, used.reason), (Verdict.ALLOW, R.APPROVAL_CONSUMED)
+        )
+        self.assertEqual(truth.checks, [TASK])
+
+    async def test_the_broker_asks_the_store_to_check_the_task_when_it_consumes(self):
+        class Spy(InMemoryApprovalStore):
+            calls: list = []
+
+            async def consume(self, approval_id, binding, **arguments):
+                self.calls.append(arguments)
+                return await super().consume(approval_id, binding, **arguments)
+
+        store = Spy()
+        h = Harness(approvals=store)
+        approved = await self.approved("a", h)
+        await self.use(approved, "a", h)
+        (arguments,) = store.calls
+        self.assertIs(arguments["require_active_task"], True)
+
+    async def test_a_reason_about_the_approval_itself_wins_over_the_task(self):
+        # revoked, and the task ended: the store names what is wrong with the
+        # approval (the broker's own check, before, names the task)
+        truth = FakeTaskActivity()
+        store = InMemoryApprovalStore(task_activity=truth)
+        h = Harness(approvals=store)
+        approved = await self.approved("a", h)
+        await h.service.revoke_task(TASK)
+        truth.answer = TaskActivity.ENDED
+        used = await self.use(approved, "a", h)
+        self.assertEqual(
+            (used.verdict, used.reason), (Verdict.DENY, R.APPROVAL_REVOKED)
+        )
 
     async def test_a_task_that_is_not_known_or_answers_nonsense_denies(self):
         approved = await self.approved()

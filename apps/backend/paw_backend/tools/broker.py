@@ -34,7 +34,11 @@ narrow what the previous one allowed:
    used, whatever the store still says. Then, without an approval a request is
    opened (``NEEDS_APPROVAL``); with one it is consumed atomically (single
    use) or the call is denied with the reason (expired, replayed, for another
-   call...).
+   call...). The check before the use gives the early, precise reason; it can be
+   overtaken by the end of the task, so the store checks the task **again in the
+   same transaction that consumes** (``require_active_task``: the task row is
+   read locked), and a task that ended in between consumes nothing
+   (``task_not_active``).
 
 The decision is audited (ids and enums only). An ``ALLOW`` that cannot be
 recorded becomes a ``DENY`` (``audit_unavailable``): a tool never runs without
@@ -126,6 +130,10 @@ _CONSUME_REASON = {
     ConsumeOutcome.ALREADY_USED: BrokerReason.APPROVAL_ALREADY_USED,
     ConsumeOutcome.REJECTED: BrokerReason.APPROVAL_REJECTED,
     ConsumeOutcome.REVOKED: BrokerReason.APPROVAL_REVOKED,
+    # The task ended between the broker's check and the use (the store checks it
+    # again in the step that consumes).
+    ConsumeOutcome.TASK_NOT_ACTIVE: BrokerReason.TASK_NOT_ACTIVE,
+    ConsumeOutcome.TASK_UNKNOWN: BrokerReason.TASK_UNKNOWN,
 }
 _OPEN_REFUSAL_REASON = {
     OpenOutcome.TOO_MANY_PENDING: BrokerReason.APPROVAL_LIMIT_REACHED,
@@ -668,7 +676,9 @@ class ToolBroker:
         )
         try:
             async with asyncio.timeout(self._timeout_seconds):
-                outcome = await self._approvals.consume(approval_id, binding, now=now)
+                outcome = await self._approvals.consume(
+                    approval_id, binding, now=now, require_active_task=True
+                )
         except Exception as error:
             logger.error("Approval use failed (%s)", type(error).__name__)
             outcome = None

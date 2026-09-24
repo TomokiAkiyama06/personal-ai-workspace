@@ -9,7 +9,10 @@ nothing:
   is the delegating user and is not the agent (and, to approve a strong
   approval, a step-up was confirmed);
 * consume: ``status = 'approved' AND expires_at > now AND`` every field of the
-  binding (task, agent, user, tool, level, call hash) equals what was granted;
+  binding (task, agent, user, tool, level, call hash) equals what was granted.
+  With ``require_active_task`` the task's row is first read **locked**
+  (``FOR SHARE``) in the same transaction, so a use and the end of the task are
+  ordered, never crossed (Decision 0006, section 9);
 * revoke: ``status IN ('pending', 'approved') AND expires_at > now``.
 
 The history row is written in the same transaction as the change. When an
@@ -56,6 +59,7 @@ from paw_backend.tools.approval_types import (
 from paw_backend.tools.capabilities import ApprovalLevel
 from paw_backend.tools.models import ToolApprovalEventRow, ToolApprovalRow
 from paw_backend.tools.scope import Target, TargetKind
+from paw_backend.tools.task_state import TaskActivity, lock_task_activity
 
 _OPEN = (ApprovalStatus.PENDING.value, ApprovalStatus.APPROVED.value)
 _OPEN_ATTEMPTS = 3
@@ -317,9 +321,38 @@ class PostgresApprovalStore:
             return DecideResult(outcome)
 
     async def consume(
-        self, approval_id: uuid.UUID, binding: ApprovalBinding, *, now: datetime
+        self,
+        approval_id: uuid.UUID,
+        binding: ApprovalBinding,
+        *,
+        now: datetime,
+        require_active_task: bool = False,
     ) -> ConsumeOutcome:
         async with self._database.session() as session, session.begin():
+            if require_active_task:
+                # The task row is read **locked** in this very transaction: a
+                # terminal transition that is in flight is waited for (and its
+                # end is then seen here), one that starts later waits for this
+                # transaction. So the use is ordered before or after the end of
+                # the task, never across it (a check made earlier could be
+                # overtaken by the end, and the consumption would then win
+                # against the revocation that follows it).
+                activity = await lock_task_activity(session, binding.task_id)
+                if activity is not TaskActivity.ACTIVE:
+                    row = await _row(session, approval_id)
+                    outcome = diagnose_consume(
+                        None if row is None else _record(row), binding, now
+                    )
+                    if outcome is ConsumeOutcome.CONSUMED:
+                        # It could have been used: the task is why it is not.
+                        # (A reason about the approval itself - revoked, used,
+                        # for another call - is the more precise one.)
+                        outcome = (
+                            ConsumeOutcome.TASK_NOT_ACTIVE
+                            if activity is TaskActivity.ENDED
+                            else ConsumeOutcome.TASK_UNKNOWN
+                        )
+                    return outcome
             changed = await session.execute(
                 update(ToolApprovalRow)
                 .where(

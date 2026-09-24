@@ -103,8 +103,10 @@ Credential の Plaintext を Agent に渡さないこと、Backend が最終判�
 2. **取り消しの失敗は握りつぶさない。** `revoke_task` は Store の失敗で `ApprovalRevocationError` を上げる（以前は `0` を返し、「Open な承認はなかった」と区別できなかった）。終了の遷移はもう Commit されているので戻せず、`TaskService` は型名だけを Log に残す。再試行は今は呼び出し側（`revoke_task` は冪等）。
 3. **Broker は独立に Fail-closed で止める。** 承認を要する呼び出しは、承認を開くときも使うときも、Task の**現在の状態**（`TaskActivityProvider`）が動ける（`ACTIVE`）ときだけ進む。終了・不明・読めないなら拒否する（`task_not_active` / `task_unknown` / `task_state_unavailable`）。取り消しの成否によらず、終わった Task の承認は使えない。既定の Provider は不明を答える（本物を入れるまで承認は使えない）。
    遷移と取り消しを 1 つの Transaction にする案（`TaskService` が Tool の Table を触る）は、Task と Tool の境界を越えるため採らなかった。
+   **使うときの確認と消費は 1 つの Transaction にする。** 独立 Review が、確認（読み取り）と消費が別の操作で、その間に終了の遷移が Commit されると、Commit 後の取り消しと消費が競い、消費が勝った承認が終わった Task で使われると指摘した（再現した）。`consume` は `require_active_task` を受け取り、`PostgresApprovalStore` は同じ Transaction で Task の行を `FOR SHARE` で読み直してから消費する（`ACTIVE` でなければ消費しない）。進行中の遷移は待ち、後の遷移は消費の Commit を待つので、使うことと終了は順序づけられる。Broker の確認は、理由をはっきり返す早い答えとして残す。Task の表を読む（Lock する）のは読み取りだけで、Task の状態は変えない。
+   「試行番号（attempt）への結びつけ」（承認を作った試行でだけ使えるようにする）は、Table の列と Migration が要るため採らなかった。Retry / Restart での取り消し（4）と、Task の現在の状態の確認で足りる。
 4. **再び動く Task。** Retry / Restart（終了状態からの遷移）でも Open な承認を取り消す。終了時の取り消しが失敗して残った承認は、再開した Task では使えず、新しい承認を求め直す。
-5. **Human に判断を求める点:** (a) 承認を要する呼び出しだけが Task の状態を見ること（`AUTO` / `SCOPED_AUTO` は見ない。終わった Task へ呼び出しを渡さないのは Orchestrator の責務）。(b) 既定の Provider を「不明 = 拒否」にしたこと（配線を忘れると承認を要する呼び出しが全て通らない）。(c) 再試行の仕組み（再取り消しの Job）を持たず、Broker の Fail-closed に任せること。
+5. **Human に判断を求める点:** (a) 承認を要する呼び出しだけが Task の状態を見ること（`AUTO` / `SCOPED_AUTO` は見ない。終わった Task へ呼び出しを渡さないのは Orchestrator の責務）。(b) 既定の Provider を「不明 = 拒否」にしたこと（配線を忘れると承認を要する呼び出しが全て通らない）。(c) 再試行の仕組み（再取り消しの Job）を持たず、Broker の Fail-closed に任せること。(d) 使うときの Task の確認を `PostgresApprovalStore` が `tasks` の行で行うこと（Tool の Store が Task の Table を読み Lock する。Task の試行番号への結びつけは持たない）。
 
 ## 既知の制限と後続の課題
 
