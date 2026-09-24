@@ -7,6 +7,7 @@ from paw_backend.tools import (
     redact_value,
 )
 from paw_backend.tools.credentials import (
+    MAX_RESULT_NODES,
     MAX_TEXT_CHARS,
     REDACTED,
     TRUNCATED,
@@ -192,7 +193,8 @@ class RedactionTest(unittest.TestCase):
         self.assertIs(redacted["has_password"], True)
         self.assertEqual(redacted["credential_handle"], HANDLE)
         self.assertIsNone(redacted["note"])
-        self.assertEqual(redacted["password_hint"], "none")
+        # A text under a key that names a secret is redacted, whatever it says.
+        self.assertEqual(redacted["password_hint"], REDACTED)
 
     def test_anything_that_is_not_json_data_becomes_a_marker(self):
         class Leaky:
@@ -232,6 +234,243 @@ class RedactionTest(unittest.TestCase):
             depth += 1
         self.assertEqual(redacted, REDACTED)
         self.assertEqual(depth, 33)
+
+
+GITLAB = "glpat-" + "aB3_" * 6
+GOOGLE = "AIza" + "Sy" + "aB3-" * 8 + "x"
+STRIPE = "sk_" + "live_" + "a1B2" * 6
+NPM = "npm_" + "aB3d" * 9
+SLACK_WEBHOOK = "https://hooks.slack.com/services/T0123456/B0123456/" + "a1B2" * 6
+HUGGING_FACE = "hf_" + "aB3d" * 9
+SENDGRID = "SG." + "a" * 22 + "." + "b" * 43
+AWS_SECRET = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+
+
+class PrefixedNamesTest(unittest.TestCase):
+    """A token glued to a variable name must not slip through (``_`` is a word
+    character, which used to hide exactly these spellings)."""
+
+    def test_the_scan_sees_tokens_behind_a_name(self):
+        for label, text in {
+            "github": f"MYTOKEN_{GITHUB}",
+            "aws": "key_" + AWS,
+            "openai": f"OPENAI_API_KEY_{OPENAI}",
+            "hyphen": f"my-{GITHUB_PAT}",
+            "slack": f"SLACK_TOKEN_{SLACK}",
+            "assigned": f"GITHUB_TOKEN={GITHUB}",
+            "quoted": f'"api_key":"{OPENAI}"',
+            "after a colon": f"token:{GITHUB}",
+        }.items():
+            with self.subTest(label=label):
+                self.assertTrue(contains_credential_plaintext(text))
+
+    def test_redaction_keeps_the_name_and_removes_the_token(self):
+        cases = {
+            f"MYTOKEN_{GITHUB}": f"MYTOKEN_{REDACTED}",
+            f"OPENAI_API_KEY_{OPENAI}": f"OPENAI_API_KEY_{REDACTED}",
+            "key_" + AWS: f"key_{REDACTED}",
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=expected):
+                self.assertEqual(redact_text(text), (expected, 1))
+
+    def test_words_that_merely_end_in_a_prefix_are_not_tokens(self):
+        for text in (
+            "disk-usage-monitoring-report-final-v2",
+            "risk-management-and-mitigation-strategies",
+            "task-runner-configuration-management-service",
+            "ask-anything-about-the-repository-layout",
+            "xghp_" + "a" * 36,  # letters glued to the prefix: not a GitHub token
+            "AKIAABCDEFGH12345678X",  # longer than a key id
+        ):
+            with self.subTest(text=text):
+                self.assertFalse(contains_credential_plaintext(text))
+
+    def test_more_formats(self):
+        for label, secret in {
+            "gitlab": GITLAB,
+            "google": GOOGLE,
+            "stripe": STRIPE,
+            "npm": NPM,
+            "slack webhook": SLACK_WEBHOOK,
+            "hugging face": HUGGING_FACE,
+            "sendgrid": SENDGRID,
+            "pgp": "-----BEGIN PGP PRIVATE KEY BLOCK-----\nabc\n"
+            "-----END PGP PRIVATE KEY BLOCK-----",
+        }.items():
+            with self.subTest(label=label):
+                self.assertTrue(contains_credential_plaintext(secret))
+                self.assertEqual(redact_text(f"x {secret} y")[0], f"x {REDACTED} y")
+
+
+class SecretFilesTest(unittest.TestCase):
+    """What ``read_file(".env")`` and its cousins return."""
+
+    def test_an_env_file(self):
+        text = (
+            "# production\n"
+            "DEBUG=false\n"
+            "DB_HOST=db.internal\n"
+            "DB_PASSWORD=hunter2hunter2\n"
+            f"AWS_SECRET_ACCESS_KEY={AWS_SECRET}\n"
+            "GITHUB_TOKEN=abcdefgh12345678\n"
+            "export API_TOKEN='abcdefgh12345678'\n"
+            'MYSQL_ROOT_PASSWORD="correct horse battery"\n'
+            "dbPassword=hunter2hunter2\n"
+            "PORT=8080\n"
+        )
+        redacted, count = redact_text(text)
+        self.assertEqual(
+            redacted,
+            "# production\n"
+            "DEBUG=false\n"
+            "DB_HOST=db.internal\n"
+            f"DB_PASSWORD={REDACTED}\n"
+            f"AWS_SECRET_ACCESS_KEY={REDACTED}\n"
+            f"GITHUB_TOKEN={REDACTED}\n"
+            f"export API_TOKEN={REDACTED}\n"
+            f"MYSQL_ROOT_PASSWORD={REDACTED}\n"
+            f"dbPassword={REDACTED}\n"
+            "PORT=8080\n",
+        )
+        self.assertEqual(count, 6)
+
+    def test_json_yaml_and_ini_text(self):
+        cases = {
+            '{"db_password": "hunter2hunter2", "port": 5432}': (
+                f'{{"db_password": {REDACTED}, "port": 5432}}'
+            ),
+            '{"API_TOKEN":"abcdefgh12345678"}': f'{{"API_TOKEN":{REDACTED}}}',
+            '{"password": "correct horse battery staple"}': (
+                f'{{"password": {REDACTED}}}'
+            ),
+            "api_token: abcdefgh12345678\nname: demo": (
+                f"api_token: {REDACTED}\nname: demo"
+            ),
+            "[db]\npassword = hunter2hunter2\nuser = bob": (
+                f"[db]\npassword = {REDACTED}\nuser = bob"
+            ),
+            "client_secret = 'abc def ghi'": f"client_secret = {REDACTED}",
+            "curl --password hunter2hunter2 --user bob": (
+                f"curl --password {REDACTED} --user bob"
+            ),
+            "docker login --password-stdin --token abcdefgh12345678": (
+                f"docker login --password-stdin --token {REDACTED}"
+            ),
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=text[:40]):
+                self.assertEqual(redact_text(text)[0], expected)
+
+    def test_ordinary_configuration_is_left_alone(self):
+        for text in (
+            "DEBUG=false\nPORT=8080\nname: demo\nmax_tokens = 4096",
+            "token: cred_" + "a1" * 16,
+            'api_key: ""',
+            "the password is stored in the vault",
+            "PWD=/home/user/project",
+        ):
+            with self.subTest(text=text[:30]):
+                self.assertEqual(redact_text(text), (text, 0))
+
+    def test_a_secret_in_a_nested_result_is_redacted_at_every_depth(self):
+        result = {
+            "files": [
+                {"path": ".env", "content": f"DB_PASSWORD=hunter2hunter2\nX={GITHUB}"},
+                {"path": "a.py", "content": "print(1)"},
+            ],
+            "meta": {"env": {"GITHUB_TOKEN": "abcdefgh12345678", "N": 3}},
+        }
+        redacted, count = redact_value(result)
+        self.assertEqual(
+            redacted,
+            {
+                "files": [
+                    {
+                        "path": ".env",
+                        "content": f"DB_PASSWORD={REDACTED}\nX={REDACTED}",
+                    },
+                    {"path": "a.py", "content": "print(1)"},
+                ],
+                "meta": {"env": {"GITHUB_TOKEN": REDACTED, "N": 3}},
+            },
+        )
+        self.assertEqual(count, 3)
+
+
+class RedactedKeysTest(unittest.TestCase):
+    def test_a_secret_used_as_a_key_is_redacted(self):
+        redacted, count = redact_value({GITHUB: "x", "plain": 1})
+        self.assertEqual(redacted, {REDACTED: "x", "plain": 1})
+        self.assertEqual(count, 1)
+        self.assertNotIn(GITHUB, repr(redacted))
+
+    def test_keys_that_redact_alike_do_not_overwrite_each_other(self):
+        other = "ghp_" + "Z9y8" * 9
+        redacted, count = redact_value({GITHUB: "first", other: "second"})
+        self.assertEqual(sorted(redacted.values()), ["first", "second"])
+        self.assertEqual(len(redacted), 2)
+        self.assertEqual(count, 2)
+        self.assertNotIn(other, repr(redacted))
+
+    def test_env_style_keys_hide_their_values(self):
+        redacted, _ = redact_value(
+            {
+                "AWS_SECRET_ACCESS_KEY": AWS_SECRET,
+                "GITHUB_TOKEN": "abc",
+                "dbPassword": "x",
+                "DB_PASSWORD": {"nested": "x"},
+                "API_KEYS": REDACTED,
+                "PORT": "8080",
+                "max_tokens": 4096,
+                "token_count": 12,
+                "has_secret": False,
+                "credential_handle": HANDLE,
+            }
+        )
+        self.assertEqual(
+            redacted,
+            {
+                "AWS_SECRET_ACCESS_KEY": REDACTED,
+                "GITHUB_TOKEN": REDACTED,
+                "dbPassword": REDACTED,
+                "DB_PASSWORD": REDACTED,
+                "API_KEYS": REDACTED,
+                "PORT": "8080",
+                "max_tokens": 4096,
+                "token_count": 12,
+                "has_secret": False,
+                "credential_handle": HANDLE,
+            },
+        )
+
+
+class ResultBudgetTest(unittest.TestCase):
+    def test_a_huge_list_is_cut_quickly_with_a_marker(self):
+        started = time.monotonic()
+        redacted, count = redact_value(["x"] * 2_000_000)
+        self.assertLess(time.monotonic() - started, 20.0)
+        self.assertEqual(len(redacted), MAX_RESULT_NODES)
+        self.assertEqual(redacted[-1], TRUNCATED)
+        self.assertEqual(count, 1)
+
+    def test_a_huge_dict_is_cut_with_a_marker(self):
+        redacted, count = redact_value({f"k{i}": i for i in range(300_000)})
+        self.assertEqual(len(redacted), MAX_RESULT_NODES)
+        self.assertIn(TRUNCATED, redacted)
+        self.assertEqual(count, 1)
+
+    def test_a_result_with_too_many_characters_is_cut(self):
+        chunk = "a" * 100_000
+        redacted, count = redact_value([chunk] * 60)
+        self.assertEqual(redacted.count(TRUNCATED), 1)
+        self.assertEqual(count, 1)
+        self.assertEqual(len(redacted), 41)
+        self.assertEqual(redacted[0], chunk)
+
+    def test_a_small_result_is_untouched(self):
+        result = {"a": [1, 2, {"b": "c"}], "d": None}
+        self.assertEqual(redact_value(result), (result, 0))
 
 
 class BoundedWorkTest(unittest.TestCase):
