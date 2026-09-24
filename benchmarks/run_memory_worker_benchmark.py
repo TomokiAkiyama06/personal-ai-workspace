@@ -46,7 +46,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         worker = _create_worker(arguments.worker)
-    except (ImportError, AttributeError, ValueError, TypeError) as error:
+    except Exception as error:  # noqa: BLE001 - a factory may fail in any way; report only the type.
         print(f"worker is unusable ({type(error).__name__})", file=sys.stderr)
         return 2
 

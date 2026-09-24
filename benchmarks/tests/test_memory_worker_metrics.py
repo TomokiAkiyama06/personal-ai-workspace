@@ -340,6 +340,9 @@ class AggregateTest(unittest.TestCase):
             "scope_accuracy": 3 / 3,  # 3 scope_correct / 3 matched
             "state_accuracy": 2 / 3,  # 2 state_correct / 3 matched
             "supersedes_accuracy": 1 / 3,  # 1 supersedes_correct / 3 matched
+            "exact_recall": 3 / 3,  # no content labels: key match is enough
+            "content_accuracy": None,
+            "conflict_accuracy": None,
         }
         self.assertEqual(result, expected)
 
@@ -361,12 +364,93 @@ class AggregateTest(unittest.TestCase):
             "scope_accuracy": None,
             "state_accuracy": None,
             "supersedes_accuracy": None,
+            "exact_recall": None,
+            "content_accuracy": None,
+            "conflict_accuracy": None,
         }
         self.assertEqual(result, expected)
 
     def test_empty_comparisons(self):
         with self.assertRaises(ValueError):
             aggregate([])
+
+
+class ContentAndConflictTest(unittest.TestCase):
+    @staticmethod
+    def record(key, content=None, conflicts=(), scope="user", state="confirmed"):
+        return MemoryRecord(key, scope, state, None, content, tuple(conflicts))
+
+    def test_right_key_with_wrong_content_is_not_an_exact_recall(self):
+        gold = [self.record("meeting_time", "Tomorrow at 3 PM")]
+        predicted = [self.record("meeting_time", "Tomorrow at 5 PM")]
+
+        comparison = compare_memories(gold, predicted)
+        metrics = aggregate([comparison])
+
+        self.assertEqual(comparison.matched, 1)
+        self.assertEqual(comparison.content_evaluated, 1)
+        self.assertEqual(comparison.content_correct, 0)
+        self.assertEqual(metrics["extraction_recall"], 1.0)
+        self.assertEqual(metrics["exact_recall"], 0.0)
+        self.assertEqual(metrics["content_accuracy"], 0.0)
+
+    def test_content_comparison_ignores_case_width_and_whitespace(self):
+        gold = [self.record("k", "Tomorrow at 3 PM")]
+        predicted = [self.record("k", "  tomorrow   at\t３ pm ")]
+
+        comparison = compare_memories(gold, predicted)
+
+        self.assertEqual(comparison.content_correct, 1)
+        self.assertEqual(aggregate([comparison])["exact_recall"], 1.0)
+
+    def test_missing_predicted_content_is_wrong_when_gold_has_content(self):
+        comparison = compare_memories(
+            [self.record("k", "fact")], [self.record("k", None)]
+        )
+        self.assertEqual(
+            (comparison.content_evaluated, comparison.content_correct), (1, 0)
+        )
+
+    def test_gold_without_content_is_not_scored_on_content(self):
+        comparison = compare_memories(
+            [self.record("k")], [self.record("k", "anything")]
+        )
+        self.assertEqual(
+            (comparison.content_evaluated, comparison.content_correct), (0, 0)
+        )
+        self.assertEqual(aggregate([comparison])["exact_recall"], 1.0)
+
+    def test_conflict_relations_are_compared_as_sets(self):
+        gold = [self.record("a", conflicts=["b", "c"]), self.record("d")]
+        predicted = [self.record("a", conflicts=["c", "b"]), self.record("d")]
+
+        comparison = compare_memories(gold, predicted)
+
+        self.assertEqual(
+            (comparison.conflicts_evaluated, comparison.conflicts_correct), (1, 1)
+        )
+        self.assertEqual(aggregate([comparison])["conflict_accuracy"], 1.0)
+
+    def test_missed_and_invented_conflicts_are_wrong(self):
+        gold = [self.record("a", conflicts=["b"]), self.record("d")]
+        predicted = [self.record("a"), self.record("d", conflicts=["a"])]
+
+        comparison = compare_memories(gold, predicted)
+
+        self.assertEqual(
+            (comparison.conflicts_evaluated, comparison.conflicts_correct), (2, 0)
+        )
+        self.assertEqual(aggregate([comparison])["conflict_accuracy"], 0.0)
+
+    def test_record_validation_for_content_and_conflicts(self):
+        with self.assertRaises(TypeError):
+            MemoryRecord("k", "user", "confirmed", None, "   ")
+        with self.assertRaises(TypeError):
+            MemoryRecord("k", "user", "confirmed", None, 5)
+        with self.assertRaises(TypeError):
+            MemoryRecord("k", "user", "confirmed", None, None, ["b"])
+        with self.assertRaises(TypeError):
+            MemoryRecord("k", "user", "confirmed", None, None, ("",))
 
 
 class SchemaAdherenceTest(unittest.TestCase):

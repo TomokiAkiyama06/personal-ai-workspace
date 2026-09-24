@@ -32,3 +32,7 @@ class MalformedWorker:
 
 def make_malformed_worker() -> MalformedWorker:
     return MalformedWorker()
+
+
+def make_failing_worker():
+    raise RuntimeError("model init failed: token=SECRET-TOKEN")

@@ -298,6 +298,118 @@ class MemoryWorkerRunnerTest(unittest.TestCase):
         self.assertNotIn("SECRET-CONTENT", str(context.exception))
 
     @staticmethod
+    def _load_from_text(text):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "cases.json"
+            path.write_text(text, encoding="utf-8")
+            return load_cases(str(path))
+
+    def test_malformed_cases_raise_value_error_naming_the_problem(self):
+        gold = {"key": "k", "scope": "user", "state": "confirmed", "supersedes": None}
+        good = {"id": "c1", "input": "text", "gold": [gold]}
+        cases = (
+            (
+                {"cases": [{"input": "x", "gold": []}]},
+                "Each case must have an 'id' field",
+            ),
+            ({"cases": [{"id": "c", "gold": []}]}, "'input' field"),
+            ({"cases": ["not an object"]}, "case at index 0 must be an object"),
+            ({"cases": [dict(good, id=5)]}, "invalid 'id'"),
+            ({"cases": [dict(good, gold={})]}, "'gold' must be a list in case 'c1'"),
+            ({"cases": [dict(good, gold=[{"scope": "user"}])]}, "missing 'key'"),
+            ({"cases": [dict(good, gold=["x"])]}, "must be an object"),
+            (
+                {"cases": [dict(good, gold=[dict(gold, conflicts_with="b")])]},
+                "'conflicts_with' must be a list",
+            ),
+            ([], "JSON document must be an object"),
+            ({"cases": {}}, "'cases' must be a list"),
+        )
+        for document, message in cases:
+            with self.subTest(message=message):
+                with self.assertRaises(ValueError) as context:
+                    self._load_from_text(json.dumps(document))
+                self.assertIn(message, str(context.exception))
+
+    def test_gold_record_may_omit_supersedes_and_carry_content_and_conflicts(self):
+        document = {
+            "cases": [
+                {
+                    "id": "c1",
+                    "input": "text",
+                    "gold": [
+                        {
+                            "key": "k",
+                            "scope": "user",
+                            "state": "inferred",
+                            "content": "the fact",
+                            "conflicts_with": ["other"],
+                        }
+                    ],
+                }
+            ]
+        }
+
+        (case,) = self._load_from_text(json.dumps(document))
+
+        self.assertEqual(
+            case.gold,
+            (MemoryRecord("k", "user", "inferred", None, "the fact", ("other",)),),
+        )
+
+    def test_worker_output_content_and_conflicts_are_parsed(self):
+        raw = json.dumps(
+            {
+                "memories": [
+                    {
+                        "key": "k",
+                        "scope": "user",
+                        "state": "confirmed",
+                        "supersedes": None,
+                        "content": "the fact",
+                        "conflicts_with": ["other"],
+                    }
+                ]
+            }
+        )
+
+        self.assertEqual(
+            parse_worker_output(raw),
+            [MemoryRecord("k", "user", "confirmed", None, "the fact", ("other",))],
+        )
+
+    def test_worker_output_with_bad_content_or_conflicts_is_schema_invalid(self):
+        base = {"key": "k", "scope": "user", "state": "confirmed", "supersedes": None}
+        for extra in (
+            {"content": ""},
+            {"content": 5},
+            {"conflicts_with": "b"},
+            {"conflicts_with": ["b", "b"]},
+        ):
+            with self.subTest(extra=extra):
+                raw = json.dumps({"memories": [dict(base, **extra)]})
+                self.assertIsNone(parse_worker_output(raw))
+
+    def test_report_serializes_the_worker_error_type_per_case(self):
+        class Raising:
+            def extract(self, input_text):
+                raise KeyError("SECRET-DETAIL")
+
+        cases = [
+            MemoryWorkerCase("c0", "x", (MemoryRecord("k", "user", "confirmed", None),))
+        ]
+
+        data = run_benchmark(Raising(), cases).to_dict()
+
+        self.assertEqual(data["cases"][0]["error_type"], "KeyError")
+        self.assertNotIn("SECRET-DETAIL", json.dumps(data))
+        self.assertEqual(data["cases"][0]["comparison"]["matched"], 0)
+
+    def test_report_error_type_is_none_for_a_normal_case(self):
+        data = run_benchmark(MockWorker([VALID_OUTPUT]), self._cases(1)).to_dict()
+        self.assertIsNone(data["cases"][0]["error_type"])
+
+    @staticmethod
     def _cases(count):
         gold = (MemoryRecord("k", "user", "confirmed", None),)
         return [MemoryWorkerCase(f"c{index}", "input", gold) for index in range(count)]

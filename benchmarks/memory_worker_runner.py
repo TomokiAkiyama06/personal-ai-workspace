@@ -6,7 +6,7 @@ import json
 import math
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Protocol
@@ -32,63 +32,83 @@ class MemoryWorkerCase:
     gold: tuple[MemoryRecord, ...]
 
 
+def _require_object(value: object, where: str) -> dict:
+    if not isinstance(value, dict):
+        raise ValueError(f"{where} must be an object")  # noqa: TRY004 - dataset problems are reported uniformly as ValueError.
+    return value
+
+
+def _parse_gold_record(record: object, case_id: str, index: int) -> MemoryRecord:
+    where = f"gold record at index {index} in case '{case_id}'"
+    record = _require_object(record, where)
+    for name in ("key", "scope", "state"):
+        if name not in record:
+            raise ValueError(f"Invalid {where}: missing '{name}'")
+    conflicts = record.get("conflicts_with", [])
+    if not isinstance(conflicts, list):
+        raise ValueError(f"Invalid {where}: 'conflicts_with' must be a list")  # noqa: TRY004 - dataset problems are reported uniformly as ValueError.
+    try:
+        return MemoryRecord(
+            key=record["key"],
+            scope=record["scope"],
+            state=record["state"],
+            supersedes=record.get("supersedes"),
+            content=record.get("content"),
+            conflicts_with=tuple(conflicts),
+        )
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"Invalid {where}: {error}") from None
+
+
 def load_cases(path: str) -> list[MemoryWorkerCase]:
-    """Load memory worker test cases from a JSON file."""
-    with open(path, "r", encoding="utf-8") as f:
+    """Load memory worker test cases from a JSON file.
+
+    Every malformed input raises ``ValueError`` naming only the case id and field.
+    """
+    with open(path, encoding="utf-8") as f:
         data = json.load(f)
 
+    data = _require_object(data, "JSON document")
     if "cases" not in data:
         raise ValueError("JSON must have a 'cases' key")
-
     cases = data["cases"]
+    if not isinstance(cases, list):
+        raise ValueError("'cases' must be a list")  # noqa: TRY004 - dataset problems are reported uniformly as ValueError.
     if not cases:
         raise ValueError("Cases list cannot be empty")
 
-    # Check for unique IDs
-    ids = [case["id"] for case in cases]
-    if len(ids) != len(set(ids)):
-        raise ValueError("Duplicate case ID found")
-
     result = []
-    for case_data in cases:
-        # Validate required fields
+    seen_ids: set[str] = set()
+    for index, case_data in enumerate(cases):
+        case_data = _require_object(case_data, f"case at index {index}")
         if "id" not in case_data:
             raise ValueError("Each case must have an 'id' field")
+        case_id = case_data["id"]
+        if not isinstance(case_id, str) or not case_id:
+            raise ValueError(f"case at index {index} has an invalid 'id'")
+        if case_id in seen_ids:
+            raise ValueError("Duplicate case ID found")
+        seen_ids.add(case_id)
         if "input" not in case_data:
             raise ValueError("Each case must have an 'input' field")
         if "gold" not in case_data:
             raise ValueError("Each case must have a 'gold' key")
-
-        # Check for empty input
-        if not case_data["input"]:
+        if not isinstance(case_data["input"], str) or not case_data["input"]:
             raise ValueError("Input text cannot be empty")
+        if not isinstance(case_data["gold"], list):
+            raise ValueError(f"'gold' must be a list in case '{case_id}'")  # noqa: TRY004 - dataset problems are reported uniformly as ValueError.
 
-        # Parse gold records
-        gold_records = []
-        for i, gold_record in enumerate(case_data["gold"]):
-            try:
-                record = MemoryRecord(
-                    key=gold_record["key"],
-                    scope=gold_record["scope"],
-                    state=gold_record["state"],
-                    supersedes=gold_record["supersedes"],
-                )
-                gold_records.append(record)
-            except (TypeError, ValueError) as e:
-                raise ValueError(
-                    f"Invalid gold record at index {i} in case '{case_data['id']}': {e!s}"
-                )
-
-        # Check for unique gold keys
+        gold_records = [
+            _parse_gold_record(record, case_id, i)
+            for i, record in enumerate(case_data["gold"])
+        ]
         gold_keys = [record.key for record in gold_records]
         if len(gold_keys) != len(set(gold_keys)):
-            raise ValueError(f"Duplicate gold key found in case '{case_data['id']}'")
+            raise ValueError(f"Duplicate gold key found in case '{case_id}'")
 
         result.append(
             MemoryWorkerCase(
-                id=case_data["id"],
-                input_text=case_data["input"],
-                gold=tuple(gold_records),
+                id=case_id, input_text=case_data["input"], gold=tuple(gold_records)
             )
         )
 
@@ -134,6 +154,8 @@ def parse_worker_output(raw: str) -> list[MemoryRecord] | None:
                 scope=item["scope"],
                 state=item["state"],
                 supersedes=item["supersedes"],
+                content=item.get("content"),
+                conflicts_with=tuple(item.get("conflicts_with", ())),
             )
             records.append(record)
         return records
@@ -168,15 +190,8 @@ class BenchmarkReport:
                     "id": case.id,
                     "latency_ms": case.latency_ms,
                     "schema_valid": case.schema_valid,
-                    "comparison": {
-                        "gold_count": case.comparison.gold_count,
-                        "predicted_count": case.comparison.predicted_count,
-                        "matched": case.comparison.matched,
-                        "unneeded": case.comparison.unneeded,
-                        "scope_correct": case.comparison.scope_correct,
-                        "state_correct": case.comparison.state_correct,
-                        "supersedes_correct": case.comparison.supersedes_correct,
-                    },
+                    "error_type": case.error_type,
+                    "comparison": asdict(case.comparison),
                 }
                 for case in self.cases
             ],

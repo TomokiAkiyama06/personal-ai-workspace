@@ -21,6 +21,18 @@
                     },
                     "supersedes": {
                         "type": ["string", "null"]
+                    },
+                    "content": {
+                        "type": "string",
+                        "minLength": 1
+                    },
+                    "conflicts_with": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "minLength": 1
+                        },
+                        "uniqueItems": true
                     }
                 },
                 "required": ["key", "scope", "state", "supersedes"],

@@ -84,6 +84,30 @@ class RunMemoryWorkerBenchmarkTest(unittest.TestCase):
         self.assertEqual(stdout, "")
         self.assertEqual(stderr, "worker returned an invalid result (TypeError)\n")
 
+    def test_any_factory_exception_is_reported_by_type_only(self):
+        code, stdout, stderr = run_cli(
+            "--cases",
+            VALID_CASES,
+            "--worker",
+            "benchmarks.tests.fixture_workers:make_failing_worker",
+        )
+
+        self.assertEqual(code, 2)
+        self.assertEqual(stdout, "")
+        self.assertEqual(stderr, "worker is unusable (RuntimeError)\n")
+
+    def test_case_missing_its_id_exits_with_one(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "cases.json"
+            path.write_text(
+                json.dumps({"cases": [{"input": "x", "gold": []}]}), encoding="utf-8"
+            )
+            code, stdout, stderr = run_cli("--cases", str(path), "--worker", WORKER)
+
+        self.assertEqual(code, 1)
+        self.assertEqual(stdout, "")
+        self.assertIn("Each case must have an 'id' field", stderr)
+
     def test_unwritable_output_exits_with_two(self):
         with tempfile.TemporaryDirectory() as directory:
             code, _, stderr = run_cli(
