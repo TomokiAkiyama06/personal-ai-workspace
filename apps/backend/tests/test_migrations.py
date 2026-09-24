@@ -37,12 +37,11 @@ class MigrationConfigTest(unittest.TestCase):
         self.assertIsNone(Config(str(ALEMBIC_INI)).get_main_option("sqlalchemy.url"))
         self.assertNotIn("postgres", ALEMBIC_INI.read_text().lower())
 
-    def test_history_is_a_single_empty_baseline(self):
+    def test_history_starts_at_the_baseline_and_has_one_head(self):
+        # Later migrations extend the chain; the tests must not name the head.
         scripts = ScriptDirectory.from_config(Config(str(ALEMBIC_INI)))
-        self.assertEqual(scripts.get_heads(), ["0001"])
-        revisions = list(scripts.walk_revisions())
-        self.assertEqual([revision.revision for revision in revisions], ["0001"])
-        self.assertIsNone(revisions[0].down_revision)
+        self.assertEqual(scripts.get_bases(), ["0001"])
+        self.assertEqual(len(scripts.get_heads()), 1)
 
 
 class MigrationEnvironmentTest(unittest.TestCase):
@@ -50,7 +49,8 @@ class MigrationEnvironmentTest(unittest.TestCase):
         output = io.StringIO()
         url = f"postgresql://paw:{PASSWORD}@db.internal/paw"
         with paw_environment(PAW_DATABASE_URL=url):
-            command.upgrade(offline_config(output), "head", sql=True)
+            # The baseline only, so that later revisions do not change this test.
+            command.upgrade(offline_config(output), "0001", sql=True)
 
         sql = output.getvalue()
         self.assertIn("CREATE TABLE alembic_version", sql)
