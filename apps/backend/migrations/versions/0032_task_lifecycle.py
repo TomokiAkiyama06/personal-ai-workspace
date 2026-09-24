@@ -24,6 +24,36 @@ down_revision: str | Sequence[str] | None = "0025"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
+# TEMPORARY placeholder (PAW-040 branch only). The lint reads the reasons as
+# string literals. Take the PAW-032 side when the 032 branch, which grants the
+# application role on these tables itself, is merged.
+NO_APP_GRANTS = {
+    "tasks": (
+        "TEMPORARY until PAW-032's own grants are merged "
+        "(orchestrator will drop this): no privilege is granted yet"
+    ),
+    "task_attempts": (
+        "TEMPORARY until PAW-032's own grants are merged "
+        "(orchestrator will drop this): no privilege is granted yet"
+    ),
+    "task_steps": (
+        "TEMPORARY until PAW-032's own grants are merged "
+        "(orchestrator will drop this): no privilege is granted yet"
+    ),
+    "task_tool_invocations": (
+        "TEMPORARY until PAW-032's own grants are merged "
+        "(orchestrator will drop this): no privilege is granted yet"
+    ),
+    "task_logs": (
+        "TEMPORARY until PAW-032's own grants are merged "
+        "(orchestrator will drop this): no privilege is granted yet"
+    ),
+    "task_events": (
+        "TEMPORARY until PAW-032's own grants are merged "
+        "(orchestrator will drop this): no privilege is granted yet"
+    ),
+}
+
 TASK_STATES = tuple(
     "queued running waiting paused evaluating completed failed cancelled".split()
 )

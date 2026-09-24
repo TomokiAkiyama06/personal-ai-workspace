@@ -4,6 +4,7 @@ import io
 import unittest
 
 from alembic import command
+from alembic.script import ScriptDirectory
 from pydantic import ValidationError
 
 from paw_backend.authz.diagnostics import AuditTableAccess
@@ -15,10 +16,16 @@ URL = "postgresql://paw:s3cr3t-pw@db.internal/paw"
 MIGRATION_URL = "postgresql://owner:0wner-pw@db.internal/paw"
 
 
+def audit_revision_range() -> str:
+    """Only the audit migration: later revisions create tables (and grants) too."""
+    scripts = ScriptDirectory.from_config(offline_config(io.StringIO()))
+    return f"{scripts.get_revision('0025').down_revision}:0025"
+
+
 def offline_upgrade_sql(**environment: str) -> str:
     output = io.StringIO()
     with paw_environment(PAW_DATABASE_URL=URL, **environment):
-        command.upgrade(offline_config(output), "head", sql=True)
+        command.upgrade(offline_config(output), audit_revision_range(), sql=True)
     return output.getvalue()
 
 
@@ -158,11 +165,16 @@ class OfflineMigrationSqlTest(unittest.TestCase):
 
     def test_a_migration_role_without_an_app_role_is_warned_about(self):
         with self.assertLogs("paw_backend.migrations.0025", level="WARNING") as logs:
-            offline_upgrade_sql(PAW_MIGRATION_DATABASE_URL=MIGRATION_URL)
+            with self.assertLogs("paw_backend.db_roles", level="WARNING") as generic:
+                offline_upgrade_sql(PAW_MIGRATION_DATABASE_URL=MIGRATION_URL)
         (line,) = logs.output
         self.assertIn("PAW_APP_DATABASE_ROLE", line)
         self.assertIn("refused (503)", line)
         self.assertNotIn("0wner-pw", line)
+        # The shared helper says the same for the table it was asked about.
+        (helper_line,) = generic.output
+        self.assertIn("audit_events", helper_line)
+        self.assertNotIn("0wner-pw", helper_line)
 
     def test_no_warning_when_the_role_is_set_or_no_split_is_configured(self):
         with self.assertNoLogs("paw_backend.migrations.0025", level="WARNING"):

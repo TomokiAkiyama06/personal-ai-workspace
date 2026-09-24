@@ -17,6 +17,13 @@ embedding model is chosen by the PAW-019 benchmark and PAW-043 adds the index.
 ``embedding_models`` (empty here) gives each model exactly one dimension, which
 ``memory_embeddings`` references.
 
+Privileges of the application role (``PAW_APP_DATABASE_ROLE``): every table
+gets the least the eventual services need, see ``_grant_app_privileges``. In
+short, the history is append-only for the application (no DELETE on versions,
+messages or relations; UPDATE only of the few columns the design says change
+in place), and deleting a conversation or a memory works through the foreign
+keys' cascade, which PostgreSQL runs with the owner's rights.
+
 The constraint definitions repeat the ones in ``paw_backend.memory.models`` on
 purpose (a migration is a frozen snapshot); ``tests/test_memory_migration.py``
 fails when the two drift apart. Constraint names come from the naming
@@ -32,6 +39,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
+
+from paw_backend.db_roles import grant_app_privileges
 
 revision: str = "0040"
 down_revision: str | Sequence[str] | None = "0032"
@@ -64,6 +73,89 @@ def _empty_object(name: str) -> sa.Column:
     return sa.Column(
         name, postgresql.JSONB(), server_default=sa.text("'{}'::jsonb"), nullable=False
     )
+
+
+def _grant_app_privileges() -> None:
+    """The least privileges the application role needs on each table.
+
+    Nothing is granted when no application role is configured (single-role
+    development). TRUNCATE, ALTER, DROP and GRANT are never given. A referential
+    action (``ON DELETE CASCADE`` / ``SET NULL``) runs with the rights of the
+    owner of the table it changes, so deleting a conversation or a memory
+    removes its messages, session state, versions and embeddings without the
+    application holding DELETE on those tables.
+    """
+    # Raw Conversation. A conversation is renamed and touched, never re-owned:
+    # ``owner_user_id`` (the ACL boundary) and the project / repo context are
+    # not updatable. Deleting a conversation is a product feature (REQUIREMENTS
+    # "Conversation deletion"), so DELETE is granted here.
+    grant_app_privileges(
+        op,
+        "conversations",
+        select=True,
+        insert=True,
+        delete=True,
+        update_columns=("title", "updated_at"),
+    )
+    # Raw events are append-only: no UPDATE (nothing rewrites history) and no
+    # DELETE (a whole conversation is deleted through its cascade; deleting a
+    # single message is not a documented flow).
+    grant_app_privileges(op, "messages", select=True, insert=True)
+    # The summary and working state are rewritten as the conversation goes on
+    # (guarded by ``summarized_through_sequence``), but the row is created once
+    # and removed only with its conversation (cascade): no DELETE, and the key
+    # ``conversation_id`` cannot change.
+    grant_app_privileges(
+        op,
+        "session_states",
+        select=True,
+        insert=True,
+        update_columns=(
+            "summary",
+            "state",
+            "summarized_through_sequence",
+            "updated_at",
+        ),
+    )
+    # Identity only, nothing to update. DELETE removes a whole memory with all
+    # its versions (cascade): the documented deletion flows (a conversation
+    # deleted together with the memories derived from it, an Admin deleting a
+    # Shared memory, erasing a deleted user's private memory). Deleting one
+    # version on its own is not granted, see ``memory_versions``.
+    grant_app_privileges(op, "memories", select=True, insert=True, delete=True)
+    # A version is never edited in place (a new version is inserted instead), so
+    # the content, scope / ACL columns, confirmation state and freshness
+    # settings are immutable. Only what the design changes in place is
+    # updatable: ``status`` (superseded / deprecated / history), ``stale_since``
+    # (stale candidate marking), and the low-risk metadata ``pinned`` and
+    # ``importance``. No DELETE: history is kept.
+    grant_app_privileges(
+        op,
+        "memory_versions",
+        select=True,
+        insert=True,
+        update_columns=("status", "stale_since", "pinned", "importance"),
+    )
+    # Edges of the history graph are append-only.
+    grant_app_privileges(op, "memory_relations", select=True, insert=True)
+    # Provenance is append-only, except that the deletion flow records a lost
+    # source in ``source_deleted_at``. The foreign keys' SET NULL clears the
+    # conversation / message references without any privilege of the application.
+    grant_app_privileges(
+        op,
+        "memory_sources",
+        select=True,
+        insert=True,
+        update_columns=("source_deleted_at",),
+    )
+    # A registry of the models chosen by the benchmark: register (insert) and
+    # read. A model's dimension never changes; retiring a model is an
+    # administrator's job, so neither UPDATE nor DELETE.
+    grant_app_privileges(op, "embedding_models", select=True, insert=True)
+    # Derived, regenerable data (not history). A model's vectors are removed
+    # when it is retired or its embeddings are regenerated (LOW-priority job),
+    # hence DELETE; a stored vector is never updated in place.
+    grant_app_privileges(op, "memory_embeddings", select=True, insert=True, delete=True)
 
 
 def upgrade() -> None:
@@ -442,9 +534,11 @@ def upgrade() -> None:
         ["embedding_model_id"],
     )
 
+    _grant_app_privileges()
+
 
 def downgrade() -> None:
-    # Reverse order of creation; dropping a table drops its indexes.
+    # Reverse order of creation; dropping a table drops its indexes and grants.
     op.drop_table("memory_embeddings")
     op.drop_table("embedding_models")
     op.drop_table("memory_sources")
