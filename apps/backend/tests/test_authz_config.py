@@ -158,11 +158,16 @@ class OfflineMigrationSqlTest(unittest.TestCase):
 
     def test_a_migration_role_without_an_app_role_is_warned_about(self):
         with self.assertLogs("paw_backend.migrations.0025", level="WARNING") as logs:
-            offline_upgrade_sql(PAW_MIGRATION_DATABASE_URL=MIGRATION_URL)
+            with self.assertLogs("paw_backend.db_roles", level="WARNING") as generic:
+                offline_upgrade_sql(PAW_MIGRATION_DATABASE_URL=MIGRATION_URL)
         (line,) = logs.output
         self.assertIn("PAW_APP_DATABASE_ROLE", line)
         self.assertIn("refused (503)", line)
         self.assertNotIn("0wner-pw", line)
+        # The shared helper says the same for the table it was asked about.
+        (helper_line,) = generic.output
+        self.assertIn("audit_events", helper_line)
+        self.assertNotIn("0wner-pw", helper_line)
 
     def test_no_warning_when_the_role_is_set_or_no_split_is_configured(self):
         with self.assertNoLogs("paw_backend.migrations.0025", level="WARNING"):

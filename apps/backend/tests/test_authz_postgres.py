@@ -566,7 +566,10 @@ class MigrationUrlTest(AuditPostgresTestCase):
                 )
 
     async def test_migration_role_without_app_role_leaves_the_app_unable_to_write(self):
-        with self.assertLogs("paw_backend.migrations.0025", level="WARNING"):
+        with (
+            self.assertLogs("paw_backend.migrations.0025", level="WARNING"),
+            self.assertLogs("paw_backend.db_roles", level="WARNING"),
+        ):
             await asyncio.to_thread(
                 migrate,
                 "upgrade",
