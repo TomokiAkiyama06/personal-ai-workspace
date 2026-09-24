@@ -160,7 +160,13 @@ class TaskQueue:
         not a timezone-aware ``datetime`` or when the queue does not allow it.
         """
         if now is None:
-            current = func.clock_timestamp()
+            # ONE reading of the clock per statement: ``clock_timestamp()`` written
+            # twice would be read twice (the reads of a volatile function may
+            # differ even within a statement), so ``claimed_at`` and the lease end
+            # would not be exactly ``lease_seconds`` apart. A volatile CTE is
+            # evaluated once however often it is referenced.
+            sample = select(func.clock_timestamp().label("ts")).cte("clock")
+            current = select(sample.c.ts).scalar_subquery()
             return current, current + self._lease
         if not self._allow_explicit_now:
             raise InvalidQueueingArgumentError("now")
