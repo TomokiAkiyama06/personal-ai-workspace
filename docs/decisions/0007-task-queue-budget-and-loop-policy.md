@@ -71,9 +71,17 @@ Command（PAW-032 の `wait` / `fail`）を発行するのは Orchestrator（PAW
 
 ### 6. Lease の時計
 
-- Queue が「Lease が切れたか」の判定と、保存する時刻（`enqueued_at`、`claimed_at`、`lease_expires_at`、`finished_at`）に使う時計は、**Database の時計（`now()`）だけ**とする。Worker が各自の時計を渡す方式は、時計が進んでいる Worker や誤った未来の時刻が有効な Lease を奪い、同じ Task を 2 つの Worker で始めさせ得るため採らない。
+実装（`TaskQueue`）が実際に行うことを、そのまま提案する。
+
+- **どの時計か。** Queue が「Lease が切れたか」の判定と、保存する時刻（`enqueued_at`、`claimed_at`、`lease_expires_at`、`finished_at`）に使う時計は、**Database の時計だけ**とする。Worker が各自の時計を渡す方式は、時計が進んでいる Worker や誤った未来の時刻が有効な Lease を奪い、同じ Task を 2 つの Worker で始めさせ得るため採らない。
+- **`clock_timestamp()` を使い、`now()` は採らない。** 使う関数は PostgreSQL の `clock_timestamp()`（評価した瞬間の壁時計）である。`now()` は Transaction の開始時刻で固定され、行の Lock を待った後の判定に、待つ前の古い時刻を使う。Lock を待つ間に期限が過ぎても、期限内と判定してしまい、失った Lease を有効とみなす（`now()` の意味は PostgreSQL の仕様。この判定を Test が確認する）。
+- **1 つの文の中では時計を 1 回だけ読む。** 時計を使う文は、先頭に `WITH clock AS (SELECT clock_timestamp() AS ts)` を付け、文の中の「現在の時刻」と「現在 + `lease_seconds`」は、全てこの CTE の 1 つの値を参照する。揮発性の関数を含む CTE は PostgreSQL が 1 回だけ評価（Materialize）するため、`claimed_at` と `lease_expires_at` はちょうど `lease_seconds` 離れ、Heartbeat の判定と新しい期限も同じ値になる（`clock_timestamp()` を文の中に 2 回書くと 2 回読まれ、数マイクロ秒ずれる）。
+- **文をまたぐときは、文ごとに読み直す。** 1 つの Transaction の中の 2 つの文は、別々に時計を読む。`claim_next` は、`FOR UPDATE SKIP LOCKED` で先頭の行を選ぶ文（期限切れの判定）と、その行を更新する文（`claimed_at` と期限）の 2 文で、後者の値は前者の値以後である。`SKIP LOCKED` は待たず、選んだ行は Claimer 自身が Lock しているので、2 つの値の間に Lease の状態は変わらない。
+- **Lease を判定する更新は、行の Lock を先に取る。** `UPDATE` は `WHERE` を行の Lock を待つ**前**に判定し、Lock を持っていた Transaction が Rollback したときは判定し直さない（実 PostgreSQL で確認した）。1 つの `UPDATE` では、待つ間に切れた Lease を有効と判定し得る。そこで `heartbeat` / `release` / `complete` は、まず `SELECT ... FOR UPDATE` で Entry の行を Lock し（待つのはこの文）、次の文で Lease の期限（`lease_expires_at > 読んだ時刻`）、Worker の id、Claim の世代（7 節）を判定して更新する。判定に使う時刻は、Lock を得た**後**に読む。
+- **Lease を判定しない文の時刻は、待つ前の値になり得る。** `enqueue` の `enqueued_at` と `cancel` の `finished_at` は、それぞれ 1 つの文で書く。同じ Task の別の `enqueue`（未 Commit）や `cancel` の対象行の Lock を待つと、保存する時刻は、待つ前に読んだ値（待った時間だけ古い値）になる。この時刻は先着順と記録のためのもので、Lease の有効・失効を決めない。これは許容する。
 - 明示の時刻は Test のための継ぎ目（`TaskQueue(..., allow_explicit_now=True)`）に限る。本番の Queue は呼び出し側の時刻を拒否する。
 - Lease の長さ（既定 60 秒、最大 86,400 秒）は、Preset の数値と同じく仮の値である。
+- この節の対象は Queue だけである。`BudgetTracker` が Runtime の測定に使う `clock`（Process の時計。Lease の判定ではない）と、`budget_usages.created_at` / `loop_failure_signatures.created_at`（行を作った時刻の `now()`。判定に使わない）は対象外である。基準は 1 台の PostgreSQL Server の時計で、Failover で別の Server の時計へ切り替わるときのずれは扱わない。
 
 ### 7. Lease の世代（Fencing token）
 
@@ -102,7 +110,7 @@ Command（PAW-032 の `wait` / `fail`）を発行するのは Orchestrator（PAW
 - Budget 超過を Loop より優先するのは、Escalation が予算を追加で消費するため。
 - Lease の世代に `claim_count` を使うのは、既存の列で足り（Migration も Grant も変えない）、Claim のたびに必ず増え、Worker の id・時刻・乱数のような呼び出し側の値に頼らずに、古い Claim を判別できるため。
 - 試行の Fencing に PAW-032 の `tasks.attempt` を使うのは、Restart が既に増やす唯一の Counter で、Step・Log・Tool の書き込みも同じ規則（古い試行は `StaleAttemptError`）で拒否しているため。失敗の行へ試行の Column を足して現在の試行だけを読む案は、当初は「`clear` を Restart の後に呼ぶ規則で足りる」として採らなかったが、独立したレビューで、Restart の Commit の後・`clear` の前に新しい試行が記録した失敗が、Task 全体を消す `clear` で失われる（または古い履歴と一緒に判定される）と指摘され、その規則では足りないと分かったため採る。Grant は変わらない（`tasks` の SELECT は付与済みで、行の UPDATE は不要）。Restart と掃除を 1 つの Transaction にする案は、Restart（PAW-032 の Command）と Loop（PAW-033）の境界を壊すため採らない。新しい試行の Dispatch を掃除の完了まで止める案は、Orchestrator（PAW-034）に順序の規則を課すだけで、それを守らない呼び出しを防げないため採らない。
-- Lease の時計を Database に一本化するのは、複数の Process（Worker）が同じ Entry を巡って競うため、判定の基準が呼び出し側ごとに違うと Lease の排他が成り立たないため。
+- Lease の時計を Database に一本化するのは、複数の Process（Worker）が同じ Entry を巡って競うため、判定の基準が呼び出し側ごとに違うと Lease の排他が成り立たないため。関数に `clock_timestamp()` を選ぶのは、Lease の期限を判定する時刻が「判定した瞬間」であるべきで、Transaction の開始時刻（`now()`）では Lock を待った分だけ古くなり、失効した Lease を有効とみなすため。文の中で 1 回だけ読むのは、`claimed_at` と期限を正確に `lease_seconds` 離すためである。
 
 ## 代替案
 
@@ -110,6 +118,8 @@ Command（PAW-032 の `wait` / `fail`）を発行するのは Orchestrator（PAW
 - 超過時にすべて `FAIL` にする: 人間が上限を上げて続けられなくなる。`retries` だけを `FAIL` にした。
 - Aging を入れる: 要件に規則がなく、`LOW` の待ち時間の上限を決める必要がある。
 - Worker id に Process 固有の値（PID、起動時刻）を含めさせる: 呼び出し側の規則に頼ることになり、Queue が古い Claim を拒否する保証にならない。別の Token 列を追加する案は、Claim のたびに増える `claim_count` で足りるため採らない。
+- `now()`（Transaction の開始時刻）を Queue の時計にする: Lock を待った後の Lease の判定が、待つ前の古い時刻になり、失効した Lease を有効とみなす。`now()` は採らない。
+- Lease を 1 つの `UPDATE ... WHERE lease_expires_at > <時刻>` だけで判定する（先に行を Lock しない）: `UPDATE` は Lock を待つ前に `WHERE` を判定し、Lock を持っていた側が Rollback すると判定し直さないため、待つ間に切れた Lease を有効と判定し得る。
 - 呼び出し側が時刻を渡す（または Process の時計を使う）: 時計のずれや誤った時刻で Lease を奪える。Constructor で時計を注入する案は、Test の呼び出しの書き換えが大きいため、既定で拒否する引数の継ぎ目を選んだ。
 
 ## 承認後の扱い
