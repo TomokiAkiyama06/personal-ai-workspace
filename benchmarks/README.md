@@ -107,3 +107,25 @@ GPU telemetryが必要な場合は `NvidiaSmiGpuSampler` を注入します。�
 ```bash
 .venv/bin/python -m benchmarks.validate_result benchmarks/tests/fixtures/result-schema/valid/complete.json
 ```
+
+## Memory Worker benchmark
+
+`benchmarks.memory_worker_runner`はGold付きのcaseをMemory Workerへ渡し、出力を
+[`memory-worker-output-v1.schema.json`](schemas/memory-worker-output-v1.schema.json)で検証して比較します。
+算出する指標は、抽出Recall、不要Memory率、Scope / Confirmed・Inferred / Supersedesの正解率、
+JSON Schema遵守率、latency（mean / p50 / p95、nearest-rank）です。
+`unneeded`はGoldに一致しない予測と、同じkeyの2回目以降の予測の合計で、予測件数を超えません。
+Workerが例外を出したcaseは、予測なしの失敗caseとして記録して続行します（記録するのは例外の型だけです）。
+
+```bash
+python -m benchmarks.run_memory_worker_benchmark \
+  --cases benchmarks/tests/fixtures/memory-worker/valid-cases.json \
+  --worker benchmarks.tests.fixture_workers:make_worker \
+  --output report.json
+```
+
+`--worker`は`module:factory`で、引数なしのfactoryが`extract(input_text) -> str`を持つobjectを返します。
+importしたmoduleは呼び出し元の権限で実行されるため、信頼できるcodeだけを指定してください。
+Reportには入力text、Workerの生出力、例外messageを含めません。終了codeは、成功が0、caseファイルの不備が1、
+Workerの指定やReport出力の不備が2です。`MetricsCollector`を渡すと、実行全体のresource metricを`resources`へ含めます。
+Datasetの正式な形式はSeed Benchmark Dataset（PAW-016）で確定するため、現在のcase形式は暫定です。
