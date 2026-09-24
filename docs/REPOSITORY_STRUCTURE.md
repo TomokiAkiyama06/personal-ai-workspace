@@ -53,7 +53,8 @@ personal-ai-workspace/
 │  │  │     ├─ 0032_task_lifecycle.py
 │  │  │     ├─ 0033_task_queue_budget_loop.py
 │  │  │     ├─ 0040_memory_schema.py
-│  │  │     └─ 0050_research_scratch_store.py
+│  │  │     ├─ 0050_research_scratch_store.py
+│  │  │     └─ 0052_research_provenance.py
 │  │  ├─ paw_backend/
 │  │  │  ├─ __init__.py
 │  │  │  ├─ __main__.py
@@ -82,6 +83,17 @@ personal-ai-workspace/
 │  │  │  │  └─ tokens.py
 │  │  │  ├─ research/
 │  │  │  │  ├─ __init__.py
+│  │  │  │  ├─ provenance/
+│  │  │  │  │  ├─ __init__.py
+│  │  │  │  │  ├─ errors.py
+│  │  │  │  │  ├─ limits.py
+│  │  │  │  │  ├─ mapping.py
+│  │  │  │  │  ├─ models.py
+│  │  │  │  │  ├─ queries.py
+│  │  │  │  │  ├─ records.py
+│  │  │  │  │  ├─ rules.py
+│  │  │  │  │  ├─ store.py
+│  │  │  │  │  └─ validation.py
 │  │  │  │  ├─ providers/
 │  │  │  │  │  ├─ __init__.py
 │  │  │  │  │  ├─ broker.py
@@ -142,6 +154,7 @@ personal-ai-workspace/
 │  │     ├─ __init__.py
 │  │     ├─ fake_postgres.py
 │  │     ├─ identity_support.py
+│  │     ├─ provenance_support.py
 │  │     ├─ queueing_support.py
 │  │     ├─ research_support.py
 │  │     ├─ scratch_support.py
@@ -163,6 +176,19 @@ personal-ai-workspace/
 │  │     ├─ test_owner_setup_service.py
 │  │     ├─ test_owner_token_roles.py
 │  │     ├─ test_postgres_integration.py
+│  │     ├─ test_provenance_concurrency.py
+│  │     ├─ test_provenance_grants.py
+│  │     ├─ test_provenance_migration.py
+│  │     ├─ test_provenance_queries.py
+│  │     ├─ test_provenance_records.py
+│  │     ├─ test_provenance_rules.py
+│  │     ├─ test_provenance_schema.py
+│  │     ├─ test_provenance_store_record.py
+│  │     ├─ test_provenance_store_relations.py
+│  │     ├─ test_provenance_store_trace.py
+│  │     ├─ test_provenance_store_validation.py
+│  │     ├─ test_provenance_store_wiring.py
+│  │     ├─ test_provenance_validation.py
 │  │     ├─ test_queueing_budget.py
 │  │     ├─ test_queueing_domain.py
 │  │     ├─ test_queueing_escalation.py
@@ -248,6 +274,7 @@ personal-ai-workspace/
 │     ├─ 0005-owner-setup-and-recovery.md
 │     ├─ 0006-tool-broker-policy.md
 │     ├─ 0007-task-queue-budget-and-loop-policy.md
+│     ├─ 0011-research-provenance-model.md
 │     └─ README.md
 └─ evaluator/
    └─ README.md
