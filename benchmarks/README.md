@@ -89,6 +89,14 @@ being benchmarked.
   it a window of microseconds remains between the check and `kill`.  The leader is left
   unreaped until the last process-group signal, so the group id cannot be reused before
   it.
+- If something else reaps the leader (the evaluator ignores `SIGCHLD`, or another
+  reaper collects it), its exit status is lost: `execute()` returns `exit_code=None`
+  (and logs `null`) instead of the `0` that `Popen` would report.  Its pid may then be
+  reused as an unrelated process group id, so the group is signalled only while a
+  process recorded earlier as its member (same pid and start time) is still in it;
+  otherwise nothing is sent.  Members are recorded every 0.2 s while the leader runs.
+  (Git children inherit an ignored `SIGCHLD` and fail, so an evaluator that ignores it
+  cannot use the runner's Git operations at all.)
 - Not covered: a process that daemonizes (double fork plus `setsid`) is neither in the
   group nor below the candidate in `/proc`, so it can outlive the run.  Only a
   container or cgroup can contain that.
