@@ -615,8 +615,9 @@ License や `robots.txt` に関する項目はありません。要件と設計�
 
 ### 実装の由来と制約
 
-- `locator.py` と `normalize.py` は、Local の Qwen3-Coder（30B-A3B）が実装したものを、レビューで見つけた不具合の修正込みで取り込んでいます。
-  修正した不具合は、`%` の直後の非 ASCII を変換しない、`?é=` の `=` を落とす、KELVIN SIGN が ASCII の Host になる、入力の長さを最後に検査するため 20 MB の入力の拒否に数秒かかる、例外の Context に入力が残る、`hasattr` による偽の Hit の受理、広すぎる `except` です。
+- `locator.py` と `normalize.py` は、Local の Qwen3-Coder（30B-A3B）が最初の実装を書き、テストにも合格しました。
+  しかし、レビューで、テストが見逃す不具合が見つかったため、本体は Claude が書き直しています（書き直し前の本体は残っていません）。
+  見つかった不具合は、`%` の直後の非 ASCII を変換しない、`?é=` の `=` を落とす、KELVIN SIGN が ASCII の Host になる、入力の長さを最後に検査するため 20 MB の入力の拒否に数秒かかる、例外の Context に入力が残る、`hasattr` による偽の Hit の受理、広すぎる `except` です。
 - `registry.py` と `broker.py` は、Local Model が仕様どおりに実装できなかったため、仕様を書いた側の参照実装を整えたものです。
 - Timeout は協調的です。Adapter が Cancel を無視する、または Event Loop を止める同期処理をする場合、Broker は止められません。
 - 未決事項（人間の判断が必要）:
