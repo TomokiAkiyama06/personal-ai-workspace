@@ -99,6 +99,30 @@ storage.  The candidate can likewise modify the main repository's `.git`, which 
 worktree shares.  See `docs/decisions/0001-hidden-check-boundary.md` (added by PAW-013)
 for the same boundary applied to hidden checks.
 
+## Candidate adapter interface
+
+[`candidate_adapter.py`](candidate_adapter.py) defines the provider-neutral boundary used by
+future Local, Codex, and Claude candidate implementations. A request fixes the system/task
+prompt, JSON Schema tool declarations, and token limits. The Backend supplies a one-attempt
+timeout and cancellation token, and owns retry decisions through `RetryPolicy`; adapters must
+never retry internally.
+
+The interface contains only public candidate identity fields. Credentials, provider clients,
+raw provider errors, runtime execution, and worktree/test-runner behavior are intentionally
+outside this module. Concrete adapters must obtain credentials through a private Backend
+dependency and convert errors to `CandidateErrorCode` values; raw provider errors
+must remain private. This benchmark-only `CandidateAdapter` contract is separate
+from the production [Agent Adapter](../docs/ARCHITECTURE.md#7-agent-adapter).
+
+`ToolDefinition.input_schema` is a validated, deeply read-only snapshot, so one request can be
+reused across candidates without any of them changing another's tools. It is deliberately not
+JSON-serializable itself: adapters build provider payloads from
+`ToolDefinition.input_schema_as_dict()` (a fresh plain `dict`/`list` copy on every call) or
+`ToolDefinition.to_dict()` (`name`, `description`, `input_schema`), both accepted by
+`json.dumps`. Mutating those copies never affects the snapshot. `copy.deepcopy` and `pickle`
+of a tool or request work and re-validate the copy; `dataclasses.asdict` is not supported for
+tools and raises `TypeError`, so use `to_dict()` instead.
+
 ## Validator
 
 standalone CLIはprojectの安定したvirtual environmentへCI依存を導入して実行します。

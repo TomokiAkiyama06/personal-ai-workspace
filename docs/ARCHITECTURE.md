@@ -61,6 +61,10 @@ GPU AI serviceだけ停止可能。
 ## 7. Agent Adapter
 共通interfaceへ寄せる。
 
+This production Agent Adapter is distinct from the benchmark-only
+[`CandidateAdapter`](../benchmarks/candidate_adapter.py), which defines one
+candidate attempt and its benchmark controls.
+
 ```python
 Agent.run(task, workspace, context, permissions, session) -> AgentResult
 ```
