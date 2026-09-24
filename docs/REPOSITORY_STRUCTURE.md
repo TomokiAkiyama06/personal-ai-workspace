@@ -58,17 +58,29 @@ personal-ai-workspace/
 │  │  │  ├─ middleware.py
 │  │  │  ├─ security.py
 │  │  │  ├─ server.py
-│  │  │  └─ api/
+│  │  │  ├─ api/
+│  │  │  │  ├─ __init__.py
+│  │  │  │  ├─ deps.py
+│  │  │  │  └─ v1/
+│  │  │  │     ├─ __init__.py
+│  │  │  │     ├─ events.py
+│  │  │  │     └─ health.py
+│  │  │  └─ research/
 │  │  │     ├─ __init__.py
-│  │  │     ├─ deps.py
-│  │  │     └─ v1/
+│  │  │     └─ providers/
 │  │  │        ├─ __init__.py
-│  │  │        ├─ events.py
-│  │  │        └─ health.py
+│  │  │        ├─ broker.py
+│  │  │        ├─ contract.py
+│  │  │        ├─ errors.py
+│  │  │        ├─ locator.py
+│  │  │        ├─ normalize.py
+│  │  │        ├─ registry.py
+│  │  │        └─ static.py
 │  │  ├─ pyproject.toml
 │  │  └─ tests/
 │  │     ├─ __init__.py
 │  │     ├─ fake_postgres.py
+│  │     ├─ research_support.py
 │  │     ├─ support.py
 │  │     ├─ teardown_child.py
 │  │     ├─ test_config.py
@@ -79,6 +91,11 @@ personal-ai-workspace/
 │  │     ├─ test_middleware.py
 │  │     ├─ test_migrations.py
 │  │     ├─ test_postgres_integration.py
+│  │     ├─ test_research_broker.py
+│  │     ├─ test_research_contract.py
+│  │     ├─ test_research_locator.py
+│  │     ├─ test_research_normalize.py
+│  │     ├─ test_research_registry.py
 │  │     ├─ test_security.py
 │  │     └─ test_server.py
 │  ├─ cli/

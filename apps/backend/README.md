@@ -4,6 +4,7 @@ Personal AI Workspace の Core Backend です。
 [PAW-020](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/17) で、後続の Issue が載る最小の Application Skeleton を実装しました。
 認証と User はまだ実装していません（PAW-021 以降）。
 RBAC と Audit（PAW-025）、Task の Lifecycle と永続化（[PAW-032](#agent-task-lifecycle)、HTTP の Endpoint はまだありません）、Memory の PostgreSQL Schema（[PAW-040](#memory--conversation-schema)）を実装済みです。Memory の保存・整理・検索の処理は PAW-041 以降です。
+Research Provider の Adapter Interface（[PAW-051](#research-provider-adapter)）も実装済みです。実際の Provider（Direct Web、Docs、GitHub、OpenCode）はまだありません。
 
 [Architecture](../../docs/ARCHITECTURE.md) に基づき、最終的に以下の機能を Backend 側で扱います。
 
@@ -50,6 +51,7 @@ apps/backend/
 │  ├─ authz/               # Role・Capability・認可の判定と Audit Event（PAW-025）
 │  ├─ tasks/               # Agent Task の状態遷移と永続化（PAW-032）
 │  ├─ memory/              # Memory / Conversation の Model、ACL 条件、vector 型（PAW-040）
+│  ├─ research/providers/  # Research Provider の Adapter Interface と Broker（PAW-051）
 │  └─ api/
 │     ├─ deps.py           # FastAPI Dependency
 │     └─ v1/               # /api/v1 の Router（health、events）
@@ -489,6 +491,133 @@ ANN Index（HNSW / IVFFlat）はまだありません。Model が決まった後
 Model と Migration の一致は Test が検証します（Alembic の autogenerate の差分が空であること、Model から作った Schema と Migration の Catalog が同じであること）。
 制約名は `paw_backend.db.Base` の命名規則に従います。
 
+## Research Provider Adapter
+
+[PAW-051](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/43) で実装した、Research の Provider を抽象化する層です（`paw_backend/research/providers/`）。
+設計は [要件](../../REQUIREMENTS.md)の「Web Research / Knowledge Layer」（Provider abstraction、Privacy）に従います。
+**実際の Provider は含みません。** Direct Web、Docs、GitHub、OpenCode の Adapter は Credential と Network Policy が必要なため、別の Issue で実装します。
+**HTTP の Endpoint も、Research Scratch（PAW-050）への保存もありません。** この層は検索結果を返すだけで、何も保存しません。
+
+Main Agent が使うのは `ResearchBroker` だけです。
+Provider の違い（API の形、Response の形、失敗の仕方）は Broker が吸収し、Main Agent には常に同じ形の `ResearchResult` が返ります。
+
+| Module | 内容 |
+| --- | --- |
+| `contract.py` | `ProviderKind`、`SourceType`、`ResearchRequest`、`ProviderHit` / `ProviderDocument`（Adapter が返す）、`SourceMetadata` / `ResearchItem` / `ResearchError` / `ResearchResult`（Main Agent が受け取る）、`ResearchProvider`（Protocol） |
+| `errors.py` | 閉じた `ResearchErrorCode`、`ProviderFailure`（Provider が分類済みの失敗を報告する）、Registry 等の例外 |
+| `locator.py` | `canonicalize_locator`: URL の正規化と無害化 |
+| `normalize.py` | `normalize_hits`（Provider の Response を検証して統一形式へ）、`merge_items`（交互配置・重複除去・件数制限） |
+| `registry.py` | `ProviderRegistry`: 登録時の Interface 検証、一意な名前、決定的な順序 |
+| `broker.py` | `ResearchBroker.gather` / `fetch`: 並行実行、Timeout、失敗の隔離 |
+| `static.py` | `StaticProvider`: Test 用の Fake（Network を使わない） |
+
+### Provider Interface
+
+Adapter は `ResearchProvider`（Protocol）を実装します。
+
+```python
+class ResearchProvider(Protocol):
+    name: str  # Registry 内で一意な ID（[a-z0-9][a-z0-9_-]{0,63}）
+    kind: ProviderKind  # web / docs / github / opencode
+
+    async def search(self, query: str, *, limit: int) -> Sequence[ProviderHit]: ...
+    async def fetch(self, locator: str) -> ProviderDocument: ...
+```
+
+- `search` は最大 `limit` 件を list か tuple で返します。`fetch` は正規化済みの URL の文書を返します。
+- Credential は受け取りません。Adapter は Backend Tool Broker から取得します（Secret Isolation）。Main Agent にも Request にも Credential は載りません。
+- Adapter は自分で Retry せず、`asyncio.CancelledError` を握りつぶしません（Timeout は Cancel で実現するため）。
+- 分類できる失敗は `raise ProviderFailure(ResearchErrorCode.RATE_LIMITED)` のように報告します。元の例外の文言は捨てます。
+- `ProviderHit` / `ProviderDocument` に `private_source`（Private Repository 由来など）の既定値はありません。Adapter が必ず明示します。Provider 名や生の Payload を入れる欄もありません。
+
+Registry は登録時に `name` と `kind` の形、`search` と `fetch` が `async def` であること、Signature が `search("q", limit=1)` と `fetch("https://x/")` を受け付けることを検証します。
+不適合な Adapter は `ProviderInterfaceError`（失敗した Member 名だけを持つ）で拒否され、あとから「全 Provider が失敗した成功 Response」になることはありません。
+`name` と `kind` は登録時に 1 度だけ読み、以後 Provider 側が変えても結果には影響しません。
+
+### Request と Result
+
+`ResearchRequest` は不変で、構築時に全項目を検証します。
+
+| 項目 | 内容 |
+| --- | --- |
+| `query` | 1 〜 512 文字、空白のみ不可、改行・Tab を含む制御文字は不可。PAW-053 の Privacy Filter で最小化済みの Query を渡す。Broker は中身を見ず、書き換えない |
+| `max_results` | 1 〜 50（既定 10）。各 Provider に頼む件数と、結果の最大件数の両方 |
+| `kinds` | `ProviderKind` の空でない `frozenset`（既定は全種類）。Provider 名では選べない |
+| `time_budget_seconds` | 1 回の `gather` 全体の上限。0 より大きく 120 以下（既定 30） |
+
+型は変換しません（`bool` は `int` ではなく、`set` や `list` は `kinds` になりません）。
+
+`ResearchResult` は `items`（`ResearchItem` の tuple）、`errors`（失敗した Provider ごとに 1 つ）、`providers_queried`、`truncated`（`max_results` を超えて捨てた）を持ちます。
+`providers_queried` により「見つからなかった」と「誰にも聞かなかった」を区別でき、`all_failed` で全 Provider の失敗を判定できます。
+
+### 統一された Source Metadata
+
+Provider の種類によらず、全ての `ResearchItem` は同じ `SourceMetadata` と本文 `text` だけを持ちます。
+
+| 項目 | 内容 |
+| --- | --- |
+| `provider_kind` / `provider_id` | Registry が持つ値。Provider 自身の申告ではない |
+| `locator` | 正規化済みの http(s) URL（次の節） |
+| `title` | 空白を 1 つにまとめた Title（空でもよい、300 文字まで） |
+| `retrieved_at` | 取得時刻（UTC）。1 回の `gather` で全 Item に同じ値 |
+| `content_hash` | `sha256:` + `text` の UTF-8 の SHA-256。取得した Excerpt / 文書の Hash で、遠隔の文書全体とは限らない |
+| `source_type` | `official_docs` / `official_github` / `primary` / `secondary` / `community` / `unknown`。Provider が宣言し、真偽の判定には使わない |
+| `published_at` | 公開日時（UTC）。不明なら `None` |
+| `private_source` | Private な Source かどうか。PAW-053 の Privacy Filter が使う |
+
+`SourceMetadata.to_dict()` は JSON にできる形（Enum は値、日時は ISO 8601）を返します。
+`SourceMetadata` 自身も、http(s) 以外、User 情報、Fragment、空白・制御文字を含む URL を拒否します。
+
+License や `robots.txt` に関する項目はありません。要件と設計文書に定義がないため、決まってから追加します。
+
+### URL の正規化
+
+`canonicalize_locator` は、同じページを指す URL を 1 つの文字列にして、重複を除けるようにします（DNS 解決も Network もない純粋な関数です）。
+
+- `http` / `https` 以外、User 情報（`user:pass@`）、空白・制御文字・バックスラッシュ、不正な Port、Host が `a-z0-9-` と `.` だけで作れない場合（IPv6、`_`、非 ASCII の Host）は `InvalidLocatorError`。
+- Scheme と Host は小文字にし、Host 末尾の `.` を 1 つ取り、既定の Port（http 80、https 443）と Fragment を外し、空の Path を `/` にします。
+- Path と Query の `%xx` は大文字にし、非 ASCII の文字は UTF-8 の `%XX` にします。
+- Query は `&` で分け、追跡用（`utm_*`、`fbclid`、`gclid` など）と Credential 用（`access_token`、`token`、`api_key`、`sig` など）の Parameter を除き、`(名前, 値)` の順に並べます。除く名前の一覧は `locator.py` の定数です。Credential の一覧は Best effort で、Path に入った Credential は判別できません。
+- Path の Dot Segment、末尾の `/`、`www.`、`http` と `https` の違いは正規化しません。そのため、これらだけが違う URL は別の Source として扱います。
+- 正規化の結果は 2048 文字以下で、もう一度かけても同じ結果になります。
+- 例外の文言に URL は入りません。
+
+### Broker の動作
+
+`ResearchBroker(registry).gather(request)` は次のとおり動きます。
+
+1. `request.kinds` に合う Provider を Registry の順序（`ProviderKind` の宣言順、次に名前順。登録順には依存しない）で選びます。
+2. **全 Provider を並行**で実行します。各 Provider の制限時間は、登録時の `timeout_seconds`（既定 10 秒、最大 120 秒）と、全体の Budget の残りの小さい方です。時間切れの Provider は Cancel し、完全に終わるまで待ってから `timeout` として報告します。`gather` が返るとき、起動した Task は残りません。
+3. Provider の例外は Provider ごとに隔離します。他の Provider の結果は失われません。`gather` を Cancel した場合は全 Provider を Cancel して `CancelledError` を伝えます。
+4. Response は Provider ごとに全体を検証します（list / tuple、件数が `limit` 以下、全要素が `ProviderHit`、全 URL が正規化できる）。1 つでも違反があれば、その Provider の結果は全て捨てて `invalid_response` にします。
+5. Provider の結果を交互に並べ（各 Provider の 1 位、2 位、…）、正規化した URL で重複を除いて（最初の 1 件を残し、どれか 1 つでも Private なら `private_source` を True にする）、`max_results` 件までにします。
+6. `errors` は Registry の順序です（完了順ではありません）。
+
+失敗は閉じた `ResearchErrorCode` の値としてだけ報告します。
+
+| Code | 意味 |
+| --- | --- |
+| `timeout` | Provider または全体の Budget の時間切れ。Provider 自身が `TimeoutError` を出した場合も含む |
+| `rate_limited` / `unavailable` / `not_found` / `internal_error` | Provider が `ProviderFailure` で報告した値。`internal_error` は、`ProviderFailure` 以外の全ての例外にも使う |
+| `invalid_response` | Interface の違反（型、件数、URL） |
+
+**例外の文言は Code にも Result にも Log にも入りません。** Log は Provider 1 つの失敗ごとに WARNING を 1 行（Provider の ID、種類、Code、例外の**型名**）出し、Query と URL は出しません。
+`ProviderFailure.code` を書き換えて文字列にしても、`internal_error` になります。
+
+`fetch(source, time_budget_seconds=30)` は、以前の結果の `SourceMetadata` から、同じ Provider の `fetch` を、`gather` と同じ隔離・Timeout・Log の規則で呼びます。制限時間は `min(登録時の timeout_seconds, time_budget_seconds)` です。Provider が登録から外れている（または種類が違う）場合は `unavailable` です。結果は 1 件の `ResearchItem`（`retrieved_at` は取得時、`private_source` は Source と文書のどちらかが True なら True）か、`errors` の 1 件です。
+
+### Security と Privacy
+
+- `network` Capability の確認は、この層の呼び出し元（Tool Broker、PAW-031）の責任です。この層は認可の判断も Network の Access もしません。
+- どの Host へ接続してよいか（SSRF、Private Address、`robots.txt`）は、具体的な Adapter と Network Policy の責任です。`canonicalize_locator` は名前を解決しません。
+- Query の最小化と Secret の除去は PAW-053 の責任です。`private_source` はその Filter が使います。
+- 全ての入力（Query、件数、文字数、Provider 数）に上限があります。Registry は 32 Provider までです。
+
+### Test
+
+`apps/backend/tests/test_research_*.py` です。標準 `unittest` だけで、DB も Network も使いません。
+Timeout の Test は、永遠に待つ Provider を 0.3 秒で打ち切り、成功する Provider は即座に答える構成です（所要時間を厳密には検査せず、30 秒の Guard で CI の停止を防ぎます）。
+
 ## 依存 Package
 
 依存は `pyproject.toml` で完全一致に固定しています。
@@ -504,5 +633,6 @@ CI は pre-commit の専用環境で Test を実行するため、同じ Version
 [PAW-021](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/18)（Owner Setup）、PAW-022（Login / Session）、
 RBAC（PAW-025）、Task Lifecycle（PAW-032）、Memory Schema（PAW-040）は、この Skeleton の上に実装済みです。
 Memory の保存・整理・検索は PAW-041 以降で、Memory Schema の上に実装します。
+Research の Provider（Direct Web、Docs、GitHub、OpenCode）の Adapter、Privacy Filter（PAW-053）、Evidence / Claim Provenance（PAW-052）は、Research Provider Adapter の上に実装します。
 受け入れ基準は [Implementation Backlog](../../docs/IMPLEMENTATION_BACKLOG.md)、
 実装時に選択できる事項は [Requirements Freeze Review](../../docs/REQUIREMENTS_FREEZE_REVIEW.md) を参照してください。
