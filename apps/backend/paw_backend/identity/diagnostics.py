@@ -6,18 +6,14 @@ the operator's, ``PAW_OPERATOR_DATABASE_ROLE``); this warns when the role the
 application actually connects as could, for instance in a single-role setup.
 """
 
-import asyncio
 import logging
 from dataclasses import astuple, dataclass
-
-from sqlalchemy import text
 
 from paw_backend.db import Database
 
 logger = logging.getLogger(__name__)
 
-_QUERY = text(
-    """
+_QUERY = """
     SELECT
       pg_has_role(current_user, c.relowner, 'MEMBER') AS owns,
       has_table_privilege(current_user, 'setup_tokens', 'INSERT') AS insert_tokens,
@@ -31,8 +27,7 @@ _QUERY = text(
         AS update_role
     FROM pg_class c
     WHERE c.oid = to_regclass('setup_tokens')
-    """
-)
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,13 +48,18 @@ class TokenTableAccess:
         return any(astuple(self))
 
 
-async def read_token_table_access(database: Database) -> TokenTableAccess | None:
-    """The access of the connected user, or ``None`` if the tables do not exist."""
-    async with database.session() as session:
-        row = (await session.execute(_QUERY)).one_or_none()
-    if row is None:
-        return None
-    return TokenTableAccess(*row)
+async def read_token_table_access(
+    database: Database, timeout_seconds: float | None = None
+) -> TokenTableAccess | None:
+    """The access of the connected user, or ``None`` if the tables do not exist.
+
+    The query runs on a dedicated connection that is aborted, never cancelled
+    on the server, when the time is up, the caller is cancelled or the
+    database is disposed (``Database.fetch_abortable``): a stalled PostgreSQL
+    must not be able to hold up shutdown.
+    """
+    rows = await database.fetch_abortable(_QUERY, timeout_seconds=timeout_seconds)
+    return TokenTableAccess(*rows[0]) if rows else None
 
 
 async def warn_if_tokens_can_be_minted(
@@ -73,8 +73,7 @@ async def warn_if_tokens_can_be_minted(
     if not database.configured:
         return
     try:
-        async with asyncio.timeout(timeout_seconds):
-            access = await read_token_table_access(database)
+        access = await read_token_table_access(database, timeout_seconds)
     except Exception as error:
         logger.info("Owner token privilege check skipped (%s)", type(error).__name__)
         return
