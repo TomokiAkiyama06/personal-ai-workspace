@@ -47,7 +47,13 @@ JSONL lifecycle log (every record carries `run_id`, `candidate_id` and `commit`)
 separate logs directory.  `execute()` removes the worktree after a normal exit,
 timeout, or cancellation; its log remains available for audit.  Cleanup also removes
 the run directory and Git's `.git/worktrees/<id>` record when a candidate deleted,
-renamed, locked, or damaged its checkout.
+renamed, locked, or damaged its checkout.  If the candidate renamed or moved the run
+directory itself, cleanup follows it: a directory handle opened at creation is resolved
+through `/proc/self/fd`, the directory's identity (`st_dev`, `st_ino`) is verified, and
+it is removed wherever it now is (a symlink planted at the old path is unlinked, never
+followed).  When the directory cannot be found (no `/proc`) or removed, the log records
+`cleanup_incomplete` instead of `cleanup_finished` and `cleanup()`/`execute()` raise
+`WorktreeRunnerError`, after removing what could be removed and pruning Git's record.
 
 The runner does not execute visible or hidden checks and does not select a model.  It
 does not persist command text, stdout, or stderr because those fields can contain
