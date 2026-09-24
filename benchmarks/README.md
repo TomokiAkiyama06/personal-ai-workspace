@@ -42,14 +42,62 @@ Task authorは[Security Policy](../SECURITY.md)に従い、credentialをlocator�
 
 `benchmarks.worktree_runner.WorktreeRunner` is evaluator infrastructure for starting a
 candidate process from a specified commit.  Each `create()` call resolves the commit,
-creates a detached worktree below an evaluator-owned runs directory, and retains a
-JSONL lifecycle log outside the worktree.  `execute()` removes that worktree after a
-normal exit, timeout, or cancellation; its log remains available for audit.
+creates a detached worktree below an evaluator-owned runs directory, and appends a
+JSONL lifecycle log (every record carries `run_id`, `candidate_id` and `commit`) to a
+separate logs directory.  `execute()` removes the worktree after a normal exit,
+timeout, or cancellation; its log remains available for audit.  Cleanup also removes
+the run directory and Git's `.git/worktrees/<id>` record when a candidate deleted,
+renamed, locked, or damaged its checkout.
 
 The runner does not execute visible or hidden checks and does not select a model.  It
 does not persist command text, stdout, or stderr because those fields can contain
-credentials.  It records only lifecycle events, exit status, duration, and byte counts.
-PAW-013 owns check execution and hidden-test isolation.
+credentials.  It records only lifecycle events, exit status, duration, and byte counts;
+output is read and discarded while the process runs, so memory use does not depend on
+how much a candidate prints.  PAW-013 owns check execution and hidden-test isolation.
+
+`starting_commit` must be a plain revision (letters, digits and `._/@~^{}-`, not
+starting with `-`); it is passed to `git rev-parse --verify --end-of-options`, which
+needs Git 2.30 or newer.  `candidate_id` is limited to letters, digits, `.`, `_`, `-`.
+
+### Candidate process containment
+
+- The candidate gets an explicit environment: only `PATH`, `LANG`, `LANGUAGE`,
+  `LC_ALL`, `LC_CTYPE` and `TZ` are inherited, plus a per-run `HOME`.  Credential
+  variables and every `GIT_*` selector are dropped.
+- The candidate runs in its own session.  On timeout or cancellation the runner sends
+  `SIGTERM` to the process group and to the processes found below the candidate in
+  `/proc`, waits `term_grace_seconds` (2 s), then sends `SIGKILL` to the group and to
+  those processes, and stops reading the pipes after `drain_seconds` (1 s).  Leftover
+  members of the candidate's process group are also killed when it exits normally.
+- Not covered: a process that daemonizes (double fork plus `setsid`) is neither in the
+  group nor below the candidate in `/proc`, so it can outlive the run.  Only a
+  container or cgroup can contain that.
+
+### Lifecycle log limits
+
+A candidate runs under the same OS user as the evaluator, so **in-process code cannot
+make the lifecycle log tamper-proof**.  What the runner does:
+
+- The log lives in `logs_directory` (default `<runs_directory>-logs`), not inside the
+  run directory, so it is not reachable as `../execution.jsonl` from the checkout and
+  is outside the checkout's parent chain.  Directories are created `0700` and log
+  files `0600` at creation time; an existing state directory that is not owned by the
+  evaluator or is group/other-writable is refused.
+- The log is opened with `O_NOFOLLOW` (and `O_EXCL` on creation) and never `chmod`ed
+  by path, so a planted symlink is neither followed nor used to change another file's
+  mode.
+- Before every append the runner checks that the file is the same regular,
+  single-link, evaluator-owned, owner-only file of the expected size.  Replacement,
+  truncation, extra appended lines, and extra hard links raise `WorktreeRunnerError`
+  (checkout removal still completes).
+
+What remains: a candidate that guesses or lists `logs_directory` can still open the
+log for writing as the same user, and changes made after the final append are not
+detected.  Production must run candidates under a separate OS identity or inside a
+container/mount namespace that cannot see the evaluator's runs, logs, and repository
+storage.  The candidate can likewise modify the main repository's `.git`, which its
+worktree shares.  See `docs/decisions/0001-hidden-check-boundary.md` (added by PAW-013)
+for the same boundary applied to hidden checks.
 
 ## Validator
 
