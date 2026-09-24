@@ -12,6 +12,8 @@ from paw_backend.authz import (
     PostgresAuditSink,
     Principal,
     ProjectRole,
+    ProjectState,
+    Resource,
     SystemRole,
     UnauthenticatedProvider,
     require_capability,
@@ -281,6 +283,48 @@ class ResolverTest(unittest.TestCase):
         self.assertEqual(calls, [])
         (event,) = sink.events
         self.assertEqual((event.decision, event.reason), ("deny", "invalid_resource"))
+
+    def test_nobody_is_refused_before_any_resource_is_resolved(self):
+        # A resolver of a project or repository route loads state from storage:
+        # an anonymous request must not be able to force (or stall on) that work.
+        resolved: list[str] = []
+
+        async def counting(connection):
+            resolved.append(connection.path_params["project_id"])
+            return Resource.project(
+                connection.path_params["project_id"], ProjectState.ACTIVE
+            )
+
+        def add_route(app):
+            @app.get(
+                "/test/counted/{project_id}",
+                dependencies=[
+                    Depends(require_capability(Capability.PROJECT_TASK_RUN, counting))
+                ],
+            )
+            async def counted(project_id: str) -> dict[str, str]:
+                return {"ok": project_id}
+
+        nobody, sink, _ = make_test_app(None)
+        add_route(nobody)
+        with self.assertLogs(LOGGER, level="INFO") as logs:
+            with make_client(nobody) as client:
+                response = client.get(f"/test/counted/{P1}")
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(error_without_request_id(response), UNAUTHORIZED)
+        self.assertEqual(resolved, [])  # the resolver did not run
+        self.assertEqual(sink.events, [])
+        self.assertIn("reason=unauthenticated", "\n".join(logs.output))
+        self.assertIn("resource_kind=unknown", "\n".join(logs.output))
+
+        # Control: for an authenticated user the same resolver does run.
+        member = principal(SystemRole.USER, projects={P1: ProjectRole.CONTRIBUTOR})
+        user, user_sink, _ = make_test_app(member)
+        add_route(user)
+        with make_client(user) as client:
+            self.assertEqual(client.get(f"/test/counted/{P1}").status_code, 200)
+        self.assertEqual(resolved, [str(P1)])
+        self.assertEqual(user_sink.events[0].resource_kind, "project")
 
     def test_the_capability_is_checked_when_the_dependency_is_built(self):
         for bad in ("admin.users.manage", "chat.use", None, 7):
