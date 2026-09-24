@@ -53,6 +53,15 @@ dependency and convert errors to `CandidateErrorCode` values; raw provider error
 must remain private. This benchmark-only `CandidateAdapter` contract is separate
 from the production [Agent Adapter](../docs/ARCHITECTURE.md#7-agent-adapter).
 
+`ToolDefinition.input_schema` is a validated, deeply read-only snapshot, so one request can be
+reused across candidates without any of them changing another's tools. It is deliberately not
+JSON-serializable itself: adapters build provider payloads from
+`ToolDefinition.input_schema_as_dict()` (a fresh plain `dict`/`list` copy on every call) or
+`ToolDefinition.to_dict()` (`name`, `description`, `input_schema`), both accepted by
+`json.dumps`. Mutating those copies never affects the snapshot. `copy.deepcopy` and `pickle`
+of a tool or request work and re-validate the copy; `dataclasses.asdict` is not supported for
+tools and raises `TypeError`, so use `to_dict()` instead.
+
 ## Validator
 
 standalone CLIはprojectの安定したvirtual environmentへCI依存を導入して実行します。

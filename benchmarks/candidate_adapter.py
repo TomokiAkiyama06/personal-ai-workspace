@@ -113,6 +113,12 @@ class ToolDefinition:
     later changes to the supplied mapping never reach a candidate.  ``TypeError``
     is raised for a non-mapping schema or non-string keys; ``ValueError`` for a
     schema that is not a valid, finite, acyclic JSON Schema of type ``object``.
+
+    The read-only snapshot is not directly JSON- or ``dataclasses.asdict``-
+    serializable.  Adapters obtain a JSON-ready, mutable, isolated copy with
+    :meth:`input_schema_as_dict` (schema only) or :meth:`to_dict` (whole tool).
+    ``copy.deepcopy`` and ``pickle`` are supported and re-validate the copy;
+    ``dataclasses.asdict`` is not supported and raises ``TypeError``.
     """
 
     name: str
@@ -128,6 +134,31 @@ class ToolDefinition:
         if snapshot.get("type") != "object":
             raise ValueError("input_schema must declare an object JSON Schema")
         object.__setattr__(self, "input_schema", _freeze_json_value(snapshot))
+
+    def input_schema_as_dict(self) -> dict[str, Any]:
+        """Return a fresh, deep, plain ``dict``/``list`` copy of the schema.
+
+        The result is JSON-serializable and may be mutated freely; each call
+        returns an independent copy and the frozen snapshot is never affected.
+        """
+
+        return _copy_json_value(self.input_schema)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-serializable ``name``/``description``/``input_schema`` copy."""
+
+        return {
+            "name": self.name,
+            "description": self.description,
+            "input_schema": self.input_schema_as_dict(),
+        }
+
+    def __reduce__(self) -> tuple[Any, tuple[str, str, dict[str, Any]]]:
+        # Rebuild from a plain copy so deepcopy/pickle re-validate and re-freeze.
+        return (
+            ToolDefinition,
+            (self.name, self.description, self.input_schema_as_dict()),
+        )
 
 
 @dataclass(frozen=True, slots=True)

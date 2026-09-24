@@ -1,9 +1,11 @@
 """Contract tests for the provider-neutral candidate adapter interface."""
 
 import asyncio
+import copy
+import dataclasses
 import json
+import pickle
 import unittest
-from collections.abc import Mapping
 from dataclasses import fields
 from operator import setitem
 
@@ -23,16 +25,6 @@ from benchmarks.candidate_adapter import (
     ToolDefinition,
     Usage,
 )
-
-
-def _thaw(value):
-    """Convert a frozen JSON snapshot back to plain dict/list values."""
-
-    if isinstance(value, Mapping):
-        return {key: _thaw(item) for key, item in value.items()}
-    if isinstance(value, tuple):
-        return [_thaw(item) for item in value]
-    return value
 
 
 class RecordingAdapter(CandidateAdapter):
@@ -129,7 +121,7 @@ class CandidateAdapterContractTest(unittest.TestCase):
             tools=(ToolDefinition("read_file", "Read a file.", schema),),
             context_limits=ContextLimits(32_768, 4_096),
         )
-        expected = json.dumps(_thaw(request.tools[0].input_schema), sort_keys=True)
+        expected = json.dumps(request.tools[0].input_schema_as_dict(), sort_keys=True)
 
         test = self
 
@@ -143,6 +135,10 @@ class CandidateAdapterContractTest(unittest.TestCase):
                 ):
                     with test.assertRaises(TypeError):
                         mutate()
+                private_copy = request.tools[0].input_schema_as_dict()
+                private_copy["type"] = "array"
+                private_copy["properties"]["path"]["type"] = "x"
+                private_copy["required"].append("extra")
                 return await super().run_attempt(request, control)
 
         schema["type"] = "array"  # the caller mutates its own dict afterwards
@@ -154,10 +150,80 @@ class CandidateAdapterContractTest(unittest.TestCase):
                 )
             )
             self.assertEqual(
-                json.dumps(_thaw(request.tools[0].input_schema), sort_keys=True),
+                json.dumps(request.tools[0].input_schema_as_dict(), sort_keys=True),
                 expected,
             )
         self.assertEqual(request.tools[0].input_schema["type"], "object")
+
+    def test_tool_schema_has_a_json_ready_isolated_plain_copy(self):
+        tool = example_request().tools[0]
+        expected = {
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+            "additionalProperties": False,
+        }
+
+        first = tool.input_schema_as_dict()
+        self.assertEqual(first, expected)
+        self.assertIs(type(first), dict)
+        self.assertIs(type(first["properties"]["path"]), dict)
+        self.assertIs(type(first["required"]), list)
+        self.assertEqual(json.loads(json.dumps(first)), expected)
+
+        first["type"] = "array"
+        first["properties"]["path"]["type"] = "integer"
+        first["required"].append("extra")
+        second = tool.input_schema_as_dict()
+        self.assertEqual(second, expected)
+        self.assertIsNot(second, first)
+        self.assertIsNot(second["properties"], first["properties"])
+        self.assertIsNot(second["required"], first["required"])
+        self.assertEqual(tool.input_schema["type"], "object")
+        self.assertEqual(tool.input_schema["required"], ("path",))
+
+    def test_tool_to_dict_is_json_serializable_and_isolated(self):
+        tool = example_request().tools[0]
+        payload = tool.to_dict()
+        self.assertEqual(
+            json.dumps(payload, sort_keys=True),
+            '{"description": "Read a repository file.", "input_schema": '
+            '{"additionalProperties": false, "properties": {"path": {"type": '
+            '"string"}}, "required": ["path"], "type": "object"}, '
+            '"name": "read_file"}',
+        )
+        payload["input_schema"]["properties"]["path"]["type"] = "integer"
+        payload["name"] = "changed"
+        self.assertEqual(tool.name, "read_file")
+        self.assertEqual(tool.input_schema["properties"]["path"]["type"], "string")
+        self.assertEqual(
+            tool.to_dict()["input_schema"]["properties"]["path"]["type"], "string"
+        )
+
+    def test_request_deepcopy_and_pickle_preserve_an_isolated_frozen_schema(self):
+        request = example_request()
+        for label, clone in (
+            ("deepcopy", copy.deepcopy(request)),
+            ("pickle", pickle.loads(pickle.dumps(request))),
+        ):
+            with self.subTest(label):
+                self.assertEqual(clone, request)
+                self.assertIsNot(clone.tools[0], request.tools[0])
+                self.assertIsNot(
+                    clone.tools[0].input_schema, request.tools[0].input_schema
+                )
+                self.assertEqual(
+                    clone.tools[0].input_schema_as_dict(),
+                    request.tools[0].input_schema_as_dict(),
+                )
+                with self.assertRaises(TypeError):
+                    clone.tools[0].input_schema["type"] = "array"  # type: ignore[index]
+
+    def test_dataclasses_asdict_is_not_supported_for_tools(self):
+        tool = example_request().tools[0]
+        with self.assertRaises(TypeError):
+            dataclasses.asdict(tool)
+        self.assertEqual(tool.to_dict()["name"], "read_file")
 
     def test_invalid_complete_tool_schema_is_rejected(self):
         with self.assertRaises(ValueError):
