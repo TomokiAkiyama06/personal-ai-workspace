@@ -1720,7 +1720,7 @@ docs/
 
 ### [IMPLEMENTATION_CHOICE]
 
-- Desktop / Backend frameworkの最終選択。
+- Desktop / Backend frameworkの最終選択。（Backend は [Decision 0003](docs/decisions/0003-backend-cli-web-implementation-stack.md) で決定済み。Desktop は未決）
 - Credential Vaultの具体製品・storage方式。
 - Provider仕様と利用規約を満たすCodex / Claudeの具体的な認証実装。
 - Benchmark結果とRuntime要件を満たす推論Backendの統合方式。
@@ -1805,6 +1805,10 @@ Claude / Codexは最終裁定者ではなく、Executable Evaluatorを主判定�
 4. Candidate modelsを同一条件で比較
 5. Main Coding Agent / Memory Workerを採用
 6. 採用モデルを前提にWorkspace本体の実装を開始
+
+注記: [Decision 0002](docs/decisions/0002-start-workspace-implementation-before-model-comparison.md)（Approved）により、
+上記6のWorkspace本体の実装は、4〜5のModel比較・採用の完了を待たずに開始できる。
+Model比較Runの実行と、その結果によるModelの採用は、Humanの判断を待つ。この節の順序は、Decision 0002より優先しない。
 
 Humanがコード全文を理解して採点することを前提にしない。
 可能な限り外部挙動・テスト・回帰・禁止変更・修正時間等で客観評価する。
