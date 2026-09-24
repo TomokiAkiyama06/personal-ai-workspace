@@ -182,6 +182,47 @@ def _raise(name: str):
     return behave
 
 
+def hostile_containers(
+    hits: list[ProviderHit], tripwire: Tripwire
+) -> dict[str, object]:
+    """Label -> a list/tuple subclass or look-alike that holds ``hits``, or lies."""
+    out: dict[str, object] = {}
+    for base in (list, tuple):
+        for label, (name, behave) in {
+            "a __len__ that raises": ("__len__", _raise("__len__")),
+            "an __iter__ that raises": ("__iter__", _raise("__iter__")),
+            "a __getitem__ that raises": ("__getitem__", _raise("__getitem__")),
+            "a __len__ that says 0": ("__len__", lambda: 0),
+            "a __len__ beyond sys.maxsize": ("__len__", lambda: 2**70),
+            "an __iter__ that yields nothing": ("__iter__", lambda: iter(())),
+        }.items():
+            cls = type(
+                f"Hostile{base.__name__.title()}",
+                (base,),
+                {name: _hook(tripwire, base, name, behave)},
+            )
+            out[f"{base.__name__} with {label}"] = cls(hits)
+        out[f"{base.__name__} without any hook"] = type("Plain", (base,), {})(hits)
+
+    def claiming(claim):
+        class Impostor:
+            @property
+            def __class__(self):
+                if not tripwire.active:
+                    return type(self)
+                tripwire.append("__class__")
+                if isinstance(claim, Exception):
+                    raise claim
+                return claim
+
+        return Impostor()
+
+    out["an object whose __class__ says list"] = claiming(list)
+    out["an object whose __class__ says tuple"] = claiming(tuple)
+    out["an object whose __class__ raises"] = claiming(RuntimeError("__class__"))
+    return out
+
+
 def hostile_failures(
     tripwire: Tripwire,
 ) -> dict[str, tuple[BaseException, ResearchErrorCode]]:

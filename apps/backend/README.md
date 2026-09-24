@@ -1285,7 +1285,7 @@ class ResearchProvider(Protocol):
     async def fetch(self, locator: str) -> ProviderDocument: ...
 ```
 
-- `search` は最大 `limit` 件を list か tuple で返します。`fetch` は正規化済みの URL の文書を返します。
+- `search` は最大 `limit` 件を **`list` か `tuple` そのもの**で返します（Subclass は不正な Response です。理由は下の「Broker の動作」4）。`fetch` は正規化済みの URL の文書を返します。
 - Credential は受け取りません。Adapter は Backend Tool Broker から取得します（Secret Isolation）。Main Agent にも Request にも Credential は載りません。
 - Adapter は自分で Retry せず、`asyncio.CancelledError` を握りつぶしません（Timeout は Cancel で実現するため）。
 - 分類できる失敗は `raise ProviderFailure(ResearchErrorCode.RATE_LIMITED)` のように報告します。元の例外の文言は捨てます。
@@ -1350,7 +1350,8 @@ License や `robots.txt` に関する項目はありません。要件と設計�
 1. `request.kinds` に合う Provider を Registry の順序（`ProviderKind` の宣言順、次に名前順。登録順には依存しない）で選びます。
 2. **全 Provider を並行**で実行します。各 Provider の制限時間は、登録時の `timeout_seconds`（既定 10 秒、最大 120 秒）と、全体の Budget の残りの小さい方です。時間切れの Provider は Cancel し、完全に終わるまで待ってから `timeout` として報告します。`gather` が返るとき、起動した Task は残りません。
 3. Provider の例外は Provider ごとに隔離します。他の Provider の結果は失われません。`gather` を Cancel した場合は全 Provider を Cancel して `CancelledError` を伝えます。
-4. Response は Provider ごとに全体を検証します（list / tuple、件数が `limit` 以下、全要素が `ProviderHit` で **Field の値も正しい**、全 URL が正規化できる）。1 つでも違反があれば、その Provider の結果は全て捨てて `invalid_response` にします。Field の検証は下の「Constructor を通らない Hit と Document」のとおりです。
+4. Response は Provider ごとに全体を検証します（`list` / `tuple` そのもの、件数が `limit` 以下、全要素が `ProviderHit` で **Field の値も正しい**、全 URL が正規化できる）。1 つでも違反があれば、その Provider の結果は全て捨てて `invalid_response` にします。Field の検証は下の「Constructor を通らない Hit と Document」のとおりです。
+   **Container 自体も Adapter の Code を動かしません。** `list` / `tuple` の Subclass（と、`__class__` で `list` を名乗る Object）は、`__len__`、`__iter__`、`__getitem__` を Adapter が上書きでき、Broker の中で例外を出したり、長さを偽って `limit` を超えさせたりできます。そのため Class は `type(x) is list`（または `tuple`）で確かめ（`isinstance` は `__class__` を Object に尋ねます）、Subclass は Hook を一切呼ばずに `invalid_response` にします。
 5. Provider の結果を交互に並べ（各 Provider の 1 位、2 位、…）、正規化した URL で重複を除いて（最初の 1 件を残し、どれか 1 つでも Private なら `private_source` を True にする）、`max_results` 件までにします。
 6. `errors` は Registry の順序です（完了順ではありません）。
 

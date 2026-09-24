@@ -190,7 +190,9 @@ class ResearchBroker:
            its constructor is invalid). If it raises
            ``InvalidProviderResponseError`` the provider is reported with
            ``INVALID_RESPONSE`` (logged like any failure), contributes no item,
-           and the others are unaffected.
+           and the others are unaffected. The response must be exactly a ``list``
+           or ``tuple``: a subclass or a look-alike is invalid before any of its
+           hooks (``__len__``, ``__iter__``, ...) can run.
         6. ``merge_items`` over the successful providers' items (in registry
            order) with ``max_results=request.max_results`` gives ``items`` and
            ``truncated``.

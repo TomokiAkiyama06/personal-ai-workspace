@@ -44,6 +44,7 @@ from .research_support import (
     github,
     guarded,
     hit,
+    hostile_containers,
     hostile_failures,
     malformed_documents,
     malformed_hits,
@@ -727,6 +728,27 @@ class GatherFailureIsolationTest(unittest.IsolatedAsyncioTestCase):
                     result.errors,
                     (error("web-a", ProviderKind.WEB, Code.INVALID_RESPONSE),),
                 )
+
+    async def test_a_response_container_with_hostile_hooks_is_invalid(self):
+        # Only an exact list or tuple is a response: a subclass (or an object
+        # that claims to be one) could run the adapter's code inside the broker.
+        calls = Tripwire()
+        for count in (2, 5):  # within the limit, and over it
+            hits = [hit(f"https://a.example/{n}") for n in range(count)]
+            for label, response in hostile_containers(hits, calls).items():
+                with self.subTest(response=label, hits=count):
+                    broken = web("web-a", raw_search_response=response)
+                    healthy = docs("docs-a", hits=[hit("https://d.example/1")])
+                    with calls.armed():
+                        result = await guarded(
+                            broker_of(broken, healthy).gather(request(max_results=2))
+                        )
+                    self.assertEqual(urls(result), ["https://d.example/1"])
+                    self.assertEqual(
+                        result.errors,
+                        (error("web-a", ProviderKind.WEB, Code.INVALID_RESPONSE),),
+                    )
+        self.assertEqual(calls, [])
 
     async def test_returning_more_hits_than_the_limit_is_invalid(self):
         hits = [hit(f"https://a.example/{n}") for n in range(3)]

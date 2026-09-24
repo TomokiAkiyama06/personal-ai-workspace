@@ -22,6 +22,7 @@ PAW-051 の実装は、動かすためにこれらを選んだ。Review（Codex�
    他の Provider の結果には影響しない（失敗の隔離）。
    Constructor を通らずに作られた `ProviderHit` / `ProviderDocument`（Slot が未設定、型や長さが不正、UTC で表せない公開日時）も同じで、Class が正しくても Field を全て読み直して検証する（`isinstance` は Field の値を保証しない）。
    Field は `ProviderHit` / `ProviderDocument` 自身の Slot から 1 度だけ読み、Subclass の Property や `__getattribute__` は呼ばない。Property だけで Field を返す Subclass は不正な Response とする（任意の例外と、読むたびに変わる値を防ぐため）。`fetch` も同じ規則を使う。
+   **Response の Container は `list` か `tuple` そのものだけ**とする（`type(x) is list` / `tuple`）。Subclass と、`__class__` で名乗る Object は、`__len__`、`__iter__`、`__getitem__` を呼ばずに `invalid_response` とする（Adapter の Code が Broker の中で例外を出したり、長さを偽って `limit` を超えさせたりするのを防ぐため）。Subclass を許して基底 Class の Method で読む案もあるが、正当な Subclass の使い道がなく、拒否のほうが単純で確実なので採らない。
    **失敗の分類も Adapter の Code を動かさない。** `ProviderFailure.code` は `ProviderFailure` 自身の Slot から 1 度だけ読み、Class は `type()` と `issubclass` で確かめる。Subclass の Property、`__getattribute__`、`__class__`、Metaclass の `__name__` は呼ばない。`ResearchErrorCode` そのものでない値と、未設定の Slot は `internal_error` とする（例外が `gather` から漏れて他の Provider の結果が失われるのを防ぐため）。
 2. **複数 Provider の結果の統合。** Provider（種類と名前の決定的な順）から交互に 1 件ずつ並べ、正規化した URL が同じ Hit は最初の 1 件だけを残し、件数を制限する。
    優先度や関連度による並べ替えは、要件に規則がないため行わない。
