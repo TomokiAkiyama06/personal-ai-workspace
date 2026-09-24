@@ -1,0 +1,45 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "paw-backend"
+version = "0.1.0"
+description = "Personal AI Workspace Core Backend"
+readme = "README.md"
+requires-python = ">=3.13"
+license = "Apache-2.0"
+# Exact pins: this is a deployed application, not a library. The same pins are
+# repeated in .pre-commit-config.yaml and .github/requirements-ci.txt (CI runs
+# the backend tests in the pre-commit environment). A test in
+# .github/scripts keeps the three lists in sync.
+dependencies = [
+    "fastapi==0.141.1",
+    "starlette==1.7.0",
+    "anyio==4.15.1",
+    "pydantic==2.13.5",
+    "pydantic-settings==2.15.0",
+    "uvicorn==0.53.0",
+    "websockets==17.1",
+    "sqlalchemy[asyncio]==2.0.54",
+    "psycopg[binary]==3.3.6",
+    "alembic==1.20.0",
+]
+
+[project.scripts]
+paw-backend = "paw_backend.server:main"
+
+[dependency-groups]
+dev = [
+    "httpx==0.28.1",
+    "ruff==0.16.8",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["paw_backend"]
+
+[tool.ruff]
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]

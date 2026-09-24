@@ -1,7 +1,8 @@
 # Repository のディレクトリ構造
 
 現在の Repository は要件・設計文書、GitHub 運用と CI、Application と Benchmark / Evaluator の配置先で構成します。
-`apps/`・`evaluator/` は README による役割の整理までです。`benchmarks/`にはTask / Evaluator Result
+`apps/backend/`にはBackendの最小Application Skeleton（PAW-020）を実装しています。
+`apps/web/`・`apps/cli/`・`evaluator/` は README による役割の整理までです。`benchmarks/`にはTask / Evaluator Result
 schemaとそのvalidator、test fixtureを配置しています。
 
 ## 現在の構造
@@ -24,6 +25,7 @@ personal-ai-workspace/
 │  │  ├─ install_hooks.py
 │  │  ├─ run_ci.py
 │  │  ├─ test_check_repository.py
+│  │  ├─ test_dependency_pins.py
 │  │  └─ test_install_hooks.py
 │  └─ workflows/
 │     ├─ ci.yml
@@ -38,7 +40,47 @@ personal-ai-workspace/
 ├─ SECURITY.md
 ├─ apps/
 │  ├─ backend/
-│  │  └─ README.md
+│  │  ├─ README.md
+│  │  ├─ alembic.ini
+│  │  ├─ migrations/
+│  │  │  ├─ env.py
+│  │  │  ├─ script.py.mako
+│  │  │  └─ versions/
+│  │  │     └─ 0001_baseline.py
+│  │  ├─ paw_backend/
+│  │  │  ├─ __init__.py
+│  │  │  ├─ __main__.py
+│  │  │  ├─ app.py
+│  │  │  ├─ config.py
+│  │  │  ├─ db.py
+│  │  │  ├─ errors.py
+│  │  │  ├─ events.py
+│  │  │  ├─ middleware.py
+│  │  │  ├─ security.py
+│  │  │  ├─ server.py
+│  │  │  └─ api/
+│  │  │     ├─ __init__.py
+│  │  │     ├─ deps.py
+│  │  │     └─ v1/
+│  │  │        ├─ __init__.py
+│  │  │        ├─ events.py
+│  │  │        └─ health.py
+│  │  ├─ pyproject.toml
+│  │  └─ tests/
+│  │     ├─ __init__.py
+│  │     ├─ fake_postgres.py
+│  │     ├─ support.py
+│  │     ├─ teardown_child.py
+│  │     ├─ test_config.py
+│  │     ├─ test_database.py
+│  │     ├─ test_errors.py
+│  │     ├─ test_events.py
+│  │     ├─ test_health.py
+│  │     ├─ test_middleware.py
+│  │     ├─ test_migrations.py
+│  │     ├─ test_postgres_integration.py
+│  │     ├─ test_security.py
+│  │     └─ test_server.py
 │  ├─ cli/
 │  │  └─ README.md
 │  └─ web/
@@ -80,6 +122,8 @@ personal-ai-workspace/
 │  ├─ SECURITY_TOOL_PERMISSIONS.md
 │  ├─ UI_DESIGN.md
 │  └─ decisions/
+│     ├─ 0002-start-workspace-implementation-before-model-comparison.md
+│     ├─ 0003-backend-cli-web-implementation-stack.md
 │     └─ README.md
 └─ evaluator/
    └─ README.md
@@ -92,7 +136,7 @@ personal-ai-workspace/
 | [REQUIREMENTS.md](../REQUIREMENTS.md) / [AGENTS.md](../AGENTS.md) | 要件と Agent の作業ルールの正本 |
 | [docs/](./) | Architecture、各機能の設計、Backlog、Issue 対応表 |
 | [docs/decisions/](decisions/README.md) | 重要な仕様・設計判断の提案と承認経緯 |
-| [apps/backend/](../apps/backend/README.md) | Core API、認証・権限、Orchestrator、Memory、Tool Broker |
+| [apps/backend/](../apps/backend/README.md) | Core API、認証・権限、Orchestrator、Memory、Tool Broker（現在はSkeleton: REST / Event経路、Health、DB接続、Migration） |
 | [apps/web/](../apps/web/README.md) | Backend API を利用する Web UI |
 | [apps/cli/](../apps/cli/README.md) | Web と同じ Backend API を利用する CLI |
 | [benchmarks/](../benchmarks/README.md) | Benchmark Task、候補 Agent の比較、公開可能な評価用データの準備領域 |
@@ -111,10 +155,13 @@ Core Backend は GPU 非依存とし、Local Model Runtime を停止できる構
 
 実装は [Benchmark / Evaluator 設計](BENCHMARK_EVALUATOR.md) と
 [Implementation Backlog](IMPLEMENTATION_BACKLOG.md) に従い、Benchmark / Evaluator、Model 選定、Workspace 本体の順で進めます。
-PAW-010 は PAW-001 に依存し、Backend の最小 Application Skeleton である PAW-020 は Model 比較 Run の PAW-017 に依存します。
+PAW-010 は PAW-001 に依存します。Backend の最小 Application Skeleton である PAW-020 は Backlog 上は Model 比較 Run の PAW-017 に依存しますが、
+[Decision 0002](decisions/0002-start-workspace-implementation-before-model-comparison.md)（Approved）により、PAW-017 の完了を待たずに着手できます。
 
-言語、Framework や Deployment の具体方式は [Requirements Freeze Review](REQUIREMENTS_FREEZE_REVIEW.md) の実装時選択として扱い、
+Backend / CLI / Web の言語と Framework は [Decision 0003](decisions/0003-backend-cli-web-implementation-stack.md)（Approved）で決まっています（承認範囲は決定を参照）。
+Deployment の具体方式など、それ以外は [Requirements Freeze Review](REQUIREMENTS_FREEZE_REVIEW.md) の実装時選択として扱い、
 該当 Issue で決めた構成に合わせてこの文書を更新します。
+Backend の構成と起動方法は [apps/backend/README.md](../apps/backend/README.md) を参照してください。
 
 ## Runtime データとの境界
 
