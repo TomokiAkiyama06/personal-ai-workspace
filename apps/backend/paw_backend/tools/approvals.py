@@ -18,8 +18,11 @@ never be handed this service**. Even so, the rules do not rest on that:
   for every terminal state: completed, failed, cancelled). That revocation runs
   after the terminal transition committed, so a failure of the store **is
   raised** (:class:`ApprovalRevocationError`), not counted as "nothing to
-  revoke", and it is **bounded by a deadline** (``TaskService`` awaits its
-  listeners: a stalled store must not hold up cancel / complete / retry). It
+  revoke", and it is **bounded by ONE deadline for the whole revocation**: the
+  store call and the report of every revoked approval (lookup, event, audit row)
+  share one ``timeout_seconds``, not one each (``TaskService`` awaits its
+  listeners: a stalled store must not hold up cancel / complete / retry, however
+  many approvals the task has). It
   cannot be retried by ``TaskService`` and it cannot roll the
   transition back, so the broker independently refuses to open or use an
   approval of a task that can no longer act (``task_state.py``): an approval
@@ -97,7 +100,10 @@ class ApprovalRevocationError(Exception):
     Carries no detail: the driver's message can name hosts or users; only the
     exception type of the cause is logged. Approvals of that task may still be
     open in the store; :meth:`ApprovalService.revoke_task` is idempotent, so it
-    can be run again (the broker refuses them meanwhile).
+    can be run again (the broker refuses them meanwhile). It is also raised when
+    the deadline ended the revocation after the store had revoked the approvals:
+    they stay revoked (running it again returns 0), but the event and the audit
+    row of the approvals not yet reported are lost (the log says how many).
     """
 
 
@@ -265,45 +271,80 @@ class ApprovalService:
         A system action: nobody's approval may outlive its task. Wire
         :meth:`revoke_on_task_end` into ``TaskService(listeners=[...])``.
         Idempotent. Raises :class:`ApprovalRevocationError` when the store
-        fails or does not answer within ``timeout_seconds``: a failure must not
-        look like "nothing was open".
+        fails, or when the whole revocation (the store call **and** reporting
+        every revoked approval: lookup, event, audit row) did not finish within
+        **one** ``timeout_seconds``: a failure must not look like "nothing was
+        open", and a task with many approvals must not take many times the limit.
         """
         if not isinstance(task_id, uuid.UUID):
             raise TypeError("task_id must be a UUID")
         now = self._clock()
+        revoked: Sequence[uuid.UUID] | None = None
+        reported = 0
         try:
             # ``TaskService`` awaits this after the transition committed: a store
             # that stalls must not hold up cancel / complete / retry requests.
-            # Cancelling the call also shuts down the abortable connection of
+            # ONE deadline covers every step below (started once, here): a limit
+            # that restarted for each of up to 100 approvals would multiply it.
+            # Cancelling a step also shuts down the abortable connection of
             # ``PostgresApprovalStore``. Whether it was done in time is unknown,
             # like any other failure: it is raised, and can be run again.
             async with asyncio.timeout(self._timeout_seconds):
-                ids = await self._store.revoke_task(task_id, now=now)
-        except Exception as error:
-            logger.error("Task approval revoke failed (%s)", type(error).__name__)
-            raise ApprovalRevocationError(
-                "the open approvals of a task could not be revoked"
-            ) from None
-        for approval_id in ids:
-            try:
-                async with asyncio.timeout(self._timeout_seconds):
-                    record = await self._store.get(approval_id)
-            except Exception:
-                # Only what the audit row and the event say about the approval
-                # is lost; the approval itself is revoked.
-                record = None
-            if record is not None:
-                await self._emit(ApprovalEventKind.REVOKED, record, now)
-            await self._audit_row(
-                "tool.approval.revoke",
-                True,
-                "task_ended",
-                approval_id,
-                None if record is None else record.project_id,
-                None,
-                now,
+                try:
+                    revoked = await self._store.revoke_task(task_id, now=now)
+                except Exception as error:
+                    logger.error(
+                        "Task approval revoke failed (%s)", type(error).__name__
+                    )
+                    raise ApprovalRevocationError(
+                        "the open approvals of a task could not be revoked"
+                    ) from None
+                for approval_id in revoked:
+                    await self._report_task_end(approval_id, now)
+                    reported += 1
+        except TimeoutError:
+            if revoked is None:
+                logger.error("Task approval revoke failed (%s)", "TimeoutError")
+                raise ApprovalRevocationError(
+                    "the open approvals of a task could not be revoked"
+                ) from None
+            # The approvals are revoked; only telling about them was cut off
+            # (the run that would repeat it finds nothing left to revoke).
+            logger.error(
+                "Task approval revoke did not finish reporting in time "
+                "(%s): %d of %d approvals reported",
+                "TimeoutError",
+                reported,
+                len(revoked),
             )
-        return len(ids)
+            raise ApprovalRevocationError(
+                "the approvals of a task were revoked, but not all of them "
+                "were reported within the deadline"
+            ) from None
+        return len(revoked)
+
+    async def _report_task_end(self, approval_id: uuid.UUID, now: datetime) -> None:
+        """Event and audit row of one approval that was revoked with its task.
+
+        Runs inside the deadline of :meth:`revoke_task`: nothing here restarts it.
+        """
+        try:
+            record = await self._store.get(approval_id)
+        except Exception:
+            # Only what the audit row and the event say about the approval
+            # is lost; the approval itself is revoked.
+            record = None
+        if record is not None:
+            await self._emit(ApprovalEventKind.REVOKED, record, now)
+        await self._audit_row(
+            "tool.approval.revoke",
+            True,
+            "task_ended",
+            approval_id,
+            None if record is None else record.project_id,
+            None,
+            now,
+        )
 
     async def revoke_on_task_end(self, event: object) -> None:
         """A ``TaskService`` listener: a task that was cancelled, failed or
