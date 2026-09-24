@@ -262,6 +262,35 @@ class ProviderHitTest(unittest.TestCase):
             value.title = "x"
 
 
+class UtcConvertibleTest(unittest.TestCase):
+    """A published_at must be expressible in UTC, or the response is unusable."""
+
+    def test_a_hit_or_document_cannot_hold_a_time_beyond_the_utc_range(self):
+        beyond = (
+            datetime.max.replace(tzinfo=timezone(timedelta(hours=-1))),
+            datetime.min.replace(tzinfo=timezone(timedelta(hours=1))),
+        )
+        for value in beyond:
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    ProviderHit(
+                        "https://example.com/", "t", "x", value, private_source=False
+                    )
+                with self.assertRaises(ValueError):
+                    ProviderDocument("t", "x", value, private_source=False)
+
+    def test_the_edges_that_are_expressible_are_accepted(self):
+        for value in (
+            datetime.max.replace(tzinfo=UTC),
+            datetime.min.replace(tzinfo=UTC),
+            datetime.max.replace(tzinfo=timezone(timedelta(hours=1))),
+        ):
+            with self.subTest(value=value):
+                ProviderHit(
+                    "https://example.com/", "t", "x", value, private_source=False
+                )
+
+
 class ProviderDocumentTest(unittest.TestCase):
     def test_document_text_bound_is_larger_than_an_excerpt(self):
         self.assertGreater(MAX_DOCUMENT_CHARS, MAX_EXCERPT_CHARS)

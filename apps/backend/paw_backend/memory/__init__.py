@@ -1,6 +1,7 @@
 """Memory / Conversation schema (PAW-040): tables, ACL conditions, pgvector type.
 
-This package is the PostgreSQL schema only. There are no repositories or
+This package is the PostgreSQL schema only, apart from ``shared/`` (the
+administration of Shared Memory, PAW-046). There are no other repositories or
 services here: writing memories, consolidation (PAW-041), conflict handling
 (PAW-042), retrieval (PAW-043) and Markdown projection (PAW-045) come later and
 build on these tables. See ``models.py`` for the layout and ``acl.py`` for how

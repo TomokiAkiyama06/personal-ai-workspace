@@ -18,7 +18,7 @@ import re
 import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Any, Protocol, runtime_checkable
@@ -125,6 +125,14 @@ def _require_aware(value: object, name: str) -> None:
         raise ValueError(f"{name} must be timezone-aware")
 
 
+def _require_utc_convertible(value: datetime, name: str) -> None:
+    """The time must be expressible in UTC: ``datetime.max`` at UTC-01:00 is not."""
+    try:
+        value.astimezone(UTC)
+    except OverflowError:
+        raise ValueError(f"{name} cannot be expressed in UTC") from None
+
+
 def _require_utc(value: object, name: str) -> None:
     _require_aware(value, name)
     if value.utcoffset() != timedelta(0):
@@ -215,6 +223,7 @@ class ProviderHit:
         _require_text(self.text, "text", max_chars=MAX_EXCERPT_CHARS)
         if self.published_at is not None:
             _require_aware(self.published_at, "published_at")
+            _require_utc_convertible(self.published_at, "published_at")
         if not isinstance(self.source_type, SourceType):
             raise TypeError("source_type must be a SourceType")
         _require_bool(self.private_source, "private_source")
@@ -240,6 +249,7 @@ class ProviderDocument:
         _require_text(self.text, "text", max_chars=MAX_DOCUMENT_CHARS)
         if self.published_at is not None:
             _require_aware(self.published_at, "published_at")
+            _require_utc_convertible(self.published_at, "published_at")
         if not isinstance(self.source_type, SourceType):
             raise TypeError("source_type must be a SourceType")
         _require_bool(self.private_source, "private_source")

@@ -30,6 +30,7 @@ from paw_backend.research.scratch import ScratchStore
 
 from . import (
     test_scratch_concurrency,
+    test_scratch_janitor_postgres,
     test_scratch_purge,
     test_scratch_store_items,
     test_scratch_store_use,
@@ -200,6 +201,14 @@ class OperationsWaitForTheRowLockAsAppRole(
 
 
 class PurgeRacesLeaseAsAppRole(AsAppRole, test_scratch_concurrency.PurgeRacesLeaseTest):
+    pass
+
+
+class JanitorTickAsAppRole(AsAppRole, test_scratch_janitor_postgres.TickTest):
+    pass
+
+
+class JanitorLoopAsAppRole(AsAppRole, test_scratch_janitor_postgres.LoopTest):
     pass
 
 

@@ -18,6 +18,14 @@ nothing changes and no token is ever shown. (If the commit itself fails after
 the event was stored, the trail holds an event for something that did not
 happen; the token was never shown.)
 
+**Who ran the command is read here, from the process** (``OperatorIdentity.
+from_environment``: ``os.geteuid()`` and ``SUDO_UID``), never taken from the
+caller: neither ``setup_owner`` nor ``recover_owner`` accepts an identity, so a
+library caller cannot vouch for itself as root or forge the uids recorded on a
+token. Tests change what the service reads by replacing ``os.geteuid`` (the
+``running_as`` helper of ``tests/identity_support.py``); production code has no
+other way to set it.
+
 Token handling: see ``paw_backend.identity.tokens``. The plaintext exists only in
 the returned ``IssuedToken``; the database keeps a salted HMAC.
 """
@@ -78,6 +86,9 @@ class OperatorIdentity:
 
     ``sudo_uid`` is ``SUDO_UID``, which sudo sets. It is an environment variable,
     so it is a hint for the investigator, not proof of who the person was.
+
+    Only the service builds the one it acts on (``from_environment``). A caller
+    can construct any value, so no method of ``OwnerOperator`` takes one.
     """
 
     uid: int
@@ -121,13 +132,17 @@ class IssuedToken:
     login_name: str
     purpose: TokenPurpose
     expires_at: datetime
+    # Who the service saw running it (the values stored on the token's row).
+    operator: OperatorIdentity | None
 
 
 class OwnerOperator:
     """Creates the Owner and issues setup / recovery tokens.
 
-    It performs no authorisation of its own: the only caller is the server-local
-    command, and whoever can run it has the operator's database credentials.
+    The one authorisation it performs is the recovery's: ``recover_owner``
+    needs a root process, which it reads from the process itself. Otherwise the
+    only caller is the server-local command, and whoever can run it has the
+    operator's database credentials.
     """
 
     def __init__(
@@ -164,9 +179,10 @@ class OwnerOperator:
         login_name: str,
         *,
         replace_non_live_owner: bool = False,
-        operator: OperatorIdentity | None = None,
     ) -> IssuedToken:
         """Create the Owner and a one-time setup token for them.
+
+        The uid and ``SUDO_UID`` of this process are stored on the token's row.
 
         Refuses (``OwnerAlreadyExistsError``) when a live Owner exists. Two
         concurrent calls cannot both succeed: the database allows one Owner row
@@ -182,6 +198,7 @@ class OwnerOperator:
         if not isinstance(replace_non_live_owner, bool):
             raise TypeError("replace_non_live_owner must be a bool")
         name = normalize_login_name(login_name)
+        operator = OperatorIdentity.from_environment()
         correlation_id = uuid.uuid4()
         try:
             return await self._create_owner(
@@ -295,23 +312,26 @@ class OwnerOperator:
             login_name=name,
             purpose=TokenPurpose.SETUP,
             expires_at=now + self._ttl,
+            operator=operator,
         )
 
     # -- recovery -----------------------------------------------------------
 
-    async def recover_owner(
-        self, *, operator: OperatorIdentity | None = None
-    ) -> IssuedToken:
+    async def recover_owner(self) -> IssuedToken:
         """Issue a recovery token for the existing Owner.
 
         Every outstanding token of the Owner is revoked first (each is audited),
         so only the new one works. Refuses with ``RecoveryNotPrivilegedError``
-        unless ``operator`` is a root process (``operator.uid == 0``; the
+        unless THIS process runs as root (its effective uid is 0, read here; the
         requirement is recovery through sudo), with ``OwnerNotFoundError`` when
         there is no Owner and with ``OwnerNotLiveError`` when the Owner account
         is pending deletion or deleted (``setup_owner`` can replace it).
+
+        The caller supplies no identity: one it could supply is one it could
+        forge. The uid the check uses is the uid stored on the token.
         """
         correlation_id = uuid.uuid4()
+        operator = OperatorIdentity.from_environment()
         if operator is None or operator.uid != ROOT_UID:
             # The requirement is a recovery through sudo, that is, as root. The
             # database credential alone is not that: a process that happens to
@@ -386,6 +406,7 @@ class OwnerOperator:
             login_name=login_name,
             purpose=TokenPurpose.RECOVERY,
             expires_at=now + self._ttl,
+            operator=operator,
         )
 
     # -- helpers ------------------------------------------------------------

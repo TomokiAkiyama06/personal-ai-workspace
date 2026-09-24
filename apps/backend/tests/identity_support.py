@@ -9,6 +9,7 @@ import unittest
 import uuid
 from collections import Counter
 from datetime import UTC, datetime, timedelta
+from unittest.mock import patch
 
 from alembic import command as alembic_command
 from sqlalchemy import text
@@ -18,14 +19,26 @@ from paw_backend.authz import PostgresAuditSink
 from paw_backend.authz.audit import AuditEvent
 from paw_backend.db import Database
 from paw_backend.identity import TokenRedeemer
-from paw_backend.identity.operator import OperatorIdentity, OwnerOperator
+from paw_backend.identity.operator import ROOT_UID, OwnerOperator
 
 from .support import make_settings, paw_environment
 from .test_migrations import offline_config
 
-# Recovery is refused unless the operator is root (what sudo runs a command as):
-# tests that exercise recovery itself say so, as the command run under sudo does.
-ROOT = OperatorIdentity(0)
+
+@contextlib.contextmanager
+def running_as(uid: int, sudo_uid: int | None = None):
+    """This process as the service sees it: effective uid ``uid`` and ``SUDO_UID``.
+
+    The service reads who runs it from the process itself (``os.geteuid()`` and
+    the environment) and takes it from no caller, so this is the only way for a
+    test to be root, or somebody else: it replaces exactly what the service reads.
+    """
+    with patch("os.geteuid", return_value=uid), patch.dict(os.environ):
+        os.environ.pop("SUDO_UID", None)
+        if sudo_uid is not None:
+            os.environ["SUDO_UID"] = str(sudo_uid)
+        yield
+
 
 TEST_DATABASE_URL = os.environ.get("PAW_TEST_DATABASE_URL")
 
@@ -178,6 +191,9 @@ class PostgresIdentityTestCase(unittest.IsolatedAsyncioTestCase):
         migrate("downgrade", "base")
 
     async def asyncSetUp(self) -> None:
+        # Recovery needs root, as under sudo: a test about who may recover, or
+        # about what is recorded, says who it runs as with ``running_as``.
+        self.enterContext(running_as(ROOT_UID))
         self.database = self.new_database()
         await self.reset_users()
         self.started_at = await self.scalar("SELECT clock_timestamp()")

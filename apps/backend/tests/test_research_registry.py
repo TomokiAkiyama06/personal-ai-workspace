@@ -208,6 +208,54 @@ class ValidateProviderTest(unittest.TestCase):
         self.assertEqual(calls, [])
 
 
+class IdentitySnapshotTest(unittest.TestCase):
+    """The name and kind that are validated are the ones that are registered."""
+
+    def flipping_provider(self, names, kinds=None):
+        reads = {"name": 0, "kind": 0}
+        kinds = kinds or [ProviderKind.WEB] * 8
+
+        class Flipping(Good):
+            @property
+            def name(self):
+                reads["name"] += 1
+                return names[min(reads["name"], len(names)) - 1]
+
+            @property
+            def kind(self):
+                reads["kind"] += 1
+                return kinds[min(reads["kind"], len(kinds)) - 1]
+
+        return Flipping(), reads
+
+    def test_a_name_that_changes_between_reads_registers_the_validated_one(self):
+        provider, reads = self.flipping_provider(["ok", "BAD!", "BAD!"])
+        registry = ProviderRegistry()
+
+        entry = registry.register(provider, timeout_seconds=5)
+
+        self.assertEqual(entry.name, "ok")  # never the unvalidated second read
+        self.assertEqual(registry.names(), ("ok",))
+        self.assertEqual(reads["name"], 1)  # read exactly once
+
+    def test_a_kind_that_changes_between_reads_registers_the_validated_one(self):
+        provider, reads = self.flipping_provider(
+            ["flip"], [ProviderKind.DOCS, "web", ProviderKind.GITHUB]
+        )
+        registry = ProviderRegistry()
+
+        entry = registry.register(provider, timeout_seconds=5)
+
+        self.assertEqual(entry.kind, ProviderKind.DOCS)
+        self.assertEqual(reads["kind"], 1)
+
+    def test_an_invalid_first_read_is_rejected_whatever_follows(self):
+        provider, _ = self.flipping_provider(["BAD!", "ok"])
+        with self.assertRaises(ProviderInterfaceError) as caught:
+            ProviderRegistry().register(provider, timeout_seconds=5)
+        self.assertEqual(caught.exception.member, "name")
+
+
 class RegistrationTest(unittest.TestCase):
     def test_register_returns_the_entry(self):
         registry = ProviderRegistry()
