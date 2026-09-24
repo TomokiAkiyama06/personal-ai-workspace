@@ -5,7 +5,8 @@ Personal AI Workspace の Core Backend です。
 Login と Session はまだ実装していません（PAW-022 以降）。
 RBAC と Audit（PAW-025）、Task の Lifecycle と永続化（[PAW-032](#agent-task-lifecycle)、HTTP の Endpoint はまだありません）、Task Queue・Budget・Loop 検知（[PAW-033](#task-queue--budget--loop-検知)）、Tool Broker と Capability Policy（[PAW-031](#tool-broker--capability-policy)、HTTP の Endpoint はまだありません）、Memory の PostgreSQL Schema（[PAW-040](#memory--conversation-schema)）、
 最小の `users` Table と Owner の初期設定・復旧のコマンド（[PAW-021](#owner-の初期設定と復旧)）を実装済みです。Memory の保存・整理・検索の処理は PAW-041 以降です。
-Research の一時保存（[PAW-050](#research-scratch-store)、24 時間 TTL、HTTP の Endpoint はまだありません）と、Research Provider の Adapter Interface（[PAW-051](#research-provider-adapter)、実際の Provider（Direct Web、Docs、GitHub、OpenCode）はまだありません）、
+Shared Memory の管理（Owner / Admin の作成・編集・削除・復元、Candidate の承認、Agent の自動昇格の拒否、System Policy の優先。[PAW-046](#shared-memory-administration)、HTTP の Endpoint はまだありません）も実装済みです。
+Research の一時保存（[PAW-050](#research-scratch-store)、24 時間 TTL、期限切れを消す Janitor つき、HTTP の Endpoint はまだありません）と、Research Provider の Adapter Interface（[PAW-051](#research-provider-adapter)、実際の Provider（Direct Web、Docs、GitHub、OpenCode）はまだありません）、
 Claim と Source の対応・回答や Task からの追跡（[PAW-052](#evidence--claim-provenance)、HTTP の Endpoint はまだありません）も実装済みです。
 
 [Architecture](../../docs/ARCHITECTURE.md) に基づき、最終的に以下の機能を Backend 側で扱います。
@@ -40,7 +41,7 @@ Python 側の Package（`pgvector-python`）は使わず、`paw_backend/memory/v
 apps/backend/
 ├─ pyproject.toml          # 依存（完全一致で固定）と Ruff 設定
 ├─ alembic.ini             # Alembic 設定（DB URL は持たない）
-├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0031 は Tool Approval、0033 は Queue / Budget / Loop、0040 は Memory Schema、0050 は Research Scratch、0052 は Evidence / Claim Provenance）
+├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0031 は Tool Approval、0033 は Queue / Budget / Loop、0040 は Memory Schema、0046 は Shared Memory Candidate、0050 は Research Scratch、0052 は Evidence / Claim Provenance）
 ├─ paw_backend/
 │  ├─ app.py               # create_app(settings)
 │  ├─ config.py            # PAW_ 環境変数から読む Settings
@@ -56,8 +57,9 @@ apps/backend/
 │  ├─ tasks/               # Agent Task の状態遷移と永続化（PAW-032）
 │  │  └─ queueing/         # Task Queue、Budget、Loop 検知、Escalation の判断（PAW-033）
 │  ├─ memory/              # Memory / Conversation の Model、ACL 条件、vector 型（PAW-040）
+│  │  └─ shared/           # Shared Memory の管理: Service、Candidate、Rule 関数、Policy の優先（PAW-046）
 │  ├─ research/providers/  # Research Provider の Adapter Interface と Broker（PAW-051）
-│  ├─ research/scratch/    # Research Scratch Store: 24 時間 TTL の一時保存（PAW-050）
+│  ├─ research/scratch/    # Research Scratch Store: 24 時間 TTL の一時保存と、期限切れを消す Janitor（PAW-050）
 │  ├─ research/provenance/ # Evidence / Claim Provenance: Claim と Source の対応、回答・Task からの追跡（PAW-052）
 │  ├─ tools/               # Tool Broker、Capability Policy、Approval（PAW-031）
 │  └─ api/
@@ -120,6 +122,7 @@ Database には pgvector が必要です（CI は `pgvector/pgvector:pg18` を�
 | `PAW_OPERATOR_DATABASE_ROLE` | なし | 上の Role 名（`PAW_APP_DATABASE_ROLE` と同じ検証）。Migration `0021` が、実在するこの Role に管理コマンドの権限を与える |
 | `PAW_SETUP_TOKEN_TTL_SECONDS` | `1800` | Owner の Setup / Recovery Token の有効期間（60〜14400 秒） |
 | `PAW_SETUP_TOKEN_MAX_ATTEMPTS` | `5` | 1 つの Token に許す試行回数（1〜20）。使い切った Token は無効になる |
+| `PAW_SCRATCH_PURGE_INTERVAL_SECONDS` | `3600` | 期限切れの Research Scratch Item を消す Janitor の間隔（秒）。`0` で Janitor を止める（期限切れの行が DB に残り続ける）。それ以外は 60〜86400。DB が未設定のときも起動しない。[Janitor](#janitor期限切れの削除) |
 | `PAW_EVENT_HEARTBEAT_SECONDS` | `15` | `system.heartbeat` の間隔 |
 | `PAW_EVENT_QUEUE_SIZE` | `100` | 接続ごとの Event Queue。溢れた場合は古い Event を捨てる |
 | `PAW_EVENT_MAX_SUBSCRIBERS` | `100` | 同時に接続できる SSE / WebSocket の数。超えた接続は SSE が 503、WebSocket が Close Code 1013 |
@@ -389,11 +392,14 @@ Table 名は `task` で始めません。PAW-032 の Test が `task` で始ま�
 - Queue は `tasks.state` を読まず、変更もしません。Orchestrator が `claim_next` と PAW-032 の `start` を組み合わせます。
 - Owner / Admin による優先度の引き上げ操作は、この Issue の範囲外です。
 
-**Claim と Lease。** `claim_next(worker_id, now)` は、次の Entry を 1 つ、その Worker へ Lease します。
+**Claim と Lease。** `claim_next(worker_id)` は、次の Entry を 1 つ、その Worker へ Lease します。
 Claim できるのは `queued` の Entry と、Lease が切れた（`lease_expires_at <= now`）`claimed` の Entry です。後者は元の優先度・`enqueued_at` の位置のまま再び Claim されます（自動の再取得。定期実行の Sweeper は不要です）。
 Lease が有効なのは `lease_expires_at > now` の間だけで、期限の瞬間に失われます。`heartbeat`、`release`、`complete` ができるのは有効な Lease を持つ Worker だけで、それ以外（未 Claim、他の Worker、取消済み、期限切れ、存在しない Entry）は全て同じ `LeaseLostError` です。
 そのため、同じ瞬間に有効な Lease を持つ Worker は最大 1 人です。期限を過ぎた Worker が完了を報告しても拒否されるので、Worker は期限より十分短い間隔で `heartbeat` してください。
-時刻は全て呼び出し側が `now`（Timezone 付きの `datetime`）として渡します。Queue は時計を読みません。
+**時計。** Queue が信頼する時計は **Database の時計だけ**です。`enqueued_at`、`claimed_at`、`lease_expires_at`、`finished_at` と「Lease が切れたか」の判定は、全て SQL の中で PostgreSQL の `clock_timestamp()`（評価した瞬間の壁時計）を使います。`now()` は Transaction の開始時刻で固定されるため、行の Lock を待った後の判定に、待つ前の古い時刻が使われてしまいます。ただし、`UPDATE` は行の Lock を待つ**前**に `WHERE` を判定し、Lock を持っていた側が Rollback した場合は判定し直さないので、`clock_timestamp()` だけでは不十分です。そこで `heartbeat` / `release` / `complete` は、まず行を `SELECT ... FOR UPDATE` で Lock し（待つのはここ）、次の文で Lease の期限を `clock_timestamp()` で判定して更新します。Lease を与えるときの `claimed_at` と期限は、1 つの文の中で**時計を 1 回だけ**読んだ値（揮発性の CTE）から作るので、ちょうど `lease_seconds` 離れます（`clock_timestamp()` を 2 回書くと、2 回読まれて数マイクロ秒ずれます）。
+Worker が各自の時計を渡す方式では、時計が進んでいる Worker や誤って未来の時刻を渡した呼び出しが、まだ有効な Lease を「切れた」と判定して Entry を奪い、同じ Task を 2 つの Worker で始めさせられます（同様に過去の時刻で待ち行列の先頭へ割り込めます）。Database の時計なら、全ての Process が 1 つの基準を共有します。
+各 Method（`enqueue`、`claim_next`、`heartbeat`、`release`、`complete`、`cancel`）の `now` は省略でき、省略（`None`）が Database の時計です。**本番のコードは `now` を渡してはいけません。** 明示の `now`（Timezone 付きの `datetime`）は Test のための継ぎ目で、`TaskQueue(database, allow_explicit_now=True)` で作った Queue だけが受け取ります。それ以外の Queue は `InvalidQueueingArgumentError("now")` で拒否するので、既定の Queue では呼び出し側が時刻を差し込めません（[Decision 0007](../../docs/decisions/0007-task-queue-budget-and-loop-policy.md) の 6）。継ぎ目は、既存の Test をそのまま使えるように、Constructor で時計を差し替える方式ではなく Method の引数で残しています。
+限界: 基準は 1 つの PostgreSQL Server の時計です。Failover などで別の Server の時計へ切り替わる場合の時計のずれは扱いません（Lease は数十秒以上なので、通常の NTP の精度では問題になりません）。`BudgetTracker` の `clock` は、Queue とは別に Process の時計を使います（Task の実行時間の測定用で、Lease の判定ではありません）。
 
 **行ロック。** `claim_next` は 1 Transaction で、Claim できる行のうち先頭を `SELECT ... ORDER BY ... LIMIT 1 FOR UPDATE SKIP LOCKED` で選び、その行を更新します。他の Transaction がロック中の行は待たずに飛ばします。
 したがって、競合する複数の Claimer が同じ Entry を得ることはなく、互いを待たず、Claim できる Entry がロック中の 1 つだけなら `None` がすぐに返ります。
@@ -442,7 +448,7 @@ Budget の Preset とは無関係に動きます。
   `repeats < repeat_threshold`（3）は `CONTINUE`。それ以上なら Loop で、`approach < max_alternatives`（1）なら `TRY_ALTERNATIVE`、そうでなければ `ESCALATE` です。
   Orchestrator は `TRY_ALTERNATIVE` の後に `approach` を 1 増やして次の失敗を記録します（0 が元の方法、1 が最初の代替）。新しい `approach` は、その中で改めて 3 回繰り返すまで `ESCALATE` になりません。
 - 判定は Deterministic で、同じ履歴には常に同じ結果を返します（`evaluate_loop` は純粋関数）。`LoopDetector.record_failure` は履歴へ追記し、1 Task あたり `window_size` 件を超えた古い行を消します。同じ Task への同時の記録は直列化されます。
-  Restart で新しい試行を始めるときは `clear(task_id)` で履歴を消してください。
+  Restart で新しい試行を始めるときは `clear(task_id)` で履歴を消してください。`clear` も同じ Task 単位の Advisory Lock（`record_failure` と同じもの）を Transaction の間ずっと取るため、書き込み中の `record_failure` があれば、その Commit を待ってから、その行も含めて削除します（未 Commit の行を見逃して先に成功を返すことはありません）。`clear` の後に始まった記録は新しい履歴に属します。
 - 閾値（3 回、Window 10、代替 1 回）は仮の値です（要件は具体的な閾値を実装時の選択としています）。[Decision 0007](../../docs/decisions/0007-task-queue-budget-and-loop-policy.md)（Proposed）で承認を求めています。
 
 ### 次の行動（Escalation の判断）
@@ -575,7 +581,7 @@ Agent の操作は、委任した人間の User の操作として判定しま�
   Grant は権限を狭めるだけで、User の権限を超えることはありません。
 - 委任できる Capability は許可リストです（Chat、Workspace、GitHub、Memory、PR、Shared Memory の閲覧、Project の閲覧・Chat・Task・Repository 編集・PR・Memory 利用）。
   `CapabilityInfo.delegable` には既定値がなく、Capability を追加するときは必ず決める必要があります。
-  Project 設定・Repository 追加・Project Memory 管理を含む管理系、`admin.*`、`owner.*`、`shared_memory.manage`、Member / Agent Policy / Lifecycle は Grant に書いてあっても拒否します（自己権限昇格の禁止）。
+  Project 設定・Repository 追加・Project Memory 管理を含む管理系、`admin.*`、`owner.*`、`shared_memory.manage` と Shared Memory を変える操作の Capability（`shared_memory.create` など）、Member / Agent Policy / Lifecycle は Grant に書いてあっても拒否します（自己権限昇格の禁止）。
   **`agent.use` と `project.agent.use`（Agent を起動する操作）も委任できません。** 子 Agent の Grant を親の部分集合として導く仕組み（PAW-032）ができるまで、Agent が自分より強い Agent を作れないようにするためです。
 - `AgentGrant.project_ids` は**必須**です。Agent が触れる Project の集合か、明示的な `ALL_PROJECTS` を渡します（既定の「User の全 Project」はありません）。
   Project を限定した Grant は、その外の Resource（個人のデータを含む）に及びません。文字列 1 つを渡すと `TypeError` です。
@@ -671,7 +677,7 @@ Application 起動時に一度、接続 User の権限を確認し、**`WARNING`
 ### 手順
 
 前提: `alembic upgrade head` を適用済みで、Operator の Role を作成し（[下記](#database-の-role)）、その接続先を `PAW_OPERATOR_DATABASE_URL` として読める OS User でその Server にログインしていること。
-`owner-recover` は **root（Ubuntu の `sudo`）で実行**してください。root でない Process は拒否されます（`owner-setup` は OS User を確認しません）。`PAW_OPERATOR_DATABASE_URL` を書いた環境変数のファイルは、root だけが読める権限にしてください（Backend を動かす User には読ませません。読めると、Web 側の侵害で Owner の Token を作れます）。
+`owner-recover` は **root（Ubuntu の `sudo`）で実行**してください。root でない Process は拒否されます（`owner-setup` は OS User を確認しません）。root かどうかは、Service（`OwnerOperator.recover_owner`）が**自分の Process の実効 uid（`os.geteuid()`）を自分で読んで**決めます。呼び出し側から uid や `OperatorIdentity` を渡す引数はなく、Library として呼ぶ非 root の Process が root を名乗ることはできません。`PAW_OPERATOR_DATABASE_URL` を書いた環境変数のファイルは、root だけが読める権限にしてください（Backend を動かす User には読ませません。読めると、Web 側の侵害で Owner の Token を作れます）。
 
 ```bash
 # 初回。login name は小文字の英数字と . _ - （3〜64 文字。大文字は小文字へ、全角は半角へ正規化する）
@@ -756,7 +762,7 @@ PAW-022 / PAW-023 が Password と Passkey の Table を追加すると、Applic
 | `owner.token.redeem` | allow `redeemed`（`actor_id` は Owner）/ deny `token_mismatch`、`token_expired`、`token_used`、`token_revoked`、`token_unavailable`、`user_not_eligible`、`attempts_exhausted` | Token の使用と失敗 |
 
 - **実行した人**: PAW-025 の `AuditEvent` には ID 以外の自由な項目がないため、Operator の uid と `SUDO_UID` は **Token の行**（`setup_tokens.issued_by_uid`、`issued_by_sudo_uid`）に数値で記録し、Audit の Event の `resource_id`（`audit_ref`）から Join できます。stderr にも出します。`SUDO_UID` は環境変数で、sudo が設定する**手掛かりであり、本人確認ではありません**。書式が不正な値は保存も表示もしません。
-  **`owner-recover` は root でなければ拒否します**（要件は Ubuntu の `sudo` 経由の Recovery です）。実効 uid が 0 であることだけを見て、`SUDO_UID` は認可に使いません（誰でも設定できる環境変数のため）。拒否は Audit に `owner.recovery_token.issue` / deny / `not_privileged` として残り、何も変更しません。`owner-setup` は今のところ OS User を確認しません（Decision 0005）。Audit に専用の項目を足すかは PAW-025 側の判断です。
+  **`owner-recover` は root でなければ拒否します**（要件は Ubuntu の `sudo` 経由の Recovery です）。Service 自身が、動いている Process の実効 uid が 0 であることだけを見て（呼び出し側が渡した値は信用しません。`recover_owner` にも `setup_owner` にも Identity を渡す引数はありません）、`SUDO_UID` は認可に使いません（誰でも設定できる環境変数のため）。Token の行に記録する uid と `SUDO_UID` も、この同じ読み取りの値です（`IssuedToken.operator` に入り、stderr の表示もこれです）。Test は `os.geteuid` を差し替えて Process の uid を変えます（`tests/identity_support.py` の `running_as`）。Production のコードにその手段はありません。拒否は Audit に `owner.recovery_token.issue` / deny / `not_privileged` として残り、何も変更しません。`owner-setup` は今のところ OS User を確認しません（Decision 0005）。Audit に専用の項目を足すかは PAW-025 側の判断です。
 - **失敗した使用の Audit 行は Token ごとに最大 `max_attempts + 1` 行**です（予約した試行ごとに 1 行と、Token を Lock した試行の `attempts_exhausted` 1 行）。Lock 後の試行は Audit に書かず、Log に固定の 1 行を出すだけです。
 - **未知の Token ID と形式不正の Token は DB に書かず**、Log に固定の 1 行（Token も ID も含まない）だけです。誰でも作れる行になり、Audit の Table は削除できないためです（PAW-025 の未認証の拒否と同じ方針）。
 - **Fail-closed**: 発行・使用・置き換えの Audit は DB の Transaction が Commit される**前**に書きます。書けなければ Transaction を戻し、Token は作られず、消費されず、表示もされません（終了コード 2）。
@@ -811,7 +817,7 @@ Login name は小文字の ASCII 英数字と `.` `_` `-` だけ（3〜64 文字
 - Token ID を知っている人は、試行を使い切らせて正規の使用を妨げられます（Token ID は Token の一部で、通常は Token を知る人しか持ちません。Audit と Log には書かないため、Audit を読める人は知りません）。回復は `owner-recover` です。
 - 比較と DB 往復の回数は全経路で同じですが、**時間そのものは揃えていません**。既存の Token に対する失敗だけは Audit の INSERT が加わるため僅かに長く、これを観測できるのは Token ID を知る人だけです。
 - **Rate Limit は Token ごとの試行の上限だけです。** 接続元ごと・全体の Limit は PAW-022 の Endpoint の責務です。
-- 実行した OS User は Token の行に uid として残ります。`owner-recover` は実効 uid が 0 でなければ拒否しますが、`SUDO_UID` は手掛かりにすぎません。この確認は、DB の認証情報を持つ Process が誤って実行することを防ぐもので、境界そのものではありません（境界は認証情報のファイルの権限）。root の Process や、User Namespace の中の uid 0 は通ります。Container で root 以外として実行する構成では Recovery できません。
+- 実行した OS User は Token の行に uid として残ります。`owner-recover` は実効 uid が 0 でなければ拒否しますが、`SUDO_UID` は手掛かりにすぎません。この確認は、DB の認証情報を持つ Process が誤って実行することを防ぐもので、境界そのものではありません（境界は認証情報のファイルの権限）。同じ Process の中の Code は `os.geteuid` の差し替えも DB への直接の書き込みもできるため、Service の確認は Library として呼ばれる場合の**誤用と Identity の偽装の防止**であり、悪意ある Code への防御ではありません。root の Process や、User Namespace の中の uid 0 は通ります。Container で root 以外として実行する構成では Recovery できません。
 - 発行・使用の成功時は Transaction と Audit のために接続を 2 本同時に使います（Pool の既定は 5）。失敗の経路は同時に持ちません。
 - Token の Web 側での Password・Passkey の扱い（Recovery の Contract）は PAW-022 / PAW-023 の実装で、この Issue の範囲は Token の発行・使用・失効と Audit までです。
 
@@ -834,7 +840,9 @@ broker = ToolBroker(
     PostgresApprovalStore(database),
     audit_sink,
     budget=budget_provider,
-)  # 既定は Budget 不明 = 拒否
+    task_activity=PostgresTaskActivity(database),
+)  # 既定は Budget 不明・Task 不明 = 拒否
+tasks = TaskService(database, listeners=[approval_service.revoke_on_task_end])
 runner = ToolRunner(broker, executor)  # executor: ToolExecutor
 outcome = await runner.run(
     ToolCall(name, arguments, task_context)
@@ -878,12 +886,13 @@ Level は `ToolPolicy` が「Capability class × Environment × Scope の状態�
 前の段階が通った場合だけ次へ進み、各段階は**狭める方向にしか**働きません。
 
 1. 呼び出しの形。`ToolCall` でなければ `invalid_call`。Tool 名は登録済みの名前と**完全一致**だけ（大文字小文字、空白、Zero-width、Unicode の見た目が近い文字は別の名前）。なければ `unknown_tool`。
-2. `returns_credential_plaintext` の Tool は `credential_plaintext_denied`。引数を Tool の宣言（`ArgumentSpec`）と照合します。宣言にない引数、足りない必須の引数、型の違い（`"true"` は bool でなく、`True` は int でない）、長さや範囲の超過は `invalid_arguments`。Path / Host / URL / Project / Credential handle は正規化して `invalid_target` または下の理由で拒否します。文字列に Credential の平文があれば `credential_plaintext_in_arguments`。
+2. `returns_credential_plaintext` の Tool は `credential_plaintext_denied`。引数を Tool の宣言（`ArgumentSpec`）と照合します。宣言にない引数、足りない必須の引数、型の違い（`"true"` は bool でなく、`True` は int でない）、長さや範囲の超過は `invalid_arguments`。Path / Host / URL / Project / Repository / Credential handle は正規化して `invalid_target` または下の理由で拒否します。文字列に Credential の平文があれば `credential_plaintext_in_arguments`。
    **長さの検査は Credential の走査より先**です（Tool の宣言した `max_length`、Path / URL / Host / handle は種別ごとの上限）。1 回の呼び出しの文字列の合計にも上限（262,144 文字）があり、超えたものは走査も正規化もしません。
-3. 対象を Task Scope と比べ（Symlink を解決）、Level を決めます。`DENY` なら `path_out_of_scope` / `host_out_of_scope` / `project_out_of_scope` / `credential_out_of_scope` / `policy_denied`。
+3. 対象を Task Scope と比べ（Symlink を解決）、Level を決めます。`DENY` なら `path_out_of_scope` / `host_out_of_scope` / `project_out_of_scope` / `repository_out_of_scope` / `credential_out_of_scope` / `policy_denied`。
 4. 認可（PAW-025 の `authorize_agent_action`）。委任元 User の権限と `AgentGrant` の積集合で、拒否は `authz_denied`（`authz_reason` に PAW-025 の理由）。Authorizer が失敗または想定外の答えなら `authz_unavailable`。
+   **Repository の呼び出しは、Repository とその ACL で判定します**（下の「Repository の ACL」）。Project の Resource だけでは Repo ACL の override（読み取り専用、Agent 禁止）が効かないためです。
 5. Task Budget（`BudgetProvider`）。超過は `budget_exceeded`、不明は `budget_unknown`、Provider の失敗・Timeout・想定外の答えは `budget_unavailable`。
-6. `AUTO` / `SCOPED_AUTO` は `ALLOW`（`auto` / `scoped_auto`）。`APPROVAL` / `STRONG_APPROVAL` は下の Approval（承認者に見せられない呼び出し、Open な承認が多すぎる、直前に却下された、は `approval_not_displayable` / `approval_limit_reached` / `approval_cooldown`）。
+6. `AUTO` / `SCOPED_AUTO` は `ALLOW`（`auto` / `scoped_auto`）。`APPROVAL` / `STRONG_APPROVAL` は、**Task がまだ動けること**（`TaskActivityProvider`。完了・失敗・取り消し済み、不明、読めない、は `task_not_active` / `task_unknown` / `task_state_unavailable`）を確認してから、下の Approval に進みます（承認者に見せられない呼び出し、Open な承認が多すぎる、直前に却下された、は `approval_not_displayable` / `approval_limit_reached` / `approval_cooldown`）。
 
 判定は `AuditSink` へ記録します（下の Audit）。**記録できない `ALLOW` は `DENY`（`audit_unavailable`）になります。**
 Approval の要求（`NEEDS_APPROVAL`）を作る前に、Path・認可・Budget の判定が済んでいるため、実行できない呼び出しの承認要求は作りません。
@@ -892,11 +901,11 @@ Approval の要求（`NEEDS_APPROVAL`）を作る前に、Path・認可・Budget
 
 `ToolRegistry` は起動時に一度だけ `ToolSpec` の一覧から作り、追加・置換・削除の方法がありません。`ToolSpec` は Tool 名、Capability class、対応する PAW-025 の Capability（必須）、引数の宣言、Environment、`min_level`、`requires_budget`（既定 `True`）を持ちます。
 宣言の整合性は生成時に検査します。**Host / URL の引数を持つ Tool は `network`、Credential handle の引数を持つ Tool は `credential-use` でなければならず**、Project-local の `write` / `destructive` は触る対象（Path / Host / URL / Project の**必須**の引数）を宣言しなければなりません
-（対象のない書き込みは、常に「範囲内」に見えるため。省略できる引数は対象を宣言したことになりません）。`network` は必須の Host / URL、`credential-use` は必須の handle が要ります。Tool 名は `unknown` と `approval*` を使えません（Audit の action と衝突するため）。
+（対象のない書き込みは、常に「範囲内」に見えるため。省略できる引数は対象を宣言したことになりません）。`network` は必須の Host / URL、`credential-use` は必須の handle が要ります。Repository への書き込み（PAW-025 の `project.repo.write` / `project.pr.create`）の Tool は、触れる Repository を表す**必須の Path か Repository の引数**が要ります（Host / URL / Project は Repository を表さないため、Repository の ACL を効かせられません）。Tool 名は `unknown` と `approval*` を使えません（Audit の action と衝突するため）。
 
 ### Task Scope と正規化の契約
 
-`TaskScope` は、Task が触れる Path の Root（先頭が相対 Path の基準）、Host、Project（Project の状態つき）、使える Credential handle を持ちます。比較は**正規化した形どうしの完全一致**で、Prefix や Wildcard の一致はありません（`scope.py` の docstring が契約の正本です）。
+`TaskScope` は、Task が触れる Path の Root（先頭が相対 Path の基準）、Host、Project（Project の状態つき）、使える Credential handle、作業対象の Repository（`repositories`、下の「Repository の ACL」）を持ちます。比較は**正規化した形どうしの完全一致**で、Prefix や Wildcard の一致はありません（`scope.py` の docstring が契約の正本です）。
 
 - **Path**: 絶対 Path、または先頭の Root からの相対。`.` と空の Segment は取り除き、**`..`（と `...`、空白や点だけの Segment）は畳み込まず拒否**します（Symlink の先の `..` は File System と字句上で食い違うため）。
   `\`、`~` で始まる名前、`%2e` `%2f` `%5c`、制御・書式・Separator 文字、NFKC で変わる文字（全角の `．．／`、合字、分解形）、1024 文字超は拒否。
@@ -906,6 +915,25 @@ Approval の要求（`NEEDS_APPROVAL`）を作る前に、Path・認可・Budget
 - **Host / URL**: ASCII のみ（国際化 Domain は `xn--`）、小文字化、末尾の `.` を 1 つ除去、Label を検査。数字で終わる Host は厳密な Dotted-quad の IPv4 だけ（`127.1`、`0x7f.1`、`2130706433` は拒否）。
   URL は `http` / `https` の既定 Port だけで、ユーザー情報（`user@`）、`\`、空白は拒否します。Scope の Host と**完全に一致**したときだけ範囲内です（`github.com.evil.com` も `gist.github.com` も外）。
 - **Project** は正規形の UUID、**Credential handle** は `cred_` + 32 桁の 16 進だけ。
+- **Repository** は正規形の UUID（`ArgumentKind.REPOSITORY`）で、Task の作業対象（`TaskScope.repositories`）にあるものだけです（なければ `repository_out_of_scope`）。
+
+### Repository の ACL
+
+Project の Member でも、Repository ごとの ACL override（`read` / `write` / `agent`。要件の「Project / Repo Permission Inheritance」）で、読み取り専用や Agent の操作禁止にできます。
+Broker は、呼び出しがどの Repository に触れるかを **Backend が作った `TaskScope.repositories`**（`ScopedRepository`: Repository の ID、Project、Worktree の Path、**解決済みの `RepoAcl`**）から決め、その Repository に対する `Resource.repository(...)` で `authorize_agent_action` を呼びます。ACL を読むのは Authorizer（PAW-025 の `decide` / `decide_agent`）で、Broker は判定を自分で作りません。
+
+| 触れる Repository | 決まり方 |
+| --- | --- |
+| 呼び出しが名指し | `repository` 引数（`ArgumentKind.REPOSITORY`）。Task の作業対象にない ID は `repository_out_of_scope`（DENY） |
+| Path | **Symlink を解決した後の** Path が、Repository の Worktree（同じく解決する）の中にあるもの。入れ子の Repository の中の Path は、外側と内側の**両方**に触れます（厳しい方の ACL が効く） |
+| Host / URL | **Repository を表しません**（同じ Host に多くの Repository があるため）。リモートへ書く Tool は `repository` 引数を宣言する |
+
+- **ACL が不明なら拒否します。** `ScopedRepository.acl=None`（Backend が解決できなかった）は `inherit` とは読まれず、`authz_denied`（`authz_reason=repo_acl_unresolved`）。ACL は Repository と Project が一致するものだけを `ScopedRepository` に入れられます（違えば構築時に `ValueError`）。
+- **ACL は呼び出しごとの現在の値です。** Task の Scope は呼び出しごとに作り直すため、ACL の変更は次の呼び出しから効きます。承認を使うときも認可をもう一度行うので、ACL が狭まった後は承認済みの呼び出しも `authz_denied` になり、承認は消費されません。
+- **Repository への書き込み**（PAW-025 の `project.repo.write` / `project.pr.create`）の Tool は、触れる Repository を **Path か Repository の必須引数**で宣言しなければなりません（`ToolSpec` の生成時に `ValueError`）。それでも作業対象のどの Repository にも触れない呼び出し（作業対象の外の Path など）は `repository_not_identified` で拒否します（ACL を読めない書き込みは通しません）。
+- 読み取りと Agent 実行（`project.read`、`project.task.run` など）で、触れる Repository がない呼び出しは、これまでどおり Project の Resource で判定します。引数のない Tool は Repository の ACL では判定できないことを、既知の制限に書きます。
+- Repository を表さない Project の Capability（`project.chat`、`project.settings.manage` など）は Project の Resource のままです（PAW-025 は、これらに Repository の Resource を渡すと拒否します）。
+- 判断の理由と、Human の承認を待つ点は [Decision 0006](../../docs/decisions/0006-tool-broker-policy.md) の「8. Repository の ACL」。
 
 ### Credential
 
@@ -936,10 +964,23 @@ Approval の要求（`NEEDS_APPROVAL`）を作る前に、Path・認可・Budget
 | 別の呼び出し | 引数・Tool・Task・Agent・User・Level のどれかが違えば `approval_mismatch`（承認は消費されません） |
 | 承認できる人 | Agent が働いている **User 本人だけ**（`ApprovalService.approve / reject`、引数は人間の `Principal`）。Agent 自身の ID は `self_approval`。他の人は Admin / Owner でも、存在を教えず `not_found`（Audit には `not_authorised`）。DB の CHECK 制約も、承認者が委任元 User であること、Agent が User と別であることを保証します |
 | `STRONG_APPROVAL` | 承認のとき `StepUpVerifier.verify(user_id, approval_id)` が**明示的な `True`** を返す必要があります（PAW-023 が実装）。Verifier がない、`False`、例外、Timeout、`True` 以外の答えは `step_up_required` で、承認は保留のままです。Store の `decide` も `step_up_verified` を受け取り、Step-up なしには強い承認を保存しません（`step_up_verified` の列と CHECK 制約。Store を直接呼ぶ側にも効きます） |
-| 取り消し | `ApprovalService.revoke`。委任元 User と、Admin / Owner（権利を減らす方向だけなので代われる）。pending・承認済みで未使用の承認だけ。Task が終わったら（`cancelled` / `failed` / `completed`）その Task の Open な承認は自動で取り消されます（`TaskService(listeners=[approval_service.revoke_on_task_end])`）。使うときは `approval_revoked` |
+| 取り消し | `ApprovalService.revoke`。委任元 User と、Admin / Owner（権利を減らす方向だけなので代われる）。pending・承認済みで未使用の承認だけ。Task の終了での取り消しは、下の「Task の終了と承認」。使うときは `approval_revoked` |
 | 使うとき | 認可・Scope・Budget を**もう一度**判定します。承認は権限を広げません。拒否された使用は承認を消費しません |
 
 `ApprovalService` は Broker と**別の Object**です。Agent の Runtime へは Broker（または Runner）だけを渡し、`ApprovalService` は渡さないでください（渡さなくても上の規則が守られますが、それが最初の防御です）。
+
+#### Task の終了と承認
+
+**Task の終わりは 3 つ**です。`completed`（完了）、`failed`、`cancelled`（`paw_backend.tasks.TERMINAL_STATES`）。Task の状態に `expired` はなく、承認は自分の `expires_at` で失効します（期限後は `approval_expired`。期限切れは取り消しの対象にもなりません）。
+`failed` と `cancelled` は Retry / Restart で再び動きます。
+
+- **正常時:** `TaskService(listeners=[approval_service.revoke_on_task_end])` を配線すると、終了の遷移が Commit された**後**に、その Task の Open な承認（pending と、承認済みで未使用）を全部取り消します（`revoked`、reason `task_ended`）。3 つの終わりの全部を `tests/test_tools_postgres.py` の `TaskEndPathsTest` が、本物の `TaskService` と Table で確かめます。
+- **取り消しに失敗したとき（Store の障害）:** `revoke_task` / `revoke_on_task_end` は `ApprovalRevocationError` を**上げます**（以前は Log を出して `0`、つまり「Open な承認はなかった」と同じ戻り値でした）。`TaskService` は Listener の失敗を Log（型名だけ）に残し、Commit 済みの遷移は戻りません。**再試行する仕組みはありません**（`revoke_task` は冪等なので、後から呼び直せます）。
+- **だから、Broker が独立に止めます。** 承認を要する呼び出しは、承認を**開く**ときも**使う**ときも、`TaskActivityProvider.check(task_id)` が `ACTIVE` を答えたときだけ進みます。終了した Task の承認は、Store がまだ `approved` と言っていても使えず（`task_not_active`）、消費もされません。終了した Task には新しい承認も開きません。Provider が失敗・Timeout・想定外の答えなら `task_state_unavailable`、Task が見つからなければ `task_unknown`（既定の `FailClosedTaskActivity` は常に不明: 本物の Provider を入れるまで承認を要する呼び出しは通りません）。
+  `PostgresTaskActivity` は `tasks.state` を、Pool を使わない中断可能な接続で読みます。
+- **再び動く Task:** Retry / Restart（終了状態からの遷移）でも Listener は Open な承認を取り消します。終了時の取り消しが失敗して残った承認は、再開した Task では使えず、新しい承認を求め直します。
+- **範囲と限界:** 承認を要しない呼び出し（`AUTO` / `SCOPED_AUTO`）は Task の状態を見ません（終わった Task へ呼び出しを渡さないのは Orchestrator の責務です）。確認から `consume` までの間に Task が終わる競合は残ります（その呼び出しは確認の時点では動ける Task のものです。実行中の呼び出しは Task の `stop_now` / `cancel` が止めます）。
+  判断の理由は [Decision 0006](../../docs/decisions/0006-tool-broker-policy.md) の「9. Task の終了と承認」（Proposed）。
 
 **永続化（決定）: PostgreSQL に保存します。** 理由: 承認は Task が `waiting`（承認待ち）の間、Backend の再起動をまたいで残る必要があり（要件は Client の切断後も状態を保持）、
 単回・期限・二重承認の保証は複数の Process が同じ行を更新できる Database でこそ成り立つためです。Audit Sink だけに書く案は、状態の読み出しも排他もできないため採りませんでした。
@@ -991,6 +1032,7 @@ Tool の実行を伴う記録（許可と実行後）は Fail-closed で、許�
 | `ToolExecutor.execute(invocation)` | 各 Tool の実装（別 Issue） | なし（`ToolRunner` に必須）。契約は下の「Executor の契約」 |
 | `BudgetProvider.check / charge` | PAW-033 | `FailClosedBudgetProvider`（予算なし = 予算が必要な Tool は拒否）。`check` は何も消費せず、同時の呼び出しは上限を少し超えうる。厳密な上限には PAW-033 が原子的な予約を追加する |
 | `StepUpVerifier.verify` | PAW-023 | `FailClosedStepUp`（Step-up の承認はできない） |
+| `TaskActivityProvider.check` | Deployment（`PostgresTaskActivity(database)`） | `FailClosedTaskActivity`（Task は不明 = 承認を要する呼び出しは拒否） |
 | `PathResolver.resolve` | Deployment | `RealpathResolver`。`LexicalPathResolver` は Symlink のない環境の Test 用 |
 
 `ToolRunner(execution_timeout=)` の既定は 600 秒（最大 24 時間。`None` は不可）。実行後の記録（Audit と Budget の Charge）は `finally` で `asyncio.shield` して書くため、Task が Cancel されても、実行後の処理が失敗しても残ります。
@@ -1013,18 +1055,19 @@ Broker は呼び出しの**前**に判定します。次は、実際に実行す
 - 承認できるのは委任元 User だけで、Admin / Owner が他の User の Task を承認する仕組みはありません（取り消しはできます）。
 - 外部 write と外部の読み取りの許可は `TaskScope.hosts` と、承認（正確な URL を見て 1 回）で表しています。Issue 作成や PR 作成といった「目的」の単位ではありません。
 - 承認者の表示は各引数の 256 文字までです。長い値は全長と Hash の先頭だけが付きます。承認 UI（PAW-022 以降）は `summary` を表示してください。
+- **Repository の ACL で判定できない呼び出し。** Path も `repository` 引数もない Tool（`tests.run` のように作業ディレクトリを暗黙に使うもの）は、Project の Resource で判定します。Repository の ACL を効かせたい Tool は、触れる Path か `repository` を必須引数にしてください。作業対象の Repository を `TaskScope.repositories` に正しく並べること（Worktree の Path、ACL）は Orchestrator の責務で、Broker は渡された値を信頼します。
 - 引数のない Tool（`host.reboot` など）は承認を開けません（`approval_not_displayable`）。承認が要る Tool は、何をするかを表す引数（対象、理由）を必須にしてください。
 - Approval の期限は 1 つです（承認してから使うまでの猶予は別にありません）。期限は Application の時計で比較します（Database の時計ではありません。複数の Host の時計のずれ、Test の時計の注入のため）。
 - 却下の Cooldown は Hash 単位で、引数を変えた別の呼び出しは止めません（件数の上限が量を抑えます）。
 - `check` と `charge` の間の競合、Symlink の確認と使用の間の競合（TOCTOU）、Credential 検出が Best Effort であることは上に書いたとおりです。
 - Model の出力から `ToolCall` を作る Adapter は JSON を `benchmarks/json_input.decode_json` と同じ厳密さ（重複 Key、`NaN` を拒否）で読んでください。Broker は Mapping を受け取り、Key と値の型を上の規則で検査します。
-- **後続の課題:** 承認する Process と Agent 側の Process の Role の分離（上）、承認 UI と一覧の Endpoint（PAW-022）、`SECURITY DEFINER` 関数による遷移の限定、Database の時計での期限、`TaskService` への `revoke_on_task_end` の配線（PAW-034）、共通 Helper（`paw_backend.db_roles.grant_app_privileges`）による GRANT の置き換え。
+- **後続の課題:** 承認する Process と Agent 側の Process の Role の分離（上）、承認 UI と一覧の Endpoint（PAW-022）、`SECURITY DEFINER` 関数による遷移の限定、Database の時計での期限、`TaskService` への `revoke_on_task_end` の配線と `PostgresTaskActivity` の注入（PAW-034）、終了時の取り消しに失敗した Task の再取り消し（今は `revoke_task` を呼び直す）、共通 Helper（`paw_backend.db_roles.grant_app_privileges`）による GRANT の置き換え。
 
 ## Memory / Conversation Schema
 
 [PAW-040](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/34)（Revision `0040`）で実装した Schema です。
 設計は [Memory Architecture](../../docs/MEMORY_ARCHITECTURE.md) と [要件](../../REQUIREMENTS.md) の Memory の節に従います。
-Repository / Service は含みません。
+Repository / Service は含みません（Shared Memory の管理だけは [PAW-046](#shared-memory-administration) の `memory/shared/` にあります）。
 
 | 層 | Table | 内容 |
 | --- | --- | --- |
@@ -1103,6 +1146,169 @@ ANN Index（HNSW / IVFFlat）はまだありません。Model が決まった後
 Model と Migration の一致は Test が検証します（Alembic の autogenerate の差分が空であること、Model から作った Schema と Migration の Catalog が同じであること）。
 制約名は `paw_backend.db.Base` の命名規則に従います。
 
+## Shared Memory Administration
+
+[PAW-046](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/40)（Revision `0046`、`paw_backend/memory/shared/`）で実装しました。
+Workspace 全体で共有する Memory（Shared Memory）の閲覧・作成・編集・削除・復元と、Shared Memory Candidate の提案・承認・却下、
+System Security Policy を優先する Effective View を扱う `SharedMemoryService` です。**HTTP の Endpoint はまだありません**（API の Issue が呼びます）。
+要件は [REQUIREMENTS.md](../../REQUIREMENTS.md) の「Shared Memory permissions」、
+要件が決めていない選択は [Decision 0009](../../docs/decisions/0009-shared-memory-administration.md)（**Proposed、未承認**）です。
+
+Shared Memory は PAW-040 の Table（`memories` と、`scope = 'shared'` の `memory_versions`）に置きます。新しい Table は Candidate 用の `shared_memory_candidates` 1 つです。
+Candidate を Version にしないのは、`shared` の Version は全 User が読める（`memory.acl`）のに対し、Candidate は承認前で、Private な Memory から来た内容を持つためです。
+
+### 権限
+
+すべてのメソッドは、最初の引数に操作する `actor`（`paw_backend.authz.Principal`、または委任元 User と Grant を持つ `AgentActor`）を取り、
+`Authorizer` に 1 回問い合わせます。Audit は Authorizer が記録します（`shared_memory.read` は拒否だけ、その他は全件で、記録に失敗すると許可は拒否になります）。
+Audit の `action` は Capability の値です。Shared Memory を変える操作は、それぞれ**専用の Capability** を使うので、Audit の履歴だけで操作を見分けられます（下の「Audit の Action」）。
+
+| メソッド | Capability | できる人 |
+| --- | --- | --- |
+| `list_memories`、`get_memory`、`effective_view` | `shared_memory.read` | すべての Active User。`shared_memory.read` を Grant された Agent（全 Project 対象の Grant のみ。Project を限った Grant は拒否） |
+| `create_memory` | `shared_memory.create` | Owner、Admin（人間） |
+| `edit_memory` | `shared_memory.edit` | Owner、Admin（人間） |
+| `delete_memory` | `shared_memory.delete` | Owner、Admin（人間） |
+| `restore_memory` | `shared_memory.restore` | Owner、Admin（人間） |
+| `approve_candidate` | `shared_memory.candidate.approve` | Owner、Admin（人間） |
+| `reject_candidate` | `shared_memory.candidate.reject` | Owner、Admin（人間） |
+| `list_candidates`、`get_candidate`、`list_memories` / `get_memory` の `include_deleted=True` | `shared_memory.manage`（管理者だけが見られる情報の閲覧。何も変えない） | Owner、Admin（人間） |
+| `propose_candidate` | `memory.use` | User が自分のために。Agent が委任元 User のために（Grant に `memory.use`） |
+
+**自動昇格はしません。** 上の表の管理の操作（`shared_memory.manage` と、操作ごとの `shared_memory.create` などの Capability）は、人間の Owner / Admin の決定だけで行います。
+
+1. Agent（`AgentActor`）と `system` role の Principal（Background Worker）は、Authorizer が何を答えても、常に `AutomaticPromotionRefusedError` で拒否します（Authorizer の判定は先に記録されます）。
+   管理の Capability はすべて委任不可（`delegable=False`）でもあります。
+2. Owner / Admin 以外の `Principal` は `SharedMemoryPermissionError` です。Authorizer が（Policy の変更などで）許可しても、Service が Owner / Admin でなければ拒否します。
+3. Authorizer が `Decision` でない値を返したら拒否します（`invalid_decision`）。
+4. Agent は Candidate を提案できますが、Candidate は `pending` のままです。承認は人間だけで、承認した人が Version の `actor_user_id` になります。
+5. Shared Memory を作る・変える経路は、`SharedMemoryService` の上の表のメソッドだけです（`tests/test_shared_memory_contract.py` が公開メソッドの一覧を固定します）。
+
+#### Audit の Action
+
+削除・復元は `memory_versions` の `status` を変えるだけで、誰がいつ行ったかを行に残しません（[Decision 0009](../../docs/decisions/0009-shared-memory-administration.md) の 7）。履歴は Audit だけです。
+Authorizer は `action` に Capability の値を書くので、全操作が 1 つの Capability（`shared_memory.manage`）だと、削除と復元、作成、編集、承認、却下を見分けられません。
+そこで、変更する 6 つの操作にそれぞれ Capability を追加しました（`authz/capabilities.py`。すべて `Scope.SYSTEM`、委任不可、Audit Mode `REQUIRED`、Owner / Admin だけ）。
+
+| `action` | 操作 | `resource_kind`、`resource_id` |
+| --- | --- | --- |
+| `shared_memory.create` | `create_memory` | `shared_memory`、なし |
+| `shared_memory.edit` | `edit_memory` | `shared_memory`、Memory の ID |
+| `shared_memory.delete` | `delete_memory` | `shared_memory`、Memory の ID |
+| `shared_memory.restore` | `restore_memory` | `shared_memory`、Memory の ID |
+| `shared_memory.candidate.approve` | `approve_candidate` | `shared_memory_candidate`、Candidate の ID |
+| `shared_memory.candidate.reject` | `reject_candidate` | `shared_memory_candidate`、Candidate の ID |
+
+- Audit の行は `actor_id`（操作した User）、`actor_role`、`decision`、時刻を持つので、「誰がいつ何を削除・復元したか」は行から分かります。拒否された試みも、試みた操作の `action` で残ります。
+- 追加の書き込みや Sink はありません。判定の Audit そのものを使うので、既存の性質（既定は拒否、Audit の行は変更が見える前に書かれる、Audit を書けなければ許可を拒否に変える）はそのままです。
+- `shared_memory.manage` は、管理者だけが見られる情報の閲覧（削除済みの Memory、Candidate）に残しました。何も変えないので、履歴で見分ける必要が小さく、`resource_kind` と `resource_id` の有無（一覧か 1 件か）で区別できます。
+- 限界: 復元・削除の理由（`reason`）は残りません（Audit は Content や自由な文を持たない）。Candidate の承認・却下の理由は Candidate の行にあります。
+
+呼び出しの順序は、(1) 引数の検証（`InvalidSharedMemoryInputError`、`actor` の型を含む）、(2) 認可（拒否は Database に触れる前）、(3) Database の使用、です。
+削除済みの Memory を含める読み取りも、認可の前に存在を知らせないため、Owner / Admin 以外には「見つからない」ではなく「権限がない」を返します。
+
+### Shared Memory の状態と Version
+
+Memory は、**現在の Version（`version_number` が最大の Version）** で見ます。現在の Version が `scope = 'shared'` で、`status` が `active`（状態 `ACTIVE`）または
+`deprecated`（状態 `DELETED`）のものだけが Shared Memory です。それ以外（他の Scope、`history` / `superseded` の Version）は、この Service では「見つからない」です。
+
+- **作成**: Version 1（`active`、`confirmation_state = 'confirmed'`、`freshness_policy = 'permanent'`、`actor_type = 'user'`）。
+- **編集**: 上書きしません。現在の Version を `superseded` にし、新しい Version `n + 1`（`active`）を書き、新しい側から古い側への `supersedes` 関係（`reason` は変わった項目の名前をアルファベット順に `", "` でつないだもの）を追加します。
+  `expected_version` が現在の番号と違えば `SharedMemoryVersionConflictError`（Optimistic Lock）。何も変わらない編集は、何も書かずに現在の Memory を返します。削除済みの Memory は編集できません（先に復元）。
+- **削除**: 現在の Version の `status` を `deprecated` にします（何も消しません）。**復元**は `active` に戻します。Version は増えません。誰がいつ削除・復元したかは Audit Event にだけ残ります。
+  削除済みの Memory は、一般 User の一覧・取得には出ません（「見つからない」）。
+- 編集できる項目は `title`（200 文字まで）、`content`（20,000 文字まで）、`memory_type`（`[a-z][a-z0-9_]{0,63}`）、`importance`（0〜100）、`policy_subjects`（20 個まで）です。`reason`（500 文字まで）は Version の `change_reason` になります。
+- 一覧は古い順（`memories.created_at`、同時刻は `id`）で、`limit`（1〜200、既定 50）と `offset`（0〜100000）で区切ります。
+
+### Candidate
+
+Candidate は「Shared Memory にしたい内容」で、提案者（User、Agent の場合は委任元 User と Agent）、元の Memory の Scope と任意の Version ID（提案者の申告で、Service は確認しません）、状態を持ちます。
+**Owner / Admin だけが見られます**（`list_candidates`、`get_candidate`）。
+
+- 状態機械は `pending` → `approved` / `rejected` だけです（`lifecycle.next_candidate_state`）。決定済みの Candidate への操作は `SharedMemoryStateError` です。
+- **承認**は、1 つの Transaction で、Candidate を `FOR UPDATE` でロックし、Candidate の内容で新しい Memory の Version 1 を書き、`memory_sources` に
+  `source_type = 'user_confirmation'`、`source_ref = 'shared_memory_candidate:<candidate id>'` の 1 行を書き、Candidate を `approved`（決定者、時刻、任意の理由、新しい Memory の ID）にします。
+- **却下**は Candidate を `rejected` にするだけです。
+- 1 人が持てる `pending` の Candidate は 50 件までです（`CandidateLimitError`）。Agent の提案は委任元 User に数えます。数える処理は User ごとの Advisory Lock で直列化するので、同時に提案しても超えません。
+
+### System Security Policy の優先（Effective View）
+
+Shared Memory は System Security Policy を上書きできません。Backend は文章の矛盾を判定できないので、衝突は**宣言**で決めます。
+
+- Shared Memory は `policy_subjects`（`merge.permission` のような、`.` 区切りで最大 5 階層の Key）を持てます。Owner / Admin が作成・編集・承認のときに設定します。
+- Policy の項目 `SystemPolicyItem` は `policy_id`、`subject`、`statement`（不透明な本文）です。項目は `SystemPolicySource.items()` から、呼び出しごとに読みます（`StaticPolicySource` は固定のリスト用）。Policy の内容はこの Issue では決めません。
+- Memory の `policy_subjects` のどれかが Policy の `subject` と等しい、またはその下位なら、その Memory は上書きされます（`merge` は `merge` と `merge.permission` を覆い、`mergeable` や `merge_x` は覆いません。Policy が下位のときも覆いません）。
+- `effective_view` は、上書きされた Memory を `memories` に含めず、`overridden` に ID と勝った Policy の ID だけを返します（内容は返しません）。上書きした Policy は `applied_policies`（`policy_id` 順）に入ります。
+- Policy を読めないとき（Source の失敗、遅延、契約違反）は、Memory を 1 件も返さずに `PolicySourceError` で失敗します（fail closed）。エラーと Log に Source の例外の文言は出ません。
+- `list_memories` と `get_memory` は保存されている Memory をそのまま返します（管理用）。モデルに渡す内容は `effective_view` で作ります。
+- **限界**: `policy_subjects` を宣言していない Memory は、この規則では上書きされません（意味の矛盾は Owner / Admin の承認と、PAW-042 の矛盾検出で補います）。Shared Memory は権限を与えないので、Tool や Merge の可否は Memory と無関係に Backend が強制します。
+
+### Database と権限
+
+Migration `0046` は `shared_memory_candidates` を作ります（`down_revision` は `0050`）。
+Application の Role には、[上の規則](#migration-は-application-の-role-に権限を与えるcontributor-向けの規則)のとおり、Service が実行する最小の権限だけを与えます。
+
+| Table | 与える権限 | 理由 |
+| --- | --- | --- |
+| `shared_memory_candidates` | SELECT、INSERT、UPDATE（`state`、`decided_by`、`decided_at`、`decision_reason`、`memory_id` のみ） | 提案（INSERT）と 1 回の決定（UPDATE）。`SELECT ... FOR UPDATE` は UPDATE 権限が要り、この 5 列で足りる。提案の内容、提案者、出典、作成時刻は書き換えられず、DELETE も与えない |
+| `memories`、`memory_versions`、`memory_relations`、`memory_sources` | PAW-040 のまま | Service は INSERT と、`memory_versions.status` の UPDATE だけを使う。`memories` の DELETE は使わない（削除は `deprecated`。物理削除の経路は別 Issue） |
+
+`shared_memory_candidates` の CHECK 制約は、状態の値、文字数の上限（Service の上限と同じ数）、`pending` は決定を持たないこと、決定済みは決定者と時刻を持つこと、`memory_id` は `approved` だけが持つことを強制します。
+`memory_id`、人・Agent・出典の ID は、外部キーのない素の UUID です（PAW-040 の Test が、Memory の層の Table と他の Table を外部キーでつなぐことを禁じています）。DB は存在を確認せず、Service は承認で自分が書いた Memory の ID だけを入れます。
+
+`tests/test_shared_memory_grants.py` は、Service の Test を非 Superuser の Role で実行し、権限が過不足ないことを検査します。
+
+### 同時実行
+
+- 1 つの Memory に書く操作（編集・削除・復元）は、まず `memory_lock_key(memory_id)` の Advisory Lock（Transaction 単位）を取り、新しい Statement で現在の Version を読みます。
+  そのため同時に編集する 5 人のうち、勝つのは 1 人で、残りは `SharedMemoryVersionConflictError` です。削除と編集が競合しても、`active` の Version が残ることはありません。
+- Candidate の決定は Candidate の行を `FOR UPDATE` でロックし、`WHERE state = 'pending'` の条件付き UPDATE で決めるので、同時に 2 回承認しても Memory は 1 つだけです。
+- 書き込みの Transaction は `SET LOCAL lock_timeout`（`lock_timeout_ms`、既定 3000）で始まり、超えると `SharedMemoryBusyError`（何も変わらない）です。読み取りはロックを待ちません。
+- `version_number` の Unique 制約と `active` の Partial Unique Index が、最後の防波堤です。
+
+### Rule 関数と Service の分担
+
+判断の規則（Candidate の状態機械、Version の扱い、優先の解決）は、純粋な関数として `lifecycle.py` と `precedence.py` に分けています。
+Service（`service.py`）は認可、検証、Transaction、Lock、SQL を持ち、判断の箇所でこれらの関数を呼びます。
+Service は、Rule 関数の戻り値を、契約に照らして確認してから書き込みます（`RulesContractError`）。
+たとえば、承認では Candidate と違う内容の Draft や期待と違う状態を、編集では並び順の違う変更項目や、版の違う Plan を拒否し、状態の更新は「更新前の状態が想定どおり」の場合だけ行います。
+
+| Module | 関数 |
+| --- | --- |
+| `lifecycle.py` | `next_candidate_state`、`check_deletable`、`check_restorable`、`apply_changes`、`changed_fields`、`plan_edit`、`draft_from_candidate` |
+| `precedence.py` | `subject_covers`、`overriding_policy_ids`、`resolve_effective_view` |
+
+**実装の由来:** この 2 つの Module の関数本体（10 個）は、ローカルの Qwen3-Coder-30B-A3B が、契約（Docstring と手計算した例）と Test だけを仕様として実装しました（1 回の実行、約 190 回の Tool 呼び出し）。Claude が書いた契約と Test（507 件）を、実 PostgreSQL の全体の CI（2,885 件）で通ることを確認しました。
+Review で、`resolve_effective_view` の仕様の Docstring が Model によって書き換えられていたため、元の Docstring に戻しています（本体の振る舞いは変えていません）。空の作業 File（`APPROVED`、`REJECTED`）も残していたので削除しました。
+Model の実装は、Test を通すことに必要な範囲で素直な書き方です。Model が書いた部分と、Claude が書いた部分（Model、Service、Validation、Migration、Test、Decision 0009）の境界は、上の表のとおりです。
+
+### 制限と未確認の点
+
+- HTTP の Endpoint、通知、Web の画面はありません。提案者が自分の Candidate の状態を見る方法もありません（Decision 0009 の 3）。
+- Policy の実体（保存、Admin による変更、強制）はこの Issue の範囲外です。`SystemPolicySource` の実装は、Policy を持つ Issue が用意します。
+- `policy_subjects` の宣言が前提です（上の限界）。PAW-042 の矛盾検出が宣言を補う設計は未実装です。
+- Shared Memory の鮮度（再確認の期限など）は `permanent` 固定です（PAW-042 で決めます）。
+- Embedding と Markdown Projection（PAW-043 / PAW-045）は、この Service を通りません。Shared Memory を読む Retrieval は、`readable_memory_versions` を使い、モデルに渡す前に Policy の優先を適用する必要があります（この Service の `effective_view`、または `precedence.resolve_effective_view`）。
+- 上限の数値（50 件、20 個、20,000 文字など）は実測に基づかない仮の値で、`memory.shared.limits` にあります。
+- Migration `0046` の `down_revision` は `0050` です（鎖は `0001 → 0025 → 0032 → 0040 → 0021 → 0033 → 0031 → 0050 → 0046`）。Revision ID は Issue 番号で、鎖の順序ではありません。統合時に Orchestrator が並びを確認します。
+- 一覧の同時刻の並び（`id` の副次キー）は決定的にするためのもので、Test は「同時刻の 12 件が `id` 順」だけを確認します。Query Plan によっては副次キーがなくても同じ順になるため、その Test だけでは副次キーの削除を検出できません（変異 Test で確認済み）。
+
+### 人間の判断が必要な点
+
+[Decision 0009](../../docs/decisions/0009-shared-memory-administration.md)（Proposed）の次の点です。
+
+1. Candidate を別 Table にすること、Agent の提案を許すこと、提案者に Candidate を見せないこと、`pending` 50 件の上限。
+2. 削除・復元を `status` の切り替えにし、Version を増やさないこと（誰が削除したかは Audit Event だけ）。その Audit の `action` を操作ごとに分けるために Capability を 6 つ追加したこと（Decision 0009 の 12）。
+3. `policy_subjects` の宣言で Policy との衝突を決めること（宣言がなければ上書きされない）。
+4. `effective_view` が、上書きした Policy の `statement` を User にも返すこと。
+5. 承認した Shared Memory の鮮度を `permanent` にすること。
+
+### Test
+
+`tests/test_shared_memory_*.py`。Rule 関数は Database なしの Test（`..._rules_*.py`）、Service は実 PostgreSQL の Test（`PAW_TEST_DATABASE_URL` がないと Skip）、
+Migration（上げ下げ、Model との差分、制約）、権限（非 Superuser の Role で Service の Test を実行）、自動昇格の拒否（`..._promotion_refused.py`）、
+操作ごとの Audit の `action`（`..._audit_actions.py`。実 `audit_events` の行を読み、非 Superuser の Role でも実行）があります。
+
 ## Research Scratch Store
 
 [PAW-050](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/42)（Revision `0050`）で実装しました。
@@ -1117,6 +1323,7 @@ Model と Migration の一致は Test が検証します（Alembic の autogener
 | `records.py`、`errors.py` | 返す値（`ScratchItem`、`Lease`、`PurgeResult`）と型付きの Error |
 | `validation.py` | 引数の検証（DB を使わない純粋関数） |
 | `service.py` | `ScratchStore`（Clock は注入） |
+| `janitor.py` | `ScratchJanitor`: `purge_expired` を定期的に呼ぶ Loop（`sleep` は注入）。`create_app` の Lifespan が起動する |
 
 ### Table
 
@@ -1176,9 +1383,25 @@ Error の Message は固定文字列（Field 名と理由の語彙）で、入�
 Local Model の試行は収束せず、構文エラーを含む部分的なコードしか作れなかったため、**この 2 つの Module は Claude の参照実装**です（人間の判断が必要な点は下記）。
 Test は参照実装で成り立つことを確認しながら書いたものです。Local Model の試行の前に確定しており、その後の変更は、負荷の高い環境で 20 件の同時 `acquire_use` が Lock Timeout に達しないよう、その 1 件の Test の `lock_timeout_ms` を伸ばしただけです。
 
+### Janitor（期限切れの削除）
+
+`ScratchStore` は期限切れの Item を全ての Method で見えなくしますが、行と調査内容を消すのは `purge_expired` だけです。呼ぶ処理がなければ 24 時間の TTL は DB で実施されません。
+`janitor.py` の `ScratchJanitor` がその Loop です。`create_app` の Lifespan が、**DB が設定されていて `PAW_SCRATCH_PURGE_INTERVAL_SECONDS` が 0 より大きいとき**だけ、Heartbeat や権限の Diagnostic と同じ場所で起動します。
+
+- **間隔。** `PAW_SCRATCH_PURGE_INTERVAL_SECONDS`（既定 3600、`0` で止める。それ以外は 60〜86400 で、1〜59 と範囲外は起動時の設定 Error）。起動の 30 秒後（間隔が短ければその間隔）に最初の Tick、その後は間隔ごとです。すぐには実行しないので、起動処理や Diagnostic と競合せず、すぐ止められた Backend は Purge の接続を開きません。
+- **1 回の Tick。** `purge_expired` を 500 件の Batch で、これ以上消せる行がない（`has_more` が偽）まで呼びます。1 Tick は最大 100 Batch（5 万行）で、上限に達して残りがあれば、次の Tick は 5 秒後です。Batch は 1 Transaction なので、途中で失敗しても、済んだ Batch の削除は残ります。
+- **削除の条件は Store のまま。** 期限は Store の Clock が決めます。Pin 済み・使用中（Lease）・昇格確認中の Item は消えず、その事情が終わった後の最初の Tick で消えます。TTL は延びません。Long-term Memory には触れません。
+- **失敗。** Tick が失敗しても Loop は止まりません。WARNING に**例外の型名だけ**を出し（Message、SQL、調査内容は出さず、Traceback も付けません）、30 秒から倍にして間隔まで待ち、成功で元に戻ります。削除できた件数は INFO に出します。
+- **停止。** Lifespan の終了で Cancel し、`PAW_SHUTDOWN_TIMEOUT_SECONDS` の範囲で待ってから `Database.dispose()` を呼びます（Diagnostic と同じ）。
+- **複数 Process。** それぞれが Janitor を持ってかまいません。`purge_expired` は `SKIP LOCKED` なので、互いに待たず、同じ行を二重に消しません（`test_two_janitors_at_once_delete_every_row_exactly_once`）。
+- **権限。** `PAW_APP_DATABASE_ROLE` の Role のままで動きます。Migration `0050` の SELECT / DELETE だけを使います（`test_scratch_grants.py` が Janitor の Test もその Role で実行します）。
+- **Test。** `test_scratch_janitor.py`（Fake の Store と `sleep`）、`test_scratch_janitor_settings.py`、`test_scratch_janitor_lifespan.py`（起動する・しない、Cancel が `dispose` より先、待ちが有界）、`test_scratch_janitor_postgres.py`（実際の PostgreSQL で期限切れの行が消え、Pin・使用中・昇格確認中は残る。Application 全体でも確認）。
+
+**Janitor が止めきれない場合。** Tick が Query の途中にいるときに PostgreSQL が応答しなくなると、その Query は通常の Pool の Query と同じ方法で止まります（psycopg がサーバに Cancel を頼んで待つ。約 10 秒、libpq が 17 未満なら Interpreter が終了時に待つ Thread から）。起動時の Diagnostic は専用の接続を切って即座に止めますが、Purge は 1 Transaction の複数の文なので、その作りにはしていません。Lifespan の待ちは `PAW_SHUTDOWN_TIMEOUT_SECONDS` で有界ですが、Process の終了がそれより遅れる可能性が残ります。Tick は最初の 30 秒の後は間隔ごと（既定 1 時間に 1 回）なので、この状況に当たる時間窓は狭いものの、実際に当てた Test はありません（起動直後の Tick で同じ状況を作ると、既存の終了 Test が失敗することを確認して、最初の Tick を遅らせました）。
+
 ### 制限と未確認の点
 
-- Purge を定期的に呼ぶ Janitor は含みません。`purge_expired` があるだけで、Scheduler は別の Issue です。
+- 削除は Janitor の間隔だけ遅れます（既定で最大約 1 時間）。ただし、期限切れの Item は削除の前から全ての Method で「存在しない」ので、読み取りは Janitor に依存しません。Janitor が動かない間（`PAW_SCRATCH_PURGE_INTERVAL_SECONDS=0`、`PAW_DATABASE_URL` 未設定、Process の停止、30 秒より短い間隔での再起動の繰り返し）は、期限切れの行と内容が DB に残ります。Janitor の停止や失敗を知らせる仕組み（Metrics、Alert）はなく、あるのは Log の WARNING だけです。詳しくは[Janitor](#janitor期限切れの削除)。
 - Claim と Source の対応（Evidence / Provenance）は [PAW-052](#evidence--claim-provenance) です。ここでは `source_metadata` に置くだけで、構造化しません。
 - 1 Project あたりの Item 数の上限（Quota）は持ちません。
 - Purge の「Snapshot の後に Commit された Lease」の Race は、実際の同時実行では起こしにくい時間窓です。Test は `purge_probe`（Test 用の接続点）で、その瞬間に exempt が現れる状況を決定的に再現して確認しています。同時実行の Test は複数回繰り返して安定を確認していますが、時間窓そのものを外部から狙って再現しているわけではありません。
@@ -1192,7 +1415,9 @@ Test は参照実装で成り立つことを確認しながら書いたもので
 3. **Claim と Source の置き場所。** PAW-052 まで `source_metadata`（16 KiB まで）に置きます。
 4. **`tasks.id` の Foreign Key の `ON DELETE`。** `SET NULL` を選びました。`RESTRICT`（Task の削除を止める）や `CASCADE`（Pin 済みも消える）にするか。
 5. **認可の対応。** 上の「呼び出し側の認可（提案）」で、特に `resolve_promotion` を委任不可の `project.memory.manage` にする点。
-6. **Quota と Janitor。** Item 数の上限と、`purge_expired` を定期実行する仕組み。
+6. **Quota。** Item 数の上限。
+7. **Janitor の既定値。** 間隔（1 時間）、起動の 30 秒後に最初の Tick、1 Tick の上限（500 件 × 100 Batch）。仕様に数値がないため、最も単純な値を選びました。
+8. **PostgreSQL が止まったときの終了。** Tick が Query の途中で PostgreSQL が応答しなくなると、Janitor の Cancel は通常の Pool の Query と同じ経路になります（下記）。起動時の Diagnostic のように専用の接続で即座に切る作りにするか。
 
 ## Research Provider Adapter
 
@@ -1280,7 +1505,7 @@ License や `robots.txt` に関する項目はありません。要件と設計�
 - `http` / `https` 以外、User 情報（`user:pass@`）、空白・制御文字・バックスラッシュ、不正な Port、Host が `a-z0-9-` と `.` だけで作れない場合（IPv6、`_`、非 ASCII の Host）は `InvalidLocatorError`。
 - Scheme と Host は小文字にし、Host 末尾の `.` を 1 つ取り、既定の Port（http 80、https 443）と Fragment を外し、空の Path を `/` にします。
 - Path と Query の `%xx` は大文字にし、非 ASCII の文字は UTF-8 の `%XX` にします。
-- Query は `&` で分け、追跡用（`utm_*`、`fbclid`、`gclid` など）と Credential 用（`access_token`、`token`、`api_key`、`sig` など）の Parameter を除き、`(名前, 値)` の順に並べます。除く名前の一覧は `locator.py` の定数です。Credential の一覧は Best effort で、Path に入った Credential は判別できません。
+- Query は `&` で分け、追跡用（`utm_*`、`fbclid`、`gclid` など）と Credential 用（`access_token`、`token`、`api_key`、`sig` など）の Parameter を除き、`(名前, 値)` の順に並べます。除く名前の一覧は `locator.py` の定数です。名前は Percent-decode（最大 4 回）してから比べます（`%61ccess_token` も除きます）。decode した名前に `&`、`;`、`=`、`#` が入るもの（`%26access_token` など、先に decode する Parser では別の Parameter になる）は、名前として成り立たないので丸ごと除きます。Credential の一覧は Best effort で、Path に入った Credential は判別できません。
 - Path の Dot Segment、末尾の `/`、`www.`、`http` と `https` の違いは正規化しません。そのため、これらだけが違う URL は別の Source として扱います。
 - 正規化の結果は 2048 文字以下で、もう一度かけても同じ結果になります。
 - 例外の文言に URL は入りません。
@@ -1323,7 +1548,7 @@ License や `robots.txt` に関する項目はありません。要件と設計�
   見つかった不具合は、`%` の直後の非 ASCII を変換しない、`?é=` の `=` を落とす、KELVIN SIGN が ASCII の Host になる、入力の長さを最後に検査するため 20 MB の入力の拒否に数秒かかる、例外の Context に入力が残る、`hasattr` による偽の Hit の受理、広すぎる `except` です。
 - `registry.py` と `broker.py` は、Local Model が仕様どおりに実装できなかったため、仕様を書いた側の参照実装を整えたものです。
 - Timeout は協調的です。Adapter が Cancel を無視する、または Event Loop を止める同期処理をする場合、Broker は止められません。
-- 未決事項（人間の判断が必要）:
+- 未決事項（人間の判断が必要。**[Decision 0012](../../docs/decisions/0012-research-provider-adapter-policy.md) は Proposed で、承認されるまで暫定です**）:
   1. License と `robots.txt` の項目は、要件に定義がないため `SourceMetadata` にありません。
   2. 不正な Hit が 1 つでもあると、その Provider の Response 全体を `invalid_response` にします（Adapter の不具合を隠さないため）。
   3. 複数 Provider の結果は交互に並べ、正規化した URL の最初の 1 件を残します（要件に統合の規則がありません）。
@@ -1438,7 +1663,7 @@ AGENTS.md のとおり、同じ失敗を繰り返したのでエスカレーシ�
 
 ### 制限と未確認の点
 
-- Migration `0052` の `down_revision` は `0050` です（鎖は `0001 → 0025 → 0032 → 0040 → 0021 → 0033 → 0031 → 0050 → 0052`）。他の Issue の Migration と並行して作ったため、統合時に付け替える場合があります。
+- Migration `0052` の `down_revision` は `0046` です（鎖は `0001 → 0025 → 0032 → 0040 → 0021 → 0033 → 0031 → 0050 → 0046 → 0052`）。
 - 回答・Task から Claim への向きだけを引けます。「この Source を使った回答」への逆引き（Source が古くなったときの影響調査）はありません。
 - Source の `private_source`、Provider、License、Claim の `confidence` は記録しません（[Decision 0011](../../docs/decisions/0011-research-provenance-model.md)）。
 - 削除・保持・Project 削除時の扱いはありません（Application は削除できません）。1 Project あたりの件数の上限（Quota）もありません。

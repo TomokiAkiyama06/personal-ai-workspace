@@ -18,7 +18,7 @@ drift apart. Constraint names come from the naming convention of
 ``paw_backend.db.Base.metadata``.
 
 Revision ID: 0052
-Revises: 0050
+Revises: 0046
 Create Date: 2026-09-24
 """
 
@@ -30,7 +30,7 @@ from alembic import op
 from paw_backend.db_roles import grant_app_privileges
 
 revision: str = "0052"
-down_revision: str | Sequence[str] | None = "0050"
+down_revision: str | Sequence[str] | None = "0046"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

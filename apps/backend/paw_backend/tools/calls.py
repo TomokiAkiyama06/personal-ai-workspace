@@ -41,6 +41,7 @@ from paw_backend.tools.scope import (
     normalise_host,
     normalise_path,
     normalise_project,
+    normalise_repository,
     normalise_url,
 )
 
@@ -52,6 +53,7 @@ _KIND_LIMITS = {
     ArgumentKind.URL: (MAX_URL_LENGTH, BrokerReason.INVALID_TARGET),
     ArgumentKind.HOST: (MAX_HOST_LENGTH + 2, BrokerReason.INVALID_TARGET),
     ArgumentKind.PROJECT: (64, BrokerReason.INVALID_TARGET),
+    ArgumentKind.REPOSITORY: (64, BrokerReason.INVALID_TARGET),
     ArgumentKind.CREDENTIAL_HANDLE: (64, BrokerReason.CREDENTIAL_HANDLE_INVALID),
 }
 
@@ -182,7 +184,9 @@ def _shown(value: object) -> str:
 
 def _parse_value(argument, value: object, base: str | None):
     kind = argument.kind
-    if kind is ArgumentKind.PROJECT and isinstance(value, uuid.UUID):
+    if kind in (ArgumentKind.PROJECT, ArgumentKind.REPOSITORY) and isinstance(
+        value, uuid.UUID
+    ):
         value = str(value)
     if kind is ArgumentKind.INTEGER:
         if type(value) is not int or not argument.minimum <= value <= argument.maximum:
@@ -218,6 +222,9 @@ def _parse_value(argument, value: object, base: str | None):
         if kind is ArgumentKind.PROJECT:
             project = str(normalise_project(value))
             return project, Target(TargetKind.PROJECT, project)
+        if kind is ArgumentKind.REPOSITORY:
+            repository = str(normalise_repository(value))
+            return repository, Target(TargetKind.REPOSITORY, repository)
     except TargetError:
         raise ArgumentError(BrokerReason.INVALID_TARGET) from None
     if kind is ArgumentKind.CREDENTIAL_HANDLE:

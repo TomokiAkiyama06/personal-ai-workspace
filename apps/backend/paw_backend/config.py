@@ -95,6 +95,10 @@ class Settings(BaseSettings):
     setup_token_ttl_seconds: int = Field(default=1_800, ge=60, le=14_400)
     setup_token_max_attempts: int = Field(default=5, ge=1, le=20)
 
+    # How often the Research Scratch Store's janitor deletes expired items
+    # (PAW-050). 0 turns it off: expired research would then stay in PostgreSQL.
+    scratch_purge_interval_seconds: int = Field(default=3_600, ge=0, le=86_400)
+
     log_level: str = "info"
 
     @field_validator(
@@ -163,6 +167,16 @@ class Settings(BaseSettings):
                 "allowed_origins entries must look like https://host[:port]"
             )
         return [origin for origin in origins if origin is not None]
+
+    @field_validator("scratch_purge_interval_seconds")
+    @classmethod
+    def _purge_interval_is_off_or_at_least_a_minute(cls, value: int) -> int:
+        # 1..59 would hit the database every few seconds for no benefit.
+        if 0 < value < 60:
+            raise ValueError(
+                "scratch_purge_interval_seconds must be 0 (off) or 60 to 86400"
+            )
+        return value
 
     @field_validator("log_level")
     @classmethod

@@ -53,6 +53,7 @@ personal-ai-workspace/
 │  │  │     ├─ 0032_task_lifecycle.py
 │  │  │     ├─ 0033_task_queue_budget_loop.py
 │  │  │     ├─ 0040_memory_schema.py
+│  │  │     ├─ 0046_shared_memory_candidates.py
 │  │  │     ├─ 0050_research_scratch_store.py
 │  │  │     └─ 0052_research_provenance.py
 │  │  ├─ paw_backend/
@@ -81,6 +82,18 @@ personal-ai-workspace/
 │  │  │  │  ├─ operator.py
 │  │  │  │  ├─ redeemer.py
 │  │  │  │  └─ tokens.py
+│  │  │  ├─ memory/
+│  │  │  │  └─ shared/
+│  │  │  │     ├─ __init__.py
+│  │  │  │     ├─ errors.py
+│  │  │  │     ├─ lifecycle.py
+│  │  │  │     ├─ limits.py
+│  │  │  │     ├─ models.py
+│  │  │  │     ├─ policy.py
+│  │  │  │     ├─ precedence.py
+│  │  │  │     ├─ records.py
+│  │  │  │     ├─ service.py
+│  │  │  │     └─ validation.py
 │  │  │  ├─ research/
 │  │  │  │  ├─ __init__.py
 │  │  │  │  ├─ provenance/
@@ -106,6 +119,7 @@ personal-ai-workspace/
 │  │  │  │  └─ scratch/
 │  │  │  │     ├─ __init__.py
 │  │  │  │     ├─ errors.py
+│  │  │  │     ├─ janitor.py
 │  │  │  │     ├─ limits.py
 │  │  │  │     ├─ models.py
 │  │  │  │     ├─ records.py
@@ -141,7 +155,8 @@ personal-ai-workspace/
 │  │  │  │  ├─ policy.py
 │  │  │  │  ├─ registry.py
 │  │  │  │  ├─ runner.py
-│  │  │  │  └─ scope.py
+│  │  │  │  ├─ scope.py
+│  │  │  │  └─ task_state.py
 │  │  │  └─ api/
 │  │  │     ├─ __init__.py
 │  │  │     ├─ deps.py
@@ -158,6 +173,7 @@ personal-ai-workspace/
 │  │     ├─ queueing_support.py
 │  │     ├─ research_support.py
 │  │     ├─ scratch_support.py
+│  │     ├─ shared_memory_support.py
 │  │     ├─ support.py
 │  │     ├─ teardown_child.py
 │  │     ├─ test_config.py
@@ -205,6 +221,10 @@ personal-ai-workspace/
 │  │     ├─ test_research_registry.py
 │  │     ├─ test_scratch_concurrency.py
 │  │     ├─ test_scratch_grants.py
+│  │     ├─ test_scratch_janitor.py
+│  │     ├─ test_scratch_janitor_lifespan.py
+│  │     ├─ test_scratch_janitor_postgres.py
+│  │     ├─ test_scratch_janitor_settings.py
 │  │     ├─ test_scratch_migration.py
 │  │     ├─ test_scratch_purge.py
 │  │     ├─ test_scratch_records.py
@@ -215,6 +235,19 @@ personal-ai-workspace/
 │  │     ├─ test_scratch_validation.py
 │  │     ├─ test_security.py
 │  │     ├─ test_server.py
+│  │     ├─ test_shared_memory_audit_actions.py
+│  │     ├─ test_shared_memory_candidates.py
+│  │     ├─ test_shared_memory_contract.py
+│  │     ├─ test_shared_memory_effective_view.py
+│  │     ├─ test_shared_memory_grants.py
+│  │     ├─ test_shared_memory_migration.py
+│  │     ├─ test_shared_memory_policy_source.py
+│  │     ├─ test_shared_memory_promotion_refused.py
+│  │     ├─ test_shared_memory_rules_lifecycle.py
+│  │     ├─ test_shared_memory_rules_precedence.py
+│  │     ├─ test_shared_memory_service_guards.py
+│  │     ├─ test_shared_memory_service_manage.py
+│  │     ├─ test_shared_memory_service_read.py
 │  │     ├─ test_tools_approvals.py
 │  │     ├─ test_tools_broker.py
 │  │     ├─ test_tools_credentials.py
@@ -275,6 +308,7 @@ personal-ai-workspace/
 │     ├─ 0006-tool-broker-policy.md
 │     ├─ 0007-task-queue-budget-and-loop-policy.md
 │     ├─ 0011-research-provenance-model.md
+│     ├─ 0012-research-provider-adapter-policy.md
 │     └─ README.md
 └─ evaluator/
    └─ README.md

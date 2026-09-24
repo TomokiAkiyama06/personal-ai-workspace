@@ -176,7 +176,7 @@ class EnvironmentErrorTest(unittest.TestCase):
         self.assertNotIn("hunter2", err)
 
     def test_an_unexpected_error_shows_its_type_and_nothing_else(self):
-        async def broken(settings, arguments, operator):
+        async def broken(settings, arguments):
             raise RuntimeError("hunter2-internal-detail")
 
         with patch.object(cli, "_issue", broken):

@@ -14,7 +14,14 @@ never be handed this service**. Even so, the rules do not rest on that:
 * what is granted is one exact call (see ``approval_types``), once, before it
   expires;
 * an approval can be revoked before it is used, by the user or an Admin / Owner,
-  and it is revoked when its task ends (:meth:`ApprovalService.revoke_on_task_end`).
+  and it is revoked when its task ends (:meth:`ApprovalService.revoke_on_task_end`,
+  for every terminal state: completed, failed, cancelled). That revocation runs
+  after the terminal transition committed, so a failure of the store **is
+  raised** (:class:`ApprovalRevocationError`), not counted as "nothing to
+  revoke". It cannot be retried by ``TaskService`` and it cannot roll the
+  transition back, so the broker independently refuses to open or use an
+  approval of a task that can no longer act (``task_state.py``): an approval
+  that stayed live is still unusable. Decision 0006, section 9.
 
 A user who is not the delegating user is told the approval does not exist (no
 oracle for other users' approvals); the audit row records ``not_authorised``.
@@ -80,6 +87,16 @@ class ApprovalListeners:
                         await result
             except Exception as error:
                 logger.warning("Approval listener failed (%s)", type(error).__name__)
+
+
+class ApprovalRevocationError(Exception):
+    """The open approvals of an ended task could not be revoked (the store failed).
+
+    Carries no detail: the driver's message can name hosts or users; only the
+    exception type of the cause is logged. Approvals of that task may still be
+    open in the store; :meth:`ApprovalService.revoke_task` is idempotent, so it
+    can be run again (the broker refuses them meanwhile).
+    """
 
 
 class StepUpVerifier(Protocol):
@@ -245,6 +262,8 @@ class ApprovalService:
 
         A system action: nobody's approval may outlive its task. Wire
         :meth:`revoke_on_task_end` into ``TaskService(listeners=[...])``.
+        Idempotent. Raises :class:`ApprovalRevocationError` when the store
+        fails: a failure must not look like "nothing was open".
         """
         if not isinstance(task_id, uuid.UUID):
             raise TypeError("task_id must be a UUID")
@@ -253,7 +272,9 @@ class ApprovalService:
             ids = await self._store.revoke_task(task_id, now=now)
         except Exception as error:
             logger.error("Task approval revoke failed (%s)", type(error).__name__)
-            return 0
+            raise ApprovalRevocationError(
+                "the open approvals of a task could not be revoked"
+            ) from None
         for approval_id in ids:
             try:
                 record = await self._store.get(approval_id)
@@ -274,12 +295,22 @@ class ApprovalService:
 
     async def revoke_on_task_end(self, event: object) -> None:
         """A ``TaskService`` listener: a task that was cancelled, failed or
-        completed keeps no usable approval. Reads only ``task_id`` and
-        ``to_state`` of the event."""
+        completed (``paw_backend.tasks.TERMINAL_STATES``) keeps no usable
+        approval; nor does one that is re-opened (Retry / Restart of a failed
+        or cancelled task) keep any that survived its end, and the run that
+        starts asks again. Reads only ``task_id``, ``from_state`` and
+        ``to_state`` of the event. A store failure is raised
+        (:class:`ApprovalRevocationError`); ``TaskService`` logs it (type only)
+        and the transition stays committed."""
         task_id = getattr(event, "task_id", None)
-        state = getattr(event, "to_state", None)
-        if isinstance(task_id, uuid.UUID) and getattr(state, "value", state) in (
-            _TASK_END_STATES
+        if not isinstance(task_id, uuid.UUID):
+            return
+        if any(
+            getattr(state, "value", state) in _TASK_END_STATES
+            for state in (
+                getattr(event, "to_state", None),
+                getattr(event, "from_state", None),
+            )
         ):
             await self.revoke_task(task_id)
 

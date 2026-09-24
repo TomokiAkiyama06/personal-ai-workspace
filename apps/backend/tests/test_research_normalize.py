@@ -119,6 +119,15 @@ class NormalizeTitleTest(unittest.TestCase):
 
 
 class NormalizeHitsTest(unittest.TestCase):
+    def test_a_timestamp_that_cannot_be_expressed_in_utc_rejects_the_response(self):
+        # Aware, so the hit is constructed; but ``datetime.max`` at UTC-01:00 is
+        # beyond UTC's range. Built by hand (the constructor refuses it).
+        far = datetime.max.replace(tzinfo=timezone(timedelta(hours=-1)))
+        bad = hit()
+        object.__setattr__(bad, "published_at", far)
+        with self.assertRaises(InvalidProviderResponseError):
+            normalize([hit("https://example.com/ok"), bad])
+
     def test_a_hit_becomes_an_item_with_unified_metadata(self):
         published = datetime(2026, 9, 1, 9, 30, tzinfo=JST)
         result = normalize(

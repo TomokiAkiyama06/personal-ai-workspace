@@ -159,6 +159,10 @@ class ConcurrencyAsAppRole(AsAppRole, test_queueing_queue.ConcurrencyTest):
     pass
 
 
+class TrustedClockAsAppRole(AsAppRole, test_queueing_queue.TrustedClockTest):
+    pass
+
+
 class BudgetConfigurationAsAppRole(AsAppRole, test_queueing_budget.ConfigurationTest):
     pass
 
