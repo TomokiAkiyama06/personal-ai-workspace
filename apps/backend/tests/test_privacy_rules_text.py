@@ -103,37 +103,90 @@ class NormalizeTextTest(unittest.TestCase):
         self.assertEqual(rules.normalize_text(text), " ".join(["word"] * 20_000))
 
 
+# Case pairs that only FULL Unicode case folding (``str.casefold``) treats as equal.
+# ``lower()`` keeps the sharp s, the final sigma and the dotted capital I apart.
+DOTTED_I = "\u0130"  # İ, capital I with dot above
+DECOMPOSED_I = "i\u0307"  # i and a combining dot above: what İ folds to
+FINAL_SIGMA = "\u03c2"  # ς
+
+
 class FoldForMatchTest(unittest.TestCase):
     def test_docstring_examples(self):
         for text, expected in (
             ("ABC def", "abc def"),
-            ("ẞ", "ß"),
-            ("İ", "İ"),
+            ("ẞ", "ss"),
+            ("Straße", "strasse"),
+            ("ΟΔΟΣ", "οδοσ"),
+            ("οδος", "οδοσ"),
+            (DOTTED_I, DECOMPOSED_I),
+            ("ǅ", "ǆ"),
             ("", ""),
         ):
             with self.subTest(text=text):
                 self.assertEqual(rules.fold_for_match(text), expected)
 
-    def test_the_length_never_changes(self):
-        for text in (
-            "İstanbul",
-            "ǅ",
-            "ẞtraße",
-            "ΣΑΣ",
-            "MIXED case 123 !?",
-            "検索 ＡＢＣ",
-            "ÀÉÎÕÜ",
-            "İİİ",
+    def test_the_full_folds_of_the_characters_that_lower_cannot_match(self):
+        # ``lower()`` leaves each of these unchanged or maps it elsewhere.
+        for text, expected in (
+            ("ß", "ss"),
+            ("ẞ", "ss"),
+            ("ss", "ss"),
+            ("SS", "ss"),
+            (FINAL_SIGMA, "σ"),
+            ("Σ", "σ"),
+            (DOTTED_I, "i\u0307"),
+            ("ŉ", "ʼn"),
+            ("ǰ", "j\u030c"),
+            ("ﬃ", "ffi"),
         ):
             with self.subTest(text=text):
-                self.assertEqual(len(rules.fold_for_match(text)), len(text))
+                self.assertEqual(rules.fold_for_match(text), expected)
+
+    def test_a_character_can_grow_but_the_text_never_shrinks(self):
+        for text, growth in (
+            ("İstanbul", 1),
+            ("ǅ", 0),
+            ("ẞtraße", 2),
+            ("ΣΑΣ", 0),
+            ("MIXED case 123 !?", 0),
+            ("検索 ＡＢＣ", 0),
+            ("ÀÉÎÕÜ", 0),
+            ("İİİ", 3),
+            ("ΐ", 2),
+            ("", 0),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(len(rules.fold_for_match(text)) - len(text), growth)
 
     def test_each_character_is_folded_on_its_own(self):
-        # ``"ΣΑΣ".lower()`` would end in a final sigma ("σας"); one character at a
-        # time gives the plain sigma every time.
+        # There is no context: a sigma at the end of a word folds like any other.
         self.assertEqual(rules.fold_for_match("ΣΑΣ"), "σασ")
-        self.assertEqual(rules.fold_for_match("İstanbul"), "İstanbul")
+        self.assertEqual(rules.fold_for_match("σας"), "σασ")
+        self.assertEqual(rules.fold_for_match("İstanbul"), "i\u0307stanbul")
         self.assertEqual(rules.fold_for_match("ǅ"), "ǆ")
+        # For every character, and so for every string, the fold of the whole is
+        # the concatenation of the folds of the parts: ``find_copied_spans`` maps
+        # folded positions back to characters with this property.
+        generator = random.Random(5306)
+        code_points = [
+            chr(code) for code in range(0x110000) if not 0xD800 <= code <= 0xDFFF
+        ]
+        for _ in range(500):
+            text = "".join(
+                generator.choice(code_points) for _ in range(generator.randint(0, 40))
+            )
+            self.assertEqual(
+                rules.fold_for_match(text),
+                "".join(rules.fold_for_match(ch) for ch in text),
+            )
+
+    def test_the_fold_is_idempotent_for_every_character(self):
+        for code in range(0x110000):
+            if 0xD800 <= code <= 0xDFFF:
+                continue
+            once = rules.fold_for_match(chr(code))
+            self.assertEqual(rules.fold_for_match(once), once, hex(code))
+            self.assertGreaterEqual(len(once), 1, hex(code))
 
     def test_uncased_text_is_unchanged(self):
         for text in ("検索クエリ", "12345 !?", "　"):
@@ -200,9 +253,161 @@ class FindCopiedSpansTest(unittest.TestCase):
         )
 
     def test_positions_are_positions_in_the_original_text(self):
-        # "İ" is not shortened or lengthened by the fold, so later positions stay put.
-        text = "İİ secret İİ"
-        self.assertEqual(rules.find_copied_spans(text, "secret", window=6), ((3, 9),))
+        # "İ" and "ß" are two characters each in the fold, yet the spans are
+        # positions in the text as it was given.
+        for prefix in ("İİ", "ßß", "ẞẞ", "ΐΐ"):
+            with self.subTest(prefix=prefix):
+                text = f"{prefix} secret {prefix}"
+                self.assertEqual(
+                    rules.find_copied_spans(text, "secret", window=6), ((3, 9),)
+                )
+
+    def test_the_sharp_s_matches_ss_in_both_directions(self):
+        find = rules.find_copied_spans
+        # The case of the review: the two are equal after full case folding.
+        source = "xxSTRASSEabcdefghijklyy"
+        draft = "straßeabcdefghijkl"
+        self.assertEqual(find(draft, source, window=16), ((0, 18),))
+        self.assertEqual(find(source, draft, window=16), ((2, 21),))
+        self.assertEqual(find("straße", "STRASSE", window=7), ((0, 6),))
+        self.assertEqual(find("STRASSE", "straße", window=7), ((0, 7),))
+        self.assertEqual(find("STRAẞE", "strasse", window=7), ((0, 6),))
+        self.assertEqual(find("strasse", "STRAẞE", window=7), ((0, 7),))
+        self.assertEqual(find("ß", "ss", window=2), ((0, 1),))
+        self.assertEqual(find("ss", "ß", window=2), ((0, 2),))
+        self.assertEqual(find("ß", "SS", window=2), ((0, 1),))
+        self.assertEqual(find("ẞ", "ß", window=2), ((0, 1),))
+
+    def test_the_dotted_capital_i_matches_i_and_a_combining_dot_in_both_directions(
+        self,
+    ):
+        find = rules.find_copied_spans
+        dotted = f"{DOTTED_I}stanbul office secret"
+        decomposed = f"{DECOMPOSED_I}stanbul office secret"
+        self.assertEqual((len(dotted), len(decomposed)), (22, 23))
+        self.assertEqual(find(dotted, decomposed, window=16), ((0, 22),))
+        self.assertEqual(find(decomposed, dotted, window=16), ((0, 23),))
+        self.assertEqual(
+            find(f"see {dotted} now", f"[{decomposed}]", window=16), ((4, 26),)
+        )
+        self.assertEqual(
+            find(f"see {decomposed} now", f"[{dotted}]", window=16), ((4, 27),)
+        )
+        self.assertEqual(find(DOTTED_I, DECOMPOSED_I, window=2), ((0, 1),))
+        self.assertEqual(find(DECOMPOSED_I, DOTTED_I, window=2), ((0, 2),))
+        # The plain "i" is not the dotted one: it is not copied, the rest is.
+        self.assertEqual(find("istanbul office secret", dotted, window=16), ((1, 22),))
+
+    def test_a_final_sigma_matches_a_plain_sigma_in_both_directions(self):
+        find = rules.find_copied_spans
+        capitals = "ΟΔΟΣ ΑΘΗΝΩΝ ΜΥΣΤΙΚΟ"
+        final = "οδος αθηνων μυστικο"
+        medial = "οδοσ αθηνων μυστικο"
+        self.assertEqual(find(capitals, final, window=16), ((0, 19),))
+        self.assertEqual(find(final, capitals, window=16), ((0, 19),))
+        self.assertEqual(find(medial, final, window=16), ((0, 19),))
+        self.assertEqual(find(final, medial, window=16), ((0, 19),))
+        self.assertEqual(find("ΣΑΣ", "σας", window=3), ((0, 3),))
+        self.assertEqual(find("σας", "ΣΑΣ", window=3), ((0, 3),))
+        self.assertEqual(find("ς", "σ", window=1), ((0, 1),))
+        self.assertEqual(find("σ", "ς", window=1), ((0, 1),))
+
+    def test_a_partly_matched_expanding_character_is_copied_whole(self):
+        find = rules.find_copied_spans
+        # The window ends inside the "ss" of the sharp s.
+        self.assertEqual(find("xxßabc", "xxs", window=3), ((0, 3),))
+        # The window starts inside it: "sabc" is found from the second "s".
+        self.assertEqual(find("xxßabc", "sabc", window=4), ((2, 6),))
+        # ... and the same with the dotted capital I: the source is only the
+        # combining dot and "stanbul".
+        self.assertEqual(
+            find(f"{DOTTED_I}stanbul", "\u0307stanbul", window=8), ((0, 8),)
+        )
+        self.assertEqual(find(f"{DOTTED_I}stanbul", "i", window=1), ((0, 1),))
+        # The three characters of U+0390: a window over the middle one only.
+        self.assertEqual(find("a\u0390b", "\u0308", window=1), ((1, 2),))
+
+    def test_two_runs_inside_one_expanding_character_are_one_span(self):
+        # "ΐ" (U+0390) folds to three characters; only the first and the last are
+        # in the source, so the folded runs are apart but the character is one.
+        self.assertEqual(
+            rules.find_copied_spans("\u0390", "\u03b9\u0301", window=1), ((0, 1),)
+        )
+        self.assertEqual(
+            rules.find_copied_spans("\u0390\u0390", "\u03b9\u0301", window=1),
+            ((0, 2),),
+        )
+        self.assertEqual(
+            rules.find_copied_spans("x\u0390y\u0390", "\u03b9\u0301", window=1),
+            ((1, 2), (3, 4)),
+        )
+
+    def test_the_window_counts_folded_characters(self):
+        find = rules.find_copied_spans
+        # The folded text "ss" has two characters: a window of three does not fit.
+        self.assertEqual(find("ß", "ssss", window=3), ())
+        self.assertEqual(find("ssss", "ß", window=3), ())
+        self.assertEqual(find("ß", "ssss", window=2), ((0, 1),))
+        self.assertEqual(find("xßx", "ssss", window=2), ((1, 2),))
+        # A window of 2 needs both halves; an "s" alone is not "ß".
+        self.assertEqual(find("sea", "ß", window=2), ())
+
+    def test_spans_never_touch_or_overlap_and_stay_inside_the_text(self):
+        generator = random.Random(53)
+        alphabet = "aAsSßẞiİ\u0307σΣς\u0390 -"
+        for _ in range(300):
+            text = "".join(generator.choice(alphabet) for _ in range(30))
+            source = "".join(generator.choice(alphabet) for _ in range(30))
+            window = generator.randint(1, 6)
+            spans = rules.find_copied_spans(text, source, window=window)
+            with self.subTest(text=text, source=source, window=window):
+                position = -1
+                for start, end in spans:
+                    self.assertGreater(start, position)  # apart: not even touching
+                    self.assertLess(start, end)
+                    position = end
+                self.assertLessEqual(position, len(text))
+
+    def test_the_result_agrees_with_a_slow_definition(self):
+        # The definition of the docstring, written the slow way: fold each
+        # character on its own, test every window with ``in``, mark the ORIGINAL
+        # characters that own a covered folded character.
+        def slow(text, source, window):
+            folded, owner = "", []
+            for index, ch in enumerate(text):
+                piece = ch.casefold()
+                folded += piece
+                owner.extend([index] * len(piece))
+            folded_source = "".join(ch.casefold() for ch in source)
+            covered = [False] * len(text)
+            for j in range(len(folded) - window + 1):
+                if folded[j : j + window] in folded_source:
+                    for k in range(j, j + window):
+                        covered[owner[k]] = True
+            spans, start = [], None
+            for index, flag in enumerate(covered + [False]):
+                if flag and start is None:
+                    start = index
+                elif not flag and start is not None:
+                    spans.append((start, index))
+                    start = None
+            return tuple(spans)
+
+        generator = random.Random(2053)
+        alphabet = "aAsSßẞiİ\u0307σΣς\u0390eE-"
+        for _ in range(600):
+            text = "".join(
+                generator.choice(alphabet) for _ in range(generator.randint(0, 24))
+            )
+            source = "".join(
+                generator.choice(alphabet) for _ in range(generator.randint(0, 24))
+            )
+            window = generator.randint(1, 8)
+            with self.subTest(text=text, source=source, window=window):
+                self.assertEqual(
+                    rules.find_copied_spans(text, source, window=window),
+                    slow(text, source, window),
+                )
 
     def test_other_scripts(self):
         source = "顧客データベースの接続情報は社外秘です"
@@ -250,6 +455,26 @@ class FindCopiedSpansTest(unittest.TestCase):
         spans = rules.find_copied_spans(text, source, window=16)
         elapsed = time.monotonic() - started
         self.assertEqual(spans, ((1_000, 1_040),))
+        self.assertLess(elapsed, LOOSE_DEADLINE_SECONDS)
+
+    def test_the_cost_is_linear_when_many_characters_expand(self):
+        generator = random.Random(1053)
+        source = "".join(generator.choice("abcdefghijklmßẞİ ") for _ in range(200_000))
+        piece = source[50_000:50_040]
+        # The filler has no character of the source, so only the piece is copied.
+        filler = "".join(generator.choice("0123456789") for _ in range(2_000))
+        text = filler[:1_000] + piece + filler[1_000:]
+        started = time.monotonic()
+        spans = rules.find_copied_spans(text, source, window=16)
+        elapsed = time.monotonic() - started
+        self.assertEqual(spans, ((1_000, 1_040),))
+        self.assertLess(elapsed, LOOSE_DEADLINE_SECONDS)
+
+    def test_a_maximum_size_text_of_expanding_characters_is_fast(self):
+        started = time.monotonic()
+        spans = rules.find_copied_spans("ß" * 2_000, "İ" * 3 + "ß" * 200_000, window=16)
+        elapsed = time.monotonic() - started
+        self.assertEqual(spans, ((0, 2_000),))
         self.assertLess(elapsed, LOOSE_DEADLINE_SECONDS)
 
 

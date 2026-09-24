@@ -1,4 +1,8 @@
-"""THROWAWAY reference implementation of rules.py (never committed)."""
+"""The pure text functions of the Research Privacy Filter (PAW-053).
+
+The docstrings are the specification (the tests check them). The implementation
+is the Claude reference implementation: see "実装の由来" in the backend README.
+"""
 
 import hashlib
 import ipaddress
@@ -52,31 +56,61 @@ def normalize_text(text):
 
 
 def fold_for_match(text):
-    """A case-folded copy of ``text`` that has EXACTLY the same length.
+    r"""A fully case-folded copy of ``text``: ``ch.casefold()`` for every character.
 
-    Each character is replaced by ``ch.lower()`` when that is exactly one
-    character, and is left unchanged otherwise (so the positions in the result
-    are the positions in ``text``).
+    This is full Unicode case folding, not lower-casing, so text that differs only
+    in case (or in the spelling of a case pair) folds to the same string. A
+    character can EXPAND: ``"ß"`` and ``"ẞ"`` (U+1E9E) become ``"ss"``, ``"İ"``
+    (U+0130) becomes ``"i"`` and a combining dot above (U+0307). Every character
+    is folded on its own (this is what ``str.casefold`` does, so the result equals
+    ``text.casefold()``); there is no context: both ``"σ"`` and a word-final
+    ``"ς"`` fold to ``"σ"``. The result is never shorter than ``text``, and equals
+    it in length exactly when no character expands. ``find_copied_spans`` relies on
+    the one-character-at-a-time property to trace every folded character back to
+    the original character it came from.
 
-    ``"ABC def"`` -> ``"abc def"``; ``"ẞ"`` (U+1E9E) -> ``"ß"``; ``"İ"`` (U+0130,
-    whose ``lower()`` has two characters) -> ``"İ"`` unchanged; ``""`` -> ``""``.
-    ``len(fold_for_match(t)) == len(t)`` for every ``t``.
+    ``"ABC def"`` -> ``"abc def"``; ``"ẞ"`` -> ``"ss"``; ``"Straße"`` ->
+    ``"strasse"``; ``"ΟΔΟΣ"`` and ``"οδος"`` -> ``"οδοσ"``; ``"İ"`` ->
+    ``"i\u0307"``; ``"ǅ"`` -> ``"ǆ"``; ``""`` -> ``""``. (The examples are Python
+    string literals.)
     """
-    return "".join(ch.lower() if len(ch.lower()) == 1 else ch for ch in text)
+    return text.casefold()
+
+
+def _fold_with_origin(text):
+    """``(folded, origin)``: ``fold_for_match(text)`` and where it came from.
+
+    ``origin[k]`` is the index in ``text`` of the character that folded character
+    ``k`` comes from (an expanding character owns several folded characters).
+    ``origin`` is ``None`` when nothing expanded: then the two indices are equal.
+    """
+    folded = text.casefold()
+    if len(folded) == len(text):  # a fold never shortens a character to nothing
+        return folded, None
+    origin = []
+    for index, ch in enumerate(text):
+        origin.extend([index] * len(ch.casefold()))
+    return folded, origin
 
 
 def find_copied_spans(text, source, *, window):
     """The stretches of ``text`` that were copied from ``source``.
 
     ``window`` is an ``int`` of at least 1 (a smaller one raises ``ValueError``
-    with a fixed message). Compare ``fold_for_match(text)`` with
-    ``fold_for_match(source)``. A position ``i`` of ``text`` is covered when some
-    ``j`` with ``j <= i < j + window <= len(text)`` has the ``window`` characters
-    ``folded_text[j:j + window]`` occurring anywhere in ``folded_source``. Return the
-    maximal runs of covered positions as ``(start, end)`` pairs (``end`` is
-    exclusive), sorted, each run one pair, so no two pairs touch or overlap. The
-    positions are positions in ``text``. If ``window`` is larger than ``text`` or
-    than ``source`` the result is ``()``. The cost must be linear in
+    with a fixed message). Matching is case-insensitive in the full Unicode sense:
+    compare ``folded_text = fold_for_match(text)`` with ``folded_source =
+    fold_for_match(source)``, so ``"ß"`` in one and ``"SS"`` in the other are the
+    same. ``window`` counts FOLDED characters. A folded position ``i`` is covered
+    when some ``j`` with ``j <= i < j + window <= len(folded_text)`` has the
+    ``window`` characters ``folded_text[j:j + window]`` occurring anywhere in
+    ``folded_source``. A character of ``text`` is copied when ANY of the folded
+    characters it produced is covered, so a character that is only partly matched
+    (the window starts or ends in the middle of the ``"ss"`` of a ``"ß"``) counts
+    as copied as a whole. Return the maximal runs of copied characters as
+    ``(start, end)`` pairs (``end`` is exclusive), sorted, each run one pair, so
+    no two pairs touch or overlap. The positions are positions in the ORIGINAL
+    ``text``, never in the folded text. If ``window`` is larger than the folded
+    text or than the folded source the result is ``()``. The cost must be linear in
     ``len(text) + len(source)`` for a fixed ``window`` (a set of the source's
     windows, not a search for every window).
 
@@ -85,30 +119,45 @@ def find_copied_spans(text, source, *, window):
     ``find_copied_spans("ABC", "abc", window=3)`` -> ``((0, 3),)``;
     ``find_copied_spans("abXcd", "abYcd", window=2)`` -> ``((0, 2), (3, 5))``;
     ``find_copied_spans("abc", "abc", window=4)`` -> ``()``;
-    ``find_copied_spans("abc", "xyz", window=1)`` -> ``()``.
+    ``find_copied_spans("abc", "xyz", window=1)`` -> ``()``;
+    ``find_copied_spans("straße", "STRASSE", window=7)`` -> ``((0, 6),)`` (the
+    folds are both ``"strasse"``; the span is in the 6 characters of the text);
+    ``find_copied_spans("xxßabc", "xxs", window=3)`` -> ``((0, 3),)`` (the window
+    ends inside the ``"ss"`` of the ``"ß"``, which is copied whole);
+    ``find_copied_spans("ß", "ssss", window=3)`` -> ``()`` (the folded text has 2
+    characters).
     """
     if window < 1:
         raise ValueError("window must be at least 1")
-    ft, fs = fold_for_match(text), fold_for_match(source)
-    if window > len(ft) or window > len(fs):
+    folded_text, origin = _fold_with_origin(text)
+    folded_source = fold_for_match(source)
+    if window > len(folded_text) or window > len(folded_source):
         return ()
-    known = {fs[i : i + window] for i in range(len(fs) - window + 1)}
-    covered = [False] * len(ft)
-    for j in range(len(ft) - window + 1):
-        if ft[j : j + window] in known:
-            for k in range(j, j + window):
-                covered[k] = True
+    known = {
+        folded_source[i : i + window] for i in range(len(folded_source) - window + 1)
+    }
+    # Covered runs of folded positions, found left to right: a window that starts
+    # inside or right after the last run extends it.
+    runs = []
+    for j in range(len(folded_text) - window + 1):
+        if folded_text[j : j + window] in known:
+            if runs and j <= runs[-1][1]:
+                runs[-1][1] = j + window
+            else:
+                runs.append([j, j + window])
+    if origin is None:
+        return tuple((start, end) for start, end in runs)
+    # Back to the original text: whole characters. Two runs can end up in one
+    # character (the first and the last of the three characters of "\u0390"), so
+    # merge again.
     spans = []
-    start = None
-    for i, flag in enumerate(covered):
-        if flag and start is None:
-            start = i
-        elif not flag and start is not None:
-            spans.append((start, i))
-            start = None
-    if start is not None:
-        spans.append((start, len(covered)))
-    return tuple(spans)
+    for start, end in runs:
+        first, last = origin[start], origin[end - 1] + 1
+        if spans and first <= spans[-1][1]:
+            spans[-1][1] = max(spans[-1][1], last)
+        else:
+            spans.append([first, last])
+    return tuple((start, end) for start, end in spans)
 
 
 def strip_credentials(text):

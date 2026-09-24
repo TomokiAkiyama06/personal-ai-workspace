@@ -55,6 +55,17 @@ from .research_support import SECRET
 Reason = RefusalReason
 WEB = frozenset({ProviderKind.WEB})
 AWS_KEY = "AKIAIOSFODNN7EXAMPLE"
+DOTTED_I = "\u0130"  # İ
+DECOMPOSED_I = "i\u0307"  # what İ folds to
+# Pairs of texts that only FULL Unicode case folding sees as equal; ``lower()``
+# keeps them apart. Both directions of each pair are used.
+FOLD_PAIRS = (
+    ("straßeabcdefghijkl", "STRASSEabcdefghijkl"),
+    ("STRAẞEabcdefghijkl", "strasseabcdefghijkl"),
+    (f"{DOTTED_I}stanbul office secret", f"{DECOMPOSED_I}stanbul office secret"),
+    ("ΟΔΟΣ ΑΘΗΝΩΝ ΜΥΣΤΙΚΟ", "οδος αθηνων μυστικο"),
+    ("σας σας σας σας σας", "ΣΑΣ ΣΑΣ ΣΑΣ ΣΑΣ ΣΑΣ"),
+)
 
 
 def refusal(test: unittest.TestCase, function, *args, **kwargs) -> PrivacyRefusal:
@@ -459,6 +470,63 @@ class CopiedTextTest(unittest.TestCase):
         error = refusal(self, self.gate.minimize, source, [private_source(source)])
         self.assertIs(error.reason, Reason.EMPTY_QUERY)
 
+    def test_a_copy_is_found_under_full_unicode_case_folding(self):
+        # The case of the review: "straße" and "STRASSE" are equal after full case
+        # folding but no 16-character window of the lower-cased texts matches.
+        for label in (
+            ContextLabel.PRIVATE_SOURCE,
+            ContextLabel.PRIVATE_MEMORY,
+            ContextLabel.RAW_CONVERSATION,
+        ):
+            for one, other in FOLD_PAIRS:
+                for draft_part, piece_text in ((one, other), (other, one)):
+                    with self.subTest(label=label, draft=draft_part, piece=piece_text):
+                        result = self.gate.minimize(
+                            f"explain {draft_part} please",
+                            [ContextPiece(label, piece_text)],
+                        )
+                        self.assertEqual(result.query, "explain please")
+                        self.assertEqual(result.pieces_matched, 1)
+
+    def test_the_review_case_end_to_end(self):
+        # A private source that contains "STRASSEabcdefghijkl" between other
+        # text, and a draft that spells it "straße...": the copy is removed.
+        result = self.gate.minimize(
+            "explain straßeabcdefghijkl please",
+            [private_source("xxSTRASSEabcdefghijklyy")],
+        )
+        self.assertEqual(result.query, "explain please")
+        self.assertEqual(result.pieces_matched, 1)
+        # And the other way round; the "xx" and "yy" are not in the private piece.
+        result = self.gate.minimize(
+            "explain xxSTRASSEabcdefghijklyy please",
+            [private_source("straßeabcdefghijkl")],
+        )
+        self.assertEqual(result.query, "explain xx yy please")
+        self.assertEqual(result.pieces_matched, 1)
+
+    def test_a_secret_is_found_under_full_unicode_case_folding(self):
+        for secret_text, draft in (
+            ("Straße", "the STRASSE road"),
+            ("STRASSE", "the straße road"),
+            ("ΟΔΟΣ", "the οδος road"),
+            ("οδος", "the ΟΔΟΣ road"),
+        ):
+            with self.subTest(secret=secret_text, draft=draft):
+                result = self.gate.minimize(draft, [secret(secret_text)])
+                self.assertEqual(result.query, "the road")
+                self.assertEqual(result.pieces_matched, 1)
+
+    def test_the_copy_window_is_counted_in_folded_characters(self):
+        # The piece "ß" is "ss" for the comparison: a lone "s" is not a copy of
+        # it, and the copy is removed as a whole.
+        result = self.gate.minimize("sea level", [secret("ß")])
+        self.assertEqual(result.query, "sea level")
+        self.assertEqual(result.pieces_matched, 0)
+        result = self.gate.minimize("the class", [secret("ß")])
+        self.assertEqual(result.query, "the cla")
+        self.assertEqual(result.pieces_matched, 1)
+
     def test_a_short_copy_below_the_window_stays(self):
         result = self.gate.minimize(
             "the quick brown fox", [private_source("a story about the quick brown dog")]
@@ -628,6 +696,36 @@ class SafetyNetTest(unittest.TestCase):
                         self.gate.minimize,
                         "explain Salary Is 500k please",
                         [ContextPiece(label, "salary is 500k")],
+                    )
+                self.assertIs(error.reason, Reason.PRIVATE_TEXT_REMAINS)
+
+    def test_the_check_uses_full_unicode_case_folding(self):
+        # With the copy rule broken, the whole-piece check alone must refuse text
+        # that is equal to a private piece only after full case folding.
+        for piece_text, draft in (
+            ("Straße Lagerbestand geheim", "explain STRASSE LAGERBESTAND GEHEIM now"),
+            ("STRASSE LAGERBESTAND GEHEIM", "explain straße lagerbestand geheim now"),
+            ("ΟΔΟΣ ΑΘΗΝΩΝ", "explain οδος αθηνων now"),
+            ("οδος αθηνων", "explain ΟΔΟΣ ΑΘΗΝΩΝ now"),
+            (f"{DOTTED_I}stanbul", f"explain {DECOMPOSED_I.upper()}STANBUL now"),
+            (f"{DECOMPOSED_I}stanbul", f"explain {DOTTED_I}STANBUL now"),
+        ):
+            with self.subTest(piece=piece_text, draft=draft):
+                with mock.patch.object(rules, "find_copied_spans", return_value=()):
+                    error = refusal(
+                        self, self.gate.minimize, draft, [private_source(piece_text)]
+                    )
+                self.assertIs(error.reason, Reason.PRIVATE_TEXT_REMAINS)
+
+    def test_a_secret_word_is_found_under_full_unicode_case_folding(self):
+        for secret_text, draft in (
+            ("Straße-Nummer", "use STRASSE-NUMMER now"),
+            ("STRASSE-NUMMER", "use straße-nummer now"),
+        ):
+            with self.subTest(secret=secret_text):
+                with mock.patch.object(rules, "find_copied_spans", return_value=()):
+                    error = refusal(
+                        self, self.gate.minimize, draft, [secret(secret_text)]
                     )
                 self.assertIs(error.reason, Reason.PRIVATE_TEXT_REMAINS)
 

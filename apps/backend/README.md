@@ -1430,11 +1430,11 @@ Gate は、外へ出してよい `MinimizedQuery` を返すか、`PrivacyRefusal
 
 1. **拒否の判定**（Text を読む前）: Context に `ContextPiece` でないもの（ラベルの無い文字列など）があれば `unclassified_context`。Draft が 2,000 文字を超えれば `draft_too_long`。Context が 32 個または合計 400,000 文字を超えれば `context_too_large`。
 2. **正規化**: NFKC、制御文字・ゼロ幅文字の除去、空白の圧縮（`normalize_text`）。
-3. **写しの除去**: `PUBLIC` 以外の Piece ごとに、Draft の中で Piece にもある 16 文字以上（`SECRET` は 4 文字以上。Piece がそれより短ければ Piece の長さ）の連続を、大文字小文字を無視して検出し、全部消します（`find_copied_spans`）。消した場所は空白にし、前後の語が連結することはありません。
+3. **写しの除去**: `PUBLIC` 以外の Piece ごとに、Draft の中で Piece にもある 16 文字以上（`SECRET` は 4 文字以上。Piece がそれより短ければ Piece の長さ）の連続を、大文字小文字を無視して検出し、全部消します（`find_copied_spans`）。大文字小文字の無視は、Unicode の**完全な Case folding**（`str.casefold`）です。`ß` と `SS`（`ẞ` も）、`İ` と `i` + 結合文字の点（U+0307）、語末の `ς` と `σ` は同じとみなします（`lower()` では一致しません）。窓の長さは Folding 後の文字数で数えます（`ß` は 2 文字）。消す範囲は Draft の**元の文字**の位置で、`ß` のように 1 文字が複数の文字に展開される文字は、一部だけ一致しても、その文字全体を消します。消した場所は空白にし、前後の語が連結することはありません。
 4. **Credential の除去**（`strip_credentials`）: PAW-031 の `redact_text` が認識するものを消します。
 5. **抽象化**（URL → E-mail → File Path → Private Host → ID → 長い Token → Version の順）: 内容は次の表のとおりです。
 6. **切り詰め**: 256 文字を超えたら、語の区切りで切ります（`truncated`）。
-7. **最終検査**（`rules.py` を使わない）: 単語の文字が 1 つもなければ `empty_query`。`redact_text` が Credential を見つければ `credential_remains`。`PUBLIC` 以外の Piece の全文、または `SECRET` の 4 文字以上の単語が残っていれば `private_text_remains`。Rule に不具合があっても、Private な Text は外へ出ません。
+7. **最終検査**（`rules.py` を使わない）: 単語の文字が 1 つもなければ `empty_query`。`redact_text` が Credential を見つければ `credential_remains`。`PUBLIC` 以外の Piece の全文、または `SECRET` の 4 文字以上の単語が残っていれば `private_text_remains`（NFKC、制御文字・ゼロ幅文字の除去のあと、`rules.py` とは別に `str.casefold` で比べます。`rules.py` と同じ完全な Case folding です）。Rule に不具合があっても、Private な Text は外へ出ません。
 
 | 抽象化の規則 | 内容 |
 | --- | --- |
@@ -1492,6 +1492,7 @@ result = await broker.gather(
 **最終的な実装は Claude の参照実装です。** ローカルの Qwen3-Coder-30B-A3B に、14 関数の実装を 2 回（各約 265 回の Tool 呼び出し）任せましたが、収束しませんでした。
 1 回目は `query_fingerprint`、`truncate_query`、`fold_for_match`、`normalize_text` の 4 関数が Test を通り、2 回目は `abstract_emails` も通りましたが、正規表現を使う残りの関数（`is_private_host`、`strip_credentials`、`abstract_ids`、`abstract_paths`、`abstract_hosts`、`abstract_urls` など）は Test を通せず、途中で構文エラーや、仕様に反する挙動（Credential を除かずに `[REDACTED]` を残すなど）が残りました。
 AGENTS.md のとおり、同じ失敗を繰り返したのでエスカレーションし、仕様の Docstring を保ったまま、Claude の参照実装（変異 176 個のうち 173 個を Test が検出。残る 3 個は同値）に置き換えています。ローカルモデルの成果物は、最終物に含まれていません。
+上の「Test を通り」は、当時の仕様のことです。`fold_for_match` と `find_copied_spans` の当時の仕様（1 文字ずつ `lower()`、長さは変わらない）は、`ß` と `SS` などを別の文字として扱う誤りがあったため、独立レビューを受けて、完全な Case folding（`str.casefold`、長さが増えることがある）に改めました。Docstring と Test は新しい仕様に合わせて更新し、現在の実装はその仕様に対する Claude の実装です。
 
 ### 制限と未確認の点
 
@@ -1499,6 +1500,7 @@ AGENTS.md のとおり、同じ失敗を繰り返したのでエスカレーシ�
 - ラベルは呼び出し側が付けます。付け忘れた Private な Text は、`PUBLIC` として扱われます（ラベルを付けない場合は拒否されます）。
 - Private な Host の判定は構文だけです（IP、`localhost`、Dot の無い名前、末尾が `local` `internal` `lan` `home` `corp` `intranet` `localdomain` `private` `arpa`）。`git.example.com` のような、外から見ると普通の名前の Private な Host は判定できず、URL の Host としては残ります。Dot の無い名前は、単語との区別がつかないため、URL の外では残ります。
 - 4 文字の窓は、`SECRET` に近い普通の語（`internal` の `nter` など）も消します。Query が読めなくなることがあります。
+- 写しの検出は文字の並びの比較です。Case folding は Unicode の 1 文字ずつの対応（`str.casefold`）だけで、言語ごとの規則（トルコ語の `I` と `ı` など）、発音が同じ別の綴り、アクセント記号の有無の違い（`e` と `é`）は同じとはみなしません。
 - 日付（`2026/09/24`）など、規則に当たる正当な語も消えます（過剰に消す方向に倒しています）。
 - 処理は同期で、CPU を使います。上限（Draft 2,000 文字、Context 合計 400,000 文字）で処理量を抑えていますが、Event Loop の上で動きます。
 - Audit の Sink は、メモリ上の Test 用（`InMemoryExternalSendAudit`、最大 1,000 件で満杯になると拒否する）だけです。永続化と Audit Log への接続は、後続の Issue です。

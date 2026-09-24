@@ -13,8 +13,10 @@ Order of ``PrivacyGate.minimize`` (the draft is the caller's proposed query):
 2. ``normalize_text`` the draft.
 3. For every non-public piece (in the order given): ``normalize_text`` its text
    and find the spans of the draft copied from it with ``find_copied_spans``
-   (window ``copy_window(label)``, shortened to the length of the piece). All
-   spans are merged and replaced by spaces in one go.
+   (window ``copy_window(label)``, shortened to the length of the piece, both
+   counted in case-folded characters: matching uses full Unicode case folding,
+   so ``ß`` and ``SS`` are the same). All spans are merged and replaced by spaces
+   in one go.
 4. ``strip_credentials``.
 5. The abstraction rules, in this order: ``abstract_urls``, ``abstract_emails``,
    ``abstract_paths``, ``abstract_hosts``, ``abstract_ids``,
@@ -23,7 +25,8 @@ Order of ``PrivacyGate.minimize`` (the draft is the caller's proposed query):
 7. Safety checks that do not use ``rules.py``: the query has a word character;
    ``redact_text`` finds no credential in it; no whole non-public piece and no
    word of 4 or more characters of a secret is in it (compared after NFKC,
-   removal of format characters and case folding).
+   removal of format characters and full case folding with ``str.casefold``,
+   the same folding as the copy detection but not taken from ``rules.py``).
 
 Nothing in an exception, a log line or a record contains the draft, a piece, the
 query or an exception text of the audit sink.
@@ -107,7 +110,11 @@ def replace_spans(text: str, spans: Sequence[tuple[int, int]]) -> str:
 
 
 def _guard_key(text: str) -> str:
-    """The comparison form of the safety checks: independent of ``rules.py``."""
+    """The comparison form of the safety checks: independent of ``rules.py``.
+
+    Full Unicode case folding (``str.casefold``), like ``rules.fold_for_match``:
+    ``ß`` and ``SS``, ``İ`` and ``i`` plus a combining dot, ``ς`` and ``σ`` are
+    equal here too."""
     folded = unicodedata.normalize("NFKC", text)
     kept = "".join(
         " " if ch.isspace() else ch
@@ -231,7 +238,9 @@ class PrivacyGate:
             source = rules.normalize_text(piece.text)
             if not source:
                 continue
-            window = min(copy_window(piece.label), len(source))
+            # The window counts case-folded characters (a ``ß`` is two of them),
+            # so a short piece is compared as a whole, not by its first letters.
+            window = min(copy_window(piece.label), len(rules.fold_for_match(source)))
             found = rules.find_copied_spans(text, source, window=window)
             if found:
                 matched += 1
