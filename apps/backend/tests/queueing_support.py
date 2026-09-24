@@ -58,20 +58,24 @@ class PostgresQueueingTestCase(PostgresTaskTestCase):
         await super().asyncSetUp()
         # Always as the owner of the schema, also when the test's own connections
         # use the unprivileged application role (test_queueing_grants).
+        await self.owner_sql(
+            "TRUNCATE queue_entries, budget_usages, loop_failure_signatures"
+        )
+        self.clock = FakeClock()
+        # Explicit times are the test seam (production queues use the database clock).
+        self.queue = TaskQueue(self.database, allow_explicit_now=True)
+        self.budget = BudgetTracker(self.database, clock=self.clock)
+        self.loop_detector = LoopDetector(self.database)
+
+    async def owner_sql(self, sql: str, **parameters) -> None:
+        """Run ``sql`` as the owner of the schema (a test moves database-side time or
+        state this way; the services under test may run as the app role)."""
         owner = new_database()
         try:
             async with owner.engine.begin() as connection:
-                await connection.execute(
-                    text(
-                        "TRUNCATE queue_entries, budget_usages, loop_failure_signatures"
-                    )
-                )
+                await connection.execute(text(sql), parameters)
         finally:
             await owner.dispose()
-        self.clock = FakeClock()
-        self.queue = TaskQueue(self.database)
-        self.budget = BudgetTracker(self.database, clock=self.clock)
-        self.loop_detector = LoopDetector(self.database)
 
     async def make_tasks(self, count: int) -> list[uuid.UUID]:
         return [await self.create_task(title=f"task {i}") for i in range(count)]
@@ -97,6 +101,7 @@ class PostgresQueueingTestCase(PostgresTaskTestCase):
 
     def new_queue(self, **kwargs) -> TaskQueue:
         """A queue on its own engine, as a second worker process would have."""
+        kwargs.setdefault("allow_explicit_now", True)
         return TaskQueue(self.new_database(), **kwargs)
 
     def new_budget(self, **kwargs) -> BudgetTracker:
