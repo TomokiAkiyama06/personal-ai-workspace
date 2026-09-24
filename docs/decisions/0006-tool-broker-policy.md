@@ -84,11 +84,16 @@ Credential の Plaintext を Agent に渡さないこと、Backend が最終判�
 独立 Review が、Broker は Project の Resource で認可するため、この override が Tool の呼び出しに効かないと指摘した。実装は次を選んだ。要件は「どの Repository に触れる呼び出しか」の決め方を定めていない。
 
 1. **触れる Repository は Backend が決める。** Orchestrator が Task の作業対象（Working Set）を `TaskScope.repositories`（Repository の ID、Project、Worktree の Path、解決済みの ACL）として呼び出しごとに作る。Model の出力は Repository の ID を名指しできるだけで、ACL を指定できない。
-2. **触れる Repository の決め方:** 呼び出しが `repository` 引数（作業対象の ID のみ）で名指しするか、Symlink を解決した後の Path が Repository の Worktree の中にあるとき。入れ子の Repository は両方に触れる（厳しい ACL が効く）。**Host / URL は Repository を表さない**（同じ Host に多くの Repository があるため）。
+2. **触れる Repository の決め方:** 呼び出しが `repository` 引数（作業対象の ID のみ）で名指しするか、Symlink を解決した後の Path が Repository の Worktree の中にあるとき。入れ子の Repository は両方に触れる（厳しい ACL が効く）。**Host は Repository を表さない**（同じ Host に多くの Repository があるため）。**URL は、Backend が Repository に登録した Remote（`ScopedRepository.remotes`）の下にあるときだけ、その Repository を表す**（Symlink を解決した Path と同じく、入れ子と同様に触れる Repository が増える）。`..`・`\`・`;`・`%2e` などで Remote の外へ出られる Path は「下」と見なさない。
 3. 触れる Repository があれば、その Repository の `Resource.repository(...)` で認可する（override は Project の Role を狭めるだけで広げない、Agent は `agent` を持たない Repository を操作できない、は PAW-025 の規則のまま）。**ACL が不明（`None`）なら拒否**し、`inherit` とは読まない。ACL は承認を使うときにも再判定する。
 4. **Repository への書き込み**（`project.repo.write` / `project.pr.create`）の Tool は、触れる Repository を Path か `repository` の必須引数で宣言しなければならず（Registry が検査）、作業対象のどの Repository にも触れない呼び出しは拒否する（`repository_not_identified`）。
    根拠は要件の Multi-Repo Task の「Write 範囲は Task Working Set として明示・制御する」「Agent が「ついでに」別 Repo を書き換えてはならない」。読み取りと Agent 実行は触れる Repository がなければ Project の Resource で判定する（Read 範囲は比較的広く取ってよい、と要件にある）。
-5. **Human に判断を求める点:** (a) 書き込みだけを「Repository を特定できなければ拒否」にしたこと（読み取りと `project.task.run` は Project の Resource のまま）。(b) 入れ子の Repository を「両方の ACL に従う」にしたこと。(c) Host から Repository を推定せず、リモートに書く Tool に `repository` 引数を求めること。
+5. **Repository に触れる呼び出しの URL を、その Repository に結びつける。** 独立 Review が、`repository` 引数だけを認可すると、書き込める B を名指しして `remote` に読み取り専用の A の URL（同じ Host）を渡せば、Executor は A の URL を受け取り、A の ACL を迂回できると指摘した（再現した: `git.push` が `allow`）。実装は次を選んだ。
+   - 呼び出しの URL は Model が書くので、Backend が登録した Remote の下にあるかで Repository を決める（上の 2）。A の Remote の下なら A にも触れ、A の ACL も効く（読み取り専用なら拒否）。
+   - Repository に触れる呼び出しの URL が作業対象のどの Repository の Remote の下にもなければ拒否する（`remote_not_in_repository`）。ACL を解決していない Repository を指せるため。Remote を登録しない Repository は URL を持てない（既定は拒否）。
+   - Host の規則が先: Scope の外の Host は従来どおり（書き込みは拒否、読み取りは承認）。Repository に触れない呼び出し（URL の読み取りだけ）は Host の検査のままだが、その URL が作業対象の Repository の Remote の下なら、その Repository の ACL が効く。
+   - 採らなかった案: Model に URL を渡させず Backend が Remote を Executor へ渡す（Tool の引数を変え、`network` の Tool が必須の Host / URL を持つ規則と合わない。将来の選択肢）。
+6. **Human に判断を求める点:** (a) 書き込みだけを「Repository を特定できなければ拒否」にしたこと（読み取りと `project.task.run` は Project の Resource のまま）。(b) 入れ子の Repository を「両方の ACL に従う」にしたこと。(c) Host から Repository を推定せず、リモートに書く Tool に `repository` 引数を求めること。(d) URL を Backend が登録した Remote で Repository に結びつけ、`repository` 引数と URL が別の Repository を指す呼び出しは両方の ACL に従わせる（不一致を拒否にはしない）こと。Remote の登録は Orchestrator（Task の Scope を作る側）の責務で、登録がない Repository では URL を伴う呼び出しが通らないこと。
 
 ### 9. Task の終了と承認
 
@@ -96,10 +101,13 @@ Credential の Plaintext を Agent に渡さないこと、Backend が最終判�
 
 1. **Task の終わりは `completed` / `failed` / `cancelled`**（`TERMINAL_STATES`）。Task の状態に `expired` はなく、承認は自分の `expires_at` で失効する。終了時に、その Task の Open な承認（pending、承認済みで未使用）を取り消す。
 2. **取り消しの失敗は握りつぶさない。** `revoke_task` は Store の失敗で `ApprovalRevocationError` を上げる（以前は `0` を返し、「Open な承認はなかった」と区別できなかった）。終了の遷移はもう Commit されているので戻せず、`TaskService` は型名だけを Log に残す。再試行は今は呼び出し側（`revoke_task` は冪等）。
+   **取り消しは時間で区切る。** `TaskService` は Listener を待つので、Statement に答えない DB が取り消しを止めると、Commit 済みの遷移の後で Cancel / Complete / Retry の要求が返らなくなる（独立 Review の指摘）。取り消しと履歴を 1 つの Statement にして、中断可能な接続（`Database.fetch_abortable`、期限で Socket を閉じる）で実行する。時間切れは失敗と同じく `ApprovalRevocationError` で、`revoke_task` を呼び直せる。`ApprovalService` は全体も `timeout_seconds` で区切る。
 3. **Broker は独立に Fail-closed で止める。** 承認を要する呼び出しは、承認を開くときも使うときも、Task の**現在の状態**（`TaskActivityProvider`）が動ける（`ACTIVE`）ときだけ進む。終了・不明・読めないなら拒否する（`task_not_active` / `task_unknown` / `task_state_unavailable`）。取り消しの成否によらず、終わった Task の承認は使えない。既定の Provider は不明を答える（本物を入れるまで承認は使えない）。
    遷移と取り消しを 1 つの Transaction にする案（`TaskService` が Tool の Table を触る）は、Task と Tool の境界を越えるため採らなかった。
+   **使うときの確認と消費は 1 つの Transaction にする。** 独立 Review が、確認（読み取り）と消費が別の操作で、その間に終了の遷移が Commit されると、Commit 後の取り消しと消費が競い、消費が勝った承認が終わった Task で使われると指摘した（再現した）。`consume` は `require_active_task` を受け取り、`PostgresApprovalStore` は同じ Transaction で Task の行を `FOR SHARE` で読み直してから消費する（`ACTIVE` でなければ消費しない）。進行中の遷移は待ち、後の遷移は消費の Commit を待つので、使うことと終了は順序づけられる。Broker の確認は、理由をはっきり返す早い答えとして残す。Task の表を読む（Lock する）のは読み取りだけで、Task の状態は変えない。
+   「試行番号（attempt）への結びつけ」（承認を作った試行でだけ使えるようにする）は、Table の列と Migration が要るため採らなかった。Retry / Restart での取り消し（4）と、Task の現在の状態の確認で足りる。
 4. **再び動く Task。** Retry / Restart（終了状態からの遷移）でも Open な承認を取り消す。終了時の取り消しが失敗して残った承認は、再開した Task では使えず、新しい承認を求め直す。
-5. **Human に判断を求める点:** (a) 承認を要する呼び出しだけが Task の状態を見ること（`AUTO` / `SCOPED_AUTO` は見ない。終わった Task へ呼び出しを渡さないのは Orchestrator の責務）。(b) 既定の Provider を「不明 = 拒否」にしたこと（配線を忘れると承認を要する呼び出しが全て通らない）。(c) 再試行の仕組み（再取り消しの Job）を持たず、Broker の Fail-closed に任せること。
+5. **Human に判断を求める点:** (a) 承認を要する呼び出しだけが Task の状態を見ること（`AUTO` / `SCOPED_AUTO` は見ない。終わった Task へ呼び出しを渡さないのは Orchestrator の責務）。(b) 既定の Provider を「不明 = 拒否」にしたこと（配線を忘れると承認を要する呼び出しが全て通らない）。(c) 再試行の仕組み（再取り消しの Job）を持たず、Broker の Fail-closed に任せること。(d) 使うときの Task の確認を `PostgresApprovalStore` が `tasks` の行で行うこと（Tool の Store が Task の Table を読み Lock する。Task の試行番号への結びつけは持たない）。
 
 ## 既知の制限と後続の課題
 
@@ -108,7 +116,7 @@ Credential の Plaintext を Agent に渡さないこと、Backend が最終判�
 - 却下の Cooldown は Hash 単位で、引数を変えた別の呼び出しは止めない（件数の上限が量を抑える）。
 - 引数のない Tool は承認を開けない。承認が要る Tool は、何をするかを表す引数を必須にする。
 - Credential の検出は形のわかる Format と代入の形だけ。
-- Task の Scope（作業対象の Repository とその ACL を含む）・Grant・Project の状態は、Orchestrator が呼び出しごとに現在の値から作る（Broker は渡された Context を信頼する）。Path も `repository` 引数もない Tool は、Repository の ACL では判定できない。
+- Task の Scope（作業対象の Repository とその ACL を含む）・Grant・Project の状態は、Orchestrator が呼び出しごとに現在の値から作る（Broker は渡された Context を信頼する）。Path も `repository` 引数もない Tool（Remote の下にない URL だけの Tool を含む）は、Repository の ACL では判定できない。
 
 ## リスク
 

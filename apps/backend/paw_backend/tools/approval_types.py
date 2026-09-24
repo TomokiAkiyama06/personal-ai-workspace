@@ -91,6 +91,10 @@ class ConsumeOutcome(StrEnum):
     REJECTED = "rejected"
     REVOKED = "revoked"
     PENDING = "pending"  # no human decision yet
+    # Only with ``require_active_task``: the task of the approval has ended, or
+    # is not known; nothing was consumed.
+    TASK_NOT_ACTIVE = "task_not_active"
+    TASK_UNKNOWN = "task_unknown"
 
 
 class RevokeOutcome(StrEnum):
@@ -306,6 +310,13 @@ class ApprovalStore(Protocol):
     ``limits.max_pending`` open approvals or the same call was rejected within
     ``limits.rejection_cooldown``. ``decide``, ``consume`` and ``revoke`` succeed
     for at most one of any number of concurrent callers.
+
+    ``consume(..., require_active_task=True)`` must check that the approval's
+    task can still act **in the same atomic step as the consumption** and
+    consume nothing otherwise (``TASK_NOT_ACTIVE`` / ``TASK_UNKNOWN``). A check
+    made before the call is not enough: the task can end in between, and an
+    approval that a consumption wins from the revocation that follows the end
+    would then be used for a task that already ended (Decision 0006, section 9).
     """
 
     async def open_request(
@@ -325,7 +336,12 @@ class ApprovalStore(Protocol):
     ) -> DecideResult: ...
 
     async def consume(
-        self, approval_id: uuid.UUID, binding: ApprovalBinding, *, now: datetime
+        self,
+        approval_id: uuid.UUID,
+        binding: ApprovalBinding,
+        *,
+        now: datetime,
+        require_active_task: bool = False,
     ) -> ConsumeOutcome: ...
 
     async def revoke(

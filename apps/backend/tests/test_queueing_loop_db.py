@@ -5,7 +5,13 @@ import asyncio
 import unittest
 import uuid
 
-from paw_backend.tasks import TaskNotFoundError
+from paw_backend.tasks import (
+    StaleAttemptError,
+    TaskCommand,
+    TaskNotFoundError,
+    TaskService,
+    TaskState,
+)
 from paw_backend.tasks.queueing import (
     DEFAULT_LOOP_POLICY,
     FailureRecord,
@@ -44,7 +50,9 @@ class LoopTestCase(PostgresQueueingTestCase):
     async def fail(
         self, task_id, message="Timeout after 30s on 0x7FFF", approach=0, **kw
     ):
-        arguments = dict(error_class="ToolError", step="run_tests", message=message)
+        arguments = dict(
+            attempt=1, error_class="ToolError", step="run_tests", message=message
+        )
         arguments.update(kw)
         return await self.loop_detector.record_failure(
             task_id, approach=approach, **arguments
@@ -167,7 +175,7 @@ class RecordFailureTest(LoopTestCase):
         detector = LoopDetector(self.database, policy)
         results = [
             await detector.record_failure(
-                task_id, error_class="E", step="s", message="same"
+                task_id, attempt=1, error_class="E", step="s", message="same"
             )
             for _ in range(6)
         ]
@@ -192,6 +200,13 @@ class RecordFailureTest(LoopTestCase):
             ("step", dict(step="s" * 101)),
             ("message", dict(message=None)),
             ("message", dict(message=5)),
+            ("attempt", dict(attempt=0)),
+            ("attempt", dict(attempt=-1)),
+            ("attempt", dict(attempt=2**31)),
+            ("attempt", dict(attempt=True)),
+            ("attempt", dict(attempt="1")),
+            ("attempt", dict(attempt=1.0)),
+            ("attempt", dict(attempt=None)),
             ("approach", dict(approach=-1)),
             ("approach", dict(approach=101)),
             ("approach", dict(approach=True)),
@@ -200,7 +215,12 @@ class RecordFailureTest(LoopTestCase):
         ]
         for parameter, overrides in cases:
             arguments = dict(
-                task_id=task_id, error_class="E", step="s", message="m", approach=0
+                task_id=task_id,
+                attempt=1,
+                error_class="E",
+                step="s",
+                message="m",
+                approach=0,
             )
             arguments.update(overrides)
             call_task = arguments.pop("task_id")
@@ -218,7 +238,9 @@ class RecordFailureTest(LoopTestCase):
         detectors = [self.new_loop_detector() for _ in range(12)]
         results = await asyncio.gather(
             *(
-                d.record_failure(task_id, error_class="E", step="s", message="same")
+                d.record_failure(
+                    task_id, attempt=1, error_class="E", step="s", message="same"
+                )
                 for d in detectors
             )
         )
@@ -278,6 +300,10 @@ class HistoryTest(LoopTestCase):
             self.assertEqual(caught.exception.parameter, "task_id")
 
 
+LOCK_WAITERS = (
+    "SELECT count(*) FROM pg_stat_activity "
+    "WHERE datname = current_database() AND wait_event_type = 'Lock'"
+)
 ADVISORY_LOCK_WAITERS = (
     "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted "
     "AND database = (SELECT oid FROM pg_database WHERE datname = current_database())"
@@ -325,7 +351,7 @@ class ClearTest(LoopTestCase):
         recorder._read_history = hold_before_commit
         recording = asyncio.create_task(
             recorder.record_failure(
-                task_id, error_class="E", step="s", message="stale failure"
+                task_id, attempt=1, error_class="E", step="s", message="stale failure"
             )
         )
         clearing = None
@@ -354,6 +380,90 @@ class ClearTest(LoopTestCase):
         self.assertEqual(outcomes[1], 3)  # the two old rows and the recorded one
         self.assertEqual(await self.stored(task_id), [])
         self.assertEqual(await self.loop_detector.history(task_id), ())
+
+    async def test_a_failure_reported_by_a_superseded_attempt_is_not_counted(self):
+        # Restart starts attempt 2 and the orchestrator clears the old history; the
+        # old worker's delayed reports then arrive. They must not enter the new
+        # history, before or after the clear.
+        task_id = await self.task_in_state(TaskState.FAILED)
+        await self.fail(task_id)
+        await self.fail(task_id)
+        await self.service.execute(task_id, TaskCommand.RESTART, actor=self.user)
+        with self.assertRaises(StaleAttemptError) as caught:
+            await self.fail(task_id, attempt=1)
+        self.assertEqual(caught.exception.code, "stale_attempt")
+        self.assertEqual(await self.loop_detector.clear(task_id), 2)
+        with self.assertRaises(StaleAttemptError):
+            await self.fail(task_id, attempt=1)
+        self.assertEqual(await self.stored(task_id), [])
+        self.assertEqual(await self.loop_detector.history(task_id), ())
+        # The new attempt records normally and starts from an empty history; an
+        # attempt that does not exist yet is refused as well.
+        with self.assertRaises(StaleAttemptError):
+            await self.fail(task_id, attempt=3)
+        first = await self.fail(task_id, attempt=2)
+        self.assertEqual((first.verdict, first.repeats), (V.CONTINUE, 1))
+        self.assertEqual(len(await self.stored(task_id)), 1)
+
+    async def test_an_unknown_task_is_not_found_whatever_the_attempt(self):
+        with self.assertRaises(TaskNotFoundError):
+            await self.fail(uuid.uuid4(), attempt=7)
+        self.assertEqual(await self.stored(), [])
+
+    async def test_a_restart_waits_for_a_failure_that_is_being_recorded(self):
+        # The attempt check and the commit of the row are atomic against Restart: a
+        # report of attempt 1 that has passed the check cannot commit after attempt 2
+        # has started (it would then be in the new history). Restart runs after it.
+        task_id = await self.task_in_state(TaskState.FAILED)
+        recorder = self.new_loop_detector()
+        inserted, release = asyncio.Event(), asyncio.Event()
+        read_history = recorder._read_history
+
+        async def hold_before_commit(session, task):
+            history = await read_history(session, task)
+            inserted.set()  # checked and inserted in an open transaction
+            await release.wait()
+            return history
+
+        recorder._read_history = hold_before_commit
+        recording = asyncio.create_task(
+            recorder.record_failure(
+                task_id, attempt=1, error_class="E", step="s", message="in flight"
+            )
+        )
+        restarting = None
+        try:
+            await asyncio.wait_for(inserted.wait(), DEADLINE_SECONDS)
+            restarting = asyncio.create_task(
+                TaskService(self.new_database()).execute(
+                    task_id, TaskCommand.RESTART, actor=self.user
+                )
+            )
+            # Either Restart is provably waiting for the row lock, or it already
+            # ran past the in-flight failure (the bug): never a fixed sleep.
+            async with asyncio.timeout(DEADLINE_SECONDS):
+                while not restarting.done():
+                    if await self.scalar(LOCK_WAITERS) > 0:
+                        break
+                    await asyncio.sleep(0.01)
+            self.assertFalse(
+                restarting.done(),
+                "Restart committed while a failure of the old attempt was in flight",
+            )
+        finally:
+            release.set()
+            outcomes = await asyncio.gather(
+                recording, *([restarting] if restarting else []), return_exceptions=True
+            )
+        raise_unexpected(outcomes)
+        self.assertEqual(outcomes[0].verdict, V.CONTINUE)
+        # The failure committed as attempt 1, before Restart; the clear that follows
+        # the Restart removes it, and the next report of attempt 1 is refused.
+        self.assertEqual(len(await self.stored(task_id)), 1)
+        self.assertEqual(await self.loop_detector.clear(task_id), 1)
+        with self.assertRaises(StaleAttemptError):
+            await self.fail(task_id, attempt=1)
+        self.assertEqual(await self.stored(task_id), [])
 
     async def test_after_a_clear_the_detection_starts_over(self):
         (task_id,) = await self.make_tasks(1)

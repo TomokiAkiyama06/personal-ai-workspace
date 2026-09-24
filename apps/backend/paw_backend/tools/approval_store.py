@@ -9,8 +9,13 @@ nothing:
   is the delegating user and is not the agent (and, to approve a strong
   approval, a step-up was confirmed);
 * consume: ``status = 'approved' AND expires_at > now AND`` every field of the
-  binding (task, agent, user, tool, level, call hash) equals what was granted;
-* revoke: ``status IN ('pending', 'approved') AND expires_at > now``.
+  binding (task, agent, user, tool, level, call hash) equals what was granted.
+  With ``require_active_task`` the task's row is first read **locked**
+  (``FOR SHARE``) in the same transaction, so a use and the end of the task are
+  ordered, never crossed (Decision 0006, section 9);
+* revoke: ``status IN ('pending', 'approved') AND expires_at > now``;
+  ``revoke_task`` (the listener of a task's end) is one such statement, with its
+  history rows, on an abortable connection that is shut down at a deadline.
 
 The history row is written in the same transaction as the change. When an
 update matches nothing, the row is read again only to *explain* the refusal
@@ -56,8 +61,27 @@ from paw_backend.tools.approval_types import (
 from paw_backend.tools.capabilities import ApprovalLevel
 from paw_backend.tools.models import ToolApprovalEventRow, ToolApprovalRow
 from paw_backend.tools.scope import Target, TargetKind
+from paw_backend.tools.task_state import TaskActivity, lock_task_activity
 
 _OPEN = (ApprovalStatus.PENDING.value, ApprovalStatus.APPROVED.value)
+# One statement, so that the revocation and its history are atomic without a
+# transaction (it runs on an abortable, autocommit connection). The values are
+# the fixed members of the enums; only ``task_id`` and ``now`` are parameters.
+_REVOKE_TASK = f"""
+WITH revoked AS (
+    UPDATE tool_approvals
+       SET status = '{ApprovalStatus.REVOKED.value}',
+           revoked_at = %(now)s,
+           revoked_by = NULL
+     WHERE task_id = %(task_id)s
+       AND status IN ('{_OPEN[0]}', '{_OPEN[1]}')
+       AND expires_at > %(now)s
+ RETURNING id
+)
+INSERT INTO tool_approval_events (approval_id, kind, created_at)
+SELECT id, '{ApprovalEventKind.REVOKED.value}', %(now)s FROM revoked
+RETURNING approval_id
+"""
 _OPEN_ATTEMPTS = 3
 
 
@@ -156,8 +180,13 @@ async def _mark_expired(
 class PostgresApprovalStore:
     """Approvals in ``tool_approvals`` / ``tool_approval_events`` (migration 0031)."""
 
-    def __init__(self, database: Database) -> None:
+    def __init__(
+        self, database: Database, *, revoke_timeout_seconds: float = 3.0
+    ) -> None:
+        if not revoke_timeout_seconds > 0:
+            raise ValueError("revoke_timeout_seconds must be positive")
         self._database = database
+        self._revoke_timeout_seconds = revoke_timeout_seconds
 
     async def open_request(
         self, new: NewApproval, *, now: datetime, limits: OpenLimits
@@ -317,9 +346,38 @@ class PostgresApprovalStore:
             return DecideResult(outcome)
 
     async def consume(
-        self, approval_id: uuid.UUID, binding: ApprovalBinding, *, now: datetime
+        self,
+        approval_id: uuid.UUID,
+        binding: ApprovalBinding,
+        *,
+        now: datetime,
+        require_active_task: bool = False,
     ) -> ConsumeOutcome:
         async with self._database.session() as session, session.begin():
+            if require_active_task:
+                # The task row is read **locked** in this very transaction: a
+                # terminal transition that is in flight is waited for (and its
+                # end is then seen here), one that starts later waits for this
+                # transaction. So the use is ordered before or after the end of
+                # the task, never across it (a check made earlier could be
+                # overtaken by the end, and the consumption would then win
+                # against the revocation that follows it).
+                activity = await lock_task_activity(session, binding.task_id)
+                if activity is not TaskActivity.ACTIVE:
+                    row = await _row(session, approval_id)
+                    outcome = diagnose_consume(
+                        None if row is None else _record(row), binding, now
+                    )
+                    if outcome is ConsumeOutcome.CONSUMED:
+                        # It could have been used: the task is why it is not.
+                        # (A reason about the approval itself - revoked, used,
+                        # for another call - is the more precise one.)
+                        outcome = (
+                            ConsumeOutcome.TASK_NOT_ACTIVE
+                            if activity is TaskActivity.ENDED
+                            else ConsumeOutcome.TASK_UNKNOWN
+                        )
+                    return outcome
             changed = await session.execute(
                 update(ToolApprovalRow)
                 .where(
@@ -394,26 +452,23 @@ class PostgresApprovalStore:
     async def revoke_task(
         self, task_id: uuid.UUID, *, now: datetime
     ) -> list[uuid.UUID]:
-        async with self._database.session() as session, session.begin():
-            revoked = await session.execute(
-                update(ToolApprovalRow)
-                .where(
-                    ToolApprovalRow.task_id == task_id,
-                    ToolApprovalRow.status.in_(_OPEN),
-                    ToolApprovalRow.expires_at > now,
-                )
-                .values(
-                    status=ApprovalStatus.REVOKED.value,
-                    revoked_at=now,
-                    revoked_by=None,
-                )
-                .returning(ToolApprovalRow.id)
-                .execution_options(synchronize_session=False)
-            )
-            ids = list(revoked.scalars().all())
-            for approval_id in ids:
-                await _add_event(session, approval_id, ApprovalEventKind.REVOKED, now)
-            return ids
+        """Revoke every open approval of a task, as one statement with a deadline.
+
+        It runs on an abortable connection (``Database.fetch_abortable``), not on
+        a pooled session: it is the listener of a task's end, ``TaskService``
+        awaits it after the transition has committed, and a database that
+        accepts the connection but stalls the statement must not hold up every
+        cancel / complete / retry request. At ``revoke_timeout_seconds`` the
+        socket is shut down and ``TimeoutError`` is raised; the statement may or
+        may not have committed (it is idempotent, so it can simply be run
+        again, and the broker refuses the task's approvals meanwhile).
+        """
+        rows = await self._database.fetch_abortable(
+            _REVOKE_TASK,
+            {"task_id": task_id, "now": now},
+            timeout_seconds=self._revoke_timeout_seconds,
+        )
+        return [row[0] for row in rows]
 
     async def history(self, approval_id: uuid.UUID) -> list[ApprovalHistoryEntry]:
         async with self._database.session() as session:
