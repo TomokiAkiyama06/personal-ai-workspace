@@ -202,7 +202,22 @@ make the lifecycle log tamper-proof**.  What the runner does:
   instead of returning a result the durable log does not contain.
 - If the output drain cannot be set up after the launch (descriptor exhaustion), or the
   supervisor cannot be built, the child is killed and reaped before the worktree is
-  removed, instead of running on without a timeout.
+  removed, instead of running on without a timeout.  When no leader could be built,
+  the child's pid and start time (recorded right after the launch) are checked first:
+  nothing is signalled unless it is still the runner's own unreaped child (`waitid`
+  with `WNOWAIT`) with that start time.  A child that something else already reaped
+  may have had its pid, which is also its process group id, reused, so then nothing is
+  sent and nothing is waited for.  A child with no recorded start time (no `/proc`, or
+  the read failed) is not signalled at all, because `waitid` alone cannot tell it from
+  another direct child that was given the same pid.
+- The start time recorded right after the launch is the leader's identity: the leader is
+  built with it instead of looking the child up a second time (a second lookup could
+  fail and leave the leader with no identity, so it would never be signalled).
+- Without a recorded start time (no `/proc`) the runner has no identity to check, so it
+  sends no signal to the candidate's group and cannot stop it: a candidate that exceeds
+  the timeout (or is cancelled) is reported `timed_out` (or `cancelled`) but keeps
+  running, and one that finishes is still reported with its real exit status.
+  Production needs a container or cgroup there.
 - A removal that fails for a filesystem reason (a Git metadata entry replaced by a
   plain file is simply removed; a permission error is not) is reported as
   `cleanup_incomplete` and `WorktreeRunnerError`, never as a raw `OSError`.
@@ -255,6 +270,48 @@ python3 -m venv .venv
 
 複数fileを一度に指定できます。すべてvalidなら終了code 0、入力が不正なら1、bundled schemaを
 利用できない場合は2を返します。エラーはJSON pathと理由を表示し、拒否した入力値は表示しません。
+
+## Retrieval benchmark
+
+`benchmarks.retrieval_runner`はACL付きのDatasetに対してRetrieverを実行し、次の指標を算出します。
+Recall@K、MRR、nDCG@K、Permission Leakage（必須要件は合計0）、
+stale / superseded / Scope誤選択率、latency（mean / p50 / p95、nearest-rank）です。
+順位指標の定義は`benchmarks.retrieval_metrics`にあり、Retrieverの返すidの重複は2件目以降を捨て、
+Datasetにないidは権限外として数えます。Retrieverが例外を出したqueryは指標0の失敗queryとして続行します
+（記録するのは例外の型だけです）。latencyは`retrieve`の呼び出しだけを計測します。
+CPU時間は、`retrieve`の呼び出し中にこのprocessが使ったCPU時間（`cpu_ms`、平均は`cpu_ms_mean`、合計は`cpu_ms_total`）です。
+Retrieverがin-processで動く場合だけ含まれ、外部のServiceが使うCPU時間は見えません。GPU・VRAMは、`--collect-resources`で
+`MetricsCollector`を使うと、wall clockとVRAM・GPU utilizationのpeakが`resources`に入ります（付けない場合は含みません）。
+`retrieve`は文字列のsequence（list・tuple）を返す必要があり、単一のid文字列（`"mem1"`）などは不正な戻り値として終了code 2にします。
+返されたidは、重複を除いた上位`k`件だけを採点します（`k`を超える分を末尾に足しても、どの指標も上がりません）。
+Datasetのrelevantなmemoryは、active・fresh・queryのScope（`scope`と、任意の`allowed_scopes`）のいずれかに属する必要があります。
+`allowed_scopes`は、要件のUser / Project / Repo / Shared階層で、そのqueryへ正当に適用できる他のScope（たとえばRepoのqueryに対するUserやShared）を表します。
+`allowed_scopes`にも`scope`にも入らないScopeのmemoryを返すと、Scope誤選択として数えます。
+Retrieverには、そのqueryに適用できるScope（`scopes`。queryの`scope`が先頭で、続けて`allowed_scopes`を昇順）を渡します。
+queryの文章とprincipalが同じでもScopeが違えば、Retrieverの入力が変わり、Scopeの扱いを候補の能力として測れます。そうでないと、正解をそのまま返しても
+stale / superseded / Scope誤選択率が0にならず、指標が矛盾するためDataset不備として拒否します。
+失敗したqueryの数は`failed_queries`に出ます。Retrieverが`retrieve(query_text, principals, k)`を
+呼べない場合（メソッドがない、引数が合わない）は、全queryが失敗した報告にせず、実行前にエラーにします。
+stale / superseded / Scope誤選択率の分母は、`k`ではなく、実際に返した上位k件以内の件数です
+（返却数が少ないRetrieverは、少ない件数の中での混入率になります。候補間で返却数が違う場合は`k`を揃えて比較してください）。
+Datasetの未知のfield（綴り誤り）は、黙って無視せず不備（終了code 1）として拒否します。DatasetのJSONは、既存のvalidatorと同じ厳格なdecoder（`benchmarks.json_input.decode_json`）で読み、同じ名前のmemberの重複や`NaN`などの非標準の定数は、後の値で上書きせずに拒否します。`retrieve`が返すidは、`k`で切る前に全件が文字列であることを検証します。
+memoryの`status`は、要件で定義された`active`・`superseded`・`deprecated`・`history`です（`active`以外は、返すと誤選択として数えます）。
+Datasetの`fresh`は真偽値、`acl`・`requester_principals`・`relevant_ids`は文字列のlistで、
+違う型は暗黙に変換せずDataset不備として扱います。
+
+```bash
+python -m benchmarks.run_retrieval_benchmark \
+  --dataset benchmarks/tests/fixtures/retrieval/valid_dataset.json \
+  --retriever benchmarks.tests.fixture_retrievers:make_retriever \
+  -k 5 --output report.json
+```
+
+`--retriever`は`module:factory`で、引数なしのfactoryが
+`retrieve(query_text, requester_principals, k, scopes) -> ids`を持つobjectを返します。
+importしたmoduleは呼び出し元の権限で実行されるため、信頼できるcodeだけを指定してください。
+Reportには文章、ACL、requester principal、例外messageを含めません。終了codeは、成功が0、Datasetの不備が1、
+Retrieverの指定・戻り値やReport出力の不備、`-k`の指定誤りが2です。
+Datasetの正式な形式はSeed Benchmark Dataset（PAW-016）で確定するため、現在の形式は暫定です。
 
 ## Evaluator Result schema v1
 
