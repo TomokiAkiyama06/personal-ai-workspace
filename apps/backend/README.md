@@ -562,7 +562,7 @@ Error の Message は固定文字列（Field 名と理由の語彙）で、入�
 
 `validation.py` と `service.py` は、当初 Local Model（Qwen3-Coder-30B-A3B）に実装させる計画でした。仕様（Contract、Model、Migration、Test）は Claude が先に書き、Local Model の合格基準は Test だけでした。
 Local Model の試行は収束せず、構文エラーを含む部分的なコードしか作れなかったため、**この 2 つの Module は Claude の参照実装**です（人間の判断が必要な点は下記）。
-Test は参照実装で成り立つことを確認しながら書いたものです。Local Model の試行の前に確定しており、その後は変更していません。
+Test は参照実装で成り立つことを確認しながら書いたものです。Local Model の試行の前に確定しており、その後の変更は、負荷の高い環境で 20 件の同時 `acquire_use` が Lock Timeout に達しないよう、その 1 件の Test の `lock_timeout_ms` を伸ばしただけです。
 
 ### 制限と未確認の点
 

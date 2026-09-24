@@ -284,7 +284,8 @@ class AcquireUseTest(PostgresScratchTestCase):
 
     async def test_twenty_holders_at_once_get_exactly_sixteen_leases(self):
         item_id = self.seed_item(expires_at=T0 + HOUR)
-        stores = [self.new_store() for _ in range(4)]
+        # The 20 calls queue on one row lock: give them the longest lock timeout.
+        stores = [self.new_store(lock_timeout_ms=60_000) for _ in range(4)]
 
         results = await asyncio.gather(
             *(
