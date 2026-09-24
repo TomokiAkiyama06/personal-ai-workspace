@@ -48,6 +48,7 @@ from paw_backend.identity.errors import (
     OwnerAlreadyExistsError,
     OwnerNotFoundError,
     OwnerNotLiveError,
+    RecoveryNotPrivilegedError,
 )
 from paw_backend.identity.limits import (
     DEFAULT_TTL_SECONDS,
@@ -68,6 +69,7 @@ from paw_backend.identity.redeemer import LIVE_STATUSES
 # Constraint names the operator tells apart when an INSERT is refused.
 _SINGLE_OWNER = "uq_users_single_owner"
 _LOGIN_NAME_UNIQUE = "uq_users_login_name"
+ROOT_UID = 0  # what ``sudo`` runs a command as
 
 
 @dataclass(frozen=True, slots=True)
@@ -303,11 +305,24 @@ class OwnerOperator:
         """Issue a recovery token for the existing Owner.
 
         Every outstanding token of the Owner is revoked first (each is audited),
-        so only the new one works. Refuses with ``OwnerNotFoundError`` when
+        so only the new one works. Refuses with ``RecoveryNotPrivilegedError``
+        unless ``operator`` is a root process (``operator.uid == 0``; the
+        requirement is recovery through sudo), with ``OwnerNotFoundError`` when
         there is no Owner and with ``OwnerNotLiveError`` when the Owner account
         is pending deletion or deleted (``setup_owner`` can replace it).
         """
         correlation_id = uuid.uuid4()
+        if operator is None or operator.uid != ROOT_UID:
+            # The requirement is a recovery through sudo, that is, as root. The
+            # database credential alone is not that: a process that happens to
+            # hold it is refused (and the refusal is audited) before it changes
+            # anything. No uid at all (not POSIX) cannot show it is root.
+            await self._refused(
+                AuditAction.RECOVERY_TOKEN_ISSUE,
+                AuditReason.NOT_PRIVILEGED,
+                correlation_id,
+            )
+            raise RecoveryNotPrivilegedError
         try:
             return await self._issue_recovery(operator, correlation_id)
         except OwnerNotFoundError:

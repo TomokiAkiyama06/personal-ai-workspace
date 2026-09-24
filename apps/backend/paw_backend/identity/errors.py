@@ -78,3 +78,15 @@ class AuditUnavailableError(IdentityError):
 
     def __init__(self) -> None:
         super().__init__("the audit trail could not be written; nothing was changed")
+
+
+class RecoveryNotPrivilegedError(IdentityError):
+    """Recovery was asked for by a process that is not running as root.
+
+    The requirement is a recovery through Ubuntu's ``sudo``: ``sudo`` runs the
+    command as root, so the effective uid is what is checked. ``SUDO_UID`` is an
+    environment variable that anybody can set, so it never authorises anything.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("Owner recovery must be run as root (for example with sudo)")

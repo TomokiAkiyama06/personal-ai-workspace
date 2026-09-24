@@ -6,6 +6,7 @@ including as separate processes and as a restricted database role.
 """
 
 import asyncio
+import contextlib
 import io
 import os
 import shlex
@@ -37,10 +38,23 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 SECRET_URL = "postgresql://paw:hunter2-secret-pw@127.0.0.1:1/paw"
 
 
-def run(argv: list[str], **environment: str) -> tuple[int, str, str]:
-    """Run ``main`` in this process with only ``environment`` as PAW_* settings."""
+def run(
+    argv: list[str], *, euid: int | None = None, **environment: str
+) -> tuple[int, str, str]:
+    """Run ``main`` in this process with only ``environment`` as PAW_* settings.
+
+    ``owner-recover`` runs as root (uid 0), as it must under sudo, unless ``euid``
+    says otherwise.
+    """
+    if euid is None and argv[:1] == ["owner-recover"]:
+        euid = 0
     out, err = io.StringIO(), io.StringIO()
-    with paw_environment(**environment):
+    as_user = (
+        contextlib.nullcontext()
+        if euid is None
+        else patch("os.geteuid", return_value=euid)
+    )
+    with paw_environment(**environment), as_user:
         code = cli.main(argv, stdout=out, stderr=err)
     return code, out.getvalue(), err.getvalue()
 
@@ -398,6 +412,41 @@ class OwnerRecoverCommandTest(CliDatabaseTestCase):
         self.assertEqual(self.scalar("SELECT count(*) FROM setup_tokens"), 1)
         self.assertEqual(self.redeem(setup_token).purpose.value, "setup")
 
+    def test_a_process_that_is_not_root_is_refused_even_with_a_sudo_uid(self):
+        # Ubuntu's sudo runs the command as root. SUDO_UID is an environment
+        # variable that anybody can set, so it authorises nothing.
+        setup_token = self.set_up_owner()
+
+        for euid, extra in ((1000, {}), (1000, {"SUDO_UID": "0"}), (33, {})):
+            with self.subTest(euid=euid, extra=extra):
+                code, out, err = run(
+                    ["owner-recover", "--confirm-owner-recovery"],
+                    euid=euid,
+                    **self.environment,
+                    **extra,
+                )
+
+                self.assertEqual((code, out), (1, ""))
+                self.assertIn("must be run as root", err)
+                self.assertNotIn(TEST_DATABASE_URL, err)
+        # Nothing was issued or revoked: the setup token is still the only one.
+        self.assertEqual(self.scalar("SELECT count(*) FROM setup_tokens"), 1)
+        self.assertEqual(self.redeem(setup_token).purpose.value, "setup")
+
+    def test_root_recovers_and_the_sudo_user_is_recorded(self):
+        self.set_up_owner()
+
+        code, out, err = run(
+            ["owner-recover", "--confirm-owner-recovery"],
+            euid=0,
+            SUDO_UID="1000",
+            **self.environment,
+        )
+
+        self.assertEqual(code, 0, err)
+        self.token_of(out)
+        self.assertIn("operator uid=0 sudo_uid=1000", err)
+
     def test_recovery_prints_a_new_token_and_invalidates_the_old_one(self):
         setup_token = self.set_up_owner()
 
@@ -441,13 +490,29 @@ class OwnerRecoverCommandTest(CliDatabaseTestCase):
         self.assertEqual(self.redeem(second).purpose.value, "recovery")
 
 
+# ``python -m paw_backend.cli`` as a process that is root, as under sudo (the test
+# cannot become root): the same entry point, with the uid it reports replaced.
+AS_ROOT = (
+    "import os, sys; os.geteuid = lambda: 0; "
+    "from paw_backend.cli.owner import main; sys.exit(main())"
+)
+
+
 def shell(argv: list[str], redirect: str, **environment: str):
-    """Run the real module through ``bash`` with ``redirect`` on the command."""
+    """Run the real module through ``bash`` with ``redirect`` on the command.
+
+    ``owner-recover`` runs as root (see ``AS_ROOT``), which its refusal of other
+    users requires.
+    """
     variables = {k: v for k, v in os.environ.items() if not k.startswith("PAW_")}
     variables["PYTHONPATH"] = str(BACKEND_DIR)
     variables.update(environment)
+    entry = (
+        ["-c", AS_ROOT] if argv[:1] == ["owner-recover"] else ["-m", "paw_backend.cli"]
+    )
     command = " ".join(
-        [shlex.quote(sys.executable), "-m", "paw_backend.cli"]
+        [shlex.quote(sys.executable)]
+        + [shlex.quote(a) for a in entry]
         + [shlex.quote(a) for a in argv]
         + [redirect]
     )

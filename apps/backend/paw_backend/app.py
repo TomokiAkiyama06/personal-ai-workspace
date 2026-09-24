@@ -57,10 +57,13 @@ def create_app(
         try:
             yield
         finally:
+            # Cancelling aborts each diagnostic's own connection (it does not wait
+            # for a stalled server to answer), and the wait is bounded anyway.
             for check in (audit_check, token_check):
                 check.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await check
+            await asyncio.wait(
+                {audit_check, token_check}, timeout=settings.shutdown_timeout_seconds
+            )
             heartbeat.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await heartbeat
