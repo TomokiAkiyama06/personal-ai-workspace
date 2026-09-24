@@ -68,6 +68,7 @@ personal-ai-workspace/
 │  │  │  │     ├─ escalation.py
 │  │  │  │     ├─ loop.py
 │  │  │  │     ├─ models.py
+│  │  │  │     ├─ sql.py
 │  │  │  │     ├─ task_queue.py
 │  │  │  │     └─ validation.py
 │  │  │  └─ api/

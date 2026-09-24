@@ -298,6 +298,7 @@ PAW-033（Revision `0033`）で実装しました。`paw_backend/tasks/queueing/
 | `budget.py` | `BudgetTracker`: 6 種類の消費の記録と、上限の判定 |
 | `loop.py` | 失敗の Signature、Loop 判定（`evaluate_loop`）、履歴を持つ `LoopDetector` |
 | `escalation.py` | `decide_next_action`: Budget と Loop の判定から次の行動を 1 つ決める |
+| `validation.py`、`errors.py`、`sql.py` | 引数の検証（型を変換せず拒否する）、固定文言の Error、DB Error の判別（SQLSTATE と制約名だけを見る） |
 | `models.py`、Migration `0033` | `queue_entries`、`budget_usages`、`loop_failure_signatures`。どれも `tasks.id` への実 Foreign Key を持つ |
 
 Table 名は `task` で始めません。PAW-032 の Test が `task` で始まる Table を全て検査するためです。
@@ -381,12 +382,27 @@ Budget の Preset とは無関係に動きます。
 `WAIT_FOR_USER` は PAW-032 の `wait`（`WaitReason.USER`）、`FAIL` は `fail` に対応します（`domain.ACTION_TASK_COMMANDS`）。Command を発行するのは Orchestrator（PAW-034）で、この Module は発行しません。
 Budget 超過のときに Escalation しないのは、使い切った予算をさらに使うためです。`Waiting for Resource` は GPU の Scheduler（PAW-036）の担当で、ここでは使いません。
 
+### 実装の出自
+
+`task_queue.py`、`budget.py`、`loop.py` は、試験を書いた側（Claude）が書いた**参照実装**です。ローカルモデルによる 2 回の実装は、これらの試験を通せませんでした。
+`escalation.py`（`decide_next_action`）だけは、ローカルの Qwen3-Coder-30B-A3B が書いたものです。試験を通ったあと、レビューで冗長な部分を整理しました（振る舞いは変えていません）。
+試験は実 PostgreSQL に対する並行 Claim の試験を含み、参照実装に対する変異（境界、行ロック、原子性など 32 通り）のうち、実質同じ動作になる 1 つを除く全てを検出することを確認しています。
+
 ### 未確定の事項と制限
 
-- Preset の数値、Loop の閾値、Budget 超過時の行動の割り当て（`retries` は `FAIL`、他は `WAIT_FOR_USER`）は、要件に定めがないため仮に置いた値・選択です。人間の確認が必要です。
-- 要件は Unlimited に Runtime などの数値の上限を定めていないため、Unlimited は完全に無制限です。暴走を止めるのは Loop 検知と、Operator の Stop Now です。上限を別に設けるかは人間が決めてください。
-- Aging がないため、`HIGH` / `NORMAL` が続くと `LOW` が飢えます。要件が規則を定めたら追加します。
-- Lease の切れた Entry は、次の `claim_next` が自動で取り直します。Worker が実行中の Process を止める処理（`stop_now` など）は含みません。
+人間の確認が必要なもの（要件に定めがないため、仮に置いた値・選択です）。
+
+- **Preset の数値。** 上の表は仮置きです。
+- **Loop の閾値。** 3 回、Window 10、代替 1 回は仮の値です。
+- **Unlimited の上限。** 要件は Unlimited に Runtime などの数値の上限を定めていないため、完全に無制限です。暴走を止めるのは Loop 検知と、Operator の Stop Now、Critical safety です。別に上限を設けるかは人間が決めてください。
+- **飢餓。** Aging がないため、`HIGH` / `NORMAL` が続くと `LOW` が飢えます。要件が規則を定めたら追加します。
+- **Budget 超過時の行動。** `retries` は `FAIL`、他は `WAIT_FOR_USER`、Escalation より Budget を優先する、という割り当ては私の選択です。警告の閾値が要件にないため `WARN` はありません。
+
+制限。
+
+- 量は 0 以上の整数だけです。GPU 時間は整数秒で、`float` は拒否します（呼び出し側が切り上げてください）。
+- Queue は `tasks.state` を読まず、変更もしません。`claim_next` と PAW-032 の `start` を組み合わせるのは PAW-034 です。
+- Lease の切れた Entry は、次の `claim_next` が自動で取り直します。実行中の Process を止める処理（`stop_now` など）は含みません。期限を過ぎた Worker の完了報告は拒否されます。
 - 優先度の引き上げ、Preset の変更、Queue の一覧は認可付きの操作で、Endpoint と一緒に追加します。
 - Migration `0033` の `down_revision` は `0040` です。統合時に 1 本の鎖へつなぎ直します。
 
