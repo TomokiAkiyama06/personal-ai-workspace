@@ -85,6 +85,7 @@ personal-ai-workspace/
 │  │  │  │  └─ scratch/
 │  │  │  │     ├─ __init__.py
 │  │  │  │     ├─ errors.py
+│  │  │  │     ├─ janitor.py
 │  │  │  │     ├─ limits.py
 │  │  │  │     ├─ models.py
 │  │  │  │     ├─ records.py
@@ -164,6 +165,10 @@ personal-ai-workspace/
 │  │     ├─ test_queueing_schema.py
 │  │     ├─ test_scratch_concurrency.py
 │  │     ├─ test_scratch_grants.py
+│  │     ├─ test_scratch_janitor.py
+│  │     ├─ test_scratch_janitor_lifespan.py
+│  │     ├─ test_scratch_janitor_postgres.py
+│  │     ├─ test_scratch_janitor_settings.py
 │  │     ├─ test_scratch_migration.py
 │  │     ├─ test_scratch_purge.py
 │  │     ├─ test_scratch_records.py
