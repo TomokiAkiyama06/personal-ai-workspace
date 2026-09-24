@@ -4,7 +4,8 @@ The worker is supplied as ``module:factory``. The factory is called without
 arguments and must return an object with ``extract(input_text) -> str``. Only
 point ``--worker`` at trusted code: the module is imported and the factory runs
 with the caller's permissions. Each ``extract`` call has a deadline
-(``--timeout-seconds``); a call that misses it is a failed case.
+(``--timeout-seconds``, required: the harness chooses no default, the value is the
+operator's decision); a call that misses it is a failed case.
 """
 
 from __future__ import annotations
@@ -16,7 +17,6 @@ import sys
 from pathlib import Path
 
 from benchmarks.memory_worker_runner import (
-    DEFAULT_TIMEOUT_SECONDS,
     load_cases,
     run_benchmark,
     validate_timeout_seconds,
@@ -58,10 +58,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--timeout-seconds",
         type=_timeout_argument,
-        default=DEFAULT_TIMEOUT_SECONDS,
-        help="deadline for each extract() call; a call that misses it is a failed "
-        f"case, not a hang (default: {DEFAULT_TIMEOUT_SECONDS:g}). Use the same "
-        "value for every candidate",
+        required=True,
+        help="deadline in seconds for each extract() call (required, no default: "
+        "the value is the operator's decision); a call that misses it is a failed "
+        "case, not a hang. Use the same value for every candidate",
     )
     parser.add_argument(
         "--collect-resources",

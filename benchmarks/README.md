@@ -321,8 +321,11 @@ case fileの未知のfield（`supercedes`や`conflict_with`のような綴り誤
 case fileとWorker出力のJSONは、既存のvalidatorと同じ厳格なdecoder（`benchmarks.json_input.decode_json`）で読み、同じ名前のmemberの重複や`NaN`などの非標準の定数は、後の値で上書きせずに拒否します（Worker出力はschema不適合として数えます）。
 `unneeded`はGoldに一致しない予測と、同じkeyの2回目以降の予測の合計で、予測件数を超えません。
 Workerが例外を出したcaseは、予測なしの失敗caseとして記録して続行します（記録するのは例外の型だけです）。
-`extract`の各呼び出しは、runnerが強制するdeadline（`--timeout-seconds`、既定120秒、有限の正の数）の中で実行します。
-候補ごとに実装を任せず、全候補へ同じ値を指定してください（[公平比較の規則](../docs/BENCHMARK_EVALUATOR.md)のTimeout）。
+`extract`の各呼び出しは、runnerが強制するdeadline（`--timeout-seconds`、有限の正の数）の中で実行します。
+deadlineの値は運用者が決めるもので、Harnessは既定値を持ちません（要件は全候補に共通のTimeoutを求めますが、値は定めていません）。
+`--timeout-seconds`（`run_benchmark`では`timeout_seconds`引数）は必須で、省略すると実行前にエラー（CLIは`the following arguments are required: --timeout-seconds`で終了code 2、`run_benchmark`は`TypeError`）になります。
+短すぎる既定値が、遅いが正しい候補を失敗caseとして記録してモデル選定を左右することを避けるためです。
+候補ごとに値を変えず、全候補へ同じ値を指定してください（[公平比較の規則](../docs/BENCHMARK_EVALUATOR.md)のTimeout）。
 deadlineまでに戻らない呼び出しは、予測なしの失敗caseとして`error_type`を`deadline_exceeded`（Candidate adapterと同じ公開code）にして次のcaseへ進むため、止まったWorkerがrun全体を止めることはなく、最悪でも`case数 × timeout`で終わります。
 そのcaseのlatencyは待った時間で、latencyの統計へも含まれます。設定したdeadlineはReportの`timeout_seconds`に記録します。
 `extract`は呼び出しごとのdaemon threadで実行します（main threadではありません。thread localな状態に依存するWorkerは注意してください）。
@@ -330,10 +333,11 @@ Pythonはthreadを強制停止できないため、deadlineを過ぎた呼び出
 factoryが`extract(input_text)`を持たないobjectを返した場合は、全caseが失敗した報告にせず、実行前にエラー（終了code 2）にします。
 
 ```bash
+# TIMEOUT_SECONDSは運用者が決めた値です（全候補で同じ値を使います）。
 python -m benchmarks.run_memory_worker_benchmark \
   --cases benchmarks/tests/fixtures/memory-worker/valid-cases.json \
   --worker benchmarks.tests.fixture_workers:make_worker \
-  --timeout-seconds 120 \
+  --timeout-seconds "$TIMEOUT_SECONDS" \
   --output report.json
 ```
 

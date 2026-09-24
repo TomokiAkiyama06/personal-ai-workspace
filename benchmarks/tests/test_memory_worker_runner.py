@@ -1,6 +1,7 @@
 """Tests for the memory worker benchmark runner."""
 
 import contextlib
+import inspect
 import io
 import json
 import math
@@ -11,13 +12,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from benchmarks import memory_worker_runner
 from benchmarks.memory_worker_metrics import (
     MEMORY_SCOPES,
     MemoryRecord,
     schema_adherence,
 )
 from benchmarks.memory_worker_runner import (
-    DEFAULT_TIMEOUT_SECONDS,
     MemoryWorkerCase,
     _output_schema,
     load_cases,
@@ -26,6 +27,10 @@ from benchmarks.memory_worker_runner import (
     validate_worker,
 )
 from benchmarks.metrics_collector import MetricsCollector
+
+# The harness has no default deadline (the value is the operator's decision), so
+# every run states one. Tests use a bound that no in-process fake worker reaches.
+TIMEOUT = 30.0
 
 
 class FakeClock:
@@ -218,7 +223,7 @@ class MemoryWorkerRunnerTest(unittest.TestCase):
             }
         )
 
-        report = run_benchmark(MockWorker([raw]), cases)
+        report = run_benchmark(MockWorker([raw]), cases, timeout_seconds=TIMEOUT)
 
         self.assertFalse(report.cases[0].schema_valid)
         self.assertEqual(report.cases[0].comparison.matched, 0)
@@ -261,7 +266,7 @@ class MemoryWorkerRunnerTest(unittest.TestCase):
             ]
         )
 
-        report = run_benchmark(perfect_worker, cases)
+        report = run_benchmark(perfect_worker, cases, timeout_seconds=TIMEOUT)
 
         # Check that we got 2 cases
         self.assertEqual(len(report.cases), 2)
@@ -309,7 +314,7 @@ class MemoryWorkerRunnerTest(unittest.TestCase):
             ]
         )
 
-        report = run_benchmark(partial_worker, cases)
+        report = run_benchmark(partial_worker, cases, timeout_seconds=TIMEOUT)
 
         # Check that we got 2 cases
         self.assertEqual(len(report.cases), 2)
@@ -349,7 +354,7 @@ class MemoryWorkerRunnerTest(unittest.TestCase):
             ]
         )
 
-        report = run_benchmark(unparsable_worker, cases)
+        report = run_benchmark(unparsable_worker, cases, timeout_seconds=TIMEOUT)
 
         # Check that we got 2 cases
         self.assertEqual(len(report.cases), 2)
@@ -566,7 +571,7 @@ class MemoryWorkerRunnerTest(unittest.TestCase):
         silent = VALID_OUTPUT.replace("favorite_color", "k")
 
         for worker in (MockWorker([invents, invents]), MockWorker([silent, silent])):
-            report = run_benchmark(worker, cases)
+            report = run_benchmark(worker, cases, timeout_seconds=TIMEOUT)
             self.assertEqual(report.metrics["extraction_recall"], 1.0)
             self.assertIsNone(report.metrics["conflict_accuracy"])
             for result in report.cases:
@@ -614,14 +619,16 @@ class MemoryWorkerRunnerTest(unittest.TestCase):
             MemoryWorkerCase("c0", "x", (MemoryRecord("k", "user", "confirmed", None),))
         ]
 
-        data = run_benchmark(Raising(), cases).to_dict()
+        data = run_benchmark(Raising(), cases, timeout_seconds=TIMEOUT).to_dict()
 
         self.assertEqual(data["cases"][0]["error_type"], "KeyError")
         self.assertNotIn("SECRET-DETAIL", json.dumps(data))
         self.assertEqual(data["cases"][0]["comparison"]["matched"], 0)
 
     def test_report_error_type_is_none_for_a_normal_case(self):
-        data = run_benchmark(MockWorker([VALID_OUTPUT]), self._cases(1)).to_dict()
+        data = run_benchmark(
+            MockWorker([VALID_OUTPUT]), self._cases(1), timeout_seconds=TIMEOUT
+        ).to_dict()
         self.assertIsNone(data["cases"][0]["error_type"])
 
     def test_workers_without_the_required_interface_are_rejected(self):
@@ -639,8 +646,9 @@ class MemoryWorkerRunnerTest(unittest.TestCase):
             with self.subTest(worker=type(worker).__name__):
                 with self.assertRaises(TypeError):
                     validate_worker(worker)
-                with self.assertRaises(TypeError):
-                    run_benchmark(worker, self._cases(1))
+                with self.assertRaises(TypeError) as caught:
+                    run_benchmark(worker, self._cases(1), timeout_seconds=TIMEOUT)
+                self.assertNotIn("timeout_seconds", str(caught.exception))
 
     def test_extract_with_an_uninspectable_signature_is_rejected(self):
         class Worker:
@@ -694,7 +702,7 @@ class MemoryWorkerRunnerTest(unittest.TestCase):
                     raise ValueError("Worker failed: SECRET-DETAIL")
                 return VALID_OUTPUT
 
-        report = run_benchmark(FlakyWorker(), cases)
+        report = run_benchmark(FlakyWorker(), cases, timeout_seconds=TIMEOUT)
 
         self.assertEqual(len(report.cases), 2)
         self.assertTrue(report.cases[0].schema_valid)
@@ -721,7 +729,10 @@ class MemoryWorkerRunnerTest(unittest.TestCase):
             for value in (0.0, milliseconds / 1000)
         )
         report = run_benchmark(
-            KeyWorker(), self._cases(10), clock=lambda: next(readings)
+            KeyWorker(),
+            self._cases(10),
+            clock=lambda: next(readings),
+            timeout_seconds=TIMEOUT,
         )
 
         self.assertAlmostEqual(report.cases[2].latency_ms, 3.0)
@@ -734,13 +745,18 @@ class MemoryWorkerRunnerTest(unittest.TestCase):
     def test_latency_excludes_parsing_and_comparison(self):
         readings = iter([0.0, 0.004])
         report = run_benchmark(
-            MockWorker([VALID_OUTPUT]), self._cases(1), clock=lambda: next(readings)
+            MockWorker([VALID_OUTPUT]),
+            self._cases(1),
+            clock=lambda: next(readings),
+            timeout_seconds=TIMEOUT,
         )
         self.assertAlmostEqual(report.cases[0].latency_ms, 4.0)
 
     def test_to_dict_is_json_serializable_without_text_or_raw_output(self):
         cases = load_cases("benchmarks/tests/fixtures/memory-worker/valid-cases.json")
-        report = run_benchmark(MockWorker([VALID_OUTPUT]), cases)
+        report = run_benchmark(
+            MockWorker([VALID_OUTPUT]), cases, timeout_seconds=TIMEOUT
+        )
 
         data = report.to_dict()
         serialized = json.dumps(data)
@@ -763,6 +779,7 @@ class MemoryWorkerRunnerTest(unittest.TestCase):
             CountingWorker(),
             load_cases("benchmarks/tests/fixtures/memory-worker/valid-cases.json"),
             metrics_collector=collector,
+            timeout_seconds=TIMEOUT,
         )
 
         self.assertEqual(report.resources["agent_steps"], 2)
@@ -862,12 +879,23 @@ class ExtractDeadlineTest(unittest.TestCase):
 
         self.assertEqual(report.timeout_seconds, 45)
         self.assertEqual(report.to_dict()["timeout_seconds"], 45)
-        default_report = run_benchmark(MockWorker([VALID_OUTPUT]), self._cases(1))
-        self.assertEqual(default_report.timeout_seconds, DEFAULT_TIMEOUT_SECONDS)
 
-    def test_a_default_deadline_applies_when_none_is_given(self):
-        self.assertTrue(math.isfinite(DEFAULT_TIMEOUT_SECONDS))
-        self.assertGreater(DEFAULT_TIMEOUT_SECONDS, 0)
+    def test_the_harness_has_no_default_deadline(self):
+        # A default would be an unapproved policy value that can fail a slow but
+        # correct candidate; the operator must choose the deadline explicitly.
+        parameter = inspect.signature(run_benchmark).parameters["timeout_seconds"]
+        self.assertIs(parameter.default, inspect.Parameter.empty)
+        self.assertEqual(parameter.kind, inspect.Parameter.KEYWORD_ONLY)
+        self.assertFalse(hasattr(memory_worker_runner, "DEFAULT_TIMEOUT_SECONDS"))
+
+    def test_omitting_the_deadline_is_an_error_naming_the_argument(self):
+        worker = MockWorker([VALID_OUTPUT])
+
+        with self.assertRaises(TypeError) as caught:
+            run_benchmark(worker, self._cases(1))
+
+        self.assertIn("timeout_seconds", str(caught.exception))
+        self.assertEqual(worker.call_count, 0)
 
     def test_the_call_runs_in_a_daemon_thread_so_a_stuck_call_cannot_block_exit(self):
         seen = []

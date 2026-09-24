@@ -262,9 +262,10 @@ def validate_worker(worker: object) -> None:
 
 
 # Every case gets the same deadline so candidates are compared under one timeout
-# (docs/BENCHMARK_EVALUATOR.md "Fair comparison rules"). Generous: it only has to
-# stop a stalled call, and a slow local model must not be failed by it.
-DEFAULT_TIMEOUT_SECONDS = 120.0
+# (docs/BENCHMARK_EVALUATOR.md "Fair comparison rules"). The harness deliberately
+# has no default: the fixed requirements call for a common timeout but do not choose
+# its value, and a default that is too short would record a slow but correct
+# candidate as a failure and could change model selection. The operator decides.
 
 # The public failure code the Candidate adapter interface uses for a missed
 # deadline; it is recorded as the case's ``error_type``.
@@ -332,11 +333,16 @@ def run_benchmark(
     worker: MemoryWorker,
     cases: Sequence[MemoryWorkerCase],
     *,
+    timeout_seconds: float,
     clock: Callable[[], float] = time.monotonic,
     metrics_collector: MetricsCollector | None = None,
-    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
 ) -> BenchmarkReport:
     """Run the Memory Worker benchmark over ``cases``.
+
+    ``timeout_seconds`` is required and has no default: the deadline is the
+    operator's decision, and it must be the same for every candidate compared.
+    Omitting it is a ``TypeError``; a value that is not a finite number above zero
+    is a ``ValueError``.
 
     Latency covers only ``worker.extract``. A worker that raises is recorded as a
     failed case with empty predictions and the run continues. Each call runs in a

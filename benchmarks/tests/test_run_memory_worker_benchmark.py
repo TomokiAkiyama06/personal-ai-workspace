@@ -7,13 +7,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from benchmarks.memory_worker_runner import DEFAULT_TIMEOUT_SECONDS
 from benchmarks.run_memory_worker_benchmark import main
 from benchmarks.tests.fixture_workers import release_hanging_workers
 
 FIXTURES = Path(__file__).parent / "fixtures" / "memory-worker"
 VALID_CASES = str(FIXTURES / "valid-cases.json")
 WORKER = "benchmarks.tests.fixture_workers:make_worker"
+# The deadline has no default (it is the operator's decision), so every run states one.
+DEADLINE = ("--timeout-seconds", "30")
 
 
 def run_cli(*arguments):
@@ -25,14 +26,16 @@ def run_cli(*arguments):
 
 class RunMemoryWorkerBenchmarkTest(unittest.TestCase):
     def test_report_is_written_to_stdout(self):
-        code, stdout, stderr = run_cli("--cases", VALID_CASES, "--worker", WORKER)
+        code, stdout, stderr = run_cli(
+            "--cases", VALID_CASES, "--worker", WORKER, *DEADLINE
+        )
 
         self.assertEqual(code, 0)
         self.assertEqual(stderr, "")
         report = json.loads(stdout)
         self.assertEqual(len(report["cases"]), 2)
         self.assertEqual(report["metrics"]["schema_adherence_rate"], 1.0)
-        self.assertEqual(report["timeout_seconds"], DEFAULT_TIMEOUT_SECONDS)
+        self.assertEqual(report["timeout_seconds"], 30.0)
         self.assertNotIn("The user mentioned", stdout)
 
     def test_a_stalled_worker_is_cut_off_by_the_deadline(self):
@@ -58,6 +61,22 @@ class RunMemoryWorkerBenchmarkTest(unittest.TestCase):
         self.assertEqual(report["metrics"]["schema_adherence_rate"], 0.0)
         self.assertEqual(report["metrics"]["extraction_recall"], 0.0)
 
+    def test_the_deadline_is_required_and_has_no_default(self):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with (
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+            self.assertRaises(SystemExit) as caught,
+        ):
+            main(["--cases", VALID_CASES, "--worker", WORKER])
+
+        self.assertEqual(caught.exception.code, 2)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn(
+            "the following arguments are required: --timeout-seconds",
+            stderr.getvalue(),
+        )
+
     def test_an_invalid_deadline_is_a_usage_error(self):
         for value in ("0", "-1", "nan", "inf", "abc", ""):
             with self.subTest(value=value):
@@ -82,7 +101,13 @@ class RunMemoryWorkerBenchmarkTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "report.json"
             code, stdout, _ = run_cli(
-                "--cases", VALID_CASES, "--worker", WORKER, "--output", str(output)
+                "--cases",
+                VALID_CASES,
+                "--worker",
+                WORKER,
+                *DEADLINE,
+                "--output",
+                str(output),
             )
             report = json.loads(output.read_text(encoding="utf-8"))
 
@@ -92,7 +117,9 @@ class RunMemoryWorkerBenchmarkTest(unittest.TestCase):
 
     def test_invalid_cases_file_exits_with_one(self):
         invalid = str(FIXTURES / "invalid-cases-duplicate-id.json")
-        code, stdout, stderr = run_cli("--cases", invalid, "--worker", WORKER)
+        code, stdout, stderr = run_cli(
+            "--cases", invalid, "--worker", WORKER, *DEADLINE
+        )
 
         self.assertEqual(code, 1)
         self.assertEqual(stdout, "")
@@ -100,7 +127,7 @@ class RunMemoryWorkerBenchmarkTest(unittest.TestCase):
 
     def test_missing_cases_file_exits_with_one(self):
         code, _, stderr = run_cli(
-            "--cases", "/nonexistent/cases.json", "--worker", WORKER
+            "--cases", "/nonexistent/cases.json", "--worker", WORKER, *DEADLINE
         )
 
         self.assertEqual(code, 1)
@@ -113,7 +140,9 @@ class RunMemoryWorkerBenchmarkTest(unittest.TestCase):
             ("benchmarks.tests.fixture_workers:missing", "AttributeError"),
         ):
             with self.subTest(spec=spec):
-                code, stdout, stderr = run_cli("--cases", VALID_CASES, "--worker", spec)
+                code, stdout, stderr = run_cli(
+                    "--cases", VALID_CASES, "--worker", spec, *DEADLINE
+                )
                 self.assertEqual(code, 2)
                 self.assertEqual(stdout, "")
                 self.assertEqual(stderr, f"worker is unusable ({error_type})\n")
@@ -124,6 +153,7 @@ class RunMemoryWorkerBenchmarkTest(unittest.TestCase):
             VALID_CASES,
             "--worker",
             "benchmarks.tests.fixture_workers:make_malformed_worker",
+            *DEADLINE,
         )
 
         self.assertEqual(code, 2)
@@ -136,6 +166,7 @@ class RunMemoryWorkerBenchmarkTest(unittest.TestCase):
             VALID_CASES,
             "--worker",
             "benchmarks.tests.fixture_workers:make_failing_worker",
+            *DEADLINE,
         )
 
         self.assertEqual(code, 2)
@@ -148,7 +179,9 @@ class RunMemoryWorkerBenchmarkTest(unittest.TestCase):
             path.write_text(
                 json.dumps({"cases": [{"input": "x", "gold": []}]}), encoding="utf-8"
             )
-            code, stdout, stderr = run_cli("--cases", str(path), "--worker", WORKER)
+            code, stdout, stderr = run_cli(
+                "--cases", str(path), "--worker", WORKER, *DEADLINE
+            )
 
         self.assertEqual(code, 1)
         self.assertEqual(stdout, "")
@@ -162,15 +195,16 @@ class RunMemoryWorkerBenchmarkTest(unittest.TestCase):
                     VALID_CASES,
                     "--worker",
                     f"benchmarks.tests.fixture_workers:{factory}",
+                    *DEADLINE,
                 )
                 self.assertEqual(code, 2)
                 self.assertEqual(stdout, "")
                 self.assertEqual(stderr, "worker is unusable (TypeError)\n")
 
     def test_resources_are_recorded_only_when_requested(self):
-        _, without, _ = run_cli("--cases", VALID_CASES, "--worker", WORKER)
+        _, without, _ = run_cli("--cases", VALID_CASES, "--worker", WORKER, *DEADLINE)
         code, with_resources, _ = run_cli(
-            "--cases", VALID_CASES, "--worker", WORKER, "--collect-resources"
+            "--cases", VALID_CASES, "--worker", WORKER, *DEADLINE, "--collect-resources"
         )
 
         self.assertNotIn("resources", json.loads(without))
@@ -181,7 +215,13 @@ class RunMemoryWorkerBenchmarkTest(unittest.TestCase):
     def test_unwritable_output_exits_with_two(self):
         with tempfile.TemporaryDirectory() as directory:
             code, _, stderr = run_cli(
-                "--cases", VALID_CASES, "--worker", WORKER, "--output", directory
+                "--cases",
+                VALID_CASES,
+                "--worker",
+                WORKER,
+                *DEADLINE,
+                "--output",
+                directory,
             )
 
         self.assertEqual(code, 2)
