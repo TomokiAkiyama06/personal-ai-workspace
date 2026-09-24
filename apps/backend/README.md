@@ -1331,6 +1331,13 @@ Registry は登録時に `name` と `kind` の形、`search` と `fetch` が `as
 不適合な Adapter は `ProviderInterfaceError`（失敗した Member 名だけを持つ）で拒否され、あとから「全 Provider が失敗した成功 Response」になることはありません。
 `name` と `kind` は登録時に 1 度だけ読み、以後 Provider 側が変えても結果には影響しません。
 
+**名前と種類の検査（Adapter の Object の Method を動かさない）。**
+
+- `name` は、受け取った文字列そのものを `fullmatch` で `[a-z0-9][a-z0-9_-]{0,63}` に照合します。正規化した写しは照合しません。Pattern は ASCII だけで、`$` も `IGNORECASE` も使いません。そのため、全角の英数字、NFKC で ASCII と同じになる文字（合字、丸数字、Kelvin 記号、長い s など）、大文字、Zero-width 文字、前後や途中の空白、末尾の改行（`$` なら通る）は、全て `ProviderInterfaceError("name")` で拒否されます。NFKC・小文字化・`strip` で別の名前と一致させられることも、登録済みの名前と「見た目が同じ」名前が別に登録されることもありません（`test_research_registry.py` が、全 Unicode コードポイントを 1 文字目と 2 文字目に置いて、通るのが ASCII の `[a-z0-9]` / `[a-z0-9_-]` だけであることを確かめます）。
+- `str` の Subclass（`StrEnum` の要素など）は、中身が合っていれば受け付けますが、Registry が保持するのは**厳密な `str` の写し**で、Adapter が返した Object そのものではありません。Subclass が `__hash__`・`__eq__`・`__lt__`・`__str__` などを上書きしていても、登録・`select()`・`gather()` が例外で失敗すること、一意性の検査をすり抜けて同じ名前を 2 つ登録すること、Log の文字列に Credential のような文字が入ることは起きません（[PAW-051 の独立 Review の指摘](../../docs/decisions/0012-research-provider-adapter-policy.md)）。写しは C の `str.encode` で作るので、上書きされた Method は呼びません。
+- 型は `type()` で読みます（`isinstance` は Object の `__class__` を信じます）。`__class__` で `str` や `ProviderKind` を名乗るだけの Object は、`re` の `TypeError` などの別の例外ではなく、`ProviderInterfaceError("name")` / `("kind")` になります。`kind` は `ProviderKind` の要素そのものだけを受け付けます（Member を持つ Enum は継承できません）。
+- 範囲: これは Adapter が返す `name` と `kind` の話です。`ProviderRegistry.get(name)` の引数と、呼び出し元が作る `SourceMetadata.provider_id` は、呼び出し元（Tool Broker）の Code で、この層は写しません（Broker が返す値は Registry の写しです）。
+
 ### Request と Result
 
 `ResearchRequest` は不変で、構築時に全項目を検証します。
@@ -1432,6 +1439,7 @@ License や `robots.txt` に関する項目はありません。要件と設計�
   3. 複数 Provider の結果は交互に並べ、正規化した URL の最初の 1 件を残します（要件に統合の規則がありません）。
   4. Credential 用の Query Parameter の一覧は Best effort です。
   5. IPv6 と非 ASCII の Host は拒否し、名前解決はしません。`network` Capability、SSRF、`robots.txt` は呼び出し元（Tool Broker、PAW-031）と個々の Adapter の責任です。
+  6. Provider の名前は正規化せず（look-alike は拒否）、`str` の Subclass は厳密な `str` の写しにして保持します。Subclass を拒否する案は採っていません（`StrEnum` の要素を名前にできるため）。
 
 ### Test
 
