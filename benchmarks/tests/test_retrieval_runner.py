@@ -547,7 +547,7 @@ class RetrievalRunnerTest(unittest.TestCase):
                 with self.assertRaises(ValueError) as context:
                     self._load_from_text(json.dumps(document))
                 self.assertIn(
-                    "relevant memory m1 must be active, fresh and in the query's scope",
+                    "relevant memory m1 must be active, fresh and in the query's scope or allowed scopes",
                     str(context.exception),
                 )
                 self.assertNotIn("SECRET-TEXT", str(context.exception))
@@ -623,6 +623,55 @@ class RetrievalRunnerTest(unittest.TestCase):
         )
 
         self.assertAlmostEqual(report.queries[0]["cpu_ms"], 3.0)
+
+    def test_allowed_scopes_model_applicable_parent_scopes(self):
+        document = self._document()
+        document["memories"].append(
+            {
+                "id": "u1",
+                "text": "USER-MEMORY",
+                "acl": ["user:a"],
+                "status": "active",
+                "fresh": True,
+                "scope": "user",
+            }
+        )
+        document["memories"].append(
+            {
+                "id": "o1",
+                "text": "OTHER-PROJECT",
+                "acl": ["user:a"],
+                "status": "active",
+                "fresh": True,
+                "scope": "project:other",
+            }
+        )
+        document["queries"][0]["allowed_scopes"] = ["user"]
+        document["queries"][0]["relevant_ids"] = ["m1", "u1"]
+        dataset = self._load_from_text(json.dumps(document))
+
+        applicable = run_benchmark(FixedRetriever(["m1", "u1"]), dataset, k=2).metrics
+        mixed_up = run_benchmark(FixedRetriever(["m1", "o1"]), dataset, k=2).metrics
+
+        self.assertEqual(dataset.queries[0].effective_scopes, {"project", "user"})
+        self.assertEqual(applicable["scope_mismatch_rate"], 0.0)
+        self.assertEqual(applicable["recall_at_k"], 1.0)
+        self.assertEqual(mixed_up["scope_mismatch_rate"], 0.5)
+
+    def test_a_relevant_memory_outside_all_applicable_scopes_is_rejected(self):
+        document = self._document()
+        document["queries"][0]["allowed_scopes"] = ["user"]
+        document["memories"][0]["scope"] = "project:other"
+        with self.assertRaises(ValueError) as context:
+            self._load_from_text(json.dumps(document))
+        self.assertIn("scope or allowed scopes", str(context.exception))
+
+    def test_allowed_scopes_must_be_a_list_of_strings(self):
+        document = self._document()
+        document["queries"][0]["allowed_scopes"] = "user"
+        with self.assertRaises(ValueError) as context:
+            self._load_from_text(json.dumps(document))
+        self.assertIn("'allowed_scopes' must be a list", str(context.exception))
 
     def test_history_memories_are_valid_hard_negatives_scored_as_non_active(self):
         document = self._document()

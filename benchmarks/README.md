@@ -78,7 +78,9 @@ Retrieverがin-processで動く場合だけ含まれ、外部のServiceが使う
 `MetricsCollector`を使うと、wall clockとVRAM・GPU utilizationのpeakが`resources`に入ります（付けない場合は含みません）。
 `retrieve`は文字列のsequence（list・tuple）を返す必要があり、単一のid文字列（`"mem1"`）などは不正な戻り値として終了code 2にします。
 返されたidは、重複を除いた上位`k`件だけを採点します（`k`を超える分を末尾に足しても、どの指標も上がりません）。
-Datasetのrelevantなmemoryは、active・fresh・queryと同じScopeである必要があります。そうでないと、正解をそのまま返しても
+Datasetのrelevantなmemoryは、active・fresh・queryのScope（`scope`と、任意の`allowed_scopes`）のいずれかに属する必要があります。
+`allowed_scopes`は、要件のUser / Project / Repo / Shared階層で、そのqueryへ正当に適用できる他のScope（たとえばRepoのqueryに対するUserやShared）を表します。
+`allowed_scopes`にも`scope`にも入らないScopeのmemoryを返すと、Scope誤選択として数えます。そうでないと、正解をそのまま返しても
 stale / superseded / Scope誤選択率が0にならず、指標が矛盾するためDataset不備として拒否します。
 失敗したqueryの数は`failed_queries`に出ます。Retrieverが`retrieve(query_text, principals, k)`を
 呼べない場合（メソッドがない、引数が合わない）は、全queryが失敗した報告にせず、実行前にエラーにします。

@@ -42,6 +42,14 @@ class RetrievalQuery:
     requester_principals: frozenset[str]
     scope: str
     relevant_ids: frozenset[str]
+    # Further scopes whose memories legitimately apply to this query (for example a
+    # Repo query may use User or Shared memories). ``scope`` is always applicable.
+    allowed_scopes: frozenset[str] = frozenset()
+
+    @property
+    def effective_scopes(self) -> frozenset[str]:
+        """Every scope whose memories are not a scope mix-up for this query."""
+        return self.allowed_scopes | {self.scope}
 
 
 @dataclass(frozen=True)
@@ -102,7 +110,7 @@ def _reject_unknown_fields(item: dict, allowed: frozenset[str], where: str) -> N
 _DATASET_FIELDS = frozenset({"memories", "queries"})
 _MEMORY_FIELDS = frozenset({"id", "text", "acl", "status", "fresh", "scope"})
 _QUERY_FIELDS = frozenset(
-    {"id", "text", "requester_principals", "scope", "relevant_ids"}
+    {"id", "text", "requester_principals", "scope", "allowed_scopes", "relevant_ids"}
 )
 
 
@@ -169,13 +177,23 @@ def _parse_query(
                 f"{where} requests memory {relevant_id} that is not visible to its requester"
             )
     scope = _string(item, "scope", where)
+    allowed_scopes = (
+        frozenset(_string_list(item, "allowed_scopes", where, allow_empty=True))
+        if "allowed_scopes" in item
+        else frozenset()
+    )
+    effective_scopes = allowed_scopes | {scope}
     for relevant_id in sorted(relevant_ids):
         memory = memories[relevant_id]
-        if memory.status != "active" or not memory.fresh or memory.scope != scope:
+        if (
+            memory.status != "active"
+            or not memory.fresh
+            or memory.scope not in effective_scopes
+        ):
             raise ValueError(
                 f"{where}: relevant memory {relevant_id} must be active, fresh and in the "
-                "query's scope, or a perfect result would also count as stale, "
-                "superseded or wrong-scope"
+                "query's scope or allowed scopes, or a perfect result would also count as "
+                "stale, superseded or wrong-scope"
             )
     return RetrievalQuery(
         id=query_id,
@@ -183,6 +201,7 @@ def _parse_query(
         requester_principals=principals,
         scope=scope,
         relevant_ids=relevant_ids,
+        allowed_scopes=allowed_scopes,
     )
 
 
@@ -304,7 +323,10 @@ def _score_queries(
         ranked = list(dict.fromkeys(retrieved))[:k]
         stale_ids = {m.id for m in dataset.memories if not m.fresh}
         superseded_ids = {m.id for m in dataset.memories if m.status != "active"}
-        scope_mismatch_ids = {m.id for m in dataset.memories if m.scope != query.scope}
+        applicable_scopes = query.effective_scopes
+        scope_mismatch_ids = {
+            m.id for m in dataset.memories if m.scope not in applicable_scopes
+        }
         query_results.append(
             {
                 "id": query.id,
