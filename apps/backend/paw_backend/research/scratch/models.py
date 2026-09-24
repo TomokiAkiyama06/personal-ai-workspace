@@ -42,9 +42,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from paw_backend.db import Base
-
-# The foreign key to tasks.id needs the table in the metadata.
-from paw_backend.tasks import models as _task_models  # noqa: F401
+from paw_backend.tasks.models import TaskRow
 
 TABLE_NAMES = ("research_scratch_items", "research_scratch_leases")
 
@@ -118,7 +116,7 @@ class ScratchItemRow(Base):
     id: Mapped[UUID] = mapped_column(primary_key=True, server_default=_UUID_DEFAULT)
     project_id: Mapped[UUID]
     task_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey("tasks.id", ondelete="SET NULL")
+        ForeignKey(TaskRow.id, ondelete="SET NULL")
     )
     created_by: Mapped[UUID]
     query: Mapped[str | None] = mapped_column(Text)

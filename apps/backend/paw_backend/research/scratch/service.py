@@ -82,26 +82,68 @@ logs nothing that contains caller content.
 """
 
 import inspect
-from collections.abc import Awaitable, Callable
-from datetime import datetime
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from contextlib import asynccontextmanager
+from dataclasses import replace
+from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID
 
+import psycopg.errors
+from sqlalchemy import (
+    ColumnElement,
+    and_,
+    delete,
+    exists,
+    func,
+    insert,
+    or_,
+    select,
+    update,
+)
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from paw_backend.db import Database
+from paw_backend.research.scratch.errors import (
+    InputProblem,
+    InvalidScratchInputError,
+    ScratchBusyError,
+    ScratchItemNotFoundError,
+    ScratchLeaseLimitError,
+    ScratchStateError,
+)
 from paw_backend.research.scratch.limits import (
     DEFAULT_LEASE_SECONDS,
     DEFAULT_LIST_LIMIT,
     DEFAULT_PURGE_BATCH_SIZE,
+    MAX_ACTIVE_LEASES_PER_ITEM,
+    MAX_LEASE_SECONDS,
+    MAX_LIST_LIMIT,
+    MAX_PURGE_BATCH_SIZE,
+    MIN_LEASE_SECONDS,
+    expiry_of,
     utc_now,
 )
+from paw_backend.research.scratch.models import ScratchItemRow, ScratchLeaseRow
 from paw_backend.research.scratch.records import (
     Lease,
     PromotionOutcome,
+    PromotionState,
     PurgeResult,
     ScratchItem,
 )
+from paw_backend.research.scratch.validation import (
+    validate_bool,
+    validate_bounded_int,
+    validate_datetime,
+    validate_new_item,
+    validate_optional_uuid,
+    validate_outcome,
+    validate_uuid,
+)
+from paw_backend.tasks.models import TaskRow
 
 Clock = Callable[[], datetime]
 # Test seam of ``purge_expired`` (see its docstring): called with the session of
@@ -111,6 +153,52 @@ PurgeProbe = Callable[[AsyncSession, list[UUID]], Awaitable[None]]
 DEFAULT_LOCK_TIMEOUT_MS = 5000
 MIN_LOCK_TIMEOUT_MS = 50
 MAX_LOCK_TIMEOUT_MS = 60_000
+
+
+_ITEMS = ScratchItemRow.__table__
+_LEASES = ScratchLeaseRow.__table__
+_TASKS = TaskRow.__table__
+
+
+def _has_active_lease(now: datetime) -> ColumnElement[bool]:
+    """A lease of the enclosing statement's item is still running at ``now``."""
+    return exists().where(_LEASES.c.item_id == _ITEMS.c.id, _LEASES.c.expires_at > now)
+
+
+def _exempt(now: datetime) -> ColumnElement[bool]:
+    """Deletion of the item is deferred at ``now`` (see the module docstring)."""
+    return or_(
+        _ITEMS.c.pinned,
+        _ITEMS.c.promotion_state == PromotionState.PENDING.value,
+        _has_active_lease(now),
+    )
+
+
+def _is_visible(item: ScratchItem) -> bool:
+    """The module docstring's visibility rule, on a snapshot."""
+    return not item.expired or bool(item.deferral_reasons)
+
+
+def _snapshot(row: Mapping[str, Any], now: datetime, *, in_use: bool) -> ScratchItem:
+    """A snapshot of an item row; ``content`` is None when the row lacks it."""
+    return ScratchItem(
+        id=row["id"],
+        project_id=row["project_id"],
+        task_id=row["task_id"],
+        created_by=row["created_by"],
+        query=row["query"],
+        title=row["title"],
+        summary=row["summary"],
+        content=row.get("content"),
+        source_metadata=row["source_metadata"],
+        created_at=row["created_at"],
+        expires_at=row["expires_at"],
+        expired=now >= row["expires_at"],
+        pinned=row["pinned"],
+        in_use=in_use,
+        promotion_state=PromotionState(row["promotion_state"]),
+        promotion_requested_at=row["promotion_requested_at"],
+    )
 
 
 class ScratchStore:
@@ -158,6 +246,84 @@ class ScratchStore:
         self._lock_timeout_ms = lock_timeout_ms
         self._purge_probe = purge_probe
 
+    # -- helpers ---------------------------------------------------------------
+
+    def _now(self) -> datetime:
+        return validate_datetime("clock", self._clock())
+
+    @asynccontextmanager
+    async def _transaction(self) -> AsyncIterator[AsyncSession]:
+        """One transaction with the store's lock timeout (module docstring, rule 4)."""
+        try:
+            async with self._database.session() as session, session.begin():
+                await session.execute(
+                    select(
+                        func.set_config(
+                            "lock_timeout", str(self._lock_timeout_ms), True
+                        )
+                    )
+                )
+                yield session
+        except DBAPIError as error:
+            # Only the type of the driver's error is read, never its text.
+            if isinstance(error.orig, psycopg.errors.LockNotAvailable):
+                raise ScratchBusyError() from None
+            raise
+
+    @staticmethod
+    async def _read(
+        session: AsyncSession,
+        project_id: UUID,
+        item_id: UUID,
+        now: datetime,
+    ) -> ScratchItem | None:
+        """The item's snapshot at ``now``, visible or not; one consistent statement."""
+        statement = select(_ITEMS, _has_active_lease(now).label("in_use")).where(
+            _ITEMS.c.id == item_id, _ITEMS.c.project_id == project_id
+        )
+        row = (await session.execute(statement)).mappings().first()
+        return None if row is None else _snapshot(row, now, in_use=row["in_use"])
+
+    @staticmethod
+    async def _lock(session: AsyncSession, project_id: UUID, item_id: UUID) -> bool:
+        """Lock the item's row (waiting); False when there is no such item."""
+        statement = (
+            select(_ITEMS.c.id)
+            .where(_ITEMS.c.id == item_id, _ITEMS.c.project_id == project_id)
+            .with_for_update()
+        )
+        return (await session.execute(statement)).first() is not None
+
+    async def _lock_visible(
+        self, session: AsyncSession, project_id: UUID, item_id: UUID, now: datetime
+    ) -> ScratchItem:
+        """Lock the item's row, then return its snapshot if it is visible.
+
+        The snapshot is read by a new statement after the lock is granted, so it
+        includes every lease committed before that moment. Reading the lease in
+        the locking statement would not: PostgreSQL re-checks only the locked
+        row itself, not the other tables of the query, after waiting for a lock.
+        """
+        if await self._lock(session, project_id, item_id):
+            item = await self._read(session, project_id, item_id, now)
+            if item is not None and _is_visible(item):
+                return item
+        raise ScratchItemNotFoundError()
+
+    async def _set_pinned(
+        self, project_id: object, item_id: object, pinned: bool
+    ) -> ScratchItem:
+        project = validate_uuid("project_id", project_id)
+        item_uuid = validate_uuid("item_id", item_id)
+        now = self._now()
+        async with self._transaction() as session:
+            item = await self._lock_visible(session, project, item_uuid, now)
+            if item.pinned != pinned:
+                await session.execute(
+                    update(_ITEMS).where(_ITEMS.c.id == item_uuid).values(pinned=pinned)
+                )
+            return replace(item, pinned=pinned)
+
     # -- create and read ----------------------------------------------------
 
     async def add(
@@ -183,8 +349,8 @@ class ScratchStore:
            belongs to another project: the two are not distinguished) raises
            ``InvalidScratchInputError("task_id", UNKNOWN_REFERENCE)`` and stores
            nothing. The relation to the project and the task is kept as given.
-        3. The item is inserted with a new id (``uuid.uuid4()``), ``pinned``
-           false, ``promotion_state`` ``none`` and no lease.
+        3. The item is inserted with a new random id (generated by the database),
+           ``pinned`` false, ``promotion_state`` ``none`` and no lease.
 
         ``add`` is not idempotent: two calls with the same arguments store two
         items with different ids (retry policy belongs to the caller).
@@ -193,7 +359,47 @@ class ScratchStore:
         ``promotion_state`` ``PromotionState.NONE``, ``promotion_requested_at``
         None and ``source_metadata`` equal to the validated copy.
         """
-        raise NotImplementedError("PAW-050 stub")
+        fields = validate_new_item(
+            project_id=project_id,
+            created_by=created_by,
+            task_id=task_id,
+            query=query,
+            title=title,
+            summary=summary,
+            content=content,
+            source_metadata=source_metadata,
+        )
+        now = self._now()
+        async with self._transaction() as session:
+            if fields.task_id is not None:
+                task = (
+                    select(_TASKS.c.id)
+                    .where(
+                        _TASKS.c.id == fields.task_id,
+                        _TASKS.c.project_id == fields.project_id,
+                    )
+                    .with_for_update(read=True, key_share=True)
+                )
+                if (await session.execute(task)).first() is None:
+                    raise InvalidScratchInputError(
+                        "task_id", InputProblem.UNKNOWN_REFERENCE
+                    )
+            inserted = insert(_ITEMS).values(
+                project_id=fields.project_id,
+                task_id=fields.task_id,
+                created_by=fields.created_by,
+                query=fields.query,
+                title=fields.title,
+                summary=fields.summary,
+                content=fields.content,
+                source_metadata=fields.source_metadata,
+                created_at=now,
+                expires_at=expiry_of(now),
+            )
+            row = (
+                (await session.execute(inserted.returning(*_ITEMS.c))).mappings().one()
+            )
+        return _snapshot(row, now, in_use=False)
 
     async def get(self, project_id: UUID, item_id: UUID) -> ScratchItem:
         """Return the visible item (see the module doc), with its full content.
@@ -205,7 +411,14 @@ class ScratchStore:
         snapshot is consistent. Invalid ids: ``InvalidScratchInputError`` with
         field ``project_id`` / ``item_id`` (checked in that order).
         """
-        raise NotImplementedError("PAW-050 stub")
+        project = validate_uuid("project_id", project_id)
+        item_uuid = validate_uuid("item_id", item_id)
+        now = self._now()
+        async with self._database.session() as session:
+            item = await self._read(session, project, item_uuid, now)
+        if item is None or not _is_visible(item):
+            raise ScratchItemNotFoundError()
+        return item
 
     async def list_items(
         self,
@@ -231,7 +444,28 @@ class ScratchStore:
         computes visibility and ``in_use`` at the clock's instant. Validation
         order: ``project_id``, ``task_id``, ``limit``, ``include_content``.
         """
-        raise NotImplementedError("PAW-050 stub")
+        project = validate_uuid("project_id", project_id)
+        task = validate_optional_uuid("task_id", task_id)
+        row_limit = validate_bounded_int(
+            "limit", limit, minimum=1, maximum=MAX_LIST_LIMIT
+        )
+        with_content = validate_bool("include_content", include_content)
+        now = self._now()
+        columns = [c for c in _ITEMS.c if with_content or c.name != "content"]
+        statement = (
+            select(*columns, _has_active_lease(now).label("in_use"))
+            .where(
+                _ITEMS.c.project_id == project,
+                or_(_ITEMS.c.expires_at > now, _exempt(now)),
+            )
+            .order_by(_ITEMS.c.created_at.desc(), _ITEMS.c.id.desc())
+            .limit(row_limit)
+        )
+        if task is not None:
+            statement = statement.where(_ITEMS.c.task_id == task)
+        async with self._database.session() as session:
+            rows = (await session.execute(statement)).mappings().all()
+        return [_snapshot(row, now, in_use=row["in_use"]) for row in rows]
 
     # -- pin ------------------------------------------------------------------
 
@@ -244,7 +478,7 @@ class ScratchStore:
         pinned item changes nothing and returns its snapshot. Returns the
         snapshot after the change (``pinned`` True).
         """
-        raise NotImplementedError("PAW-050 stub")
+        return await self._set_pinned(project_id, item_id, True)
 
     async def unpin(self, project_id: UUID, item_id: UUID) -> ScratchItem:
         """Remove the pin. Idempotent; same lookup rules as :meth:`pin`.
@@ -254,7 +488,7 @@ class ScratchStore:
         the item is gone for later calls (``get`` raises
         ``ScratchItemNotFoundError``) and is deleted by the next purge.
         """
-        raise NotImplementedError("PAW-050 stub")
+        return await self._set_pinned(project_id, item_id, False)
 
     # -- use (leases) ------------------------------------------------------------
 
@@ -279,8 +513,10 @@ class ScratchStore:
            pending promotion can).
         2. Delete this item's lease rows with ``expires_at <= now`` (expired
            leases must not accumulate).
-        3. If ``holder_id`` has no active lease and ``MAX_ACTIVE_LEASES_PER_ITEM``
-           other holders have one, raise ``ScratchLeaseLimitError``.
+        3. If ``MAX_ACTIVE_LEASES_PER_ITEM`` holders other than ``holder_id``
+           have an active lease, raise ``ScratchLeaseLimitError``. At most
+           ``MAX_ACTIVE_LEASES_PER_ITEM`` holders, ``holder_id`` included, are
+           active at once, so a holder that already has a lease can always renew.
         4. Upsert the lease of ``(item_id, holder_id)`` with ``leased_at = now``
            and ``expires_at = now + lease_seconds``. A holder that already has a
            lease is renewed: the new ``expires_at`` replaces the old one (it may
@@ -291,7 +527,51 @@ class ScratchStore:
         crashes therefore keeps the item alive for at most ``lease_seconds``.
         Acquiring does not change ``expires_at`` of the item.
         """
-        raise NotImplementedError("PAW-050 stub")
+        project = validate_uuid("project_id", project_id)
+        item_uuid = validate_uuid("item_id", item_id)
+        holder = validate_uuid("holder_id", holder_id)
+        seconds = validate_bounded_int(
+            "lease_seconds",
+            lease_seconds,
+            minimum=MIN_LEASE_SECONDS,
+            maximum=MAX_LEASE_SECONDS,
+        )
+        now = self._now()
+        lease = Lease(item_uuid, holder, now, now + timedelta(seconds=seconds))
+        async with self._transaction() as session:
+            await self._lock_visible(session, project, item_uuid, now)
+            await session.execute(
+                delete(_LEASES).where(
+                    _LEASES.c.item_id == item_uuid, _LEASES.c.expires_at <= now
+                )
+            )
+            other_holders = (
+                await session.execute(
+                    select(func.count())
+                    .select_from(_LEASES)
+                    .where(
+                        _LEASES.c.item_id == item_uuid, _LEASES.c.holder_id != holder
+                    )
+                )
+            ).scalar_one()
+            if other_holders >= MAX_ACTIVE_LEASES_PER_ITEM:
+                raise ScratchLeaseLimitError()
+            upsert = postgresql_insert(_LEASES).values(
+                item_id=lease.item_id,
+                holder_id=lease.holder_id,
+                leased_at=lease.leased_at,
+                expires_at=lease.expires_at,
+            )
+            await session.execute(
+                upsert.on_conflict_do_update(
+                    index_elements=[_LEASES.c.item_id, _LEASES.c.holder_id],
+                    set_={
+                        "leased_at": upsert.excluded.leased_at,
+                        "expires_at": upsert.excluded.expires_at,
+                    },
+                )
+            )
+        return lease
 
     async def release_use(
         self, project_id: UUID, item_id: UUID, holder_id: UUID
@@ -307,7 +587,16 @@ class ScratchStore:
         Other holders' leases are untouched. Validation order: ``project_id``,
         ``item_id``, ``holder_id``.
         """
-        raise NotImplementedError("PAW-050 stub")
+        project = validate_uuid("project_id", project_id)
+        item_uuid = validate_uuid("item_id", item_id)
+        holder = validate_uuid("holder_id", holder_id)
+        async with self._transaction() as session:
+            if await self._lock(session, project, item_uuid):
+                await session.execute(
+                    delete(_LEASES).where(
+                        _LEASES.c.item_id == item_uuid, _LEASES.c.holder_id == holder
+                    )
+                )
 
     # -- promotion ------------------------------------------------------------
 
@@ -325,7 +614,28 @@ class ScratchStore:
         Returns the snapshot after the change. The store does not create a
         Memory Candidate: that is the promotion flow's job.
         """
-        raise NotImplementedError("PAW-050 stub")
+        project = validate_uuid("project_id", project_id)
+        item_uuid = validate_uuid("item_id", item_id)
+        now = self._now()
+        async with self._transaction() as session:
+            item = await self._lock_visible(session, project, item_uuid, now)
+            if item.promotion_state is PromotionState.PENDING:
+                return item
+            if item.promotion_state is PromotionState.PROMOTED:
+                raise ScratchStateError()
+            await session.execute(
+                update(_ITEMS)
+                .where(_ITEMS.c.id == item_uuid)
+                .values(
+                    promotion_state=PromotionState.PENDING.value,
+                    promotion_requested_at=now,
+                )
+            )
+            return replace(
+                item,
+                promotion_state=PromotionState.PENDING,
+                promotion_requested_at=now,
+            )
 
     async def resolve_promotion(
         self, project_id: UUID, item_id: UUID, outcome: PromotionOutcome
@@ -346,7 +656,22 @@ class ScratchStore:
         Returns the snapshot after the change. If the item is expired it is not
         visible afterwards and the next purge deletes it.
         """
-        raise NotImplementedError("PAW-050 stub")
+        project = validate_uuid("project_id", project_id)
+        item_uuid = validate_uuid("item_id", item_id)
+        result = PromotionState(validate_outcome(outcome).value)
+        now = self._now()
+        async with self._transaction() as session:
+            item = await self._lock_visible(session, project, item_uuid, now)
+            if item.promotion_state is result:
+                return item
+            if item.promotion_state is not PromotionState.PENDING:
+                raise ScratchStateError()
+            await session.execute(
+                update(_ITEMS)
+                .where(_ITEMS.c.id == item_uuid)
+                .values(promotion_state=result.value, promotion_requested_at=None)
+            )
+            return replace(item, promotion_state=result, promotion_requested_at=None)
 
     # -- purge ---------------------------------------------------------------------
 
@@ -404,4 +729,44 @@ class ScratchStore:
         the number of expired-but-exempt rows left. Calling again is safe and
         repeats no work (idempotent). Unexpired rows are never deleted.
         """
-        raise NotImplementedError("PAW-050 stub")
+        instant = None if now is None else validate_datetime("now", now)
+        size = validate_bounded_int(
+            "batch_size", batch_size, minimum=1, maximum=MAX_PURGE_BATCH_SIZE
+        )
+        if instant is None:
+            instant = self._now()
+        purgeable = and_(_ITEMS.c.expires_at <= instant, ~_exempt(instant))
+        async with self._transaction() as session:
+            candidates = (
+                (
+                    await session.execute(
+                        select(_ITEMS.c.id)
+                        .where(purgeable)
+                        .order_by(_ITEMS.c.expires_at, _ITEMS.c.id)
+                        .limit(size + 1)
+                        .with_for_update(skip_locked=True, of=_ITEMS)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            chosen = list(candidates[:size])
+            purged = 0
+            if chosen:
+                if self._purge_probe is not None:
+                    await self._purge_probe(session, chosen)
+                # A new statement: it sees exemptions committed after the SELECT.
+                deleted = await session.execute(
+                    delete(_ITEMS).where(_ITEMS.c.id.in_(chosen), purgeable)
+                )
+                purged = deleted.rowcount
+            deferred = (
+                await session.execute(
+                    select(func.count())
+                    .select_from(_ITEMS)
+                    .where(_ITEMS.c.expires_at <= instant, _exempt(instant))
+                )
+            ).scalar_one()
+        return PurgeResult(
+            purged=purged, deferred=deferred, has_more=len(candidates) > size
+        )
