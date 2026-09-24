@@ -16,6 +16,7 @@ import threading
 import time
 import tracemalloc
 import unittest
+import warnings
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -658,6 +659,300 @@ class WorktreeRunnerTest(unittest.TestCase):
         self.assertFalse(run.path.exists())
         self.assertNotIn(run.run_id, self.runner._runs)
 
+    # A child that nobody supervises ----------------------------------------------
+
+    @contextlib.contextmanager
+    def spy_on_signals(self, passthrough):
+        """Record every signal sent by number; deliver them only if ``passthrough``."""
+        calls = []
+        real_killpg, real_kill, real_popen_kill = (
+            os.killpg,
+            os.kill,
+            subprocess.Popen.kill,
+        )
+
+        def killpg(pgid, number):
+            calls.append(("killpg", pgid, int(number)))
+            if passthrough:
+                real_killpg(pgid, number)
+
+        def kill(pid, number):
+            calls.append(("kill", pid, int(number)))
+            if passthrough:
+                real_kill(pid, number)
+
+        def popen_kill(process):
+            calls.append(("Popen.kill", process.pid, int(signal.SIGKILL)))
+            if passthrough:
+                real_popen_kill(process)
+
+        with (
+            mock.patch.object(os, "killpg", killpg),
+            mock.patch.object(os, "kill", kill),
+            mock.patch.object(subprocess.Popen, "kill", popen_kill),
+        ):
+            yield calls
+
+    def fail_to_build_the_leader(self, action, seen):
+        """Stand in for ``_Leader``: run ``action`` on the just-launched child, then
+        fail as descriptor exhaustion would."""
+
+        def fail(process, *_identity):
+            seen.append(process.pid)
+            action(process)
+            raise OSError(errno.EMFILE, "Too many open files")
+
+        return mock.patch.object(worktree_runner, "_Leader", fail)
+
+    def test_a_child_reaped_elsewhere_is_not_signalled_when_no_leader_can_be_built(
+        self,
+    ):
+        # The child was collected by somebody else (SIGCHLD ignored, a concurrent
+        # reaper) before the leader could be built, so its pid and process group
+        # id may already belong to an unrelated process: nothing may be sent.
+        run = self.runner.create("reaped-elsewhere", self.commit)
+        seen = []
+
+        def reap(process):
+            os.waitpid(process.pid, 0)  # waits for the exit, then collects it
+
+        with (
+            self.spy_on_signals(passthrough=False) as calls,
+            self.fail_to_build_the_leader(reap, seen),
+            self.assertRaises(OSError),
+        ):
+            self.runner.execute(run, [sys.executable, "-c", "pass"], PATIENCE)
+
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(calls, [], "a reaped child's number was signalled")
+        self.assertFalse(run.path.exists())
+        self.assertNotIn(run.run_id, self.runner._runs)
+
+    def test_a_live_child_and_its_group_are_killed_when_no_leader_can_be_built(self):
+        run = self.runner.create("no-leader", self.commit)
+        pid_file = self.pid_file()
+        script = (
+            "import os, sys, time\n"
+            "if os.fork() == 0:\n"
+            "    open(sys.argv[1] + '.tmp', 'w').write(str(os.getpid()))\n"
+            "    os.replace(sys.argv[1] + '.tmp', sys.argv[1])\n"
+            "    time.sleep(60)\n"
+            "    os._exit(0)\n"
+            "time.sleep(60)\n"
+        )
+        seen = []
+
+        def publish(process):
+            # The member is running in the candidate's group by now.
+            self.assertTrue(wait_until(pid_file.exists))
+
+        with (
+            self.spy_on_signals(passthrough=True) as calls,
+            self.fail_to_build_the_leader(publish, seen),
+            self.assertRaises(OSError),
+        ):
+            self.runner.execute(
+                run, [sys.executable, "-c", script, str(pid_file)], PATIENCE
+            )
+
+        (leader,) = seen
+        member = self.read_pid(pid_file)
+        for pid in (leader, member):
+            self.assertTrue(wait_until(lambda pid=pid: not is_running(pid)))
+        # Only the child's own group was signalled, and it was killed.
+        self.assertIn(("killpg", leader, int(signal.SIGKILL)), calls)
+        self.assertEqual({pid for _, pid, _ in calls}, {leader}, calls)
+        self.assertFalse(run.path.exists())
+
+    def spawn_unsupervised(self):
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            start_new_session=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+        def clean_up():
+            with contextlib.suppress(OSError):
+                os.kill(process.pid, signal.SIGKILL)
+                process.wait()
+            for stream in (process.stdout, process.stderr):
+                stream.close()
+
+        self.addCleanup(clean_up)
+        self.assertTrue(
+            wait_until(lambda: WorktreeRunner._start_time(process.pid) is not None)
+        )
+        return process
+
+    def test_stopping_an_unsupervised_child_needs_its_recorded_identity(self):
+        process = self.spawn_unsupervised()
+        started = WorktreeRunner._start_time(process.pid)
+
+        # Another process now has this pid (same number, other start time).
+        with self.spy_on_signals(passthrough=True) as calls:
+            WorktreeRunner._stop_unsupervised(process, started + 1)
+        self.assertEqual(calls, [])
+        time.sleep(0.3)
+        self.assertTrue(
+            is_running(process.pid), "a process with another identity was killed"
+        )
+
+    def test_a_reaped_child_is_not_signalled_without_a_recorded_start_time(self):
+        process = subprocess.Popen(
+            [sys.executable, "-c", "pass"],
+            start_new_session=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        os.waitpid(process.pid, 0)  # somebody else collected it
+
+        with self.spy_on_signals(passthrough=False) as calls:
+            WorktreeRunner._stop_unsupervised(process, None)
+
+        self.assertEqual(calls, [])
+        self.assertTrue(process.stdout.closed and process.stderr.closed)
+
+    def reused_pid_of_another_child(self):
+        """A reaped ``Popen`` whose pid now belongs to another direct child.
+
+        Models a reaper that collected the launched child and a later launch that
+        got the same pid, which ``waitid`` cannot tell apart from the original.
+        The stranger leads its own process group, as a new child would.
+        """
+        stranger = self.spawn_unsupervised()
+        original = subprocess.Popen(
+            [sys.executable, "-c", "pass"],
+            start_new_session=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        os.waitpid(original.pid, 0)  # somebody else collected it
+        original.pid = stranger.pid  # ...and its number went to the stranger
+        return original, stranger
+
+    def test_a_reused_pid_is_not_signalled_when_no_start_time_was_recorded(self):
+        # The stranger is our own child, so ``waitid`` does not fail for its pid: it
+        # is no proof that the number is still the child that was launched.
+        # Once with ``/proc`` (the read at launch failed) and once without it, where
+        # a start time can be read for nobody and "None == None" must not pass.
+        for label, no_proc in (("start unreadable", False), ("no /proc", True)):
+            with self.subTest(case=label):
+                process, stranger = self.reused_pid_of_another_child()
+                no_start_times = (
+                    mock.patch.object(WorktreeRunner, "_start_time", return_value=None)
+                    if no_proc
+                    else contextlib.nullcontext()
+                )
+                with no_start_times, self.spy_on_signals(passthrough=True) as calls:
+                    WorktreeRunner._stop_unsupervised(process, None)
+
+                self.assertEqual(calls, [])
+                time.sleep(0.3)
+                self.assertIsNone(stranger.poll(), "another child was killed")
+                self.assertEqual(process.returncode, 0)  # not waited for
+                self.assertTrue(process.stdout.closed and process.stderr.closed)
+
+    def test_no_recorded_start_time_means_the_child_is_not_provably_ours(self):
+        process = self.spawn_unsupervised()
+        started = WorktreeRunner._start_time(process.pid)
+        # Both with ``waitid(WNOWAIT)`` and where only the start time can tell.
+        for label, context in (
+            ("waitid", contextlib.nullcontext()),
+            ("no waitid", mock.patch.object(os, "waitid", side_effect=AttributeError)),
+        ):
+            with self.subTest(path=label), context:
+                self.assertFalse(WorktreeRunner._is_unreaped_child(process.pid, None))
+                self.assertFalse(
+                    WorktreeRunner._is_unreaped_child(process.pid, started + 1)
+                )
+                self.assertTrue(WorktreeRunner._is_unreaped_child(process.pid, started))
+                # No ``/proc`` at all: no start time can be read now either.
+                with mock.patch.object(
+                    WorktreeRunner, "_start_time", return_value=None
+                ):
+                    self.assertFalse(
+                        WorktreeRunner._is_unreaped_child(process.pid, None)
+                    )
+
+    def test_a_leader_without_a_recorded_start_time_never_signals_its_group(self):
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            start_new_session=True,
+        )
+        self.addCleanup(process.wait)
+        self.addCleanup(process.kill)
+        with mock.patch.object(WorktreeRunner, "_start_time", return_value=None):
+            leader = worktree_runner._Leader(process)
+            with self.spy_on_signals(passthrough=True) as calls:
+                leader.signal_group(signal.SIGKILL)
+
+        self.assertEqual(calls, [])
+        time.sleep(0.3)
+        self.assertIsNone(process.poll(), "an unidentified group was signalled")
+        # Nothing was learnt about the leader: it is neither released nor lost.
+        self.assertFalse(leader.released or leader.status_lost)
+
+    def test_without_any_start_time_a_run_still_reports_its_real_status(self):
+        # No /proc, say.  Nothing can be signalled, but a candidate that finishes
+        # must still be reported as what it was, not as a lost status.
+        with mock.patch.object(WorktreeRunner, "_start_time", return_value=None):
+            results = [
+                self.runner.execute(
+                    self.runner.create(name, self.commit),
+                    [sys.executable, "-c", f"raise SystemExit({code})"],
+                    PATIENCE,
+                )
+                for name, code in (("ok", 0), ("bad", 3))
+            ]
+        self.assertEqual(
+            [(result.status, result.exit_code) for result in results],
+            [("completed", 0), ("completed", 3)],
+        )
+
+    def test_a_timed_out_candidate_is_left_alone_when_it_has_no_identity(self):
+        self.runner.term_grace_seconds = 0.3
+        self.runner.drain_seconds = 0.3
+        run = self.runner.create("no-identity", self.commit)
+        pid_file = self.pid_file()
+        script = (
+            "import os, sys, time\n"
+            "open(sys.argv[1] + '.tmp', 'w').write(str(os.getpid()))\n"
+            "os.replace(sys.argv[1] + '.tmp', sys.argv[1])\n"
+            "time.sleep(60)\n"
+        )
+        with (
+            mock.patch.object(WorktreeRunner, "_start_time", return_value=None),
+            self.spy_on_signals(passthrough=True) as calls,
+            # The candidate is deliberately left running, so its ``Popen`` is
+            # dropped while the child is alive.
+            warnings.catch_warnings(),
+        ):
+            warnings.simplefilter("ignore", ResourceWarning)
+            result = self.runner.execute(
+                run, [sys.executable, "-c", script, str(pid_file)], 1
+            )
+
+        self.assertEqual(result.status, "timed_out")
+        self.assertEqual(
+            [call for call in calls if call[2] != 0],
+            [],
+            "a group without a recorded identity was signalled",
+        )
+        self.assertTrue(is_running(self.read_pid(pid_file)))  # cleanup kills it
+
+    def test_an_unsupervised_child_with_its_recorded_identity_is_killed_and_reaped(
+        self,
+    ):
+        process = self.spawn_unsupervised()
+        started = WorktreeRunner._start_time(process.pid)
+
+        with self.spy_on_signals(passthrough=True) as calls:
+            WorktreeRunner._stop_unsupervised(process, started)
+        self.assertIn(("killpg", process.pid, int(signal.SIGKILL)), calls)
+        self.assertEqual(process.returncode, -signal.SIGKILL)
+        self.assertTrue(process.stdout.closed and process.stderr.closed)
+
     def test_a_metadata_entry_replaced_by_a_file_is_removed(self):
         run = self.runner.create("admin-file", self.commit)
         admin = self.runner._runs[run.run_id].admin_directory
@@ -736,6 +1031,44 @@ class WorktreeRunnerTest(unittest.TestCase):
         self.assertEqual(events[-2:], ["cleanup_started", "cleanup_incomplete"])
         self.assertNotIn(run.run_id, self.runner._runs)
         real_rmtree(admin, ignore_errors=True)  # leave nothing behind
+
+    def test_the_start_time_recorded_at_launch_is_the_leaders_identity(self):
+        # The identity is read ONCE, right after the launch. A second, independent
+        # lookup when the leader is built could fail (descriptor exhaustion in
+        # another thread) and leave the leader without an identity: then nothing
+        # would ever be signalled and a timed-out candidate would run on.
+        pid_file = self.pid_file()
+        script = (
+            "import os, sys, time\n"
+            "open(sys.argv[1] + '.tmp', 'w').write(str(os.getpid()))\n"
+            "os.replace(sys.argv[1] + '.tmp', sys.argv[1])\n"
+            "time.sleep(60)\n"
+        )
+        real = WorktreeRunner._start_time
+        seen = {"launched": None, "failed": False}
+
+        def second_lookup_of_the_leader_fails(pid):
+            if seen["launched"] is None:
+                seen["launched"] = pid  # the lookup made right after the launch
+            elif pid == seen["launched"] and not seen["failed"]:
+                seen["failed"] = True
+                return None
+            return real(pid)
+
+        run = self.runner.create("one-lookup", self.commit)
+        self.runner.term_grace_seconds = 0.3
+        with mock.patch.object(
+            WorktreeRunner,
+            "_start_time",
+            staticmethod(second_lookup_of_the_leader_fails),
+        ):
+            result = self.runner.execute(
+                run, [sys.executable, "-c", script, str(pid_file)], timeout_seconds=1.5
+            )
+
+        self.assertEqual(result.status, "timed_out")
+        child = self.read_pid(pid_file)
+        self.assertTrue(wait_until(lambda: not is_running(child)))
 
     def test_a_failing_log_close_does_not_stop_cleanup(self):
         # close(2) can report a delayed write error; the descriptor is released

@@ -202,7 +202,22 @@ make the lifecycle log tamper-proof**.  What the runner does:
   instead of returning a result the durable log does not contain.
 - If the output drain cannot be set up after the launch (descriptor exhaustion), or the
   supervisor cannot be built, the child is killed and reaped before the worktree is
-  removed, instead of running on without a timeout.
+  removed, instead of running on without a timeout.  When no leader could be built,
+  the child's pid and start time (recorded right after the launch) are checked first:
+  nothing is signalled unless it is still the runner's own unreaped child (`waitid`
+  with `WNOWAIT`) with that start time.  A child that something else already reaped
+  may have had its pid, which is also its process group id, reused, so then nothing is
+  sent and nothing is waited for.  A child with no recorded start time (no `/proc`, or
+  the read failed) is not signalled at all, because `waitid` alone cannot tell it from
+  another direct child that was given the same pid.
+- The start time recorded right after the launch is the leader's identity: the leader is
+  built with it instead of looking the child up a second time (a second lookup could
+  fail and leave the leader with no identity, so it would never be signalled).
+- Without a recorded start time (no `/proc`) the runner has no identity to check, so it
+  sends no signal to the candidate's group and cannot stop it: a candidate that exceeds
+  the timeout (or is cancelled) is reported `timed_out` (or `cancelled`) but keeps
+  running, and one that finishes is still reported with its real exit status.
+  Production needs a container or cgroup there.
 - A removal that fails for a filesystem reason (a Git metadata entry replaced by a
   plain file is simply removed; a permission error is not) is reported as
   `cleanup_incomplete` and `WorktreeRunnerError`, never as a raw `OSError`.
