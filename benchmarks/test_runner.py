@@ -286,7 +286,7 @@ class TestRunner:
                 if now >= deadline:
                     timed_out = True
                     break
-                if exited_at is None and process.poll() is not None:
+                if exited_at is None and _has_exited(process):
                     exited_at = now
                 if exited_at is None:
                     if not capture.open:
@@ -315,26 +315,24 @@ class TestRunner:
     def _terminate(self, process: subprocess.Popen[bytes]) -> None:
         """TERM, wait for a grace period, then KILL whatever is left."""
         # Snapshot first: children that started their own session are not in the
-        # process group, and they are re-parented once their parent dies.
-        tracked = set(_descendant_pids(process.pid))
+        # process group, and they are re-parented once their parent dies.  Each is
+        # recorded with its start time, so a recycled pid is never mistaken for it.
+        tracked = _descendant_pids(process.pid)
         _signal_group(process.pid, signal.SIGTERM)
-        for pid in tracked:
-            _signal_process(pid, signal.SIGTERM)
+        for pid, started in tracked.items():
+            _signal_identified(pid, started, signal.SIGTERM)
         # The grace period belongs to everything the check started, not just its
         # leader: a leader that exits promptly must not cut short a descendant
         # that is still running its TERM handler.
         deadline = time.monotonic() + self.term_grace_seconds
         while time.monotonic() < deadline:
-            if process.poll() is not None and not _anything_alive(process.pid, tracked):
+            if _has_exited(process) and not _anything_alive(process.pid, tracked):
                 break
             time.sleep(0.02)
         _signal_group(process.pid, signal.SIGKILL)
-        for pid in tracked:
-            _signal_process(pid, signal.SIGKILL)
-        try:
-            process.wait(timeout=self.term_grace_seconds)
-        except subprocess.TimeoutExpired:
-            pass
+        for pid, started in tracked.items():
+            _signal_identified(pid, started, signal.SIGKILL)
+        # The leader is reaped by the caller after its last group signal.
 
     def _write_record(self, result: CheckExecution) -> None:
         record = {
@@ -433,6 +431,25 @@ def _safe_stream_record(
     }
 
 
+def _has_exited(process: subprocess.Popen[bytes]) -> bool:
+    """Has the leader exited?  Looks without reaping it.
+
+    An unreaped leader keeps its pid, which is the check's process group id,
+    reserved: the final group ``SIGKILL`` cannot reach a new, unrelated group that
+    happened to be given the same number.  ``process.wait()`` reaps it only after
+    that signal.
+    """
+    if process.returncode is not None:
+        return True
+    try:
+        return (
+            os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+            is not None
+        )
+    except (AttributeError, ChildProcessError):  # no WNOWAIT, or already reaped
+        return process.poll() is not None
+
+
 def _signal_group(pgid: int, number: int) -> None:
     try:
         os.killpg(pgid, number)
@@ -440,16 +457,56 @@ def _signal_group(pgid: int, number: int) -> None:
         pass
 
 
-def _signal_process(pid: int, number: int) -> None:
+def _signal_identified(pid: int, started: int, number: int) -> None:
+    """Signal ``pid`` only if it is still the process first seen at ``started``.
+
+    A process that exited may have its pid reused by an unrelated one, so a pid
+    alone is not an identity.  With ``pidfd_open`` (Linux 5.3+) the descriptor is
+    opened first and the identity checked afterwards: it then refers to exactly the
+    process that was checked, or to none, and the signal cannot reach a newcomer.
+    Without it the check is followed by ``kill`` and a window of microseconds
+    remains in which the process could exit and its pid be reused.  A pid whose
+    identity changed is dropped.
+    """
+    descriptor: int | None = None
     try:
-        os.kill(pid, number)
+        descriptor = os.pidfd_open(pid)
+    except ProcessLookupError:
+        return
+    except (AttributeError, OSError):  # unsupported: use the plain fallback
+        descriptor = None
+    try:
+        if _start_time(pid) != started:
+            return
+        if descriptor is not None:
+            signal.pidfd_send_signal(descriptor, number)
+        else:
+            os.kill(pid, number)
     except (ProcessLookupError, PermissionError):
         pass
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
 
 
-def _process_table() -> dict[int, tuple[str, int, int]]:
-    """pid -> (state, ppid, pgrp) from Linux ``/proc``; empty elsewhere."""
-    table: dict[int, tuple[str, int, int]] = {}
+def _parse_stat(raw: bytes) -> tuple[str, int, int, int]:
+    """(state, ppid, pgrp, start time in clock ticks) from ``/proc/<pid>/stat``."""
+    fields = raw.rsplit(b")", 1)[1].split()
+    return fields[0].decode(), int(fields[1]), int(fields[2]), int(fields[19])
+
+
+def _start_time(pid: int) -> int | None:
+    """The start time that, with the pid, identifies a process; None if gone."""
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as handle:
+            return _parse_stat(handle.read())[3]
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+def _process_table() -> dict[int, tuple[str, int, int, int]]:
+    """pid -> (state, ppid, pgrp, start time) from Linux ``/proc``; empty elsewhere."""
+    table: dict[int, tuple[str, int, int, int]] = {}
     try:
         entries = os.listdir("/proc")
     except OSError:
@@ -459,29 +516,33 @@ def _process_table() -> dict[int, tuple[str, int, int]]:
             continue
         try:
             with open(f"/proc/{entry}/stat", "rb") as handle:
-                fields = handle.read().rsplit(b")", 1)[1].split()
-            table[int(entry)] = (fields[0].decode(), int(fields[1]), int(fields[2]))
+                table[int(entry)] = _parse_stat(handle.read())
         except (OSError, IndexError, ValueError):
             continue
     return table
 
 
-def _descendant_pids(root: int) -> list[int]:
-    """Best-effort process tree below ``root`` (Linux ``/proc``)."""
+def _descendant_pids(root: int) -> dict[int, int]:
+    """Best-effort process tree below ``root``: pid -> start time (Linux ``/proc``)."""
+    table = _process_table()
     children: dict[int, list[int]] = {}
-    for pid, (_, ppid, _) in _process_table().items():
+    for pid, (_, ppid, _, _) in table.items():
         children.setdefault(ppid, []).append(pid)
-    found: list[int] = []
+    found: dict[int, int] = {}
     pending = [root]
     while pending:
         for child in children.get(pending.pop(), []):
-            found.append(child)
+            found[child] = table[child][3]
             pending.append(child)
     return found
 
 
-def _anything_alive(pgid: int, tracked: set[int]) -> bool:
-    """Is any tracked process, or any member of ``pgid``, still running?"""
+def _anything_alive(pgid: int, tracked: dict[int, int]) -> bool:
+    """Is a tracked process, or any member of ``pgid``, still running?
+
+    A tracked pid now held by a process with a different start time is a stranger
+    and does not count.
+    """
     table = _process_table()
     if not table:  # no /proc: probe the process group itself
         try:
@@ -490,6 +551,6 @@ def _anything_alive(pgid: int, tracked: set[int]) -> bool:
             return False
         return True
     return any(
-        state not in "ZX" and (pid in tracked or pgrp == pgid)
-        for pid, (state, _, pgrp) in table.items()
+        state not in "ZX" and (tracked.get(pid) == started or pgrp == pgid)
+        for pid, (state, _, pgrp, started) in table.items()
     )

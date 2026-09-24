@@ -1,10 +1,13 @@
 """Acceptance tests for visible and hidden benchmark check execution."""
 
+import contextlib
+import errno
 import hashlib
 import json
 import os
 import signal
 import stat
+import subprocess
 import sys
 import tempfile
 import time
@@ -469,6 +472,84 @@ class TestRunnerTest(unittest.TestCase):
         self.assertEqual((result.status, result.exit_code), ("passed", 0))
         grandchild = self.read_pid(pid_file)
         self.assertTrue(wait_until(lambda: not is_running(grandchild)))
+
+    # Process identity ----------------------------------------------------------
+
+    def spawn_bystander(self):
+        """An unrelated process standing in for one that inherited a recycled pid."""
+        bystander = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"]
+        )
+        self.addCleanup(bystander.wait)
+        self.addCleanup(bystander.kill)
+        self.assertTrue(wait_until(lambda: test_runner._start_time(bystander.pid)))
+        return bystander
+
+    def test_a_signal_reaches_only_the_process_that_was_recorded(self):
+        # Both with pidfd_open and with the plain ``kill`` fallback.
+        for label, context in (
+            ("pidfd", contextlib.nullcontext()),
+            (
+                "fallback",
+                mock.patch.object(os, "pidfd_open", side_effect=OSError(errno.ENOSYS)),
+            ),
+        ):
+            with self.subTest(path=label), context:
+                bystander = self.spawn_bystander()
+                started = test_runner._start_time(bystander.pid)
+                # The recorded process was replaced: same pid, other start time.
+                test_runner._signal_identified(
+                    bystander.pid, started + 1, signal.SIGKILL
+                )
+                time.sleep(0.3)
+                self.assertIsNone(bystander.poll(), "an unrelated process was killed")
+                # Same identity: the signal is delivered.
+                test_runner._signal_identified(bystander.pid, started, signal.SIGKILL)
+                self.assertEqual(bystander.wait(timeout=PATIENCE), -signal.SIGKILL)
+
+    def test_a_recycled_pid_is_neither_signalled_nor_waited_for_on_termination(self):
+        self.runner.term_grace_seconds = 30
+        bystander = self.spawn_bystander()
+        stale = {bystander.pid: test_runner._start_time(bystander.pid) - 1}
+        check = self.python_check("sleeper", "import time; time.sleep(60)")
+
+        started = time.monotonic()
+        with mock.patch.object(test_runner, "_descendant_pids", return_value=stale):
+            (result,) = self.runner.run_visible((check,), 0.3)
+
+        self.assertEqual(result.status, "timed_out")
+        # It was not treated as a live descendant to wait out for the grace period.
+        self.assertLess(time.monotonic() - started, 20)
+        time.sleep(0.3)
+        self.assertIsNone(bystander.poll(), "an unrelated process was signalled")
+
+    @unittest.skipUnless(hasattr(os, "WNOWAIT"), "needs waitid(WNOWAIT)")
+    def test_the_leader_is_not_reaped_before_the_final_group_kill(self):
+        # An unreaped leader keeps its pid (the process group id) from being reused.
+        for label, script, timeout in (
+            ("exits", "pass", PATIENCE),
+            ("timed out", "import time; time.sleep(60)", 0.3),
+        ):
+            with self.subTest(check=label):
+                seen = []
+                real = test_runner._signal_group
+
+                def spy(pgid, number, real=real, seen=seen):
+                    try:
+                        os.waitid(os.P_PID, pgid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+                        reaped = False
+                    except ChildProcessError:
+                        reaped = True
+                    seen.append((number, reaped))
+                    real(pgid, number)
+
+                check = self.python_check(label, script)
+                with mock.patch.object(test_runner, "_signal_group", spy):
+                    self.runner.run_visible((check,), timeout)
+
+                kills = [reaped for number, reaped in seen if number == signal.SIGKILL]
+                self.assertTrue(kills)
+                self.assertEqual(kills, [False] * len(kills), seen)
 
     def test_check_environment_is_an_allowlist_without_credentials(self):
         report = self.root / "environment.json"
