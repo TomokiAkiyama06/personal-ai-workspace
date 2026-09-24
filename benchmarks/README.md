@@ -51,13 +51,22 @@ renamed, locked, or damaged its checkout.
 
 The runner does not execute visible or hidden checks and does not select a model.  It
 does not persist command text, stdout, or stderr because those fields can contain
-credentials.  It records only lifecycle events, exit status, duration, and byte counts;
-output is read and discarded while the process runs, so memory use does not depend on
-how much a candidate prints.  PAW-013 owns check execution and hidden-test isolation.
+credentials.  It records only lifecycle events, exit status, duration, and byte counts:
+the final event of an invocation (`completed`, `timed_out`, `cancelled` or
+`launch_failed`) carries `exit_code`, `duration_ms`, `stdout_bytes` and `stderr_bytes`,
+the same numbers `execute()` returns.  Output is read and discarded while the process
+runs, so memory use does not depend on how much a candidate prints.  PAW-013 owns check execution and hidden-test isolation.
 
 `starting_commit` must be a plain revision (letters, digits and `._/@~^{}-`, not
 starting with `-`); it is passed to `git rev-parse --verify --end-of-options`, which
 needs Git 2.30 or newer.  `candidate_id` is limited to letters, digits, `.`, `_`, `-`.
+`execute()` needs a non-empty `argv[0]`; later arguments may be any string (including
+`""`).
+
+`runs_directory` and `logs_directory` must resolve, after symlinks, outside the source
+repository (its worktree root, the main worktree of a linked worktree, and `.git`);
+otherwise the constructor raises `ValueError`, so retained logs never dirty the checkout
+being benchmarked.
 
 ### Candidate process containment
 
@@ -66,12 +75,55 @@ needs Git 2.30 or newer.  `candidate_id` is limited to letters, digits, `.`, `_`
   variables and every `GIT_*` selector are dropped.
 - The candidate runs in its own session.  On timeout or cancellation the runner sends
   `SIGTERM` to the process group and to the processes found below the candidate in
-  `/proc`, waits `term_grace_seconds` (2 s), then sends `SIGKILL` to the group and to
-  those processes, and stops reading the pipes after `drain_seconds` (1 s).  Leftover
-  members of the candidate's process group are also killed when it exits normally.
+  `/proc`.  The grace period (`term_grace_seconds`, 2 s) applies to all of them, not
+  only the leader: the runner waits until the leader has exited *and* no group member
+  or known descendant is still running, so a descendant finishing its `SIGTERM` handler
+  is not cut short.  Whatever is left when the period ends gets `SIGKILL`, and reading
+  the pipes stops after `drain_seconds` (1 s).  Leftover members of the candidate's
+  process group are also killed when it exits normally.
 - Not covered: a process that daemonizes (double fork plus `setsid`) is neither in the
   group nor below the candidate in `/proc`, so it can outlive the run.  Only a
   container or cgroup can contain that.
+
+### Same-user candidates and the evaluator process
+
+A candidate runs as the evaluator's OS user.  On Linux any such process can read
+`/proc/<evaluator pid>/environ`, the environment the evaluator was *started* with (later
+`os.environ` changes do not appear there), so credentials the evaluator inherited are
+exposed even though the candidate's own environment is an allowlist.  `/proc/<pid>/mem`
+was already refused in the tested configuration by `ptrace_scope=1`.
+
+Mitigation: the constructor calls `prctl(PR_SET_DUMPABLE, 0)` on the evaluator (Linux,
+best effort, `harden_process=False` opts out; `runner.process_hardened` reports the
+result).  Observed on Linux 7.0 as an unprivileged user: the candidate's reads of the
+evaluator's `environ` and `mem` fail with `EACCES`, the candidate itself is dumpable
+again after `exec`, and the evaluator stays non-dumpable.  Side effects: no core dumps,
+no debugger attach (`gdb`, `py-spy`), and the evaluator cannot read its own
+`/proc/self/environ` (`/proc/self/fd`, `status` and `cmdline` stay readable).  The flag
+is process-wide, so a host application that needs core dumps or a debugger should opt
+out and provide isolation another way.
+
+This does **not** close the exposure:
+
+- **Ancestors.**  The shell or service manager that started the evaluator still has the
+  same environment, and its `/proc/<pid>/environ` stays readable to a same-user
+  candidate (it finds the parent pid in the evaluator's world-readable
+  `/proc/<pid>/stat`).  Start the evaluator from a clean environment
+  (`env -i PATH=... python ...`, or a service unit that passes no secrets).
+- **Root candidates** and any process with `CAP_SYS_PTRACE` or `CAP_DAC_READ_SEARCH`
+  ignore the flag.
+- **Other same-user channels**: the real home directory (`~/.ssh`, `~/.aws`, ...) by
+  absolute path, the user's keyrings, `ssh-agent`/D-Bus/X11 sockets, the evaluator's
+  command line (world-readable `/proc/<pid>/cmdline`, so never pass secrets as
+  arguments), files the evaluator wrote, and every other process of the same user.
+- Where the flag is unavailable (non-Linux, or a refused `prctl`) nothing changes.
+
+Closing these needs a separate OS identity, or a PID namespace / container in which the
+evaluator's processes and files do not exist.  Unprivileged user namespaces are not
+always permitted (they are refused on the machine used to test this), so that must be
+provided by the deployment, not by this module.  See
+`docs/decisions/0001-hidden-check-boundary.md` (added by PAW-013) for the same boundary
+applied to hidden checks.
 
 ### Lifecycle log limits
 
