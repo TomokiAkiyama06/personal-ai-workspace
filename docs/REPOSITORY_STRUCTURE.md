@@ -46,7 +46,8 @@ personal-ai-workspace/
 │  │  │  ├─ env.py
 │  │  │  ├─ script.py.mako
 │  │  │  └─ versions/
-│  │  │     └─ 0001_baseline.py
+│  │  │     ├─ 0001_baseline.py
+│  │  │     └─ 0031_tool_approvals.py
 │  │  ├─ paw_backend/
 │  │  │  ├─ __init__.py
 │  │  │  ├─ __main__.py
@@ -58,6 +59,24 @@ personal-ai-workspace/
 │  │  │  ├─ middleware.py
 │  │  │  ├─ security.py
 │  │  │  ├─ server.py
+│  │  │  ├─ tools/
+│  │  │  │  ├─ __init__.py
+│  │  │  │  ├─ approval_store.py
+│  │  │  │  ├─ approval_types.py
+│  │  │  │  ├─ approvals.py
+│  │  │  │  ├─ audit.py
+│  │  │  │  ├─ broker.py
+│  │  │  │  ├─ budget.py
+│  │  │  │  ├─ calls.py
+│  │  │  │  ├─ capabilities.py
+│  │  │  │  ├─ credentials.py
+│  │  │  │  ├─ decisions.py
+│  │  │  │  ├─ interfaces.py
+│  │  │  │  ├─ models.py
+│  │  │  │  ├─ policy.py
+│  │  │  │  ├─ registry.py
+│  │  │  │  ├─ runner.py
+│  │  │  │  └─ scope.py
 │  │  │  └─ api/
 │  │  │     ├─ __init__.py
 │  │  │     ├─ deps.py
@@ -80,7 +99,18 @@ personal-ai-workspace/
 │  │     ├─ test_migrations.py
 │  │     ├─ test_postgres_integration.py
 │  │     ├─ test_security.py
-│  │     └─ test_server.py
+│  │     ├─ test_server.py
+│  │     ├─ test_tools_approvals.py
+│  │     ├─ test_tools_broker.py
+│  │     ├─ test_tools_credentials.py
+│  │     ├─ test_tools_migration.py
+│  │     ├─ test_tools_policy.py
+│  │     ├─ test_tools_postgres.py
+│  │     ├─ test_tools_registry.py
+│  │     ├─ test_tools_runner.py
+│  │     ├─ test_tools_scope.py
+│  │     ├─ tools_store_contract.py
+│  │     └─ tools_support.py
 │  ├─ cli/
 │  │  └─ README.md
 │  └─ web/
