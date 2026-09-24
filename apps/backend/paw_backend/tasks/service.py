@@ -99,6 +99,17 @@ _STEP_ACTIVE_STATES = frozenset(
 _FINISHED_STEP_STATUSES = frozenset(
     {StepStatus.SUCCEEDED, StepStatus.FAILED, StepStatus.INTERRUPTED}
 )
+# Commands that end the step that is running when they arrive, and how it ends.
+# Restart does so for the attempt it abandons; Pause and Cancel are graceful and
+# leave the step to its worker (``finish_step``).
+_STEP_ENDING_COMMANDS = {
+    TaskCommand.STOP_NOW: StepStatus.INTERRUPTED,
+    TaskCommand.FAIL: StepStatus.FAILED,
+    TaskCommand.RESTART: StepStatus.INTERRUPTED,
+}
+# Their event names the step they ended (or none); every other command names the
+# latest step, which is what Retry and Restart need to say where they resume from.
+_NAMES_ENDED_STEP = frozenset({TaskCommand.STOP_NOW, TaskCommand.FAIL})
 _FINISHED_TOOL_STATUSES = frozenset(
     {
         ToolInvocationStatus.SUCCEEDED,
@@ -310,18 +321,20 @@ class TaskService:
             # failed. Restart abandons the old attempt, so a step that a
             # graceful Cancel left running is closed too. Pause and Cancel are
             # graceful: the worker finishes its step itself (``finish_step``).
-            if step_running:
-                if command is TaskCommand.FAIL:
-                    await self._close_step(session, step, StepStatus.FAILED, now)
-                elif command in (TaskCommand.STOP_NOW, TaskCommand.RESTART):
-                    await self._close_step(session, step, StepStatus.INTERRUPTED, now)
+            ended_step: str | None = None  # a step that THIS command ended
+            if step is not None and command in _STEP_ENDING_COMMANDS:
+                closed = await self._close_step(
+                    session, step, _STEP_ENDING_COMMANDS[command], now
+                )
+                if closed:
+                    ended_step = step.name
             if command is TaskCommand.STOP_NOW:
                 session.add(
                     TaskLogRow(
                         task_id=task.id,
                         attempt=task.attempt,
                         level=LogLevel.WARNING,
-                        message=self._stop_now_message(step_name, reason),
+                        message=self._stop_now_message(ended_step, reason),
                         created_at=now,
                     )
                 )
@@ -336,7 +349,9 @@ class TaskService:
                 from_state=plan.from_state,
                 actor=actor,
                 reason=reason,
-                step_name=step_name,
+                # Stop Now and Fail name a step only if they actually ended it; a
+                # step that had already finished is not "interrupted" by them.
+                step_name=ended_step if command in _NAMES_ENDED_STEP else step_name,
                 detail=detail or None,
             )
         await self._notify(event)
@@ -696,11 +711,11 @@ class TaskService:
         return value
 
     @staticmethod
-    def _stop_now_message(step_name: str | None, reason: str | None) -> str:
+    def _stop_now_message(interrupted_step: str | None, reason: str | None) -> str:
         message = (
-            f"Stop Now: interrupted step {step_name!r}"
-            if step_name
-            else "Stop Now: no step"
+            f"Stop Now: interrupted step {interrupted_step!r}"
+            if interrupted_step
+            else "Stop Now: no step was running"
         )
         return f"{message} (reason: {reason})" if reason else message
 
@@ -728,8 +743,14 @@ class TaskService:
     @staticmethod
     async def _close_step(
         session: AsyncSession, step: TaskStepRow, status: StepStatus, now: datetime
-    ) -> None:
-        """End a running step; a tool call it still runs is interrupted with it."""
+    ) -> bool:
+        """End ``step`` if it is running; a tool call it still runs ends with it.
+
+        Returns whether this call ended a running step. A step that had already
+        finished is left exactly as it is and ``False`` is returned.
+        """
+        if step.status is not StepStatus.RUNNING:
+            return False
         step.status = status
         step.finished_at = now
         await session.execute(
@@ -741,6 +762,7 @@ class TaskService:
             .values(status=ToolInvocationStatus.INTERRUPTED, finished_at=now)
             .execution_options(synchronize_session=False)
         )
+        return True
 
     @staticmethod
     async def _latest_step(

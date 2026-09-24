@@ -138,8 +138,10 @@ class TaskEvent:
     """One row of the append-only task history.
 
     ``seq`` increases monotonically across all tasks. ``step_name`` is the
-    latest step at the time of the event; for Stop Now and Fail it is the step
-    that was interrupted. ``task_version`` is the task version after the event.
+    latest step at the time of the event, except for Stop Now and Fail: they name
+    only a step they actually ended (``None`` if no step was running, even when an
+    earlier, finished step exists). ``task_version`` is the task version after
+    the event.
     """
 
     seq: int
