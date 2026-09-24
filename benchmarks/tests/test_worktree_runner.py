@@ -1,5 +1,6 @@
 """Behavioral tests for isolated benchmark candidate worktrees."""
 
+import ctypes
 import json
 import os
 import signal
@@ -68,6 +69,65 @@ open(sys.argv[1], 'w').close()
 time.sleep(60)
 """
 
+# Candidate that leaves a descendant whose SIGTERM handler needs ~0.3 s to finish
+# its cleanup.  ``orphan``: an orphaned member of the candidate's process group.
+# ``session``: a child in its own session.  The candidate itself dies on SIGTERM.
+SLOW_TERM_CLEANUP = """
+import os, signal, sys, time
+mode, pid_file, done = sys.argv[1:4]
+
+def install_handler_and_wait():
+    def cleanup(signum, frame):
+        time.sleep(0.3)
+        with open(done, 'w') as handle:
+            handle.write('cleaned')
+        os._exit(0)
+    signal.signal(signal.SIGTERM, cleanup)
+    with open(pid_file + '.tmp', 'w') as handle:
+        handle.write(str(os.getpid()))
+    os.replace(pid_file + '.tmp', pid_file)
+    time.sleep(60)
+
+child = os.fork()
+if child == 0:
+    if mode == 'session':
+        os.setsid()
+        install_handler_and_wait()
+    elif os.fork() == 0:
+        install_handler_and_wait()
+    os._exit(0)
+if mode == 'orphan':
+    os.waitpid(child, 0)
+while not os.path.exists(pid_file):
+    time.sleep(0.01)
+time.sleep(60)
+"""
+
+# Candidate that reports whether it can read the evaluator's /proc entries.
+PROBE_EVALUATOR_PROC = """
+import ctypes, json, sys
+pid, report = sys.argv[1:3]
+def probe(name):
+    try:
+        with open(f'/proc/{pid}/{name}', 'rb') as handle:
+            handle.read(16)
+        return 'readable'
+    except PermissionError:
+        return 'denied'
+result = {'environ': probe('environ'), 'mem': probe('mem')}
+result['own_dumpable'] = ctypes.CDLL(None).prctl(3, 0, 0, 0, 0)
+json.dump(result, open(report, 'w'))
+"""
+
+
+def dumpable():
+    return ctypes.CDLL(None).prctl(3, 0, 0, 0, 0)
+
+
+def set_dumpable(value):
+    zero = ctypes.c_ulong(0)
+    ctypes.CDLL(None).prctl(4, ctypes.c_ulong(value), zero, zero, zero)
+
 
 def wait_until(condition, seconds=PATIENCE):
     deadline = time.monotonic() + seconds
@@ -100,6 +160,8 @@ class WorktreeRunnerTest(unittest.TestCase):
         self.git("add", "state.txt")
         self.git("commit", "-m", "starting state")
         self.commit = self.git("rev-parse", "HEAD").stdout.strip()
+        # Hardening the evaluator is process-wide; leave the test process as found.
+        self.addCleanup(set_dumpable, dumpable())
         self.runner = WorktreeRunner(self.repository, self.root / "benchmark-runs")
         self.pid_files = []
         # Cleanups run last-in first-out: stop stray processes, then delete files.
@@ -741,6 +803,191 @@ class WorktreeRunnerTest(unittest.TestCase):
         script = "import os; d = os.getcwd(); os.chdir('/'); os.rename(d, d + '-moved')"
         self.runner.execute(run, [sys.executable, "-c", script], PATIENCE)
         self.assert_only_the_main_worktree_remains(run)
+
+    # Evaluator /proc exposure ----------------------------------------------
+
+    def probe_evaluator_proc(self, runner):
+        report = self.root / "proc-report.json"
+        run = runner.create("candidate-a", self.commit)
+        result = runner.execute(
+            run,
+            [sys.executable, "-c", PROBE_EVALUATOR_PROC, str(os.getpid()), str(report)],
+            PATIENCE,
+        )
+        self.assertEqual(result.status, "completed")
+        return json.loads(report.read_text(encoding="utf-8"))
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "needs Linux /proc")
+    def test_a_same_uid_candidate_cannot_read_the_evaluator_environment(self):
+        self.assertTrue(self.runner.process_hardened)
+        observed = self.probe_evaluator_proc(self.runner)
+        self.assertEqual(observed["environ"], "denied")
+        self.assertEqual(observed["mem"], "denied")
+        # The candidate is dumpable again after exec; the evaluator stays hardened.
+        self.assertEqual(observed["own_dumpable"], 1)
+        self.assertEqual(dumpable(), 0)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "needs Linux /proc")
+    def test_process_hardening_can_be_disabled(self):
+        set_dumpable(1)
+        runner = WorktreeRunner(
+            self.repository, self.root / "open-runs", harden_process=False
+        )
+        self.assertFalse(runner.process_hardened)
+        self.assertEqual(dumpable(), 1)
+        # Without the mitigation the environment is readable, which is why it exists.
+        self.assertEqual(self.probe_evaluator_proc(runner)["environ"], "readable")
+
+    # State outside the source repository -------------------------------------
+
+    def test_state_directories_inside_the_repository_are_rejected(self):
+        (self.repository / "sub").mkdir()
+        elsewhere = self.root / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "inside").symlink_to(self.repository / "sub")
+        for runs, logs in (
+            (self.repository / "benchmark-runs", None),
+            (self.repository / "sub" / "runs", None),
+            (self.repository, None),
+            (self.repository / ".git" / "runs", None),
+            (self.root / "runs", self.repository / "logs"),
+            (elsewhere / "inside" / "runs", self.root / "logs"),
+        ):
+            with (
+                self.subTest(runs=runs, logs=logs),
+                self.assertRaisesRegex(ValueError, "outside the source repository"),
+            ):
+                WorktreeRunner(self.repository, runs, logs)
+        self.assertEqual(self.git("status", "--porcelain", "-uall").stdout, "")
+        self.assertFalse(list(self.repository.rglob("*-logs")))
+
+    def test_a_subdirectory_or_linked_worktree_does_not_hide_the_repository_root(self):
+        linked = self.root / "linked"
+        self.git("worktree", "add", "--detach", str(linked))
+        for repository in (self.repository / "sub", linked):
+            repository.mkdir(exist_ok=True)
+            with (
+                self.subTest(repository=repository),
+                self.assertRaisesRegex(ValueError, "outside the source repository"),
+            ):
+                WorktreeRunner(repository, self.repository / "benchmark-runs")
+
+    # Durable execution metrics ------------------------------------------------
+
+    def final_event(self, run, status):
+        (event,) = [event for event in self.events(run) if event["event"] == status]
+        return event
+
+    def assert_event_matches_result(self, run, result):
+        event = self.final_event(run, result.status)
+        self.assertEqual(
+            {key: event[key] for key in ("exit_code", "duration_ms", "stdout_bytes")},
+            {
+                "exit_code": result.exit_code,
+                "duration_ms": result.duration_ms,
+                "stdout_bytes": result.stdout_bytes,
+            },
+        )
+        self.assertEqual(event["stderr_bytes"], result.stderr_bytes)
+        for key in ("duration_ms", "stdout_bytes", "stderr_bytes"):
+            self.assertIsInstance(event[key], int)
+
+    def test_completed_run_persists_its_metrics(self):
+        run = self.runner.create("candidate-a", self.commit)
+        script = "import sys; print('out-secret'); print('err', file=sys.stderr)"
+        result = self.runner.execute(run, [sys.executable, "-c", script], PATIENCE)
+        self.assertEqual(result.status, "completed")
+        self.assert_event_matches_result(run, result)
+        self.assertEqual(self.final_event(run, "completed")["stdout_bytes"], 11)
+        self.assertEqual(self.final_event(run, "completed")["stderr_bytes"], 4)
+        self.assertNotIn("out-secret", run.log_path.read_text(encoding="utf-8"))
+
+    def test_timed_out_run_persists_its_metrics(self):
+        run = self.runner.create("candidate-a", self.commit)
+        script = "import sys, time; print('out-secret', flush=True); time.sleep(60)"
+        result = self.runner.execute(run, [sys.executable, "-c", script], 1.5)
+        self.assertEqual(result.status, "timed_out")
+        self.assert_event_matches_result(run, result)
+        self.assertGreaterEqual(self.final_event(run, "timed_out")["duration_ms"], 1500)
+        self.assertNotIn("out-secret", run.log_path.read_text(encoding="utf-8"))
+
+    def test_cancelled_run_persists_its_metrics(self):
+        run = self.runner.create("candidate-a", self.commit)
+        ready = self.root / "printed"
+        script = (
+            "import sys, time; print('out-secret', flush=True); "
+            "open(sys.argv[1], 'w').close(); time.sleep(60)"
+        )
+        worker, box = self.execute_in_thread(
+            run, [sys.executable, "-c", script, str(ready)]
+        )
+        self.assertTrue(wait_until(ready.exists), "the candidate never printed")
+        self.runner.cancel(run)
+        worker.join(timeout=PATIENCE)
+        self.assertEqual(box["result"].status, "cancelled")
+        self.assert_event_matches_result(run, box["result"])
+        self.assertEqual(self.final_event(run, "cancelled")["stdout_bytes"], 11)
+        self.assertNotIn("out-secret", run.log_path.read_text(encoding="utf-8"))
+
+    def test_a_command_that_cannot_start_persists_zero_output(self):
+        run = self.runner.create("candidate-a", self.commit)
+        with self.assertRaises(FileNotFoundError):
+            self.runner.execute(run, ["/nonexistent/candidate-binary"], PATIENCE)
+        event = self.final_event(run, "launch_failed")
+        self.assertEqual((event["stdout_bytes"], event["stderr_bytes"]), (0, 0))
+        self.assertIsNone(event["exit_code"])
+
+    # TERM grace period ----------------------------------------------------------
+
+    def test_descendants_may_finish_their_term_handlers_within_the_grace_period(self):
+        self.runner.term_grace_seconds = 10
+        for mode in ("orphan", "session"):
+            with self.subTest(mode=mode):
+                run = self.runner.create(f"slow-{mode}", self.commit)
+                pid_file = self.pid_file(f"{mode}.pid")
+                done = self.root / f"{mode}.done"
+                worker, box = self.execute_in_thread(
+                    run,
+                    [
+                        sys.executable,
+                        "-c",
+                        SLOW_TERM_CLEANUP,
+                        mode,
+                        str(pid_file),
+                        str(done),
+                    ],
+                )
+                self.read_pid(pid_file)
+                self.runner.cancel(run)
+                worker.join(timeout=PATIENCE)
+
+                self.assertEqual(box["result"].status, "cancelled")
+                self.assertTrue(done.exists(), "the TERM handler was cut short")
+                self.assertEqual(done.read_text(encoding="utf-8"), "cleaned")
+
+    def test_a_descendant_that_ignores_sigterm_is_killed_only_after_the_grace_period(
+        self,
+    ):
+        self.runner.term_grace_seconds = 1.0
+        run = self.runner.create("stubborn-child", self.commit)
+        pid_file = self.pid_file()
+        worker, _ = self.execute_in_thread(
+            run,
+            [sys.executable, "-c", ORPHANED_TERM_IGNORING_CHILD, str(pid_file), "wait"],
+        )
+        grandchild = self.read_pid(pid_file)
+        cancelled_at = time.monotonic()
+        self.runner.cancel(run)
+        worker.join(timeout=PATIENCE)
+
+        # The leader dies on TERM at once; the grace period still has to run out.
+        self.assertGreaterEqual(time.monotonic() - cancelled_at, 1.0)
+        self.assertTrue(wait_until(lambda: not is_running(grandchild)))
+
+    def test_program_must_be_named_but_arguments_may_be_empty(self):
+        run = self.runner.create("candidate-a", self.commit)
+        result = self.runner.execute(run, [sys.executable, "-c", ""], PATIENCE)
+        self.assertEqual((result.status, result.exit_code), ("completed", 0))
 
 
 if __name__ == "__main__":

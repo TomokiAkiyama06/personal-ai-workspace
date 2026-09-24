@@ -12,6 +12,7 @@ writing it, and detects (but cannot stop) tampering.  See ``benchmarks/README.md
 
 from __future__ import annotations
 
+import ctypes
 import json
 import math
 import os
@@ -21,6 +22,7 @@ import shutil
 import signal
 import stat
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -32,6 +34,8 @@ _CANDIDATE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 # Conservative revision syntax: no option-like or whitespace/control characters.
 _REVISION = re.compile(r"[A-Za-z0-9_@][A-Za-z0-9._/@~^{}-]{0,254}\Z")
 _OBJECT_ID = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
+_PR_GET_DUMPABLE = 3
+_PR_SET_DUMPABLE = 4
 # The only inherited candidate variables.  Everything else, notably credentials
 # and every ``GIT_*`` selector, is dropped; HOME is replaced per run.
 _CANDIDATE_ENVIRONMENT_ALLOWLIST = (
@@ -46,6 +50,39 @@ _CANDIDATE_ENVIRONMENT_ALLOWLIST = (
 
 class WorktreeRunnerError(RuntimeError):
     """Raised when the runner cannot prepare or execute an isolated run."""
+
+
+def _make_process_non_dumpable() -> bool:
+    """Best effort (Linux): hide this process's ``/proc/<pid>`` files from others.
+
+    A same-UID process can normally read ``/proc/<pid>/environ`` (the environment
+    this process started with) and, where ``ptrace_scope`` allows, ``mem``.  A
+    non-dumpable process's ``/proc`` entries belong to root instead.  Children
+    become dumpable again on ``exec`` and this process stays non-dumpable.  Side
+    effects: no core dumps, no debugger attach, and this process's own
+    ``/proc/self/environ`` becomes unreadable to itself.
+    """
+    if not sys.platform.startswith("linux"):
+        return False
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        zero = ctypes.c_ulong(0)
+        if libc.prctl(_PR_SET_DUMPABLE, zero, zero, zero, zero) != 0:
+            return False
+        return libc.prctl(_PR_GET_DUMPABLE, zero, zero, zero, zero) == 0
+    except (OSError, AttributeError):
+        return False
+
+
+def _valid_command(command: object) -> bool:
+    """``argv[0]`` must name a program; later arguments may be any string."""
+    return (
+        isinstance(command, Sequence)
+        and not isinstance(command, (str, bytes))
+        and len(command) > 0
+        and all(isinstance(item, str) and "\0" not in item for item in command)
+        and bool(command[0])
+    )
 
 
 @dataclass(frozen=True)
@@ -125,7 +162,13 @@ class WorktreeRunner:
     A runner is meant to be long-lived: all per-run state is released when
     ``cleanup`` finishes, so the registries stay bounded by the active runs.
     Lifecycle logs live in ``logs_directory`` (default: a sibling of
-    ``runs_directory``), never below the candidate's directory chain.
+    ``runs_directory``), never below the candidate's directory chain.  Both
+    directories must be outside the source repository.
+
+    By default the constructor marks the evaluator process non-dumpable (see
+    ``_make_process_non_dumpable``); pass ``harden_process=False`` to opt out.
+    ``process_hardened`` reports whether the kernel accepted it.  This narrows,
+    but does not close, what a same-UID candidate can read; see the README.
     """
 
     term_grace_seconds = 2.0
@@ -137,6 +180,7 @@ class WorktreeRunner:
         repository: Path,
         runs_directory: Path,
         logs_directory: Path | None = None,
+        harden_process: bool = True,
     ):
         self.repository = Path(repository).resolve()
         self.runs_directory = Path(runs_directory).resolve()
@@ -156,8 +200,10 @@ class WorktreeRunner:
         self._runs: dict[str, _RunState] = {}
         self._assert_repository()
         self._common_git_directory = self._find_common_git_directory()
+        self._reject_state_inside_repository()
         self._ensure_private_directory(self.runs_directory)
         self._ensure_private_directory(self.logs_directory)
+        self.process_hardened = harden_process and _make_process_non_dumpable()
 
     def create(self, candidate_id: str, starting_commit: str) -> WorktreeRun:
         """Create a detached worktree at ``starting_commit`` for one candidate."""
@@ -217,8 +263,8 @@ class WorktreeRunner:
         The returned byte counts allow a later evaluator to record diagnostics
         without turning the runner log into a secret store.
         """
-        if not command or not all(isinstance(item, str) and item for item in command):
-            raise ValueError("command must contain non-empty strings")
+        if not _valid_command(command):
+            raise ValueError("command needs a non-empty program and string arguments")
         if (
             isinstance(timeout_seconds, bool)
             or not isinstance(timeout_seconds, (int, float))
@@ -233,6 +279,7 @@ class WorktreeRunner:
         started = time.monotonic()
         status = "launch_failed"
         exit_code: int | None = None
+        result: ExecutionResult | None = None
         try:
             self._write_event(run, "execution_started")
             process = subprocess.Popen(
@@ -246,15 +293,29 @@ class WorktreeRunner:
             )
             status, drain = self._supervise(run.run_id, process, timeout_seconds)
             exit_code = process.returncode
-            return ExecutionResult(
+            result = ExecutionResult(
                 status=status,
                 exit_code=exit_code,
                 duration_ms=round((time.monotonic() - started) * 1000),
                 stdout_bytes=drain.counts["stdout"],
                 stderr_bytes=drain.counts["stderr"],
             )
+            return result
         finally:
-            self._try_event(run, status, exit_code=exit_code)
+            # The durable record carries the same numbers as the returned
+            # result (counts and time only, never output).
+            self._try_event(
+                run,
+                status,
+                exit_code=exit_code,
+                duration_ms=(
+                    result.duration_ms
+                    if result
+                    else round((time.monotonic() - started) * 1000)
+                ),
+                stdout_bytes=result.stdout_bytes if result else 0,
+                stderr_bytes=result.stderr_bytes if result else 0,
+            )
             self.cleanup(run, reason=status)
 
     def cancel(self, run: WorktreeRun) -> None:
@@ -344,17 +405,22 @@ class WorktreeRunner:
         """TERM, wait for a grace period, then KILL whatever is left."""
         # Snapshot first: children that started their own session are not in the
         # process group, and they are re-parented once their parent dies.
-        escaped = self._descendant_pids(process.pid)
+        tracked = set(self._descendant_pids(process.pid))
         self._signal_group(process.pid, signal.SIGTERM)
-        for pid in escaped:
+        for pid in tracked:
             self._signal_process(pid, signal.SIGTERM)
-        try:
-            process.wait(timeout=self.term_grace_seconds)
-        except subprocess.TimeoutExpired:
-            pass
-        # Even after the leader exited, group members may have ignored TERM.
+        # The grace period belongs to everything the candidate started, not just
+        # its leader: a leader that exits promptly must not cut short a
+        # descendant that is still running its TERM handler.
+        deadline = time.monotonic() + self.term_grace_seconds
+        while time.monotonic() < deadline:
+            if process.poll() is not None and not self._anything_alive(
+                process.pid, tracked
+            ):
+                break
+            time.sleep(0.02)
         self._kill_group(process.pid)
-        for pid in escaped:
+        for pid in tracked:
             self._signal_process(pid, signal.SIGKILL)
         try:
             process.wait(timeout=self.term_grace_seconds)
@@ -380,22 +446,30 @@ class WorktreeRunner:
         cls._signal_group(pgid, signal.SIGKILL)
 
     @staticmethod
-    def _descendant_pids(root: int) -> list[int]:
-        """Best-effort process tree below ``root`` (Linux ``/proc``)."""
-        children: dict[int, list[int]] = {}
+    def _process_table() -> dict[int, tuple[str, int, int]]:
+        """pid -> (state, ppid, pgrp) from Linux ``/proc``; empty elsewhere."""
+        table: dict[int, tuple[str, int, int]] = {}
         try:
             entries = os.listdir("/proc")
         except OSError:
-            return []
+            return table
         for entry in entries:
             if not entry.isdigit():
                 continue
             try:
                 with open(f"/proc/{entry}/stat", "rb") as handle:
                     fields = handle.read().rsplit(b")", 1)[1].split()
-                children.setdefault(int(fields[1]), []).append(int(entry))
+                table[int(entry)] = (fields[0].decode(), int(fields[1]), int(fields[2]))
             except (OSError, IndexError, ValueError):
                 continue
+        return table
+
+    @classmethod
+    def _descendant_pids(cls, root: int) -> list[int]:
+        """Best-effort process tree below ``root`` (Linux ``/proc``)."""
+        children: dict[int, list[int]] = {}
+        for pid, (_, ppid, _) in cls._process_table().items():
+            children.setdefault(ppid, []).append(pid)
         found: list[int] = []
         pending = [root]
         while pending:
@@ -403,6 +477,21 @@ class WorktreeRunner:
                 found.append(child)
                 pending.append(child)
         return found
+
+    @classmethod
+    def _anything_alive(cls, pgid: int, tracked: set[int]) -> bool:
+        """Is any tracked process, or any member of ``pgid``, still running?"""
+        table = cls._process_table()
+        if not table:  # no /proc: probe the process group itself
+            try:
+                os.killpg(pgid, 0)
+            except (ProcessLookupError, PermissionError):
+                return False
+            return True
+        return any(
+            state not in "ZX" and (pid in tracked or pgrp == pgid)
+            for pid, (state, _, pgrp) in table.items()
+        )
 
     def _remove_checkout(self, state: _RunState) -> None:
         """Remove the run directory and Git's record of its worktree."""
@@ -446,6 +535,19 @@ class WorktreeRunner:
         )
         if result.returncode != 0 or result.stdout.strip() != "true":
             raise WorktreeRunnerError("repository must be a Git working tree")
+
+    def _reject_state_inside_repository(self) -> None:
+        """Runs and logs must not dirty the source repository they check out."""
+        toplevel = os.fsdecode(self._git("rev-parse", "--show-toplevel").stdout)
+        roots = {Path(toplevel.strip()).resolve(), self._common_git_directory}
+        if self._common_git_directory.name == ".git":
+            roots.add(self._common_git_directory.parent)  # main worktree
+        for name, directory in (
+            ("runs_directory", self.runs_directory),
+            ("logs_directory", self.logs_directory),
+        ):
+            if any(directory.is_relative_to(root) for root in roots):
+                raise ValueError(f"{name} must be outside the source repository")
 
     def _find_common_git_directory(self) -> Path:
         output = self._git("rev-parse", "--git-common-dir").stdout.decode().strip()
