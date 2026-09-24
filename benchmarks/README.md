@@ -72,8 +72,10 @@ do not become durable logs.
   get `SIGTERM`.  The grace period (`term_grace_seconds`, 2 s) applies to all of them,
   not only the leader: the runner waits until the leader has exited and no group member
   or known descendant is still running, so a descendant finishing its `SIGTERM` handler
-  is not cut short.  Whatever remains when it ends gets `SIGKILL`, and pipe reading
-  stops after `drain_seconds` (1 s).  Leftover group members are also killed when a
+  is not cut short.  Output keeps being drained during the grace period, so a handler
+  that writes more than a pipe holds is not blocked (and killed) on a full pipe.
+  Whatever remains when it ends gets `SIGKILL`, and pipe reading stops after
+  `drain_seconds` (1 s).  Leftover group members are also killed when a
   check exits normally.  A process that daemonizes (double fork plus `setsid`) cannot
   be found and can outlive the check; only a container or cgroup contains that.
 - Descendants are tracked by identity, not by pid alone (pid plus the start time in

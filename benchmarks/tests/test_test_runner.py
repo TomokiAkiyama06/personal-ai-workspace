@@ -427,6 +427,28 @@ class TestRunnerTest(unittest.TestCase):
 
     # Process containment ----------------------------------------------------
 
+    def test_a_term_handler_that_writes_a_lot_can_finish_within_the_grace_period(self):
+        # The handler writes 1 MiB (far more than a pipe holds) before recording
+        # that it finished, so it only finishes if its output is being drained.
+        self.runner.term_grace_seconds = 20
+        done = self.root / "noisy-done"
+        script = (
+            "import os, signal, sys, time\n"
+            "def cleanup(signum, frame):\n"
+            "    sys.stdout.buffer.write(b'x' * (1 << 20))\n"
+            "    sys.stdout.buffer.flush()\n"
+            "    open(sys.argv[1], 'w').write('cleaned')\n"
+            "    os._exit(0)\n"
+            "signal.signal(signal.SIGTERM, cleanup)\n"
+            "time.sleep(60)\n"
+        )
+        check = self.python_check("noisy-handler", script, done)
+        (result,) = self.runner.run_visible((check,), 5)
+
+        self.assertEqual(result.status, "timed_out")
+        self.assertEqual(done.read_text(), "cleaned")
+        self.assertGreaterEqual(result.stdout_bytes, 1 << 20)
+
     def test_timeout_kills_a_group_member_that_ignores_sigterm(self):
         self.runner.term_grace_seconds = 0.3
         pid_file = self.pid_file()

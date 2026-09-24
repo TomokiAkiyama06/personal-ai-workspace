@@ -302,7 +302,7 @@ class TestRunner:
                 if capture.open:
                     capture.pump(min(self.poll_seconds, deadline - now))
             if timed_out:
-                self._terminate(leader)
+                self._terminate(leader, capture)
                 until = time.monotonic() + self.drain_seconds
                 while capture.open and time.monotonic() < until:
                     capture.pump(self.poll_seconds)
@@ -313,8 +313,13 @@ class TestRunner:
             leader.signal_group(signal.SIGKILL)
             leader.reap(self.term_grace_seconds)
 
-    def _terminate(self, leader: _Leader) -> None:
-        """TERM, wait for a grace period, then KILL whatever is left."""
+    def _terminate(self, leader: _Leader, capture: _OutputCapture) -> None:
+        """TERM, wait for a grace period, then KILL whatever is left.
+
+        The check's output keeps being drained during the grace period: a TERM
+        handler that writes more than a pipe holds would otherwise block on the
+        full pipe, never finish, and be killed.
+        """
         # Snapshot first: children that started their own session are not in the
         # process group, and they are re-parented once their parent dies.  Each is
         # recorded with its start time, so a recycled pid is never mistaken for it.
@@ -330,7 +335,10 @@ class TestRunner:
         while time.monotonic() < deadline:
             if leader.has_exited() and not _anything_alive(leader, tracked):
                 break
-            time.sleep(0.02)
+            if capture.open:
+                capture.pump(0.02)
+            else:
+                time.sleep(0.02)
         leader.signal_group(signal.SIGKILL)
         for pid, started in tracked.items():
             _signal_identified(pid, started, signal.SIGKILL)
