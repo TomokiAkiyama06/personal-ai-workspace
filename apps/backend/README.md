@@ -547,6 +547,7 @@ redemption = await service.redeem(token_from_request, apply=set_password)
 
 - `redeem` は Token を消費し、`apply` を**同じ Transaction の中で**実行してから Commit します。`apply` が例外を出すと全体を Rollback し（Token は消費されず、例外はそのまま伝わります）、消費と Password の設定は 1 つの単位になります。
   ただし試行の予約は先に Commit されるため、入力の検証は `redeem` の前に行ってください。
+  `apply` の間は Owner の `users` 行のロックを保持するので、時間のかかる処理（外部への通信など）は入れないでください。
 - `redeem` は User を作らず、`users.status` を変えず、Session も作りません。`invited` から `active` への移行、Password、Session（Recovery のときは既存 Session の全失効）は PAW-022、Passkey は PAW-023 の責務です。
 - Web の Endpoint は誰でも呼べる**公開 Route**になるため、`tests/test_authz_routes.py` の `PUBLIC_ROUTES` に理由付きで載せ、Client 単位の Rate Limit を付けてください。
   未知の Token ID への試行は数える相手がなく、上限は Token ごとにしか効きません。
