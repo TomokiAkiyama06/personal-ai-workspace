@@ -108,14 +108,27 @@ class _Leader:
     exists, so whatever is in the group then is ours unless the id was reused
     within one polling interval.  Whether the leader is still ours is re-checked
     at every signal, because a reaper can act at any time after it was observed.
+    A leader without a recorded start time cannot be told from a stranger holding
+    its number: its group is never signalled.
     """
 
     refresh_seconds = 0.2
 
-    def __init__(self, process: subprocess.Popen[bytes]):
+    _LOOKUP = object()  # "read the start time here"
+
+    def __init__(
+        self, process: subprocess.Popen[bytes], start: int | None | object = _LOOKUP
+    ):
         self.process = process
         self.pgid = process.pid
-        self.start = WorktreeRunner._start_time(process.pid)  # None without /proc
+        # The identity recorded right after the launch is reused: a second,
+        # independent lookup could fail (descriptor exhaustion) and leave the
+        # leader without an identity, so it would never be signalled.
+        self.start = (
+            WorktreeRunner._start_time(process.pid)  # None without /proc
+            if start is _Leader._LOOKUP
+            else start
+        )
         self.released = False  # no longer guaranteed to reserve ``pgid``
         self.status_lost = False  # reaped by someone else: exit status unknown
         self.members: dict[int, int] = {}  # pid -> start time, seen in the group
@@ -166,13 +179,7 @@ class _Leader:
 
     def _still_ours(self) -> bool:
         """Is the process at ``pgid`` still our own, unreaped leader?"""
-        try:
-            os.waitid(os.P_PID, self.pgid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
-        except ChildProcessError:
-            return False
-        except AttributeError:
-            pass
-        return self.start is None or WorktreeRunner._start_time(self.pgid) == self.start
+        return WorktreeRunner._is_unreaped_child(self.pgid, self.start)
 
     def owns(self, pid: int, pgrp: int, started: int) -> bool:
         """Is this process, seen in the table, a member of our group?"""
@@ -181,6 +188,8 @@ class _Leader:
         return not self.released or self.members.get(pid) == started
 
     def signal_group(self, number: int) -> None:
+        if self.start is None:
+            return  # no recorded identity: nothing shows the number is still ours
         if not self.released and (
             self.process.returncode is not None or not self._still_ours()
         ):
@@ -456,13 +465,16 @@ class WorktreeRunner:
                 start_new_session=True,
                 env=self._candidate_environment(state),
             )
+            # The child's identity (pid plus start time), recorded before
+            # anything else can go wrong.
+            started_at = self._start_time(process.pid)
             try:
-                leader = _Leader(process)
+                leader = _Leader(process, started_at)
             except BaseException:
                 # The child is running and nothing supervises it yet: never leave
-                # it behind a removed worktree. It is our own unreaped child, so
-                # its pid is still its process group id.
-                self._stop_unsupervised(process)
+                # it behind a removed worktree, but never signal a number that may
+                # no longer be ours either.
+                self._stop_unsupervised(process, started_at)
                 raise
             status, drain = self._supervise(run.run_id, leader, timeout_seconds)
             # If something else reaped the leader (SIGCHLD ignored, another
@@ -598,19 +610,57 @@ class WorktreeRunner:
                             stream.close()
             leader.reap(self.term_grace_seconds)
 
-    @staticmethod
-    def _stop_unsupervised(process: subprocess.Popen[bytes]) -> None:
-        """Kill and reap a just-started child that no supervisor took over."""
-        with contextlib.suppress(ProcessLookupError, PermissionError):
-            os.killpg(process.pid, signal.SIGKILL)
-        with contextlib.suppress(OSError):
-            process.kill()
-        with contextlib.suppress(OSError, subprocess.TimeoutExpired):
-            process.wait(timeout=5)
+    @classmethod
+    def _stop_unsupervised(
+        cls, process: subprocess.Popen[bytes], started_at: int | None
+    ) -> None:
+        """Kill and reap a just-started child that no supervisor took over.
+
+        ``started_at`` is the child's start time, recorded right after it was
+        launched.  The child may already have been reaped by someone else
+        (``SIGCHLD`` ignored, a concurrent reaper), and its pid, which is also its
+        process group id, may then belong to an unrelated process.  So nothing is
+        signalled or waited for unless the child has a recorded start time and is
+        still our own unreaped child with it: without a recorded identity nothing
+        can show that the number is still ours, so nothing is sent.
+        """
+        if cls._is_unreaped_child(process.pid, started_at):
+            # Its own session, so its pid is the group id, and being unreaped
+            # reserves that id.
+            cls._signal_group(process.pid, signal.SIGKILL)
+            with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+                process.wait(timeout=5)
+        elif process.returncode is None:
+            # Reaped elsewhere, or not provably ours: nothing is sent.  Recording
+            # that keeps ``Popen`` from waiting for (or reaping) whatever holds
+            # the number now.
+            process.returncode = 0
         for stream in (process.stdout, process.stderr):
             if stream is not None:
                 with contextlib.suppress(OSError):
                     stream.close()
+
+    @classmethod
+    def _is_unreaped_child(cls, pid: int, started_at: int | None) -> bool:
+        """Is ``pid`` still our own, unreaped child, and the process first seen at
+        ``started_at``?  Looks without reaping it.
+
+        An unreaped child keeps its pid from being reused; once it was reaped (by
+        us or by someone else) the number may belong to an unrelated process.
+        ``waitid`` alone cannot tell: if the original child was reaped and its pid
+        went to another direct child of ours, ``waitid`` describes that one.  So a
+        start time recorded at launch is required; without one (no ``/proc``, or
+        the read failed) the child is not provably ours and the answer is no.
+        """
+        if started_at is None:
+            return False
+        try:
+            os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        except ChildProcessError:
+            return False
+        except AttributeError:
+            pass  # no WNOWAIT: only the start time can tell
+        return cls._start_time(pid) == started_at
 
     def _terminate(self, leader: _Leader, drain: _PipeDrain) -> None:
         """TERM, wait for a grace period, then KILL whatever is left.
