@@ -610,6 +610,23 @@ class TestRunnerTest(unittest.TestCase):
             is_running(process.pid), "a process with another identity was killed"
         )
 
+    def test_a_reaped_child_is_not_signalled_even_without_a_recorded_start_time(self):
+        # Without /proc no start time is known, so only "still our unreaped child"
+        # can tell that the number was released.
+        process = subprocess.Popen(
+            [sys.executable, "-c", "pass"],
+            start_new_session=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        os.waitpid(process.pid, 0)  # somebody else collected it
+
+        with self.spy_on_signals(passthrough=False) as calls:
+            test_runner._stop_unsupervised(process, None)
+
+        self.assertEqual(calls, [])
+        self.assertTrue(process.stdout.closed and process.stderr.closed)
+
     def test_an_unsupervised_child_with_its_recorded_identity_is_killed_and_reaped(
         self,
     ):
