@@ -57,6 +57,8 @@ class Database:
         self._settings = settings
         self._engine: AsyncEngine | None = None
         self._sessions: async_sessionmaker[AsyncSession] | None = None
+        # Timed-out readiness probes that are still being cancelled.
+        self._cancelling: set[asyncio.Task[None]] = set()
 
     @property
     def configured(self) -> bool:
@@ -82,20 +84,45 @@ class Database:
             self._sessions = async_sessionmaker(self.engine, expire_on_commit=False)
         return self._sessions()
 
+    async def _ping(self) -> None:
+        async with self.engine.connect() as connection:
+            await connection.execute(text("SELECT 1"))
+
     async def check(self) -> DatabaseStatus:
-        """Run ``SELECT 1``. Never raises and never reports connection details."""
+        """Run ``SELECT 1``. Never raises and never reports connection details.
+
+        Returns within ``database_timeout_seconds`` even if the driver is slow
+        to give up: psycopg waits several seconds for the server to confirm a
+        query cancellation, and ``asyncio.timeout`` would wait for that too.
+        A probe that is still running at the deadline is cancelled in the
+        background instead.
+        """
         if not self.configured:
             return DatabaseStatus.NOT_CONFIGURED
+        probe = asyncio.create_task(self._ping())
         try:
-            async with asyncio.timeout(self._settings.database_timeout_seconds):
-                async with self.engine.connect() as connection:
-                    await connection.execute(text("SELECT 1"))
+            await asyncio.wait({probe}, timeout=self._settings.database_timeout_seconds)
+        finally:
+            if not probe.done():
+                self._cancel_in_background(probe)
+        if not probe.done():
+            logger.warning("Database readiness check failed: TimeoutError")
+            return DatabaseStatus.UNAVAILABLE
+        try:
+            probe.result()
         except Exception as error:
             # Log the exception type only: driver messages can name the host,
             # database or user, and this log line is not the place for them.
             logger.warning("Database readiness check failed: %s", type(error).__name__)
             return DatabaseStatus.UNAVAILABLE
         return DatabaseStatus.OK
+
+    def _cancel_in_background(self, probe: asyncio.Task[None]) -> None:
+        self._cancelling.add(probe)
+        probe.add_done_callback(self._cancelling.discard)
+        # Retrieve the outcome so that asyncio does not log it as unhandled.
+        probe.add_done_callback(lambda task: task.cancelled() or task.exception())
+        probe.cancel()
 
     async def dispose(self) -> None:
         if self._engine is not None:

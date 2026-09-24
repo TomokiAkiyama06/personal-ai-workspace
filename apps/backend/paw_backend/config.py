@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     tls_keyfile: Path | None = None
     allow_plaintext_http: bool = False
     hsts_max_age_seconds: int = Field(default=31_536_000, ge=0)
+    # Seconds Uvicorn waits for open connections (SSE, WebSocket) on shutdown
+    # before it cancels them.
+    shutdown_timeout_seconds: int = Field(default=5, ge=1, le=300)
 
     # PostgreSQL. ``None`` keeps the app running; readiness then reports
     # ``not_configured`` instead of the process refusing to start.

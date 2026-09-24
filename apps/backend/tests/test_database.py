@@ -1,3 +1,6 @@
+import asyncio
+import logging
+import time
 import unittest
 from typing import Annotated
 
@@ -9,6 +12,7 @@ from paw_backend.api.deps import get_session
 from paw_backend.app import create_app
 from paw_backend.db import Base, Database, DatabaseNotConfiguredError, DatabaseStatus
 
+from .fake_postgres import HangingPostgres
 from .support import FakeDatabase, make_settings
 
 PASSWORD = "s3cr3t-pw"
@@ -53,6 +57,64 @@ class ConfiguredDatabaseTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_dispose_without_an_engine_is_a_no_op(self):
         await Database(make_settings(database_url=URL)).dispose()
+
+
+class ReadinessTimeoutTest(unittest.IsolatedAsyncioTestCase):
+    """``check()`` must return at its timeout, however slowly the driver gives up."""
+
+    TIMEOUT = 0.3
+
+    def database(self, url: str = URL) -> Database:
+        return Database(
+            make_settings(database_url=url, database_timeout_seconds=self.TIMEOUT)
+        )
+
+    async def test_returns_at_the_timeout_even_if_cancellation_is_slow(self):
+        class SlowToCancel(Database):
+            async def _ping(self):
+                try:
+                    await asyncio.sleep(60)
+                except asyncio.CancelledError:
+                    # What psycopg does: wait for the server to confirm the
+                    # cancellation before letting the cancelled call end.
+                    await asyncio.sleep(1.5)
+                    raise
+
+        database = SlowToCancel(
+            make_settings(database_url=URL, database_timeout_seconds=self.TIMEOUT)
+        )
+        started = time.monotonic()
+        with self.assertLogs("paw_backend.db", level=logging.WARNING):
+            status = await database.check()
+        elapsed = time.monotonic() - started
+
+        self.assertEqual(status, DatabaseStatus.UNAVAILABLE)
+        self.assertLess(elapsed, self.TIMEOUT + 0.5, "check() waited for the cancel")
+
+    async def test_returns_at_the_timeout_when_the_server_stops_answering(self):
+        # Real psycopg against a server that logs in and then ignores queries:
+        # the cancel request is never confirmed and psycopg waits ~10 s for it.
+        # Its background warnings about the abandoned cancel are not under test.
+        psycopg_logger = logging.getLogger("psycopg")
+        self.addCleanup(psycopg_logger.setLevel, psycopg_logger.level)
+        psycopg_logger.setLevel(logging.CRITICAL)
+        async with HangingPostgres() as server:
+            database = self.database(f"postgresql://paw:pw@127.0.0.1:{server.port}/paw")
+            started = time.monotonic()
+            with self.assertLogs("paw_backend.db", level=logging.WARNING):
+                status = await database.check()
+            elapsed = time.monotonic() - started
+
+        self.assertEqual(status, DatabaseStatus.UNAVAILABLE)
+        self.assertLess(elapsed, self.TIMEOUT + 1.0)
+
+    async def test_a_probe_cancelled_after_the_timeout_leaves_no_task_behind(self):
+        database = self.database()
+        database._ping = lambda: asyncio.sleep(60)
+        with self.assertLogs("paw_backend.db", level=logging.WARNING):
+            await database.check()
+        await asyncio.sleep(0.05)  # let the cancellation finish
+        self.assertEqual(database._cancelling, set())
 
 
 class SessionDependencyTest(unittest.TestCase):

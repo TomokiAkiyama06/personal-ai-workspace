@@ -47,6 +47,10 @@ def build_server_config(settings: Settings, app: FastAPI) -> uvicorn.Config:
         ssl_keyfile=settings.tls_keyfile,
         log_level=settings.log_level,
         server_header=False,
+        # Open SSE / WebSocket connections never end by themselves; without a
+        # limit shutdown would wait for them forever and the lifespan cleanup
+        # (closing the database engine) would not run.
+        timeout_graceful_shutdown=settings.shutdown_timeout_seconds,
         ws_max_size=WEBSOCKET_MAX_MESSAGE_BYTES,
     )
 

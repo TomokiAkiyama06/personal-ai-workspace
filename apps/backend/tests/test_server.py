@@ -1,8 +1,14 @@
 import contextlib
 import io
+import logging
+import socket
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
+
+import uvicorn
 
 from paw_backend.app import create_app
 from paw_backend.server import (
@@ -12,7 +18,7 @@ from paw_backend.server import (
     main,
 )
 
-from .support import make_settings, paw_environment
+from .support import FakeDatabase, make_settings, paw_environment
 
 
 class BuildServerConfigTest(unittest.TestCase):
@@ -55,6 +61,63 @@ class BuildServerConfigTest(unittest.TestCase):
         config = self.build()
         self.assertFalse(config.server_header)
         self.assertEqual(config.ws_max_size, WEBSOCKET_MAX_MESSAGE_BYTES)
+
+    def test_graceful_shutdown_is_bounded(self):
+        self.assertEqual(self.build().timeout_graceful_shutdown, 5)
+        config = self.build(shutdown_timeout_seconds=2)
+        self.assertEqual(config.timeout_graceful_shutdown, 2)
+
+
+class ShutdownWithOpenStreamTest(unittest.TestCase):
+    """A real Uvicorn on loopback: an open SSE stream must not block shutdown."""
+
+    def test_shutdown_completes_while_an_event_stream_is_open(self):
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        database = FakeDatabase()
+        settings = make_settings(
+            port=port,
+            shutdown_timeout_seconds=1,
+            event_heartbeat_seconds=0.05,
+            log_level="warning",
+        )
+        config = build_server_config(settings, create_app(settings, database=database))
+        # Uvicorn logs the streams it has to cancel at the deadline as errors.
+        # That is the expected outcome here, so keep it out of the test output.
+        config.log_config = None
+        logging.disable(logging.CRITICAL)
+        self.addCleanup(logging.disable, logging.NOTSET)
+        server = uvicorn.Server(config)
+        thread = threading.Thread(target=server.run, daemon=True)
+        thread.start()
+        self.addCleanup(self.stop, server, thread)
+        deadline = time.monotonic() + 5
+        while not server.started and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertTrue(server.started, "the server did not start")
+
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as client:
+            client.sendall(
+                b"GET /api/v1/events/stream HTTP/1.1\r\n"
+                b"Host: localhost\r\nAccept: text/event-stream\r\n\r\n"
+            )
+            received = b""
+            while b"system.heartbeat" not in received:
+                received += client.recv(4096)
+
+            # The client stays connected; only the server is asked to stop.
+            server.should_exit = True
+            thread.join(timeout=5)
+
+        self.assertFalse(thread.is_alive(), "shutdown hung on the open stream")
+        self.assertTrue(database.disposed, "lifespan cleanup did not run")
+
+    @staticmethod
+    def stop(server, thread):
+        server.should_exit = True
+        server.force_exit = True
+        thread.join(timeout=5)
 
 
 class MainTest(unittest.TestCase):
