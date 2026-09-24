@@ -90,6 +90,7 @@ class ModelsMetadataTest(unittest.TestCase):
             ("conversations", "repo_id"),
             ("memory_versions", "owner_user_id"),
             ("memory_versions", "project_id"),
+            ("memory_versions", "project_group_id"),
             ("memory_versions", "repo_id"),
             ("memory_versions", "actor_user_id"),
         ]:
@@ -100,7 +101,7 @@ class ModelsMetadataTest(unittest.TestCase):
 
     def test_allowed_values_follow_the_design_documents(self):
         expected: dict[type[StrEnum], set[str]] = {
-            models.MemoryScope: {"user", "project", "repo", "shared"},
+            models.MemoryScope: {"user", "project", "project_group", "repo", "shared"},
             models.MemoryStatus: {"active", "superseded", "deprecated", "history"},
             models.ConfirmationState: {
                 "observed",

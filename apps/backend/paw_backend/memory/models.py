@@ -14,7 +14,8 @@ Separation"):
 
 Users, projects and repositories do not exist yet (PAW-021 / PAW-026 /
 PAW-027). Their ids are therefore **plain UUID columns without foreign keys**
-(``owner_user_id``, ``project_id``, ``repo_id``, ``actor_user_id``). Nothing in
+(``owner_user_id``, ``project_id``, ``project_group_id``, ``repo_id``,
+``actor_user_id``). Nothing in
 the database ties them to a row: the Backend must only write ids it has
 validated, and PAW-021+ may add the foreign keys in a later migration.
 
@@ -58,6 +59,9 @@ class MemoryScope(StrEnum):
 
     USER = "user"
     PROJECT = "project"
+    # A subset of projects (for example "development projects"), as the
+    # Inferred Preference flow emits it. See ``MemoryVersion``.
+    PROJECT_GROUP = "project_group"
     REPO = "repo"
     SHARED = "shared"
 
@@ -244,14 +248,16 @@ class Memory(Base):
 
 # Also the list of allowed scopes: no other value satisfies one of the branches.
 _SCOPE_COLUMNS = (
-    "(scope = 'user' AND owner_user_id IS NOT NULL"
-    " AND project_id IS NULL AND repo_id IS NULL)"
-    " OR (scope = 'project' AND project_id IS NOT NULL"
-    " AND owner_user_id IS NULL AND repo_id IS NULL)"
-    " OR (scope = 'repo' AND repo_id IS NOT NULL"
-    " AND owner_user_id IS NULL AND project_id IS NULL)"
-    " OR (scope = 'shared' AND owner_user_id IS NULL"
-    " AND project_id IS NULL AND repo_id IS NULL)"
+    "(scope = 'user' AND owner_user_id IS NOT NULL AND project_id IS NULL"
+    " AND project_group_id IS NULL AND repo_id IS NULL)"
+    " OR (scope = 'project' AND owner_user_id IS NULL AND project_id IS NOT NULL"
+    " AND project_group_id IS NULL AND repo_id IS NULL)"
+    " OR (scope = 'project_group' AND owner_user_id IS NULL AND project_id IS NULL"
+    " AND project_group_id IS NOT NULL AND repo_id IS NULL)"
+    " OR (scope = 'repo' AND owner_user_id IS NULL AND project_id IS NULL"
+    " AND project_group_id IS NULL AND repo_id IS NOT NULL)"
+    " OR (scope = 'shared' AND owner_user_id IS NULL AND project_id IS NULL"
+    " AND project_group_id IS NULL AND repo_id IS NULL)"
 )
 _FRESHNESS_FIELDS = (
     "(freshness_policy <> 'revalidate'"
@@ -268,7 +274,17 @@ class MemoryVersion(Base):
     ``user`` to ``project``) creates a new version and leaves the older, private
     versions private. The columns that decide who may read a row are
     ``scope`` plus exactly one of ``owner_user_id`` / ``project_id`` /
-    ``repo_id`` (none for ``shared``); ``acl.py`` builds the query condition.
+    ``project_group_id`` / ``repo_id`` (none for ``shared``); ``acl.py`` builds
+    the query condition.
+
+    ``project_group`` is a memory that applies to a set of projects. The
+    requirements only show it as the structured form of a free-text preference
+    ("apply to the development projects"); they define no project-group entity,
+    its membership or its permissions. The schema therefore stores just the
+    group's id (a plain UUID, like the other ids) and leaves what a group is to
+    the caller: a principal reads a group memory only when the group id is in
+    the ``project_group_ids`` the caller supplies (``acl.py``). Membership of a
+    project in a group never widens access by itself.
     """
 
     __tablename__ = "memory_versions"
@@ -334,6 +350,12 @@ class MemoryVersion(Base):
             postgresql_where=text("project_id IS NOT NULL"),
         ),
         Index(
+            "ix_memory_versions_project_group_id_status",
+            "project_group_id",
+            "status",
+            postgresql_where=text("project_group_id IS NOT NULL"),
+        ),
+        Index(
             "ix_memory_versions_repo_id_status",
             "repo_id",
             "status",
@@ -358,6 +380,7 @@ class MemoryVersion(Base):
     scope: Mapped[str] = mapped_column(Text)
     owner_user_id: Mapped[UUID | None]
     project_id: Mapped[UUID | None]
+    project_group_id: Mapped[UUID | None]
     repo_id: Mapped[UUID | None]
 
     memory_type: Mapped[str] = mapped_column(Text)

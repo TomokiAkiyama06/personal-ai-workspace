@@ -458,12 +458,16 @@ Conversation を消しても Memory と他の出典は残り（`ON DELETE SET NU
 出典の `conversation_id` と `message_id` は組で検証し（複合 Foreign Key）、Message がその Conversation のものでなければ DB が拒否します。
 Message だけを消すと `message_id` だけが NULL になり、Conversation の出典は残ります。Message を指す出典は Conversation も指してください（Conversation が NULL の組は検証されず、Conversation 単位の検索から漏れます）。
 
-**Scope と ACL。** 各 Version が `scope`（`user` / `project` / `repo` / `shared`）を持ち、Scope に対応する ID を 1 つだけ持ちます
-（`owner_user_id` / `project_id` / `repo_id`、`shared` は無し）。CHECK 制約が組み合わせを強制します。
+**Scope と ACL。** 各 Version が `scope`（`user` / `project` / `project_group` / `repo` / `shared`）を持ち、Scope に対応する ID を 1 つだけ持ちます
+（`owner_user_id` / `project_id` / `project_group_id` / `repo_id`、`shared` は無し）。CHECK 制約が組み合わせを強制します。
+`project_group` は、要件の Inferred Preference の例（自由入力「開発系の Project だけ適用」を `scope: project_group` へ構造化）を保存するための Scope です。
+要件は Project Group の実体、Member、権限を定義していません。そのため Schema は Group の ID（素の UUID）だけを持ち、
+`Principal.project_group_ids`（呼び出し側が決めた、読める Group の ID）に含まれる場合だけ読めます。
+Project が Group に属していても、それだけでは Group の Memory は読めません（既定は拒否）。
 権限の判定は SQL で行います。`paw_backend.memory.acl` の `readable_memory_versions(principal)` を、
 `memory_versions`（と、それを Join する `memory_embeddings`、`memory_sources`、`memory_relations`）を読む全ての Query に付けます。
 Vector 検索でも、順位付けの前に付けるため、見えない行が順位に入ることはありません。
-`Principal` は User の実効的な権限（読める Project と Repo の ID）で、RBAC と Membership から Backend が決めます。
+`Principal` は User の実効的な権限（読める Project、Project Group、Repo の ID）で、RBAC と Membership から Backend が決めます。
 Repo は既定で Project の権限を継承し、Repo 単位の ACL override で外された Repo は `repo_ids` に入れません。
 Memory ごとの権限の写しは持ちません（Member の変更で古くなり、漏れの原因になるため）。
 Scope 別の Index が `status = 'active'` の絞り込みとあわせて ACL 条件を支えます。
@@ -478,7 +482,7 @@ Scope を広げる編集は新しい Version で行うため、旧 Version は�
 方針ごとの必須項目（`verified_at`、`revalidate_after`、`commit_sha`、`expires_at`）、`actor`、`change_reason` も Version が持ちます。
 
 **User / Project / Repo の ID は Foreign Key なし。** User、Project、Repo の Table はまだありません（PAW-021 / 026 / 027）。
-`owner_user_id`、`project_id`、`repo_id`、`actor_user_id` は素の UUID Column で、DB は存在を確認しません。
+`owner_user_id`、`project_id`、`project_group_id`、`repo_id`、`actor_user_id` は素の UUID Column で、DB は存在を確認しません。
 Backend は検証した ID だけを書いてください。Table ができた後の Migration で Foreign Key を追加できます。
 Task、Repo 解析、Project Decision の出典も、Table がないため `memory_sources.source_ref` の不透明な文字列です。
 

@@ -304,10 +304,11 @@ class SessionStateTest(MemoryDatabaseTestCase):
 @requires_postgres
 class MemoryScopeTest(MemoryDatabaseTestCase):
     def test_each_scope_stores_exactly_its_own_id_column(self):
-        user, project, repo = uuid4(), uuid4(), uuid4()
+        user, project, group, repo = uuid4(), uuid4(), uuid4(), uuid4()
         cases = [
             ("user", {"owner_user_id": user}),
             ("project", {"project_id": project}),
+            ("project_group", {"project_group_id": group}),
             ("repo", {"repo_id": repo}),
             ("shared", {}),
         ]
@@ -319,6 +320,7 @@ class MemoryScopeTest(MemoryDatabaseTestCase):
                         MemoryVersion.scope,
                         MemoryVersion.owner_user_id,
                         MemoryVersion.project_id,
+                        MemoryVersion.project_group_id,
                         MemoryVersion.repo_id,
                     ).where(MemoryVersion.id == version)
                 ).one()
@@ -328,12 +330,13 @@ class MemoryScopeTest(MemoryDatabaseTestCase):
                         scope,
                         columns.get("owner_user_id"),
                         columns.get("project_id"),
+                        columns.get("project_group_id"),
                         columns.get("repo_id"),
                     ),
                 )
 
     def test_a_scope_with_the_wrong_id_columns_is_rejected(self):
-        user, project, repo = uuid4(), uuid4(), uuid4()
+        user, project, group, repo = uuid4(), uuid4(), uuid4(), uuid4()
         cases = {
             "unknown scope": {"scope": "team", "project_id": project},
             "user without owner": {"scope": "user"},
@@ -353,6 +356,38 @@ class MemoryScopeTest(MemoryDatabaseTestCase):
                 "project_id": project,
                 "repo_id": repo,
             },
+            "project with group": {
+                "scope": "project",
+                "project_id": project,
+                "project_group_id": group,
+            },
+            "project group without group": {"scope": "project_group"},
+            "project group with project": {
+                "scope": "project_group",
+                "project_group_id": group,
+                "project_id": project,
+            },
+            "project group with owner": {
+                "scope": "project_group",
+                "project_group_id": group,
+                "owner_user_id": user,
+            },
+            "project group with repo": {
+                "scope": "project_group",
+                "project_group_id": group,
+                "repo_id": repo,
+            },
+            "user with group": {
+                "scope": "user",
+                "owner_user_id": user,
+                "project_group_id": group,
+            },
+            "repo with group": {
+                "scope": "repo",
+                "repo_id": repo,
+                "project_group_id": group,
+            },
+            "shared with group": {"scope": "shared", "project_group_id": group},
             "repo without repo": {"scope": "repo"},
             "repo with project": {
                 "scope": "repo",

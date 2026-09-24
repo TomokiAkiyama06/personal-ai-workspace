@@ -40,11 +40,21 @@ class PrincipalTest(unittest.TestCase):
         with self.assertRaises(TypeError):
             Principal(uuid4(), repo_ids=frozenset({None}))
 
+    def test_project_group_grants_must_be_uuids(self):
+        with self.assertRaises(TypeError):
+            Principal(uuid4(), project_group_ids=frozenset({"development"}))
+
     def test_grants_are_normalised_to_frozen_sets(self):
-        project = uuid4()
-        principal = Principal(uuid4(), project_ids=[project, project], repo_ids=())
+        project, group = uuid4(), uuid4()
+        principal = Principal(
+            uuid4(),
+            project_ids=[project, project],
+            repo_ids=(),
+            project_group_ids=[group],
+        )
         self.assertEqual(principal.project_ids, frozenset({project}))
         self.assertEqual(principal.repo_ids, frozenset())
+        self.assertEqual(principal.project_group_ids, frozenset({group}))
         with self.assertRaises(AttributeError):
             principal.user_id = uuid4()
 
@@ -57,6 +67,8 @@ class AclFilterTest(MemoryDatabaseTestCase):
         super().setUp()
         self.alice, self.bob, self.carol, self.dave = (uuid4() for _ in range(4))
         self.p1, self.p2 = uuid4(), uuid4()
+        # Project groups (for example "development projects") of the caller.
+        self.g1, self.g2 = uuid4(), uuid4()
         self.r1, self.r2, self.r3 = uuid4(), uuid4(), uuid4()
         self.embeddings: dict[str, list[float]] = {}
 
@@ -86,6 +98,8 @@ class AclFilterTest(MemoryDatabaseTestCase):
         memory("carol-private", owner_user_id=self.carol)
         memory("p1-decision", scope="project", project_id=self.p1)
         memory("p2-decision", scope="project", project_id=self.p2)
+        memory("g1-preference", scope="project_group", project_group_id=self.g1)
+        memory("g2-preference", scope="project_group", project_group_id=self.g2)
         memory("r1-repo", scope="repo", repo_id=self.r1)
         memory("r2-repo", scope="repo", repo_id=self.r2)
         memory("r3-repo", scope="repo", repo_id=self.r3)
@@ -104,9 +118,11 @@ class AclFilterTest(MemoryDatabaseTestCase):
         self.session.flush()
 
         self.principals = {
-            "alice": Principal(self.alice, {self.p1}, {self.r1, self.r2}),
+            "alice": Principal(self.alice, {self.p1}, {self.r1, self.r2}, {self.g1}),
             "bob": Principal(self.bob, {self.p1}, {self.r1}),  # barred from R2
-            "carol": Principal(self.carol, {self.p2}, {self.r3}),
+            # Bob again, with a project group the caller resolved for him.
+            "bob_in_group": Principal(self.bob, {self.p1}, {self.r1}, {self.g1}),
+            "carol": Principal(self.carol, {self.p2}, {self.r3}, {self.g2}),
             "dave": Principal(self.dave),  # a member of nothing
             "member_without_repos": Principal(uuid4(), {self.p1}),
         }
@@ -151,12 +167,22 @@ class AclFilterTest(MemoryDatabaseTestCase):
                 "widened-user",
                 "widened-project",
                 "p1-decision",
+                "g1-preference",
                 "r1-repo",
                 "r2-repo",
             },
             "bob": shared
             | {"bob-private", "widened-project", "p1-decision", "r1-repo"},
-            "carol": shared | {"carol-private", "p2-decision", "r3-repo"},
+            "bob_in_group": shared
+            | {
+                "bob-private",
+                "widened-project",
+                "p1-decision",
+                "g1-preference",
+                "r1-repo",
+            },
+            "carol": shared
+            | {"carol-private", "p2-decision", "g2-preference", "r3-repo"},
             "dave": shared,
             "member_without_repos": shared | {"widened-project", "p1-decision"},
         }
@@ -171,6 +197,7 @@ class AclFilterTest(MemoryDatabaseTestCase):
                 "alice-private",
                 "widened-project",
                 "p1-decision",
+                "g1-preference",
                 "r1-repo",
                 "r2-repo",
                 "shared-knowledge",
@@ -197,16 +224,19 @@ class AclFilterTest(MemoryDatabaseTestCase):
                 MemoryVersion.scope,
                 MemoryVersion.owner_user_id,
                 MemoryVersion.project_id,
+                MemoryVersion.project_group_id,
                 MemoryVersion.repo_id,
             )
         ).all()
-        self.assertEqual(len(rows), 13)
+        self.assertEqual(len(rows), 15)
 
         def may_read(principal: Principal, row) -> bool:
             if row.scope == "user":
                 return row.owner_user_id == principal.user_id
             if row.scope == "project":
                 return row.project_id in principal.project_ids
+            if row.scope == "project_group":
+                return row.project_group_id in principal.project_group_ids
             if row.scope == "repo":
                 return row.repo_id in principal.repo_ids
             return row.scope == "shared"
@@ -219,9 +249,16 @@ class AclFilterTest(MemoryDatabaseTestCase):
                 )
 
     def test_an_id_of_one_kind_never_grants_another_kind(self):
-        # Alice's user id, used as a project or repo id, opens nothing of hers;
-        # R2 used as a project id does not open R2's repo memory either.
-        confused = Principal(self.dave, {self.alice, self.r2}, {self.p1, self.alice})
+        # Alice's user id, used as a project, repo or group id, opens nothing of
+        # hers; R2 used as a project or group id does not open R2's repo memory;
+        # the project group G1 used as a project or repo id does not open the
+        # group's memory, and P1 used as a group id does not open the project's.
+        confused = Principal(
+            self.dave,
+            project_ids={self.alice, self.r2, self.g1},
+            repo_ids={self.p1, self.alice, self.g1},
+            project_group_ids={self.p1, self.r2, self.alice},
+        )
 
         titles = set(
             self.session.execute(
@@ -352,26 +389,32 @@ class AclFilterTest(MemoryDatabaseTestCase):
                 projects AS (
                     SELECT array_agg(gen_random_uuid()) AS ids
                     FROM generate_series(1, 100)),
+                groups AS (
+                    SELECT array_agg(gen_random_uuid()) AS ids
+                    FROM generate_series(1, 20)),
                 repos AS (
                     SELECT array_agg(gen_random_uuid()) AS ids
                     FROM generate_series(1, 100))
                 INSERT INTO memory_versions
                     (memory_id, version_number, scope, owner_user_id, project_id,
-                     repo_id, memory_type, title, content, status,
-                     confirmation_state, freshness_policy, actor_type)
+                     project_group_id, repo_id, memory_type, title, content,
+                     status, confirmation_state, freshness_policy, actor_type)
                 SELECT numbered.id, 1,
-                    CASE numbered.n % 4 WHEN 0 THEN 'user' WHEN 1 THEN 'project'
-                        WHEN 2 THEN 'repo' ELSE 'shared' END,
-                    CASE WHEN numbered.n % 4 = 0
+                    CASE numbered.n % 5 WHEN 0 THEN 'user' WHEN 1 THEN 'project'
+                        WHEN 2 THEN 'project_group' WHEN 3 THEN 'repo'
+                        ELSE 'shared' END,
+                    CASE WHEN numbered.n % 5 = 0
                         THEN owners.ids[1 + numbered.n % 200] END,
-                    CASE WHEN numbered.n % 4 = 1
+                    CASE WHEN numbered.n % 5 = 1
                         THEN projects.ids[1 + numbered.n % 100] END,
-                    CASE WHEN numbered.n % 4 = 2
+                    CASE WHEN numbered.n % 5 = 2
+                        THEN groups.ids[1 + numbered.n % 20] END,
+                    CASE WHEN numbered.n % 5 = 3
                         THEN repos.ids[1 + numbered.n % 100] END,
                     'note', 'bulk', 'bulk',
-                    CASE WHEN numbered.n % 5 = 0 THEN 'superseded' ELSE 'active' END,
+                    CASE WHEN numbered.n % 7 = 0 THEN 'superseded' ELSE 'active' END,
                     'confirmed', 'permanent', 'system'
-                FROM numbered, owners, projects, repos
+                FROM numbered, owners, projects, groups, repos
                 """
             )
         )
@@ -389,6 +432,7 @@ class AclFilterTest(MemoryDatabaseTestCase):
         for index in (
             "ix_memory_versions_owner_user_id_status",
             "ix_memory_versions_project_id_status",
+            "ix_memory_versions_project_group_id_status",
             "ix_memory_versions_repo_id_status",
             "ix_memory_versions_shared_status",
         ):

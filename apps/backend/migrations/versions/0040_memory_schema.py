@@ -3,7 +3,8 @@
 Raw Conversation (conversations, messages), Session state (session_states) and
 Long-term Memory (memories, memory_versions, memory_relations, memory_sources,
 memory_embeddings) as separate tables. Users, projects and repositories are
-plain UUID columns without foreign keys: those tables do not exist yet.
+plain UUID columns without foreign keys: those tables do not exist yet (the
+same goes for the id of a project group, the fifth scope).
 
 The migration enables the ``vector`` extension. ``CREATE EXTENSION`` needs a
 role that may create it (a superuser, or the extension is "trusted"); if an
@@ -154,6 +155,7 @@ def upgrade() -> None:
         sa.Column("scope", sa.Text(), nullable=False),
         sa.Column("owner_user_id", sa.Uuid(), nullable=True),
         sa.Column("project_id", sa.Uuid(), nullable=True),
+        sa.Column("project_group_id", sa.Uuid(), nullable=True),
         sa.Column("repo_id", sa.Uuid(), nullable=True),
         sa.Column("memory_type", sa.Text(), nullable=False),
         sa.Column("title", sa.Text(), nullable=False),
@@ -198,14 +200,18 @@ def upgrade() -> None:
         sa.UniqueConstraint("memory_id", "version_number"),
         sa.CheckConstraint("version_number >= 1", name="version_number_positive"),
         sa.CheckConstraint(
-            "(scope = 'user' AND owner_user_id IS NOT NULL"
-            " AND project_id IS NULL AND repo_id IS NULL)"
-            " OR (scope = 'project' AND project_id IS NOT NULL"
-            " AND owner_user_id IS NULL AND repo_id IS NULL)"
-            " OR (scope = 'repo' AND repo_id IS NOT NULL"
-            " AND owner_user_id IS NULL AND project_id IS NULL)"
-            " OR (scope = 'shared' AND owner_user_id IS NULL"
-            " AND project_id IS NULL AND repo_id IS NULL)",
+            "(scope = 'user' AND owner_user_id IS NOT NULL AND project_id IS NULL"
+            " AND project_group_id IS NULL AND repo_id IS NULL)"
+            " OR (scope = 'project' AND owner_user_id IS NULL"
+            " AND project_id IS NOT NULL"
+            " AND project_group_id IS NULL AND repo_id IS NULL)"
+            " OR (scope = 'project_group' AND owner_user_id IS NULL"
+            " AND project_id IS NULL"
+            " AND project_group_id IS NOT NULL AND repo_id IS NULL)"
+            " OR (scope = 'repo' AND owner_user_id IS NULL AND project_id IS NULL"
+            " AND project_group_id IS NULL AND repo_id IS NOT NULL)"
+            " OR (scope = 'shared' AND owner_user_id IS NULL AND project_id IS NULL"
+            " AND project_group_id IS NULL AND repo_id IS NULL)",
             name="scope_columns",
         ),
         sa.CheckConstraint(
@@ -276,6 +282,12 @@ def upgrade() -> None:
         "memory_versions",
         ["project_id", "status"],
         postgresql_where=sa.text("project_id IS NOT NULL"),
+    )
+    op.create_index(
+        "ix_memory_versions_project_group_id_status",
+        "memory_versions",
+        ["project_group_id", "status"],
+        postgresql_where=sa.text("project_group_id IS NOT NULL"),
     )
     op.create_index(
         "ix_memory_versions_repo_id_status",
