@@ -210,6 +210,9 @@ make the lifecycle log tamper-proof**.  What the runner does:
   sent and nothing is waited for.  A child with no recorded start time (no `/proc`, or
   the read failed) is not signalled at all, because `waitid` alone cannot tell it from
   another direct child that was given the same pid.
+- The start time recorded right after the launch is the leader's identity: the leader is
+  built with it instead of looking the child up a second time (a second lookup could
+  fail and leave the leader with no identity, so it would never be signalled).
 - Without a recorded start time (no `/proc`) the runner has no identity to check, so it
   sends no signal to the candidate's group and cannot stop it: a candidate that exceeds
   the timeout (or is cancelled) is reported `timed_out` (or `cancelled`) but keeps

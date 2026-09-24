@@ -697,7 +697,7 @@ class WorktreeRunnerTest(unittest.TestCase):
         """Stand in for ``_Leader``: run ``action`` on the just-launched child, then
         fail as descriptor exhaustion would."""
 
-        def fail(process):
+        def fail(process, *_identity):
             seen.append(process.pid)
             action(process)
             raise OSError(errno.EMFILE, "Too many open files")
@@ -1031,6 +1031,44 @@ class WorktreeRunnerTest(unittest.TestCase):
         self.assertEqual(events[-2:], ["cleanup_started", "cleanup_incomplete"])
         self.assertNotIn(run.run_id, self.runner._runs)
         real_rmtree(admin, ignore_errors=True)  # leave nothing behind
+
+    def test_the_start_time_recorded_at_launch_is_the_leaders_identity(self):
+        # The identity is read ONCE, right after the launch. A second, independent
+        # lookup when the leader is built could fail (descriptor exhaustion in
+        # another thread) and leave the leader without an identity: then nothing
+        # would ever be signalled and a timed-out candidate would run on.
+        pid_file = self.pid_file()
+        script = (
+            "import os, sys, time\n"
+            "open(sys.argv[1] + '.tmp', 'w').write(str(os.getpid()))\n"
+            "os.replace(sys.argv[1] + '.tmp', sys.argv[1])\n"
+            "time.sleep(60)\n"
+        )
+        real = WorktreeRunner._start_time
+        seen = {"launched": None, "failed": False}
+
+        def second_lookup_of_the_leader_fails(pid):
+            if seen["launched"] is None:
+                seen["launched"] = pid  # the lookup made right after the launch
+            elif pid == seen["launched"] and not seen["failed"]:
+                seen["failed"] = True
+                return None
+            return real(pid)
+
+        run = self.runner.create("one-lookup", self.commit)
+        self.runner.term_grace_seconds = 0.3
+        with mock.patch.object(
+            WorktreeRunner,
+            "_start_time",
+            staticmethod(second_lookup_of_the_leader_fails),
+        ):
+            result = self.runner.execute(
+                run, [sys.executable, "-c", script, str(pid_file)], timeout_seconds=1.5
+            )
+
+        self.assertEqual(result.status, "timed_out")
+        child = self.read_pid(pid_file)
+        self.assertTrue(wait_until(lambda: not is_running(child)))
 
     def test_a_failing_log_close_does_not_stop_cleanup(self):
         # close(2) can report a delayed write error; the descriptor is released

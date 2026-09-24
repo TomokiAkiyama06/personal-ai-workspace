@@ -114,10 +114,21 @@ class _Leader:
 
     refresh_seconds = 0.2
 
-    def __init__(self, process: subprocess.Popen[bytes]):
+    _LOOKUP = object()  # "read the start time here"
+
+    def __init__(
+        self, process: subprocess.Popen[bytes], start: int | None | object = _LOOKUP
+    ):
         self.process = process
         self.pgid = process.pid
-        self.start = WorktreeRunner._start_time(process.pid)  # None without /proc
+        # The identity recorded right after the launch is reused: a second,
+        # independent lookup could fail (descriptor exhaustion) and leave the
+        # leader without an identity, so it would never be signalled.
+        self.start = (
+            WorktreeRunner._start_time(process.pid)  # None without /proc
+            if start is _Leader._LOOKUP
+            else start
+        )
         self.released = False  # no longer guaranteed to reserve ``pgid``
         self.status_lost = False  # reaped by someone else: exit status unknown
         self.members: dict[int, int] = {}  # pid -> start time, seen in the group
@@ -458,7 +469,7 @@ class WorktreeRunner:
             # anything else can go wrong.
             started_at = self._start_time(process.pid)
             try:
-                leader = _Leader(process)
+                leader = _Leader(process, started_at)
             except BaseException:
                 # The child is running and nothing supervises it yet: never leave
                 # it behind a removed worktree, but never signal a number that may
