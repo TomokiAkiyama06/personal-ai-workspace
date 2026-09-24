@@ -774,6 +774,14 @@ class TrustedClockTest(QueueTestCase):
         self.assertEqual((claimed.task_id, claimed.claimed_by), (task_id, worker))
         return claimed
 
+    async def until(self, sql: str, **parameters) -> None:
+        """Poll a query that returns a boolean until it is true (30 s at most)."""
+        for _ in range(600):
+            if await self.scalar(sql, **parameters):
+                return
+            await asyncio.sleep(0.05)
+        self.fail("the condition was not reached in time")
+
     async def expire_lease(self, entry_id: int) -> None:
         """The lease ran out on the database clock (moved, never slept)."""
         await self.owner_sql(
@@ -796,6 +804,39 @@ class TrustedClockTest(QueueTestCase):
         self.assertIsNone(await production.claim_next("w2"))
         row = await self.entry_row(entry.id)
         self.assertEqual((row["claimed_by"], row["claim_count"]), ("w1", 1))
+
+    async def test_expiry_is_judged_after_the_wait_for_the_row_lock(self):
+        # The heartbeat starts while the lease is alive and then waits for a row
+        # lock past the lease end. The transaction start time (``now()``) would say
+        # "alive"; the time of the decision (``clock_timestamp()``) says expired.
+        production = self.production_queue()
+        claimed = await self.claimed_entry(production)
+        await self.owner_sql(
+            "UPDATE queue_entries SET claimed_at = clock_timestamp() - interval "
+            "'1 minute', lease_expires_at = clock_timestamp() + interval '3 seconds' "
+            "WHERE id = :id",
+            id=claimed.id,
+        )
+        async with self.database.engine.connect() as holder:
+            await holder.execute(
+                text("SELECT id FROM queue_entries WHERE id = :id FOR UPDATE"),
+                {"id": claimed.id},
+            )
+            heartbeat = asyncio.create_task(production.heartbeat(claimed.id, "w1"))
+            # It is blocked on the row, and then the lease runs out while it waits.
+            await self.until(
+                "SELECT count(*) > 0 FROM pg_locks "
+                "WHERE locktype = 'transactionid' AND NOT granted"
+            )
+            await self.until(
+                "SELECT clock_timestamp() > lease_expires_at FROM queue_entries "
+                "WHERE id = :id",
+                id=claimed.id,
+            )
+            await holder.rollback()
+            with self.assertRaises(LeaseLostError):
+                async with asyncio.timeout(30):
+                    await heartbeat
 
     async def test_a_production_queue_rejects_every_caller_supplied_time(self):
         production = self.production_queue()

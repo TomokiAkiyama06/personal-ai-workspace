@@ -9,8 +9,10 @@ command. It performs no authorisation and offers no HTTP endpoint.
 Time. The DATABASE clock is the only clock the queue trusts (Decision 0007,
 section 6): every instant it compares or stores (``enqueued_at``, ``claimed_at``,
 ``lease_expires_at``, ``finished_at`` and "has this lease expired?") is
-PostgreSQL's ``now()`` (the start time of the queue's transaction) evaluated inside
-the SQL statement. A worker's own clock, however skewed or wrong, therefore cannot
+PostgreSQL's ``clock_timestamp()`` (the wall clock at the moment it is evaluated, so
+after any wait for a row lock; ``now()`` is fixed at the start of the transaction and
+would judge an expiry by a time that has already passed) evaluated inside the SQL
+statement. A worker's own clock, however skewed or wrong, therefore cannot
 make a live lease look expired (and so cannot start the same task on a second
 worker) or put an entry in front of the queue. All processes share one authority.
 
@@ -149,14 +151,16 @@ class TaskQueue:
     ) -> tuple[ColumnElement[datetime], ColumnElement[datetime]]:
         """The current instant and the expiry of a lease granted now, as SQL.
 
-        ``now=None``: PostgreSQL's ``now()`` (one value per transaction) and
-        ``now() + lease``, evaluated by the database. An explicit ``now`` (test
+        ``now=None``: PostgreSQL's ``clock_timestamp()`` (the wall clock at the
+        moment it is evaluated, so after any wait for a row lock, unlike ``now()``,
+        which is fixed at the start of the transaction) and that plus the lease,
+        evaluated by the database. An explicit ``now`` (test
         seam) is checked and bound as a value. Raises
         ``InvalidQueueingArgumentError("now")`` for an explicit ``now`` that is
         not a timezone-aware ``datetime`` or when the queue does not allow it.
         """
         if now is None:
-            current = func.now()
+            current = func.clock_timestamp()
             return current, current + self._lease
         if not self._allow_explicit_now:
             raise InvalidQueueingArgumentError("now")
@@ -371,12 +375,22 @@ class TaskQueue:
         current: ColumnElement[datetime],
         **values: Any,
     ) -> QueueEntry:
-        """Apply ``values`` if the worker holds a valid lease, in one statement.
+        """Apply ``values`` if the worker holds a valid lease.
 
         Raises ``LeaseLostError`` when the entry does not exist, is not claimed, is
         claimed by another worker or its lease has expired (``lease_expires_at <=
         current``).
+
+        The row is locked FIRST, in its own statement, and the lease is judged in the
+        next one. An ``UPDATE`` judges its ``WHERE`` before it waits for a row lock,
+        and does not judge it again when the lock holder rolled back, so a single
+        statement would accept a lease that ran out while it waited.
         """
+        lock_entry = (
+            select(QueueEntryRow.id)
+            .where(QueueEntryRow.id == entry_id)
+            .with_for_update()
+        )
         update_held = (
             update(QueueEntryRow)
             .where(
@@ -390,6 +404,8 @@ class TaskQueue:
             .execution_options(populate_existing=True)
         )
         async with self._database.session() as session, session.begin():
+            if (await session.execute(lock_entry)).scalar_one_or_none() is None:
+                raise LeaseLostError()
             row = (await session.execute(update_held)).scalar_one_or_none()
             if row is None:
                 raise LeaseLostError()
