@@ -99,6 +99,7 @@ MAX_RESTORE_TOOL_INVOCATIONS = 100
 # A step runs at most this many tool calls at once. ``begin_tool_invocation``
 # refuses the next one, which keeps what ``restore`` returns bounded even though
 # it never drops a started call.
+# PROVISIONAL: not set by the requirements; awaiting human confirmation (README).
 MAX_ACTIVE_TOOL_INVOCATIONS = 1000
 _TRUNCATED = "...[truncated]"
 
