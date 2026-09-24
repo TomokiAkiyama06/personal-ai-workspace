@@ -190,6 +190,10 @@ def is_private_host(host):
     answer is True when any of these holds, else False:
 
     * it is empty;
+    * it contains ``%``: a zone identifier (``fe80::1%eth0``, or as a URL writes
+      it ``fe80::1%25eth0``) belongs to a link-local address, and a DNS name never
+      contains ``%``, so such a host is not a public name, whatever precedes the
+      ``%``, and is unknown;
     * it is an IP address literal, IPv4 or IPv6, public or not (``ipaddress``
       parses it);
     * it is ``localhost``;
@@ -202,14 +206,16 @@ def is_private_host(host):
     ``"3.13"`` -> False; ``"db.corp"`` -> True; ``"printer.local"`` -> True;
     ``"localhost"`` -> True; ``"db"`` -> True; ``"192.168.0.1"`` -> True;
     ``"8.8.8.8"`` -> True; ``"[::1]"`` -> True; ``""`` -> True;
-    ``"1.2.3.999"`` -> False (not an address; the last label ``999`` is not private).
+    ``"[fe80::1%eth0]"`` -> True; ``"fe80::1%25eth0"`` -> True;
+    ``"db.internal%eth0"`` -> True; ``"1.2.3.999"`` -> False (not an address; the
+    last label ``999`` is not private).
     """
     host = host.lower()
     if host.endswith("."):
         host = host[:-1]
     if host.startswith("[") and host.endswith("]"):
         host = host[1:-1]
-    if not host:
+    if not host or "%" in host:
         return True
     try:
         ipaddress.ip_address(host)
@@ -345,10 +351,33 @@ def abstract_paths(text):
     return " ".join(kept), count
 
 
-_HOST = re.compile(
-    r"(?P<host>localhost|\[[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*\]|[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)"
+# One endpoint, matched whole: optional user information, a host, an optional port,
+# an optional path. The time is linear: no repetition is nested in another, the user
+# information ends at the only "@" it can hold, and the two classes around the first
+# ":" of an IPv6 literal cannot both take that ":".
+_ZONE = r"(?:%[^\s\[\]/]*)?"
+_ENDPOINT = re.compile(
+    r"(?:[^/@\[\]]*@)?"
+    r"(?:\[(?P<v6>[0-9A-Fa-f.]*:[0-9A-Fa-f:.]*)" + _ZONE + r"\]"
+    r"|(?P<name>(?i:localhost)|[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)\.?)"
     r"(?::\d{1,5})?(?:/\S*)?"
 )
+_BARE_V6 = re.compile(r"(?P<address>[0-9A-Fa-f.]*:[0-9A-Fa-f:.]*)" + _ZONE)
+
+
+def _endpoint_host(core):
+    """The bare host of an endpoint token, or ``None`` if ``core`` is not one."""
+    match = _ENDPOINT.fullmatch(core)
+    if match:
+        return match.group("v6") or match.group("name")
+    match = _BARE_V6.fullmatch(core)
+    if match:
+        try:
+            ipaddress.IPv6Address(match.group("address"))
+        except ValueError:
+            return None
+        return match.group("address")
+    return None
 
 
 def abstract_hosts(text):
@@ -358,27 +387,46 @@ def abstract_hosts(text):
     by single spaces. Let ``core`` be the token with leading ``"``, ``'``, ``(``,
     ``{`` and ``<`` characters removed and trailing ``"``, ``'``, ``)``, ``}``,
     ``>``, ``,``, ``;``, ``:``, ``.``, ``!`` and ``?`` characters removed (``[`` and
-    ``]`` are never removed, so that an IPv6 literal in brackets stays whole). The
-    token is dropped, and counts 1, when ``core`` matches ALL of:
-    a host that is either ``localhost``, or an IPv6 literal in brackets (``[``,
-    then hex digits, ``:`` and ``.`` with at least one ``:``, then ``]``), or two
-    or more labels of ``A-Z a-z 0-9 -`` separated by ``.``; then optionally ``:``
-    and 1 to 5 digits; then optionally ``/`` and anything; the WHOLE core must
-    match; and ``is_private_host(host)`` is True for the host part.
+    ``]`` are never removed, so that an IPv6 literal in brackets stays whole).
+    The token is dropped, and counts 1, when ``core`` is an endpoint and the host
+    of that endpoint is private. The WHOLE core must match, in this order:
+
+    1. optionally user information: any characters except ``/``, ``@``, ``[`` and
+       ``]`` (there may be none), then ``@``;
+    2. a host, which is one of: ``localhost`` in any case; two or more labels of
+       ``A-Z a-z 0-9 -`` separated by ``.``, each of these two forms with ONE
+       optional trailing ``.`` (an absolute name); an IPv6 literal in brackets
+       (``[``, hex digits, ``:`` and ``.`` with at least one ``:``, optionally a
+       zone identifier, which is ``%`` and any characters except white space,
+       ``[``, ``]`` and ``/``, and ``]``);
+    3. optionally ``:`` and 1 to 5 digits (the port);
+    4. optionally ``/`` and anything (the path).
+
+    A core that is no endpoint of this kind is dropped too when it is an IPv6
+    address without brackets: ``ipaddress.IPv6Address`` accepts the part before an
+    optional zone identifier (``%`` and any characters except white space, ``[``,
+    ``]`` and ``/``). It has no port and no user information.
+
+    The host is judged with ``is_private_host``, after the user information, the
+    port, the path, the brackets, the zone identifier and the trailing ``.`` are
+    taken off: ``is_private_host`` must be True for what is left.
 
     ``"connect to db.internal:5432 now"`` -> ``("connect to now", 1)``;
     ``"ping 192.168.1.5, then"`` -> ``("ping then", 1)``;
     ``"use localhost:8080/health"`` -> ``("use", 1)``; ``"see (printer.local)"`` ->
-    ``("see", 1)``; ``"[::1]:8080"`` -> ``("", 1)``; ``"docs at example.com."``,
-    ``"python 3.13"``, ``"server1"`` and ``"file.py"`` are unchanged, 0 (public, or
-    a single label that cannot be told from a word).
+    ``("see", 1)``; ``"[::1]:8080"`` -> ``("", 1)``;
+    ``"[fe80::1%eth0]:8080"`` -> ``("", 1)``; ``"db.internal.:5432"`` ->
+    ``("", 1)``; ``"ssh admin@10.0.0.5"`` -> ``("ssh", 1)``; ``"ping fe80::1%eth0"``
+    -> ``("ping", 1)``; ``"docs at example.com."``, ``"example.com.:8080"``,
+    ``"python 3.13"``, ``"server1"``, ``"user@db:5432"`` and ``"file.py"`` are
+    unchanged, 0 (public, or a single label that cannot be told from a word).
     """
     kept = []
     count = 0
     for token in text.split():
         core = token.lstrip("\"'({<").rstrip("\"')}>,;:.!?")
-        match = _HOST.fullmatch(core)
-        if match and is_private_host(match.group("host")):
+        host = _endpoint_host(core)
+        if host is not None and is_private_host(host):
             count += 1
         else:
             kept.append(token)

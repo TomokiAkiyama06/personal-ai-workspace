@@ -151,6 +151,33 @@ class IsPrivateHostTest(unittest.TestCase):
             with self.subTest(host=host):
                 self.assertTrue(rules.is_private_host(host))
 
+    def test_a_zone_identifier_makes_a_host_private(self):
+        for host in (
+            "fe80::1%eth0",
+            "[fe80::1%eth0]",
+            "[fe80::1%eth0].",
+            "FE80::1%ETH0",
+            "[FE80::1%25ETH0]",
+            "fe80::1%25eth0",
+            "fe80::1%eth0.100",
+            "fe80::1%12",
+            "fe80::1%",
+            "[fe80::1%]",
+            "::ffff:10.0.0.1%eth0",
+            "[::FFFF:1.2.3.4%eth0]",
+            # IPv4 has no zone, and neither has a DNS name: a host that contains
+            # "%" is not a public name, so it is unknown and therefore private.
+            "1.2.3.4%eth0",
+            "db.internal%eth0",
+            "db.%69nternal",
+            "%64b.example.com",
+            "example.com%eth0",
+            "%eth0",
+            "[%eth0]",
+        ):
+            with self.subTest(host=host):
+                self.assertTrue(rules.is_private_host(host))
+
     def test_public_hosts(self):
         for host in (
             "docs.python.org",
@@ -221,6 +248,23 @@ class AbstractUrlsTest(Table, unittest.TestCase):
                 ("https://db.internal:5432/mydb ok", ("ok", 1)),
                 ("http://8.8.8.8/dns", ("", 1)),
                 ("http://[::1/x", ("", 1)),
+            )
+        )
+
+    def test_scoped_absolute_and_userinfo_hosts_are_removed_whole(self):
+        self.check(
+            (
+                ("http://[fe80::1%eth0]:8080/x", ("", 1)),
+                ("http://[fe80::1%25eth0]:8080/x rest", ("rest", 1)),
+                ("http://[FE80::1%25ETH0]/x", ("", 1)),
+                ("https://admin@[fe80::1%25eth0]:22/x", ("", 1)),
+                ("http://[::ffff:10.0.0.1]:80/x", ("", 1)),
+                ("http://db.internal.:5432/x ok", ("ok", 1)),
+                ("http://DB.INTERNAL.:5432", ("", 1)),
+                ("ssh://git@db.internal.:22/x", ("", 1)),
+                ("http://LOCALHOST.:80/x", ("", 1)),
+                ("http://localhost./x", ("", 1)),
+                ("http://fe80::1%eth0/x", ("", 1)),
             )
         )
 
@@ -377,8 +421,14 @@ class AbstractHostsTest(Table, unittest.TestCase):
                 ("use localhost:8080/health", ("use", 1)),
                 ("see (printer.local)", ("see", 1)),
                 ("[::1]:8080", ("", 1)),
+                ("[fe80::1%eth0]:8080", ("", 1)),
+                ("db.internal.:5432", ("", 1)),
+                ("ssh admin@10.0.0.5", ("ssh", 1)),
+                ("ping fe80::1%eth0", ("ping", 1)),
                 ("docs at example.com.", ("docs at example.com.", 0)),
+                ("example.com.:8080", ("example.com.:8080", 0)),
                 ("python 3.13 server1 file.py", ("python 3.13 server1 file.py", 0)),
+                ("user@db:5432", ("user@db:5432", 0)),
             )
         )
 
@@ -397,6 +447,129 @@ class AbstractHostsTest(Table, unittest.TestCase):
                 ("wiki.corp, then", ("then", 1)),
                 ("localhost.localdomain up", ("up", 1)),
                 ("[::ffff:1.2.3.4]:80 up", ("up", 1)),
+            )
+        )
+
+    def test_a_bracketed_ipv6_literal_may_have_a_zone_identifier(self):
+        self.check(
+            (
+                ("[fe80::1%eth0]:8080", ("", 1)),
+                ("[fe80::1%eth0]", ("", 1)),
+                ("ping [fe80::1%eth0]:8080 now", ("ping now", 1)),
+                ("[FE80::1%ETH0]:8080 up", ("up", 1)),
+                ("[fe80::1%25eth0]:8080", ("", 1)),
+                ("[fe80::1%eth0.100]:80", ("", 1)),
+                ("[fe80::1%12]/x", ("", 1)),
+                ("[fe80::1%br-lan_0]", ("", 1)),
+                ("[fe80::1%]:80", ("", 1)),
+                ("([fe80::1%eth0]:8080).", ("", 1)),
+                ("[fe80::1%eth0],", ("", 1)),
+                ("[::ffff:1.2.3.4%eth0]:80", ("", 1)),
+                ("[::FFFF:10.0.0.1]:80 up", ("up", 1)),
+                ("[2001:db8::1%eth0]:443", ("", 1)),
+            )
+        )
+
+    def test_the_port_has_one_to_five_digits(self):
+        self.check(
+            (
+                ("db.internal:8", ("", 1)),
+                ("db.internal:65535", ("", 1)),
+                ("db.internal.:65535/x", ("", 1)),
+                ("[fe80::1%eth0]:8", ("", 1)),
+                ("[fe80::1%eth0]:65535", ("", 1)),
+                ("root@10.0.0.5:22222", ("", 1)),
+                ("db.internal:654321", ("db.internal:654321", 0)),
+                ("[fe80::1%eth0]:654321", ("[fe80::1%eth0]:654321", 0)),
+            )
+        )
+
+    def test_the_host_may_be_wrapped_in_quotes_and_brackets(self):
+        self.check(
+            (
+                ("see <db.internal:5432>", ("see", 1)),
+                ('"db.internal.:5432"', ("", 1)),
+                ("'[fe80::1%eth0]:80'", ("", 1)),
+                ("{db.internal.}", ("", 1)),
+                ("(admin@10.0.0.5)", ("", 1)),
+                ("<fe80::1%eth0>!", ("", 1)),
+                ("Localhost", ("", 1)),
+            )
+        )
+
+    def test_an_absolute_name_may_end_in_a_dot_before_the_port_or_the_path(self):
+        self.check(
+            (
+                ("db.internal.:5432", ("", 1)),
+                ("DB.INTERNAL.:5432 up", ("up", 1)),
+                ("db.internal.:5432/x", ("", 1)),
+                ("db.internal./health ok", ("ok", 1)),
+                ("db.internal.", ("", 1)),
+                ("localhost.:8080", ("", 1)),
+                ("LOCALHOST.:80/x", ("", 1)),
+                ("localhost./x", ("", 1)),
+                ("localhost.", ("", 1)),
+                ("10.0.0.5.:22", ("", 1)),
+                ("(db.internal.:5432),", ("", 1)),
+                # Only one trailing dot makes an absolute name.
+                ("db.internal..:5432 x", ("db.internal..:5432 x", 0)),
+                # A public absolute name stays, with or without a port.
+                ("example.com.:8080 up", ("example.com.:8080 up", 0)),
+                ("example.com./a up", ("example.com./a up", 0)),
+                ("example.com.", ("example.com.", 0)),
+                # A single label cannot be told from a word, dot or not.
+                ("db.:5432 x", ("db.:5432 x", 0)),
+            )
+        )
+
+    def test_user_information_before_the_host(self):
+        self.check(
+            (
+                ("admin@db.internal:5432", ("", 1)),
+                ("ssh git@10.0.0.5 now", ("ssh now", 1)),
+                ("user@localhost", ("", 1)),
+                ("user@localhost.:22", ("", 1)),
+                ("root@[fe80::1%eth0]:22", ("", 1)),
+                ("root@[::1]", ("", 1)),
+                ("u:p@10.0.0.5:22", ("", 1)),
+                ("git@db.internal./x", ("", 1)),
+                ("@wiki.corp", ("", 1)),
+                # A public host stays (an e-mail address is the e-mail rule's).
+                ("bob@example.com", ("bob@example.com", 0)),
+                ("git@example.com:22", ("git@example.com:22", 0)),
+                # A single label cannot be told from a word.
+                ("user@db:5432", ("user@db:5432", 0)),
+                ("a@b", ("a@b", 0)),
+                # User information holds neither a slash nor brackets nor a second @.
+                ("a/b@db.internal", ("a/b@db.internal", 0)),
+                ("a[b]@db.internal", ("a[b]@db.internal", 0)),
+                ("a@b@db.internal", ("a@b@db.internal", 0)),
+            )
+        )
+
+    def test_an_ipv6_address_without_brackets(self):
+        self.check(
+            (
+                ("ping fe80::1 now", ("ping now", 1)),
+                ("ping fe80::1%eth0 now", ("ping now", 1)),
+                ("FE80::1%ETH0", ("", 1)),
+                ("fe80::1%25eth0.", ("", 1)),
+                ("::1", ("", 1)),
+                ("(::1),", ("", 1)),
+                ("2001:db8::1", ("", 1)),
+                ("2001:db8:0:0:0:0:0:1", ("", 1)),
+                ("::ffff:1.2.3.4", ("", 1)),
+                ("::ffff:1.2.3.4%eth0", ("", 1)),
+                # Not IPv6 addresses.
+                ("12:30 meeting", ("12:30 meeting", 0)),
+                ("10:30:45", ("10:30:45", 0)),
+                ("aa:bb:cc:dd:ee:ff", ("aa:bb:cc:dd:ee:ff", 0)),
+                ("std::vector", ("std::vector", 0)),
+                ("fe80::1::2", ("fe80::1::2", 0)),
+                ("fe80::g", ("fe80::g", 0)),
+                ("::", ("::", 0)),
+                (":::1", (":::1", 0)),
+                ("1:2:3:4:5:6:7:8:9", ("1:2:3:4:5:6:7:8:9", 0)),
             )
         )
 
@@ -423,6 +596,17 @@ class AbstractHostsTest(Table, unittest.TestCase):
                 ("db.internal:abc x", ("db.internal:abc x", 0)),
                 ("see db.internal=x", ("see db.internal=x", 0)),
                 ("prefix-db.internal:80x", ("prefix-db.internal:80x", 0)),
+                ("[fe80::1%eth0]:123456 x", ("[fe80::1%eth0]:123456 x", 0)),
+                ("[fe80::1%eth0]x", ("[fe80::1%eth0]x", 0)),
+                ("x[fe80::1%eth0]", ("x[fe80::1%eth0]", 0)),
+                ("[fe80::1%eth[0]]", ("[fe80::1%eth[0]]", 0)),
+                ("[fe80::1%eth0]:abc", ("[fe80::1%eth0]:abc", 0)),
+                ("[fe80::1%a/b]:80", ("[fe80::1%a/b]:80", 0)),
+                ("[fe80::1%eth0]./x", ("[fe80::1%eth0]./x", 0)),
+                ("db.internal.:", ("", 1)),
+                ("db.internal.:abc x", ("db.internal.:abc x", 0)),
+                ("db.internal.:123456 x", ("db.internal.:123456 x", 0)),
+                ("db.internal.x:80 y", ("db.internal.x:80 y", 0)),
             )
         )
 

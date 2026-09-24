@@ -55,13 +55,15 @@ Draft に次の規則を、この順に適用する。各規則の正確な定�
 | 1 | URL | Host だけを残す。Host が Private（IP、`localhost`、Dot を含まない名前、末尾の Label が `local` `internal` `lan` `home` `corp` `intranet` `localdomain` `private` `arpa` など）なら URL ごと消す。Path、Query、Fragment、User 情報は残さない |
 | 2 | E-mail | 消す |
 | 3 | File Path | `/`、`~/`、`./`、`../`、Windows のドライブ、UNC で始まる Token と、区切り文字（`/` `\`）を 2 つ以上含む Token を消す |
-| 4 | Private Host | Host 名だけの Token が Private なら消す。Dot を含まない名前は単語と区別できないので残す |
+| 4 | Private Host | Host だけの Token が Private なら消す。Port、Path、User 情報（`admin@10.0.0.5`）、IPv6 の `[...]` と Zone ID（`[fe80::1%eth0]:8080`）、末尾の Dot の付いた絶対名（`db.internal.:5432`）、`[]` の無い IPv6 も対象で、判定の前にそれらを取り除く。Dot を含まない名前は単語と区別できないので残す |
 | 5 | ID | UUID、Credential Handle、12 桁以上の 16 進数、5 桁以上の数字を消す（小数は残す） |
 | 6 | 長い不透明な Token | 40 文字以上の `A-Za-z0-9+/_=-` の連続を消す |
 | 7 | Version | 3 つ以上の部分がある Version（`3.13.15`）を先頭 2 つ（`3.13`）にする |
 
 - Version を 2 つにするのは、正確な Patch Version が環境の情報になるため。検索には Minor Version で通常足りる。
 - 日付（`2026/09/24`）や `key=value/1` の一部など、規則に当たる正当な語も消える。過剰に消す方向に倒している。
+- **`%` を含む Host は Private（不明）とみなす。** `%` は IPv6 の Zone ID（`fe80::1%eth0`、URL では `%25eth0`）で、DNS の名前には現れない。`%` の前が IP でも名前でも、公開名とはみなさない（Link-local の Address を送らないため。`db.%69nternal` のような `%` 符号化で Private な Label を隠す書き方も同じ扱いになる）。公開名に `%` が付く正当な Host は無いという前提で、過剰に消す方向に倒している。
+- URL の外の Host の判定は、空白で区切られた 1 語の全体が Host である場合に限る。`_` や ASCII 以外の文字を含む名前（`my_db.internal`）と、他の文字と続いた語（`host=db.internal`）は残る（README の「制限と未確認の点」）。これらも消すか（過剰に消す方向を強めるか）は人間が決める。
 
 ### 4. 長さと拒否
 

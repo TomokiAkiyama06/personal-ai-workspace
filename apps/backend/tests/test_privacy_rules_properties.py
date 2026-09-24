@@ -67,6 +67,35 @@ HOSTILE = {
     "colons": "a:" * (MAX_DRAFT_CHARS // 2),
     "mail-like": "a.b@c" * (MAX_DRAFT_CHARS // 5),
     "punctuation": ".,;:!?)]}>\"'" * (MAX_DRAFT_CHARS // 12),
+    "open bracket colons": "[" + ":" * (MAX_DRAFT_CHARS - 1),
+    "open bracket hex": "[" + "a:" * (MAX_DRAFT_CHARS // 2),
+    "zone": "[::1%" + "a" * (MAX_DRAFT_CHARS - 5),
+    "zones": "[::1%a]" * (MAX_DRAFT_CHARS // 7),
+    "percents": "%" * MAX_DRAFT_CHARS,
+    "bare colons": ":" * MAX_DRAFT_CHARS,
+    "bare hex colons": "a:" * (MAX_DRAFT_CHARS // 2),
+    "userinfo": "a" * (MAX_DRAFT_CHARS - 1) + "@",
+    "userinfo dots": "a." * (MAX_DRAFT_CHARS // 2 - 1) + "@a.b",
+    "absolute": "a." * (MAX_DRAFT_CHARS // 2 - 1) + ".:1",
+    "ports": "a.b:1" * (MAX_DRAFT_CHARS // 5),
+}
+
+# Each shape again as ONE token, far longer than a draft may be. Linear time is a
+# few milliseconds here; quadratic time is minutes, so the deadline can be loose.
+LONG_TOKEN_DEADLINE_SECONDS = 10.0
+LONG = 400_000
+LONG_TOKENS = {
+    "open bracket colons": "[" + ":" * LONG,
+    "open bracket hex": "[" + "a:" * (LONG // 2),
+    "zone": "[::1%" + "a" * LONG,
+    "bare colons": ":" * LONG,
+    "bare hex colons": "a:" * (LONG // 2),
+    "userinfo": "a" * LONG + "@",
+    "userinfo dots": "a." * (LONG // 2) + "@a.b",
+    "absolute": "a." * (LONG // 2) + ".:1",
+    "labels": "a.b" * (LONG // 3),
+    "percents": "%" * LONG,
+    "ats": "a@" * (LONG // 2),
 }
 
 
@@ -122,6 +151,15 @@ class RuleProperties(unittest.TestCase):
                     self.assertLess(elapsed, LOOSE_DEADLINE_SECONDS)
                     self.assertLessEqual(len(out), len(text))
                     self.assertGreaterEqual(count, 0)
+
+    def test_the_host_rules_take_linear_time_on_one_very_long_token(self):
+        for label, text in LONG_TOKENS.items():
+            with self.subTest(shape=label):
+                started = time.monotonic()
+                rules.abstract_hosts(text)
+                rules.abstract_urls("http://" + text)
+                rules.is_private_host(text)
+                self.assertLess(time.monotonic() - started, LONG_TOKEN_DEADLINE_SECONDS)
 
     def test_the_helpers_are_fast_on_hostile_input_too(self):
         for label, text in HOSTILE.items():

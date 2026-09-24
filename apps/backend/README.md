@@ -1486,7 +1486,7 @@ Gate は、外へ出してよい `MinimizedQuery` を返すか、`PrivacyRefusal
 | `abstract_urls` | URL を Host だけにする。Host が Private（IP、`localhost`、Dot の無い名前、末尾が `local` `internal` `corp` など）なら消す |
 | `abstract_emails` | E-mail Address を消す |
 | `abstract_paths` | `/`、`~/`、`./`、`../`、ドライブ、UNC で始まる語と、区切りを 2 つ以上含む語を消す |
-| `abstract_hosts` | Private な Host・IP の語（Port、Path 付きを含む）を消す。Dot の無い名前は単語と区別できないので残す |
+| `abstract_hosts` | Private な Host・IP の語を消す。Port、Path、User 情報（`admin@10.0.0.5`）、IPv6 の `[...]` と Zone ID（`[fe80::1%eth0]:8080`）、`[]` の無い IPv6（`fe80::1%eth0`）、末尾の Dot の付いた絶対名（`db.internal.:5432`）を含む。判定の前に、User 情報、Port、Path、`[]`、Zone ID、末尾の Dot を取り除く。Dot の無い名前は単語と区別できないので残す |
 | `abstract_ids` | UUID、Credential Handle、12 桁以上の 16 進数、5 桁以上の数字を消す（小数は残す） |
 | `drop_opaque_tokens` | 40 文字以上の Base64 風の連続を消す |
 | `generalize_versions` | `3.13.15` を `3.13` にする |
@@ -1536,14 +1536,15 @@ result = await broker.gather(
 `rules.py` の各関数は、仕様（Docstring）と Test（270 件）を先に固定してから実装しています。
 **最終的な実装は Claude の参照実装です。** ローカルの Qwen3-Coder-30B-A3B に、14 関数の実装を 2 回（各約 265 回の Tool 呼び出し）任せましたが、収束しませんでした。
 1 回目は `query_fingerprint`、`truncate_query`、`fold_for_match`、`normalize_text` の 4 関数が Test を通り、2 回目は `abstract_emails` も通りましたが、正規表現を使う残りの関数（`is_private_host`、`strip_credentials`、`abstract_ids`、`abstract_paths`、`abstract_hosts`、`abstract_urls` など）は Test を通せず、途中で構文エラーや、仕様に反する挙動（Credential を除かずに `[REDACTED]` を残すなど）が残りました。
-AGENTS.md のとおり、同じ失敗を繰り返したのでエスカレーションし、仕様の Docstring を保ったまま、Claude の参照実装（変異 176 個のうち 173 個を Test が検出。残る 3 個は同値）に置き換えています。ローカルモデルの成果物は、最終物に含まれていません。
+AGENTS.md のとおり、同じ失敗を繰り返したのでエスカレーションし、仕様の Docstring を保ったまま、Claude の参照実装（変異 176 個のうち 173 個を Test が検出。残る 3 個は同値）に置き換えています。ローカルモデルの成果物は、最終物に含まれていません。`abstract_hosts` と `is_private_host` の Host の書式（IPv6 の Zone ID、末尾の Dot、User 情報、`[]` の無い IPv6）の追加分は、その後に Claude が拡張し、その部分の正規表現と判定に手で入れた変異 40 個のうち 38 個を Test が検出しました（残る 2 個は同値: `[]` の無い IPv6 の `:` の後が空でもよいか、と、空の Host の判定が `%` の判定の前にあるか。どちらも結果が変わりません）。
 上の「Test を通り」は、当時の仕様のことです。`fold_for_match` と `find_copied_spans` の当時の仕様（1 文字ずつ `lower()`、長さは変わらない）は、`ß` と `SS` などを別の文字として扱う誤りがあったため、独立レビューを受けて、完全な Case folding（`str.casefold`、長さが増えることがある）に改めました。Docstring と Test は新しい仕様に合わせて更新し、現在の実装はその仕様に対する Claude の実装です。
 
 ### 制限と未確認の点
 
 - **検出できるのは Text の写しだけです。** 言い換え、翻訳、Base64 以外の符号化、文字を分けて送る方法、Context に載っていない情報は検出できません。Prompt Injection を受けた Agent に対する完全な防御ではありません。
 - ラベルは呼び出し側が付けます。付け忘れた Private な Text は、`PUBLIC` として扱われます（ラベルを付けない場合は拒否されます）。
-- Private な Host の判定は構文だけです（IP、`localhost`、Dot の無い名前、末尾が `local` `internal` `lan` `home` `corp` `intranet` `localdomain` `private` `arpa`）。`git.example.com` のような、外から見ると普通の名前の Private な Host は判定できず、URL の Host としては残ります。Dot の無い名前は、単語との区別がつかないため、URL の外では残ります。
+- Private な Host の判定は構文だけです（IP、`localhost`、Dot の無い名前、末尾が `local` `internal` `lan` `home` `corp` `intranet` `localdomain` `private` `arpa`、`%` を含む名前。`%` は IPv6 の Zone ID（`fe80::1%eth0`、URL では `%25eth0`）で、DNS の名前には無いので、公開名とはみなしません。IPv4 に Zone は無いので `1.2.3.4%eth0` のような組み合わせも同じ扱いで、`%` を含む名前は、`%` の前が何であっても Private として消します）。`git.example.com` のような、外から見ると普通の名前の Private な Host は判定できず、URL の Host としては残ります。Dot の無い名前は、単語との区別がつかないため、URL の外では残ります。
+- URL の外の Host は、空白で区切られた 1 語の全体が Host（User 情報、Port、Path を除く）である場合だけ消えます。`host=db.internal` や `db.internal,port=5432` のように他の文字と続いている語、`_` や ASCII 以外の文字を含む名前（`my_db.internal`、`データ.corp`）、Zone ID に `/` や `[` `]` を含むもの（`[fe80::1%a/b]:80`）は 1 語の Host として認識できず残ります（URL の中の Host は `urlsplit` が解析するので、名前の文字の制限はありません）。`[]` の無い IPv6 は `ipaddress` が受理する書式だけを消すので、`12:30`、`aa:bb:cc:dd:ee:ff`（MAC）、`std::vector` は残りますが、`a::b` のように IPv6 として有効な語は消えます。
 - 4 文字の窓は、`SECRET` に近い普通の語（`internal` の `nter` など）も消します。Query が読めなくなることがあります。
 - 写しの検出は文字の並びの比較です。Case folding は Unicode の 1 文字ずつの対応（`str.casefold`）だけで、言語ごとの規則（トルコ語の `I` と `ı` など）、発音が同じ別の綴り、アクセント記号の有無の違い（`e` と `é`）は同じとはみなしません。
 - 日付（`2026/09/24`）など、規則に当たる正当な語も消えます（過剰に消す方向に倒しています）。

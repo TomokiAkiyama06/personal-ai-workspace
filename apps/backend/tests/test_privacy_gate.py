@@ -586,6 +586,19 @@ class CredentialAndAbstractionTest(unittest.TestCase):
         self.assertEqual(result.query, "error on from user in id uuid")
         self.assertEqual(result.abstractions, 6)
 
+    def test_scoped_and_absolute_private_hosts_are_removed(self):
+        # A zone identifier, a trailing dot before the port and user information
+        # must not keep an internal endpoint in the query that is sent out.
+        result = self.gate.minimize(
+            "retry [fe80::1%eth0]:8080 then db.internal.:5432 and ssh admin@10.0.0.5 "
+            "plus fe80::2%25eth1 or LOCALHOST.:3000 for python 3.13",
+            [],
+        )
+        self.assertEqual(result.query, "retry then and ssh plus or for python 3.13")
+        self.assertEqual(result.abstractions, 5)
+        for private in ("fe80", "eth0", "internal", "10.0.0.5", "LOCALHOST"):
+            self.assertNotIn(private, result.query)
+
     def test_a_public_query_is_left_alone(self):
         for draft in (
             "python asyncio TaskGroup exception handling",
