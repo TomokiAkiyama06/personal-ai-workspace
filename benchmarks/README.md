@@ -192,8 +192,8 @@ make the lifecycle log tamper-proof**.  What the runner does:
   single-link, evaluator-owned, owner-only file of the expected size.  Replacement,
   truncation, extra appended lines, and extra hard links raise `WorktreeRunnerError`
   (checkout removal still completes).
-- A write that fails (a full disk, an I/O error) is reported as `WorktreeRunnerError`
-  too, without the operating system's message, so `cleanup()` still removes the
+- A write or a `close(2)` that fails (a full disk, an I/O error; `close` can report a
+  delayed write error) is reported as `WorktreeRunnerError` too, without the operating system's message, so `cleanup()` still removes the
   checkout, its Git metadata and the in-memory ownership before it raises.  The failed
   append leaves the file at an unexpected size, so later appends are refused by the
   integrity check instead of writing after a torn record.

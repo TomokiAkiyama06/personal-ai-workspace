@@ -12,6 +12,7 @@ writing it, and detects (but cannot stop) tampering.  See ``benchmarks/README.md
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
 import json
 import math
@@ -965,8 +966,18 @@ class WorktreeRunner:
                 raise WorktreeRunnerError("lifecycle log cannot be written") from None
             state.log_identity = (info.st_dev, info.st_ino)
             state.log_size = info.st_size + len(line)
-        finally:
+        except BaseException:
+            # Keep the error that is already on its way out: a close failure on
+            # top of it would only hide it.
+            with contextlib.suppress(OSError):
+                os.close(descriptor)
+            raise
+        try:
             os.close(descriptor)
+        except OSError:
+            # close(2) can report a delayed write error (EIO, ENOSPC); the
+            # descriptor is released either way.
+            raise WorktreeRunnerError("lifecycle log cannot be written") from None
 
     @staticmethod
     def _git_environment() -> dict[str, str]:

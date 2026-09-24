@@ -567,28 +567,52 @@ class WorktreeRunnerTest(unittest.TestCase):
         self.assertGreaterEqual(result.stdout_bytes, 1 << 20)
         self.assertEqual(result.exit_code, 0)
 
-    def test_a_failing_log_write_does_not_stop_cleanup(self):
+    def assert_cleanup_survives_a_failing_log(self, patch_target, failing):
         run = self.runner.create("full-disk", self.commit)
-        log_inode = run.log_path.stat().st_ino
-        real_write = os.write
-
-        def failing_write(descriptor, data):
-            if os.fstat(descriptor).st_ino == log_inode:
-                raise OSError(errno.ENOSPC, "No space left on device")
-            return real_write(descriptor, data)
-
+        info = run.log_path.stat()
+        real = getattr(os, patch_target)
         with (
-            mock.patch.object(worktree_runner.os, "write", failing_write),
+            mock.patch.object(
+                worktree_runner.os,
+                patch_target,
+                lambda descriptor, *rest: failing(
+                    real, (info.st_dev, info.st_ino), descriptor, *rest
+                ),
+            ),
             self.assertRaises(WorktreeRunnerError) as caught,
         ):
             self.runner.cleanup(run)
 
         # The failure is reported as ours, without the operating system's text.
         self.assertNotIn("space", str(caught.exception))
+        self.assertNotIn("I/O", str(caught.exception))
         # ... but the checkout, its Git metadata and the ownership are gone.
         self.assertFalse(run.path.exists())
         self.assertNotIn(str(run.path), self.git("worktree", "list").stdout)
         self.assertNotIn(run.run_id, self.runner._runs)
+
+    def test_a_failing_log_write_does_not_stop_cleanup(self):
+        def failing_write(real, log, descriptor, data):
+            info = os.fstat(descriptor)
+            if (info.st_dev, info.st_ino) == log:
+                raise OSError(errno.ENOSPC, "No space left on device")
+            return real(descriptor, data)
+
+        self.assert_cleanup_survives_a_failing_log("write", failing_write)
+
+    def test_a_failing_log_close_does_not_stop_cleanup(self):
+        # close(2) can report a delayed write error; the descriptor is released
+        # all the same.
+        def failing_close(real, log, descriptor):
+            try:
+                info = os.fstat(descriptor)
+            except OSError:
+                info = None
+            real(descriptor)
+            if info is not None and (info.st_dev, info.st_ino) == log:
+                raise OSError(errno.EIO, "I/O error")
+
+        self.assert_cleanup_survives_a_failing_log("close", failing_close)
 
     def test_cancel_kills_a_group_member_that_ignores_sigterm(self):
         self.runner.term_grace_seconds = 0.3
