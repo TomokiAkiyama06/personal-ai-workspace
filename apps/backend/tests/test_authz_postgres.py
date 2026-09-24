@@ -36,6 +36,7 @@ from paw_backend.authz import (
     PostgresAuditSink,
     ProjectRole,
     Reason,
+    RepoPermission,
     Resource,
     SystemRole,
 )
@@ -50,6 +51,7 @@ from paw_backend.db import Base, Database
 from .authz_support import (
     AGENT,
     P1,
+    REPO,
     U1,
     U2,
     StaticDirectory,
@@ -57,15 +59,19 @@ from .authz_support import (
     add_test_routes,
     principal,
     project,
+    repo_resource,
 )
 from .support import make_client, make_settings, paw_environment
 from .test_migrations import offline_config
 
 TEST_DATABASE_URL = os.environ.get("PAW_TEST_DATABASE_URL")
 NOW = datetime(2001, 1, 1, 12, 0, tzinfo=UTC)
-# Dummy credentials of the throw-away test roles.
-APP_ROLE = "paw_authz_test_app_025"
-OTHER_ROLE = "paw_authz_test_other_025"
+# Dummy credentials of the throw-away test roles. PostgreSQL roles are cluster-wide, so
+# a fixed name would collide when two test runs share one server (parallel jobs, several
+# working trees): every run uses its own suffix.
+_RUN_ID = uuid.uuid4().hex[:10]
+APP_ROLE = f"paw_authz_test_app_{_RUN_ID}"
+OTHER_ROLE = f"paw_authz_test_other_{_RUN_ID}"
 ROLE_PASSWORD = "dummy-test-password-025"
 
 
@@ -236,6 +242,26 @@ class AppendOnlyTest(AuditPostgresTestCase):
         self.assertEqual(
             (row.decision, row.reason, row.client_request_id),
             ("allow", "granted_by_system_role", "req-1"),
+        )
+
+    async def test_a_repository_decision_row_keeps_the_repo_and_the_acl_kind(self):
+        contributor = principal(
+            SystemRole.USER, user_id=U1, projects={P1: ProjectRole.CONTRIBUTOR}
+        )
+        authorizer = Authorizer(PostgresAuditSink(self.database))
+        write = Capability.PROJECT_REPO_WRITE
+        await authorizer.authorize(contributor, write, repo_resource())
+        await authorizer.authorize(
+            contributor, write, repo_resource({RepoPermission.READ})
+        )
+        inherit, override = await self.rows()
+        self.assertEqual(
+            (inherit.repo_id, inherit.repo_acl, inherit.decision),
+            (REPO, "inherit", "allow"),
+        )
+        self.assertEqual(
+            (override.repo_id, override.repo_acl, override.reason),
+            (REPO, "override", "repo_acl_forbids"),
         )
 
     async def test_recorded_at_is_the_database_clock_not_the_applications(self):
@@ -540,7 +566,10 @@ class MigrationUrlTest(AuditPostgresTestCase):
                 )
 
     async def test_migration_role_without_app_role_leaves_the_app_unable_to_write(self):
-        with self.assertLogs("paw_backend.migrations.0025", level="WARNING"):
+        with (
+            self.assertLogs("paw_backend.migrations.0025", level="WARNING"),
+            self.assertLogs("paw_backend.db_roles", level="WARNING"),
+        ):
             await asyncio.to_thread(
                 migrate,
                 "upgrade",
@@ -691,7 +720,10 @@ class AuthorizerOnPostgresTest(AuditPostgresTestCase):
                         time.sleep(0.05)
             return logs.output
 
-        (line,) = await asyncio.to_thread(start_and_wait_for_the_check)
+        output = await asyncio.to_thread(start_and_wait_for_the_check)
+        # The check of the tool approval tables (PAW-031) warns as well; this
+        # test is about the audit trail.
+        (line,) = [entry for entry in output if "audit_events" in entry]
         self.assertIn("owner=True", line)
         self.assertIn("append-only guard", line)
 

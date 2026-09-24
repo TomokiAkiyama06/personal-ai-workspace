@@ -34,6 +34,7 @@ import sqlalchemy as sa
 from alembic import op
 
 from paw_backend.config import Settings
+from paw_backend.db_roles import configured_app_role, grant_app_privileges
 
 logger = logging.getLogger("paw_backend.migrations.0025")
 
@@ -64,36 +65,15 @@ $$
 """
 
 
-def _quoted_app_role() -> str | None:
-    """The application role as a quoted identifier, or ``None`` if none is set.
-
-    The name is validated by ``Settings`` (letters, digits, underscore; not
-    ``public``, ``pg_*`` or another reserved name), must exist, and is then
-    quoted by the dialect's identifier preparer; it is never interpolated into
-    SQL as text.
-    """
-    settings = Settings()
-    role = settings.app_database_role
-    if role is None:
-        if settings.migration_database_url is not None:
-            logger.warning(
-                "PAW_MIGRATION_DATABASE_URL is set but PAW_APP_DATABASE_ROLE is not: "
-                "no role is granted access to audit_events, so the application "
-                "cannot write its audit trail and every audited action will be "
-                "refused (503) until the role is granted INSERT and SELECT."
-            )
-        return None
-    context = op.get_context()
-    if not context.as_sql:  # online: the role must exist, fail loudly if not
-        found = op.get_bind().execute(
-            sa.text("SELECT 1 FROM pg_roles WHERE rolname = :role"), {"role": role}
+def _warn_if_the_app_cannot_write() -> None:
+    """The split-role configuration without an app role leaves the trail unwritable."""
+    if configured_app_role() is None and Settings().migration_database_url is not None:
+        logger.warning(
+            "PAW_MIGRATION_DATABASE_URL is set but PAW_APP_DATABASE_ROLE is not: "
+            "no role is granted access to audit_events, so the application "
+            "cannot write its audit trail and every audited action will be "
+            "refused (503) until the role is granted INSERT and SELECT."
         )
-        if found.first() is None:
-            raise RuntimeError(
-                "PAW_APP_DATABASE_ROLE names a PostgreSQL role that does not exist; "
-                "create it before running the migration."
-            )
-    return context.dialect.identifier_preparer.quote_identifier(role)
 
 
 def upgrade() -> None:
@@ -116,6 +96,7 @@ def upgrade() -> None:
         sa.Column("resource_id", sa.Uuid(), nullable=True),
         sa.Column("project_id", sa.Uuid(), nullable=True),
         sa.Column("repo_id", sa.Uuid(), nullable=True),
+        sa.Column("repo_acl", sa.Text(), nullable=True),
         sa.Column("decision", sa.Text(), nullable=False),
         sa.Column("reason", sa.Text(), nullable=False),
         sa.Column("old_role", sa.Text(), nullable=True),
@@ -160,10 +141,9 @@ def upgrade() -> None:
         "tr_audit_events_force_recorded_at"
     )
 
-    op.execute("REVOKE ALL ON audit_events FROM PUBLIC")
-    app_role = _quoted_app_role()
-    if app_role is not None:
-        op.execute(f"GRANT INSERT, SELECT ON audit_events TO {app_role}")
+    _warn_if_the_app_cannot_write()
+    # The application appends and reads; it never updates or deletes.
+    grant_app_privileges(op, "audit_events", select=True, insert=True)
 
 
 def downgrade() -> None:

@@ -27,8 +27,10 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
+from paw_backend.db_roles import grant_app_privileges
+
 revision: str = "0050"
-down_revision: str | Sequence[str] | None = "0040"
+down_revision: str | Sequence[str] | None = "0031"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -134,6 +136,27 @@ def upgrade() -> None:
             "expires_at > leased_at AND expires_at <= leased_at + interval '1 hour'",
             name="lease_window",
         ),
+    )
+
+    # Least privilege for the application role (PAW_APP_DATABASE_ROLE), exactly
+    # what ``ScratchStore`` executes: an item is inserted, pinned, put into or
+    # resolved in the promotion workflow (three columns) and deleted by the
+    # purge; a lease is inserted or renewed (two columns) and deleted. Nothing
+    # else may change: an item's content, its owner, its project and above all
+    # its expiry (only pinning exempts it from the purge) stay as written.
+    grant_app_privileges(
+        op,
+        "research_scratch_items",
+        insert=True,
+        delete=True,
+        update_columns=("pinned", "promotion_state", "promotion_requested_at"),
+    )
+    grant_app_privileges(
+        op,
+        "research_scratch_leases",
+        insert=True,
+        delete=True,
+        update_columns=("leased_at", "expires_at"),
     )
 
 

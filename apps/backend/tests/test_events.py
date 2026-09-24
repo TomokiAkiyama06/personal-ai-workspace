@@ -1,21 +1,28 @@
 import asyncio
 import json
 import unittest
+from typing import Annotated
 
+from fastapi import APIRouter, Depends
 from pydantic import ValidationError
 from starlette.websockets import WebSocketDisconnect
 
+from paw_backend.api.deps import reserve_event_slot
 from paw_backend.app import create_app
+from paw_backend.errors import ApiError
 from paw_backend.events import (
     Event,
     EventBus,
     EventBusFull,
     EventType,
+    Reservation,
     publish_heartbeats,
 )
 
 from .support import (
     WEBSOCKET_URL,
+    AsgiWebSocket,
+    http_scope,
     make_client,
     make_settings,
     read_sse,
@@ -42,6 +49,49 @@ class EventModelTest(unittest.TestCase):
         self.assertEqual(payload["type"], "system.heartbeat")
         self.assertEqual(payload["data"], {})
         self.assertTrue(payload["occurred_at"].endswith("Z"))
+
+
+class ReservationTest(unittest.IsolatedAsyncioTestCase):
+    async def test_a_reservation_holds_its_slot_until_released(self):
+        bus = EventBus(max_subscribers=1)
+        reservation = bus.reserve()
+        self.assertTrue(bus.is_full)
+        with self.assertRaises(EventBusFull):
+            bus.reserve()
+
+        reservation.release()
+        self.assertFalse(bus.is_full)
+        bus.reserve()  # the slot is available again
+
+    async def test_releasing_twice_does_not_free_another_reservations_slot(self):
+        bus = EventBus(max_subscribers=1)
+        first = bus.reserve()
+        first.release()
+        first.release()
+        second = bus.reserve()
+
+        first.release()  # already released: must not take the second's slot
+        self.assertEqual(bus.slots_in_use, 1)
+        with self.assertRaises(EventBusFull):
+            bus.reserve()
+        second.release()
+        self.assertEqual(bus.slots_in_use, 0)
+
+    async def test_an_attached_reservation_receives_events_until_released(self):
+        bus = EventBus()
+        reservation = bus.reserve()
+        self.assertEqual(bus.subscriber_count, 0, "a reservation is not a subscriber")
+        subscription = reservation.attach()
+        self.assertEqual(bus.subscriber_count, 1)
+
+        event = heartbeat()
+        bus.publish(event)
+        self.assertEqual(await subscription.get(), event)
+
+        reservation.release()
+        self.assertEqual((bus.subscriber_count, bus.slots_in_use), (0, 0))
+        with self.assertRaises(RuntimeError):
+            reservation.attach()
 
 
 class EventBusTest(unittest.IsolatedAsyncioTestCase):
@@ -214,6 +264,117 @@ class SubscriberCapTest(unittest.TestCase):
         )
         with client.websocket_connect(WEBSOCKET_URL) as websocket:
             self.assertEqual(websocket.receive_json()["type"], "system.connected")
+
+
+class SlotReservationTest(unittest.IsolatedAsyncioTestCase):
+    """The last slot is claimed atomically, before any response header."""
+
+    STREAM = "/api/v1/events/stream"
+
+    def build(self, **settings):
+        app = create_app(
+            make_settings(
+                event_max_subscribers=1, event_heartbeat_seconds=0.05, **settings
+            )
+        )
+        router = APIRouter()
+
+        @router.get("/test/slow")
+        async def slow(
+            reservation: Annotated[Reservation, Depends(reserve_event_slot)],
+        ):
+            await asyncio.sleep(60)  # a request that never gets to stream
+
+        @router.get("/test/fails")
+        async def fails(
+            reservation: Annotated[Reservation, Depends(reserve_event_slot)],
+        ):
+            raise ApiError(500, "test_failure", "fails after reserving")
+
+        app.include_router(router)
+        return app
+
+    async def test_concurrent_streams_for_the_last_slot_get_one_200_and_the_rest_503(
+        self,
+    ):
+        app = self.build()
+        bus = app.state.event_bus
+        async with app.router.lifespan_context(app):
+            results = await asyncio.gather(
+                *(read_sse(app, self.STREAM, chunks=2) for _ in range(6)),
+                return_exceptions=True,
+            )
+
+            # No client saw a 200 followed by a broken stream.
+            self.assertEqual([r for r in results if isinstance(r, BaseException)], [])
+            self.assertEqual(
+                sorted(start["status"] for start, _ in results), [200] + [503] * 5
+            )
+            for start, bodies in results:
+                if start["status"] == 503:
+                    error = json.loads(b"".join(bodies))["error"]
+                    self.assertEqual(error["code"], "event_capacity_reached")
+            self.assertTrue(
+                await wait_until(lambda: bus.slots_in_use == 0),
+                "a slot leaked after every client had gone",
+            )
+
+    async def test_concurrent_websockets_for_the_last_slot_get_one_socket_and_1013(
+        self,
+    ):
+        app = self.build()
+        bus = app.state.event_bus
+        clients = [AsgiWebSocket(app) for _ in range(6)]
+
+        self.assertTrue(
+            await wait_until(lambda: sum(c.task.done() for c in clients) == 5)
+        )
+        open_clients = [c for c in clients if not c.task.done()]
+        self.assertEqual(len(open_clients), 1)
+        self.assertEqual([c.close_code for c in clients if c.task.done()], [1013] * 5)
+        self.assertEqual(bus.slots_in_use, 1)
+
+        open_clients[0].disconnect()
+        await asyncio.gather(*(c.task for c in clients))
+        self.assertTrue(await wait_until(lambda: bus.slots_in_use == 0))
+
+    async def test_the_slot_is_reserved_before_the_request_body_runs(self):
+        app = self.build()
+        bus = app.state.event_bus
+        request = asyncio.create_task(read_sse(app, "/test/slow", chunks=1, limit=30))
+        self.assertTrue(await wait_until(lambda: bus.slots_in_use == 1))
+        self.assertEqual(bus.subscriber_count, 0, "reserved, not yet streaming")
+
+        # The last slot is taken, so a stream is refused with the standard 503.
+        start, _ = await read_sse(app, self.STREAM, chunks=1)
+        self.assertEqual(start["status"], 503)
+
+        request.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await request
+        self.assertTrue(
+            await wait_until(lambda: bus.slots_in_use == 0),
+            "cancelling the request leaked its slot",
+        )
+
+    async def test_the_slot_is_released_when_the_request_fails_before_streaming(self):
+        app = self.build()
+        start, _ = await read_sse(app, "/test/fails", chunks=1)
+        self.assertEqual(start["status"], 500)
+        self.assertEqual(app.state.event_bus.slots_in_use, 0)
+
+    async def test_the_slot_is_released_when_the_client_disconnects_at_once(self):
+        app = self.build()
+
+        async def receive():
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            pass
+
+        async with app.router.lifespan_context(app):
+            await app(http_scope(self.STREAM), receive, send)
+        self.assertEqual(app.state.event_bus.slots_in_use, 0)
 
 
 class ServerSentEventsTest(unittest.IsolatedAsyncioTestCase):

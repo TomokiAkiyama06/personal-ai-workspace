@@ -1,4 +1,4 @@
-"""Agent Task lifecycle: tasks, attempts, steps, logs and the event history (PAW-032).
+"""Agent Task lifecycle: tasks, attempts, steps, tool calls, logs and events (PAW-032).
 
 Revision ID: 0032
 Revises: 0025
@@ -7,6 +7,12 @@ Create Date: 2026-09-24
 ``project_id``, ``created_by`` and ``actor_id`` carry no foreign keys because
 the users and projects tables do not exist yet; add them together with those
 tables. ``task_events`` is append-only: a trigger rejects UPDATE and DELETE.
+
+The application role (``PAW_APP_DATABASE_ROLE``) gets the least privileges that
+``TaskService`` needs on each table: rows of the history and the log are only
+added and read; the other tables are added, read and updated on the columns the
+service changes (never the identity of a row, its title or its input). Nothing
+is ever deleted, so DELETE is granted nowhere.
 
 Enum-like columns are text with CHECK constraints whose value lists are
 written out here (a migration must not follow later changes of the Python
@@ -18,6 +24,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
+
+from paw_backend.db_roles import grant_app_privileges
 
 revision: str = "0032"
 down_revision: str | Sequence[str] | None = "0025"
@@ -37,6 +45,7 @@ REVIEW_STATUSES = ("not_started", "in_review", "approved", "changes_requested")
 EVALUATION_RESULTS = ("not_run", "passed", "failed")
 PR_STATES = ("draft", "open", "merged", "closed")
 STEP_STATUSES = ("running", "succeeded", "failed", "interrupted")
+TOOL_STATUSES = ("started", "succeeded", "failed", "interrupted")
 LOG_LEVELS = ("debug", "info", "warning", "error")
 
 
@@ -79,6 +88,21 @@ def upgrade() -> None:
             "retry_count >= 0", name=op.f("ck_tasks_retry_count_not_negative")
         ),
     )
+    grant_app_privileges(
+        op,
+        "tasks",
+        insert=True,
+        update_columns=(
+            "state",
+            "wait_reason",
+            "agent",
+            "model",
+            "attempt",
+            "retry_count",
+            "version",
+            "updated_at",
+        ),
+    )
 
     op.create_table(
         "task_attempts",
@@ -116,6 +140,22 @@ def upgrade() -> None:
             name=op.f("ck_task_attempts_pull_request_complete"),
         ),
     )
+    grant_app_privileges(
+        op,
+        "task_attempts",
+        insert=True,
+        update_columns=(
+            "branch",
+            "worktree_path",
+            "head_commit",
+            "review_status",
+            "evaluation_result",
+            "pr_number",
+            "pr_url",
+            "pr_state",
+            "updated_at",
+        ),
+    )
 
     op.create_table(
         "task_steps",
@@ -143,12 +183,51 @@ def upgrade() -> None:
             name=op.f("ck_task_steps_finished_matches_status"),
         ),
     )
+    grant_app_privileges(
+        op, "task_steps", insert=True, update_columns=("status", "finished_at")
+    )
     op.create_index(
         "uq_task_steps_one_running",
         "task_steps",
         ["task_id", "attempt"],
         unique=True,
         postgresql_where=sa.text("status = 'running'"),
+    )
+
+    op.create_table(
+        "task_tool_invocations",
+        sa.Column("id", sa.Uuid(), nullable=False),
+        sa.Column("task_id", sa.Uuid(), nullable=False),
+        sa.Column("step_id", sa.BigInteger(), nullable=False),
+        sa.Column("tool_name", sa.String(length=100), nullable=False),
+        sa.Column("status", sa.String(length=24), nullable=False),
+        sa.Column("started_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("finished_at", sa.DateTime(timezone=True), nullable=True),
+        sa.PrimaryKeyConstraint("id", name=op.f("pk_task_tool_invocations")),
+        sa.ForeignKeyConstraint(
+            ["task_id"],
+            ["tasks.id"],
+            name=op.f("fk_task_tool_invocations_task_id_tasks"),
+        ),
+        sa.ForeignKeyConstraint(
+            ["step_id"],
+            ["task_steps.id"],
+            name=op.f("fk_task_tool_invocations_step_id_task_steps"),
+        ),
+        _in("status", TOOL_STATUSES, "ck_task_tool_invocations_status_valid"),
+        sa.CheckConstraint(
+            "(status = 'started') = (finished_at IS NULL)",
+            name=op.f("ck_task_tool_invocations_finished_matches_status"),
+        ),
+    )
+    grant_app_privileges(
+        op,
+        "task_tool_invocations",
+        insert=True,
+        update_columns=("status", "finished_at"),
+    )
+    op.create_index(
+        op.f("ix_task_tool_invocations_step_id"), "task_tool_invocations", ["step_id"]
     )
 
     op.create_table(
@@ -165,6 +244,7 @@ def upgrade() -> None:
         ),
         _in("level", LOG_LEVELS, "ck_task_logs_level_valid"),
     )
+    grant_app_privileges(op, "task_logs", insert=True)
     op.create_index(op.f("ix_task_logs_task_id"), "task_logs", ["task_id", "seq"])
 
     op.create_table(
@@ -197,6 +277,7 @@ def upgrade() -> None:
             name=op.f("ck_task_events_actor_id_matches_kind"),
         ),
     )
+    grant_app_privileges(op, "task_events", insert=True)
     op.create_index(op.f("ix_task_events_task_id"), "task_events", ["task_id", "seq"])
 
     # The history is append-only: not even the application role may rewrite it.
@@ -225,6 +306,7 @@ def downgrade() -> None:
     op.drop_table("task_events")
     op.execute("DROP FUNCTION task_events_reject_change()")
     op.drop_table("task_logs")
+    op.drop_table("task_tool_invocations")
     op.drop_table("task_steps")
     op.drop_table("task_attempts")
     op.drop_table("tasks")

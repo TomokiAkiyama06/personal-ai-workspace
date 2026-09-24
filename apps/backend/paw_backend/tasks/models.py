@@ -38,6 +38,7 @@ from paw_backend.tasks.records import (
     PullRequestState,
     ReviewStatus,
     StepStatus,
+    ToolInvocationStatus,
 )
 
 
@@ -178,6 +179,31 @@ class TaskStepRow(Base):
         CheckConstraint("sequence >= 1", name="sequence_positive"),
         CheckConstraint(
             "(status = 'running') = (finished_at IS NULL)",
+            name="finished_matches_status",
+        ),
+    )
+
+
+class TaskToolInvocationRow(Base):
+    """A tool call of a step: identity and status only, never arguments or output."""
+
+    __tablename__ = "task_tool_invocations"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    task_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tasks.id"))
+    step_id: Mapped[int] = mapped_column(ForeignKey("task_steps.id"))
+    tool_name: Mapped[str] = mapped_column(String(100))
+    status: Mapped[ToolInvocationStatus] = mapped_column(_enum(ToolInvocationStatus))
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        Index(None, "step_id"),
+        _in("status", ToolInvocationStatus, "status_valid"),
+        CheckConstraint(
+            "(status = 'started') = (finished_at IS NULL)",
             name="finished_matches_status",
         ),
     )

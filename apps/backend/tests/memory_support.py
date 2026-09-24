@@ -9,7 +9,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from alembic import command
-from sqlalchemy import create_engine, insert
+from sqlalchemy import create_engine, insert, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -27,6 +27,7 @@ TEST_DATABASE_URL = os.environ.get("PAW_TEST_DATABASE_URL")
 
 MEMORY_TABLES = (
     "conversations",
+    "embedding_models",
     "memories",
     "memory_embeddings",
     "memory_relations",
@@ -45,6 +46,40 @@ def migrate(action: str, revision: str) -> None:
     """Run ``alembic <action> <revision>`` against the test database."""
     with paw_environment(PAW_DATABASE_URL=TEST_DATABASE_URL):
         getattr(command, action)(offline_config(io.StringIO()), revision)
+
+
+FOREIGN_KEYS_WITHOUT_INDEX = """
+SELECT con.conname
+FROM pg_constraint con
+JOIN pg_class child ON child.oid = con.conrelid
+WHERE con.contype = 'f'
+  AND child.relnamespace = 'public'::regnamespace
+  AND child.relname = ANY (:tables)
+  AND NOT EXISTS (
+    -- A valid index whose first column is one of the foreign key's columns and
+    -- that covers every row with a value there (no or an ``IS NOT NULL`` filter):
+    -- what a referential action needs to find the referencing rows.
+    SELECT 1
+    FROM pg_index i
+    JOIN pg_attribute lead ON lead.attrelid = i.indrelid AND lead.attnum = i.indkey[0]
+    WHERE i.indrelid = con.conrelid
+      AND i.indisvalid
+      AND i.indkey[0] = ANY (con.conkey)
+      AND (i.indpred IS NULL
+           OR pg_get_expr(i.indpred, i.indrelid)
+              = '(' || lead.attname || ' IS NOT NULL)')
+  )
+ORDER BY con.conname
+"""
+
+
+def foreign_keys_without_index(connection) -> list[str]:
+    """Names of the memory tables' foreign keys that no index can serve."""
+    return list(
+        connection.execute(
+            text(FOREIGN_KEYS_WITHOUT_INDEX), {"tables": list(MEMORY_TABLES)}
+        ).scalars()
+    )
 
 
 def sync_database_url() -> str:
@@ -96,6 +131,16 @@ class MemoryDatabaseTestCase(unittest.TestCase):
         return None
 
     # -- rows ---------------------------------------------------------------
+
+    def register_embedding_model(self, model_id: str, dimensions: int) -> None:
+        """Register an embedding model unless it is already registered."""
+        self.session.execute(
+            text(
+                "INSERT INTO embedding_models (id, dimensions)"
+                " VALUES (:id, :dimensions) ON CONFLICT (id) DO NOTHING"
+            ),
+            {"id": model_id, "dimensions": dimensions},
+        )
 
     def add_conversation(self, **values: Any) -> UUID:
         values.setdefault("owner_user_id", uuid4())
