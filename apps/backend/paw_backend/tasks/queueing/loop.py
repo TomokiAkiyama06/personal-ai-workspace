@@ -200,10 +200,10 @@ class LoopDetector:
         at most ``policy.window_size`` remain (the newest by ``seq`` are kept);
         then return ``evaluate_loop`` of the remaining rows (oldest first). The
         raw ``message`` (and ``error_class`` / ``step``) is never stored or
-        logged. Concurrent calls for the SAME task must be serialised for the whole
-        transaction (for example with ``SELECT pg_advisory_xact_lock(...)`` keyed by
-        the task id): otherwise transactions that cannot see each other's rows
-        would each skip the deletion and the window bound would be broken. Every
+        logged. Concurrent calls for the SAME task (``clear`` included) are
+        serialised for the whole transaction by ``SELECT pg_advisory_xact_lock(...)``
+        keyed by the task id: otherwise transactions that cannot see each other's
+        rows would each skip the deletion and the window bound would be broken. Every
         argument is validated before the database is used
         (``validation.check_uuid("task_id", ...)``, ``check_approach``, and the
         checks named in ``failure_signature``). Not idempotent: calling twice
@@ -214,15 +214,7 @@ class LoopDetector:
         signature = failure_signature(error_class, step, message)
         try:
             async with self._database.session() as session, session.begin():
-                # Serialise the recorders of one task: transactions that cannot see each
-                # other's rows would otherwise all skip the deletion below.
-                await session.execute(
-                    select(
-                        func.pg_advisory_xact_lock(
-                            func.hashtextextended(f"loop-failures:{task_id}", 0)
-                        )
-                    )
-                )
+                await self._lock_failures(session, task_id)
                 session.add(
                     FailureSignatureRow(
                         task_id=task_id, approach=approach, signature=signature
@@ -247,6 +239,24 @@ class LoopDetector:
                 raise TaskNotFoundError() from None
             raise
         return evaluate_loop(history, self._policy)
+
+    @staticmethod
+    async def _lock_failures(session: AsyncSession, task_id: uuid.UUID) -> None:
+        """Take the task's failure lock until the end of the transaction.
+
+        Every transaction that writes the task's rows (``record_failure`` and
+        ``clear``) takes it first, so they run one after the other. Without it,
+        transactions that cannot see each other's uncommitted rows would each skip
+        the window deletion, and a ``clear`` would return before an in-flight
+        ``record_failure`` commits and leave that (stale) failure behind.
+        """
+        await session.execute(
+            select(
+                func.pg_advisory_xact_lock(
+                    func.hashtextextended(f"loop-failures:{task_id}", 0)
+                )
+            )
+        )
 
     @staticmethod
     async def _read_history(
@@ -275,9 +285,17 @@ class LoopDetector:
 
     async def clear(self, task_id: uuid.UUID) -> int:
         """Delete the task's stored failures (for example on Restart) and return
-        how many rows were deleted (0 when there were none)."""
+        how many rows were deleted (0 when there were none).
+
+        Serialised with ``record_failure`` of the SAME task by the same per-task
+        lock, held for the whole transaction: a ``record_failure`` that is still
+        in flight commits first and its row is deleted too, one that starts
+        later waits for the clear. So ``clear`` never returns while an earlier
+        failure is still going to appear (a failure recorded after the clear
+        belongs to the new history)."""
         check_uuid("task_id", task_id)
         async with self._database.session() as session, session.begin():
+            await self._lock_failures(session, task_id)
             result = await session.execute(
                 delete(FailureSignatureRow).where(
                     FailureSignatureRow.task_id == task_id
