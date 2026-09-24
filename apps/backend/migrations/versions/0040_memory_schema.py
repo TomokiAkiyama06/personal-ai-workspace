@@ -102,6 +102,9 @@ def upgrade() -> None:
             ["conversation_id"], ["conversations.id"], ondelete="CASCADE"
         ),
         sa.UniqueConstraint("conversation_id", "event_sequence"),
+        sa.UniqueConstraint(
+            "conversation_id", "id", name="uq_messages_conversation_id_id"
+        ),
         sa.CheckConstraint(
             "role IN ('user', 'assistant', 'tool', 'agent', 'task')", name="role_valid"
         ),
@@ -341,6 +344,13 @@ def upgrade() -> None:
             ["conversation_id"], ["conversations.id"], ondelete="SET NULL"
         ),
         sa.ForeignKeyConstraint(["message_id"], ["messages.id"], ondelete="SET NULL"),
+        # The message must belong to the conversation when both are set. Only
+        # the message column is cleared when the message is deleted.
+        sa.ForeignKeyConstraint(
+            ["conversation_id", "message_id"],
+            ["messages.conversation_id", "messages.id"],
+            ondelete="SET NULL (message_id)",
+        ),
         sa.CheckConstraint(
             "source_type IN ('conversation', 'task', 'repo_analysis',"
             " 'user_confirmation', 'project_decision')",

@@ -854,6 +854,97 @@ class ProvenanceTest(MemoryDatabaseTestCase):
         stored = self.session.execute(select(MemorySource.message_id)).scalar_one()
         self.assertEqual(stored, message)
 
+    def test_a_source_message_must_belong_to_the_source_conversation(self):
+        conversation_a, conversation_b = (
+            self.add_conversation(),
+            self.add_conversation(),
+        )
+        message_of_b = self.add_message(conversation_b, 0)
+        version = self.add_version(self.add_memory())
+
+        mismatched = partial(
+            self.add_source,
+            version,
+            "conversation",
+            conversation_id=conversation_a,
+            message_id=message_of_b,
+        )
+        matching = partial(
+            self.add_source,
+            version,
+            "conversation",
+            conversation_id=conversation_b,
+            message_id=message_of_b,
+        )
+
+        self.assertEqual(
+            self.violation(mismatched), "fk_memory_sources_conversation_id_messages"
+        )
+        self.assertIsNone(self.violation(matching))
+        stored = self.session.execute(
+            select(MemorySource.conversation_id, MemorySource.message_id)
+        ).all()
+        self.assertEqual(
+            [tuple(row) for row in stored], [(conversation_b, message_of_b)]
+        )
+
+    def test_a_source_may_name_a_conversation_without_naming_a_message(self):
+        conversation = self.add_conversation()
+        version = self.add_version(self.add_memory())
+
+        self.add_source(version, "conversation", conversation_id=conversation)
+
+        stored = self.session.execute(
+            select(MemorySource.conversation_id, MemorySource.message_id)
+        ).one()
+        self.assertEqual(tuple(stored), (conversation, None))
+
+    def test_deleting_a_message_keeps_the_source_and_its_conversation(self):
+        conversation = self.add_conversation()
+        message = self.add_message(conversation, 0)
+        version = self.add_version(self.add_memory())
+        self.add_source(
+            version, "conversation", conversation_id=conversation, message_id=message
+        )
+
+        self.session.execute(delete(Message).where(Message.id == message))
+
+        stored = self.session.execute(
+            select(MemorySource.conversation_id, MemorySource.message_id)
+        ).one()
+        self.assertEqual(tuple(stored), (conversation, None))
+
+    def test_deleting_a_conversation_clears_both_references_of_its_sources(self):
+        conversation = self.add_conversation()
+        message = self.add_message(conversation, 0)
+        version = self.add_version(self.add_memory())
+        self.add_source(
+            version, "conversation", conversation_id=conversation, message_id=message
+        )
+
+        self.session.execute(
+            delete(Conversation).where(Conversation.id == conversation)
+        )
+
+        stored = self.session.execute(
+            select(MemorySource.conversation_id, MemorySource.message_id)
+        ).one()
+        self.assertEqual(tuple(stored), (None, None))
+
+    def test_the_message_reference_is_cleared_by_column_not_the_whole_pair(self):
+        # ``ON DELETE SET NULL (message_id)``: a plain SET NULL would also null
+        # conversation_id and lose which conversation the memory came from.
+        cleared = self.connection.execute(
+            text(
+                "SELECT array_agg(a.attname)"
+                " FROM pg_constraint con"
+                " JOIN pg_attribute a ON a.attrelid = con.conrelid"
+                "   AND a.attnum = ANY (con.confdelsetcols)"
+                " WHERE con.conname = 'fk_memory_sources_conversation_id_messages'"
+            )
+        ).scalar_one()
+        self.assertEqual(cleared, ["message_id"])
+
     def test_deleting_a_conversation_keeps_the_memory_and_its_other_sources(self):
         doomed, kept = self.add_conversation(), self.add_conversation()
         message = self.add_message(doomed, 0)

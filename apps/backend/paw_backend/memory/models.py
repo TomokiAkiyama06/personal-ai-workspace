@@ -36,6 +36,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     Interval,
@@ -168,6 +169,11 @@ class Message(Base):
     __tablename__ = "messages"
     __table_args__ = (
         UniqueConstraint("conversation_id", "event_sequence"),
+        # Redundant with the primary key; the composite foreign key of
+        # ``memory_sources`` needs it as its target.
+        UniqueConstraint(
+            "conversation_id", "id", name="uq_messages_conversation_id_id"
+        ),
         CheckConstraint(_one_of("role", MessageRole), name="role_valid"),
         CheckConstraint("event_sequence >= 0", name="event_sequence_not_negative"),
         CheckConstraint(
@@ -427,6 +433,16 @@ class MemorySource(Base):
     keeps the version and its other sources. The deletion flow records the loss
     in ``source_deleted_at`` (a foreign-key action cannot, and a CHECK that
     demanded it would block the delete).
+
+    ``conversation_id`` and ``message_id`` are checked as a pair: when both are
+    set, the message must belong to that conversation (composite foreign key).
+    Deleting only the message clears ``message_id`` and keeps the conversation
+    (``ON DELETE SET NULL (message_id)``). A writer that names a message must
+    also name its conversation: with a NULL conversation the pair is not
+    checked (``MATCH SIMPLE``), the database then only knows that the message
+    exists, and the deletion-flow lookup by ``conversation_id`` would miss the
+    row. No CHECK requires it because the SET NULL of a conversation deletion
+    passes through that state.
     """
 
     __tablename__ = "memory_sources"
@@ -446,6 +462,11 @@ class MemorySource(Base):
         CheckConstraint(
             "source_ref IS NULL OR source_type <> 'conversation'",
             name="conversation_has_no_opaque_reference",
+        ),
+        ForeignKeyConstraint(
+            ["conversation_id", "message_id"],
+            ["messages.conversation_id", "messages.id"],
+            ondelete="SET NULL (message_id)",
         ),
         Index("ix_memory_sources_memory_version_id", "memory_version_id"),
         Index(

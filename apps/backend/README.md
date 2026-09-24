@@ -455,6 +455,8 @@ Repository / Service は含みません。
 
 3 つの層は別の Table で、Foreign Key でつながるのは出典（`memory_sources`）だけです。
 Conversation を消しても Memory と他の出典は残り（`ON DELETE SET NULL`）、Session state と Message は一緒に消えます。
+出典の `conversation_id` と `message_id` は組で検証し（複合 Foreign Key）、Message がその Conversation のものでなければ DB が拒否します。
+Message だけを消すと `message_id` だけが NULL になり、Conversation の出典は残ります。Message を指す出典は Conversation も指してください（Conversation が NULL の組は検証されず、Conversation 単位の検索から漏れます）。
 
 **Scope と ACL。** 各 Version が `scope`（`user` / `project` / `repo` / `shared`）を持ち、Scope に対応する ID を 1 つだけ持ちます
 （`owner_user_id` / `project_id` / `repo_id`、`shared` は無し）。CHECK 制約が組み合わせを強制します。
