@@ -24,6 +24,17 @@ down_revision: str | Sequence[str] | None = "0025"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
+# Placeholder: this revision predates ``grant_app_privileges``. It grants the
+# application role nothing today, which this records; the PAW-032 lane replaces
+# it with the privileges TaskService needs (a decision that is theirs).
+NO_APP_GRANTS = {
+    "tasks": "privileges of TaskService are decided by the PAW-032 lane",
+    "task_attempts": "privileges of TaskService are decided by the PAW-032 lane",
+    "task_steps": "privileges of TaskService are decided by the PAW-032 lane",
+    "task_logs": "privileges of TaskService are decided by the PAW-032 lane",
+    "task_events": "privileges of TaskService are decided by the PAW-032 lane",
+}
+
 TASK_STATES = tuple(
     "queued running waiting paused evaluating completed failed cancelled".split()
 )

@@ -6,6 +6,7 @@ import io
 import logging
 import os
 import unittest
+import uuid
 from collections import Counter
 from datetime import UTC, datetime, timedelta
 
@@ -28,8 +29,17 @@ requires_postgres = unittest.skipUnless(
     TEST_DATABASE_URL, "PAW_TEST_DATABASE_URL is not set"
 )
 
-# Dummy credentials of a throw-away, non-superuser database role.
-APP_ROLE = "paw_owner_test_app_021"
+# Database roles are cluster-wide, so a fixed name collides when two runs share
+# a server. The names of the throw-away roles carry a random per-run suffix.
+RUN_ID = uuid.uuid4().hex[:10]
+
+
+def role_name(kind: str) -> str:
+    """A role name for ``kind`` that is unique to this run (a valid role name)."""
+    return f"paw_owner_{kind}_{RUN_ID}"
+
+
+# Dummy credentials of the throw-away, non-superuser database roles.
 ROLE_PASSWORD = "dummy-test-password-021"
 SECRET_DETAIL = "hunter2-connection-detail-021"
 T0 = datetime(2030, 1, 1, 12, 0, tzinfo=UTC)

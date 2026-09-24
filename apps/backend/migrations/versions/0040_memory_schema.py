@@ -35,6 +35,32 @@ down_revision: str | Sequence[str] | None = "0032"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
+# Placeholder: this revision predates ``grant_app_privileges``. It grants the
+# application role nothing today, which this records; the PAW-040 lane replaces
+# it with the privileges the Memory service needs (a decision that is theirs).
+NO_APP_GRANTS = {
+    "conversations": (
+        "privileges of the Memory service are decided by the PAW-040 lane"
+    ),
+    "messages": ("privileges of the Memory service are decided by the PAW-040 lane"),
+    "session_states": (
+        "privileges of the Memory service are decided by the PAW-040 lane"
+    ),
+    "memories": ("privileges of the Memory service are decided by the PAW-040 lane"),
+    "memory_versions": (
+        "privileges of the Memory service are decided by the PAW-040 lane"
+    ),
+    "memory_relations": (
+        "privileges of the Memory service are decided by the PAW-040 lane"
+    ),
+    "memory_sources": (
+        "privileges of the Memory service are decided by the PAW-040 lane"
+    ),
+    "memory_embeddings": (
+        "privileges of the Memory service are decided by the PAW-040 lane"
+    ),
+}
+
 
 class _Vector(sa.types.UserDefinedType):
     """``vector`` without a dimension."""

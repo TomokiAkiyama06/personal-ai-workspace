@@ -174,17 +174,32 @@ class OfflineMigrationTest(unittest.TestCase):
             PAW_APP_DATABASE_ROLE="paw_app",
         )
 
-        self.assertIn('GRANT SELECT ON users, setup_tokens TO "paw_app"', sql)
+        # Made through grant_app_privileges: PUBLIC is stripped first, then only
+        # SELECT and the named columns are granted.
+        for table in ("users", "setup_tokens"):
+            self.assertIn(f"REVOKE ALL ON {table} FROM PUBLIC", sql)
+            self.assertIn(f'GRANT SELECT ON {table} TO "paw_app"', sql)
         self.assertIn('GRANT UPDATE (updated_at) ON users TO "paw_app"', sql)
         self.assertIn(
             'GRANT UPDATE (attempts, used_at, locked_at) ON setup_tokens TO "paw_app"',
             sql,
         )
         grants = [line for line in sql.splitlines() if line.startswith("GRANT")]
-        self.assertEqual(len(grants), 3)
+        self.assertEqual(len(grants), 4)
         for line in grants:
             self.assertNotIn("INSERT", line)
             self.assertNotIn("DELETE", line)
+            self.assertNotIn("TRUNCATE", line)
+        self.assertLess(
+            sql.index("REVOKE ALL ON users"), sql.index("GRANT SELECT ON users")
+        )
+
+    def test_public_is_stripped_even_without_an_application_role(self):
+        sql = self.sql("upgrade", f"{previous_revision()}:{REVISION}")
+
+        self.assertIn("REVOKE ALL ON users FROM PUBLIC", sql)
+        self.assertIn("REVOKE ALL ON setup_tokens FROM PUBLIC", sql)
+        self.assertNotIn("GRANT", sql)
 
     def test_the_operator_role_may_insert_and_update_only_what_the_commands_need(
         self,

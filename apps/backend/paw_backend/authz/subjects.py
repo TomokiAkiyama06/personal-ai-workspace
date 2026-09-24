@@ -18,7 +18,11 @@ from dataclasses import dataclass, field
 from enum import Enum, StrEnum
 from types import MappingProxyType
 
-from paw_backend.authz.capabilities import Capability, parse_capability
+from paw_backend.authz.capabilities import (
+    Capability,
+    RepoPermission,
+    parse_capability,
+)
 from paw_backend.authz.roles import ProjectRole, SystemRole
 
 KIND_PATTERN = r"[a-z][a-z0-9_]{0,63}"
@@ -88,6 +92,64 @@ class Principal:
 
 
 @dataclass(frozen=True, slots=True)
+class RepoAcl:
+    """The stored ACL of one repository, as the *caller* resolved it.
+
+    ``allowed=None`` means ``inherit`` (the default): the repository follows the
+    project role exactly as a project resource does. Otherwise it is an
+    *override*: the set of repository permissions members keep on this
+    repository. An override can only narrow what the project role gives
+    (``REQUIREMENTS.md``: "Repo ACL override は Project role より狭める用途");
+    ``frozenset()`` is "access denied", ``{READ}`` is "read-only".
+
+    The value is bound to the repository **and the project it belongs to**, as
+    stored. The policy refuses a resource whose ids differ from the ACL's, so
+    an id pair assembled from a URL cannot borrow another repository's (or
+    project's) ACL.
+
+    Use :meth:`inherit` / :meth:`override`. The policy never guesses an ACL: a
+    repository resource without one is refused (``repo_acl_unresolved``).
+    """
+
+    repo_id: uuid.UUID
+    project_id: uuid.UUID
+    allowed: frozenset[RepoPermission] | None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "repo_id", to_uuid(self.repo_id, "repo_id"))
+        object.__setattr__(self, "project_id", to_uuid(self.project_id, "project_id"))
+        allowed = self.allowed
+        if allowed is not None:
+            if isinstance(allowed, str | bytes) or not isinstance(allowed, Iterable):
+                raise TypeError("allowed must be None or a collection of permissions")
+            if not all(isinstance(p, RepoPermission) for p in allowed):
+                raise ValueError("an ACL can only hold RepoPermission members")
+            object.__setattr__(self, "allowed", frozenset(allowed))
+
+    @classmethod
+    def inherit(
+        cls, repo_id: uuid.UUID | str, project_id: uuid.UUID | str
+    ) -> "RepoAcl":
+        return cls(repo_id, project_id, None)
+
+    @classmethod
+    def override(
+        cls,
+        repo_id: uuid.UUID | str,
+        project_id: uuid.UUID | str,
+        allowed: Iterable[RepoPermission],
+    ) -> "RepoAcl":
+        """An override that keeps only ``allowed`` (empty = access denied)."""
+        if allowed is None or isinstance(allowed, str | bytes):
+            raise TypeError("allowed must be a collection of permissions")
+        return cls(repo_id, project_id, frozenset(allowed))
+
+    @property
+    def inherits(self) -> bool:
+        return self.allowed is None
+
+
+@dataclass(frozen=True, slots=True)
 class Resource:
     """What an action is about. Only ids the backend itself resolved belong here.
 
@@ -95,9 +157,11 @@ class Resource:
     a decision on a project resource without it is refused, so a caller cannot
     forget to pass "archived" and get write access by accident.
 
-    ``repo_id`` is refused by the policy (``repo_acl_not_supported``) until
-    per-repository ACLs exist, because a repository can be "access denied"
-    inside a project the user belongs to (``REQUIREMENTS.md``, "Project roles").
+    A repository resource (``repo_id`` set) must carry its resolved
+    ``repo_acl``: a repository can be read-only or "access denied" inside a
+    project the user belongs to (``REQUIREMENTS.md``, "Project roles"), so an
+    unknown ACL is never treated as ``inherit``. Without one the policy refuses
+    (``repo_acl_unresolved``). Build it with :meth:`Resource.repository`.
     """
 
     kind: str
@@ -106,6 +170,7 @@ class Resource:
     owner_id: uuid.UUID | None = None
     repo_id: uuid.UUID | None = None
     project_state: ProjectState | None = None
+    repo_acl: RepoAcl | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.kind, str) or _KIND.fullmatch(self.kind) is None:
@@ -116,6 +181,11 @@ class Resource:
             object.__setattr__(self, "project_state", ProjectState(self.project_state))
         if self.project_state is not None and self.project_id is None:
             raise ValueError("project_state needs a project_id")
+        if self.repo_acl is not None:
+            if not isinstance(self.repo_acl, RepoAcl):
+                raise ValueError("repo_acl must be a RepoAcl")
+            if self.repo_id is None:
+                raise ValueError("repo_acl needs a repo_id")
 
     @classmethod
     def system(cls) -> "Resource":
@@ -127,15 +197,36 @@ class Resource:
         cls,
         project_id: uuid.UUID | str,
         project_state: ProjectState,
-        *,
-        repo_id: uuid.UUID | str | None = None,
     ) -> "Resource":
         return cls(
             kind="project",
             id=project_id,
             project_id=project_id,
-            repo_id=repo_id,
             project_state=project_state,
+        )
+
+    @classmethod
+    def repository(
+        cls,
+        project_id: uuid.UUID | str,
+        project_state: ProjectState,
+        repo_acl: RepoAcl,
+    ) -> "Resource":
+        """A repository of a project; ``repo_acl`` is its resolved ACL.
+
+        The repository id is the ACL's (a stored id pair), so a repository and
+        an ACL can not be paired up wrongly; the policy still checks the ACL
+        against ``project_id``.
+        """
+        if not isinstance(repo_acl, RepoAcl):
+            raise ValueError("repo_acl must be a RepoAcl")
+        return cls(
+            kind="repository",
+            id=repo_acl.repo_id,
+            project_id=project_id,
+            repo_id=repo_acl.repo_id,
+            project_state=project_state,
+            repo_acl=repo_acl,
         )
 
     @classmethod

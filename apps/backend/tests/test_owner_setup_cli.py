@@ -27,6 +27,7 @@ from .identity_support import (
     TEST_DATABASE_URL,
     migrate,
     requires_postgres,
+    role_name,
     sync_database_url,
     url_for_role,
 )
@@ -770,8 +771,8 @@ class OperatorUrlTest(CliDatabaseTestCase):
 class OperatorRoleCommandTest(CliDatabaseTestCase):
     """The command as the operator's role; the web role cannot run it at all."""
 
-    WEB_ROLE = "paw_owner_cli_web_021"
-    OPERATOR_ROLE = "paw_owner_cli_op_021"
+    WEB_ROLE = role_name("cliweb")
+    OPERATOR_ROLE = role_name("cliop")
 
     def roles(self):
         return (self.WEB_ROLE, self.OPERATOR_ROLE)

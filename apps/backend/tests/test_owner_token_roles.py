@@ -29,14 +29,15 @@ from .identity_support import (
     PostgresIdentityTestCase,
     migrate,
     requires_postgres,
+    role_name,
     sync_database_url,
     url_for_role,
     wrong_secret_for,
 )
 from .support import FakeDatabase, make_client, make_settings
 
-WEB_ROLE = "paw_owner_test_web_021"
-OPERATOR_ROLE = "paw_owner_test_op_021"
+WEB_ROLE = role_name("web")
+OPERATOR_ROLE = role_name("op")
 INSUFFICIENT_PRIVILEGE = "42501"
 RESTRICT_VIOLATION = "23001"
 

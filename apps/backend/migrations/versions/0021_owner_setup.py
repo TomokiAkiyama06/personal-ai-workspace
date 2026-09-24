@@ -27,12 +27,15 @@ Two database roles, split like the audit table's (see ``PAW_APP_DATABASE_ROLE``
 and ``PAW_MIGRATION_DATABASE_URL`` in the README). Whoever can INSERT a token row
 can mint a token for the Owner, so the web application's role may not:
 
-* ``PAW_APP_DATABASE_ROLE`` (the web application): SELECT on both tables, UPDATE
+* ``PAW_APP_DATABASE_ROLE`` (the web application; granted through
+  ``paw_backend.db_roles.grant_app_privileges`` like every table): SELECT on both
+  tables, UPDATE
   of ``users.updated_at`` (PostgreSQL wants an UPDATE privilege for the row lock
   ``SELECT ... FOR UPDATE`` that redeeming takes) and of ``attempts``,
   ``used_at``, ``locked_at`` of ``setup_tokens``. No INSERT, no DELETE, and no
   UPDATE of a role, a salt, a hash, an expiry or ``revoked_at``.
-* ``PAW_OPERATOR_DATABASE_ROLE`` (the server-local commands): SELECT and INSERT
+* ``PAW_OPERATOR_DATABASE_ROLE`` (the server-local commands; a different role,
+  so granted here, validated with the same ``validate_role_name``): SELECT and INSERT
   on both tables, UPDATE of ``users.system_role`` / ``updated_at`` and of
   ``setup_tokens.revoked_at``, and INSERT on ``audit_events`` (their audit
   events), which is granted here only if that table exists.
@@ -64,6 +67,11 @@ import sqlalchemy as sa
 from alembic import op
 
 from paw_backend.config import Settings
+from paw_backend.db_roles import (
+    configured_app_role,
+    grant_app_privileges,
+    validate_role_name,
+)
 
 revision: str = "0021"
 down_revision: str | Sequence[str] | None = "0040"
@@ -106,14 +114,17 @@ $$
 """
 
 
-def _quoted_role(role: str | None) -> str | None:
-    """A configured role as a quoted identifier, or ``None`` if none is set.
+def _quoted_operator_role(role: str | None) -> str | None:
+    """The operator role as a quoted identifier, or ``None`` if none is set.
 
-    Validated by ``Settings`` and quoted by the dialect; never interpolated as
-    text. Online, the role must exist (a missing role fails the migration).
+    Validated with the same rules as the application role
+    (``paw_backend.db_roles.validate_role_name``) and quoted by the dialect like
+    ``grant_app_privileges`` does; never interpolated as text. Online, the role
+    must exist (a missing role fails the migration before anything is granted).
     """
     if role is None:
         return None
+    role = validate_role_name(role)
     context = op.get_context()
     if not context.as_sql:
         found = op.get_bind().execute(
@@ -121,32 +132,24 @@ def _quoted_role(role: str | None) -> str | None:
         )
         if found.first() is None:
             raise RuntimeError(
-                "PAW_APP_DATABASE_ROLE / PAW_OPERATOR_DATABASE_ROLE names a "
-                "PostgreSQL role that does not exist; create it before running "
-                "the migration."
+                "PAW_OPERATOR_DATABASE_ROLE names a PostgreSQL role that does not "
+                "exist; create it before running the migration."
             )
     return context.dialect.identifier_preparer.quote_identifier(role)
 
 
-def _grant_privileges() -> None:
+def _grant_operator_privileges() -> None:
+    """The privileges of the server-local commands (a different role)."""
     settings = Settings()
-    app_role = _quoted_role(settings.app_database_role)
-    operator_role = _quoted_role(settings.operator_database_role)
-    if app_role is not None:
-        # See the module docstring: no INSERT, and no UPDATE of anything that
-        # could mint a token or change who the Owner is.
-        op.execute(f"GRANT SELECT ON users, setup_tokens TO {app_role}")
-        op.execute(f"GRANT UPDATE (updated_at) ON users TO {app_role}")
-        op.execute(
-            f"GRANT UPDATE (attempts, used_at, locked_at) ON setup_tokens TO {app_role}"
-        )
+    operator_role = _quoted_operator_role(settings.operator_database_role)
     if operator_role is not None:
         op.execute(f"GRANT SELECT, INSERT ON users, setup_tokens TO {operator_role}")
         op.execute(
             f"GRANT UPDATE (system_role, updated_at) ON users TO {operator_role}"
         )
         op.execute(f"GRANT UPDATE (revoked_at) ON setup_tokens TO {operator_role}")
-        # The audit table belongs to another revision: grant only if it exists.
+        # The audit table belongs to another revision, whose ``REVOKE ALL ... FROM
+        # PUBLIC`` does not touch a grant to a named role: grant only if it exists.
         op.execute(
             "DO $$ BEGIN IF to_regclass('audit_events') IS NOT NULL THEN "
             f"GRANT INSERT ON audit_events TO {operator_role}; END IF; END $$"
@@ -158,7 +161,9 @@ def _grant_privileges() -> None:
             "server-local Owner commands must run as that role "
             "(PAW_OPERATOR_DATABASE_URL)."
         )
-    if app_role is not None and app_role == operator_role:
+    if operator_role is not None and settings.operator_database_role == (
+        configured_app_role()
+    ):
         logger.warning(
             "PAW_APP_DATABASE_ROLE and PAW_OPERATOR_DATABASE_ROLE are the same "
             "role: the web application can create Owner tokens. Use two roles."
@@ -201,6 +206,10 @@ def upgrade() -> None:
         unique=True,
         postgresql_where=sa.text("system_role = 'owner'"),
     )
+    # The web application reads users. The only UPDATE it gets is ``updated_at``:
+    # PostgreSQL wants an UPDATE privilege for the row lock (SELECT ... FOR UPDATE)
+    # that redeeming takes. No INSERT, and no UPDATE of a role or a status.
+    grant_app_privileges(op, "users", select=True, update_columns=("updated_at",))
 
     op.create_table(
         "setup_tokens",
@@ -265,6 +274,15 @@ def upgrade() -> None:
         postgresql_where=sa.text("used_at IS NULL AND revoked_at IS NULL"),
     )
 
+    # The web application reads tokens and writes only what redeeming writes.
+    # No INSERT: whoever can insert a token row can mint a token for the Owner.
+    grant_app_privileges(
+        op,
+        "setup_tokens",
+        select=True,
+        update_columns=("attempts", "used_at", "locked_at"),
+    )
+
     op.execute(_GUARD_FUNCTION)
     op.execute(
         "CREATE TRIGGER tr_setup_tokens_guard_update BEFORE UPDATE ON setup_tokens "
@@ -274,7 +292,7 @@ def upgrade() -> None:
         "ALTER TABLE setup_tokens ENABLE ALWAYS TRIGGER tr_setup_tokens_guard_update"
     )
 
-    _grant_privileges()
+    _grant_operator_privileges()
 
 
 def downgrade() -> None:
