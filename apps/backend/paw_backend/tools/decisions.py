@@ -55,6 +55,9 @@ class BrokerReason(StrEnum):
     # A repository write that names no repository of the working set: there is
     # no repository ACL to consult (see ``ToolBroker``, step 4).
     REPOSITORY_NOT_IDENTIFIED = "repository_not_identified"
+    # A call that touches a repository carries a URL that lies below no remote
+    # of a repository of the working set: whose ACL it is is unknown.
+    REMOTE_NOT_IN_REPOSITORY = "remote_not_in_repository"
     AUTHZ_DENIED = "authz_denied"
     AUTHZ_UNAVAILABLE = "authz_unavailable"
     POLICY_DENIED = "policy_denied"

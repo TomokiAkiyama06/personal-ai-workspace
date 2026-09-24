@@ -84,11 +84,16 @@ Credential の Plaintext を Agent に渡さないこと、Backend が最終判�
 独立 Review が、Broker は Project の Resource で認可するため、この override が Tool の呼び出しに効かないと指摘した。実装は次を選んだ。要件は「どの Repository に触れる呼び出しか」の決め方を定めていない。
 
 1. **触れる Repository は Backend が決める。** Orchestrator が Task の作業対象（Working Set）を `TaskScope.repositories`（Repository の ID、Project、Worktree の Path、解決済みの ACL）として呼び出しごとに作る。Model の出力は Repository の ID を名指しできるだけで、ACL を指定できない。
-2. **触れる Repository の決め方:** 呼び出しが `repository` 引数（作業対象の ID のみ）で名指しするか、Symlink を解決した後の Path が Repository の Worktree の中にあるとき。入れ子の Repository は両方に触れる（厳しい ACL が効く）。**Host / URL は Repository を表さない**（同じ Host に多くの Repository があるため）。
+2. **触れる Repository の決め方:** 呼び出しが `repository` 引数（作業対象の ID のみ）で名指しするか、Symlink を解決した後の Path が Repository の Worktree の中にあるとき。入れ子の Repository は両方に触れる（厳しい ACL が効く）。**Host は Repository を表さない**（同じ Host に多くの Repository があるため）。**URL は、Backend が Repository に登録した Remote（`ScopedRepository.remotes`）の下にあるときだけ、その Repository を表す**（Symlink を解決した Path と同じく、入れ子と同様に触れる Repository が増える）。`..`・`\`・`;`・`%2e` などで Remote の外へ出られる Path は「下」と見なさない。
 3. 触れる Repository があれば、その Repository の `Resource.repository(...)` で認可する（override は Project の Role を狭めるだけで広げない、Agent は `agent` を持たない Repository を操作できない、は PAW-025 の規則のまま）。**ACL が不明（`None`）なら拒否**し、`inherit` とは読まない。ACL は承認を使うときにも再判定する。
 4. **Repository への書き込み**（`project.repo.write` / `project.pr.create`）の Tool は、触れる Repository を Path か `repository` の必須引数で宣言しなければならず（Registry が検査）、作業対象のどの Repository にも触れない呼び出しは拒否する（`repository_not_identified`）。
    根拠は要件の Multi-Repo Task の「Write 範囲は Task Working Set として明示・制御する」「Agent が「ついでに」別 Repo を書き換えてはならない」。読み取りと Agent 実行は触れる Repository がなければ Project の Resource で判定する（Read 範囲は比較的広く取ってよい、と要件にある）。
-5. **Human に判断を求める点:** (a) 書き込みだけを「Repository を特定できなければ拒否」にしたこと（読み取りと `project.task.run` は Project の Resource のまま）。(b) 入れ子の Repository を「両方の ACL に従う」にしたこと。(c) Host から Repository を推定せず、リモートに書く Tool に `repository` 引数を求めること。
+5. **Repository に触れる呼び出しの URL を、その Repository に結びつける。** 独立 Review が、`repository` 引数だけを認可すると、書き込める B を名指しして `remote` に読み取り専用の A の URL（同じ Host）を渡せば、Executor は A の URL を受け取り、A の ACL を迂回できると指摘した（再現した: `git.push` が `allow`）。実装は次を選んだ。
+   - 呼び出しの URL は Model が書くので、Backend が登録した Remote の下にあるかで Repository を決める（上の 2）。A の Remote の下なら A にも触れ、A の ACL も効く（読み取り専用なら拒否）。
+   - Repository に触れる呼び出しの URL が作業対象のどの Repository の Remote の下にもなければ拒否する（`remote_not_in_repository`）。ACL を解決していない Repository を指せるため。Remote を登録しない Repository は URL を持てない（既定は拒否）。
+   - Host の規則が先: Scope の外の Host は従来どおり（書き込みは拒否、読み取りは承認）。Repository に触れない呼び出し（URL の読み取りだけ）は Host の検査のままだが、その URL が作業対象の Repository の Remote の下なら、その Repository の ACL が効く。
+   - 採らなかった案: Model に URL を渡させず Backend が Remote を Executor へ渡す（Tool の引数を変え、`network` の Tool が必須の Host / URL を持つ規則と合わない。将来の選択肢）。
+6. **Human に判断を求める点:** (a) 書き込みだけを「Repository を特定できなければ拒否」にしたこと（読み取りと `project.task.run` は Project の Resource のまま）。(b) 入れ子の Repository を「両方の ACL に従う」にしたこと。(c) Host から Repository を推定せず、リモートに書く Tool に `repository` 引数を求めること。(d) URL を Backend が登録した Remote で Repository に結びつけ、`repository` 引数と URL が別の Repository を指す呼び出しは両方の ACL に従わせる（不一致を拒否にはしない）こと。Remote の登録は Orchestrator（Task の Scope を作る側）の責務で、登録がない Repository では URL を伴う呼び出しが通らないこと。
 
 ### 9. Task の終了と承認
 
@@ -108,7 +113,7 @@ Credential の Plaintext を Agent に渡さないこと、Backend が最終判�
 - 却下の Cooldown は Hash 単位で、引数を変えた別の呼び出しは止めない（件数の上限が量を抑える）。
 - 引数のない Tool は承認を開けない。承認が要る Tool は、何をするかを表す引数を必須にする。
 - Credential の検出は形のわかる Format と代入の形だけ。
-- Task の Scope（作業対象の Repository とその ACL を含む）・Grant・Project の状態は、Orchestrator が呼び出しごとに現在の値から作る（Broker は渡された Context を信頼する）。Path も `repository` 引数もない Tool は、Repository の ACL では判定できない。
+- Task の Scope（作業対象の Repository とその ACL を含む）・Grant・Project の状態は、Orchestrator が呼び出しごとに現在の値から作る（Broker は渡された Context を信頼する）。Path も `repository` 引数もない Tool（Remote の下にない URL だけの Tool を含む）は、Repository の ACL では判定できない。
 
 ## リスク
 

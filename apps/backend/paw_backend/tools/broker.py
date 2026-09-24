@@ -17,11 +17,14 @@ narrow what the previous one allowed:
    user's rights intersected with the agent grant. The broker adds to this and
    never replaces it: an approval cannot make an operation the agent may not do.
    A call that touches a repository of the task's working set (it names the
-   repository, or a path lies in its worktree) is decided on that **repository**
-   with its resolved ACL, so a read-only override or a "no agents" override
-   applies; an ACL the backend could not resolve denies. A repository write
-   that touches no repository of the working set is denied
-   (``repository_not_identified``);
+   repository, a path lies in its worktree, or a URL lies below a remote the
+   backend registered for it) is decided on that **repository** with its
+   resolved ACL, so a read-only override or a "no agents" override applies; an
+   ACL the backend could not resolve denies. A URL of such a call that lies
+   below no remote of the working set is refused at step 3
+   (``remote_not_in_repository``): the executor is never given an endpoint whose
+   repository was not authorized. A repository write that touches no repository
+   of the working set is denied (``repository_not_identified``);
 5. the task budget (:class:`~.budget.BudgetProvider`); unknown means denied;
 6. ``AUTO`` / ``SCOPED_AUTO`` are allowed; ``APPROVAL`` / ``STRONG_APPROVAL``
    need an approval bound to this exact call. **The task must still be able to
@@ -114,6 +117,7 @@ _OUT_OF_SCOPE_REASON = {
     TargetKind.PROJECT: BrokerReason.PROJECT_OUT_OF_SCOPE,
     TargetKind.CREDENTIAL: BrokerReason.CREDENTIAL_OUT_OF_SCOPE,
     TargetKind.REPOSITORY: BrokerReason.REPOSITORY_OUT_OF_SCOPE,
+    TargetKind.URL: BrokerReason.REMOTE_NOT_IN_REPOSITORY,
 }
 _CONSUME_REASON = {
     ConsumeOutcome.NOT_FOUND: BrokerReason.APPROVAL_NOT_FOUND,
@@ -301,6 +305,7 @@ class ToolBroker:
                 context.scope,
                 self._resolver,
                 timeout_seconds=self._timeout_seconds,
+                urls=parsed.urls,
             )
         except PathResolutionError as error:
             logger.warning("Path resolution failed (%s)", error)
