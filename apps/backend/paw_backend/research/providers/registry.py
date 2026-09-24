@@ -74,11 +74,27 @@ def validate_provider(provider: object) -> None:
     Nothing is called on the provider except reading these attributes. The
     provider is never awaited and its values never appear in the error.
     """
+    _identity(provider)
+    _check_methods(provider)
+
+
+def _identity(provider: object) -> tuple[str, ProviderKind]:
+    """Read ``name`` and ``kind`` ONCE and return the validated pair.
+
+    A property can return something else on the next read, so what is checked
+    here is the very value that is used afterwards (the registry stores this
+    pair, and never reads the provider's identity again).
+    """
     name = getattr(provider, "name", None)
     if not isinstance(name, str) or PROVIDER_NAME_PATTERN.fullmatch(name) is None:
         raise ProviderInterfaceError("name")
-    if not isinstance(getattr(provider, "kind", None), ProviderKind):
+    kind = getattr(provider, "kind", None)
+    if not isinstance(kind, ProviderKind):
         raise ProviderInterfaceError("kind")
+    return name, kind
+
+
+def _check_methods(provider: object) -> None:
     if not _accepts_call(getattr(provider, "search", None), "q", limit=1):
         raise ProviderInterfaceError("search")
     if not _accepts_call(getattr(provider, "fetch", None), "https://x/"):
@@ -114,11 +130,12 @@ class ProviderRegistry:
         4. Fewer than ``MAX_PROVIDERS`` providers are registered:
            ``RegistryFullError``.
 
-        The name and kind are read from the provider once, here.
+        The name and kind are read from the provider once, here, and the values
+        that were validated are the ones stored.
         """
-        validate_provider(provider)
+        name, kind = _identity(provider)  # read once, here, and validated
+        _check_methods(provider)
         validate_provider_timeout(timeout_seconds)
-        name, kind = provider.name, provider.kind  # read once, here
         if name in self._entries:
             raise DuplicateProviderError()
         if len(self._entries) >= MAX_PROVIDERS:

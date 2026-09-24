@@ -47,11 +47,7 @@ from paw_backend.identity import (
     OwnerNotLiveError,
     RecoveryNotPrivilegedError,
 )
-from paw_backend.identity.operator import (
-    IssuedToken,
-    OperatorIdentity,
-    OwnerOperator,
-)
+from paw_backend.identity.operator import IssuedToken, OwnerOperator
 
 EXIT_OK = 0
 EXIT_REFUSED = 1
@@ -211,9 +207,8 @@ def _run(arguments: argparse.Namespace, out: TextIO | None, err: TextIO | None) 
     if connection is None:
         _say(err, "PAW_OPERATOR_DATABASE_URL (or PAW_DATABASE_URL) is not set.")
         return EXIT_ENVIRONMENT
-    operator = OperatorIdentity.from_environment()
     try:
-        issued = asyncio.run(_issue(connection, arguments, operator))
+        issued = asyncio.run(_issue(connection, arguments))
     except InvalidLoginNameError:
         _say(err, f"Invalid login name: {_LOGIN_NAME_RULE}.")
         return EXIT_REFUSED
@@ -263,14 +258,11 @@ def _run(arguments: argparse.Namespace, out: TextIO | None, err: TextIO | None) 
             "(PAW_OPERATOR_DATABASE_ROLE).",
         )
         return EXIT_ENVIRONMENT
-    return _show(issued, arguments.command, operator, out, err)
+    return _show(issued, arguments.command, out, err)
 
 
-async def _issue(
-    settings: Settings,
-    arguments: argparse.Namespace,
-    operator: OperatorIdentity | None,
-) -> IssuedToken:
+async def _issue(settings: Settings, arguments: argparse.Namespace) -> IssuedToken:
+    """Run the command. The service reads who runs it (the uid) from this process."""
     database = Database(settings)
     try:
         service = OwnerOperator.from_settings(
@@ -280,19 +272,14 @@ async def _issue(
             return await service.setup_owner(
                 arguments.login_name,
                 replace_non_live_owner=arguments.replace_non_live_owner,
-                operator=operator,
             )
-        return await service.recover_owner(operator=operator)
+        return await service.recover_owner()
     finally:
         await database.dispose()
 
 
 def _show(
-    issued: IssuedToken,
-    command: str,
-    operator: OperatorIdentity | None,
-    out: TextIO | None,
-    err: TextIO | None,
+    issued: IssuedToken, command: str, out: TextIO | None, err: TextIO | None
 ) -> int:
     """Hand the token over (stdout, once) and say what was done (stderr)."""
     what = "Owner created" if command == "owner-setup" else "Recovery token issued"
@@ -305,6 +292,7 @@ def _show(
         )
         return EXIT_TOKEN_NOT_DELIVERED
     who = ""
+    operator = issued.operator  # what the service saw, and stored on the token
     if operator is not None:
         sudo = f" sudo_uid={operator.sudo_uid}" if operator.sudo_uid is not None else ""
         who = f" operator uid={operator.uid}{sudo}."

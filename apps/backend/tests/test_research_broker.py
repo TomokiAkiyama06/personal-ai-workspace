@@ -144,6 +144,41 @@ class ConstructionTest(unittest.IsolatedAsyncioTestCase):
                 await guarded(broker.fetch(source, time_budget_seconds=budget))
 
 
+class UnconvertibleTimestampTest(unittest.IsolatedAsyncioTestCase):
+    """A time beyond UTC's range is the provider's invalid response, not a crash."""
+
+    @staticmethod
+    def far():
+        return datetime.max.replace(tzinfo=timezone(timedelta(hours=-1)))
+
+    async def test_gather_reports_invalid_response_instead_of_raising(self):
+        bad = hit()
+        object.__setattr__(bad, "published_at", self.far())
+        provider = web("web-bad", hits=[bad])
+        good = docs("docs-ok", hits=[hit("https://example.com/ok")])
+
+        result = await guarded(broker_of(provider, good).gather(request()))
+
+        self.assertEqual(
+            [(e.provider_id, e.code) for e in result.errors],
+            [("web-bad", ResearchErrorCode.INVALID_RESPONSE)],
+        )
+        self.assertEqual([i.source.provider_id for i in result.items], ["docs-ok"])
+
+    async def test_fetch_reports_invalid_response_instead_of_raising(self):
+        bad = document()
+        object.__setattr__(bad, "published_at", self.far())
+        provider = web(documents={"https://example.com/a": bad})
+
+        result = await guarded(broker_of(provider).fetch(source_of()))
+
+        self.assertEqual(result.items, ())
+        self.assertEqual(
+            [(e.provider_id, e.code) for e in result.errors],
+            [("web-a", ResearchErrorCode.INVALID_RESPONSE)],
+        )
+
+
 class GatherBasicsTest(unittest.IsolatedAsyncioTestCase):
     async def test_no_providers_gives_an_empty_result(self):
         result = await guarded(broker_of().gather(request()))

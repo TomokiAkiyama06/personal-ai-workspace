@@ -17,7 +17,11 @@ from paw_backend.tasks.queueing import (
     failure_signature,
 )
 
-from .queueing_support import PostgresQueueingTestCase, requires_postgres
+from .queueing_support import (
+    PostgresQueueingTestCase,
+    raise_unexpected,
+    requires_postgres,
+)
 
 V = LoopVerdict
 # sha256("ToolError\x1frun_tests\x1ftimeout after <n>s on <hex>")
@@ -274,6 +278,13 @@ class HistoryTest(LoopTestCase):
             self.assertEqual(caught.exception.parameter, "task_id")
 
 
+ADVISORY_LOCK_WAITERS = (
+    "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted "
+    "AND database = (SELECT oid FROM pg_database WHERE datname = current_database())"
+)
+DEADLINE_SECONDS = 30
+
+
 @requires_postgres
 class ClearTest(LoopTestCase):
     async def test_clear_forgets_the_failures_of_one_task(self):
@@ -293,6 +304,56 @@ class ClearTest(LoopTestCase):
         (task_id,) = await self.make_tasks(1)
         self.assertEqual(await self.loop_detector.clear(task_id), 0)
         self.assertEqual(await self.loop_detector.clear(uuid.uuid4()), 0)
+
+    async def test_clear_waits_for_a_failure_that_is_being_recorded(self):
+        # An old worker's record_failure has inserted its row but not committed. The
+        # clear of a Restart must not run past it (READ COMMITTED would not see the
+        # row): it has to wait for the same per-task lock, then remove the row too.
+        (task_id,) = await self.make_tasks(1)
+        await self.fail(task_id, "old one")
+        await self.fail(task_id, "old two")
+        recorder = self.new_loop_detector()
+        inserted, release = asyncio.Event(), asyncio.Event()
+        read_history = recorder._read_history
+
+        async def hold_before_commit(session, task):
+            history = await read_history(session, task)
+            inserted.set()  # the row is in this open transaction, uncommitted
+            await release.wait()
+            return history
+
+        recorder._read_history = hold_before_commit
+        recording = asyncio.create_task(
+            recorder.record_failure(
+                task_id, error_class="E", step="s", message="stale failure"
+            )
+        )
+        clearing = None
+        try:
+            await asyncio.wait_for(inserted.wait(), DEADLINE_SECONDS)
+            clearing = asyncio.create_task(self.new_loop_detector().clear(task_id))
+            # Either clear is provably waiting for the lock, or it already returned
+            # (the bug): never a fixed sleep.
+            async with asyncio.timeout(DEADLINE_SECONDS):
+                while not clearing.done():
+                    if await self.scalar(ADVISORY_LOCK_WAITERS) > 0:
+                        break
+                    await asyncio.sleep(0.01)
+            self.assertFalse(
+                clearing.done(),
+                "clear ran past a failure that was still being recorded",
+            )
+            self.assertEqual(await self.scalar(ADVISORY_LOCK_WAITERS), 1)
+        finally:
+            release.set()
+            outcomes = await asyncio.gather(
+                recording, *([clearing] if clearing else []), return_exceptions=True
+            )
+        raise_unexpected(outcomes)
+        self.assertEqual(outcomes[0].verdict, V.CONTINUE)
+        self.assertEqual(outcomes[1], 3)  # the two old rows and the recorded one
+        self.assertEqual(await self.stored(task_id), [])
+        self.assertEqual(await self.loop_detector.history(task_id), ())
 
     async def test_after_a_clear_the_detection_starts_over(self):
         (task_id,) = await self.make_tasks(1)

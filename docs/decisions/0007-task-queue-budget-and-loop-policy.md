@@ -69,17 +69,25 @@ Command（PAW-032 の `wait` / `fail`）を発行するのは Orchestrator（PAW
 - `HIGH` > `NORMAL` > `LOW`、同じ優先度では先着順とする。要件に Aging / 飢餓防止の規則がないため**置いていない**。`HIGH` / `NORMAL` が続く間、`LOW` は待ち続ける。
 - 優先度は開始の順序にだけ影響し、実行中の Entry は中断しない（Preemption は Queue の責務ではない）。
 
+### 6. Lease の時計
+
+- Queue が「Lease が切れたか」の判定と、保存する時刻（`enqueued_at`、`claimed_at`、`lease_expires_at`、`finished_at`）に使う時計は、**Database の時計（`now()`）だけ**とする。Worker が各自の時計を渡す方式は、時計が進んでいる Worker や誤った未来の時刻が有効な Lease を奪い、同じ Task を 2 つの Worker で始めさせ得るため採らない。
+- 明示の時刻は Test のための継ぎ目（`TaskQueue(..., allow_explicit_now=True)`）に限る。本番の Queue は呼び出し側の時刻を拒否する。
+- Lease の長さ（既定 60 秒、最大 86,400 秒）は、Preset の数値と同じく仮の値である。
+
 ## 選定理由
 
 - 数値は、1 台の GPU Server で個人〜小規模チームが使うことを想定した、桁を合わせるための仮の値であり、実測に基づかない。
   Benchmark（PAW-016 / 017）と実運用の記録で見直す前提で、データとして 1 か所に置いた。
 - Budget 超過を Loop より優先するのは、Escalation が予算を追加で消費するため。
+- Lease の時計を Database に一本化するのは、複数の Process（Worker）が同じ Entry を巡って競うため、判定の基準が呼び出し側ごとに違うと Lease の排他が成り立たないため。
 
 ## 代替案
 
 - 数値を Preset に固定せず、Admin が設定する: Preset の名前を要件が定める以上、まず既定の値が要る。設定 UI と認可は別の Issue。
 - 超過時にすべて `FAIL` にする: 人間が上限を上げて続けられなくなる。`retries` だけを `FAIL` にした。
 - Aging を入れる: 要件に規則がなく、`LOW` の待ち時間の上限を決める必要がある。
+- 呼び出し側が時刻を渡す（または Process の時計を使う）: 時計のずれや誤った時刻で Lease を奪える。Constructor で時計を注入する案は、Test の呼び出しの書き換えが大きいため、既定で拒否する引数の継ぎ目を選んだ。
 
 ## 承認後の扱い
 
