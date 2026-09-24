@@ -69,7 +69,7 @@ class StalledServerTest(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(await wait_until(lambda: not database._probes, limit=5))
             self.assertEqual(database._probe_connections, {})
             # The slot is free again for the next call.
-            self.assertEqual(database._abortable_slots._value, 5)
+            self.assertEqual(database._abortable_slots.free, 5)
 
     async def test_dispose_aborts_a_running_transaction_within_the_budget(self):
         async with HangingPostgres() as server:

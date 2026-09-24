@@ -28,6 +28,17 @@ never be handed this service**. Even so, the rules do not rest on that:
   approval of a task that can no longer act (``task_state.py``): an approval
   that stayed live is still unusable. Decision 0006, section 9.
 
+The store calls of a human's decision are bounded too: ``approve``, ``reject`` and
+``revoke`` read the approval and then update it, and those two calls share ONE
+``timeout_seconds`` (started with the operation; the step-up has its own limit
+and is not counted). A store that stalls, or runs out of the time, gives the
+typed outcome ``UNAVAILABLE`` and the call that was cut off is not reported as
+done. ``PostgresApprovalStore`` runs these calls on abortable connections, so the
+deadline really ends them (a cancelled query on a pooled session waits for the
+server to confirm, about ten seconds on a stalled one). The cut-off statement
+is atomic and may still be applied by the server: a repeated call shows the
+true state. Decision 0006, section 4.
+
 A user who is not the delegating user is told the approval does not exist (no
 oracle for other users' approvals); the audit row records ``not_authorised``.
 
@@ -41,7 +52,7 @@ import asyncio
 import inspect
 import logging
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -94,6 +105,36 @@ class ApprovalListeners:
                 logger.warning("Approval listener failed (%s)", type(error).__name__)
 
 
+class _StoreDeadline:
+    """ONE time limit for all the store calls of one operation.
+
+    A human's decision (approve, reject, revoke) reads the approval and then
+    updates it: two store calls. Each with its own ``timeout_seconds`` would let
+    one operation take twice the limit, so they share one: it starts with the
+    operation and every call gets what is left of it (a call that finds nothing
+    left is not started). A call that runs out is cancelled, which shuts down
+    the abortable connection of ``PostgresApprovalStore``, and raises
+    ``TimeoutError``. Only the store is counted: the step-up, the listeners and
+    the audit row each have their own limit.
+    """
+
+    def __init__(self, seconds: float) -> None:
+        self._left = seconds
+
+    async def call[T](
+        self, method: Callable[..., Awaitable[T]], *args: object, **kwargs: object
+    ) -> T:
+        if self._left <= 0:
+            raise TimeoutError
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        try:
+            async with asyncio.timeout(self._left):
+                return await method(*args, **kwargs)
+        finally:
+            self._left -= loop.time() - started
+
+
 class ApprovalRevocationError(Exception):
     """The open approvals of an ended task could not be revoked (the store failed).
 
@@ -138,7 +179,7 @@ class ApprovalOutcome(StrEnum):
     NOT_AUTHORISED = "not_authorised"  # kept for the audit reason
     SELF_APPROVAL = "self_approval"  # the requesting agent itself
     STEP_UP_REQUIRED = "step_up_required"
-    UNAVAILABLE = "unavailable"  # the store failed
+    UNAVAILABLE = "unavailable"  # the store failed or did not answer in time
     INVALID = "invalid"  # not a UUID / not a Principal
 
 
@@ -223,8 +264,9 @@ class ApprovalService:
         if not isinstance(approval_id, uuid.UUID) or not isinstance(actor, Principal):
             return ApprovalResult(ApprovalOutcome.INVALID)
         now = self._clock()
+        store = _StoreDeadline(self._timeout_seconds)
         try:
-            record = await self._store.get(approval_id)
+            record = await store.call(self._store.get, approval_id)
         except Exception as error:
             logger.error("Approval lookup failed (%s)", type(error).__name__)
             return ApprovalResult(ApprovalOutcome.UNAVAILABLE, approval_id)
@@ -241,8 +283,8 @@ class ApprovalService:
             )
         else:
             try:
-                revoked = await self._store.revoke(
-                    approval_id, actor_id=actor.user_id, now=now
+                revoked = await store.call(
+                    self._store.revoke, approval_id, actor_id=actor.user_id, now=now
                 )
             except Exception as error:
                 logger.error("Approval revoke failed (%s)", type(error).__name__)
@@ -416,13 +458,16 @@ class ApprovalService:
         ):
             return ApprovalResult(ApprovalOutcome.INVALID)
         now = self._clock()
+        store = _StoreDeadline(self._timeout_seconds)
         try:
-            record = await self._store.get(approval_id)
+            record = await store.call(self._store.get, approval_id)
         except Exception as error:
             logger.error("Approval lookup failed (%s)", type(error).__name__)
             return ApprovalResult(ApprovalOutcome.UNAVAILABLE, approval_id)
 
-        internal = await self._outcome(record, approval_id, approver, approve, now)
+        internal = await self._outcome(
+            record, approval_id, approver, approve, now, store
+        )
         # A stranger is told "not found", not that the approval exists.
         outcome = (
             ApprovalOutcome.NOT_FOUND
@@ -459,6 +504,7 @@ class ApprovalService:
         approver: Principal,
         approve: bool,
         now: datetime,
+        store: _StoreDeadline,
     ) -> ApprovalOutcome:
         if record is None:
             return ApprovalOutcome.NOT_FOUND
@@ -477,7 +523,8 @@ class ApprovalService:
                 return ApprovalOutcome.STEP_UP_REQUIRED
             stepped_up = True
         try:
-            result = await self._store.decide(
+            result = await store.call(
+                self._store.decide,
                 approval_id,
                 approver_id=approver.user_id,
                 approve=approve,

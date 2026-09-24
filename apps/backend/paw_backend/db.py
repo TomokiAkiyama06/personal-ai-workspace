@@ -54,6 +54,82 @@ class DatabaseNotConfiguredError(RuntimeError):
     """``PAW_DATABASE_URL`` is not set."""
 
 
+class DatabaseDisposedError(RuntimeError):
+    """``dispose()`` ran (or is running): abortable work is not started.
+
+    Raised by ``fetch_abortable`` / ``run_abortable`` to a call that was waiting
+    for a connection slot when ``dispose()`` began, or that started while it ran.
+    Nothing of the call was executed.
+    """
+
+
+class _Slots:
+    """A bounded counting gate whose waiters can be failed all at once.
+
+    Like ``asyncio.BoundedSemaphore`` (first come, first served; a cancelled
+    waiter neither keeps nor loses a slot; releasing a slot nobody holds is an
+    error), plus ``fail_waiters``, which ``Database.dispose()`` uses to end
+    every wait with an error instead of leaving the waiters to start work once a
+    running call gives its slot back.
+    """
+
+    def __init__(self, size: int) -> None:
+        self._size = size
+        self._in_use = 0  # slots taken, including one handed to a waiter
+        # The waiting callers, oldest first (a dict is an ordered set here).
+        self._waiters: dict[asyncio.Future[None], None] = {}
+
+    @property
+    def free(self) -> int:
+        return self._size - self._in_use
+
+    @property
+    def waiting(self) -> int:
+        return len(self._waiters)
+
+    async def acquire(self) -> None:
+        # A slot that is handed to a waiter stays "in use", so there is never a
+        # free slot while somebody waits: a new call cannot overtake a waiter.
+        if self._in_use < self._size:
+            self._in_use += 1
+            return
+        waiter = asyncio.get_running_loop().create_future()
+        self._waiters[waiter] = None
+        try:
+            await waiter
+        except asyncio.CancelledError:
+            if (
+                waiter.done()
+                and not waiter.cancelled()
+                and waiter.exception() is None  # not one that was failed
+            ):
+                # The slot was handed to this waiter just before the
+                # cancellation: nobody will use it, so give it back (once).
+                self.release()
+            raise
+        finally:
+            self._waiters.pop(waiter, None)
+
+    def release(self) -> None:
+        if self._in_use == 0:
+            raise ValueError("A slot that nobody holds was released")
+        while self._waiters:
+            waiter = next(iter(self._waiters))
+            del self._waiters[waiter]
+            if not waiter.done():  # not one that was cancelled a moment ago
+                waiter.set_result(None)  # the slot moves to it: still in use
+                return
+        self._in_use -= 1
+
+    def fail_waiters(self, make_error: Callable[[], Exception]) -> None:
+        """Fail every waiting caller with its own error; held slots are kept."""
+        waiters = list(self._waiters)
+        self._waiters.clear()
+        for waiter in waiters:
+            if not waiter.done():
+                waiter.set_exception(make_error())
+
+
 class Database:
     """Owns the SQLAlchemy async engine.
 
@@ -76,7 +152,12 @@ class Database:
         self._recent: tuple[float, DatabaseStatus] | None = None
         # Abortable statements use connections outside the pool: at most as many
         # at once as the pool would allow, so a burst cannot exhaust the server.
-        self._abortable_slots = asyncio.Semaphore(settings.database_pool_size)
+        self._abortable_slots = _Slots(settings.database_pool_size)
+        # `dispose()`: how many are running, and how many have started. A call
+        # that waited for a slot across the start of one must not run (see
+        # `_acquire_slot`).
+        self._disposing = 0
+        self._disposals = 0
         # The engine of `run_abortable`: no pool, every transaction connects
         # through `_connect_abortable`, which registers the driver connection.
         self._abortable_engine: AsyncEngine | None = None
@@ -146,6 +227,24 @@ class Database:
             self._probe_connections.pop(probe, None)
             await connection.close()
 
+    async def _acquire_slot(self) -> None:
+        """Wait for a free slot of the abortable connections; take it.
+
+        The wait is part of the abortable work: cancelling the caller ends it
+        without taking a slot, and ``dispose()`` fails it with
+        ``DatabaseDisposedError`` (no slot is kept). A call is also refused
+        while ``dispose()`` runs, and one that was given a slot just before
+        ``dispose()`` began gives it back, so that no call starts work after
+        ``dispose()`` has taken stock of what to abort.
+        """
+        if self._disposing:
+            raise DatabaseDisposedError("The database is being disposed")
+        disposals = self._disposals
+        await self._abortable_slots.acquire()
+        if self._disposals != disposals:
+            self._abortable_slots.release()
+            raise DatabaseDisposedError("The database was disposed while waiting")
+
     async def fetch_abortable(
         self,
         sql: str,
@@ -163,9 +262,10 @@ class Database:
         query (see ``_abort``). The limit is ONE deadline for the whole call:
         waiting for a free slot (see ``__init__``) and running the statement
         share it, so a call never takes longer than ``timeout_seconds``. Raises
-        ``TimeoutError`` at the deadline and the driver's error if the
-        connection fails. ``params`` are bound by the driver (``%(name)s``
-        placeholders), never formatted into ``sql``.
+        ``TimeoutError`` at the deadline, ``DatabaseDisposedError`` if
+        ``dispose()`` ran while it waited (see ``_acquire_slot``) and the
+        driver's error if the connection fails. ``params`` are bound by the
+        driver (``%(name)s`` placeholders), never formatted into ``sql``.
 
         A write that is aborted may or may not have been committed: the caller
         learns only that it did not finish in time.
@@ -181,7 +281,7 @@ class Database:
         # the statement share the limit (the query gets only what is left).
         loop = asyncio.get_running_loop()
         deadline = loop.time() + limit
-        await asyncio.wait_for(self._abortable_slots.acquire(), limit)
+        await asyncio.wait_for(self._acquire_slot(), limit)
         try:
             query = asyncio.create_task(self._query(sql, params))
             self._probes.add(query)
@@ -232,11 +332,12 @@ class Database:
         deadline of its own (a caller that needs one wraps the call in
         ``asyncio.timeout``: the expiry cancels the caller and so aborts the
         connection). Waiting for a free slot (see ``__init__``) is cancellable
-        the same way.
+        the same way, and ``dispose()`` fails it with ``DatabaseDisposedError``
+        (see ``_acquire_slot``).
         """
         if not self.configured:
             raise DatabaseNotConfiguredError("PAW_DATABASE_URL is not set")
-        await self._abortable_slots.acquire()
+        await self._acquire_slot()
         try:
             transaction = asyncio.create_task(self._run_transaction(work))
             self._probes.add(transaction)
@@ -383,8 +484,24 @@ class Database:
         """Stop readiness probes and abortable work, close the pool, in the budget.
 
         Abortable work (``fetch_abortable`` and ``run_abortable``) that is still
-        running is aborted like a readiness probe.
+        running is aborted like a readiness probe. A call that is still waiting
+        for a slot fails with ``DatabaseDisposedError`` at once (it has not
+        started anything), and so does one that starts while this runs: no
+        abortable work begins after the disposal took stock of what to stop.
+        Once ``dispose()`` has returned the object is usable again (the engines
+        are created on first use).
         """
+        self._disposals += 1
+        self._disposing += 1
+        try:
+            self._abortable_slots.fail_waiters(
+                lambda: DatabaseDisposedError("The database was disposed while waiting")
+            )
+            await self._stop_work_and_close_engines()
+        finally:
+            self._disposing -= 1
+
+    async def _stop_work_and_close_engines(self) -> None:
         probes = set(self._probes)
         for probe in probes:
             self._abort(probe)

@@ -16,10 +16,12 @@ failed or cancelled task can be retried or restarted later; that makes the task
 run asks again).
 
 That check is only the early answer. It can be overtaken by the end of the task
-(a terminal transition committing between the check and the use), so the store
-checks again **in the transaction that consumes the approval**, reading the task
-row locked (:func:`lock_task_activity`, ``ApprovalStore.consume(...,
-require_active_task=True)``): the use and the end are then ordered, never crossed.
+(a terminal transition committing between the check and the insert of the
+request, or the use of the approval), so the store checks again **in the
+transaction that inserts the request or consumes the approval**, reading the
+task row locked (:func:`lock_task_activity`, ``ApprovalStore.open_request(...,
+require_active_task=True)`` and ``consume(..., require_active_task=True)``): the
+insert or the use and the end are then ordered, never crossed.
 
 The default provider knows no task, so nothing that needs an approval may run:
 fail closed until a real provider (:class:`PostgresTaskActivity`) is installed,

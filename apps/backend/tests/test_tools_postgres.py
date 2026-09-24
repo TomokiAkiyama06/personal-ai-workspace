@@ -11,6 +11,7 @@ the single winner among concurrent callers on separate connection pools.
 import asyncio
 import contextlib
 import hashlib
+import time
 import unittest
 import uuid
 from datetime import timedelta
@@ -19,7 +20,8 @@ import psycopg.errors
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
-from paw_backend.authz import SystemRole
+from paw_backend.authz import InMemoryAuditSink, SystemRole
+from paw_backend.db import Database
 from paw_backend.tasks import (
     TERMINAL_STATES,
     Actor,
@@ -35,6 +37,7 @@ from paw_backend.tools import (
     ApprovalStatus,
     BrokerReason,
     ConsumeOutcome,
+    DecideOutcome,
     OpenLimits,
     OpenOutcome,
     PostgresApprovalStore,
@@ -43,6 +46,8 @@ from paw_backend.tools import (
     Verdict,
 )
 
+from .fake_postgres import HangingPostgres
+from .support import make_settings
 from .task_support import migrate, new_database, requires_postgres
 from .tools_store_contract import (
     HOUR,
@@ -849,20 +854,16 @@ class CrossProcessTest(PostgresTestCase):
             Harness(approvals=store, clock=clock, max_pending_approvals=4)
             for store in stores
         ]
-        decisions = await asyncio.gather(
-            *(
-                harnesses[i % 3].broker.request(
-                    make_call(
-                        "repo.delete_tree",
-                        {"path": f"{ROOT}/cap-{i}"},
-                        context=make_context(task_id=uuid.uuid4()),
-                    )
-                )
-                for i in range(1)
+        # tasks the database has: the store checks the task when it opens a request
+        single = await harnesses[0].broker.request(
+            make_call(
+                "repo.delete_tree",
+                {"path": f"{ROOT}/cap-0"},
+                context=await self.live_context(),
             )
         )
-        self.assertEqual(decisions[0].verdict, Verdict.NEEDS_APPROVAL)
-        task_context = make_context(task_id=uuid.uuid4())
+        self.assertEqual(single.verdict, Verdict.NEEDS_APPROVAL)
+        task_context = await self.live_context()
         decisions = await asyncio.gather(
             *(
                 harnesses[i % 3].broker.request(
@@ -1028,6 +1029,32 @@ PATHS_TO_STATES = {
     TaskState.FAILED: [(C.FAIL, {})],
     TaskState.CANCELLED: [(C.CANCEL, {})],
 }
+
+
+class LockWaits:
+    """Drive transactions in a fixed order: a step starts only once the previous
+    one is provably blocked on a lock (``pg_stat_activity``)."""
+
+    async def lock_waiters(self) -> int:
+        async with self.database.engine.begin() as connection:
+            return (
+                await connection.execute(
+                    text(
+                        "SELECT count(*) FROM pg_stat_activity WHERE datname = "
+                        "current_database() AND wait_event_type = 'Lock'"
+                    )
+                )
+            ).scalar_one()
+
+    async def wait_for_lock_waiters(self, count: int, *unless_done) -> None:
+        """Until ``count`` backends wait on a lock, or one of ``unless_done`` (a
+        task that should have been blocked) has finished: then the caller's
+        assertion says what went wrong, instead of a time-out."""
+        async with asyncio.timeout(10):
+            while await self.lock_waiters() < count:
+                if any(task.done() for task in unless_done):
+                    return
+                await asyncio.sleep(0.02)
 
 
 class TaskFixture(PostgresTestCase):
@@ -1303,7 +1330,7 @@ class EndsTheTaskAfterAnswering:
 
 
 @requires_postgres
-class ConsumeRacesWithTaskEndTest(TaskFixture):
+class ConsumeRacesWithTaskEndTest(LockWaits, TaskFixture):
     """Using an approval and the end of its task are ordered, never crossed.
 
     Finding of the review of PR #74: the task-state check and the consumption
@@ -1342,27 +1369,6 @@ class ConsumeRacesWithTaskEndTest(TaskFixture):
 
     async def status(self):
         return (await self.store.get(self.approval_id)).status
-
-    async def lock_waiters(self) -> int:
-        async with self.database.engine.begin() as connection:
-            return (
-                await connection.execute(
-                    text(
-                        "SELECT count(*) FROM pg_stat_activity WHERE datname = "
-                        "current_database() AND wait_event_type = 'Lock'"
-                    )
-                )
-            ).scalar_one()
-
-    async def wait_for_lock_waiters(self, count: int, *unless_done) -> None:
-        """Until ``count`` backends wait on a lock, or one of ``unless_done`` (a
-        task that should have been blocked) has finished: then the caller's
-        assertion says what went wrong, instead of a time-out."""
-        async with asyncio.timeout(10):
-            while await self.lock_waiters() < count:
-                if any(task.done() for task in unless_done):
-                    return
-                await asyncio.sleep(0.02)
 
     async def test_a_task_that_ends_after_the_check_cannot_have_its_approval_used(
         self,
@@ -1471,6 +1477,171 @@ class ConsumeRacesWithTaskEndTest(TaskFixture):
         # and every other caller of ``consume``)
         new = await self.approved(ended)
         self.assertEqual(await self.use(new), ConsumeOutcome.CONSUMED)
+
+
+@requires_postgres
+class OpenRacesWithTaskEndTest(LockWaits, TaskFixture):
+    """Opening an approval request and the end of its task are ordered, never crossed.
+
+    Finding of the review of PR #74: the broker read the task as ``ACTIVE`` and
+    the request was inserted afterwards, in another transaction. A terminal
+    transition that committed in between had its revocation (which runs after
+    the commit) find nothing, and the request created next was open for an
+    ended task: it could be approved, and once the task was started again a
+    worker could use it before the listener of that transition revoked it. The
+    insert now reads the task row **locked** in its own transaction. Each test
+    drives real transactions in a fixed order.
+    """
+
+    async def wire(self):
+        self.store = PostgresApprovalStore(self.new_database())
+        self.provider = EndsTheTaskAfterAnswering(
+            PostgresTaskActivity(self.new_database()), self.end_the_task
+        )
+        self.h = Harness(
+            approvals=self.store, clock=Clock(), task_activity=self.provider
+        )
+        # no listener: the revocation after the end is run by the test
+        self.tasks = TaskService(self.new_database())
+        self.task_id = await self.new_task()
+        self.context = make_context(task_id=self.task_id)
+
+    async def end_the_task(self):
+        await self.tasks.execute(self.task_id, C.CANCEL, actor=Actor.system())
+
+    async def request(self, path="build"):
+        return await self.h.broker.request(
+            make_call(
+                "repo.delete_tree", {"path": f"{ROOT}/{path}"}, context=self.context
+            )
+        )
+
+    async def statuses(self, task_id=None):
+        async with self.database.engine.begin() as connection:
+            rows = await connection.execute(
+                text(
+                    "SELECT status FROM tool_approvals WHERE task_id = :id "
+                    "ORDER BY created_at, id"
+                ),
+                {"id": self.task_id if task_id is None else task_id},
+            )
+            return [ApprovalStatus(row[0]) for row in rows]
+
+    async def test_a_task_that_ends_after_the_check_gets_no_request(self):
+        await self.wire()
+        self.provider.armed = True
+        asked = await self.request()
+        # the check said ACTIVE and the task ended before the insert: refused,
+        # and nothing was created for the ended task
+        self.assertEqual(
+            (asked.verdict, asked.reason, asked.approval_id, asked.invocation),
+            (Verdict.DENY, BrokerReason.TASK_NOT_ACTIVE, None, None),
+        )
+        self.assertEqual(
+            await self.provider.inner.check(self.task_id), TaskActivity.ENDED
+        )
+        self.assertEqual(await self.statuses(), [])
+        # the revocation that follows the end has nothing to take away, and
+        # there is nothing for a task that is started again to pick up
+        self.assertEqual(await self.h.service.revoke_task(self.task_id), 0)
+        await self.drive(self.task_id, [(C.RESTART, {})])
+        self.assertEqual(await self.statuses(), [])
+
+    async def test_a_request_waits_for_an_end_that_is_in_flight_and_then_refuses(self):
+        await self.wire()
+        async with self.database.engine.connect() as ending:
+            # the terminal transition holds the task row and has not committed
+            await ending.execute(
+                text("UPDATE tasks SET state = 'cancelled' WHERE id = :id"),
+                {"id": self.task_id},
+            )
+            asked = asyncio.create_task(self.request())
+            # (the broker read ``ACTIVE``: the end is not committed yet)
+            await self.wait_for_lock_waiters(1, asked)
+            self.assertFalse(asked.done(), "the request did not wait for the end")
+            await ending.commit()
+        decision = await asked
+        self.assertEqual(
+            (decision.verdict, decision.reason, decision.approval_id),
+            (Verdict.DENY, BrokerReason.TASK_NOT_ACTIVE, None),
+        )
+        self.assertEqual(await self.statuses(), [])
+
+    async def test_an_end_waits_for_a_request_in_flight_and_its_revocation_finds_it(
+        self,
+    ):
+        await self.wire()
+        async with self.database.engine.connect() as holder:
+            # a lock on the table blocks the insert of the request, which has
+            # by then read the task (and holds its lock)
+            await holder.execute(
+                text("LOCK TABLE tool_approvals IN SHARE ROW EXCLUSIVE MODE")
+            )
+            asked = asyncio.create_task(self.request())
+            await self.wait_for_lock_waiters(1, asked)
+            end = asyncio.create_task(self.end_the_task())
+            await self.wait_for_lock_waiters(2, asked, end)
+            self.assertFalse(end.done(), "the end did not wait for the request")
+            await holder.rollback()
+        decision = await asked
+        await end
+        # the request came first, so it stands; the end came second and the
+        # revocation after it finds the request and takes it away
+        self.assertEqual(
+            (decision.verdict, decision.reason),
+            (Verdict.NEEDS_APPROVAL, BrokerReason.APPROVAL_REQUIRED),
+        )
+        self.assertEqual(await self.statuses(), [ApprovalStatus.PENDING])
+        self.assertEqual(await self.h.service.revoke_task(self.task_id), 1)
+        self.assertEqual(await self.statuses(), [ApprovalStatus.REVOKED])
+
+    async def test_the_store_checks_the_task_only_when_asked_to_and_reads_it_live(
+        self,
+    ):
+        await self.wire()
+        alive = self.task_id
+        ended = await self.new_task()
+        await self.tasks.execute(ended, C.CANCEL, actor=Actor.system())
+        with_flag = {"require_active_task": True}
+
+        async def open_for(task_id, **arguments):
+            new = new_approval(task_id=task_id)
+            opened = await self.store.open_request(
+                new, now=NOW, limits=LIMITS, **arguments
+            )
+            return new, opened
+
+        # a live task: created
+        first, opened = await open_for(alive, **with_flag)
+        self.assertEqual(opened.outcome, OpenOutcome.CREATED)
+        # an ended task, and a task the database does not have: nothing is
+        # created, and nothing is written for it
+        for label, task_id, outcome in (
+            ("ended", ended, OpenOutcome.TASK_NOT_ACTIVE),
+            ("unknown", uuid.uuid4(), OpenOutcome.TASK_UNKNOWN),
+        ):
+            with self.subTest(label):
+                new, opened = await open_for(task_id, **with_flag)
+                self.assertEqual((opened.outcome, opened.record), (outcome, None))
+                self.assertIsNone(await self.store.get(new.approval_id))
+                self.assertEqual(await self.store.history(new.approval_id), [])
+                self.assertEqual(await self.statuses(task_id), [])
+        # the request that was open when its task ended (the revocation failed)
+        # is not handed out again either ...
+        await self.tasks.execute(alive, C.CANCEL, actor=Actor.system())
+        again = new_approval(task_id=alive, call_hash=first.call_hash)
+        handed = await self.store.open_request(
+            again, now=NOW, limits=LIMITS, **with_flag
+        )
+        self.assertEqual(
+            (handed.outcome, handed.record), (OpenOutcome.TASK_NOT_ACTIVE, None)
+        )
+        # ... and without the flag the store looks at no task (the contract
+        # tests and every other caller of ``open_request``)
+        handed = await self.store.open_request(again, now=NOW, limits=LIMITS)
+        self.assertEqual(handed.outcome, OpenOutcome.EXISTING)
+        new, opened = await open_for(ended)
+        self.assertEqual(opened.outcome, OpenOutcome.CREATED)
 
 
 @requires_postgres
@@ -1583,3 +1754,331 @@ class RevocationDeadlineTest(TaskFixture):
                 [("requested", None), ("revoked", None)],
             )
         self.assertEqual(await self.store.revoke_task(self.task_id, now=NOW), [])
+
+
+class SlowDatabase:
+    """Answers each ``fetch_abortable`` from a script after ``step`` seconds, and
+    records the time limit each statement was given (it does not enforce it)."""
+
+    def __init__(self, script, step=0.0):
+        self.script, self.step, self.timeouts = list(script), step, []
+
+    async def fetch_abortable(self, sql, params=None, *, timeout_seconds=None):
+        self.timeouts.append(timeout_seconds)
+        await asyncio.sleep(self.step)
+        return self.script.pop(0)
+
+    async def execute_abortable(self, sql, params=None, *, timeout_seconds=None):
+        await self.fetch_abortable(sql, params, timeout_seconds=timeout_seconds)
+
+
+def approval_row(approval_id, **overrides):
+    """A row of ``tool_approvals`` as the abortable connection returns it."""
+    values = {
+        "id": approval_id,
+        "task_id": TASK,
+        "project_id": P1,
+        "agent_id": AGENT,
+        "requester_user_id": U1,
+        "tool": "repo.delete_tree",
+        "level": "approval",
+        "call_hash": "0" * 64,
+        "targets": [{"kind": "path", "value": f"{ROOT}/x"}],
+        "summary": [{"name": "path", "kind": "path", "value": f"{ROOT}/x"}],
+        "status": "pending",
+        "created_at": NOW - HOUR,
+        "expires_at": NOW + HOUR,
+        "approver_id": None,
+        "decided_at": None,
+        "consumed_at": None,
+        "step_up_verified": False,
+        "revoked_at": None,
+        "revoked_by": None,
+    }
+    values.update(overrides)
+    return tuple(values.values())
+
+
+class DecisionStatementsShareOneDeadlineTest(unittest.IsolatedAsyncioTestCase):
+    """The statements of one ``get`` / ``decide`` / ``revoke`` share one limit.
+
+    ``decide`` and ``revoke`` are one statement, plus (only when it matched
+    nothing) the read that explains why, plus for an expired approval the marking
+    as expired: each was given the full limit, so a call could take three times
+    it. They now get what is left of ONE limit, started with the call.
+    """
+
+    LIMIT = 1.0
+
+    def store(self, script, step, limit=LIMIT):
+        database = SlowDatabase(script, step)
+        return database, PostgresApprovalStore(database, decision_timeout_seconds=limit)
+
+    async def test_each_statement_gets_what_is_left_of_one_limit(self):
+        approval_id = uuid.uuid4()
+        expired = approval_row(approval_id, expires_at=NOW - timedelta(minutes=1))
+        cases = {
+            # the update matches nothing, the read finds the approval expired,
+            # and it is marked as expired: three statements
+            "decide": lambda store: store.decide(
+                approval_id, approver_id=U1, approve=True, now=NOW
+            ),
+            # the update matches nothing and the read explains why: two
+            "revoke": lambda store: store.revoke(approval_id, actor_id=U1, now=NOW),
+        }
+        for name, call in cases.items():
+            script = [[], [expired], []] if name == "decide" else [[], [expired]]
+            with self.subTest(call=name):
+                database, store = self.store(script, step=0.2)
+                result = await call(store)
+                self.assertEqual(
+                    getattr(result, "outcome", result).value,
+                    "expired" if name == "decide" else "not_open",
+                )
+                self.assertEqual(len(database.timeouts), len(script))
+                first, *rest = database.timeouts
+                self.assertLessEqual(first, self.LIMIT)
+                self.assertGreater(first, self.LIMIT - 0.1)
+                # every statement gets less than the one before by what that one
+                # took (0.2 s), not the limit again
+                for before, after in zip(database.timeouts, rest, strict=False):
+                    self.assertLess(after, before - 0.15)
+
+    async def test_a_limit_that_the_first_statement_used_up_starts_no_second(self):
+        approval_id = uuid.uuid4()
+        # the first statement takes longer than the limit (a stand-in that does
+        # not enforce it, as the real connection would)
+        for name, call in {
+            "decide": lambda store: store.decide(
+                approval_id, approver_id=U1, approve=True, now=NOW
+            ),
+            "revoke": lambda store: store.revoke(approval_id, actor_id=U1, now=NOW),
+        }.items():
+            with self.subTest(call=name):
+                database, store = self.store([[], []], step=0.4, limit=0.3)
+                with self.assertRaises(TimeoutError):
+                    await call(store)
+                self.assertEqual(len(database.timeouts), 1)  # the read never started
+
+    async def test_the_limit_must_be_positive(self):
+        for value in (0, -1, float("nan")):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    PostgresApprovalStore(
+                        SlowDatabase([]), decision_timeout_seconds=value
+                    )
+
+
+def stalled_settings(server):
+    return make_settings(
+        database_url=f"postgresql://paw:pw@127.0.0.1:{server.port}/paw"
+    )
+
+
+class StalledServerTest(unittest.IsolatedAsyncioTestCase):
+    """A PostgreSQL that accepts the connection and then answers nothing.
+
+    Finding of the third review of PR #74: the store calls of a human's decision
+    ran on pooled sessions with no deadline, and cancelling a query on a pooled
+    session waits for the server to confirm the cancel (about ten seconds with
+    this server, which never does), so not even ``asyncio.timeout`` bounded them.
+    They now run on abortable connections whose socket is shut down at the
+    deadline. No PostgreSQL is needed for these tests.
+    """
+
+    LIMIT = 0.3
+    FAR = 5  # far above the limit, far below the ten seconds of a pooled cancel
+
+    async def wire(self, server):
+        database = Database(stalled_settings(server))
+        self.addAsyncCleanup(database.dispose)
+        return PostgresApprovalStore(database, decision_timeout_seconds=self.LIMIT)
+
+    async def test_the_store_calls_of_a_decision_give_up_at_their_deadline(self):
+        approval_id = uuid.uuid4()
+        async with HangingPostgres() as server:
+            store = await self.wire(server)
+            for name, call in {
+                "get": lambda: store.get(approval_id),
+                "decide": lambda: store.decide(
+                    approval_id, approver_id=U1, approve=True, now=NOW
+                ),
+                "revoke": lambda: store.revoke(approval_id, actor_id=U1, now=NOW),
+            }.items():
+                with self.subTest(call=name):
+                    started = time.monotonic()
+                    with self.assertRaises(TimeoutError):
+                        async with asyncio.timeout(20):
+                            await call()
+                    self.assertLess(time.monotonic() - started, self.FAR)
+
+    async def test_a_decision_returns_unavailable_when_the_server_stalls(self):
+        approval_id = uuid.uuid4()
+        async with HangingPostgres() as server:
+            store = await self.wire(server)
+            sink = InMemoryAuditSink()
+            service = ApprovalService(
+                store,
+                sink,
+                step_up=StepUp(True),
+                clock=Clock(),
+                timeout_seconds=self.LIMIT,
+            )
+            user = principal(SystemRole.USER, U1)
+            for operation in ("approve", "reject", "revoke"):
+                with self.subTest(operation=operation):
+                    started = time.monotonic()
+                    with self.assertLogs("paw_backend", "ERROR") as logs:
+                        result = await asyncio.wait_for(
+                            getattr(service, operation)(approval_id, user), 20
+                        )
+                    self.assertLess(time.monotonic() - started, self.FAR)
+                    self.assertEqual(
+                        (result.outcome, result.approval_id),
+                        (ApprovalOutcome.UNAVAILABLE, approval_id),
+                    )
+                    self.assertIn("TimeoutError", "\n".join(logs.output))
+            self.assertEqual(sink.events, [])  # nothing to attribute a row to
+
+
+@requires_postgres
+class DecisionDeadlineTest(LockWaits, PostgresTestCase):
+    """A decision that meets a stalled statement returns, and stays atomic.
+
+    Here the stall is a row lock that another transaction holds, which makes the
+    UPDATE wait exactly like a stalled statement would. The statement that was
+    abandoned may still finish once the lock is released (the server does not
+    notice the closed socket before it has something to send), so what is
+    asserted is not "nothing changed" but that the change is all or nothing:
+    the approval and its history row agree, and repeating the call says which.
+    """
+
+    LIMIT = 0.5
+    GUARD = 10  # far above the limit: only reached by a call that ignores it
+
+    async def wire(self):
+        self.store = PostgresApprovalStore(
+            self.new_database(), decision_timeout_seconds=self.LIMIT
+        )
+        self.sink = InMemoryAuditSink()
+        self.service = ApprovalService(
+            self.store,
+            self.sink,
+            step_up=StepUp(True),
+            clock=Clock(),
+            timeout_seconds=self.LIMIT,
+        )
+        self.new = new_approval()
+        await self.store.open_request(self.new, now=NOW, limits=LIMITS)
+        self.user = principal(SystemRole.USER, U1)
+
+    @contextlib.asynccontextmanager
+    async def stalled(self):
+        """Hold the approval row, as a statement that is stalled would."""
+        async with self.database.engine.connect() as holder:
+            await holder.execute(
+                text("SELECT id FROM tool_approvals WHERE id = :id FOR UPDATE"),
+                {"id": self.new.approval_id},
+            )
+            try:
+                yield
+            finally:
+                await holder.rollback()
+
+    async def settled(self):
+        """Wait until the abandoned statement has left the database."""
+        async with asyncio.timeout(self.GUARD):
+            while True:
+                if await self.lock_waiters() == 0:
+                    return
+                await asyncio.sleep(0.02)
+
+    async def state(self):
+        record = await self.store.get(self.new.approval_id)
+        kinds = [h.kind.value for h in await self.store.history(self.new.approval_id)]
+        return record.status, kinds
+
+    async def test_a_decision_meets_a_stalled_statement_in_time(self):
+        expected = {
+            # what the abandoned statement leaves, whichever way it ends: the
+            # approval and its history row agree
+            "approve": {
+                (ApprovalStatus.PENDING, ("requested",)),
+                (ApprovalStatus.APPROVED, ("requested", "approved")),
+            },
+            "reject": {
+                (ApprovalStatus.PENDING, ("requested",)),
+                (ApprovalStatus.REJECTED, ("requested", "rejected")),
+            },
+            "revoke": {
+                (ApprovalStatus.PENDING, ("requested",)),
+                (ApprovalStatus.REVOKED, ("requested", "revoked")),
+            },
+        }
+        for operation, allowed in expected.items():
+            with self.subTest(operation=operation):
+                await self.wire()
+                started = time.monotonic()
+                async with self.stalled():
+                    with self.assertLogs("paw_backend", "ERROR") as logs:
+                        async with asyncio.timeout(self.GUARD):
+                            result = await getattr(self.service, operation)(
+                                self.new.approval_id, self.user
+                            )
+                    elapsed = time.monotonic() - started
+                self.assertLess(elapsed, self.GUARD / 2)
+                self.assertEqual(result.outcome, ApprovalOutcome.UNAVAILABLE)
+                self.assertIn("TimeoutError", "\n".join(logs.output))
+                self.assertEqual(
+                    [(e.action, e.decision, e.reason) for e in self.sink.events],
+                    [(f"tool.approval.{operation}", "deny", "unavailable")],
+                )
+                await self.settled()
+                status, kinds = await self.state()
+                self.assertIn((status, tuple(kinds)), allowed)
+                # repeating the call says which it was, and the pool still works
+                if status is ApprovalStatus.PENDING:
+                    outcome = {
+                        "approve": ApprovalOutcome.APPROVED,
+                        "reject": ApprovalOutcome.REJECTED,
+                        "revoke": ApprovalOutcome.REVOKED,
+                    }[operation]
+                else:
+                    outcome = (
+                        ApprovalOutcome.NOT_OPEN
+                        if operation == "revoke"
+                        else ApprovalOutcome.NOT_PENDING
+                    )
+                again = await getattr(self.service, operation)(
+                    self.new.approval_id, self.user
+                )
+                self.assertEqual(again.outcome, outcome)
+
+    async def test_a_decision_returns_the_stored_record_and_writes_its_history(self):
+        # (the contract tests check every outcome; this one reads back what the
+        # single statement wrote and returned)
+        await self.wire()
+        for approve in (True, False):
+            new = new_approval()
+            await self.store.open_request(new, now=NOW, limits=LIMITS)
+            decided = await self.store.decide(
+                new.approval_id, approver_id=U1, approve=approve, now=NOW
+            )
+            self.assertEqual(decided.outcome, DecideOutcome.DECIDED)
+            self.assertEqual(
+                (
+                    decided.record.status,
+                    decided.record.approver_id,
+                    decided.record.decided_at,
+                ),
+                (
+                    ApprovalStatus.APPROVED if approve else ApprovalStatus.REJECTED,
+                    U1,
+                    NOW,
+                ),
+            )
+            history = await self.store.history(new.approval_id)
+            self.assertEqual(
+                [(h.kind.value, h.actor_user_id) for h in history],
+                [("requested", None), ("approved" if approve else "rejected", U1)],
+            )

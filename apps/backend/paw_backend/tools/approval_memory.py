@@ -84,9 +84,23 @@ class InMemoryApprovalStore:
         return record
 
     async def open_request(
-        self, new: NewApproval, *, now: datetime, limits: OpenLimits
+        self,
+        new: NewApproval,
+        *,
+        now: datetime,
+        limits: OpenLimits,
+        require_active_task: bool = False,
     ) -> OpenResult:
         async with self._lock:
+            if require_active_task and self._task_activity is not None:
+                # Under the store's lock, like the check of ``consume``.
+                activity = await self._task_activity.check(new.task_id)
+                if activity is not TaskActivity.ACTIVE:
+                    return OpenResult(
+                        OpenOutcome.TASK_NOT_ACTIVE
+                        if activity is TaskActivity.ENDED
+                        else OpenOutcome.TASK_UNKNOWN
+                    )
             for record in list(self._records.values()):
                 if record.call_hash != new.call_hash:
                     continue

@@ -22,6 +22,10 @@ from paw_backend.tasks import (
     TaskStepError,
     ToolInvocationStatus,
 )
+from paw_backend.tasks.service import (
+    MAX_ACTIVE_TOOL_INVOCATIONS,
+    MAX_RESTORE_TOOL_INVOCATIONS,
+)
 
 from .task_support import PostgresTaskTestCase, requires_postgres
 
@@ -154,6 +158,139 @@ class ToolInvocationTest(PostgresTaskTestCase):
         names = [call.tool_name for call in snapshot.tool_invocations]
         self.assertEqual(len(names), 100)
         self.assertEqual((names[0], names[-1]), ("tool-6", "tool-105"))
+
+    async def test_restore_keeps_a_started_call_older_than_the_latest_hundred(self):
+        # The oldest call is still started; 150 calls that finished later must not
+        # push it out of the restored list (a backend must be able to resume or
+        # abort every call that is still in flight).
+        task_id, step = await self.running_step()
+        active = await self.service.begin_tool_invocation(
+            task_id, step_id=step.id, tool_name="long-running"
+        )
+        await self.database_execute(
+            "INSERT INTO task_tool_invocations "
+            "(id, task_id, step_id, tool_name, status, started_at, finished_at) "
+            "SELECT gen_random_uuid(), :t, :s, 'tool-' || n, 'succeeded', "
+            "now() + n * interval '1 millisecond', "
+            "now() + n * interval '1 millisecond' "
+            "FROM generate_series(1, 150) AS n",
+            t=task_id,
+            s=step.id,
+        )
+        snapshot = await self.service.restore(task_id)
+        calls = snapshot.tool_invocations
+        self.assertEqual(len(calls), 101)
+        self.assertEqual(calls[0], active)
+        self.assertEqual(calls[0].status, T.STARTED)
+        self.assertEqual(calls[1].tool_name, "tool-51")
+        self.assertEqual(calls[-1].tool_name, "tool-150")
+
+    async def test_restore_returns_every_started_call_of_the_step(self):
+        # Far more started calls than the finished history keeps, mixed with newer
+        # and older finished ones: none of the started ones may be missing.
+        task_id, step = await self.running_step()
+        insert = (
+            "INSERT INTO task_tool_invocations "
+            "(id, task_id, step_id, tool_name, status, started_at, finished_at) "
+            "SELECT gen_random_uuid(), :t, :s, CAST(:prefix AS text) || n, "
+            "CAST(:status AS text), "
+            "now() + n * interval '1 second', "
+            "CASE WHEN CAST(:status AS text) = 'started' THEN NULL "
+            "ELSE now() + n * interval '1 second' END "
+            "FROM generate_series(CAST(:first AS integer), CAST(:last AS integer)) AS n"
+        )
+        started_count = MAX_ACTIVE_TOOL_INVOCATIONS
+        self.assertGreater(started_count, MAX_RESTORE_TOOL_INVOCATIONS)
+        # started 1..1000 interleaved with finished ones before, among and after.
+        await self.database_execute(
+            insert,
+            t=task_id,
+            s=step.id,
+            prefix="active-",
+            status="started",
+            first=1,
+            last=started_count,
+        )
+        await self.database_execute(
+            insert,
+            t=task_id,
+            s=step.id,
+            prefix="done-",
+            status="succeeded",
+            first=-50,
+            last=started_count + 50,
+        )
+        snapshot = await self.service.restore(task_id)
+        calls = snapshot.tool_invocations
+
+        active = [call for call in calls if call.status is T.STARTED]
+        self.assertEqual(
+            [call.tool_name for call in active],
+            [f"active-{n}" for n in range(1, started_count + 1)],
+        )
+        finished = [call for call in calls if call.status is not T.STARTED]
+        self.assertEqual(
+            [call.tool_name for call in finished],
+            [
+                f"done-{n}"
+                for n in range(
+                    started_count + 50 - MAX_RESTORE_TOOL_INVOCATIONS + 1,
+                    started_count + 51,
+                )
+            ],
+        )
+        # Oldest first overall.
+        self.assertEqual(
+            [call.started_at for call in calls],
+            sorted(call.started_at for call in calls),
+        )
+        self.assertEqual(len(calls), started_count + MAX_RESTORE_TOOL_INVOCATIONS)
+
+    async def test_a_step_refuses_a_call_beyond_the_active_limit(self):
+        task_id, step = await self.running_step()
+        await self.database_execute(
+            "INSERT INTO task_tool_invocations "
+            "(id, task_id, step_id, tool_name, status, started_at) "
+            "SELECT gen_random_uuid(), :t, :s, 'tool-' || n, 'started', now() "
+            "FROM generate_series(1, CAST(:n AS integer)) AS n",
+            t=task_id,
+            s=step.id,
+            n=MAX_ACTIVE_TOOL_INVOCATIONS,
+        )
+        with self.assertRaises(TaskStepError):
+            await self.service.begin_tool_invocation(
+                task_id, step_id=step.id, tool_name="one-too-many"
+            )
+        count = await self.scalar(
+            "SELECT count(*) FROM task_tool_invocations WHERE step_id = :s",
+            s=step.id,
+        )
+        self.assertEqual(count, MAX_ACTIVE_TOOL_INVOCATIONS)
+
+        # Only calls still started count: finishing one makes room for exactly one.
+        snapshot = await self.service.restore(task_id)
+        await self.service.finish_tool_invocation(
+            task_id, snapshot.tool_invocations[0].id, T.SUCCEEDED
+        )
+        again = await self.service.begin_tool_invocation(
+            task_id, step_id=step.id, tool_name="fits-now"
+        )
+        self.assertEqual(again.status, T.STARTED)
+        with self.assertRaises(TaskStepError):
+            await self.service.begin_tool_invocation(
+                task_id, step_id=step.id, tool_name="one-too-many"
+            )
+
+        # The limit is per step: another task's step is not affected.
+        other_task, other_step = await self.running_step()
+        self.assertEqual(
+            (
+                await self.service.begin_tool_invocation(
+                    other_task, step_id=other_step.id, tool_name="shell"
+                )
+            ).status,
+            T.STARTED,
+        )
 
     async def test_the_broker_may_supply_the_invocation_id_once(self):
         task_id, step = await self.running_step()
