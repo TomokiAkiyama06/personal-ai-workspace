@@ -46,6 +46,13 @@ _CANDIDATE_ENVIRONMENT_ALLOWLIST = (
     "LC_CTYPE",
     "TZ",
 )
+# The environment of the runner's own Git commands.  Git may start programs from
+# the shared Git directory (hooks, filters) that a candidate has written to, so
+# these commands get no credentials either.  HOME stays so that the operator's
+# Git configuration (for example ``safe.directory``) still applies.
+_GIT_ENVIRONMENT_ALLOWLIST = ("HOME", *_CANDIDATE_ENVIRONMENT_ALLOWLIST)
+# The runner never wants a hook: ``git worktree add`` would run ``post-checkout``.
+_GIT_COMMAND = ("git", "-c", "core.hooksPath=/dev/null")
 
 
 class WorktreeRunnerError(RuntimeError):
@@ -797,7 +804,13 @@ class WorktreeRunner:
 
     def _assert_repository(self) -> None:
         result = subprocess.run(
-            ["git", "-C", str(self.repository), "rev-parse", "--is-inside-work-tree"],
+            [
+                *_GIT_COMMAND,
+                "-C",
+                str(self.repository),
+                "rev-parse",
+                "--is-inside-work-tree",
+            ],
             capture_output=True,
             text=True,
             check=False,
@@ -856,7 +869,7 @@ class WorktreeRunner:
         self, *arguments: str, check: bool = True
     ) -> subprocess.CompletedProcess[bytes]:
         result = subprocess.run(
-            ["git", "-C", str(self.repository), *arguments],
+            [*_GIT_COMMAND, "-C", str(self.repository), *arguments],
             capture_output=True,
             check=False,
             env=self._git_environment(),
@@ -941,11 +954,11 @@ class WorktreeRunner:
 
     @staticmethod
     def _git_environment() -> dict[str, str]:
-        """Avoid inheriting a caller's Git worktree or index selection."""
+        """An explicit allowlist: no credentials, no ``GIT_*`` selection."""
         return {
-            key: value
-            for key, value in os.environ.items()
-            if not key.startswith("GIT_")
+            key: os.environ[key]
+            for key in _GIT_ENVIRONMENT_ALLOWLIST
+            if key in os.environ
         }
 
     @staticmethod

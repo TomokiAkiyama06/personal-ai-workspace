@@ -80,6 +80,12 @@ being benchmarked.
 - The candidate gets an explicit environment: only `PATH`, `LANG`, `LANGUAGE`,
   `LC_ALL`, `LC_CTYPE` and `TZ` are inherited, plus a per-run `HOME`.  Credential
   variables and every `GIT_*` selector are dropped.
+- The runner's own Git commands (`worktree add`, `rev-parse`, ...) get an allowlist too:
+  the six variables above plus the operator's `HOME`, so Git configuration such as
+  `safe.directory` still applies, and no credentials.  They also run with
+  `core.hooksPath=/dev/null`.  The candidate shares the repository's Git directory, so
+  without this a candidate could leave a `post-checkout` hook that the next
+  `git worktree add` starts with the evaluator's credentials.
 - The candidate runs in its own session.  On timeout or cancellation the runner sends
   `SIGTERM` to the process group and to the processes found below the candidate in
   `/proc`.  The grace period (`term_grace_seconds`, 2 s) applies to all of them, not
@@ -119,6 +125,12 @@ being benchmarked.
     not reused within one polling interval (50 ms) of the leader vanishing.
   - A member forked into the group only after the leader was reaped, by members that
     have all exited before the signal, is not recorded and survives.
+  - The shared Git directory is writable by the candidate.  Hooks are disabled and the
+    Git commands carry no credentials, but a candidate can still write other
+    configuration there (a `filter.*` or `core.fsmonitor` setting, an alias) that makes a
+    later Git command run a program as the evaluator's user and with its `HOME`.
+    Production must run candidates under another OS user or in a container, with the
+    repository mounted read-only.
   - Containing descendants reliably needs a PID namespace or a cgroup (`cgroup.kill`);
     production must run candidates in one.
 

@@ -730,6 +730,63 @@ class WorktreeRunnerTest(unittest.TestCase):
         self.assertEqual((result.status, result.exit_code), ("completed", 0))
         self.assertEqual(self.git("status", "--porcelain").stdout, "")
 
+    def test_git_operations_of_the_runner_get_no_credentials(self):
+        secrets = {
+            "SECRET_TOKEN": "hunter2",
+            "GITHUB_TOKEN": "ghp_not_for_git",
+            "ANTHROPIC_API_KEY": "sk-not-for-git",
+            "GIT_DIR": str(self.repository / ".git"),
+            "GIT_INDEX_FILE": str(self.repository / ".git" / "index"),
+        }
+        with mock.patch.dict(os.environ, secrets):
+            environment = WorktreeRunner._git_environment()
+        self.assertEqual(set(environment) & set(secrets), set())
+        self.assertLessEqual(
+            set(environment), set(worktree_runner._GIT_ENVIRONMENT_ALLOWLIST)
+        )
+        self.assertEqual(environment["PATH"], os.environ["PATH"])
+
+    def test_a_hook_planted_by_a_candidate_never_sees_the_evaluator_environment(self):
+        # The candidate shares the repository's Git directory, so it can leave a
+        # hook there that the runner's next ``git worktree add`` would start.
+        first = self.runner.create("candidate-a", self.commit)
+        leaked = self.root / "leaked.txt"
+        hook_source = (
+            "#!" + sys.executable + "\n"
+            "import os\n"
+            f"open({str(leaked)!r}, 'w').write(os.environ.get('SECRET_TOKEN', ''))\n"
+        )
+        plant = (
+            "import os, pathlib, sys; "
+            "hook = pathlib.Path(sys.argv[1]) / 'hooks' / 'post-checkout'; "
+            "hook.parent.mkdir(exist_ok=True); "
+            "hook.write_text(sys.argv[2]); "
+            "os.chmod(hook, 0o755)"
+        )
+        result = self.runner.execute(
+            first,
+            [sys.executable, "-c", plant, str(self.repository / ".git"), hook_source],
+            timeout_seconds=PATIENCE,
+        )
+        self.assertEqual((result.status, result.exit_code), ("completed", 0))
+        with mock.patch.dict(os.environ, {"SECRET_TOKEN": "hunter2"}):
+            second = self.runner.create("candidate-b", self.commit)
+        self.addCleanup(self.runner.cleanup, second)
+        self.assertNotIn("hunter2", leaked.read_text() if leaked.exists() else "")
+
+    def test_the_runner_never_starts_a_hook_of_the_shared_git_directory(self):
+        started = self.root / "hook-started.txt"
+        hooks = self.repository / ".git" / "hooks"
+        hooks.mkdir(exist_ok=True)
+        hook = hooks / "post-checkout"
+        hook.write_text(
+            "#!" + sys.executable + f"\nopen({str(started)!r}, 'w').write('started')\n"
+        )
+        hook.chmod(0o755)
+        run = self.runner.create("candidate-a", self.commit)
+        self.addCleanup(self.runner.cleanup, run)
+        self.assertFalse(started.exists())
+
     def test_candidate_environment_is_an_allowlist_without_credentials(self):
         run = self.runner.create("candidate-a", self.commit)
         report = self.root / "environment.json"
