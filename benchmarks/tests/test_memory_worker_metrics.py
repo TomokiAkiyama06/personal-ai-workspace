@@ -74,6 +74,25 @@ class MemoryRecordTest(unittest.TestCase):
                     MemoryRecord("k", "user", "confirmed", None, None, ("a", blank))
                 self.assertNotIn(repr(blank), str(caught.exception))
 
+    def test_a_supersedes_target_that_is_blank_is_rejected(self):
+        # A supersedes target names another memory's key, and a blank key cannot
+        # exist, so "" and whitespace-only text are not targets. "No target" is
+        # None, never an empty string.
+        for blank in ("", *BLANK_TEXTS):
+            with self.subTest(supersedes=blank):
+                with self.assertRaises(TypeError) as caught:
+                    MemoryRecord("k", "user", "confirmed", blank)
+                self.assertEqual(
+                    str(caught.exception),
+                    "supersedes must be a non-empty string or None",
+                )
+
+    def test_a_supersedes_target_keeps_its_surrounding_whitespace(self):
+        # Like a key, a target is compared by exact equality and never trimmed.
+        record = MemoryRecord("k", "user", "confirmed", " old\u3000")
+        self.assertEqual(record.supersedes, " old\u3000")
+        self.assertIsNone(MemoryRecord("k", "user", "confirmed", None).supersedes)
+
     def test_keys_with_visible_characters_keep_their_surrounding_whitespace(self):
         # Matching is by exact key: only an all-blank key is invalid, and a key is
         # never trimmed (" k " and "k" stay different identifiers).

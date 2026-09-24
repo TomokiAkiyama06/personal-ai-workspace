@@ -20,7 +20,8 @@
                         "enum": ["confirmed", "inferred"]
                     },
                     "supersedes": {
-                        "type": ["string", "null"]
+                        "type": ["string", "null"],
+                        "pattern": "\\S"
                     },
                     "content": {
                         "type": "string",

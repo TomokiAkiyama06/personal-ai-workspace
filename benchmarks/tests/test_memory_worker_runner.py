@@ -706,13 +706,44 @@ class MemoryWorkerRunnerTest(unittest.TestCase):
                 self.assertIsNone(parse_worker_output(raw))
                 self.assertEqual(schema_adherence([raw], _output_schema()).valid, 0)
 
+    def test_a_blank_supersedes_is_invalid_in_the_schema_and_the_parser(self):
+        for blank in ("", *BLANK_TEXTS):
+            with self.subTest(supersedes=blank):
+                raw = self._output_with(supersedes=blank)
+                self.assertIsNone(parse_worker_output(raw))
+                self.assertEqual(schema_adherence([raw], _output_schema()).valid, 0)
+
+    def test_a_worker_that_emits_an_empty_string_for_no_target_fails_the_schema(self):
+        # Decision (README): "no target" is null. A worker that writes "" instead
+        # is not corrected or normalised; the output is schema-invalid like any
+        # other deviation, so all of that case's records are dropped.
+        gold = (MemoryRecord("k", "user", "confirmed", None),)
+        cases = [MemoryWorkerCase("c1", "input", gold)]
+        worker = MockWorker([self._output_with(supersedes="")])
+
+        report = run_benchmark(worker, cases, timeout_seconds=TIMEOUT)
+
+        self.assertFalse(report.cases[0].schema_valid)
+        self.assertEqual(report.cases[0].comparison.matched, 0)
+        self.assertEqual(report.cases[0].comparison.predicted_count, 0)
+        self.assertEqual(report.metrics["schema_adherence_rate"], 0.0)
+        self.assertEqual(report.metrics["extraction_recall"], 0.0)
+
     def test_non_blank_keys_stay_valid_in_the_schema_and_the_parser(self):
         for key in ("k", " k ", "\u3000k", "\u200b"):
             with self.subTest(key=key):
-                raw = self._output_with(key=key, conflicts_with=[key + "2"])
+                raw = self._output_with(
+                    key=key, supersedes=key + "0", conflicts_with=[key + "2"]
+                )
                 parsed = parse_worker_output(raw)
                 self.assertEqual([record.key for record in parsed], [key])
+                self.assertEqual([record.supersedes for record in parsed], [key + "0"])
                 self.assertEqual(schema_adherence([raw], _output_schema()).valid, 1)
+
+    def test_a_null_supersedes_stays_valid_in_the_schema_and_the_parser(self):
+        raw = self._output_with(supersedes=None)
+        self.assertIsNone(parse_worker_output(raw)[0].supersedes)
+        self.assertEqual(schema_adherence([raw], _output_schema()).valid, 1)
 
     def test_the_schema_treats_exactly_the_strip_whitespace_as_blank(self):
         # The schema pattern is evaluated by Python's re, whose \s is the same set
@@ -720,6 +751,7 @@ class MemoryWorkerRunnerTest(unittest.TestCase):
         item = _output_schema()["properties"]["memories"]["items"]["properties"]
         for name, subschema in (
             ("key", item["key"]),
+            ("supersedes", item["supersedes"]),
             ("conflicts_with", item["conflicts_with"]["items"]),
         ):
             pattern = subschema["pattern"]
@@ -732,12 +764,16 @@ class MemoryWorkerRunnerTest(unittest.TestCase):
                         hex(codepoint),
                     )
 
-    def test_a_blank_gold_key_is_a_case_file_error_that_does_not_echo_the_key(self):
+    def test_a_blank_gold_identifier_is_a_case_file_error_that_does_not_echo_it(self):
         gold = {"key": "k", "scope": "user", "state": "confirmed", "supersedes": None}
         prefix = "Invalid gold record at index 0 in case 'c1': "
-        for blank in BLANK_TEXTS:
+        for blank in ("", *BLANK_TEXTS):
             for record, reason in (
                 (dict(gold, key=blank), "key must be a non-empty string"),
+                (
+                    dict(gold, supersedes=blank),
+                    "supersedes must be a non-empty string or None",
+                ),
                 (
                     dict(gold, conflicts_with=["other", blank]),
                     "conflicts_with must be a tuple of non-empty strings or None",

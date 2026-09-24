@@ -40,16 +40,20 @@ def _is_non_blank_string(value: object) -> bool:
 class MemoryRecord:
     """A memory record.
 
-    ``key`` identifies the memory (matching is by key). ``key``, every
-    ``conflicts_with`` key and ``content`` must contain a character that is not
-    whitespace (see ``_is_non_blank_string``): a whitespace-only identifier would
-    otherwise match another one and earn credit. ``scope`` is one of
-    ``MEMORY_SCOPES``, so a topic label cannot earn scope credit. ``content`` is the extracted
-    fact; a gold record without content is not scored on content. ``conflicts_with``
-    lists the keys of memories this one conflicts with. ``None`` (absent) is not the
-    same as ``()``: on a gold record ``None`` means "not labelled" and the record is
-    not scored on conflicts, while ``()`` labels it "conflicts with nothing" and is
-    scored. On a prediction, ``None`` and ``()`` both mean no relation was declared.
+    ``key`` identifies the memory (matching is by key). ``key``, ``supersedes``
+    (when not ``None``), every ``conflicts_with`` key and ``content`` must contain a
+    character that is not whitespace (see ``_is_non_blank_string``): a
+    whitespace-only identifier would otherwise match another one and earn credit.
+    ``supersedes`` is the key of the memory this one replaces, so "no target" is
+    ``None``; an empty string is not a target and is rejected (in worker output that
+    makes the whole output schema-invalid; it is not read as ``None``). ``scope`` is
+    one of ``MEMORY_SCOPES``, so a topic label cannot earn scope credit. ``content``
+    is the extracted fact; a gold record without content is not scored on content.
+    ``conflicts_with`` lists the keys of memories this one conflicts with. ``None``
+    (absent) is not the same as ``()``: on a gold record ``None`` means "not
+    labelled" and the record is not scored on conflicts, while ``()`` labels it
+    "conflicts with nothing" and is scored. On a prediction, ``None`` and ``()``
+    both mean no relation was declared.
     """
 
     key: str
@@ -72,8 +76,8 @@ class MemoryRecord:
             raise TypeError("state must be a non-empty string")
         if self.state not in {"confirmed", "inferred"}:
             raise ValueError("state must be 'confirmed' or 'inferred'")
-        if self.supersedes is not None and not isinstance(self.supersedes, str):
-            raise TypeError("supersedes must be a string or None")
+        if self.supersedes is not None and not _is_non_blank_string(self.supersedes):
+            raise TypeError("supersedes must be a non-empty string or None")
         if self.content is not None and not _is_non_blank_string(self.content):
             raise TypeError("content must be a non-empty string or None")
         if self.conflicts_with is not None and (
