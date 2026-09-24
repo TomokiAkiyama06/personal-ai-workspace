@@ -80,7 +80,13 @@ class ModelsMetadataTest(unittest.TestCase):
                     targets.add(constraint.referred_table.name)
         self.assertEqual(
             targets,
-            {"conversations", "messages", "memories", "memory_versions"},
+            {
+                "conversations",
+                "messages",
+                "memories",
+                "memory_versions",
+                "embedding_models",
+            },
         )
 
     def test_user_project_and_repo_ids_are_plain_uuid_columns(self):

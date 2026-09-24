@@ -78,6 +78,9 @@ class LayerSeparationTest(MemoryDatabaseTestCase):
                 ("memory_relations", "memory_versions"): "c",
                 ("memory_sources", "memory_versions"): "c",
                 ("memory_embeddings", "memory_versions"): "c",
+                # A model's dimension cannot change or the model disappear
+                # while embeddings use it (NO ACTION).
+                ("memory_embeddings", "embedding_models"): "a",
                 # The only bridge from Long-term Memory to Raw Conversation:
                 # provenance, which must survive the conversation's deletion.
                 ("memory_sources", "conversations"): "n",
@@ -787,6 +790,7 @@ class VersioningTest(MemoryDatabaseTestCase):
                 memory_version_id=v2, source_type="task", source_ref="task-7"
             )
         )
+        self.register_embedding_model("model-a", 2)
         self.session.execute(
             insert(MemoryEmbedding).values(
                 memory_version_id=v2,

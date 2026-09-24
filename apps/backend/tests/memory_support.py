@@ -27,6 +27,7 @@ TEST_DATABASE_URL = os.environ.get("PAW_TEST_DATABASE_URL")
 
 MEMORY_TABLES = (
     "conversations",
+    "embedding_models",
     "memories",
     "memory_embeddings",
     "memory_relations",
@@ -130,6 +131,16 @@ class MemoryDatabaseTestCase(unittest.TestCase):
         return None
 
     # -- rows ---------------------------------------------------------------
+
+    def register_embedding_model(self, model_id: str, dimensions: int) -> None:
+        """Register an embedding model unless it is already registered."""
+        self.session.execute(
+            text(
+                "INSERT INTO embedding_models (id, dimensions)"
+                " VALUES (:id, :dimensions) ON CONFLICT (id) DO NOTHING"
+            ),
+            {"id": model_id, "dimensions": dimensions},
+        )
 
     def add_conversation(self, **values: Any) -> UUID:
         values.setdefault("owner_user_id", uuid4())

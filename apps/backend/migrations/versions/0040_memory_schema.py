@@ -14,6 +14,8 @@ cascades, if another object depends on it).
 
 The ``embedding`` column has no fixed dimension and there is no ANN index: the
 embedding model is chosen by the PAW-019 benchmark and PAW-043 adds the index.
+``embedding_models`` (empty here) gives each model exactly one dimension, which
+``memory_embeddings`` references.
 
 The constraint definitions repeat the ones in ``paw_backend.memory.models`` on
 purpose (a migration is a frozen snapshot); ``tests/test_memory_migration.py``
@@ -398,6 +400,21 @@ def upgrade() -> None:
         postgresql_where=sa.text("message_id IS NOT NULL"),
     )
 
+    # Nothing is registered here: the model (and dimension) is chosen by the
+    # PAW-019 benchmark and registered with an ordinary insert.
+    op.create_table(
+        "embedding_models",
+        sa.Column("id", sa.Text(), nullable=False),
+        sa.Column("dimensions", sa.Integer(), nullable=False),
+        _now("created_at"),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint(
+            "id", "dimensions", name="uq_embedding_models_id_dimensions"
+        ),
+        sa.CheckConstraint("char_length(id) BETWEEN 1 AND 200", name="id_length"),
+        sa.CheckConstraint("dimensions BETWEEN 1 AND 16000", name="dimensions_range"),
+    )
+
     op.create_table(
         "memory_embeddings",
         sa.Column("memory_version_id", sa.Uuid(), nullable=False),
@@ -409,8 +426,11 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(
             ["memory_version_id"], ["memory_versions.id"], ondelete="CASCADE"
         ),
-        sa.CheckConstraint(
-            "char_length(embedding_model_id) BETWEEN 1 AND 200", name="model_id_length"
+        # One dimension per model: NO ACTION, so neither the dimension of a
+        # model nor the model itself can change while embeddings use it.
+        sa.ForeignKeyConstraint(
+            ["embedding_model_id", "dimensions"],
+            ["embedding_models.id", "embedding_models.dimensions"],
         ),
         sa.CheckConstraint(
             "vector_dims(embedding) = dimensions", name="dimensions_match"
@@ -426,6 +446,7 @@ def upgrade() -> None:
 def downgrade() -> None:
     # Reverse order of creation; dropping a table drops its indexes.
     op.drop_table("memory_embeddings")
+    op.drop_table("embedding_models")
     op.drop_table("memory_sources")
     op.drop_table("memory_relations")
     op.drop_table("memory_versions")

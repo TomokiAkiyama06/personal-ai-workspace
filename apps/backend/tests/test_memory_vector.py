@@ -4,13 +4,17 @@ import unittest
 from math import inf, nan
 from uuid import uuid4
 
-from sqlalchemy import insert, select, text
+from sqlalchemy import delete, func, insert, select, text, update
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.dialects.postgresql.base import ischema_names
 from sqlalchemy.exc import DataError
 from sqlalchemy.schema import CreateTable
 
-from paw_backend.memory.models import MemoryEmbedding, MemoryVersion
+from paw_backend.memory.models import (
+    EmbeddingModel,
+    MemoryEmbedding,
+    MemoryVersion,
+)
 from paw_backend.memory.vector import Vector, format_vector, parse_vector
 
 from .memory_support import MemoryDatabaseTestCase, requires_postgres
@@ -75,11 +79,13 @@ class VectorTypeTest(unittest.TestCase):
 @requires_postgres
 class PgvectorTest(MemoryDatabaseTestCase):
     def add_embedding(self, version, vector, model="model-a", dimensions=None):
+        dimensions = len(vector) if dimensions is None else dimensions
+        self.register_embedding_model(model, dimensions)
         return self.session.execute(
             insert(MemoryEmbedding).values(
                 memory_version_id=version,
                 embedding_model_id=model,
-                dimensions=len(vector) if dimensions is None else dimensions,
+                dimensions=dimensions,
                 embedding=vector,
             )
         )
@@ -184,7 +190,7 @@ class PgvectorTest(MemoryDatabaseTestCase):
         version = self.add_version(self.add_memory())
         cases = {
             "ck_memory_embeddings_dimensions_match": {"dimensions": 4},
-            "ck_memory_embeddings_model_id_length": {"model": ""},
+            "ck_embedding_models_id_length": {"model": ""},
         }
         for expected, options in cases.items():
             with self.subTest(expected):
@@ -229,6 +235,158 @@ class PgvectorTest(MemoryDatabaseTestCase):
             ["ix_memory_embeddings_embedding_model_id", "pk_memory_embeddings"],
         )
         self.assertFalse(any("hnsw" in d or "ivfflat" in d for _, d in indexes))
+
+
+@requires_postgres
+class EmbeddingModelTest(MemoryDatabaseTestCase):
+    """One dimension per embedding model, enforced by the database."""
+
+    FK = "fk_memory_embeddings_embedding_model_id_embedding_models"
+
+    def register(self, model, dimensions):
+        return self.session.execute(
+            insert(EmbeddingModel).values(id=model, dimensions=dimensions)
+        )
+
+    def embed(self, version, model, vector, dimensions=None):
+        return self.session.execute(
+            insert(MemoryEmbedding).values(
+                memory_version_id=version,
+                embedding_model_id=model,
+                dimensions=len(vector) if dimensions is None else dimensions,
+                embedding=vector,
+            )
+        )
+
+    def test_no_model_or_dimension_is_fixed_by_the_migration(self):
+        count = self.session.execute(
+            select(func.count()).select_from(EmbeddingModel)
+        ).scalar_one()
+        self.assertEqual(count, 0)
+
+    def test_registering_a_model_is_a_plain_insert(self):
+        self.register("model-a", 768)
+
+        stored = self.session.execute(
+            select(EmbeddingModel.id, EmbeddingModel.dimensions)
+        ).one()
+        self.assertEqual(tuple(stored), ("model-a", 768))
+
+    def test_a_model_is_registered_once_with_one_dimension(self):
+        self.register("model-a", 3)
+
+        again = self.violation(lambda: self.register("model-a", 8))
+
+        self.assertEqual(again, "pk_embedding_models")
+
+    def test_a_second_dimension_for_the_same_model_is_rejected(self):
+        first = self.add_version(self.add_memory())
+        second = self.add_version(self.add_memory())
+        self.register("model-a", 3)
+        self.embed(first, "model-a", [1.0, 2.0, 3.0])
+
+        # Registered as 3-dimensional: an 8-dimensional row can claim neither.
+        as_eight = self.violation(lambda: self.embed(second, "model-a", [0.5] * 8))
+        as_three = self.violation(
+            lambda: self.embed(second, "model-a", [0.5] * 8, dimensions=3)
+        )
+
+        self.assertEqual(as_eight, self.FK)
+        self.assertEqual(as_three, "ck_memory_embeddings_dimensions_match")
+        stored = self.session.execute(
+            select(MemoryEmbedding.dimensions).where(
+                MemoryEmbedding.embedding_model_id == "model-a"
+            )
+        ).scalars()
+        self.assertEqual(list(stored), [3])
+
+    def test_an_embedding_needs_a_registered_model(self):
+        version = self.add_version(self.add_memory())
+
+        unknown = self.violation(lambda: self.embed(version, "unregistered", [1.0]))
+
+        self.assertEqual(unknown, self.FK)
+
+    def test_a_models_dimension_cannot_change_while_embeddings_exist(self):
+        version = self.add_version(self.add_memory())
+        self.register("model-a", 3)
+        self.embed(version, "model-a", [1.0, 2.0, 3.0])
+
+        def change():
+            return self.session.execute(
+                update(EmbeddingModel)
+                .where(EmbeddingModel.id == "model-a")
+                .values(dimensions=8)
+            )
+
+        def retire():
+            return self.session.execute(
+                delete(EmbeddingModel).where(EmbeddingModel.id == "model-a")
+            )
+
+        self.assertEqual(self.violation(change), self.FK)
+        self.assertEqual(self.violation(retire), self.FK)
+        # Without embeddings the model can be changed or removed.
+        self.session.execute(delete(MemoryEmbedding))
+        self.assertIsNone(self.violation(change))
+        stored = self.session.execute(select(EmbeddingModel.dimensions)).scalar_one()
+        self.assertEqual(stored, 8)
+        self.assertIsNone(self.violation(retire))
+
+    def test_models_of_different_dimensions_coexist_and_search_per_model(self):
+        titles = ["near", "middle", "far"]
+        versions = {
+            title: self.add_version(self.add_memory(), title=title) for title in titles
+        }
+        self.register("small", 2)
+        self.register("large", 4)
+        small = {"near": [1.0, 0.0], "middle": [0.0, 1.0], "far": [-9.0, -9.0]}
+        large = {
+            "near": [0.0, 0.0, 9.0, 9.0],
+            "middle": [1.0, 0.0, 0.0, 0.0],
+            "far": [0.0, 1.0, 0.0, 0.0],
+        }
+        for title in titles:
+            self.embed(versions[title], "small", small[title])
+            self.embed(versions[title], "large", large[title])
+
+        def ranked(model, query):
+            distance = MemoryEmbedding.embedding.l2_distance(query)
+            rows = self.session.execute(
+                select(MemoryVersion.title)
+                .join(
+                    MemoryEmbedding,
+                    MemoryEmbedding.memory_version_id == MemoryVersion.id,
+                )
+                .where(MemoryEmbedding.embedding_model_id == model)
+                .order_by(distance)
+            )
+            return list(rows.scalars())
+
+        self.assertEqual(ranked("small", [0.9, 0.1]), ["near", "middle", "far"])
+        self.assertEqual(
+            ranked("large", [0.9, 0.0, 0.0, 0.0]), ["middle", "far", "near"]
+        )
+
+    def test_a_registered_dimension_must_be_a_possible_vector_dimension(self):
+        for dimensions in (0, -3, 16001):
+            with self.subTest(dimensions=dimensions):
+                self.assertEqual(
+                    self.violation(
+                        lambda dimensions=dimensions: self.register("m", dimensions)
+                    ),
+                    "ck_embedding_models_dimensions_range",
+                )
+        self.assertIsNone(self.violation(lambda: self.register("max", 16000)))
+
+    def test_a_model_id_must_not_be_empty_or_too_long(self):
+        for model in ("", "m" * 201):
+            with self.subTest(length=len(model)):
+                self.assertEqual(
+                    self.violation(lambda model=model: self.register(model, 3)),
+                    "ck_embedding_models_id_length",
+                )
+        self.assertIsNone(self.violation(lambda: self.register("m" * 200, 3)))
 
 
 if __name__ == "__main__":

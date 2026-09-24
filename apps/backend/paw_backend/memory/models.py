@@ -10,7 +10,8 @@ Separation"):
   the working state), derived from the raw messages.
 * Long-term Memory: ``memories`` (identity), ``memory_versions`` (every edit is
   a new row), ``memory_relations`` (version graph), ``memory_sources``
-  (provenance) and ``memory_embeddings`` (pgvector).
+  (provenance), ``embedding_models`` (each model's one dimension) and
+  ``memory_embeddings`` (pgvector).
 
 Users, projects and repositories do not exist yet (PAW-021 / PAW-026 /
 PAW-027). Their ids are therefore **plain UUID columns without foreign keys**
@@ -522,21 +523,53 @@ class MemorySource(Base):
     created_at: Mapped[datetime] = _now_column()
 
 
+class EmbeddingModel(Base):
+    """An embedding model and its one dimension.
+
+    Which model (and so which dimension) is used is decided by the PAW-019
+    benchmark, so nothing is registered by the migration: registering a model
+    is an ordinary insert. Its dimension is fixed once embeddings use it:
+    ``memory_embeddings`` references ``(id, dimensions)``, so the database
+    refuses a vector of another dimension for the model, and refuses to change
+    or delete the model while embeddings exist.
+    """
+
+    __tablename__ = "embedding_models"
+    __table_args__ = (
+        # Redundant with the primary key; the composite foreign key of
+        # ``memory_embeddings`` needs it as its target.
+        UniqueConstraint("id", "dimensions", name="uq_embedding_models_id_dimensions"),
+        CheckConstraint("char_length(id) BETWEEN 1 AND 200", name="id_length"),
+        # 16000 is the largest dimension pgvector's ``vector`` type accepts.
+        CheckConstraint("dimensions BETWEEN 1 AND 16000", name="dimensions_range"),
+    )
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    dimensions: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = _now_column()
+
+
 class MemoryEmbedding(Base):
     """A vector of one memory version, made by one embedding model.
 
-    ``embedding`` has no fixed dimension (the model is not chosen yet), so rows
-    of different models can coexist; ``dimensions`` must equal the vector's real
-    dimension. A nearest-neighbour query must filter one ``embedding_model_id``
-    first and join ``memory_versions`` to apply the ACL condition before ranking.
-    No ANN index exists yet: PAW-043 adds it once the model is chosen (an HNSW
-    index needs a fixed dimension, so it will be a per-model expression index).
+    ``embedding`` has no fixed dimension in the column type (the model is not
+    chosen yet), but each model has exactly one (``embedding_models``): the
+    composite foreign key ``(embedding_model_id, dimensions)`` and the
+    ``vector_dims`` CHECK together make every row of a model the same size, so
+    a nearest-neighbour query that filters one ``embedding_model_id`` never
+    meets a dimension mismatch. The query must also join ``memory_versions`` to
+    apply the ACL condition before ranking. No ANN index exists yet: PAW-043
+    adds it once the model is chosen (an HNSW index needs a fixed dimension, so
+    it will be a per-model expression index).
     """
 
     __tablename__ = "memory_embeddings"
     __table_args__ = (
-        CheckConstraint(
-            "char_length(embedding_model_id) BETWEEN 1 AND 200", name="model_id_length"
+        # NO ACTION on update and delete: a model's dimension cannot change, and
+        # the model cannot be removed, while embeddings use it.
+        ForeignKeyConstraint(
+            ["embedding_model_id", "dimensions"],
+            ["embedding_models.id", "embedding_models.dimensions"],
         ),
         # A vector has at least one dimension, so this also keeps it positive.
         CheckConstraint("vector_dims(embedding) = dimensions", name="dimensions_match"),
@@ -554,6 +587,7 @@ class MemoryEmbedding(Base):
 
 TABLE_NAMES: tuple[str, ...] = (
     Conversation.__tablename__,
+    EmbeddingModel.__tablename__,
     Message.__tablename__,
     SessionState.__tablename__,
     Memory.__tablename__,

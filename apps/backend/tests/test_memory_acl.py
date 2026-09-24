@@ -71,6 +71,7 @@ class AclFilterTest(MemoryDatabaseTestCase):
         self.g1, self.g2 = uuid4(), uuid4()
         self.r1, self.r2, self.r3 = uuid4(), uuid4(), uuid4()
         self.embeddings: dict[str, list[float]] = {}
+        self.register_embedding_model(MODEL, 3)
 
         def memory(title: str, *, versions=None, **columns) -> None:
             """One memory; ``versions`` lists extra (title, columns) older rows."""

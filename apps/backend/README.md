@@ -476,7 +476,7 @@ Repository / Service は含みません。
 | --- | --- | --- |
 | Raw Conversation | `conversations`、`messages` | 発言、Tool 結果、Agent 結果、Task の経緯。無期限に保持し、LLM Context へ全文は入れない |
 | Session state | `session_states` | Conversation ごとの要約と作業状態（1 Conversation に 1 行） |
-| Long-term Memory | `memories`、`memory_versions`、`memory_relations`、`memory_sources`、`memory_embeddings` | 確定した知識。Version、関係、出典、Embedding |
+| Long-term Memory | `memories`、`memory_versions`、`memory_relations`、`memory_sources`、`embedding_models`、`memory_embeddings` | 確定した知識。Version、関係、出典、Embedding |
 
 3 つの層は別の Table で、Foreign Key でつながるのは出典（`memory_sources`）だけです。
 Conversation を消しても Memory と他の出典は残り（`ON DELETE SET NULL`）、Session state と Message は一緒に消えます。
@@ -514,8 +514,11 @@ Task、Repo 解析、Project Decision の出典も、Table がないため `memo
 
 **pgvector。** Migration が `CREATE EXTENSION IF NOT EXISTS vector` を実行します（Migration の Role に権限が必要。管理者が先に作成済みでもよい）。
 `memory_embeddings` は `(memory_version_id, embedding_model_id)` が Key で、`embedding` は **次元を固定しない** `vector` です。
-Embedding Model と次元は Benchmark（PAW-019）で決めるため、まだ決めていません。`dimensions` と実際の次元は CHECK で一致させます。
-次元の異なる Vector 同士の距離は計算できないため、近傍検索は先に 1 つの `embedding_model_id` に絞ります。
+Embedding Model と次元は Benchmark（PAW-019）で決めるため、まだ決めていません。Migration は Model を 1 件も登録しません。
+Model の登録は `embedding_models`（Model ID と次元）への通常の INSERT です。
+`memory_embeddings` は `(embedding_model_id, dimensions)` でこの Table を参照し、`dimensions` と実際の次元は CHECK で一致させます。
+そのため 1 つの Model は 1 つの次元だけを持ち、別の次元の Vector は DB が拒否します。Embedding がある間は、Model の次元の変更も Model の削除もできません。
+次元の異なる Vector 同士の距離は計算できないため、近傍検索は先に 1 つの `embedding_model_id` に絞ります（この絞り込みで次元の不一致は起きません）。
 ANN Index（HNSW / IVFFlat）はまだありません。Model が決まった後に PAW-043 が追加します。
 
 Model と Migration の一致は Test が検証します（Alembic の autogenerate の差分が空であること、Model から作った Schema と Migration の Catalog が同じであること）。
