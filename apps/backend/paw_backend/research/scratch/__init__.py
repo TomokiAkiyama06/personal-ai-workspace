@@ -1,6 +1,7 @@
 """Research Scratch Store: temporary research results with a 24 hour TTL (PAW-050).
 
-Kept apart from Long-term Memory. There is no HTTP surface yet; see
+Kept apart from Long-term Memory. The Backend's janitor (``ScratchJanitor``)
+deletes expired items regularly. There is no HTTP surface yet; see
 ``apps/backend/README.md`` (Research Scratch Store) for the rules.
 """
 
@@ -13,6 +14,7 @@ from paw_backend.research.scratch.errors import (
     ScratchLeaseLimitError,
     ScratchStateError,
 )
+from paw_backend.research.scratch.janitor import PurgeRun, ScratchJanitor
 from paw_backend.research.scratch.limits import (
     DEFAULT_LEASE_SECONDS,
     DEFAULT_LIST_LIMIT,
@@ -50,8 +52,10 @@ __all__ = [
     "PromotionOutcome",
     "PromotionState",
     "PurgeResult",
+    "PurgeRun",
     "ScratchBusyError",
     "ScratchError",
+    "ScratchJanitor",
     "ScratchItem",
     "ScratchItemNotFoundError",
     "ScratchLeaseLimitError",
