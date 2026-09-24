@@ -70,6 +70,20 @@ def _table_argument(node: ast.Call) -> ast.AST | None:
     return None
 
 
+def _may_return(node: ast.AST) -> bool:
+    """Can executing this statement return from the enclosing function?
+
+    A ``return`` inside a nested function, lambda or class belongs to that one.
+    """
+    if isinstance(node, ast.Return):
+        return True
+    if isinstance(
+        node, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda | ast.ClassDef
+    ):
+        return False
+    return any(_may_return(child) for child in ast.iter_child_nodes(node))
+
+
 class _UpgradePath:
     """What ``upgrade()`` creates and what it certainly grants.
 
@@ -123,8 +137,19 @@ class _UpgradePath:
         if key in self._visited:
             return
         self._visited.add(key)
-        for statement in function.body:
+        self._block(function.body, conditional)
+
+    def _block(self, statements: list[ast.stmt], conditional: bool) -> None:
+        """Visit statements in order.
+
+        After a possible ``return`` the rest is conditional: ``upgrade()`` (or a
+        helper) can finish without reaching it, so a grant after
+        ``if skip: return`` is not certain.
+        """
+        for statement in statements:
             self._visit(statement, conditional)
+            if _may_return(statement):
+                conditional = True
 
     def _visit(self, node: ast.AST, conditional: bool) -> None:
         if isinstance(node, ast.Call):
@@ -136,8 +161,15 @@ class _UpgradePath:
             # A module-level SQL constant that the upgrade path uses.
             self.created.extend(_RAW_CREATE.findall(self.constants[node.id]))
         below = conditional or isinstance(node, _MAY_NOT_RUN)
-        for child in ast.iter_child_nodes(node):
-            self._visit(child, below)
+        for _, value in ast.iter_fields(node):
+            if isinstance(value, list) and value and isinstance(value[0], ast.stmt):
+                self._block(value, below)  # a body, orelse, finalbody ...
+            elif isinstance(value, list):
+                for child in value:
+                    if isinstance(child, ast.AST):
+                        self._visit(child, below)
+            elif isinstance(value, ast.AST):
+                self._visit(value, below)
 
     def _call(self, node: ast.Call, conditional: bool) -> None:
         callee = _callee(node)
@@ -346,6 +378,64 @@ class LintDetectsTest(unittest.TestCase):
                     "def upgrade():\n    op.create_table('widgets')\n" + block
                 )
                 self.assertEqual(problems, [missing("widgets")])
+
+    def test_a_grant_after_a_possible_early_return_does_not_count(self):
+        # upgrade() can finish without reaching the grant, leaving the table
+        # ungranted: the statements after a possible return are conditional.
+        cases = {
+            "if return": (
+                "    if SKIP:\n        return\n"
+                "    grant_app_privileges(op, 'widgets')\n"
+            ),
+            "return in else": (
+                "    if SKIP:\n        pass\n    else:\n        return\n"
+                "    grant_app_privileges(op, 'widgets')\n"
+            ),
+            "return in try": (
+                "    try:\n        return\n    finally:\n        pass\n"
+                "    grant_app_privileges(op, 'widgets')\n"
+            ),
+            "return in loop": (
+                "    for _ in ITEMS:\n        return\n"
+                "    grant_app_privileges(op, 'widgets')\n"
+            ),
+            "plain return": "    return\n    grant_app_privileges(op, 'widgets')\n",
+            "inside a with": (
+                "    with op.batch_alter_table('widgets'):\n"
+                "        if SKIP:\n            return\n"
+                "        grant_app_privileges(op, 'widgets')\n"
+            ),
+        }
+        for name, block in cases.items():
+            with self.subTest(case=name):
+                problems = self.check(
+                    "def upgrade():\n    op.create_table('widgets')\n" + block
+                )
+                self.assertEqual(problems, [missing("widgets")])
+
+    def test_an_early_return_inside_a_helper_makes_its_later_grant_conditional(self):
+        problems = self.check(
+            "def _grant():\n"
+            "    if SKIP:\n        return\n"
+            "    grant_app_privileges(op, 'widgets')\n"
+            "def upgrade():\n    op.create_table('widgets')\n    _grant()\n"
+        )
+        self.assertEqual(problems, [missing("widgets")])
+
+    def test_a_grant_before_a_possible_return_still_counts(self):
+        for tail in (
+            "    if SKIP:\n        return\n",
+            "    return\n",
+            "    def later():\n        return 1\n",  # a nested return is not ours
+        ):
+            with self.subTest(tail=tail):
+                self.assertEqual(
+                    self.check(
+                        "def upgrade():\n    op.create_table('widgets')\n"
+                        "    grant_app_privileges(op, 'widgets')\n" + tail
+                    ),
+                    [],
+                )
 
     def test_a_helper_called_only_conditionally_does_not_count(self):
         problems = self.check(
