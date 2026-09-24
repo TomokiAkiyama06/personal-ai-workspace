@@ -1,0 +1,33 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+        "memories": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "key": {
+                        "type": "string",
+                        "minLength": 1
+                    },
+                    "scope": {
+                        "type": "string",
+                        "minLength": 1
+                    },
+                    "state": {
+                        "type": "string",
+                        "enum": ["confirmed", "inferred"]
+                    },
+                    "supersedes": {
+                        "type": ["string", "null"]
+                    }
+                },
+                "required": ["key", "scope", "state", "supersedes"],
+                "additionalProperties": false
+            }
+        }
+    },
+    "required": ["memories"],
+    "additionalProperties": false
+}

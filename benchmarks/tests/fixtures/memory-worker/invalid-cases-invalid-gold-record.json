@@ -1,0 +1,16 @@
+{
+    "cases": [
+        {
+            "id": "test-1",
+            "input": "Test input",
+            "gold": [
+                {
+                    "key": "",
+                    "scope": "test_scope",
+                    "state": "confirmed",
+                    "supersedes": null
+                }
+            ]
+        }
+    ]
+}
