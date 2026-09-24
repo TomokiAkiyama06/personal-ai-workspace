@@ -244,6 +244,150 @@ class CreateTaskTest(PostgresTaskTestCase):
 
 
 @requires_postgres
+class UnstorableTextTest(PostgresTaskTestCase):
+    """Text that a PostgreSQL text column cannot hold is refused up front.
+
+    NUL fails as a ``DataError`` and a surrogate code point as a
+    ``UnicodeEncodeError`` when the row is flushed, which would surface as a
+    database or encoding error instead of the typed argument error.
+    """
+
+    MARKER = "SECRET-MARKER"
+    BAD = {
+        "NUL": MARKER + "\x00",
+        "lone surrogate": MARKER + chr(0xD800),
+        "surrogate pair as code points": MARKER + chr(0xD83D) + chr(0xDE00),
+    }
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        # One task per starting point the entry points below need.
+        self.idle = await self.task_in_state(S.RUNNING)
+        self.busy = await self.task_in_state(S.RUNNING)
+        self.step = await self.service.begin_step(self.busy, "build", attempt=1)
+        self.failed = await self.task_in_state(S.FAILED)
+
+    async def assert_refused(self, task_id, call) -> None:
+        """The typed error, no echo of the text, and nothing about the task changed."""
+        before = await self.service.restore(task_id)
+        with self.assertRaises(InvalidCommandArgumentError) as caught:
+            await call()
+        self.assertNotIn(self.MARKER, str(caught.exception))
+        self.assertEqual(await self.service.restore(task_id), before)
+
+    def entry_points(self, bad: str) -> dict:
+        service = self.service
+        return {
+            "begin_step name": (
+                self.idle,
+                lambda: service.begin_step(self.idle, bad, attempt=1),
+            ),
+            "begin_tool_invocation tool_name": (
+                self.busy,
+                lambda: service.begin_tool_invocation(
+                    self.busy, step_id=self.step.id, tool_name=bad
+                ),
+            ),
+            "add_log message": (
+                self.idle,
+                lambda: service.add_log(self.idle, bad, attempt=1),
+            ),
+            "add_log message cut off by the length limit": (
+                self.idle,
+                lambda: service.add_log(self.idle, "a" * 9000 + bad, attempt=1),
+            ),
+            "execute reason": (
+                self.idle,
+                lambda: service.execute(
+                    self.idle, C.CANCEL, actor=self.user, reason=bad
+                ),
+            ),
+            "execute agent": (
+                self.failed,
+                lambda: service.execute(
+                    self.failed, C.RETRY, actor=self.user, agent=bad
+                ),
+            ),
+            "execute model": (
+                self.failed,
+                lambda: service.execute(
+                    self.failed, C.RESTART, actor=self.user, model=bad
+                ),
+            ),
+            "update_attempt branch": (
+                self.idle,
+                lambda: service.update_attempt(
+                    self.idle, attempt=1, worktree=WorktreeState(branch=bad)
+                ),
+            ),
+            "update_attempt path": (
+                self.idle,
+                lambda: service.update_attempt(
+                    self.idle, attempt=1, worktree=WorktreeState(path=bad)
+                ),
+            ),
+            "update_attempt head_commit": (
+                self.idle,
+                lambda: service.update_attempt(
+                    self.idle, attempt=1, worktree=WorktreeState(head_commit=bad)
+                ),
+            ),
+            "update_attempt pull request url": (
+                self.idle,
+                lambda: service.update_attempt(
+                    self.idle,
+                    attempt=1,
+                    pull_request=PullRequestInfo(1, bad, PullRequestState.OPEN),
+                ),
+            ),
+        }
+
+    async def test_every_text_entry_point_refuses_nul_and_surrogates(self):
+        checked = 0
+        for label, bad in self.BAD.items():
+            for name, (task_id, call) in self.entry_points(bad).items():
+                with self.subTest(f"{name}: {label}"):
+                    checked += 1
+                    await self.assert_refused(task_id, call)
+        self.assertEqual(checked, 11 * len(self.BAD))
+
+    async def test_create_task_refuses_nul_and_surrogates_in_every_text_field(self):
+        count = "SELECT count(*) FROM tasks WHERE project_id = :project_id"
+        for label, bad in self.BAD.items():
+            for field in ("title", "starting_commit", "agent", "model"):
+                with self.subTest(f"{field}: {label}"):
+                    before = await self.scalar(count, project_id=self.project_id)
+                    with self.assertRaises(InvalidCommandArgumentError) as caught:
+                        await self.create_task(**{field: bad})
+                    self.assertNotIn(self.MARKER, str(caught.exception))
+                    self.assertEqual(
+                        await self.scalar(count, project_id=self.project_id), before
+                    )
+
+    async def test_other_unusual_text_is_still_stored_unchanged(self):
+        text = '日本語 \U0001f600 \x01 tab\t newline\n quote" back\\slash é'
+        task_id = await self.create_task(
+            title=text, agent=text, model=text, starting_commit=text
+        )
+        await self.service.execute(task_id, C.START, actor=self.system)
+        await self.service.add_log(task_id, text, attempt=1)
+        await self.service.update_attempt(
+            task_id,
+            attempt=1,
+            worktree=WorktreeState(text, text, text),
+            pull_request=PullRequestInfo(1, text, PullRequestState.OPEN),
+        )
+        snapshot = await self.service.restore(task_id)
+        self.assertEqual(
+            (snapshot.title, snapshot.agent, snapshot.model, snapshot.starting_commit),
+            (text, text, text, text),
+        )
+        self.assertEqual([log.message for log in snapshot.recent_logs], [text])
+        self.assertEqual(snapshot.attempt.worktree, WorktreeState(text, text, text))
+        self.assertEqual(snapshot.attempt.pull_request.url, text)
+
+
+@requires_postgres
 class TransitionTest(PostgresTaskTestCase):
     async def test_database_follows_the_transition_table_for_every_state_and_command(
         self,

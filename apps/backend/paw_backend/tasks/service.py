@@ -189,21 +189,36 @@ class _JsonInputCheck:
         if type(value) is not str:
             raise InvalidCommandArgumentError(_INPUT_NOT_JSON)
         self._spend(len(value) + 2)  # the quotes
-        if "\x00" in value:
-            raise InvalidCommandArgumentError("input text must not contain NUL")
-        if not value.isascii():
-            try:
-                value.encode("utf-8")
-            except UnicodeEncodeError:
-                raise InvalidCommandArgumentError(
-                    "input text must be valid Unicode (no surrogate characters)"
-                ) from None
+        _storable("input text", value)
+
+
+def _storable(name: str, value: str) -> str:
+    """Refuse text that a PostgreSQL text column or JSONB string cannot hold.
+
+    A NUL character fails at flush time as a ``DataError`` and a surrogate code
+    point (not valid Unicode) as a ``UnicodeEncodeError``; either would leak
+    instead of the typed error. The text is not echoed.
+    """
+    if "\x00" in value:
+        raise InvalidCommandArgumentError(f"{name} must not contain NUL characters")
+    if not value.isascii():
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            raise InvalidCommandArgumentError(
+                f"{name} must be valid Unicode text (no surrogate characters)"
+            ) from None
+    return value
+
+
+def _optional_storable(name: str, value: str | None) -> str | None:
+    return None if value is None else _storable(name, value)
 
 
 def _text(name: str, value: str, limit: int) -> str:
     if not value.strip() or len(value) > limit:
         raise InvalidCommandArgumentError(f"{name} must be 1 to {limit} characters")
-    return value
+    return _storable(name, value)
 
 
 def _optional_text(name: str, value: str | None, limit: int) -> str | None:
@@ -588,8 +603,10 @@ class TaskService:
 
         Raises ``StaleAttemptError`` unless ``attempt`` is the current attempt.
         Callers must not pass secrets: redaction is not done here. Messages over
-        ``MAX_LOG_MESSAGE_LENGTH`` characters are truncated.
+        ``MAX_LOG_MESSAGE_LENGTH`` characters are truncated; text PostgreSQL cannot
+        store (NUL, surrogate characters) is refused, in the cut-off part too.
         """
+        _storable("message", message)  # all of it, not only what is kept
         if len(message) > MAX_LOG_MESSAGE_LENGTH:
             message = message[: MAX_LOG_MESSAGE_LENGTH - len(_TRUNCATED)] + _TRUNCATED
         async with self._database.session() as session, session.begin():
@@ -625,8 +642,15 @@ class TaskService:
         Each group that is given replaces the stored one; groups left as ``None``
         are unchanged. Allowed in any task state (a pull request can be merged
         after the task completed) but only for the current attempt
-        (``StaleAttemptError`` otherwise).
+        (``StaleAttemptError`` otherwise). Text that PostgreSQL cannot store (NUL,
+        surrogate characters) raises ``InvalidCommandArgumentError``.
         """
+        if worktree is not None:
+            _optional_storable("worktree branch", worktree.branch)
+            _optional_storable("worktree path", worktree.path)
+            _optional_storable("worktree head_commit", worktree.head_commit)
+        if pull_request is not None:
+            _storable("pull request url", pull_request.url)
         async with self._database.session() as session, session.begin():
             task = await self._require_task(session, task_id, lock=True)
             self._require_current_attempt(task, attempt)
