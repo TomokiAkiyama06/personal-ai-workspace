@@ -155,19 +155,11 @@ Core Backend は GPU 非依存とし、Local Model Runtime を停止できる構
 
 実装は [Benchmark / Evaluator 設計](BENCHMARK_EVALUATOR.md) と
 [Implementation Backlog](IMPLEMENTATION_BACKLOG.md) に従い、Benchmark / Evaluator、Model 選定、Workspace 本体の順で進めます。
-PAW-010 は PAW-001 に依存します。
-Backend の最小 Application Skeleton である PAW-020 は、Backlog 上は Model 比較 Run の PAW-017 に依存しますが、
-[Decision 0002](decisions/0002-start-workspace-implementation-before-model-comparison.md) により PAW-017 の完了を待たずに着手します。
+PAW-010 は PAW-001 に依存します。Backend の最小 Application Skeleton である PAW-020 は Backlog 上は Model 比較 Run の PAW-017 に依存しますが、
+[Decision 0002](decisions/0002-start-workspace-implementation-before-model-comparison.md)（Approved）により、PAW-017 の完了を待たずに着手できます。
 
-言語と Framework は [Decision 0003](decisions/0003-backend-cli-web-implementation-stack.md) で承認された構成に従います。
-
-| 配置 | 構成 |
-| --- | --- |
-| `apps/backend/` | Python 3.13、FastAPI + Uvicorn、Pydantic v2、PostgreSQL、SQLAlchemy 2.x + psycopg 3、Alembic、uv + `pyproject.toml` |
-| `apps/cli/` | Python（Backend の公開 HTTP API だけを呼ぶ） |
-| `apps/web/` | React + TypeScript + Vite、pnpm（Lint / Format Tool は PAW-060 で確定） |
-
-Deployment の具体方式は [Requirements Freeze Review](REQUIREMENTS_FREEZE_REVIEW.md) の実装時選択として扱い、
+Backend / CLI / Web の言語と Framework は [Decision 0003](decisions/0003-backend-cli-web-implementation-stack.md)（Approved）で決まっています（承認範囲は決定を参照）。
+Deployment の具体方式など、それ以外は [Requirements Freeze Review](REQUIREMENTS_FREEZE_REVIEW.md) の実装時選択として扱い、
 該当 Issue で決めた構成に合わせてこの文書を更新します。
 Backend の構成と起動方法は [apps/backend/README.md](../apps/backend/README.md) を参照してください。
 

@@ -69,7 +69,7 @@ IDE固有Context取得はV1 blocking requirementではない。
 - Credential Vaultの具体製品 / storage方式
 - Docker / systemd / release directory等のdeployment mechanism
 - PostgreSQL backup utilityの具体選定
-- Backend / frontend frameworkの最終選択（決定済み: [Decision 0003](decisions/0003-backend-cli-web-implementation-stack.md)。Web の Lint / Format Tool は PAW-060 で確定）
+- Backend / frontend frameworkの最終選択（Backend / CLI / Web は [Decision 0003](decisions/0003-backend-cli-web-implementation-stack.md) で決定済み。Desktopは未決）
 - Observability storage implementation
 
 ### FUTURE
