@@ -671,6 +671,34 @@ class WorktreeRunnerTest(unittest.TestCase):
         events = [event["event"] for event in self.events(run)]
         self.assertEqual(events[-2:], ["cleanup_started", "cleanup_finished"])
 
+    def test_inaccessible_git_metadata_is_a_cleanup_failure_not_absence(self):
+        # A candidate removes the search permission of ``.git/worktrees``: the
+        # entry cannot be looked at, which is not the same as being gone.
+        run = self.runner.create("locked-admin", self.commit)
+        admin = self.runner._runs[run.run_id].admin_directory
+        real_git = self.runner._git
+
+        def git_leaves_its_metadata(*arguments, **options):
+            result = real_git(*arguments, **options)
+            if arguments[:2] == ("worktree", "remove"):
+                admin.mkdir(parents=True, exist_ok=True)  # Git could not drop it
+                os.chmod(admin.parent, 0o000)
+            return result
+
+        try:
+            with (
+                mock.patch.object(self.runner, "_git", git_leaves_its_metadata),
+                self.assertRaises(WorktreeRunnerError),
+            ):
+                self.runner.cleanup(run)
+        finally:
+            os.chmod(admin.parent, 0o700)
+            shutil.rmtree(admin, ignore_errors=True)
+
+        events = [event["event"] for event in self.events(run)]
+        self.assertEqual(events[-2:], ["cleanup_started", "cleanup_incomplete"])
+        self.assertNotIn(run.run_id, self.runner._runs)
+
     def test_a_removal_that_fails_is_reported_as_incomplete(self):
         run = self.runner.create("stuck-admin", self.commit)
         admin = self.runner._runs[run.run_id].admin_directory

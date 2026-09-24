@@ -806,6 +806,17 @@ class WorktreeRunner:
         return "unknown", None  # the text and the disk disagree
 
     @staticmethod
+    def _still_present(path: Path) -> bool:
+        """False only when ``path`` is known to be gone (not merely unreadable)."""
+        try:
+            os.lstat(path)
+        except (FileNotFoundError, NotADirectoryError):
+            return False
+        except OSError:
+            return True
+        return True
+
+    @staticmethod
     def _lstat(path: Path) -> os.stat_result | None:
         try:
             return os.lstat(path)
@@ -822,7 +833,7 @@ class WorktreeRunner:
                 shutil.rmtree(path, ignore_errors=True)
         except OSError:
             return False
-        return not os.path.lexists(path)
+        return not WorktreeRunner._still_present(path)
 
     def _remove_moved_directory(self, state: _RunState, moved: Path) -> bool:
         """Remove the run directory a candidate moved to ``moved`` (identity checked)."""
@@ -834,7 +845,7 @@ class WorktreeRunner:
         ):
             return info is None  # gone already, or no longer the directory we opened
         shutil.rmtree(moved, ignore_errors=True)
-        return not os.path.lexists(moved)
+        return not self._still_present(moved)
 
     def _remove_admin_entry(self, state: _RunState) -> None:
         """Drop this run's ``.git/worktrees/<id>`` if Git could not.
@@ -843,8 +854,18 @@ class WorktreeRunner:
         would also discard records of unrelated missing worktrees.
         """
         admin = state.admin_directory
-        if admin is None or not os.path.lexists(admin):
+        if admin is None:
             return
+        try:
+            os.lstat(admin)
+        except (FileNotFoundError, NotADirectoryError):
+            return  # really gone
+        except OSError:
+            # ``os.path.lexists`` would say "absent" for a permission error: an
+            # entry that cannot be looked at is not an entry that is gone.
+            raise WorktreeRunnerError(
+                "could not inspect the Git worktree metadata"
+            ) from None
         expected_parent = self._common_git_directory / "worktrees"
         try:
             if admin.is_symlink() or admin.resolve().parent != expected_parent:

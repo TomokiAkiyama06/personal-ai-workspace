@@ -206,6 +206,9 @@ make the lifecycle log tamper-proof**.  What the runner does:
 - A removal that fails for a filesystem reason (a Git metadata entry replaced by a
   plain file is simply removed; a permission error is not) is reported as
   `cleanup_incomplete` and `WorktreeRunnerError`, never as a raw `OSError`.
+  An entry that cannot be looked at (a candidate removed the search permission of
+  `.git/worktrees`) is not treated as gone: only `ENOENT` / `ENOTDIR` mean absent, any
+  other error makes the cleanup incomplete.
 
 What remains: a candidate that guesses or lists `logs_directory` can still open the
 log for writing as the same user, and changes made after the final append are not
