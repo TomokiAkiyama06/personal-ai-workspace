@@ -17,12 +17,20 @@ from pathlib import Path
 from unittest.mock import patch
 
 from paw_backend.app import create_app
+from paw_backend.authz import (
+    Authorizer,
+    Capability,
+    PostgresAuditSink,
+    ProjectRole,
+    SystemRole,
+)
 from paw_backend.authz.diagnostics import (
     read_audit_table_access,
     warn_if_audit_table_is_mutable,
 )
 from paw_backend.db import Database, DatabaseNotConfiguredError
 
+from .authz_support import P1, U1, principal, repo_resource
 from .fake_postgres import HangingPostgres
 from .support import FakeDatabase, make_settings, wait_until
 
@@ -74,6 +82,23 @@ class FetchAbortableTest(unittest.IsolatedAsyncioTestCase):
             self.assertLess(time.monotonic() - started, 1.5)
             self.assertTrue(await wait_until(lambda: not database._probes, limit=3))
 
+    async def test_abortable_statements_are_limited_to_the_pool_size(self):
+        async with HangingPostgres() as server:
+            database = Database(settings_for(server, database_pool_size=1))
+            self.addAsyncCleanup(database.dispose)
+            first = asyncio.create_task(
+                database.execute_abortable("SELECT 1", timeout_seconds=30)
+            )
+            self.assertTrue(await wait_until(lambda: server.logins == 1))
+            started = time.monotonic()
+            with self.assertRaises(TimeoutError):  # no free slot within its limit
+                await database.execute_abortable("SELECT 1", timeout_seconds=0.3)
+            self.assertLess(time.monotonic() - started, 1.5)
+            self.assertEqual(server.logins, 1)  # it never opened a connection
+            first.cancel()
+            await asyncio.gather(first, return_exceptions=True)
+            self.assertTrue(await wait_until(lambda: not database._probes, limit=3))
+
     async def test_dispose_aborts_a_query_in_flight(self):
         async with HangingPostgres() as server:
             database = Database(settings_for(server, shutdown_timeout_seconds=2))
@@ -88,6 +113,33 @@ class FetchAbortableTest(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(Exception) as caught:
                 await asyncio.wait_for(caller, 3)
             self.assertNotIsInstance(caught.exception, TimeoutError)
+
+
+class AuditWriteStallTest(unittest.IsolatedAsyncioTestCase):
+    """A required audit write must fail closed on time, not after a server cancel."""
+
+    async def test_a_stalled_audit_insert_is_given_up_on_time(self):
+        async with HangingPostgres() as server:
+            database = Database(settings_for(server))
+            self.addAsyncCleanup(database.dispose)
+            authorizer = Authorizer(PostgresAuditSink(database), timeout_seconds=0.3)
+            contributor = principal(
+                SystemRole.USER, user_id=U1, projects={P1: ProjectRole.CONTRIBUTOR}
+            )
+            started = time.monotonic()
+            with self.assertLogs("paw_backend.authz.authorizer", level="WARNING"):
+                decision = await authorizer.authorize(
+                    contributor,
+                    Capability.PROJECT_REPO_WRITE,
+                    repo_resource(set()),  # an override that forbids: audited denial
+                )
+            elapsed = time.monotonic() - started
+            self.assertFalse(decision.allowed)
+            # psycopg's own server-side cancellation would take about ten seconds.
+            self.assertLess(elapsed, 1.5)
+            # The connection is wound down, not left hanging.
+            self.assertTrue(await wait_until(lambda: not database._probes, limit=3))
+            self.assertEqual(database._probe_connections, {})
 
 
 class DiagnosticStallTest(unittest.IsolatedAsyncioTestCase):

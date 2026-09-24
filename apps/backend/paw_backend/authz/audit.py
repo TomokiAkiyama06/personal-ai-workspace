@@ -13,9 +13,7 @@ from datetime import UTC, datetime
 from typing import Literal, Protocol
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
-from sqlalchemy import insert
 
-from paw_backend.authz.models import AuditEventRecord
 from paw_backend.authz.policy import Decision
 from paw_backend.authz.roles import SystemRole
 from paw_backend.authz.subjects import (
@@ -30,6 +28,32 @@ from paw_backend.authz.subjects import (
 from paw_backend.db import Database
 
 UNKNOWN_ACTION = "unknown"
+
+# The columns of an event; ``recorded_at`` is not listed: the database sets it
+# (see migration 0025). Values are bound by the driver, never formatted in.
+_COLUMNS = (
+    "id",
+    "correlation_id",
+    "occurred_at",
+    "actor_id",
+    "actor_role",
+    "agent_id",
+    "action",
+    "resource_kind",
+    "resource_id",
+    "project_id",
+    "repo_id",
+    "repo_acl",
+    "decision",
+    "reason",
+    "old_role",
+    "new_role",
+    "client_request_id",
+)
+_INSERT = (
+    f"INSERT INTO audit_events ({', '.join(_COLUMNS)}) "
+    f"VALUES ({', '.join(f'%({column})s' for column in _COLUMNS)})"
+)
 
 
 class AuditEvent(BaseModel):
@@ -163,6 +187,7 @@ class PostgresAuditSink:
             "new_role": event.new_role,
             "client_request_id": event.client_request_id,
         }
-        async with self._database.session() as session:
-            await session.execute(insert(AuditEventRecord).values(**values))
-            await session.commit()
+        # Its own short autocommit statement on a connection that is shut down at
+        # the deadline: a database that accepts the connection but stalls must not
+        # hold a required audit write past its limit (see ``fetch_abortable``).
+        await self._database.execute_abortable(_INSERT, values)

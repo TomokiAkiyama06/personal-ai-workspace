@@ -6,7 +6,9 @@ import logging
 import os
 import socket
 import time
+from collections.abc import Mapping
 from enum import StrEnum
+from typing import Any
 
 import psycopg
 from sqlalchemy import MetaData
@@ -71,6 +73,9 @@ class Database:
         # result is reused for `database_readiness_cache_seconds`.
         self._flight: asyncio.Task[DatabaseStatus] | None = None
         self._recent: tuple[float, DatabaseStatus] | None = None
+        # Abortable statements use connections outside the pool: at most as many
+        # at once as the pool would allow, so a burst cannot exhaust the server.
+        self._abortable_slots = asyncio.Semaphore(settings.database_pool_size)
 
     @property
     def configured(self) -> bool:
@@ -103,8 +108,10 @@ class Database:
         """One ``SELECT 1`` on a dedicated connection that ``_abort`` can drop."""
         await self._query("SELECT 1")
 
-    async def _query(self, sql: str) -> list[tuple]:
-        """Run one read-only statement on a dedicated, abortable connection.
+    async def _query(
+        self, sql: str, params: Mapping[str, Any] | None = None
+    ) -> list[tuple]:
+        """Run one short statement on a dedicated, abortable connection.
 
         The probe deliberately does not use the pool: it must not occupy a pool
         slot while the server is stalled, and it needs to own its connection
@@ -121,24 +128,32 @@ class Database:
         probe = asyncio.current_task()
         self._probe_connections[probe] = connection
         try:
-            cursor = await connection.execute(sql)
+            cursor = await connection.execute(sql, params)
             return await cursor.fetchall() if cursor.description else []
         finally:
             self._probe_connections.pop(probe, None)
             await connection.close()
 
     async def fetch_abortable(
-        self, sql: str, *, timeout_seconds: float | None = None
+        self,
+        sql: str,
+        params: Mapping[str, Any] | None = None,
+        *,
+        timeout_seconds: float | None = None,
     ) -> list[tuple]:
-        """Run a short read-only ``sql`` that never outlives its limit or ``dispose()``.
+        """Run a short ``sql`` that never outlives its limit or ``dispose()``.
 
-        For diagnostics and other non-request work that must not be able to
-        hold up shutdown: the statement runs on its own connection, and when
+        For diagnostics and for writes that must fail closed on time (the audit
+        row): the statement runs on its own autocommit connection, and when
         ``timeout_seconds`` (default ``database_timeout_seconds``) passes, the
         caller is cancelled, or the database is disposed, the connection's socket is
         shut down instead of asking a possibly stalled server to cancel the
         query (see ``_abort``). Raises ``TimeoutError`` at the deadline and the
-        driver's error if the connection fails.
+        driver's error if the connection fails. ``params`` are bound by the
+        driver (``%(name)s`` placeholders), never formatted into ``sql``.
+
+        A write that is aborted may or may not have been committed: the caller
+        learns only that it did not finish in time.
         """
         if not self.configured:
             raise DatabaseNotConfiguredError("PAW_DATABASE_URL is not set")
@@ -147,19 +162,34 @@ class Database:
             if timeout_seconds is None
             else timeout_seconds
         )
-        query = asyncio.create_task(self._query(sql))
-        self._probes.add(query)
-        query.add_done_callback(self._probes.discard)
-        # Retrieve the outcome so that asyncio does not log it as unhandled.
-        query.add_done_callback(lambda task: task.cancelled() or task.exception())
+        # Waiting for a free slot counts against the same limit.
+        await asyncio.wait_for(self._abortable_slots.acquire(), limit)
         try:
-            await asyncio.wait({query}, timeout=limit)
+            query = asyncio.create_task(self._query(sql, params))
+            self._probes.add(query)
+            query.add_done_callback(self._probes.discard)
+            # Retrieve the outcome so that asyncio does not log it as unhandled.
+            query.add_done_callback(lambda task: task.cancelled() or task.exception())
+            try:
+                await asyncio.wait({query}, timeout=limit)
+            finally:
+                if not query.done():  # timed out, or this caller was cancelled
+                    self._abort(query)
+            if not query.done():
+                raise TimeoutError
+            return query.result()
         finally:
-            if not query.done():  # timed out, or this caller was cancelled
-                self._abort(query)
-        if not query.done():
-            raise TimeoutError
-        return query.result()
+            self._abortable_slots.release()
+
+    async def execute_abortable(
+        self,
+        sql: str,
+        params: Mapping[str, Any] | None = None,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> None:
+        """``fetch_abortable`` for a statement whose rows are not needed."""
+        await self.fetch_abortable(sql, params, timeout_seconds=timeout_seconds)
 
     async def check(self) -> DatabaseStatus:
         """Run ``SELECT 1``. Never raises and never reports connection details.
