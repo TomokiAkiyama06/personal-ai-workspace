@@ -43,7 +43,14 @@ from .test_migrations import offline_config
 
 C = TaskCommand
 S = TaskState
-TASK_TABLES = ("tasks", "task_attempts", "task_steps", "task_logs", "task_events")
+TASK_TABLES = (
+    "tasks",
+    "task_attempts",
+    "task_steps",
+    "task_tool_invocations",
+    "task_logs",
+    "task_events",
+)
 
 
 @requires_postgres
@@ -90,8 +97,8 @@ class ConcurrencyTest(PostgresTaskTestCase):
                 task_id, C.PAUSE, actor=self.user, expected_version=4
             )
 
-    async def test_a_writer_that_read_the_same_version_loses_the_race(self):
-        """Two commands read version 1; PostgreSQL lets only one UPDATE match."""
+    async def test_a_command_waiting_behind_a_writer_rejects_its_stale_version(self):
+        """Both commands were decided on version 1; only the first one may apply."""
         task_id = await self.create_task()
         loser = TaskService(self.new_database())
 
@@ -104,11 +111,10 @@ class ConcurrencyTest(PostgresTaskTestCase):
                 ),
                 {"id": task_id},
             )
-            # The loser reads the committed version 1, then blocks on the lock.
             pending = asyncio.create_task(
-                loser.execute(task_id, C.START, actor=self.system)
+                loser.execute(task_id, C.START, actor=self.system, expected_version=1)
             )
-            await self.wait_until_blocked_on_a_lock()
+            await self.wait_for_lock_waiters(1)
             await winner.commit()
 
         with self.assertRaises(TaskConflictError):
@@ -125,16 +131,28 @@ class ConcurrencyTest(PostgresTaskTestCase):
             [event.command for event in await self.service.history(task_id)], [C.CREATE]
         )
 
-    async def wait_until_blocked_on_a_lock(self, limit: float = 10.0):
-        async with asyncio.timeout(limit):
-            while True:
-                waiting = await self.scalar(
-                    "SELECT count(*) FROM pg_stat_activity "
-                    "WHERE datname = current_database() AND wait_event_type = 'Lock'"
-                )
-                if waiting:
-                    return
-                await asyncio.sleep(0.02)
+    async def test_a_command_without_a_version_is_judged_on_the_latest_state(self):
+        task_id = await self.task_in_state(S.RUNNING)
+        second = TaskService(self.new_database())
+
+        async with self.database.engine.connect() as first:
+            await first.execute(
+                text(
+                    "UPDATE tasks SET state = 'paused', version = version + 1 "
+                    "WHERE id = :id"
+                ),
+                {"id": task_id},
+            )
+            pending = asyncio.create_task(
+                second.execute(task_id, C.CANCEL, actor=self.user)
+            )
+            await self.wait_for_lock_waiters(1)
+            await first.commit()
+
+        event = await pending
+        # It did not act on the running state it could have read before waiting.
+        self.assertEqual((event.from_state, event.to_state), (S.PAUSED, S.CANCELLED))
+        self.assertEqual(event.task_version, 4)
 
     async def test_of_many_simultaneous_cancels_exactly_one_wins(self):
         task_id = await self.task_in_state(S.RUNNING)
@@ -193,7 +211,7 @@ class ConcurrencyTest(PostgresTaskTestCase):
         task_id = await self.task_in_state(S.RUNNING)
         services = [TaskService(self.new_database()) for _ in range(4)]
         results = await asyncio.gather(
-            *(service.begin_step(task_id, "work") for service in services),
+            *(service.begin_step(task_id, "work", attempt=1) for service in services),
             return_exceptions=True,
         )
         started = [result for result in results if not isinstance(result, Exception)]
@@ -206,7 +224,7 @@ class ConcurrencyTest(PostgresTaskTestCase):
 
     async def test_stop_now_does_not_overwrite_a_step_the_worker_just_finished(self):
         task_id = await self.task_in_state(S.RUNNING)
-        await self.service.begin_step(task_id, "work")
+        await self.service.begin_step(task_id, "work", attempt=1)
         stopper = TaskService(self.new_database())
 
         async with self.database.engine.connect() as worker:
@@ -221,13 +239,19 @@ class ConcurrencyTest(PostgresTaskTestCase):
             pending = asyncio.create_task(
                 stopper.execute(task_id, C.STOP_NOW, actor=self.user)
             )
-            await self.wait_until_blocked_on_a_lock()
+            await self.wait_for_lock_waiters(1)
             await worker.commit()
 
         event = await pending
-        self.assertEqual(event.step_name, "work")
-        step = (await self.service.restore(task_id)).current_step
-        self.assertEqual(step.status, StepStatus.SUCCEEDED)
+        # Stop Now found the step already finished, so it interrupted nothing and
+        # must not say it did.
+        self.assertIsNone(event.step_name)
+        snapshot = await self.service.restore(task_id)
+        self.assertEqual(snapshot.current_step.status, StepStatus.SUCCEEDED)
+        self.assertEqual(
+            [log.message for log in snapshot.recent_logs],
+            ["Stop Now: no step was running"],
+        )
 
 
 @requires_postgres
@@ -241,11 +265,14 @@ class RestoreTest(PostgresTaskTestCase):
             model="model-x",
         )
         await service.execute(task_id, C.START, actor=self.system)
-        await service.begin_step(task_id, "implement")
-        await service.add_log(task_id, "editing parser.py")
-        await service.add_log(task_id, "tests are red", level=LogLevel.WARNING)
+        await service.begin_step(task_id, "implement", attempt=1)
+        await service.add_log(task_id, "editing parser.py", attempt=1)
+        await service.add_log(
+            task_id, "tests are red", attempt=1, level=LogLevel.WARNING
+        )
         await service.update_attempt(
             task_id,
+            attempt=1,
             worktree=WorktreeState("agent/task-1", "/srv/worktrees/task-1", "b" * 40),
             review=ReviewState(ReviewStatus.IN_REVIEW, EvaluationResult.PASSED),
             pull_request=PullRequestInfo(
@@ -305,7 +332,7 @@ class RestoreTest(PostgresTaskTestCase):
         await fresh.execute(
             task_id, C.UNBLOCK, actor=self.user, expected_version=before.version
         )
-        await fresh.finish_step(task_id, StepStatus.SUCCEEDED)
+        await fresh.finish_step(task_id, before.current_step.id, StepStatus.SUCCEEDED)
         after = await self.service.restore(task_id)
         self.assertEqual((after.state, after.version), (S.RUNNING, before.version + 1))
         self.assertEqual(after.current_step.status, StepStatus.SUCCEEDED)
@@ -380,7 +407,7 @@ class SchemaTest(PostgresTaskTestCase):
         self,
     ):
         task_id = await self.task_in_state(S.RUNNING)
-        await self.service.begin_step(task_id, "one")
+        await self.service.begin_step(task_id, "one", attempt=1)
         with self.assertRaises(IntegrityError):
             async with self.database.engine.begin() as connection:
                 await connection.execute(
@@ -557,7 +584,13 @@ class OfflineMigrationTest(unittest.TestCase):
             sql.index("DROP TABLE task_events"),
             sql.index("DROP FUNCTION task_events_reject_change()"),
         )
-        for table in ("task_logs", "task_steps", "task_attempts", "tasks"):
+        for table in (
+            "task_logs",
+            "task_tool_invocations",
+            "task_steps",
+            "task_attempts",
+            "tasks",
+        ):
             self.assertIn(f"DROP TABLE {table}", sql)
 
 

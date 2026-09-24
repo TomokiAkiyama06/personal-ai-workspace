@@ -24,6 +24,7 @@ from paw_backend.memory.models import (
 
 from .memory_support import (
     MemoryDatabaseTestCase,
+    foreign_keys_without_index,
     requires_postgres,
     utc,
     version_values,
@@ -77,6 +78,9 @@ class LayerSeparationTest(MemoryDatabaseTestCase):
                 ("memory_relations", "memory_versions"): "c",
                 ("memory_sources", "memory_versions"): "c",
                 ("memory_embeddings", "memory_versions"): "c",
+                # A model's dimension cannot change or the model disappear
+                # while embeddings use it (NO ACTION).
+                ("memory_embeddings", "embedding_models"): "a",
                 # The only bridge from Long-term Memory to Raw Conversation:
                 # provenance, which must survive the conversation's deletion.
                 ("memory_sources", "conversations"): "n",
@@ -304,10 +308,11 @@ class SessionStateTest(MemoryDatabaseTestCase):
 @requires_postgres
 class MemoryScopeTest(MemoryDatabaseTestCase):
     def test_each_scope_stores_exactly_its_own_id_column(self):
-        user, project, repo = uuid4(), uuid4(), uuid4()
+        user, project, group, repo = uuid4(), uuid4(), uuid4(), uuid4()
         cases = [
             ("user", {"owner_user_id": user}),
             ("project", {"project_id": project}),
+            ("project_group", {"project_group_id": group}),
             ("repo", {"repo_id": repo}),
             ("shared", {}),
         ]
@@ -319,6 +324,7 @@ class MemoryScopeTest(MemoryDatabaseTestCase):
                         MemoryVersion.scope,
                         MemoryVersion.owner_user_id,
                         MemoryVersion.project_id,
+                        MemoryVersion.project_group_id,
                         MemoryVersion.repo_id,
                     ).where(MemoryVersion.id == version)
                 ).one()
@@ -328,12 +334,13 @@ class MemoryScopeTest(MemoryDatabaseTestCase):
                         scope,
                         columns.get("owner_user_id"),
                         columns.get("project_id"),
+                        columns.get("project_group_id"),
                         columns.get("repo_id"),
                     ),
                 )
 
     def test_a_scope_with_the_wrong_id_columns_is_rejected(self):
-        user, project, repo = uuid4(), uuid4(), uuid4()
+        user, project, group, repo = uuid4(), uuid4(), uuid4(), uuid4()
         cases = {
             "unknown scope": {"scope": "team", "project_id": project},
             "user without owner": {"scope": "user"},
@@ -353,6 +360,38 @@ class MemoryScopeTest(MemoryDatabaseTestCase):
                 "project_id": project,
                 "repo_id": repo,
             },
+            "project with group": {
+                "scope": "project",
+                "project_id": project,
+                "project_group_id": group,
+            },
+            "project group without group": {"scope": "project_group"},
+            "project group with project": {
+                "scope": "project_group",
+                "project_group_id": group,
+                "project_id": project,
+            },
+            "project group with owner": {
+                "scope": "project_group",
+                "project_group_id": group,
+                "owner_user_id": user,
+            },
+            "project group with repo": {
+                "scope": "project_group",
+                "project_group_id": group,
+                "repo_id": repo,
+            },
+            "user with group": {
+                "scope": "user",
+                "owner_user_id": user,
+                "project_group_id": group,
+            },
+            "repo with group": {
+                "scope": "repo",
+                "repo_id": repo,
+                "project_group_id": group,
+            },
+            "shared with group": {"scope": "shared", "project_group_id": group},
             "repo without repo": {"scope": "repo"},
             "repo with project": {
                 "scope": "repo",
@@ -751,6 +790,7 @@ class VersioningTest(MemoryDatabaseTestCase):
                 memory_version_id=v2, source_type="task", source_ref="task-7"
             )
         )
+        self.register_embedding_model("model-a", 2)
         self.session.execute(
             insert(MemoryEmbedding).values(
                 memory_version_id=v2,
@@ -798,6 +838,71 @@ class VersioningTest(MemoryDatabaseTestCase):
             select(func.count()).select_from(MemoryRelation)
         ).scalar_one()
         self.assertEqual(edges, 0)
+
+
+@requires_postgres
+class ForeignKeyIndexTest(MemoryDatabaseTestCase):
+    """Deleting a parent row must not scan the child table (referential actions)."""
+
+    def test_every_foreign_key_has_an_index_that_leads_with_its_column(self):
+        self.assertEqual(foreign_keys_without_index(self.connection), [])
+
+    def test_the_check_reports_a_foreign_key_whose_index_is_missing(self):
+        # Proves the check above can fail: remove the indexes that serve one
+        # single-column foreign key each.
+        for index, foreign_key in [
+            ("ix_memory_sources_message_id", "fk_memory_sources_message_id_messages"),
+            (
+                "ix_memory_relations_to_version_id",
+                "fk_memory_relations_to_version_id_memory_versions",
+            ),
+            (
+                "ix_memory_sources_memory_version_id",
+                "fk_memory_sources_memory_version_id_memory_versions",
+            ),
+        ]:
+            with self.subTest(index), self.connection.begin_nested() as savepoint:
+                self.connection.execute(text(f"DROP INDEX {index}"))
+                self.assertEqual(
+                    foreign_keys_without_index(self.connection), [foreign_key]
+                )
+                savepoint.rollback()
+
+    def test_a_message_lookup_in_sources_uses_the_message_index(self):
+        # The lookup a message deletion runs for ``ON DELETE SET NULL``, on a
+        # table big enough that the planner does not just scan it.
+        conversation = self.add_conversation()
+        version = self.add_version(self.add_memory())
+        for sequence in range(300):
+            message = self.add_message(conversation, sequence)
+            self.session.execute(
+                insert(MemorySource).values(
+                    memory_version_id=version,
+                    source_type="conversation",
+                    conversation_id=conversation,
+                    message_id=message,
+                )
+            )
+        self.connection.execute(
+            text(
+                "INSERT INTO memory_sources"
+                " (memory_version_id, source_type, source_ref)"
+                " SELECT :version, 'task', 'task-' || n"
+                " FROM generate_series(1, 30000) n"
+            ),
+            {"version": version},
+        )
+        self.connection.execute(text("ANALYZE memory_sources"))
+        target = self.session.execute(select(Message.id).limit(1)).scalar_one()
+
+        plan = "\n".join(
+            self.connection.execute(
+                text("EXPLAIN SELECT 1 FROM memory_sources WHERE message_id = :id"),
+                {"id": target},
+            ).scalars()
+        )
+
+        self.assertIn("ix_memory_sources_message_id", plan)
 
 
 @requires_postgres
@@ -853,6 +958,97 @@ class ProvenanceTest(MemoryDatabaseTestCase):
 
         stored = self.session.execute(select(MemorySource.message_id)).scalar_one()
         self.assertEqual(stored, message)
+
+    def test_a_source_message_must_belong_to_the_source_conversation(self):
+        conversation_a, conversation_b = (
+            self.add_conversation(),
+            self.add_conversation(),
+        )
+        message_of_b = self.add_message(conversation_b, 0)
+        version = self.add_version(self.add_memory())
+
+        mismatched = partial(
+            self.add_source,
+            version,
+            "conversation",
+            conversation_id=conversation_a,
+            message_id=message_of_b,
+        )
+        matching = partial(
+            self.add_source,
+            version,
+            "conversation",
+            conversation_id=conversation_b,
+            message_id=message_of_b,
+        )
+
+        self.assertEqual(
+            self.violation(mismatched), "fk_memory_sources_conversation_id_messages"
+        )
+        self.assertIsNone(self.violation(matching))
+        stored = self.session.execute(
+            select(MemorySource.conversation_id, MemorySource.message_id)
+        ).all()
+        self.assertEqual(
+            [tuple(row) for row in stored], [(conversation_b, message_of_b)]
+        )
+
+    def test_a_source_may_name_a_conversation_without_naming_a_message(self):
+        conversation = self.add_conversation()
+        version = self.add_version(self.add_memory())
+
+        self.add_source(version, "conversation", conversation_id=conversation)
+
+        stored = self.session.execute(
+            select(MemorySource.conversation_id, MemorySource.message_id)
+        ).one()
+        self.assertEqual(tuple(stored), (conversation, None))
+
+    def test_deleting_a_message_keeps_the_source_and_its_conversation(self):
+        conversation = self.add_conversation()
+        message = self.add_message(conversation, 0)
+        version = self.add_version(self.add_memory())
+        self.add_source(
+            version, "conversation", conversation_id=conversation, message_id=message
+        )
+
+        self.session.execute(delete(Message).where(Message.id == message))
+
+        stored = self.session.execute(
+            select(MemorySource.conversation_id, MemorySource.message_id)
+        ).one()
+        self.assertEqual(tuple(stored), (conversation, None))
+
+    def test_deleting_a_conversation_clears_both_references_of_its_sources(self):
+        conversation = self.add_conversation()
+        message = self.add_message(conversation, 0)
+        version = self.add_version(self.add_memory())
+        self.add_source(
+            version, "conversation", conversation_id=conversation, message_id=message
+        )
+
+        self.session.execute(
+            delete(Conversation).where(Conversation.id == conversation)
+        )
+
+        stored = self.session.execute(
+            select(MemorySource.conversation_id, MemorySource.message_id)
+        ).one()
+        self.assertEqual(tuple(stored), (None, None))
+
+    def test_the_message_reference_is_cleared_by_column_not_the_whole_pair(self):
+        # ``ON DELETE SET NULL (message_id)``: a plain SET NULL would also null
+        # conversation_id and lose which conversation the memory came from.
+        cleared = self.connection.execute(
+            text(
+                "SELECT array_agg(a.attname)"
+                " FROM pg_constraint con"
+                " JOIN pg_attribute a ON a.attrelid = con.conrelid"
+                "   AND a.attnum = ANY (con.confdelsetcols)"
+                " WHERE con.conname = 'fk_memory_sources_conversation_id_messages'"
+            )
+        ).scalar_one()
+        self.assertEqual(cleared, ["message_id"])
 
     def test_deleting_a_conversation_keeps_the_memory_and_its_other_sources(self):
         doomed, kept = self.add_conversation(), self.add_conversation()

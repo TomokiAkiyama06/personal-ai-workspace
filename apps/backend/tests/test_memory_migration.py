@@ -80,7 +80,13 @@ class ModelsMetadataTest(unittest.TestCase):
                     targets.add(constraint.referred_table.name)
         self.assertEqual(
             targets,
-            {"conversations", "messages", "memories", "memory_versions"},
+            {
+                "conversations",
+                "messages",
+                "memories",
+                "memory_versions",
+                "embedding_models",
+            },
         )
 
     def test_user_project_and_repo_ids_are_plain_uuid_columns(self):
@@ -90,6 +96,7 @@ class ModelsMetadataTest(unittest.TestCase):
             ("conversations", "repo_id"),
             ("memory_versions", "owner_user_id"),
             ("memory_versions", "project_id"),
+            ("memory_versions", "project_group_id"),
             ("memory_versions", "repo_id"),
             ("memory_versions", "actor_user_id"),
         ]:
@@ -100,7 +107,7 @@ class ModelsMetadataTest(unittest.TestCase):
 
     def test_allowed_values_follow_the_design_documents(self):
         expected: dict[type[StrEnum], set[str]] = {
-            models.MemoryScope: {"user", "project", "repo", "shared"},
+            models.MemoryScope: {"user", "project", "project_group", "repo", "shared"},
             models.MemoryStatus: {"active", "superseded", "deprecated", "history"},
             models.ConfirmationState: {
                 "observed",

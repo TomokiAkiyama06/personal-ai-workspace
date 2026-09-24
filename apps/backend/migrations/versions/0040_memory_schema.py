@@ -3,7 +3,8 @@
 Raw Conversation (conversations, messages), Session state (session_states) and
 Long-term Memory (memories, memory_versions, memory_relations, memory_sources,
 memory_embeddings) as separate tables. Users, projects and repositories are
-plain UUID columns without foreign keys: those tables do not exist yet.
+plain UUID columns without foreign keys: those tables do not exist yet (the
+same goes for the id of a project group, the fifth scope).
 
 The migration enables the ``vector`` extension. ``CREATE EXTENSION`` needs a
 role that may create it (a superuser, or the extension is "trusted"); if an
@@ -13,6 +14,15 @@ cascades, if another object depends on it).
 
 The ``embedding`` column has no fixed dimension and there is no ANN index: the
 embedding model is chosen by the PAW-019 benchmark and PAW-043 adds the index.
+``embedding_models`` (empty here) gives each model exactly one dimension, which
+``memory_embeddings`` references.
+
+Privileges of the application role (``PAW_APP_DATABASE_ROLE``): every table
+gets the least the eventual services need, see ``_grant_app_privileges``. In
+short, the history is append-only for the application (no DELETE on versions,
+messages or relations; UPDATE only of the few columns the design says change
+in place), and deleting a conversation or a memory works through the foreign
+keys' cascade, which PostgreSQL runs with the owner's rights.
 
 The constraint definitions repeat the ones in ``paw_backend.memory.models`` on
 purpose (a migration is a frozen snapshot); ``tests/test_memory_migration.py``
@@ -30,36 +40,12 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
+from paw_backend.db_roles import grant_app_privileges
+
 revision: str = "0040"
 down_revision: str | Sequence[str] | None = "0032"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
-
-# Placeholder: this revision predates ``grant_app_privileges``. It grants the
-# application role nothing today, which this records; the PAW-040 lane replaces
-# it with the privileges the Memory service needs (a decision that is theirs).
-NO_APP_GRANTS = {
-    "conversations": (
-        "privileges of the Memory service are decided by the PAW-040 lane"
-    ),
-    "messages": ("privileges of the Memory service are decided by the PAW-040 lane"),
-    "session_states": (
-        "privileges of the Memory service are decided by the PAW-040 lane"
-    ),
-    "memories": ("privileges of the Memory service are decided by the PAW-040 lane"),
-    "memory_versions": (
-        "privileges of the Memory service are decided by the PAW-040 lane"
-    ),
-    "memory_relations": (
-        "privileges of the Memory service are decided by the PAW-040 lane"
-    ),
-    "memory_sources": (
-        "privileges of the Memory service are decided by the PAW-040 lane"
-    ),
-    "memory_embeddings": (
-        "privileges of the Memory service are decided by the PAW-040 lane"
-    ),
-}
 
 
 class _Vector(sa.types.UserDefinedType):
@@ -87,6 +73,89 @@ def _empty_object(name: str) -> sa.Column:
     return sa.Column(
         name, postgresql.JSONB(), server_default=sa.text("'{}'::jsonb"), nullable=False
     )
+
+
+def _grant_app_privileges() -> None:
+    """The least privileges the application role needs on each table.
+
+    Nothing is granted when no application role is configured (single-role
+    development). TRUNCATE, ALTER, DROP and GRANT are never given. A referential
+    action (``ON DELETE CASCADE`` / ``SET NULL``) runs with the rights of the
+    owner of the table it changes, so deleting a conversation or a memory
+    removes its messages, session state, versions and embeddings without the
+    application holding DELETE on those tables.
+    """
+    # Raw Conversation. A conversation is renamed and touched, never re-owned:
+    # ``owner_user_id`` (the ACL boundary) and the project / repo context are
+    # not updatable. Deleting a conversation is a product feature (REQUIREMENTS
+    # "Conversation deletion"), so DELETE is granted here.
+    grant_app_privileges(
+        op,
+        "conversations",
+        select=True,
+        insert=True,
+        delete=True,
+        update_columns=("title", "updated_at"),
+    )
+    # Raw events are append-only: no UPDATE (nothing rewrites history) and no
+    # DELETE (a whole conversation is deleted through its cascade; deleting a
+    # single message is not a documented flow).
+    grant_app_privileges(op, "messages", select=True, insert=True)
+    # The summary and working state are rewritten as the conversation goes on
+    # (guarded by ``summarized_through_sequence``), but the row is created once
+    # and removed only with its conversation (cascade): no DELETE, and the key
+    # ``conversation_id`` cannot change.
+    grant_app_privileges(
+        op,
+        "session_states",
+        select=True,
+        insert=True,
+        update_columns=(
+            "summary",
+            "state",
+            "summarized_through_sequence",
+            "updated_at",
+        ),
+    )
+    # Identity only, nothing to update. DELETE removes a whole memory with all
+    # its versions (cascade): the documented deletion flows (a conversation
+    # deleted together with the memories derived from it, an Admin deleting a
+    # Shared memory, erasing a deleted user's private memory). Deleting one
+    # version on its own is not granted, see ``memory_versions``.
+    grant_app_privileges(op, "memories", select=True, insert=True, delete=True)
+    # A version is never edited in place (a new version is inserted instead), so
+    # the content, scope / ACL columns, confirmation state and freshness
+    # settings are immutable. Only what the design changes in place is
+    # updatable: ``status`` (superseded / deprecated / history), ``stale_since``
+    # (stale candidate marking), and the low-risk metadata ``pinned`` and
+    # ``importance``. No DELETE: history is kept.
+    grant_app_privileges(
+        op,
+        "memory_versions",
+        select=True,
+        insert=True,
+        update_columns=("status", "stale_since", "pinned", "importance"),
+    )
+    # Edges of the history graph are append-only.
+    grant_app_privileges(op, "memory_relations", select=True, insert=True)
+    # Provenance is append-only, except that the deletion flow records a lost
+    # source in ``source_deleted_at``. The foreign keys' SET NULL clears the
+    # conversation / message references without any privilege of the application.
+    grant_app_privileges(
+        op,
+        "memory_sources",
+        select=True,
+        insert=True,
+        update_columns=("source_deleted_at",),
+    )
+    # A registry of the models chosen by the benchmark: register (insert) and
+    # read. A model's dimension never changes; retiring a model is an
+    # administrator's job, so neither UPDATE nor DELETE.
+    grant_app_privileges(op, "embedding_models", select=True, insert=True)
+    # Derived, regenerable data (not history). A model's vectors are removed
+    # when it is retired or its embeddings are regenerated (LOW-priority job),
+    # hence DELETE; a stored vector is never updated in place.
+    grant_app_privileges(op, "memory_embeddings", select=True, insert=True, delete=True)
 
 
 def upgrade() -> None:
@@ -128,6 +197,9 @@ def upgrade() -> None:
             ["conversation_id"], ["conversations.id"], ondelete="CASCADE"
         ),
         sa.UniqueConstraint("conversation_id", "event_sequence"),
+        sa.UniqueConstraint(
+            "conversation_id", "id", name="uq_messages_conversation_id_id"
+        ),
         sa.CheckConstraint(
             "role IN ('user', 'assistant', 'tool', 'agent', 'task')", name="role_valid"
         ),
@@ -177,6 +249,7 @@ def upgrade() -> None:
         sa.Column("scope", sa.Text(), nullable=False),
         sa.Column("owner_user_id", sa.Uuid(), nullable=True),
         sa.Column("project_id", sa.Uuid(), nullable=True),
+        sa.Column("project_group_id", sa.Uuid(), nullable=True),
         sa.Column("repo_id", sa.Uuid(), nullable=True),
         sa.Column("memory_type", sa.Text(), nullable=False),
         sa.Column("title", sa.Text(), nullable=False),
@@ -221,14 +294,18 @@ def upgrade() -> None:
         sa.UniqueConstraint("memory_id", "version_number"),
         sa.CheckConstraint("version_number >= 1", name="version_number_positive"),
         sa.CheckConstraint(
-            "(scope = 'user' AND owner_user_id IS NOT NULL"
-            " AND project_id IS NULL AND repo_id IS NULL)"
-            " OR (scope = 'project' AND project_id IS NOT NULL"
-            " AND owner_user_id IS NULL AND repo_id IS NULL)"
-            " OR (scope = 'repo' AND repo_id IS NOT NULL"
-            " AND owner_user_id IS NULL AND project_id IS NULL)"
-            " OR (scope = 'shared' AND owner_user_id IS NULL"
-            " AND project_id IS NULL AND repo_id IS NULL)",
+            "(scope = 'user' AND owner_user_id IS NOT NULL AND project_id IS NULL"
+            " AND project_group_id IS NULL AND repo_id IS NULL)"
+            " OR (scope = 'project' AND owner_user_id IS NULL"
+            " AND project_id IS NOT NULL"
+            " AND project_group_id IS NULL AND repo_id IS NULL)"
+            " OR (scope = 'project_group' AND owner_user_id IS NULL"
+            " AND project_id IS NULL"
+            " AND project_group_id IS NOT NULL AND repo_id IS NULL)"
+            " OR (scope = 'repo' AND owner_user_id IS NULL AND project_id IS NULL"
+            " AND project_group_id IS NULL AND repo_id IS NOT NULL)"
+            " OR (scope = 'shared' AND owner_user_id IS NULL AND project_id IS NULL"
+            " AND project_group_id IS NULL AND repo_id IS NULL)",
             name="scope_columns",
         ),
         sa.CheckConstraint(
@@ -301,6 +378,12 @@ def upgrade() -> None:
         postgresql_where=sa.text("project_id IS NOT NULL"),
     )
     op.create_index(
+        "ix_memory_versions_project_group_id_status",
+        "memory_versions",
+        ["project_group_id", "status"],
+        postgresql_where=sa.text("project_group_id IS NOT NULL"),
+    )
+    op.create_index(
         "ix_memory_versions_repo_id_status",
         "memory_versions",
         ["repo_id", "status"],
@@ -367,6 +450,13 @@ def upgrade() -> None:
             ["conversation_id"], ["conversations.id"], ondelete="SET NULL"
         ),
         sa.ForeignKeyConstraint(["message_id"], ["messages.id"], ondelete="SET NULL"),
+        # The message must belong to the conversation when both are set. Only
+        # the message column is cleared when the message is deleted.
+        sa.ForeignKeyConstraint(
+            ["conversation_id", "message_id"],
+            ["messages.conversation_id", "messages.id"],
+            ondelete="SET NULL (message_id)",
+        ),
         sa.CheckConstraint(
             "source_type IN ('conversation', 'task', 'repo_analysis',"
             " 'user_confirmation', 'project_decision')",
@@ -395,6 +485,27 @@ def upgrade() -> None:
         ["conversation_id"],
         postgresql_where=sa.text("conversation_id IS NOT NULL"),
     )
+    op.create_index(
+        "ix_memory_sources_message_id",
+        "memory_sources",
+        ["message_id"],
+        postgresql_where=sa.text("message_id IS NOT NULL"),
+    )
+
+    # Nothing is registered here: the model (and dimension) is chosen by the
+    # PAW-019 benchmark and registered with an ordinary insert.
+    op.create_table(
+        "embedding_models",
+        sa.Column("id", sa.Text(), nullable=False),
+        sa.Column("dimensions", sa.Integer(), nullable=False),
+        _now("created_at"),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint(
+            "id", "dimensions", name="uq_embedding_models_id_dimensions"
+        ),
+        sa.CheckConstraint("char_length(id) BETWEEN 1 AND 200", name="id_length"),
+        sa.CheckConstraint("dimensions BETWEEN 1 AND 16000", name="dimensions_range"),
+    )
 
     op.create_table(
         "memory_embeddings",
@@ -407,8 +518,11 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(
             ["memory_version_id"], ["memory_versions.id"], ondelete="CASCADE"
         ),
-        sa.CheckConstraint(
-            "char_length(embedding_model_id) BETWEEN 1 AND 200", name="model_id_length"
+        # One dimension per model: NO ACTION, so neither the dimension of a
+        # model nor the model itself can change while embeddings use it.
+        sa.ForeignKeyConstraint(
+            ["embedding_model_id", "dimensions"],
+            ["embedding_models.id", "embedding_models.dimensions"],
         ),
         sa.CheckConstraint(
             "vector_dims(embedding) = dimensions", name="dimensions_match"
@@ -420,10 +534,13 @@ def upgrade() -> None:
         ["embedding_model_id"],
     )
 
+    _grant_app_privileges()
+
 
 def downgrade() -> None:
-    # Reverse order of creation; dropping a table drops its indexes.
+    # Reverse order of creation; dropping a table drops its indexes and grants.
     op.drop_table("memory_embeddings")
+    op.drop_table("embedding_models")
     op.drop_table("memory_sources")
     op.drop_table("memory_relations")
     op.drop_table("memory_versions")

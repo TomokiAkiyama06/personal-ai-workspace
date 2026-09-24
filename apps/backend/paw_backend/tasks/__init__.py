@@ -21,6 +21,7 @@ from paw_backend.tasks.domain import (
 from paw_backend.tasks.errors import (
     IllegalTransitionError,
     InvalidCommandArgumentError,
+    StaleAttemptError,
     TaskConflictError,
     TaskError,
     TaskNotFoundError,
@@ -39,6 +40,8 @@ from paw_backend.tasks.records import (
     StepStatus,
     TaskEvent,
     TaskSnapshot,
+    ToolInvocationInfo,
+    ToolInvocationStatus,
     WorktreeState,
 )
 from paw_backend.tasks.service import TaskService, TransitionListener
@@ -60,6 +63,7 @@ __all__ = [
     "PullRequestState",
     "ReviewState",
     "ReviewStatus",
+    "StaleAttemptError",
     "StepInfo",
     "StepStatus",
     "TaskCommand",
@@ -71,6 +75,8 @@ __all__ = [
     "TaskSnapshot",
     "TaskState",
     "TaskStepError",
+    "ToolInvocationInfo",
+    "ToolInvocationStatus",
     "TransitionListener",
     "WaitReason",
     "WorktreeState",
