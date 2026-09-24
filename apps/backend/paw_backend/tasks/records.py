@@ -191,6 +191,7 @@ class TaskSnapshot:
     updated_at: datetime
     # Earlier attempts (oldest first); Restart keeps them as history.
     previous_attempts: tuple[AttemptSnapshot, ...] = field(default=())
-    # Tool calls of the current step (oldest first, at most the latest 100). The
-    # ones still ``started`` are what the backend would have to resume or abort.
+    # Tool calls of the current step, oldest first: every one that is still
+    # ``started`` (what the backend would have to resume or abort; a step has at
+    # most ``MAX_ACTIVE_TOOL_INVOCATIONS`` of them) and the latest 100 finished.
     tool_invocations: tuple[ToolInvocationInfo, ...] = field(default=())
