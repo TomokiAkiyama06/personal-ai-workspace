@@ -247,6 +247,12 @@ do not become durable logs.
   be found and can outlive the check; only a container or cgroup contains that.
   If the output capture cannot be set up after the launch (descriptor exhaustion), the
   child is killed and reaped and the check is reported as an `error`, not left running.
+  The child's pid and start time are recorded right after the launch, and nothing is
+  signalled unless it is still the runner's own unreaped child (`waitid` with
+  `WNOWAIT`) with that start time: a child that something else already reaped may have
+  had its pid, which is also its process group id, reused, so then nothing is sent and
+  nothing is waited for.  Once the leader object exists its guarded signalling
+  (recorded members, identity re-check at every signal) is used instead.
 - Descendants are tracked by identity, not by pid alone (pid plus the start time in
   `/proc/<pid>/stat`).  Before every `SIGTERM`/`SIGKILL` the identity is re-checked, and
   a pid now held by a different process is dropped and neither signalled nor waited

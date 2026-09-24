@@ -476,6 +476,152 @@ class TestRunnerTest(unittest.TestCase):
             child = self.read_pid(pid_file)
             self.assertTrue(wait_until(lambda: not is_running(child)))
 
+    # A child that nobody supervises ----------------------------------------------
+
+    @contextlib.contextmanager
+    def spy_on_signals(self, passthrough):
+        """Record every signal sent by number; deliver them only if ``passthrough``."""
+        calls = []
+        real_killpg, real_kill, real_popen_kill = (
+            os.killpg,
+            os.kill,
+            subprocess.Popen.kill,
+        )
+
+        def killpg(pgid, number):
+            calls.append(("killpg", pgid, int(number)))
+            if passthrough:
+                real_killpg(pgid, number)
+
+        def kill(pid, number):
+            calls.append(("kill", pid, int(number)))
+            if passthrough:
+                real_kill(pid, number)
+
+        def popen_kill(process):
+            calls.append(("Popen.kill", process.pid, int(signal.SIGKILL)))
+            if passthrough:
+                real_popen_kill(process)
+
+        with (
+            mock.patch.object(os, "killpg", killpg),
+            mock.patch.object(os, "kill", kill),
+            mock.patch.object(subprocess.Popen, "kill", popen_kill),
+        ):
+            yield calls
+
+    def fail_after(self, action, seen, target):
+        """Stand in for ``_Leader`` / ``_OutputCapture``: run ``action`` on the
+        just-launched child, then fail as descriptor exhaustion would."""
+
+        def fail(process, *_):
+            seen.append(process.pid)
+            action(process)
+            raise OSError(errno.EMFILE, "Too many open files")
+
+        return mock.patch.object(test_runner, target, fail)
+
+    def test_a_child_reaped_elsewhere_is_not_signalled_when_the_setup_fails(self):
+        # The child was collected by somebody else (SIGCHLD ignored, a concurrent
+        # reaper) before the setup failed, so its pid and process group id may
+        # already belong to an unrelated process: nothing may be sent to them.
+        for target in ("_Leader", "_OutputCapture"):
+            with self.subTest(fails=target):
+                seen = []
+                check = self.python_check("short", "pass")
+
+                def reap(process):
+                    os.waitpid(process.pid, 0)  # waits for the exit, then collects it
+
+                with (
+                    self.spy_on_signals(passthrough=False) as calls,
+                    self.fail_after(reap, seen, target),
+                ):
+                    (result,) = self.runner.run_visible((check,), PATIENCE)
+
+                self.assertEqual(result.status, "error")
+                self.assertEqual(len(seen), 1)
+                self.assertEqual(calls, [], "a reaped child's number was signalled")
+
+    def test_a_live_child_and_its_group_are_killed_when_the_setup_fails(self):
+        script = (
+            "import os, sys, time\n"
+            "if os.fork() == 0:\n"
+            "    open(sys.argv[1] + '.tmp', 'w').write(str(os.getpid()))\n"
+            "    os.replace(sys.argv[1] + '.tmp', sys.argv[1])\n"
+            "    time.sleep(60)\n"
+            "    os._exit(0)\n"
+            "time.sleep(60)\n"
+        )
+        for target in ("_Leader", "_OutputCapture"):
+            with self.subTest(fails=target):
+                pid_file = self.pid_file(f"member-{target}.pid")
+                seen = []
+                check = self.python_check("live", script, pid_file)
+
+                def publish(process, pid_file=pid_file):
+                    # The member is running in the check's group by now.
+                    self.assertTrue(wait_until(pid_file.exists))
+
+                with (
+                    self.spy_on_signals(passthrough=True) as calls,
+                    self.fail_after(publish, seen, target),
+                ):
+                    (result,) = self.runner.run_visible((check,), PATIENCE)
+
+                self.assertEqual(result.status, "error")
+                (leader,) = seen
+                member = self.read_pid(pid_file)
+                for pid in (leader, member):
+                    self.assertTrue(wait_until(lambda pid=pid: not is_running(pid)))
+                # Only the child's own group was signalled, and it was killed.
+                self.assertIn(("killpg", leader, int(signal.SIGKILL)), calls)
+                self.assertEqual({pid for _, pid, _ in calls}, {leader}, calls)
+
+    def spawn_unsupervised(self):
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            start_new_session=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+        def clean_up():
+            with contextlib.suppress(OSError):
+                os.kill(process.pid, signal.SIGKILL)
+                os.waitpid(process.pid, 0)
+            for stream in (process.stdout, process.stderr):
+                stream.close()
+
+        self.addCleanup(clean_up)
+        self.assertTrue(wait_until(lambda: test_runner._start_time(process.pid)))
+        return process
+
+    def test_stopping_an_unsupervised_child_needs_its_recorded_identity(self):
+        process = self.spawn_unsupervised()
+        started = test_runner._start_time(process.pid)
+
+        # Another process now has this pid (same number, other start time).
+        with self.spy_on_signals(passthrough=True) as calls:
+            test_runner._stop_unsupervised(process, started + 1)
+        self.assertEqual(calls, [])
+        time.sleep(0.3)
+        self.assertTrue(
+            is_running(process.pid), "a process with another identity was killed"
+        )
+
+    def test_an_unsupervised_child_with_its_recorded_identity_is_killed_and_reaped(
+        self,
+    ):
+        process = self.spawn_unsupervised()
+        started = test_runner._start_time(process.pid)
+
+        with self.spy_on_signals(passthrough=True) as calls:
+            test_runner._stop_unsupervised(process, started)
+        self.assertIn(("killpg", process.pid, int(signal.SIGKILL)), calls)
+        self.assertEqual(process.returncode, -signal.SIGKILL)
+        self.assertTrue(process.stdout.closed and process.stderr.closed)
+
     def test_timeout_kills_a_group_member_that_ignores_sigterm(self):
         self.runner.term_grace_seconds = 0.3
         pid_file = self.pid_file()

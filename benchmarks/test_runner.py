@@ -236,14 +236,18 @@ class TestRunner:
                     start_new_session=True,
                     env=_check_environment(home),
                 )
+                # The child's identity (pid plus start time), recorded before
+                # anything else can go wrong.
+                started_at = _start_time(process.pid)
+                leader: _Leader | None = None
                 try:
                     leader = _Leader(process)
                     capture = _OutputCapture(process, _MAX_CAPTURE_BYTES)
                 except BaseException:
                     # The child is running and nothing supervises it yet: never
-                    # leave it behind. It is our own unreaped child, so its pid is
-                    # still its process group id.
-                    _stop_unsupervised(process)
+                    # leave it behind, but never signal a number that may no
+                    # longer be ours either.
+                    _stop_unsupervised(process, started_at, leader)
                     raise
                 try:
                     timed_out = self._supervise(leader, capture, timeout_seconds)
@@ -449,18 +453,53 @@ def _safe_stream_record(
     }
 
 
-def _stop_unsupervised(process: subprocess.Popen[bytes]) -> None:
-    """Kill and reap a just-started child that no supervisor took over."""
-    with contextlib.suppress(ProcessLookupError, PermissionError):
-        os.killpg(process.pid, signal.SIGKILL)
-    with contextlib.suppress(OSError):
-        process.kill()
-    with contextlib.suppress(OSError, subprocess.TimeoutExpired):
-        process.wait(timeout=5)
+def _stop_unsupervised(
+    process: subprocess.Popen[bytes],
+    started_at: int | None,
+    leader: _Leader | None = None,
+) -> None:
+    """Kill and reap a just-started child that no supervisor took over.
+
+    ``started_at`` is the child's start time, recorded right after it was launched.
+    The child may already have been reaped by someone else (``SIGCHLD`` ignored, a
+    concurrent reaper), and its pid, which is also its process group id, may then
+    belong to an unrelated process.  So nothing is signalled or waited for unless
+    the child is still our own unreaped child with the recorded start time.  A
+    constructed ``leader`` is used when there is one: it also knows the group's
+    members and re-checks its own identity at every signal.
+    """
+    if leader is not None:
+        leader.signal_group(signal.SIGKILL)
+        leader.reap(5)
+    elif _is_unreaped_child(process.pid, started_at):
+        # Its own session, so its pid is the group id, and being unreaped reserves it.
+        _signal_group(process.pid, signal.SIGKILL)
+        with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+            process.wait(timeout=5)
+    elif process.returncode is None:
+        # Reaped elsewhere: its status is gone.  Recording that keeps ``Popen`` from
+        # waiting for (or reaping) whatever holds the number now.
+        process.returncode = 0
     for stream in (process.stdout, process.stderr):
         if stream is not None:
             with contextlib.suppress(OSError):
                 stream.close()
+
+
+def _is_unreaped_child(pid: int, started_at: int | None) -> bool:
+    """Is ``pid`` still our own, unreaped child, and the process first seen at
+    ``started_at``?  Looks without reaping it.
+
+    An unreaped child keeps its pid from being reused; once it was reaped (by us or
+    by someone else) the number may belong to an unrelated process.
+    """
+    try:
+        os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+    except ChildProcessError:
+        return False
+    except AttributeError:
+        pass  # no WNOWAIT: only the start time can tell
+    return started_at is None or _start_time(pid) == started_at
 
 
 class _Leader:
@@ -542,13 +581,7 @@ class _Leader:
 
     def _still_ours(self) -> bool:
         """Is the process at ``pgid`` still our own, unreaped leader?"""
-        try:
-            os.waitid(os.P_PID, self.pgid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
-        except ChildProcessError:
-            return False
-        except AttributeError:
-            pass
-        return self.start is None or _start_time(self.pgid) == self.start
+        return _is_unreaped_child(self.pgid, self.start)
 
     def owns(self, pid: int, pgrp: int, started: int) -> bool:
         """Is this process, seen in the table, a member of our group?"""
