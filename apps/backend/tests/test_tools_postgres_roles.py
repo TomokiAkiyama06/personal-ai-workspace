@@ -481,7 +481,9 @@ class ApplicationRoleTest(RoleTestCase):
             with self.subTest(sql=sql[:40]):
                 error = await self.attempt(self.other_db, sql)
                 self.assertIsInstance(error, psycopg.errors.InsufficientPrivilege)
-        with self.assertRaises(DBAPIError):
+        # (``get`` runs on an abortable connection, so the error is the driver's
+        # own and not SQLAlchemy's wrapper of it)
+        with self.assertRaises(psycopg.errors.InsufficientPrivilege):
             await PostgresApprovalStore(self.other_db).get(uuid.uuid4())
 
 

@@ -980,6 +980,15 @@ Broker は、呼び出しがどの Repository に触れるかを **Backend が�
 
 `ApprovalService` は Broker と**別の Object**です。Agent の Runtime へは Broker（または Runner）だけを渡し、`ApprovalService` は渡さないでください（渡さなくても上の規則が守られますが、それが最初の防御です）。
 
+**人の判断（承認・却下・取り消し）の Store 呼び出しは、時間で区切ります。** 独立 Review が、接続は受け付けるが Query に答えない PostgreSQL に、`approve` / `reject` / `revoke` の照会（`get`）と更新（`decide` / `revoke`）が無期限に待たされ、承認の HTTP 要求と Pool の枠が塞がると指摘しました（`revoke_task`・Step-up・Listener・Audit は区切られていました）。Pool の Session の Query を `asyncio.timeout` で取り消しても、サーバが取り消しを確認しないため約 10 秒かかり、期限になりません（実測）。そこで 2 段にしました。
+
+1. `ApprovalService` は、1 回の操作の Store 呼び出し（照会と更新）を**1 つの期限 `timeout_seconds`** で区切ります。期限は操作の開始時に 1 回だけ数え、各呼び出しには残りを渡します（呼び出しごとに数え直すと、1 回の操作が 2 倍かかります）。使い切った後は次の呼び出しを始めません。期限になれば型付きの結果 `ApprovalOutcome.UNAVAILABLE` を返し、型名だけを Log に残します（Audit 行は、照会に成功して更新まで進んだ場合に `unavailable` で残ります）。Step-up は自分の期限を持つので、この期限には数えません。
+2. `PostgresApprovalStore` の `get` / `decide` / `revoke` は、Pool を使わない**中断可能な接続**（`Database.fetch_abortable`）で、変更と履歴の行を 1 つにした CTE の **1 つの Statement**（原子的）として実行し、`decision_timeout_seconds`（既定 3 秒）で Socket を閉じます。拒否の理由を説明する読み取りや、期限切れの印付けが要る呼び出しは、それらと**1 つの期限**を分け合います。
+
+期限を過ぎた Statement は、Server 側では続きが実行されることがあります（`revoke_task` と同じ）。ただし 1 つの Statement なので、承認の行と履歴の行は**両方が反映されるか、どちらも反映されない**かで、部分的な状態にはなりません。呼び直すと真の状態が返ります（反映済みなら `not_pending` / `not_open`）。
+Test: `tests/test_tools_approvals.py` の `DecisionDeadlineTest`（応答しない Store、1 つの期限、Step-up は数えないこと、型名だけの Log）、`tests/test_tools_postgres.py` の `StalledServerTest`（応答しない Server）、`DecisionStatementsShareOneDeadlineTest`（Statement ごとの残り時間）、`DecisionDeadlineTest`（行の Lock で Statement を止めて期限で返ること、承認と履歴が食い違わないこと）。
+限界: `open_request` / `consume` / `history` は Pool の Transaction で動き、Broker が `asyncio.timeout` で区切ります。応答しない Server では約 10 秒かかることがあり、`timeout_seconds` ちょうどでは返りません（この範囲外。後続の課題）。中断可能な接続は呼び出しごとに接続を張るので、Pool の Session より重いです（承認の Endpoint は低頻度です）。
+
 #### Task の終了と承認
 
 **Task の終わりは 3 つ**です。`completed`（完了）、`failed`、`cancelled`（`paw_backend.tasks.TERMINAL_STATES`）。Task の状態に `expired` はなく、承認は自分の `expires_at` で失効します（期限後は `approval_expired`。期限切れは取り消しの対象にもなりません）。

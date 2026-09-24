@@ -325,6 +325,12 @@ class ApprovalStore(Protocol):
     consumption could then win from the revocation that follows the end, and a
     request created after that revocation would be one that nothing revokes
     (Decision 0006, section 9).
+
+    ``get``, ``decide`` and ``revoke`` are what a human's decision calls
+    (``ApprovalService``, which bounds them with one deadline and cancels them at
+    it): a store on a database should run them so that the cancellation really
+    ends the query (``PostgresApprovalStore``: an abortable connection), and each
+    must stay atomic when it is cut off (Decision 0006, section 4).
     """
 
     async def open_request(

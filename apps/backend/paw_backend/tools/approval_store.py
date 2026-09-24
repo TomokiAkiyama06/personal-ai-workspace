@@ -13,13 +13,25 @@ nothing:
   With ``require_active_task`` the task's row is first read **locked**
   (``FOR SHARE``) in the same transaction, so a use and the end of the task are
   ordered, never crossed (Decision 0006, section 9);
-* revoke: ``status IN ('pending', 'approved') AND expires_at > now``;
-  ``revoke_task`` (the listener of a task's end) is one such statement, with its
-  history rows, on an abortable connection that is shut down at a deadline.
+* revoke: ``status IN ('pending', 'approved') AND expires_at > now``.
 
 The history row is written in the same transaction as the change. When an
 update matches nothing, the row is read again only to *explain* the refusal
 (``diagnose_*``); that explanation is never used to allow anything.
+
+What a **human's decision** and the listener of a **task's end** call is
+bounded in time: ``get``, ``decide``, ``revoke`` and ``revoke_task`` are each a
+single statement (the change and its history row in one CTE, so still atomic)
+on an abortable connection outside the pool (``Database.fetch_abortable``),
+which is shut down at a deadline instead of asking a stalled server to cancel:
+a query on a pooled session, cancelled, waits for the server for about ten
+seconds. A call that needs a second statement (the read that explains a refusal,
+the marking of an expired approval) shares ONE deadline with the first. The
+statement of a call that ran out of time may still finish on the server: it is
+atomic, so it is applied completely or not at all, and repeating the call shows
+which. ``open_request``, ``consume`` and ``history`` run in one pooled
+transaction each (the broker bounds them with ``asyncio.timeout``, which on a
+server that stops answering can take longer than its limit).
 
 Opening a request is serialised **per (task, user)** by a transaction-scoped
 advisory lock, so that the cap on open approvals holds under concurrency (a
@@ -35,6 +47,7 @@ constraints (migration ``0031``): a wrong statement from a buggy or
 compromised application fails there.
 """
 
+import asyncio
 import uuid
 from datetime import datetime
 
@@ -86,6 +99,87 @@ INSERT INTO tool_approval_events (approval_id, kind, created_at)
 SELECT id, '{ApprovalEventKind.REVOKED.value}', %(now)s FROM revoked
 RETURNING approval_id
 """
+# The columns of an approval, in the order of ``ApprovalRecord``'s fields.
+_COLUMNS = (
+    "id, task_id, project_id, agent_id, requester_user_id, tool, level, call_hash,"
+    " targets, summary, status, created_at, expires_at, approver_id, decided_at,"
+    " consumed_at, step_up_verified, revoked_at, revoked_by"
+)
+_GET = f"SELECT {_COLUMNS} FROM tool_approvals WHERE id = %(id)s"
+# One statement per change, like ``_REVOKE_TASK``: the update and its history row
+# are atomic without a transaction, and it runs on an abortable connection. A
+# data-modifying CTE runs to completion whether or not the main query reads it.
+# The values are the fixed members of the enums; the ids, the time and the
+# actor are parameters (``::uuid`` types a NULL actor).
+_REVOKE = f"""
+WITH revoked AS (
+    UPDATE tool_approvals
+       SET status = '{ApprovalStatus.REVOKED.value}',
+           revoked_at = %(now)s,
+           revoked_by = %(actor)s
+     WHERE id = %(id)s
+       AND status IN ('{_OPEN[0]}', '{_OPEN[1]}')
+       AND expires_at > %(now)s
+ RETURNING id
+), event AS (
+    INSERT INTO tool_approval_events (approval_id, kind, actor_user_id, created_at)
+    SELECT id, '{ApprovalEventKind.REVOKED.value}', %(actor)s::uuid, %(now)s
+      FROM revoked
+)
+SELECT id FROM revoked
+"""
+_MARK_EXPIRED = f"""
+WITH expired AS (
+    UPDATE tool_approvals
+       SET status = '{ApprovalStatus.EXPIRED.value}'
+     WHERE id = %(id)s
+       AND status IN ('{_OPEN[0]}', '{_OPEN[1]}')
+       AND expires_at <= %(now)s
+ RETURNING id
+)
+INSERT INTO tool_approval_events (approval_id, kind, created_at)
+SELECT id, '{ApprovalEventKind.EXPIRED.value}', %(now)s FROM expired
+"""
+
+
+def _decide_statement(approve: bool, *, without_strong: bool) -> str:
+    """The conditional update of ``decide``: the whole rule is in its ``WHERE``.
+
+    ``without_strong`` excludes a strong approval (approving one needs a step-up).
+    """
+    status = ApprovalStatus.APPROVED if approve else ApprovalStatus.REJECTED
+    kind = ApprovalEventKind.APPROVED if approve else ApprovalEventKind.REJECTED
+    not_strong = (
+        f" AND level <> '{ApprovalLevel.STRONG_APPROVAL.value}'"
+        if without_strong
+        else ""
+    )
+    return f"""
+WITH decided AS (
+    UPDATE tool_approvals
+       SET status = '{status.value}',
+           approver_id = %(approver)s,
+           decided_at = %(now)s,
+           step_up_verified = %(verified)s
+     WHERE id = %(id)s
+       AND status = '{ApprovalStatus.PENDING.value}'
+       AND expires_at > %(now)s
+       AND requester_user_id = %(approver)s
+       AND agent_id <> %(approver)s{not_strong}
+ RETURNING {_COLUMNS}
+), event AS (
+    INSERT INTO tool_approval_events (approval_id, kind, actor_user_id, created_at)
+    SELECT id, '{kind.value}', %(approver)s::uuid, %(now)s FROM decided
+)
+SELECT {_COLUMNS} FROM decided
+"""
+
+
+_DECIDE = {
+    (approve, without_strong): _decide_statement(approve, without_strong=without_strong)
+    for approve in (True, False)
+    for without_strong in (True, False)
+}
 _OPEN_ATTEMPTS = 3
 
 
@@ -121,6 +215,68 @@ def _record(row: ToolApprovalRow) -> ApprovalRecord:
         revoked_at=row.revoked_at,
         revoked_by=row.revoked_by,
     )
+
+
+def _record_of_values(values: tuple) -> ApprovalRecord:
+    """An ``ApprovalRecord`` from a row of ``_COLUMNS`` read on a raw connection."""
+    (
+        approval_id,
+        task_id,
+        project_id,
+        agent_id,
+        requester_user_id,
+        tool,
+        level,
+        call_hash,
+        targets,
+        summary,
+        status,
+        created_at,
+        expires_at,
+        approver_id,
+        decided_at,
+        consumed_at,
+        step_up_verified,
+        revoked_at,
+        revoked_by,
+    ) = values
+    return ApprovalRecord(
+        approval_id=approval_id,
+        task_id=task_id,
+        project_id=project_id,
+        agent_id=agent_id,
+        requester_user_id=requester_user_id,
+        tool=tool,
+        level=ApprovalLevel(level),
+        call_hash=call_hash,
+        targets=tuple(
+            Target(TargetKind(item["kind"]), item["value"]) for item in targets
+        ),
+        summary=_summary(summary),
+        status=ApprovalStatus(status),
+        created_at=created_at,
+        expires_at=expires_at,
+        approver_id=approver_id,
+        decided_at=decided_at,
+        consumed_at=consumed_at,
+        step_up_verified=step_up_verified,
+        revoked_at=revoked_at,
+        revoked_by=revoked_by,
+    )
+
+
+class _Deadline:
+    """ONE time limit for the statements of one store call: each gets what is left."""
+
+    def __init__(self, seconds: float) -> None:
+        self._loop = asyncio.get_running_loop()
+        self._end = self._loop.time() + seconds
+
+    def left(self) -> float:
+        remaining = self._end - self._loop.time()
+        if remaining <= 0:
+            raise TimeoutError
+        return remaining
 
 
 async def _add_event(
@@ -185,12 +341,24 @@ class PostgresApprovalStore:
     """Approvals in ``tool_approvals`` / ``tool_approval_events`` (migration 0031)."""
 
     def __init__(
-        self, database: Database, *, revoke_timeout_seconds: float = 3.0
+        self,
+        database: Database,
+        *,
+        revoke_timeout_seconds: float = 3.0,
+        decision_timeout_seconds: float = 3.0,
     ) -> None:
-        if not revoke_timeout_seconds > 0:
-            raise ValueError("revoke_timeout_seconds must be positive")
+        """``revoke_timeout_seconds`` bounds ``revoke_task``;
+        ``decision_timeout_seconds`` bounds ``get``, ``decide`` and ``revoke``
+        (each call as a whole, all its statements together)."""
+        for name, value in (
+            ("revoke_timeout_seconds", revoke_timeout_seconds),
+            ("decision_timeout_seconds", decision_timeout_seconds),
+        ):
+            if not value > 0:
+                raise ValueError(f"{name} must be positive")
         self._database = database
         self._revoke_timeout_seconds = revoke_timeout_seconds
+        self._decision_timeout_seconds = decision_timeout_seconds
 
     async def open_request(
         self,
@@ -305,9 +473,27 @@ class PostgresApprovalStore:
         raise RuntimeError("could not open an approval request")
 
     async def get(self, approval_id: uuid.UUID) -> ApprovalRecord | None:
-        async with self._database.session() as session:
-            row = await _row(session, approval_id)
-            return None if row is None else _record(row)
+        """The approval, read on an abortable connection within
+        ``decision_timeout_seconds`` (``TimeoutError`` past it)."""
+        return await self._read(approval_id, _Deadline(self._decision_timeout_seconds))
+
+    async def _read(
+        self, approval_id: uuid.UUID, deadline: _Deadline
+    ) -> ApprovalRecord | None:
+        rows = await self._database.fetch_abortable(
+            _GET, {"id": approval_id}, timeout_seconds=deadline.left()
+        )
+        return None if not rows else _record_of_values(rows[0])
+
+    async def _mark_expired_abortably(
+        self, approval_id: uuid.UUID, now: datetime, deadline: _Deadline
+    ) -> None:
+        """Move an open approval that ran out of time to ``expired`` (with history)."""
+        await self._database.execute_abortable(
+            _MARK_EXPIRED,
+            {"id": approval_id, "now": now},
+            timeout_seconds=deadline.left(),
+        )
 
     async def decide(
         self,
@@ -318,56 +504,41 @@ class PostgresApprovalStore:
         now: datetime,
         step_up_verified: bool = False,
     ) -> DecideResult:
-        status = ApprovalStatus.APPROVED if approve else ApprovalStatus.REJECTED
-        kind = ApprovalEventKind.APPROVED if approve else ApprovalEventKind.REJECTED
+        """Decide as one atomic statement (the change and its history row) on an
+        abortable connection; the whole call, with the read that explains a
+        refusal, shares one ``decision_timeout_seconds`` (``TimeoutError`` past
+        it: the statement may or may not have been applied, completely)."""
+        deadline = _Deadline(self._decision_timeout_seconds)
         # Only an approval carries a step-up; a strong one needs it.
         verified = approve and step_up_verified
-        conditions = [
-            ToolApprovalRow.id == approval_id,
-            ToolApprovalRow.status == ApprovalStatus.PENDING.value,
-            ToolApprovalRow.expires_at > now,
-            ToolApprovalRow.requester_user_id == approver_id,
-            ToolApprovalRow.agent_id != approver_id,
-        ]
-        if approve and not verified:
-            conditions.append(
-                ToolApprovalRow.level != ApprovalLevel.STRONG_APPROVAL.value
-            )
-        async with self._database.session() as session, session.begin():
-            changed = await session.execute(
-                update(ToolApprovalRow)
-                .where(*conditions)
-                .values(
-                    status=status.value,
-                    approver_id=approver_id,
-                    decided_at=now,
-                    step_up_verified=verified,
-                )
-                .returning(ToolApprovalRow.id)
-                .execution_options(synchronize_session=False)
-            )
-            if changed.scalar_one_or_none() is not None:
-                await _add_event(
-                    session, approval_id, kind, now, actor_user_id=approver_id
-                )
-                row = await _row(session, approval_id)
-                assert row is not None
-                return DecideResult(DecideOutcome.DECIDED, _record(row))
-            row = await _row(session, approval_id)
-            outcome = diagnose_decide(
-                None if row is None else _record(row),
-                approver_id,
-                now,
-                approve=approve,
-                step_up_verified=step_up_verified,
-            )
-            if outcome is DecideOutcome.DECIDED:
-                # It changed under us after our update matched nothing: do not
-                # claim a decision that this call did not make.
-                outcome = DecideOutcome.NOT_PENDING
-            elif outcome is DecideOutcome.EXPIRED:
-                await _mark_expired(session, now, approval_id=approval_id)
-            return DecideResult(outcome)
+        statement = _DECIDE[(approve, approve and not verified)]
+        rows = await self._database.fetch_abortable(
+            statement,
+            {
+                "id": approval_id,
+                "approver": approver_id,
+                "now": now,
+                "verified": verified,
+            },
+            timeout_seconds=deadline.left(),
+        )
+        if rows:
+            return DecideResult(DecideOutcome.DECIDED, _record_of_values(rows[0]))
+        record = await self._read(approval_id, deadline)
+        outcome = diagnose_decide(
+            record,
+            approver_id,
+            now,
+            approve=approve,
+            step_up_verified=step_up_verified,
+        )
+        if outcome is DecideOutcome.DECIDED:
+            # It changed under us after our update matched nothing: do not
+            # claim a decision that this call did not make.
+            outcome = DecideOutcome.NOT_PENDING
+        elif outcome is DecideOutcome.EXPIRED:
+            await self._mark_expired_abortably(approval_id, now, deadline)
+        return DecideResult(outcome)
 
     async def consume(
         self,
@@ -442,36 +613,21 @@ class PostgresApprovalStore:
     async def revoke(
         self, approval_id: uuid.UUID, *, actor_id: uuid.UUID | None, now: datetime
     ) -> RevokeOutcome:
-        async with self._database.session() as session, session.begin():
-            changed = await session.execute(
-                update(ToolApprovalRow)
-                .where(
-                    ToolApprovalRow.id == approval_id,
-                    ToolApprovalRow.status.in_(_OPEN),
-                    ToolApprovalRow.expires_at > now,
-                )
-                .values(
-                    status=ApprovalStatus.REVOKED.value,
-                    revoked_at=now,
-                    revoked_by=actor_id,
-                )
-                .returning(ToolApprovalRow.id)
-                .execution_options(synchronize_session=False)
-            )
-            if changed.scalar_one_or_none() is not None:
-                await _add_event(
-                    session,
-                    approval_id,
-                    ApprovalEventKind.REVOKED,
-                    now,
-                    actor_user_id=actor_id,
-                )
-                return RevokeOutcome.REVOKED
-            row = await _row(session, approval_id)
-            outcome = diagnose_revoke(None if row is None else _record(row), now)
-            if outcome is RevokeOutcome.REVOKED:
-                outcome = RevokeOutcome.NOT_OPEN  # changed under us: not ours
-            return outcome
+        """Revoke as one atomic statement (the change and its history row) on an
+        abortable connection, within ``decision_timeout_seconds`` for the whole
+        call (see ``decide``)."""
+        deadline = _Deadline(self._decision_timeout_seconds)
+        rows = await self._database.fetch_abortable(
+            _REVOKE,
+            {"id": approval_id, "actor": actor_id, "now": now},
+            timeout_seconds=deadline.left(),
+        )
+        if rows:
+            return RevokeOutcome.REVOKED
+        outcome = diagnose_revoke(await self._read(approval_id, deadline), now)
+        if outcome is RevokeOutcome.REVOKED:
+            outcome = RevokeOutcome.NOT_OPEN  # changed under us: not ours
+        return outcome
 
     async def revoke_task(
         self, task_id: uuid.UUID, *, now: datetime

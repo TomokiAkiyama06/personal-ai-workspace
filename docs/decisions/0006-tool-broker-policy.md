@@ -60,6 +60,7 @@ Credential の Plaintext を Agent に渡さないこと、Backend が最終判�
 2. 第三者には、他の User の承認の存在を教えない（`not_found`。Audit には `not_authorised`）。
 3. 取り消しは、委任元 User と Admin / Owner ができる（権利を減らす方向だけなので、Admin / Owner が代われる）。Task の終了（cancelled / failed / completed）で、その Task の Open な承認を取り消す。この取り消しが失敗したときの扱いは「9. Task の終了と承認」。
 4. `STRONG_APPROVAL` は Step-up（PAW-023）の確認が要る。確認できない（Verifier がない、失敗、Timeout）ときは承認できない。Store も `step_up_verified` を受け取り、DB は Step-up なしの強い承認を保存しない。
+5. **人の判断の Store 呼び出しは時間で区切る。** 独立 Review が、応答しない DB に `approve` / `reject` / `revoke` が無期限に待たされると指摘した（`revoke_task`・Step-up・Listener・Audit は区切られていた）。Pool の Session の Query の取り消しは、サーバの確認を待って約 10 秒かかるので、`asyncio.timeout` だけでは区切れない（実測）。`ApprovalService` は 1 回の操作の Store 呼び出し（照会と更新）を **1 つの期限 `timeout_seconds`**（開始時に 1 回数え、残りを渡す。Step-up は数えない）で区切り、期限になれば型付きの `unavailable` を返す。`PostgresApprovalStore` の `get` / `decide` / `revoke` は、変更と履歴の行を 1 つの CTE にした Statement を、中断可能な接続（`Database.fetch_abortable`）で実行する。期限を過ぎた Statement はサーバで続きが実行されうるが、原子的なので、承認と履歴は両方反映されるかどちらも反映されない（呼び直すと真の状態が返る）。取り消しの `revoke_task`（9）と同じ方針。`open_request` / `consume` は Pool の Transaction のままで、Broker の `asyncio.timeout`（応答しない DB では約 10 秒かかりうる）で区切る。これは後続の課題。
 
 ### 5. 承認の表示・件数・却下
 
@@ -114,6 +115,7 @@ Credential の Plaintext を Agent に渡さないこと、Backend が最終判�
 
 - Symlink の確認と使用の間の競合（TOCTOU）、DNS Rebinding、Redirect は Executor の責務（[README](../../apps/backend/README.md) の「Executor の契約」）。
 - Approval の期限は Application の時計で比較する（Database の時計ではない）。
+- Broker が使う `open_request` / `consume` は Pool の Transaction で、`asyncio.timeout` で区切る。応答しない DB では、取り消しの確認待ちで約 10 秒かかり、`timeout_seconds` ちょうどでは返らない（人の判断の呼び出しは、中断可能な接続で区切っている）。
 - 却下の Cooldown は Hash 単位で、引数を変えた別の呼び出しは止めない（件数の上限が量を抑える）。
 - 引数のない Tool は承認を開けない。承認が要る Tool は、何をするかを表す引数を必須にする。
 - Credential の検出は形のわかる Format と代入の形だけ。
