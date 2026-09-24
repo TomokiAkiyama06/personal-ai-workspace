@@ -1159,6 +1159,7 @@ Candidate を Version にしないのは、`shared` の Version は全 User が�
 
 すべてのメソッドは、最初の引数に操作する `actor`（`paw_backend.authz.Principal`、または委任元 User と Grant を持つ `AgentActor`）を取り、
 `Authorizer` に 1 回問い合わせます。Audit は Authorizer が記録します（`shared_memory.read` は拒否だけ、その他は全件で、記録に失敗すると許可は拒否になります）。
+変更が実際に行われたことは、Service が変更と同じ Transaction で完了の行として記録します（下の「変更の完了の記録」）。
 Audit の `action` は Capability の値です。Shared Memory を変える操作は、それぞれ**専用の Capability** を使うので、Audit の履歴だけで操作を見分けられます（下の「Audit の Action」）。
 
 | メソッド | Capability | できる人 |
@@ -1197,10 +1198,37 @@ Authorizer は `action` に Capability の値を書くので、全操作が 1 �
 | `shared_memory.candidate.approve` | `approve_candidate` | `shared_memory_candidate`、Candidate の ID |
 | `shared_memory.candidate.reject` | `reject_candidate` | `shared_memory_candidate`、Candidate の ID |
 
-- Audit の行は `actor_id`（操作した User）、`actor_role`、`decision`、時刻を持つので、「誰がいつ何を削除・復元したか」は行から分かります。拒否された試みも、試みた操作の `action` で残ります。
-- 追加の書き込みや Sink はありません。判定の Audit そのものを使うので、既存の性質（既定は拒否、Audit の行は変更が見える前に書かれる、Audit を書けなければ許可を拒否に変える）はそのままです。
+- Audit の行は `actor_id`（操作した User）、`actor_role`、`decision`、時刻を持つので、「誰がいつ何を試みたか」は行から分かります。拒否された試みも、試みた操作の `action` で残ります。実際に変更が起きたかは、下の完了の行が示します。
+- この行は変更の**試み**（判定）です。判定の Audit そのものなので、既存の性質（既定は拒否、Audit の行は変更が見える前に書かれる、Audit を書けなければ許可を拒否に変える）はそのままです。
+  変更の前に書かれるので、この行だけでは変更が**起きたか**は分かりません（対象がない、状態が違う、Lock を待ち切れない、更新が失敗する場合も同じ行が残ります）。起きたことは次の完了の行が示します。
 - `shared_memory.manage` は、管理者だけが見られる情報の閲覧（削除済みの Memory、Candidate）に残しました。何も変えないので、履歴で見分ける必要が小さく、`resource_kind` と `resource_id` の有無（一覧か 1 件か）で区別できます。
 - 限界: 復元・削除の理由（`reason`）は残りません（Audit は Content や自由な文を持たない）。Candidate の承認・却下の理由は Candidate の行にあります。
+
+#### 変更の完了の記録
+
+変更する 6 つの操作は、変更と**同じ Database の Transaction の中**（最後の書き込み）で、`audit_events` へ完了の行を 1 本追加します（`memory/shared/audit.py`、[Decision 0009](../../docs/decisions/0009-shared-memory-administration.md) の 13）。
+試みの行と 2 本で 1 回の変更を表し、次の値を持ちます（ID、Enum、固定の `reason` だけです。Memory の内容は含みません）。
+
+| 列 | 試みの行（Authorizer） | 完了の行（Service） |
+| --- | --- | --- |
+| `action` | 操作の Capability | 同じ |
+| `decision`、`reason` | `allow`、`granted_by_system_role` など（拒否は `deny`） | `allow`、`completed` |
+| `actor_id`、`actor_role` | 操作した User、Role | 同じ |
+| `resource_kind`、`resource_id` | 対象（`create_memory` は ID なし） | 変えたもの。`create_memory` は作った Memory の ID。承認・却下は Candidate の ID |
+| `occurred_at` | Authorizer の時計（判定の時刻） | Service の時計（遷移の時刻。新しい Version の `created_at` と同じ読み） |
+| `correlation_id` | 呼び出しごとに Service が作った ID | 同じ ID（2 本の行を結ぶ） |
+
+- **完了の行がある ⇔ 変更が Commit された**。Rollback、失敗した Statement、失敗した Commit は行も戻します。完了の行を書けなければ変更も戻ります（fail-closed。Test は行の INSERT と Commit を失敗させて確認）。
+- 試みの後で失敗した呼び出し（対象がない、状態が違う、版が古い、Lock を待ち切れない、更新が失敗する）は、**完了のない試み**として残ります（`correlation_id` が同じ完了の行がない `allow` の行）。何も変えなかった呼び出し（内容が同じ編集）にも完了の行はありません。
+  拒否された試み、Audit を書けずに拒否された試みは、これまでどおりで、完了しません。
+- 「誰がいつ削除・復元したか」は、`resource_id` と `reason = 'completed'` で絞った行の `action`、`actor_id`、`occurred_at` です。
+- 権限は増えません。Application の Role が持つ `audit_events` の INSERT / SELECT（Revision `0025`）で書きます。UPDATE、DELETE、TRUNCATE は Trigger と権限が拒否したままです（`tests/test_shared_memory_grants.py` が確認）。
+- 限界:
+  - 完了の行は Authorizer の `AuditSink` を通らず、Service が `audit_events` に直接書きます（Sink は別の Transaction で書くため、変更と記録が別れうるからです）。Sink を差し替えた配備では、試みと完了が別の場所に分かれます（現在の Sink は `PostgresAuditSink` だけです）。
+  - `decision` の CHECK（`allow` / `deny`）があるため、完了の行も `allow` です。`action` と `decision` だけで数えると 1 回の操作が 2 行になるので、集計は `reason` で分けてください。
+  - **失敗そのものの行はありません**。失敗は「完了のない試み」から読みます。失敗の行は Rollback の後に Transaction の外で書くことになり、行がないことが何も証明しないためです。実行中の試みと、Process が落ちた試みも、完了がないので区別できません。
+  - `occurred_at` は Service の時計の読みで、Lock を待つ前に読みます。Database が付ける `recorded_at`（Transaction の開始時刻）が、行が確定した時刻に近い値です。
+  - Application の Role は `audit_events` に INSERT できるので、Application 自体が偽の行を書けることは、他の Audit の行と同じです（`0025` の限界）。
 
 呼び出しの順序は、(1) 引数の検証（`InvalidSharedMemoryInputError`、`actor` の型を含む）、(2) 認可（拒否は Database に触れる前）、(3) Database の使用、です。
 削除済みの Memory を含める読み取りも、認可の前に存在を知らせないため、Owner / Admin 以外には「見つからない」ではなく「権限がない」を返します。
@@ -1213,7 +1241,7 @@ Memory は、**現在の Version（`version_number` が最大の Version）** �
 - **作成**: Version 1（`active`、`confirmation_state = 'confirmed'`、`freshness_policy = 'permanent'`、`actor_type = 'user'`）。
 - **編集**: 上書きしません。現在の Version を `superseded` にし、新しい Version `n + 1`（`active`）を書き、新しい側から古い側への `supersedes` 関係（`reason` は変わった項目の名前をアルファベット順に `", "` でつないだもの）を追加します。
   `expected_version` が現在の番号と違えば `SharedMemoryVersionConflictError`（Optimistic Lock）。何も変わらない編集は、何も書かずに現在の Memory を返します。削除済みの Memory は編集できません（先に復元）。
-- **削除**: 現在の Version の `status` を `deprecated` にします（何も消しません）。**復元**は `active` に戻します。Version は増えません。誰がいつ削除・復元したかは Audit Event にだけ残ります。
+- **削除**: 現在の Version の `status` を `deprecated` にします（何も消しません）。**復元**は `active` に戻します。Version は増えません。誰がいつ削除・復元したかは、Audit の試みの行と完了の行にだけ残ります（上の「変更の完了の記録」）。
   削除済みの Memory は、一般 User の一覧・取得には出ません（「見つからない」）。
 - 編集できる項目は `title`（200 文字まで）、`content`（20,000 文字まで）、`memory_type`（`[a-z][a-z0-9_]{0,63}`）、`importance`（0〜100）、`policy_subjects`（20 個まで）です。`reason`（500 文字まで）は Version の `change_reason` になります。
 - 一覧は古い順（`memories.created_at`、同時刻は `id`）で、`limit`（1〜200、既定 50）と `offset`（0〜100000）で区切ります。
@@ -1250,6 +1278,7 @@ Application の Role には、[上の規則](#migration-は-application-の-role
 | --- | --- | --- |
 | `shared_memory_candidates` | SELECT、INSERT、UPDATE（`state`、`decided_by`、`decided_at`、`decision_reason`、`memory_id` のみ） | 提案（INSERT）と 1 回の決定（UPDATE）。`SELECT ... FOR UPDATE` は UPDATE 権限が要り、この 5 列で足りる。提案の内容、提案者、出典、作成時刻は書き換えられず、DELETE も与えない |
 | `memories`、`memory_versions`、`memory_relations`、`memory_sources` | PAW-040 のまま | Service は INSERT と、`memory_versions.status` の UPDATE だけを使う。`memories` の DELETE は使わない（削除は `deprecated`。物理削除の経路は別 Issue） |
+| `audit_events` | Revision `0025` のまま（SELECT、INSERT） | Authorizer の試みの行と、変更ごとの完了の行（変更と同じ Transaction の INSERT 1 本）。UPDATE、DELETE、TRUNCATE は与えず、Trigger も拒否する |
 
 `shared_memory_candidates` の CHECK 制約は、状態の値、文字数の上限（Service の上限と同じ数）、`pending` は決定を持たないこと、決定済みは決定者と時刻を持つこと、`memory_id` は `approved` だけが持つことを強制します。
 `memory_id`、人・Agent・出典の ID は、外部キーのない素の UUID です（PAW-040 の Test が、Memory の層の Table と他の Table を外部キーでつなぐことを禁じています）。DB は存在を確認せず、Service は承認で自分が書いた Memory の ID だけを入れます。
@@ -1296,7 +1325,7 @@ Model の実装は、Test を通すことに必要な範囲で素直な書き方
 [Decision 0009](../../docs/decisions/0009-shared-memory-administration.md)（Proposed）の次の点です。
 
 1. Candidate を別 Table にすること、Agent の提案を許すこと、提案者に Candidate を見せないこと、`pending` 50 件の上限。
-2. 削除・復元を `status` の切り替えにし、Version を増やさないこと（誰が削除したかは Audit Event だけ）。その Audit の `action` を操作ごとに分けるために Capability を 6 つ追加したこと（Decision 0009 の 12）。
+2. 削除・復元を `status` の切り替えにし、Version を増やさないこと（誰が削除したかは Audit Event だけ）。その Audit の `action` を操作ごとに分けるために Capability を 6 つ追加したこと（Decision 0009 の 12）と、変更の完了を Audit の行として同じ Transaction で書くこと（同 13。Service が `audit_events` に直接書く）。
 3. `policy_subjects` の宣言で Policy との衝突を決めること（宣言がなければ上書きされない）。
 4. `effective_view` が、上書きした Policy の `statement` を User にも返すこと。
 5. 承認した Shared Memory の鮮度を `permanent` にすること。
@@ -1305,7 +1334,8 @@ Model の実装は、Test を通すことに必要な範囲で素直な書き方
 
 `tests/test_shared_memory_*.py`。Rule 関数は Database なしの Test（`..._rules_*.py`）、Service は実 PostgreSQL の Test（`PAW_TEST_DATABASE_URL` がないと Skip）、
 Migration（上げ下げ、Model との差分、制約）、権限（非 Superuser の Role で Service の Test を実行）、自動昇格の拒否（`..._promotion_refused.py`）、
-操作ごとの Audit の `action`（`..._audit_actions.py`。実 `audit_events` の行を読み、非 Superuser の Role でも実行）があります。
+操作ごとの Audit の `action`（`..._audit_actions.py`。実 `audit_events` の行を読み、非 Superuser の Role でも実行）、
+変更の完了の記録（`..._completion.py`。成功は完了の行が続くこと、失敗・Lock の待ち切れ・更新の失敗・Commit の失敗は完了の行がなく変更もないこと、完了の行を書けなければ変更も戻ること。非 Superuser の Role でも実行）があります。
 
 ## Research Scratch Store
 

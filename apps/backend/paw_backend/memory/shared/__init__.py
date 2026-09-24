@@ -7,6 +7,7 @@ Administration") and Decision 0009 for the rules and the open choices.
 """
 
 from paw_backend.memory.shared import limits
+from paw_backend.memory.shared.audit import COMPLETED_REASON
 from paw_backend.memory.shared.errors import (
     AutomaticPromotionRefusedError,
     CandidateLimitError,
@@ -65,6 +66,7 @@ __all__ = [
     "CandidateProposal",
     "CandidateState",
     "Clock",
+    "COMPLETED_REASON",
     "EditPlan",
     "EffectiveSharedMemory",
     "InputProblem",
