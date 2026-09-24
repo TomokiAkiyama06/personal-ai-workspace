@@ -212,6 +212,10 @@ class RecordFailureTest(LoopTestCase):
             ("approach", dict(approach=True)),
             ("approach", dict(approach="0")),
             ("error_class", dict(error_class=secret + "\n")),
+            ("message", dict(message="\ud800")),
+            ("message", dict(message=secret + "\udfff")),
+            ("error_class", dict(error_class=secret + "\ud800")),
+            ("step", dict(step="s\ud800")),
         ]
         for parameter, overrides in cases:
             arguments = dict(

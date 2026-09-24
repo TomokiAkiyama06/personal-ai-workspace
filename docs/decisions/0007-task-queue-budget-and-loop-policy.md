@@ -89,6 +89,12 @@ Command（PAW-032 の `wait` / `fail`）を発行するのは Orchestrator（PAW
 - 失敗の行は、報告された試行の番号（`loop_failure_signatures.attempt`、1 以上の `INTEGER`、必須）を持つ（0033 は未 Merge のため、0033 の Migration に列を足した）。判定（`history`、`assess`、`record_failure` が返す判定）は、Task の**現在の試行**（`tasks.attempt`）の行だけを対象にする。Restart が Commit された瞬間から、新しい試行は空の履歴で始まり、古い試行の行と一緒に数えられない。
 - 履歴の削除は `clear(task_id)`（Task の全行）をやめ、`clear_previous_attempts(task_id)`（**現在の試行より前**の試行の行だけ）にする。Restart の Command が Commit された後、この掃除が走る前に、新しい試行が失敗を記録できる（分散した Scheduler は、Restart の Commit の直後に新しい試行を始め得る）。その失敗は有効なので、掃除は削除しない。掃除は正しさに必要ではなく（古い行は読まれず、`window_size` の上限で新しい行に押し出される）、Table を小さく保つためのもの。Orchestrator（PAW-034）は Restart の後に呼ぶが、呼ぶ順序や間隔は正しさに影響しない。
 
+### 9. 失敗の文字列の検証（Surrogate 文字）
+
+- `record_failure` の `error_class`・`step`・`message` に Surrogate 文字（U+D800〜U+DFFF）が含まれると、Hash の UTF-8 への符号化が `UnicodeEncodeError` を漏らし、型付きの `InvalidQueueingArgumentError` の契約が破れる。3 つとも Database に触れる前に `InvalidQueueingArgumentError` で拒否する（値は返さない）。`message` は切り詰めの前の全体を検査する。
+- `message` の NUL は拒否しない。`message` は Hash にするだけで保存せず、NUL で失敗しない。拒否すると、NUL を含む出力の失敗を記録できず、その繰り返しの Loop を見逃す。`error_class` と `step` は従来どおり制御文字（NUL を含む）を拒否する。
+- 拒否か整形（Surrogate を置換して記録する）かは、仕様の選択である。ここでは、他の入力（PAW-032 の文字列）と同じく拒否とし、整形は呼び出し側（Worker）に任せる。整形して記録する方が失敗を取りこぼさない、という反対の考えもあるため、承認時に確認したい。
+
 ## 選定理由
 
 - 数値は、1 台の GPU Server で個人〜小規模チームが使うことを想定した、桁を合わせるための仮の値であり、実測に基づかない。

@@ -60,7 +60,9 @@ def normalize_failure_message(message: str) -> str:
     """Reduce a failure message to a stable form so that repeats compare equal.
 
     ``message`` must be a ``str`` (``InvalidQueueingArgumentError("message")``
-    otherwise); it may be empty and may contain any characters. Steps, in this
+    otherwise); it may be empty and may contain any characters except surrogate
+    code points (U+D800 to U+DFFF, which UTF-8 cannot encode; they raise the same
+    error, wherever they are in the text, without echoing it). Steps, in this
     exact order:
 
     1. Keep only the first ``MAX_SIGNATURE_MESSAGE_CHARS`` (2000) characters.
@@ -100,7 +102,10 @@ def failure_signature(error_class: str, step: str, message: str) -> str:
     Validation (before hashing): ``validation.check_error_class``,
     ``validation.check_step_name``, ``validation.check_message``; failures raise
     ``InvalidQueueingArgumentError`` naming ``error_class`` / ``step`` /
-    ``message``. Deterministic: the same inputs always give the same signature.
+    ``message``. That includes text that cannot be encoded as UTF-8 (a lone
+    surrogate code point in any of the three): the typed error is raised instead
+    of a ``UnicodeEncodeError`` from the hashing below, and the text is not echoed.
+    Deterministic: the same inputs always give the same signature.
     """
     check_error_class(error_class)
     check_step_name(step)
