@@ -1,0 +1,76 @@
+name: Claude Code
+
+# PR作成・更新時の自動レビュー（pull_requestトリガーとclaude-auto-reviewジョブ）は、
+# Claudeの週間利用制限でレビューが失敗するため外している。@claudeメンションによる
+# 手動のレビュー依頼は、この workflow でそのまま使える。自動レビューを戻す場合は、
+# git履歴の claude-auto-review ジョブとpull_requestトリガーを復元する。
+
+on:
+  # Issue / PRの通常コメントで @claude
+  issue_comment:
+    types:
+      - created
+
+  # PRのコード行へのコメントで @claude
+  pull_request_review_comment:
+    types:
+      - created
+
+  # PR Review本文で @claude
+  pull_request_review:
+    types:
+      - submitted
+
+  # Issue本文・タイトルで @claude
+  issues:
+    types:
+      - opened
+
+jobs:
+
+  # ============================================================
+  # @claude メンションによるInteractive Mode
+  # ============================================================
+  claude-mention:
+    if: >
+      (github.event_name == 'issue_comment' &&
+       contains(github.event.comment.body, '@claude')) ||
+
+      (github.event_name == 'pull_request_review_comment' &&
+       contains(github.event.comment.body, '@claude')) ||
+
+      (github.event_name == 'pull_request_review' &&
+       contains(github.event.review.body, '@claude')) ||
+
+      (github.event_name == 'issues' &&
+       (contains(github.event.issue.body, '@claude') ||
+        contains(github.event.issue.title, '@claude')))
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      actions: read
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Claude Interactive
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+
+          trigger_phrase: "@claude"
+
+          additional_permissions: |
+            actions: read
+
+          claude_args: |
+            --max-turns 60
+            --allowedTools "Bash(git diff:*),Bash(git status:*),Bash(git log:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
