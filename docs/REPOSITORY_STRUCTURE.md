@@ -80,6 +80,8 @@ personal-ai-workspace/
 │  ├─ SECURITY_TOOL_PERMISSIONS.md
 │  ├─ UI_DESIGN.md
 │  └─ decisions/
+│     ├─ 0002-start-workspace-implementation-before-model-comparison.md
+│     ├─ 0003-backend-cli-web-implementation-stack.md
 │     └─ README.md
 └─ evaluator/
    └─ README.md
