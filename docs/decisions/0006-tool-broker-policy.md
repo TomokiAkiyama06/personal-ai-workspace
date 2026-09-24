@@ -58,7 +58,7 @@ Credential の Plaintext を Agent に渡さないこと、Backend が最終判�
 
 1. 承認・却下できるのは、Agent が働いている **User 本人だけ**（人間の `Principal`）。Agent 自身の ID は拒否する。Admin / Owner が他の User の Task を承認する仕組みは作らない。
 2. 第三者には、他の User の承認の存在を教えない（`not_found`。Audit には `not_authorised`）。
-3. 取り消しは、委任元 User と Admin / Owner ができる（権利を減らす方向だけなので、Admin / Owner が代われる）。Task の終了（cancelled / failed / completed）で、その Task の Open な承認を取り消す。
+3. 取り消しは、委任元 User と Admin / Owner ができる（権利を減らす方向だけなので、Admin / Owner が代われる）。Task の終了（cancelled / failed / completed）で、その Task の Open な承認を取り消す。この取り消しが失敗したときの扱いは「9. Task の終了と承認」。
 4. `STRONG_APPROVAL` は Step-up（PAW-023）の確認が要る。確認できない（Verifier がない、失敗、Timeout）ときは承認できない。Store も `step_up_verified` を受け取り、DB は Step-up なしの強い承認を保存しない。
 
 ### 5. 承認の表示・件数・却下
@@ -89,6 +89,17 @@ Credential の Plaintext を Agent に渡さないこと、Backend が最終判�
 4. **Repository への書き込み**（`project.repo.write` / `project.pr.create`）の Tool は、触れる Repository を Path か `repository` の必須引数で宣言しなければならず（Registry が検査）、作業対象のどの Repository にも触れない呼び出しは拒否する（`repository_not_identified`）。
    根拠は要件の Multi-Repo Task の「Write 範囲は Task Working Set として明示・制御する」「Agent が「ついでに」別 Repo を書き換えてはならない」。読み取りと Agent 実行は触れる Repository がなければ Project の Resource で判定する（Read 範囲は比較的広く取ってよい、と要件にある）。
 5. **Human に判断を求める点:** (a) 書き込みだけを「Repository を特定できなければ拒否」にしたこと（読み取りと `project.task.run` は Project の Resource のまま）。(b) 入れ子の Repository を「両方の ACL に従う」にしたこと。(c) Host から Repository を推定せず、リモートに書く Tool に `repository` 引数を求めること。
+
+### 9. Task の終了と承認
+
+独立 Review が、Task の終了時の承認の取り消しが失敗すると、それが握りつぶされ、承認が期限まで使えてしまうと指摘した。事実として、取り消しは終了の遷移が Commit された**後**の Listener で行われ、`TaskService` は Listener の失敗を Log に残すだけで再試行しない。実装は次を選んだ。要件は Task の終了と承認の関係を定めていない。
+
+1. **Task の終わりは `completed` / `failed` / `cancelled`**（`TERMINAL_STATES`）。Task の状態に `expired` はなく、承認は自分の `expires_at` で失効する。終了時に、その Task の Open な承認（pending、承認済みで未使用）を取り消す。
+2. **取り消しの失敗は握りつぶさない。** `revoke_task` は Store の失敗で `ApprovalRevocationError` を上げる（以前は `0` を返し、「Open な承認はなかった」と区別できなかった）。終了の遷移はもう Commit されているので戻せず、`TaskService` は型名だけを Log に残す。再試行は今は呼び出し側（`revoke_task` は冪等）。
+3. **Broker は独立に Fail-closed で止める。** 承認を要する呼び出しは、承認を開くときも使うときも、Task の**現在の状態**（`TaskActivityProvider`）が動ける（`ACTIVE`）ときだけ進む。終了・不明・読めないなら拒否する（`task_not_active` / `task_unknown` / `task_state_unavailable`）。取り消しの成否によらず、終わった Task の承認は使えない。既定の Provider は不明を答える（本物を入れるまで承認は使えない）。
+   遷移と取り消しを 1 つの Transaction にする案（`TaskService` が Tool の Table を触る）は、Task と Tool の境界を越えるため採らなかった。
+4. **再び動く Task。** Retry / Restart（終了状態からの遷移）でも Open な承認を取り消す。終了時の取り消しが失敗して残った承認は、再開した Task では使えず、新しい承認を求め直す。
+5. **Human に判断を求める点:** (a) 承認を要する呼び出しだけが Task の状態を見ること（`AUTO` / `SCOPED_AUTO` は見ない。終わった Task へ呼び出しを渡さないのは Orchestrator の責務）。(b) 既定の Provider を「不明 = 拒否」にしたこと（配線を忘れると承認を要する呼び出しが全て通らない）。(c) 再試行の仕組み（再取り消しの Job）を持たず、Broker の Fail-closed に任せること。
 
 ## 既知の制限と後続の課題
 

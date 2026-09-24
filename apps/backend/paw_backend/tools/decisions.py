@@ -61,6 +61,10 @@ class BrokerReason(StrEnum):
     BUDGET_EXCEEDED = "budget_exceeded"
     BUDGET_UNKNOWN = "budget_unknown"
     BUDGET_UNAVAILABLE = "budget_unavailable"
+    # --- DENY: the task of an approval cannot act (ended / unknown / unreadable) ---
+    TASK_NOT_ACTIVE = "task_not_active"
+    TASK_UNKNOWN = "task_unknown"
+    TASK_STATE_UNAVAILABLE = "task_state_unavailable"
     # --- DENY: approvals ---
     APPROVAL_NOT_FOUND = "approval_not_found"
     APPROVAL_MISMATCH = "approval_mismatch"

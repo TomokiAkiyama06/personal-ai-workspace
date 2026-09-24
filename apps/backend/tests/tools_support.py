@@ -24,6 +24,7 @@ from paw_backend.tools import (
     InMemoryApprovalStore,
     LexicalPathResolver,
     ScopedRepository,
+    TaskActivity,
     TaskContext,
     TaskScope,
     ToolBroker,
@@ -257,6 +258,21 @@ class FakeBudget:
             raise self.error
 
 
+class FakeTaskActivity:
+    """Answers what the test says about the task; records every question."""
+
+    def __init__(self, answer=TaskActivity.ACTIVE, *, error=None) -> None:
+        self.answer = answer
+        self.error = error
+        self.checks: list[uuid.UUID] = []
+
+    async def check(self, task_id):
+        self.checks.append(task_id)
+        if self.error is not None:
+            raise self.error
+        return self.answer
+
+
 class FakeExecutor:
     """Records invocations; returns ``result`` or raises ``error``."""
 
@@ -307,6 +323,8 @@ class Harness:
         self.sink = overrides.pop("sink", InMemoryAuditSink())
         self.approvals = overrides.pop("approvals", InMemoryApprovalStore())
         self.budget = overrides.pop("budget", FakeBudget())
+        # The default task is alive; a test moves it with ``task_activity.answer``.
+        self.task_activity = overrides.pop("task_activity", FakeTaskActivity())
         self.directory = overrides.pop(
             "directory",
             StaticDirectory(
@@ -329,6 +347,7 @@ class Harness:
             self.approvals,
             self.broker_sink,
             budget=self.budget,
+            task_activity=self.task_activity,
             path_resolver=overrides.pop("path_resolver", LexicalPathResolver()),
             clock=self.clock,
             listeners=listeners,
@@ -360,6 +379,7 @@ __all__ = [
     "U1",
     "U2",
     "AGENT",
+    "FakeTaskActivity",
     "Harness",
     "make_call",
     "make_context",

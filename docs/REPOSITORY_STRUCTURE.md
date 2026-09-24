@@ -109,7 +109,8 @@ personal-ai-workspace/
 │  │  │  │  ├─ policy.py
 │  │  │  │  ├─ registry.py
 │  │  │  │  ├─ runner.py
-│  │  │  │  └─ scope.py
+│  │  │  │  ├─ scope.py
+│  │  │  │  └─ task_state.py
 │  │  │  └─ api/
 │  │  │     ├─ __init__.py
 │  │  │     ├─ deps.py
