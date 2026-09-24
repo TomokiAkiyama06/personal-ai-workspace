@@ -3,8 +3,11 @@
 Skipped unless ``PAW_TEST_DATABASE_URL`` is set (see test_postgres_integration).
 """
 
+import contextlib
 import json
 import logging
+import sys
+import tracemalloc
 import unittest
 import uuid
 from collections import OrderedDict
@@ -37,7 +40,11 @@ from paw_backend.tasks import (
     WorktreeState,
 )
 from paw_backend.tasks import service as service_module
-from paw_backend.tasks.service import MAX_INPUT_BYTES, MAX_INPUT_DEPTH
+from paw_backend.tasks.service import (
+    MAX_INPUT_BYTES,
+    MAX_INPUT_DEPTH,
+    MAX_INPUT_INTEGER_DIGITS,
+)
 
 from .task_support import PostgresTaskTestCase, requires_postgres
 from .test_task_domain import EXPECTED
@@ -45,6 +52,26 @@ from .test_task_domain import EXPECTED
 C = TaskCommand
 S = TaskState
 WORKTREE = WorktreeState("agent/task-1", "/srv/worktrees/task-1", "b" * 40)
+
+
+@contextlib.contextmanager
+def int_str_digits_limit(limit: int):
+    """Run with the interpreter's integer <-> text digit limit set (0 = none)."""
+    previous = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(limit)
+    try:
+        yield
+    finally:
+        sys.set_int_max_str_digits(previous)
+
+
+def encoder_must_not_run():
+    """Fail loudly if the input is encoded, which the check has to prevent."""
+    return mock.patch.object(
+        service_module.json,
+        "dumps",
+        side_effect=AssertionError("json.dumps was reached"),
+    )
 
 
 @requires_postgres
@@ -241,6 +268,149 @@ class CreateTaskTest(PostgresTaskTestCase):
         with mock.patch.object(service_module.json, "dumps") as dumps:
             await self.assert_input_rejected({"x": value})
         dumps.assert_not_called()
+
+    async def test_a_repeated_large_integer_is_refused_before_it_is_encoded(self):
+        # One 4000-digit integer that is referenced 65000 times costs almost no
+        # memory, but the encoder writes its 4000 digits every time (about 260 MB).
+        # Each occurrence must be charged the length it will be encoded to.
+        big = 10**3999
+        cases = {
+            "one integer, repeated": {"x": [big] * 65000},
+            "negative": {"x": [-big] * 65000},
+            "the same integer as many values": {
+                "x": {str(n): big for n in range(1000)}
+            },
+            "shared by two nested levels": {"x": [[big] * 300] * 300},
+        }
+        for name, value in cases.items():
+            with self.subTest(name), encoder_must_not_run():
+                await self.assert_input_rejected(value)
+
+    async def test_every_number_is_charged_by_its_encoded_length(self):
+        # ``{"k...": items}`` is built so that the check's charge is exactly
+        # ``MAX_INPUT_BYTES`` (brackets, the key with its quotes, and the encoded
+        # length of every item, measured with json.dumps): that still reaches the
+        # encoder, which refuses it on the separators. One character more is
+        # refused before anything is encoded.
+        def charging(items: list, extra: int) -> dict:
+            spent = 2 + 2 + sum(len(json.dumps(item)) for item in items)
+            return {"k" * (MAX_INPUT_BYTES - spent - 2 + extra): items}
+
+        cases = {
+            "large integers": [10**3999, -(10**3999), 10**1234, -(10**99)] * 15,
+            "integers around powers of ten": [
+                *(0, 9, 10, 99, 100, 999, 1000, -9, -10, -99, -100),
+                *(10**18 - 1, 10**18, 2**63, 2**64, -(2**64)),
+            ]
+            * 100,
+            "booleans and null": [True, False, None] * 1000,
+            "floats": [0.0, 1.5, -2.5e-300, 1.7976931348623157e308, 5e-324, 1e16] * 500,
+        }
+        for name, items in cases.items():
+            at_limit, one_over = charging(items, 0), charging(items, 1)
+            with self.subTest(name):
+                with mock.patch.object(
+                    service_module.json, "dumps", wraps=json.dumps
+                ) as dumps:
+                    await self.assert_input_rejected(at_limit)
+                self.assertEqual(dumps.call_count, 1)
+                with encoder_must_not_run():
+                    await self.assert_input_rejected(one_over)
+
+    async def test_large_integers_within_the_limits_are_stored_and_restored(self):
+        with int_str_digits_limit(4300):
+            value = {
+                "many": [10**3999, -(10**3998)] * 30,
+                "at the interpreter's digit limit": [10**4299, -(10**4299)],
+            }
+            task_id = await self.create_task(input=value)
+            self.assertEqual((await self.service.restore(task_id)).input, value)
+
+    async def test_integers_beyond_the_digit_limit_are_refused_before_encoding(self):
+        # 4300 digits is the interpreter's default limit for turning an integer
+        # into text; the encoder would refuse more (a ValueError), so the check
+        # states it as the typed error before any encoding.
+        with int_str_digits_limit(4300):
+            cases = {
+                "one digit too many": {"x": 10**4300},
+                "negative": {"x": -(10**4300)},
+                "in a list in an object": {"x": [1, [{"y": 10**4300}]]},
+                "far more than PostgreSQL can hold": {"x": 2**1_000_000},
+            }
+            for name, value in cases.items():
+                with self.subTest(name), encoder_must_not_run():
+                    await self.assert_input_rejected(value)
+
+    async def test_the_interpreters_lower_digit_limit_is_the_limit(self):
+        with int_str_digits_limit(640):
+            value = {"x": [10**639, -(10**639)]}
+            task_id = await self.create_task(input=value)
+            self.assertEqual((await self.service.restore(task_id)).input, value)
+            with self.assertRaises(InvalidCommandArgumentError) as caught:
+                await self.create_task(input={"x": 10**640})
+            self.assertEqual(
+                str(caught.exception), "input integers must have at most 640 digits"
+            )
+
+    async def test_integers_are_limited_to_the_digits_postgresql_holds(self):
+        # With the interpreter's own limit lifted, PostgreSQL's ``numeric`` is
+        # what limits an integer: MAX_INPUT_INTEGER_DIGITS digits are stored and
+        # restored, one more is refused before it is encoded.
+        with int_str_digits_limit(0):
+            for name, number in {
+                "positive": 10 ** (MAX_INPUT_INTEGER_DIGITS - 1),
+                "negative": -(10 ** (MAX_INPUT_INTEGER_DIGITS - 1)),
+            }.items():
+                with self.subTest(name):
+                    task_id = await self.create_task(input={"x": number})
+                    restored = (await self.service.restore(task_id)).input
+                    self.assertEqual(restored, {"x": number})
+            for name, number in {
+                "positive": 10**MAX_INPUT_INTEGER_DIGITS,
+                "negative": -(10**MAX_INPUT_INTEGER_DIGITS),
+            }.items():
+                with self.subTest(f"one digit too many, {name}"):
+                    with self.assertRaises(InvalidCommandArgumentError) as caught:
+                        with encoder_must_not_run():
+                            await self.create_task(input={"x": number})
+                    self.assertEqual(
+                        str(caught.exception),
+                        f"input integers must have at most "
+                        f"{MAX_INPUT_INTEGER_DIGITS} digits",
+                    )
+
+    async def test_a_huge_integer_is_refused_without_converting_it_to_text(self):
+        # Turning 2**3_000_000 (903 thousand digits) into text would allocate at
+        # least 900 kB. The refusal must come from its bit length alone.
+        with int_str_digits_limit(0):
+            value = {"x": 2**3_000_000}
+            tracemalloc.start()
+            try:
+                tracemalloc.reset_peak()
+                with (
+                    self.assertRaises(InvalidCommandArgumentError),
+                    encoder_must_not_run(),
+                ):
+                    await self.create_task(input=value)
+                peak = tracemalloc.get_traced_memory()[1]
+            finally:
+                tracemalloc.stop()
+        self.assertLess(peak, 300_000)
+
+    async def test_postgresql_refuses_more_digits_than_the_limit_states(self):
+        # The constant MAX_INPUT_INTEGER_DIGITS is PostgreSQL's own limit for the
+        # digits of a ``numeric`` (which every JSONB number is).
+        sql = text("SELECT length(CAST(:document AS jsonb)::text)")
+        with int_str_digits_limit(0):
+            fits = '{"x": 1' + "0" * (MAX_INPUT_INTEGER_DIGITS - 1) + "}"
+            too_long = '{"x": 1' + "0" * MAX_INPUT_INTEGER_DIGITS + "}"
+            async with self.database.engine.connect() as connection:
+                stored = await connection.scalar(sql, {"document": fits})
+                self.assertEqual(stored, len(fits))
+                await connection.rollback()
+                with self.assertRaises(DBAPIError) as caught:
+                    await connection.execute(sql, {"document": too_long})
+                self.assertEqual(caught.exception.orig.sqlstate, "22003")
 
 
 @requires_postgres
