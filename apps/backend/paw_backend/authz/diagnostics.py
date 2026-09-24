@@ -1,17 +1,13 @@
 """Startup diagnostic: can the application's database user rewrite the audit trail?"""
 
-import asyncio
 import logging
 from dataclasses import dataclass
-
-from sqlalchemy import text
 
 from paw_backend.db import Database
 
 logger = logging.getLogger(__name__)
 
-_QUERY = text(
-    """
+_QUERY = """
     SELECT pg_has_role(current_user, c.relowner, 'MEMBER') AS owns,
            has_table_privilege(current_user, c.oid, 'INSERT') AS can_insert,
            has_table_privilege(current_user, c.oid, 'UPDATE') AS can_update,
@@ -20,7 +16,6 @@ _QUERY = text(
     FROM pg_class c
     WHERE c.oid = to_regclass('audit_events')
     """
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,13 +41,18 @@ class AuditTableAccess:
         )
 
 
-async def read_audit_table_access(database: Database) -> AuditTableAccess | None:
-    """The access of the connected user, or ``None`` if the table does not exist."""
-    async with database.session() as session:
-        row = (await session.execute(_QUERY)).one_or_none()
-    if row is None:
-        return None
-    return AuditTableAccess(*row)
+async def read_audit_table_access(
+    database: Database, timeout_seconds: float | None = None
+) -> AuditTableAccess | None:
+    """The access of the connected user, or ``None`` if the table does not exist.
+
+    The query runs on a dedicated connection that is aborted, never cancelled
+    on the server, when the time is up, the caller is cancelled or the
+    database is disposed (``Database.fetch_abortable``): a stalled PostgreSQL
+    must not be able to hold up shutdown.
+    """
+    rows = await database.fetch_abortable(_QUERY, timeout_seconds=timeout_seconds)
+    return AuditTableAccess(*rows[0]) if rows else None
 
 
 async def warn_if_audit_table_is_mutable(
@@ -66,8 +66,7 @@ async def warn_if_audit_table_is_mutable(
     if not database.configured:
         return
     try:
-        async with asyncio.timeout(timeout_seconds):
-            access = await read_audit_table_access(database)
+        access = await read_audit_table_access(database, timeout_seconds)
     except Exception as error:
         logger.info("Audit table privilege check skipped (%s)", type(error).__name__)
         return
