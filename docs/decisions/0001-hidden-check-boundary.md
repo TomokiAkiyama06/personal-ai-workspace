@@ -17,6 +17,13 @@ records use mode `0600` and retain each stream's bounded byte count, digest, and
 truncation state rather than raw stdout or stderr.  Raw output is available only
 to the trusted evaluator caller for immediate diagnosis.
 
+The runner also applies safeguards that reduce accidents but are not the
+boundary: an allowlisted check environment, output captured into bounded buffers
+while the check runs, termination of the check's process group and known
+descendants on timeout, an owner-only log created without a wider-permission window
+and never opened through a symlink, and lookup errors that carry no chained
+exception.
+
 ## Constraint
 
 This Python runner separates data and process phases but is not a hostile-code

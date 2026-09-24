@@ -57,13 +57,34 @@ PAW-013 owns check execution and hidden-test isolation.
 hidden checks resolved from an evaluator-owned `HiddenCheckRegistry`.  The manifest
 continues to contain only the opaque `reference_id`; the registry and its command
 content are never placed in the candidate worktree or durable check log.  A check
-record includes its status, timeout, exit code, duration, and a bounded-output digest
-and byte count.  Raw stdout/stderr stay in memory for the trusted evaluator caller,
-so credentials emitted by a command do not become durable logs.
+record includes its status, timeout, exit code, duration, and, per stream, the byte
+count, the SHA-256 of the retained bytes, and a truncation flag.  Raw stdout/stderr
+stay in memory for the trusted evaluator caller, so credentials emitted by a command
+do not become durable logs.
 
-The runner is a data/process boundary, not a hostile-code sandbox.  Production must
-run candidate code and private evaluator storage under separately enforced OS or
-container permissions.  The proposed boundary is recorded in
+- Output is read while the check runs.  Only the first 64 KiB per stream is kept;
+  the rest is counted and discarded, so evaluator memory does not depend on how much
+  a check prints.  `truncated` is set when a stream exceeded 64 KiB.
+- A check gets an explicit environment: only `PATH`, `LANG`, `LANGUAGE`, `LC_ALL`,
+  `LC_CTYPE` and `TZ` are inherited, plus a private temporary `HOME` removed after the
+  check.  Credential variables and every `GIT_*` selector are dropped.
+- On timeout the check's process group and the processes found below it in `/proc`
+  get `SIGTERM`, then `SIGKILL` after `term_grace_seconds` (2 s); pipe reading stops
+  after `drain_seconds` (1 s).  Leftover group members are also killed when a check
+  exits normally.  A process that daemonizes (double fork plus `setsid`) cannot be
+  found and can outlive the check; only a container or cgroup contains that.
+- The check log directory is created `0700` and the log `0600` at creation, opened
+  with `O_NOFOLLOW`, and refused (`TestRunnerError`) if it is a symlink, has extra
+  hard links, is not owned by the evaluator, or sits in a group/other-writable
+  directory.  A wider mode on an existing log is tightened on the open descriptor
+  before anything is written.
+- An unknown hidden reference raises a `KeyError` that carries neither the reference
+  nor a chained exception (`__cause__` and `__context__` are `None`).
+
+The runner is a data/process boundary, not a hostile-code sandbox: checks run under
+the evaluator's own OS user, so code under test can still open evaluator files it can
+locate.  Production must run candidate code and private evaluator storage under
+separately enforced OS or container permissions.  The proposed boundary is recorded in
 [Decision 0001](../docs/decisions/0001-hidden-check-boundary.md).
 
 ## Validator
