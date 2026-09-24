@@ -65,10 +65,14 @@ personal-ai-workspace/
 │  │  │  │  └─ owner.py
 │  │  │  ├─ identity/
 │  │  │  │  ├─ __init__.py
+│  │  │  │  ├─ audit.py
+│  │  │  │  ├─ diagnostics.py
 │  │  │  │  ├─ errors.py
+│  │  │  │  ├─ limits.py
 │  │  │  │  ├─ login_name.py
 │  │  │  │  ├─ models.py
-│  │  │  │  ├─ service.py
+│  │  │  │  ├─ operator.py
+│  │  │  │  ├─ redeemer.py
 │  │  │  │  └─ tokens.py
 │  │  │  └─ api/
 │  │  │     ├─ __init__.py
@@ -98,6 +102,7 @@ personal-ai-workspace/
 │  │     ├─ test_owner_no_web_path.py
 │  │     ├─ test_owner_setup_cli.py
 │  │     ├─ test_owner_setup_service.py
+│  │     ├─ test_owner_token_roles.py
 │  │     ├─ test_postgres_integration.py
 │  │     ├─ test_security.py
 │  │     └─ test_server.py
@@ -145,6 +150,7 @@ personal-ai-workspace/
 │     ├─ 0002-start-workspace-implementation-before-model-comparison.md
 │     ├─ 0003-backend-cli-web-implementation-stack.md
 │     ├─ 0004-rbac-capability-and-audit-policy.md
+│     ├─ 0005-owner-setup-and-recovery.md
 │     └─ README.md
 └─ evaluator/
    └─ README.md

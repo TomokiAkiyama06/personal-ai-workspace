@@ -13,7 +13,7 @@ Repositoryでは以下を検証する。
 - 検証スクリプトが正常な文書を許容し、破損した入力を検出する回帰テスト
 - `benchmarks/`と`apps/backend/`のPython codeに対するRuff format / lint
 - Benchmark Task schema、fixture、validator CLIのtest
-- Backendのtest（`apps/backend/tests`。設定、Health、Error Response、Host / Origin検証、Security Header、SSE / WebSocketのEvent経路と購読数の上限、Graceful shutdown、Migration設定、Memory / Conversation Schema。制約、Version、ACL filter、pgvector、ModelとMigrationの一致、Owner Setup / Recovery（Token、Audit、同時実行、Lockout、CLI、users / setup_tokensのMigration））
+- Backendのtest（`apps/backend/tests`。設定、Health、Error Response、Host / Origin検証、Security Header、SSE / WebSocketのEvent経路と購読数の上限、Graceful shutdown、Migration設定、Memory / Conversation Schema。制約、Version、ACL filter、pgvector、ModelとMigrationの一致、Owner Setup / Recovery（Token、Audit、同時実行、Lockout、CLI、users / setup_tokensのMigrationとWeb / Operator Roleの権限））
 - Backend依存のversionが`apps/backend/pyproject.toml`、hook環境、`requirements-ci.txt`で一致すること
 
 Markdown の行末の 2 個以上のスペースによる改行は許容する。
