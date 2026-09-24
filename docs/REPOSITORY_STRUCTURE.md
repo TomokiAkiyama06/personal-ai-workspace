@@ -49,6 +49,7 @@ personal-ai-workspace/
 │  │  │     ├─ 0001_baseline.py
 │  │  │     ├─ 0021_owner_setup.py
 │  │  │     ├─ 0025_audit_events.py
+│  │  │     ├─ 0026_projects.py
 │  │  │     ├─ 0031_tool_approvals.py
 │  │  │     ├─ 0032_task_lifecycle.py
 │  │  │     ├─ 0033_task_queue_budget_loop.py
@@ -80,6 +81,16 @@ personal-ai-workspace/
 │  │  │  │  ├─ operator.py
 │  │  │  │  ├─ redeemer.py
 │  │  │  │  └─ tokens.py
+│  │  │  ├─ projects/
+│  │  │  │  ├─ __init__.py
+│  │  │  │  ├─ domain.py
+│  │  │  │  ├─ errors.py
+│  │  │  │  ├─ limits.py
+│  │  │  │  ├─ models.py
+│  │  │  │  ├─ records.py
+│  │  │  │  ├─ service.py
+│  │  │  │  ├─ store.py
+│  │  │  │  └─ validation.py
 │  │  │  ├─ research/
 │  │  │  │  ├─ __init__.py
 │  │  │  │  ├─ providers/
@@ -142,6 +153,7 @@ personal-ai-workspace/
 │  │     ├─ __init__.py
 │  │     ├─ fake_postgres.py
 │  │     ├─ identity_support.py
+│  │     ├─ projects_support.py
 │  │     ├─ queueing_support.py
 │  │     ├─ research_support.py
 │  │     ├─ scratch_support.py
@@ -163,6 +175,16 @@ personal-ai-workspace/
 │  │     ├─ test_owner_setup_service.py
 │  │     ├─ test_owner_token_roles.py
 │  │     ├─ test_postgres_integration.py
+│  │     ├─ test_projects_concurrency.py
+│  │     ├─ test_projects_domain.py
+│  │     ├─ test_projects_grants.py
+│  │     ├─ test_projects_schema.py
+│  │     ├─ test_projects_service_access.py
+│  │     ├─ test_projects_service_lifecycle.py
+│  │     ├─ test_projects_service_members.py
+│  │     ├─ test_projects_service_validation.py
+│  │     ├─ test_projects_store.py
+│  │     ├─ test_projects_validation.py
 │  │     ├─ test_queueing_budget.py
 │  │     ├─ test_queueing_domain.py
 │  │     ├─ test_queueing_escalation.py

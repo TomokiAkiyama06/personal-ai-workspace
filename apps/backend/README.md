@@ -6,6 +6,7 @@ Login と Session はまだ実装していません（PAW-022 以降）。
 RBAC と Audit（PAW-025）、Task の Lifecycle と永続化（[PAW-032](#agent-task-lifecycle)、HTTP の Endpoint はまだありません）、Task Queue・Budget・Loop 検知（[PAW-033](#task-queue--budget--loop-検知)）、Tool Broker と Capability Policy（[PAW-031](#tool-broker--capability-policy)、HTTP の Endpoint はまだありません）、Memory の PostgreSQL Schema（[PAW-040](#memory--conversation-schema)）、
 最小の `users` Table と Owner の初期設定・復旧のコマンド（[PAW-021](#owner-の初期設定と復旧)）を実装済みです。Memory の保存・整理・検索の処理は PAW-041 以降です。
 Research の一時保存（[PAW-050](#research-scratch-store)、24 時間 TTL、HTTP の Endpoint はまだありません）と、Research Provider の Adapter Interface（[PAW-051](#research-provider-adapter)、実際の Provider（Direct Web、Docs、GitHub、OpenCode）はまだありません）も実装済みです。
+Project の作成・招待制の Membership・Lifecycle（Active / Archived / Pending deletion / Deleted）は [PAW-026](#project-crud--membership--lifecycle) で実装済みです（Service のみ。HTTP の Endpoint と Session はまだありません）。
 
 [Architecture](../../docs/ARCHITECTURE.md) に基づき、最終的に以下の機能を Backend 側で扱います。
 
@@ -39,7 +40,7 @@ Python 側の Package（`pgvector-python`）は使わず、`paw_backend/memory/v
 apps/backend/
 ├─ pyproject.toml          # 依存（完全一致で固定）と Ruff 設定
 ├─ alembic.ini             # Alembic 設定（DB URL は持たない）
-├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0031 は Tool Approval、0033 は Queue / Budget / Loop、0040 は Memory Schema、0050 は Research Scratch）
+├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0031 は Tool Approval、0033 は Queue / Budget / Loop、0040 は Memory Schema、0050 は Research Scratch、0026 は Project）
 ├─ paw_backend/
 │  ├─ app.py               # create_app(settings)
 │  ├─ config.py            # PAW_ 環境変数から読む Settings
@@ -55,6 +56,7 @@ apps/backend/
 │  ├─ tasks/               # Agent Task の状態遷移と永続化（PAW-032）
 │  │  └─ queueing/         # Task Queue、Budget、Loop 検知、Escalation の判断（PAW-033）
 │  ├─ memory/              # Memory / Conversation の Model、ACL 条件、vector 型（PAW-040）
+│  ├─ projects/            # Project、Membership（招待制）、Lifecycle（PAW-026）
 │  ├─ research/providers/  # Research Provider の Adapter Interface と Broker（PAW-051）
 │  ├─ research/scratch/    # Research Scratch Store: 24 時間 TTL の一時保存（PAW-050）
 │  ├─ tools/               # Tool Broker、Capability Policy、Approval（PAW-031）
@@ -286,7 +288,7 @@ Operator の 6 操作は次のように解釈しています（[要件](../../RE
 | `task_logs` | 試行ごとの Log（`debug` / `info` / `warning` / `error`） |
 | `task_events` | Append-only の履歴。全遷移について、Command、遷移前後の状態、`wait_reason`、Actor（`user` / `system` / `policy` と User の UUID）、理由、その時点の Step 名、`task_version` |
 
-- `project_id`、`created_by`、`actor_id` は UUID だけを持ち、外部キーはありません。projects の Table がまだ存在せず、`users`（PAW-021、Revision `0021`）は Migration の順序が統合後に決まるためです（両方が揃った後の Revision で外部キーを追加します）。
+- `project_id`、`created_by`、`actor_id` は UUID だけを持ち、外部キーはありません。`projects`（PAW-026、Revision `0026`）と `users`（PAW-021、Revision `0021`）は、この Schema の Revision より後にできた Table です（外部キーを付ける後の Revision の手順は「[Project CRUD / Membership / Lifecycle](#project-crud--membership--lifecycle)」の「他の領域との関係」にあります）。
 - `task_events` は DB の Trigger が UPDATE と DELETE を拒否します。Application からも履歴は書き換えられません。
 - **Application の Role の権限**（Role を分ける構成、`PAW_APP_DATABASE_ROLE`）: Migration `0032` は、すべての Table に [`grant_app_privileges`](#migration-は-application-の-role-に権限を与えるcontributor-向けの規則) で `TaskService` が必要とする最小の権限だけを与えます。DELETE はどこにも与えません（`PUBLIC` の権限は外します）。
 
@@ -647,7 +649,7 @@ Application 起動時に一度、接続 User の権限を確認し、**`WARNING`
 - Repository の ACL の保存と解決は呼び出す側（PAW-027 など）の責任です。この Backend は、渡された `RepoAcl` を判定するだけです。
   Override が Project の Role を広げてよいか、User 単位の許可リストを持つかは、要件が定めておらず、Decision 0004 で Human の判断を待っています（今は狭めるだけ・権限の集合）。
 - `Scope.SELF` の Capability（`chat.use`、`memory.use` など）は `Project` の状態と Member 資格を見ません
-  （たとえば Pending deletion の Project の Chat、Member から外された後の Memory）。Project との関係のモデル化は PAW-026 で行います。
+  （たとえば Pending deletion の Project の Chat、Member から外された後の Memory）。Project との Member 関係は PAW-026 の `project_members` にありますが、これらの Capability の判定はまだ Member 資格を見ません（[Project CRUD / Membership / Lifecycle](#project-crud--membership--lifecycle)）。
 - `tests/test_authz_routes.py` が調べるのは `/api/v1` の Route だけで、FastAPI の内部（`effective_route_contexts`）に依存します。
 - `create_app` は既定の Provider と Directory を組み込みます。PAW-022 が `install_authz` を呼んで差し替えるまで、全 Endpoint が 401 です。
 - 重要操作の Step-up 認証の項目は Audit にありません（PAW-023 で追加します）。
@@ -1059,7 +1061,7 @@ Scope を広げる編集は新しい Version で行うため、旧 Version は�
 `confirmation_state`（`observed` / `inferred` / `confirmed` / `rejected`）、`freshness_policy`（`permanent` / `revalidate` / `repo_commit` / `expiring` / `session_only`）と、
 方針ごとの必須項目（`verified_at`、`revalidate_after`、`commit_sha`、`expires_at`）、`actor`、`change_reason` も Version が持ちます。
 
-**User / Project / Repo の ID は Foreign Key なし。** Project と Repo の Table はまだありません（PAW-026 / 027）。`users`（PAW-021）はありますが、Migration の順序が統合後に決まるため、この Schema からの外部キーは付けていません。
+**User / Project / Repo の ID は Foreign Key なし。** `projects`（PAW-026、Revision `0026`）と `users`（PAW-021）の Table は、この Schema の Revision より後にできます（Repo の Table はまだありません: PAW-027）。この Schema からの外部キーは付けていません。
 `owner_user_id`、`project_id`、`project_group_id`、`repo_id`、`actor_user_id` は素の UUID Column で、DB は存在を確認しません。
 Backend は検証した ID だけを書いてください。Table ができた後の Migration で Foreign Key を追加できます。
 Task、Repo 解析、Project Decision の出典も、Table がないため `memory_sources.source_ref` の不透明な文字列です。
@@ -1124,7 +1126,7 @@ Model と Migration の一致は Test が検証します（Alembic の autogener
 | `research_scratch_leases` | 「今使っている」印。`(item_id, holder_id)` が Key。`holder_id` は Task や Worker の実行の UUID |
 
 - **TTL**: `expires_at = created_at + interval '24 hours'` を CHECK 制約で強制します（Generated Column は `timestamptz + interval` が immutable ではないため使えません）。`expires_at` は変更しません。延期は TTL の延長ではなく削除の保留です。
-- **Project / Task の関係**: `project_id` は素の UUID（projects の Table がまだありません）、`task_id` は `tasks.id` への Foreign Key（`ON DELETE SET NULL`。Task を消しても、Task の削除が調査結果に止められることも、Pin 済みの調査結果が消えることもなく、Project の関係は残る）。`add` は Task が存在し、その `project_id` が同じであることを確認します。存在しない Task と他の Project の Task は区別しません。
+- **Project / Task の関係**: `project_id` は素の UUID（`projects` は Revision `0026`。外部キーは後の Revision で付けられます）、`task_id` は `tasks.id` への Foreign Key（`ON DELETE SET NULL`。Task を消しても、Task の削除が調査結果に止められることも、Pin 済みの調査結果が消えることもなく、Project の関係は残る）。`add` は Task が存在し、その `project_id` が同じであることを確認します。存在しない Task と他の Project の Task は区別しません。
 - 全ての Method は `project_id` を受け取り、その Project の中だけで Item を探します。他の Project の ID は「存在しない」と同じ扱いです。
 
 ### 削除の延期
@@ -1332,6 +1334,142 @@ License や `robots.txt` に関する項目はありません。要件と設計�
 
 `apps/backend/tests/test_research_*.py` です。標準 `unittest` だけで、DB も Network も使いません。
 Timeout の Test は、永遠に待つ Provider を 0.3 秒で打ち切り、成功する Provider は即座に答える構成です（所要時間を厳密には検査せず、30 秒の Guard で CI の停止を防ぎます）。
+
+## Project CRUD / Membership / Lifecycle
+
+[PAW-026](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/23)（Revision `0026`）で実装しました。設計は [要件](../../REQUIREMENTS.md)の「Project roles and membership」「Project lifecycle」「New Project defaults」と
+[Decision 0004](../../docs/decisions/0004-rbac-capability-and-audit-policy.md)（Proposed）に従い、要件が決めていない選択は [Decision 0008（Proposed）](../../docs/decisions/0008-project-membership-and-lifecycle-policy.md)にまとめています。
+**Decision 0008 は Human の承認前です。** 招待の期限、Delete 開始の確認、復元できる人などは、承認されるまで暫定です。
+**HTTP の Endpoint はありません**（Session は PAW-022）。`ProjectService` は、認証済みの `Principal` を受け取り、`Authorizer` で判定します。
+
+| ファイル | 内容 |
+| --- | --- |
+| `models.py` | `projects`、`project_members` の Model |
+| `limits.py` | 上限、30 日、招待の期限（Test が DB の CHECK 制約との一致を検証） |
+| `records.py`、`errors.py` | 返す値（`Project`、`Member`、`PendingInvite`、`PurgeResult`）、状態の Enum、型付きの Error |
+| `validation.py` | 引数の検証（DB を使わない純粋関数） |
+| `domain.py` | Lifecycle と Membership の規則（純粋関数。状態遷移の表、30 日、招待の期限、最後の Manager） |
+| `store.py` | SQL（1 文 1 関数。Transaction・Lock・Timeout・認可は持たない） |
+| `service.py` | `ProjectService`（Transaction、Lock、認可、規則の組み立て。Clock は注入） |
+
+### Table
+
+| Table | 内容 |
+| --- | --- |
+| `projects` | Project 1 件。`name`（1〜100 文字、前後に空白なし）、`description`（なし、または 1〜2000 文字）、`status`（`active` / `archived` / `pending_deletion` / `deleted`）、`created_by`、`created_at`、`updated_at`、`deletion_started_at`、`deletion_scheduled_at`、`deleted_at` |
+| `project_members` | 受諾済みの Member（`status = 'active'`）か招待（`status = 'invited'`）。`(project_id, user_id)` が Key で、1 人が 1 Project に持てる行は 1 つ。`role`（`manager` / `contributor` / `viewer`）、`invited_at`、`invite_expires_at`、`joined_at` |
+
+- **Repo なしで作れます。** `projects` に Repository の列はありません（Repo の紐付けは PAW-027）。作成には Project 名だけが要り、作成者が最初の Manager になります。
+- **Pending deletion は 30 日。** `deletion_scheduled_at = deletion_started_at + interval '720 hours'` を CHECK 制約で強制します（`interval '30 days'` はセッションの Time Zone の暦日で、夏時間の切り替えで 1 時間ずれるため時間で書きます）。
+- **削除しても行は残る。** `projects` は DELETE しません（Application の Role にも DELETE を与えていません）。Deleted は墓石で、名前は `Deleted Project`、説明は消去、`id`・作成者の不透明な ID・時刻は残します。
+- CHECK 制約: 状態と時刻の対応（`deletion_*` は Pending deletion と Deleted のときだけ、`deleted_at` は Deleted のときだけ、招待の期限は招待のときだけ、`joined_at` は受諾済みのときだけ）を DB が強制します。
+- **Foreign Key**: `projects.created_by → users.id`（`ON DELETE SET NULL`）、`project_members.project_id → projects.id`（`ON DELETE CASCADE`）、`project_members.user_id → users.id`（`ON DELETE RESTRICT`: Member や招待のある User は物理削除できません。User の削除の流れは先に Member を外します）。
+  **`users`（Revision `0021`）が鎖の前にあることが必要です。**
+- Migration `0026` の `down_revision` は `0050` です（鎖は `0001 → 0025 → 0032 → 0040 → 0021 → 0033 → 0031 → 0050 → 0026`）。統合時の並びは Orchestrator が決めますが、`0021` は `0026` より前でなければなりません。
+- **Application Role の権限**（`grant_app_privileges`、`test_projects_grants.py` が実 DB で確認）: `projects` は SELECT / INSERT と、UPDATE は `name`・`description`・`status`・`updated_at`・`deletion_started_at`・`deletion_scheduled_at`・`deleted_at` の 7 列だけ（DELETE なし。`id`・`created_by`・`created_at` は書き換えられません）。
+  `project_members` は SELECT / INSERT / DELETE と、UPDATE は `role`・`status`・`joined_at`・`invite_expires_at` だけです。TRUNCATE と Schema の変更は誰にも与えません。`users` は読むだけです（`0021` の権限）。
+  Migration に加えて、`tests/test_projects_grants.py` は Service の Test を全てこの Role で実行します。
+- `0026` の FK のうち 2 つは `ALTER TABLE ... ADD CONSTRAINT` の手書きの文で付けています。既存の Test（`test_task_persistence.OfflineMigrationTest`）が、鎖全体の SQL に `FOREIGN KEY(project_id)` の文字列がないことで「`tasks` に外部キーがない」ことを確かめているためです（上の 2 つは `projects` の Key で、`tasks` とは無関係）。統合時にその Test を `tasks` の DDL に絞ることを勧めます。
+
+### Lifecycle
+
+```text
+Active ⇄ Archived
+   ╲        ╲
+    ╲        ╲ Delete 開始（確認: Project 名の入力）
+     └────────→ Pending deletion（30 日）──→ Deleted（Purge。墓石）
+                     │
+                     └── 復元（30 日以内）→ Archived
+```
+
+| 操作 | 許可する人（`project.lifecycle.manage`） | 遷移 |
+| --- | --- | --- |
+| `archive` | Manager、Owner、Admin | Active → Archived |
+| `unarchive` | 同上 | Archived → Active（**Archived からの復帰**） |
+| `begin_deletion(confirm_name)` | 同上 | Active / Archived → Pending deletion。`deletion_started_at = now`、`deletion_scheduled_at = now + 30 日` |
+| `restore` | 同上 | Pending deletion → **Archived**（`now < deletion_scheduled_at` の間だけ。Manager が 1 人もいなければ拒否） |
+| `purge_expired(now)` | Backend の Janitor だけ（Actor なし） | `now >= deletion_scheduled_at` の Pending deletion → Deleted。Member と招待の行を全て削除 |
+
+- 遷移の表は `domain.plan_transition` にあり、`tests/test_projects_domain.py` が 5 操作 × 4 状態の全 20 通りを固定しています。**すでにその状態にある操作は成功して何も書きません**（`updated_at` も 30 日も動かない）。それ以外の組み合わせは `IllegalTransitionError` です。
+- Archived は読み取り専用（Policy: `project.read` と Lifecycle だけ）、Pending deletion は Lifecycle だけです（Member のアクセスは止まります）。Deleted は全ての操作で「存在しない」です。
+- Delete 開始は `confirm_name` が Project 名と**完全に一致**しなければ `ConfirmationMismatchError`（認可の後に検査するので、権限のない人には名前の一致を教えません）。
+- Purge は **`now >= deletion_scheduled_at`** から（復元は `now < deletion_scheduled_at`。同じ瞬間に両方が真にはなりません）。1 回の Transaction で、期限の古い順に最大 `batch_size`（1〜500、既定 50）件を `FOR UPDATE SKIP LOCKED` で選び、各 Project の Member と招待を全て削除して墓石にします。
+  Lock 中の Project は待たずに飛ばし、`has_more` は「まだ期限の来た Project が残っている」（Lock 中を含む）ことを示します。二重に呼んでも安全です。Scheduler は含みません（別の Issue）。
+- **他の領域のデータは、この Issue では消しません。** Chat、Memory、Task、Repo の紐付け、調査結果の `project_id` は素の UUID で、各領域の Service が `PurgeResult.purged` の ID を使って消します（承認後に各 Issue へ引き継ぐ）。
+  GitHub、Local checkout などの外部資源は消しません（要件）。
+
+### Membership（招待制）
+
+- **誰も自分では入れません。** Manager が `invite_member(project, user, role)` で招待し（存在して `active` の User だけ）、招待された人が `accept_invite` で受諾して Member になります。`decline_invite` は行を削除します。System の Owner / Admin も、招待されなければ入れません。
+- 招待は **14 日**（`domain.invite_expiry`）。`invite_expires_at` ちょうどからは受諾できません（`InviteExpiredError`）。期限切れの招待は、再度の `invite_member` で置き換わります。有効な招待がある人、Member の人への再招待はエラーです（期限を更新しません）。
+- 招待された人は `list_my_invites` で自分宛ての有効な招待を見られます（Project 名、Role、期限）。受諾するまで、Project も Member 一覧も見えません（`roles_of` にも入りません）。
+- Manager は `remove_member`（招待の取り下げも）、`change_role` で Member を管理します。**最後の受諾済み Manager は、退出・削除・降格できません**（`LastManagerError`。招待中の Manager は数えません）。
+  例外は、Pending deletion の Project からの `leave_project`（削除中なので許可）です。その場合、Manager のいない Project の復元は `NoManagerError` で拒否されます。
+- 1 Project の Member と有効な招待の合計は 200 までです（`MemberLimitError`）。
+- Member の一覧は Member 全員が見られます（`project.read`）。有効な招待の一覧は Manager だけです（`project.members.manage`）。
+
+### 認可と Audit
+
+| 方法 | 操作 |
+| --- | --- |
+| `Authorizer`（Capability を Audit に残す） | `get_project`、`list_members`（`project.read`）、`list_invites`、`invite_member`、`remove_member`、`change_role`（`project.members.manage`）、`rename_project`、`set_description`（`project.settings.manage`）、`archive`、`unarchive`、`begin_deletion`、`restore`（`project.lifecycle.manage`） |
+| **本人確認だけ（Audit を書かない）** | `create_project`、`accept_invite`、`decline_invite`、`leave_project`、`list_projects`、`list_my_invites`。`system_role` が Owner / Admin / User の `Principal` だけ（`SYSTEM` は拒否）。受諾・辞退・退出は Actor 自身の行だけを対象にします |
+| Backend 内部（Actor なし） | `purge_expired`（Janitor）、`roles_of`（`Principal.project_roles` を作る PAW-022 用） |
+
+- **`Principal.project_roles` を信用しません。** Service は、Actor の Role を同じ Transaction で `project_members` から読み直し（受諾済みの行だけ）、それを使って `Authorizer` に渡す `Principal` を作り直します。
+  Member から外された後の古い `Principal`、自分で Manager と申告した `Principal`、招待中なのに Manager と申告した `Principal` は、効きません。`system_role` と `user_id` だけを呼び出し側から受け取ります。
+- **存在を明かしません。** 認可で拒否され、かつ Actor が受諾済みの Member でないときは、存在しない Project と同じ `ProjectNotFoundError` です（Audit は Authorizer が書きます）。Owner / Admin が Lifecycle 以外を試みた場合も同じです。
+  Member への拒否は、状態のため（Archived の変更、Pending deletion の閲覧）は `ProjectStateError`、それ以外は `ProjectPermissionDeniedError`（`reason` は固定の Reason Code。`audit_unavailable` は API 層が 503 にします）です。
+- **一覧は自分の Member の行だけ**です（Owner / Admin も同じ）。Pending deletion の一覧は、復元できる Manager の Project だけです。Owner / Admin が全 Project を探す手段はこの Issue にありません（Decision 0008）。
+- Audit の行は「判定」を記録します。許可された操作が後から失敗しても（規則の違反、DB の Error）、Audit の行は残ります。
+- `Scope.SELF` の Capability（`chat.use`、`memory.use` など）は、今も Member 資格と Project の状態を見ません。Membership の Table と `roles_of` を用意しただけで、絞り込みは Project の Chat や Memory を実装する Issue が行います。
+
+### 同時実行
+
+- Project を変える操作（設定、Member、Lifecycle、Purge）は、Transaction の最初に **Project の行を `SELECT ... FOR UPDATE`** で Lock し（待ちます）、それから存在・認可・規則を評価します。1 Project の変更は直列になり、
+  2 人の Manager が同時に退出しても、最後の 1 人は残ります（`tests/test_projects_concurrency.py`）。Lock 待ちは `lock_timeout_ms`（既定 3000、1〜60000）で `ProjectBusyError` になります。読み取りは Lock も待ちもしません。
+- `Authorizer` の呼び出しは、この Lock を持ったまま行います（Audit の書き込みは Authorizer の Timeout で有界）。
+- Clock は 1 回の操作で 1 度だけ読みます（`validate_instant`）。
+
+### 上限と入力の検証
+
+Project 名は 1〜100 文字（前後の空白は除き、内側は保持）、説明は 2000 文字まで（空・空白だけは「なし」）。長さは Unicode の Code Point で数えます。制御文字（名前は改行・Tab も）、Surrogate、行・段落の区切り、双方向の書式制御文字は拒否します。
+ID は `UUID` か正規の文字列だけです。Role と Status は Enum の Member だけで、`"manager"` の文字列は受け付けません（`bool` は `int` でなく、naive な `datetime` は時刻でもありません）。
+`list_projects` の `limit` は 1〜200（既定 50）、`offset` は 0〜100000。Error の Message は固定文字列で、入力の内容・ID・DB の Message を含みません。DB の Error（接続断など）は加工せず伝わります。
+
+### 他の領域との関係
+
+`tasks`（PAW-032）、Memory（PAW-040）、Research Scratch（PAW-050）などの `project_id` は素の UUID のままで、この Issue はそれらの Table を変えません。**後の Migration で外部キーを付けるには:**
+Project を持たない孤児の行がないことを確認し、`ALTER TABLE <table> ADD CONSTRAINT fk_<table>_project_id_projects FOREIGN KEY (project_id) REFERENCES projects (id) NOT VALID` の後に `VALIDATE CONSTRAINT`（長い Lock を避けるため）。
+`ON DELETE` は `RESTRICT` を勧めます（Project の行は削除しないので、実際には働きません）。Purge では行が消えないため、他の領域の削除は各領域の Service が `PurgeResult.purged` を使って行います。
+
+### 実装の由来
+
+`domain.py`（7 関数）と `store.py`（20 関数）は、仕様（Docstring と `tests/test_projects_*.py`）を先に書き、関数の本体を別の実装者に埋めさせる設計です。Model、Migration、権限、`validation.py`、`service.py` は仕様の作者が実装しています。
+本体を誰がどの関数について実装したかは、人間の Orchestrator が確認した後にここへ記録します（現時点では未確認）。
+
+### 制限と未確認の点
+
+- HTTP の Endpoint、Session は含みません（PAW-022）。作成・受諾・退出は Audit に残りません（Decision 0008 の 5）。
+- 招待を通知する仕組み（Notification、Email）はありません。招待された人は `list_my_invites` で見つけます。User の削除の流れ（Member を外す、所有権の移譲）は PAW-021 以降の Issue です。
+- Purge を定期的に呼ぶ Janitor、Purge 後の他の領域のデータ削除は含みません。Repository の紐付け（PAW-027）と Repo ACL の保存もありません。
+- Project 名の一意性、Project ごとの設定（Agent Policy、Merge Policy など。要件の「New Project defaults」）、Owner / Admin の全 Project 一覧は含みません。
+- `Authorizer` の呼び出しと Project の Lock は同じ Transaction の中です。Audit の Store が遅いと、その間 Project の行の Lock が続きます（Authorizer の Timeout で有界）。
+- PostgreSQL 18 の実 DB で Test しました。`READ COMMITTED` を前提に、Lock の順序（Project の行が最初）で直列化しています。他の Isolation Level では未確認です。
+
+### 人間の判断が必要な点
+
+1. **Decision 0008 全体の承認。** 特に、Delete 開始を Active から許すか（Archived 経由を必須にするか）、Delete の確認を Project 名の入力にするか、復元できる人（Manager、Owner、Admin）。
+2. **Capability を持たない 4 つの操作**（作成、招待の受諾・辞退、退出）に Capability を追加して Audit するか（Decision 0004 の後継 Decision が要る）。
+3. **招待の期限（14 日）と Member の上限（200）**、辞退・退出の履歴を持たない（行の削除）こと。
+4. **`users` への Foreign Key**（`ON DELETE RESTRICT`）と、`0021` を `0026` より前に置く並び。
+5. **Owner / Admin が全 Project を一覧する API**（管理上の Lifecycle 操作の入口）を、どの Issue で持つか。
+6. **Purge 後の他の領域のデータ削除**の担当（各 Service が `PurgeResult.purged` を使う想定）。
+
+### Test
+
+`apps/backend/tests/test_projects_*.py`、`projects_support.py` です。標準 `unittest` だけで、`test_projects_domain.py`、`test_projects_validation.py`、`test_projects_service_validation.py` と Model の Test は DB を使いません。
+それ以外は実 PostgreSQL（`PAW_TEST_DATABASE_URL`）を使い、未設定なら Skip します。時刻は注入した Clock で、速度に依存する Test はありません。
 
 ## 依存 Package
 
