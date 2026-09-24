@@ -81,6 +81,14 @@ being benchmarked.
   is not cut short.  Whatever is left when the period ends gets `SIGKILL`, and reading
   the pipes stops after `drain_seconds` (1 s).  Leftover members of the candidate's
   process group are also killed when it exits normally.
+- Descendants are tracked by identity, not by pid alone (pid plus the start time in
+  `/proc/<pid>/stat`).  Before every `SIGTERM`/`SIGKILL` the identity is re-checked, and
+  a pid now held by a different process is dropped and neither signalled nor waited
+  for.  Where `pidfd_open` exists (Linux 5.3+, Python 3.9+) the pidfd is opened first
+  and the identity checked afterwards, so the signal cannot reach a newcomer; without
+  it a window of microseconds remains between the check and `kill`.  The leader is left
+  unreaped until the last process-group signal, so the group id cannot be reused before
+  it.
 - Not covered: a process that daemonizes (double fork plus `setsid`) is neither in the
   group nor below the candidate in `/proc`, so it can outlive the run.  Only a
   container or cgroup can contain that.
