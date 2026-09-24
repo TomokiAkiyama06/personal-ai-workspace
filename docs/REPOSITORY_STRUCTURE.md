@@ -152,6 +152,7 @@ personal-ai-workspace/
 │  │     ├─ test_config.py
 │  │     ├─ test_database.py
 │  │     ├─ test_database_run_abortable.py
+│  │     ├─ test_database_slot_wait.py
 │  │     ├─ test_errors.py
 │  │     ├─ test_events.py
 │  │     ├─ test_health.py
