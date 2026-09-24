@@ -76,6 +76,14 @@ do not become durable logs.
   stops after `drain_seconds` (1 s).  Leftover group members are also killed when a
   check exits normally.  A process that daemonizes (double fork plus `setsid`) cannot
   be found and can outlive the check; only a container or cgroup contains that.
+- Descendants are tracked by identity, not by pid alone (pid plus the start time in
+  `/proc/<pid>/stat`).  Before every `SIGTERM`/`SIGKILL` the identity is re-checked, and
+  a pid now held by a different process is dropped and neither signalled nor waited
+  for.  Where `pidfd_open` exists (Linux 5.3+, Python 3.9+) the pidfd is opened first
+  and the identity checked afterwards, so the signal cannot reach a newcomer; without
+  it a window of microseconds remains between the check and `kill`.  The check's
+  leader is left unreaped until the last process-group signal, so the group id cannot
+  be reused before it.
 - A check command needs a non-empty `argv[0]`; later arguments may be any string,
   including `""` (for example `("python3", "-c", "")`), as the task schema allows.
 - The check log directory is created `0700` and the log `0600` at creation, opened
