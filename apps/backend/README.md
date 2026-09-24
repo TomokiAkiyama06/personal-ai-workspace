@@ -1350,9 +1350,16 @@ License や `robots.txt` に関する項目はありません。要件と設計�
 1. `request.kinds` に合う Provider を Registry の順序（`ProviderKind` の宣言順、次に名前順。登録順には依存しない）で選びます。
 2. **全 Provider を並行**で実行します。各 Provider の制限時間は、登録時の `timeout_seconds`（既定 10 秒、最大 120 秒）と、全体の Budget の残りの小さい方です。時間切れの Provider は Cancel し、完全に終わるまで待ってから `timeout` として報告します。`gather` が返るとき、起動した Task は残りません。
 3. Provider の例外は Provider ごとに隔離します。他の Provider の結果は失われません。`gather` を Cancel した場合は全 Provider を Cancel して `CancelledError` を伝えます。
-4. Response は Provider ごとに全体を検証します（list / tuple、件数が `limit` 以下、全要素が `ProviderHit`、全 URL が正規化できる）。1 つでも違反があれば、その Provider の結果は全て捨てて `invalid_response` にします。
+4. Response は Provider ごとに全体を検証します（list / tuple、件数が `limit` 以下、全要素が `ProviderHit` で **Field の値も正しい**、全 URL が正規化できる）。1 つでも違反があれば、その Provider の結果は全て捨てて `invalid_response` にします。Field の検証は下の「Constructor を通らない Hit と Document」のとおりです。
 5. Provider の結果を交互に並べ（各 Provider の 1 位、2 位、…）、正規化した URL で重複を除いて（最初の 1 件を残し、どれか 1 つでも Private なら `private_source` を True にする）、`max_results` 件までにします。
 6. `errors` は Registry の順序です（完了順ではありません）。
+
+**Constructor を通らない Hit と Document。** `isinstance(x, ProviderHit)` は Class しか証明しません。`object.__setattr__` で作った Object、Constructor が Slot を設定しない Subclass、`text` が `str` でない Object、上限を超える文字列、UTC で表せない `published_at` も `ProviderHit` の Instance です。
+そのため `normalize_hits`（`gather` の経路）と `fetch` は、受け取った Object の Field を全て 1 度だけ読み直し、`ProviderHit` / `ProviderDocument` の Constructor と同じ規則で検証し直します（`revalidate_hit` / `revalidate_document`）。以後の処理は、その検証済みの複製だけを使います。
+- Field は `ProviderHit` 自身の Slot から直接読みます。Subclass の Property や `__getattribute__` は呼びません（呼ぶと、任意の例外や、読むたびに変わる値を許すため）。Subclass 自体は使えますが、Property だけで Field を返し Slot を設定しない Subclass は不正な Response です。
+- `str` の Subclass は、`__len__` や `encode` を呼ばずに通常の `str` へ複製してから検証します（長さを偽れません）。`source_type` は `SourceType` そのもの、`private_source` は `bool` そのものだけを受け付けます（`__class__` を偽る Object は不正）。
+- `published_at` は `None` か、UTC に変換できる Timezone つきの `datetime` だけです。変換後は標準の `datetime` の Method だけで行い、通常の UTC の `datetime` にします（Timezone の `utcoffset` が例外を出した場合も不正な Response です）。
+- 違反は全て `InvalidProviderResponseError`（固定の文言。値も例外の文言も含みません）になり、`gather` はその Provider を `invalid_response` にして他の Provider の結果を残します。`fetch` は `errors` に `invalid_response` を 1 件返します。例外は呼び出し元へ出ません。
 
 失敗は閉じた `ResearchErrorCode` の値としてだけ報告します。
 
@@ -1360,12 +1367,12 @@ License や `robots.txt` に関する項目はありません。要件と設計�
 | --- | --- |
 | `timeout` | Provider または全体の Budget の時間切れ。Provider 自身が `TimeoutError` を出した場合も含む |
 | `rate_limited` / `unavailable` / `not_found` / `internal_error` | Provider が `ProviderFailure` で報告した値。`internal_error` は、`ProviderFailure` 以外の全ての例外にも使う |
-| `invalid_response` | Interface の違反（型、件数、URL） |
+| `invalid_response` | Interface の違反（型、件数、URL、Field の値） |
 
 **例外の文言は Code にも Result にも Log にも入りません。** Log は Provider 1 つの失敗ごとに WARNING を 1 行（Provider の ID、種類、Code、例外の**型名**）出し、Query と URL は出しません。
 `ProviderFailure.code` を書き換えて文字列にしても、`internal_error` になります。
 
-`fetch(source, time_budget_seconds=30)` は、以前の結果の `SourceMetadata` から、同じ Provider の `fetch` を、`gather` と同じ隔離・Timeout・Log の規則で呼びます。制限時間は `min(登録時の timeout_seconds, time_budget_seconds)` です。Provider が登録から外れている（または種類が違う）場合は `unavailable` です。結果は 1 件の `ResearchItem`（`retrieved_at` は取得時、`private_source` は Source と文書のどちらかが True なら True）か、`errors` の 1 件です。
+`fetch(source, time_budget_seconds=30)` は、以前の結果の `SourceMetadata` から、同じ Provider の `fetch` を、`gather` と同じ隔離・Timeout・Log の規則で呼びます。制限時間は `min(登録時の timeout_seconds, time_budget_seconds)` です。Provider が登録から外れている（または種類が違う）場合は `unavailable` です。`ProviderDocument` でない Response と、Field が不正な `ProviderDocument`（上の「Constructor を通らない Hit と Document」）は `invalid_response` です。結果は 1 件の `ResearchItem`（`retrieved_at` は取得時、`private_source` は Source と文書のどちらかが True なら True）か、`errors` の 1 件です。
 
 ### Security と Privacy
 
@@ -1383,7 +1390,7 @@ License や `robots.txt` に関する項目はありません。要件と設計�
 - Timeout は協調的です。Adapter が Cancel を無視する、または Event Loop を止める同期処理をする場合、Broker は止められません。
 - 未決事項（人間の判断が必要。**[Decision 0012](../../docs/decisions/0012-research-provider-adapter-policy.md) は Proposed で、承認されるまで暫定です**）:
   1. License と `robots.txt` の項目は、要件に定義がないため `SourceMetadata` にありません。
-  2. 不正な Hit が 1 つでもあると、その Provider の Response 全体を `invalid_response` にします（Adapter の不具合を隠さないため）。
+  2. 不正な Hit が 1 つでもあると、その Provider の Response 全体を `invalid_response` にします（Adapter の不具合を隠さないため）。Constructor を通らずに作られた Hit / Document は、Field を読み直して検証し、Subclass の Property は使いません。
   3. 複数 Provider の結果は交互に並べ、正規化した URL の最初の 1 件を残します（要件に統合の規則がありません）。
   4. Credential 用の Query Parameter の一覧は Best effort です。
   5. IPv6 と非 ASCII の Host は拒否し、名前解決はしません。`network` Capability、SSRF、`robots.txt` は呼び出し元（Tool Broker、PAW-031）と個々の Adapter の責任です。

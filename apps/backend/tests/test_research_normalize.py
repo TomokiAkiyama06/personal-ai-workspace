@@ -2,7 +2,7 @@
 
 import hashlib
 import unittest
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone, tzinfo
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -19,7 +19,7 @@ from paw_backend.research.providers import (
     normalize_title,
 )
 
-from .research_support import NOW, SECRET, hit
+from .research_support import NOW, SECRET, hit, malformed_hits
 
 JST = timezone(timedelta(hours=9))
 
@@ -297,6 +297,208 @@ class NormalizeHitsTest(unittest.TestCase):
 
         (result,) = normalize([MyHit("https://a.example/1", private_source=False)])
         self.assertEqual(result.source.locator, "https://a.example/1")
+
+
+class MalformedTypedHitTest(unittest.TestCase):
+    """A ``ProviderHit`` built around its constructor is validated again.
+
+    ``isinstance`` says nothing about the field values: an object can lack
+    slots, hold a value of the wrong type, or be far over the length bounds.
+    Each such response is the provider's invalid response and never an
+    ``AttributeError`` / ``TypeError`` for the caller.
+    """
+
+    def test_every_malformed_hit_rejects_the_whole_response(self):
+        good = hit("https://example.com/ok")
+        for label, bad in malformed_hits().items():
+            for hits in ([good, bad], [bad, good], (bad,)):
+                with self.subTest(malformed=label, hits=len(hits)):
+                    with self.assertRaises(InvalidProviderResponseError):
+                        normalize(hits)
+
+    def test_the_unmodified_hit_of_the_table_is_accepted(self):
+        # The table's builder is a valid hit: only the changed field is at fault.
+        (result,) = normalize([hit()])
+        self.assertEqual(result.source.locator, "https://example.com/a")
+
+    def test_the_rejection_names_neither_the_field_nor_the_value(self):
+        bad = hit()
+        object.__setattr__(bad, "title", SECRET * 200)
+        with self.assertRaises(InvalidProviderResponseError) as caught:
+            normalize([bad])
+        self.assertEqual(str(caught.exception), "Invalid provider response")
+        self.assertNotIn(SECRET, repr(caught.exception))
+        self.assertIsNone(caught.exception.__cause__)
+
+    def test_a_subclass_that_sets_nothing_is_not_read_through_its_properties(self):
+        class Shadow(ProviderHit):
+            locator = property(lambda self: "https://a.example/1")
+            title = property(lambda self: "t")
+            text = property(lambda self: "x")
+            published_at = property(lambda self: None)
+            source_type = property(lambda self: SourceType.UNKNOWN)
+            private_source = property(lambda self: False)
+
+            def __init__(self) -> None:
+                pass
+
+        with self.assertRaises(InvalidProviderResponseError):
+            normalize([Shadow()])
+
+    def test_the_subclass_is_never_asked_for_a_value(self):
+        calls: list[str] = []
+
+        def spy(name):
+            def read(self):
+                calls.append(name)
+                raise RuntimeError(name)
+
+            return property(read)
+
+        class Meddling(ProviderHit):
+            locator = spy("locator")
+            title = spy("title")
+            text = spy("text")
+            published_at = spy("published_at")
+            source_type = spy("source_type")
+            private_source = spy("private_source")
+
+            def __init__(self) -> None:  # the class's own properties block the
+                pass  # normal setters, so the slots are filled by hand
+
+            def __getattribute__(self, name):
+                calls.append(name)
+                return super().__getattribute__(name)
+
+        meddling = Meddling()
+        for name, value in {
+            "locator": "https://a.example/1",
+            "title": "  Real   title ",
+            "text": "the text",
+            "published_at": None,
+            "source_type": SourceType.PRIMARY,
+            "private_source": True,
+        }.items():
+            getattr(ProviderHit, name).__set__(meddling, value)
+
+        (result,) = normalize([meddling])
+
+        self.assertEqual(calls, [])
+        self.assertEqual(
+            (
+                result.source.locator,
+                result.source.title,
+                result.text,
+                result.source.source_type,
+                result.source.private_source,
+            ),
+            (
+                "https://a.example/1",
+                "Real title",
+                "the text",
+                SourceType.PRIMARY,
+                True,
+            ),
+        )
+
+    def test_a_class_that_claims_to_be_a_hit_is_rejected(self):
+        class Impostor:
+            @property
+            def __class__(self):
+                return ProviderHit
+
+            locator = "https://a.example/1"
+
+        self.assertIsInstance(Impostor(), ProviderHit)  # what isinstance would say
+        with self.assertRaises(InvalidProviderResponseError):
+            normalize([Impostor()])
+
+    def test_a_value_that_claims_to_be_a_bool_or_a_source_type_is_rejected(self):
+        def claiming(cls):
+            class Impostor:
+                @property
+                def __class__(self):
+                    return cls
+
+            return Impostor()
+
+        for field, cls in (("private_source", bool), ("source_type", SourceType)):
+            bad = hit()
+            object.__setattr__(bad, field, claiming(cls))
+            with self.subTest(field=field):
+                with self.assertRaises(InvalidProviderResponseError):
+                    normalize([bad])
+
+    def test_a_string_subclass_cannot_lie_about_its_length(self):
+        class Liar(str):
+            def __len__(self):
+                return 1
+
+        for field, size in (("text", 4_001), ("title", 301), ("locator", 2_049)):
+            bad = hit()
+            object.__setattr__(bad, field, Liar("x" * size))
+            with (
+                self.subTest(field=field),
+                self.assertRaises(InvalidProviderResponseError),
+            ):
+                normalize([bad])
+
+    def test_a_string_subclass_becomes_a_plain_str(self):
+        class Tagged(str):
+            def encode(self, *args, **kwargs):
+                raise RuntimeError("must not run")
+
+        sub = hit()
+        for field, value in {
+            "locator": Tagged("https://a.example/1"),
+            "title": Tagged(" A  B "),
+            "text": Tagged("excerpt"),
+        }.items():
+            object.__setattr__(sub, field, value)
+
+        (result,) = normalize([sub])
+
+        self.assertEqual(
+            (result.source.locator, result.source.title, result.text),
+            ("https://a.example/1", "A B", "excerpt"),
+        )
+        self.assertIs(type(result.text), str)
+        self.assertEqual(result.source.content_hash, compute_content_hash("excerpt"))
+
+    def test_a_datetime_subclass_is_converted_without_running_its_code(self):
+        class Meddling(datetime):
+            def astimezone(self, tz=None):
+                raise RuntimeError("must not run")
+
+            def utcoffset(self):
+                raise RuntimeError("must not run")
+
+        stamp = Meddling(2026, 9, 1, 9, 30, tzinfo=JST)
+        bad = hit()
+        object.__setattr__(bad, "published_at", stamp)
+
+        (result,) = normalize([bad])
+
+        self.assertEqual(
+            result.source.published_at, datetime(2026, 9, 1, 0, 30, tzinfo=UTC)
+        )
+        self.assertIs(type(result.source.published_at), datetime)
+
+    def test_a_timezone_that_fails_is_an_invalid_response(self):
+        class Broken(tzinfo):
+            def utcoffset(self, moment):
+                raise RuntimeError(SECRET)
+
+        bad = hit()
+        object.__setattr__(bad, "published_at", datetime(2026, 9, 1, tzinfo=Broken()))
+        with self.assertRaises(InvalidProviderResponseError) as caught:
+            normalize([bad])
+        self.assertNotIn(SECRET, repr(caught.exception))
+
+    def test_the_hits_are_not_modified(self):
+        first = hit("https://example.com/a", title="  spaced  title ")
+        normalize([first])
+        self.assertEqual(first.title, "  spaced  title ")
 
 
 class MergeItemsTest(unittest.TestCase):

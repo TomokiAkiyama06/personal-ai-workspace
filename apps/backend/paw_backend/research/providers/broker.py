@@ -22,7 +22,6 @@ from typing import NamedTuple
 
 from paw_backend.research.providers.contract import (
     DEFAULT_TIME_BUDGET_SECONDS,
-    ProviderDocument,
     ProviderKind,
     ResearchError,
     ResearchItem,
@@ -43,7 +42,7 @@ from paw_backend.research.providers.normalize import (
     merge_items,
     normalize_hits,
     normalize_title,
-    published_utc,
+    revalidate_document,
 )
 from paw_backend.research.providers.registry import ProviderRegistry, RegisteredProvider
 
@@ -163,8 +162,10 @@ class ResearchBroker:
            items.
         5. A provider that returned normally is validated and normalised with
            ``normalize_hits(provider_id=entry.name, kind=entry.kind, hits=<the
-           response>, limit=request.max_results, retrieved_at=...)``. If that
-           raises ``InvalidProviderResponseError`` the provider is reported with
+           response>, limit=request.max_results, retrieved_at=...)``; that includes
+           validating the live fields of every hit again (an object built around
+           its constructor is invalid). If it raises
+           ``InvalidProviderResponseError`` the provider is reported with
            ``INVALID_RESPONSE`` (logged like any failure), contributes no item,
            and the others are unaffected.
         6. ``merge_items`` over the successful providers' items (in registry
@@ -251,8 +252,12 @@ class ResearchBroker:
         ``min(entry.timeout_seconds, time_budget_seconds)`` with the same failure
         rules as ``gather`` (``classify_failure``, ``TIMEOUT`` with cancellation,
         one WARNING log, ``CancelledError`` propagates). A response that is not a
-        ``ProviderDocument`` is ``INVALID_RESPONSE``. On success the result has
-        one item, ``providers_queried=1``, no errors, ``truncated=False``:
+        ``ProviderDocument`` is ``INVALID_RESPONSE``, and so is a ``ProviderDocument``
+        whose live fields are invalid (unset slots, wrong types, text over
+        ``MAX_DOCUMENT_CHARS``, a ``published_at`` that is naive or that UTC cannot
+        express): ``revalidate_document`` reads and validates every field again.
+        On success the result has one item, ``providers_queried=1``, no errors,
+        ``truncated=False``:
         ``ResearchItem(source=SourceMetadata(provider_kind=source.provider_kind,
         provider_id=source.provider_id, locator=<canonical locator>,
         title=normalize_title(doc.title), retrieved_at=clock(),
@@ -283,24 +288,17 @@ class ResearchBroker:
             started + min(entry.timeout_seconds, time_budget_seconds),
         )
         code = outcome.code
-        document = outcome.response
-        if code is None and not isinstance(document, ProviderDocument):
-            code = ResearchErrorCode.INVALID_RESPONSE
-            _log_failure(entry, code, InvalidProviderResponseError.__name__)
+        if code is None:
+            # Not just ``isinstance``: an object built around the constructor
+            # (unset slots, wrong types, over-long text) is invalid, not a crash.
+            try:
+                document = revalidate_document(outcome.response)
+            except InvalidProviderResponseError as error:
+                code = ResearchErrorCode.INVALID_RESPONSE
+                _log_failure(entry, code, type(error).__name__)
         if code is not None:
             return self._failed_fetch(entry.name, entry.kind, code)
 
-        try:
-            published_at = published_utc(document.published_at)
-        except InvalidProviderResponseError:
-            _log_failure(
-                entry,
-                ResearchErrorCode.INVALID_RESPONSE,
-                InvalidProviderResponseError.__name__,
-            )
-            return self._failed_fetch(
-                entry.name, entry.kind, ResearchErrorCode.INVALID_RESPONSE
-            )
         item = ResearchItem(
             SourceMetadata(
                 provider_kind=source.provider_kind,
@@ -310,7 +308,7 @@ class ResearchBroker:
                 retrieved_at=self._clock(),
                 content_hash=compute_content_hash(document.text),
                 source_type=document.source_type,
-                published_at=published_at,
+                published_at=document.published_at,
                 # Conservative: private if either side says so.
                 private_source=source.private_source or document.private_source,
             ),
