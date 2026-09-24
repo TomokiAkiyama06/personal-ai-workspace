@@ -50,6 +50,11 @@ from paw_backend.research.providers.normalize import (
     normalize_hits,
     normalize_title,
 )
+from paw_backend.research.providers.preflight import (
+    PreflightNotConfiguredError,
+    SearchPreflight,
+    validate_preflight,
+)
 from paw_backend.research.providers.registry import (
     ProviderRegistry,
     RegisteredProvider,
@@ -78,6 +83,7 @@ __all__ = [
     "ProviderHit",
     "ProviderInterfaceError",
     "ProviderKind",
+    "PreflightNotConfiguredError",
     "ProviderRegistry",
     "ProviderRegistryError",
     "RegisteredProvider",
@@ -89,6 +95,7 @@ __all__ = [
     "ResearchProvider",
     "ResearchRequest",
     "ResearchResult",
+    "SearchPreflight",
     "SourceMetadata",
     "SourceType",
     "StaticProvider",
@@ -99,5 +106,6 @@ __all__ = [
     "merge_items",
     "normalize_hits",
     "normalize_title",
+    "validate_preflight",
     "validate_provider",
 ]

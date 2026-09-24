@@ -5,7 +5,7 @@ Personal AI Workspace の Core Backend です。
 Login と Session はまだ実装していません（PAW-022 以降）。
 RBAC と Audit（PAW-025）、Task の Lifecycle と永続化（[PAW-032](#agent-task-lifecycle)、HTTP の Endpoint はまだありません）、Task Queue・Budget・Loop 検知（[PAW-033](#task-queue--budget--loop-検知)）、Tool Broker と Capability Policy（[PAW-031](#tool-broker--capability-policy)、HTTP の Endpoint はまだありません）、Memory の PostgreSQL Schema（[PAW-040](#memory--conversation-schema)）、
 最小の `users` Table と Owner の初期設定・復旧のコマンド（[PAW-021](#owner-の初期設定と復旧)）を実装済みです。Memory の保存・整理・検索の処理は PAW-041 以降です。
-Research の一時保存（[PAW-050](#research-scratch-store)、24 時間 TTL、HTTP の Endpoint はまだありません）と、Research Provider の Adapter Interface（[PAW-051](#research-provider-adapter)、実際の Provider（Direct Web、Docs、GitHub、OpenCode）はまだありません）も実装済みです。
+Research の一時保存（[PAW-050](#research-scratch-store)、24 時間 TTL、HTTP の Endpoint はまだありません）と、Research Provider の Adapter Interface（[PAW-051](#research-provider-adapter)、実際の Provider（Direct Web、Docs、GitHub、OpenCode）はまだありません）と、外部の検索へ送る Query の最小化と送信の Audit（[PAW-053](#research-privacy-filter)、Audit の永続化はまだありません）も実装済みです。
 
 [Architecture](../../docs/ARCHITECTURE.md) に基づき、最終的に以下の機能を Backend 側で扱います。
 
@@ -56,6 +56,7 @@ apps/backend/
 │  │  └─ queueing/         # Task Queue、Budget、Loop 検知、Escalation の判断（PAW-033）
 │  ├─ memory/              # Memory / Conversation の Model、ACL 条件、vector 型（PAW-040）
 │  ├─ research/providers/  # Research Provider の Adapter Interface と Broker（PAW-051）
+│  ├─ research/privacy/    # Research の Privacy Filter: Query の最小化と外部送信の Audit（PAW-053）
 │  ├─ research/scratch/    # Research Scratch Store: 24 時間 TTL の一時保存（PAW-050）
 │  ├─ tools/               # Tool Broker、Capability Policy、Approval（PAW-031）
 │  └─ api/
@@ -1209,6 +1210,7 @@ Provider の違い（API の形、Response の形、失敗の仕方）は Broker
 | `locator.py` | `canonicalize_locator`: URL の正規化と無害化 |
 | `normalize.py` | `normalize_hits`（Provider の Response を検証して統一形式へ）、`merge_items`（交互配置・重複除去・件数制限） |
 | `registry.py` | `ProviderRegistry`: 登録時の Interface 検証、一意な名前、決定的な順序 |
+| `preflight.py` | `SearchPreflight`（Protocol）: Provider を呼ぶ前に Request を書き換える・拒否する任意の差し込み口（PAW-053 の Privacy Filter が実装する）、`PreflightNotConfiguredError` |
 | `broker.py` | `ResearchBroker.gather` / `fetch`: 並行実行、Timeout、失敗の隔離 |
 | `static.py` | `StaticProvider`: Test 用の Fake（Network を使わない） |
 
@@ -1241,7 +1243,7 @@ Registry は登録時に `name` と `kind` の形、`search` と `fetch` が `as
 
 | 項目 | 内容 |
 | --- | --- |
-| `query` | 1 〜 512 文字、空白のみ不可、改行・Tab を含む制御文字は不可。PAW-053 の Privacy Filter で最小化済みの Query を渡す。Broker は中身を見ず、書き換えない |
+| `query` | 1 〜 512 文字、空白のみ不可、改行・Tab を含む制御文字は不可。Privacy Filter（PAW-053）で最小化済みの Query を渡す。Broker は中身を見ず、書き換えない（pre-flight を設定した場合だけ、pre-flight が Query を差し替える。[Research Privacy Filter](#research-privacy-filter)） |
 | `max_results` | 1 〜 50（既定 10）。各 Provider に頼む件数と、結果の最大件数の両方 |
 | `kinds` | `ProviderKind` の空でない `frozenset`（既定は全種類）。Provider 名では選べない |
 | `time_budget_seconds` | 1 回の `gather` 全体の上限。0 より大きく 120 以下（既定 30） |
@@ -1288,6 +1290,7 @@ License や `robots.txt` に関する項目はありません。要件と設計�
 `ResearchBroker(registry).gather(request)` は次のとおり動きます。
 
 1. `request.kinds` に合う Provider を Registry の順序（`ProviderKind` の宣言順、次に名前順。登録順には依存しない）で選びます。
+   `ResearchBroker(registry, preflight=...)` で pre-flight を設定した場合は、ここで、どの Provider も呼ぶ前に `preflight.preflight(request, kinds, preflight_input)` が走り、返された Request が以降の全ての段階で使われます（拒否は例外として `gather` から出て、Provider は呼ばれません。詳しくは [Research Privacy Filter](#research-privacy-filter)）。pre-flight を設定せず `preflight_input` も渡さなければ、この段階は何もしません。
 2. **全 Provider を並行**で実行します。各 Provider の制限時間は、登録時の `timeout_seconds`（既定 10 秒、最大 120 秒）と、全体の Budget の残りの小さい方です。時間切れの Provider は Cancel し、完全に終わるまで待ってから `timeout` として報告します。`gather` が返るとき、起動した Task は残りません。
 3. Provider の例外は Provider ごとに隔離します。他の Provider の結果は失われません。`gather` を Cancel した場合は全 Provider を Cancel して `CancelledError` を伝えます。
 4. Response は Provider ごとに全体を検証します（list / tuple、件数が `limit` 以下、全要素が `ProviderHit`、全 URL が正規化できる）。1 つでも違反があれば、その Provider の結果は全て捨てて `invalid_response` にします。
@@ -1311,7 +1314,7 @@ License や `robots.txt` に関する項目はありません。要件と設計�
 
 - `network` Capability の確認は、この層の呼び出し元（Tool Broker、PAW-031）の責任です。この層は認可の判断も Network の Access もしません。
 - どの Host へ接続してよいか（SSRF、Private Address、`robots.txt`）は、具体的な Adapter と Network Policy の責任です。`canonicalize_locator` は名前を解決しません。
-- Query の最小化と Secret の除去は PAW-053 の責任です。`private_source` はその Filter が使います。
+- Query の最小化と Secret の除去は、Privacy Filter（PAW-053、[Research Privacy Filter](#research-privacy-filter)）が、pre-flight として行います。`private_source` は、以前の結果を Context の Piece にする `context_pieces_from_items` が使います。pre-flight を設定しない Broker は、Query をそのまま Provider へ渡します。
 - 全ての入力（Query、件数、文字数、Provider 数）に上限があります。Registry は 32 Provider までです。
 
 ### 実装の由来と制約
@@ -1333,6 +1336,120 @@ License や `robots.txt` に関する項目はありません。要件と設計�
 `apps/backend/tests/test_research_*.py` です。標準 `unittest` だけで、DB も Network も使いません。
 Timeout の Test は、永遠に待つ Provider を 0.3 秒で打ち切り、成功する Provider は即座に答える構成です（所要時間を厳密には検査せず、30 秒の Guard で CI の停止を防ぎます）。
 
+## Research Privacy Filter
+
+[PAW-053](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/45) で実装した、外部の検索へ送る Query を最小化し、送信を Audit する層です（`paw_backend/research/privacy/`）。
+設計は [要件](../../REQUIREMENTS.md)の「Web Research / Knowledge Layer」の Privacy に従い、数値と規則は [Decision 0010](../../docs/decisions/0010-research-privacy-filter-policy.md)（Proposed、Human の承認待ち）で承認を求めています。
+**Provider には依存しません。** HTTP の Endpoint も、永続化する Store もありません（Audit の保存先は `ExternalSendAudit`（Protocol）で、後続の Issue が接続します）。Migration もありません。
+
+Main Agent（または Research Worker）は、書いた Query の**下書き**と、その下書きの元になった Context（各 Piece に `ContextLabel` を付けたもの）を Gate に渡します。
+Gate は、外へ出してよい `MinimizedQuery` を返すか、`PrivacyRefusal` で拒否します。
+
+| Module | 内容 |
+| --- | --- |
+| `contract.py` | `ContextLabel`、`ContextPiece`、`PrivacyInput`、`MinimizedQuery`、`ExternalSendRecord`、`WithheldCounts`、`RefusalReason` / `PrivacyRefusal`、`ExternalSendAudit`（Protocol）、`InMemoryExternalSendAudit`、上限の定数 |
+| `rules.py` | 最小化の規則（小さな純粋関数）。正規化、写しの検出、Credential の除去、抽象化の規則、切り詰め、Fingerprint |
+| `gate.py` | `PrivacyGate`: 入力の検証、Default deny、規則を呼ぶ順序、Rule とは別の最終検査、Audit してから返す |
+
+### Context のラベル
+
+| `ContextLabel` | 意味 | Query に入ってよいか |
+| --- | --- | --- |
+| `PUBLIC` | Public な文書、Web の結果 | 入ってよい（Gate は書き換えない） |
+| `PRIVATE_SOURCE` | Private な Repository・File の本文 | 写しは入らない |
+| `PRIVATE_MEMORY` | User の Private Memory | 写しは入らない |
+| `RAW_CONVERSATION` | 会話の Raw Text | 写しは入らない |
+| `SECRET` | Credential、Token、Password、Key | 写しは（4 文字以上でも）入らない |
+
+ラベルは、出所を知っている Backend のコードが付けます。LLM や Client の申告、Text の中身から推測することはしません。
+`context_pieces_from_items` は、以前の Research の結果（`ResearchItem`）を、`private_source` が True なら `PRIVATE_SOURCE`（本文と、あれば Title）、False なら `PUBLIC` の Piece にします。
+
+### Query が外へ出るまで
+
+`PrivacyGate.minimize(draft, context)` は、次の順に処理します（正確な定義は `rules.py` の Docstring）。
+
+1. **拒否の判定**（Text を読む前）: Context に `ContextPiece` でないもの（ラベルの無い文字列など）があれば `unclassified_context`。Draft が 2,000 文字を超えれば `draft_too_long`。Context が 32 個または合計 400,000 文字を超えれば `context_too_large`。
+2. **正規化**: NFKC、制御文字・ゼロ幅文字の除去、空白の圧縮（`normalize_text`）。
+3. **写しの除去**: `PUBLIC` 以外の Piece ごとに、Draft の中で Piece にもある 16 文字以上（`SECRET` は 4 文字以上。Piece がそれより短ければ Piece の長さ）の連続を、大文字小文字を無視して検出し、全部消します（`find_copied_spans`）。消した場所は空白にし、前後の語が連結することはありません。
+4. **Credential の除去**（`strip_credentials`）: PAW-031 の `redact_text` が認識するものを消します。
+5. **抽象化**（URL → E-mail → File Path → Private Host → ID → 長い Token → Version の順）: 内容は次の表のとおりです。
+6. **切り詰め**: 256 文字を超えたら、語の区切りで切ります（`truncated`）。
+7. **最終検査**（`rules.py` を使わない）: 単語の文字が 1 つもなければ `empty_query`。`redact_text` が Credential を見つければ `credential_remains`。`PUBLIC` 以外の Piece の全文、または `SECRET` の 4 文字以上の単語が残っていれば `private_text_remains`。Rule に不具合があっても、Private な Text は外へ出ません。
+
+| 抽象化の規則 | 内容 |
+| --- | --- |
+| `abstract_urls` | URL を Host だけにする。Host が Private（IP、`localhost`、Dot の無い名前、末尾が `local` `internal` `corp` など）なら消す |
+| `abstract_emails` | E-mail Address を消す |
+| `abstract_paths` | `/`、`~/`、`./`、`../`、ドライブ、UNC で始まる語と、区切りを 2 つ以上含む語を消す |
+| `abstract_hosts` | Private な Host・IP の語（Port、Path 付きを含む）を消す。Dot の無い名前は単語と区別できないので残す |
+| `abstract_ids` | UUID、Credential Handle、12 桁以上の 16 進数、5 桁以上の数字を消す（小数は残す） |
+| `drop_opaque_tokens` | 40 文字以上の Base64 風の連続を消す |
+| `generalize_versions` | `3.13.15` を `3.13` にする |
+
+例: `explain <Private な Note の 1 文> in stripe at /srv/billing/app.py` は `explain in stripe at` になります。
+
+### Audit
+
+`PrivacyGate.authorize(...)`（`ResearchBroker` は pre-flight として呼ぶ）は、`minimize` のあと、`ExternalSendRecord` を `ExternalSendAudit.record` へ渡し、**受理されてから** Query を返します。
+
+| Record の項目 | 内容 |
+| --- | --- |
+| `recorded_at` | 送ってよいと判断した時刻（UTC） |
+| `project_id` | Project の UUID |
+| `query_fingerprint` / `query_chars` | Query の SHA-256（`sha256:` + 64 桁の 16 進数）と文字数 |
+| `provider_kinds` | 実際に Query を送る Provider の種類（`ProviderKind` の順） |
+| `withheld` | Label ごとの、Query から外した Piece の数 |
+| `credentials_removed` / `pieces_matched` / `abstractions` | 除いた Credential の数、写しがあった Piece の数、抽象化した数 |
+| `truncated` | 長さの上限で切ったか |
+
+Record は Query の本文、消した文字列、Context の本文を**持ちません**（Field 自体がありません）。`ContextPiece` の本文は `repr` にも出ません。
+Sink が例外を出す、5 秒（既定）以内に終わらない、満杯である場合は、`audit_failed` で拒否し、送りません。ログには例外の**型名**だけを 1 行（WARNING）出します。
+Record は「送ってよいと判断した」記録で、Provider が答えたかは含みません。拒否した要求は Record を作りません。
+
+### Broker への差し込み
+
+```python
+gate = PrivacyGate(audit)  # audit は ExternalSendAudit
+broker = ResearchBroker(registry, preflight=gate)
+result = await broker.gather(
+    ResearchRequest(draft_query),
+    preflight_input=PrivacyInput(context_pieces, project_id),
+)
+```
+
+- `preflight` を渡さず、`preflight_input` も渡さなければ、今までと同じ動作です（PAW-051 の Test はそのまま通ります）。
+- `preflight` が無い Broker に `preflight_input` を渡すと `PreflightNotConfiguredError` です（確認されると思った Query が、確認されずに出るのを防ぐため）。
+- `preflight` がある Broker に `preflight_input` を渡さない（`None`）、または `PrivacyInput` でないものを渡すと、Gate は `unclassified_context` で拒否します（Default deny）。
+- Provider を選んだ後、どの Provider も呼ぶ前に、Gate が Query を最小化して Audit します。Provider が受け取る Query は、最小化した Query だけです。拒否されると、Provider は 1 つも呼ばれず、`PrivacyRefusal` が `gather` から出ます。
+- 選ばれた Provider が 1 つもなければ、何も送られないので、Gate も Audit も動きません。
+- 1 回の `gather` につき Record は 1 つです。Time Budget は pre-flight の後から数えます。
+- `ResearchBroker.fetch` は Gate を通りません（Decision 0010）。
+
+### 実装の由来
+
+`rules.py` の各関数は、仕様（Docstring）と Test（270 件）を先に固定してから実装しています。
+**最終的な実装は Claude の参照実装です。** ローカルの Qwen3-Coder-30B-A3B に、14 関数の実装を 2 回（各約 265 回の Tool 呼び出し）任せましたが、収束しませんでした。
+1 回目は `query_fingerprint`、`truncate_query`、`fold_for_match`、`normalize_text` の 4 関数が Test を通り、2 回目は `abstract_emails` も通りましたが、正規表現を使う残りの関数（`is_private_host`、`strip_credentials`、`abstract_ids`、`abstract_paths`、`abstract_hosts`、`abstract_urls` など）は Test を通せず、途中で構文エラーや、仕様に反する挙動（Credential を除かずに `[REDACTED]` を残すなど）が残りました。
+AGENTS.md のとおり、同じ失敗を繰り返したのでエスカレーションし、仕様の Docstring を保ったまま、Claude の参照実装（変異 176 個のうち 173 個を Test が検出。残る 3 個は同値）に置き換えています。ローカルモデルの成果物は、最終物に含まれていません。
+
+### 制限と未確認の点
+
+- **検出できるのは Text の写しだけです。** 言い換え、翻訳、Base64 以外の符号化、文字を分けて送る方法、Context に載っていない情報は検出できません。Prompt Injection を受けた Agent に対する完全な防御ではありません。
+- ラベルは呼び出し側が付けます。付け忘れた Private な Text は、`PUBLIC` として扱われます（ラベルを付けない場合は拒否されます）。
+- Private な Host の判定は構文だけです（IP、`localhost`、Dot の無い名前、末尾が `local` `internal` `lan` `home` `corp` `intranet` `localdomain` `private` `arpa`）。`git.example.com` のような、外から見ると普通の名前の Private な Host は判定できず、URL の Host としては残ります。Dot の無い名前は、単語との区別がつかないため、URL の外では残ります。
+- 4 文字の窓は、`SECRET` に近い普通の語（`internal` の `nter` など）も消します。Query が読めなくなることがあります。
+- 日付（`2026/09/24`）など、規則に当たる正当な語も消えます（過剰に消す方向に倒しています）。
+- 処理は同期で、CPU を使います。上限（Draft 2,000 文字、Context 合計 400,000 文字）で処理量を抑えていますが、Event Loop の上で動きます。
+- Audit の Sink は、メモリ上の Test 用（`InMemoryExternalSendAudit`、最大 1,000 件で満杯になると拒否する）だけです。永続化と Audit Log への接続は、後続の Issue です。
+- `Fingerprint` は塩なしの SHA-256 です。Query が Public な内容になっていることが前提です。
+- 人間の判断が必要な数値と規則は [Decision 0010](../../docs/decisions/0010-research-privacy-filter-policy.md)（Proposed）にまとめています。
+
+### Test
+
+`apps/backend/tests/test_privacy_*.py` です。標準 `unittest` だけで、DB も Network も使いません。
+`test_privacy_rules_text.py`、`test_privacy_rules_abstract.py`、`test_privacy_rules_properties.py` は `rules.py` の各関数を、`test_privacy_gate.py` は Gate（拒否、最終検査、Audit の失敗）を、`test_privacy_broker.py` は `ResearchBroker` への差し込みを、`test_privacy_contract.py` は値の検証を確かめます。
+Timeout の Test は、永遠に待つ Sink を 0.2 秒で打ち切り、成功する経路は即座に終わる構成です（30 秒の Guard で CI の停止を防ぎます）。
+
 ## 依存 Package
 
 依存は `pyproject.toml` で完全一致に固定しています。
@@ -1346,9 +1463,9 @@ CI は pre-commit の専用環境で Test を実行するため、同じ Version
 ## 今後の Issue
 
 [PAW-021](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/18)（Owner Setup）、
-RBAC（PAW-025）、Task Lifecycle（PAW-032）、Task Queue / Budget / Loop 検知（PAW-033）、Tool Broker（PAW-031）、Memory Schema（PAW-040）、Research Scratch Store（PAW-050）、Research Provider Adapter（PAW-051）は、この Skeleton の上に実装済みです。
+RBAC（PAW-025）、Task Lifecycle（PAW-032）、Task Queue / Budget / Loop 検知（PAW-033）、Tool Broker（PAW-031）、Memory Schema（PAW-040）、Research Scratch Store（PAW-050）、Research Provider Adapter（PAW-051）、Research Privacy Filter（PAW-053）は、この Skeleton の上に実装済みです。
 PAW-022（Login / Session / Password）と PAW-023（Passkey / Step-up）は Owner Setup の Token を受け取る側で、まだありません。
 Memory の保存・整理・検索は PAW-041 以降で、Memory Schema の上に実装します。
-Research の Provider（Direct Web、Docs、GitHub、OpenCode）の Adapter、Privacy Filter（PAW-053）、Evidence / Claim Provenance（PAW-052）は、Research Provider Adapter の上に実装します。
+Research Privacy Filter（PAW-053）は、Research Provider Adapter の上に実装済みです。Research の Provider（Direct Web、Docs、GitHub、OpenCode）の Adapter、Evidence / Claim Provenance（PAW-052）は、Research Provider Adapter の上に実装します。外部送信の Audit を Audit Log へ保存する実装は、後続の Issue です。
 受け入れ基準は [Implementation Backlog](../../docs/IMPLEMENTATION_BACKLOG.md)、
 実装時に選択できる事項は [Requirements Freeze Review](../../docs/REQUIREMENTS_FREEZE_REVIEW.md) を参照してください。

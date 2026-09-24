@@ -82,6 +82,11 @@ personal-ai-workspace/
 │  │  │  │  └─ tokens.py
 │  │  │  ├─ research/
 │  │  │  │  ├─ __init__.py
+│  │  │  │  ├─ privacy/
+│  │  │  │  │  ├─ __init__.py
+│  │  │  │  │  ├─ contract.py
+│  │  │  │  │  ├─ gate.py
+│  │  │  │  │  └─ rules.py
 │  │  │  │  ├─ providers/
 │  │  │  │  │  ├─ __init__.py
 │  │  │  │  │  ├─ broker.py
@@ -89,6 +94,7 @@ personal-ai-workspace/
 │  │  │  │  │  ├─ errors.py
 │  │  │  │  │  ├─ locator.py
 │  │  │  │  │  ├─ normalize.py
+│  │  │  │  │  ├─ preflight.py
 │  │  │  │  │  ├─ registry.py
 │  │  │  │  │  └─ static.py
 │  │  │  │  └─ scratch/
@@ -142,6 +148,7 @@ personal-ai-workspace/
 │  │     ├─ __init__.py
 │  │     ├─ fake_postgres.py
 │  │     ├─ identity_support.py
+│  │     ├─ privacy_support.py
 │  │     ├─ queueing_support.py
 │  │     ├─ research_support.py
 │  │     ├─ scratch_support.py
@@ -163,6 +170,12 @@ personal-ai-workspace/
 │  │     ├─ test_owner_setup_service.py
 │  │     ├─ test_owner_token_roles.py
 │  │     ├─ test_postgres_integration.py
+│  │     ├─ test_privacy_broker.py
+│  │     ├─ test_privacy_contract.py
+│  │     ├─ test_privacy_gate.py
+│  │     ├─ test_privacy_rules_abstract.py
+│  │     ├─ test_privacy_rules_properties.py
+│  │     ├─ test_privacy_rules_text.py
 │  │     ├─ test_queueing_budget.py
 │  │     ├─ test_queueing_domain.py
 │  │     ├─ test_queueing_escalation.py
@@ -248,6 +261,7 @@ personal-ai-workspace/
 │     ├─ 0005-owner-setup-and-recovery.md
 │     ├─ 0006-tool-broker-policy.md
 │     ├─ 0007-task-queue-budget-and-loop-policy.md
+│     ├─ 0010-research-privacy-filter-policy.md
 │     └─ README.md
 └─ evaluator/
    └─ README.md

@@ -44,6 +44,11 @@ from paw_backend.research.providers.normalize import (
     normalize_hits,
     normalize_title,
 )
+from paw_backend.research.providers.preflight import (
+    PreflightNotConfiguredError,
+    SearchPreflight,
+    validate_preflight,
+)
 from paw_backend.research.providers.registry import ProviderRegistry, RegisteredProvider
 
 logger = logging.getLogger(__name__)
@@ -120,6 +125,8 @@ class ResearchBroker:
 
     ``clock`` returns the current time as a timezone-aware datetime (UTC by
     default: ``datetime.now(timezone.utc)``); it is injectable for tests.
+    ``preflight`` (default ``None``: no pre-flight, the behaviour of PAW-051) is
+    an optional ``SearchPreflight``, for example the ``PrivacyGate`` of PAW-053.
     """
 
     def __init__(
@@ -127,18 +134,41 @@ class ResearchBroker:
         registry: ProviderRegistry,
         *,
         clock: Callable[[], datetime] | None = None,
+        preflight: SearchPreflight | None = None,
     ) -> None:
-        """``registry`` must be a ``ProviderRegistry`` (else ``TypeError``)."""
+        """``registry`` must be a ``ProviderRegistry`` (else ``TypeError``);
+        ``preflight`` must be ``None`` or implement ``SearchPreflight`` (checked
+        with ``validate_preflight``: ``TypeError``)."""
         if not isinstance(registry, ProviderRegistry):
             raise TypeError("registry must be a ProviderRegistry")
+        if preflight is not None:
+            validate_preflight(preflight)
         self._registry = registry
         self._clock = _utc_now if clock is None else clock
+        self._preflight = preflight
 
-    async def gather(self, request: ResearchRequest) -> ResearchResult:
+    async def gather(
+        self, request: ResearchRequest, *, preflight_input: object = None
+    ) -> ResearchResult:
         """Search every registered provider whose kind is in ``request.kinds``.
 
         A ``request`` that is not a ``ResearchRequest`` raises ``TypeError``.
         Provider failures never raise; the method returns a ``ResearchResult``.
+
+        Pre-flight (PAW-053). Without a ``preflight`` and with
+        ``preflight_input=None`` nothing changes. A ``preflight_input`` given to
+        a broker without a pre-flight raises ``PreflightNotConfiguredError``
+        (the query would go out unchecked). With a pre-flight, and after step 1
+        has selected at least one provider,
+        ``await preflight.preflight(request, kinds, preflight_input)`` runs
+        BEFORE any provider is called, where ``kinds`` is the ``frozenset`` of
+        the selected providers' kinds and ``preflight_input`` is passed on as it
+        is (``None`` too: the pre-flight decides). Whatever it raises (a refusal)
+        propagates and no provider is called. What it returns must be a
+        ``ResearchRequest`` (else ``TypeError``) and replaces ``request`` for all
+        the steps below, so the provider only ever sees the rewritten query. When
+        no provider is selected, nothing can be sent and the pre-flight is not
+        called. The time budget starts after the pre-flight.
 
         1. Select providers with ``registry.select(request.kinds)``. None
            selected: ``ResearchResult(items=(), errors=(), providers_queried=0)``
@@ -177,7 +207,15 @@ class ResearchBroker:
         """
         if not isinstance(request, ResearchRequest):
             raise TypeError("request must be a ResearchRequest")
+        if self._preflight is None and preflight_input is not None:
+            raise PreflightNotConfiguredError
         entries = self._registry.select(request.kinds)
+        if self._preflight is not None and entries:
+            request = await self._preflight.preflight(
+                request, frozenset(entry.kind for entry in entries), preflight_input
+            )
+            if not isinstance(request, ResearchRequest):
+                raise TypeError("preflight must return a ResearchRequest")
         loop = asyncio.get_running_loop()
         started = loop.time()
         budget_end = started + request.time_budget_seconds
