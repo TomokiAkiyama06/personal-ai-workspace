@@ -28,6 +28,14 @@ class StepStatus(StrEnum):
     INTERRUPTED = "interrupted"
 
 
+class ToolInvocationStatus(StrEnum):
+    STARTED = "started"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    # Cut short by Stop Now, by a step that ended, or by a Restart.
+    INTERRUPTED = "interrupted"
+
+
 class LogLevel(StrEnum):
     DEBUG = "debug"
     INFO = "info"
@@ -89,9 +97,29 @@ class AttemptSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class StepInfo:
+    """A step execution. ``id`` and ``attempt`` are what a worker passes back."""
+
+    id: int
+    attempt: int
     sequence: int
     name: str
     status: StepStatus
+    started_at: datetime
+    finished_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class ToolInvocationInfo:
+    """A tool call made by a step: identity and execution state only.
+
+    Arguments and output are deliberately not stored here; they belong to the
+    Tool Broker (PAW-031), which can use ``id`` to refer to the same call.
+    """
+
+    id: uuid.UUID
+    step_id: int
+    tool_name: str
+    status: ToolInvocationStatus
     started_at: datetime
     finished_at: datetime | None
 
@@ -110,8 +138,10 @@ class TaskEvent:
     """One row of the append-only task history.
 
     ``seq`` increases monotonically across all tasks. ``step_name`` is the
-    latest step at the time of the event; for Stop Now and Fail it is the step
-    that was interrupted. ``task_version`` is the task version after the event.
+    latest step at the time of the event, except for Stop Now and Fail: they name
+    only a step they actually ended (``None`` if no step was running, even when an
+    earlier, finished step exists). ``task_version`` is the task version after
+    the event.
     """
 
     seq: int
@@ -161,3 +191,6 @@ class TaskSnapshot:
     updated_at: datetime
     # Earlier attempts (oldest first); Restart keeps them as history.
     previous_attempts: tuple[AttemptSnapshot, ...] = field(default=())
+    # Tool calls of the current step (oldest first, at most the latest 100). The
+    # ones still ``started`` are what the backend would have to resume or abort.
+    tool_invocations: tuple[ToolInvocationInfo, ...] = field(default=())

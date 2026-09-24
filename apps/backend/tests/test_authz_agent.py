@@ -11,6 +11,7 @@ from paw_backend.authz import (
     ProjectRole,
     ProjectState,
     Reason,
+    RepoPermission,
     Resource,
     SystemRole,
 )
@@ -21,12 +22,14 @@ from .authz_support import (
     P1,
     P2,
     P3,
+    REPO,
     SECRET,
     U1,
     U2,
     StaticDirectory,
     principal,
     project,
+    repo_resource,
 )
 from .test_authz_policy import DELEGABLE_CAPS, NON_DELEGABLE_CAPS, resource_for
 
@@ -274,6 +277,101 @@ class ProjectScopeTest(unittest.TestCase):
             archived,
         )
         self.assertEqual(decision.reason, Reason.PROJECT_STATE_FORBIDS)
+
+
+class RepositoryDelegationTest(unittest.TestCase):
+    """An agent needs the user's permission, the grant and the repo's `agent`."""
+
+    WRITE = Capability.PROJECT_REPO_WRITE
+
+    def contributor(self):
+        return principal(SystemRole.USER, projects={P1: ProjectRole.CONTRIBUTOR})
+
+    def test_an_inherit_repository_follows_the_users_role_and_the_grant(self):
+        allowed = decide_agent(
+            self.contributor(), grant(self.WRITE), self.WRITE, repo_resource()
+        )
+        self.assertTrue(allowed.allowed)
+        not_granted = decide_agent(
+            self.contributor(),
+            grant(Capability.PROJECT_READ),
+            self.WRITE,
+            repo_resource(),
+        )
+        self.assertEqual(not_granted.reason, Reason.AGENT_CAPABILITY_NOT_GRANTED)
+
+    def test_an_agent_cannot_gain_what_its_user_lacks_on_a_repository(self):
+        viewer = principal(SystemRole.USER, projects={P1: ProjectRole.VIEWER})
+        decision = decide_agent(viewer, grant(*Capability), self.WRITE, repo_resource())
+        self.assertEqual(decision.reason, Reason.CAPABILITY_NOT_GRANTED)
+
+    def test_the_agent_permission_is_needed_on_top_of_the_capabilitys_own(self):
+        # Write but not agent: a person may edit, an agent may not operate.
+        acl = {RepoPermission.READ, RepoPermission.WRITE}
+        human = decide(self.contributor(), self.WRITE, repo_resource(acl))
+        by_agent = decide_agent(
+            self.contributor(), grant(self.WRITE), self.WRITE, repo_resource(acl)
+        )
+        self.assertTrue(human.allowed)
+        self.assertFalse(by_agent.allowed)
+        self.assertEqual(by_agent.reason, Reason.REPO_ACL_FORBIDS)
+        # With `agent` as well, the agent may.
+        acl.add(RepoPermission.AGENT)
+        self.assertTrue(
+            decide_agent(
+                self.contributor(), grant(self.WRITE), self.WRITE, repo_resource(acl)
+            ).allowed
+        )
+
+    def test_a_repository_the_user_cannot_use_is_closed_to_their_agent(self):
+        for kept in (set(), {RepoPermission.READ}, {RepoPermission.AGENT}):
+            with self.subTest(kept=sorted(p.value for p in kept)):
+                decision = decide_agent(
+                    self.contributor(),
+                    grant(self.WRITE),
+                    self.WRITE,
+                    repo_resource(kept),
+                )
+                self.assertFalse(decision.allowed)
+                self.assertEqual(decision.reason, Reason.REPO_ACL_FORBIDS)
+
+    def test_an_unresolved_or_forged_repository_is_closed_to_agents_too(self):
+        unresolved = Resource(
+            kind="repository",
+            id=REPO,
+            project_id=P1,
+            repo_id=REPO,
+            project_state=ProjectState.ACTIVE,
+        )
+        decision = decide_agent(
+            self.contributor(), grant(self.WRITE), self.WRITE, unresolved
+        )
+        self.assertEqual(decision.reason, Reason.REPO_ACL_UNRESOLVED)
+        forged = repo_resource(project_id=P1, acl_project_id=P2)
+        decision = decide_agent(
+            self.contributor(), grant(self.WRITE), self.WRITE, forged
+        )
+        self.assertEqual(decision.reason, Reason.REPO_ACL_MISMATCH)
+
+    def test_a_project_restricted_grant_does_not_reach_a_repository_elsewhere(self):
+        who = principal(
+            SystemRole.USER,
+            projects={P1: ProjectRole.CONTRIBUTOR, P2: ProjectRole.CONTRIBUTOR},
+        )
+        agent_grant = grant(self.WRITE, projects=frozenset({P1}))
+        elsewhere = repo_resource(project_id=P2)
+        decision = decide_agent(who, agent_grant, self.WRITE, elsewhere)
+        self.assertEqual(decision.reason, Reason.AGENT_PROJECT_NOT_GRANTED)
+
+    def test_a_non_delegable_capability_stays_forbidden_on_a_repository(self):
+        manager = principal(SystemRole.USER, projects={P1: ProjectRole.MANAGER})
+        decision = decide_agent(
+            manager,
+            grant(Capability.PROJECT_AGENT_USE),
+            Capability.PROJECT_AGENT_USE,
+            repo_resource({RepoPermission.AGENT}),
+        )
+        self.assertEqual(decision.reason, Reason.AGENT_CAPABILITY_FORBIDDEN)
 
 
 class GrantValueTest(unittest.TestCase):

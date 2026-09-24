@@ -1,7 +1,7 @@
 """Task queue, budget usage and failure signatures (PAW-033).
 
 Revision ID: 0033
-Revises: 0040
+Revises: 0021
 Create Date: 2026-09-24
 
 ``queue_entries``: waiting / running work with a lease, at most one active entry
@@ -9,6 +9,11 @@ per task. ``budget_usages``: consumption and limit per task and budget item.
 ``loop_failure_signatures``: a bounded window of failure hashes per task (never
 the failure message). All reference ``tasks.id`` (revision ``0032``) with real
 foreign keys.
+
+Privileges of the application role (``PAW_APP_DATABASE_ROLE``, see
+``paw_backend.db_roles``): each table gets the least the services need, chosen
+from what ``TaskQueue`` / ``BudgetTracker`` / ``LoopDetector`` execute. No table
+gets a table-level UPDATE, and TRUNCATE is never granted.
 
 The tables deliberately do not start with ``task``: the PAW-032 tests inspect
 every table with that prefix.
@@ -23,8 +28,10 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
+from paw_backend.db_roles import grant_app_privileges
+
 revision: str = "0033"
-down_revision: str | Sequence[str] | None = "0040"
+down_revision: str | Sequence[str] | None = "0021"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -119,6 +126,28 @@ def upgrade() -> None:
         ["priority_rank", "enqueued_at", "id"],
         postgresql_where=sa.text("status IN ('queued', 'claimed')"),
     )
+    # enqueue INSERTs (and reads the generated id back, hence SELECT). claim,
+    # heartbeat, release, complete and cancel UPDATE only the lease / status
+    # columns (``SELECT ... FOR UPDATE SKIP LOCKED`` needs UPDATE on at least one
+    # column, which this grant provides). ``task_id``, ``priority``,
+    # ``priority_rank``, ``enqueued_at`` and ``id`` are fixed for the life of an
+    # entry, so a compromised application cannot re-prioritise or re-assign a
+    # queued task. No DELETE: cancelling is a status change and finished entries
+    # are kept as history.
+    grant_app_privileges(
+        op,
+        "queue_entries",
+        select=True,
+        insert=True,
+        update_columns=(
+            "status",
+            "claimed_by",
+            "claimed_at",
+            "lease_expires_at",
+            "claim_count",
+            "finished_at",
+        ),
+    )
 
     op.create_table(
         "budget_usages",
@@ -159,6 +188,18 @@ def upgrade() -> None:
             name=op.f("ck_budget_usages_running_only_for_runtime"),
         ),
     )
+    # set_preset upserts (INSERT ... ON CONFLICT DO UPDATE SET preset,
+    # limit_value); record and stop_runtime add to ``consumed`` (atomic
+    # ``UPDATE ... SET consumed = ...``); start_runtime and stop_runtime set
+    # ``running_since``. Nothing else changes: ``task_id`` and ``kind`` are the
+    # key and ``created_at`` is history. No DELETE: a budget is never removed.
+    grant_app_privileges(
+        op,
+        "budget_usages",
+        select=True,
+        insert=True,
+        update_columns=("preset", "limit_value", "consumed", "running_since"),
+    )
 
     op.create_table(
         "loop_failure_signatures",
@@ -191,6 +232,14 @@ def upgrade() -> None:
         op.f("ix_loop_failure_signatures_task_id"),
         "loop_failure_signatures",
         ["task_id", "seq"],
+    )
+    # record_failure INSERTs a row and DELETEs the rows that fall out of the
+    # bounded window; clear DELETEs a task's rows (Restart). That is the only
+    # place in PAW-033 where the application deletes, because this table is a
+    # sliding window of hashes, not history (the durable record of what happened
+    # is ``task_events``). No UPDATE: a stored failure is never edited.
+    grant_app_privileges(
+        op, "loop_failure_signatures", select=True, insert=True, delete=True
     )
 
 

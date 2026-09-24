@@ -7,7 +7,7 @@ from sqlalchemy import text
 
 from paw_backend.tasks.queueing import BudgetTracker, LoopDetector, TaskQueue
 
-from .task_support import PostgresTaskTestCase, requires_postgres
+from .task_support import PostgresTaskTestCase, new_database, requires_postgres
 
 __all__ = [
     "T0",
@@ -56,10 +56,18 @@ class PostgresQueueingTestCase(PostgresTaskTestCase):
 
     async def asyncSetUp(self):
         await super().asyncSetUp()
-        async with self.database.engine.begin() as connection:
-            await connection.execute(
-                text("TRUNCATE queue_entries, budget_usages, loop_failure_signatures")
-            )
+        # Always as the owner of the schema, also when the test's own connections
+        # use the unprivileged application role (test_queueing_grants).
+        owner = new_database()
+        try:
+            async with owner.engine.begin() as connection:
+                await connection.execute(
+                    text(
+                        "TRUNCATE queue_entries, budget_usages, loop_failure_signatures"
+                    )
+                )
+        finally:
+            await owner.dispose()
         self.clock = FakeClock()
         self.queue = TaskQueue(self.database)
         self.budget = BudgetTracker(self.database, clock=self.clock)

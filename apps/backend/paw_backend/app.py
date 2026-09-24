@@ -15,6 +15,7 @@ from paw_backend.config import Settings
 from paw_backend.db import Database
 from paw_backend.errors import ERROR_RESPONSES, register_error_handlers
 from paw_backend.events import EventBus, publish_heartbeats
+from paw_backend.identity.diagnostics import warn_if_tokens_can_be_minted
 from paw_backend.middleware import (
     HostValidationMiddleware,
     RequestIdMiddleware,
@@ -49,12 +50,17 @@ def create_app(
         audit_check = asyncio.create_task(
             warn_if_audit_table_is_mutable(database, settings.database_timeout_seconds)
         )
+        # Likewise: warn if that user could mint an Owner token (PAW-021).
+        token_check = asyncio.create_task(
+            warn_if_tokens_can_be_minted(database, settings.database_timeout_seconds)
+        )
         try:
             yield
         finally:
-            audit_check.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await audit_check
+            for check in (audit_check, token_check):
+                check.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await check
             heartbeat.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await heartbeat
