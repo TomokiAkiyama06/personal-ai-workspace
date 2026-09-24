@@ -187,7 +187,7 @@ class CreateMemoryTest(AsyncPostgresSharedTestCase):
                 event.agent_id,
             ),
             (
-                "shared_memory.manage",
+                "shared_memory.create",
                 "allow",
                 self.owner.user_id,
                 "owner",
@@ -204,7 +204,7 @@ class CreateMemoryTest(AsyncPostgresSharedTestCase):
         self.assertEqual(
             (event.action, event.decision, event.reason, event.actor_id),
             (
-                "shared_memory.manage",
+                "shared_memory.create",
                 "deny",
                 "capability_not_granted",
                 self.user.user_id,
@@ -495,7 +495,7 @@ class EditMemoryTest(AsyncPostgresSharedTestCase):
                 event.resource_id,
                 event.actor_role,
             ),
-            ("shared_memory.manage", "allow", "shared_memory", memory_id, "admin"),
+            ("shared_memory.edit", "allow", "shared_memory", memory_id, "admin"),
         )
 
     async def test_a_normal_user_cannot_edit(self):
@@ -668,8 +668,8 @@ class DeleteAndRestoreTest(AsyncPostgresSharedTestCase):
         self.assertEqual(
             [(e.action, e.decision, e.resource_id, e.actor_role) for e in events],
             [
-                ("shared_memory.manage", "allow", memory_id, "owner"),
-                ("shared_memory.manage", "allow", memory_id, "admin"),
+                ("shared_memory.delete", "allow", memory_id, "owner"),
+                ("shared_memory.restore", "allow", memory_id, "admin"),
             ],
         )
 

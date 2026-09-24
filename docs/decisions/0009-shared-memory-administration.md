@@ -66,7 +66,7 @@
 ### 7. 削除は現在の Version の `deprecated`、復元は `active` に戻す
 
 1. 削除は、現在の Version（番号が最大）の `status` を `active` から `deprecated` にする。何も消さない。復元は `deprecated` から `active` に戻す。
-2. 削除・復元では新しい Version を作らない。誰がいつ削除・復元したかは、Authorizer の Audit Event にだけ残り、`memory_versions` には残らない。
+2. 削除・復元では新しい Version を作らない。誰がいつ削除・復元したかは、Authorizer の Audit Event にだけ残り（`action` が `shared_memory.delete` / `shared_memory.restore`。12 を参照）、`memory_versions` には残らない。
 3. 代替案は、削除・復元ごとに新しい Version を作り、`actor_user_id` と `change_reason` を Memory 側に残す方法。履歴は詳しくなるが、Version が増え、内容の同じ Version が並ぶ。
 4. PAW-040 は `memories` に DELETE 権限を与えているが、この Service は使わない。物理削除の経路（User 削除、法的な消去など）は別 Issue で決める。
 
@@ -102,6 +102,36 @@
 3. 通常の User は拒否する。Authorizer が誤って許可しても、Owner / Admin 以外は Service が拒否する（多層防御）。
 4. 削除済みの Memory を含める読み取り（`include_deleted`）も、管理と同じ権限を要する。
 
+### 12. 変更する操作ごとに Audit の `action` を分ける（Capability を 6 つ追加する）
+
+1. 問題。削除と復元は `status` を変えるだけで、実行者と時刻を行に残さない（7）。履歴は Authorizer の Audit だけである。
+   Authorizer は `action` に Capability の値を書く。全管理操作が 1 つの `shared_memory.manage` を使うと、削除と復元、作成、編集、承認、却下を Audit から見分けられない。
+2. 提案。Shared Memory を変える 6 つの操作に、それぞれ Capability を追加する。`authz/capabilities.py` と `authz/policy.py` への加算だけで、既存の判定は変わらない。
+
+   | Capability（Audit の `action`） | 操作 |
+   | --- | --- |
+   | `shared_memory.create` | `create_memory` |
+   | `shared_memory.edit` | `edit_memory` |
+   | `shared_memory.delete` | `delete_memory` |
+   | `shared_memory.restore` | `restore_memory` |
+   | `shared_memory.candidate.approve` | `approve_candidate` |
+   | `shared_memory.candidate.reject` | `reject_candidate` |
+
+   すべて `Scope.SYSTEM`、委任不可（`delegable=False`。[Decision 0004](0004-rbac-capability-and-audit-policy.md) の 2 の許可リストに入れない。`shared_memory.manage` と同じ）、Audit Mode `REQUIRED`、Owner / Admin だけが持つ。
+   `shared_memory.manage` は、削除済み Memory と Candidate の閲覧（`include_deleted`、`list_candidates`、`get_candidate`）に残す。何も変えない読み取りで、`resource_kind` と `resource_id` の有無で区別できるため。
+3. 選んだ理由。次の 3 つの保証を、新しい仕組みなしに保てる。
+   - 既定は拒否: 新しい Capability は `CAPABILITIES` の表（`delegable` の明示が必須。書かないと起動時に失敗する）と Owner / Admin の表にだけある。ほかの Role は持たない。
+   - Audit の行は変更が見える前に書かれる: 認可（と Audit）は Database の Transaction の前に終わる。
+   - Audit を書けなければ許可を拒否に変える: Audit Mode `REQUIRED` の既存の規則。
+   拒否された試みも、試みた操作の `action` で残る。
+4. 代替案。
+   - Service が `AuditSink` へ操作専用のイベントを別に書く: 1 回の呼び出しに Audit の行が 2 本（判定と操作）でき、突き合わせが要る。Service に Sink を持たせ、「書けなければ止める」規則を Authorizer と二重に実装することになる。`action` が Capability でない値になり、Audit の規則を広げる必要もある。
+   - 行に実行者と時刻を持たせる（`memory_versions` に列を足す、または削除・復元ごとに新しい Version（7 の 3））: PAW-040 の権限（Version の列は更新できない）を変えるか、内容の同じ Version が並ぶ。行の記録は、Trigger で追記専用にした Audit ほど強くは守れない（列の権限だけが守り）。拒否された試みの履歴も残らない。
+5. 限界と帰結。
+   - Capability が 6 つ増える。Policy を差し替えて `shared_memory.manage` だけを Grant していた Role は、変更の操作ができなくなる（拒否の方向。既定の Policy では Owner / Admin が全部持つ）。
+   - 削除・復元の理由は残らない（Audit は自由な文を持たない）。
+   - 閲覧（`manage`）まで分けるか、6 つより粗い分け方にするかは、**人間が決める**。
+
 ## 選定理由
 
 - Candidate の可視性（3）と Version の不変性（1）が、専用の Table を選ぶ理由。PAW-040 の Table の権限（Version の列は更新できない）を変えずに済む。
@@ -117,6 +147,7 @@
 
 ## 影響
 
+- `authz/capabilities.py` と `authz/policy.py` に Capability を 6 つ加える（12）。認可の実装（PAW-025）は別の PR にあるため、この変更は加算だけにしてある。
 - Migration `0046`（`shared_memory_candidates`）。Application の Role には `SELECT`、`INSERT`、決定の 5 列の `UPDATE` だけを与える。
 - HTTP の Endpoint はこの Issue では作らない。API の Issue が `SharedMemoryService` を呼ぶ。
 - 承認されたら、この Decision の Status と Approval を更新する。値や規則を変える場合は、新しい Decision から `Supersedes` する。

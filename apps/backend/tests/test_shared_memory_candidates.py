@@ -592,7 +592,7 @@ class ApproveTest(AsyncPostgresSharedTestCase):
                 event.actor_role,
             ),
             (
-                "shared_memory.manage",
+                "shared_memory.candidate.approve",
                 "allow",
                 "shared_memory_candidate",
                 candidate_id,

@@ -47,6 +47,21 @@ MANAGE_METHODS = (
 )
 
 
+# The audit action of each managing call (the capability it asks for), spelled
+# out literally: see Decision 0009, section 12.
+ACTION_OF = {
+    "create_memory": "shared_memory.create",
+    "edit_memory": "shared_memory.edit",
+    "delete_memory": "shared_memory.delete",
+    "restore_memory": "shared_memory.restore",
+    "approve_candidate": "shared_memory.candidate.approve",
+    "reject_candidate": "shared_memory.candidate.reject",
+    "list_candidates": "shared_memory.manage",
+    "get_candidate": "shared_memory.manage",
+}
+MANAGE_CAPABILITIES = tuple(Capability(action) for action in set(ACTION_OF.values()))
+
+
 class AllowEverything:
     """An authorizer that says yes to everything (and counts how often it is asked)."""
 
@@ -104,7 +119,7 @@ class AgentsNeverManageTest(ManageCallsMixin, AsyncPostgresSharedTestCase):
 
     def agents(self):
         every = (
-            Capability.SHARED_MEMORY_MANAGE,
+            *MANAGE_CAPABILITIES,
             Capability.SHARED_MEMORY_READ,
             Capability.MEMORY_USE,
         )
@@ -140,13 +155,11 @@ class AgentsNeverManageTest(ManageCallsMixin, AsyncPostgresSharedTestCase):
                     event = self.only_event()
                     self.assertEqual(
                         (event.action, event.decision, event.reason, event.agent_id),
-                        ("shared_memory.manage", "deny", reason, AGENT_ID),
+                        (ACTION_OF[name], "deny", reason, AGENT_ID),
                     )
 
     async def test_an_agent_can_propose_but_the_candidate_stays_pending(self):
-        agent = agent_for(
-            self.owner, Capability.MEMORY_USE, Capability.SHARED_MEMORY_MANAGE
-        )
+        agent = agent_for(self.owner, Capability.MEMORY_USE, *MANAGE_CAPABILITIES)
         candidate = await self.service.propose_candidate(
             agent,
             CandidateProposal(
@@ -211,7 +224,7 @@ class TheBackendIdentityNeverManagesTest(ManageCallsMixin, AsyncPostgresSharedTe
                 event = self.only_event()
                 self.assertEqual(
                     (event.decision, event.actor_role, event.action),
-                    ("deny", "system", "shared_memory.manage"),
+                    ("deny", "system", ACTION_OF[name]),
                 )
 
 
@@ -247,7 +260,7 @@ class TheServiceDoesNotTrustTheAuthorizerAloneTest(
     async def test_an_agent_is_refused_although_the_authorizer_allows(self):
         allow = AllowEverything()
         service = self.new_service(authorizer=allow)
-        agent = agent_for(self.owner, Capability.SHARED_MEMORY_MANAGE)
+        agent = agent_for(self.owner, *MANAGE_CAPABILITIES)
         for name in MANAGE_METHODS:
             with self.subTest(method=name):
                 self.reseed()
@@ -293,10 +306,8 @@ class TheServiceDoesNotTrustTheAuthorizerAloneTest(
         self,
     ):
         grants = dict(DEFAULT_POLICY.system_grants)
-        grants[SystemRole.SYSTEM] = frozenset({Capability.SHARED_MEMORY_MANAGE})
-        grants[SystemRole.USER] = grants[SystemRole.USER] | {
-            Capability.SHARED_MEMORY_MANAGE
-        }
+        grants[SystemRole.SYSTEM] = frozenset(MANAGE_CAPABILITIES)
+        grants[SystemRole.USER] = grants[SystemRole.USER] | set(MANAGE_CAPABILITIES)
         permissive = Authorizer(
             self.sink,
             policy=Policy(
@@ -340,7 +351,7 @@ class TheServiceDoesNotTrustTheAuthorizerAloneTest(
     async def test_no_candidate_is_ever_decided_by_anyone_but_a_human_manager(self):
         self.reseed()
         actors = [
-            agent_for(self.owner, Capability.SHARED_MEMORY_MANAGE),
+            agent_for(self.owner, *MANAGE_CAPABILITIES),
             self.system,
             self.user,
             self.other_user,

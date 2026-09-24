@@ -28,6 +28,9 @@ from sqlalchemy.exc import DBAPIError
 from paw_backend.db import Database
 
 from . import (
+    test_shared_memory_audit_actions as audit_actions,
+)
+from . import (
     test_shared_memory_candidates as candidates,
 )
 from . import (
@@ -212,6 +215,38 @@ class ApproveGuardsAsAppRole(AsAppRole, guards.ApproveGuardsTest):
 
 
 class EditGuardsAsAppRole(AsAppRole, guards.EditGuardsTest):
+    pass
+
+
+# The audit rows of the operations are written to ``audit_events`` by the same
+# application role (INSERT, SELECT), one action per operation.
+class EachOperationHasItsOwnActionAsAppRole(
+    AsAppRole, audit_actions.EachOperationHasItsOwnActionTest
+):
+    pass
+
+
+class ARefusalNamesTheOperationAsAppRole(
+    AsAppRole, audit_actions.ARefusalNamesTheOperationTest
+):
+    pass
+
+
+class TheAdministrationViewsStayManageAsAppRole(
+    AsAppRole, audit_actions.TheAdministrationViewsStayManageTest
+):
+    pass
+
+
+class TheAuditRowComesBeforeTheChangeAsAppRole(
+    AsAppRole, audit_actions.TheAuditRowComesBeforeTheChangeTest
+):
+    pass
+
+
+class AnAuditFailureBlocksTheOperationAsAppRole(
+    AsAppRole, audit_actions.AnAuditFailureBlocksTheOperationTest
+):
     pass
 
 

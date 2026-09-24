@@ -579,7 +579,7 @@ Agent の操作は、委任した人間の User の操作として判定しま�
   Grant は権限を狭めるだけで、User の権限を超えることはありません。
 - 委任できる Capability は許可リストです（Chat、Workspace、GitHub、Memory、PR、Shared Memory の閲覧、Project の閲覧・Chat・Task・Repository 編集・PR・Memory 利用）。
   `CapabilityInfo.delegable` には既定値がなく、Capability を追加するときは必ず決める必要があります。
-  Project 設定・Repository 追加・Project Memory 管理を含む管理系、`admin.*`、`owner.*`、`shared_memory.manage`、Member / Agent Policy / Lifecycle は Grant に書いてあっても拒否します（自己権限昇格の禁止）。
+  Project 設定・Repository 追加・Project Memory 管理を含む管理系、`admin.*`、`owner.*`、`shared_memory.manage` と Shared Memory を変える操作の Capability（`shared_memory.create` など）、Member / Agent Policy / Lifecycle は Grant に書いてあっても拒否します（自己権限昇格の禁止）。
   **`agent.use` と `project.agent.use`（Agent を起動する操作）も委任できません。** 子 Agent の Grant を親の部分集合として導く仕組み（PAW-032）ができるまで、Agent が自分より強い Agent を作れないようにするためです。
 - `AgentGrant.project_ids` は**必須**です。Agent が触れる Project の集合か、明示的な `ALL_PROJECTS` を渡します（既定の「User の全 Project」はありません）。
   Project を限定した Grant は、その外の Resource（個人のデータを含む）に及びません。文字列 1 つを渡すと `TypeError` です。
@@ -1159,23 +1159,48 @@ Candidate を Version にしないのは、`shared` の Version は全 User が�
 
 すべてのメソッドは、最初の引数に操作する `actor`（`paw_backend.authz.Principal`、または委任元 User と Grant を持つ `AgentActor`）を取り、
 `Authorizer` に 1 回問い合わせます。Audit は Authorizer が記録します（`shared_memory.read` は拒否だけ、その他は全件で、記録に失敗すると許可は拒否になります）。
+Audit の `action` は Capability の値です。Shared Memory を変える操作は、それぞれ**専用の Capability** を使うので、Audit の履歴だけで操作を見分けられます（下の「Audit の Action」）。
 
 | メソッド | Capability | できる人 |
 | --- | --- | --- |
 | `list_memories`、`get_memory`、`effective_view` | `shared_memory.read` | すべての Active User。`shared_memory.read` を Grant された Agent（全 Project 対象の Grant のみ。Project を限った Grant は拒否） |
-| `create_memory`、`edit_memory`、`delete_memory`、`restore_memory` | `shared_memory.manage` | Owner、Admin（人間） |
-| `approve_candidate`、`reject_candidate`、`list_candidates`、`get_candidate` | `shared_memory.manage` | Owner、Admin（人間） |
-| `list_memories` / `get_memory` の `include_deleted=True` | `shared_memory.manage` | Owner、Admin（人間） |
+| `create_memory` | `shared_memory.create` | Owner、Admin（人間） |
+| `edit_memory` | `shared_memory.edit` | Owner、Admin（人間） |
+| `delete_memory` | `shared_memory.delete` | Owner、Admin（人間） |
+| `restore_memory` | `shared_memory.restore` | Owner、Admin（人間） |
+| `approve_candidate` | `shared_memory.candidate.approve` | Owner、Admin（人間） |
+| `reject_candidate` | `shared_memory.candidate.reject` | Owner、Admin（人間） |
+| `list_candidates`、`get_candidate`、`list_memories` / `get_memory` の `include_deleted=True` | `shared_memory.manage`（管理者だけが見られる情報の閲覧。何も変えない） | Owner、Admin（人間） |
 | `propose_candidate` | `memory.use` | User が自分のために。Agent が委任元 User のために（Grant に `memory.use`） |
 
-**自動昇格はしません。** `shared_memory.manage` の操作は、人間の Owner / Admin の決定だけで行います。
+**自動昇格はしません。** 上の表の管理の操作（`shared_memory.manage` と、操作ごとの `shared_memory.create` などの Capability）は、人間の Owner / Admin の決定だけで行います。
 
 1. Agent（`AgentActor`）と `system` role の Principal（Background Worker）は、Authorizer が何を答えても、常に `AutomaticPromotionRefusedError` で拒否します（Authorizer の判定は先に記録されます）。
-   `shared_memory.manage` は委任不可（`delegable=False`）でもあります。
+   管理の Capability はすべて委任不可（`delegable=False`）でもあります。
 2. Owner / Admin 以外の `Principal` は `SharedMemoryPermissionError` です。Authorizer が（Policy の変更などで）許可しても、Service が Owner / Admin でなければ拒否します。
 3. Authorizer が `Decision` でない値を返したら拒否します（`invalid_decision`）。
 4. Agent は Candidate を提案できますが、Candidate は `pending` のままです。承認は人間だけで、承認した人が Version の `actor_user_id` になります。
 5. Shared Memory を作る・変える経路は、`SharedMemoryService` の上の表のメソッドだけです（`tests/test_shared_memory_contract.py` が公開メソッドの一覧を固定します）。
+
+#### Audit の Action
+
+削除・復元は `memory_versions` の `status` を変えるだけで、誰がいつ行ったかを行に残しません（[Decision 0009](../../docs/decisions/0009-shared-memory-administration.md) の 7）。履歴は Audit だけです。
+Authorizer は `action` に Capability の値を書くので、全操作が 1 つの Capability（`shared_memory.manage`）だと、削除と復元、作成、編集、承認、却下を見分けられません。
+そこで、変更する 6 つの操作にそれぞれ Capability を追加しました（`authz/capabilities.py`。すべて `Scope.SYSTEM`、委任不可、Audit Mode `REQUIRED`、Owner / Admin だけ）。
+
+| `action` | 操作 | `resource_kind`、`resource_id` |
+| --- | --- | --- |
+| `shared_memory.create` | `create_memory` | `shared_memory`、なし |
+| `shared_memory.edit` | `edit_memory` | `shared_memory`、Memory の ID |
+| `shared_memory.delete` | `delete_memory` | `shared_memory`、Memory の ID |
+| `shared_memory.restore` | `restore_memory` | `shared_memory`、Memory の ID |
+| `shared_memory.candidate.approve` | `approve_candidate` | `shared_memory_candidate`、Candidate の ID |
+| `shared_memory.candidate.reject` | `reject_candidate` | `shared_memory_candidate`、Candidate の ID |
+
+- Audit の行は `actor_id`（操作した User）、`actor_role`、`decision`、時刻を持つので、「誰がいつ何を削除・復元したか」は行から分かります。拒否された試みも、試みた操作の `action` で残ります。
+- 追加の書き込みや Sink はありません。判定の Audit そのものを使うので、既存の性質（既定は拒否、Audit の行は変更が見える前に書かれる、Audit を書けなければ許可を拒否に変える）はそのままです。
+- `shared_memory.manage` は、管理者だけが見られる情報の閲覧（削除済みの Memory、Candidate）に残しました。何も変えないので、履歴で見分ける必要が小さく、`resource_kind` と `resource_id` の有無（一覧か 1 件か）で区別できます。
+- 限界: 復元・削除の理由（`reason`）は残りません（Audit は Content や自由な文を持たない）。Candidate の承認・却下の理由は Candidate の行にあります。
 
 呼び出しの順序は、(1) 引数の検証（`InvalidSharedMemoryInputError`、`actor` の型を含む）、(2) 認可（拒否は Database に触れる前）、(3) Database の使用、です。
 削除済みの Memory を含める読み取りも、認可の前に存在を知らせないため、Owner / Admin 以外には「見つからない」ではなく「権限がない」を返します。
@@ -1271,7 +1296,7 @@ Model の実装は、Test を通すことに必要な範囲で素直な書き方
 [Decision 0009](../../docs/decisions/0009-shared-memory-administration.md)（Proposed）の次の点です。
 
 1. Candidate を別 Table にすること、Agent の提案を許すこと、提案者に Candidate を見せないこと、`pending` 50 件の上限。
-2. 削除・復元を `status` の切り替えにし、Version を増やさないこと（誰が削除したかは Audit Event だけ）。
+2. 削除・復元を `status` の切り替えにし、Version を増やさないこと（誰が削除したかは Audit Event だけ）。その Audit の `action` を操作ごとに分けるために Capability を 6 つ追加したこと（Decision 0009 の 12）。
 3. `policy_subjects` の宣言で Policy との衝突を決めること（宣言がなければ上書きされない）。
 4. `effective_view` が、上書きした Policy の `statement` を User にも返すこと。
 5. 承認した Shared Memory の鮮度を `permanent` にすること。
@@ -1279,7 +1304,8 @@ Model の実装は、Test を通すことに必要な範囲で素直な書き方
 ### Test
 
 `tests/test_shared_memory_*.py`。Rule 関数は Database なしの Test（`..._rules_*.py`）、Service は実 PostgreSQL の Test（`PAW_TEST_DATABASE_URL` がないと Skip）、
-Migration（上げ下げ、Model との差分、制約）、権限（非 Superuser の Role で Service の Test を実行）、自動昇格の拒否（`..._promotion_refused.py`）があります。
+Migration（上げ下げ、Model との差分、制約）、権限（非 Superuser の Role で Service の Test を実行）、自動昇格の拒否（`..._promotion_refused.py`）、
+操作ごとの Audit の `action`（`..._audit_actions.py`。実 `audit_events` の行を読み、非 Superuser の Role でも実行）があります。
 
 ## Research Scratch Store
 

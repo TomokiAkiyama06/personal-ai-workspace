@@ -17,19 +17,25 @@ record denials only, the others every decision, fail-closed).
 * ``list_memories``, ``get_memory``, ``effective_view``: capability
   ``shared_memory.read``. Every active user; an agent whose grant lists it and
   covers all projects.
-* ``list_memories`` / ``get_memory`` with ``include_deleted=True``: capability
-  ``shared_memory.manage``. Owner, Admin.
-* ``create_memory``, ``edit_memory``, ``delete_memory``, ``restore_memory``,
-  ``approve_candidate``, ``reject_candidate``, ``list_candidates``,
-  ``get_candidate``: capability ``shared_memory.manage``. Owner, Admin (human).
+* ``list_memories`` / ``get_memory`` with ``include_deleted=True``,
+  ``list_candidates``, ``get_candidate``: capability ``shared_memory.manage``
+  (the views only managers may see; they change nothing). Owner, Admin (human).
+* Each operation that changes Shared Memory has a capability of its own, and it
+  is that capability the Authorizer stores as the ``action`` of its audit row
+  (Decision 0009, section 12): ``create_memory`` ``shared_memory.create``,
+  ``edit_memory`` ``shared_memory.edit``, ``delete_memory``
+  ``shared_memory.delete``, ``restore_memory`` ``shared_memory.restore``,
+  ``approve_candidate`` ``shared_memory.candidate.approve``, ``reject_candidate``
+  ``shared_memory.candidate.reject``. Owner, Admin (human).
 * ``propose_candidate``: capability ``memory.use``. A user for themselves; an
   agent for its delegating user.
 
 **No automatic promotion.** Managing Shared Memory (every method of the
-``shared_memory.manage`` items above) is a decision of a human Owner or Admin. An
-:class:`AgentActor`, and a ``Principal`` whose role is ``system`` (a background
-worker), always get :class:`AutomaticPromotionRefusedError` from those methods,
-after the Authorizer has recorded its decision and whatever it decided. A
+``shared_memory.manage`` and operation capability items above) is a decision of
+a human Owner or Admin. An :class:`AgentActor`, and a ``Principal`` whose role
+is ``system`` (a background worker), always get
+:class:`AutomaticPromotionRefusedError` from those methods, after the
+Authorizer has recorded its decision and whatever it decided. A
 ``Principal`` whose role is neither Owner nor Admin gets
 :class:`SharedMemoryPermissionError`. An agent can propose a candidate; the
 candidate stays ``pending`` until an Owner or Admin approves it. There is no
@@ -64,7 +70,9 @@ version has another status, is "not found" for this service. Older versions are
   memory cannot be edited (:class:`SharedMemoryStateError`).
 * ``delete_memory``: the current version's status becomes ``deprecated``. Nothing
   is erased. ``restore_memory`` sets it back to ``active``. Who deleted or
-  restored is in the Authorizer's audit event only.
+  restored, and when, is in the Authorizer's audit event only: its ``action``
+  (``shared_memory.delete`` or ``shared_memory.restore``) says which, its
+  ``actor_id`` who, and it is written before the status changes.
 
 Shared Memory candidates
 ------------------------
@@ -412,15 +420,21 @@ class SharedMemoryService:
             raise SharedMemoryPermissionError(reason)
         return actor.delegator_id if isinstance(actor, AgentActor) else actor.user_id
 
-    async def _authorize_manage(self, actor: Actor, resource: Resource) -> UUID:
-        """Authorize ``shared_memory.manage``; only a human Owner or Admin passes.
+    async def _authorize_manage(
+        self, actor: Actor, capability: Capability, resource: Resource
+    ) -> UUID:
+        """Authorize a managing ``capability``; only a human Owner or Admin passes.
+
+        ``capability`` is the operation's own (there is no default): the
+        Authorizer stores it as the ``action`` of its audit row, which is how the
+        history tells a deletion from a restoration.
 
         The Authorizer decides first (and audits). An agent, and the ``system``
         role, are refused with :class:`AutomaticPromotionRefusedError` whatever
         the decision was; any other refusal is a permission error. Even an
         allowed decision is refused unless the principal is an Owner or Admin.
         """
-        decision = await self._decide(actor, Capability.SHARED_MEMORY_MANAGE, resource)
+        decision = await self._decide(actor, capability, resource)
         reason = (
             "invalid_decision"
             if decision is None
@@ -581,7 +595,9 @@ class SharedMemoryService:
         limit, offset = validate_page(limit, offset)
         resource = Resource(kind=RESOURCE_MEMORY)
         if include_deleted:
-            await self._authorize_manage(actor, resource)
+            await self._authorize_manage(
+                actor, Capability.SHARED_MEMORY_MANAGE, resource
+            )
         else:
             await self._authorize(actor, Capability.SHARED_MEMORY_READ, resource)
         statuses = _LIVE_OR_DELETED if include_deleted else _LIVE
@@ -596,7 +612,9 @@ class SharedMemoryService:
         include_deleted = _check_bool("include_deleted", include_deleted)
         resource = Resource(kind=RESOURCE_MEMORY, id=memory_uuid)
         if include_deleted:
-            await self._authorize_manage(actor, resource)
+            await self._authorize_manage(
+                actor, Capability.SHARED_MEMORY_MANAGE, resource
+            )
         else:
             await self._authorize(actor, Capability.SHARED_MEMORY_READ, resource)
         async with self._database.session() as session:
@@ -639,7 +657,9 @@ class SharedMemoryService:
         """Create a shared memory (version 1). Owner or Admin only."""
         self._check_actor(actor)
         _check_type("draft", draft, SharedMemoryDraft)
-        user_id = await self._authorize_manage(actor, Resource(kind=RESOURCE_MEMORY))
+        user_id = await self._authorize_manage(
+            actor, Capability.SHARED_MEMORY_CREATE, Resource(kind=RESOURCE_MEMORY)
+        )
         now = self._now()
         async with self._transaction() as session:
             memory_id = await self._insert_memory(session, draft, user_id, now)
@@ -664,7 +684,9 @@ class SharedMemoryService:
         )
         _check_type("changes", changes, SharedMemoryChanges)
         user_id = await self._authorize_manage(
-            actor, Resource(kind=RESOURCE_MEMORY, id=memory_uuid)
+            actor,
+            Capability.SHARED_MEMORY_EDIT,
+            Resource(kind=RESOURCE_MEMORY, id=memory_uuid),
         )
         now = self._now()
         async with self._transaction(memory_lock_key(memory_uuid)) as session:
@@ -737,7 +759,11 @@ class SharedMemoryService:
         self._check_actor(actor)
         memory_uuid = validate_uuid("memory_id", memory_id)
         await self._authorize_manage(
-            actor, Resource(kind=RESOURCE_MEMORY, id=memory_uuid)
+            actor,
+            Capability.SHARED_MEMORY_DELETE
+            if delete
+            else Capability.SHARED_MEMORY_RESTORE,
+            Resource(kind=RESOURCE_MEMORY, id=memory_uuid),
         )
         async with self._transaction(memory_lock_key(memory_uuid)) as session:
             current = await self._read_current(
@@ -820,7 +846,9 @@ class SharedMemoryService:
         if state is not None:
             validate_enum("state", state, CandidateState)
         limit, offset = validate_page(limit, offset)
-        await self._authorize_manage(actor, Resource(kind=RESOURCE_CANDIDATE))
+        await self._authorize_manage(
+            actor, Capability.SHARED_MEMORY_MANAGE, Resource(kind=RESOURCE_CANDIDATE)
+        )
         statement = select(_CANDIDATES).order_by(
             _CANDIDATES.c.created_at, _CANDIDATES.c.id
         )
@@ -837,7 +865,9 @@ class SharedMemoryService:
         self._check_actor(actor)
         candidate_uuid = validate_uuid("candidate_id", candidate_id)
         await self._authorize_manage(
-            actor, Resource(kind=RESOURCE_CANDIDATE, id=candidate_uuid)
+            actor,
+            Capability.SHARED_MEMORY_MANAGE,
+            Resource(kind=RESOURCE_CANDIDATE, id=candidate_uuid),
         )
         async with self._database.session() as session:
             row = (
@@ -882,7 +912,9 @@ class SharedMemoryService:
             "reason", reason, max_chars=limits.MAX_REASON_CHARS
         )
         user_id = await self._authorize_manage(
-            actor, Resource(kind=RESOURCE_CANDIDATE, id=candidate_uuid)
+            actor,
+            Capability.SHARED_MEMORY_CANDIDATE_APPROVE,
+            Resource(kind=RESOURCE_CANDIDATE, id=candidate_uuid),
         )
         now = self._now()
         async with self._transaction() as session:
@@ -929,7 +961,9 @@ class SharedMemoryService:
             "reason", reason, max_chars=limits.MAX_REASON_CHARS
         )
         user_id = await self._authorize_manage(
-            actor, Resource(kind=RESOURCE_CANDIDATE, id=candidate_uuid)
+            actor,
+            Capability.SHARED_MEMORY_CANDIDATE_REJECT,
+            Resource(kind=RESOURCE_CANDIDATE, id=candidate_uuid),
         )
         now = self._now()
         async with self._transaction() as session:

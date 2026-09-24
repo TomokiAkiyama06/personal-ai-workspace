@@ -209,6 +209,7 @@ personal-ai-workspace/
 │  │     ├─ test_scratch_validation.py
 │  │     ├─ test_security.py
 │  │     ├─ test_server.py
+│  │     ├─ test_shared_memory_audit_actions.py
 │  │     ├─ test_shared_memory_candidates.py
 │  │     ├─ test_shared_memory_contract.py
 │  │     ├─ test_shared_memory_effective_view.py
