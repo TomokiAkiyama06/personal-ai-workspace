@@ -40,8 +40,11 @@
    **守れないもの:** Schema の Owner と Superuser、Web の Role が Token を使用済みにして Owner を締め出すこと（`owner-recover` で回復する可用性の問題）、
    そして PAW-022 / PAW-023 が追加する Password と Passkey の Table を Application が書けること（Application の侵害で認証情報を変えられる可能性は残る）。
 6. **Recovery は管理コマンドだけ。** 確認フラグ（`--confirm-owner-recovery`）を要求し、未使用の Token をすべて無効にして新しい Token を発行し、Audit に残す。
-   要件は sudo 経由の復旧を想定するが、コマンドは sudo や root を**要求しない**（DB の認証情報を読める人が実行できる）。代わりに、実行した Process の uid と `SUDO_UID`（環境変数で、手掛かりにすぎない）を、
-   Token の行に数値で記録し、stderr に出す。PAW-025 の `AuditEvent` に自由な項目がないため、Audit の Event へは Token の `audit_ref` から Join する。Audit に専用の項目を足すか、sudo を強制するかは決めていない。
+   要件（`[FIXED]`）は Ubuntu の sudo 経由の Recovery なので、**`owner-recover` は実効 uid が 0（root。`sudo` が実行する User）でなければ拒否する**（`RecoveryNotPrivilegedError`、Audit に deny `not_privileged`、何も変更しない）。
+   `SUDO_UID` は環境変数で誰でも設定できるため認可に使わず、実行した Process の uid と `SUDO_UID` を Token の行に数値で記録し、stderr に出す（調査の手掛かり）。
+   この確認は、DB の認証情報を持つ Process が誤って実行することを防ぐもので、**境界そのものではない**。境界は `PAW_OPERATOR_DATABASE_URL` を root だけが読めるファイルに置くこと。root の Process や User Namespace の中の uid 0 は通る。
+   PAW-025 の `AuditEvent` に自由な項目がないため、Audit の Event へは Token の `audit_ref` から Join する。Audit に専用の項目を足すかは決めていない。
+   `owner-setup`（初回の Owner 作成）には OS User の確認を付けていない（要件は Recovery だけを sudo と定めている）。付けるかは人間が決める。
 7. **Recovery の Token を受ける側の Contract（PAW-022 / PAW-023）。** `purpose = recovery` の `redeem` は、同じ Transaction で、既存の全 Session を失効させ、
    現在の Password を無効にして新しい Password を設定させ（または再設定を必須にし）、既存の Passkey をすべて失効させて（または再登録を必須にして）から Commit する。
    復旧が必要な状況は認証情報が盗まれた可能性を含むためである。`passkey_required` の Owner が Passkey を 1 つも持たない間は、Passkey の登録以外を許さない。
@@ -63,7 +66,7 @@
 - 1 つの Database Role のまま運用する: 実装は単純だが、Application の侵害や SQL 経由の書き込みで Token を偽造できる。
 - Token を Argon2 で Hash する: Secret が 256 bit の乱数のため、遅い Hash は効果がなく、依存を増やす。
 - Login name に Unicode を許す: 要件に合うが、Homoglyph の対策を決めるまで保留する。
-- sudo / root でなければ実行を拒否する: 環境変数と OS User の確認は迂回でき、確認できない構成（Container など）で復旧を妨げるため、記録にとどめた。
+- `owner-recover` を root（sudo）に限らず、DB の認証情報を読める人なら誰でも実行できるままにする: 当初はこれを選んだが、要件（`[FIXED]`: Ubuntu の sudo 経由の Recovery）に反し、認証情報を得た非 root の Process が Owner の Recovery Token を発行できる（Review の指摘）ため、root を要求する形に改めた。Container で root 以外として動かす構成では Recovery できない（要件が Ubuntu を前提とする）。
 
 ## 承認後の扱い
 

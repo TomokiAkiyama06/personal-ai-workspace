@@ -48,6 +48,7 @@ class AuditReason(StrEnum):
     OWNER_NOT_LIVE = "owner_not_live"
     LOGIN_NAME_TAKEN = "login_name_taken"
     OWNER_MISSING = "owner_missing"
+    NOT_PRIVILEGED = "not_privileged"  # recovery asked for by a non-root process
     TOKEN_MISMATCH = "token_mismatch"
     TOKEN_EXPIRED = "token_expired"
     TOKEN_USED = "token_used"

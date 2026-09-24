@@ -20,6 +20,7 @@ from paw_backend.identity.errors import (
     OwnerAlreadyExistsError,
     OwnerNotFoundError,
     OwnerNotLiveError,
+    RecoveryNotPrivilegedError,
     RedeemHookError,
     SetupTokenRejectedError,
 )
@@ -45,6 +46,7 @@ __all__ = [
     "OwnerAlreadyExistsError",
     "OwnerNotFoundError",
     "OwnerNotLiveError",
+    "RecoveryNotPrivilegedError",
     "RedeemHook",
     "RedeemHookError",
     "Redemption",

@@ -4,7 +4,8 @@ Exit codes (the convention of ``benchmarks/validate_task.py``):
 
 * ``0``  success;
 * ``1``  refused or invalid: an Owner already exists, there is no Owner to
-  recover, a bad login name, a missing confirmation flag, a usage error;
+  recover, ``owner-recover`` run by a process that is not root (sudo), a bad
+  login name, a missing confirmation flag, a usage error;
 * ``2``  environment error: the configuration is invalid, the database is not
   configured, unreachable or not migrated, or the audit trail cannot be written
   (nothing was changed in that case);
@@ -44,6 +45,7 @@ from paw_backend.identity import (
     OwnerAlreadyExistsError,
     OwnerNotFoundError,
     OwnerNotLiveError,
+    RecoveryNotPrivilegedError,
 )
 from paw_backend.identity.operator import (
     IssuedToken,
@@ -67,7 +69,8 @@ REPLACE_FLAG = "--replace-non-live-owner"
 _RECOVERY_WARNING = (
     "owner-recover issues a recovery token for the existing Owner and revokes "
     "every outstanding setup / recovery token of the Owner. Run it only on the "
-    f"server, when the Owner cannot log in. Repeat with {CONFIRM_FLAG} to proceed."
+    "server, as root (sudo), when the Owner cannot log in. "
+    f"Repeat with {CONFIRM_FLAG} to proceed."
 )
 
 
@@ -235,6 +238,13 @@ def _run(arguments: argparse.Namespace, out: TextIO | None, err: TextIO | None) 
         return EXIT_REFUSED
     except OwnerNotFoundError:
         _say(err, "Refused: there is no Owner to recover. Run owner-setup first.")
+        return EXIT_REFUSED
+    except RecoveryNotPrivilegedError:
+        _say(
+            err,
+            "Refused: owner-recover must be run as root, for example with sudo. "
+            "The database credential alone is not enough (SUDO_UID is not checked).",
+        )
         return EXIT_REFUSED
     except AuditUnavailableError:
         _say(
