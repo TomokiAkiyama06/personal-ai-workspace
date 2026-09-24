@@ -108,6 +108,30 @@ class RunMemoryWorkerBenchmarkTest(unittest.TestCase):
         self.assertEqual(stdout, "")
         self.assertIn("Each case must have an 'id' field", stderr)
 
+    def test_factories_that_do_not_return_a_worker_exit_with_two(self):
+        for factory in ("make_none_worker", "make_wrong_signature_worker"):
+            with self.subTest(factory=factory):
+                code, stdout, stderr = run_cli(
+                    "--cases",
+                    VALID_CASES,
+                    "--worker",
+                    f"benchmarks.tests.fixture_workers:{factory}",
+                )
+                self.assertEqual(code, 2)
+                self.assertEqual(stdout, "")
+                self.assertEqual(stderr, "worker is unusable (TypeError)\n")
+
+    def test_resources_are_recorded_only_when_requested(self):
+        _, without, _ = run_cli("--cases", VALID_CASES, "--worker", WORKER)
+        code, with_resources, _ = run_cli(
+            "--cases", VALID_CASES, "--worker", WORKER, "--collect-resources"
+        )
+
+        self.assertNotIn("resources", json.loads(without))
+        self.assertEqual(code, 0)
+        resources = json.loads(with_resources)["resources"]
+        self.assertGreaterEqual(resources["wall_clock_ms"], 0)
+
     def test_unwritable_output_exits_with_two(self):
         with tempfile.TemporaryDirectory() as directory:
             code, _, stderr = run_cli(

@@ -5,12 +5,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from benchmarks.memory_worker_metrics import MemoryRecord
+from benchmarks.memory_worker_metrics import MemoryRecord, schema_adherence
 from benchmarks.memory_worker_runner import (
     MemoryWorkerCase,
+    _output_schema,
     load_cases,
     parse_worker_output,
     run_benchmark,
+    validate_worker,
 )
 from benchmarks.metrics_collector import MetricsCollector
 
@@ -408,6 +410,42 @@ class MemoryWorkerRunnerTest(unittest.TestCase):
     def test_report_error_type_is_none_for_a_normal_case(self):
         data = run_benchmark(MockWorker([VALID_OUTPUT]), self._cases(1)).to_dict()
         self.assertIsNone(data["cases"][0]["error_type"])
+
+    def test_workers_without_the_required_interface_are_rejected(self):
+        class NoMethod:
+            pass
+
+        class WrongSignature:
+            def extract(self):
+                return "{}"
+
+        class NotCallable:
+            extract = 5
+
+        for worker in (None, NoMethod(), WrongSignature(), NotCallable()):
+            with self.subTest(worker=type(worker).__name__):
+                with self.assertRaises(TypeError):
+                    validate_worker(worker)
+                with self.assertRaises(TypeError):
+                    run_benchmark(worker, self._cases(1))
+
+    def test_whitespace_only_content_is_invalid_in_the_schema_and_the_parser(self):
+        raw = json.dumps(
+            {
+                "memories": [
+                    {
+                        "key": "k",
+                        "scope": "user",
+                        "state": "confirmed",
+                        "supersedes": None,
+                        "content": " ",
+                    }
+                ]
+            }
+        )
+
+        self.assertIsNone(parse_worker_output(raw))
+        self.assertEqual(schema_adherence([raw], _output_schema()).valid, 0)
 
     @staticmethod
     def _cases(count):

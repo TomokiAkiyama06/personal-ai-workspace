@@ -121,6 +121,7 @@ Gold recordが`content`を持つ場合は、`exact_recall`（keyと内容の両�
 Goldに`content` / `conflicts_with`がなければ、対応する指標は`null`または従来と同じ値になります。
 `unneeded`はGoldに一致しない予測と、同じkeyの2回目以降の予測の合計で、予測件数を超えません。
 Workerが例外を出したcaseは、予測なしの失敗caseとして記録して続行します（記録するのは例外の型だけです）。
+factoryが`extract(input_text)`を持たないobjectを返した場合は、全caseが失敗した報告にせず、実行前にエラー（終了code 2）にします。
 
 ```bash
 python -m benchmarks.run_memory_worker_benchmark \
@@ -132,5 +133,5 @@ python -m benchmarks.run_memory_worker_benchmark \
 `--worker`は`module:factory`で、引数なしのfactoryが`extract(input_text) -> str`を持つobjectを返します。
 importしたmoduleは呼び出し元の権限で実行されるため、信頼できるcodeだけを指定してください。
 Reportには入力text、Workerの生出力、例外messageを含めません。終了codeは、成功が0、caseファイルの不備が1、
-Workerの指定やReport出力の不備が2です。`MetricsCollector`を渡すと、実行全体のresource metricを`resources`へ含めます。
+Workerの指定やReport出力の不備が2です。`--collect-resources`を付けると、実行全体のwall clockと、`nvidia-smi`が使える環境ではVRAM・GPU utilizationのpeakを`resources`へ含めます（付けない場合は含みません）。
 Datasetの正式な形式はSeed Benchmark Dataset（PAW-016）で確定するため、現在のcase形式は暫定です。

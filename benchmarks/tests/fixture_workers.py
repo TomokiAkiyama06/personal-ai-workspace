@@ -36,3 +36,15 @@ def make_malformed_worker() -> MalformedWorker:
 
 def make_failing_worker():
     raise RuntimeError("model init failed: token=SECRET-TOKEN")
+
+
+def make_none_worker():
+    return None
+
+
+def make_wrong_signature_worker():
+    class WrongSignature:
+        def extract(self):
+            return "{}"
+
+    return WrongSignature()

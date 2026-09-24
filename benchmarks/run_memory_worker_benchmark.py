@@ -14,7 +14,12 @@ import json
 import sys
 from pathlib import Path
 
-from benchmarks.memory_worker_runner import load_cases, run_benchmark
+from benchmarks.memory_worker_runner import (
+    load_cases,
+    run_benchmark,
+    validate_worker,
+)
+from benchmarks.metrics_collector import MetricsCollector, NvidiaSmiGpuSampler
 
 
 def _create_worker(spec: str):
@@ -22,7 +27,9 @@ def _create_worker(spec: str):
     if not module_name or not separator or not factory_name:
         raise ValueError("worker must be given as module:factory")
     factory = getattr(importlib.import_module(module_name), factory_name)
-    return factory()
+    worker = factory()
+    validate_worker(worker)
+    return worker
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -35,6 +42,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--output", type=Path, help="write the JSON report to this file, not stdout"
+    )
+    parser.add_argument(
+        "--collect-resources",
+        action="store_true",
+        help="record wall clock and, when nvidia-smi is available, peak VRAM / GPU "
+        "utilization under 'resources'",
     )
     arguments = parser.parse_args(argv)
 
@@ -51,7 +64,12 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     try:
-        report = run_benchmark(worker, cases)
+        collector = (
+            MetricsCollector(gpu_sampler=NvidiaSmiGpuSampler())
+            if arguments.collect_resources
+            else None
+        )
+        report = run_benchmark(worker, cases, metrics_collector=collector)
     except (TypeError, ValueError) as error:
         print(
             f"worker returned an invalid result ({type(error).__name__})",

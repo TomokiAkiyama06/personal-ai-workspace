@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import math
 import time
@@ -207,6 +208,23 @@ def _percentile(sorted_values: list[float], percent: float) -> float:
     return sorted_values[max(math.ceil(percent / 100 * len(sorted_values)), 1) - 1]
 
 
+def validate_worker(worker: object) -> None:
+    """Raise ``TypeError`` unless ``worker.extract`` can take the benchmark's call.
+
+    Without this check a missing or mis-declared method would be swallowed as a
+    failure of every case and produce an all-zero report.
+    """
+    method = getattr(worker, "extract", None)
+    if not callable(method):
+        raise TypeError("worker must provide a callable extract()")
+    try:
+        inspect.signature(method).bind("input text")
+    except TypeError:
+        raise TypeError("extract() must accept (input_text)") from None
+    except ValueError:  # no introspectable signature (some builtins): accept
+        pass
+
+
 def run_benchmark(
     worker: MemoryWorker,
     cases: Sequence[MemoryWorkerCase],
@@ -219,6 +237,7 @@ def run_benchmark(
     Latency covers only ``worker.extract``. A worker that raises is recorded as a
     failed case with empty predictions and the run continues.
     """
+    validate_worker(worker)
     results: list[BenchmarkResult] = []
     raw_outputs: list[str] = []
 
