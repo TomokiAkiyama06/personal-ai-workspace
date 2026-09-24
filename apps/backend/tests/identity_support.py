@@ -18,10 +18,14 @@ from paw_backend.authz import PostgresAuditSink
 from paw_backend.authz.audit import AuditEvent
 from paw_backend.db import Database
 from paw_backend.identity import TokenRedeemer
-from paw_backend.identity.operator import OwnerOperator
+from paw_backend.identity.operator import OperatorIdentity, OwnerOperator
 
 from .support import make_settings, paw_environment
 from .test_migrations import offline_config
+
+# Recovery is refused unless the operator is root (what sudo runs a command as):
+# tests that exercise recovery itself say so, as the command run under sudo does.
+ROOT = OperatorIdentity(0)
 
 TEST_DATABASE_URL = os.environ.get("PAW_TEST_DATABASE_URL")
 

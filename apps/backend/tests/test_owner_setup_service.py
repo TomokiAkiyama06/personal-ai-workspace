@@ -24,6 +24,7 @@ from paw_backend.identity import (
     OwnerAlreadyExistsError,
     OwnerNotFoundError,
     OwnerNotLiveError,
+    RecoveryNotPrivilegedError,
     RedeemHookError,
     Redemption,
     SetupTokenRejectedError,
@@ -41,6 +42,7 @@ from paw_backend.identity.operator import (
 )
 
 from .identity_support import (
+    ROOT,
     SECRET_DETAIL,
     T0,
     FailingSink,
@@ -341,7 +343,7 @@ class SetupOwnerTest(PostgresIdentityTestCase):
 class RecoverOwnerTest(PostgresIdentityTestCase):
     async def test_there_is_nothing_to_recover_without_an_owner(self):
         with self.assertRaises(OwnerNotFoundError):
-            await self.operator.recover_owner()
+            await self.operator.recover_owner(operator=ROOT)
 
         self.assertEqual(await self.scalar("SELECT count(*) FROM setup_tokens"), 0)
         self.assertEqual(
@@ -349,11 +351,61 @@ class RecoverOwnerTest(PostgresIdentityTestCase):
             Counter({("owner.recovery_token.issue", "deny", "owner_missing"): 1}),
         )
 
+    async def test_recovery_is_refused_unless_the_operator_is_root(self):
+        # The requirement is a recovery through sudo, that is, as root. Holding the
+        # database credential, or naming a sudo user, is not that.
+        setup = await self.operator.setup_owner("boss")
+        for name, who in (
+            ("no uid at all", None),
+            ("an ordinary user", OperatorIdentity(1000)),
+            ("SUDO_UID is only a hint", OperatorIdentity(1000, sudo_uid=1000)),
+            ("SUDO_UID of root", OperatorIdentity(1000, sudo_uid=0)),
+            ("a system user", OperatorIdentity(1)),
+        ):
+            with self.subTest(name):
+                with self.assertRaises(RecoveryNotPrivilegedError) as caught:
+                    await self.operator.recover_owner(operator=who)
+                self.assertNotIn("boss", str(caught.exception))
+
+        # Nothing changed: the setup token still works, and no token was added.
+        self.assertEqual(await self.scalar("SELECT count(*) FROM setup_tokens"), 1)
+        self.assertEqual(
+            await self.scalar(
+                "SELECT count(*) FROM setup_tokens "
+                "WHERE used_at IS NULL AND revoked_at IS NULL"
+            ),
+            1,
+        )
+        self.assertEqual(
+            (await self.redeemer.redeem(setup.token)).purpose, TokenPurpose.SETUP
+        )
+        summary = await self.audit_summary()
+        self.assertEqual(
+            summary[("owner.recovery_token.issue", "deny", "not_privileged")], 5
+        )
+        self.assertNotIn(("owner.recovery_token.issue", "allow", "issued"), summary)
+
+    async def test_recovery_as_root_records_uid_zero_and_the_sudo_user(self):
+        await self.operator.setup_owner("boss")
+
+        recovery = await self.operator.recover_owner(
+            operator=OperatorIdentity(0, sudo_uid=1000)
+        )
+
+        row = (
+            await self.query(
+                "SELECT issued_by_uid, issued_by_sudo_uid FROM setup_tokens "
+                "WHERE audit_ref = :ref",
+                ref=recovery.audit_ref,
+            )
+        )[0]
+        self.assertEqual(tuple(row), (0, 1000))
+
     async def test_issues_a_recovery_token_for_the_existing_owner(self):
         setup = await self.operator.setup_owner("boss")
         self.clock.advance(seconds=60)
 
-        recovery = await self.operator.recover_owner()
+        recovery = await self.operator.recover_owner(operator=ROOT)
 
         self.assertEqual(recovery.purpose, TokenPurpose.RECOVERY)
         self.assertEqual(
@@ -377,7 +429,7 @@ class RecoverOwnerTest(PostgresIdentityTestCase):
         setup = await self.operator.setup_owner("boss")
         self.clock.advance(seconds=60)
 
-        recovery = await self.operator.recover_owner()
+        recovery = await self.operator.recover_owner(operator=ROOT)
 
         self.assertEqual(
             await self.scalar(
@@ -398,8 +450,8 @@ class RecoverOwnerTest(PostgresIdentityTestCase):
 
     async def test_a_second_recovery_supersedes_the_first(self):
         await self.operator.setup_owner("boss")
-        first = await self.operator.recover_owner()
-        second = await self.operator.recover_owner()
+        first = await self.operator.recover_owner(operator=ROOT)
+        second = await self.operator.recover_owner(operator=ROOT)
 
         with self.assertRaises(SetupTokenRejectedError):
             await self.redeemer.redeem(first.token)
@@ -414,7 +466,7 @@ class RecoverOwnerTest(PostgresIdentityTestCase):
     async def test_at_most_one_token_is_outstanding(self):
         await self.operator.setup_owner("boss")
         for _ in range(3):
-            await self.operator.recover_owner()
+            await self.operator.recover_owner(operator=ROOT)
 
         self.assertEqual(
             await self.scalar(
@@ -429,7 +481,7 @@ class RecoverOwnerTest(PostgresIdentityTestCase):
         await self.redeemer.redeem(setup.token)
         used_at = await self.scalar("SELECT used_at FROM setup_tokens")
 
-        await self.operator.recover_owner()
+        await self.operator.recover_owner(operator=ROOT)
 
         self.assertEqual(
             await self.scalar(
@@ -448,7 +500,7 @@ class RecoverOwnerTest(PostgresIdentityTestCase):
         await self.execute("UPDATE users SET status = 'pending_deletion'")
 
         with self.assertRaises(OwnerNotLiveError) as caught:
-            await self.operator.recover_owner()
+            await self.operator.recover_owner(operator=ROOT)
 
         # The real state is reported, not "no Owner".
         self.assertEqual(caught.exception.status, "pending_deletion")
@@ -465,7 +517,7 @@ class RecoverOwnerTest(PostgresIdentityTestCase):
         await self.redeemer.redeem(setup.token)
         await self.execute("UPDATE users SET status = 'active'")
 
-        recovery = await self.operator.recover_owner()
+        recovery = await self.operator.recover_owner(operator=ROOT)
         redemption = await self.redeemer.redeem(recovery.token)
 
         self.assertEqual(
@@ -477,7 +529,7 @@ class RecoverOwnerTest(PostgresIdentityTestCase):
         await self.operator.setup_owner("boss")
 
         results = await self.gather_on_own_engines(
-            4, lambda service, index: service.recover_owner()
+            4, lambda service, index: service.recover_owner(operator=ROOT)
         )
 
         issued = [r for r in results if isinstance(r, IssuedToken)]
@@ -506,7 +558,7 @@ class RecoverOwnerTest(PostgresIdentityTestCase):
 
         with self.audit_failure_is_logged_by_type_only():
             with self.assertRaises(AuditUnavailableError):
-                await service.recover_owner()
+                await service.recover_owner(operator=ROOT)
 
         # Nothing changed: the old token is still the outstanding one.
         self.assertEqual(await self.scalar("SELECT count(*) FROM setup_tokens"), 1)
@@ -522,7 +574,7 @@ class RecoverOwnerTest(PostgresIdentityTestCase):
 
         with self.audit_failure_is_logged_by_type_only():
             with self.assertRaises(AuditUnavailableError):
-                await broken.recover_owner()
+                await broken.recover_owner(operator=ROOT)
 
         self.assertEqual(await self.scalar("SELECT count(*) FROM setup_tokens"), 1)
         self.assertEqual(
@@ -532,7 +584,7 @@ class RecoverOwnerTest(PostgresIdentityTestCase):
             0,
         )
         # And once the audit works again, the recovery goes through.
-        await self.operator.recover_owner()
+        await self.operator.recover_owner(operator=ROOT)
         self.assertEqual(await self.scalar("SELECT count(*) FROM setup_tokens"), 2)
 
     async def test_a_refusal_stands_even_when_its_audit_cannot_be_written(self):
@@ -540,7 +592,7 @@ class RecoverOwnerTest(PostgresIdentityTestCase):
 
         with self.audit_failure_is_logged_by_type_only():
             with self.assertRaises(OwnerNotFoundError):  # not AuditUnavailableError
-                await broken.recover_owner()
+                await broken.recover_owner(operator=ROOT)
             await self.operator.setup_owner("boss")
             with self.assertRaises(OwnerAlreadyExistsError):
                 await broken.setup_owner("someone")
@@ -603,7 +655,7 @@ class RedeemTest(PostgresIdentityTestCase):
         early = await self.redeemer.redeem(issued.token)
         self.assertEqual(early.audit_ref, issued.audit_ref)
 
-        second = await self.operator.recover_owner()
+        second = await self.operator.recover_owner(operator=ROOT)
         self.clock.advance(seconds=TTL)  # exactly the expiry instant
         with self.assertRaises(SetupTokenRejectedError):
             await self.redeemer.redeem(second.token)
@@ -687,7 +739,7 @@ class RedeemTest(PostgresIdentityTestCase):
         self.assertEqual(await self.audit_summary(), before)
         self.assertEqual(await self.scalar("SELECT attempts FROM setup_tokens"), 3)
         # A new recovery token is the way out.
-        recovery = await self.operator.recover_owner()
+        recovery = await self.operator.recover_owner(operator=ROOT)
         await redeemer.redeem(recovery.token)
 
     async def test_the_last_permitted_attempt_can_still_succeed(self):
@@ -765,12 +817,12 @@ class RedeemTest(PostgresIdentityTestCase):
         await rejection("not a string", None)
         await self.redeemer.redeem(setup.token)
         await rejection("used", setup.token)
-        revoked = await self.operator.recover_owner()
-        expired = await self.operator.recover_owner()
+        revoked = await self.operator.recover_owner(operator=ROOT)
+        expired = await self.operator.recover_owner(operator=ROOT)
         await rejection("revoked", revoked.token)
         self.clock.advance(hours=3)
         await rejection("expired", expired.token)
-        locked = await self.operator.recover_owner()
+        locked = await self.operator.recover_owner(operator=ROOT)
         strict = self.make_redeemer(max_attempts=2)
         await rejection(
             "wrong before the lockout", wrong_secret_for(locked.token), strict
@@ -945,7 +997,7 @@ class NothingSecretIsLeakedTest(PostgresIdentityTestCase):
             await self.redeemer.redeem(setup.token)
             with self.assertRaises(SetupTokenRejectedError):
                 await self.redeemer.redeem(setup.token)
-            recovery = await self.operator.recover_owner()
+            recovery = await self.operator.recover_owner(operator=ROOT)
             tokens_seen.append(recovery.token)
             self.clock.advance(hours=3)
             with self.assertRaises(SetupTokenRejectedError):
@@ -977,8 +1029,8 @@ class AuditReferenceTest(PostgresIdentityTestCase):
         await self.redeemer.redeem(setup.token)
         with self.assertRaises(SetupTokenRejectedError):
             await self.redeemer.redeem(setup.token)
-        first = await self.operator.recover_owner()
-        second = await self.operator.recover_owner()
+        first = await self.operator.recover_owner(operator=ROOT)
+        second = await self.operator.recover_owner(operator=ROOT)
         with self.assertRaises(SetupTokenRejectedError):
             await self.redeemer.redeem(first.token)
         for _ in range(2):
@@ -987,7 +1039,7 @@ class AuditReferenceTest(PostgresIdentityTestCase):
         with self.assertRaises(SetupTokenRejectedError):
             await strict.redeem(second.token)
         self.clock.advance(hours=3)
-        third = await self.operator.recover_owner()
+        third = await self.operator.recover_owner(operator=ROOT)
         self.clock.advance(hours=3)
         with self.assertRaises(SetupTokenRejectedError):
             await self.redeemer.redeem(third.token)
@@ -1224,7 +1276,7 @@ class LockoutPersistenceTest(PostgresIdentityTestCase):
             [(3, T0)],
         )
         # Recovery is the way out, as documented.
-        recovery = await self.operator.recover_owner()
+        recovery = await self.operator.recover_owner(operator=ROOT)
         await self.make_redeemer(max_attempts=20).redeem(recovery.token)
 
     async def test_a_token_that_is_not_locked_follows_the_new_maximum(self):
@@ -1311,7 +1363,7 @@ class NonLiveOwnerTest(PostgresIdentityTestCase):
                 await self.owner_in(status)
 
                 with self.assertRaises(OwnerNotLiveError) as caught:
-                    await self.operator.recover_owner()
+                    await self.operator.recover_owner(operator=ROOT)
 
                 self.assertEqual(caught.exception.status, status)
                 self.assertNotIsInstance(caught.exception, OwnerNotFoundError)
@@ -1473,7 +1525,7 @@ class OperatorRecordTest(PostgresIdentityTestCase):
         who = OperatorIdentity(uid=1000, sudo_uid=1001)
 
         setup = await self.operator.setup_owner("boss", operator=who)
-        recovery = await self.operator.recover_owner(operator=OperatorIdentity(0))
+        recovery = await self.operator.recover_owner(operator=ROOT)
 
         rows = await self.query(
             "SELECT audit_ref, purpose, issued_by_uid, issued_by_sudo_uid "
