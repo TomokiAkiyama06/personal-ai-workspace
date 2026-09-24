@@ -49,8 +49,9 @@ timeout, or cancellation; its log remains available for audit.  Cleanup also rem
 the run directory and Git's `.git/worktrees/<id>` record when a candidate deleted,
 renamed, locked, or damaged its checkout.  If the candidate renamed or moved the run
 directory itself, cleanup follows it: a directory handle opened at creation is resolved
-through `/proc/self/fd`, the directory's identity (`st_dev`, `st_ino`) is verified, and
-it is removed wherever it now is (a symlink planted at the old path is unlinked, never
+through `/proc/self/fd`, the directory's identity (`st_dev`, `st_ino`) is verified (the
+`/proc` text is not trusted: a live directory named `x (deleted)` reads like a deleted
+one), and it is removed wherever it now is (a symlink planted at the old path is unlinked, never
 followed).  When the directory cannot be found (no `/proc`) or removed, the log records
 `cleanup_incomplete` instead of `cleanup_finished` and `cleanup()`/`execute()` raise
 `WorktreeRunnerError`, after removing what could be removed and pruning Git's record.
@@ -97,15 +98,29 @@ being benchmarked.
   it.
 - If something else reaps the leader (the evaluator ignores `SIGCHLD`, or another
   reaper collects it), its exit status is lost: `execute()` returns `exit_code=None`
-  (and logs `null`) instead of the `0` that `Popen` would report.  Its pid may then be
-  reused as an unrelated process group id, so the group is signalled only while a
-  process recorded earlier as its member (same pid and start time) is still in it;
-  otherwise nothing is sent.  Members are recorded every 0.2 s while the leader runs.
-  (Git children inherit an ignored `SIGCHLD` and fail, so an evaluator that ignores it
-  cannot use the runner's Git operations at all.)
-- Not covered: a process that daemonizes (double fork plus `setsid`) is neither in the
-  group nor below the candidate in `/proc`, so it can outlive the run.  Only a
-  container or cgroup can contain that.
+  (and logs `null`) instead of the `0` that `Popen` would report.  The runner reaps the
+  leader itself, so it notices a reaper that got there first at any point, and it
+  re-checks at every group signal that the leader is still its own unreaped child (pid
+  and start time).  Once it is not, its pid may be reused as an unrelated process group
+  id, so the group is signalled only while a process recorded earlier as its member
+  (same pid and start time) is still in it; otherwise nothing is sent.  Members are
+  recorded every 0.2 s while the leader runs and once more at the moment it is seen to
+  have vanished, so a child forked just before the exit is still known.  (Git children
+  inherit an ignored `SIGCHLD` and fail, so an evaluator that ignores it cannot use the
+  runner's Git operations at all.)
+- **Documented residuals** of signalling a same-user candidate from the same UID, none of
+  which can be closed in-process (see `docs/decisions/0001-hidden-check-boundary.md`,
+  added by PAW-013):
+  - A process that daemonizes (double fork plus `setsid`) is neither in the group nor
+    below the candidate in `/proc`, so it can outlive the run.
+  - A check-then-signal gap of microseconds remains, because a process group cannot be
+    signalled through a pidfd: after the last identity check a reaper could still free
+    the group id before `killpg` runs.  The last look at the group assumes the id was
+    not reused within one polling interval (50 ms) of the leader vanishing.
+  - A member forked into the group only after the leader was reaped, by members that
+    have all exited before the signal, is not recorded and survives.
+  - Containing descendants reliably needs a PID namespace or a cgroup (`cgroup.kill`);
+    production must run candidates in one.
 
 ### Same-user candidates and the evaluator process
 
