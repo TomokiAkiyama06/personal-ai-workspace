@@ -1,6 +1,9 @@
 """Behavioral tests for isolated benchmark candidate worktrees."""
 
+import contextlib
 import ctypes
+import errno
+import inspect
 import json
 import os
 import signal
@@ -103,21 +106,40 @@ while not os.path.exists(pid_file):
 time.sleep(60)
 """
 
-# Candidate that reports whether it can read the evaluator's /proc entries.
-PROBE_EVALUATOR_PROC = """
-import ctypes, json, sys
-pid, report = sys.argv[1:3]
-def probe(name):
+
+def probe_proc_file(pid, name, address=None, expected=b""):
+    """Can this process read ``/proc/<pid>/<name>``?  Any ``OSError`` means no.
+
+    ``mem`` is read at ``address`` and must return ``expected``: reading at offset 0
+    raises ``EIO`` even where the file can be opened, so only a read of memory that
+    exists proves the file is readable.  The source of this function is also sent
+    to the candidate, so the candidate and the tests probe identically.
+    """
     try:
-        with open(f'/proc/{pid}/{name}', 'rb') as handle:
-            handle.read(16)
-        return 'readable'
-    except PermissionError:
-        return 'denied'
-result = {'environ': probe('environ'), 'mem': probe('mem')}
-result['own_dumpable'] = ctypes.CDLL(None).prctl(3, 0, 0, 0, 0)
+        with open(f"/proc/{pid}/{name}", "rb", buffering=0) as handle:
+            if address is None:
+                handle.read(16)
+                return {"readable": True, "errno": None}
+            data = os.pread(handle.fileno(), len(expected), address)
+            return {"readable": data == expected, "errno": None}
+    except OSError as error:
+        return {"readable": False, "errno": error.errno}
+
+
+# Candidate that reports whether it can read the evaluator's /proc entries.
+PROBE_EVALUATOR_PROC = (
+    "import ctypes, json, os, sys\n"
+    + inspect.getsource(probe_proc_file)
+    + """
+pid, report, address, expected = sys.argv[1:5]
+result = {
+    'environ': probe_proc_file(pid, 'environ'),
+    'mem': probe_proc_file(pid, 'mem', int(address), bytes.fromhex(expected)),
+    'own_dumpable': ctypes.CDLL(None).prctl(3, 0, 0, 0, 0),
+}
 json.dump(result, open(report, 'w'))
 """
+)
 
 
 def dumpable():
@@ -807,22 +829,57 @@ class WorktreeRunnerTest(unittest.TestCase):
     # Evaluator /proc exposure ----------------------------------------------
 
     def probe_evaluator_proc(self, runner):
+        # A buffer in this (the evaluator's) memory that a reader can look for.
+        marker = os.urandom(16)
+        buffer = ctypes.create_string_buffer(marker, len(marker))
         report = self.root / "proc-report.json"
         run = runner.create("candidate-a", self.commit)
         result = runner.execute(
             run,
-            [sys.executable, "-c", PROBE_EVALUATOR_PROC, str(os.getpid()), str(report)],
+            [
+                sys.executable,
+                "-c",
+                PROBE_EVALUATOR_PROC,
+                str(os.getpid()),
+                str(report),
+                str(ctypes.addressof(buffer)),
+                marker.hex(),
+            ],
             PATIENCE,
         )
-        self.assertEqual(result.status, "completed")
+        self.assertEqual((result.status, result.exit_code), ("completed", 0))
         return json.loads(report.read_text(encoding="utf-8"))
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "needs Linux /proc")
+    def test_probe_reads_real_memory_and_reports_unreadable_memory_without_raising(
+        self,
+    ):
+        set_dumpable(1)  # a process may always read its own memory when dumpable
+        marker = os.urandom(16)
+        buffer = ctypes.create_string_buffer(marker, len(marker))
+        address = ctypes.addressof(buffer)
+        pid = os.getpid()
+        self.assertEqual(
+            probe_proc_file(pid, "mem", address, marker),
+            {"readable": True, "errno": None},
+        )
+        # Offset 0 is unmapped: reading it fails with EIO, which must not escape.
+        self.assertEqual(
+            probe_proc_file(pid, "mem", 0, marker),
+            {"readable": False, "errno": errno.EIO},
+        )
+        self.assertEqual(
+            probe_proc_file(pid, "no-such-file"),
+            {"readable": False, "errno": errno.ENOENT},
+        )
 
     @unittest.skipUnless(sys.platform.startswith("linux"), "needs Linux /proc")
     def test_a_same_uid_candidate_cannot_read_the_evaluator_environment(self):
         self.assertTrue(self.runner.process_hardened)
         observed = self.probe_evaluator_proc(self.runner)
-        self.assertEqual(observed["environ"], "denied")
-        self.assertEqual(observed["mem"], "denied")
+        # Whatever the ``ptrace_scope`` setting, neither file may be readable.
+        self.assertFalse(observed["environ"]["readable"], observed)
+        self.assertFalse(observed["mem"]["readable"], observed)
         # The candidate is dumpable again after exec; the evaluator stays hardened.
         self.assertEqual(observed["own_dumpable"], 1)
         self.assertEqual(dumpable(), 0)
@@ -835,8 +892,97 @@ class WorktreeRunnerTest(unittest.TestCase):
         )
         self.assertFalse(runner.process_hardened)
         self.assertEqual(dumpable(), 1)
-        # Without the mitigation the environment is readable, which is why it exists.
-        self.assertEqual(self.probe_evaluator_proc(runner)["environ"], "readable")
+        # Without the mitigation the environment is readable, which is why it
+        # exists.  ``mem`` depends on ``ptrace_scope`` and is not asserted here.
+        observed = self.probe_evaluator_proc(runner)
+        self.assertTrue(observed["environ"]["readable"], observed)
+
+    # Process identity ----------------------------------------------------------
+
+    def spawn_bystander(self):
+        """An unrelated process standing in for one that inherited a recycled pid."""
+        bystander = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"]
+        )
+        self.addCleanup(bystander.wait)
+        self.addCleanup(bystander.kill)
+        self.assertTrue(
+            wait_until(lambda: WorktreeRunner._start_time(bystander.pid) is not None)
+        )
+        return bystander
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "needs Linux /proc")
+    def test_a_signal_reaches_only_the_process_that_was_recorded(self):
+        # Both with pidfd_open and with the plain ``kill`` fallback.
+        for label, context in (
+            ("pidfd", contextlib.nullcontext()),
+            (
+                "fallback",
+                mock.patch.object(os, "pidfd_open", side_effect=OSError(errno.ENOSYS)),
+            ),
+        ):
+            with self.subTest(path=label), context:
+                bystander = self.spawn_bystander()
+                started = WorktreeRunner._start_time(bystander.pid)
+                # The recorded process was replaced: same pid, other start time.
+                WorktreeRunner._signal_identified(
+                    bystander.pid, started + 1, signal.SIGKILL
+                )
+                time.sleep(0.3)
+                self.assertIsNone(bystander.poll(), "an unrelated process was killed")
+                # Same identity: the signal is delivered.
+                WorktreeRunner._signal_identified(
+                    bystander.pid, started, signal.SIGKILL
+                )
+                self.assertEqual(bystander.wait(timeout=PATIENCE), -signal.SIGKILL)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "needs Linux /proc")
+    def test_a_recycled_pid_is_neither_signalled_nor_waited_for_on_termination(self):
+        self.runner.term_grace_seconds = 30
+        bystander = self.spawn_bystander()
+        stale = {bystander.pid: WorktreeRunner._start_time(bystander.pid) - 1}
+        run = self.runner.create("candidate-a", self.commit)
+        started = time.monotonic()
+        with mock.patch.object(WorktreeRunner, "_descendant_pids", return_value=stale):
+            result = self.runner.execute(
+                run, [sys.executable, "-c", "import time; time.sleep(60)"], 0.3
+            )
+
+        self.assertEqual(result.status, "timed_out")
+        # It was not treated as a live descendant to wait out for the grace period.
+        self.assertLess(time.monotonic() - started, 20)
+        time.sleep(0.3)
+        self.assertIsNone(bystander.poll(), "an unrelated process was signalled")
+
+    @unittest.skipUnless(hasattr(os, "WNOWAIT"), "needs waitid(WNOWAIT)")
+    def test_the_leader_is_not_reaped_before_the_final_group_kill(self):
+        # An unreaped leader keeps its pid (the process group id) from being reused.
+        for label, script, timeout in (
+            ("exits", "pass", PATIENCE),
+            ("timed out", "import time; time.sleep(60)", 0.3),
+        ):
+            with self.subTest(candidate=label):
+                seen = []
+                real = WorktreeRunner._signal_group
+
+                def spy(pgid, number, real=real, seen=seen):
+                    try:
+                        os.waitid(os.P_PID, pgid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+                        reaped = False
+                    except ChildProcessError:
+                        reaped = True
+                    seen.append((number, reaped))
+                    real(pgid, number)
+
+                run = self.runner.create("candidate-a", self.commit)
+                with mock.patch.object(
+                    WorktreeRunner, "_signal_group", staticmethod(spy)
+                ):
+                    self.runner.execute(run, [sys.executable, "-c", script], timeout)
+
+                kills = [reaped for number, reaped in seen if number == signal.SIGKILL]
+                self.assertTrue(kills)
+                self.assertEqual(kills, [False] * len(kills), seen)
 
     # State outside the source repository -------------------------------------
 
