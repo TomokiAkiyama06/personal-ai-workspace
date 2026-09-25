@@ -122,7 +122,7 @@ Credential の Plaintext を Agent に渡さないこと、Backend が最終判�
 ## 既知の制限と後続の課題
 
 - Symlink の確認と使用の間の競合（TOCTOU）、DNS Rebinding、Redirect は Executor の責務（[README](../../apps/backend/README.md) の「Executor の契約」）。
-- Approval の期限は Application の時計で比較する（Database の時計ではない）。
+- Approval の期限は Application の時計で比較する（Database の時計ではない）。Lock を待った後の時刻は、呼び出し側の `now` に、呼び出しが始まってから経った単調時計の時間を足したもの（独立 Review 第 6 回: 待つ前の `now` のままだと、Lock を待つ間に期限が過ぎた承認を消費できた。`consume` は Task の行と承認の行を Lock した**後**に、`open_request` は advisory lock と Task の行の後に読み直す）。時計が戻ることはなく、待った分だけ期限を短くする向きにしか働かない。Database の時計を併用する案（`greatest(Application の時計, clock_timestamp())`）は、`expires_at` と同じ時計で比べるという上の方針と、固定の時刻で動く既存の Test を崩すので採らず、Human の判断を待つ。
 - `PostgresApprovalStore.history`（Test と診断が読む。どの Request の経路からも呼ばれない）は Pool の Session で動き、期限で区切っていない。
 - 却下の Cooldown は Hash 単位で、引数を変えた別の呼び出しは止めない（件数の上限が量を抑える）。
 - 引数のない Tool は承認を開けない。承認が要る Tool は、何をするかを表す引数を必須にする。

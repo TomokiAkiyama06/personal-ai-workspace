@@ -16,6 +16,20 @@ nothing:
   are ordered, never crossed (Decision 0006, section 9);
 * revoke: ``status IN ('pending', 'approved') AND expires_at > now``.
 
+**When "now" is.** ``open_request`` and ``consume`` are handed the caller's ``now``,
+but they may wait for locks (a free slot, the task's row, the advisory lock, the
+approval's own row) before they decide, and an approval that ran out of time
+during the wait must not be used or returned. So they judge the expiry at the
+moment the locks are held: the caller's ``now`` moved forward by the monotonic
+time that passed since the call began (``_Moment``; ``consume`` locks the approval
+row itself with ``SELECT ... FOR NO KEY UPDATE`` first, so the wait for it is
+over before the time is read). It is still the application's clock (Decision
+0006, known limits): the one that gave the approval its ``expires_at``, not the
+database's, and it can only move forward, so the wait can only shorten a
+lifetime. ``created_at`` and the rejection cooldown keep the caller's ``now``
+(when the request was made); what is recorded for a use is the instant it was
+judged at.
+
 The history row is written in the same transaction as the change. When an
 update matches nothing, the row is read again only to *explain* the refusal
 (``diagnose_*``); that explanation is never used to allow anything.
@@ -71,8 +85,10 @@ compromised application fails there.
 """
 
 import asyncio
+import time
 import uuid
-from datetime import datetime
+from collections.abc import Callable
+from datetime import datetime, timedelta
 
 import psycopg
 from psycopg.types.json import Jsonb
@@ -277,6 +293,12 @@ INSERT INTO tool_approval_events (approval_id, kind, agent_id, summary, created_
 VALUES (%(id)s, '{ApprovalEventKind.REQUESTED.value}', %(agent_id)s, %(summary)s,
         %(now)s)
 """
+# The approval's own row, locked the way the UPDATE below locks it (a key is
+# never changed), and read: ``consume`` reads the time only after this lock is
+# held, and the row it returns is what the decision is explained from.
+_LOCK_APPROVAL = f"""
+SELECT {_COLUMNS} FROM tool_approvals WHERE id = %(id)s FOR NO KEY UPDATE
+"""
 # One statement: the use and its history row are atomic even without the
 # transaction, and the whole binding is in the WHERE clause.
 _CONSUME = f"""
@@ -378,11 +400,27 @@ class _Deadline:
         return remaining
 
 
-async def _read_record(
-    connection: psycopg.AsyncConnection, approval_id: uuid.UUID
-) -> ApprovalRecord | None:
-    row = await (await connection.execute(_GET, {"id": approval_id})).fetchone()
-    return None if row is None else _record_of_values(row)
+class _Moment:
+    """What time it is *now*, for a call that may wait for locks before it decides.
+
+    A caller reads its clock, and then the call waits: for a free slot, for the
+    task's row, for the advisory lock, for the approval's row. Whether an approval
+    has expired is a question about the instant of the decision, which comes after
+    those waits, not about the instant the caller read. ``read()`` is the caller's
+    ``now`` moved forward by the (monotonic) time that has passed since the call
+    began, so it needs no second clock: the expiry of an approval is compared with
+    the application's clock (the one that gave it its ``expires_at``), never with
+    the database's, and a monotonic clock cannot run backwards, so the result is
+    never earlier than ``now``. Read it after the locks are held.
+    """
+
+    def __init__(self, now: datetime, monotonic: Callable[[], float]) -> None:
+        self._now = now
+        self._monotonic = monotonic
+        self._began = monotonic()
+
+    def read(self) -> datetime:
+        return self._now + timedelta(seconds=max(0.0, self._monotonic() - self._began))
 
 
 class PostgresApprovalStore:
@@ -395,11 +433,16 @@ class PostgresApprovalStore:
         revoke_timeout_seconds: float = 3.0,
         decision_timeout_seconds: float = 3.0,
         transaction_timeout_seconds: float = 3.0,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         """``revoke_timeout_seconds`` bounds ``revoke_task``;
         ``decision_timeout_seconds`` bounds ``get``, ``decide`` and ``revoke``
         and ``transaction_timeout_seconds`` bounds ``open_request`` and
-        ``consume`` (each call as a whole, all its statements together)."""
+        ``consume`` (each call as a whole, all its statements together).
+        ``monotonic`` is the clock that measures how long a call waited for its
+        locks (see ``_Moment``); a test passes its own."""
+        if not callable(monotonic):
+            raise TypeError("monotonic must be callable")
         for name, value in (
             ("revoke_timeout_seconds", revoke_timeout_seconds),
             ("decision_timeout_seconds", decision_timeout_seconds),
@@ -411,6 +454,7 @@ class PostgresApprovalStore:
         self._revoke_timeout_seconds = revoke_timeout_seconds
         self._decision_timeout_seconds = decision_timeout_seconds
         self._transaction_timeout_seconds = transaction_timeout_seconds
+        self._monotonic = monotonic
 
     async def open_request(
         self,
@@ -424,12 +468,18 @@ class PostgresApprovalStore:
         connection within ``transaction_timeout_seconds`` for the whole call
         (``TimeoutError`` past it: the transaction was rolled back, or, if the
         limit hit during its ``COMMIT``, may have been committed; repeating the
-        call shows which, as an open request is returned as ``EXISTING``)."""
+        call shows which, as an open request is returned as ``EXISTING``).
+
+        ``now`` is when the request was made (``created_at``, the cooldown). What
+        has expired is judged at the moment the locks are held (``_Moment``): a
+        request that waited for the advisory lock or the task's row does not
+        return, or count, an approval that ran out of time meanwhile."""
         deadline = _Deadline(self._transaction_timeout_seconds)
+        moment = _Moment(now, self._monotonic)
         for _ in range(_OPEN_ATTEMPTS):
             opened = await self._database.transact_abortable(
                 lambda connection: self._open_once(
-                    connection, new, now, limits, require_active_task
+                    connection, new, now, moment, limits, require_active_task
                 ),
                 timeout_seconds=deadline.left(),
             )
@@ -443,10 +493,14 @@ class PostgresApprovalStore:
         connection: psycopg.AsyncConnection,
         new: NewApproval,
         now: datetime,
+        moment: _Moment,
         limits: OpenLimits,
         require_active_task: bool,
     ) -> OpenResult | None:
-        """One attempt, inside the transaction; ``None``: lost a race, try again."""
+        """One attempt, inside the transaction; ``None``: lost a race, try again.
+
+        ``now`` stamps the request; ``moment.read()``, taken after both locks
+        (they may have been waited for), is the instant the expiry is judged at."""
         # One request at a time per (task, user): the cap below is a count,
         # which only holds if nobody inserts between the count and our insert.
         await connection.execute(
@@ -463,8 +517,10 @@ class PostgresApprovalStore:
             activity = await lock_task_activity(connection, new.task_id, new.task_run)
             if activity is not TaskActivity.ACTIVE:
                 return OpenResult(OPEN_TASK_REFUSAL[activity])
+        # Both locks are held: what has run out of time is judged from here on.
+        judged = moment.read()
         await connection.execute(
-            _MARK_EXPIRED_CALL, {"call_hash": new.call_hash, "now": now}
+            _MARK_EXPIRED_CALL, {"call_hash": new.call_hash, "now": judged}
         )
         if require_active_task:
             # ``new.task_run`` was just found to be the task's current run (under
@@ -475,7 +531,7 @@ class PostgresApprovalStore:
                     "task_id": new.task_id,
                     "attempt": new.task_run.attempt,
                     "retry_count": new.task_run.retry_count,
-                    "now": now,
+                    "now": judged,
                 },
             )
         existing = await (
@@ -500,7 +556,7 @@ class PostgresApprovalStore:
                 {
                     "task_id": new.task_id,
                     "user_id": new.requester_user_id,
-                    "now": now,
+                    "now": judged,
                 },
             )
         ).fetchone()
@@ -623,10 +679,16 @@ class PostgresApprovalStore:
         within ``transaction_timeout_seconds`` for the whole call
         (``TimeoutError`` past it: the approval was not used, or, if the limit
         hit during the ``COMMIT``, may have been: repeating the call shows
-        ``already_used``)."""
+        ``already_used``).
+
+        ``now`` is when the caller read its clock. Whether the approval has
+        expired is judged after the task's row and the approval's own row are
+        locked (``_Moment``), so a use that waited for either does not consume
+        an approval that ran out of time meanwhile."""
+        moment = _Moment(now, self._monotonic)
         return await self._database.transact_abortable(
             lambda connection: self._consume_once(
-                connection, approval_id, binding, now, require_active_task
+                connection, approval_id, binding, moment, require_active_task
             ),
             timeout_seconds=self._transaction_timeout_seconds,
         )
@@ -636,9 +698,10 @@ class PostgresApprovalStore:
         connection: psycopg.AsyncConnection,
         approval_id: uuid.UUID,
         binding: ApprovalBinding,
-        now: datetime,
+        moment: _Moment,
         require_active_task: bool,
     ) -> ConsumeOutcome:
+        activity = TaskActivity.ACTIVE
         if require_active_task:
             # The task row is read **locked** in this very transaction: a
             # terminal transition, a Retry or a Restart that is in flight is
@@ -652,18 +715,26 @@ class PostgresApprovalStore:
             activity = await lock_task_activity(
                 connection, binding.task_id, binding.task_run
             )
-            if activity is not TaskActivity.ACTIVE:
-                outcome = diagnose_consume(
-                    await _read_record(connection, approval_id), binding, now
-                )
-                if outcome in (ConsumeOutcome.CONSUMED, ConsumeOutcome.SUPERSEDED):
-                    # It could have been used, or is for another run than the
-                    # caller's, which the task's state explains better: the task
-                    # is why it is not used. (A reason about the approval itself
-                    # - revoked, used, for another call - is the more precise
-                    # one.)
-                    outcome = CONSUME_TASK_REFUSAL[activity]
-                return outcome
+        # Then the approval's own row (the task before the approval, as in every
+        # other path). The time is read only now: either lock may have been
+        # waited for, and an approval that expired while it was is expired.
+        locked = await (
+            await connection.execute(_LOCK_APPROVAL, {"id": approval_id})
+        ).fetchone()
+        now = moment.read()
+        # The row is locked, so nothing changes it until this transaction ends:
+        # what explains a refusal below is what the UPDATE saw.
+        record = None if locked is None else _record_of_values(locked)
+        if activity is not TaskActivity.ACTIVE:
+            outcome = diagnose_consume(record, binding, now)
+            if outcome in (ConsumeOutcome.CONSUMED, ConsumeOutcome.SUPERSEDED):
+                # It could have been used, or is for another run than the
+                # caller's, which the task's state explains better: the task
+                # is why it is not used. (A reason about the approval itself
+                # - revoked, used, for another call - is the more precise
+                # one.)
+                outcome = CONSUME_TASK_REFUSAL[activity]
+            return outcome
         changed = await (
             await connection.execute(
                 _CONSUME,
@@ -683,9 +754,7 @@ class PostgresApprovalStore:
         ).fetchone()
         if changed is not None:
             return ConsumeOutcome.CONSUMED
-        outcome = diagnose_consume(
-            await _read_record(connection, approval_id), binding, now
-        )
+        outcome = diagnose_consume(record, binding, now)
         if outcome is ConsumeOutcome.CONSUMED:
             # Consumable now, but it was not when our update ran: not ours.
             outcome = ConsumeOutcome.PENDING
