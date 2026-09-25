@@ -20,7 +20,8 @@ What one call of :meth:`~ProjectTaskStopper.stop_project_tasks` does
    also the "stop" for a project that has no row.
 2. Lists at most ``batch_size`` active tasks of the project (queued, running,
    waiting, paused, evaluating; oldest first), by a plain read of ``tasks``.
-3. For each: cancels its active **queue entry** (``TaskQueue.cancel``: the entry
+3. For each (after reading the project again: see "Restore during a batch"):
+   cancels its active **queue entry** (``TaskQueue.cancel``: the entry
    can no longer be claimed and a worker that holds it loses its lease), then
    issues the PAW-032 **Cancel** command through ``TaskService.execute`` with
    ``Actor.policy()`` and a fixed reason. Task state is never written directly:
@@ -38,10 +39,11 @@ What one call of :meth:`~ProjectTaskStopper.stop_project_tasks` does
    state of the task (``queue_entries`` joined to ``tasks``; at most
    ``batch_size``) and cancels each one with ``TaskQueue.cancel``. The same sweep
    also finds an entry that appeared after the request was processed (a rerun).
-   It re-reads the project first and does nothing for a project that is not (or
-   no longer) Pending deletion or Deleted. The queue's state machine is not
-   changed: an entry of a task that is already terminal is only cancelled (a
-   worker that still held it loses its lease). Decision 0008, section 8, item 7.
+   It re-reads the project first, and again before EACH entry, and does nothing
+   for a project that is not (or no longer) Pending deletion or Deleted. The
+   queue's state machine is not changed: an entry of a task that is already
+   terminal is only cancelled (a worker that still held it loses its lease).
+   Decision 0008, section 8, item 7.
 5. In one short transaction that holds ``SELECT ... FOR SHARE`` on the project
    row (so the project cannot be restored or changed in between), checks that no
    active task AND no active queue entry of the project's tasks is left and only
@@ -88,11 +90,27 @@ What the caller must do (limits)
   such an entry, also that of a task that is already terminal (tests:
   ``test_a_task_created_after_the_deletion_began_is_stopped_on_a_rerun``,
   ``test_an_entry_of_a_finished_task_is_found_by_project_on_a_rerun``).
-* A restore that commits between the read of step 1 (or the re-read of the
-  sweep, step 4) and a command lets that command cancel a task (or a queue
-  entry) of a project that has just been restored (a task can be restarted). The
-  window is one task or queue command; closing it would need the task service
-  and the queue to share a transaction with the project row.
+* **Restore during a batch.** The ids of a batch are listed in one read, and a
+  batch is up to ``batch_size`` (default 100) tasks or entries; a Restore can
+  commit at any time in between. So the project is read again before EACH task
+  (step 3) and before each stray entry (step 4), and the loop stops at the first
+  read that shows a project that is not Pending deletion / Deleted any more (a
+  Restore, or a restore followed by a NEW deletion: the state counts, not the
+  request, so that project is stopped again). The tasks and entries cancelled
+  before the Restore stay cancelled (a task can be restarted); none after it is
+  touched. A project that was restored is not stopped further: ``_finish`` finds
+  it neither Pending deletion nor Deleted, marks the (moot) request processed and
+  ``done`` is true. Cost: one extra plain read (no lock) per task and per entry.
+  What remains: the read and the commands are not one atomic step, so a Restore
+  that commits after the read of a task and before the end of ITS commands (the
+  queue cancel and the Cancel are one unit: a restored task must not be left
+  queued without its entry) still lets that ONE task (or one entry) be
+  cancelled. Closing it needs the task service and the queue to run their
+  commands under ``FOR SHARE`` on the project row (Decision 0008, section 5).
+  Holding that lock here, in a transaction of its own around the two calls, was
+  rejected: it would take a second pooled connection per stopper, and every
+  Restore would wait (``ProjectBusyError`` after the lock timeout) for as long as
+  the task service and its listeners, which this module does not bound, take.
 * ``tasks.project_id`` has no index (PAW-032): the list reads ``tasks`` by a
   sequential scan until the task lane adds one on ``(project_id, state)``.
 
@@ -225,8 +243,16 @@ class ProjectTaskStopper:
         stopped: list[uuid.UUID] = []
         entries = 0
         for task_id in task_ids:
+            # The ids were listed a moment ago; a Restore may have committed since
+            # (also while an earlier task was being cancelled). One read per task:
+            # the rest of the batch is left alone as soon as the project is live.
+            if not await self._is_stopping(project_id):
+                break
             # The entry first: if this run stops here, the task is still active
             # and the next run repeats it (a cancelled task would not be listed).
+            # Entry and Cancel are one unit: after the entry, the Cancel follows
+            # even if a Restore committed in between (a restored task left
+            # queued without its entry would never run again).
             if await self._queue.cancel(task_id):
                 entries += 1
             if await self._cancel(task_id):
@@ -259,8 +285,9 @@ class ProjectTaskStopper:
 
         Found through the project, not through the state of the task: a raced
         Restart can leave an active entry behind a terminal task (module
-        docstring, step 4). The project is read again first, so a project that
-        was restored since the first read keeps its entries. At most
+        docstring, step 4). The project is read again first and before EACH entry
+        (``_is_stopping``), so a project that was restored since the first read,
+        or during the sweep, keeps the entries not cancelled yet. At most
         ``batch_size`` entries; ``_finish`` keeps the request open if more remain.
         """
         async with self._transaction() as session:
@@ -276,9 +303,28 @@ class ProjectTaskStopper:
             )
         cancelled = 0
         for task_id in task_ids:
+            # Same as in ``stop_project_tasks``: one read per entry, so a Restore
+            # that commits during the sweep keeps the entries not yet cancelled.
+            if not await self._is_stopping(project_id):
+                break
             if await self._queue.cancel(task_id):
                 cancelled += 1
         return cancelled
+
+    async def _is_stopping(self, project_id: uuid.UUID) -> bool:
+        """Whether the project is still Pending deletion (or Deleted): read now.
+
+        A plain read in its own short transaction (it waits for no lock), made
+        before EACH task and each stray entry: the loops must not go on with ids
+        that were listed while the project was Pending deletion once a Restore
+        has committed. It does not lock the project (see the module docstring for
+        the window that stays and why).
+        """
+        async with self._transaction() as session:
+            project = await store.get_project(session, project_id)
+        if project is None:
+            raise ProjectNotFoundError()
+        return project.status in _STOPPING
 
     async def _finish(self, project_id: uuid.UUID) -> bool:
         """Mark the request processed if nothing is active; ``True`` when it is.

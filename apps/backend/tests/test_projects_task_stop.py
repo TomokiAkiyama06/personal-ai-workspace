@@ -12,6 +12,7 @@ and once as the unprivileged application role (``test_projects_grants``).
 
 import asyncio
 import unittest
+import unittest.mock
 from datetime import timedelta
 from typing import Any
 from uuid import UUID, uuid4
@@ -28,6 +29,7 @@ from paw_backend.projects import (
     ProjectStatus,
     ProjectTaskStopper,
     TaskStopResult,
+    store,
 )
 from paw_backend.projects.task_stop import STOP_REASON
 from paw_backend.tasks import (
@@ -542,6 +544,203 @@ class StopProjectTasksTest(TaskStopTestCase):
         self.assertEqual((result.cancelled_entries, result.done), (1, True))
         self.assertEqual(self.entry_statuses(running), ["cancelled"])
         self.assertEqual(self.entry_statuses(finished), ["queued"])
+
+    # -- a Restore that commits in the middle of a batch ------------------------------
+
+    async def seed_queued(self, count: int) -> list[UUID]:
+        """``count`` queued tasks of the project, each with an active queue entry."""
+        return [await self.seed_task(TaskState.QUEUED) for _ in range(count)]
+
+    def cancelled_tasks(self, task_ids: list[UUID]) -> list[UUID]:
+        return [t for t in task_ids if self.task_state(t) == "cancelled"]
+
+    def assert_alive(self, task_ids: list[UUID]) -> None:
+        """Untouched: the task is still queued and so is its queue entry."""
+        for task_id in task_ids:
+            self.assertEqual(self.task_state(task_id), "queued")
+            self.assertEqual(self.entry_statuses(task_id), ["queued"])
+
+    def restoring_service(self) -> TaskService:
+        """A task service that restores the project after its first Cancel."""
+        service, manager, project_id = self.service, self.manager, self.project_id
+        restored: list[bool] = []
+
+        class Restoring(TaskService):
+            async def execute(self, task_id, command, **options):
+                result = await super().execute(task_id, command, **options)
+                if not restored:
+                    restored.append(True)
+                    await service.restore(manager, project_id)
+                return result
+
+        return Restoring(self.database)
+
+    async def test_a_restore_between_two_tasks_stops_the_batch(self):
+        # Six active tasks; the project is restored right after the first one was
+        # stopped. The other five belong to a live (Archived) project now: they
+        # must not be cancelled just because they were listed while it was
+        # Pending deletion.
+        tasks = await self.seed_queued(6)
+        await self.begin_deletion()
+        stopper = self.new_stopper(self.restoring_service())
+
+        result = await stopper.stop_project_tasks(self.project_id)
+
+        self.assertEqual(self.status(), "archived")
+        self.assertEqual(len(result.stopped), 1)
+        self.assertEqual(self.cancelled_tasks(tasks), list(result.stopped))
+        self.assertEqual(result.cancelled_entries, 1)
+        (first,) = result.stopped
+        self.assertEqual(self.entry_statuses(first), ["cancelled"])
+        self.assert_alive([t for t in tasks if t != first])
+        # The request is moot (the deletion was restored): processed, nothing left
+        # for the orchestrator to call again, and no task of the live project hurt.
+        self.assertTrue(result.done)
+        self.assertEqual(self.outbox()["processed_at"], self.clock.now)
+
+    async def test_a_restore_between_the_entry_and_the_cancel_finishes_that_task(self):
+        # The restore commits after the queue entry of the first task was
+        # cancelled: that task is finished (its Cancel follows, so it is not left
+        # queued without an entry), the next ones are not started.
+        tasks = await self.seed_queued(6)
+        service, manager, project_id = self.service, self.manager, self.project_id
+        restored: list[bool] = []
+
+        class Restoring(TaskQueue):
+            async def cancel(self, task_id, now=None):
+                cancelled = await super().cancel(task_id, now)
+                if not restored:
+                    restored.append(True)
+                    await service.restore(manager, project_id)
+                return cancelled
+
+        await self.begin_deletion()
+        stopper = ProjectTaskStopper(
+            self.database,
+            TaskService(self.database),
+            Restoring(self.database),
+            clock=self.clock,
+        )
+
+        result = await stopper.stop_project_tasks(self.project_id)
+
+        self.assertEqual(self.status(), "archived")
+        self.assertEqual(len(result.stopped), 1)
+        (first,) = result.stopped
+        self.assertEqual(self.cancelled_tasks(tasks), [first])
+        self.assertEqual(self.entry_statuses(first), ["cancelled"])
+        self.assertEqual(result.cancelled_entries, 1)
+        self.assert_alive([t for t in tasks if t != first])
+        self.assertTrue(result.done)
+
+    async def test_a_restore_after_the_ids_were_listed_cancels_nothing(self):
+        # The restore commits between the list of the ids and the first command.
+        tasks = await self.seed_queued(6)
+        service, manager, project_id = self.service, self.manager, self.project_id
+        select = store.select_active_task_ids
+        restored: list[bool] = []
+
+        async def listing_then_restore(session, project, limit):
+            found = await select(session, project, limit)
+            if not restored:
+                restored.append(True)
+                await service.restore(manager, project_id)
+            return found
+
+        await self.begin_deletion()
+        with unittest.mock.patch.object(
+            store, "select_active_task_ids", listing_then_restore
+        ):
+            result = await self.new_stopper().stop_project_tasks(self.project_id)
+
+        self.assertEqual(self.status(), "archived")
+        self.assertEqual(result, TaskStopResult(self.project_id, (), 0, done=True))
+        self.assert_alive(tasks)
+
+    async def test_a_restore_between_two_stray_entries_stops_the_sweep(self):
+        # Six terminal tasks that still have an active entry each (found by the
+        # sweep only). Restored after the first entry was cancelled.
+        finished = [await self.seed_task(TaskState.CANCELLED) for _ in range(6)]
+        for task_id in finished:
+            await self.seed_queue.enqueue(task_id)
+        service, manager, project_id = self.service, self.manager, self.project_id
+        restored: list[bool] = []
+
+        class Restoring(TaskQueue):
+            async def cancel(self, task_id, now=None):
+                cancelled = await super().cancel(task_id, now)
+                if not restored:
+                    restored.append(True)
+                    await service.restore(manager, project_id)
+                return cancelled
+
+        await self.begin_deletion()
+        stopper = ProjectTaskStopper(
+            self.database,
+            TaskService(self.database),
+            Restoring(self.database),
+            clock=self.clock,
+        )
+
+        result = await stopper.stop_project_tasks(self.project_id)
+
+        self.assertEqual(self.status(), "archived")
+        self.assertEqual((result.stopped, result.cancelled_entries), ((), 1))
+        statuses = sorted(self.entry_statuses(t)[0] for t in finished)
+        self.assertEqual(statuses, ["cancelled"] + ["queued"] * 5)
+        self.assertTrue(result.done)
+        self.assertEqual(self.outbox()["processed_at"], self.clock.now)
+
+    async def test_a_restore_after_the_stray_entries_were_listed_cancels_none(self):
+        finished = [await self.seed_task(TaskState.CANCELLED) for _ in range(6)]
+        for task_id in finished:
+            await self.seed_queue.enqueue(task_id)
+        service, manager, project_id = self.service, self.manager, self.project_id
+        select = store.select_active_entry_task_ids
+        restored: list[bool] = []
+
+        async def listing_then_restore(session, project, limit):
+            found = await select(session, project, limit)
+            if not restored:
+                restored.append(True)
+                await service.restore(manager, project_id)
+            return found
+
+        await self.begin_deletion()
+        with unittest.mock.patch.object(
+            store, "select_active_entry_task_ids", listing_then_restore
+        ):
+            result = await self.new_stopper().stop_project_tasks(self.project_id)
+
+        self.assertEqual(self.status(), "archived")
+        self.assertEqual(result, TaskStopResult(self.project_id, (), 0, done=True))
+        self.assertEqual([self.entry_statuses(t) for t in finished], [["queued"]] * 6)
+
+    async def test_a_project_that_is_deleted_again_keeps_being_stopped(self):
+        # The recheck looks at the state, not at the request: a restore followed by
+        # a NEW deletion leaves a Pending deletion project, whose tasks are stopped.
+        tasks = await self.seed_queued(4)
+        service, manager, project_id = self.service, self.manager, self.project_id
+        again: list[bool] = []
+
+        class Flapping(TaskService):
+            async def execute(self, task_id, command, **options):
+                result = await super().execute(task_id, command, **options)
+                if not again:
+                    again.append(True)
+                    await service.restore(manager, project_id)
+                    await service.begin_deletion(manager, project_id, "Alpha")
+                return result
+
+        await self.begin_deletion()
+        result = await self.new_stopper(Flapping(self.database)).stop_project_tasks(
+            self.project_id
+        )
+
+        self.assertEqual(self.status(), "pending_deletion")
+        self.assertEqual(sorted(result.stopped), sorted(tasks))
+        self.assertTrue(result.done)
+        self.assertEqual(self.cancelled_tasks(tasks), list(result.stopped))
 
     async def test_more_stray_entries_than_a_batch_need_several_runs(self):
         finished = [await self.seed_task(TaskState.CANCELLED) for _ in range(3)]
