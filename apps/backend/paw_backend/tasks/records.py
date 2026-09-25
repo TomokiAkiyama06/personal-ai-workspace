@@ -168,7 +168,9 @@ class TaskEvent:
 class TaskSnapshot:
     """Everything a new process or a reconnecting client needs to see a task.
 
-    Built only from the database by ``TaskService.restore``.
+    Built only from the database by ``TaskService.restore``. It has no working set
+    (the repositories of a Multi-Repo task and their roles): that is outside
+    PAW-032, see ``docs/decisions/0014-task-working-set-persistence.md``.
     """
 
     id: uuid.UUID
