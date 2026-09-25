@@ -12,25 +12,31 @@ used by every user through the backend. The credential is never a user's.
 Quota
 -----
 A quota is a limit on one :class:`QuotaMetric` over one :class:`QuotaPeriod` for
-one user and one connection kind. The limit is a number or :data:`UNLIMITED`
-(explicit: "no row" is not "unlimited", see ``ConnectionService.execute``). The rule
-of the module is one comparison, ``used >= limit``: the quota is *reached* when
-what was used already equals the limit (a limit of 0 blocks everything). It is
-applied to a call that starts a NEW task only (Decision 0016, section 3).
+one user and one connection kind. The limit is a number or :data:`UNLIMITED`. A
+quota that is not set is **not enforced** (Decision 0016, section 2, approved on
+2026-09-26: a user, metric or period without a row is unlimited; ``UNLIMITED`` is the
+explicit spelling of the same thing). The rule of the module is one comparison,
+``used >= limit``: a set quota is *reached* when what was used already equals the
+limit (a limit of 0 blocks everything). It is applied to a call that starts a NEW
+task only (Decision 0016, section 3).
 
 Windows
 -------
 ``rolling_5h`` is the last five hours; ``day``, ``week`` and ``month`` are calendar
-periods in the configured time zone (a week starts on Monday), so a calendar window
-has a fixed start and a fixed end while a rolling one has neither. The instant is
-always the DATABASE's clock (read by the store after the row locks are held); this
-module only turns an instant into the start and the end of a window.
+periods in the configured time zone (:data:`DEFAULT_PERIOD_TIMEZONE`, ``Asia/Tokyo``:
+Decision 0016, section 4; a week is the calendar week, starting on Monday), so a
+calendar window has a fixed start and a fixed end while a rolling one has neither.
+The instant is always the DATABASE's clock (read by the store after the row locks are
+held); this module only turns an instant into the start and the end of a window.
 """
 
 from datetime import UTC, date, datetime, time, timedelta, tzinfo
 from enum import StrEnum
 
 from paw_backend.connections.limits import ROLLING_WINDOW_HOURS
+
+# The time zone of the calendar periods (day, week, month) when none is configured.
+DEFAULT_PERIOD_TIMEZONE = "Asia/Tokyo"
 
 
 class ConnectionKind(StrEnum):
@@ -52,7 +58,7 @@ class UsagePurpose(StrEnum):
     """Why a call was made: a closed usage category, never text (privacy-safe).
 
     ``REQUIREMENTS.md`` asks for "usage category" analytics without raw chat
-    text and defines no list; this set is proposed in Decision 0016.
+    text and defines no list; this set is the one approved in Decision 0016.
     """
 
     CHAT = "chat"
@@ -128,23 +134,24 @@ class RefusalReason(StrEnum):
     TASK_ENDED = "task_ended"
     TASK_SUPERSEDED = "task_superseded"
     CONNECTION_UNAVAILABLE = "connection_unavailable"
-    QUOTA_NOT_CONFIGURED = "quota_not_configured"
     QUOTA_EXCEEDED = "quota_exceeded"
     TASK_BUDGET_EXCEEDED = "task_budget_exceeded"
     TASK_BUDGET_NOT_CONFIGURED = "task_budget_not_configured"
 
 
-def window_start(period: QuotaPeriod, now: datetime, zone: tzinfo = UTC) -> datetime:
-    """The instant (UTC) the window of ``period`` that contains ``now`` began."""
+def window_start(period: QuotaPeriod, now: datetime, zone: tzinfo) -> datetime:
+    """The instant (UTC) the window of ``period`` that contains ``now`` began.
+
+    ``zone`` is the time zone of the calendar periods; there is no default here on
+    purpose (the caller has the configured one).
+    """
     _require_aware(now)
     if period is QuotaPeriod.ROLLING_5H:
         return now.astimezone(UTC) - timedelta(hours=ROLLING_WINDOW_HOURS)
     return _midnight(_first_day(period, now.astimezone(zone).date()), zone)
 
 
-def window_end(
-    period: QuotaPeriod, now: datetime, zone: tzinfo = UTC
-) -> datetime | None:
+def window_end(period: QuotaPeriod, now: datetime, zone: tzinfo) -> datetime | None:
     """The instant (UTC) the window that contains ``now`` ends and the count starts
     again; ``None`` for a rolling window (it never resets at one moment)."""
     _require_aware(now)

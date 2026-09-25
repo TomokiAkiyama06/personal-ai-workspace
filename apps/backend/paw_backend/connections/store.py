@@ -53,12 +53,13 @@ moves time without sleeping; production code builds ``ConnectionStore(database)`
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime, tzinfo
+from datetime import datetime, tzinfo
 from typing import Any
 
 import psycopg
 
 from paw_backend.connections.domain import (
+    DEFAULT_PERIOD_TIMEZONE,
     UNLIMITED,
     ConnectionKind,
     ConnectionStatus,
@@ -86,6 +87,7 @@ from paw_backend.connections.records import (
 from paw_backend.connections.validation import (
     validate_bool,
     validate_seconds,
+    zone_of,
 )
 from paw_backend.db import Database
 from paw_backend.tasks.domain import TaskRun
@@ -258,7 +260,7 @@ class ConnectionStore:
         database: Database,
         *,
         timeout_seconds: float = DEFAULT_DATABASE_TIMEOUT_SECONDS,
-        zone: tzinfo = UTC,
+        zone: tzinfo | None = None,
         clock: Callable[[], datetime] | None = None,
         allow_explicit_clock: bool = False,
     ) -> None:
@@ -274,6 +276,8 @@ class ConnectionStore:
         validate_seconds(
             "timeout_seconds", timeout_seconds, MAX_DATABASE_TIMEOUT_SECONDS
         )
+        if zone is None:
+            zone = zone_of(DEFAULT_PERIOD_TIMEZONE)
         if not isinstance(zone, tzinfo):
             raise InvalidConnectionInputError("zone", InputProblem.WRONG_TYPE)
         validate_bool("allow_explicit_clock", allow_explicit_clock)
@@ -445,6 +449,13 @@ class ConnectionStore:
 
     # --- quotas ---------------------------------------------------------------------
 
+    async def read_system_role(self, user_id: uuid.UUID) -> str | None:
+        """The stored system role of a user (``None`` if the user does not exist)."""
+        rows = await self._fetch(
+            "SELECT system_role FROM users WHERE id = %(user)s", {"user": user_id}
+        )
+        return rows[0][0] if rows else None
+
     async def upsert_quota(
         self,
         user_id: uuid.UUID,
@@ -598,8 +609,10 @@ class ConnectionStore:
         task that has used this connection before is a CONTINUING task: it is
         admitted whatever the quotas say (a running task is not cut off, Decision
         0016, section 3) and still recorded. A call that starts a new task needs
-        at least one quota for the user and kind (else ``QUOTA_NOT_CONFIGURED``:
-        no quota is not unlimited) and every limited quota must be below its limit.
+        every quota that IS set for the user and kind to be below its limit; a quota
+        that is not set (no row at all, or no row for a metric or a period) is not
+        enforced (Decision 0016, section 2), and ``UNLIMITED`` is the explicit way to
+        say the same.
         """
 
         async def work(connection: psycopg.AsyncConnection) -> Admitted | Refused:
@@ -647,10 +660,6 @@ class ConnectionStore:
 
             now = await self._instant(connection)  # after the locks
             if not continuing:
-                if not quotas:
-                    return Refused(
-                        RefusalReason.QUOTA_NOT_CONFIGURED, project_id=project_id
-                    )
                 sums: dict[datetime, _Sums] = {}
                 for metric, period, limit in quotas:
                     if limit is None:  # Unlimited

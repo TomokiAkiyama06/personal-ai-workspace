@@ -18,7 +18,6 @@ from paw_backend.connections import (
     ConnectionUnavailableError,
     FailureCode,
     QuotaExceededError,
-    QuotaNotConfiguredError,
     RefusalReason,
     TaskNotUsableError,
     UsagePurpose,
@@ -185,6 +184,22 @@ class HappyPathTest(ExecuteCase):
         (event,) = self.sink.events
         self.assertEqual((event.actor_id, event.actor_role), (self.user, "user"))
         self.assertEqual(event.resource_kind, "connection")
+
+    async def test_a_user_without_any_quota_may_call_and_is_attributed(self):
+        # Quota unset = unlimited (Decision 0016, section 2): the call is allowed,
+        # attributed to the user and the task, and audited like any other.
+        stranger = self.seed_user()
+        task = self.seed_task(stranger)
+        result = await self.call(
+            principal=self.principal(stranger),
+            context=self.context(task, stranger, self.project_of(task)),
+        )
+        self.assertEqual(result.text, "an answer")
+        (row,) = self.usage_rows(stranger)
+        self.assertEqual((row["user_id"], row["task_id"]), (stranger, task))
+        self.assertEqual(
+            self.audit_actions(), [("agent.use", "allow", "granted_to_resource_owner")]
+        )
 
     async def test_an_owner_uses_the_connection_for_their_own_task_like_anyone(self):
         task = self.seed_task(self.owner)
@@ -682,20 +697,6 @@ class RefusalTest(ExecuteCase):
             await self.call()
         self.assertNothingRan()
         self.assertRefusalAudited("connection_unavailable", project=False)
-
-    async def test_a_user_without_any_quota_may_not_start_a_new_task(self):
-        stranger = self.seed_user()
-        task = self.seed_task(stranger)
-        with self.assertRaises(QuotaNotConfiguredError):
-            await self.call(
-                principal=self.principal(stranger),
-                context=self.context(task, stranger, self.project_of(task)),
-            )
-        self.assertNothingRan()
-        (event,) = self.refusals()
-        self.assertEqual(
-            (event.reason, event.actor_id), ("quota_not_configured", stranger)
-        )
 
     async def test_a_principal_that_is_not_the_delegating_user_is_denied(self):
         other = self.seed_user()

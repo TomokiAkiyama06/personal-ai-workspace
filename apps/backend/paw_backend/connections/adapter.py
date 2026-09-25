@@ -4,8 +4,9 @@ An adapter is the only code that talks to Codex or Claude. It is **backend code*
 (never a user's or an agent's) and gets a credential only as a
 :class:`~paw_backend.connections.secret.Secret`, resolved by the service from the
 connection's handle for the duration of one call. No adapter ships in this package:
-a real one needs the provider's terms of use for the credential (Decision 0016) and
-a network policy; tests use in-memory doubles.
+a real one needs the secret store and a network policy (the provider's terms for a
+shared subscription were confirmed by the human on 2026-09-26, Decision 0016);
+tests use in-memory doubles.
 
 The interface (``ConnectionAdapter``)
 -------------------------------------

@@ -121,19 +121,6 @@ class TargetUserNotFoundError(ConnectionsError):
         super().__init__("User not found")
 
 
-class QuotaNotConfiguredError(ConnectionsError):
-    """The user has no quota for this connection, so a new task may not start.
-
-    "No quota" is not "unlimited": an Owner / Admin sets a number or Unlimited
-    explicitly (Decision 0016, section 2).
-    """
-
-    code = "quota_not_configured"
-
-    def __init__(self) -> None:
-        super().__init__("No quota is configured for this connection")
-
-
 class QuotaExceededError(ConnectionsError):
     """The user has reached a quota, so a new task may not start (typed refusal).
 

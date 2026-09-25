@@ -10,8 +10,10 @@ nothing that fails is echoed: the error names the field and a closed
 import math
 import unicodedata
 import uuid
+from datetime import UTC, tzinfo
 from enum import StrEnum
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from paw_backend.authz.subjects import to_uuid
 from paw_backend.connections.domain import UNLIMITED, Unlimited
@@ -154,6 +156,23 @@ def validate_page(limit: object, offset: object) -> tuple[int, int]:
         validate_int("limit", limit, 1, MAX_LIST_LIMIT),
         validate_int("offset", offset, 0, MAX_LIST_OFFSET),
     )
+
+
+def zone_of(name: object) -> tzinfo:
+    """The time zone of the calendar periods, by its IANA name (``"UTC"`` needs no
+    database of zones). An unknown name, a wrong type or a path-like name is refused.
+
+    A named zone (the default ``Asia/Tokyo`` too) needs the time zone database of the
+    system (``tzdata``); a host without it fails here, when the service is built.
+    """
+    if type(name) is not str:
+        raise fail("period_timezone", InputProblem.NOT_A_STRING)
+    if name == "UTC":
+        return UTC
+    try:
+        return ZoneInfo(name)
+    except (ValueError, LookupError, OSError):  # ZoneInfoNotFoundError is a KeyError
+        raise fail("period_timezone", InputProblem.NOT_ONE_OF) from None
 
 
 def require_type(field: str, value: object, expected: type[Any]) -> None:

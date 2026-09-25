@@ -7,14 +7,16 @@ and makes no network call and starts no process: the provider is reached only th
 a registered :class:`~paw_backend.connections.adapter.ConnectionAdapter` (none ships
 here) with a credential that only the secret store's resolver can produce
 (:mod:`~paw_backend.connections.secret`). The Orchestrator (PAW-034) calls
-:meth:`ConnectionService.execute`; an agent never does. Decision 0016 (Proposed) holds
-the product choices this code takes provisionally.
+:meth:`ConnectionService.execute`; an agent never does. Decision 0016 (Approved,
+2026-09-26) holds the product choices this code follows (quota semantics, periods,
+running tasks).
 
 Authorization (the existing capabilities of Decision 0004; none is added)
 -------------------------------------------------------------------------
 * ``connect``, ``replace_credential``, ``enable``, ``disable``, ``disconnect``,
   ``get_connection``, ``list_connections``: ``admin.config.manage`` (Owner / Admin);
-* ``set_quota``, ``remove_quota``: ``admin.quota.manage`` (Owner / Admin);
+* ``set_quota``, ``remove_quota``: ``admin.quota.manage`` (Owner / Admin), and the
+  quota of an Owner only by the Owner (Decision 0016, section 7);
 * ``quota_status``, ``list_usage`` of ANOTHER user: ``admin.usage.view``;
 * ``quota_status``, ``list_usage`` of one's OWN, ``availability`` and ``execute``:
   ``agent.use``, a ``Scope.SELF`` capability: the resource is owned by the user the
@@ -46,8 +48,8 @@ credential or a handle): the OUTCOME of every change of a connection or a quota
 ``.quota.set`` / ``.quota.remove``, allowed, reason ``succeeded``), a change of a
 connection's status (``connection.status``, reason = the new status; no actor when a
 health check found it), and every REFUSAL to start a call (``connection.use``, denied,
-reason = a ``RefusalReason``: ``quota_exceeded``, ``quota_not_configured``,
-``connection_unavailable``, ``task_*``). An allowed call is recorded as its usage row
+reason = a ``RefusalReason``: ``quota_exceeded``, ``connection_unavailable``,
+``task_*``, ``task_budget_*``). An allowed call is recorded as its usage row
 (user, task, project, kind, model, purpose, tokens, duration) and by the Authorizer's
 ``agent.use`` row; not a third time. These events are written AFTER the change or the
 refusal and are best effort (a failure is logged by exception type and does not undo
@@ -72,8 +74,10 @@ answer, scrubbed of the credential.
 
 A quota that is reached never interrupts a call that has started: the check is at the
 admission only, and a running TASK is not refused at its next call either (Decision
-0016, section 3); only a call that starts a new task is (``QuotaExceededError`` or
-``QuotaNotConfiguredError``, audited, with ``resets_at`` for a calendar window).
+0016, section 3); only a call that starts a new task is (``QuotaExceededError``,
+audited, with ``resets_at`` for a calendar window). A quota that is not set is not
+enforced: a user, metric or period without a row is unlimited (Decision 0016,
+section 2); the call is still attributed and audited.
 
 Failures of the call (``ConnectionCallError`` with a closed ``FailureCode``) are
 recorded and counted like any call. Cancelling the caller records the call as
@@ -98,8 +102,7 @@ import asyncio
 import logging
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime, tzinfo
-from zoneinfo import ZoneInfo
+from datetime import UTC, datetime
 
 from paw_backend.authz import (
     AuditEvent,
@@ -119,6 +122,7 @@ from paw_backend.connections.adapter import (
     validate_adapter_result,
 )
 from paw_backend.connections.domain import (
+    DEFAULT_PERIOD_TIMEZONE,
     ConnectionKind,
     ConnectionStatus,
     FailureCode,
@@ -137,7 +141,6 @@ from paw_backend.connections.errors import (
     ConnectionUnavailableError,
     InputProblem,
     QuotaExceededError,
-    QuotaNotConfiguredError,
     TargetUserNotFoundError,
     TaskBudgetError,
     TaskNotUsableError,
@@ -168,6 +171,7 @@ from paw_backend.connections.validation import (
     validate_quota_limit,
     validate_seconds,
     validate_uuid,
+    zone_of,
 )
 from paw_backend.db import Database
 from paw_backend.research.providers.broker import log_type_name
@@ -191,6 +195,7 @@ ACTION_USE = "connection.use"
 ACTION_QUOTA_SET = "connection.quota.set"
 ACTION_QUOTA_REMOVE = "connection.quota.remove"
 OUTCOME_SUCCEEDED = "succeeded"
+OWNER_ONLY = "owner_quota_owner_only"  # reason of the refusal (audit)
 
 _RESOURCE_CONNECTION = "connection"
 _RESOURCE_QUOTA = "connection_quota"
@@ -237,17 +242,6 @@ def _failure_code_of(error: BaseException) -> FailureCode:
     return FailureCode.INTERNAL_ERROR
 
 
-def _zone_of(name: object) -> tzinfo:
-    if type(name) is not str:
-        raise fail("period_timezone", InputProblem.NOT_A_STRING)
-    if name == "UTC":
-        return UTC
-    try:
-        return ZoneInfo(name)
-    except (ValueError, LookupError, OSError):  # ZoneInfoNotFoundError is a KeyError
-        raise fail("period_timezone", InputProblem.NOT_ONE_OF) from None
-
-
 class ConnectionService:
     """The shared Codex / Claude connections. See the module docstring."""
 
@@ -260,7 +254,7 @@ class ConnectionService:
         secrets: SecretResolver,
         *,
         budget: BudgetTracker | None = None,
-        period_timezone: str = "UTC",
+        period_timezone: str = DEFAULT_PERIOD_TIMEZONE,
         database_timeout_seconds: float = DEFAULT_DATABASE_TIMEOUT_SECONDS,
         health_timeout_seconds: float = DEFAULT_HEALTH_TIMEOUT_SECONDS,
         clock=None,
@@ -272,7 +266,8 @@ class ConnectionService:
         type, a bad time zone or number), not on the first call.
 
         ``period_timezone`` is the IANA zone of the calendar windows (``day``, ``week``,
-        ``month``); the default is UTC (Decision 0016, section 4). ``clock`` /
+        ``month``); the default is ``Asia/Tokyo`` (Decision 0016, section 4, approved;
+        it needs the system's time zone database). ``clock`` /
         ``allow_explicit_clock`` are the TEST SEAM of ``ConnectionStore``: production
         code passes neither, and every instant is the database's.
         """
@@ -291,7 +286,7 @@ class ConnectionService:
         self._store = ConnectionStore(
             database,
             timeout_seconds=database_timeout_seconds,
-            zone=_zone_of(period_timezone),
+            zone=zone_of(period_timezone),
             clock=clock,
             allow_explicit_clock=allow_explicit_clock,
         )
@@ -548,6 +543,9 @@ class ConnectionService:
             Resource(kind=_RESOURCE_QUOTA, id=user_id),
             correlation_id,
         )
+        await self._require_owner_for_owner_quota(
+            principal, user_id, ACTION_QUOTA_SET, correlation_id
+        )
         quota = await self._call_store(
             self._store.upsert_quota(user_id, kind, metric, period, limit)
         )
@@ -567,9 +565,9 @@ class ConnectionService:
         metric: QuotaMetric,
         period: QuotaPeriod,
     ) -> bool:
-        """Remove one limit. ``True`` if it existed. Removing the LAST quota of a user
-        and kind does not make them unlimited: a new task then needs a quota again
-        (``QuotaNotConfiguredError``)."""
+        """Remove one limit. ``True`` if it existed. What is not set is not enforced
+        (Decision 0016, section 2): removing the last quota of a user and kind makes
+        them unlimited for it; the calls stay attributed and audited."""
         self._actor(principal)
         user_id = validate_uuid("user_id", user_id)
         kind = validate_enum("kind", kind, ConnectionKind)
@@ -581,6 +579,9 @@ class ConnectionService:
             Capability.ADMIN_QUOTA_MANAGE,
             Resource(kind=_RESOURCE_QUOTA, id=user_id),
             correlation_id,
+        )
+        await self._require_owner_for_owner_quota(
+            principal, user_id, ACTION_QUOTA_REMOVE, correlation_id
         )
         removed = await self._call_store(
             self._store.delete_quota(user_id, kind, metric, period)
@@ -644,10 +645,10 @@ class ConnectionService:
 
         Refusals before the call starts (all audited as ``connection.use``, nothing
         written to the usage table): ``TaskNotUsableError``,
-        ``ConnectionUnavailableError``, ``QuotaNotConfiguredError``,
-        ``QuotaExceededError``, ``TaskBudgetError``. A call that started and did not
-        return an answer is ``ConnectionCallError`` (recorded, counted). A database
-        that does not answer in time is ``ConnectionBusyError``.
+        ``ConnectionUnavailableError``, ``QuotaExceededError``, ``TaskBudgetError``.
+        A call that started and did not return an answer is ``ConnectionCallError``
+        (recorded, counted). A database that does not answer in time is
+        ``ConnectionBusyError``.
         """
         self._actor(principal)
         require_type("context", context, TaskContext)
@@ -944,6 +945,32 @@ class ConnectionService:
         if not decision.allowed:
             raise ConnectionPermissionDeniedError(decision.reason)
 
+    async def _require_owner_for_owner_quota(
+        self,
+        principal: Principal,
+        user_id: uuid.UUID,
+        action: str,
+        correlation_id: uuid.UUID,
+    ) -> None:
+        """The quota of an Owner is changed by the Owner only (Decision 0016, section
+        7: an Admin does not manage the Owner, as in Decision 0004).
+
+        The target's role is read from the store, never taken from the caller. The
+        refusal is audited (``reason`` ``owner_quota_owner_only``) and is a
+        ``CAPABILITY_NOT_GRANTED`` denial. The read and the change are separate
+        statements: a role that changes between them is not a case this guards.
+        """
+        role = await self._call_store(self._store.read_system_role(user_id))
+        if (
+            role == SystemRole.OWNER.value
+            and principal.system_role is not SystemRole.OWNER
+        ):
+            await self._audit(
+                action, OWNER_ONLY, False, principal, correlation_id,
+                _RESOURCE_QUOTA, user_id,
+            )  # fmt: skip
+            raise ConnectionPermissionDeniedError(Reason.CAPABILITY_NOT_GRANTED)
+
     async def _authorize_view(self, principal: Principal, user_id: uuid.UUID) -> None:
         """One's own usage and quotas need ``agent.use`` (SELF); another user's need
         ``admin.usage.view``."""
@@ -1003,8 +1030,6 @@ class ConnectionService:
         if reason is RefusalReason.QUOTA_EXCEEDED and refused is not None:
             assert refused.metric is not None and refused.period is not None
             raise QuotaExceededError(refused.metric, refused.period, refused.resets_at)
-        if reason is RefusalReason.QUOTA_NOT_CONFIGURED:
-            raise QuotaNotConfiguredError()
         if reason in _TASK_REFUSALS:
             raise TaskNotUsableError(reason)
         if reason in (

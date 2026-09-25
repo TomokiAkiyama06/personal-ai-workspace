@@ -13,6 +13,7 @@ from paw_backend.connections.adapter import (
     validate_adapter,
 )
 from paw_backend.connections.domain import (
+    DEFAULT_PERIOD_TIMEZONE,
     UNLIMITED,
     ConnectionKind,
     ConnectionStatus,
@@ -40,7 +41,6 @@ from paw_backend.connections.errors import (
     InputProblem,
     InvalidConnectionInputError,
     QuotaExceededError,
-    QuotaNotConfiguredError,
     TargetUserNotFoundError,
     TaskBudgetError,
     TaskNotUsableError,
@@ -60,6 +60,7 @@ from paw_backend.connections.service import ConnectionService
 from paw_backend.connections.store import ConnectionStore
 
 __all__ = [
+    "DEFAULT_PERIOD_TIMEZONE",
     "UNLIMITED",
     "AdapterFailure",
     "AdapterInterfaceError",
@@ -90,7 +91,6 @@ __all__ = [
     "Quota",
     "QuotaExceededError",
     "QuotaMetric",
-    "QuotaNotConfiguredError",
     "QuotaPeriod",
     "QuotaUsage",
     "RefusalReason",

@@ -9,7 +9,7 @@ Shared Memory の管理（Owner / Admin の作成・編集・削除・復元、C
 Research の一時保存（[PAW-050](#research-scratch-store)、24 時間 TTL、期限切れを消す Janitor つき、HTTP の Endpoint はまだありません）と、Research Provider の Adapter Interface（[PAW-051](#research-provider-adapter)、実際の Provider（Direct Web、Docs、GitHub、OpenCode）はまだありません）と、外部の検索へ送る Query の最小化と送信の Audit（[PAW-053](#research-privacy-filter)、Audit の永続化はまだありません）も実装済みです。
 Claim と Source の対応・回答や Task からの追跡（[PAW-052](#evidence--claim-provenance)、HTTP の Endpoint はまだありません）も実装済みです。
 Project の作成・招待制の Membership・Lifecycle（Active / Archived / Pending deletion / Deleted）は [PAW-026](#project-crud--membership--lifecycle) で実装済みです（Service のみ。HTTP の Endpoint と Session はまだありません）。
-Workspace 共有の Codex / Claude Connection（Credential は不透明な Handle だけ）、User 別 Quota、User と Task への利用量の帰属は [PAW-030](#shared-codex--claude-connection) で実装済みです（Service のみ。実 Adapter と HTTP の Endpoint はまだありません。Quota の意味などは [Decision 0016](../../docs/decisions/0016-shared-connection-adapter-policy.md)（Proposed）の暫定の実装です）。
+Workspace 共有の Codex / Claude Connection（Credential は不透明な Handle だけ）、User 別 Quota、User と Task への利用量の帰属は [PAW-030](#shared-codex--claude-connection) で実装済みです（Service のみ。実 Adapter と HTTP の Endpoint はまだありません。Quota の意味・期間・実行中の Task の扱いは [Decision 0016](../../docs/decisions/0016-shared-connection-adapter-policy.md)（Approved、2026-09-26）に従います）。
 
 [Architecture](../../docs/ARCHITECTURE.md) に基づき、最終的に以下の機能を Backend 側で扱います。
 
@@ -1196,8 +1196,8 @@ Broker は呼び出しの**前**に判定します。次は、実際に実行す
 [PAW-030](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/26) で実装しました（`paw_backend/connections/`、Migration `0030`）。
 Migration `0030` の `down_revision` は `0026` です（鎖は `0001 → 0025 → 0032 → 0040 → 0021 → 0033 → 0031 → 0050 → 0046 → 0052 → 0026 → 0030`。統合時に並びを確認します。`users`（0021）と `tasks`（0032）が先にある必要があります）。
 設計は [要件](../../REQUIREMENTS.md) の「Shared Codex / Claude system connection」「User別Quota」と [SECURITY_RBAC_AUDIT](../../docs/SECURITY_RBAC_AUDIT.md) の External Agent authentication に従い、
-要件が決めていない点は **[Decision 0016（Proposed。未承認）](../../docs/decisions/0016-shared-connection-adapter-policy.md)** に推奨つきで置いています。この節の Quota の意味・期間・実行中の Task の扱いなどは、**承認されるまで暫定の実装**です。
-**HTTP の Endpoint はありません**（Session は PAW-022 以降）。**Network の呼び出しも Process の起動もしません。** Codex / Claude を実際に呼ぶ Adapter は含みません（Provider の規約で共有 Subscription の Credential が許されるかを、Human が確認するまで作りません）。
+要件が決めていない点は **[Decision 0016（Approved。2026-09-26）](../../docs/decisions/0016-shared-connection-adapter-policy.md)** にまとめています。この節の Quota の意味（**未設定は無制限**）・期間（既定の時間帯は **Asia/Tokyo**）・実行中の Task の扱いは、承認された方針です。
+**HTTP の Endpoint はありません**（Session は PAW-022 以降）。**Network の呼び出しも Process の起動もしません。** Codex / Claude を実際に呼ぶ Adapter は含みません（実 Adapter の前提だった Provider の規約は、共有 Subscription の利用が問題ないことを Human が確認済みです（2026-09-26）。実 Adapter は別の Issue で、Secret Store と Network の Policy が決まってから作ります）。
 
 Codex と Claude は Workspace 全体で共有する System-level Connection です。User ごとの Connection ではなく、**利用量だけが User と Task に帰属**し、User 別の Quota が適用されます。
 
@@ -1209,7 +1209,7 @@ service = ConnectionService(
     adapters,
     secrets,
     budget=budget_tracker,  # 任意。Task の Token Budget（PAW-033）
-    period_timezone="Asia/Tokyo",  # 既定は UTC
+    period_timezone="Asia/Tokyo",  # 暦の期間の時間帯。省略すると Asia/Tokyo
 )
 # Owner / Admin。Credential は Handle だけを渡す
 await service.connect(admin, ConnectionKind.CODEX, "cred_" + "0" * 32)
@@ -1291,10 +1291,10 @@ Health Check の結果は、確認した Credential（Handle）がまだ現在�
 | 期間 | 範囲 |
 | --- | --- |
 | `rolling_5h` | 直近 5 時間（終わりの時刻はない） |
-| `day` / `week` / `month` | 設定した時間帯（既定 UTC）の暦の日・週（月曜始まり）・月 |
+| `day` / `week` / `month` | 設定した時間帯（既定 `Asia/Tokyo`。`ConnectionService(period_timezone=)`）の暦の日・週（月曜始まり）・月 |
 
 - 判定は **「使った量 >= 上限」** の 1 つの比較です（上限 0 はすべて拒否）。1 つの指標に複数の期間、複数の指標を同時に設定でき、設定したものだけを、指標・期間の宣言順に判定して、最初に達したものを報告します。
-- **Quota が 1 つも無い User は、新しい Task を始められません**（`QuotaNotConfiguredError`）。最後の Quota を削除しても無制限にはなりません（Decision 0016 の 2 節）。
+- **設定していない Quota は判定しません（無制限）。** Quota の行が 1 つも無い User、Quota の無い指標・期間、Quota の無い種類は、新しい Task を始められます（Decision 0016 の 2 節。**2026-09-26 に Human が「未設定は無制限」を選びました。** 最初の実装は、Quota が 1 つも無い User の新しい Task を拒否していました（`QuotaNotConfiguredError`）が、この契約に置き換え、その Error と `quota_not_configured` の理由は無くしました）。設定した上限は従来どおり判定し、`UNLIMITED` の明示も有効です。最後の Quota を削除すると、その User はその種類で無制限になります。呼び出しは、無制限でも使用量の行として User と Task に帰属し、Authorizer の `agent.use` の行で記録されます。
 - **Quota は、その Connection をまだ使っていない Task の最初の呼び出し（新規の Task）だけを止めます。** すでに使った Task の以降の呼び出しは Quota に達していても通し、記録します（要件の「実行中Taskを原則完了させ、新規Taskのみ停止する」。Task が使う量の上限は Task の Budget）。
   始まった呼び出しは、Quota に達しても止めません（Decision 0016 の 3 節）。
 - `requests` と `tasks` は同時の呼び出しでも上限を超えません（下の Admission）。`tokens` と `runtime_seconds` は終わった呼び出しの分だけを数えるので、同時に始まった新規の Task は使った分だけ超えうる。
@@ -1314,7 +1314,7 @@ Health Check の結果は、確認した Credential（Handle）がまだ現在�
 **精算**（`finally` の中で、専用の Task として実行し、`execute` がその Task を保持して終わるまで待つ: Outcome・Token・Database の時計の経過時間を使用量の行へ書き、Token を Task の Budget へ加算。精算が終わる前に届いた Cancel（遅い間の Cancel、繰り返しの Cancel を含む）は、精算が終わってから伝えます。`asyncio.timeout` の中の `execute` は `TimeoutError` になります。`ToolRunner` の記録と同じ方式）、Credential を取り除いた結果の返却。
 
 - 失敗は `ConnectionCallError(failure)`（`FailureCode`: `rate_limited` / `unavailable` / `expired` / `timeout` / `invalid_response` / `internal_error`）。記録され、数えられます。呼び出し側の Cancel は `cancelled` として記録し、Cancel を伝えます。
-- 始める前の拒否は、使用量の行を書かず、Adapter も Resolver も呼びません: `TaskNotUsableError`（Task が無い・他人の・終了・古い Run）、`ConnectionUnavailableError`（未設定・無効・未確認・期限切れ・Adapter 無し。理由は 1 つに揃えます）、`QuotaNotConfiguredError`、`QuotaExceededError`（指標・期間・暦の期間の再開時刻 `resets_at`）、`TaskBudgetError`。
+- 始める前の拒否は、使用量の行を書かず、Adapter も Resolver も呼びません: `TaskNotUsableError`（Task が無い・他人の・終了・古い Run）、`ConnectionUnavailableError`（未設定・無効・未確認・期限切れ・Adapter 無し。理由は 1 つに揃えます）、`QuotaExceededError`（指標・期間・暦の期間の再開時刻 `resets_at`）、`TaskBudgetError`。
   Database が期限内に答えないときは `ConnectionBusyError`（何も変わっていません。書き込みは COMMIT の前に放棄され、Server も同じ限度で諦めます）。
 
 ### Task の Budget との関係（PAW-033）
@@ -1329,7 +1329,7 @@ Health Check の結果は、確認した Credential（Handle）がまだ現在�
 | 操作 | Capability | Resource |
 | --- | --- | --- |
 | `connect` / `replace_credential` / `enable` / `disable` / `disconnect` / `get_connection` / `list_connections` | `admin.config.manage`（Owner / Admin） | `connection` |
-| `set_quota` / `remove_quota` | `admin.quota.manage` | `connection_quota`（対象の User） |
+| `set_quota` / `remove_quota` | `admin.quota.manage`。Owner の Quota は Owner だけが変えられる（対象の Role は Store から読み、拒否は `connection.quota.set` / `.remove` の Deny、reason `owner_quota_owner_only`） | `connection_quota`（対象の User） |
 | 他の User の `quota_status` / `list_usage` | `admin.usage.view` | `connection_usage` |
 | 自分の `quota_status` / `list_usage`、`availability`、`execute` | `agent.use`（`Scope.SELF`。委任不可のまま） | 本人が所有する Resource |
 | `check_health` | なし（Backend 内部） | |
@@ -1353,14 +1353,15 @@ CHECK 制約が、状態と終了・時間・Token・失敗の種類の対応（
 
 ### 制限と未確認の点
 
+- **`Asia/Tokyo`（既定）などの名前つきの時間帯は、OS の時間帯 Database（`tzdata`）を使います。** 無い Host では `ConnectionService` の生成時に `InvalidConnectionInputError`（`period_timezone`）になります（`"UTC"` は不要）。
 - **PostgreSQL 18 以上が必要です。** Admission と書き込みは `Database.transact_abortable`（`transaction_timeout`。[Decision 0006](../../docs/decisions/0006-tool-broker-policy.md) で承認された要件）を使います。
-- **実 Adapter が無く、Provider の規約は未確認**（上）。実際の Codex / Claude では動かしていません。Adapter の Interface は In-memory の代役でだけ確かめています。
-- 実行中の Task は Quota で止まらない（暫定。Decision 0016 の 3 節）。`tokens` / `runtime_seconds` は終了後に数える。同時実行数、GPU 時間、期限付きの上限の一時緩和は未実装。
+- **実 Adapter がありません。** 実際の Codex / Claude では動かしていません（Provider の規約は確認済みで、実 Adapter の前提は満たされています）。Adapter の Interface は In-memory の代役でだけ確かめています。
+- 実行中の Task は Quota で止まらない（承認済み。Decision 0016 の 3 節）。`tokens` / `runtime_seconds` は終了後に数える。同時実行数、GPU 時間、期限付きの上限の一時緩和は未実装。
 - Process が Admission と精算の間で落ちた行は `in_flight` のまま残り、要求数にだけ数えられます（掃除は未実装）。精算に失敗した呼び出しは、答えを返し、失敗を Log（型名と使用量の ID）に残します。Task の Budget への加算は精算と別の Transaction です。
 - 精算と Budget の加算が終わるまで呼び出し側の Cancel を伝えないため、Database や Budget の Store が止まっていると、Cancel はその分（使用量の行は Database の期限まで。Budget の加算は `BudgetTracker` が中断できない接続を使うため上限なし）遅れます。Event Loop の終了で Task ごと Cancel された精算は防げず、行が `in_flight` のまま残ります。
 - Adapter の答えは 1,000,000 文字まで（Credential の Redact の上限 `tools.credentials.MAX_TEXT_CHARS` と同じ）です。超える答え、Credential の値の置き換えで超える答えは、途中で切らずに `invalid_response` の失敗にします（`redact_text` は長い文を切って印を付けるだけなので、黙って短くなった答えを成功として返さないため）。
 - Prompt の中身は検査しません（Credential の混入や Privacy の Filter は Orchestrator と Tool Broker の責務）。
-- 使用量の保存期間、集計、Admin の Graph は未実装。Owner の Quota を Admin が変えられる点、Step-up（PAW-023）が Credential の差し替えに効かない点は Decision 0016 に置きました。
+- 使用量の保存期間、集計、Admin の Graph は未実装。専用の Capability（#82）と、Credential の差し替え・削除への Step-up（PAW-023 の後）は、Decision 0016 で承認された後続の Issue です（今は `admin.config.manage` の通常の認可だけ）。
 - Health Check を動かす Scheduler と、状態の変化の Owner への通知は Orchestrator / 通知の Issue です。
 
 ### Test

@@ -10,8 +10,10 @@ valid call got as far as the database.
 import math
 import unittest
 import uuid
+from datetime import UTC
 from types import SimpleNamespace
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from paw_backend.authz import Authorizer, InMemoryAuditSink, Principal, SystemRole
 from paw_backend.authz.policy import Reason
@@ -467,6 +469,12 @@ class ConstructionTest(unittest.TestCase):
             (bad_flag.exception.field, bad_flag.exception.problem),
             ("allow_explicit_clock", InputProblem.NOT_A_BOOL),
         )
+
+    def test_the_store_defaults_to_the_zone_of_the_decision(self):
+        # Asia/Tokyo, not UTC (Decision 0016, section 4); an explicit zone wins.
+        database = Database(make_settings())
+        self.assertEqual(ConnectionStore(database)._zone, ZoneInfo("Asia/Tokyo"))
+        self.assertIs(ConnectionStore(database, zone=UTC)._zone, UTC)
 
     def test_the_store_checks_its_own_arguments(self):
         database = Database(make_settings())

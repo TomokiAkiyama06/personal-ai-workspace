@@ -5,6 +5,7 @@ import unittest
 import uuid
 from datetime import timedelta
 
+from paw_backend.authz import Principal, SystemRole
 from paw_backend.authz.policy import Reason
 from paw_backend.connections import (
     UNLIMITED,
@@ -244,7 +245,9 @@ class QuotaStatusTest(PostgresConnectionTestCase):
     async def asyncSetUp(self):
         await super().asyncSetUp()
         self.clock = FakeClock(T0)  # Thursday 2026-09-24 12:00 UTC
-        self.service = self.new_service(clock=self.clock, allow_explicit_clock=True)
+        self.service = self.new_service(
+            clock=self.clock, allow_explicit_clock=True, period_timezone="UTC"
+        )
         self.task = self.seed_task(self.user)
 
     async def status(self, user=None, kind=None):
@@ -346,6 +349,25 @@ class QuotaStatusTest(PostgresConnectionTestCase):
         self.assertEqual(
             by_period[MONTH].window_end.isoformat(), "2026-10-01T00:00:00+00:00"
         )
+
+    async def test_the_windows_follow_asia_tokyo_unless_another_zone_is_set(self):
+        # T0 is Thursday 2026-09-24 21:00 in Tokyo.
+        for period in (DAY, WEEK, MONTH):
+            self.seed_quota(self.user, 9, period=period.value)
+        default = self.new_service(clock=self.clock, allow_explicit_clock=True)
+        by_period = {
+            s.period: s
+            for s in await default.quota_status(self.principal(self.user), self.user)
+        }
+        expected = {
+            DAY: ("2026-09-23T15:00:00+00:00", "2026-09-24T15:00:00+00:00"),
+            WEEK: ("2026-09-20T15:00:00+00:00", "2026-09-27T15:00:00+00:00"),
+            MONTH: ("2026-08-31T15:00:00+00:00", "2026-09-30T15:00:00+00:00"),
+        }
+        for period, (start, end) in expected.items():
+            with self.subTest(period=period.value):
+                self.assertEqual(by_period[period].window_start.isoformat(), start)
+                self.assertEqual(by_period[period].window_end.isoformat(), end)
 
     async def test_the_list_is_ordered_by_kind_metric_and_period(self):
         for kind in (CLAUDE, CODEX):
@@ -503,6 +525,81 @@ class ListUsageTest(PostgresConnectionTestCase):
             with self.subTest(options=options):
                 with self.assertRaises(InvalidConnectionInputError):
                     await self.listing(**options)
+
+
+@requires_postgres
+class OwnerQuotaTest(PostgresConnectionTestCase):
+    """The quota of an Owner is changed by the Owner only (Decision 0016, section 7:
+    an Admin does not manage the Owner, as with the roles of Decision 0004)."""
+
+    async def test_an_admin_cannot_set_the_quota_of_the_owner(self):
+        with self.assertRaises(ConnectionPermissionDeniedError) as caught:
+            await self.service.set_quota(
+                self.principal(self.admin), self.owner, CODEX, REQUESTS, DAY, 0
+            )
+        self.assertEqual(caught.exception.reason, Reason.CAPABILITY_NOT_GRANTED)
+        self.assertEqual(quota_rows(self), [])
+        self.assertEqual(
+            self.audit_actions(),
+            [
+                ("admin.quota.manage", "allow", "granted_by_system_role"),
+                ("connection.quota.set", "deny", "owner_quota_owner_only"),
+            ],
+        )
+        denial = self.sink.events[1]
+        self.assertEqual(
+            (denial.actor_id, denial.resource_id), (self.admin, self.owner)
+        )
+
+    async def test_an_admin_cannot_remove_the_quota_of_the_owner(self):
+        self.seed_quota(self.owner, 7)
+        with self.assertRaises(ConnectionPermissionDeniedError) as caught:
+            await self.service.remove_quota(
+                self.principal(self.admin), self.owner, CODEX, REQUESTS, DAY
+            )
+        self.assertEqual(caught.exception.reason, Reason.CAPABILITY_NOT_GRANTED)
+        self.assertEqual(quota_rows(self, self.owner)[0]["limit_value"], 7)
+        self.assertEqual(
+            self.own_audit(),
+            [("connection.quota.remove", "deny", "owner_quota_owner_only")],
+        )
+
+    async def test_the_owner_may_set_and_remove_their_own_quota(self):
+        owner = self.principal(self.owner)
+        quota = await self.service.set_quota(owner, self.owner, CODEX, REQUESTS, DAY, 9)
+        self.assertEqual(quota.limit, 9)
+        self.assertTrue(
+            await self.service.remove_quota(owner, self.owner, CODEX, REQUESTS, DAY)
+        )
+
+    async def test_the_owner_and_an_admin_may_set_the_quota_of_users_and_admins(self):
+        other_admin = self.seed_user(system_role="admin")
+        for actor in (self.owner, self.admin):
+            for target in (self.user, other_admin):
+                with self.subTest(
+                    actor=actor == self.owner, target=target == self.user
+                ):
+                    await self.service.set_quota(
+                        self.principal(actor), target, CODEX, REQUESTS, DAY, 3
+                    )
+        # ... and the Owner those of an Admin.
+        await self.service.set_quota(
+            self.principal(self.owner), self.admin, CODEX, TOKENS, WEEK, 5
+        )
+
+    async def test_the_role_is_read_from_the_store_not_from_the_caller(self):
+        # A Principal that claims to be the Owner but is a User is refused by the
+        # capability first; the target's role is never taken from the caller.
+        forged = Principal(self.admin, SystemRole.USER)
+        with self.assertRaises(ConnectionPermissionDeniedError):
+            await self.service.set_quota(forged, self.owner, CODEX, REQUESTS, DAY, 1)
+        self.assertEqual(quota_rows(self), [])
+
+    async def test_a_target_that_does_not_exist_is_still_not_found(self):
+        with self.assertRaises(TargetUserNotFoundError):
+            await self.service.set_quota(
+                self.principal(self.admin), uuid.uuid4(), CODEX, REQUESTS, DAY, 1
+            )
 
 
 if __name__ == "__main__":

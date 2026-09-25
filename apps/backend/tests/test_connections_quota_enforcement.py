@@ -12,7 +12,6 @@ from paw_backend.connections import (
     ConnectionUnavailableError,
     QuotaExceededError,
     QuotaMetric,
-    QuotaNotConfiguredError,
     QuotaPeriod,
 )
 
@@ -38,14 +37,15 @@ MIDNIGHT = T0.replace(hour=0)  # 2026-09-24T00:00Z, a Thursday
 class QuotaCase(PostgresConnectionTestCase):
     """A connected Codex connection and a service whose clock the test moves."""
 
-    zone = "UTC"
+    zone: str | None = "UTC"  # None: the default of the service (Asia/Tokyo)
 
     async def asyncSetUp(self):
         await super().asyncSetUp()
         self.seed_connection(CODEX)
         self.clock = FakeClock(T0)
+        zone = {} if self.zone is None else {"period_timezone": self.zone}
         self.service = self.new_service(
-            clock=self.clock, allow_explicit_clock=True, period_timezone=self.zone
+            clock=self.clock, allow_explicit_clock=True, **zone
         )
 
     async def new_task_call(self, user=None, kind=CODEX, **request):
@@ -403,8 +403,7 @@ class RunningTaskTest(QuotaCase):
             self.principal(self.admin), self.user, CODEX, REQUESTS, DAY
         )
         await self.call_of(task)
-        with self.assertRaises(QuotaNotConfiguredError):
-            await self.new_task_call()
+        await self.assertAdmits()  # a user without quota rows is unlimited
 
     async def test_a_task_that_started_yesterday_continues_today(self):
         self.seed_quota(self.user, 0)
@@ -445,42 +444,87 @@ class RunningTaskTest(QuotaCase):
 
 
 @requires_postgres
-class NotConfiguredTest(QuotaCase):
-    """No quota is not unlimited: a limit or Unlimited is set explicitly."""
+class UnsetQuotaIsUnlimitedTest(QuotaCase):
+    """A quota that is not set is not enforced (Decision 0016, section 2, approved).
 
-    async def test_a_user_without_quota_rows_may_not_start_a_task(self):
-        with self.assertRaises(QuotaNotConfiguredError) as caught:
-            await self.new_task_call()
+    The contract used to be the opposite (a user without any quota could not start a
+    task, ``QuotaNotConfiguredError``); the human chose "unlimited" on 2026-09-26.
+    An explicit limit is still enforced, and ``UNLIMITED`` is still a valid value.
+    """
+
+    async def test_a_user_without_quota_rows_may_start_tasks_without_end(self):
+        for _ in range(12):
+            await self.assertAdmits()
+        self.assertEqual(len(self.usage_rows()), 12)
+
+    async def test_the_use_of_an_unset_user_is_attributed_and_audited(self):
+        result = await self.new_task_call()
+        (row,) = self.usage_rows()
+        self.assertEqual((row["id"], row["user_id"]), (result.usage_id, self.user))
         self.assertEqual(
-            str(caught.exception), "No quota is configured for this connection"
+            (row["kind"], row["status"], row["input_tokens"]),
+            ("codex", "succeeded", 10),
         )
-        self.assertEqual(self.usage_rows(), [])
+        self.assertEqual(
+            self.audit_actions(), [("agent.use", "allow", "granted_to_resource_owner")]
+        )
+        self.assertEqual([e for e in self.sink.events if e.decision == "deny"], [])
 
-    async def test_a_quota_of_the_other_kind_does_not_count(self):
-        self.seed_quota(self.user, None, kind=CLAUDE)
-        with self.assertRaises(QuotaNotConfiguredError):
-            await self.new_task_call(kind=CODEX)
+    async def test_a_quota_of_the_other_kind_does_not_apply(self):
+        self.seed_connection(CLAUDE, secret_handle=handle(2))
+        self.seed_quota(self.user, 0, kind=CLAUDE)
+        await self.assertAdmits(kind=CODEX)  # codex is unset: unlimited
+        await self.assertRefuses(
+            REQUESTS, DAY, datetime(2026, 9, 25, tzinfo=UTC), kind=CLAUDE
+        )
 
-    async def test_removing_the_last_quota_does_not_make_the_user_unlimited(self):
+    async def test_removing_the_last_quota_makes_the_user_unlimited_again(self):
+        self.seed_quota(self.user, 1)
+        await self.assertAdmits()
+        await self.assertRefuses(REQUESTS, DAY, datetime(2026, 9, 25, tzinfo=UTC))
+        await self.service.remove_quota(
+            self.principal(self.admin), self.user, CODEX, REQUESTS, DAY
+        )
+        await self.assertAdmits()
+
+    async def test_explicit_unlimited_is_still_valid_and_is_shown(self):
         await self.service.set_quota(
             self.principal(self.admin), self.user, CODEX, REQUESTS, DAY, UNLIMITED
         )
         await self.assertAdmits()
-        await self.service.remove_quota(
-            self.principal(self.admin), self.user, CODEX, REQUESTS, DAY
+        (status,) = await self.service.quota_status(
+            self.principal(self.user), self.user
         )
-        with self.assertRaises(QuotaNotConfiguredError):
-            await self.new_task_call()
-
-    async def test_a_single_unlimited_row_is_enough(self):
-        self.seed_quota(self.user, None, metric="tokens", period="month")
-        await self.assertAdmits()
+        self.assertEqual(
+            (status.limit, status.used, status.reached), (UNLIMITED, 1, False)
+        )
 
     async def test_only_the_configured_metrics_and_periods_are_enforced(self):
-        # A requests limit says nothing about tokens.
+        # A requests limit says nothing about tokens, and none about the other periods.
         self.seed_quota(self.user, 5, metric="requests", period="day")
         self.seed_usage(self.user, self.old_task(), started_at=MIDNIGHT, tokens=10**9)
         await self.assertAdmits()
+
+    async def test_an_explicit_limit_of_one_user_does_not_limit_another(self):
+        stranger = self.seed_user()
+        self.seed_quota(self.user, 0)
+        await self.assertRefuses(REQUESTS, DAY, datetime(2026, 9, 25, tzinfo=UTC))
+        await self.assertAdmits(user=stranger)
+
+    async def test_a_limit_that_is_set_later_applies_to_the_next_task_only(self):
+        for _ in range(3):
+            await self.assertAdmits()
+        await self.service.set_quota(
+            self.principal(self.admin), self.user, CODEX, REQUESTS, DAY, 3
+        )
+        await self.assertRefuses(REQUESTS, DAY, datetime(2026, 9, 25, tzinfo=UTC))
+
+    async def test_the_refusal_of_an_unset_quota_no_longer_exists(self):
+        import paw_backend.connections as connections
+        from paw_backend.connections import RefusalReason
+
+        self.assertFalse(hasattr(connections, "QuotaNotConfiguredError"))
+        self.assertNotIn("quota_not_configured", [r.value for r in RefusalReason])
 
 
 @requires_postgres
@@ -500,7 +544,9 @@ class TimeZoneTest(QuotaCase):
 
     async def test_the_same_instants_are_one_day_in_utc(self):
         # The control: the UTC service counts 14:30 and 15:01 as the same day.
-        utc_service = self.new_service(clock=self.clock, allow_explicit_clock=True)
+        utc_service = self.new_service(
+            clock=self.clock, allow_explicit_clock=True, period_timezone="UTC"
+        )
         self.seed_quota(self.user, 1)
         self.clock.now = datetime(2026, 9, 24, 14, 30, tzinfo=UTC)
         await self.assertAdmits()
@@ -527,6 +573,60 @@ class TimeZoneTest(QuotaCase):
             MONTH,
             datetime(2026, 10, 31, 15, tzinfo=UTC),  # November 1st, 00:00 JST
         )
+
+
+@requires_postgres
+class DefaultTimeZoneTest(QuotaCase):
+    """The calendar periods follow Asia/Tokyo unless another zone is set (Decision
+    0016, section 4, approved). T0 is Thursday 2026-09-24 21:00 in Tokyo."""
+
+    zone = None
+
+    async def test_a_day_ends_at_midnight_in_tokyo(self):
+        self.seed_quota(self.user, 1)
+        await self.assertAdmits()
+        await self.assertRefuses(
+            REQUESTS,
+            DAY,
+            datetime(2026, 9, 24, 15, 0, tzinfo=UTC),  # 00:00 JST
+        )
+        self.clock.now = datetime(2026, 9, 24, 14, 59, tzinfo=UTC)  # 23:59 JST
+        await self.assertRefuses(
+            REQUESTS, DAY, datetime(2026, 9, 24, 15, 0, tzinfo=UTC)
+        )
+        self.clock.now = datetime(2026, 9, 24, 15, 0, tzinfo=UTC)  # 00:00 JST
+        await self.assertAdmits()
+
+    async def test_a_week_is_the_calendar_week_starting_on_monday_in_tokyo(self):
+        self.seed_quota(self.user, 0, period="week")
+        # Monday 2026-09-28 00:00 JST is Sunday 2026-09-27 15:00 UTC.
+        await self.assertRefuses(
+            REQUESTS, WEEK, datetime(2026, 9, 27, 15, 0, tzinfo=UTC)
+        )
+
+    async def test_the_calls_of_sunday_night_in_tokyo_belong_to_the_old_week(self):
+        self.seed_quota(self.user, 1, period="week")
+        # Sunday 2026-09-27 23:30 JST = 14:30 UTC: the week that began on the 21st.
+        self.clock.now = datetime(2026, 9, 27, 14, 30, tzinfo=UTC)
+        await self.assertAdmits()
+        self.clock.now = datetime(2026, 9, 27, 14, 59, tzinfo=UTC)
+        await self.assertRefuses(
+            REQUESTS, WEEK, datetime(2026, 9, 27, 15, 0, tzinfo=UTC)
+        )
+        self.clock.now = datetime(2026, 9, 27, 15, 0, tzinfo=UTC)  # Monday 00:00 JST
+        await self.assertAdmits()
+
+    async def test_a_month_ends_at_midnight_of_the_last_day_in_tokyo(self):
+        self.seed_quota(self.user, 0, period="month")
+        await self.assertRefuses(
+            REQUESTS,
+            MONTH,
+            datetime(2026, 9, 30, 15, 0, tzinfo=UTC),  # Oct 1st JST
+        )
+
+    async def test_rolling_5h_does_not_depend_on_the_zone(self):
+        self.seed_quota(self.user, 0, period="rolling_5h")
+        await self.assertRefuses(REQUESTS, ROLLING, None)
 
 
 if __name__ == "__main__":
