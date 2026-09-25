@@ -8,7 +8,11 @@ the normalised arguments, the task and the requester (user and agent). It is
   that was just rejected),
 * ``approved`` or ``rejected`` once, by the human user the agent works for
   (never by the agent); a ``STRONG_APPROVAL`` is approved only with a step-up,
-* ``consumed`` at most once, by the very call it was granted for,
+* ``consumed`` at most once, by the very call it was granted for, in the very
+  **run** of the task it was requested in (:class:`~.task_state.TaskRun`: a
+  Retry or a Restart starts a new run, whose worker cannot use what an earlier
+  run was granted, whether or not the revocation that follows the transition
+  has run),
 * ``revoked`` by that user (or an Admin / Owner) or when its task ends, and
 * ``expired`` when its time runs out, whatever it was before.
 
@@ -24,7 +28,7 @@ import hashlib
 import re
 import unicodedata
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Protocol
@@ -32,6 +36,7 @@ from typing import Protocol
 from paw_backend.tools.capabilities import ApprovalLevel
 from paw_backend.tools.credentials import contains_credential_plaintext, redact_text
 from paw_backend.tools.scope import Target
+from paw_backend.tools.task_state import TaskActivity, TaskRun
 
 MAX_APPROVAL_TOOL_LENGTH = 64
 _HASH = re.compile(r"[0-9a-f]{64}")
@@ -71,10 +76,13 @@ class OpenOutcome(StrEnum):
     EXISTING = "existing"  # an open request for this exact call already exists
     TOO_MANY_PENDING = "too_many_pending"  # the task / user has too many open ones
     COOLING_DOWN = "cooling_down"  # this exact call was rejected a moment ago
-    # Only with ``require_active_task``: the task has ended, or is not known;
-    # nothing was created (and no existing request is handed out either).
+    # Only with ``require_active_task``: the task has ended, or is not known, or
+    # the run that asks is not the task's current one (a Retry / Restart started
+    # another); nothing was created (and no existing request is handed out
+    # either).
     TASK_NOT_ACTIVE = "task_not_active"
     TASK_UNKNOWN = "task_unknown"
+    TASK_SUPERSEDED = "task_superseded"
 
 
 class DecideOutcome(StrEnum):
@@ -95,10 +103,29 @@ class ConsumeOutcome(StrEnum):
     REJECTED = "rejected"
     REVOKED = "revoked"
     PENDING = "pending"  # no human decision yet
+    # Otherwise usable, but requested in an earlier run of the task than the one
+    # that uses it (a Retry / Restart came in between): a new one is needed.
+    SUPERSEDED = "superseded"
     # Only with ``require_active_task``: the task of the approval has ended, or
-    # is not known; nothing was consumed.
+    # is not known, or the run that uses it is not the task's current one (a
+    # Retry / Restart started another); nothing was consumed.
     TASK_NOT_ACTIVE = "task_not_active"
     TASK_UNKNOWN = "task_unknown"
+    TASK_SUPERSEDED = "task_superseded"
+
+
+# What a task that cannot act (``TaskActivity`` other than ``ACTIVE``) makes of
+# ``open_request`` / ``consume`` with ``require_active_task``: both stores use it.
+OPEN_TASK_REFUSAL = {
+    TaskActivity.ENDED: OpenOutcome.TASK_NOT_ACTIVE,
+    TaskActivity.SUPERSEDED: OpenOutcome.TASK_SUPERSEDED,
+    TaskActivity.UNKNOWN: OpenOutcome.TASK_UNKNOWN,
+}
+CONSUME_TASK_REFUSAL = {
+    TaskActivity.ENDED: ConsumeOutcome.TASK_NOT_ACTIVE,
+    TaskActivity.SUPERSEDED: ConsumeOutcome.TASK_SUPERSEDED,
+    TaskActivity.UNKNOWN: ConsumeOutcome.TASK_UNKNOWN,
+}
 
 
 class RevokeOutcome(StrEnum):
@@ -177,6 +204,10 @@ class OpenLimits:
 class NewApproval:
     approval_id: uuid.UUID
     task_id: uuid.UUID
+    # The run of the task the request is made in: the approval can only be used
+    # by this run. With ``require_active_task`` the store checks that it is the
+    # task's current run, in the transaction that inserts the request.
+    task_run: TaskRun
     project_id: uuid.UUID
     agent_id: uuid.UUID
     requester_user_id: uuid.UUID
@@ -194,6 +225,8 @@ class NewApproval:
                 raise TypeError(f"{name} must be a UUID")
         if not isinstance(self.requester_user_id, uuid.UUID):
             raise TypeError("requester_user_id must be a UUID")
+        if not isinstance(self.task_run, TaskRun):
+            raise TypeError("task_run must be a TaskRun")
         if self.agent_id == self.requester_user_id:
             raise ValueError("an agent cannot be the user it acts for")
         if (
@@ -219,9 +252,15 @@ class NewApproval:
 
 @dataclass(frozen=True, slots=True)
 class ApprovalBinding:
-    """The call an approval is used for: all of it must match what was granted."""
+    """The call an approval is used for: all of it must match what was granted.
+
+    ``task_run`` is the run of the task the caller works in (from the broker's
+    ``TaskContext``): an approval requested in another run does not match, even
+    for the same task and the same call.
+    """
 
     task_id: uuid.UUID
+    task_run: TaskRun
     agent_id: uuid.UUID
     requester_user_id: uuid.UUID
     tool: str
@@ -233,6 +272,7 @@ class ApprovalBinding:
 class ApprovalRecord:
     approval_id: uuid.UUID
     task_id: uuid.UUID
+    task_run: TaskRun
     project_id: uuid.UUID
     agent_id: uuid.UUID
     requester_user_id: uuid.UUID
@@ -256,6 +296,7 @@ class ApprovalRecord:
     def binding(self) -> ApprovalBinding:
         return ApprovalBinding(
             self.task_id,
+            self.task_run,
             self.agent_id,
             self.requester_user_id,
             self.tool,
@@ -317,14 +358,24 @@ class ApprovalStore(Protocol):
 
     ``consume(..., require_active_task=True)`` must check that the approval's
     task can still act **in the same atomic step as the consumption** and
-    consume nothing otherwise (``TASK_NOT_ACTIVE`` / ``TASK_UNKNOWN``); and
+    consume nothing otherwise (``TASK_NOT_ACTIVE`` / ``TASK_UNKNOWN``), and
     ``open_request(..., require_active_task=True)`` must do the same **in the
     same atomic step as the insert**, creating (or handing out) nothing for an
     ended or unknown task (``OpenOutcome.TASK_NOT_ACTIVE`` / ``TASK_UNKNOWN``).
-    A check made before the call is not enough: the task can end in between. A
-    consumption could then win from the revocation that follows the end, and a
+    "Can act" includes the **run**: the run in ``new.task_run`` /
+    ``binding.task_run`` must be the task's current one
+    (``TASK_SUPERSEDED`` otherwise), and ``consume`` never consumes an approval
+    that was requested in another run, with or without the flag
+    (``ConsumeOutcome.SUPERSEDED``). A check made before the call is not
+    enough: the task can end, or be started again, in between. A consumption
+    could then win from the revocation that follows the transition, and a
     request created after that revocation would be one that nothing revokes
     (Decision 0006, section 9).
+
+    ``open_request(..., require_active_task=True)`` also revokes (as the system,
+    with history) the open approvals of the task that belong to an *earlier*
+    run: they cannot be used any more, and an open request for the same call
+    would otherwise keep the new run from asking for it.
 
     ``get``, ``decide`` and ``revoke`` are what a human's decision calls
     (``ApprovalService``, which bounds them with one deadline and cancels them at
@@ -414,11 +465,13 @@ def diagnose_consume(
 ) -> ConsumeOutcome:
     """What ``consume`` does with the record in its current state (see above).
 
-    ``CONSUMED`` means the record is consumable right now.
+    ``CONSUMED`` means the record is consumable right now. A record that matches
+    in everything but the run of the task is ``SUPERSEDED`` (while it is open),
+    not a ``MISMATCH``: it is the same call, asked in an earlier run.
     """
     if record is None:
         return ConsumeOutcome.NOT_FOUND
-    if record.binding() != binding:
+    if replace(record.binding(), task_run=binding.task_run) != binding:
         return ConsumeOutcome.MISMATCH
     status = record.status
     if status is ApprovalStatus.CONSUMED:
@@ -429,9 +482,13 @@ def diagnose_consume(
         return ConsumeOutcome.REVOKED
     if status is ApprovalStatus.EXPIRED or is_expired(record, now):
         return ConsumeOutcome.EXPIRED
+    if record.task_run != binding.task_run:
+        # Open and unexpired, but for another run: what the approval itself is
+        # (used, revoked, expired) is the more precise reason, said above.
+        return ConsumeOutcome.SUPERSEDED
     if status is ApprovalStatus.PENDING:
         return ConsumeOutcome.PENDING
-    return ConsumeOutcome.CONSUMED  # approved and unexpired
+    return ConsumeOutcome.CONSUMED  # approved and unexpired, for this run
 
 
 def diagnose_revoke(record: ApprovalRecord | None, now: datetime) -> RevokeOutcome:

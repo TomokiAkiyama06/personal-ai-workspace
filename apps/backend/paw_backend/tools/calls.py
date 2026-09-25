@@ -44,6 +44,7 @@ from paw_backend.tools.scope import (
     normalise_repository,
     normalise_url,
 )
+from paw_backend.tools.task_state import TaskRun
 
 HASH_VERSION = 1
 # All text arguments of one call together (each is also bounded by its kind).
@@ -65,7 +66,11 @@ class TaskContext:
     ``delegator_id`` is the human user the agent works for and ``grant`` what
     that user delegated (``grant.agent_id`` is the requesting agent).
     ``primary_project_id`` is the task's own project; it must be one of the
-    projects of the scope.
+    projects of the scope. ``run`` is the run of the task the worker was started
+    for (``tasks.attempt`` and ``tasks.retry_count`` when the orchestrator
+    started it): an approval is requested for, and can only be used by, that
+    run, and a worker of a run that a Retry / Restart replaced is refused
+    (``task_superseded``).
     """
 
     task_id: uuid.UUID
@@ -73,6 +78,7 @@ class TaskContext:
     grant: AgentGrant
     scope: TaskScope
     primary_project_id: uuid.UUID
+    run: TaskRun
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "task_id", to_uuid(self.task_id, "task_id"))
@@ -88,6 +94,8 @@ class TaskContext:
             raise TypeError("grant must be an AgentGrant")
         if not isinstance(self.scope, TaskScope):
             raise TypeError("scope must be a TaskScope")
+        if not isinstance(self.run, TaskRun):
+            raise TypeError("run must be a TaskRun")
         if self.primary_project_id not in self.scope.projects:
             raise ValueError("the task's project must be part of its scope")
         if self.grant.agent_id == self.delegator_id:
