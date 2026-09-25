@@ -75,12 +75,12 @@ class ConstructorTest(unittest.TestCase):
 
 
 class ClockContractTest(unittest.TestCase):
-    """The clock the queue really uses is the one its documents propose.
+    """The clock the queue really uses is the one its documents record.
 
-    Decision 0007 (Proposed, awaiting human approval) and the README must not
-    describe a different policy than the code applies: approving a text that says
-    ``now()`` would approve a lease expiry judged by the time the transaction
-    started, which is stale after a wait for a row lock.
+    Decision 0007 (approved by the human on 2026-09-25) and the README must not
+    describe a different policy than the code applies: an approved text that says
+    ``now()`` would make a lease expiry judged by the time the transaction
+    started, which is stale after a wait for a row lock, the recorded policy.
     """
 
     REPOSITORY = Path(__file__).resolve().parents[3]
@@ -103,7 +103,7 @@ class ClockContractTest(unittest.TestCase):
         for transaction_time in ("now()", "transaction_timestamp", "current_timestamp"):
             self.assertNotIn(transaction_time, sql.lower())
 
-    def test_decision_0007_proposes_the_clock_the_queue_uses(self):
+    def test_decision_0007_records_the_clock_the_queue_uses(self):
         section = self.decision_section(6)
         for phrase in (
             "`clock_timestamp()`",

@@ -1,19 +1,19 @@
 # Research Provider Adapter の方針
 
-- Status: Proposed
+- Status: Approved
 - Date: 2026-09-24
 - Scope: PAW-051 と、Research の Provider を使う以降の Issue（PAW-052 Evidence / Claim Provenance、PAW-053 Privacy Filter、各 Provider の Adapter）
 - Supersedes: なし
-- Approval: 未承認（Humanの承認待ち）
+- Approval: 2026-09-25、Humanが作業Session内で、判断メモ（Artifact）の各点について「推奨どおり」と回答して承認（下記の「承認時の決定」）
 
 ## 背景
 
 [REQUIREMENTS.md](../../REQUIREMENTS.md) の「Web Research / Knowledge Layer」は、Provider の抽象化（Direct Web、Docs、GitHub、OpenCode）と Privacy を定める。
 一方で、複数 Provider の結果の統合規則、不正な Response の扱い、URL の正規化の細部、Credential の除去の範囲は定めていない。
 PAW-051 の実装は、動かすためにこれらを選んだ。Review（Codex）は、これらが `docs/decisions/` の提案と承認を経ずに実装の契約になっていることを指摘した。
-[AGENTS.md](../../AGENTS.md) の「仕様変更」に従い、選択を一覧にして承認または変更を求める。
+[AGENTS.md](../../AGENTS.md) の「仕様変更」に従い、選択を一覧にして Human が承認または変更できるようにした。
 
-**この Decision は Proposed であり、Human の承認を得ていない。** 承認されるまで、次の選択は暫定である。
+**この Decision は 2026-09-25 に Human が承認した（Approved）。** 下の各選択は、承認された方針である（承認時の決定は末尾を参照）。
 実装は [Backend README](../../apps/backend/README.md) の「Research Provider Adapter」に書いている。
 
 ## 提案
@@ -33,6 +33,7 @@ PAW-051 の実装は、動かすためにこれらを選んだ。Review（Codex�
    名前は Percent-decode（最大 4 回。Proxy が複数回 decode する場合に備える）してから、大文字小文字を区別せずに比べる。decode した名前に `&`、`;`、`=`、`#` が入るものは、先に decode する Parser では別の Parameter になるので、名前として成り立たないものとして丸ごと除く。**一覧は Best effort** で、Path に入った Credential や一覧にない名前は判別できない。
 5. **License と `robots.txt`。** 要件に定義がないため `SourceMetadata` には含めない。必要になったときに追加する。
 6. **責務の境界。** `network` Capability の確認、SSRF 対策、`robots.txt` の遵守、名前解決の後の接続先の検査は、呼び出し元（Tool Broker、PAW-031）と個々の Adapter の責任とする。この層は認可の判断も Network の Access もしない。
+   これらの責務は、各 Adapter（Direct Web、Docs、GitHub、OpenCode など）の Issue の受け入れ条件に明記する（承認時の決定を参照）。
 7. **公開日時は UTC で表せるもの。** `published_at` は Timezone つきで、UTC へ変換できる値だけを受け付ける（`datetime.max` を UTC-01:00 で表した値など、範囲を超える値は Adapter の不正な Response として扱い、`invalid_response` にする。Timezone のない値、Timezone の `utcoffset` が例外を出す値も同じ。例外の種類は 10 のとおり）。変換の前に、標準の `datetime` の Method で Field を通常の `datetime` へ複製する（`datetime.astimezone` は途中の値を Subclass 自身の Constructor で作るため、複製しないと Adapter の Code が Broker の中で動く）。
 8. **Timeout は協調的。** Adapter が Cancel を無視する、または Event Loop を止める同期処理をする場合、Broker は止められない。Adapter の実装規約として、Cancel に応じる非同期の実装を求める。
 9. **Provider の名前は正規化せず、厳密な `str` の写しだけを保持する。** `name` は受け取った文字列そのものを `fullmatch` で `[a-z0-9][a-z0-9_-]{0,63}`（ASCII だけ、`$` と `IGNORECASE` なし）に照合する。全角・NFKC で同じになる文字・大文字・Zero-width 文字・空白・末尾の改行は拒否し、NFKC、小文字化、`strip` は行わない（別の名前と同じにしたり、見た目が同じ名前を別に登録させたりしないため）。
@@ -49,7 +50,7 @@ PAW-051 の実装は、動かすためにこれらを選んだ。Review（Codex�
    - 例外を出さずに `asyncio.current_task().cancel()` を呼んで値を返す Hook は、Broker と同じ `Task.cancelling()` の Guard（`guard.CancelGuard`）で増えた分を取り消し、その Member の `ProviderInterfaceError` にする。
    - 登録は同期（`await` しない）なので、本物の Cancel は窓の中には届かない。登録の前からあった Cancel の要求は残り、呼び出し元の次の `await` で届く。
    - 代償は Broker の窓と同じで、窓の間（起動時の配線の数マイクロ秒）に Signal で本物の `KeyboardInterrupt` が届くと、それも不適合な Adapter として拒否される。
-   **この Decision が決めないこと:** Adapter の非同期の Code（`await` の最中）が自分で出した `CancelledError`、または自分で呼んだ `Task.cancel()`（内部で使った Task が別の場所で Cancel された場合など）は、Task の Cancel と区別せず、これまでどおり `gather` へ伝わる。`Task.cancelling()` は同期の窓の前後を比べるだけに使う。`await` の最中は、Adapter 自身の要求と本物の Cancel が同じ `CancelledError` として届き、数の増加では区別できないので、区別する案は別の判断として承認を求める。
+   **この Decision が決めないこと:** Adapter の非同期の Code（`await` の最中）が自分で出した `CancelledError`、または自分で呼んだ `Task.cancel()`（内部で使った Task が別の場所で Cancel された場合など）は、Task の Cancel と区別せず、これまでどおり `gather` へ伝わる。`Task.cancelling()` は同期の窓の前後を比べるだけに使う。`await` の最中は、Adapter 自身の要求と本物の Cancel が同じ `CancelledError` として届き、数の増加では区別できないので、区別する案は、この Decision では決めず、必要になったときに別の Decision で決める（承認時の決定を参照）。
 
 ## 選定理由
 
@@ -65,4 +66,16 @@ PAW-051 の実装は、動かすためにこれらを選んだ。Review（Codex�
 
 ## 承認後の扱い
 
-承認された内容をこの Decision の `Approval` に記録して Status を Approved に改める。変更が必要な場合は、新しい Decision から `Supersedes` する。
+2026-09-25 に承認された。PAW-051 のPRは本Decisionを参照する。
+
+承認後に方針を変える場合は、この Decision を書き換えず、新しい Decision から `Supersedes` する。
+
+## 承認時の決定（2026-09-25）
+
+- 本文の各点を、提案どおり承認した。
+- 不正な Hit が 1 つでもあれば、その Provider の Response 全体を無効にする（`invalid_response`）。他の Provider の結果には影響しない。
+- 複数 Provider の結果の統合は、交互に 1 件ずつ並べ、正規化した URL で重複を除き、並べ替えはしない。
+- URL の正規化と Credential の除去は Best effort とする。一覧にない名前や Path に入った Credential は判別できないことを了承した。
+- License と `robots.txt` は `SourceMetadata` に含めない。SSRF 対策、`robots.txt` の遵守、`network` Capability の確認、名前解決の後の接続先の検査は、呼び出し元（Tool Broker）と個々の Adapter の責任とする。**各 Adapter の受け入れ条件に、これらの責務を明記する。** 明記は、各 Adapter の Issue を作るときに行う（現在の [Implementation Backlog](../IMPLEMENTATION_BACKLOG.md) には、Direct Web、Docs、GitHub、OpenCode の個別の Issue はまだない）。当面の記載場所は [Backend README](../../apps/backend/README.md) の「各 Adapter の受け入れ条件」で、Adapter の Issue はこれを写す。
+- 同期で動く Adapter の Code が出した例外（`KeyboardInterrupt` / `SystemExit` を含む）は、Adapter 自身の失敗として隔離する。
+- Adapter 自身の `await` での自己 Cancel を、本物の Cancel と区別する案は、この Decision では決めない。必要になったときに、別の Decision で決める。

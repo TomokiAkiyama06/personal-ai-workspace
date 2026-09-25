@@ -1,0 +1,47 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+        "memories": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "key": {
+                        "type": "string",
+                        "pattern": "\\S"
+                    },
+                    "scope": {
+                        "type": "string",
+                        "enum": ["user", "project", "repo", "shared"]
+                    },
+                    "state": {
+                        "type": "string",
+                        "enum": ["confirmed", "inferred"]
+                    },
+                    "supersedes": {
+                        "type": ["string", "null"],
+                        "pattern": "\\S"
+                    },
+                    "content": {
+                        "description": "The extracted fact. Optional here, but the benchmark's gold records always carry it, so a record without it never counts as an exact recall.",
+                        "type": "string",
+                        "pattern": "\\S"
+                    },
+                    "conflicts_with": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "pattern": "\\S"
+                        },
+                        "uniqueItems": true
+                    }
+                },
+                "required": ["key", "scope", "state", "supersedes"],
+                "additionalProperties": false
+            }
+        }
+    },
+    "required": ["memories"],
+    "additionalProperties": false
+}

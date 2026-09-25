@@ -30,7 +30,12 @@ from paw_backend.tasks import (
     WorktreeState,
 )
 
-from .task_support import FIRST_RUN, PostgresTaskTestCase, requires_postgres
+from .task_support import (
+    FIRST_RUN,
+    PostgresTaskTestCase,
+    command_reason,
+    requires_postgres,
+)
 
 C = TaskCommand
 S = TaskState
@@ -90,7 +95,12 @@ class BeginStepRacesWithEndingCommandsTest(PostgresTaskTestCase):
                         )
                         await self.wait_for_lock_waiters(1)
                         end = asyncio.create_task(
-                            ender.execute(task_id, command, actor=self.system)
+                            ender.execute(
+                                task_id,
+                                command,
+                                actor=self.system,
+                                reason=command_reason(command),
+                            )
                         )
                         await self.wait_for_lock_waiters(2)
                         await blocker.rollback()
@@ -154,7 +164,12 @@ class BeginStepRacesWithEndingCommandsTest(PostgresTaskTestCase):
                             {"s": finished.id},
                         )
                         end = asyncio.create_task(
-                            ender.execute(task_id, command, actor=self.system)
+                            ender.execute(
+                                task_id,
+                                command,
+                                actor=self.system,
+                                reason=command_reason(command),
+                            )
                         )
                         await self.wait_for_lock_waiters(1)
                         begin = asyncio.create_task(
@@ -186,7 +201,7 @@ class BeginStepRacesWithEndingCommandsTest(PostgresTaskTestCase):
                 {"s": step.id},
             )
             end = asyncio.create_task(
-                ender.execute(task_id, C.STOP_NOW, actor=self.user)
+                ender.execute(task_id, C.STOP_NOW, actor=self.user, reason="agent loop")
             )
             await self.wait_for_lock_waiters(1)
             tool = asyncio.create_task(
