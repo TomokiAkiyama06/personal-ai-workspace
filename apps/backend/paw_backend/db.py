@@ -25,9 +25,9 @@ from paw_backend.config import Settings
 
 logger = logging.getLogger(__name__)
 
-# How long the SERVER keeps waiting (for a lock, or for a statement) after the
-# caller's own deadline of an abortable transaction, for a statement that the
-# caller has abandoned (see ``Database.transact_abortable``).
+# How long the SERVER keeps an abortable transaction (and so whatever it waits
+# for, and the locks it holds) after the caller's own deadline, once the caller
+# has abandoned it (see ``Database.transact_abortable``).
 _SERVER_GRACE_SECONDS = 1.0
 
 # Constraint names must be deterministic so that Alembic can drop / alter them.
@@ -207,14 +207,30 @@ class Database:
         outcome unknown to the caller (which then learns only that it did not
         finish in time).
 
-        The server is also told to give up: ``lock_timeout`` and
-        ``statement_timeout`` are set (``SET LOCAL``) to the time that is left
-        plus ``_SERVER_GRACE_SECONDS``. A statement that is waiting on a lock
-        when the caller aborts is not woken by the closed socket (the server
-        notices it only when it has something to send), so without them the
-        abandoned backend would wait for the lock for as long as its holder
-        takes, and keep the locks it already has. The grace keeps the caller's
-        own deadline first, so the caller always sees ``TimeoutError``.
+        The server is also told to give up, and the limit is on the WHOLE
+        transaction: ``transaction_timeout`` (``SET LOCAL``, PostgreSQL 17 or
+        later; this project targets 18) is set to the time that is left plus
+        ``_SERVER_GRACE_SECONDS``, and the server ends the session when it runs
+        out, whatever the transaction is doing (a statement waiting on a lock,
+        the pause between two statements, the ``COMMIT``). A statement that is
+        waiting on a lock when the caller aborts is not woken by the closed
+        socket (the server notices it only when it has something to send), so
+        without a limit the abandoned backend would wait for the lock for as long
+        as its holder takes, and keep the locks it already has. Limits that are
+        set once for each *statement* (``lock_timeout`` / ``statement_timeout``
+        from the full time left) do not do this: a later statement started when
+        most of the deadline had gone would be granted the whole limit again, and
+        outlive the caller by nearly that much. They are still set to the same
+        value, as a backstop for the one thing the transaction limit does not
+        cover (the server ignores the longer of it and ``statement_timeout``, so
+        they never shorten it). The grace keeps the caller's own deadline first,
+        so the caller always sees ``TimeoutError``. The timer starts at the
+        ``SET LOCAL``, the first statement of the transaction, with the time
+        that is left at that moment.
+
+        A server older than 17 does not know ``transaction_timeout``: the
+        transaction then fails at its first statement (fail closed) instead of
+        running with a weaker limit.
         """
         loop = asyncio.get_running_loop()
 
@@ -223,7 +239,8 @@ class Database:
                 server_limit = max(0.0, deadline - loop.time()) + _SERVER_GRACE_SECONDS
                 milliseconds = str(max(1, round(server_limit * 1000)))
                 await connection.execute(
-                    "SELECT set_config('lock_timeout', %(ms)s, true),"
+                    "SELECT set_config('transaction_timeout', %(ms)s, true),"
+                    " set_config('lock_timeout', %(ms)s, true),"
                     " set_config('statement_timeout', %(ms)s, true)",
                     {"ms": milliseconds},
                 )

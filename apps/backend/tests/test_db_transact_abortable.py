@@ -210,7 +210,8 @@ class TransactAbortableTest(unittest.IsolatedAsyncioTestCase):
         async def work(connection):
             cursor = await connection.execute(
                 "SELECT name, setting::integer FROM pg_settings"
-                " WHERE name IN ('lock_timeout', 'statement_timeout')"
+                " WHERE name IN ('transaction_timeout', 'lock_timeout',"
+                " 'statement_timeout')"
             )
             return dict(await cursor.fetchall())
 
@@ -218,7 +219,11 @@ class TransactAbortableTest(unittest.IsolatedAsyncioTestCase):
         milliseconds = await self.database.transact_abortable(
             work, timeout_seconds=limit
         )
-        self.assertEqual(set(milliseconds), {"lock_timeout", "statement_timeout"})
+        # the limit is on the transaction; the other two are its backstops
+        self.assertEqual(
+            set(milliseconds),
+            {"transaction_timeout", "lock_timeout", "statement_timeout"},
+        )
         for name, value in milliseconds.items():
             with self.subTest(setting=name):
                 # what is left of the limit (a little less than all of it) plus the
@@ -246,6 +251,43 @@ class TransactAbortableTest(unittest.IsolatedAsyncioTestCase):
                 left = time.monotonic() - began
                 # within the limit and its grace (plus the polling and a margin)
                 self.assertLess(left, self.LIMIT + _SERVER_GRACE_SECONDS + 3)
+            finally:
+                await holder.rollback()
+
+    async def test_a_later_statement_cannot_outlive_the_deadline_by_the_whole_limit(
+        self,
+    ):
+        """Finding of the sixth review of PR #74: the server's limits were set
+        once, at the start, from the whole time left. An earlier statement that
+        used most of the deadline left a later one, waiting on a lock, a whole
+        limit (plus the grace) more, holding what it had locked. The limit now
+        belongs to the transaction: whatever is running when the time is up, the
+        backend leaves about the grace after the caller's deadline."""
+        limit = 2.5
+        spent = 2.3  # of the limit, in the first statement (on the server)
+        pids = []
+
+        async def work(connection):
+            cursor = await connection.execute("SELECT pg_backend_pid()")
+            pids.append((await cursor.fetchone())[0])
+            await connection.execute(f"SELECT pg_sleep({spent})")
+            # waits for a lock that is never released while the test looks
+            await connection.execute("SELECT pg_advisory_xact_lock(4712)")
+
+        async with self.database.engine.connect() as holder:
+            await holder.execute(text("SELECT pg_advisory_xact_lock(4712)"))
+            try:
+                began = time.monotonic()
+                with self.assertRaises(TimeoutError):
+                    await self.database.transact_abortable(work, timeout_seconds=limit)
+                self.assertLess(time.monotonic() - began, self.GUARD / 2)
+                self.assertEqual(len(pids), 1)
+                await self.until_no_backend(f"pid = {pids[0]}")
+                left = time.monotonic() - began
+                # about the grace after the deadline (a margin for polling and a
+                # slow machine), and nowhere near the whole limit after the second
+                # statement began: that would be `spent + limit + grace` = 5.8 s
+                self.assertLess(left, limit + _SERVER_GRACE_SECONDS + 1.2)
             finally:
                 await holder.rollback()
 

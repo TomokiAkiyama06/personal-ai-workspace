@@ -57,12 +57,15 @@ closed connection, never receives the next statement or the ``COMMIT``, and roll
 the transaction back (only an abort during the ``COMMIT`` itself leaves it unknown
 whether it was applied; repeating the call shows which, as an open request is
 returned as ``EXISTING`` and a used approval is ``already_used``). The server is
-also given the limit (``lock_timeout`` / ``statement_timeout``, a little beyond
-the caller's), because a backend that waits on a lock does not notice the closed
-socket: without it the abandoned transaction would keep its advisory lock, and a
-server connection, for as long as the lock's holder takes. Nothing of these calls
-uses the pool, so a stalled server cannot hold a pool slot. ``TimeoutError`` is
-what the broker turns into ``approval_unavailable`` (type name only in the log).
+also given the limit, on the whole transaction (``transaction_timeout``, a little
+beyond the caller's, with ``lock_timeout`` / ``statement_timeout`` as backstops),
+because a backend that waits on a lock does not notice the closed socket: without
+it the abandoned transaction would keep its advisory lock, and a server
+connection, for as long as the lock's holder takes; and a limit that started over
+with each statement would grant a late statement the whole limit again. Nothing
+of these calls uses the pool, so a stalled server cannot hold a pool slot.
+``TimeoutError`` is what the broker turns into ``approval_unavailable`` (type
+name only in the log).
 ``history`` (read by tests and diagnostics, not by any request path) still runs
 on a pooled session.
 
