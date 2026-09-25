@@ -27,6 +27,10 @@ spelled ``FOREIGN KEY (project_id)`` with a space: the existing offline test
 chain* for the text ``FOREIGN KEY(project_id)`` / ``FOREIGN KEY(created_by)`` to
 prove that the ``tasks`` table has no such key (same reason as revision 0026).
 
+The ``path`` and the remote ``url`` are bounded by their **encoded** length (2048 and
+1024 bytes) as well as by their characters: both are keys of a unique btree index, whose
+entries cannot exceed about 2700 bytes, and a character can be 4 bytes.
+
 The definitions repeat the ones in ``paw_backend.repositories.models`` on purpose
 (a migration is a frozen snapshot); ``tests/test_repositories_schema.py`` fails
 when the two drift apart. Constraint names come from the naming convention of
@@ -117,7 +121,7 @@ def upgrade() -> None:
             ondelete="CASCADE",
         ),
         sa.CheckConstraint(
-            f"char_length(url) BETWEEN 10 AND 1024 AND url ~ '{REMOTE_PATTERN}'",
+            f"octet_length(url) BETWEEN 10 AND 1024 AND url ~ '{REMOTE_PATTERN}'",
             name="url_valid",
         ),
     )
@@ -157,7 +161,8 @@ def upgrade() -> None:
             name="identity_not_negative",
         ),
         sa.CheckConstraint(
-            "char_length(path) BETWEEN 2 AND 1024 AND path LIKE '/%'"
+            "char_length(path) BETWEEN 2 AND 1024 AND octet_length(path) <= 2048"
+            " AND path LIKE '/%'"
             " AND path NOT LIKE '%/' AND path !~ '(^|/)\\.\\.?(/|$)'",
             name="path_valid",
         ),

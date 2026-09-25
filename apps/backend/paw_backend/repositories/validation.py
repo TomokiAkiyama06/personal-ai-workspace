@@ -22,6 +22,7 @@ from paw_backend.repositories.limits import (
     MAX_LIST_LIMIT,
     MAX_LIST_OFFSET,
     MAX_NAME_CHARS,
+    MAX_PATH_BYTES,
     MAX_PATH_CHARS,
     MAX_PURGE_PROJECTS,
     MAX_REMOTE_URL_CHARS,
@@ -107,6 +108,8 @@ def validate_bool(field: str, value: object) -> bool:
 def validate_path_text(value: object, field: str = "path") -> str:
     """An absolute path in the canonical spelling of ``tools.scope.normalise_path``.
 
+    At most 1024 characters **and** 2048 bytes in UTF-8 (``TOO_LONG`` otherwise).
+
     The text is not changed: a path that is not already canonical (``//``,
     ``/./``, a trailing ``/``) is refused, so what is checked later is exactly
     what the caller wrote. ``..``, ``~``, backslashes, percent-encoded
@@ -114,7 +117,8 @@ def validate_path_text(value: object, field: str = "path") -> str:
     function that the Tool Broker applies to a path.
     """
     text = _checked_text(field, value, MAX_PATH_CHARS)
-    if len(text) > MAX_PATH_CHARS:
+    if len(text) > MAX_PATH_CHARS or len(text.encode()) > MAX_PATH_BYTES:
+        # The stored path is bounded by its encoded length too (the unique index).
         raise _fail(field, InputProblem.TOO_LONG)
     if not text.startswith("/"):
         raise _fail(field, InputProblem.INVALID_FORMAT)

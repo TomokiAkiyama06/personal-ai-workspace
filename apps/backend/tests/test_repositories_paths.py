@@ -588,6 +588,72 @@ class InspectCheckoutRootTest(PathTestCase):
         )
 
 
+class LocateDirectoryIdentityTest(PathTestCase):
+    def make(self, relative):
+        path = f"{self.home}/{relative}"
+        os.makedirs(path)
+        info = os.lstat(path)
+        return path, (info.st_dev, info.st_ino)
+
+    def locate(self, root, wanted, limit=1000):
+        return paths.locate_directory_identity(root, wanted, limit)
+
+    def test_a_directory_below_the_root_is_found_at_any_depth(self):
+        root, _ = self.make("root")
+        child, child_identity = self.make("root/a")
+        deep, deep_identity = self.make("root/b/c/d/e")
+        self.assertEqual(self.locate(root, [child_identity]), (child_identity, True))
+        self.assertEqual(self.locate(root, [deep_identity]), (deep_identity, True))
+        self.assertEqual(
+            self.locate(root, [(1, 1), deep_identity]), (deep_identity, True)
+        )
+
+    def test_a_directory_not_below_the_root_is_not_found_by_a_complete_search(
+        self,
+    ):
+        root, _ = self.make("root")
+        self.make("root/a/b")
+        _, elsewhere = self.make("elsewhere")
+        self.assertEqual(self.locate(root, [elsewhere]), (None, True))
+        self.assertEqual(self.locate(root, []), (None, True))
+
+    def test_the_root_itself_and_files_are_not_matches(self):
+        root, root_identity = self.make("root")
+        Path(root, "file").write_text("x")
+        info = os.lstat(f"{root}/file")
+        self.assertEqual(self.locate(root, [root_identity]), (None, True))
+        self.assertEqual(self.locate(root, [(info.st_dev, info.st_ino)]), (None, True))
+
+    def test_the_same_inode_on_another_device_is_not_a_match(self):
+        root, _ = self.make("root")
+        _, (device, inode) = self.make("root/a")
+        self.assertEqual(self.locate(root, [(device + 1, inode)]), (None, True))
+
+    def test_the_search_is_bounded_and_says_when_it_gave_up(self):
+        root, _ = self.make("root")
+        for index in range(10):
+            os.makedirs(f"{root}/d{index}")
+        _, elsewhere = self.make("elsewhere")
+        self.assertEqual(self.locate(root, [elsewhere], limit=5), (None, False))
+        self.assertEqual(self.locate(root, [elsewhere], limit=10), (None, True))
+        self.assertEqual(self.locate(root, [elsewhere], limit=9), (None, False))
+
+    def test_a_symbolic_link_is_never_entered(self):
+        root, _ = self.make("root")
+        target, identity = self.make("target/inner")
+        os.symlink(f"{self.home}/target", f"{root}/link")  # leads to ``inner``
+        os.symlink(root, f"{root}/loop")  # a cycle
+        self.assertEqual(self.locate(root, [identity]), (None, True))
+
+    def test_an_unreadable_directory_is_skipped(self):
+        root, _ = self.make("root")
+        closed, _ = self.make("root/closed")
+        _, identity = self.make("root/open/x")
+        os.chmod(closed, 0)
+        self.addCleanup(os.chmod, closed, 0o755)
+        self.assertEqual(self.locate(root, [identity])[0], identity)
+
+
 class PlannedPathLengthTest(PathTestCase):
     def plan(self, name):
         return paths.plan_checkout_path(self.account, SUBDIR, "p-12345678", name)

@@ -21,6 +21,11 @@ MAX_BRANCH_CHARS = 200
 # Shorter than the Tool Broker accepts (2048): a btree key must stay small.
 MAX_REMOTE_URL_CHARS = 1024
 MAX_PATH_CHARS = MAX_PATH_LENGTH
+# The path is also bounded by its **encoded** (UTF-8) length: it is the key of a unique
+# btree index, an entry of which cannot exceed about 2700 bytes, and 1024 characters
+# can be 4096 bytes. Half of the entry limit leaves room for the index's own overhead.
+# Repeated as a CHECK constraint (migration ``0027``); a longer limit needs a migration.
+MAX_PATH_BYTES = 2048
 # A raw string longer than this many times the limit is refused before it is
 # scanned (bounds the work done for a hostile caller).
 RAW_TEXT_FACTOR = 10
@@ -31,6 +36,11 @@ MAX_REMOTES_PER_REPOSITORY = MAX_REMOTES
 # Provisional (Decision 0017): the ready checkouts of one user a scope is derived
 # against (every one is verified on the file system for each scope).
 MAX_SCOPE_CHECKOUTS = 500
+# Provisional (Decision 0017): the directories searched below a requested checkout root
+# for a checkout that vanished from its path (it may have been renamed into the root).
+# Only searched when some other checkout of the user changed; a root that is larger than
+# this is refused, never guessed.
+MAX_IDENTITY_SCAN_DIRECTORIES = 20_000
 # Provisional (Decision 0017): the repositories one project can hold.
 MAX_REPOSITORIES_PER_PROJECT = 100
 # The readable part of a project's directory name (``<slug>-<8 hex of the id>``).

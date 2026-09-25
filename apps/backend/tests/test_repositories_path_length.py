@@ -47,6 +47,28 @@ def make_directory_of_length(base: str, length: int) -> str:
     return path
 
 
+FOUR_BYTES = "\U00020000"  # a CJK character of 4 bytes in UTF-8, stable under NFKC
+
+
+def make_directory_of_bytes(base: str, target_bytes: int) -> str:
+    """Create nested directories below ``base``; the last one is ``target_bytes`` long.
+
+    The length is the UTF-8 length of the whole path. Components hold at most 252 bytes
+    (a file name holds 255), are mostly 4-byte characters, and are never empty.
+    """
+    path = base
+    os.makedirs(path)
+    while len(path.encode()) < target_bytes:
+        remaining = target_bytes - len(path.encode())  # "/" plus the next component
+        chunk = min(252, remaining - 1)
+        if remaining - (chunk + 1) == 1:  # the rest could not hold a component
+            chunk -= 1
+        path = f"{path}/{FOUR_BYTES * (chunk // 4)}{'h' * (chunk % 4)}"
+        os.mkdir(path)
+    assert len(path.encode()) == target_bytes, (len(path.encode()), target_bytes)
+    return path
+
+
 @requires_postgres
 @requires_git
 class GeneratedPathLengthTest(PostgresRepositoryTestCase):
@@ -141,3 +163,99 @@ class GeneratedPathLengthTest(PostgresRepositoryTestCase):
                 self.alice, self.project_id, "/" + "a" * limits.MAX_PATH_CHARS
             )
         self.assertEqual(raised.exception.problem, InputProblem.TOO_LONG)
+
+
+@requires_postgres
+@requires_git
+class PathBytesTest(PostgresRepositoryTestCase):
+    """The path is bounded by its **encoded** length: the unique index has a limit.
+
+    A btree entry over ``path`` cannot exceed about 2700 bytes, and 1024 characters
+    can be 4096 bytes. The limit is ``MAX_PATH_BYTES`` (in the CHECK constraint too), so
+    the failure is a typed refusal, never a database error.
+    """
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        self.project_id = self.seed_project(name="Alpha Project")
+        self.manager = self.seed_user_with_account("alice")
+        self.seed_manager(self.project_id, self.manager)
+        self.alice = self.actor(self.manager)
+        self.home = self.account(self.manager).home
+        self.projdir = project_directory_name("Alpha Project", self.project_id)
+
+    def repository_at_bytes(self, total: int) -> str:
+        """A git repository whose path is exactly ``total`` bytes; its path."""
+        path = make_directory_of_bytes(f"{self.home}/deep", total)
+        parent, last = path.rsplit("/", 1)
+        os.rmdir(path)  # ``make_repository`` makes the directory itself
+        self.world.make_repository(f"{parent}/{last}")
+        return path
+
+    async def test_an_existing_repository_at_the_byte_limit_is_accepted(self):
+        path = self.repository_at_bytes(limits.MAX_PATH_BYTES)
+        self.assertLessEqual(len(path), limits.MAX_PATH_CHARS)
+        self.assertGreater(len(path.encode()), limits.MAX_PATH_CHARS)
+
+        result = await self.service.register_existing(
+            self.alice, self.project_id, path, name="repo"
+        )
+
+        self.assertEqual(result.checkout.path, path)
+        (row,) = self.checkout_rows(result.repository.id)
+        self.assertEqual(len(row["path"].encode()), limits.MAX_PATH_BYTES)
+
+    async def test_one_byte_over_the_limit_is_refused_with_a_typed_error(self):
+        used = 1 + 4 * 500 + 1  # "/" + 500 four-byte characters + "/"
+        path = f"/{FOUR_BYTES * 500}/" + "h" * (limits.MAX_PATH_BYTES + 1 - used)
+        self.assertEqual(len(path.encode()), limits.MAX_PATH_BYTES + 1)
+
+        with self.assertRaises(InvalidRepositoryInputError) as raised:
+            await self.service.register_existing(self.alice, self.project_id, path)
+
+        self.assertEqual(
+            (raised.exception.field, raised.exception.problem),
+            ("path", InputProblem.TOO_LONG),
+        )
+        self.assertEqual(self.checkout_rows(), [])
+
+    async def test_the_longest_text_of_four_byte_characters_is_refused(self):
+        path = "/" + FOUR_BYTES * (
+            limits.MAX_PATH_CHARS - 1
+        )  # 1024 characters, 4093 bytes
+        self.assertEqual(len(path), limits.MAX_PATH_CHARS)
+        with self.assertRaises(InvalidRepositoryInputError) as raised:
+            await self.service.register_existing(self.alice, self.project_id, path)
+        self.assertEqual(raised.exception.problem, InputProblem.TOO_LONG)
+
+    def home_of_bytes(self, repository_name: str, total: int) -> str:
+        suffix = f"/workspaces/{self.projdir}/{repository_name}"
+        return make_directory_of_bytes(
+            f"{self.world.root}/bytes-home", total - len(suffix.encode())
+        )
+
+    def live_in(self, home: str) -> None:
+        self.accounts.accounts[self.manager] = LinuxAccount(
+            self.manager, "alice", os.geteuid(), home
+        )
+
+    async def test_a_generated_path_at_the_byte_limit_is_accepted(self):
+        self.live_in(self.home_of_bytes("r", limits.MAX_PATH_BYTES))
+
+        result = await self.service.create_local(self.alice, self.project_id, "r")
+
+        self.assertEqual(len(result.checkout.path.encode()), limits.MAX_PATH_BYTES)
+        (row,) = self.checkout_rows(result.repository.id)
+        self.assertEqual(row["path"], result.checkout.path)
+
+    async def test_a_generated_path_one_byte_over_is_refused_before_any_insert(self):
+        home = self.home_of_bytes("r", limits.MAX_PATH_BYTES)
+        self.live_in(home)
+
+        with self.assertRaises(PathRejectedError) as raised:
+            await self.service.create_local(self.alice, self.project_id, "rr")
+
+        self.assertIs(raised.exception.problem, PathProblem.TOO_LONG)
+        self.assertEqual(self.repository_rows(self.project_id), [])
+        self.assertEqual(self.checkout_rows(), [])
+        self.assertFalse(fs.lexists(f"{home}/workspaces"))

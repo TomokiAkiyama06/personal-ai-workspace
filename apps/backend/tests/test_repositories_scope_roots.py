@@ -16,6 +16,7 @@ Real PostgreSQL and real git on temporary repositories. Skipped unless
 
 import os
 import shutil
+from unittest import mock
 
 from paw_backend.authz.roles import ProjectRole
 from paw_backend.repositories import (
@@ -196,6 +197,119 @@ class NestedRootTest(ScopeRootsTestCase):
 
         self.assertEqual(self.ids(await self.scope(a)), [a])
         await self.assertRefused(b, PathProblem.NOT_FOUND)
+
+
+class VanishedCheckoutTest(ScopeRootsTestCase):
+    """A checkout that vanished from its path may now sit inside the requested root.
+
+    B is renamed from an unrelated path into a (new) directory of A. A's own identity
+    is unchanged and B's stored path is far away, yet the Tool Broker now reaches B's
+    files through A and would classify them by A's ACL only. A changed or vanished
+    checkout therefore has to be *located* under the requested root (by the identity
+    recorded when it became ready) before it can be called unrelated.
+    """
+
+    async def checkout_id(self, repository_id):
+        return self.checkout_rows(repository_id)[0]["id"]
+
+    async def test_a_checkout_renamed_into_a_new_child_of_the_requested_one(self):
+        a, a_path = await self.register("src/a", "a")
+        b, b_path = await self.register("other/b", "b")
+        os.rename(b_path, f"{a_path}/moved")  # B's files are now reachable through A
+
+        error = await self.assertRefused(a, PathProblem.CHANGED)
+        self.assertEqual(error.checkout_id, await self.checkout_id(b))
+        await self.assertRefused(b, PathProblem.NOT_FOUND)
+
+    async def test_a_checkout_renamed_into_a_deeper_grandchild(self):
+        a, a_path = await self.register("src/a", "a")
+        b, b_path = await self.register("other/b", "b")
+        os.makedirs(f"{a_path}/x/y")
+        os.rename(b_path, f"{a_path}/x/y/b")
+
+        error = await self.assertRefused(a, PathProblem.CHANGED)
+        self.assertEqual(error.checkout_id, await self.checkout_id(b))
+
+    async def test_the_old_path_of_the_moved_checkout_taken_by_another_directory(self):
+        a, a_path = await self.register("src/a", "a")
+        b, b_path = await self.register("other/b", "b")
+        os.rename(b_path, f"{a_path}/moved")
+        os.makedirs(b_path)  # something else at B's old path: "changed", not "gone"
+
+        await self.assertRefused(a, PathProblem.CHANGED)
+
+    async def test_the_old_path_of_the_moved_checkout_replaced_by_a_link(self):
+        a, a_path = await self.register("src/a", "a")
+        b, b_path = await self.register("other/b", "b")
+        os.rename(b_path, f"{a_path}/moved")
+        os.symlink(f"{self.home}/nowhere", b_path)
+
+        await self.assertRefused(a, PathProblem.CHANGED)
+
+    async def test_the_error_names_the_checkout_that_was_found_not_just_any_changed_one(
+        self,
+    ):
+        a, a_path = await self.register("src/a", "a")
+        far, far_path = await self.register("other/far", "far")
+        moved, moved_path = await self.register("other/moved", "moved")
+        shutil.rmtree(far_path)  # vanished, and not inside A
+        os.rename(moved_path, f"{a_path}/inside")  # this one is inside A
+
+        error = await self.assertRefused(a, PathProblem.CHANGED)
+        self.assertEqual(error.checkout_id, await self.checkout_id(moved))
+
+    async def test_a_checkout_that_vanished_far_away_does_not_block_the_scope(self):
+        a, a_path = await self.register("src/a", "a")
+        c, c_path = await self.register("other/c", "c")
+        shutil.rmtree(c_path)
+
+        self.assertEqual(self.ids(await self.scope(a)), [a])
+
+    async def test_a_checkout_moved_elsewhere_outside_the_root_does_not_block_it(self):
+        a, a_path = await self.register("src/a", "a")
+        c, c_path = await self.register("other/c", "c")
+        os.rename(c_path, f"{self.home}/moved-c")
+        os.symlink(f"{self.home}/moved-c", f"{a_path}/link")  # not followed
+
+        self.assertEqual(self.ids(await self.scope(a)), [a])
+        await self.assertRefused(c, PathProblem.NOT_FOUND)
+
+    async def test_a_link_cycle_in_the_root_does_not_hang_the_search(self):
+        a, a_path = await self.register("src/a", "a")
+        c, c_path = await self.register("other/c", "c")
+        shutil.rmtree(c_path)
+        os.symlink(a_path, f"{a_path}/loop")
+
+        self.assertEqual(self.ids(await self.scope(a)), [a])
+
+    async def test_nothing_is_searched_while_every_checkout_is_as_registered(self):
+        outer, _ = await self.register("src/outer", "outer")
+        inner, _ = await self.register("src/outer/vendor/inner", "inner")
+        far, _ = await self.register("other/far", "far")
+
+        with mock.patch(
+            "paw_backend.repositories.service.locate_directory_identity",
+            side_effect=AssertionError("searched an unchanged tree"),
+        ):
+            self.assertEqual(self.ids(await self.scope(outer)), [outer, inner])
+            self.assertEqual(self.ids(await self.scope(far)), [far])
+
+    async def test_a_root_too_large_to_search_is_refused_not_guessed(self):
+        a, a_path = await self.register("src/a", "a")
+        c, c_path = await self.register("other/c", "c")
+        for index in range(10):
+            os.makedirs(f"{a_path}/d{index}")
+        shutil.rmtree(c_path)  # it may have been anywhere: A has to be searched
+
+        with mock.patch(
+            "paw_backend.repositories.service.MAX_IDENTITY_SCAN_DIRECTORIES", 5
+        ):
+            error = await self.assertRefused(a, PathProblem.CHANGED)
+            self.assertEqual(error.checkout_id, await self.checkout_id(c))
+        with mock.patch(
+            "paw_backend.repositories.service.MAX_IDENTITY_SCAN_DIRECTORIES", 500
+        ):
+            self.assertEqual(self.ids(await self.scope(a)), [a])
 
 
 class ScopeErrorsTest(ScopeRootsTestCase):

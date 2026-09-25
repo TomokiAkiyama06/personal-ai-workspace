@@ -130,7 +130,7 @@ class RepositoryRemoteRow(Base):
             ondelete="CASCADE",
         ),
         CheckConstraint(
-            f"char_length(url) BETWEEN 10 AND 1024 AND url ~ '{REMOTE_SQL_PATTERN}'",
+            f"octet_length(url) BETWEEN 10 AND 1024 AND url ~ '{REMOTE_SQL_PATTERN}'",
             name="url_valid",
         ),
         # A URL addresses one repository of a project (the Tool Broker maps a
@@ -156,7 +156,8 @@ class RepositoryCheckoutRow(Base):
         ),
         CheckConstraint("state IN ('pending', 'ready')", name="state_valid"),
         CheckConstraint(
-            "char_length(path) BETWEEN 2 AND 1024 AND path LIKE '/%'"
+            "char_length(path) BETWEEN 2 AND 1024 AND octet_length(path) <= 2048"
+            " AND path LIKE '/%'"
             " AND path NOT LIKE '%/' AND path !~ '(^|/)\\.\\.?(/|$)'",
             name="path_valid",
         ),

@@ -40,12 +40,16 @@ import shutil
 import stat
 import unicodedata
 import uuid
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 
 from paw_backend.authz.subjects import to_uuid
 from paw_backend.repositories.errors import PathProblem, PathRejectedError
-from paw_backend.repositories.limits import MAX_PATH_CHARS, MAX_PROJECT_SLUG_CHARS
+from paw_backend.repositories.limits import (
+    MAX_PATH_BYTES,
+    MAX_PATH_CHARS,
+    MAX_PROJECT_SLUG_CHARS,
+)
 from paw_backend.tools.scope import TargetError, normalise_path, path_within
 
 _USERNAME = re.compile(r"[a-z0-9_][a-z0-9_.-]{0,63}")
@@ -180,10 +184,11 @@ def plan_checkout_path(
             raise PathRejectedError(PathProblem.NOT_FOUND) from None
         _require_owned_directory(info, account.uid)
     path = f"{root}/{project_directory}/{repository_name}"
-    if len(path) > MAX_PATH_CHARS:
-        # The database stores at most this many characters (and 1024 characters
-        # never exceed the 4096 bytes of PATH_MAX). A long home can make a valid
-        # account generate such a path: refused here, before anything is inserted.
+    if len(path) > MAX_PATH_CHARS or len(path.encode()) > MAX_PATH_BYTES:
+        # The database stores at most this many characters and this many encoded
+        # bytes (the path is a unique index key, whose entries have a size limit). A
+        # long home can make a valid account generate such a path: refused here,
+        # before anything is inserted.
         raise PathRejectedError(PathProblem.TOO_LONG)
     return path
 
@@ -232,6 +237,55 @@ def inspect_checkout_root(
     elif expected is not None and identity != expected:
         problem = PathProblem.CHANGED
     return RootState(problem, resolved, identity)
+
+
+def locate_directory_identity(
+    root: str, wanted: Collection[tuple[int, int]], limit: int
+) -> tuple[tuple[int, int] | None, bool]:
+    """Look below ``root`` for a directory with one of the identities (dev, ino).
+
+    For a checkout that vanished from its path: renamed into ``root``, it is now
+    reachable through it, and only its recorded identity can say so. The search
+    visits directories only, never follows a symbolic link (a link to a directory is
+    not entered, so a link cycle ends), reads the inode from the directory entry (a
+    ``lstat`` only when it matches), and stops after ``limit`` directories.
+    Returns ``(the identity found or None, complete)``: ``complete`` is ``False``
+    when the limit was reached, and then nothing is known about the rest. A
+    directory that cannot be read is skipped (the Tool Broker cannot enter it
+    either). Blocks on the file system.
+    """
+    identities = set(wanted)
+    inodes = {inode for _, inode in identities}
+    stack = [root]
+    seen = 0
+    while stack:
+        current = stack.pop()
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    try:
+                        if not entry.is_dir(follow_symlinks=False):
+                            continue
+                        inode = entry.inode()
+                    except OSError:
+                        continue
+                    seen += 1
+                    if seen > limit:
+                        return None, False
+                    if inode in inodes:
+                        try:
+                            info = os.lstat(entry.path)
+                        except OSError:
+                            info = None
+                        if (
+                            info is not None
+                            and (info.st_dev, info.st_ino) in identities
+                        ):
+                            return (info.st_dev, info.st_ino), True
+                    stack.append(entry.path)
+        except OSError:
+            continue
+    return None, True
 
 
 def read_checkout_identity(path: str, account: LinuxAccount) -> tuple[int, int]:

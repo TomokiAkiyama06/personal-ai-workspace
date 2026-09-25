@@ -165,6 +165,7 @@ from paw_backend.repositories.github import (
 from paw_backend.repositories.limits import (
     DEFAULT_LIST_LIMIT,
     DEFAULT_LOCK_TIMEOUT_MS,
+    MAX_IDENTITY_SCAN_DIRECTORIES,
     MAX_LOCK_TIMEOUT_MS,
     MAX_REMOTES_PER_REPOSITORY,
     MAX_REPOSITORIES_PER_PROJECT,
@@ -176,6 +177,7 @@ from paw_backend.repositories.paths import (
     check_existing_repository,
     create_checkout_directory,
     inspect_checkout_root,
+    locate_directory_identity,
     plan_checkout_path,
     project_directory_name,
     read_checkout_identity,
@@ -1348,18 +1350,46 @@ class RepositoryService:
             return path == root or path_within(path, root) or path_within(root, path)
 
         found: list[Checkout] = []
+        vanished: list[Checkout] = []  # changed, and not (by path) related to the root
         for other in ready:
             if other.id == checkout.id:
                 continue
             state = states[other.id]
             leads_to = {other.path} | ({state.resolved} if state.resolved else set())
             if not any(related(path) for path in leads_to):
-                continue  # nothing to do with this checkout, whatever happened to it
+                if state.problem is not None and other.root_device is not None:
+                    vanished.append(other)
+                continue
             if state.problem is not None:
                 _log_changed_root(other, state.problem)
                 raise CheckoutChangedError(PathProblem.CHANGED, other.id)
             found.append(other)
+        if vanished:
+            await RepositoryService._refuse_if_moved_into(root, vanished)
         return found
+
+    @staticmethod
+    async def _refuse_if_moved_into(root: str, vanished: list[Checkout]) -> None:
+        """Refuse when a checkout that left its path may now be inside ``root``.
+
+        Such a checkout (deleted, moved, replaced) is unrelated *by its paths*, but it
+        may have been renamed into a directory of ``root``, and then the Tool Broker
+        reaches its files through ``root`` and applies only ``root``'s ACL. Its
+        identity, recorded when it became ready, is looked for in the directories below
+        ``root``: found, or not provably absent (the search is bounded), and the scope
+        is refused. Only runs when a checkout changed; no changed checkout, no search.
+        """
+        wanted = {(c.root_device, c.root_inode): c for c in vanished}
+        located, complete = await asyncio.to_thread(
+            locate_directory_identity,
+            root,
+            list(wanted),
+            MAX_IDENTITY_SCAN_DIRECTORIES,
+        )
+        culprit = vanished[0] if located is None else wanted[located]
+        if located is not None or not complete:
+            _log_changed_root(culprit, PathProblem.CHANGED)
+            raise CheckoutChangedError(PathProblem.CHANGED, culprit.id)
 
     @staticmethod
     async def _entry(

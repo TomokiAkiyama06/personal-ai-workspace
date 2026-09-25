@@ -132,6 +132,19 @@ class PathTextTest(ValidatorTestCase):
             with self.subTest(path=path):
                 self.assertEqual(v.validate_path_text(path), path)
 
+    def test_the_encoded_length_is_bounded_as_well_as_the_characters(self):
+        four = "\U00020000"  # 4 bytes in UTF-8
+        at_limit = "/" + four * 511 + "h" * (limits.MAX_PATH_BYTES - 1 - 4 * 511)
+        self.assertEqual(len(at_limit.encode()), limits.MAX_PATH_BYTES)
+        self.assertEqual(v.validate_path_text(at_limit), at_limit)
+        self.assertRefused(v.validate_path_text, at_limit + "h", InputProblem.TOO_LONG)
+        # 1024 characters (the character limit) of 4 bytes: over the byte limit.
+        long_text = "/" + four * (limits.MAX_PATH_CHARS - 1)
+        self.assertRefused(v.validate_path_text, long_text, InputProblem.TOO_LONG)
+        # Two-byte characters: 1024 of them are exactly 2048 bytes, and that is stored.
+        two = "é" * 512
+        self.assertEqual(v.validate_path_text("/" + two), "/" + two)
+
     def test_everything_else_is_refused(self):
         cases = [
             (None, InputProblem.NOT_A_STRING),

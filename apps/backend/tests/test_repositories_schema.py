@@ -198,9 +198,11 @@ class ModelsMetadataTest(unittest.TestCase):
         self.assertIn(f"{{0,{limits.MAX_BRANCH_CHARS - 1}}}", BRANCH_SQL_PATTERN)
         remotes = check_sql(REMOTES)["url_valid"]
         self.assertIn(f"BETWEEN 10 AND {limits.MAX_REMOTE_URL_CHARS}", remotes)
-        self.assertIn(
-            f"BETWEEN 2 AND {limits.MAX_PATH_CHARS}", check_sql(CHECKOUTS)["path_valid"]
-        )
+        self.assertIn("octet_length(url)", remotes)
+        path_check = check_sql(CHECKOUTS)["path_valid"]
+        self.assertIn(f"BETWEEN 2 AND {limits.MAX_PATH_CHARS}", path_check)
+        self.assertIn(f"octet_length(path) <= {limits.MAX_PATH_BYTES}", path_check)
+        self.assertEqual(limits.MAX_PATH_BYTES, 2048)
         self.assertEqual(limits.MAX_PATH_CHARS, MAX_PATH_LENGTH)
         self.assertEqual(limits.MAX_REMOTES_PER_REPOSITORY, MAX_REMOTES)
         self.assertEqual(limits.MAX_REMOTE_URL_CHARS, 1024)
@@ -875,6 +877,41 @@ class ConstraintsTest(MemoryDatabaseTestCase):
                     identity=(biggest, biggest),
                 )
             )
+        )
+
+    def test_the_path_is_bounded_by_its_encoded_length_before_the_index_is(self):
+        # 1024 characters of 4 bytes are 4096 bytes: more than a btree entry can
+        # hold (about 2700). The CHECK refuses it first, with a name a service can map.
+        project, user = self.project(), self.user()
+        repository = self.repository(project)
+        four = "\U00020000"
+        limit = limits.MAX_PATH_BYTES
+        at_limit = "/" + four * ((limit - 2) // 4) + "h" * ((limit - 2) % 4) + "x"
+        self.assertEqual(len(at_limit.encode()), limit)
+        self.assertIsNone(
+            self.violation(lambda: self.checkout(repository, project, user, at_limit)),
+            "a path of exactly the limit is stored, index entry included",
+        )
+        for index, path in enumerate(
+            (at_limit + "y", "/" + four * (limits.MAX_PATH_CHARS - 1))
+        ):
+            with self.subTest(bytes=len(path.encode())):
+                self.assertEqual(
+                    self.violation(
+                        lambda p=path, n=index: self.checkout(
+                            repository, project, self.user(), p
+                        )
+                    ),
+                    "ck_repository_checkouts_path_valid",
+                )
+
+    def test_a_remote_url_is_bounded_by_its_encoded_length_too(self):
+        project = self.project()
+        repository = self.repository(project)
+        url = "https://git.example.org/" + "\u00e9" * 600  # 1200 bytes, 624 characters
+        self.assertEqual(
+            self.violation(lambda: self.remote(repository, project, url)),
+            "ck_repository_remotes_url_valid",
         )
 
     def test_a_user_has_one_checkout_per_repository_and_a_path_belongs_to_one(self):
