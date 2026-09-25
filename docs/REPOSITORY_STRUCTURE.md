@@ -56,7 +56,8 @@ personal-ai-workspace/
 │  │  │     ├─ 0040_memory_schema.py
 │  │  │     ├─ 0046_shared_memory_candidates.py
 │  │  │     ├─ 0050_research_scratch_store.py
-│  │  │     └─ 0052_research_provenance.py
+│  │  │     ├─ 0052_research_provenance.py
+│  │  │     └─ 0087_audit_external_send_details.py
 │  │  ├─ paw_backend/
 │  │  │  ├─ __init__.py
 │  │  │  ├─ __main__.py
@@ -112,7 +113,9 @@ personal-ai-workspace/
 │  │  │  │  ├─ __init__.py
 │  │  │  │  ├─ privacy/
 │  │  │  │  │  ├─ __init__.py
+│  │  │  │  │  ├─ audit.py
 │  │  │  │  │  ├─ contract.py
+│  │  │  │  │  ├─ factory.py
 │  │  │  │  │  ├─ gate.py
 │  │  │  │  │  └─ rules.py
 │  │  │  │  ├─ provenance/
@@ -190,6 +193,7 @@ personal-ai-workspace/
 │  │     ├─ __init__.py
 │  │     ├─ fake_postgres.py
 │  │     ├─ identity_support.py
+│  │     ├─ privacy_audit_support.py
 │  │     ├─ privacy_support.py
 │  │     ├─ provenance_support.py
 │  │     ├─ projects_support.py
@@ -218,6 +222,12 @@ personal-ai-workspace/
 │  │     ├─ test_owner_setup_service.py
 │  │     ├─ test_owner_token_roles.py
 │  │     ├─ test_postgres_integration.py
+│  │     ├─ test_privacy_audit_event.py
+│  │     ├─ test_privacy_audit_factory.py
+│  │     ├─ test_privacy_audit_grants.py
+│  │     ├─ test_privacy_audit_postgres.py
+│  │     ├─ test_privacy_audit_schema.py
+│  │     ├─ test_privacy_audit_stall.py
 │  │     ├─ test_privacy_broker.py
 │  │     ├─ test_privacy_contract.py
 │  │     ├─ test_privacy_gate.py

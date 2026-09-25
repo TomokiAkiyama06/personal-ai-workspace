@@ -6,7 +6,7 @@ Login と Session はまだ実装していません（PAW-022 以降）。
 RBAC と Audit（PAW-025）、Task の Lifecycle と永続化（[PAW-032](#agent-task-lifecycle)、HTTP の Endpoint はまだありません）、Task Queue・Budget・Loop 検知（[PAW-033](#task-queue--budget--loop-検知)）、Tool Broker と Capability Policy（[PAW-031](#tool-broker--capability-policy)、HTTP の Endpoint はまだありません）、Memory の PostgreSQL Schema（[PAW-040](#memory--conversation-schema)）、
 最小の `users` Table と Owner の初期設定・復旧のコマンド（[PAW-021](#owner-の初期設定と復旧)）を実装済みです。Memory の保存・整理・検索の処理は PAW-041 以降です。
 Shared Memory の管理（Owner / Admin の作成・編集・削除・復元、Candidate の承認、Agent の自動昇格の拒否、System Policy の優先。[PAW-046](#shared-memory-administration)、HTTP の Endpoint はまだありません）も実装済みです。
-Research の一時保存（[PAW-050](#research-scratch-store)、24 時間 TTL、期限切れを消す Janitor つき、HTTP の Endpoint はまだありません）と、Research Provider の Adapter Interface（[PAW-051](#research-provider-adapter)、実際の Provider（Direct Web、Docs、GitHub、OpenCode）はまだありません）と、外部の検索へ送る Query の最小化と送信の Audit（[PAW-053](#research-privacy-filter)、Audit の永続化はまだありません）も実装済みです。
+Research の一時保存（[PAW-050](#research-scratch-store)、24 時間 TTL、期限切れを消す Janitor つき、HTTP の Endpoint はまだありません）と、Research Provider の Adapter Interface（[PAW-051](#research-provider-adapter)、実際の Provider（Direct Web、Docs、GitHub、OpenCode）はまだありません）と、外部の検索へ送る Query の最小化と送信の Audit（[PAW-053](#research-privacy-filter)。Audit は [#87](#audit-の永続化issue-87) で `audit_events` に永続化済み）も実装済みです。
 Claim と Source の対応・回答や Task からの追跡（[PAW-052](#evidence--claim-provenance)、HTTP の Endpoint はまだありません）も実装済みです。
 Project の作成・招待制の Membership・Lifecycle（Active / Archived / Pending deletion / Deleted）は [PAW-026](#project-crud--membership--lifecycle) で実装済みです（Service のみ。HTTP の Endpoint と Session はまだありません）。
 
@@ -42,7 +42,7 @@ Python 側の Package（`pgvector-python`）は使わず、`paw_backend/memory/v
 apps/backend/
 ├─ pyproject.toml          # 依存（完全一致で固定）と Ruff 設定
 ├─ alembic.ini             # Alembic 設定（DB URL は持たない）
-├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0026 は Project、0031 は Tool Approval、0033 は Queue / Budget / Loop、0040 は Memory Schema、0046 は Shared Memory Candidate、0050 は Research Scratch、0052 は Evidence / Claim Provenance）
+├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0026 は Project、0031 は Tool Approval、0033 は Queue / Budget / Loop、0040 は Memory Schema、0046 は Shared Memory Candidate、0050 は Research Scratch、0052 は Evidence / Claim Provenance、0087 は外部送信の Audit の `audit_events.details`）
 ├─ paw_backend/
 │  ├─ app.py               # create_app(settings)
 │  ├─ config.py            # PAW_ 環境変数から読む Settings
@@ -61,7 +61,7 @@ apps/backend/
 │  │  └─ shared/           # Shared Memory の管理: Service、Candidate、Rule 関数、Policy の優先（PAW-046）
 │  ├─ projects/            # Project、Membership（招待制）、Lifecycle（PAW-026）
 │  ├─ research/providers/  # Research Provider の Adapter Interface と Broker（PAW-051）
-│  ├─ research/privacy/    # Research の Privacy Filter: Query の最小化と外部送信の Audit（PAW-053）
+│  ├─ research/privacy/    # Research の Privacy Filter: Query の最小化と外部送信の Audit（PAW-053、永続の Sink は #87）
 │  ├─ research/scratch/    # Research Scratch Store: 24 時間 TTL の一時保存と、期限切れを消す Janitor（PAW-050）
 │  ├─ research/provenance/ # Evidence / Claim Provenance: Claim と Source の対応、回答・Task からの追跡（PAW-052）
 │  ├─ tools/               # Tool Broker、Capability Policy、Approval（PAW-031）
@@ -671,7 +671,17 @@ Tool Broker の Capability（read / write / execute / network / credential-use /
 `resource_kind` / `resource_id` / `project_id` / `repo_id` / `repo_acl`（Repository のときだけ `inherit` か `override`）、`decision`（`allow` / `deny`）、`reason`（固定の Reason Code）、
 `old_role` / `new_role`（User の Role 変更のときだけ）、
 `client_request_id`（Client が送った `X-Request-ID`。検証済みで 64 文字以内だが**偽造できる**ので、Request の識別には使わない）です。
-Table は加えて `recorded_at`（Database の時計。INSERT 時に Trigger が `now()` へ上書きするので、INSERT できる Role も指定できない）を持ちます。Secret、Prompt、本文は持ちません。
+Table は加えて `recorded_at`（Database の時計。INSERT 時に Trigger が `now()` へ上書きするので、INSERT できる Role も指定できない）と、`details`（Migration `0087`、NULL 可の JSONB）を持ちます。Secret、Prompt、本文は持ちません。
+`AuditEvent` には `details` がなく、ほとんどの行では NULL です。`details` を使うのは、下の `research.external_send` の行だけです（[Audit の永続化](#audit-の永続化issue-87)）。
+
+**`action` の一覧**（`audit_events` に新しい `action` を足すときは、ここと、必要なら Migration の CHECK 制約に登録します）:
+
+| `action` | 出所 | `reason` の例 |
+| --- | --- | --- |
+| Capability の値（`project.repo.write`、`shared_memory.delete` など）。存在しない Capability は `unknown` | `Authorizer` の判定（PAW-025）。Shared Memory の変更の完了の行は、同じ `action` で `reason` が `completed`（PAW-046） | `Reason` の値（`granted_by_system_role`、`audit_unavailable` など） |
+| `tool.<Tool 名>`、`tool.unknown`、`tool.approval.approve` / `reject` / `revoke` | Tool Broker（PAW-031） | `BrokerReason` の値 |
+| `owner.create`、`owner.replace`、`owner.setup_token.issue`、`owner.recovery_token.issue`、`owner.token.revoke`、`owner.token.redeem` | Owner の設定・復旧（PAW-021） | `AuditReason` の値 |
+| `research.external_send` | Research Privacy Filter の永続の Sink（Issue [#87](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/87)） | `send_authorized`（`decision` は `allow`。`actor_role` は `system`、`resource_kind` は `research_query`） |
 
 **Audit Mode**（`CAPABILITIES[...].audit`）は Capability ごとに決まり、既定は `REQUIRED` です。
 
@@ -1810,8 +1820,9 @@ Timeout の Test は、永遠に待つ Provider を 0.3 秒で打ち切り、成
 
 [PAW-053](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/45) で実装した、外部の検索へ送る Query を最小化し、送信を Audit する層です（`paw_backend/research/privacy/`）。
 設計は [要件](../../REQUIREMENTS.md)の「Web Research / Knowledge Layer」の Privacy に従い、数値と規則は [Decision 0010](../../docs/decisions/0010-research-privacy-filter-policy.md)（Approved。2026-09-25 に Human が承認）で決めています。数値は暫定値として承認されたもので、変更できます。
-**永続の Audit Sink（Issue [#87](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/87)）が接続されるまでは、Private 由来の Context を Research へ自動で入れる設計を有効にしません**（承認時の条件）。
-**Provider には依存しません。** HTTP の Endpoint も、永続化する Store もありません（Audit の保存先は `ExternalSendAudit`（Protocol）で、後続の Issue が接続します）。Migration もありません。
+**永続の Audit Sink は接続済みです**（Issue [#87](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/87)、Migration `0087`。[Audit の永続化](#audit-の永続化issue-87)）。
+**2026-09-25 の追記（#87）: Decision 0010 の承認時の条件が満たされました。** 条件は「永続の Audit Sink が接続されるまで、Private 由来の Context を Research へ自動で入れる設計を有効にしない」でした。Sink が接続されたので、この設計を有効にしてよくなりました。ただし、それは **`build_research_broker`（または `build_privacy_gate`）で作った Broker を通す場合だけ**です（下の「許可されること・まだ許可されないこと」）。この追記は、承認済みの Decision 0010 を書き換えるものではなく、条件が満たされたことの記録です。
+**Provider には依存しません。** HTTP の Endpoint はありません。永続化する Store は、Authorizer の `audit_events` Table だけです（新しい Table はなく、Migration `0087` はその Table に列を 1 つ足します）。
 
 Main Agent（または Research Worker）は、書いた Query の**下書き**と、その下書きの元になった Context（各 Piece に `ContextLabel` を付けたもの）を Gate に渡します。
 Gate は、外へ出してよい `MinimizedQuery` を返すか、`PrivacyRefusal` で拒否します。
@@ -1821,6 +1832,8 @@ Gate は、外へ出してよい `MinimizedQuery` を返すか、`PrivacyRefusal
 | `contract.py` | `ContextLabel`、`ContextPiece`、`PrivacyInput`、`MinimizedQuery`、`ExternalSendRecord`、`WithheldCounts`、`RefusalReason` / `PrivacyRefusal`、`ExternalSendAudit`（Protocol）、`InMemoryExternalSendAudit`、上限の定数 |
 | `rules.py` | 最小化の規則（小さな純粋関数）。正規化、写しの検出、Credential の除去、抽象化の規則、切り詰め、Fingerprint |
 | `gate.py` | `PrivacyGate`: 入力の検証、Default deny、規則を呼ぶ順序、Rule とは別の最終検査、Audit してから返す |
+| `audit.py` | `PostgresExternalSendAudit`（Record を `audit_events` へ 1 行追記する Sink）、`external_send_event`（Record → 行の変換。I/O なし）（#87） |
+| `factory.py` | `build_privacy_gate` / `build_research_broker`: 永続の Sink をつないだ Gate と Broker の**本番の構築経路**（#87） |
 
 ### Context のラベル
 
@@ -1878,12 +1891,51 @@ Gate は、外へ出してよい `MinimizedQuery` を返すか、`PrivacyRefusal
 Record は Query の本文、消した文字列、Context の本文を**持ちません**（Field 自体がありません）。`ContextPiece` の本文は `repr` にも出ません。
 Sink が例外を出す、5 秒（既定）以内に終わらない、満杯である場合は、`audit_failed` で拒否し、送りません。ログには例外の型を 1 行（WARNING）だけ出しますが、それは**固定の分類**で、Sink が決められる文字列は入りません。Sink が上げた例外の Class 名は Sink のデータです（`type("access_token=SECRET\nforged", (Exception,), {})()` のように、Credential や、次の Log 行を偽造する改行を入れられ、Metaclass の `__name__` や `__getattribute__` を上書きして、名前を読む処理そのものを例外にもできます）。そのため Gate は `type(error)` が組み込みの例外、またはこの Package の例外の Class **そのもの**（`is` で照合。Subclass や名前だけ似せた Class は含まない）のときだけその Class 名（`RuntimeError`、時間切れの `TimeoutError` など）を出し、それ以外は固定の `adapter_error` にします。これは Provider Broker の `log_type_name`（「例外の文言は Code にも Result にも Log にも入りません」の節。一覧は `broker.py` の `LOGGED_EXCEPTION_TYPES`）をそのまま使っており、Class の属性は 1 つも読まず、`id` で一覧を引くので、Metaclass の Hook（`__getattribute__`、`__name__`、`__hash__`、`__eq__`）は呼ばれず、どんな Class の例外でも拒否は `audit_failed` のままです。組み込み以外の Library の例外（DB Driver の例外など）は `adapter_error` になり、型では区別できません。
 Record は「送ってよいと判断した」記録で、Provider が答えたかは含みません。拒否した要求は Record を作りません。
+保存先は、Test では `InMemoryExternalSendAudit`（最大 1,000 件）、本番では `PostgresExternalSendAudit`（次の節）です。
+
+#### Audit の永続化（Issue #87）
+
+`PostgresExternalSendAudit(database, timeout_seconds=5.0)`（`audit.py`）は、Gate が渡す `ExternalSendRecord` を、Authorizer と同じ追記専用の `audit_events` Table（PAW-025）へ 1 行として書きます。**Query の本文は、どの列にも入りません。**
+
+| 列 | 値 |
+| --- | --- |
+| `action` / `reason` / `decision` | `research.external_send` / `send_authorized` / `allow`（拒否した要求は Record を作らないので、`deny` の行はありません） |
+| `resource_kind` / `resource_id` | `research_query` / なし |
+| `project_id` | Record の Project |
+| `actor_role` / `actor_id` | `system`（Backend が判断する。Record には User がない）/ なし |
+| `occurred_at` / `recorded_at` | Gate の時計（送ってよいと判断した時刻）/ Database の時計（Trigger） |
+| `id` / `correlation_id` | 新しい UUID（Gate は Request の `correlation_id` を持たないので、送信ごとに 1 つ） |
+| `details`（JSONB） | `query_fingerprint`（`sha256:` と 64 桁の 16 進数）、`query_chars`、`provider_kinds`（`web` `docs` `github` `opencode` のうち送った種類、`ProviderKind` の順）、`withheld`（Label ごとに外した Piece の数）、`credentials_removed`、`pieces_matched`、`abstractions`、`truncated` |
+
+- **Query の SHA-256 は、Provider が受け取る最小化済みの Query の SHA-256 です**（`MinimizedQuery.fingerprint`）。塩なしなので、Query が Public な内容になっていることが前提です（上の「制限と未確認の点」）。Test は、Provider が実際に受け取った Query の SHA-256 と行の値が一致すること、Database 自身が `sha256()` で再計算した値とも一致することを確かめます。
+- **本文が入らないことは、3 つの層で守ります。** (1) `ExternalSendRecord` に本文の Field がありません。(2) `external_send_event` は、Record が作られた後に書き換えられていないか（`object.__setattr__`）、`str` / `int` の Subclass でないか、Slot が消えていないかを、Field ごとに型と形（`sha256:` + 64 桁の小文字の 16 進数、範囲内の整数、`ProviderKind` の Member、`bool`）で確かめ直し、**新しい**プレーンな値（`str` `int` `bool` `list` `dict`）だけで `details` を作ります。合わなければ Database に触れる前に `TypeError` / `ValueError`（固定の文言。値は含まない）です。(3) Migration `0087` の CHECK 制約 `ck_audit_events_external_send_details` が、`research.external_send` の行に、決まった 8 つの Key（`withheld` の中は 4 つ）と値の形（指紋の書式、数字だけの整数、Boolean、`[a-z][a-z0-9_]{0,31}` の Token が 1〜8 個の配列）以外を許しません。Key の追加も、Query を入れる場所になる Fingerprint の別の書式も、Application の Role からも拒否されます（`ck_audit_events_details_object`: `details` は JSON の Object で 2,048 Byte まで）。
+- **Fail closed です。** 書き込みは `Database.execute_abortable`（`PostgresAuditSink` と同じ、Pool を使わない 1 文専用の中断可能な接続）で、`timeout_seconds`（既定は Gate の既定と同じ 5 秒）で**接続の Socket を閉じて**止めます。接続の枠の待ちと実行は 1 つの期限を共有し、同時に動く書き込み（専用接続）は `PAW_DATABASE_POOL_SIZE` を超えません（枠は Query の Task が実際に終わるまで保持します）。書けない、時間切れ、権限がない、接続できない、Database が停止中は、いずれも例外になり、Gate が `audit_failed` で拒否して **Provider を 1 つも呼びません**。Gate の時間切れがそのまま書き込みの Cancel になり、Cancel は握りつぶしません。
+- **打ち切られた書き込みは Commit されたか分かりません。** Gate が拒否したのに行が残ることがあります（「承認済み」と書かれた行があるのに、送っていない）。逆（送ったのに行がない）は起きません: 行が確認される前に Query は返りません。
+- **本番の構築経路は `factory.py` です。** `build_research_broker(registry, database, audit_timeout_seconds=5.0, clock=None)` は、Gate と Sink に**同じ期限**を渡し、`ResearchBroker(registry, preflight=gate)` を返します（`unfiltered` ではありません）。`build_privacy_gate(database, ...)` は Gate だけを返します。`database` は `Database` で、URL が設定されていなければ `DatabaseNotConfiguredError`（記録できない Gate は、全ての送信を拒否するだけなので、作りません）。作るときに接続はしません。
+- **権限。** Application の Role は `audit_events` に INSERT と SELECT だけを持ち（Migration `0025`）、Migration `0087` は何も付与しません（列は Table 単位の権限に含まれます）。送信の行を UPDATE、DELETE、TRUNCATE することも、Trigger や CHECK 制約を外すこともできません（`tests/test_privacy_audit_grants.py` が非 Superuser の Role で確かめます）。`PAW_APP_DATABASE_ROLE` に INSERT が無い Role では、記録できず、送信は全て拒否されます。
+
+#### 許可されること・まだ許可されないこと
+
+Decision 0010 の承認時の条件が満たされたので、次は**許可されます**:
+
+- Private 由来の Context（`PRIVATE_SOURCE`、`PRIVATE_MEMORY`、`RAW_CONVERSATION`、`SECRET` の Label を付けた `ContextPiece`）を Gate に渡して、Research の Query の下書きから写しを除き、最小化した Query を外部の Provider へ送ること。**ただし `build_research_broker` / `build_privacy_gate` で作った Broker を通す場合だけです。** 送信ごとに、Query の SHA-256 などが `audit_events` に残ります。
+
+次は**今も許可されません**:
+
+- Sink の無い `ResearchBroker`（`preflight` も `unfiltered=True` も無い Broker は `PreflightRequiredError` で検索しません）。`unfiltered=True` の Broker（最小化も Audit もしない。Private 由来の Query には使わない）。
+- `PrivacyGate(InMemoryExternalSendAudit())`（Test 用。Process が終わると Record が消え、1,000 件で満杯になる）を、本番で Private 由来の Context に使うこと。
+- この Repository には、`build_research_broker` を呼ぶ Application のコードも、Provider の実装（Direct Web、Docs、GitHub、OpenCode）も、HTTP の Endpoint も**まだありません**。条件が外れたのは、それらの Issue が Private 由来の Context を渡してよい、ということで、渡す実装があるわけではありません。
 
 ### Broker への差し込み
 
 ```python
-gate = PrivacyGate(audit)  # audit は ExternalSendAudit
-broker = ResearchBroker(registry, preflight=gate)
+# 本番: 永続の Sink（audit_events）をつないだ Broker。database は Database（URL が必須）
+broker = build_research_broker(registry, database)
+
+# Test: メモリ上の Sink
+# gate = PrivacyGate(InMemoryExternalSendAudit())
+# broker = ResearchBroker(registry, preflight=gate)
+
 result = await broker.gather(
     ResearchRequest(draft_query),
     preflight_input=PrivacyInput(context_pieces, project_id),
@@ -1898,6 +1950,13 @@ result = await broker.gather(
 - 選ばれた Provider が 1 つもなければ、何も送られないので、Gate も Audit も動きません。
 - 1 回の `gather` につき Record は 1 つです。Time Budget は pre-flight の後から数えます。
 - **`ResearchBroker.fetch` は Gate を通りません**（Decision 0010）。`fetch` は Query を持たず、Provider が以前返した Source の Locator（正規化済み）を、その Provider へ戻すだけです。そのため、`preflight` の有無にも `unfiltered=True` にも関係なく、どの Broker でも使えます（`preflight` も `unfiltered=True` も無い Broker でも動きます）。Private な Source を取得してよいかは、Tool Broker（PAW-031）と個々の Adapter の責任です。
+
+### Migration `0087`
+
+`0087_audit_external_send_details.py` は、`audit_events` に NULL 可の JSONB 列 `details` と CHECK 制約 2 つ（`ck_audit_events_details_object`、`ck_audit_events_external_send_details`）を足します。Table も Trigger も権限も作らず、変えません（上の「Audit の永続化」）。CHECK 制約は `NOT VALID` で足し、検証しません（追記専用の大きな Table を `ACCESS EXCLUSIVE` の Lock で走査しないため。新しい行は、制約を足した時から検査されます。検証しないのは、下げて上げ直したとき、`details` を失った古い送信の行が検証に失敗しないためでもあります）。
+`downgrade` は `details` の列を落とすので、**記録済みの外部送信の Query の指紋と数を破棄します**（行は残ります）。開発・Test 用で、本番では実行しないでください。
+`down_revision` は `0026` です（鎖は `0001 → 0025 → 0032 → 0040 → 0021 → 0033 → 0031 → 0050 → 0046 → 0052 → 0026 → 0087`）。Revision ID は Issue 番号で、鎖の順序ではありません。統合時に Orchestrator が並びを確認します。
+Model（`authz/models.py`）と Migration は同じ CHECK の文を繰り返しており（Migration は凍結した写し）、`tests/test_privacy_audit_schema.py` が食い違いを検出します。
 
 ### 実装の由来
 
@@ -1921,13 +1980,20 @@ AGENTS.md のとおり、同じ失敗を繰り返したのでエスカレーシ�
 - 写しの検出は文字の並びの比較です。Case folding は Unicode の 1 文字ずつの対応（`str.casefold`）だけで、言語ごとの規則（トルコ語の `I` と `ı` など）、発音が同じ別の綴り、アクセント記号の有無の違い（`e` と `é`）は同じとはみなしません。
 - 日付（`2026/09/24`）など、規則に当たる正当な語も消えます（過剰に消す方向に倒しています）。
 - 処理は同期で、CPU を使います。上限（Draft 2,000 文字、Context 合計 400,000 文字。書かれたままの文字数と、NFKC・Case folding 後の文字数の両方）で処理量を抑えていますが、Event Loop の上で動きます。展開する Text（U+FDFA など）は、展開後の文字数で拒否するので、窓の集合は作られません。上限ぎりぎりの Context は、通常の Text でも、Event Loop を数十ミリ秒から 0.1 秒程度止めます（この Repository の開発機で測った目安で、保証する値ではありません。`test_a_context_that_expands_past_the_limit_is_refused_before_any_text_work` は 1 秒未満だけを確かめます）。
-- Audit の Sink は、メモリ上の Test 用（`InMemoryExternalSendAudit`、最大 1,000 件で満杯になると拒否する）だけです。永続化と Audit Log への接続は、後続の Issue [#87](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/87) です。それまで、Private 由来の Context を Research へ自動で入れる設計は有効にしません（Decision 0010 の承認時の条件）。
+- **拒否した要求は Audit しません**（Decision 0010）。拒否の理由（`unclassified_context` など）は、Record にも `audit_events` にも残りません。Audit できなかった送信（`audit_failed`）も、記録できなかったから拒否したので、記録がありません（Log に固定の型名が 1 行出るだけです）。
+- Audit の行は、Query の指紋（SHA-256）と数だけです。**何を検索したかは、行から分かりません**（本文を持たない、という要件のとおり）。Query を知っている人が、その SHA-256 で行を探すことはできます。
+- 保存期間、Partition、古い行の退避はありません。`audit_events` は削除できないので、送信ごとに 1 行ずつ増え続けます（認可の節の制限と同じ）。
+- 送信の行は、Application の Role が INSERT できる Table にあるため、**Application が侵害されれば偽の行を足せます**（認可の節の「守れないもの」と同じ）。本文が入らない、行を書き換えられない、は CHECK 制約と権限が守ります。
+- `PostgresExternalSendAudit` は、PostgreSQL 18 の実 DB、ソケットを閉じる Stub Server、Proxy で途中から止まる実 DB で確かめました。Database が遅い・落ちているとき、Research の検索は全て止まります（Fail closed の意図した結果です）。
+- 期限は Gate の引数（`audit_timeout_seconds`）で、環境変数の設定はありません（Decision 0010 が暫定値として承認した 5 秒）。
+- **接続の確立の途中で打ち切られた書き込み**（`Database._abort` が、まだ接続の無い Task を Cancel する経路）は、Task が終わっても、その接続の Socket が Python の Garbage Collection まで開いたままに見えることがあります（応答しない Stub Server を使う Test で、Server の終了が止まる現象として観測しました。原因は推測で、確認していません）。枠（同時に動く書き込み）は Task が終わるまで保持するので、**同時に動く書き込みは Pool の大きさまで**ですが、開いている Socket の数は、その瞬間、それを超えることがあります。`Database` の既存の動作で、この Issue では変えていません（Test は `HangingPostgres` の終了で `close_clients` を使い、動く書き込みの数の上限だけを確かめます）。
 - `Fingerprint` は塩なしの SHA-256 です。Query が Public な内容になっていることが前提です。
 - 数値と規則は [Decision 0010](../../docs/decisions/0010-research-privacy-filter-policy.md)（Approved、2026-09-25）にまとめています。数値は暫定値として承認されたもので、変更する場合は新しい Decision から `Supersedes` します。
 
 ### Test
 
-`apps/backend/tests/test_privacy_*.py` です。標準 `unittest` だけで、DB も Network も使いません。
+`apps/backend/tests/test_privacy_*.py` です。標準 `unittest` だけです。`test_privacy_audit_*.py`（永続の Sink、#87）以外は、DB も Network も使いません。
+`test_privacy_audit_event.py`（Record → 行の変換、Field ごとの検証、改ざんされた Record、本文が入らないこと）と `test_privacy_audit_factory.py`（Sink と構築経路の引数、`Database` を差し替えた Broker の順序と失敗）は DB なしで、`test_privacy_audit_postgres.py`（実 PostgreSQL: 行の中身、Provider が受け取った Query の SHA-256 との一致、追記専用、並行、Fail closed）、`test_privacy_audit_schema.py`（Migration `0087` の上げ下げ、Model との差、CHECK 制約の各条項）、`test_privacy_audit_grants.py`（非 Superuser の Role: `0087` が何も付与しないこと、`audit_events` の権限が INSERT と SELECT だけであること、その Role で `test_privacy_audit_postgres.py` の Class を実行）、`test_privacy_audit_stall.py`（応答しない Server が Gate の期限で拒否になること、枠と接続が戻ること。Stub と、途中で止まる Proxy 越しの実 DB）は `PAW_TEST_DATABASE_URL` を設定したときに実行します（`test_privacy_audit_stall.py` の Stub の Test は設定なしでも動きます）。
 `test_privacy_rules_text.py`、`test_privacy_rules_abstract.py`、`test_privacy_rules_properties.py` は `rules.py` の各関数を、`test_privacy_gate.py` は Gate（拒否、最終検査、Audit の失敗。Class 名に Credential や改行を入れた例外、Metaclass の `__name__`・`__getattribute__`・`__hash__`・`__eq__` が例外になる Class を Sink が上げても、Log の型が固定の `adapter_error` で、拒否が `audit_failed` のままであること）を、`test_privacy_broker.py` は `ResearchBroker` への差し込みを、`test_privacy_contract.py` は値の検証を確かめます。
 Timeout の Test は、永遠に待つ Sink を 0.2 秒で打ち切り、成功する経路は即座に終わる構成です（30 秒の Guard で CI の停止を防ぎます）。
 
