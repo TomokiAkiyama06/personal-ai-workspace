@@ -1161,7 +1161,7 @@ Tool の実行を伴う記録（許可と実行後）は Fail-closed で、許�
 | `TaskActivityProvider.check(task_id, run)` | Deployment（`PostgresTaskActivity(database)`） | `FailClosedTaskActivity`（Task は不明 = 承認を要する呼び出しは拒否） |
 | `PathResolver.resolve` | Deployment | `RealpathResolver`。`LexicalPathResolver` は Symlink のない環境の Test 用 |
 
-`ToolRunner(execution_timeout=)` の既定は 600 秒（最大 24 時間。`None` は不可）。実行後の記録（Audit と Budget の Charge）は `finally` で `asyncio.shield` して書くため、Task が Cancel されても、実行後の処理が失敗しても残ります。
+`ToolRunner(execution_timeout=)` の既定は 600 秒（最大 24 時間。`None` は不可）。実行後の記録（Audit と Budget の Charge）は `finally` の中で、専用の Task として実行し、`ToolRunner` がその Task を保持して終わるまで待つため、Task が Cancel されても、実行後の処理が失敗しても残ります。記録が終わる前に届いた Cancel（Audit や Budget の Adapter が遅い間の Cancel、繰り返しの Cancel を含む）は、記録が終わるまで保留して、その後に `CancelledError` として伝えます（`asyncio.timeout` は `TimeoutError` になります）。`asyncio.shield` だけでは、Cancel が届いた時点で `run` が戻り、記録は誰も待たない背景の Task として残って、Event Loop の終了で Cancel されえました。待ちは Broker の Timeout（Audit の書き込みと Charge のそれぞれ）で有界です。Event Loop の終了時に全 Task を Cancel する場合（`asyncio.run`）は、記録の Task も Cancel されるため、防げません。（`tests/test_tools_runner_accounting.py`）
 
 Adapter は Broker / Runner / Service の生成時に検査します（Async Method か、必要な引数の数か）。間違った Adapter は生成時に `TypeError` です。
 

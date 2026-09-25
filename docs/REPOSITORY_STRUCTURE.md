@@ -307,6 +307,7 @@ personal-ai-workspace/
 │  │     ├─ test_tools_postgres_roles.py
 │  │     ├─ test_tools_registry.py
 │  │     ├─ test_tools_runner.py
+│  │     ├─ test_tools_runner_accounting.py
 │  │     ├─ test_tools_scope.py
 │  │     ├─ tools_store_contract.py
 │  │     └─ tools_support.py
