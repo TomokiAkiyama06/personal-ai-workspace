@@ -10,8 +10,10 @@ the normalised invocation to the injected :class:`ToolExecutor`. The runner then
   ``password`` / ``api_key``, anything that is not plain JSON data) before it is
   returned or logged,
 * reports the call to the broker (audit row and budget charge) in a ``finally``,
-  shielded from cancellation: a call that ran is recorded and charged even if the
-  task around it is cancelled, or something after it fails.
+  as a task that ``run`` keeps and waits for (``_account``): a call that ran is
+  recorded and charged even if the task around it is cancelled (also while the
+  audit or budget adapter is still working: the cancellation is raised only
+  after the accounting has ended), or something after it fails.
 
 The executor receives a credential only as an opaque handle in the arguments.
 Resolving it, opening files confined to the scope's roots (no symlink out of
@@ -109,14 +111,42 @@ class ToolRunner:
                 succeeded = True
         finally:
             # The call ran (or was cut short): it is recorded and charged even if
-            # this task is cancelled meanwhile (the record is shielded), and
-            # before anything below can fail.
-            await asyncio.shield(
-                self._broker.record_execution(decision, succeeded=succeeded)
-            )
+            # this task is cancelled meanwhile, and before anything below can
+            # fail.
+            await self._account(decision, succeeded=succeeded)
         if not succeeded:
             return ToolOutcome(decision, ExecutionStatus.FAILED, error_type=error_type)
         result, redactions = redact_value(raw)
         return ToolOutcome(
             decision, ExecutionStatus.COMPLETED, result=result, redactions=redactions
         )
+
+    async def _account(self, decision: BrokerDecision, *, succeeded: bool) -> None:
+        """Record and charge an executed call; finish before any cancel passes.
+
+        The accounting runs as a task of its own that this coroutine keeps a
+        reference to and waits for. A cancellation that arrives meanwhile (the
+        audit or budget adapter is slow) is held back until the accounting has
+        ended, and then raised: the caller still learns that it was cancelled
+        (an ``asyncio.timeout`` around ``run`` still becomes ``TimeoutError``),
+        but never before the audit row and the charge exist. ``asyncio.shield``
+        alone returned at once and left the accounting as a background task that
+        nothing waited for or kept alive. The wait is bounded by the broker's own
+        timeouts (one for the audit write, one for the charge). A task that the
+        event loop itself cancels while it is closing (``asyncio.run`` cancels
+        every task) cancels the accounting too; that cannot be prevented here.
+        """
+        accounting = asyncio.create_task(
+            self._broker.record_execution(decision, succeeded=succeeded)
+        )
+        cancelled: asyncio.CancelledError | None = None
+        while not accounting.done():
+            try:
+                # Unlike awaiting the task, asyncio.wait() does not cancel it
+                # when this caller is cancelled.
+                await asyncio.wait({accounting})
+            except asyncio.CancelledError as error:
+                cancelled = error  # raised below, once the accounting is done
+        accounting.result()  # its own failure, if any (it never raises for a store)
+        if cancelled is not None:
+            raise cancelled
