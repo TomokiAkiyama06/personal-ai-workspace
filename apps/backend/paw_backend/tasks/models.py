@@ -8,8 +8,9 @@ here (the API layer must do it, see PAW-022 / PAW-025).
 
 The Multi-Repo working set (repositories with the ``referenced`` / ``working`` /
 ``target`` roles, each with its own worktree / review / pull request state) is
-not stored: it is outside PAW-032 and proposed in
-``docs/decisions/0014-task-working-set-persistence.md``. ``TaskAttemptRow``
+not stored: it is outside PAW-032 (Human approved this on 2026-09-25 in
+``docs/decisions/0014-task-working-set-persistence.md``, which assigns it to a
+new issue, #85, after PAW-027 and before PAW-034). ``TaskAttemptRow``
 holds the state of a single repository.
 """
 
