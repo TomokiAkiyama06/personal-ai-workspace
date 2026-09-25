@@ -35,6 +35,7 @@ from . import (
     test_orchestrator_fenced_commands,
     test_orchestrator_lease,
     test_orchestrator_planning,
+    test_orchestrator_project_gate,
     test_orchestrator_project_sweep,
     test_orchestrator_recovery,
     test_orchestrator_run,
@@ -269,6 +270,10 @@ class ShutdownAsAppRole(AsAppRole, test_orchestrator_shutdown.ShutdownTest):
 class ToolsAsAppRole(
     AsAppRole, test_orchestrator_tools.ToolsThroughTheOrchestratorTest
 ):
+    pass
+
+
+class ProjectGateAsAppRole(AsAppRole, test_orchestrator_project_gate.ProjectGateTest):
     pass
 
 

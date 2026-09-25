@@ -97,15 +97,16 @@ from paw_backend.orchestrator.validation import (
     check_uuid,
     check_worker_id,
 )
+from paw_backend.projects.errors import ProjectBusyError
 from paw_backend.tasks import (
     Actor,
     IllegalTransitionError,
     LogLevel,
+    ProjectNotActiveError,
     StaleAttemptError,
     StaleRunError,
     TaskCommand,
     TaskConflictError,
-    TaskError,
     TaskNotFoundError,
     TaskRun,
     TaskService,
@@ -575,12 +576,15 @@ class Orchestrator:
             except (IllegalTransitionError, TaskConflictError, TaskNotFoundError):
                 await self._complete_quietly(entry, worker_id)
                 return None
-            except TaskError as error:
-                # Refused for a reason that may pass (a project that is not Active,
-                # Issue #83): the entry goes back to the queue, not away.
-                logger.warning(
-                    "Starting a task was refused (%s)", error_class_of(error)
-                )
+            except (ProjectNotActiveError, ProjectBusyError) as error:
+                # The Project state gate (Issue #83, Decision 0020) refuses the
+                # Start: the project was Archived or put in deletion after this
+                # entry was claimed (the claim skips such projects), or its row
+                # could not be locked in time. The task stays queued and the entry
+                # goes BACK to the queue (not away): it is claimed again once the
+                # project is Active, and nothing was started, so no runtime timer,
+                # node or budget was touched.
+                logger.info("Starting a task was refused (%s)", error_class_of(error))
                 with contextlib.suppress(LeaseLostError):
                     await self._queue.release(entry.id, worker_id, entry.claim_count)
                 return None

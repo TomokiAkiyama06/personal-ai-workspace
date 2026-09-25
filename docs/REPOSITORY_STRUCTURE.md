@@ -168,8 +168,7 @@ personal-ai-workspace/
 │  │  │  │  ├─ scheduling.py
 │  │  │  │  ├─ scope.py
 │  │  │  │  ├─ store.py
-│  │  │  │  ├─ validation.py
-│  │  │  │  └─ wiring.py
+│  │  │  │  └─ validation.py
 │  │  │  ├─ projects/
 │  │  │  │  ├─ __init__.py
 │  │  │  │  ├─ cursor.py
@@ -348,6 +347,7 @@ personal-ai-workspace/
 │  │     ├─ test_orchestrator_migration.py
 │  │     ├─ test_orchestrator_plan.py
 │  │     ├─ test_orchestrator_planning.py
+│  │     ├─ test_orchestrator_project_gate.py
 │  │     ├─ test_orchestrator_project_sweep.py
 │  │     ├─ test_orchestrator_project_sweep_app.py
 │  │     ├─ test_orchestrator_property.py

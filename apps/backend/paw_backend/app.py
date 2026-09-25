@@ -26,7 +26,7 @@ from paw_backend.middleware import (
     SecurityHeadersMiddleware,
 )
 from paw_backend.orchestrator.project_sweep import build_project_stop_loop
-from paw_backend.orchestrator.wiring import production_project_gate
+from paw_backend.projects import ProjectStateGate
 from paw_backend.research.scratch import ScratchJanitor, ScratchStore
 
 logger = logging.getLogger(__name__)
@@ -87,7 +87,7 @@ def create_app(
                 # queue are built with it, never without.
                 stop_loop = build_project_stop_loop(
                     database,
-                    project_gate=production_project_gate(),
+                    project_gate=ProjectStateGate(),
                     interval_seconds=settings.project_task_stop_interval_seconds,
                 )
                 background.add(asyncio.create_task(stop_loop.run()))

@@ -15,6 +15,7 @@ from pydantic import ValidationError
 from paw_backend.app import create_app
 from paw_backend.config import Settings
 from paw_backend.orchestrator import limits
+from paw_backend.projects import ProjectStateGate
 
 from .support import FakeDatabase, make_settings, paw_environment, wait_until
 from .test_scratch_janitor_lifespan import configured
@@ -91,12 +92,13 @@ class LifespanTestCase(unittest.IsolatedAsyncioTestCase):
         patcher = patch("paw_backend.app.build_project_stop_loop", RecordingLoop)
         patcher.start()
         self.addCleanup(patcher.stop)
-        # The gate is composed explicitly (Issue #83): the lifespan asks for it and
-        # hands it to the loop; here the answer is a recognisable object.
-        self.gate = object()
-        gate = patch("paw_backend.app.production_project_gate", lambda: self.gate)
-        gate.start()
-        self.addCleanup(gate.stop)
+
+    def assert_composed_with_the_project_state_gate(self, loop, interval) -> None:
+        """The lifespan hands the loop the real gate, explicitly (Issue #83,
+        Decision 0020: the task lane requires one), and the interval."""
+        self.assertEqual(set(loop.options), {"project_gate", "interval_seconds"})
+        self.assertIsInstance(loop.options["project_gate"], ProjectStateGate)
+        self.assertEqual(loop.options["interval_seconds"], interval)
 
     async def run_lifespan(self, app) -> None:
         async with app.router.lifespan_context(app):
@@ -112,10 +114,7 @@ class StartTest(LifespanTestCase):
             (loop,) = RecordingLoop.instances
             self.assertTrue(await wait_until(loop.started.is_set))
             self.assertIs(loop.database, database)
-            self.assertEqual(
-                loop.options,
-                {"project_gate": self.gate, "interval_seconds": 60},
-            )
+            self.assert_composed_with_the_project_state_gate(loop, 60)
             self.assertFalse(loop.cancelled)
 
         self.assertTrue(loop.stopped)  # asked to stop ...
@@ -129,9 +128,7 @@ class StartTest(LifespanTestCase):
         await self.run_lifespan(app)
 
         (loop,) = RecordingLoop.instances
-        self.assertEqual(
-            loop.options, {"project_gate": self.gate, "interval_seconds": 90}
-        )
+        self.assert_composed_with_the_project_state_gate(loop, 90)
 
     async def test_it_is_stopped_before_the_database_is_disposed(self):
         settings, database = configured()

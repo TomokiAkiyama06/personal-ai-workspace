@@ -45,12 +45,12 @@ from paw_backend.tasks.queueing import (
 )
 from paw_backend.tools import PostgresTaskActivity
 
+from .gate_support import ALWAYS_ACTIVE
 from .orchestrator_support import (
     FakeAuthority,
     FakeRuntime,
     FakeTools,
     ManualClock,
-    gate_kwargs,
     make_plan,
     node,
 )
@@ -312,8 +312,8 @@ class OrchestratorArgumentTest(unittest.IsolatedAsyncioTestCase):
     def build(self, **overrides) -> Orchestrator:
         db = database()
         arguments = {
-            "tasks": TaskService(db, **gate_kwargs(TaskService)),
-            "queue": TaskQueue(db, **gate_kwargs(TaskQueue)),
+            "tasks": TaskService(db, project_gate=ALWAYS_ACTIVE),
+            "queue": TaskQueue(db, project_gate=ALWAYS_ACTIVE),
             "budget": BudgetTracker(db),
             "loops": LoopDetector(db),
             "store": DagStore(db),

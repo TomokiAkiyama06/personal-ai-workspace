@@ -23,11 +23,10 @@ from paw_backend.projects.task_stop import TaskStopResult
 from paw_backend.tasks import TaskCommand, TaskState
 from paw_backend.tasks.queueing import TaskQueue
 
+from .gate_support import ALWAYS_ACTIVE
 from .orchestrator_support import (
-    ALWAYS_ACTIVE,
     ManualClock,
     PostgresOrchestratorTestCase,
-    gate_kwargs,
 )
 from .support import make_settings
 from .task_support import requires_postgres
@@ -374,8 +373,8 @@ class RealProjectSweepTest(PostgresOrchestratorTestCase):
     async def set_project_state(self, project_id, status: str) -> None:
         """Move a project between the states with SQL (the deletion times the
         database requires go with them). Tasks are created while a project is
-        Active: a project that is not is (or will be, issue #83) refused new
-        tasks by the task lane itself."""
+        Active: a project that is not is refused new tasks by the task lane
+        itself (the project state gate, issue #83)."""
         times = (
             "now(), now() + interval '720 hours'"
             if status == "pending_deletion"
@@ -392,7 +391,7 @@ class RealProjectSweepTest(PostgresOrchestratorTestCase):
     async def task_in(self, project_id, *, enqueue=True):
         task_id = await self.create_task(project_id=project_id)
         if enqueue:
-            await TaskQueue(self.database, **gate_kwargs(TaskQueue)).enqueue(task_id)
+            await TaskQueue(self.database, project_gate=ALWAYS_ACTIVE).enqueue(task_id)
         return task_id
 
     async def state_of(self, task_id) -> str:

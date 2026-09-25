@@ -20,12 +20,12 @@ from paw_backend.tasks.queueing import (
     TaskQueue,
 )
 
+from .gate_support import ALWAYS_ACTIVE
 from .orchestrator_support import (
     FakeRuntime,
     PostgresOrchestratorTestCase,
     SpyBudget,
     diamond,
-    gate_kwargs,
     hang,
     make_plan,
     node,
@@ -62,7 +62,7 @@ class LeaseTest(PostgresOrchestratorTestCase):
 
     async def test_a_worker_whose_lease_has_expired_does_nothing(self):
         queue = TaskQueue(
-            self.database, allow_explicit_now=True, **gate_kwargs(TaskQueue)
+            self.database, allow_explicit_now=True, project_gate=ALWAYS_ACTIVE
         )
         spy = SpyBudget(self.database)
         runtime = FakeRuntime("local")
@@ -217,7 +217,7 @@ class LeaseTest(PostgresOrchestratorTestCase):
         self.assertEqual(await self.store.get(task_id, 1), final)
 
     async def test_heartbeats_that_keep_failing_count_as_a_lost_lease(self):
-        queue = FlakyQueue(self.database, **gate_kwargs(TaskQueue))
+        queue = FlakyQueue(self.database, project_gate=ALWAYS_ACTIVE)
         runtime = FakeRuntime("local")
         runtime.gate("only")
         h = self.harness(queue=queue, runtimes={"local": runtime})
@@ -241,7 +241,7 @@ class LeaseTest(PostgresOrchestratorTestCase):
     async def test_a_planner_that_never_returns_is_stopped_when_the_lease_is_lost(
         self,
     ):
-        queue = FlakyQueue(self.database, **gate_kwargs(TaskQueue))
+        queue = FlakyQueue(self.database, project_gate=ALWAYS_ACTIVE)
         planner = FakeRuntime("local", script={"plan": hang})
         # An hour between the looks at the task: only the lost lease itself can
         # wake the run within the test's (heartbeat) time.

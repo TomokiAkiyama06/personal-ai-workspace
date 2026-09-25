@@ -14,7 +14,6 @@ from paw_backend.orchestrator.plan import Plan
 from paw_backend.orchestrator.result import NodeResult
 from paw_backend.orchestrator.runtime import NodeAssignment, NodeOutcome
 from paw_backend.orchestrator.store import DagStore
-from paw_backend.orchestrator.wiring import gate_arguments
 from paw_backend.tasks import TaskRun, TaskService
 from paw_backend.tasks.queueing import (
     BudgetPreset,
@@ -25,10 +24,10 @@ from paw_backend.tasks.queueing import (
 from paw_backend.tools import PostgresTaskActivity, TaskScope
 
 from .authz_support import uid
+from .gate_support import ALWAYS_ACTIVE
 from .task_support import PostgresTaskTestCase, new_database, requires_postgres
 
 __all__ = [
-    "ALWAYS_ACTIVE",
     "PARENT_AGENT",
     "ROOT",
     "FakeAuthority",
@@ -38,7 +37,6 @@ __all__ = [
     "ManualClock",
     "PostgresOrchestratorTestCase",
     "SpyBudget",
-    "gate_kwargs",
     "diamond",
     "fail",
     "hang",
@@ -49,21 +47,6 @@ __all__ = [
     "requires_postgres",
     "until",
 ]
-
-try:
-    # The gate of tests that have no projects (Issue #83 / PR #103 adds it: the task
-    # lane then REQUIRES a project gate). Before that merge there is none, and the
-    # constructors take none.
-    from .gate_support import ALWAYS_ACTIVE
-except ImportError:
-    ALWAYS_ACTIVE = None
-
-
-def gate_kwargs(constructor) -> dict:
-    """The ``project_gate=`` argument for ``TaskService`` / ``TaskQueue`` (or none
-    where they do not take one yet): tests never rely on the gate being optional."""
-    return gate_arguments(constructor, ALWAYS_ACTIVE)
-
 
 TABLES = (
     "agent_dag_node_attempts",
@@ -283,13 +266,17 @@ class Harness:
     def __init__(self, database, **options) -> None:
         self.database = database
         self.clock = options.pop("clock", None) or ManualClock()
+        # The Project state gate is mandatory for the task lane (Issue #83,
+        # Decision 0020). These tests have no projects unless one asks for the
+        # real gate, so they say so in plain words.
+        project_gate = options.pop("project_gate", ALWAYS_ACTIVE)
         self.tasks = TaskService(
             database,
             listeners=options.pop("task_listeners", ()),
-            **gate_kwargs(TaskService),
+            project_gate=project_gate,
         )
         self.queue = options.pop("queue", None) or TaskQueue(
-            database, **gate_kwargs(TaskQueue)
+            database, project_gate=project_gate
         )
         self.budget = options.pop("budget", None) or BudgetTracker(database)
         self.loops = LoopDetector(database)

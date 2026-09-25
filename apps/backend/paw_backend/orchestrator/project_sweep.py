@@ -8,8 +8,9 @@ need somebody to call it regularly, and the orchestrator's lane is that somebody
 * the open requests (``pending_project_ids``), until each reports ``done``;
 * **every project that is Pending deletion, also those whose request was already
   processed**: a task or a queue entry can appear after the request was processed
-  (a ``create_task`` or ``enqueue`` that raced the deletion; the gate that closes
-  the race is issue #83), and ``stop_project_tasks`` works from the project's
+  (a ``create_task`` or ``enqueue`` that raced the deletion: the project state
+  gate of issue #83 refuses such writes now, and the sweep stays the periodic
+  second line), and ``stop_project_tasks`` works from the project's
   state, so a later call stops it. That is why the sweep lists the Pending
   deletion projects themselves.
 
@@ -60,10 +61,9 @@ from paw_backend.orchestrator.limits import (
     MIN_STOP_INTERVAL_SECONDS,
 )
 from paw_backend.orchestrator.validation import check_int, check_seconds, check_uuid
-from paw_backend.orchestrator.wiring import gate_arguments
 from paw_backend.projects.models import ProjectRow
 from paw_backend.projects.task_stop import ProjectTaskStopper, TaskStopResult
-from paw_backend.tasks import TaskService
+from paw_backend.tasks import ProjectGate, TaskService
 from paw_backend.tasks.queueing import TaskQueue
 from paw_backend.tools import ApprovalService, PostgresApprovalStore
 from paw_backend.tools.interfaces import require_async_method
@@ -286,7 +286,7 @@ class ProjectTaskStopLoop:
 def build_project_stop_loop(
     database: Database,
     *,
-    project_gate: object | None,
+    project_gate: ProjectGate,
     interval_seconds: float = DEFAULT_STOP_INTERVAL_SECONDS,
     clock: Clock | None = None,
 ) -> ProjectTaskStopLoop:
@@ -296,12 +296,14 @@ def build_project_stop_loop(
     section 9: a task that ends, here by Cancel, keeps no usable approval), so a
     task the stopper cancels loses its open approvals at once.
 
-    ``project_gate`` (no default: the caller says which gate it composes with) is the
-    Project state gate of the task lane (Issue #83, Decision 0020), given to the
-    ``TaskService`` and the ``TaskQueue`` explicitly: they require it once #83 is
-    merged (``orchestrator.wiring``). The stopper itself only cancels tasks and
-    entries, which the gate never blocks, but the services it drives are the
-    application's own and are built with the gate like every other.
+    ``project_gate`` is REQUIRED (no default, and ``None`` is refused): the Project
+    state gate of the task lane (Issue #83, Decision 0020) is given to the
+    ``TaskService`` and the ``TaskQueue`` explicitly, and they refuse to be built
+    without one. The stopper itself only cancels tasks and entries, which the gate
+    never blocks, but the services it drives are the application's own and are
+    built with the gate like every other. The application passes
+    ``ProjectStateGate()`` (``paw_backend.app``); the tests that have no projects
+    pass a gate that admits everything, which production code never has.
     """
     approvals = ApprovalService(
         PostgresApprovalStore(database), PostgresAuditSink(database)
@@ -309,9 +311,9 @@ def build_project_stop_loop(
     tasks = TaskService(
         database,
         listeners=[approvals.revoke_on_task_end],
-        **gate_arguments(TaskService, project_gate),
+        project_gate=project_gate,
     )
-    queue = TaskQueue(database, **gate_arguments(TaskQueue, project_gate))
+    queue = TaskQueue(database, project_gate=project_gate)
     stopper = ProjectTaskStopper(database, tasks, queue)
     return ProjectTaskStopLoop(
         stopper,

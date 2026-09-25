@@ -19,11 +19,11 @@ from paw_backend.orchestrator import RunOutcome
 from paw_backend.orchestrator.orchestrator import Orchestrator
 from paw_backend.tasks import TaskCommand, TaskRun, TaskService, TaskState
 
+from .gate_support import ALWAYS_ACTIVE
 from .orchestrator_support import (
     FakeRuntime,
     PostgresOrchestratorTestCase,
     fail,
-    gate_kwargs,
     make_plan,
     node,
     requires_postgres,
@@ -65,7 +65,7 @@ class TerminalCommandsAreFencedTest(PostgresOrchestratorTestCase):
         if setup is not None:
             await setup(h, task_id)
         interference = Interference(
-            self, task_id, TaskService(self.new_database(), **gate_kwargs(TaskService))
+            self, task_id, TaskService(self.new_database(), project_gate=ALWAYS_ACTIVE)
         )
 
         original = Orchestrator._end_task
@@ -138,7 +138,7 @@ class TerminalCommandsAreFencedTest(PostgresOrchestratorTestCase):
     async def test_a_restart_in_the_window_is_a_stale_attempt(self):
         h = self.harness()
         task_id = await self.prepare(h, make_plan(node("a")))
-        other = TaskService(self.new_database(), **gate_kwargs(TaskService))
+        other = TaskService(self.new_database(), project_gate=ALWAYS_ACTIVE)
         original = Orchestrator._end_task
         seen = []
 
@@ -164,7 +164,7 @@ class TerminalCommandsAreFencedTest(PostgresOrchestratorTestCase):
     async def test_a_command_whose_task_ended_meanwhile_is_reported_as_ended(self):
         h = self.harness()
         task_id = await self.prepare(h, make_plan(node("a")))
-        other = TaskService(self.new_database(), **gate_kwargs(TaskService))
+        other = TaskService(self.new_database(), project_gate=ALWAYS_ACTIVE)
         original = Orchestrator._end_task
 
         async def raced(orchestrator, *args, **kwargs):
@@ -202,7 +202,7 @@ class TheVersionFenceIsInTheTransactionTest(PostgresOrchestratorTestCase):
     async def test_a_replacement_between_the_read_and_the_write_is_refused(self):
         h = self.harness()
         task_id = await self.prepare(h, make_plan(node("a")))
-        other = TaskService(self.new_database(), **gate_kwargs(TaskService))
+        other = TaskService(self.new_database(), project_gate=ALWAYS_ACTIVE)
 
         async def replace(task_id):
             for command, actor in (
@@ -227,7 +227,7 @@ class TheVersionFenceIsInTheTransactionTest(PostgresOrchestratorTestCase):
     ):
         h = self.harness()
         task_id = await self.prepare(h, make_plan(node("a")))
-        other = TaskService(self.new_database(), **gate_kwargs(TaskService))
+        other = TaskService(self.new_database(), project_gate=ALWAYS_ACTIVE)
 
         async def pause_and_resume(task_id):
             # The version moves, the run does not.
@@ -247,7 +247,7 @@ class StartIsFencedTest(PostgresOrchestratorTestCase):
     async def test_a_restart_between_the_read_and_the_start_skips_the_old_entry(self):
         h = self.harness()
         task_id = await self.prepare(h, make_plan(node("a")))
-        other = TaskService(self.new_database(), **gate_kwargs(TaskService))
+        other = TaskService(self.new_database(), project_gate=ALWAYS_ACTIVE)
         original = h.tasks.execute
         seen = []
 
@@ -278,7 +278,7 @@ class StartIsFencedTest(PostgresOrchestratorTestCase):
     async def test_a_retry_between_the_read_and_the_start_skips_the_old_entry(self):
         h = self.harness()
         task_id = await self.prepare(h, make_plan(node("a")))
-        other = TaskService(self.new_database(), **gate_kwargs(TaskService))
+        other = TaskService(self.new_database(), project_gate=ALWAYS_ACTIVE)
         original = h.tasks.execute
         seen = []
 

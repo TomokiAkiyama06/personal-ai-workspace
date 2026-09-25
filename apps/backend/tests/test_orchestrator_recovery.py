@@ -19,7 +19,7 @@ import unittest
 from paw_backend.orchestrator import RunOutcome
 from paw_backend.orchestrator.domain import DagState
 from paw_backend.orchestrator.orchestrator import REASON_INTERNAL
-from paw_backend.tasks import TaskCommand, TaskError, TaskRun, TaskState
+from paw_backend.tasks import ProjectNotActiveError, TaskCommand, TaskRun, TaskState
 
 from .orchestrator_support import (
     FakeRuntime,
@@ -281,14 +281,9 @@ class UnexpectedErrorsTest(PostgresOrchestratorTestCase):
         task_id = await self.prepare(h, make_plan(node("a")))
         original = h.tasks.execute
 
-        class NotActive(TaskError):
-            """Stands in for the Project state gate's refusal (issue #83)."""
-
-            code = "project_not_active"
-
         async def gated(tid, command, **kwargs):
             if command is TaskCommand.START:
-                raise NotActive("the project is not active")
+                raise ProjectNotActiveError()  # what the real gate raises
             return await original(tid, command, **kwargs)
 
         h.tasks.execute = gated
