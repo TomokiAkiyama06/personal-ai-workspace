@@ -78,7 +78,7 @@ def published_utc(value: object) -> datetime | None:
     end of the task. The function does not run in a task of its own (it is a pure
     function), so the caller is the one that retracts it: ``ResearchBroker``
     brackets every call of ``normalize_hits`` / ``revalidate_document`` with a
-    ``_CancelGuard`` and treats a retracted request as an invalid response.
+    ``guard.CancelGuard`` and treats a retracted request as an invalid response.
     """
     if value is None:
         return None

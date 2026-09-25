@@ -7,7 +7,7 @@ all-failed "successful" result.
 """
 
 import inspect
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 
 from paw_backend.research.providers.contract import (
@@ -25,6 +25,7 @@ from paw_backend.research.providers.errors import (
     RegistryFullError,
     UnknownProviderError,
 )
+from paw_backend.research.providers.guard import CancelGuard
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,8 +43,58 @@ class RegisteredProvider:
     provider: ResearchProvider = field(repr=False, compare=False)
 
 
+def _adapter_window[T](member: str, read: Callable[[], T]) -> T:
+    """Run ``read`` (adapter code that runs synchronously) as one guarded window.
+
+    Reading a member of the provider, and inspecting what it returns, runs the
+    adapter's own code: a property, ``__getattribute__``, ``__getattr__`` or
+    descriptor, an object's ``__class__`` (``isinstance`` asks for it),
+    ``__signature__`` and ``Signature.bind``. Whatever that code does is a fault of
+    the adapter, never of the registry, so:
+
+    * ANY ``BaseException`` it raises (``CancelledError``, ``KeyboardInterrupt``,
+      ``SystemExit``, ``GeneratorExit`` included) becomes
+      ``ProviderInterfaceError(member)``. Registration never awaits, so a real
+      ``Task.cancel()`` cannot be delivered inside the window: a ``CancelledError``
+      here is the adapter's own, exactly as in the broker's synchronous window
+      (Decision 0012, item 10). The price is the same too: a real
+      ``KeyboardInterrupt`` that arrives inside this window (start-up wiring, a few
+      microseconds) is reported as a rejected adapter.
+    * A hook that asks for the cancellation of the running task
+      (``asyncio.current_task().cancel()``) and returns normally leaves a request
+      that the caller's next ``await`` would deliver. ``CancelGuard`` (the
+      broker's) takes back the requests made inside the window and the adapter is
+      rejected for ``member``. A request that was there before the call stays, so
+      a caller that had been cancelled is still cancelled at its next ``await``.
+
+    The error is raised AFTER the ``try`` block, never inside the ``except``:
+    inside it, ``__context__`` would hold the adapter's exception (``from None``
+    hides it from the traceback but does not clear it), and a log line that
+    formats the error (``logger.exception``) would print the adapter's text. Here
+    the error has no ``__cause__`` or ``__context__`` (unless the CALLER is itself
+    handling an exception), and no adapter text or object in it.
+
+    Only the reads and the ``inspect`` probes go through here. The checks of the
+    values (``type()``, ``fullmatch``, ``str.encode``) are C code and never run
+    the adapter's; keeping them outside means a bug of this module is not turned
+    into an adapter fault.
+    """
+    failed = False
+    with CancelGuard() as guard:
+        try:
+            result = read()
+        except BaseException:  # adapter code, synchronous; see above
+            failed = True
+    if failed or guard.retracted:
+        raise ProviderInterfaceError(member)
+    return result
+
+
 def _accepts_call(method: object, *args: object, **kwargs: object) -> bool:
-    """True if ``method`` is a coroutine function that accepts this call."""
+    """True if ``method`` is a coroutine function that accepts this call.
+
+    Runs adapter code (see ``_adapter_window``): call it only inside a window.
+    """
     if not callable(method) or not inspect.iscoroutinefunction(method):
         return False
     try:
@@ -75,6 +126,14 @@ def validate_provider(provider: object) -> None:
 
     Nothing is called on the provider except reading these attributes. The
     provider is never awaited and its values never appear in the error.
+
+    Reading and inspecting a member is adapter code. Whatever it raises (any
+    ``BaseException``), and a request it makes to cancel the running task, is the
+    fixed ``ProviderInterfaceError`` of that member, with nothing of the adapter
+    in it and nothing chained to it (``_adapter_window``, Decision 0012). This
+    function is synchronous: it never awaits, so a real cancellation of the
+    caller is not delivered inside it, and one that was requested before the call
+    is still delivered at the caller's next ``await``.
     """
     _identity(provider)
     _check_methods(provider)
@@ -88,7 +147,10 @@ def _identity(provider: object) -> tuple[str, ProviderKind]:
     pair, and never reads the provider's identity again).
 
     The provider is adapter code, and so is every object it returns: none of the
-    object's own methods may run in the registry or the broker.
+    object's own methods may run in the registry or the broker. The two reads
+    themselves run adapter code (a property, ``__getattribute__``, ...), so each
+    is a guarded window that turns any exception, or a cancellation request, into
+    the fixed error of that member (``_adapter_window``).
 
     * The class is read with ``type()`` (``isinstance`` would also believe an
       object's ``__class__``, and ``re`` would then raise a ``TypeError``
@@ -108,20 +170,27 @@ def _identity(provider: object) -> tuple[str, ProviderKind]:
       text into a log line. ``str.encode`` is the C method, so the copy does not
       call an override either (the name is ASCII here, so this cannot fail).
     """
-    name = getattr(provider, "name", None)
+    name = _adapter_window("name", lambda: getattr(provider, "name", None))
     if not issubclass(type(name), str) or PROVIDER_NAME_PATTERN.fullmatch(name) is None:
         raise ProviderInterfaceError("name")
     name = str.encode(name, "ascii").decode("ascii")
-    kind = getattr(provider, "kind", None)
+    kind = _adapter_window("kind", lambda: getattr(provider, "kind", None))
     if type(kind) is not ProviderKind:
         raise ProviderInterfaceError("kind")
     return name, kind
 
 
 def _check_methods(provider: object) -> None:
-    if not _accepts_call(getattr(provider, "search", None), "q", limit=1):
+    """Check ``search`` and ``fetch``; each read and probe is one guarded window."""
+    if not _adapter_window(
+        "search",
+        lambda: _accepts_call(getattr(provider, "search", None), "q", limit=1),
+    ):
         raise ProviderInterfaceError("search")
-    if not _accepts_call(getattr(provider, "fetch", None), "https://x/"):
+    if not _adapter_window(
+        "fetch",
+        lambda: _accepts_call(getattr(provider, "fetch", None), "https://x/"),
+    ):
         raise ProviderInterfaceError("fetch")
 
 
@@ -157,6 +226,14 @@ class ProviderRegistry:
         The name and kind are read from the provider once, here, and the values
         that were validated are the ones stored (the name as an exact ``str``
         copy, see ``_identity``).
+
+        Every read of the provider's members is guarded (``_adapter_window``): an
+        exception of any kind that adapter code raises while it is read or
+        inspected is the fixed ``ProviderInterfaceError`` of that member, and a
+        request to cancel the running task is retracted and rejected the same
+        way. Registration is synchronous (it never awaits), so a real cancellation
+        of the caller cannot be delivered in the middle of it; one requested
+        before the call is left alone and delivered at the caller's next ``await``.
         """
         name, kind = _identity(provider)  # read once, here, and validated
         _check_methods(provider)
