@@ -161,7 +161,9 @@ class TestRunner:
     Each check runs in its own session with an allowlisted environment, plus a
     random marker variable.  Output is bounded while the check runs.  On timeout
     the check's process group, the processes below it, and every process that still
-    carries the marker are terminated, then killed after ``term_grace_seconds``; when
+    carries the marker are terminated, then killed after ``term_grace_seconds``; a
+    process that a ``SIGTERM`` handler starts meanwhile (found by the same means, on
+    every round of the wait) gets its own ``SIGTERM`` and is waited for too; when
     the check ends any other way (it exits, or its setup fails) whatever is left of
     those is killed, including processes that left the group (own session, double
     fork plus ``setsid``).  That covers a process that keeps its environment or was
@@ -358,10 +360,18 @@ class TestRunner:
             _signal_identified(pid, started, signal.SIGTERM)
         # The grace period belongs to everything the check started, not just its
         # leader: a leader that exits promptly must not cut short a descendant
-        # that is still running its TERM handler.
+        # that is still running its TERM handler.  Nor is the set fixed by the
+        # snapshot: a TERM handler may start processes of its own.  Each round
+        # looks again and sends whatever is new its own SIGTERM (and counts it as
+        # running), so that it gets its cleanup too instead of the final SIGKILL.
         deadline = time.monotonic() + self.term_grace_seconds
         while time.monotonic() < deadline:
-            if leader.has_exited() and not _anything_alive(leader, tracked):
+            # The exit is observed before the table is read, so whatever the leader
+            # started before it exited is in the table.
+            exited = leader.has_exited()
+            table = _process_table()
+            _term_newcomers(leader, tracked, table)
+            if exited and not _anything_alive(leader, tracked, table):
                 break
             if capture.open:
                 capture.pump(0.02)
@@ -897,13 +907,41 @@ def _descendant_pids(
     return found
 
 
-def _anything_alive(leader: _Leader, tracked: dict[int, int]) -> bool:
+def _term_newcomers(
+    leader: _Leader,
+    tracked: dict[int, int],
+    table: dict[int, tuple[str, int, int, int]],
+) -> None:
+    """SIGTERM what the check started since ``tracked`` was taken, and track it.
+
+    ``spawned`` finds the processes below the leader that were recorded meanwhile
+    and every live process that carries the check's marker; the ones already in
+    ``tracked`` have had their signal.  What a process started after the group
+    signal went out is not reached by that signal, so it is signalled here, once.
+    A process that has gone, or whose pid was reused, is not tracked.  Members of the
+    check's own group are not signalled individually (the leader's guarded group
+    signal is the only one they get; a member forked after it is only killed).
+    """
+    for pid, started in leader.spawned(table).items():
+        state, _, _, seen = table.get(pid, ("X", 0, 0, -1))
+        if state in "ZX" or seen != started or tracked.get(pid) == started:
+            continue
+        tracked[pid] = started
+        _signal_identified(pid, started, signal.SIGTERM)
+
+
+def _anything_alive(
+    leader: _Leader,
+    tracked: dict[int, int],
+    table: dict[int, tuple[str, int, int, int]] | None = None,
+) -> bool:
     """Is a tracked process, or a member of the leader's group, still running?
 
     A tracked pid now held by a process with a different start time is a stranger
     and does not count.
     """
-    table = _process_table()
+    if table is None:
+        table = _process_table()
     if not table:  # no /proc: probe the process group itself
         try:
             os.killpg(leader.pgid, 0)

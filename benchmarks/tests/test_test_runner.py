@@ -105,6 +105,64 @@ while not os.path.exists(pid_file):
 time.sleep(60)
 """
 
+# Check whose SIGTERM handler starts a helper in a session of its own, so the helper
+# is neither in the check's process group nor known before the timeout.  The helper
+# installs a SIGTERM handler whose cleanup takes ~0.3 s and publishes its pid; the
+# check's handler waits for that, so the helper can only be stopped cleanly if it is
+# sent SIGTERM itself.  ``exit``: the check then exits at once.  ``wait``: it stays
+# until the helper's cleanup has finished.  ``scrubbed-wait``: as ``wait`` with a
+# helper that carries no marker of the check, so only the record of what runs below
+# the check can find it.  The helper is started with SIGTERM blocked and unblocks it
+# once its handler is installed and its pid published, so a SIGTERM that reaches it
+# early is held back instead of killing it: the test does not depend on how soon after
+# its start the runner first sees it.
+TERM_HANDLER_STARTS_HELPER = """
+import os, signal, subprocess, sys, time
+mode, pid_file, done, ready = sys.argv[1:5]
+HELPER = (
+    'import os, signal, sys, time\\n'
+    'pid_file, done = sys.argv[1:3]\\n'
+    'def cleanup(signum, frame):\\n'
+    '    time.sleep(0.3)\\n'
+    '    open(done, "w").write("cleaned")\\n'
+    '    os._exit(0)\\n'
+    'signal.signal(signal.SIGTERM, cleanup)\\n'
+    'open(pid_file + ".tmp", "w").write(str(os.getpid()))\\n'
+    'os.replace(pid_file + ".tmp", pid_file)\\n'
+    'signal.pthread_sigmask(signal.SIG_UNBLOCK, [signal.SIGTERM])\\n'
+    'time.sleep(60)\\n'
+)
+started = False
+
+def wait_for(path):
+    deadline = time.monotonic() + 20
+    while not os.path.exists(path) and time.monotonic() < deadline:
+        time.sleep(0.005)
+
+def on_term(signum, frame):
+    global started
+    if started:
+        return
+    started = True
+    null = subprocess.DEVNULL
+    # The child inherits the blocked signal mask across fork and exec.
+    old = signal.pthread_sigmask(signal.SIG_BLOCK, [signal.SIGTERM])
+    subprocess.Popen(
+        [sys.executable, '-c', HELPER, pid_file, done],
+        start_new_session=True, stdin=null, stdout=null, stderr=null,
+        env={} if mode.startswith('scrubbed') else None,
+    )
+    signal.pthread_sigmask(signal.SIG_SETMASK, old)
+    wait_for(pid_file)
+    if mode.endswith('wait'):
+        wait_for(done)
+    os._exit(0)
+
+signal.signal(signal.SIGTERM, on_term)
+open(ready, 'w').close()
+time.sleep(60)
+"""
+
 # Check that leaves a background process in its process group and stays alive long
 # enough for the runner to record that group's members before it exits.
 BACKGROUND_THEN_EXIT = """
@@ -1148,6 +1206,80 @@ class TestRunnerTest(unittest.TestCase):
                 self.assertEqual(result.status, "timed_out")
                 self.assertTrue(done.exists(), "the TERM handler was cut short")
                 self.assertEqual(done.read_text(encoding="utf-8"), "cleaned")
+
+    def test_a_process_started_by_a_term_handler_gets_its_own_term_and_grace_period(
+        self,
+    ):
+        # The set of processes to signal is not fixed when the first SIGTERM goes
+        # out: a handler may start one.  Killing it outright would skip its own
+        # cleanup, so it is found during the grace period and sent SIGTERM too.
+        self.runner.term_grace_seconds = 10
+        calls = []
+        real_signal_identified = test_runner._signal_identified
+
+        def spy(pid, started, number):
+            calls.append((pid, int(number)))
+            real_signal_identified(pid, started, number)
+
+        for mode in ("exit", "wait", "scrubbed-wait"):
+            with self.subTest(mode=mode):
+                pid_file = self.pid_file(f"helper-{mode}.pid")
+                done = self.root / f"helper-{mode}.done"
+                ready = self.root / f"helper-{mode}.ready"
+                check = self.python_check(
+                    f"starts-helper-{mode}",
+                    TERM_HANDLER_STARTS_HELPER,
+                    mode,
+                    pid_file,
+                    done,
+                    ready,
+                )
+
+                with mock.patch.object(test_runner, "_signal_identified", spy):
+                    (result,) = self.runner.run_visible((check,), 2.0)
+
+                self.assertTrue(ready.exists(), "the check never installed its handler")
+                self.assertEqual(result.status, "timed_out")
+                helper = self.read_pid(pid_file)
+                self.assertTrue(done.exists(), "the helper's TERM handler never ran")
+                self.assertEqual(done.read_text(encoding="utf-8"), "cleaned")
+                self.assertTrue(
+                    wait_until(lambda helper=helper: not is_running(helper))
+                )
+                # One SIGTERM, not one per look at the process table.
+                self.assertEqual(
+                    [n for pid, n in calls if pid == helper and n == signal.SIGTERM],
+                    [signal.SIGTERM],
+                )
+
+    def test_a_newcomer_is_signalled_once_and_only_while_it_is_the_recorded_process(
+        self,
+    ):
+        # Direct check of the identity rule: a process found during the grace period
+        # is sent SIGTERM once, if it is alive and still the process that was seen; a
+        # zombie, a process that was replaced under the same pid, and one that has
+        # gone are left alone.
+        calls = []
+        table = {
+            10: ("S", 1, 1, 100),  # alive: signalled
+            11: ("Z", 1, 1, 101),  # a zombie: nothing to stop
+            12: ("S", 1, 1, 999),  # the pid was reused (recorded start time 102)
+            14: ("S", 1, 1, 104),  # already had its signal
+        }
+        found = {10: 100, 11: 101, 12: 102, 13: 103, 14: 104}
+        leader = SimpleNamespace(spawned=lambda table: found)
+        tracked = {14: 104}
+
+        with mock.patch.object(
+            test_runner,
+            "_signal_identified",
+            lambda pid, started, number: calls.append((pid, started, int(number))),
+        ):
+            test_runner._term_newcomers(leader, tracked, table)
+            test_runner._term_newcomers(leader, tracked, table)  # the next look
+
+        self.assertEqual(calls, [(10, 100, int(signal.SIGTERM))])
+        self.assertEqual(tracked, {10: 100, 14: 104})
 
     def test_a_descendant_that_ignores_sigterm_is_killed_only_after_the_grace_period(
         self,

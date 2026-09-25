@@ -259,8 +259,16 @@ do not become durable logs.
   or known descendant is still running, so a descendant finishing its `SIGTERM` handler
   is not cut short.  Output keeps being drained during the grace period, so a handler
   that writes more than a pipe holds is not blocked (and killed) on a full pipe.
-  Whatever remains when it ends gets `SIGKILL`, and pipe reading stops after
-  `drain_seconds` (1 s).
+  The set of processes is not fixed when the first `SIGTERM` goes out: on every round of
+  the wait the runner looks again (recorded descendants and the marker), and a process
+  that a `SIGTERM` handler started meanwhile, in a session of its own for instance, gets
+  its own `SIGTERM` once and is waited for like the others, so its cleanup can run
+  instead of meeting the final `SIGKILL`.  A new process is stopped as soon as it is
+  found, so one that has not installed its own handler yet dies of the default action;
+  a member of the check's own group that a handler forks after the group signal is not
+  sent a `SIGTERM` (the group signal is the only one group members get) and is killed
+  with the group at the end.  Whatever remains when the grace period ends gets
+  `SIGKILL`, and pipe reading stops after `drain_seconds` (1 s).
   If the output capture cannot be set up after the launch (descriptor exhaustion), the
   child is killed and reaped and the check is reported as an `error`, not left running.
   The child's pid and start time are recorded right after the launch, and nothing is
