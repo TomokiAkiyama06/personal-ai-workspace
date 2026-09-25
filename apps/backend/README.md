@@ -3,7 +3,7 @@
 Personal AI Workspace の Core Backend です。
 [PAW-020](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/17) で、後続の Issue が載る最小の Application Skeleton を実装しました。
 Login と Session はまだ実装していません（PAW-022 以降）。
-RBAC と Audit（PAW-025）、Task の Lifecycle と永続化（[PAW-032](#agent-task-lifecycle)、HTTP の Endpoint はまだありません）、Memory の PostgreSQL Schema（[PAW-040](#memory--conversation-schema)）、
+RBAC と Audit（PAW-025）、Task の Lifecycle と永続化（[PAW-032](#agent-task-lifecycle)、HTTP の Endpoint はまだありません）、Task Queue・Budget・Loop 検知（[PAW-033](#task-queue--budget--loop-検知)）、Memory の PostgreSQL Schema（[PAW-040](#memory--conversation-schema)）、
 最小の `users` Table と Owner の初期設定・復旧のコマンド（[PAW-021](#owner-の初期設定と復旧)）を実装済みです。Memory の保存・整理・検索の処理は PAW-041 以降です。
 
 [Architecture](../../docs/ARCHITECTURE.md) に基づき、最終的に以下の機能を Backend 側で扱います。
@@ -38,7 +38,7 @@ Python 側の Package（`pgvector-python`）は使わず、`paw_backend/memory/v
 apps/backend/
 ├─ pyproject.toml          # 依存（完全一致で固定）と Ruff 設定
 ├─ alembic.ini             # Alembic 設定（DB URL は持たない）
-├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0040 は Memory Schema）
+├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0033 は Queue / Budget / Loop、0040 は Memory Schema）
 ├─ paw_backend/
 │  ├─ app.py               # create_app(settings)
 │  ├─ config.py            # PAW_ 環境変数から読む Settings
@@ -52,6 +52,7 @@ apps/backend/
 │  ├─ identity/            # 最小の users、One-time Token。`redeemer.py` は Web 側、`operator.py`（Owner の作成・Token の発行）は cli だけが使う（PAW-021）
 │  ├─ cli/                 # server-local の管理コマンド `python -m paw_backend.cli`（PAW-021）
 │  ├─ tasks/               # Agent Task の状態遷移と永続化（PAW-032）
+│  │  └─ queueing/         # Task Queue、Budget、Loop 検知、Escalation の判断（PAW-033）
 │  ├─ memory/              # Memory / Conversation の Model、ACL 条件、vector 型、Pin / Importance 変更の Actor（PAW-040）
 │  └─ api/
 │     ├─ deps.py           # FastAPI Dependency
@@ -230,7 +231,7 @@ alembic -c apps/backend/alembic.ini revision -m "説明"    # 新しい Revision
 PAW-032 で実装しました。`paw_backend/tasks/` は Task の状態遷移（`domain.py`、DB なしの純粋な規則）と、その永続化（`models.py`、`service.py`、Migration `0032`）です。
 **HTTP の Endpoint はありません。** 認証と RBAC（PAW-022 / PAW-025）が先に必要なためです。
 `TaskService` は認可を行いません。Endpoint を作る側が、権限を確認してから認証済み User を `Actor` として渡します。
-Queue、Budget、Loop 検知（PAW-033）と DAG Orchestration（PAW-034）は含みません。
+Queue、Budget、Loop 検知（PAW-033、[別の節](#task-queue--budget--loop-検知)）と DAG Orchestration（PAW-034）は、この節の対象外です。
 **Multi-Repo Task の Working Set（Repo の集合と `referenced` / `working` / `target` の役割、Repo ごとの worktree / Review / PR の状態）は PAW-032 に含みません。**
 PAW-032 の受け入れ条件は Task に 1 組の worktree / review / PR 状態の復元までで（Backlog）、Working Set が指す Repository の登録（PAW-027）はまだなく、
 Repo ごとの worktree / branch の作成と統合の処理は PAW-035、Write 範囲の強制は Tool Broker（PAW-031）の責務だからです。
@@ -381,6 +382,162 @@ def upgrade() -> None:
 - 例外: Migration の Role だけが使う Table は、Module に `NO_APP_GRANTS = {"table": "理由（15 文字以上）"}` を書きます。
 - `tests/test_migration_grants.py` が、`migrations/versions/` のすべての Migration を調べます。
   `op.create_table`（または生の `CREATE TABLE`）で作った Table に `grant_app_privileges` も `NO_APP_GRANTS` もない Migration があると失敗します。
+
+## Task Queue / Budget / Loop 検知
+
+PAW-033（Revision `0033`）で実装しました。`paw_backend/tasks/queueing/` は、PAW-032 の Task Lifecycle（`paw_backend/tasks/`）を変更せずにその上へ載せた部品です。
+**HTTP の Endpoint も Orchestration（PAW-034）もありません。** Orchestrator が呼ぶ部品だけです。認可も行いません（Endpoint を作る側が権限を確認してください）。
+状態は全て PostgreSQL にあり、Process のメモリには何も持たないため、複数の Worker Process が同じ Table を同時に使えます。
+
+| Module | 内容 |
+| --- | --- |
+| `domain.py` | Priority、Budget の種類と Preset（データ）、Verdict / Decision の値、Loop の閾値。DB なしの純粋な定義 |
+| `task_queue.py` | `TaskQueue`: 追加、優先度順の取得（Claim）、Lease、返却・完了・取消 |
+| `budget.py` | `BudgetTracker`: 6 種類の消費の記録と、上限の判定 |
+| `loop.py` | 失敗の Signature、Loop 判定（`evaluate_loop`）、履歴を持つ `LoopDetector` |
+| `escalation.py` | `decide_next_action`: Budget と Loop の判定から次の行動を 1 つ決める |
+| `validation.py`、`errors.py`、`sql.py` | 引数の検証（型を変換せず拒否する）、固定文言の Error、DB Error の判別（SQLSTATE と制約名だけを見る） |
+| `models.py`、Migration `0033` | `queue_entries`、`budget_usages`、`loop_failure_signatures`。どれも `tasks.id` への実 Foreign Key を持つ |
+
+Table 名は `task` で始めません。PAW-032 の Test が `task` で始まる Table を全て検査するためです。
+
+**Application の Role の権限**（Role を分ける構成、`PAW_APP_DATABASE_ROLE`）: Migration `0033` は 3 つの Table のそれぞれに [`grant_app_privileges`](#migration-は-application-の-role-に権限を与えるcontributor-向けの規則) で、Service が実行する文に必要な最小の権限だけを与えます。TRUNCATE と、Table 単位の UPDATE はどこにも与えません（`PUBLIC` の権限は外します）。
+
+| Table | Application の Role の権限 | 理由 |
+| --- | --- | --- |
+| `queue_entries` | SELECT、INSERT、UPDATE は `status`、`claimed_by`、`claimed_at`、`lease_expires_at`、`claim_count`、`finished_at` の列だけ。DELETE なし | 追加は INSERT（生成された `id` を読み戻すので SELECT）。Claim・Heartbeat・返却・完了・取消は Lease と状態の列だけを更新する（`FOR UPDATE SKIP LOCKED` も UPDATE 権限が要る）。`task_id`、`priority`、`priority_rank`、`enqueued_at`、`id` は変更できないため、侵害された Application でも、待っている Task の優先度や順序を書き換えられない。取消は状態の変更で、終わった Entry は履歴として残る |
+| `budget_usages` | SELECT、INSERT、UPDATE は `preset`、`limit_value`、`consumed`、`running_since`、`runtime_generation`、`settled_through` の列だけ。DELETE なし | `set_preset` は INSERT ... ON CONFLICT DO UPDATE（`preset`、`limit_value`）。`record` と `stop_runtime` は `consumed` への原子的な加算、`start_runtime` / `stop_runtime` は `running_since`、`start_runtime` は `runtime_generation` への加算、`stop_runtime` は停止の Cutoff である `settled_through`。キー（`task_id`、`kind`）と `created_at` は変更できず、Budget は削除されない |
+| `loop_failure_signatures` | SELECT、INSERT、DELETE。UPDATE なし | `record_failure` が追加し（試行を確認するため `tasks` の行を `FOR SHARE` で Lock する。PAW-032 で付与済みの `tasks` の SELECT と列単位の UPDATE で足り、追加の権限は不要）、Window から外れた行を削除する。`clear_previous_attempts`（Restart の後の掃除）は、Task の現在の試行より前の試行の行だけを削除する（現在の試行との比較も `tasks` の SELECT で足りる）。この Table は Hash の Window で履歴ではない（何が起きたかの記録は `task_events`）。保存された失敗は編集できない。PAW-033 で Application が行を削除するのは、ここだけ |
+
+`budget_usages` の `preset` と `limit_value` は Application が更新できます（Owner / Admin が Preset を上げる操作のため）。Preset を変えてよいかの認可は、Endpoint を作る側の責務です。
+`tests/test_queueing_grants.py` が、Migration を実際にこの構成で実行し、Superuser でない Role で Queue・Budget・Loop・Flow の Test（同時 Claim を含む）を全て実行します。あわせて、この表と Role の権限が一致すること、優先度や Key の変更、削除、Schema の変更が拒否されることを確認します。
+
+### Queue（HIGH / NORMAL / LOW）
+
+- 優先度は `HIGH` > `NORMAL` > `LOW` です。通常の User Task は `NORMAL`、Background の Memory 整理・Research 更新は `LOW` を想定します（[要件](../../REQUIREMENTS.md)の「Task Queue / Priority / Preemption」）。
+- 次に開始する Entry は、優先度、`enqueued_at`（先着順）、`id` の順で決まります。要件に Aging / 飢餓防止の規則はないため、**ありません**。`HIGH` が続く間、`LOW` は待ち続けます。
+- 優先度は開始の順序にだけ影響します。`HIGH` の到着で実行中の Entry は中断されません（Preemption は Queue の責務ではありません）。
+- 1 つの Task が持てる有効な Entry（`queued` または `claimed`）は 1 つだけです（Partial Unique Index）。完了・取消済みの Entry は残り、Retry / Restart の後で新しい Entry を追加できます。
+- Queue は `tasks.state` を読まず、変更もしません。Orchestrator が `claim_next` と PAW-032 の `start` を組み合わせます。
+- Owner / Admin による優先度の引き上げ操作は、この Issue の範囲外です。
+
+**Claim と Lease。** `claim_next(worker_id)` は、次の Entry を 1 つ、その Worker へ Lease します。
+Claim できるのは `queued` の Entry と、Lease が切れた（`lease_expires_at <= now`）`claimed` の Entry です。後者は元の優先度・`enqueued_at` の位置のまま再び Claim されます（自動の再取得。定期実行の Sweeper は不要です）。
+Lease が有効なのは `lease_expires_at > now` の間だけで、期限の瞬間に失われます。`heartbeat`、`release`、`complete` ができるのは有効な Lease を持つ Worker だけで、それ以外（未 Claim、他の Worker、取消済み、期限切れ、存在しない Entry）は全て同じ `LeaseLostError` です。
+そのため、同じ瞬間に有効な Lease を持つ Worker は最大 1 人です。期限を過ぎた Worker が完了を報告しても拒否されるので、Worker は期限より十分短い間隔で `heartbeat` してください。
+**Claim の世代（Fencing token）。** Lease を識別するのは Entry の `id` と Worker の id だけでは足りません。Lease が切れた Worker の Entry が、**同じ Worker id**（設定で固定した id の再起動した Process など）に再び Claim されると、まだ動いている古い実行は、`claimed_by` も新しい Lease も満たしてしまい、新しい Claim の Heartbeat・返却・完了を行えてしまいます。そこで、Claim のたびに 1 増え、減ることも戻ることもない `claim_count`（Reclaim も、`release` 後の再 Claim も数える）を Lease の世代とします。`claim_next` が返す `QueueEntry.claim_count` を、Worker は `heartbeat(entry_id, worker_id, claim_count)`、`release(...)`、`complete(...)` の**必須の引数**として渡します（省略できると、渡し忘れた呼び出しが保護されないため、必須です）。Entry の現在の `claim_count` と違う世代は、Worker id が同じでも `LeaseLostError` になり、何も変更しません。`claim_count` は 1 以上の `int` で、範囲外・`bool`・`None` は `InvalidQueueingArgumentError("claim_count")` です（[Decision 0007](../../docs/decisions/0007-task-queue-budget-and-loop-policy.md) の 7）。
+**時計。** Queue が信頼する時計は **Database の時計だけ**です。`enqueued_at`、`claimed_at`、`lease_expires_at`、`finished_at` と「Lease が切れたか」の判定は、全て SQL の中で PostgreSQL の `clock_timestamp()`（評価した瞬間の壁時計）を使います。`now()` は使いません（方針は [Decision 0007](../../docs/decisions/0007-task-queue-budget-and-loop-policy.md) の 6 で、2026-09-25 に Human が承認しました）。`now()` は Transaction の開始時刻で固定されるため、行の Lock を待った後の判定に、待つ前の古い時刻が使われてしまいます。実際の動作は次のとおりです。
+- **1 つの文の中では時計を 1 回だけ読みます。** 時計を使う文は、先頭に `WITH clock AS (SELECT clock_timestamp() AS ts)` を付け、文の中の「現在の時刻」と「現在 + `lease_seconds`」は全てこの CTE の 1 つの値を参照します（揮発性の関数を含む CTE は 1 回だけ評価されます）。そのため、Lease を与えるときの `claimed_at` と期限はちょうど `lease_seconds` 離れます（`clock_timestamp()` を文の中に 2 回書くと、2 回読まれて数マイクロ秒ずれます）。
+- **文をまたぐと、文ごとに読み直します。** `claim_next` は 1 Transaction の 2 文で、先頭の行を選ぶ文（期限切れの判定）と、その行を更新する文（`claimed_at` と期限）が別々に時計を読みます。後者の値は前者の値以後です。`SKIP LOCKED` は待たず、選んだ行は自分が Lock しているので、その間に Lease の状態は変わりません。
+- **Lease を判定する更新は、行の Lock を先に取ります。** `UPDATE` は行の Lock を待つ**前**に `WHERE` を判定し、Lock を持っていた側が Rollback した場合は判定し直さないので、`clock_timestamp()` を使うだけでは不十分です。そこで `heartbeat` / `release` / `complete` は、まず行を `SELECT ... FOR UPDATE` で Lock し（待つのはこの文）、次の文で、Lock を得た後に読んだ時刻で Lease の期限を判定して更新します。
+- **Lease を判定しない文は、待つ前に読んだ時刻を保存します。** `enqueue` の `enqueued_at` と `cancel` の `finished_at` は 1 つの文で書くため、同じ Task の別の `enqueue`（未 Commit）や、`cancel` の対象行の Lock を待つと、待つ前に読んだ時刻（待った時間だけ古い値）になります。先着順と記録のための時刻で、Lease の有効・失効は決めません。
+
+Worker が各自の時計を渡す方式では、時計が進んでいる Worker や誤って未来の時刻を渡した呼び出しが、まだ有効な Lease を「切れた」と判定して Entry を奪い、同じ Task を 2 つの Worker で始めさせられます（同様に過去の時刻で待ち行列の先頭へ割り込めます）。Database の時計なら、全ての Process が 1 つの基準を共有します。
+各 Method（`enqueue`、`claim_next`、`heartbeat`、`release`、`complete`、`cancel`）の `now` は省略でき、省略（`None`）が Database の時計です。**本番のコードは `now` を渡してはいけません。** 明示の `now`（Timezone 付きの `datetime`）は Test のための継ぎ目で、`TaskQueue(database, allow_explicit_now=True)` で作った Queue だけが受け取ります。それ以外の Queue は `InvalidQueueingArgumentError("now")` で拒否するので、既定の Queue では呼び出し側が時刻を差し込めません（[Decision 0007](../../docs/decisions/0007-task-queue-budget-and-loop-policy.md) の 6）。継ぎ目は、既存の Test をそのまま使えるように、Constructor で時計を差し替える方式ではなく Method の引数で残しています。
+限界: 基準は 1 つの PostgreSQL Server の時計です。Failover などで別の Server の時計へ切り替わる場合の時計のずれは扱いません（Lease は数十秒以上なので、通常の NTP の精度では問題になりません）。Runtime の Timer（`BudgetTracker`）も同じ Database の時計を使います（下の Budget の節。以前は Process の時計でしたが、Host ごとに時計が食い違うと Runtime を少なく数えられるため、Database の時計へ一本化しました）。
+
+**行ロック。** `claim_next` は 1 Transaction で、Claim できる行のうち先頭を `SELECT ... ORDER BY ... LIMIT 1 FOR UPDATE SKIP LOCKED` で選び、その行を更新します。他の Transaction がロック中の行は待たずに飛ばします。
+したがって、競合する複数の Claimer が同じ Entry を得ることはなく、互いを待たず、Claim できる Entry がロック中の 1 つだけなら `None` がすぐに返ります。
+`heartbeat`、`release`、`complete` は、1 Transaction の中で、まず行を `SELECT ... FOR UPDATE` で Lock し、次に Worker id・Claim の世代・Lease の期限を条件にした `UPDATE ... RETURNING` を行います（時計の項のとおり、期限は Lock を得た後の時刻で判定します）。`cancel` は条件付きの単一の `UPDATE` で、行の Lock を先には取りません。
+Test は別々の DB 接続を持つ複数の Claimer で、同じ Entry を 2 人が得ないこと、ロック中の行を待たないことを実 PostgreSQL で確認します。
+
+**Index（履歴が増えても Claim が遅くならないこと）。** 完了・取消済みの Entry は消さずに残すため、`queue_entries` は使うほど、有効な（`queued` / `claimed` の）Entry より終わった Entry のほうがはるかに多くなります。Claim の Index `ix_queue_entries_claim_order`（`priority_rank`、`enqueued_at`、`id`）と、Task の有効な Entry を探す `uq_queue_entries_one_active_per_task`（`task_id`）は、どちらも `WHERE status IN ('queued', 'claimed')` の Partial Index です。PostgreSQL は、文の条件が Index の条件を含意すると証明できるときだけ Partial Index を使えます。Driver は何度も実行する文を Prepared Statement にし、PostgreSQL は値を使わない汎用の Plan（`plan_cache_mode = force_generic_plan` と同じもの）を Cache できます。その Plan では、`status` が Bind Parameter だと証明できず、Index が使われません。`claim_next` は終わった Entry も含めて全行を読んで並べ替え、`cancel` は全行を読むため、Claim の遅さが過去の全 Entry の数に比例して増えます。そこで、`claim_next` の `status = 'queued'` / `status = 'claimed'` と `cancel` の `status IN ('queued', 'claimed')` は、`bindparam(..., literal_execute=True)` で **SQL の文面に書き込みます**（`task_queue.py` の `_inlined()` / `_active()`。PAW-032 の `_tool_call_started()` と同じ手法です）。値は 2 つの定数なので、Plan を使い回せなくなる代償はありません。Test（`IndexPlanTest`）は、終わった Entry が 2 万件ある Queue に有効な Entry が 4 つある状態で、値ごとに立てる Plan（`force_custom_plan`）でも汎用の Plan（`force_generic_plan`）でも、Claim の選択は Seq Scan と並べ替えがなく `ix_queue_entries_claim_order` だけを使うこと、`cancel` は Seq Scan がなく `uq_queue_entries_one_active_per_task` だけを使うこと、Entry の `id` で行う Lock と更新は主キーを使うことを確認します。
+
+### Budget（Preset と 6 種類の上限）
+
+Task ごとの実行予算で、User / Admin 単位の Quota（別の仕組み）とは独立です。種類は次の 6 つです（`BudgetKind`）。
+Runtime と GPU 時間の単位は整数の秒、他は個数です。記録する量は 0 以上の `int` だけで、`float`（有限でも）、`bool`、文字列、`None` は拒否します。
+
+| 種類 | 記録 |
+| --- | --- |
+| `runtime_seconds`（max runtime） | `start_runtime` / `stop_runtime(task_id, generation)` が、Database の時計で測る（`record` は不可） |
+| `steps`、`retries`、`tool_calls`、`tokens`、`gpu_seconds` | `record(task_id, kind, amount)` |
+
+- **Preset。** Standard / Long / Unlimited は `domain.PRESET_LIMITS` のデータです。`set_preset` が Task の 6 行を作り（または上限だけを更新し、消費は保ちます）、上限をその Task の行へ写します。
+  Preset を設定していない Task は `BudgetNotConfiguredError` になり、無制限とは**みなしません**。
+- **超過の定義。** `消費量 + planned > 上限` のとき、その種類が `EXCEEDED` です。上限ちょうどまで使うのは超過ではなく（`max 50 steps` は 50 まで）、`check(task_id, planned={kind: 1})` で「もう 1 つ実行できるか」を調べられます。
+  `EXCEEDED` の Verdict は、超過した種類をすべて、宣言順で返します。要件に警告の閾値はないため、`WARN` はありません。
+- **原子性。** `record` は `UPDATE ... SET consumed = LEAST(consumed + :amount, 上限) ... RETURNING` の 1 文で、複数 Process が同時に記録しても増分は失われません。消費量は `10^15` で飽和し、Overflow しません。
+- **Runtime。** `start_runtime` が `running_since` を保存し、`stop_runtime` が経過した整数秒（切り捨て、負にはならない）を加えて消します。実行中は `usage` / `check` が経過分を足して返しますが、書き込みません。同時の `stop_runtime` が時間を二重に加えることはありません。
+- **Runtime の時計は Database の時計だけです。** Timer の端点（`running_since`、`settled_through`）と経過時間は全て、SQL の文の中で読む PostgreSQL の `clock_timestamp()` です。文は `WITH clock AS (SELECT clock_timestamp() AS ts)` で始まり、1 つの文の中では時計を 1 回だけ読みます（Queue と同じ方式。`now()` は使いません）。実行中の `usage` / `check` / `set_preset` も、行を読んだ文が読んだ Database の時刻で経過分を数えます。Process の時計は一切読みません。Host ごとに時計が食い違っていても（Process の時計だと、時計が進んだ Host が書いた `settled_through` が、遅れた Host の置き換えの Session の `running_since` を未来へ押し出し、その Session の Runtime が 0 と数えられて上限を回避できました）、全ての Worker が 1 つの基準を共有するので、数える秒は変わりません（[Decision 0007](../../docs/decisions/0007-task-queue-budget-and-loop-policy.md) の 10）。
+  本番のコードは `BudgetTracker(database)` だけで作ります。`clock`（Timezone 付きの `datetime` を返す引数なしの callable）は Test のための継ぎ目で、`BudgetTracker(database, clock=..., allow_explicit_clock=True)` でだけ受け取ります（`TaskQueue` の `allow_explicit_now=True` と同じ考え方）。それ以外は `InvalidQueueingArgumentError("clock")` で拒否するので、既定の Tracker には Process の時刻を差し込めません。継ぎ目の時計は Database の時計の代わりに、その値を文へ束縛します（Test が時間を動かすため）。1 つの Database に、Test の時計の Tracker と Database の時計の Tracker を混在させてはいけません。
+- **Timer の時刻の順序。** Database の時計は、行の Lock を待つ**前**に読まれ（Queue の時計の項と同じ）、壁時計は後ろへ戻り得ます（NTP の Step、別の Server への Failover）。そこで `stop_runtime` は、精算した Cutoff を `settled_through`（`greatest(now, running_since)`）に記録し、`start_runtime` は Timer を `greatest(now, settled_through)` から始めます（どちらも行を Lock する文の中で計算します。`greatest` は `NULL` を無視するので、まだ停止していないときは `now` です）。競合する `stop_runtime` が、より後の時刻（たとえば t=150）まで精算して `running_since` を消した**後**に、それより前の時刻（t=100）を読んで待っていた `start_runtime` の文が実行されても、新しい Timer は t=150 から始まり、100〜150 が二重に数えられることはありません。Cutoff は前にしか進まないので（`running_since` は常に `settled_through` 以上で、CHECK でも守ります）、数える区間は重なりません。`stop_runtime` は Cutoff より前の時刻を読んでも 0 秒を加えるだけです。Cutoff は、Database の時計への一本化で Host 間の食い違いには不要になりましたが、上の 2 つの競合（読んでから待つ間、時計の後戻り）を防ぐので残しています（Column・CHECK・Grant はすでにあり、費用はありません）。限界: 文は時計を Lock の待ちの前に読むので、`stop_runtime` が別の Transaction の Lock を待った時間（通常はミリ秒）は数えません（`stop_runtime` は切り捨てで整数秒に丸めます）。
+- **Runtime の Session（Fencing）。** `start_runtime` は呼ぶたびに新しい Runtime の Session を始め、その世代（`runtime_generation`、1 以上の `int`。増える一方で、Timer が止まっても戻りません）を返します。Worker は、その世代を `stop_runtime(task_id, generation)` の**必須の引数**として渡します。現在の世代と違う `stop_runtime` は、何も変更せず `StaleRuntimeSessionError`（`code` は `runtime_session_stale`）にします。Lease が切れて Entry が Reclaim された古い Worker や、Restart 前の実行が遅れて `stop_runtime` を呼んでも、新しい Session の `running_since` と累積の Runtime には触れず、`check` は新しい Worker の Runtime を数え続けます（上限を回避できません）。Session の世代は Queue の `claim_count` と同じ考え方ですが、`claim_count` は Entry ごとに 1 から数え直す（Restart の新しい Entry と衝突する）ため、専用の Counter にしています。
+  すでに Timer が動いているときの `start_runtime` は、Session を**引き継ぎ**ます（`running_since` と `settled_through` はそのままで、それまでの時間は失われず二重にも数えられません。前の世代は古くなります）。同じ世代の `stop_runtime` を 2 回呼ぶと、2 回目は何も変えず現在の Runtime を返します。渡す世代の型・範囲の誤り（`bool`、0 以下、文字列など）は `InvalidQueueingArgumentError("generation")` です。Preset の変更（`set_preset`）は世代を変えません（[Decision 0007](../../docs/decisions/0007-task-queue-budget-and-loop-policy.md) の 10）。
+- **Unlimited。** 6 つの数値の上限を無くすだけです。Loop 検知（下記）、Stop Now、Critical safety / resource protection による停止は Preset と無関係で、Unlimited の Task でも有効です。消費量の記録も続きます。
+  要件は Unlimited に別の数値の上限を定めていないため、設けていません。
+- 子 Agent が親の Budget を超えないこと（[要件](../../REQUIREMENTS.md)）は、Sub-Agent を扱う PAW-034 の責務です。
+
+**Preset の値は暫定値です。** 要件は Preset の名前だけを定め、数値を定めていません（具体的な閾値は実装時の選択）。次の値は、実測に基づかない**暫定値**で、[Decision 0007](../../docs/decisions/0007-task-queue-budget-and-loop-policy.md)（Approved）で暫定値として承認されています（2026-09-25）。値は `domain.PRESET_LIMITS` のデータなので、後で変えても Migration は要りません（変えるときは、新しい Decision から `Supersedes` します）。
+
+| 種類 | Standard | Long | Unlimited |
+| --- | --- | --- | --- |
+| `runtime_seconds` | 3,600（1 時間） | 14,400（4 時間） | 上限なし |
+| `steps` | 50 | 200 | 上限なし |
+| `retries` | 10 | 20 | 上限なし |
+| `tool_calls` | 300 | 1,200 | 上限なし |
+| `tokens` | 1,000,000 | 4,000,000 | 上限なし |
+| `gpu_seconds` | 3,600 | 14,400 | 上限なし |
+
+### Loop 検知
+
+同じ失敗の繰り返しを検知し、同じ方法を止め、別の方法を試し、それでも失敗するなら上位の Agent へ渡します。Loop の検知だけで Task を `failed` にはしません。
+Budget の Preset とは無関係に動きます。
+
+- **Signature。** 失敗を `sha256(error_class + "\x1f" + step + "\x1f" + 正規化した Message)` の 16 進 64 文字にします。Message の正規化は、先頭 2000 文字、NFKC、小文字化、UUID / 16 進 / 数字の置換、空白の圧縮です（`loop.normalize_failure_message`）。
+  そのため「Timeout after 30s」と「timeout after 45s」は同じ失敗です。**Message の原文、Error class、Step 名は保存せず**、`loop_failure_signatures` は Signature、方法の番号（`approach`）、Task の試行（`attempt`）だけを持ちます。
+- **入力の検証。** `error_class`、`step`、`message` は、Signature を計算する前に（Database に触れる前に）検証します。`error_class` と `step` は空白だけ・制御文字（NUL を含む）・長さの超過を、`message` は `str` でないものを、`InvalidQueueingArgumentError` で拒否します。さらに、3 つとも**Surrogate 文字（U+D800〜U+DFFF。JSON の `"\ud800"` などから生じ、UTF-8 にできない不正な Unicode）を含むと**、Hash の計算で `UnicodeEncodeError` が漏れる代わりに、同じ `InvalidQueueingArgumentError`（`parameter` は `error_class` / `step` / `message`）で拒否します。値はエラーに含めません。`message` は、先頭 2000 文字への切り詰めの前の全体を検査します（切り捨てられる部分の Surrogate も拒否するので、結果は切り捨ての位置に依存しません）。`message` の NUL は拒否しません（Hash にするだけで保存しないため、書き込みのエラーにならず、拒否すると繰り返される失敗を記録できなくなるため）。呼び出し側は、Surrogate を含み得る出力（`errors="surrogateescape"` で読んだ Process の出力など）を、渡す前に整形してください。拒否のままとし、整形は Worker 側で行うことは [Decision 0007](../../docs/decisions/0007-task-queue-budget-and-loop-policy.md) の 9 で承認されています（2026-09-25。この規約は PAW-034 の受け入れ条件に追記しました）。
+- **判定。** 直近 `window_size` 件（10）のうち、最後の失敗と Signature も `approach` も同じ件数（連続でなくてよい）を `repeats` とします。
+  `repeats < repeat_threshold`（3）は `CONTINUE`。それ以上なら Loop で、`approach < max_alternatives`（1）なら `TRY_ALTERNATIVE`、そうでなければ `ESCALATE` です。
+  Orchestrator は `TRY_ALTERNATIVE` の後に `approach` を 1 増やして次の失敗を記録します（0 が元の方法、1 が最初の代替）。新しい `approach` は、その中で改めて 3 回繰り返すまで `ESCALATE` になりません。
+- 判定は Deterministic で、同じ履歴には常に同じ結果を返します（`evaluate_loop` は純粋関数）。`LoopDetector.record_failure` は履歴へ追記し、1 Task あたり `window_size` 件を超えた古い行を消します。同じ Task への同時の記録は直列化されます。
+  Restart で新しい試行を始めたら、**Restart の Command が Commit された後に** `clear_previous_attempts(task_id)` で古い試行の行を掃除してください。これは Task の**現在の試行より前**の試行の行だけを削除し、削除した件数を返します（未知の Task と、前の試行がない Task は 0）。Restart が Commit された後、この掃除が走る前に新しい試行が記録した失敗は、現在の試行のものなので**削除されません**（Task 全体を消す `clear` は、その失敗も消してしまうため、なくしました）。現在の試行は同じ文で `tasks.attempt` から読み、`tasks.attempt` は増えるだけなので、途中で Restart が Commit されても、削除が減るだけです。同じ Task 単位の Advisory Lock（`record_failure` と同じもの）を Transaction の間ずっと取るため、書き込み中の `record_failure` とは直列になります。掃除は正しさに必要ではなく（下の読み取りの規則のため、古い行は読まれません）、Table を小さく保つためのものです。
+- **試行（Attempt）による Fencing。** `record_failure(task_id, *, attempt, error_class, step, message, approach=0)` の `attempt` は**必須**で、報告する Worker が開始された試行の番号（PAW-032 の `TaskEvent.attempt`。Step・Log・Tool の書き込みが持つものと同じ）です。`tasks.attempt`（Restart が 1 増やす既存の Counter）と違う試行の報告は `StaleAttemptError` で拒否し、何も書きません（未知の Task は先に `TaskNotFoundError`）。そのため、Restart の後に古い Worker が遅れて失敗を報告しても、新しい試行の履歴には入りません（`clear_previous_attempts` の前でも後でも）。
+  確認と書き込みの間に Restart が割り込まないよう、`record_failure` は Task の行を `SELECT ... FOR SHARE` で Lock し、Transaction の終わりまで持ちます。Restart（PAW-032 の Command は `FOR NO KEY UPDATE` を取る）は、進行中の記録の Commit を待ってから実行されます。したがって、Commit された失敗は、Commit の時点で現在だった試行のものです。`FOR SHARE` は他の `record_failure`（Advisory Lock が直列化する）や外部キーの確認（`FOR KEY SHARE`）とは競合しません。
+  失敗の行は、報告された試行（`attempt`）を持ち、**Task の現在の試行の行だけ**が判定に使われます（`history`、`assess`、`record_failure` が返す判定）。そのため、Restart が Commit された瞬間から、新しい試行は空の履歴で始まります（`clear_previous_attempts` の前でも同じで、古い行と一緒に数えて、新しい試行の最初の失敗が Loop と判定されることはありません）。Window の上限（`window_size`）は Task 全体の行数にかかり、現在の試行の行は古い試行の行より常に新しいため、古い行から先に消えます。
+  試行の番号は既存の PAW-032 の Counter をそのまま使います（[Decision 0007](../../docs/decisions/0007-task-queue-budget-and-loop-policy.md) の 8）。Retry（同じ試行のやり直し）は試行を変えず、履歴も消しません。Migration（`0033`）の列は `attempt`（1 以上の `INTEGER`、必須）です。
+- 閾値（3 回、Window 10、代替 1 回）は暫定値です（要件は具体的な閾値を実装時の選択としています）。[Decision 0007](../../docs/decisions/0007-task-queue-budget-and-loop-policy.md) で暫定値として承認されています（2026-09-25）。`LoopPolicy` のデータなので、後で変えられます。
+
+### 次の行動（Escalation の判断）
+
+`decide_next_action(budget_verdict, loop_verdict, can_escalate=...)` は、次の順で最初に当てはまる規則を使います。
+
+| 条件 | 行動 |
+| --- | --- |
+| Budget が `EXCEEDED` | `retries` を含めば `FAIL`、それ以外は `WAIT_FOR_USER`（安全な区切りで停止し、人間が上限を上げるか終了する）。Loop の判定にかかわらず、超過を無視しません |
+| Loop が `ESCALATE` | `can_escalate` なら `ESCALATE_AGENT`（Codex / Claude など）、なければ `WAIT_FOR_USER` |
+| Loop が `TRY_ALTERNATIVE` | `TRY_ALTERNATIVE` |
+| それ以外 | `CONTINUE` |
+
+`WAIT_FOR_USER` は PAW-032 の `wait`（`WaitReason.USER`）、`FAIL` は `fail` に対応します（`domain.ACTION_TASK_COMMANDS`）。Command を発行するのは Orchestrator（PAW-034）で、この Module は発行しません。
+この対応（`retries` は `FAIL`、他は `WAIT_FOR_USER`、Budget を Loop より優先）も [Decision 0007](../../docs/decisions/0007-task-queue-budget-and-loop-policy.md) で承認されています（2026-09-25）。
+Budget 超過のときに Escalation しないのは、使い切った予算をさらに使うためです。`Waiting for Resource` は GPU の Scheduler（PAW-036）の担当で、ここでは使いません。
+
+### 実装の出自
+
+`task_queue.py`、`budget.py`、`loop.py` は、試験を書いた側（Claude）が書いた**参照実装**です。ローカルモデルによる 2 回の実装は、これらの試験を通せませんでした。
+`escalation.py`（`decide_next_action`）だけは、ローカルの Qwen3-Coder-30B-A3B が書いたものです。試験を通ったあと、レビューで冗長な部分を整理しました（振る舞いは変えていません）。
+試験は実 PostgreSQL に対する並行 Claim の試験を含み、参照実装に対する変異（境界、行ロック、原子性など 32 通り）のうち、実質同じ動作になる 1 つを除く全てを検出することを確認しています。
+
+### 未確定の事項と制限
+
+要件に定めがなく、実装が置いた値・選択です。**[Decision 0007](../../docs/decisions/0007-task-queue-budget-and-loop-policy.md) は 2026-09-25 に Human が承認しました（Approved）。** 数値は暫定値として承認されたもので、後で変えられます。次の項目のうち、未決なのは「Loop 検知の範囲」の担当だけです。
+
+- **Preset の数値。** 上の表は暫定値として承認されています。
+- **Loop の閾値。** 3 回、Window 10、代替 1 回は暫定値として承認されています。
+- **Loop 検知の範囲。** 検知するのは**失敗の繰り返しだけ**です（`record_failure` が受け取る `error_class` / `step` / `message`）。要件は「同じ Tool Call」「同種の修正」の繰り返しも対象としますが、成功した同じ Tool Call、何も変えない Tool Call、同種の修正の繰り返しは Window に入らず、`TRY_ALTERNATIVE` / `ESCALATE` になりません。今はそれらを `tool_calls` / `steps` / `runtime_seconds` の Budget の上限が止めるだけで、`Unlimited` の Task では止まりません。PAW-033 の受け入れ条件は「repeated failure loop detection」だけで、担当の Issue は要件にも Backlog にもなく**未決**です（入力を持つのは Tool Broker（PAW-031）、Worktree（PAW-035）、判定する Orchestrator（PAW-034）。[Decision 0007](../../docs/decisions/0007-task-queue-budget-and-loop-policy.md) の 3。担当の決定は別途で、2026-09-25 の承認には含まれません）。
+- **Unlimited の上限。** 要件は Unlimited に Runtime などの数値の上限を定めていないため、完全に無制限です。暴走を止めるのは Loop 検知と、Operator の Stop Now、Critical safety です。Human は、Unlimited に絶対の上限を設けないことを承認しました（2026-09-25）。上限を設けるなら、値を決める新しい Decision が要ります。
+- **飢餓。** Aging がないため、`HIGH` / `NORMAL` が続くと `LOW` が飢えます。Human は、Aging を入れないことを承認しました（2026-09-25）。要件が規則を定めたら追加します。
+- **Budget 超過時の行動。** `retries` は `FAIL`、他は `WAIT_FOR_USER`、Escalation より Budget を優先する、という割り当ては、[Decision 0007](../../docs/decisions/0007-task-queue-budget-and-loop-policy.md) で承認されています（2026-09-25）。警告の閾値が要件にないため `WARN` はありません。
+
+制限。
+
+- 量は 0 以上の整数だけです。GPU 時間は整数秒で、`float` は拒否します（呼び出し側が切り上げてください）。
+- Queue は `tasks.state` を読まず、変更もしません。`claim_next` と PAW-032 の `start` を組み合わせるのは PAW-034 です。
+- Lease の切れた Entry は、次の `claim_next` が自動で取り直します。実行中の Process を止める処理（`stop_now` など）は含みません。期限を過ぎた Worker の完了報告は拒否されます。
+- 優先度の引き上げ、Preset の変更、Queue の一覧は認可付きの操作で、Endpoint と一緒に追加します。
+- `start_runtime` は、`BudgetTracker` が Queue を読まないため、呼んだ Worker が Lease を持つかを確認しません。Lease を失った古い Worker が `start_runtime` を呼ぶと、Session を引き継げてしまいます（時間は数え続けるので Budget は回避されませんが、新しい Worker の `stop_runtime` は `StaleRuntimeSessionError` になります）。Lease を持つ Worker だけが呼ぶ規則は、Orchestrator（PAW-034）の責務です。Tracker が Queue の Entry を確かめる案は採らないことを、[Decision 0007](../../docs/decisions/0007-task-queue-budget-and-loop-policy.md) の 10 で承認しています（2026-09-25。「Lease を持つ Worker だけが呼ぶ」規則は PAW-034 の受け入れ条件に置きます）。
+- Migration `0033` の `down_revision` は `0021` です（鎖は `0001 → 0025 → 0032 → 0040 → 0021 → 0033`）。
 
 ## 認可（RBAC / Capability）と Audit
 
@@ -844,7 +1001,7 @@ CI は pre-commit の専用環境で Test を実行するため、同じ Version
 ## 今後の Issue
 
 [PAW-021](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/18)（Owner Setup）、
-RBAC（PAW-025）、Task Lifecycle（PAW-032）、Memory Schema（PAW-040）は、この Skeleton の上に実装済みです。
+RBAC（PAW-025）、Task Lifecycle（PAW-032）、Task Queue / Budget / Loop 検知（PAW-033）、Memory Schema（PAW-040）は、この Skeleton の上に実装済みです。
 PAW-022（Login / Session / Password）と PAW-023（Passkey / Step-up）は Owner Setup の Token を受け取る側で、まだありません。
 Memory の保存・整理・検索は PAW-041 以降で、Memory Schema の上に実装します。
 受け入れ基準は [Implementation Backlog](../../docs/IMPLEMENTATION_BACKLOG.md)、

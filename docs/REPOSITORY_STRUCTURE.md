@@ -47,7 +47,11 @@ personal-ai-workspace/
 │  │  │  ├─ script.py.mako
 │  │  │  └─ versions/
 │  │  │     ├─ 0001_baseline.py
-│  │  │     └─ 0021_owner_setup.py
+│  │  │     ├─ 0021_owner_setup.py
+│  │  │     ├─ 0025_audit_events.py
+│  │  │     ├─ 0032_task_lifecycle.py
+│  │  │     ├─ 0033_task_queue_budget_loop.py
+│  │  │     └─ 0040_memory_schema.py
 │  │  ├─ paw_backend/
 │  │  │  ├─ __init__.py
 │  │  │  ├─ __main__.py
@@ -74,6 +78,18 @@ personal-ai-workspace/
 │  │  │  │  ├─ operator.py
 │  │  │  │  ├─ redeemer.py
 │  │  │  │  └─ tokens.py
+│  │  │  ├─ tasks/
+│  │  │  │  └─ queueing/
+│  │  │  │     ├─ __init__.py
+│  │  │  │     ├─ budget.py
+│  │  │  │     ├─ domain.py
+│  │  │  │     ├─ errors.py
+│  │  │  │     ├─ escalation.py
+│  │  │  │     ├─ loop.py
+│  │  │  │     ├─ models.py
+│  │  │  │     ├─ sql.py
+│  │  │  │     ├─ task_queue.py
+│  │  │  │     └─ validation.py
 │  │  │  └─ api/
 │  │  │     ├─ __init__.py
 │  │  │     ├─ deps.py
@@ -86,6 +102,7 @@ personal-ai-workspace/
 │  │     ├─ __init__.py
 │  │     ├─ fake_postgres.py
 │  │     ├─ identity_support.py
+│  │     ├─ queueing_support.py
 │  │     ├─ support.py
 │  │     ├─ teardown_child.py
 │  │     ├─ test_config.py
@@ -104,6 +121,15 @@ personal-ai-workspace/
 │  │     ├─ test_owner_setup_service.py
 │  │     ├─ test_owner_token_roles.py
 │  │     ├─ test_postgres_integration.py
+│  │     ├─ test_queueing_budget.py
+│  │     ├─ test_queueing_domain.py
+│  │     ├─ test_queueing_escalation.py
+│  │     ├─ test_queueing_flow.py
+│  │     ├─ test_queueing_grants.py
+│  │     ├─ test_queueing_loop.py
+│  │     ├─ test_queueing_loop_db.py
+│  │     ├─ test_queueing_queue.py
+│  │     ├─ test_queueing_schema.py
 │  │     ├─ test_security.py
 │  │     └─ test_server.py
 │  ├─ cli/
@@ -151,6 +177,7 @@ personal-ai-workspace/
 │     ├─ 0003-backend-cli-web-implementation-stack.md
 │     ├─ 0004-rbac-capability-and-audit-policy.md
 │     ├─ 0005-owner-setup-and-recovery.md
+│     ├─ 0007-task-queue-budget-and-loop-policy.md
 │     ├─ 0014-task-working-set-persistence.md
 │     └─ README.md
 └─ evaluator/

@@ -74,7 +74,8 @@ class StaleAttemptError(StaleRunError):
     """A ``StaleRunError`` whose attempt is not the task's current one.
 
     A Restart started a newer attempt. A worker that only wants to know whether it
-    was superseded catches ``StaleRunError``, which covers this as well.
+    was superseded catches ``StaleRunError``, which covers this as well. The loop
+    failure records of PAW-033 (``record_failure``) also raise it, after a Restart.
     """
 
     code = "stale_attempt"
