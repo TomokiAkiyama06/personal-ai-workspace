@@ -1,0 +1,13 @@
+{
+  "memories": [
+    {
+      "id": "mem1",
+      "text": "Memory content",
+      "acl": ["user:alice"],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:p1"
+    }
+  ],
+  "queries": []
+}

@@ -14,7 +14,8 @@ Scope. Only repeated FAILURES are detected. REQUIREMENTS.md also names repeated
 tool calls and same-kind modifications; repeated successful or no-op tool calls and
 edits never enter the window and cannot produce TRY_ALTERNATIVE / ESCALATE (only the
 budgets stop them, and not an Unlimited task). No issue owns them yet: see
-Decision 0007, section 3 (Proposed).
+Decision 0007, section 3 (the owner of that detection is undecided, separate
+from the approval of 2026-09-25).
 
 The detector part is split in three pure functions (``normalize_failure_message``,
 ``failure_signature``, ``evaluate_loop``) and the database part

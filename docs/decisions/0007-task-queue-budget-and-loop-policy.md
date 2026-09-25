@@ -1,10 +1,10 @@
 # Task Queue・Budget・Loop検知の方針
 
-- Status: Proposed
+- Status: Approved
 - Date: 2026-09-24
 - Scope: PAW-033 と、Budget・Loop検知・Escalationを使う以降の Issue（PAW-034 Orchestrator、PAW-036 GPU Scheduler など）
 - Supersedes: なし
-- Approval: 未承認（Humanの承認待ち）
+- Approval: 2026-09-25、Humanが作業Session内で、判断メモ（Artifact）の各点について「推奨どおり」と回答して承認（末尾の「承認時の決定」）
 
 ## 背景
 
@@ -14,13 +14,15 @@
 （要件は「実装時の選択」としている）。
 
 PAW-033 の実装は、動かすためにこれらを仮の値で置いた。Review（Codex）は、
-承認前の Product Policy を既定として実装してよいのかを指摘した。
-[AGENTS.md](../../AGENTS.md) の「仕様変更」は、重要判断を `docs/decisions/` に提案して人間 / Admin の承認を得ると定める。
-そこで、仮に置いた値と選択を一覧にし、承認または変更を求める。
+Human の判断を経ていない値と選択を、Product Policy の既定として実装してよいのかを指摘した。
+[AGENTS.md](../../AGENTS.md) の「仕様変更」は、重要判断を `docs/decisions/` に記録して人間 / Admin の承認を得ると定める。
+そこで、実装が置いた値と選択を一覧にし、Human が承認または変更できるようにした。
 
-**この Decision は Proposed であり、Human の承認を得ていない。** 承認されるまで、次の値と選択は暫定である。
-値は `domain.PRESET_LIMITS` と `LoopPolicy` のデータで、変更しても Schema は変わらない（Migration は不要）。
-承認された値が変わる場合は、新しい Decision から `Supersedes` する。
+**この Decision は 2026-09-25 に Human が承認した（Approved）。** 下の各選択は、承認された方針である（承認時の決定は末尾を参照）。
+数値（Preset の値、Loop 検知の閾値、Lease の長さ）は、実測に基づかないため**暫定値として承認された**。
+値は `domain.PRESET_LIMITS` と `LoopPolicy` などのデータ・定数で、変更しても Schema は変わらない（Migration は不要）。
+値を変えるときは、この Decision を書き換えず、新しい Decision から `Supersedes` する。
+ただし、3 節の「繰り返す成功の Tool 呼び出し・同種の修正の検知」の担当は、この承認の対象ではなく、**未決**のままである。
 
 実装は [Backend README](../../apps/backend/README.md) の「Task Queue / Budget / Loop 検知」に書いている。
 
@@ -44,7 +46,7 @@ PAW-033 の実装は、動かすためにこれらを仮の値で置いた。Rev
 ### 2. Unlimited
 
 - 6 つの数値の上限を無くすだけとする。Loop 検知、Stop Now、Critical safety / resource protection による停止は Preset と無関係で、Unlimited の Task にも効く。
-- 要件が Unlimited に別の数値の上限（たとえば絶対の Runtime）を定めていないため、設けていない。**設けるかは人間が決める。**
+- 要件が Unlimited に別の数値の上限（たとえば絶対の Runtime）を定めていないため、設けていない。Human は、Unlimited に絶対の上限を設けない（上限なしのまま）ことを承認した（2026-09-25）。上限を設けるなら、値を決める新しい Decision が要る。
 
 ### 3. Loop 検知の閾値
 
@@ -52,7 +54,7 @@ PAW-033 の実装は、動かすためにこれらを仮の値で置いた。Rev
 - Loop のとき、`approach` が 1（`max_alternatives`）未満なら代替を試し（`TRY_ALTERNATIVE`）、そうでなければ上位の Agent へ渡す（`ESCALATE`）。
 - Signature は、Error class・Step・正規化した Message（先頭 2,000 文字、NFKC、小文字化、数字と ID の置換）の Hash とする。Message の原文は保存しない。
 - Loop の検知だけでは Task を `failed` にしない。
-- **検知の範囲（要件との差。承認時に確認したい）。** 要件（`REQUIREMENTS.md` の「Loop detection」）は Reactive Loop Detector の対象を「同じ失敗、同じ Tool Call、同種の修正」の繰り返しとするが、PAW-033 の受け入れ条件（`docs/IMPLEMENTATION_BACKLOG.md`）は「repeated failure loop detection」だけで、実装が検知するのは**失敗の繰り返しだけ**である（`record_failure` が受け取るのは `error_class` / `step` / `message` の失敗で、`loop_failure_signatures` は失敗の Signature だけを持つ）。成功した同じ Tool Call の繰り返し、何も変えない Tool Call、同種の修正の繰り返しは Window に入らず、`TRY_ALTERNATIVE` / `ESCALATE` を起こさない。今これらを止めるのは `tool_calls` / `steps` / `runtime_seconds` などの Budget の上限だけで、上限のない `Unlimited` の Task では何も止めない。要件にも Backlog にも、これを担う Issue の指定はなく、**担当は未定**である。入力を持つのは、Tool Call が Tool Broker（PAW-031。PAW-032 の Tool の記録は Tool 名と状態だけで、引数と結果を持たないため、同じ Call かは区別できない）、修正が Worktree（PAW-035）、判定して次の行動を選ぶのが Orchestrator（PAW-034）である。何を「同じ」とみなすか（引数・結果・差分の何を Signature にするか。原文を保存しない規則と閾値を含む）は要件にない製品判断のため、この Issue では実装しない。人間が Backlog に Issue を足すか、上の 3 つのどれかの Issue の受け入れ条件に加えるかを決める。
+- **検知の範囲（要件との差。担当は未決）。** 要件（`REQUIREMENTS.md` の「Loop detection」）は Reactive Loop Detector の対象を「同じ失敗、同じ Tool Call、同種の修正」の繰り返しとするが、PAW-033 の受け入れ条件（`docs/IMPLEMENTATION_BACKLOG.md`）は「repeated failure loop detection」だけで、実装が検知するのは**失敗の繰り返しだけ**である（`record_failure` が受け取るのは `error_class` / `step` / `message` の失敗で、`loop_failure_signatures` は失敗の Signature だけを持つ）。成功した同じ Tool Call の繰り返し、何も変えない Tool Call、同種の修正の繰り返しは Window に入らず、`TRY_ALTERNATIVE` / `ESCALATE` を起こさない。今これらを止めるのは `tool_calls` / `steps` / `runtime_seconds` などの Budget の上限だけで、上限のない `Unlimited` の Task では何も止めない。要件にも Backlog にも、これを担う Issue の指定はなく、**担当は未決**である。入力を持つのは、Tool Call が Tool Broker（PAW-031。PAW-032 の Tool の記録は Tool 名と状態だけで、引数と結果を持たないため、同じ Call かは区別できない）、修正が Worktree（PAW-035）、判定して次の行動を選ぶのが Orchestrator（PAW-034）である。何を「同じ」とみなすか（引数・結果・差分の何を Signature にするか。原文を保存しない規則と閾値を含む）は要件にない製品判断のため、この Issue では実装しない。人間が Backlog に Issue を足すか、上の 3 つのどれかの Issue の受け入れ条件に加えるかは、**未決（担当の決定は別途）**である。この節の他の点（閾値など）は 2026-09-25 に承認されたが、この担当だけは承認で決めていない。決まったら、この Decision を書き換えず、新しい Decision または該当 Issue に記録する。
 
 ### 4. Budget を使い切ったときの遷移
 
@@ -72,7 +74,7 @@ Command（PAW-032 の `wait` / `fail`）を発行するのは Orchestrator（PAW
 
 ### 6. Lease の時計
 
-実装（`TaskQueue`）が実際に行うことを、そのまま提案する。
+実装（`TaskQueue`）が実際に行うことを、そのまま記録する（Human が承認した）。
 
 - **どの時計か。** Queue が「Lease が切れたか」の判定と、保存する時刻（`enqueued_at`、`claimed_at`、`lease_expires_at`、`finished_at`）に使う時計は、**Database の時計だけ**とする。Worker が各自の時計を渡す方式は、時計が進んでいる Worker や誤った未来の時刻が有効な Lease を奪い、同じ Task を 2 つの Worker で始めさせ得るため採らない。
 - **`clock_timestamp()` を使い、`now()` は採らない。** 使う関数は PostgreSQL の `clock_timestamp()`（評価した瞬間の壁時計）である。`now()` は Transaction の開始時刻で固定され、行の Lock を待った後の判定に、待つ前の古い時刻を使う。Lock を待つ間に期限が過ぎても、期限内と判定してしまい、失った Lease を有効とみなす（`now()` の意味は PostgreSQL の仕様。この判定を Test が確認する）。
@@ -81,7 +83,7 @@ Command（PAW-032 の `wait` / `fail`）を発行するのは Orchestrator（PAW
 - **Lease を判定する更新は、行の Lock を先に取る。** `UPDATE` は `WHERE` を行の Lock を待つ**前**に判定し、Lock を持っていた Transaction が Rollback したときは判定し直さない（実 PostgreSQL で確認した）。1 つの `UPDATE` では、待つ間に切れた Lease を有効と判定し得る。そこで `heartbeat` / `release` / `complete` は、まず `SELECT ... FOR UPDATE` で Entry の行を Lock し（待つのはこの文）、次の文で Lease の期限（`lease_expires_at > 読んだ時刻`）、Worker の id、Claim の世代（7 節）を判定して更新する。判定に使う時刻は、Lock を得た**後**に読む。
 - **Lease を判定しない文の時刻は、待つ前の値になり得る。** `enqueue` の `enqueued_at` と `cancel` の `finished_at` は、それぞれ 1 つの文で書く。同じ Task の別の `enqueue`（未 Commit）や `cancel` の対象行の Lock を待つと、保存する時刻は、待つ前に読んだ値（待った時間だけ古い値）になる。この時刻は先着順と記録のためのもので、Lease の有効・失効を決めない。これは許容する。
 - 明示の時刻は Test のための継ぎ目（`TaskQueue(..., allow_explicit_now=True)`）に限る。本番の Queue は呼び出し側の時刻を拒否する。
-- Lease の長さ（既定 60 秒、最大 86,400 秒）は、Preset の数値と同じく仮の値である。
+- Lease の長さ（既定 60 秒、最大 86,400 秒）は、Preset の数値と同じく暫定値として承認された（定数で変更できる）。
 - この節の対象は Queue である。`BudgetTracker` の Runtime の時計も同じく Database の時計にした（10 節。以前は Process の時計だった）。`budget_usages.created_at` / `loop_failure_signatures.created_at`（行を作った時刻の `now()`。判定に使わない）は対象外である。基準は 1 台の PostgreSQL Server の時計で、Failover で別の Server の時計へ切り替わるときのずれは扱わない。
 
 ### 7. Lease の世代（Fencing token）
@@ -102,7 +104,7 @@ Command（PAW-032 の `wait` / `fail`）を発行するのは Orchestrator（PAW
 
 - `record_failure` の `error_class`・`step`・`message` に Surrogate 文字（U+D800〜U+DFFF）が含まれると、Hash の UTF-8 への符号化が `UnicodeEncodeError` を漏らし、型付きの `InvalidQueueingArgumentError` の契約が破れる。3 つとも Database に触れる前に `InvalidQueueingArgumentError` で拒否する（値は返さない）。`message` は切り詰めの前の全体を検査する。
 - `message` の NUL は拒否しない。`message` は Hash にするだけで保存せず、NUL で失敗しない。拒否すると、NUL を含む出力の失敗を記録できず、その繰り返しの Loop を見逃す。`error_class` と `step` は従来どおり制御文字（NUL を含む）を拒否する。
-- 拒否か整形（Surrogate を置換して記録する）かは、仕様の選択である。ここでは、他の入力（PAW-032 の文字列）と同じく拒否とし、整形は呼び出し側（Worker）に任せる。整形して記録する方が失敗を取りこぼさない、という反対の考えもあるため、承認時に確認したい。
+- 拒否か整形（Surrogate を置換して記録する）かは、仕様の選択である。ここでは、他の入力（PAW-032 の文字列）と同じく拒否とし、整形は呼び出し側（Worker）に任せる。Human は、拒否のままとし、整形は Worker 側で行うことを承認した（2026-09-25。整形して記録する方が失敗を取りこぼさない、という反対の考えは採らなかった）。Worker が整形を忘れた失敗は Loop 検知に入らない。この規約は PAW-034 の受け入れ条件に追記した（[#30](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/30)）。
 
 ### 10. Runtime の Timer の世代（Fencing token）
 
@@ -116,12 +118,12 @@ Command（PAW-032 の `wait` / `fail`）を発行するのは Orchestrator（PAW
 - そこで `start_runtime`・`stop_runtime`・実行中の Runtime の読み取り（`usage` / `check` / `set_preset` の返す値）は、行を Lock する 1 つの文の中で、Database の `clock_timestamp()` を（`WITH clock AS (SELECT clock_timestamp() AS ts)` の CTE で、文ごとに 1 回）読む。Python の時計は読まない。`BudgetTracker(database)` が本番の形で、時計を差し替える引数は Test のための継ぎ目（`clock=...` は `allow_explicit_clock=True` の Tracker だけが受け取り、その返す Timezone 付きの `datetime` を Database の時計の代わりに文へ束縛する。`TaskQueue(allow_explicit_now=True)` と同じ考え方）に限る。既定の Tracker は、呼び出し側の時刻を拒否する。継ぎ目の Tracker と Database の時計の Tracker を 1 つの Database に混在させない（時刻の出所が 2 つになるため）。
 - `settled_through` は残す。Database の時計にすれば Host 間の食い違いには不要になるが、Database の時計も、文が Lock を待つ**前**に読まれる（6 節）ため、競合する `stop_runtime` の Cutoff より前の読み取りで開始する `start_runtime` があり得る。また壁時計は後ろへ戻り得る（NTP の Step、別の Server への Failover）。Cutoff は、この 2 つで数える区間が重なるのを防ぐ。Column・CHECK・Grant はすでにあり、削除は Migration と Test の変更を要するだけで、得るものがない。限界: 文が Lock の待ちの前に時計を読むので、待った時間（通常はミリ秒）は Runtime に数えない（整数秒に切り捨てるため影響は小さい）。
 - 採らなかった案: Process の時計のまま、Cutoff の比較を外す（または Cutoff を `least` で頭打ちにする）案。重複して数える競合が再び開く。Lock を先に取り、次の文で Python の時計を読み直す案は、Lock の待ちの後の Process の時計が、別の Host の停止の時計より後であることを保証しない。Database の時計を `now()` で読む案は、Transaction の開始時刻で固定される（6 節）。
-- **限界（承認時に確認したい）。** `BudgetTracker` は Queue を読まないため、`start_runtime` を呼んだ Worker が Lease を持つかは確かめない。Lease を失った古い Worker が `start_runtime` を呼ぶと Session を引き継げてしまう。その場合も、時間は数え続けるので Budget は回避されず、新しい Worker の `stop_runtime` が `StaleRuntimeSessionError` になるので気付ける。Lease を持つ Worker だけが呼ぶ規則は Orchestrator（PAW-034）に置く。
+- **限界（承認した）。** `BudgetTracker` は Queue を読まないため、`start_runtime` を呼んだ Worker が Lease を持つかは確かめない。Lease を失った古い Worker が `start_runtime` を呼ぶと Session を引き継げてしまう。その場合も、時間は数え続けるので Budget は回避されず、新しい Worker の `stop_runtime` が `StaleRuntimeSessionError` になるので気付ける。Lease を持つ Worker だけが呼ぶ規則は Orchestrator（PAW-034）に置く。Human は、`BudgetTracker` が Lease を確かめない現在の作りを承認し（2026-09-25）、「Lease を持つ Worker だけが `start_runtime` を呼ぶ」規則を PAW-034 の受け入れ条件に置くことを決めた（[#30](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/30)）。
 
 ## 選定理由
 
-- 数値は、1 台の GPU Server で個人〜小規模チームが使うことを想定した、桁を合わせるための仮の値であり、実測に基づかない。
-  Benchmark（PAW-016 / 017）と実運用の記録で見直す前提で、データとして 1 か所に置いた。
+- 数値は、1 台の GPU Server で個人〜小規模チームが使うことを想定した、桁を合わせるための暫定値であり、実測に基づかない。
+  Human は暫定値として承認した。Benchmark（PAW-016 / 017）と実運用の記録で見直す前提で、データとして 1 か所に置いた。
 - Budget 超過を Loop より優先するのは、Escalation が予算を追加で消費するため。
 - Lease の世代に `claim_count` を使うのは、既存の列で足り（Migration も Grant も変えない）、Claim のたびに必ず増え、Worker の id・時刻・乱数のような呼び出し側の値に頼らずに、古い Claim を判別できるため。
 - 試行の Fencing に PAW-032 の `tasks.attempt` を使うのは、Restart が既に増やす唯一の Counter で、Step・Log・Tool の書き込みも同じ規則（古い試行は `StaleAttemptError`）で拒否しているため。失敗の行へ試行の Column を足して現在の試行だけを読む案は、当初は「`clear` を Restart の後に呼ぶ規則で足りる」として採らなかったが、独立したレビューで、Restart の Commit の後・`clear` の前に新しい試行が記録した失敗が、Task 全体を消す `clear` で失われる（または古い履歴と一緒に判定される）と指摘され、その規則では足りないと分かったため採る。Grant は変わらない（`tasks` の SELECT は付与済みで、行の UPDATE は不要）。Restart と掃除を 1 つの Transaction にする案は、Restart（PAW-032 の Command）と Loop（PAW-033）の境界を壊すため採らない。新しい試行の Dispatch を掃除の完了まで止める案は、Orchestrator（PAW-034）に順序の規則を課すだけで、それを守らない呼び出しを防げないため採らない。
@@ -136,12 +138,25 @@ Command（PAW-032 の `wait` / `fail`）を発行するのは Orchestrator（PAW
 - Worker id に Process 固有の値（PID、起動時刻）を含めさせる: 呼び出し側の規則に頼ることになり、Queue が古い Claim を拒否する保証にならない。別の Token 列を追加する案は、Claim のたびに増える `claim_count` で足りるため採らない。
 - `now()`（Transaction の開始時刻）を Queue の時計にする: Lock を待った後の Lease の判定が、待つ前の古い時刻になり、失効した Lease を有効とみなす。`now()` は採らない。
 - Lease を 1 つの `UPDATE ... WHERE lease_expires_at > <時刻>` だけで判定する（先に行を Lock しない）: `UPDATE` は Lock を待つ前に `WHERE` を判定し、Lock を持っていた側が Rollback すると判定し直さないため、待つ間に切れた Lease を有効と判定し得る。
-- `start_runtime` が Queue の Entry（`entry_id`、`claim_count`）を受け取り、同じ Transaction の中で「Lease が有効な Claim か」を確かめてから Session を始める: 古い Worker の `start_runtime` も拒否できる。一方で、Budget が Queue に依存し（Tracker の Test も全て Queue の Entry を要する）、Lease の期限の判定に Database の時計と行の Lock を足す必要がある。まず Tracker 単体で世代の Fencing を入れ、Lease の確認が要るかは承認時に決める。
+- `start_runtime` が Queue の Entry（`entry_id`、`claim_count`）を受け取り、同じ Transaction の中で「Lease が有効な Claim か」を確かめてから Session を始める: 古い Worker の `start_runtime` も拒否できる。一方で、Budget が Queue に依存し（Tracker の Test も全て Queue の Entry を要する）、Lease の期限の判定に Database の時計と行の Lock を足す必要がある。まず Tracker 単体で世代の Fencing を入れ、Lease の確認は入れないことを、Human が承認した（2026-09-25）。
 - Timer が動いている間の `start_runtime` を拒否する（引き継がない）: 死んだ Worker が止めずに残した Timer が、置き換えの Worker を永久に締め出す。
 - 呼び出し側が時刻を渡す（または Process の時計を使う）: 時計のずれや誤った時刻で Lease を奪える。Constructor で時計を注入する案は、Test の呼び出しの書き換えが大きいため、既定で拒否する引数の継ぎ目を選んだ。
 
 ## 承認後の扱い
 
-承認された値と選択を、この Decision の `Approval` に記録して Status を Approved に改める。
-値が変わる場合は `domain.PRESET_LIMITS` / `LoopPolicy` のデータと Test の期待値を、承認された値に合わせる。
-承認されるまで、この値を前提にした運用（Budget の上限に頼る自動停止の設計など）をしない。
+2026-09-25 に承認された。PAW-033 のPRは本Decisionを参照する。
+承認された値は暫定値で、この値を前提にした運用（Budget の上限に頼る自動停止の設計など）をしてよい。
+値を変えるときは、この Decision を書き換えず、新しい Decision から `Supersedes` する。
+そのとき `domain.PRESET_LIMITS` / `LoopPolicy` / Lease の定数のデータと Test の期待値を、新しい値に合わせる（Migration は不要）。
+
+3 節の「繰り返す成功の Tool 呼び出し・同種の修正の検知」の担当は、この承認の対象外で、未決のままである（担当の決定は別途）。
+
+## 承認時の決定（2026-09-25）
+
+- 本文の各点を、提案どおり承認した。
+- Preset の数値、Loop 検知の基準、Lease の長さ等は、暫定値として承認した。値の変更は設定・定数（`domain.PRESET_LIMITS`、`LoopPolicy`、Lease の定数）で行える。
+- Unlimited に絶対の上限は設けない（6 つの数値の上限を無くすだけ）。
+- Queue に Aging（飢餓防止）は入れない。
+- Surrogate 文字を含む失敗の文字列は、拒否のままとする。整形は Worker 側で行い、この規約は PAW-034（[#30](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/30)）の受け入れ条件に追記した。
+- `BudgetTracker` は Lease を確かめない現在の作りで承認した。「Lease を持つ Worker だけが `start_runtime` を呼ぶ」規則は、PAW-034（[#30](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/30)）に置く。
+- 未決（今日は決めていない）: 3 節の「繰り返す成功の Tool 呼び出し・同種の修正の検知」の担当は、Human の判断待ちのまま残る。この承認に含まれない。担当の決定は別途行う。

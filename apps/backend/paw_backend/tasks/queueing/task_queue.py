@@ -7,7 +7,7 @@ the orchestrator (PAW-034) pairs ``claim_next`` with the PAW-032 ``start``
 command. It performs no authorisation and offers no HTTP endpoint.
 
 Time. The DATABASE clock is the only clock the queue trusts (Decision 0007,
-section 6, Proposed): every instant it compares or stores (``enqueued_at``,
+section 6, Approved 2026-09-25): every instant it compares or stores (``enqueued_at``,
 ``claimed_at``, ``lease_expires_at``, ``finished_at`` and "has this lease
 expired?") is PostgreSQL's ``clock_timestamp()`` (the wall clock at the moment it is
 evaluated) read inside the SQL statement. It is never ``now()``: that is fixed at the
