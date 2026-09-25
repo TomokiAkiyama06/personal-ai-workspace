@@ -1297,7 +1297,7 @@ Model と Migration の一致は Test が検証します（Alembic の autogener
 | `research_scratch_leases` | 「今使っている」印。`(item_id, holder_id)` が Key。`holder_id` は Task や Worker の実行の UUID |
 
 - **TTL**: `expires_at = created_at + interval '24 hours'` を CHECK 制約で強制します（Generated Column は `timestamptz + interval` が immutable ではないため使えません）。`expires_at` は変更しません。延期は TTL の延長ではなく削除の保留です。
-- **Project / Task の関係**: `project_id` も `task_id` も**素の UUID**で、Foreign Key はありません（projects の Table がまだなく、`task_id` の理由は [Decision 0013](../../docs/decisions/0013-research-scratch-task-relation.md)（Proposed）にあります）。Task を削除しても、削除が調査結果に止められることも、Pin 済みなどの調査結果が Task と一緒に消えることもなく、Item は `task_id` を保ちます（`list_items(project_id, task_id=...)` で読めます）。期限切れの削除は Task と無関係に働きます。`add` は、Task の行を `FOR KEY SHARE` で Lock して、Task が存在し、その `project_id` が同じであることを確認します（存在しない Task と他の Project の Task は区別しません）。**DB は `task_id` の存在を検査しません**（この確認が唯一で、削除された Task を指す `task_id` は残ります）。
+- **Project / Task の関係**: `project_id` も `task_id` も**素の UUID**で、Foreign Key はありません（projects の Table がまだなく、`task_id` の理由は [Decision 0013](../../docs/decisions/0013-research-scratch-task-relation.md)（2026-09-25 に承認）にあります）。Task を削除しても、削除が調査結果に止められることも、Pin 済みなどの調査結果が Task と一緒に消えることもなく、Item は `task_id` を保ちます（`list_items(project_id, task_id=...)` で読めます）。期限切れの削除は Task と無関係に働きます。`add` は、Task の行を `FOR KEY SHARE` で Lock して、Task が存在し、その `project_id` が同じであることを確認します（存在しない Task と他の Project の Task は区別しません）。**DB は `task_id` の存在を検査しません**（この確認が唯一で、削除された Task を指す `task_id` は残ります）。
 - 全ての Method は `project_id` を受け取り、その Project の中だけで Item を探します。他の Project の ID は「存在しない」と同じ扱いです。
 
 ### 削除の延期
@@ -1305,7 +1305,7 @@ Model と Migration の一致は Test が検証します（Alembic の autogener
 次のどれかに当てはまる Item は削除を延期します（**exempt**）。
 
 - **Pin 済み**（`pinned`）。一時的に残す印です。
-- **User が明示保存**（`saved`）。要件は「Pin 済み」と「User が明示保存」を別の延期理由として挙げているため、Pin とは**別の独立した印**にしています（[Decision 0013](../../docs/decisions/0013-research-scratch-task-relation.md)（Proposed）の「Pin と明示保存」）。
+- **User が明示保存**（`saved`）。要件は「Pin 済み」と「User が明示保存」を別の延期理由として挙げているため、Pin とは**別の独立した印**にしています（[Decision 0013](../../docs/decisions/0013-research-scratch-task-relation.md)（2026-09-25 に承認）の「Pin と明示保存」）。
 - **Memory 昇格の確認中**（`promotion_state = 'pending'`）。
 - **使用中**（`expires_at > now` の Lease が 1 つ以上ある）。
 
@@ -1333,7 +1333,8 @@ Item は `now < expires_at` または exempt のとき **見える**（visible�
 
 ### 呼び出し側の認可（提案）
 
-Endpoint は次の Issue の仕事です。次の対応を提案します（未強制）。読み取り（`get`、`list_items`）は `project.read`。`add`、`acquire_use`、`release_use`、`pin`、`unpin` は `project.task.run`。`save`、`unsave` も暫定で `project.task.run` としますが、誰が明示保存を付け・外せるかは未決です（[Decision 0013](../../docs/decisions/0013-research-scratch-task-relation.md)）。
+Endpoint は次の Issue の仕事です。次の対応を提案します（未強制）。読み取り（`get`、`list_items`）は `project.read`。`add`、`acquire_use`、`release_use`、`pin`、`unpin` は `project.task.run`。`pin`、`unpin` は Agent へ委任できます。
+**`save`、`unsave` は User 本人だけができる操作で、Agent へ委任できません**（[Decision 0013](../../docs/decisions/0013-research-scratch-task-relation.md)で 2026-09-25 に承認。要件の「User が明示保存」は人の意思表示であり、Agent が調査結果を TTL から免れさせられないようにするためです）。`ScratchStore` 自体は認可をしないので、この制限は呼び出し側（API 層）が強制します。`save`、`unsave` を、Agent の権限（委任元 User と `AgentGrant` の積集合）では呼べない経路にしてください。専用の Capability を新設するかと、その id はここでは決めていません。新設するときは、委任不可（`CapabilityInfo.delegable=False`）にしてください（[Decision 0004](../../docs/decisions/0004-rbac-capability-and-audit-policy.md) は、Capability を追加するときに委任の可否を明示することを求めます）。
 `request_promotion` は `project.memory.use`、`resolve_promotion` は `project.memory.manage`（Agent へ委任できない: 調査結果を Agent の判断だけで Long-term Memory へ送らないため）。`purge_expired` は Backend 自身の Janitor だけ（User も Agent も呼べない）。
 
 ### 上限と入力の検証
@@ -1375,7 +1376,7 @@ Test は参照実装で成り立つことを確認しながら書いたもので
 ### 制限と未確認の点
 
 - 削除は Janitor の間隔だけ遅れます（既定で最大約 1 時間）。ただし、期限切れの Item は削除の前から全ての Method で「存在しない」ので、読み取りは Janitor に依存しません。Janitor が動かない間（`PAW_SCRATCH_PURGE_INTERVAL_SECONDS=0`、`PAW_DATABASE_URL` 未設定、Process の停止、30 秒より短い間隔での再起動の繰り返し）は、期限切れの行と内容が DB に残ります。Janitor の停止や失敗を知らせる仕組み（Metrics、Alert）はなく、あるのは Log の WARNING だけです。詳しくは[Janitor](#janitor期限切れの削除)。
-- `task_id` は素の UUID なので、Task を削除した後は存在しない Task を指し、DB はそれを検査しません（存在の確認は `add` の時点だけ）。[Decision 0013](../../docs/decisions/0013-research-scratch-task-relation.md)（Proposed）で承認を求めています。
+- `task_id` は素の UUID なので、Task を削除した後は存在しない Task を指し、DB はそれを検査しません（存在の確認は `add` の時点だけ）。[Decision 0013](../../docs/decisions/0013-research-scratch-task-relation.md)で、この選択が承認されています。
 - Claim と Source の対応（Evidence / Provenance）は PAW-052 です。ここでは `source_metadata` に置くだけで、構造化しません。
 - 1 Project あたりの Item 数の上限（Quota）は持ちません。
 - Purge の「Snapshot の後に Commit された Lease」の Race は、実際の同時実行では起こしにくい時間窓です。Test は `purge_probe`（Test 用の接続点）で、その瞬間に exempt が現れる状況を決定的に再現して確認しています。同時実行の Test は複数回繰り返して安定を確認していますが、時間窓そのものを外部から狙って再現しているわけではありません。
@@ -1385,11 +1386,11 @@ Test は参照実装で成り立つことを確認しながら書いたもので
 ### 人間の判断が必要な点
 
 1. **昇格の確認中（`pending`）の期限。** 期限がないため、確認の Flow が止まると、その Item は残り続けます（`promotion_requested_at` で見つけられます）。期限を付けるか。
-2. **「User が明示保存」。** [要件](../../REQUIREMENTS.md)の「Pin 済み」と「User が明示保存」は別の延期理由なので、Pin を 1 つの真偽値で兼ねると `unpin` が保存まで消して期限切れの Item を削除させてしまいます（Review の指摘）。そこで Pin（`pinned`）と保存（`saved`）を**独立した 2 つの印**にしました（情報を失わない最小の案。[Decision 0013](../../docs/decisions/0013-research-scratch-task-relation.md)（Proposed）の「Pin と明示保存」）。残る判断は、保存と Pin で**見え方**（UI、一覧）・**Quota**・**誰が付け外しできるか**（User 本人だけか、Agent に委任できるか）を分けるか、誰が・いつ保存したかを記録するか（現在は真偽値だけ）、複数の User の保存を別々の参照として持つか（現在は 1 つの印で、誰かが `unsave` すれば消えます）です。
+2. **「User が明示保存」（[Decision 0013](../../docs/decisions/0013-research-scratch-task-relation.md)で承認済み）。** [要件](../../REQUIREMENTS.md)の「Pin 済み」と「User が明示保存」は別の延期理由なので、Pin を 1 つの真偽値で兼ねると `unpin` が保存まで消して期限切れの Item を削除させてしまいます（Review の指摘）。そこで Pin（`pinned`）と保存（`saved`）を**独立した 2 つの印**にしました（情報を失わない最小の案）。承認された内容は次のとおりです。保存と Pin は UI・一覧で今は区別しない。保存済み・Pin 済みの件数の Quota は今は持たない。`save` / `unsave` は User 本人だけができる操作で Agent へ委任できない（`pin` / `unpin` は従来どおり）。誰が・いつ保存したかは記録せず、1 人の `unsave` で保存の印が消える。保存に最大の期間は付けない。
 3. **Claim と Source の置き場所。** PAW-052 まで `source_metadata`（16 KiB まで）に置きます。
-4. **Task を削除したときの `task_id`。** Review は、最初の実装（`tasks.id` への Foreign Key、`ON DELETE SET NULL`）は Task の削除で `task_id` を失い、Pin 済みの Item が Project / Task の関係を保てないと指摘しました。要件は Task 削除時の扱いを定めていないため、[Decision 0013](../../docs/decisions/0013-research-scratch-task-relation.md)（**Proposed**、承認待ち）として、Foreign Key を持たない素の UUID にしました。Task の削除は止められず（`RESTRICT` は止める）、Pin 済みは消えず（`CASCADE` は消す）、期限切れは消え、関係は残ります。代わりに DB は存在を保証せず、削除された Task を指す `task_id` が残ります。`RESTRICT` など別の選択にするか、Task を論理削除にして Foreign Key に戻すか。
+4. **Task を削除したときの `task_id`。** Review は、最初の実装（`tasks.id` への Foreign Key、`ON DELETE SET NULL`）は Task の削除で `task_id` を失い、Pin 済みの Item が Project / Task の関係を保てないと指摘しました。要件は Task 削除時の扱いを定めていないため、[Decision 0013](../../docs/decisions/0013-research-scratch-task-relation.md)（2026-09-25 に承認）として、Foreign Key を持たない素の UUID にしました。Task の削除は止められず（`RESTRICT` は止める）、Pin 済みは消えず（`CASCADE` は消す）、期限切れは消え、関係は残ります。代わりに DB は存在を保証せず、削除された Task を指す `task_id` が残ります。`RESTRICT` など別の選択にするか、Task を論理削除にして Foreign Key に戻すかは、Task の削除の方針（物理か論理か）や Project の Table が入ったときに、新しい Decision で見直します。
 5. **認可の対応。** 上の「呼び出し側の認可（提案）」で、特に `resolve_promotion` を委任不可の `project.memory.manage` にする点。
-6. **Quota。** Item 数の上限。
+6. **Quota。** Item 数の上限。保存済み・Pin 済みの件数の上限は、[Decision 0013](../../docs/decisions/0013-research-scratch-task-relation.md)で今は持たないと承認されています。
 7. **Janitor の既定値。** 間隔（1 時間）、起動の 30 秒後に最初の Tick、1 Tick の上限（500 件 × 100 Batch）。仕様に数値がないため、最も単純な値を選びました。
 8. **PostgreSQL が止まったときの終了。** Review の指摘に従い、Purge は中断できる専用の接続で行い、Cancel と `dispose()` で接続の Socket を閉じます（上の「止まらない PostgreSQL」）。残る判断は、Purge の 1 Batch に**時間切れ**を付けるか（付ければ、応答しない PostgreSQL の間も Janitor が自分で諦めて次の Tick に進みます。値は仕様にないため付けていません）と、1 Batch ごとに接続を開くコストを許すかです。
 
