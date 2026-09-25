@@ -50,6 +50,7 @@ personal-ai-workspace/
 │  │  │     ├─ 0021_owner_setup.py
 │  │  │     ├─ 0025_audit_events.py
 │  │  │     ├─ 0026_projects.py
+│  │  │     ├─ 0027_repository_registration.py
 │  │  │     ├─ 0031_tool_approvals.py
 │  │  │     ├─ 0032_task_lifecycle.py
 │  │  │     ├─ 0033_task_queue_budget_loop.py
@@ -106,6 +107,21 @@ personal-ai-workspace/
 │  │  │  │  ├─ service.py
 │  │  │  │  ├─ store.py
 │  │  │  │  ├─ task_stop.py
+│  │  │  │  ├─ transaction.py
+│  │  │  │  └─ validation.py
+│  │  │  ├─ repositories/
+│  │  │  │  ├─ __init__.py
+│  │  │  │  ├─ accounts.py
+│  │  │  │  ├─ errors.py
+│  │  │  │  ├─ git.py
+│  │  │  │  ├─ github.py
+│  │  │  │  ├─ limits.py
+│  │  │  │  ├─ models.py
+│  │  │  │  ├─ paths.py
+│  │  │  │  ├─ policy.py
+│  │  │  │  ├─ records.py
+│  │  │  │  ├─ service.py
+│  │  │  │  ├─ store.py
 │  │  │  │  ├─ transaction.py
 │  │  │  │  └─ validation.py
 │  │  │  ├─ research/
@@ -194,6 +210,7 @@ personal-ai-workspace/
 │  │     ├─ provenance_support.py
 │  │     ├─ projects_support.py
 │  │     ├─ queueing_support.py
+│  │     ├─ repositories_support.py
 │  │     ├─ research_support.py
 │  │     ├─ scratch_support.py
 │  │     ├─ shared_memory_support.py
@@ -257,6 +274,19 @@ personal-ai-workspace/
 │  │     ├─ test_queueing_loop_db.py
 │  │     ├─ test_queueing_queue.py
 │  │     ├─ test_queueing_schema.py
+│  │     ├─ test_repositories_accounts.py
+│  │     ├─ test_repositories_concurrency.py
+│  │     ├─ test_repositories_git.py
+│  │     ├─ test_repositories_github.py
+│  │     ├─ test_repositories_grants.py
+│  │     ├─ test_repositories_paths.py
+│  │     ├─ test_repositories_policy.py
+│  │     ├─ test_repositories_schema.py
+│  │     ├─ test_repositories_service_checkout.py
+│  │     ├─ test_repositories_service_manage.py
+│  │     ├─ test_repositories_service_register.py
+│  │     ├─ test_repositories_service_validation.py
+│  │     ├─ test_repositories_validation.py
 │  │     ├─ test_research_broker.py
 │  │     ├─ test_research_contract.py
 │  │     ├─ test_research_locator.py
@@ -358,6 +388,7 @@ personal-ai-workspace/
 │     ├─ 0012-research-provider-adapter-policy.md
 │     ├─ 0013-research-scratch-task-relation.md
 │     ├─ 0014-task-working-set-persistence.md
+│     ├─ 0017-repository-registration-policy.md
 │     └─ README.md
 └─ evaluator/
    └─ README.md
