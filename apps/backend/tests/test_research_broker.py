@@ -15,7 +15,9 @@ from datetime import UTC, datetime, timedelta, timezone
 
 from paw_backend.research.providers import (
     InvalidLocatorError,
+    InvalidProviderResponseError,
     ProviderFailure,
+    ProviderInterfaceError,
     ProviderKind,
     ProviderRegistry,
     ResearchBroker,
@@ -30,8 +32,14 @@ from paw_backend.research.providers import (
     classify_failure,
     compute_content_hash,
 )
+from paw_backend.research.providers.broker import (
+    ADAPTER_ERROR,
+    LOGGED_EXCEPTION_TYPES,
+    log_type_name,
+)
 
 from .research_support import (
+    FORGED,
     GUARD_SECONDS,
     NOW,
     SECRET,
@@ -46,6 +54,7 @@ from .research_support import (
     hit,
     hostile_containers,
     hostile_failures,
+    hostile_named_exceptions,
     malformed_documents,
     malformed_hits,
     other_tasks,
@@ -639,12 +648,18 @@ class GatherFailureIsolationTest(unittest.IsolatedAsyncioTestCase):
                 )
         self.assertEqual(calls, [])
 
-    async def test_a_hostile_failure_is_logged_by_its_real_type_name(self):
+    async def test_an_adapter_defined_type_is_logged_as_a_fixed_token(self):
+        # The class name of an exception that an adapter defines is adapter data:
+        # it is never logged, not even a harmless-looking one.
         calls = Tripwire()
         failure, _ = hostile_failures(calls)["a metaclass whose __name__ raises"]
         with self.assertLogs(LOGGER, level="WARNING") as logs, calls.armed():
             await guarded(broker_of(web(search_error=failure)).gather(request()))
-        self.assertIn("exception_type=RaisingMetaclass", "\n".join(logs.output))
+        self.assertEqual(len(logs.records), 1)
+        self.assertTrue(
+            logs.output[0].endswith("code=internal_error exception_type=adapter_error")
+        )
+        self.assertNotIn("RaisingMetaclass", "\n".join(logs.output))
         self.assertEqual(calls, [])
 
     async def test_an_exception_that_cannot_be_printed_is_handled(self):
@@ -781,6 +796,196 @@ class GatherFailureIsolationTest(unittest.IsolatedAsyncioTestCase):
     async def test_a_fully_successful_gather_logs_nothing(self):
         with self.assertNoLogs(LOGGER, level="WARNING"):
             await guarded(broker_of(web(hits=[hit()]), docs(hits=[])).gather(request()))
+
+
+class LoggedExceptionTypeTest(unittest.IsolatedAsyncioTestCase):
+    """The log line names an allowlisted exception type or says ``adapter_error``.
+
+    The class name of an exception that an adapter raises is adapter data: it can
+    hold a credential, a newline that forges a second log record, 100,000
+    characters, or the name of an allowed class. Only a class that IS one of a
+    fixed list (matched by identity, never by name) is named.
+    """
+
+    def assert_one_line(self, logs, *, code: str, exception_type: str) -> None:
+        self.assertEqual(len(logs.records), 1)
+        record = logs.records[0]
+        self.assertEqual(
+            record.getMessage(),
+            "research provider failed: provider=web-a kind=web "
+            f"code={code} exception_type={exception_type}",
+        )
+        self.assertEqual([type(arg) for arg in record.args], [str] * 4)
+        self.assertEqual(logs.output[0].count("\n"), 0)
+
+    @staticmethod
+    def expected_code(label: str) -> str:
+        unavailable = label == "a subclass of ProviderFailure"
+        return Code.UNAVAILABLE.value if unavailable else Code.INTERNAL_ERROR.value
+
+    async def test_no_hostile_class_name_reaches_the_log_of_gather(self):
+        calls = Tripwire()
+        for label, failure in hostile_named_exceptions(calls).items():
+            with self.subTest(exception=label):
+                broken = web("web-a", search_error=failure)
+                healthy = docs("docs-a", hits=[hit("https://d.example/1")])
+                with self.assertLogs(LOGGER, level="WARNING") as logs, calls.armed():
+                    result = await guarded(broker_of(broken, healthy).gather(request()))
+                self.assert_one_line(
+                    logs,
+                    code=self.expected_code(label),
+                    exception_type=ADAPTER_ERROR,
+                )
+                self.assertEqual(urls(result), ["https://d.example/1"])
+                self.assertEqual(
+                    [e.code.value for e in result.errors], [self.expected_code(label)]
+                )
+        self.assertEqual(calls, [])
+
+    async def test_no_hostile_class_name_reaches_the_log_of_fetch(self):
+        calls = Tripwire()
+        for label, failure in hostile_named_exceptions(calls).items():
+            with self.subTest(exception=label):
+                provider = web("web-a", fetch_error=failure)
+                with self.assertLogs(LOGGER, level="WARNING") as logs, calls.armed():
+                    result = await guarded(broker_of(provider).fetch(source_of()))
+                self.assert_one_line(
+                    logs,
+                    code=self.expected_code(label),
+                    exception_type=ADAPTER_ERROR,
+                )
+                self.assertEqual(
+                    [e.code.value for e in result.errors], [self.expected_code(label)]
+                )
+        self.assertEqual(calls, [])
+
+    async def test_the_token_replaces_every_name_of_the_hostile_classes(self):
+        # The log holds none of the text that the class names, or their other
+        # attributes, carry (the exact-line tests above would also fail on it).
+        calls = Tripwire()
+        forbidden = (SECRET, FORGED, "access_token", "Innocent", "Runtim", "例外")
+        for label, failure in hostile_named_exceptions(calls).items():
+            with self.subTest(exception=label):
+                with self.assertLogs(LOGGER, level="WARNING") as logs, calls.armed():
+                    await guarded(
+                        broker_of(web("web-a", search_error=failure)).gather(request())
+                    )
+                text = "\n".join(logs.output)
+                self.assertLess(len(text), 200)
+                for word in forbidden:
+                    self.assertNotIn(word, text)
+
+    async def test_allowlisted_types_are_named(self):
+        cases = [
+            (RuntimeError(SECRET), "internal_error", "RuntimeError"),
+            (ValueError(SECRET), "internal_error", "ValueError"),
+            (KeyError(SECRET), "internal_error", "KeyError"),
+            (OSError(SECRET), "internal_error", "OSError"),
+            (
+                ConnectionRefusedError(SECRET),
+                "internal_error",
+                "ConnectionRefusedError",
+            ),
+            (TimeoutError(SECRET), "timeout", "TimeoutError"),
+            (
+                ExceptionGroup(SECRET, [ValueError()]),
+                "internal_error",
+                "ExceptionGroup",
+            ),
+            (Exception(SECRET), "internal_error", "Exception"),
+            (ProviderFailure(Code.RATE_LIMITED), "rate_limited", "ProviderFailure"),
+            (
+                InvalidProviderResponseError(),
+                "internal_error",
+                "InvalidProviderResponseError",
+            ),
+        ]
+        for failure, code, expected in cases:
+            with self.subTest(exception=expected):
+                with self.assertLogs(LOGGER, level="WARNING") as logs:
+                    await guarded(
+                        broker_of(web("web-a", search_error=failure)).gather(request())
+                    )
+                self.assert_one_line(logs, code=code, exception_type=expected)
+                self.assertNotIn(SECRET, logs.output[0])
+
+    async def test_a_subclass_of_an_allowlisted_type_is_not_named(self):
+        # The class is the adapter's own, so is its name (``RateLimitedError``).
+        class SecretRuntimeError(RuntimeError):
+            pass
+
+        class RateLimitedError(ProviderFailure):
+            pass
+
+        cases = [
+            (SecretRuntimeError(), "internal_error"),
+            (RateLimitedError(Code.RATE_LIMITED), "rate_limited"),
+        ]
+        for failure, code in cases:
+            with self.subTest(exception=type(failure).__name__):
+                with self.assertLogs(LOGGER, level="WARNING") as logs:
+                    await guarded(
+                        broker_of(web("web-a", search_error=failure)).gather(request())
+                    )
+                self.assert_one_line(logs, code=code, exception_type=ADAPTER_ERROR)
+
+    def test_the_allowlist_holds_only_short_plain_names(self):
+        names = [cls.__name__ for cls in LOGGED_EXCEPTION_TYPES]
+        self.assertEqual(len(set(names)), len(names), msg="unique names")
+        self.assertNotIn(ADAPTER_ERROR, names)
+        for cls in LOGGED_EXCEPTION_TYPES:
+            with self.subTest(exception=cls.__name__):
+                self.assertTrue(issubclass(cls, Exception))
+                self.assertRegex(cls.__name__, r"\A[A-Za-z]{1,40}\Z")
+                self.assertEqual(log_type_name(instance_of(cls)), cls.__name__)
+        self.assertEqual(ADAPTER_ERROR, "adapter_error")
+
+    def test_the_package_and_common_builtin_errors_are_on_the_list(self):
+        for cls in (
+            ProviderFailure,
+            InvalidProviderResponseError,
+            InvalidLocatorError,
+            Exception,
+            RuntimeError,
+            ValueError,
+            TypeError,
+            OSError,
+            TimeoutError,
+            ConnectionError,
+            ExceptionGroup,
+        ):
+            with self.subTest(exception=cls.__name__):
+                self.assertIn(cls, LOGGED_EXCEPTION_TYPES)
+
+    def test_reading_the_token_never_runs_adapter_code(self):
+        calls = Tripwire()
+        failures = [f for f, _ in hostile_failures(calls).values()]
+        failures += list(hostile_named_exceptions(calls).values())
+        names = []
+        for failure in failures:
+            with calls.armed():
+                names.append(log_type_name(failure))
+        self.assertEqual(calls, [])
+        # ``ProviderFailure`` itself (a forged code) is on the list; nothing else is.
+        self.assertEqual(set(names), {ADAPTER_ERROR, "ProviderFailure"})
+        self.assertEqual(names.count("ProviderFailure"), 1)
+
+
+def instance_of(cls: type[Exception]) -> Exception:
+    """An instance of a class of ``LOGGED_EXCEPTION_TYPES`` (some need arguments)."""
+    if cls is ExceptionGroup:
+        return ExceptionGroup("group", [ValueError()])
+    if cls is UnicodeDecodeError:
+        return UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid")
+    if cls is UnicodeEncodeError:
+        return UnicodeEncodeError("ascii", "\u00e9", 0, 1, "invalid")
+    if cls is UnicodeTranslateError:
+        return UnicodeTranslateError("\u00e9", 0, 1, "invalid")
+    if cls is ProviderFailure:
+        return ProviderFailure(Code.UNAVAILABLE)
+    if cls is ProviderInterfaceError:
+        return ProviderInterfaceError("name")
+    return cls()
 
 
 class GatherTimeoutTest(unittest.IsolatedAsyncioTestCase):
