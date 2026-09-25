@@ -38,6 +38,346 @@ Task JSONの必須fieldは次のとおりです。
 PAW-013で定義します。Schema validationはlocatorやcommitの存在確認、credentialの検出を行いません。
 Task authorは[Security Policy](../SECURITY.md)に従い、credentialをlocatorへ保存してはいけません。
 
+## Isolated worktree runner
+
+`benchmarks.worktree_runner.WorktreeRunner` is evaluator infrastructure for starting a
+candidate process from a specified commit.  Each `create()` call resolves the commit,
+creates a detached worktree below an evaluator-owned runs directory, and appends a
+JSONL lifecycle log (every record carries `run_id`, `candidate_id` and `commit`) to a
+separate logs directory.  `execute()` removes the worktree after a normal exit,
+timeout, or cancellation; its log remains available for audit.  Cleanup also removes
+the run directory and Git's `.git/worktrees/<id>` record when a candidate deleted,
+renamed, locked, or damaged its checkout.  If the candidate renamed or moved the run
+directory itself, cleanup follows it: a directory handle opened at creation is resolved
+through `/proc/self/fd`, the directory's identity (`st_dev`, `st_ino`) is verified (the
+`/proc` text is not trusted: a live directory named `x (deleted)` reads like a deleted
+one), and it is removed wherever it now is (a symlink planted at the old path is unlinked, never
+followed).  When the directory cannot be found (no `/proc`) or removed, the log records
+`cleanup_incomplete` instead of `cleanup_finished` and `cleanup()`/`execute()` raise
+`WorktreeRunnerError`, after removing what could be removed and pruning Git's record.
+
+The runner does not execute visible or hidden checks and does not select a model.  It
+does not persist command text, stdout, or stderr because those fields can contain
+credentials.  It records only lifecycle events, exit status, duration, and byte counts:
+the final event of an invocation (`completed`, `timed_out`, `cancelled` or
+`launch_failed`) carries `exit_code`, `duration_ms`, `stdout_bytes` and `stderr_bytes`,
+the same numbers `execute()` returns.  Output is read and discarded while the process
+runs, so memory use does not depend on how much a candidate prints.  PAW-013 owns check execution and hidden-test isolation.
+
+`starting_commit` must be a plain revision (letters, digits and `._/@~^{}-`, not
+starting with `-`); it is passed to `git rev-parse --verify --end-of-options`, which
+needs Git 2.30 or newer.  `candidate_id` is limited to letters, digits, `.`, `_`, `-`.
+`execute()` needs a non-empty `argv[0]`; later arguments may be any string (including
+`""`).
+
+`runs_directory` and `logs_directory` must resolve, after symlinks, outside the source
+repository (its worktree root, the main worktree of a linked worktree, and `.git`);
+otherwise the constructor raises `ValueError`, so retained logs never dirty the checkout
+being benchmarked.
+
+### Candidate process containment
+
+- The candidate gets an explicit environment: only `PATH`, `LANG`, `LANGUAGE`,
+  `LC_ALL`, `LC_CTYPE` and `TZ` are inherited, plus a per-run `HOME`.  Credential
+  variables and every `GIT_*` selector are dropped.
+- The runner's own Git commands (`worktree add`, `rev-parse`, ...) get an allowlist too:
+  the six variables above plus the operator's `HOME`, so Git configuration such as
+  `safe.directory` still applies, and no credentials.  They also run with
+  `core.hooksPath=/dev/null`.  The candidate shares the repository's Git directory, so
+  without this a candidate could leave a `post-checkout` hook that the next
+  `git worktree add` starts with the evaluator's credentials.
+- The candidate runs in its own session.  On timeout or cancellation the runner sends
+  `SIGTERM` to the process group and to the processes found below the candidate in
+  `/proc`.  The grace period (`term_grace_seconds`, 2 s) applies to all of them, not
+  only the leader: the runner waits until the leader has exited *and* no group member
+  or known descendant is still running, so a descendant finishing its `SIGTERM` handler
+  is not cut short.  Output keeps being drained during the grace period, so a handler
+  that writes more than a pipe holds is not blocked (and killed) on a full pipe.  Whatever is left when the period ends gets `SIGKILL`, and reading
+  the pipes stops after `drain_seconds` (1 s).  Leftover members of the candidate's
+  process group are also killed when it exits normally.
+- Descendants are tracked by identity, not by pid alone (pid plus the start time in
+  `/proc/<pid>/stat`).  Before every `SIGTERM`/`SIGKILL` the identity is re-checked, and
+  a pid now held by a different process is dropped and neither signalled nor waited
+  for.  Where `pidfd_open` exists (Linux 5.3+, Python 3.9+) the pidfd is opened first
+  and the identity checked afterwards, so the signal cannot reach a newcomer; without
+  it a window of microseconds remains between the check and `kill`.  The leader is left
+  unreaped until the last process-group signal, so the group id cannot be reused before
+  it.
+- If something else reaps the leader (the evaluator ignores `SIGCHLD`, or another
+  reaper collects it), its exit status is lost: `execute()` returns `exit_code=None`
+  (and logs `null`) instead of the `0` that `Popen` would report.  The runner reaps the
+  leader itself, so it notices a reaper that got there first at any point, and it
+  re-checks at every group signal that the leader is still its own unreaped child (pid
+  and start time).  Once it is not, its pid may be reused as an unrelated process group
+  id, so the group is signalled only while a process recorded earlier as its member
+  (same pid and start time) is still in it; otherwise nothing is sent.  Members are
+  recorded every 0.2 s while the leader runs and once more at the moment it is seen to
+  have vanished, so a child forked just before the exit is still known.  (Git children
+  inherit an ignored `SIGCHLD` and fail, so an evaluator that ignores it cannot use the
+  runner's Git operations at all.)
+- **Documented residuals** of signalling a same-user candidate from the same UID, none of
+  which can be closed in-process (see `docs/decisions/0001-hidden-check-boundary.md`,
+  added by PAW-013):
+  - A process that daemonizes (double fork plus `setsid`) is neither in the group nor
+    below the candidate in `/proc`, so it can outlive the run.
+  - A check-then-signal gap of microseconds remains, because a process group cannot be
+    signalled through a pidfd: after the last identity check a reaper could still free
+    the group id before `killpg` runs.  The last look at the group assumes the id was
+    not reused within one polling interval (50 ms) of the leader vanishing.
+  - A member forked into the group only after the leader was reaped, by members that
+    have all exited before the signal, is not recorded and survives.
+  - The shared Git directory is writable by the candidate.  Hooks are disabled and the
+    Git commands carry no credentials, but a candidate can still write other
+    configuration there (a `filter.*` or `core.fsmonitor` setting, an alias) that makes a
+    later Git command run a program as the evaluator's user and with its `HOME`.
+    Production must run candidates under another OS user or in a container, with the
+    repository mounted read-only.
+  - Containing descendants reliably needs a PID namespace or a cgroup (`cgroup.kill`);
+    production must run candidates in one.
+
+### Same-user candidates and the evaluator process
+
+A candidate runs as the evaluator's OS user.  On Linux any such process can read
+`/proc/<evaluator pid>/environ`, the environment the evaluator was *started* with (later
+`os.environ` changes do not appear there), so credentials the evaluator inherited are
+exposed even though the candidate's own environment is an allowlist.  `/proc/<pid>/mem`
+was already refused in the tested configuration by `ptrace_scope=1`.
+
+Mitigation: the constructor calls `prctl(PR_SET_DUMPABLE, 0)` on the evaluator (Linux,
+best effort, `harden_process=False` opts out; `runner.process_hardened` reports the
+result).  Observed on Linux 7.0 as an unprivileged user: the candidate's reads of the
+evaluator's `environ` and `mem` fail with `EACCES`, the candidate itself is dumpable
+again after `exec`, and the evaluator stays non-dumpable.  Side effects: no core dumps,
+no debugger attach (`gdb`, `py-spy`), and the evaluator cannot read its own
+`/proc/self/environ` (`/proc/self/fd`, `status` and `cmdline` stay readable).  The flag
+is process-wide, so a host application that needs core dumps or a debugger should opt
+out and provide isolation another way.
+
+This does **not** close the exposure:
+
+- **Ancestors.**  The shell or service manager that started the evaluator still has the
+  same environment, and its `/proc/<pid>/environ` stays readable to a same-user
+  candidate (it finds the parent pid in the evaluator's world-readable
+  `/proc/<pid>/stat`).  Start the evaluator from a clean environment
+  (`env -i PATH=... python ...`, or a service unit that passes no secrets).
+- **Root candidates** and any process with `CAP_SYS_PTRACE` or `CAP_DAC_READ_SEARCH`
+  ignore the flag.
+- **Other same-user channels**: the real home directory (`~/.ssh`, `~/.aws`, ...) by
+  absolute path, the user's keyrings, `ssh-agent`/D-Bus/X11 sockets, the evaluator's
+  command line (world-readable `/proc/<pid>/cmdline`, so never pass secrets as
+  arguments), files the evaluator wrote, and every other process of the same user.
+- Where the flag is unavailable (non-Linux, or a refused `prctl`) nothing changes.
+
+Closing these needs a separate OS identity, or a PID namespace / container in which the
+evaluator's processes and files do not exist.  Unprivileged user namespaces are not
+always permitted (they are refused on the machine used to test this), so that must be
+provided by the deployment, not by this module.  See
+`docs/decisions/0001-hidden-check-boundary.md` (added by PAW-013) for the same boundary
+applied to hidden checks.
+
+### Lifecycle log limits
+
+A candidate runs under the same OS user as the evaluator, so **in-process code cannot
+make the lifecycle log tamper-proof**.  What the runner does:
+
+- The log lives in `logs_directory` (default `<runs_directory>-logs`), not inside the
+  run directory, so it is not reachable as `../execution.jsonl` from the checkout and
+  is outside the checkout's parent chain.  Directories are created `0700` and log
+  files `0600` at creation time; an existing state directory that is not owned by the
+  evaluator or is group/other-writable is refused.
+- The log is opened with `O_NOFOLLOW` (and `O_EXCL` on creation) and never `chmod`ed
+  by path, so a planted symlink is neither followed nor used to change another file's
+  mode.
+- Before every append the runner checks that the file is the same regular,
+  single-link, evaluator-owned, owner-only file of the expected size.  Replacement,
+  truncation, extra appended lines, and extra hard links raise `WorktreeRunnerError`
+  (checkout removal still completes).
+- A write or a `close(2)` that fails (a full disk, an I/O error; `close` can report a
+  delayed write error) is reported as `WorktreeRunnerError` too, without the operating system's message, so `cleanup()` still removes the
+  checkout, its Git metadata and the in-memory ownership before it raises.  The failed
+  append leaves the file at an unexpected size, so later appends are refused by the
+  integrity check instead of writing after a torn record.
+  If only the record of the outcome (`completed` / `timed_out` / `cancelled`) cannot be
+  written, cleanup still runs and `execute()` then raises that `WorktreeRunnerError`
+  instead of returning a result the durable log does not contain.
+- If the output drain cannot be set up after the launch (descriptor exhaustion), or the
+  supervisor cannot be built, the child is killed and reaped before the worktree is
+  removed, instead of running on without a timeout.  When no leader could be built,
+  the child's pid and start time (recorded right after the launch) are checked first:
+  nothing is signalled unless it is still the runner's own unreaped child (`waitid`
+  with `WNOWAIT`) with that start time.  A child that something else already reaped
+  may have had its pid, which is also its process group id, reused, so then nothing is
+  sent and nothing is waited for.  A child with no recorded start time (no `/proc`, or
+  the read failed) is not signalled at all, because `waitid` alone cannot tell it from
+  another direct child that was given the same pid.
+- The start time recorded right after the launch is the leader's identity: the leader is
+  built with it instead of looking the child up a second time (a second lookup could
+  fail and leave the leader with no identity, so it would never be signalled).
+- Without a recorded start time (no `/proc`) the runner has no identity to check, so it
+  sends no signal to the candidate's group and cannot stop it: a candidate that exceeds
+  the timeout (or is cancelled) is reported `timed_out` (or `cancelled`) but keeps
+  running, and one that finishes is still reported with its real exit status.
+  Production needs a container or cgroup there.
+- A removal that fails for a filesystem reason (a Git metadata entry replaced by a
+  plain file is simply removed; a permission error is not) is reported as
+  `cleanup_incomplete` and `WorktreeRunnerError`, never as a raw `OSError`.
+  An entry that cannot be looked at (a candidate removed the search permission of
+  `.git/worktrees`) is not treated as gone: only `ENOENT` / `ENOTDIR` mean absent, any
+  other error makes the cleanup incomplete.
+
+What remains: a candidate that guesses or lists `logs_directory` can still open the
+log for writing as the same user, and changes made after the final append are not
+detected.  Production must run candidates under a separate OS identity or inside a
+container/mount namespace that cannot see the evaluator's runs, logs, and repository
+storage.  The candidate can likewise modify the main repository's `.git`, which its
+worktree shares.  See `docs/decisions/0001-hidden-check-boundary.md` (added by PAW-013)
+for the same boundary applied to hidden checks.
+
+## Test / hidden acceptance runner
+
+`benchmarks.test_runner.TestRunner` executes visible checks supplied by the task and
+hidden checks resolved from an evaluator-owned `HiddenCheckRegistry`.  The manifest
+continues to contain only the opaque `reference_id`; the registry and its command
+content are never placed in the candidate worktree or durable check log.  A check
+record includes its status, timeout, exit code, duration, and, per stream, the byte
+count, the SHA-256 of the retained bytes, and a truncation flag.  Raw stdout/stderr
+stay in memory for the trusted evaluator caller, so credentials emitted by a command
+do not become durable logs.
+
+- Output is read while the check runs.  Only the first 64 KiB per stream is kept;
+  the rest is counted and discarded, so evaluator memory does not depend on how much
+  a check prints.  `truncated` is set when a stream exceeded 64 KiB.
+- A check gets an explicit environment: only `PATH`, `LANG`, `LANGUAGE`, `LC_ALL`,
+  `LC_CTYPE` and `TZ` are inherited, plus a private temporary `HOME` removed after the
+  check.  Credential variables and every `GIT_*` selector are dropped.  One variable is
+  added, `PAW_CHECK_RUN`, with a random value of its own for every check (see the next
+  item for what it is for).
+- On timeout the check's process group and the processes found below it in `/proc`
+  (or carrying its marker, see below) get `SIGTERM`.  The grace period
+  (`term_grace_seconds`, 2 s) applies to all of them, not only the leader: the runner
+  waits until the leader has exited and no group member
+  or known descendant is still running, so a descendant finishing its `SIGTERM` handler
+  is not cut short.  Output keeps being drained during the grace period, so a handler
+  that writes more than a pipe holds is not blocked (and killed) on a full pipe.
+  The set of processes is not fixed when the first `SIGTERM` goes out: on every round of
+  the wait the runner looks again (recorded descendants and the marker), and a process
+  that a `SIGTERM` handler started meanwhile, in a session of its own for instance, gets
+  its own `SIGTERM` once and is waited for like the others, so its cleanup can run
+  instead of meeting the final `SIGKILL`.  A new process is stopped as soon as it is
+  found, so one that has not installed its own handler yet dies of the default action;
+  a member of the check's own group that a handler forks after the group signal is not
+  sent a `SIGTERM` (the group signal is the only one group members get) and is killed
+  with the group at the end.  A newcomer gets a whole grace period counted from its
+  own `SIGTERM`, not what is left of the first one: a handler that starts a helper
+  1.8 s into a 2 s grace period does not have the helper's cleanup cut off after
+  0.2 s.  Whatever remains when the wait ends gets `SIGKILL`, and pipe reading stops
+  after `drain_seconds` (1 s).
+  The wait is bounded: however many processes a handler keeps starting, it ends
+  `max_grace_periods` (2) grace periods after the first `SIGTERM` at the latest, so a
+  newcomer found in the second half of that time gets only what is left of it.  With
+  the defaults, a check that times out takes at most `timeout` + 4 s (the two grace
+  periods) + 1 s (`drain_seconds`, for what the killed processes left in the pipes), and
+  2 s more only if the killed leader cannot be reaped (it is stuck in uninterruptible
+  sleep).
+  If the output capture cannot be set up after the launch (descriptor exhaustion), the
+  child is killed and reaped and the check is reported as an `error`, not left running.
+  The child's pid and start time are recorded right after the launch, and nothing is
+  signalled unless it is still the runner's own unreaped child (`waitid` with
+  `WNOWAIT`) with that start time: a child that something else already reaped may have
+  had its pid, which is also its process group id, reused, so then nothing is sent and
+  nothing is waited for.  A child with no recorded start time (no `/proc`, or the read
+  failed) is not signalled at all, because `waitid` alone cannot tell it from another
+  direct child that was given the same pid; a leader whose start time differs from the
+  one recorded at launch is not signalled either.  Once the leader object exists its
+  guarded signalling (recorded members, identity re-check at every signal) is used
+  instead, after one last unthrottled look at the group: a member the check forked
+  since the leader was built is recorded even if another reaper collected the leader
+  in the meantime.  The pipes are closed first, so the identity checks can still read
+  `/proc` under descriptor exhaustion.
+- What a check left behind is killed when the check exits normally (or its setup fails)
+  too, not only on timeout: leftover group members, and the processes that left the
+  group, whether they started a session of their own (`start_new_session`, `setsid`) or
+  daemonized (double fork plus `setsid`).  Those are found in two ways.  The processes
+  below the leader are recorded while it runs (every 0.2 s, by pid and start time, and
+  only while the leader is still the runner's own unreaped child, so a leader collected
+  elsewhere never makes a stranger's children look like the check's).  And every live
+  process whose initial environment carries this check's marker
+  (`PAW_CHECK_RUN=<random value>`) is found by scanning `/proc/<pid>/environ` when the
+  check ends.  The marker survives re-parenting, `setsid` and double forks, so a check
+  that starts a server in a session of its own and exits at once is still cleaned up.
+  Only the whole marker variable is looked for (a longer or shorter value, or the same
+  text inside another variable, does not match) and nothing else of another process's
+  environment is kept; processes whose environment cannot be read (another user, not
+  dumpable) are skipped.  The value is random per check, so concurrent runs never match
+  each other's processes.  On timeout these processes get `SIGTERM` and the grace
+  period like the group does; a process the group signal already reaches (the leader
+  and the group's members) is not signalled a second time, so a `SIGTERM` handler is
+  not interrupted by another `SIGTERM`.  The kill is repeated (at most 20 rounds) until
+  none of them is left running, because a process that forked just before its
+  `SIGKILL` may have left a child.
+- Descendants are tracked by identity, not by pid alone (pid plus the start time in
+  `/proc/<pid>/stat`).  Before every `SIGTERM`/`SIGKILL` the identity is re-checked, and
+  a pid now held by a different process is dropped and neither signalled nor waited
+  for.  Where `pidfd_open` exists (Linux 5.3+, Python 3.9+) the pidfd is opened first
+  and the identity checked afterwards, so the signal cannot reach a newcomer; without
+  it a window of microseconds remains between the check and `kill`.  The check's
+  leader is left unreaped until the last process-group signal, so the group id cannot
+  be reused before it.
+- If something else reaps the check's leader (the evaluator ignores `SIGCHLD`, or
+  another reaper collects it), its exit status is lost, so the check is reported as
+  `error` with no exit code, never as `passed`.  The runner reaps the leader itself, so
+  it notices a reaper that got there first at any point, and it re-checks at every group
+  signal that the leader is still its own unreaped child (pid and start time).  Once it
+  is not, its pid may be reused as an unrelated process group id, so the group is
+  signalled only while a process recorded earlier as its member (same pid and start
+  time) is still in it; otherwise nothing is sent.  Members are recorded every 0.2 s
+  while the leader runs, once more when it is first seen as a zombie (which still
+  reserves the group id), and once more at the moment it is seen to have vanished, so a
+  child forked just before the exit is still known even if another reaper collects the
+  leader before the final group kill.  A listing is adopted only if the leader was still
+  its own unreaped child after it (so it was taken while the group id was reserved),
+  and the listing after a vanished leader is dropped when some process now holds the
+  leader's own number (the id was reused, so that group is a stranger's).  If the
+  leader turns out to have been collected after a listing was read (a reaper acting
+  between the table read and the ownership check, including in the last look of the
+  setup-failure cleanup), or at a group signal since it was last observed, the
+  untrusted listing is dropped and the snapshot of the vanished leader's group is taken
+  at once, exactly as if the loss had been seen when it happened; the leader is not
+  merely marked released, so a member forked just before the loss is not forgotten.
+- Without a recorded start time (no `/proc`) the runner has no identity to check, so it
+  sends no signal to the check's group and cannot stop it: a check that exceeds the
+  timeout is reported `timed_out` but keeps running, and one that finishes is still
+  reported with its real exit status.  Production needs a container or cgroup there.
+- **Documented residuals** (not closable in-process; see Decision 0001): a process that
+  leaves the group, is re-parented before the runner recorded it (the check exits within
+  0.2 s of starting it, or double-forks a daemon) *and* does not carry the marker (it
+  was started with an explicit or empty environment, for example `env -i`, or its
+  environment cannot be read) can outlive the check.  The marker is a best-effort
+  recogniser for cooperative code, not a boundary: a hostile check can drop it.  A
+  check-then-signal gap of microseconds remains because a process group cannot be
+  signalled through a pidfd, and the snapshot of a vanished leader's group assumes its
+  id was not reused, by a group whose leader has already gone, since the leader was last
+  observed (one polling interval of 50 ms; after a timeout, the drain of up to
+  `drain_seconds`).  A member forked into the group only after the leader was reaped and
+  the snapshot was taken, or by members that have all exited before the signal, is
+  missed.  Containing descendants reliably needs a PID namespace or a cgroup
+  (`cgroup.kill`).
+- A check command needs a non-empty `argv[0]`; later arguments may be any string,
+  including `""` (for example `("python3", "-c", "")`), as the task schema allows.
+- The check log directory is created `0700` and the log `0600` at creation, opened
+  with `O_NOFOLLOW`, and refused (`TestRunnerError`) if it is a symlink, has extra
+  hard links, is not owned by the evaluator, or sits in a group/other-writable
+  directory.  A wider mode on an existing log is tightened on the open descriptor
+  before anything is written.
+- An unknown hidden reference raises a `KeyError` that carries neither the reference
+  nor a chained exception (`__cause__` and `__context__` are `None`).
+
+The runner is a data/process boundary, not a hostile-code sandbox: checks run under
+the evaluator's own OS user, so code under test can still open evaluator files it can
+locate.  Production must run candidate code and private evaluator storage under
+separately enforced OS or container permissions.  The proposed boundary is recorded in
+[Decision 0001](../docs/decisions/0001-hidden-check-boundary.md).
+
 ## Candidate adapter interface
 
 [`candidate_adapter.py`](candidate_adapter.py) defines the provider-neutral boundary used by
@@ -76,6 +416,48 @@ python3 -m venv .venv
 複数fileを一度に指定できます。すべてvalidなら終了code 0、入力が不正なら1、bundled schemaを
 利用できない場合は2を返します。エラーはJSON pathと理由を表示し、拒否した入力値は表示しません。
 
+## Retrieval benchmark
+
+`benchmarks.retrieval_runner`はACL付きのDatasetに対してRetrieverを実行し、次の指標を算出します。
+Recall@K、MRR、nDCG@K、Permission Leakage（必須要件は合計0）、
+stale / superseded / Scope誤選択率、latency（mean / p50 / p95、nearest-rank）です。
+順位指標の定義は`benchmarks.retrieval_metrics`にあり、Retrieverの返すidの重複は2件目以降を捨て、
+Datasetにないidは権限外として数えます。Retrieverが例外を出したqueryは指標0の失敗queryとして続行します
+（記録するのは例外の型だけです）。latencyは`retrieve`の呼び出しだけを計測します。
+CPU時間は、`retrieve`の呼び出し中にこのprocessが使ったCPU時間（`cpu_ms`、平均は`cpu_ms_mean`、合計は`cpu_ms_total`）です。
+Retrieverがin-processで動く場合だけ含まれ、外部のServiceが使うCPU時間は見えません。GPU・VRAMは、`--collect-resources`で
+`MetricsCollector`を使うと、wall clockとVRAM・GPU utilizationのpeakが`resources`に入ります（付けない場合は含みません）。
+`retrieve`は文字列のsequence（list・tuple）を返す必要があり、単一のid文字列（`"mem1"`）などは不正な戻り値として終了code 2にします。
+返されたidは、重複を除いた上位`k`件だけを採点します（`k`を超える分を末尾に足しても、どの指標も上がりません）。
+Datasetのrelevantなmemoryは、active・fresh・queryのScope（`scope`と、任意の`allowed_scopes`）のいずれかに属する必要があります。
+`allowed_scopes`は、要件のUser / Project / Repo / Shared階層で、そのqueryへ正当に適用できる他のScope（たとえばRepoのqueryに対するUserやShared）を表します。
+`allowed_scopes`にも`scope`にも入らないScopeのmemoryを返すと、Scope誤選択として数えます。
+Retrieverには、そのqueryに適用できるScope（`scopes`。queryの`scope`が先頭で、続けて`allowed_scopes`を昇順）を渡します。
+queryの文章とprincipalが同じでもScopeが違えば、Retrieverの入力が変わり、Scopeの扱いを候補の能力として測れます。そうでないと、正解をそのまま返しても
+stale / superseded / Scope誤選択率が0にならず、指標が矛盾するためDataset不備として拒否します。
+失敗したqueryの数は`failed_queries`に出ます。Retrieverが`retrieve(query_text, principals, k)`を
+呼べない場合（メソッドがない、引数が合わない）は、全queryが失敗した報告にせず、実行前にエラーにします。
+stale / superseded / Scope誤選択率の分母は、`k`ではなく、実際に返した上位k件以内の件数です
+（返却数が少ないRetrieverは、少ない件数の中での混入率になります。候補間で返却数が違う場合は`k`を揃えて比較してください）。
+Datasetの未知のfield（綴り誤り）は、黙って無視せず不備（終了code 1）として拒否します。DatasetのJSONは、既存のvalidatorと同じ厳格なdecoder（`benchmarks.json_input.decode_json`）で読み、同じ名前のmemberの重複や`NaN`などの非標準の定数は、後の値で上書きせずに拒否します。`retrieve`が返すidは、`k`で切る前に全件が文字列であることを検証します。
+memoryの`status`は、要件で定義された`active`・`superseded`・`deprecated`・`history`です（`active`以外は、返すと誤選択として数えます）。
+Datasetの`fresh`は真偽値、`acl`・`requester_principals`・`relevant_ids`は文字列のlistで、
+違う型は暗黙に変換せずDataset不備として扱います。
+
+```bash
+python -m benchmarks.run_retrieval_benchmark \
+  --dataset benchmarks/tests/fixtures/retrieval/valid_dataset.json \
+  --retriever benchmarks.tests.fixture_retrievers:make_retriever \
+  -k 5 --output report.json
+```
+
+`--retriever`は`module:factory`で、引数なしのfactoryが
+`retrieve(query_text, requester_principals, k, scopes) -> ids`を持つobjectを返します。
+importしたmoduleは呼び出し元の権限で実行されるため、信頼できるcodeだけを指定してください。
+Reportには文章、ACL、requester principal、例外messageを含めません。終了codeは、成功が0、Datasetの不備が1、
+Retrieverの指定・戻り値やReport出力の不備、`-k`の指定誤りが2です。
+Datasetの正式な形式はSeed Benchmark Dataset（PAW-016）で確定するため、現在の形式は暫定です。
+
 ## Evaluator Result schema v1
 
 Result JSONは、Evaluator version、Task ID、Candidateのmodel/runtime/quantization、`FAIL_TO_PASS`と
@@ -90,10 +472,14 @@ Result JSONは、Evaluator version、Task ID、Candidateのmodel/runtime/quantiz
 | --- | --- |
 | `wall_clock_ms` | 実行時間 |
 | `token_count` | token数 |
+| `context_tokens` | Runtimeが報告したcontext token数 |
 | `agent_steps` | Agent step数 |
+| `retries` | Retry回数 |
+| `tool_calls` | Tool呼び出し回数 |
 | `diff_size` | 変更行数 |
 | `tool_failures` | Tool失敗回数 |
 | `peak_vram_bytes` | Peak VRAM |
+| `peak_gpu_utilization_percent` | Peak GPU utilization（%） |
 | `human_correction_ms` | 人間による修正時間 |
 
 Runtimeで取得できないmetricは、`metrics`から省略できます。これは計測不能と0を区別するためです。
@@ -101,6 +487,82 @@ Result schema validatorもTask schema validatorと同じ終了code・値を出�
 量子化をしないCandidateは`quantization`へ`none`を、Runtime側で詳細を公開しないCandidateは
 `provider-managed`を記録します。
 
+## Metrics collector
+
+`benchmarks.metrics_collector.MetricsCollector` はCandidate adapterからstep、retry、tool call、
+Runtimeが報告する累積token/context usageを受け取り、Result schemaにそのまま入れられる
+`metrics` objectへ正規化します。CollectorはProvider接続やCredentialを扱いません。
+
+GPU telemetryが必要な場合は `NvidiaSmiGpuSampler` を注入します。これは`nvidia-smi`を使って
+全GPUの使用VRAM合計と各GPU utilizationの最大値を周期的に観測します。GPUがない、または
+`nvidia-smi`が利用できない環境では、GPU metricは省略されます。
+
 ```bash
 .venv/bin/python -m benchmarks.validate_result benchmarks/tests/fixtures/result-schema/valid/complete.json
 ```
+
+## Memory Worker benchmark
+
+`benchmarks.memory_worker_runner`はGold付きのcaseをMemory Workerへ渡し、出力を
+[`memory-worker-output-v1.schema.json`](schemas/memory-worker-output-v1.schema.json)で検証して比較します。
+算出する指標は、抽出Recall、不要Memory率、Scope / Confirmed・Inferred / Supersedesの正解率、
+JSON Schema遵守率、latency（mean / p50 / p95、nearest-rank）です。
+`extraction_recall`はkey単位の一致で、抽出した事実の正しさは見ません。
+`scope`は要件の可視範囲class（`user` / `project` / `repo` / `shared`。`REQUIREMENTS.md`のScope）だけを受け付けます。
+Worker出力はschemaの`enum`でschema不適合になり、Goldはcase loaderでcase fileの不備（終了code 1）になります。
+このため`schedule`や`user_preferences`のような話題ラベルは、Goldとの一致でscope_accuracyを得られません。
+`session`と、Inferred Preferenceの例にある`project_group`は、Memory抽出Workerの出力に含めるかが未決定のため受け付けません（追加はschemaの`enum`と`MEMORY_SCOPES`の同時変更です）。
+Gold recordは`content`（抽出すべき事実）を必須とします。`content`がない（省略・`null`・空文字列・空白だけ）Goldは、case fileの不備（終了code 1、`Invalid gold record at index N in case 'ID': missing 'content'`。値は表示しません）です。
+`content`がないと、その記録はkeyだけでしか採点できず、Workerが事実を出力しない、または作り話を出力しても`exact_recall`が1.0になり、事実を評価していないのに満点に見えるためです。
+`exact_recall`は、keyと内容の両方が一致したGold memoryの割合（Goldの全件が分母）です。
+`content_accuracy`は、key一致したもののうち内容が一致した割合です（NFKC・大文字小文字・空白を正規化して比較）。
+Worker出力の`content`はschema上は任意ですが、省略した記録は内容が一致しない扱いで、`exact_recall`と`content_accuracy`では不正解です（schema遵守率には影響しません）。
+`load_cases`を通さず`MemoryWorkerCase`を直接組み立てて`content`のないGoldを渡した場合は、`exact_recall`を`null`（算出不能）にします。keyだけの一致を完全一致として報告しないためです。
+このときcaseの`comparison.content_unlabelled`に、内容を確かめられないGoldの件数が入ります。
+`conflicts_with`（衝突するMemoryのkey）は`conflict_accuracy`で採点し、Goldが`conflicts_with`を持つkey一致recordだけを対象にします。
+Goldの空配列（`[]`）は「衝突なし」というlabelで、Workerが関係を出力すれば不正解、出力しなければ正解として採点します。
+`conflicts_with`がないGoldは未labelとして採点せず、Workerが関係を出力しても評価対象は変わりません（候補の出力に依存して対象recordが増減しません）。
+Worker出力で`conflicts_with`を省略した場合と`[]`は、どちらも関係なしの宣言として扱います。
+Goldに`conflicts_with`がなければ、`conflict_accuracy`は`null`（未labelの記録は採点しない）になります。
+case fileの未知のfield（`supercedes`や`conflict_with`のような綴り誤り）は、黙って無視せず不備（終了code 1）として拒否します。
+case fileとWorker出力のJSONは、既存のvalidatorと同じ厳格なdecoder（`benchmarks.json_input.decode_json`）で読み、同じ名前のmemberの重複や`NaN`などの非標準の定数は、後の値で上書きせずに拒否します（Worker出力はschema不適合として数えます）。
+`key`、`supersedes`（nullでないとき）、`conflicts_with`の各key、`content`は、空白だけの文字列を受け付けません（空文字列も同様）。空白だけのkeyやsupersedesがGoldとWorker出力の両方に現れると、存在しえない識別子で一致して抽出・分類・置換関係の得点になるためです。
+Worker出力はschemaの`pattern`（`\S`）でschema不適合になり、Goldはcase loaderで、他の不備と同じ形式（`Invalid gold record at index N in case 'ID': key must be a non-empty string`。値は表示しません）のcase file不備（終了code 1）になります。
+`supersedes`は置換する側のMemoryが置き換える対象のkeyで、「対象なし」は`null`（Goldでは省略も同じ）です。空文字列は対象ではなく、`null`とは読み替えません。
+Workerが`null`の代わりに`""`を出力した場合は、補正せずschema不適合として扱います（他のschema違反と同じく、そのcaseの全予測を捨て、`schema_adherence_rate`にも不適合として数えます）。Goldの`"supersedes": ""`は`null`と書き直すよう、case file不備（終了code 1）になります。
+ここでの空白は`str.strip()`が取り除く文字（Unicodeの空白。半角space、tab、改行、no-break space（U+00A0）、全角space（U+3000）など）で、Pythonの`re`が`\s`として扱う集合と同じです（testで全code pointについて一致を確認しています）。
+ゼロ幅文字（U+200B、U+200C、U+200D、U+2060、U+FEFFなど）は空白ではなく書式文字なので、それだけのkeyやsupersedesも拒否しません。keyとsupersedesは完全一致で比較し、trimもしないため、Goldに同じ文字列がなければ、keyは不要Memoryとして数えるだけ、supersedesは不正解になるだけで、得点にはなりません。Gold作成時に目視で気付けるよう、Datasetのreviewで確認してください。
+`unneeded`はGoldに一致しない予測と、同じkeyの2回目以降の予測の合計で、予測件数を超えません。
+Workerが例外を出したcaseは、予測なしの失敗caseとして記録して続行します（記録するのは例外の型だけです）。
+`extract`の各呼び出しは、runnerが強制するdeadline（`--timeout-seconds`、有限の正の数）の中で実行します。
+deadlineの値は運用者が決めるもので、Harnessは既定値を持ちません（要件は全候補に共通のTimeoutを求めますが、値は定めていません）。
+`--timeout-seconds`（`run_benchmark`では`timeout_seconds`引数）は必須で、省略すると実行前にエラー（CLIは`the following arguments are required: --timeout-seconds`で終了code 2、`run_benchmark`は`TypeError`）になります。
+短すぎる既定値が、遅いが正しい候補を失敗caseとして記録してモデル選定を左右することを避けるためです。
+候補ごとに値を変えず、全候補へ同じ値を指定してください（[公平比較の規則](../docs/BENCHMARK_EVALUATOR.md)のTimeout）。
+deadlineまでに戻らない呼び出しは、予測なしの失敗caseとして`error_type`を`deadline_exceeded`（Candidate adapterと同じ公開code）にします。
+そのcaseのlatencyはdeadlineまで待った時間で、latencyの統計へも含まれます（後述の、呼び出しが終わるのを待つ時間は含みません）。設定したdeadlineはReportの`timeout_seconds`に記録します。
+`extract`は呼び出しごとのdaemon threadで実行します（main threadではありません。thread localな状態に依存するWorkerは注意してください）。
+Pythonはthreadを強制停止できないため、deadlineを過ぎた呼び出しは中止されず、Workerが自然に戻るまで動き続けます（出力は捨てます）。
+同じWorkerで`extract`が2つ重なると、共有状態の破壊、VRAMなどの資源の競合、後続caseのlatency / VRAM測定の歪み、遅れて終わる呼び出しの誤帰属が起きます。
+このためRunnerは重なりを許さず、deadlineを過ぎた呼び出しについて、次のcase（最後のcaseならReportの作成）へ進む前に、さらに`timeout_seconds`だけその呼び出しが終わるのを待ちます。この間、Workerへ次の呼び出しはしません。
+その間に終わらなければRunを止めます（`run_benchmark`は`WorkerStuckError`、CLIは`extract() had not ended N seconds after its deadline in case 'ID'; ...`をstderrへ出して終了code 2）。
+このときReportは作りません。部分的なReportはmetricsの母数を変えてしまうためです。Workerを直すか、deadlineを見直して最初からやり直してください。止まった呼び出しのthreadはdaemonなので、processの終了は妨げません。
+したがって止まったWorkerは、1 caseあたり最悪でも`2 × timeout`でRunを終わらせ（hangしません）、Reportを返したRunでは`extract`が同時に2つ動いたことがありません。
+限界: 呼び出しそのものを中止する仕組み（呼び出しごとのprocess隔離）は入れていません。Workerはfactoryが作る、modelを保持した呼び出し元processのobjectで、呼び出しごとにprocessを分けるとmodelの再読み込みがlatencyを歪め、常駐processとのIPCはWorkerの形（`extract(input_text) -> str`）を変えてしまうためです。
+Worker自身が別processへ隔離し、deadline超過時にそのprocessを止めて`extract`を戻す実装であれば、上の待ち時間の中で終わり、Runは続行します。
+factoryが`extract(input_text)`を持たないobjectを返した場合は、全caseが失敗した報告にせず、実行前にエラー（終了code 2）にします。
+
+```bash
+# TIMEOUT_SECONDSは運用者が決めた値です（全候補で同じ値を使います）。
+python -m benchmarks.run_memory_worker_benchmark \
+  --cases benchmarks/tests/fixtures/memory-worker/valid-cases.json \
+  --worker benchmarks.tests.fixture_workers:make_worker \
+  --timeout-seconds "$TIMEOUT_SECONDS" \
+  --output report.json
+```
+
+`--worker`は`module:factory`で、引数なしのfactoryが`extract(input_text) -> str`を持つobjectを返します。
+importしたmoduleは呼び出し元の権限で実行されるため、信頼できるcodeだけを指定してください。
+Reportには入力text、Workerの生出力、例外messageを含めません。終了codeは、成功が0、caseファイルの不備が1、
+Workerの指定・Workerの停止（上記）・Report出力の不備が2です。`--collect-resources`を付けると、実行全体のwall clockと、`nvidia-smi`が使える環境ではVRAM・GPU utilizationのpeakを`resources`へ含めます（付けない場合は含みません）。
+Datasetの正式な形式はSeed Benchmark Dataset（PAW-016）で確定するため、現在のcase形式は暫定です。

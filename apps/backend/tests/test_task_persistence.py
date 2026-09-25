@@ -242,7 +242,9 @@ class ConcurrencyTest(PostgresTaskTestCase):
                 {"id": task_id},
             )
             pending = asyncio.create_task(
-                stopper.execute(task_id, C.STOP_NOW, actor=self.user)
+                stopper.execute(
+                    task_id, C.STOP_NOW, actor=self.user, reason="agent loop"
+                )
             )
             await self.wait_for_lock_waiters(1)
             await worker.commit()
@@ -255,7 +257,7 @@ class ConcurrencyTest(PostgresTaskTestCase):
         self.assertEqual(snapshot.current_step.status, StepStatus.SUCCEEDED)
         self.assertEqual(
             [log.message for log in snapshot.recent_logs],
-            ["Stop Now: no step was running"],
+            ["Stop Now: no step was running (reason: agent loop)"],
         )
 
 

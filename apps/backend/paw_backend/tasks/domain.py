@@ -113,15 +113,46 @@ class ActorKind(StrEnum):
     POLICY = "policy"
 
 
+def enum_member[E: StrEnum](name: str, enum_class: type[E], value: object) -> E:
+    """``value`` as a member of ``enum_class``, or ``InvalidCommandArgumentError``.
+
+    Accepts the member itself or its serialised value (an exact ``str``, such as
+    ``"stop_now"`` read from JSON) and returns the member, so that the code after
+    it compares by identity and stores the member. Anything else is refused: a
+    ``str`` subclass (its methods could lie), a member of another enum that has the
+    same text, bytes, numbers, ``None``. The error names the argument and the
+    valid values and never echoes ``value``.
+    """
+    if type(value) is enum_class:
+        return value
+    if type(value) is str:
+        try:
+            return enum_class(value)
+        except ValueError:
+            pass
+    allowed = ", ".join(member.value for member in enum_class)
+    raise InvalidCommandArgumentError(f"{name} must be one of: {allowed}")
+
+
 @dataclass(frozen=True, slots=True)
 class Actor:
-    """Who (or what) triggered a command. Recorded on every history event."""
+    """Who (or what) triggered a command. Recorded on every history event.
+
+    ``kind`` may be given as its serialised value (``"user"``); it is stored as
+    the ``ActorKind`` member. ``id`` is a ``uuid.UUID`` (a UUID as text is
+    refused), and only a user actor has one.
+    """
 
     kind: ActorKind
     id: uuid.UUID | None = None
 
     def __post_init__(self) -> None:
-        if (self.kind is ActorKind.USER) != (self.id is not None):
+        kind = enum_member("actor kind", ActorKind, self.kind)
+        if kind is not self.kind:
+            object.__setattr__(self, "kind", kind)  # frozen: normalise in place
+        if self.id is not None and not isinstance(self.id, uuid.UUID):
+            raise InvalidCommandArgumentError("An actor id must be a UUID")
+        if (kind is ActorKind.USER) != (self.id is not None):
             raise InvalidCommandArgumentError(
                 "A user actor needs an id; others must not have one"
             )
@@ -211,7 +242,9 @@ TRANSITIONS: dict[TaskCommand, TransitionRule] = {
     # Stop Now is the emergency stop: it also ends the task, but interrupts
     # generation / tool execution / sub-agents immediately. It only applies
     # where something can be executing, so not to queued or paused tasks (use
-    # Cancel for those).
+    # Cancel for those). The reason and the interrupted step must be kept, so
+    # ``TaskService.execute`` requires a reason for it (the table does not
+    # know about arguments).
     _C.STOP_NOW: TransitionRule(
         frozenset({_S.RUNNING, _S.WAITING, _S.EVALUATING}),
         _S.CANCELLED,
@@ -256,10 +289,14 @@ def plan_transition(
 ) -> TransitionPlan:
     """Return the resulting state of ``command`` in ``state``.
 
-    Raises ``IllegalTransitionError`` when the state does not accept the command
-    and ``InvalidCommandArgumentError`` when ``wait_reason`` is missing for Wait
-    or given for any other command.
+    Raises ``InvalidCommandArgumentError`` when ``wait_reason`` is not a
+    ``WaitReason`` (or its value), whatever the state; ``IllegalTransitionError``
+    when the state does not accept the command; and, after that check,
+    ``InvalidCommandArgumentError`` when ``wait_reason`` is missing for Wait or
+    given for any other command (an illegal transition is reported first).
     """
+    if wait_reason is not None:
+        wait_reason = enum_member("wait_reason", WaitReason, wait_reason)
     rule = TRANSITIONS.get(command)
     if rule is None or state not in rule.sources:
         raise IllegalTransitionError(state.value, command.value)

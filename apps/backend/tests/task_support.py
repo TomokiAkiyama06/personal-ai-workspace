@@ -56,6 +56,17 @@ def new_database() -> Database:
 # by the first Start event passes to ``begin_step`` / ``add_log`` / ``update_attempt``.
 FIRST_RUN = TaskRun(1, 0)
 
+
+def command_reason(command: TaskCommand) -> str | None:
+    """The ``reason`` a test passes with ``command``.
+
+    Stop Now is refused without a reason (REQUIREMENTS: the reason of an
+    emergency stop is kept in the Audit / Task log); every other command is
+    called without one unless the test is about reasons.
+    """
+    return "emergency stop" if command is TaskCommand.STOP_NOW else None
+
+
 # How to bring a fresh (queued) task into each state through legal commands.
 PATH_TO_STATE: dict[TaskState, list[tuple[TaskCommand, WaitReason | None]]] = {
     TaskState.QUEUED: [],
