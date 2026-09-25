@@ -32,7 +32,7 @@ Authorization of each method:
   membership is not needed and not consulted; see "The administrator's list");
 * ``roles_of``, ``purge_expired``: backend-internal, not for users.
 
-Self service (Decision 0022, Proposed; supersedes Decision 0008 section 5)
+Self service (Decision 0022, Approved; supersedes Decision 0008 section 5)
 ---------------------------------------------------------------------------
 Creating a project, answering one's own invitation and leaving a project used
 to be authorized by identity alone and left no Audit event (Decision 0008, an

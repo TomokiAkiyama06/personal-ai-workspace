@@ -4,7 +4,7 @@ See ``apps/backend/README.md`` ("Project CRUD / Membership / Lifecycle") and
 Decision 0008 (Approved 2026-09-25). The service performs authorization through
 ``paw_backend.authz.Authorizer``, and creating a project, answering an
 invitation and leaving one are audited capabilities too (Decision 0022,
-Proposed); there is no HTTP endpoint yet.
+Approved 2026-09-26); there is no HTTP endpoint yet.
 ``ProjectTaskStopper`` carries out the "stop the project's tasks" request that
 ``ProjectService.begin_deletion`` records (Decision 0008, section 8); the
 orchestrator (PAW-034) calls it. ``ProjectService.list_all_projects`` (Issue #84)

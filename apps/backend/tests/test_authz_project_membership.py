@@ -1,6 +1,6 @@
 """The project.create / project.invitation.respond / project.leave capabilities.
 
-Decision 0022 (Proposed) adds them.
+Decision 0022 (Approved 2026-09-26) adds them.
 
 The three capabilities give the Authorizer a say in creating a project, answering
 one's own invitation and leaving a project (Decision 0008 had no capability for

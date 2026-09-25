@@ -1,9 +1,10 @@
 """Audit of creating, answering an invitation and leaving (real PostgreSQL).
 
-Decision 0022 (Proposed): ``project.create``, ``project.invitation.respond`` and
-``project.leave`` go through the Authorizer with the audit mode ``REQUIRED``. The
-events are written to the real ``audit_events`` table by ``PostgresAuditSink`` (its
-own short transaction, not the request's), and the tests read them back with SQL.
+Decision 0022 (Approved 2026-09-26): ``project.create``,
+``project.invitation.respond`` and ``project.leave`` go through the Authorizer
+with the audit mode ``REQUIRED``. The events are written to the real
+``audit_events`` table by ``PostgresAuditSink`` (its own short transaction, not
+the request's), and the tests read them back with SQL.
 
 What must hold, for each of the four methods (``create_project``,
 ``accept_invite``, ``decline_invite``, ``leave_project``):
