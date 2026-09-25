@@ -168,6 +168,11 @@ def upgrade() -> None:
             server_default=sa.text("0"),
             nullable=False,
         ),
+        # The cutoff of the last stop_runtime: the time up to which the runtime is
+        # charged. start_runtime never sets running_since before it, so a start
+        # that read its clock earlier than an older session's stop cannot make the
+        # interval in between count twice.
+        sa.Column("settled_through", sa.DateTime(timezone=True), nullable=True),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -201,11 +206,21 @@ def upgrade() -> None:
             " AND (kind = 'runtime_seconds' OR runtime_generation = 0)",
             name=op.f("ck_budget_usages_runtime_generation_valid"),
         ),
+        sa.CheckConstraint(
+            "settled_through IS NULL OR kind = 'runtime_seconds'",
+            name=op.f("ck_budget_usages_settled_only_for_runtime"),
+        ),
+        sa.CheckConstraint(
+            "running_since IS NULL OR settled_through IS NULL"
+            " OR running_since >= settled_through",
+            name=op.f("ck_budget_usages_running_not_before_settled"),
+        ),
     )
     # set_preset upserts (INSERT ... ON CONFLICT DO UPDATE SET preset,
     # limit_value); record and stop_runtime add to ``consumed`` (atomic
     # ``UPDATE ... SET consumed = ...``); start_runtime and stop_runtime set
-    # ``running_since``, and start_runtime adds 1 to ``runtime_generation``.
+    # ``running_since``, start_runtime adds 1 to ``runtime_generation``, and
+    # stop_runtime sets ``settled_through`` (the cutoff start_runtime honours).
     # Nothing else changes: ``task_id`` and ``kind`` are the key and
     # ``created_at`` is history. No DELETE: a budget is never removed.
     grant_app_privileges(
@@ -219,6 +234,7 @@ def upgrade() -> None:
             "consumed",
             "running_since",
             "runtime_generation",
+            "settled_through",
         ),
     )
 
