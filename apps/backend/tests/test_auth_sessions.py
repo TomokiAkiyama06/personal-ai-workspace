@@ -168,6 +168,120 @@ class CreateTest(SessionTestCase):
         self.assertIsNone(await self.row(issued.record.id))
 
 
+RETENTION = timedelta(days=30)
+
+
+@requires_postgres
+class PurgeTest(SessionTestCase):
+    """Rows are kept for 30 days after the session ENDED, whichever way it ended.
+
+    A session ends at the earliest of its idle expiry, its absolute expiry (never
+    earlier than the idle one: a CHECK constraint) and its revocation.
+    """
+
+    async def purge(self, at) -> int:
+        self.clock.now = at
+        return await self.tx(lambda s: self.store.purge(s))
+
+    async def exists(self, issued) -> bool:
+        return await self.row(issued.record.id) is not None
+
+    async def test_an_idle_expired_session_is_purged_30_days_after_it_went_idle(self):
+        issued = await self.create()  # idle limit day 30, absolute limit day 90
+        idle_end = T0 + timedelta(days=30)
+        # Exactly at the retention boundary it is still kept ...
+        self.assertEqual(await self.purge(idle_end + RETENTION), 0)
+        self.assertTrue(await self.exists(issued))
+        # ... a second later it goes: day 60, not day 120 (absolute limit + 30).
+        self.assertEqual(
+            await self.purge(idle_end + RETENTION + timedelta(seconds=1)), 1
+        )
+        self.assertFalse(await self.exists(issued))
+
+    async def test_the_absolute_limit_is_not_what_decides_for_an_idle_session(self):
+        issued = await self.create()
+        self.assertEqual(
+            await self.purge(T0 + timedelta(days=61)), 1
+        )  # the old rule would wait until day 120
+        self.assertFalse(await self.exists(issued))
+
+    async def test_a_session_still_valid_or_only_recently_ended_is_kept(self):
+        valid = await self.create()
+        await self.purge(T0 + timedelta(days=10))
+        self.assertTrue(await self.exists(valid))
+        # Ended 29 days ago (idle): still inside the retention.
+        self.assertEqual(await self.purge(T0 + timedelta(days=59)), 0)
+        self.assertTrue(await self.exists(valid))
+
+    async def test_use_moves_the_end_and_so_the_purge(self):
+        issued = await self.create()
+        self.clock.now = T0 + timedelta(days=20)
+        await self.authenticate(issued.token)  # idle limit is now day 50
+        self.assertEqual(await self.purge(T0 + timedelta(days=80)), 0)
+        self.assertEqual(await self.purge(T0 + timedelta(days=80, seconds=1)), 1)
+
+    async def test_a_remember_me_session_is_purged_30_days_after_day_90(self):
+        issued = await self.create(remember_me=True)
+        end = T0 + timedelta(days=90)
+        self.assertEqual(await self.purge(end + RETENTION), 0)
+        self.assertEqual(await self.purge(end + RETENTION + timedelta(seconds=1)), 1)
+        self.assertFalse(await self.exists(issued))
+
+    async def test_a_session_revoked_early_is_purged_30_days_after_the_revocation(self):
+        issued = await self.create()
+        self.clock.now = T0 + timedelta(days=1)
+        await self.tx(
+            lambda s: self.store.revoke(
+                s, issued.record.id, self.alice.id, RevokeReason.LOGOUT
+            )
+        )
+        revoked = T0 + timedelta(days=1)
+        self.assertEqual(await self.purge(revoked + RETENTION), 0)
+        self.assertEqual(
+            await self.purge(revoked + RETENTION + timedelta(seconds=1)), 1
+        )
+
+    async def test_a_session_revoked_after_it_went_idle_ended_when_it_went_idle(self):
+        issued = await self.create()
+        self.clock.now = T0 + timedelta(days=40)  # idle since day 30
+        await self.tx(
+            lambda s: self.store.revoke(
+                s, issued.record.id, self.alice.id, RevokeReason.LOGOUT
+            )
+        )
+        idle_end = T0 + timedelta(days=30)
+        self.assertEqual(await self.purge(idle_end + RETENTION), 0)
+        self.assertEqual(
+            await self.purge(idle_end + RETENTION + timedelta(seconds=1)), 1
+        )
+
+    async def test_the_retention_is_judged_by_the_database_clock(self):
+        # The caller's clock is years behind: the rows are judged at the
+        # database's time, so what ended 30 days ago there is purged.
+        self.clock.now = datetime(2001, 1, 1, tzinfo=UTC)
+        ended = await self.create()
+        kept = await self.create()
+        await self.execute(
+            "UPDATE auth_sessions SET "
+            "created_at = clock_timestamp() - interval '400 days', "
+            "last_used_at = clock_timestamp() - interval '400 days', "
+            "absolute_expires_at = clock_timestamp(), "
+            "idle_expires_at = CASE WHEN id = :ended "
+            "THEN clock_timestamp() - interval '30 days' - interval '2 seconds' "
+            "ELSE clock_timestamp() - interval '30 days' + interval '1 minute' END",
+            ended=ended.record.id,
+        )
+        self.assertEqual(await self.tx(lambda s: self.store.purge(s)), 1)
+        self.assertFalse(await self.exists(ended))
+        self.assertTrue(await self.exists(kept))
+
+    async def test_at_most_one_batch_is_deleted_per_call(self):
+        for _ in range(60):
+            await self.create()
+        self.assertEqual(await self.purge(T0 + timedelta(days=61)), 50)
+        self.assertEqual(await self.purge(T0 + timedelta(days=61)), 10)
+
+
 @requires_postgres
 class AuthenticateTest(SessionTestCase):
     async def test_a_valid_session_resolves_to_its_user(self):

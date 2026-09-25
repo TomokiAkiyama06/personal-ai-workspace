@@ -450,7 +450,7 @@ class AuthMigrationDatabaseTest(unittest.TestCase):
             {row[1] for row in migrated["indexes"] if row[1].startswith("ix_")},
             {
                 "ix_auth_sessions_user_id_active",
-                "ix_auth_sessions_absolute_expires_at",
+                "ix_auth_sessions_idle_expires_at",
                 "ix_auth_sessions_revoked_at",
                 "ix_auth_throttles_last_attempt_at",
             },

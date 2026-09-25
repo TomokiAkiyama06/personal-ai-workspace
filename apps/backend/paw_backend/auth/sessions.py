@@ -564,17 +564,25 @@ class SessionStore:
         return tuple(_record(row) for row in rows)
 
     async def purge(self, session: AsyncSession) -> int:
-        """Delete a few sessions that ended more than the retention period ago.
+        """Delete a few sessions that ENDED more than the retention period ago.
+
+        A session ends at the earliest of its idle expiry (``idle_expires_at``: the
+        last use plus the idle limit, never past the absolute limit) and its
+        revocation. The absolute limit needs no rule of its own: a CHECK
+        constraint keeps ``idle_expires_at <= absolute_expires_at``, so a session
+        that reached it went idle at or before that. (Judging by the absolute
+        limit alone kept a normal session that went idle on day 30 until day 120
+        instead of day 60.) "Ended" is judged at the database's clock.
 
         At most ``PURGE_BATCH`` rows. Two statements, each served by one index
-        (``ix_auth_sessions_absolute_expires_at`` for what reached its absolute
-        limit, the partial ``ix_auth_sessions_revoked_at`` for what was revoked),
-        never an ``OR`` of both that only a sequential scan could answer.
+        (``ix_auth_sessions_idle_expires_at``, the partial
+        ``ix_auth_sessions_revoked_at``), never an ``OR`` of both that only a
+        sequential scan could answer.
         """
         _session(session)
         deleted = 0
         for condition in (
-            "s.absolute_expires_at < clock.ts - :keep * interval '1 second'",
+            "s.idle_expires_at < clock.ts - :keep * interval '1 second'",
             "s.revoked_at IS NOT NULL "
             "AND s.revoked_at < clock.ts - :keep * interval '1 second'",
         ):

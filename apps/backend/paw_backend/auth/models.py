@@ -132,7 +132,10 @@ class AuthSessionRow(Base):
             "user_id",
             postgresql_where=text("revoked_at IS NULL"),
         ),
-        Index("ix_auth_sessions_absolute_expires_at", "absolute_expires_at"),
+        # The purge finds what went idle long ago (a CHECK constraint keeps the
+        # idle expiry at or before the absolute one, so this also covers a session
+        # that reached its absolute limit).
+        Index("ix_auth_sessions_idle_expires_at", "idle_expires_at"),
         Index(
             "ix_auth_sessions_revoked_at",
             "revoked_at",

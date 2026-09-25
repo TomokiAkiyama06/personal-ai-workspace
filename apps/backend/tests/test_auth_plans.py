@@ -168,7 +168,7 @@ class PlanTest(PostgresAuthTestCase):
             self.indexes_used(await self.plan_of(sql, params))
             for sql, params in deletes
         ]
-        self.assertIn("ix_auth_sessions_absolute_expires_at", used[0])
+        self.assertIn("ix_auth_sessions_idle_expires_at", used[0])
         self.assertIn("ix_auth_sessions_revoked_at", used[1])
 
     async def test_the_purge_of_old_counters_uses_the_index_of_the_last_attempt(self):

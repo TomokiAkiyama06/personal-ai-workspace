@@ -237,9 +237,9 @@ def upgrade() -> None:
         postgresql_where=sa.text("revoked_at IS NULL"),
     )
     op.create_index(
-        "ix_auth_sessions_absolute_expires_at",
+        "ix_auth_sessions_idle_expires_at",
         "auth_sessions",
-        ["absolute_expires_at"],
+        ["idle_expires_at"],
     )
     op.create_index(
         "ix_auth_sessions_revoked_at",
