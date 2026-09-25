@@ -29,7 +29,13 @@ a message must name its conversation. A CHECK cannot state that, because the
 foreign keys' SET NULL actions of a conversation delete pass through the state
 (NULL conversation, message); the trigger judges the row at COMMIT instead.
 
-The constraint definitions and the trigger repeat the ones in
+``memory_versions`` keeps ``pinned`` and ``importance`` updatable in place
+(REQUIREMENTS.md "Manual Memory Editing": low-risk metadata takes effect at
+once), but "変更履歴は残す": a trigger records every change, with its actor, in the
+append-only ``memory_metadata_changes``. The writer names the actor with
+``paw_backend.memory.metadata.metadata_change_actor``; a change without one fails.
+
+The constraint definitions and the triggers repeat the ones in
 ``paw_backend.memory.models`` on purpose (a migration is a frozen snapshot);
 ``tests/test_memory_migration.py`` fails when the two drift apart. Constraint
 names come from the naming convention of ``paw_backend.db.Base.metadata``.
@@ -104,6 +110,31 @@ DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW EXECUTE FUNCTION paw_check_memory_source_message_conversation()"""
 
 
+# See ``MemoryMetadataChange`` in ``paw_backend.memory.models``.
+_RECORD_METADATA_CHANGE_FUNCTION = """\
+CREATE OR REPLACE FUNCTION paw_record_memory_metadata_change()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    INSERT INTO memory_metadata_changes (
+        memory_version_id, old_pinned, new_pinned, old_importance, new_importance,
+        actor_type, actor_user_id
+    ) VALUES (
+        NEW.id, OLD.pinned, NEW.pinned, OLD.importance, NEW.importance,
+        nullif(current_setting('paw.actor_type', true), ''),
+        nullif(current_setting('paw.actor_user_id', true), '')::uuid
+    );
+    RETURN NULL;
+END
+$$"""
+_RECORD_METADATA_CHANGE_TRIGGER = """\
+CREATE TRIGGER tr_memory_versions_record_metadata_change
+AFTER UPDATE OF pinned, importance ON memory_versions
+FOR EACH ROW
+WHEN (OLD.pinned IS DISTINCT FROM NEW.pinned
+      OR OLD.importance IS DISTINCT FROM NEW.importance)
+EXECUTE FUNCTION paw_record_memory_metadata_change()"""
+
+
 def _grant_app_privileges() -> None:
     """The least privileges the application role needs on each table.
 
@@ -157,7 +188,8 @@ def _grant_app_privileges() -> None:
     # settings are immutable. Only what the design changes in place is
     # updatable: ``status`` (superseded / deprecated / history), ``stale_since``
     # (stale candidate marking), and the low-risk metadata ``pinned`` and
-    # ``importance``. No DELETE: history is kept.
+    # ``importance`` (every change is recorded by a trigger, see
+    # ``memory_metadata_changes``). No DELETE: history is kept.
     grant_app_privileges(
         op,
         "memory_versions",
@@ -165,6 +197,11 @@ def _grant_app_privileges() -> None:
         insert=True,
         update_columns=("status", "stale_since", "pinned", "importance"),
     )
+    # The history of the in-place pin / importance edits is written by the
+    # trigger of ``memory_versions`` with the writer's own rights, so INSERT is
+    # needed; it is append-only (no UPDATE, no DELETE), and goes with its
+    # version by cascade.
+    grant_app_privileges(op, "memory_metadata_changes", select=True, insert=True)
     # Edges of the history graph are append-only.
     grant_app_privileges(op, "memory_relations", select=True, insert=True)
     # Provenance is append-only, except that the deletion flow records a lost
@@ -426,6 +463,50 @@ def upgrade() -> None:
     )
 
     op.create_table(
+        "memory_metadata_changes",
+        _uuid_pk(),
+        sa.Column("memory_version_id", sa.Uuid(), nullable=False),
+        sa.Column("old_pinned", sa.Boolean(), nullable=False),
+        sa.Column("new_pinned", sa.Boolean(), nullable=False),
+        sa.Column("old_importance", sa.SmallInteger(), nullable=False),
+        sa.Column("new_importance", sa.SmallInteger(), nullable=False),
+        sa.Column("actor_type", sa.Text(), nullable=False),
+        sa.Column("actor_user_id", sa.Uuid(), nullable=True),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.func.clock_timestamp(),
+            nullable=False,
+        ),
+        sa.PrimaryKeyConstraint("id"),
+        sa.ForeignKeyConstraint(
+            ["memory_version_id"], ["memory_versions.id"], ondelete="CASCADE"
+        ),
+        sa.CheckConstraint(
+            "old_importance BETWEEN 0 AND 100 AND new_importance BETWEEN 0 AND 100",
+            name="importance_range",
+        ),
+        sa.CheckConstraint(
+            "old_pinned <> new_pinned OR old_importance <> new_importance",
+            name="something_changed",
+        ),
+        sa.CheckConstraint(
+            "actor_type IN ('user', 'agent', 'system')", name="actor_type_valid"
+        ),
+        sa.CheckConstraint(
+            "actor_type <> 'user' OR actor_user_id IS NOT NULL",
+            name="user_actor_has_id",
+        ),
+    )
+    op.create_index(
+        "ix_memory_metadata_changes_memory_version_id_created_at",
+        "memory_metadata_changes",
+        ["memory_version_id", "created_at"],
+    )
+    op.execute(_RECORD_METADATA_CHANGE_FUNCTION)
+    op.execute(_RECORD_METADATA_CHANGE_TRIGGER)
+
+    op.create_table(
         "memory_relations",
         _uuid_pk(),
         sa.Column("from_version_id", sa.Uuid(), nullable=False),
@@ -575,7 +656,9 @@ def downgrade() -> None:
     op.drop_table("memory_sources")  # its trigger goes with it
     op.execute("DROP FUNCTION IF EXISTS paw_check_memory_source_message_conversation()")
     op.drop_table("memory_relations")
-    op.drop_table("memory_versions")
+    op.drop_table("memory_metadata_changes")
+    op.drop_table("memory_versions")  # its trigger goes with it
+    op.execute("DROP FUNCTION IF EXISTS paw_record_memory_metadata_change()")
     op.drop_table("memories")
     op.drop_table("session_states")
     op.drop_table("messages")

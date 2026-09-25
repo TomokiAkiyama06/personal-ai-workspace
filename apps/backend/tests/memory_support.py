@@ -30,6 +30,7 @@ MEMORY_TABLES = (
     "embedding_models",
     "memories",
     "memory_embeddings",
+    "memory_metadata_changes",
     "memory_relations",
     "memory_sources",
     "memory_versions",

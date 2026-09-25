@@ -57,6 +57,7 @@ class LayerSeparationTest(MemoryDatabaseTestCase):
             "session_states",
             "memories",
             "memory_versions",
+            "memory_metadata_changes",
             "memory_relations",
             "memory_sources",
             "memory_embeddings",
@@ -76,6 +77,7 @@ class LayerSeparationTest(MemoryDatabaseTestCase):
                 ("session_states", "conversations"): "c",
                 # Long-term Memory.
                 ("memory_versions", "memories"): "c",
+                ("memory_metadata_changes", "memory_versions"): "c",
                 ("memory_relations", "memory_versions"): "c",
                 ("memory_sources", "memory_versions"): "c",
                 ("memory_embeddings", "memory_versions"): "c",

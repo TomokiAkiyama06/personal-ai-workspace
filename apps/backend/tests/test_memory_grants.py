@@ -17,13 +17,15 @@ import uuid
 from alembic import command
 from sqlalchemy import create_engine, delete, func, insert, select, text, update
 from sqlalchemy.engine import make_url
-from sqlalchemy.exc import ProgrammingError
+from sqlalchemy.exc import IntegrityError, ProgrammingError
 
 from paw_backend.memory.acl import Principal, readable_memory_versions
+from paw_backend.memory.metadata import metadata_change_actor
 from paw_backend.memory.models import (
     Conversation,
     Memory,
     MemoryEmbedding,
+    MemoryMetadataChange,
     MemoryRelation,
     MemorySource,
     MemoryVersion,
@@ -63,6 +65,7 @@ EXPECTED = {
         {"SELECT", "INSERT"},
         {"status", "stale_since", "pinned", "importance"},
     ),
+    "memory_metadata_changes": ({"SELECT", "INSERT"}, set()),
     "memory_relations": ({"SELECT", "INSERT"}, set()),
     "memory_sources": ({"SELECT", "INSERT"}, {"source_deleted_at"}),
     "embedding_models": ({"SELECT", "INSERT"}, set()),
@@ -245,6 +248,10 @@ class ApplicationFlowTest(ApplicationRoleTestCase):
         v1 = self.add_version(memory, version_number=1, content="Use tabs")
 
         # Supersede: the status changes in place, the new version is inserted.
+        # The pin / importance edit needs a named actor (its history row is
+        # written by a trigger with the application role's own rights).
+        editor = uuid.uuid4()
+        self.session.execute(metadata_change_actor("user", editor))
         self.session.execute(
             update(MemoryVersion)
             .where(MemoryVersion.id == v1)
@@ -271,6 +278,20 @@ class ApplicationFlowTest(ApplicationRoleTestCase):
         self.assertEqual(
             [tuple(row) for row in history],
             [(1, "superseded", "Use tabs"), (2, "active", "Use spaces")],
+        )
+        changes = self.session.execute(
+            select(
+                MemoryMetadataChange.old_pinned,
+                MemoryMetadataChange.new_pinned,
+                MemoryMetadataChange.old_importance,
+                MemoryMetadataChange.new_importance,
+                MemoryMetadataChange.actor_type,
+                MemoryMetadataChange.actor_user_id,
+            ).where(MemoryMetadataChange.memory_version_id == v1)
+        ).all()
+        self.assertEqual(
+            [tuple(row) for row in changes],
+            [(False, True, 50, 80, "user", editor)],
         )
 
     def test_acl_filtered_vector_search(self):
@@ -357,6 +378,23 @@ class ApplicationFlowTest(ApplicationRoleTestCase):
             )
         ).one()
         self.assertEqual(tuple(source), (None, None, True))
+
+    def test_a_pin_change_without_a_named_actor_is_refused_for_the_application(self):
+        version = self.add_version(self.add_memory())
+
+        with self.assertRaises(IntegrityError) as caught:
+            with self.session.begin_nested():
+                self.session.execute(
+                    update(MemoryVersion)
+                    .where(MemoryVersion.id == version)
+                    .values(pinned=True)
+                )
+
+        self.assertEqual(caught.exception.orig.diag.column_name, "actor_type")
+        pinned = self.session.execute(
+            select(MemoryVersion.pinned).where(MemoryVersion.id == version)
+        ).scalar_one()
+        self.assertFalse(pinned)
 
     def test_a_source_naming_a_message_without_its_conversation_is_refused_at_commit(
         self,
@@ -467,11 +505,16 @@ class ApplicationDeniedTest(ApplicationRoleTestCase):
                 embedding=[1.0, 0.0],
             )
         )
+        self.session.execute(metadata_change_actor("system"))
+        self.session.execute(
+            update(MemoryVersion).where(MemoryVersion.id == new).values(pinned=True)
+        )
 
     def test_history_and_the_registry_cannot_be_deleted_from(self):
         self.rows()
         for table in (
             "memory_versions",
+            "memory_metadata_changes",
             "memory_relations",
             "memory_sources",
             "messages",
@@ -519,6 +562,16 @@ class ApplicationDeniedTest(ApplicationRoleTestCase):
                 "turn_id",
                 "conversation_id",
             ],
+            "memory_metadata_changes": [
+                "memory_version_id",
+                "old_pinned",
+                "new_pinned",
+                "old_importance",
+                "new_importance",
+                "actor_type",
+                "actor_user_id",
+                "created_at",
+            ],
             "memory_relations": ["relation_type", "from_version_id", "to_version_id"],
             "memory_sources": [
                 "source_type",
@@ -548,6 +601,23 @@ class ApplicationDeniedTest(ApplicationRoleTestCase):
                 self.denied(f"ALTER TABLE {table} ADD COLUMN extra text")
                 self.denied(f"DROP TABLE {table}")
                 self.denied(f"CREATE INDEX ix_denied ON {table} ((1))")
+
+    def test_the_history_of_a_pin_change_cannot_be_avoided_or_rewritten(self):
+        self.rows()
+        # The application does not own the table, so it cannot switch the
+        # trigger off; without a named actor a pin change is refused.
+        self.denied(
+            "ALTER TABLE memory_versions"
+            " DISABLE TRIGGER tr_memory_versions_record_metadata_change"
+        )
+        self.denied("ALTER TABLE memory_versions DISABLE TRIGGER ALL")
+        self.denied("UPDATE memory_metadata_changes SET actor_type = 'system'")
+        self.denied("DELETE FROM memory_metadata_changes")
+        self.denied("TRUNCATE memory_metadata_changes")
+        recorded = self.session.execute(
+            select(func.count()).select_from(MemoryMetadataChange)
+        ).scalar_one()
+        self.assertEqual(recorded, 1)
 
     def test_the_registry_accepts_only_new_models(self):
         self.register_embedding_model("new-model", 4)  # a plain insert works

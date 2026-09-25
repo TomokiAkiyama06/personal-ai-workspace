@@ -354,7 +354,8 @@ class MemoryMigrationDatabaseTest(unittest.TestCase):
             for statement in (
                 "DROP INDEX ix_memory_versions_one_active",
                 "ALTER TABLE memory_versions ALTER COLUMN pinned DROP DEFAULT",
-                "ALTER TABLE memory_versions ALTER COLUMN importance TYPE integer",
+                # (not ``importance``: a trigger uses it, so its type cannot change)
+                "ALTER TABLE memory_versions ALTER COLUMN version_number TYPE bigint",
                 "ALTER TABLE memory_versions ADD COLUMN unexpected text",
                 "ALTER TABLE memory_versions ALTER COLUMN title DROP NOT NULL",
             ):
@@ -424,7 +425,15 @@ class MemoryMigrationDatabaseTest(unittest.TestCase):
                     " ON memory_sources DEFERRABLE INITIALLY DEFERRED"
                     " FOR EACH ROW EXECUTE FUNCTION"
                     " paw_check_memory_source_message_conversation()",
-                )
+                ),
+                (
+                    "tr_memory_versions_record_metadata_change",
+                    "CREATE TRIGGER tr_memory_versions_record_metadata_change"
+                    " AFTER UPDATE OF pinned, importance ON memory_versions"
+                    " FOR EACH ROW WHEN (((old.pinned IS DISTINCT FROM new.pinned)"
+                    " OR (old.importance IS DISTINCT FROM new.importance)))"
+                    " EXECUTE FUNCTION paw_record_memory_metadata_change()",
+                ),
             ],
         )
         index_definitions = {row[1]: row[2] for row in migrated["indexes"]}
@@ -497,16 +506,31 @@ class MemoryMigrationDatabaseTest(unittest.TestCase):
 
     def test_the_trigger_functions_of_the_migration_equal_the_models_definitions(self):
         migrate("upgrade", "head")
-        name = "paw_check_memory_source_message_conversation"
+        # name -> (the models' DDL, a fragment that proves the body is compared)
+        functions = {
+            "paw_check_memory_source_message_conversation": (
+                models.MESSAGE_REQUIRES_CONVERSATION_FUNCTION,
+                "message_id IS NOT NULL AND conversation_id IS NULL",
+            ),
+            "paw_record_memory_metadata_change": (
+                models.RECORD_METADATA_CHANGE_FUNCTION,
+                "OLD.pinned, NEW.pinned, OLD.importance, NEW.importance",
+            ),
+        }
 
-        with self.engine.connect() as connection, connection.begin() as transaction:
-            migrated = self.function_definition(connection, name)
-            connection.execute(text(models.MESSAGE_REQUIRES_CONVERSATION_FUNCTION))
-            from_models = self.function_definition(connection, name)
-            transaction.rollback()
+        for name, (model_ddl, fragment) in functions.items():
+            with self.subTest(name):
+                with (
+                    self.engine.connect() as connection,
+                    connection.begin() as transaction,
+                ):
+                    migrated = self.function_definition(connection, name)
+                    connection.execute(text(model_ddl))
+                    from_models = self.function_definition(connection, name)
+                    transaction.rollback()
 
-        self.assertEqual(migrated, from_models)
-        self.assertIn("message_id IS NOT NULL AND conversation_id IS NULL", migrated)
+                self.assertEqual(migrated, from_models)
+                self.assertIn(fragment, migrated)
 
     def test_downgrade_drops_the_trigger_functions(self):
         migrate("upgrade", "head")
@@ -517,7 +541,8 @@ class MemoryMigrationDatabaseTest(unittest.TestCase):
                 text(
                     "SELECT proname FROM pg_proc"
                     " WHERE pronamespace = 'public'::regnamespace"
-                    "   AND proname LIKE 'paw\\_check\\_memory%'"
+                    "   AND (proname LIKE 'paw\\_check\\_memory%'"
+                    "        OR proname LIKE 'paw\\_record\\_memory%')"
                 )
             ).scalars()
             self.assertEqual(list(leftovers), [])
