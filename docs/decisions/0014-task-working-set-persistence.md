@@ -24,7 +24,7 @@ Task 全体の完了を対象 Repo ごとの必要条件で判定する、と定
    worktree / review / PR は Task に 1 組の書き方である。Depends on は `PAW-020` だけで、Repository の登録（PAW-027）には依存しない。
 2. **Working Set が指す Repository がまだない。** Repository の登録と ID は PAW-027（Depends on: PAW-026）の責務で、
    PAW-032 の `project_id` も、Project の Table がまだないため外部キーのない UUID のままである（[Backend README](../../apps/backend/README.md)）。
-3. **Repo ごとの Git 状態と統合は別の Issue の責務である。** Write Worker ごとの worktree / branch、同一 Repo の並列変更の統合、統合後の test / review は PAW-035（Depends on: PAW-034, PAW-027）、
+3. **Repo ごとの Git 状態を作る処理と統合は別の Issue の責務である（保存する表は #85）。** Write Worker ごとの worktree / branch、同一 Repo の並列変更の統合、統合後の test / review は PAW-035（Depends on: PAW-034, PAW-027）、
    Working Set 候補の提案は Planner（PAW-034）、Repo ごとの表示は PAW-061 / 062 が扱う。
 4. **Write 範囲の強制は Tool Broker（PAW-031）が行い、Working Set は呼び出し側が解決して渡す入力である。**
    Decision 0006（PAW-031 の PR に含まれる `docs/decisions/0006-tool-broker-policy.md`）は、Orchestrator が Task の作業対象を `TaskScope.repositories` として呼び出しごとに作ると選んでいる。
@@ -50,7 +50,7 @@ Task 全体の完了を対象 Repo ごとの必要条件で判定する、と定
 
 1. **Working Set の永続化は PAW-032 の完了条件に含めない。** PAW-032 は、Backlog の 4 項目どおり、Task に 1 組の worktree / review / PR 状態の永続化と復元までとする。
    Backend README に「PAW-032 は Working Set を含まない。この Decision が追跡する」と明記する（実装済み）。
-2. **Repository の登録（PAW-027）ができた後、上の未決の項目が決まってから、専用の Migration で追加する。** 実装する Issue は、PAW-027 の後・PAW-034 の前に立てる新しい Issue [#85](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/85) とする（上の 6。PAW-035 には含めない）。
+2. **Repository の登録（PAW-027）ができた後、上の未決の項目が決まってから、専用の Migration で追加する。** 実装する Issue は、PAW-027 の後・PAW-034 の前に立てる新しい Issue [#85](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/85) とする（上の 6）。#85 は、Working Set と、Repo ごとの Git 状態を**保存する表**（下の「想定する形」）を持つ。PAW-035 は、Repo ごとの worktree / branch の作成と、並列変更の統合という**振る舞い**を持ち、その結果を #85 の表へ書く（保存は #85、それを作る処理は PAW-035）。
 3. **想定する形**（承認された方針は、Working Set を PAW-032 に含めないことと、担当を #85 とすることである。この形に縛られることは決めておらず、形は #85 の実装の前の別の Decision で決める）:
    - `task_repositories`: `task_id`（`tasks` への外部キー）、`repository_id`（PAW-027 の Repository の UUID。Table ができるまでは外部キーなし。`project_id` と同じ扱い）、`role`（`referenced` / `working` / `target`、CHECK 制約）、追加した Actor、時刻。`(task_id, repository_id)` は一意。
    - Repo ごとの Git 状態: 試行と Repo ごとの行（branch、worktree の path、head commit、Review 状態、Evaluator 結果、PR の番号・URL・状態）。現在の `task_attempts` の列は、Single-Repo の状態としてそこへ移すか、Task 全体の状態として残す（上の 2）。
@@ -81,6 +81,6 @@ Task 全体の完了を対象 Repo ごとの必要条件で判定する、と定
 
 - 本文の各点を、提案どおり承認した。
 - Working Set の永続化は、PAW-032 の完了条件に含めない。
-- 実装の担当は、PAW-027 の後・PAW-034 の前に立てる新しい Issue [#85](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/85) とする。PAW-035 には含めない。
+- 実装の担当は、PAW-027 の後・PAW-034 の前に立てる新しい Issue [#85](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/85) とする。#85 は Working Set と Repo ごとの Git 状態の保存を持ち、PAW-035 は worktree・統合の振る舞いを持つ（PAW-035 に保存の表は含めない）。
 - 「決まっていないこと」の 1〜5（Working Set の単位、Single-Repo Task との関係、Repo の追加・役割の変更の権限と承認、役割と Write 範囲の対応、Task 全体の完了条件）は、今は決めず、#85 の実装の前に別の Decision で決める。そのうち「役割と Write 範囲の対応」は、保存より先に決める。
 
