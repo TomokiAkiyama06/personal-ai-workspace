@@ -1149,5 +1149,113 @@ class TrustedClockTest(QueueTestCase):
         )
 
 
+@requires_postgres
+class IndexPlanTest(QueueTestCase):
+    """Every queue query can use the index that serves it, whatever the plan mode.
+
+    ``ix_queue_entries_claim_order`` and ``uq_queue_entries_one_active_per_task``
+    are partial indexes over the ``queued`` / ``claimed`` entries, while completed
+    and cancelled entries are kept for ever. PostgreSQL can use a partial index
+    only if the statement's own predicate implies the index condition, and it
+    cannot prove that for statuses sent as bind parameters in the plan it caches
+    for a prepared statement (``force_generic_plan``): the claim would then scan
+    and sort the whole history and ``cancel`` would scan it. Each statement is
+    planned for its values (``force_custom_plan``) and as a prepared statement.
+    """
+
+    HISTORY = 20_000
+
+    async def busy_queue(self) -> list[QueueEntry]:
+        """One task with a long finished history and four active entries."""
+        (finished_task,) = await self.make_tasks(1)
+        await self.owner_sql(
+            "INSERT INTO queue_entries (task_id, priority, priority_rank, status, "
+            "enqueued_at, claimed_by, claimed_at, claim_count, finished_at) "
+            "SELECT :t, (ARRAY['high', 'normal', 'low'])[1 + g % 3], g % 3, "
+            "(ARRAY['completed', 'cancelled'])[1 + g % 2], "
+            "now() - g * interval '1 second', 'w0', "
+            "now() - g * interval '1 second', 1, now() FROM generate_series(1, :n) g",
+            t=finished_task,
+            n=self.HISTORY,
+        )
+        active = [
+            await self.enqueue(priority, seconds=index)
+            for index, priority in enumerate([P.LOW, P.NORMAL, P.HIGH, P.NORMAL])
+        ]
+        await self.owner_sql("ANALYZE queue_entries")
+        return active
+
+    async def assert_plans_use_only(
+        self, statement: tuple, index: str, *, sorted_by_index: bool = False
+    ) -> None:
+        sql, parameters = statement
+        for mode in ("force_custom_plan", "force_generic_plan"):
+            with self.subTest(plan_cache_mode=mode, statement=sql[:70]):
+                (explained,) = await self.plan(sql, parameters, mode)
+                nodes = list(self.plan_nodes(explained["Plan"]))
+                types = {node["Node Type"] for node in nodes}
+                self.assertNotIn("Seq Scan", types)
+                if sorted_by_index:
+                    # Nothing is sorted: the index hands the entries over in order.
+                    self.assertFalse({t for t in types if "Sort" in t}, types)
+                self.assertEqual(
+                    [n["Index Name"] for n in nodes if "Index Name" in n], [index]
+                )
+
+    @staticmethod
+    def on_the_queue(captured: list, *, containing: str, excluding: str = "\0"):
+        return [
+            statement
+            for statement in captured
+            if "queue_entries" in statement[0]
+            and containing in statement[0]
+            and excluding not in statement[0]
+        ]
+
+    async def test_the_claim_reads_the_active_entries_in_order_from_the_index(self):
+        active = await self.busy_queue()
+        with self.captured_statements() as captured:
+            # A caller-supplied time (the test seam) and the database clock.
+            first = await self.queue.claim_next("w1", at(0))
+            second = await self.queue.claim_next("w2")
+        # The HIGH entry first, then the older NORMAL one: the claims are real.
+        self.assertEqual(
+            [first.id, second.id], [active[2].id, active[1].id], "claim order"
+        )
+        selects = self.on_the_queue(captured, containing="FOR UPDATE SKIP LOCKED")
+        self.assertEqual(len(selects), 2)
+        for statement in selects:
+            await self.assert_plans_use_only(
+                statement, "ix_queue_entries_claim_order", sorted_by_index=True
+            )
+
+    async def test_the_updates_and_row_locks_of_one_entry_use_the_primary_key(self):
+        await self.busy_queue()
+        with self.captured_statements() as captured:
+            entry = await self.queue.claim_next("w1")
+            entry = await self.queue.heartbeat(entry.id, "w1", entry.claim_count)
+            await self.queue.release(entry.id, "w1", entry.claim_count)
+            entry = await self.queue.claim_next("w1")
+            await self.queue.complete(entry.id, "w1", entry.claim_count)
+        by_entry = self.on_the_queue(captured, containing="queue_entries.id =")
+        # Two claims (the update), three row locks, heartbeat / release / complete.
+        self.assertEqual(len(by_entry), 8)
+        for statement in by_entry:
+            await self.assert_plans_use_only(statement, "pk_queue_entries")
+
+    async def test_cancel_finds_the_active_entry_of_a_task_by_the_partial_index(self):
+        active = await self.busy_queue()
+        with self.captured_statements() as captured:
+            self.assertTrue(await self.queue.cancel(active[1].task_id))
+            self.assertTrue(await self.queue.cancel(active[2].task_id, at(5)))
+            self.assertFalse(await self.queue.cancel(active[2].task_id))
+        cancels = self.on_the_queue(captured, containing="UPDATE queue_entries")
+        self.assertEqual(len(cancels), 3)
+        for statement in cancels:
+            await self.assert_plans_use_only(
+                statement, "uq_queue_entries_one_active_per_task"
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

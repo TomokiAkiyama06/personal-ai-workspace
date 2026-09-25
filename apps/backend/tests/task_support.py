@@ -163,6 +163,8 @@ class PostgresTaskTestCase(unittest.IsolatedAsyncioTestCase):
         )
 
         def literal(value) -> str:
+            if value is None:
+                return "NULL"
             if isinstance(value, int):
                 return str(value)
             return "'" + str(value).replace("'", "''") + "'"
