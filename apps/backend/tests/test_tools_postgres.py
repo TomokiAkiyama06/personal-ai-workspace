@@ -39,6 +39,7 @@ from paw_backend.tools import (
     BrokerReason,
     ConsumeOutcome,
     DecideOutcome,
+    ExecutionStatus,
     OpenLimits,
     OpenOutcome,
     PostgresApprovalStore,
@@ -2103,6 +2104,118 @@ class RestartWindowTest(LockWaits, TaskFixture):
             ConsumeOutcome.CONSUMED,
         )
         self.assertEqual(await self.status(new), ApprovalStatus.CONSUMED)
+
+
+@requires_postgres
+class LifecycleRunTest(TaskFixture):
+    """The run the lifecycle hands a worker is the run the broker works with.
+
+    Finding of the review of PR #74 (round 7): the broker declared a ``TaskRun``
+    of its own, a class unrelated to the lifecycle's ``paw_backend.tasks.TaskRun``
+    (the type of ``TaskEvent.run`` and ``TaskSnapshot.run``) although both have
+    the same fields. A context built from the event that started a worker (or from
+    ``TaskService.restore``) raised ``TypeError``, and the provider compared the
+    two unrelated classes, which are never equal, so it answered ``SUPERSEDED`` for
+    the run that was current. There is now one ``TaskRun``. The runs here are
+    NEVER built by hand: they come from the real ``TaskService``, and the call goes
+    through the broker and the runner on the real tables.
+    """
+
+    # The commands up to the Start that hands the worker its run, and that run.
+    STARTS = {
+        "first start": ([(C.START, {})], (1, 0)),
+        "after a retry": ([(C.FAIL, {}), (C.RETRY, {}), (C.START, {})], (1, 1)),
+        "after a restart": ([(C.FAIL, {}), (C.RESTART, {}), (C.START, {})], (2, 0)),
+    }
+
+    async def wire(self, steps):
+        """A task that has run ``steps``; returns the event of the last one."""
+        self.store = PostgresApprovalStore(self.new_database())
+        self.provider = PostgresTaskActivity(self.new_database())
+        self.h = Harness(
+            approvals=self.store, clock=Clock(), task_activity=self.provider
+        )
+        self.tasks = TaskService(self.new_database())
+        self.task_id = await self.new_task()
+        self.user = principal(SystemRole.USER, U1)
+        event = None
+        for command, arguments in steps:
+            event = await self.tasks.execute(
+                self.task_id, command, actor=Actor.system(), **arguments
+            )
+        return event
+
+    def call(self, run, name="approved"):
+        return make_call(
+            "repo.delete_tree",
+            {"path": f"{ROOT}/{name}"},
+            context=make_context(task_id=self.task_id, run=run),
+        )
+
+    async def test_a_run_of_the_lifecycle_can_execute_and_consume_through_the_broker(
+        self,
+    ):
+        for name, (steps, expected) in self.STARTS.items():
+            for source in ("start event", "snapshot"):
+                with self.subTest(start=name, run_from=source):
+                    started = await self.wire(steps)
+                    snapshot = await self.tasks.restore(self.task_id)
+                    run = started.run if source == "start event" else snapshot.run
+                    self.assertEqual((run.attempt, run.retry_count), expected)
+                    self.assertEqual(
+                        await self.provider.check(self.task_id, run),
+                        TaskActivity.ACTIVE,
+                    )
+                    call = self.call(run)
+                    asked = await self.h.runner.run(call)
+                    self.assertEqual(
+                        (asked.decision.verdict, asked.status),
+                        (Verdict.NEEDS_APPROVAL, ExecutionStatus.NOT_EXECUTED),
+                    )
+                    approval_id = asked.decision.approval_id
+                    await self.h.service.approve(approval_id, self.user)
+                    done = await self.h.runner.run(call, approval_id=approval_id)
+                    self.assertEqual(
+                        (done.decision.verdict, done.decision.reason, done.status),
+                        (
+                            Verdict.ALLOW,
+                            BrokerReason.APPROVAL_CONSUMED,
+                            ExecutionStatus.COMPLETED,
+                        ),
+                    )
+                    # the tool ran once, for the run the worker was started for
+                    (invocation,) = self.h.executor.invocations
+                    self.assertEqual(invocation.context.run, run)
+                    record = await self.store.get(approval_id)
+                    self.assertEqual(
+                        (record.status, record.task_run),
+                        (ApprovalStatus.CONSUMED, run),
+                    )
+
+    async def test_the_run_of_an_earlier_start_is_superseded_and_the_new_one_active(
+        self,
+    ):
+        first = await self.wire([(C.START, {})])
+        await self.drive(self.task_id, [(C.FAIL, {}), (C.RETRY, {})], self.tasks)
+        retried = await self.tasks.execute(self.task_id, C.START, actor=Actor.system())
+        snapshot = await self.tasks.restore(self.task_id)
+        self.assertEqual((first.run.attempt, first.run.retry_count), (1, 0))
+        self.assertEqual(retried.run, snapshot.run)
+        for run, expected in (
+            (retried.run, TaskActivity.ACTIVE),
+            (snapshot.run, TaskActivity.ACTIVE),
+            (first.run, TaskActivity.SUPERSEDED),
+        ):
+            with self.subTest(run=run):
+                self.assertEqual(await self.provider.check(self.task_id, run), expected)
+        # ... and the broker says the same to the worker of the replaced run
+        stale = await self.h.runner.run(self.call(first.run))
+        self.assertEqual(
+            (stale.decision.verdict, stale.decision.reason),
+            (Verdict.DENY, BrokerReason.TASK_SUPERSEDED),
+        )
+        current = await self.h.runner.run(self.call(retried.run))
+        self.assertEqual(current.decision.verdict, Verdict.NEEDS_APPROVAL)
 
 
 @requires_postgres

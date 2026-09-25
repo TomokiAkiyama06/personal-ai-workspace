@@ -98,6 +98,7 @@ from psycopg.types.json import Jsonb
 from sqlalchemy import select
 
 from paw_backend.db import Database
+from paw_backend.tasks import TaskRun
 from paw_backend.tools.approval_types import (
     CONSUME_TASK_REFUSAL,
     OPEN_TASK_REFUSAL,
@@ -122,7 +123,7 @@ from paw_backend.tools.approval_types import (
 from paw_backend.tools.capabilities import ApprovalLevel
 from paw_backend.tools.models import ToolApprovalEventRow
 from paw_backend.tools.scope import Target, TargetKind
-from paw_backend.tools.task_state import TaskActivity, TaskRun, lock_task_activity
+from paw_backend.tools.task_state import TaskActivity, lock_task_activity
 
 _OPEN = (ApprovalStatus.PENDING.value, ApprovalStatus.APPROVED.value)
 # One statement, so that the revocation and its history are atomic without a

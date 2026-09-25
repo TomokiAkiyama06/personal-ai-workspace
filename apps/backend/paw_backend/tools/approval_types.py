@@ -9,7 +9,7 @@ the normalised arguments, the task and the requester (user and agent). It is
 * ``approved`` or ``rejected`` once, by the human user the agent works for
   (never by the agent); a ``STRONG_APPROVAL`` is approved only with a step-up,
 * ``consumed`` at most once, by the very call it was granted for, in the very
-  **run** of the task it was requested in (:class:`~.task_state.TaskRun`: a
+  **run** of the task it was requested in (``paw_backend.tasks.TaskRun``: a
   Retry or a Restart starts a new run, whose worker cannot use what an earlier
   run was granted, whether or not the revocation that follows the transition
   has run),
@@ -33,10 +33,11 @@ from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Protocol
 
+from paw_backend.tasks import TaskRun
 from paw_backend.tools.capabilities import ApprovalLevel
 from paw_backend.tools.credentials import contains_credential_plaintext, redact_text
 from paw_backend.tools.scope import Target
-from paw_backend.tools.task_state import TaskActivity, TaskRun
+from paw_backend.tools.task_state import TaskActivity
 
 MAX_APPROVAL_TOOL_LENGTH = 64
 _HASH = re.compile(r"[0-9a-f]{64}")
