@@ -41,6 +41,9 @@ MAX_PURGE_BATCH_SIZE = 500
 # Tasks one ``ProjectTaskStopper.stop_project_tasks`` call stops at most (and open
 # requests one ``pending_project_ids`` call lists at most); same upper bound.
 DEFAULT_TASK_STOP_BATCH_SIZE = 100
+# The most a cancelled or failed stop of one task waits (seconds) for the read and
+# the queue cancel that reconcile its queue entry (``ProjectTaskStopper``).
+RECONCILE_TIMEOUT_S = 5.0
 DEFAULT_LOCK_TIMEOUT_MS = 3000
 MIN_LOCK_TIMEOUT_MS = 1
 MAX_LOCK_TIMEOUT_MS = 60_000

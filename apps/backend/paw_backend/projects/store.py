@@ -652,29 +652,50 @@ async def select_active_task_ids(
     return list((await session.execute(statement)).scalars())
 
 
+async def is_task_terminal(session: AsyncSession, task_id: uuid.UUID) -> bool:
+    """Whether the task exists and is completed, failed or cancelled. A plain read.
+
+    ``False`` for an unknown id (there is nothing to reconcile for it).
+    """
+    state = (
+        await session.execute(select(TASKS.c.state).where(TASKS.c.id == task_id))
+    ).scalar_one_or_none()
+    return state in TERMINAL_STATES
+
+
 async def has_active_task(session: AsyncSession, project_id: uuid.UUID) -> bool:
     """Whether at least one task of the project is active (same rule as above)."""
     return bool(await select_active_task_ids(session, project_id, 1))
 
 
 async def select_active_entry_task_ids(
-    session: AsyncSession, project_id: uuid.UUID, limit: int
+    session: AsyncSession,
+    project_id: uuid.UUID,
+    limit: int,
+    *,
+    terminal_tasks_only: bool = False,
 ) -> list[uuid.UUID]:
     """Ids of the project's tasks that have an active queue entry, oldest entry first.
 
     Active means ``queued`` or ``claimed`` (``ACTIVE_QUEUE_STATUSES``). Found
     through the project (``queue_entries`` joined to ``tasks``), whatever state
     the TASK is in: a terminal task can still have an entry (a restart that raced
-    with a stop enqueued it). At most one entry per task is active (a unique
-    index), so the ids are distinct. At most ``limit`` ids. A plain read.
+    with a stop enqueued it). ``terminal_tasks_only`` keeps only the entries of
+    tasks that are completed, failed or cancelled: the entry of a task that is
+    still active is the way it runs again if its project is restored. At most one
+    entry per task is active (a unique index), so the ids are distinct. At most
+    ``limit`` ids. A plain read.
     """
+    conditions = [
+        TASKS.c.project_id == project_id,
+        QUEUE_ENTRIES.c.status.in_(sorted(ACTIVE_QUEUE_STATUSES)),
+    ]
+    if terminal_tasks_only:
+        conditions.append(TASKS.c.state.in_(sorted(TERMINAL_STATES)))
     statement = (
         select(QUEUE_ENTRIES.c.task_id)
         .join(TASKS, TASKS.c.id == QUEUE_ENTRIES.c.task_id)
-        .where(
-            TASKS.c.project_id == project_id,
-            QUEUE_ENTRIES.c.status.in_(sorted(ACTIVE_QUEUE_STATUSES)),
-        )
+        .where(*conditions)
         .order_by(QUEUE_ENTRIES.c.id)
         .limit(limit)
     )

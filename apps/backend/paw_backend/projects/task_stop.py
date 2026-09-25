@@ -21,29 +21,30 @@ What one call of :meth:`~ProjectTaskStopper.stop_project_tasks` does
 2. Lists at most ``batch_size`` active tasks of the project (queued, running,
    waiting, paused, evaluating; oldest first), by a plain read of ``tasks``.
 3. For each (after reading the project again: see "Restore during a batch"):
-   cancels its active **queue entry** (``TaskQueue.cancel``: the entry
-   can no longer be claimed and a worker that holds it loses its lease), then
    issues the PAW-032 **Cancel** command through ``TaskService.execute`` with
-   ``Actor.policy()`` and a fixed reason. Task state is never written directly:
+   ``Actor.policy()`` and a fixed reason, and only THEN cancels its active
+   **queue entry** (``TaskQueue.cancel``: the entry can no longer be claimed and a
+   worker that holds it loses its lease). Task state is never written directly:
    the state machine, the ``task_events`` history and the listeners of the task
-   service all apply. The order (entry first) makes a crash between the two
-   harmless: the task is still active, so the next run finds it and repeats the
-   idempotent queue cancel.
+   service all apply. The order (task first) is what makes the two commits safe to
+   interrupt, see "Cancel and entry: order and interruption".
 4. **Sweeps the queue by project.** Steps 2-3 reach a queue entry only through a
-   task that is still active, and the entry is cancelled once, before the
-   Cancel. A concurrent caller can put a NEW entry in between: it cancels the
-   task, restarts it (Restart) and enqueues the new attempt; the Cancel of
-   step 3 then ends the restarted task and the new entry would survive behind a
-   terminal task, unreachable through step 2. So, after the loop, the stopper
-   lists the active queue entries of ALL tasks of the project whatever the
-   state of the task (``queue_entries`` joined to ``tasks``; at most
-   ``batch_size``) and cancels each one with ``TaskQueue.cancel``. The same sweep
-   also finds an entry that appeared after the request was processed (a rerun).
-   It re-reads the project first, and again before EACH entry, and does nothing
-   for a project that is not (or no longer) Pending deletion or Deleted. The
-   queue's state machine is not changed: an entry of a task that is already
-   terminal is only cancelled (a worker that still held it loses its lease).
-   Decision 0008, section 8, item 7.
+   task that is still active. A concurrent caller can leave an entry behind a
+   task that is TERMINAL: it cancels the task, restarts it (Restart) and
+   enqueues the new attempt, and the Cancel of step 3 then ends the restarted
+   task; or an interrupted step 3 (see below) cancelled the task but not its
+   entry. Step 2 never lists such a task again. So, after the loop, the stopper
+   lists the active queue entries of the tasks of the project that are terminal
+   (``queue_entries`` joined to ``tasks``; at most ``batch_size``) and cancels
+   each one with ``TaskQueue.cancel``. The same sweep also finds an entry that
+   appeared after the request was processed (a rerun). An entry of a task that is
+   still ACTIVE is left alone (a task that is not terminal keeps the entry it
+   would run again with if its project were restored; step 3 of the next run
+   cancels the task and then the entry). The sweep re-reads the project first,
+   and again before EACH entry, and does nothing for a project that is not (or no
+   longer) Pending deletion or Deleted. The queue's state machine is not changed:
+   an entry of a task that is already terminal is only cancelled (a worker that
+   still held it loses its lease). Decision 0008, section 8, items 7 and 8.
 5. In one short transaction that holds ``SELECT ... FOR SHARE`` on the project
    row (so the project cannot be restored or changed in between), checks that no
    active task AND no active queue entry of the project's tasks is left and only
@@ -63,6 +64,60 @@ stop and is not used: nothing here is an emergency, and Restart can re-run a
 cancelled task. The alternative, Pause, would leave tasks that nobody resumes.
 Decision 0008 records this choice.
 
+Cancel and entry: order and interruption
+-----------------------------------------
+The Cancel and the cancel of the queue entry are two commits of two separate parts
+(they cannot share a transaction without a change of the task or queue lane), so a
+crash, an error or a cancelled stopper can fall between them, and a Restore can
+commit there. The order decides what such a gap leaves behind:
+
+* Entry first (the order of the first implementations): the task is still active
+  (queued) and its ONLY entry is cancelled. While the project stays Pending
+  deletion the next run finds the task and repeats. But a Restore in the gap
+  makes the project live: the next run then touches nothing, marks the request
+  processed, and the queued task is never claimed again (it has no entry, and a
+  queued task without an entry is also the normal state before it is first
+  enqueued, so nothing can tell them apart afterwards).
+* Task first (this module): a task that is still active always keeps its entry,
+  whatever fails or is interrupted (an error of the Cancel, a ``TaskConflictError``,
+  a cancelled stopper, a Restore in between). The entry is cancelled only when the
+  task is terminal (the Cancel ended it, or it was terminal already). The gap that
+  is left is "terminal task, active entry": while the project is Pending deletion
+  the sweep of step 4 finds the entry by project on the next run.
+
+A gap after the Cancel is also reconciled in the same call, by STATE, never by
+outcome: if the Cancel or the entry cancel raises anything (including a
+cancellation, or an interruption of a transition listener, which runs after the
+commit), ``_reconcile_entry`` reads the task once and, when it is terminal now,
+cancels its entry (the same idempotent queue cancel), then re-raises the original
+error. A task that is still active is never touched by it. It runs in the
+``except`` of the interruption, so one cancellation does not stop it, and it is
+bounded by ``RECONCILE_TIMEOUT_S`` (another cancellation, a timeout or a failure of
+the reconciliation itself never replaces the original error).
+
+What remains (Decision 0008, section 8, item 8; recorded, not closed):
+
+* A concurrent ``Restart`` of the task between the Cancel and the entry cancel (the
+  entry cancel does not check the task again: ``TaskQueue.cancel`` has no
+  condition, and the check and the cancel cannot be one transaction) leaves the
+  restarted task active without an entry. While the project is Pending deletion the
+  next run finds it (it is active) and stops it; it needs a concurrent Restore as
+  well to matter. This is the race of ``TaskService`` / ``TaskQueue`` not looking at
+  the project (Decision 0008, section 8, item 4).
+* The process dies (or the reconciliation fails) between the two commits AND a
+  Restore commits before the next run. The project is live then, the request is
+  moot and is marked processed, and a CANCELLED task keeps an active entry: an
+  entry of a terminal task that a worker claims and then cannot start (``start``
+  is refused), and that the stopper does not touch in a live project (it must not
+  touch anything there: a completing worker holds a claimed entry of a completed
+  task for a moment). The task itself is cancelled, which is the accepted "one
+  task may be cancelled" window of "Restore during a batch" (it can be
+  restarted).
+
+Closing both needs the task and queue lanes: one transaction for the two commands
+(or a conditional queue cancel), or a queue rule that a claim skips (cancels) the
+entry of a terminal task.
+
 Idempotent and re-runnable
 --------------------------
 A second call finds no active task and no active entry, changes nothing and returns
@@ -70,9 +125,10 @@ A second call finds no active task and no active entry, changes nothing and retu
 stays. Every step is either a state change that is itself idempotent or a read.
 A task that leaves the active states between the list and the command (the
 worker failed or finished it, a user cancelled it) raises ``IllegalTransitionError``
-from the task service and is simply not counted; a ``TaskConflictError`` leaves
-the task active for the next run. Any other error propagates, with the request
-still open.
+from the task service and is simply not counted (its queue entry, if it still has
+one, is cancelled: the task is terminal); a ``TaskConflictError`` leaves the task
+AND its entry alone for the next run. Any other error propagates, with the request
+still open (and the interruption reconciled, see above).
 
 What the caller must do (limits)
 --------------------------------
@@ -103,14 +159,15 @@ What the caller must do (limits)
   ``done`` is true. Cost: one extra plain read (no lock) per task and per entry.
   What remains: the read and the commands are not one atomic step, so a Restore
   that commits after the read of a task and before the end of ITS commands (the
-  queue cancel and the Cancel are one unit: a restored task must not be left
-  queued without its entry) still lets that ONE task (or one entry) be
-  cancelled. Closing it needs the task service and the queue to run their
-  commands under ``FOR SHARE`` on the project row (Decision 0008, section 5).
-  Holding that lock here, in a transaction of its own around the two calls, was
-  rejected: it would take a second pooled connection per stopper, and every
-  Restore would wait (``ProjectBusyError`` after the lock timeout) for as long as
-  the task service and its listeners, which this module does not bound, take.
+  Cancel and the cancel of its entry: the entry is cancelled after the Cancel, so
+  a restored task that the Cancel did not end keeps its entry) still lets that ONE
+  task (or one entry) be cancelled. Closing it needs the task service and the
+  queue to run their commands under ``FOR SHARE`` on the project row (Decision
+  0008, section 5). Holding that lock here, in a transaction of its own around
+  the two calls, was rejected: it would take a second pooled connection per
+  stopper, and every Restore would wait (``ProjectBusyError`` after the lock
+  timeout) for as long as the task service and its listeners, which this module
+  does not bound, take.
 * ``tasks.project_id`` has no index (PAW-032): the list reads ``tasks`` by a
   sequential scan until the task lane adds one on ``(project_id, state)``.
 
@@ -119,11 +176,14 @@ no actor and asks no Authorizer, and it writes no Audit event of its own (each
 cancelled task has its ``task_events`` row). Errors carry no caller content.
 """
 
+import asyncio
+import contextlib
 import uuid
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum, auto
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -133,6 +193,7 @@ from paw_backend.projects.errors import ProjectNotFoundError
 from paw_backend.projects.limits import (
     DEFAULT_LOCK_TIMEOUT_MS,
     DEFAULT_TASK_STOP_BATCH_SIZE,
+    RECONCILE_TIMEOUT_S,
     utc_now,
 )
 from paw_backend.projects.records import ProjectStatus
@@ -157,6 +218,15 @@ STOP_REASON = "Project deletion started"
 
 Clock = Callable[[], datetime]
 
+
+class _Outcome(Enum):
+    """What the Cancel command did to a task (see ``ProjectTaskStopper._cancel``)."""
+
+    CANCELLED = auto()  # this call ended the task
+    TERMINAL = auto()  # the task was not active any more (or is gone)
+    ACTIVE = auto()  # a concurrent writer won; the task may still be active
+
+
 # The tasks of a project in these states are stopped. A Deleted project is a
 # tombstone, but tasks it had when it was purged may still be active.
 _STOPPING = (ProjectStatus.PENDING_DELETION, ProjectStatus.DELETED)
@@ -167,8 +237,9 @@ class TaskStopResult:
     """What one ``stop_project_tasks`` call did.
 
     ``stopped`` lists the tasks whose Cancel this call issued (oldest first).
-    ``cancelled_entries`` counts the queue entries it cancelled (also those of
-    tasks that are already terminal, see the module docstring, step 4). ``done``
+    ``cancelled_entries`` counts the queue entries it cancelled (each after its
+    task was terminal; also entries left behind a terminal task, see the module
+    docstring, step 4). ``done``
     is true when no task of the project was left active, no queue entry of its
     tasks is active and the request is marked processed (or the project needs no
     stop: it is Active or Archived); false means "call again".
@@ -248,21 +319,59 @@ class ProjectTaskStopper:
             # the rest of the batch is left alone as soon as the project is live.
             if not await self._is_stopping(project_id):
                 break
-            # The entry first: if this run stops here, the task is still active
-            # and the next run repeats it (a cancelled task would not be listed).
-            # Entry and Cancel are one unit: after the entry, the Cancel follows
-            # even if a Restore committed in between (a restored task left
-            # queued without its entry would never run again).
-            if await self._queue.cancel(task_id):
-                entries += 1
-            if await self._cancel(task_id):
+            # The Cancel first, then the entry: a task that is still active keeps
+            # its entry whatever happens in between (module docstring, "Cancel and
+            # entry: order and interruption").
+            cancelled, entry = await self._stop_task(task_id)
+            if cancelled:
                 stopped.append(task_id)
+            if entry:
+                entries += 1
         entries += await self._cancel_stray_entries(project_id)
         done = await self._finish(project_id)
         return TaskStopResult(project_id, tuple(stopped), entries, done)
 
-    async def _cancel(self, task_id: uuid.UUID) -> bool:
-        """Issue Cancel; ``False`` if the task was not (or not yet) stopped by it."""
+    async def _stop_task(self, task_id: uuid.UUID) -> tuple[bool, bool]:
+        """Cancel the task, then its entry; ``(task cancelled by us, entry cancelled)``.
+
+        The entry is cancelled only once the task is terminal (the Cancel ended
+        it, or it already was): a task that stays active (``TaskConflictError``)
+        keeps its entry. If anything is raised, also a cancellation, the task is
+        read once (``_reconcile_entry``) and its entry cancelled if the task is
+        terminal by now, then the original error propagates.
+        """
+        try:
+            outcome = await self._cancel(task_id)
+            if outcome is _Outcome.ACTIVE:
+                return False, False
+            return outcome is _Outcome.CANCELLED, await self._queue.cancel(task_id)
+        except BaseException:
+            await self._reconcile_entry(task_id)
+            raise
+
+    async def _reconcile_entry(self, task_id: uuid.UUID) -> None:
+        """After an interrupted ``_stop_task``: cancel the entry of a terminal task.
+
+        Decided by the STATE of the task, read now (plain read), never by how far
+        the interrupted call got: the Cancel may have committed although it raised
+        (a transition listener runs after the commit and can be cancelled), and the
+        entry cancel is idempotent. A task that is still active keeps its entry.
+        Runs inside the ``except`` of the interruption (one cancellation has been
+        delivered already), is bounded by ``RECONCILE_TIMEOUT_S``, and never
+        replaces the original error: whatever it raises (another database error, a
+        timeout) is dropped, and the entry then stays for the sweep of the next run
+        while the project is Pending deletion. A second cancellation is not
+        suppressed.
+        """
+        with contextlib.suppress(Exception):
+            async with asyncio.timeout(RECONCILE_TIMEOUT_S):
+                async with self._transaction() as session:
+                    terminal = await store.is_task_terminal(session, task_id)
+                if terminal:
+                    await self._queue.cancel(task_id)
+
+    async def _cancel(self, task_id: uuid.UUID) -> _Outcome:
+        """Issue Cancel and say what it did to the task."""
         try:
             await self._tasks.execute(
                 task_id,
@@ -273,22 +382,24 @@ class ProjectTaskStopper:
         except (IllegalTransitionError, TaskNotFoundError):
             # It left the active states by itself since it was listed (failed,
             # completed, cancelled by a user): nothing left to stop.
-            return False
+            return _Outcome.TERMINAL
         except TaskConflictError:
             # A concurrent writer changed it first. It stays active if that did
             # not end it, and ``_finish`` keeps the request open.
-            return False
-        return True
+            return _Outcome.ACTIVE
+        return _Outcome.CANCELLED
 
     async def _cancel_stray_entries(self, project_id: uuid.UUID) -> int:
-        """Cancel the active queue entries of the project's tasks; return how many.
+        """Cancel the active entries behind terminal tasks of the project; count them.
 
         Found through the project, not through the state of the task: a raced
-        Restart can leave an active entry behind a terminal task (module
-        docstring, step 4). The project is read again first and before EACH entry
-        (``_is_stopping``), so a project that was restored since the first read,
-        or during the sweep, keeps the entries not cancelled yet. At most
-        ``batch_size`` entries; ``_finish`` keeps the request open if more remain.
+        Restart or an interrupted stop can leave an active entry behind a terminal
+        task (module docstring, step 4). The entry of a task that is still active
+        is not touched (``terminal_tasks_only``). The project is read again first
+        and before EACH entry (``_is_stopping``), so a project that was restored
+        since the first read, or during the sweep, keeps the entries not cancelled
+        yet. At most ``batch_size`` entries; ``_finish`` keeps the request open if
+        more remain.
         """
         async with self._transaction() as session:
             project = await store.get_project(session, project_id)
@@ -296,7 +407,7 @@ class ProjectTaskStopper:
                 raise ProjectNotFoundError()
             task_ids = (
                 await store.select_active_entry_task_ids(
-                    session, project_id, self._batch_size
+                    session, project_id, self._batch_size, terminal_tasks_only=True
                 )
                 if project.status in _STOPPING
                 else []
