@@ -23,6 +23,7 @@ from paw_backend.tasks import (
     TaskState,
 )
 
+from .gate_support import ALWAYS_ACTIVE
 from .task_support import PostgresTaskTestCase, requires_postgres
 
 
@@ -101,7 +102,9 @@ class InTransactionStepTest(PostgresTaskTestCase):
         async def listener(event):
             heard.append(event)
 
-        service = TaskService(self.database, listeners=[listener])
+        service = TaskService(
+            self.database, listeners=[listener], project_gate=ALWAYS_ACTIVE
+        )
         raised = Boom()
         writes: list[str] = []
 
@@ -140,7 +143,9 @@ class InTransactionStepTest(PostgresTaskTestCase):
         async def step(session, step_task, step_project):
             order.append("step")
 
-        service = TaskService(self.database, listeners=[listener])
+        service = TaskService(
+            self.database, listeners=[listener], project_gate=ALWAYS_ACTIVE
+        )
         await service.execute(
             task_id, TaskCommand.CANCEL, actor=self.system, in_transaction=step
         )

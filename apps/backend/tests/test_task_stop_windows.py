@@ -30,6 +30,7 @@ from paw_backend.tasks import Actor, TaskCommand, TaskService, TaskState
 from paw_backend.tasks.queueing import TaskAlreadyQueuedError
 
 from . import test_projects_task_stop as stop_tests
+from .gate_support import ALWAYS_ACTIVE
 from .projects_support import requires_postgres
 
 TRIGGER = "paw_test_refuse_entry_cancel"
@@ -66,9 +67,9 @@ class RestoreRacingTheStopperTest(WindowTestCase):
 
         await self.begin_deletion()
 
-        result = await self.new_stopper(Restoring(self.database)).stop_project_tasks(
-            self.project_id
-        )
+        result = await self.new_stopper(
+            Restoring(self.database, project_gate=ALWAYS_ACTIVE)
+        ).stop_project_tasks(self.project_id)
 
         self.assertEqual(restored, [True])
         self.assertEqual(self.status(), "archived")
@@ -92,9 +93,9 @@ class RestoreRacingTheStopperTest(WindowTestCase):
 
         await self.begin_deletion()
 
-        result = await self.new_stopper(Restoring(self.database)).stop_project_tasks(
-            self.project_id
-        )
+        result = await self.new_stopper(
+            Restoring(self.database, project_gate=ALWAYS_ACTIVE)
+        ).stop_project_tasks(self.project_id)
 
         (first,) = result.stopped
         self.assertEqual(self.status(), "archived")
@@ -128,9 +129,9 @@ class RestartRacingTheStopperTest(WindowTestCase):
 
         await self.begin_deletion()
 
-        first = await self.new_stopper(Racing(self.database)).stop_project_tasks(
-            self.project_id
-        )
+        first = await self.new_stopper(
+            Racing(self.database, project_gate=ALWAYS_ACTIVE)
+        ).stop_project_tasks(self.project_id)
 
         # The restarted task is active, so the request stays open ...
         self.assertEqual((first.stopped, first.done), ((task_id,), False))

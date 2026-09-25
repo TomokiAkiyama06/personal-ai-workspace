@@ -45,6 +45,7 @@ from . import (
     test_task_service,
     test_task_tools,
 )
+from .gate_support import ALWAYS_ACTIVE
 from .support import make_settings
 from .task_support import (
     FIRST_RUN,
@@ -327,7 +328,7 @@ class AppRolePrivilegesTest(AsAppRole, PostgresTaskTestCase):
         self.assertEqual(await self.service.history(task_id), history)
 
     async def test_the_app_role_can_run_a_whole_task_through_a_second_process(self):
-        service = TaskService(self.new_database())
+        service = TaskService(self.new_database(), project_gate=ALWAYS_ACTIVE)
         task_id = await self.create_task(service)
         commands = [
             (C.START, None),

@@ -108,8 +108,11 @@ def check_session(name: str, value: Any) -> AsyncSession:
 
 
 def check_project_gate(name: str, value: Any) -> Any:
-    """``None`` (no Project state gate) or an object with ``require_active``."""
-    if value is not None and not callable(getattr(value, "require_active", None)):
+    """An object with ``require_active`` and ``active_condition`` (never ``None``)."""
+    if not all(
+        callable(getattr(value, method, None))
+        for method in ("require_active", "active_condition")
+    ):
         _reject(name)
     return value
 

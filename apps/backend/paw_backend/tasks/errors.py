@@ -57,9 +57,9 @@ class TaskStepError(TaskError):
 class ProjectNotActiveError(TaskError):
     """The project of the task is not Active, so no new work is admitted.
 
-    Raised by ``TaskService.create_task``, Retry and Restart and by
+    Raised by ``TaskService.create_task``, Retry, Restart and Start and by
     ``TaskQueue.enqueue`` when the Project state gate (``tasks.project_gate``) finds
-    the project Archived, Pending deletion or Deleted (Decision 0008, section 8).
+    the project Archived, Pending deletion or Deleted (Decisions 0008 and 0020).
     Nothing is written. An unknown project is refused the same way (default deny).
     The message names no project, state or task.
     """

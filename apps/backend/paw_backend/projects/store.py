@@ -191,6 +191,33 @@ async def get_project_status_for_share(
     return None if status is None else ProjectStatus(status)
 
 
+def active_project_condition(project_id: ColumnElement) -> ColumnElement[bool]:
+    """``(the status of the project with this id) = 'active'``, for a WHERE clause.
+
+    ``project_id`` is an expression of the caller's own statement that names the
+    project (in the queue's claim: a scalar subquery over ``tasks`` for the entry
+    under consideration). A statement FRAGMENT, not a statement: nothing is locked
+    and nothing is read until the caller runs it. An unknown project has no status,
+    so the comparison is not true: default deny.
+
+    It is a correlated SCALAR subquery on purpose, not an ``EXISTS``. An ``EXISTS``
+    is turned into a join, and the planner may then start from the (few) Active
+    projects, read all their entries and sort them, instead of reading the queue in
+    the order of ``ix_queue_entries_claim_order`` and stopping at the first entry
+    that passes; a scalar subquery can only be evaluated per candidate row, so the
+    ordered index scan and the ``LIMIT 1`` stay in charge (``tests/
+    test_project_claim_filter.py`` plans it). The status is written into the SQL text
+    (``literal_execute``) like the other fragments here.
+    """
+    status = select(PROJECTS.c.status).where(PROJECTS.c.id == project_id)
+    return status.scalar_subquery() == bindparam(
+        "project_status_active",
+        ProjectStatus.ACTIVE.value,
+        type_=PROJECTS.c.status.type,
+        literal_execute=True,
+    )
+
+
 async def insert_project(
     session: AsyncSession,
     *,

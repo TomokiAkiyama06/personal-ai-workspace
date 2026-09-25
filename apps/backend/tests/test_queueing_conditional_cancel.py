@@ -20,6 +20,7 @@ from sqlalchemy.exc import DBAPIError
 from paw_backend.tasks import TaskCommand, TaskService, TaskState
 from paw_backend.tasks.queueing import InvalidQueueingArgumentError, LeaseLostError
 
+from .gate_support import ALWAYS_ACTIVE
 from .queueing_support import PostgresQueueingTestCase, requires_postgres
 
 FINISHED = (TaskState.COMPLETED, TaskState.FAILED, TaskState.CANCELLED)
@@ -262,7 +263,7 @@ class RestartRaceTest(CancelTestCase):
         await self.queue.enqueue(task_id)
         hold = HoldOpen()
         restarting = self.spawn(
-            TaskService(self.new_database()).execute(
+            TaskService(self.new_database(), project_gate=ALWAYS_ACTIVE).execute(
                 task_id, TaskCommand.RESTART, actor=self.user, in_transaction=hold
             )
         )
@@ -294,7 +295,7 @@ class RestartRaceTest(CancelTestCase):
                 await self.queue.cancel_in(session, task_id, only_if_task_terminal=True)
             )
             restarting = self.spawn(
-                TaskService(self.new_database()).execute(
+                TaskService(self.new_database(), project_gate=ALWAYS_ACTIVE).execute(
                     task_id, TaskCommand.RESTART, actor=self.user
                 )
             )

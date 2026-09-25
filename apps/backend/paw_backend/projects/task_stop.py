@@ -104,9 +104,9 @@ What that closes:
 
 Not closed here: an entry that is left behind a terminal task by somebody else (a
 user's Cancel, a worker's Fail) stays until the sweep of step 4, the orchestrator's
-own cleanup (PAW-034) or a Restart finds it; the queue does not skip such an entry
-at claim time (Decision 0020 lists what is not decided about work that was admitted
-before an Archive).
+own cleanup (PAW-034) or a Restart finds it. The queue does not skip an entry
+because its TASK is terminal (Decision 0020, C filters by the project's state: an
+entry of a project that is not Active is never claimed, whatever its task's state).
 
 Idempotent and re-runnable
 --------------------------
@@ -126,16 +126,18 @@ What the caller must do (limits)
 * Keep calling until ``done``; a project with more than ``batch_size`` active
   tasks needs several calls.
 * Build the ``TaskService`` and ``TaskQueue`` of the whole backend with the Project
-  state gate (``ProjectStateGate``, Issue #83): ``create_task`` / Retry / Restart
-  and ``enqueue`` then refuse a project that is not Active, in the transaction of
-  their own write, serialised with Delete by the project row lock. Without the gate
-  a task whose creation was authorized just before the deletion began (or a queue
-  entry for a task of the project) can appear **after** the request was processed:
-  the Authorizer already refuses ``project.task.run`` in Archived and Pending
-  deletion (PAW-025), but only before the command. The call is cheap and idempotent,
-  so the orchestrator should also call ``stop_project_tasks`` for the projects that
-  are Pending deletion on its regular cycle (Decision 0008, section 8; it stops such
-  a task and cancels such an entry, also that of a task that is already terminal; tests:
+  state gate (``ProjectStateGate``; both constructors REQUIRE one, Decision 0020,
+  Issue #83): ``create_task`` / Retry / Restart / Start and ``enqueue`` then refuse a
+  project that is not Active, in the transaction of their own write, serialised with
+  Delete by the project row lock, and the queue does not claim the entries of such a
+  project. The Authorizer already refuses ``project.task.run`` in Archived and
+  Pending deletion (PAW-025), but only before the command; the gate is what holds
+  when a Delete overlaps it. So nothing new can appear in a Pending deletion
+  project after the request was processed, and the call is cheap and idempotent:
+  the orchestrator can still call ``stop_project_tasks`` for the projects that
+  are Pending deletion on its regular cycle (a safety net, no longer needed for
+  correctness; it stops a task and cancels an entry that slipped in, also that of
+  a task that is already terminal; tests:
   ``test_a_task_created_after_the_deletion_began_is_stopped_on_a_rerun``,
   ``test_an_entry_of_a_finished_task_is_found_by_project_on_a_rerun``).
 * **A Restore during a batch.** The ids of a batch are listed in one read and a

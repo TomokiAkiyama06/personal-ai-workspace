@@ -1,9 +1,10 @@
-"""The Project state gate of the task lane (Issue #83, Decision 0008, section 8).
+"""The Project state gate of the task lane (Issue #83, Decisions 0008 and 0020).
 
-``TaskService.create_task`` / Retry / Restart and ``TaskQueue.enqueue`` lock the
-project row ``FOR SHARE`` in the transaction of their own write and refuse unless
-the project is Active. The tasks and queue entries are seeded through the ungated
-services of the owner, and every assertion reads the database with SQL. The race
+``TaskService.create_task`` / Retry / Restart / Start and ``TaskQueue.enqueue`` lock
+the project row ``FOR SHARE`` in the transaction of their own write and refuse unless
+the project is Active; the gate is mandatory. The tasks and queue entries are seeded
+through the owner's services, which are built with the tests' ``AlwaysActiveGate``,
+and every assertion reads the database with SQL. The race
 tests interleave the gated write with a Delete / Archive through explicit hooks
 (a gate that holds its transaction open until told to go on) and through row locks
 that another connection holds, never through sleeps; a wait is proven by asking
@@ -38,6 +39,7 @@ from paw_backend.tasks import (
     TaskNotFoundError,
     TaskService,
     TaskState,
+    WaitReason,
 )
 from paw_backend.tasks.queueing import (
     InvalidQueueingArgumentError,
@@ -47,6 +49,7 @@ from paw_backend.tasks.queueing import (
 )
 
 from . import test_projects_task_stop as stop_tests
+from .gate_support import ALWAYS_ACTIVE
 from .projects_support import T0, requires_postgres
 
 NOT_ACTIVE = (
@@ -110,10 +113,15 @@ class RecordingGate:
     def __init__(self, inner: ProjectStateGate) -> None:
         self.inner = inner
         self.calls: list[UUID] = []
+        self.conditions = 0  # how often the claim asked for its SQL condition
 
     async def require_active(self, session, project_id) -> None:
         self.calls.append(project_id)
         await self.inner.require_active(session, project_id)
+
+    def active_condition(self, project_id):
+        self.conditions += 1
+        return self.inner.active_condition(project_id)
 
 
 class PausingGate:
@@ -129,15 +137,27 @@ class PausingGate:
         self.locked.set()
         await self.release.wait()
 
+    def active_condition(self, project_id):
+        return self.inner.active_condition(project_id)
+
 
 class GateTestCase(stop_tests.TaskStopTestCase):
     """A project with a team; gated task and queue services on ``self.database``."""
 
-    async def asyncSetUp(self) -> None:
-        await super().asyncSetUp()
-        self.gate = ProjectStateGate()
-        self.tasks = TaskService(self.database, project_gate=self.gate)
-        self.queue = TaskQueue(self.database, project_gate=self.gate)
+    gate = ProjectStateGate()
+
+    # The gated services are built from ``self.database`` when they are used, not in
+    # ``asyncSetUp``: ``test_projects_grants`` swaps ``self.database`` for one that
+    # connects as the unprivileged application role AFTER ``asyncSetUp`` ran, and the
+    # services under test must follow it (the seeding ones, in the base class, stay
+    # on the owner's connection).
+    @property
+    def tasks(self) -> TaskService:
+        return TaskService(self.database, project_gate=self.gate)
+
+    @property
+    def queue(self) -> TaskQueue:
+        return TaskQueue(self.database, project_gate=self.gate)
 
     def project_in(self, status: ProjectStatus) -> UUID:
         return self.seed_project(status, name=f"Project {status.value}")
@@ -208,6 +228,27 @@ class GateTestCase(stop_tests.TaskStopTestCase):
         finally:
             connection.close()
 
+    def commit_lifecycle_change(self, status: str, holder) -> None:
+        """Change the project on the connection that holds its row, then commit."""
+        connection, transaction = holder
+        started = T0
+        connection.execute(
+            text(
+                "UPDATE projects SET status = :status,"
+                " deletion_started_at = :started, deletion_scheduled_at = :due"
+                " WHERE id = :id"
+            ),
+            {
+                "status": status,
+                "started": started if status == "pending_deletion" else None,
+                "due": (started + stop_tests.DAYS_30)
+                if status == "pending_deletion"
+                else None,
+                "id": self.project_id,
+            },
+        )
+        transaction.commit()
+
 
 @requires_postgres
 class CreateTaskGateTest(GateTestCase):
@@ -247,10 +288,13 @@ class CreateTaskGateTest(GateTestCase):
 
         self.assertEqual(self.rows_of_tasks(), before)
 
-    async def test_a_service_without_a_gate_admits_a_task_in_any_project(self):
-        # The default (tests and tools of the task lane that have no projects).
+    async def test_the_test_gate_that_says_so_admits_a_task_in_any_project(self):
+        # ``AlwaysActiveGate``: the explicit, named gate of the tests and tools of the
+        # task lane that have no projects. There is no other way to build a service
+        # without asking a real gate (see ``GateIsMandatoryTest``).
+        service = TaskService(self.database, project_gate=ALWAYS_ACTIVE)
         for project_id in (self.project_in(ProjectStatus.ARCHIVED), uuid4()):
-            event = await self.create(TaskService(self.database), project_id=project_id)
+            event = await self.create(service, project_id=project_id)
             self.assertEqual(self.task_state(event.task_id), "queued")
 
     async def test_a_bad_argument_is_refused_before_the_gate_is_asked(self):
@@ -315,23 +359,38 @@ class RetryAndRestartGateTest(GateTestCase):
 
     async def test_the_other_commands_never_ask_the_gate(self):
         # Cancel (which the stop processor issues in a Pending deletion project),
-        # Fail, Start, Pause, ...: only the ways to admit NEW work are gated.
+        # Fail, Pause, Resume, ...: only the ways to admit or BEGIN work are gated
+        # (create, Retry, Restart, Start), so a stop always works and running work
+        # goes on (Decision 0020, C).
         gate = RecordingGate(self.gate)
         tasks = TaskService(self.database, project_gate=gate)
         project_id = self.project_in(ProjectStatus.PENDING_DELETION)
-        queued = await self.seed_in(project_id, TaskState.QUEUED)
         running = await self.seed_in(project_id, TaskState.RUNNING)
+        cancelled = await self.seed_in(project_id, TaskState.RUNNING)
         system = Actor.system()
 
-        await tasks.execute(queued, TaskCommand.START, actor=system)
-        await tasks.execute(queued, TaskCommand.PAUSE, actor=system)
-        await tasks.execute(queued, TaskCommand.RESUME, actor=system)
-        await tasks.execute(queued, TaskCommand.FAIL, actor=system)
-        await tasks.execute(running, TaskCommand.CANCEL, actor=Actor.policy())
+        await tasks.execute(running, TaskCommand.PAUSE, actor=system)
+        await tasks.execute(running, TaskCommand.RESUME, actor=system)
+        await tasks.execute(
+            running, TaskCommand.WAIT, actor=system, wait_reason=WaitReason.USER
+        )
+        await tasks.execute(running, TaskCommand.UNBLOCK, actor=system)
+        await tasks.execute(running, TaskCommand.FAIL, actor=system)
+        await tasks.execute(cancelled, TaskCommand.CANCEL, actor=Actor.policy())
 
         self.assertEqual(gate.calls, [])
-        self.assertEqual(self.task_state(queued), "failed")
-        self.assertEqual(self.task_state(running), "cancelled")
+        self.assertEqual(self.task_state(running), "failed")
+        self.assertEqual(self.task_state(cancelled), "cancelled")
+
+    async def test_start_asks_the_gate_for_the_project_of_the_task(self):
+        gate = RecordingGate(self.gate)
+        tasks = TaskService(self.database, project_gate=gate)
+        queued = await self.seed_in(self.project_id, TaskState.QUEUED)
+
+        await tasks.execute(queued, TaskCommand.START, actor=Actor.system())
+
+        self.assertEqual(gate.calls, [self.project_id])
+        self.assertEqual(self.task_state(queued), "running")
 
     async def test_a_stopped_task_restarts_only_after_the_project_is_active_again(self):
         # Decision 0008, section 8: a Restore leaves the project Archived, which
@@ -399,13 +458,13 @@ class EnqueueGateTest(GateTestCase):
 
         self.assertEqual(self.entry_statuses(task_id), ["queued"])
 
-    async def test_a_queue_without_a_gate_enqueues_for_any_project(self):
+    async def test_the_test_gate_that_says_so_enqueues_for_any_project(self):
         project_id = self.project_in(ProjectStatus.ARCHIVED)
         task_id = await self.seed_task(
             TaskState.QUEUED, project_id=project_id, queue=False
         )
 
-        await TaskQueue(self.database).enqueue(task_id)
+        await TaskQueue(self.database, project_gate=ALWAYS_ACTIVE).enqueue(task_id)
 
         self.assertEqual(self.entry_statuses(task_id), ["queued"])
 
@@ -415,21 +474,38 @@ class EnqueueGateTest(GateTestCase):
         project_id = self.project_in(ProjectStatus.PENDING_DELETION)
         first = await self.seed_task(TaskState.QUEUED, project_id=project_id)
         second = await self.seed_task(TaskState.QUEUED, project_id=project_id)
+        # Both entries were claimed before the project began to be deleted: the
+        # holder of a lease can still heartbeat, give it back, complete and be
+        # cancelled (the project's state decides only who may be handed NEW work).
+        held = await self.seed_queue.claim_next("worker-1")
+        other = await self.seed_queue.claim_next("worker-2")
+        assert held is not None and other is not None
 
-        claimed = await queue.claim_next("worker-1")
-        assert claimed is not None
-        heartbeat = await queue.heartbeat(claimed.id, "worker-1", claimed.claim_count)
-        released = await queue.release(claimed.id, "worker-1", claimed.claim_count)
-        again = await queue.claim_next("worker-1")
-        assert again is not None
-        await queue.complete(again.id, "worker-1", again.claim_count)
-        cancelled = await queue.cancel(second if again.task_id == first else first)
+        heartbeat = await queue.heartbeat(held.id, "worker-1", held.claim_count)
+        released = await queue.release(held.id, "worker-1", held.claim_count)
+        completed = await queue.complete(other.id, "worker-2", other.claim_count)
+        cancelled = await queue.cancel(held.task_id)
 
         self.assertEqual(gate.calls, [])
-        self.assertTrue(cancelled)
-        self.assertEqual((heartbeat.claim_count, released.status.value), (1, "queued"))
+        self.assertEqual(
+            (heartbeat.status.value, released.status.value, completed.status.value),
+            ("claimed", "queued", "completed"),
+        )
+        self.assertTrue(cancelled)  # the released entry, queued again
+        self.assertEqual({held.task_id, other.task_id}, {first, second})
         with self.assertRaises(LeaseLostError):
-            await queue.heartbeat(again.id, "worker-1", again.claim_count)
+            await queue.heartbeat(held.id, "worker-1", held.claim_count)
+
+    async def test_claiming_asks_for_a_condition_and_never_locks_the_project(self):
+        gate = RecordingGate(self.gate)
+        queue = TaskQueue(self.database, project_gate=gate)
+        task_id = await self.seed_task(TaskState.QUEUED)
+
+        claimed = await queue.claim_next("worker-1")
+
+        assert claimed is not None
+        self.assertEqual(claimed.task_id, task_id)
+        self.assertEqual((gate.calls, gate.conditions), ([], 1))
 
 
 @requires_postgres
@@ -449,6 +525,9 @@ class GateLockTest(GateTestCase):
                 await asyncio.to_thread(self.test.project_is_share_locked, project_id)
             )
 
+        def active_condition(self, project_id):
+            return self.inner.active_condition(project_id)
+
     async def test_every_gated_write_holds_the_share_lock_until_it_commits(self):
         probe = self.Probe(self, self.gate)
         tasks = TaskService(self.database, project_gate=probe)
@@ -457,15 +536,17 @@ class GateLockTest(GateTestCase):
         failed = await self.seed_task(TaskState.FAILED)
         cancelled = await self.seed_task(TaskState.CANCELLED)
         queued = await self.seed_task(TaskState.QUEUED, queue=False)
+        starting = await self.seed_task(TaskState.QUEUED, queue=False)
         self.assertFalse(self.project_is_share_locked(self.project_id))
 
         await self.create(tasks)
         await tasks.execute(failed, TaskCommand.RETRY, actor=actor)
         await tasks.execute(cancelled, TaskCommand.RESTART, actor=actor)
+        await tasks.execute(starting, TaskCommand.START, actor=actor)
         await queue.enqueue(queued)
 
         # Locked while each write was open, free again once it had committed.
-        self.assertEqual(probe.locked_during, [True, True, True, True])
+        self.assertEqual(probe.locked_during, [True] * 5)
         self.assertFalse(self.project_is_share_locked(self.project_id))
 
     async def test_a_refused_write_releases_the_lock(self):
@@ -518,13 +599,72 @@ class GateLockTest(GateTestCase):
                 with self.subTest(project_id=repr(bad)):
                     with self.assertRaises(InvalidProjectInputError):
                         await self.gate.require_active(session, bad)
-        for wrong in (object(), "gate", 5):
+
+
+class GateIsMandatoryTest(unittest.TestCase):
+    """No service or queue can be built without a gate (Decision 0020, A).
+
+    Omitting the gate used to skip the check without a word; now it is an error at
+    construction. No database is needed: the constructors refuse before any use.
+    """
+
+    DATABASE = object()
+
+    def test_a_service_needs_a_gate_argument(self):
+        with self.assertRaises(TypeError):
+            TaskService(self.DATABASE)
+        with self.assertRaises(TypeError):
+            TaskService(self.DATABASE, listeners=[])
+
+    def test_a_queue_needs_a_gate_argument(self):
+        with self.assertRaises(TypeError):
+            TaskQueue(self.DATABASE)
+        with self.assertRaises(TypeError):
+            TaskQueue(self.DATABASE, lease_seconds=5, allow_explicit_now=True)
+
+    def test_none_is_not_a_gate(self):
+        with self.assertRaises(TypeError):
+            TaskService(self.DATABASE, project_gate=None)
+        with self.assertRaises(InvalidQueueingArgumentError) as caught:
+            TaskQueue(self.DATABASE, project_gate=None)
+        self.assertEqual(caught.exception.parameter, "project_gate")
+
+    def test_something_that_is_not_a_gate_is_refused(self):
+        for wrong in (object(), "gate", 5, False, type("Half", (), {})()):
             with self.subTest(project_gate=type(wrong).__name__):
                 with self.assertRaises(TypeError):
-                    TaskService(self.database, project_gate=wrong)
+                    TaskService(self.DATABASE, project_gate=wrong)
                 with self.assertRaises(InvalidQueueingArgumentError) as caught:
-                    TaskQueue(self.database, project_gate=wrong)
+                    TaskQueue(self.DATABASE, project_gate=wrong)
                 self.assertEqual(caught.exception.parameter, "project_gate")
+
+    def test_a_gate_is_accepted_by_both(self):
+        for gate in (ALWAYS_ACTIVE, ProjectStateGate()):
+            with self.subTest(gate=type(gate).__name__):
+                self.assertIsInstance(
+                    TaskService(self.DATABASE, project_gate=gate), TaskService
+                )
+                self.assertEqual(
+                    TaskQueue(self.DATABASE, project_gate=gate).lease_seconds, 60
+                )
+
+    def test_the_test_gate_is_not_part_of_the_production_code(self):
+        # ``AlwaysActiveGate`` admits every project, Pending deletion ones included:
+        # it lives in the tests' support module. Nothing under ``paw_backend`` may
+        # define, import or mention it, so production composition code cannot reach it.
+        mentions = {
+            str(path.relative_to(BACKEND)): text
+            for path in sorted((BACKEND / "paw_backend").rglob("*.py"))
+            if (text := path.read_text()).count("AlwaysActive")
+            or text.count("gate_support")
+        }
+        production_files = list((BACKEND / "paw_backend").rglob("*.py"))
+
+        self.assertGreater(len(production_files), 100)  # the whole package is scanned
+        self.assertEqual({name: "" for name in mentions}, {})
+        # ... and the support module is where the tests say it is.
+        self.assertTrue((BACKEND / "tests" / "gate_support.py").is_file())
+        self.assertFalse([p for p in (BACKEND / "paw_backend").rglob("gate_support*")])
 
 
 @requires_postgres
@@ -536,27 +676,6 @@ class GateRaceTest(GateTestCase):
         return self.spawn(
             service.begin_deletion(self.manager, self.project_id, "Alpha")
         )
-
-    def commit_lifecycle_change(self, status: str, holder) -> None:
-        """Change the project on the connection that holds its row, then commit."""
-        connection, transaction = holder
-        started = T0
-        connection.execute(
-            text(
-                "UPDATE projects SET status = :status,"
-                " deletion_started_at = :started, deletion_scheduled_at = :due"
-                " WHERE id = :id"
-            ),
-            {
-                "status": status,
-                "started": started if status == "pending_deletion" else None,
-                "due": (started + stop_tests.DAYS_30)
-                if status == "pending_deletion"
-                else None,
-                "id": self.project_id,
-            },
-        )
-        transaction.commit()
 
     async def test_a_create_that_holds_the_lock_makes_the_deletion_wait(self):
         gate = PausingGate(self.gate)

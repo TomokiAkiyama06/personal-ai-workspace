@@ -46,6 +46,7 @@ from paw_backend.tasks import (
 )
 from paw_backend.tasks.queueing import LeaseLostError, TaskQueue
 
+from .gate_support import ALWAYS_ACTIVE
 from .projects_support import T0, requires_postgres
 from .support import make_settings
 from .task_support import PATH_TO_STATE, TEST_DATABASE_URL
@@ -78,8 +79,8 @@ class TaskStopTestCase(LifecycleTestCase):
         # test connects as the application role.
         self.owner = Database(make_settings(database_url=TEST_DATABASE_URL))
         self.addAsyncCleanup(self.owner.dispose)
-        self.seed_tasks = TaskService(self.owner)
-        self.seed_queue = TaskQueue(self.owner)
+        self.seed_tasks = TaskService(self.owner, project_gate=ALWAYS_ACTIVE)
+        self.seed_queue = TaskQueue(self.owner, project_gate=ALWAYS_ACTIVE)
 
     def new_stopper(
         self, task_service: TaskService | None = None, **options: Any
@@ -87,8 +88,8 @@ class TaskStopTestCase(LifecycleTestCase):
         # ``self.database`` is the application role's in ``test_projects_grants``.
         return ProjectTaskStopper(
             self.database,
-            task_service or TaskService(self.database),
-            TaskQueue(self.database),
+            task_service or TaskService(self.database, project_gate=ALWAYS_ACTIVE),
+            TaskQueue(self.database, project_gate=ALWAYS_ACTIVE),
             clock=self.clock,
             **options,
         )
@@ -416,8 +417,9 @@ class StopProjectTasksTest(TaskStopTestCase):
         self.assertIsNone(self.outbox(other))
 
     async def test_a_task_created_after_the_deletion_began_is_stopped_on_a_rerun(self):
-        # The seed services have no Project state gate (issue #83), like a caller that
-        # was built without one: the processor catches what slipped through.
+        # The seed services use ``AlwaysActiveGate`` (issue #83): they admit work in
+        # a Pending deletion project like a write that slipped past the real gate, and
+        # the processor catches what slipped through.
         await self.begin_deletion()
         stopper = self.new_stopper()
         first = await stopper.stop_project_tasks(self.project_id)
@@ -458,9 +460,9 @@ class StopProjectTasksTest(TaskStopTestCase):
 
         await self.begin_deletion()
 
-        result = await self.new_stopper(Racing(self.database)).stop_project_tasks(
-            self.project_id
-        )
+        result = await self.new_stopper(
+            Racing(self.database, project_gate=ALWAYS_ACTIVE)
+        ).stop_project_tasks(self.project_id)
 
         self.assertEqual(raced, [True])
         self.assertEqual(self.task_state(task_id), "cancelled")
@@ -505,8 +507,8 @@ class StopProjectTasksTest(TaskStopTestCase):
         await self.begin_deletion()
         stopper = ProjectTaskStopper(
             self.database,
-            Joining(self.database),
-            RestartingQueue(self.database),
+            Joining(self.database, project_gate=ALWAYS_ACTIVE),
+            RestartingQueue(self.database, project_gate=ALWAYS_ACTIVE),
             clock=self.clock,
         )
 
@@ -699,7 +701,7 @@ class StopProjectTasksTest(TaskStopTestCase):
                     await service.restore(manager, project_id)
                 return result
 
-        return Restoring(self.database)
+        return Restoring(self.database, project_gate=ALWAYS_ACTIVE)
 
     async def test_a_restore_between_two_tasks_stops_the_batch(self):
         # Six active tasks; the project is restored right after the first one was
@@ -756,8 +758,8 @@ class StopProjectTasksTest(TaskStopTestCase):
         await self.begin_deletion()
         stopper = ProjectTaskStopper(
             self.database,
-            Joining(self.database),
-            Restoring(self.database),
+            Joining(self.database, project_gate=ALWAYS_ACTIVE),
+            Restoring(self.database, project_gate=ALWAYS_ACTIVE),
             clock=self.clock,
         )
 
@@ -871,9 +873,9 @@ class StopProjectTasksTest(TaskStopTestCase):
                 return result
 
         await self.begin_deletion()
-        result = await self.new_stopper(Flapping(self.database)).stop_project_tasks(
-            self.project_id
-        )
+        result = await self.new_stopper(
+            Flapping(self.database, project_gate=ALWAYS_ACTIVE)
+        ).stop_project_tasks(self.project_id)
 
         self.assertEqual(self.status(), "pending_deletion")
         self.assertEqual(sorted(result.stopped), sorted(tasks))
@@ -936,7 +938,7 @@ class StopProjectTasksTest(TaskStopTestCase):
                 return await super().execute(task_id, command, **options)
 
         await self.begin_deletion()
-        stopper = self.new_stopper(Racing(self.database))
+        stopper = self.new_stopper(Racing(self.database, project_gate=ALWAYS_ACTIVE))
 
         result = await stopper.stop_project_tasks(self.project_id)
 
@@ -956,7 +958,7 @@ class StopProjectTasksTest(TaskStopTestCase):
                 return await super().execute(task_id, command, **options)
 
         await self.begin_deletion()
-        stopper = self.new_stopper(Busy(self.database))
+        stopper = self.new_stopper(Busy(self.database, project_gate=ALWAYS_ACTIVE))
 
         first = await stopper.stop_project_tasks(self.project_id)
         self.assertEqual((first.stopped, first.done), ((), False))
@@ -976,9 +978,9 @@ class StopProjectTasksTest(TaskStopTestCase):
 
         await self.begin_deletion()
         with self.assertRaises(TaskError):
-            await self.new_stopper(Broken(self.database)).stop_project_tasks(
-                self.project_id
-            )
+            await self.new_stopper(
+                Broken(self.database, project_gate=ALWAYS_ACTIVE)
+            ).stop_project_tasks(self.project_id)
         self.assertIsNone(self.outbox()["processed_at"])
 
     async def test_a_restored_project_keeps_its_tasks(self):
@@ -1057,7 +1059,10 @@ class StopProjectTasksTest(TaskStopTestCase):
 
     async def test_it_needs_real_collaborators_and_a_sane_batch(self):
         database = self.database
-        service, queue = TaskService(database), TaskQueue(database)
+        service, queue = (
+            TaskService(database, project_gate=ALWAYS_ACTIVE),
+            TaskQueue(database, project_gate=ALWAYS_ACTIVE),
+        )
         for arguments in (
             (None, service, queue),
             (database, object(), queue),
@@ -1108,13 +1113,16 @@ class InterruptedTaskCancelTest(TaskStopTestCase):
                     raise errors.pop(0)
                 return await super().cancel_in(session, task_id, now, **options)
 
-        queue = Failing(self.database)
+        queue = Failing(self.database, project_gate=ALWAYS_ACTIVE)
         queue.calls = calls  # type: ignore[attr-defined]
         return queue
 
     def stopper_with(self, queue: TaskQueue) -> ProjectTaskStopper:
         return ProjectTaskStopper(
-            self.database, TaskService(self.database), queue, clock=self.clock
+            self.database,
+            TaskService(self.database, project_gate=ALWAYS_ACTIVE),
+            queue,
+            clock=self.clock,
         )
 
     async def test_the_task_and_its_queue_entry_commit_together(self):
@@ -1140,9 +1148,9 @@ class InterruptedTaskCancelTest(TaskStopTestCase):
 
         await self.begin_deletion()
 
-        result = await self.stopper_with(Watching(self.database)).stop_project_tasks(
-            self.project_id
-        )
+        result = await self.stopper_with(
+            Watching(self.database, project_gate=ALWAYS_ACTIVE)
+        ).stop_project_tasks(self.project_id)
 
         self.assertEqual(
             seen,
@@ -1231,9 +1239,9 @@ class InterruptedTaskCancelTest(TaskStopTestCase):
 
         await self.begin_deletion()
         stopping = self.spawn(
-            self.stopper_with(Hanging(self.database)).stop_project_tasks(
-                self.project_id
-            )
+            self.stopper_with(
+                Hanging(self.database, project_gate=ALWAYS_ACTIVE)
+            ).stop_project_tasks(self.project_id)
         )
         async with asyncio.timeout(DEADLINE):
             await inside.wait()
@@ -1263,7 +1271,9 @@ class InterruptedTaskCancelTest(TaskStopTestCase):
             raise asyncio.CancelledError()
 
         await self.begin_deletion()
-        stopper = self.new_stopper(TaskService(self.database, listeners=[listener]))
+        stopper = self.new_stopper(
+            TaskService(self.database, listeners=[listener], project_gate=ALWAYS_ACTIVE)
+        )
 
         with self.assertRaises(asyncio.CancelledError):
             await stopper.stop_project_tasks(self.project_id)
@@ -1283,9 +1293,9 @@ class InterruptedTaskCancelTest(TaskStopTestCase):
 
         await self.begin_deletion()
         with self.assertRaises(TaskError):
-            await self.new_stopper(Failing(self.database)).stop_project_tasks(
-                self.project_id
-            )
+            await self.new_stopper(
+                Failing(self.database, project_gate=ALWAYS_ACTIVE)
+            ).stop_project_tasks(self.project_id)
 
         # The project is live again and the task is queued: it still has its entry
         # (it would never run again without one), and the request is still open.
@@ -1312,9 +1322,9 @@ class InterruptedTaskCancelTest(TaskStopTestCase):
 
         await self.begin_deletion()
 
-        result = await self.new_stopper(Busy(self.database)).stop_project_tasks(
-            self.project_id
-        )
+        result = await self.new_stopper(
+            Busy(self.database, project_gate=ALWAYS_ACTIVE)
+        ).stop_project_tasks(self.project_id)
 
         self.assertEqual(result, TaskStopResult(self.project_id, (), 0, done=True))
         self.assertEqual(self.task_state(task_id), "queued")
@@ -1331,7 +1341,7 @@ class InterruptedTaskCancelTest(TaskStopTestCase):
                 return await super().execute(task_id, command, **options)
 
         await self.begin_deletion()
-        stopper = self.new_stopper(Busy(self.database))
+        stopper = self.new_stopper(Busy(self.database, project_gate=ALWAYS_ACTIVE))
 
         first = await stopper.stop_project_tasks(self.project_id)
 
@@ -1359,9 +1369,9 @@ class InterruptedTaskCancelTest(TaskStopTestCase):
 
         await self.begin_deletion()
 
-        result = await self.new_stopper(Racing(self.database)).stop_project_tasks(
-            self.project_id
-        )
+        result = await self.new_stopper(
+            Racing(self.database, project_gate=ALWAYS_ACTIVE)
+        ).stop_project_tasks(self.project_id)
 
         self.assertEqual(result, TaskStopResult(self.project_id, (), 1, done=True))
         self.assertEqual(self.entry_statuses(task_id), ["cancelled"])
@@ -1379,7 +1389,9 @@ class InterruptedTaskCancelTest(TaskStopTestCase):
 
         await self.begin_deletion()
         stopping = self.spawn(
-            self.new_stopper(Hanging(self.database)).stop_project_tasks(self.project_id)
+            self.new_stopper(
+                Hanging(self.database, project_gate=ALWAYS_ACTIVE)
+            ).stop_project_tasks(self.project_id)
         )
         async with asyncio.timeout(DEADLINE):
             await inside.wait()

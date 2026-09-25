@@ -21,6 +21,7 @@ from paw_backend.tasks.queueing import (
     TaskQueue,
 )
 
+from .gate_support import ALWAYS_ACTIVE
 from .queueing_support import (
     T0,
     PostgresQueueingTestCase,
@@ -53,24 +54,36 @@ class QueueTestCase(PostgresQueueingTestCase):
 
 class ConstructorTest(unittest.TestCase):
     def test_the_lease_length_is_validated(self):
-        self.assertEqual(TaskQueue(object()).lease_seconds, 60)
-        self.assertEqual(TaskQueue(object(), lease_seconds=1).lease_seconds, 1)
         self.assertEqual(
-            TaskQueue(object(), lease_seconds=86_400).lease_seconds, 86_400
+            TaskQueue(object(), project_gate=ALWAYS_ACTIVE).lease_seconds, 60
+        )
+        self.assertEqual(
+            TaskQueue(
+                object(), lease_seconds=1, project_gate=ALWAYS_ACTIVE
+            ).lease_seconds,
+            1,
+        )
+        self.assertEqual(
+            TaskQueue(
+                object(), lease_seconds=86_400, project_gate=ALWAYS_ACTIVE
+            ).lease_seconds,
+            86_400,
         )
         for bad in (0, -1, 86_401, True, 1.5, "60", None):
             with self.subTest(bad=repr(bad)):
                 with self.assertRaises(InvalidQueueingArgumentError) as caught:
-                    TaskQueue(object(), lease_seconds=bad)
+                    TaskQueue(object(), lease_seconds=bad, project_gate=ALWAYS_ACTIVE)
                 self.assertEqual(caught.exception.parameter, "lease_seconds")
 
     def test_the_explicit_time_switch_is_a_real_bool(self):
-        TaskQueue(object(), allow_explicit_now=True)
-        TaskQueue(object(), allow_explicit_now=False)
+        TaskQueue(object(), allow_explicit_now=True, project_gate=ALWAYS_ACTIVE)
+        TaskQueue(object(), allow_explicit_now=False, project_gate=ALWAYS_ACTIVE)
         for bad in (1, 0, "yes", "", None):
             with self.subTest(bad=repr(bad)):
                 with self.assertRaises(InvalidQueueingArgumentError) as caught:
-                    TaskQueue(object(), allow_explicit_now=bad)
+                    TaskQueue(
+                        object(), allow_explicit_now=bad, project_gate=ALWAYS_ACTIVE
+                    )
                 self.assertEqual(caught.exception.parameter, "allow_explicit_now")
 
 
@@ -93,7 +106,9 @@ class ClockContractTest(unittest.TestCase):
         return text[start : text.index("\n### ", start)]
 
     def test_an_instant_is_one_reading_of_clock_timestamp_in_a_cte(self):
-        current, lease_end = TaskQueue(object())._instants(None)
+        current, lease_end = TaskQueue(object(), project_gate=ALWAYS_ACTIVE)._instants(
+            None
+        )
         sql = str(select(current, lease_end).compile(dialect=postgresql.dialect()))
         # The instant and the lease end both refer to the ONE reading in the CTE:
         # written into the statement twice, the function would be read twice.
@@ -888,7 +903,7 @@ class TrustedClockTest(QueueTestCase):
 
     def production_queue(self, **kwargs) -> TaskQueue:
         """A queue as production builds it: no explicit time is accepted."""
-        return TaskQueue(self.new_database(), **kwargs)
+        return TaskQueue(self.new_database(), **kwargs, project_gate=ALWAYS_ACTIVE)
 
     async def database_time(self):
         return await self.scalar("SELECT clock_timestamp()")
@@ -920,7 +935,7 @@ class TrustedClockTest(QueueTestCase):
         entry = await self.enqueue()
         await self.queue.claim_next("w1", at(0))  # w1 holds the lease until at(60)
         # A queue as production builds it, called by a worker whose clock is far ahead.
-        production = TaskQueue(self.database)
+        production = TaskQueue(self.database, project_gate=ALWAYS_ACTIVE)
         with self.assertRaises(InvalidQueueingArgumentError) as caught:
             await production.claim_next("w2", at(10**6))
         self.assertEqual(caught.exception.parameter, "now")

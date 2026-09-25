@@ -21,13 +21,15 @@ Changes of the task's row also increment ``tasks.version`` and are applied with
 it saw earlier passes it as ``expected_version`` so that a stale decision is
 rejected (``TaskConflictError``) even if it arrives later.
 
-Project state gate (Issue #83, Decision 0008, section 8). ``create_task``, Retry and
-Restart admit new work, so a service built with a ``ProjectGate`` (see
-``tasks.project_gate``) asks it, INSIDE the transaction of the write, to lock the
-project row ``FOR SHARE`` and to refuse (``ProjectNotActiveError``, nothing
-written) unless the project is Active. Lock order in every command: the task row
-first (Retry and Restart), then the project row. Cancel and the other commands are
-never gated.
+Project state gate (Issue #83, Decisions 0008 and 0020). ``create_task``, Retry,
+Restart and Start admit new work or begin the work of a queued task, so every
+service is built with a ``ProjectGate`` (required; see ``tasks.project_gate``) and
+asks it, INSIDE the transaction of the write, to lock the project row ``FOR SHARE``
+and to refuse (``ProjectNotActiveError``, nothing written) unless the project is
+Active. Lock order in every command: the task row first (Retry, Restart, Start), then
+the project row. Every other command (Cancel, Fail, Stop Now, Pause, Resume, Wait,
+Unblock, Begin evaluation, Complete) is never gated: running work is not stopped
+and a stop must always be possible.
 
 A command can also carry a step of its own (``execute(..., in_transaction=step)``):
 the caller's coroutine runs in the SAME transaction, after the command's writes and
@@ -194,6 +196,12 @@ class InTransactionStep(Protocol):
         self, session: AsyncSession, task_id: uuid.UUID, project_id: uuid.UUID
     ) -> None: ...
 
+
+# The commands that begin or resume WORK from a state where nothing runs, so they are
+# refused in a project that is not Active (Decision 0020). Cancel, Fail, Stop Now,
+# Pause, Resume, Wait, Unblock, Begin evaluation and Complete are not: work that
+# already runs is not stopped, and a stop must always be possible.
+_GATED_COMMANDS = frozenset({TaskCommand.START, TaskCommand.RETRY, TaskCommand.RESTART})
 
 _STEP_ACTIVE_STATES = frozenset(
     {TaskState.RUNNING, TaskState.WAITING, TaskState.EVALUATING}
@@ -576,15 +584,18 @@ class TaskService:
         self,
         database: Database,
         *,
+        project_gate: ProjectGate,
         listeners: Sequence[TransitionListener] = (),
-        project_gate: ProjectGate | None = None,
     ) -> None:
-        """``project_gate``: the Project state gate (module docstring); ``None`` (the
-        default) admits new work in any project, for tests and tools without
-        projects. ``TypeError`` for a ``project_gate`` without ``require_active``."""
-        if project_gate is not None and not callable(
-            getattr(project_gate, "require_active", None)
-        ):
+        """``project_gate`` is REQUIRED: the Project state gate (module docstring).
+
+        There is no default and ``None`` is refused, so a service can never be built
+        that skips the check by omission (Decision 0020, approved 2026-09-26);
+        ``TypeError`` for a missing argument or one without a ``require_active``
+        coroutine. A caller that has no projects (a test, a tool) passes a gate that
+        says so in its name; production wiring passes ``ProjectStateGate``.
+        """
+        if not callable(getattr(project_gate, "require_active", None)):
             raise TypeError("project_gate must have a require_active coroutine")
         self._database = database
         self._listeners = tuple(listeners)
@@ -613,7 +624,7 @@ class TaskService:
         for any other wrong argument (``project_id`` and ``created_by`` are
         ``uuid.UUID`` objects; see the module docstring).
 
-        With a ``project_gate`` the project is locked ``FOR SHARE`` in the
+        The project is locked ``FOR SHARE`` (``project_gate``) in the
         transaction of the insert and must be Active, otherwise
         ``ProjectNotActiveError`` is raised and nothing is written.
         """
@@ -642,9 +653,8 @@ class TaskService:
             updated_at=now,
         )
         async with self._database.session() as session, session.begin():
-            if self._project_gate is not None:
-                # First, before any write: a refused project leaves no trace.
-                await self._project_gate.require_active(session, project_id)
+            # First, before any write: a refused project leaves no trace.
+            await self._project_gate.require_active(session, project_id)
             session.add(task)
             # No relationship() links the rows, so the task must be flushed
             # before the rows that reference it.
@@ -704,8 +714,8 @@ class TaskService:
         ``InvalidCommandArgumentError`` before anything is written or the task
         is looked at.
 
-        Retry and Restart also need the project to be Active when the service has a
-        ``project_gate`` (``ProjectNotActiveError``, nothing written; judged after
+        Retry, Restart and Start also need the project to be Active (``project_gate``;
+        ``ProjectNotActiveError``, nothing written; judged after
         the transition, so an illegal command is reported as such first).
         ``in_transaction`` (``None`` or a coroutine function, see
         ``InTransactionStep``) runs in the same transaction, after the command's
@@ -743,12 +753,11 @@ class TaskService:
             if expected_version is not None and task.version != expected_version:
                 raise TaskConflictError()
             plan = plan_transition(task.state, command, wait_reason=wait_reason)
-            if (
-                command in (TaskCommand.RETRY, TaskCommand.RESTART)
-                and self._project_gate is not None
-            ):
-                # Retry and Restart put a finished task back to work: new work.
-                # The task row is locked already; the project row follows.
+            if command in _GATED_COMMANDS:
+                # Retry and Restart put a finished task back to work, and Start
+                # begins the work of a task that was queued: none may happen in a
+                # project that is not Active. The task row is locked already; the
+                # project row follows.
                 await self._project_gate.require_active(session, task.project_id)
 
             now = utcnow()
