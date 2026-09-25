@@ -1772,7 +1772,7 @@ Timeout の Test は、永遠に待つ Provider を 0.3 秒で打ち切り、成
 「どの回答・Task がその Claim を使ったか」を **Project ごとに** 残します（[要件](../../REQUIREMENTS.md)の「Evidence / provenance」）。
 Research Scratch（24 時間 TTL）とは別の Table で、Long-term Memory とも Foreign Key でつながりません。Source の本文は保存せず、Hash だけを持ちます。
 **HTTP の Endpoint はありません。** `ProvenanceStore` は `TaskService`、`ScratchStore` と同じく認可を行わず、権限の確認は呼び出す側（API 層）の仕事です。
-選んだ規則のうち要件にないものは [Decision 0011](../../docs/decisions/0011-research-provenance-model.md)（Proposed）にまとめています。
+選んだ規則のうち要件にないものは [Decision 0011](../../docs/decisions/0011-research-provenance-model.md)（Approved、2026-09-25 に Human が承認）にまとめています。
 
 | ファイル | 内容 |
 | --- | --- |
@@ -1850,14 +1850,14 @@ Claim を記録した Task は自動で利用者になるので、`trace(project
 
 ### 上限と入力の検証
 
-Claim の本文は 2000 文字（Unicode の Code Point）、Source の `title` は 300 文字、Locator は正規化後 2048 文字です。1 回の `record_claim` は Source 20 件、`add_reference` は Claim 50 件、Claim あたりの Source は合計 50 件、`trace` は Claim 200 件までです。
+上限は Decision 0011 で暫定値として承認された値で、定数として変更できます。Claim の本文は 2000 文字（Unicode の Code Point）、Source の `title` は 300 文字、Locator は正規化後 2048 文字です。1 回の `record_claim` は Source 20 件、`add_reference` は Claim 50 件、Claim あたりの Source は合計 50 件、`trace` は Claim 200 件までです。
 型は変換しません（`"supports"` は `Stance` でなく、`bool` は `int` でなく、UUID の文字列は UUID でなく、Naive な日時は UTC でありません）。NUL と UTF-8 にできない文字は拒否します。
 全ての要素を検証してから統合します。時刻は全て aware で、UTC の同じ瞬間に変換します。
 Error の Message は固定文字列（Field 名と理由の語彙）で、入力の内容（本文、Locator、ID）・DB の Message を含みません。DB の Error（接続断など）は、Lock の待ち超過と Deadlock 以外は加工せず伝わりますが、SQL の引数を含みうるため、呼び出し側は `str(error)` を User へ見せないでください。
 
-### 呼び出し側の認可（提案）
+### 呼び出し側の認可
 
-Endpoint は次の Issue の仕事です。次の対応を提案します（未強制）。読み取り（`get_claim`、`trace`、`list_relations`）は `project.read`。`record_claim`、`add_reference`、`mark_related` は `project.task.run`。
+Endpoint は次の Issue の仕事です。次の対応を [Decision 0011](../../docs/decisions/0011-research-provenance-model.md) で承認しました（Backend では未強制）。読み取り（`get_claim`、`trace`、`list_relations`）は `project.read`。`record_claim`、`add_reference`、`mark_related` は `project.task.run`。
 
 ### 実装の由来
 
@@ -1871,15 +1871,17 @@ AGENTS.md のとおり、同じ失敗を繰り返したのでエスカレーシ�
 - Migration `0052` の `down_revision` は `0046` です（鎖は `0001 → 0025 → 0032 → 0040 → 0021 → 0033 → 0031 → 0050 → 0046 → 0052`）。
 - 回答・Task から Claim への向きだけを引けます。「この Source を使った回答」への逆引き（Source が古くなったときの影響調査）はありません。
 - Source の `private_source`、Provider、License、Claim の `confidence` は記録しません（[Decision 0011](../../docs/decisions/0011-research-provenance-model.md)）。
-- 削除・保持・Project 削除時の扱いはありません（Application は削除できません）。1 Project あたりの件数の上限（Quota）もありません。
+- 削除・保持・Project 削除時の扱いはありません（Application は削除できません）。Project 削除時の Provenance の扱い（消す・残す・匿名化する）は、Decision 0011 で今は決めないとし、Issue [#88](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/88) で別の Decision にします。1 Project あたりの件数の上限（Quota）もありません。
 - `published_at` が `fetched_at` より後でも拒否しません（ページの日付は不正確なことがあるため）。
 - Claim の Fingerprint は、正規化した本文が同じかだけを見ます。同じ意味の別の表現は、`mark_related` で明示します。
 - Advisory Lock の Key は Claim の ID の Hash（64 bit）です。衝突すると無関係な 2 つの Claim が互いを待ちますが、結果は正しいままです。
 - Deadlock が実際に起きた場合の `ProvenanceBusyError` への変換は、Driver の Error を作る Test で確認しています。実際の Deadlock を起こす Test はありません（順序を固定して起きないようにしています）。
 
-### 人間の判断が必要な点
+### 承認済みの点と、残る判断
 
-[Decision 0011](../../docs/decisions/0011-research-provenance-model.md) の「決めてほしいこと」を参照してください。
+[Decision 0011](../../docs/decisions/0011-research-provenance-model.md) は 2026-09-25 に承認されました（「承認時の決定」を参照）。
+上限（本文 2000 文字、Source 50 件など）は暫定値として承認されており、定数なので変更できます。
+Project 削除時の Provenance の扱いは、Issue [#88](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/88) で別の Decision にします。
 
 ### Test
 
