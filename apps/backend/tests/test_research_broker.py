@@ -39,6 +39,7 @@ from paw_backend.research.providers.broker import (
 )
 
 from .research_support import (
+    BASE_EXCEPTIONS,
     FORGED,
     GUARD_SECONDS,
     NOW,
@@ -58,6 +59,7 @@ from .research_support import (
     malformed_documents,
     malformed_hits,
     other_tasks,
+    raising_timezone,
     registry_of,
     web,
 )
@@ -216,6 +218,173 @@ class UnconvertibleTimestampTest(unittest.IsolatedAsyncioTestCase):
             [(e.provider_id, e.code) for e in result.errors],
             [("web-a", ResearchErrorCode.INVALID_RESPONSE)],
         )
+
+
+class SynchronousHookBaseExceptionTest(unittest.IsolatedAsyncioTestCase):
+    """A ``BaseException`` out of a hook that runs synchronously is the adapter's.
+
+    ``CancelledError`` (and ``KeyboardInterrupt``, ``SystemExit``,
+    ``GeneratorExit``) that a ``tzinfo.utcoffset`` or the lookup of a provider's
+    method raises cannot be the task's cancellation: ``Task.cancel()`` is only
+    delivered at an ``await``. It is classified like any adapter failure and
+    must neither cancel ``gather()`` / ``fetch()`` nor cost the other providers
+    their answers. A cancellation that IS delivered at an ``await`` still
+    propagates.
+    """
+
+    @staticmethod
+    def stamped(error, *, fail_on_call=1):
+        zone = raising_timezone(error, fail_on_call=fail_on_call)
+        return datetime(2026, 9, 1, tzinfo=zone)
+
+    async def test_gather_reports_a_timezone_that_raises_as_invalid_response(self):
+        for label, error in BASE_EXCEPTIONS.items():
+            for fail_on_call in (1, 2):
+                with self.subTest(error=label, fail_on_call=fail_on_call):
+                    bad = hit()
+                    stamp = self.stamped(error, fail_on_call=fail_on_call)
+                    object.__setattr__(bad, "published_at", stamp)
+                    provider = web("web-bad", hits=[bad])
+                    good = docs("docs-ok", hits=[hit("https://example.com/ok")])
+
+                    with self.assertLogs(LOGGER, level="WARNING") as logs:
+                        result = await guarded(
+                            broker_of(provider, good).gather(request())
+                        )
+
+                    self.assertEqual(
+                        [(e.provider_id, e.code) for e in result.errors],
+                        [("web-bad", Code.INVALID_RESPONSE)],
+                    )
+                    self.assertEqual(urls(result), ["https://example.com/ok"])
+                    self.assertEqual(len(logs.records), 1)
+                    self.assertNotIn(SECRET, "\n".join(logs.output))
+                    self.assertEqual(asyncio.current_task().cancelling(), 0)
+                    self.assertEqual(other_tasks(), set())
+
+    async def test_fetch_reports_a_timezone_that_raises_as_invalid_response(self):
+        for label, error in BASE_EXCEPTIONS.items():
+            with self.subTest(error=label):
+                bad = document()
+                object.__setattr__(bad, "published_at", self.stamped(error))
+                provider = web(documents={"https://example.com/a": bad})
+
+                with self.assertLogs(LOGGER, level="WARNING") as logs:
+                    result = await guarded(broker_of(provider).fetch(source_of()))
+
+                self.assertEqual(result.items, ())
+                self.assertEqual(
+                    [(e.provider_id, e.code) for e in result.errors],
+                    [("web-a", Code.INVALID_RESPONSE)],
+                )
+                self.assertNotIn(SECRET, "\n".join(logs.output))
+                self.assertEqual(asyncio.current_task().cancelling(), 0)
+
+    async def test_gather_isolates_a_provider_method_that_raises_synchronously(self):
+        # The broker reads ``provider.search`` / ``provider.fetch`` and calls it
+        # before it awaits anything: that is adapter code too (a property, a
+        # ``__getattribute__``, a marked plain function).
+        for label, error in BASE_EXCEPTIONS.items():
+            with self.subTest(error=label):
+                bad = ArmedProvider("web-bad", error)
+                good = docs("docs-ok", hits=[hit("https://example.com/ok")])
+                broker = broker_of(bad, good)
+                bad.armed = True
+
+                with self.assertLogs(LOGGER, level="WARNING") as logs:
+                    found = await guarded(broker.gather(request()))
+
+                self.assertEqual(
+                    [(e.provider_id, e.code) for e in found.errors],
+                    [("web-bad", Code.INTERNAL_ERROR)],
+                )
+                self.assertEqual(urls(found), ["https://example.com/ok"])
+                self.assertEqual(len(logs.records), 1)
+                self.assertNotIn(SECRET, "\n".join(logs.output))
+                self.assertIn(f"exception_type={ADAPTER_ERROR}", logs.output[0])
+                self.assertEqual(asyncio.current_task().cancelling(), 0)
+                self.assertEqual(other_tasks(), set())
+
+    async def test_fetch_isolates_a_provider_method_that_raises_synchronously(self):
+        for label, error in BASE_EXCEPTIONS.items():
+            with self.subTest(error=label):
+                bad = ArmedProvider("web-a", error)
+                broker = broker_of(bad)
+                bad.armed = True
+
+                with self.assertLogs(LOGGER, level="WARNING") as logs:
+                    result = await guarded(broker.fetch(source_of()))
+
+                self.assertEqual(result.items, ())
+                self.assertEqual(
+                    [(e.provider_id, e.code) for e in result.errors],
+                    [("web-a", Code.INTERNAL_ERROR)],
+                )
+                self.assertNotIn(SECRET, "\n".join(logs.output))
+
+    async def test_cancelling_gather_still_propagates_next_to_such_a_failure(self):
+        hanging = web("web-hang", hang=True)
+        bad = ArmedProvider("docs-bad", asyncio.CancelledError, kind=ProviderKind.DOCS)
+        broker = broker_of(bad, hanging, timeout_seconds=60)
+        bad.armed = True
+        task = asyncio.ensure_future(broker.gather(request(time_budget_seconds=60)))
+        for _ in range(1000):
+            if hanging.search_calls:
+                break
+            await asyncio.sleep(0.01)
+        self.assertEqual(len(hanging.search_calls), 1)
+        self.assertFalse(task.done())  # the failure of "docs-bad" did not end it
+
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await guarded(task)
+
+        self.assertTrue(task.cancelled())
+        self.assertTrue(hanging.cancelled)
+        self.assertEqual(other_tasks(), set())
+
+    async def test_cancelling_fetch_still_propagates_after_a_failed_fetch(self):
+        bad = ArmedProvider("web-a", asyncio.CancelledError)
+        broker = broker_of(bad)
+        bad.armed = True
+        with self.assertLogs(LOGGER, level="WARNING"):
+            first = await guarded(broker.fetch(source_of()))
+        self.assertEqual(first.errors[0].code, Code.INTERNAL_ERROR)
+
+        hanging = web("web-a", hang_fetch=True)
+        task = asyncio.ensure_future(
+            broker_of(hanging, timeout_seconds=60).fetch(
+                source_of(), time_budget_seconds=60
+            )
+        )
+        for _ in range(1000):
+            if hanging.fetch_calls:
+                break
+            await asyncio.sleep(0.01)
+        self.assertEqual(len(hanging.fetch_calls), 1)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await guarded(task)
+        self.assertTrue(task.cancelled())
+        self.assertTrue(hanging.cancelled)
+
+
+class ArmedProvider(StaticProvider):
+    """Reading ``search`` / ``fetch`` raises ``error(SECRET)`` once ``armed``.
+
+    Registration reads the attributes while not armed, as a real provider that
+    breaks later would.
+    """
+
+    def __init__(self, name, error, kind=ProviderKind.WEB, **kwargs):
+        super().__init__(name, kind, **kwargs)
+        self.error = error
+        self.armed = False
+
+    def __getattribute__(self, name):
+        if name in ("search", "fetch") and object.__getattribute__(self, "armed"):
+            raise object.__getattribute__(self, "error")(SECRET)
+        return super().__getattribute__(name)
 
 
 class MalformedTypedResponseTest(unittest.IsolatedAsyncioTestCase):

@@ -140,7 +140,11 @@ class BudgetUsageRow(Base):
     on the ``runtime_seconds`` row, 0 elsewhere) is the runtime session generation:
     every ``start_runtime`` increments it and ``stop_runtime`` must present the
     current value, so a superseded session cannot stop the newer one's timer. It
-    only grows and is kept when the timer stops.
+    only grows and is kept when the timer stops. ``settled_through`` (also only on
+    the ``runtime_seconds`` row) is the cutoff of the last ``stop_runtime``: the
+    time up to which the runtime has been charged. A timer starts no earlier than
+    it, so a start that read its clock before an older session's stop settled a
+    later time cannot make that interval count twice (Decision 0007, 10).
     """
 
     __tablename__ = "budget_usages"
@@ -156,6 +160,7 @@ class BudgetUsageRow(Base):
     runtime_generation: Mapped[int] = mapped_column(
         BigInteger, default=0, server_default=text("0")
     )
+    settled_through: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()")
     )
@@ -181,6 +186,15 @@ class BudgetUsageRow(Base):
             "runtime_generation >= 0"
             " AND (kind = 'runtime_seconds' OR runtime_generation = 0)",
             name="runtime_generation_valid",
+        ),
+        CheckConstraint(
+            "settled_through IS NULL OR kind = 'runtime_seconds'",
+            name="settled_only_for_runtime",
+        ),
+        CheckConstraint(
+            "running_since IS NULL OR settled_through IS NULL"
+            " OR running_since >= settled_through",
+            name="running_not_before_settled",
         ),
     )
 

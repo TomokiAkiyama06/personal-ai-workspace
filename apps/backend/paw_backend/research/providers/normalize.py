@@ -57,18 +57,30 @@ def published_utc(value: object) -> datetime | None:
     can express (``datetime.max`` at UTC-01:00 cannot); anything else, and any
     failure of the conversion, is ``InvalidProviderResponseError``. The result is
     an exact ``datetime`` (never a subclass) whose methods are the standard
-    library's: the conversion uses the ``datetime`` methods directly, so a
-    subclass cannot run its own code. Only ``value.tzinfo`` is the provider's
-    code (``utcoffset``); whatever it raises is the provider's invalid response.
+    library's. The fields are first copied into an exact ``datetime`` with the
+    ``datetime`` methods (``astimezone`` builds its intermediate result with the
+    constructor of the subclass, which is adapter code), so a subclass cannot run
+    its own code, and the ``tzinfo`` sees a plain ``datetime``.
+
+    Only ``value.tzinfo`` is the provider's code (``utcoffset``), and it runs
+    synchronously: nothing is awaited between the call and its answer, so a
+    cancellation of the broker's task cannot arrive inside it (``Task.cancel()``
+    is delivered at an ``await``). Whatever it raises, ``asyncio.CancelledError``,
+    ``KeyboardInterrupt``, ``SystemExit`` or ``GeneratorExit`` included, is
+    therefore the provider's own invalid response and never the task's; it does
+    not escape to cancel ``gather()`` / ``fetch()`` (Decision 0012). The one thing
+    that this cannot tell apart is a real ``KeyboardInterrupt`` that a signal
+    handler raises inside this window: it is converted too (Decision 0012).
     """
     if value is None:
         return None
     if not issubclass(type(value), datetime):
         raise InvalidProviderResponseError()
+    exact = datetime.combine(datetime.date(value), datetime.timetz(value))
     try:
-        offset = datetime.utcoffset(value)
-        converted = None if offset is None else datetime.astimezone(value, UTC)
-    except Exception:  # only the provider's tzinfo runs here (see the docstring)
+        offset = exact.utcoffset()
+        converted = None if offset is None else exact.astimezone(UTC)
+    except BaseException:  # the provider's tzinfo, run synchronously (see above)
         raise InvalidProviderResponseError() from None
     if converted is None:  # naive
         raise InvalidProviderResponseError()

@@ -26,6 +26,7 @@ from paw_backend.tasks.queueing import (
 from paw_backend.tasks.queueing.validation import MAX_CONSUMED
 
 from .queueing_support import (
+    FakeClock,
     PostgresQueueingTestCase,
     at,
     requires_postgres,
@@ -52,6 +53,40 @@ class ConstructorTest(unittest.TestCase):
                 self.assertEqual(caught.exception.parameter, "clock")
 
 
+class StalledBegin:
+    """``engine.begin()`` that first says it was reached, then waits for the gate."""
+
+    def __init__(self, engine, reached: asyncio.Event, gate: asyncio.Event) -> None:
+        self._engine = engine
+        self._reached = reached
+        self._gate = gate
+        self._transaction = None
+
+    async def __aenter__(self):
+        self._reached.set()
+        await self._gate.wait()
+        self._transaction = self._engine.begin()
+        return await self._transaction.__aenter__()
+
+    async def __aexit__(self, *exc_info):
+        return await self._transaction.__aexit__(*exc_info)
+
+
+class StalledDatabase:
+    """A database whose transactions stall until ``gate`` is set. A tracker on it
+    reads its clock, then stalls before its statement runs (a paused process, a
+    slow connection): the delayed writer of a race, made deterministic."""
+
+    def __init__(self, database) -> None:
+        self.reached = asyncio.Event()
+        self.gate = asyncio.Event()
+        self.engine = self
+        self._database = database
+
+    def begin(self) -> StalledBegin:
+        return StalledBegin(self._database.engine, self.reached, self.gate)
+
+
 class BudgetTestCase(PostgresQueueingTestCase):
     async def configured_task(self, preset: BudgetPreset = STANDARD) -> uuid.UUID:
         (task_id,) = await self.make_tasks(1)
@@ -61,7 +96,8 @@ class BudgetTestCase(PostgresQueueingTestCase):
     async def snapshot(self) -> list[dict]:
         return await self.rows(
             "SELECT task_id, kind, preset, consumed, limit_value, running_since, "
-            "runtime_generation FROM budget_usages ORDER BY task_id, kind"
+            "runtime_generation, settled_through FROM budget_usages "
+            "ORDER BY task_id, kind"
         )
 
 
@@ -788,6 +824,129 @@ class RuntimeTest(BudgetTestCase):
             with self.assertRaises(StaleRuntimeSessionError):
                 await self.budget.stop_runtime(task_id, generation)
         self.assertEqual((await self.budget.stop_runtime(task_id, 5)).consumed, 10)
+
+    async def test_a_delayed_replacement_start_cannot_predate_the_old_stop(self):
+        task_id = await self.configured_task()
+        old = await self.budget.start_runtime(task_id)  # worker A, t=0
+        stalled = StalledDatabase(self.database)
+        replacement = BudgetTracker(stalled, clock=FakeClock(at(100)))
+        # Worker B reads its clock (t=100) and then stalls before its statement.
+        start = asyncio.create_task(replacement.start_runtime(task_id))
+        try:
+            await asyncio.wait_for(stalled.reached.wait(), timeout=30)
+            self.clock.set(150)
+            # A's stop settles the run through t=150 first and clears the timer.
+            settled = await self.budget.stop_runtime(task_id, old)
+            self.assertEqual(settled.consumed, 150)
+        finally:
+            stalled.gate.set()
+        new = await asyncio.wait_for(start, timeout=30)
+        self.assertEqual(new, old + 1)
+        # B's timer starts at the cutoff of A's stop, not at its own earlier reading
+        # (t=100): 100..150 is already charged.
+        row = await self.budget_row(task_id, "runtime_seconds")
+        self.assertEqual(
+            (row["consumed"], row["running_since"], row["runtime_generation"]),
+            (150, at(150), new),
+        )
+        self.clock.set(160)
+        self.assertEqual((await self.budget.usage(task_id))[0].consumed, 160)
+        self.assertEqual((await self.budget.stop_runtime(task_id, new)).consumed, 160)
+
+    async def test_a_start_waiting_on_the_row_lock_starts_after_the_stop_settled(
+        self,
+    ):
+        # The same race with the real interleaving: both statements wait on the row
+        # lock, the stop first. The start already holds its earlier reading (t=100)
+        # and is re-evaluated against the row the stop wrote.
+        task_id = await self.configured_task()
+        old = await self.budget.start_runtime(task_id)  # t=0
+        replacement = self.new_budget(clock=FakeClock(at(100)))
+        stop = start = None
+        try:
+            async with self.database.engine.connect() as holder:
+                await holder.execute(
+                    text(
+                        "SELECT 1 FROM budget_usages "
+                        "WHERE task_id = :t AND kind = 'runtime_seconds' FOR UPDATE"
+                    ),
+                    {"t": task_id},
+                )
+                self.clock.set(150)
+                stop = asyncio.create_task(self.budget.stop_runtime(task_id, old))
+                await self.wait_for_lock_waiters(1)
+                start = asyncio.create_task(replacement.start_runtime(task_id))
+                await self.wait_for_lock_waiters(2)
+                await holder.rollback()
+            settled = await asyncio.wait_for(stop, timeout=30)
+            new = await asyncio.wait_for(start, timeout=30)
+        finally:
+            for pending in (stop, start):
+                if pending is not None and not pending.done():
+                    pending.cancel()
+        self.assertEqual(settled.consumed, 150)
+        row = await self.budget_row(task_id, "runtime_seconds")
+        self.assertEqual(
+            (row["consumed"], row["running_since"], row["runtime_generation"]),
+            (150, at(150), new),
+        )
+        self.clock.set(160)
+        self.assertEqual((await self.budget.stop_runtime(task_id, new)).consumed, 160)
+
+    async def test_a_start_never_predates_the_previous_stops_cutoff(self):
+        task_id = await self.configured_task()
+        self.clock.set(100)
+        first = await self.budget.start_runtime(task_id)
+        self.clock.set(50)  # the clock went backwards: nothing is charged
+        await self.budget.stop_runtime(task_id, first)
+        self.clock.set(60)
+        second = await self.budget.start_runtime(task_id)
+        # The interval up to t=100 was settled (as an empty one) by the first stop.
+        row = await self.budget_row(task_id, "runtime_seconds")
+        self.assertEqual((row["running_since"], row["consumed"]), (at(100), 0))
+        self.clock.set(130)
+        self.assertEqual((await self.budget.stop_runtime(task_id, second)).consumed, 30)
+
+    async def test_the_cutoff_only_moves_forward_across_backwards_clocks(self):
+        task_id = await self.configured_task()
+        self.clock.set(0)
+        session = await self.budget.start_runtime(task_id)
+        self.clock.set(150)
+        await self.budget.stop_runtime(task_id, session)  # settled through t=150
+        for reading in (130, 120, 200):
+            self.clock.set(reading)
+            session = await self.budget.start_runtime(task_id)
+            self.clock.set(110)  # a stop from a host whose clock is behind
+            await self.budget.stop_runtime(task_id, session)
+        # The last stop settled through t=200 (its own running_since), although its
+        # clock said 110: a later start cannot go back before that.
+        self.clock.set(160)
+        session = await self.budget.start_runtime(task_id)
+        row = await self.budget_row(task_id, "runtime_seconds")
+        self.assertEqual((row["consumed"], row["running_since"]), (150, at(200)))
+        self.clock.set(230)
+        self.assertEqual(
+            (await self.budget.stop_runtime(task_id, session)).consumed, 180
+        )
+
+    async def test_a_takeover_start_keeps_the_running_timer_and_the_cutoff(self):
+        task_id = await self.configured_task()
+        self.clock.set(10)
+        first = await self.budget.start_runtime(task_id)
+        self.clock.set(40)
+        await self.budget.stop_runtime(task_id, first)  # settled through t=40
+        self.clock.set(50)
+        await self.budget.start_runtime(task_id)
+        self.clock.set(20)  # a delayed replacement start that sampled t=20
+        takeover = await self.budget.start_runtime(task_id)
+        row = await self.budget_row(task_id, "runtime_seconds")
+        self.assertEqual(
+            (row["running_since"], row["settled_through"]), (at(50), at(40))
+        )
+        self.clock.set(70)
+        self.assertEqual(
+            (await self.budget.stop_runtime(task_id, takeover)).consumed, 50
+        )
 
     async def test_the_generation_is_validated_before_anything_is_written(self):
         task_id = await self.configured_task()

@@ -14,6 +14,7 @@ from paw_backend.tasks import (
     Actor,
     TaskCommand,
     TaskEvent,
+    TaskRun,
     TaskService,
     TaskState,
     WaitReason,
@@ -47,6 +48,10 @@ def migrate(
 def new_database() -> Database:
     return Database(make_settings(database_url=TEST_DATABASE_URL))
 
+
+# The run of a task that has not been retried or restarted: what a worker started
+# by the first Start event passes to ``begin_step`` / ``add_log`` / ``update_attempt``.
+FIRST_RUN = TaskRun(1, 0)
 
 # How to bring a fresh (queued) task into each state through legal commands.
 PATH_TO_STATE: dict[TaskState, list[tuple[TaskCommand, WaitReason | None]]] = {

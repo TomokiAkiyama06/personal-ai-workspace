@@ -185,6 +185,13 @@ def _log_failure(
     )
 
 
+def _failed(entry: RegisteredProvider, error: BaseException) -> _Outcome:
+    """Classify, log and return the failure of one provider call."""
+    code = classify_failure(error)
+    _log_failure(entry, code, error)
+    return _Outcome(code=code)
+
+
 async def _call_provider(
     entry: RegisteredProvider,
     call: Callable[[], Awaitable[object]],
@@ -196,17 +203,29 @@ async def _call_provider(
     ``timeout_at`` block does this) and reported as ``TIMEOUT``. Catching
     ``Exception`` is the point of this function: one failing provider must not
     fail the others. ``CancelledError`` is a ``BaseException`` and propagates.
+
+    One exception to that: ``call()`` itself (reading ``provider.search`` and
+    calling it) is adapter code that runs synchronously, before anything is
+    awaited. A cancellation of this task is delivered at an ``await``, never
+    there, so whatever ``call()`` raises, ``BaseException`` included (a property
+    that raises ``CancelledError``, say), is the adapter's own failure and is
+    classified like any other; it must not cancel ``gather()``. Only the
+    synchronous call is guarded this way: the ``await`` below still lets a real
+    ``CancelledError`` (a cancelled ``gather()``, or the timeout) through
+    (Decision 0012).
     """
     try:
         async with asyncio.timeout_at(deadline):
-            return _Outcome(response=await call())
+            try:
+                pending = call()
+            except BaseException as error:  # adapter code, synchronous: see above
+                return _failed(entry, error)
+            return _Outcome(response=await pending)
     except Exception as error:
-        code = classify_failure(error)
-        _log_failure(entry, code, error)
-        return _Outcome(code=code)
+        return _failed(entry, error)
 
 
-def classify_failure(error: Exception) -> ResearchErrorCode:
+def classify_failure(error: BaseException) -> ResearchErrorCode:
     """Map an exception raised by a provider to a member of ``ResearchErrorCode``.
 
     * a ``ProviderFailure`` gives the ``ResearchErrorCode`` that its constructor
@@ -328,9 +347,13 @@ class ResearchBroker:
            unaffected. The exception is read without running any of its own code
            (see ``classify_failure``), so it cannot make ``gather`` raise. This is
            the one place where catching ``Exception`` is intended.
-           ``asyncio.CancelledError`` and other ``BaseException`` are
-           never swallowed: cancelling ``gather`` cancels every provider call and
-           propagates.
+           ``asyncio.CancelledError`` and other ``BaseException`` raised while a
+           provider call is awaited are never swallowed: cancelling ``gather``
+           cancels every provider call and propagates. The exception is the
+           synchronous part of the call (reading ``provider.search`` and calling
+           it): no cancellation can be delivered there, so a ``BaseException``
+           from it is the adapter's own failure (``INTERNAL_ERROR``, see
+           ``_call_provider``).
         4. ``retrieved_at = clock()`` is read exactly once per ``gather`` call,
            AFTER all providers have finished or timed out, and shared by all
            items.
@@ -343,7 +366,10 @@ class ResearchBroker:
            ``INVALID_RESPONSE`` (logged like any failure), contributes no item,
            and the others are unaffected. The response must be exactly a ``list``
            or ``tuple``: a subclass or a look-alike is invalid before any of its
-           hooks (``__len__``, ``__iter__``, ...) can run.
+           hooks (``__len__``, ``__iter__``, ...) can run. The one hook that does
+           run is a ``published_at``'s ``tzinfo.utcoffset``; whatever it raises,
+           ``asyncio.CancelledError`` included, is an invalid response too
+           (see ``published_utc``).
         6. ``merge_items`` over the successful providers' items (in registry
            order) with ``max_results=request.max_results`` gives ``items`` and
            ``truncated``.
@@ -445,11 +471,13 @@ class ResearchBroker:
         Otherwise ``provider.fetch(<canonical locator>)`` runs under
         ``min(entry.timeout_seconds, time_budget_seconds)`` with the same failure
         rules as ``gather`` (``classify_failure``, ``TIMEOUT`` with cancellation,
-        one WARNING log, ``CancelledError`` propagates). A response that is not a
-        ``ProviderDocument`` is ``INVALID_RESPONSE``, and so is a ``ProviderDocument``
-        whose live fields are invalid (unset slots, wrong types, text over
-        ``MAX_DOCUMENT_CHARS``, a ``published_at`` that is naive or that UTC cannot
-        express): ``revalidate_document`` reads and validates every field again.
+        one WARNING log, ``CancelledError`` at an ``await`` propagates). A response
+        that is not a ``ProviderDocument`` is ``INVALID_RESPONSE``, and so is a
+        ``ProviderDocument`` whose live fields are invalid (unset slots, wrong
+        types, text over ``MAX_DOCUMENT_CHARS``, a ``published_at`` that is naive
+        or that UTC cannot express, or whose ``tzinfo`` raises anything at all,
+        ``CancelledError`` included): ``revalidate_document`` reads and validates
+        every field again.
         On success the result has one item, ``providers_queried=1``, no errors,
         ``truncated=False``:
         ``ResearchItem(source=SourceMetadata(provider_kind=source.provider_kind,
