@@ -70,7 +70,9 @@ call: the handle is resolved into a ``Secret`` and the adapter runs, under ONE d
 of the caller gets through (it runs as a task the caller keeps and waits for; the
 cancel is raised afterwards): the outcome, the tokens and the database-clock duration
 are written to the usage row and the tokens are charged to the task's budget; 8. the
-answer, scrubbed of the credential.
+answer, scrubbed of the credential (returned whole or refused: never shortened, never
+longer than the limit after the credential was replaced and redacted; the token counts
+the adapter reported are kept even when the answer is refused).
 
 A quota that is reached never interrupts a call that has started: the check is at the
 admission only, and a running TASK is not refused at its next call either (Decision
@@ -119,7 +121,6 @@ from paw_backend.connections.adapter import (
     AdapterRegistry,
     AdapterRequest,
     AdapterResult,
-    validate_adapter_result,
 )
 from paw_backend.connections.domain import (
     DEFAULT_PERIOD_TIMEZONE,
@@ -150,6 +151,8 @@ from paw_backend.connections.limits import (
     DEFAULT_HEALTH_TIMEOUT_SECONDS,
     DEFAULT_LIST_LIMIT,
     MAX_HEALTH_TIMEOUT_SECONDS,
+    MAX_RESULT_CHARS,
+    MAX_TOKENS_PER_CALL,
 )
 from paw_backend.connections.records import (
     ConnectionAvailability,
@@ -167,8 +170,10 @@ from paw_backend.connections.validation import (
     require_type,
     validate_enum,
     validate_handle,
+    validate_optional_tokens,
     validate_page,
     validate_quota_limit,
+    validate_result_text,
     validate_seconds,
     validate_uuid,
     zone_of,
@@ -195,6 +200,11 @@ ACTION_USE = "connection.use"
 ACTION_QUOTA_SET = "connection.quota.set"
 ACTION_QUOTA_REMOVE = "connection.quota.remove"
 OUTCOME_SUCCEEDED = "succeeded"
+# The most an answer may be, as the adapter returned it and as it is returned: the
+# limit of the adapter result, and never more than ``redact_text`` reads (it cuts an
+# input over its own limit). ``tests/test_connections_result_limit.py`` keeps the
+# two limits equal.
+ANSWER_LIMIT = min(MAX_RESULT_CHARS, MAX_TEXT_CHARS)
 OWNER_ONLY = "owner_quota_owner_only"  # reason of the refusal (audit)
 
 _RESOURCE_CONNECTION = "connection"
@@ -760,46 +770,61 @@ class ConnectionService:
             )
             outcome.failed(code)
             return
+        # The token counts are validated on their own, and kept whatever happens to
+        # the body below: the provider consumed them even if the answer cannot be
+        # returned, so the usage row, the quotas and the task's budget count them.
         try:
             if type(raw) is not AdapterResult:
                 raise TypeError("not an AdapterResult")
-            validate_adapter_result(raw)
-            text, input_tokens, output_tokens = (
-                raw.text,
-                raw.input_tokens,
-                raw.output_tokens,
+            input_tokens = validate_optional_tokens(
+                "input_tokens", raw.input_tokens, MAX_TOKENS_PER_CALL
+            )
+            output_tokens = validate_optional_tokens(
+                "output_tokens", raw.output_tokens, MAX_TOKENS_PER_CALL
             )
         except Exception as error:
-            logger.warning(
-                "connection call returned an invalid response: usage_id=%s"
-                " exception_type=%s",
-                admission.usage_id,
-                log_type_name(error),
-            )
+            self._log_invalid_response(admission, error)
+            outcome.failed(FailureCode.INVALID_RESPONSE)
+            return
+        outcome.input_tokens = input_tokens
+        outcome.output_tokens = output_tokens
+        try:
+            text = validate_result_text("text", raw.text, ANSWER_LIMIT)
+        except Exception as error:
+            self._log_invalid_response(admission, error)
             outcome.failed(FailureCode.INVALID_RESPONSE)
             return
         # The credential must not come back to the user or the agent, even if the
         # adapter (a bug, an echo of the provider) put it in the answer: the exact
-        # value first, then every recognisable format.
+        # value first, then every recognisable format. Both REPLACE text by longer
+        # text (a short credential becomes ``[REDACTED]``, ``token=abcdef`` becomes
+        # ``token=[REDACTED]``), and ``redact_text`` cuts an input over its own limit
+        # and only marks it. An answer is returned whole or refused, never shortened
+        # and never longer than the limit: the length is checked before the redaction
+        # (its input) and again after it (what is returned).
         text = secret.scrub(text)
-        if len(text) > MAX_TEXT_CHARS:
-            # ``redact_text`` would cut the text and only mark it: an answer is
-            # returned whole or refused, never silently shortened. (The scrub can
-            # lengthen a text: each occurrence of a short credential becomes
-            # ``[REDACTED]``.)
+        if len(text) <= ANSWER_LIMIT:
+            text, redactions = redact_text(text)
+        if len(text) > ANSWER_LIMIT:
             logger.warning(
                 "connection call returned an answer that is too long: usage_id=%s",
                 admission.usage_id,
             )
             outcome.failed(FailureCode.INVALID_RESPONSE)
             return
-        text, redactions = redact_text(text)
         outcome.status = UsageStatus.SUCCEEDED
         outcome.failure = None
         outcome.text = text
-        outcome.input_tokens = input_tokens
-        outcome.output_tokens = output_tokens
         outcome.redactions = redactions
+
+    @staticmethod
+    def _log_invalid_response(admission: Admitted, error: BaseException) -> None:
+        logger.warning(
+            "connection call returned an invalid response: usage_id=%s"
+            " exception_type=%s",
+            admission.usage_id,
+            log_type_name(error),
+        )
 
     async def _resolve(self, handle: str) -> Secret:
         secret = await self._secrets.resolve(handle)

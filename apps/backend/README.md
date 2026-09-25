@@ -1285,7 +1285,7 @@ Health Check の結果は、確認した Credential（Handle）がまだ現在�
 | --- | --- |
 | `requests` | Admission を通った呼び出し（失敗・取り消し・実行中も数える） |
 | `tasks` | その期間にその Connection を使った Task の数（同じ Task の複数回は 1） |
-| `tokens` | Adapter が返した入力 + 出力（返さない呼び出しは 0） |
+| `tokens` | Adapter が返した入力 + 出力（返さない呼び出しは 0。答えを返せない失敗でも、有効な数は数える） |
 | `runtime_seconds` | 呼び出しの時間の合計。Database の時計で ms まで測り、秒に切り捨てて比較 |
 
 | 期間 | 範囲 |
@@ -1359,7 +1359,8 @@ CHECK 制約が、状態と終了・時間・Token・失敗の種類の対応（
 - 実行中の Task は Quota で止まらない（承認済み。Decision 0016 の 3 節）。`tokens` / `runtime_seconds` は終了後に数える。同時実行数、GPU 時間、期限付きの上限の一時緩和は未実装。
 - Process が Admission と精算の間で落ちた行は `in_flight` のまま残り、要求数にだけ数えられます（掃除は未実装）。精算に失敗した呼び出しは、答えを返し、失敗を Log（型名と使用量の ID）に残します。Task の Budget への加算は精算と別の Transaction です。
 - 精算と Budget の加算が終わるまで呼び出し側の Cancel を伝えないため、Database や Budget の Store が止まっていると、Cancel はその分（使用量の行は Database の期限まで。Budget の加算は `BudgetTracker` が中断できない接続を使うため上限なし）遅れます。Event Loop の終了で Task ごと Cancel された精算は防げず、行が `in_flight` のまま残ります。
-- Adapter の答えは 1,000,000 文字まで（Credential の Redact の上限 `tools.credentials.MAX_TEXT_CHARS` と同じ）です。超える答え、Credential の値の置き換えで超える答えは、途中で切らずに `invalid_response` の失敗にします（`redact_text` は長い文を切って印を付けるだけなので、黙って短くなった答えを成功として返さないため）。
+- Adapter の答えは 1,000,000 文字までです（Credential の Redact の上限 `tools.credentials.MAX_TEXT_CHARS` と同じ）。**返す文の長さで判定します**: Adapter が返した長さ、Credential の値の置き換え（短い Credential は `[REDACTED]` になり長くなる）の後、形のわかる Credential の Redact（`token=abcdef` が `token=[REDACTED]` になるように**長くなりうる**）の後の、どれかが上限を超える答えは、途中で切らずに `invalid_response` の失敗にします（`redact_text` は長い文を切って印を付けるだけなので、黙って短くなった答え、上限を超えて長くなった答えを成功として返さないため）。
+- 答えを返せない失敗（`invalid_response`）でも、Adapter が返した Token 数が有効なら、使用量の行・Token の Quota・Task の Budget が数えます（Provider は消費しているため）。Token 数は答えの本文とは別に検査し、有効でない数（負、上限超、bool、非整数）は保存しません（NULL）。
 - Prompt の中身は検査しません（Credential の混入や Privacy の Filter は Orchestrator と Tool Broker の責務）。
 - 使用量の保存期間、集計、Admin の Graph は未実装。専用の Capability（#82）と、Credential の差し替え・削除への Step-up（PAW-023 の後）は、Decision 0016 で承認された後続の Issue です（今は `admin.config.manage` の通常の認可だけ）。
 - Health Check を動かす Scheduler と、状態の変化の Owner への通知は Orchestrator / 通知の Issue です。
