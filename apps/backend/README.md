@@ -91,7 +91,7 @@ Repository 全体の検証は `python .github/scripts/run_ci.py` です（[CI](.
 実 PostgreSQL に対する Test は `PAW_TEST_DATABASE_URL` を設定した場合だけ実行し、未設定では Skip します。
 GitHub Actions は使い捨ての PostgreSQL を起動してこの変数を渡すため、CI ではこれらの Test も実行されます。
 この Test は Migration を `head` へ上げて `base` へ戻すため、ローカルでも使い捨ての Database を指定してください。
-Database には pgvector が必要です（CI は `pgvector/pgvector:pg18` を使います）。Migration の実行には `CREATE EXTENSION` の権限が要ります。
+Database には pgvector が必要です（CI は `pgvector/pgvector:pg18` を使います）。承認の要求と使用（`Database.transact_abortable`）は `transaction_timeout` を使うので、PostgreSQL 17 以上が必要です。Migration の実行には `CREATE EXTENSION` の権限が要ります。
 
 ## 設定
 
@@ -291,7 +291,7 @@ Operator の 6 操作は次のように解釈しています（[要件](../../RE
 | `task_attempts` | 試行ごとの branch / worktree / head commit、Review 状態、Evaluator 結果、PR の番号・URL・状態 |
 | `task_steps` | Step の実行記録。試行内で最新の行が current step。試行内で `running` は高々 1 つ（Partial Unique Index） |
 | `task_tool_invocations` | Step が呼んだ Tool の実行状態（下記）。ID、Tool 名、状態（`started` / `succeeded` / `failed` / `interrupted`）、開始・終了時刻だけを持つ。`started` の行だけの Partial Index（`step_id`）と、終了済みの行だけの Partial Index（`step_id`、開始の新しい順、`id` の新しい順）がある |
-| `task_logs` | 試行ごとの Log（`debug` / `info` / `warning` / `error`）。行は書いた Run（`attempt` と `retry_count`）を持つ |
+| `task_logs` | 試行ごとの Log（`debug` / `info` / `warning` / `error`）。行は書いた Run（`attempt` と `retry_count`）を持つ。Index は `(task_id, attempt, seq DESC)`（下記の `restore`） |
 | `task_events` | Append-only の履歴。全遷移について、Command、遷移前後の状態、`wait_reason`、Actor（`user` / `system` / `policy` と User の UUID）、理由、その時点の Step 名、`task_version`、Event 後の Run（`attempt` と `retry_count`。Start では Worker の Run） |
 
 - `project_id`、`created_by`、`actor_id` は UUID だけを持ち、外部キーはありません。projects の Table がまだ存在せず、`users`（PAW-021、Revision `0021`）は Migration の順序が統合後に決まるためです（両方が揃った後の Revision で外部キーを追加します）。
@@ -339,6 +339,7 @@ Operator の 6 操作は次のように解釈しています（[要件](../../RE
   **引数と出力は保存しません。** 権限判定、承認、引数と結果の扱いは Tool Broker（PAW-031）の責務です。Step が終わる（Stop Now / Fail / Restart / `finish_step`）と、`started` のままの Tool は `interrupted` になります。
 - `TaskService.restore(task_id)` は DB だけから Snapshot（状態、current step、直近の Log、worktree / review / PR の状態、直近の Event）を作ります。1 つの Repeatable Read Transaction で読むため、同じ時点の値です。
   状態は Process のメモリに持たないので、Client が切断しても、Backend が再起動しても、別の Process が同じ値を返します。
+  `restore` の Log の問い合わせ（現在の試行の行を `seq` の新しい順に `log_limit` 件まで）は、Index `ix_task_logs_task_id_attempt_seq`（`task_id`、`attempt`、`seq DESC`）が受け持ちます。PostgreSQL は現在の試行の位置へ直接移り、その行だけを並び順のまま読んで件数で止まるため、Restart で前の試行の Log が何万行残っていても、再接続のたびの作業量は返す行数で決まります（以前の `(task_id, seq)` の Index では、新しい方から前の試行の行を読んで捨てながら遡っていました）。`(task_id, seq)` の Index は残していません。Log を試行をまたいで読む問い合わせが今はなく、外部キー `task_id` の確認には新しい Index の先頭の列が使えるためです。書き込みの多い Table なので Index を 1 つ減らします。Log を試行をまたいで読む機能を足すときは、その問い合わせに合う Index を、そのときに足してください。`restore` の他の問い合わせは、すでに専用の Index があります（現在の Step は `UNIQUE (task_id, attempt, sequence)`、直近の Event は `(task_id, seq)`、試行の一覧は `UNIQUE (task_id, number)`）。Test は、前の試行の Log と Step が 2 万件ずつ、他の Task の Log と Event が合わせて数万件ある Task で、Plan を使い回す設定（`force_generic_plan`）でも値ごとに立てる Plan（`force_custom_plan`）でも、Seq Scan と並べ替えがなく、Log は現在の試行の行（3 行と 0 行）だけ、現在の Step と直近の Event は 1 行だけを読むことを確認します。
 - `TaskService(database, listeners=[...])` の Listener は Commit 後に、書き込まれた `TaskEvent` を受け取ります。Audit（PAW-025）の接続点です。Listener の失敗は Command を失敗させず、例外の型名だけを Log に残します。
   取りこぼしを避けたい Consumer は `task_events` を `seq` で読んでください（`TaskService.history(task_id, after_seq=...)`）。
 - 実行中 Task の Runtime 状態（実行中 Process など）の復旧は、要件どおり V1 では保証しません。`tool_invocations` が `started` のままの Task は、Backend が再開または中断を判断するための記録で、Process が生きている保証ではありません。
@@ -430,7 +431,7 @@ Lease が有効なのは `lease_expires_at > now` の間だけで、期限の瞬
 
 Worker が各自の時計を渡す方式では、時計が進んでいる Worker や誤って未来の時刻を渡した呼び出しが、まだ有効な Lease を「切れた」と判定して Entry を奪い、同じ Task を 2 つの Worker で始めさせられます（同様に過去の時刻で待ち行列の先頭へ割り込めます）。Database の時計なら、全ての Process が 1 つの基準を共有します。
 各 Method（`enqueue`、`claim_next`、`heartbeat`、`release`、`complete`、`cancel`）の `now` は省略でき、省略（`None`）が Database の時計です。**本番のコードは `now` を渡してはいけません。** 明示の `now`（Timezone 付きの `datetime`）は Test のための継ぎ目で、`TaskQueue(database, allow_explicit_now=True)` で作った Queue だけが受け取ります。それ以外の Queue は `InvalidQueueingArgumentError("now")` で拒否するので、既定の Queue では呼び出し側が時刻を差し込めません（[Decision 0007](../../docs/decisions/0007-task-queue-budget-and-loop-policy.md) の 6）。継ぎ目は、既存の Test をそのまま使えるように、Constructor で時計を差し替える方式ではなく Method の引数で残しています。
-限界: 基準は 1 つの PostgreSQL Server の時計です。Failover などで別の Server の時計へ切り替わる場合の時計のずれは扱いません（Lease は数十秒以上なので、通常の NTP の精度では問題になりません）。`BudgetTracker` の `clock` は、Queue とは別に Process の時計を使います（Task の実行時間の測定用で、Lease の判定ではありません）。
+限界: 基準は 1 つの PostgreSQL Server の時計です。Failover などで別の Server の時計へ切り替わる場合の時計のずれは扱いません（Lease は数十秒以上なので、通常の NTP の精度では問題になりません）。Runtime の Timer（`BudgetTracker`）も同じ Database の時計を使います（下の Budget の節。以前は Process の時計でしたが、Host ごとに時計が食い違うと Runtime を少なく数えられるため、Database の時計へ一本化しました）。
 
 **行ロック。** `claim_next` は 1 Transaction で、Claim できる行のうち先頭を `SELECT ... ORDER BY ... LIMIT 1 FOR UPDATE SKIP LOCKED` で選び、その行を更新します。他の Transaction がロック中の行は待たずに飛ばします。
 したがって、競合する複数の Claimer が同じ Entry を得ることはなく、互いを待たず、Claim できる Entry がロック中の 1 つだけなら `None` がすぐに返ります。
@@ -444,7 +445,7 @@ Runtime と GPU 時間の単位は整数の秒、他は個数です。記録す�
 
 | 種類 | 記録 |
 | --- | --- |
-| `runtime_seconds`（max runtime） | `start_runtime` / `stop_runtime(task_id, generation)` が、注入した Clock で測る（`record` は不可） |
+| `runtime_seconds`（max runtime） | `start_runtime` / `stop_runtime(task_id, generation)` が、Database の時計で測る（`record` は不可） |
 | `steps`、`retries`、`tool_calls`、`tokens`、`gpu_seconds` | `record(task_id, kind, amount)` |
 
 - **Preset。** Standard / Long / Unlimited は `domain.PRESET_LIMITS` のデータです。`set_preset` が Task の 6 行を作り（または上限だけを更新し、消費は保ちます）、上限をその Task の行へ写します。
@@ -453,7 +454,9 @@ Runtime と GPU 時間の単位は整数の秒、他は個数です。記録す�
   `EXCEEDED` の Verdict は、超過した種類をすべて、宣言順で返します。要件に警告の閾値はないため、`WARN` はありません。
 - **原子性。** `record` は `UPDATE ... SET consumed = LEAST(consumed + :amount, 上限) ... RETURNING` の 1 文で、複数 Process が同時に記録しても増分は失われません。消費量は `10^15` で飽和し、Overflow しません。
 - **Runtime。** `start_runtime` が `running_since` を保存し、`stop_runtime` が経過した整数秒（切り捨て、負にはならない）を加えて消します。実行中は `usage` / `check` が経過分を足して返しますが、書き込みません。同時の `stop_runtime` が時間を二重に加えることはありません。
-- **Timer の時刻の順序。** 時計（`clock`）は文を実行する**前**に Python で読むため、読んだ後に呼び出しが遅れることがあります。そこで `stop_runtime` は、精算した Cutoff を `settled_through`（`greatest(clock(), running_since)`）に記録し、`start_runtime` は Timer を `greatest(clock(), settled_through)` から始めます（どちらも行を Lock する文の中で計算します。`greatest` は `NULL` を無視するので、まだ停止していないときは `clock()` です）。古い Session の `stop_runtime` が、より後の時刻（たとえば t=150）まで精算して `running_since` を消した**後**に、それより前の時刻（t=100）を読んで遅れていた `start_runtime` が実行されても、新しい Timer は t=150 から始まり、100〜150 が二重に数えられることはありません。Cutoff は前にしか進まないので（`running_since` は常に `settled_through` 以上で、CHECK でも守ります）、Clock が食い違っても、数える区間は重なりません。`stop_runtime` は Cutoff より前の `clock()` を読んでも 0 秒を加えるだけです。DB の時計を文の中で読む案は、注入した `clock` が使われなくなり、時刻の出所が 2 つになるため採りませんでした（[Decision 0007](../../docs/decisions/0007-task-queue-budget-and-loop-policy.md) の 10）。
+- **Runtime の時計は Database の時計だけです。** Timer の端点（`running_since`、`settled_through`）と経過時間は全て、SQL の文の中で読む PostgreSQL の `clock_timestamp()` です。文は `WITH clock AS (SELECT clock_timestamp() AS ts)` で始まり、1 つの文の中では時計を 1 回だけ読みます（Queue と同じ方式。`now()` は使いません）。実行中の `usage` / `check` / `set_preset` も、行を読んだ文が読んだ Database の時刻で経過分を数えます。Process の時計は一切読みません。Host ごとに時計が食い違っていても（Process の時計だと、時計が進んだ Host が書いた `settled_through` が、遅れた Host の置き換えの Session の `running_since` を未来へ押し出し、その Session の Runtime が 0 と数えられて上限を回避できました）、全ての Worker が 1 つの基準を共有するので、数える秒は変わりません（[Decision 0007](../../docs/decisions/0007-task-queue-budget-and-loop-policy.md) の 10）。
+  本番のコードは `BudgetTracker(database)` だけで作ります。`clock`（Timezone 付きの `datetime` を返す引数なしの callable）は Test のための継ぎ目で、`BudgetTracker(database, clock=..., allow_explicit_clock=True)` でだけ受け取ります（`TaskQueue` の `allow_explicit_now=True` と同じ考え方）。それ以外は `InvalidQueueingArgumentError("clock")` で拒否するので、既定の Tracker には Process の時刻を差し込めません。継ぎ目の時計は Database の時計の代わりに、その値を文へ束縛します（Test が時間を動かすため）。1 つの Database に、Test の時計の Tracker と Database の時計の Tracker を混在させてはいけません。
+- **Timer の時刻の順序。** Database の時計は、行の Lock を待つ**前**に読まれ（Queue の時計の項と同じ）、壁時計は後ろへ戻り得ます（NTP の Step、別の Server への Failover）。そこで `stop_runtime` は、精算した Cutoff を `settled_through`（`greatest(now, running_since)`）に記録し、`start_runtime` は Timer を `greatest(now, settled_through)` から始めます（どちらも行を Lock する文の中で計算します。`greatest` は `NULL` を無視するので、まだ停止していないときは `now` です）。競合する `stop_runtime` が、より後の時刻（たとえば t=150）まで精算して `running_since` を消した**後**に、それより前の時刻（t=100）を読んで待っていた `start_runtime` の文が実行されても、新しい Timer は t=150 から始まり、100〜150 が二重に数えられることはありません。Cutoff は前にしか進まないので（`running_since` は常に `settled_through` 以上で、CHECK でも守ります）、数える区間は重なりません。`stop_runtime` は Cutoff より前の時刻を読んでも 0 秒を加えるだけです。Cutoff は、Database の時計への一本化で Host 間の食い違いには不要になりましたが、上の 2 つの競合（読んでから待つ間、時計の後戻り）を防ぐので残しています（Column・CHECK・Grant はすでにあり、費用はありません）。限界: 文は時計を Lock の待ちの前に読むので、`stop_runtime` が別の Transaction の Lock を待った時間（通常はミリ秒）は数えません（`stop_runtime` は切り捨てで整数秒に丸めます）。
 - **Runtime の Session（Fencing）。** `start_runtime` は呼ぶたびに新しい Runtime の Session を始め、その世代（`runtime_generation`、1 以上の `int`。増える一方で、Timer が止まっても戻りません）を返します。Worker は、その世代を `stop_runtime(task_id, generation)` の**必須の引数**として渡します。現在の世代と違う `stop_runtime` は、何も変更せず `StaleRuntimeSessionError`（`code` は `runtime_session_stale`）にします。Lease が切れて Entry が Reclaim された古い Worker や、Restart 前の実行が遅れて `stop_runtime` を呼んでも、新しい Session の `running_since` と累積の Runtime には触れず、`check` は新しい Worker の Runtime を数え続けます（上限を回避できません）。Session の世代は Queue の `claim_count` と同じ考え方ですが、`claim_count` は Entry ごとに 1 から数え直す（Restart の新しい Entry と衝突する）ため、専用の Counter にしています。
   すでに Timer が動いているときの `start_runtime` は、Session を**引き継ぎ**ます（`running_since` と `settled_through` はそのままで、それまでの時間は失われず二重にも数えられません。前の世代は古くなります）。同じ世代の `stop_runtime` を 2 回呼ぶと、2 回目は何も変えず現在の Runtime を返します。渡す世代の型・範囲の誤り（`bool`、0 以下、文字列など）は `InvalidQueueingArgumentError("generation")` です。Preset の変更（`set_preset`）は世代を変えません（[Decision 0007](../../docs/decisions/0007-task-queue-budget-and-loop-policy.md) の 10）。
 - **Unlimited。** 6 つの数値の上限を無くすだけです。Loop 検知（下記）、Stop Now、Critical safety / resource protection による停止は Preset と無関係で、Unlimited の Task でも有効です。消費量の記録も続きます。
@@ -786,6 +789,7 @@ PAW-022 / PAW-023 が Password と Passkey の Table を追加すると、Applic
 - **有効期限**は `PAW_SETUP_TOKEN_TTL_SECONDS`（既定 1800、60〜**14400**）。期限ちょうどの時刻は無効です。
   期限は**消費の瞬間**に判定します（Decision 0005 の 10。Proposed）。`redeem` は開始時に 1 度判定し（期限切れの Token は Owner の行 Lock を待ちません）、Owner の `users` 行を `FOR UPDATE` で Lock した**後**、消費する 1 文の中で判定し直します。別の Transaction が Owner の行を Lock している間に待たされても、待っている間に期限が切れた Token は使用済みになりません（拒否は同じ `SetupTokenRejectedError`、Audit は deny `token_expired`）。
   その文は、この Process の Clock（Lock を得た後に読み直した値。Test が動かす時計）と DB の `clock_timestamp()`（`now()` は Transaction の開始時刻なので使いません）の**新しいほう**を「現在」とします。どちらか一方が期限を過ぎたと言えば期限切れで、Clock がずれていても Token の寿命が**短くなる**側にしか働きません（Test は、止まった Process Clock でも DB の Clock だけで拒否されることを確かめます）。`used_at` は Process の Clock で、Lock を得た後の時刻を記録します。
+  **発行する側も、寿命は保存の瞬間から数えます**（Decision 0005 の 10）。`owner-recover` と `owner-setup --replace-non-live-owner` は Owner の行を Lock する間、別の Transaction に待たされることがあります。Process の Clock は Lock を得た**後**に読み（旧 Token の `revoked_at`、旧 Owner の降格、新 User の時刻）、Token の `created_at` / `expires_at` と表示する `IssuedToken.expires_at` は、待ちうる文（旧 Token の無効化、新 Owner の INSERT）がすべて終わった後にもう一度読んだ値から決めます。待ちが TTL を超えても、表示された Token には TTL の全体が残ります（Test は、Owner の行・旧 Token の行・競合する Owner の INSERT を別の Transaction が持つ間に発行し、Clock を TTL 以上進めてから解放します。`pg_stat_activity` で待ちを確認します）。最初の `owner-setup` の新 User の `created_at` だけは、競合する INSERT を待つ前の時刻のままです（記録用で、Token の寿命には関わりません）。
 - **試行の上限**は Token ごとに `PAW_SETUP_TOKEN_MAX_ATTEMPTS`（既定 5、1〜20）です。試行は Secret を比較する**前に**予約して Commit するため、同時に大量の Request が来ても比較は上限回までしか行われません。
   上限を使い切る試行が **`setup_tokens.locked_at` を記録**し、その Token は正しい Token でも二度と使えません。**設定を後から大きくしても再び開くことはありません**（Test 済み）。`owner-recover` で新しい Token を発行してください。
 - **失敗はすべて同じ失敗**です。`SetupTokenRejectedError`（固定の Message）は、Token が間違い・未知・形式不正・期限切れ・使用済み・無効化済み・試行上限超過・Owner でなくなった User のどれでも同じで、Message にも Cause にも違いがありません。
@@ -1030,7 +1034,10 @@ Test（人の判断）: `tests/test_tools_approvals.py` の `DecisionDeadlineTes
 
 - `Database.transact_abortable`（新規）が、`fetch_abortable` と同じ**中断可能な接続**（Pool を使わない。空き待ちと実行が**1 つの期限**を共有。期限、呼び出し側の Cancel、`dispose()` で Socket を閉じる）の上で、**1 つの `BEGIN` / `COMMIT`** の Transaction を実行します。`PostgresApprovalStore.open_request` / `consume` は、上の規則を生の SQL にして（Statement は 1 つずつ別のまま）これで実行し、`transaction_timeout_seconds`（既定 3 秒）で呼び出し全体を区切ります。`open_request` が競合で再試行する分も、この期限を共有します。時間切れは `TimeoutError` で、Broker は型付きの `approval_unavailable`（Log は型名だけ）にします。Broker の `asyncio.timeout` が先に来ても同じです（Cancel も Socket を閉じるので、約 10 秒待ちません）。
 - **打ち切られた Transaction は、全部か何もか**です。Server は閉じた接続しか見ず、次の Statement も `COMMIT` も受け取らないので、Transaction を巻き戻します（承認の行、履歴、取り消しの全て）。`COMMIT` の最中に打ち切られたときだけ、反映されたかどうかが分かりません。呼び直すと分かります（要求は `EXISTING`、使ったものは `already_used`）。使う側は失敗（Fail-closed）に倒れます（承認が使われたのに Tool が動かないことはあっても、その逆はありません）。
-- **Server にも上限を伝えます。** Lock を待っている Backend は、閉じた Socket に気づきません（送るものができるまで気づかない）。そのままだと、打ち切られた Transaction が Lock の持ち主が終わるまで待ち続け、取った advisory lock と Server の接続を持ち続けます。そこで Transaction の最初に `SET LOCAL lock_timeout` / `statement_timeout` を、残り時間に `_SERVER_GRACE_SECONDS`（1 秒）を足した値にします（呼び出し側の期限が必ず先に来て `TimeoutError` になり、Server の側は少し後に自分で手を引きます）。
+- **Server にも上限を伝えます。上限は Transaction 全体にかけます。** Lock を待っている Backend は、閉じた Socket に気づきません（送るものができるまで気づかない）。そのままだと、打ち切られた Transaction が Lock の持ち主が終わるまで待ち続け、取った advisory lock と Server の接続を持ち続けます。そこで Transaction の最初の Statement で `SET LOCAL transaction_timeout` を、その時点の残り時間に `_SERVER_GRACE_SECONDS`（1 秒）を足した値にします（呼び出し側の期限が必ず先に来て `TimeoutError` になり、Server の側は少し後に自分で手を引きます）。`transaction_timeout` は Transaction の開始から数える 1 つの時計で、その間に走っている Statement が Lock を待っていても、Statement の合間でも、`COMMIT` の最中でも、時間が来れば Server がその Session を終わらせ、Lock を手放します。
+  独立 Review（第 6 回）が、最初は `lock_timeout` / `statement_timeout` を Transaction の**開始時**に「残り時間 + 1 秒」で 1 回だけ設定していたため、前の Statement が期限の大半（例: 3 秒のうち 2.9 秒）を使った後に Lock を待つ Statement は、そこからまた約 4 秒、Server に残れると指摘しました（`lock_timeout` / `statement_timeout` は Statement ごとに数え直される）。事実として確かめ、再現しました（旧実装は期限の 2.5 秒に対し 5.8 秒後に Backend が残っていた。新しい実装は約 3.5 秒 = 期限 + 1 秒）。`lock_timeout` / `statement_timeout` は同じ値の予備として残します（`transaction_timeout` 以上なら Server は長い方を無視するので、短くしません）。
+  採らなかった案: Statement の直前ごとに残り時間から上限を設定し直す。`work` が使う接続を包み、Statement ごとに余分な往復が要り、Statement の合間と `COMMIT` は覆えず、包みを通らない実行があると漏れます。`transaction_timeout` は 1 つの設定で全部を覆います。**この経路（`transact_abortable`。承認の要求と使用）に必要な Server は PostgreSQL 17 以上です**（README と CI は `pgvector/pgvector:pg18`、Test は 18 の実 DB で動かしています。承認済みの Decision 0003 は major version を決めていないので、17 以上に限ることは Decision 0006（Proposed）で Human に判断を求めています）。それより古い Server は `transaction_timeout` を知らず、Transaction は最初の Statement で失敗します（弱い上限で動き続けず、Fail-closed になります）。
+  Test: `tests/test_db_transact_abortable.py` の `test_a_later_statement_cannot_outlive_the_deadline_by_the_whole_limit`（1 つ目の Statement が期限の大半を使い、2 つ目が握られた advisory lock を待つ。Backend が期限 + 猶予の少し先までに Server から消えること）と、`test_the_server_is_told_to_stop_waiting_shortly_after_the_caller`（3 つの設定の値）。
 
 Test（要求と使用）: `tests/test_tools_postgres.py` の `StalledServerTest`（応答しない Server に、Store と Broker が期限で返ること、Pool を使わないこと、Log に接続先を出さないこと。旧実装は 10.3 秒かかり失敗）、`RequestAttemptsShareOneDeadlineTest`（再試行が 1 つの期限を共有）、`TransactionDeadlineTest`（advisory lock と Task の行と承認の行を別の Transaction で Lock して止め、期限で返ること、打ち切られた Transaction が何も残さず、Lock の持ち主が残っていても Server の Backend が自分で去ること）、`tests/test_db_transact_abortable.py`（`Database.transact_abortable` の Commit・Rollback・打ち切り・Server 側の上限・Slot の共有・`dispose()`）。
 限界: `history`（Test と診断が読む。どの Request の経路からも呼ばれない）は Pool の Session で動き、期限で区切っていません。中断可能な接続は呼び出しごとに接続を張るので、Pool の Session より重いです（承認の要求と使用は Tool 呼び出しごとに 1 回で、承認の Endpoint は低頻度です。接続数は Pool の大きさで抑えています）。
@@ -1064,6 +1071,10 @@ Test（要求と使用）: `tests/test_tools_postgres.py` の `StalledServerTest
   - `TaskActivityProvider.check` は `(task_id, run)` を受け取ります（以前は `task_id` だけ）。`InMemoryApprovalStore`（Test の代役）は Provider にこの Run を渡し、同じ規則を守ります。
   - **限界:** `TaskContext.run` は Orchestrator が Worker の開始時の Task（`TaskSnapshot.attempt.number`、`TaskSnapshot.retry_count`）から作ります。Broker は渡された Run を信頼します（他の Context の値と同じ）が、その Run が Task の現在のものでなければ、上のとおり拒否します。`require_active_task` なしで Store を直接呼ぶ側は、Run の照合を受けません（承認の Run と束縛の Run の一致だけ）。DB の Trigger は `tasks` を読みません（Task の生涯と結びつけないため）。
   判断の理由は [Decision 0006](../../docs/decisions/0006-tool-broker-policy.md) の「9. Task の終了と承認」（Proposed）。
+- **期限は、Lock を取った後の時刻で判定します。** 独立 Review（第 6 回）が、`consume` が呼び出し側の `now` を、Task の行や承認の行の Lock を待つ**前**に受け取ったまま `expires_at` と比べると指摘しました。期限の直前に使い始めて Lock を待ち、その間に期限が過ぎても、待つ前の `now` では条件が通り、期限切れの承認が `consumed` になって破壊的な呼び出しが走ります（`open_request` も、待った間に期限が切れた承認を「既にある」として返し、件数に数えていました）。事実として確かめ、再現しました（Lock を握った別の Transaction と、進めた時計で。旧実装は `consumed` / `existing`）。
+  `PostgresApprovalStore` は、**Lock を全て取った後に**時刻を読み直します。`consume` は Task の行（`FOR SHARE`）の次に、承認の行を `SELECT ... FOR NO KEY UPDATE` で自分で Lock し、待ちが終わってから時刻を読み、その時刻で消費の `UPDATE`・期限切れの印付け・説明（`diagnose_consume`）を判定します。`open_request` は advisory lock と Task の行の後に読み、期限切れの印付け、前の Run の承認の取り消し、Open な件数の数え方に使います。
+  「読み直した時刻」は、**呼び出し側の `now` に、その呼び出しが始まってから経った時間（単調時計）を足したもの**です（`PostgresApprovalStore(monotonic=...)`。既定は `time.monotonic`、Test は手で動かす時計を渡します）。理由は 2 つです。(1) 期限を比べる時計は、`expires_at` を付けた Application の時計 1 つだけにします（上の「期限は Application の時計で比較する」。Database の絶対時刻と比べると、時計のずれと、固定の時刻を使う Test が混ざります）。(2) 単調時計は戻らないので、待った分だけ**期限を短くする向きにしか働きません**。`created_at` と却下の Cooldown は、要求した時刻（呼び出し側の `now`）のままです。使用の時刻（`consumed_at`、履歴）は、判定した時刻です。Database の時計での期限は「後続の課題」のままです。
+  Test: `tests/test_tools_postgres.py` の `ExpiryAfterLockWaitTest`（Task の行・承認の行・advisory lock を別の Transaction で握って呼び出しを止め、止まっている間に時計を動かし、離す。期限の 1 秒前は使えて、期限ちょうどは使えないこと、時計を注入しない実時間でも同じこと、開く側の印付け・件数・前の Run の取り消し）。
 - **再び動く Task:** Retry / Restart（終了状態からの遷移）でも Listener は Open な承認を取り消します。終了時の取り消しが失敗して残った承認は、再開した Task では使えず（上の Run で）、新しい承認を求め直します。
 - **範囲と限界:** 承認を要しない呼び出し（`AUTO` / `SCOPED_AUTO`）は Task の状態を見ません（終わった Task へ呼び出しを渡さないのは Orchestrator の責務です）。消費より前に決まった使用は有効です（消費の後に Task が終わっても、実行中の呼び出しは Task の `stop_now` / `cancel` が止めます。Executor の中の確認は Executor の責務です）。
   判断の理由は [Decision 0006](../../docs/decisions/0006-tool-broker-policy.md) の「9. Task の終了と承認」（Proposed）。
@@ -1216,6 +1227,10 @@ Permanent / Revalidate など鮮度の設定は Version の不変の列なので
 `owner_user_id`、`project_id`、`project_group_id`、`repo_id`、`actor_user_id` は素の UUID Column で、DB は存在を確認しません。
 Backend は検証した ID だけを書いてください。Table ができた後の Migration で Foreign Key を追加できます。
 Task、Repo 解析、Project Decision の出典も、Table がないため `memory_sources.source_ref` の不透明な文字列です。
+種別 `conversation` 以外の出典は、`source_ref` が NULL でなく、1 文字以上であることを CHECK 制約（`ck_memory_sources_other_sources_have_reference`）が求めます。
+空文字は NULL ではありませんが、Task、Repo 解析、確認、Decision のどれも指さず、出典として辿れないため拒否します（`char_length(NULL)` は NULL で CHECK を通り抜けるため、NULL も明示して拒否します）。
+検査するのは長さだけです。空白だけの文字列は DB が受け入れます。`title`、`content`、`memory_type`、Embedding Model の `id` など、この Schema の他の文字列の Column と同じく、DB は文字列の意味を知らず、
+空白の除去や正規化は Backend が行うためです。種別 `conversation` は従来どおり `source_ref` を持てません（`conversation_has_no_opaque_reference`）。Conversation の削除が残す、参照がすべて NULL の状態（正当）はこの CHECK の対象外です。
 
 **Application の Role の権限。** Migration は `PAW_APP_DATABASE_ROLE` の Role に、Table ごとに必要最小限を与えます（[上の規則](#migration-は-application-の-role-に権限を与えるcontributor-向けの規則)）。
 未設定のときは何も与えません。TRUNCATE、ALTER、DROP、GRANT は誰にも与えません。
