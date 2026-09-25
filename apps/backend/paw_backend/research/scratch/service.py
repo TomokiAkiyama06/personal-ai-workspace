@@ -11,10 +11,14 @@ exposed over HTTP by this issue. The intended mapping to the capabilities of
 ``paw_backend.authz`` (a proposal for that issue, not enforced here):
 
 * ``get``, ``list_items``: ``project.read`` on ``project_id``;
-* ``add``, ``acquire_use``, ``release_use``, ``pin``, ``unpin``, ``save``,
-  ``unsave``: ``project.task.run`` on ``project_id`` (for ``save`` / ``unsave``
-  this is provisional: who may set or clear a user's explicit save is still an
-  open question of decision 0013);
+* ``add``, ``acquire_use``, ``release_use``, ``pin``, ``unpin``:
+  ``project.task.run`` on ``project_id`` (an agent may be delegated these);
+* ``save``, ``unsave``: **the user only, never delegable to an agent** (approved
+  in decision 0013: the requirement's "Userが明示保存" is a person's own act, and
+  an agent must not be able to exempt research from the TTL). The store cannot
+  enforce this, so the API layer must expose them only on a path an agent's
+  grant cannot reach. No capability id is fixed here; one added for them must be
+  declared non-delegable (decision 0004 requires the choice to be explicit);
 * ``request_promotion``: ``project.memory.use``; ``resolve_promotion``:
   ``project.memory.manage`` (not delegable to an agent: research is never saved
   to Long-term Memory on an agent's own say-so);
@@ -541,6 +545,10 @@ class ScratchStore:
         expired, unexempt item back). Idempotent. Returns the snapshot after the
         change (``saved`` True). It does not extend ``expires_at`` and does not
         promote the item to Long-term Memory.
+
+        Only the user may do this, never an agent (decision 0013). The store does
+        no authorisation, so the caller (the API layer) must enforce that; see
+        "Who may call it" in the module doc.
         """
         return await self._set_marker(project_id, item_id, "saved", True)
 
@@ -549,7 +557,8 @@ class ScratchStore:
 
         A pin (:meth:`pin`) is not touched. Returns the snapshot after the
         change; if the save was the last exemption of an expired item the item is
-        gone for later calls and is deleted by the next purge.
+        gone for later calls and is deleted by the next purge. Like :meth:`save`,
+        only the user may do this, never an agent (enforced by the caller).
         """
         return await self._set_marker(project_id, item_id, "saved", False)
 

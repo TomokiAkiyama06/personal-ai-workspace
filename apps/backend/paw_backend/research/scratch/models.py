@@ -15,13 +15,13 @@ issue); the store just records ``promotion_state``.
   (a temporary keep) and ``saved`` (a user's explicit save) are two separate
   markers because REQUIREMENTS.md lists "Pin済み" and "Userが明示保存" as separate
   reasons: each is set and cleared on its own, so clearing one never removes the
-  other, and the item stays while either is set (proposed decision 0013).
+  other, and the item stays while either is set (decision 0013).
 * ``research_scratch_leases``: who is using an item right now. A lease has an
   end (at most one hour) so that a crashed worker cannot keep an item alive.
 
 ``project_id`` and ``created_by`` are plain UUID columns: the projects and users
 tables do not exist yet. ``task_id`` is a plain UUID column too, with no foreign
-key to ``tasks.id`` (Proposed decision 0013): deleting a task is never blocked by
+key to ``tasks.id`` (decision 0013): deleting a task is never blocked by
 research (RESTRICT would), pinned research is never deleted with it (CASCADE
 would) and the item keeps its Project / Task relation (SET NULL lost it). That the
 task exists, in the same project, is checked by ``ScratchStore.add`` under a row
