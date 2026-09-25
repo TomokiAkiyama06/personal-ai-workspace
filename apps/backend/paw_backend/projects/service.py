@@ -23,22 +23,43 @@ Authorization of each method:
 * ``archive``, ``unarchive``, ``begin_deletion``, ``restore``:
   ``project.lifecycle.manage`` (a Manager, and Owner / Admin without being a
   member);
-* ``create_project``, ``accept_invite``, ``decline_invite``, ``leave_project``:
-  **no capability**, see "Self service" below;
-* ``list_projects``, ``list_my_invites``: the user's own memberships only;
+* ``create_project``: ``project.create``; ``accept_invite``, ``decline_invite``:
+  ``project.invitation.respond``; ``leave_project``: ``project.leave`` (see
+  "Self service" below);
+* ``list_projects``, ``list_my_invites``: the user's own memberships only, by
+  identity (a read of the actor's own rows; no capability, no Audit event);
 * ``roles_of``, ``purge_expired``: backend-internal, not for users.
 
-Self service (Decision 0008, Approved)
---------------------------------------
-Decision 0004 has no capability for creating a project, answering one's own
-invitation or leaving a project, and this issue does not change the policy of
-PAW-025. These four methods are therefore authorized **by identity**: the actor
-must be a ``Principal`` whose ``system_role`` is Owner, Admin or User (never
-``SYSTEM``), and ``accept_invite`` / ``decline_invite`` / ``leave_project`` act
-only on the actor's own membership row. **They write no Audit event** (the
-Authorizer is not involved). Decision 0008 approved this provisional arrangement
-(2026-09-25); the capabilities that let the Authorizer audit these operations are
-added in issue #82 (a new Decision that supersedes Decision 0004).
+Self service (Decision 0022, Proposed; it extends Decision 0004)
+-----------------------------------------------------------------
+Creating a project, answering one's own invitation and leaving a project used
+to be authorized by identity alone and left no Audit event (Decision 0008, an
+approved provisional arrangement). They now go through the Authorizer like every
+other operation, with an Audit mode of ``REQUIRED``: an allowed **and** a denied
+call each write one event, and an allowed call whose event cannot be written is
+refused (``ProjectPermissionDeniedError(AUDIT_UNAVAILABLE)``; nothing changed).
+
+* ``project.create`` is ``Scope.SYSTEM``: Owner, Admin and User hold it
+  (``SYSTEM`` does not); the resource is the workspace (``Resource.system()``).
+  The event cannot name the project, which does not exist yet.
+* ``project.invitation.respond`` and ``project.leave`` are ``Scope.SELF``: the
+  resource (kind ``project_invitation`` / ``project_membership``, ``project_id``
+  set) is owned by the actor, and the service only ever builds it for the actor's
+  own row. The policy does not look at the project's state or at the actor's role
+  in it (leaving is allowed in every state, Decision 0008); whether an invitation
+  or a membership exists is decided by the transaction below.
+* None of the three can be delegated to an agent (``delegable=False``).
+
+The **decision is taken before anything else**: after the actor and the arguments
+are checked, and before the clock is read, the transaction is opened, the project
+row is locked or any row is read. A denial therefore reveals nothing about the
+project or the invitation, and the Audit write (bounded by the Authorizer's
+timeout) never runs while the project row is locked. The event records the
+*decision* for the attempt, not its outcome: an allowed attempt that then finds
+no invitation, an expired one, or the last Manager, still has its ``allow``
+event and changes nothing. ``accept_invite`` reads the clock **after** the
+decision, so that the time spent writing the event does not make an expired
+invitation look valid.
 
 Errors that do not disclose existence
 -------------------------------------
@@ -55,26 +76,31 @@ the project cannot be joined) and never reveal anything about the project.
 
 Order of checks (every method)
 ------------------------------
-1. the actor: not a ``Principal`` -> ``ProjectPermissionDeniedError(UNAUTHENTICATED)``;
-   for the self service methods also ``system_role is SYSTEM`` ->
-   ``ProjectPermissionDeniedError(CAPABILITY_NOT_GRANTED)``;
+1. the actor: not a ``Principal`` -> ``ProjectPermissionDeniedError(UNAUTHENTICATED)``
+   (no Audit event: an unauthenticated denial is never written to the database);
+   ``list_projects`` / ``list_my_invites`` also refuse ``system_role is SYSTEM``
+   -> ``ProjectPermissionDeniedError(CAPABILITY_NOT_GRANTED)``;
 2. the arguments, in signature order, all before the database is touched
    (``InvalidProjectInputError``; a service on an unconfigured ``Database``
    still reports them);
-3. the clock is read **once** and validated (``validate_instant``);
-4. one transaction. Every operation that changes something first runs
+3. ``create_project``, ``accept_invite``, ``decline_invite``, ``leave_project``:
+   the Authorizer (see "Self service"), before the clock and the database;
+4. the clock is read **once** and validated (``validate_instant``);
+5. one transaction. Every operation that changes something first runs
    ``SELECT ... FOR UPDATE`` on the project row: all changes of one project
    (members, settings, lifecycle, purge) are serialised by that lock, which is
    what makes "the last Manager cannot leave" hold under concurrency. Then: the
    project must exist and not be Deleted (``ProjectNotFoundError``); the
-   authorization; then the rules of the method.
+   authorization (every method that is not one of the four of step 3); then the
+   rules of the method.
 A ``SET LOCAL lock_timeout`` opens every transaction; a lock wait longer than
 ``lock_timeout_ms`` is :class:`ProjectBusyError`.
 
-The Authorizer is called while the project row is locked and its audit write
-is bounded by the Authorizer's own timeout. The audit records the decision, not
-the outcome: an allowed action can still fail afterwards (a rule, a database
-error) and the audit event stays.
+Where the Authorizer is called inside the transaction, it is called while the
+project row is locked and its audit write is bounded by the Authorizer's own
+timeout; the four self service methods decide before the transaction instead.
+The audit records the decision, not the outcome: an allowed action can still
+fail afterwards (a rule, a database error) and the audit event stays.
 
 Lifecycle (``REQUIREMENTS.md`` "Project lifecycle", Decision 0008)
 ------------------------------------------------------------------
@@ -192,6 +218,19 @@ _AUTHZ_STATE = MappingProxyType(
 )
 # An invitation can be answered while the project can still be joined.
 _JOINABLE = (ProjectStatus.ACTIVE, ProjectStatus.ARCHIVED)
+# The audit resource kinds of the actor's own invitation / membership row.
+_INVITATION_KIND = "project_invitation"
+_MEMBERSHIP_KIND = "project_membership"
+
+
+def _own_row(kind: str, project_id: uuid.UUID, user_id: uuid.UUID) -> Resource:
+    """The actor's own invitation / membership in a project (a ``Scope.SELF`` resource).
+
+    The audit event names the project (``project_id``) and the actor. The
+    project's state is not part of it: the policy does not consult it for these
+    capabilities.
+    """
+    return Resource(kind=kind, project_id=project_id, owner_id=user_id)
 
 
 class ProjectService:
@@ -235,6 +274,23 @@ class ProjectService:
         if principal.system_role not in _HUMAN_ROLES:
             raise ProjectPermissionDeniedError(Reason.CAPABILITY_NOT_GRANTED)
         return principal
+
+    async def _authorize_own(
+        self, actor: Principal, capability: Capability, resource: Resource
+    ) -> None:
+        """Ask the Authorizer about an act on the actor's own data; refuse if denied.
+
+        Called **before** the clock, the transaction or any row is touched, so a
+        denial (or an Audit event that could not be written) changes nothing and
+        reveals nothing. The Principal is rebuilt without ``project_roles``: these
+        capabilities do not depend on a role in a project, and the caller's
+        claims are never passed on.
+        """
+        decision = await self._authorizer.authorize(
+            Principal(actor.user_id, actor.system_role), capability, resource
+        )
+        if not decision.allowed:
+            raise ProjectPermissionDeniedError(decision.reason)
 
     def _now(self) -> datetime:
         return validate_instant("clock", self._clock())
@@ -291,15 +347,18 @@ class ProjectService:
     ) -> Project:
         """Create an ACTIVE project **without a repository**; the actor manages it.
 
-        Self service (no capability, no Audit event). One transaction inserts
-        the project and the actor's membership (``MANAGER``, ``ACTIVE``,
-        ``invited_at = joined_at = now``). ``name`` and ``description`` are
-        validated (``validate_name`` / ``validate_description``). Returns the
-        stored project.
+        ``project.create`` (Owner, Admin, User; audited, decided before the
+        database is touched). One transaction inserts the project and the actor's
+        membership (``MANAGER``, ``ACTIVE``, ``invited_at = joined_at = now``).
+        ``name`` and ``description`` are validated (``validate_name`` /
+        ``validate_description``). Returns the stored project.
         """
-        principal = self._human(actor)
+        principal = self._actor(actor)
         name = validate_name(name)
         description = validate_description(description)
+        await self._authorize_own(
+            principal, Capability.PROJECT_CREATE, Resource.system()
+        )
         now = self._now()
         async with self._transaction() as session:
             project = await store.insert_project(
@@ -485,16 +544,24 @@ class ProjectService:
             )
 
     async def accept_invite(self, actor: Principal, project_id: uuid.UUID) -> Member:
-        """Accept the actor's own invitation (self service, no Audit event).
+        """Accept the actor's own invitation (``project.invitation.respond``).
 
+        The decision (audited) comes before anything is read; then
         ``InviteNotFoundError``: no row, or the project is missing, Deleted or
         Pending deletion. ``InviteExpiredError``: the invitation's time is over
         (the row stays). An actor who is an accepted member already gets that
         membership back unchanged (idempotent). Otherwise the row becomes
         ACTIVE with ``joined_at = now`` and is returned.
         """
-        principal = self._human(actor)
+        principal = self._actor(actor)
         project_id = validate_uuid("project_id", project_id)
+        await self._authorize_own(
+            principal,
+            Capability.PROJECT_INVITATION_RESPOND,
+            _own_row(_INVITATION_KIND, project_id, principal.user_id),
+        )
+        # After the decision: the time an Audit write took must not make an
+        # expired invitation look valid.
         now = self._now()
         async with self._transaction() as session:
             project = await store.get_project(session, project_id, for_update=True)
@@ -513,14 +580,21 @@ class ProjectService:
             )
 
     async def decline_invite(self, actor: Principal, project_id: uuid.UUID) -> None:
-        """Decline the actor's own invitation: the row is deleted (self service).
+        """Decline the actor's own invitation: the row is deleted.
 
-        An open **or expired** invitation can be declined. ``InviteNotFoundError``
-        when there is no invitation (an accepted member must ``leave_project``)
-        or the project is missing, Deleted or Pending deletion.
+        ``project.invitation.respond`` (the same capability as accepting; audited,
+        decided before anything is read). An open **or expired** invitation can be
+        declined. ``InviteNotFoundError`` when there is no invitation (an accepted
+        member must ``leave_project``) or the project is missing, Deleted or
+        Pending deletion.
         """
-        principal = self._human(actor)
+        principal = self._actor(actor)
         project_id = validate_uuid("project_id", project_id)
+        await self._authorize_own(
+            principal,
+            Capability.PROJECT_INVITATION_RESPOND,
+            _own_row(_INVITATION_KIND, project_id, principal.user_id),
+        )
         now = self._now()
         async with self._transaction() as session:
             project = await store.get_project(session, project_id, for_update=True)
@@ -559,15 +633,20 @@ class ProjectService:
             await store.delete_member(session, project_id, user_id)
 
     async def leave_project(self, actor: Principal, project_id: uuid.UUID) -> None:
-        """The actor leaves the project (self service, no Audit event).
+        """The actor leaves the project (``project.leave``; audited, decided first).
 
         ``ProjectNotFoundError`` when the project is missing or Deleted, or the
         actor is not an accepted member (an invitee declines instead). The last
         accepted Manager cannot leave (``LastManagerError``) unless the project
         is Pending deletion.
         """
-        principal = self._human(actor)
+        principal = self._actor(actor)
         project_id = validate_uuid("project_id", project_id)
+        await self._authorize_own(
+            principal,
+            Capability.PROJECT_LEAVE,
+            _own_row(_MEMBERSHIP_KIND, project_id, principal.user_id),
+        )
         async with self._transaction() as session:
             project = await self._load(session, project_id, lock=True)
             member = await store.get_member(session, project_id, principal.user_id)

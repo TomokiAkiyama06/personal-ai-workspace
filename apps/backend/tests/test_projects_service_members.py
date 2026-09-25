@@ -412,7 +412,11 @@ class AcceptInviteTest(MembersTestCase):
                 self.assertEqual(str(caught.exception), "Invitation not found")
                 self.assertIsNone(self.member_row(self.project_id, stranger))
         await self.assertUnchanged(before)
-        self.assertEqual(self.sink.events, [])
+        # Each attempt was authorized (and recorded) and then found no invitation.
+        self.assertEqual(
+            self.audit(),
+            [("project.invitation.respond", "allow", "granted_to_resource_owner")] * 3,
+        )
 
     async def test_a_manager_of_another_project_cannot_join_this_one(self):
         other_project = self.seed_project()
@@ -509,7 +513,11 @@ class DeclineInviteTest(MembersTestCase):
         self.assertIsNone(await self.service.decline_invite(self.me, self.project_id))
         self.assertIsNone(self.member_row(self.project_id, self.invitee))
         self.assertEqual(len(self.member_rows(self.project_id)), 3)
-        self.assertEqual(self.sink.events, [])
+        (event,) = self.sink.events
+        self.assertEqual(
+            (event.action, event.decision, event.actor_id, event.project_id),
+            ("project.invitation.respond", "allow", self.invitee, self.project_id),
+        )
 
     async def test_an_expired_invitation_can_be_declined_too(self):
         self.clock.now = T0 + INVITE_TTL
@@ -681,14 +689,19 @@ class RemoveMemberTest(MembersTestCase):
 
 @requires_postgres
 class LeaveProjectTest(MembersTestCase):
-    async def test_a_member_leaves_without_an_audit_event(self):
+    async def test_a_member_leaves_and_the_leave_is_audited(self):
         for user in (self.team.contributor, self.team.viewer):
             with self.subTest(user=user):
+                self.sink.events.clear()
                 self.assertIsNone(
                     await self.service.leave_project(self.actor(user), self.project_id)
                 )
                 self.assertIsNone(self.member_row(self.project_id, user))
-        self.assertEqual(self.sink.events, [])
+                (event,) = self.sink.events
+                self.assertEqual(
+                    (event.action, event.decision, event.actor_id, event.project_id),
+                    ("project.leave", "allow", user, self.project_id),
+                )
 
     async def test_a_manager_leaves_when_another_manager_remains(self):
         self.seed_manager(self.project_id)
