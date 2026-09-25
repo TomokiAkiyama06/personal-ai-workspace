@@ -585,6 +585,8 @@ Budget 超過のときに Escalation しないのは、使い切った予算を�
     別の Project の Repository を、自分が Member の Project の URL で開いても、その Repository の ACL を借りられません。呼び出す側は `project_id` に URL（と Member 資格）の Project を渡し、ACL は保存済みの行から作ってください。
   - Agent は、User の権限と Grant に加えて、Override がある Repository では `agent` が許可されている必要があります（人間が編集できても、Agent は操作できない設定ができます）。
 - 自分のデータ（Chat、Workspace、GitHub、Memory）の Capability は、`Resource.owner_id` が本人のときだけ許可します。Owner でも他の User の Private Data は使えません。
+- Project の作成（`project.create`。`Scope.SYSTEM`）と、自分宛ての招待への応答・Project からの退出（`project.invitation.respond`、`project.leave`。`Scope.SELF`）は、User 以上（Owner / Admin / User）が持ち、Agent へ委任できず、Audit Mode は `REQUIRED` です。
+  [Decision 0022](../../docs/decisions/0022-project-lifecycle-capabilities.md)（**Proposed**。Decision 0004 への追補で、Human の承認待ち）の提案で、Issue [#82](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/82) の実装です。詳細は [自分の Membership の操作](#自分の-membership-の操作作成招待への応答退出decision-0022)。
 - User の Role 変更・削除は `Authorizer.authorize_role_change(actor, target_user_id, target_role, new_role)` で判定します。`target_user_id` は必須です。
   Admin は他の Admin を管理できず（Admin の追加・削除は Owner のみ）、自分自身の Role は誰も変更できません。
   Audit の行は対象の User（`resource_kind="user"`、`resource_id`）を指し、変更前後の Role（`old_role`、`new_role`）を持ちます。
@@ -645,7 +647,7 @@ Agent の操作は、委任した人間の User の操作として判定しま�
   Grant は権限を狭めるだけで、User の権限を超えることはありません。
 - 委任できる Capability は許可リストです（Chat、Workspace、GitHub、Memory、PR、Shared Memory の閲覧、Project の閲覧・Chat・Task・Repository 編集・PR・Memory 利用）。
   `CapabilityInfo.delegable` には既定値がなく、Capability を追加するときは必ず決める必要があります。
-  Project 設定・Repository 追加・Project Memory 管理を含む管理系、`admin.*`、`owner.*`、`shared_memory.manage` と Shared Memory を変える操作の Capability（`shared_memory.create` など）、Member / Agent Policy / Lifecycle は Grant に書いてあっても拒否します（自己権限昇格の禁止）。
+  Project 設定・Repository 追加・Project Memory 管理を含む管理系、`admin.*`、`owner.*`、`shared_memory.manage` と Shared Memory を変える操作の Capability（`shared_memory.create` など）、Member / Agent Policy / Lifecycle、Project の作成・招待への応答・退出（`project.create`、`project.invitation.respond`、`project.leave`）は Grant に書いてあっても拒否します（自己権限昇格の禁止）。
   **`agent.use` と `project.agent.use`（Agent を起動する操作）も委任できません。** 子 Agent の Grant を親の部分集合として導く仕組み（PAW-032）ができるまで、Agent が自分より強い Agent を作れないようにするためです。
 - `AgentGrant.project_ids` は**必須**です。Agent が触れる Project の集合か、明示的な `ALL_PROJECTS` を渡します（既定の「User の全 Project」はありません）。
   Project を限定した Grant は、その外の Resource（個人のデータを含む）に及びません。文字列 1 つを渡すと `TypeError` です。
@@ -2061,6 +2063,7 @@ DB を使わない Test（`records`、`validation`、`rules`、`store_validation
 [Decision 0004](../../docs/decisions/0004-rbac-capability-and-audit-policy.md)（承認済み）に従い、要件が決めていない選択は [Decision 0008（承認済み）](../../docs/decisions/0008-project-membership-and-lifecycle-policy.md)にまとめています。
 **Decision 0008 は 2026-09-25 に Human が承認しました。** 招待の期限（14 日）、Member と招待の合計（200）、Project 名と説明の長さ（1〜100 文字、2,000 文字）は暫定値として承認されました。Project 名と説明の長さは DB の CHECK 制約にも書かれているため、変えるには新しい Migration と `models.py` の変更が要ります（`limits.py` の定数だけでは足りません）。Member と招待の合計は `limits.MAX_MEMBERS_PER_PROJECT` で、招待の期限は `domain.invite_expiry` で決まり、どちらも Migration は要りません（詳しくは Decision 0008 の「背景」）。
 **HTTP の Endpoint はありません**（Session は PAW-022）。`ProjectService` は、認証済みの `Principal` を受け取り、`Authorizer` で判定します。
+作成・招待への応答・退出の Capability（`project.create`、`project.invitation.respond`、`project.leave`）は [Decision 0022（Proposed。0004 の追補。Human の承認待ち）](../../docs/decisions/0022-project-lifecycle-capabilities.md) の提案で、Issue [#82](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/82) の実装です（[認可と Audit](#認可と-audit)）。
 
 | ファイル | 内容 |
 | --- | --- |
@@ -2174,7 +2177,8 @@ Active ⇄ Archived
 | 方法 | 操作 |
 | --- | --- |
 | `Authorizer`（Capability を Audit に残す） | `get_project`、`list_members`（`project.read`）、`list_invites`、`invite_member`、`remove_member`、`change_role`（`project.members.manage`）、`rename_project`、`set_description`（`project.settings.manage`）、`archive`、`unarchive`、`begin_deletion`、`restore`（`project.lifecycle.manage`） |
-| **本人確認だけ（Audit を書かない）** | `create_project`、`accept_invite`、`decline_invite`、`leave_project`、`list_projects`、`list_my_invites`。`system_role` が Owner / Admin / User の `Principal` だけ（`SYSTEM` は拒否）。受諾・辞退・退出は Actor 自身の行だけを対象にします |
+| `Authorizer`（**判定を先に行う**。[自分の Membership の操作](#自分の-membership-の操作作成招待への応答退出decision-0022)） | `create_project`（`project.create`）、`accept_invite`、`decline_invite`（`project.invitation.respond`）、`leave_project`（`project.leave`） |
+| 本人確認だけ（Audit を書かない） | `list_projects`、`list_my_invites`（Actor 自身の行を読むだけ）。`system_role` が Owner / Admin / User の `Principal` だけ（`SYSTEM` は拒否） |
 | Backend 内部（Actor なし） | `purge_expired`（Janitor）、`roles_of`（`Principal.project_roles` を作る PAW-022 用） |
 
 - **`Principal.project_roles` を信用しません。** Service は、Actor の Role を同じ Transaction で `project_members` から読み直し（受諾済みの行だけ）、それを使って `Authorizer` に渡す `Principal` を作り直します。
@@ -2185,11 +2189,36 @@ Active ⇄ Archived
 - Audit の行は「判定」を記録します。許可された操作が後から失敗しても（規則の違反、DB の Error）、Audit の行は残ります。
 - `Scope.SELF` の Capability（`chat.use`、`memory.use` など）は、今も Member 資格と Project の状態を見ません。Membership の Table と `roles_of` を用意しただけで、絞り込みは Project の Chat や Memory を実装する Issue が行います。
 
+### 自分の Membership の操作（作成・招待への応答・退出。Decision 0022）
+
+Project の作成、自分宛ての招待の受諾・辞退、退出は、PAW-026 では Capability がなく、本人確認だけで許可して Audit に残しませんでした（[Decision 0008](../../docs/decisions/0008-project-membership-and-lifecycle-policy.md) の 5。暫定の作りとして承認）。
+Issue [#82](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/82) で、Authorizer を通し、Audit を `REQUIRED` で残すようにしました。方針は [Decision 0022](../../docs/decisions/0022-project-lifecycle-capabilities.md)（**Proposed**。Decision 0004 への追補で、承認済みの 0004 と 0008 は書き換えていません。Human の承認待ち）です。
+
+| Capability | Scope | 持つ人 | 委任 | Audit | 操作 | Audit の行（`resource_kind`、`project_id`） |
+| --- | --- | --- | --- | --- | --- | --- |
+| `project.create` | `SYSTEM` | Owner / Admin / User | 不可 | `REQUIRED` | `create_project` | `system`、なし（Project はまだない） |
+| `project.invitation.respond` | `SELF` | 同上 | 不可 | `REQUIRED` | `accept_invite`、`decline_invite` | `project_invitation`、対象の Project |
+| `project.leave` | `SELF` | 同上 | 不可 | `REQUIRED` | `leave_project` | `project_membership`、対象の Project |
+
+- **判定は、状態を変える前に行います。** Actor と引数の検査の後、時計の読み取り・Transaction・Project の行の Lock・行の読み取りより**前**に Authorizer を呼びます。拒否や Audit の書き込みの失敗は何も変えず、Project や招待の存在も明かしません
+  （存在しない Project でも、`system` identity は同じ `ProjectPermissionDeniedError` です）。Audit の書き込みは、Project の行の Lock を持つ間には行いません（他の操作は Lock の下で判定します）。
+  `accept_invite` は、期限の判定に使う時刻を、判定の**後**に読みます（Audit の書き込みに時間がかかっても、期限切れの招待が有効に見えません）。
+- **許可も拒否も 1 回ごとに 1 行。** 記録できなければ許可を拒否にします（`ProjectPermissionDeniedError` の `reason` は `audit_unavailable`。API 層は 503 にします）。何も変わりません。
+  認証されていない Actor（`Principal` でないもの）は `unauthenticated` で、Database に書きません（Log だけ）。引数が不正な呼び出しは、判定の前に `InvalidProjectInputError` になり、行を書きません。
+- **Audit の行は「判定」を記録し、操作の結果は記録しません。** 許可された試行が規則に拒否されても（招待がない、期限切れ、最後の Manager、Lock の Timeout）、`allow` の行が残り、何も変わりません。
+  状態が変わったのに `allow` の行がない、ということは起きません（Test: `tests/test_projects_self_service_audit.py`）。要件の Audit の最低項目にある `result` は、この Schema（Decision 0004。`decision` と `reason`）にはなく、この Issue では足していません。
+- **`Scope.SELF`** の 2 つは、Project の状態と Actor の Role を見ません。Archived、Pending deletion の Project からも退出できます（Decision 0008。Pending deletion の最後の Manager の退出を含む）。
+  行があるかどうかは、これまでどおり Transaction（Project の行の Lock の下）で判定し、なければ `InviteNotFoundError` / `ProjectNotFoundError` です。「最後の受諾済み Manager は退出できない」（`LastManagerError`）と、招待の状態（期限など）の判定は変えていません。
+- 受諾と辞退は同じ `project.invitation.respond` で、Audit の `action` では区別できません（分ける案は Decision 0022 の 5）。`project.create` の行は、作成された Project を指しません（作成の前に判定するため。`projects.created_by` と `created_at` で分かります）。
+- **Agent は 3 つとも使えません**（`delegable=False`）。Grant に書いてあっても、委任元が持っていても `agent_capability_forbidden` で拒否され、Agent の ID 付きで Audit に残ります（Test: `tests/test_authz_project_membership.py`、`test_projects_self_service_audit.py`）。
+- `list_projects` と `list_my_invites` は、Actor 自身の行を読むだけなので、本人確認のままです（Capability を足すかは Decision 0022 の 7）。
+- 旧い契約（Audit に残らない、Audit が止まっても動く）を確かめていた 5 つの Test（`test_projects_service_members.py`、`test_projects_service_access.py`）は、新しい契約（1 行の `allow`、Audit 停止で拒否）に書き換えました。
+
 ### 同時実行
 
 - Project を変える操作（設定、Member、Lifecycle、Purge）は、Transaction の最初に **Project の行を `SELECT ... FOR UPDATE`** で Lock し（待ちます）、それから存在・認可・規則を評価します。1 Project の変更は直列になり、
   2 人の Manager が同時に退出しても、最後の 1 人は残ります（`tests/test_projects_concurrency.py`）。Lock 待ちは `lock_timeout_ms`（既定 3000、1〜60000）で `ProjectBusyError` になります。読み取りは Lock も待ちもしません。
-- `Authorizer` の呼び出しは、この Lock を持ったまま行います（Audit の書き込みは Authorizer の Timeout で有界）。
+- `Authorizer` の呼び出しは、この Lock を持ったまま行います（Audit の書き込みは Authorizer の Timeout で有界）。ただし `create_project`、`accept_invite`、`decline_invite`、`leave_project` は、Lock と Transaction の前に判定します（上の「自分の Membership の操作」）。
 - Task 停止の Processor は、Task の Command を Project の行の Lock なしで（Task Service 自身の Transaction で）実行し、要求を完了にする最後の短い Transaction だけ Project の行を `FOR SHARE` で Lock します（Lifecycle の操作は `FOR UPDATE` なので互いに待ちます。待ちは同じ `lock_timeout` で `ProjectBusyError`）。
 - Clock は 1 回の操作で 1 度だけ読みます（`validate_instant`）。
 
@@ -2214,11 +2243,11 @@ AGENTS.md のとおり、同じ失敗を繰り返したのでエスカレーシ�
 
 ### 制限と未確認の点
 
-- HTTP の Endpoint、Session は含みません（PAW-022）。作成・受諾・退出は Audit に残りません（Decision 0008 の 5。暫定の作りとして承認され、Capability と Audit の追加は Issue [#82](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/82) です）。
+- HTTP の Endpoint、Session は含みません（PAW-022）。作成・受諾・辞退・退出は Authorizer を通り Audit に残ります（Issue [#82](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/82)、[Decision 0022](../../docs/decisions/0022-project-lifecycle-capabilities.md)。**Proposed のまま、Human の承認待ち**）。Audit は判定を記録し、操作の結果は記録しません。
 - 招待を通知する仕組み（Notification、Email）はありません。招待された人は `list_my_invites` で見つけます。User の削除の流れ（Member を外す、所有権の移譲）は PAW-021 以降の Issue です。
 - Purge を定期的に呼ぶ Janitor、Purge 後の他の領域のデータ削除、Task 停止の Processor を呼ぶ Orchestrator（PAW-034）は含みません。Processor 自体は含みます（上の「Delete 開始時の Task 停止」）。Repository の紐付け（PAW-027）と Repo ACL の保存もありません。
 - Project 名の一意性、Project ごとの設定（Agent Policy、Merge Policy など。要件の「New Project defaults」）、Owner / Admin の全 Project 一覧（Issue #84）は含みません。
-- `Authorizer` の呼び出しと Project の Lock は同じ Transaction の中です。Audit の Store が遅いと、その間 Project の行の Lock が続きます（Authorizer の Timeout で有界）。
+- `Authorizer` の呼び出しと Project の Lock は同じ Transaction の中です（作成・招待への応答・退出を除く）。Audit の Store が遅いと、その間 Project の行の Lock が続きます（Authorizer の Timeout で有界）。
 - PostgreSQL 18 の実 DB で Test しました。`READ COMMITTED` を前提に、Lock の順序（Project の行が最初）で直列化しています。他の Isolation Level では未確認です。
 
 ### Human の承認（2026-09-25）と、後続の Issue
@@ -2227,7 +2256,7 @@ Human は [Decision 0008](../../docs/decisions/0008-project-membership-and-lifec
 
 1. **承認した点。** Delete 開始を Active から許し、Project 名の完全一致の入力を要求すること。復元できる人（`project.lifecycle.manage` を持つ Manager、Owner、Admin。復元先は Archived）。墓石を残す Purge。Membership のルール（辞退・退出は行の削除で履歴を持たない、`users` への Foreign Key `ON DELETE RESTRICT` を含む）。
 2. **暫定値として承認した数値。** 招待の期限（14 日）、Member と有効な招待の合計（200）、Project 名（1〜100 文字）と説明（2,000 文字）。後から変えられますが、名と説明の長さは DB の CHECK 制約にも書かれているため、新しい Migration と `models.py` の変更が要ります。他の数値は Migration が要りません（Decision 0008 の「背景」）。
-3. **Capability を持たない 4 つの操作**（作成、招待の受諾・辞退、退出）は、暫定の作りで承認されました。Capability と Audit の追加は Issue [#82](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/82) で行います（承認済みの Decision 0004 は書き換えず、新しい Decision から `Supersedes` します）。
+3. **Capability を持たなかった 4 つの操作**（作成、招待の受諾・辞退、退出）は、暫定の作りで承認されました。Capability と Audit は Issue [#82](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/82) で追加しました（[Decision 0022](../../docs/decisions/0022-project-lifecycle-capabilities.md)。**Proposed で、Human の承認待ち**。承認済みの Decision 0004 と 0008 は書き換えていません）。この作りは、0008 の暫定の作りに代わります。
 4. **Owner / Admin が全 Project を一覧する API**（管理上の Lifecycle 操作の入口）は、Issue [#84](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/84) です。
 5. **Purge 後の他の領域のデータ削除**は、各 Service が `PurgeResult.purged` を使う分担で承認されました。調査結果（Provenance・Scratch など）の扱いは、Issue [#88](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/88) で決めます。
 6. **Delete 開始時の Task 停止**（Decision 0008 の 8）: 停止に Cancel（graceful）を使うこと、Outbox と Processor に分けることを承認しました。Delete 開始の後に作られた Task の競合を閉じる Gate（`create_task` / Retry / Restart / `enqueue` が Project の行を Lock して Active 以外を拒否する）の方針も承認され、実装は Issue [#83](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/83)（PAW-034 の前後。`tasks(project_id, state)` の Index を含む）です。この Issue では入れません。

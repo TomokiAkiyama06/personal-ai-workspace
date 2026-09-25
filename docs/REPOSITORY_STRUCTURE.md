@@ -241,6 +241,8 @@ personal-ai-workspace/
 │  │     ├─ test_projects_domain.py
 │  │     ├─ test_projects_grants.py
 │  │     ├─ test_projects_schema.py
+│  │     ├─ test_projects_self_service_arguments.py
+│  │     ├─ test_projects_self_service_audit.py
 │  │     ├─ test_projects_service_access.py
 │  │     ├─ test_projects_service_lifecycle.py
 │  │     ├─ test_projects_service_members.py
@@ -358,6 +360,7 @@ personal-ai-workspace/
 │     ├─ 0012-research-provider-adapter-policy.md
 │     ├─ 0013-research-scratch-task-relation.md
 │     ├─ 0014-task-working-set-persistence.md
+│     ├─ 0022-project-lifecycle-capabilities.md
 │     └─ README.md
 └─ evaluator/
    └─ README.md
