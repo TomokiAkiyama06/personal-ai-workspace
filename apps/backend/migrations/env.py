@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 # them.
 from paw_backend.authz import models as authz_models  # noqa: F401
 from paw_backend.config import Settings
+from paw_backend.connections import models as connection_models  # noqa: F401
 from paw_backend.db import Base
 from paw_backend.identity import models as identity_models  # noqa: F401
 from paw_backend.memory import models as memory_models  # noqa: F401
