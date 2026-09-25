@@ -47,6 +47,7 @@
 
 - git は **Backend の Process の Linux User として**動かす。Process の User が Checkout の持ち主の Account でなければ、実行を拒否する（`identity_mismatch`）。権限の昇格（`sudo`、`setuid` など）は実装していない。
 - したがって、Backend が Service 用の 1 つの User で動く配備では、Per-user の Clone は、Account の User に切り替える実行の仕組み（User ごとの Worker、特権を分けた Helper など）を配備側が `GitRunner` として渡すまで動かない。PAW-028（`gh auth` は Linux User ごと）も同じ仕組みを必要とする。
+- **人間の回答 2026-09-25: Userごとに割り振られたSSHで実行する方針。実装は別Issue #105。この PR は Backend の Process の User でだけ動く（従来どおり）。** 方向は、Backend → `ssh <linux user>@localhost`（User ごとの専用 Key。`command=` で決まった Wrapper に固定し、`from=127.0.0.1`・`no-pty`・`no-agent-forwarding`・`no-port-forwarding` を付け、Host Key を固定する）で、その User 自身として git を実行する `GitRunner` を後から差し込むこと。この Decision と PR は、その実装も設定も含まない。Decision は Proposed のままである。
 - git の環境は許可リストだけ（`PATH` 固定、`HOME`、Locale、`GIT_*`）。`GIT_CONFIG_GLOBAL=/dev/null`、`GIT_CONFIG_NOSYSTEM=1`、Hook 無効（`core.hooksPath=/dev/null`）、`core.fsmonitor=false`、`protocol.allow=never`（許可した Transport だけ `always`。既定は `https`）、Submodule の再帰なし。Credential は渡さない・Log に出さない。Timeout（通常 30 秒、Clone 900 秒）と出力の上限（64 KiB）がある。
 
 ### 5. 「既存 Repository の登録」で確かめること
@@ -123,7 +124,7 @@
 - Home の外の共有 Directory（`/srv/repos`）を登録する: 複数 User が同じ Working Tree を編集することになる。
 - 既存の Directory を、登録済みの Repository の自分の Checkout として取り込む: Remote の照合が要る（V1 では作らない）。
 - Repository の `origin` の URL をそのまま保存する: Token を含む URL を DB に残す。
-- Backend が `sudo -u` で User を切り替える: 権限の昇格を Backend に持たせる。配備の判断と別 Issue に分ける。
+- Backend が `sudo -u` で User を切り替える: 権限の昇格を Backend に持たせる。人間の回答（2026-09-25）で、User ごとの SSH（別 Issue #105）に決まった。
 - Table で入れ子を保存する: 移動・削除で古くなる複製になる。
 - ACL の設定に新しい Capability を足す: Decision 0004（承認済み）の Capability 一覧を変える。既存の `project.settings.manage`（Manager）を使う。
 
@@ -131,7 +132,7 @@
 
 1. Workspace の User と Linux の User の対応は `login_name`（3）。推奨: 承認。Mapping Table や LDAP が要るなら、`AccountDirectory` を置き換える。
 2. Checkout の置き場所と Project Directory の名前（1）。推奨: 承認。
-3. git を Backend の Process の User で動かし、別の User なら拒否する（4）。推奨: 承認したうえで、User を切り替える実行の仕組みを配備の Issue にする。
+3. git を Backend の Process の User で動かし、別の User なら拒否する（4）。推奨: 承認したうえで、User を切り替える実行の仕組みを別の Issue にする。**人間の回答 2026-09-25: Userごとに割り振られたSSHで実行する方針。実装は別Issue #105。この PR は Backend の Process の User でだけ動く（従来どおり）。**
 4. 既存 Repository の検証の範囲（5）、特に隠し Directory・`.git` の File・Linked Worktree の拒否。推奨: 承認。
 5. Viewer にも Checkout を許す（6）。推奨: 承認（読み取りの複製）。書き込みの前提にはしない。
 6. ACL の設定を `project.settings.manage`（Manager）にする（6）。推奨: 承認。
@@ -157,7 +158,7 @@
 
 1. Workspace の User と Linux の User の対応（`login_name`）でよいか。
 2. Checkout の置き場所（`<home>/workspaces/<slug>-<id8>/<name>`）でよいか。
-3. git を Backend の Process の User で動かし、別の User では動かさない方針でよいか。User を切り替える仕組み（誰が、どの権限で）は別の Issue にするか。
+3. git を Backend の Process の User で動かし、別の User では動かさない方針でよいか。User を切り替える仕組みは、人間の回答（2026-09-25）のとおり User ごとの SSH とし、別 Issue #105 で実装する。この PR の実行の挙動（Backend の Process の User でだけ動く）を、その Issue が入るまでの暫定として承認してよいか。
 4. 既存 Repository の検証の範囲（隠し Directory、`.git` の File、Linked Worktree の拒否）でよいか。
 5. Viewer に Checkout を許してよいか。
 6. ACL の設定を Manager（`project.settings.manage`）に限ってよいか。

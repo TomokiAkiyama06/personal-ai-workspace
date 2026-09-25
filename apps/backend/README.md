@@ -2393,7 +2393,7 @@ Backend が作る Checkout は、`workspaces` と Project の Directory（0700�
 - **Repository の設定に勝つ Option**（`-c core.hooksPath=/dev/null` / `core.fsmonitor=false` / `protocol.allow=never`（許可した Transport だけ `always`、既定は `https`）/ `submodule.recurse=false`）を毎回付ける。
 - **Credential を Command 行にも Log にも出さない。** Log には Sub-command 名と理由だけ。Error は `GitFailure`（Timeout、出力超過、非 0 の終了、UTF-8 でない出力）の Enum だけで、git の出力を持たない。
 - **Timeout と出力の上限**（既定 30 秒 / Clone 900 秒、64 KiB）。超えると **Process Group ごと** Kill する（Cancel でも Kill する）。
-- **実行 User。** git は Backend の Process の Linux User として動く。それが Checkout の持ち主の Account でなければ、実行を拒否する（`identity_mismatch`）。**User を切り替える仕組みは実装していない**（配備で `GitRunner` を渡す。Decision 0017 の 4）。
+- **実行 User。** git は Backend の Process の Linux User として動く。それが Checkout の持ち主の Account でなければ、実行を拒否する（`identity_mismatch`）。**User を切り替える仕組みは実装していない**（配備で `GitRunner` を渡す。Decision 0017 の 4）。**人間の回答 2026-09-25: Userごとに割り振られたSSHで実行する方針。実装は別Issue [#105](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/105)。この PR は Backend の Process の User でだけ動く（従来どおり）。**
 
 ### 認可と Audit
 
@@ -2426,7 +2426,7 @@ Backend が作る Checkout は、`workspaces` と Project の Directory（0700�
 
 ### 制限と未確認の点
 
-- **Per-user の Clone は、Backend の Process の User が Checkout の持ち主のときだけ動く。** 別の User の Home へは書けず、User を切り替える実行の仕組みは、この Issue にない（Decision 0017 の 4。PAW-028 も必要とする）。
+- **Per-user の Clone は、Backend の Process の User が Checkout の持ち主のときだけ動く。** 別の User の Home へは書けず、User を切り替える実行の仕組みは、この Issue にない（Decision 0017 の 4。PAW-028 も必要とする）。人間の回答 2026-09-25: Userごとに割り振られたSSHで実行する方針。実装は別Issue [#105](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/105)（SSH 経由の `GitRunner`）で、この PR には含まない。
 - Private Repository の Clone、GitHub での新規作成は PAW-028 まで動かない（Global の git 設定と Credential Helper を読まないため）。作成後に登録が失敗しても、GitHub の Repository は削除しない（Log に 1 行）。
 - Path の検証は確認した瞬間の事実で、持ち主は後で差し替えられる。`scope_entries` は Scope を作る瞬間に Root と識別を確かめるが、その後 Tool Broker が呼び出しを解決するまでの窓は残る（Broker が呼び出しごとに確かめ直すことに依存する）。
 - Backend が生成する Checkout の Path は DB が保存できる 1024 文字までで、長い Home の Account が超える Path を作ると、挿入の前に `PathRejectedError`（`too_long`）で拒否する（`tests/test_repositories_path_length.py`。境界は 1024 文字が可、1025 文字が不可）。
