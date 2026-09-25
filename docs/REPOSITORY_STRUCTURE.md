@@ -49,6 +49,7 @@ personal-ai-workspace/
 │  │  │     ├─ 0001_baseline.py
 │  │  │     ├─ 0021_owner_setup.py
 │  │  │     ├─ 0022_login_session_password.py
+│  │  │     ├─ 0023_passkeys.py
 │  │  │     ├─ 0025_audit_events.py
 │  │  │     ├─ 0026_projects.py
 │  │  │     ├─ 0030_shared_connections.py
@@ -83,11 +84,21 @@ personal-ai-workspace/
 │  │  │  │  ├─ errors.py
 │  │  │  │  ├─ limits.py
 │  │  │  │  ├─ models.py
+│  │  │  │  ├─ passkeys/
+│  │  │  │  │  ├─ __init__.py
+│  │  │  │  │  ├─ approvals.py
+│  │  │  │  │  ├─ ceremony.py
+│  │  │  │  │  ├─ config.py
+│  │  │  │  │  ├─ models.py
+│  │  │  │  │  ├─ service.py
+│  │  │  │  │  ├─ store.py
+│  │  │  │  │  └─ types.py
 │  │  │  │  ├─ passwords.py
 │  │  │  │  ├─ principals.py
 │  │  │  │  ├─ service.py
 │  │  │  │  ├─ sessions.py
 │  │  │  │  ├─ state.py
+│  │  │  │  ├─ stepup.py
 │  │  │  │  ├─ throttle.py
 │  │  │  │  ├─ tokens.py
 │  │  │  │  └─ wiring.py
@@ -243,7 +254,8 @@ personal-ai-workspace/
 │  │  │        ├─ __init__.py
 │  │  │        ├─ auth.py
 │  │  │        ├─ events.py
-│  │  │        └─ health.py
+│  │  │        ├─ health.py
+│  │  │        └─ passkeys.py
 │  │  ├─ pyproject.toml
 │  │  └─ tests/
 │  │     ├─ __init__.py
@@ -254,6 +266,9 @@ personal-ai-workspace/
 │  │     ├─ fake_postgres.py
 │  │     ├─ gate_support.py
 │  │     ├─ identity_support.py
+│  │     ├─ passkey_http_support.py
+│  │     ├─ passkey_pg_support.py
+│  │     ├─ passkey_support.py
 │  │     ├─ privacy_audit_support.py
 │  │     ├─ privacy_support.py
 │  │     ├─ provenance_support.py
@@ -320,6 +335,19 @@ personal-ai-workspace/
 │  │     ├─ test_owner_setup_cli.py
 │  │     ├─ test_owner_setup_service.py
 │  │     ├─ test_owner_token_roles.py
+│  │     ├─ test_passkey_argument_validation.py
+│  │     ├─ test_passkey_authenticate.py
+│  │     ├─ test_passkey_ceremony.py
+│  │     ├─ test_passkey_gate.py
+│  │     ├─ test_passkey_grants.py
+│  │     ├─ test_passkey_http.py
+│  │     ├─ test_passkey_migration.py
+│  │     ├─ test_passkey_plans.py
+│  │     ├─ test_passkey_registration.py
+│  │     ├─ test_passkey_revoke.py
+│  │     ├─ test_passkey_sensitive.py
+│  │     ├─ test_passkey_settings.py
+│  │     ├─ test_passkey_types.py
 │  │     ├─ test_postgres_integration.py
 │  │     ├─ test_privacy_audit_event.py
 │  │     ├─ test_privacy_audit_factory.py
