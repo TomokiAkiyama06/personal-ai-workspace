@@ -1056,15 +1056,8 @@ class RedeemTest(PostgresIdentityTestCase):
         self.assertEqual(redemption.user_id, issued.user_id)
 
 
-@requires_postgres
-class ExpiryWhileWaitingForTheOwnerLockTest(PostgresIdentityTestCase):
-    """The expiry is judged when the token is consumed, not when the attempt began.
-
-    A redemption first locks the Owner's ``users`` row and only then consumes the
-    token. While another transaction holds that lock the redemption waits, and the
-    instant it began with no longer says whether the token is still live
-    (Decision 0005, point 10).
-    """
+class ExpiryWhileWaitingTestCase(PostgresIdentityTestCase):
+    """What the tests of a wait for a lock during a redemption share (no tests)."""
 
     async def wait_until_the_database_clock_passes(self, instant: datetime) -> None:
         loop = asyncio.get_running_loop()
@@ -1074,6 +1067,32 @@ class ExpiryWhileWaitingForTheOwnerLockTest(PostgresIdentityTestCase):
                 return
             await asyncio.sleep(0.02)
         self.fail("the database clock did not reach the instant")
+
+    async def assert_rejected_as(self, attempt, reason: str, issued) -> None:
+        with self.assertRaises(SetupTokenRejectedError) as caught:
+            await attempt
+        self.assertNotIn(secret_of(issued.token), str(caught.exception))
+        self.assertIsNone(await self.scalar("SELECT used_at FROM setup_tokens"))
+        self.assertEqual(await self.scalar("SELECT attempts FROM setup_tokens"), 1)
+        redeems = {
+            event: count
+            for event, count in (await self.audit_summary()).items()
+            if event[0] == "owner.token.redeem"
+        }
+        self.assertEqual(redeems, {("owner.token.redeem", "deny", reason): 1})
+        rows = await self.audit_rows()
+        self.assertNotIn(secret_of(issued.token), repr(rows))
+
+
+@requires_postgres
+class ExpiryWhileWaitingForTheOwnerLockTest(ExpiryWhileWaitingTestCase):
+    """The expiry is judged when the token is consumed, not when the attempt began.
+
+    A redemption first locks the Owner's ``users`` row and only then consumes the
+    token. While another transaction holds that lock the redemption waits, and the
+    instant it began with no longer says whether the token is still live
+    (Decision 0005, point 10).
+    """
 
     @contextlib.asynccontextmanager
     async def redemption_waiting_for_the_owner_lock(self, token: str, *, holder_sql=""):
@@ -1102,21 +1121,6 @@ class ExpiryWhileWaitingForTheOwnerLockTest(PostgresIdentityTestCase):
                         await session.rollback()  # never leave it waiting
                     attempt.cancel()
                     await asyncio.gather(attempt, return_exceptions=True)
-
-    async def assert_rejected_as(self, attempt, reason: str, issued) -> None:
-        with self.assertRaises(SetupTokenRejectedError) as caught:
-            await attempt
-        self.assertNotIn(secret_of(issued.token), str(caught.exception))
-        self.assertIsNone(await self.scalar("SELECT used_at FROM setup_tokens"))
-        self.assertEqual(await self.scalar("SELECT attempts FROM setup_tokens"), 1)
-        redeems = {
-            event: count
-            for event, count in (await self.audit_summary()).items()
-            if event[0] == "owner.token.redeem"
-        }
-        self.assertEqual(redeems, {("owner.token.redeem", "deny", reason): 1})
-        rows = await self.audit_rows()
-        self.assertNotIn(secret_of(issued.token), repr(rows))
 
     async def test_a_token_that_expires_while_the_attempt_waits_is_not_consumed(self):
         issued = await self.operator.setup_owner("boss")
@@ -1180,6 +1184,153 @@ class ExpiryWhileWaitingForTheOwnerLockTest(PostgresIdentityTestCase):
         ) as (release, attempt):
             await release()
             await self.assert_rejected_as(attempt, "token_unavailable", issued)
+
+
+@requires_postgres
+class ExpiryWhileWaitingForTheTokenRowTest(ExpiryWhileWaitingTestCase):
+    """The clocks are read after the token's own row is locked, not before.
+
+    Any transaction may hold the token's row (the application role can
+    ``SELECT ... FOR UPDATE`` it). An UPDATE that waits for a row goes on, once
+    the holder lets go of it unchanged, with the conditions it judged BEFORE the
+    wait: a consuming statement that had judged the expiry first would consume a
+    token that expired meanwhile, and record the time before the wait
+    (Decision 0005, point 10). A redemption therefore locks the row first and
+    only then reads the clocks.
+    """
+
+    @contextlib.asynccontextmanager
+    async def redemption_waiting_for_the_token_row(self, token: str, *, holder_sql=""):
+        """Redeem ``token`` while another transaction holds the token's row lock.
+
+        Counting the attempt is an UPDATE of the same row (it would wait for the
+        holder too), so the row is taken while the redemption is parked at the
+        Owner's lock, between counting the attempt and consuming the token.
+        Yields ``(release, attempt)`` once the redemption waits for the token's
+        row, and for that lock only (``pg_blocking_pids``). ``release()``
+        commits the holder (which may first run ``holder_sql``).
+        """
+        owner_holder = self.new_database()
+        token_holder = self.new_database()
+        attempt = None
+        async with (
+            owner_holder.session() as owner_session,
+            token_holder.session() as token_session,
+        ):
+            await owner_session.execute(text("SELECT 1 FROM users FOR UPDATE"))
+            try:
+                attempt = asyncio.create_task(self.redeemer.redeem(token))
+                await self.wait_until_a_statement_waits_for_a_lock()  # Owner lock
+                await token_session.execute(
+                    text("SELECT 1 FROM setup_tokens FOR UPDATE")
+                )
+                holder_pid = await token_session.scalar(text("SELECT pg_backend_pid()"))
+                await owner_session.commit()
+                await self.wait_until_a_statement_waits_for_a_lock(
+                    blocked_by=holder_pid
+                )
+
+                async def release() -> None:
+                    if holder_sql:
+                        await token_session.execute(text(holder_sql))
+                    await token_session.commit()
+
+                yield release, attempt
+            finally:
+                if attempt is not None:
+                    if not attempt.done():
+                        await owner_session.rollback()  # never leave it waiting
+                        await token_session.rollback()
+                    attempt.cancel()
+                    await asyncio.gather(attempt, return_exceptions=True)
+
+    async def test_a_token_that_expires_while_waiting_for_its_row_is_not_consumed(
+        self,
+    ):
+        issued = await self.operator.setup_owner("boss")
+        self.clock.advance(seconds=TTL - 1)  # one second before the expiry
+
+        async with self.redemption_waiting_for_the_token_row(issued.token) as (
+            release,
+            attempt,
+        ):
+            self.clock.advance(seconds=2)  # expired while it waits for the row
+            await release()
+            await self.assert_rejected_as(attempt, "token_expired", issued)
+
+    async def test_a_token_that_is_still_live_after_the_wait_for_its_row_is_consumed(
+        self,
+    ):
+        issued = await self.operator.setup_owner("boss")
+        self.clock.advance(seconds=TTL - 3)
+
+        async with self.redemption_waiting_for_the_token_row(issued.token) as (
+            release,
+            attempt,
+        ):
+            self.clock.advance(seconds=1)  # still one second to go
+            await release()
+            redemption = await attempt
+
+        self.assertEqual(redemption.audit_ref, issued.audit_ref)
+        # Stamped with the instant of the consumption, after the wait.
+        self.assertEqual(
+            await self.scalar("SELECT used_at FROM setup_tokens"),
+            T0 + timedelta(seconds=TTL - 2),
+        )
+
+    async def test_the_database_clock_decides_after_a_wait_for_the_token_row_too(self):
+        # The process clock is frozen 57 s after the token was issued with a
+        # 60 s lifetime: by that clock the token never expires. The database
+        # clock passes the expiry (3 s after this line) while the attempt waits
+        # for the token's row.
+        database_now = await self.scalar("SELECT clock_timestamp()")
+        self.clock.now = database_now - timedelta(seconds=57)
+        issued = await self.make_operator(ttl_seconds=60).setup_owner("boss")
+        expires_at = await self.scalar("SELECT expires_at FROM setup_tokens")
+        self.assertEqual(expires_at, database_now + timedelta(seconds=3))
+
+        async with self.redemption_waiting_for_the_token_row(issued.token) as (
+            release,
+            attempt,
+        ):
+            await self.wait_until_the_database_clock_passes(expires_at)
+            await release()
+            await self.assert_rejected_as(attempt, "token_expired", issued)
+
+    async def test_a_token_revoked_while_the_attempt_waits_for_its_row_is_unavailable(
+        self,
+    ):
+        issued = await self.operator.setup_owner("boss")
+        self.clock.advance(seconds=TTL - 1)
+
+        async with self.redemption_waiting_for_the_token_row(
+            issued.token, holder_sql="UPDATE setup_tokens SET revoked_at = now()"
+        ) as (release, attempt):
+            await release()
+            await self.assert_rejected_as(attempt, "token_unavailable", issued)
+
+    async def test_a_token_used_while_the_attempt_waits_for_its_row_is_unavailable(
+        self,
+    ):
+        issued = await self.operator.setup_owner("boss")
+        self.clock.advance(seconds=TTL - 1)
+
+        async with self.redemption_waiting_for_the_token_row(
+            issued.token, holder_sql="UPDATE setup_tokens SET used_at = now()"
+        ) as (release, attempt):
+            await release()
+            with self.assertRaises(SetupTokenRejectedError):
+                await attempt
+        # Spent by somebody else: it stays as that transaction left it, and this
+        # attempt is audited without saying "expired".
+        self.assertIsNotNone(await self.scalar("SELECT used_at FROM setup_tokens"))
+        redeems = {
+            event
+            for event in await self.audit_summary()
+            if event[0] == "owner.token.redeem"
+        }
+        self.assertEqual(redeems, {("owner.token.redeem", "deny", "token_unavailable")})
 
 
 @requires_postgres
@@ -1297,6 +1448,54 @@ class IssuanceWhileWaitingForALockTest(PostgresIdentityTestCase):
             (after_the_wait, expected_expiry),
         )
         self.assertEqual(issued.expires_at, expected_expiry)
+
+    async def test_the_older_token_is_revoked_at_the_end_of_a_wait_for_its_row(self):
+        await self.operator.setup_owner("boss")
+
+        async with self.issuing_while_another_transaction_holds(
+            self.operator.recover_owner, "SELECT 1 FROM setup_tokens FOR UPDATE"
+        ) as (end_holder, attempt):
+            self.clock.advance(seconds=TTL + 60)
+            after_the_wait = self.clock.now
+            await end_holder()
+            await attempt
+
+        # ``revoked_at`` is the reading taken once the token's row was locked,
+        # not the one before the wait.
+        self.assertEqual((await self.token_of("setup")).revoked_at, after_the_wait)
+        self.assertEqual((await self.token_of("recovery")).created_at, after_the_wait)
+
+    async def test_a_replaced_owners_token_is_revoked_at_the_end_of_a_wait_for_its_row(
+        self,
+    ):
+        await self.operator.setup_owner("old")
+        await self.execute("UPDATE users SET status = 'pending_deletion'")
+
+        async def replace():
+            return await self.operator.setup_owner("new", replace_non_live_owner=True)
+
+        async with self.issuing_while_another_transaction_holds(
+            replace, "SELECT 1 FROM setup_tokens FOR UPDATE"
+        ) as (end_holder, attempt):
+            self.clock.advance(seconds=TTL + 60)
+            after_the_wait = self.clock.now
+            await end_holder()
+            await attempt
+
+        (old_token,) = await self.query(
+            "SELECT revoked_at FROM setup_tokens t "
+            "JOIN users u ON u.id = t.user_id WHERE u.login_name = 'old'"
+        )
+        (old_user,) = await self.query(
+            "SELECT updated_at FROM users WHERE login_name = 'old'"
+        )
+        (new_user,) = await self.query(
+            "SELECT created_at FROM users WHERE login_name = 'new'"
+        )
+        self.assertEqual(
+            (old_token.revoked_at, old_user.updated_at, new_user.created_at),
+            (after_the_wait, after_the_wait, after_the_wait),
+        )
 
     async def test_a_replacing_setup_lives_from_the_end_of_the_wait_for_the_owner_lock(
         self,
