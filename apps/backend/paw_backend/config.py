@@ -99,6 +99,11 @@ class Settings(BaseSettings):
     # (PAW-050). 0 turns it off: expired research would then stay in PostgreSQL.
     scratch_purge_interval_seconds: int = Field(default=3_600, ge=0, le=86_400)
 
+    # How often the orchestrator's sweep stops the tasks of projects whose deletion
+    # began (PAW-034, Decision 0008 section 8). 0 turns it off: tasks that appear
+    # after a project's deletion began would then keep running.
+    project_task_stop_interval_seconds: int = Field(default=60, ge=0, le=3_600)
+
     log_level: str = "info"
 
     @field_validator(
@@ -175,6 +180,16 @@ class Settings(BaseSettings):
         if 0 < value < 60:
             raise ValueError(
                 "scratch_purge_interval_seconds must be 0 (off) or 60 to 86400"
+            )
+        return value
+
+    @field_validator("project_task_stop_interval_seconds")
+    @classmethod
+    def _stop_interval_is_off_or_at_least_ten_seconds(cls, value: int) -> int:
+        # 1..9 would hit the database every few seconds for no benefit.
+        if 0 < value < 10:
+            raise ValueError(
+                "project_task_stop_interval_seconds must be 0 (off) or 10 to 3600"
             )
         return value
 
