@@ -18,7 +18,9 @@ jobs:
     # Keep this name stable so it can be selected as a required status check.
     name: Repository checks
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    # The backend test suite (real PostgreSQL) needs about 10 minutes on a hosted runner
+    # and keeps growing; a 10-minute limit cancelled the runs of main and of PRs (#93).
+    timeout-minutes: 30
     services:
       # Throwaway PostgreSQL for the backend integration tests. It exists only
       # for this job and is not reachable from outside the runner, so the
