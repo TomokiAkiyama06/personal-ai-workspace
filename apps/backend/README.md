@@ -6,7 +6,7 @@ Login と Session はまだ実装していません（PAW-022 以降）。
 RBAC と Audit（PAW-025）、Task の Lifecycle と永続化（[PAW-032](#agent-task-lifecycle)、HTTP の Endpoint はまだありません）、Task Queue・Budget・Loop 検知（[PAW-033](#task-queue--budget--loop-検知)）、Tool Broker と Capability Policy（[PAW-031](#tool-broker--capability-policy)、HTTP の Endpoint はまだありません）、Memory の PostgreSQL Schema（[PAW-040](#memory--conversation-schema)）、
 最小の `users` Table と Owner の初期設定・復旧のコマンド（[PAW-021](#owner-の初期設定と復旧)）を実装済みです。Memory の保存・整理・検索の処理は PAW-041 以降です。
 Shared Memory の管理（Owner / Admin の作成・編集・削除・復元、Candidate の承認、Agent の自動昇格の拒否、System Policy の優先。[PAW-046](#shared-memory-administration)、HTTP の Endpoint はまだありません）も実装済みです。
-Research の一時保存（[PAW-050](#research-scratch-store)、24 時間 TTL、期限切れを消す Janitor つき、HTTP の Endpoint はまだありません）と、Research Provider の Adapter Interface（[PAW-051](#research-provider-adapter)、実際の Provider（Direct Web、Docs、GitHub、OpenCode）はまだありません）と、外部の検索へ送る Query の最小化と送信の Audit（[PAW-053](#research-privacy-filter)。Audit は [#87](#audit-の永続化issue-87) で `audit_events` に永続化済み）も実装済みです。
+Research の一時保存（[PAW-050](#research-scratch-store)、24 時間 TTL、期限切れを消す Janitor つき、HTTP の Endpoint はまだありません）と、Research Provider の Adapter Interface（[PAW-051](#research-provider-adapter)、実際の Provider（Direct Web、Docs、GitHub、OpenCode）はまだありません）と、外部の検索へ送る Query の最小化と送信の Audit（[PAW-053](#research-privacy-filter)。Audit は [#87](#audit-の永続化issue-87) で `audit_events` に永続化済み。方式は Decision 0023（Proposed、未承認）の提案です）も実装済みです。
 Claim と Source の対応・回答や Task からの追跡（[PAW-052](#evidence--claim-provenance)、HTTP の Endpoint はまだありません）も実装済みです。
 Project の作成・招待制の Membership・Lifecycle（Active / Archived / Pending deletion / Deleted）は [PAW-026](#project-crud--membership--lifecycle) で実装済みです（Service のみ。HTTP の Endpoint と Session はまだありません）。
 
@@ -1821,7 +1821,7 @@ Timeout の Test は、永遠に待つ Provider を 0.3 秒で打ち切り、成
 [PAW-053](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/45) で実装した、外部の検索へ送る Query を最小化し、送信を Audit する層です（`paw_backend/research/privacy/`）。
 設計は [要件](../../REQUIREMENTS.md)の「Web Research / Knowledge Layer」の Privacy に従い、数値と規則は [Decision 0010](../../docs/decisions/0010-research-privacy-filter-policy.md)（Approved。2026-09-25 に Human が承認）で決めています。数値は暫定値として承認されたもので、変更できます。
 **永続の Audit Sink は接続済みです**（Issue [#87](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/87)、Migration `0087`。[Audit の永続化](#audit-の永続化issue-87)）。
-**2026-09-25 の追記（#87）: Decision 0010 の承認時の条件が満たされました。** 条件は「永続の Audit Sink が接続されるまで、Private 由来の Context を Research へ自動で入れる設計を有効にしない」でした。Sink が接続されたので、この設計を有効にしてよくなりました。ただし、それは **`build_research_broker`（または `build_privacy_gate`）で作った Broker を通す場合だけ**です（下の「許可されること・まだ許可されないこと」）。この追記は、承認済みの Decision 0010 を書き換えるものではなく、条件が満たされたことの記録です。
+**2026-09-25 の追記（#87）: Decision 0010 の承認時の条件のうち、Sink の接続は実装しました。** 条件は「永続の Audit Sink が接続されるまで、Private 由来の Context を Research へ自動で入れる設計を有効にしない」でした。Sink は接続済みなので、`build_research_broker`（または `build_privacy_gate`）で作った Broker を通す場合に限り、この設計を有効にしてよい、という状態になります。**ただし、その Sink の方式（`audit_events` への JSONB 列 `details`、CHECK 制約、`NOT VALID`、`downgrade` が `details` を破棄すること）は [Decision 0023](../../docs/decisions/0023-audit-events-details-for-external-send.md)（Proposed、Approval は未承認）の提案で、Human の承認を待っています。承認されるまで、条件が満たされたとは扱わず、Private 由来の Context を Research へ自動で入れる設計は有効にしません**（下の「許可されること・まだ許可されないこと」）。この追記は、承認済みの Decision 0010 を書き換えるものではなく、実装の状態の記録です。
 **Provider には依存しません。** HTTP の Endpoint はありません。永続化する Store は、Authorizer の `audit_events` Table だけです（新しい Table はなく、Migration `0087` はその Table に列を 1 つ足します）。
 
 Main Agent（または Research Worker）は、書いた Query の**下書き**と、その下書きの元になった Context（各 Piece に `ContextLabel` を付けたもの）を Gate に渡します。
@@ -1916,7 +1916,7 @@ Record は「送ってよいと判断した」記録で、Provider が答えた�
 
 #### 許可されること・まだ許可されないこと
 
-Decision 0010 の承認時の条件が満たされたので、次は**許可されます**:
+Decision 0010 の承認時の条件は「永続の Sink の接続」で、実装は接続しました。[Decision 0023](../../docs/decisions/0023-audit-events-details-for-external-send.md) が承認されたら、次は**許可されます**（**承認されるまでは、Private 由来の Context を Research へ自動で入れる設計は、まだ有効にしません**）:
 
 - Private 由来の Context（`PRIVATE_SOURCE`、`PRIVATE_MEMORY`、`RAW_CONVERSATION`、`SECRET` の Label を付けた `ContextPiece`）を Gate に渡して、Research の Query の下書きから写しを除き、最小化した Query を外部の Provider へ送ること。**ただし `build_research_broker` / `build_privacy_gate` で作った Broker を通す場合だけです。** 送信ごとに、Query の SHA-256 などが `audit_events` に残ります。
 
@@ -1924,7 +1924,7 @@ Decision 0010 の承認時の条件が満たされたので、次は**許可さ�
 
 - Sink の無い `ResearchBroker`（`preflight` も `unfiltered=True` も無い Broker は `PreflightRequiredError` で検索しません）。`unfiltered=True` の Broker（最小化も Audit もしない。Private 由来の Query には使わない）。
 - `PrivacyGate(InMemoryExternalSendAudit())`（Test 用。Process が終わると Record が消え、1,000 件で満杯になる）を、本番で Private 由来の Context に使うこと。
-- この Repository には、`build_research_broker` を呼ぶ Application のコードも、Provider の実装（Direct Web、Docs、GitHub、OpenCode）も、HTTP の Endpoint も**まだありません**。条件が外れたのは、それらの Issue が Private 由来の Context を渡してよい、ということで、渡す実装があるわけではありません。
+- この Repository には、`build_research_broker` を呼ぶ Application のコードも、Provider の実装（Direct Web、Docs、GitHub、OpenCode）も、HTTP の Endpoint も**まだありません**。条件が外れる（0023 の承認）のは、それらの Issue が Private 由来の Context を渡してよい、ということで、渡す実装があるわけではありません。
 
 ### Broker への差し込み
 
@@ -1953,7 +1953,7 @@ result = await broker.gather(
 
 ### Migration `0087`
 
-`0087_audit_external_send_details.py` は、`audit_events` に NULL 可の JSONB 列 `details` と CHECK 制約 2 つ（`ck_audit_events_details_object`、`ck_audit_events_external_send_details`）を足します。Table も Trigger も権限も作らず、変えません（上の「Audit の永続化」）。CHECK 制約は `NOT VALID` で足し、検証しません（追記専用の大きな Table を `ACCESS EXCLUSIVE` の Lock で走査しないため。新しい行は、制約を足した時から検査されます。検証しないのは、下げて上げ直したとき、`details` を失った古い送信の行が検証に失敗しないためでもあります）。
+`0087_audit_external_send_details.py` は、`audit_events` に NULL 可の JSONB 列 `details` と CHECK 制約 2 つ（`ck_audit_events_details_object`、`ck_audit_events_external_send_details`）を足します。Table も Trigger も権限も作らず、変えません（上の「Audit の永続化」）。この方式と、下の `NOT VALID`・`downgrade` の扱い、拒否した要求を Audit しないこと、`actor_id` を持たないことは、[Decision 0023](../../docs/decisions/0023-audit-events-details-for-external-send.md)（Proposed、未承認）が提案し、Human に決めてほしい点を挙げています。CHECK 制約は `NOT VALID` で足し、検証しません（追記専用の大きな Table を `ACCESS EXCLUSIVE` の Lock で走査しないため。新しい行は、制約を足した時から検査されます。検証しないのは、下げて上げ直したとき、`details` を失った古い送信の行が検証に失敗しないためでもあります）。
 `downgrade` は `details` の列を落とすので、**記録済みの外部送信の Query の指紋と数を破棄します**（行は残ります）。開発・Test 用で、本番では実行しないでください。
 `down_revision` は `0026` です（鎖は `0001 → 0025 → 0032 → 0040 → 0021 → 0033 → 0031 → 0050 → 0046 → 0052 → 0026 → 0087`）。Revision ID は Issue 番号で、鎖の順序ではありません。統合時に Orchestrator が並びを確認します。
 Model（`authz/models.py`）と Migration は同じ CHECK の文を繰り返しており（Migration は凍結した写し）、`tests/test_privacy_audit_schema.py` が食い違いを検出します。

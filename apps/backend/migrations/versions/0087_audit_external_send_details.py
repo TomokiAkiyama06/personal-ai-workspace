@@ -6,7 +6,11 @@ Create Date: 2026-09-25
 
 Decision 0010 (approved 2026-09-25) lets the Research Privacy Filter send a query
 out only after it has recorded the send, and makes a persistent record the
-condition for feeding private-derived context into research. The record (the
+condition for feeding private-derived context into research. This revision, and
+its choices (a JSONB column on ``audit_events``, the CHECK shapes, ``NOT VALID``,
+what a downgrade destroys), are proposed in Decision 0023 (Proposed, not yet
+approved by the human; see
+``docs/decisions/0023-audit-events-details-for-external-send.md``). The record (the
 SHA-256 of the query, its length, the provider kinds, the project, how much was
 removed) does not fit the columns of ``audit_events`` (ids and enum values), so
 this revision adds one nullable JSONB column, ``details``, and two CHECK

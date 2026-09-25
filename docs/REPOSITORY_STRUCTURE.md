@@ -368,6 +368,7 @@ personal-ai-workspace/
 │     ├─ 0012-research-provider-adapter-policy.md
 │     ├─ 0013-research-scratch-task-relation.md
 │     ├─ 0014-task-working-set-persistence.md
+│     ├─ 0023-audit-events-details-for-external-send.md
 │     └─ README.md
 └─ evaluator/
    └─ README.md
