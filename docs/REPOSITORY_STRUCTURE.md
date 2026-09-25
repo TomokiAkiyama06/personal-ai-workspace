@@ -53,6 +53,7 @@ personal-ai-workspace/
 │  │  │     ├─ 0031_tool_approvals.py
 │  │  │     ├─ 0032_task_lifecycle.py
 │  │  │     ├─ 0033_task_queue_budget_loop.py
+│  │  │     ├─ 0034_agent_dag_orchestrator.py
 │  │  │     ├─ 0040_memory_schema.py
 │  │  │     ├─ 0046_shared_memory_candidates.py
 │  │  │     ├─ 0050_research_scratch_store.py
@@ -96,6 +97,25 @@ personal-ai-workspace/
 │  │  │  │     ├─ records.py
 │  │  │  │     ├─ service.py
 │  │  │  │     └─ validation.py
+│  │  │  ├─ orchestrator/
+│  │  │  │  ├─ __init__.py
+│  │  │  │  ├─ config.py
+│  │  │  │  ├─ domain.py
+│  │  │  │  ├─ errors.py
+│  │  │  │  ├─ gateway.py
+│  │  │  │  ├─ jsonvalue.py
+│  │  │  │  ├─ limits.py
+│  │  │  │  ├─ models.py
+│  │  │  │  ├─ orchestrator.py
+│  │  │  │  ├─ plan.py
+│  │  │  │  ├─ project_sweep.py
+│  │  │  │  ├─ records.py
+│  │  │  │  ├─ result.py
+│  │  │  │  ├─ runtime.py
+│  │  │  │  ├─ scheduling.py
+│  │  │  │  ├─ scope.py
+│  │  │  │  ├─ store.py
+│  │  │  │  └─ validation.py
 │  │  │  ├─ projects/
 │  │  │  │  ├─ __init__.py
 │  │  │  │  ├─ domain.py
@@ -190,6 +210,7 @@ personal-ai-workspace/
 │  │     ├─ __init__.py
 │  │     ├─ fake_postgres.py
 │  │     ├─ identity_support.py
+│  │     ├─ orchestrator_support.py
 │  │     ├─ privacy_support.py
 │  │     ├─ provenance_support.py
 │  │     ├─ projects_support.py
@@ -213,6 +234,25 @@ personal-ai-workspace/
 │  │     ├─ test_identity_tokens.py
 │  │     ├─ test_middleware.py
 │  │     ├─ test_migrations.py
+│  │     ├─ test_orchestrator_argument_validation.py
+│  │     ├─ test_orchestrator_budget.py
+│  │     ├─ test_orchestrator_control.py
+│  │     ├─ test_orchestrator_failures.py
+│  │     ├─ test_orchestrator_grants.py
+│  │     ├─ test_orchestrator_lease.py
+│  │     ├─ test_orchestrator_migration.py
+│  │     ├─ test_orchestrator_plan.py
+│  │     ├─ test_orchestrator_planning.py
+│  │     ├─ test_orchestrator_project_sweep.py
+│  │     ├─ test_orchestrator_project_sweep_app.py
+│  │     ├─ test_orchestrator_property.py
+│  │     ├─ test_orchestrator_result.py
+│  │     ├─ test_orchestrator_run.py
+│  │     ├─ test_orchestrator_scheduling.py
+│  │     ├─ test_orchestrator_scope.py
+│  │     ├─ test_orchestrator_shutdown.py
+│  │     ├─ test_orchestrator_store.py
+│  │     ├─ test_orchestrator_tools.py
 │  │     ├─ test_owner_no_web_path.py
 │  │     ├─ test_owner_setup_cli.py
 │  │     ├─ test_owner_setup_service.py
