@@ -21,7 +21,9 @@ from paw_backend.memory.shared import (
     CandidateLimitError,
     CandidateNotFoundError,
     CandidateProposal,
+    EffectiveSharedMemory,
     InputProblem,
+    InternalEffectiveView,
     InvalidSharedMemoryInputError,
     OriginScope,
     PolicySourceError,
@@ -571,6 +573,11 @@ class PublicSurfaceTest(unittest.TestCase):
         "effective_view",
         "propose_candidate",
     }
+    # Backend-internal (Decision 0009, section 10): the one method that returns
+    # the wording of the System Policies that overrode a memory. It is named here
+    # on purpose so that a new such method cannot appear unnoticed; whoever adds
+    # an HTTP surface must not expose it.
+    INTERNAL = {"internal_effective_view"}
 
     def public_members(self):
         return {
@@ -580,7 +587,24 @@ class PublicSurfaceTest(unittest.TestCase):
         }
 
     def test_the_public_methods_are_exactly_the_documented_ones(self):
-        self.assertEqual(set(self.public_members()), self.MANAGE | self.OTHER)
+        # ``INTERNAL`` is added to the set (the test used to expect
+        # ``MANAGE | OTHER``): Decision 0009 (approved) keeps the policy wording
+        # off the public view and gives the backend its own path to it.
+        self.assertEqual(
+            set(self.public_members()), self.MANAGE | self.OTHER | self.INTERNAL
+        )
+
+    def test_only_the_internal_method_returns_the_policy_wording(self):
+        hints = {
+            name: inspect.signature(member).return_annotation
+            for name, member in self.public_members().items()
+        }
+        self.assertIs(hints["effective_view"], EffectiveSharedMemory)
+        self.assertIs(hints["internal_effective_view"], InternalEffectiveView)
+        carriers = {
+            name for name, hint in hints.items() if hint is InternalEffectiveView
+        }
+        self.assertEqual(carriers, self.INTERNAL)
 
     def test_every_public_method_is_async_and_takes_the_actor_first(self):
         for name, member in self.public_members().items():

@@ -1049,7 +1049,7 @@ class GatherClockTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(seen, [True])
 
     async def test_the_default_clock_is_utc_now(self):
-        broker = ResearchBroker(registry_of(web(hits=[hit()])))
+        broker = ResearchBroker(registry_of(web(hits=[hit()])), unfiltered=True)
         before = datetime.now(UTC)
         result = await guarded(broker.gather(request()))
         after = datetime.now(UTC)
@@ -1484,7 +1484,7 @@ class GatherTimeoutTest(unittest.IsolatedAsyncioTestCase):
         )
         registry.register(impatient, timeout_seconds=SHORT_TIMEOUT)
         registry.register(patient, timeout_seconds=10)
-        broker = ResearchBroker(registry, clock=fixed_clock())
+        broker = ResearchBroker(registry, clock=fixed_clock(), unfiltered=True)
         result = await guarded(broker.gather(request()))
         self.assertEqual(urls(result), ["https://d.example/1"])
         self.assertEqual(

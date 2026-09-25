@@ -593,7 +593,8 @@ class SubclassedNameThroughTheBrokerTest(unittest.IsolatedAsyncioTestCase):
             provider.name = hostile_name(name)
             provider.kind = kind
             registry.register(provider)
-        broker = ResearchBroker(registry, clock=fixed_clock(NOW))
+        # No privacy gate here: the explicit opt-out (PAW-053 fails closed without it).
+        broker = ResearchBroker(registry, clock=fixed_clock(NOW), unfiltered=True)
 
         result = await asyncio.wait_for(
             broker.gather(ResearchRequest("python asyncio")), GUARD_SECONDS

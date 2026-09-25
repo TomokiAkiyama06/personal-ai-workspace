@@ -5,13 +5,13 @@ memory table): ``research_scratch_items`` and ``research_scratch_leases``.
 ``expires_at = created_at + 24 hours`` is a CHECK constraint (a generated column
 cannot be used: ``timestamptz + interval`` is not immutable). Deletion is
 deferred for pinned items, saved items (a user's explicit save, kept apart from
-the pin so that clearing one never clears the other; Proposed decision 0013),
+the pin so that clearing one never clears the other; decision 0013),
 items whose promotion is pending and items with an active lease; a lease lasts
 at most one hour.
 
 ``project_id`` and ``created_by`` are plain UUIDs (the projects and users tables
 do not exist yet). ``task_id`` is a plain UUID too, with no foreign key to
-``tasks.id`` (Proposed decision 0013): deleting a task is never blocked by
+``tasks.id`` (decision 0013): deleting a task is never blocked by
 research, pinned research is never deleted with it and the item keeps its
 Project / Task relation (``SET NULL`` lost it, ``RESTRICT`` blocked the task
 delete, ``CASCADE`` deleted pinned research). ``ScratchStore.add`` checks that the

@@ -17,6 +17,10 @@ record denials only, the others every decision, fail-closed).
 * ``list_memories``, ``get_memory``, ``effective_view``: capability
   ``shared_memory.read``. Every active user; an agent whose grant lists it and
   covers all projects.
+* ``internal_effective_view``: the same capability, but **backend-internal
+  only** (the context assembly). It is the one path that returns the wording of
+  the System Policies that overrode a memory; no API layer may return its result
+  to a user or an agent (see "The effective view").
 * ``list_memories`` / ``get_memory`` with ``include_deleted=True``,
   ``list_candidates``, ``get_candidate``: capability ``shared_memory.manage``
   (the views only managers may see; they change nothing). Owner, Admin (human).
@@ -116,6 +120,17 @@ declared ``policy_subjects`` are covered by a policy item is suppressed and only
 named in ``overridden``. The policy is loaded on every call. If it cannot be
 loaded the call raises :class:`PolicySourceError` and returns no memory.
 
+The result of ``effective_view`` (:class:`EffectiveSharedMemory`) never carries
+the wording of a System Policy: users and agents do not see it (Decision 0009,
+section 10). ``internal_effective_view`` runs the same steps (same
+authorization, same policy load, same fail-closed rule) and returns an
+:class:`InternalEffectiveView`, which adds the policy items that won
+(``applied_policies``, with their ``statement``). It exists for the backend's
+own context assembly. It is a separate method rather than a flag so that no
+argument of ``effective_view`` can turn the wording on; whoever exposes this
+service over HTTP (a later issue) exposes ``effective_view`` and not
+``internal_effective_view``.
+
 Concurrency
 -----------
 The database runs at READ COMMITTED. Every transaction that writes starts with
@@ -204,6 +219,7 @@ from paw_backend.memory.shared.records import (
     CandidateState,
     EditPlan,
     EffectiveSharedMemory,
+    InternalEffectiveView,
     OriginScope,
     SharedMemory,
     SharedMemoryCandidate,
@@ -694,10 +710,36 @@ class SharedMemoryService:
     ) -> EffectiveSharedMemory:
         """A page of the active shared memories with the System Policy applied.
 
-        The page is the one ``list_memories`` would return. Raises
-        :class:`PolicySourceError` (and returns no memory) when the policy cannot
-        be loaded.
+        The page is the one ``list_memories`` would return. The result has no
+        policy wording (only the ids of the policies that won): it is what a user
+        or an agent may be shown. Raises :class:`PolicySourceError` (and returns
+        no memory) when the policy cannot be loaded.
         """
+        view = await self._resolved_view(actor, limit=limit, offset=offset)
+        return view.public()
+
+    async def internal_effective_view(
+        self,
+        actor: Actor,
+        *,
+        limit: int = limits.DEFAULT_LIST_LIMIT,
+        offset: int = 0,
+    ) -> InternalEffectiveView:
+        """``effective_view`` plus the policies that won, for the backend only.
+
+        **Backend-internal:** the result holds the wording of the System
+        Policies that overrode a memory (``applied_policies``), which users and
+        agents never see (Decision 0009, section 10). Only the backend's own
+        context assembly calls this; never return it, or anything made from its
+        ``applied_policies``, to a user or an agent. Same authorization
+        (``shared_memory.read``), same policy load and same fail-closed rule as
+        ``effective_view``.
+        """
+        return await self._resolved_view(actor, limit=limit, offset=offset)
+
+    async def _resolved_view(
+        self, actor: Actor, *, limit: int, offset: int
+    ) -> InternalEffectiveView:
         self._check_actor(actor)
         limit, offset = validate_page(limit, offset)
         await self._authorize(
@@ -708,7 +750,7 @@ class SharedMemoryService:
         )
         memories = await self._page(statuses=_LIVE, limit=limit, offset=offset)
         view = resolve_effective_view(memories, policies)
-        if not isinstance(view, EffectiveSharedMemory):
+        if not isinstance(view, InternalEffectiveView):
             raise RulesContractError("resolve_effective_view")
         return view
 

@@ -212,6 +212,12 @@ class PolicyWinsAsAppRole(AsAppRole, effective_view.PolicyWinsTest):
     pass
 
 
+class PolicyWordingStaysInternalAsAppRole(
+    AsAppRole, effective_view.PolicyWordingStaysInternalTest
+):
+    pass
+
+
 class AgentsNeverManageAsAppRole(AsAppRole, refused.AgentsNeverManageTest):
     pass
 
