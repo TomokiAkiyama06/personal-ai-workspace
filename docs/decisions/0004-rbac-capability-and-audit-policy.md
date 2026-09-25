@@ -1,10 +1,10 @@
 # RBAC・Capability・Auditの方針
 
-- Status: Proposed
+- Status: Approved
 - Date: 2026-09-24
 - Scope: PAW-025 と、Role・Capability・Audit を使う以降の Issue（PAW-021 / 022 / 023 / 026 / 031 / 032 / 040 など）
 - Supersedes: なし
-- Approval: 未承認（Humanの承認待ち）
+- Approval: 2026-09-25、Humanが作業Session内で、判断メモ（Artifact）の各点について「推奨どおり」と回答して承認（下記の「承認時の決定」）
 
 ## 背景
 
@@ -112,3 +112,11 @@ Tool Broker の Approval（Human Approval、Step-up）で、委任不可の操�
 Human が変更を指示した項目は、この Decision を更新してから実装を合わせる。
 承認後に方針を変える場合は、この Decision を書き換えず、新しい Decision から `Supersedes` する。
 [REQUIREMENTS.md](../../REQUIREMENTS.md) の原文は書き換えない。
+
+## 承認時の決定（2026-09-25）
+
+- 本文の各点を、提案どおり承認した。
+- Break-glass（Auditの表が使えない障害時のAdminの入口）は、選択肢 (a)「このまま」（復旧はOwnerのUbuntu sudo Recoveryで行う）とする。
+- Auditの保存期間・Partition・古い行の退避は未決のまま承認し、別Issue [#86](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/86) で決める。
+- Projectの作成・招待の受諾 / 辞退・退出のCapability（`project.create` / `project.invitation.respond` / `project.leave`）の追加は、別Issue [#82](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/82) で行う。承認済みのこのDecisionは書き換えず、新しいDecisionから`Supersedes`で追記する。
+
