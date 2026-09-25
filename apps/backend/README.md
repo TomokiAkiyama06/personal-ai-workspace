@@ -1129,7 +1129,7 @@ Test（要求と使用）: `tests/test_tools_postgres.py` の `StalledServerTest
 - CHECK 制約: 承認者は委任元 User だけで Agent ではない、強い承認は Step-up つき、`summary` は 1〜16 件の配列、`task_attempt` は 1 以上・`task_retry_count` は 0 以上（`tasks` の列と同じ）。
 
 **Application の Role の権限（Migration の末尾の 1 ブロック）。** `PUBLIC` には何も与えません。`PAW_APP_DATABASE_ROLE` があれば、`tool_approvals` に SELECT・INSERT と**状態の列だけ**の UPDATE、履歴に SELECT・INSERT だけを与えます（DELETE・TRUNCATE・識別する列の UPDATE はなし）。
-非 Superuser の Role で、書き換え、Replay、TRUNCATE、Trigger の無効化、他人を承認者にする UPDATE を試して拒否されることを Test しています（`tests/test_tools_postgres_roles.py`）。起動時の診断（`warn_about_loose_privileges`）は、承認の 2 つの Table への過剰な権限（Owner、全体の UPDATE、DELETE、TRUNCATE）と不足（INSERT できない）を警告します。
+非 Superuser の Role で、書き換え、Replay、TRUNCATE、Trigger の無効化、他人を承認者にする UPDATE を試して拒否されることを Test しています（`tests/test_tools_postgres_roles.py`）。起動時の診断（`warn_about_loose_privileges`）は、承認の 2 つの Table への過剰な権限（Owner、全体の UPDATE、DELETE、TRUNCATE）と不足（INSERT できない、または `tool_approvals` の状態の列の UPDATE が 1 つでも欠けている）を警告します。状態の列は、`PostgresApprovalStore` が更新する 7 列（`status`、`approver_id`、`decided_at`、`step_up_verified`、`consumed_at`、`revoked_at`、`revoked_by`。`authz/diagnostics.py` の `APPROVAL_STATE_COLUMNS`）で、「どれか 1 列でも UPDATE できる」（`has_any_column_privilege`）では足りません（`INSERT` と `UPDATE(status)` だけの Role は、要求は書けても、承認・消費・取り消しの遷移が権限エラーになるためです）。列のリストが Store の SQL と Migration の権限に一致することは `tests/test_tools_diagnostics_columns.py` が確認します。
 
 **承認と消費の Role の分離（実装しない。理由）。** Agent 側の Process が承認できない、を Database の権限で保証するには、承認する Process と Agent 側の Process が別の Role で接続する必要があります。
 今の構成は Application の Role が 1 つで、その Role は合法な遷移（`pending` → `approved`）を実行できるため、**Application の Process が侵害されれば、その User の名前で承認を書ける**（承認者は委任元 User でなければならず、強い承認は `step_up_verified` を偽るだけ）ことは、Database では防げません。

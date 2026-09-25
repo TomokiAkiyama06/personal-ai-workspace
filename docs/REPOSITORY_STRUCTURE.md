@@ -301,6 +301,7 @@ personal-ai-workspace/
 │  │     ├─ test_tools_approvals.py
 │  │     ├─ test_tools_broker.py
 │  │     ├─ test_tools_credentials.py
+│  │     ├─ test_tools_diagnostics_columns.py
 │  │     ├─ test_tools_migration.py
 │  │     ├─ test_tools_policy.py
 │  │     ├─ test_tools_postgres.py
