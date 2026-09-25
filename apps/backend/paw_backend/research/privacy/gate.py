@@ -11,18 +11,30 @@ Order of ``PrivacyGate.minimize`` (the draft is the caller's proposed query):
 1. Refuse an unclassified context, a draft over ``MAX_DRAFT_CHARS`` and a context
    over the limits, before any text work.
 2. ``normalize_text`` the draft.
-3. For every non-public piece (in the order given): ``normalize_text`` its text
+3. ``strip_credentials``, FIRST: a credential is removed whole from the draft as
+   written. Nothing that cuts text (step 4) may run before it, because a credential
+   cut into pieces (``ghp_ABCDEF`` and ``abcdefghij``) is no longer recognised by
+   this rule or by the final check, and its pieces would be sent.
+4. For every non-public piece (in the order given): ``normalize_text`` its text
    and find the spans of the draft copied from it with ``find_copied_spans``
    (window ``copy_window(label)``, shortened to the length of the piece, both
    counted in case-folded characters: matching uses full Unicode case folding,
-   so ``ß`` and ``SS`` are the same). All spans are merged and replaced by spaces
-   in one go.
-4. ``strip_credentials``.
-5. The abstraction rules, in this order: ``abstract_urls``, ``abstract_emails``,
+   so ``ß`` and ``SS`` are the same). A span that touches a word that one of the
+   abstraction rules of step 6 would rewrite (a path, an address, an identifier,
+   a URL, ...) is widened to the whole word: the same hazard as in step 3, for
+   the words those rules remove (``an-2026.md`` left of a private path). All spans
+   are merged and replaced by spaces in one go.
+5. ``strip_credentials`` again, when step 4 changed the text: removing a copy can
+   uncover a credential that a neighbouring character had hidden from the rule.
+6. The abstraction rules, in this order: ``abstract_urls``, ``abstract_emails``,
    ``abstract_paths``, ``abstract_hosts``, ``abstract_ids``,
    ``drop_opaque_tokens``, ``generalize_versions``.
-6. ``truncate_query`` to ``MAX_MINIMIZED_QUERY_CHARS``.
-7. Safety checks that do not use ``rules.py``: the query has a word character;
+   After step 5 and after every one of these rules, ``redact_text`` must find no
+   MORE credentials than before the step (a rule that produced one is refused at
+   once, before a later rule can cut it into pieces that the final check would
+   not recognise).
+7. ``truncate_query`` to ``MAX_MINIMIZED_QUERY_CHARS``.
+8. Safety checks that do not use ``rules.py``: the query has a word character;
    ``redact_text`` finds no credential in it; no whole non-public piece and no
    word of 4 or more characters of a secret is in it (compared after NFKC,
    removal of format characters and full case folding with ``str.casefold``,
@@ -37,6 +49,7 @@ closed ``log_type_name``).
 import asyncio
 import inspect
 import logging
+import re
 import unicodedata
 import uuid
 from collections.abc import Callable, Sequence
@@ -74,6 +87,8 @@ from paw_backend.tools.credentials import redact_text
 
 logger = logging.getLogger(__name__)
 
+_WORD = re.compile(r"\S+")
+
 # The abstraction rules of ``rules.py`` in the order they run (see the module
 # docstring), looked up by name at call time.
 ABSTRACTION_RULE_NAMES: tuple[str, ...] = (
@@ -110,6 +125,43 @@ def replace_spans(text: str, spans: Sequence[tuple[int, int]]) -> str:
         position = end
     parts.append(text[position:])
     return "".join(parts)
+
+
+def widen_to_whole_words(
+    text: str,
+    spans: Sequence[tuple[int, int]],
+    rewritten: Callable[[str], bool],
+) -> tuple[tuple[int, int], ...]:
+    """``spans`` (sorted, disjoint, inside ``text``) with every span that touches a
+    word for which ``rewritten(word)`` is true widened to that whole word.
+
+    A word is a maximal run of non-space characters. A span that covers a word
+    entirely, or touches only words for which ``rewritten`` is false, is unchanged.
+    The result is merged (sorted, no two spans touch or overlap). The number of
+    calls to ``rewritten`` is at most the number of words, so the time is linear in
+    ``len(text)`` plus the cost of ``rewritten``."""
+    widened = list(spans)
+    index = 0
+    for match in _WORD.finditer(text):
+        start, end = match.span()
+        while index < len(spans) and spans[index][1] <= start:
+            index += 1
+        if index == len(spans):
+            break
+        if spans[index][0] >= end:
+            continue  # no span touches this word
+        if spans[index][0] <= start and end <= spans[index][1]:
+            continue  # a span covers it whole already
+        if rewritten(match.group()):
+            widened.append((start, end))
+    return merge_spans(widened)
+
+
+def _rewritten_by_the_rules(word: str) -> bool:
+    """Whether one of the abstraction rules rewrites or removes (part of) ``word``.
+
+    The rules work on whitespace-separated words, so a word is judged alone."""
+    return any(getattr(rules, name)(word)[1] for name in ABSTRACTION_RULE_NAMES)
 
 
 def _guard_key(text: str) -> str:
@@ -209,12 +261,25 @@ class PrivacyGate:
             raise PrivacyRefusal(RefusalReason.CONTEXT_TOO_LARGE)
 
         text = rules.normalize_text(draft)
-        text, pieces_matched = self._remove_copied_text(text, context)
+        # The credential rule runs first (module docstring, step 3): nothing that
+        # cuts text may run before it.
         text, credentials_removed = rules.strip_credentials(text)
+        # ``credentials`` is what ``redact_text`` finds in the text now; a step may
+        # not increase it (``_no_new_credential``).
+        credentials = redact_text(text)[1]
+        text, pieces_matched = self._remove_copied_text(text, context)
+        if pieces_matched:  # a copy was removed: the text changed
+            text, uncovered = rules.strip_credentials(text)
+            credentials_removed += uncovered
+            credentials = self._no_new_credential(text, credentials, changed=True)
         abstractions = 0
         for name in ABSTRACTION_RULE_NAMES:
+            before = text
             text, count = getattr(rules, name)(text)
             abstractions += count
+            credentials = self._no_new_credential(
+                text, credentials, changed=text != before
+            )
         truncated = len(text) > MAX_MINIMIZED_QUERY_CHARS
         text = rules.truncate_query(text, MAX_MINIMIZED_QUERY_CHARS)
         self._check_finished_query(text, context)
@@ -250,7 +315,24 @@ class PrivacyGate:
                 spans.extend(found)
         if not spans:
             return text, matched
-        return rules.normalize_text(replace_spans(text, merge_spans(spans))), matched
+        merged = widen_to_whole_words(text, merge_spans(spans), _rewritten_by_the_rules)
+        return rules.normalize_text(replace_spans(text, merged)), matched
+
+    @staticmethod
+    def _no_new_credential(text: str, before: int, *, changed: bool) -> int:
+        """The number of credentials in ``text``; a refusal if it is above ``before``.
+
+        Called after every step that can change the text. A step that leaves a
+        credential where there was none (or more than there were) is a faulty
+        step: refuse now, because a later step that cut the credential into pieces
+        would hide it from ``_check_finished_query``. Only a changed text is
+        looked at again."""
+        if not changed:
+            return before
+        found = redact_text(text)[1]
+        if found > before:
+            raise PrivacyRefusal(RefusalReason.CREDENTIAL_REMAINS)
+        return found
 
     @staticmethod
     def _check_finished_query(text: str, context: Sequence[ContextPiece]) -> None:

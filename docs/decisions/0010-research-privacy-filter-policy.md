@@ -45,6 +45,9 @@ PAW-053 の実装は、動かすためにこれらを仮の値と規則で置い
   Secret は「一部でも漏らさない」ことを優先して 4 文字にした。**この厳しさで良いかは人間が決める。**
 - `PUBLIC` の Context は Query を書き換えない（Public な文書と同じ文章を検索することは正当）。
 - Gate は、仕上がった Query に、Context の全文、または Secret の 4 文字以上の単語が残っていないかを、Rule とは別のコードで確かめ、残っていれば拒否する。
+- **Credential は、写しの除去より先に消す。** 写しの除去は、窓に当たった部分を空白に置き換えるので、先に走らせると、Credential が Private な Context と 16 文字（`SECRET` は 4 文字）を共有しただけで、`ghp_ABCDEF` と `abcdefghij` のような断片に切られる。断片は `redact_text` にも認識されず、最終検査も通って、Credential の一部が外へ出る。そこで順序を、正規化 → Credential の除去 → 写しの除去 → （写しを消して Text が変わったときだけ）Credential の再除去 → 抽象化 とし、Credential は Draft に書かれたままの形で消す。副作用として、Credential と同じ文字列の `SECRET` の Piece は、Credential として先に消えるので、「写しがあった Piece」には数えず、`credentials_removed` に数える。Credential を消した跡の前後にある、窓より短い写しの断片は、検出できず残る（Credential 自体は残らない）。
+- **抽象化の規則が消す語は、写しに触れたら全体を消す。** 上と同じ理由で、写しの除去が Path・Private Host・IP Address・UUID・16 進数の Hash・数字の ID・URL・E-mail の途中を切ると、その語を丸ごと消すはずだった規則が語を認識できず、断片（Private な Path の `an-2026.md`、UUID の `123e4567-`、Private Host の `printer-`）が残る。そこで、写しの範囲が、抽象化の規則のどれかが書き換える語（空白で区切られた 1 続きの文字）に触れたら、その語全体を写しとして消す。どの規則も書き換えない普通の語は、写しの部分だけを消す。副作用として、URL の Path の一部だけが Context と共通でも、Host まで消える。**この過剰な除去を許すかは人間が決める。**
+- Gate は、Credential の再除去と抽象化の各規則のあと、`redact_text` が見つける Credential の数が、その手順の前より増えていないかを確かめ、増えていれば直ちに拒否する（`credential_remains`）。規則が作った Credential を、後の規則が断片に切って最終検査から隠すことを防ぐ。
 
 ### 3. 抽象化の規則（数値は仮）
 

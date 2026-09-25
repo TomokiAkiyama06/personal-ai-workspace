@@ -28,13 +28,18 @@ from paw_backend.research.privacy import (
     WithheldCounts,
     rules,
 )
-from paw_backend.research.privacy.gate import merge_spans, replace_spans
+from paw_backend.research.privacy.gate import (
+    merge_spans,
+    replace_spans,
+    widen_to_whole_words,
+)
 from paw_backend.research.providers import (
     KIND_ORDER,
     ProviderKind,
     ResearchRequest,
 )
 from paw_backend.research.providers.contract import MAX_QUERY_CHARS
+from paw_backend.tools.credentials import redact_text
 
 from .privacy_support import (
     NOW,
@@ -103,6 +108,47 @@ class SpanHelpersTest(unittest.TestCase):
                 with self.assertRaises(ValueError) as caught:
                     replace_spans("PRIVATE", spans)
                 self.assertNotIn("PRIVATE", str(caught.exception))
+
+
+class WidenToWholeWordsTest(unittest.TestCase):
+    TEXT = "ab cdef gh"  # the words are (0, 2), (3, 7) and (8, 10)
+
+    def widen(self, spans, rewritten):
+        return widen_to_whole_words(self.TEXT, spans, rewritten)
+
+    def test_a_span_that_touches_a_rewritten_word_becomes_the_word(self):
+        self.assertEqual(self.widen(((4, 5),), lambda word: word == "cdef"), ((3, 7),))
+        self.assertEqual(self.widen(((3, 4),), lambda word: word == "cdef"), ((3, 7),))
+        self.assertEqual(self.widen(((6, 7),), lambda word: word == "cdef"), ((3, 7),))
+        self.assertEqual(self.widen(((6, 9),), lambda word: word == "cdef"), ((3, 9),))
+
+    def test_other_words_and_spaces_are_left_alone(self):
+        self.assertEqual(self.widen(((4, 5),), lambda word: False), ((4, 5),))
+        self.assertEqual(self.widen(((4, 5),), lambda word: word == "gh"), ((4, 5),))
+        # A span on the spaces between the words touches no word.
+        self.assertEqual(self.widen(((2, 3),), lambda word: True), ((2, 3),))
+        self.assertEqual(self.widen(((7, 8),), lambda word: True), ((7, 8),))
+
+    def test_a_span_that_covers_a_word_whole_needs_no_widening(self):
+        self.assertEqual(self.widen(((3, 7),), lambda word: True), ((3, 7),))
+        self.assertEqual(self.widen(((2, 8),), lambda word: True), ((2, 8),))
+
+    def test_widened_spans_are_merged_with_their_neighbours(self):
+        self.assertEqual(self.widen(((1, 4),), lambda word: True), ((0, 7),))
+        self.assertEqual(
+            self.widen(((1, 2), (9, 10)), lambda word: True), ((0, 2), (8, 10))
+        )
+        self.assertEqual(self.widen((), lambda word: True), ())
+
+    def test_only_the_touched_words_are_judged_and_each_one_once(self):
+        judged = []
+
+        def rewritten(word):
+            judged.append(word)
+            return False
+
+        self.widen(((1, 2), (4, 6)), rewritten)
+        self.assertEqual(judged, ["ab", "cdef"])
 
 
 class ConstructionTest(unittest.TestCase):
@@ -550,12 +596,14 @@ class CredentialAndAbstractionTest(unittest.TestCase):
         self.assertEqual(result.credentials_removed, 1)
         self.assertEqual(result.pieces_matched, 0)
 
-    def test_a_secret_piece_wins_over_the_credential_rule(self):
-        # The copied text is removed first, so the credential rule finds nothing.
+    def test_the_credential_rule_runs_before_the_copy_rule(self):
+        # A credential is removed whole from the draft as written, before a copy
+        # removal can cut it into pieces that no rule recognises (Decision 0010).
+        # It is counted as a credential; the copy rule finds nothing left of it.
         result = self.gate.minimize(f"use {AWS_KEY} now", [secret(AWS_KEY)])
         self.assertEqual(result.query, "use now")
-        self.assertEqual(result.pieces_matched, 1)
-        self.assertEqual(result.credentials_removed, 0)
+        self.assertEqual(result.pieces_matched, 0)
+        self.assertEqual(result.credentials_removed, 1)
 
     def test_a_draft_that_is_only_a_credential_is_refused(self):
         error = refusal(self, self.gate.minimize, AWS_KEY, [])
@@ -625,6 +673,285 @@ class CredentialAndAbstractionTest(unittest.TestCase):
                 second = self.gate.minimize(first.query, [])
                 self.assertEqual(second.query, first.query)
                 self.assertEqual(second.abstractions, 0)
+
+
+def eight_character_windows(text: str) -> set[str]:
+    return {text[i : i + 8] for i in range(len(text) - 7)}
+
+
+# (name, the credential as it is written in a draft, the part of it that must not
+# reach the query in ANY 8-character piece). Every one is a shape that
+# ``redact_text`` recognises (checked in the test).
+CREDENTIAL_SHAPES = (
+    ("github token", "ghp_Zx9qW4tRb7Lm2PhKvN5cD8fG1jH3sA6yUeXo", None),
+    ("github fine-grained", "github_pat_11ABCDEFG0Zx9qW4tRb7Lm2PhKvN5cD8fG1jH3s", None),
+    ("gitlab token", "glpat-Zx9qW4tRb7Lm2PhKvN5cD8fG", None),
+    ("openai style key", "sk-Zx9qW4tRb7Lm2PhKvN5cD8fG1jH3sA6yUeXo", None),
+    # Written in two pieces so that no complete secret-shaped literal is in the
+    # source (GitHub push protection rejects them, even as test data).
+    ("stripe key", "sk_" + "live_Zx9qW4tRb7Lm2PhKvN5cD8fG", None),
+    ("aws access key", "AKIAIOSFODNN7EXAMPLE", None),
+    ("google api key", "AIzaSyZx9qW4tRb7Lm2PhKvN5cD8fG1jH3sA6yU", None),
+    ("slack token", "xoxb-" + "1234567890-Zx9qW4tRb7Lm2PhKvN", None),
+    ("npm token", "npm_Zx9qW4tRb7Lm2PhKvN5cD8fG1jH3sA6yUeXo", None),
+    (
+        "jwt",
+        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r",
+        None,
+    ),
+    (
+        "bearer header",
+        "Bearer Zx9qW4tRb7Lm2PhKvN5cD8fG1jH3sA6yUeXo",
+        "Zx9qW4tRb7Lm2PhKvN5cD8fG1jH3sA6yUeXo",
+    ),
+    (
+        "private key",
+        "-----BEGIN RSA PRIVATE KEY----- MIIEowIBAAKCAQEAu1SU1LfVLPHCozMxH2Mo4lgO "
+        "-----END RSA PRIVATE KEY-----",
+        "MIIEowIBAAKCAQEAu1SU1LfVLPHCozMxH2Mo4lgO",
+    ),
+    (
+        "url with user information",
+        "https://svc:Zx9qW4tRb7Lm2PhKvN5c@example.com/x.git",
+        "Zx9qW4tRb7Lm2PhKvN5c",
+    ),
+    (
+        "password assignment",
+        "DB_PASSWORD=Zx9qW4tRb7Lm2PhKvN5cD8fG",
+        "Zx9qW4tRb7Lm2PhKvN5cD8fG",
+    ),
+    (
+        "password flag",
+        "--password Zx9qW4tRb7Lm2PhKvN5cD8fG",
+        "Zx9qW4tRb7Lm2PhKvN5cD8fG",
+    ),
+)
+
+
+class CredentialBeforeCopyTest(unittest.TestCase):
+    """A copy removal must not cut a credential into pieces nothing recognises.
+
+    Found in review: ``_remove_copied_text`` ran first and replaced any 16
+    characters shared with a private piece by a space, so a credential that shared
+    them became fragments (``ghp_ABCDEF abcdefghij``) that neither
+    ``strip_credentials`` nor the final ``redact_text`` recognised.
+    """
+
+    def setUp(self):
+        self.gate, _ = make_gate()
+
+    def test_the_shapes_are_recognised_credentials(self):
+        for name, credential, _ in CREDENTIAL_SHAPES:
+            with self.subTest(shape=name):
+                self.assertGreater(redact_text(credential)[1], 0)
+
+    def test_a_credential_that_shares_text_with_a_piece_is_removed_whole(self):
+        for name, credential, secret_part in CREDENTIAL_SHAPES:
+            core = secret_part or credential
+            third = len(core) // 3
+            # What the piece shares with the credential: the secret part in four
+            # ways (the query must then be exactly the one without any context: the
+            # credential is gone before the piece is looked at), and the first and
+            # last 24 characters of the credential as written (with its name, its
+            # header or its footer).
+            slices = {
+                "head": (core[:20], True),
+                "middle": (core[third : third + 20], True),
+                "tail": (core[-20:], True),
+                "all": (core, True),
+                "written head": (credential[:24], False),
+                "written tail": (credential[-24:], False),
+            }
+            draft = f"why does {credential} fail with psycopg"
+            baseline = self.gate.minimize(draft, [])
+            for where, (shared, exact) in slices.items():
+                for label in (ContextLabel.PRIVATE_SOURCE, ContextLabel.SECRET):
+                    with self.subTest(shape=name, shared=where, label=label):
+                        result = self.gate.minimize(
+                            draft, [ContextPiece(label, shared)]
+                        )
+                        if exact:
+                            self.assertEqual(result.query, baseline.query)
+                            self.assertEqual(
+                                result.credentials_removed, baseline.credentials_removed
+                            )
+                        self.assertGreaterEqual(result.credentials_removed, 1)
+                        for window in eight_character_windows(core):
+                            self.assertNotIn(window, result.query)
+
+    def test_the_review_case(self):
+        token = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"
+        result = self.gate.minimize(
+            f"why does {token} fail", [private_source(f"deploy note {token[:22]}")]
+        )
+        self.assertEqual(result.query, "why does fail")
+        self.assertEqual(result.credentials_removed, 1)
+        self.assertNotIn("ghp_", result.query)
+        self.assertNotIn("abcdefghij", result.query)
+
+    def test_a_credential_in_a_long_copied_run_is_removed_whole(self):
+        # The credential is inside text that the piece also holds: the words around
+        # it are a copy, the credential is not a part of the query in either case.
+        token = "ghp_Zx9qW4tRb7Lm2PhKvN5cD8fG1jH3sA6yUeXo"
+        note = "the billing service reads its deploy key from the vault every night"
+        result = self.gate.minimize(
+            f"explain {note} {token} please",
+            [private_source(f"{note} {token}")],
+        )
+        self.assertEqual(result.query, "explain please")
+        for window in eight_character_windows(token):
+            self.assertNotIn(window, result.query)
+
+    def test_a_credential_that_a_copy_removal_uncovers_is_removed_too(self):
+        # The letters in front of the key hide it from the rule (it needs a
+        # character that is not a letter or digit before it); once the copy is gone
+        # it shows, and the credential rule looks again.
+        key = "sk-Zx9qW4tRb7Lm2PhKvN5c"
+        prefix = "abcdefghijklmnop"
+        self.assertEqual(redact_text(f"{prefix}{key}")[1], 0)
+        result = self.gate.minimize(f"why {prefix}{key} fail", [memory(prefix)])
+        self.assertEqual(result.query, "why fail")
+        self.assertEqual(result.credentials_removed, 1)
+        self.assertEqual(result.pieces_matched, 1)
+
+    def test_a_long_word_that_holds_a_credential_is_removed_whole(self):
+        # The same draft with a word that the opaque-token rule rewrites: the copy
+        # then removes the whole word (no fragment of the key is left).
+        token = "ghp_Zx9qW4tRb7Lm2PhKvN5cD8fG1jH3sA6yUeXo"
+        prefix = "abcdefghijklmnop"
+        result = self.gate.minimize(f"why {prefix}{token} fail", [memory(prefix)])
+        self.assertEqual(result.query, "why fail")
+        self.assertEqual(result.pieces_matched, 1)
+
+    def test_a_copy_only_removes_more_never_less(self):
+        token = "ghp_Zx9qW4tRb7Lm2PhKvN5cD8fG1jH3sA6yUeXo"
+        note = "our staging cluster lives behind the office vpn gateway"
+        draft = f"{note} with {token} see"
+        for context in ([], [private_source(note)], [private_source(token)]):
+            with self.subTest(pieces=len(context)):
+                result = self.gate.minimize(draft, context)
+                self.assertNotIn("ghp_", result.query)
+                self.assertNotIn("Zx9qW4tR", result.query)
+
+
+class WholeTokenCopyTest(unittest.TestCase):
+    """A copy removal must not cut a token that an abstraction rule would remove.
+
+    The abstraction rules take out whole words (a path, an address, an identifier,
+    a URL). Cutting such a word first left the fragments (``an-2026.md`` of a
+    private path, ``123e4567-`` of a UUID) that no rule recognises any more. A word
+    that one of the rules rewrites is therefore removed WHOLE when a copy touches
+    it (Decision 0010).
+    """
+
+    def setUp(self):
+        self.gate, _ = make_gate()
+
+    def test_a_private_path_touched_by_a_copy_leaves_no_fragment(self):
+        result = self.gate.minimize(
+            "open /srv/billing/secret-plan-2026.md now",
+            [private_source("see billing/secret-pl ok")],
+        )
+        self.assertEqual(result.query, "open now")
+        self.assertEqual(result.pieces_matched, 1)
+
+    def test_a_uuid_touched_by_a_copy_leaves_no_fragment(self):
+        result = self.gate.minimize(
+            "user 123e4567-e89b-12d3-a456-426614174000 failed",
+            [memory("x e89b-12d3-a456-4266 y")],
+        )
+        self.assertEqual(result.query, "user failed")
+
+    def test_a_private_host_touched_by_a_copy_leaves_no_fragment(self):
+        result = self.gate.minimize(
+            "ping printer-floor3.corp.local:9100 now",
+            [private_source("zz floor3.corp.loca zz")],
+        )
+        self.assertEqual(result.query, "ping now")
+
+    def test_an_id_touched_by_a_copy_leaves_no_fragment(self):
+        result = self.gate.minimize(
+            "ticket 9876543210 now", [private_source("ticket 98765432")]
+        )
+        self.assertEqual(result.query, "now")
+
+    def test_a_hash_touched_by_a_copy_leaves_no_fragment(self):
+        digest = "0123456789abcdef0123456789abcdef"
+        result = self.gate.minimize(
+            f"commit {digest} broke", [raw_conversation(f"a {digest[8:26]} b")]
+        )
+        self.assertEqual(result.query, "commit broke")
+
+    def test_a_long_opaque_token_touched_by_a_copy_leaves_no_fragment(self):
+        blob = "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v2"
+        result = self.gate.minimize(
+            f"use {blob} now", [private_source(f"zz {blob[10:30]} zz")]
+        )
+        self.assertEqual(result.query, "use now")
+
+    def test_a_version_touched_by_a_copy_is_removed_whole(self):
+        result = self.gate.minimize(
+            "run build-3.13.15-final now", [private_source("ld-3.13.15-fin")]
+        )
+        self.assertEqual(result.query, "run now")
+
+    def test_a_url_touched_by_a_copy_leaves_no_host_fragment(self):
+        result = self.gate.minimize(
+            "see https://wiki.acme-internal.example.com now",
+            [private_source("acme-internal.ex")],
+        )
+        self.assertEqual(result.query, "see now")
+
+    def test_an_email_touched_by_a_copy_leaves_no_fragment(self):
+        result = self.gate.minimize(
+            "mail alice.smith@corp-mail.example.org today",
+            [memory("smith@corp-mail.exa")],
+        )
+        self.assertEqual(result.query, "mail today")
+
+    def test_a_word_no_rule_rewrites_is_still_cut_only_where_it_was_copied(self):
+        # The existing behaviour: the fragments of an ordinary word stay apart.
+        result = self.gate.minimize("prefixhunter2!suffix now", [secret("hunter2!")])
+        self.assertEqual(result.query, "prefix suffix now")
+
+    def test_a_word_that_no_copy_touches_is_left_to_the_rules(self):
+        result = self.gate.minimize(
+            "open /srv/app/main.py and explain the quick brown fox jumps over",
+            [private_source("the quick brown fox jumps over")],
+        )
+        self.assertEqual(result.query, "open and explain")
+        self.assertEqual(result.abstractions, 1)
+        self.assertEqual(result.pieces_matched, 1)
+
+    def test_a_copy_that_covers_the_whole_word_needs_no_widening(self):
+        result = self.gate.minimize(
+            "open /srv/billing/plan.md now", [private_source("/srv/billing/plan.md")]
+        )
+        self.assertEqual(result.query, "open now")
+        self.assertEqual(result.abstractions, 0)
+        self.assertEqual(result.pieces_matched, 1)
+
+    def test_a_copy_that_only_borders_a_word_does_not_widen_to_it(self):
+        # The copied run ends with the space in front of the path, or starts with
+        # the space behind it: the path itself is not touched, so the path rule
+        # removes it (and counts it).
+        note = "the quick brown fox jumps over the lazy dog"
+        for draft, context_text in (
+            (f"explain {note} /srv/app/plan.md now", f"a {note} z"),
+            (f"open /srv/app/plan.md {note} now", f"a {note} z"),
+        ):
+            with self.subTest(draft=draft):
+                result = self.gate.minimize(draft, [private_source(context_text)])
+                self.assertEqual(result.abstractions, 1)
+                self.assertEqual(result.pieces_matched, 1)
+                self.assertNotIn("plan", result.query)
+
+    def test_the_widening_never_reaches_a_neighbouring_word(self):
+        result = self.gate.minimize(
+            "before /srv/billing/secret-plan-2026.md after",
+            [private_source("billing/secret-pl")],
+        )
+        self.assertEqual(result.query, "before after")
 
 
 class TruncationTest(unittest.TestCase):
@@ -765,6 +1092,25 @@ class SafetyNetTest(unittest.TestCase):
         ):
             error = refusal(self, self.gate.minimize, f"key {AWS_KEY} here", [])
         self.assertIs(error.reason, Reason.CREDENTIAL_REMAINS)
+
+    def test_a_rule_that_creates_a_credential_is_refused_at_once(self):
+        # The credential must be noticed right after the rule that produced it: a
+        # later rule that cuts it into pieces would hide it from the final check.
+        token = "ghp_Zx9qW4tRb7Lm2PhKvN5cD8fG1jH3sA6yUeXo"
+
+        def create(text):
+            return f"{text} {token}", 1
+
+        def cut(text):
+            return text.replace(token[10:22], " "), 1
+
+        with (
+            mock.patch.object(rules, "abstract_urls", side_effect=create),
+            mock.patch.object(rules, "abstract_emails", side_effect=cut),
+        ):
+            error = refusal(self, self.gate.minimize, "python", [])
+        self.assertIs(error.reason, Reason.CREDENTIAL_REMAINS)
+        self.assertEqual(self.sink.records, ())
 
     def test_a_query_with_no_word_character_is_refused(self):
         with mock.patch.object(
