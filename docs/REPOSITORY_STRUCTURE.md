@@ -294,6 +294,7 @@ personal-ai-workspace/
 │  │     ├─ test_shared_memory_service_guards.py
 │  │     ├─ test_shared_memory_service_manage.py
 │  │     ├─ test_shared_memory_service_read.py
+│  │     ├─ test_task_input_snapshot.py
 │  │     ├─ test_tools_approvals.py
 │  │     ├─ test_tools_broker.py
 │  │     ├─ test_tools_credentials.py
