@@ -98,6 +98,7 @@ personal-ai-workspace/
 │  │  │  │     └─ validation.py
 │  │  │  ├─ projects/
 │  │  │  │  ├─ __init__.py
+│  │  │  │  ├─ cursor.py
 │  │  │  │  ├─ domain.py
 │  │  │  │  ├─ errors.py
 │  │  │  │  ├─ limits.py
@@ -237,6 +238,10 @@ personal-ai-workspace/
 │  │     ├─ test_provenance_store_validation.py
 │  │     ├─ test_provenance_store_wiring.py
 │  │     ├─ test_provenance_validation.py
+│  │     ├─ test_projects_admin_access.py
+│  │     ├─ test_projects_admin_cursor.py
+│  │     ├─ test_projects_admin_grants.py
+│  │     ├─ test_projects_admin_list.py
 │  │     ├─ test_projects_concurrency.py
 │  │     ├─ test_projects_domain.py
 │  │     ├─ test_projects_grants.py
