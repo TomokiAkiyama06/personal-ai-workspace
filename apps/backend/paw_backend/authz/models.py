@@ -1,25 +1,119 @@
-"""ORM model of the append-only ``audit_events`` table (migration ``0025``).
+"""ORM model of the append-only ``audit_events`` table (migrations ``0025``, ``0087``).
 
 Rows are only ever inserted. UPDATE, DELETE and TRUNCATE are rejected by
 triggers created in the migration, and when the application runs as a
 separate database role that only holds INSERT and SELECT it cannot remove the
 triggers either (see ``apps/backend/README.md`` for exactly what this does and
 does not guarantee).
+
+Migration ``0087`` (issue #87, Decision 0010) adds the nullable ``details`` column
+for the one action whose record needs more than ids and enum values: the
+persistent audit of an external research send (``research.external_send``). Two
+CHECK constraints keep it from becoming a free-text column: ``details`` is a JSON
+object of at most ``MAX_DETAILS_BYTES`` bytes as text, and a row of that action has
+exactly the keys of ``EXTERNAL_SEND_DETAILS_KEYS`` with the value shapes of
+``external_send_check_sql`` (a ``sha256:`` fingerprint, counts, a boolean and
+provider kind tokens: no field can hold a query). ``AuditEvent`` (``audit.py``) has
+no ``details`` field and is unchanged; ``paw_backend.research.privacy.audit``
+writes that row.
 """
 
 import uuid
 from datetime import datetime
 
 from sqlalchemy import CheckConstraint, DateTime, Text, Uuid, text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from paw_backend.db import Base
+
+# The action of the persistent audit of an external research send, and what its
+# row says (migration 0087 repeats these literals on purpose: a migration is a
+# frozen snapshot, ``tests/test_privacy_audit_schema.py`` fails when they drift).
+EXTERNAL_SEND_ACTION = "research.external_send"
+EXTERNAL_SEND_REASON = "send_authorized"
+# ``details`` of that row: the keys, in the order the audit writes them.
+EXTERNAL_SEND_DETAILS_KEYS = (
+    "query_fingerprint",
+    "query_chars",
+    "provider_kinds",
+    "withheld",
+    "credentials_removed",
+    "pieces_matched",
+    "abstractions",
+    "truncated",
+)
+EXTERNAL_SEND_WITHHELD_KEYS = (
+    "private_source",
+    "private_memory",
+    "raw_conversation",
+    "secret",
+)
+# ``details`` is at most this many bytes as JSON text (a real one has about 300).
+MAX_DETAILS_BYTES = 2048
+DETAILS_OBJECT_CHECK = (
+    "details IS NULL OR (jsonb_typeof(details) = 'object' "
+    f"AND octet_length(details::text) <= {MAX_DETAILS_BYTES})"
+)
+
+
+def _keys(names: tuple[str, ...]) -> str:
+    return "ARRAY[" + ", ".join(f"'{name}'" for name in names) + "]"
+
+
+def external_send_check_sql() -> str:
+    """The CHECK of the rows of ``research.external_send``, as one SQL expression.
+
+    A row of that action is an ``allow`` with the fixed reason, names a project
+    and has ``details`` with exactly the keys above: a fingerprint
+    (``sha256:`` and 64 hex digits), the query length and the counts (JSON numbers
+    written as plain non-negative integers), ``truncated`` (a boolean), one to
+    eight provider kind tokens (lower case letters, digits, ``_``) and the counts of
+    withheld pieces per label. PostgreSQL does not promise an order of evaluation
+    inside an ``AND``, so nothing here casts a value: everything is a type test or
+    a regular expression on text. ``COALESCE`` turns a missing key (NULL) into a
+    violation instead of a pass.
+    """
+    number = "'^(0|[1-9][0-9]{0,6})$'"
+    conditions = [
+        "decision = 'allow'",
+        f"reason = '{EXTERNAL_SEND_REASON}'",
+        "project_id IS NOT NULL",
+        "jsonb_typeof(details) = 'object'",
+        f"details - {_keys(EXTERNAL_SEND_DETAILS_KEYS)} = '{{}}'::jsonb",
+        "jsonb_typeof(details -> 'query_fingerprint') = 'string'",
+        "details ->> 'query_fingerprint' ~ '^sha256:[0-9a-f]{64}$'",
+        "jsonb_typeof(details -> 'query_chars') = 'number'",
+        "details ->> 'query_chars' ~ '^[1-9][0-9]{0,2}$'",
+        "jsonb_typeof(details -> 'provider_kinds') = 'array'",
+        "(details -> 'provider_kinds')::text ~ "
+        '\'^\\["[a-z][a-z0-9_]{0,31}"(, "[a-z][a-z0-9_]{0,31}"){0,7}\\]$\'',
+        "jsonb_typeof(details -> 'withheld') = 'object'",
+        f"(details -> 'withheld') - {_keys(EXTERNAL_SEND_WITHHELD_KEYS)}"
+        " = '{}'::jsonb",
+    ]
+    for label in EXTERNAL_SEND_WITHHELD_KEYS:
+        conditions.append(
+            f"jsonb_typeof(details -> 'withheld' -> '{label}') = 'number'"
+        )
+        conditions.append(f"details -> 'withheld' ->> '{label}' ~ {number}")
+    for name in ("credentials_removed", "pieces_matched", "abstractions"):
+        conditions.append(f"jsonb_typeof(details -> '{name}') = 'number'")
+        conditions.append(f"details ->> '{name}' ~ {number}")
+    conditions.append("jsonb_typeof(details -> 'truncated') = 'boolean'")
+    return (
+        f"action <> '{EXTERNAL_SEND_ACTION}' OR COALESCE("
+        + " AND ".join(conditions)
+        + ", false)"
+    )
 
 
 class AuditEventRecord(Base):
     __tablename__ = "audit_events"
     __table_args__ = (
         CheckConstraint("decision IN ('allow', 'deny')", name="decision_valid"),
+        CheckConstraint(DETAILS_OBJECT_CHECK, name="details_object"),
+        CheckConstraint(external_send_check_sql(), name="external_send_details"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
@@ -53,3 +147,7 @@ class AuditEventRecord(Base):
     # is only a hint for correlating with client logs; it can be forged, so use
     # ``correlation_id`` to tie rows together.
     client_request_id: Mapped[str | None] = mapped_column(Text)
+    # Only ``research.external_send`` rows have it (see the module docstring):
+    # counts, a query fingerprint and provider kinds, never a query. NULL, not JSON
+    # ``null``, when absent.
+    details: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))

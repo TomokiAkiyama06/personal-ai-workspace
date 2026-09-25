@@ -126,7 +126,13 @@ class MigrationTest(AuditPostgresTestCase):
             "SELECT string_agg(conname, ',' ORDER BY conname) FROM pg_constraint "
             "WHERE conrelid = 'audit_events'::regclass AND contype IN ('c', 'p')"
         )
-        self.assertEqual(constraints, "ck_audit_events_decision_valid,pk_audit_events")
+        # The last two are revision 0087 (issue #87: ``details`` of the audit of an
+        # external research send, tests/test_privacy_audit_schema.py).
+        self.assertEqual(
+            constraints,
+            "ck_audit_events_decision_valid,ck_audit_events_details_object,"
+            "ck_audit_events_external_send_details,pk_audit_events",
+        )
         self.assertEqual(
             await self.scalar(
                 "SELECT indexname FROM pg_indexes WHERE tablename = 'audit_events' "
