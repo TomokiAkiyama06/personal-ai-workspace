@@ -5,6 +5,12 @@ foreign keys: the users and projects tables do not exist yet (PAW-021 and the
 project issues). They must gain foreign keys when those tables arrive. Until
 then the service layer trusts its caller for the ids; authorisation is not done
 here (the API layer must do it, see PAW-022 / PAW-025).
+
+The Multi-Repo working set (repositories with the ``referenced`` / ``working`` /
+``target`` roles, each with its own worktree / review / pull request state) is
+not stored: it is outside PAW-032 and proposed in
+``docs/decisions/0014-task-working-set-persistence.md``. ``TaskAttemptRow``
+holds the state of a single repository.
 """
 
 import uuid
