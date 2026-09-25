@@ -5,6 +5,7 @@ import errno
 import hashlib
 import json
 import os
+import shutil
 import signal
 import stat
 import subprocess
@@ -1334,6 +1335,34 @@ class TestRunnerTest(unittest.TestCase):
                     wait_until(lambda child=child: not is_running(child)),
                     "a process outside the check's group outlived a passing check",
                 )
+
+    @unittest.skipUnless(shutil.which("setsid"), "needs the setsid program")
+    def test_a_child_started_with_the_setsid_program_is_killed_when_the_check_exits_0(
+        self,
+    ):
+        # A shell check that starts ``setsid`` in the background, waits until that
+        # child is running, and exits 0: the child is in a session of its own and is
+        # re-parented, and must not outlive the passing check.
+        self.runner.drain_seconds = 0.3
+        pid_file = self.pid_file()
+        script = (
+            'setsid sh -c \'echo $$ > "$0.tmp"; mv "$0.tmp" "$0"; exec sleep 60\''
+            ' "$1" >/dev/null 2>&1 </dev/null &\n'
+            'while [ ! -e "$1" ]; do sleep 0.01; done\n'
+            "exit 0\n"
+        )
+        check = CheckDefinition(
+            "setsid-child", "unit", ("sh", "-c", script, "check", str(pid_file))
+        )
+
+        (result,) = self.runner.run_visible((check,), PATIENCE)
+
+        self.assertEqual((result.status, result.exit_code), ("passed", 0))
+        child = self.read_pid(pid_file)
+        self.assertTrue(
+            wait_until(lambda: not is_running(child)),
+            "a setsid child outlived a passing check",
+        )
 
     def test_timeout_kills_a_daemonized_process(self):
         self.runner.term_grace_seconds = 0.3
