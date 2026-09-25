@@ -3,8 +3,18 @@
 - Status: Proposed
 - Date: 2026-09-25
 - Scope: PAW-022（Workspace Login / Session / Password Policy、Issue [#19](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/19)）と、その上に載る PAW-023（Passkey / Step-up、[#20](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/20)）、Owner の初期設定・復旧（[Decision 0005](0005-owner-setup-and-recovery.md)）との接続点
-- Supersedes: なし。ただし 12 節は、`REQUIREMENTS.md` の `[FIXED]`「Passkey Policy」を「固定の方針」から「Owner が変えられる設定の**既定値**」へ読み替える提案を含む（`REQUIREMENTS.md` は書き換えない。承認後に別途、要件側の記述を直すかを決める）
-- Approval: 未承認（Human の承認待ち）
+- Supersedes: なし。ただし 12 節は、`REQUIREMENTS.md` の `[FIXED]`「Passkey Policy」を「固定の方針」から「Owner が変えられる設定の**既定値**」へ読み替える提案を含む（`[FIXED]` の本文は変えない。Human の指示（2026-09-25）で、`REQUIREMENTS.md` の該当箇所の下に、既定値であること・Owner が設定で変えられることの**注記だけ**を追記した）
+- Approval: 未承認（Human の承認待ち。個別の点への回答は「人間の回答（2026-09-25）」の節。この Decision 全体はまだ承認されていない）
+
+## 人間の回答（2026-09-25）
+
+個別の点への回答である。**この Decision 全体は未承認**で、Status は Proposed のまま。他の点（Argon2id の数値、Password の規則、Cookie、Backoff、Rate Limit、Audit の形、DB Role など）は未回答。
+
+| 点 | 人間の回答 | 反映 |
+| --- | --- | --- |
+| 4 節 Session の寿命（90 日を無操作と絶対の両方の上限とする。通常 Session にも 90 日の絶対の上限を置く） | 「承認」 | 本文のとおり。数値は設定（`PAW_SESSION_IDLE_DAYS`、`PAW_SESSION_REMEMBER_DAYS`、`PAW_SESSION_ABSOLUTE_DAYS`）のまま |
+| 12 節 Owner が変えられる Passkey Policy の変更に Passkey の Step-up を要求するか | 「オーナーはパスキー必須でいい」 | **Passkey の Step-up を必須にする。PAW-023 まで、この設定変更は本番では使えない**（実装のとおり。Password の Step-up は受け付けない） |
+| 11 節 `REQUIREMENTS.md` の記述 | 「追記を行って下さい」 | `[FIXED]`「Passkey Policy」の本文は変えず、その下に注記を追記した（11 節の判断点を参照） |
 
 ## 背景
 
@@ -82,7 +92,8 @@ Decision 0005 は、PAW-022 が満たす条件（Issue #19 に追記済み）と
 | Remember Me | **90 日**（要件の「最大 90 日」） | **90 日** | 永続 Cookie（Max-Age = 残り） |
 
 - 設定: `PAW_SESSION_IDLE_DAYS`（30）、`PAW_SESSION_REMEMBER_DAYS`（90）、`PAW_SESSION_ABSOLUTE_DAYS`（90）。値は Session の行に写すので、設定を変えても既存の Session は変わらない。
-- **判断が要る解釈が 2 つある。**
+- **人間の回答 2026-09-25: 承認**（下の 2 つの解釈を、提案どおりに承認した）。
+- **判断が要った解釈が 2 つある（承認済み）。**
   - 「最大 90 日」を、無操作の上限であり同時に絶対の上限としている（使い続けても 90 日で Login し直す）。別の読みは「無操作の上限が 90 日で、絶対の上限はない」。
   - 通常 Session にも絶対の上限（90 日）を置いた。要件は無操作の 30 日しか定めていない。別の案は「通常 Session に絶対の上限を置かない（使い続ける限り続く）」。
 - 有効かどうかは、行を判定する**その文の中で** Database の時計（`clock_timestamp()`）を読んで決める。Test は Process 側の時計を差し込むが、使うのは「Process の時計と Database の時計の**新しいほう**」なので、Process の時計が遅れていても寿命は**長くならない**。
@@ -186,6 +197,7 @@ Migration `0022` は、Web の Role（`PAW_APP_DATABASE_ROLE`）に各 Table の
 - **誰が**: **変更は Owner だけ**（新しい Capability `owner.auth_policy.manage`。Owner 専用で、Agent に委任できず、Audit は REQUIRED）。**閲覧は Admin と Owner**（`admin.auth_policy.view`）。API は `GET` / `PUT /api/v1/auth/policy`。
 - **検証**: 各項目は厳密な値だけ（`required` / `optional`、真偽値、5〜240 分の整数。範囲外や型違いは拒否）。更新は完全な置き換えで、Client が読んだ `expected_version` を送る。Row Lock の下で Version が違えば 409（`version_conflict`）で拒否し、**同時の 2 つの編集で更新が失われない**。同じ値の更新は Version を上げない。
 - **Owner の再認証は Passkey の Step-up**: Policy の変更には、Owner 自身の Session の直近の **Passkey の Step-up**（Policy の Step-up 有効時間の内。判定は Row Lock の下で Database の時計）が要る。要件（`[FIXED]`: Owner / Admin の重要操作は Passkey の Step-up）のとおりで、**Password の Step-up は数えない**（403 `step_up_method_insufficient`、Audit は deny `step_up_method_insufficient`）。Password を盗んだ者は `POST /auth/step-up` で Password の Step-up を得られるので、それを受け付けると、盗まれた Password だけで Owner / Admin の Passkey の要求を `optional` に緩められてしまう（Review 指摘）。Step-up が全くないときは従来どおり 403 `step_up_required`。Step-up の方法は、その方法の Verifier だけが記録する（別の方法の鍵で登録した Verifier は `AuthService` が拒否する。Password の Step-up を Passkey として記録することはできない。後の Password の Step-up は直前の Passkey の Step-up を置き換える。強さは上がらず下がるだけ）。
+- **人間の回答 2026-09-25: Passkey の Step-up を必須にする。PAW-023 まで、この設定変更は本番では使えない**（「オーナーはパスキー必須でいい」）。
 - **Owner が変えられる Policy は、PAW-023 が入るまで本番では変更できない**（この節の提案は、PAW-023 で Passkey の Step-up ができて初めて端から端まで動く）。その間、`GET /policy` と要求の報告は動き、既定値（要件のまま）が効く。`PUT /policy` は、Test が Passkey の Step-up を書いた Session でだけ成功する（Passkey の Step-up を書けるのは、その方法の Verifier を登録した Code、または DB の直接の書き込みだけ）。Web の Role は `stepup_method` を書けるので、**Application が侵害されれば `passkey` と書ける**（Password を変えられるのと同じ、Decision 0005 で受け入れた限界）。
 - **効く範囲**: **新しい Sign-in・新しい Session から**。**変更は既存の Session を失効も降格もしない**（厳しくしても黙って Logout されない。Test 済み）。Session の応答（`GET /auth/session`）が、その人の現在の要求（`required` か `optional`、未登録なら `enrollment_required`、勧めるか）を返す。
 - **Owner を締め出さない（安全側の規則）**: この Issue は Passkey を**強制しない**（PAW-023 が強制する）ので、どの設定でも Owner は Password で Login できる。PAW-023 は「`required` で未登録」を**登録だけができる状態**（行き止まりではない）にし、Password Login と `owner-recover` を残さなければならない（Decision 0005 の 7 の「Passkey の登録以外を許さない」と同じ）。
@@ -228,7 +240,7 @@ Migration `0022` は、Web の Role（`PAW_APP_DATABASE_ROLE`）に各 Table の
 
 ## 人間の判断が必要な点（推奨つき）
 
-1. **Session の寿命の解釈（4 節）**: 「最大 90 日」= 無操作と絶対の両方の上限 90 日（推奨）／無操作 90 日で絶対の上限なし。通常 Session の絶対の上限 90 日（推奨）／なし。
+1. **Session の寿命の解釈（4 節。人間の回答 2026-09-25: 承認）**: 「最大 90 日」= 無操作と絶対の両方の上限 90 日（推奨）／無操作 90 日で絶対の上限なし。通常 Session の絶対の上限 90 日（推奨）／なし。
 2. **Argon2id（1 節）**: 64 MiB、t=3、p=4、同時 2（推奨）／OWASP の最小構成。
 3. **Password の Policy（2 節）**: 最大 256 文字、短い一覧、Login name の規則（推奨）／一覧なし。流出 Corpus（外部 API）は入れない（推奨）。
 4. **Cookie（3 節）**: `SameSite=Strict`（推奨）／`Lax`。通常 Session は Session Cookie（推奨）／永続 Cookie。
@@ -237,8 +249,8 @@ Migration `0022` は、Web の Role（`PAW_APP_DATABASE_ROLE`）に各 Table の
 7. **Audit（9 節）**: 存在しない名前の失敗は Audit へ書かない、接続元は仮名の UUID（推奨）／Audit に「接続元」「名前の Hash」の列を足す（Decision 0004 を Supersede する）。
 8. **Rotation（5 節）**: 猶予期間なし（推奨）／10 秒程度の猶予。
 9. **DB Role（11 節）**: `SECURITY DEFINER` の関数（推奨）／`users.status` の列の UPDATE と Trigger。
-10. **Passkey Policy を Owner が変えられる設定にする（12 節）**: 設定にする（推奨、Human の指示）／固定の方針のまま／User ごとの上書きも足す。Step-up の有効時間を Owner が 5〜240 分で変えられる（推奨）／30 分に固定。設定を緩めることを Owner だけに許す（推奨）。**変更に Passkey の Step-up を要求し、PAW-023 が入るまで本番では変更できない**（推奨。要件に沿う）／Password の Step-up でも変更できる（Password の侵害だけで Owner / Admin の Passkey の要求を緩められる）。
-11. **`REQUIREMENTS.md` の記述**: 承認後に、`[FIXED]`「Passkey Policy」を「既定値であり、Owner が設定で変えられる」と直すか（推奨）、この Decision の参照だけを足すか。
+10. **Passkey Policy を Owner が変えられる設定にする（12 節）**: 設定にする（推奨、Human の指示）／固定の方針のまま／User ごとの上書きも足す。Step-up の有効時間を Owner が 5〜240 分で変えられる（推奨）／30 分に固定。設定を緩めることを Owner だけに許す（推奨）。**変更に Passkey の Step-up を要求し、PAW-023 が入るまで本番では変更できない**（推奨。要件に沿う。**人間の回答 2026-09-25: Passkey の Step-up を必須にする。PAW-023 まで、この設定変更は本番では使えない**）／Password の Step-up でも変更できる（Password の侵害だけで Owner / Admin の Passkey の要求を緩められる）。
+11. **`REQUIREMENTS.md` の記述**: 人間の回答 2026-09-25「追記を行って下さい」。**対応済み**: `[FIXED]`「Passkey Policy」の本文は変えず、その下に注記を追記した（`[FIXED]` の規則が既定値であること、Owner だけが設定で変えられること、変更に Passkey の Step-up が要ること、既存の Session に影響しないこと、Passkey が未登録の間 Owner は Password で Login でき `owner-recover` があること、この Decision の 12 節への参照）。実装が実際にすることだけを書いた。本文を「既定値」へ書き換える案（本文の変更）は採らなかった。
 
 ## リスク
 
@@ -257,10 +269,10 @@ Migration `0022` は、Web の Role（`PAW_APP_DATABASE_ROLE`）に各 Table の
 
 ## 決めてほしいこと
 
-1. 4 節の Session の寿命の 2 つの解釈（無操作と絶対の上限、通常 Session の絶対の上限）。
+1. ~~4 節の Session の寿命の 2 つの解釈~~（人間の回答 2026-09-25: 承認済み）。
 2. 1〜3、5、7〜9 節の数値と選択を、推奨どおりにしてよいか。
 3. 12 節: Passkey Policy を Owner が変えられる設定にすること、Owner 専用の変更、Passkey の Step-up の再認証（PAW-023 が入るまで本番では変更できないこと）、既存 Session に影響しないこと。
 4. 12 節: `users.passkey_required` の扱い（設定を見る。列の整理は PAW-023）。
 5. 9 節: Audit に接続元と名前の Hash の列を足すか（足す場合は Decision 0004 の変更）。
 6. 8 節: 全体の Rate Limit と、Recovery の DoS の許容。
-7. 11 節: `REQUIREMENTS.md` をどう直すか。
+7. ~~11 節: `REQUIREMENTS.md` をどう直すか~~（人間の回答 2026-09-25: 追記。対応済み。注記の文面は確認してほしい）。
