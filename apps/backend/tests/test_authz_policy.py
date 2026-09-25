@@ -50,6 +50,9 @@ USER_CAPS = {
     "memory.use",
     "pr.create",
     "shared_memory.read",
+    "project.create",
+    "project.invitation.respond",
+    "project.leave",
 }
 ADMIN_CAPS = USER_CAPS | {
     "shared_memory.manage",
@@ -151,6 +154,10 @@ NON_DELEGABLE_CAPS = {
     "owner.recovery.manage",
     "owner.user_restore",
     "owner.backup.manage",
+    # A person's own project membership (Decision 0022): never an agent's act.
+    "project.create",
+    "project.invitation.respond",
+    "project.leave",
     "project.memory.manage",
     "project.settings.manage",
     "project.repo.add",
@@ -286,6 +293,9 @@ class CapabilityTableTest(unittest.TestCase):
             "project.memory.manage",
             "admin.audit.view",
             "admin.usage.view",
+            "project.create",
+            "project.invitation.respond",
+            "project.leave",
         ):
             self.assertIs(CAPABILITIES[Capability(value)].audit, AuditMode.REQUIRED)
 

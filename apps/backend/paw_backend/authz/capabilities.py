@@ -36,8 +36,17 @@ class Capability(StrEnum):
     GITHUB_USE = "github.use"
     MEMORY_USE = "memory.use"
     PR_CREATE = "pr.create"
+    # A person's own project membership (Decision 0022, extending Decision 0004):
+    # answering an invitation addressed to oneself, and leaving a project one is a
+    # member of. The resource is owned by the actor; the project's state and the
+    # actor's role in it are not consulted (see ``ProjectService``).
+    PROJECT_INVITATION_RESPOND = "project.invitation.respond"
+    PROJECT_LEAVE = "project.leave"
 
     # --- Scope.SYSTEM: workspace-wide ---
+    # Any human user may create a project (REQUIREMENTS.md does not restrict who
+    # may; Decision 0022). The creator becomes its first Manager.
+    PROJECT_CREATE = "project.create"
     SHARED_MEMORY_READ = "shared_memory.read"
     # Reads what only managers may see (deleted memories, Candidates). The
     # operations that change Shared Memory each have a capability of their own
@@ -138,6 +147,11 @@ CAPABILITIES: MappingProxyType[Capability, CapabilityInfo] = MappingProxyType(
         C.GITHUB_USE: _info(Scope.SELF, delegable=True),
         C.MEMORY_USE: _info(Scope.SELF, delegable=True),
         C.PR_CREATE: _info(Scope.SELF, delegable=True),
+        # Answering one's own invitation and leaving a project change who belongs
+        # to a project: a person's own act, never an agent's (Decision 0022).
+        C.PROJECT_INVITATION_RESPOND: _info(Scope.SELF, delegable=False),
+        C.PROJECT_LEAVE: _info(Scope.SELF, delegable=False),
+        C.PROJECT_CREATE: _info(Scope.SYSTEM, delegable=False),
         C.SHARED_MEMORY_READ: _info(Scope.SYSTEM, delegable=True, read_only=True),
         C.SHARED_MEMORY_MANAGE: _info(Scope.SYSTEM, delegable=False),
         C.SHARED_MEMORY_CREATE: _info(Scope.SYSTEM, delegable=False),

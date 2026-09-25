@@ -106,6 +106,11 @@ _USER = frozenset(
         C.MEMORY_USE,
         C.PR_CREATE,
         C.SHARED_MEMORY_READ,
+        # Any human user (Owner and Admin include User): create a project, answer
+        # one's own invitation, leave a project (Decision 0022).
+        C.PROJECT_CREATE,
+        C.PROJECT_INVITATION_RESPOND,
+        C.PROJECT_LEAVE,
     }
 )
 _ADMIN_ONLY = frozenset(
