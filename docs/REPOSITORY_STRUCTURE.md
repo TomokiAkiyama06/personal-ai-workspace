@@ -315,6 +315,7 @@ personal-ai-workspace/
 │     ├─ 0011-research-provenance-model.md
 │     ├─ 0012-research-provider-adapter-policy.md
 │     ├─ 0013-research-scratch-task-relation.md
+│     ├─ 0014-task-working-set-persistence.md
 │     └─ README.md
 └─ evaluator/
    └─ README.md

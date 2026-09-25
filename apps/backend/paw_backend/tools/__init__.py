@@ -78,6 +78,7 @@ from paw_backend.tools.task_state import (
     PostgresTaskActivity,
     TaskActivity,
     TaskActivityProvider,
+    TaskRun,
 )
 
 __all__ = [
@@ -125,6 +126,7 @@ __all__ = [
     "TaskActivity",
     "TaskActivityProvider",
     "TaskContext",
+    "TaskRun",
     "TaskScope",
     "ToolBroker",
     "ToolCall",

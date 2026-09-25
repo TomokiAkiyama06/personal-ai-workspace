@@ -28,6 +28,17 @@ progress ``usage`` / ``check`` report ``consumed + elapsed`` WITHOUT writing.
 Elapsed whole seconds are ``floor((now - running_since).total_seconds())``, and
 never negative (a clock that went backwards counts as 0).
 
+Runtime sessions (fencing). Every ``start_runtime`` begins a new runtime session
+and returns its generation (``budget_usages.runtime_generation``: it only grows
+and is kept when the timer stops). ``stop_runtime`` must present that generation:
+a stop of any other generation raises ``StaleRuntimeSessionError`` and changes
+nothing, so a delayed stop of a superseded execution (the worker whose lease
+expired and whose entry was reclaimed, or the run of a task that has been
+restarted) can neither clear nor settle the newer session's timer. This is the
+same idea as the ``claim_count`` of the queue lease; a dedicated counter is used
+because ``claim_count`` starts again at 1 for every new queue entry (Decision
+0007, 10).
+
 A task without budget rows raises ``BudgetNotConfiguredError`` (from every method
 except ``set_preset``, and whether or not the task exists); it is never treated
 as unlimited. Only ``set_preset`` raises ``TaskNotFoundError`` for an unknown
@@ -57,6 +68,7 @@ from paw_backend.tasks.queueing.domain import (
 from paw_backend.tasks.queueing.errors import (
     BudgetNotConfiguredError,
     InvalidQueueingArgumentError,
+    StaleRuntimeSessionError,
 )
 from paw_backend.tasks.queueing.models import BudgetUsageRow
 from paw_backend.tasks.queueing.sql import FOREIGN_KEY_VIOLATION, sqlstate
@@ -64,6 +76,7 @@ from paw_backend.tasks.queueing.validation import (
     MAX_CONSUMED,
     check_amount,
     check_member,
+    check_runtime_generation,
     check_uuid,
 )
 
@@ -101,11 +114,12 @@ class BudgetTracker:
 
         Creates the six rows (consumed 0) or, if they exist, sets ``preset`` and
         ``limit_value`` of each from ``PRESET_LIMITS[preset]`` and KEEPS
-        ``consumed`` and ``running_since`` (a task that is already over the new
-        limits is simply EXCEEDED afterwards). One transaction; concurrent calls
-        and ``record`` calls never lose consumption. Returns what ``usage``
-        returns. ``TaskNotFoundError`` for an unknown task (foreign key violation
-        SQLSTATE 23503; other ``IntegrityError`` propagate).
+        ``consumed``, ``running_since`` and ``runtime_generation`` (a task that is
+        already over the new limits is simply EXCEEDED afterwards). One
+        transaction; concurrent calls and ``record`` calls never lose
+        consumption. Returns what ``usage`` returns. ``TaskNotFoundError`` for an
+        unknown task (foreign key violation SQLSTATE 23503; other
+        ``IntegrityError`` propagate).
         """
         check_uuid("task_id", task_id)
         check_member("preset", preset, BudgetPreset)
@@ -125,7 +139,7 @@ class BudgetTracker:
         )
         upsert = upsert.on_conflict_do_update(
             index_elements=[BudgetUsageRow.task_id, BudgetUsageRow.kind],
-            # Consumption and a run in progress are kept.
+            # Consumption and a runtime session in progress are kept.
             set_={
                 "preset": upsert.excluded.preset,
                 "limit_value": upsert.excluded.limit_value,
@@ -170,12 +184,20 @@ class BudgetTracker:
             raise BudgetNotConfiguredError()
         return BudgetUsage(kind, row.consumed, row.limit_value)
 
-    async def start_runtime(self, task_id: uuid.UUID) -> None:
-        """Mark the task as running now (``running_since = clock()``).
+    async def start_runtime(self, task_id: uuid.UUID) -> int:
+        """Begin a new runtime session and return its generation (>= 1).
 
-        Idempotent: when a run is already in progress nothing changes (the
-        original ``running_since`` is kept). Raises ``BudgetNotConfiguredError``
-        if there is no budget.
+        The generation grows by 1 on every call and must be passed to
+        ``stop_runtime``. When no run is in progress ``running_since`` is set to
+        ``clock()``. When a run is already in progress (a worker that died without
+        stopping, whose lease expired) the new session TAKES OVER: the original
+        ``running_since`` is kept, so the time since then is neither lost nor
+        counted twice, and the previous session's generation is superseded (its
+        ``stop_runtime`` raises ``StaleRuntimeSessionError``). Only the worker
+        that holds the queue lease may call this: the tracker does not read the
+        queue, so a superseded worker that starts again would take the session
+        back (Decision 0007, 10). Raises ``BudgetNotConfiguredError`` if there is
+        no budget.
         """
         check_uuid("task_id", task_id)
         now = self._now()
@@ -184,27 +206,39 @@ class BudgetTracker:
             .where(
                 BudgetUsageRow.task_id == task_id,
                 BudgetUsageRow.kind == BudgetKind.RUNTIME_SECONDS,
-                BudgetUsageRow.running_since.is_(None),
             )
-            .values(running_since=now)
+            .values(
+                runtime_generation=BudgetUsageRow.runtime_generation + 1,
+                running_since=func.coalesce(BudgetUsageRow.running_since, now),
+            )
+            .returning(BudgetUsageRow.runtime_generation)
         )
         async with self._database.engine.begin() as connection:
-            if (await connection.execute(start)).rowcount == 0:
-                # A run is already in progress (nothing to do), or there is no
-                # budget: reading the usage raises BudgetNotConfiguredError then.
-                await self._read_usage(connection, task_id, now)
+            row = (await connection.execute(start)).one_or_none()
+        if row is None:
+            raise BudgetNotConfiguredError()
+        return row.runtime_generation
 
-    async def stop_runtime(self, task_id: uuid.UUID) -> BudgetUsage:
-        """End the run in progress: add the elapsed seconds and clear it.
+    async def stop_runtime(self, task_id: uuid.UUID, generation: int) -> BudgetUsage:
+        """End the run of session ``generation``: add the elapsed seconds, clear it.
 
-        Adds ``max(floor((clock() - running_since).total_seconds()), 0)`` to the
+        ``generation`` is what ``start_runtime`` returned (an ``int`` >= 1;
+        otherwise ``InvalidQueueingArgumentError("generation")``). Adds
+        ``max(floor((clock() - running_since).total_seconds()), 0)`` to the
         runtime consumption (saturating at ``MAX_CONSUMED``), sets
-        ``running_since`` to ``NULL`` and returns the runtime usage. When no run
-        is in progress it changes nothing and returns the current runtime usage.
-        The read of ``running_since`` and the write must be atomic (a second
+        ``running_since`` to ``NULL`` and returns the runtime usage. The read of
+        ``running_since`` and the write are one atomic statement (a second
         concurrent stop must not add the time twice).
+
+        When the session has no run in progress (it was already stopped) nothing
+        changes and the current runtime usage is returned. Any OTHER generation
+        (a newer session has begun, or the generation was never issued) raises
+        ``StaleRuntimeSessionError`` and changes nothing: the newer session's
+        ``running_since`` and the accumulated runtime are untouched.
+        ``BudgetNotConfiguredError`` is raised first if the task has no budget.
         """
         check_uuid("task_id", task_id)
+        check_runtime_generation(generation)
         now = self._now()
         elapsed = func.greatest(
             cast(
@@ -220,6 +254,7 @@ class BudgetTracker:
             .where(
                 BudgetUsageRow.task_id == task_id,
                 BudgetUsageRow.kind == BudgetKind.RUNTIME_SECONDS,
+                BudgetUsageRow.runtime_generation == generation,
                 BudgetUsageRow.running_since.is_not(None),
             )
             .values(
@@ -234,8 +269,21 @@ class BudgetTracker:
                 return BudgetUsage(
                     BudgetKind.RUNTIME_SECONDS, row.consumed, row.limit_value
                 )
-            # No run in progress: report the runtime so far, or raise
-            # BudgetNotConfiguredError when the task has no budget.
+            # Nothing was stopped: no budget, another session, or no run in
+            # progress (this session was stopped already).
+            current = (
+                await connection.execute(
+                    select(BudgetUsageRow.runtime_generation).where(
+                        BudgetUsageRow.task_id == task_id,
+                        BudgetUsageRow.kind == BudgetKind.RUNTIME_SECONDS,
+                    )
+                )
+            ).scalar_one_or_none()
+            if current is None:
+                raise BudgetNotConfiguredError()
+            if current != generation:
+                raise StaleRuntimeSessionError()
+            # This session has already been stopped: report the runtime so far.
             usage = await self._read_usage(connection, task_id, now)
         return next(item for item in usage if item.kind is BudgetKind.RUNTIME_SECONDS)
 

@@ -28,17 +28,21 @@ narrow what the previous one allowed:
 5. the task budget (:class:`~.budget.BudgetProvider`); unknown means denied;
 6. ``AUTO`` / ``SCOPED_AUTO`` are allowed; ``APPROVAL`` / ``STRONG_APPROVAL``
    need an approval bound to this exact call. **The task must still be able to
-   act** (:class:`~.task_state.TaskActivityProvider`: not completed / failed /
-   cancelled, and not unknown or unreadable) before an approval is opened or
-   used: an approval whose revocation failed when its task ended cannot be
-   used, whatever the store still says. Then, without an approval a request is
-   opened (``NEEDS_APPROVAL``); with one it is consumed atomically (single
-   use) or the call is denied with the reason (expired, replayed, for another
-   call...). The check before the request or the use gives the early, precise
-   reason; it can be overtaken by the end of the task, so the store checks the
-   task **again in the same transaction that inserts the request or consumes
-   the approval** (``require_active_task``: the task row is read locked), and a
-   task that ended in between opens or consumes nothing (``task_not_active``).
+   act, in the worker's run** (:class:`~.task_state.TaskActivityProvider`: not
+   completed / failed / cancelled, not unknown or unreadable, and the run in
+   ``TaskContext.run`` is still the task's current one: a Retry / Restart
+   starts a new run) before an approval is opened or used: an approval whose
+   revocation failed when its task ended cannot be used, whatever the store
+   still says. Then, without an approval a request is opened (``NEEDS_APPROVAL``,
+   stamped with the run); with one it is consumed atomically (single use, and
+   only by the run it was requested in) or the call is denied with the reason
+   (expired, replayed, for another call, for an earlier run...). The check
+   before the request or the use gives the early, precise reason; it can be
+   overtaken by the end of the task or by a Retry / Restart, so the store checks
+   the task **again in the same transaction that inserts the request or
+   consumes the approval** (``require_active_task``: the task row is read
+   locked), and a task that ended, or a run that was replaced, in between opens
+   or consumes nothing (``task_not_active`` / ``task_superseded``).
 
 The decision is audited (ids and enums only). An ``ALLOW`` that cannot be
 recorded becomes a ``DENY`` (``audit_unavailable``): a tool never runs without
@@ -130,18 +134,22 @@ _CONSUME_REASON = {
     ConsumeOutcome.ALREADY_USED: BrokerReason.APPROVAL_ALREADY_USED,
     ConsumeOutcome.REJECTED: BrokerReason.APPROVAL_REJECTED,
     ConsumeOutcome.REVOKED: BrokerReason.APPROVAL_REVOKED,
-    # The task ended between the broker's check and the use (the store checks it
-    # again in the step that consumes).
+    # Requested in an earlier run of the task than the caller's.
+    ConsumeOutcome.SUPERSEDED: BrokerReason.APPROVAL_SUPERSEDED,
+    # The task ended (or was started again) between the broker's check and the
+    # use (the store checks it again in the step that consumes).
     ConsumeOutcome.TASK_NOT_ACTIVE: BrokerReason.TASK_NOT_ACTIVE,
     ConsumeOutcome.TASK_UNKNOWN: BrokerReason.TASK_UNKNOWN,
+    ConsumeOutcome.TASK_SUPERSEDED: BrokerReason.TASK_SUPERSEDED,
 }
 _OPEN_REFUSAL_REASON = {
     OpenOutcome.TOO_MANY_PENDING: BrokerReason.APPROVAL_LIMIT_REACHED,
     OpenOutcome.COOLING_DOWN: BrokerReason.APPROVAL_COOLDOWN,
-    # The task ended between the broker's check and the insert (the store checks
-    # it again in the transaction that inserts).
+    # The task ended (or was started again) between the broker's check and the
+    # insert (the store checks it again in the transaction that inserts).
     OpenOutcome.TASK_NOT_ACTIVE: BrokerReason.TASK_NOT_ACTIVE,
     OpenOutcome.TASK_UNKNOWN: BrokerReason.TASK_UNKNOWN,
+    OpenOutcome.TASK_SUPERSEDED: BrokerReason.TASK_SUPERSEDED,
 }
 
 
@@ -180,7 +188,7 @@ class ToolBroker:
         self._task_activity: TaskActivityProvider = (
             FailClosedTaskActivity() if task_activity is None else task_activity
         )
-        require_async_method(self._task_activity, "check", 1)
+        require_async_method(self._task_activity, "check", 2)
         self._resolver: PathResolver = path_resolver or RealpathResolver()
         require_async_method(self._resolver, "resolve", 1)
         if not isinstance(approval_ttl, timedelta) or not (
@@ -541,7 +549,7 @@ class ToolBroker:
         """Why the task cannot ask for or use an approval now (``None``: it can)."""
         try:
             async with asyncio.timeout(self._timeout_seconds):
-                activity = await self._task_activity.check(context.task_id)
+                activity = await self._task_activity.check(context.task_id, context.run)
         except Exception as error:
             logger.error("Task state check failed (%s)", type(error).__name__)
             return BrokerReason.TASK_STATE_UNAVAILABLE
@@ -549,6 +557,8 @@ class ToolBroker:
             return None
         if activity is TaskActivity.ENDED:
             return BrokerReason.TASK_NOT_ACTIVE
+        if activity is TaskActivity.SUPERSEDED:
+            return BrokerReason.TASK_SUPERSEDED
         if activity is TaskActivity.UNKNOWN:
             return BrokerReason.TASK_UNKNOWN
         return BrokerReason.TASK_STATE_UNAVAILABLE  # not an answer: an adapter bug
@@ -578,6 +588,7 @@ class ToolBroker:
             new = NewApproval(
                 approval_id=uuid.uuid4(),
                 task_id=context.task_id,
+                task_run=context.run,
                 project_id=context.primary_project_id,
                 agent_id=context.grant.agent_id,
                 requester_user_id=context.delegator_id,
@@ -672,6 +683,7 @@ class ToolBroker:
         now = self._clock()
         binding = ApprovalBinding(
             task_id=context.task_id,
+            task_run=context.run,
             agent_id=context.grant.agent_id,
             requester_user_id=context.delegator_id,
             tool=spec.name,

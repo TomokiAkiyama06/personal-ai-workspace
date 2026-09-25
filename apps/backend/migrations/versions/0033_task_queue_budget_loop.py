@@ -159,6 +159,15 @@ def upgrade() -> None:
         ),
         sa.Column("limit_value", sa.BigInteger(), nullable=True),
         sa.Column("running_since", sa.DateTime(timezone=True), nullable=True),
+        # The runtime session generation (fencing token of the runtime timer):
+        # every start_runtime adds 1, stop_runtime must present the current value.
+        # It only grows and is kept when the timer stops.
+        sa.Column(
+            "runtime_generation",
+            sa.BigInteger(),
+            server_default=sa.text("0"),
+            nullable=False,
+        ),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -187,18 +196,30 @@ def upgrade() -> None:
             "running_since IS NULL OR kind = 'runtime_seconds'",
             name=op.f("ck_budget_usages_running_only_for_runtime"),
         ),
+        sa.CheckConstraint(
+            "runtime_generation >= 0"
+            " AND (kind = 'runtime_seconds' OR runtime_generation = 0)",
+            name=op.f("ck_budget_usages_runtime_generation_valid"),
+        ),
     )
     # set_preset upserts (INSERT ... ON CONFLICT DO UPDATE SET preset,
     # limit_value); record and stop_runtime add to ``consumed`` (atomic
     # ``UPDATE ... SET consumed = ...``); start_runtime and stop_runtime set
-    # ``running_since``. Nothing else changes: ``task_id`` and ``kind`` are the
-    # key and ``created_at`` is history. No DELETE: a budget is never removed.
+    # ``running_since``, and start_runtime adds 1 to ``runtime_generation``.
+    # Nothing else changes: ``task_id`` and ``kind`` are the key and
+    # ``created_at`` is history. No DELETE: a budget is never removed.
     grant_app_privileges(
         op,
         "budget_usages",
         select=True,
         insert=True,
-        update_columns=("preset", "limit_value", "consumed", "running_since"),
+        update_columns=(
+            "preset",
+            "limit_value",
+            "consumed",
+            "running_since",
+            "runtime_generation",
+        ),
     )
 
     op.create_table(

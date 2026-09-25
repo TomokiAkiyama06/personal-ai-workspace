@@ -27,6 +27,7 @@ MAX_LEASE_SECONDS = 86_400
 MAX_ENTRY_ID = 2**63 - 1
 MAX_CLAIM_COUNT = 2**31 - 1  # ``queue_entries.claim_count`` is a 32-bit integer
 MAX_ATTEMPT = 2**31 - 1  # ``tasks.attempt`` is a 32-bit integer
+MAX_RUNTIME_GENERATION = 2**63 - 1  # ``budget_usages.runtime_generation`` is a BIGINT
 
 _WORKER_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@/-]*")
 _CONTROL_CHARACTER = re.compile(r"[\x00-\x1f\x7f]")
@@ -73,6 +74,11 @@ def check_entry_id(value: Any) -> int:
 def check_claim_count(value: Any) -> int:
     """A claim generation: an ``int`` from 1 (first claim) to ``MAX_CLAIM_COUNT``."""
     return check_int("claim_count", value, minimum=1, maximum=MAX_CLAIM_COUNT)
+
+
+def check_runtime_generation(value: Any) -> int:
+    """A runtime session generation: an ``int`` from 1 (first start) upward."""
+    return check_int("generation", value, minimum=1, maximum=MAX_RUNTIME_GENERATION)
 
 
 def check_attempt(value: Any) -> int:

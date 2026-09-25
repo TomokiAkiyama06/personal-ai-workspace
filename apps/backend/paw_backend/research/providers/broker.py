@@ -10,8 +10,13 @@ Broker, PAW-031) must have checked the ``network`` capability before calling
 
 Logging: one WARNING per failed provider on the logger
 ``paw_backend.research.providers`` (or a child of it) with the provider id,
-kind, error code and the exception TYPE name. Never the exception text, the
-query or a locator.
+kind, error code and ``exception_type``. ``exception_type`` is the name of the
+exception class only when that class IS one of ``LOGGED_EXCEPTION_TYPES`` (builtin
+exceptions and this package's own, matched by identity); any other class, that is
+every class an adapter defines, is logged as ``ADAPTER_ERROR``. The name of such a
+class is adapter data (it can hold a credential or a newline that forges a log
+record), so it is never logged, cut down or sanitised. Never the exception text,
+the query or a locator (Decision 0012).
 """
 
 import asyncio
@@ -31,8 +36,13 @@ from paw_backend.research.providers.contract import (
     validate_time_budget,
 )
 from paw_backend.research.providers.errors import (
+    DuplicateProviderError,
+    InvalidLocatorError,
     InvalidProviderResponseError,
     ProviderFailure,
+    ProviderInterfaceError,
+    ProviderRegistryError,
+    RegistryFullError,
     ResearchErrorCode,
     UnknownProviderError,
 )
@@ -60,16 +70,105 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+# The value logged for an exception whose class is not on the list below.
+ADAPTER_ERROR = "adapter_error"
+
+# The classes that may be named in the log: the builtin exceptions an adapter's
+# transport or parser can raise, and this package's own. A closed list that a
+# reviewer extends by editing it; never derived from what an adapter raises.
+LOGGED_EXCEPTION_TYPES: tuple[type[Exception], ...] = (
+    # builtin
+    Exception,
+    ArithmeticError,
+    AssertionError,
+    AttributeError,
+    BufferError,
+    EOFError,
+    FloatingPointError,
+    ImportError,
+    ModuleNotFoundError,
+    IndexError,
+    KeyError,
+    LookupError,
+    MemoryError,
+    NameError,
+    UnboundLocalError,
+    NotImplementedError,
+    OSError,
+    BlockingIOError,
+    ChildProcessError,
+    ConnectionError,
+    BrokenPipeError,
+    ConnectionAbortedError,
+    ConnectionRefusedError,
+    ConnectionResetError,
+    FileExistsError,
+    FileNotFoundError,
+    InterruptedError,
+    IsADirectoryError,
+    NotADirectoryError,
+    PermissionError,
+    ProcessLookupError,
+    TimeoutError,
+    OverflowError,
+    RecursionError,
+    ReferenceError,
+    RuntimeError,
+    StopAsyncIteration,
+    StopIteration,
+    SyntaxError,
+    SystemError,
+    TypeError,
+    ValueError,
+    UnicodeError,
+    UnicodeDecodeError,
+    UnicodeEncodeError,
+    UnicodeTranslateError,
+    ZeroDivisionError,
+    ExceptionGroup,
+    # this package
+    ProviderFailure,
+    InvalidLocatorError,
+    InvalidProviderResponseError,
+    ProviderRegistryError,
+    ProviderInterfaceError,
+    DuplicateProviderError,
+    RegistryFullError,
+    UnknownProviderError,
+)
+
+# Keyed by ``id``: hashing or comparing the key would call the ``__hash__`` /
+# ``__eq__`` of the exception's metaclass (adapter code). Every class above lives
+# as long as this module, so its ``id`` cannot belong to another class.
+_LOGGED_NAMES: dict[int, str] = {
+    id(cls): cls.__name__ for cls in LOGGED_EXCEPTION_TYPES
+}
+
+
+def log_type_name(error: BaseException) -> str:
+    """The value to log as ``exception_type`` for ``error``; it never raises.
+
+    The class's name if ``type(error)`` IS (not: derives from, or is named like)
+    one of ``LOGGED_EXCEPTION_TYPES``, else ``ADAPTER_ERROR``. No attribute of the
+    class is read: ``type()`` gives the class without asking the object for its
+    ``__class__``, and the class is looked up by ``id``, so a metaclass hook
+    (``__getattribute__``, ``__name__``, ``__hash__``, ``__eq__``, ...) never
+    runs, and a ``__name__``, ``__qualname__`` or ``__module__`` set by the
+    adapter is never seen. The result is one of about fifty fixed strings.
+    """
+    return _LOGGED_NAMES.get(id(type(error)), ADAPTER_ERROR)
+
+
 def _log_failure(
-    entry: RegisteredProvider, code: ResearchErrorCode, exception_type: str
+    entry: RegisteredProvider, code: ResearchErrorCode, error: BaseException
 ) -> None:
-    """One WARNING per failed provider: identity, code and the exception TYPE only."""
+    """One WARNING per failed provider: identity, code and a fixed exception type."""
     logger.warning(
         "research provider failed: provider=%s kind=%s code=%s exception_type=%s",
         entry.name,
         entry.kind.value,
         code.value,
-        exception_type,
+        log_type_name(error),
     )
 
 
@@ -90,17 +189,8 @@ async def _call_provider(
             return _Outcome(response=await call())
     except Exception as error:
         code = classify_failure(error)
-        _log_failure(entry, code, _type_name(error))
+        _log_failure(entry, code, error)
         return _Outcome(code=code)
-
-
-def _type_name(error: BaseException) -> str:
-    """The name of ``type(error)``, read without running the adapter's code.
-
-    ``type(error).__name__`` would run a property that the exception's metaclass
-    may define; the descriptor of ``type`` itself returns the real name.
-    """
-    return type.__dict__["__name__"].__get__(type(error))
 
 
 def classify_failure(error: Exception) -> ResearchErrorCode:
@@ -173,7 +263,8 @@ class ResearchBroker:
            running.
         3. An ``Exception`` raised by a provider is converted with
            ``classify_failure`` into one ``ResearchError(entry.name, entry.kind,
-           code)`` and logged (see the module docstring); the other providers are
+           code)`` and logged (see the module docstring: a class of the adapter is
+           logged as ``adapter_error``, never by its name); the other providers are
            unaffected. The exception is read without running any of its own code
            (see ``classify_failure``), so it cannot make ``gather`` raise. This is
            the one place where catching ``Exception`` is intended.
@@ -242,7 +333,7 @@ class ResearchBroker:
                     )
                 except InvalidProviderResponseError as error:
                     code = ResearchErrorCode.INVALID_RESPONSE
-                    _log_failure(entry, code, type(error).__name__)
+                    _log_failure(entry, code, error)
             if code is not None:
                 errors.append(ResearchError(entry.name, entry.kind, code))
         items, truncated = merge_items(batches, max_results=request.max_results)
@@ -320,7 +411,7 @@ class ResearchBroker:
                 document = revalidate_document(outcome.response)
             except InvalidProviderResponseError as error:
                 code = ResearchErrorCode.INVALID_RESPONSE
-                _log_failure(entry, code, type(error).__name__)
+                _log_failure(entry, code, error)
         if code is not None:
             return self._failed_fetch(entry.name, entry.kind, code)
 

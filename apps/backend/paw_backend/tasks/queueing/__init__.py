@@ -35,6 +35,7 @@ from paw_backend.tasks.queueing.errors import (
     InvalidQueueingArgumentError,
     LeaseLostError,
     QueueingError,
+    StaleRuntimeSessionError,
     TaskAlreadyQueuedError,
 )
 from paw_backend.tasks.queueing.escalation import decide_next_action
@@ -74,6 +75,7 @@ __all__ = [
     "QueueEntry",
     "QueueStatus",
     "QueueingError",
+    "StaleRuntimeSessionError",
     "TaskAlreadyQueuedError",
     "TaskQueue",
     "decide_next_action",
