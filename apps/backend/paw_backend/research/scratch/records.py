@@ -32,6 +32,7 @@ class DeferralReason(StrEnum):
     """Why an item is exempt from TTL deletion."""
 
     PINNED = "pinned"
+    SAVED = "saved"
     IN_USE = "in_use"
     PROMOTION_PENDING = "promotion_pending"
 
@@ -60,6 +61,7 @@ class ScratchItem:
     expires_at: datetime
     expired: bool
     pinned: bool
+    saved: bool
     in_use: bool
     promotion_state: PromotionState
     promotion_requested_at: datetime | None
@@ -68,12 +70,15 @@ class ScratchItem:
     def deferral_reasons(self) -> tuple[DeferralReason, ...]:
         """The reasons TTL deletion is deferred right now, in a fixed order.
 
-        The order is pinned, in_use, promotion_pending. Empty when the item is
-        not exempt.
+        The order is pinned, saved, in_use, promotion_pending. Empty when the
+        item is not exempt. ``pinned`` and ``saved`` are independent: the item
+        is exempt while either is set.
         """
         reasons = []
         if self.pinned:
             reasons.append(DeferralReason.PINNED)
+        if self.saved:
+            reasons.append(DeferralReason.SAVED)
         if self.in_use:
             reasons.append(DeferralReason.IN_USE)
         if self.promotion_state is PromotionState.PENDING:
@@ -97,7 +102,7 @@ class PurgeResult:
     """The outcome of one ``purge_expired`` call.
 
     ``purged``: rows this call deleted. ``deferred``: expired rows that are
-    still present because they are exempt (pinned, in use or promotion
+    still present because they are exempt (pinned, saved, in use or promotion
     pending) at ``now``; a row with several reasons counts once. ``has_more``:
     more purgeable rows exist beyond this call's batch, so the caller should
     call again.

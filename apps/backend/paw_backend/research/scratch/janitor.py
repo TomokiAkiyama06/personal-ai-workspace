@@ -101,8 +101,8 @@ class PurgeRun:
     """The outcome of one tick.
 
     ``purged``: rows deleted by all its batches. ``deferred``: expired rows left
-    because they are pinned, in use or awaiting a promotion decision (as counted
-    by the last batch). ``batches``: how many times ``purge_expired`` ran.
+    because they are pinned, saved, in use or awaiting a promotion decision (as
+    counted by the last batch). ``batches``: how many times ``purge_expired`` ran.
     ``has_more``: the tick stopped at its batch bound and purgeable rows remain.
     """
 

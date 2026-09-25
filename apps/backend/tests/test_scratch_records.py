@@ -44,6 +44,7 @@ def item(**overrides) -> ScratchItem:
         "expires_at": T0 + timedelta(hours=24),
         "expired": False,
         "pinned": False,
+        "saved": False,
         "in_use": False,
         "promotion_state": PromotionState.NONE,
         "promotion_requested_at": None,
@@ -58,6 +59,7 @@ class ScratchItemTest(unittest.TestCase):
 
     def test_each_reason_alone(self):
         self.assertEqual(item(pinned=True).deferral_reasons, (DeferralReason.PINNED,))
+        self.assertEqual(item(saved=True).deferral_reasons, (DeferralReason.SAVED,))
         self.assertEqual(item(in_use=True).deferral_reasons, (DeferralReason.IN_USE,))
         self.assertEqual(
             item(
@@ -82,11 +84,13 @@ class ScratchItemTest(unittest.TestCase):
             promotion_requested_at=T0,
             in_use=True,
             pinned=True,
+            saved=True,
         )
         self.assertEqual(
             both.deferral_reasons,
             (
                 DeferralReason.PINNED,
+                DeferralReason.SAVED,
                 DeferralReason.IN_USE,
                 DeferralReason.PROMOTION_PENDING,
             ),
@@ -116,7 +120,7 @@ class ScratchItemTest(unittest.TestCase):
         )
         self.assertEqual(
             [reason.value for reason in DeferralReason],
-            ["pinned", "in_use", "promotion_pending"],
+            ["pinned", "saved", "in_use", "promotion_pending"],
         )
 
 

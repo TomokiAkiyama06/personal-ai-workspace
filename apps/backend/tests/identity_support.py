@@ -246,6 +246,19 @@ class PostgresIdentityTestCase(unittest.IsolatedAsyncioTestCase):
         rows = await self.query(sql, **params)
         return rows[0][0]
 
+    async def wait_until_a_statement_waits_for_a_lock(self) -> None:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 30
+        while loop.time() < deadline:
+            waiting = await self.scalar(
+                "SELECT count(*) FROM pg_stat_activity "
+                "WHERE datname = current_database() AND wait_event_type = 'Lock'"
+            )
+            if waiting:
+                return
+            await asyncio.sleep(0.02)
+        self.fail("no statement is waiting for a lock")
+
     async def audit_rows(self) -> list:
         return await self.query(
             "SELECT * FROM audit_events WHERE recorded_at >= :since "

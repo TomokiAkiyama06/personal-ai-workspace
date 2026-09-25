@@ -143,8 +143,9 @@ class BudgetUsageRow(Base):
     only grows and is kept when the timer stops. ``settled_through`` (also only on
     the ``runtime_seconds`` row) is the cutoff of the last ``stop_runtime``: the
     time up to which the runtime has been charged. A timer starts no earlier than
-    it, so a start that read its clock before an older session's stop settled a
-    later time cannot make that interval count twice (Decision 0007, 10).
+    it, so a start whose clock reading precedes a concurrent stop's cutoff (or a
+    clock that stepped backwards) cannot make that interval count twice. Every
+    runtime instant is the DATABASE's ``clock_timestamp()`` (Decision 0007, 10).
     """
 
     __tablename__ = "budget_usages"

@@ -292,6 +292,23 @@ class DeferredDeletionTest(PostgresScratchTestCase):
         self.assertEqual(await self.store.purge_expired(), PurgeResult(1, 0, False))
         self.assertFalse(self.exists(item_id))
 
+    async def test_saved_until_it_is_unsaved(self):
+        item_id = self.seed_item(expires_at=T0 - HOUR, saved=True)
+
+        self.assertEqual(await self.store.purge_expired(), PurgeResult(0, 1, False))
+        self.set_item(item_id, saved=False)
+        self.assertEqual(await self.store.purge_expired(), PurgeResult(1, 0, False))
+        self.assertFalse(self.exists(item_id))
+
+    async def test_pinned_and_saved_wait_for_both_to_be_cleared(self):
+        item_id = self.seed_item(expires_at=T0 - HOUR, pinned=True, saved=True)
+
+        self.assertEqual(await self.store.purge_expired(), PurgeResult(0, 1, False))
+        self.set_item(item_id, pinned=False)
+        self.assertEqual(await self.store.purge_expired(), PurgeResult(0, 1, False))
+        self.set_item(item_id, saved=False)
+        self.assertEqual(await self.store.purge_expired(), PurgeResult(1, 0, False))
+
     async def test_promotion_pending_until_it_is_resolved(self):
         item_id = self.seed_pending(expires_at=T0 - HOUR)
 

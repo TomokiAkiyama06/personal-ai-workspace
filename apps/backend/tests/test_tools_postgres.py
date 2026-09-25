@@ -10,11 +10,12 @@ the single winner among concurrent callers on separate connection pools.
 
 import asyncio
 import contextlib
+import functools
 import hashlib
 import time
 import unittest
 import uuid
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 import psycopg.errors
 from sqlalchemy import text
@@ -151,7 +152,14 @@ class PostgresTestCase(unittest.IsolatedAsyncioTestCase):
 
 @requires_postgres
 class PostgresStoreContractTest(StoreContract, PostgresTestCase):
-    pass
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        # The contract fixes instants to the microsecond (an approval one
+        # microsecond before its expiry, the recorded time of a use), while a real
+        # store reads the time again after its locks, moved forward by the time
+        # the call took (``ExpiryAfterLockWaitTest``). Here the store's monotonic
+        # clock stands still: no call waits, so it judges at exactly ``now``.
+        self.store = PostgresApprovalStore(self.database, monotonic=lambda: 0.0)
 
 
 ROW = {
@@ -2740,6 +2748,303 @@ class TransactionDeadlineTest(LockWaits, TaskFixture):
         )
         self.assertEqual(used, ConsumeOutcome.CONSUMED)
         self.assertEqual(await self.kinds(), ["requested", "approved", "consumed"])
+
+
+class MonotonicClock:
+    """A monotonic clock (seconds) that the test moves by hand."""
+
+    def __init__(self) -> None:
+        self.seconds = 1000.0
+
+    def __call__(self) -> float:
+        return self.seconds
+
+    def advance(self, seconds: float) -> None:
+        self.seconds += seconds
+
+
+@requires_postgres
+class ExpiryAfterLockWaitTest(LockWaits, TaskFixture):
+    """The expiry is judged after the locks, not before them.
+
+    Finding of the sixth review of PR #74: ``open_request`` and ``consume`` were
+    handed ``now`` by the caller and compared ``expires_at`` with it, but they may
+    first wait for the task row, the advisory lock or the approval row. A use that
+    started shortly before ``expires_at`` and got its locks after it was still
+    decided against the old ``now`` and consumed an expired approval (a request
+    that waited counted, and returned, an approval that had run out meanwhile).
+    The store now reads the time again once it holds the locks: the caller's
+    ``now`` moved forward by the time that passed since the call began (a
+    monotonic clock, injected here, so nothing depends on how fast the machine
+    is). Each test holds a lock in another transaction, starts the call, moves that
+    clock while the call is provably blocked, and only then lets the lock go.
+    """
+
+    GUARD = 10  # far above what a call needs: only reached by a hung one
+
+    async def wire(self, *, limits=LIMITS):
+        self.moving = MonotonicClock()
+        self.limits = limits
+        self.store = PostgresApprovalStore(self.new_database(), monotonic=self.moving)
+        self.task_id = await self.new_task()
+        self.new = new_approval(task_id=self.task_id)  # expires NOW + 1 hour
+
+    @contextlib.asynccontextmanager
+    async def holding(self, sql: str, **parameters):
+        async with self.database.engine.connect() as holder:
+            await holder.execute(text(sql), parameters)
+            try:
+                yield
+            finally:
+                await holder.rollback()
+
+    def hold_the_task(self):
+        return self.holding(
+            "SELECT id FROM tasks WHERE id = :id FOR UPDATE", id=self.task_id
+        )
+
+    def hold_the_approval(self):
+        return self.holding(
+            "SELECT id FROM tool_approvals WHERE id = :id FOR UPDATE",
+            id=self.new.approval_id,
+        )
+
+    def hold_the_requests(self):
+        # the lock that serialises the requests of a (task, user)
+        key = f"tool_approvals:{self.task_id}:{U1}"
+        return self.holding(
+            "SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))", key=key
+        )
+
+    async def approved(self) -> None:
+        opened = await self.store.open_request(self.new, now=NOW, limits=self.limits)
+        self.assertEqual(opened.outcome, OpenOutcome.CREATED)
+        decided = await self.store.decide(
+            self.new.approval_id, approver_id=U1, approve=True, now=NOW
+        )
+        self.assertEqual(decided.outcome, DecideOutcome.DECIDED)
+
+    async def kinds(self):
+        history = await self.store.history(self.new.approval_id)
+        return [entry.kind.value for entry in history]
+
+    async def waiting(self, hold, start, advance: float):
+        """Run ``start()`` while ``hold`` is held; move the clock by ``advance``
+        seconds once it is blocked on the lock, then let the lock go."""
+        async with hold:
+            call = asyncio.create_task(start())
+            await self.wait_for_lock_waiters(1, call)
+            self.assertFalse(call.done())  # it really waited
+            self.moving.advance(advance)
+        return await asyncio.wait_for(call, self.GUARD)
+
+    async def use(self, hold, advance: float, **arguments):
+        return await self.waiting(
+            hold,
+            lambda: self.store.consume(
+                self.new.approval_id, binding_of(self.new), now=NOW, **arguments
+            ),
+            advance,
+        )
+
+    # every wait of a use: the task's row (with require_active_task) and the
+    # approval's own row; the boundary is exact (``expires_at`` itself is expired)
+    BEFORE_EXPIRY = HOUR.total_seconds() - 1
+    AT_EXPIRY = HOUR.total_seconds()
+
+    async def test_a_use_that_waited_for_the_task_row_sees_an_expiry_meanwhile(self):
+        for advance, expected, kinds in (
+            (self.BEFORE_EXPIRY, ConsumeOutcome.CONSUMED, ["consumed"]),
+            (self.AT_EXPIRY, ConsumeOutcome.EXPIRED, ["expired"]),
+        ):
+            with self.subTest(advance=advance):
+                await self.wire()
+                await self.approved()
+                outcome = await self.use(
+                    self.hold_the_task(), advance, require_active_task=True
+                )
+                self.assertEqual(outcome, expected)
+                self.assertEqual(await self.kinds(), ["requested", "approved", *kinds])
+                record = await self.store.get(self.new.approval_id)
+                self.assertEqual(
+                    record.status,
+                    ApprovalStatus.CONSUMED
+                    if expected is ConsumeOutcome.CONSUMED
+                    else ApprovalStatus.EXPIRED,
+                )
+                self.assertEqual(
+                    record.consumed_at is not None,
+                    expected is ConsumeOutcome.CONSUMED,
+                )
+
+    async def test_a_use_that_waited_for_the_approval_row_sees_an_expiry_meanwhile(
+        self,
+    ):
+        for require_active_task in (False, True):
+            for advance, expected in (
+                (self.BEFORE_EXPIRY, ConsumeOutcome.CONSUMED),
+                (self.AT_EXPIRY, ConsumeOutcome.EXPIRED),
+            ):
+                with self.subTest(
+                    advance=advance, require_active_task=require_active_task
+                ):
+                    await self.wire()
+                    await self.approved()
+                    outcome = await self.use(
+                        self.hold_the_approval(),
+                        advance,
+                        require_active_task=require_active_task,
+                    )
+                    self.assertEqual(outcome, expected)
+                    record = await self.store.get(self.new.approval_id)
+                    self.assertEqual(
+                        record.status,
+                        ApprovalStatus.CONSUMED
+                        if expected is ConsumeOutcome.CONSUMED
+                        else ApprovalStatus.EXPIRED,
+                    )
+
+    async def test_a_use_that_did_not_wait_is_not_moved_by_the_clock(self):
+        # no lock is held: nothing passes between the caller's ``now`` and the use
+        await self.wire()
+        await self.approved()
+        self.moving.advance(10 * self.AT_EXPIRY)  # before the call: no effect
+        used = await self.store.consume(
+            self.new.approval_id, binding_of(self.new), now=NOW
+        )
+        self.assertEqual(used, ConsumeOutcome.CONSUMED)
+
+    async def test_the_use_of_an_expired_approval_is_refused_on_the_real_clock_too(
+        self,
+    ):
+        """No injected clock: a real wait, longer than what the approval has
+        left, decides the same."""
+        self.store = PostgresApprovalStore(self.new_database())
+        self.task_id = await self.new_task()
+        started = datetime.now(UTC)
+        self.new = new_approval(
+            task_id=self.task_id, expires_at=started + timedelta(seconds=0.5)
+        )
+        opened = await self.store.open_request(self.new, now=started, limits=LIMITS)
+        self.assertEqual(opened.outcome, OpenOutcome.CREATED)
+        decided = await self.store.decide(
+            self.new.approval_id, approver_id=U1, approve=True, now=started
+        )
+        self.assertEqual(decided.outcome, DecideOutcome.DECIDED)
+        async with self.hold_the_approval():
+            call = asyncio.create_task(
+                self.store.consume(
+                    self.new.approval_id, binding_of(self.new), now=started
+                )
+            )
+            await self.wait_for_lock_waiters(1, call)
+            await asyncio.sleep(1.0)  # twice what the approval has left
+        self.assertEqual(
+            await asyncio.wait_for(call, self.GUARD), ConsumeOutcome.EXPIRED
+        )
+
+    async def test_a_request_that_waited_finds_that_the_open_one_expired_meanwhile(
+        self,
+    ):
+        for name, hold, require_active_task in (
+            ("the requests of the task", self.hold_the_requests, False),
+            ("the task row", self.hold_the_task, True),
+        ):
+            for advance, expected in (
+                (self.BEFORE_EXPIRY, OpenOutcome.EXISTING),
+                (self.AT_EXPIRY, OpenOutcome.CREATED),
+            ):
+                with self.subTest(waiting_for=name, advance=advance):
+                    await self.wire()
+                    await self.approved()
+                    again = new_approval(
+                        task_id=self.task_id,
+                        call_hash=self.new.call_hash,
+                        expires_at=NOW + 2 * HOUR,
+                    )
+                    opened = await self.waiting(
+                        hold(),
+                        functools.partial(
+                            self.store.open_request,
+                            again,
+                            now=NOW,
+                            limits=self.limits,
+                            require_active_task=require_active_task,
+                        ),
+                        advance,
+                    )
+                    self.assertEqual(opened.outcome, expected)
+                    old = await self.store.get(self.new.approval_id)
+                    if expected is OpenOutcome.CREATED:
+                        # the expired one is not handed out again: it is marked
+                        # expired (with its history) and a new request is opened
+                        self.assertEqual(opened.record.approval_id, again.approval_id)
+                        self.assertEqual(old.status, ApprovalStatus.EXPIRED)
+                        self.assertEqual(
+                            await self.kinds(), ["requested", "approved", "expired"]
+                        )
+                    else:
+                        self.assertEqual(
+                            opened.record.approval_id, self.new.approval_id
+                        )
+                        self.assertEqual(old.status, ApprovalStatus.APPROVED)
+
+    async def test_a_request_that_waited_does_not_count_what_expired_meanwhile(self):
+        one_open = OpenLimits(max_pending=1, rejection_cooldown=timedelta(minutes=5))
+        for advance, expected in (
+            (self.BEFORE_EXPIRY, OpenOutcome.TOO_MANY_PENDING),
+            (self.AT_EXPIRY, OpenOutcome.CREATED),
+        ):
+            with self.subTest(advance=advance):
+                await self.wire(limits=one_open)
+                await self.approved()  # the only one the task may have open
+                other = new_approval(task_id=self.task_id, expires_at=NOW + 2 * HOUR)
+                opened = await self.waiting(
+                    self.hold_the_requests(),
+                    functools.partial(
+                        self.store.open_request, other, now=NOW, limits=one_open
+                    ),
+                    advance,
+                )
+                self.assertEqual(opened.outcome, expected)
+
+    async def test_a_request_that_waited_does_not_revoke_what_expired_meanwhile(self):
+        # An approval of an earlier run is revoked when a request of the new run
+        # comes in; one that ran out of time by then is not (it is expired).
+        await self.wire()
+        await self.approved()  # run (1, 0)
+        await self.drive(self.task_id, PATHS_TO_STATES[TaskState.FAILED])
+        await self.drive(self.task_id, [(C.RESTART, {})])  # run (2, 0)
+        second = new_approval(
+            task_id=self.task_id, task_run=TaskRun(2, 0), expires_at=NOW + 2 * HOUR
+        )
+        opened = await self.waiting(
+            self.hold_the_requests(),
+            lambda: self.store.open_request(
+                second, now=NOW, limits=self.limits, require_active_task=True
+            ),
+            self.AT_EXPIRY,
+        )
+        self.assertEqual(opened.outcome, OpenOutcome.CREATED)
+        record = await self.store.get(self.new.approval_id)
+        self.assertEqual(record.status, ApprovalStatus.APPROVED)  # not revoked
+        self.assertIsNone(record.revoked_at)
+        self.assertEqual(await self.kinds(), ["requested", "approved"])
+
+    async def test_the_moment_of_a_use_is_the_one_it_was_judged_at(self):
+        # what is recorded is the instant the use was decided (after the wait)
+        await self.wire()
+        await self.approved()
+        outcome = await self.use(self.hold_the_approval(), 60.0)
+        self.assertEqual(outcome, ConsumeOutcome.CONSUMED)
+        record = await self.store.get(self.new.approval_id)
+        self.assertEqual(record.consumed_at, NOW + timedelta(seconds=60))
+
+    async def test_the_clock_must_be_callable(self):
+        for bad in (None, 5, "monotonic"):
+            with self.subTest(monotonic=bad):
+                with self.assertRaises(TypeError):
+                    PostgresApprovalStore(self.new_database(), monotonic=bad)
 
 
 @requires_postgres
