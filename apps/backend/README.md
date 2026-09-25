@@ -277,7 +277,7 @@ Operator の 6 操作は次のように解釈しています（[要件](../../RE
 | `task_attempts` | 試行ごとの branch / worktree / head commit、Review 状態、Evaluator 結果、PR の番号・URL・状態 |
 | `task_steps` | Step の実行記録。試行内で最新の行が current step。試行内で `running` は高々 1 つ（Partial Unique Index） |
 | `task_tool_invocations` | Step が呼んだ Tool の実行状態（下記）。ID、Tool 名、状態（`started` / `succeeded` / `failed` / `interrupted`）、開始・終了時刻だけを持つ。`started` の行だけの Partial Index（`step_id`）と、終了済みの行だけの Partial Index（`step_id`、開始の新しい順、`id` の新しい順）がある |
-| `task_logs` | 試行ごとの Log（`debug` / `info` / `warning` / `error`）。行は書いた Run（`attempt` と `retry_count`）を持つ |
+| `task_logs` | 試行ごとの Log（`debug` / `info` / `warning` / `error`）。行は書いた Run（`attempt` と `retry_count`）を持つ。Index は `(task_id, attempt, seq DESC)`（下記の `restore`） |
 | `task_events` | Append-only の履歴。全遷移について、Command、遷移前後の状態、`wait_reason`、Actor（`user` / `system` / `policy` と User の UUID）、理由、その時点の Step 名、`task_version`、Event 後の Run（`attempt` と `retry_count`。Start では Worker の Run） |
 
 - `project_id`、`created_by`、`actor_id` は UUID だけを持ち、外部キーはありません。users と projects の Table がまだ存在しないためです（Table が入るときに外部キーを追加します）。
@@ -325,6 +325,7 @@ Operator の 6 操作は次のように解釈しています（[要件](../../RE
   **引数と出力は保存しません。** 権限判定、承認、引数と結果の扱いは Tool Broker（PAW-031）の責務です。Step が終わる（Stop Now / Fail / Restart / `finish_step`）と、`started` のままの Tool は `interrupted` になります。
 - `TaskService.restore(task_id)` は DB だけから Snapshot（状態、current step、直近の Log、worktree / review / PR の状態、直近の Event）を作ります。1 つの Repeatable Read Transaction で読むため、同じ時点の値です。
   状態は Process のメモリに持たないので、Client が切断しても、Backend が再起動しても、別の Process が同じ値を返します。
+  `restore` の Log の問い合わせ（現在の試行の行を `seq` の新しい順に `log_limit` 件まで）は、Index `ix_task_logs_task_id_attempt_seq`（`task_id`、`attempt`、`seq DESC`）が受け持ちます。PostgreSQL は現在の試行の位置へ直接移り、その行だけを並び順のまま読んで件数で止まるため、Restart で前の試行の Log が何万行残っていても、再接続のたびの作業量は返す行数で決まります（以前の `(task_id, seq)` の Index では、新しい方から前の試行の行を読んで捨てながら遡っていました）。`(task_id, seq)` の Index は残していません。Log を試行をまたいで読む問い合わせが今はなく、外部キー `task_id` の確認には新しい Index の先頭の列が使えるためです。書き込みの多い Table なので Index を 1 つ減らします。Log を試行をまたいで読む機能を足すときは、その問い合わせに合う Index を、そのときに足してください。`restore` の他の問い合わせは、すでに専用の Index があります（現在の Step は `UNIQUE (task_id, attempt, sequence)`、直近の Event は `(task_id, seq)`、試行の一覧は `UNIQUE (task_id, number)`）。Test は、前の試行の Log と Step が 2 万件ずつ、他の Task の Log と Event が合わせて数万件ある Task で、Plan を使い回す設定（`force_generic_plan`）でも値ごとに立てる Plan（`force_custom_plan`）でも、Seq Scan と並べ替えがなく、Log は現在の試行の行（3 行と 0 行）だけ、現在の Step と直近の Event は 1 行だけを読むことを確認します。
 - `TaskService(database, listeners=[...])` の Listener は Commit 後に、書き込まれた `TaskEvent` を受け取ります。Audit（PAW-025）の接続点です。Listener の失敗は Command を失敗させず、例外の型名だけを Log に残します。
   取りこぼしを避けたい Consumer は `task_events` を `seq` で読んでください（`TaskService.history(task_id, after_seq=...)`）。
 - 実行中 Task の Runtime 状態（実行中 Process など）の復旧は、要件どおり V1 では保証しません。`tool_invocations` が `started` のままの Task は、Backend が再開または中断を判断するための記録で、Process が生きている保証ではありません。
