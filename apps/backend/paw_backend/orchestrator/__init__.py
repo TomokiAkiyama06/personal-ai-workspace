@@ -5,8 +5,8 @@ runs the independent nodes in parallel, retries / changes approach / escalates a
 failing node on its own, passes structured results between nodes and never lets a
 sub-agent exceed its parent's rights or budget. There is no HTTP surface: the
 orchestrator is driven by ``Orchestrator.run_once`` / ``serve`` (a worker process)
-(and, in a later step, the periodic project task-stop loop). See
-``apps/backend/README.md`` and ``docs/decisions/0021-dag-orchestrator-policy.md``.
+and the periodic ``ProjectTaskStopLoop``. See ``apps/backend/README.md`` and
+``docs/decisions/0021-dag-orchestrator-policy.md``.
 """
 
 from paw_backend.orchestrator.config import Clock, OrchestratorConfig, SystemClock
@@ -51,6 +51,12 @@ from paw_backend.orchestrator.orchestrator import (
     format_failure_text,
 )
 from paw_backend.orchestrator.plan import Plan, PlanNode
+from paw_backend.orchestrator.project_sweep import (
+    PendingDeletionLister,
+    ProjectTaskStopLoop,
+    SweepReport,
+    build_project_stop_loop,
+)
 from paw_backend.orchestrator.records import AttemptRecord, DagRecord, NodeRecord
 from paw_backend.orchestrator.result import NodeResult
 from paw_backend.orchestrator.runtime import (
@@ -100,9 +106,11 @@ __all__ = [
     "Orchestrator",
     "OrchestratorConfig",
     "OrchestratorError",
+    "PendingDeletionLister",
     "Plan",
     "PlanNode",
     "PlanReason",
+    "ProjectTaskStopLoop",
     "ResultReason",
     "RunGuard",
     "RunOutcome",
@@ -111,11 +119,13 @@ __all__ = [
     "StaleDagEpochError",
     "StaleNodeAttemptError",
     "StopReason",
+    "SweepReport",
     "SystemClock",
     "TaskAuthority",
     "ToolCaller",
     "TrackerBudgetProvider",
     "agent_id_of",
+    "build_project_stop_loop",
     "derive_child_scope",
     "format_error_class",
     "format_failure_text",
