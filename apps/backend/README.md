@@ -2319,7 +2319,7 @@ Human は [Decision 0008](../../docs/decisions/0008-project-membership-and-lifec
 
 ## DAG Agent Orchestrator
 
-[PAW-034](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/30)（Revision `0034`、`paw_backend/orchestrator/`）で実装しました。設計は [要件](../../REQUIREMENTS.md)の「Agent Orchestration / Parallel-first execution」に従い、要件が決めていない選択（Plan の形、Role の上限、Escalation の段、並列数、結果の大きさ、Sub-Agent の予算、Sweep の周期）は **[Decision 0021（Proposed、未承認）](../../docs/decisions/0021-dag-orchestrator-policy.md)** にまとめています。数値は暫定値で、人間の承認を待っています。
+[PAW-034](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/30)（Revision `0034`、`paw_backend/orchestrator/`）で実装しました。設計は [要件](../../REQUIREMENTS.md)の「Agent Orchestration / Parallel-first execution」に従い、要件が決めていない選択（Plan の形、Role の上限、Escalation の段、並列数、結果の大きさ、Sub-Agent の予算、Sweep の周期）は **[Decision 0021（Approved、2026-09-26）](../../docs/decisions/0021-dag-orchestrator-policy.md)** にまとめ、人間が承認しました。数値は暫定値として承認されたもので、`orchestrator/limits.py` と Test の期待値で変えられます（DB の CHECK に書いた項目を除く）。
 **HTTP の Endpoint はありません**（Session は PAW-022）。Orchestrator は Worker Process が `Orchestrator.run_once` / `serve` で駆動し、Agent の Runtime は Protocol で、実際の Codex / Claude / Local の Runtime は別の Issue です（Test は Fake の Runtime で動かします）。認可は行いません（Task の権利は呼び出し側が渡す `TaskAuthority`）。
 Migration `0034` の `down_revision` は `0026` です（この Issue を Merge する順序で、統合時に鎖をつなぎ直します）。
 

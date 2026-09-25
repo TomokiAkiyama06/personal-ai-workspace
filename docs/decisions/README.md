@@ -19,7 +19,7 @@
 | [0012](0012-research-provider-adapter-policy.md) | Research Provider Adapterの方針 | Approved |
 | [0013](0013-research-scratch-task-relation.md) | Research Scratch の Task との関係と Pin / 保存の方針 | Approved |
 | [0014](0014-task-working-set-persistence.md) | Task の Working Set（Multi-Repo）の永続化をPAW-032に含めず、新しいIssueで扱う | Approved |
-| [0021](0021-dag-orchestrator-policy.md) | DAG Agent Orchestrator の方針（Plan の形、Role、Escalation、並列数、結果の受け渡し、Sub-Agent の権限と予算） | Proposed（未承認） |
+| [0021](0021-dag-orchestrator-policy.md) | DAG Agent Orchestrator の方針（Plan の形、Role、Escalation、並列数、結果の受け渡し、Sub-Agent の権限と予算） | Approved |
 
 運用は [AGENTS.md](../../AGENTS.md) の「仕様変更」に従います。
 

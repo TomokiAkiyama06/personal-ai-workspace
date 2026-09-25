@@ -2,11 +2,12 @@
 
 Every size here bounds something a planner or an agent runtime controls. The
 numbers are **provisional product choices** that the requirements do not settle;
-``docs/decisions/0021-dag-orchestrator-policy.md`` (Proposed) lists them for the
-human. The database repeats the ones that shape a column (key format, JSON
-sizes) as CHECK constraints (migration ``0034``): ``tests/test_orchestrator_schema.py``
-fails when the two disagree, so a limit that is written into the database is
-changed with a new migration and a new Decision, not by editing the constant.
+``docs/decisions/0021-dag-orchestrator-policy.md`` (Approved, 2026-09-26) records
+them as approved provisional values. The database repeats the ones that shape a
+column (key format, JSON sizes) as CHECK constraints (migration ``0034``):
+``tests/test_orchestrator_schema.py`` fails when the two disagree, so a limit that
+is written into the database is changed with a new migration and a new Decision,
+not by editing the constant.
 """
 
 # -- plan (what a planner may propose) -------------------------------------------

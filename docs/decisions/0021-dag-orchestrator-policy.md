@@ -1,16 +1,16 @@
 # DAG Agent Orchestrator の方針（Plan の形、Role、Escalation、並列数、結果の受け渡し、Sub-Agent の権限と予算）
 
-- Status: Proposed
+- Status: Approved
 - Date: 2026-09-25
 - Scope: PAW-034（[#30](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/30)）の DAG Agent Orchestrator（`paw_backend/orchestrator/`、Migration `0034`）と、Sub-Agent を起動する以降の Issue（PAW-035 Worktree / Integration、PAW-036 GPU Scheduler、各 Agent Runtime）
 - Supersedes: なし
-- Approval: 未承認
+- Approval: 2026-09-26、Humanが作業Session内で、判断メモの各点に個別に回答し、残りは「推奨どおり」と回答して承認（末尾の「承認時の決定」）
 
 ## 背景
 
 [REQUIREMENTS.md](../../REQUIREMENTS.md) の「Agent Orchestration / Parallel-first execution」は、Task を依存関係付きの DAG で管理し、独立した Subtask を同時に実行し、Role（Planner / Worker / Researcher / Reviewer）を持ち、失敗した Node だけを Retry / Escalate し、Sub-Agent の間では構造化された結果を渡し、親 Task の Budget / Permission / ACL を Sub-Agent が超えないことを定める。
 一方で、**次のことは要件も Backlog（PAW-034 の受け入れ条件は 6 項目）も定めていない。** Planner が返す Plan の形、Role ごとに何を許すか、Node の上限、Escalation の段の作り方、並列数の上限、結果の大きさ、Node が失敗し続けたときと Budget が尽きたときの Task の行き先、DAG の寿命、Sub-Agent の予算の分け方、Project 削除の Sweep の周期。
-[AGENTS.md](../../AGENTS.md) の「仕様変更」は、重要判断を `docs/decisions/` に提案して人間 / Admin の承認を得ると定める。実装はこれらを最も単純な選択で置いた。この Decision はそれを一覧にし、Human が承認または変更できるようにする。
+[AGENTS.md](../../AGENTS.md) の「仕様変更」は、重要判断を `docs/decisions/` に提案して人間 / Admin の承認を得ると定める。実装はこれらを最も単純な選択で置いた。この Decision はそれを一覧にし、Human が承認した（2026-09-26。下の各選択は承認された方針で、承認時の決定は末尾にある）。
 
 すでに**承認された Decision が Orchestrator に課した条件**は、選択ではなく守るべき条件として、この Decision の対象外である（実装した場所は README の「DAG Agent Orchestrator」に書いた）。
 
@@ -22,7 +22,7 @@
 
 実装は [Backend README](../../apps/backend/README.md) の「DAG Agent Orchestrator」に書いている。
 
-## 提案
+## 決定
 
 ### 1. Plan の形と上限
 
@@ -160,11 +160,11 @@ Decision 0004 は、この 2 つを「子 Agent の Grant を親の部分集合�
 
 ## 承認後の扱い
 
-承認されたら、Status を Approved に改め、`Approval` に日付と承認の様子を記録する。数値は暫定値で、`orchestrator/limits.py` のデータと Test の期待値を変えれば変えられる（DB に書いた 3 項目を除く: Key の形、JSON の大きさの予備、Node と Ladder の数の CHECK。これらは新しい Migration と Decision が要る）。
+2026-09-26 に承認された。`Approval` に記録し、Status を Approved に改めた。数値は暫定値（暫定値として承認された）で、`orchestrator/limits.py` のデータと Test の期待値を変えれば変えられる（DB に書いた 3 項目を除く: Key の形、JSON の大きさの予備、Node と Ladder の数の CHECK。これらは新しい Migration と Decision が要る）。
 方針を変えるときは、この Decision を書き換えず、新しい Decision から `Supersedes` する。
 [REQUIREMENTS.md](../../REQUIREMENTS.md) の原文は書き換えない。
 
-## 決めてほしいこと
+## 判断が必要だった点（承認済み。各点の決定は末尾の「承認時の決定」）
 
 1. **Role の上限**（2 節）を承認するか。特に Reviewer / Researcher に `project.task.run`（Test の実行）を与えるか。推奨: 与えない（読み取り専用を保証しやすい）。Test の結果は Worker / Evaluator が `test_result` に載せる。
 2. **予算は親 Task の共有 Pool とし、Node ごとの予算は持たない**（7 節）でよいか。推奨: はい。
@@ -176,3 +176,18 @@ Decision 0004 は、この 2 つを「子 Agent の Grant を親の部分集合�
 8. **Cancel の扱い**（8 節: Graceful と Immediate を Node では区別せず即停止）でよいか。
 9. **Pause / `waiting` の後の再開は、呼び出し側（API 層）が Queue へ戻す**（8 節）ことを、PAW-022 以降の受け入れ条件に加えてよいか。
 10. **`succeeded` の DAG を Retry したときは、DAG を開き直さず `evaluating` へ戻す**（6 節）でよいか。推奨: はい（仕事をやり直すのは Restart）。代わりに、Retry が成功済みの Node も含めて DAG を開き直す案もあるが、何を再実行するかの規則と Budget の消費が要件にない。
+
+## 承認時の決定（2026-09-26）
+
+Humanが作業Session内で、上の 10 点について判断メモで回答した。個別に回答した点も、残りの「推奨どおり」の点も、本文（「決定」の各節）の内容をそのまま承認した。**設計の変更はない。**
+
+1. **Role の上限**: 本文 2 節の表のとおり承認した。Reviewer / Researcher（と Planner）には `project.task.run`（Test の実行）を与えない（読み取り専用を保証しやすい）。Test の結果は Worker / Evaluator が `test_result` に載せる。
+2. **予算**: 親 Task の共有 Pool とし、Node ごとの予算は持たない（7 節）。
+3. **必須の Node が解決できなかったとき**: Task を `failed` にする（6 節）。既存の Retry / Restart の経路を使う。`waiting`（理由 `user`）にはしない。
+4. **DAG が成功したとき**: `evaluating` までで、完了にするのは Evaluator（6 節）。Orchestrator は Task を完了にしない。
+5. **試行の上限に達した Node**: Escalation せず失敗にする（3 節）。Escalation は Loop のときだけで、上位の Agent の成功率が高いと分かったら新しい Decision で変える。
+6. **`agent.use` / `project.agent.use`**: 委任不可のまま（9 節）。
+7. **数値**: 暫定値として承認した（Node 32、依存 8、結果 32 KiB、試行 6、Back-off 1〜60 秒、Node の Timeout 30 分、並列 4、Sweep の周期 60 秒など。1、3、4、5、10 節）。変える場合は `orchestrator/limits.py` のデータと Test の期待値で足りる（DB に書いた 3 項目を除く。それらは新しい Migration と Decision が要る）。
+8. **Cancel**: Graceful と Immediate を Node では区別せず、即停止する（8 節）。
+9. **Pause / `waiting` の後の再開**: 呼び出し側（API 層）が Queue へ戻す（8 節）。これを PAW-022 以降の受け入れ条件に加える。
+10. **`succeeded` の DAG を Retry したとき**: DAG を開き直さず、`evaluating` へ戻す（6 節）。Node は再実行せず、Budget も使わない。仕事そのものをやり直すのは Restart（新しい試行、新しい DAG）。同じ Run のまま DAG だけが閉じていた場合（DAG を閉じた後、Task の Command の前に Worker が死んだ）も、DAG の結果のとおりに Task を進める。
