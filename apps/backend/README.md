@@ -2364,7 +2364,7 @@ Project の **Repository** は論理的な共有の記録で、User や Agent �
 | --- | --- |
 | `clone_from_github` | `owner/repo` または `https://<host>/<owner>/<repo>[.git]`（許可 Host だけ）を、実行 User の `<home>/workspaces/<project>/<repo>` へ `git clone` して登録する。`https` の綴り 2 つ（`.../r` と `.../r.git`）を Remote に登録する |
 | `register_existing` | Ubuntu 上の既存 Repository を、そのまま登録する（Clone しない）。その Directory が実行 User の Checkout になる。名前は Directory 名（指定も可）。既定の Branch と `HEAD` を取得する |
-| `create_local` / `create_github` | 新しい**空の** Repository を作る（`git init`。Template なし、File も Commit もなし）。`create_github` は `GitHubGateway` で GitHub にも作り、`origin` と Remote を登録する（既定の Gateway は `GitHubUnavailableError`） |
+| `create_local` / `create_github` | 新しい**空の** Repository を作る（`git init`。Template なし、File も Commit もなし）。`create_github` は `GitHubGateway` で GitHub にも作り、`origin` と Remote を登録する（既定の Gateway は `GitHubUnavailableError`）。**Gateway が返した Repository は、`origin` を書く前・Remote を保存する前に、Host・Owner・名前の 3 つすべてを `parse_github_source` と同じ規則（ドット区切り、`/`、制御文字、見た目の似た Unicode、長すぎる名前、`.git`、大文字の Host を拒否）で検証し、要求した名前と一致すること、導出する URL が Tool Broker の `normalise_remote` を通ることも確かめる。** 通らなければ `GitHubUnavailableError`（値は出さない。GitHub に Repository があるかもしれない旨を Log に 1 行） |
 
 - **Project Repository へ管理ファイルを自動注入しません。** Backend が書くのは、`git clone` / `git init` が作るものだけです（`AGENTS.md`、`MEMORY.md`、`.personal-ai/` を作らず、Commit せず、Working Tree に File を足しません）。`tests/test_repositories_service_register.py` は、登録の前後で Repository の全 File と `git status`・`HEAD`・Commit 数が同じことを確かめます。
 - **Checkout の分離。** Checkout は実行 User の Home の下に作られ（`<home>/workspaces/<slug>-<Project ID の先頭 8 桁>/<name>`）、他の User の Home には触れません。User ごとに 1 つ（`create_checkout`）で、他の Member は登録済みの Remote から自分で Clone します（Remote のない Repository は、作った User だけが Checkout を持つ。Decision 0017 の 8）。

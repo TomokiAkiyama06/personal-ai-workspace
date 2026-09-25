@@ -25,7 +25,10 @@ from paw_backend.repositories.errors import (
     RemoteProblem,
 )
 from paw_backend.repositories.limits import MAX_NAME_CHARS
-from paw_backend.repositories.validation import is_storable_remote
+from paw_backend.repositories.validation import (
+    is_storable_remote,
+    validate_remote_url,
+)
 from paw_backend.tools.scope import TargetError, normalise_remote
 
 _OWNER = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})")
@@ -109,6 +112,43 @@ def parse_github_source(
     ):
         raise bad()
     return GitHubRepo(host, owner, repo)
+
+
+def check_created_repository(
+    created: object, requested_name: str, allowed_hosts: Collection[str]
+) -> GitHubRepo:
+    """The repository a gateway returned, validated as strictly as a caller's input.
+
+    A gateway is foreign code and ``GitHubRepo`` is a plain value, so nothing about
+    it is trusted. All three fields must be text and must be exactly what
+    :func:`parse_github_source` accepts for ``https://<host>/<owner>/<repo>`` on an
+    allowed host (dot segments, slashes, control characters, look-alike Unicode,
+    an over-long name, a ``.git`` suffix, an upper-case host: refused); the result
+    must be the value itself (nothing is normalised silently); the repository must
+    be the one that was asked for (compared without case); and every URL derived from
+    it (the two remotes and the clone URL) must pass ``validate_remote_url``, the
+    normaliser the Tool Broker applies. ``InvalidRepositoryInputError`` (field
+    ``repository``) otherwise; the value is never echoed.
+    """
+
+    def bad() -> InvalidRepositoryInputError:
+        return InvalidRepositoryInputError("repository", InputProblem.INVALID_FORMAT)
+
+    if not isinstance(created, GitHubRepo):
+        raise bad()
+    # What is registered is ``checked`` (built by the parser from plain text), never
+    # ``created`` itself: a value that is not text, or a ``str`` subclass that lies
+    # about its content, cannot get past the comparison with ``created`` below.
+    checked = parse_github_source(
+        f"https://{created.host}/{created.owner}/{created.repo}",
+        allowed_hosts,
+        "repository",
+    )
+    if checked != created or checked.repo.lower() != requested_name.lower():
+        raise bad()
+    for url in (*checked.remote_urls, checked.clone_url):
+        validate_remote_url(url, "repository")
+    return checked
 
 
 class GitHubGateway(Protocol):

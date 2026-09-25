@@ -29,7 +29,9 @@ from paw_backend.db import Database
 
 from . import (
     test_repositories_accounts,
+    test_repositories_completion_state,
     test_repositories_concurrency,
+    test_repositories_gateway_result,
     test_repositories_min_uid,
     test_repositories_path_length,
     test_repositories_scope_roots,
@@ -158,6 +160,8 @@ for _module in (
     test_repositories_service_checkout,
     test_repositories_service_manage,
     test_repositories_concurrency,
+    test_repositories_completion_state,
+    test_repositories_gateway_result,
     test_repositories_unregister_race,
     test_repositories_min_uid,
     test_repositories_path_length,
@@ -234,6 +238,8 @@ class AppRolePrivilegesTest(PostgresRepositoryTestCase):
         )
         self.assertIn("MinUidMinimumUidOnTheServicePathTestAsAppRole", derived)
         self.assertIn("ScopeRootsReplacedRootTestAsAppRole", derived)
+        self.assertIn("CompletionStateCreateCheckoutCompletionTestAsAppRole", derived)
+        self.assertIn("GatewayResultGatewayResultTestAsAppRole", derived)
         self.assertIn("PathLengthGeneratedPathLengthTestAsAppRole", derived)
 
     async def test_the_service_really_runs_as_a_non_superuser_role(self):

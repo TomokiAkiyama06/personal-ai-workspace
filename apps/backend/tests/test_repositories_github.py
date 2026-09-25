@@ -16,7 +16,10 @@ from paw_backend.repositories import (
     UnavailableGitHubGateway,
     parse_github_source,
 )
-from paw_backend.repositories.github import remote_urls_from_origin
+from paw_backend.repositories.github import (
+    check_created_repository,
+    remote_urls_from_origin,
+)
 
 HOSTS = ("github.com",)
 
@@ -180,6 +183,94 @@ class RemoteUrlsFromOriginTest(unittest.TestCase):
         self.assertEqual(
             remote_urls_from_origin("https://git.example.org/a@b/c", HOSTS), ()
         )
+
+
+class CheckCreatedRepositoryTest(unittest.TestCase):
+    def check(self, host, owner, repo, name="shared", hosts=HOSTS):
+        return check_created_repository(GitHubRepo(host, owner, repo), name, hosts)
+
+    def test_a_well_formed_repository_is_returned_as_it_is(self):
+        result = self.check("github.com", "alice-gh", "shared")
+        self.assertEqual(result, GitHubRepo("github.com", "alice-gh", "shared"))
+        self.assertEqual(
+            self.check("github.com", "A1", "My_Repo.v2", "my_repo.V2").repo,
+            "My_Repo.v2",
+        )
+
+    def test_every_field_is_checked_with_the_rules_of_a_callers_source(self):
+        cases = [
+            ("github.com", "a/../b", "shared"),
+            ("github.com", "..", "shared"),
+            ("github.com", "a b", "shared"),
+            ("github.com", "a\nb", "shared"),
+            ("github.com", "-a", "shared"),
+            ("github.com", "x" * 40, "shared"),
+            ("github.com", "аcme", "shared"),
+            ("github.com", "alice", "shared/../x"),
+            ("github.com", "alice", "shared.git"),
+            ("github.com", "alice", "shared\x00"),
+            ("github.com", "alice", "shаred"),
+            ("GitHub.com", "alice", "shared"),
+            ("github.com:443", "alice", "shared"),
+            ("evil.example.org", "alice", "shared"),
+            ("", "alice", "shared"),
+            ("github.com", "", "shared"),
+            ("github.com", "alice", ""),
+        ]
+        for host, owner, repo in cases:
+            with self.subTest(host=host, owner=owner[:12], repo=repo[:12]):
+                with self.assertRaises(InvalidRepositoryInputError) as raised:
+                    self.check(host, owner, repo)
+                self.assertEqual(raised.exception.field, "repository")
+
+    def test_a_name_the_broker_could_not_read_back_is_refused_even_when_it_matches(
+        self,
+    ):
+        # ``...`` passes the source parser (only ``.`` and ``..`` are refused there)
+        # but is a URL segment that climbs out of its parent in ``normalise_remote``:
+        # the derived URLs are checked with the Broker's own normaliser.
+        for repo in ("...", "....", "...git"):
+            with self.subTest(repo=repo):
+                with self.assertRaises(InvalidRepositoryInputError):
+                    self.check("github.com", "alice", repo, name=repo)
+
+    def test_a_str_subclass_that_lies_about_its_content_registers_nothing_of_it(self):
+        class Sneaky(str):
+            def __format__(self, spec):
+                return "alice"  # what the URL is built from ...
+
+        for owner in (Sneaky("a/../b"), Sneaky("alice")):
+            with self.subTest(owner=str(owner)):
+                try:
+                    result = self.check("github.com", owner, "shared")
+                except InvalidRepositoryInputError:
+                    continue
+                # ... and when it passes, the result is clean text of that URL.
+                self.assertIs(type(result.owner), str)
+                self.assertEqual(result.owner, "alice")
+
+    def test_it_must_be_the_repository_that_was_asked_for(self):
+        with self.assertRaises(InvalidRepositoryInputError):
+            self.check("github.com", "alice", "other")
+        with self.assertRaises(InvalidRepositoryInputError):
+            self.check("github.com", "alice", "n" * 101, "n" * 100)
+
+    def test_values_that_are_not_text_or_not_a_repository_are_refused(self):
+        for value in (
+            None,
+            "https://github.com/alice/shared",
+            ("github.com", "alice", "shared"),
+            GitHubRepo(5, "alice", "shared"),
+            GitHubRepo("github.com", None, "shared"),
+            GitHubRepo("github.com", "alice", b"shared"),
+        ):
+            with self.subTest(value=repr(value)[:40]):
+                with self.assertRaises(InvalidRepositoryInputError):
+                    check_created_repository(value, "shared", HOSTS)
+
+    def test_no_allowed_host_means_nothing_is_accepted(self):
+        with self.assertRaises(InvalidRepositoryInputError):
+            self.check("github.com", "alice", "shared", hosts=())
 
 
 class GatewayTest(unittest.IsolatedAsyncioTestCase):

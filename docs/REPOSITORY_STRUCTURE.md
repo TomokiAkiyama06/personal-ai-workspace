@@ -281,7 +281,9 @@ personal-ai-workspace/
 │  │     ├─ test_queueing_queue.py
 │  │     ├─ test_queueing_schema.py
 │  │     ├─ test_repositories_accounts.py
+│  │     ├─ test_repositories_completion_state.py
 │  │     ├─ test_repositories_concurrency.py
+│  │     ├─ test_repositories_gateway_result.py
 │  │     ├─ test_repositories_git.py
 │  │     ├─ test_repositories_github.py
 │  │     ├─ test_repositories_grants.py

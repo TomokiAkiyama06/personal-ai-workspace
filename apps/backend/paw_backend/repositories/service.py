@@ -137,6 +137,7 @@ from paw_backend.repositories.errors import (
     CheckoutInProgressError,
     CheckoutNotFoundError,
     GitHubUnavailableError,
+    InvalidRepositoryInputError,
     NoCloneSourceError,
     PathProblem,
     PathRejectedError,
@@ -157,6 +158,7 @@ from paw_backend.repositories.github import (
     GitHubGateway,
     GitHubRepo,
     UnavailableGitHubGateway,
+    check_created_repository,
     parse_github_source,
     remote_urls_from_origin,
 )
@@ -461,6 +463,26 @@ class RepositoryService:
             raise RepositoryNotFoundError()
         return project, repository
 
+    async def _require_active_project(
+        self, session: AsyncSession, project_id: uuid.UUID
+    ) -> Project:
+        """Lock the project ``FOR SHARE`` and require it to be Active *now*.
+
+        The first statement of every transaction that completes a pending checkout
+        (``_finish``, the end of ``create_checkout``). A clone or a GitHub creation
+        runs for minutes between the reservation and the completion, and repository
+        changes are allowed only in an Active project, so the state is read again
+        here, under a lock that an Archive or a Delete start (``FOR UPDATE``) waits
+        for. Lock order as everywhere: the project first, then the repository, then
+        the checkout. ``ProjectUnavailableError`` for a missing or Deleted project,
+        ``ProjectNotActiveError`` otherwise; the caller's own work is then undone by
+        ``_abandon`` (only what it still owns).
+        """
+        project = await self._load_project(session, project_id, _Lock.SHARE)
+        if project.status is not ProjectStatus.ACTIVE:
+            raise ProjectNotActiveError(project.status)
+        return project
+
     async def _check_capacity(self, session: AsyncSession, project_id: uuid.UUID):
         if (
             await store.count_repositories(session, project_id)
@@ -692,12 +714,16 @@ class RepositoryService:
             # A gateway is foreign code: its message can hold anything.
             logger.warning("GitHub gateway failed (%s)", type(error).__name__)
             raise GitHubUnavailableError() from None
-        if (
-            not isinstance(created, GitHubRepo)
-            or created.host not in self._policy.clone_hosts
-        ):
-            raise GitHubUnavailableError()
-        return created
+        try:
+            return check_created_repository(created, name, self._policy.clone_hosts)
+        except InvalidRepositoryInputError:
+            # The repository may exist on GitHub, but what came back cannot be
+            # registered (nothing of it is logged: it can be anything).
+            logger.error(
+                "The GitHub gateway returned an invalid repository; a GitHub "
+                "repository may exist that was not registered"
+            )
+            raise GitHubUnavailableError() from None
 
     async def _create_managed(
         self,
@@ -814,7 +840,9 @@ class RepositoryService:
     ) -> tuple[Checkout, Repository]:
         """The second transaction: branch, remotes, then the checkout is ``ready``.
 
-        Something may have unregistered while git or GitHub was working:
+        The project must still be Active (``_require_active_project``: locked ``FOR
+        SHARE`` before anything else). Something may also have unregistered while
+        git or GitHub was working:
         ``CheckoutGoneError`` for a repository that is gone (nothing is inserted
         below a missing parent) and for a checkout that is gone (the branch and the
         remotes are still stored: the repository stays registered). The repository
@@ -823,6 +851,7 @@ class RepositoryService:
         now = self._now()
         try:
             async with self._transaction() as session:
+                await self._require_active_project(session, repository.project_id)
                 stored = await store.get_repository(
                     session, repository.project_id, repository.id, for_share=True
                 )
@@ -968,6 +997,7 @@ class RepositoryService:
             identity = await asyncio.to_thread(read_checkout_identity, path, account)
             now = self._now()
             async with self._transaction() as session:
+                await self._require_active_project(session, project.id)
                 checkout = await store.mark_ready(session, checkout_id, now, identity)
             if checkout is None:
                 raise CheckoutGoneError()

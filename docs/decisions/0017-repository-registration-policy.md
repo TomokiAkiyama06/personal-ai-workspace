@@ -74,7 +74,7 @@
 
 - Owner / Admin は Member でなければ、Repository を登録も参照もできない（Decision 0004 の 1 のとおり）。
 - **Viewer も自分の Checkout を作れる**（`project.read` を持つ。Checkout は読み取りの複製）。Repository の ACL override が `read` を許さなければ、その Repository は存在しないように扱う。
-- Repository の追加・削除・Remote・ACL・Checkout の作成は、Project が **Active** のときだけ。Archived の Project は読み取りだけ（参照は可、登録解除は可）。
+- Repository の追加・削除・Remote・ACL・Checkout の作成は、Project が **Active** のときだけ。Archived の Project は読み取りだけ（参照は可、登録解除は可）。長い Clone や GitHub での作成の間に Project が Archive・削除の開始になったときのため、`pending` の予約を `ready` にする**完了の Transaction でも、Project を `FOR SHARE` で Lock して状態を確かめ直す**（`clone_from_github`、`create_local`、`create_github`、`create_checkout` のすべて）。Active でなければ `ProjectNotActiveError` で終わり、この呼び出しが作った行・Directory・（他に Checkout のない）Repository だけを片づける。同時に登録解除があった場合は、何も消さない（7 の後始末の規則）。
 - 判定の Audit は、Authorizer が Decision として記録する（結果ではない）。登録の Audit は `project.repo.add` の Decision で、`resource_id` が Repository の ID（新規なら新しい ID）を指す。
 
 ### 7. 削除の意味
@@ -97,7 +97,7 @@
 ### 10. GitHub の Credential は PAW-028
 
 - Backend は GitHub の Token を持たず、読まず、渡さない。Clone は User 自身の環境（`gh auth`、PAW-028）に任せる。今の実行環境は Global の git 設定を読まないため、Private Repository の Clone は PAW-028 が `extra_config`（Credential Helper）を足すまで通らない。
-- 「GitHub にも新規作成」は `GitHubGateway`（継ぎ目）を呼ぶ。既定の実装は拒否する。PAW-028 が、User 自身の GitHub の権限で作成する実装を渡す。作成後に登録が失敗しても、GitHub の Repository は削除しない（削除の権限を Backend に持たせない）。ログに 1 行残す。
+- 「GitHub にも新規作成」は `GitHubGateway`（継ぎ目）を呼ぶ。既定の実装は拒否する。PAW-028 が、User 自身の GitHub の権限で作成する実装を渡す。作成後に登録が失敗しても、GitHub の Repository は削除しない（削除の権限を Backend に持たせない）。ログに 1 行残す。Gateway は外部のコードで、`GitHubRepo` は任意の文字列を持てるため、**返された Repository は、`origin` を書く前・Remote を保存する前に、Host・Owner・名前の 3 つすべてを Caller の入力（`parse_github_source`）と同じ規則で検証し、要求した名前と一致すること、導出する URL が Tool Broker の `normalise_remote` を通ることを確かめる**（`a/../b` のような値は DB の URL の形には合うが、Broker が読めず、登録した Repository が使えなくなるため）。
 
 ### 11. 入れ子の Repository と、Scope を作るときの Root の再確認
 
