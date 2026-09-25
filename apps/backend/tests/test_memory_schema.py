@@ -61,6 +61,10 @@ class LayerSeparationTest(MemoryDatabaseTestCase):
             "memory_relations",
             "memory_sources",
             "memory_embeddings",
+            # The Immediate Journal (PAW-041): part of the Memory layer.
+            "memory_journal_entries",
+            "memory_consolidation_queue",
+            "memory_consolidation_keys",
         }
         edges = {
             (child, parent): action
@@ -88,6 +92,12 @@ class LayerSeparationTest(MemoryDatabaseTestCase):
                 # provenance, which must survive the conversation's deletion.
                 ("memory_sources", "conversations"): "n",
                 ("memory_sources", "messages"): "n",
+                # The Immediate Journal (PAW-041): an entry points at its raw message
+                # and goes with it (no raw text outlives its conversation); a job goes
+                # with its entry; a consolidation key goes with its memory.
+                ("memory_journal_entries", "messages"): "c",
+                ("memory_consolidation_queue", "memory_journal_entries"): "c",
+                ("memory_consolidation_keys", "memories"): "c",
             },
         )
         # Two edges appear once per column of memory_relations: they collapse in
