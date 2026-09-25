@@ -32,7 +32,9 @@ record denials only, the others every decision, fail-closed).
   ``approve_candidate`` ``shared_memory.candidate.approve``, ``reject_candidate``
   ``shared_memory.candidate.reject``. Owner, Admin (human).
 * ``propose_candidate``: capability ``memory.use``. A user for themselves; an
-  agent for its delegating user.
+  agent for its delegating user. Never the ``system`` role: it is refused
+  (:class:`SharedMemoryPermissionError`, reason ``system_role_may_not_propose``)
+  after the Authorizer has recorded its decision, whatever that decision was.
 
 **No automatic promotion.** Managing Shared Memory (every method of the
 ``shared_memory.manage`` and operation capability items above) is a decision of
@@ -928,6 +930,12 @@ class SharedMemoryService:
 
         A user proposes for themselves; an agent for its delegating user
         (``memory.use``). Nothing is promoted.
+
+        The backend's own identity (the ``system`` role, a background worker)
+        never proposes (Decision 0009, section 2): the Authorizer is asked first
+        (so its decision is audited), and the ``system`` role is then refused with
+        :class:`SharedMemoryPermissionError` whatever the decision was, so a policy
+        that grants it ``memory.use`` does not let it propose.
         """
         self._check_actor(actor)
         _check_type("proposal", proposal, CandidateProposal)
@@ -938,6 +946,8 @@ class SharedMemoryService:
             Capability.MEMORY_USE,
             Resource.owned_by(user_id, RESOURCE_CANDIDATE),
         )
+        if not isinstance(actor, AgentActor) and actor.system_role is SystemRole.SYSTEM:
+            raise SharedMemoryPermissionError("system_role_may_not_propose")
         now = self._now()
         async with self._transaction(proposer_lock_key(user_id)) as session:
             pending = (
