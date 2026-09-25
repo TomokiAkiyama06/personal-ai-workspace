@@ -52,6 +52,10 @@
 8. **削除待ち・削除済みの Owner の置き換え。** その行が Owner の Unique Index を占め続けるため、`owner-setup` も `owner-recover` も進めなくなる。
    実際の状態を報告して拒否し、`owner-setup --replace-non-live-owner` を明示した場合だけ、古いアカウントを `user` に降格して新しい Owner を作る（1 つの Transaction、Audit 付き）。生きている Owner は置き換えない。
 9. **`downgrade()` は `users` と `setup_tokens` を Table ごと破棄する**（Owner を含む全 User と全 Token が失われる）。開発・Test 用で、本番では実行しない。README に警告する。
+10. **Token の期限は、消費の瞬間に判定する。** `redeem` は Owner の行を Lock してから Token を消費するため、別の Transaction が Lock している間は待たされる。待つ前に測った時刻で期限を判定すると、期限を過ぎた Token が使えてしまう（Review の指摘）。
+    そのため、開始時の判定は「期限切れの Token が Lock を待たない」ための早道にとどめ、正本は、Owner の Lock を得た後の、消費する `UPDATE` の条件（`expires_at > greatest(<Lock の後に読み直した Process の Clock>, clock_timestamp())`）とする。`clock_timestamp()` はその文が行を判定する時点の DB の時計で、Transaction の開始時刻（`now()`）ではない。
+    Process の Clock を残すのは、Test が時計を動かせるようにするためで、どちらか一方でも期限切れと言えば期限切れ（Clock のずれは Token の寿命を短くする側にしか働かない）。単一の Host の想定なので、Clock のずれを補正する仕組みは置かない。
+    消費できなかった理由は、Token が未使用・未無効のままなら `token_expired`、使用済み・無効化済みなら `token_unavailable` として Audit に残す（外へ返す失敗は他と同じ）。
 
 ## リスク
 

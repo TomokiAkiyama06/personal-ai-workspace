@@ -64,9 +64,11 @@ class BrokerReason(StrEnum):
     BUDGET_EXCEEDED = "budget_exceeded"
     BUDGET_UNKNOWN = "budget_unknown"
     BUDGET_UNAVAILABLE = "budget_unavailable"
-    # --- DENY: the task of an approval cannot act (ended / unknown / unreadable) ---
+    # --- DENY: the task of an approval cannot act (ended / unknown / unreadable),
+    # or the run that asks is not its current one (a Retry / Restart came) ---
     TASK_NOT_ACTIVE = "task_not_active"
     TASK_UNKNOWN = "task_unknown"
+    TASK_SUPERSEDED = "task_superseded"
     TASK_STATE_UNAVAILABLE = "task_state_unavailable"
     # --- DENY: approvals ---
     APPROVAL_NOT_FOUND = "approval_not_found"
@@ -75,6 +77,9 @@ class BrokerReason(StrEnum):
     APPROVAL_ALREADY_USED = "approval_already_used"
     APPROVAL_REJECTED = "approval_rejected"
     APPROVAL_REVOKED = "approval_revoked"
+    # Requested in another run of the task than the one that uses it: a Retry /
+    # Restart came in between, and the run asks again.
+    APPROVAL_SUPERSEDED = "approval_superseded"
     APPROVAL_UNAVAILABLE = "approval_unavailable"
     # No approval is opened: too many are waiting for this task and user, the
     # same call was rejected a moment ago, or nothing readable can be shown.

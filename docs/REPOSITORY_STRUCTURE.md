@@ -243,6 +243,7 @@ personal-ai-workspace/
 │     ├─ 0006-tool-broker-policy.md
 │     ├─ 0007-task-queue-budget-and-loop-policy.md
 │     ├─ 0013-research-scratch-task-relation.md
+│     ├─ 0014-task-working-set-persistence.md
 │     └─ README.md
 └─ evaluator/
    └─ README.md

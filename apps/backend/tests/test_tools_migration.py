@@ -245,10 +245,25 @@ class DatabaseMigrationTest(unittest.IsolatedAsyncioTestCase):
             "pk_tool_approvals",
             "fk_tool_approval_events_approval_id_tool_approvals",
             "ck_tool_approvals_approver_is_delegating_user",
+            "ck_tool_approvals_task_attempt_positive",
+            "ck_tool_approvals_task_retry_count_not_negative",
             "uq_tool_approvals_open_call",
             "ix_tool_approval_events_approval_id",
         ):
             self.assertIn(name, expected)
+
+    async def test_the_run_of_the_task_is_a_required_integer_column(self):
+        # what an approval was requested in; the consumption compares it with
+        # the locked ``tasks`` row (Decision 0006, section 9)
+        rows = await self.scalars(
+            "SELECT column_name || ':' || data_type || ':' || is_nullable "
+            "FROM information_schema.columns WHERE table_name = 'tool_approvals' "
+            "AND column_name IN ('task_attempt', 'task_retry_count') "
+            "ORDER BY column_name"
+        )
+        self.assertEqual(
+            rows, ["task_attempt:integer:NO", "task_retry_count:integer:NO"]
+        )
 
     async def test_the_open_call_index_is_partial_and_unique(self):
         (definition,) = await self.scalars(

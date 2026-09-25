@@ -26,6 +26,7 @@ from paw_backend.tools import (
     ScopedRepository,
     TaskActivity,
     TaskContext,
+    TaskRun,
     TaskScope,
     ToolBroker,
     ToolCall,
@@ -47,6 +48,8 @@ REPO_API = "https://api.github.com/repos/org/repo"
 HANDLE = "cred_" + "a1" * 16
 OTHER_HANDLE = "cred_" + "b2" * 16
 TASK = uid(501)
+# The run of a task that was just created (attempt 1, never retried).
+RUN = TaskRun(1, 0)
 NOW = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
 
 C = ToolCapability
@@ -223,6 +226,8 @@ def make_context(**overrides) -> TaskContext:
         "grant": make_grant(),
         "scope": make_scope(),
         "primary_project_id": P1,
+        # a task that was just created: attempt 1, never retried
+        "run": RUN,
     }
     arguments.update(overrides)
     return TaskContext(**arguments)
@@ -276,9 +281,11 @@ class FakeTaskActivity:
         self.answer = answer
         self.error = error
         self.checks: list[uuid.UUID] = []
+        self.runs: list[TaskRun] = []  # the run each question was about
 
-    async def check(self, task_id):
+    async def check(self, task_id, run):
         self.checks.append(task_id)
+        self.runs.append(run)
         if self.error is not None:
             raise self.error
         return self.answer
@@ -386,6 +393,7 @@ __all__ = [
     "P2",
     "REPO",
     "ROOT",
+    "RUN",
     "TASK",
     "U1",
     "U2",

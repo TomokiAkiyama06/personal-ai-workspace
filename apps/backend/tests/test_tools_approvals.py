@@ -29,8 +29,10 @@ from paw_backend.tools import (
     FailClosedStepUp,
     FailClosedTaskActivity,
     InMemoryApprovalStore,
+    OpenOutcome,
     SummaryItem,
     TaskActivity,
+    TaskRun,
     TaskScope,
     ToolCapability,
     ToolRegistry,
@@ -46,6 +48,7 @@ from .tools_support import (
     P1,
     REPO,
     ROOT,
+    RUN,
     TASK,
     U1,
     U2,
@@ -110,10 +113,43 @@ class NewApprovalTest(unittest.TestCase):
             with self.subTest(overrides=str(overrides)[:40]):
                 with self.assertRaises(ValueError):
                     new_approval(**overrides)
-        for overrides in ({"task_id": str(TASK)}, {"approval_id": 5}):
+        for overrides in (
+            {"task_id": str(TASK)},
+            {"approval_id": 5},
+            {"task_run": (1, 0)},  # a TaskRun, not a tuple
+            {"task_run": None},
+        ):
             with self.subTest(overrides=str(overrides)[:40]):
                 with self.assertRaises(TypeError):
                     new_approval(**overrides)
+
+
+class TaskRunTypeTest(unittest.TestCase):
+    def test_a_run_is_two_counters_of_the_task(self):
+        self.assertEqual(TaskRun(1, 0), TaskRun(1, 0))
+        self.assertNotEqual(TaskRun(1, 0), TaskRun(1, 1))
+        self.assertNotEqual(TaskRun(1, 0), TaskRun(2, 0))
+        self.assertEqual((TaskRun(2, 5).attempt, TaskRun(2, 5).retry_count), (2, 5))
+        top = 2**31 - 1  # the INTEGER columns
+        self.assertEqual(TaskRun(top, top).attempt, top)
+
+    def test_a_counter_that_is_not_one_is_refused(self):
+        for attempt, retry_count in (
+            (0, 0),  # attempts start at 1
+            (-1, 0),
+            (1, -1),
+            (2**31, 0),  # does not fit the column
+            (1, 2**31),
+            (True, 0),  # a bool is not an int
+            (1, False),
+            (1.0, 0),
+            ("1", 0),
+            (None, 0),
+            (1, None),
+        ):
+            with self.subTest(attempt=attempt, retry_count=retry_count):
+                with self.assertRaises(ValueError):
+                    TaskRun(attempt, retry_count)
 
 
 class ApprovalFlowTest(unittest.IsolatedAsyncioTestCase):
@@ -1561,6 +1597,7 @@ class TaskEndTest(unittest.IsolatedAsyncioTestCase):
         # test_tools_postgres.ConsumeRacesWithTaskEndTest.)
         for answer, reason in (
             (TaskActivity.ENDED, R.TASK_NOT_ACTIVE),
+            (TaskActivity.SUPERSEDED, R.TASK_SUPERSEDED),
             (TaskActivity.UNKNOWN, R.TASK_UNKNOWN),
         ):
             with self.subTest(answer=answer.value):
@@ -1601,6 +1638,7 @@ class TaskEndTest(unittest.IsolatedAsyncioTestCase):
         # test_tools_postgres.OpenRacesWithTaskEndTest.)
         for answer, reason in (
             (TaskActivity.ENDED, R.TASK_NOT_ACTIVE),
+            (TaskActivity.SUPERSEDED, R.TASK_SUPERSEDED),
             (TaskActivity.UNKNOWN, R.TASK_UNKNOWN),
         ):
             with self.subTest(answer=answer.value):
@@ -1681,6 +1719,10 @@ class TaskEndTest(unittest.IsolatedAsyncioTestCase):
         approved = await self.approved()
         cases = {
             "unknown task": (FakeTaskActivity(TaskActivity.UNKNOWN), R.TASK_UNKNOWN),
+            "another run": (
+                FakeTaskActivity(TaskActivity.SUPERSEDED),
+                R.TASK_SUPERSEDED,
+            ),
             "not an answer": (FakeTaskActivity("active"), R.TASK_STATE_UNAVAILABLE),
             "not even a string": (FakeTaskActivity(True), R.TASK_STATE_UNAVAILABLE),
             "no provider": (FailClosedTaskActivity(), R.TASK_UNKNOWN),
@@ -1713,7 +1755,7 @@ class TaskEndTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_provider_that_never_answers_is_a_denial(self):
         class Hangs:
-            async def check(self, task_id):
+            async def check(self, task_id, run):
                 await asyncio.Event().wait()
 
         h = Harness(approvals=self.store, task_activity=Hangs(), timeout_seconds=0.05)
@@ -1759,10 +1801,240 @@ class TaskEndTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((used.verdict, used.reason), (Verdict.DENY, R.TASK_NOT_ACTIVE))
 
     async def test_a_broker_needs_a_working_provider_interface(self):
-        for provider in (object(), FakeTaskActivity, lambda task_id: None):
+        class OldStyle:  # asks about the task, not about the run: refused
+            async def check(self, task_id):
+                return TaskActivity.ACTIVE
+
+        for provider in (
+            object(),
+            FakeTaskActivity,
+            lambda task_id, run: None,  # not a coroutine function
+            OldStyle(),
+        ):
             with self.subTest(provider=repr(provider)[:30]):
                 with self.assertRaises(TypeError):
                     Harness(task_activity=provider)
+
+
+class TaskOfRuns:
+    """A task that is alive in ONE current run (what ``tasks`` says), and the
+    provider that answers about any run: only the current one can act."""
+
+    def __init__(self, current=RUN) -> None:
+        self.current = current
+        self.ended = False
+        self.checks: list[tuple[uuid.UUID, TaskRun]] = []
+
+    async def check(self, task_id, run):
+        self.checks.append((task_id, run))
+        if task_id != TASK:
+            return TaskActivity.UNKNOWN
+        if self.ended:
+            return TaskActivity.ENDED
+        return TaskActivity.ACTIVE if run == self.current else TaskActivity.SUPERSEDED
+
+    def start_again(self, run) -> None:
+        """A Retry / Restart: the task is alive again, in a new run."""
+        self.current, self.ended = run, False
+
+
+class TaskRunTest(unittest.IsolatedAsyncioTestCase):
+    """An approval belongs to the run of the task it was requested in.
+
+    Finding of the review of PR #74: a Restart commits, and only after that does
+    the listener revoke the approvals of the abandoned attempt. In that window a
+    worker of the new attempt passed the "task is active" check and used the old
+    approval. The approval now carries the run it was requested in, and a use
+    (and a request) is refused unless the run is the task's current one. These
+    tests use the in-memory store; ``test_tools_postgres.RestartWindowTest`` runs
+    the same steps on the real tables, with the real ``TaskService``.
+    """
+
+    RUN2 = TaskRun(2, 0)  # after a Restart
+    RETRIED = TaskRun(1, 1)  # after a Retry
+
+    async def asyncSetUp(self):
+        self.task = TaskOfRuns()
+        self.store = InMemoryApprovalStore(task_activity=self.task)
+        self.h = Harness(approvals=self.store, task_activity=self.task)
+        self.user = principal(SystemRole.USER, U1)
+
+    def call(self, path="build", run=RUN):
+        return make_call(
+            "repo.delete_tree",
+            {"path": f"{ROOT}/{path}"},
+            context=make_context(run=run),
+        )
+
+    async def ask(self, path="build", run=RUN, h=None):
+        return await (h or self.h).broker.request(self.call(path, run))
+
+    async def approved(self, path="build", run=RUN, h=None):
+        h = h or self.h
+        decision = await self.ask(path, run, h)
+        self.assertEqual(decision.verdict, Verdict.NEEDS_APPROVAL)
+        result = await h.service.approve(decision.approval_id, self.user)
+        self.assertEqual(result.outcome, ApprovalOutcome.APPROVED)
+        return decision
+
+    async def use(self, decision, path="build", run=RUN, h=None):
+        return await (h or self.h).broker.request(
+            self.call(path, run), approval_id=decision.approval_id
+        )
+
+    async def status(self, decision):
+        return (await self.store.get(decision.approval_id)).status
+
+    async def test_the_broker_asks_about_the_run_of_the_context(self):
+        run = TaskRun(3, 2)
+        self.task.start_again(run)
+        approved = await self.approved(run=run)
+        used = await self.use(approved, run=run)
+        self.assertEqual(
+            (used.verdict, used.reason), (Verdict.ALLOW, R.APPROVAL_CONSUMED)
+        )
+        # its own check and the store's, at the request and at the use
+        self.assertEqual(self.task.checks, [(TASK, run)] * 4)
+
+    async def test_a_request_is_stamped_with_the_run_of_its_context(self):
+        for run in (RUN, self.RETRIED, self.RUN2):
+            with self.subTest(run=run):
+                self.task.start_again(run)
+                asked = await self.ask(f"p{run.attempt}{run.retry_count}", run)
+                self.assertEqual(
+                    (await self.store.get(asked.approval_id)).task_run, run
+                )
+
+    async def test_a_restarted_task_cannot_use_an_approval_of_the_earlier_run(self):
+        for new_run in (self.RUN2, self.RETRIED):
+            with self.subTest(new_run=new_run):
+                path = f"run{new_run.attempt}-{new_run.retry_count}"
+                self.task.start_again(RUN)
+                approved = await self.approved(path)
+                # the task ended and was started again, and the revocation of
+                # the listener has not run: the store still says "approved"
+                self.task.start_again(new_run)
+                self.assertEqual(await self.status(approved), ApprovalStatus.APPROVED)
+                used = await self.use(approved, path, new_run)
+                self.assertEqual(
+                    (used.verdict, used.reason, used.invocation),
+                    (Verdict.DENY, R.APPROVAL_SUPERSEDED, None),
+                )
+                self.assertEqual(await self.status(approved), ApprovalStatus.APPROVED)
+                # the worker of the run that was replaced is refused as well
+                stale = await self.use(approved, path, RUN)
+                self.assertEqual(
+                    (stale.verdict, stale.reason), (Verdict.DENY, R.TASK_SUPERSEDED)
+                )
+        self.assertEqual(self.h.executor.invocations, [])
+
+    async def test_the_new_run_asks_again_and_the_earlier_requests_are_revoked(self):
+        pending = await self.ask("pending")
+        approved = await self.approved("approved")
+        # an approval of another task, which the restart of this one leaves alone
+        other_task = uuid.UUID(int=999)
+        elsewhere = new_approval(task_id=other_task)
+        await self.store.open_request(elsewhere, now=NOW, limits=LIMITS)
+        self.task.start_again(self.RUN2)
+        again = await self.ask("approved", self.RUN2)  # the very call that was approved
+        self.assertEqual(
+            (again.verdict, again.reason), (Verdict.NEEDS_APPROVAL, R.APPROVAL_REQUIRED)
+        )
+        self.assertNotIn(again.approval_id, (pending.approval_id, approved.approval_id))
+        self.assertEqual(await self.status(pending), ApprovalStatus.REVOKED)
+        self.assertEqual(await self.status(approved), ApprovalStatus.REVOKED)
+        record = await self.store.get(again.approval_id)
+        self.assertEqual(
+            (record.status, record.task_run), (ApprovalStatus.PENDING, self.RUN2)
+        )
+        self.assertEqual(
+            (await self.store.get(elsewhere.approval_id)).status, ApprovalStatus.PENDING
+        )
+        # as the system, with history (the revocation of a task that ended)
+        history = await self.store.history(approved.approval_id)
+        self.assertEqual(
+            [(h.kind, h.actor_user_id) for h in history],
+            [
+                (ApprovalEventKind.REQUESTED, None),
+                (ApprovalEventKind.APPROVED, U1),
+                (ApprovalEventKind.REVOKED, None),
+            ],
+        )
+        # the approvals of the current run are not touched by later requests of it
+        later = await self.ask("something else", self.RUN2)
+        self.assertEqual(later.verdict, Verdict.NEEDS_APPROVAL)
+        self.assertEqual(await self.status(again), ApprovalStatus.PENDING)
+
+    async def test_the_earlier_requests_do_not_count_against_the_cap_of_the_new_run(
+        self,
+    ):
+        h = Harness(
+            approvals=self.store, task_activity=self.task, max_pending_approvals=1
+        )
+        first = await self.ask("a", RUN, h)
+        self.assertEqual(first.verdict, Verdict.NEEDS_APPROVAL)
+        full = await self.ask("b", RUN, h)
+        self.assertEqual(full.reason, R.APPROVAL_LIMIT_REACHED)  # the cap works
+        self.task.start_again(self.RUN2)
+        second = await self.ask("b", self.RUN2, h)
+        self.assertEqual(
+            (second.verdict, second.reason),
+            (Verdict.NEEDS_APPROVAL, R.APPROVAL_REQUIRED),
+        )
+
+    async def test_a_worker_of_an_earlier_run_opens_nothing_and_revokes_nothing(self):
+        approved = await self.approved("a", RUN)
+        self.task.start_again(self.RUN2)
+        before = dict(self.store._records)
+        stale = await self.ask("b", RUN)
+        self.assertEqual(
+            (stale.verdict, stale.reason, stale.approval_id),
+            (Verdict.DENY, R.TASK_SUPERSEDED, None),
+        )
+        self.assertEqual(self.store._records, before)
+        self.assertEqual(await self.status(approved), ApprovalStatus.APPROVED)
+
+    async def test_a_run_that_is_replaced_after_the_broker_checked_is_still_refused(
+        self,
+    ):
+        # The broker's own provider says ACTIVE; the task is started again
+        # before the store looks (the window of the finding, in the double).
+        early = FakeTaskActivity()
+        h = Harness(approvals=self.store, task_activity=early)
+        approved = await self.approved("a", RUN, h)
+        self.task.start_again(self.RUN2)
+        used = await self.use(approved, "a", RUN, h)
+        self.assertEqual(
+            (used.verdict, used.reason, used.invocation),
+            (Verdict.DENY, R.TASK_SUPERSEDED, None),
+        )
+        asked = await self.ask("b", RUN, h)
+        self.assertEqual(
+            (asked.verdict, asked.reason, asked.approval_id),
+            (Verdict.DENY, R.TASK_SUPERSEDED, None),
+        )
+        self.assertEqual(await self.status(approved), ApprovalStatus.APPROVED)
+        self.assertEqual(len(self.store._records), 1)
+        # ... and a worker of the new run that the early check lets through
+        # cannot use it either (this is the finding itself)
+        fresh = await self.use(approved, "a", self.RUN2, h)
+        self.assertEqual(
+            (fresh.verdict, fresh.reason), (Verdict.DENY, R.APPROVAL_SUPERSEDED)
+        )
+
+    async def test_the_store_checks_the_run_only_when_asked_to(self):
+        new = new_approval(task_run=TaskRun(7, 7))  # not the task's run
+        opened = await self.store.open_request(new, now=NOW, limits=LIMITS)
+        self.assertEqual(opened.outcome, OpenOutcome.CREATED)
+        self.assertEqual(self.task.checks, [])
+        refused = await self.store.open_request(
+            new_approval(task_id=TASK, task_run=TaskRun(7, 7)),
+            now=NOW,
+            limits=LIMITS,
+            require_active_task=True,
+        )
+        self.assertEqual(refused.outcome, OpenOutcome.TASK_SUPERSEDED)
+        self.assertIsNone(refused.record)
 
 
 class PausingStore(InMemoryApprovalStore):

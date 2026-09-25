@@ -21,6 +21,7 @@ from paw_backend.tasks.queueing import (
     BudgetTracker,
     BudgetUsage,
     InvalidQueueingArgumentError,
+    StaleRuntimeSessionError,
 )
 from paw_backend.tasks.queueing.validation import MAX_CONSUMED
 
@@ -59,8 +60,8 @@ class BudgetTestCase(PostgresQueueingTestCase):
 
     async def snapshot(self) -> list[dict]:
         return await self.rows(
-            "SELECT task_id, kind, preset, consumed, limit_value, running_since "
-            "FROM budget_usages ORDER BY task_id, kind"
+            "SELECT task_id, kind, preset, consumed, limit_value, running_since, "
+            "runtime_generation FROM budget_usages ORDER BY task_id, kind"
         )
 
 
@@ -73,7 +74,7 @@ class ConfigurationTest(BudgetTestCase):
             lambda: self.budget.check(task_id),
             lambda: self.budget.record(task_id, K.STEPS, 1),
             lambda: self.budget.start_runtime(task_id),
-            lambda: self.budget.stop_runtime(task_id),
+            lambda: self.budget.stop_runtime(task_id, 1),
         ]
         for call in calls:
             with self.assertRaises(BudgetNotConfiguredError) as caught:
@@ -110,8 +111,9 @@ class ConfigurationTest(BudgetTestCase):
                     row["consumed"],
                     row["limit_value"],
                     row["running_since"],
+                    row["runtime_generation"],
                 ),
-                ("standard", 0, limit(BudgetKind(row["kind"])), None),
+                ("standard", 0, limit(BudgetKind(row["kind"])), None, 0),
             )
 
     async def test_the_unlimited_preset_stores_no_limit(self):
@@ -125,7 +127,7 @@ class ConfigurationTest(BudgetTestCase):
         task_id = await self.configured_task(STANDARD)
         await self.budget.record(task_id, K.TOKENS, 500)
         await self.budget.record(task_id, K.STEPS, 7)
-        await self.budget.start_runtime(task_id)
+        generation = await self.budget.start_runtime(task_id)
         usage = await self.budget.set_preset(task_id, LONG)
         by_kind = {u.kind: u for u in usage}
         self.assertEqual(
@@ -135,7 +137,10 @@ class ConfigurationTest(BudgetTestCase):
             by_kind[K.STEPS], BudgetUsage(K.STEPS, 7, limit(K.STEPS, LONG))
         )
         row = await self.budget_row(task_id, "runtime_seconds")
-        self.assertEqual((row["preset"], row["running_since"]), ("long", at(0)))
+        self.assertEqual(
+            (row["preset"], row["running_since"], row["runtime_generation"]),
+            ("long", at(0), generation),
+        )
         self.assertEqual(await self.scalar("SELECT count(*) FROM budget_usages"), 6)
 
     async def test_every_preset_can_be_switched_to_every_other(self):
@@ -405,7 +410,7 @@ class CheckTest(BudgetTestCase):
             "usage": lambda: self.budget.usage("x"),
             "check": lambda: self.budget.check("x"),
             "start_runtime": lambda: self.budget.start_runtime("x"),
-            "stop_runtime": lambda: self.budget.stop_runtime("x"),
+            "stop_runtime": lambda: self.budget.stop_runtime("x", 1),
         }
         for name, call in calls.items():
             with self.subTest(method=name):
@@ -491,9 +496,9 @@ class RuntimeTest(BudgetTestCase):
 
     async def test_stopping_adds_the_whole_elapsed_seconds(self):
         task_id = await self.configured_task()
-        await self.budget.start_runtime(task_id)
+        generation = await self.budget.start_runtime(task_id)
         self.clock.set(130.9)
-        usage = await self.budget.stop_runtime(task_id)
+        usage = await self.budget.stop_runtime(task_id, generation)
         self.assertEqual(
             usage, BudgetUsage(K.RUNTIME_SECONDS, 130, limit(K.RUNTIME_SECONDS))
         )
@@ -502,11 +507,11 @@ class RuntimeTest(BudgetTestCase):
 
     async def test_stopping_twice_adds_the_time_only_once(self):
         task_id = await self.configured_task()
-        await self.budget.start_runtime(task_id)
+        generation = await self.budget.start_runtime(task_id)
         self.clock.set(60)
-        await self.budget.stop_runtime(task_id)
+        await self.budget.stop_runtime(task_id, generation)
         self.clock.set(9_999)
-        again = await self.budget.stop_runtime(task_id)
+        again = await self.budget.stop_runtime(task_id, generation)
         self.assertEqual(again.consumed, 60)
         self.assertEqual(
             (await self.budget_row(task_id, "runtime_seconds"))["consumed"], 60
@@ -514,42 +519,51 @@ class RuntimeTest(BudgetTestCase):
 
     async def test_runs_accumulate(self):
         task_id = await self.configured_task()
-        await self.budget.start_runtime(task_id)
+        first = await self.budget.start_runtime(task_id)
         self.clock.set(130.9)
-        await self.budget.stop_runtime(task_id)
+        await self.budget.stop_runtime(task_id, first)
         self.clock.set(200)
-        await self.budget.start_runtime(task_id)
+        second = await self.budget.start_runtime(task_id)
         self.clock.set(210)
-        usage = await self.budget.stop_runtime(task_id)
+        usage = await self.budget.stop_runtime(task_id, second)
         self.assertEqual(usage.consumed, 140)
 
     async def test_time_between_runs_is_not_counted(self):
         task_id = await self.configured_task()
-        await self.budget.start_runtime(task_id)
+        generation = await self.budget.start_runtime(task_id)
         self.clock.set(10)
-        await self.budget.stop_runtime(task_id)
+        await self.budget.stop_runtime(task_id, generation)
         self.clock.set(100_000)
         usage = {u.kind: u for u in await self.budget.usage(task_id)}
         self.assertEqual(usage[K.RUNTIME_SECONDS].consumed, 10)
 
     async def test_starting_twice_keeps_the_first_start(self):
         task_id = await self.configured_task()
-        await self.budget.start_runtime(task_id)
+        first = await self.budget.start_runtime(task_id)
         self.clock.set(50)
-        await self.budget.start_runtime(task_id)
+        second = await self.budget.start_runtime(task_id)
+        # The run in progress is not restarted: its time is neither lost nor
+        # counted twice. The second start takes the session over (10).
         self.assertEqual(
             (await self.budget_row(task_id, "runtime_seconds"))["running_since"], at(0)
         )
+        self.assertEqual((first, second), (1, 2))
         self.clock.set(100)
-        self.assertEqual((await self.budget.stop_runtime(task_id)).consumed, 100)
+        self.assertEqual(
+            (await self.budget.stop_runtime(task_id, second)).consumed, 100
+        )
 
-    async def test_stopping_without_a_run_changes_nothing(self):
+    async def test_stopping_a_session_that_was_never_started_changes_nothing(self):
+        # Contract change: stop_runtime needs the generation of a session that
+        # start_runtime returned. A task that never started one has none, so any
+        # generation is stale (before, this was a silent no-op).
         task_id = await self.configured_task()
         before = await self.snapshot()
-        usage = await self.budget.stop_runtime(task_id)
-        self.assertEqual(
-            usage, BudgetUsage(K.RUNTIME_SECONDS, 0, limit(K.RUNTIME_SECONDS))
-        )
+        for generation in (1, 2, 10**6):
+            with self.subTest(generation=generation):
+                with self.assertRaises(StaleRuntimeSessionError) as caught:
+                    await self.budget.stop_runtime(task_id, generation)
+                self.assertEqual(caught.exception.code, "runtime_session_stale")
         self.assertEqual(await self.snapshot(), before)
 
     async def test_elapsed_time_is_floored_to_whole_seconds(self):
@@ -564,7 +578,7 @@ class RuntimeTest(BudgetTestCase):
     async def test_the_runtime_limit_is_exceeded_one_second_after_it_is_reached(self):
         task_id = await self.configured_task()
         maximum = limit(K.RUNTIME_SECONDS)
-        await self.budget.start_runtime(task_id)
+        generation = await self.budget.start_runtime(task_id)
         self.clock.set(maximum - 1)
         self.assertEqual((await self.budget.check(task_id)).status, BudgetStatus.OK)
         self.clock.set(maximum)
@@ -578,7 +592,7 @@ class RuntimeTest(BudgetTestCase):
             (BudgetStatus.EXCEEDED, (K.RUNTIME_SECONDS,)),
         )
         # Stopping keeps it exceeded.
-        await self.budget.stop_runtime(task_id)
+        await self.budget.stop_runtime(task_id, generation)
         self.assertEqual(
             (await self.budget.check(task_id)).exceeded, (K.RUNTIME_SECONDS,)
         )
@@ -596,10 +610,10 @@ class RuntimeTest(BudgetTestCase):
     async def test_a_clock_that_went_backwards_counts_as_zero(self):
         task_id = await self.configured_task()
         self.clock.set(100)
-        await self.budget.start_runtime(task_id)
+        generation = await self.budget.start_runtime(task_id)
         self.clock.set(50)
         self.assertEqual((await self.budget.usage(task_id))[0].consumed, 0)
-        usage = await self.budget.stop_runtime(task_id)
+        usage = await self.budget.stop_runtime(task_id, generation)
         self.assertEqual(usage.consumed, 0)
         row = await self.budget_row(task_id, "runtime_seconds")
         self.assertEqual((row["consumed"], row["running_since"]), (0, None))
@@ -628,7 +642,7 @@ class RuntimeTest(BudgetTestCase):
         naive = BudgetTracker(self.database, clock=lambda: datetime(2030, 1, 1))
         for call in (
             lambda: naive.start_runtime(task_id),
-            lambda: naive.stop_runtime(task_id),
+            lambda: naive.stop_runtime(task_id, 1),
             lambda: naive.usage(task_id),
             lambda: naive.check(task_id),
         ):
@@ -643,14 +657,148 @@ class RuntimeTest(BudgetTestCase):
 
     async def test_simultaneous_stops_add_the_time_once(self):
         task_id = await self.configured_task()
-        await self.budget.start_runtime(task_id)
+        generation = await self.budget.start_runtime(task_id)
         self.clock.set(100)
         trackers = [self.new_budget() for _ in range(6)]
-        results = await asyncio.gather(*(t.stop_runtime(task_id) for t in trackers))
+        results = await asyncio.gather(
+            *(t.stop_runtime(task_id, generation) for t in trackers)
+        )
         self.assertEqual({u.consumed for u in results}, {100})
         self.assertEqual(
             (await self.budget_row(task_id, "runtime_seconds"))["consumed"], 100
         )
+
+    async def test_a_delayed_stop_of_a_reclaimed_execution_keeps_the_new_timer(self):
+        task_id = await self.configured_task()
+        maximum = limit(K.RUNTIME_SECONDS)
+        old = await self.budget.start_runtime(task_id)  # worker A
+        self.clock.set(100)
+        new = await self.budget.start_runtime(task_id)  # worker B, after A's lease
+        self.assertGreater(new, old)  # expired and the entry was reclaimed
+        before = await self.snapshot()
+        self.clock.set(150)
+        with self.assertRaises(StaleRuntimeSessionError):
+            await self.budget.stop_runtime(task_id, old)  # A's delayed stop
+        # Nothing changed: B's timer still runs from the first start, and the
+        # generation is B's.
+        self.assertEqual(await self.snapshot(), before)
+        row = await self.budget_row(task_id, "runtime_seconds")
+        self.assertEqual(
+            (row["consumed"], row["running_since"], row["runtime_generation"]),
+            (0, at(0), new),
+        )
+        # check() keeps accruing B's runtime, so the limit still bites.
+        self.clock.set(200)
+        self.assertEqual((await self.budget.usage(task_id))[0].consumed, 200)
+        self.clock.set(maximum + 1)
+        verdict = await self.budget.check(task_id)
+        self.assertEqual(verdict.exceeded, (K.RUNTIME_SECONDS,))
+        # B stops its own session normally.
+        self.clock.set(250)
+        self.assertEqual((await self.budget.stop_runtime(task_id, new)).consumed, 250)
+
+    async def test_a_delayed_stop_of_a_restarted_run_keeps_the_new_timer(self):
+        task_id = await self.configured_task()
+        old = await self.budget.start_runtime(task_id)
+        self.clock.set(10)
+        await self.budget.stop_runtime(task_id, old)  # the old run ended normally
+        self.clock.set(100)
+        new = await self.budget.start_runtime(task_id)  # the restarted task runs
+        self.clock.set(120)
+        # The old worker (a retry of its stop, or a slow duplicate) arrives late.
+        with self.assertRaises(StaleRuntimeSessionError):
+            await self.budget.stop_runtime(task_id, old)
+        row = await self.budget_row(task_id, "runtime_seconds")
+        self.assertEqual(
+            (row["consumed"], row["running_since"], row["runtime_generation"]),
+            (10, at(100), new),
+        )
+        self.clock.set(150)
+        self.assertEqual((await self.budget.usage(task_id))[0].consumed, 60)
+        self.assertEqual((await self.budget.stop_runtime(task_id, new)).consumed, 60)
+
+    async def test_the_newer_session_stops_only_with_its_own_generation(self):
+        task_id = await self.configured_task()
+        old = await self.budget.start_runtime(task_id)
+        new = await self.budget.start_runtime(task_id)
+        self.assertEqual((old, new), (1, 2))
+        self.clock.set(30)
+        # Neither an older generation nor one that was never issued stops it.
+        for wrong in (old, new + 1, 10**6):
+            with self.subTest(generation=wrong):
+                with self.assertRaises(StaleRuntimeSessionError):
+                    await self.budget.stop_runtime(task_id, wrong)
+        row = await self.budget_row(task_id, "runtime_seconds")
+        self.assertEqual((row["consumed"], row["running_since"]), (0, at(0)))
+        self.assertEqual((await self.budget.stop_runtime(task_id, new)).consumed, 30)
+
+    async def test_generations_only_grow_across_stops(self):
+        task_id = await self.configured_task()
+        seen = []
+        for second in (10, 20, 30):
+            self.clock.set(second)
+            generation = await self.budget.start_runtime(task_id)
+            seen.append(generation)
+            self.clock.set(second + 5)
+            await self.budget.stop_runtime(task_id, generation)
+        self.assertEqual(seen, [1, 2, 3])
+        row = await self.budget_row(task_id, "runtime_seconds")
+        self.assertEqual((row["consumed"], row["runtime_generation"]), (15, 3))
+        # An old generation cannot stop the run of a later session either.
+        self.clock.set(40)
+        latest = await self.budget.start_runtime(task_id)
+        with self.assertRaises(StaleRuntimeSessionError):
+            await self.budget.stop_runtime(task_id, seen[0])
+        self.assertEqual(
+            (await self.budget_row(task_id, "runtime_seconds"))["running_since"], at(40)
+        )
+        self.clock.set(41)
+        self.assertEqual((await self.budget.stop_runtime(task_id, latest)).consumed, 16)
+
+    async def test_a_stale_stop_and_the_current_stop_at_the_same_time(self):
+        task_id = await self.configured_task()
+        old = await self.budget.start_runtime(task_id)
+        new = await self.budget.start_runtime(task_id)
+        self.clock.set(100)
+        trackers = [self.new_budget() for _ in range(4)]
+        results = await asyncio.gather(
+            trackers[0].stop_runtime(task_id, old),
+            trackers[1].stop_runtime(task_id, new),
+            trackers[2].stop_runtime(task_id, old),
+            trackers[3].stop_runtime(task_id, new),
+            return_exceptions=True,
+        )
+        self.assertIsInstance(results[0], StaleRuntimeSessionError)
+        self.assertIsInstance(results[2], StaleRuntimeSessionError)
+        self.assertEqual([results[1].consumed, results[3].consumed], [100, 100])
+        row = await self.budget_row(task_id, "runtime_seconds")
+        self.assertEqual((row["consumed"], row["running_since"]), (100, None))
+
+    async def test_simultaneous_starts_leave_exactly_one_current_session(self):
+        task_id = await self.configured_task()
+        trackers = [self.new_budget() for _ in range(5)]
+        generations = await asyncio.gather(
+            *(t.start_runtime(task_id) for t in trackers)
+        )
+        self.assertEqual(sorted(generations), [1, 2, 3, 4, 5])
+        row = await self.budget_row(task_id, "runtime_seconds")
+        self.assertEqual((row["running_since"], row["runtime_generation"]), (at(0), 5))
+        self.clock.set(10)
+        for generation in sorted(generations)[:-1]:
+            with self.assertRaises(StaleRuntimeSessionError):
+                await self.budget.stop_runtime(task_id, generation)
+        self.assertEqual((await self.budget.stop_runtime(task_id, 5)).consumed, 10)
+
+    async def test_the_generation_is_validated_before_anything_is_written(self):
+        task_id = await self.configured_task()
+        await self.budget.start_runtime(task_id)
+        before = await self.snapshot()
+        for bad in (0, -1, True, "1", 1.0, None, 2**63):
+            with self.subTest(generation=repr(bad)):
+                with self.assertRaises(InvalidQueueingArgumentError) as caught:
+                    await self.budget.stop_runtime(task_id, bad)
+                self.assertEqual(caught.exception.parameter, "generation")
+        self.assertEqual(await self.snapshot(), before)
 
     async def test_runtime_cannot_be_reported_with_record(self):
         task_id = await self.configured_task()

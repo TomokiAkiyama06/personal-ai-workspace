@@ -57,6 +57,24 @@ class LeaseLostError(QueueingError):
         super().__init__("Queue entry is not leased to this worker")
 
 
+class StaleRuntimeSessionError(QueueingError):
+    """The runtime timer of the task has been taken over by a newer session.
+
+    Raised by ``BudgetTracker.stop_runtime`` when the caller's ``generation`` is
+    not the generation of the task's current runtime session (a newer
+    ``start_runtime`` began a new session, for example the worker that reclaimed
+    the entry after this worker's lease expired, or the run of a restarted task).
+    Nothing is written: the newer session's ``running_since`` and the accumulated
+    runtime stay as they are. Like ``LeaseLostError`` it reveals nothing about
+    the other session.
+    """
+
+    code = "runtime_session_stale"
+
+    def __init__(self) -> None:
+        super().__init__("The runtime timer belongs to a newer session")
+
+
 class BudgetNotConfiguredError(QueueingError):
     """The task has no budget yet: call ``BudgetTracker.set_preset`` first.
 

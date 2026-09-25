@@ -40,13 +40,14 @@ from paw_backend.tools import (
     PostgresTaskActivity,
     RevokeOutcome,
     TaskActivity,
+    TaskRun,
 )
 
 from .support import make_settings, paw_environment
 from .task_support import TEST_DATABASE_URL, requires_postgres
 from .test_migrations import offline_config
 from .tools_store_contract import LIMITS, binding_of, new_approval
-from .tools_support import AGENT, NOW, U1, U2
+from .tools_support import AGENT, NOW, RUN, U1, U2
 
 GUARDS = (
     "tool_approvals_created_pending",
@@ -59,6 +60,8 @@ GUARDS = (
 IDENTITY_COLUMNS = {
     "id": "gen_random_uuid()",
     "task_id": "gen_random_uuid()",
+    "task_attempt": "2",
+    "task_retry_count": "1",
     "project_id": "gen_random_uuid()",
     "agent_id": "gen_random_uuid()",
     "requester_user_id": "gen_random_uuid()",
@@ -219,10 +222,12 @@ class ApplicationRoleTest(RoleTestCase):
         tasks = TaskService(self.app_db)
         activity = PostgresTaskActivity(self.app_db)
         created = await tasks.create_task(project_id=U1, created_by=U1, title="t")
-        self.assertEqual(await activity.check(created.task_id), TaskActivity.ACTIVE)
+        self.assertEqual(
+            await activity.check(created.task_id, RUN), TaskActivity.ACTIVE
+        )
         await tasks.execute(created.task_id, TaskCommand.CANCEL, actor=Actor.system())
-        self.assertEqual(await activity.check(created.task_id), TaskActivity.ENDED)
-        self.assertEqual(await activity.check(uuid.uuid4()), TaskActivity.UNKNOWN)
+        self.assertEqual(await activity.check(created.task_id, RUN), TaskActivity.ENDED)
+        self.assertEqual(await activity.check(uuid.uuid4(), RUN), TaskActivity.UNKNOWN)
 
     async def test_the_role_can_lock_the_task_row_when_it_uses_an_approval(self):
         # Using an approval reads the task row locked (FOR SHARE), in the same
@@ -281,6 +286,56 @@ class ApplicationRoleTest(RoleTestCase):
                     require_active_task=True,
                 )
                 self.assertEqual(opened.outcome, expected)
+
+    async def test_the_role_can_use_and_open_across_a_restart(self):
+        # Reading the run (SELECT on `tasks.attempt` / `retry_count`, under the
+        # row lock) and revoking what an earlier run left open (UPDATE of the
+        # state columns, an INSERT into the history) need no more than the role
+        # has. A restart is the case: the task fails, is started again, and the
+        # approval of the earlier attempt is still `approved`.
+        tasks = TaskService(self.app_db)
+        task_id = (
+            await tasks.create_task(project_id=U1, created_by=U1, title="t")
+        ).task_id
+        old = new_approval(task_id=task_id, task_run=TaskRun(1, 0))
+        await self.store.open_request(old, now=NOW, limits=LIMITS)
+        await self.store.decide(old.approval_id, approver_id=U1, approve=True, now=NOW)
+        await tasks.execute(task_id, TaskCommand.FAIL, actor=Actor.system())
+        await tasks.execute(task_id, TaskCommand.RESTART, actor=Actor.system())
+        flag = {"require_active_task": True}
+        activity = PostgresTaskActivity(self.app_db)
+        self.assertEqual(
+            await activity.check(task_id, TaskRun(2, 0)), TaskActivity.ACTIVE
+        )
+        self.assertEqual(
+            await activity.check(task_id, TaskRun(1, 0)), TaskActivity.SUPERSEDED
+        )
+        # the new run cannot use it; the old run is not the task's any more
+        for run, outcome in (
+            (TaskRun(2, 0), ConsumeOutcome.SUPERSEDED),
+            (TaskRun(1, 0), ConsumeOutcome.TASK_SUPERSEDED),
+        ):
+            with self.subTest(run=run):
+                self.assertEqual(
+                    await self.store.consume(
+                        old.approval_id,
+                        binding_of(old, task_run=run),
+                        now=NOW,
+                        **flag,
+                    ),
+                    outcome,
+                )
+        # the new run asks: the earlier approval is revoked, the new one is open
+        fresh = new_approval(task_id=task_id, task_run=TaskRun(2, 0))
+        opened = await self.store.open_request(fresh, now=NOW, limits=LIMITS, **flag)
+        self.assertEqual(opened.outcome, OpenOutcome.CREATED)
+        self.assertEqual(
+            (await self.store.get(old.approval_id)).status, ApprovalStatus.REVOKED
+        )
+        self.assertEqual(
+            [h.kind.value for h in await self.store.history(old.approval_id)],
+            ["requested", "approved", "revoked"],
+        )
 
     async def test_concurrent_requests_hold_the_cap_for_the_role_too(self):
         limits = OpenLimits(max_pending=3, rejection_cooldown=timedelta(minutes=5))
@@ -363,10 +418,10 @@ class ApplicationRoleTest(RoleTestCase):
     async def test_a_row_cannot_be_created_already_approved(self):
         error = await self.attempt(
             self.app_db,
-            "INSERT INTO tool_approvals (id, task_id, project_id, agent_id,"
-            " requester_user_id, tool, level, call_hash, targets, summary, status,"
-            " created_at, expires_at, approver_id, decided_at) VALUES"
-            " (gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), :a, :u,"
+            "INSERT INTO tool_approvals (id, task_id, task_attempt, task_retry_count,"
+            " project_id, agent_id, requester_user_id, tool, level, call_hash, targets,"
+            " summary, status, created_at, expires_at, approver_id, decided_at) VALUES"
+            " (gen_random_uuid(), gen_random_uuid(), 1, 0, gen_random_uuid(), :a, :u,"
             " 'repo.delete_tree', 'approval', :h, '[]', '[{}]', 'approved', now(),"
             " now() + interval '1 hour', :u, now())",
             a=AGENT,
