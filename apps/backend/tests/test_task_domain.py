@@ -11,7 +11,10 @@ from paw_backend.tasks import (
     IllegalTransitionError,
     Interruption,
     InvalidCommandArgumentError,
+    StaleAttemptError,
+    StaleRunError,
     TaskCommand,
+    TaskRun,
     TaskState,
     WaitReason,
     allowed_commands,
@@ -237,6 +240,64 @@ class ErrorAndActorTest(unittest.TestCase):
         self.assertEqual(Actor.user(user_id), Actor(ActorKind.USER, user_id))
         self.assertEqual(Actor.system(), Actor(ActorKind.SYSTEM))
         self.assertEqual(Actor.policy(), Actor(ActorKind.POLICY))
+
+
+class TaskRunTest(unittest.TestCase):
+    def test_a_run_is_the_attempt_and_the_retry_count(self):
+        run = TaskRun(2, 3)
+        self.assertEqual((run.attempt, run.retry_count), (2, 3))
+        self.assertEqual(run, TaskRun(2, 3))
+        # Two runs are the same only if both numbers are.
+        self.assertNotEqual(run, TaskRun(2, 4))
+        self.assertNotEqual(run, TaskRun(3, 3))
+        self.assertEqual(TaskRun(1, 0), TaskRun(1, 0))
+        self.assertEqual(len({TaskRun(1, 0), TaskRun(1, 0), TaskRun(1, 1)}), 2)
+
+    def test_the_counters_are_bounded_by_their_integer_columns(self):
+        largest = 2**31 - 1
+        self.assertEqual(TaskRun(largest, largest).attempt, largest)
+        self.assertEqual(TaskRun(1, 0).retry_count, 0)
+        for attempt, retry_count in (
+            (0, 0),  # an attempt starts at 1
+            (-1, 0),
+            (1, -1),  # a retry count starts at 0
+            (largest + 1, 0),
+            (1, largest + 1),
+        ):
+            with (
+                self.subTest(attempt=attempt, retry_count=retry_count),
+                self.assertRaises(InvalidCommandArgumentError),
+            ):
+                TaskRun(attempt, retry_count)
+
+    def test_a_counter_must_be_an_integer(self):
+        # ``bool`` is an ``int``; a float or text would be coerced by the driver.
+        for bad in (True, False, 1.0, "1", "secret-value", None, b"1"):
+            with (
+                self.subTest(value=bad),
+                self.assertRaises(InvalidCommandArgumentError) as caught,
+            ):
+                TaskRun(bad, 0)
+            # The error names the field, never the value it was given.
+            self.assertNotIn("secret-value", str(caught.exception))
+            with (
+                self.subTest(retry_count=bad),
+                self.assertRaises(InvalidCommandArgumentError),
+            ):
+                TaskRun(1, bad)
+
+    def test_a_stale_attempt_is_a_stale_run(self):
+        # A worker that only asks "was I superseded?" catches ``StaleRunError``;
+        # the attempt case keeps its own code and message.
+        self.assertTrue(issubclass(StaleAttemptError, StaleRunError))
+        self.assertEqual(
+            (StaleRunError.code, str(StaleRunError())),
+            ("stale_run", "The task has moved on to a newer run"),
+        )
+        self.assertEqual(
+            (StaleAttemptError.code, str(StaleAttemptError())),
+            ("stale_attempt", "The task has moved on to a newer attempt"),
+        )
 
 
 if __name__ == "__main__":

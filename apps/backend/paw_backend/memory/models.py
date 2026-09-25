@@ -430,18 +430,29 @@ class MemoryVersion(Base):
 # writer names it in two transaction-local settings, see ``metadata.py``. The
 # insert runs with the writer's own rights: the application role holds INSERT
 # on the history table, and no UPDATE or DELETE.
+#
+# The function runs in the writer's session, and every role holds PostgreSQL's
+# default TEMP privilege: a temporary table (or type) named like a table the
+# function uses would be found first through the writer's ``search_path``. So
+# the function pins its own path (``pg_catalog`` first, ``pg_temp`` explicitly
+# last, which also keeps a temporary type from shadowing ``uuid``) and names its
+# one table by schema, taken from the table the trigger is on. The statement is
+# dynamic because a plpgsql ``INSERT`` cannot take a computed schema (and it
+# avoids ``format``: SQLAlchemy's ``DDL`` treats ``%I`` as a placeholder).
 RECORD_METADATA_CHANGE_FUNCTION = """\
 CREATE OR REPLACE FUNCTION paw_record_memory_metadata_change()
-RETURNS trigger LANGUAGE plpgsql AS $$
+RETURNS trigger LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp AS $$
 BEGIN
-    INSERT INTO memory_metadata_changes (
-        memory_version_id, old_pinned, new_pinned, old_importance, new_importance,
-        actor_type, actor_user_id
-    ) VALUES (
+    EXECUTE 'INSERT INTO ' || quote_ident(TG_TABLE_SCHEMA)
+        || '.memory_metadata_changes ('
+        || 'memory_version_id, old_pinned, new_pinned, old_importance,'
+        || ' new_importance, actor_type, actor_user_id'
+        || ') VALUES ($1, $2, $3, $4, $5, $6, $7)'
+    USING
         NEW.id, OLD.pinned, NEW.pinned, OLD.importance, NEW.importance,
         nullif(current_setting('paw.actor_type', true), ''),
-        nullif(current_setting('paw.actor_user_id', true), '')::uuid
-    );
+        nullif(current_setting('paw.actor_user_id', true), '')::uuid;
     RETURN NULL;
 END
 $$"""
@@ -564,14 +575,26 @@ class MemoryRelation(Base):
 # The trigger function reads the row again instead of using ``NEW``: a deferred
 # trigger event carries the row as the statement wrote it, and the same row may
 # have been changed again by a later foreign-key action in the transaction.
+#
+# The re-read names the table by the schema and name of the table the trigger is
+# on, and the function pins its ``search_path`` (``pg_catalog``, then ``pg_temp``
+# explicitly): the function runs in the writer's session, and a temporary table
+# called ``memory_sources`` (every role may create one) would otherwise answer
+# the query with no rows and let the invalid row commit. See
+# ``RECORD_METADATA_CHANGE_FUNCTION`` for the same reasoning and why the
+# statement is dynamic.
 MESSAGE_REQUIRES_CONVERSATION_FUNCTION = """\
 CREATE OR REPLACE FUNCTION paw_check_memory_source_message_conversation()
-RETURNS trigger LANGUAGE plpgsql AS $$
+RETURNS trigger LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp AS $$
+DECLARE
+    invalid boolean;
 BEGIN
-    IF EXISTS (
-        SELECT 1 FROM memory_sources
-        WHERE id = NEW.id AND message_id IS NOT NULL AND conversation_id IS NULL
-    ) THEN
+    EXECUTE 'SELECT EXISTS (SELECT 1 FROM ' || quote_ident(TG_TABLE_SCHEMA)
+        || '.' || quote_ident(TG_TABLE_NAME)
+        || ' WHERE id = $1 AND message_id IS NOT NULL AND conversation_id IS NULL)'
+    INTO invalid USING NEW.id;
+    IF invalid THEN
         RAISE EXCEPTION 'a source that names a message must name its conversation'
             USING ERRCODE = 'check_violation',
                   TABLE = 'memory_sources',
@@ -587,6 +610,34 @@ CREATE CONSTRAINT TRIGGER tr_memory_sources_message_requires_conversation
 AFTER INSERT OR UPDATE OF conversation_id, message_id ON %(fullname)s
 DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW EXECUTE FUNCTION paw_check_memory_source_message_conversation()"""
+
+
+# A source of type ``conversation`` with no conversation, no message and (by
+# ``conversation_has_no_opaque_reference``) no ``source_ref`` identifies nothing,
+# and looks like a source whose conversation was deleted later
+# (``ON DELETE SET NULL``), which is legitimate. Only the INSERT can tell them
+# apart, so the rule is an INSERT-only trigger: nothing else fires it, and the
+# foreign keys' actions and the deletion flow's UPDATE never meet it. It reads
+# only ``NEW`` (no table), but pins the ``search_path`` like the other functions.
+CONVERSATION_SOURCE_IDENTIFIED_FUNCTION = """\
+CREATE OR REPLACE FUNCTION paw_check_memory_source_conversation_identified()
+RETURNS trigger LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp AS $$
+BEGIN
+    IF NEW.source_type = 'conversation'
+       AND NEW.conversation_id IS NULL AND NEW.message_id IS NULL THEN
+        RAISE EXCEPTION 'a new conversation source must name a conversation'
+            USING ERRCODE = 'check_violation',
+                  TABLE = 'memory_sources',
+                  CONSTRAINT = 'tr_memory_sources_conversation_source_identified';
+    END IF;
+    RETURN NEW;
+END
+$$"""
+CONVERSATION_SOURCE_IDENTIFIED_TRIGGER = """\
+CREATE TRIGGER tr_memory_sources_conversation_source_identified
+BEFORE INSERT ON %(fullname)s
+FOR EACH ROW EXECUTE FUNCTION paw_check_memory_source_conversation_identified()"""
 
 
 class MemorySource(Base):
@@ -617,6 +668,13 @@ class MemorySource(Base):
     ``tests/test_memory_migration.py`` compares both. A violation therefore
     surfaces at COMMIT (or at ``SET CONSTRAINTS ... IMMEDIATE``), not at the
     INSERT.
+
+    A new source of type ``conversation`` must name a conversation or a message
+    (``CONVERSATION_SOURCE_IDENTIFIED_FUNCTION``, a ``BEFORE INSERT`` trigger,
+    refused at the INSERT). Without it a row with nothing set is accepted by
+    the CHECKs and identifies no source. The rule is not a CHECK because that
+    state is exactly what deleting the conversation leaves behind, and it stays
+    valid there.
     """
 
     __tablename__ = "memory_sources"
@@ -676,6 +734,8 @@ class MemorySource(Base):
 for _statement in (
     MESSAGE_REQUIRES_CONVERSATION_FUNCTION,
     MESSAGE_REQUIRES_CONVERSATION_TRIGGER,
+    CONVERSATION_SOURCE_IDENTIFIED_FUNCTION,
+    CONVERSATION_SOURCE_IDENTIFIED_TRIGGER,
 ):
     event.listen(
         MemorySource.__table__,
