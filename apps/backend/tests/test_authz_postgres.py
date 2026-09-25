@@ -130,7 +130,7 @@ class MigrationTest(AuditPostgresTestCase):
         # external research send, tests/test_privacy_audit_schema.py).
         self.assertEqual(
             constraints,
-            "ck_audit_events_decision_valid,ck_audit_events_details_object,"
+            "ck_audit_events_decision_valid,ck_audit_events_details_registered,"
             "ck_audit_events_external_send_details,pk_audit_events",
         )
         self.assertEqual(

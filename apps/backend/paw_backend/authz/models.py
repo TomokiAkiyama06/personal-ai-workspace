@@ -6,15 +6,22 @@ separate database role that only holds INSERT and SELECT it cannot remove the
 triggers either (see ``apps/backend/README.md`` for exactly what this does and
 does not guarantee).
 
-Migration ``0087`` (issue #87, Decision 0010) adds the nullable ``details`` column
-for the one action whose record needs more than ids and enum values: the
-persistent audit of an external research send (``research.external_send``). Two
-CHECK constraints keep it from becoming a free-text column: ``details`` is a JSON
-object of at most ``MAX_DETAILS_BYTES`` bytes as text, and a row of that action has
-exactly the keys of ``EXTERNAL_SEND_DETAILS_KEYS`` with the value shapes of
-``external_send_check_sql`` (a ``sha256:`` fingerprint, counts, a boolean and
-provider kind tokens: no field can hold a query). ``AuditEvent`` (``audit.py``) has
-no ``details`` field and is unchanged; ``paw_backend.research.privacy.audit``
+Migration ``0087`` (issue #87, Decision 0010, proposed in Decision 0023) adds the
+nullable ``details`` column for the one action whose record needs more than ids and
+enum values: the persistent audit of an external research send
+(``research.external_send``). **``details`` is allowed only for registered actions**:
+an action that has no closed schema for it (every action of the audit trail except
+that one, existing or invented) has ``details`` NULL, whatever a writer with INSERT
+tries. Two CHECK constraints do it. ``ck_audit_events_details_registered``: ``details``
+is NULL, or the row's ``action`` is one of ``DETAILS_ACTIONS`` and ``details`` is a
+JSON object of at most ``MAX_DETAILS_BYTES`` bytes as text. And one closed-schema
+constraint per registered action (today ``ck_audit_events_external_send_details``):
+a row of that action has exactly the keys of ``EXTERNAL_SEND_DETAILS_KEYS`` with the
+value shapes of ``external_send_check_sql`` (a ``sha256:`` fingerprint, counts, a
+boolean and provider kind tokens: no field can hold a query). Registering another
+action takes a new migration that adds it to ``DETAILS_ACTIONS`` (the registry
+constraint) and adds its own closed-schema constraint. ``AuditEvent`` (``audit.py``)
+has no ``details`` field and is unchanged; ``paw_backend.research.privacy.audit``
 writes that row.
 """
 
@@ -51,8 +58,14 @@ EXTERNAL_SEND_WITHHELD_KEYS = (
 )
 # ``details`` is at most this many bytes as JSON text (a real one has about 300).
 MAX_DETAILS_BYTES = 2048
-DETAILS_OBJECT_CHECK = (
-    "details IS NULL OR (jsonb_typeof(details) = 'object' "
+# The registry: the actions that may have ``details`` at all. Each one needs a
+# closed-schema CHECK of its own (``external_send_check_sql`` for this one); an
+# action that is not here has ``details`` NULL. Adding one is a new migration.
+DETAILS_ACTIONS = (EXTERNAL_SEND_ACTION,)
+DETAILS_REGISTERED_CHECK = (
+    "details IS NULL OR (action IN ("
+    + ", ".join(f"'{action}'" for action in DETAILS_ACTIONS)
+    + ") AND jsonb_typeof(details) = 'object' "
     f"AND octet_length(details::text) <= {MAX_DETAILS_BYTES})"
 )
 
@@ -112,7 +125,7 @@ class AuditEventRecord(Base):
     __tablename__ = "audit_events"
     __table_args__ = (
         CheckConstraint("decision IN ('allow', 'deny')", name="decision_valid"),
-        CheckConstraint(DETAILS_OBJECT_CHECK, name="details_object"),
+        CheckConstraint(DETAILS_REGISTERED_CHECK, name="details_registered"),
         CheckConstraint(external_send_check_sql(), name="external_send_details"),
     )
 

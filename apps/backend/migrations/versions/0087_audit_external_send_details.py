@@ -16,15 +16,23 @@ removed) does not fit the columns of ``audit_events`` (ids and enum values), so
 this revision adds one nullable JSONB column, ``details``, and two CHECK
 constraints that keep it from becoming a free-text column:
 
-* ``ck_audit_events_details_object``: ``details`` is NULL or a JSON object of at
-  most 2048 bytes (as text).
-* ``ck_audit_events_external_send_details``: a row whose ``action`` is
-  ``research.external_send`` is an ``allow`` with the reason ``send_authorized``,
-  names a ``project_id`` and has ``details`` with exactly eight keys (a
-  ``sha256:`` fingerprint, the query length, the provider kinds, the counts of
-  withheld pieces per label, three removal counts and ``truncated``), each of the
-  shape the constraint spells out. No key can hold a query, however the row got
-  there.
+* ``ck_audit_events_details_registered``: **``details`` is allowed only for
+  registered actions.** It is NULL, or the row's ``action`` is in the registry (today
+  only ``research.external_send``) and ``details`` is a JSON object of at most 2048
+  bytes (as text). Every other action, existing or invented, has ``details`` NULL:
+  a writer with INSERT cannot keep text in such a row, whatever the object looks
+  like (Codex review of PR #99).
+* ``ck_audit_events_external_send_details``: the closed schema of the one registered
+  action. A row whose ``action`` is ``research.external_send`` is an ``allow`` with
+  the reason ``send_authorized``, names a ``project_id`` and has ``details`` with
+  exactly eight keys (a ``sha256:`` fingerprint, the query length, the provider
+  kinds, the counts of withheld pieces per label, three removal counts and
+  ``truncated``), each of the shape the constraint spells out. No key can hold a
+  query, however the row got there.
+
+Registering another action that needs ``details`` takes a NEW migration: add it to the
+registry (replace ``ck_audit_events_details_registered``) and add a closed-schema
+constraint of its own. Nothing is registered by default.
 
 Nothing else changes: the append-only triggers, the ``recorded_at`` trigger and the
 grants of revision 0025 are untouched. The privileges of the application role on
@@ -75,8 +83,13 @@ _KEYS = (
 )
 _WITHHELD = ("private_source", "private_memory", "raw_conversation", "secret")
 _MAX_DETAILS_BYTES = 2048
-_DETAILS_OBJECT = (
-    "details IS NULL OR (jsonb_typeof(details) = 'object' "
+# The actions that may have ``details``: each has a closed-schema CHECK of its own
+# below. Any other action has ``details`` NULL.
+_ACTIONS = (_ACTION,)
+_DETAILS_REGISTERED = (
+    "details IS NULL OR (action IN ("
+    + ", ".join(f"'{action}'" for action in _ACTIONS)
+    + ") AND jsonb_typeof(details) = 'object' "
     f"AND octet_length(details::text) <= {_MAX_DETAILS_BYTES})"
 )
 
@@ -116,7 +129,7 @@ def _external_send_check() -> str:
 
 
 _CONSTRAINTS = (
-    ("ck_audit_events_details_object", _DETAILS_OBJECT),
+    ("ck_audit_events_details_registered", _DETAILS_REGISTERED),
     ("ck_audit_events_external_send_details", _external_send_check()),
 )
 

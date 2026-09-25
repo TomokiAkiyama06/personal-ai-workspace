@@ -42,11 +42,13 @@ Decision 0004 にも 0010 にも、「`audit_events` にどう足すか」は書
   `withheld`（`private_source`、`private_memory`、`raw_conversation`、`secret` ごとに外した Piece の数）、`credentials_removed`、`pieces_matched`、`abstractions`、`truncated` の 8 つの Key だけを持つ。
   Decision 0010 の Record の Field と同じで、Query の本文、消した文字列、Context の本文はどこにも入らない。
 
-### 2. `details` は自由記述の列にしない: 2 つの CHECK 制約
+### 2. `details` は自由記述の列にしない: 登録簿と、`action` ごとの閉じた Schema
 
 `details` が将来、本文や説明文の置き場になり、`audit_events` の「本文を持たない」という性質が崩れることを、Database の側で防ぐ。
 
-- `ck_audit_events_details_object`: `details` は NULL か、JSON の Object で、テキストにして **2,048 Byte 以内**（実際の行は約 300 Byte）。全ての `action` に効く。
+- `ck_audit_events_details_registered`: **`details` は、登録された `action` にだけ許す。** `details` は NULL か、`action` が登録簿にあり（今は `research.external_send` の 1 つだけ）、
+  JSON の Object でテキストにして **2,048 Byte 以内**（実際の行は約 300 Byte）。登録簿にない `action`（既存の Capability の値、`tool.*`、`owner.*`、存在しない名前、`research.external_send` に似た綴りを含む全て）の行は、
+  `details` が NULL でなければ拒否される。INSERT できる Role の Bug や侵害が、別の `action` の行に本文を残すことはできない（独立したレビューの指摘。最初の案は、登録簿にない `action` にも「小さな Object なら可」としていた）。
 - `ck_audit_events_external_send_details`: `action` が `research.external_send` の行は、`decision` が `allow`、`reason` が `send_authorized`、`project_id` が非 NULL で、
   `details` が**ちょうど上の 8 つの Key**（`withheld` の中は 4 つの Key）を持ち、値が決まった形であること。指紋は `sha256:` と 64 桁の小文字の 16 進数、数は 0 以上の整数（数字だけ。文字列、小数、指数表記は不可）、
   `truncated` は Boolean、`provider_kinds` は `[a-z][a-z0-9_]{0,31}` の Token が 1〜8 個の配列。Key の追加も、Query を入れられる形の値も、Application の Role からの INSERT でも拒否される。
@@ -54,7 +56,9 @@ Decision 0004 にも 0010 にも、「`audit_events` にどう足すか」は書
 - 本文が入らないことは、3 つの層で守る。(1) `ExternalSendRecord` に本文の Field がない。(2) `external_send_event` が、Record の各 Field を、型と形（`type(x) is int`、`sha256:` の形、`ProviderKind` の Member など）で確かめ直し、
   新しいプレーンな値だけで `details` を作る（作られた後に書き換えられた Record、`str` / `int` の Subclass、Slot の消えた Record は、Database に触れる前に `TypeError` / `ValueError`）。
   (3) 上の CHECK 制約。
-- 新しい種類の外部送信の記録（別の `action`）が `details` を使うときは、その `action` の形を、新しい Migration の CHECK 制約で登録する。`details_object` だけが、全ての `action` に効く。
+- **規則: `details` は、登録された `action` にだけ許す。登録された `action` は、それぞれ閉じた Schema の CHECK 制約を持つ**（今は `ck_audit_events_external_send_details` の 1 つ）。
+  別の `action` が `details` を使うには、**新しい Migration** で、(1) 登録簿の制約 `ck_audit_events_details_registered` にその `action` を足し、(2) その `action` の閉じた Schema の制約（決まった Key、値の形、`decision` / `reason`）を足す。
+  登録簿にだけ足して Schema を足さないと、その `action` に、2,048 Byte 以内なら自由な Object を許してしまう。そのため Test が、登録簿の全ての `action` が、自分の閉じた Schema の制約に名前を挙げられていることを確かめる。既定では何も登録しない。
 
 ### 3. 書き込みは Fail closed
 
@@ -121,8 +125,8 @@ Decision 0010 の承認時の条件は「永続の Audit Sink が接続される
 
 1. **保存先と方式**: 外部送信の Audit を、`audit_events` に NULL 可の JSONB 列 `details` を足して書く（`AuditEvent` は変えない）。別の Table にする、`AuditEvent` に一般の Field を足す、既存の列に詰める、は採らない。
    推奨: 提案どおり。これを承認すると、Decision 0010 の条件（永続の Sink の接続）が満たされたと扱う。
-2. **`details` の制限**: 全ての `action` で JSON の Object・2,048 Byte 以内。`research.external_send` は、決まった 8 つの Key（`withheld` の中は 4 つ）と値の形だけ（Database の CHECK 制約）。
-   推奨: 提案どおり（本文が入らないことを、Application の Code だけに頼らず Database でも守るため）。Key を増やすときは、新しい Migration と Decision の更新で行う。
+2. **`details` の制限**: `details` を持てるのは登録された `action` だけ（今は `research.external_send` の 1 つ。それ以外の `action` の行は `details` が NULL）。登録された `action` の `details` は JSON の Object・2,048 Byte 以内で、`research.external_send` は、決まった 8 つの Key（`withheld` の中は 4 つ）と値の形だけ（Database の CHECK 制約）。
+   推奨: 提案どおり（本文が入らないことを、Application の Code だけに頼らず Database でも守るため）。Key を増やす、`action` を登録するときは、新しい Migration と Decision の更新で行う。
 3. **CHECK 制約は `NOT VALID` のまま検証しない**: 追記専用の大きな Table を長い Lock で走査しないため、また `downgrade` の後の `upgrade` を通すため。
    推奨: 提案どおり（新しい行には効く）。検証する案は、`downgrade` を使わない本番でだけ意味があり、その場合は既存の行に違反がないので、後から `VALIDATE` する Migration を足せる。
 4. **`downgrade` が `details` を破棄すること**: 開発・Test 用とし、本番では実行しない（Migration `0025` と同じ）。

@@ -326,7 +326,8 @@ class AppRoleCannotTest(PostgresAuditTestCase):
             "ALTER TABLE audit_events DROP COLUMN details",
             "ALTER TABLE audit_events DROP CONSTRAINT "
             "ck_audit_events_external_send_details",
-            "ALTER TABLE audit_events DROP CONSTRAINT ck_audit_events_details_object",
+            "ALTER TABLE audit_events DROP CONSTRAINT "
+            "ck_audit_events_details_registered",
             "ALTER TABLE audit_events DISABLE TRIGGER ALL",
             "ALTER TABLE audit_events DISABLE TRIGGER "
             "tr_audit_events_reject_update_delete",

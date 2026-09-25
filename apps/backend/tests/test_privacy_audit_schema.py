@@ -24,7 +24,8 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from paw_backend.authz.models import (
-    DETAILS_OBJECT_CHECK,
+    DETAILS_ACTIONS,
+    DETAILS_REGISTERED_CHECK,
     EXTERNAL_SEND_ACTION,
     EXTERNAL_SEND_DETAILS_KEYS,
     EXTERNAL_SEND_REASON,
@@ -49,7 +50,7 @@ from .test_migrations import offline_config
 REVISION = "0087"
 PREVIOUS = "0026"
 TABLE = "audit_events"
-OBJECT_CHECK = "ck_audit_events_details_object"
+REGISTERED_CHECK = "ck_audit_events_details_registered"
 SHAPE_CHECK = "ck_audit_events_external_send_details"
 QUERY = "python asyncio"
 
@@ -80,9 +81,12 @@ class ModelAndMigrationAgreeTest(unittest.TestCase):
         checks = model_checks()
         self.assertEqual(
             {name: sql for name, sql in module._CONSTRAINTS},
-            {OBJECT_CHECK: checks[OBJECT_CHECK], SHAPE_CHECK: checks[SHAPE_CHECK]},
+            {
+                REGISTERED_CHECK: checks[REGISTERED_CHECK],
+                SHAPE_CHECK: checks[SHAPE_CHECK],
+            },
         )
-        self.assertEqual(checks[OBJECT_CHECK], DETAILS_OBJECT_CHECK)
+        self.assertEqual(checks[REGISTERED_CHECK], DETAILS_REGISTERED_CHECK)
         self.assertEqual(checks[SHAPE_CHECK], external_send_check_sql())
 
     def test_the_migration_repeats_the_literals_of_the_audit(self):
@@ -152,7 +156,7 @@ class OfflineMigrationTest(unittest.TestCase):
     def test_upgrade_adds_one_column_and_two_not_valid_checks(self):
         sql = self.sql("upgrade", f"{PREVIOUS}:{REVISION}")
         self.assertIn("ALTER TABLE audit_events ADD COLUMN details JSONB", sql)
-        for name in (OBJECT_CHECK, SHAPE_CHECK):
+        for name in (REGISTERED_CHECK, SHAPE_CHECK):
             self.assertIn(f"ADD CONSTRAINT {name} CHECK", sql)
         self.assertEqual(sql.count("NOT VALID"), 2)
         # Not validated: a downgrade can leave rows of the action without details,
@@ -170,10 +174,10 @@ class OfflineMigrationTest(unittest.TestCase):
         sql = self.sql("downgrade", f"{REVISION}:{PREVIOUS}")
         self.assertLess(
             sql.index(f"DROP CONSTRAINT {SHAPE_CHECK}"),
-            sql.index(f"DROP CONSTRAINT {OBJECT_CHECK}"),
+            sql.index(f"DROP CONSTRAINT {REGISTERED_CHECK}"),
         )
         self.assertLess(
-            sql.index(f"DROP CONSTRAINT {OBJECT_CHECK}"),
+            sql.index(f"DROP CONSTRAINT {REGISTERED_CHECK}"),
             sql.index("DROP COLUMN details"),
         )
         self.assertNotIn("DROP TABLE", sql)
@@ -233,6 +237,10 @@ class DatabaseTestCase(unittest.TestCase):
     def scalars(self, sql: str, **params) -> list:
         with self.engine.connect() as connection:
             return list(connection.execute(text(sql), params).scalars())
+
+    def rows(self, sql: str, **params) -> list[tuple]:
+        with self.engine.connect() as connection:
+            return [tuple(row) for row in connection.execute(text(sql), params)]
 
     def scalar(self, sql: str, **params):
         (value,) = self.scalars(sql, **params)
@@ -300,7 +308,7 @@ class MigrationTest(DatabaseTestCase):
             self.constraints(),
             {
                 "ck_audit_events_decision_valid": True,
-                OBJECT_CHECK: False,
+                REGISTERED_CHECK: False,
                 SHAPE_CHECK: False,
             },
         )
@@ -480,7 +488,7 @@ class ExternalSendCheckTest(DatabaseTestCase):
                     self.insert(raw, project=project, raw=True)
                 self.assertIn(
                     caught.exception.orig.diag.constraint_name,
-                    {OBJECT_CHECK, SHAPE_CHECK},
+                    {REGISTERED_CHECK, SHAPE_CHECK},
                 )
 
     def test_a_missing_key_is_refused_for_every_key(self):
@@ -618,53 +626,167 @@ class ExternalSendCheckTest(DatabaseTestCase):
                 self.refused(details, project=uuid.uuid4())
 
 
-class DetailsObjectCheckTest(DatabaseTestCase):
-    """Another action may use ``details`` (later issues), but only as a small object."""
+# Every kind of action name: the ones that exist (authorization capabilities, tools,
+# owner setup, shared memory), the one of this issue spelled a little differently, and
+# invented ones. None of them has a registered schema for ``details``.
+UNREGISTERED_ACTIONS = (
+    "chat.use",
+    "project.read",
+    "project.repo.write",
+    "shared_memory.delete",
+    "tool.repo_read",
+    "tool.unknown",
+    "owner.token.redeem",
+    "unknown",
+    "research.something_else",
+    "research.external_send2",
+    "research.external_sen",
+    "Research.External_Send",
+    "RESEARCH.EXTERNAL_SEND",
+    " research.external_send",
+    "research.external_send ",
+    "research.external_send\n",
+    "research_external_send",
+    "x",
+)
+HOSTILE_DETAILS = {
+    "a query": {"query": "the billing service retries payment three times"},
+    "private text under a schema key": valid_details(
+        query_fingerprint="the billing service retries payment"
+    ),
+    "a note": {"note": "x"},
+    "an empty object": {},
+    "the valid shape of the registered action": valid_details(),
+    "nested text": {"a": {"b": ["c", {"d": "private"}]}},
+}
 
-    def other(self, details, **kwargs):
+
+class UnregisteredActionTest(DatabaseTestCase):
+    """``details`` is allowed only for registered actions (today: one).
+
+    An action without a registered closed schema has no ``details``: a writer with
+    INSERT (a bug, or an application that was taken over) cannot keep text in an
+    existing or an invented action's row, whatever the object looks like.
+    """
+
+    def insert_other(self, action, details, **kwargs):
         self.insert(
-            details,
-            action="research.something_else",
-            decision="allow",
-            reason="x",
-            **kwargs,
+            details, action=action, decision="allow", reason="x", raw=False, **kwargs
         )
 
-    def test_an_object_of_another_action_is_accepted_and_null_too(self):
-        self.other({"anything": ["goes", 1, True, None]})
-        self.other(None)
-        self.other({})
+    def test_details_is_refused_for_every_action_that_is_not_registered(self):
+        for action in UNREGISTERED_ACTIONS:
+            for label, details in HOSTILE_DETAILS.items():
+                with self.subTest(action=action, details=label):
+                    with self.assertRaises(IntegrityError) as caught:
+                        self.insert_other(action, details, project=uuid.uuid4())
+                    self.assertEqual(
+                        caught.exception.orig.diag.constraint_name, REGISTERED_CHECK
+                    )
 
-    def test_a_non_object_is_refused_for_every_action(self):
+    def test_a_json_value_that_is_not_an_object_is_refused_for_those_actions_too(self):
+        for action in ("chat.use", "research.something_else"):
+            for label, raw in {
+                "json null": "null",
+                "an array": "[]",
+                "a string": '"text"',
+                "a number": "5",
+                "true": "true",
+            }.items():
+                with self.subTest(action=action, details=label):
+                    with self.assertRaises(IntegrityError) as caught:
+                        self.insert(
+                            raw,
+                            action=action,
+                            decision="allow",
+                            reason="x",
+                            raw=True,
+                        )
+                    self.assertEqual(
+                        caught.exception.orig.diag.constraint_name, REGISTERED_CHECK
+                    )
+
+    def test_every_such_action_is_accepted_without_details(self):
+        # The column is NULL for every other row of the audit trail, as before.
+        for action in UNREGISTERED_ACTIONS:
+            with self.subTest(action=action):
+                self.insert_other(action, None)
+
+    def test_a_registered_action_needs_its_details_and_no_other_action_may_share_them(
+        self,
+    ):
+        project = uuid.uuid4()
+        self.insert(valid_details(), project=project)  # the registered action
+        self.refused(None, project=project)  # ... always with its details
+        with self.assertRaises(IntegrityError):
+            self.insert_other("research.external_send2", valid_details())
+
+    def test_the_registry_is_exactly_the_one_action_of_this_issue(self):
+        self.assertEqual(DETAILS_ACTIONS, (EXTERNAL_SEND_ACTION,))
+        self.assertEqual(migration_module()._ACTIONS, DETAILS_ACTIONS)
+        definition = self.scalar(
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+            "WHERE conname = :n AND conrelid = 'audit_events'::regclass",
+            n=REGISTERED_CHECK,
+        )
+        self.assertEqual(definition.count("research.external_send"), 1)
+        for action in UNREGISTERED_ACTIONS:
+            self.assertNotEqual(action, EXTERNAL_SEND_ACTION)
+
+    def test_every_registered_action_has_a_closed_schema_constraint_of_its_own(self):
+        # Registering an action without its own schema would allow any small object
+        # for it: each action of the registry must be named by exactly one CHECK
+        # other than the two general ones (the decision list and the registry).
+        rows = self.rows(
+            "SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint "
+            "WHERE conrelid = 'audit_events'::regclass AND contype = 'c' "
+            "AND conname NOT IN (:decision, :registry)",
+            decision="ck_audit_events_decision_valid",
+            registry=REGISTERED_CHECK,
+        )
+        self.assertEqual(len(rows), len(DETAILS_ACTIONS))
+        for action in DETAILS_ACTIONS:
+            with self.subTest(action=action):
+                named = [
+                    name for name, definition in rows if f"'{action}'" in definition
+                ]
+                self.assertEqual(named, [SHAPE_CHECK])
+
+    def test_a_registered_action_may_not_exceed_the_size_limit_or_be_a_non_object(self):
+        project = uuid.uuid4()
+        # Small and wrong: the closed schema of the action refuses it.
+        self.refused(valid_details(note="x"), project=project)
+        # Large: the general limit is what refuses it (checked first, by name).
+        self.refused(
+            valid_details(note="x" * MAX_DETAILS_BYTES),
+            constraint=REGISTERED_CHECK,
+            project=project,
+        )
         for label, raw in {
-            "an array": "[1, 2]",
+            "an array": "[]",
             "a string": '"text"',
-            "a number": "5",
             "json null": "null",
-            "true": "true",
         }.items():
             with self.subTest(details=label):
                 with self.assertRaises(IntegrityError) as caught:
-                    self.other(raw, raw=True)
+                    self.insert(raw, project=project, raw=True)
                 self.assertEqual(
-                    caught.exception.orig.diag.constraint_name, OBJECT_CHECK
+                    caught.exception.orig.diag.constraint_name, REGISTERED_CHECK
                 )
 
-    def test_the_size_limit_is_2048_bytes_of_json_text(self):
-        # ``{"k": "`` is 7 characters and ``"}`` 2 more.
-        exact = {"k": "x" * (MAX_DETAILS_BYTES - 9)}
-        self.assertEqual(len(json.dumps(exact)), MAX_DETAILS_BYTES)
-        self.other(exact)
-        with self.assertRaises(IntegrityError) as caught:
-            self.other({"k": "x" * (MAX_DETAILS_BYTES - 8)})
-        self.assertEqual(caught.exception.orig.diag.constraint_name, OBJECT_CHECK)
-
     def test_the_size_limit_counts_bytes_not_characters(self):
-        # Three bytes each in UTF-8: {"k": "..."} is 9 + 3n bytes.
-        self.other({"k": "\u3042" * 679})  # 2046 bytes
-        with self.assertRaises(IntegrityError) as caught:
-            self.other({"k": "\u3042" * 680})  # 2049 bytes, 689 characters
-        self.assertEqual(caught.exception.orig.diag.constraint_name, OBJECT_CHECK)
+        project = uuid.uuid4()
+        base = len(json.dumps(valid_details(note="")).encode())
+        self.assertLess(base, MAX_DETAILS_BYTES)
+        # A 3-byte character: 679 fit under the limit as bytes, 680 do not, though
+        # 689 characters would fit if characters were counted.
+        exact = MAX_DETAILS_BYTES - base
+        note = "\u3042" * (exact // 3 + 1)
+        self.assertGreater(len(note.encode()), exact)
+        self.assertLess(len(note), exact)  # fewer characters than the byte budget
+        self.refused(
+            valid_details(note=note), constraint=REGISTERED_CHECK, project=project
+        )
 
 
 if __name__ == "__main__":
