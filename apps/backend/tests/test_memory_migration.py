@@ -414,6 +414,15 @@ class MemoryMigrationDatabaseTest(unittest.TestCase):
         self.assertIn("ck_memory_versions_status_valid", names)
         self.assertIn("ck_memory_versions_freshness_fields", names)
         self.assertIn("fk_memory_sources_conversation_id_conversations", names)
+        # The rule of a non-conversation source's reference: the two schemas
+        # agree on its text, and it is not the bare ``IS NOT NULL`` any more.
+        reference_rules = {
+            row[3]
+            for row in migrated["constraints"]
+            if row[1] == "ck_memory_sources_other_sources_have_reference"
+        }
+        self.assertEqual(len(reference_rules), 1)
+        self.assertIn("char_length(source_ref) >= 1", reference_rules.pop())
         self.assertEqual(
             [row[1:] for row in migrated["triggers"]],
             [

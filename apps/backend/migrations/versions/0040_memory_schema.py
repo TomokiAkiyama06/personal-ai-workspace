@@ -620,8 +620,11 @@ def upgrade() -> None:
             " OR source_type = 'conversation'",
             name="conversation_reference_only_for_conversation",
         ),
+        # NULL is refused explicitly: ``char_length(NULL)`` is NULL, which a CHECK
+        # accepts. An empty reference names nothing.
         sa.CheckConstraint(
-            "source_type = 'conversation' OR source_ref IS NOT NULL",
+            "source_type = 'conversation'"
+            " OR (source_ref IS NOT NULL AND char_length(source_ref) >= 1)",
             name="other_sources_have_reference",
         ),
         sa.CheckConstraint(

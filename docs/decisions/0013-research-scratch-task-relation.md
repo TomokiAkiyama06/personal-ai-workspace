@@ -2,7 +2,7 @@
 
 - Status: Proposed
 - Date: 2026-09-25
-- Scope: PAW-050（Research Scratch Store）の `research_scratch_items.task_id`（Migration `0050`）と、Item を Task に結びつける以降の Issue（PAW-051 / 052 など）
+- Scope: PAW-050（Research Scratch Store）の `research_scratch_items.task_id` と、削除の延期の印 `pinned` / `saved`（Migration `0050`）、Item を Task に結びつける以降の Issue（PAW-051 / 052 など）。「提案」は `task_id`、末尾の「追加の提案: Pin と明示保存」は `pinned` / `saved` の扱い
 - Supersedes: なし
 - Approval: 未承認（Humanの承認待ち）
 
@@ -73,3 +73,44 @@ Migration `0050` はまだ Merge されていないため、承認された内�
 - 承認されたら、`Approval` に記録して Status を Approved に改める。
 - `RESTRICT` など別の選択が承認された場合は、Migration `0050`（未 Merge のうち）と Model、`test_scratch_schema.py`、`test_scratch_migration.py`、`test_scratch_purge.py` の Task 削除の Test を、承認された選択に合わせる。
 - 承認されるまで、Item の `task_id` が存在する Task を指すことを前提にした処理（`tasks` との JOIN を必須にするなど）を作らない。
+
+## 追加の提案: Pin と明示保存を別の印にする
+
+同じ Decision（同じ Migration `0050`、どちらも未承認）に、Review（PAW-050、6 回目）の指摘への対応として追記する。`task_id` の提案とは独立に承認・却下できる。
+
+### 背景
+
+[REQUIREMENTS.md](../../REQUIREMENTS.md) の「Research Scratch」は、TTL 削除を延期できる場合として「Pin済み」と「Userが明示保存」を**別の項目**として挙げる。
+最初の実装は、この 2 つを 1 つの真偽値 `pinned` で表していた（README は、別の状態にするかを「人間の判断が必要な点」に残していた）。
+Review は、Item が「一時的な Pin」と「User の明示保存」の両方の理由で残っているとき、後の `unpin` が保存まで消し、期限切れの Item が削除されると指摘した。
+2 つの延期理由は独立でなければならないため、これは Human の判断を待たずに実装へ固定してよい選択ではない。
+
+### 提案
+
+1. **2 つの独立した印を持つ。** `research_scratch_items` に `pinned`（一時的に残す）と `saved`（User の明示保存）を、どちらも `boolean NOT NULL DEFAULT false` で持つ。片方から片方を導かない。
+2. **各操作は自分の印だけを変える。** `pin` / `unpin` は `pinned` だけ、`save` / `unsave` は `saved` だけ。`unpin` は保存を消さず、`unsave` は Pin を消さない。どちらも冪等で、Item の行を Lock してから、自分の列だけの `UPDATE` を 1 つ実行する（同時の変更で他方の印を失わない）。
+3. **Purge と TTL の失効は、どちらかが立っている間 Item を残す。** 削除の延期は、Pin 済み、保存済み、Memory 昇格の確認中、使用中（Lease）のどれか 1 つでもあれば有効になる。全てが終わり TTL が過ぎた Item を、次の `purge_expired` が削除する。TTL（`expires_at`）は延びない。`ix_research_scratch_items_purgeable`（削除候補の部分 Index）は `NOT pinned AND NOT saved AND promotion_state <> 'pending'` を条件にする。
+4. **Application Role の権限は最小のまま。** `research_scratch_items` の UPDATE の列に `saved` を 1 つ足すだけ（`pinned`、`saved`、`promotion_state`、`promotion_requested_at`）。
+5. **API の互換性。** `pin` / `unpin`、`ScratchItem.pinned`、`DeferralReason.PINNED` は変えない。追加は `save` / `unsave`、`ScratchItem.saved`、`DeferralReason.SAVED` で、`deferral_reasons` の順は `pinned`、`saved`、`in_use`、`promotion_pending`。
+
+### 選定理由と代替案
+
+| 案 | 情報を失わない | 採らない理由 |
+| --- | --- | --- |
+| 1 つの `pinned`（最初の実装） | いいえ | `unpin` が保存を消す（Review の指摘） |
+| `pinned` と `saved` の 2 つの真偽値（提案） | 誰が・いつは失う | 最小。要件の 2 項目に 1 対 1 で対応し、既存の `pin` / `unpin` の意味を変えない |
+| 参照の Table（Item ごとに `kind`、`holder` など） | はい | 誰が・いつ・複数の保存者を持てるが、Table・権限・Lease との整合が増える。要件は誰が保存したかを求めていない |
+| `saved` に応じて TTL を延長する | — | TTL は `created_at + 24 hours` の CHECK 制約で、削除の延期は TTL の延長ではない（既存の方針） |
+
+### まだ Human / Admin の判断が必要な点
+
+- **見え方。** 保存と Pin を UI や一覧で区別するか（要件は「Userが明示保存」した Item を、一時的な Pin とは別の扱いにするとは述べていない）。現在の Store は、どちらも「TTL を過ぎても見える」だけで区別しない。
+- **Quota。** 保存済み・Pin 済みの Item の数の上限を分けるか、そもそも持つか（現在は持たない）。
+- **誰が付け外しできるか。** `save` / `unsave` を、`pin` / `unpin` と同じ `project.task.run` にするか、User 本人だけ（Agent へ委任できない）にするか。現在の Store は認可をしない（README の「呼び出し側の認可（提案）」は暫定で `project.task.run`）。
+- **記録。** 誰が・いつ保存したか（`saved_by`、`saved_at`）を持つか。複数の User が保存できるとき、1 人の `unsave` が他の人の保存まで消してよいか（現在は 1 つの印で、消える）。持つなら上の「参照の Table」案に移る。
+- **保存の期限。** 保存に上限の期間を付けるか（現在は `unsave` まで無期限。Pin も同じ）。
+
+### 承認後の扱い
+
+- 承認されたら、`Approval` に記録して Status を Approved に改める（`task_id` の提案と同時でも別でもよい）。
+- 別の選択（参照の Table など）が承認された場合は、Migration `0050`（未 Merge のうち）と Model、`test_scratch_saved.py`、`test_scratch_migration.py`、`test_scratch_grants.py` を、承認された選択に合わせる。

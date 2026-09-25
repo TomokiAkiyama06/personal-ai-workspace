@@ -8,9 +8,11 @@ implementation is stopped by a 30 s guard instead of blocking CI.
 """
 
 import asyncio
+import gc
 import json
 import time
 import unittest
+import warnings
 from datetime import UTC, datetime, timedelta, timezone
 
 from paw_backend.research.providers import (
@@ -35,6 +37,7 @@ from paw_backend.research.providers import (
 from paw_backend.research.providers.broker import (
     ADAPTER_ERROR,
     LOGGED_EXCEPTION_TYPES,
+    _CancelGuard,
     log_type_name,
 )
 
@@ -45,8 +48,11 @@ from .research_support import (
     NOW,
     SECRET,
     SHORT_TIMEOUT,
+    CancellingProvider,
     Tripwire,
     broker_of,
+    cancel_current_task,
+    cancelling_timezone,
     docs,
     document,
     fixed_clock,
@@ -385,6 +391,302 @@ class ArmedProvider(StaticProvider):
         if name in ("search", "fetch") and object.__getattribute__(self, "armed"):
             raise object.__getattribute__(self, "error")(SECRET)
         return super().__getattribute__(name)
+
+
+class SynchronousHookCancelRequestTest(unittest.IsolatedAsyncioTestCase):
+    """A synchronous hook that asks for the cancellation and then returns normally.
+
+    ``asyncio.current_task().cancel()`` from adapter code that runs without an
+    ``await`` raises nothing, but the request stays on the task: its next
+    ``await`` (or the end of the task) delivers it, which would cancel
+    ``gather()`` and discard the answers of the healthy providers. The broker
+    retracts what a hook requested (``Task.cancelling()`` before and after,
+    ``Task.uncancel()`` for the increase), reports the provider as failed, keeps a
+    cancellation that was there before, and still lets a real one through.
+    """
+
+    async def assertNothingPending(self):
+        task = asyncio.current_task()
+        self.assertEqual(task.cancelling(), 0)
+        await asyncio.sleep(0)  # a request left on the task is delivered here
+
+    @staticmethod
+    def stamped(times=1):
+        return datetime(2026, 9, 1, tzinfo=cancelling_timezone(times=times))
+
+    async def test_gather_isolates_a_provider_method_that_cancels_the_task(self):
+        for times in (1, 3):
+            for hang in (False, True):
+                with self.subTest(times=times, hang=hang):
+                    bad = CancellingProvider("web-bad", times=times, hang=hang)
+                    good = docs("docs-ok", hits=[hit("https://example.com/ok")])
+                    broker = broker_of(bad, good)
+                    bad.armed = True
+
+                    with (
+                        warnings.catch_warnings(record=True) as caught,
+                        self.assertLogs(LOGGER, level="WARNING") as logs,
+                    ):
+                        warnings.simplefilter("always")
+                        found = await guarded(broker.gather(request()))
+                        gc.collect()
+
+                    self.assertEqual(
+                        [(e.provider_id, e.code) for e in found.errors],
+                        [("web-bad", Code.INTERNAL_ERROR)],
+                    )
+                    self.assertEqual(urls(found), ["https://example.com/ok"])
+                    self.assertEqual(found.providers_queried, 2)
+                    # The dropped coroutine was closed: no "never awaited" warning.
+                    self.assertEqual([str(w.message) for w in caught], [])
+                    self.assertEqual(len(logs.records), 1)
+                    self.assertIn("provider=web-bad", logs.output[0])
+                    self.assertIn(f"exception_type={ADAPTER_ERROR}", logs.output[0])
+                    # The awaitable was dropped, not awaited: the provider never ran.
+                    self.assertEqual(bad.search_calls, [])
+                    self.assertFalse(bad.cancelled)
+                    self.assertEqual(other_tasks(), set())
+                    await self.assertNothingPending()
+
+    async def test_fetch_isolates_a_provider_method_that_cancels_the_task(self):
+        for times in (1, 3):
+            for hang in (False, True):
+                with self.subTest(times=times, hang=hang):
+                    bad = CancellingProvider(
+                        "web-a",
+                        times=times,
+                        hang_fetch=hang,
+                        documents={"https://example.com/a": document()},
+                    )
+                    broker = broker_of(bad)
+                    bad.armed = True
+
+                    with self.assertLogs(LOGGER, level="WARNING") as logs:
+                        result = await guarded(broker.fetch(source_of()))
+
+                    self.assertEqual(result.items, ())
+                    self.assertEqual(
+                        [(e.provider_id, e.code) for e in result.errors],
+                        [("web-a", Code.INTERNAL_ERROR)],
+                    )
+                    self.assertEqual(len(logs.records), 1)
+                    self.assertIn(f"exception_type={ADAPTER_ERROR}", logs.output[0])
+                    self.assertEqual(bad.fetch_calls, [])
+                    await self.assertNothingPending()
+
+    async def test_gather_reports_a_timezone_that_cancels_the_task_as_invalid(self):
+        for times in (1, 2):
+            for own_task in (False, True):
+                with self.subTest(times=times, own_task=own_task):
+                    hits = [
+                        hit("https://example.com/b1"),
+                        hit("https://example.com/b2"),
+                    ]
+                    for bad_hit in hits:
+                        object.__setattr__(bad_hit, "published_at", self.stamped(times))
+                    bad = web("web-bad", hits=hits)
+                    good = docs("docs-ok", hits=[hit("https://example.com/ok")])
+                    pending = broker_of(bad, good).gather(request())
+                    if own_task:
+                        # The end of a task that still carries a request cancels it.
+                        pending = asyncio.ensure_future(pending)
+
+                    with self.assertLogs(LOGGER, level="WARNING") as logs:
+                        found = await guarded(pending)
+
+                    self.assertEqual(
+                        [(e.provider_id, e.code) for e in found.errors],
+                        [("web-bad", Code.INVALID_RESPONSE)],
+                    )
+                    self.assertEqual(urls(found), ["https://example.com/ok"])
+                    self.assertEqual(len(logs.records), 1)
+                    self.assertIn(f"exception_type={ADAPTER_ERROR}", logs.output[0])
+                    self.assertEqual(other_tasks(), set())
+                    await self.assertNothingPending()
+
+    async def test_fetch_reports_a_timezone_that_cancels_the_task_as_invalid(self):
+        for times in (1, 2):
+            for own_task in (False, True):
+                with self.subTest(times=times, own_task=own_task):
+                    bad = document()
+                    object.__setattr__(bad, "published_at", self.stamped(times))
+                    provider = web(documents={"https://example.com/a": bad})
+                    pending = broker_of(provider).fetch(source_of())
+                    if own_task:
+                        pending = asyncio.ensure_future(pending)
+
+                    with self.assertLogs(LOGGER, level="WARNING") as logs:
+                        result = await guarded(pending)
+
+                    self.assertEqual(result.items, ())
+                    self.assertEqual(
+                        [(e.provider_id, e.code) for e in result.errors],
+                        [("web-a", Code.INVALID_RESPONSE)],
+                    )
+                    self.assertEqual(len(logs.records), 1)
+                    self.assertIn(f"exception_type={ADAPTER_ERROR}", logs.output[0])
+                    await self.assertNothingPending()
+
+    async def test_a_cancellation_pending_before_the_hook_is_kept(self):
+        # The caller's own request is not the adapter's: only the increase during
+        # the hook is retracted, so the count stays at 1 and the request is still
+        # delivered at the next ``await``, and the provider is still a failure.
+        task = asyncio.current_task()
+        method = CancellingProvider("web-a", times=2)
+        stamped = document()
+        object.__setattr__(stamped, "published_at", self.stamped())
+        zone = web("web-a", documents={"https://example.com/a": stamped})
+        for label, provider, code in (
+            ("method", method, Code.INTERNAL_ERROR),
+            ("timezone", zone, Code.INVALID_RESPONSE),
+        ):
+            with self.subTest(hook=label):
+                broker = broker_of(provider)
+                if provider is method:
+                    method.armed = True
+                task.cancel()  # pending BEFORE the hook
+                try:
+                    with self.assertLogs(LOGGER, level="WARNING"):
+                        result = await broker.fetch(source_of())
+                    self.assertEqual(
+                        [(e.provider_id, e.code) for e in result.errors],
+                        [("web-a", code)],
+                    )
+                    self.assertEqual(task.cancelling(), 1)
+                    with self.assertRaises(asyncio.CancelledError):
+                        await asyncio.sleep(0)  # the caller's request arrives
+                finally:
+                    while task.cancelling():
+                        task.uncancel()
+                await self.assertNothingPending()
+
+    async def test_a_real_cancellation_of_gather_still_propagates(self):
+        hanging = web("web-hang", hang=True)
+        bad = CancellingProvider("docs-bad", ProviderKind.DOCS)
+        broker = broker_of(bad, hanging, timeout_seconds=60)
+        bad.armed = True
+        task = asyncio.ensure_future(broker.gather(request(time_budget_seconds=60)))
+        for _ in range(1000):
+            if hanging.search_calls:
+                break
+            await asyncio.sleep(0.01)
+        self.assertEqual(len(hanging.search_calls), 1)
+        self.assertFalse(task.done())  # the request of "docs-bad" did not end it
+        self.assertEqual(task.cancelling(), 0)
+
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await guarded(task)
+
+        self.assertTrue(task.cancelled())
+        self.assertTrue(hanging.cancelled)
+        self.assertEqual(other_tasks(), set())
+
+    async def test_a_real_cancellation_of_fetch_still_propagates(self):
+        bad = CancellingProvider("web-a")
+        broker = broker_of(bad)
+        bad.armed = True
+        with self.assertLogs(LOGGER, level="WARNING"):
+            first = await guarded(broker.fetch(source_of()))
+        self.assertEqual(first.errors[0].code, Code.INTERNAL_ERROR)
+        await self.assertNothingPending()
+
+        hanging = web("web-a", hang_fetch=True)
+        task = asyncio.ensure_future(
+            broker_of(hanging, timeout_seconds=60).fetch(
+                source_of(), time_budget_seconds=60
+            )
+        )
+        for _ in range(1000):
+            if hanging.fetch_calls:
+                break
+            await asyncio.sleep(0.01)
+        self.assertEqual(len(hanging.fetch_calls), 1)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await guarded(task)
+        self.assertTrue(task.cancelled())
+        self.assertTrue(hanging.cancelled)
+
+    async def test_the_timeout_is_still_a_timeout_after_a_retracted_request(self):
+        # A retraction leaves the count that ``asyncio.timeout_at`` recorded intact.
+        bad = CancellingProvider("docs-bad", ProviderKind.DOCS)
+        hanging = web("web-hang", hang=True)
+        broker = broker_of(bad, hanging, timeout_seconds=SHORT_TIMEOUT)
+        bad.armed = True
+        with self.assertLogs(LOGGER, level="WARNING"):
+            found = await guarded(broker.gather(request()))
+        self.assertEqual(
+            [(e.provider_id, e.code) for e in found.errors],
+            [("web-hang", Code.TIMEOUT), ("docs-bad", Code.INTERNAL_ERROR)],
+        )
+        self.assertTrue(hanging.cancelled)
+        await self.assertNothingPending()
+
+
+class CancelGuardTest(unittest.IsolatedAsyncioTestCase):
+    """``_CancelGuard`` retracts exactly the requests made inside its block."""
+
+    async def test_it_retracts_every_request_made_inside(self):
+        task = asyncio.current_task()
+        with _CancelGuard() as guard:
+            cancel_current_task(3)
+            self.assertEqual(task.cancelling(), 3)
+        self.assertEqual(guard.retracted, 3)
+        self.assertEqual(task.cancelling(), 0)
+        await asyncio.sleep(0)  # nothing is delivered
+
+    async def test_it_leaves_no_request_alone_when_there_was_none(self):
+        task = asyncio.current_task()
+        with _CancelGuard() as guard:
+            pass
+        self.assertEqual(guard.retracted, 0)
+        self.assertEqual(task.cancelling(), 0)
+
+    async def test_it_keeps_a_request_that_was_there_before(self):
+        task = asyncio.current_task()
+        task.cancel()
+        try:
+            with _CancelGuard() as guard:
+                cancel_current_task(2)
+            self.assertEqual(guard.retracted, 2)
+            self.assertEqual(task.cancelling(), 1)
+            with self.assertRaises(asyncio.CancelledError):
+                await asyncio.sleep(0)
+        finally:
+            while task.cancelling():
+                task.uncancel()
+
+    async def test_it_retracts_and_does_not_swallow_an_exception(self):
+        task = asyncio.current_task()
+        with self.assertRaises(ValueError):
+            with _CancelGuard() as guard:
+                cancel_current_task()
+                raise ValueError
+        self.assertEqual(guard.retracted, 1)
+        self.assertEqual(task.cancelling(), 0)
+
+    async def test_it_does_nothing_outside_a_task(self):
+        loop = asyncio.get_running_loop()
+        done = loop.create_future()
+
+        def callback():
+            # A loop callback runs in no task: ``current_task()`` is None.
+            try:
+                self.assertIsNone(asyncio.current_task())
+                with _CancelGuard() as guard:
+                    pass
+                done.set_result(guard.retracted)
+            except BaseException as error:
+                done.set_exception(error)
+
+        loop.call_soon(callback)
+        self.assertEqual(await guarded(done), 0)
+
+    def test_it_does_nothing_without_a_running_loop(self):
+        with _CancelGuard() as guard:
+            pass
+        self.assertEqual(guard.retracted, 0)
 
 
 class MalformedTypedResponseTest(unittest.IsolatedAsyncioTestCase):

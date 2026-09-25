@@ -205,6 +205,7 @@ personal-ai-workspace/
 │  │     ├─ test_scratch_migration.py
 │  │     ├─ test_scratch_purge.py
 │  │     ├─ test_scratch_records.py
+│  │     ├─ test_scratch_saved.py
 │  │     ├─ test_scratch_schema.py
 │  │     ├─ test_scratch_service_validation.py
 │  │     ├─ test_scratch_store_items.py

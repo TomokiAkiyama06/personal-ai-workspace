@@ -187,6 +187,12 @@ class BudgetRuntimeAsAppRole(AsAppRole, test_queueing_budget.RuntimeTest):
     pass
 
 
+class BudgetRuntimeClockAsAppRole(
+    AsAppRole, test_queueing_budget.RuntimeClockAuthorityTest
+):
+    pass
+
+
 class RecordFailureAsAppRole(AsAppRole, test_queueing_loop_db.RecordFailureTest):
     pass
 

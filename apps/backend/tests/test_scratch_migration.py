@@ -379,7 +379,8 @@ class ScratchMigrationDatabaseTest(unittest.TestCase):
         )
         index_definitions = {row[1]: row[2] for row in migrated["indexes"]}
         self.assertIn(
-            "WHERE ((NOT pinned) AND (promotion_state <> 'pending'::text))",
+            "WHERE ((NOT pinned) AND (NOT saved)"
+            " AND (promotion_state <> 'pending'::text))",
             index_definitions["ix_research_scratch_items_purgeable"],
         )
         self.assertEqual(

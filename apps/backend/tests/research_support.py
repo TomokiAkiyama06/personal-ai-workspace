@@ -182,6 +182,48 @@ def raising_timezone(error: type[BaseException], *, fail_on_call: int = 1) -> tz
     return Raising()
 
 
+def cancel_current_task(times: int = 1) -> None:
+    """What a hostile hook does: ask for the cancellation of the running task."""
+    task = asyncio.current_task()
+    assert task is not None
+    for _ in range(times):
+        task.cancel()
+
+
+def cancelling_timezone(*, times: int = 1) -> tzinfo:
+    """A ``tzinfo`` whose ``utcoffset`` cancels the running task, then answers +09:00.
+
+    Nothing is raised: the request stays on the task and its next ``await`` (or
+    the end of the task) delivers it. ``times`` requests are made per call.
+    """
+
+    class Cancelling(tzinfo):
+        def utcoffset(self, moment):
+            cancel_current_task(times)
+            return timedelta(hours=9)
+
+    return Cancelling()
+
+
+class CancellingProvider(StaticProvider):
+    """Reading ``search`` / ``fetch`` cancels the running task once ``armed``.
+
+    The lookup then returns the method normally (so nothing is raised: the
+    request stays on the task). Registration reads the attributes while not
+    armed, as a real provider that misbehaves later would.
+    """
+
+    def __init__(self, name, kind=ProviderKind.WEB, *, times=1, **kwargs):
+        super().__init__(name, kind, **kwargs)
+        self.times = times
+        self.armed = False
+
+    def __getattribute__(self, name):
+        if name in ("search", "fetch") and object.__getattribute__(self, "armed"):
+            cancel_current_task(object.__getattribute__(self, "times"))
+        return super().__getattribute__(name)
+
+
 class Tripwire(list):
     """The names of the hooks that ran while it was ``armed()`` (should be none).
 
