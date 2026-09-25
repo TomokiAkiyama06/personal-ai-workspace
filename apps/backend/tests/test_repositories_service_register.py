@@ -685,7 +685,7 @@ class CloneFromGitHubTest(RegistrationTestCase):
         self.assertNothingRegistered()
         self.assertFalse(fs.lexists(pending["path"]))
 
-    async def test_a_removed_repository_during_the_clone_leaves_nothing(self):
+    async def test_a_removed_repository_during_the_clone_leaves_no_rows(self):
         started = asyncio.Event()
         release = asyncio.Event()
 
@@ -714,7 +714,9 @@ class CloneFromGitHubTest(RegistrationTestCase):
         with self.assertRaises(CheckoutGoneError):
             await task
 
-        self.assertFalse(fs.lexists(pending["path"]))
+        # No row is left; the directory is not the call's to delete any more (the
+        # removal operations never touch files: see test_repositories_unregister_race).
+        self.assertTrue(fs.isdir(pending["path"]))
         self.assertNothingRegistered()
 
 

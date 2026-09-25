@@ -131,7 +131,7 @@ Database には pgvector が必要です（CI は `pgvector/pgvector:pg18` を�
 | `PAW_REPOSITORY_WORKSPACE_SUBDIR` | `workspaces` | Backend が作る Checkout の置き場所（`<home>/<この名前>/<project>/<repo>`）。1 つの安全な名前（[Repository 登録](#repository-registration--per-user-checkout)） |
 | `PAW_REPOSITORY_EXISTING_ROOTS` | `{home}` | 既存 Repository を登録してよい Root（Comma 区切り、8 つまで）。各 Root は絶対 Path で `{home}`（先頭だけ）か `{user}` を含む（全員で共有する Directory は拒否） |
 | `PAW_REPOSITORY_CLONE_HOSTS` | `github.com` | Clone してよい Host（Comma 区切り、8 つまで。小文字の DNS 名。IP Address は不可） |
-| `PAW_REPOSITORY_MIN_LINUX_UID` | `1000` | Checkout の持ち主になれる Linux Account の最小の uid（`root` などの System Account を拒否する） |
+| `PAW_REPOSITORY_MIN_LINUX_UID` | `1000` | Checkout の持ち主になれる Linux Account の最小の uid（`root` などの System Account を拒否する）。**Account を引くときに実際に適用される唯一の値**（`RepositoryService.from_policy` が同じ Policy から `LoginNameAccountDirectory` を組み立てる） |
 | `PAW_REPOSITORY_GIT_TIMEOUT_SECONDS` / `PAW_REPOSITORY_CLONE_TIMEOUT_SECONDS` | `30` / `900` | git の Command / Clone の Timeout（秒）。超えると Process Group ごと止める。途中の Clone の予約は Clone の Timeout の 2 倍で古いとみなす |
 | `PAW_EVENT_HEARTBEAT_SECONDS` | `15` | `system.heartbeat` の間隔 |
 | `PAW_EVENT_QUEUE_SIZE` | `100` | 接続ごとの Event Queue。溢れた場合は古い Event を捨てる |
@@ -2339,7 +2339,7 @@ Project の **Repository** は論理的な共有の記録で、User や Agent �
 | `models.py`、`records.py`、`errors.py`、`limits.py` | Table の Model（`repositories`、`repository_remotes`、`repository_checkouts`）、返す値、型付きの Error、上限 |
 | `validation.py` | 引数の検証（DB を使わない純粋関数。名前、Branch、Path、URL、ACL の権限） |
 | `paths.py` | Path の安全性（Linux Account、Checkout の Path、既存 Repository の検査、`O_NOFOLLOW` での Directory 作成） |
-| `accounts.py` | Workspace の User から Linux Account への対応（`LoginNameAccountDirectory`。継ぎ目は `AccountDirectory`） |
+| `accounts.py` | Workspace の User から Linux Account への対応（`LoginNameAccountDirectory`。継ぎ目は `AccountDirectory`）。最小の uid は `RepositoryPolicy.min_uid` だけ（Directory に別の値はない）。Directory と Service の Policy が食い違うと、Service の構築が `ValueError` |
 | `git.py` | git の実行（許可リストの環境、Hook 無効、Timeout、出力の上限、Shell なし）と、必要な操作（`inspect`、`clone`、`init`、`add_origin`） |
 | `github.py` | GitHub の指定の解析、origin URL の登録形式、`GitHubGateway`（PAW-028 の継ぎ目。既定は拒否） |
 | `policy.py` | 設定（`PAW_REPOSITORY_*`）を検証した値 `RepositoryPolicy` |
@@ -2368,7 +2368,7 @@ Project の **Repository** は論理的な共有の記録で、User や Agent �
 
 - **Project Repository へ管理ファイルを自動注入しません。** Backend が書くのは、`git clone` / `git init` が作るものだけです（`AGENTS.md`、`MEMORY.md`、`.personal-ai/` を作らず、Commit せず、Working Tree に File を足しません）。`tests/test_repositories_service_register.py` は、登録の前後で Repository の全 File と `git status`・`HEAD`・Commit 数が同じことを確かめます。
 - **Checkout の分離。** Checkout は実行 User の Home の下に作られ（`<home>/workspaces/<slug>-<Project ID の先頭 8 桁>/<name>`）、他の User の Home には触れません。User ごとに 1 つ（`create_checkout`）で、他の Member は登録済みの Remote から自分で Clone します（Remote のない Repository は、作った User だけが Checkout を持つ。Decision 0017 の 8）。
-- 登録は、Project 行の `FOR UPDATE`、名前・URL・Path の一意制約、上限（Repository 100 まで、Remote 8 まで）で、同時実行でも 1 つだけが通ります。長い Clone は Transaction を持たず、`pending` の行が名前と Path を予約します（失敗・Cancel で Directory と予約を消します。Process が死んだ予約は Clone の Timeout の 2 倍で古いとみなし、次の作成が置き換えます。**残された Directory は自動では消しません**（次の作成は「既にある」で止まり、持ち主が消してから再実行します））。
+- 登録は、Project 行の `FOR UPDATE`、名前・URL・Path の一意制約、上限（Repository 100 まで、Remote 8 まで）で、同時実行でも 1 つだけが通ります。長い Clone は Transaction を持たず、`pending` の行が名前と Path を予約します（この呼び出し自身の失敗・Cancel では、**自分の `pending` の行がまだあるときだけ**、その行、Directory、他の誰も Checkout を持たない新規の Repository を消します。行を先に消せなかった（`remove_checkout` / `remove_repository` が先に登録を解除した）ときは、**Directory を消さず**、呼び出しは `CheckoutGoneError` で終わります。登録解除は File に触れない約束で、解除の後に持ち主が Directory に足した作業を守るためです。Process が死んだ予約は Clone の Timeout の 2 倍で古いとみなし、次の作成が置き換えます。**残された Directory は自動では消しません**（次の作成は「既にある」で止まり、持ち主が消してから再実行します））。
 
 ### Path の安全性
 

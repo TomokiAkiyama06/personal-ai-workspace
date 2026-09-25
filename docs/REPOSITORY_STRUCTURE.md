@@ -285,6 +285,7 @@ personal-ai-workspace/
 │  │     ├─ test_repositories_git.py
 │  │     ├─ test_repositories_github.py
 │  │     ├─ test_repositories_grants.py
+│  │     ├─ test_repositories_min_uid.py
 │  │     ├─ test_repositories_paths.py
 │  │     ├─ test_repositories_policy.py
 │  │     ├─ test_repositories_schema.py
@@ -292,6 +293,7 @@ personal-ai-workspace/
 │  │     ├─ test_repositories_service_manage.py
 │  │     ├─ test_repositories_service_register.py
 │  │     ├─ test_repositories_service_validation.py
+│  │     ├─ test_repositories_unregister_race.py
 │  │     ├─ test_repositories_validation.py
 │  │     ├─ test_research_broker.py
 │  │     ├─ test_research_contract.py

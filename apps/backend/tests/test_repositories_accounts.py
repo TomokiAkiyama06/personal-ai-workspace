@@ -14,6 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from paw_backend.repositories import (
     LinuxAccountUnavailableError,
     LoginNameAccountDirectory,
+    RepositoryPolicy,
 )
 
 from .repositories_support import PostgresRepositoryTestCase, requires_postgres
@@ -41,7 +42,10 @@ class LoginNameAccountDirectoryTest(PostgresRepositoryTestCase):
                 raise KeyError(name) from None
 
         directory = LoginNameAccountDirectory(
-            self.service_database(), lookup=lookup, **options
+            self.service_database(),
+            policy=options.pop("policy", RepositoryPolicy()),
+            lookup=lookup,
+            **options,
         )
         self.addAsyncCleanup(directory._database.dispose)
         return directory, calls
@@ -106,10 +110,21 @@ class LoginNameAccountDirectoryTest(PostgresRepositoryTestCase):
     async def test_the_lowest_uid_is_configurable(self):
         user = self.seed_user()
         login = self.login_of(user)
-        directory, _ = self.directory(
-            {login: entry(login, 500, "/home/x")}, min_uid=500
+        # The one value is the policy's: the lowest uid is lowered by it, and raised
+        # by it (there is no second knob on the directory).
+        record = {login: entry(login, 500, "/home/x")}
+        lowered, _ = self.directory(record, policy=RepositoryPolicy(min_uid=500))
+        self.assertEqual((await lowered.account_of(user)).uid, 500)
+        self.assertEqual(lowered.min_uid, 500)
+        default, _ = self.directory(record)
+        with self.assertRaises(LinuxAccountUnavailableError):
+            await default.account_of(user)
+        raised, _ = self.directory(
+            {login: entry(login, 1500, "/home/x")},
+            policy=RepositoryPolicy(min_uid=1501),
         )
-        self.assertEqual((await directory.account_of(user)).uid, 500)
+        with self.assertRaises(LinuxAccountUnavailableError):
+            await raised.account_of(user)
 
     async def test_the_lookup_error_carries_no_detail(self):
         user = self.seed_user()
@@ -118,7 +133,9 @@ class LoginNameAccountDirectoryTest(PostgresRepositoryTestCase):
         def lookup(name):
             raise OSError("ldap://internal.example.org bind failed for cn=admin")
 
-        directory = LoginNameAccountDirectory(self.service_database(), lookup=lookup)
+        directory = LoginNameAccountDirectory(
+            self.service_database(), policy=RepositoryPolicy(), lookup=lookup
+        )
         self.addAsyncCleanup(directory._database.dispose)
 
         with self.assertRaises(LinuxAccountUnavailableError) as raised:
@@ -130,12 +147,14 @@ class LoginNameAccountDirectoryTest(PostgresRepositoryTestCase):
 
     def test_the_constructor_checks_its_arguments(self):
         database = self.service_database()
-        for kwargs in ({"min_uid": 0}, {"min_uid": True}, {"min_uid": "1000"}):
-            with self.subTest(kwargs=kwargs):
+        for bad in (None, 1000, {"min_uid": 1000}, "policy", object()):
+            with self.subTest(policy=repr(bad)[:20]):
                 with self.assertRaises(TypeError):
-                    LoginNameAccountDirectory(database, **kwargs)
+                    LoginNameAccountDirectory(database, policy=bad)
         with self.assertRaises(TypeError):
-            LoginNameAccountDirectory(object())
+            LoginNameAccountDirectory(object(), policy=RepositoryPolicy())
+        with self.assertRaises(TypeError):
+            LoginNameAccountDirectory(database)  # the policy is required
 
     async def test_the_real_account_database_gives_the_current_user(self):
         # Not mocked: proves the default lookup and the entry fields fit.
@@ -151,7 +170,9 @@ class LoginNameAccountDirectoryTest(PostgresRepositoryTestCase):
                 )
         except IntegrityError:
             self.skipTest("the user name is not a valid login name")
-        directory = LoginNameAccountDirectory(self.service_database())
+        directory = LoginNameAccountDirectory(
+            self.service_database(), policy=RepositoryPolicy()
+        )
         self.addAsyncCleanup(directory._database.dispose)
 
         account = await directory.account_of(user)

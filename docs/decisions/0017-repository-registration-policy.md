@@ -41,7 +41,7 @@
 
 - 要件は「Linux User ごと」とだけ言い、Workspace の User と Linux の User の対応を定めていない。
 - 提案: **`users.login_name` を Linux の User 名とする**（`LoginNameAccountDirectory`）。置き換えられる継ぎ目（`AccountDirectory`）を用意した。
-- System の Account は Checkout の持ち主にしない。uid が最小値（既定 1000。`PAW_REPOSITORY_MIN_LINUX_UID`）未満、`nobody`（65534 以上）、Shell が `nologin` / `false` の Account は拒否する。Login 名の規則は `root` や `www-data` を許すため、これがないと、そのような名前の User が System の Directory に書ける。
+- System の Account は Checkout の持ち主にしない。uid が最小値（既定 1000。`PAW_REPOSITORY_MIN_LINUX_UID`）未満、`nobody`（65534 以上）、Shell が `nologin` / `false` の Account は拒否する。Login 名の規則は `root` や `www-data` を許すため、これがないと、そのような名前の User が System の Directory に書ける。最小の uid の値は**設定（`RepositoryPolicy.min_uid`）だけ**とし、`LoginNameAccountDirectory` は Policy から受け取る（別の既定値を持たない）。本番の組み立て（`RepositoryService.from_policy`）は同じ Policy から Directory と Service を作り、食い違う組み合わせは Service の構築時に拒否する。
 
 ### 4. git を動かす User
 
@@ -79,6 +79,7 @@
 ### 7. 削除の意味
 
 - Repository の削除は**登録の削除**である。Repository、Remote、**全員の** Checkout の行を消す。Directory も GitHub の Repository も消さない（要件）。持ち主の Directory はそのまま残り、登録されなくなる。
+- **Clone の実行中に登録解除（`remove_checkout` / `remove_repository`）があったとき、実行中の呼び出しは Directory を消さない**（`CheckoutGoneError` で終わる）。呼び出し自身の失敗・Cancel の後始末は、自分の `pending` の行がまだあるときだけ行う（行を先に消せたときだけ Directory と、他に Checkout のない新規の Repository を消す）。登録解除は File に触れない約束であり、解除の後に持ち主が足した作業を守るため。Repository が消えた後の GitHub の Remote の登録は、行が消えたことを確かめ（`FOR SHARE`）、`CheckoutGoneError` として返す。
 - Checkout の登録解除も Directory を消さない。残った Directory が同じ Path にあると、次の Checkout の作成は「既にある」として拒否する（上書きも再利用もしない）。
 - Project の削除（30 日後の Deleted）に伴い、`purge_projects` が、**Deleted になっている** Project の Repository の登録を消す（`ProjectService.purge_expired` が返した ID を渡す。Decision 0008 の 2）。Directory と GitHub の Repository は残る。
 

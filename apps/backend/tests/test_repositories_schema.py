@@ -166,7 +166,10 @@ class ModelsMetadataTest(unittest.TestCase):
         names = set()
         for table in self.tables():
             for constraint in table.constraints:
-                if isinstance(constraint, UniqueConstraint | PrimaryKeyConstraint):
+                if isinstance(
+                    constraint,
+                    UniqueConstraint | PrimaryKeyConstraint | ForeignKeyConstraint,
+                ):
                     names.add(constraint.name)
             names.update(
                 i.name for i in table.indexes if isinstance(i, Index) and i.unique

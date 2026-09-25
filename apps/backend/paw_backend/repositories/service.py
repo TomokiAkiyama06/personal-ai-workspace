@@ -78,8 +78,12 @@ Order of checks (every method)
 
 Long work (a clone) never holds a transaction: a **pending** checkout row reserves
 the name and the path first (committed), git runs, and a second transaction marks it
-``ready``. A failure or a cancellation removes the directory the call created and the
-reservation. A pending row whose process died is *stale* after twice the clone
+``ready``. A failure or a cancellation of the call's own work removes the reservation
+and the directory the call created, but **only while its own pending row still
+exists** (``_abandon``): when ``remove_checkout`` / ``remove_repository`` unregistered
+it meanwhile, the call ends with ``CheckoutGoneError`` and never deletes the directory
+(unregistering promises not to touch files, and the user may have added work since).
+A pending row whose process died is *stale* after twice the clone
 timeout; the next ``create_checkout`` of the same user replaces it (a directory the
 dead attempt left is never deleted: the owner removes it).
 
@@ -102,6 +106,7 @@ never show ``str(error)``). The service logs only the type of an unexpected erro
 import asyncio
 import logging
 import os
+import pwd
 import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
@@ -121,7 +126,10 @@ from paw_backend.db import Database
 from paw_backend.projects import store as projects_store
 from paw_backend.projects.records import MemberStatus, Project, ProjectStatus
 from paw_backend.repositories import store
-from paw_backend.repositories.accounts import AccountDirectory
+from paw_backend.repositories.accounts import (
+    AccountDirectory,
+    LoginNameAccountDirectory,
+)
 from paw_backend.repositories.errors import (
     CheckoutExistsError,
     CheckoutGoneError,
@@ -140,7 +148,7 @@ from paw_backend.repositories.errors import (
     RepositoryNotFoundError,
     RepositoryPermissionDeniedError,
 )
-from paw_backend.repositories.git import GitClient
+from paw_backend.repositories.git import GitClient, GitRunner
 from paw_backend.repositories.github import (
     GitHubGateway,
     GitHubRepo,
@@ -214,6 +222,9 @@ _VIOLATIONS: MappingProxyType[str, Callable[[], Exception]] = MappingProxyType(
         "pk_repository_remotes": RemoteAlreadyRegisteredError,
         "uq_repository_checkouts_path": CheckoutExistsError,
         "uq_repository_checkouts_repository_id": CheckoutExistsError,
+        # The repository was removed while an operation of its own was running.
+        "fk_repository_remotes_repository_id_repositories": CheckoutGoneError,
+        "fk_repository_checkouts_repository_id_repositories": CheckoutGoneError,
     }
 )
 
@@ -266,6 +277,12 @@ class RepositoryService:
             raise TypeError("git must be a GitClient")
         if policy is not None and not isinstance(policy, RepositoryPolicy):
             raise TypeError("policy must be a RepositoryPolicy")
+        if (
+            isinstance(accounts, LoginNameAccountDirectory)
+            and accounts.min_uid != (policy or RepositoryPolicy()).min_uid
+        ):
+            # One value for "the lowest uid of a person": the policy's.
+            raise ValueError("the account directory and the policy disagree on min_uid")
         if github is not None and not hasattr(github, "create_repository"):
             raise TypeError("github must be a GitHubGateway")
         if clock is not None and not callable(clock):
@@ -282,6 +299,47 @@ class RepositoryService:
         self._github = github or UnavailableGitHubGateway()
         self._clock = clock or _utc_now
         self._lock_timeout_ms = lock_timeout_ms
+
+    @classmethod
+    def from_policy(
+        cls,
+        database: Database,
+        authorizer: Authorizer,
+        runner: GitRunner,
+        policy: RepositoryPolicy,
+        *,
+        accounts: AccountDirectory | None = None,
+        account_lookup: Callable[[str], pwd.struct_passwd] | None = None,
+        github: GitHubGateway | None = None,
+        clock: Clock | None = None,
+        lock_timeout_ms: int = DEFAULT_LOCK_TIMEOUT_MS,
+    ) -> "RepositoryService":
+        """The production wiring: **one** ``RepositoryPolicy`` for every part.
+
+        ``RepositoryPolicy.from_settings(settings)`` is the usual ``policy``. The git
+        client and (unless ``accounts`` is given) the ``LoginNameAccountDirectory`` are
+        built from it, so ``PAW_REPOSITORY_MIN_LINUX_UID`` is applied when a Linux
+        account is looked up, whatever else is configured. ``account_lookup``
+        replaces ``pwd.getpwnam`` (tests only); ``runner`` is the ``GitRunner`` of the
+        deployment (``SubprocessGitRunner`` unless git must run as another user).
+        """
+        if not isinstance(policy, RepositoryPolicy):
+            raise TypeError("policy must be a RepositoryPolicy")
+        if accounts is None:
+            options = {} if account_lookup is None else {"lookup": account_lookup}
+            accounts = LoginNameAccountDirectory(database, policy=policy, **options)
+        elif account_lookup is not None:
+            raise TypeError("account_lookup is for the default account directory")
+        return cls(
+            database,
+            authorizer,
+            accounts,
+            GitClient(runner, policy),
+            policy=policy,
+            github=github,
+            clock=clock,
+            lock_timeout_ms=lock_timeout_ms,
+        )
 
     # -- plumbing --------------------------------------------------------------
 
@@ -704,11 +762,17 @@ class RepositoryService:
         except BaseException:
             if source is RepositorySource.NEW_GITHUB and populated is not None:
                 self._log_orphaned_github_repository()
-            # Cancellation included: the reservation and the directory this call
-            # made must not outlive it (shielded, so a second cancel cannot skip it).
+            # What this call made must not outlive a failure or a cancellation of
+            # its own work (shielded, so a second cancel cannot skip it). What a
+            # concurrent unregistration took away is not cleaned up again: see
+            # ``_abandon``.
             await asyncio.shield(
                 self._abandon(
-                    account, path, created_directory, repository_id=repository_id
+                    account,
+                    path,
+                    created_directory,
+                    checkout_id=checkout_id,
+                    repository_id=repository_id,
                 )
             )
             raise
@@ -729,27 +793,39 @@ class RepositoryService:
         default_branch: str | None,
         extra_remotes: tuple[str, ...],
     ) -> tuple[Checkout, Repository]:
-        """The second transaction: branch, remotes, then the checkout is ``ready``."""
+        """The second transaction: branch, remotes, then the checkout is ``ready``.
+
+        Something may have unregistered while git or GitHub was working:
+        ``CheckoutGoneError`` for a repository that is gone (nothing is inserted
+        below a missing parent) and for a checkout that is gone (the branch and the
+        remotes are still stored: the repository stays registered). The repository
+        row is locked ``FOR SHARE`` first, so it cannot disappear under the inserts.
+        """
         now = self._now()
         try:
             async with self._transaction() as session:
+                stored = await store.get_repository(
+                    session, repository.project_id, repository.id, for_share=True
+                )
+                if stored is None:
+                    raise CheckoutGoneError()
                 if default_branch is not None and (
-                    default_branch != repository.default_branch
+                    default_branch != stored.default_branch
                 ):
                     await store.update_default_branch(
-                        session, repository.id, default_branch, now
+                        session, stored.id, default_branch, now
                     )
                 for url in extra_remotes:
                     await store.insert_remote(
                         session,
-                        repository_id=repository.id,
-                        project_id=repository.project_id,
+                        repository_id=stored.id,
+                        project_id=stored.project_id,
                         url=url,
                         now=now,
                     )
                 checkout = await store.mark_ready(session, checkout_id, now)
                 stored = await store.get_repository(
-                    session, repository.project_id, repository.id
+                    session, stored.project_id, stored.id
                 )
         except IntegrityError as error:
             raise _violation(error) from None
@@ -763,21 +839,32 @@ class RepositoryService:
         path: str,
         created_directory: bool,
         *,
+        checkout_id: uuid.UUID,
         repository_id: uuid.UUID | None = None,
-        checkout_id: uuid.UUID | None = None,
     ) -> None:
-        """Undo a failed creation: the directory, then the reservation. Best effort."""
+        """Undo what a failed or cancelled creation made, if it still owns it.
+
+        The call owns its work as long as **its own ``pending`` row still exists**.
+        The row is deleted first, in a transaction of its own, and only when that
+        deleted it are the directory and (for a new repository nobody else has a
+        checkout of) the repository removed. If the row is gone, a concurrent
+        ``remove_checkout`` / ``remove_repository`` unregistered it, and those
+        operations promise not to touch files: the directory stays, whatever the
+        user put into it since. A row that already became ``ready`` is a finished
+        registration and stays too. Best effort: a database error leaves the
+        directory and the row (a stale reservation).
+        """
         try:
-            if created_directory:
-                await asyncio.to_thread(remove_directory, path, account)
             async with self._transaction() as session:
-                if repository_id is not None:
-                    await store.delete_repository(session, repository_id)
-                elif checkout_id is not None:
-                    await store.delete_checkout(session, checkout_id, only_pending=True)
+                owned = await store.delete_checkout(
+                    session, checkout_id, only_pending=True
+                )
+                if owned and repository_id is not None:
+                    await store.delete_repository_if_unused(session, repository_id)
+            if owned and created_directory:
+                await asyncio.to_thread(remove_directory, path, account)
         except Exception as error:
-            # A row left behind is a pending reservation: it goes stale and the
-            # next attempt takes it over. Only the type is logged.
+            # Only the type is logged.
             logger.error(
                 "Cleanup of a failed checkout failed (%s)", type(error).__name__
             )
@@ -902,8 +989,9 @@ class RepositoryService:
 
         ``workspace.use`` on the actor's own checkout (a member who left the project
         can still unregister). Works in every project state. A pending checkout can
-        be removed too: the clone that is running notices, stops using the row and
-        removes what it made. ``CheckoutNotFoundError`` if there is none.
+        be removed too: the clone that is running ends with ``CheckoutGoneError`` and
+        **leaves the directory as it is** (it is no longer the clone's to delete).
+        ``CheckoutNotFoundError`` if there is none.
         """
         principal = self._human(actor)
         project_id = validate_uuid("project_id", project_id)

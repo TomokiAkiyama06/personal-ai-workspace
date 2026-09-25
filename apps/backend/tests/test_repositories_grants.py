@@ -30,9 +30,11 @@ from paw_backend.db import Database
 from . import (
     test_repositories_accounts,
     test_repositories_concurrency,
+    test_repositories_min_uid,
     test_repositories_service_checkout,
     test_repositories_service_manage,
     test_repositories_service_register,
+    test_repositories_unregister_race,
 )
 from .repositories_support import PostgresRepositoryTestCase
 from .support import make_settings
@@ -151,6 +153,8 @@ for _module in (
     test_repositories_service_checkout,
     test_repositories_service_manage,
     test_repositories_concurrency,
+    test_repositories_unregister_race,
+    test_repositories_min_uid,
     test_repositories_accounts,
 ):
     _prefix = _module.__name__.removeprefix("tests.test_repositories_")
@@ -218,6 +222,10 @@ class AppRolePrivilegesTest(PostgresRepositoryTestCase):
         self.assertIn("ServiceManagePurgeTestAsAppRole", derived)
         self.assertIn("ConcurrencyRowLockTestAsAppRole", derived)
         self.assertIn("AccountsLoginNameAccountDirectoryTestAsAppRole", derived)
+        self.assertIn(
+            "UnregisterRaceUnregisterDuringCreateGitHubTestAsAppRole", derived
+        )
+        self.assertIn("MinUidMinimumUidOnTheServicePathTestAsAppRole", derived)
 
     async def test_the_service_really_runs_as_a_non_superuser_role(self):
         for database in (self.app, self.other):

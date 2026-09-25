@@ -432,7 +432,7 @@ class CreateCheckoutTest(CheckoutTestCase):
         self.assertEqual(self.checkout_rows(), [])
         self.assertFalse(fs.lexists(pending["path"]))
 
-    async def test_a_repository_removed_during_the_clone_leaves_nothing(self):
+    async def test_a_repository_removed_during_the_clone_leaves_no_rows(self):
         started, release = asyncio.Event(), asyncio.Event()
 
         class Held(SubprocessGitRunner):
@@ -460,7 +460,8 @@ class CreateCheckoutTest(CheckoutTestCase):
         with self.assertRaises(CheckoutGoneError):
             await task
 
-        self.assertFalse(fs.lexists(pending["path"]))
+        self.assertTrue(fs.isdir(pending["path"]), "unregistering never deletes files")
+        self.assertEqual(self.checkout_rows(), [])
 
     async def test_an_audit_failure_blocks_the_checkout(self):
         from paw_backend.authz import Authorizer

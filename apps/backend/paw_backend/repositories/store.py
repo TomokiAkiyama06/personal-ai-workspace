@@ -127,13 +127,21 @@ async def get_repository(
     repository_id: uuid.UUID,
     *,
     for_update: bool = False,
+    for_share: bool = False,
 ) -> Repository | None:
-    """The repository **of this project**, or ``None`` (not another project's)."""
+    """The repository **of this project**, or ``None`` (not another project's).
+
+    ``for_share`` locks the row ``FOR SHARE``: until the transaction ends the
+    repository cannot be deleted, so rows that reference it can be inserted without
+    a foreign key error (a delete waits, then removes them with it).
+    """
     statement = select(REPOSITORIES).where(
         REPOSITORIES.c.id == repository_id, REPOSITORIES.c.project_id == project_id
     )
     if for_update:
         statement = statement.with_for_update()
+    elif for_share:
+        statement = statement.with_for_update(read=True)
     row = (await session.execute(statement)).first()
     return None if row is None else repository_from_row(row)
 
@@ -220,6 +228,26 @@ async def set_acl(
         )
     ).first()
     return None if row is None else repository_from_row(row)
+
+
+async def delete_repository_if_unused(
+    session: AsyncSession, repository_id: uuid.UUID
+) -> bool:
+    """Delete the repository only when nobody has a checkout of it (any state).
+
+    For undoing a registration that a failed operation made: a checkout another
+    user made meanwhile is theirs, and it keeps the repository. Whether a row was
+    deleted.
+    """
+    result = await session.execute(
+        delete(REPOSITORIES).where(
+            REPOSITORIES.c.id == repository_id,
+            ~select(CHECKOUTS.c.id)
+            .where(CHECKOUTS.c.repository_id == repository_id)
+            .exists(),
+        )
+    )
+    return result.rowcount == 1
 
 
 async def delete_repository(session: AsyncSession, repository_id: uuid.UUID) -> bool:
