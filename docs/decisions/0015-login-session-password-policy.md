@@ -87,7 +87,7 @@ Decision 0005 は、PAW-022 が満たす条件（Issue #19 に追記済み）と
   - 通常 Session にも絶対の上限（90 日）を置いた。要件は無操作の 30 日しか定めていない。別の案は「通常 Session に絶対の上限を置かない（使い続ける限り続く）」。
 - 有効かどうかは、行を判定する**その文の中で** Database の時計（`clock_timestamp()`）を読んで決める。Test は Process 側の時計を差し込むが、使うのは「Process の時計と Database の時計の**新しいほう**」なので、Process の時計が遅れていても寿命は**長くならない**。
 - 「最終利用日時」は最大でも 60 秒に 1 回しか書かない（`PAW_SESSION_TOUCH_INTERVAL_SECONDS`）。毎回書くと読み取りごとに書き込みが起きる。端末の一覧の精度は 1 分。
-- 失効・Logout した行は、失効から 30 日たつと（Login のたびに最大 50 行ずつ）消す。
+- 終わった Session の行は、**終わってから 30 日**たつと（Login のたびに最大 50 行ずつ）消す。終わった時刻は、無操作の期限（最後の利用 + 無操作の上限。絶対の上限を超えない）と失効の時刻の早いほう。CHECK 制約が「無操作の期限 ≤ 絶対の期限」を保つので、絶対の期限に達した Session もこれで足りる（絶対の期限だけで判定すると、30 日で無操作になった通常 Session が 60 日目でなく 120 日目まで残る）。
 
 ### 5. Session ID の Rotation
 
@@ -185,18 +185,19 @@ Migration `0022` は、Web の Role（`PAW_APP_DATABASE_ROLE`）に各 Table の
 - **保存**: `auth_policy`（1 行、`version` つき）と `auth_policy_changes`（変更のたびに 1 行。誰が、いつ、各項目の変更前と変更後。追記専用）。変更は Audit（`auth.policy.update`）にも 1 行。
 - **誰が**: **変更は Owner だけ**（新しい Capability `owner.auth_policy.manage`。Owner 専用で、Agent に委任できず、Audit は REQUIRED）。**閲覧は Admin と Owner**（`admin.auth_policy.view`）。API は `GET` / `PUT /api/v1/auth/policy`。
 - **検証**: 各項目は厳密な値だけ（`required` / `optional`、真偽値、5〜240 分の整数。範囲外や型違いは拒否）。更新は完全な置き換えで、Client が読んだ `expected_version` を送る。Row Lock の下で Version が違えば 409（`version_conflict`）で拒否し、**同時の 2 つの編集で更新が失われない**。同じ値の更新は Version を上げない。
-- **Owner の再認証**: Policy の変更には、Owner 自身の Session の直近 Step-up（Policy の Step-up 有効時間の内。判定は Row Lock の下で Database の時計）が要る。盗まれた Session が Policy を緩められないため。Passkey がない間は Password の再入力（次節）。
+- **Owner の再認証は Passkey の Step-up**: Policy の変更には、Owner 自身の Session の直近の **Passkey の Step-up**（Policy の Step-up 有効時間の内。判定は Row Lock の下で Database の時計）が要る。要件（`[FIXED]`: Owner / Admin の重要操作は Passkey の Step-up）のとおりで、**Password の Step-up は数えない**（403 `step_up_method_insufficient`、Audit は deny `step_up_method_insufficient`）。Password を盗んだ者は `POST /auth/step-up` で Password の Step-up を得られるので、それを受け付けると、盗まれた Password だけで Owner / Admin の Passkey の要求を `optional` に緩められてしまう（Review 指摘）。Step-up が全くないときは従来どおり 403 `step_up_required`。Step-up の方法は、その方法の Verifier だけが記録する（別の方法の鍵で登録した Verifier は `AuthService` が拒否する。Password の Step-up を Passkey として記録することはできない。後の Password の Step-up は直前の Passkey の Step-up を置き換える。強さは上がらず下がるだけ）。
+- **Owner が変えられる Policy は、PAW-023 が入るまで本番では変更できない**（この節の提案は、PAW-023 で Passkey の Step-up ができて初めて端から端まで動く）。その間、`GET /policy` と要求の報告は動き、既定値（要件のまま）が効く。`PUT /policy` は、Test が Passkey の Step-up を書いた Session でだけ成功する（Passkey の Step-up を書けるのは、その方法の Verifier を登録した Code、または DB の直接の書き込みだけ）。Web の Role は `stepup_method` を書けるので、**Application が侵害されれば `passkey` と書ける**（Password を変えられるのと同じ、Decision 0005 で受け入れた限界）。
 - **効く範囲**: **新しい Sign-in・新しい Session から**。**変更は既存の Session を失効も降格もしない**（厳しくしても黙って Logout されない。Test 済み）。Session の応答（`GET /auth/session`）が、その人の現在の要求（`required` か `optional`、未登録なら `enrollment_required`、勧めるか）を返す。
 - **Owner を締め出さない（安全側の規則）**: この Issue は Passkey を**強制しない**（PAW-023 が強制する）ので、どの設定でも Owner は Password で Login できる。PAW-023 は「`required` で未登録」を**登録だけができる状態**（行き止まりではない）にし、Password Login と `owner-recover` を残さなければならない（Decision 0005 の 7 の「Passkey の登録以外を許さない」と同じ）。
 - **`users.passkey_required` 列（0021）との関係**: この列は Owner / Admin では CHECK 制約で `false` にできない。設定が `optional` でも列は `true` のままで、**Login の処理は列を見ず、設定（`auth_policy`）を見る**。列を設定へ合わせる（CHECK を外す、または列を捨てる）かは PAW-023 で決める。
 - **Step-up の有効時間**: 列と設定の項目を持ち、Owner が 5〜240 分で変えられる。この Issue が使うのは Policy 変更の判定だけ。Owner / Admin の他の重要操作への適用は PAW-023 と、各操作の Issue。
-- **リスク**: (1) 緩める（Owner / Admin を `optional` にする）と、Password だけの侵害で Owner / Admin を乗っ取れる。要件が Owner / Admin の Passkey を必須にした理由を弱める。(2) Owner 自身を `required` にして Passkey を失うと締め出される恐れ（上の安全側の規則と `owner-recover` で戻れる）。(3) Owner の Session が Step-up つきで奪われると Policy を緩められる（Password の再入力を要求することで下げている。PAW-023 で Passkey にする）。
+- **リスク**: (1) 緩める（Owner / Admin を `optional` にする）と、Password だけの侵害で Owner / Admin を乗っ取れる。要件が Owner / Admin の Passkey を必須にした理由を弱める。(2) Owner 自身を `required` にして Passkey を失うと締め出される恐れ（上の安全側の規則と `owner-recover` で戻れる）。(3) Owner の Session が Passkey の Step-up つきで奪われると Policy を緩められる（Passkey の Step-up を要求することで下げている。Password だけでは緩められない）。(4) PAW-023 が入るまで Policy を変えられない（上）。
 - **却下した案**: 固定の方針のまま（要件どおり。Owner が運用に合わせて変えられない）。User ごとの上書き（Owner が個別の User に Passkey を必須または免除する。要件になく、権限の面が増える。将来 Decision で足せる）。設定をコードの定数にする（変更に再起動と Deploy が要り、変更の履歴が残らない）。
 
 ### 13. Step-up の差し込み口（PAW-023 へ）
 
 - `StepUpVerifier`（`method`、`verify(user_id, login_name, evidence)`）と `StepUpEvidence` を用意した。Password の実装（`PasswordStepUpVerifier`）が入っている。PAW-023 は Passkey の Verifier を `AuthService(step_up_verifiers=...)` に登録するだけでよい。
-- Step-up は `POST /auth/step-up` で、成功すると Session に時刻と方法（`stepup_at`、`stepup_method`）を記録し、**Session ID を作り直す**。Session の応答に `auth.step_up`（方法、時刻、有効な期限、満たしているか）を含める。誤りは Account の Backoff に数える。
+- Step-up は `POST /auth/step-up` で、成功すると Session に時刻と方法（`stepup_at`、`stepup_method`）を記録し、**Session ID を作り直す**。Session の応答に `auth.step_up`（方法、時刻、有効な期限、満たしているか）を含める。誤りは Account の Backoff に数える。`satisfied` は「時間内に Step-up があった」だけを表し、**方法の強さは `method` で判断する**（何を許すかを決めるのは Backend で、Client の表示ではない。Policy の変更は Passkey だけを許す）。
 - 「Passkey の登録の有無」は `PasskeyEnrollment`（既定は誰も登録していない）を通して尋ねる。PAW-023 が実装を差し込む。
 
 ### 14. この Issue に含めないこと
@@ -236,7 +237,7 @@ Migration `0022` は、Web の Role（`PAW_APP_DATABASE_ROLE`）に各 Table の
 7. **Audit（9 節）**: 存在しない名前の失敗は Audit へ書かない、接続元は仮名の UUID（推奨）／Audit に「接続元」「名前の Hash」の列を足す（Decision 0004 を Supersede する）。
 8. **Rotation（5 節）**: 猶予期間なし（推奨）／10 秒程度の猶予。
 9. **DB Role（11 節）**: `SECURITY DEFINER` の関数（推奨）／`users.status` の列の UPDATE と Trigger。
-10. **Passkey Policy を Owner が変えられる設定にする（12 節）**: 設定にする（推奨、Human の指示）／固定の方針のまま／User ごとの上書きも足す。Step-up の有効時間を Owner が 5〜240 分で変えられる（推奨）／30 分に固定。設定を緩めることを Owner だけに許す（推奨）。
+10. **Passkey Policy を Owner が変えられる設定にする（12 節）**: 設定にする（推奨、Human の指示）／固定の方針のまま／User ごとの上書きも足す。Step-up の有効時間を Owner が 5〜240 分で変えられる（推奨）／30 分に固定。設定を緩めることを Owner だけに許す（推奨）。**変更に Passkey の Step-up を要求し、PAW-023 が入るまで本番では変更できない**（推奨。要件に沿う）／Password の Step-up でも変更できる（Password の侵害だけで Owner / Admin の Passkey の要求を緩められる）。
 11. **`REQUIREMENTS.md` の記述**: 承認後に、`[FIXED]`「Passkey Policy」を「既定値であり、Owner が設定で変えられる」と直すか（推奨）、この Decision の参照だけを足すか。
 
 ## リスク
@@ -252,13 +253,13 @@ Migration `0022` は、Web の Role（`PAW_APP_DATABASE_ROLE`）に各 Table の
 
 承認されたら、この Decision の Status を Approved にする（Status と承認の記録だけを更新する。既存の Decision の本文の方針を書き換えるときは新しい Decision から `Supersedes` する）。PAW-022 の PR は本 Decision を参照する。
 値を変えるときは、この Decision を書き換えず新しい Decision から `Supersedes` し、設定の既定値（`config.py`）と Test の期待値を合わせる（Migration は不要）。
-12 節が承認された場合は、PAW-023 の受け入れ条件に「Owner が設定で変える Policy に従って強制する」「`required` で未登録の状態を登録だけができる状態にし、行き止まりにしない」を加える。
+12 節が承認された場合は、PAW-023 の受け入れ条件に「Owner が設定で変える Policy に従って強制する」「`required` で未登録の状態を登録だけができる状態にし、行き止まりにしない」「Passkey の `StepUpVerifier` を `AuthService(step_up_verifiers={AuthMethod.PASSKEY: ...})` に登録して、Policy の変更（`PUT /auth/policy`）を使えるようにする」「Owner / Admin の他の重要操作（Admin による Lock の解除など）にも Passkey の Step-up を要求する」を加える。
 
 ## 決めてほしいこと
 
 1. 4 節の Session の寿命の 2 つの解釈（無操作と絶対の上限、通常 Session の絶対の上限）。
 2. 1〜3、5、7〜9 節の数値と選択を、推奨どおりにしてよいか。
-3. 12 節: Passkey Policy を Owner が変えられる設定にすること、Owner 専用の変更、Step-up の再認証、既存 Session に影響しないこと。
+3. 12 節: Passkey Policy を Owner が変えられる設定にすること、Owner 専用の変更、Passkey の Step-up の再認証（PAW-023 が入るまで本番では変更できないこと）、既存 Session に影響しないこと。
 4. 12 節: `users.passkey_required` の扱い（設定を見る。列の整理は PAW-023）。
 5. 9 節: Audit に接続元と名前の Hash の列を足すか（足す場合は Decision 0004 の変更）。
 6. 8 節: 全体の Rate Limit と、Recovery の DoS の許容。

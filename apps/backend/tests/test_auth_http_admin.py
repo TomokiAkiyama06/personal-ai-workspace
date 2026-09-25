@@ -269,11 +269,70 @@ class RoleMatrixTest(HttpTestCase):
         return self.call("PUT", "/api/v1/auth/policy", token=token, json=body)
 
     def step_up(self, token, password):
+        """The real password step-up (rotates the cookie)."""
         response = self.call(
             "POST", "/api/v1/auth/step-up", token=token, json={"password": password}
         )
         self.assertEqual(response.status_code, 200, response.text)
         return self.token_of(response)
+
+    def passkey_step_up(self, token):
+        """A passkey step-up, written by the fixture (there is no Passkey yet)."""
+        self.fake_passkey_step_up(token)
+        return token
+
+    def test_a_password_step_up_is_refused_for_the_policy_change_over_http(self):
+        # A stolen Owner password must not relax the policy (REQUIREMENTS.md:
+        # Passkey step-up for the Owner's sensitive operations). Until PAW-023
+        # provides Passkeys, the change is unavailable in production.
+        stepped = self.step_up(self.owner, OWNER_PASSWORD)
+        response = self.put_policy(stepped, passkey_owner="optional")
+        self.assertEqual(
+            (response.status_code, error_code(response)),
+            (403, "step_up_method_insufficient"),
+        )
+        self.assertEqual(self.scalar("SELECT version FROM auth_policy"), 1)
+        self.assertEqual(
+            self.scalar("SELECT passkey_owner FROM auth_policy"), "required"
+        )
+        # The session reports the method it holds, so a client can say why.
+        report = self.call("GET", "/api/v1/auth/session", token=stepped).json()
+        self.assertEqual(report["auth"]["step_up"]["method"], "password")
+
+    def test_the_password_step_up_cannot_be_upgraded_by_asking_for_a_passkey_one(self):
+        stepped = self.step_up(self.owner, OWNER_PASSWORD)
+        for body in (
+            {"method": "passkey", "password": OWNER_PASSWORD},
+            {"method": "passkey"},
+        ):
+            with self.subTest(body=body):
+                response = self.call(
+                    "POST", "/api/v1/auth/step-up", token=stepped, json=body
+                )
+                self.assertEqual(response.status_code, 422)
+        self.assertEqual(
+            self.scalar(
+                "SELECT stepup_method FROM auth_sessions WHERE revoked_at IS NULL "
+                "AND user_id = :u ORDER BY stepup_at DESC NULLS LAST LIMIT 1",
+                u=self.owner_id,
+            ),
+            "password",
+        )
+        response = self.put_policy(stepped, passkey_owner="optional")
+        self.assertEqual(error_code(response), "step_up_method_insufficient")
+
+    def test_the_passkey_step_up_is_what_allows_the_change(self):
+        stepped = self.passkey_step_up(self.owner)
+        response = self.put_policy(stepped, passkey_owner="optional")
+        self.assertEqual(
+            (response.status_code, response.json()["passkey_owner"]), (200, "optional")
+        )
+
+    def test_a_missing_step_up_is_still_step_up_required(self):
+        response = self.put_policy(self.owner, passkey_user="required")
+        self.assertEqual(
+            (response.status_code, error_code(response)), (403, "step_up_required")
+        )
 
     def test_only_the_owner_changes_the_policy_and_only_after_a_step_up(self):
         for token in (self.admin, self.user):
@@ -288,7 +347,7 @@ class RoleMatrixTest(HttpTestCase):
         self.assertEqual(
             (response.status_code, error_code(response)), (403, "step_up_required")
         )
-        stepped = self.step_up(self.owner, OWNER_PASSWORD)
+        stepped = self.passkey_step_up(self.owner)
         response = self.put_policy(stepped, passkey_user="required")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
@@ -302,7 +361,7 @@ class RoleMatrixTest(HttpTestCase):
         self.assertEqual(self.scalar("SELECT count(*) FROM auth_policy_changes"), 1)
 
     def test_a_stale_version_is_409_and_the_body_is_checked_strictly(self):
-        stepped = self.step_up(self.owner, OWNER_PASSWORD)
+        stepped = self.passkey_step_up(self.owner)
         self.assertEqual(
             self.put_policy(stepped, passkey_user="required").status_code, 200
         )
@@ -328,7 +387,7 @@ class RoleMatrixTest(HttpTestCase):
         self.assertEqual(self.scalar("SELECT version FROM auth_policy"), 2)
 
     def test_tightening_does_not_sign_anybody_out_and_the_owner_can_still_sign_in(self):
-        stepped = self.step_up(self.owner, OWNER_PASSWORD)
+        stepped = self.passkey_step_up(self.owner)
         response = self.put_policy(
             stepped, passkey_user="required", passkey_admin="required"
         )
@@ -344,7 +403,7 @@ class RoleMatrixTest(HttpTestCase):
         self.assertEqual(self.login("boss", OWNER_PASSWORD).status_code, 200)
 
     def test_relaxing_is_the_owners_too_and_recorded_with_who_and_what(self):
-        stepped = self.step_up(self.owner, OWNER_PASSWORD)
+        stepped = self.passkey_step_up(self.owner)
         self.assertEqual(
             self.put_policy(
                 stepped, passkey_owner="optional", passkey_admin="optional"

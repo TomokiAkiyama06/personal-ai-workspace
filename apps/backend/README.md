@@ -929,7 +929,7 @@ Passkey の登録・認証・強制と Step-up の Passkey は PAW-023 です（
 | `POST /step-up` | `account.manage` | Password を再入力して Step-up する（Session ID を作り直す） |
 | `POST /users/{id}/unlock` | `admin.users.manage` | Login の Lock を解除する（Admin は User だけ、Admin と Owner は Owner だけ） |
 | `GET /policy` | `admin.auth_policy.view`（Admin、Owner） | Workspace の認証 Policy |
-| `PUT /policy` | `owner.auth_policy.manage`（**Owner だけ**） | Policy を変える（`expected_version` と直近の Step-up が要る） |
+| `PUT /policy` | `owner.auth_policy.manage`（**Owner だけ**） | Policy を変える（`expected_version` と直近の **Passkey の** Step-up が要る。PAW-023 まで本番では使えない） |
 
 | 状態 | Code |
 | --- | --- |
@@ -938,7 +938,7 @@ Passkey の登録・認証・強制と Step-up の Passkey は PAW-023 です（
 | Password が Policy を満たさない | 422 `password_policy`（Message に規則の Code だけ。入力は返さない） |
 | Token が受け付けられない（すべて同じ応答） | 400 `invalid_token` |
 | 別の Origin からの状態を変える Request | 403 `forbidden_origin` |
-| Policy の変更に Step-up がない / Version が古い | 403 `step_up_required` / 409 `version_conflict` |
+| Policy の変更に Step-up がない / Step-up が Password だけ / Version が古い | 403 `step_up_required` / 403 `step_up_method_insufficient` / 409 `version_conflict` |
 | DB・Audit・Hash の計算が使えない | 503 `service_unavailable`（何も変更されず、認証されない） |
 
 未知の Field、型違い（`"remember_me": "yes"`、数値の Password）、長すぎる入力は 422 です（入力は返しません）。
@@ -959,7 +959,7 @@ Passkey の登録・認証・強制と Step-up の Passkey は PAW-023 です（
 - ID は 256 bit の乱数（`secrets`）。**DB には SHA-256 だけを保存**します（ID は Cookie にだけある）。
 - Cookie: `__Host-paw_session`、`Secure`、`HttpOnly`、`SameSite=Strict`（設定で `Lax`）、`Path=/`、Domain なし。Remember Me のときだけ `Max-Age`（残りの寿命）。
 - 寿命（既定）: **通常は 30 日間使わなければ失効し、開始から 90 日で必ず失効**。**Remember Me は最大 90 日**（使わなくても、使っても）。有効かどうかは、判定する文の中で **Database の時計**（`clock_timestamp()`）を読んで決めます。Test が差し込む時計は「Process の時計と Database の時計の新しいほう」として使うので、Process の時計が遅れていても寿命は長くなりません。
-- 最終利用日時の更新は 60 秒に 1 回まで。失効から 30 日たった行は、Login のたびに 50 行ずつ消します。
+- 最終利用日時の更新は 60 秒に 1 回まで。**終わってから 30 日**たった行は、Login のたびに 50 行ずつ消します。終わった時刻は、無操作の期限（最後の利用 + 無操作の上限）と失効の時刻の早いほうで、Database の時計で判定します（無操作の期限は絶対の期限を超えず、CHECK 制約が保つので、絶対の期限だけを見ると 30 日で無操作になった通常 Session が 120 日目まで残ります）。
 - **Rotation**: Login のたびに新しい ID を作り、Browser が持っていた古い Session は失効します（Session Fixation の防止）。Password の変更と Step-up では、同じ Session の ID を作り直し、古い ID は即座に効かなくなります。同時の Rotation は 1 つだけが成功します（Compare-and-Swap）。
 - Role の変更では ID を作り直しません。ID は Role を持たず、Role は Request ごとに `users` から読むので、昇格・降格は次の Request から効きます。
 - 端末の管理: 一覧、個別の Logout、他の全端末の Logout、Logout。失効の理由（`logout`、`revoked_by_user`、`logout_others`、`password_changed`、`password_reset`、`recovery`、`account_closed`、`admin`、`replaced`）は行に残ります。`AuthService.revoke_all_sessions_of` は、User を削除待ちにする処理が呼ぶための部品です（`users.status` が `active` でなくなれば Session は効かなくなりますが、復元されても生き返らないように行も終わらせます）。
@@ -997,11 +997,11 @@ Passkey の登録・認証・強制と Step-up の Passkey は PAW-023 です（
 ### Passkey Policy（Owner が変える設定）と Step-up
 
 - `auth_policy`（1 行、`version` つき）: Owner / Admin / User ごとの Passkey の要求（`required` / `optional`）、User へ Passkey を強く勧めるか、Step-up の有効時間（5〜240 分）。**既定は要件のまま**（Owner・Admin は required、User は optional で勧める、30 分）。Decision 0015 の 12 節が、要件の固定の方針を「Owner が変えられる設定の既定値」に読み替える提案です。
-- **変更は Owner だけ**（`owner.auth_policy.manage`。Agent に委任できず、Audit は REQUIRED）。**Owner の Session の直近の Step-up**（Policy の有効時間の内。Row Lock の下で Database の時計）が要ります。`expected_version` が現在と違えば 409 で、**同時の編集で更新が失われません**（別の接続で競わせる Test 済み）。同じ値の更新は Version を上げません。
+- **変更は Owner だけ**（`owner.auth_policy.manage`。Agent に委任できず、Audit は REQUIRED）。**Owner の Session の直近の Passkey の Step-up**（Policy の有効時間の内。Row Lock の下で Database の時計）が要ります。**Password の Step-up は数えません**（403 `step_up_method_insufficient`。Password を盗んだ者が `POST /step-up` で得られる Step-up を受け付けると、Owner / Admin の Passkey の要求を緩められてしまうため。要件: Owner / Admin の重要操作は Passkey の Step-up）。**そのため、PAW-023 が Passkey の Verifier を登録するまで、`PUT /policy` は本番では使えません**（Owner が変えられる Policy は PAW-023 で端から端まで動きます。それまでは既定値、つまり要件どおりの Policy が効きます）。Test は、Passkey の Step-up を Test の Fixture が Session の行へ書いて、この経路を確かめます。Step-up の方法はその方法の Verifier だけが記録し、別の方法の鍵で登録した Verifier は拒否されます。`auth.step_up.satisfied` は「時間内に Step-up があった」だけを表すので、方法の強さは `method` で見ます。`expected_version` が現在と違えば 409 で、**同時の編集で更新が失われません**（別の接続で競わせる Test 済み）。同じ値の更新は Version を上げません。
 - 変更は `auth_policy_changes`（誰が・いつ・各項目の変更前後。追記専用）と Audit（`auth.policy.update`）に、同じ Transaction で残ります。
 - **効く範囲は新しい Sign-in と Session から**です。**既存の Session は失効も降格もしません**（厳しくしても黙って Logout されない。Test 済み）。`GET /session` の `auth.passkey` が、その人の要求（`requirement`）、登録の有無（`enrolled`。PAW-023 まで常に `false`）、`enrollment_required`（`required` で未登録）、`recommended`（User に勧める）を返します。
 - **この Issue は Passkey を強制しません**（PAW-023）。したがって、どの設定でも Owner は Password で Login できます。PAW-023 は「`required` で未登録」を登録だけができる状態にし、Password Login と `owner-recover` を残さなければなりません（行き止まりを作らない）。`users.passkey_required` 列は Owner / Admin では CHECK 制約で `false` にできないため、**Login の処理はこの列を見ず `auth_policy` を見ます**（列の整理は PAW-023）。
-- **PAW-023 の差し込み口（まとめ）**: (1) `AuthService(step_up_verifiers=...)` に Passkey の `StepUpVerifier` を登録する。(2) `PasskeyEnrollment` を差し替える。(3) `AuthService(credential_invalidators=...)` に Passkey の失効を足す（Token の受け取りと同じ Transaction で走る）。(4) `auth_sessions.auth_method` と `stepup_method` の CHECK は `passkey` を許すので、Session の Table の変更は要らない。(5) Passkey は 1 User に複数あるため `password_credentials` へは足さず、別の Table にする。(6) 要求は `auth_policy` から `AuthPolicy.requirement_for(role)` で読む。
+- **PAW-023 の差し込み口（まとめ）**: (1) `AuthService(step_up_verifiers={AuthMethod.PASSKEY: ...})` に Passkey の `StepUpVerifier`（`method = AuthMethod.PASSKEY`。別の方法の鍵での登録は拒否される）を登録する。これで `PUT /policy` が使えるようになる。(2) `PasskeyEnrollment` を差し替える。(3) `AuthService(credential_invalidators=...)` に Passkey の失効を足す（Token の受け取りと同じ Transaction で走る）。(4) `auth_sessions.auth_method` と `stepup_method` の CHECK は `passkey` を許すので、Session の Table の変更は要らない。(5) Passkey は 1 User に複数あるため `password_credentials` へは足さず、別の Table にする。(6) 要求は `auth_policy` から `AuthPolicy.requirement_for(role)` で読む。
 - **Step-up の差し込み口**: `StepUpVerifier`（`method`、`verify`）と `StepUpEvidence`。Password の実装（`PasswordStepUpVerifier`）が入っています。`POST /step-up` は成功すると Session に時刻と方法を記録して ID を作り直し、`auth.step_up`（方法、時刻、期限、`satisfied`）に出ます。PAW-023 は Passkey の Verifier を `AuthService(step_up_verifiers=...)` に登録するだけでよく、`PasskeyEnrollment`（既定は誰も登録していない）も同様に差し替えます。
 
 ### CSRF
@@ -1020,7 +1020,7 @@ Passkey の登録・認証・強制と Step-up の Passkey は PAW-023 です（
 | `auth.logout`、`auth.session.revoke`、`auth.session.revoke_others`、`auth.session.revoke_all` | Session の失効 |
 | `auth.password.change`、`auth.password.set`（`setup`、`recovery`） | Password の変更・設定 |
 | `auth.step_up` | allow `verified` / deny |
-| `auth.policy.update` | allow `updated` / deny `role_not_allowed`、`step_up_required`、`version_conflict` |
+| `auth.policy.update` | allow `updated` / deny `role_not_allowed`、`step_up_required`、`step_up_method_insufficient`、`version_conflict` |
 
 - Login の行は、Account の ID（`actor_id`、`actor_role`）と、接続元の Bucket を表す**不透明な UUID**（`resource_kind = login_source`。Bucket の Hash から作る仮名で、Address は保存しない）を持ちます。
 - **存在しない名前の失敗は DB へ書きません**（Log に固定の 1 行。誰でも作れる行になり、Audit の Table は削除できないため）。Lock 中に拒否された試行も書きません。
@@ -1052,6 +1052,7 @@ Migration `0022`（`down_revision` は `0026`。鎖は `0001 → 0025 → 0032 �
 
 ### 制限と未確認の点
 
+- **`PUT /api/v1/auth/policy`（Owner が変えられる Passkey Policy の変更）は、PAW-023 が Passkey の Step-up を入れるまで本番では使えません**（Passkey の Step-up を要求し、Password の Step-up は数えないため。上の「Passkey Policy」）。Owner / Admin の他の重要操作（Admin による Lock の解除など）にも Step-up は要求していません（要件の「重要操作」の範囲と Passkey の Step-up は PAW-023 と各操作の Issue で決めます）。Tool Broker の強い承認は別の `StepUpVerifier`（`tools/approvals.py`、Fail Closed）を持ち、この Session の `stepup_*` は読みません。PAW-023 は両方に Passkey の Step-up を結び付けます。
 - **Passkey は登録も強制もしません**（PAW-023）。Owner / Admin の Passkey が必須という要件は、PAW-023 が入るまで Login では強制されず、Password だけで Login できます。
 - 複数端末の追加（QR / Link の Pairing、Owner / Admin の既存端末での承認）、Admin による強制 Reset の Token の発行、Owner / Admin の異常な失敗の信頼済み端末への警告は含みません（Decision 0015 の 14 節）。
 - `/api/v1/events` の 2 つの Endpoint は、System Event しか流さない間は認証なしのままです（公開一覧に理由つきで載っています）。非公開の Event を足す Issue が `require_capability` を付けます。

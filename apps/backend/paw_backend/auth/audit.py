@@ -74,6 +74,7 @@ class AuthReason(StrEnum):
     BACKOFF_STARTED = "backoff_started"
     ROLE_NOT_ALLOWED = "role_not_allowed"
     STEP_UP_REQUIRED = "step_up_required"
+    STEP_UP_METHOD_INSUFFICIENT = "step_up_method_insufficient"
     VERSION_CONFLICT = "version_conflict"
 
 

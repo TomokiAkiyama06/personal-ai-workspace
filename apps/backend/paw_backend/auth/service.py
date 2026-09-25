@@ -232,6 +232,13 @@ class AuthService:
                 getattr(verifier, "verify", None)
             ):
                 raise TypeError("step_up_verifiers maps AuthMethod to a verifier")
+            # The method a step-up is recorded under is the key it was verified
+            # under: a verifier of one method registered under another's key (a
+            # password check filed as a passkey step-up) is refused.
+            if getattr(verifier, "method", None) != method:
+                raise TypeError(
+                    "a step-up verifier must be registered for its own method"
+                )
         invalidators = tuple(credential_invalidators)
         if not all(callable(invalidator) for invalidator in invalidators):
             raise TypeError("credential_invalidators must be callables")

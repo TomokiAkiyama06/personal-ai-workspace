@@ -42,6 +42,7 @@ from paw_backend.auth.errors import (
     PolicyVersionConflictError,
     SessionEndedError,
     SessionNotFoundError,
+    StepUpMethodInsufficientError,
     StepUpRequiredError,
     ThrottledError,
     TokenRejectedError,
@@ -234,6 +235,12 @@ def api_errors(
         raise ApiError(404, "not_found", "Not Found") from None
     except SessionEndedError:
         raise ApiError(401, "unauthorized", "Authentication required") from None
+    except StepUpMethodInsufficientError:
+        raise ApiError(
+            403,
+            "step_up_method_insufficient",
+            "This operation needs a Passkey step-up",
+        ) from None
     except StepUpRequiredError:
         raise ApiError(
             403, "step_up_required", "A recent step-up authentication is required"

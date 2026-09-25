@@ -15,10 +15,14 @@ migration seeds the requirements' values.
   lock a different version is refused (``PolicyVersionConflictError``), so two
   concurrent edits cannot lose an update; every change moves the version up by
   exactly one (also a trigger of the migration).
-* **Step-up.** The change needs a step-up of the Owner's own session within the
-  policy's window (password re-entry until PAW-023 adds Passkeys): a stolen
-  session cannot relax the policy. The window is judged by the database's clock
-  after the row lock is held.
+* **Step-up.** The change needs a **Passkey** step-up of the Owner's own session
+  within the policy's window (REQUIREMENTS.md: the Owner's sensitive operations).
+  A password step-up is refused (``StepUpMethodInsufficientError``): whoever holds
+  the password can obtain one, so accepting it would let a stolen password relax
+  the policy. **Until PAW-023 provides Passkeys this operation is therefore
+  unavailable in production**; the path is proved with a passkey step-up that the
+  tests write. The window is judged by the database's clock after the row lock is
+  held.
 * **History.** Every change writes ``auth_policy_changes`` (who, when, each field
   before and after) and an audit event, in the same transaction.
 * **Effect.** The policy applies to NEW sign-ins and new sessions. Changing it
@@ -42,9 +46,10 @@ from paw_backend.auth.errors import (
     AuthPermissionError,
     InvalidAuthInputError,
     PolicyVersionConflictError,
+    StepUpMethodInsufficientError,
     StepUpRequiredError,
 )
-from paw_backend.auth.models import PasskeyRequirement
+from paw_backend.auth.models import AuthMethod, PasskeyRequirement
 from paw_backend.auth.state import AuthPolicy
 from paw_backend.authz.roles import SystemRole
 from paw_backend.authz.subjects import Principal
@@ -53,6 +58,8 @@ from paw_backend.db import Database
 MIN_STEPUP_WINDOW_MINUTES = 5
 MAX_STEPUP_WINDOW_MINUTES = 240
 MAX_VERSION = 2_147_483_646
+# The step-up method a change of the policy needs (see ``AuthPolicyService.update``).
+POLICY_CHANGE_STEP_UP_METHOD = AuthMethod.PASSKEY
 
 _SELECT = """
 SELECT version, passkey_owner, passkey_admin, passkey_user,
@@ -177,24 +184,23 @@ class AuthPolicyService:
             if current.version != expected_version:
                 denial = AuthReason.VERSION_CONFLICT
                 raise PolicyVersionConflictError
-            # The window is judged now, under the row lock, by the later of the
-            # service clock and the database's: a step-up that is older than the
-            # current window is no step-up.
-            fresh = (
+            # The step-up is judged now, under the row lock, by the later of the
+            # service clock and the database's: one that is older than the current
+            # window is no step-up. Its METHOD is read with it (see below).
+            method = (
                 await session.execute(
                     text(
                         """
                         WITH clock AS (SELECT greatest(CAST(:now AS timestamptz),
                                                        clock_timestamp()) AS ts)
-                        SELECT EXISTS (
-                            SELECT 1 FROM clock, auth_sessions s
-                             WHERE s.id = :id AND s.user_id = :user_id
-                               AND s.revoked_at IS NULL
-                               AND s.idle_expires_at > clock.ts
-                               AND s.absolute_expires_at > clock.ts
-                               AND s.stepup_at IS NOT NULL
-                               AND s.stepup_at + :window * interval '1 minute'
-                                   > clock.ts)
+                        SELECT s.stepup_method FROM clock, auth_sessions s
+                         WHERE s.id = :id AND s.user_id = :user_id
+                           AND s.revoked_at IS NULL
+                           AND s.idle_expires_at > clock.ts
+                           AND s.absolute_expires_at > clock.ts
+                           AND s.stepup_at IS NOT NULL
+                           AND s.stepup_at + :window * interval '1 minute'
+                               > clock.ts
                         """
                     ),
                     {
@@ -204,10 +210,22 @@ class AuthPolicyService:
                         "window": current.stepup_window_minutes,
                     },
                 )
-            ).scalar_one()
-            if not fresh:
+            ).scalar_one_or_none()
+            if method is None:
                 denial = AuthReason.STEP_UP_REQUIRED
                 raise StepUpRequiredError
+            # REQUIREMENTS.md: the Owner's sensitive operations need a PASSKEY
+            # step-up. A password step-up is refused here even though the session
+            # has a fresh one: whoever holds the Owner's password can obtain that
+            # (``POST /auth/step-up``), so accepting it would let a stolen password
+            # relax the policy. Until PAW-023 registers a passkey verifier no
+            # session can hold a passkey step-up, so this operation is unavailable
+            # in production (fail closed). The method is only ever written by the
+            # verifier of that method (``AuthService`` refuses a verifier
+            # registered under another method's key).
+            if method != POLICY_CHANGE_STEP_UP_METHOD.value:
+                denial = AuthReason.STEP_UP_METHOD_INSUFFICIENT
+                raise StepUpMethodInsufficientError
             if all(getattr(current, field) == value for field, value in new.items()):
                 return current
             now = self._audit.now()
@@ -284,7 +302,7 @@ class AuthPolicyService:
 
         try:
             return await run(self._database, work, self._timeout)
-        except (PolicyVersionConflictError, StepUpRequiredError):
+        except (PolicyVersionConflictError, StepUpRequiredError):  # and its subclass
             # Refused: the denial is recorded on its own (the transaction rolled back).
             if denial is not None:
                 await self._deny(actor, context, denial)

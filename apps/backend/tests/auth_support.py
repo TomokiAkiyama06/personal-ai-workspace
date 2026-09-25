@@ -248,6 +248,20 @@ class PostgresAuthTestCase(unittest.IsolatedAsyncioTestCase):
             return_exceptions=True,
         )
 
+    async def fake_passkey_step_up(self, session_id: uuid.UUID, at=None) -> None:
+        """Write a passkey step-up into a session row, as a PAW-023 verifier would.
+
+        There is no Passkey yet, so nothing in the application can produce this
+        value; the test fixture writes it (as the database's owner) to prove what
+        the code does once a Passkey exists. ``at`` defaults to the test clock.
+        """
+        await self.execute(
+            "UPDATE auth_sessions SET stepup_at = :at, stepup_method = 'passkey' "
+            "WHERE id = :id",
+            id=session_id,
+            at=at or self.clock.now,
+        )
+
     async def advance(self, **delta: float) -> None:
         self.clock.advance(**delta)
 

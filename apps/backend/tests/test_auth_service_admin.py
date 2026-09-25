@@ -11,10 +11,12 @@ from paw_backend.auth.errors import (
     InvalidAuthInputError,
     InvalidCredentialsError,
     PolicyVersionConflictError,
+    StepUpMethodInsufficientError,
     StepUpRequiredError,
     ThrottledError,
 )
 from paw_backend.auth.models import AuthMethod, PasskeyRequirement
+from paw_backend.auth.service import AuthService
 from paw_backend.auth.state import StepUpEvidence
 from paw_backend.authz import Principal, SystemRole
 
@@ -22,6 +24,15 @@ from .auth_support import PASSWORD, T0, PostgresAuthTestCase, requires_postgres
 
 SOURCE = "203.0.113.7"
 OTHER = "198.51.100.4"
+
+
+class FakePasskeyVerifier:
+    """Stands in for PAW-023's verifier: accepts nothing by itself."""
+
+    method = AuthMethod.PASSKEY
+
+    async def verify(self, user_id, login_name, evidence) -> bool:
+        return False
 
 
 def context(source: str = SOURCE) -> RequestContext:
@@ -157,16 +168,24 @@ class UnlockTest(AdminTestCase):
 
 @requires_postgres
 class PolicyTest(AdminTestCase):
-    async def owner_session(self, step_up=True):
+    async def owner_session(self, step_up="passkey"):
+        """A signed-in Owner session.
+
+        ``step_up``: ``"passkey"`` (a passkey step-up written by the fixture: there
+        is no Passkey to produce one yet), ``"password"`` (the real password
+        step-up, which rotates the session) or ``False`` (none).
+        """
         logged = await self.auth.login("boss", "owner passphrase", context())
-        if not step_up:
-            return logged.session
-        stepped = await self.auth.step_up(
-            logged.session,
-            StepUpEvidence(AuthMethod.PASSWORD, "owner passphrase"),
-            context(),
-        )
-        return stepped.session
+        if step_up == "password":
+            stepped = await self.auth.step_up(
+                logged.session,
+                StepUpEvidence(AuthMethod.PASSWORD, "owner passphrase"),
+                context(),
+            )
+            return stepped.session
+        if step_up == "passkey":
+            await self.fake_passkey_step_up(logged.session.record.id)
+        return logged.session
 
     async def update(self, session, version=1, **changes):
         values = {
@@ -346,9 +365,160 @@ class PolicyTest(AdminTestCase):
             1,
         )
 
+    async def test_a_change_needs_a_step_up_that_is_actually_missing_not_insufficient(
+        self,
+    ):
+        session = await self.owner_session(step_up=False)
+        with self.assertRaises(StepUpRequiredError) as caught:
+            await self.update(session, passkey_user="required")
+        # "no step-up at all" is the base error, not the "wrong method" one.
+        self.assertIs(type(caught.exception), StepUpRequiredError)
+
+    async def test_a_password_step_up_is_not_enough_to_change_the_policy(self):
+        # REQUIREMENTS.md: the Owner's sensitive operations need a Passkey
+        # step-up. A stolen Owner password must not be able to relax the policy.
+        session = await self.owner_session("password")
+        step = (await self.auth.view(session)).auth.step_up
+        self.assertEqual((step.method, step.satisfied), (AuthMethod.PASSWORD, True))
+        for changes in (
+            {"passkey_owner": "optional"},
+            {"passkey_admin": "optional"},
+            {"passkey_user": "required"},
+            {"stepup_window_minutes": 240},
+        ):
+            with self.subTest(changes=changes):
+                with self.assertRaises(StepUpMethodInsufficientError):
+                    await self.update(session, **changes)
+        policy = await self.auth.policy.get()
+        self.assertEqual(policy.version, 1)
+        self.assertEqual(policy.passkey_owner, PasskeyRequirement.REQUIRED)
+        self.assertEqual(
+            await self.scalar("SELECT count(*) FROM auth_policy_changes"), 0
+        )
+        summary = await self.audit_summary()
+        self.assertEqual(
+            summary[("auth.policy.update", "deny", "step_up_method_insufficient")], 4
+        )
+        self.assertNotIn(("auth.policy.update", "allow", "updated"), summary)
+
+    async def test_the_insufficient_method_error_is_a_step_up_error(self):
+        # Callers that handle "a step-up is needed" also handle this one.
+        self.assertTrue(issubclass(StepUpMethodInsufficientError, StepUpRequiredError))
+
+    async def test_a_passkey_step_up_changes_the_policy_and_the_change_is_recorded(
+        self,
+    ):
+        session = await self.owner_session("passkey")
+        policy = await self.update(session, passkey_user="required")
+        self.assertEqual(
+            (policy.version, policy.passkey_user), (2, PasskeyRequirement.REQUIRED)
+        )
+
+    async def test_a_password_step_up_cannot_be_turned_into_a_passkey_one(self):
+        session = await self.owner_session("password")
+        # 1. Asking for the passkey method with a password: no verifier is
+        #    registered for it, so it is refused before anything is written.
+        for password in ("owner passphrase", None):
+            with self.subTest(password=password):
+                with self.assertRaises(InvalidAuthInputError):
+                    await self.auth.step_up(
+                        session, StepUpEvidence(AuthMethod.PASSKEY, password), context()
+                    )
+        row = (
+            await self.query(
+                "SELECT stepup_method FROM auth_sessions WHERE id = :id",
+                id=session.record.id,
+            )
+        )[0]
+        self.assertEqual(row.stepup_method, "password")
+        # 2. The password verifier refuses evidence that claims another method.
+        verifier = self.auth._verifiers[AuthMethod.PASSWORD]
+        self.assertFalse(
+            await verifier.verify(
+                self.owner.id,
+                "boss",
+                StepUpEvidence(AuthMethod.PASSKEY, "owner passphrase"),
+            )
+        )
+        # 3. Repeating the password step-up (refresh, replay) stays a password one.
+        again = await self.auth.step_up(
+            session, StepUpEvidence(AuthMethod.PASSWORD, "owner passphrase"), context()
+        )
+        self.assertEqual(
+            (await self.auth.view(again.session)).auth.step_up.method,
+            AuthMethod.PASSWORD,
+        )
+        with self.assertRaises(StepUpMethodInsufficientError):
+            await self.update(again.session, passkey_user="required")
+
+    async def test_a_verifier_cannot_be_registered_for_a_method_it_does_not_verify(
+        self,
+    ):
+        # A password verifier under the passkey key would let a password
+        # step-up be recorded as a passkey one: the registration is refused.
+        service = self.services.service
+        for key, verifier in (
+            (AuthMethod.PASSKEY, self.auth._verifiers[AuthMethod.PASSWORD]),
+            (AuthMethod.PASSWORD, FakePasskeyVerifier()),
+        ):
+            with self.subTest(key=key):
+                with self.assertRaises(TypeError):
+                    AuthService(
+                        self.service_database,
+                        hasher=service._hasher,
+                        sessions=service._sessions,
+                        throttle=service._throttle,
+                        audit=service._audit,
+                        policy=service._policy,
+                        step_up_verifiers={key: verifier},
+                    )
+
+    async def test_a_later_password_step_up_replaces_a_passkey_one(self):
+        # The recorded method is the LAST one: a password step-up cannot inherit
+        # the strength of an earlier passkey one (it lowers, never raises).
+        logged = await self.auth.login("boss", "owner passphrase", context())
+        await self.fake_passkey_step_up(logged.session.record.id)
+        await self.update(logged.session, passkey_user="required")  # accepted
+        stepped = await self.auth.step_up(
+            logged.session,
+            StepUpEvidence(AuthMethod.PASSWORD, "owner passphrase"),
+            context(),
+        )
+        with self.assertRaises(StepUpMethodInsufficientError):
+            await self.update(stepped.session, 2, passkey_user="optional")
+
+    async def test_a_real_passkey_step_up_through_the_seam_is_accepted(self):
+        # What PAW-023 will do: register a verifier for the passkey method; the
+        # step-up then records the method and rotates the session as usual.
+        seen = []
+
+        class Verifier(FakePasskeyVerifier):
+            async def verify(self, user_id, login_name, evidence):
+                seen.append((user_id, login_name))
+                return True
+
+        service = self.services.service
+        extended = AuthService(
+            self.service_database,
+            hasher=service._hasher,
+            sessions=service._sessions,
+            throttle=service._throttle,
+            audit=service._audit,
+            policy=service._policy,
+            step_up_verifiers={AuthMethod.PASSKEY: Verifier()},
+        )
+        logged = await self.auth.login("boss", "owner passphrase", context())
+        stepped = await extended.step_up(
+            logged.session, StepUpEvidence(AuthMethod.PASSKEY), context()
+        )
+        self.assertEqual(seen, [(self.owner.id, "boss")])
+        self.assertNotEqual(stepped.token, logged.token)
+        policy = await self.update(stepped.session, passkey_user="required")
+        self.assertEqual(policy.version, 2)
+
     async def test_a_step_up_of_another_session_does_not_count(self):
         stale = await self.owner_session(step_up=False)
-        await self.owner_session(step_up=True)  # a second session that did step up
+        await self.owner_session()  # a second session that did step up
         with self.assertRaises(StepUpRequiredError):
             await self.update(stale, passkey_user="required")
 

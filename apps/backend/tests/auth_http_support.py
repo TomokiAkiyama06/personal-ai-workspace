@@ -11,6 +11,7 @@ from sqlalchemy import create_engine, text
 
 from paw_backend.app import create_app
 from paw_backend.auth.limits import SESSION_COOKIE_NAME
+from paw_backend.auth.tokens import hash_session_token
 from paw_backend.auth.wiring import build_auth
 from paw_backend.db import Database
 
@@ -202,6 +203,23 @@ class HttpTestCase(unittest.TestCase):
                     {"id": user_id, "hash": ARGON2.hash(password), "now": T0},
                 )
         return user_id
+
+    def fake_passkey_step_up(self, token: str) -> None:
+        """Write a passkey step-up into the session of ``token`` (see auth_support).
+
+        Nothing in the application can produce a passkey step-up before PAW-023,
+        so the fixture writes the value a Passkey verifier would (at the test
+        clock's time). The session id is not rotated (a real verifier rotates it).
+        """
+        with self.engine.begin() as connection:
+            updated = connection.execute(
+                text(
+                    "UPDATE auth_sessions SET stepup_at = :at, "
+                    "stepup_method = 'passkey' WHERE token_hash = :h"
+                ),
+                {"at": self.clock.now, "h": hash_session_token(token)},
+            ).rowcount
+        assert updated == 1
 
     def rows(self, sql: str, **params) -> list:
         with self.engine.connect() as connection:

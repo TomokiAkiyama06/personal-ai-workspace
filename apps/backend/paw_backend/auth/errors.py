@@ -87,6 +87,19 @@ class StepUpRequiredError(AuthError):
         super().__init__("a recent step-up authentication is required")
 
 
+class StepUpMethodInsufficientError(StepUpRequiredError):
+    """The session has a recent step-up, but by a method too weak for this operation.
+
+    REQUIREMENTS.md: the Owner's and Admin's sensitive operations need a *Passkey*
+    step-up. A password step-up does not count, so a stolen password cannot be
+    turned into the authority to relax the policy. Until PAW-023 provides Passkeys
+    such an operation is refused (fail closed).
+    """
+
+    def __init__(self) -> None:
+        AuthError.__init__(self, "the step-up method is not sufficient")
+
+
 class AuthPermissionError(AuthError):
     """The actor may not do this to this account (beyond what the capability says)."""
 
