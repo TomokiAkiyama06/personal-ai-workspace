@@ -4,7 +4,7 @@ Personal AI Workspace の Core Backend です。
 [PAW-020](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/17) で、後続の Issue が載る最小の Application Skeleton を実装しました。
 Login・Session・Password の Policy と、Owner の Token を受け取る Endpoint は [PAW-022](#login--session--password-policy) で実装しました（Passkey の登録・強制と Step-up の Passkey は PAW-023）。
 RBAC と Audit（PAW-025）、Task の Lifecycle と永続化（[PAW-032](#agent-task-lifecycle)、HTTP の Endpoint はまだありません）、Task Queue・Budget・Loop 検知（[PAW-033](#task-queue--budget--loop-検知)）、Tool Broker と Capability Policy（[PAW-031](#tool-broker--capability-policy)、HTTP の Endpoint はまだありません）、Memory の PostgreSQL Schema（[PAW-040](#memory--conversation-schema)）、
-最小の `users` Table と Owner の初期設定・復旧のコマンド（[PAW-021](#owner-の初期設定と復旧)）を実装済みです。Memory の保存・整理・検索の処理は PAW-041 以降です。
+最小の `users` Table と Owner の初期設定・復旧のコマンド（[PAW-021](#owner-の初期設定と復旧)）を実装済みです。Memory の保存・整理の処理は PAW-041 以降です。Memory の検索（Hybrid Retrieval。[PAW-043](#hybrid-retrieval)、HTTP の Endpoint はまだありません）は実装済みです。
 Shared Memory の管理（Owner / Admin の作成・編集・削除・復元、Candidate の承認、Agent の自動昇格の拒否、System Policy の優先。[PAW-046](#shared-memory-administration)、HTTP の Endpoint はまだありません）も実装済みです。
 Research の一時保存（[PAW-050](#research-scratch-store)、24 時間 TTL、期限切れを消す Janitor つき、HTTP の Endpoint はまだありません）と、Research Provider の Adapter Interface（[PAW-051](#research-provider-adapter)、実際の Provider（Direct Web、Docs、GitHub、OpenCode）はまだありません）と、外部の検索へ送る Query の最小化と送信の Audit（[PAW-053](#research-privacy-filter)。Audit は [#87](#audit-の永続化issue-87) で `audit_events` に永続化済み。方式は Decision 0023（Approved、2026-09-26）で決めています）も実装済みです。
 Claim と Source の対応・回答や Task からの追跡（[PAW-052](#evidence--claim-provenance)、HTTP の Endpoint はまだありません）も実装済みです。
@@ -43,7 +43,7 @@ Python 側の Package（`pgvector-python`）は使わず、`paw_backend/memory/v
 apps/backend/
 ├─ pyproject.toml          # 依存（完全一致で固定）と Ruff 設定
 ├─ alembic.ini             # Alembic 設定（DB URL は持たない）
-├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0022 は Password / Session / Login Throttle / 認証 Policy、0026 は Project、0031 は Tool Approval、0033 は Queue / Budget / Loop、0040 は Memory Schema、0046 は Shared Memory Candidate、0050 は Research Scratch、0052 は Evidence / Claim Provenance、0083 は `tasks (project_id, state)` の Index、0087 は外部送信の Audit の `audit_events.details`）
+├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0022 は Password / Session / Login Throttle / 認証 Policy、0026 は Project、0031 は Tool Approval、0033 は Queue / Budget / Loop、0040 は Memory Schema、0043 は `memory_versions` の全文検索の Index、0046 は Shared Memory Candidate、0050 は Research Scratch、0052 は Evidence / Claim Provenance、0083 は `tasks (project_id, state)` の Index、0087 は外部送信の Audit の `audit_events.details`）
 ├─ paw_backend/
 │  ├─ app.py               # create_app(settings)
 │  ├─ config.py            # PAW_ 環境変数から読む Settings
@@ -59,8 +59,9 @@ apps/backend/
 │  ├─ cli/                 # server-local の管理コマンド `python -m paw_backend.cli`（PAW-021）
 │  ├─ tasks/               # Agent Task の状態遷移と永続化（PAW-032）。`project_gate.py` は Project の状態 Gate の Protocol（Issue #83）
 │  │  └─ queueing/         # Task Queue、Budget、Loop 検知、Escalation の判断（PAW-033）
-│  ├─ memory/              # Memory / Conversation の Model、ACL 条件、vector 型、Pin / Importance 変更の Actor（PAW-040）
-│  │  └─ shared/           # Shared Memory の管理: Service、Candidate、Rule 関数、Policy の優先（PAW-046）
+│  ├─ memory/              # Memory / Conversation の Model、ACL 条件、vector 型、Pin / Importance 変更の Actor（PAW-040）、全文検索の式 `fulltext.py`（PAW-043）
+│  │  ├─ shared/           # Shared Memory の管理: Service、Candidate、Rule 関数、Policy の優先（PAW-046）
+│  │  └─ retrieval/        # Hybrid Retrieval: 権限の解決、SQL Prefilter、Keyword + Vector、Rerank、重複・矛盾（PAW-043）
 │  ├─ projects/            # Project、Membership（招待制）、Lifecycle（PAW-026）、管理者向けの全 Project 一覧（Issue #84）。`task_gate.py` は Task Lane に渡す Project の状態 Gate（Issue #83）、`task_stop.py` は Delete 開始時の Task 停止
 │  ├─ research/providers/  # Research Provider の Adapter Interface と Broker（PAW-051）
 │  ├─ research/privacy/    # Research の Privacy Filter: Query の最小化と外部送信の Audit（PAW-053、永続の Sink は #87）
@@ -1507,7 +1508,7 @@ Model の登録は `embedding_models`（Model ID と次元）への通常の INS
 `memory_embeddings` は `(embedding_model_id, dimensions)` でこの Table を参照し、`dimensions` と実際の次元は CHECK で一致させます。
 そのため 1 つの Model は 1 つの次元だけを持ち、別の次元の Vector は DB が拒否します。Embedding がある間は、Model の次元の変更も Model の削除もできません。
 次元の異なる Vector 同士の距離は計算できないため、近傍検索は先に 1 つの `embedding_model_id` に絞ります（この絞り込みで次元の不一致は起きません）。
-ANN Index（HNSW / IVFFlat）はまだありません。Model が決まった後に PAW-043 が追加します。
+ANN Index（HNSW / IVFFlat）はまだありません。PAW-043（[Hybrid Retrieval](#hybrid-retrieval)）は、Model が未定のため追加せず、権限の条件を保つ条件つきで Model の決定後に足す方針を [Decision 0019](../../docs/decisions/0019-hybrid-retrieval-policy.md)（Approved）に書いています。全文検索の Index `ix_memory_versions_search` だけを Revision `0043` が足します。
 
 Model と Migration の一致は Test が検証します（Alembic の autogenerate の差分が空であること、Model から作った Schema と Migration の Catalog（Trigger を含む）が同じであること）。Trigger は Alembic の比較の対象外なので、Model は DDL Event、Migration は同じ DDL の複製で作り、Trigger 関数の定義も Test が比較します。
 制約名は `paw_backend.db.Base` の命名規則に従います。
@@ -1689,7 +1690,7 @@ Model の実装は、Test を通すことに必要な範囲で素直な書き方
 - Policy の実体（保存、Admin による変更、強制）はこの Issue の範囲外です。`SystemPolicySource` の実装は、Policy を持つ Issue が用意します。
 - `policy_subjects` の宣言が前提です（上の限界）。PAW-042 の矛盾検出が宣言を補う設計は未実装です。
 - Shared Memory の鮮度（再確認の期限など）は `permanent` 固定です（PAW-042 で決めます）。
-- Embedding と Markdown Projection（PAW-043 / PAW-045）は、この Service を通りません。Shared Memory を読む Retrieval は、`readable_memory_versions` を使い、モデルに渡す前に Policy の優先を適用する必要があります（この Service の `internal_effective_view`、または `precedence.resolve_effective_view`。どちらも Policy の文言を含む `InternalEffectiveView` を返すので、User や Agent へ返すときは `.public()` か `effective_view` を使います）。
+- Embedding と Markdown Projection（PAW-045）は、この Service を通りません。Shared Memory を読む Retrieval は、`readable_memory_versions` を使い、モデルに渡す前に Policy の優先を適用する必要があります（この Service の `internal_effective_view`、または `precedence.resolve_effective_view`。どちらも Policy の文言を含む `InternalEffectiveView` を返すので、User や Agent へ返すときは `.public()` か `effective_view` を使います）。PAW-043 の `HybridRetriever`（[Hybrid Retrieval](#hybrid-retrieval)）は、`shared` の候補があるときに `SystemPolicySource` を読み、`precedence.overriding_policy_ids` で Policy が覆う Memory を返しません（文言は使いません）。
 - 上限の数値（50 件、20 個、20,000 文字など）は実測に基づかない仮の値で、`memory.shared.limits` にあります。
 - Migration `0046` の `down_revision` は `0050` です（鎖は `0001 → 0025 → 0032 → 0040 → 0021 → 0033 → 0031 → 0050 → 0046`）。Revision ID は Issue 番号で、鎖の順序ではありません。統合時に Orchestrator が並びを確認します。
 - 一覧の同時刻の並び（`id` の副次キー）は決定的にするためのもので、Test は「同時刻の 12 件が `id` 順」だけを確認します。Query Plan によっては副次キーがなくても同じ順になるため、その Test だけでは副次キーの削除を検出できません（変異 Test で確認済み）。
@@ -2584,6 +2585,89 @@ Human は [Decision 0008](../../docs/decisions/0008-project-membership-and-lifec
 それ以外は実 PostgreSQL（`PAW_TEST_DATABASE_URL`）を使い、未設定なら Skip します。時刻は注入した Clock で、速度に依存する Test はありません。
 `test_projects_task_stop.py` は Task と Queue を本物の `TaskService` / `TaskQueue` で作り（SQL で読み戻す）、Delete 開始が要求を同じ Transaction で記録すること（失敗させると Project も Active のまま）、Processor が running / queued などの Task を止めて Queue の Entry を取り消すこと、冪等なこと、他の Project の Task と Active / Archived の Project の Task に触れないこと、Delete 開始の後に作られた Task を再実行で止めること、要求が「Task が残っている間は完了にならない」ことを確認します。Cancel → Restart → enqueue の競合で残る Entry が、終了済みの Task の後ろでも Project から見つかって Cancel され（claimed の Entry の Worker は Lease を失う）、Sweep の後に現れた Entry があると要求が開いたままになること、件数が `batch_size` を超えると複数回に分かれること、Sweep の途中で復元された Project の Entry は残ること、一覧の後に Restart された Task の Entry は Sweep が残すことを確認します。`InterruptedTaskCancelTest` は、Task の Cancel と Entry の Cancel が 1 つの Transaction であること（Entry の Cancel の中から見ると Task は Cancel 済みで、別の接続からは Task も Entry も元のまま）、Entry の Cancel の失敗と Stopper の Cancel がどちらも元に戻すこと（失敗の後に Restore しても、queued の Task は Entry を持ち続けて Claim される）、Commit の後の Listener の Cancel は整合が要らないこと、競合や Cancel の Error のとき Entry が残ることを確認します。Restore の Test は、6 件の Task（または Entry）の途中で Restore を Commit させ、止まったのが 1 件だけで残りの Task と Entry が queued のままであること、Stopper の Transaction の中に来た Restore は Commit まで待つこと、Delete が再び始まった Project は止め続けることを確認します。`test_task_stop_windows.py` は、3 つの窓を、旧実装にもあった継ぎ目（`TaskService.execute` の前後と、Entry の更新だけを失敗させる DB の Trigger）で再現し、旧実装で失敗して今は通ることを確認します。`test_projects_grants.py` はこれらの Test も Application の Role で実行します。
 
+## Hybrid Retrieval
+
+[PAW-043](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/37)（Revision `0043`）で実装しました。設計は [Memory Architecture](../../docs/MEMORY_ARCHITECTURE.md) の 12・13 節と [要件](../../REQUIREMENTS.md) の「Memory Retrieval Pipeline」に従い、
+要件が決めていない数値・Score・日本語の Keyword 検索・Audit の量・部品の失敗の扱いは
+**[Decision 0019（Approved、2026-09-26）](../../docs/decisions/0019-hybrid-retrieval-policy.md)** にまとめています。数値は暫定値で、`RankingPolicy`（`ranking.py`）と `limits.py` に集めてあります。
+**HTTP の Endpoint はありません。** `HybridRetriever.retrieve(actor, query)` は、認証済みの `Principal` と `RetrievalQuery` を受け取ります。
+
+| ファイル | 内容 |
+| --- | --- |
+| `memory/fulltext.py` | 日本語を含む全文検索の文書式（NFKC、CJK の 1 文字ごとに空白）と Query の語（`model` が Index に使うため `retrieval/` の外） |
+| `retrieval/records.py` | `RetrievalQuery`（検証つき）、`RetrievedMemory`、`ConflictGroup`、`RetrievalResult` |
+| `retrieval/protocols.py`、`fakes.py` | `Embedder`、`Reranker`、`RepoAclSource`、`ProjectGroupSource` の Protocol と、決定的な Fake（`HashingEmbedder`、`OverlapReranker`） |
+| `retrieval/resolver.py`、`scopes.py` | 権限の解決（`Authorizer` と DB の Membership）と、その結果 `ResolvedScopes` |
+| `retrieval/queries.py`、`pool.py` | SQL の Prefilter、Keyword / Vector / Relation の Query、1 Transaction で候補を読む |
+| `retrieval/ranking.py`、`grouping.py` | 融合・鮮度・Score、重複・矛盾・Top-N（純粋な規則） |
+| `retrieval/service.py` | `HybridRetriever`（全体の順序、System Policy、Rerank、Degrade） |
+| `retrieval/stages.py`、`validation.py`、`errors.py`、`limits.py`、`candidates.py` | 部品の呼び出し（時間制限・例外の扱い）、入力の検証、型付きの Error、上限、内部 Record |
+
+### 順序
+
+```text
+Permission / ACL（Authorizer と DB の Membership）   ← Memory を 1 行も読む前
+        ↓ ResolvedScopes
+System Policy を読む（shared を検索するときだけ。候補より前）
+        ↓
+全文検索 / Vector（それぞれ 1 つの SQL。WHERE に権限・status・鮮度と、返してよいかの条件全部）
+        ↓ 融合（Reciprocal Rank Fusion）→ 上位を残す
+Relation（両端が候補になれる conflicts_with）と、矛盾の相手
+        ↓
+Rerank（Reranker Protocol）→ 構造化 Score（confirmed・鮮度・importance・pin・Scope）
+        ↓ 重複の統合 → Conflict Group → Top-N
+```
+
+- **権限は先に、SQL の WHERE に。** Keyword と Vector の Query は、`memory.acl` の条件、`status = 'active'`、鮮度を自分の WHERE に持ち、距離や順位を付ける前に読めない行を除きます（`queries.visible`）。後から絞りません。
+  Scope 名は SQL に書き込み（Generic Plan でも部分 Index を使えます）、Caller の値は Bind します。Relation は**両端**が読めるときだけ読みます。Plan の Test（`test_retrieval_plans.py`）が、Sort より下の Scan に条件があり、上に権限の条件が無いことを確かめます。
+- **「返してよいか」の条件も、候補の上限より前に。** 候補の一覧は上限（`keyword_candidates`、`vector_candidates`、`rerank_candidates`）で切ります。返さない行を上限の**後**で除くと、返さない行が、返す行の場所を奪います（上位が Policy に覆われた Shared Memory や Stale な Memory ばかりだと、答えが空になる）。
+  そこで、後継に置き換えられた Version、`stale_policy = exclude` のときの Stale、System Policy が覆う Shared Memory も、権限と同じく候補の SQL の WHERE に入れています（`queries.visible` と `Eligibility`）。
+  後継: 読める `active` な Version から `supersedes` される行は、`status` が `active` のままでも（Status の更新が遅れた不整合）候補にしません（`memory_relations` の一意な部分 Index で引きます。**読める後継だけ**が数えられ、読めない後継は結果に影響しません）。
+  Stale: `stale_since`、`revalidate` の期限（`verified_at + revalidate_after`。Transaction を UTC にして 1 日を 24 時間で数える）、`repo_commit` が渡された Head と違う、を SQL で判定します（`ranking.freshness_of` と同じ規則で、`test_retrieval_eligibility.py` が行ごとに突き合わせます）。
+  System Policy: Policy を**候補より前に**読み（Shared を検索するときだけ）、`policy_subjects` が Policy の Subject と等しいか、その下にある Shared Memory を除きます（`starts_with(subject, policy || '.')`。`LIKE` は `_` が Wildcard のため使いません）。宣言が壊れた（配列でない、21 個以上、書式違反、文字列でない）Shared Memory は判定できないため除きます（Shared Memory の規則と同じ）。
+  除いた行は順位にも影響しません。除いた行を無効にした DB と結果が全 Field で等しいことを、短い候補の上限で Test します（`test_retrieval_leakage.py`、`test_retrieval_eligibility.py`）。
+- **Scope ごとの認可**（Decision 0019 の 1、2）: `user` は `memory.use`（`REQUIRED`: 呼び出し 1 回に Audit 1 行）、`shared` は `shared_memory.read`、`project` は DB から読み直した受諾済み Membership と `project.read`（Archived は読める。Pending deletion / Deleted / 招待中は読めず、尋ねもしない）、
+  `repo` は `RepoAclSource` の ACL を `project.read` の Repository Resource で判定（`repo_ids` が明示的に空なら、Repository の Scope は飛ばし、Source を呼びません）、`project_group` は `ProjectGroupSource` の ID。Source の答えは 1 回だけ読んでコピーし、コピーできない・型や上限が違うものは `RetrievalSourceError` です。`Principal.project_roles` は信用しません。拒否は「その Scope が何も返さない」だけで、応答に出しません。
+  決定を記録できない（`audit_unavailable`）ときだけ `RetrievalPermissionError` です。`DENIED_ONLY` の `shared_memory.read` / `project.read` は、許可した読み取りを記録しません（この実装は Audit を増やしません。`memory.use` の 1 行は Decision 0004 のとおり）。**`user` を読み取り専用の `memory.read`（`DENIED_ONLY`）に切り替える**ことは、Human が推奨の方向で承認済み（Decision 0019 の 1）ですが、Capability の追加は [Decision 0024](../../docs/decisions/0024-memory-read-capability.md)（Proposed）で決めます。承認され実装されるまで、コードは `memory.use`（`REQUIRED`）のままで、切り替えはその後続の Issue です（authz の Capability の表は、この Issue では変えません）。
+- **結果は読める Memory についてしか語りません。** 件数・合計・「他に n 件」は無く、Conflict Group・`duplicates`・Rerank の入力・順位・Score・`conflicts_incomplete` も、読める Memory だけから決まります。
+- **Keyword**: PostgreSQL の全文検索（`simple`）。日本語は、Index 側で CJK の 1 文字ごとに空白を入れ、Query 側で隣り合う 2 文字の句を OR で並べます（形態素解析ではない近似。英語の機能語とひらがな 2 文字の組は Query から除く）。Index は Migration 0043 の `ix_memory_versions_search`（GIN、`status = 'active'` のみ）。
+- **Vector**: Cosine 距離（`<=>`）。1 つの `embedding_model_id` だけを比べます。**ANN Index は作っていません**（Decision 0019 の 4）。`min_vector_similarity` の既定は `None`（Model が決まるまで下限を置かない）。
+- **融合と Score**: RRF（`k = 60`）で順位だけを使い、0〜1 に正規化します。Reranker があれば `0.3 × 融合 + 0.7 × Score`。最終 Score は関連度に、Confirmation（1.0 / 0.85 / 0.7）、Stale（0.5）、Importance（0.8〜1.2）、Pin（1.1）、Scope の具体性（+2% ずつ）を掛けます。関連度 0 は 0 のままです。
+- **鮮度**: `session_only` と、期限に達した `expiring` は返しません。`revalidate` の期限切れと `stale_since` は Stale Candidate（返して Score を下げる。`stale_policy = exclude` で候補の段階から除外）。`repo_commit` は呼び出し側が Head を渡したときだけ判定します。
+- **重複と矛盾**: 近い Memory は、優先順位（Confirmed、Fresh、具体的な Scope、Score）が高い方に統合します。統合は、統合先が代表している Memory（すでに統合された複製を含む）の**どれとも** `conflicts_with` で結ばれていないときだけ行います。両端の複製を、第三の Memory が吸収して矛盾が消えることはありません（片方は別の Memory として残り、Conflict Group になる。乱数で作った複製と矛盾の Graph で、矛盾が Group から消えないことを Test します）。`conflicts_with` は**選ばず** Conflict Group として返し、Query に一致しない相手も（最大 20 件）取り込みます。Group は分けずに Top-N に入れ、入らなければ `dropped_conflict_groups` に数えます。
+  `active` なのに読める `active` な後継を持つ Version は、候補にしません（上）。
+- **System Policy**: Policy が覆う `shared` の Memory は返しません（[Decision 0009](../../docs/decisions/0009-shared-memory-administration.md)）。Shared を検索するときは、候補より前に Policy を読み、読めなければ失敗します（以前は Shared の候補があるときだけ読んでいました）。
+- **部品の失敗**: `Embedder` / `Reranker` の失敗（例外・時間切れ・形の違う答え）は `RetrievalResult.degraded` で返し、残りの段階で答えます。答えの数値は、有限の `int` / `float`（`bool` は除く）だけを受け入れます。`10**400`（`float` に変換できず `OverflowError`）、`Decimal`、文字列、`nan`、`inf`、変換で例外を出す型も、Call を失敗させず無効な答えとして Degrade します（`stages.component_number`）。Query の Vector は長さ 1 に揃えてから送ります（pgvector は `float4` で、`1e39` は Database が拒否し、`1e30` の距離は `NaN` になるため。Cosine は向きだけを使うので順位は変わりません）。Source の失敗は `RetrievalSourceError`。全体は `timeout_seconds`（既定 10 秒）で切り（DB の接続を切ります）、部品は `stage_timeout_seconds`（既定 3 秒）です。
+  Log には部品の名前と固定の例外名だけを出し、Query・Memory の本文・例外の Message は出しません。
+- **入力の検証**: `RetrievalQuery` は生成時に検証し（Text の長さ・NUL・Surrogate、UUID は `uuid.UUID`、Enum は Member か正確な文字列、Collection の上限、コピー）、`HybridRetriever` は Constructor で全ての部品と数値を検証します。DB には触れる前に拒否します。
+
+### Migration と権限
+
+- Revision `0043` は **Index を 1 つ足すだけ**で Table は作りません（`grant_app_privileges` は不要）。`down_revision` は `0083`、鎖は `0001 → 0025 → 0032 → 0040 → 0021 → 0033 → 0031 → 0050 → 0046 → 0052 → 0026 → 0087 → 0022 → 0083 → 0043`。
+  Index の式は `memory/fulltext.py` の `search_document_sql()` の 1 か所で、Model・Migration・Query が同じ式を使います（Alembic は式を文字列で比べるため、PostgreSQL の表示に合わせて書いてあります。`test_retrieval_migration.py`）。`normalize(..., NFKC)` は UTF8 の Database が要ります。
+- Retrieval が読む Table は `memory_versions`、`memory_embeddings`、`memory_relations`、`projects`、`project_members` の 5 つで、**SELECT だけ**です（0026 と 0040 の権限で足ります）。`test_retrieval_grants.py` は、Test を Application の Role と「この 5 つの SELECT だけを持つ Role」で実行し、5 つの SELECT を 1 つずつ外すと失敗することを確かめます。
+  Retrieval が何も書かないこと、Application の Role が Index を DROP / 変更できないことも確認します。
+
+### 制限と未確認の点
+
+- 日本語の Keyword は近似です。無関係な語の一致も拾います。Keyword で検索できるのは `title` と `content` の先頭 100,000 文字までです（tsvector は 1 MB を超えられず、超える Memory の INSERT が Index で失敗するため。Shared Memory の上限は 20,000 文字。`fulltext.SEARCH_TEXT_CHARS`）。Vector の Embedding Model は未定で、Fake は意味を理解しません（Recall / MRR は Benchmark の課題）。
+- Membership の読み取りから Memory の読み取りまでの間に Membership が外れても、その 1 回は読めます。応答の時間から Memory の存在を推測できないことは保証しません（保証は応答の内容）。
+- Agent（`AgentGrant`）経由の Retrieval、HTTP の Endpoint、ANN Index、Repository / Project Group の実体（PAW-027 と Group の定義）は含みません。
+- 上限は**候補**にかかります。Top-N（`limit`）は、その後の重複の統合と Conflict Group の単位で決まるため、候補が上限より多くても、統合の結果 `limit` に満たないことはあります（除外された行のせいではありません）。
+- `revalidate_after` を月・年の単位で保存すると、SQL（暦の月）と Driver の `timedelta`（30 日 / 365 日）で境界がずれ得ます。要件の例は日数（`90d`）で、Test はその形です。
+- 鮮度（`expiring` の期限、`revalidate` の期限）は、注入した Clock（既定は Process の時計）で 1 回だけ判定します。権限の判定ではないため、Queue や Redeemer のように Database の時計は使いません。
+- 実 PostgreSQL 18 でだけ Test しました。`REPEATABLE READ` を Retrieval の 1 Transaction に使います。Retrieval は Membership の読み取りと候補の読み取りで、接続を 2 回開きます（`Database.run_abortable`）。
+
+### Test
+
+`tests/test_retrieval_*.py`、`retrieval_support.py`、`retrieval_pg_support.py` です。標準 `unittest` だけです。
+`test_retrieval_text.py`、`test_retrieval_ranking.py`、`test_retrieval_grouping.py`（乱数の複製と矛盾の Graph に対する Oracle を含む）、`test_retrieval_component_output.py`（部品が返す悪意のある数値）、`test_retrieval_query_validation.py`、`test_retrieval_fakes.py`、`test_retrieval_service_validation.py` は DB を使いません（表駆動の入力検証を含む）。残りは実 PostgreSQL（`PAW_TEST_DATABASE_URL`）で、未設定なら Skip します。
+`test_retrieval_eligibility.py` は、返さない行が候補の上限を使わないことを、候補の上限より多い「返さない上位の行」を足して**結果が変わらない**ことで確かめます（Policy に覆われた Shared Memory、Stale、後継のある行を、Keyword と Vector と Rerank の各上限で）。続けて、SQL の条件が元の規則と同じであることを、行ごとに突き合わせます（Stale は `freshness_of`、Policy は Shared Memory の `_subjects_of` と `overriding_policy_ids`。乱数と境界の例、夏時間のある Session の時刻を含む）。`test_retrieval_service_concurrency.py` は 1 つの `HybridRetriever` への同時呼び出しで Caller の結果が混ざらないこと、Cancel が伝わり後続の呼び出しが使えることを確かめます。
+**Permission Leakage 0**（`test_retrieval_leakage.py`）: 明示した攻撃（Vector が他人の Memory とぴったり一致する Query、読めない Memory との Conflict・重複・後継、Reranker への入力、読めない Project の指定、拡張して公開された Memory の旧版など）と、
+乱数で作った世界（User・Project の全状態・Membership・Repository の Override・Group・全 Scope と Status・鮮度・Relation。`random.Random(seed)`）で、Caller ごとに (1) 独立に書いた Oracle が読めるとする集合に、Hit・Conflict Group・`duplicates` が収まること、(2) 読めない Memory を無効にした DB の結果と**全 Field が等しい**こと、(3) Reranker が読めない Memory の本文を見ないことを確かめます。
+`benchmarks/retrieval_metrics.py` の Permission Leakage（Top-K のうち許可されていない ID の数）と同じ考えを、Backend の Test として実装しています（Backend は `benchmarks` を import しません）。
+実装の SQL を変えて Test が失敗することも確認しました（Vector / Keyword の権限条件を外す、Relation の片端・相手の取得の条件を外す、`scope IN` を外す、招待・Pending deletion を含める、Status・期限・`session_only` の条件を外す、Resolver の判定を外す、など）。
+
 ## 依存 Package
 
 依存は `pyproject.toml` で完全一致に固定しています。
@@ -2599,7 +2683,7 @@ CI は pre-commit の専用環境で Test を実行するため、同じ Version
 [PAW-021](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/18)（Owner Setup）、
 RBAC（PAW-025）、Task Lifecycle（PAW-032）、Task Queue / Budget / Loop 検知（PAW-033）、Tool Broker（PAW-031）、Memory Schema（PAW-040）、Research Scratch Store（PAW-050）、Research Provider Adapter（PAW-051）、Research Privacy Filter（PAW-053）、Evidence / Claim Provenance（PAW-052）は、この Skeleton の上に実装済みです。
 PAW-022（Login / Session / Password）は Owner Setup の Token を受け取る側として実装済みです（[Login / Session / Password Policy](#login--session--password-policy)）。PAW-023（Passkey / Step-up）はまだありません。
-Memory の保存・整理・検索は PAW-041 以降で、Memory Schema の上に実装します。
+Memory の保存・整理は PAW-041 以降で、Memory Schema の上に実装します。検索は [Hybrid Retrieval（PAW-043）](#hybrid-retrieval) が Memory Schema の上に実装済みです。
 Research Privacy Filter（PAW-053）と Evidence / Claim Provenance（PAW-052）は、Research Provider Adapter の上に実装済みです。Research の Provider（Direct Web、Docs、GitHub、OpenCode）の Adapter は、Research Provider Adapter の上に実装します。外部送信の Audit を Audit Log へ保存する実装は、後続の Issue です。
 受け入れ基準は [Implementation Backlog](../../docs/IMPLEMENTATION_BACKLOG.md)、
 実装時に選択できる事項は [Requirements Freeze Review](../../docs/REQUIREMENTS_FREEZE_REVIEW.md) を参照してください。
