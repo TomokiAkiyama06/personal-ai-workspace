@@ -101,6 +101,61 @@ class SharedStatusHistoryTest(AsyncPostgresSharedTestCase):
             ],
         )
 
+    async def test_the_audit_completion_rows_and_the_version_history_agree(self):
+        # Decision 0026: the two records of one operation coexist and must not
+        # contradict each other: same memory, same actor, the transition of the
+        # operation. (The times come from two clocks: only their nearness is
+        # checked, with a generous margin.)
+        admin, owner = self.admin, self.owner
+        created = await self.service.create_memory(owner, draft(title="v1"))
+        memory_id = created.memory_id
+        await self.service.edit_memory(
+            admin, memory_id, 1, SharedMemoryChanges(title="v2")
+        )
+        await self.service.delete_memory(admin, memory_id)
+        await self.service.restore_memory(owner, memory_id)
+
+        completions = self.rows(
+            "SELECT action, actor_id, recorded_at FROM audit_events"
+            " WHERE resource_id = :m AND reason = 'completed'"
+            " ORDER BY recorded_at, id",
+            m=memory_id,
+        )
+        changes = self.rows(
+            "SELECT c.old_status, c.new_status, c.actor_user_id, c.created_at"
+            " FROM memory_metadata_changes c"
+            " JOIN memory_versions v ON v.id = c.memory_version_id"
+            " WHERE v.memory_id = :m ORDER BY c.created_at, c.id",
+            m=memory_id,
+        )
+
+        # A creation changes no existing version: no history row, one completion.
+        self.assertEqual(
+            [row["action"] for row in completions],
+            [
+                "shared_memory.create",
+                "shared_memory.edit",
+                "shared_memory.delete",
+                "shared_memory.restore",
+            ],
+        )
+        transitions = {
+            "shared_memory.edit": ("active", "superseded"),
+            "shared_memory.delete": ("active", "deprecated"),
+            "shared_memory.restore": ("deprecated", "active"),
+        }
+        operations = [row for row in completions if row["action"] in transitions]
+        self.assertEqual(len(changes), len(operations))
+        for completion, change in zip(operations, changes, strict=True):
+            with self.subTest(completion["action"]):
+                self.assertEqual(
+                    (change["old_status"], change["new_status"]),
+                    transitions[completion["action"]],
+                )
+                self.assertEqual(change["actor_user_id"], completion["actor_id"])
+                gap = abs(change["created_at"] - completion["recorded_at"])
+                self.assertLess(gap.total_seconds(), 60)
+
     async def test_a_refused_or_failed_change_records_nothing(self):
         memory_id = self.seed_memory(title="Rule")
         with self.assertRaises(SharedMemoryPermissionError):

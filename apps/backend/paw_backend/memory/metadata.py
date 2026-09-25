@@ -11,6 +11,10 @@ names the actor first, in the same transaction and before the ``UPDATE``::
     session.execute(update(MemoryVersion)...values(pinned=True))
     session.execute(update(MemoryVersion)...values(status="deprecated"))
 
+Decision 0026 (approved 2026-09-26) records the contract: this history and the
+Audit of Shared Memory administration (Decision 0009: the attempt and completion
+rows) coexist, the actor is mandatory, and it is never silently ``system``.
+
 The two settings are transaction-local (``set_config(..., true)``), so a pooled
 connection never carries one request's actor into the next. A change without an
 actor is refused by the database (NOT NULL ``actor_type``). The Backend must

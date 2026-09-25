@@ -506,6 +506,7 @@ personal-ai-workspace/
 │     ├─ 0014-task-working-set-persistence.md
 │     ├─ 0016-shared-connection-adapter-policy.md
 │     ├─ 0023-audit-events-details-for-external-send.md
+│     ├─ 0026-memory-status-change-history.md
 │     └─ README.md
 └─ evaluator/
    └─ README.md

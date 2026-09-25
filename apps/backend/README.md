@@ -1650,6 +1650,8 @@ Permanent / Revalidate など鮮度の設定は Version の不変の列なので
 
 **Status / Stale の変更履歴（Issue #90）。** PAW-040（PR #71）の独立 Review が、`memory_versions.status`（`superseded` / `deprecated` / `history` へ変える）と `stale_since`（Stale の候補として印を付ける・外す）が、以前の値・実行者・時刻を残さずに上書きされる、と指摘しました。
 履歴 / Graph が「いつ・誰が Deprecated にした / Stale の印を付けた・外したか」を説明できません。Revision `0071` は、**Pin / Importance と同じ Trigger・同じ追記専用の `memory_metadata_changes`** でこの 2 列も記録します（新しい Table も権限もありません）。
+この履歴と、Shared Memory の管理の Audit（[Decision 0009](../../docs/decisions/0009-shared-memory-administration.md) の 12、13 の試みの行と完了の行）は**併存**します。[Decision 0026](../../docs/decisions/0026-memory-status-change-history.md)（承認済み、2026-09-26）が併存を決め、0009 の「削除・復元は Audit にだけ残る」とした記述だけを置き換えています（0009 のそれ以外、Capability 6 つ、完了の行の値と書き方は変わりません）。
+Audit は管理操作の試みと完了の記録で、この履歴は Scope を問わずすべての `status` / `stale_since` の変更の記録です。
 
 - **列。** `memory_metadata_changes` に `old_status` / `new_status`（Text）と `old_stale_since` / `new_stale_since`（timestamptz）を足しました。4 列とも NULL 可です。Revision `0040` が書いた行は、Status を持ちません（当時は記録しておらず、後から分かりません）。Trigger が書く行は、常に `old_status` と `new_status` の両方を持ち、Stale 時刻の NULL は「印なし」を意味します。
   CHECK: `status_pair`（Status は両方あるか両方ない）、`status_valid`（既知の Status だけ）、`stale_since_needs_status`（Status のない旧形式の行は Stale 時刻を持たない）、`something_changed`（Pin / Importance / Status / Stale のどれかが変わった行だけ）。
@@ -1753,7 +1755,10 @@ Audit の `action` は Capability の値です。Shared Memory を変える操�
 
 #### Audit の Action
 
-削除・復元は `memory_versions` の `status` を変えるだけで、誰がいつ行ったかを行に残しません（[Decision 0009](../../docs/decisions/0009-shared-memory-administration.md) の 7）。履歴は Audit だけです。
+削除・復元は `memory_versions` の `status` を変えるだけで、Version の行には誰がいつ行ったかの列を足しません（[Decision 0009](../../docs/decisions/0009-shared-memory-administration.md) の 7）。
+誰がいつ行ったかは、**2 つの記録が併存**して残します。Audit（この節。管理操作の試みと完了）と、`memory_metadata_changes`（Version の `status` / `stale_since` の状態変化。Revision `0071`）です。
+[Decision 0026](../../docs/decisions/0026-memory-status-change-history.md)（承認済み。0009 の「Audit にだけ残る」とした記述だけを置き換える）が、この併存を決めています。
+Audit は「誰が管理操作を試み、Commit されたか」、履歴は「この Version の状態がいつ・誰によって何から何へ変わったか」に答えます。同じ削除・復元について 2 つの記録は、対象の Memory、操作した Owner / Admin、遷移が一致します（時刻は Service の時計と DB の時計で別です。共通の Key は持たず、Memory、Actor、時刻で結びます）。`tests/test_shared_memory_status_history.py` が一致を確かめます。
 Authorizer は `action` に Capability の値を書くので、全操作が 1 つの Capability（`shared_memory.manage`）だと、削除と復元、作成、編集、承認、却下を見分けられません。
 そこで、変更する 6 つの操作にそれぞれ Capability を追加しました（`authz/capabilities.py`。すべて `Scope.SYSTEM`、委任不可、Audit Mode `REQUIRED`、Owner / Admin だけ）。
 
@@ -1789,7 +1794,7 @@ Authorizer は `action` に Capability の値を書くので、全操作が 1 �
 - **完了の行がある ⇔ 変更が Commit された**。Rollback、失敗した Statement、失敗した Commit は行も戻します。完了の行を書けなければ変更も戻ります（fail-closed。Test は行の INSERT と Commit を失敗させて確認）。
 - 試みの後で失敗した呼び出し（対象がない、状態が違う、版が古い、Lock を待ち切れない、更新が失敗する）は、**完了のない試み**として残ります（`correlation_id` が同じ完了の行がない `allow` の行）。何も変えなかった呼び出し（内容が同じ編集）にも完了の行はありません。
   拒否された試み、Audit を書けずに拒否された試みは、これまでどおりで、完了しません。
-- 「誰がいつ削除・復元したか」は、`resource_id` と `reason = 'completed'` で絞った行の `action`、`actor_id`、`occurred_at` です。
+- 「誰がいつ削除・復元したか」は、`resource_id` と `reason = 'completed'` で絞った行の `action`、`actor_id`、`occurred_at` です。同じ変更は `memory_metadata_changes` にも残ります（Version ごとの `status` の前後と、DB の時刻。[Decision 0026](../../docs/decisions/0026-memory-status-change-history.md)）。完了の行の値と書き方は、その Decision でも変わりません。
 - 権限は増えません。Application の Role が持つ `audit_events` の INSERT / SELECT（Revision `0025`）で書きます。UPDATE、DELETE、TRUNCATE は Trigger と権限が拒否したままです（`tests/test_shared_memory_grants.py` が確認）。
 - 限界:
   - 完了の行は Authorizer の `AuditSink` を通らず、Service が `audit_events` に直接書きます（Sink は別の Transaction で書くため、変更と記録が別れうるからです）。Sink を差し替えた配備では、試みと完了が別の場所に分かれます（現在の Sink は `PostgresAuditSink` だけです）。
@@ -1809,7 +1814,7 @@ Memory は、**現在の Version（`version_number` が最大の Version）** �
 - **作成**: Version 1（`active`、`confirmation_state = 'confirmed'`、`freshness_policy = 'permanent'`、`actor_type = 'user'`）。
 - **編集**: 上書きしません。現在の Version を `superseded` にし、新しい Version `n + 1`（`active`）を書き、新しい側から古い側への `supersedes` 関係（`reason` は変わった項目の名前をアルファベット順に `", "` でつないだもの）を追加します。
   `expected_version` が現在の番号と違えば `SharedMemoryVersionConflictError`（Optimistic Lock）。何も変わらない編集は、何も書かずに現在の Memory を返します。削除済みの Memory は編集できません（先に復元）。
-- **削除**: 現在の Version の `status` を `deprecated` にします（何も消しません）。**復元**は `active` に戻します。Version は増えません。誰がいつ削除・復元したかは、Audit の試みの行と完了の行に残ります（上の「変更の完了の記録」）。Revision `0071` 以降は、`memory_metadata_changes` にも残ります（変更前後の `status`、実行した Owner / Admin、DB の時刻。編集で旧 Version を `superseded` にする変更も同じです）。Service は認可した Owner / Admin を `metadata_change_actor` で `user` の Actor として示してから `status` を更新します（示さない更新は DB が拒否します。`tests/test_shared_memory_status_history.py`）。
+- **削除**: 現在の Version の `status` を `deprecated` にします（何も消しません）。**復元**は `active` に戻します。Version は増えません。誰がいつ削除・復元したかは、Audit の試みの行と完了の行に残ります（上の「変更の完了の記録」）。Revision `0071` 以降は、`memory_metadata_changes` にも残ります（変更前後の `status`、実行した Owner / Admin、DB の時刻。編集で旧 Version を `superseded` にする変更も同じです。Audit の行と併存する記録で、[Decision 0026](../../docs/decisions/0026-memory-status-change-history.md) が決めています）。Service は認可した Owner / Admin を `metadata_change_actor` で `user` の Actor として示してから `status` を更新します（示さない更新は DB が拒否します。`tests/test_shared_memory_status_history.py`）。
   削除済みの Memory は、一般 User の一覧・取得には出ません（「見つからない」）。
 - 編集できる項目は `title`（200 文字まで）、`content`（20,000 文字まで）、`memory_type`（`[a-z][a-z0-9_]{0,63}`）、`importance`（0〜100）、`policy_subjects`（20 個まで）です。`reason`（500 文字まで）は Version の `change_reason` になります。
 - 一覧は古い順（`memories.created_at`、同時刻は `id`）で、`limit`（1〜200、既定 50）と `offset`（0〜100000）で区切ります。

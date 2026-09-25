@@ -27,6 +27,17 @@ holds SELECT and INSERT on it, and no UPDATE or DELETE):
   the columns is one row; an update that writes the value that is already there
   records nothing; the change time is the database's ``clock_timestamp()``.
 
+**Decision 0026** (approved 2026-09-26,
+``docs/decisions/0026-memory-status-change-history.md``) records this contract:
+the history table and the Audit of Shared Memory administration (Decision 0009,
+sections 12 and 13: the attempt row and the completion row) **coexist**. Audit
+stays the record of the attempt and completion of an administration operation;
+``memory_metadata_changes`` additionally records old / new ``status`` and
+``stale_since``, the actor and the database time of EVERY status or stale change
+of a version, in any scope (a delete or restore of a Shared Memory is in both).
+Decision 0026 supersedes only the statements of Decision 0009 that said the Audit
+is the only record of a delete / restore.
+
 The actor comes from the same two transaction-local settings as before
 (``paw_backend.memory.metadata.metadata_change_actor``), and the same rule applies:
 **a change of ``status`` or ``stale_since`` without a named actor fails** (NOT NULL
