@@ -106,6 +106,8 @@ _USER = frozenset(
         C.MEMORY_USE,
         C.PR_CREATE,
         C.SHARED_MEMORY_READ,
+        C.ACCOUNT_READ,
+        C.ACCOUNT_MANAGE,
     }
 )
 _ADMIN_ONLY = frozenset(
@@ -127,6 +129,7 @@ _ADMIN_ONLY = frozenset(
         C.ADMIN_PERMISSIONS_MANAGE,
         C.ADMIN_CONFIG_MANAGE,
         C.ADMIN_PROJECTS_MANAGE,
+        C.ADMIN_AUTH_POLICY_VIEW,
         # "System Owner / Admin: administrative operations" on a project.
         C.PROJECT_LIFECYCLE_MANAGE,
     }
@@ -138,6 +141,7 @@ _OWNER_ONLY = frozenset(
         C.OWNER_RECOVERY_MANAGE,
         C.OWNER_USER_RESTORE,
         C.OWNER_BACKUP_MANAGE,
+        C.OWNER_AUTH_POLICY_MANAGE,
     }
 )
 

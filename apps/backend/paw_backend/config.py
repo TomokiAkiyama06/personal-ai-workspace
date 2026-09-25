@@ -7,7 +7,7 @@ read from files in the repository, and no secret has a default value.
 import re
 from ipaddress import ip_address
 from pathlib import Path
-from typing import Annotated, Self
+from typing import Annotated, Literal, Self
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -99,6 +99,51 @@ class Settings(BaseSettings):
     # (PAW-050). 0 turns it off: expired research would then stay in PostgreSQL.
     scratch_purge_interval_seconds: int = Field(default=3_600, ge=0, le=86_400)
 
+    # Login, sessions and passwords (PAW-022; the values the requirements do not
+    # fix are decided in Decision 0015 (Approved, provisional) and are changed
+    # here, not in the code).
+    #
+    # Argon2id. The defaults are RFC 9106's second recommended option (64 MiB,
+    # t=3, p=4); the lower bounds are OWASP's minimum (19 MiB, t=2 is the
+    # recommendation; t=1 is accepted so that a test can run fast).
+    password_hash_time_cost: int = Field(default=3, ge=1, le=10)
+    password_hash_memory_kib: int = Field(default=65_536, ge=19_456, le=1_048_576)
+    password_hash_parallelism: int = Field(default=4, ge=1, le=16)
+    # Hashes computed at the same time (each holds ``password_hash_memory_kib``).
+    password_hash_concurrency: int = Field(default=2, ge=1, le=16)
+    # Session lifetime in days. A normal session ends after ``session_idle_days``
+    # without use (REQUIREMENTS.md: 30) and never lives longer than
+    # ``session_absolute_days``. "Keep me signed in" (Remember Me) ends after at
+    # most ``session_remember_days`` (REQUIREMENTS.md: 90), used or not.
+    session_idle_days: int = Field(default=30, ge=1, le=365)
+    session_remember_days: int = Field(default=90, ge=1, le=365)
+    session_absolute_days: int = Field(default=90, ge=1, le=365)
+    # A session's "last used" time is written at most this often.
+    session_touch_interval_seconds: int = Field(default=60, ge=1, le=3_600)
+    # ``Strict`` (default) or ``Lax``. The cookie is always Secure and HttpOnly.
+    session_cookie_samesite: Literal["strict", "lax"] = "strict"
+    # Progressive backoff of failed logins (REQUIREMENTS.md: normal for 1-4
+    # failures, about 30 seconds at the 5th, then longer, never permanent). An
+    # account (login name, known or not) is locked at its ``login_account_
+    # free_attempts``-th attempt without success; a source (client address) at its
+    # ``login_source_free_attempts``-th. The n-th lock after that lasts the n-th
+    # entry of ``login_backoff_seconds`` (the last one repeats). A count is
+    # forgotten after ``login_decay_seconds`` without an attempt.
+    login_account_free_attempts: int = Field(default=5, ge=2, le=50)
+    login_source_free_attempts: int = Field(default=20, ge=2, le=1_000)
+    login_backoff_seconds: Annotated[list[int], NoDecode] = Field(
+        default_factory=lambda: [30, 60, 300, 900, 3_600], min_length=1, max_length=12
+    )
+    login_decay_seconds: int = Field(default=86_400, ge=60, le=2_592_000)
+    # The public Owner token endpoint (Decision 0005): attempts per client address
+    # and in total, with the same kind of backoff.
+    redeem_source_free_attempts: int = Field(default=5, ge=1, le=100)
+    redeem_global_free_attempts: int = Field(default=30, ge=1, le=10_000)
+    redeem_backoff_seconds: Annotated[list[int], NoDecode] = Field(
+        default_factory=lambda: [60, 300, 900, 3_600], min_length=1, max_length=12
+    )
+    redeem_decay_seconds: int = Field(default=900, ge=60, le=86_400)
+
     log_level: str = "info"
 
     @field_validator(
@@ -140,11 +185,28 @@ class Settings(BaseSettings):
         # The same rules the migrations apply (see paw_backend.db_roles).
         return None if value is None else validate_role_name(value)
 
-    @field_validator("allowed_hosts", "allowed_origins", mode="before")
+    @field_validator(
+        "allowed_hosts",
+        "allowed_origins",
+        "login_backoff_seconds",
+        "redeem_backoff_seconds",
+        mode="before",
+    )
     @classmethod
     def _split_comma_separated(cls, value: object) -> object:
         if isinstance(value, str):
             return [item.strip() for item in value.split(",") if item.strip()]
+        return value
+
+    @field_validator("login_backoff_seconds", "redeem_backoff_seconds")
+    @classmethod
+    def _backoff_is_a_finite_schedule(cls, value: list[int]) -> list[int]:
+        # Never permanent (a lock of a day or more would be one) and never
+        # shorter than a second; a schedule that shrinks is not a backoff.
+        if not all(1 <= seconds <= 86_400 for seconds in value):
+            raise ValueError("backoff seconds must be from 1 to 86400 each")
+        if value != sorted(value):
+            raise ValueError("backoff seconds must not decrease")
         return value
 
     @field_validator("allowed_hosts")
@@ -185,6 +247,18 @@ class Settings(BaseSettings):
         if value not in {"critical", "error", "warning", "info", "debug", "trace"}:
             raise ValueError("log_level is not a Uvicorn log level")
         return value
+
+    @model_validator(mode="after")
+    def _session_lifetimes_are_consistent(self) -> Self:
+        if self.session_absolute_days < self.session_idle_days:
+            raise ValueError(
+                "session_absolute_days must not be below session_idle_days"
+            )
+        if self.session_remember_days < self.session_idle_days:
+            raise ValueError(
+                "session_remember_days must not be below session_idle_days"
+            )
+        return self
 
     @model_validator(mode="after")
     def _tls_files_come_in_pairs(self) -> Self:
