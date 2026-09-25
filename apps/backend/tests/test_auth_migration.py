@@ -129,12 +129,11 @@ class ModelsMetadataTest(unittest.TestCase):
                 self.assertEqual(literals(check_sql(table)[name]), values)
 
     def test_the_migration_repeats_the_values_of_the_code(self):
+        versions = Path(__file__).resolve().parents[1].joinpath("migrations/versions")
+        # 0023 (PAW-023) adds the ``passkey_revoked`` reason to the same constraint.
         source = (
-            Path(__file__)
-            .resolve()
-            .parents[1]
-            .joinpath("migrations/versions/0022_login_session_password.py")
-            .read_text()
+            versions.joinpath("0022_login_session_password.py").read_text()
+            + versions.joinpath("0023_passkeys.py").read_text()
         )
         for method in AuthMethod:
             self.assertIn(f"'{method.value}'", source)
@@ -404,8 +403,11 @@ class AuthMigrationDatabaseTest(unittest.TestCase):
 
     def created_catalog(self) -> dict[str, list[tuple]]:
         """The catalog of a schema built from the models with ``create_all``."""
+        # ``auth_sessions.passkey_id`` (0023) references ``user_passkeys``, so the
+        # tables of PAW-023 are created too (the comparison is still of TABLES).
         tables = [Base.metadata.tables["users"]] + [
-            Base.metadata.tables[name] for name in TABLES
+            Base.metadata.tables[name]
+            for name in (*TABLES, "user_passkeys", "passkey_challenges")
         ]
         with self.engine.begin() as connection:
             connection.execute(text(f"DROP SCHEMA IF EXISTS {SCHEMA} CASCADE"))
@@ -452,6 +454,7 @@ class AuthMigrationDatabaseTest(unittest.TestCase):
                 "ix_auth_sessions_user_id_active",
                 "ix_auth_sessions_idle_expires_at",
                 "ix_auth_sessions_revoked_at",
+                "ix_auth_sessions_passkey_id_active",
                 "ix_auth_throttles_last_attempt_at",
             },
         )

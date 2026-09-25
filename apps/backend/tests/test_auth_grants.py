@@ -72,6 +72,9 @@ EXPECTED = {
             "rotated_at",
             "revoked_at",
             "revoked_reason",
+            # PAW-023 (0023): the Passkey gate of the session and what opened it.
+            "passkey_gate",
+            "passkey_id",
         },
     ),
     "auth_throttles": (
