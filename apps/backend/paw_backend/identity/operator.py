@@ -27,7 +27,8 @@ token. Tests change what the service reads by replacing ``os.geteuid`` (the
 other way to set it.
 
 **A token's lifetime starts when it is stored, not when the command began**
-(Decision 0005, point 10): the clock is read after the Owner's row lock, and
+(Decision 0005, point 10): the clock is read after the Owner's row lock (for
+the older tokens' ``revoked_at`` only after those rows are locked as well), and
 again after the last statement that can wait (revoking the older tokens, the
 INSERT of a new Owner), and ``created_at`` / ``expires_at`` (and the returned
 ``IssuedToken.expires_at``) come from that last read. However long another
@@ -243,16 +244,22 @@ class OwnerOperator:
         try:
             async with self._database.session() as session:
                 old_owner = await _lock_owner(session)
-                # Read after the Owner lock, which may have been waited for: what
-                # this step stamps says when it happened, not when it began.
-                now = self._audit.now()
                 replaced_events = []
-                if old_owner is not None:
+                if old_owner is None:
+                    # Read after the Owner lock, which may have been waited for:
+                    # what this step stamps says when it happened, not when it
+                    # began.
+                    now = self._audit.now()
+                else:
                     if old_owner.status in LIVE_STATUSES:
                         raise OwnerAlreadyExistsError
                     if not replace:
                         raise OwnerNotLiveError(old_owner.status)
-                    revoked = await _revoke_outstanding(session, old_owner.id, now)
+                    # The reading of the clock is taken by the revocation itself,
+                    # after the older tokens are locked (see there).
+                    revoked, now = await _revoke_outstanding(
+                        session, old_owner.id, self._audit.now
+                    )
                     old_owner.system_role = SystemRole.USER.value
                     old_owner.updated_at = now
                     await session.flush()
@@ -398,11 +405,12 @@ class OwnerOperator:
             if owner.status not in LIVE_STATUSES:
                 raise OwnerNotLiveError(owner.status)
             # The clock is read after the lock, which may have been waited for
-            # (however long another transaction held it), and once more after
-            # the revoking statement, which can wait for a token's row. The
-            # lifetime of the new token starts at the second read, so that a
-            # wait can never use it up (Decision 0005, point 10).
-            revoked = await _revoke_outstanding(session, owner.id, self._audit.now())
+            # (however long another transaction held it): the revocation reads
+            # it after it has locked the older tokens (a wait for one of their
+            # rows), and once more after the revocation. The lifetime of the
+            # new token starts at that last read, so that a wait can never use
+            # it up (Decision 0005, point 10).
+            revoked, _ = await _revoke_outstanding(session, owner.id, self._audit.now)
             issued_at = self._audit.now()
             session.add(
                 self._token_row(
@@ -488,9 +496,28 @@ async def _lock_owner(session: AsyncSession) -> UserRow | None:
 
 
 async def _revoke_outstanding(
-    session: AsyncSession, user_id: uuid.UUID, now: datetime
-) -> list[uuid.UUID]:
-    """Revoke the user's unused, unrevoked tokens; their ``audit_ref``s."""
+    session: AsyncSession, user_id: uuid.UUID, clock: Callable[[], datetime]
+) -> tuple[list[uuid.UUID], datetime]:
+    """Revoke the user's unused, unrevoked tokens: their ``audit_ref``s and the
+    instant of the revocation.
+
+    The rows are locked first and the clock is read only afterwards (the
+    Owner's row is locked already, so nobody else can add, spend or revoke one
+    meanwhile). An UPDATE that waits for a row (another transaction may hold
+    it) would otherwise stamp ``revoked_at`` with a reading taken before the
+    wait.
+    """
+    await session.execute(
+        select(SetupTokenRow.id)
+        .where(
+            SetupTokenRow.user_id == user_id,
+            SetupTokenRow.used_at.is_(None),
+            SetupTokenRow.revoked_at.is_(None),
+        )
+        .order_by(SetupTokenRow.id)
+        .with_for_update()
+    )
+    revoked_at = clock()
     result = await session.execute(
         update(SetupTokenRow)
         .where(
@@ -498,11 +525,11 @@ async def _revoke_outstanding(
             SetupTokenRow.used_at.is_(None),
             SetupTokenRow.revoked_at.is_(None),
         )
-        .values(revoked_at=now)
+        .values(revoked_at=revoked_at)
         .returning(SetupTokenRow.audit_ref)
         .execution_options(synchronize_session=False)
     )
-    return list(result.scalars())
+    return list(result.scalars()), revoked_at
 
 
 def _violated_constraint(error: IntegrityError) -> str | None:

@@ -86,6 +86,14 @@ of the entry (they wait here for a competing transaction), then a conditional
 ``UPDATE ... RETURNING`` that judges worker, claim generation and lease. ``cancel``
 is one conditional ``UPDATE`` (atomic by itself; it takes no row lock first).
 
+Indexes. Completed and cancelled entries are kept for ever, and both indexes of the
+queue (``ix_queue_entries_claim_order``, ``uq_queue_entries_one_active_per_task``)
+are partial: ``WHERE status IN ('queued', 'claimed')``. A statement whose predicate
+does not imply that condition cannot use them, and a status sent as a bind parameter
+is not known in the generic plan PostgreSQL may cache for a prepared statement. So
+``claim_next`` and ``cancel`` write the statuses into the SQL text (``_inlined``,
+``_active``), and ``IndexPlanTest`` plans every query in both ``plan_cache_mode``s.
+
 Errors. Invalid arguments (including an explicit ``now`` that this queue does not
 accept) raise ``InvalidQueueingArgumentError(parameter)`` before any database
 access. Messages never contain the argument values.
@@ -95,9 +103,19 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import DateTime, and_, func, insert, literal, or_, select, update
+from sqlalchemy import (
+    DateTime,
+    and_,
+    bindparam,
+    func,
+    insert,
+    literal,
+    or_,
+    select,
+    update,
+)
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.sql.elements import ColumnElement
+from sqlalchemy.sql.elements import BindParameter, ColumnElement
 
 from paw_backend.db import Database
 from paw_backend.tasks.errors import TaskNotFoundError
@@ -133,6 +151,33 @@ from paw_backend.tasks.queueing.validation import (
 )
 
 ONE_ACTIVE_ENTRY_PER_TASK = "uq_queue_entries_one_active_per_task"
+
+
+def _inlined(status: QueueStatus) -> BindParameter[QueueStatus]:
+    """``status`` written into the SQL text (``'queued'``), not sent as a parameter.
+
+    ``ix_queue_entries_claim_order`` and ``uq_queue_entries_one_active_per_task``
+    are partial indexes over ``status IN ('queued', 'claimed')``. PostgreSQL uses
+    such an index only if the statement's own predicate implies that condition, and
+    it cannot prove it for a status sent as a bind parameter in the plan it caches
+    for a prepared statement (the driver prepares a statement it runs often): the
+    claim would then scan and sort every entry ever queued (completed and cancelled
+    entries are kept), and ``cancel`` would scan them all. The status is one of two
+    constants, so writing it into the statement costs no plan reuse.
+    """
+    return bindparam(
+        f"status_{status.value}",
+        status,
+        type_=QueueEntryRow.status.type,
+        literal_execute=True,
+    )
+
+
+def _active() -> ColumnElement[bool]:
+    """``status IN ('queued', 'claimed')`` (the condition of both partial indexes)."""
+    return QueueEntryRow.status.in_(
+        [_inlined(status) for status in sorted(ACTIVE_QUEUE_STATUSES)]
+    )
 
 
 def _entry(row: QueueEntryRow) -> QueueEntry:
@@ -290,9 +335,9 @@ class TaskQueue:
         check_worker_id(worker_id)
         current, lease_end = self._instants(now)
         claimable = or_(
-            QueueEntryRow.status == QueueStatus.QUEUED,
+            QueueEntryRow.status == _inlined(QueueStatus.QUEUED),
             and_(
-                QueueEntryRow.status == QueueStatus.CLAIMED,
+                QueueEntryRow.status == _inlined(QueueStatus.CLAIMED),
                 QueueEntryRow.lease_expires_at <= current,
             ),
         )
@@ -429,10 +474,7 @@ class TaskQueue:
         current, _ = self._instants(now)
         cancel_active = (
             update(QueueEntryRow)
-            .where(
-                QueueEntryRow.task_id == task_id,
-                QueueEntryRow.status.in_(ACTIVE_QUEUE_STATUSES),
-            )
+            .where(QueueEntryRow.task_id == task_id, _active())
             .values(
                 status=QueueStatus.CANCELLED, finished_at=current, lease_expires_at=None
             )
