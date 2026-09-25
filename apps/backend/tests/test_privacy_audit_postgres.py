@@ -568,6 +568,22 @@ class SinkDirectTest(GateTestCase):
             row["details"]["query_fingerprint"], fingerprint_of("asyncio gather")
         )
 
+    async def test_every_provider_kind_of_the_code_can_be_recorded(self):
+        # The CHECK of migration 0087 lists the kinds: a kind added to
+        # ``ProviderKind`` without a migration would make every send to it fail.
+        sink = PostgresExternalSendAudit(self.database, timeout_seconds=10)
+        for kind in ProviderKind:
+            await sink.record(make_record(self.project_id, provider_kinds=(kind,)))
+        await sink.record(
+            make_record(self.project_id, provider_kinds=tuple(ProviderKind))
+        )
+        rows = await self.rows()
+        self.assertEqual(
+            [row["details"]["provider_kinds"] for row in rows],
+            [[kind.value] for kind in ProviderKind]
+            + [[kind.value for kind in ProviderKind]],
+        )
+
     async def test_a_bad_record_reaches_no_database(self):
         sink = PostgresExternalSendAudit(self.database)
         record = make_record(self.project_id)

@@ -27,8 +27,12 @@ constraints that keep it from becoming a free-text column:
   the reason ``send_authorized``, names a ``project_id`` and has ``details`` with
   exactly eight keys (a ``sha256:`` fingerprint, the query length, the provider
   kinds, the counts of withheld pieces per label, three removal counts and
-  ``truncated``), each of the shape the constraint spells out. No key can hold a
-  query, however the row got there.
+  ``truncated``), each of the shape the constraint spells out: a fingerprint of
+  exactly ``sha256:`` and 64 lower case hex digits, every number inside the bound the
+  record has, ``truncated`` a boolean, and the provider kinds only the values of
+  ``ProviderKind`` (``web``, ``docs``, ``github``, ``opencode``: no other token, so
+  no credential or fragment of a query). No key can hold a query, however the row
+  got there. A new provider kind takes a new migration (Codex review of PR #99).
 
 Registering another action that needs ``details`` takes a NEW migration: add it to the
 registry (replace ``ck_audit_events_details_registered``) and add a closed-schema
@@ -82,6 +86,14 @@ _KEYS = (
     "truncated",
 )
 _WITHHELD = ("private_source", "private_memory", "raw_conversation", "secret")
+# The provider kinds a row may name: the values of ``ProviderKind`` today, repeated
+# here as they are (a migration is a frozen snapshot). Adding a kind takes a new
+# migration; ``tests/test_privacy_audit_schema.py`` fails until there is one.
+_PROVIDER_KINDS = ("web", "docs", "github", "opencode")
+# The numbers are bounded as the record bounds them, not by their digits.
+_QUERY_CHARS = "'^([1-9][0-9]?|1[0-9]{2}|2[0-4][0-9]|25[0-6])$'"  # 1 .. 256
+_PIECES = "'^([0-9]|[12][0-9]|3[0-2])$'"  # 0 .. 32
+_COUNT = "'^(0|[1-9][0-9]{0,5}|1000000)$'"  # 0 .. 10**6
 _MAX_DETAILS_BYTES = 2048
 # The actions that may have ``details``: each has a closed-schema CHECK of its own
 # below. Any other action has ``details`` NULL.
@@ -99,7 +111,9 @@ def _keys(names: tuple[str, ...]) -> str:
 
 
 def _external_send_check() -> str:
-    number = "'^(0|[1-9][0-9]{0,6})$'"
+    kind = "(" + "|".join(_PROVIDER_KINDS) + ")"
+    more = len(_PROVIDER_KINDS) - 1
+    kinds_pattern = f'\'^\\["{kind}"(, "{kind}"){{0,{more}}}\\]$\''
     conditions = [
         "decision = 'allow'",
         f"reason = '{_REASON}'",
@@ -109,10 +123,9 @@ def _external_send_check() -> str:
         "jsonb_typeof(details -> 'query_fingerprint') = 'string'",
         "details ->> 'query_fingerprint' ~ '^sha256:[0-9a-f]{64}$'",
         "jsonb_typeof(details -> 'query_chars') = 'number'",
-        "details ->> 'query_chars' ~ '^[1-9][0-9]{0,2}$'",
+        f"details ->> 'query_chars' ~ {_QUERY_CHARS}",
         "jsonb_typeof(details -> 'provider_kinds') = 'array'",
-        "(details -> 'provider_kinds')::text ~ "
-        '\'^\\["[a-z][a-z0-9_]{0,31}"(, "[a-z][a-z0-9_]{0,31}"){0,7}\\]$\'',
+        f"(details -> 'provider_kinds')::text ~ {kinds_pattern}",
         "jsonb_typeof(details -> 'withheld') = 'object'",
         f"(details -> 'withheld') - {_keys(_WITHHELD)} = '{{}}'::jsonb",
     ]
@@ -120,10 +133,14 @@ def _external_send_check() -> str:
         conditions.append(
             f"jsonb_typeof(details -> 'withheld' -> '{label}') = 'number'"
         )
-        conditions.append(f"details -> 'withheld' ->> '{label}' ~ {number}")
-    for name in ("credentials_removed", "pieces_matched", "abstractions"):
+        conditions.append(f"details -> 'withheld' ->> '{label}' ~ {_PIECES}")
+    for name, pattern in (
+        ("credentials_removed", _COUNT),
+        ("pieces_matched", _PIECES),
+        ("abstractions", _COUNT),
+    ):
         conditions.append(f"jsonb_typeof(details -> '{name}') = 'number'")
-        conditions.append(f"details ->> '{name}' ~ {number}")
+        conditions.append(f"details ->> '{name}' ~ {pattern}")
     conditions.append("jsonb_typeof(details -> 'truncated') = 'boolean'")
     return f"action <> '{_ACTION}' OR COALESCE(" + " AND ".join(conditions) + ", false)"
 

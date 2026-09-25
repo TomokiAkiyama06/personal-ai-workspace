@@ -33,6 +33,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from paw_backend.db import Base
+from paw_backend.research.providers.contract import ProviderKind
 
 # The action of the persistent audit of an external research send, and what its
 # row says (migration 0087 repeats these literals on purpose: a migration is a
@@ -50,6 +51,17 @@ EXTERNAL_SEND_DETAILS_KEYS = (
     "abstractions",
     "truncated",
 )
+# The provider kinds a row may name: the values of ``ProviderKind``, which is the one
+# source of truth (the CHECK below is built from it and migration 0087 repeats the
+# list as it is today, so ``tests/test_privacy_audit_schema.py`` fails when a kind is
+# added without a migration that registers it: every send to it would be refused).
+EXTERNAL_SEND_PROVIDER_KINDS = tuple(kind.value for kind in ProviderKind)
+# The numbers of the row are bounded as the record bounds them
+# (``MAX_MINIMIZED_QUERY_CHARS``, ``MAX_CONTEXT_PIECES``, ``10**6``), not by how many
+# digits fit: a number can carry data as well.
+QUERY_CHARS_PATTERN = "'^([1-9][0-9]?|1[0-9]{2}|2[0-4][0-9]|25[0-6])$'"  # 1 .. 256
+PIECES_PATTERN = "'^([0-9]|[12][0-9]|3[0-2])$'"  # 0 .. 32
+COUNT_PATTERN = "'^(0|[1-9][0-9]{0,5}|1000000)$'"  # 0 .. 10**6
 EXTERNAL_SEND_WITHHELD_KEYS = (
     "private_source",
     "private_memory",
@@ -80,14 +92,18 @@ def external_send_check_sql() -> str:
     A row of that action is an ``allow`` with the fixed reason, names a project
     and has ``details`` with exactly the keys above: a fingerprint
     (``sha256:`` and 64 hex digits), the query length and the counts (JSON numbers
-    written as plain non-negative integers), ``truncated`` (a boolean), one to
-    eight provider kind tokens (lower case letters, digits, ``_``) and the counts of
-    withheld pieces per label. PostgreSQL does not promise an order of evaluation
-    inside an ``AND``, so nothing here casts a value: everything is a type test or
-    a regular expression on text. ``COALESCE`` turns a missing key (NULL) into a
-    violation instead of a pass.
+    written as plain non-negative integers, each within the bound the record has),
+    ``truncated`` (a boolean), one to (number of kinds) provider kinds, each of them
+    a value of ``ProviderKind`` and nothing else (``EXTERNAL_SEND_PROVIDER_KINDS``),
+    and the counts of withheld pieces per label. PostgreSQL does not promise an order
+    of evaluation inside an ``AND``, so nothing here casts a value: everything is a
+    type test or a regular expression on text. ``COALESCE`` turns a missing key (NULL)
+    into a violation instead of a pass.
     """
-    number = "'^(0|[1-9][0-9]{0,6})$'"
+    kind = "(" + "|".join(EXTERNAL_SEND_PROVIDER_KINDS) + ")"
+    more = len(EXTERNAL_SEND_PROVIDER_KINDS) - 1
+    # ["web", "docs"]: the text of a jsonb array, one to (number of kinds) of the kinds.
+    kinds_pattern = f'\'^\\["{kind}"(, "{kind}"){{0,{more}}}\\]$\''
     conditions = [
         "decision = 'allow'",
         f"reason = '{EXTERNAL_SEND_REASON}'",
@@ -97,10 +113,9 @@ def external_send_check_sql() -> str:
         "jsonb_typeof(details -> 'query_fingerprint') = 'string'",
         "details ->> 'query_fingerprint' ~ '^sha256:[0-9a-f]{64}$'",
         "jsonb_typeof(details -> 'query_chars') = 'number'",
-        "details ->> 'query_chars' ~ '^[1-9][0-9]{0,2}$'",
+        f"details ->> 'query_chars' ~ {QUERY_CHARS_PATTERN}",
         "jsonb_typeof(details -> 'provider_kinds') = 'array'",
-        "(details -> 'provider_kinds')::text ~ "
-        '\'^\\["[a-z][a-z0-9_]{0,31}"(, "[a-z][a-z0-9_]{0,31}"){0,7}\\]$\'',
+        f"(details -> 'provider_kinds')::text ~ {kinds_pattern}",
         "jsonb_typeof(details -> 'withheld') = 'object'",
         f"(details -> 'withheld') - {_keys(EXTERNAL_SEND_WITHHELD_KEYS)}"
         " = '{}'::jsonb",
@@ -109,10 +124,14 @@ def external_send_check_sql() -> str:
         conditions.append(
             f"jsonb_typeof(details -> 'withheld' -> '{label}') = 'number'"
         )
-        conditions.append(f"details -> 'withheld' ->> '{label}' ~ {number}")
-    for name in ("credentials_removed", "pieces_matched", "abstractions"):
+        conditions.append(f"details -> 'withheld' ->> '{label}' ~ {PIECES_PATTERN}")
+    for name, pattern in (
+        ("credentials_removed", COUNT_PATTERN),
+        ("pieces_matched", PIECES_PATTERN),
+        ("abstractions", COUNT_PATTERN),
+    ):
         conditions.append(f"jsonb_typeof(details -> '{name}') = 'number'")
-        conditions.append(f"details ->> '{name}' ~ {number}")
+        conditions.append(f"details ->> '{name}' ~ {pattern}")
     conditions.append("jsonb_typeof(details -> 'truncated') = 'boolean'")
     return (
         f"action <> '{EXTERNAL_SEND_ACTION}' OR COALESCE("

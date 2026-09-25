@@ -51,7 +51,7 @@ Decision 0004 にも 0010 にも、「`audit_events` にどう足すか」は書
   `details` が NULL でなければ拒否される。INSERT できる Role の Bug や侵害が、別の `action` の行に本文を残すことはできない（独立したレビューの指摘。最初の案は、登録簿にない `action` にも「小さな Object なら可」としていた）。
 - `ck_audit_events_external_send_details`: `action` が `research.external_send` の行は、`decision` が `allow`、`reason` が `send_authorized`、`project_id` が非 NULL で、
   `details` が**ちょうど上の 8 つの Key**（`withheld` の中は 4 つの Key）を持ち、値が決まった形であること。指紋は `sha256:` と 64 桁の小文字の 16 進数、数は 0 以上の整数（数字だけ。文字列、小数、指数表記は不可）、
-  `truncated` は Boolean、`provider_kinds` は `[a-z][a-z0-9_]{0,31}` の Token が 1〜8 個の配列。Key の追加も、Query を入れられる形の値も、Application の Role からの INSERT でも拒否される。
+  `truncated` は Boolean、`provider_kinds` は `ProviderKind` の値（`web`、`docs`、`github`、`opencode`）だけの 1〜4 個の配列で、それ以外の Token は入らない。数は Record の上限の範囲内（`query_chars` は 1〜256、Piece の数は 0〜32、他の 2 つは 0〜1,000,000）。Key の追加も、Query を入れられる形の値も、Application の Role からの INSERT でも拒否される。
   値の型を確かめる式は、Cast をしない（PostgreSQL は `AND` の評価順を保証しないため）。欠けた Key（NULL）は `COALESCE` で違反にする（CHECK は NULL を通してしまうため）。
 - 本文が入らないことは、3 つの層で守る。(1) `ExternalSendRecord` に本文の Field がない。(2) `external_send_event` が、Record の各 Field を、型と形（`type(x) is int`、`sha256:` の形、`ProviderKind` の Member など）で確かめ直し、
   新しいプレーンな値だけで `details` を作る（作られた後に書き換えられた Record、`str` / `int` の Subclass、Slot の消えた Record は、Database に触れる前に `TypeError` / `ValueError`）。
@@ -100,10 +100,11 @@ Decision 0010 は「Record は『送ってよいと判断した』記録で、�
 - **塩なしの SHA-256 を永続化する。** Decision 0010 は、Query が Public な内容になってから送るため、塩なしの指紋を承認した。指紋を `audit_events` に永続化すると、
   Audit Log を読める人が、推測した Query の SHA-256 と突き合わせて、「その Query を送ったか」を確かめられる。何を検索したかは行から分からないが、推測が当たれば分かる。
   Query は Public な内容という前提が崩れたときの影響は、Audit Log を読める人（Admin）に及ぶ。塩を付けると、この突き合わせができなくなる（Query から行を探せなくなる）。
+- **指紋の 64 桁の 16 進数は、Database では検証できない。** CHECK が確かめるのは書式（`sha256:` と 64 桁の小文字の 16 進数）だけで、SHA-256 であること、Query の指紋であることは確かめられない。Application の Role で INSERT できる書き手は、32 Byte の任意のデータを指紋として置ける（Bug や侵害。Decision 0004 の「偽の行を足せる」と同じ範囲）。他の値は、数の範囲、Provider の種類の閉じた集合、Boolean で、自由な文字列を置く場所はない。
 - **記録の内容の限界。** Record には Provider の応答の成否がない（「送ってよいと判断した」記録）。`actor_id` がなく、誰の操作で送ったかは行から分からない（`project_id` だけ）。
   行数は送信ごとに 1 行ずつ増え続ける（保存期間と Partition は未実装。Decision 0004 の既知の制限と同じ）。
 - **Database が遅い、または落ちている間、Research の検索は全て止まる。** Fail closed の意図した帰結だが、Research が Audit Table に依存することになる（Decision 0004 の `REQUIRED` と同じ）。
-- **形を変えるたびに Migration が要る。** `research.external_send` の Key を増やす、Provider の種類の Token の形を変える、上限を変える、は CHECK 制約を変える Migration を要する。
+- **形を変えるたびに Migration が要る。** `research.external_send` の Key を増やす、**Provider の種類を足す**（`ProviderKind` に値を足す）、上限を変える、は CHECK 制約を変える Migration を要する。
   Migration が適用された後の Migration は書き換えない。CHECK と Code が食い違ったまま出荷すると、全ての送信が拒否される（Fail closed）。`tests/test_privacy_audit_schema.py` が、Model、Migration、Code の食い違いを検出する。
 - **`0087` の Revision ID は Issue の番号で、鎖の順序ではない。** 統合時に並びを確認する。
 
@@ -155,3 +156,8 @@ Human は、1 に「承認」と答え、それ以外は「推奨どおり」と
 6. **拒否した要求の Audit**: 推奨どおり。今回は書かない。必要なら、別の Issue と Decision で、Project と拒否の理由だけを持つ `deny` の行として提案する。
 7. **`actor_id` を持たない**: 推奨どおり。今回は足さない。Research を呼ぶ API の Issue が、Task や Request の `correlation_id` で認可の行と結び付ける設計を、その時に提案する。
 8. **保存期間と削除**: 推奨どおり。決めない。`audit_events` 全体の方針として、別の Issue で扱う。
+
+**承認後の補足（2026-09-26、独立レビューの指摘への訂正。承認された方針は変えない）**: 上の 2 の CHECK 制約は、承認された「決まった 8 つの Key と値の形だけ。Query を入れられる形の値は拒否する」を実装するときに、値の形の一部を緩く書いていた。
+`provider_kinds` は「小文字の Token が 1〜8 個」で、`secret_token_abc123` のような Credential や Query の断片が入った。数は「桁数」（`query_chars` は 999 まで、他は 9,999,999 まで）で縛っていて、Record の上限より広く、数も情報を運べる。
+そこで、本文の 2 の形を次のように狭めた: `provider_kinds` は `ProviderKind` の値の閉じた集合だけ（1〜4 個。**`ProviderKind` に値を足すには、新しい Migration が要る**）、数は Record の上限のとおり（`query_chars` 1〜256、Piece の数 0〜32、`credentials_removed` と `abstractions` 0〜1,000,000）。
+方針（本文が入らないこと、Key の閉じた集合、`NOT VALID`、登録された `action` だけ）は変えていない。Migration `0087` は、どこにも適用される前に直した。

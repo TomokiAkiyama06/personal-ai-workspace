@@ -24,13 +24,17 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from paw_backend.authz.models import (
+    COUNT_PATTERN,
     DETAILS_ACTIONS,
     DETAILS_REGISTERED_CHECK,
     EXTERNAL_SEND_ACTION,
     EXTERNAL_SEND_DETAILS_KEYS,
+    EXTERNAL_SEND_PROVIDER_KINDS,
     EXTERNAL_SEND_REASON,
     EXTERNAL_SEND_WITHHELD_KEYS,
     MAX_DETAILS_BYTES,
+    PIECES_PATTERN,
+    QUERY_CHARS_PATTERN,
     external_send_check_sql,
 )
 from paw_backend.db import Base
@@ -40,7 +44,12 @@ from paw_backend.research.privacy import (
 from paw_backend.research.privacy import (
     EXTERNAL_SEND_REASON as AUDIT_REASON,
 )
-from paw_backend.research.privacy import external_send_event
+from paw_backend.research.privacy import (
+    MAX_CONTEXT_PIECES,
+    MAX_MINIMIZED_QUERY_CHARS,
+    external_send_event,
+)
+from paw_backend.research.providers import ProviderKind
 
 from .memory_support import migrate, requires_postgres, sync_database_url
 from .privacy_audit_support import fingerprint_of, make_record
@@ -53,6 +62,8 @@ TABLE = "audit_events"
 REGISTERED_CHECK = "ck_audit_events_details_registered"
 SHAPE_CHECK = "ck_audit_events_external_send_details"
 QUERY = "python asyncio"
+# The largest a removal count may be (``MinimizedQuery`` allows ``10**6``).
+MAX_COUNT = 10**6
 
 
 def migration_module() -> ModuleType:
@@ -102,6 +113,25 @@ class ModelAndMigrationAgreeTest(unittest.TestCase):
         _, details = external_send_event(make_record())
         self.assertEqual(tuple(details), module._KEYS)
         self.assertEqual(tuple(details["withheld"]), module._WITHHELD)
+
+    def test_the_provider_kinds_of_the_check_are_those_of_the_enum(self):
+        # One source of truth (``ProviderKind``): the model's CHECK is built from it,
+        # the migration repeats it as it was. Adding a kind without a migration that
+        # registers it makes this fail (and every send to that kind would be refused).
+        kinds = tuple(kind.value for kind in ProviderKind)
+        self.assertEqual(EXTERNAL_SEND_PROVIDER_KINDS, kinds)
+        self.assertEqual(migration_module()._PROVIDER_KINDS, kinds)
+        self.assertEqual(kinds, ("web", "docs", "github", "opencode"))
+        sql = external_send_check_sql()
+        for kind in kinds:
+            self.assertIn(f"{kind}", sql)
+        self.assertIn(f"{{0,{len(kinds) - 1}}}", sql)
+
+    def test_the_number_patterns_of_the_migration_are_those_of_the_model(self):
+        module = migration_module()
+        self.assertEqual(module._QUERY_CHARS, QUERY_CHARS_PATTERN)
+        self.assertEqual(module._PIECES, PIECES_PATTERN)
+        self.assertEqual(module._COUNT, COUNT_PATTERN)
 
     def test_the_literals_are_the_documented_ones(self):
         self.assertEqual(EXTERNAL_SEND_ACTION, "research.external_send")
@@ -449,17 +479,22 @@ class ExternalSendCheckTest(DatabaseTestCase):
     def test_the_shape_at_its_boundaries_is_accepted(self):
         for label, details in {
             "one provider kind": valid_details(provider_kinds=["web"]),
-            "eight provider kinds": valid_details(
-                provider_kinds=[f"kind_{n}" for n in range(8)]
+            "every provider kind": valid_details(
+                provider_kinds=[kind.value for kind in ProviderKind]
             ),
-            "a 32 character kind": valid_details(provider_kinds=["k" * 32]),
             "a query of 1 character": valid_details(query_chars=1),
-            "a query of 999 characters": valid_details(query_chars=999),
+            "the longest query": valid_details(query_chars=MAX_MINIMIZED_QUERY_CHARS),
             "the largest counts": valid_details(
-                credentials_removed=9_999_999,
-                pieces_matched=9_999_999,
-                abstractions=9_999_999,
-                withheld=dict.fromkeys(EXTERNAL_SEND_WITHHELD_KEYS, 9_999_999),
+                credentials_removed=MAX_COUNT,
+                pieces_matched=MAX_CONTEXT_PIECES,
+                abstractions=MAX_COUNT,
+                withheld=dict.fromkeys(EXTERNAL_SEND_WITHHELD_KEYS, MAX_CONTEXT_PIECES),
+            ),
+            "the smallest counts": valid_details(
+                credentials_removed=0,
+                pieces_matched=0,
+                abstractions=0,
+                withheld=dict.fromkeys(EXTERNAL_SEND_WITHHELD_KEYS, 0),
             ),
         }.items():
             with self.subTest(case=label):
@@ -563,10 +598,13 @@ class ExternalSendCheckTest(DatabaseTestCase):
                         project=uuid.uuid4(),
                     )
 
-    def test_the_query_length_must_be_between_1_and_999(self):
+    def test_the_query_length_must_be_between_1_and_the_maximum(self):
         for label, value in {
             "zero": 0,
             "negative": -5,
+            "one above the maximum": MAX_MINIMIZED_QUERY_CHARS + 1,
+            "300": 300,
+            "999": 999,
             "1000": 1000,
             "a string": "14",
             "a fraction": 14.5,
@@ -576,15 +614,42 @@ class ExternalSendCheckTest(DatabaseTestCase):
             with self.subTest(query_chars=label):
                 self.refused(valid_details(query_chars=value), project=uuid.uuid4())
 
-    def test_the_provider_kinds_are_a_short_list_of_lower_case_tokens(self):
+    def test_every_count_is_bounded_as_the_code_bounds_it(self):
+        # A number can carry data as well (nine digits are 30 bits): every count is
+        # limited to what the record allows, not to what fits a column.
+        for name, limit in (
+            ("credentials_removed", MAX_COUNT),
+            ("pieces_matched", MAX_CONTEXT_PIECES),
+            ("abstractions", MAX_COUNT),
+        ):
+            for value in (limit + 1, limit * 10, 9_999_999):
+                with self.subTest(field=name, value=value):
+                    self.refused(valid_details(**{name: value}), project=uuid.uuid4())
+        for label in EXTERNAL_SEND_WITHHELD_KEYS:
+            for value in (MAX_CONTEXT_PIECES + 1, 100, 9_999_999):
+                with self.subTest(field=f"withheld.{label}", value=value):
+                    self.refused(
+                        nested(valid_details(), ("withheld", label), value),
+                        project=uuid.uuid4(),
+                    )
+
+    def test_the_provider_kinds_are_only_the_registered_values(self):
+        # The point of the constraint: a token that is not a provider kind (a
+        # credential, a fragment of a query) has no place in the row.
         for label, value in {
-            "empty": [],
-            "nine kinds": [f"kind_{n}" for n in range(9)],
-            "upper case": ["Web"],
-            "a space": ["web docs"],
+            "a credential-like token": ["secret_token_abc123"],
+            "a GitHub token prefix": ["ghp_abc123"],
+            "a lower case word": ["billing"],
+            "a longer token that starts like a kind": ["web_search"],
+            "a kind with a suffix": ["web2"],
+            "a kind with a missing letter": ["we"],
+            "a kind in upper case": ["Web"],
+            "a valid kind and a token": ["web", "secret_token_abc123"],
+            "a token and a valid kind": ["secret_token_abc123", "docs"],
+            "a token of 32 characters": ["k" * 32],
             "a sentence, i.e. a query": ["how to retry payments in stripe"],
+            "a space": ["web docs"],
             "a dot": ["web.search"],
-            "33 characters": ["k" * 33],
             "an empty token": [""],
             "a leading digit": ["1web"],
             "a number": [1],
@@ -596,9 +661,25 @@ class ExternalSendCheckTest(DatabaseTestCase):
             "a quote": ['we"b'],
             "a newline": ["web\n"],
             "non-ascii": ["w\u00e9b"],
+            "empty": [],
+            "one more than there are kinds": ["web"] * (len(ProviderKind) + 1),
+            "nine": ["web"] * 9,
         }.items():
             with self.subTest(provider_kinds=label):
                 self.refused(valid_details(provider_kinds=value), project=uuid.uuid4())
+
+    def test_every_provider_kind_of_the_code_is_accepted_by_the_database(self):
+        # Fails when a kind is added to ``ProviderKind`` without a migration that
+        # registers it: every send to that kind would be refused.
+        for kind in ProviderKind:
+            with self.subTest(kind=kind.value):
+                self.insert(
+                    valid_details(provider_kinds=[kind.value]), project=uuid.uuid4()
+                )
+        self.insert(
+            valid_details(provider_kinds=[kind.value for kind in ProviderKind]),
+            project=uuid.uuid4(),
+        )
 
     def test_truncated_is_a_boolean_and_withheld_an_object(self):
         for label, value in {
