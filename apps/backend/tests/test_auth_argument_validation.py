@@ -267,7 +267,19 @@ class ArgumentValidationTest(unittest.IsolatedAsyncioTestCase):
                 args = [ADMIN, uuid.uuid4(), CONTEXT]
                 args[index] = value
                 with self.subTest(argument=index, value=repr(value)[:20]):
-                    await self.refused(lambda a=args: self.auth.unlock_account(*a))
+                    await self.refused(
+                        lambda a=args: self.auth.unlock_account(
+                            *a, session_id=uuid.uuid4()
+                        )
+                    )
+        # The session the Passkey step-up is read from (PAW-023) is a UUID too.
+        for value in NOT_A_UUID:
+            with self.subTest(argument="session_id", value=repr(value)[:20]):
+                await self.refused(
+                    lambda v=value: self.auth.unlock_account(
+                        ADMIN, uuid.uuid4(), CONTEXT, session_id=v
+                    )
+                )
 
     async def test_a_user_that_may_not_unlock_is_refused_before_the_database_too(self):
         from paw_backend.auth.errors import AuthPermissionError
@@ -275,7 +287,9 @@ class ArgumentValidationTest(unittest.IsolatedAsyncioTestCase):
         user = Principal(uuid.uuid4(), SystemRole.USER)
         with patch.object(self.services.service._audit, "record_best_effort"):
             await self.refused(
-                lambda: self.auth.unlock_account(user, uuid.uuid4(), CONTEXT),
+                lambda: self.auth.unlock_account(
+                    user, uuid.uuid4(), CONTEXT, session_id=uuid.uuid4()
+                ),
                 AuthPermissionError,
             )
 

@@ -138,3 +138,81 @@ class PolicyVersionConflictError(AuthError):
 
     def __init__(self) -> None:
         super().__init__("the policy was changed by someone else")
+
+
+# -- Passkeys (PAW-023) ---------------------------------------------------------
+# Like everything above: fixed messages, never a value of the caller, a credential
+# or the database, never why a ceremony failed beyond the kind (the audit trail has
+# the reason).
+
+
+class PasskeyError(AuthError):
+    """Base class of the Passkey errors below."""
+
+
+class PasskeyUnavailableError(PasskeyError):
+    """Passkeys are not configured on this server (``PAW_PASSKEY_RP_ID``)."""
+
+    def __init__(self) -> None:
+        super().__init__("passkeys are not configured")
+
+
+class PasskeyRequiredError(PasskeyError):
+    """The session is restricted until a Passkey is registered / used (the gate).
+
+    Also raised for a Passkey operation the session's gate does not allow (for
+    example registering another Passkey before the sign-in assertion).
+    """
+
+    def __init__(self) -> None:
+        super().__init__("a passkey is required for this session")
+
+
+class PasskeyChallengeError(PasskeyError):
+    """The challenge is unknown, expired or already used (begin the ceremony again)."""
+
+    def __init__(self) -> None:
+        super().__init__("the challenge is not valid")
+
+
+class PasskeyVerificationError(PasskeyError):
+    """The browser's answer did not verify (a registration; an assertion is a
+    ``InvalidCredentialsError`` like every other proof)."""
+
+    def __init__(self) -> None:
+        super().__init__("the passkey response was not accepted")
+
+
+class PasskeyNotFoundError(PasskeyError):
+    """No such (active) Passkey of this user (also: not the user's own)."""
+
+    def __init__(self) -> None:
+        super().__init__("no such passkey")
+
+
+class PasskeyExistsError(PasskeyError):
+    """That authenticator's credential is already registered."""
+
+    def __init__(self) -> None:
+        super().__init__("the credential is already registered")
+
+
+class PasskeyLimitError(PasskeyError):
+    """The user already has the most Passkeys a user may have."""
+
+    def __init__(self) -> None:
+        super().__init__("too many passkeys")
+
+
+class LastPasskeyError(PasskeyError):
+    """The last Passkey of an account whose role requires one cannot be revoked."""
+
+    def __init__(self) -> None:
+        super().__init__("the last required passkey cannot be revoked")
+
+
+class NoPasskeyError(PasskeyError):
+    """The account has no Passkey to authenticate with (register one first)."""
+
+    def __init__(self) -> None:
+        super().__init__("the account has no passkey")

@@ -104,6 +104,10 @@ class RedeemRouteTest(OwnerTokenTestCase):
                 "enrolled": False,
                 "enrollment_required": True,
                 "recommended": False,
+                # Passkeys are not configured in these tests: nothing is enforced.
+                "available": False,
+                "gate": "open",
+                "next": None,
             },
         )
 
@@ -428,6 +432,7 @@ class RoleMatrixTest(HttpTestCase):
         )
 
     def test_an_admin_unlocks_a_user_and_not_an_admin_or_the_owner(self):
+        self.passkey_step_up(self.admin)  # unlocking needs a recent Passkey step-up
         for name in ("alice", "boss", "admin-one"):
             for _ in range(5):
                 self.login(name, "wrong wrong wrong", source="198.51.100.4")
@@ -448,6 +453,7 @@ class RoleMatrixTest(HttpTestCase):
         )
 
     def test_the_owner_unlocks_the_owners_own_locked_account(self):
+        self.passkey_step_up(self.owner)
         for _ in range(5):
             self.login("boss", "wrong wrong wrong", source="198.51.100.4")
         self.assertEqual(
@@ -466,6 +472,7 @@ class RoleMatrixTest(HttpTestCase):
             "POST", f"/api/v1/auth/users/{self.user_id}/unlock", token=self.user
         )
         self.assertEqual(response.status_code, 403)
+        self.passkey_step_up(self.admin)
         response = self.call(
             "POST", f"/api/v1/auth/users/{uuid.uuid4()}/unlock", token=self.admin
         )

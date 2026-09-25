@@ -44,7 +44,7 @@ TOKEN_HASH_BYTES = 32  # SHA-256
 
 
 class AuthMethod(StrEnum):
-    """How a session was authenticated. ``PASSKEY`` is PAW-023's (unused here)."""
+    """How an authentication (a sign-in, a Step-up) was proven."""
 
     PASSWORD = "password"
     PASSKEY = "passkey"
@@ -62,6 +62,28 @@ class RevokeReason(StrEnum):
     ACCOUNT_CLOSED = "account_closed"  # pending deletion / deleted
     ADMIN = "admin"
     REPLACED = "replaced"  # a new login on a browser that still had a session
+    # The Passkey that signed the session in (or enrolled it) was revoked (PAW-023).
+    PASSKEY_REVOKED = "passkey_revoked"
+
+
+class PasskeyGate(StrEnum):
+    """What a session may do until the Passkey the policy asks for is dealt with.
+
+    Decided at sign-in (Decision 0025): a role whose requirement is ``required``
+    signs in with a password and gets a session that is *restricted*:
+
+    * ``OPEN``: no restriction (the requirement is ``optional``, the Passkey step
+      was completed, or the session predates the feature);
+    * ``ENROLLMENT_REQUIRED``: ``required`` and no Passkey is registered: the
+      session may only register one (never a dead end: the password login and
+      ``owner-recover`` stay);
+    * ``ASSERTION_REQUIRED``: ``required`` and a Passkey is registered: the
+      session may only complete a Passkey authentication.
+    """
+
+    OPEN = "open"
+    ENROLLMENT_REQUIRED = "enrollment_required"
+    ASSERTION_REQUIRED = "assertion_required"
 
 
 class ThrottleScope(StrEnum):
@@ -124,6 +146,17 @@ class AuthSessionRow(Base):
     rotated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     revoked_reason: Mapped[str | None] = mapped_column(Text)
+    # PAW-023 (revision 0023). ``open`` unless the policy required a Passkey at
+    # sign-in; a session that predates the feature is ``open`` (a policy applies to
+    # new sessions only, Decision 0015).
+    passkey_gate: Mapped[str] = mapped_column(
+        Text, server_default=text("'open'"), nullable=False
+    )
+    # The Passkey that opened the gate (a sign-in assertion or the first
+    # registration). Revoking that Passkey ends this session.
+    passkey_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("user_passkeys.id", ondelete="SET NULL")
+    )
 
     __table_args__ = (
         UniqueConstraint("token_hash"),
@@ -141,7 +174,17 @@ class AuthSessionRow(Base):
             "revoked_at",
             postgresql_where=text("revoked_at IS NOT NULL"),
         ),
+        Index(
+            "ix_auth_sessions_passkey_id_active",
+            "passkey_id",
+            postgresql_where=text("passkey_id IS NOT NULL AND revoked_at IS NULL"),
+        ),
         _in("auth_method", [m.value for m in AuthMethod], "auth_method_valid"),
+        _in("passkey_gate", [g.value for g in PasskeyGate], "passkey_gate_valid"),
+        CheckConstraint(
+            "passkey_id IS NULL OR passkey_gate = 'open'",
+            name="passkey_binds_open_session",
+        ),
         _in(
             "stepup_method",
             [m.value for m in AuthMethod],

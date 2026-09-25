@@ -45,7 +45,7 @@ Python 側の Package（`pgvector-python`）は使わず、`paw_backend/memory/v
 apps/backend/
 ├─ pyproject.toml          # 依存（完全一致で固定）と Ruff 設定
 ├─ alembic.ini             # Alembic 設定（DB URL は持たない）
-├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0022 は Password / Session / Login Throttle / 認証 Policy、0026 は Project、0027 は Repository 登録・Remote・Checkout、0030 は Shared Connection・Quota・Usage、0031 は Tool Approval、0033 は Queue / Budget / Loop、0040 は Memory Schema、0043 は `memory_versions` の全文検索の Index、0046 は Shared Memory Candidate、0050 は Research Scratch、0052 は Evidence / Claim Provenance、0083 は `tasks (project_id, state)` の Index、0087 は外部送信の Audit の `audit_events.details`）
+├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0022 は Password / Session / Login Throttle / 認証 Policy、0023 は Passkey / Passkey の Challenge / Session の Gate、0026 は Project、0027 は Repository 登録・Remote・Checkout、0030 は Shared Connection・Quota・Usage、0031 は Tool Approval、0033 は Queue / Budget / Loop、0040 は Memory Schema、0043 は `memory_versions` の全文検索の Index、0046 は Shared Memory Candidate、0050 は Research Scratch、0052 は Evidence / Claim Provenance、0083 は `tasks (project_id, state)` の Index、0087 は外部送信の Audit の `audit_events.details`）
 ├─ paw_backend/
 │  ├─ app.py               # create_app(settings)
 │  ├─ config.py            # PAW_ 環境変数から読む Settings
@@ -56,7 +56,8 @@ apps/backend/
 │  ├─ middleware.py        # Request ID、Host 検証、Security Header
 │  ├─ security.py          # Host / Origin の判定
 │  ├─ authz/               # Role・Capability・認可の判定と Audit Event（PAW-025）
-│  ├─ auth/                # Login、Session、Password（Argon2id）、Backoff、Step-up の差し込み口、認証 Policy、CSRF の Origin 検査（PAW-022）
+│  ├─ auth/                # Login、Session、Password（Argon2id）、Backoff、Step-up、認証 Policy、CSRF の Origin 検査（PAW-022）。`stepup.py` は重要操作の Passkey Step-up の判定（PAW-023）
+│  │  └─ passkeys/         # Passkey（WebAuthn）: Ceremony の検証、Challenge、登録・認証・失効、Passkey の Step-up の Verifier、Tool Broker の強い承認の Step-up（PAW-023）
 │  ├─ identity/            # 最小の users、One-time Token。`redeemer.py` は Web 側、`operator.py`（Owner の作成・Token の発行）は cli だけが使う（PAW-021）
 │  ├─ cli/                 # server-local の管理コマンド `python -m paw_backend.cli`（PAW-021）
 │  ├─ tasks/               # Agent Task の状態遷移と永続化（PAW-032）。`project_gate.py` は Project の状態 Gate の Protocol（Issue #83）
@@ -74,7 +75,7 @@ apps/backend/
 │  ├─ tools/               # Tool Broker、Capability Policy、Approval（PAW-031）
 │  └─ api/
 │     ├─ deps.py           # FastAPI Dependency
-│     └─ v1/               # /api/v1 の Router（health、events、auth）
+│     └─ v1/               # /api/v1 の Router（health、events、auth、passkeys）
 └─ tests/                  # unittest
 ```
 
@@ -142,6 +143,8 @@ Database には pgvector が必要です（CI は `pgvector/pgvector:pg18` を�
 | `PAW_LOGIN_DECAY_SECONDS` | `86400` | 試行がなければ Counter を忘れるまでの秒 |
 | `PAW_REDEEM_SOURCE_FREE_ATTEMPTS` / `PAW_REDEEM_GLOBAL_FREE_ATTEMPTS` | `5` / `30` | Token の受け取りで、接続元ごとと全体の、Lock が始まる試行の番号 |
 | `PAW_REDEEM_BACKOFF_SECONDS` / `PAW_REDEEM_DECAY_SECONDS` | `60,300,900,3600` / `900` | 同、Lock の長さと数え直しの秒 |
+| `PAW_PASSKEY_RP_ID` / `PAW_PASSKEY_ORIGINS` | なし | WebAuthn の Relying Party ID（Domain）と、Browser が Ceremony を実行してよい Origin の完全一致（Comma 区切り、最大 8）。**両方か、どちらもなしか**。なしのとき Passkey の機能は切れ、要求は強制されない。[Passkey / Step-up](#passkey--step-up) |
+| `PAW_PASSKEY_RP_NAME` / `PAW_PASSKEY_CHALLENGE_TTL_SECONDS` | `Personal AI Workspace` / `300` | Authenticator に見せる名前と、Challenge に答えられる秒（30〜900） |
 | `PAW_SCRATCH_PURGE_INTERVAL_SECONDS` | `3600` | 期限切れの Research Scratch Item を消す Janitor の間隔（秒）。`0` で Janitor を止める（期限切れの行が DB に残り続ける）。それ以外は 60〜86400。DB が未設定のときも起動しない。[Janitor](#janitor期限切れの削除) |
 | `PAW_REPOSITORY_WORKSPACE_SUBDIR` | `workspaces` | Backend が作る Checkout の置き場所（`<home>/<この名前>/<project>/<repo>`）。1 つの安全な名前（[Repository 登録](#repository-registration--per-user-checkout)） |
 | `PAW_REPOSITORY_EXISTING_ROOTS` | `{home}` | 既存 Repository を登録してよい Root（Comma 区切り、8 つまで）。各 Root は絶対 Path で `{home}`（先頭だけ）か `{user}` を含む（全員で共有する Directory は拒否） |
@@ -182,6 +185,7 @@ Endpoint は `/api/v1` 以下です。OpenAPI Schema は `/api/v1/openapi.json` 
 | `GET /api/v1/events/stream` | Server-Sent Events |
 | `WebSocket /api/v1/events/ws` | WebSocket |
 | `/api/v1/auth/*` | Login、Session、Password、Step-up、Owner の Token、認証 Policy（12 個の Endpoint）。[Login / Session / Password Policy](#login--session--password-policy) |
+| `/api/v1/auth/passkeys/*` | Passkey の登録・認証（Step-up）・一覧・失効（6 個の Endpoint）。[Passkey / Step-up](#passkey--step-up) |
 
 Readiness は 200 または 503 で、Body の形は同じです。
 
@@ -787,7 +791,7 @@ Application 起動時に一度、接続 User の権限を確認し、**`WARNING`
   （たとえば Pending deletion の Project の Chat、Member から外された後の Memory）。Project との Member 関係は PAW-026 の `project_members` にありますが、これらの Capability の判定はまだ Member 資格を見ません（[Project CRUD / Membership / Lifecycle](#project-crud--membership--lifecycle)）。
 - `tests/test_authz_routes.py` が調べるのは `/api/v1` の Route だけで、FastAPI の内部（`effective_route_contexts`）に依存します。Method の一覧を持たない Route（`Mount` など）は Method `*` の 1 操作として報告し、見逃しません。
 - `create_app` は PAW-022 の `SessionPrincipalProvider` と `DatabasePrincipalDirectory` を組み込みます（Session Cookie が無い Request は 401）。
-- 重要操作の Step-up 認証の項目は Audit にありません（PAW-023 で追加します）。
+- 重要操作の Step-up 認証の Audit は、PAW-023 が追加しました（`auth.passkey.authenticate`、`auth.passkey.register`、`auth.passkey.revoke`。[Passkey / Step-up](#passkey--step-up)）。
 - Migration の鎖は `0001 → 0025 → 0032 → 0040 → 0021` です（`0021` の Revision ID は Issue 番号で、鎖の順序ではありません。統合時に並びを確認します）。
 
 ## Owner の初期設定と復旧
@@ -816,7 +820,7 @@ python -m paw_backend.cli owner-setup --login-name tomoki
 - **stdout に Token だけが 1 行**出ます（`pawst1.<Token ID>.<Secret>`）。stderr に owner_id、login name、実行した Process の uid（`operator uid=... sudo_uid=...`）、有効期限が出ます。Token は**この 1 回しか表示されません**（保存しないため再表示できません）。
   端末のスクロールバックの記録、`tee`、CI の Log、`script` に Token を残さないでください。`TOKEN=$(...)` のように取り込めますが、Shell の履歴やプロセス一覧に出さないでください（Token は引数ではなく出力です）。
 - Token を Web の Setup 画面から `POST /api/v1/auth/token/redeem` へ渡します（PAW-022 で実装。Web Client の画面はまだありません）。**有効期間は既定で 30 分**（`PAW_SETUP_TOKEN_TTL_SECONDS`。上限 4 時間）、使えるのは 1 回だけです。
-- Owner は Passkey が必須です（`users.passkey_required = true`）。Passkey の登録の強制は PAW-023 です。
+- Owner は Passkey が必須です（`users.passkey_required = true`）。Passkey の要求の強制は PAW-023 が実装しました（Session の Gate。強制は `auth_policy` が決め、この列は見ません。[Passkey / Step-up](#passkey--step-up)）。
 
 ```bash
 # Owner が全 Passkey / 端末を失った、または Token を失ったとき
@@ -925,7 +929,7 @@ redemption = await redeemer.redeem(token_from_request, apply=set_credentials)
 - `apply` の間は Owner の `users` 行と Token の行を Lock（`SELECT ... FOR UPDATE`）したままなので、時間のかかる処理（外部への通信など）は入れないでください。他の `redeem` や `owner-recover` は、その間待たされます（Test 済み）。
 - `redeem` は User を作らず、`users.status` を変えず、Session も作りません。`invited` から `active` への移行、Password、Session は PAW-022、Passkey は PAW-023 の責務です。
 - **Recovery の Contract**（要件: 全 Passkey / 端末を失った Owner の復旧、Owner Recovery では既存 Session を全失効）: `purpose` が `recovery` の `apply` は、同じ Transaction で **既存の全 Session を失効させ、現在の Password を無効にして新しい Password を設定させ（または再設定を必須にし）、既存の Passkey をすべて失効させて（または再登録を必須にして）**ください。
-  復旧が必要な状況は、認証情報が盗まれた可能性を含むためです。Passkey が必須（`passkey_required`）の Owner に、Passkey が 1 つも登録されていないまま通常の操作を許してはいけません（PAW-023）。この Contract は Code では強制できないため、PAW-022 / PAW-023 の受け入れ条件です。
+  復旧が必要な状況は、認証情報が盗まれた可能性を含むためです。Passkey が必須（`passkey_required`）の Owner に、Passkey が 1 つも登録されていないまま通常の操作を許してはいけません。この Contract は Code では強制できないため、PAW-022 / PAW-023 の受け入れ条件でした。PAW-023 は、Token の受け取りと同じ Transaction で全 Passkey を失効し（`credential_invalidators`）、次の Sign-in を登録だけができる Session（Gate）にして、これを満たしました。
 - Web の Endpoint は誰でも呼べる**公開 Route**になるため、`tests/test_authz_routes.py` の `PUBLIC_ROUTES` に理由付きで載せ、**Client（接続元）単位と全体の Rate Limit** を付けてください。
   上限は Token ごとにしか効かず、未知の Token ID への試行は数える相手がありません。
 - **Passkey の必須化**: `users.passkey_required` は Owner と Admin では DB の CHECK 制約で `false` にできず、`Redemption.passkey_required` も `true` です。
@@ -951,14 +955,14 @@ Login name は小文字の ASCII 英数字と `.` `_` `-` だけ（3〜64 文字
 - **Rate Limit は Token ごとの試行の上限だけです。** 接続元ごと・全体の Limit は PAW-022 の Endpoint（`POST /api/v1/auth/token/redeem`）が実装しました（[Login と Backoff](#login-と-backoff)）。
 - 実行した OS User は Token の行に uid として残ります。`owner-recover` は実効 uid が 0 でなければ拒否しますが、`SUDO_UID` は手掛かりにすぎません。この確認は、DB の認証情報を持つ Process が誤って実行することを防ぐもので、境界そのものではありません（境界は認証情報のファイルの権限）。同じ Process の中の Code は `os.geteuid` の差し替えも DB への直接の書き込みもできるため、Service の確認は Library として呼ばれる場合の**誤用と Identity の偽装の防止**であり、悪意ある Code への防御ではありません。root の Process や、User Namespace の中の uid 0 は通ります。Container で root 以外として実行する構成では Recovery できません。
 - 発行・使用の成功時は Transaction と Audit のために接続を 2 本同時に使います（Pool の既定は 5）。失敗の経路は同時に持ちません。
-- Token の Web 側での Password・Session の扱い（Recovery の Contract）は PAW-022 が実装しました。Passkey は PAW-023 で、この Issue の範囲は Token の発行・使用・失効と Audit までです。
+- Token の Web 側での Password・Session の扱い（Recovery の Contract）は PAW-022 が実装しました。Passkey の失効は PAW-023 が実装しました。この Issue の範囲は Token の発行・使用・失効と Audit までです。
 
 ## Login / Session / Password Policy
 
 [PAW-022](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/19) で実装しました（`paw_backend/auth/`、Migration `0022`、`api/v1/auth.py`）。
 **数値と選択（Argon2id の Parameter、Backoff の段階、Session の寿命、Cookie の属性、Rate Limit、Password の規則、Audit に残す項目）は [Decision 0015](../../docs/decisions/0015-login-session-password-policy.md)（Approved。2026-09-26 に Human が承認）に、各点の判断と根拠をまとめています。**
 値は設定（`PAW_` の環境変数）または定数で、承認で変わっても Schema は変わりません（Migration は不要）。
-Passkey の登録・認証・強制と Step-up の Passkey は PAW-023 です（この Issue は差し込み口だけを用意しました）。
+Passkey の登録・認証・強制と Step-up の Passkey は PAW-023 で実装しました（[Passkey / Step-up](#passkey--step-up)。この Issue は差し込み口だけを用意していました）。
 
 ### Endpoint
 
@@ -974,10 +978,10 @@ Passkey の登録・認証・強制と Step-up の Passkey は PAW-023 です（
 | `DELETE /sessions/{id}` | `account.manage` | 自分の別の端末を Logout する（他人の Session、存在しない ID は 404） |
 | `POST /sessions/revoke-others` | `account.manage` | 他のすべての端末を Logout する |
 | `POST /password/change` | `account.manage` | 現在の Password で本人確認して変更する（`revoke_other_sessions` で他の端末を Logout） |
-| `POST /step-up` | `account.manage` | Password を再入力して Step-up する（Session ID を作り直す） |
-| `POST /users/{id}/unlock` | `admin.users.manage` | Login の Lock を解除する（Admin は User だけ、Admin と Owner は Owner だけ） |
+| `POST /step-up` | `account.manage` | **Password を**再入力して Step-up する（Session ID を作り直す。Passkey の Step-up は `/auth/passkeys/authenticate/*`） |
+| `POST /users/{id}/unlock` | `admin.users.manage` | Login の Lock を解除する（Admin は User だけ、Admin と Owner は Owner だけ）。**直近の Passkey の Step-up が要る**（PAW-023） |
 | `GET /policy` | `admin.auth_policy.view`（Admin、Owner） | Workspace の認証 Policy |
-| `PUT /policy` | `owner.auth_policy.manage`（**Owner だけ**） | Policy を変える（`expected_version` と直近の **Passkey の** Step-up が要る。PAW-023 まで本番では使えない） |
+| `PUT /policy` | `owner.auth_policy.manage`（**Owner だけ**） | Policy を変える（`expected_version` と直近の **Passkey の** Step-up が要る。Passkey を設定した環境で使える） |
 
 | 状態 | Code |
 | --- | --- |
@@ -1046,13 +1050,13 @@ Passkey の登録・認証・強制と Step-up の Passkey は PAW-023 です（
 
 ### Passkey Policy（Owner が変える設定）と Step-up
 
-- `auth_policy`（1 行、`version` つき）: Owner / Admin / User ごとの Passkey の要求（`required` / `optional`）、User へ Passkey を強く勧めるか、Step-up の有効時間（5〜240 分）。**既定は要件のまま**（Owner・Admin は required、User は optional で勧める、30 分）。Decision 0015 の 12 節（承認済み）が、要件の固定の方針を「Owner が変えられる設定の既定値」に読み替えます（Human の指示で、`REQUIREMENTS.md` の `[FIXED]`「Passkey Policy」の本文は変えず、その下に注記だけを追記しました。Human の回答 2026-09-25: Passkey の Step-up を必須にする。PAW-023 まで、この設定変更は本番では使えません）。
-- **変更は Owner だけ**（`owner.auth_policy.manage`。Agent に委任できず、Audit は REQUIRED）。**Owner の Session の直近の Passkey の Step-up**（Policy の有効時間の内。Row Lock の下で Database の時計）が要ります。**Password の Step-up は数えません**（403 `step_up_method_insufficient`。Password を盗んだ者が `POST /step-up` で得られる Step-up を受け付けると、Owner / Admin の Passkey の要求を緩められてしまうため。要件: Owner / Admin の重要操作は Passkey の Step-up）。**そのため、PAW-023 が Passkey の Verifier を登録するまで、`PUT /policy` は本番では使えません**（Owner が変えられる Policy は PAW-023 で端から端まで動きます。それまでは既定値、つまり要件どおりの Policy が効きます）。Test は、Passkey の Step-up を Test の Fixture が Session の行へ書いて、この経路を確かめます。Step-up の方法はその方法の Verifier だけが記録し、別の方法の鍵で登録した Verifier は拒否されます。`auth.step_up.satisfied` は「時間内に Step-up があった」だけを表すので、方法の強さは `method` で見ます。`expected_version` が現在と違えば 409 で、**同時の編集で更新が失われません**（別の接続で競わせる Test 済み）。同じ値の更新は Version を上げません。
+- `auth_policy`（1 行、`version` つき）: Owner / Admin / User ごとの Passkey の要求（`required` / `optional`）、User へ Passkey を強く勧めるか、Step-up の有効時間（5〜240 分）。**既定は要件のまま**（Owner・Admin は required、User は optional で勧める、30 分）。Decision 0015 の 12 節（承認済み）が、要件の固定の方針を「Owner が変えられる設定の既定値」に読み替えます（Human の指示で、`REQUIREMENTS.md` の `[FIXED]`「Passkey Policy」の本文は変えず、その下に注記だけを追記しました。Human の回答 2026-09-25: Passkey の Step-up を必須にする。PAW-023 まで、この設定変更は本番では使えません。この制限は PAW-023 で解消しました）。
+- **変更は Owner だけ**（`owner.auth_policy.manage`。Agent に委任できず、Audit は REQUIRED）。**Owner の Session の直近の Passkey の Step-up**（Policy の有効時間の内。Row Lock の下で Database の時計）が要ります。**Password の Step-up は数えません**（403 `step_up_method_insufficient`。Password を盗んだ者が `POST /step-up` で得られる Step-up を受け付けると、Owner / Admin の Passkey の要求を緩められてしまうため。要件: Owner / Admin の重要操作は Passkey の Step-up）。**そのため `PUT /policy` は、PAW-023 が入れた Passkey の Step-up（Passkey を設定した環境）で使えます**（Passkey が設定されていない間は既定値、つまり要件どおりの Policy が効きます）。PAW-022 の Test は Passkey の Step-up を Test の Fixture が Session の行へ書いて確かめ、PAW-023 の Test（`tests/test_passkey_http.py`）は実際の Passkey の Ceremony で端から端まで確かめます。Step-up の方法はその方法の Verifier だけが記録し、別の方法の鍵で登録した Verifier は拒否されます。`auth.step_up.satisfied` は「時間内に Step-up があった」だけを表すので、方法の強さは `method` で見ます。`expected_version` が現在と違えば 409 で、**同時の編集で更新が失われません**（別の接続で競わせる Test 済み）。同じ値の更新は Version を上げません。
 - 変更は `auth_policy_changes`（誰が・いつ・各項目の変更前後。追記専用）と Audit（`auth.policy.update`）に、同じ Transaction で残ります。
-- **効く範囲は新しい Sign-in と Session から**です。**既存の Session は失効も降格もしません**（厳しくしても黙って Logout されない。Test 済み）。`GET /session` の `auth.passkey` が、その人の要求（`requirement`）、登録の有無（`enrolled`。PAW-023 まで常に `false`）、`enrollment_required`（`required` で未登録）、`recommended`（User に勧める）を返します。
-- **この Issue は Passkey を強制しません**（PAW-023）。したがって、どの設定でも Owner は Password で Login できます。PAW-023 は「`required` で未登録」を登録だけができる状態にし、Password Login と `owner-recover` を残さなければなりません（行き止まりを作らない）。`users.passkey_required` 列は Owner / Admin では CHECK 制約で `false` にできないため、**Login の処理はこの列を見ず `auth_policy` を見ます**（列の整理は PAW-023）。
-- **PAW-023 の差し込み口（まとめ）**: (1) `AuthService(step_up_verifiers={AuthMethod.PASSKEY: ...})` に Passkey の `StepUpVerifier`（`method = AuthMethod.PASSKEY`。別の方法の鍵での登録は拒否される）を登録する。これで `PUT /policy` が使えるようになる。(2) `PasskeyEnrollment` を差し替える。(3) `AuthService(credential_invalidators=...)` に Passkey の失効を足す（Token の受け取りと同じ Transaction で走る）。(4) `auth_sessions.auth_method` と `stepup_method` の CHECK は `passkey` を許すので、Session の Table の変更は要らない。(5) Passkey は 1 User に複数あるため `password_credentials` へは足さず、別の Table にする。(6) 要求は `auth_policy` から `AuthPolicy.requirement_for(role)` で読む。
-- **Step-up の差し込み口**: `StepUpVerifier`（`method`、`verify`）と `StepUpEvidence`。Password の実装（`PasswordStepUpVerifier`）が入っています。`POST /step-up` は成功すると Session に時刻と方法を記録して ID を作り直し、`auth.step_up`（方法、時刻、期限、`satisfied`）に出ます。PAW-023 は Passkey の Verifier を `AuthService(step_up_verifiers=...)` に登録するだけでよく、`PasskeyEnrollment`（既定は誰も登録していない）も同様に差し替えます。
+- **効く範囲は新しい Sign-in と Session から**です。**既存の Session は失効も降格もしません**（厳しくしても黙って Logout されない。Test 済み）。`GET /session` の `auth.passkey` が、その人の要求（`requirement`）、登録の有無（`enrolled`。PAW-023 が `PasskeyRegistry` で答える）、`enrollment_required`（`required` で未登録）、`recommended`（User に勧める）を返します。
+- **Passkey の強制は PAW-023 が実装しました**（[Passkey / Step-up](#passkey--step-up)）。`required` の Role は、Password で Sign-in すると制限された Session を得ます（Passkey がなければ登録だけ、あれば認証だけ）。Password の Login と `owner-recover` は常に使え、行き止まりはありません。`users.passkey_required` 列は Owner / Admin では CHECK 制約で `false` にできませんが、**Sign-in の処理はこの列を見ず `auth_policy` を見ます**（列と CHECK はそのままにする。Decision 0025 の 9 節）。
+- **PAW-023 が差し込み口を埋めました**: (1) `AuthService(step_up_verifiers={AuthMethod.PASSKEY: PasskeyStepUpVerifier})`（Passkey を設定したときだけ。別の方法の鍵での登録は拒否される）。これで `PUT /policy` が端から端まで動きます。(2) `PasskeyEnrollment` は `PasskeyRegistry`（設定がなければ `NoPasskeys`）。(3) `credential_invalidators=(registry.revoke_all_in,)`（Token の受け取りと同じ Transaction で全 Passkey を失効する）。(4) Passkey は `password_credentials` ではなく別の Table `user_passkeys`。(5) 要求は `AuthPolicy.requirement_for(role)`。(6) `auth_sessions` に Gate の列を足した（0023）。
+- **Step-up の差し込み口**: `StepUpVerifier`（`method`、`verify`）と `StepUpEvidence`。Password の実装（`PasswordStepUpVerifier`）が入っています。`POST /step-up` は成功すると Session に時刻と方法を記録して ID を作り直し、`auth.step_up`（方法、時刻、期限、`satisfied`）に出ます。Passkey の Verifier（`PasskeyStepUpVerifier`）は、Passkey を設定したとき `AuthService` に登録されます。Passkey の Step-up は専用の Ceremony（`/auth/passkeys/authenticate/*`）で記録します。
 
 ### CSRF
 
@@ -1066,11 +1070,12 @@ Passkey の登録・認証・強制と Step-up の Passkey は PAW-023 です（
 | --- | --- |
 | `auth.login` | allow `authenticated` / deny `invalid_credentials`、`account_not_active`、`no_password`、`credentials_changed`（**存在する Account のときだけ**） |
 | `auth.lockout` | deny `backoff_started`（Lock を始めた失敗 1 件につき 1 行） |
-| `auth.unlock` | allow `unlocked` / deny `role_not_allowed` |
+| `auth.unlock` | allow `unlocked` / deny `role_not_allowed`、`step_up_required`、`step_up_method_insufficient` |
 | `auth.logout`、`auth.session.revoke`、`auth.session.revoke_others`、`auth.session.revoke_all` | Session の失効 |
 | `auth.password.change`、`auth.password.set`（`setup`、`recovery`） | Password の変更・設定 |
-| `auth.step_up` | allow `verified` / deny |
+| `auth.step_up` | allow `verified` / deny（Password の Step-up。Passkey は `auth.passkey.authenticate`） |
 | `auth.policy.update` | allow `updated` / deny `role_not_allowed`、`step_up_required`、`step_up_method_insufficient`、`version_conflict` |
+| `auth.passkey.*`（PAW-023） | 登録・認証・失効。[Passkey / Step-up](#passkey--step-up) |
 
 - Login の行は、Account の ID（`actor_id`、`actor_role`）と、接続元の Bucket を表す**不透明な UUID**（`resource_kind = login_source`。Bucket の Hash から作る仮名で、Address は保存しない）を持ちます。
 - **存在しない名前の失敗は DB へ書きません**（Log に固定の 1 行。誰でも作れる行になり、Audit の Table は削除できないため）。Lock 中に拒否された試行も書きません。
@@ -1102,8 +1107,8 @@ Migration `0022`（`down_revision` は `0087`。鎖は `0001 → 0025 → 0032 �
 
 ### 制限と未確認の点
 
-- **`PUT /api/v1/auth/policy`（Owner が変えられる Passkey Policy の変更）は、PAW-023 が Passkey の Step-up を入れるまで本番では使えません**（Passkey の Step-up を要求し、Password の Step-up は数えないため。上の「Passkey Policy」）。Owner / Admin の他の重要操作（Admin による Lock の解除など）にも Step-up は要求していません（要件の「重要操作」の範囲と Passkey の Step-up は PAW-023 と各操作の Issue で決めます）。Tool Broker の強い承認は別の `StepUpVerifier`（`tools/approvals.py`、Fail Closed）を持ち、この Session の `stepup_*` は読みません。PAW-023 は両方に Passkey の Step-up を結び付けます。
-- **Passkey は登録も強制もしません**（PAW-023）。Owner / Admin の Passkey が必須という要件は、PAW-023 が入るまで Login では強制されず、Password だけで Login できます。
+- **`PUT /api/v1/auth/policy`（Owner が変えられる Passkey Policy の変更）は、Passkey を設定した環境（`PAW_PASSKEY_RP_ID` と `PAW_PASSKEY_ORIGINS`）で使えます**。設定がなければ Passkey の Step-up を作れないので、Fail Closed のまま使えません（起動時に警告する）。Account の Lock の解除にも Passkey の Step-up を要求します（PAW-023）。Tool Broker の強い承認は別の `StepUpVerifier`（`tools/approvals.py`、Fail Closed）を持ち、`AuthServices.approval_step_up`（`PasskeyApprovalStepUp`）を渡した Deployment だけが Passkey の Step-up に結び付きます（User 単位の限界は [Passkey / Step-up](#passkey--step-up)）。
+- Owner / Admin の Passkey が必須という要件は、PAW-023 が **Passkey を設定した環境で**強制します（制限された Session）。設定がなければ強制されず、Password だけで Login できます。
 - 複数端末の追加（QR / Link の Pairing、Owner / Admin の既存端末での承認）、Admin による強制 Reset の Token の発行、Owner / Admin の異常な失敗の信頼済み端末への警告は含みません（Decision 0015 の 14 節）。
 - `/api/v1/events` の 2 つの Endpoint は、System Event しか流さない間は認証なしのままです（公開一覧に理由つきで載っています）。非公開の Event を足す Issue が `require_capability` を付けます。
 - 存在しない名前と存在する名前の**時間は完全には揃っていません**（上記）。時間の差は Argon2 に比べて小さく、Rate Limit で回数が抑えられています。
@@ -1118,13 +1123,158 @@ Migration `0022`（`down_revision` は `0087`。鎖は `0001 → 0025 → 0032 �
 
 `tests/test_auth_*.py`。Unit（`passwords`、`tokens`、`settings`、`argument_validation`、`csrf`、`provider`）、実 PostgreSQL の Service（`sessions`、`throttle`、`service_login`、`service_account`、`service_redeem`、`service_admin`。別の接続で競わせる Test を含む）、HTTP（`http`、`http_admin`。Cookie の属性、Role の一覧、CSRF、Rate Limit）、Migration（`migration`。Model との差分なし、上げ下げ、Trigger・関数）、Query Plan（`plans`。実際に送る文が Index を使えること。部分 Index を含む）、権限（`grants`。同じ Service の Test を非 Superuser の Web の Role で実行し、権限を列まで固定し、してはいけない操作を拒否）。時間は注入した時計で動かします（待たない）。
 
+## Passkey / Step-up
+
+[PAW-023](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/20) で実装しました（`paw_backend/auth/passkeys/`、`auth/stepup.py`、Migration `0023`、`api/v1/passkeys.py`）。
+**Library の選定、Attestation・User Verification・Resident Key・署名 Counter の方針、「Passkey 必須」の強制の意味、重要操作の一覧、失効の規則、`users.passkey_required` 列の扱いは、[Decision 0025](../../docs/decisions/0025-passkey-webauthn-policy.md)（Approved。2026-09-26 に Human が承認）にまとめています。** 各点の判断と根拠、承認された内容は、Decision の本文と末尾の「承認時の決定」を参照してください。
+Decision 0015 の 12・13 節と Issue #20 の追加条件（Owner が設定で変える Policy に従った強制、「必須で未登録」を行き止まりにしない、Passkey の `StepUpVerifier` の登録、他の重要操作と Tool Broker への結び付け、`users.passkey_required` 列の整理）を、すべてこの Issue で実装しています。
+
+**実際の Browser と Authenticator では確かめていません。** Test は、W3C の仕様から書いた Software Authenticator（`tests/passkey_support.py`。`cryptography` で実際に署名し、CBOR と Authenticator Data を自前で組み立てる。検証する Library と Code を共有しない）が作る WebAuthn の Payload で、登録・認証の全体を通しています。
+
+### 有効にする
+
+Passkey は、次の 2 つの設定をしたときだけ有効です（両方か、どちらもなしか。片方だけは起動時に拒否）。
+
+```text
+PAW_PASSKEY_RP_ID=paw.example.org
+PAW_PASSKEY_ORIGINS=https://paw.example.org
+```
+
+- `PAW_PASSKEY_RP_ID` は WebAuthn の Relying Party ID（公開 Host 名の Domain。IP は不可）。`PAW_PASSKEY_ORIGINS` は、Browser が Ceremony を実行してよい Origin の完全一致（Scheme・Host・Port。最大 8、`https`。`localhost` だけ `http` も可。Host は RP ID か、その Sub-domain）です。Browser が署名した `clientDataJSON` の Origin がこの一覧のどれかと**文字列として**一致しなければ拒否します。`PAW_ALLOWED_ORIGINS`（CSRF と WebSocket）とは別の設定です。
+- **設定がなければ Passkey の機能は切れ、Passkey の要求は強制されません**（Passkey を登録できない環境で要求を強制すると、Owner が登録だけができる状態から出られず、行き止まりになるため）。起動時に警告を出し、`GET /auth/session` の `auth.passkey.available` が `false` になります。この間は、Passkey の Step-up が要る操作（Policy の変更、Account の Lock の解除）は使えません（Fail Closed）。
+- `PAW_PASSKEY_RP_NAME`（既定 `Personal AI Workspace`）、`PAW_PASSKEY_CHALLENGE_TTL_SECONDS`（既定 300、30〜900）。
+
+### Endpoint
+
+`/api/v1/auth/passkeys` 以下（すべて `require_capability`。CSRF の Origin の検査と Body の 16 KiB の上限は他の認証 Route と同じ）。登録の Path が `enroll` なのは、`tests/test_owner_no_web_path.py` が「Owner の Setup・Recovery・登録の Route を持たない」ことを Path の語（`register` など）で確かめるためです（Python の Method 名は `register_begin` などで、WebAuthn の用語のまま）。`options` は `navigator.credentials.create()` / `get()` にそのまま渡せる JSON、Client の答えは `PublicKeyCredential.toJSON()` です。
+
+| Endpoint | 認可 | 制限された Session | 内容 |
+| --- | --- | --- | --- |
+| `POST /enroll/begin` | `account.manage` | 可 | 登録の Options を返し、Challenge を保存する |
+| `POST /enroll/finish` | `account.manage` | 可 | 答え（`credential`、任意の `name`）を検証して Passkey を登録する。Gate が開いたときは Session ID が変わり、新しい Cookie を設定する |
+| `POST /authenticate/begin` | `account.manage` | 可 | 認証の Options（自分の有効な Passkey だけ）を返し、Challenge を保存する |
+| `POST /authenticate/finish` | `account.manage` | 可 | 答えを検証する。**Passkey の Step-up として記録し、Session ID を作り直す**。制限された Session は Gate が開く |
+| `GET /` | `account.read` | 可 | 自分の Passkey の一覧（ID、名前、作成・最終利用の日時、同期される Passkey か）。Credential の ID や公開鍵は返さない |
+| `DELETE /{id}` | `account.manage` | 不可 | 自分の Passkey を失効する（Step-up が要る） |
+
+| 状態 | Code |
+| --- | --- |
+| 制限された Session が、許されていない Route を呼んだ | 403 `passkey_required` |
+| Step-up がない / Passkey の Step-up でない | 403 `step_up_required` / 403 `step_up_method_insufficient` |
+| Challenge がない・期限切れ・使用済み | 400 `challenge_invalid`（Begin からやり直す） |
+| 答えが検証に通らない（登録） | 400 `passkey_rejected`。認証の答えは、他の証明と同じ 403 `invalid_credentials` |
+| 認証する Passkey がない | 409 `no_passkey` |
+| その Credential は登録済み / 上限（10 個） / 必須の最後の Passkey | 409 `passkey_exists` / `passkey_limit` / `last_passkey` |
+| 他人の・存在しない・失効済みの Passkey | 404 `not_found`（区別しない） |
+| Passkey が設定されていない | 503 `passkey_unavailable` |
+| 誤りが続く | 429 `rate_limited` と `Retry-After`（Password と同じ Backoff） |
+
+形が正しくない答え（未知の Field、型違い、正準でない Base64url、大きすぎる値、Extension が多すぎるなど）は 422 です（値は返しません）。`POST /auth/step-up` は Password だけを受け付けます（`method: passkey` は 422）。
+
+### 「Passkey 必須」を強制する: Session の Gate
+
+Owner が設定する Policy（`auth_policy`）が `required` の Role（既定は Owner と Admin）は、**Password で Sign-in すると制限された Session** を得ます（`auth_sessions.passkey_gate`）。
+
+| Gate | 条件 | Session ができること |
+| --- | --- | --- |
+| `open` | 要求が `optional`、Passkey が設定されていない、手順を終えた、または機能の前からある Session | 制限なし |
+| `enrollment_required` | `required` で有効な Passkey が 0 | Passkey の**登録だけ**。行き止まりではない（Password の Login と `owner-recover` は常に使える） |
+| `assertion_required` | `required` で Passkey が 1 つ以上 | Passkey の**認証だけ** |
+
+- 制限された Session は、**すべての Route で既定で 403 `passkey_required`**（`SessionPrincipalProvider.get_principal`。WebSocket は 1008）。次の 7 つだけが通ります: `GET /auth/session`、`POST /auth/logout`、`GET /auth/passkeys`、`enroll/begin`・`enroll/finish`、`authenticate/begin`・`authenticate/finish`（`require_capability(..., allow_restricted=True)`。`tests/test_passkey_http.py` が、その一覧が正確にこれであることと、他の Route がすべて拒否することを固定します）。Agent が User の名前で行う操作は Session を持たないので、この Gate の対象ではありません。
+- **Gate は Sign-in の Transaction の中で決めます**（Policy の要求と有効な Passkey の数を、User の行の `FOR SHARE` の下で読む。Passkey の登録と失効は `FOR UPDATE` で同じ行を Lock する）。`GET /auth/session` の `auth.passkey` が `gate`、`next`（`register` / `authenticate` / `null`）、`available` を返します。Sign-in の Audit の理由は、制限された Session のとき `authenticated_passkey_pending` / `authenticated_enrollment_only` です。
+- **手順を終える**: 登録の Finish は Gate を開いて Session ID を作り直し、その Session を登録した Passkey に結び付けます。**登録は Step-up として記録しません**（Password だけで登録した Credential は、まだ何も証明していないため）。認証の Finish は Gate を開き、Session ID を作り直し、Passkey の Step-up を記録し、認証した Passkey に結び付けます。`assertion_required` の Session で、その間に Passkey がすべて失効した場合は、`enrollment_required` として扱います（登録を許す）。
+- **既存の Session は影響を受けません**（Migration は既存の行を `open` にする。Owner が Policy を変えても、動いている Session は失効も降格もしない。0015）。
+- **`users.passkey_required` 列（0021）は、強制に使いません**（Decision 0025 の 9 節。強制は `auth_policy` だけが決める。列と CHECK はそのまま）。
+
+### Step-up と重要操作
+
+Owner・Admin の重要操作は、Session に**Passkey の Step-up**（Policy の有効時間内。Password の Step-up は数えない）を要求します。判定は 1 か所（`auth/stepup.py`）で、Session の行を `FOR SHARE` で Lock してから Database の時計で `stepup_at + 有効時間 > now` を見ます（Lock の待ちで期限切れの Step-up が通らず、判定の後に Session が失効することもありません）。
+
+| 操作 | 要求 |
+| --- | --- |
+| Policy の変更（`PUT /auth/policy`、Owner） | Passkey の Step-up（0015 で実装済み。**Passkey を設定した環境で端から端まで動く**。`tests/test_passkey_http.py` の Owner の一連の Test） |
+| Account の Lock の解除（`POST /auth/users/{id}/unlock`、Admin・Owner） | Passkey の Step-up。対象を調べる前に判定する（Step-up のない Session に、Account の存在を教えない） |
+| Passkey の追加 | すでに Passkey がある User: Passkey の Step-up。ない User: 直近の認証（Sign-in が有効時間内、または任意の Step-up） |
+| Passkey の失効 | 要求が `required` の Role: Passkey の Step-up。それ以外: 任意の Step-up |
+| Tool Broker の強い承認 | 下記 |
+
+- 要求が `optional` に変えられた Role の重要操作にも、Passkey の Step-up を要求します（設定で変えられるのは「要求」と「有効時間」で、Step-up の要否ではない。Passkey を持たない Admin は Lock を解除できない）。
+- **Tool Broker の強い承認**: `ApprovalService(step_up=services.approval_step_up)`（`PasskeyApprovalStepUp`）を渡すと、承認する User の**有効な Session のどれかに**、Policy の有効時間内の Passkey の Step-up があるときだけ `True` を返します（Password の Step-up、Gate が開いていない Session、`active` でない User は数えない。DB の失敗は例外で、`ApprovalService` が「Step-up なし」に倒す）。`ApprovalService` の既定は `FailClosedStepUp` のままで、Verifier を渡した Deployment だけが有効にします。**限界**: Step-up は User と時間に結び付き、承認そのもの・決める Session には結び付きません（`ApprovalService` が渡さないため）。承認の Endpoint（未実装）が入るときに、決める Session で Step-up する形にします。
+
+### 登録と認証の Ceremony
+
+- **Challenge**: 32 byte の乱数。`passkey_challenges` に **Session と用途（登録・認証）ごとに 1 行**（再度 Begin すると置き換わる）。**単回使用**（消費は `DELETE ... RETURNING`。答えが誤りでも消費する）、期限（既定 5 分）は**Database の時計で、行を Lock した後に**判定します。別の Session の答えは、Challenge を見つけられません（同じ User の別端末も）。
+- **検証**（`ceremony.py`。WebAuthn の Library `webauthn` 3.0.1 を import する唯一の Module）: **User Verification は必須**、**Attestation は `none` だけ**（`none` 以外、`attStmt` の未知の Member、3 つ以外の Member は拒否）、Origin は設定との完全一致、RP ID Hash、`crossOrigin` と `topOrigin` の拒否、Algorithm は EdDSA・ES256・RS256、User Handle の一致。Library の例外の文（Client の Origin と Challenge を含む）は返しも Log もしません。
+- **署名 Counter**: 保存した値より大きい、または両方が 0（Counter を持たない Authenticator）のとき受け付けます。判定と保存は 1 つの条件付き `UPDATE` で、同じ Assertion の同時の使用や再送が両方成功することはありません。満たさなければ拒否し（Audit は `sign_count_regression`、Log は固定の Warning）、**自動では失効しません**。
+- **Credential の確認**: Step-up を記録する Transaction が、Credential が今も有効かを `FOR SHARE` で確かめます。検証している間に失効した Passkey は、Step-up を作れません。失効の UPDATE は、その Transaction を待ちます。
+- **登録の上限は 1 User 10 個**。同じ Authenticator の Credential は `excludeCredentials` で重複させません。Credential の ID は全 User で一意です。
+- **試行の制限**: 登録と認証の Finish の失敗は、Password の誤りと同じ Account と接続元の Backoff に数えます。
+
+### 失効（Device の Revoke）
+
+`DELETE /auth/passkeys/{id}` は 1 つの Transaction で、User の行を `FOR UPDATE` で Lock し、次を行います。
+
+1. Passkey を失効する（行は残す。`revoked_reason = revoked_by_user`）。**要求が `required` の Role の最後の Passkey は失効できません**（409 `last_passkey`。全体を Rollback する）。
+2. **その Passkey が開けた Session を終える**（`revoked_reason = passkey_revoked`。呼んだ Session 自身が該当すれば、その Session も終わり、応答は `signed_out: true` で Cookie を消す）。
+3. **User のすべての Session の Passkey の Step-up を忘れる**（どの Credential でどの Step-up かは持たず、安全な側に倒す）。開いている Challenge も消す。
+4. Audit（`auth.passkey.revoke`）を同じ Transaction で書く。
+
+同時の失効（同じ Passkey、または 2 つの Passkey）は、User の行の Lock で 1 つずつになります（別の接続で競わせる Test 済み）。
+
+**Lock の順序**: Passkey の行を、Session の行より先に Lock します（Step-up は Credential を `FOR SHARE` で確かめてから Session を更新し、失効と Recovery は Session の行に触れる前に Passkey の行を Lock する。Recovery は Passkey の失効を Session の失効より先に行う）。順序が逆だと、同じ Session の Step-up と失効が互いを待つ Deadlock になります（Lock を保持して競わせる Test が、逆にすると失敗することを確かめています）。
+
+**Owner Recovery**（Decision 0005 の 7 節）: `AuthService(credential_invalidators=(registry.revoke_all_in,))` が、Token の消費と**同じ Transaction**で、全 Passkey を失効し（`revoked_reason = recovery`）、開いている Challenge を消します。どれか 1 つが失敗すれば全体を Rollback します。Recovery の後の Sign-in は `enrollment_required` の Session です。
+
+### Audit
+
+| `action` | 内容 |
+| --- | --- |
+| `auth.passkey.register` | allow `registered` / deny `challenge_invalid`、`verification_failed`、`already_registered`、`limit_reached`、`gate_not_allowed`、`step_up_required`、`step_up_method_insufficient` |
+| `auth.passkey.authenticate` | allow `verified` / deny `challenge_invalid`、`unknown_credential`、`verification_failed`、`sign_count_regression`、`invalid_credentials` |
+| `auth.passkey.revoke` | allow `revoked` / deny `step_up_required`、`step_up_method_insufficient`、`last_passkey`、`not_found`、`gate_not_allowed` |
+
+Credential の ID、公開鍵、Challenge、名前、Origin は入りません（ID と列挙値だけ）。変更は同じ Transaction、拒否は別の短い Transaction で Best Effort に書きます。制限された Session の 403 は書きません（Sign-in の行に理由が残る）。
+
+### Database と権限
+
+Migration `0023`（`down_revision` は `0027`。鎖は `... → 0087 → 0022 → 0083 → 0043 → 0030 → 0027 → 0023`）は、`user_passkeys`（Credential の ID、公開鍵、署名 Counter、名前、Authenticator の種類、Backup の状態、作成・最終利用・失効の日時と理由）と `passkey_challenges` を作り、`auth_sessions` に `passkey_gate`（既存の行は `open`）と `passkey_id`（Session を開けた Passkey）を足し、`revoked_reason` に `passkey_revoked` を加えます。
+
+Web の Role（`PAW_APP_DATABASE_ROLE`）の権限は、実際に実行する文だけです（`tests/test_passkey_grants.py`）。
+
+| Table | 権限 |
+| --- | --- |
+| `user_passkeys` | SELECT、INSERT、`sign_count`・`last_used_at`・`backed_up`・`revoked_at`・`revoked_reason` の UPDATE。DELETE なし。`credential_id`・`public_key`・`user_id` は変えられない |
+| `passkey_challenges` | SELECT、INSERT、DELETE、`challenge`・`created_at`・`expires_at` の UPDATE |
+| `auth_sessions`（追加分） | `passkey_gate`・`passkey_id` の UPDATE。`auth_method` は変えられない |
+
+**守れないもの（Decision 0005 が Password で受け入れたものと同じ）**: Web の Role は Passkey の行と Gate を書けなければならないので、**Application が侵害されれば、自分の Passkey を登録し、Gate を開けられます**。
+
+`downgrade()` は 2 つの Table と 2 つの列を破棄します（**登録された Passkey がすべて失われる**。開発・Test 用）。`passkey_revoked` の Session は `admin` に付け替えます。
+
+### 制限と未確認の点
+
+- **実際の Browser、Authenticator（Touch ID、Windows Hello、Security Key）、Reverse Proxy、TLS を通した動作は確かめていません**（Software Authenticator と `TestClient`、実 PostgreSQL まで）。Counter・Flag・Attestation の匿名化・`transports` の実機の癖は未確認です。
+- 固定した Library（`webauthn` 3.0.1、`cryptography` 50.0.1）は、最新であることと、公開された脆弱性がないことを 2026-09-26 に PyPI と GitHub で確かめましたが、3.0.1 は固定の前日の公開です（Decision 0025）。
+- **Passkey を設定しなければ、要求は強制されません**（上）。
+- Owner が最初の Passkey を登録する前は、Password を盗んだ者が先に自分の Passkey を登録できます（最初の 1 つは Password の信頼に依存する）。
+- **Admin が全 Passkey を失う経路はありません**（Owner が Passkey を Reset する機能は別の Issue）。Owner は `owner-recover` で戻れます。
+- Attestation を検証しないので、同期される Passkey（`backup_eligible`）も使えます（記録はしている）。
+- Tool Broker の Step-up は User 単位です（上）。
+- Passkey だけの Sign-in、複数端末の追加（Pairing）、Passkey の名前の変更は含みません。
+- Commit が期限で中断された場合、登録や Step-up が反映されたかは分かりません（一覧で確かめる。Session ID を作り直す応答が届かなければ、Sign-in し直す）。
+
+### Test
+
+`tests/test_passkey_*.py`。Unit（`settings`、`types`、`ceremony`、`argument_validation`。全 Method × 引数 × 不正な値、DB に届かないことを確認）、実 PostgreSQL の Service（`registration`、`authenticate`、`gate`、`revoke`、`sensitive`。別の接続で競わせる Test、Lock を保持して待つことを確かめる Test を含む）、HTTP（`http`。Owner の一連の流れ、制限された Session の Route の一覧、Error の形、Cookie の配信、CSRF、Body の上限）、Migration（`migration`。Model との差分なし、上げ下げ、全制約の境界）、Query Plan（`plans`）、権限（`grants`。同じ Service と HTTP の Test を非 Superuser の Web の Role で実行し、権限を列まで固定し、してはいけない操作を拒否）。時間は注入した時計で動かします（待たない）。Software Authenticator は `tests/passkey_support.py` です。
+
 ## Tool Broker / Capability Policy
 
 [PAW-031](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/27) で実装しました（`paw_backend/tools/`、Migration `0031`）。
 Migration `0031` の `down_revision` は `0033` です（鎖は `0001 → 0025 → 0032 → 0040 → 0021 → 0033 → 0031`）。Application Role への権限は、共通の `grant_app_privileges`（PAW-025）で付与します。
 設計は [Tool 権限](../../docs/SECURITY_TOOL_PERMISSIONS.md) と [要件](../../REQUIREMENTS.md) の「Tool Broker / Capability Policy / Secret Isolation」「Tool approval boundary」に従います。
 **HTTP の Endpoint はありません**（承認の Endpoint は認証済みの Session が必要なため PAW-022 以降）。`create_app` にも組み込んでいません。呼び出すのは後続の Orchestrator（PAW-034）と API です。
-Tool の実装、Sandbox、Task Budget（PAW-033）、Step-up 認証（PAW-023）は含まず、それぞれ差し込み口（Protocol）だけを持ちます。
+Tool の実装、Sandbox、Task Budget（PAW-033）、Step-up 認証（PAW-023。Passkey の Step-up の Verifier は `paw_backend.auth.passkeys.approvals.PasskeyApprovalStepUp`）は含まず、それぞれ差し込み口（Protocol）だけを持ちます。
 
 Agent の Tool 呼び出しは `ToolBroker.request(call)` を通り、`ALLOW` / `NEEDS_APPROVAL` / `DENY` と固定の理由コードを返します。
 **Broker は何も実行しません。** 許可された呼び出しの実行は、注入する `ToolExecutor` を呼ぶ `ToolRunner.run` だけが行います（Broker に実行の入口はありません）。
@@ -1270,7 +1420,7 @@ Broker は、呼び出しがどの Repository に触れるかを **Backend が�
 | 別の呼び出し | 引数・Tool・Task・Agent・User・Level のどれかが違えば `approval_mismatch`（承認は消費されません） |
 | 別の Run | 同じ呼び出しでも、承認を求めた Run（`tool_approvals.task_attempt` / `task_retry_count`）と違う Run の Worker は使えません（`approval_superseded`。承認は消費されません）。下の「Task の終了と承認」の「Run への結びつけ」 |
 | 承認できる人 | Agent が働いている **User 本人だけ**（`ApprovalService.approve / reject`、引数は人間の `Principal`）。Agent 自身の ID は `self_approval`。他の人は Admin / Owner でも、存在を教えず `not_found`（Audit には `not_authorised`）。DB の CHECK 制約も、承認者が委任元 User であること、Agent が User と別であることを保証します |
-| `STRONG_APPROVAL` | 承認のとき `StepUpVerifier.verify(user_id, approval_id)` が**明示的な `True`** を返す必要があります（PAW-023 が実装）。Verifier がない、`False`、例外、Timeout、`True` 以外の答えは `step_up_required` で、承認は保留のままです。Store の `decide` も `step_up_verified` を受け取り、Step-up なしには強い承認を保存しません（`step_up_verified` の列と CHECK 制約。Store を直接呼ぶ側にも効きます） |
+| `STRONG_APPROVAL` | 承認のとき `StepUpVerifier.verify(user_id, approval_id)` が**明示的な `True`** を返す必要があります（PAW-023 が `PasskeyApprovalStepUp` を実装。渡さなければ既定は Fail Closed）。Verifier がない、`False`、例外、Timeout、`True` 以外の答えは `step_up_required` で、承認は保留のままです。Store の `decide` も `step_up_verified` を受け取り、Step-up なしには強い承認を保存しません（`step_up_verified` の列と CHECK 制約。Store を直接呼ぶ側にも効きます） |
 | 取り消し | `ApprovalService.revoke`。委任元 User と、Admin / Owner（権利を減らす方向だけなので代われる）。pending・承認済みで未使用の承認だけ。Task の終了での取り消しは、下の「Task の終了と承認」。使うときは `approval_revoked` |
 | 使うとき | 認可・Scope・Budget を**もう一度**判定します。承認は権限を広げません。拒否された使用は承認を消費しません |
 
@@ -1382,7 +1532,7 @@ Tool の実行を伴う記録（許可と実行後）は Fail-closed で、許�
 | --- | --- | --- |
 | `ToolExecutor.execute(invocation)` | 各 Tool の実装（別 Issue） | なし（`ToolRunner` に必須）。契約は下の「Executor の契約」 |
 | `BudgetProvider.check / charge` | PAW-033 | `FailClosedBudgetProvider`（予算なし = 予算が必要な Tool は拒否）。`check` は何も消費せず、同時の呼び出しは上限を少し超えうる。厳密な上限には PAW-033 が原子的な予約を追加する |
-| `StepUpVerifier.verify` | PAW-023 | `FailClosedStepUp`（Step-up の承認はできない） |
+| `StepUpVerifier.verify` | PAW-023（`PasskeyApprovalStepUp`） | `FailClosedStepUp`（Step-up の承認はできない） |
 | `TaskActivityProvider.check(task_id, run)` | Deployment（`PostgresTaskActivity(database)`） | `FailClosedTaskActivity`（Task は不明 = 承認を要する呼び出しは拒否） |
 | `PathResolver.resolve` | Deployment | `RealpathResolver`。`LexicalPathResolver` は Symlink のない環境の Test 用 |
 
@@ -3018,12 +3168,13 @@ CI は pre-commit の専用環境で Test を実行するため、同じ Version
 3 か所の一致と、Backend が import する Package の宣言漏れは
 [test_dependency_pins.py](../../.github/scripts/test_dependency_pins.py) が検査します。
 依存を追加・更新する場合は 3 か所を同時に変更してください。
+PAW-023 は `webauthn`（py_webauthn。WebAuthn の検証。`auth/passkeys/ceremony.py` だけが import する）と `cryptography`（Test の Software Authenticator が実際に署名するために直接 import する）を追加しました。どちらも最新の Version を固定しています（選定の理由は Decision 0025）。
 
 ## 今後の Issue
 
 [PAW-021](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/18)（Owner Setup）、
 RBAC（PAW-025）、Task Lifecycle（PAW-032）、Task Queue / Budget / Loop 検知（PAW-033）、Tool Broker（PAW-031）、Memory Schema（PAW-040）、Research Scratch Store（PAW-050）、Research Provider Adapter（PAW-051）、Research Privacy Filter（PAW-053）、Evidence / Claim Provenance（PAW-052）は、この Skeleton の上に実装済みです。
-PAW-022（Login / Session / Password）は Owner Setup の Token を受け取る側として実装済みです（[Login / Session / Password Policy](#login--session--password-policy)）。PAW-023（Passkey / Step-up）はまだありません。
+PAW-022（Login / Session / Password）は Owner Setup の Token を受け取る側として実装済みです（[Login / Session / Password Policy](#login--session--password-policy)）。PAW-023（Passkey / Step-up）も実装済みです（[Passkey / Step-up](#passkey--step-up)。Decision 0025 は Approved）。
 Memory の保存・整理は PAW-041 以降で、Memory Schema の上に実装します。検索は [Hybrid Retrieval（PAW-043）](#hybrid-retrieval) が Memory Schema の上に実装済みです。
 Research Privacy Filter（PAW-053）と Evidence / Claim Provenance（PAW-052）は、Research Provider Adapter の上に実装済みです。Research の Provider（Direct Web、Docs、GitHub、OpenCode）の Adapter は、Research Provider Adapter の上に実装します。外部送信の Audit を Audit Log へ保存する実装は、後続の Issue です。
 受け入れ基準は [Implementation Backlog](../../docs/IMPLEMENTATION_BACKLOG.md)、

@@ -43,7 +43,12 @@ from paw_backend.auth.limits import (
     SESSION_LIST_LIMIT,
     SESSION_RETENTION_SECONDS,
 )
-from paw_backend.auth.models import TOKEN_HASH_BYTES, AuthMethod, RevokeReason
+from paw_backend.auth.models import (
+    TOKEN_HASH_BYTES,
+    AuthMethod,
+    PasskeyGate,
+    RevokeReason,
+)
 from paw_backend.auth.tokens import (
     hash_session_token,
     new_session_token,
@@ -59,7 +64,7 @@ _CLOCK = (
 _COLUMNS = (
     "s.id, s.user_id, s.remember_me, s.auth_method, s.device_label, s.created_at, "
     "s.last_used_at, s.idle_expires_at, s.absolute_expires_at, s.stepup_at, "
-    "s.stepup_method"
+    "s.stepup_method, s.passkey_gate, s.passkey_id"
 )
 _VALID = (
     "s.revoked_at IS NULL AND s.idle_expires_at > clock.ts "
@@ -113,6 +118,11 @@ class SessionRecord:
     absolute_expires_at: datetime
     stepup_at: datetime | None
     stepup_method: AuthMethod | None
+    # What the session may do until the Passkey the policy asks for is dealt with
+    # (PAW-023). ``OPEN`` for a session that predates the feature.
+    passkey_gate: PasskeyGate = PasskeyGate.OPEN
+    # The Passkey that opened the gate; revoking it ends the session.
+    passkey_id: uuid.UUID | None = None
 
     @property
     def expires_at(self) -> datetime:
@@ -153,6 +163,8 @@ def _record(row) -> SessionRecord:
         absolute_expires_at=row.absolute_expires_at,
         stepup_at=row.stepup_at,
         stepup_method=AuthMethod(row.stepup_method) if row.stepup_method else None,
+        passkey_gate=PasskeyGate(row.passkey_gate),
+        passkey_id=row.passkey_id,
     )
 
 
@@ -183,6 +195,17 @@ def _method(value: object) -> AuthMethod:
         except ValueError:
             pass
     raise InvalidAuthInputError("method")
+
+
+def _gate(value: object) -> PasskeyGate:
+    if isinstance(value, PasskeyGate):
+        return value
+    if isinstance(value, str):
+        try:
+            return PasskeyGate(value)
+        except ValueError:
+            pass
+    raise InvalidAuthInputError("passkey_gate")
 
 
 def validate_reason(value: object) -> RevokeReason:
@@ -242,6 +265,7 @@ class SessionStore:
         remember_me: bool,
         device_label: str | None = None,
         auth_method: AuthMethod = AuthMethod.PASSWORD,
+        passkey_gate: PasskeyGate = PasskeyGate.OPEN,
     ) -> IssuedSession:
         """Insert a new session with a fresh random id (in ``session``'s transaction).
 
@@ -253,6 +277,7 @@ class SessionStore:
         if not isinstance(remember_me, bool):
             raise InvalidAuthInputError("remember_me")
         auth_method = _method(auth_method)
+        gate = _gate(passkey_gate)
         device_label = validate_device_label(device_label)
         lifetimes = self._lifetimes
         idle = lifetimes.remember_seconds if remember_me else lifetimes.idle_seconds
@@ -266,18 +291,21 @@ class SessionStore:
                     f"""{_CLOCK}
                     INSERT INTO auth_sessions (id, user_id, token_hash, remember_me,
                         auth_method, device_label, created_at, last_used_at,
-                        idle_timeout_seconds, idle_expires_at, absolute_expires_at)
+                        idle_timeout_seconds, idle_expires_at, absolute_expires_at,
+                        passkey_gate)
                     SELECT :id, :user_id, :token_hash, :remember_me, :auth_method,
                            :device_label, ts, ts, :idle,
                            ts + :idle * interval '1 second',
-                           ts + :absolute * interval '1 second'
+                           ts + :absolute * interval '1 second',
+                           :gate
                     FROM clock
                     RETURNING id AS id, user_id AS user_id, remember_me AS remember_me,
                         auth_method AS auth_method, device_label AS device_label,
                         created_at AS created_at, last_used_at AS last_used_at,
                         idle_expires_at AS idle_expires_at,
                         absolute_expires_at AS absolute_expires_at,
-                        stepup_at AS stepup_at, stepup_method AS stepup_method"""
+                        stepup_at AS stepup_at, stepup_method AS stepup_method,
+                        passkey_gate AS passkey_gate, passkey_id AS passkey_id"""
                 ),
                 {
                     "now": self._now(),
@@ -289,6 +317,7 @@ class SessionStore:
                     "device_label": device_label,
                     "idle": idle,
                     "absolute": absolute,
+                    "gate": gate.value,
                 },
             )
         ).one()
@@ -401,17 +430,29 @@ class SessionStore:
         session_id: uuid.UUID,
         old_token_hash: bytes,
         method: AuthMethod,
+        *,
+        passkey_id: uuid.UUID | None = None,
     ) -> IssuedSession | None:
         """Mark the session as freshly step-up authenticated AND rotate its id.
 
         A new authentication level is a privilege change: the id changes with it.
         Returns the session as it is now, with its new id; ``None`` if the
         session changed or ended meanwhile.
+
+        ``passkey_id`` (only for a Passkey step-up whose credential the caller has
+        just confirmed, in this transaction) also OPENS the session's Passkey gate
+        and, if the gate was closed, binds the session to that Passkey (revoking
+        it then ends the session). A session that is already open keeps its
+        binding, or none.
         """
         _session(session)
         _uuid("session_id", session_id)
         _hash32("old_token_hash", old_token_hash)
         method = _method(method)
+        if passkey_id is not None:
+            _uuid("passkey_id", passkey_id)
+            if method is not AuthMethod.PASSKEY:
+                raise InvalidAuthInputError("passkey_id")
         token = new_session_token()
         row = (
             await session.execute(
@@ -419,7 +460,14 @@ class SessionStore:
                     f"""{_CLOCK}
                     UPDATE auth_sessions s
                        SET token_hash = :new_hash, rotated_at = clock.ts,
-                           stepup_at = clock.ts, stepup_method = :method
+                           stepup_at = clock.ts, stepup_method = :method,
+                           passkey_id = CASE
+                               WHEN CAST(:passkey_id AS uuid) IS NOT NULL
+                                    AND s.passkey_gate <> 'open'
+                               THEN CAST(:passkey_id AS uuid) ELSE s.passkey_id END,
+                           passkey_gate = CASE
+                               WHEN CAST(:passkey_id AS uuid) IS NOT NULL
+                               THEN 'open' ELSE s.passkey_gate END
                       FROM clock
                      WHERE s.id = :id AND s.token_hash = :old_hash AND {_VALID}
                     RETURNING {_COLUMNS}"""
@@ -430,10 +478,100 @@ class SessionStore:
                     "old_hash": old_token_hash,
                     "new_hash": hash_session_token(token),
                     "method": method.value,
+                    "passkey_id": passkey_id,
                 },
             )
         ).first()
         return None if row is None else IssuedSession(token, _record(row))
+
+    async def open_gate(
+        self,
+        session: AsyncSession,
+        session_id: uuid.UUID,
+        old_token_hash: bytes,
+        passkey_id: uuid.UUID,
+    ) -> IssuedSession | None:
+        """Lift the gate after the session registered a Passkey while it was restricted.
+
+        The id is rotated (the session's authority changes) and the session is
+        bound to the new Passkey. NOT a Step-up: a Passkey that was just enrolled
+        on the strength of a password is not yet a proof of anything, so no Step-up
+        is recorded (Decision 0025). Only a session whose gate is closed changes;
+        ``None`` if it changed, ended or was open already.
+        """
+        _session(session)
+        _uuid("session_id", session_id)
+        _hash32("old_token_hash", old_token_hash)
+        _uuid("passkey_id", passkey_id)
+        token = new_session_token()
+        row = (
+            await session.execute(
+                text(
+                    f"""{_CLOCK}
+                    UPDATE auth_sessions s
+                       SET token_hash = :new_hash, rotated_at = clock.ts,
+                           passkey_gate = 'open', passkey_id = :passkey_id
+                      FROM clock
+                     WHERE s.id = :id AND s.token_hash = :old_hash AND {_VALID}
+                       AND s.passkey_gate <> 'open'
+                    RETURNING {_COLUMNS}"""
+                ),
+                {
+                    "now": self._now(),
+                    "id": session_id,
+                    "old_hash": old_token_hash,
+                    "new_hash": hash_session_token(token),
+                    "passkey_id": passkey_id,
+                },
+            )
+        ).first()
+        return None if row is None else IssuedSession(token, _record(row))
+
+    async def revoke_bound_to_passkey(
+        self, session: AsyncSession, passkey_id: uuid.UUID
+    ) -> list[uuid.UUID]:
+        """End every session that the Passkey opened (its revocation ends them)."""
+        _session(session)
+        _uuid("passkey_id", passkey_id)
+        result = await session.execute(
+            text(
+                f"""{_CLOCK}
+                UPDATE auth_sessions s
+                   SET revoked_at = clock.ts, revoked_reason = :reason
+                  FROM clock
+                 WHERE s.passkey_id = :passkey_id AND s.revoked_at IS NULL
+                RETURNING s.id"""
+            ),
+            {
+                "now": self._now(),
+                "passkey_id": passkey_id,
+                "reason": RevokeReason.PASSKEY_REVOKED.value,
+            },
+        )
+        return [row.id for row in result.all()]
+
+    async def clear_passkey_step_ups(
+        self, session: AsyncSession, user_id: uuid.UUID
+    ) -> int:
+        """Forget every Passkey Step-up of the user's live sessions.
+
+        A Passkey that is revoked may have been used to step up in any of the
+        user's sessions (a thief's included); none of those Step-ups may outlive it.
+        Cheaper and safer than tracking which credential made which: the user steps
+        up again with a Passkey that is left.
+        """
+        _session(session)
+        _uuid("user_id", user_id)
+        result = await session.execute(
+            text(
+                """UPDATE auth_sessions SET stepup_at = NULL, stepup_method = NULL
+                    WHERE user_id = :user_id AND stepup_method = 'passkey'
+                      AND revoked_at IS NULL
+                RETURNING id"""
+            ),
+            {"user_id": user_id},
+        )
+        return len(result.all())
 
     async def revoke(
         self,
