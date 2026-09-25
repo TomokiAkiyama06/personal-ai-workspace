@@ -290,6 +290,7 @@ personal-ai-workspace/
 │  │     ├─ test_research_normalize.py
 │  │     ├─ test_research_published_offset.py
 │  │     ├─ test_research_registry.py
+│  │     ├─ test_retrieval_eligibility.py
 │  │     ├─ test_retrieval_fakes.py
 │  │     ├─ test_retrieval_grants.py
 │  │     ├─ test_retrieval_grouping.py

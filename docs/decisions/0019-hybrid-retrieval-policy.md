@@ -1,10 +1,10 @@
 # Hybrid Retrieval の方針（暫定値と選択）
 
-- Status: Proposed
+- Status: Approved
 - Date: 2026-09-25
 - Scope: PAW-043（Hybrid Retrieval Pipeline）と、Retrieval を使う以降の Issue（Memory の保存・整理 PAW-041 / 042、Context の組み立て）
 - Supersedes: なし
-- Approval: 未承認
+- Approval: 2026-09-26、Humanが作業Session内で、判断メモの各点に個別に回答し、残りは「推奨どおり」と回答して承認（末尾の「承認時の決定」）
 
 ## 背景
 
@@ -16,6 +16,7 @@ Retrieval の**順序**を定めている（Permission / ACL、Metadata、Keywor
 PAW-043 の実装は、動かすためにこれらを暫定値と選択で置いた。
 [AGENTS.md](../../AGENTS.md) の「仕様変更」は、重要判断を記録して人間 / Admin の承認を得ると定める。
 そこで、実装が置いた値と選択を一覧にし、Human が承認または変更できるようにした。
+**この Decision は 2026-09-26 に Human が承認した（Approved）。** 下の各選択は、承認された方針である（承認時の決定は末尾を参照）。数値は暫定値として承認された。
 要件が決めていること（順序、`active` だけ、ACL を先に、`conflicts_with` は選ばない、Permission Leakage 0）はここでは判断しない。
 
 実装は [Backend README](../../apps/backend/README.md) の「Hybrid Retrieval」に書いている。
@@ -35,16 +36,21 @@ Backend が、Memory を 1 行も読む前に、`Authorizer` で Scope ごとに
 | `repo` | `RepoAclSource` が返す Repository の ACL を、`project.read` の Repository Resource で判定（Override が `read` を外していれば拒否） | `DENIED_ONLY` |
 | `project_group` | `ProjectGroupSource` が返す ID をそのまま信用（Capability なし） | なし |
 
-- **Viewer も Project Memory を読める**。要件は Viewer を「Project / Repository / Task / Memory の閲覧のみ」とする。`project.memory.use`（Contributor 以上）ではなく `project.read` を使う。Archived は読める。Pending deletion / Deleted は**読めず、Authorizer にも尋ねない**（尋ねると呼び出しごとに拒否の Audit が増える）。招待中は Membership ではない。
+- **Viewer も Project Memory を読める**（人間の回答 2026-09-25: 承認）。要件は Viewer を「Project / Repository / Task / Memory の閲覧のみ」とする。`project.memory.use`（Contributor 以上）ではなく `project.read` を使う。Archived は読める。Pending deletion / Deleted は**読めず、Authorizer にも尋ねない**（尋ねると呼び出しごとに拒否の Audit が増える）。招待中は Membership ではない。
 - 拒否は Scope が何も返さないだけで、エラーにも応答にも出さない（存在を明かさないため）。エラーにするのは「決定を記録できない」（`audit_unavailable`）だけ。
-- **Audit の量（要判断）。** `memory.use` は `REQUIRED` のため、User Scope を含む Retrieval が 1 回ごとに Audit の行を 1 つ書く。Chat の Turn ごとに呼ぶと量が多い。この実装は Decision 0004 を変えずに、そのまま使う。
+- **Audit の量。** `memory.use` は `REQUIRED` のため、User Scope を含む Retrieval が 1 回ごとに Audit の行を 1 つ書く。Chat の Turn ごとに呼ぶと量が多い。
+  **人間の回答 2026-09-25: 推奨の方向（読み取り専用の Capability `memory.read` を `DENIED_ONLY` で足す）で承認。具体化は [Decision 0024](0024-memory-read-capability.md)（Proposed）で行う。** 0024 が承認され実装されるまで、コードは Decision 0004 を変えずに `memory.use`（`REQUIRED`）を使い続ける。
 - Project Group は、要件に実体・Member・権限がない（`memory/acl.py`）。呼び出し側が決めた ID を信用する。Source がなければ Group の Memory は読めない。Repository も、Table（PAW-027）がないため Source が要る。Source がなければ Repo Memory は読めない。
 - Agent（`AgentGrant`）経由の Retrieval はこの Issue に含めない。Backend の Context 組み立てが Task の User の `Principal` で呼ぶことを想定する。
 
 ### 2. 権限・状態・鮮度の Filter は、順位付けの Query の WHERE に入れる
 
 - Keyword の Query と Vector の Query は、それぞれ自分の WHERE に、権限の条件（`memory.acl`）、`status = 'active'`、鮮度の条件を持つ。結果を後から絞らない。距離の Sort・Rank は、読める行だけが入る。
-- Relation（`conflicts_with`、`supersedes`）は**両端が読める**ときだけ読む。
+- Relation（`conflicts_with`）は**両端が候補になれる**（読めて、下の条件を満たす）ときだけ読む。
+- **返してよいかの条件も、候補の上限より前に適用する。** 上限の後で除くと、返さない行が返す行の場所を奪い、答えが空または短くなる。次の 3 つも、権限と同じく候補の SQL の WHERE に入れる（結果は、その行が無い DB と全 Field で等しい）。
+  - 読める `active` な Version に `supersedes` される行（`status` が `active` のままの不整合。読めない後継は数えない）。
+  - `stale_policy = exclude` のときの Stale（`stale_since`、`revalidate` の期限、`repo_commit` が渡された Head と違う）。
+  - System Policy が覆う Shared Memory（Policy を**候補より前に**読む。宣言が壊れたものも除く）。
 - 1 回の Retrieval は、読み取り専用・`REPEATABLE READ` の 1 Transaction（期限で接続を切る `Database.run_abortable`）。
 - **結果には件数・合計・「他に n 件」を含めない。** 読めない Memory の存在・数・Score が、応答から分からないことを Test で証明する（読めない Memory を無効にした DB と全 Field が等しい）。
 
@@ -97,7 +103,7 @@ PostgreSQL の全文検索（`simple` 設定）を使う。`simple` は日本語
 
 ### 8. System Policy と Shared Memory
 
-[Decision 0009](0009-shared-memory-administration.md) のとおり、System Security Policy が覆う `shared` の Memory は返さない。Policy を読めなければ Retrieval は失敗する（Shared Memory があるときだけ読む）。宣言（`policy_subjects`）が壊れた Shared Memory は判定できないため返さない。
+[Decision 0009](0009-shared-memory-administration.md) のとおり、System Security Policy が覆う `shared` の Memory は返さない。Shared を検索するとき（`shared_memory.read` が許可され、Scope に含まれるとき）は、候補より前に Policy を読み、読めなければ Retrieval は失敗する（以前の実装は、Shared の候補があるときだけ読んだが、上限の後で除くと候補を奪うため、候補の SQL で除く形に変えた。Policy の Source への呼び出しは、Shared を検索するたびになる）。宣言（`policy_subjects`）が壊れた Shared Memory は判定できないため返さない。
 
 ### 9. 部品の失敗
 
@@ -132,18 +138,24 @@ PostgreSQL の全文検索（`simple` 設定）を使う。`simple` は日本語
 
 ## 承認後の扱い
 
-承認された値・選択は、`ranking.py` / `limits.py` の設定と Backend README の記述に合わせる。値だけの変更は Migration が要らない（新しい Decision から `Supersedes`）。
-ANN Index、`memory.read`（下の 1）、Agent 経由の Retrieval、HTTP の Endpoint は、それぞれ別の Issue / Decision で扱う。
+2026-09-26 に承認された。PAW-043 の PR は本 Decision を参照する。承認された値は暫定値で、`ranking.py` / `limits.py` の設定と Backend README の記述に合わせてある。
+値だけの変更は Migration が要らない（この Decision を書き換えず、新しい Decision から `Supersedes` する。そのとき `RankingPolicy` / `limits.py` と Test の期待値を新しい値に合わせる）。
+ANN Index、`memory.read`（[Decision 0024](0024-memory-read-capability.md)、Proposed。承認されるまで `memory.use` のまま）、Agent 経由の Retrieval、HTTP の Endpoint は、それぞれ別の Issue / Decision で扱う。
 
-## 決めてほしいこと
+## 承認時の決定（2026-09-26）
 
-1. **User Memory の Retrieval の Audit**（推奨: 新しい Capability `memory.read`（`DENIED_ONLY`）を、Decision 0004 を `Supersedes` する新しい Decision で足す）。今の実装は `memory.use`（`REQUIRED`、Retrieval 1 回に Audit 1 行）を使う。
-2. Viewer が `project.read` で Project / Repo Memory を読めること（推奨: 承認）。
-3. 日本語の Keyword を「文字の組 + 全文検索」で近似すること（推奨: 承認。形態素解析の拡張を入れられる環境になったら見直す）。
-4. ANN Index を作らず、正確な走査にすること（推奨: 承認。Model 決定後に条件付きで足す）。
-5. 5 節の暫定値（融合、Confirmation、Stale、Importance、Pin、Scope の段差、`project_group` の位置）と 7 節の重複の基準（推奨: 暫定で承認し、Benchmark で調整）。
-6. Embedder / Reranker の失敗を `degraded` で返すこと（推奨: 承認）。
-7. Policy の Source が失敗したら Retrieval を失敗させること（推奨: 承認）。
-8. Project Group と Repository を、呼び出し側の Source の答えとして扱うこと（推奨: 承認。実体は PAW-027 と Group の定義を待つ）。
-9. 矛盾の Conflict Group を Group ごと Top-N に入れる（入らなければ落として数える）こと（推奨: 承認）。
-10. `session_only` を返さず、`repo_commit` を Head を渡されたときだけ判定すること（推奨: 承認）。
+本文の各点を、次のとおり承認した。点 1 と 2 は Human が個別に回答し、他は「推奨どおり」と回答した。
+
+1. **User Memory の Retrieval の Audit。** 推奨の方向（読み取り専用の Capability `memory.read` を `DENIED_ONLY` で足す）で承認した（個別の回答、2026-09-25）。具体化は [Decision 0024](0024-memory-read-capability.md)（Proposed）で行う。
+   **0024 が承認され実装されるまで、コードは `memory.use`（`REQUIRED`）のまま**で、Decision 0004 を変えない。
+2. **Viewer が `project.read` で Project / Repo Memory を読める**ことを承認した（個別の回答、2026-09-25）。
+3. 日本語の Keyword を「文字の組 + 全文検索」で近似することを承認した（形態素解析の拡張を入れられる環境になったら見直す）。
+4. ANN Index を作らず、権限の条件を保つ条件つきで、Model の決定後に足す方針を承認した。
+5. 5 節の暫定値（融合、Confirmation、Stale、Importance、Pin、Scope の段差、`project_group` の位置）と 7 節の重複の基準を、暫定値として承認した。Benchmark で調整する。
+6. Embedder / Reranker の失敗を `degraded` で返すことを承認した。
+7. Policy の Source が失敗したら Retrieval を失敗させることを承認した。
+8. Project Group と Repository を、呼び出し側の Source の答えとして扱うことを承認した（実体は PAW-027 と Group の定義を待つ）。
+9. 矛盾の Conflict Group を Group ごと Top-N に入れる（入らなければ落として数える）ことを承認した。
+10. `session_only` を返さず、`repo_commit` を Head を渡されたときだけ判定することを承認した。
+
+承認の対象には、2 節の「返してよいかの条件も、候補の上限より前に適用する」と 8 節の「Policy を候補より前に、Shared を検索するたびに読む」（独立 Review の指摘に対する修正）を含む。
