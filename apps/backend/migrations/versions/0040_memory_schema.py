@@ -24,10 +24,15 @@ messages or relations; UPDATE only of the few columns the design says change
 in place), and deleting a conversation or a memory works through the foreign
 keys' cascade, which PostgreSQL runs with the owner's rights.
 
-The constraint definitions repeat the ones in ``paw_backend.memory.models`` on
-purpose (a migration is a frozen snapshot); ``tests/test_memory_migration.py``
-fails when the two drift apart. Constraint names come from the naming
-convention of ``paw_backend.db.Base.metadata``.
+``memory_sources`` also gets a deferred constraint trigger: a source that names
+a message must name its conversation. A CHECK cannot state that, because the
+foreign keys' SET NULL actions of a conversation delete pass through the state
+(NULL conversation, message); the trigger judges the row at COMMIT instead.
+
+The constraint definitions and the trigger repeat the ones in
+``paw_backend.memory.models`` on purpose (a migration is a frozen snapshot);
+``tests/test_memory_migration.py`` fails when the two drift apart. Constraint
+names come from the naming convention of ``paw_backend.db.Base.metadata``.
 
 Revision ID: 0040
 Revises: 0032
@@ -73,6 +78,30 @@ def _empty_object(name: str) -> sa.Column:
     return sa.Column(
         name, postgresql.JSONB(), server_default=sa.text("'{}'::jsonb"), nullable=False
     )
+
+
+# See ``MemorySource`` in ``paw_backend.memory.models`` for why this is a trigger.
+_MESSAGE_REQUIRES_CONVERSATION_FUNCTION = """\
+CREATE OR REPLACE FUNCTION paw_check_memory_source_message_conversation()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM memory_sources
+        WHERE id = NEW.id AND message_id IS NOT NULL AND conversation_id IS NULL
+    ) THEN
+        RAISE EXCEPTION 'a source that names a message must name its conversation'
+            USING ERRCODE = 'check_violation',
+                  TABLE = 'memory_sources',
+                  CONSTRAINT = 'tr_memory_sources_message_requires_conversation';
+    END IF;
+    RETURN NULL;
+END
+$$"""
+_MESSAGE_REQUIRES_CONVERSATION_TRIGGER = """\
+CREATE CONSTRAINT TRIGGER tr_memory_sources_message_requires_conversation
+AFTER INSERT OR UPDATE OF conversation_id, message_id ON memory_sources
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION paw_check_memory_source_message_conversation()"""
 
 
 def _grant_app_privileges() -> None:
@@ -491,6 +520,8 @@ def upgrade() -> None:
         ["message_id"],
         postgresql_where=sa.text("message_id IS NOT NULL"),
     )
+    op.execute(_MESSAGE_REQUIRES_CONVERSATION_FUNCTION)
+    op.execute(_MESSAGE_REQUIRES_CONVERSATION_TRIGGER)
 
     # Nothing is registered here: the model (and dimension) is chosen by the
     # PAW-019 benchmark and registered with an ordinary insert.
@@ -541,7 +572,8 @@ def downgrade() -> None:
     # Reverse order of creation; dropping a table drops its indexes and grants.
     op.drop_table("memory_embeddings")
     op.drop_table("embedding_models")
-    op.drop_table("memory_sources")
+    op.drop_table("memory_sources")  # its trigger goes with it
+    op.execute("DROP FUNCTION IF EXISTS paw_check_memory_source_message_conversation()")
     op.drop_table("memory_relations")
     op.drop_table("memory_versions")
     op.drop_table("memories")

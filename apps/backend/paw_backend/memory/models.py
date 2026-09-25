@@ -33,6 +33,7 @@ from uuid import UUID
 
 from sqlalchemy import (
     ARRAY,
+    DDL,
     BigInteger,
     Boolean,
     CheckConstraint,
@@ -45,6 +46,7 @@ from sqlalchemy import (
     SmallInteger,
     Text,
     UniqueConstraint,
+    event,
     func,
     text,
 )
@@ -450,6 +452,34 @@ class MemoryRelation(Base):
     created_at: Mapped[datetime] = _now_column()
 
 
+# The trigger function reads the row again instead of using ``NEW``: a deferred
+# trigger event carries the row as the statement wrote it, and the same row may
+# have been changed again by a later foreign-key action in the transaction.
+MESSAGE_REQUIRES_CONVERSATION_FUNCTION = """\
+CREATE OR REPLACE FUNCTION paw_check_memory_source_message_conversation()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM memory_sources
+        WHERE id = NEW.id AND message_id IS NOT NULL AND conversation_id IS NULL
+    ) THEN
+        RAISE EXCEPTION 'a source that names a message must name its conversation'
+            USING ERRCODE = 'check_violation',
+                  TABLE = 'memory_sources',
+                  CONSTRAINT = 'tr_memory_sources_message_requires_conversation';
+    END IF;
+    RETURN NULL;
+END
+$$"""
+# ``%(fullname)s`` is the table with its schema, so a schema built in another
+# schema (the drift test) gets its own trigger.
+MESSAGE_REQUIRES_CONVERSATION_TRIGGER = """\
+CREATE CONSTRAINT TRIGGER tr_memory_sources_message_requires_conversation
+AFTER INSERT OR UPDATE OF conversation_id, message_id ON %(fullname)s
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION paw_check_memory_source_message_conversation()"""
+
+
 class MemorySource(Base):
     """Provenance: where a version came from. A version may have many sources.
 
@@ -461,12 +491,23 @@ class MemorySource(Base):
     ``conversation_id`` and ``message_id`` are checked as a pair: when both are
     set, the message must belong to that conversation (composite foreign key).
     Deleting only the message clears ``message_id`` and keeps the conversation
-    (``ON DELETE SET NULL (message_id)``). A writer that names a message must
-    also name its conversation: with a NULL conversation the pair is not
-    checked (``MATCH SIMPLE``), the database then only knows that the message
-    exists, and the deletion-flow lookup by ``conversation_id`` would miss the
-    row. No CHECK requires it because the SET NULL of a conversation deletion
-    passes through that state.
+    (``ON DELETE SET NULL (message_id)``).
+
+    A source that names a message must also name its conversation. The
+    composite key alone does not say so: with a NULL ``conversation_id`` it is
+    skipped (``MATCH SIMPLE``), the database would only know that the message
+    exists, and the deletion flow, which finds the memories of a conversation
+    by ``conversation_id``, would miss the row. A plain CHECK cannot state the
+    rule, because the ``SET NULL`` actions of a conversation delete clear
+    ``conversation_id`` and ``message_id`` one after the other, in an order
+    that depends on object ids, so the row passes through (NULL, message). The
+    rule is therefore a deferred constraint trigger
+    (``MESSAGE_REQUIRES_CONVERSATION_FUNCTION`` and ``..._TRIGGER``) that
+    judges the row as it is at COMMIT. It is not a table constraint, so
+    Alembic does not see it: the migration repeats the DDL and
+    ``tests/test_memory_migration.py`` compares both. A violation therefore
+    surfaces at COMMIT (or at ``SET CONSTRAINTS ... IMMEDIATE``), not at the
+    INSERT.
     """
 
     __tablename__ = "memory_sources"
@@ -521,6 +562,17 @@ class MemorySource(Base):
     source_ref: Mapped[str | None] = mapped_column(Text)
     source_deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = _now_column()
+
+
+for _statement in (
+    MESSAGE_REQUIRES_CONVERSATION_FUNCTION,
+    MESSAGE_REQUIRES_CONVERSATION_TRIGGER,
+):
+    event.listen(
+        MemorySource.__table__,
+        "after_create",
+        DDL(_statement).execute_if(dialect="postgresql"),
+    )
 
 
 class EmbeddingModel(Base):

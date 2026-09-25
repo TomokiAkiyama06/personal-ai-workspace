@@ -336,6 +336,9 @@ class ApplicationFlowTest(ApplicationRoleTestCase):
             .where(MemorySource.memory_version_id == version)
             .values(source_deleted_at=func.now())
         )
+        # What a COMMIT does: the deferred check of the sources (a trigger that
+        # runs with the application role's rights) accepts the final state.
+        self.session.execute(text("SET CONSTRAINTS ALL IMMEDIATE"))
 
         counts = {
             model.__tablename__: self.session.execute(
@@ -354,6 +357,28 @@ class ApplicationFlowTest(ApplicationRoleTestCase):
             )
         ).one()
         self.assertEqual(tuple(source), (None, None, True))
+
+    def test_a_source_naming_a_message_without_its_conversation_is_refused_at_commit(
+        self,
+    ):
+        conversation = self.add_conversation()
+        message = self.add_message(conversation, 0)
+        version = self.add_version(self.add_memory())
+
+        def message_only():
+            self.session.execute(
+                insert(MemorySource).values(
+                    memory_version_id=version,
+                    source_type="conversation",
+                    message_id=message,
+                )
+            )
+            self.session.execute(text("SET CONSTRAINTS ALL IMMEDIATE"))
+
+        self.assertEqual(
+            self.violation(message_only),
+            "tr_memory_sources_message_requires_conversation",
+        )
 
     def test_deleting_a_memory_removes_its_whole_history_by_cascade(self):
         memory = self.add_memory()
