@@ -3,7 +3,7 @@
 import asyncio
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone, tzinfo
 
 from paw_backend.research.providers import (
     DEFAULT_PROVIDER_TIMEOUT_SECONDS,
@@ -145,6 +145,41 @@ def malformed_documents() -> dict[str, object]:
 
     documents["a subclass whose constructor sets nothing"] = NeverInitialised()
     return documents
+
+
+class AdapterBaseError(BaseException):
+    """A ``BaseException`` that belongs to no standard family (an adapter's own)."""
+
+
+# Label -> an exception CLASS that is not an ``Exception``. Raised by a hook that
+# the broker runs synchronously, none of them can be the task's cancellation: a
+# real ``Task.cancel()`` only ever arrives at an ``await``.
+BASE_EXCEPTIONS: dict[str, type[BaseException]] = {
+    "asyncio.CancelledError": asyncio.CancelledError,
+    "KeyboardInterrupt": KeyboardInterrupt,
+    "SystemExit": SystemExit,
+    "GeneratorExit": GeneratorExit,
+    "a plain BaseException subclass": AdapterBaseError,
+}
+
+
+def raising_timezone(error: type[BaseException], *, fail_on_call: int = 1) -> tzinfo:
+    """A ``tzinfo`` whose ``utcoffset`` raises ``error(SECRET)`` on call ``n``.
+
+    ``fail_on_call=1`` fails on the first read of the offset, ``2`` on the second
+    (the one that ``astimezone`` makes). Calls before that answer UTC+09:00.
+    """
+
+    class Raising(tzinfo):
+        calls = 0
+
+        def utcoffset(self, moment):
+            self.calls += 1
+            if self.calls >= fail_on_call:
+                raise error(SECRET)
+            return timedelta(hours=9)
+
+    return Raising()
 
 
 class Tripwire(list):

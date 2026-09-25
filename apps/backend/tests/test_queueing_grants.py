@@ -59,7 +59,14 @@ EXPECTED = {
     ),
     "budget_usages": (
         {"SELECT", "INSERT"},
-        {"preset", "limit_value", "consumed", "running_since", "runtime_generation"},
+        {
+            "preset",
+            "limit_value",
+            "consumed",
+            "running_since",
+            "runtime_generation",
+            "settled_through",
+        },
     ),
     "loop_failure_signatures": ({"SELECT", "INSERT", "DELETE"}, set()),
 }

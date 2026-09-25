@@ -28,6 +28,17 @@ progress ``usage`` / ``check`` report ``consumed + elapsed`` WITHOUT writing.
 Elapsed whole seconds are ``floor((now - running_since).total_seconds())``, and
 never negative (a clock that went backwards counts as 0).
 
+Ordering of the timer times. The clock is read in Python BEFORE the statement runs,
+so a caller can be delayed between reading and writing. ``stop_runtime`` therefore
+records the cutoff it settled through (``budget_usages.settled_through`` =
+``greatest(clock(), running_since)``), and ``start_runtime`` starts a timer at
+``greatest(clock(), settled_through)``, all inside the (row-locked) statements. A
+start that read its clock earlier than an older session's stop cannot make the
+interval in between count twice, and the cutoff only moves forward, so the charged
+intervals never overlap even when clocks disagree. The alternative of reading the
+database clock inside the statements was not used: it would leave the injected
+clock unused and mix two time sources (Decision 0007, 10).
+
 Runtime sessions (fencing). Every ``start_runtime`` begins a new runtime session
 and returns its generation (``budget_usages.runtime_generation``: it only grows
 and is kept when the timer stops). ``stop_runtime`` must present that generation:
@@ -50,7 +61,16 @@ import uuid
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 
-from sqlalchemy import BigInteger, cast, extract, func, literal, select, update
+from sqlalchemy import (
+    BigInteger,
+    DateTime,
+    cast,
+    extract,
+    func,
+    literal,
+    select,
+    update,
+)
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -114,12 +134,12 @@ class BudgetTracker:
 
         Creates the six rows (consumed 0) or, if they exist, sets ``preset`` and
         ``limit_value`` of each from ``PRESET_LIMITS[preset]`` and KEEPS
-        ``consumed``, ``running_since`` and ``runtime_generation`` (a task that is
-        already over the new limits is simply EXCEEDED afterwards). One
-        transaction; concurrent calls and ``record`` calls never lose
-        consumption. Returns what ``usage`` returns. ``TaskNotFoundError`` for an
-        unknown task (foreign key violation SQLSTATE 23503; other
-        ``IntegrityError`` propagate).
+        ``consumed``, ``running_since``, ``runtime_generation`` and
+        ``settled_through`` (a task that is already over the new limits is simply
+        EXCEEDED afterwards). One transaction; concurrent calls and ``record``
+        calls never lose consumption. Returns what ``usage`` returns.
+        ``TaskNotFoundError`` for an unknown task (foreign key violation SQLSTATE
+        23503; other ``IntegrityError`` propagate).
         """
         check_uuid("task_id", task_id)
         check_member("preset", preset, BudgetPreset)
@@ -189,18 +209,21 @@ class BudgetTracker:
 
         The generation grows by 1 on every call and must be passed to
         ``stop_runtime``. When no run is in progress ``running_since`` is set to
-        ``clock()``. When a run is already in progress (a worker that died without
-        stopping, whose lease expired) the new session TAKES OVER: the original
-        ``running_since`` is kept, so the time since then is neither lost nor
-        counted twice, and the previous session's generation is superseded (its
-        ``stop_runtime`` raises ``StaleRuntimeSessionError``). Only the worker
-        that holds the queue lease may call this: the tracker does not read the
-        queue, so a superseded worker that starts again would take the session
-        back (Decision 0007, 10). Raises ``BudgetNotConfiguredError`` if there is
-        no budget.
+        ``greatest(clock(), settled_through)``: never before the cutoff of the last
+        ``stop_runtime`` (a start that read its clock before an older session's stop
+        settled a later time would otherwise charge that interval twice), and plain
+        ``clock()`` when nothing was stopped yet. When a run is already in progress (a
+        worker that died without stopping, whose lease expired) the new session
+        TAKES OVER: the original ``running_since`` is kept, so the time since then
+        is neither lost nor counted twice, and the previous session's generation is
+        superseded (its ``stop_runtime`` raises ``StaleRuntimeSessionError``). Only
+        the worker that holds the queue lease may call this: the tracker does not
+        read the queue, so a superseded worker that starts again would take the
+        session back (Decision 0007, 10). Raises ``BudgetNotConfiguredError`` if
+        there is no budget.
         """
         check_uuid("task_id", task_id)
-        now = self._now()
+        now = literal(self._now(), DateTime(timezone=True))
         start = (
             update(BudgetUsageRow)
             .where(
@@ -209,7 +232,11 @@ class BudgetTracker:
             )
             .values(
                 runtime_generation=BudgetUsageRow.runtime_generation + 1,
-                running_since=func.coalesce(BudgetUsageRow.running_since, now),
+                # ``greatest`` ignores a NULL ``settled_through`` (nothing stopped).
+                running_since=func.coalesce(
+                    BudgetUsageRow.running_since,
+                    func.greatest(now, BudgetUsageRow.settled_through),
+                ),
             )
             .returning(BudgetUsageRow.runtime_generation)
         )
@@ -226,7 +253,9 @@ class BudgetTracker:
         otherwise ``InvalidQueueingArgumentError("generation")``). Adds
         ``max(floor((clock() - running_since).total_seconds()), 0)`` to the
         runtime consumption (saturating at ``MAX_CONSUMED``), sets
-        ``running_since`` to ``NULL`` and returns the runtime usage. The read of
+        ``running_since`` to ``NULL``, records the cutoff ``settled_through =
+        greatest(clock(), running_since)`` (the next start begins no earlier; the
+        cutoff only moves forward) and returns the runtime usage. The read of
         ``running_since`` and the write are one atomic statement (a second
         concurrent stop must not add the time twice).
 
@@ -240,11 +269,10 @@ class BudgetTracker:
         check_uuid("task_id", task_id)
         check_runtime_generation(generation)
         now = self._now()
+        stopped_at = literal(now, DateTime(timezone=True))
         elapsed = func.greatest(
             cast(
-                func.floor(
-                    extract("epoch", literal(now) - BudgetUsageRow.running_since)
-                ),
+                func.floor(extract("epoch", stopped_at - BudgetUsageRow.running_since)),
                 BigInteger,
             ),
             0,
@@ -260,6 +288,9 @@ class BudgetTracker:
             .values(
                 consumed=func.least(BudgetUsageRow.consumed + elapsed, MAX_CONSUMED),
                 running_since=None,
+                # Both expressions see the OLD ``running_since`` (a non-NULL, per
+                # the WHERE): the cutoff is never before the run's own start.
+                settled_through=func.greatest(stopped_at, BudgetUsageRow.running_since),
             )
             .returning(BudgetUsageRow.consumed, BudgetUsageRow.limit_value)
         )

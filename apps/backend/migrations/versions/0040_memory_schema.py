@@ -28,12 +28,23 @@ keys' cascade, which PostgreSQL runs with the owner's rights.
 a message must name its conversation. A CHECK cannot state that, because the
 foreign keys' SET NULL actions of a conversation delete pass through the state
 (NULL conversation, message); the trigger judges the row at COMMIT instead.
+A second trigger, ``BEFORE INSERT`` only, refuses a new ``conversation`` source
+that names neither a conversation nor a message: such a row identifies nothing,
+yet is exactly what a deleted conversation leaves behind (``ON DELETE SET NULL``),
+so only the INSERT can be judged.
 
 ``memory_versions`` keeps ``pinned`` and ``importance`` updatable in place
 (REQUIREMENTS.md "Manual Memory Editing": low-risk metadata takes effect at
 once), but "変更履歴は残す": a trigger records every change, with its actor, in the
 append-only ``memory_metadata_changes``. The writer names the actor with
 ``paw_backend.memory.metadata.metadata_change_actor``; a change without one fails.
+
+The trigger functions run in the writer's session, and every role holds
+PostgreSQL's default TEMP privilege, which lets a session shadow an unqualified
+table (or type) name with a temporary one. So each function pins its own
+``search_path`` (``pg_catalog, pg_temp``: ``pg_temp`` named explicitly, so that
+it comes last) and reaches its table by the schema of the table the trigger is
+on (``TG_TABLE_SCHEMA``), through dynamic SQL.
 
 The constraint definitions and the triggers repeat the ones in
 ``paw_backend.memory.models`` on purpose (a migration is a frozen snapshot);
@@ -86,15 +97,20 @@ def _empty_object(name: str) -> sa.Column:
     )
 
 
-# See ``MemorySource`` in ``paw_backend.memory.models`` for why this is a trigger.
+# See ``MemorySource`` in ``paw_backend.memory.models`` for why this is a trigger,
+# and why the function pins its ``search_path`` and names its table by schema.
 _MESSAGE_REQUIRES_CONVERSATION_FUNCTION = """\
 CREATE OR REPLACE FUNCTION paw_check_memory_source_message_conversation()
-RETURNS trigger LANGUAGE plpgsql AS $$
+RETURNS trigger LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp AS $$
+DECLARE
+    invalid boolean;
 BEGIN
-    IF EXISTS (
-        SELECT 1 FROM memory_sources
-        WHERE id = NEW.id AND message_id IS NOT NULL AND conversation_id IS NULL
-    ) THEN
+    EXECUTE 'SELECT EXISTS (SELECT 1 FROM ' || quote_ident(TG_TABLE_SCHEMA)
+        || '.' || quote_ident(TG_TABLE_NAME)
+        || ' WHERE id = $1 AND message_id IS NOT NULL AND conversation_id IS NULL)'
+    INTO invalid USING NEW.id;
+    IF invalid THEN
         RAISE EXCEPTION 'a source that names a message must name its conversation'
             USING ERRCODE = 'check_violation',
                   TABLE = 'memory_sources',
@@ -110,19 +126,46 @@ DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW EXECUTE FUNCTION paw_check_memory_source_message_conversation()"""
 
 
-# See ``MemoryMetadataChange`` in ``paw_backend.memory.models``.
+# See ``MemorySource`` in ``paw_backend.memory.models``: an INSERT-only rule,
+# because a conversation source with nothing set is what a deleted conversation
+# leaves behind, and that state must stay valid.
+_CONVERSATION_SOURCE_IDENTIFIED_FUNCTION = """\
+CREATE OR REPLACE FUNCTION paw_check_memory_source_conversation_identified()
+RETURNS trigger LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp AS $$
+BEGIN
+    IF NEW.source_type = 'conversation'
+       AND NEW.conversation_id IS NULL AND NEW.message_id IS NULL THEN
+        RAISE EXCEPTION 'a new conversation source must name a conversation'
+            USING ERRCODE = 'check_violation',
+                  TABLE = 'memory_sources',
+                  CONSTRAINT = 'tr_memory_sources_conversation_source_identified';
+    END IF;
+    RETURN NEW;
+END
+$$"""
+_CONVERSATION_SOURCE_IDENTIFIED_TRIGGER = """\
+CREATE TRIGGER tr_memory_sources_conversation_source_identified
+BEFORE INSERT ON memory_sources
+FOR EACH ROW EXECUTE FUNCTION paw_check_memory_source_conversation_identified()"""
+
+
+# See ``MemoryMetadataChange`` in ``paw_backend.memory.models``, and there for
+# why the function pins its ``search_path`` and names its table by schema.
 _RECORD_METADATA_CHANGE_FUNCTION = """\
 CREATE OR REPLACE FUNCTION paw_record_memory_metadata_change()
-RETURNS trigger LANGUAGE plpgsql AS $$
+RETURNS trigger LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp AS $$
 BEGIN
-    INSERT INTO memory_metadata_changes (
-        memory_version_id, old_pinned, new_pinned, old_importance, new_importance,
-        actor_type, actor_user_id
-    ) VALUES (
+    EXECUTE 'INSERT INTO ' || quote_ident(TG_TABLE_SCHEMA)
+        || '.memory_metadata_changes ('
+        || 'memory_version_id, old_pinned, new_pinned, old_importance,'
+        || ' new_importance, actor_type, actor_user_id'
+        || ') VALUES ($1, $2, $3, $4, $5, $6, $7)'
+    USING
         NEW.id, OLD.pinned, NEW.pinned, OLD.importance, NEW.importance,
         nullif(current_setting('paw.actor_type', true), ''),
-        nullif(current_setting('paw.actor_user_id', true), '')::uuid
-    );
+        nullif(current_setting('paw.actor_user_id', true), '')::uuid;
     RETURN NULL;
 END
 $$"""
@@ -603,6 +646,8 @@ def upgrade() -> None:
     )
     op.execute(_MESSAGE_REQUIRES_CONVERSATION_FUNCTION)
     op.execute(_MESSAGE_REQUIRES_CONVERSATION_TRIGGER)
+    op.execute(_CONVERSATION_SOURCE_IDENTIFIED_FUNCTION)
+    op.execute(_CONVERSATION_SOURCE_IDENTIFIED_TRIGGER)
 
     # Nothing is registered here: the model (and dimension) is chosen by the
     # PAW-019 benchmark and registered with an ordinary insert.
@@ -655,6 +700,9 @@ def downgrade() -> None:
     op.drop_table("embedding_models")
     op.drop_table("memory_sources")  # its trigger goes with it
     op.execute("DROP FUNCTION IF EXISTS paw_check_memory_source_message_conversation()")
+    op.execute(
+        "DROP FUNCTION IF EXISTS paw_check_memory_source_conversation_identified()"
+    )
     op.drop_table("memory_relations")
     op.drop_table("memory_metadata_changes")
     op.drop_table("memory_versions")  # its trigger goes with it
