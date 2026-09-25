@@ -9,6 +9,8 @@ unclassified-context tests, which are decided before any rule runs, pass.
 import asyncio
 import json
 import logging
+import time
+import unicodedata
 import unittest
 from unittest import mock
 
@@ -305,6 +307,140 @@ class SizeLimitTest(unittest.TestCase):
     def test_a_refusal_is_never_recorded(self):
         refusal(self, self.gate.minimize, "a" * (MAX_DRAFT_CHARS + 1), [])
         self.assertEqual(self.sink.records, ())
+
+
+class NormalisedSizeLimitTest(unittest.TestCase):
+    """The limits also hold AFTER NFKC and full case folding (Decision 0010).
+
+    U+FDFA is one code point that NFKC turns into 18, so a context that is within
+    the limits as written can become millions of characters, and the copy
+    detection would build one window per character on the event loop. The gate
+    counts the size of the text in the form the filter compares: the length of
+    ``unicodedata.normalize("NFKC", text).casefold()``.
+    """
+
+    EXPANDING = "\ufdfa"  # 1 code point -> 18 after NFKC
+    LIGATURE = "\ufb01"  # "ﬁ": 1 code point -> "fi" (2) after NFKC
+
+    def setUp(self):
+        self.gate, self.sink = make_gate()
+
+    def test_the_test_characters_expand_as_assumed(self):
+        self.assertEqual(len(self.EXPANDING), 1)
+        self.assertEqual(len(unicodedata.normalize("NFKC", self.EXPANDING)), 18)
+        self.assertEqual(unicodedata.normalize("NFKC", self.LIGATURE), "fi")
+
+    def test_a_context_that_expands_past_the_limit_is_refused_before_any_text_work(
+        self,
+    ):
+        for make in (private_source, memory, raw_conversation, secret, public):
+            # Two pieces of the maximum raw size: 400,000 characters as written,
+            # 7,200,000 after NFKC.
+            context = [make(self.EXPANDING * MAX_PIECE_CHARS)] * 2
+            with (
+                self.subTest(label=make.__name__),
+                mock.patch.object(
+                    rules, "find_copied_spans", side_effect=AssertionError("windows")
+                ) as windows,
+                mock.patch.object(
+                    rules, "normalize_text", side_effect=rules.normalize_text
+                ) as normalise,
+                mock.patch.object(
+                    rules, "fold_for_match", side_effect=rules.fold_for_match
+                ) as fold,
+            ):
+                started = time.perf_counter()
+                error = refusal(self, self.gate.minimize, "python asyncio", context)
+                elapsed = time.perf_counter() - started
+                self.assertIs(error.reason, Reason.CONTEXT_TOO_LARGE)
+                self.assertLess(elapsed, 1.0)
+                # No window set is built and no text is normalised or folded by
+                # the rules: the refusal comes first.
+                self.assertEqual(windows.call_count, 0)
+                self.assertEqual(normalise.call_count, 0)
+                self.assertEqual(fold.call_count, 0)
+
+    def test_a_piece_within_the_raw_limit_but_over_it_after_folding_is_refused(self):
+        error = refusal(
+            self,
+            self.gate.minimize,
+            "python",
+            [private_source(self.EXPANDING * 12_000)],  # 216,000 > 200,000
+        )
+        self.assertIs(error.reason, Reason.CONTEXT_TOO_LARGE)
+        # Pieces that are each within the limit but add up past the total.
+        pieces = [private_source(self.EXPANDING * 11_000)] * 3  # 3 x 198,000
+        error = refusal(self, self.gate.minimize, "python", pieces)
+        self.assertIs(error.reason, Reason.CONTEXT_TOO_LARGE)
+
+    def test_a_piece_of_exactly_the_limit_after_normalisation_is_accepted(self):
+        exact = private_source(self.LIGATURE * (MAX_PIECE_CHARS // 2))
+        self.assertEqual(len(exact.text), 100_000)  # far within the raw limit
+        result = self.gate.minimize("python", [exact])  # 200,000 after NFKC
+        self.assertEqual(result.query, "python")
+        error = refusal(
+            self,
+            self.gate.minimize,
+            "python",
+            [private_source(self.LIGATURE * (MAX_PIECE_CHARS // 2) + "a")],
+        )
+        self.assertIs(error.reason, Reason.CONTEXT_TOO_LARGE)
+
+    def test_the_total_of_exactly_the_limit_after_normalisation_is_accepted(self):
+        half = private_source(self.LIGATURE * (MAX_PIECE_CHARS // 2))  # 200,000
+        result = self.gate.minimize("python", [half, half])  # 400,000 in all
+        self.assertEqual(result.query, "python")
+        # One more character: 400,001 after NFKC, but only 200,001 as written.
+        error = refusal(self, self.gate.minimize, "python", [half, half, memory("b")])
+        self.assertIs(error.reason, Reason.CONTEXT_TOO_LARGE)
+
+    def test_case_folding_counts_too(self):
+        # "ß" folds to "ss": 100,000 of them are 200,000 folded characters.
+        result = self.gate.minimize(
+            "python", [private_source("\u00df" * (MAX_PIECE_CHARS // 2))]
+        )
+        self.assertEqual(result.query, "python")
+        error = refusal(
+            self,
+            self.gate.minimize,
+            "python",
+            [private_source("\u00df" * (MAX_PIECE_CHARS // 2) + "a")],
+        )
+        self.assertIs(error.reason, Reason.CONTEXT_TOO_LARGE)
+
+    def test_a_normal_large_ascii_context_still_works(self):
+        big = ("lorem ipsum dolor sit amet " * 8_000)[:MAX_PIECE_CHARS]
+        self.assertEqual(len(big), MAX_PIECE_CHARS)
+        result = self.gate.minimize(
+            "python asyncio", [private_source(big), raw_conversation(big)]
+        )
+        self.assertEqual(result.query, "python asyncio")
+        self.assertEqual(result.pieces_matched, 0)
+
+    def test_a_draft_that_expands_past_the_limit_is_refused(self):
+        # 201 characters as written, 3,618 after NFKC.
+        with mock.patch.object(
+            rules, "normalize_text", side_effect=AssertionError("text work")
+        ):
+            error = refusal(self, self.gate.minimize, self.EXPANDING * 201, [])
+        self.assertIs(error.reason, Reason.DRAFT_TOO_LONG)
+        # "ß" folds to "ss": 1,001 of them are 2,002 characters.
+        error = refusal(self, self.gate.minimize, "\u00df" * 1_001, [])
+        self.assertIs(error.reason, Reason.DRAFT_TOO_LONG)
+
+    def test_a_draft_of_exactly_the_limit_after_normalisation_is_accepted(self):
+        # "ﬁ " is 2 characters as written and 3 after NFKC: 666 of them and "ab"
+        # are 2,000; a third letter makes 2,001.
+        draft = (self.LIGATURE + " ") * 666 + "ab"
+        result = self.gate.minimize(draft, [])
+        self.assertTrue(result.query.startswith("fi fi fi"))
+        self.assertTrue(result.truncated)
+        error = refusal(self, self.gate.minimize, draft + "c", [])
+        self.assertIs(error.reason, Reason.DRAFT_TOO_LONG)
+
+    def test_an_unclassified_context_is_still_decided_first(self):
+        error = refusal(self, self.gate.minimize, self.EXPANDING * 201, ["raw"])
+        self.assertIs(error.reason, Reason.UNCLASSIFIED_CONTEXT)
 
 
 class MinimizeBasicsTest(unittest.TestCase):
@@ -1304,6 +1440,12 @@ class AuthorizeTest(unittest.IsolatedAsyncioTestCase):
         for draft, context, reason in (
             ("python", ["raw"], Reason.UNCLASSIFIED_CONTEXT),
             ("x" * (MAX_DRAFT_CHARS + 1), [], Reason.DRAFT_TOO_LONG),
+            ("\ufdfa" * 201, [], Reason.DRAFT_TOO_LONG),
+            (
+                "python",
+                [private_source("\ufdfa" * 12_000)],  # 216,000 after NFKC
+                Reason.CONTEXT_TOO_LARGE,
+            ),
             ("/etc/passwd", [], Reason.EMPTY_QUERY),
             (AWS_KEY, [], Reason.EMPTY_QUERY),
         ):

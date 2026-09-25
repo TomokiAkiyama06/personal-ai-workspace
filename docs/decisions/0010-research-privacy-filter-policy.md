@@ -81,6 +81,12 @@ Draft に次の規則を、この順に適用する。各規則の正確な定�
 
 この表の値は暫定値として承認された。
 
+**承認後の補足（2026-09-25、独立レビューの指摘への訂正。上の値と承認された内容は変えない）**: 上の表の Draft と Context の文字数の上限は、**書かれたままの文字数**と、**NFKC と完全な Case folding をかけたあとの文字数**（`len(unicodedata.normalize("NFKC", text).casefold())`。写しの検出と最終検査が比べる形）の**両方**に適用する。承認時の文言は文字数の数え方を書いていなかったため、書かれたままの文字数だけを数える実装だった。NFKC は 1 文字を最大 18 文字（U+FDFA）に増やすので、書かれたままでは上限内の Context（400,000 文字）が展開後に 700 万文字を超え、写しの検出が窓の集合を作る間、Event Loop を止めて大量のメモリを使えた。数値は変えず、数え方だけを明確にした。
+
+- 書かれたままの文字数の検査は、そのまま残す（安価な早い拒否。`ContextPiece` は書かれたままの 1 個 200,000 文字までしか作れない）。
+- 展開後の文字数が、Draft では 2,000、Piece では 1 個 200,000、Context では合計 400,000 を超えたら、それぞれ `draft_too_long` / `context_too_large` で拒否する。新しい拒否の理由は作らない。Piece は 1 個ずつ測り、超えたところで止め、Text の処理（`rules.py`）の前に拒否する。全ての Label の Piece を数える。
+- 副作用: 書かれたままでは上限内でも、Case folding で増える文字（`ß` は `ss`）や NFKC で増える文字（`ﬁ` は `fi`、`㎏` は `kg`）を多く含む Text は、展開後の文字数で拒否されることがある（Draft は 2,000 文字を超える Query になり得ず、Piece と Context の上限も処理量の上限として置いているため、許す）。
+
 拒否の理由は閉じた集合（`unclassified_context`、`draft_too_long`、`context_too_large`、`empty_query`、`credential_remains`、`private_text_remains`、`audit_failed`）で、Query、Context、例外の文言は含まない。
 
 ### 5. Audit
@@ -127,4 +133,5 @@ Private な Repository の内容を Research の Context に自動で入れる�
 - URL の外の Host の判定は、空白で区切られた 1 語の全体だけとし、今回は強めない。
 - 長さ・件数などの暫定値（Draft 2,000 文字、送る Query 256 文字、Context 32 個・合計 400,000 文字、Audit Sink の時間切れ 5 秒、抽象化の閾値）を、暫定値として承認した。
 - 対象外（`ResearchBroker.fetch` は Gate を通さない、Provider の応答本文と Scratch 保存時の検査はしない）を承認した。
+- **承認後の補足訂正（2026-09-25、独立レビューの指摘）**: 上の「長さと拒否」の文字数の上限は、書かれたままの文字数に加えて、NFKC と完全な Case folding をかけたあとの文字数にも同じ数値で適用する（展開する Text による、Event Loop の停止とメモリの浪費を防ぐため）。承認した数値と方針は変えず、数え方の明確化である（本文の「長さと拒否」の表の下を参照）。実装は `gate.folded_length`、Test は `NormalisedSizeLimitTest`。
 - **条件**: 永続の Audit Sink（Issue [#87](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/87)）が接続されるまで、Private 由来の Context を Research へ自動で入れる設計は有効にしない。Audit の Record が保存されない間は、「外部送信を Audit できる」要件を満たさないため。

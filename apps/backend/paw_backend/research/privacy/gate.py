@@ -9,7 +9,10 @@ finished query, and "audit first, then send".
 Order of ``PrivacyGate.minimize`` (the draft is the caller's proposed query):
 
 1. Refuse an unclassified context, a draft over ``MAX_DRAFT_CHARS`` and a context
-   over the limits, before any text work.
+   over the limits, before any text work. The limits are checked twice: on the
+   text as written (cheap) and on its size after NFKC and full case folding
+   (``folded_length``), because those can make a text much longer (U+FDFA is one
+   code point and 18 after NFKC) and every later step works on that form.
 2. ``normalize_text`` the draft.
 3. ``strip_credentials``, FIRST: a credential is removed whole from the draft as
    written. Nothing that cuts text (step 4) may run before it, because a credential
@@ -64,6 +67,7 @@ from paw_backend.research.privacy.contract import (
     MAX_CONTEXT_PIECES,
     MAX_DRAFT_CHARS,
     MAX_MINIMIZED_QUERY_CHARS,
+    MAX_PIECE_CHARS,
     MAX_TOTAL_CONTEXT_CHARS,
     SECRET_WINDOW_CHARS,
     ContextLabel,
@@ -164,6 +168,38 @@ def _rewritten_by_the_rules(word: str) -> bool:
     return any(getattr(rules, name)(word)[1] for name in ABSTRACTION_RULE_NAMES)
 
 
+def folded_length(text: str) -> int:
+    """The size of ``text`` in the form the filter compares: NFKC, then full case
+    folding, counted in characters.
+
+    This is what the limits of the gate count (Decision 0010): NFKC can turn one
+    code point into up to 18 (U+FDFA) and case folding into up to 3, and the copy
+    detection, the safety checks and the windows all work on that form. It never
+    depends on ``rules.py`` (a gate check must not depend on the functions it
+    guards) and it is an upper bound of the length of ``rules.normalize_text``
+    plus ``rules.fold_for_match``, which only drop format characters and collapse
+    spaces. The text is normalised once and dropped: the memory is a few times the
+    length of ``text`` as written (at most 18 times), never more."""
+    return len(unicodedata.normalize("NFKC", text).casefold())
+
+
+def _context_within_limits(context: Sequence[ContextPiece]) -> bool:
+    """Whether the pieces are within ``MAX_PIECE_CHARS`` each and
+    ``MAX_TOTAL_CONTEXT_CHARS`` in all, counted with ``folded_length``.
+
+    The pieces are measured one at a time and the loop stops at the first one that
+    breaks a limit, so an expanding context is never normalised as a whole. The
+    size is that of every piece of every label: public text is never read by the
+    filter, but it counts too (one rule, nothing to forget if that changes)."""
+    total = 0
+    for piece in context:
+        size = folded_length(piece.text)
+        total += size
+        if size > MAX_PIECE_CHARS or total > MAX_TOTAL_CONTEXT_CHARS:
+            return False
+    return True
+
+
 def _guard_key(text: str) -> str:
     """The comparison form of the safety checks: independent of ``rules.py``.
 
@@ -231,10 +267,14 @@ class PrivacyGate:
 
         * an element of ``context`` that is not a ``ContextPiece``:
           ``UNCLASSIFIED_CONTEXT`` (checked first);
-        * ``len(draft) > MAX_DRAFT_CHARS``: ``DRAFT_TOO_LONG``;
+        * a draft of more than ``MAX_DRAFT_CHARS`` characters, as written OR
+          after NFKC and full case folding (``folded_length``): ``DRAFT_TOO_LONG``;
         * more than ``MAX_CONTEXT_PIECES`` pieces, or more than
-          ``MAX_TOTAL_CONTEXT_CHARS`` characters of text in all:
-          ``CONTEXT_TOO_LARGE``;
+          ``MAX_TOTAL_CONTEXT_CHARS`` characters of text in all, or a piece of
+          more than ``MAX_PIECE_CHARS`` characters, counted as written and after
+          NFKC and full case folding (``folded_length``): ``CONTEXT_TOO_LARGE``.
+          A text that expands (U+FDFA becomes 18 characters) is refused before any
+          of it is normalised by ``rules.py`` or compared;
         * no word character left after the steps in the module docstring:
           ``EMPTY_QUERY``; a credential or non-public text left in the finished
           query: ``CREDENTIAL_REMAINS`` / ``PRIVATE_TEXT_REMAINS``.
@@ -252,11 +292,15 @@ class PrivacyGate:
             raise ValueError("draft must be encodable as UTF-8") from None
         if not all(isinstance(piece, ContextPiece) for piece in context):
             raise PrivacyRefusal(RefusalReason.UNCLASSIFIED_CONTEXT)
-        if len(draft) > MAX_DRAFT_CHARS:
+        # The raw length is the cheap early reject; the folded length is the limit
+        # that protects the work below (an expanding text is as long as it
+        # becomes, not as it is written).
+        if len(draft) > MAX_DRAFT_CHARS or folded_length(draft) > MAX_DRAFT_CHARS:
             raise PrivacyRefusal(RefusalReason.DRAFT_TOO_LONG)
         if (
             len(context) > MAX_CONTEXT_PIECES
             or sum(len(piece.text) for piece in context) > MAX_TOTAL_CONTEXT_CHARS
+            or not _context_within_limits(context)
         ):
             raise PrivacyRefusal(RefusalReason.CONTEXT_TOO_LARGE)
 

@@ -31,6 +31,12 @@ from paw_backend.research.providers.contract import (
 
 # --- Limits (everything that comes from a caller is bounded) ------------------
 
+# The limits below are counted twice by ``PrivacyGate`` (Decision 0010): on the text
+# as written, and on its size after NFKC and full case folding
+# (``gate.folded_length``), because those can make a text up to 18 times longer
+# (U+FDFA is one code point and 18 after NFKC) and everything the gate does works
+# on that form. ``ContextPiece`` can only check the text as written.
+#
 # A draft query longer than this is not a query but pasted material: refused.
 MAX_DRAFT_CHARS = 2_000
 # The minimised query is cut to this many characters (ResearchRequest allows 512).
@@ -112,7 +118,11 @@ class RefusalReason(StrEnum):
     # The context is missing, is not a ``PrivacyInput``, or has an element that
     # is not a ``ContextPiece`` (nothing says how it may be used): default deny.
     UNCLASSIFIED_CONTEXT = "unclassified_context"
+    # Over ``MAX_DRAFT_CHARS``, as written or after NFKC and full case folding.
     DRAFT_TOO_LONG = "draft_too_long"
+    # More than ``MAX_CONTEXT_PIECES`` pieces, or a piece over ``MAX_PIECE_CHARS`` or
+    # all of them over ``MAX_TOTAL_CONTEXT_CHARS``, as written or after NFKC and
+    # full case folding.
     CONTEXT_TOO_LARGE = "context_too_large"
     # Nothing searchable is left after minimisation.
     EMPTY_QUERY = "empty_query"
@@ -185,8 +195,10 @@ class ContextPiece:
     ``label`` must be a ``ContextLabel`` (a plain string is a ``TypeError``: a
     piece cannot exist unclassified). ``text`` must be a ``str`` that is
     UTF-8 encodable, not blank (``strip()`` is not empty) and at most
-    ``MAX_PIECE_CHARS`` characters (``ValueError`` otherwise). ``text`` is
-    excluded from ``repr``.
+    ``MAX_PIECE_CHARS`` characters as written (``ValueError`` otherwise). The gate
+    counts the size after NFKC and full case folding against the same limit (and
+    all pieces against ``MAX_TOTAL_CONTEXT_CHARS``) and refuses a context that is
+    larger in that form. ``text`` is excluded from ``repr``.
     """
 
     label: ContextLabel
