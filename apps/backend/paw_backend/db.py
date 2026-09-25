@@ -26,6 +26,11 @@ from paw_backend.config import Settings
 
 logger = logging.getLogger(__name__)
 
+# How long the SERVER keeps waiting (for a lock, or for a statement) after the
+# caller's own deadline of an abortable transaction, for a statement that the
+# caller has abandoned (see ``Database.transact_abortable``).
+_SERVER_GRACE_SECONDS = 1.0
+
 # Constraint names must be deterministic so that Alembic can drop / alter them.
 NAMING_CONVENTION = {
     "ix": "ix_%(column_0_label)s",
@@ -144,8 +149,8 @@ class Database:
         self._sessions: async_sessionmaker[AsyncSession] | None = None
         # Readiness probes that are running or being stopped, and the driver
         # connection each one is using (see `check`).
-        self._probes: set[asyncio.Task[None]] = set()
-        self._probe_connections: dict[asyncio.Task[None], psycopg.AsyncConnection] = {}
+        self._probes: set[asyncio.Task[Any]] = set()
+        self._probe_connections: dict[asyncio.Task[Any], psycopg.AsyncConnection] = {}
         # Single flight: concurrent `check()` calls share one probe, and its
         # result is reused for `database_readiness_cache_seconds`.
         self._flight: asyncio.Task[DatabaseStatus] | None = None
@@ -209,11 +214,23 @@ class Database:
     async def _query(
         self, sql: str, params: Mapping[str, Any] | None = None
     ) -> list[tuple]:
-        """Run one short statement on a dedicated, abortable connection.
+        """Run one short statement on a dedicated, abortable connection."""
 
-        The probe deliberately does not use the pool: it must not occupy a pool
-        slot while the server is stalled, and it needs to own its connection
-        from the first byte so that it can be torn down (see ``_abort``).
+        async def statement(connection: psycopg.AsyncConnection) -> list[tuple]:
+            cursor = await connection.execute(sql, params)
+            return await cursor.fetchall() if cursor.description else []
+
+        return await self._run(statement)
+
+    async def _run[T](
+        self, work: Callable[[psycopg.AsyncConnection], Awaitable[T]]
+    ) -> T:
+        """Run ``work`` on a dedicated connection that ``_abort`` can drop.
+
+        The connection deliberately does not come from the pool: it must not
+        occupy a pool slot while the server is stalled, and it needs to be owned
+        by this task from the first byte so that it can be torn down (see
+        ``_abort``).
         """
         connection = await psycopg.AsyncConnection.connect(
             **self._connect_kwargs(autocommit=True)
@@ -221,8 +238,7 @@ class Database:
         probe = asyncio.current_task()
         self._probe_connections[probe] = connection
         try:
-            cursor = await connection.execute(sql, params)
-            return await cursor.fetchall() if cursor.description else []
+            return await work(connection)
         finally:
             self._probe_connections.pop(probe, None)
             await connection.close()
@@ -270,6 +286,71 @@ class Database:
         A write that is aborted may or may not have been committed: the caller
         learns only that it did not finish in time.
         """
+
+        async def statement(connection: psycopg.AsyncConnection, deadline: float):
+            cursor = await connection.execute(sql, params)
+            return await cursor.fetchall() if cursor.description else []
+
+        return await self._abortable(statement, timeout_seconds)
+
+    async def transact_abortable[T](
+        self,
+        work: Callable[[psycopg.AsyncConnection], Awaitable[T]],
+        *,
+        timeout_seconds: float | None = None,
+    ) -> T:
+        """Run ``work(connection)`` as ONE transaction that never outlives its limit.
+
+        For a write that needs several statements in one transaction (a lock,
+        then a read, then the change) and must still fail closed on time: it has
+        the guarantees of ``fetch_abortable`` (its own connection outside the
+        pool, ONE deadline that includes the wait for a free slot, the socket
+        shut down at the deadline, when the caller is cancelled or on
+        ``dispose()``; ``TimeoutError`` at the deadline), and ``work`` runs
+        between ``BEGIN`` and ``COMMIT`` of a transaction of its own: it commits
+        when ``work`` returns and rolls back when it raises. ``work`` uses the
+        connection it is given (``await connection.execute(sql, params)``) and
+        must not keep it.
+
+        A transaction that is aborted is all or nothing. The server sees only a
+        closed connection: the statement it was running finishes (or fails), it
+        never receives the next statement or the ``COMMIT``, and the transaction
+        is rolled back. Only an abort during the ``COMMIT`` itself leaves the
+        outcome unknown to the caller (which then learns only that it did not
+        finish in time).
+
+        The server is also told to give up: ``lock_timeout`` and
+        ``statement_timeout`` are set (``SET LOCAL``) to the time that is left
+        plus ``_SERVER_GRACE_SECONDS``. A statement that is waiting on a lock
+        when the caller aborts is not woken by the closed socket (the server
+        notices it only when it has something to send), so without them the
+        abandoned backend would wait for the lock for as long as its holder
+        takes, and keep the locks it already has. The grace keeps the caller's
+        own deadline first, so the caller always sees ``TimeoutError``.
+        """
+        loop = asyncio.get_running_loop()
+
+        async def transaction(connection: psycopg.AsyncConnection, deadline: float):
+            async with connection.transaction():
+                server_limit = max(0.0, deadline - loop.time()) + _SERVER_GRACE_SECONDS
+                milliseconds = str(max(1, round(server_limit * 1000)))
+                await connection.execute(
+                    "SELECT set_config('lock_timeout', %(ms)s, true),"
+                    " set_config('statement_timeout', %(ms)s, true)",
+                    {"ms": milliseconds},
+                )
+                return await work(connection)
+
+        return await self._abortable(transaction, timeout_seconds)
+
+    async def _abortable[T](
+        self,
+        work: Callable[[psycopg.AsyncConnection, float], Awaitable[T]],
+        timeout_seconds: float | None,
+    ) -> T:
+        """``work(connection, deadline)`` on an abortable connection: the shared
+        part of ``fetch_abortable`` and ``transact_abortable``. ``deadline`` is
+        the absolute ``loop.time()`` at which the call is aborted."""
         if not self.configured:
             raise DatabaseNotConfiguredError("PAW_DATABASE_URL is not set")
         limit = (
@@ -283,7 +364,9 @@ class Database:
         deadline = loop.time() + limit
         await asyncio.wait_for(self._acquire_slot(), limit)
         try:
-            query = asyncio.create_task(self._query(sql, params))
+            query = asyncio.create_task(
+                self._run(lambda connection: work(connection, deadline))
+            )
             self._probes.add(query)
             query.add_done_callback(self._probes.discard)
             # Retrieve the outcome so that asyncio does not log it as unhandled.
@@ -454,7 +537,7 @@ class Database:
             return DatabaseStatus.UNAVAILABLE
         return DatabaseStatus.OK
 
-    def _abort(self, probe: asyncio.Task[None]) -> None:
+    def _abort(self, probe: asyncio.Task[Any]) -> None:
         """Make a running probe stop now, without waiting on the server.
 
         Cancelling a task that is inside a query makes psycopg ask the server
