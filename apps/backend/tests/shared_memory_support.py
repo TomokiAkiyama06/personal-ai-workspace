@@ -27,6 +27,8 @@ from paw_backend.authz import (
     SystemRole,
 )
 from paw_backend.db import Database
+from paw_backend.memory.metadata import metadata_change_actor
+from paw_backend.memory.models import ActorType
 from paw_backend.memory.shared import (
     AgentActor,
     CandidateState,
@@ -352,6 +354,9 @@ class AsyncPostgresSharedTestCase(unittest.IsolatedAsyncioTestCase):
         """Add a version; a new ``active`` one first supersedes the active one."""
         with self.engine.begin() as connection:
             if status == "active":
+                # The database records a status change and refuses one that names
+                # no actor (revision 0071); the seeding names the system.
+                connection.execute(metadata_change_actor(ActorType.SYSTEM))
                 connection.execute(
                     text(
                         "UPDATE memory_versions SET status = 'superseded'"

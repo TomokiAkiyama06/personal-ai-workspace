@@ -51,6 +51,9 @@ from . import (
 from . import (
     test_shared_memory_service_read as read,
 )
+from . import (
+    test_shared_memory_status_history as status_history,
+)
 from .shared_memory_support import AsyncPostgresSharedTestCase
 from .support import make_settings
 from .task_support import TEST_DATABASE_URL, migrate, new_database, requires_postgres
@@ -181,6 +184,10 @@ class DeleteAndRestoreAsAppRole(AsAppRole, manage.DeleteAndRestoreTest):
 
 
 class ConcurrencyAsAppRole(AsAppRole, manage.ConcurrencyTest):
+    pass
+
+
+class StatusHistoryAsAppRole(AsAppRole, status_history.SharedStatusHistoryTest):
     pass
 
 

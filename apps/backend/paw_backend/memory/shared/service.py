@@ -174,6 +174,7 @@ from paw_backend.authz import (
     SystemRole,
 )
 from paw_backend.db import Database
+from paw_backend.memory.metadata import metadata_change_actor
 from paw_backend.memory.models import (
     ActorType,
     ConfirmationState,
@@ -609,8 +610,15 @@ class SharedMemoryService:
         version_id: UUID,
         old: MemoryStatus,
         new: MemoryStatus,
+        user_id: UUID,
     ) -> None:
-        """Change a version's status if (and only if) it still is ``old``."""
+        """Change a version's status if (and only if) it still is ``old``.
+
+        The database records the change (old and new status, ``user_id`` as the
+        actor, its own clock) in ``memory_metadata_changes``, and refuses it when
+        nobody is named, so the manager is named first, in this transaction.
+        """
+        await session.execute(metadata_change_actor(ActorType.USER, user_id))
         result = await session.execute(
             update(_VERSIONS)
             .where(_VERSIONS.c.id == version_id, _VERSIONS.c.status == old.value)
@@ -821,6 +829,7 @@ class SharedMemoryService:
                 current.version_id,
                 MemoryStatus.ACTIVE,
                 MemoryStatus.SUPERSEDED,
+                manager.user_id,
             )
             new_version_id = (
                 await session.execute(
@@ -909,7 +918,9 @@ class SharedMemoryService:
             else:
                 check_restorable(current)
                 old, new = MemoryStatus.DEPRECATED, MemoryStatus.ACTIVE
-            await self._set_status(session, current.version_id, old, new)
+            await self._set_status(
+                session, current.version_id, old, new, manager.user_id
+            )
             await self._complete(
                 session,
                 manager,

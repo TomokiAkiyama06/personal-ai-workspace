@@ -444,9 +444,12 @@ class MemoryMigrationDatabaseTest(unittest.TestCase):
                 (
                     "tr_memory_versions_record_metadata_change",
                     "CREATE TRIGGER tr_memory_versions_record_metadata_change"
-                    " AFTER UPDATE OF pinned, importance ON memory_versions"
+                    " AFTER UPDATE OF pinned, importance, status, stale_since"
+                    " ON memory_versions"
                     " FOR EACH ROW WHEN (((old.pinned IS DISTINCT FROM new.pinned)"
-                    " OR (old.importance IS DISTINCT FROM new.importance)))"
+                    " OR (old.importance IS DISTINCT FROM new.importance)"
+                    " OR (old.status IS DISTINCT FROM new.status)"
+                    " OR (old.stale_since IS DISTINCT FROM new.stale_since)))"
                     " EXECUTE FUNCTION paw_record_memory_metadata_change()",
                 ),
             ],
@@ -533,7 +536,8 @@ class MemoryMigrationDatabaseTest(unittest.TestCase):
             ),
             "paw_record_memory_metadata_change": (
                 models.RECORD_METADATA_CHANGE_FUNCTION,
-                "OLD.pinned, NEW.pinned, OLD.importance, NEW.importance",
+                "OLD.pinned, NEW.pinned, OLD.importance, NEW.importance,"
+                "\n        OLD.status, NEW.status, OLD.stale_since, NEW.stale_since",
             ),
         }
 
