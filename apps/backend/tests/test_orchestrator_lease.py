@@ -25,6 +25,7 @@ from .orchestrator_support import (
     PostgresOrchestratorTestCase,
     SpyBudget,
     diamond,
+    gate_kwargs,
     make_plan,
     node,
     requires_postgres,
@@ -59,7 +60,9 @@ class LeaseTest(PostgresOrchestratorTestCase):
         )
 
     async def test_a_worker_whose_lease_has_expired_does_nothing(self):
-        queue = TaskQueue(self.database, allow_explicit_now=True)
+        queue = TaskQueue(
+            self.database, allow_explicit_now=True, **gate_kwargs(TaskQueue)
+        )
         spy = SpyBudget(self.database)
         runtime = FakeRuntime("local")
         h = self.harness(queue=queue, budget=spy, runtimes={"local": runtime})
@@ -213,7 +216,7 @@ class LeaseTest(PostgresOrchestratorTestCase):
         self.assertEqual(await self.store.get(task_id, 1), final)
 
     async def test_heartbeats_that_keep_failing_count_as_a_lost_lease(self):
-        queue = FlakyQueue(self.database)
+        queue = FlakyQueue(self.database, **gate_kwargs(TaskQueue))
         runtime = FakeRuntime("local")
         runtime.gate("only")
         h = self.harness(queue=queue, runtimes={"local": runtime})

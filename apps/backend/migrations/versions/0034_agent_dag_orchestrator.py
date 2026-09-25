@@ -53,6 +53,7 @@ MAX_NODES = 32
 MAX_LADDER_LENGTH = 4
 MAX_APPROACH = 100
 MAX_GOAL_CHARS = 4000
+MAX_PLAN_BYTES = 131072
 DB_MAX_JSON_BYTES = 65536
 KEY_PATTERN = "[a-z][a-z0-9_-]{0,31}"
 
@@ -87,6 +88,7 @@ def upgrade() -> None:
         sa.Column("epoch", sa.Integer(), server_default=sa.text("0"), nullable=False),
         sa.Column("owner", sa.String(length=100), nullable=True),
         sa.Column("node_count", sa.Integer(), nullable=False),
+        sa.Column("plan_bytes", sa.Integer(), nullable=False),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -117,6 +119,14 @@ def upgrade() -> None:
         sa.CheckConstraint(
             f"node_count BETWEEN 1 AND {MAX_NODES}",
             name=op.f("ck_agent_dags_node_count_in_range"),
+        ),
+        # The accepted plan's size in UTF-8 bytes, as the service declares it: the
+        # total spans rows, so no per-row CHECK can measure it, but the database
+        # refuses a declaration above the limit (and the application cannot change
+        # it: it is not an updatable column).
+        sa.CheckConstraint(
+            f"plan_bytes BETWEEN 1 AND {MAX_PLAN_BYTES}",
+            name=op.f("ck_agent_dags_plan_bytes_in_range"),
         ),
     )
     # ``SELECT ... FOR NO KEY UPDATE`` (the fencing lock) needs UPDATE on at least

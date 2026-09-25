@@ -56,6 +56,7 @@ from paw_backend.orchestrator.limits import (
     MAX_GOAL_CHARS,
     MAX_LADDER_LENGTH,
     MAX_NODES,
+    MAX_PLAN_BYTES,
 )
 from paw_backend.tasks.queueing.validation import MAX_APPROACH
 
@@ -103,6 +104,12 @@ class DagRow(Base):
     epoch: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
     owner: Mapped[str | None] = mapped_column(String(100))
     node_count: Mapped[int] = mapped_column(Integer)
+    # The size of the accepted plan in UTF-8 bytes (``Plan.encoded_bytes``). The
+    # texts of the nodes are bounded one by one by CHECK constraints; the total
+    # cannot be one (it spans rows), so the service declares it here and the
+    # database bounds the declaration. Fixed for good (the application cannot
+    # update it).
+    plan_bytes: Mapped[int] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()")
     )
@@ -120,6 +127,9 @@ class DagRow(Base):
         CheckConstraint("(epoch = 0) = (owner IS NULL)", name="owner_matches_epoch"),
         CheckConstraint(
             f"node_count BETWEEN 1 AND {MAX_NODES}", name="node_count_in_range"
+        ),
+        CheckConstraint(
+            f"plan_bytes BETWEEN 1 AND {MAX_PLAN_BYTES}", name="plan_bytes_in_range"
         ),
     )
 

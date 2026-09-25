@@ -91,6 +91,12 @@ class LifespanTestCase(unittest.IsolatedAsyncioTestCase):
         patcher = patch("paw_backend.app.build_project_stop_loop", RecordingLoop)
         patcher.start()
         self.addCleanup(patcher.stop)
+        # The gate is composed explicitly (Issue #83): the lifespan asks for it and
+        # hands it to the loop; here the answer is a recognisable object.
+        self.gate = object()
+        gate = patch("paw_backend.app.production_project_gate", lambda: self.gate)
+        gate.start()
+        self.addCleanup(gate.stop)
 
     async def run_lifespan(self, app) -> None:
         async with app.router.lifespan_context(app):
@@ -106,7 +112,10 @@ class StartTest(LifespanTestCase):
             (loop,) = RecordingLoop.instances
             self.assertTrue(await wait_until(loop.started.is_set))
             self.assertIs(loop.database, database)
-            self.assertEqual(loop.options, {"interval_seconds": 60})
+            self.assertEqual(
+                loop.options,
+                {"project_gate": self.gate, "interval_seconds": 60},
+            )
             self.assertFalse(loop.cancelled)
 
         self.assertTrue(loop.stopped)  # asked to stop ...
@@ -120,7 +129,9 @@ class StartTest(LifespanTestCase):
         await self.run_lifespan(app)
 
         (loop,) = RecordingLoop.instances
-        self.assertEqual(loop.options, {"interval_seconds": 90})
+        self.assertEqual(
+            loop.options, {"project_gate": self.gate, "interval_seconds": 90}
+        )
 
     async def test_it_is_stopped_before_the_database_is_disposed(self):
         settings, database = configured()

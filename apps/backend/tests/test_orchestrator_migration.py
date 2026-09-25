@@ -136,6 +136,10 @@ class ModelsMetadataTest(unittest.TestCase):
             f"BETWEEN 1 AND {limits.MAX_NODES}", check_sql(DAGS)["node_count_in_range"]
         )
         # The database is the backstop: it accepts everything the service accepts.
+        self.assertIn(
+            f"BETWEEN 1 AND {limits.MAX_PLAN_BYTES}",
+            check_sql(DAGS)["plan_bytes_in_range"],
+        )
         self.assertGreaterEqual(limits.DB_MAX_JSON_BYTES, limits.MAX_RESULT_BYTES)
         self.assertGreaterEqual(limits.DB_MAX_JSON_BYTES, limits.MAX_NODE_INPUT_BYTES)
         title_length = Base.metadata.tables[NODES].columns["title"].type.length
@@ -154,6 +158,7 @@ class ModelsMetadataTest(unittest.TestCase):
         self.assertEqual(module.MAX_LADDER_LENGTH, limits.MAX_LADDER_LENGTH)
         self.assertEqual(module.MAX_APPROACH, MAX_APPROACH)
         self.assertEqual(module.MAX_GOAL_CHARS, limits.MAX_GOAL_CHARS)
+        self.assertEqual(module.MAX_PLAN_BYTES, limits.MAX_PLAN_BYTES)
         self.assertEqual(module.DB_MAX_JSON_BYTES, limits.DB_MAX_JSON_BYTES)
         self.assertEqual(module.KEY_PATTERN, limits.KEY_PATTERN)
         for name, enum_class in (

@@ -87,6 +87,9 @@ class RunOutcome(StrEnum):
     PAUSED = "paused"  # the task was paused: quiesced, entry completed
     TASK_ENDED = "task_ended"  # cancelled / failed / completed under the run
     SUPERSEDED = "superseded"  # a Retry / Restart replaced the run
+    # An unexpected error or state: the task was failed safely (or, when even that
+    # could not be written, the entry was left claimed for the next worker).
+    ERROR = "error"
 
 
 # -- what a role may hold ----------------------------------------------------------

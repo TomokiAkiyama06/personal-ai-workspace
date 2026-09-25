@@ -282,9 +282,18 @@ def _topological_order(nodes: list[PlanNode]) -> list[PlanNode]:
     return ordered
 
 
+def plan_bytes(nodes: Iterable[PlanNode]) -> int:
+    """The size in bytes of the compact UTF-8 JSON of ``{"nodes": [...]}``."""
+    return encoded_size({"nodes": [node.to_mapping() for node in nodes]})
+
+
 @dataclass(frozen=True, slots=True)
 class Plan:
-    """An acceptable plan; ``nodes`` are in topological order (see the module)."""
+    """An acceptable plan; ``nodes`` are in topological order (see the module).
+
+    ``encoded_bytes`` is its size in UTF-8 bytes (at most ``MAX_PLAN_BYTES``); the
+    store records it in ``agent_dags.plan_bytes``, where the database bounds it.
+    """
 
     nodes: tuple[PlanNode, ...]
 
@@ -317,11 +326,11 @@ class Plan:
             depth[node.key] = 1 + max((depth[d] for d in node.depends_on), default=0)
         if max(depth.values()) > MAX_DEPTH:
             _refuse(PlanReason.TOO_DEEP)
-        size = sum(
-            len(node.title) + len(node.goal) + encoded_size(node.input)
-            for node in ordered
-        )
-        if size > MAX_PLAN_BYTES:
+        # The size of the whole plan is what it weighs on the wire and in the
+        # database: the compact UTF-8 JSON of every field (keys, texts, inputs,
+        # capability names, repository ids), not a count of code points (a
+        # four-byte character is four bytes of the limit).
+        if plan_bytes(ordered) > MAX_PLAN_BYTES:
             _refuse(PlanReason.TOO_LARGE)
         if not any(node.required for node in ordered):
             _refuse(PlanReason.NO_REQUIRED_NODE)
@@ -340,6 +349,11 @@ class Plan:
 
     def to_mapping(self) -> dict[str, Any]:
         return {"nodes": [node.to_mapping() for node in self.nodes]}
+
+    @property
+    def encoded_bytes(self) -> int:
+        """The plan's size in bytes of compact UTF-8 JSON (see :func:`plan_bytes`)."""
+        return plan_bytes(self.nodes)
 
     @property
     def edges(self) -> tuple[tuple[str, str], ...]:

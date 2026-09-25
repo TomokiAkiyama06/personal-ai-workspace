@@ -258,6 +258,7 @@ class DagStore:
                         task_id=task_id,
                         attempt=attempt,
                         node_count=len(plan.nodes),
+                        plan_bytes=plan.encoded_bytes,
                     )
                 )
                 await session.flush()

@@ -50,6 +50,7 @@ from .orchestrator_support import (
     FakeRuntime,
     FakeTools,
     ManualClock,
+    gate_kwargs,
     make_plan,
     node,
 )
@@ -311,8 +312,8 @@ class OrchestratorArgumentTest(unittest.IsolatedAsyncioTestCase):
     def build(self, **overrides) -> Orchestrator:
         db = database()
         arguments = {
-            "tasks": TaskService(db),
-            "queue": TaskQueue(db),
+            "tasks": TaskService(db, **gate_kwargs(TaskService)),
+            "queue": TaskQueue(db, **gate_kwargs(TaskQueue)),
             "budget": BudgetTracker(db),
             "loops": LoopDetector(db),
             "store": DagStore(db),

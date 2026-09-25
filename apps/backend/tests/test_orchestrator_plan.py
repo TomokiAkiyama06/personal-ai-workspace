@@ -20,6 +20,7 @@ from paw_backend.orchestrator.limits import (
     MAX_GOAL_CHARS,
     MAX_NODE_INPUT_BYTES,
     MAX_NODES,
+    MAX_PLAN_BYTES,
     MAX_TITLE_CHARS,
 )
 from paw_backend.orchestrator.plan import NODE_FIELDS, Plan, PlanNode
@@ -423,6 +424,84 @@ class AcceptedPlansTest(unittest.TestCase):
             )
         )
         self.assertEqual(Plan.from_mapping(accepted.to_mapping()), accepted)
+
+
+def emoji_plan(padding: int) -> dict:
+    """Eight nodes whose goals are 3,990 four-byte characters, and a ninth whose goal
+    is ``padding`` ASCII characters: every goal is far below the goal limit in
+    CHARACTERS (and the whole plan is far below the plan limit counted in
+    characters), but the plan is about 128 KiB in BYTES."""
+    goals = [node(f"n{i}", goal="\U0001f600" * 3990) for i in range(8)]
+    return plan(*goals, node("pad", goal="a" * padding))
+
+
+class PlanBytesTest(unittest.TestCase):
+    """The size limit of a plan is measured in UTF-8 bytes, for every text field."""
+
+    def size_of(self, padding: int) -> int:
+        return Plan.from_mapping(emoji_plan(padding)).encoded_bytes
+
+    def test_the_size_of_a_plan_is_its_compact_utf8_json(self):
+        accepted = Plan.from_mapping(
+            plan(node("a", title="日本語", goal="ü" * 10, input={"k": "€"}))
+        )
+        import json
+
+        encoded = json.dumps(
+            accepted.to_mapping(),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        self.assertEqual(accepted.encoded_bytes, len(encoded))
+        self.assertGreater(len(encoded), len(encoded.decode("utf-8")))
+
+    def test_a_plan_of_multibyte_text_is_measured_in_bytes_at_the_limit(self):
+        padding = 100
+        base = self.size_of(padding)
+        # One padding character is one byte: the size at the limit is reachable
+        # exactly, and one byte more is one character more.
+        exact = padding + (MAX_PLAN_BYTES - base)
+        self.assertGreater(exact, 0)
+        self.assertLessEqual(exact, MAX_GOAL_CHARS)
+        self.assertEqual(self.size_of(exact), MAX_PLAN_BYTES)
+        with self.assertRaises(InvalidPlanError) as caught:
+            Plan.from_mapping(emoji_plan(exact + 1))
+        self.assertEqual(caught.exception.reason, R.TOO_LARGE)
+
+    def test_the_same_plan_would_pass_if_characters_were_counted(self):
+        data = emoji_plan(MAX_GOAL_CHARS)
+        characters = sum(len(n["title"]) + len(n["goal"]) for n in data["nodes"])
+        self.assertLess(characters, MAX_PLAN_BYTES // 3)  # "small" by code points
+        with self.assertRaises(InvalidPlanError) as caught:
+            Plan.from_mapping(data)
+        self.assertEqual(caught.exception.reason, R.TOO_LARGE)
+
+    def test_three_byte_text_in_titles_and_goals_counts_in_bytes(self):
+        # 32 nodes with a 100-character title and a 1,250-character goal, all
+        # three-byte characters: 43,200 characters, but about 130 KB.
+        nodes = [
+            node(f"n{i}", title="\u65e5" * 100, goal="\u672c" * 1250) for i in range(32)
+        ]
+        self.assertLess(32 * (100 + 1250), MAX_PLAN_BYTES // 2)
+        with self.assertRaises(InvalidPlanError) as caught:
+            Plan.from_mapping(plan(*nodes))
+        self.assertEqual(caught.exception.reason, R.TOO_LARGE)
+        # A little less text of the same kind is accepted.
+        fewer = [
+            node(f"n{i}", title="\u65e5" * 100, goal="\u672c" * 1000) for i in range(32)
+        ]
+        self.assertLessEqual(
+            Plan.from_mapping(plan(*fewer)).encoded_bytes, MAX_PLAN_BYTES
+        )
+
+    def test_a_node_input_is_limited_in_bytes_too(self):
+        # {"t": "あ..."} is 8 bytes of structure plus 3 bytes a character.
+        fits = {"t": "あ" * ((MAX_NODE_INPUT_BYTES - 8) // 3)}
+        PlanNode.from_mapping(node("a", input=fits))
+        over = {"t": "あ" * ((MAX_NODE_INPUT_BYTES - 8) // 3 + 1) + "a"}
+        with self.assertRaises(InvalidPlanError) as caught:
+            PlanNode.from_mapping(node("a", input=over))
+        self.assertEqual(caught.exception.reason, R.TOO_LARGE)
 
 
 class RandomGraphTest(unittest.TestCase):

@@ -60,6 +60,7 @@ from paw_backend.orchestrator.limits import (
     MIN_STOP_INTERVAL_SECONDS,
 )
 from paw_backend.orchestrator.validation import check_int, check_seconds, check_uuid
+from paw_backend.orchestrator.wiring import gate_arguments
 from paw_backend.projects.models import ProjectRow
 from paw_backend.projects.task_stop import ProjectTaskStopper, TaskStopResult
 from paw_backend.tasks import TaskService
@@ -285,6 +286,7 @@ class ProjectTaskStopLoop:
 def build_project_stop_loop(
     database: Database,
     *,
+    project_gate: object | None,
     interval_seconds: float = DEFAULT_STOP_INTERVAL_SECONDS,
     clock: Clock | None = None,
 ) -> ProjectTaskStopLoop:
@@ -293,12 +295,24 @@ def build_project_stop_loop(
     The task service carries the approval revocation listener (Decision 0006,
     section 9: a task that ends, here by Cancel, keeps no usable approval), so a
     task the stopper cancels loses its open approvals at once.
+
+    ``project_gate`` (no default: the caller says which gate it composes with) is the
+    Project state gate of the task lane (Issue #83, Decision 0020), given to the
+    ``TaskService`` and the ``TaskQueue`` explicitly: they require it once #83 is
+    merged (``orchestrator.wiring``). The stopper itself only cancels tasks and
+    entries, which the gate never blocks, but the services it drives are the
+    application's own and are built with the gate like every other.
     """
     approvals = ApprovalService(
         PostgresApprovalStore(database), PostgresAuditSink(database)
     )
-    tasks = TaskService(database, listeners=[approvals.revoke_on_task_end])
-    stopper = ProjectTaskStopper(database, tasks, TaskQueue(database))
+    tasks = TaskService(
+        database,
+        listeners=[approvals.revoke_on_task_end],
+        **gate_arguments(TaskService, project_gate),
+    )
+    queue = TaskQueue(database, **gate_arguments(TaskQueue, project_gate))
+    stopper = ProjectTaskStopper(database, tasks, queue)
     return ProjectTaskStopLoop(
         stopper,
         PendingDeletionLister(database),

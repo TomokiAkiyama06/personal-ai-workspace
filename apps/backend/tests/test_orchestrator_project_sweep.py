@@ -23,7 +23,12 @@ from paw_backend.projects.task_stop import TaskStopResult
 from paw_backend.tasks import TaskCommand, TaskState
 from paw_backend.tasks.queueing import TaskQueue
 
-from .orchestrator_support import ManualClock, PostgresOrchestratorTestCase
+from .orchestrator_support import (
+    ALWAYS_ACTIVE,
+    ManualClock,
+    PostgresOrchestratorTestCase,
+    gate_kwargs,
+)
 from .support import make_settings
 from .task_support import requires_postgres
 
@@ -387,7 +392,7 @@ class RealProjectSweepTest(PostgresOrchestratorTestCase):
     async def task_in(self, project_id, *, enqueue=True):
         task_id = await self.create_task(project_id=project_id)
         if enqueue:
-            await TaskQueue(self.database).enqueue(task_id)
+            await TaskQueue(self.database, **gate_kwargs(TaskQueue)).enqueue(task_id)
         return task_id
 
     async def state_of(self, task_id) -> str:
@@ -402,7 +407,9 @@ class RealProjectSweepTest(PostgresOrchestratorTestCase):
         safe = [await self.task_in(live), await self.task_in(archived)]
         await self.set_project_state(pending, "pending_deletion")
         await self.set_project_state(archived, "archived")
-        loop = build_project_stop_loop(self.new_database(), interval_seconds=60)
+        loop = build_project_stop_loop(
+            self.new_database(), project_gate=ALWAYS_ACTIVE, interval_seconds=60
+        )
 
         report = await loop.run_cycle()
 
@@ -422,7 +429,7 @@ class RealProjectSweepTest(PostgresOrchestratorTestCase):
     async def test_a_late_task_is_stopped_by_a_later_cycle(self):
         await self.owner_sql("TRUNCATE projects CASCADE")
         pending = await self.seed_project("pending_deletion")
-        loop = build_project_stop_loop(self.new_database())
+        loop = build_project_stop_loop(self.new_database(), project_gate=ALWAYS_ACTIVE)
         first = await loop.run_cycle()  # nothing to stop yet
         self.assertEqual((first.projects, first.stopped_tasks), (1, 0))
 
@@ -443,7 +450,7 @@ class RealProjectSweepTest(PostgresOrchestratorTestCase):
         task_id = await self.task_in(project)
         await self.set_project_state(project, "pending_deletion")
         await self.set_project_state(project, "archived")  # restored
-        loop = build_project_stop_loop(self.new_database())
+        loop = build_project_stop_loop(self.new_database(), project_gate=ALWAYS_ACTIVE)
 
         report = await loop.run_cycle()
 
@@ -456,7 +463,9 @@ class RealProjectSweepTest(PostgresOrchestratorTestCase):
         task_id = await self.task_in(project)
         await self.set_project_state(project, "pending_deletion")
         clock = ManualClock()
-        loop = build_project_stop_loop(self.new_database(), clock=clock)
+        loop = build_project_stop_loop(
+            self.new_database(), project_gate=ALWAYS_ACTIVE, clock=clock
+        )
         run = asyncio.create_task(loop.run())
         await clock.settle()
 
@@ -521,7 +530,7 @@ class RealProjectSweepTest(PostgresOrchestratorTestCase):
 
     async def test_the_loops_task_service_revokes_approvals_when_a_task_ends(self):
         # Wiring check: the task service of the loop carries the revocation listener.
-        loop = build_project_stop_loop(self.new_database())
+        loop = build_project_stop_loop(self.new_database(), project_gate=ALWAYS_ACTIVE)
         tasks = loop._stopper._tasks
         listeners = [getattr(listener, "__name__", "") for listener in tasks._listeners]
         self.assertEqual(listeners, ["revoke_on_task_end"])

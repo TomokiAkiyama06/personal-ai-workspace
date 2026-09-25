@@ -769,8 +769,8 @@ def update_attempts(assignments: str) -> str:
 
 
 INSERT_DAG = (
-    "INSERT INTO agent_dags (id, task_id, attempt, node_count)"
-    " SELECT gen_random_uuid(), task_id, {attempt}, {count}"
+    "INSERT INTO agent_dags (id, task_id, attempt, node_count, plan_bytes)"
+    " SELECT gen_random_uuid(), task_id, {attempt}, {count}, {size}"
     " FROM agent_dags WHERE id = :d"
 )
 
@@ -827,13 +827,21 @@ class DatabaseRulesTest(PostgresOrchestratorTestCase):
             ("two nodes at the same ordinal", insert_node(ordinal=0)),
             (
                 "a second DAG for the same attempt",
-                INSERT_DAG.format(attempt=1, count=1),
+                INSERT_DAG.format(attempt=1, count=1, size=1),
             ),
-            ("a DAG of no node", INSERT_DAG.format(attempt=9, count=0)),
+            ("a DAG of no node", INSERT_DAG.format(attempt=9, count=0, size=1)),
+            (
+                "a plan declared as zero bytes",
+                INSERT_DAG.format(attempt=9, count=1, size=0),
+            ),
+            (
+                "a plan declared one byte over the limit",
+                INSERT_DAG.format(attempt=9, count=1, size=131073),
+            ),
             (
                 "a DAG of an unknown task",
-                "INSERT INTO agent_dags (id, task_id, attempt, node_count)"
-                " VALUES (gen_random_uuid(), gen_random_uuid(), 1, 1)",
+                "INSERT INTO agent_dags (id, task_id, attempt, node_count, plan_bytes)"
+                " VALUES (gen_random_uuid(), gen_random_uuid(), 1, 1, 1)",
             ),
         ]
         for label, sql in cases:
@@ -841,6 +849,28 @@ class DatabaseRulesTest(PostgresOrchestratorTestCase):
                 await self.refused(sql, d=dag.id)
         # Nothing was changed by the refused statements.
         self.assertEqual(await self.store.get_by_id(dag.id), dag)
+
+    async def test_the_database_accepts_a_plan_of_exactly_the_limit(self):
+        dag = await self.taken_dag()
+        async with self.database.session() as session:
+            await session.execute(
+                text(INSERT_DAG.format(attempt=9, count=1, size=131072)), {"d": dag.id}
+            )
+            await session.commit()
+        self.assertEqual(
+            await self.scalar("SELECT plan_bytes FROM agent_dags WHERE attempt = 9"),
+            131072,
+        )
+
+    async def test_the_stored_plan_size_is_the_plans_encoded_size(self):
+        plan = diamond()
+        task_id = await self.create_task()
+
+        await self.store.create(task_id, 1, plan)
+
+        self.assertEqual(
+            await self.scalar("SELECT plan_bytes FROM agent_dags"), plan.encoded_bytes
+        )
 
     async def test_the_database_refuses_inconsistent_attempts(self):
         dag = await self.taken_dag()

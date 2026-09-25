@@ -43,7 +43,8 @@ Planner（Role `planner` の Runtime）は次の形の JSON Object を返す。B
 | 依存の鎖の長さ（Node 数） | 16 まで |
 | `key` | `[a-z][a-z0-9_-]{0,31}`（Plan の中で一意） |
 | `title` | 1〜100 文字（1 行）。`goal` は 1〜4,000 文字 |
-| 1 Node の `input` | JSON Object。16 KiB、入れ子 8 段まで。Plan 全体（`title` + `goal` + `input`）は 128 KiB まで |
+| 1 Node の `input` | JSON Object。16 KiB（UTF-8 の Byte）、入れ子 8 段まで |
+| Plan 全体 | Plan を Compact な UTF-8 の JSON にした大きさで 128 KiB まで。**Byte で数える**（`key`、`title`、`goal`、`input`、依存、Capability 名、Repository の ID を全て含む。Code Point の数ではないので、4 Byte 文字は 4 Byte）。`agent_dags.plan_bytes` に記録し、DB が範囲を CHECK する（行をまたぐ合計は CHECK で測れないため、Service が宣言し DB が上限を強制する） |
 | `required`（既定 `true`） | Task が成功するために必要な Node。全てが `false` の Plan は拒否 |
 | `capabilities` / `repositories`（任意） | Role の上限より狭い Capability / Working Set の一部。省略は「Role の上限」「Working Set 全体」 |
 
@@ -91,12 +92,16 @@ Node の結果は `NodeResult`（要件の「Subtask output例」）: `summary`�
 - 実行できる Node がなくなったとき、`required` な Node が全て成功していれば DAG は `succeeded`、そうでなければ `failed`。`required: false` の Node の失敗は Task を失敗にしない（それに依存する `required` な Node は `blocked` なので、その場合は失敗）。
 - DAG が `succeeded` なら Task を `evaluating` にする（`begin_evaluation`）。**`complete` は Evaluator の責務**で、Orchestrator は完了にしない（Evaluator と Review は別の層。AGENTS.md）。DAG が `failed` なら Task を `failed` にする。
 - Task の Retry（同じ試行のやり直し）は同じ DAG の失敗・Blocked の Node を開き直して続きから実行する。Restart は新しい試行で新しい DAG（古い DAG は履歴）。
+- **すでに `succeeded` の DAG は開き直さない。** DAG が成功して Task が `evaluating` になった後、Evaluator が Task を `failed` にして人が Retry したとき、Orchestrator は同じ DAG の結果をそのまま使い、Task を `evaluating` へ戻す（Node は再実行せず、Budget も使わない）。理由: 1 試行に 1 つの DAG で、結果は確定している。開き直すと、失敗した Node がないので何を再実行するかを決められず、成功済みの Node を全て再実行して Budget を使い、結果が変わり得る。Retry は「DAG の後の層（Evaluator / Review）の失敗のやり直し」になり、仕事そのものをやり直したいときは Restart（新しい試行、新しい DAG）である。同じ Run のまま DAG だけが閉じていた場合（DAG を閉じた後、Task の Command の前に Worker が死んだ）も、DAG の結果のとおりに Task を進める。
+- **Task の Command は、その Run に限って発行する。** `begin_evaluation` / `fail` / `wait` / Start は、Task を読み直し、Run が違えば型付きの Stale Run のエラーで何も書かず、同じなら読んだ Version を `expected_version` に付けて 1 つの Transaction で比較と遷移を行う。最後の確認の後に `fail` → Retry → Start された Task に、古い Run の Command が届かない。
+- **Run が終わるとき、`running` の Task に仕事が残らない状態を作らない。** 予期しない Error や状態は Task を固定の Reason で `failed` にし、それも書けないときは Queue の Entry を Claim されたまま残す（Lease の失効で次の Worker が引き継ぐ）。
 
 ### 7. Sub-Agent の予算
 
 **予算の分け方は「親 Task の予算を 1 つの共有の Pool として使う」**。Node ごとの予算は持たない。Node の消費は全て親 Task の `budget_usages` へ記録する（`NodeBudgetHandle.charge`。Tool 呼び出しは Broker の `BudgetProvider`（`TrackerBudgetProvider`）が `tool_calls` として記録する）。Node の起動ごとに `steps` を 1、再試行ごとに `retries` を 1 消費する。Runtime は Lease を持つ Worker の Timer が 1 つ数える。
 
 - 起動の前に `steps` の予定を確認し、超過なら新しい Node を起動しない（Decision 0007 の規則で `WAIT_FOR_USER` か `FAIL`）。
+- **Budget は Loop が起きるたび（Node の終了ごと、Poll ごと）に全て確認する。** `runtime_seconds` は Tracker の中で増えて Node は報告しないため、これがなければ上限を超えて走り続ける Node（終わらない Node を含む）を止められない。上限を超えたら、終わったばかりの Node の結果を先に保存し、走っている Node を Cancel して（試行は `interrupted`、Node は `ready`）、新しい Node を起動せず、Decision 0007 の規則で Task を止める。
 - Node が報告した消費で Budget が尽きたら、その Node に `NodeStopped` を投げ、同じ Run の他の Node の Tool 呼び出しと報告も拒否する。実行中の Node が使った分は超過として記録される（`check` が予約でないため、超えるのは実行中の呼び出しの分まで）。
 
 ### 8. DAG の永続化と Fencing
@@ -169,3 +174,4 @@ Decision 0004 は、この 2 つを「子 Agent の Grant を親の部分集合�
 7. **数値の暫定値**（1、3、4、5、10 節: Node 32、依存 8、結果 32 KiB、試行 6、Back-off 1〜60 秒、Node の Timeout 30 分、並列 4、Sweep の周期 60 秒など）を暫定値として承認するか。
 8. **Cancel の扱い**（8 節: Graceful と Immediate を Node では区別せず即停止）でよいか。
 9. **Pause / `waiting` の後の再開は、呼び出し側（API 層）が Queue へ戻す**（8 節）ことを、PAW-022 以降の受け入れ条件に加えてよいか。
+10. **`succeeded` の DAG を Retry したときは、DAG を開き直さず `evaluating` へ戻す**（6 節）でよいか。推奨: はい（仕事をやり直すのは Restart）。代わりに、Retry が成功済みの Node も含めて DAG を開き直す案もあるが、何を再実行するかの規則と Budget の消費が要件にない。

@@ -101,9 +101,11 @@ from paw_backend.tasks import (
     Actor,
     IllegalTransitionError,
     LogLevel,
+    StaleAttemptError,
     StaleRunError,
     TaskCommand,
     TaskConflictError,
+    TaskError,
     TaskNotFoundError,
     TaskRun,
     TaskService,
@@ -141,6 +143,10 @@ REASON_PLAN_FAILED = "No acceptable plan"
 REASON_NO_BUDGET = "The task has no budget preset"
 REASON_RETRIES = "The retry budget is used up"
 REASON_WAIT = "The budget or a repeated failure needs a decision"
+REASON_INTERNAL = "The orchestrator stopped on an unexpected error"
+# A command fenced by ``expected_version`` is decided again when another change of
+# the task commits between the read and the write; this many times, then it fails.
+COMMAND_ATTEMPTS = 5
 # The wait for cleaning up after a cancellation (shutdown).
 SHUTDOWN_GRACE_SECONDS = 5.0
 HEARTBEAT_FAILURES_TO_LOSE = 3
@@ -457,27 +463,27 @@ class Orchestrator:
         guard = RunGuard(task_id, run_id, self._activity)
         run = _Run(snapshot, run_id, entry, worker_id, guard)
 
-        try:
-            verdict = await self._budget.check(task_id)
-        except BudgetNotConfiguredError:
-            await self._end_task(
-                run, TaskCommand.FAIL, Actor.policy(), REASON_NO_BUDGET
-            )
-            await self._complete_entry(run)
-            return RunReport(RunOutcome.BUDGET_NOT_CONFIGURED, task_id)
-        if verdict.status is BudgetStatus.EXCEEDED:
-            action = decide_next_action(
-                verdict, LoopVerdict.CONTINUE, can_escalate=False
-            ).action
-            report = await self._end_after_stop(
-                run, self._stop_for_budget(action), None
-            )
-            await self._complete_entry(run)
-            return report
-
+        # From here the task runs, and it must never be left running without work:
+        # every way out either moves the task on (evaluating, failed, waiting,
+        # paused: see ``_drive`` and ``_fail_safely``) or leaves the queue entry
+        # claimed, so that its lease expires and the next worker takes the run over.
         heartbeat: asyncio.Task[None] | None = None
         complete_entry = True
         try:
+            try:
+                verdict = await self._budget.check(task_id)
+            except BudgetNotConfiguredError:
+                await self._end_task(
+                    run, TaskCommand.FAIL, Actor.policy(), REASON_NO_BUDGET
+                )
+                return RunReport(RunOutcome.BUDGET_NOT_CONFIGURED, task_id)
+            if verdict.status is BudgetStatus.EXCEEDED:
+                action = decide_next_action(
+                    verdict, LoopVerdict.CONTINUE, can_escalate=False
+                ).action
+                return await self._end_after_stop(
+                    run, self._stop_for_budget(action), None
+                )
             run.generation = await self._budget.start_runtime(task_id)
             heartbeat = asyncio.create_task(self._heartbeats(run))
             report = await self._drive(run)
@@ -492,6 +498,13 @@ class Orchestrator:
             return RunReport(RunOutcome.LEASE_LOST, task_id)
         except StaleRunError:
             return RunReport(RunOutcome.SUPERSEDED, task_id)
+        except LeaseLostError:
+            complete_entry = False
+            raise
+        except Exception as error:
+            logger.error("The orchestrator run failed (%s)", error_class_of(error))
+            complete_entry = await self._fail_safely(run)
+            return RunReport(RunOutcome.ERROR, task_id)
         finally:
             if heartbeat is not None:
                 heartbeat.cancel()
@@ -500,20 +513,62 @@ class Orchestrator:
             if complete_entry and not run.lost.is_set():
                 await self._complete_entry(run)
 
+    async def _fail_safely(self, run: _Run) -> bool:
+        """After an unexpected error: fail the task (for this run only), so that it
+        is not left ``running`` with no work behind it; a human can retry it.
+
+        ``True``: the task no longer runs (failed now, or it had moved on), and the
+        entry may be completed. ``False``: the failure could not be written (the
+        database is unreachable, say): the entry must stay claimed, its lease will
+        expire and the next worker takes the run over.
+        """
+        try:
+            await self._end_task(run, TaskCommand.FAIL, Actor.system(), REASON_INTERNAL)
+        except StaleRunError:
+            return True  # a newer run owns the task: nothing of ours is left to end
+        except Exception as error:
+            logger.error(
+                "Failing the task after an error failed (%s); its lease is left to "
+                "expire",
+                error_class_of(error),
+            )
+            return False
+        return True
+
     async def _begin_task(
         self, snapshot: TaskSnapshot, entry: QueueEntry, worker_id: str
     ) -> TaskRun | None:
         """Start the task (queued) or take over a run that lost its worker
-        (running). ``None``: the task is in no state that can run; the entry is
-        completed (a paused or waiting task is queued again by whoever unblocks it)."""
+        (running). ``None``: the task is in no state that can run, or was replaced
+        while it was looked at; the entry is completed (a paused or waiting task is
+        queued again by whoever unblocks it, a replaced run by whoever retried or
+        restarted it).
+
+        Start is fenced by the version of the snapshot: it is applied only to the
+        task as it was seen. A queued task can change only by Start, Fail or
+        Cancel, all of which change its state, so a conflict always means that the
+        run this entry was claimed for is gone (nothing is started under it).
+        """
         task_id = snapshot.id
         if snapshot.state is TaskState.QUEUED:
             try:
                 event = await self._tasks.execute(
-                    task_id, TaskCommand.START, actor=Actor.system()
+                    task_id,
+                    TaskCommand.START,
+                    actor=Actor.system(),
+                    expected_version=snapshot.version,
                 )
-            except (IllegalTransitionError, TaskConflictError):
+            except (IllegalTransitionError, TaskConflictError, TaskNotFoundError):
                 await self._complete_quietly(entry, worker_id)
+                return None
+            except TaskError as error:
+                # Refused for a reason that may pass (a project that is not Active,
+                # Issue #83): the entry goes back to the queue, not away.
+                logger.warning(
+                    "Starting a task was refused (%s)", error_class_of(error)
+                )
+                with contextlib.suppress(LeaseLostError):
+                    await self._queue.release(entry.id, worker_id, entry.claim_count)
                 return None
             return event.run
         if snapshot.state is TaskState.RUNNING:
@@ -587,6 +642,16 @@ class Orchestrator:
             dag = planned
         dag = await self._store.acquire(dag.id, run.worker_id, run.run)
         run.epoch = dag.epoch
+        if dag.state is not DagState.ACTIVE:
+            # A DAG that already ended is not run again (one DAG per task attempt;
+            # Decision 0021, section 6). The task is handed on as the DAG's outcome
+            # says: back to evaluation after a retry of a failed evaluation, or
+            # failed for a crash between closing the DAG and failing the task.
+            # (A cancelled DAG cannot be taken over: ``acquire`` refused it.)
+            await self._log(
+                run, LogLevel.INFO, f"The DAG had already {dag.state.value}"
+            )
+            return await self._finish_dag(run, dag, None)
         running: dict[str, asyncio.Task[_Finished]] = {}
         numbers: dict[str, int] = {}
         stop: _Stop | None = None
@@ -615,6 +680,25 @@ class Orchestrator:
                 elif stop is not None and stop.kind is _StopKind.PAUSE:
                     stop = None  # resumed while the nodes were finishing
 
+                # The whole budget is looked at every time the loop wakes (a node
+                # ended, or the poll fired): the runtime accrues in the tracker and
+                # no node reports it, so nothing else would stop a node that runs
+                # past its limit, or one that never ends.
+                exhausted = await self._exhausted_budget(run)
+                if exhausted is not None:
+                    finished_now = {k for k, task in running.items() if task.done()}
+                    dag, extra = await self._process_done(
+                        run, dag, running, numbers, finished_now
+                    )
+                    stop = self._sooner(stop, extra)
+                    await self._cancel_all(running)
+                    numbers.clear()
+                    # The nodes that were still running are ready again, their
+                    # attempts interrupted (the next run takes them up).
+                    dag = await self._store.interrupt(dag.id, run.epoch)
+                    stop = self._sooner(stop, exhausted)
+                    break
+
                 if stop is None:
                     stop = await self._dispatch(run, dag, running, numbers)
                     dag = await self._store.get_by_id(dag.id)
@@ -629,13 +713,8 @@ class Orchestrator:
                     continue
 
                 done = await self._wait_for(run, running, lost_waiter)
-                for key in sorted(done, key=lambda k: dag.node(k).ordinal):
-                    task = running.pop(key)
-                    finished = self._result_of(task)
-                    dag, extra = await self._settle(
-                        run, dag, dag.node(key), numbers.pop(key), finished
-                    )
-                    stop = stop or extra
+                dag, extra = await self._process_done(run, dag, running, numbers, done)
+                stop = stop or extra
         finally:
             lost_waiter.cancel()
             await self._cancel_all(running)
@@ -643,13 +722,57 @@ class Orchestrator:
 
         return await self._finish_dag(run, dag, stop)
 
+    async def _process_done(
+        self,
+        run: _Run,
+        dag: DagRecord,
+        running: dict[str, asyncio.Task[_Finished]],
+        numbers: dict[str, int],
+        done: set[str],
+    ) -> tuple[DagRecord, _Stop | None]:
+        """Write the outcomes of the nodes that ended, in node order."""
+        stop: _Stop | None = None
+        for key in sorted(done, key=lambda k: dag.node(k).ordinal):
+            task = running.pop(key)
+            finished = self._result_of(task)
+            dag, extra = await self._settle(
+                run, dag, dag.node(key), numbers.pop(key), finished
+            )
+            stop = stop or extra
+        return dag, stop
+
+    async def _exhausted_budget(self, run: _Run) -> _Stop | None:
+        """What Decision 0007 does with the task's budget as it is now: ``None``
+        while every limit holds; otherwise the stop (``retries``: the task fails,
+        anything else: it waits for a human). The runtime of a run in progress is
+        counted (the tracker adds what has elapsed)."""
+        verdict = await self._budget.check(run.task.id)
+        if verdict.status is not BudgetStatus.EXCEEDED:
+            return None
+        action = decide_next_action(
+            verdict, LoopVerdict.CONTINUE, can_escalate=False
+        ).action
+        return self._stop_for_budget(action)
+
+    @staticmethod
+    def _sooner(current: _Stop | None, new: _Stop | None) -> _Stop | None:
+        """The stop that wins when two apply: failing beats waiting beats pausing
+        (a used-up retry budget must not be hidden by a pause or a wait)."""
+        order = {_StopKind.FAIL: 0, _StopKind.WAIT: 1, _StopKind.PAUSE: 2}
+        candidates = [stop for stop in (current, new) if stop is not None]
+        return min(candidates, key=lambda stop: order[stop.kind], default=None)
+
     async def _finish_dag(
         self, run: _Run, dag: DagRecord, stop: _Stop | None
     ) -> RunReport:
         task_id = run.task.id
         if stop is not None:
             return await self._end_after_stop(run, stop, dag)
-        final = await self._store.finalize(dag.id, run.epoch)
+        final = (
+            await self._store.finalize(dag.id, run.epoch)
+            if dag.state is DagState.ACTIVE
+            else dag
+        )
         if final.state is DagState.SUCCEEDED:
             ended = await self._end_task(
                 run, TaskCommand.BEGIN_EVALUATION, Actor.system(), REASON_DAG_SUCCEEDED
@@ -705,19 +828,45 @@ class Orchestrator:
         reason: str,
         wait_reason: WaitReason | None = None,
     ) -> bool:
-        """Issue a task command; ``False`` when the task no longer accepts it (it
-        was cancelled, retried, ... meanwhile)."""
-        try:
-            await self._tasks.execute(
-                run.task.id,
-                command,
-                actor=actor,
-                reason=reason,
-                wait_reason=wait_reason,
-            )
-        except (IllegalTransitionError, TaskConflictError):
-            return False
-        return True
+        """Issue a task command **for this run only**.
+
+        The task is read afresh and the command is applied with the version that
+        was read (``expected_version``), so the comparison and the transition are one
+        transaction: a task that was failed, retried and started again meanwhile has
+        a newer run, and the command of the old run is refused with a typed
+        ``StaleAttemptError`` / ``StaleRunError`` (nothing is written; the caller
+        stops). ``False`` when the task no longer accepts the command (it was
+        cancelled, completed, ...). A change of the task that commits between the
+        read and the write and leaves the run alone (a Pause and a Resume, say) makes
+        the command conflict; it is then decided again from a new read, up to
+        ``COMMAND_ATTEMPTS`` times.
+        """
+        for _ in range(COMMAND_ATTEMPTS):
+            try:
+                snapshot = await self._tasks.restore(run.task.id, log_limit=0)
+            except TaskNotFoundError:
+                return False
+            if snapshot.run != run.run:
+                raise (
+                    StaleAttemptError()
+                    if snapshot.run.attempt != run.run.attempt
+                    else StaleRunError()
+                )
+            try:
+                await self._tasks.execute(
+                    run.task.id,
+                    command,
+                    actor=actor,
+                    reason=reason,
+                    wait_reason=wait_reason,
+                    expected_version=snapshot.version,
+                )
+            except IllegalTransitionError:
+                return False
+            except TaskConflictError:
+                continue
+            return True
+        raise TaskConflictError()
 
     async def _watch(self, run: _Run) -> _Watch:
         """What the task is doing now, judged from the database (and the guard)."""

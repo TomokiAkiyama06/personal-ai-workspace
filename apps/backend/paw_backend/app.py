@@ -23,6 +23,7 @@ from paw_backend.middleware import (
     SecurityHeadersMiddleware,
 )
 from paw_backend.orchestrator.project_sweep import build_project_stop_loop
+from paw_backend.orchestrator.wiring import production_project_gate
 from paw_backend.research.scratch import ScratchJanitor, ScratchStore
 
 logger = logging.getLogger(__name__)
@@ -74,8 +75,12 @@ def create_app(
             # Tasks of a project whose deletion began are stopped on a schedule,
             # also those created after the deletion request was processed (PAW-034).
             if database.configured and settings.project_task_stop_interval_seconds > 0:
+                # The Project state gate is given explicitly (Issue #83, Decision
+                # 0020: the task lane requires it): the loop's task service and
+                # queue are built with it, never without.
                 stop_loop = build_project_stop_loop(
                     database,
+                    project_gate=production_project_gate(),
                     interval_seconds=settings.project_task_stop_interval_seconds,
                 )
                 background.add(asyncio.create_task(stop_loop.run()))

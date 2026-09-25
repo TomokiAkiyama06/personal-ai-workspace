@@ -312,6 +312,7 @@ class AppRolePrivilegesTest(AsAppRole, PostgresOrchestratorTestCase):
             "UPDATE agent_dags SET attempt = 9",
             "UPDATE agent_dags SET id = gen_random_uuid()",
             "UPDATE agent_dags SET node_count = 1",
+            "UPDATE agent_dags SET plan_bytes = 1",
             "UPDATE agent_dags SET created_at = now()",
             "DELETE FROM agent_dags",
             "TRUNCATE agent_dags CASCADE",
