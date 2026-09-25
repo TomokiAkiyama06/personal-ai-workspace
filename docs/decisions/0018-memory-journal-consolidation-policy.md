@@ -4,7 +4,7 @@
 - Date: 2026-09-25
 - Scope: PAW-041（Immediate Journal / Background Consolidation。Migration `0041`、`paw_backend/memory/journal/`）と、Journal・Consolidation Queue を使う以降の Issue（PAW-042 Conflict / Versioning、PAW-043 Retrieval、PAW-044 Inferred Preference Confirmation Flow、PAW-045 Markdown Projection）
 - Supersedes: なし
-- Approval: 2026-09-26、Humanが作業Session内で、判断メモの各点に個別に回答し、残りは「推奨どおり」と回答して承認（末尾の「承認時の決定」）
+- Approval: 2026-09-26、Humanが作業Session内の質問Toolで、この Decision を「推奨どおり」として承認（末尾の「承認時の決定」）
 
 ## 背景
 
@@ -151,7 +151,7 @@
 
 ## 承認時の決定（2026-09-26）
 
-Human は、作業 Session の中で、判断メモの各点に個別に回答し、残りは「推奨どおり」と回答した。**8 点すべてが推奨どおりで、設計の変更はない。**
+Human は、作業 Session の質問 Tool で、この Decision を「推奨どおり」として承認した（8 点を一括で。個別の回答ではない）。**8 点すべてが推奨どおりで、設計の変更はない。**
 
 1. **Worker の `confirmed` は `observed` に下げる。** Confirmed にするのは User の確認だけ（元の主張は `attributes.worker_state` に残す）。将来、User が明示的に保存を操作した Message に限って `confirmed` を許す拡張は、別の Decision で扱う。
 2. **すべての Candidate を `user` Scope（会話の Owner だけが読める）に置く。** Worker の `project` / `repo` は推奨として `attributes.recommended_scope` に残し、範囲を広げるのは確認 Flow（PAW-044）が新しい Version で行う。`shared` は書かない。
