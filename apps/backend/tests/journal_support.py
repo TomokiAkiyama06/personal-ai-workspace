@@ -262,6 +262,51 @@ class AsyncPostgresJournalTestCase(unittest.IsolatedAsyncioTestCase):
                 )
         return memory_id
 
+    def widen_key_memory(
+        self,
+        memory_id: UUID,
+        *,
+        confirmation: str = "confirmed",
+        scope: str = "project",
+    ) -> UUID:
+        """The user widened the memory: a new, wider ACTIVE version (what PAW-044's
+        confirmation flow makes) after the private one, which is superseded. Returns
+        the project / repo id the widened version is visible to."""
+        target = uuid4()
+        column = {"project": "project_id", "repo": "repo_id"}[scope]
+        with self.engine.begin() as connection:
+            row = connection.execute(
+                text(
+                    "SELECT id, version_number, title, content FROM memory_versions"
+                    " WHERE memory_id = :m ORDER BY version_number DESC LIMIT 1"
+                ),
+                {"m": memory_id},
+            ).one()
+            connection.execute(
+                text("UPDATE memory_versions SET status = 'superseded' WHERE id = :i"),
+                {"i": row.id},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO memory_versions (memory_id, version_number, scope,"
+                    f" {column}, memory_type, title, content, status,"
+                    " confirmation_state, freshness_policy, actor_type, actor_user_id)"
+                    " VALUES (:m, :n, :scope, :t, 'preference', :title, :content,"
+                    " 'active', :c, 'permanent', 'user', :u)"
+                ),
+                {
+                    "m": memory_id,
+                    "n": row.version_number + 1,
+                    "scope": scope,
+                    "t": target,
+                    "title": row.title,
+                    "content": row.content,
+                    "c": confirmation,
+                    "u": USER_ID,
+                },
+            )
+        return target
+
     def entry_row(self, entry_id: UUID) -> dict[str, Any]:
         (row,) = self.rows(
             "SELECT * FROM memory_journal_entries WHERE id = :i", i=entry_id

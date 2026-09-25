@@ -13,7 +13,12 @@ tables of the Memory schema (PAW-040) and nothing else:
   conversation under a row lock). Nothing the worker returned names an owner, and
   every candidate is written to the ``user`` scope of that owner, private to them.
   ``project`` / ``repo`` are kept only as ``attributes.recommended_scope``.
-* A memory is found through ``memory_consolidation_keys`` (owner, key). The keys a
+* A memory is found through ``memory_consolidation_keys`` (owner, key), and read
+  only if one of its versions is this owner's private one; its LATEST version may be
+  a wider one the user made (a widened memory: no owner column), which the rules
+  never let a worker change (``held_widened``). The items of one output are applied
+  in the order ``rules.processing_order`` gives (referenced keys first), not the
+  order they were listed in. The keys a
   transaction touches are locked with transaction-level advisory locks, taken in
   the order of their hash, so two consolidations of one key are serialised and two
   that need the same keys cannot deadlock. The memory rows themselves are guarded
@@ -57,6 +62,7 @@ from paw_backend.memory.journal.rules import (
     CurrentMemory,
     OrderKey,
     plan_item,
+    processing_order,
     stored_state,
     supersede_target,
 )
@@ -92,7 +98,9 @@ _LOCK_ORDER = text(
 ).bindparams(bindparam("keys", type_=ARRAY(sqltypes.Text())))
 _LOCK = text("SELECT pg_advisory_xact_lock(:lock_id)")
 
-HELD_RESULTS = frozenset({ItemResult.HELD_CONFIRMED, ItemResult.HELD_HIGH_RISK})
+HELD_RESULTS = frozenset(
+    {ItemResult.HELD_CONFIRMED, ItemResult.HELD_HIGH_RISK, ItemResult.HELD_WIDENED}
+)
 
 
 class ApplyConflict(Exception):  # noqa: N818 - an internal signal, not a public error
@@ -233,9 +241,31 @@ async def _load_registry(
 async def _load_latest(
     session: AsyncSession, owner: UUID, memory_ids: set[UUID]
 ) -> dict[UUID, _Version]:
-    """The latest version of each memory, if it is one of this owner's private ones."""
+    """The latest version of each memory that belongs to this owner.
+
+    A memory belongs to the owner when one of its versions is the owner's private
+    (``user`` scope) one: the consolidator writes version 1 that way and a version is
+    never rewritten, so that version stays. The LATEST version may be a wider one
+    (the user widened the memory to a project or a repository through the
+    confirmation flow, which adds a version and leaves the private ones as they
+    were); it has no owner column, so it is found through the memory, and reported
+    as ``widened`` so that the rules never let a worker change it. A memory none of
+    whose versions is the owner's private one (a registry row pointing at somebody
+    else's memory) is not read at all.
+    """
     if not memory_ids:
         return {}
+    private = _VERSION.alias("private")
+    belongs_to_owner = (
+        select(private.c.id)
+        .where(
+            private.c.memory_id == _VERSION.c.memory_id,
+            # The scope and owner rule of the Memory schema (memory.acl).
+            private.c.scope == MemoryScope.USER.value,
+            private.c.owner_user_id == owner,
+        )
+        .exists()
+    )
     rows = await session.execute(
         select(
             _VERSION.c.id,
@@ -244,14 +274,10 @@ async def _load_latest(
             _VERSION.c.status,
             _VERSION.c.confirmation_state,
             _VERSION.c.content,
+            _VERSION.c.scope,
+            _VERSION.c.owner_user_id,
         )
-        .where(
-            _VERSION.c.memory_id.in_(memory_ids),
-            # The scope and owner rule of the Memory schema (memory.acl): only the
-            # owner's own private versions are read or replaced here.
-            _VERSION.c.scope == MemoryScope.USER.value,
-            _VERSION.c.owner_user_id == owner,
-        )
+        .where(_VERSION.c.memory_id.in_(memory_ids), belongs_to_owner)
         .distinct(_VERSION.c.memory_id)
         .order_by(_VERSION.c.memory_id, _VERSION.c.version_number.desc())
     )
@@ -263,6 +289,9 @@ async def _load_latest(
                 MemoryStatus(row.status),
                 ConfirmationState(row.confirmation_state),
                 row.content,
+                widened=not (
+                    row.scope == MemoryScope.USER.value and row.owner_user_id == owner
+                ),
             ),
         )
         for row in rows
@@ -346,13 +375,16 @@ async def apply_items(
         session, owner, {registered.memory_id for registered in registry.values()}
     )
 
-    outcomes: list[ItemOutcome] = []
+    outcomes: dict[int, ItemOutcome] = {}
     seen: set[str] = set()
     for index, item in enumerate(items):
-        if item.key in seen:
-            outcomes.append(ItemOutcome(index, item, ItemResult.DUPLICATE_KEY))
-            continue
+        if item.key in seen:  # the first occurrence of a key wins
+            outcomes[index] = ItemOutcome(index, item, ItemResult.DUPLICATE_KEY)
         seen.add(item.key)
+    # What an output does must not depend on the order its items are listed in:
+    # the memories an item refers to (supersedes, conflicts_with) are applied first.
+    for index in processing_order(items):
+        item = items[index]
         registered = registry.get(item.key)
         current = latest.get(registered.memory_id) if registered else None
         target_registered = (
@@ -377,7 +409,7 @@ async def apply_items(
             supersedes_target=target.summary if target else None,
         )
         outcome = ItemOutcome(index, item, result)
-        outcomes.append(outcome)
+        outcomes[index] = outcome
 
         if result is ItemResult.DUPLICATE:
             assert registered is not None  # a duplicate needs a current version
@@ -397,7 +429,7 @@ async def apply_items(
                 registry,
                 latest,
             )
-    return outcomes
+    return [outcomes[index] for index in sorted(outcomes)]
 
 
 async def _advance(

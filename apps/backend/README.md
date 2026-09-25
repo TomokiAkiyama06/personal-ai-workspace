@@ -1577,6 +1577,7 @@ User / Project の ID は、他の Memory Table と同じく素の UUID です�
 | `state` が `confirmed` | **`observed`**（Confirmed は User の確認だけ。元の主張は `attributes.worker_state`） |
 | key または内容が高リスクの領域（Merge、Delete、公開、ACL・Role・権限、Credential・Secret、外部送信） | Memory にせず、Outcome に候補を保存して保留（`held_high_risk`）。語彙は暫定の一覧で、補助の網。どの状態の Memory も権限や実行を与えない |
 | 既存の **Confirmed** の Memory と内容が違う | 書かない（`held_confirmed`）。同じ内容なら重複（`duplicate`） |
+| User が**範囲を広げた** Memory（`project` / `repo` の新しい Version。確認 Flow が作る） | 書かない・退役させない（`held_widened`。同じ内容なら `duplicate`）。Worker は、User が決めた範囲を変えない。key で Memory を探すときは、Owner の `user` Scope の Version を 1 つ持つ Memory を、最新の Version（広げた Version）まで含めて読む（広げた Version には Owner の列がないため。他人の Memory を指す Registry の行は、何も読まずに失敗する） |
 | User が却下・無効化した Memory | 書かない（`blocked_by_user`） |
 | 同じ key の既存の弱い Memory | 新しい Version（`active`）、前の Version は `superseded`、`supersedes` の関係。`supersedes` が別の key なら、その Memory も（Confirmed でなければ）同様に置き換える。`conflicts_with` は関係を足すだけ |
 | 古い Turn の結果 | 書かない（`stale`）。下の「順序」 |
@@ -1585,6 +1586,7 @@ User / Project の ID は、他の Memory Table と同じく素の UUID です�
 Memory の Query の ACL（`readable_memory_versions`）は、他の User にも、同じ Project の Member にも、この Memory を見せません（`tests/test_journal_consolidator.py`）。
 
 - **順序（古い Turn が新しい Memory を上書きしない）。** Claim の順は優先度で、適用時に Event の順で守ります。Memory の現在の Version を作った Entry の順序の印を `memory_consolidation_keys` に持ち、Candidate は**それより新しい**ときだけ適用します（同じ会話は `event_sequence`、会話が違えば記録時刻）。古い結果は `stale` として Outcome に残り、Memory に書きません。`supersedes` で別の key の Memory を退役させるときは、**その key の順序の印も同じ Transaction で今回の Entry へ進めます**（退役より古い Observation が後から終わっても、退役した Memory は戻りません。退役より**新しい** Observation だけが戻せます）。逆に、対象の key を、今回の Entry より新しい Turn がすでに更新していれば、古い Turn の `supersedes` はその Memory を退役させません（`ide` 自体は書きます）。key ごとの Advisory Lock（Hash 順に取る）が同じ key の適用を直列にし、`(memory_id, version_number)` の Unique と `UPDATE ... WHERE status = 'active'` の行数が、手動編集など Lock を取らない書き込みとの Lost Update を失敗にします（Transaction は戻り、Job は新しい状態で再試行）。
+- **出力の中の順序に依存しません。** 1 つの出力の項目は、参照される Memory を先に適用します（`supersedes` で退役させる key、`conflicts_with` の key。`rules.processing_order`）。`y`（`x` を退役させる）が `x` より先に並んでいても、`x` が先に書かれてから `y` が退役させます。循環（`a` が `b` を、`b` が `a` を退役させる）は、並んだ順に適用し、退役で進めた順序の印を、次の項目が見ます。同じ key の 2 番目以降は `duplicate_key`、同じ key を退役させる項目が 2 つあれば、先に並んだ方が退役させます。
 - **適用は 1 Transaction です**（Lease の確認、Candidate、Entry の `consolidated`、Job の `completed`）。Lease の確認は Job の Row Lock の後なので、Lease を失った Worker の結果は捨てられます。失敗した書き込みは全部戻ります（途中まで書いた出力は残りません）。
 - **GPU が使えないとき。** Worker の `WorkerUnavailableError` は Job を遅延つきで戻すだけで、Entry は `pending`、Raw は保存済みです。GPU が復帰して遅延が過ぎれば、Event の順（同じ優先度では古い Entry から）に再開します（`tests/test_journal_gpu_unavailable.py`）。
 - **Privacy。** Log、エラー、`repr`、Audit に、会話の本文・key・内容を出しません（Job の ID と閉じた Code だけ。Worker の例外の文言は読みません）。`PendingObservation` と `WorkerMemory` は本文を `repr` から外しています。Outcome（保留した Candidate の本文を含む）は Owner の行にあり、Conversation と一緒に消え、Admin にも見せません。

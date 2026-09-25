@@ -23,6 +23,7 @@ from paw_backend.memory.journal.rules import (
     is_high_risk,
     is_newer,
     plan_item,
+    processing_order,
     stored_state,
     supersede_target,
 )
@@ -54,8 +55,9 @@ def current(
     content="Use spaces.",
     status=MemoryStatus.ACTIVE,
     state=ConfirmationState.INFERRED,
+    widened=False,
 ) -> CurrentMemory:
-    return CurrentMemory(status, state, content)
+    return CurrentMemory(status, state, content, widened=widened)
 
 
 class BackoffTest(unittest.TestCase):
@@ -137,6 +139,74 @@ class OrderTest(unittest.TestCase):
         b = order(3, conversation=CONVERSATION_B, seconds=7)
         self.assertNotEqual(is_newer(a, b), is_newer(b, a))  # exactly one is newer
         self.assertTrue(is_newer(b, a))  # the larger id
+
+
+class ProcessingOrderTest(unittest.TestCase):
+    """The order the items of one output are applied in: referenced keys first."""
+
+    def order_of(self, *items: WorkerMemory) -> list[int]:
+        return processing_order(items)
+
+    def test_items_that_refer_to_nothing_keep_their_order(self):
+        items = [worker_memory(key=k) for k in ("a", "b", "c")]
+        self.assertEqual(self.order_of(*items), [0, 1, 2])
+
+    def test_a_superseding_item_listed_first_is_applied_after_the_key_it_retires(self):
+        y = worker_memory(key="y", supersedes="x")
+        x = worker_memory(key="x")
+        self.assertEqual(self.order_of(y, x), [1, 0])
+        self.assertEqual(self.order_of(x, y), [0, 1])  # already in order
+
+    def test_the_order_is_the_same_whichever_way_the_output_lists_them(self):
+        a = worker_memory(key="a", supersedes="b")
+        b = worker_memory(key="b", supersedes="c")
+        c = worker_memory(key="c")
+        keys = ["a", "b", "c"]
+        for permutation in (
+            (a, b, c),
+            (c, b, a),
+            (b, a, c),
+            (b, c, a),
+            (c, a, b),
+            (a, c, b),
+        ):
+            listed = [item.key for item in permutation]
+            applied = [listed[i] for i in self.order_of(*permutation)]
+            with self.subTest(listed=listed):
+                self.assertEqual(applied, ["c", "b", "a"])
+        self.assertEqual(sorted(keys), keys)
+
+    def test_a_conflict_refers_to_its_target_too(self):
+        one = worker_memory(key="one", conflicts_with=("two",))
+        two = worker_memory(key="two")
+        self.assertEqual(self.order_of(one, two), [1, 0])
+
+    def test_references_to_keys_outside_the_output_and_to_itself_are_ignored(self):
+        items = [
+            worker_memory(key="a", supersedes="outside", conflicts_with=("gone",)),
+            worker_memory(key="b", supersedes="b"),
+        ]
+        self.assertEqual(self.order_of(*items), [0, 1])
+
+    def test_a_cycle_falls_back_to_the_order_of_the_output(self):
+        a = worker_memory(key="a", supersedes="b")
+        b = worker_memory(key="b", supersedes="a")
+        self.assertEqual(self.order_of(a, b), [0, 1])
+        self.assertEqual(self.order_of(b, a), [0, 1])
+        # An item that refers to a member of the cycle still comes after it.
+        c = worker_memory(key="c", supersedes="a")
+        applied = [["c", "a", "b"][i] for i in self.order_of(c, a, b)]
+        self.assertLess(applied.index("a"), applied.index("c"))
+
+    def test_a_repeated_key_counts_once_at_its_first_place(self):
+        first = worker_memory(key="x", content="first")
+        y = worker_memory(key="y", supersedes="x")
+        again = worker_memory(key="x", content="again")
+        # Only the first occurrence of ``x`` is applied (the rest is a duplicate key).
+        self.assertEqual(self.order_of(y, first, again), [1, 0])
+
+    def test_no_items_no_order(self):
+        self.assertEqual(self.order_of(), [])
 
 
 class SupersedeTargetTest(unittest.TestCase):
@@ -374,6 +444,47 @@ class PlanItemTest(unittest.TestCase):
         for name, arguments, expected in cases:
             with self.subTest(name):
                 self.assertEqual(self.plan(**arguments), expected)
+
+    def test_a_memory_the_user_widened_is_never_changed_by_a_candidate(self):
+        R, C, W = ItemResult, current, worker_memory
+        widened = C(state=ConfirmationState.CONFIRMED, widened=True)
+        widened_weak = C(state=ConfirmationState.INFERRED, widened=True)
+        cases = [
+            ("other content", dict(cur=widened), R.HELD_WIDENED),
+            (
+                "other content, a weaker widened memory",
+                dict(cur=widened_weak),
+                R.HELD_WIDENED,
+            ),
+            (
+                "the same content",
+                dict(cur=C(content="Use tabs.", widened=True)),
+                R.DUPLICATE,
+            ),
+            ("an older turn", dict(cur=widened, applied=order(9)), R.STALE),
+            (
+                "deprecated",
+                dict(cur=C(status=MemoryStatus.DEPRECATED, widened=True)),
+                R.BLOCKED,
+            ),
+            (
+                "as the target of a supersedes",
+                dict(cur=C(), target=widened),
+                R.HELD_WIDENED,
+            ),
+            ("as a new key's target", dict(target=widened_weak), R.HELD_WIDENED),
+            (
+                "an old widened target is not protected",
+                dict(cur=C(), target=C(status=MemoryStatus.SUPERSEDED, widened=True)),
+                R.UPDATED,
+            ),
+        ]
+        for name, arguments, expected in cases:
+            with self.subTest(name):
+                self.assertEqual(self.plan(**arguments), expected)
+        self.assertNotIn(R.HELD_WIDENED, {R.CREATED, R.UPDATED})
+        self.assertFalse(R.HELD_WIDENED.wrote_memory)
+        self.assertIsNotNone(W)
 
     def test_the_first_matching_rule_wins(self):
         risky_and_shared = worker_memory(scope=WorkerScope.SHARED, key="merge")

@@ -96,6 +96,9 @@ class ItemResult(StrEnum):
     # Would replace a confirmed memory: the user decides.
     HELD_CONFIRMED = "held_confirmed"
     HELD_HIGH_RISK = "held_high_risk"  # a high-risk area: explicit confirmation first
+    # The user widened this memory (a wider version made by their confirmation): a
+    # worker's candidate never changes it or retires it.
+    HELD_WIDENED = "held_widened"
     BLOCKED = "blocked_by_user"  # the user rejected or deleted this memory
     REFUSED_SHARED = "refused_shared"  # Shared Memory is never written automatically
     NO_CONTENT = "no_content"  # the worker gave no text to store

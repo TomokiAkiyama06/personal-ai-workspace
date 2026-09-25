@@ -211,6 +211,14 @@ class VersioningAsAppRole(AsAppRole, test_journal_consolidator.VersioningTest):
     pass
 
 
+class WidenedAsAppRole(AsAppRole, test_journal_consolidator.WidenedMemoryTest):
+    pass
+
+
+class ItemOrderAsAppRole(AsAppRole, test_journal_consolidator.ItemOrderTest):
+    pass
+
+
 class PrivacyAsAppRole(AsAppRole, test_journal_consolidator.PrivacyBetweenUsersTest):
     pass
 

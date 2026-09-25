@@ -510,21 +510,66 @@ class VersioningTest(ConsolidatorTestCase):
         self.assertEqual(sorted(self.active_versions()), ["y"])
         self.assertEqual(self.scalar("SELECT count(*) FROM memory_relations"), 1)
 
-    async def test_a_key_retired_by_an_output_is_not_revived_by_the_same_output(self):
-        # Later items of one output see the moved guard: the retirement stands.
+    async def test_a_key_restated_and_retired_in_one_output_ends_retired_either_way(
+        self,
+    ):
+        # ``editor`` exists; one output restates it AND retires it through ``ide``.
+        # Listed either way round, the restatement is applied first (it is what
+        # ``ide`` refers to) and then retired: ``ide`` is the only active memory.
+        finals = []
+        for name, order in (("retire first", (0, 1)), ("restate first", (1, 0))):
+            with self.subTest(name):
+                self.clean_tables()
+                conversation = self.seed_conversation()
+                await self.record("editor", conversation=conversation)
+                receipt = await self.record("both at once", conversation=conversation)
+                both = [
+                    memory("ide", content="Uses VS Code.", supersedes="editor"),
+                    memory("editor", content="Uses vim again."),
+                ]
+                worker = ScriptedWorker(
+                    worker_output(memory("editor", content="Uses vim.")),
+                    worker_output(*(both[i] for i in order)),
+                )
+                await self.consolidate(worker, count=2)
+                results = {
+                    i["key"]: i["result"]
+                    for i in self.outcome_of(receipt.entry_id)["items"]
+                }
+                self.assertEqual(results, {"ide": "created", "editor": "updated"})
+                self.assertEqual(sorted(self.active_versions()), ["ide"])
+                finals.append(
+                    sorted(
+                        (v["key"], v["version_number"], v["status"])
+                        for v in self.versions()
+                    )
+                )
+        self.assertEqual(finals[0], finals[1])
+
+    async def test_a_cycle_of_supersessions_retires_one_and_leaves_the_other_stale(
+        self,
+    ):
+        # ``a`` retires ``b`` and ``b`` retires ``a`` in one output: a cycle, applied
+        # in the listed order. The retired key's guard moved to this turn is seen by
+        # the item that comes next, so ``b`` cannot then undo the retirement.
         conversation = self.seed_conversation()
-        await self.record("editor", conversation=conversation)
-        receipt = await self.record("both at once", conversation=conversation)
+        await self.record("a", conversation=conversation)
+        await self.record("b", conversation=conversation)
+        receipt = await self.record("cycle", conversation=conversation)
         worker = ScriptedWorker(
-            worker_output(memory("editor", content="Uses vim.")),
+            worker_output(memory("a", content="A.")),
+            worker_output(memory("b", content="B.")),
             worker_output(
-                memory("ide", content="Uses VS Code.", supersedes="editor"),
-                memory("editor", content="Uses vim again."),
+                memory("a", content="A2.", supersedes="b"),
+                memory("b", content="B2.", supersedes="a"),
             ),
         )
-        await self.consolidate(worker, count=2)
-        self.assertEqual(self.results_of(receipt.entry_id), ["created", "stale"])
-        self.assertEqual(sorted(self.active_versions()), ["ide"])
+        await self.consolidate(worker, count=3)
+        results = {
+            i["key"]: i["result"] for i in self.outcome_of(receipt.entry_id)["items"]
+        }
+        self.assertEqual(results, {"a": "updated", "b": "stale"})
+        self.assertEqual(sorted(self.active_versions()), ["a"])
 
     async def test_a_candidate_cannot_supersede_a_confirmed_memory_of_another_key(self):
         self.seed_key_memory("editor", "Uses vim.", "confirmed")
@@ -577,6 +622,188 @@ class VersioningTest(ConsolidatorTestCase):
         )
         self.assertEqual(self.results_of(receipt.entry_id), ["created"])
         self.assertEqual(self.scalar("SELECT count(*) FROM memory_relations"), 0)
+
+
+@requires_postgres
+class WidenedMemoryTest(ConsolidatorTestCase):
+    """After the user widens a memory (a new, wider version of the SAME memory) the
+    consolidator still finds it by its key, and never changes it."""
+
+    def widened(self, key="indent_style", content="Use spaces.", **kwargs):
+        memory_id = self.seed_key_memory(key, content, "inferred")
+        self.widen_key_memory(memory_id, **kwargs)
+        return memory_id
+
+    async def test_a_different_candidate_is_held_not_a_failed_write(self):
+        memory_id = self.widened()
+        receipt = await self.record("Use tabs now.")
+
+        (result,) = await self.consolidate(
+            ScriptedWorker(worker_output(memory("indent_style", content="Use tabs.")))
+        )
+
+        self.assertEqual(result.outcome, RunOutcome.COMPLETED)
+        self.assertEqual(result.items, (ItemResult.HELD_WIDENED,))
+        self.assertEqual(self.results_of(receipt.entry_id), ["held_widened"])
+        held = self.outcome_of(receipt.entry_id)["items"][0]["candidate"]
+        self.assertEqual(held["content"], "Use tabs.")
+        versions = self.rows(
+            "SELECT version_number, scope, status FROM memory_versions"
+            " WHERE memory_id = :m ORDER BY version_number",
+            m=memory_id,
+        )
+        self.assertEqual(
+            [(v["version_number"], v["scope"], v["status"]) for v in versions],
+            [(1, "user", "superseded"), (2, "project", "active")],
+        )
+        job = self.jobs_of(receipt.entry_id)[0]
+        self.assertEqual((job["status"], job["attempts"]), ("completed", 0))
+
+    async def test_the_same_content_is_a_duplicate(self):
+        self.widened(content="Use spaces.")
+        receipt = await self.record("spaces")
+        await self.consolidate(
+            ScriptedWorker(worker_output(memory("indent_style", content="Use spaces.")))
+        )
+        self.assertEqual(self.results_of(receipt.entry_id), ["duplicate"])
+        self.assertEqual(self.scalar("SELECT count(*) FROM memory_versions"), 2)
+
+    async def test_a_repo_scoped_widening_is_found_too(self):
+        self.widened(scope="repo")
+        receipt = await self.record("tabs")
+        await self.consolidate(
+            ScriptedWorker(worker_output(memory("indent_style", content="Use tabs.")))
+        )
+        self.assertEqual(self.results_of(receipt.entry_id), ["held_widened"])
+
+    async def test_a_widened_memory_is_not_retired_by_another_keys_supersedes(self):
+        memory_id = self.widened("editor", "Uses vim.")
+        receipt = await self.record("switch")
+        await self.consolidate(
+            ScriptedWorker(
+                worker_output(
+                    memory("ide", content="Uses VS Code.", supersedes="editor")
+                )
+            )
+        )
+        self.assertEqual(self.results_of(receipt.entry_id), ["held_widened"])
+        active = self.rows(
+            "SELECT scope FROM memory_versions WHERE memory_id = :m"
+            " AND status = 'active'",
+            m=memory_id,
+        )
+        self.assertEqual([r["scope"] for r in active], ["project"])
+        self.assertEqual(self.scalar("SELECT count(*) FROM memory_relations"), 0)
+
+    async def test_another_owners_memory_is_still_not_read_or_written(self):
+        # The widened version has no owner column; ownership comes from the memory's
+        # private versions. A registry row pointing at SOMEONE ELSE's memory finds
+        # nothing (the earlier corrupted-registry case still fails closed).
+        foreign = self.seed_key_memory(
+            "theirs", "not yours", "inferred", owner=OTHER_USER_ID, register=False
+        )
+        self.widen_key_memory(foreign)
+        self.execute(
+            "INSERT INTO memory_consolidation_keys (owner_user_id, key, memory_id,"
+            " applied_conversation_id, applied_event_sequence, applied_recorded_at)"
+            " VALUES (:o, 'second', :m, :c, 0, '2000-01-01T00:00:00+00:00')",
+            o=USER_ID,
+            m=foreign,
+            c=uuid4(),
+        )
+        receipt = await self.record("mine")
+        (result,) = await self.consolidate(
+            ScriptedWorker(worker_output(memory("second", content="Mine.")))
+        )
+        self.assertEqual(result.outcome, RunOutcome.RETRY_SCHEDULED)
+        self.assertEqual(self.entry_row(receipt.entry_id)["state"], "pending")
+        self.assertEqual(
+            self.scalar(
+                "SELECT count(*) FROM memory_versions WHERE memory_id = :m", m=foreign
+            ),
+            2,
+        )
+
+
+@requires_postgres
+class ItemOrderTest(ConsolidatorTestCase):
+    """What an output does must not depend on the order its items are listed in."""
+
+    async def test_a_memory_retired_in_the_same_output_whatever_the_order(self):
+        outcomes = []
+        for name, items in (
+            ("listed first", ("y", "x")),
+            ("listed last", ("x", "y")),
+        ):
+            with self.subTest(name):
+                self.clean_tables()
+                receipt = await self.record("one output")
+                by_key = {
+                    "x": memory("x", content="X."),
+                    "y": memory("y", content="Y.", supersedes="x"),
+                }
+                await self.consolidate(
+                    ScriptedWorker(worker_output(*(by_key[k] for k in items)))
+                )
+                results = {
+                    item["key"]: item["result"]
+                    for item in self.outcome_of(receipt.entry_id)["items"]
+                }
+                statuses = {v["key"]: v["status"] for v in self.versions()}
+                relations = self.scalar("SELECT count(*) FROM memory_relations")
+                self.assertEqual(results, {"x": "created", "y": "created"})
+                self.assertEqual(statuses, {"x": "superseded", "y": "active"})
+                self.assertEqual(relations, 1)
+                outcomes.append((results, statuses, relations))
+        self.assertEqual(outcomes[0], outcomes[1])
+
+    async def test_the_outcome_lists_the_items_in_the_order_of_the_output(self):
+        receipt = await self.record("one output")
+        await self.consolidate(
+            ScriptedWorker(
+                worker_output(
+                    memory("y", supersedes="x"),
+                    memory("x"),
+                    memory("y", content="again"),
+                )
+            )
+        )
+        items = self.outcome_of(receipt.entry_id)["items"]
+        self.assertEqual(
+            [(i["index"], i["key"], i["result"]) for i in items],
+            [(0, "y", "created"), (1, "x", "created"), (2, "y", "duplicate_key")],
+        )
+
+    async def test_a_conflict_refers_to_a_key_listed_after_it(self):
+        await self.record("one output")
+        await self.consolidate(
+            ScriptedWorker(
+                worker_output(memory("one", conflicts_with=["two"]), memory("two"))
+            )
+        )
+        active = self.active_versions()
+        (relation,) = self.rows("SELECT * FROM memory_relations")
+        self.assertEqual(
+            (
+                relation["from_version_id"],
+                relation["to_version_id"],
+                relation["relation_type"],
+            ),
+            (active["one"]["id"], active["two"]["id"], "conflicts_with"),
+        )
+
+    async def test_a_chain_of_supersessions_is_applied_from_its_end(self):
+        await self.record("one output")
+        by_key = {
+            "a": memory("a", supersedes="b"),
+            "b": memory("b", supersedes="c"),
+            "c": memory("c"),
+        }
+        await self.consolidate(
+            ScriptedWorker(worker_output(by_key["a"], by_key["b"], by_key["c"]))
+        )
+        self.assertEqual(sorted(self.active_versions()), ["a"])
+        self.assertEqual(self.scalar("SELECT count(*) FROM memory_relations"), 2)
 
 
 @requires_postgres

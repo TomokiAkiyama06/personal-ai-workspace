@@ -7,7 +7,8 @@ What a Memory Worker returns is a set of *claims* about a conversation: which
 scope a memory should have, whether the user confirmed it. The backend decides
 what happens (REQUIREMENTS.md "Inferred Preference / Confirmation Flow", "Memory
 Conflict / Versioning", docs/MEMORY_ARCHITECTURE.md sections 8, 9 and 10), and
-the choices the requirements leave open are proposed in Decision 0018:
+the choices the requirements leave open are decided in Decision 0018 (Approved,
+2026-09-26):
 
 * **Scope is narrowed, never widened.** Every candidate is written to the
   conversation owner's private scope (``user``). The worker's ``project`` /
@@ -32,6 +33,7 @@ the choices the requirements leave open are proposed in Decision 0018:
 
 import re
 import unicodedata
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from uuid import UUID
@@ -192,11 +194,18 @@ def is_high_risk(*texts: str | None) -> bool:
 
 @dataclass(frozen=True, slots=True)
 class CurrentMemory:
-    """The latest version of the memory a key names, as far as a decision needs."""
+    """The latest version of the memory a key names, as far as a decision needs.
+
+    ``widened`` is true when that version is no longer the owner's private one: the
+    user widened the memory (a new version with a wider scope, made by the
+    confirmation flow of PAW-044). The memory keeps its identity and its key, but
+    who may read it is no longer the worker's to change.
+    """
 
     status: MemoryStatus
     confirmation_state: ConfirmationState
     content: str
+    widened: bool = False
 
     @property
     def is_active_confirmed(self) -> bool:
@@ -204,6 +213,64 @@ class CurrentMemory:
             self.status is MemoryStatus.ACTIVE
             and self.confirmation_state is ConfirmationState.CONFIRMED
         )
+
+    @property
+    def is_active_widened(self) -> bool:
+        return self.status is MemoryStatus.ACTIVE and self.widened
+
+
+def processing_order(items: Sequence[WorkerMemory]) -> list[int]:
+    """The indexes of ``items`` in the order they are applied: what an item refers to
+    (the key it ``supersedes``, the keys it ``conflicts_with``) comes before it.
+
+    What an output does must not depend on the order the worker happened to list
+    its items in: ``y`` (supersedes ``x``) listed before ``x`` would otherwise find
+    ``x`` unknown, and only ``x`` listed first would retire it. Kahn's algorithm,
+    the earliest listed ready item first, so an output without references keeps its
+    order. A cycle (``a`` supersedes ``b`` and ``b`` supersedes ``a``) is applied in
+    the order it is listed, its earliest listed member first, and whatever refers to
+    it after that. Only the first occurrence of a key takes part (a later one is a
+    duplicate key, not applied), and a reference to a key outside the output, or to
+    itself, is no dependency. Two items that supersede the SAME key are as
+    ambiguous as they sound: the one listed first retires it.
+    """
+    first: dict[str, int] = {}
+    for index, item in enumerate(items):
+        first.setdefault(item.key, index)
+    live = [index for index, item in enumerate(items) if first[item.key] == index]
+    depends_on = {
+        index: {
+            first[reference]
+            for reference in (items[index].supersedes, *items[index].conflicts_with)
+            if reference is not None
+            and reference in first
+            and first[reference] != index
+        }
+        for index in live
+    }
+    # What each item can reach through references: an item that reaches itself is
+    # part of a cycle.
+    reach = {index: set(depends_on[index]) for index in live}
+    changed = True
+    while changed:
+        changed = False
+        for index in live:
+            before = len(reach[index])
+            for other in tuple(reach[index]):
+                reach[index] |= reach[other]
+            changed = changed or len(reach[index]) != before
+
+    done: set[int] = set()
+    remaining = list(live)
+    applied: list[int] = []
+    while remaining:
+        chosen = next((index for index in remaining if depends_on[index] <= done), None)
+        if chosen is None:  # every remaining item waits for another: a cycle
+            chosen = next(index for index in remaining if index in reach[index])
+        applied.append(chosen)
+        done.add(chosen)
+        remaining.remove(chosen)
+    return applied
 
 
 def supersede_target(
@@ -250,11 +317,12 @@ def plan_item(
 
     1. ``shared`` scope: refused. 2. No content: nothing to store.
     3. A high-risk area: held. 4. A new key: created (held instead if it would
-    supersede a confirmed memory). 5. The user rejected or deleted the memory:
-    blocked. 6. An older turn than the one behind the current version: stale.
-    7. The current version says the same: duplicate. 8. The current version is
-    confirmed, or the item supersedes a confirmed memory: held. 9. Otherwise a new
-    version.
+    supersede a confirmed or widened memory). 5. The user rejected or deleted the
+    memory: blocked. 6. An older turn than the one behind the current version:
+    stale. 7. The user widened the memory: a duplicate if it says the same, else
+    held (``held_widened``). 8. The current version says the same: duplicate.
+    9. The current version is confirmed, or the item supersedes a confirmed or
+    widened memory: held. 10. Otherwise a new version.
     """
     if item.scope is WorkerScope.SHARED:
         return ItemResult.REFUSED_SHARED
@@ -262,11 +330,16 @@ def plan_item(
         return ItemResult.NO_CONTENT
     if is_high_risk(item.key, item.content):
         return ItemResult.HELD_HIGH_RISK
-    replaces_confirmed = (
-        supersedes_target is not None and supersedes_target.is_active_confirmed
-    )
+    # What retiring the supersedes target would undo: a widened memory is the user's
+    # (a worker never narrows or retires it), a confirmed one is the user's too.
+    hold_for_target: ItemResult | None = None
+    if supersedes_target is not None:
+        if supersedes_target.is_active_widened:
+            hold_for_target = ItemResult.HELD_WIDENED
+        elif supersedes_target.is_active_confirmed:
+            hold_for_target = ItemResult.HELD_CONFIRMED
     if current is None:
-        return ItemResult.HELD_CONFIRMED if replaces_confirmed else ItemResult.CREATED
+        return hold_for_target or ItemResult.CREATED
     if (
         current.status in (MemoryStatus.DEPRECATED, MemoryStatus.HISTORY)
         or current.confirmation_state is ConfirmationState.REJECTED
@@ -274,9 +347,15 @@ def plan_item(
         return ItemResult.BLOCKED
     if applied is not None and not is_newer(entry, applied):
         return ItemResult.STALE
+    if current.widened:
+        # The user's, at a scope the worker may not set: the same words are a
+        # duplicate, anything else waits for the user.
+        if current.content.strip() == item.content.strip():
+            return ItemResult.DUPLICATE
+        return ItemResult.HELD_WIDENED
     if current.status is MemoryStatus.ACTIVE:
         if current.content.strip() == item.content.strip():
             return ItemResult.DUPLICATE
         if current.confirmation_state is ConfirmationState.CONFIRMED:
             return ItemResult.HELD_CONFIRMED
-    return ItemResult.HELD_CONFIRMED if replaces_confirmed else ItemResult.UPDATED
+    return hold_for_target or ItemResult.UPDATED
