@@ -73,8 +73,8 @@ Human が 2026-09-25 に確認し、承認した結果を各項に書く。
 ## 承認後の扱い
 
 2026-09-25 に承認された。PAW-052 のPRは本Decisionを参照する。
-Human が変更を指示した項目は、この Decision を更新してから実装を合わせる。
-承認後に方針を変える場合は、この Decision を書き換えず、新しい Decision から `Supersedes` する。
+承認後に Human が承認済みの選択を変える場合は、この Decision を書き換えない（[AGENTS.md](../../AGENTS.md) の「仕様変更」）。
+この Decision を `Supersedes` する新しい Decision を作り、Human の承認を得てから、実装を合わせる。
 [REQUIREMENTS.md](../../REQUIREMENTS.md) の原文は書き換えない。
 
 ## 承認時の決定（2026-09-25）
