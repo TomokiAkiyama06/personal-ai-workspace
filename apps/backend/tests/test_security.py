@@ -1,6 +1,11 @@
 import unittest
 
-from paw_backend.security import host_from_header, normalize_origin, origin_allowed
+from paw_backend.security import (
+    host_from_header,
+    normalize_origin,
+    origin_allowed,
+    origin_matches_request,
+)
 
 
 class HostFromHeaderTest(unittest.TestCase):
@@ -70,6 +75,60 @@ class OriginAllowedTest(unittest.TestCase):
 
     def test_malformed_origins_are_never_allowed(self):
         self.assertFalse(origin_allowed("null", "null", ["null"]))
+
+
+class OriginMatchesRequestTest(unittest.TestCase):
+    """scheme + host + port of the request, or a listed origin (default deny)."""
+
+    def test_the_request_origin_is_scheme_host_and_port(self):
+        for scheme, host, origin, expected in (
+            ("https", "paw.example.org", "https://paw.example.org", True),
+            ("https", "paw.example.org:443", "https://paw.example.org:443", True),
+            ("http", "paw.example.org:80", "http://paw.example.org", True),
+            ("https", "paw.example.org", "http://paw.example.org", False),
+            ("http", "paw.example.org", "https://paw.example.org", False),
+            ("https", "paw.example.org", "https://paw.example.org:80", False),
+            ("https", "paw.example.org:8443", "https://paw.example.org", False),
+            ("http", "[::1]:8000", "http://[::1]:8000", True),
+            ("https", "[::1]:8000", "http://[::1]:8000", False),
+            ("https", None, "https://paw.example.org", False),
+            ("https", "", "https://paw.example.org", False),
+            ("https", "paw.example.org", "null", False),
+            ("https", "user@paw.example.org", "https://paw.example.org", False),
+        ):
+            with self.subTest(scheme=scheme, host=host, origin=origin):
+                self.assertIs(
+                    origin_matches_request(origin, host, scheme, []), expected
+                )
+
+    def test_an_unknown_scheme_matches_nothing_but_a_listed_origin(self):
+        for scheme in (None, "", "ws", "wss", "ftp", "HTTP", 80, b"https"):
+            with self.subTest(scheme=repr(scheme)):
+                self.assertFalse(
+                    origin_matches_request(
+                        "https://paw.example.org", "paw.example.org", scheme, []
+                    )
+                )
+                self.assertTrue(
+                    origin_matches_request(
+                        "https://paw.example.org",
+                        "backend",
+                        scheme,
+                        ["https://paw.example.org"],
+                    )
+                )
+
+    def test_a_listed_origin_is_a_full_origin(self):
+        listed = ["https://app.example.org"]
+        self.assertTrue(
+            origin_matches_request("https://APP.example.org:443", "x", "http", listed)
+        )
+        self.assertFalse(
+            origin_matches_request("http://app.example.org", "x", "https", listed)
+        )
+        self.assertFalse(
+            origin_matches_request("https://app.example.org:8443", "x", "https", listed)
+        )
 
 
 if __name__ == "__main__":

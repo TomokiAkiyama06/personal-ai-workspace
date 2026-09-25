@@ -28,7 +28,7 @@ from .support import paw_environment
 from .test_migrations import offline_config
 
 REVISION = "0043"
-PREVIOUS = "0026"
+PREVIOUS = "0083"
 INDEX = "ix_memory_versions_search"
 VERSION_FILE = (
     Path(__file__).resolve().parents[1]

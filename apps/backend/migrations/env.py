@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 # Import every module that defines ORM models here, so that autogenerate sees
 # them.
+from paw_backend.auth import models as auth_models  # noqa: F401
 from paw_backend.authz import models as authz_models  # noqa: F401
 from paw_backend.config import Settings
 from paw_backend.db import Base

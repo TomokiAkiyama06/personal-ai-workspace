@@ -27,7 +27,7 @@ The definition of the index repeats the one in ``paw_backend.memory.models``;
 Alembic's autogenerate shows no difference (``tests/test_retrieval_migration.py``).
 
 Revision ID: 0043
-Revises: 0026
+Revises: 0083
 Create Date: 2026-09-25
 """
 
@@ -37,7 +37,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "0043"
-down_revision: str | Sequence[str] | None = "0026"
+down_revision: str | Sequence[str] | None = "0083"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
