@@ -130,8 +130,8 @@ class OfflineMigrationSqlTest(unittest.TestCase):
         sql = offline_upgrade_sql(PAW_APP_DATABASE_ROLE="paw_app")
         self.assertIn('GRANT INSERT, SELECT ON audit_events TO "paw_app"', sql)
         # Exactly one grant on the audit table. Other revisions (users and
-        # setup_tokens, 0021) grant on their own tables, which is not the audit
-        # table's business.
+        # setup_tokens, tool approvals, queue tables, ...) grant on their own
+        # tables, which is not the audit table's business.
         self.assertEqual(sql.count("ON audit_events TO"), 1)
         self.assertLess(sql.index("REVOKE ALL"), sql.index("GRANT INSERT"))
 

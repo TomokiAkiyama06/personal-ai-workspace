@@ -1,0 +1,184 @@
+# Tool Broker の Policy・承認・Credential の方針
+
+- Status: Approved
+- Date: 2026-09-24
+- Scope: PAW-031（Tool Broker / Capability Policy）と、Tool を使う以降の Issue（PAW-023 / 030 / 033 / 034 など）
+- Supersedes: なし
+- Approval: 2026-09-25、Humanが作業Session内で、判断メモ（Artifact）の各点について「推奨どおり」と回答して承認（下記の「承認時の決定」）
+
+## 背景
+
+[Security / Tool Permissions](../SECURITY_TOOL_PERMISSIONS.md) と [REQUIREMENTS.md](../../REQUIREMENTS.md) の
+「Tool Broker / Capability Policy / Secret Isolation」「Tool approval boundary」は、Capability の 6 つの class、5 つの Approval level、
+Credential の Plaintext を Agent に渡さないこと、Backend が最終判定することを定める。
+一方、次のことは文書だけでは決まらず、PAW-031 の実装が選んだ。独立 Review もこれらを問題として指摘した。
+Product Policy を実装が暗黙に確定させないよう、選択を一覧にして Human が承認または変更できるようにした。Human は 2026-09-25 に、この一覧を承認した（末尾の「承認時の決定」）。
+
+実装は [Backend README](../../apps/backend/README.md) の「Tool Broker / Capability Policy」にある。
+**この Decision は 2026-09-25 に Human が承認した（Approved）。** 下の各選択は、承認された方針である（承認時の決定は末尾を参照）。
+承認済みの [Decision 0004](0004-rbac-capability-and-audit-policy.md) が PAW-031 に残した「Tool Broker の Approval で委任不可の操作を許す仕組み」もここで決める。
+
+## 承認された方針
+
+### 1. Approval は Level を上げるだけで、権限を広げない
+
+1. Tool の呼び出しは、まず PAW-025 の認可（委任元 User の権限と Agent の Grant の積集合）を通る。Broker の Level はその上に足すだけで、置き換えも拡張もしない。
+2. Approval で、委任できない Capability（`admin.*`、`owner.*`、Project の設定・Member・Agent Policy・Lifecycle など）の操作を Agent に許す仕組みは作らない。承認があっても `authz_denied` のまま。
+3. Approval は認可・Scope・Budget を使うときにもう一度確認する。承認の後に権限が減れば、使えない（承認は消費されない）。
+
+### 2. Policy の表（Capability class × Environment × Scope）
+
+`DEFAULT_TOOL_POLICY` は 36 マス（6 class × 2 Environment × 3 Scope の状態）。表にない組み合わせは `DENY`（既定拒否）。Tool の Level は class ごとの Level のうち最も厳しいもの。
+`ToolSpec.min_level` は Level を上げるだけ。Task Scope の範囲外（Path / Project / Repository / Credential）は Policy で許可できない。
+表の値は `apps/backend/paw_backend/tools/policy.py` の `DEFAULT_TOOL_POLICY` が正本で、`tests/test_tools_policy.py` が 1 マスずつ固定している。
+
+Scope の状態（3 つの列）は、Backend が呼び出しの対象から計算する。Model は選べない。
+
+- **範囲内**（`in_scope`）: 対象がすべて Task Scope の中にある。
+- **Task の Host の外**（`host_out_of_scope`）: 対象のうち **Host（URL の Host を含む）だけ**が `TaskScope.hosts` の外にある。Path・Project・Repository・Credential は Scope の中にある。
+- **範囲外**（`out_of_scope`）: Path・Project・Repository・Credential の handle のどれかが Task Scope の外にある。Host も外にあるときは、こちらが優先する。
+  Repository に触れる呼び出しの URL が、作業対象のどの Repository の Remote の下にもないとき（Host が Scope の中のときの `remote_not_in_repository`。8 の 5）も範囲外として扱う。
+
+Tool の Environment が `PROJECT_LOCAL`（Project / Worktree の中。既定）の 18 マス:
+
+| Capability | 範囲内 | Task の Host の外 | 範囲外 |
+| --- | --- | --- | --- |
+| `read` | `AUTO` | `APPROVAL` | `DENY` |
+| `write` | `SCOPED_AUTO` | `APPROVAL` | `DENY` |
+| `execute` | `SCOPED_AUTO` | `DENY` | `DENY` |
+| `network` | `SCOPED_AUTO` | `APPROVAL` | `DENY` |
+| `credential-use` | `SCOPED_AUTO` | `DENY` | `DENY` |
+| `destructive` | `APPROVAL` | `DENY` | `DENY` |
+
+Tool の Environment が `HOST`（Host 全体の環境: package、service、firewall、proxy、mount）の 18 マス。「Task の Host の外」「範囲外」の列は `PROJECT_LOCAL` と同じで、違うのは「範囲内」の列だけである:
+
+| Capability | 範囲内 | Task の Host の外 | 範囲外 |
+| --- | --- | --- | --- |
+| `read` | `AUTO` | `APPROVAL` | `DENY` |
+| `write` | `APPROVAL` | `APPROVAL` | `DENY` |
+| `execute` | `APPROVAL` | `DENY` | `DENY` |
+| `network` | `APPROVAL` | `APPROVAL` | `DENY` |
+| `credential-use` | `STRONG_APPROVAL` | `DENY` | `DENY` |
+| `destructive` | `STRONG_APPROVAL` | `DENY` | `DENY` |
+
+Task の Host の外への外部 write（`write` + `network`。Credential を使わないもの）は、読み取りと同じく `APPROVAL` である（承認者が正確な URL を見て 1 回だけ許す。要件の「通常 Task Scope を超える外部 write: `APPROVAL`」）。
+`execute` / `credential-use` / `destructive` を持つ Tool は、Task の Host の外なら `DENY` になる。Credential を使う Tool（`git push` など）は、さらに、その Credential の使えない Host へは Task の Host の中でも `DENY`（3 の 3。範囲外として扱う）。
+
+要件の表との違い（Human が 2026-09-25 に承認した）:
+
+- **厳しい方向**: build / test / lint（`execute`）は `AUTO` でなく `SCOPED_AUTO`（挙動は同じ: 人の確認なし）。Task Scope 内の一時ファイルの削除は `destructive` なので `APPROVAL`
+  （要件は `SCOPED_AUTO`。「一時ファイルだけを消す」Tool を別に宣言する方法が要る）。Task の Host の外への Web の読み取りは `APPROVAL`（要件は Web / Docs の read-only 取得を `AUTO`）。
+- **緩い方向（Tool の宣言が前提。Tool 登録時のレビューを条件に承認）**: Task Scope 内の `credential-use` は `SCOPED_AUTO`。要件の `STRONG_APPROVAL` は Credential の登録・更新・削除で、使用は分類されていない
+  （AI 専用 Branch への push と PR 作成は `SCOPED_AUTO`）。Credential を管理する Tool は `min_level=STRONG_APPROVAL` を宣言する。
+  Host 全体の `sudo` / 特権操作は要件では `STRONG_APPROVAL` だが、表は `HOST` 環境の `write` / `execute` を `APPROVAL` にしている。特権の Tool は `min_level=STRONG_APPROVAL` を宣言する必要がある。
+  **Tool の登録時のレビューで、Credential を管理する Tool と特権 Tool が `STRONG_APPROVAL` を宣言していることを確認する**（表は Tool の中身を知らないため、宣言漏れはここで防ぐ）。
+
+### 3. 外部の読み取り・書き込み
+
+1. 外部 write の許可は `TaskScope.hosts` で表す。Issue 作成や PR 作成といった「目的」の単位ではない。`TaskScope.hosts` の外への外部 write（Credential を使わないもの）は、2 の表のとおり `APPROVAL`（拒否ではない）。
+2. Task の Host の外への読み取りは、行き止まりの `DENY` でなく `APPROVAL`（承認者は正確な URL を見て 1 回だけ許す）。ワイルドカードや「任意の公開 Host」の許可はない。
+3. Credential は、その Credential の使える Host にだけ使える（`TaskScope.credential_handles` は Host の集合を持つ）。Task が触れられる Host でも、その Credential の使える Host でなければ `DENY`（承認でも許可しない）。
+
+### 4. 承認者と取り消し
+
+1. 承認・却下できるのは、Agent が働いている **User 本人だけ**（人間の `Principal`）。Agent 自身の ID は拒否する。Admin / Owner が他の User の Task を承認する仕組みは作らない。
+2. 第三者には、他の User の承認の存在を教えない（`not_found`。Audit には `not_authorised`）。
+3. 取り消しは、委任元 User と Admin / Owner ができる（権利を減らす方向だけなので、Admin / Owner が代われる）。Task の終了（cancelled / failed / completed）で、その Task の Open な承認を取り消す。この取り消しが失敗したときの扱いは「9. Task の終了と承認」。
+4. `STRONG_APPROVAL` は Step-up（PAW-023）の確認が要る。確認できない（Verifier がない、失敗、Timeout）ときは承認できない。Store も `step_up_verified` を受け取り、DB は Step-up なしの強い承認を保存しない。
+5. **人の判断の Store 呼び出しは時間で区切る。** 独立 Review が、応答しない DB に `approve` / `reject` / `revoke` が無期限に待たされると指摘した（`revoke_task`・Step-up・Listener・Audit は区切られていた）。Pool の Session の Query の取り消しは、サーバの確認を待って約 10 秒かかるので、`asyncio.timeout` だけでは区切れない（実測）。`ApprovalService` は 1 回の操作の Store 呼び出し（照会と更新）を **1 つの期限 `timeout_seconds`**（開始時に 1 回数え、残りを渡す。Step-up は数えない）で区切り、期限になれば型付きの `unavailable` を返す。`PostgresApprovalStore` の `get` / `decide` / `revoke` は、変更と履歴の行を 1 つの CTE にした Statement を、中断可能な接続（`Database.fetch_abortable`）で実行する。期限を過ぎた Statement はサーバで続きが実行されうるが、原子的なので、承認と履歴は両方反映されるかどちらも反映されない（呼び直すと真の状態が返る）。取り消しの `revoke_task`（9）と同じ方針。
+   **Broker が呼ぶ `open_request` / `consume` も同じ方法で区切る**（独立 Review が、Pool の Transaction のままでは応答しない DB や Lock 待ちで `asyncio.timeout` を超え（約 10 秒）、Pool の枠も塞ぐと指摘した）。この 2 つは複数の Statement が要る（(Task, User) ごとの advisory lock、Task の行の `FOR SHARE`、確認、更新）。1 つの CTE にはしない: READ COMMITTED では Statement が Lock を待つ前に Snapshot を取るので、advisory lock の下の件数の確認が古い値で決まり、上限を超える。そこで `Database.transact_abortable` が、中断可能な接続（Pool を使わない）の上で **1 つの `BEGIN` / `COMMIT` の Transaction** を、呼び出し全体で 1 つの期限（`transaction_timeout_seconds`、既定 3 秒）で実行し、期限で Socket を閉じる。打ち切られた Transaction は、Server が閉じた接続しか見ず次の Statement も `COMMIT` も受け取らないので、全部が巻き戻される（`COMMIT` の最中に打ち切られたときだけ、反映されたか分からない。呼び直すと分かる。使う側は失敗に倒れる）。Lock を待つ Backend は閉じた Socket に気づかないので、Server にも上限を伝え、打ち切られた Transaction が advisory lock と Server の接続を持ち続けないようにする。上限は **Transaction 全体**にかける: 最初の Statement で `SET LOCAL transaction_timeout`（その時点の残り時間 + 1 秒。`lock_timeout` / `statement_timeout` は同じ値の予備）を設定し、Statement が何を待っていても、その合間でも、時間が来れば Server が Session を終わらせる（独立 Review 第 6 回: 開始時に 1 回だけ Statement ごとの上限を設定すると、期限の大半を使った後の Statement がまた丸ごと 1 回分の上限をもらい、期限を約 4 秒超えて Lock を持ち続けた）。`transaction_timeout` は PostgreSQL 17 で入った設定だが、Tool Broker の経路（承認の要求と使用）が要求する Server は **PostgreSQL 18 以上（human 決定済み 2026-09-25）** とする。承認済みの [Decision 0003](0003-backend-cli-web-implementation-stack.md) は PostgreSQL の major version を固定していないが、README と CI（`pgvector/pgvector:pg18`）と Test は 18 で、Human が 2026-09-25 にこの経路の下限を 18 と決めた（末尾の「承認時の決定」にも記録した）。17 は `transaction_timeout` を知っているが、Test も保証もしない。16 以下は `transaction_timeout` を知らず、Transaction は最初の Statement で失敗する（Fail-closed）。起動時の Version 確認は入れていない。Statement ごとに上限を設定し直す案は、接続を包む必要があり、Statement の合間と `COMMIT` を覆えないので採らなかった。時間切れは `TimeoutError` で、Broker は型付きの `approval_unavailable`（Log は型名だけ）にする。Task の終了・Run との順序（9）は変えない（Lock の順序、Task の行の `FOR SHARE` の位置、同じ Transaction での前の Run の取り消しは同じ）。
+   Human が承認した点（2026-09-25）: 中断可能な接続は呼び出しごとに接続を張るので Pool の Session より重い（承認の要求と使用は承認を要する Tool 呼び出しごとに 1 回）。`AUTO` / `SCOPED_AUTO` の呼び出しは承認の Store を呼ばない。待った後の時刻を Application の時計に単調時計の経過を足して求め、Database の時計を併用しないこと（「既知の制限」）。Server の下限は PostgreSQL 18 以上（上記、human 決定済み 2026-09-25）。
+
+### 5. 承認の表示・件数・却下
+
+1. 承認者に、呼び出しの全引数を名前つきで見せる（Redact・Escape・256 文字で切り、全長と Hash 先頭つき）。見せるものがない承認は開かない。
+2. (Task, User) ごとの Open な承認は 10 まで（1〜100 で設定可）。却下した呼び出しは 5 分（1 分〜24 時間で設定可）は再要求できない。
+3. 上の数値（256 文字、10 件、5 分）と、4 の 5 の期限（`transaction_timeout_seconds`。既定 3 秒）は暫定値として承認された。
+   設定で変えられる（256 文字だけは設定項目でなく、変えるには実装を変える）。Broker・`ApprovalService`・Listener の `timeout_seconds` と、承認の Store の `revoke_timeout_seconds` / `decision_timeout_seconds`（Store の呼び出し・取り消し・Listener の期限）の既定も 3 秒で、暫定値として承認された（本文に値の記載がなかったため、実装の既定値をここに記録する）。
+
+### 6. Credential
+
+1. Agent の引数・結果に Credential の平文を入れない。使用は不透明な handle だけ。Tool の引数に平文があれば `DENY`、結果は Redact する（形式・代入の形・Key 名・Dict の Key）。
+2. 検出は Best Effort であることを認める（本来の防御は handle のみの構造）。
+
+### 7. 永続化と DB の保証
+
+1. 承認は PostgreSQL に保存する（Migration `0031`）。状態は DB の Trigger と CHECK 制約でも守る（作成は pending のみ、合法な遷移のみ、識別する列は不変、DELETE / TRUNCATE は拒否、すべて `ENABLE ALWAYS`）。
+2. Application の Role には最小権限（`tool_approvals` は SELECT・INSERT と状態の列の UPDATE、履歴は SELECT・INSERT）だけを与える。
+3. **承認と消費の Role の分離は、この Decision の範囲では実装しない。** Application の Role が 1 つの間は、Application の Process が侵害されれば、その User の名前で承認を書ける（Database では防げない）。
+   **前提条件: Agent の Runtime へ、Application の Role の DB 接続を渡さない**（Agent へ渡すのは Broker だけ）。この前提を満たす限り、Agent は承認を書けない。
+   承認の Endpoint（PAW-022 / 023）ができる時に、別 Role または `SECURITY DEFINER` 関数で分離する。この分離は PAW-022 / 023 の受け入れ条件に追記済みである（[#19](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/19)・[#20](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/20)）。
+
+### 8. Repository の ACL
+
+要件の「Project / Repo Permission Inheritance」は、Repository ごとの ACL override（`read` / `write` / `agent`）で、Project の Member でも Repository を読み取り専用や Agent 禁止にできると定める。
+独立 Review が、Broker は Project の Resource で認可するため、この override が Tool の呼び出しに効かないと指摘した。実装は次を選んだ。要件は「どの Repository に触れる呼び出しか」の決め方を定めていない。
+
+1. **触れる Repository は Backend が決める。** Orchestrator が Task の作業対象（Working Set）を `TaskScope.repositories`（Repository の ID、Project、Worktree の Path、解決済みの ACL）として呼び出しごとに作る。Model の出力は Repository の ID を名指しできるだけで、ACL を指定できない。
+2. **触れる Repository の決め方:** 呼び出しが `repository` 引数（作業対象の ID のみ）で名指しするか、Symlink を解決した後の Path が Repository の Worktree の中にあるとき。入れ子の Repository は両方に触れる（厳しい ACL が効く）。**Host は Repository を表さない**（同じ Host に多くの Repository があるため）。**URL は、Backend が Repository に登録した Remote（`ScopedRepository.remotes`）の下にあるときだけ、その Repository を表す**（Symlink を解決した Path と同じく、入れ子と同様に触れる Repository が増える）。`..`・`\`・`;`・`%2e` などで Remote の外へ出られる Path は「下」と見なさない。
+3. 触れる Repository があれば、その Repository の `Resource.repository(...)` で認可する（override は Project の Role を狭めるだけで広げない、Agent は `agent` を持たない Repository を操作できない、は PAW-025 の規則のまま）。**ACL が不明（`None`）なら拒否**し、`inherit` とは読まない。ACL は承認を使うときにも再判定する。
+4. **Repository への書き込み**（`project.repo.write` / `project.pr.create`）の Tool は、触れる Repository を Path か `repository` の必須引数で宣言しなければならず（Registry が検査）、作業対象のどの Repository にも触れない呼び出しは拒否する（`repository_not_identified`）。
+   根拠は要件の Multi-Repo Task の「Write 範囲は Task Working Set として明示・制御する」「Agent が「ついでに」別 Repo を書き換えてはならない」。読み取りと Agent 実行は触れる Repository がなければ Project の Resource で判定する（Read 範囲は比較的広く取ってよい、と要件にある）。
+5. **Repository に触れる呼び出しの URL を、その Repository に結びつける。** 独立 Review が、`repository` 引数だけを認可すると、書き込める B を名指しして `remote` に読み取り専用の A の URL（同じ Host）を渡せば、Executor は A の URL を受け取り、A の ACL を迂回できると指摘した（再現した: `git.push` が `allow`）。実装は次を選んだ。
+   - 呼び出しの URL は Model が書くので、Backend が登録した Remote の下にあるかで Repository を決める（上の 2）。A の Remote の下なら A にも触れ、A の ACL も効く（読み取り専用なら拒否）。
+   - Repository に触れる呼び出しの URL が作業対象のどの Repository の Remote の下にもなければ拒否する（`remote_not_in_repository`）。ACL を解決していない Repository を指せるため。Remote を登録しない Repository は URL を持てない（既定は拒否）。
+   - Host の規則が先: Scope の外の Host は従来どおり、2 の表で決まる（Credential を使わない `write` + `network` も、`read` + `network` も `APPROVAL`。Credential を使う・`execute` / `destructive` を持つ Tool は `DENY`）。Repository に触れない呼び出し（URL の読み取りだけ）は Host の検査のままだが、その URL が作業対象の Repository の Remote の下なら、その Repository の ACL が効く。
+   - 採らなかった案: Model に URL を渡させず Backend が Remote を Executor へ渡す（Tool の引数を変え、`network` の Tool が必須の Host / URL を持つ規則と合わない。将来の選択肢）。
+6. **Human が承認した点（2026-09-25）:** (a) 書き込みだけを「Repository を特定できなければ拒否」にしたこと（読み取りと `project.task.run` は Project の Resource のまま）。(b) 入れ子の Repository を「両方の ACL に従う」にしたこと。(c) Host から Repository を推定せず、リモートに書く Tool に `repository` 引数を求めること。(d) URL を Backend が登録した Remote で Repository に結びつけ、`repository` 引数と URL が別の Repository を指す呼び出しは両方の ACL に従わせる（不一致を拒否にはしない）こと。Remote の登録は Orchestrator（Task の Scope を作る側）の責務で、登録がない Repository では URL を伴う呼び出しが通らないこと。
+
+### 9. Task の終了と承認
+
+独立 Review が、Task の終了時の承認の取り消しが失敗すると、それが握りつぶされ、承認が期限まで使えてしまうと指摘した。事実として、取り消しは終了の遷移が Commit された**後**の Listener で行われ、`TaskService` は Listener の失敗を Log に残すだけで再試行しない。実装は次を選んだ。要件は Task の終了と承認の関係を定めていない。
+
+1. **Task の終わりは `completed` / `failed` / `cancelled`**（`TERMINAL_STATES`）。Task の状態に `expired` はなく、承認は自分の `expires_at` で失効する。終了時に、その Task の Open な承認（pending、承認済みで未使用）を取り消す。
+2. **取り消しの失敗は握りつぶさない。** `revoke_task` は Store の失敗で `ApprovalRevocationError` を上げる（以前は `0` を返し、「Open な承認はなかった」と区別できなかった）。終了の遷移はもう Commit されているので戻せず、`TaskService` は型名だけを Log に残す。再試行は今は呼び出し側（`revoke_task` は冪等）。
+   **取り消しは時間で区切る。** `TaskService` は Listener を待つので、Statement に答えない DB が取り消しを止めると、Commit 済みの遷移の後で Cancel / Complete / Retry の要求が返らなくなる（独立 Review の指摘）。取り消しと履歴を 1 つの Statement にして、中断可能な接続（`Database.fetch_abortable`、期限で Socket を閉じる）で実行する。時間切れは失敗と同じく `ApprovalRevocationError` で、`revoke_task` を呼び直せる。`ApprovalService` は取り消し全体（Store の呼び出しと、取り消した承認ごとの照会・Event・Audit 行）を、承認ごとではなく**1 つの期限 `timeout_seconds`** で区切る（独立 Review の指摘: 期限を承認ごとに数え直すと、承認が最大 100 件ある Task で期限の何倍もかかった）。Store に保存された後で期限が来ても `ApprovalRevocationError` で、承認は取り消し済みだが、まだ報告していない承認の Event と Audit 行は残らない（呼び直すと `0` になる）。
+3. **Broker は独立に Fail-closed で止める。** 承認を要する呼び出しは、承認を開くときも使うときも、Task の**現在の状態**（`TaskActivityProvider`）が動ける（`ACTIVE`）ときだけ進む。終了・不明・読めないなら拒否する（`task_not_active` / `task_unknown` / `task_state_unavailable`）。取り消しの成否によらず、終わった Task の承認は使えない。既定の Provider は不明を答える（本物を入れるまで承認は使えない）。
+   遷移と取り消しを 1 つの Transaction にする案（`TaskService` が Tool の Table を触る）は、Task と Tool の境界を越えるため採らなかった。
+   **使うときの確認と消費は 1 つの Transaction にする。** 独立 Review が、確認（読み取り）と消費が別の操作で、その間に終了の遷移が Commit されると、Commit 後の取り消しと消費が競い、消費が勝った承認が終わった Task で使われると指摘した（再現した）。`consume` は `require_active_task` を受け取り、`PostgresApprovalStore` は同じ Transaction で Task の行を `FOR SHARE` で読み直してから消費する（`ACTIVE` でなければ消費しない）。進行中の遷移は待ち、後の遷移は消費の Commit を待つので、使うことと終了は順序づけられる。Broker の確認は、理由をはっきり返す早い答えとして残す。Task の表を読む（Lock する）のは読み取りだけで、Task の状態は変えない。
+   **開くときの確認も挿入と同じ Transaction にする。** 独立 Review が、同じ競合が承認を「開く」側にもあると指摘した。Broker が `ACTIVE` と読んだ後、要求の挿入の前に終了の遷移が Commit されると、Commit 後の取り消しは何も見つけられず、その後に挿入された要求が終わった Task の承認として残る（`ApprovalService` はそれを承認でき、Retry / Restart の後、Listener の取り消しより先に Worker が消費する窓ができる）。`open_request` も `require_active_task` を受け取り、`PostgresApprovalStore` は (Task, User) の advisory lock の直後に、同じ Transaction で Task の行を `FOR SHARE` で読み直してから挿入する（`ACTIVE` でなければ何も作らず、既存の要求も返さず、`TASK_NOT_ACTIVE` / `TASK_UNKNOWN`）。
+   **承認は Task の Run に結びつける（独立 Review 第 4 回の指摘で追加）。** 以前の版は「試行番号への結びつけは、Table の列と Migration が要るため採らない。Retry / Restart での取り消し（4）と Task の現在の状態の確認で足りる」としていた。それは誤りだった。終了時の取り消しが失敗して承認が残った Task を Restart すると、Restart の Commit の後、Listener の取り消しが動く前の窓で、新しい試行の Worker は Task の状態の確認（`ACTIVE`）を通り、前の試行の承認を消費できる（再現した。Listener の後、あるいは Listener が動かなければ、消費が取り消しに勝つ）。Retry も同じ窓を持つ。状態の確認は「Task が生きているか」しか言えず、それが**どの試行の承認か**を言えないためである。
+   実装は Task の **Run**（Task Lifecycle の `paw_backend.tasks.TaskRun(attempt, retry_count)` をそのまま使い、Broker に別のクラスは持たない。`tasks.attempt` は Restart が、`tasks.retry_count` は Retry が 1 増やす。どちらも増えるだけで、再開は必ずどちらか一方を変える）を承認に持たせる。
+   - `tool_approvals` に `task_attempt`（1 以上）と `task_retry_count`（0 以上）を加える（`NOT NULL`、CHECK、Trigger が書き換えを拒否。Migration `0031` を直接更新した。未 Merge）。`NewApproval` / `ApprovalBinding` / `ApprovalRecord` が `task_run` を持ち、Broker は `TaskContext.run`（Orchestrator が Worker の開始時の Task から作る）を入れる。
+   - 消費の `UPDATE` の `WHERE` に Run を加え、`require_active_task` では、Task の行を `FOR SHARE` で読む同じ Transaction で、Task が生きており、**かつ `attempt` / `retry_count` が束縛の Run に一致する**ことを確認する（`TaskActivity.SUPERSEDED`）。Listener の成否に依存しない。進行中の Retry / Restart はその Commit を待つ。Provider の Protocol は `check(task_id, run)` になった。
+   - 承認を求めた Run と違う Run が使えば `approval_superseded`。Task の現在の Run でない Worker は、開くのも使うのも `task_superseded`。
+   - 開くとき（`require_active_task`）も、同じ Transaction で要求の Run が現在の Run であることを確認し、**その Task の別の Run の Open な承認を、システムとして取り消す**（履歴に残る）。取り消しは Listener の失敗を補い、「開いている承認は呼び出しごとに 1 つ」の制約で新しい Run が同じ呼び出しを求められなくなるのを防ぐ。Audit 行は書かない（Listener が書く `task_ended` の行は、動かなかった Listener のものとして存在しない。履歴 `tool_approval_events` には残る）。
+   - 採らなかった案: (a) `call_hash` に Run を入れる: 古い承認と新しい承認が別の Hash になり一意性の衝突は避けられるが、Hash は不可逆で、消費の Transaction が Task の行の Run と照合する値（承認の行の列）にならない。列を持つほうが単純で、DB の CHECK も効く。(b) DB の Trigger が `tasks` を読む: Task の生涯と承認の証拠を結びつける（承認は Task が Archive されても読めるべき）。(c) Store が Task の行から Run を読んで承認に付ける（Context に Run を持たない）: 古い Worker が新しい Run の承認を開き、使えてしまう。
+4. **再び動く Task。** Retry / Restart（終了状態からの遷移）でも Open な承認を取り消す。終了時の取り消しが失敗して残った承認は、再開した Task では使えず（3 の Run による）、新しい承認を求め直す。
+5. **Human が承認した点（2026-09-25）:** (a) 承認を要する呼び出しだけが Task の状態を見ること（`AUTO` / `SCOPED_AUTO` は見ない。終わった Task へ呼び出しを渡さないのは Orchestrator の責務）。(b) 既定の Provider を「不明 = 拒否」にしたこと（配線を忘れると承認を要する呼び出しが全て通らない）。(c) 再試行の仕組み（再取り消しの Job）を持たず、Broker の Fail-closed に任せること。(d) 開くとき・使うときの Task の確認を `PostgresApprovalStore` が `tasks` の行で行うこと（Tool の Store が Task の Table を読み Lock する）。(e) 承認を Task の Run（試行の番号と Retry の回数）に結びつけ、Retry / Restart の後の Run は前の Run の承認を使えないこと、新しい Run が求めたときに前の Run の Open な承認をシステムとして取り消すこと（Audit 行なし）、`TaskContext.run` を Orchestrator が作ること。要件は Retry / Restart と承認の関係を定めていない。Retry（同じ試行のやり直し）でも承認を引き継がない選択は、Retry が「同じ Context のやり直し」であることと緊張する（4 の取り消しに合わせて、引き継がない側を選んだ）。
+
+## 既知の制限と後続の課題
+
+- Symlink の確認と使用の間の競合（TOCTOU）、DNS Rebinding、Redirect は Executor の責務（[README](../../apps/backend/README.md) の「Executor の契約」）。
+- Approval の期限は Application の時計で比較する（Database の時計ではない）。Lock を待った後の時刻は、呼び出し側の `now` に、呼び出しが始まってから経った単調時計の時間を足したもの（独立 Review 第 6 回: 待つ前の `now` のままだと、Lock を待つ間に期限が過ぎた承認を消費できた。`consume` は Task の行と承認の行を Lock した**後**に、`open_request` は advisory lock と Task の行の後に読み直す）。時計が戻ることはなく、待った分だけ期限を短くする向きにしか働かない。Database の時計を併用する案（`greatest(Application の時計, clock_timestamp())`）は、`expires_at` と同じ時計で比べるという上の方針と、固定の時刻で動く既存の Test を崩すので採らない。Human は Application の時計だけを使う方針で承認した（2026-09-25）。
+- `PostgresApprovalStore.history`（Test と診断が読む。どの Request の経路からも呼ばれない）は Pool の Session で動き、期限で区切っていない。
+- 却下の Cooldown は Hash 単位で、引数を変えた別の呼び出しは止めない（件数の上限が量を抑える）。
+- 引数のない Tool は承認を開けない。承認が要る Tool は、何をするかを表す引数を必須にする。
+- Credential の検出は形のわかる Format と代入の形だけ。
+- Task の Scope（作業対象の Repository とその ACL を含む）・Grant・Project の状態は、Orchestrator が呼び出しごとに現在の値から作る（Broker は渡された Context を信頼する）。Path も `repository` 引数もない Tool（Remote の下にない URL だけの Tool を含む）は、Repository の ACL では判定できない。
+  Orchestrator の実装（PAW-034、[#30](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/30)）の受け入れ条件に、次の 3 点を追記済みである: 終了した Task へ呼び出しを渡さない、`TaskContext.run` を Orchestrator が組み立てる、Repository へ Remote を登録する。
+
+## リスク
+
+- 承認の Role を分離するまで、Application の Process の侵害は承認の偽造につながる（Database の保証は、書き換え・Replay・削除・自己承認以外の Application の誤りに効く）。
+- 要件より緩い点（`credential-use`、特権の Tool）は Tool の宣言に頼る。宣言を誤った Tool は、要件より少ない確認で走る。Tool の登録時のレビューで、Credential を管理する Tool と特権 Tool が `STRONG_APPROVAL` を宣言することを確認する（承認の条件）。
+- 厳しい点（Host の外の読み取りが `APPROVAL`）は、調査型の Task で承認が増える。運用で `TaskScope.hosts` の作り方を見直す。
+
+## 承認後の扱い
+
+2026-09-25 に承認された。PAW-031 の PR は本 Decision を参照する。
+Human が変更を指示した項目は、この Decision を更新してから実装を合わせる。
+承認後に方針を変える場合は、この Decision を書き換えず、新しい Decision から `Supersedes` する。
+[REQUIREMENTS.md](../../REQUIREMENTS.md) の原文は書き換えない。
+
+## 承認時の決定（2026-09-25）
+
+- 本文の各点を、提案どおり承認した。
+- PostgreSQL は **18 以上を必須**とする（承認の要求と使用の経路。決定済み）。本文の 4 の 5 は「18 以上」と書いており、README・CI・Test も 18 である。
+- 要件より緩い 2 点（Task Scope 内の `credential-use` を `SCOPED_AUTO` とすること、Host 全体の環境の `write` / `execute` を `APPROVAL` とすること）は、**条件つきで承認**した。
+  条件: Tool の登録時のレビューで、「Credential を管理する Tool と特権 Tool は `STRONG_APPROVAL` を宣言する」ことを確認する。
+- 承認する側と使う側の Role の分離は、PAW-022 / 023（[#19](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/19)・[#20](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/20)、受け入れ条件に追記済み）で行う。
+  それまでの前提条件として、**「Agent の Runtime へ、Application の Role の DB 接続を渡さない」** を明記する（本文の 7 の 3、README）。
+- PAW-034（[#30](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/30)）の受け入れ条件に、「終了した Task へ呼び出しを渡さない」「`TaskContext.run` を Orchestrator が組み立てる」「Repository へ Remote を登録する」を追記済みである。
+- 暫定値（256 文字、10 件、5 分、`transaction_timeout_seconds` と `timeout_seconds` の 3 秒）は、暫定値として承認した。設定で変えられる（本文の 5 の 3）。
+- 本文の「36 マス」と表の食い違い（表が 24 マス分だけだった点）と、「Task の Host の外」の `write`（`APPROVAL`）と 8 の 5 の「書き込みは拒否」の食い違いは、実装（`policy.py` の表）に合わせて本文を直した（承認した方針は変えていない）。

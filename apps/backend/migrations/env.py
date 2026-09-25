@@ -17,6 +17,7 @@ from paw_backend.identity import models as identity_models  # noqa: F401
 from paw_backend.memory import models as memory_models  # noqa: F401
 from paw_backend.tasks import models as task_models  # noqa: F401
 from paw_backend.tasks.queueing import models as queueing_models  # noqa: F401
+from paw_backend.tools import models as tool_models  # noqa: F401
 
 config = context.config
 

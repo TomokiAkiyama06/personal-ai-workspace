@@ -49,6 +49,7 @@ personal-ai-workspace/
 │  │  │     ├─ 0001_baseline.py
 │  │  │     ├─ 0021_owner_setup.py
 │  │  │     ├─ 0025_audit_events.py
+│  │  │     ├─ 0031_tool_approvals.py
 │  │  │     ├─ 0032_task_lifecycle.py
 │  │  │     ├─ 0033_task_queue_budget_loop.py
 │  │  │     └─ 0040_memory_schema.py
@@ -90,6 +91,26 @@ personal-ai-workspace/
 │  │  │  │     ├─ sql.py
 │  │  │  │     ├─ task_queue.py
 │  │  │  │     └─ validation.py
+│  │  │  ├─ tools/
+│  │  │  │  ├─ __init__.py
+│  │  │  │  ├─ approval_memory.py
+│  │  │  │  ├─ approval_store.py
+│  │  │  │  ├─ approval_types.py
+│  │  │  │  ├─ approvals.py
+│  │  │  │  ├─ audit.py
+│  │  │  │  ├─ broker.py
+│  │  │  │  ├─ budget.py
+│  │  │  │  ├─ calls.py
+│  │  │  │  ├─ capabilities.py
+│  │  │  │  ├─ credentials.py
+│  │  │  │  ├─ decisions.py
+│  │  │  │  ├─ interfaces.py
+│  │  │  │  ├─ models.py
+│  │  │  │  ├─ policy.py
+│  │  │  │  ├─ registry.py
+│  │  │  │  ├─ runner.py
+│  │  │  │  ├─ scope.py
+│  │  │  │  └─ task_state.py
 │  │  │  └─ api/
 │  │  │     ├─ __init__.py
 │  │  │     ├─ deps.py
@@ -107,6 +128,7 @@ personal-ai-workspace/
 │  │     ├─ teardown_child.py
 │  │     ├─ test_config.py
 │  │     ├─ test_database.py
+│  │     ├─ test_db_transact_abortable.py
 │  │     ├─ test_errors.py
 │  │     ├─ test_events.py
 │  │     ├─ test_health.py
@@ -131,7 +153,19 @@ personal-ai-workspace/
 │  │     ├─ test_queueing_queue.py
 │  │     ├─ test_queueing_schema.py
 │  │     ├─ test_security.py
-│  │     └─ test_server.py
+│  │     ├─ test_server.py
+│  │     ├─ test_tools_approvals.py
+│  │     ├─ test_tools_broker.py
+│  │     ├─ test_tools_credentials.py
+│  │     ├─ test_tools_migration.py
+│  │     ├─ test_tools_policy.py
+│  │     ├─ test_tools_postgres.py
+│  │     ├─ test_tools_postgres_roles.py
+│  │     ├─ test_tools_registry.py
+│  │     ├─ test_tools_runner.py
+│  │     ├─ test_tools_scope.py
+│  │     ├─ tools_store_contract.py
+│  │     └─ tools_support.py
 │  ├─ cli/
 │  │  └─ README.md
 │  └─ web/
@@ -177,6 +211,7 @@ personal-ai-workspace/
 │     ├─ 0003-backend-cli-web-implementation-stack.md
 │     ├─ 0004-rbac-capability-and-audit-policy.md
 │     ├─ 0005-owner-setup-and-recovery.md
+│     ├─ 0006-tool-broker-policy.md
 │     ├─ 0007-task-queue-budget-and-loop-policy.md
 │     ├─ 0014-task-working-set-persistence.md
 │     └─ README.md
