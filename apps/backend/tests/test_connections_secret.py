@@ -99,7 +99,7 @@ class SecretTextTest(unittest.TestCase):
         self.assertEqual(len({self.secret, Secret(CANARY)}), 2)
 
     def test_a_subclass_cannot_bypass_the_text_protection(self):
-        self.assertEqual(Secret.__slots__, ("_value",))
+        self.assertEqual(Secret.__slots__, ("_value", "_needle"))
 
 
 class SecretScrubTest(unittest.TestCase):

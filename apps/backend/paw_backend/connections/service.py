@@ -70,9 +70,10 @@ call: the handle is resolved into a ``Secret`` and the adapter runs, under ONE d
 of the caller gets through (it runs as a task the caller keeps and waits for; the
 cancel is raised afterwards): the outcome, the tokens and the database-clock duration
 are written to the usage row and the tokens are charged to the task's budget; 8. the
-answer, scrubbed of the credential (returned whole or refused: never shortened, never
-longer than the limit after the credential was replaced and redacted; the token counts
-the adapter reported are kept even when the answer is refused).
+answer, scrubbed of the credential (scrub, redact the credential formats, scrub again,
+then check: returned whole or refused; never shortened, never longer than the limit,
+never with the credential still readable in any normalised form; each valid token
+count the adapter reported is kept even when the answer is refused).
 
 A quota that is reached never interrupts a call that has started: the check is at the
 admission only, and a running TASK is not refused at its next call either (Decision
@@ -141,6 +142,7 @@ from paw_backend.connections.errors import (
     ConnectionPermissionDeniedError,
     ConnectionUnavailableError,
     InputProblem,
+    InvalidConnectionInputError,
     QuotaExceededError,
     TargetUserNotFoundError,
     TaskBudgetError,
@@ -237,6 +239,16 @@ class _Outcome:
     def cancelled(self) -> None:
         self.status = UsageStatus.CANCELLED
         self.failure = None
+
+
+def _token_count(value: object) -> tuple[int | None, bool]:
+    """``(the count to keep, whether it was valid)``: an unknown count (``None``) is
+    valid and kept as unknown; an invalid one (negative, over the limit, a bool, a
+    float, a string) is not kept."""
+    try:
+        return validate_optional_tokens("tokens", value, MAX_TOKENS_PER_CALL), True
+    except InvalidConnectionInputError:
+        return None, False
 
 
 def _failure_code_of(error: BaseException) -> FailureCode:
@@ -770,24 +782,21 @@ class ConnectionService:
             )
             outcome.failed(code)
             return
-        # The token counts are validated on their own, and kept whatever happens to
-        # the body below: the provider consumed them even if the answer cannot be
-        # returned, so the usage row, the quotas and the task's budget count them.
-        try:
-            if type(raw) is not AdapterResult:
-                raise TypeError("not an AdapterResult")
-            input_tokens = validate_optional_tokens(
-                "input_tokens", raw.input_tokens, MAX_TOKENS_PER_CALL
-            )
-            output_tokens = validate_optional_tokens(
-                "output_tokens", raw.output_tokens, MAX_TOKENS_PER_CALL
-            )
-        except Exception as error:
-            self._log_invalid_response(admission, error)
+        # The token counts are validated on their own (each of the two, independently
+        # of the other and of the body), and every valid one is kept whatever happens
+        # next: the provider consumed the tokens even if the answer cannot be
+        # returned, so the usage row, the quotas and the task's budget count them. An
+        # invalid count is not kept (NULL) and makes the response invalid.
+        if type(raw) is not AdapterResult:
+            self._log_invalid_response(admission, TypeError())
             outcome.failed(FailureCode.INVALID_RESPONSE)
             return
-        outcome.input_tokens = input_tokens
-        outcome.output_tokens = output_tokens
+        outcome.input_tokens, input_valid = _token_count(raw.input_tokens)
+        outcome.output_tokens, output_valid = _token_count(raw.output_tokens)
+        if not (input_valid and output_valid):
+            self._log_invalid_response(admission, ValueError())
+            outcome.failed(FailureCode.INVALID_RESPONSE)
+            return
         try:
             text = validate_result_text("text", raw.text, ANSWER_LIMIT)
         except Exception as error:
@@ -795,19 +804,35 @@ class ConnectionService:
             outcome.failed(FailureCode.INVALID_RESPONSE)
             return
         # The credential must not come back to the user or the agent, even if the
-        # adapter (a bug, an echo of the provider) put it in the answer: the exact
-        # value first, then every recognisable format. Both REPLACE text by longer
-        # text (a short credential becomes ``[REDACTED]``, ``token=abcdef`` becomes
-        # ``token=[REDACTED]``), and ``redact_text`` cuts an input over its own limit
-        # and only marks it. An answer is returned whole or refused, never shortened
-        # and never longer than the limit: the length is checked before the redaction
-        # (its input) and again after it (what is returned).
+        # adapter (a bug, an echo of the provider) put it in the answer. Removing it
+        # takes three steps, in this order, because each can change the text in a way
+        # that matters to the others:
+        #   1. scrub: the value, in the normalised, case-folded view of the text too
+        #      (``ＡＢＣ１２３`` is the value ``ABC123``);
+        #   2. redact the recognisable credential formats: ``redact_text`` normalises
+        #      the WHOLE text when it finds one, which can CREATE the exact value
+        #      (a composition, a format character removed between two halves), and it
+        #      lengthens text (``token=abcdef`` becomes ``token=[REDACTED]``);
+        #   3. scrub again, and only then check what is left.
+        # An answer is returned whole or refused: never shortened (``redact_text``
+        # cuts an input over its own limit and only marks it), never longer than the
+        # limit, and never with the value still readable in it.
         text = secret.scrub(text)
+        redactions = 0
         if len(text) <= ANSWER_LIMIT:
             text, redactions = redact_text(text)
+            text = secret.scrub(text)
         if len(text) > ANSWER_LIMIT:
             logger.warning(
                 "connection call returned an answer that is too long: usage_id=%s",
+                admission.usage_id,
+            )
+            outcome.failed(FailureCode.INVALID_RESPONSE)
+            return
+        if secret.visible_in(text):
+            logger.warning(
+                "connection call returned an answer that still holds the credential:"
+                " usage_id=%s",
                 admission.usage_id,
             )
             outcome.failed(FailureCode.INVALID_RESPONSE)

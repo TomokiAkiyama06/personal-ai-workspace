@@ -146,23 +146,50 @@ class TokenCountsAreKeptTest(ExecuteCase):
         await self.refused()
         self.assertEqual(self.tokens_of_the_row(), (None, None))
 
-    async def test_counts_that_are_not_valid_are_not_kept(self):
-        for label, input_tokens, output_tokens in (
-            ("negative input", -1, 3),
-            ("negative output", 7, -1),
-            ("too many", 10**9 + 1, 3),
-            ("a bool", True, 3),
-            ("a float", 7, 1.5),
-            ("a string", "7", 3),
-        ):
-            with self.subTest(label):
-                self.clear_usage_rows()
-                answer = AdapterResult("ok", 1, 1)
-                object.__setattr__(answer, "input_tokens", input_tokens)
-                object.__setattr__(answer, "output_tokens", output_tokens)
-                self.codex.result = answer
-                await self.refused()
-                self.assertEqual(self.tokens_of_the_row(), (None, None))
+    async def test_each_count_is_kept_or_dropped_on_its_own(self):
+        # Every combination of valid and invalid: the valid one is kept, the invalid
+        # one is NULL, and the response is invalid whenever either is.
+        valid = {"input": 1000, "output": 300}
+        bad_values = (-1, 10**9 + 1, True, 1.5, "7")
+        for bad in bad_values:
+            for label, input_tokens, output_tokens, expected in (
+                ("both valid", 1000, 300, (1000, 300)),
+                ("input invalid", bad, 300, (None, 300)),
+                ("output invalid", 1000, bad, (1000, None)),
+                ("both invalid", bad, bad, (None, None)),
+            ):
+                with self.subTest(label, bad=repr(bad)):
+                    self.clear_usage_rows()
+                    answer = AdapterResult("ok", valid["input"], valid["output"])
+                    object.__setattr__(answer, "input_tokens", input_tokens)
+                    object.__setattr__(answer, "output_tokens", output_tokens)
+                    self.codex.result = answer
+                    if label == "both valid":
+                        result = await self.call()
+                        self.assertEqual(
+                            (result.input_tokens, result.output_tokens), expected
+                        )
+                        (row,) = self.usage_rows()
+                        self.assertEqual(row["status"], "succeeded")
+                        self.assertEqual(
+                            (row["input_tokens"], row["output_tokens"]), expected
+                        )
+                    else:
+                        await self.refused()
+                        self.assertEqual(self.tokens_of_the_row(), expected)
+
+    async def test_an_unknown_count_next_to_an_invalid_one_stays_unknown(self):
+        answer = AdapterResult("ok", None, 5)
+        object.__setattr__(answer, "output_tokens", -5)
+        self.codex.result = answer
+        await self.refused()
+        self.assertEqual(self.tokens_of_the_row(), (None, None))
+
+    async def test_a_valid_unknown_count_and_a_valid_known_one_are_both_kept(self):
+        self.codex.input_tokens, self.codex.output_tokens = None, 5
+        self.codex.text = expanding_answer(76_923)  # refused for its body
+        await self.refused()
+        self.assertEqual(self.tokens_of_the_row(), (None, 5))
 
     async def test_an_answer_that_is_not_a_result_keeps_nothing(self):
         self.codex.result = {"text": "x", "input_tokens": 7}
@@ -205,10 +232,29 @@ class BudgetIsChargedForARefusedAnswerTest(TaskBudgetCase):
         await self.refused()
         self.assertEqual(await self.consumed(BudgetKind.TOKENS), 15)
 
-    async def test_counts_that_are_not_valid_charge_nothing(self):
+    async def test_the_valid_count_is_charged_when_the_other_is_invalid(self):
+        await self.with_budget(BudgetPreset.STANDARD)
+        answer = AdapterResult("ok", 1000, 1)
+        object.__setattr__(answer, "output_tokens", -1)
+        self.codex.result = answer
+        await self.refused()
+        self.assertEqual(await self.consumed(BudgetKind.TOKENS), 1000)
+        (row,) = self.usage_rows()
+        self.assertEqual((row["input_tokens"], row["output_tokens"]), (1000, None))
+
+    async def test_the_other_valid_count_is_charged_too(self):
+        await self.with_budget(BudgetPreset.STANDARD)
+        answer = AdapterResult("ok", 1, 300)
+        object.__setattr__(answer, "input_tokens", 10**9 + 1)
+        self.codex.result = answer
+        await self.refused()
+        self.assertEqual(await self.consumed(BudgetKind.TOKENS), 300)
+
+    async def test_two_invalid_counts_charge_nothing(self):
         await self.with_budget(BudgetPreset.STANDARD)
         answer = AdapterResult("ok", 1, 1)
-        object.__setattr__(answer, "output_tokens", -5)
+        object.__setattr__(answer, "input_tokens", -5)
+        object.__setattr__(answer, "output_tokens", True)
         self.codex.result = answer
         await self.refused()
         self.assertEqual(await self.consumed(BudgetKind.TOKENS), 0)

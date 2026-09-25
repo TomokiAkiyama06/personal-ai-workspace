@@ -1439,7 +1439,7 @@ result = await service.execute(
   Audit、Log、Error、`repr`、User と Agent への返り値に、平文も Handle も出ません（Owner / Admin の `get_connection` も Handle を返しません）。
 - `Secret` は `repr` / `str` / `format` / `bytes` / Pickle / `copy` / `vars` / JSON のどれでも値を出しません（`Secret(<redacted>)`）。値を読めるのは `reveal()` だけで、呼ぶのは Adapter（Backend の Code）です。
   この Package は Secret Store を持たず、平文をどの形でも書きません。Secret Store の製品と保存方式は、要件どおり実装時の選択のままです。
-- Adapter の返した文は、返す前に Credential の値そのもの（`Secret.scrub`）と形のわかる Credential（[Tool Broker](#tool-broker--capability-policy) の `redact_text`）を取り除きます。値の一部だけの一致や変形した形は防げません（Best Effort）。
+- Adapter の返した文は、返す前に **scrub → 形のわかる Credential の Redact（`tools.credentials.redact_text`）→ scrub → 検査** の順で処理します。`redact_text` は Credential の形を見つけると文の**全体**を正規化する（書式文字の除去と NFKC）ため、全角の `ＡＢＣ１２３` やゼロ幅文字で分けた値が、その処理で**厳密な値そのものに変わりうる**ためです。scrub は値を、正規化・大文字小文字を畳んだ見え方（`fold`）でも探し、元の文の該当する範囲を `[REDACTED]` にします（全角・半角、大文字小文字、ゼロ幅文字、結合文字・ハングルの Jamo の並びを含む）。Redact の後にもう 1 度 scrub し、最後に `Secret.visible_in` で値がどの見え方でも残っていないことを確かめます。残っている答え（`[REDACTED]` の中に値が入る短い値、scrub が追えない文字をまたぐ合成など）は返さず、`invalid_response` の失敗にします（Token 数は数えます）。**追えない形:** 別の文字体系の似た字（キリル文字の `а` など）、空白や改行で区切った値、Encode（base64、逆順、Escape）。
 - Adapter や Resolver が投げた例外の文・名前は、記録も Log も返却もしません。Log に出るのは、固定の許可リスト（`log_type_name`）にある例外の型名だけです。
 - Connection の Handle を Task の `credential_handles` に入れてはいけません（Orchestrator が TaskScope を作るときの規則）。
 
@@ -1547,7 +1547,7 @@ CHECK 制約が、状態と終了・時間・Token・失敗の種類の対応（
 - Process が Admission と精算の間で落ちた行は `in_flight` のまま残り、要求数にだけ数えられます（掃除は未実装）。精算に失敗した呼び出しは、答えを返し、失敗を Log（型名と使用量の ID）に残します。Task の Budget への加算は精算と別の Transaction です。
 - 精算と Budget の加算が終わるまで呼び出し側の Cancel を伝えないため、Database や Budget の Store が止まっていると、Cancel はその分（使用量の行は Database の期限まで。Budget の加算は `BudgetTracker` が中断できない接続を使うため上限なし）遅れます。Event Loop の終了で Task ごと Cancel された精算は防げず、行が `in_flight` のまま残ります。
 - Adapter の答えは 1,000,000 文字までです（Credential の Redact の上限 `tools.credentials.MAX_TEXT_CHARS` と同じ）。**返す文の長さで判定します**: Adapter が返した長さ、Credential の値の置き換え（短い Credential は `[REDACTED]` になり長くなる）の後、形のわかる Credential の Redact（`token=abcdef` が `token=[REDACTED]` になるように**長くなりうる**）の後の、どれかが上限を超える答えは、途中で切らずに `invalid_response` の失敗にします（`redact_text` は長い文を切って印を付けるだけなので、黙って短くなった答え、上限を超えて長くなった答えを成功として返さないため）。
-- 答えを返せない失敗（`invalid_response`）でも、Adapter が返した Token 数が有効なら、使用量の行・Token の Quota・Task の Budget が数えます（Provider は消費しているため）。Token 数は答えの本文とは別に検査し、有効でない数（負、上限超、bool、非整数）は保存しません（NULL）。
+- 答えを返せない失敗（`invalid_response`）でも、Adapter が返した Token 数が有効なら、使用量の行・Token の Quota・Task の Budget が数えます（Provider は消費しているため）。入力と出力の Token 数は、答えの本文とも互いにも**別々に**検査し、有効な数は保存し（もう一方が無効でも数える）、有効でない数（負、上限超、bool、非整数）は保存しません（NULL）。どちらかが無効なら、答えは `invalid_response` です。
 - Prompt の中身は検査しません（Credential の混入や Privacy の Filter は Orchestrator と Tool Broker の責務）。
 - 使用量の保存期間、集計、Admin の Graph は未実装。専用の Capability（#82）と、Credential の差し替え・削除への Step-up（PAW-023 の後）は、Decision 0016 で承認された後続の Issue です（今は `admin.config.manage` の通常の認可だけ）。
 - Health Check を動かす Scheduler と、状態の変化の Owner への通知は Orchestrator / 通知の Issue です。
