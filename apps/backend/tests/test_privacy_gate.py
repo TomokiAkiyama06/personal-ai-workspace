@@ -944,6 +944,74 @@ class AuthorizeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sink.records, ())
 
 
+class RaisingNameMeta(type):
+    """A metaclass whose ``__name__`` (a property here) raises."""
+
+    @property
+    def __name__(cls):
+        raise RuntimeError("metaclass __name__")
+
+
+class RaisingGetattributeMeta(type):
+    """A metaclass that raises on every attribute read of its classes."""
+
+    def __getattribute__(cls, name):
+        raise RuntimeError("metaclass __getattribute__ " + name)
+
+
+class RaisingHashMeta(type):
+    """A metaclass whose classes can be neither hashed nor compared."""
+
+    def __hash__(cls):
+        raise RuntimeError("metaclass __hash__")
+
+    def __eq__(cls, other):
+        raise RuntimeError("metaclass __eq__")
+
+
+def hostile_error_instances():
+    """``(label, exception)`` pairs: the classes a sink can make up (adapter data)."""
+    secret_name = type(f"access_token={SECRET}", (Exception,), {})
+    forged_name = type("Boom\nWARNING forged log line", (Exception,), {})
+    lookalike = type("RuntimeError", (Exception,), {})
+
+    class Sub(RuntimeError):
+        pass
+
+    class RenamedClass(RuntimeError):
+        __name__ = "ValueError"
+        __qualname__ = f"access_token={SECRET}"
+        __module__ = "builtins"
+
+    class RaisingName(Exception, metaclass=RaisingNameMeta):
+        pass
+
+    class RaisingGetattribute(Exception, metaclass=RaisingGetattributeMeta):
+        pass
+
+    class RaisingHash(Exception, metaclass=RaisingHashMeta):
+        pass
+
+    class Both(RuntimeError, metaclass=RaisingHashMeta):
+        pass
+
+    class Group(ExceptionGroup):
+        pass
+
+    return [
+        ("credential in the name", secret_name(SECRET)),
+        ("newline in the name", forged_name(SECRET)),
+        ("named like a builtin", lookalike(SECRET)),
+        ("subclass of a builtin", Sub(SECRET)),
+        ("renamed class", RenamedClass(SECRET)),
+        ("raising metaclass __name__", RaisingName(SECRET)),
+        ("raising metaclass __getattribute__", RaisingGetattribute(SECRET)),
+        ("raising metaclass __hash__ and __eq__", RaisingHash(SECRET)),
+        ("builtin subclass with raising hash", Both(SECRET)),
+        ("subclass of ExceptionGroup", Group(SECRET, [ValueError(SECRET)])),
+    ]
+
+
 class RaisingSink:
     def __init__(self, error: BaseException) -> None:
         self.error = error
@@ -979,6 +1047,26 @@ class AuditFailureTest(unittest.IsolatedAsyncioTestCase):
             gate.authorize(
                 "python asyncio", [], project_id=PROJECT_ID, provider_kinds=WEB
             )
+        )
+
+    async def refused(self, gate):
+        """The ``PrivacyRefusal`` of ``authorize``; anything else fails the test.
+
+        A hostile sink error must not stay chained to the failure (unittest would
+        format its class and run the class's own hooks while reporting), so the
+        test fails from outside the ``except`` block.
+        """
+        problem = False
+        try:
+            await self.authorize(gate)
+        except PrivacyRefusal as refusal:
+            return refusal
+        except Exception:
+            problem = True
+        self.fail(
+            "authorize raised something other than a PrivacyRefusal"
+            if problem
+            else "authorize did not refuse"
         )
 
     async def test_any_sink_exception_refuses_the_send(self):
@@ -1021,6 +1109,62 @@ class AuditFailureTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("RuntimeError", message)
         self.assertNotIn(SECRET, message)
         self.assertNotIn("python", message)
+
+    async def test_the_logged_type_is_a_fixed_value_the_sink_cannot_choose(self):
+        # ``type(error).__name__`` is the sink's data: a credential, a newline that
+        # forges the next log line, or a metaclass hook that raises. The gate logs
+        # a name only for a builtin or ``paw_backend.research`` exception class
+        # (the broker's ``log_type_name``) and ``adapter_error`` for all the rest.
+        logging.disable(logging.NOTSET)
+        for label, error in hostile_error_instances():
+            with self.subTest(sink_error=label):
+                gate = PrivacyGate(RaisingSink(error), clock=lambda: NOW)
+                with self.assertLogs(
+                    "paw_backend.research.privacy", level="WARNING"
+                ) as logs:
+                    refusal = await self.refused(gate)
+                self.assertIs(refusal.reason, Reason.AUDIT_FAILED)
+                self.assertEqual(len(logs.records), 1)
+                self.assertEqual(
+                    logs.records[0].getMessage(),
+                    "external send audit failed: exception_type=adapter_error",
+                )
+                self.assertEqual(logs.output[0].count("\n"), 0)
+                self.assertNotIn(SECRET, logs.output[0])
+                self.assertIsNone(refusal.__cause__)
+                self.assertTrue(refusal.__suppress_context__)
+
+    async def test_the_type_of_a_builtin_or_package_exception_is_still_named(self):
+        logging.disable(logging.NOTSET)
+        for error, name in (
+            (RuntimeError(SECRET), "RuntimeError"),
+            (ConnectionRefusedError(SECRET), "ConnectionRefusedError"),
+            (ExceptionGroup(SECRET, [ValueError(SECRET)]), "ExceptionGroup"),
+            (TimeoutError(SECRET), "TimeoutError"),
+        ):
+            with self.subTest(name=name):
+                gate = PrivacyGate(RaisingSink(error), clock=lambda: NOW)
+                with self.assertLogs(
+                    "paw_backend.research.privacy", level="WARNING"
+                ) as logs:
+                    with self.assertRaises(PrivacyRefusal):
+                        await self.authorize(gate)
+                self.assertEqual(
+                    logs.records[0].getMessage(),
+                    f"external send audit failed: exception_type={name}",
+                )
+
+    async def test_a_sink_that_is_too_slow_is_logged_as_a_timeout(self):
+        logging.disable(logging.NOTSET)
+        gate = PrivacyGate(HangingSink(), clock=lambda: NOW, audit_timeout_seconds=0.2)
+        with self.assertLogs("paw_backend.research.privacy", level="WARNING") as logs:
+            with self.assertRaises(PrivacyRefusal) as caught:
+                await self.authorize(gate)
+        self.assertIs(caught.exception.reason, Reason.AUDIT_FAILED)
+        self.assertEqual(
+            logs.records[0].getMessage(),
+            "external send audit failed: exception_type=TimeoutError",
+        )
 
     async def test_a_sink_that_is_too_slow_refuses_the_send_and_is_cancelled(self):
         sink = HangingSink()

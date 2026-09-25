@@ -1582,7 +1582,7 @@ Gate は、外へ出してよい `MinimizedQuery` を返すか、`PrivacyRefusal
 | `truncated` | 長さの上限で切ったか |
 
 Record は Query の本文、消した文字列、Context の本文を**持ちません**（Field 自体がありません）。`ContextPiece` の本文は `repr` にも出ません。
-Sink が例外を出す、5 秒（既定）以内に終わらない、満杯である場合は、`audit_failed` で拒否し、送りません。ログには例外の**型名**だけを 1 行（WARNING）出します。
+Sink が例外を出す、5 秒（既定）以内に終わらない、満杯である場合は、`audit_failed` で拒否し、送りません。ログには例外の型を 1 行（WARNING）だけ出しますが、それは**固定の分類**で、Sink が決められる文字列は入りません。Sink が上げた例外の Class 名は Sink のデータです（`type("access_token=SECRET\nforged", (Exception,), {})()` のように、Credential や、次の Log 行を偽造する改行を入れられ、Metaclass の `__name__` や `__getattribute__` を上書きして、名前を読む処理そのものを例外にもできます）。そのため Gate は `type(error)` が組み込みの例外、またはこの Package の例外の Class **そのもの**（`is` で照合。Subclass や名前だけ似せた Class は含まない）のときだけその Class 名（`RuntimeError`、時間切れの `TimeoutError` など）を出し、それ以外は固定の `adapter_error` にします。これは Provider Broker の `log_type_name`（「例外の文言は Code にも Result にも Log にも入りません」の節。一覧は `broker.py` の `LOGGED_EXCEPTION_TYPES`）をそのまま使っており、Class の属性は 1 つも読まず、`id` で一覧を引くので、Metaclass の Hook（`__getattribute__`、`__name__`、`__hash__`、`__eq__`）は呼ばれず、どんな Class の例外でも拒否は `audit_failed` のままです。組み込み以外の Library の例外（DB Driver の例外など）は `adapter_error` になり、型では区別できません。
 Record は「送ってよいと判断した」記録で、Provider が答えたかは含みません。拒否した要求は Record を作りません。
 
 ### Broker への差し込み
@@ -1631,7 +1631,7 @@ AGENTS.md のとおり、同じ失敗を繰り返したのでエスカレーシ�
 ### Test
 
 `apps/backend/tests/test_privacy_*.py` です。標準 `unittest` だけで、DB も Network も使いません。
-`test_privacy_rules_text.py`、`test_privacy_rules_abstract.py`、`test_privacy_rules_properties.py` は `rules.py` の各関数を、`test_privacy_gate.py` は Gate（拒否、最終検査、Audit の失敗）を、`test_privacy_broker.py` は `ResearchBroker` への差し込みを、`test_privacy_contract.py` は値の検証を確かめます。
+`test_privacy_rules_text.py`、`test_privacy_rules_abstract.py`、`test_privacy_rules_properties.py` は `rules.py` の各関数を、`test_privacy_gate.py` は Gate（拒否、最終検査、Audit の失敗。Class 名に Credential や改行を入れた例外、Metaclass の `__name__`・`__getattribute__`・`__hash__`・`__eq__` が例外になる Class を Sink が上げても、Log の型が固定の `adapter_error` で、拒否が `audit_failed` のままであること）を、`test_privacy_broker.py` は `ResearchBroker` への差し込みを、`test_privacy_contract.py` は値の検証を確かめます。
 Timeout の Test は、永遠に待つ Sink を 0.2 秒で打ち切り、成功する経路は即座に終わる構成です（30 秒の Guard で CI の停止を防ぎます）。
 
 ## 依存 Package

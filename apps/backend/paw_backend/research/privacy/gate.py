@@ -29,7 +29,9 @@ Order of ``PrivacyGate.minimize`` (the draft is the caller's proposed query):
    the same folding as the copy detection but not taken from ``rules.py``).
 
 Nothing in an exception, a log line or a record contains the draft, a piece, the
-query or an exception text of the audit sink.
+query, an exception text of the audit sink or a name that the sink chose (the log
+line names the class of the sink's exception only through the provider broker's
+closed ``log_type_name``).
 """
 
 import asyncio
@@ -62,6 +64,7 @@ from paw_backend.research.privacy.contract import (
     WithheldCounts,
     copy_window,
 )
+from paw_backend.research.providers.broker import log_type_name
 from paw_backend.research.providers.contract import (
     KIND_ORDER,
     ProviderKind,
@@ -287,8 +290,15 @@ class PrivacyGate:
         from the clock in UTC) is passed to ``audit.record``. If the sink raises
         any ``Exception``, or does not finish within ``audit_timeout_seconds``,
         the send is refused with ``PrivacyRefusal(AUDIT_FAILED)``: nothing is sent
-        that was not recorded. The failure is logged once at WARNING with the
-        exception TYPE name only. ``asyncio.CancelledError`` is never swallowed.
+        that was not recorded. The failure is logged once at WARNING with a fixed
+        exception type only: ``log_type_name`` of the provider broker, i.e. the name
+        of a builtin or ``paw_backend.research`` exception class (``TimeoutError``
+        for a sink that is too slow) and ``adapter_error`` for every other class
+        (a sink's own, a subclass, one that is only named like a builtin). The
+        class of the sink's exception is never asked for its name or any other
+        attribute, so a sink cannot put a credential or a newline into the log, and
+        a metaclass hook that raises cannot replace the refusal.
+        ``asyncio.CancelledError`` is never swallowed.
         A refusal from ``minimize`` happens before the sink is called (nothing is
         recorded for a refused request).
         """
@@ -322,8 +332,11 @@ class PrivacyGate:
             async with asyncio.timeout(self._audit_timeout):
                 await self._audit.record(record)
         except Exception as error:  # the sink is foreign code: fail closed
+            # The class of ``error`` is the sink's data (its name, its metaclass):
+            # log a fixed value for it, never a name it chose, and never read a
+            # hook of it, so nothing here can raise instead of the refusal.
             logger.warning(
-                "external send audit failed: exception_type=%s", type(error).__name__
+                "external send audit failed: exception_type=%s", log_type_name(error)
             )
             raise PrivacyRefusal(RefusalReason.AUDIT_FAILED) from None
         return minimized

@@ -79,7 +79,7 @@ Draft に次の規則を、この順に適用する。各規則の正確な定�
 
 ### 5. Audit
 
-- 外部へ送る前に、`ExternalSendRecord` を `ExternalSendAudit`（Protocol）へ渡す。Record が受理されなければ送らない（`audit_failed`）。Sink の例外・時間切れ（既定 5 秒）も拒否になる。
+- 外部へ送る前に、`ExternalSendRecord` を `ExternalSendAudit`（Protocol）へ渡す。Record が受理されなければ送らない（`audit_failed`）。Sink の例外・時間切れ（既定 5 秒）も拒否になる。失敗は WARNING を 1 行だけ Log に残し、例外の型は固定の分類（組み込みまたは `paw_backend.research` の例外 Class そのものならその名前、それ以外は `adapter_error`。Provider Broker の `log_type_name` と同じ）で出す。Sink の Class 名は Sink のデータで、Credential や改行を入れられ、Metaclass の Hook で読む処理が例外になり得るため、名前を読まない。
 - Record は、Query の SHA-256（塩なし。Query は Public な内容にしてから送るため）、Query の文字数、送る Provider の種類、Project ID、消した数（Credential、写しがあった Context の数、抽象化の数）、Label ごとの Context の数、切ったかどうか、時刻だけを持つ。**Query の本文、消した文字列、Context の本文は持たない。**
 - Record は「送ってよいと判断した」記録で、「送り終えた」記録ではない。Provider の成否は Record に含まない。
 - 永続化する Sink は持たない（メモリ上の Test 用 Sink だけ）。Audit Log への保存は、後続の Issue が `ExternalSendAudit` を実装して接続する。
