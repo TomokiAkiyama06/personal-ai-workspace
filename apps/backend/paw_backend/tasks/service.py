@@ -1187,7 +1187,7 @@ class TaskService:
 
     @staticmethod
     def _checked_input(value: dict[str, Any] | None) -> dict[str, Any]:
-        """Return ``value`` if PostgreSQL JSONB can hold it exactly, else raise.
+        """Return a detached copy of ``value`` if JSONB can hold it, else raise.
 
         The value is walked first (``_JsonInputCheck``: plain JSON types only,
         finite numbers, text without NUL or surrogates, bounded depth and work),
@@ -1197,10 +1197,17 @@ class TaskService:
         """
         value = {} if value is None else value
         _JsonInputCheck().check_object(value)
-        encoded = json.dumps(value, allow_nan=False)
+        try:
+            encoded = json.dumps(value, allow_nan=False)
+        except (RuntimeError, ValueError, TypeError):
+            # A caller that changes the value while it is being read.
+            raise InvalidCommandArgumentError(_INPUT_TOO_LARGE) from None
         if len(encoded) > MAX_INPUT_BYTES:
             raise InvalidCommandArgumentError(_INPUT_TOO_LARGE)
-        return value
+        # Not the caller's object: a container the caller still holds can change
+        # while a connection is awaited, after the checks above. What is stored
+        # is decoded from the very text that was measured.
+        return json.loads(encoded)
 
     @staticmethod
     def _stop_now_message(interrupted_step: str | None, reason: str) -> str:

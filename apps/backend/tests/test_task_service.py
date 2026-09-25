@@ -246,6 +246,29 @@ class CreateTaskTest(PostgresTaskTestCase):
             with self.subTest(name):
                 await self.assert_input_rejected(value)
 
+    async def test_the_stored_input_is_detached_from_the_callers_object(self):
+        # A caller that keeps its dict can change it while a connection is awaited,
+        # after the checks: what is stored must be the checked value, not that dict.
+        payload = {"a": [1, {"b": "x"}], "c": {"d": [2, 3]}}
+        checked = TaskService._checked_input(payload)
+        self.assertEqual(checked, payload)
+        self.assertIsNot(checked, payload)
+        self.assertIsNot(checked["a"], payload["a"])
+        self.assertIsNot(checked["a"][1], payload["a"][1])
+        self.assertIsNot(checked["c"], payload["c"])
+        payload["a"].append("late")
+        payload["c"]["d"].clear()
+        payload["e"] = 1
+        self.assertEqual(checked, {"a": [1, {"b": "x"}], "c": {"d": [2, 3]}})
+
+    async def test_an_input_changed_by_the_caller_during_the_encoding_is_refused(self):
+        value = {"a": 1}
+        with mock.patch.object(
+            service_module.json, "dumps", side_effect=RuntimeError("changed")
+        ):
+            with self.assertRaises(InvalidCommandArgumentError):
+                TaskService._checked_input(value)
+
     async def test_input_size_is_bounded_at_the_limit_and_by_element_count(self):
         overhead = len(json.dumps({"b": ""}))
         at_limit = {"b": "x" * (MAX_INPUT_BYTES - overhead)}
