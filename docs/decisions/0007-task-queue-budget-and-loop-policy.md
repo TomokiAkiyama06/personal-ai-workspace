@@ -52,6 +52,7 @@ PAW-033 の実装は、動かすためにこれらを仮の値で置いた。Rev
 - Loop のとき、`approach` が 1（`max_alternatives`）未満なら代替を試し（`TRY_ALTERNATIVE`）、そうでなければ上位の Agent へ渡す（`ESCALATE`）。
 - Signature は、Error class・Step・正規化した Message（先頭 2,000 文字、NFKC、小文字化、数字と ID の置換）の Hash とする。Message の原文は保存しない。
 - Loop の検知だけでは Task を `failed` にしない。
+- **検知の範囲（要件との差。承認時に確認したい）。** 要件（`REQUIREMENTS.md` の「Loop detection」）は Reactive Loop Detector の対象を「同じ失敗、同じ Tool Call、同種の修正」の繰り返しとするが、PAW-033 の受け入れ条件（`docs/IMPLEMENTATION_BACKLOG.md`）は「repeated failure loop detection」だけで、実装が検知するのは**失敗の繰り返しだけ**である（`record_failure` が受け取るのは `error_class` / `step` / `message` の失敗で、`loop_failure_signatures` は失敗の Signature だけを持つ）。成功した同じ Tool Call の繰り返し、何も変えない Tool Call、同種の修正の繰り返しは Window に入らず、`TRY_ALTERNATIVE` / `ESCALATE` を起こさない。今これらを止めるのは `tool_calls` / `steps` / `runtime_seconds` などの Budget の上限だけで、上限のない `Unlimited` の Task では何も止めない。要件にも Backlog にも、これを担う Issue の指定はなく、**担当は未定**である。入力を持つのは、Tool Call が Tool Broker（PAW-031。PAW-032 の Tool の記録は Tool 名と状態だけで、引数と結果を持たないため、同じ Call かは区別できない）、修正が Worktree（PAW-035）、判定して次の行動を選ぶのが Orchestrator（PAW-034）である。何を「同じ」とみなすか（引数・結果・差分の何を Signature にするか。原文を保存しない規則と閾値を含む）は要件にない製品判断のため、この Issue では実装しない。人間が Backlog に Issue を足すか、上の 3 つのどれかの Issue の受け入れ条件に加えるかを決める。
 
 ### 4. Budget を使い切ったときの遷移
 

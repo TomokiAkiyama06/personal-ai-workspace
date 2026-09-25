@@ -37,9 +37,9 @@ from paw_backend.research.providers import (
 from paw_backend.research.providers.broker import (
     ADAPTER_ERROR,
     LOGGED_EXCEPTION_TYPES,
-    _CancelGuard,
     log_type_name,
 )
+from paw_backend.research.providers.guard import CancelGuard
 
 from .research_support import (
     BASE_EXCEPTIONS,
@@ -625,11 +625,11 @@ class SynchronousHookCancelRequestTest(unittest.IsolatedAsyncioTestCase):
 
 
 class CancelGuardTest(unittest.IsolatedAsyncioTestCase):
-    """``_CancelGuard`` retracts exactly the requests made inside its block."""
+    """``CancelGuard`` retracts exactly the requests made inside its block."""
 
     async def test_it_retracts_every_request_made_inside(self):
         task = asyncio.current_task()
-        with _CancelGuard() as guard:
+        with CancelGuard() as guard:
             cancel_current_task(3)
             self.assertEqual(task.cancelling(), 3)
         self.assertEqual(guard.retracted, 3)
@@ -638,7 +638,7 @@ class CancelGuardTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_it_leaves_no_request_alone_when_there_was_none(self):
         task = asyncio.current_task()
-        with _CancelGuard() as guard:
+        with CancelGuard() as guard:
             pass
         self.assertEqual(guard.retracted, 0)
         self.assertEqual(task.cancelling(), 0)
@@ -647,7 +647,7 @@ class CancelGuardTest(unittest.IsolatedAsyncioTestCase):
         task = asyncio.current_task()
         task.cancel()
         try:
-            with _CancelGuard() as guard:
+            with CancelGuard() as guard:
                 cancel_current_task(2)
             self.assertEqual(guard.retracted, 2)
             self.assertEqual(task.cancelling(), 1)
@@ -660,7 +660,7 @@ class CancelGuardTest(unittest.IsolatedAsyncioTestCase):
     async def test_it_retracts_and_does_not_swallow_an_exception(self):
         task = asyncio.current_task()
         with self.assertRaises(ValueError):
-            with _CancelGuard() as guard:
+            with CancelGuard() as guard:
                 cancel_current_task()
                 raise ValueError
         self.assertEqual(guard.retracted, 1)
@@ -674,7 +674,7 @@ class CancelGuardTest(unittest.IsolatedAsyncioTestCase):
             # A loop callback runs in no task: ``current_task()`` is None.
             try:
                 self.assertIsNone(asyncio.current_task())
-                with _CancelGuard() as guard:
+                with CancelGuard() as guard:
                     pass
                 done.set_result(guard.retracted)
             except BaseException as error:
@@ -684,7 +684,7 @@ class CancelGuardTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await guarded(done), 0)
 
     def test_it_does_nothing_without_a_running_loop(self):
-        with _CancelGuard() as guard:
+        with CancelGuard() as guard:
             pass
         self.assertEqual(guard.retracted, 0)
 
