@@ -647,6 +647,27 @@ class CredentialAndAbstractionTest(unittest.TestCase):
         for private in ("fe80", "eth0", "internal", "10.0.0.5", "LOCALHOST"):
             self.assertNotIn(private, result.query)
 
+    def test_a_private_ipv6_network_is_removed(self):
+        # The review case: an unbracketed IPv6 network in CIDR form.
+        for network in (
+            "fd12:3456:789a::/48",
+            "fd00::/8",
+            "fe80::1%eth0/64",
+            "[fd12::/48]",
+            "[fd12::]/48",
+        ):
+            with self.subTest(network=network):
+                result = self.gate.minimize(f"allow {network} through the firewall", [])
+                self.assertEqual(result.query, "allow through the firewall")
+                self.assertEqual(result.abstractions, 1)
+
+    def test_a_time_range_or_a_ratio_is_not_taken_for_a_network(self):
+        for draft in ("meet 10:30/12:00 sharp", "ratio 16:9/2 wide", "a::b/c stays"):
+            with self.subTest(draft=draft):
+                result = self.gate.minimize(draft, [])
+                self.assertEqual(result.query, draft)
+                self.assertEqual(result.abstractions, 0)
+
     def test_a_public_query_is_left_alone(self):
         for draft in (
             "python asyncio TaskGroup exception handling",
@@ -868,6 +889,13 @@ class WholeTokenCopyTest(unittest.TestCase):
             [private_source("zz floor3.corp.loca zz")],
         )
         self.assertEqual(result.query, "ping now")
+
+    def test_an_address_touched_by_a_copy_leaves_no_fragment(self):
+        result = self.gate.minimize(
+            "route fd12:3456:789a:1::/64 now",
+            [private_source("zz 3456:789a:1::/64 zz")],
+        )
+        self.assertEqual(result.query, "route now")
 
     def test_an_id_touched_by_a_copy_leaves_no_fragment(self):
         result = self.gate.minimize(

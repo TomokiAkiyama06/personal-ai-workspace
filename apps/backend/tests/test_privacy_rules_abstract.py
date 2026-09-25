@@ -426,6 +426,8 @@ class AbstractHostsTest(Table, unittest.TestCase):
                 ("ssh admin@10.0.0.5", ("ssh", 1)),
                 ("ping fe80::1%eth0", ("ping", 1)),
                 ("net fd00::, 2001:db8::.", ("net", 2)),
+                ("allow fd12:3456:789a::/48 now", ("allow now", 1)),
+                ("[fd12::/48], fe80::1%eth0/64.", ("", 2)),
                 ("docs at example.com.", ("docs at example.com.", 0)),
                 ("example.com.:8080", ("example.com.:8080", 0)),
                 ("python 3.13 server1 file.py", ("python 3.13 server1 file.py", 0)),
@@ -632,6 +634,113 @@ class AbstractHostsTest(Table, unittest.TestCase):
                 ("[fd00::]:", ("", 1)),
                 ("root@[fd00::]:22", ("", 1)),
                 ("[fe80::%eth0]:8080", ("", 1)),
+            )
+        )
+
+    def test_an_ipv6_network_in_cidr_form_is_removed(self):
+        # The review case: ``fd12:3456:789a::/48`` has one slash (the path rule leaves
+        # it) and no brackets (the endpoint rule needs them), so the private network
+        # reached the provider. An address, an optional zone identifier, ``/`` and
+        # digits is a network (or an interface address with its prefix length).
+        self.check(
+            (
+                ("fd12:3456:789a::/48", ("", 1)),
+                ("allow fd12:3456:789a::/48 through", ("allow through", 1)),
+                ("fd00::/8", ("", 1)),
+                ("fe80::/10", ("", 1)),
+                ("fd12::1/64", ("", 1)),
+                ("fd12::1/128", ("", 1)),
+                ("2001:db8::/32", ("", 1)),
+                ("2001:db8:0:0:0:0:0:0/64", ("", 1)),
+                ("::1/128", ("", 1)),
+                ("::/0", ("", 1)),
+                ("1::/1", ("", 1)),
+                ("fd12::/0", ("", 1)),
+                ("::ffff:10.0.0.0/104", ("", 1)),
+                ("FD12:3456:789A::/48", ("", 1)),
+                # A zone identifier before the slash.
+                ("fe80::1%eth0/64", ("", 1)),
+                ("fe80::%25eth0/10", ("", 1)),
+                ("fe80::1%/64", ("", 1)),
+                # The prefix length is not range-checked: a bad one does not make
+                # the address a public one.
+                ("fd12::/129", ("", 1)),
+                ("fd12::/999", ("", 1)),
+                ("fd12::/0064", ("", 1)),
+                ("fd12::/1234567", ("", 1)),
+                # Two networks are two tokens.
+                ("fd12::/48 fd34::/48", ("", 2)),
+            )
+        )
+
+    def test_an_ipv6_cidr_may_be_followed_by_punctuation_or_wrapped(self):
+        self.check(
+            (
+                ("fd12::/48,", ("", 1)),
+                ("fd12::/48.", ("", 1)),
+                ("fd12::/48;", ("", 1)),
+                ("fd12::/48:", ("", 1)),
+                ("fd12::/48!", ("", 1)),
+                ("fd12::/48?", ("", 1)),
+                ("(fd12::/48)", ("", 1)),
+                ("(fd12::/48).", ("", 1)),
+                ('"fd12::/48"', ("", 1)),
+                ("'fd12::/48',", ("", 1)),
+                ("<fd12::/48>", ("", 1)),
+                ("{fd12::/48}", ("", 1)),
+                ("see (fd12::/48), then", ("see then", 1)),
+                # Brackets: the address in brackets, or the whole network.
+                ("[fd12::]/48", ("", 1)),
+                ("[fd12::1]/64", ("", 1)),
+                ("[fd12::/48]", ("", 1)),
+                ("[fd12::/48],", ("", 1)),
+                ("[fd12::%eth0/48]", ("", 1)),
+                ("[fe80::1%eth0]/64", ("", 1)),
+                # A bracketed list: the first and the last item hold a bracket.
+                (
+                    "subnets: [fd12:3456:789a::/48, fd00::/8]",
+                    ("subnets:", 2),
+                ),
+                ("[fd12::/48,", ("", 1)),
+                ("fd00::/8]", ("", 1)),
+            )
+        )
+
+    def test_text_that_only_looks_like_an_ipv6_cidr_stays(self):
+        # ``a::b/c`` is an address, a slash and a WORD: not a network (an address
+        # with a slash is removed only when digits follow, the form of a prefix
+        # length). The others are not IPv6 addresses at all.
+        self.check(
+            (
+                ("a::b/c", ("a::b/c", 0)),
+                ("fd12::/", ("fd12::/", 0)),
+                ("fd12::/x", ("fd12::/x", 0)),
+                ("fd12::/48x", ("fd12::/48x", 0)),
+                ("fd12::/-1", ("fd12::/-1", 0)),
+                ("fd12::/4/8", ("fd12::/4/8", 0)),
+                ("fd12::/48/x", ("fd12::/48/x", 0)),
+                ("::/", ("::/", 0)),
+                ("/48", ("/48", 0)),
+                ("10:30/12:00", ("10:30/12:00", 0)),
+                ("10:30/12", ("10:30/12", 0)),
+                ("12:30/45 meeting", ("12:30/45 meeting", 0)),
+                ("at 10:30/11:00 sharp", ("at 10:30/11:00 sharp", 0)),
+                ("aa:bb:cc:dd:ee:ff/48", ("aa:bb:cc:dd:ee:ff/48", 0)),
+                ("1:2:3:4:5:6:7:8:9/64", ("1:2:3:4:5:6:7:8:9/64", 0)),
+                ("fe80::g/64", ("fe80::g/64", 0)),
+                ("fe80::1::2/64", ("fe80::1::2/64", 0)),
+                (":::1/64", (":::1/64", 0)),
+                ("std::a/2", ("std::a/2", 0)),
+                ("gpu::x/2", ("gpu::x/2", 0)),
+                ("2020/01/02", ("2020/01/02", 0)),
+                ("1/2 and 3/4", ("1/2 and 3/4", 0)),
+                ("3:2/5", ("3:2/5", 0)),
+                ("16:9/2", ("16:9/2", 0)),
+                ("TCP/IP and/or", ("TCP/IP and/or", 0)),
+                # A network with something in front of it is one longer word (the
+                # rule takes whole words only, like ``host=db.internal``).
+                ("--subnet=fd12::/48", ("--subnet=fd12::/48", 0)),
+                ("net:fd12::/48", ("net:fd12::/48", 0)),
             )
         )
 

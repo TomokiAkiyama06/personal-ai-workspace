@@ -45,6 +45,8 @@ CORPUS = (
     "a@b.c user@localhost @octocat 1/2 I/O TCP/IP and/or",
     "pi is 3.14159265 and 12345.678 and 0.12345678",
     "mixed https://a.io/x mail a@x.org path /a/b ip 1.2.3.4 id 99999 v1.2.3",
+    "route fd12:3456:789a::/48 and [fe80::1%eth0/64], 10.0.0.0/8 ::/0",
+    "not a network: a::b/c 10:30/12:00 fd12::/x aa:bb:cc:dd:ee:ff/48",
     "((( [[[ {{{ <<< ))) ]]] }}} >>>",
     ". , ; : ! ? \" ' - _ = + / \\",
 )
@@ -107,6 +109,12 @@ HOSTILE = {
     "ports": "a.b:1" * (MAX_DRAFT_CHARS // 5),
     "hex double colons": "a::" * (MAX_DRAFT_CHARS // 3),
     "hex then colons": "f" * (MAX_DRAFT_CHARS - 3) + ":::",
+    "cidr groups": "a:" * (MAX_DRAFT_CHARS // 2 - 2) + "/64",
+    "cidr open bracket": "[" + ":" * (MAX_DRAFT_CHARS - 5) + "/64]",
+    "cidr zone": "[::1%" + "a" * (MAX_DRAFT_CHARS - 9) + "/64]",
+    "cidr digits": "::/" + "1" * (MAX_DRAFT_CHARS - 3),
+    "cidr slashes": "a::b" + "/1" * (MAX_DRAFT_CHARS // 2 - 2),
+    "cidr words": "a::b/64 " * (MAX_DRAFT_CHARS // 8),
     **percent_shapes(MAX_DRAFT_CHARS),
 }
 
@@ -129,6 +137,14 @@ LONG_TOKENS = {
     "hex double colons": "a::" * (LONG // 3),
     "percents": "%" * LONG,
     "ats": "a@" * (LONG // 2),
+    "cidr groups": "a:" * (LONG // 2) + "/64",
+    "cidr groups without a prefix": "a:" * (LONG // 2) + "/",
+    "cidr open bracket": "[" + ":" * LONG + "/64]",
+    "cidr zone": "[::1%" + "a" * LONG + "/64]",
+    "cidr digits": "::/" + "1" * LONG,
+    "cidr bad digits": "::/" + "1" * LONG + "x",
+    "cidr slashes": "a::b" + "/1" * (LONG // 2),
+    "cidr brackets": "[" * LONG + "a::/64",
     **percent_shapes(LONG),
 }
 

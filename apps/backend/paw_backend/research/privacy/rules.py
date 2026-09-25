@@ -363,6 +363,16 @@ _ENDPOINT = re.compile(
     r"(?::\d{1,5})?(?:/\S*)?"
 )
 _BARE_V6 = re.compile(r"(?P<address>[0-9A-Fa-f.]*:[0-9A-Fa-f:.]*)" + _ZONE)
+# An IPv6 network or interface address in CIDR form: an address, an optional zone
+# identifier, "/" and digits (``fd12:3456:789a::/48``, ``fe80::1%eth0/64``), with at
+# most one "[" in front and one "]" at the end (``[fd12::/48]``, and the first and
+# the last item of a bracketed list; ``[fd12::]/48`` is an ``_ENDPOINT`` already).
+# The address is judged by ``ipaddress`` afterwards. The time is linear, like that
+# of ``_BARE_V6``: the two classes around the first ":" cannot both take it, and the
+# zone class stops at "/", "[" and "]".
+_V6_CIDR = re.compile(
+    r"\[?(?P<address>[0-9A-Fa-f.]*:[0-9A-Fa-f:.]*)" + _ZONE + r"/[0-9]+\]?"
+)
 
 # A name that contains "%". ``is_private_host`` calls every such host private (a DNS
 # name never holds "%"), so the recognizer must hand it over: a private name must not
@@ -420,12 +430,27 @@ def _bare_v6_host(core):
     return None
 
 
+def _v6_cidr_host(core):
+    """The address of ``core`` if it is an IPv6 network in CIDR form, else ``None``."""
+    match = _V6_CIDR.fullmatch(core)
+    if match:
+        try:
+            ipaddress.IPv6Address(match.group("address"))
+        except ValueError:
+            return None
+        return match.group("address")
+    return None
+
+
 def _endpoint_host(core):
     """The bare host of an endpoint token, or ``None`` if ``core`` is not one."""
     match = _ENDPOINT.fullmatch(core)
     if match:
         return match.group("v6") or match.group("name")
     host = _bare_v6_host(core)
+    if host is not None:
+        return host
+    host = _v6_cidr_host(core)
     if host is not None:
         return host
     match = _PCT_ENDPOINT.fullmatch(core) if "%" in core else None
@@ -461,6 +486,20 @@ def abstract_hosts(text):
     optional zone identifier (``%`` and any characters except white space, ``[``,
     ``]`` and ``/``). It has no port and no user information.
 
+    An IPv6 network in CIDR form is dropped as well (Decision 0010): the whole core
+    is an IPv6 address (as just described, judged by ``ipaddress``), optionally a
+    zone identifier, ``/`` and ONE OR MORE ASCII digits (the prefix length;
+    ``/129`` is a bad prefix length, but the address is still an address, so the
+    range is not checked), with at most one ``[`` at the very start and at most one
+    ``]`` at the very end. So
+    ``fd12:3456:789a::/48``, ``fe80::1%eth0/64``, ``::/0``, ``[fd12::]/48`` (a
+    bracketed address with a path: an endpoint already), ``[fd12::/48]`` and the
+    items of ``[fd12::/48, fd00::/8]`` are dropped. A slash and anything but digits
+    (``a::b/c``, ``fd12::/48x``, ``fd12::/``), a second slash, and a word that is no
+    address (``10:30/12:00``, ``aa:bb:cc:dd:ee:ff/48``, ``std::a/2``) are not a
+    network and stay. The word must be the whole core, as everywhere in this
+    rule: ``--subnet=fd12::/48`` stays (like ``host=db.internal``).
+
     The ``:`` characters that ended the token may belong to the address: a
     compressed address can end in ``::`` (``fd00::``, ``2001:db8::``, ``fe80::``).
     So when ``core`` is not an endpoint and is not empty, and the characters that
@@ -495,6 +534,8 @@ def abstract_hosts(text):
     ``"[fe80::1%eth0]:8080"`` -> ``("", 1)``; ``"db.internal.:5432"`` ->
     ``("", 1)``; ``"ssh admin@10.0.0.5"`` -> ``("ssh", 1)``; ``"ping fe80::1%eth0"``
     -> ``("ping", 1)``; ``"net fd00::, 2001:db8::."`` -> ``("net", 2)``;
+    ``"allow fd12:3456:789a::/48 now"`` -> ``("allow now", 1)``;
+    ``"[fd12::/48], fe80::1%eth0/64."`` -> ``("", 2)``;
     ``"docs at example.com."``, ``"example.com.:8080"``, ``"python 3.13"``,
     ``"server1"``, ``"user@db:5432"`` and ``"file.py"`` are unchanged, 0 (public, or
     a single label that cannot be told from a word);
