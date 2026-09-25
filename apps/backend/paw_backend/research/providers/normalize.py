@@ -71,6 +71,14 @@ def published_utc(value: object) -> datetime | None:
     not escape to cancel ``gather()`` / ``fetch()`` (Decision 0012). The one thing
     that this cannot tell apart is a real ``KeyboardInterrupt`` that a signal
     handler raises inside this window: it is converted too (Decision 0012).
+
+    A ``utcoffset`` that asks for the cancellation of the task
+    (``asyncio.current_task().cancel()``) and then returns an offset raises
+    nothing here; the request would be delivered at the next ``await`` or at the
+    end of the task. The function does not run in a task of its own (it is a pure
+    function), so the caller is the one that retracts it: ``ResearchBroker``
+    brackets every call of ``normalize_hits`` / ``revalidate_document`` with a
+    ``_CancelGuard`` and treats a retracted request as an invalid response.
     """
     if value is None:
         return None
