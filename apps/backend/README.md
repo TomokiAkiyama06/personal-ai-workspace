@@ -1297,6 +1297,7 @@ Audit の `action` は Capability の値です。Shared Memory を変える操�
 | メソッド | Capability | できる人 |
 | --- | --- | --- |
 | `list_memories`、`get_memory`、`effective_view` | `shared_memory.read` | すべての Active User。`shared_memory.read` を Grant された Agent（全 Project 対象の Grant のみ。Project を限った Grant は拒否） |
+| `internal_effective_view` | `shared_memory.read`（`effective_view` と同じ検査） | **Backend 内部（Context の組み立て）だけが呼びます。** User と Agent には出さず、HTTP の Endpoint にも出しません（下の「System Security Policy の優先」）。返す値に Policy の文言を含む唯一の経路です |
 | `create_memory` | `shared_memory.create` | Owner、Admin（人間） |
 | `edit_memory` | `shared_memory.edit` | Owner、Admin（人間） |
 | `delete_memory` | `shared_memory.delete` | Owner、Admin（人間） |
@@ -1396,9 +1397,13 @@ Shared Memory は System Security Policy を上書きできません。Backend �
 - Shared Memory は `policy_subjects`（`merge.permission` のような、`.` 区切りで最大 5 階層の Key）を持てます。Owner / Admin が作成・編集・承認のときに設定します。
 - Policy の項目 `SystemPolicyItem` は `policy_id`、`subject`、`statement`（不透明な本文）です。項目は `SystemPolicySource.items()` から、呼び出しごとに読みます（`StaticPolicySource` は固定のリスト用）。Policy の内容はこの Issue では決めません。
 - Memory の `policy_subjects` のどれかが Policy の `subject` と等しい、またはその下位なら、その Memory は上書きされます（`merge` は `merge` と `merge.permission` を覆い、`mergeable` や `merge_x` は覆いません。Policy が下位のときも覆いません）。
-- `effective_view` は、上書きされた Memory を `memories` に含めず、`overridden` に ID と勝った Policy の ID だけを返します（内容は返しません）。上書きした Policy は `applied_policies`（`policy_id` 順）に入ります。
+- `effective_view` は、上書きされた Memory を `memories` に含めず、`overridden` に ID と勝った Policy の ID だけを返します（内容は返しません）。
+  **Policy の文言（`statement`）は、User にも Agent にも返しません。** 返す `EffectiveSharedMemory` には `applied_policies` の欄がなく、`repr` や `dataclasses.asdict` にも文言は現れません（[Decision 0009](../../docs/decisions/0009-shared-memory-administration.md) の 10）。
+- 上書きした Policy の項目（文言を含む。`policy_id` 順）は、**Backend 内部の Context の組み立て**だけが `internal_effective_view` で受け取ります（`InternalEffectiveView.applied_policies`）。
+  引数で切り替える方式ではなく別のメソッドにしたのは、`effective_view` のどの引数でも文言を出せないようにするためです。`repr` には `applied_policies` を含めません（Log に出さないため）。
+  API の Issue が Service を HTTP に出すときは、`effective_view` だけを出します（`internal_effective_view` を出さないことを、その Issue の Review で確認します）。
 - Policy を読めないとき（Source の失敗、遅延、契約違反）は、Memory を 1 件も返さずに `PolicySourceError` で失敗します（fail closed）。エラーと Log に Source の例外の文言は出ません。
-- `list_memories` と `get_memory` は保存されている Memory をそのまま返します（管理用）。モデルに渡す内容は `effective_view` で作ります。
+- `list_memories` と `get_memory` は保存されている Memory をそのまま返します（管理用）。モデルに渡す内容は、Backend 内部では `internal_effective_view`、User に見せる画面や API では `effective_view` で作ります。
 - **限界**: `policy_subjects` を宣言していない Memory は、この規則では上書きされません（意味の矛盾は Owner / Admin の承認と、PAW-042 の矛盾検出で補います）。Shared Memory は権限を与えないので、Tool や Merge の可否は Memory と無関係に Backend が強制します。
 
 ### Database と権限
@@ -1447,7 +1452,7 @@ Model の実装は、Test を通すことに必要な範囲で素直な書き方
 - Policy の実体（保存、Admin による変更、強制）はこの Issue の範囲外です。`SystemPolicySource` の実装は、Policy を持つ Issue が用意します。
 - `policy_subjects` の宣言が前提です（上の限界）。PAW-042 の矛盾検出が宣言を補う設計は未実装です。
 - Shared Memory の鮮度（再確認の期限など）は `permanent` 固定です（PAW-042 で決めます）。
-- Embedding と Markdown Projection（PAW-043 / PAW-045）は、この Service を通りません。Shared Memory を読む Retrieval は、`readable_memory_versions` を使い、モデルに渡す前に Policy の優先を適用する必要があります（この Service の `effective_view`、または `precedence.resolve_effective_view`）。
+- Embedding と Markdown Projection（PAW-043 / PAW-045）は、この Service を通りません。Shared Memory を読む Retrieval は、`readable_memory_versions` を使い、モデルに渡す前に Policy の優先を適用する必要があります（この Service の `internal_effective_view`、または `precedence.resolve_effective_view`。どちらも Policy の文言を含む `InternalEffectiveView` を返すので、User や Agent へ返すときは `.public()` か `effective_view` を使います）。
 - 上限の数値（50 件、20 個、20,000 文字など）は実測に基づかない仮の値で、`memory.shared.limits` にあります。
 - Migration `0046` の `down_revision` は `0050` です（鎖は `0001 → 0025 → 0032 → 0040 → 0021 → 0033 → 0031 → 0050 → 0046`）。Revision ID は Issue 番号で、鎖の順序ではありません。統合時に Orchestrator が並びを確認します。
 - 一覧の同時刻の並び（`id` の副次キー）は決定的にするためのもので、Test は「同時刻の 12 件が `id` 順」だけを確認します。Query Plan によっては副次キーがなくても同じ順になるため、その Test だけでは副次キーの削除を検出できません（変異 Test で確認済み）。

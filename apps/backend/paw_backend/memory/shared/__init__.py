@@ -3,7 +3,7 @@
 Read, create, edit, delete and restore Shared Memory, approve or reject Shared
 Memory Candidates, and resolve the precedence of the System Security Policy.
 There is no HTTP surface yet; see ``apps/backend/README.md`` ("Shared Memory
-Administration") and Decision 0009 for the rules and the open choices.
+Administration") and Decision 0009 (approved) for the rules and the choices.
 """
 
 from paw_backend.memory.shared import limits
@@ -39,6 +39,7 @@ from paw_backend.memory.shared.records import (
     CandidateState,
     EditPlan,
     EffectiveSharedMemory,
+    InternalEffectiveView,
     OriginScope,
     OverriddenMemory,
     SharedMemory,
@@ -70,6 +71,7 @@ __all__ = [
     "EditPlan",
     "EffectiveSharedMemory",
     "InputProblem",
+    "InternalEffectiveView",
     "InvalidSharedMemoryInputError",
     "OriginScope",
     "OverriddenMemory",

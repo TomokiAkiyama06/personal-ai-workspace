@@ -1,11 +1,14 @@
 """The precedence rule of Shared Memory (``memory.shared.precedence``): pure tests."""
 
+import dataclasses
+import json
 import unittest
 from uuid import uuid4
 
 from paw_backend.memory.shared import (
     EffectiveSharedMemory,
     InputProblem,
+    InternalEffectiveView,
     InvalidSharedMemoryInputError,
     OverriddenMemory,
     SharedMemoryStatus,
@@ -144,7 +147,9 @@ class ResolveEffectiveViewTest(unittest.TestCase):
 
     def test_the_docstring_example(self):
         view = resolve_effective_view([self.m1, self.m2, self.m3], [self.p1, self.p2])
-        self.assertIsInstance(view, EffectiveSharedMemory)
+        # Decision 0009, section 10: the rule returns the internal view (it
+        # carries the policy items); only its ``public()`` may reach a user.
+        self.assertIsInstance(view, InternalEffectiveView)
         self.assertEqual(view.memories, (self.m2, self.m3))
         self.assertEqual(
             view.overridden,
@@ -260,3 +265,67 @@ class ResolveEffectiveViewTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PublicViewCarriesNoPolicyTextTest(unittest.TestCase):
+    """The view a user or an agent may get has no policy wording anywhere.
+
+    Decision 0009, section 10: ``applied_policies`` (the ``statement`` of the
+    System Policies that overrode a memory) is for the backend's own context
+    assembly. The public ``EffectiveSharedMemory`` has no such field, so the
+    wording cannot appear in it however it is read: attribute, ``repr``, ``str``,
+    ``dataclasses.asdict`` or JSON.
+    """
+
+    WORDING = "POLICY-WORDING-Merging-needs-a-human-approval"
+
+    def setUp(self):
+        self.memory = make_memory(title="m1", policy_subjects=("merge.permission",))
+        self.plain = make_memory(title="m2")
+        self.item = policy("no-auto-merge", "merge", self.WORDING)
+        self.internal = resolve_effective_view([self.memory, self.plain], [self.item])
+        self.public = self.internal.public()
+
+    def test_the_rule_result_holds_the_wording_for_the_internal_use(self):
+        self.assertEqual(self.internal.applied_policies, (self.item,))
+        self.assertEqual(self.internal.applied_policies[0].statement, self.WORDING)
+
+    def test_the_public_view_has_no_field_for_the_policies(self):
+        self.assertEqual(
+            [f.name for f in dataclasses.fields(EffectiveSharedMemory)],
+            ["memories", "overridden"],
+        )
+        self.assertFalse(hasattr(self.public, "applied_policies"))
+        with self.assertRaises(AttributeError):
+            self.public.applied_policies  # noqa: B018
+
+    def test_the_public_view_keeps_everything_but_the_wording(self):
+        self.assertIsInstance(self.public, EffectiveSharedMemory)
+        self.assertEqual(self.public.memories, (self.plain,))
+        self.assertEqual(self.public.overridden, self.internal.overridden)
+        # The ids of the winning policies stay (Decision 0009, section 9 4).
+        self.assertEqual(self.public.overridden[0].policy_ids, ("no-auto-merge",))
+
+    def test_no_reading_of_the_public_view_shows_the_wording(self):
+        readings = {
+            "repr": repr(self.public),
+            "str": str(self.public),
+            "asdict": repr(dataclasses.asdict(self.public)),
+            "json": json.dumps(dataclasses.asdict(self.public), default=str),
+            "astuple": repr(dataclasses.astuple(self.public)),
+        }
+        for how, text in readings.items():
+            with self.subTest(reading=how):
+                self.assertNotIn(self.WORDING, text)
+                self.assertNotIn("statement", text)
+
+    def test_the_internal_view_does_not_put_the_wording_in_its_repr(self):
+        # A log line made by accident from the internal view stays clean too.
+        self.assertNotIn(self.WORDING, repr(self.internal))
+        self.assertNotIn(self.WORDING, str(self.internal))
+        # It is still there for the code that needs it.
+        self.assertIn(self.WORDING, repr(dataclasses.asdict(self.internal)))
+
+    def test_the_public_view_of_an_empty_view_is_empty(self):
+        public = resolve_effective_view([], [self.item]).public()
+        self.assertEqual((public.memories, public.overridden), ((), ()))
