@@ -53,6 +53,7 @@ personal-ai-workspace/
 │  │  │     ├─ 0032_task_lifecycle.py
 │  │  │     ├─ 0033_task_queue_budget_loop.py
 │  │  │     ├─ 0040_memory_schema.py
+│  │  │     ├─ 0046_shared_memory_candidates.py
 │  │  │     └─ 0050_research_scratch_store.py
 │  │  ├─ paw_backend/
 │  │  │  ├─ __init__.py
@@ -80,6 +81,19 @@ personal-ai-workspace/
 │  │  │  │  ├─ operator.py
 │  │  │  │  ├─ redeemer.py
 │  │  │  │  └─ tokens.py
+│  │  │  ├─ memory/
+│  │  │  │  └─ shared/
+│  │  │  │     ├─ __init__.py
+│  │  │  │     ├─ audit.py
+│  │  │  │     ├─ errors.py
+│  │  │  │     ├─ lifecycle.py
+│  │  │  │     ├─ limits.py
+│  │  │  │     ├─ models.py
+│  │  │  │     ├─ policy.py
+│  │  │  │     ├─ precedence.py
+│  │  │  │     ├─ records.py
+│  │  │  │     ├─ service.py
+│  │  │  │     └─ validation.py
 │  │  │  ├─ research/
 │  │  │  │  ├─ __init__.py
 │  │  │  │  ├─ privacy/
@@ -155,6 +169,7 @@ personal-ai-workspace/
 │  │     ├─ queueing_support.py
 │  │     ├─ research_support.py
 │  │     ├─ scratch_support.py
+│  │     ├─ shared_memory_support.py
 │  │     ├─ support.py
 │  │     ├─ teardown_child.py
 │  │     ├─ test_config.py
@@ -214,6 +229,20 @@ personal-ai-workspace/
 │  │     ├─ test_scratch_validation.py
 │  │     ├─ test_security.py
 │  │     ├─ test_server.py
+│  │     ├─ test_shared_memory_audit_actions.py
+│  │     ├─ test_shared_memory_candidates.py
+│  │     ├─ test_shared_memory_completion.py
+│  │     ├─ test_shared_memory_contract.py
+│  │     ├─ test_shared_memory_effective_view.py
+│  │     ├─ test_shared_memory_grants.py
+│  │     ├─ test_shared_memory_migration.py
+│  │     ├─ test_shared_memory_policy_source.py
+│  │     ├─ test_shared_memory_promotion_refused.py
+│  │     ├─ test_shared_memory_rules_lifecycle.py
+│  │     ├─ test_shared_memory_rules_precedence.py
+│  │     ├─ test_shared_memory_service_guards.py
+│  │     ├─ test_shared_memory_service_manage.py
+│  │     ├─ test_shared_memory_service_read.py
 │  │     ├─ test_tools_approvals.py
 │  │     ├─ test_tools_broker.py
 │  │     ├─ test_tools_credentials.py

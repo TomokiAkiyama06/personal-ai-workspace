@@ -39,7 +39,16 @@ class Capability(StrEnum):
 
     # --- Scope.SYSTEM: workspace-wide ---
     SHARED_MEMORY_READ = "shared_memory.read"
+    # Reads what only managers may see (deleted memories, Candidates). The
+    # operations that change Shared Memory each have a capability of their own
+    # below, so that the audit action (the capability value) names the operation.
     SHARED_MEMORY_MANAGE = "shared_memory.manage"
+    SHARED_MEMORY_CREATE = "shared_memory.create"
+    SHARED_MEMORY_EDIT = "shared_memory.edit"
+    SHARED_MEMORY_DELETE = "shared_memory.delete"
+    SHARED_MEMORY_RESTORE = "shared_memory.restore"
+    SHARED_MEMORY_CANDIDATE_APPROVE = "shared_memory.candidate.approve"
+    SHARED_MEMORY_CANDIDATE_REJECT = "shared_memory.candidate.reject"
     # Admin (and Owner): "Admin-only" in docs/SECURITY_RBAC_AUDIT.md.
     ADMIN_USERS_MANAGE = "admin.users.manage"
     ADMIN_USAGE_VIEW = "admin.usage.view"
@@ -131,6 +140,12 @@ CAPABILITIES: MappingProxyType[Capability, CapabilityInfo] = MappingProxyType(
         C.PR_CREATE: _info(Scope.SELF, delegable=True),
         C.SHARED_MEMORY_READ: _info(Scope.SYSTEM, delegable=True, read_only=True),
         C.SHARED_MEMORY_MANAGE: _info(Scope.SYSTEM, delegable=False),
+        C.SHARED_MEMORY_CREATE: _info(Scope.SYSTEM, delegable=False),
+        C.SHARED_MEMORY_EDIT: _info(Scope.SYSTEM, delegable=False),
+        C.SHARED_MEMORY_DELETE: _info(Scope.SYSTEM, delegable=False),
+        C.SHARED_MEMORY_RESTORE: _info(Scope.SYSTEM, delegable=False),
+        C.SHARED_MEMORY_CANDIDATE_APPROVE: _info(Scope.SYSTEM, delegable=False),
+        C.SHARED_MEMORY_CANDIDATE_REJECT: _info(Scope.SYSTEM, delegable=False),
         C.ADMIN_USERS_MANAGE: _info(Scope.SYSTEM, delegable=False),
         C.ADMIN_USAGE_VIEW: _info(Scope.SYSTEM, delegable=False),
         C.ADMIN_QUOTA_MANAGE: _info(Scope.SYSTEM, delegable=False),

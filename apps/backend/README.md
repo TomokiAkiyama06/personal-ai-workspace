@@ -5,6 +5,7 @@ Personal AI Workspace の Core Backend です。
 Login と Session はまだ実装していません（PAW-022 以降）。
 RBAC と Audit（PAW-025）、Task の Lifecycle と永続化（[PAW-032](#agent-task-lifecycle)、HTTP の Endpoint はまだありません）、Task Queue・Budget・Loop 検知（[PAW-033](#task-queue--budget--loop-検知)）、Tool Broker と Capability Policy（[PAW-031](#tool-broker--capability-policy)、HTTP の Endpoint はまだありません）、Memory の PostgreSQL Schema（[PAW-040](#memory--conversation-schema)）、
 最小の `users` Table と Owner の初期設定・復旧のコマンド（[PAW-021](#owner-の初期設定と復旧)）を実装済みです。Memory の保存・整理・検索の処理は PAW-041 以降です。
+Shared Memory の管理（Owner / Admin の作成・編集・削除・復元、Candidate の承認、Agent の自動昇格の拒否、System Policy の優先。[PAW-046](#shared-memory-administration)、HTTP の Endpoint はまだありません）も実装済みです。
 Research の一時保存（[PAW-050](#research-scratch-store)、24 時間 TTL、期限切れを消す Janitor つき、HTTP の Endpoint はまだありません）と、Research Provider の Adapter Interface（[PAW-051](#research-provider-adapter)、実際の Provider（Direct Web、Docs、GitHub、OpenCode）はまだありません）と、外部の検索へ送る Query の最小化と送信の Audit（[PAW-053](#research-privacy-filter)、Audit の永続化はまだありません）も実装済みです。
 
 [Architecture](../../docs/ARCHITECTURE.md) に基づき、最終的に以下の機能を Backend 側で扱います。
@@ -39,7 +40,7 @@ Python 側の Package（`pgvector-python`）は使わず、`paw_backend/memory/v
 apps/backend/
 ├─ pyproject.toml          # 依存（完全一致で固定）と Ruff 設定
 ├─ alembic.ini             # Alembic 設定（DB URL は持たない）
-├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0031 は Tool Approval、0033 は Queue / Budget / Loop、0040 は Memory Schema、0050 は Research Scratch）
+├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0031 は Tool Approval、0033 は Queue / Budget / Loop、0040 は Memory Schema、0046 は Shared Memory Candidate、0050 は Research Scratch）
 ├─ paw_backend/
 │  ├─ app.py               # create_app(settings)
 │  ├─ config.py            # PAW_ 環境変数から読む Settings
@@ -55,6 +56,7 @@ apps/backend/
 │  ├─ tasks/               # Agent Task の状態遷移と永続化（PAW-032）
 │  │  └─ queueing/         # Task Queue、Budget、Loop 検知、Escalation の判断（PAW-033）
 │  ├─ memory/              # Memory / Conversation の Model、ACL 条件、vector 型、Pin / Importance 変更の Actor（PAW-040）
+│  │  └─ shared/           # Shared Memory の管理: Service、Candidate、Rule 関数、Policy の優先（PAW-046）
 │  ├─ research/providers/  # Research Provider の Adapter Interface と Broker（PAW-051）
 │  ├─ research/privacy/    # Research の Privacy Filter: Query の最小化と外部送信の Audit（PAW-053）
 │  ├─ research/scratch/    # Research Scratch Store: 24 時間 TTL の一時保存と、期限切れを消す Janitor（PAW-050）
@@ -639,7 +641,7 @@ Agent の操作は、委任した人間の User の操作として判定しま�
   Grant は権限を狭めるだけで、User の権限を超えることはありません。
 - 委任できる Capability は許可リストです（Chat、Workspace、GitHub、Memory、PR、Shared Memory の閲覧、Project の閲覧・Chat・Task・Repository 編集・PR・Memory 利用）。
   `CapabilityInfo.delegable` には既定値がなく、Capability を追加するときは必ず決める必要があります。
-  Project 設定・Repository 追加・Project Memory 管理を含む管理系、`admin.*`、`owner.*`、`shared_memory.manage`、Member / Agent Policy / Lifecycle は Grant に書いてあっても拒否します（自己権限昇格の禁止）。
+  Project 設定・Repository 追加・Project Memory 管理を含む管理系、`admin.*`、`owner.*`、`shared_memory.manage` と Shared Memory を変える操作の Capability（`shared_memory.create` など）、Member / Agent Policy / Lifecycle は Grant に書いてあっても拒否します（自己権限昇格の禁止）。
   **`agent.use` と `project.agent.use`（Agent を起動する操作）も委任できません。** 子 Agent の Grant を親の部分集合として導く仕組み（PAW-032）ができるまで、Agent が自分より強い Agent を作れないようにするためです。
 - `AgentGrant.project_ids` は**必須**です。Agent が触れる Project の集合か、明示的な `ALL_PROJECTS` を渡します（既定の「User の全 Project」はありません）。
   Project を限定した Grant は、その外の Resource（個人のデータを含む）に及びません。文字列 1 つを渡すと `TypeError` です。
@@ -1186,7 +1188,7 @@ Broker は呼び出しの**前**に判定します。次は、実際に実行す
 
 [PAW-040](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/34)（Revision `0040`）で実装した Schema です。
 設計は [Memory Architecture](../../docs/MEMORY_ARCHITECTURE.md) と [要件](../../REQUIREMENTS.md) の Memory の節に従います。
-Repository / Service は含みません。
+Repository / Service は含みません（Shared Memory の管理だけは [PAW-046](#shared-memory-administration) の `memory/shared/` にあります）。
 
 | 層 | Table | 内容 |
 | --- | --- | --- |
@@ -1291,6 +1293,204 @@ ANN Index（HNSW / IVFFlat）はまだありません。Model が決まった後
 
 Model と Migration の一致は Test が検証します（Alembic の autogenerate の差分が空であること、Model から作った Schema と Migration の Catalog（Trigger を含む）が同じであること）。Trigger は Alembic の比較の対象外なので、Model は DDL Event、Migration は同じ DDL の複製で作り、Trigger 関数の定義も Test が比較します。
 制約名は `paw_backend.db.Base` の命名規則に従います。
+
+## Shared Memory Administration
+
+[PAW-046](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/40)（Revision `0046`、`paw_backend/memory/shared/`）で実装しました。
+Workspace 全体で共有する Memory（Shared Memory）の閲覧・作成・編集・削除・復元と、Shared Memory Candidate の提案・承認・却下、
+System Security Policy を優先する Effective View を扱う `SharedMemoryService` です。**HTTP の Endpoint はまだありません**（API の Issue が呼びます）。
+要件は [REQUIREMENTS.md](../../REQUIREMENTS.md) の「Shared Memory permissions」、
+要件が決めていない選択は [Decision 0009](../../docs/decisions/0009-shared-memory-administration.md)（**Approved、2026-09-25 に Human が承認**）です。
+
+Shared Memory は PAW-040 の Table（`memories` と、`scope = 'shared'` の `memory_versions`）に置きます。新しい Table は Candidate 用の `shared_memory_candidates` 1 つです。
+Candidate を Version にしないのは、`shared` の Version は全 User が読める（`memory.acl`）のに対し、Candidate は承認前で、Private な Memory から来た内容を持つためです。
+
+### 権限
+
+すべてのメソッドは、最初の引数に操作する `actor`（`paw_backend.authz.Principal`、または委任元 User と Grant を持つ `AgentActor`）を取り、
+`Authorizer` に 1 回問い合わせます。Audit は Authorizer が記録します（`shared_memory.read` は拒否だけ、その他は全件で、記録に失敗すると許可は拒否になります）。
+変更が実際に行われたことは、Service が変更と同じ Transaction で完了の行として記録します（下の「変更の完了の記録」）。
+Audit の `action` は Capability の値です。Shared Memory を変える操作は、それぞれ**専用の Capability** を使うので、Audit の履歴だけで操作を見分けられます（下の「Audit の Action」）。
+
+| メソッド | Capability | できる人 |
+| --- | --- | --- |
+| `list_memories`、`get_memory`、`effective_view` | `shared_memory.read` | すべての Active User。`shared_memory.read` を Grant された Agent（全 Project 対象の Grant のみ。Project を限った Grant は拒否） |
+| `internal_effective_view` | `shared_memory.read`（`effective_view` と同じ検査） | **Backend 内部（Context の組み立て）だけが呼びます。** User と Agent には出さず、HTTP の Endpoint にも出しません（下の「System Security Policy の優先」）。返す値に Policy の文言を含む唯一の経路です |
+| `create_memory` | `shared_memory.create` | Owner、Admin（人間） |
+| `edit_memory` | `shared_memory.edit` | Owner、Admin（人間） |
+| `delete_memory` | `shared_memory.delete` | Owner、Admin（人間） |
+| `restore_memory` | `shared_memory.restore` | Owner、Admin（人間） |
+| `approve_candidate` | `shared_memory.candidate.approve` | Owner、Admin（人間） |
+| `reject_candidate` | `shared_memory.candidate.reject` | Owner、Admin（人間） |
+| `list_candidates`、`get_candidate`、`list_memories` / `get_memory` の `include_deleted=True` | `shared_memory.manage`（管理者だけが見られる情報の閲覧。何も変えない） | Owner、Admin（人間） |
+| `propose_candidate` | `memory.use` | User が自分のために。Agent が委任元 User のために（Grant に `memory.use`） |
+
+**自動昇格はしません。** 上の表の管理の操作（`shared_memory.manage` と、操作ごとの `shared_memory.create` などの Capability）は、人間の Owner / Admin の決定だけで行います。
+
+1. Agent（`AgentActor`）と `system` role の Principal（Background Worker）は、Authorizer が何を答えても、常に `AutomaticPromotionRefusedError` で拒否します（Authorizer の判定は先に記録されます）。
+   管理の Capability はすべて委任不可（`delegable=False`）でもあります。
+2. Owner / Admin 以外の `Principal` は `SharedMemoryPermissionError` です。Authorizer が（Policy の変更などで）許可しても、Service が Owner / Admin でなければ拒否します。
+3. Authorizer が `Decision` でない値を返したら拒否します（`invalid_decision`）。
+4. Agent は Candidate を提案できますが、Candidate は `pending` のままです。承認は人間だけで、承認した人が Version の `actor_user_id` になります。
+5. Shared Memory を作る・変える経路は、`SharedMemoryService` の上の表のメソッドだけです（`tests/test_shared_memory_contract.py` が公開メソッドの一覧を固定します）。
+
+#### Audit の Action
+
+削除・復元は `memory_versions` の `status` を変えるだけで、誰がいつ行ったかを行に残しません（[Decision 0009](../../docs/decisions/0009-shared-memory-administration.md) の 7）。履歴は Audit だけです。
+Authorizer は `action` に Capability の値を書くので、全操作が 1 つの Capability（`shared_memory.manage`）だと、削除と復元、作成、編集、承認、却下を見分けられません。
+そこで、変更する 6 つの操作にそれぞれ Capability を追加しました（`authz/capabilities.py`。すべて `Scope.SYSTEM`、委任不可、Audit Mode `REQUIRED`、Owner / Admin だけ）。
+
+| `action` | 操作 | `resource_kind`、`resource_id` |
+| --- | --- | --- |
+| `shared_memory.create` | `create_memory` | `shared_memory`、なし |
+| `shared_memory.edit` | `edit_memory` | `shared_memory`、Memory の ID |
+| `shared_memory.delete` | `delete_memory` | `shared_memory`、Memory の ID |
+| `shared_memory.restore` | `restore_memory` | `shared_memory`、Memory の ID |
+| `shared_memory.candidate.approve` | `approve_candidate` | `shared_memory_candidate`、Candidate の ID |
+| `shared_memory.candidate.reject` | `reject_candidate` | `shared_memory_candidate`、Candidate の ID |
+
+- Audit の行は `actor_id`（操作した User）、`actor_role`、`decision`、時刻を持つので、「誰がいつ何を試みたか」は行から分かります。拒否された試みも、試みた操作の `action` で残ります。実際に変更が起きたかは、下の完了の行が示します。
+- この行は変更の**試み**（判定）です。判定の Audit そのものなので、既存の性質（既定は拒否、Audit の行は変更が見える前に書かれる、Audit を書けなければ許可を拒否に変える）はそのままです。
+  変更の前に書かれるので、この行だけでは変更が**起きたか**は分かりません（対象がない、状態が違う、Lock を待ち切れない、更新が失敗する場合も同じ行が残ります）。起きたことは次の完了の行が示します。
+- `shared_memory.manage` は、管理者だけが見られる情報の閲覧（削除済みの Memory、Candidate）に残しました。何も変えないので、履歴で見分ける必要が小さく、`resource_kind` と `resource_id` の有無（一覧か 1 件か）で区別できます。
+- 限界: 復元・削除の理由（`reason`）は残りません（Audit は Content や自由な文を持たない）。Candidate の承認・却下の理由は Candidate の行にあります。
+
+#### 変更の完了の記録
+
+変更する 6 つの操作は、変更と**同じ Database の Transaction の中**（最後の書き込み）で、`audit_events` へ完了の行を 1 本追加します（`memory/shared/audit.py`、[Decision 0009](../../docs/decisions/0009-shared-memory-administration.md) の 13）。
+試みの行と 2 本で 1 回の変更を表し、次の値を持ちます（ID、Enum、固定の `reason` だけです。Memory の内容は含みません）。
+
+| 列 | 試みの行（Authorizer） | 完了の行（Service） |
+| --- | --- | --- |
+| `action` | 操作の Capability | 同じ |
+| `decision`、`reason` | `allow`、`granted_by_system_role` など（拒否は `deny`） | `allow`、`completed` |
+| `actor_id`、`actor_role` | 操作した User、Role | 同じ |
+| `resource_kind`、`resource_id` | 対象（`create_memory` は ID なし） | 変えたもの。`create_memory` は作った Memory の ID。承認・却下は Candidate の ID |
+| `occurred_at` | Authorizer の時計（判定の時刻） | Service の時計（遷移の時刻。新しい Version の `created_at` と同じ読み） |
+| `correlation_id` | 呼び出しごとに Service が作った ID | 同じ ID（2 本の行を結ぶ） |
+
+- **完了の行がある ⇔ 変更が Commit された**。Rollback、失敗した Statement、失敗した Commit は行も戻します。完了の行を書けなければ変更も戻ります（fail-closed。Test は行の INSERT と Commit を失敗させて確認）。
+- 試みの後で失敗した呼び出し（対象がない、状態が違う、版が古い、Lock を待ち切れない、更新が失敗する）は、**完了のない試み**として残ります（`correlation_id` が同じ完了の行がない `allow` の行）。何も変えなかった呼び出し（内容が同じ編集）にも完了の行はありません。
+  拒否された試み、Audit を書けずに拒否された試みは、これまでどおりで、完了しません。
+- 「誰がいつ削除・復元したか」は、`resource_id` と `reason = 'completed'` で絞った行の `action`、`actor_id`、`occurred_at` です。
+- 権限は増えません。Application の Role が持つ `audit_events` の INSERT / SELECT（Revision `0025`）で書きます。UPDATE、DELETE、TRUNCATE は Trigger と権限が拒否したままです（`tests/test_shared_memory_grants.py` が確認）。
+- 限界:
+  - 完了の行は Authorizer の `AuditSink` を通らず、Service が `audit_events` に直接書きます（Sink は別の Transaction で書くため、変更と記録が別れうるからです）。Sink を差し替えた配備では、試みと完了が別の場所に分かれます（現在の Sink は `PostgresAuditSink` だけです）。
+  - `decision` の CHECK（`allow` / `deny`）があるため、完了の行も `allow` です。`action` と `decision` だけで数えると 1 回の操作が 2 行になるので、集計は `reason` で分けてください。
+  - **失敗そのものの行はありません**。失敗は「完了のない試み」から読みます。失敗の行は Rollback の後に Transaction の外で書くことになり、行がないことが何も証明しないためです。実行中の試みと、Process が落ちた試みも、完了がないので区別できません。
+  - `occurred_at` は Service の時計の読みで、Lock を待つ前に読みます。Database が付ける `recorded_at`（Transaction の開始時刻）が、行が確定した時刻に近い値です。
+  - Application の Role は `audit_events` に INSERT できるので、Application 自体が偽の行を書けることは、他の Audit の行と同じです（`0025` の限界）。
+
+呼び出しの順序は、(1) 引数の検証（`InvalidSharedMemoryInputError`、`actor` の型を含む）、(2) 認可（拒否は Database に触れる前）、(3) Database の使用、です。
+削除済みの Memory を含める読み取りも、認可の前に存在を知らせないため、Owner / Admin 以外には「見つからない」ではなく「権限がない」を返します。
+
+### Shared Memory の状態と Version
+
+Memory は、**現在の Version（`version_number` が最大の Version）** で見ます。現在の Version が `scope = 'shared'` で、`status` が `active`（状態 `ACTIVE`）または
+`deprecated`（状態 `DELETED`）のものだけが Shared Memory です。それ以外（他の Scope、`history` / `superseded` の Version）は、この Service では「見つからない」です。
+
+- **作成**: Version 1（`active`、`confirmation_state = 'confirmed'`、`freshness_policy = 'permanent'`、`actor_type = 'user'`）。
+- **編集**: 上書きしません。現在の Version を `superseded` にし、新しい Version `n + 1`（`active`）を書き、新しい側から古い側への `supersedes` 関係（`reason` は変わった項目の名前をアルファベット順に `", "` でつないだもの）を追加します。
+  `expected_version` が現在の番号と違えば `SharedMemoryVersionConflictError`（Optimistic Lock）。何も変わらない編集は、何も書かずに現在の Memory を返します。削除済みの Memory は編集できません（先に復元）。
+- **削除**: 現在の Version の `status` を `deprecated` にします（何も消しません）。**復元**は `active` に戻します。Version は増えません。誰がいつ削除・復元したかは、Audit の試みの行と完了の行にだけ残ります（上の「変更の完了の記録」）。
+  削除済みの Memory は、一般 User の一覧・取得には出ません（「見つからない」）。
+- 編集できる項目は `title`（200 文字まで）、`content`（20,000 文字まで）、`memory_type`（`[a-z][a-z0-9_]{0,63}`）、`importance`（0〜100）、`policy_subjects`（20 個まで）です。`reason`（500 文字まで）は Version の `change_reason` になります。
+- 一覧は古い順（`memories.created_at`、同時刻は `id`）で、`limit`（1〜200、既定 50）と `offset`（0〜100000）で区切ります。
+
+### Candidate
+
+Candidate は「Shared Memory にしたい内容」で、提案者（User、Agent の場合は委任元 User と Agent）、元の Memory の Scope と任意の Version ID（提案者の申告で、Service は確認しません）、状態を持ちます。
+**Owner / Admin だけが見られます**（`list_candidates`、`get_candidate`）。
+
+- 状態機械は `pending` → `approved` / `rejected` だけです（`lifecycle.next_candidate_state`）。決定済みの Candidate への操作は `SharedMemoryStateError` です。
+- **承認**は、1 つの Transaction で、Candidate を `FOR UPDATE` でロックし、Candidate の内容で新しい Memory の Version 1 を書き、`memory_sources` に
+  `source_type = 'user_confirmation'`、`source_ref = 'shared_memory_candidate:<candidate id>'` の 1 行を書き、Candidate を `approved`（決定者、時刻、任意の理由、新しい Memory の ID）にします。
+- **却下**は Candidate を `rejected` にするだけです。
+- 1 人が持てる `pending` の Candidate は 50 件までです（`CandidateLimitError`）。Agent の提案は委任元 User に数えます。数える処理は User ごとの Advisory Lock で直列化するので、同時に提案しても超えません。
+
+### System Security Policy の優先（Effective View）
+
+Shared Memory は System Security Policy を上書きできません。Backend は文章の矛盾を判定できないので、衝突は**宣言**で決めます。
+
+- Shared Memory は `policy_subjects`（`merge.permission` のような、`.` 区切りで最大 5 階層の Key）を持てます。Owner / Admin が作成・編集・承認のときに設定します。
+- Policy の項目 `SystemPolicyItem` は `policy_id`、`subject`、`statement`（不透明な本文）です。項目は `SystemPolicySource.items()` から、呼び出しごとに読みます（`StaticPolicySource` は固定のリスト用）。Policy の内容はこの Issue では決めません。
+- Memory の `policy_subjects` のどれかが Policy の `subject` と等しい、またはその下位なら、その Memory は上書きされます（`merge` は `merge` と `merge.permission` を覆い、`mergeable` や `merge_x` は覆いません。Policy が下位のときも覆いません）。
+- `effective_view` は、上書きされた Memory を `memories` に含めず、`overridden` に ID と勝った Policy の ID だけを返します（内容は返しません）。
+  **Policy の文言（`statement`）は、User にも Agent にも返しません。** 返す `EffectiveSharedMemory` には `applied_policies` の欄がなく、`repr` や `dataclasses.asdict` にも文言は現れません（[Decision 0009](../../docs/decisions/0009-shared-memory-administration.md) の 10）。
+- 上書きした Policy の項目（文言を含む。`policy_id` 順）は、**Backend 内部の Context の組み立て**だけが `internal_effective_view` で受け取ります（`InternalEffectiveView.applied_policies`）。
+  引数で切り替える方式ではなく別のメソッドにしたのは、`effective_view` のどの引数でも文言を出せないようにするためです。`repr` には `applied_policies` を含めません（Log に出さないため）。
+  API の Issue が Service を HTTP に出すときは、`effective_view` だけを出します（`internal_effective_view` を出さないことを、その Issue の Review で確認します）。
+- Policy を読めないとき（Source の失敗、遅延、契約違反）は、Memory を 1 件も返さずに `PolicySourceError` で失敗します（fail closed）。エラーと Log に Source の例外の文言は出ません。
+- `list_memories` と `get_memory` は保存されている Memory をそのまま返します（管理用）。モデルに渡す内容は、Backend 内部では `internal_effective_view`、User に見せる画面や API では `effective_view` で作ります。
+- **限界**: `policy_subjects` を宣言していない Memory は、この規則では上書きされません（意味の矛盾は Owner / Admin の承認と、PAW-042 の矛盾検出で補います）。Shared Memory は権限を与えないので、Tool や Merge の可否は Memory と無関係に Backend が強制します。
+
+### Database と権限
+
+Migration `0046` は `shared_memory_candidates` を作ります（`down_revision` は `0050`）。
+Application の Role には、[上の規則](#migration-は-application-の-role-に権限を与えるcontributor-向けの規則)のとおり、Service が実行する最小の権限だけを与えます。
+
+| Table | 与える権限 | 理由 |
+| --- | --- | --- |
+| `shared_memory_candidates` | SELECT、INSERT、UPDATE（`state`、`decided_by`、`decided_at`、`decision_reason`、`memory_id` のみ） | 提案（INSERT）と 1 回の決定（UPDATE）。`SELECT ... FOR UPDATE` は UPDATE 権限が要り、この 5 列で足りる。提案の内容、提案者、出典、作成時刻は書き換えられず、DELETE も与えない |
+| `memories`、`memory_versions`、`memory_relations`、`memory_sources` | PAW-040 のまま | Service は INSERT と、`memory_versions.status` の UPDATE だけを使う。`memories` の DELETE は使わない（削除は `deprecated`。物理削除の経路は別 Issue） |
+| `audit_events` | Revision `0025` のまま（SELECT、INSERT） | Authorizer の試みの行と、変更ごとの完了の行（変更と同じ Transaction の INSERT 1 本）。UPDATE、DELETE、TRUNCATE は与えず、Trigger も拒否する |
+
+`shared_memory_candidates` の CHECK 制約は、状態の値、文字数の上限（Service の上限と同じ数）、`pending` は決定を持たないこと、決定済みは決定者と時刻を持つこと、`memory_id` は `approved` だけが持つことを強制します。
+`memory_id`、人・Agent・出典の ID は、外部キーのない素の UUID です（PAW-040 の Test が、Memory の層の Table と他の Table を外部キーでつなぐことを禁じています）。DB は存在を確認せず、Service は承認で自分が書いた Memory の ID だけを入れます。
+
+`tests/test_shared_memory_grants.py` は、Service の Test を非 Superuser の Role で実行し、権限が過不足ないことを検査します。
+
+### 同時実行
+
+- 1 つの Memory に書く操作（編集・削除・復元）は、まず `memory_lock_key(memory_id)` の Advisory Lock（Transaction 単位）を取り、新しい Statement で現在の Version を読みます。
+  そのため同時に編集する 5 人のうち、勝つのは 1 人で、残りは `SharedMemoryVersionConflictError` です。削除と編集が競合しても、`active` の Version が残ることはありません。
+- Candidate の決定は Candidate の行を `FOR UPDATE` でロックし、`WHERE state = 'pending'` の条件付き UPDATE で決めるので、同時に 2 回承認しても Memory は 1 つだけです。
+- 書き込みの Transaction は `SET LOCAL lock_timeout`（`lock_timeout_ms`、既定 3000）で始まり、超えると `SharedMemoryBusyError`（何も変わらない）です。読み取りはロックを待ちません。
+- `version_number` の Unique 制約と `active` の Partial Unique Index が、最後の防波堤です。
+
+### Rule 関数と Service の分担
+
+判断の規則（Candidate の状態機械、Version の扱い、優先の解決）は、純粋な関数として `lifecycle.py` と `precedence.py` に分けています。
+Service（`service.py`）は認可、検証、Transaction、Lock、SQL を持ち、判断の箇所でこれらの関数を呼びます。
+Service は、Rule 関数の戻り値を、契約に照らして確認してから書き込みます（`RulesContractError`）。
+たとえば、承認では Candidate と違う内容の Draft や期待と違う状態を、編集では並び順の違う変更項目や、版の違う Plan を拒否し、状態の更新は「更新前の状態が想定どおり」の場合だけ行います。
+
+| Module | 関数 |
+| --- | --- |
+| `lifecycle.py` | `next_candidate_state`、`check_deletable`、`check_restorable`、`apply_changes`、`changed_fields`、`plan_edit`、`draft_from_candidate` |
+| `precedence.py` | `subject_covers`、`overriding_policy_ids`、`resolve_effective_view` |
+
+**実装の由来:** この 2 つの Module の関数本体（10 個）は、ローカルの Qwen3-Coder-30B-A3B が、契約（Docstring と手計算した例）と Test だけを仕様として実装しました（1 回の実行、約 190 回の Tool 呼び出し）。Claude が書いた契約と Test（507 件）を、実 PostgreSQL の全体の CI（2,885 件）で通ることを確認しました。
+Review で、`resolve_effective_view` の仕様の Docstring が Model によって書き換えられていたため、元の Docstring に戻しています（本体の振る舞いは変えていません）。空の作業 File（`APPROVED`、`REJECTED`）も残していたので削除しました。
+Model の実装は、Test を通すことに必要な範囲で素直な書き方です。Model が書いた部分と、Claude が書いた部分（Model、Service、Validation、Migration、Test、Decision 0009）の境界は、上の表のとおりです。
+
+### 制限と未確認の点
+
+- HTTP の Endpoint、通知、Web の画面はありません。提案者が自分の Candidate の状態を見る方法もありません（Decision 0009 の 3）。
+- Policy の実体（保存、Admin による変更、強制）はこの Issue の範囲外です。`SystemPolicySource` の実装は、Policy を持つ Issue が用意します。
+- `policy_subjects` の宣言が前提です（上の限界）。PAW-042 の矛盾検出が宣言を補う設計は未実装です。
+- Shared Memory の鮮度（再確認の期限など）は `permanent` 固定です（PAW-042 で決めます）。
+- Embedding と Markdown Projection（PAW-043 / PAW-045）は、この Service を通りません。Shared Memory を読む Retrieval は、`readable_memory_versions` を使い、モデルに渡す前に Policy の優先を適用する必要があります（この Service の `internal_effective_view`、または `precedence.resolve_effective_view`。どちらも Policy の文言を含む `InternalEffectiveView` を返すので、User や Agent へ返すときは `.public()` か `effective_view` を使います）。
+- 上限の数値（50 件、20 個、20,000 文字など）は実測に基づかない仮の値で、`memory.shared.limits` にあります。
+- Migration `0046` の `down_revision` は `0050` です（鎖は `0001 → 0025 → 0032 → 0040 → 0021 → 0033 → 0031 → 0050 → 0046`）。Revision ID は Issue 番号で、鎖の順序ではありません。統合時に Orchestrator が並びを確認します。
+- 一覧の同時刻の並び（`id` の副次キー）は決定的にするためのもので、Test は「同時刻の 12 件が `id` 順」だけを確認します。Query Plan によっては副次キーがなくても同じ順になるため、その Test だけでは副次キーの削除を検出できません（変異 Test で確認済み）。
+
+### 承認された判断
+
+[Decision 0009](../../docs/decisions/0009-shared-memory-administration.md)（Approved、2026-09-25 に Human が承認）の次の点は、承認された方針です。
+
+1. Candidate を別 Table にすること、Agent の提案を許すこと、提案者に Candidate を見せない（結果を返す仕組みは今は作らない）こと、`pending` 50 件の上限（暫定値として承認）。
+2. 削除・復元を `status` の切り替えにし、Version を増やさないこと（誰が削除したかは Audit Event だけ）。その Audit の `action` を操作ごとに分けるために Capability を 6 つ追加したこと（閲覧は `shared_memory.manage` のまま。Decision 0009 の 12）と、変更の完了を Audit の行として同じ Transaction で書くこと（同 13。Service が `audit_events` に直接書く）。
+3. `policy_subjects` の宣言で Policy との衝突を決めること（宣言がなければ上書きされない。この限界を受け入れた）。
+4. `effective_view` は、上書きした Policy の `statement`（文言）を User にも Agent にも返さないこと。文言は Backend 内部の `internal_effective_view` だけが受け取ります（Global System Prompt との関係は、公開する場合に別途決める。Decision 0009 の 10）。
+5. 承認した Shared Memory の鮮度を `permanent` にすること（PAW-042 で見直す）。
+
+### Test
+
+`tests/test_shared_memory_*.py`。Rule 関数は Database なしの Test（`..._rules_*.py`）、Service は実 PostgreSQL の Test（`PAW_TEST_DATABASE_URL` がないと Skip）、
+Migration（上げ下げ、Model との差分、制約）、権限（非 Superuser の Role で Service の Test を実行）、自動昇格の拒否（`..._promotion_refused.py`）、
+操作ごとの Audit の `action`（`..._audit_actions.py`。実 `audit_events` の行を読み、非 Superuser の Role でも実行）、
+変更の完了の記録（`..._completion.py`。成功は完了の行が続くこと、失敗・Lock の待ち切れ・更新の失敗・Commit の失敗は完了の行がなく変更もないこと、完了の行を書けなければ変更も戻ること。非 Superuser の Role でも実行）があります。
 
 ## Research Scratch Store
 
