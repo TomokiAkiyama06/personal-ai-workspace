@@ -69,6 +69,12 @@ name only in the log).
 ``history`` (read by tests and diagnostics, not by any request path) still runs
 on a pooled session.
 
+**PostgreSQL 18 or newer** is required for this path (``transaction_timeout``;
+decided by the human on 2026-09-25, Decision 0006; it is what the tests and CI
+run). A server older than 17 does not know the setting and fails these calls at
+the first statement, closed; 17 knows it but is neither tested nor supported.
+Nothing checks the version at start-up.
+
 Opening a request is serialised **per (task, user)** by a transaction-scoped
 advisory lock, so that the cap on open approvals holds under concurrency (a
 count followed by an insert would let simultaneous requests all pass). The
