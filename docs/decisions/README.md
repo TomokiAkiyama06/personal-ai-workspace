@@ -19,6 +19,7 @@
 | [0012](0012-research-provider-adapter-policy.md) | Research Provider Adapterの方針 | Approved |
 | [0013](0013-research-scratch-task-relation.md) | Research Scratch の Task との関係と Pin / 保存の方針 | Approved |
 | [0014](0014-task-working-set-persistence.md) | Task の Working Set（Multi-Repo）の永続化をPAW-032に含めず、新しいIssueで扱う | Approved |
+| [0018](0018-memory-journal-consolidation-policy.md) | Memory の Immediate Journal と Background Consolidation の方針（Worker 出力の Scope と State、優先度、Queue の数値、高リスク領域の保留） | Approved |
 
 運用は [AGENTS.md](../../AGENTS.md) の「仕様変更」に従います。
 

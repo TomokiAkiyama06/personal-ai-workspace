@@ -1,8 +1,8 @@
 """Numeric limits and policy defaults of the Immediate Journal (PAW-041).
 
-REQUIREMENTS.md does not state any of these numbers; they are provisional and
-proposed in Decision 0018
-(``docs/decisions/0018-memory-journal-consolidation-policy.md``).
+REQUIREMENTS.md does not state any of these numbers; they are provisional values
+approved as such in Decision 0018 (Approved, 2026-09-26;
+``docs/decisions/0018-memory-journal-consolidation-policy.md``).
 They live in this one module so that a changed value is a code change without a
 schema change, except the ones a CHECK constraint repeats (marked below; the
 migration writes the number out and ``tests/test_journal_migration.py`` compares

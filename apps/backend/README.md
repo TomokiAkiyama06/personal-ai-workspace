@@ -1507,7 +1507,8 @@ Memory の整理は**背景の Queue**（`ConsolidationQueue`）から Worker（
 **HTTP の Endpoint も、Worker の Process もまだありません**（Chat の層が `MemoryJournal` を呼び、Worker の Process が `Consolidator.run_batch` を定期的に呼びます）。
 要件は [REQUIREMENTS.md](../../REQUIREMENTS.md) の「Immediate Journal / Background Consolidation」と [Memory Architecture](../../docs/MEMORY_ARCHITECTURE.md) の 18 節、
 要件が決めていない選択（Scope と State の扱い、優先度の割り当て、Queue の数値、保持、高リスクの領域）は
-[Decision 0018](../../docs/decisions/0018-memory-journal-consolidation-policy.md)（**Proposed、Human の承認待ち**）です。承認されるまで、下の値と選択は暫定の実装です。
+[Decision 0018](../../docs/decisions/0018-memory-journal-consolidation-policy.md)（**Approved、2026-09-26 に Human が承認**。8 点すべて推奨どおり）です。
+数値と高リスクの語彙は、実測に基づかない**暫定値として承認**されています（下の「承認された判断」）。
 
 ```text
 User Message
@@ -1605,11 +1606,24 @@ Application の Role には、Service が実行する最小の権限だけを与
 
 `tests/test_journal_grants.py` は、Journal、Queue、Consolidator の Test を非 Superuser の Role で実行し、権限が過不足ないこと、書き換えを禁じた列と Schema の変更が拒否されることを検査します。
 
+### 承認された判断
+
+[Decision 0018](../../docs/decisions/0018-memory-journal-consolidation-policy.md)（Approved、2026-09-26 に Human が承認。8 点すべて推奨どおり）の次の点は、承認された方針です。
+
+1. Worker の `confirmed` は `observed` に下げる（Confirmed は User の確認だけ）。
+2. すべての Candidate を `user` Scope に置く（`project` / `repo` は推奨として残し、範囲を広げるのは確認 Flow）。`shared` は書かない。
+3. 高リスクの領域（key と内容、英日の語）は保留する。語彙は暫定。
+4. 優先度は呼び出し側が決める（本文の Keyword では決めない）。
+5. Timeout は失敗として数え、Worker が使えないことは数えない。
+6. Queue の数値（Lease 300 秒、Worker 120 秒、失敗 5 回、Backoff 30 秒から 15 分、Batch 10、Lock の待ち 3 秒）は暫定値として承認された。
+7. 保留した Candidate の本文は Entry の `outcome` に持つ。
+8. Dead Letter の復旧は運用（`enqueue`）で、自動の再投入は置かない。
+
 ### 制限と未確認の点
 
 - HTTP の Endpoint、Worker の Process（`run_batch` を呼び続ける Loop）、User 向けの「再試行」、通知はありません。
 - **Worker は Test の `ScriptedWorker`（Model なし）でだけ確認しています。** 実 GPU・実 Model の Adapter、Prompt（既存 Memory を渡して `supersedes` を出させる）、Benchmark で採用された Model との接続は未確認です。
-- 高リスクの語彙（英日）は暫定で、見逃しと過剰な保留がありえます（Decision 0018）。key の正規化はしないので、同じ意味の別の key は別の Memory になります。
+- 高リスクの語彙（英日）は暫定値として承認されたもので、見逃しと過剰な保留がありえます（Decision 0018）。key の正規化はしないので、同じ意味の別の key は別の Memory になります。
 - Conflict / Freshness / Retrieval / Confirmation Flow（PAW-042、043、044）は含みません。関係は最小（同じ key の置き換え、`supersedes`、`conflicts_with`）で、鮮度は `permanent` 固定、Embedding と Markdown Projection は行いません。
 - 数値（Lease 300 秒、5 回、Backoff、Batch 10、上限の件数と文字数）は実測に基づかない暫定値で、`journal/limits.py` にあります。
 - 同じ key を別の User が使っても Memory は別ですが、User ごとの Advisory Lock の名前空間は、Hash の衝突で無関係な key を直列にすることがあります（正しさには影響しません）。
