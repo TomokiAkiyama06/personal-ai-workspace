@@ -364,6 +364,46 @@ _ENDPOINT = re.compile(
 )
 _BARE_V6 = re.compile(r"(?P<address>[0-9A-Fa-f.]*:[0-9A-Fa-f:.]*)" + _ZONE)
 
+# A name that contains "%". ``is_private_host`` calls every such host private (a DNS
+# name never holds "%"), so the recognizer must hand it over: a private name must not
+# survive because a "%" hides part of it. What it recognizes is a dotted name whose
+# labels may hold percent-escapes (``db.%69nternal``), followed by an optional zone
+# identifier (``db.internal%eth0``, ``1.2.3.4%25eth0``). The escape of the dot
+# (``%2e``, and ``%252e`` once more encoded) separates labels like a dot and is never
+# part of a label, so no repetition is ambiguous and the time stays linear (the name
+# is matched greedily, once; the rest is one character class). The alphabet is wider
+# than the plain rule's (``_`` is in): a "%" is reason enough.
+_PCT_ENDPOINT = re.compile(
+    r"(?:[^/@\[\]]*@)?(?P<host>[A-Za-z0-9%._~-]+)(?::\d{1,5})?(?:/\S*)?"
+)
+_PCT_DOT = r"(?:\.|%(?:25)?2[eE])"
+_PCT_LABEL = r"(?:[A-Za-z0-9_-]|%(?!(?:25)?2[eE])[0-9A-Fa-f]{2})+"
+_ESCAPED_NAME = re.compile(_PCT_LABEL + "(?:" + _PCT_DOT + _PCT_LABEL + ")+")
+_ZONE_ID = re.compile(r"%[A-Za-z0-9._~%-]*")
+_DOTTED_QUAD = re.compile(r"\d{1,3}(?:\.\d{1,3}){3}")
+_LETTER = re.compile(r"[A-Za-z]")
+
+
+def _percent_host(host):
+    """``host`` if it is a DNS-shaped name that contains "%", else ``None``."""
+    if "%" not in host:
+        return None
+    if host.endswith("."):
+        host = host[:-1]
+    name = _ESCAPED_NAME.match(host)
+    if name is None:
+        return None
+    rest = host[name.end() :]
+    if not rest:
+        return host
+    # A zone identifier. ``3.5%`` and ``12.5%off`` are percentages, not hosts: the
+    # name in front of the zone needs a letter, or must be a dotted quad.
+    if _ZONE_ID.fullmatch(rest) and (
+        _LETTER.search(name.group()) or _DOTTED_QUAD.fullmatch(name.group())
+    ):
+        return host
+    return None
+
 
 def _endpoint_host(core):
     """The bare host of an endpoint token, or ``None`` if ``core`` is not one."""
@@ -377,6 +417,9 @@ def _endpoint_host(core):
         except ValueError:
             return None
         return match.group("address")
+    match = _PCT_ENDPOINT.fullmatch(core) if "%" in core else None
+    if match:
+        return _percent_host(match.group("host"))
     return None
 
 
@@ -407,6 +450,18 @@ def abstract_hosts(text):
     optional zone identifier (``%`` and any characters except white space, ``[``,
     ``]`` and ``/``). It has no port and no user information.
 
+    A core that contains ``%`` and is neither of those is a host too (and
+    ``is_private_host`` is True, as it is for every host that contains ``%``) when it
+    is, after the optional user information, ONE dotted name, an optional port and an
+    optional path (Decision 0010): two or more labels of ``A-Z a-z 0-9 _ -`` that may
+    hold percent-escapes (``%`` and two hex digits) and are separated by ``.``, ``%2e``
+    or ``%252e`` (an escape of the dot is a dot, never part of a label), then ONE
+    optional trailing ``.``, and optionally ``%`` and a zone identifier of
+    ``A-Z a-z 0-9 . _ ~ % -`` (it may be empty). A zone identifier needs, in front of
+    it, a name with an ASCII letter or a dotted quad (``3.5%`` and ``12.5%off`` are
+    percentages). ``100%``, ``50%off``, ``%.2f``, ``%s.%d``, ``db%eth0`` and
+    ``db.%zzinternal`` stay.
+
     The host is judged with ``is_private_host``, after the user information, the
     port, the path, the brackets, the zone identifier and the trailing ``.`` are
     taken off: ``is_private_host`` must be True for what is left.
@@ -419,7 +474,9 @@ def abstract_hosts(text):
     ``("", 1)``; ``"ssh admin@10.0.0.5"`` -> ``("ssh", 1)``; ``"ping fe80::1%eth0"``
     -> ``("ping", 1)``; ``"docs at example.com."``, ``"example.com.:8080"``,
     ``"python 3.13"``, ``"server1"``, ``"user@db:5432"`` and ``"file.py"`` are
-    unchanged, 0 (public, or a single label that cannot be told from a word).
+    unchanged, 0 (public, or a single label that cannot be told from a word);
+    ``"db.internal%eth0"``, ``"db.%69nternal:5432"`` and ``"db%2einternal"`` are
+    dropped, 1; ``"3.5%"`` and ``"100%"`` are unchanged, 0.
     """
     kept = []
     count = 0

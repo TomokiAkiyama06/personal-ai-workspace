@@ -49,6 +49,33 @@ CORPUS = (
     ". , ; : ! ? \" ' - _ = + / \\",
 )
 
+
+def percent_shapes(size):
+    """Hostile tokens for names that contain "%" (``rules._percent_host``).
+
+    Each is one token of about ``size`` characters. The one that ends in ``^`` is
+    rejected by the first pattern; the others reach the name and zone patterns, and
+    are accepted or rejected only after the whole token was read.
+    """
+    return {
+        "escaped label": "%41" * (size // 3),
+        "letters around an escape": "a" * (size // 2) + "%41" + "a" * (size // 2 - 3),
+        "escaped labels": "a." + "%41" * (size // 3) + "..",
+        "escaped labels rejected": "a." + "%41" * (size // 3) + "^",
+        "escaped dots": "a" + "%2e" * (size // 3),
+        "double escaped dots": "a" + "%252e" * (size // 5),
+        "escaped dots between labels": "a%2e%41" * (size // 7) + "..",
+        "escaped names": "%41." * (size // 4) + ".",
+        "percent labels": "a.%" * (size // 3),
+        "percent dots": "%." * (size // 2),
+        "zone names": "a.b%" + "a" * (size - 4),
+        "dotted zone names": "a.b%" + "a." * (size // 2 - 2) + "%",
+        "escaped zone names": "a.b" + "%41" * (size // 3 - 1) + "%zz",
+        "escaped userinfo": "%41" * (size // 3 - 1) + "@",
+        "escaped ports": "a.%41" * (size // 5 - 1) + ":1",
+    }
+
+
 HOSTILE = {
     "letters": "a" * MAX_DRAFT_CHARS,
     "digits": "1" * MAX_DRAFT_CHARS,
@@ -78,6 +105,7 @@ HOSTILE = {
     "userinfo dots": "a." * (MAX_DRAFT_CHARS // 2 - 1) + "@a.b",
     "absolute": "a." * (MAX_DRAFT_CHARS // 2 - 1) + ".:1",
     "ports": "a.b:1" * (MAX_DRAFT_CHARS // 5),
+    **percent_shapes(MAX_DRAFT_CHARS),
 }
 
 # Each shape again as ONE token, far longer than a draft may be. Linear time is a
@@ -96,6 +124,7 @@ LONG_TOKENS = {
     "labels": "a.b" * (LONG // 3),
     "percents": "%" * LONG,
     "ats": "a@" * (LONG // 2),
+    **percent_shapes(LONG),
 }
 
 

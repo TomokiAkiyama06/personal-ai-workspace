@@ -573,6 +573,114 @@ class AbstractHostsTest(Table, unittest.TestCase):
             )
         )
 
+    def test_a_name_with_a_zone_identifier_is_removed_whole(self):
+        # ``is_private_host`` calls every host that contains "%" private, so the
+        # recognizer must hand such a name to it: a private name must not survive
+        # only because a "%" follows it.
+        self.check(
+            (
+                ("db.internal%eth0", ("", 1)),
+                ("connect to db.internal%eth0 now", ("connect to now", 1)),
+                ("DB.INTERNAL%ETH0", ("", 1)),
+                ("db.internal%25eth0", ("", 1)),
+                ("db.internal%eth0.100", ("", 1)),
+                ("db.internal%br-lan_0", ("", 1)),
+                ("db.internal%12", ("", 1)),
+                ("db.internal%", ("", 1)),
+                ("example.com%eth0", ("", 1)),
+                ("1.2.3.4%eth0", ("", 1)),
+                ("ping 10.0.0.1%25eth0:22 up", ("ping up", 1)),
+                ("my_db.internal%eth0", ("", 1)),
+                ("db.internal%eth0:5432", ("", 1)),
+                ("db.internal%eth0:5432/x", ("", 1)),
+                ("db.internal%eth0/health ok", ("ok", 1)),
+                ("admin@db.internal%eth0", ("", 1)),
+                ("admin@db.internal%eth0:22", ("", 1)),
+                ("(db.internal%eth0)", ("", 1)),
+                ('"db.internal%eth0:80",', ("", 1)),
+                ("see db.internal%eth0.", ("see", 1)),
+                ("db.internal%eth0.:80", ("", 1)),
+                ("db.internal%eth0%zz", ("", 1)),
+            )
+        )
+
+    def test_a_name_with_a_percent_encoded_character_is_removed_whole(self):
+        # ``db.%69nternal`` is ``db.internal`` with the "i" written as ``%69``.
+        self.check(
+            (
+                ("db.%69nternal", ("", 1)),
+                ("connect to db.%69nternal now", ("connect to now", 1)),
+                ("db.%69NTERNAL", ("", 1)),
+                ("%64b.internal", ("", 1)),
+                ("%64b.example.com", ("", 1)),
+                ("db.%69nternal:5432", ("", 1)),
+                ("db.%69nternal/health ok", ("ok", 1)),
+                ("db.%69nternal.:5432", ("", 1)),
+                ("db.%69nternal.", ("", 1)),
+                ("admin@db.%69nternal:5432", ("", 1)),
+                ("'db.%69nternal:5432/x'", ("", 1)),
+                ("wiki.%63orp, then", ("then", 1)),
+                ("my_db.%69nternal", ("", 1)),
+                ("db.%69nternal%eth0", ("", 1)),
+                ("10.0.0.%31", ("", 1)),
+                ("%64%62.%69%6e%74%65%72%6e%61%6c", ("", 1)),
+                # The dot itself written as an escape, once or twice encoded.
+                ("db%2einternal", ("", 1)),
+                ("db%2Einternal", ("", 1)),
+                ("db%252einternal", ("", 1)),
+                ("db%2einternal:5432", ("", 1)),
+                ("db%2e%69nternal", ("", 1)),
+                ("%64%62%2einternal", ("", 1)),
+            )
+        )
+
+    def test_ordinary_text_with_a_percent_sign_stays(self):
+        self.check(
+            (
+                ("100%", ("100%", 0)),
+                ("50% off", ("50% off", 0)),
+                ("50%off", ("50%off", 0)),
+                ("50%off.example", ("50%off.example", 0)),
+                ("3.5%", ("3.5%", 0)),
+                ("grew 99.9%, then 0.5%.", ("grew 99.9%, then 0.5%.", 0)),
+                ("12.5%off", ("12.5%off", 0)),
+                ("3.5%increase", ("3.5%increase", 0)),
+                ("1.5%/yr", ("1.5%/yr", 0)),
+                ("%.2f", ("%.2f", 0)),
+                ("print %.2f and %s.%d", ("print %.2f and %s.%d", 0)),
+                ("%d.%d.%d", ("%d.%d.%d", 0)),
+                ("%s", ("%s", 0)),
+                ("%eth0", ("%eth0", 0)),
+                ("C%2B%2B", ("C%2B%2B", 0)),
+                ("hello%20world", ("hello%20world", 0)),
+                ("%", ("%", 0)),
+                ("%%.%%", ("%%.%%", 0)),
+                ("a%b.c", ("a%b.c", 0)),
+                ("q=a%20b.c", ("q=a%20b.c", 0)),
+                # Not a name that any resolver takes: a bad escape, or an empty label.
+                ("db.%zzinternal", ("db.%zzinternal", 0)),
+                ("db.%6", ("db.%6", 0)),
+                ("a.%41.%2e.b", ("a.%41.%2e.b", 0)),
+                ("db.internal.%eth0", ("db.internal.%eth0", 0)),
+                ("db..%69nternal", ("db..%69nternal", 0)),
+                # A "%" in the path does not make the host one that contains "%":
+                # the plain rule's limits (here the "_") still apply.
+                ("my_db.internal/a%20b", ("my_db.internal/a%20b", 0)),
+                ("my_db.internal:80/a%", ("my_db.internal:80/a%", 0)),
+            )
+        )
+
+    def test_a_percent_encoded_file_name_is_removed_like_a_host(self):
+        # Every dotted name with a valid escape is "not a public name" (a "%"
+        # can hide any character of it), so a percent-encoded file name is
+        # removed too: an over-removal that Decision 0010 accepts.
+        self.check(
+            (
+                ("my%20file.txt", ("", 1)),
+                ("see report%202024.pdf now", ("see now", 1)),
+            )
+        )
+
     def test_public_hosts_and_words_stay(self):
         self.check(
             (
