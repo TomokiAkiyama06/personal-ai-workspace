@@ -7,7 +7,7 @@ credential and no identifying detail, or refuses with a ``PrivacyRefusal``. It
 also delivers an ``ExternalSendRecord`` to an ``ExternalSendAudit`` sink before
 anything is sent. This module has no I/O and no minimisation logic: it holds the
 closed enums, the immutable value objects with their validation, the limits and
-the in-memory audit sink used by tests.
+the in-memory audit sink used by tests (the persistent one is in ``audit.py``).
 
 Wrong types raise ``TypeError`` and out-of-range values raise ``ValueError``;
 every message is a fixed string that never echoes a value. ``ContextPiece.text``
@@ -435,8 +435,9 @@ class ExternalSendAudit(Protocol):
 
     ``record`` must durably accept the record (or raise). If it raises or takes
     longer than the gate's audit timeout, the gate refuses the send with
-    ``RefusalReason.AUDIT_FAILED``: an unaudited send never happens. A later
-    issue connects this Protocol to a persistent store.
+    ``RefusalReason.AUDIT_FAILED``: an unaudited send never happens.
+    ``PostgresExternalSendAudit`` (``audit.py``, issue #87) is the persistent
+    implementation; ``InMemoryExternalSendAudit`` is the one of the tests.
     """
 
     async def record(self, record: ExternalSendRecord) -> None: ...

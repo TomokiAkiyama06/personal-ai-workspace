@@ -28,6 +28,9 @@ from .support import paw_environment
 from .test_migrations import offline_config
 
 REVISION = "0034"
+# The revision this one follows: the chain is re-linked when other revisions merge
+# first, and this constant, the migration and the README then change together.
+PREVIOUS = "0030"
 SCHEMA = "paw_orchestrator_drift_check"
 DAGS, NODES, EDGES, ATTEMPTS = TABLE_NAMES
 
@@ -170,7 +173,7 @@ class ModelsMetadataTest(unittest.TestCase):
             self.assertEqual(
                 set(getattr(module, name)), {m.value for m in enum_class}, name
             )
-        self.assertEqual(module.down_revision, "0026")
+        self.assertEqual(module.down_revision, PREVIOUS)
 
 
 class OfflineMigrationTest(unittest.TestCase):
@@ -194,7 +197,7 @@ class OfflineMigrationTest(unittest.TestCase):
         self.assertEqual(positions, sorted(positions))
 
     def test_the_revision_follows_the_current_head(self):
-        self.assertEqual(previous_revision(), "0026")
+        self.assertEqual(previous_revision(), PREVIOUS)
 
 
 def only_orchestrator_objects(obj, name, type_, reflected, compare_to) -> bool:

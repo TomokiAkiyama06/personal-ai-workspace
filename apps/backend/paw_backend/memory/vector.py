@@ -45,7 +45,7 @@ class Vector(UserDefinedType[list[float]]):
 
     The schema uses no dimension. ``dimensions`` exists so that reflecting a
     ``vector(N)`` column (SQLAlchemy passes the ``N``) keeps working once a later
-    migration, such as PAW-043's per-model index, introduces a typed vector.
+    migration, such as a later per-model ANN index, introduces a typed vector.
     """
 
     cache_ok = True

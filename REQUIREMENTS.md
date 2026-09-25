@@ -1173,6 +1173,12 @@ OS側も:
 - Owner/Adminの重要操作では、直近30分以内のPasskeyによるStep-up Authenticationを要求する。
 - 一般UserはPasswordのみでも利用可能だが、初回登録・設定画面でPasskey登録を推奨する。
 
+> **注記（[Decision 0015](docs/decisions/0015-login-session-password-policy.md) の12節。上の `[FIXED]` の規則は変更しない）**:
+> 上の規則は**既定値**であり、Ownerだけが、Workspaceの設定でRoleごとのPasskey要求（required / optional）、Userへの推奨表示、Step-upの有効時間を変更できる（Adminは閲覧のみ）。
+> 変更には、Owner自身の直近のPasskeyによるStep-upが必要である（PasswordによるStep-upでは変更できない。Passkey実装（PAW-023）まで、この設定変更は本番では使えない）。
+> Step-upの有効時間は5〜240分の範囲で設定できる（既定30分）。変更は新しいSign-in・新しいSessionから効き、既存のSessionは失効も降格もしない。変更履歴（誰が・いつ・変更前後）はAuditに加えて専用の履歴に残る。
+> Passkey未登録の間、OwnerはPasswordでLoginでき、`owner-recover` による復旧もできる（PAW-022はPasskeyを強制しない。PAW-023は「必須で未登録」をPasskeyの登録だけができる状態にし、行き止まりを作らない）。
+
 
 ### [FIXED] Password / Login Failure / Session Policy
 

@@ -1,9 +1,10 @@
 """FastAPI integration: the principal seam and ``require_capability``.
 
-Authentication does not exist yet (PAW-022). Until it does, the default
-provider yields nobody, so every endpoint protected with
-:func:`require_capability` answers 401. PAW-022 replaces the provider (see
-:func:`install_authz`); nothing else in this package changes.
+The default provider yields nobody, so an endpoint protected with
+:func:`require_capability` answers 401 for everybody. ``create_app`` replaces it
+with the session provider of PAW-022 (``paw_backend.auth.principals``: the session
+cookie, resolved from stored data) through :func:`install_authz`; a test that
+does not pass a provider keeps the default.
 """
 
 import inspect

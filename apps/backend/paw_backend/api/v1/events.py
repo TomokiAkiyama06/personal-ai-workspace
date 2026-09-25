@@ -1,11 +1,12 @@
 """Server-to-client event paths: Server-Sent Events and WebSocket.
 
-SECURITY (PAW-022 must close this before any non-public event is added):
-these endpoints are UNAUTHENTICATED because sessions do not exist yet. They
-therefore emit system events only (``system.connected`` and
-``system.heartbeat``), which contain no user, project, task or memory data.
-When PAW-022 introduces sessions, both endpoints must require an
-authenticated session before they deliver anything else.
+SECURITY (close this before any non-public event is added): these endpoints
+are UNAUTHENTICATED. They therefore emit system events only
+(``system.connected`` and ``system.heartbeat``), which contain no user,
+project, task or memory data. Sessions exist now (PAW-022: the session cookie is
+what ``require_capability`` authenticates), so the Issue that adds the first
+non-public event must guard both endpoints with ``require_capability`` (and
+authorize each event type) before it delivers anything else.
 
 Already enforced here: the WebSocket refuses cross-origin browser handshakes
 (``require_allowed_origin``; browsers do not apply CORS to WebSockets), the

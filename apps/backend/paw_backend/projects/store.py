@@ -23,7 +23,9 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import (
+    ColumnElement,
     and_,
+    bindparam,
     delete,
     func,
     insert,
@@ -53,7 +55,7 @@ from paw_backend.projects.records import (
     Project,
     ProjectStatus,
 )
-from paw_backend.tasks.domain import TERMINAL_STATES
+from paw_backend.tasks.domain import TERMINAL_STATES, TaskState
 from paw_backend.tasks.models import TaskRow
 from paw_backend.tasks.queueing.domain import ACTIVE_QUEUE_STATUSES
 from paw_backend.tasks.queueing.models import QueueEntryRow
@@ -67,6 +69,35 @@ USERS = UserRow.__table__
 # ``TaskService`` / ``TaskQueue``, never by an UPDATE.
 TASKS = TaskRow.__table__
 QUEUE_ENTRIES = QueueEntryRow.__table__
+
+_ACTIVE_STATES = tuple(sorted(set(TaskState) - TERMINAL_STATES))
+_TERMINAL_STATES = tuple(sorted(TERMINAL_STATES))
+
+
+def _written_in(column: Any, values: Any) -> ColumnElement[bool]:
+    """``column IN ('a', 'b')`` with the values written into the SQL text.
+
+    The statements below read ``tasks`` through ``ix_tasks_project_id_state`` and
+    ``queue_entries`` through its partial indexes (``WHERE status IN ('queued',
+    'claimed')``). PostgreSQL uses a partial index only if the statement's own
+    predicate implies the index condition, and it cannot prove that for values sent
+    as bind parameters in the generic plan it may cache for a prepared statement
+    (the driver prepares a statement it runs often). The values are a closed set
+    of constants, so writing them into the statement (``literal_execute``) costs
+    no plan reuse. ``tests/test_tasks_project_index.py`` plans every statement in
+    both ``plan_cache_mode``s.
+    """
+    return column.in_(
+        [
+            bindparam(
+                f"{column.name}_{value.value}",
+                value,
+                type_=column.type,
+                literal_execute=True,
+            )
+            for value in values
+        ]
+    )
 
 
 def project_from_row(row: Any) -> Project:
@@ -134,6 +165,57 @@ async def get_project_for_share(
         )
     ).first()
     return None if row is None else project_from_row(row)
+
+
+async def get_project_status_for_share(
+    session: AsyncSession, project_id: uuid.UUID
+) -> ProjectStatus | None:
+    """The project's status with ``SELECT ... FOR SHARE``; ``None`` if it is unknown.
+
+    Only the status is read: the Project state gate of the task lane
+    (``task_gate.py``) needs nothing else, and nothing of the project's content
+    (name, description) passes through the task lane's transaction. The lock is the
+    one of :func:`get_project_for_share`: until the caller's transaction ends the
+    project cannot be archived, deleted or restored (Every lifecycle change locks
+    the row ``FOR UPDATE`` first; share locks do not exclude each other). The lock
+    needs ``UPDATE`` on some column of ``projects`` besides ``SELECT``, which the
+    application role holds (``status`` and six others, migration 0026).
+    """
+    status = (
+        await session.execute(
+            select(PROJECTS.c.status)
+            .where(PROJECTS.c.id == project_id)
+            .with_for_update(read=True)
+        )
+    ).scalar_one_or_none()
+    return None if status is None else ProjectStatus(status)
+
+
+def active_project_condition(project_id: ColumnElement) -> ColumnElement[bool]:
+    """``(the status of the project with this id) = 'active'``, for a WHERE clause.
+
+    ``project_id`` is an expression of the caller's own statement that names the
+    project (in the queue's claim: a scalar subquery over ``tasks`` for the entry
+    under consideration). A statement FRAGMENT, not a statement: nothing is locked
+    and nothing is read until the caller runs it. An unknown project has no status,
+    so the comparison is not true: default deny.
+
+    It is a correlated SCALAR subquery on purpose, not an ``EXISTS``. An ``EXISTS``
+    is turned into a join, and the planner may then start from the (few) Active
+    projects, read all their entries and sort them, instead of reading the queue in
+    the order of ``ix_queue_entries_claim_order`` and stopping at the first entry
+    that passes; a scalar subquery can only be evaluated per candidate row, so the
+    ordered index scan and the ``LIMIT 1`` stay in charge (``tests/
+    test_project_claim_filter.py`` plans it). The status is written into the SQL text
+    (``literal_execute``) like the other fragments here.
+    """
+    status = select(PROJECTS.c.status).where(PROJECTS.c.id == project_id)
+    return status.scalar_subquery() == bindparam(
+        "project_status_active",
+        ProjectStatus.ACTIVE.value,
+        type_=PROJECTS.c.status.type,
+        literal_execute=True,
+    )
 
 
 async def insert_project(
@@ -714,23 +796,12 @@ async def select_active_task_ids(
         select(TASKS.c.id)
         .where(
             TASKS.c.project_id == project_id,
-            TASKS.c.state.notin_(sorted(TERMINAL_STATES)),
+            _written_in(TASKS.c.state, _ACTIVE_STATES),
         )
         .order_by(TASKS.c.created_at, TASKS.c.id)
         .limit(limit)
     )
     return list((await session.execute(statement)).scalars())
-
-
-async def is_task_terminal(session: AsyncSession, task_id: uuid.UUID) -> bool:
-    """Whether the task exists and is completed, failed or cancelled. A plain read.
-
-    ``False`` for an unknown id (there is nothing to reconcile for it).
-    """
-    state = (
-        await session.execute(select(TASKS.c.state).where(TASKS.c.id == task_id))
-    ).scalar_one_or_none()
-    return state in TERMINAL_STATES
 
 
 async def has_active_task(session: AsyncSession, project_id: uuid.UUID) -> bool:
@@ -758,10 +829,10 @@ async def select_active_entry_task_ids(
     """
     conditions = [
         TASKS.c.project_id == project_id,
-        QUEUE_ENTRIES.c.status.in_(sorted(ACTIVE_QUEUE_STATUSES)),
+        _written_in(QUEUE_ENTRIES.c.status, sorted(ACTIVE_QUEUE_STATUSES)),
     ]
     if terminal_tasks_only:
-        conditions.append(TASKS.c.state.in_(sorted(TERMINAL_STATES)))
+        conditions.append(_written_in(TASKS.c.state, _TERMINAL_STATES))
     statement = (
         select(QUEUE_ENTRIES.c.task_id)
         .join(TASKS, TASKS.c.id == QUEUE_ENTRIES.c.task_id)

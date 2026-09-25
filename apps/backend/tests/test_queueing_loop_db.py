@@ -23,6 +23,7 @@ from paw_backend.tasks.queueing import (
     failure_signature,
 )
 
+from .gate_support import ALWAYS_ACTIVE
 from .queueing_support import (
     PostgresQueueingTestCase,
     raise_unexpected,
@@ -411,7 +412,7 @@ class ClearTest(LoopTestCase):
         try:
             await asyncio.wait_for(inserted.wait(), DEADLINE_SECONDS)
             restarting = asyncio.create_task(
-                TaskService(self.new_database()).execute(
+                TaskService(self.new_database(), project_gate=ALWAYS_ACTIVE).execute(
                     task_id, TaskCommand.RESTART, actor=self.user
                 )
             )

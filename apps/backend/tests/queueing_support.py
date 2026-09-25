@@ -7,6 +7,7 @@ from sqlalchemy import text
 
 from paw_backend.tasks.queueing import BudgetTracker, LoopDetector, TaskQueue
 
+from .gate_support import ALWAYS_ACTIVE
 from .task_support import PostgresTaskTestCase, new_database, requires_postgres
 
 __all__ = [
@@ -64,7 +65,9 @@ class PostgresQueueingTestCase(PostgresTaskTestCase):
         )
         self.clock = FakeClock()
         # Explicit times are the test seam (production queues use the database clock).
-        self.queue = TaskQueue(self.database, allow_explicit_now=True)
+        self.queue = TaskQueue(
+            self.database, allow_explicit_now=True, project_gate=ALWAYS_ACTIVE
+        )
         # The fake clock is the test seam (production trackers use the database's).
         self.budget = BudgetTracker(
             self.database, clock=self.clock, allow_explicit_clock=True
@@ -106,7 +109,7 @@ class PostgresQueueingTestCase(PostgresTaskTestCase):
     def new_queue(self, **kwargs) -> TaskQueue:
         """A queue on its own engine, as a second worker process would have."""
         kwargs.setdefault("allow_explicit_now", True)
-        return TaskQueue(self.new_database(), **kwargs)
+        return TaskQueue(self.new_database(), **kwargs, project_gate=ALWAYS_ACTIVE)
 
     def new_budget(self, **kwargs) -> BudgetTracker:
         kwargs.setdefault("clock", self.clock)

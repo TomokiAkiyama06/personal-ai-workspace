@@ -32,12 +32,15 @@ from paw_backend.db import Database
 from paw_backend.projects import ProjectService
 
 from . import (
+    test_project_claim_filter,
+    test_project_state_gate,
     test_projects_concurrency,
     test_projects_service_access,
     test_projects_service_lifecycle,
     test_projects_service_members,
     test_projects_store,
     test_projects_task_stop,
+    test_task_stop_windows,
 )
 from .projects_support import FakeClock, PostgresProjectTestCase
 from .support import make_settings
@@ -178,8 +181,15 @@ for _module in (
     test_projects_service_lifecycle,
     test_projects_concurrency,
     test_projects_task_stop,
+    test_project_state_gate,
+    test_project_claim_filter,
+    test_task_stop_windows,
 ):
-    _prefix = _module.__name__.removeprefix("tests.test_projects_")
+    _prefix = (
+        _module.__name__.removeprefix("tests.")
+        .removeprefix("test_projects_")
+        .removeprefix("test_")
+    )
     for _name, _case in _database_test_classes(_module):
         _derived = f"{_prefix.title().replace('_', '')}{_name}AsAppRole"
         globals()[_derived] = type(
@@ -227,6 +237,12 @@ class AppRolePrivilegesTest(PostgresProjectTestCase):
         self.assertIn("ServiceLifecyclePurgeTestAsAppRole", derived)
         self.assertIn("TaskStopStopProjectTasksTestAsAppRole", derived)
         self.assertIn("TaskStopBeginDeletionRecordsTheStopTestAsAppRole", derived)
+        # Issue #83: the Project state gate and the windows it closed.
+        self.assertIn("ProjectStateGateGateRaceTestAsAppRole", derived)
+        self.assertIn("ProjectStateGateGateLockTestAsAppRole", derived)
+        self.assertIn("ProjectClaimFilterClaimFilterTestAsAppRole", derived)
+        self.assertIn("ProjectClaimFilterStartGateTestAsAppRole", derived)
+        self.assertIn("TaskStopWindowsCrashBetweenTheCommitsTestAsAppRole", derived)
 
     async def test_the_service_really_runs_as_a_non_superuser_role(self):
         for database in (self.app, self.other):
@@ -282,6 +298,32 @@ class AppRolePrivilegesTest(PostgresProjectTestCase):
                     )
                 }
                 self.assertEqual(updatable, update_columns)
+
+    async def test_the_state_gate_locks_a_project_with_the_existing_grants_only(self):
+        # Issue #83: ``ProjectStateGate`` reads ``projects.status`` under
+        # ``SELECT ... FOR SHARE``, which needs SELECT and UPDATE on a column.
+        # Migration 0026 gave the application role both (UPDATE on ``status`` among
+        # six other columns); nothing was added for the gate, and a role without
+        # grants can lock nothing.
+        project_id = self.seed_project()
+        async with self.app.session() as session, session.begin():
+            status = (
+                await session.execute(
+                    text("SELECT status FROM projects WHERE id = :p FOR SHARE"),
+                    {"p": project_id},
+                )
+            ).scalar_one()
+        self.assertEqual(status, "active")
+        await self.refused(
+            self.other,
+            f"SELECT status FROM projects WHERE id = '{project_id}' FOR SHARE",
+        )
+        self.assertTrue(
+            self.owner_scalar(
+                "SELECT has_column_privilege(:r, 'projects', 'status', 'UPDATE')",
+                r=APP_ROLE,
+            )
+        )
 
     async def test_a_role_without_grants_reaches_no_project_table(self):
         for table in EXPECTED:
