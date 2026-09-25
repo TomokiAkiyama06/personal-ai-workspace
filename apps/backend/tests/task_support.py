@@ -171,6 +171,10 @@ class PostgresTaskTestCase(unittest.IsolatedAsyncioTestCase):
         options = "ANALYZE, FORMAT JSON" if analyze else "FORMAT JSON"
         async with self.database.engine.connect() as connection:
             await connection.exec_driver_sql(f"SET plan_cache_mode = {mode}")
+            # With a handful of matching rows the planner may choose a bitmap scan
+            # and a Sort over it, depending on the ANALYZE sample: the same plan
+            # the index serves in order, so the tests rule it out to stay stable.
+            await connection.exec_driver_sql("SET enable_bitmapscan = off")
             await connection.exec_driver_sql(f"PREPARE checked_statement AS {numbered}")
             try:
                 result = await connection.exec_driver_sql(
@@ -182,6 +186,7 @@ class PostgresTaskTestCase(unittest.IsolatedAsyncioTestCase):
                 # The connection goes back to the pool: leave no session state.
                 await connection.exec_driver_sql("DEALLOCATE checked_statement")
                 await connection.exec_driver_sql("RESET plan_cache_mode")
+                await connection.exec_driver_sql("RESET enable_bitmapscan")
 
     @staticmethod
     def plan_nodes(plan: dict):
