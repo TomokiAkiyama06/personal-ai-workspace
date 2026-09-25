@@ -12,6 +12,7 @@
 | [0005](0005-owner-setup-and-recovery.md) | Owner の初期設定と復旧の方針 | Approved |
 | [0006](0006-tool-broker-policy.md) | Tool Broker の Policy・承認・Credentialの方針 | Approved |
 | [0007](0007-task-queue-budget-and-loop-policy.md) | Task Queue・Budget・Loop検知の方針 | Approved |
+| [0010](0010-research-privacy-filter-policy.md) | Research Privacy Filter と Query 最小化の方針 | Approved |
 | [0012](0012-research-provider-adapter-policy.md) | Research Provider Adapterの方針 | Approved |
 | [0013](0013-research-scratch-task-relation.md) | Research Scratch の Task との関係と Pin / 保存の方針 | Approved |
 | [0014](0014-task-working-set-persistence.md) | Task の Working Set（Multi-Repo）の永続化をPAW-032に含めず、新しいIssueで扱う | Approved |
