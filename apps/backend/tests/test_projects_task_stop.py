@@ -398,7 +398,8 @@ class StopProjectTasksTest(TaskStopTestCase):
 
     async def test_a_task_created_after_the_deletion_began_is_stopped_on_a_rerun(self):
         # ``TaskService.create_task`` does not look at the project (Decision 0008,
-        # section 8 proposes a gate); the processor catches what slipped through.
+        # section 8 approved a gate; issue #83 builds it); the processor catches
+        # what slipped through.
         await self.begin_deletion()
         stopper = self.new_stopper()
         first = await stopper.stop_project_tasks(self.project_id)

@@ -4,7 +4,8 @@ Every size here bounds something a caller controls. The database repeats the
 name / description limits and the 30 day retention as CHECK constraints
 (migration ``0026``); ``tests/test_projects_schema.py`` fails when the two
 disagree. The invitation lifetime is a product choice that is **not** written
-into the database (Decision 0008, Proposed): changing it needs no migration.
+into the database (Decision 0008 approved it on 2026-09-25 as a provisional value):
+changing it needs no migration.
 """
 
 from datetime import UTC, datetime, timedelta
@@ -26,7 +27,8 @@ DELETED_PROJECT_NAME = "Deleted Project"
 # Pending deletion lasts 30 days (``REQUIREMENTS.md`` "Project lifecycle"). The
 # database enforces ``deletion_scheduled_at = deletion_started_at + 30 days``.
 DELETION_RETENTION = timedelta(days=30)
-# An invitation can be accepted for 14 days (Decision 0008: a proposal).
+# An invitation can be accepted for 14 days (Decision 0008: approved as a provisional
+# value on 2026-09-25; the limits below are provisional as well).
 INVITE_TTL = timedelta(days=14)
 # Accepted members plus open invitations of one project.
 MAX_MEMBERS_PER_PROJECT = 200

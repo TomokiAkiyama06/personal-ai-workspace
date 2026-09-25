@@ -28,7 +28,7 @@ Authorization of each method:
 * ``list_projects``, ``list_my_invites``: the user's own memberships only;
 * ``roles_of``, ``purge_expired``: backend-internal, not for users.
 
-Self service (Decision 0008, Proposed)
+Self service (Decision 0008, Approved)
 --------------------------------------
 Decision 0004 has no capability for creating a project, answering one's own
 invitation or leaving a project, and this issue does not change the policy of
@@ -36,8 +36,9 @@ PAW-025. These four methods are therefore authorized **by identity**: the actor
 must be a ``Principal`` whose ``system_role`` is Owner, Admin or User (never
 ``SYSTEM``), and ``accept_invite`` / ``decline_invite`` / ``leave_project`` act
 only on the actor's own membership row. **They write no Audit event** (the
-Authorizer is not involved). Decision 0008 proposes capabilities so that the
-Authorizer can audit them.
+Authorizer is not involved). Decision 0008 approved this provisional arrangement
+(2026-09-25); the capabilities that let the Authorizer audit these operations are
+added in issue #82 (a new Decision that supersedes Decision 0004).
 
 Errors that do not disclose existence
 -------------------------------------

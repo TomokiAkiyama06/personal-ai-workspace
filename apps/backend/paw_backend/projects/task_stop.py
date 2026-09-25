@@ -62,7 +62,7 @@ active state (Pause and Stop Now are not: Stop Now does not apply to queued or
 paused tasks). Stop Now (immediate, aborts the running step) is the emergency
 stop and is not used: nothing here is an emergency, and Restart can re-run a
 cancelled task. The alternative, Pause, would leave tasks that nobody resumes.
-Decision 0008 records this choice.
+Decision 0008 records this choice (approved 2026-09-25).
 
 Cancel and entry: order and interruption
 -----------------------------------------
@@ -95,7 +95,8 @@ error. A task that is still active is never touched by it. It runs in the
 bounded by ``RECONCILE_TIMEOUT_S`` (another cancellation, a timeout or a failure of
 the reconciliation itself never replaces the original error).
 
-What remains (Decision 0008, section 8, item 8; recorded, not closed):
+What remains (Decision 0008, section 8, item 8; recorded, not closed here; issue #83
+closes it):
 
 * A concurrent ``Restart`` of the task between the Cancel and the entry cancel (the
   entry cancel does not check the task again: ``TaskQueue.cancel`` has no
@@ -139,10 +140,10 @@ What the caller must do (limits)
   authorized just before the deletion began (or a queue entry for a task of the
   project) can appear **after** the request was processed. The Authorizer
   already refuses ``project.task.run`` in Archived and Pending deletion (PAW-025);
-  only that race remains. Until the task service closes it (Decision 0008
-  proposes a gate in the same transaction as the insert and the enqueue), the
-  orchestrator should also call ``stop_project_tasks`` for the projects that are
-  Pending deletion on its regular cycle: the call stops such a task and cancels
+  only that race remains. Until the task service closes it (Decision 0008 approved
+  a gate in the same transaction as the insert and the enqueue; issue #83 builds
+  it), the orchestrator should also call ``stop_project_tasks`` for the projects that
+  are Pending deletion on its regular cycle: the call stops such a task and cancels
   such an entry, also that of a task that is already terminal (tests:
   ``test_a_task_created_after_the_deletion_began_is_stopped_on_a_rerun``,
   ``test_an_entry_of_a_finished_task_is_found_by_project_on_a_rerun``).
