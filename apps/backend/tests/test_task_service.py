@@ -33,6 +33,7 @@ from paw_backend.tasks import (
     TaskCommand,
     TaskConflictError,
     TaskNotFoundError,
+    TaskRun,
     TaskService,
     TaskState,
     TaskStepError,
@@ -46,7 +47,7 @@ from paw_backend.tasks.service import (
     MAX_INPUT_INTEGER_DIGITS,
 )
 
-from .task_support import PostgresTaskTestCase, requires_postgres
+from .task_support import FIRST_RUN, PostgresTaskTestCase, requires_postgres
 from .test_task_domain import EXPECTED
 
 C = TaskCommand
@@ -434,7 +435,7 @@ class UnstorableTextTest(PostgresTaskTestCase):
         # One task per starting point the entry points below need.
         self.idle = await self.task_in_state(S.RUNNING)
         self.busy = await self.task_in_state(S.RUNNING)
-        self.step = await self.service.begin_step(self.busy, "build", attempt=1)
+        self.step = await self.service.begin_step(self.busy, "build", run=FIRST_RUN)
         self.failed = await self.task_in_state(S.FAILED)
 
     async def assert_refused(self, task_id, call) -> None:
@@ -450,7 +451,7 @@ class UnstorableTextTest(PostgresTaskTestCase):
         return {
             "begin_step name": (
                 self.idle,
-                lambda: service.begin_step(self.idle, bad, attempt=1),
+                lambda: service.begin_step(self.idle, bad, run=FIRST_RUN),
             ),
             "begin_tool_invocation tool_name": (
                 self.busy,
@@ -460,11 +461,11 @@ class UnstorableTextTest(PostgresTaskTestCase):
             ),
             "add_log message": (
                 self.idle,
-                lambda: service.add_log(self.idle, bad, attempt=1),
+                lambda: service.add_log(self.idle, bad, run=FIRST_RUN),
             ),
             "add_log message cut off by the length limit": (
                 self.idle,
-                lambda: service.add_log(self.idle, "a" * 9000 + bad, attempt=1),
+                lambda: service.add_log(self.idle, "a" * 9000 + bad, run=FIRST_RUN),
             ),
             "execute reason": (
                 self.idle,
@@ -487,26 +488,26 @@ class UnstorableTextTest(PostgresTaskTestCase):
             "update_attempt branch": (
                 self.idle,
                 lambda: service.update_attempt(
-                    self.idle, attempt=1, worktree=WorktreeState(branch=bad)
+                    self.idle, run=FIRST_RUN, worktree=WorktreeState(branch=bad)
                 ),
             ),
             "update_attempt path": (
                 self.idle,
                 lambda: service.update_attempt(
-                    self.idle, attempt=1, worktree=WorktreeState(path=bad)
+                    self.idle, run=FIRST_RUN, worktree=WorktreeState(path=bad)
                 ),
             ),
             "update_attempt head_commit": (
                 self.idle,
                 lambda: service.update_attempt(
-                    self.idle, attempt=1, worktree=WorktreeState(head_commit=bad)
+                    self.idle, run=FIRST_RUN, worktree=WorktreeState(head_commit=bad)
                 ),
             ),
             "update_attempt pull request url": (
                 self.idle,
                 lambda: service.update_attempt(
                     self.idle,
-                    attempt=1,
+                    run=FIRST_RUN,
                     pull_request=PullRequestInfo(1, bad, PullRequestState.OPEN),
                 ),
             ),
@@ -540,10 +541,10 @@ class UnstorableTextTest(PostgresTaskTestCase):
             title=text, agent=text, model=text, starting_commit=text
         )
         await self.service.execute(task_id, C.START, actor=self.system)
-        await self.service.add_log(task_id, text, attempt=1)
+        await self.service.add_log(task_id, text, run=FIRST_RUN)
         await self.service.update_attempt(
             task_id,
-            attempt=1,
+            run=FIRST_RUN,
             worktree=WorktreeState(text, text, text),
             pull_request=PullRequestInfo(1, text, PullRequestState.OPEN),
         )
@@ -568,7 +569,7 @@ class AttemptStateLimitsTest(PostgresTaskTestCase):
     async def assert_refused(self, **groups) -> None:
         before = await self.service.restore(self.task_id)
         with self.assertRaises(InvalidCommandArgumentError):
-            await self.service.update_attempt(self.task_id, attempt=1, **groups)
+            await self.service.update_attempt(self.task_id, run=FIRST_RUN, **groups)
         self.assertEqual(await self.service.restore(self.task_id), before)
 
     async def test_worktree_and_pull_request_text_is_accepted_at_the_column_limit(
@@ -577,7 +578,7 @@ class AttemptStateLimitsTest(PostgresTaskTestCase):
         worktree = WorktreeState("b" * 255, "p" * 1024, "c" * 64)
         pull_request = PullRequestInfo(12, "u" * 2048, PullRequestState.OPEN)
         await self.service.update_attempt(
-            self.task_id, attempt=1, worktree=worktree, pull_request=pull_request
+            self.task_id, run=FIRST_RUN, worktree=worktree, pull_request=pull_request
         )
         attempt = (await self.service.restore(self.task_id)).attempt
         self.assertEqual(attempt.worktree, worktree)
@@ -585,7 +586,9 @@ class AttemptStateLimitsTest(PostgresTaskTestCase):
 
     async def test_limits_count_characters_not_bytes(self):
         worktree = WorktreeState("日" * 255, "é" * 1024, "😀" * 64)
-        await self.service.update_attempt(self.task_id, attempt=1, worktree=worktree)
+        await self.service.update_attempt(
+            self.task_id, run=FIRST_RUN, worktree=worktree
+        )
         self.assertEqual(
             (await self.service.restore(self.task_id)).attempt.worktree, worktree
         )
@@ -607,7 +610,9 @@ class AttemptStateLimitsTest(PostgresTaskTestCase):
             with self.subTest(name):
                 before = await self.service.restore(self.task_id)
                 with self.assertRaises(InvalidCommandArgumentError) as caught:
-                    await self.service.update_attempt(self.task_id, attempt=1, **groups)
+                    await self.service.update_attempt(
+                        self.task_id, run=FIRST_RUN, **groups
+                    )
                 self.assertNotIn(secret, str(caught.exception))
                 self.assertEqual(await self.service.restore(self.task_id), before)
 
@@ -618,7 +623,7 @@ class AttemptStateLimitsTest(PostgresTaskTestCase):
                     number, "https://example.test/pr", PullRequestState.OPEN
                 )
                 await self.service.update_attempt(
-                    self.task_id, attempt=1, pull_request=pull_request
+                    self.task_id, run=FIRST_RUN, pull_request=pull_request
                 )
                 attempt = (await self.service.restore(self.task_id)).attempt
                 self.assertEqual(attempt.pull_request, pull_request)
@@ -756,9 +761,9 @@ class TransitionTest(PostgresTaskTestCase):
 
     async def test_pause_and_resume_keep_the_step_worktree_and_logs(self):
         task_id = await self.task_in_state(S.RUNNING)
-        await self.service.begin_step(task_id, "implement", attempt=1)
-        await self.service.add_log(task_id, "editing parser.py", attempt=1)
-        await self.service.update_attempt(task_id, attempt=1, worktree=WORKTREE)
+        await self.service.begin_step(task_id, "implement", run=FIRST_RUN)
+        await self.service.add_log(task_id, "editing parser.py", run=FIRST_RUN)
+        await self.service.update_attempt(task_id, run=FIRST_RUN, worktree=WORKTREE)
 
         paused = await self.service.execute(
             task_id, C.PAUSE, actor=self.user, reason="lunch"
@@ -782,8 +787,8 @@ class TransitionTest(PostgresTaskTestCase):
 
     async def test_cancel_is_graceful_and_keeps_artifacts_and_the_running_step(self):
         task_id = await self.task_in_state(S.RUNNING)
-        step = await self.service.begin_step(task_id, "implement", attempt=1)
-        await self.service.update_attempt(task_id, attempt=1, worktree=WORKTREE)
+        step = await self.service.begin_step(task_id, "implement", run=FIRST_RUN)
+        await self.service.update_attempt(task_id, run=FIRST_RUN, worktree=WORKTREE)
 
         event = await self.service.execute(
             task_id, C.CANCEL, actor=self.user, reason="not needed"
@@ -802,8 +807,8 @@ class TransitionTest(PostgresTaskTestCase):
 
     async def test_stop_now_interrupts_the_step_immediately_and_logs_why(self):
         task_id = await self.task_in_state(S.RUNNING)
-        await self.service.begin_step(task_id, "run-tests", attempt=1)
-        await self.service.update_attempt(task_id, attempt=1, worktree=WORKTREE)
+        await self.service.begin_step(task_id, "run-tests", run=FIRST_RUN)
+        await self.service.update_attempt(task_id, run=FIRST_RUN, worktree=WORKTREE)
 
         event = await self.service.execute(
             task_id, C.STOP_NOW, actor=self.user, reason="agent loop"
@@ -846,7 +851,9 @@ class TransitionTest(PostgresTaskTestCase):
         ):
             with self.subTest(step=finished_as.value):
                 task_id = await self.task_in_state(S.RUNNING)
-                step = await self.service.begin_step(task_id, "run-tests", attempt=1)
+                step = await self.service.begin_step(
+                    task_id, "run-tests", run=FIRST_RUN
+                )
                 await self.service.finish_step(task_id, step.id, finished_as)
 
                 event = await self.service.execute(
@@ -865,7 +872,7 @@ class TransitionTest(PostgresTaskTestCase):
 
     async def test_fail_after_the_step_finished_names_no_step(self):
         task_id = await self.task_in_state(S.RUNNING)
-        step = await self.service.begin_step(task_id, "run-tests", attempt=1)
+        step = await self.service.begin_step(task_id, "run-tests", run=FIRST_RUN)
         await self.service.finish_step(task_id, step.id, StepStatus.FAILED)
         event = await self.service.execute(task_id, C.FAIL, actor=self.system)
         self.assertIsNone(event.step_name)
@@ -875,7 +882,7 @@ class TransitionTest(PostgresTaskTestCase):
 
     async def test_other_commands_still_name_the_latest_step(self):
         task_id = await self.task_in_state(S.RUNNING)
-        step = await self.service.begin_step(task_id, "run-tests", attempt=1)
+        step = await self.service.begin_step(task_id, "run-tests", run=FIRST_RUN)
         await self.service.finish_step(task_id, step.id, StepStatus.SUCCEEDED)
         event = await self.service.execute(task_id, C.PAUSE, actor=self.user)
         self.assertEqual(event.step_name, "run-tests")
@@ -893,7 +900,7 @@ class TransitionTest(PostgresTaskTestCase):
 
     async def test_fail_ends_the_running_step_as_failed(self):
         task_id = await self.task_in_state(S.RUNNING)
-        await self.service.begin_step(task_id, "run-tests", attempt=1)
+        await self.service.begin_step(task_id, "run-tests", run=FIRST_RUN)
         event = await self.service.execute(
             task_id, C.FAIL, actor=self.system, reason="tests red"
         )
@@ -904,9 +911,9 @@ class TransitionTest(PostgresTaskTestCase):
     async def test_retry_reruns_the_failed_step_in_the_same_attempt(self):
         task_id = await self.create_task(agent="local", model="small")
         await self.service.execute(task_id, C.START, actor=self.system)
-        await self.service.begin_step(task_id, "implement", attempt=1)
-        await self.service.update_attempt(task_id, attempt=1, worktree=WORKTREE)
-        await self.service.add_log(task_id, "compile error", attempt=1)
+        await self.service.begin_step(task_id, "implement", run=FIRST_RUN)
+        await self.service.update_attempt(task_id, run=FIRST_RUN, worktree=WORKTREE)
+        await self.service.add_log(task_id, "compile error", run=FIRST_RUN)
         await self.service.execute(task_id, C.FAIL, actor=self.system)
 
         event = await self.service.execute(
@@ -929,8 +936,10 @@ class TransitionTest(PostgresTaskTestCase):
         )
         # The failed step stays as history; the next run starts a new step row.
         self.assertEqual(snapshot.current_step.status, StepStatus.FAILED)
-        await self.service.execute(task_id, C.START, actor=self.system)
-        rerun = await self.service.begin_step(task_id, "implement", attempt=1)
+        started = await self.service.execute(task_id, C.START, actor=self.system)
+        # The Retry made a new run of the same attempt; Start hands it to the worker.
+        self.assertEqual(started.run, TaskRun(1, 1))
+        rerun = await self.service.begin_step(task_id, "implement", run=started.run)
         self.assertEqual(rerun.sequence, 2)
 
     async def test_retry_history_counts_every_retry(self):
@@ -945,16 +954,68 @@ class TransitionTest(PostgresTaskTestCase):
         events = await self.service.history(task_id)
         self.assertEqual([e.command for e in events].count(C.RETRY), 3)
 
+    async def test_every_event_carries_the_run_the_task_is_in(self):
+        task_id = await self.create_task()
+        script = [
+            (C.START, TaskRun(1, 0)),
+            (C.FAIL, TaskRun(1, 0)),
+            (C.RETRY, TaskRun(1, 1)),  # the same attempt, run again
+            (C.START, TaskRun(1, 1)),
+            (C.FAIL, TaskRun(1, 1)),
+            (C.RETRY, TaskRun(1, 2)),
+            (C.START, TaskRun(1, 2)),
+            (C.FAIL, TaskRun(1, 2)),
+            (C.RESTART, TaskRun(2, 2)),  # a new attempt; the retry count stays
+            (C.START, TaskRun(2, 2)),
+        ]
+        returned = [
+            (
+                command,
+                (await self.service.execute(task_id, command, actor=self.user)).run,
+            )
+            for command, _ in script
+        ]
+        self.assertEqual(returned, script)
+        events = await self.service.history(task_id)
+        self.assertEqual(
+            [(e.command, e.run) for e in events], [(C.CREATE, TaskRun(1, 0)), *script]
+        )
+        self.assertEqual(
+            await self.scalar(
+                "SELECT array_agg(retry_count ORDER BY seq) FROM task_events "
+                "WHERE task_id = :i",
+                i=task_id,
+            ),
+            [0, 0, 0, 1, 1, 1, 2, 2, 2, 2, 2],
+        )
+        snapshot = await self.service.restore(task_id)
+        self.assertEqual(snapshot.run, TaskRun(2, 2))
+        self.assertEqual(snapshot.run, snapshot.last_event.run)
+
+    async def test_a_line_the_service_logs_itself_carries_the_run_too(self):
+        task_id = await self.task_in_state(S.FAILED)
+        await self.service.execute(task_id, C.RETRY, actor=self.user)
+        await self.service.execute(task_id, C.START, actor=self.system)
+        await self.service.execute(task_id, C.STOP_NOW, actor=self.user)
+        (line,) = (await self.service.restore(task_id)).recent_logs
+        self.assertEqual((line.level, line.run), (LogLevel.WARNING, TaskRun(1, 1)))
+        self.assertEqual(
+            await self.scalar(
+                "SELECT retry_count FROM task_logs WHERE task_id = :i", i=task_id
+            ),
+            1,
+        )
+
     async def test_restart_starts_a_new_attempt_and_keeps_the_old_one_as_history(self):
         task_id = await self.create_task(
             starting_commit="a" * 40, input={"prompt": "p"}
         )
         await self.service.execute(task_id, C.START, actor=self.system)
-        await self.service.begin_step(task_id, "implement", attempt=1)
-        await self.service.add_log(task_id, "attempt one log", attempt=1)
+        await self.service.begin_step(task_id, "implement", run=FIRST_RUN)
+        await self.service.add_log(task_id, "attempt one log", run=FIRST_RUN)
         await self.service.update_attempt(
             task_id,
-            attempt=1,
+            run=FIRST_RUN,
             worktree=WORKTREE,
             review=ReviewState(ReviewStatus.CHANGES_REQUESTED, EvaluationResult.FAILED),
             pull_request=PullRequestInfo(
@@ -1035,7 +1096,7 @@ class TransitionTest(PostgresTaskTestCase):
 
     async def test_illegal_command_does_not_disturb_step_or_history(self):
         task_id = await self.task_in_state(S.RUNNING)
-        await self.service.begin_step(task_id, "implement", attempt=1)
+        await self.service.begin_step(task_id, "implement", run=FIRST_RUN)
         before = await self.service.history(task_id)
         with self.assertRaises(IllegalTransitionError):
             await self.service.execute(task_id, C.RESUME, actor=self.user)
@@ -1050,14 +1111,14 @@ class TransitionTest(PostgresTaskTestCase):
 class StepAndLogTest(PostgresTaskTestCase):
     async def test_steps_are_numbered_and_only_one_runs_at_a_time(self):
         task_id = await self.task_in_state(S.RUNNING)
-        first = await self.service.begin_step(task_id, "plan", attempt=1)
+        first = await self.service.begin_step(task_id, "plan", run=FIRST_RUN)
         self.assertEqual((first.sequence, first.status), (1, StepStatus.RUNNING))
         with self.assertRaises(TaskStepError):
-            await self.service.begin_step(task_id, "implement", attempt=1)
+            await self.service.begin_step(task_id, "implement", run=FIRST_RUN)
         done = await self.service.finish_step(task_id, first.id, StepStatus.SUCCEEDED)
         self.assertEqual((done.name, done.status), ("plan", StepStatus.SUCCEEDED))
         self.assertIsNotNone(done.finished_at)
-        second = await self.service.begin_step(task_id, "implement", attempt=1)
+        second = await self.service.begin_step(task_id, "implement", run=FIRST_RUN)
         self.assertEqual(second.sequence, 2)
         snapshot = await self.service.restore(task_id)
         self.assertEqual(
@@ -1070,11 +1131,11 @@ class StepAndLogTest(PostgresTaskTestCase):
             with self.subTest(state=state.value):
                 task_id = await self.task_in_state(state)
                 if state in (S.RUNNING, S.WAITING, S.EVALUATING):
-                    step = await self.service.begin_step(task_id, "work", attempt=1)
+                    step = await self.service.begin_step(task_id, "work", run=FIRST_RUN)
                     self.assertEqual(step.status, StepStatus.RUNNING)
                 else:
                     with self.assertRaises(TaskStepError):
-                        await self.service.begin_step(task_id, "work", attempt=1)
+                        await self.service.begin_step(task_id, "work", run=FIRST_RUN)
                     self.assertIsNone(
                         (await self.service.restore(task_id)).current_step
                     )
@@ -1083,7 +1144,7 @@ class StepAndLogTest(PostgresTaskTestCase):
         task_id = await self.task_in_state(S.RUNNING)
         with self.assertRaises(TaskStepError):
             await self.service.finish_step(task_id, 999_999_999, StepStatus.SUCCEEDED)
-        step = await self.service.begin_step(task_id, "plan", attempt=1)
+        step = await self.service.begin_step(task_id, "plan", run=FIRST_RUN)
         with self.assertRaises(InvalidCommandArgumentError):
             await self.service.finish_step(task_id, step.id, StepStatus.RUNNING)
         await self.service.finish_step(task_id, step.id, StepStatus.FAILED)
@@ -1093,7 +1154,7 @@ class StepAndLogTest(PostgresTaskTestCase):
     async def test_a_step_of_another_task_cannot_be_finished_through_this_one(self):
         mine = await self.task_in_state(S.RUNNING)
         other = await self.task_in_state(S.RUNNING)
-        foreign = await self.service.begin_step(other, "plan", attempt=1)
+        foreign = await self.service.begin_step(other, "plan", run=FIRST_RUN)
         with self.assertRaises(TaskStepError):
             await self.service.finish_step(mine, foreign.id, StepStatus.SUCCEEDED)
         current = (await self.service.restore(other)).current_step
@@ -1106,23 +1167,23 @@ class StepAndLogTest(PostgresTaskTestCase):
                 self.subTest(length=len(name)),
                 self.assertRaises(InvalidCommandArgumentError),
             ):
-                await self.service.begin_step(task_id, name, attempt=1)
+                await self.service.begin_step(task_id, name, run=FIRST_RUN)
 
     async def test_step_and_log_calls_reject_unknown_tasks(self):
         unknown = uuid.uuid4()
         with self.assertRaises(TaskNotFoundError):
-            await self.service.begin_step(unknown, "plan", attempt=1)
+            await self.service.begin_step(unknown, "plan", run=FIRST_RUN)
         with self.assertRaises(TaskNotFoundError):
             await self.service.finish_step(unknown, 1, StepStatus.SUCCEEDED)
         with self.assertRaises(TaskNotFoundError):
-            await self.service.add_log(unknown, "hello", attempt=1)
+            await self.service.add_log(unknown, "hello", run=FIRST_RUN)
         with self.assertRaises(TaskNotFoundError):
-            await self.service.update_attempt(unknown, attempt=1, worktree=WORKTREE)
+            await self.service.update_attempt(unknown, run=FIRST_RUN, worktree=WORKTREE)
 
     async def test_recent_logs_are_the_latest_n_in_order(self):
         task_id = await self.task_in_state(S.RUNNING)
         for number in range(1, 6):
-            await self.service.add_log(task_id, f"line {number}", attempt=1)
+            await self.service.add_log(task_id, f"line {number}", run=FIRST_RUN)
         snapshot = await self.service.restore(task_id, log_limit=3)
         self.assertEqual(
             [log.message for log in snapshot.recent_logs],
@@ -1151,7 +1212,7 @@ class StepAndLogTest(PostgresTaskTestCase):
             with self.subTest(state=state.value):
                 task_id = await self.task_in_state(state)
                 entry = await self.service.add_log(
-                    task_id, "cleanup", attempt=1, level=LogLevel.ERROR
+                    task_id, "cleanup", run=FIRST_RUN, level=LogLevel.ERROR
                 )
                 self.assertEqual((entry.level, entry.attempt), (LogLevel.ERROR, 1))
                 snapshot = await self.service.restore(task_id)
@@ -1159,17 +1220,19 @@ class StepAndLogTest(PostgresTaskTestCase):
 
     async def test_a_long_log_line_is_truncated_at_the_limit(self):
         task_id = await self.task_in_state(S.RUNNING)
-        exact = await self.service.add_log(task_id, "a" * 8000, attempt=1)
-        long = await self.service.add_log(task_id, "b" * 9000, attempt=1)
+        exact = await self.service.add_log(task_id, "a" * 8000, run=FIRST_RUN)
+        long = await self.service.add_log(task_id, "b" * 9000, run=FIRST_RUN)
         self.assertEqual(len(exact.message), 8000)
         self.assertEqual(len(long.message), 8000)
         self.assertTrue(long.message.endswith("...[truncated]"))
 
     async def test_attempt_state_updates_replace_only_the_given_groups(self):
         task_id = await self.task_in_state(S.RUNNING)
-        await self.service.update_attempt(task_id, attempt=1, worktree=WORKTREE)
+        await self.service.update_attempt(task_id, run=FIRST_RUN, worktree=WORKTREE)
         review = ReviewState(ReviewStatus.APPROVED, EvaluationResult.PASSED)
-        result = await self.service.update_attempt(task_id, attempt=1, review=review)
+        result = await self.service.update_attempt(
+            task_id, run=FIRST_RUN, review=review
+        )
         self.assertEqual((result.worktree, result.review), (WORKTREE, review))
         self.assertIsNone(result.pull_request)
         pull_request = PullRequestInfo(
@@ -1178,7 +1241,9 @@ class StepAndLogTest(PostgresTaskTestCase):
         # A pull request can change after the task is finished.
         await self.service.execute(task_id, C.BEGIN_EVALUATION, actor=self.system)
         await self.service.execute(task_id, C.COMPLETE, actor=self.system)
-        await self.service.update_attempt(task_id, attempt=1, pull_request=pull_request)
+        await self.service.update_attempt(
+            task_id, run=FIRST_RUN, pull_request=pull_request
+        )
         snapshot = await self.service.restore(task_id)
         self.assertEqual(
             (

@@ -139,6 +139,40 @@ class Actor:
         return cls(ActorKind.POLICY)
 
 
+# ``tasks.attempt`` and ``tasks.retry_count`` are 32-bit ``INTEGER`` columns.
+_MAX_COUNTER = 2**31 - 1
+
+
+@dataclass(frozen=True, slots=True)
+class TaskRun:
+    """Which run of a task a worker belongs to: the attempt and the retry count.
+
+    Retry runs a failed task again inside the same attempt, so ``attempt`` alone
+    cannot tell the run that failed from the one that Retry started. Restart
+    increments ``attempt`` and Retry increments ``retry_count``; neither ever
+    decreases, and every re-opening of a failed or cancelled task changes one of
+    them, so two runs of a task are equal only if they are the same run. A worker
+    learns its run from the event that started it (``TaskEvent.run`` of Start) and
+    passes it back with everything it writes about the attempt (``begin_step``,
+    ``add_log``, ``update_attempt``). The Tool Broker (PAW-031) binds approvals to
+    the same pair.
+    """
+
+    attempt: int
+    retry_count: int
+
+    def __post_init__(self) -> None:
+        for name, value, minimum in (
+            ("attempt", self.attempt, 1),
+            ("retry_count", self.retry_count, 0),
+        ):
+            # ``bool`` is an ``int`` in Python; text or a float is not a counter.
+            if type(value) is not int or not minimum <= value <= _MAX_COUNTER:
+                raise InvalidCommandArgumentError(
+                    f"{name} must be an integer from {minimum} to {_MAX_COUNTER}"
+                )
+
+
 @dataclass(frozen=True, slots=True)
 class TransitionRule:
     sources: frozenset[TaskState]

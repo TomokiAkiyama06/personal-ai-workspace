@@ -1101,6 +1101,59 @@ class ProvenanceTest(MemoryDatabaseTestCase):
         ).one()
         self.assertEqual(tuple(stored), (conversation, None))
 
+    def test_a_new_conversation_source_must_name_a_conversation_or_a_message(self):
+        version = self.add_version(self.add_memory())
+
+        self.assertEqual(
+            self.violation(partial(self.add_source, version, "conversation")),
+            "tr_memory_sources_conversation_source_identified",
+        )
+        # Naming either one is enough for the insert; the other rules apply as before.
+        conversation = self.add_conversation()
+        message = self.add_message(conversation, 0)
+        for values in (
+            {"conversation_id": conversation},
+            {"conversation_id": conversation, "message_id": message},
+        ):
+            with self.subTest(sorted(values)):
+                self.assertIsNone(
+                    self.violation(
+                        partial(self.add_source, version, "conversation", **values)
+                    )
+                )
+        count = self.session.execute(
+            select(func.count()).select_from(MemorySource)
+        ).scalar_one()
+        self.assertEqual(count, 2)
+
+    def test_a_source_that_lost_its_conversation_stays_valid_and_can_be_updated(self):
+        # The state the new insert rule refuses is the one a deleted
+        # conversation leaves behind (``ON DELETE SET NULL``): it is legitimate
+        # there, and the rule must not fire again for the update that records it.
+        conversation = self.add_conversation()
+        version = self.add_version(self.add_memory())
+        self.add_source(version, "conversation", conversation_id=conversation)
+        self.session.execute(
+            delete(Conversation).where(Conversation.id == conversation)
+        )
+
+        self.session.execute(
+            update(MemorySource)
+            .where(MemorySource.memory_version_id == version)
+            .values(source_deleted_at=func.now())
+        )
+        self.session.execute(text("SET CONSTRAINTS ALL IMMEDIATE"))
+
+        stored = self.session.execute(
+            select(
+                MemorySource.conversation_id,
+                MemorySource.message_id,
+                MemorySource.source_ref,
+                MemorySource.source_deleted_at.is_not(None),
+            )
+        ).one()
+        self.assertEqual(tuple(stored), (None, None, None, True))
+
     def test_deleting_a_message_keeps_the_source_and_its_conversation(self):
         conversation = self.add_conversation()
         message = self.add_message(conversation, 0)
@@ -1281,6 +1334,7 @@ class CommittedProvenanceTest(MemoryDatabaseTestCase):
     """
 
     MESSAGE_REQUIRES_CONVERSATION = "tr_memory_sources_message_requires_conversation"
+    CONVERSATION_SOURCE_IDENTIFIED = "tr_memory_sources_conversation_source_identified"
 
     def setUp(self) -> None:
         self.conversation = uuid4()
@@ -1360,6 +1414,45 @@ class CommittedProvenanceTest(MemoryDatabaseTestCase):
                 delete(Conversation).where(Conversation.id == self.conversation)
             )
 
+        self.assertEqual(self.stored_sources(), [(None, None)])
+
+    def test_committing_a_conversation_source_that_names_nothing_fails(self):
+        self.commit_conversation_with_a_memory()
+
+        with self.assertRaises(IntegrityError) as caught:
+            self.commit_source()
+
+        self.assertEqual(
+            caught.exception.orig.diag.constraint_name,
+            self.CONVERSATION_SOURCE_IDENTIFIED,
+        )
+        self.assertEqual(self.stored_sources(), [])
+
+    def test_a_source_that_lost_its_conversation_still_commits_and_updates(self):
+        # After the delete the row has the shape the insert rule refuses. It is
+        # committed data now: a later update of the row must go through.
+        self.commit_conversation_with_a_memory()
+        self.commit_source(conversation_id=self.conversation)
+        with self.engine.begin() as connection:
+            connection.execute(
+                delete(Conversation).where(Conversation.id == self.conversation)
+            )
+        self.assertEqual(self.stored_sources(), [(None, None)])
+
+        with self.engine.begin() as connection:
+            connection.execute(
+                update(MemorySource)
+                .where(MemorySource.memory_version_id == self.version)
+                .values(source_deleted_at=func.now())
+            )
+
+        with self.engine.connect() as connection:
+            lost = connection.execute(
+                select(MemorySource.source_deleted_at.is_not(None)).where(
+                    MemorySource.memory_version_id == self.version
+                )
+            ).scalar_one()
+        self.assertTrue(lost)
         self.assertEqual(self.stored_sources(), [(None, None)])
 
     def test_the_delete_does_not_depend_on_which_foreign_key_action_runs_first(self):
