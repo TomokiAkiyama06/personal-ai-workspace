@@ -48,15 +48,20 @@ personal-ai-workspace/
 │  │  │  └─ versions/
 │  │  │     ├─ 0001_baseline.py
 │  │  │     ├─ 0021_owner_setup.py
+│  │  │     ├─ 0022_login_session_password.py
 │  │  │     ├─ 0025_audit_events.py
 │  │  │     ├─ 0026_projects.py
+│  │  │     ├─ 0030_shared_connections.py
 │  │  │     ├─ 0031_tool_approvals.py
 │  │  │     ├─ 0032_task_lifecycle.py
 │  │  │     ├─ 0033_task_queue_budget_loop.py
 │  │  │     ├─ 0040_memory_schema.py
+│  │  │     ├─ 0043_memory_search_index.py
 │  │  │     ├─ 0046_shared_memory_candidates.py
 │  │  │     ├─ 0050_research_scratch_store.py
-│  │  │     └─ 0052_research_provenance.py
+│  │  │     ├─ 0052_research_provenance.py
+│  │  │     ├─ 0083_tasks_project_state_index.py
+│  │  │     └─ 0087_audit_external_send_details.py
 │  │  ├─ paw_backend/
 │  │  │  ├─ __init__.py
 │  │  │  ├─ __main__.py
@@ -68,10 +73,40 @@ personal-ai-workspace/
 │  │  │  ├─ middleware.py
 │  │  │  ├─ security.py
 │  │  │  ├─ server.py
+│  │  │  ├─ auth/
+│  │  │  │  ├─ __init__.py
+│  │  │  │  ├─ audit.py
+│  │  │  │  ├─ auth_policy.py
+│  │  │  │  ├─ context.py
+│  │  │  │  ├─ csrf.py
+│  │  │  │  ├─ db.py
+│  │  │  │  ├─ errors.py
+│  │  │  │  ├─ limits.py
+│  │  │  │  ├─ models.py
+│  │  │  │  ├─ passwords.py
+│  │  │  │  ├─ principals.py
+│  │  │  │  ├─ service.py
+│  │  │  │  ├─ sessions.py
+│  │  │  │  ├─ state.py
+│  │  │  │  ├─ throttle.py
+│  │  │  │  ├─ tokens.py
+│  │  │  │  └─ wiring.py
 │  │  │  ├─ cli/
 │  │  │  │  ├─ __init__.py
 │  │  │  │  ├─ __main__.py
 │  │  │  │  └─ owner.py
+│  │  │  ├─ connections/
+│  │  │  │  ├─ __init__.py
+│  │  │  │  ├─ adapter.py
+│  │  │  │  ├─ domain.py
+│  │  │  │  ├─ errors.py
+│  │  │  │  ├─ limits.py
+│  │  │  │  ├─ models.py
+│  │  │  │  ├─ records.py
+│  │  │  │  ├─ secret.py
+│  │  │  │  ├─ service.py
+│  │  │  │  ├─ store.py
+│  │  │  │  └─ validation.py
 │  │  │  ├─ identity/
 │  │  │  │  ├─ __init__.py
 │  │  │  │  ├─ audit.py
@@ -84,6 +119,24 @@ personal-ai-workspace/
 │  │  │  │  ├─ redeemer.py
 │  │  │  │  └─ tokens.py
 │  │  │  ├─ memory/
+│  │  │  │  ├─ fulltext.py
+│  │  │  │  ├─ retrieval/
+│  │  │  │  │  ├─ __init__.py
+│  │  │  │  │  ├─ candidates.py
+│  │  │  │  │  ├─ errors.py
+│  │  │  │  │  ├─ fakes.py
+│  │  │  │  │  ├─ grouping.py
+│  │  │  │  │  ├─ limits.py
+│  │  │  │  │  ├─ pool.py
+│  │  │  │  │  ├─ protocols.py
+│  │  │  │  │  ├─ queries.py
+│  │  │  │  │  ├─ ranking.py
+│  │  │  │  │  ├─ records.py
+│  │  │  │  │  ├─ resolver.py
+│  │  │  │  │  ├─ scopes.py
+│  │  │  │  │  ├─ service.py
+│  │  │  │  │  ├─ stages.py
+│  │  │  │  │  └─ validation.py
 │  │  │  │  └─ shared/
 │  │  │  │     ├─ __init__.py
 │  │  │  │     ├─ audit.py
@@ -106,6 +159,7 @@ personal-ai-workspace/
 │  │  │  │  ├─ records.py
 │  │  │  │  ├─ service.py
 │  │  │  │  ├─ store.py
+│  │  │  │  ├─ task_gate.py
 │  │  │  │  ├─ task_stop.py
 │  │  │  │  ├─ transaction.py
 │  │  │  │  └─ validation.py
@@ -113,7 +167,9 @@ personal-ai-workspace/
 │  │  │  │  ├─ __init__.py
 │  │  │  │  ├─ privacy/
 │  │  │  │  │  ├─ __init__.py
+│  │  │  │  │  ├─ audit.py
 │  │  │  │  │  ├─ contract.py
+│  │  │  │  │  ├─ factory.py
 │  │  │  │  │  ├─ gate.py
 │  │  │  │  │  └─ rules.py
 │  │  │  │  ├─ provenance/
@@ -148,6 +204,7 @@ personal-ai-workspace/
 │  │  │  │     ├─ service.py
 │  │  │  │     └─ validation.py
 │  │  │  ├─ tasks/
+│  │  │  │  ├─ project_gate.py
 │  │  │  │  └─ queueing/
 │  │  │  │     ├─ __init__.py
 │  │  │  │     ├─ budget.py
@@ -184,23 +241,67 @@ personal-ai-workspace/
 │  │  │     ├─ deps.py
 │  │  │     └─ v1/
 │  │  │        ├─ __init__.py
+│  │  │        ├─ auth.py
 │  │  │        ├─ events.py
 │  │  │        └─ health.py
 │  │  ├─ pyproject.toml
 │  │  └─ tests/
 │  │     ├─ __init__.py
+│  │     ├─ auth_http_support.py
+│  │     ├─ auth_support.py
+│  │     ├─ connections_fakes.py
+│  │     ├─ connections_support.py
 │  │     ├─ fake_postgres.py
+│  │     ├─ gate_support.py
 │  │     ├─ identity_support.py
+│  │     ├─ privacy_audit_support.py
 │  │     ├─ privacy_support.py
 │  │     ├─ provenance_support.py
 │  │     ├─ projects_support.py
 │  │     ├─ queueing_support.py
 │  │     ├─ research_support.py
+│  │     ├─ retrieval_pg_support.py
+│  │     ├─ retrieval_support.py
 │  │     ├─ scratch_support.py
 │  │     ├─ shared_memory_support.py
 │  │     ├─ support.py
 │  │     ├─ teardown_child.py
+│  │     ├─ test_auth_argument_validation.py
+│  │     ├─ test_auth_csrf.py
+│  │     ├─ test_auth_grants.py
+│  │     ├─ test_auth_http.py
+│  │     ├─ test_auth_http_admin.py
+│  │     ├─ test_auth_migration.py
+│  │     ├─ test_auth_passwords.py
+│  │     ├─ test_auth_plans.py
+│  │     ├─ test_auth_provider.py
+│  │     ├─ test_auth_service_account.py
+│  │     ├─ test_auth_service_admin.py
+│  │     ├─ test_auth_service_login.py
+│  │     ├─ test_auth_service_redeem.py
+│  │     ├─ test_auth_sessions.py
+│  │     ├─ test_auth_settings.py
+│  │     ├─ test_auth_throttle.py
+│  │     ├─ test_auth_tokens.py
 │  │     ├─ test_config.py
+│  │     ├─ test_connections_adapter.py
+│  │     ├─ test_connections_admin.py
+│  │     ├─ test_connections_budget.py
+│  │     ├─ test_connections_concurrency.py
+│  │     ├─ test_connections_domain.py
+│  │     ├─ test_connections_execute.py
+│  │     ├─ test_connections_grants.py
+│  │     ├─ test_connections_plan.py
+│  │     ├─ test_connections_quota_admin.py
+│  │     ├─ test_connections_quota_enforcement.py
+│  │     ├─ test_connections_result_accounting.py
+│  │     ├─ test_connections_result_limit.py
+│  │     ├─ test_connections_schema.py
+│  │     ├─ test_connections_secret.py
+│  │     ├─ test_connections_secret_paths.py
+│  │     ├─ test_connections_secret_scrub.py
+│  │     ├─ test_connections_settlement_cancel.py
+│  │     ├─ test_connections_validation.py
 │  │     ├─ test_database.py
 │  │     ├─ test_database_run_abortable.py
 │  │     ├─ test_database_run_abortable_slot.py
@@ -220,6 +321,12 @@ personal-ai-workspace/
 │  │     ├─ test_owner_setup_service.py
 │  │     ├─ test_owner_token_roles.py
 │  │     ├─ test_postgres_integration.py
+│  │     ├─ test_privacy_audit_event.py
+│  │     ├─ test_privacy_audit_factory.py
+│  │     ├─ test_privacy_audit_grants.py
+│  │     ├─ test_privacy_audit_postgres.py
+│  │     ├─ test_privacy_audit_schema.py
+│  │     ├─ test_privacy_audit_stall.py
 │  │     ├─ test_privacy_broker.py
 │  │     ├─ test_privacy_contract.py
 │  │     ├─ test_privacy_gate.py
@@ -239,6 +346,8 @@ personal-ai-workspace/
 │  │     ├─ test_provenance_store_validation.py
 │  │     ├─ test_provenance_store_wiring.py
 │  │     ├─ test_provenance_validation.py
+│  │     ├─ test_project_claim_filter.py
+│  │     ├─ test_project_state_gate.py
 │  │     ├─ test_projects_admin_access.py
 │  │     ├─ test_projects_admin_cursor.py
 │  │     ├─ test_projects_admin_grants.py
@@ -257,6 +366,7 @@ personal-ai-workspace/
 │  │     ├─ test_projects_task_stop.py
 │  │     ├─ test_projects_validation.py
 │  │     ├─ test_queueing_budget.py
+│  │     ├─ test_queueing_conditional_cancel.py
 │  │     ├─ test_queueing_domain.py
 │  │     ├─ test_queueing_escalation.py
 │  │     ├─ test_queueing_flow.py
@@ -271,6 +381,24 @@ personal-ai-workspace/
 │  │     ├─ test_research_normalize.py
 │  │     ├─ test_research_published_offset.py
 │  │     ├─ test_research_registry.py
+│  │     ├─ test_retrieval_component_output.py
+│  │     ├─ test_retrieval_eligibility.py
+│  │     ├─ test_retrieval_fakes.py
+│  │     ├─ test_retrieval_grants.py
+│  │     ├─ test_retrieval_grouping.py
+│  │     ├─ test_retrieval_leakage.py
+│  │     ├─ test_retrieval_migration.py
+│  │     ├─ test_retrieval_plans.py
+│  │     ├─ test_retrieval_queries.py
+│  │     ├─ test_retrieval_query_validation.py
+│  │     ├─ test_retrieval_ranking.py
+│  │     ├─ test_retrieval_service_access.py
+│  │     ├─ test_retrieval_service_concurrency.py
+│  │     ├─ test_retrieval_service_metadata.py
+│  │     ├─ test_retrieval_service_search.py
+│  │     ├─ test_retrieval_service_stages.py
+│  │     ├─ test_retrieval_service_validation.py
+│  │     ├─ test_retrieval_text.py
 │  │     ├─ test_scratch_concurrency.py
 │  │     ├─ test_scratch_grants.py
 │  │     ├─ test_scratch_janitor.py
@@ -304,7 +432,10 @@ personal-ai-workspace/
 │  │     ├─ test_shared_memory_service_guards.py
 │  │     ├─ test_shared_memory_service_manage.py
 │  │     ├─ test_shared_memory_service_read.py
+│  │     ├─ test_task_in_transaction.py
 │  │     ├─ test_task_input_snapshot.py
+│  │     ├─ test_task_stop_windows.py
+│  │     ├─ test_tasks_project_index.py
 │  │     ├─ test_tools_approvals.py
 │  │     ├─ test_tools_broker.py
 │  │     ├─ test_tools_credentials.py
@@ -371,7 +502,9 @@ personal-ai-workspace/
 │     ├─ 0012-research-provider-adapter-policy.md
 │     ├─ 0013-research-scratch-task-relation.md
 │     ├─ 0014-task-working-set-persistence.md
+│     ├─ 0016-shared-connection-adapter-policy.md
 │     ├─ 0022-project-lifecycle-capabilities.md
+│     ├─ 0023-audit-events-details-for-external-send.md
 │     └─ README.md
 └─ evaluator/
    └─ README.md

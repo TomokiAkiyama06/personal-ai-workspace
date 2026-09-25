@@ -27,6 +27,7 @@ from paw_backend.tasks.service import (
     MAX_RESTORE_TOOL_INVOCATIONS,
 )
 
+from .gate_support import ALWAYS_ACTIVE
 from .task_support import FIRST_RUN, PostgresTaskTestCase, requires_postgres
 
 C = TaskCommand
@@ -68,7 +69,9 @@ class ToolInvocationTest(PostgresTaskTestCase):
             task_id, step_id=step.id, tool_name="git-push"
         )
         # A different process (a reconnecting client, a restarted backend).
-        snapshot = await TaskService(self.new_database()).restore(task_id)
+        snapshot = await TaskService(
+            self.new_database(), project_gate=ALWAYS_ACTIVE
+        ).restore(task_id)
         self.assertEqual(snapshot.tool_invocations, (call,))
         self.assertEqual(snapshot.tool_invocations[0].status, T.STARTED)
         self.assertEqual(snapshot.current_step.id, step.id)
