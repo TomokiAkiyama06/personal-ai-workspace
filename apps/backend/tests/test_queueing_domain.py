@@ -39,6 +39,7 @@ from paw_backend.tasks.queueing import (
     Priority,
     QueueingError,
     QueueStatus,
+    StaleRuntimeSessionError,
     TaskAlreadyQueuedError,
     limit_for,
 )
@@ -398,6 +399,13 @@ class ValidationTest(unittest.TestCase):
             with self.subTest(bad=repr(bad)):
                 self.assertRejects("approach", v.check_approach, bad)
 
+    def test_runtime_generations(self):
+        self.assertEqual(v.check_runtime_generation(1), 1)
+        self.assertEqual(v.check_runtime_generation(2**63 - 1), 2**63 - 1)
+        for bad in (0, -1, 2**63, True, "1", 1.0, None):
+            with self.subTest(bad=repr(bad)):
+                self.assertRejects("generation", v.check_runtime_generation, bad)
+
     def test_uuids_are_not_parsed_from_strings(self):
         value = uuid.uuid4()
         self.assertIs(v.check_uuid("task_id", value), value)
@@ -504,6 +512,7 @@ class ErrorTest(unittest.TestCase):
             TaskAlreadyQueuedError(),
             LeaseLostError(),
             BudgetNotConfiguredError(),
+            StaleRuntimeSessionError(),
         ]
         for error in errors:
             self.assertIsInstance(error, TaskError)
@@ -516,6 +525,7 @@ class ErrorTest(unittest.TestCase):
                 "task_already_queued",
                 "queue_lease_lost",
                 "budget_not_configured",
+                "runtime_session_stale",
             ],
         )
 
@@ -531,6 +541,10 @@ class ErrorTest(unittest.TestCase):
         )
         self.assertEqual(
             str(BudgetNotConfiguredError()), "No budget preset is set for this task"
+        )
+        self.assertEqual(
+            str(StaleRuntimeSessionError()),
+            "The runtime timer belongs to a newer session",
         )
 
     def test_a_validation_error_never_contains_the_rejected_value(self):

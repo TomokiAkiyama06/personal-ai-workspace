@@ -383,7 +383,7 @@ Table 名は `task` で始めません。PAW-032 の Test が `task` で始ま�
 | Table | Application の Role の権限 | 理由 |
 | --- | --- | --- |
 | `queue_entries` | SELECT、INSERT、UPDATE は `status`、`claimed_by`、`claimed_at`、`lease_expires_at`、`claim_count`、`finished_at` の列だけ。DELETE なし | 追加は INSERT（生成された `id` を読み戻すので SELECT）。Claim・Heartbeat・返却・完了・取消は Lease と状態の列だけを更新する（`FOR UPDATE SKIP LOCKED` も UPDATE 権限が要る）。`task_id`、`priority`、`priority_rank`、`enqueued_at`、`id` は変更できないため、侵害された Application でも、待っている Task の優先度や順序を書き換えられない。取消は状態の変更で、終わった Entry は履歴として残る |
-| `budget_usages` | SELECT、INSERT、UPDATE は `preset`、`limit_value`、`consumed`、`running_since` の列だけ。DELETE なし | `set_preset` は INSERT ... ON CONFLICT DO UPDATE（`preset`、`limit_value`）。`record` と `stop_runtime` は `consumed` への原子的な加算、`start_runtime` / `stop_runtime` は `running_since`。キー（`task_id`、`kind`）と `created_at` は変更できず、Budget は削除されない |
+| `budget_usages` | SELECT、INSERT、UPDATE は `preset`、`limit_value`、`consumed`、`running_since`、`runtime_generation` の列だけ。DELETE なし | `set_preset` は INSERT ... ON CONFLICT DO UPDATE（`preset`、`limit_value`）。`record` と `stop_runtime` は `consumed` への原子的な加算、`start_runtime` / `stop_runtime` は `running_since`、`start_runtime` は `runtime_generation` への加算。キー（`task_id`、`kind`）と `created_at` は変更できず、Budget は削除されない |
 | `loop_failure_signatures` | SELECT、INSERT、DELETE。UPDATE なし | `record_failure` が追加し（試行を確認するため `tasks` の行を `FOR SHARE` で Lock する。PAW-032 で付与済みの `tasks` の SELECT と列単位の UPDATE で足り、追加の権限は不要）、Window から外れた行を削除する。`clear_previous_attempts`（Restart の後の掃除）は、Task の現在の試行より前の試行の行だけを削除する（現在の試行との比較も `tasks` の SELECT で足りる）。この Table は Hash の Window で履歴ではない（何が起きたかの記録は `task_events`）。保存された失敗は編集できない。PAW-033 で Application が行を削除するのは、ここだけ |
 
 `budget_usages` の `preset` と `limit_value` は Application が更新できます（Owner / Admin が Preset を上げる操作のため）。Preset を変えてよいかの認可は、Endpoint を作る側の責務です。
@@ -425,7 +425,7 @@ Runtime と GPU 時間の単位は整数の秒、他は個数です。記録す�
 
 | 種類 | 記録 |
 | --- | --- |
-| `runtime_seconds`（max runtime） | `start_runtime` / `stop_runtime` が、注入した Clock で測る（`record` は不可） |
+| `runtime_seconds`（max runtime） | `start_runtime` / `stop_runtime(task_id, generation)` が、注入した Clock で測る（`record` は不可） |
 | `steps`、`retries`、`tool_calls`、`tokens`、`gpu_seconds` | `record(task_id, kind, amount)` |
 
 - **Preset。** Standard / Long / Unlimited は `domain.PRESET_LIMITS` のデータです。`set_preset` が Task の 6 行を作り（または上限だけを更新し、消費は保ちます）、上限をその Task の行へ写します。
@@ -434,6 +434,8 @@ Runtime と GPU 時間の単位は整数の秒、他は個数です。記録す�
   `EXCEEDED` の Verdict は、超過した種類をすべて、宣言順で返します。要件に警告の閾値はないため、`WARN` はありません。
 - **原子性。** `record` は `UPDATE ... SET consumed = LEAST(consumed + :amount, 上限) ... RETURNING` の 1 文で、複数 Process が同時に記録しても増分は失われません。消費量は `10^15` で飽和し、Overflow しません。
 - **Runtime。** `start_runtime` が `running_since` を保存し、`stop_runtime` が経過した整数秒（切り捨て、負にはならない）を加えて消します。実行中は `usage` / `check` が経過分を足して返しますが、書き込みません。同時の `stop_runtime` が時間を二重に加えることはありません。
+- **Runtime の Session（Fencing）。** `start_runtime` は呼ぶたびに新しい Runtime の Session を始め、その世代（`runtime_generation`、1 以上の `int`。増える一方で、Timer が止まっても戻りません）を返します。Worker は、その世代を `stop_runtime(task_id, generation)` の**必須の引数**として渡します。現在の世代と違う `stop_runtime` は、何も変更せず `StaleRuntimeSessionError`（`code` は `runtime_session_stale`）にします。Lease が切れて Entry が Reclaim された古い Worker や、Restart 前の実行が遅れて `stop_runtime` を呼んでも、新しい Session の `running_since` と累積の Runtime には触れず、`check` は新しい Worker の Runtime を数え続けます（上限を回避できません）。Session の世代は Queue の `claim_count` と同じ考え方ですが、`claim_count` は Entry ごとに 1 から数え直す（Restart の新しい Entry と衝突する）ため、専用の Counter にしています。
+  すでに Timer が動いているときの `start_runtime` は、Session を**引き継ぎ**ます（`running_since` はそのままで、それまでの時間は失われず二重にも数えられません。前の世代は古くなります）。同じ世代の `stop_runtime` を 2 回呼ぶと、2 回目は何も変えず現在の Runtime を返します。渡す世代の型・範囲の誤り（`bool`、0 以下、文字列など）は `InvalidQueueingArgumentError("generation")` です。Preset の変更（`set_preset`）は世代を変えません（[Decision 0007](../../docs/decisions/0007-task-queue-budget-and-loop-policy.md) の 10）。
 - **Unlimited。** 6 つの数値の上限を無くすだけです。Loop 検知（下記）、Stop Now、Critical safety / resource protection による停止は Preset と無関係で、Unlimited の Task でも有効です。消費量の記録も続きます。
   要件は Unlimited に別の数値の上限を定めていないため、設けていません。
 - 子 Agent が親の Budget を超えないこと（[要件](../../REQUIREMENTS.md)）は、Sub-Agent を扱う PAW-034 の責務です。
@@ -505,6 +507,7 @@ Budget 超過のときに Escalation しないのは、使い切った予算を�
 - Queue は `tasks.state` を読まず、変更もしません。`claim_next` と PAW-032 の `start` を組み合わせるのは PAW-034 です。
 - Lease の切れた Entry は、次の `claim_next` が自動で取り直します。実行中の Process を止める処理（`stop_now` など）は含みません。期限を過ぎた Worker の完了報告は拒否されます。
 - 優先度の引き上げ、Preset の変更、Queue の一覧は認可付きの操作で、Endpoint と一緒に追加します。
+- `start_runtime` は、`BudgetTracker` が Queue を読まないため、呼んだ Worker が Lease を持つかを確認しません。Lease を失った古い Worker が `start_runtime` を呼ぶと、Session を引き継げてしまいます（時間は数え続けるので Budget は回避されませんが、新しい Worker の `stop_runtime` は `StaleRuntimeSessionError` になります）。Lease を持つ Worker だけが呼ぶ規則は、Orchestrator（PAW-034）の責務です。Tracker が Queue の Entry を確かめる案は、[Decision 0007](../../docs/decisions/0007-task-queue-budget-and-loop-policy.md) の 10 で承認を求めています。
 - Migration `0033` の `down_revision` は `0021` です（鎖は `0001 → 0025 → 0032 → 0040 → 0021 → 0033`）。
 
 ## 認可（RBAC / Capability）と Audit
