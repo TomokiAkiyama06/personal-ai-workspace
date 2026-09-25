@@ -610,9 +610,11 @@ PAW-022 / PAW-023 が Password と Passkey の Table を追加すると、Applic
 - DB には **Token を保存しません**。Token ごとの乱数 Salt を鍵にした HMAC-SHA256 だけを保存します（Secret が高 Entropy のため、Password 用の遅い Hash は不要です）。比較は `hmac.compare_digest`（定数時間）です。
   Token は `IssuedToken`（`repr` に出ない）以外の場所に存在せず、Log、DB の行、Audit のどこにも入りません（Test が SQL の Log と全 Table の行を検査します）。
 - 各 Token は、Token ID とは無関係な乱数の **`audit_ref`**（UUID）も持ちます。Audit の Event と Log は Token をこの値だけで呼び、`audit_ref` を検索の鍵として受け付ける処理はありません。Audit を読める Admin が `audit_ref` を知っても、Token を使うことも試行を使い切らせることもできません（Test 済み）。
-- **1 回限り**。消費は `UPDATE ... WHERE used_at IS NULL AND revoked_at IS NULL AND expires_at > now` の 1 文で行うため、同時に 2 回使っても片方だけが成功します。
+- **1 回限り**。消費は `UPDATE ... WHERE used_at IS NULL AND revoked_at IS NULL AND expires_at > <その文が行を判定する瞬間>` の 1 文で行うため、同時に 2 回使っても片方だけが成功します。
   1 人の User について、未使用で無効になっていない Token は最大 1 つです（Partial Unique Index）。新しく発行すると、古い Token は先に無効にされます（`owner-recover`）。
 - **有効期限**は `PAW_SETUP_TOKEN_TTL_SECONDS`（既定 1800、60〜**14400**）。期限ちょうどの時刻は無効です。
+  期限は**消費の瞬間**に判定します（Decision 0005 の 10。Proposed）。`redeem` は開始時に 1 度判定し（期限切れの Token は Owner の行 Lock を待ちません）、Owner の `users` 行を `FOR UPDATE` で Lock した**後**、消費する 1 文の中で判定し直します。別の Transaction が Owner の行を Lock している間に待たされても、待っている間に期限が切れた Token は使用済みになりません（拒否は同じ `SetupTokenRejectedError`、Audit は deny `token_expired`）。
+  その文は、この Process の Clock（Lock を得た後に読み直した値。Test が動かす時計）と DB の `clock_timestamp()`（`now()` は Transaction の開始時刻なので使いません）の**新しいほう**を「現在」とします。どちらか一方が期限を過ぎたと言えば期限切れで、Clock がずれていても Token の寿命が**短くなる**側にしか働きません（Test は、止まった Process Clock でも DB の Clock だけで拒否されることを確かめます）。`used_at` は Process の Clock で、Lock を得た後の時刻を記録します。
 - **試行の上限**は Token ごとに `PAW_SETUP_TOKEN_MAX_ATTEMPTS`（既定 5、1〜20）です。試行は Secret を比較する**前に**予約して Commit するため、同時に大量の Request が来ても比較は上限回までしか行われません。
   上限を使い切る試行が **`setup_tokens.locked_at` を記録**し、その Token は正しい Token でも二度と使えません。**設定を後から大きくしても再び開くことはありません**（Test 済み）。`owner-recover` で新しい Token を発行してください。
 - **失敗はすべて同じ失敗**です。`SetupTokenRejectedError`（固定の Message）は、Token が間違い・未知・形式不正・期限切れ・使用済み・無効化済み・試行上限超過・Owner でなくなった User のどれでも同じで、Message にも Cause にも違いがありません。
