@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 # `Authorizer._lookup`). At this many, a new lookup is refused (an audited
 # denial) instead of piling one more stuck task onto a directory that is not
 # answering.
-_MAX_ABANDONED_LOOKUPS = 32
+_MAX_LIVE_LOOKUPS = 32
 
 
 class Authorizer:
@@ -69,9 +69,12 @@ class Authorizer:
         self._directory = directory
         self._timeout_seconds = timeout_seconds
         self._clock = clock
-        # Strong references to the lookups that are still ending after their
-        # deadline (bounded by `_MAX_ABANDONED_LOOKUPS`).
-        self._abandoned: set[asyncio.Task[Principal | None]] = set()
+        # Every directory lookup that has not ended yet, in flight or abandoned
+        # after its deadline (strong references), and the bound on how many may
+        # exist at once (`_MAX_LIVE_LOOKUPS`): a slot is taken before a lookup
+        # starts and returned only when its task has really ended.
+        self._live: set[asyncio.Task[Principal | None]] = set()
+        self._slots = asyncio.Semaphore(_MAX_LIVE_LOOKUPS)
 
     async def authorize(
         self,
@@ -154,24 +157,36 @@ class Authorizer:
         discarded, never used and never logged. A directory should still stop
         its own work on cancellation (``Database.fetch_abortable``), so that an
         abandoned lookup does not keep a connection; at most
-        ``_MAX_ABANDONED_LOOKUPS`` of them are tolerated at a time.
+        ``_MAX_LIVE_LOOKUPS`` lookups (in flight or abandoned) exist at a time:
+        a slot is taken before a lookup starts, within the same deadline, and
+        returned when its task has really ended, so a stalled directory cannot
+        make concurrent requests start more lookups (or connections) than that.
         """
         if self._directory is None:
             return None
-        if len(self._abandoned) >= _MAX_ABANDONED_LOOKUPS:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._timeout_seconds
+        try:
+            await asyncio.wait_for(self._slots.acquire(), self._timeout_seconds)
+        except TimeoutError:
             logger.warning("Principal lookup refused: earlier lookups have not ended")
             return None
         lookup = asyncio.create_task(self._ask_directory(user_id))
-        # Retrieve the outcome so that asyncio never logs it (with the message)
-        # when an abandoned lookup fails after its deadline.
-        lookup.add_done_callback(lambda task: task.cancelled() or task.exception())
+        self._live.add(lookup)
+
+        def ended(task: asyncio.Task[Principal | None]) -> None:
+            self._live.discard(task)
+            self._slots.release()
+            # Retrieve the outcome so that asyncio never logs it (with the
+            # message) when an abandoned lookup fails after its deadline.
+            task.cancelled() or task.exception()
+
+        lookup.add_done_callback(ended)
         try:
-            await asyncio.wait({lookup}, timeout=self._timeout_seconds)
+            await asyncio.wait({lookup}, timeout=max(0.0, deadline - loop.time()))
         finally:
             if not lookup.done():  # timed out, or this caller was cancelled
                 lookup.cancel()
-                self._abandoned.add(lookup)
-                lookup.add_done_callback(self._abandoned.discard)
         if not lookup.done():
             logger.warning("Principal lookup failed (TimeoutError)")
             return None

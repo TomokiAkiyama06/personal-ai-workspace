@@ -596,8 +596,10 @@ class DirectoryCancellationTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_abandoned_lookups_are_capped_and_the_cap_denies(self):
         directory = self.stubborn(self.contributor)
-        authorizer = Authorizer(self.sink, directory=directory, timeout_seconds=0.05)
-        with patch("paw_backend.authz.authorizer._MAX_ABANDONED_LOOKUPS", 2):
+        with patch("paw_backend.authz.authorizer._MAX_LIVE_LOOKUPS", 2):
+            authorizer = Authorizer(
+                self.sink, directory=directory, timeout_seconds=0.05
+            )
             with self.assertLogs("paw_backend.authz.authorizer", level="WARNING"):
                 decisions = [await self.act(authorizer) for _ in range(3)]
             # Two lookups are still stuck: the third is refused without asking.
@@ -609,11 +611,40 @@ class DirectoryCancellationTest(unittest.IsolatedAsyncioTestCase):
             # Once they end, lookups run again (and this one is allowed).
             directory.release.set()
             self.assertTrue(await wait_until(lambda: directory.finished == 2))
-            self.assertTrue(await wait_until(lambda: not authorizer._abandoned))
+            self.assertTrue(await wait_until(lambda: not authorizer._live))
             directory.outcome = self.contributor
             decision = await self.act(authorizer)
         self.assertEqual(directory.calls, 3)
         self.assertTrue(decision.allowed)
+
+    async def test_concurrent_requests_cannot_start_more_lookups_than_the_cap(self):
+        # Every request arrives before any lookup has timed out: the cap must
+        # hold for lookups still in flight, not only for abandoned ones.
+        directory = self.stubborn(self.contributor)
+        with patch("paw_backend.authz.authorizer._MAX_LIVE_LOOKUPS", 2):
+            authorizer = Authorizer(self.sink, directory=directory, timeout_seconds=0.1)
+            with self.assertLogs("paw_backend.authz.authorizer", level="WARNING"):
+                decisions = await asyncio.gather(
+                    *[self.act(authorizer) for _ in range(6)]
+                )
+            self.assertEqual(directory.calls, 2)
+            self.assertEqual(
+                [d.reason for d in decisions], [Reason.DELEGATOR_NOT_ACTIVE] * 6
+            )
+            self.assertEqual(len(self.sink.events), 6)
+            directory.release.set()
+            self.assertTrue(await wait_until(lambda: not authorizer._live))
+
+    async def test_requests_beyond_the_cap_wait_for_a_free_slot_when_lookups_end(self):
+        # A healthy, fast directory: more concurrent requests than the cap are
+        # served (they wait for a slot), none is refused.
+        directory = self.stubborn(self.contributor)
+        directory.release.set()
+        with patch("paw_backend.authz.authorizer._MAX_LIVE_LOOKUPS", 2):
+            authorizer = Authorizer(self.sink, directory=directory, timeout_seconds=1.0)
+            decisions = await asyncio.gather(*[self.act(authorizer) for _ in range(6)])
+        self.assertTrue(all(d.allowed for d in decisions))
+        self.assertEqual(directory.calls, 6)
 
     async def test_a_cancelled_caller_cancels_its_lookup(self):
         cancelled = asyncio.Event()
@@ -656,7 +687,7 @@ class DirectoryCancellationTest(unittest.IsolatedAsyncioTestCase):
         decision = await self.act(authorizer)
         self.assertTrue(decision.allowed)
         self.assertEqual(directory.lookups, 1)
-        self.assertEqual(authorizer._abandoned, set())
+        self.assertEqual(authorizer._live, set())
         self.assertEqual(asyncio.all_tasks(), {asyncio.current_task()})
 
 

@@ -26,8 +26,9 @@ class PrincipalDirectory(Protocol):
     socket is shut down at the deadline), not a pooled SQLAlchemy/psycopg call:
     cancelling that waits for a stalled server (about ten seconds, or for
     good) and the abandoned lookup keeps its connection meanwhile. At most 32
-    abandoned lookups are tolerated at a time; beyond that a new lookup is
-    refused (the same audited denial).
+    lookups (in flight or abandoned) exist at a time: a request waits for a
+    free slot within its deadline, and is refused with the same audited denial
+    when none frees up.
     """
 
     async def get_principal_by_id(self, user_id: uuid.UUID) -> Principal | None: ...
