@@ -1547,6 +1547,19 @@ Test: `tests/test_research_broker.py` の `LoggedExceptionTypeTest`（Credential
 - Query の最小化と Secret の除去は PAW-053 の責任です。`private_source` はその Filter が使います。
 - 全ての入力（Query、件数、文字数、Provider 数）に上限があります。Registry は 32 Provider までです。
 
+#### 各 Adapter の受け入れ条件
+
+[Decision 0012](../../docs/decisions/0012-research-provider-adapter-policy.md) の承認時の決定により、次の責務は Broker ではなく個々の Adapter と呼び出し元（Tool Broker）にあります。
+Direct Web、Docs、GitHub、OpenCode などの Adapter の Issue は、受け入れ条件に次を明記します（現在の [Implementation Backlog](../../docs/IMPLEMENTATION_BACKLOG.md) には、個別の Adapter の Issue はまだありません）。
+
+- [ ] `network` Capability を、呼び出し元（Tool Broker、PAW-031）が確認してから Adapter を呼ぶ（Adapter を直接呼ぶ経路を作らない）。
+- [ ] SSRF 対策（Private Address、Loopback、Link-local、Cloud の Metadata Address などへの接続の拒否。Redirect の先も同じ）。
+- [ ] 名前解決の後の接続先の検査（DNS Rebinding への対策。検査した Address へ接続する）。`canonicalize_locator` は名前を解決しません。
+- [ ] `robots.txt` の遵守（該当する Adapter だけ）。
+- [ ] Timeout と Cancel に応じる非同期の実装（Broker の Timeout は協調的です）。
+- [ ] Response は `ProviderHit` / `ProviderDocument` に変換し、外部の Library の例外は `ProviderFailure` に分類してから返す。
+- [ ] License と `robots.txt` は `SourceMetadata` に含めない（必要になったときに、Decision を経て追加する）。
+
 ### 実装の由来と制約
 
 - `locator.py` と `normalize.py` は、Local の Qwen3-Coder（30B-A3B）が最初の実装を書き、テストにも合格しました。
@@ -1554,14 +1567,14 @@ Test: `tests/test_research_broker.py` の `LoggedExceptionTypeTest`（Credential
   見つかった不具合は、`%` の直後の非 ASCII を変換しない、`?é=` の `=` を落とす、KELVIN SIGN が ASCII の Host になる、入力の長さを最後に検査するため 20 MB の入力の拒否に数秒かかる、例外の Context に入力が残る、`hasattr` による偽の Hit の受理、広すぎる `except` です。
 - `registry.py` と `broker.py` は、Local Model が仕様どおりに実装できなかったため、仕様を書いた側の参照実装を整えたものです。
 - Timeout は協調的です。Adapter が Cancel を無視する、または Event Loop を止める同期処理をする場合、Broker は止められません。
-- 未決事項（人間の判断が必要。**[Decision 0012](../../docs/decisions/0012-research-provider-adapter-policy.md) は Proposed で、承認されるまで暫定です**）:
+- 実装が選んだ方針（**[Decision 0012](../../docs/decisions/0012-research-provider-adapter-policy.md) は 2026-09-25 に Human が承認しました**。変える場合は新しい Decision から `Supersedes` します）:
   1. License と `robots.txt` の項目は、要件に定義がないため `SourceMetadata` にありません。
   2. 不正な Hit が 1 つでもあると、その Provider の Response 全体を `invalid_response` にします（Adapter の不具合を隠さないため）。Constructor を通らずに作られた Hit / Document は、Field を読み直して検証し、Subclass の Property は使いません。Response の Container は `list` / `tuple` そのものだけで、Subclass は Hook を呼ばずに不正とします。`ProviderFailure` の分類も Subclass の Hook を呼びません（Adapter の Code を Broker の中で動かさないため）。
   3. 複数 Provider の結果は交互に並べ、正規化した URL の最初の 1 件を残します（要件に統合の規則がありません）。
   4. Credential 用の Query Parameter の一覧は Best effort です。
   5. IPv6 と非 ASCII の Host は拒否し、名前解決はしません。`network` Capability、SSRF、`robots.txt` は呼び出し元（Tool Broker、PAW-031）と個々の Adapter の責任です。
   6. Provider の名前は正規化せず（look-alike は拒否）、`str` の Subclass は厳密な `str` の写しにして保持します。Subclass を拒否する案は採っていません（`StrEnum` の要素を名前にできるため）。
-  7. 同期で動く Adapter の Code（`published_at` の `tzinfo`、`provider.search` を読んで呼ぶ部分）が出した `BaseException` は、`CancelledError`、`KeyboardInterrupt`、`SystemExit` を含めて Adapter の失敗として報告します。同期の Code に Task の Cancel は届かないためです。代償として、その数マイクロ秒の間に Signal で本物の `KeyboardInterrupt` が届くと、それも `invalid_response` になり、握りつぶされます。例外を出さずに `asyncio.current_task().cancel()` を呼んで値を返す同期の Code は、`Task.cancelling()` の増加を `Task.uncancel()` で取り消して、同じく Adapter の失敗にします（数が 1 以上で Cancel が未着の Task では `uncancel()` が印を消せない、という限界があります。登録の窓も同じ扱いです）。**限界:** Adapter の非同期の Code（`await` の最中）が自分で出した `CancelledError` や自分で呼んだ `Task.cancel()` は、Task の Cancel と区別せず、これまでどおり `gather` へ伝わります（`await` の最中は本物の Cancel と数の増加で区別できないため、区別する案は別の判断が要ります）。
+  7. 同期で動く Adapter の Code（`published_at` の `tzinfo`、`provider.search` を読んで呼ぶ部分）が出した `BaseException` は、`CancelledError`、`KeyboardInterrupt`、`SystemExit` を含めて Adapter の失敗として報告します。同期の Code に Task の Cancel は届かないためです。代償として、その数マイクロ秒の間に Signal で本物の `KeyboardInterrupt` が届くと、それも `invalid_response` になり、握りつぶされます。例外を出さずに `asyncio.current_task().cancel()` を呼んで値を返す同期の Code は、`Task.cancelling()` の増加を `Task.uncancel()` で取り消して、同じく Adapter の失敗にします（数が 1 以上で Cancel が未着の Task では `uncancel()` が印を消せない、という限界があります。登録の窓も同じ扱いです）。**限界:** Adapter の非同期の Code（`await` の最中）が自分で出した `CancelledError` や自分で呼んだ `Task.cancel()` は、Task の Cancel と区別せず、これまでどおり `gather` へ伝わります（`await` の最中は本物の Cancel と数の増加で区別できないため、区別する案は Decision 0012 では決めず、必要になったときに別の Decision で決めます）。
 
 ### Test
 
