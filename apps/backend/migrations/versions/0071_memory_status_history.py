@@ -64,7 +64,7 @@ drift apart, and ``tests/test_memory_status_history_migration.py`` runs this
 revision up and down on a database that already holds history rows.
 
 Revision ID: 0071
-Revises: 0030
+Revises: 0027
 Create Date: 2026-09-26
 """
 
@@ -74,7 +74,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "0071"
-down_revision: str | Sequence[str] | None = "0030"
+down_revision: str | Sequence[str] | None = "0027"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

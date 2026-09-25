@@ -33,7 +33,7 @@ from .test_memory_migration import catalog
 from .test_migrations import offline_config
 
 REVISION = "0071"
-PREVIOUS = "0030"
+PREVIOUS = "0027"
 FIRST = datetime(2026, 9, 1, tzinfo=UTC)
 
 HISTORY_0040 = (
