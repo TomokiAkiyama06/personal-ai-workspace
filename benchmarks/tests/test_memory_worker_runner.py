@@ -1,0 +1,1318 @@
+"""Tests for the memory worker benchmark runner."""
+
+import contextlib
+import inspect
+import io
+import json
+import math
+import re
+import tempfile
+import threading
+import time
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from benchmarks import memory_worker_runner
+from benchmarks.memory_worker_metrics import (
+    MEMORY_SCOPES,
+    MemoryRecord,
+    schema_adherence,
+)
+from benchmarks.memory_worker_runner import (
+    MemoryWorkerCase,
+    WorkerStuckError,
+    _output_schema,
+    load_cases,
+    parse_worker_output,
+    run_benchmark,
+    validate_worker,
+)
+from benchmarks.metrics_collector import MetricsCollector
+from benchmarks.tests.test_memory_worker_metrics import BLANK_TEXTS
+
+# The harness has no default deadline (the value is the operator's decision), so
+# every run states one. Tests use a bound that no in-process fake worker reaches.
+TIMEOUT = 30.0
+
+
+class FakeClock:
+    def __init__(self, value: float = 100.0):
+        self.value = value
+
+    def __call__(self) -> float:
+        return self.value
+
+
+class FakeGpuSampler:
+    def __init__(self, samples):
+        self.samples = list(samples)
+        self.calls = 0
+
+    def sample(self):
+        self.calls += 1
+        return self.samples.pop(0) if self.samples else ()
+
+
+class MockWorker:
+    def __init__(self, responses):
+        self.responses = responses
+        self.call_count = 0
+
+    def extract(self, input_text):
+        if self.call_count < len(self.responses):
+            response = self.responses[self.call_count]
+            self.call_count += 1
+            return response
+        return ""
+
+
+class MemoryWorkerRunnerTest(unittest.TestCase):
+    def test_load_cases_happy_path(self):
+        cases = load_cases("benchmarks/tests/fixtures/memory-worker/valid-cases.json")
+        self.assertEqual(len(cases), 2)
+
+        case1 = cases[0]
+        self.assertEqual(case1.id, "test-1")
+        self.assertEqual(
+            case1.input_text, "The user mentioned their favorite color is blue."
+        )
+        self.assertEqual(len(case1.gold), 1)
+        self.assertEqual(case1.gold[0].key, "favorite_color")
+        self.assertEqual(case1.gold[0].content, "The user's favorite color is blue.")
+        self.assertEqual(case1.gold[0].scope, "user")
+        self.assertEqual(case1.gold[0].state, "confirmed")
+        self.assertIsNone(case1.gold[0].supersedes)
+
+        case2 = cases[1]
+        self.assertEqual(case2.id, "test-2")
+        self.assertEqual(
+            case2.input_text,
+            "The meeting is scheduled for tomorrow at 3 PM in room 205.",
+        )
+        self.assertEqual(len(case2.gold), 2)
+        self.assertEqual(case2.gold[0].key, "meeting_time")
+        self.assertEqual(case2.gold[1].key, "meeting_location")
+
+    def test_load_cases_empty_cases(self):
+        with self.assertRaises(ValueError) as cm:
+            load_cases(
+                "benchmarks/tests/fixtures/memory-worker/invalid-cases-empty-cases.json"
+            )
+        self.assertIn("Cases list cannot be empty", str(cm.exception))
+
+    def test_load_cases_duplicate_ids(self):
+        with self.assertRaises(ValueError) as cm:
+            load_cases(
+                "benchmarks/tests/fixtures/memory-worker/invalid-cases-duplicate-id.json"
+            )
+        self.assertIn("Duplicate case ID", str(cm.exception))
+
+    def test_load_cases_missing_fields(self):
+        with self.assertRaises(ValueError) as cm:
+            load_cases(
+                "benchmarks/tests/fixtures/memory-worker/invalid-cases-missing-fields.json"
+            )
+        self.assertIn("must have a 'gold' key", str(cm.exception))
+
+    def test_load_cases_invalid_gold_record(self):
+        with self.assertRaises(ValueError) as cm:
+            load_cases(
+                "benchmarks/tests/fixtures/memory-worker/invalid-cases-invalid-gold-record.json"
+            )
+        self.assertIn("key must be a non-empty string", str(cm.exception))
+
+    def test_parse_worker_output_valid(self):
+        valid_output = """
+        {
+            "memories": [
+                {
+                    "key": "test_key",
+                    "scope": "user",
+                    "state": "confirmed",
+                    "supersedes": null
+                }
+            ]
+        }
+        """
+        result = parse_worker_output(valid_output)
+        self.assertIsNotNone(result)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].key, "test_key")
+        self.assertEqual(result[0].scope, "user")
+        self.assertEqual(result[0].state, "confirmed")
+        self.assertIsNone(result[0].supersedes)
+
+    def test_parse_worker_output_invalid_json(self):
+        invalid_json = '{"memories": [}'
+        result = parse_worker_output(invalid_json)
+        self.assertIsNone(result)
+
+    def test_parse_worker_output_wrong_shape(self):
+        wrong_shape = '{"wrong_field": "value"}'
+        result = parse_worker_output(wrong_shape)
+        self.assertIsNone(result)
+
+    def test_parse_worker_output_extra_property(self):
+        extra_property = """
+        {
+            "memories": [
+                {
+                    "key": "test_key",
+                    "scope": "user",
+                    "state": "confirmed",
+                    "supersedes": null,
+                    "extra_field": "should_not_be_here"
+                }
+            ]
+        }
+        """
+        result = parse_worker_output(extra_property)
+        self.assertIsNone(result)
+
+    def test_worker_output_scope_is_limited_to_the_visibility_classes(self):
+        base = {"key": "k", "state": "confirmed", "supersedes": None}
+        for scope in ("user", "project", "repo", "shared"):
+            with self.subTest(accepted=scope):
+                raw = json.dumps({"memories": [dict(base, scope=scope)]})
+                self.assertEqual(
+                    parse_worker_output(raw),
+                    [MemoryRecord("k", scope, "confirmed", None)],
+                )
+        # Topic labels and other spellings are not scope classes.
+        for scope in ("schedule", "user_preferences", "User", ""):
+            with self.subTest(rejected=scope):
+                raw = json.dumps({"memories": [dict(base, scope=scope)]})
+                self.assertIsNone(parse_worker_output(raw))
+                self.assertEqual(schema_adherence([raw], _output_schema()).valid, 0)
+
+    def test_output_schema_scope_enum_is_the_record_validation_set(self):
+        scope_schema = _output_schema()["properties"]["memories"]["items"][
+            "properties"
+        ]["scope"]
+        self.assertEqual(sorted(scope_schema["enum"]), sorted(MEMORY_SCOPES))
+        self.assertEqual(len(scope_schema["enum"]), len(MEMORY_SCOPES))
+
+    def test_gold_with_an_undefined_scope_is_a_dataset_error(self):
+        document = {
+            "cases": [
+                {
+                    "id": "c1",
+                    "input": "text",
+                    "gold": [
+                        {
+                            "key": "k",
+                            "scope": "schedule",
+                            "state": "confirmed",
+                            "content": "the fact",
+                        }
+                    ],
+                }
+            ]
+        }
+        with self.assertRaises(ValueError) as caught:
+            self._load_from_text(json.dumps(document))
+        message = str(caught.exception)
+        self.assertIn("case 'c1'", message)
+        self.assertIn("scope must be one of", message)
+        self.assertNotIn("schedule", message)
+
+    def test_a_topic_label_as_scope_is_a_schema_failure_not_scope_credit(self):
+        cases = [
+            MemoryWorkerCase("c0", "x", (MemoryRecord("k", "user", "confirmed", None),))
+        ]
+        raw = json.dumps(
+            {
+                "memories": [
+                    {
+                        "key": "k",
+                        "scope": "user_preferences",
+                        "state": "confirmed",
+                        "supersedes": None,
+                    }
+                ]
+            }
+        )
+
+        report = run_benchmark(MockWorker([raw]), cases, timeout_seconds=TIMEOUT)
+
+        self.assertFalse(report.cases[0].schema_valid)
+        self.assertEqual(report.cases[0].comparison.matched, 0)
+        self.assertEqual(report.metrics["schema_adherence_rate"], 0.0)
+        self.assertEqual(report.metrics["extraction_recall"], 0.0)
+        self.assertIsNone(report.metrics["scope_accuracy"])
+
+    def test_run_benchmark_perfect_worker(self):
+        cases = load_cases("benchmarks/tests/fixtures/memory-worker/valid-cases.json")
+
+        # Create a worker that returns perfect output for both cases
+        perfect_worker = MockWorker(
+            [
+                """{
+                "memories": [
+                    {
+                        "key": "favorite_color",
+                        "scope": "user",
+                        "state": "confirmed",
+                        "supersedes": null
+                    }
+                ]
+            }""",
+                """{
+                "memories": [
+                    {
+                        "key": "meeting_time",
+                        "scope": "project",
+                        "state": "confirmed",
+                        "supersedes": null
+                    },
+                    {
+                        "key": "meeting_location",
+                        "scope": "project",
+                        "state": "confirmed",
+                        "supersedes": null
+                    }
+                ]
+            }""",
+            ]
+        )
+
+        report = run_benchmark(perfect_worker, cases, timeout_seconds=TIMEOUT)
+
+        # Check that we got 2 cases
+        self.assertEqual(len(report.cases), 2)
+
+        # Both cases should succeed
+        self.assertTrue(report.cases[0].schema_valid)
+        self.assertTrue(report.cases[1].schema_valid)
+
+        # First case should have perfect match
+        self.assertEqual(report.cases[0].comparison.gold_count, 1)
+        self.assertEqual(report.cases[0].comparison.predicted_count, 1)
+        self.assertEqual(report.cases[0].comparison.matched, 1)
+
+        # Second case should have perfect match
+        self.assertEqual(report.cases[1].comparison.gold_count, 2)
+        self.assertEqual(report.cases[1].comparison.predicted_count, 2)
+        self.assertEqual(report.cases[1].comparison.matched, 2)
+
+    def test_run_benchmark_partial_match(self):
+        cases = load_cases("benchmarks/tests/fixtures/memory-worker/valid-cases.json")
+
+        # Create a worker that returns partial matches
+        partial_worker = MockWorker(
+            [
+                """{
+                "memories": [
+                    {
+                        "key": "favorite_color",
+                        "scope": "user",
+                        "state": "confirmed",
+                        "supersedes": null
+                    }
+                ]
+            }""",
+                """{
+                "memories": [
+                    {
+                        "key": "meeting_time",
+                        "scope": "project",
+                        "state": "inferred",
+                        "supersedes": null
+                    }
+                ]
+            }""",
+            ]
+        )
+
+        report = run_benchmark(partial_worker, cases, timeout_seconds=TIMEOUT)
+
+        # Check that we got 2 cases
+        self.assertEqual(len(report.cases), 2)
+
+        # Both cases should succeed
+        self.assertTrue(report.cases[0].schema_valid)
+        self.assertTrue(report.cases[1].schema_valid)
+
+        # First case should have perfect match
+        self.assertEqual(report.cases[0].comparison.gold_count, 1)
+        self.assertEqual(report.cases[0].comparison.predicted_count, 1)
+        self.assertEqual(report.cases[0].comparison.matched, 1)
+
+        # Second case should have partial match (wrong state)
+        self.assertEqual(report.cases[1].comparison.gold_count, 2)
+        self.assertEqual(report.cases[1].comparison.predicted_count, 1)
+        self.assertEqual(report.cases[1].comparison.matched, 1)  # Only matching key
+        self.assertEqual(report.cases[1].comparison.state_correct, 0)  # Wrong state
+
+    def test_run_benchmark_unparsable_output(self):
+        cases = load_cases("benchmarks/tests/fixtures/memory-worker/valid-cases.json")
+
+        # Create a worker that returns unparsable output for the second case
+        unparsable_worker = MockWorker(
+            [
+                """{
+                "memories": [
+                    {
+                        "key": "favorite_color",
+                        "scope": "user",
+                        "state": "confirmed",
+                        "supersedes": null
+                    }
+                ]
+            }""",
+                "This is not valid JSON",
+            ]
+        )
+
+        report = run_benchmark(unparsable_worker, cases, timeout_seconds=TIMEOUT)
+
+        # Check that we got 2 cases
+        self.assertEqual(len(report.cases), 2)
+
+        # First case should succeed
+        self.assertTrue(report.cases[0].schema_valid)
+
+        # Second case should fail to parse
+        self.assertFalse(report.cases[1].schema_valid)
+        self.assertEqual(
+            report.cases[1].comparison.gold_count, 2
+        )  # Should still count gold
+        self.assertEqual(
+            report.cases[1].comparison.predicted_count, 0
+        )  # No predictions
+        self.assertEqual(report.cases[1].comparison.matched, 0)
+
+    def test_load_cases_rejects_non_json_without_echoing_content(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "cases.json"
+            path.write_text('{"cases": [SECRET-CONTENT', encoding="utf-8")
+            with self.assertRaises(ValueError) as context:
+                load_cases(str(path))
+        self.assertNotIn("SECRET-CONTENT", str(context.exception))
+
+    @staticmethod
+    def _load_from_text(text):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "cases.json"
+            path.write_text(text, encoding="utf-8")
+            return load_cases(str(path))
+
+    def test_malformed_cases_raise_value_error_naming_the_problem(self):
+        gold = {
+            "key": "k",
+            "scope": "user",
+            "state": "confirmed",
+            "supersedes": None,
+            "content": "the fact",
+        }
+        good = {"id": "c1", "input": "text", "gold": [gold]}
+        cases = (
+            (
+                {"cases": [{"input": "x", "gold": []}]},
+                "Each case must have an 'id' field",
+            ),
+            ({"cases": [{"id": "c", "gold": []}]}, "'input' field"),
+            ({"cases": ["not an object"]}, "case at index 0 must be an object"),
+            ({"cases": [dict(good, id=5)]}, "invalid 'id'"),
+            ({"cases": [dict(good, gold={})]}, "'gold' must be a list in case 'c1'"),
+            ({"cases": [dict(good, gold=[{"scope": "user"}])]}, "missing 'key'"),
+            ({"cases": [dict(good, gold=["x"])]}, "must be an object"),
+            (
+                {"cases": [dict(good, gold=[dict(gold, conflicts_with="b")])]},
+                "'conflicts_with' must be a list",
+            ),
+            ([], "JSON document must be an object"),
+            ({"cases": {}}, "'cases' must be a list"),
+        )
+        for document, message in cases:
+            with self.subTest(message=message):
+                with self.assertRaises(ValueError) as context:
+                    self._load_from_text(json.dumps(document))
+                self.assertIn(message, str(context.exception))
+
+    def test_duplicate_or_nonstandard_json_in_a_cases_file_is_rejected(self):
+        duplicate_scope = (
+            '{"cases": [{"id": "c", "input": "x", "gold": [{"key": "k", "scope": "a", '
+            '"scope": "b", "state": "confirmed"}]}]}'
+        )
+        texts = (
+            '{"cases": [{"id": "c", "input": "x", "gold": []}], "cases": []}',
+            duplicate_scope,
+            '{"cases": [{"id": "c", "input": NaN, "gold": []}]}',
+        )
+        for text in texts:
+            with self.subTest(text=text[:40]), self.assertRaises(ValueError):
+                self._load_from_text(text)
+
+    def test_worker_output_with_duplicate_members_is_schema_invalid(self):
+        valid = json.dumps(
+            {
+                "memories": [
+                    {
+                        "key": "k",
+                        "scope": "user",
+                        "state": "confirmed",
+                        "supersedes": None,
+                    }
+                ]
+            }
+        )
+        duplicated = (
+            '{"memories": [{"key": "k", "key": "other", "scope": "user", '
+            '"state": "confirmed", "supersedes": null}]}'
+        )
+        self.assertIsNotNone(parse_worker_output(valid))
+        self.assertIsNone(parse_worker_output(duplicated))
+        adherence = schema_adherence([valid, duplicated], _output_schema())
+        self.assertEqual((adherence.valid, adherence.total), (1, 2))
+
+    def test_misspelled_or_unknown_fields_are_rejected_not_ignored(self):
+        gold = {"key": "k", "scope": "user", "state": "confirmed"}
+        case = {"id": "c1", "input": "text", "gold": [gold]}
+        documents = (
+            (
+                {"cases": [dict(case, gold=[dict(gold, supercedes="other")])]},
+                "supercedes",
+            ),
+            (
+                {"cases": [dict(case, gold=[dict(gold, conflict_with=["a"])])]},
+                "conflict_with",
+            ),
+            ({"cases": [dict(case, gold=[dict(gold, contents="x")])]}, "contents"),
+            ({"cases": [dict(case, goal=[])]}, "goal"),
+            ({"cases": [case], "case": []}, "case"),
+        )
+        for document, name in documents:
+            with self.subTest(field=name):
+                with self.assertRaises(ValueError) as context:
+                    self._load_from_text(json.dumps(document))
+                self.assertIn("unknown field(s)", str(context.exception))
+                self.assertIn(name, str(context.exception))
+
+    def test_gold_record_may_omit_supersedes_and_carry_content_and_conflicts(self):
+        document = {
+            "cases": [
+                {
+                    "id": "c1",
+                    "input": "text",
+                    "gold": [
+                        {
+                            "key": "k",
+                            "scope": "user",
+                            "state": "inferred",
+                            "content": "the fact",
+                            "conflicts_with": ["other"],
+                        }
+                    ],
+                }
+            ]
+        }
+
+        (case,) = self._load_from_text(json.dumps(document))
+
+        self.assertEqual(
+            case.gold,
+            (MemoryRecord("k", "user", "inferred", None, "the fact", ("other",)),),
+        )
+
+    def test_gold_without_content_is_a_case_file_error_that_does_not_echo_values(self):
+        # Without a content label a gold record could only be scored on its key, so a
+        # worker that omits or invents the fact would still earn exact recall.
+        record = {"key": "k", "scope": "user", "state": "confirmed"}
+        prefix = "Invalid gold record at index 0 in case 'c1': "
+        for gold, reason in (
+            (record, "missing 'content'"),
+            (dict(record, content=None), "'content' must be a non-empty string"),
+        ):
+            with self.subTest(gold=gold):
+                document = {"cases": [{"id": "c1", "input": "text", "gold": [gold]}]}
+                with self.assertRaises(ValueError) as caught:
+                    self._load_from_text(json.dumps(document))
+                self.assertEqual(str(caught.exception), prefix + reason)
+
+    def test_one_gold_record_without_content_rejects_the_whole_dataset(self):
+        labelled = {"key": "a", "scope": "user", "state": "confirmed", "content": "x"}
+        unlabelled = {"key": "b", "scope": "user", "state": "confirmed"}
+        document = {
+            "cases": [
+                {"id": "c1", "input": "text", "gold": [labelled]},
+                {"id": "c2", "input": "text", "gold": [labelled, unlabelled]},
+            ]
+        }
+        with self.assertRaises(ValueError) as caught:
+            self._load_from_text(json.dumps(document))
+        self.assertEqual(
+            str(caught.exception),
+            "Invalid gold record at index 1 in case 'c2': missing 'content'",
+        )
+
+    def test_bundled_valid_cases_label_every_gold_record_with_content(self):
+        cases = load_cases("benchmarks/tests/fixtures/memory-worker/valid-cases.json")
+        self.assertEqual(
+            [(record.key, record.content) for case in cases for record in case.gold],
+            [
+                ("favorite_color", "The user's favorite color is blue."),
+                ("meeting_time", "The meeting is tomorrow at 3 PM."),
+                ("meeting_location", "The meeting is in room 205."),
+            ],
+        )
+
+    @staticmethod
+    def _output_for_gold(cases, content_of):
+        """One raw worker output per case: the gold keys with ``content_of(record)``."""
+        outputs = []
+        for case in cases:
+            memories = []
+            for record in case.gold:
+                memory = {
+                    "key": record.key,
+                    "scope": record.scope,
+                    "state": record.state,
+                    "supersedes": record.supersedes,
+                }
+                content = content_of(record)
+                if content is not None:
+                    memory["content"] = content
+                memories.append(memory)
+            outputs.append(json.dumps({"memories": memories}))
+        return outputs
+
+    def test_exact_recall_needs_the_extracted_fact_not_only_the_key(self):
+        cases = load_cases("benchmarks/tests/fixtures/memory-worker/valid-cases.json")
+        for label, content_of, exact, accuracy in (
+            ("gold content", lambda record: record.content, 1.0, 1.0),
+            ("fabricated content", lambda record: "an invented fact", 0.0, 0.0),
+            ("omitted content", lambda record: None, 0.0, 0.0),
+        ):
+            with self.subTest(worker=label):
+                worker = MockWorker(self._output_for_gold(cases, content_of))
+
+                report = run_benchmark(worker, cases, timeout_seconds=TIMEOUT)
+
+                self.assertEqual(report.metrics["extraction_recall"], 1.0)
+                self.assertEqual(report.metrics["exact_recall"], exact)
+                self.assertEqual(report.metrics["content_accuracy"], accuracy)
+
+    def test_exact_recall_is_unavailable_for_gold_built_without_content(self):
+        # ``load_cases`` cannot produce such gold, but a caller can build cases by
+        # hand; the key alone must not be reported as an exact recall.
+        cases = [
+            MemoryWorkerCase("c0", "x", (MemoryRecord("k", "user", "confirmed", None),))
+        ]
+        raw = json.dumps(
+            {
+                "memories": [
+                    {
+                        "key": "k",
+                        "scope": "user",
+                        "state": "confirmed",
+                        "supersedes": None,
+                        "content": "an invented fact",
+                    }
+                ]
+            }
+        )
+
+        report = run_benchmark(MockWorker([raw]), cases, timeout_seconds=TIMEOUT)
+
+        self.assertEqual(report.metrics["extraction_recall"], 1.0)
+        self.assertIsNone(report.metrics["exact_recall"])
+        self.assertIsNone(report.metrics["content_accuracy"])
+        self.assertEqual(
+            report.to_dict()["cases"][0]["comparison"]["content_unlabelled"], 1
+        )
+
+    def test_gold_conflict_label_absent_and_empty_are_kept_apart(self):
+        def gold(**extra):
+            return {
+                "key": "k",
+                "scope": "user",
+                "state": "inferred",
+                "content": "the fact",
+                **extra,
+            }
+
+        document = {
+            "cases": [
+                {
+                    "id": "c1",
+                    "input": "text",
+                    "gold": [
+                        dict(gold(), key="unlabelled"),
+                        dict(gold(conflicts_with=[]), key="no_conflict"),
+                        dict(gold(conflicts_with=["unlabelled"]), key="conflicts"),
+                    ],
+                }
+            ]
+        }
+
+        (case,) = self._load_from_text(json.dumps(document))
+
+        self.assertEqual(
+            [(record.key, record.conflicts_with) for record in case.gold],
+            [("unlabelled", None), ("no_conflict", ()), ("conflicts", ("unlabelled",))],
+        )
+
+    def test_a_null_conflict_label_is_not_the_same_as_an_absent_one(self):
+        document = {
+            "cases": [
+                {
+                    "id": "c1",
+                    "input": "text",
+                    "gold": [
+                        {
+                            "key": "k",
+                            "scope": "user",
+                            "state": "inferred",
+                            "content": "the fact",
+                            "conflicts_with": None,
+                        }
+                    ],
+                }
+            ]
+        }
+        with self.assertRaises(ValueError) as caught:
+            self._load_from_text(json.dumps(document))
+        self.assertIn("'conflicts_with' must be a list", str(caught.exception))
+
+    def test_worker_output_conflict_label_absent_and_empty_are_kept_apart(self):
+        base = {"key": "k", "scope": "user", "state": "confirmed", "supersedes": None}
+        for extra, expected in (({}, None), ({"conflicts_with": []}, ())):
+            with self.subTest(extra=extra):
+                raw = json.dumps({"memories": [dict(base, **extra)]})
+                (record,) = parse_worker_output(raw)
+                self.assertEqual(record.conflicts_with, expected)
+
+    def test_conflicts_a_worker_invents_on_unlabelled_gold_cost_nothing(self):
+        cases = self._cases(2)  # gold has no conflict label
+        invents = json.dumps(
+            {
+                "memories": [
+                    {
+                        "key": "k",
+                        "scope": "user",
+                        "state": "confirmed",
+                        "supersedes": None,
+                        "conflicts_with": ["other"],
+                    }
+                ]
+            }
+        )
+        silent = VALID_OUTPUT.replace("favorite_color", "k")
+
+        for worker in (MockWorker([invents, invents]), MockWorker([silent, silent])):
+            report = run_benchmark(worker, cases, timeout_seconds=TIMEOUT)
+            self.assertEqual(report.metrics["extraction_recall"], 1.0)
+            self.assertIsNone(report.metrics["conflict_accuracy"])
+            for result in report.cases:
+                self.assertEqual(result.comparison.conflicts_evaluated, 0)
+
+    def test_worker_output_content_and_conflicts_are_parsed(self):
+        raw = json.dumps(
+            {
+                "memories": [
+                    {
+                        "key": "k",
+                        "scope": "user",
+                        "state": "confirmed",
+                        "supersedes": None,
+                        "content": "the fact",
+                        "conflicts_with": ["other"],
+                    }
+                ]
+            }
+        )
+
+        self.assertEqual(
+            parse_worker_output(raw),
+            [MemoryRecord("k", "user", "confirmed", None, "the fact", ("other",))],
+        )
+
+    def test_worker_output_with_bad_content_or_conflicts_is_schema_invalid(self):
+        base = {"key": "k", "scope": "user", "state": "confirmed", "supersedes": None}
+        for extra in (
+            {"content": ""},
+            {"content": 5},
+            {"conflicts_with": "b"},
+            {"conflicts_with": ["b", "b"]},
+        ):
+            with self.subTest(extra=extra):
+                raw = json.dumps({"memories": [dict(base, **extra)]})
+                self.assertIsNone(parse_worker_output(raw))
+
+    def test_report_serializes_the_worker_error_type_per_case(self):
+        class Raising:
+            def extract(self, input_text):
+                raise KeyError("SECRET-DETAIL")
+
+        cases = [
+            MemoryWorkerCase("c0", "x", (MemoryRecord("k", "user", "confirmed", None),))
+        ]
+
+        data = run_benchmark(Raising(), cases, timeout_seconds=TIMEOUT).to_dict()
+
+        self.assertEqual(data["cases"][0]["error_type"], "KeyError")
+        self.assertNotIn("SECRET-DETAIL", json.dumps(data))
+        self.assertEqual(data["cases"][0]["comparison"]["matched"], 0)
+
+    def test_report_error_type_is_none_for_a_normal_case(self):
+        data = run_benchmark(
+            MockWorker([VALID_OUTPUT]), self._cases(1), timeout_seconds=TIMEOUT
+        ).to_dict()
+        self.assertIsNone(data["cases"][0]["error_type"])
+
+    def test_workers_without_the_required_interface_are_rejected(self):
+        class NoMethod:
+            pass
+
+        class WrongSignature:
+            def extract(self):
+                return "{}"
+
+        class NotCallable:
+            extract = 5
+
+        for worker in (None, NoMethod(), WrongSignature(), NotCallable()):
+            with self.subTest(worker=type(worker).__name__):
+                with self.assertRaises(TypeError):
+                    validate_worker(worker)
+                with self.assertRaises(TypeError) as caught:
+                    run_benchmark(worker, self._cases(1), timeout_seconds=TIMEOUT)
+                self.assertNotIn("timeout_seconds", str(caught.exception))
+
+    def test_extract_with_an_uninspectable_signature_is_rejected(self):
+        class Worker:
+            def extract(self, input_text):
+                return "{}"
+
+        with (
+            patch(
+                "benchmarks.memory_worker_runner.inspect.signature",
+                side_effect=ValueError,
+            ),
+            self.assertRaises(TypeError) as context,
+        ):
+            validate_worker(Worker())
+
+        self.assertIn("no inspectable signature", str(context.exception))
+
+    def test_whitespace_only_content_is_invalid_in_the_schema_and_the_parser(self):
+        raw = json.dumps(
+            {
+                "memories": [
+                    {
+                        "key": "k",
+                        "scope": "user",
+                        "state": "confirmed",
+                        "supersedes": None,
+                        "content": " ",
+                    }
+                ]
+            }
+        )
+
+        self.assertIsNone(parse_worker_output(raw))
+        self.assertEqual(schema_adherence([raw], _output_schema()).valid, 0)
+
+    @staticmethod
+    def _output_with(**fields):
+        record = {"key": "k", "scope": "user", "state": "confirmed", "supersedes": None}
+        return json.dumps({"memories": [dict(record, **fields)]})
+
+    def test_a_blank_key_is_invalid_in_the_schema_and_the_parser(self):
+        for blank in BLANK_TEXTS:
+            with self.subTest(key=blank):
+                raw = self._output_with(key=blank)
+                self.assertIsNone(parse_worker_output(raw))
+                self.assertEqual(schema_adherence([raw], _output_schema()).valid, 0)
+
+    def test_a_blank_conflicts_with_key_is_invalid_in_the_schema_and_the_parser(self):
+        for blank in BLANK_TEXTS:
+            with self.subTest(key=blank):
+                raw = self._output_with(conflicts_with=["other", blank])
+                self.assertIsNone(parse_worker_output(raw))
+                self.assertEqual(schema_adherence([raw], _output_schema()).valid, 0)
+
+    def test_a_blank_supersedes_is_invalid_in_the_schema_and_the_parser(self):
+        for blank in ("", *BLANK_TEXTS):
+            with self.subTest(supersedes=blank):
+                raw = self._output_with(supersedes=blank)
+                self.assertIsNone(parse_worker_output(raw))
+                self.assertEqual(schema_adherence([raw], _output_schema()).valid, 0)
+
+    def test_a_worker_that_emits_an_empty_string_for_no_target_fails_the_schema(self):
+        # Decision (README): "no target" is null. A worker that writes "" instead
+        # is not corrected or normalised; the output is schema-invalid like any
+        # other deviation, so all of that case's records are dropped.
+        gold = (MemoryRecord("k", "user", "confirmed", None),)
+        cases = [MemoryWorkerCase("c1", "input", gold)]
+        worker = MockWorker([self._output_with(supersedes="")])
+
+        report = run_benchmark(worker, cases, timeout_seconds=TIMEOUT)
+
+        self.assertFalse(report.cases[0].schema_valid)
+        self.assertEqual(report.cases[0].comparison.matched, 0)
+        self.assertEqual(report.cases[0].comparison.predicted_count, 0)
+        self.assertEqual(report.metrics["schema_adherence_rate"], 0.0)
+        self.assertEqual(report.metrics["extraction_recall"], 0.0)
+
+    def test_non_blank_keys_stay_valid_in_the_schema_and_the_parser(self):
+        for key in ("k", " k ", "\u3000k", "\u200b"):
+            with self.subTest(key=key):
+                raw = self._output_with(
+                    key=key, supersedes=key + "0", conflicts_with=[key + "2"]
+                )
+                parsed = parse_worker_output(raw)
+                self.assertEqual([record.key for record in parsed], [key])
+                self.assertEqual([record.supersedes for record in parsed], [key + "0"])
+                self.assertEqual(schema_adherence([raw], _output_schema()).valid, 1)
+
+    def test_a_null_supersedes_stays_valid_in_the_schema_and_the_parser(self):
+        raw = self._output_with(supersedes=None)
+        self.assertIsNone(parse_worker_output(raw)[0].supersedes)
+        self.assertEqual(schema_adherence([raw], _output_schema()).valid, 1)
+
+    def test_the_schema_treats_exactly_the_strip_whitespace_as_blank(self):
+        # The schema pattern is evaluated by Python's re, whose \s is the same set
+        # as str.isspace()/str.strip() that MemoryRecord uses; keep them in step.
+        item = _output_schema()["properties"]["memories"]["items"]["properties"]
+        for name, subschema in (
+            ("key", item["key"]),
+            ("supersedes", item["supersedes"]),
+            ("conflicts_with", item["conflicts_with"]["items"]),
+        ):
+            pattern = subschema["pattern"]
+            with self.subTest(field=name):
+                for codepoint in range(0x110000):
+                    character = chr(codepoint)
+                    self.assertEqual(
+                        bool(re.search(pattern, character)),
+                        bool(character.strip()),
+                        hex(codepoint),
+                    )
+
+    def test_a_blank_gold_identifier_is_a_case_file_error_that_does_not_echo_it(self):
+        gold = {
+            "key": "k",
+            "scope": "user",
+            "state": "confirmed",
+            "supersedes": None,
+            "content": "the fact",
+        }
+        prefix = "Invalid gold record at index 0 in case 'c1': "
+        for blank in ("", *BLANK_TEXTS):
+            for record, reason in (
+                (dict(gold, key=blank), "key must be a non-empty string"),
+                (
+                    dict(gold, supersedes=blank),
+                    "supersedes must be a non-empty string or None",
+                ),
+                (
+                    dict(gold, conflicts_with=["other", blank]),
+                    "conflicts_with must be a tuple of non-empty strings or None",
+                ),
+                (
+                    dict(gold, content=blank),
+                    "content must be a non-empty string or None",
+                ),
+            ):
+                with self.subTest(record=record):
+                    document = {
+                        "cases": [{"id": "c1", "input": "text", "gold": [record]}]
+                    }
+                    with self.assertRaises(ValueError) as caught:
+                        self._load_from_text(json.dumps(document))
+                    # The whole message is fixed text, so the offending value is
+                    # never echoed.
+                    self.assertEqual(str(caught.exception), prefix + reason)
+
+    def test_a_blank_key_can_never_earn_credit_by_matching_a_blank_gold_key(self):
+        # Both sides being "   " used to count as a match; now neither side exists.
+        with self.assertRaises(TypeError):
+            MemoryRecord("   ", "user", "confirmed", None)
+        self.assertIsNone(parse_worker_output(self._output_with(key="   ")))
+
+    @staticmethod
+    def _cases(count):
+        gold = (MemoryRecord("k", "user", "confirmed", None),)
+        return [MemoryWorkerCase(f"c{index}", "input", gold) for index in range(count)]
+
+    def test_run_benchmark_exception(self):
+        cases = load_cases("benchmarks/tests/fixtures/memory-worker/valid-cases.json")
+
+        class FlakyWorker:
+            def __init__(self):
+                self.calls = 0
+
+            def extract(self, input_text):
+                self.calls += 1
+                if self.calls == 2:
+                    raise ValueError("Worker failed: SECRET-DETAIL")
+                return VALID_OUTPUT
+
+        report = run_benchmark(FlakyWorker(), cases, timeout_seconds=TIMEOUT)
+
+        self.assertEqual(len(report.cases), 2)
+        self.assertTrue(report.cases[0].schema_valid)
+        self.assertIsNone(report.cases[0].error_type)
+        self.assertFalse(report.cases[1].schema_valid)
+        self.assertEqual(report.cases[1].error_type, "ValueError")
+        self.assertEqual(report.cases[1].comparison.matched, 0)
+        self.assertEqual(report.cases[1].comparison.predicted_count, 0)
+        self.assertEqual(report.cases[1].comparison.gold_count, len(cases[1].gold))
+        self.assertAlmostEqual(report.metrics["schema_adherence_rate"], 0.5)
+        self.assertNotIn("SECRET-DETAIL", json.dumps(report.to_dict()))
+
+    def test_latency_statistics_use_nearest_rank_percentiles(self):
+        class KeyWorker:
+            def extract(self, input_text):
+                return VALID_OUTPUT.replace("favorite_color", "k").replace(
+                    "user", "user"
+                )
+
+        # The runner reads the clock twice per case: before and after extract().
+        readings = iter(
+            value
+            for milliseconds in range(1, 11)
+            for value in (0.0, milliseconds / 1000)
+        )
+        report = run_benchmark(
+            KeyWorker(),
+            self._cases(10),
+            clock=lambda: next(readings),
+            timeout_seconds=TIMEOUT,
+        )
+
+        self.assertAlmostEqual(report.cases[2].latency_ms, 3.0)
+        self.assertAlmostEqual(report.metrics["latency_ms_mean"], 5.5)
+        self.assertAlmostEqual(report.metrics["latency_ms_p50"], 5.0)
+        self.assertAlmostEqual(report.metrics["latency_ms_p95"], 10.0)
+        self.assertEqual(report.metrics["extraction_recall"], 1.0)
+        self.assertEqual(report.metrics["schema_adherence_rate"], 1.0)
+
+    def test_latency_excludes_parsing_and_comparison(self):
+        readings = iter([0.0, 0.004])
+        report = run_benchmark(
+            MockWorker([VALID_OUTPUT]),
+            self._cases(1),
+            clock=lambda: next(readings),
+            timeout_seconds=TIMEOUT,
+        )
+        self.assertAlmostEqual(report.cases[0].latency_ms, 4.0)
+
+    def test_to_dict_is_json_serializable_without_text_or_raw_output(self):
+        cases = load_cases("benchmarks/tests/fixtures/memory-worker/valid-cases.json")
+        report = run_benchmark(
+            MockWorker([VALID_OUTPUT]), cases, timeout_seconds=TIMEOUT
+        )
+
+        data = report.to_dict()
+        serialized = json.dumps(data)
+
+        self.assertNotIn("The user mentioned", serialized)
+        self.assertNotIn("favorite_color", serialized)
+        self.assertEqual(len(data["cases"]), 2)
+        self.assertEqual(data["metrics"], report.metrics)
+        self.assertNotIn("resources", data)
+
+    def test_metrics_collector_resources_are_reported(self):
+        collector = MetricsCollector(gpu_poll_interval_s=None)
+
+        class CountingWorker:
+            def extract(self, input_text):
+                collector.record_step()
+                return VALID_OUTPUT
+
+        report = run_benchmark(
+            CountingWorker(),
+            load_cases("benchmarks/tests/fixtures/memory-worker/valid-cases.json"),
+            metrics_collector=collector,
+            timeout_seconds=TIMEOUT,
+        )
+
+        self.assertEqual(report.resources["agent_steps"], 2)
+        self.assertEqual(report.to_dict()["resources"]["agent_steps"], 2)
+
+    def test_parsing_does_not_depend_on_the_working_directory(self):
+        import os
+        import tempfile
+
+        previous = os.getcwd()
+        with tempfile.TemporaryDirectory() as directory:
+            os.chdir(directory)
+            try:
+                records = parse_worker_output(VALID_OUTPUT)
+            finally:
+                os.chdir(previous)
+        self.assertEqual(len(records), 1)
+
+
+class HangingWorker:
+    """Blocks inside ``extract`` until released, like a stalled inference.
+
+    Call numbers (0-based) in ``hang_on`` block; ``None`` blocks every call. The
+    wait is bounded so a broken test cannot leave a thread behind for long, and
+    ``shutdown`` releases and joins every call deterministically. A released call
+    takes ``end_delay`` more seconds to return (a stalled call that is slow to
+    wind down). ``max_running`` is the most calls ever inside ``extract`` at the
+    same time (2 means two calls overlapped); ``stalled`` is set once a call is
+    blocked.
+    """
+
+    def __init__(self, hang_on=None, end_delay=0.0):
+        self.hang_on = hang_on
+        self.end_delay = end_delay
+        self.release = threading.Event()
+        self.stalled = threading.Event()
+        self.threads = []
+        self.calls = 0
+        self.running = 0
+        self.max_running = 0
+        self._lock = threading.Lock()
+
+    def extract(self, input_text):
+        with self._lock:
+            index = self.calls
+            self.calls += 1
+            self.running += 1
+            self.max_running = max(self.max_running, self.running)
+            self.threads.append(threading.current_thread())
+        try:
+            if self.hang_on is None or index in self.hang_on:
+                self.stalled.set()
+                self.release.wait(60)
+                time.sleep(self.end_delay)
+            return VALID_OUTPUT.replace("favorite_color", "k")
+        finally:
+            with self._lock:
+                self.running -= 1
+
+    def clock(self):
+        """Real time; a read once a call has stalled lets that call return.
+
+        The runner reads the clock right after it gave up on the call at its
+        deadline, so the release always happens after the deadline and before the
+        wait for the call to end: no sleeping, no dependence on machine speed.
+        """
+        if self.stalled.is_set():
+            self.release.set()
+        return time.monotonic()
+
+    def shutdown(self):
+        self.release.set()
+        for thread in self.threads:
+            thread.join(10)
+
+
+class ExtractDeadlineTest(unittest.TestCase):
+    @staticmethod
+    def _cases(count):
+        return MemoryWorkerRunnerTest._cases(count)
+
+    def _hanging_worker(self, hang_on=None, end_delay=0.0):
+        worker = HangingWorker(hang_on, end_delay)
+        self.addCleanup(worker.shutdown)
+        return worker
+
+    def test_a_worker_that_never_returns_stops_the_run_instead_of_hanging_it(self):
+        worker = self._hanging_worker()
+        started = time.monotonic()
+
+        with self.assertRaises(WorkerStuckError) as caught:
+            run_benchmark(worker, self._cases(3), timeout_seconds=0.2)
+
+        # Without a bound on the wait the run would sit in the worker's 60 s hang.
+        self.assertLess(time.monotonic() - started, 30)
+        self.assertEqual(
+            str(caught.exception),
+            "extract() had not ended 0.2 seconds after its deadline in case 'c0'; "
+            "the run was stopped instead of starting the next case while it is "
+            "still running",
+        )
+
+    def test_the_next_case_is_not_started_while_a_timed_out_call_still_runs(self):
+        # The call keeps running after its deadline (Python cannot stop a thread).
+        # Starting case 2 now would overlap two extract() calls on one worker.
+        worker = self._hanging_worker()
+
+        with self.assertRaises(WorkerStuckError):
+            run_benchmark(worker, self._cases(3), timeout_seconds=0.2)
+
+        self.assertEqual(worker.calls, 1)
+        self.assertEqual(worker.max_running, 1)
+
+    def test_the_last_case_also_waits_for_a_timed_out_call(self):
+        # Returning a report while an abandoned call still runs would let it
+        # overlap the resource measurement and the next candidate's run.
+        worker = self._hanging_worker()
+
+        with self.assertRaises(WorkerStuckError):
+            run_benchmark(worker, self._cases(1), timeout_seconds=0.2)
+
+        self.assertEqual(worker.calls, 1)
+
+    def test_a_stopped_run_still_stops_the_metrics_collector(self):
+        events = []
+
+        class Collector:
+            def start(self):
+                events.append("start")
+
+            def stop(self):
+                events.append("stop")
+
+            def metrics(self):
+                raise AssertionError("no report is built for a stopped run")
+
+        with self.assertRaises(WorkerStuckError):
+            run_benchmark(
+                self._hanging_worker(),
+                self._cases(2),
+                timeout_seconds=0.2,
+                metrics_collector=Collector(),
+            )
+
+        self.assertEqual(events, ["start", "stop"])
+
+    def test_a_timed_out_call_that_ends_in_time_lets_the_run_continue(self):
+        # The call is released right after its deadline but needs 0.3 s more to
+        # return, far below the further 2 s the runner waits for it.
+        worker = self._hanging_worker(hang_on={1}, end_delay=0.3)
+
+        report = run_benchmark(
+            worker, self._cases(3), timeout_seconds=2.0, clock=worker.clock
+        )
+
+        self.assertEqual(
+            [result.error_type for result in report.cases],
+            [None, "deadline_exceeded", None],
+        )
+        self.assertEqual(
+            [result.schema_valid for result in report.cases], [True, False, True]
+        )
+        self.assertEqual(report.metrics["extraction_recall"], 2 / 3)
+        self.assertEqual(report.metrics["schema_adherence_rate"], 2 / 3)
+        # Case 3 started only after the timed-out call of case 2 had ended.
+        self.assertEqual(worker.calls, 3)
+        self.assertEqual(worker.max_running, 1)
+
+    def test_the_latency_of_a_timed_out_case_is_the_wait_until_the_deadline(self):
+        clock = FakeClock(100.0)
+        stalled, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+
+        class SlowToEnd:
+            def extract(self, input_text):
+                stalled.set()
+                release.wait(60)
+                clock.value += 500.0  # ending takes far longer than the deadline
+                return VALID_OUTPUT.replace("favorite_color", "k")
+
+        def clock_reading():
+            if stalled.is_set() and not release.is_set():
+                clock.value += 2.0  # the deadline passed while the call stalled
+                reading = clock.value
+                release.set()
+                return reading
+            return clock.value
+
+        report = run_benchmark(
+            SlowToEnd(), self._cases(1), timeout_seconds=2.0, clock=clock_reading
+        )
+
+        self.assertEqual(report.cases[0].error_type, "deadline_exceeded")
+        # The time spent waiting for the abandoned call to end is not the case's.
+        self.assertEqual(report.cases[0].latency_ms, 2000.0)
+        self.assertEqual(clock.value, 602.0)
+
+    def test_the_deadline_is_reported_in_the_report(self):
+        report = run_benchmark(
+            MockWorker([VALID_OUTPUT]), self._cases(1), timeout_seconds=45
+        )
+
+        self.assertEqual(report.timeout_seconds, 45)
+        self.assertEqual(report.to_dict()["timeout_seconds"], 45)
+
+    def test_the_harness_has_no_default_deadline(self):
+        # A default would be an unapproved policy value that can fail a slow but
+        # correct candidate; the operator must choose the deadline explicitly.
+        parameter = inspect.signature(run_benchmark).parameters["timeout_seconds"]
+        self.assertIs(parameter.default, inspect.Parameter.empty)
+        self.assertEqual(parameter.kind, inspect.Parameter.KEYWORD_ONLY)
+        self.assertFalse(hasattr(memory_worker_runner, "DEFAULT_TIMEOUT_SECONDS"))
+
+    def test_omitting_the_deadline_is_an_error_naming_the_argument(self):
+        worker = MockWorker([VALID_OUTPUT])
+
+        with self.assertRaises(TypeError) as caught:
+            run_benchmark(worker, self._cases(1))
+
+        self.assertIn("timeout_seconds", str(caught.exception))
+        self.assertEqual(worker.call_count, 0)
+
+    def test_the_call_runs_in_a_daemon_thread_so_a_stuck_call_cannot_block_exit(self):
+        seen = []
+
+        class Recording:
+            def extract(self, input_text):
+                seen.append(threading.current_thread())
+                return VALID_OUTPUT
+
+        run_benchmark(Recording(), self._cases(1), timeout_seconds=30)
+
+        self.assertEqual(len(seen), 1)
+        self.assertIsNot(seen[0], threading.main_thread())
+        self.assertTrue(seen[0].daemon)
+
+    def test_an_invalid_deadline_is_rejected_before_the_worker_is_called(self):
+        for value in (0, -1, 0.0, math.inf, -math.inf, math.nan, True, "5", None, [1]):
+            with self.subTest(value=value):
+                worker = MockWorker([VALID_OUTPUT])
+                with self.assertRaises(ValueError) as caught:
+                    run_benchmark(worker, self._cases(1), timeout_seconds=value)
+                self.assertEqual(
+                    str(caught.exception),
+                    "timeout_seconds must be a finite number above zero",
+                )
+                self.assertEqual(worker.call_count, 0)
+
+    def test_worker_errors_are_still_reported_by_type_only_and_never_printed(self):
+        class Raising:
+            def extract(self, input_text):
+                raise KeyError("SECRET-DETAIL")
+
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            report = run_benchmark(Raising(), self._cases(1), timeout_seconds=30)
+
+        self.assertEqual(report.cases[0].error_type, "KeyError")
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertNotIn("SECRET-DETAIL", json.dumps(report.to_dict()))
+
+    def test_a_base_exception_from_the_worker_still_ends_the_run(self):
+        class Exiting:
+            def extract(self, input_text):
+                raise SystemExit(3)
+
+        with self.assertRaises(SystemExit) as caught:
+            run_benchmark(Exiting(), self._cases(1), timeout_seconds=30)
+        self.assertEqual(caught.exception.code, 3)
+
+
+VALID_OUTPUT = json.dumps(
+    {
+        "memories": [
+            {
+                "key": "favorite_color",
+                "scope": "user",
+                "state": "confirmed",
+                "supersedes": None,
+            }
+        ]
+    }
+)
+
+
+if __name__ == "__main__":
+    unittest.main()

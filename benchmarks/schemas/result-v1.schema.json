@@ -129,7 +129,7 @@
       "additionalProperties": false
     },
     "metrics": {
-      "description": "Numeric measurements collected by the evaluator when available. Durations are milliseconds, token_count is a token count, diff_size is changed lines, and peak_vram_bytes is bytes.",
+      "description": "Numeric measurements collected by the evaluator when available. Durations are milliseconds, token and context fields are token counts, diff_size is changed lines, peak_vram_bytes is bytes, and peak_gpu_utilization_percent is a percentage.",
       "type": "object",
       "properties": {
         "wall_clock_ms": {
@@ -140,7 +140,19 @@
           "type": "integer",
           "minimum": 0
         },
+        "context_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
         "agent_steps": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "retries": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tool_calls": {
           "type": "integer",
           "minimum": 0
         },
@@ -155,6 +167,11 @@
         "peak_vram_bytes": {
           "type": "integer",
           "minimum": 0
+        },
+        "peak_gpu_utilization_percent": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
         },
         "human_correction_ms": {
           "type": "number",

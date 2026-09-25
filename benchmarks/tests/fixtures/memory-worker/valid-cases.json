@@ -1,0 +1,37 @@
+{
+    "cases": [
+        {
+            "id": "test-1",
+            "input": "The user mentioned their favorite color is blue.",
+            "gold": [
+                {
+                    "key": "favorite_color",
+                    "scope": "user",
+                    "state": "confirmed",
+                    "supersedes": null,
+                    "content": "The user's favorite color is blue."
+                }
+            ]
+        },
+        {
+            "id": "test-2",
+            "input": "The meeting is scheduled for tomorrow at 3 PM in room 205.",
+            "gold": [
+                {
+                    "key": "meeting_time",
+                    "scope": "project",
+                    "state": "confirmed",
+                    "supersedes": null,
+                    "content": "The meeting is tomorrow at 3 PM."
+                },
+                {
+                    "key": "meeting_location",
+                    "scope": "project",
+                    "state": "confirmed",
+                    "supersedes": null,
+                    "content": "The meeting is in room 205."
+                }
+            ]
+        }
+    ]
+}

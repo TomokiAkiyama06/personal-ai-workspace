@@ -210,6 +210,16 @@ class DisposeDoesNotWaitForTheHolderTest(unittest.IsolatedAsyncioTestCase):
 
 
 class SlotsTest(unittest.IsolatedAsyncioTestCase):
+    async def test_locked_says_whether_no_slot_is_free(self):
+        slots = _Slots(2)
+        self.assertFalse(slots.locked())
+        await slots.acquire()
+        self.assertFalse(slots.locked())
+        await slots.acquire()
+        self.assertTrue(slots.locked())
+        slots.release()
+        self.assertFalse(slots.locked())
+
     async def test_it_hands_slots_over_in_order(self):
         slots = _Slots(1)
         await slots.acquire()

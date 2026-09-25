@@ -1,0 +1,21 @@
+{
+  "memories": [
+    {
+      "id": "mem1",
+      "text": "Memory content",
+      "acl": ["user:alice"],
+      "status": "invalid_status",
+      "fresh": true,
+      "scope": "project:p1"
+    }
+  ],
+  "queries": [
+    {
+      "id": "q1",
+      "text": "Test query",
+      "requester_principals": ["user:alice"],
+      "scope": "project:p1",
+      "relevant_ids": ["mem1"]
+    }
+  ]
+}
