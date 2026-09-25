@@ -20,9 +20,10 @@ Atomicity. ``record`` is one ``UPDATE ... SET consumed = LEAST(consumed +
 number of processes) never lose an increment, and consumed never exceeds
 ``MAX_CONSUMED`` (saturating, no overflow).
 
-Runtime is measured with ONE clock, the DATABASE's (Decision 0007, 10, Proposed):
-every persisted runtime instant (``running_since``, ``settled_through``) and every
-elapsed time is PostgreSQL's ``clock_timestamp()``, read INSIDE the SQL statement
+Runtime is measured with ONE clock, the DATABASE's (Decision 0007, 10, approved
+2026-09-25): every persisted runtime instant (``running_since``,
+``settled_through``) and every elapsed time is PostgreSQL's ``clock_timestamp()``,
+read INSIDE the SQL statement
 (``WITH clock AS (SELECT clock_timestamp() AS ts)``: one reading per statement, as
 in the queue, see ``task_queue``). No process's clock is read, so workers on hosts
 whose clocks disagree cannot charge a session too little (a budget bypass: a host

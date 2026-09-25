@@ -28,6 +28,37 @@ is updated for a run. Once Restart or Retry has started a newer run, a supersede
 worker gets ``StaleAttemptError`` / ``StaleRunError`` (nothing is written) and
 cannot touch the new run. Finishing a step or a tool call names the step or the
 call instead, and that is enough: see ``TaskService.finish_step``.
+
+Arguments: every argument of every public method is checked BEFORE the database
+is used (before a session is opened, so before anything is read or locked), and a
+wrong type or value raises ``InvalidCommandArgumentError`` with a fixed message
+that names the rule and never the value. Never an ``AttributeError`` /
+``TypeError`` / ``StatementError`` / ``DBAPIError``, and never a silent success.
+
+* Ids (``task_id``, ``project_id``, ``created_by``, ``invocation_id``) are
+  ``uuid.UUID`` objects; a UUID as text is refused, not parsed. A ``step_id`` is
+  an ``int`` from 1 (the identity column starts there) to 2**63 - 1.
+* Enumerations (``command``, ``wait_reason``, ``status``, ``level``, the review
+  status, the evaluation result, the pull request state) accept the member or its
+  serialised value (an exact ``str`` such as ``"stop_now"``) and use the member
+  from then on; anything else, a member of another enum included, is refused.
+* Integers (``expected_version``, ``log_limit``, ``after_seq``, ``limit``, the
+  pull request number) are ``int`` and not ``bool``, within the range each
+  documents. ``expected_version`` is ``None`` or from 1 (a task starts at
+  version 1) to 2**31 - 1.
+* Text is exactly ``str`` (never a subclass or bytes), without NUL or surrogate
+  characters, and of the length its field allows. Names, ``title``, ``reason``,
+  worktree fields and the pull request URL are not blank; a log ``message`` may be
+  (a worker forwarding output has blank lines).
+* ``actor`` is an ``Actor``, ``run`` a ``TaskRun``, ``worktree`` / ``review`` /
+  ``pull_request`` a ``WorktreeState`` / ``ReviewState`` / ``PullRequestInfo`` (or
+  ``None`` where optional) whose fields are checked as above, and ``input`` a
+  JSON object (``_JsonInputCheck``).
+
+One rule is judged with the task's state, not before: a wait reason that does not
+fit the command (Wait needs one, every other command refuses one) is reported
+after an illegal transition (``plan_transition``), so it needs the task read. It
+raises the same error and writes nothing.
 """
 
 import json
@@ -59,6 +90,7 @@ from paw_backend.tasks.domain import (
     TaskRun,
     TaskState,
     WaitReason,
+    enum_member,
     plan_transition,
 )
 from paw_backend.tasks.errors import (
@@ -80,10 +112,13 @@ from paw_backend.tasks.models import (
 )
 from paw_backend.tasks.records import (
     AttemptSnapshot,
+    EvaluationResult,
     LogEntry,
     LogLevel,
     PullRequestInfo,
+    PullRequestState,
     ReviewState,
+    ReviewStatus,
     StepInfo,
     StepStatus,
     TaskEvent,
@@ -106,6 +141,12 @@ MAX_INPUT_DEPTH = 32
 # digits before the decimal point ("value overflows numeric format" beyond it).
 MAX_INPUT_INTEGER_DIGITS = 131072
 MAX_RESTORE_LOGS = 1000
+MAX_HISTORY_LIMIT = 5000
+# The largest values of the ``INTEGER`` (versions, counters) and ``BIGINT``
+# (identity ids, event sequence numbers) columns; a larger argument would fail as a
+# database error when it is sent.
+_MAX_INTEGER = 2**31 - 1
+_MAX_BIGINT = 2**63 - 1
 # ``restore`` returns every tool call of the current step that is still started
 # (a backend must be able to resume or abort each of them) plus at most this many
 # of the latest finished ones.
@@ -149,7 +190,7 @@ _FINISHED_TOOL_STATUSES = frozenset(
 
 
 # The largest value of the ``INTEGER`` column ``task_attempts.pr_number``.
-MAX_PULL_REQUEST_NUMBER = 2**31 - 1
+MAX_PULL_REQUEST_NUMBER = _MAX_INTEGER
 _ATTEMPT_COLUMNS = TaskAttemptRow.__table__.c
 
 _INPUT_TOO_LARGE = f"input must be a JSON object of at most {MAX_INPUT_BYTES} bytes"
@@ -272,8 +313,11 @@ def _storable(name: str, value: str) -> str:
 
     A NUL character fails at flush time as a ``DataError`` and a surrogate code
     point (not valid Unicode) as a ``UnicodeEncodeError``; either would leak
-    instead of the typed error. The text is not echoed.
+    instead of the typed error. The text is not echoed. Only an exact ``str`` is
+    text (not bytes, a number, ``None`` or a subclass).
     """
+    if type(value) is not str:
+        raise InvalidCommandArgumentError(f"{name} must be text")
     if "\x00" in value:
         raise InvalidCommandArgumentError(f"{name} must not contain NUL characters")
     if not value.isascii():
@@ -286,24 +330,111 @@ def _storable(name: str, value: str) -> str:
     return value
 
 
-def _column_text(name: str, value: str | None, column: str) -> None:
-    """Check a value of ``task_attempts.<column>`` (length from the model)."""
-    if value is None:
+def _column_text(
+    name: str, value: object, column: str, *, required: bool = False
+) -> None:
+    """Check a value of ``task_attempts.<column>``: 1 to its length, not blank.
+
+    The length comes from the model (one definition). ``None`` means "not set"
+    and is accepted unless ``required``.
+    """
+    if value is None and not required:
         return
-    limit = _ATTEMPT_COLUMNS[column].type.length
-    if len(value) > limit:
-        raise InvalidCommandArgumentError(f"{name} must be at most {limit} characters")
-    _storable(name, value)
+    _text(name, value, _ATTEMPT_COLUMNS[column].type.length)
 
 
-def _text(name: str, value: str, limit: int) -> str:
-    if not value.strip() or len(value) > limit:
+def _text(name: str, value: object, limit: int) -> str:
+    # A non-string (or a str subclass, whose methods could lie) is refused with
+    # the same typed error instead of failing with an ``AttributeError``.
+    if type(value) is not str or not value.strip() or len(value) > limit:
         raise InvalidCommandArgumentError(f"{name} must be 1 to {limit} characters")
     return _storable(name, value)
 
 
-def _optional_text(name: str, value: str | None, limit: int) -> str | None:
+def _optional_text(name: str, value: object, limit: int) -> str | None:
     return None if value is None else _text(name, value, limit)
+
+
+def _uuid(name: str, value: object) -> uuid.UUID:
+    """``value`` itself, or ``InvalidCommandArgumentError`` if it is not a ``UUID``.
+
+    A UUID as text is refused rather than parsed: an id is a ``uuid.UUID``
+    everywhere (what the events, snapshots and the Tool Broker hand out).
+    """
+    if not isinstance(value, uuid.UUID):
+        raise InvalidCommandArgumentError(f"{name} must be a UUID")
+    return value
+
+
+def _optional_uuid(name: str, value: object) -> uuid.UUID | None:
+    return None if value is None else _uuid(name, value)
+
+
+def _int(name: str, value: object, low: int, high: int) -> int:
+    """An ``int`` from ``low`` to ``high``; not a ``bool``, text or a float."""
+    if type(value) is not int or not low <= value <= high:
+        raise InvalidCommandArgumentError(
+            f"{name} must be an integer from {low} to {high}"
+        )
+    return value
+
+
+def _step_id(value: object) -> int:
+    """A step id: what the ``BIGINT`` identity column of ``task_steps`` holds."""
+    return _int("step_id", value, 1, _MAX_BIGINT)
+
+
+def _actor(actor: object) -> Actor:
+    if not isinstance(actor, Actor):
+        raise InvalidCommandArgumentError("actor must be an Actor")
+    return actor
+
+
+def _worktree(
+    worktree: object,
+) -> tuple[str | None, str | None, str | None] | None:
+    """The (branch, path, head commit) of a ``WorktreeState``, each checked."""
+    if worktree is None:
+        return None
+    if not isinstance(worktree, WorktreeState):
+        raise InvalidCommandArgumentError("worktree must be a WorktreeState")
+    branch, path, head_commit = worktree.branch, worktree.path, worktree.head_commit
+    _column_text("worktree branch", branch, "branch")
+    _column_text("worktree path", path, "worktree_path")
+    _column_text("worktree head_commit", head_commit, "head_commit")
+    return branch, path, head_commit
+
+
+def _review(review: object) -> tuple[ReviewStatus, EvaluationResult] | None:
+    """The (status, result) of a ``ReviewState`` as enum members."""
+    if review is None:
+        return None
+    if not isinstance(review, ReviewState):
+        raise InvalidCommandArgumentError("review must be a ReviewState")
+    return (
+        enum_member("review_status", ReviewStatus, review.review_status),
+        enum_member("evaluation_result", EvaluationResult, review.evaluation_result),
+    )
+
+
+def _pull_request(
+    pull_request: object,
+) -> tuple[int, str, PullRequestState] | None:
+    """The (number, url, state) of a ``PullRequestInfo``, each checked."""
+    if pull_request is None:
+        return None
+    if not isinstance(pull_request, PullRequestInfo):
+        raise InvalidCommandArgumentError("pull_request must be a PullRequestInfo")
+    number, url, state = pull_request.number, pull_request.url, pull_request.state
+    # ``bool`` is an ``int`` in Python; a float or text would be coerced by the
+    # driver.
+    if type(number) is not int or not 1 <= number <= MAX_PULL_REQUEST_NUMBER:
+        raise InvalidCommandArgumentError(
+            f"pull request number must be an integer from 1 to "
+            f"{MAX_PULL_REQUEST_NUMBER}"
+        )
+    _column_text("pull request url", url, "pr_url", required=True)
+    return number, url, enum_member("pull request state", PullRequestState, state)
 
 
 def _run(run: object) -> TaskRun:
@@ -425,10 +556,17 @@ class TaskService:
         (finite numbers, integers of at most ``MAX_INPUT_INTEGER_DIGITS`` digits,
         no NUL or surrogate characters, at most ``MAX_INPUT_DEPTH`` levels and
         ``MAX_INPUT_BYTES`` bytes); otherwise
-        ``InvalidCommandArgumentError`` is raised before anything is written.
+        ``InvalidCommandArgumentError`` is raised before anything is written, as
+        for any other wrong argument (``project_id`` and ``created_by`` are
+        ``uuid.UUID`` objects; see the module docstring).
         """
+        project_id = _uuid("project_id", project_id)
+        created_by = _uuid("created_by", created_by)
         title = _text("title", title, MAX_TITLE_LENGTH)
         input = self._checked_input(input)
+        starting_commit = _optional_text("starting_commit", starting_commit, 64)
+        agent = _optional_text("agent", agent, MAX_NAME_LENGTH)
+        model = _optional_text("model", model, MAX_NAME_LENGTH)
         now = utcnow()
         task = TaskRow(
             id=uuid.uuid4(),
@@ -436,11 +574,11 @@ class TaskService:
             created_by=created_by,
             title=title,
             input=input,
-            starting_commit=_optional_text("starting_commit", starting_commit, 64),
+            starting_commit=starting_commit,
             state=TaskState.QUEUED,
             wait_reason=None,
-            agent=_optional_text("agent", agent, MAX_NAME_LENGTH),
-            model=_optional_text("model", model, MAX_NAME_LENGTH),
+            agent=agent,
+            model=model,
             attempt=1,
             retry_count=0,
             created_at=now,
@@ -488,8 +626,37 @@ class TaskService:
         for the next run. Raises ``TaskNotFoundError``,
         ``TaskConflictError`` (stale ``expected_version`` or a concurrent
         writer), ``IllegalTransitionError`` and ``InvalidCommandArgumentError``.
+
+        ``command`` and ``wait_reason`` are the enum member or its serialised
+        value and are normalised to the member; ``actor`` is an ``Actor``;
+        ``expected_version`` is ``None`` or an ``int`` from 1 to 2**31 - 1. A
+        wrong task id, command, actor, ``expected_version``, ``wait_reason``,
+        ``reason``, ``agent`` or ``model`` is refused before the transaction
+        opens. Only the fit of ``wait_reason`` to the command (Wait needs one,
+        the others refuse one) is judged with the state, after an illegal
+        transition is ruled out.
+
+        ``reason`` (optional, 1 to ``MAX_REASON_LENGTH`` characters) is kept in
+        the history event. Stop Now REQUIRES one: the emergency stop must leave
+        its reason (and the step it interrupted) in the Audit / Task log, so a
+        missing, blank or non-string reason is refused with
+        ``InvalidCommandArgumentError`` before anything is written or the task
+        is looked at.
         """
+        task_id = _uuid("task_id", task_id)
+        # The serialised value ("stop_now") is a command too: normalise it to the
+        # member first, since the checks below compare by identity.
+        command = enum_member("command", TaskCommand, command)
+        actor = _actor(actor)
+        if expected_version is not None:
+            expected_version = _int(
+                "expected_version", expected_version, 1, _MAX_INTEGER
+            )
+        if wait_reason is not None:
+            wait_reason = enum_member("wait_reason", WaitReason, wait_reason)
         reason = _optional_text("reason", reason, MAX_REASON_LENGTH)
+        if command is TaskCommand.STOP_NOW and reason is None:
+            raise InvalidCommandArgumentError("Stop Now needs a reason")
         agent = _optional_text("agent", agent, MAX_NAME_LENGTH)
         model = _optional_text("model", model, MAX_NAME_LENGTH)
         if (agent or model) and command not in (TaskCommand.RETRY, TaskCommand.RESTART):
@@ -592,6 +759,7 @@ class TaskService:
         superseded run: after Fail, Retry and Start no step is running, so only the
         run tells the worker of the failed run from the new one.
         """
+        task_id = _uuid("task_id", task_id)
         name = _text("name", name, MAX_NAME_LENGTH)
         run = _run(run)
         async with self._database.session() as session, session.begin():
@@ -635,6 +803,9 @@ class TaskService:
         for ``begin_tool_invocation`` and ``finish_tool_invocation``, which name a
         step or a call.
         """
+        task_id = _uuid("task_id", task_id)
+        step_id = _step_id(step_id)
+        status = enum_member("status", StepStatus, status)
         if status not in _FINISHED_STEP_STATUSES:
             raise InvalidCommandArgumentError(
                 "A step is finished as succeeded, failed or interrupted"
@@ -667,7 +838,10 @@ class TaskService:
         ``MAX_ACTIVE_TOOL_INVOCATIONS`` calls started at once; another one raises
         ``TaskStepError`` until one of them finishes.
         """
+        task_id = _uuid("task_id", task_id)
+        step_id = _step_id(step_id)
         tool_name = _text("tool_name", tool_name, MAX_NAME_LENGTH)
+        invocation_id = _optional_uuid("invocation_id", invocation_id)
         async with self._database.session() as session, session.begin():
             task = await self._require_task(session, task_id, lock=True)
             step = await session.get(TaskStepRow, step_id)
@@ -688,7 +862,7 @@ class TaskService:
             if active >= MAX_ACTIVE_TOOL_INVOCATIONS:
                 raise TaskStepError("The step already runs too many tool calls")
             row = TaskToolInvocationRow(
-                id=invocation_id or uuid.uuid4(),
+                id=uuid.uuid4() if invocation_id is None else invocation_id,
                 task_id=task.id,
                 step_id=step.id,
                 tool_name=tool_name,
@@ -709,6 +883,9 @@ class TaskService:
         status: ToolInvocationStatus,
     ) -> ToolInvocationInfo:
         """Record how a started tool call ended (allowed in any task state)."""
+        task_id = _uuid("task_id", task_id)
+        invocation_id = _uuid("invocation_id", invocation_id)
+        status = enum_member("status", ToolInvocationStatus, status)
         if status not in _FINISHED_TOOL_STATUSES:
             raise InvalidCommandArgumentError(
                 "A tool call is finished as succeeded, failed or interrupted"
@@ -747,7 +924,9 @@ class TaskService:
         ``MAX_LOG_MESSAGE_LENGTH`` characters are truncated; text PostgreSQL cannot
         store (NUL, surrogate characters) is refused, in the cut-off part too.
         """
+        task_id = _uuid("task_id", task_id)
         run = _run(run)
+        level = enum_member("level", LogLevel, level)
         _storable("message", message)  # all of it, not only what is kept
         if len(message) > MAX_LOG_MESSAGE_LENGTH:
             message = message[: MAX_LOG_MESSAGE_LENGTH - len(_TRUNCATED)] + _TRUNCATED
@@ -792,26 +971,21 @@ class TaskService:
         after the task completed) but only for the current run
         (``StaleAttemptError`` after a Restart, ``StaleRunError`` after a Retry:
         the new run continues the same attempt's state, so a delayed worker of the
-        failed run must not overwrite it). Text longer than its column or that
-        PostgreSQL cannot store (NUL, surrogate characters), and a pull request
-        number that is not an integer from 1 to ``MAX_PULL_REQUEST_NUMBER``, raise
-        ``InvalidCommandArgumentError``.
+        failed run must not overwrite it). Text that is not ``str``, blank, longer
+        than its column or that PostgreSQL cannot store (NUL, surrogate
+        characters), a pull request number that is not an integer from 1 to
+        ``MAX_PULL_REQUEST_NUMBER``, a group that is not a ``WorktreeState`` /
+        ``ReviewState`` / ``PullRequestInfo``, and a status that is not one of its
+        enumeration's members or values, raise ``InvalidCommandArgumentError``
+        before anything is read. A pull request needs its URL.
         """
+        task_id = _uuid("task_id", task_id)
         run = _run(run)
-        if worktree is not None:
-            _column_text("worktree branch", worktree.branch, "branch")
-            _column_text("worktree path", worktree.path, "worktree_path")
-            _column_text("worktree head_commit", worktree.head_commit, "head_commit")
-        if pull_request is not None:
-            number = pull_request.number
-            # ``bool`` is an ``int`` in Python; a float or text would be coerced by
-            # the driver.
-            if type(number) is not int or not 1 <= number <= MAX_PULL_REQUEST_NUMBER:
-                raise InvalidCommandArgumentError(
-                    f"pull request number must be an integer from 1 to "
-                    f"{MAX_PULL_REQUEST_NUMBER}"
-                )
-            _column_text("pull request url", pull_request.url, "pr_url")
+        # Each group is read once and checked; what is stored is what was checked
+        # (enumerations as members).
+        worktree_fields = _worktree(worktree)
+        review_fields = _review(review)
+        pull_request_fields = _pull_request(pull_request)
         async with self._database.session() as session, session.begin():
             task = await self._require_task(session, task_id, lock=True)
             self._require_current_run(task, run)
@@ -823,19 +997,12 @@ class TaskService:
                     )
                 )
             ).scalar_one()
-            if worktree is not None:
-                row.branch, row.worktree_path, row.head_commit = (
-                    worktree.branch,
-                    worktree.path,
-                    worktree.head_commit,
-                )
-            if review is not None:
-                row.review_status = review.review_status
-                row.evaluation_result = review.evaluation_result
-            if pull_request is not None:
-                row.pr_number = pull_request.number
-                row.pr_url = pull_request.url
-                row.pr_state = pull_request.state
+            if worktree_fields is not None:
+                row.branch, row.worktree_path, row.head_commit = worktree_fields
+            if review_fields is not None:
+                row.review_status, row.evaluation_result = review_fields
+            if pull_request_fields is not None:
+                row.pr_number, row.pr_url, row.pr_state = pull_request_fields
             row.updated_at = utcnow()
             await session.flush()
             return _attempt(row)
@@ -857,10 +1024,8 @@ class TaskService:
         the unique keys of the steps and attempts, ``(task_id, seq)`` of the
         events), so its cost does not grow with the history of earlier attempts.
         """
-        if not 0 <= log_limit <= MAX_RESTORE_LOGS:
-            raise InvalidCommandArgumentError(
-                f"log_limit must be 0 to {MAX_RESTORE_LOGS}"
-            )
+        task_id = _uuid("task_id", task_id)
+        log_limit = _int("log_limit", log_limit, 0, MAX_RESTORE_LOGS)
         async with self._database.session() as session, session.begin():
             await session.execute(
                 text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
@@ -991,9 +1156,14 @@ class TaskService:
     async def history(
         self, task_id: uuid.UUID, *, after_seq: int = 0, limit: int = 500
     ) -> list[TaskEvent]:
-        """The task's events in order, starting after ``after_seq``."""
-        if not 1 <= limit <= 5000:
-            raise InvalidCommandArgumentError("limit must be 1 to 5000")
+        """The task's events in order, starting after ``after_seq``.
+
+        ``after_seq`` is an ``int`` from 0 (from the start) and ``limit`` one from
+        1 to ``MAX_HISTORY_LIMIT``; anything else is refused up front.
+        """
+        task_id = _uuid("task_id", task_id)
+        after_seq = _int("after_seq", after_seq, 0, _MAX_BIGINT)
+        limit = _int("limit", limit, 1, MAX_HISTORY_LIMIT)
         async with self._database.session() as session, session.begin():
             await self._require_task(session, task_id)
             rows = (
@@ -1017,7 +1187,7 @@ class TaskService:
 
     @staticmethod
     def _checked_input(value: dict[str, Any] | None) -> dict[str, Any]:
-        """Return ``value`` if PostgreSQL JSONB can hold it exactly, else raise.
+        """Return a detached copy of ``value`` if JSONB can hold it, else raise.
 
         The value is walked first (``_JsonInputCheck``: plain JSON types only,
         finite numbers, text without NUL or surrogates, bounded depth and work),
@@ -1027,19 +1197,27 @@ class TaskService:
         """
         value = {} if value is None else value
         _JsonInputCheck().check_object(value)
-        encoded = json.dumps(value, allow_nan=False)
+        try:
+            encoded = json.dumps(value, allow_nan=False)
+        except (RuntimeError, ValueError, TypeError):
+            # A caller that changes the value while it is being read.
+            raise InvalidCommandArgumentError(_INPUT_TOO_LARGE) from None
         if len(encoded) > MAX_INPUT_BYTES:
             raise InvalidCommandArgumentError(_INPUT_TOO_LARGE)
-        return value
+        # Not the caller's object: a container the caller still holds can change
+        # while a connection is awaited, after the checks above. What is stored
+        # is decoded from the very text that was measured.
+        return json.loads(encoded)
 
     @staticmethod
-    def _stop_now_message(interrupted_step: str | None, reason: str | None) -> str:
+    def _stop_now_message(interrupted_step: str | None, reason: str) -> str:
+        """The Task log line of a Stop Now: the step it ended and why (both kept)."""
         message = (
             f"Stop Now: interrupted step {interrupted_step!r}"
             if interrupted_step
             else "Stop Now: no step was running"
         )
-        return f"{message} (reason: {reason})" if reason else message
+        return f"{message} (reason: {reason})"
 
     @staticmethod
     async def _require_task(
