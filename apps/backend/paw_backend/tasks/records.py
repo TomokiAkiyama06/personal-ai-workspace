@@ -189,7 +189,8 @@ class TaskSnapshot:
 
     Built only from the database by ``TaskService.restore``. It has no working set
     (the repositories of a Multi-Repo task and their roles): that is outside
-    PAW-032, see ``docs/decisions/0014-task-working-set-persistence.md``.
+    PAW-032 (approved 2026-09-25, and left to issue #85), see
+    ``docs/decisions/0014-task-working-set-persistence.md``.
     """
 
     id: uuid.UUID

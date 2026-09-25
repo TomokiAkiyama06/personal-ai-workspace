@@ -80,6 +80,7 @@ class Database:
         self._recent: tuple[float, DatabaseStatus] | None = None
         # Abortable statements use connections outside the pool: at most as many
         # at once as the pool would allow, so a burst cannot exhaust the server.
+        # A slot is held by the query task until it has ended (`fetch_abortable`).
         self._abortable_slots = asyncio.Semaphore(settings.database_pool_size)
 
     @property
@@ -173,13 +174,16 @@ class Database:
 
         A write that is aborted may or may not have been committed: the caller
         learns only that it did not finish in time.
+
+        A slot is held until the query has actually ended, not merely until
+        the call returns: a query that outlives its abort (the socket shutdown
+        failed, the driver's cleanup blocks) keeps its slot, so the number of
+        dedicated connections never exceeds ``database_pool_size`` even then.
         """
 
-        async def statement(connection: psycopg.AsyncConnection, deadline: float):
-            cursor = await connection.execute(sql, params)
-            return await cursor.fetchall() if cursor.description else []
-
-        return await self._abortable(statement, timeout_seconds)
+        return await self._abortable(
+            lambda deadline: self._query(sql, params), timeout_seconds
+        )
 
     async def transact_abortable[T](
         self,
@@ -249,16 +253,23 @@ class Database:
                 )
                 return await work(connection)
 
-        return await self._abortable(transaction, timeout_seconds)
+        return await self._abortable(
+            lambda deadline: self._run(
+                lambda connection: transaction(connection, deadline)
+            ),
+            timeout_seconds,
+        )
 
     async def _abortable[T](
         self,
-        work: Callable[[psycopg.AsyncConnection, float], Awaitable[T]],
+        start: Callable[[float], Awaitable[T]],
         timeout_seconds: float | None,
     ) -> T:
-        """``work(connection, deadline)`` on an abortable connection: the shared
-        part of ``fetch_abortable`` and ``transact_abortable``. ``deadline`` is
-        the absolute ``loop.time()`` at which the call is aborted."""
+        """The shared part of ``fetch_abortable`` and ``transact_abortable``.
+
+        ``start(deadline)`` returns the coroutine to run on an abortable connection
+        (``_query`` or ``_run``); ``deadline`` is the absolute ``loop.time()`` at
+        which the call is aborted."""
         if not self.configured:
             raise DatabaseNotConfiguredError("PAW_DATABASE_URL is not set")
         limit = (
@@ -271,24 +282,25 @@ class Database:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + limit
         await asyncio.wait_for(self._abortable_slots.acquire(), limit)
+        query = asyncio.create_task(start(deadline))
+        # The slot belongs to the query task, not to this call: it is given back
+        # when the task has really ended. A query that is aborted (or cancelled)
+        # at the deadline may end later than the caller returns, e.g. when the
+        # socket shutdown failed or the driver's cleanup blocks; releasing the
+        # slot then would let the next call open a connection beyond the cap.
+        query.add_done_callback(lambda _: self._abortable_slots.release())
+        self._probes.add(query)
+        query.add_done_callback(self._probes.discard)
+        # Retrieve the outcome so that asyncio does not log it as unhandled.
+        query.add_done_callback(lambda task: task.cancelled() or task.exception())
         try:
-            query = asyncio.create_task(
-                self._run(lambda connection: work(connection, deadline))
-            )
-            self._probes.add(query)
-            query.add_done_callback(self._probes.discard)
-            # Retrieve the outcome so that asyncio does not log it as unhandled.
-            query.add_done_callback(lambda task: task.cancelled() or task.exception())
-            try:
-                await asyncio.wait({query}, timeout=max(0.0, deadline - loop.time()))
-            finally:
-                if not query.done():  # timed out, or this caller was cancelled
-                    self._abort(query)
-            if not query.done():
-                raise TimeoutError
-            return query.result()
+            await asyncio.wait({query}, timeout=max(0.0, deadline - loop.time()))
         finally:
-            self._abortable_slots.release()
+            if not query.done():  # timed out, or this caller was cancelled
+                self._abort(query)
+        if not query.done():
+            raise TimeoutError
+        return query.result()
 
     async def execute_abortable(
         self,

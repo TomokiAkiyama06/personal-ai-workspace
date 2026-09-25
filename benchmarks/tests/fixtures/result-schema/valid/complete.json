@@ -66,10 +66,14 @@
   "metrics": {
     "wall_clock_ms": 1234.5,
     "token_count": 4567,
+    "context_tokens": 8192,
     "agent_steps": 12,
+    "retries": 1,
+    "tool_calls": 18,
     "diff_size": 84,
     "tool_failures": 0,
     "peak_vram_bytes": 987654321,
+    "peak_gpu_utilization_percent": 92.5,
     "human_correction_ms": 0
   }
 }

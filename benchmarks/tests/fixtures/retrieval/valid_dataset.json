@@ -1,0 +1,70 @@
+{
+  "memories": [
+    {
+      "id": "mem1",
+      "text": "Memory 1 content",
+      "acl": [
+        "user:alice",
+        "user:bob"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:p1"
+    },
+    {
+      "id": "mem2",
+      "text": "Memory 2 content",
+      "acl": [
+        "user:alice"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:p1"
+    },
+    {
+      "id": "mem3",
+      "text": "Memory 3 content",
+      "acl": [
+        "user:charlie"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:p2"
+    },
+    {
+      "id": "mem4",
+      "text": "Memory 4 content (superseded, stale)",
+      "acl": [
+        "user:charlie"
+      ],
+      "status": "superseded",
+      "fresh": false,
+      "scope": "project:p2"
+    }
+  ],
+  "queries": [
+    {
+      "id": "q1",
+      "text": "What is project p1?",
+      "requester_principals": [
+        "user:alice"
+      ],
+      "scope": "project:p1",
+      "relevant_ids": [
+        "mem1",
+        "mem2"
+      ]
+    },
+    {
+      "id": "q2",
+      "text": "What is project p2?",
+      "requester_principals": [
+        "user:charlie"
+      ],
+      "scope": "project:p2",
+      "relevant_ids": [
+        "mem3"
+      ]
+    }
+  ]
+}

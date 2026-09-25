@@ -125,10 +125,11 @@ def _limits(**limits: int | None) -> Mapping[BudgetKind, int | None]:
 
 # The presets as data. The requirements name the presets (Standard / Long /
 # Unlimited) but give NO numbers ("initial preset examples"; the concrete
-# thresholds are an [IMPLEMENTATION_CHOICE]). THE NUMBERS BELOW ARE PLACEHOLDERS
-# that a human must confirm: they are proposed in docs/decisions/0007-*.md (Status:
-# Proposed, not approved) and described in the PAW-033 section of
-# apps/backend/README.md. They are data: changing them needs no migration.
+# thresholds are an [IMPLEMENTATION_CHOICE]). THE NUMBERS BELOW ARE PROVISIONAL
+# VALUES: the human approved them as provisional on 2026-09-25 in
+# docs/decisions/0007-*.md (Status: Approved) and they are described in the PAW-033
+# section of apps/backend/README.md. They are data: changing them needs no migration
+# (and a new Decision that ``Supersedes`` 0007).
 #
 # ``None`` means "no limit". The Unlimited preset removes the six numeric limits
 # and nothing else: loop detection (``LoopDetector``), Stop Now and the critical
@@ -274,8 +275,9 @@ class FailureRecord:
 class LoopPolicy:
     """Thresholds of the loop detector.
 
-    The defaults are placeholders proposed in docs/decisions/0007-*.md (Proposed,
-    not approved by a human yet); see also the README.
+    The defaults are provisional values the human approved in
+    docs/decisions/0007-*.md (Approved 2026-09-25, as provisional; they can be
+    changed as data); see also the README.
 
     * ``repeat_threshold``: how many failures with the same signature within the
       same approach make a loop.
