@@ -82,6 +82,16 @@ personal-ai-workspace/
 │  │  │  │  └─ tokens.py
 │  │  │  ├─ research/
 │  │  │  │  ├─ __init__.py
+│  │  │  │  ├─ providers/
+│  │  │  │  │  ├─ __init__.py
+│  │  │  │  │  ├─ broker.py
+│  │  │  │  │  ├─ contract.py
+│  │  │  │  │  ├─ errors.py
+│  │  │  │  │  ├─ guard.py
+│  │  │  │  │  ├─ locator.py
+│  │  │  │  │  ├─ normalize.py
+│  │  │  │  │  ├─ registry.py
+│  │  │  │  │  └─ static.py
 │  │  │  │  └─ scratch/
 │  │  │  │     ├─ __init__.py
 │  │  │  │     ├─ errors.py
@@ -136,6 +146,7 @@ personal-ai-workspace/
 │  │     ├─ fake_postgres.py
 │  │     ├─ identity_support.py
 │  │     ├─ queueing_support.py
+│  │     ├─ research_support.py
 │  │     ├─ scratch_support.py
 │  │     ├─ support.py
 │  │     ├─ teardown_child.py
@@ -167,6 +178,11 @@ personal-ai-workspace/
 │  │     ├─ test_queueing_loop_db.py
 │  │     ├─ test_queueing_queue.py
 │  │     ├─ test_queueing_schema.py
+│  │     ├─ test_research_broker.py
+│  │     ├─ test_research_contract.py
+│  │     ├─ test_research_locator.py
+│  │     ├─ test_research_normalize.py
+│  │     ├─ test_research_registry.py
 │  │     ├─ test_scratch_concurrency.py
 │  │     ├─ test_scratch_grants.py
 │  │     ├─ test_scratch_janitor.py
@@ -244,6 +260,7 @@ personal-ai-workspace/
 │     ├─ 0005-owner-setup-and-recovery.md
 │     ├─ 0006-tool-broker-policy.md
 │     ├─ 0007-task-queue-budget-and-loop-policy.md
+│     ├─ 0012-research-provider-adapter-policy.md
 │     ├─ 0013-research-scratch-task-relation.md
 │     ├─ 0014-task-working-set-persistence.md
 │     └─ README.md

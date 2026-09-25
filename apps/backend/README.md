@@ -5,7 +5,7 @@ Personal AI Workspace の Core Backend です。
 Login と Session はまだ実装していません（PAW-022 以降）。
 RBAC と Audit（PAW-025）、Task の Lifecycle と永続化（[PAW-032](#agent-task-lifecycle)、HTTP の Endpoint はまだありません）、Task Queue・Budget・Loop 検知（[PAW-033](#task-queue--budget--loop-検知)）、Tool Broker と Capability Policy（[PAW-031](#tool-broker--capability-policy)、HTTP の Endpoint はまだありません）、Memory の PostgreSQL Schema（[PAW-040](#memory--conversation-schema)）、
 最小の `users` Table と Owner の初期設定・復旧のコマンド（[PAW-021](#owner-の初期設定と復旧)）を実装済みです。Memory の保存・整理・検索の処理は PAW-041 以降です。
-Research の一時保存（[PAW-050](#research-scratch-store)、24 時間 TTL、期限切れを消す Janitor つき、HTTP の Endpoint はまだありません）も実装済みです。
+Research の一時保存（[PAW-050](#research-scratch-store)、24 時間 TTL、期限切れを消す Janitor つき、HTTP の Endpoint はまだありません）と、Research Provider の Adapter Interface（[PAW-051](#research-provider-adapter)、実際の Provider（Direct Web、Docs、GitHub、OpenCode）はまだありません）も実装済みです。
 
 [Architecture](../../docs/ARCHITECTURE.md) に基づき、最終的に以下の機能を Backend 側で扱います。
 
@@ -55,6 +55,7 @@ apps/backend/
 │  ├─ tasks/               # Agent Task の状態遷移と永続化（PAW-032）
 │  │  └─ queueing/         # Task Queue、Budget、Loop 検知、Escalation の判断（PAW-033）
 │  ├─ memory/              # Memory / Conversation の Model、ACL 条件、vector 型、Pin / Importance 変更の Actor（PAW-040）
+│  ├─ research/providers/  # Research Provider の Adapter Interface と Broker（PAW-051）
 │  ├─ research/scratch/    # Research Scratch Store: 24 時間 TTL の一時保存と、期限切れを消す Janitor（PAW-050）
 │  ├─ tools/               # Tool Broker、Capability Policy、Approval（PAW-031）
 │  └─ api/
@@ -1411,6 +1412,193 @@ Test は参照実装で成り立つことを確認しながら書いたもので
 7. **Janitor の既定値。** 間隔（1 時間）、起動の 30 秒後に最初の Tick、1 Tick の上限（500 件 × 100 Batch）。仕様に数値がないため、最も単純な値を選びました。
 8. **PostgreSQL が止まったときの終了。** Review の指摘に従い、Purge は中断できる専用の接続で行い、Cancel と `dispose()` で接続の Socket を閉じます（上の「止まらない PostgreSQL」）。残る判断は、Purge の 1 Batch に**時間切れ**を付けるか（付ければ、応答しない PostgreSQL の間も Janitor が自分で諦めて次の Tick に進みます。値は仕様にないため付けていません）と、1 Batch ごとに接続を開くコストを許すかです。
 
+## Research Provider Adapter
+
+[PAW-051](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/43) で実装した、Research の Provider を抽象化する層です（`paw_backend/research/providers/`）。
+設計は [要件](../../REQUIREMENTS.md)の「Web Research / Knowledge Layer」（Provider abstraction、Privacy）に従います。
+**実際の Provider は含みません。** Direct Web、Docs、GitHub、OpenCode の Adapter は Credential と Network Policy が必要なため、別の Issue で実装します。
+**HTTP の Endpoint も、Research Scratch（PAW-050）への保存もありません。** この層は検索結果を返すだけで、何も保存しません。
+
+Main Agent が使うのは `ResearchBroker` だけです。
+Provider の違い（API の形、Response の形、失敗の仕方）は Broker が吸収し、Main Agent には常に同じ形の `ResearchResult` が返ります。
+
+| Module | 内容 |
+| --- | --- |
+| `contract.py` | `ProviderKind`、`SourceType`、`ResearchRequest`、`ProviderHit` / `ProviderDocument`（Adapter が返す）、`SourceMetadata` / `ResearchItem` / `ResearchError` / `ResearchResult`（Main Agent が受け取る）、`ResearchProvider`（Protocol） |
+| `errors.py` | 閉じた `ResearchErrorCode`、`ProviderFailure`（Provider が分類済みの失敗を報告する）、Registry 等の例外 |
+| `guard.py` | `CancelGuard`: 同期で動く Adapter の Code が要求した Task の Cancel を取り消す（Registry と Broker が使う） |
+| `locator.py` | `canonicalize_locator`: URL の正規化と無害化 |
+| `normalize.py` | `normalize_hits`（Provider の Response を検証して統一形式へ）、`merge_items`（交互配置・重複除去・件数制限） |
+| `registry.py` | `ProviderRegistry`: 登録時の Interface 検証、一意な名前、決定的な順序 |
+| `broker.py` | `ResearchBroker.gather` / `fetch`: 並行実行、Timeout、失敗の隔離 |
+| `static.py` | `StaticProvider`: Test 用の Fake（Network を使わない） |
+
+### Provider Interface
+
+Adapter は `ResearchProvider`（Protocol）を実装します。
+
+```python
+class ResearchProvider(Protocol):
+    name: str  # Registry 内で一意な ID（[a-z0-9][a-z0-9_-]{0,63}）
+    kind: ProviderKind  # web / docs / github / opencode
+
+    async def search(self, query: str, *, limit: int) -> Sequence[ProviderHit]: ...
+    async def fetch(self, locator: str) -> ProviderDocument: ...
+```
+
+- `search` は最大 `limit` 件を **`list` か `tuple` そのもの**で返します（Subclass は不正な Response です。理由は下の「Broker の動作」4）。`fetch` は正規化済みの URL の文書を返します。
+- Credential は受け取りません。Adapter は Backend Tool Broker から取得します（Secret Isolation）。Main Agent にも Request にも Credential は載りません。
+- Adapter は自分で Retry せず、`asyncio.CancelledError` を握りつぶしません（Timeout は Cancel で実現するため）。
+- 分類できる失敗は `raise ProviderFailure(ResearchErrorCode.RATE_LIMITED)` のように報告します。元の例外の文言は捨てます。
+- `ProviderHit` / `ProviderDocument` に `private_source`（Private Repository 由来など）の既定値はありません。Adapter が必ず明示します。Provider 名や生の Payload を入れる欄もありません。
+
+Registry は登録時に `name` と `kind` の形、`search` と `fetch` が `async def` であること、Signature が `search("q", limit=1)` と `fetch("https://x/")` を受け付けることを検証します。
+不適合な Adapter は `ProviderInterfaceError`（失敗した Member 名だけを持つ）で拒否され、あとから「全 Provider が失敗した成功 Response」になることはありません。
+`name` と `kind` は登録時に 1 度だけ読み、以後 Provider 側が変えても結果には影響しません。
+
+**名前と種類の検査（Adapter の Object の Method を動かさない）。**
+
+- `name` は、受け取った文字列そのものを `fullmatch` で `[a-z0-9][a-z0-9_-]{0,63}` に照合します。正規化した写しは照合しません。Pattern は ASCII だけで、`$` も `IGNORECASE` も使いません。そのため、全角の英数字、NFKC で ASCII と同じになる文字（合字、丸数字、Kelvin 記号、長い s など）、大文字、Zero-width 文字、前後や途中の空白、末尾の改行（`$` なら通る）は、全て `ProviderInterfaceError("name")` で拒否されます。NFKC・小文字化・`strip` で別の名前と一致させられることも、登録済みの名前と「見た目が同じ」名前が別に登録されることもありません（`test_research_registry.py` が、全 Unicode コードポイントを 1 文字目と 2 文字目に置いて、通るのが ASCII の `[a-z0-9]` / `[a-z0-9_-]` だけであることを確かめます）。
+- `str` の Subclass（`StrEnum` の要素など）は、中身が合っていれば受け付けますが、Registry が保持するのは**厳密な `str` の写し**で、Adapter が返した Object そのものではありません。Subclass が `__hash__`・`__eq__`・`__lt__`・`__str__` などを上書きしていても、登録・`select()`・`gather()` が例外で失敗すること、一意性の検査をすり抜けて同じ名前を 2 つ登録すること、Log の文字列に Credential のような文字が入ることは起きません（[PAW-051 の独立 Review の指摘](../../docs/decisions/0012-research-provider-adapter-policy.md)）。写しは C の `str.encode` で作るので、上書きされた Method は呼びません。
+- 型は `type()` で読みます（`isinstance` は Object の `__class__` を信じます）。`__class__` で `str` や `ProviderKind` を名乗るだけの Object は、`re` の `TypeError` などの別の例外ではなく、`ProviderInterfaceError("name")` / `("kind")` になります。`kind` は `ProviderKind` の要素そのものだけを受け付けます（Member を持つ Enum は継承できません）。
+- 範囲: これは Adapter が返す `name` と `kind` の話です。`ProviderRegistry.get(name)` の引数と、呼び出し元が作る `SourceMetadata.provider_id` は、呼び出し元（Tool Broker）の Code で、この層は写しません（Broker が返す値は Registry の写しです）。
+
+**Adapter の属性の読み取り（登録の窓）。** `register` と `validate_provider` が `name`、`kind`、`search`、`fetch` を読む部分と、`search` / `fetch` が返した Object を `inspect` で調べる部分は、Adapter の Code（Property、`__getattribute__`、`__getattr__`、Descriptor、`__class__`、`__signature__`、`Signature.bind`）が動く窓です。
+
+- Member ごとの窓の中で Adapter が出した例外は、`BaseException`（`CancelledError`、`KeyboardInterrupt`、`SystemExit`、`GeneratorExit` を含む）を全て、その Member の固定の `ProviderInterfaceError("name" / "kind" / "search" / "fetch")` になります。Adapter の文言や例外 Object は Error に入らず、`__cause__` / `__context__` にも付きません（`try` の外で送出するため。Log に `exc_info` を付けても Adapter の文言は出ません）。`register` が失敗しても Registry は変わりません。
+- 例外を出さずに `asyncio.current_task().cancel()` を呼んで値を返す Hook は、Broker と同じ `Task.cancelling()` の Guard（`guard.CancelGuard`）で取り消し、その Member の `ProviderInterfaceError` にします。
+- 登録は同期（`await` しない）です。本物の Cancel は窓の中には届かず、登録の前からあった Cancel の要求は残って、呼び出し元の次の `await` で届きます。
+- 代償は Broker の同期の窓と同じで、窓の間（起動時の配線の数マイクロ秒）に Signal で届いた本物の `KeyboardInterrupt` も、不適合な Adapter として拒否されます（Decision 0012 の 10）。
+- Test: `tests/test_research_registry.py` の `HostileMemberReadTest`（Property、`__getattribute__`、`__getattr__`、Descriptor が、4 つの Member それぞれで `RuntimeError`、`RecursionError`、Hook が敵対的な例外、`CancelledError`、`KeyboardInterrupt`、`SystemExit`、`GeneratorExit`、独自の `BaseException` を出しても、固定の `ProviderInterfaceError` になり、`str` / `repr` / `args` / 整形した Traceback と Log に Adapter の文言がなく、`__cause__` / `__context__` が空であること）、`HostileMemberProbeTest`（`__class__` を読むと出す Object、Metaclass の `__getattribute__` が出す Class、`bind` が出す `Signature` を `search` / `fetch` に持つ Adapter）、`RegistrationCancellationTest`（Cancel を要求して値を返す Hook の取り消し、前からある要求は残って次の `await` で届くこと、`CancelledError` を出しても呼び出し元は Cancel されないこと）。
+
+### Request と Result
+
+`ResearchRequest` は不変で、構築時に全項目を検証します。
+
+| 項目 | 内容 |
+| --- | --- |
+| `query` | 1 〜 512 文字、空白のみ不可、改行・Tab を含む制御文字は不可。PAW-053 の Privacy Filter で最小化済みの Query を渡す。Broker は中身を見ず、書き換えない |
+| `max_results` | 1 〜 50（既定 10）。各 Provider に頼む件数と、結果の最大件数の両方 |
+| `kinds` | `ProviderKind` の空でない `frozenset`（既定は全種類）。Provider 名では選べない |
+| `time_budget_seconds` | 1 回の `gather` 全体の上限。0 より大きく 120 以下（既定 30） |
+
+型は変換しません（`bool` は `int` ではなく、`set` や `list` は `kinds` になりません）。
+
+`ResearchResult` は `items`（`ResearchItem` の tuple）、`errors`（失敗した Provider ごとに 1 つ）、`providers_queried`、`truncated`（`max_results` を超えて捨てた）を持ちます。
+`providers_queried` により「見つからなかった」と「誰にも聞かなかった」を区別でき、`all_failed` で全 Provider の失敗を判定できます。
+
+### 統一された Source Metadata
+
+Provider の種類によらず、全ての `ResearchItem` は同じ `SourceMetadata` と本文 `text` だけを持ちます。
+
+| 項目 | 内容 |
+| --- | --- |
+| `provider_kind` / `provider_id` | Registry が持つ値。Provider 自身の申告ではない |
+| `locator` | 正規化済みの http(s) URL（次の節） |
+| `title` | 空白を 1 つにまとめた Title（空でもよい、300 文字まで） |
+| `retrieved_at` | 取得時刻（UTC）。1 回の `gather` で全 Item に同じ値 |
+| `content_hash` | `sha256:` + `text` の UTF-8 の SHA-256。取得した Excerpt / 文書の Hash で、遠隔の文書全体とは限らない |
+| `source_type` | `official_docs` / `official_github` / `primary` / `secondary` / `community` / `unknown`。Provider が宣言し、真偽の判定には使わない |
+| `published_at` | 公開日時（UTC）。不明なら `None` |
+| `private_source` | Private な Source かどうか。PAW-053 の Privacy Filter が使う |
+
+`SourceMetadata.to_dict()` は JSON にできる形（Enum は値、日時は ISO 8601）を返します。
+`SourceMetadata` 自身も、http(s) 以外、User 情報、Fragment、空白・制御文字を含む URL を拒否します。
+
+License や `robots.txt` に関する項目はありません。要件と設計文書に定義がないため、決まってから追加します。
+
+### URL の正規化
+
+`canonicalize_locator` は、同じページを指す URL を 1 つの文字列にして、重複を除けるようにします（DNS 解決も Network もない純粋な関数です）。
+
+- `http` / `https` 以外、User 情報（`user:pass@`）、空白・制御文字・バックスラッシュ、不正な Port、Host が `a-z0-9-` と `.` だけで作れない場合（IPv6、`_`、非 ASCII の Host）は `InvalidLocatorError`。
+- Scheme と Host は小文字にし、Host 末尾の `.` を 1 つ取り、既定の Port（http 80、https 443）と Fragment を外し、空の Path を `/` にします。
+- Path と Query の `%xx` は大文字にし、非 ASCII の文字は UTF-8 の `%XX` にします。
+- Query は `&` で分け、追跡用（`utm_*`、`fbclid`、`gclid` など）と Credential 用（`access_token`、`token`、`api_key`、`sig` など）の Parameter を除き、`(名前, 値)` の順に並べます。除く名前の一覧は `locator.py` の定数です。名前は Percent-decode（最大 4 回）してから比べます（`%61ccess_token` も除きます）。decode した名前に `&`、`;`、`=`、`#` が入るもの（`%26access_token` など、先に decode する Parser では別の Parameter になる）は、名前として成り立たないので丸ごと除きます。Credential の一覧は Best effort で、Path に入った Credential は判別できません。
+- Path の Dot Segment、末尾の `/`、`www.`、`http` と `https` の違いは正規化しません。そのため、これらだけが違う URL は別の Source として扱います。
+- 正規化の結果は 2048 文字以下で、もう一度かけても同じ結果になります。
+- 例外の文言に URL は入りません。
+
+### Broker の動作
+
+`ResearchBroker(registry).gather(request)` は次のとおり動きます。
+
+1. `request.kinds` に合う Provider を Registry の順序（`ProviderKind` の宣言順、次に名前順。登録順には依存しない）で選びます。
+2. **全 Provider を並行**で実行します。各 Provider の制限時間は、登録時の `timeout_seconds`（既定 10 秒、最大 120 秒）と、全体の Budget の残りの小さい方です。時間切れの Provider は Cancel し、完全に終わるまで待ってから `timeout` として報告します。`gather` が返るとき、起動した Task は残りません。
+3. Provider の例外は Provider ごとに隔離します。他の Provider の結果は失われません。`gather` を Cancel した場合は全 Provider を Cancel して `CancelledError` を伝えます。
+   **`await` の最中の Cancel と、同期で動く Adapter の Code の例外は区別します。** `Task.cancel()` は `await` の地点でしか届きません。`provider.search` を読んで呼ぶ部分（Property、`__getattribute__` など）と、`published_at` の `tzinfo.utcoffset` は `await` を挟まない同期の Code なので、そこが `CancelledError`、`KeyboardInterrupt`、`SystemExit`、`GeneratorExit` などの `BaseException` を出しても、それは Task の Cancel ではなく Adapter 自身の失敗です。前者は `internal_error`、後者は `invalid_response` として報告し、他の Provider の結果を残します（`gather` / `fetch` は Cancel されません）。`await` の最中に届いた Cancel と Timeout は、これまでどおり握りつぶさず伝えます。
+   **例外を出さずに Cancel だけを要求する Code も同じです。** 同期の Code が `asyncio.current_task().cancel()` を呼んでから普通に値を返す（`__getattribute__` が Method を返す、`tzinfo.utcoffset` が Offset を返す）と、何も出ませんが、要求は Task に残り、次の `await`（か Task の終わり）で `gather` 全体を Cancel して、成功した他の Provider の結果を失わせます。Broker は同期の窓（`provider.search` / `fetch` を読んで呼ぶ部分と、1 つの Provider の Response の検証）の前後で `Task.cancelling()` を比べ、増えた分だけ `Task.uncancel()` で取り消して、その Provider を Adapter の失敗（前者は `internal_error`、後者は `invalid_response`。Log の `exception_type` は `adapter_error`）にします。呼び出した Coroutine は `await` せずに閉じるので、Provider の Code は動きません。窓の前からあった Cancel（呼び出し元自身の `cancel()`）は残り、`await` の地点で届きます。限界は Decision 0012 の 10 に書いたとおりです（数が 1 以上で Cancel が未着の Task では印を消せない）。`ProviderRegistry.register` / `validate_provider` の窓も同じ Guard で保護します（「Adapter の属性の読み取り」）。
+4. Response は Provider ごとに全体を検証します（`list` / `tuple` そのもの、件数が `limit` 以下、全要素が `ProviderHit` で **Field の値も正しい**、全 URL が正規化できる）。1 つでも違反があれば、その Provider の結果は全て捨てて `invalid_response` にします。Field の検証は下の「Constructor を通らない Hit と Document」のとおりです。
+   **Container 自体も Adapter の Code を動かしません。** `list` / `tuple` の Subclass（と、`__class__` で `list` を名乗る Object）は、`__len__`、`__iter__`、`__getitem__` を Adapter が上書きでき、Broker の中で例外を出したり、長さを偽って `limit` を超えさせたりできます。そのため Class は `type(x) is list`（または `tuple`）で確かめ（`isinstance` は `__class__` を Object に尋ねます）、Subclass は Hook を一切呼ばずに `invalid_response` にします。
+5. Provider の結果を交互に並べ（各 Provider の 1 位、2 位、…）、正規化した URL で重複を除いて（最初の 1 件を残し、どれか 1 つでも Private なら `private_source` を True にする）、`max_results` 件までにします。
+6. `errors` は Registry の順序です（完了順ではありません）。
+
+**Constructor を通らない Hit と Document。** `isinstance(x, ProviderHit)` は Class しか証明しません。`object.__setattr__` で作った Object、Constructor が Slot を設定しない Subclass、`text` が `str` でない Object、上限を超える文字列、UTC で表せない `published_at` も `ProviderHit` の Instance です。
+そのため `normalize_hits`（`gather` の経路）と `fetch` は、受け取った Object の Field を全て 1 度だけ読み直し、`ProviderHit` / `ProviderDocument` の Constructor と同じ規則で検証し直します（`revalidate_hit` / `revalidate_document`）。以後の処理は、その検証済みの複製だけを使います。
+- Field は `ProviderHit` 自身の Slot から直接読みます。Subclass の Property や `__getattribute__` は呼びません（呼ぶと、任意の例外や、読むたびに変わる値を許すため）。Subclass 自体は使えますが、Property だけで Field を返し Slot を設定しない Subclass は不正な Response です。
+- `str` の Subclass は、`__len__` や `encode` を呼ばずに通常の `str` へ複製してから検証します（長さを偽れません）。`source_type` は `SourceType` そのもの、`private_source` は `bool` そのものだけを受け付けます（`__class__` を偽る Object は不正）。
+- `published_at` は `None` か、UTC に変換できる Timezone つきの `datetime` だけです。まず標準の `datetime` の Method で Field を通常の `datetime` へ複製し（`datetime.astimezone` は途中の値を Subclass 自身の Constructor で作るため、複製せずに呼ぶと Adapter の Code が動きます）、その複製を UTC へ変換して、通常の UTC の `datetime` にします。動くのは Adapter の `tzinfo.utcoffset` だけで、それが出した例外は、`asyncio.CancelledError`、`KeyboardInterrupt`、`SystemExit`、`GeneratorExit` を含む `BaseException` の全てが不正な Response です（同期の Code に Task の Cancel は届かないため。[Decision 0012](../../docs/decisions/0012-research-provider-adapter-policy.md) の 10）。`utcoffset` が `asyncio.current_task().cancel()` を呼んで Offset を返す場合も同じで、Broker が Response の検証の前後で `Task.cancelling()` を比べ、増えた分を `Task.uncancel()` で取り消して、`invalid_response` にします。
+- 違反は全て `InvalidProviderResponseError`（固定の文言。値も例外の文言も含みません）になり、`gather` はその Provider を `invalid_response` にして他の Provider の結果を残します。`fetch` は `errors` に `invalid_response` を 1 件返します。例外は呼び出し元へ出ません。
+- Test: `tests/test_research_normalize.py` の `test_a_timezone_that_raises_a_base_exception_is_an_invalid_response`（5 種類の `BaseException` を `utcoffset` の 1 回目と `astimezone` の 2 回目で出す）と `test_a_datetime_subclass_constructor_never_runs`、`tests/test_research_broker.py` の `SynchronousHookBaseExceptionTest`（`gather` / `fetch` が `invalid_response` / `internal_error` を返し他の Provider の結果を残すことと、`await` の最中の Cancel が `gather` / `fetch` へ伝わること）、`SynchronousHookCancelRequestTest`（`__getattribute__` と `utcoffset` が現在の Task を Cancel して普通に値を返す場合に、`gather` で他の Provider の結果が残り、`fetch` が `internal_error` / `invalid_response` を返し、Task に要求が残らないこと。窓の前からあった要求は残ること、本物の Cancel と Timeout はこれまでどおり効くこと）と `CancelGuardTest`（取り消す数、前からある要求、Task の外）。
+
+失敗は閉じた `ResearchErrorCode` の値としてだけ報告します。
+
+| Code | 意味 |
+| --- | --- |
+| `timeout` | Provider または全体の Budget の時間切れ。Provider 自身が `TimeoutError` を出した場合も含む |
+| `rate_limited` / `unavailable` / `not_found` / `internal_error` | Provider が `ProviderFailure` で報告した値。`internal_error` は、`ProviderFailure` 以外の全ての例外にも使う |
+| `invalid_response` | Interface の違反（型、件数、URL、Field の値） |
+
+**例外の文言は Code にも Result にも Log にも入りません。** Log は Provider 1 つの失敗ごとに WARNING を 1 行（Provider の ID、種類、Code、`exception_type`）出し、Query と URL は出しません。
+**`exception_type` は固定の分類で、Adapter が決められる文字列は入りません。** Adapter が上げた例外の Class 名は Adapter のデータです（`type("access_token=SECRET\nforged", (Exception,), {})()` のように、Credential や、次の Log 行を偽造する改行を入れられます。`__name__` の読み方を変えても、実際の名前は Adapter が決めています）。そのため Log に出すのは、`type(error)` が**次の Class そのもの**（`is` で照合。名前が同じ Class、Subclass は含まない）のときだけ、その Class 名です。1 つは Python 組み込みの例外（`RuntimeError`、`ValueError`、`OSError` とその Subclass の `ConnectionRefusedError`、`TimeoutError`、`ExceptionGroup` など）、もう 1 つはこの Package の例外（`ProviderFailure`、`InvalidProviderResponseError` など）で、一覧は `broker.py` の `LOGGED_EXCEPTION_TYPES` です。それ以外の全て（Adapter が定義した Class、組み込みの Subclass、名前だけ似せた Class を含む）は固定の `adapter_error` です。名前を切り詰めたり無害化したりして出すことはしません。Adapter が独自の例外で `RATE_LIMITED` などを伝えたいときは `ProviderFailure` を上げます（`code` は別に Log に出ます）。**限界:** 組み込み以外の Library の例外（`httpx.ConnectError` など）は `adapter_error` になり、型では区別できません。区別が要るときは Adapter が `ProviderFailure` へ変えます。
+`ProviderFailure.code` を書き換えて文字列にしても、`internal_error` になります。
+**失敗の分類も Adapter の Code を動かしません。** Adapter が上げた例外は、`ProviderFailure` の Subclass が `code` の Property、`__getattribute__`、`__class__`、Metaclass の `__name__` を上書きして、例外を出したり読むたびに違う値を返したりできます。それが `_call_provider` の Handler から漏れると `TaskGroup` が中断し、他の Provider の成功した結果も失われます。そのため `code` は `ProviderFailure` 自身の Slot（`ProviderFailure.code`）から 1 度だけ読み（Constructor も同じ Slot へ書きます）、Class は `type()` と `issubclass` で確かめ、`ResearchErrorCode` そのものでない値、Slot が未設定（Subclass の Constructor が `super().__init__` を呼ばない）の場合は `internal_error` にします。ログの `exception_type` も Adapter の Code を動かしません（`type()` で Class を得て `id` で一覧を引くので、Metaclass の `__getattribute__`、`__name__`、`__hash__`、`__eq__` などは呼ばれません）。`classify_failure` と `log_type_name` は例外を出しません。
+
+Test: `tests/test_research_broker.py` の `LoggedExceptionTypeTest`（Credential・改行・制御文字・10 万文字・非 ASCII・書式指定子・組み込みや `ProviderFailure` を名乗る Class・`__name__` / `__qualname__` / `__module__` の上書き・作成後の改名・Metaclass の Hook を持つ例外が、`gather` と `fetch` で固定の `adapter_error` の 1 行になること、一覧の Class だけが名前で出ること、Subclass は出ないこと、Hook が動かないこと）。
+
+`fetch(source, time_budget_seconds=30)` は、以前の結果の `SourceMetadata` から、同じ Provider の `fetch` を、`gather` と同じ隔離・Timeout・Log の規則で呼びます。制限時間は `min(登録時の timeout_seconds, time_budget_seconds)` です。Provider が登録から外れている（または種類が違う）場合は `unavailable` です。`ProviderDocument` でない Response と、Field が不正な `ProviderDocument`（上の「Constructor を通らない Hit と Document」）は `invalid_response` です。結果は 1 件の `ResearchItem`（`retrieved_at` は取得時、`private_source` は Source と文書のどちらかが True なら True）か、`errors` の 1 件です。
+
+### Security と Privacy
+
+- `network` Capability の確認は、この層の呼び出し元（Tool Broker、PAW-031）の責任です。この層は認可の判断も Network の Access もしません。
+- どの Host へ接続してよいか（SSRF、Private Address、`robots.txt`）は、具体的な Adapter と Network Policy の責任です。`canonicalize_locator` は名前を解決しません。
+- Query の最小化と Secret の除去は PAW-053 の責任です。`private_source` はその Filter が使います。
+- 全ての入力（Query、件数、文字数、Provider 数）に上限があります。Registry は 32 Provider までです。
+
+#### 各 Adapter の受け入れ条件
+
+[Decision 0012](../../docs/decisions/0012-research-provider-adapter-policy.md) の承認時の決定により、次の責務は Broker ではなく個々の Adapter と呼び出し元（Tool Broker）にあります。
+Direct Web、Docs、GitHub、OpenCode などの Adapter の Issue は、受け入れ条件に次を明記します（現在の [Implementation Backlog](../../docs/IMPLEMENTATION_BACKLOG.md) には、個別の Adapter の Issue はまだありません）。
+
+- [ ] `network` Capability を、呼び出し元（Tool Broker、PAW-031）が確認してから Adapter を呼ぶ（Adapter を直接呼ぶ経路を作らない）。
+- [ ] SSRF 対策（Private Address、Loopback、Link-local、Cloud の Metadata Address などへの接続の拒否。Redirect の先も同じ）。
+- [ ] 名前解決の後の接続先の検査（DNS Rebinding への対策。検査した Address へ接続する）。`canonicalize_locator` は名前を解決しません。
+- [ ] `robots.txt` の遵守（該当する Adapter だけ）。
+- [ ] Timeout と Cancel に応じる非同期の実装（Broker の Timeout は協調的です）。
+- [ ] Response は `ProviderHit` / `ProviderDocument` に変換し、外部の Library の例外は `ProviderFailure` に分類してから返す。
+- [ ] License と `robots.txt` は `SourceMetadata` に含めない（必要になったときに、Decision を経て追加する）。
+
+### 実装の由来と制約
+
+- `locator.py` と `normalize.py` は、Local の Qwen3-Coder（30B-A3B）が最初の実装を書き、テストにも合格しました。
+  しかし、レビューで、テストが見逃す不具合が見つかったため、本体は Claude が書き直しています（書き直し前の本体は残っていません）。
+  見つかった不具合は、`%` の直後の非 ASCII を変換しない、`?é=` の `=` を落とす、KELVIN SIGN が ASCII の Host になる、入力の長さを最後に検査するため 20 MB の入力の拒否に数秒かかる、例外の Context に入力が残る、`hasattr` による偽の Hit の受理、広すぎる `except` です。
+- `registry.py` と `broker.py` は、Local Model が仕様どおりに実装できなかったため、仕様を書いた側の参照実装を整えたものです。
+- Timeout は協調的です。Adapter が Cancel を無視する、または Event Loop を止める同期処理をする場合、Broker は止められません。
+- 実装が選んだ方針（**[Decision 0012](../../docs/decisions/0012-research-provider-adapter-policy.md) は 2026-09-25 に Human が承認しました**。変える場合は新しい Decision から `Supersedes` します）:
+  1. License と `robots.txt` の項目は、要件に定義がないため `SourceMetadata` にありません。
+  2. 不正な Hit が 1 つでもあると、その Provider の Response 全体を `invalid_response` にします（Adapter の不具合を隠さないため）。Constructor を通らずに作られた Hit / Document は、Field を読み直して検証し、Subclass の Property は使いません。Response の Container は `list` / `tuple` そのものだけで、Subclass は Hook を呼ばずに不正とします。`ProviderFailure` の分類も Subclass の Hook を呼びません（Adapter の Code を Broker の中で動かさないため）。
+  3. 複数 Provider の結果は交互に並べ、正規化した URL の最初の 1 件を残します（要件に統合の規則がありません）。
+  4. Credential 用の Query Parameter の一覧は Best effort です。
+  5. IPv6 と非 ASCII の Host は拒否し、名前解決はしません。`network` Capability、SSRF、`robots.txt` は呼び出し元（Tool Broker、PAW-031）と個々の Adapter の責任です。
+  6. Provider の名前は正規化せず（look-alike は拒否）、`str` の Subclass は厳密な `str` の写しにして保持します。Subclass を拒否する案は採っていません（`StrEnum` の要素を名前にできるため）。
+  7. 同期で動く Adapter の Code（`published_at` の `tzinfo`、`provider.search` を読んで呼ぶ部分）が出した `BaseException` は、`CancelledError`、`KeyboardInterrupt`、`SystemExit` を含めて Adapter の失敗として報告します。同期の Code に Task の Cancel は届かないためです。代償として、その数マイクロ秒の間に Signal で本物の `KeyboardInterrupt` が届くと、それも `invalid_response` になり、握りつぶされます。例外を出さずに `asyncio.current_task().cancel()` を呼んで値を返す同期の Code は、`Task.cancelling()` の増加を `Task.uncancel()` で取り消して、同じく Adapter の失敗にします（数が 1 以上で Cancel が未着の Task では `uncancel()` が印を消せない、という限界があります。登録の窓も同じ扱いです）。**限界:** Adapter の非同期の Code（`await` の最中）が自分で出した `CancelledError` や自分で呼んだ `Task.cancel()` は、Task の Cancel と区別せず、これまでどおり `gather` へ伝わります（`await` の最中は本物の Cancel と数の増加で区別できないため、区別する案は Decision 0012 では決めず、必要になったときに別の Decision で決めます）。
+
+### Test
+
+`apps/backend/tests/test_research_*.py` です。標準 `unittest` だけで、DB も Network も使いません。
+Timeout の Test は、永遠に待つ Provider を 0.3 秒で打ち切り、成功する Provider は即座に答える構成です（所要時間を厳密には検査せず、30 秒の Guard で CI の停止を防ぎます）。
+
 ## 依存 Package
 
 依存は `pyproject.toml` で完全一致に固定しています。
@@ -1424,8 +1612,9 @@ CI は pre-commit の専用環境で Test を実行するため、同じ Version
 ## 今後の Issue
 
 [PAW-021](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/18)（Owner Setup）、
-RBAC（PAW-025）、Task Lifecycle（PAW-032）、Task Queue / Budget / Loop 検知（PAW-033）、Tool Broker（PAW-031）、Memory Schema（PAW-040）、Research Scratch Store（PAW-050）は、この Skeleton の上に実装済みです。
+RBAC（PAW-025）、Task Lifecycle（PAW-032）、Task Queue / Budget / Loop 検知（PAW-033）、Tool Broker（PAW-031）、Memory Schema（PAW-040）、Research Scratch Store（PAW-050）、Research Provider Adapter（PAW-051）は、この Skeleton の上に実装済みです。
 PAW-022（Login / Session / Password）と PAW-023（Passkey / Step-up）は Owner Setup の Token を受け取る側で、まだありません。
 Memory の保存・整理・検索は PAW-041 以降で、Memory Schema の上に実装します。
+Research の Provider（Direct Web、Docs、GitHub、OpenCode）の Adapter、Privacy Filter（PAW-053）、Evidence / Claim Provenance（PAW-052）は、Research Provider Adapter の上に実装します。
 受け入れ基準は [Implementation Backlog](../../docs/IMPLEMENTATION_BACKLOG.md)、
 実装時に選択できる事項は [Requirements Freeze Review](../../docs/REQUIREMENTS_FREEZE_REVIEW.md) を参照してください。
