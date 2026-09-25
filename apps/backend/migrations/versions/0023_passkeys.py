@@ -1,7 +1,7 @@
 """Passkeys (WebAuthn), their challenges and the session's Passkey gate (PAW-023).
 
 Revision ID: 0023
-Revises: 0030
+Revises: 0027
 Create Date: 2026-09-26
 
 Tables (every column and constraint is spelled out below; the models in
@@ -56,7 +56,7 @@ from alembic import op
 from paw_backend.db_roles import configured_app_role, grant_app_privileges
 
 revision: str = "0023"
-down_revision: str | Sequence[str] | None = "0030"
+down_revision: str | Sequence[str] | None = "0027"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

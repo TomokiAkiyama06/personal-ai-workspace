@@ -39,7 +39,7 @@ from .support import paw_environment
 from .test_migrations import offline_config
 
 REVISION = "0023"
-PREVIOUS = "0030"
+PREVIOUS = "0027"
 NEW_TABLES = ("user_passkeys", "passkey_challenges")
 COMPARED = (*NEW_TABLES, "auth_sessions")
 SCHEMA = "paw_passkey_drift_check"
@@ -59,7 +59,7 @@ def literals(sql: str) -> set[str]:
 
 
 class ModelsTest(unittest.TestCase):
-    def test_the_revision_follows_0030(self):
+    def test_the_revision_follows_0027(self):
         scripts = ScriptDirectory.from_config(offline_config(io.StringIO()))
         self.assertEqual(scripts.get_revision(REVISION).down_revision, PREVIOUS)
 
