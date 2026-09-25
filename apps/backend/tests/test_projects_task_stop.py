@@ -38,6 +38,7 @@ from paw_backend.tasks import (
     TaskCommand,
     TaskConflictError,
     TaskError,
+    TaskRun,
     TaskService,
     TaskState,
     TaskStepError,
@@ -291,7 +292,9 @@ class StopProjectTasksTest(TaskStopTestCase):
 
     async def test_a_running_task_is_stopped_gracefully_through_the_task_service(self):
         task_id = await self.seed_task(TaskState.RUNNING)
-        step = await self.seed_tasks.begin_step(task_id, "edit files", attempt=1)
+        step = await self.seed_tasks.begin_step(
+            task_id, "edit files", run=TaskRun(1, 0)
+        )
         entry = await self.seed_queue.enqueue(task_id)
         claimed = await self.seed_queue.claim_next("worker-1")
         assert claimed is not None and claimed.id == entry.id
@@ -328,7 +331,7 @@ class StopProjectTasksTest(TaskStopTestCase):
         # Safe stop: the worker closes its own step at a safe boundary and can
         # still do so; it can no longer start a new one; it lost its lease.
         with self.assertRaises(TaskStepError):
-            await self.seed_tasks.begin_step(task_id, "one more", attempt=1)
+            await self.seed_tasks.begin_step(task_id, "one more", run=TaskRun(1, 0))
         with self.assertRaises(LeaseLostError):
             await self.seed_queue.heartbeat(claimed.id, "worker-1", claimed.claim_count)
         finished = await self.seed_tasks.finish_step(
