@@ -37,10 +37,20 @@ MAX_TERM_CHARS = 64
 # width Katakana is folded into the Katakana block by NFKC first.
 CJK_CLASS = "\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff"
 
-_CJK_CHARACTER = re.compile(f"[{CJK_CLASS}]")
 _RUNS = re.compile(f"[{CJK_CLASS}]+|[^{CJK_CLASS}]+")
 _WORD = re.compile(r"\w+")
 _CJK_ONLY = re.compile(f"[{CJK_CLASS}]+")
+_HIRAGANA_PAIR = re.compile("[\u3040-\u309f]{2}")
+
+# English function words that carry no information in a keyword query. The
+# ``simple`` configuration has no stop words (it is language independent), so the
+# query side drops these; the vector leg is what understands the sentence.
+STOP_WORDS = frozenset(
+    "a an and are as at be but by can do does did for from had has have how i if in"
+    " is it its me my of on or our so than that the their them then there these"
+    " they this to was we were what when where which who whom why will with would"
+    " you your".split()
+)
 
 
 def normalize_text(text: str) -> str:
@@ -70,18 +80,25 @@ def features(text: str) -> tuple[str, ...]:
 
 
 def keyword_terms(text: str) -> tuple[str, ...]:
-    """The distinct features of ``text`` a keyword query asks for, bounded.
+    """The distinct, informative features of ``text`` a keyword query asks for.
 
-    Order of first appearance is kept; a feature longer than ``MAX_TERM_CHARS``
-    is dropped and at most ``MAX_QUERY_TERMS`` remain.
+    Order of first appearance is kept. A feature longer than ``MAX_TERM_CHARS`` is
+    dropped. A query is usually a sentence, and an OR query over its words would
+    match every memory that contains "the": so English function words
+    (:data:`STOP_WORDS`) and character pairs made of two Hiragana (the particles
+    and endings: ``する``, ``です``) are left out, unless nothing else remains (then
+    they are all kept). At most ``MAX_QUERY_TERMS`` remain.
     """
-    seen: dict[str, None] = {}
+    distinct: dict[str, None] = {}
     for feature in features(text):
         if len(feature) <= MAX_TERM_CHARS:
-            seen.setdefault(feature)
-        if len(seen) >= MAX_QUERY_TERMS:
-            break
-    return tuple(seen)
+            distinct.setdefault(feature)
+    informative = [
+        term
+        for term in distinct
+        if term not in STOP_WORDS and _HIRAGANA_PAIR.fullmatch(term) is None
+    ]
+    return tuple((informative or list(distinct))[:MAX_QUERY_TERMS])
 
 
 def tsquery_text(terms: tuple[str, ...]) -> str | None:

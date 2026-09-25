@@ -82,6 +82,11 @@ class RankingPolicy:
       ``1 - span`` to ``1 + span`` (50 is neutral).
     * ``pinned_factor``: multiplies a pinned memory.
     * ``scope_step``: each step of scope specificity adds this to the factor.
+    * ``min_vector_similarity``: a memory whose cosine similarity to the query is
+      below this is not a vector candidate (``None``: no floor, the nearest ones
+      are candidates however far they are). Similarity is model specific (an
+      unrelated text is near 0 for one model and near 0.4 for another), so there
+      is no default until the PAW-019 benchmark has chosen the model.
     * ``near_duplicate_similarity``: the overlap of two memories' words and
       character pairs (0..1, Jaccard) from which they count as the same memory.
     """
@@ -97,6 +102,7 @@ class RankingPolicy:
     importance_span: float = 0.2
     pinned_factor: float = 1.1
     scope_step: float = 0.02
+    min_vector_similarity: float | None = None
     near_duplicate_similarity: float = 0.9
 
     def __post_init__(self) -> None:
@@ -131,6 +137,13 @@ class RankingPolicy:
             ),
             "scope_step": validate_number(
                 "scope_step", self.scope_step, low=0, high=0.2
+            ),
+            "min_vector_similarity": (
+                None
+                if self.min_vector_similarity is None
+                else validate_number(
+                    "min_vector_similarity", self.min_vector_similarity, low=-1, high=1
+                )
             ),
             "near_duplicate_similarity": validate_number(
                 "near_duplicate_similarity",

@@ -53,7 +53,29 @@ class FeaturesTest(unittest.TestCase):
 
 class KeywordTermsTest(unittest.TestCase):
     def test_terms_are_distinct_and_keep_their_first_position(self):
-        self.assertEqual(keyword_terms("b a b c a"), ("b", "a", "c"))
+        self.assertEqual(
+            keyword_terms("beta alpha beta gamma alpha"), ("beta", "alpha", "gamma")
+        )
+
+    def test_english_function_words_are_left_out_of_a_sentence(self):
+        self.assertEqual(
+            keyword_terms("when do we deploy the backend"), ("deploy", "backend")
+        )
+        for word in ("the", "a", "of", "we", "do", "when", "with", "you"):
+            self.assertIn(word, fulltext.STOP_WORDS)
+        # Words that are not function words stay, whatever their length.
+        self.assertEqual(keyword_terms("go db ci"), ("go", "db", "ci"))
+
+    def test_hiragana_only_pairs_are_left_out_of_a_japanese_sentence(self):
+        self.assertEqual(
+            keyword_terms("デプロイの手順はする"),
+            ("デプ", "プロ", "ロイ", "イの", "の手", "手順", "順は"),
+        )
+
+    def test_when_only_uninformative_terms_remain_all_of_them_are_kept(self):
+        self.assertEqual(keyword_terms("the a of"), ("the", "a", "of"))
+        self.assertEqual(keyword_terms("です する"), ("です", "する"))
+        self.assertEqual(keyword_terms("the ok"), ("ok",))
 
     def test_at_most_max_query_terms_remain_in_order(self):
         text = " ".join(f"w{n}" for n in range(fulltext.MAX_QUERY_TERMS + 10))
@@ -85,9 +107,9 @@ class TsqueryTextTest(unittest.TestCase):
     def test_tsquery_operators_in_the_text_never_reach_the_query(self):
         # Everything that is not a word character is a separator, so an attempt
         # to write tsquery syntax yields plain words only.
-        text = "a & !b | (c) <-> d:* 'e' \\ f"
+        text = "x & !b | (c) <-> d:* 'e' \\ f"
         query = tsquery_text(keyword_terms(text))
-        self.assertEqual(query, "'a' | 'b' | 'c' | 'd' | 'e' | 'f'")
+        self.assertEqual(query, "'x' | 'b' | 'c' | 'd' | 'e' | 'f'")
 
     def test_a_term_with_a_non_word_character_is_dropped_not_quoted(self):
         self.assertEqual(tsquery_text(("ok", "a'b", "c d")), "'ok'")
