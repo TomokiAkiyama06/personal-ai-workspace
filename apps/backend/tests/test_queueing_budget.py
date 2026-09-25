@@ -2,13 +2,16 @@
 is set (except the constructor checks)."""
 
 import asyncio
+import contextlib
 import math
 import unittest
 import uuid
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from types import MappingProxyType
+from unittest import mock
 
-from sqlalchemy import text
+from sqlalchemy import event, text
 
 from paw_backend.tasks import TaskNotFoundError
 from paw_backend.tasks.queueing import (
@@ -23,6 +26,7 @@ from paw_backend.tasks.queueing import (
     InvalidQueueingArgumentError,
     StaleRuntimeSessionError,
 )
+from paw_backend.tasks.queueing import budget as budget_module
 from paw_backend.tasks.queueing.validation import MAX_CONSUMED
 
 from .queueing_support import (
@@ -43,14 +47,33 @@ def limit(kind: BudgetKind, preset: BudgetPreset = STANDARD) -> int | None:
 
 
 class ConstructorTest(unittest.TestCase):
-    def test_the_clock_must_be_callable(self):
-        BudgetTracker(object(), clock=lambda: datetime.now(UTC))
+    def test_a_test_clock_must_be_callable(self):
+        BudgetTracker(
+            object(), clock=lambda: datetime.now(UTC), allow_explicit_clock=True
+        )
         BudgetTracker(object())
-        for bad in (None, 5, "now", datetime.now(UTC)):
+        BudgetTracker(object(), allow_explicit_clock=True)
+        for bad in (5, "now", datetime.now(UTC)):
             with self.subTest(bad=repr(bad)):
                 with self.assertRaises(InvalidQueueingArgumentError) as caught:
-                    BudgetTracker(object(), clock=bad)
+                    BudgetTracker(object(), clock=bad, allow_explicit_clock=True)
                 self.assertEqual(caught.exception.parameter, "clock")
+
+    def test_a_production_tracker_cannot_be_given_a_process_clock(self):
+        # Runtime endpoints come from the database clock: a clock is refused unless
+        # the caller says it is a test (allow_explicit_clock, as TaskQueue's now).
+        for kwargs in ({}, {"allow_explicit_clock": False}):
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaises(InvalidQueueingArgumentError) as caught:
+                    BudgetTracker(object(), clock=lambda: datetime.now(UTC), **kwargs)
+                self.assertEqual(caught.exception.parameter, "clock")
+
+    def test_allow_explicit_clock_must_be_a_bool(self):
+        for bad in (1, 0, "yes", None):
+            with self.subTest(bad=repr(bad)):
+                with self.assertRaises(InvalidQueueingArgumentError) as caught:
+                    BudgetTracker(object(), allow_explicit_clock=bad)
+                self.assertEqual(caught.exception.parameter, "allow_explicit_clock")
 
 
 class StalledBegin:
@@ -665,7 +688,7 @@ class RuntimeTest(BudgetTestCase):
             BudgetUsage(K.RUNTIME_SECONDS, 10**9, None),
         )
 
-    async def test_the_injected_clock_is_the_only_time_source(self):
+    async def test_the_test_clock_replaces_the_database_clock(self):
         task_id = await self.configured_task()
         self.clock.set(7)
         await self.budget.start_runtime(task_id)
@@ -675,7 +698,7 @@ class RuntimeTest(BudgetTestCase):
 
     async def test_a_clock_without_a_timezone_is_rejected(self):
         task_id = await self.configured_task()
-        naive = BudgetTracker(self.database, clock=lambda: datetime(2030, 1, 1))
+        naive = self.new_budget(clock=lambda: datetime(2030, 1, 1))
         for call in (
             lambda: naive.start_runtime(task_id),
             lambda: naive.stop_runtime(task_id, 1),
@@ -685,7 +708,7 @@ class RuntimeTest(BudgetTestCase):
             with self.assertRaises(InvalidQueueingArgumentError) as caught:
                 await call()
             self.assertEqual(caught.exception.parameter, "clock")
-        wrong = BudgetTracker(self.database, clock=lambda: 1234.5)
+        wrong = self.new_budget(clock=lambda: 1234.5)
         with self.assertRaises(InvalidQueueingArgumentError):
             await wrong.start_runtime(task_id)
         row = await self.budget_row(task_id, "runtime_seconds")
@@ -829,7 +852,9 @@ class RuntimeTest(BudgetTestCase):
         task_id = await self.configured_task()
         old = await self.budget.start_runtime(task_id)  # worker A, t=0
         stalled = StalledDatabase(self.database)
-        replacement = BudgetTracker(stalled, clock=FakeClock(at(100)))
+        replacement = BudgetTracker(
+            stalled, clock=FakeClock(at(100)), allow_explicit_clock=True
+        )
         # Worker B reads its clock (t=100) and then stalls before its statement.
         start = asyncio.create_task(replacement.start_runtime(task_id))
         try:
@@ -964,6 +989,153 @@ class RuntimeTest(BudgetTestCase):
         with self.assertRaises(InvalidQueueingArgumentError) as caught:
             await self.budget.record(task_id, K.RUNTIME_SECONDS, 5)
         self.assertEqual(caught.exception.parameter, "kind")
+
+
+@contextlib.contextmanager
+def process_clock_off_by(offset_seconds: float) -> Iterator[list[float]]:
+    """Make this process's clock, as ``budget`` reads it (``datetime.now``), run
+    ``offset_seconds`` ahead of (behind, if negative) the real time: one host of a
+    fleet whose clocks disagree. Yields the list of readings taken meanwhile."""
+    readings: list[float] = []
+    real = datetime
+
+    class SkewedDatetime(real):
+        @classmethod
+        def now(cls, tz=None):
+            readings.append(offset_seconds)
+            return cls.fromtimestamp(real.now(UTC).timestamp() + offset_seconds, tz)
+
+    with mock.patch.object(budget_module, "datetime", SkewedDatetime):
+        yield readings
+
+
+def runtime_of(usage: tuple[BudgetUsage, ...]) -> BudgetUsage:
+    return next(item for item in usage if item.kind is K.RUNTIME_SECONDS)
+
+
+@requires_postgres
+class RuntimeClockAuthorityTest(BudgetTestCase):
+    """The persisted runtime endpoints (``running_since``, ``settled_through`` and
+    the charged seconds) come from ONE clock, the database's (Decision 0007, 10): a
+    ``BudgetTracker`` built without a test clock never reads its process's clock,
+    however far apart the clocks of the hosts are. Time passes by moving the stored
+    instants back in the database (never by sleeping)."""
+
+    async def shift_timer(self, task_id: uuid.UUID, seconds: float) -> None:
+        """As if ``seconds`` more had passed since the timer's stored instants."""
+        await self.owner_sql(
+            "UPDATE budget_usages SET "
+            "running_since = running_since - make_interval(secs => :s), "
+            "settled_through = settled_through - make_interval(secs => :s) "
+            "WHERE task_id = :t AND kind = 'runtime_seconds'",
+            s=seconds,
+            t=task_id,
+        )
+
+    async def database_now(self) -> datetime:
+        (row,) = await self.rows("SELECT clock_timestamp() AS now")
+        return row["now"]
+
+    async def test_a_tracker_without_a_test_clock_reads_the_database_clock(self):
+        task_id = await self.configured_task()
+        tracker = BudgetTracker(self.new_database())
+        before = await self.database_now()
+        generation = await tracker.start_runtime(task_id)
+        after = await self.database_now()
+        row = await self.budget_row(task_id, "runtime_seconds")
+        self.assertLessEqual(before, row["running_since"])
+        self.assertLessEqual(row["running_since"], after)
+        before = await self.database_now()
+        await tracker.stop_runtime(task_id, generation)
+        after = await self.database_now()
+        row = await self.budget_row(task_id, "runtime_seconds")
+        self.assertLessEqual(before, row["settled_through"])
+        self.assertLessEqual(row["settled_through"], after)
+
+    async def test_a_replacement_on_a_host_with_another_clock_is_charged_fully(self):
+        # The review scenario: the host that stops a session runs ahead of the host
+        # that starts the replacement. With process clocks the cutoff written by the
+        # first put the second timer into its future, and the whole replacement
+        # session was charged 0 (a budget bypass).
+        for host_a, host_b in ((3600, -3600), (-3600, 3600), (86_400, -86_400)):
+            with self.subTest(host_a=host_a, host_b=host_b):
+                task_id = await self.configured_task()
+                a = BudgetTracker(self.new_database())
+                b = BudgetTracker(self.new_database())
+                with process_clock_off_by(host_a) as reads_a:
+                    first = await a.start_runtime(task_id)
+                    await self.shift_timer(task_id, 200.5)
+                    stopped = await a.stop_runtime(task_id, first)
+                self.assertGreaterEqual(stopped.consumed, 200)
+                self.assertLess(stopped.consumed, 260)
+                with process_clock_off_by(host_b) as reads_b:
+                    second = await b.start_runtime(task_id)
+                    await self.shift_timer(task_id, 100.5)
+                    finished = await b.stop_runtime(task_id, second)
+                self.assertEqual(second, first + 1)
+                # Both sessions are charged, 200 + 100 seconds (plus the real few
+                # milliseconds): not 200 (the second one lost) and not hours more.
+                self.assertGreaterEqual(finished.consumed, 300)
+                self.assertLess(finished.consumed, 360)
+                self.assertEqual((reads_a, reads_b), ([], []), "a process clock read")
+
+    async def test_every_host_sees_a_running_timer_at_the_databases_time(self):
+        for host_a, host_b in ((3600, -3600), (-3600, 3600)):
+            with self.subTest(host_a=host_a, host_b=host_b):
+                task_id = await self.configured_task()
+                a = BudgetTracker(self.new_database())
+                b = BudgetTracker(self.new_database())
+                with process_clock_off_by(host_a) as reads_a:
+                    first = await a.start_runtime(task_id)
+                await self.shift_timer(task_id, 200.5)
+                with process_clock_off_by(host_b) as reads_b:
+                    seen = runtime_of(await b.usage(task_id))
+                    verdict = await b.check(task_id)
+                    kept = runtime_of(await b.set_preset(task_id, STANDARD))
+                for item in (seen, verdict.usage_of(K.RUNTIME_SECONDS), kept):
+                    self.assertGreaterEqual(item.consumed, 200)
+                    self.assertLess(item.consumed, 260)
+                # The stop reports the same, on either host (the second is a
+                # repeated stop of a stopped session: it only reports).
+                stopped = await a.stop_runtime(task_id, first)
+                self.assertGreaterEqual(stopped.consumed, 200)
+                self.assertLess(stopped.consumed, 260)
+                with process_clock_off_by(host_b) as reads_c:
+                    again = await b.stop_runtime(task_id, first)
+                self.assertEqual(again, stopped)
+                self.assertEqual((reads_a, reads_b, reads_c), ([], [], []))
+
+    async def test_each_statement_reads_the_database_clock_exactly_once(self):
+        # Two readings in one statement would make the charged seconds and the
+        # stored cutoff differ by microseconds (and the cutoff no longer bound the
+        # elapsed time): every statement takes ONE reading (a materialised CTE).
+        task_id = await self.configured_task()
+        database = self.new_database()
+        tracker = BudgetTracker(database)
+        statements: list[str] = []
+
+        def record(connection, cursor, statement, *_):
+            statements.append(statement)
+
+        event.listen(database.engine.sync_engine, "before_cursor_execute", record)
+        try:
+            generation = await tracker.start_runtime(task_id)
+            start_statements, statements[:] = list(statements), []
+            await tracker.usage(task_id)
+            usage_statements, statements[:] = list(statements), []
+            await tracker.stop_runtime(task_id, generation)
+            stop_statements = list(statements)
+        finally:
+            event.remove(database.engine.sync_engine, "before_cursor_execute", record)
+        for name, executed in (
+            ("start", start_statements),
+            ("usage", usage_statements),
+            ("stop", stop_statements),
+        ):
+            with self.subTest(statement=name):
+                (timed,) = [sql for sql in executed if "clock_timestamp()" in sql]
+                self.assertEqual(timed.count("clock_timestamp()"), 1)
+                self.assertTrue(timed.startswith("WITH clock AS"))
 
 
 if __name__ == "__main__":

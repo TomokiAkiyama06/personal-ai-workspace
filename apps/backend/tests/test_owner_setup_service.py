@@ -1066,19 +1066,6 @@ class ExpiryWhileWaitingForTheOwnerLockTest(PostgresIdentityTestCase):
     (Decision 0005, point 10).
     """
 
-    async def wait_until_a_statement_waits_for_a_lock(self) -> None:
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + 30
-        while loop.time() < deadline:
-            waiting = await self.scalar(
-                "SELECT count(*) FROM pg_stat_activity "
-                "WHERE datname = current_database() AND wait_event_type = 'Lock'"
-            )
-            if waiting:
-                return
-            await asyncio.sleep(0.02)
-        self.fail("no statement is waiting for a lock")
-
     async def wait_until_the_database_clock_passes(self, instant: datetime) -> None:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + 30
@@ -1193,6 +1180,204 @@ class ExpiryWhileWaitingForTheOwnerLockTest(PostgresIdentityTestCase):
         ) as (release, attempt):
             await release()
             await self.assert_rejected_as(attempt, "token_unavailable", issued)
+
+
+@requires_postgres
+class IssuanceWhileWaitingForALockTest(PostgresIdentityTestCase):
+    """A token's lifetime starts when it is stored, not when the command began.
+
+    Issuing locks the Owner's ``users`` row, revokes the older tokens and only
+    then stores the new one. While another transaction holds a lock the command
+    waits, however long that is, and a lifetime counted from the instant the
+    command began could be over before the operator is ever shown the token
+    (Decision 0005, point 10, the issuing side).
+    """
+
+    @contextlib.asynccontextmanager
+    async def issuing_while_another_transaction_holds(self, issue, holder_sql: str):
+        """Run ``issue()`` while another transaction holds what ``holder_sql`` locks.
+
+        Yields ``(end_holder, attempt)`` once the attempt is waiting for a lock.
+        ``end_holder()`` commits the holder, ``end_holder(rollback=True)`` rolls
+        it back.
+        """
+        holder = self.new_database()
+        attempt = None
+        async with holder.session() as session:
+            await session.execute(text(holder_sql))
+
+            async def end_holder(*, rollback: bool = False) -> None:
+                if rollback:
+                    await session.rollback()
+                else:
+                    await session.commit()
+
+            try:
+                attempt = asyncio.create_task(issue())
+                await self.wait_until_a_statement_waits_for_a_lock()
+                yield end_holder, attempt
+            finally:
+                if attempt is not None:
+                    if not attempt.done():
+                        await session.rollback()  # never leave it waiting
+                    attempt.cancel()
+                    await asyncio.gather(attempt, return_exceptions=True)
+
+    async def token_of(self, purpose: str):
+        (row,) = await self.query(
+            "SELECT created_at, expires_at, revoked_at FROM setup_tokens "
+            "WHERE purpose = :purpose",
+            purpose=purpose,
+        )
+        return row
+
+    async def test_a_recovery_token_lives_from_the_end_of_the_wait_for_the_owner_lock(
+        self,
+    ):
+        await self.operator.setup_owner("boss")
+        self.clock.advance(seconds=100)
+
+        async with self.issuing_while_another_transaction_holds(
+            self.operator.recover_owner, "SELECT 1 FROM users FOR UPDATE"
+        ) as (end_holder, attempt):
+            # A wait longer than the whole lifetime of a token.
+            self.clock.advance(seconds=TTL + 60)
+            after_the_wait = self.clock.now
+            await end_holder()
+            issued = await attempt
+
+        expected_expiry = after_the_wait + timedelta(seconds=TTL)
+        recovery = await self.token_of("recovery")
+        self.assertEqual(
+            (recovery.created_at, recovery.expires_at),
+            (after_the_wait, expected_expiry),
+        )
+        self.assertEqual(issued.expires_at, expected_expiry)
+        # The token it superseded was revoked after the wait, too.
+        self.assertEqual((await self.token_of("setup")).revoked_at, after_the_wait)
+        # The full lifetime remains: the token can be spent, and only until the
+        # end of it.
+        self.clock.advance(seconds=TTL - 1)
+        redemption = await self.redeemer.redeem(issued.token)
+        self.assertEqual(redemption.purpose, TokenPurpose.RECOVERY)
+
+    async def test_a_recovery_token_is_not_issued_expired_by_a_long_wait(self):
+        await self.operator.setup_owner("boss")
+
+        async with self.issuing_while_another_transaction_holds(
+            self.operator.recover_owner, "SELECT 1 FROM users FOR UPDATE"
+        ) as (end_holder, attempt):
+            self.clock.advance(seconds=TTL + 1)  # the old lifetime is over
+            await end_holder()
+            issued = await attempt
+
+        self.assertGreater(issued.expires_at, self.clock.now)
+        redemption = await self.redeemer.redeem(issued.token)
+        self.assertEqual(redemption.purpose, TokenPurpose.RECOVERY)
+
+    async def test_a_recovery_token_lives_from_the_end_of_a_wait_for_an_older_token(
+        self,
+    ):
+        # The Owner's row lock is free, but the statement that revokes the older
+        # token waits for another transaction that holds that token's row.
+        await self.operator.setup_owner("boss")
+
+        async with self.issuing_while_another_transaction_holds(
+            self.operator.recover_owner, "SELECT 1 FROM setup_tokens FOR UPDATE"
+        ) as (end_holder, attempt):
+            self.clock.advance(seconds=TTL + 60)
+            after_the_wait = self.clock.now
+            await end_holder()
+            issued = await attempt
+
+        expected_expiry = after_the_wait + timedelta(seconds=TTL)
+        recovery = await self.token_of("recovery")
+        self.assertEqual(
+            (recovery.created_at, recovery.expires_at),
+            (after_the_wait, expected_expiry),
+        )
+        self.assertEqual(issued.expires_at, expected_expiry)
+
+    async def test_a_replacing_setup_lives_from_the_end_of_the_wait_for_the_owner_lock(
+        self,
+    ):
+        await self.operator.setup_owner("old")
+        await self.execute("UPDATE users SET status = 'pending_deletion'")
+        self.clock.advance(seconds=100)
+
+        async def replace():
+            return await self.operator.setup_owner("new", replace_non_live_owner=True)
+
+        async with self.issuing_while_another_transaction_holds(
+            replace, "SELECT 1 FROM users FOR UPDATE"
+        ) as (end_holder, attempt):
+            self.clock.advance(seconds=TTL + 60)
+            after_the_wait = self.clock.now
+            await end_holder()
+            issued = await attempt
+
+        expected_expiry = after_the_wait + timedelta(seconds=TTL)
+        self.assertEqual(issued.expires_at, expected_expiry)
+        (new_token,) = await self.query(
+            "SELECT t.created_at, t.expires_at FROM setup_tokens t "
+            "JOIN users u ON u.id = t.user_id WHERE u.login_name = 'new'"
+        )
+        self.assertEqual(
+            (new_token.created_at, new_token.expires_at),
+            (after_the_wait, expected_expiry),
+        )
+        # What the replacement changed is stamped after the wait as well.
+        (old_user,) = await self.query(
+            "SELECT updated_at FROM users WHERE login_name = 'old'"
+        )
+        self.assertEqual(old_user.updated_at, after_the_wait)
+        (old_token,) = await self.query(
+            "SELECT revoked_at FROM setup_tokens t "
+            "JOIN users u ON u.id = t.user_id WHERE u.login_name = 'old'"
+        )
+        self.assertEqual(old_token.revoked_at, after_the_wait)
+        (new_user,) = await self.query(
+            "SELECT created_at, updated_at FROM users WHERE login_name = 'new'"
+        )
+        self.assertEqual(
+            (new_user.created_at, new_user.updated_at), (after_the_wait, after_the_wait)
+        )
+
+    async def test_a_first_setup_lives_from_the_end_of_a_wait_for_a_concurrent_insert(
+        self,
+    ):
+        # Nobody is the Owner yet, so there is no row to lock; the INSERT of the
+        # new Owner waits for another transaction that is inserting one (the one
+        # Owner index). That transaction rolls back, and this one goes on.
+        self.clock.advance(seconds=100)
+        rival = (
+            "INSERT INTO users (id, login_name, system_role, status, "
+            "passkey_required, created_at, updated_at) VALUES "
+            "(gen_random_uuid(), 'rival', 'owner', 'invited', true, now(), now())"
+        )
+
+        async def setup():
+            return await self.operator.setup_owner("boss")
+
+        async with self.issuing_while_another_transaction_holds(setup, rival) as (
+            end_holder,
+            attempt,
+        ):
+            self.clock.advance(seconds=TTL + 60)
+            after_the_wait = self.clock.now
+            await end_holder(rollback=True)
+            issued = await attempt
+
+        expected_expiry = after_the_wait + timedelta(seconds=TTL)
+        self.assertEqual(issued.expires_at, expected_expiry)
+        setup_token = await self.token_of("setup")
+        self.assertEqual(
+            (setup_token.created_at, setup_token.expires_at),
+            (after_the_wait, expected_expiry),
+        )
+        self.assertEqual(
+            (await self.redeemer.redeem(issued.token)).purpose, TokenPurpose.SETUP
+        )
 
 
 @requires_postgres

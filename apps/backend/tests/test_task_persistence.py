@@ -26,6 +26,7 @@ from paw_backend.tasks import (
     StepStatus,
     TaskCommand,
     TaskConflictError,
+    TaskRun,
     TaskService,
     TaskState,
     WaitReason,
@@ -363,6 +364,197 @@ class RestoreTest(PostgresTaskTestCase):
         self.assertEqual(snapshot.state, S.PAUSED)
         self.assertEqual(snapshot.recent_logs, ())
         self.assertIsNone(snapshot.attempt.pull_request)
+
+
+@requires_postgres
+class RestoreQueryPlanTest(PostgresTaskTestCase):
+    """``restore`` reads about the rows it returns, however long the history is.
+
+    A Restart leaves the earlier attempts' rows behind: a reconnect after a
+    Restart must not read (and throw away) that history to find the few rows of
+    the current attempt.
+    """
+
+    OLD_ROWS = 20000
+
+    async def database_execute(self, sql: str, **parameters) -> None:
+        async with self.database.engine.begin() as connection:
+            await connection.execute(text(sql), parameters)
+
+    async def restarted_task(self, *, old_rows: int, current_logs: int) -> uuid.UUID:
+        """A task in its second attempt, after a first one with ``old_rows`` rows.
+
+        The old logs and steps are written before the Restart, so their ``seq`` is
+        lower than the current attempt's (a scan from the newest end reads them
+        last). A task has as many events as it had commands, so its own events
+        stay few; about ``old_rows`` logs and events of 200 other tasks, written
+        later, are what its rows are looked up among.
+        """
+        task_id = await self.task_in_state(S.RUNNING)
+        await self.database_execute(
+            "INSERT INTO task_logs (task_id, attempt, retry_count, level, message, "
+            "created_at) SELECT :t, 1, 0, 'info', 'old ' || g, now() "
+            "FROM generate_series(1, :n) AS g",
+            t=task_id,
+            n=old_rows,
+        )
+        await self.database_execute(
+            "INSERT INTO task_steps (task_id, attempt, sequence, name, status, "
+            "started_at, finished_at) SELECT :t, 1, g, 'old', 'succeeded', now(), "
+            "now() FROM generate_series(1, :n) AS g",
+            t=task_id,
+            n=old_rows,
+        )
+        await self.service.execute(task_id, C.FAIL, actor=self.system)
+        await self.service.execute(task_id, C.RESTART, actor=self.user)
+        await self.service.execute(task_id, C.START, actor=self.system)
+        run = TaskRun(2, 0)
+        for number in range(1, current_logs + 1):
+            await self.service.add_log(task_id, f"current {number}", run=run)
+        for name in ("first", "second"):
+            step = await self.service.begin_step(task_id, name, run=run)
+            if name == "first":
+                await self.service.finish_step(task_id, step.id, StepStatus.SUCCEEDED)
+        # Many other tasks that wrote later: the newest rows of the tables are not
+        # this task's, so a scan of the primary key (newest first) is no shortcut.
+        async with self.database.engine.begin() as connection:
+            others = (
+                (
+                    await connection.execute(
+                        text(
+                            "INSERT INTO tasks (id, project_id, created_by, title, "
+                            "input, state, attempt, retry_count, version, created_at, "
+                            "updated_at) SELECT gen_random_uuid(), :p, :u, 'other', "
+                            "'{}', 'running', 1, 0, 1, now(), now() "
+                            "FROM generate_series(1, 200) RETURNING id"
+                        ),
+                        {"p": self.project_id, "u": self.user_id},
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            per_task = old_rows // len(others)
+            await connection.execute(
+                text(
+                    "INSERT INTO task_logs (task_id, attempt, retry_count, level, "
+                    "message, created_at) SELECT o, 1, 0, 'info', 'other', now() "
+                    "FROM unnest(CAST(:ids AS uuid[])) AS o, "
+                    "generate_series(1, :n)"
+                ),
+                {"ids": others, "n": per_task},
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO task_events (task_id, attempt, retry_count, command, "
+                    "to_state, actor_kind, task_version, created_at) "
+                    "SELECT o, 1, 0, 'start', 'running', 'system', 1, now() "
+                    "FROM unnest(CAST(:ids AS uuid[])) AS o, "
+                    "generate_series(1, :n)"
+                ),
+                {"ids": others, "n": per_task},
+            )
+        for table in ("task_logs", "task_steps", "task_events"):
+            await self.database_execute(f"ANALYZE {table}")
+        return task_id
+
+    async def restore_statements(self, task_id: uuid.UUID):
+        """The snapshot ``restore`` returns and the statement it sent for each table."""
+        with self.captured_statements() as captured:
+            snapshot = await self.service.restore(task_id)
+        statements = {}
+        for table in ("task_logs", "task_steps", "task_events"):
+            (found,) = (
+                statement
+                for statement in captured
+                if statement[0].lstrip().startswith("SELECT")
+                and f"FROM {table}" in statement[0]
+            )
+            statements[table] = found
+        return snapshot, statements
+
+    async def assert_reads_only(self, statement, *, table, rows, index):
+        """The statement, planned both ways, reads ``rows`` rows of ``table`` in order.
+
+        Planned for the values at hand (``force_custom_plan``) and as the prepared
+        statement a driver may cache (``force_generic_plan``): no Seq Scan, no Sort
+        (the index hands the rows over in order), the named index, and no row read
+        only to be filtered out.
+        """
+        sql, parameters = statement
+        for mode in ("force_custom_plan", "force_generic_plan"):
+            with self.subTest(table=table, plan_cache_mode=mode):
+                (explained,) = await self.plan(sql, parameters, mode, analyze=True)
+                found = list(self.plan_nodes(explained["Plan"]))
+                types = {node["Node Type"] for node in found}
+                self.assertNotIn("Seq Scan", types)
+                self.assertFalse({t for t in types if "Sort" in t}, types)
+                (scan,) = (n for n in found if n.get("Relation Name") == table)
+                self.assertEqual(scan.get("Rows Removed by Filter", 0), 0, scan)
+                self.assertEqual(scan["Actual Rows"], rows, scan)
+                self.assertEqual(scan["Index Name"], index)
+
+    async def test_the_logs_of_a_restarted_task_are_read_without_the_old_attempts(self):
+        for current in (3, 0):
+            with self.subTest(current_logs=current):
+                task_id = await self.restarted_task(
+                    old_rows=self.OLD_ROWS, current_logs=current
+                )
+                snapshot, statements = await self.restore_statements(task_id)
+                await self.assert_reads_only(
+                    statements["task_logs"],
+                    table="task_logs",
+                    rows=current,
+                    index="ix_task_logs_task_id_attempt_seq",
+                )
+                # ...and they are the current attempt's lines, oldest first.
+                self.assertEqual(
+                    [(log.attempt, log.message) for log in snapshot.recent_logs],
+                    [(2, f"current {n}") for n in range(1, current + 1)],
+                )
+
+    async def test_the_step_and_the_last_event_of_a_restarted_task_read_one_row_each(
+        self,
+    ):
+        task_id = await self.restarted_task(old_rows=self.OLD_ROWS, current_logs=1)
+        snapshot, statements = await self.restore_statements(task_id)
+        await self.assert_reads_only(
+            statements["task_steps"],
+            table="task_steps",
+            rows=1,
+            index="uq_task_steps_task_id",
+        )
+        await self.assert_reads_only(
+            statements["task_events"],
+            table="task_events",
+            rows=1,
+            index="ix_task_events_task_id",
+        )
+        self.assertEqual(
+            (snapshot.current_step.attempt, snapshot.current_step.name),
+            (2, "second"),
+        )
+
+    async def test_task_logs_have_one_index_for_the_current_attempt_newest_first(self):
+        async with self.database.engine.connect() as connection:
+            rows = (
+                await connection.execute(
+                    text(
+                        "SELECT indexname, indexdef FROM pg_indexes "
+                        "WHERE tablename = 'task_logs' ORDER BY indexname"
+                    )
+                )
+            ).all()
+        # Nothing else reads the logs of a task across its attempts, so the index
+        # on ``(task_id, seq)`` is not kept next to this one (it also serves the
+        # foreign key on ``task_id``, being its leading column).
+        self.assertEqual(
+            [name for name, _ in rows],
+            ["ix_task_logs_task_id_attempt_seq", "pk_task_logs"],
+        )
+        self.assertIn(
+            "USING btree (task_id, attempt, seq DESC)", dict(rows)[rows[0][0]]
+        )
 
 
 @requires_postgres
