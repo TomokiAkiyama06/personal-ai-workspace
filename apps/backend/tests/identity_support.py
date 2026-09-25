@@ -246,13 +246,23 @@ class PostgresIdentityTestCase(unittest.IsolatedAsyncioTestCase):
         rows = await self.query(sql, **params)
         return rows[0][0]
 
-    async def wait_until_a_statement_waits_for_a_lock(self) -> None:
+    async def wait_until_a_statement_waits_for_a_lock(
+        self, *, blocked_by: int | None = None
+    ) -> None:
+        """Wait until a statement waits for a lock (``pg_stat_activity``).
+
+        With ``blocked_by`` (a backend pid) only a wait for a lock that backend
+        holds counts: a test with two consecutive waits can tell them apart.
+        """
         loop = asyncio.get_running_loop()
         deadline = loop.time() + 30
         while loop.time() < deadline:
             waiting = await self.scalar(
                 "SELECT count(*) FROM pg_stat_activity "
-                "WHERE datname = current_database() AND wait_event_type = 'Lock'"
+                "WHERE datname = current_database() AND wait_event_type = 'Lock' "
+                "AND (CAST(:blocker AS integer) IS NULL "
+                "OR CAST(:blocker AS integer) = ANY(pg_blocking_pids(pid)))",
+                blocker=blocked_by,
             )
             if waiting:
                 return
