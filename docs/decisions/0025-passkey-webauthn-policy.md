@@ -4,7 +4,7 @@
 - Date: 2026-09-26
 - Scope: PAW-023（Passkey / Step-up Authentication、Issue [#20](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/20)）。[Decision 0015](0015-login-session-password-policy.md) の 12 節・13 節・「承認時の決定」が PAW-023 に残した点、[Decision 0005](0005-owner-setup-and-recovery.md) の 7 節（Recovery で Passkey を無効にする）、[Decision 0006](0006-tool-broker-policy.md)（強い承認の Step-up）との接続点
 - Supersedes: なし。Decision 0015 は書き換えない（0015 の 12 節が「PAW-023 で決める」とした `users.passkey_required` 列の扱いは、この Decision の 9 節で決める）
-- Approval: 2026-09-26、Humanが作業Session内で、判断メモの各点に個別に回答し、残りは「推奨どおり」と回答して承認（末尾の「承認時の決定」）
+- Approval: 2026-09-26、Humanが作業Session内の質問Toolで、この Decision を「推奨どおり」として承認（末尾の「承認時の決定」）
 
 ## 背景
 
@@ -315,7 +315,7 @@ Web の Role（`PAW_APP_DATABASE_ROLE`）の権限は、実際に実行する文
 
 ## 承認時の決定（2026-09-26）
 
-判断点 1〜11 のすべてに、Human が作業 Session 内の質問 Tool で個別に回答した。すべて推奨どおりで、本文の変更はない。
+Human は、作業 Session 内の質問 Tool で、この Decision を「推奨どおり」として承認した（判断点 1〜11 を一括で。個別の回答ではない）。すべて推奨どおりで、本文の変更はない。
 
 1. **Library**: `webauthn`（py_webauthn）3.0.1 を完全一致で固定する（`cryptography==50.0.1` も）。3.0.0 への引き下げと `fido2` は採らない。
 2. **強制の意味**: R2。`required` の Role は Password で Sign-in して制限された Session を得て、Passkey の登録（未登録）または認証（登録済み）を終えるまで、許された少数の Route だけが使える。R1（登録の強制だけ）は採らない。
