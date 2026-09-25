@@ -43,6 +43,7 @@ from paw_backend.tools import (
     TaskRun,
 )
 
+from .gate_support import ALWAYS_ACTIVE
 from .support import make_settings, paw_environment
 from .task_support import TEST_DATABASE_URL, requires_postgres
 from .test_migrations import offline_config
@@ -219,7 +220,7 @@ class ApplicationRoleTest(RoleTestCase):
     async def test_the_role_can_read_the_state_of_a_task(self):
         # The broker asks whether a task can still act before it opens or uses
         # an approval; the role that runs it must be able to read `tasks`.
-        tasks = TaskService(self.app_db)
+        tasks = TaskService(self.app_db, project_gate=ALWAYS_ACTIVE)
         activity = PostgresTaskActivity(self.app_db)
         created = await tasks.create_task(project_id=U1, created_by=U1, title="t")
         self.assertEqual(
@@ -233,7 +234,7 @@ class ApplicationRoleTest(RoleTestCase):
         # Using an approval reads the task row locked (FOR SHARE), in the same
         # transaction that consumes: the lock needs the UPDATE privilege on
         # `tasks` that the role has for the task lifecycle (PAW-032).
-        tasks = TaskService(self.app_db)
+        tasks = TaskService(self.app_db, project_gate=ALWAYS_ACTIVE)
         live = (
             await tasks.create_task(project_id=U1, created_by=U1, title="t")
         ).task_id
@@ -265,7 +266,7 @@ class ApplicationRoleTest(RoleTestCase):
     async def test_the_role_can_lock_the_task_row_when_it_opens_a_request(self):
         # Opening a request reads the task row locked (FOR SHARE) in the
         # transaction that inserts: the same privileges as using an approval.
-        tasks = TaskService(self.app_db)
+        tasks = TaskService(self.app_db, project_gate=ALWAYS_ACTIVE)
         live = (
             await tasks.create_task(project_id=U1, created_by=U1, title="t")
         ).task_id
@@ -293,7 +294,7 @@ class ApplicationRoleTest(RoleTestCase):
         # state columns, an INSERT into the history) need no more than the role
         # has. A restart is the case: the task fails, is started again, and the
         # approval of the earlier attempt is still `approved`.
-        tasks = TaskService(self.app_db)
+        tasks = TaskService(self.app_db, project_gate=ALWAYS_ACTIVE)
         task_id = (
             await tasks.create_task(project_id=U1, created_by=U1, title="t")
         ).task_id

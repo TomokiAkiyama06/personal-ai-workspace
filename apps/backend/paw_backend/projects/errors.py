@@ -36,6 +36,8 @@ class InputProblem(StrEnum):
     NOT_A_DATETIME = "not_a_datetime"
     NAIVE_DATETIME = "naive_datetime"
     INVALID_CURSOR = "invalid_cursor"
+    NOT_A_SESSION = "not_a_session"
+    NO_TRANSACTION = "no_transaction"
 
 
 class ProjectError(Exception):

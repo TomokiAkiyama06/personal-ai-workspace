@@ -48,6 +48,7 @@ from paw_backend.tasks.service import (
     MAX_REASON_LENGTH,
 )
 
+from .gate_support import ALWAYS_ACTIVE
 from .task_support import (
     FIRST_RUN,
     PostgresTaskTestCase,
@@ -1472,7 +1473,9 @@ class HistoryAndListenerTest(PostgresTaskTestCase):
             received.append(event)
             seen_in_database.append(await self.service.history(event.task_id))
 
-        service = TaskService(self.database, listeners=[listener])
+        service = TaskService(
+            self.database, listeners=[listener], project_gate=ALWAYS_ACTIVE
+        )
         task_id = await self.create_task(service)
         await service.execute(task_id, C.START, actor=self.system)
         await service.execute(task_id, C.PAUSE, actor=self.user, reason="break")
@@ -1490,7 +1493,9 @@ class HistoryAndListenerTest(PostgresTaskTestCase):
         async def listener(event):
             received.append(event.command)
 
-        service = TaskService(self.database, listeners=[listener])
+        service = TaskService(
+            self.database, listeners=[listener], project_gate=ALWAYS_ACTIVE
+        )
         task_id = await self.create_task(service)
         with self.assertRaises(IllegalTransitionError):
             await service.execute(task_id, C.PAUSE, actor=self.user)
@@ -1504,7 +1509,9 @@ class HistoryAndListenerTest(PostgresTaskTestCase):
         async def broken(event):
             raise RuntimeError("password=hunter2")
 
-        service = TaskService(self.database, listeners=[broken])
+        service = TaskService(
+            self.database, listeners=[broken], project_gate=ALWAYS_ACTIVE
+        )
         with self.assertLogs(
             "paw_backend.tasks.service", level=logging.WARNING
         ) as logs:

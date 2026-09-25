@@ -17,7 +17,7 @@ Three tables:
   hold a prompt, an answer or a credential.
 
 **Depends on revisions 0021 (``users``) and 0032 (``tasks``)**: both are in this
-revision's ancestry (0030 follows 0022, whose chain contains them).
+revision's ancestry (0030 follows 0043, whose chain contains them).
 
 The definitions repeat the ones in ``paw_backend.connections.models`` on purpose (a
 migration is a frozen snapshot); ``tests/test_connections_schema.py`` fails when the
@@ -25,7 +25,7 @@ two drift apart. Constraint names come from the naming convention of
 ``paw_backend.db.Base.metadata``.
 
 Revision ID: 0030
-Revises: 0022
+Revises: 0043
 Create Date: 2026-09-25
 """
 
@@ -37,7 +37,7 @@ from alembic import op
 from paw_backend.db_roles import grant_app_privileges
 
 revision: str = "0030"
-down_revision: str | Sequence[str] | None = "0022"
+down_revision: str | Sequence[str] | None = "0043"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

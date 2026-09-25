@@ -56,9 +56,11 @@ personal-ai-workspace/
 │  │  │     ├─ 0032_task_lifecycle.py
 │  │  │     ├─ 0033_task_queue_budget_loop.py
 │  │  │     ├─ 0040_memory_schema.py
+│  │  │     ├─ 0043_memory_search_index.py
 │  │  │     ├─ 0046_shared_memory_candidates.py
 │  │  │     ├─ 0050_research_scratch_store.py
 │  │  │     ├─ 0052_research_provenance.py
+│  │  │     ├─ 0083_tasks_project_state_index.py
 │  │  │     └─ 0087_audit_external_send_details.py
 │  │  ├─ paw_backend/
 │  │  │  ├─ __init__.py
@@ -117,6 +119,24 @@ personal-ai-workspace/
 │  │  │  │  ├─ redeemer.py
 │  │  │  │  └─ tokens.py
 │  │  │  ├─ memory/
+│  │  │  │  ├─ fulltext.py
+│  │  │  │  ├─ retrieval/
+│  │  │  │  │  ├─ __init__.py
+│  │  │  │  │  ├─ candidates.py
+│  │  │  │  │  ├─ errors.py
+│  │  │  │  │  ├─ fakes.py
+│  │  │  │  │  ├─ grouping.py
+│  │  │  │  │  ├─ limits.py
+│  │  │  │  │  ├─ pool.py
+│  │  │  │  │  ├─ protocols.py
+│  │  │  │  │  ├─ queries.py
+│  │  │  │  │  ├─ ranking.py
+│  │  │  │  │  ├─ records.py
+│  │  │  │  │  ├─ resolver.py
+│  │  │  │  │  ├─ scopes.py
+│  │  │  │  │  ├─ service.py
+│  │  │  │  │  ├─ stages.py
+│  │  │  │  │  └─ validation.py
 │  │  │  │  └─ shared/
 │  │  │  │     ├─ __init__.py
 │  │  │  │     ├─ audit.py
@@ -139,6 +159,7 @@ personal-ai-workspace/
 │  │  │  │  ├─ records.py
 │  │  │  │  ├─ service.py
 │  │  │  │  ├─ store.py
+│  │  │  │  ├─ task_gate.py
 │  │  │  │  ├─ task_stop.py
 │  │  │  │  ├─ transaction.py
 │  │  │  │  └─ validation.py
@@ -183,6 +204,7 @@ personal-ai-workspace/
 │  │  │  │     ├─ service.py
 │  │  │  │     └─ validation.py
 │  │  │  ├─ tasks/
+│  │  │  │  ├─ project_gate.py
 │  │  │  │  └─ queueing/
 │  │  │  │     ├─ __init__.py
 │  │  │  │     ├─ budget.py
@@ -230,6 +252,7 @@ personal-ai-workspace/
 │  │     ├─ connections_fakes.py
 │  │     ├─ connections_support.py
 │  │     ├─ fake_postgres.py
+│  │     ├─ gate_support.py
 │  │     ├─ identity_support.py
 │  │     ├─ privacy_audit_support.py
 │  │     ├─ privacy_support.py
@@ -237,6 +260,8 @@ personal-ai-workspace/
 │  │     ├─ projects_support.py
 │  │     ├─ queueing_support.py
 │  │     ├─ research_support.py
+│  │     ├─ retrieval_pg_support.py
+│  │     ├─ retrieval_support.py
 │  │     ├─ scratch_support.py
 │  │     ├─ shared_memory_support.py
 │  │     ├─ support.py
@@ -321,6 +346,8 @@ personal-ai-workspace/
 │  │     ├─ test_provenance_store_validation.py
 │  │     ├─ test_provenance_store_wiring.py
 │  │     ├─ test_provenance_validation.py
+│  │     ├─ test_project_claim_filter.py
+│  │     ├─ test_project_state_gate.py
 │  │     ├─ test_projects_admin_access.py
 │  │     ├─ test_projects_admin_cursor.py
 │  │     ├─ test_projects_admin_grants.py
@@ -337,6 +364,7 @@ personal-ai-workspace/
 │  │     ├─ test_projects_task_stop.py
 │  │     ├─ test_projects_validation.py
 │  │     ├─ test_queueing_budget.py
+│  │     ├─ test_queueing_conditional_cancel.py
 │  │     ├─ test_queueing_domain.py
 │  │     ├─ test_queueing_escalation.py
 │  │     ├─ test_queueing_flow.py
@@ -351,6 +379,24 @@ personal-ai-workspace/
 │  │     ├─ test_research_normalize.py
 │  │     ├─ test_research_published_offset.py
 │  │     ├─ test_research_registry.py
+│  │     ├─ test_retrieval_component_output.py
+│  │     ├─ test_retrieval_eligibility.py
+│  │     ├─ test_retrieval_fakes.py
+│  │     ├─ test_retrieval_grants.py
+│  │     ├─ test_retrieval_grouping.py
+│  │     ├─ test_retrieval_leakage.py
+│  │     ├─ test_retrieval_migration.py
+│  │     ├─ test_retrieval_plans.py
+│  │     ├─ test_retrieval_queries.py
+│  │     ├─ test_retrieval_query_validation.py
+│  │     ├─ test_retrieval_ranking.py
+│  │     ├─ test_retrieval_service_access.py
+│  │     ├─ test_retrieval_service_concurrency.py
+│  │     ├─ test_retrieval_service_metadata.py
+│  │     ├─ test_retrieval_service_search.py
+│  │     ├─ test_retrieval_service_stages.py
+│  │     ├─ test_retrieval_service_validation.py
+│  │     ├─ test_retrieval_text.py
 │  │     ├─ test_scratch_concurrency.py
 │  │     ├─ test_scratch_grants.py
 │  │     ├─ test_scratch_janitor.py
@@ -384,7 +430,10 @@ personal-ai-workspace/
 │  │     ├─ test_shared_memory_service_guards.py
 │  │     ├─ test_shared_memory_service_manage.py
 │  │     ├─ test_shared_memory_service_read.py
+│  │     ├─ test_task_in_transaction.py
 │  │     ├─ test_task_input_snapshot.py
+│  │     ├─ test_task_stop_windows.py
+│  │     ├─ test_tasks_project_index.py
 │  │     ├─ test_tools_approvals.py
 │  │     ├─ test_tools_broker.py
 │  │     ├─ test_tools_credentials.py
