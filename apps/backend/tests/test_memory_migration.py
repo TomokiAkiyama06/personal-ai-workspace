@@ -532,6 +532,42 @@ class MemoryMigrationDatabaseTest(unittest.TestCase):
                 self.assertEqual(migrated, from_models)
                 self.assertIn(fragment, migrated)
 
+    def test_every_trigger_function_of_the_memory_tables_pins_its_search_path(self):
+        # A temporary table (every role may create one) is searched first by a
+        # name without a schema, and a trigger function runs in the writer's
+        # session: a function that leaves the path open can be pointed at a
+        # look-alike. ``pg_temp`` must be named, and last (otherwise it comes
+        # first, also for types).
+        migrate("upgrade", "head")
+
+        with self.engine.connect() as connection:
+            functions = {
+                name: config
+                for name, config in connection.execute(
+                    text(
+                        "SELECT DISTINCT p.proname, p.proconfig"
+                        " FROM pg_trigger t"
+                        " JOIN pg_class c ON c.oid = t.tgrelid"
+                        " JOIN pg_proc p ON p.oid = t.tgfoid"
+                        " WHERE c.relnamespace = 'public'::regnamespace"
+                        "   AND c.relname = ANY (:tables) AND NOT t.tgisinternal"
+                    ),
+                    {"tables": list(MEMORY_TABLES)},
+                )
+            }
+
+        self.assertEqual(
+            functions,
+            {
+                "paw_check_memory_source_message_conversation": [
+                    "search_path=pg_catalog, pg_temp"
+                ],
+                "paw_record_memory_metadata_change": [
+                    "search_path=pg_catalog, pg_temp"
+                ],
+            },
+        )
+
     def test_downgrade_drops_the_trigger_functions(self):
         migrate("upgrade", "head")
         migrate("downgrade", "base")

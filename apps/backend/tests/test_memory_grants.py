@@ -753,6 +753,36 @@ class ShadowedRelationTest(ApplicationRoleTestCase):
             ).all()
         self.assertEqual([tuple(row) for row in recorded], [(70, str(user))])
 
+    def test_a_temporary_look_alike_does_not_hide_a_source_from_the_deferred_check(
+        self,
+    ):
+        with self.assertRaises(IntegrityError) as caught:
+            with self.engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "CREATE TEMP TABLE memory_sources"
+                        " (LIKE public.memory_sources) ON COMMIT DROP"
+                    )
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO public.memory_sources"
+                        " (memory_version_id, source_type, message_id)"
+                        " VALUES (:version, 'conversation', :message)"
+                    ),
+                    {"version": self.version, "message": self.message},
+                )
+
+        self.assertEqual(
+            caught.exception.orig.diag.constraint_name,
+            "tr_memory_sources_message_requires_conversation",
+        )
+        with self.engine.connect() as connection:
+            stored = connection.execute(
+                text("SELECT count(*) FROM public.memory_sources")
+            ).scalar_one()
+        self.assertEqual(stored, 0)
+
 
 class DowngradeUnderGrantsTest(unittest.TestCase):
     @requires_postgres

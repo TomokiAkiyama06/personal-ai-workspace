@@ -575,14 +575,26 @@ class MemoryRelation(Base):
 # The trigger function reads the row again instead of using ``NEW``: a deferred
 # trigger event carries the row as the statement wrote it, and the same row may
 # have been changed again by a later foreign-key action in the transaction.
+#
+# The re-read names the table by the schema and name of the table the trigger is
+# on, and the function pins its ``search_path`` (``pg_catalog``, then ``pg_temp``
+# explicitly): the function runs in the writer's session, and a temporary table
+# called ``memory_sources`` (every role may create one) would otherwise answer
+# the query with no rows and let the invalid row commit. See
+# ``RECORD_METADATA_CHANGE_FUNCTION`` for the same reasoning and why the
+# statement is dynamic.
 MESSAGE_REQUIRES_CONVERSATION_FUNCTION = """\
 CREATE OR REPLACE FUNCTION paw_check_memory_source_message_conversation()
-RETURNS trigger LANGUAGE plpgsql AS $$
+RETURNS trigger LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp AS $$
+DECLARE
+    invalid boolean;
 BEGIN
-    IF EXISTS (
-        SELECT 1 FROM memory_sources
-        WHERE id = NEW.id AND message_id IS NOT NULL AND conversation_id IS NULL
-    ) THEN
+    EXECUTE 'SELECT EXISTS (SELECT 1 FROM ' || quote_ident(TG_TABLE_SCHEMA)
+        || '.' || quote_ident(TG_TABLE_NAME)
+        || ' WHERE id = $1 AND message_id IS NOT NULL AND conversation_id IS NULL)'
+    INTO invalid USING NEW.id;
+    IF invalid THEN
         RAISE EXCEPTION 'a source that names a message must name its conversation'
             USING ERRCODE = 'check_violation',
                   TABLE = 'memory_sources',

@@ -93,15 +93,20 @@ def _empty_object(name: str) -> sa.Column:
     )
 
 
-# See ``MemorySource`` in ``paw_backend.memory.models`` for why this is a trigger.
+# See ``MemorySource`` in ``paw_backend.memory.models`` for why this is a trigger,
+# and why the function pins its ``search_path`` and names its table by schema.
 _MESSAGE_REQUIRES_CONVERSATION_FUNCTION = """\
 CREATE OR REPLACE FUNCTION paw_check_memory_source_message_conversation()
-RETURNS trigger LANGUAGE plpgsql AS $$
+RETURNS trigger LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp AS $$
+DECLARE
+    invalid boolean;
 BEGIN
-    IF EXISTS (
-        SELECT 1 FROM memory_sources
-        WHERE id = NEW.id AND message_id IS NOT NULL AND conversation_id IS NULL
-    ) THEN
+    EXECUTE 'SELECT EXISTS (SELECT 1 FROM ' || quote_ident(TG_TABLE_SCHEMA)
+        || '.' || quote_ident(TG_TABLE_NAME)
+        || ' WHERE id = $1 AND message_id IS NOT NULL AND conversation_id IS NULL)'
+    INTO invalid USING NEW.id;
+    IF invalid THEN
         RAISE EXCEPTION 'a source that names a message must name its conversation'
             USING ERRCODE = 'check_violation',
                   TABLE = 'memory_sources',
