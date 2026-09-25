@@ -250,10 +250,23 @@ class TaskLogRow(Base):
     )
 
     __table_args__ = (
-        Index(None, "task_id", "seq"),
         _in("level", LogLevel, "level_valid"),
         CheckConstraint("retry_count >= 0", name="retry_count_not_negative"),
     )
+
+
+# The lines of one attempt of a task, newest first (``restore`` returns the latest
+# ones of the current attempt): PostgreSQL seeks straight to the attempt and reads
+# as far as the limit, instead of walking the log of the earlier attempts (a
+# Restart leaves them behind) to filter them out. Nothing reads the lines of a
+# task across its attempts, and the foreign key on ``task_id`` is served by the
+# leading column, so there is no separate index on ``(task_id, seq)``.
+Index(
+    "ix_task_logs_task_id_attempt_seq",
+    TaskLogRow.task_id,
+    TaskLogRow.attempt,
+    TaskLogRow.seq.desc(),
+)
 
 
 class TaskEventRow(Base):
