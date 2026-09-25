@@ -193,6 +193,7 @@ personal-ai-workspace/
 │  │  └─ tests/
 │  │     ├─ __init__.py
 │  │     ├─ fake_postgres.py
+│  │     ├─ gate_support.py
 │  │     ├─ identity_support.py
 │  │     ├─ privacy_support.py
 │  │     ├─ provenance_support.py
@@ -242,6 +243,7 @@ personal-ai-workspace/
 │  │     ├─ test_provenance_store_validation.py
 │  │     ├─ test_provenance_store_wiring.py
 │  │     ├─ test_provenance_validation.py
+│  │     ├─ test_project_claim_filter.py
 │  │     ├─ test_project_state_gate.py
 │  │     ├─ test_projects_admin_access.py
 │  │     ├─ test_projects_admin_cursor.py

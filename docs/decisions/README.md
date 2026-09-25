@@ -1,7 +1,7 @@
 # 設計判断の記録
 
 重要な仕様・設計判断の提案と、承認された判断の経緯を保存するディレクトリです。
-判断は次の表のとおりです（Status が Proposed のものは、人間 / Admin の承認を待つ提案で、まだ方針ではありません）。
+承認済みの判断は次の表のとおりです。
 
 | Decision | 内容 | Status |
 | --- | --- | --- |
@@ -19,7 +19,7 @@
 | [0012](0012-research-provider-adapter-policy.md) | Research Provider Adapterの方針 | Approved |
 | [0013](0013-research-scratch-task-relation.md) | Research Scratch の Task との関係と Pin / 保存の方針 | Approved |
 | [0014](0014-task-working-set-persistence.md) | Task の Working Set（Multi-Repo）の永続化をPAW-032に含めず、新しいIssueで扱う | Approved |
-| [0020](0020-project-state-gate.md) | Task / Queue の Project 状態 Gate の適用範囲（Gate の必須化、Restore 後の Restart、Archive 時点の受け入れ済みの作業） | Proposed（未承認） |
+| [0020](0020-project-state-gate.md) | Task / Queue の Project 状態 Gate の適用範囲（Gate の必須化、Restore 後の Restart、Active でない Project の Claim と Start） | Approved |
 
 運用は [AGENTS.md](../../AGENTS.md) の「仕様変更」に従います。
 
