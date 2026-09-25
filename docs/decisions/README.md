@@ -12,6 +12,7 @@
 | [0005](0005-owner-setup-and-recovery.md) | Owner の初期設定と復旧の方針 | Approved |
 | [0006](0006-tool-broker-policy.md) | Tool Broker の Policy・承認・Credentialの方針 | Approved |
 | [0007](0007-task-queue-budget-and-loop-policy.md) | Task Queue・Budget・Loop検知の方針 | Approved |
+| [0008](0008-project-membership-and-lifecycle-policy.md) | ProjectのMembershipとLifecycleの方針 | Approved |
 | [0009](0009-shared-memory-administration.md) | Shared Memory 管理の方針（Candidate、削除と復元、System Policy との優先関係） | Approved |
 | [0010](0010-research-privacy-filter-policy.md) | Research Privacy Filter と Query 最小化の方針 | Approved |
 | [0011](0011-research-provenance-model.md) | Researchの出典追跡（Evidence / Claim Provenance）の方針 | Approved |

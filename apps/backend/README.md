@@ -8,6 +8,7 @@ RBAC と Audit（PAW-025）、Task の Lifecycle と永続化（[PAW-032](#agent
 Shared Memory の管理（Owner / Admin の作成・編集・削除・復元、Candidate の承認、Agent の自動昇格の拒否、System Policy の優先。[PAW-046](#shared-memory-administration)、HTTP の Endpoint はまだありません）も実装済みです。
 Research の一時保存（[PAW-050](#research-scratch-store)、24 時間 TTL、期限切れを消す Janitor つき、HTTP の Endpoint はまだありません）と、Research Provider の Adapter Interface（[PAW-051](#research-provider-adapter)、実際の Provider（Direct Web、Docs、GitHub、OpenCode）はまだありません）と、外部の検索へ送る Query の最小化と送信の Audit（[PAW-053](#research-privacy-filter)、Audit の永続化はまだありません）も実装済みです。
 Claim と Source の対応・回答や Task からの追跡（[PAW-052](#evidence--claim-provenance)、HTTP の Endpoint はまだありません）も実装済みです。
+Project の作成・招待制の Membership・Lifecycle（Active / Archived / Pending deletion / Deleted）は [PAW-026](#project-crud--membership--lifecycle) で実装済みです（Service のみ。HTTP の Endpoint と Session はまだありません）。
 
 [Architecture](../../docs/ARCHITECTURE.md) に基づき、最終的に以下の機能を Backend 側で扱います。
 
@@ -41,7 +42,7 @@ Python 側の Package（`pgvector-python`）は使わず、`paw_backend/memory/v
 apps/backend/
 ├─ pyproject.toml          # 依存（完全一致で固定）と Ruff 設定
 ├─ alembic.ini             # Alembic 設定（DB URL は持たない）
-├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0031 は Tool Approval、0033 は Queue / Budget / Loop、0040 は Memory Schema、0046 は Shared Memory Candidate、0050 は Research Scratch、0052 は Evidence / Claim Provenance）
+├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0026 は Project、0031 は Tool Approval、0033 は Queue / Budget / Loop、0040 は Memory Schema、0046 は Shared Memory Candidate、0050 は Research Scratch、0052 は Evidence / Claim Provenance）
 ├─ paw_backend/
 │  ├─ app.py               # create_app(settings)
 │  ├─ config.py            # PAW_ 環境変数から読む Settings
@@ -58,6 +59,7 @@ apps/backend/
 │  │  └─ queueing/         # Task Queue、Budget、Loop 検知、Escalation の判断（PAW-033）
 │  ├─ memory/              # Memory / Conversation の Model、ACL 条件、vector 型、Pin / Importance 変更の Actor（PAW-040）
 │  │  └─ shared/           # Shared Memory の管理: Service、Candidate、Rule 関数、Policy の優先（PAW-046）
+│  ├─ projects/            # Project、Membership（招待制）、Lifecycle（PAW-026）
 │  ├─ research/providers/  # Research Provider の Adapter Interface と Broker（PAW-051）
 │  ├─ research/privacy/    # Research の Privacy Filter: Query の最小化と外部送信の Audit（PAW-053）
 │  ├─ research/scratch/    # Research Scratch Store: 24 時間 TTL の一時保存と、期限切れを消す Janitor（PAW-050）
@@ -302,7 +304,7 @@ Operator の 6 操作は次のように解釈しています（[要件](../../RE
 | `task_logs` | 試行ごとの Log（`debug` / `info` / `warning` / `error`）。行は書いた Run（`attempt` と `retry_count`）を持つ。Index は `(task_id, attempt, seq DESC)`（下記の `restore`） |
 | `task_events` | Append-only の履歴。全遷移について、Command、遷移前後の状態、`wait_reason`、Actor（`user` / `system` / `policy` と User の UUID）、理由、その時点の Step 名、`task_version`、Event 後の Run（`attempt` と `retry_count`。Start では Worker の Run） |
 
-- `project_id`、`created_by`、`actor_id` は UUID だけを持ち、外部キーはありません。projects の Table がまだ存在せず、`users`（PAW-021、Revision `0021`）は Migration の順序が統合後に決まるためです（両方が揃った後の Revision で外部キーを追加します）。
+- `project_id`、`created_by`、`actor_id` は UUID だけを持ち、外部キーはありません。`projects`（PAW-026、Revision `0026`）と `users`（PAW-021、Revision `0021`）は、この Schema の Revision より後にできた Table です（外部キーを付ける後の Revision の手順は「[Project CRUD / Membership / Lifecycle](#project-crud--membership--lifecycle)」の「他の領域との関係」にあります）。
 - **引数の検証（`TaskService` のすべての Public メソッド）**: すべての引数を、DB を使う前（Session を開く前）に検査し、型や値が誤っていれば固定文言の `InvalidCommandArgumentError` で拒否します（エラー文に値は含めません）。`AttributeError`、`TypeError`、SQLAlchemy の `StatementError`、`DBAPIError` として漏れることも、黙って成功することもありません（以前は、偽と評価される `invocation_id`（`""` や `0`）が黙って新しい ID に置き換わっていました）。
   - **ID**（`task_id`、`project_id`、`created_by`、`invocation_id`）は `uuid.UUID` です。**文字列の UUID は解釈せずに拒否します**（簡単さを優先した判断です。ID は Event や Snapshot が返す `uuid.UUID` をそのまま使います）。`invocation_id` は `None`（自動採番）か UUID です。`step_id` は 1 から 9223372036854775807（`BIGINT` の識別列で、1 から始まる）の `int` です。
   - **Enum**（`command`、`wait_reason`、Step / Tool 呼び出しの `status`、Log の `level`、Review の状態、Evaluator の結果、PR の状態）は、Member か、その直列化した値（ちょうど `str` 型。`"stop_now"` など）を受け付け、以降は Member に揃えて使います。`str` の派生、別の Enum の Member（同じ文字列でも）、bytes、数値、`None`（必須のもの）、未知の値は拒否します。`Actor(kind, id)` も同じ規則で、`kind` は Member かその値、`id` は `uuid.UUID`（User だけが持つ）です。`finish_step` / `finish_tool_invocation` の `status` は、終了を表す値だけを受け付けます。`plan_transition` も、`wait_reason` が `WaitReason` でも値でもなければ、状態に関係なく拒否します。
@@ -721,7 +723,7 @@ Application 起動時に一度、接続 User の権限を確認し、**`WARNING`
 - Repository の ACL の保存と解決は呼び出す側（PAW-027 など）の責任です。この Backend は、渡された `RepoAcl` を判定するだけです。
   Override が Project の Role を広げてよいか、User 単位の許可リストを持つかは、要件が定めておらず、Decision 0004 で Human が「狭めるだけ・権限の集合」で承認しました（2026-09-25）。
 - `Scope.SELF` の Capability（`chat.use`、`memory.use` など）は `Project` の状態と Member 資格を見ません
-  （たとえば Pending deletion の Project の Chat、Member から外された後の Memory）。Project との関係のモデル化は PAW-026 で行います。
+  （たとえば Pending deletion の Project の Chat、Member から外された後の Memory）。Project との Member 関係は PAW-026 の `project_members` にありますが、これらの Capability の判定はまだ Member 資格を見ません（[Project CRUD / Membership / Lifecycle](#project-crud--membership--lifecycle)）。
 - `tests/test_authz_routes.py` が調べるのは `/api/v1` の Route だけで、FastAPI の内部（`effective_route_contexts`）に依存します。Method の一覧を持たない Route（`Mount` など）は Method `*` の 1 操作として報告し、見逃しません。
 - `create_app` は既定の Provider と Directory を組み込みます。PAW-022 が `install_authz` を呼んで差し替えるまで、全 Endpoint が 401 です。
 - 重要操作の Step-up 認証の項目は Audit にありません（PAW-023 で追加します）。
@@ -1249,7 +1251,7 @@ Actor を示さない変更は `memory_metadata_changes.actor_type` の NOT NULL
 `pinned` / `importance` は Trigger が使う列なので、型を変える Migration は Trigger を作り直す必要があります。
 Permanent / Revalidate など鮮度の設定は Version の不変の列なので、変更は新しい Version になり、その履歴が変更履歴です。
 
-**User / Project / Repo の ID は Foreign Key なし。** Project と Repo の Table はまだありません（PAW-026 / 027）。`users`（PAW-021）はありますが、Migration の順序が統合後に決まるため、この Schema からの外部キーは付けていません。
+**User / Project / Repo の ID は Foreign Key なし。** `projects`（PAW-026、Revision `0026`）と `users`（PAW-021）の Table は、この Schema の Revision より後にできます（Repo の Table はまだありません: PAW-027）。この Schema からの外部キーは付けていません。
 `owner_user_id`、`project_id`、`project_group_id`、`repo_id`、`actor_user_id` は素の UUID Column で、DB は存在を確認しません。
 Backend は検証した ID だけを書いてください。Table ができた後の Migration で Foreign Key を追加できます。
 Task、Repo 解析、Project Decision の出典も、Table がないため `memory_sources.source_ref` の不透明な文字列です。
@@ -1518,7 +1520,7 @@ Migration（上げ下げ、Model との差分、制約）、権限（非 Superus
 | `research_scratch_leases` | 「今使っている」印。`(item_id, holder_id)` が Key。`holder_id` は Task や Worker の実行の UUID |
 
 - **TTL**: `expires_at = created_at + interval '24 hours'` を CHECK 制約で強制します（Generated Column は `timestamptz + interval` が immutable ではないため使えません）。`expires_at` は変更しません。延期は TTL の延長ではなく削除の保留です。
-- **Project / Task の関係**: `project_id` も `task_id` も**素の UUID**で、Foreign Key はありません（projects の Table がまだなく、`task_id` の理由は [Decision 0013](../../docs/decisions/0013-research-scratch-task-relation.md)（2026-09-25 に承認）にあります）。Task を削除しても、削除が調査結果に止められることも、Pin 済みなどの調査結果が Task と一緒に消えることもなく、Item は `task_id` を保ちます（`list_items(project_id, task_id=...)` で読めます）。期限切れの削除は Task と無関係に働きます。`add` は、Task の行を `FOR KEY SHARE` で Lock して、Task が存在し、その `project_id` が同じであることを確認します（存在しない Task と他の Project の Task は区別しません）。**DB は `task_id` の存在を検査しません**（この確認が唯一で、削除された Task を指す `task_id` は残ります）。
+- **Project / Task の関係**: `project_id` も `task_id` も**素の UUID**で、Foreign Key はありません（`projects` は Revision `0026` で、外部キーは後の Revision で付けられます。`task_id` の理由は [Decision 0013](../../docs/decisions/0013-research-scratch-task-relation.md)（2026-09-25 に承認）にあります）。Task を削除しても、削除が調査結果に止められることも、Pin 済みなどの調査結果が Task と一緒に消えることもなく、Item は `task_id` を保ちます（`list_items(project_id, task_id=...)` で読めます）。期限切れの削除は Task と無関係に働きます。`add` は、Task の行を `FOR KEY SHARE` で Lock して、Task が存在し、その `project_id` が同じであることを確認します（存在しない Task と他の Project の Task は区別しません）。**DB は `task_id` の存在を検査しません**（この確認が唯一で、削除された Task を指す `task_id` は残ります）。
 - 全ての Method は `project_id` を受け取り、その Project の中だけで Item を探します。他の Project の ID は「存在しない」と同じ扱いです。
 
 ### 削除の延期
@@ -2052,6 +2054,190 @@ Project 削除時の Provenance の扱いは、Issue [#88](https://github.com/To
 `apps/backend/tests/test_provenance_*.py` と `provenance_support.py` です。標準 `unittest` だけです。
 DB を使わない Test（`records`、`validation`、`rules`、`store_validation`、`store_wiring`、`migration` の一部）と、実 PostgreSQL の Test（`PAW_TEST_DATABASE_URL` が未設定なら Skip）があります。
 期待値は SQL で用意して SQL で確かめ、Store の別の Method には頼りません。並行の Test は、別の接続で Lock を持たせて「待っている」状態を確かめ、機械の速さに頼りません。
+
+## Project CRUD / Membership / Lifecycle
+
+[PAW-026](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/23)（Revision `0026`）で実装しました。設計は [要件](../../REQUIREMENTS.md)の「Project roles and membership」「Project lifecycle」「New Project defaults」と
+[Decision 0004](../../docs/decisions/0004-rbac-capability-and-audit-policy.md)（承認済み）に従い、要件が決めていない選択は [Decision 0008（承認済み）](../../docs/decisions/0008-project-membership-and-lifecycle-policy.md)にまとめています。
+**Decision 0008 は 2026-09-25 に Human が承認しました。** 招待の期限（14 日）、Member と招待の合計（200）、Project 名と説明の長さ（1〜100 文字、2,000 文字）は暫定値として承認されました。Project 名と説明の長さは DB の CHECK 制約にも書かれているため、変えるには新しい Migration と `models.py` の変更が要ります（`limits.py` の定数だけでは足りません）。Member と招待の合計は `limits.MAX_MEMBERS_PER_PROJECT` で、招待の期限は `domain.invite_expiry` で決まり、どちらも Migration は要りません（詳しくは Decision 0008 の「背景」）。
+**HTTP の Endpoint はありません**（Session は PAW-022）。`ProjectService` は、認証済みの `Principal` を受け取り、`Authorizer` で判定します。
+
+| ファイル | 内容 |
+| --- | --- |
+| `models.py` | `projects`、`project_members`、`project_task_stops` の Model |
+| `limits.py` | 上限と時間の定数（名と説明の長さ、30 日は DB の CHECK 制約と一致することを Test が検証。招待の期限 `INVITE_TTL` は記録だけで、実際の値は `domain.invite_expiry`） |
+| `records.py`、`errors.py` | 返す値（`Project`、`Member`、`PendingInvite`、`PurgeResult`）、状態の Enum、型付きの Error |
+| `validation.py` | 引数の検証（DB を使わない純粋関数） |
+| `domain.py` | Lifecycle と Membership の規則（純粋関数。状態遷移の表、30 日、招待の期限、最後の Manager） |
+| `store.py` | SQL（1 文 1 関数。Transaction・Lock・Timeout・認可は持たない） |
+| `service.py` | `ProjectService`（Transaction、Lock、認可、規則の組み立て。Clock は注入） |
+| `task_stop.py` | `ProjectTaskStopper`: Delete 開始で記録された Task 停止の要求を実行する Processor（[Delete 開始時の Task 停止](#delete-開始時の-task-停止outbox-と-processor)） |
+| `transaction.py` | Lock Timeout 付きの Transaction（`ProjectService` と `ProjectTaskStopper` が共有する） |
+
+### Table
+
+| Table | 内容 |
+| --- | --- |
+| `projects` | Project 1 件。`name`（1〜100 文字、前後に空白なし）、`description`（なし、または 1〜2000 文字）、`status`（`active` / `archived` / `pending_deletion` / `deleted`）、`created_by`、`created_at`、`updated_at`、`deletion_started_at`、`deletion_scheduled_at`、`deleted_at` |
+| `project_members` | 受諾済みの Member（`status = 'active'`）か招待（`status = 'invited'`）。`(project_id, user_id)` が Key で、1 人が 1 Project に持てる行は 1 つ。`role`（`manager` / `contributor` / `viewer`）、`invited_at`、`invite_expires_at`、`joined_at` |
+| `project_task_stops` | 「この Project の Task を止める」要求（Outbox）。`project_id` が Key で 1 Project に 1 行。`requested_at`、`processed_at`（未処理の間は `NULL`）。`begin_deletion` が Project の状態を変える**同じ Transaction で**書く。部分 Index `ix_project_task_stops_open`（`processed_at IS NULL`）が未処理の要求を古い順に引く |
+
+- **Repo なしで作れます。** `projects` に Repository の列はありません（Repo の紐付けは PAW-027）。作成には Project 名だけが要り、作成者が最初の Manager になります。
+- **Pending deletion は 30 日。** `deletion_scheduled_at = deletion_started_at + interval '720 hours'` を CHECK 制約で強制します（`interval '30 days'` はセッションの Time Zone の暦日で、夏時間の切り替えで 1 時間ずれるため時間で書きます）。
+- **削除しても行は残る。** `projects` は DELETE しません（Application の Role にも DELETE を与えていません）。Deleted は墓石で、名前は `Deleted Project`、説明は消去、`id`・作成者の不透明な ID・時刻は残します。
+- CHECK 制約: 状態と時刻の対応（`deletion_*` は Pending deletion と Deleted のときだけ、`deleted_at` は Deleted のときだけ、招待の期限は招待のときだけ、`joined_at` は受諾済みのときだけ）を DB が強制します。
+- **Foreign Key**: `projects.created_by → users.id`（`ON DELETE SET NULL`）、`project_members.project_id → projects.id`（`ON DELETE CASCADE`）、`project_task_stops.project_id → projects.id`（`ON DELETE CASCADE`）、`project_members.user_id → users.id`（`ON DELETE RESTRICT`: Member や招待のある User は物理削除できません。User の削除の流れは先に Member を外します）。
+  **`users`（Revision `0021`）が鎖の前にあることが必要です。**
+- Migration `0026` の `down_revision` は `0052` です（鎖は `0001 → 0025 → 0032 → 0040 → 0021 → 0033 → 0031 → 0050 → 0046 → 0052 → 0026`）。`0021`（`users`）が `0026` より前にあることが必要です（`project_members` が `users` を参照します）。
+- **Application Role の権限**（`grant_app_privileges`、`test_projects_grants.py` が実 DB で確認）: `projects` は SELECT / INSERT と、UPDATE は `name`・`description`・`status`・`updated_at`・`deletion_started_at`・`deletion_scheduled_at`・`deleted_at` の 7 列だけ（DELETE なし。`id`・`created_by`・`created_at` は書き換えられません）。
+  `project_members` は SELECT / INSERT / DELETE と、UPDATE は `role`・`status`・`joined_at`・`invite_expires_at` だけです。
+  `project_task_stops` は SELECT / INSERT と、UPDATE は `requested_at`・`processed_at` だけです（DELETE なし。要求は「いつ Task に停止を求めたか」の履歴で、`project_id` も書き換えられません。再度の Delete 開始は同じ行への `INSERT ... ON CONFLICT DO UPDATE`、Processor は `processed_at` の更新）。TRUNCATE と Schema の変更は誰にも与えません。`users` は読むだけです（`0021` の権限）。
+  停止の Processor が読む `tasks`、Task を止める `TaskService` と `TaskQueue` の権限は、PAW-032 / PAW-033 の Migration のものです（`test_projects_grants.py` が Processor の Test も同じ Role で実行し、足りることを確認します）。
+  Migration に加えて、`tests/test_projects_grants.py` は Service の Test を全てこの Role で実行します。
+- `0026` の FK のうち 3 つは `ALTER TABLE ... ADD CONSTRAINT` の手書きの文で付けています。既存の Test（`test_task_persistence.OfflineMigrationTest`）が、鎖全体の SQL に `FOREIGN KEY(project_id)` の文字列がないことで「`tasks` に外部キーがない」ことを確かめているためです（上の 3 つは `projects` の Key で、`tasks` とは無関係）。統合時にその Test を `tasks` の DDL に絞ることを勧めます。
+
+### Lifecycle
+
+```text
+Active ⇄ Archived
+   ╲        ╲
+    ╲        ╲ Delete 開始（確認: Project 名の入力）
+     └────────→ Pending deletion（30 日）──→ Deleted（Purge。墓石）
+                     │
+                     └── 復元（30 日以内）→ Archived
+```
+
+| 操作 | 許可する人（`project.lifecycle.manage`） | 遷移 |
+| --- | --- | --- |
+| `archive` | Manager、Owner、Admin | Active → Archived |
+| `unarchive` | 同上 | Archived → Active（**Archived からの復帰**） |
+| `begin_deletion(confirm_name)` | 同上 | Active / Archived → Pending deletion。`deletion_started_at = now`、`deletion_scheduled_at = now + 30 日`。**同じ Transaction で** Task 停止の要求（`project_task_stops`）を書く（下記） |
+| `restore` | 同上 | Pending deletion → **Archived**（`now < deletion_scheduled_at` の間だけ。Manager が 1 人もいなければ拒否） |
+| `purge_expired(now)` | Backend の Janitor だけ（Actor なし） | `now >= deletion_scheduled_at` の Pending deletion → Deleted。Member と招待の行を全て削除 |
+
+- 遷移の表は `domain.plan_transition` にあり、`tests/test_projects_domain.py` が 5 操作 × 4 状態の全 20 通りを固定しています。**すでにその状態にある操作は成功して何も書きません**（`updated_at` も 30 日も動かない）。それ以外の組み合わせは `IllegalTransitionError` です。
+- Archived は読み取り専用（Policy: `project.read` と Lifecycle だけ）、Pending deletion は Lifecycle だけです（Member のアクセスは止まります）。Deleted は全ての操作で「存在しない」です。
+- Delete 開始は `confirm_name` が Project 名と**完全に一致**しなければ `ConfirmationMismatchError`（認可の後に検査するので、権限のない人には名前の一致を教えません）。
+- Purge は **`now >= deletion_scheduled_at`** から（復元は `now < deletion_scheduled_at`。同じ瞬間に両方が真にはなりません）。1 回の Transaction で、期限の古い順に最大 `batch_size`（1〜500、既定 50）件を `FOR UPDATE SKIP LOCKED` で選び、各 Project の Member と招待を全て削除して墓石にします。
+  Lock 中の Project は待たずに飛ばし、`has_more` は「まだ期限の来た Project が残っている」（Lock 中を含む）ことを示します。二重に呼んでも安全です。Scheduler は含みません（別の Issue）。
+- **他の領域のデータは、この Issue では消しません。** Chat、Memory、Task、Repo の紐付け、調査結果の `project_id` は素の UUID で、各領域の Service が `PurgeResult.purged` の ID を使って消します（各 Issue へ引き継ぎます。調査結果の扱い（消す・残す・匿名化）は Issue [#88](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/88) で決めます）。
+  GitHub、Local checkout などの外部資源は消しません（要件）。
+
+### Delete 開始時の Task 停止（Outbox と Processor）
+
+要件は Delete 開始の時点で「実行中Taskをsafe-stop」「新規Agent Task停止」と定めます（[Decision 0008](../../docs/decisions/0008-project-membership-and-lifecycle-policy.md) の 8。2026-09-25 に承認）。
+`ProjectService.begin_deletion` は Project の行を更新するだけでは Task を止められない（Task Service と Queue は別の部品で、外部の Worker は Transaction の中から止められない）ため、2 段で実現します。
+
+1. **要求（同じ Transaction）。** `begin_deletion` が、Project の状態を変える Transaction で `project_task_stops` の行を書きます（`requested_at = now`、`processed_at = NULL`）。両方が Commit されるか、どちらも Commit されません（Test は要求の書き込みを失敗させ、Project が Active のまま残ることを確認します）。
+   何も書かない再度の呼び出し（すでに Pending deletion）と、失敗した Delete 開始（確認の不一致、権限なし、状態の誤り）は行を書きません。復元してからの再度の Delete 開始は、同じ行を新しい要求にします（`requested_at` を更新し、`processed_at` を消す）。
+2. **実行（Processor）。** `ProjectTaskStopper(database, task_service, task_queue)`。Orchestrator（PAW-034。この Issue にはありません）が、`pending_project_ids()` が返す Project のそれぞれについて `stop_project_tasks(project_id)` を、`TaskStopResult.done` になるまで呼びます。
+
+`stop_project_tasks` の動き。
+
+- Project が **Pending deletion**（または Purge 済みの Deleted）のときだけ、その Project の active な Task（queued / running / waiting / paused / evaluating）を、最大 `batch_size`（既定 100、1〜500）件、古い順に止めます。Active / Archived の Project（復元された、または Delete していない）には何もしません。誤った呼び出しで、生きている Project の Task を止めることはありません。
+- 各 Task について、まず PAW-032 の **Cancel** を `TaskService.execute` で発行し（Actor は `policy`、理由は固定文 `Project deletion started`）、Task が終了してから Queue の Entry を `TaskQueue.cancel` します（Claim できなくなり、Lease を持つ Worker は失う）。**Task の状態は直接書きません**（状態遷移表、`task_events` の履歴、Listener が全て適用されます）。
+  **Task が先、Entry が後です**（6 回目のレビュー）。2 つは別々の Commit で、間で Process が落ちる、Error になる、Stopper が Cancel される、Restore が Commit される、ことがあります。Entry を先に取り消すと、その隙間に Restore が入った Project の queued の Task は Entry を失い、二度と実行されません（次の実行は復元済みの Project に何もせず、要求を処理済みにします。Entry のない queued の Task は enqueue 前の普通の状態でもあるため、後から見分けられません）。Task が先なら、まだ active な Task は **どの失敗でも Entry を持ち続けます**（Cancel の Error、`TaskConflictError`、Stopper の Cancel、間の Restore）。Entry を Cancel するのは、Task が終了しているとき（この呼び出しの Cancel が終わらせた、または元から終了していた）だけです。残る隙間は「終了した Task と active な Entry」で、Project が削除中なら次の実行の Sweep が拾います。
+  隙間の後の中断は、同じ呼び出しの中でも **状態で** 整合させます（`_reconcile_entry`）。Cancel か Entry の Cancel が何かを送出したとき（Cancel、Listener が Commit の後に Cancel されて `execute` が例外になる場合を含む）、Task を 1 回読み、終了していれば Entry を Cancel してから元の Error を再送出します（まだ active な Task と Entry には触りません）。中断の `except` の中で動くので Cancel 1 回では止まらず、`RECONCILE_TIMEOUT_S`（5 秒）で有界です。整合の失敗や時間切れは元の Error を置き換えません。
+- **Cancel を使う理由。** Cancel は成果物（branch / worktree / 途中成果）を保持し、Worker は現在の Step を安全な区切りで自分で閉じられます（`finish_step`。新しい Step は始められません）。全ての active な状態で使えます。Stop Now（実行中の Step を即時に中断する緊急停止）は queued と paused には使えず、Pause は復元されない限り Resume されない Task を残します。
+- **Queue の Entry も Project で掃除します（Sweep）。** Task の一覧は active な Task だけです。別の呼び出しが Task を Cancel → Restart し、新しい Attempt を enqueue すると、Processor 自身の Cancel が再開された Task を終わらせ、新しい Entry だけが終了済みの Task の後ろに残ります。中断された停止（上）も、Cancel の済んだ Task の Entry を残しえます。Task が終了しているので、Task の一覧では二度と見つかりません。
+  そのため、Task の停止の後に、Project の Task のうち **終了している Task** が持つ active な Entry（queued / claimed）を Project で引き（`queue_entries` と `tasks` の Join。最大 `batch_size` 件）、`TaskQueue.cancel` で Cancel します。まだ active な Task の Entry は Sweep では取り消しません（その Task は次の実行で Cancel と Entry の順に止めます。復元されたときに実行できる Entry を残すため）。処理済みになった後に現れた Entry も、再実行の Sweep が拾います。Sweep は先に Project を読み直し、Pending deletion / Deleted でなければ何もしません（復元済みの Project の Entry は残ります）。Queue の状態機械は変えません（既存の `cancel` と読み取りだけ）。終了済みの Task の Entry を Cancel すると、その Entry を持つ Worker は Lease を失います（Project は削除中で、Task の結果は Task の側に残るため許容）。`cancelled_entries` はこの Entry も数えます。
+- active な Task が 1 つも残っておらず、Project の Task に active な Queue の Entry も無いことを、Project の行の `FOR SHARE` Lock の下で確認してから `processed_at` を書きます（Project は、その間に復元も再削除もされません）。残っているとき（件数が `batch_size` を超えた、他の書き込みと競合した、Task がまた active になった、Sweep の後に Entry が enqueue された）は要求を開いたままにし、`done` は `False` で、次の実行が残りを止めます。
+- **冪等で再実行できます。** 2 回目は何も変えず（`TaskStopResult(project_id, (), 0, done=True)`）、最初の `processed_at` も変わりません。一覧と Command の間に Task が終わった場合（`IllegalTransitionError`）は数えません（Entry が残っていれば Cancel します。Task は終了済みです）。競合（`TaskConflictError`）は Task も Entry もそのまま残し、次の実行に任せます。それ以外の Error は、要求を開いたまま伝わります。
+- 認可も Audit も持ちません（`purge_expired` と同じ Backend 内部の部品）。止められた Task には `task_events` の行が残ります。
+
+制限（[Decision 0008](../../docs/decisions/0008-project-membership-and-lifecycle-policy.md) の 8。方針は承認済みで、残る窓は Issue [#83](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/83) で閉じます）。
+
+- **Delete 開始の後に作られた Task と Entry。** `project.task.run` は Archived / Pending deletion で Authorizer が拒否します（PAW-025）。残るのは、認可の後、Delete 開始の Commit の前後に `TaskService.create_task`（または Retry / Restart）や `TaskQueue.enqueue` が実行される競合だけです（`TaskService` も `TaskQueue` も Project の状態を見ません）。
+  この Issue は、その Task と Entry（終了済みの Task の Entry も）を **Processor の再実行で止めます**（Processor は Project の状態から動きます。Test: `test_a_task_created_after_the_deletion_began_is_stopped_on_a_rerun`、`test_an_entry_of_a_finished_task_is_found_by_project_on_a_rerun`、`test_a_queue_entry_created_by_a_raced_restart_does_not_survive`）。Orchestrator は Pending deletion の Project にも通常の周期で `stop_project_tasks` を呼んでください。競合そのものを閉じるには、Task Lane（PAW-032 / PAW-034）の `create_task` / Retry / Restart と Queue Lane（PAW-033）の `enqueue` が、Insert と同じ Transaction で Project の行を `FOR SHARE` で Lock し、Active 以外を拒否する必要があります。Decision 0008 の 4 で Human が方針を承認しており、実装は Issue #83（PAW-034 の前後）で行います（この Issue は Task Lane と Queue Lane を変えません）。Orchestrator が削除待ちの Project にも呼ぶことは、PAW-034（[#30](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/30)）の受け入れ条件に追記済みです。
+- **Restore との競合。** 1 回の呼び出しは、最大 `batch_size`（既定 100）件の Task（Sweep は Entry）を 1 回の読み取りで一覧してから 1 件ずつ止めるため、その途中で Restore が Commit されることがあります。そこで Processor は **Task 1 件ごと**（Sweep は Entry 1 件ごと）の前に Project を読み直し（Lock のない読み取りが 1 件につき 1 回増えるだけ）、Pending deletion / Deleted でなくなった最初の読み取りで残りを止めます。Restore の後にもう一度 Delete が始まった Project は、状態を見るので止め続けます。
+  Restore の前に止めた Task と Entry は止まったままで（Restart できます）、Restore の後の Task と Entry には触りません。復元された Project の要求は意味を失ったものとして処理済みになり、`done` は `True` です。
+  **残る窓は、その 1 件の Command が終わるまでです。** Project の読み取りと Command は 1 つの原子的な操作ではないため、読み取りの後、その Task の Cancel と Entry の Cancel が終わるまでの間に Restore が Commit されると、その 1 件（Sweep なら Entry 1 件）は止まります。Cancel が先なので、Cancel が終わらせなかった Task（Error、競合、Stopper の Cancel）は復元された Project で Entry を持ち続けます（Entry を先に取り消すと、復元された Task が Entry のない queued のまま残り、二度と実行されませんでした）。
+  閉じるには、Task Service と Queue が Command を Project の行の `FOR SHARE` の下で実行する必要があります（Decision 0008 の 5。Issue #83 で行い、この Issue は両方の Lane を変えません）。Processor が別の Transaction で `FOR SHARE` を持ったまま 2 つの部品を呼ぶ案は採りません。Stopper 1 つにつき Pool の接続を 2 本使い、この Module が時間を制限できない Task Service と Listener が動く間、Restore が待たされる（Lock timeout で `ProjectBusyError`）ためです。Test: `test_a_restore_between_two_tasks_stops_the_batch`、`test_a_restore_after_the_ids_were_listed_cancels_nothing`、`test_a_restore_between_the_cancel_and_the_entry_cancel_finishes_that_task`、`test_a_restore_between_two_stray_entries_stops_the_sweep`、`test_a_restore_after_the_stray_entries_were_listed_cancels_none`、`test_a_project_that_is_deleted_again_keeps_being_stopped`。
+- **Cancel と Entry の Cancel の間の隙間（6 回目のレビュー。Decision 0008 の 8）。** 上の順序と整合で、1 つの故障（Error、Stopper の Cancel、Listener の Cancel）はどれも閉じます。閉じないものが 2 つあり、いずれも別 Lane の変更（2 つの Command を 1 つの Transaction にする、条件付きの Queue の Cancel、または Claim が終了済みの Task の Entry を飛ばす規則）が要り、Issue #83 で行います。
+  (a) 別の呼び出しが、Stopper の Cancel と Entry の Cancel の間に Task を Restart すると、再開された Task は Entry を失います。Project が削除中なら次の実行が active な Task として止めます（Restore も競合して初めて問題になります。`test_a_restart_between_the_cancel_and_the_entry_cancel_is_stopped_later`）。
+  (b) 2 つの Commit の間で Process が落ちる（または整合が失敗する）**うえに** 次の実行の前に Restore が Commit されると、`cancelled` の Task に active な Entry が残ります。Claim した Worker が `start` を拒否される、動かない Entry です。復元された Project では、Stopper は何も触りません（完了する Worker が、完了した Task の claimed の Entry を一瞬持つため）。Task 自体は「1 件は止まる窓」（上）と同じで、Restart できます（整合が失敗して Entry が残る場合: `test_a_failing_reconciliation_does_not_hide_the_original_error`）。
+- `tasks.project_id` に Index がないため（PAW-032）、Task の一覧は `tasks` の Sequential Scan です。Task 数が増えたら、Task Lane で `(project_id, state)` の Index を足してください。
+- 実行中の Process への停止の伝達は Orchestrator / Worker の責務です。Cancel は状態を `cancelled` にして Lease を失わせますが、Process を殺しません（Worker は Step の区切りで状態を見て止まります）。
+
+### Membership（招待制）
+
+- **誰も自分では入れません。** Manager が `invite_member(project, user, role)` で招待し（存在して `active` の User だけ）、招待された人が `accept_invite` で受諾して Member になります。`decline_invite` は行を削除します。System の Owner / Admin も、招待されなければ入れません。
+- 招待は **14 日**（`domain.invite_expiry`）。`invite_expires_at` ちょうどからは受諾できません（`InviteExpiredError`）。期限切れの招待は、再度の `invite_member` で置き換わります。有効な招待がある人、Member の人への再招待はエラーです（期限を更新しません）。
+- 招待された人は `list_my_invites` で自分宛ての有効な招待を見られます（Project 名、Role、期限）。受諾するまで、Project も Member 一覧も見えません（`roles_of` にも入りません）。
+- Manager は `remove_member`（招待の取り下げも）、`change_role` で Member を管理します。**最後の受諾済み Manager は、退出・削除・降格できません**（`LastManagerError`。招待中の Manager は数えません）。
+  例外は、Pending deletion の Project からの `leave_project`（削除中なので許可）です。その場合、Manager のいない Project の復元は `NoManagerError` で拒否されます。
+- 1 Project の Member と有効な招待の合計は 200 までです（`MemberLimitError`）。
+- Member の一覧は Member 全員が見られます（`project.read`）。有効な招待の一覧は Manager だけです（`project.members.manage`）。
+
+### 認可と Audit
+
+| 方法 | 操作 |
+| --- | --- |
+| `Authorizer`（Capability を Audit に残す） | `get_project`、`list_members`（`project.read`）、`list_invites`、`invite_member`、`remove_member`、`change_role`（`project.members.manage`）、`rename_project`、`set_description`（`project.settings.manage`）、`archive`、`unarchive`、`begin_deletion`、`restore`（`project.lifecycle.manage`） |
+| **本人確認だけ（Audit を書かない）** | `create_project`、`accept_invite`、`decline_invite`、`leave_project`、`list_projects`、`list_my_invites`。`system_role` が Owner / Admin / User の `Principal` だけ（`SYSTEM` は拒否）。受諾・辞退・退出は Actor 自身の行だけを対象にします |
+| Backend 内部（Actor なし） | `purge_expired`（Janitor）、`roles_of`（`Principal.project_roles` を作る PAW-022 用） |
+
+- **`Principal.project_roles` を信用しません。** Service は、Actor の Role を同じ Transaction で `project_members` から読み直し（受諾済みの行だけ）、それを使って `Authorizer` に渡す `Principal` を作り直します。
+  Member から外された後の古い `Principal`、自分で Manager と申告した `Principal`、招待中なのに Manager と申告した `Principal` は、効きません。`system_role` と `user_id` だけを呼び出し側から受け取ります。
+- **存在を明かしません。** 認可で拒否され、かつ Actor が受諾済みの Member でないときは、存在しない Project と同じ `ProjectNotFoundError` です（Audit は Authorizer が書きます）。Owner / Admin が Lifecycle 以外を試みた場合も同じです。
+  Member への拒否は、状態のため（Archived の変更、Pending deletion の閲覧）は `ProjectStateError`、それ以外は `ProjectPermissionDeniedError`（`reason` は固定の Reason Code。`audit_unavailable` は API 層が 503 にします）です。
+- **一覧は自分の Member の行だけ**です（Owner / Admin も同じ）。Pending deletion の一覧は、復元できる Manager の Project だけです。Owner / Admin が全 Project を探す手段はこの Issue にありません（Decision 0008。管理者向けの全 Project 一覧 API は Issue [#84](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/84) で実装します）。
+- Audit の行は「判定」を記録します。許可された操作が後から失敗しても（規則の違反、DB の Error）、Audit の行は残ります。
+- `Scope.SELF` の Capability（`chat.use`、`memory.use` など）は、今も Member 資格と Project の状態を見ません。Membership の Table と `roles_of` を用意しただけで、絞り込みは Project の Chat や Memory を実装する Issue が行います。
+
+### 同時実行
+
+- Project を変える操作（設定、Member、Lifecycle、Purge）は、Transaction の最初に **Project の行を `SELECT ... FOR UPDATE`** で Lock し（待ちます）、それから存在・認可・規則を評価します。1 Project の変更は直列になり、
+  2 人の Manager が同時に退出しても、最後の 1 人は残ります（`tests/test_projects_concurrency.py`）。Lock 待ちは `lock_timeout_ms`（既定 3000、1〜60000）で `ProjectBusyError` になります。読み取りは Lock も待ちもしません。
+- `Authorizer` の呼び出しは、この Lock を持ったまま行います（Audit の書き込みは Authorizer の Timeout で有界）。
+- Task 停止の Processor は、Task の Command を Project の行の Lock なしで（Task Service 自身の Transaction で）実行し、要求を完了にする最後の短い Transaction だけ Project の行を `FOR SHARE` で Lock します（Lifecycle の操作は `FOR UPDATE` なので互いに待ちます。待ちは同じ `lock_timeout` で `ProjectBusyError`）。
+- Clock は 1 回の操作で 1 度だけ読みます（`validate_instant`）。
+
+### 上限と入力の検証
+
+Project 名は 1〜100 文字（前後の空白は除き、内側は保持）、説明は 2000 文字まで（空・空白だけは「なし」）。長さは Unicode の Code Point で数えます。制御文字（名前は改行・Tab も）、Surrogate、行・段落の区切り、双方向の書式制御文字は拒否します。
+ID は `UUID` か正規の文字列だけです。Role と Status は Enum の Member だけで、`"manager"` の文字列は受け付けません（`bool` は `int` でなく、naive な `datetime` は時刻でもありません）。
+`list_projects` の `limit` は 1〜200（既定 50）、`offset` は 0〜100000。Error の Message は固定文字列で、入力の内容・ID・DB の Message を含みません。DB の Error（接続断など）は加工せず伝わります。
+
+### 他の領域との関係
+
+`tasks`（PAW-032）、Memory（PAW-040）、Research Scratch（PAW-050）などの `project_id` は素の UUID のままで、この Issue はそれらの Table を変えません。**後の Migration で外部キーを付けるには:**
+Project を持たない孤児の行がないことを確認し、`ALTER TABLE <table> ADD CONSTRAINT fk_<table>_project_id_projects FOREIGN KEY (project_id) REFERENCES projects (id) NOT VALID` の後に `VALIDATE CONSTRAINT`（長い Lock を避けるため）。
+`ON DELETE` は `RESTRICT` を勧めます（Project の行は削除しないので、実際には働きません）。Purge では行が消えないため、他の領域の削除は各領域の Service が `PurgeResult.purged` を使って行います。
+
+### 実装の由来
+
+`domain.py`（7 関数）と `store.py`（20 関数）は、仕様（Docstring と `tests/test_projects_*.py`）を先に書き、関数の本体を別の実装者に埋めさせる設計です。Model、Migration、権限、`validation.py`、`service.py` は仕様の作者が実装しています。
+**最終的な実装は Claude の参照実装です。** ローカルの Qwen3-Coder-30B-A3B に、27 関数の実装を 2 回（各約 265 回の Tool 呼び出し）任せましたが、収束しませんでした（1 回目は `domain.py` の書式を壊し、`store.py` は未着手、2 回目は `domain.py` の Test の約半数が通らないまま、`store.py` に届きませんでした）。
+AGENTS.md のとおり、同じ失敗を繰り返したのでエスカレーションし、仕様の Docstring を保ったまま、Claude の参照実装（変異 38 個をすべて Test が検出）に置き換えています。ローカルモデルの成果物は、最終物に含まれていません。
+レビューの指摘（Delete 開始時の Task 停止）への対応で足した `store.py` の 9 関数（4 回目のレビューで Project から Queue の Entry を引く 2 関数、6 回目のレビューで Task が終了しているかを読む 1 関数を追加）、`task_stop.py`、`transaction.py` とその Test は、最初から Claude が書いています（ローカルモデルは関与していません）。Test は変異 15 個（要求を書かない、別 Transaction に移す、完了を確認せずに記録する、完了の確認を Project の Lock の外で行う、生きている Project の Task も止める、Queue を取り消さない、他の Project の Task を含める、終了した Task を active と数える、全 Error を握りつぶす、再度の要求を上書きしない、`processed_at` を上書きする、Stop Now を使う、理由を落とす、並びと件数の上限を外す）をすべて検出しました。4 回目のレビューの Sweep には変異 6 個（Sweep を外す、`processed_at` の前の Entry の確認を外す、Sweep が Project の状態を見ない、Sweep の件数の上限を外す、Entry を Project で絞らない、claimed の Entry を数えない）を足し、すべて検出しました。5 回目のレビューの Restore 対応（`_is_stopping`）には変異 5 個（Task の読み直しを外す、Sweep の読み直しを外す、最初の 1 件だけ読み直す、Deleted を停止の対象から外す、Entry と Cancel の間でも止める）を足し、すべて検出しました。6 回目のレビューの順序と整合には変異 5 個（整合を外す、整合が状態を見ずに Entry を Cancel する、整合の Error が元の Error を隠す、整合の時間制限を外す、Sweep が active な Task の Entry も Cancel する）を足し、すべて検出しました（順序を戻すと新しい Test の 13 個が失敗します）。
+
+### 制限と未確認の点
+
+- HTTP の Endpoint、Session は含みません（PAW-022）。作成・受諾・退出は Audit に残りません（Decision 0008 の 5。暫定の作りとして承認され、Capability と Audit の追加は Issue [#82](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/82) です）。
+- 招待を通知する仕組み（Notification、Email）はありません。招待された人は `list_my_invites` で見つけます。User の削除の流れ（Member を外す、所有権の移譲）は PAW-021 以降の Issue です。
+- Purge を定期的に呼ぶ Janitor、Purge 後の他の領域のデータ削除、Task 停止の Processor を呼ぶ Orchestrator（PAW-034）は含みません。Processor 自体は含みます（上の「Delete 開始時の Task 停止」）。Repository の紐付け（PAW-027）と Repo ACL の保存もありません。
+- Project 名の一意性、Project ごとの設定（Agent Policy、Merge Policy など。要件の「New Project defaults」）、Owner / Admin の全 Project 一覧（Issue #84）は含みません。
+- `Authorizer` の呼び出しと Project の Lock は同じ Transaction の中です。Audit の Store が遅いと、その間 Project の行の Lock が続きます（Authorizer の Timeout で有界）。
+- PostgreSQL 18 の実 DB で Test しました。`READ COMMITTED` を前提に、Lock の順序（Project の行が最初）で直列化しています。他の Isolation Level では未確認です。
+
+### Human の承認（2026-09-25）と、後続の Issue
+
+Human は [Decision 0008](../../docs/decisions/0008-project-membership-and-lifecycle-policy.md) の各点を、推奨どおり承認しました。
+
+1. **承認した点。** Delete 開始を Active から許し、Project 名の完全一致の入力を要求すること。復元できる人（`project.lifecycle.manage` を持つ Manager、Owner、Admin。復元先は Archived）。墓石を残す Purge。Membership のルール（辞退・退出は行の削除で履歴を持たない、`users` への Foreign Key `ON DELETE RESTRICT` を含む）。
+2. **暫定値として承認した数値。** 招待の期限（14 日）、Member と有効な招待の合計（200）、Project 名（1〜100 文字）と説明（2,000 文字）。後から変えられますが、名と説明の長さは DB の CHECK 制約にも書かれているため、新しい Migration と `models.py` の変更が要ります。他の数値は Migration が要りません（Decision 0008 の「背景」）。
+3. **Capability を持たない 4 つの操作**（作成、招待の受諾・辞退、退出）は、暫定の作りで承認されました。Capability と Audit の追加は Issue [#82](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/82) で行います（承認済みの Decision 0004 は書き換えず、新しい Decision から `Supersedes` します）。
+4. **Owner / Admin が全 Project を一覧する API**（管理上の Lifecycle 操作の入口）は、Issue [#84](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/84) です。
+5. **Purge 後の他の領域のデータ削除**は、各 Service が `PurgeResult.purged` を使う分担で承認されました。調査結果（Provenance・Scratch など）の扱いは、Issue [#88](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/88) で決めます。
+6. **Delete 開始時の Task 停止**（Decision 0008 の 8）: 停止に Cancel（graceful）を使うこと、Outbox と Processor に分けることを承認しました。Delete 開始の後に作られた Task の競合を閉じる Gate（`create_task` / Retry / Restart / `enqueue` が Project の行を Lock して Active 以外を拒否する）の方針も承認され、実装は Issue [#83](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/83)（PAW-034 の前後。`tasks(project_id, state)` の Index を含む）です。この Issue では入れません。
+7. **`0021` を `0026` より前に置く並び**は、Migration の実装上の順序で、統合時に確認してください。
+
+### Test
+
+`apps/backend/tests/test_projects_*.py`、`projects_support.py` です。標準 `unittest` だけで、`test_projects_domain.py`、`test_projects_validation.py`、`test_projects_service_validation.py` と Model の Test は DB を使いません。
+それ以外は実 PostgreSQL（`PAW_TEST_DATABASE_URL`）を使い、未設定なら Skip します。時刻は注入した Clock で、速度に依存する Test はありません。
+`test_projects_task_stop.py` は Task と Queue を本物の `TaskService` / `TaskQueue` で作り（SQL で読み戻す）、Delete 開始が要求を同じ Transaction で記録すること（失敗させると Project も Active のまま）、Processor が running / queued などの Task を止めて Queue の Entry を取り消すこと、冪等なこと、他の Project の Task と Active / Archived の Project の Task に触れないこと、Delete 開始の後に作られた Task を再実行で止めること、要求が「Task が残っている間は完了にならない」ことを確認します。Cancel → Restart → enqueue の競合（Queue の `cancel` に差し込んだ処理で再現します）で残る Entry が、終了済みの Task の後ろでも Project から見つかって Cancel され（claimed の Entry の Worker は Lease を失う）、Sweep の後に現れた Entry があると要求が開いたままになること、件数が `batch_size` を超えると複数回に分かれること、Sweep の途中で復元された Project の Entry は残ることを確認します。6 回目のレビューの Test（`InterruptedTaskCancelTest`）は、Restore が Cancel の前に Commit され Cancel が失敗する、競合する、Stopper が Cancel されるとき、復元された queued の Task が active な Entry を持ち続けること、Task の Cancel が Entry の Cancel より先であること、Cancel の後の中断（Entry の Cancel の失敗と Cancel、Listener の Cancel）が状態で整合され元の Error が伝わること、整合の失敗が元の Error を隠さないこと、整合が有界なこと、Sweep が active な Task の Entry を残すことを確認します。5 回目のレビューの Restore の Test は、6 件の Task（または Entry）の 1 件目の後に Restore を Commit させ（Task Service と Queue の `cancel` に差し込んだ処理と、一覧の直後に差し込んだ処理で再現します）、止まったのが 1 件だけで残りの Task と Entry が queued のままであること、Delete が再び始まった Project は止め続けることを確認します。`test_projects_grants.py` はこの Test も Application の Role で実行します。
 
 ## 依存 Package
 
