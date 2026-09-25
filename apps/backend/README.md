@@ -578,6 +578,9 @@ Scope を広げる編集は新しい Version で行うため、旧 Version は�
 そのため `memory_versions.pinned` / `importance` は Version の中で更新でき（新しい Version は作りません。本文の編集の楽観ロックと衝突させないためです）、
 変更は `memory_metadata_changes` に追記されます（変更前後の `pinned` と `importance`、`actor_type` / `actor_user_id`、時刻）。
 記録は `memory_versions` の Trigger（`tr_memory_versions_record_metadata_change`）が行うので、書き込む側が省略することはできません（Table の Owner でない Application は Trigger を止められません）。
+Trigger の関数は書き込む側の Session で動き、Application の Role も PostgreSQL 既定の `TEMP` 権限を持つため、同名の一時 Table（や一時 Type `uuid`）で履歴の書き込み先をすり替えられないようにしてあります。
+関数は `search_path` を `pg_catalog, pg_temp`（`pg_temp` を明示して最後に置く）へ固定し、履歴 Table は Trigger を持つ Table と同じ Schema（`TG_TABLE_SCHEMA`）で修飾して書き込みます（動的 SQL）。
+Test は Application の Role で、一時 Table を先に作ってから Pin を変更し、実際の履歴に行が残ることを確認します（`tests/test_memory_grants.py` の `ShadowedRelationTest`）。
 値が変わらない UPDATE は記録しません。`status` と `stale_since` の更新も対象外です。
 Trigger は誰の操作か知らないため、書き込む側が同じ Transaction の UPDATE の前に `metadata_change_actor(actor_type, actor_user_id)`（`paw_backend.memory.metadata`）で Actor を示します。
 Actor を示さない変更は `memory_metadata_changes.actor_type` の NOT NULL で失敗し、UPDATE も取り消されます。設定は Transaction 内だけ有効（`set_config(..., true)`）で、接続 Pool を通じて次の Request へ残りません。

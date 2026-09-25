@@ -35,6 +35,13 @@ once), but "変更履歴は残す": a trigger records every change, with its act
 append-only ``memory_metadata_changes``. The writer names the actor with
 ``paw_backend.memory.metadata.metadata_change_actor``; a change without one fails.
 
+The trigger functions run in the writer's session, and every role holds
+PostgreSQL's default TEMP privilege, which lets a session shadow an unqualified
+table (or type) name with a temporary one. So each function pins its own
+``search_path`` (``pg_catalog, pg_temp``: ``pg_temp`` named explicitly, so that
+it comes last) and reaches its table by the schema of the table the trigger is
+on (``TG_TABLE_SCHEMA``), through dynamic SQL.
+
 The constraint definitions and the triggers repeat the ones in
 ``paw_backend.memory.models`` on purpose (a migration is a frozen snapshot);
 ``tests/test_memory_migration.py`` fails when the two drift apart. Constraint
@@ -110,19 +117,22 @@ DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW EXECUTE FUNCTION paw_check_memory_source_message_conversation()"""
 
 
-# See ``MemoryMetadataChange`` in ``paw_backend.memory.models``.
+# See ``MemoryMetadataChange`` in ``paw_backend.memory.models``, and there for
+# why the function pins its ``search_path`` and names its table by schema.
 _RECORD_METADATA_CHANGE_FUNCTION = """\
 CREATE OR REPLACE FUNCTION paw_record_memory_metadata_change()
-RETURNS trigger LANGUAGE plpgsql AS $$
+RETURNS trigger LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp AS $$
 BEGIN
-    INSERT INTO memory_metadata_changes (
-        memory_version_id, old_pinned, new_pinned, old_importance, new_importance,
-        actor_type, actor_user_id
-    ) VALUES (
+    EXECUTE 'INSERT INTO ' || quote_ident(TG_TABLE_SCHEMA)
+        || '.memory_metadata_changes ('
+        || 'memory_version_id, old_pinned, new_pinned, old_importance,'
+        || ' new_importance, actor_type, actor_user_id'
+        || ') VALUES ($1, $2, $3, $4, $5, $6, $7)'
+    USING
         NEW.id, OLD.pinned, NEW.pinned, OLD.importance, NEW.importance,
         nullif(current_setting('paw.actor_type', true), ''),
-        nullif(current_setting('paw.actor_user_id', true), '')::uuid
-    );
+        nullif(current_setting('paw.actor_user_id', true), '')::uuid;
     RETURN NULL;
 END
 $$"""

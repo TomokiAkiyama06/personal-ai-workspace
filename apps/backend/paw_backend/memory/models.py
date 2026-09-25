@@ -430,18 +430,29 @@ class MemoryVersion(Base):
 # writer names it in two transaction-local settings, see ``metadata.py``. The
 # insert runs with the writer's own rights: the application role holds INSERT
 # on the history table, and no UPDATE or DELETE.
+#
+# The function runs in the writer's session, and every role holds PostgreSQL's
+# default TEMP privilege: a temporary table (or type) named like a table the
+# function uses would be found first through the writer's ``search_path``. So
+# the function pins its own path (``pg_catalog`` first, ``pg_temp`` explicitly
+# last, which also keeps a temporary type from shadowing ``uuid``) and names its
+# one table by schema, taken from the table the trigger is on. The statement is
+# dynamic because a plpgsql ``INSERT`` cannot take a computed schema (and it
+# avoids ``format``: SQLAlchemy's ``DDL`` treats ``%I`` as a placeholder).
 RECORD_METADATA_CHANGE_FUNCTION = """\
 CREATE OR REPLACE FUNCTION paw_record_memory_metadata_change()
-RETURNS trigger LANGUAGE plpgsql AS $$
+RETURNS trigger LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp AS $$
 BEGIN
-    INSERT INTO memory_metadata_changes (
-        memory_version_id, old_pinned, new_pinned, old_importance, new_importance,
-        actor_type, actor_user_id
-    ) VALUES (
+    EXECUTE 'INSERT INTO ' || quote_ident(TG_TABLE_SCHEMA)
+        || '.memory_metadata_changes ('
+        || 'memory_version_id, old_pinned, new_pinned, old_importance,'
+        || ' new_importance, actor_type, actor_user_id'
+        || ') VALUES ($1, $2, $3, $4, $5, $6, $7)'
+    USING
         NEW.id, OLD.pinned, NEW.pinned, OLD.importance, NEW.importance,
         nullif(current_setting('paw.actor_type', true), ''),
-        nullif(current_setting('paw.actor_user_id', true), '')::uuid
-    );
+        nullif(current_setting('paw.actor_user_id', true), '')::uuid;
     RETURN NULL;
 END
 $$"""

@@ -40,6 +40,7 @@ from .memory_support import (
     migrate,
     requires_postgres,
     sync_database_url,
+    version_values,
 )
 from .support import paw_environment
 from .test_migrations import offline_config
@@ -627,6 +628,130 @@ class ApplicationDeniedTest(ApplicationRoleTestCase):
             text("SELECT dimensions FROM embedding_models WHERE id = 'new-model'")
         ).scalar_one()
         self.assertEqual(dimension, 4)
+
+
+@requires_postgres
+class ShadowedRelationTest(ApplicationRoleTestCase):
+    """A session's temporary tables cannot take the place of the triggers' tables.
+
+    PostgreSQL gives every role the TEMP privilege by default, and a temporary
+    table is searched first when a name is not schema-qualified. The trigger
+    functions run in the writer's session with the writer's ``search_path``, so
+    a function that named its table without a schema could be pointed at an
+    empty look-alike: the history row (or the provenance check) would then be
+    written to (or read from) a table that vanishes with the session. Every
+    step here commits, as the real writers do.
+    """
+
+    def setUp(self) -> None:
+        self.conversation = uuid.uuid4()
+        self.message = uuid.uuid4()
+        self.memory = uuid.uuid4()
+        self.version = uuid.uuid4()
+        self.addCleanup(self.remove_rows)
+        with self.engine.begin() as connection:
+            connection.execute(
+                insert(Conversation).values(
+                    id=self.conversation, owner_user_id=uuid.uuid4()
+                )
+            )
+            connection.execute(
+                insert(Message).values(
+                    id=self.message,
+                    conversation_id=self.conversation,
+                    turn_id=uuid.uuid4(),
+                    event_sequence=0,
+                    role="user",
+                    content="hello",
+                )
+            )
+            connection.execute(insert(Memory).values(id=self.memory))
+            connection.execute(
+                insert(MemoryVersion).values(
+                    id=self.version, **version_values(self.memory)
+                )
+            )
+        # A trigger function's plans are cached per session, and a cached plan
+        # would hide a lookup that a temporary object could redirect: every test
+        # starts on a new connection, so its first statement is the first use.
+        self.engine.dispose()
+
+    def remove_rows(self) -> None:
+        with self.engine.begin() as connection:
+            connection.execute(
+                delete(Conversation).where(Conversation.id == self.conversation)
+            )
+            connection.execute(delete(Memory).where(Memory.id == self.memory))
+
+    def test_the_application_role_can_create_temporary_tables(self):
+        # The precondition of the other tests (PostgreSQL's default).
+        with self.engine.connect() as connection:
+            allowed = connection.execute(
+                text(
+                    "SELECT has_database_privilege("
+                    "current_user, current_database(), 'TEMP')"
+                )
+            ).scalar_one()
+
+        self.assertTrue(allowed)
+
+    def test_a_temporary_look_alike_does_not_take_the_history_of_a_pin_change(self):
+        with self.engine.begin() as connection:
+            connection.execute(
+                text(
+                    "CREATE TEMP TABLE memory_metadata_changes"
+                    " (LIKE public.memory_metadata_changes INCLUDING DEFAULTS)"
+                    " ON COMMIT DROP"
+                )
+            )
+            connection.execute(metadata_change_actor("system"))
+            connection.execute(
+                text("UPDATE public.memory_versions SET pinned = true WHERE id = :id"),
+                {"id": self.version},
+            )
+            diverted = connection.execute(
+                text("SELECT count(*) FROM pg_temp.memory_metadata_changes")
+            ).scalar_one()
+
+        with self.engine.connect() as connection:
+            recorded = connection.execute(
+                text(
+                    "SELECT old_pinned, new_pinned, actor_type"
+                    " FROM public.memory_metadata_changes"
+                    " WHERE memory_version_id = :id"
+                ),
+                {"id": self.version},
+            ).all()
+        self.assertEqual(diverted, 0)
+        self.assertEqual([tuple(row) for row in recorded], [(False, True, "system")])
+
+    def test_a_temporary_type_named_uuid_does_not_break_the_history_either(self):
+        # Types are searched through the same path as tables: a temporary table
+        # called ``uuid`` brings a composite type of that name, which the
+        # trigger's ``::uuid`` cast of the actor's id would meet first.
+        user = uuid.uuid4()
+        with self.engine.begin() as connection:
+            connection.execute(
+                text("CREATE TEMP TABLE uuid (x integer) ON COMMIT DROP")
+            )
+            connection.execute(metadata_change_actor("user", user))
+            connection.execute(
+                text(
+                    "UPDATE public.memory_versions SET importance = 70 WHERE id = :id"
+                ),
+                {"id": self.version},
+            )
+
+        with self.engine.connect() as connection:
+            recorded = connection.execute(
+                text(
+                    "SELECT new_importance, actor_user_id::text"
+                    " FROM public.memory_metadata_changes"
+                    " WHERE memory_version_id = :id"
+                ),
+                {"id": self.version},
+            ).all()
+        self.assertEqual([tuple(row) for row in recorded], [(70, str(user))])
 
 
 class DowngradeUnderGrantsTest(unittest.TestCase):
