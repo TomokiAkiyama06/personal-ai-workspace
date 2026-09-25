@@ -35,7 +35,15 @@ from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import ColumnElement, bindparam, func, select, text, update
+from sqlalchemy import (
+    BindParameter,
+    ColumnElement,
+    bindparam,
+    func,
+    select,
+    text,
+    update,
+)
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.exc import StaleDataError
@@ -322,17 +330,26 @@ def _step(row: TaskStepRow) -> StepInfo:
     )
 
 
-def _tool_call_started() -> ColumnElement[bool]:
-    """``status = 'started'`` of a tool call, written into the SQL text.
+def _started_status() -> BindParameter[ToolInvocationStatus]:
+    """``'started'`` written into the SQL text, not sent as a bind parameter.
 
-    Sent as a bind parameter instead, PostgreSQL could not match the partial
-    index ``ix_task_tool_invocations_started`` in a plan it caches for a prepared
-    statement (the driver prepares a statement it runs often), and the query
-    would read the step's whole history of finished calls again.
+    Sent as a parameter, PostgreSQL could not match a partial index on the status
+    (``ix_task_tool_invocations_started`` and ``..._finished``) in a plan it
+    caches for a prepared statement (the driver prepares a statement it runs
+    often), and the query would read the step's whole history of finished calls
+    again.
     """
-    return TaskToolInvocationRow.status == bindparam(
-        "started", ToolInvocationStatus.STARTED, literal_execute=True
-    )
+    return bindparam("started", ToolInvocationStatus.STARTED, literal_execute=True)
+
+
+def _tool_call_started() -> ColumnElement[bool]:
+    """``status = 'started'`` of a tool call (the calls in flight)."""
+    return TaskToolInvocationRow.status == _started_status()
+
+
+def _tool_call_finished() -> ColumnElement[bool]:
+    """``status != 'started'`` of a tool call (the history of finished calls)."""
+    return TaskToolInvocationRow.status != _started_status()
 
 
 def _tool(row: TaskToolInvocationRow) -> ToolInvocationInfo:
@@ -880,6 +897,10 @@ class TaskService:
         A started call is never dropped, however many calls started after it
         (the number of started calls is bounded when they begin, see
         ``MAX_ACTIVE_TOOL_INVOCATIONS``); only the finished history is cut off.
+        Each query has its own partial index (``ix_task_tool_invocations_started``,
+        ``ix_task_tool_invocations_finished``), so neither reads the rows of the
+        other kind, and the finished ones are read in the order they are returned
+        and only as far as ``MAX_RESTORE_TOOL_INVOCATIONS``.
         """
         started = (
             (
@@ -899,7 +920,7 @@ class TaskService:
                     select(TaskToolInvocationRow)
                     .where(
                         TaskToolInvocationRow.step_id == step_id,
-                        TaskToolInvocationRow.status != ToolInvocationStatus.STARTED,
+                        _tool_call_finished(),
                     )
                     .order_by(
                         TaskToolInvocationRow.started_at.desc(),

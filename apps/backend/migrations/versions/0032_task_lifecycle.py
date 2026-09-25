@@ -235,6 +235,14 @@ def upgrade() -> None:
         ["step_id"],
         postgresql_where=sa.text("status = 'started'"),
     )
+    # The latest finished calls of a step, newest first, in the order ``restore``
+    # returns them (its query stops at the limit and sorts nothing).
+    op.create_index(
+        "ix_task_tool_invocations_finished",
+        "task_tool_invocations",
+        ["step_id", sa.text("started_at DESC"), sa.text("id DESC")],
+        postgresql_where=sa.text("status <> 'started'"),
+    )
 
     op.create_table(
         "task_logs",

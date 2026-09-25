@@ -442,26 +442,41 @@ class ToolInvocationSchemaTest(PostgresTaskTestCase):
         async with self.database.engine.begin() as connection:
             await connection.execute(text(sql), parameters)
 
-    async def test_started_calls_have_a_partial_index_on_the_step(self):
+    async def test_calls_have_one_partial_index_for_each_kind_of_query(self):
         rows = await self.rows(
-            "SELECT i.relname, x.indisunique, "
-            "array_agg(a.attname::text ORDER BY k.ordinality), "
+            "SELECT i.relname, x.indisunique, pg_get_indexdef(i.oid), "
             "pg_get_expr(x.indpred, x.indrelid) "
             "FROM pg_index x "
             "JOIN pg_class i ON i.oid = x.indexrelid "
             "JOIN pg_class t ON t.oid = x.indrelid "
-            "CROSS JOIN LATERAL unnest(x.indkey) WITH ORDINALITY AS k(attnum, "
-            "ordinality) "
-            "JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum "
             "WHERE t.relname = 'task_tool_invocations' AND x.indpred IS NOT NULL "
-            "GROUP BY i.relname, x.indisunique, x.indpred, x.indrelid"
+            "ORDER BY i.relname"
         )
-        self.assertEqual(len(rows), 1)
-        name, unique, columns, predicate = rows[0]
-        self.assertEqual(name, "ix_task_tool_invocations_started")
-        self.assertFalse(unique)
-        self.assertEqual(columns, ["step_id"])
-        self.assertEqual(predicate, "((status)::text = 'started'::text)")
+        # The calls in flight (a bounded number per step) and the finished ones,
+        # newest first (what ``restore`` returns, at most 100).
+        self.assertEqual(
+            [(name, unique, predicate) for name, unique, _, predicate in rows],
+            [
+                (
+                    "ix_task_tool_invocations_finished",
+                    False,
+                    "((status)::text <> 'started'::text)",
+                ),
+                (
+                    "ix_task_tool_invocations_started",
+                    False,
+                    "((status)::text = 'started'::text)",
+                ),
+            ],
+        )
+        definitions = {name: definition for name, _, definition, _ in rows}
+        self.assertIn(
+            "USING btree (step_id, started_at DESC, id DESC)",
+            definitions["ix_task_tool_invocations_finished"],
+        )
+        self.assertIn(
+            "USING btree (step_id)", definitions["ix_task_tool_invocations_started"]
+        )
 
     async def test_every_query_on_started_calls_can_use_the_partial_index(self):
         # One long step with a large finished history and two calls in flight:
@@ -526,6 +541,90 @@ class ToolInvocationSchemaTest(PostgresTaskTestCase):
                 self.assertIn("ix_task_tool_invocations_started", plan)
                 self.assertNotIn("Seq Scan", plan)
 
+    async def test_the_bounded_finished_calls_query_reads_only_the_rows_it_returns(
+        self,
+    ):
+        # One long step: a large finished history whose physical order is not its
+        # time order, and two calls in flight (the newest rows of the step).
+        task_id, step = await self.running_step()
+        await self.database_execute(
+            "INSERT INTO task_tool_invocations (id, task_id, step_id, tool_name, "
+            "status, started_at, finished_at) "
+            "SELECT gen_random_uuid(), :t, :s, 'shell', "
+            "(ARRAY['succeeded', 'failed', 'interrupted'])[1 + g % 3], "
+            "now() - ((g * 7919) % 20011) * interval '1 second', now() "
+            "FROM generate_series(1, 20000) AS g",
+            t=task_id,
+            s=step.id,
+        )
+        in_flight = {
+            (
+                await self.service.begin_tool_invocation(
+                    task_id, step_id=step.id, tool_name="shell"
+                )
+            ).id
+            for _ in range(2)
+        }
+        await self.database_execute("ANALYZE task_tool_invocations")
+
+        captured = []
+
+        def capture(connection, cursor, statement, parameters, context, many):
+            captured.append((statement, dict(parameters)))
+
+        engine = self.database.engine.sync_engine
+        event.listen(engine, "before_cursor_execute", capture)
+        try:
+            snapshot = await self.service.restore(task_id)
+        finally:
+            event.remove(engine, "before_cursor_execute", capture)
+        (sql, parameters) = next(
+            (statement, parameters)
+            for statement, parameters in captured
+            if statement.lstrip().startswith("SELECT task_tool_invocations")
+            and "LIMIT" in statement
+        )
+
+        def nodes(plan):
+            yield plan
+            for child in plan.get("Plans", ()):
+                yield from nodes(child)
+
+        # The plan PostgreSQL makes for the values at hand, and the one it caches
+        # for a prepared statement (planned without them).
+        for mode in ("force_custom_plan", "force_generic_plan"):
+            with self.subTest(plan_cache_mode=mode):
+                (explained,) = await self.plan(sql, parameters, mode, analyze=True)
+                found = list(nodes(explained["Plan"]))
+                types = {node["Node Type"] for node in found}
+                self.assertNotIn("Seq Scan", types)
+                # Nothing is sorted: the index hands the rows over in order.
+                self.assertFalse({t for t in types if "Sort" in t}, types)
+                (scan,) = (
+                    node
+                    for node in found
+                    if node.get("Index Name") == "ix_task_tool_invocations_finished"
+                )
+                # It stopped after the rows that were asked for: it did not read
+                # the finished history, nor filter out the calls in flight.
+                self.assertEqual(scan["Actual Rows"], MAX_RESTORE_TOOL_INVOCATIONS)
+                self.assertNotIn("Rows Removed by Filter", scan)
+
+        # The rows are the latest finished ones (newest first by start, then id).
+        latest = [
+            row[0]
+            for row in await self.rows(
+                "SELECT id FROM task_tool_invocations WHERE step_id = "
+                f"{step.id} AND status <> 'started' "
+                "ORDER BY started_at DESC, id DESC LIMIT "
+                f"{MAX_RESTORE_TOOL_INVOCATIONS}"
+            )
+        ]
+        self.assertEqual(
+            {call.id for call in snapshot.tool_invocations},
+            {*latest, *in_flight},
+        )
+
     async def generic_plan(self, sql: str, parameters: dict) -> str:
         """The plan PostgreSQL caches for a prepared statement (parameters unknown).
 
@@ -533,6 +632,17 @@ class ToolInvocationSchemaTest(PostgresTaskTestCase):
         stop planning it for each set of parameter values; a partial index can
         only be used by such a plan when the index condition is written into
         the statement, not passed as a parameter.
+        """
+        return json.dumps(await self.plan(sql, parameters, "force_generic_plan"))
+
+    async def plan(
+        self, sql: str, parameters: dict, mode: str, *, analyze: bool = False
+    ) -> list:
+        """``EXPLAIN`` of the statement as a prepared statement planned in ``mode``.
+
+        ``mode`` is a value of ``plan_cache_mode`` (``force_generic_plan`` plans
+        without the parameter values, ``force_custom_plan`` with them).
+        ``analyze`` also runs the statement and reports the rows each node read.
         """
         names = list(dict.fromkeys(re.findall(r"%\((\w+)\)s", sql)))
         numbered = re.sub(
@@ -545,15 +655,16 @@ class ToolInvocationSchemaTest(PostgresTaskTestCase):
             return "'" + str(value).replace("'", "''") + "'"
 
         arguments = ", ".join(literal(parameters[name]) for name in names)
+        options = "ANALYZE, FORMAT JSON" if analyze else "FORMAT JSON"
         async with self.database.engine.connect() as connection:
-            await connection.exec_driver_sql("SET plan_cache_mode = force_generic_plan")
+            await connection.exec_driver_sql(f"SET plan_cache_mode = {mode}")
             await connection.exec_driver_sql(f"PREPARE started_calls AS {numbered}")
             try:
                 result = await connection.exec_driver_sql(
-                    "EXPLAIN (FORMAT JSON) EXECUTE started_calls"
+                    f"EXPLAIN ({options}) EXECUTE started_calls"
                     + (f"({arguments})" if names else "")
                 )
-                return json.dumps(result.scalar())
+                return result.scalar()
             finally:
                 # The connection goes back to the pool: leave no session state.
                 await connection.exec_driver_sql("DEALLOCATE started_calls")

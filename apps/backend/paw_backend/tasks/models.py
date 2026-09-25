@@ -222,6 +222,19 @@ class TaskToolInvocationRow(Base):
     )
 
 
+# The latest finished calls of a step, newest first (``restore`` returns at most
+# 100 of them): PostgreSQL reads them in this order and stops at the limit,
+# instead of reading and sorting the step's whole history. Only finished calls, so
+# the calls in flight (the other partial index) are not in it.
+Index(
+    "ix_task_tool_invocations_finished",
+    TaskToolInvocationRow.step_id,
+    TaskToolInvocationRow.started_at.desc(),
+    TaskToolInvocationRow.id.desc(),
+    postgresql_where=text("status <> 'started'"),
+)
+
+
 class TaskLogRow(Base):
     __tablename__ = "task_logs"
 
