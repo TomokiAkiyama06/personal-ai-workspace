@@ -54,6 +54,7 @@ personal-ai-workspace/
 │  │  │     ├─ 0032_task_lifecycle.py
 │  │  │     ├─ 0033_task_queue_budget_loop.py
 │  │  │     ├─ 0040_memory_schema.py
+│  │  │     ├─ 0041_memory_journal.py
 │  │  │     ├─ 0046_shared_memory_candidates.py
 │  │  │     ├─ 0050_research_scratch_store.py
 │  │  │     └─ 0052_research_provenance.py
@@ -84,6 +85,20 @@ personal-ai-workspace/
 │  │  │  │  ├─ redeemer.py
 │  │  │  │  └─ tokens.py
 │  │  │  ├─ memory/
+│  │  │  │  ├─ journal/
+│  │  │  │  │  ├─ __init__.py
+│  │  │  │  │  ├─ applier.py
+│  │  │  │  │  ├─ consolidator.py
+│  │  │  │  │  ├─ domain.py
+│  │  │  │  │  ├─ errors.py
+│  │  │  │  │  ├─ limits.py
+│  │  │  │  │  ├─ models.py
+│  │  │  │  │  ├─ queue.py
+│  │  │  │  │  ├─ rules.py
+│  │  │  │  │  ├─ service.py
+│  │  │  │  │  ├─ sql.py
+│  │  │  │  │  ├─ validation.py
+│  │  │  │  │  └─ worker.py
 │  │  │  │  └─ shared/
 │  │  │  │     ├─ __init__.py
 │  │  │  │     ├─ audit.py
@@ -191,6 +206,7 @@ personal-ai-workspace/
 │  │     ├─ __init__.py
 │  │     ├─ fake_postgres.py
 │  │     ├─ identity_support.py
+│  │     ├─ journal_support.py
 │  │     ├─ privacy_support.py
 │  │     ├─ provenance_support.py
 │  │     ├─ projects_support.py
@@ -213,6 +229,18 @@ personal-ai-workspace/
 │  │     ├─ test_identity_migration.py
 │  │     ├─ test_identity_settings.py
 │  │     ├─ test_identity_tokens.py
+│  │     ├─ test_journal_argument_validation.py
+│  │     ├─ test_journal_concurrency.py
+│  │     ├─ test_journal_consolidator.py
+│  │     ├─ test_journal_failures.py
+│  │     ├─ test_journal_gpu_unavailable.py
+│  │     ├─ test_journal_grants.py
+│  │     ├─ test_journal_migration.py
+│  │     ├─ test_journal_queue.py
+│  │     ├─ test_journal_rules.py
+│  │     ├─ test_journal_schema.py
+│  │     ├─ test_journal_service.py
+│  │     ├─ test_journal_worker_contract.py
 │  │     ├─ test_middleware.py
 │  │     ├─ test_migrations.py
 │  │     ├─ test_owner_no_web_path.py
@@ -369,6 +397,7 @@ personal-ai-workspace/
 │     ├─ 0012-research-provider-adapter-policy.md
 │     ├─ 0013-research-scratch-task-relation.md
 │     ├─ 0014-task-working-set-persistence.md
+│     ├─ 0018-memory-journal-consolidation-policy.md
 │     └─ README.md
 └─ evaluator/
    └─ README.md
