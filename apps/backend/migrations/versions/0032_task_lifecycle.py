@@ -229,6 +229,12 @@ def upgrade() -> None:
     op.create_index(
         op.f("ix_task_tool_invocations_step_id"), "task_tool_invocations", ["step_id"]
     )
+    op.create_index(
+        "ix_task_tool_invocations_started",
+        "task_tool_invocations",
+        ["step_id"],
+        postgresql_where=sa.text("status = 'started'"),
+    )
 
     op.create_table(
         "task_logs",

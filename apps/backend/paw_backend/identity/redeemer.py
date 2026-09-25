@@ -21,7 +21,7 @@ from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import case, event, select, update
+from sqlalchemy import DateTime, case, event, func, literal, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from paw_backend.authz.audit import AuditSink
@@ -148,6 +148,14 @@ class TokenRedeemer:
         keep the hook short. The attempt counter still counts the try, so
         validate input before calling ``redeem``.
 
+        The expiry is judged twice: cheaply at the start (an expired token
+        never waits for the Owner lock), and again, for good, by the statement
+        that consumes the token, after the Owner lock was obtained (a wait for
+        that lock cannot let a token be used after its ``expires_at``). The
+        consuming statement counts a token as expired as soon as this process's
+        clock (read again after the lock) or the database's ``clock_timestamp()``
+        says so, so a clock that is ahead can only shorten the lifetime.
+
         Attempts are bounded per token: an attempt is reserved (and committed)
         *before* the secret is compared, so at most ``max_attempts`` comparisons
         are ever made for one token, however many requests arrive at once. The
@@ -180,7 +188,7 @@ class TokenRedeemer:
         reason = _rejection_reason(attempt, matches, now)
         if reason is None:
             try:
-                return await self._consume(attempt, now, correlation_id, apply)
+                return await self._consume(attempt, correlation_id, apply)
             except _Refused as refusal:
                 reason = refusal.reason
         await self._record_failure(attempt, reason, correlation_id)
@@ -238,7 +246,6 @@ class TokenRedeemer:
     async def _consume(
         self,
         attempt: _Attempt,
-        now: datetime,
         correlation_id: uuid.UUID,
         apply: RedeemHook | None,
     ) -> Redemption:
@@ -258,6 +265,15 @@ class TokenRedeemer:
                 or user.status not in LIVE_STATUSES
             ):
                 raise _Refused(AuditReason.USER_NOT_ELIGIBLE)
+            # The lock above may have been waited for, so the instant the attempt
+            # began with says nothing about whether the token is still live: the
+            # expiry is judged now, by the consuming statement itself (Decision
+            # 0005, point 10). The token is expired as soon as EITHER this
+            # process's clock (read again, after the lock: the seam of the
+            # tests) OR the database's says so. ``clock_timestamp()`` is the
+            # wall clock at the moment the statement judges the row, not
+            # ``now()`` (the start of the transaction).
+            now = self._audit.now()
             consumed = (
                 await session.execute(
                     update(SetupTokenRow)
@@ -265,15 +281,19 @@ class TokenRedeemer:
                         SetupTokenRow.id == attempt.token_id,
                         SetupTokenRow.used_at.is_(None),
                         SetupTokenRow.revoked_at.is_(None),
-                        SetupTokenRow.expires_at > now,
+                        SetupTokenRow.expires_at
+                        > func.greatest(
+                            literal(now, DateTime(timezone=True)),
+                            func.clock_timestamp(),
+                        ),
                     )
                     .values(used_at=now)
                     .returning(SetupTokenRow.id)
                     .execution_options(synchronize_session=False)
                 )
             ).first()
-            if consumed is None:  # lost a race with another redemption or a revoke
-                raise _Refused(AuditReason.TOKEN_UNAVAILABLE)
+            if consumed is None:
+                raise _Refused(await self._why_not_consumed(session, attempt))
             redemption = Redemption(
                 user_id=user.id,
                 audit_ref=attempt.audit_ref,
@@ -306,6 +326,24 @@ class TokenRedeemer:
             )
             await session.commit()
         return redemption
+
+    async def _why_not_consumed(
+        self, session: AsyncSession, attempt: _Attempt
+    ) -> AuditReason:
+        """Why the consuming statement matched nothing (the Owner row is locked).
+
+        Nobody can use or revoke the token meanwhile (both take the user's lock
+        first), so if it is still unused and unrevoked, the expiry is all that
+        is left of the statement's conditions.
+        """
+        still_open = await session.scalar(
+            select(
+                SetupTokenRow.used_at.is_(None) & SetupTokenRow.revoked_at.is_(None)
+            ).where(SetupTokenRow.id == attempt.token_id)
+        )
+        if still_open:
+            return AuditReason.TOKEN_EXPIRED
+        return AuditReason.TOKEN_UNAVAILABLE  # used / revoked while redeeming
 
     async def _record_failure(
         self, attempt: _Attempt, reason: AuditReason, correlation_id: uuid.UUID
