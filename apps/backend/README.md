@@ -1352,6 +1352,7 @@ CHECK 制約が、状態と終了・時間・Token・失敗の種類の対応（
 
 ### 制限と未確認の点
 
+- **PostgreSQL 18 以上が必要です。** Admission と書き込みは `Database.transact_abortable`（`transaction_timeout`。[Decision 0006](../../docs/decisions/0006-tool-broker-policy.md) で承認された要件）を使います。
 - **実 Adapter が無く、Provider の規約は未確認**（上）。実際の Codex / Claude では動かしていません。Adapter の Interface は In-memory の代役でだけ確かめています。
 - 実行中の Task は Quota で止まらない（暫定。Decision 0016 の 3 節）。`tokens` / `runtime_seconds` は終了後に数える。同時実行数、GPU 時間、期限付きの上限の一時緩和は未実装。
 - Process が Admission と精算の間で落ちた行は `in_flight` のまま残り、要求数にだけ数えられます（掃除は未実装）。精算に失敗した呼び出しは、答えを返し、失敗を Log（型名と使用量の ID）に残します。Task の Budget への加算は精算と別の Transaction です。

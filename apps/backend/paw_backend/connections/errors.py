@@ -45,6 +45,7 @@ class InputProblem(StrEnum):
     OUT_OF_RANGE = "out_of_range"
     NOT_A_BOOL = "not_a_bool"
     NOT_CALLABLE = "not_callable"
+    NOT_ALLOWED = "not_allowed"  # a test seam passed without its opt-in
 
 
 class ConnectionsError(Exception):

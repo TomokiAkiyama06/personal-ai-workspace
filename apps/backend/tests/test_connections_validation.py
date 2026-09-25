@@ -450,6 +450,24 @@ class ConstructionTest(unittest.TestCase):
             allow_explicit_clock=True,
         )
 
+    def test_a_test_clock_needs_its_opt_in_and_must_be_callable(self):
+        database = Database(make_settings())
+        with self.assertRaises(InvalidConnectionInputError) as not_allowed:
+            ConnectionStore(database, clock=lambda: None)
+        self.assertEqual(
+            (not_allowed.exception.field, not_allowed.exception.problem),
+            ("clock", InputProblem.NOT_ALLOWED),
+        )
+        with self.assertRaises(InvalidConnectionInputError) as not_callable:
+            ConnectionStore(database, clock="now", allow_explicit_clock=True)
+        self.assertEqual(not_callable.exception.problem, InputProblem.NOT_CALLABLE)
+        with self.assertRaises(InvalidConnectionInputError) as bad_flag:
+            ConnectionStore(database, allow_explicit_clock=1)  # type: ignore[arg-type]
+        self.assertEqual(
+            (bad_flag.exception.field, bad_flag.exception.problem),
+            ("allow_explicit_clock", InputProblem.NOT_A_BOOL),
+        )
+
     def test_the_store_checks_its_own_arguments(self):
         database = Database(make_settings())
         with self.assertRaises(InvalidConnectionInputError):

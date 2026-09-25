@@ -276,12 +276,12 @@ class ConnectionStore:
         )
         if not isinstance(zone, tzinfo):
             raise InvalidConnectionInputError("zone", InputProblem.WRONG_TYPE)
-        if clock is not None and not (
-            validate_bool("allow_explicit_clock", allow_explicit_clock)
-            and callable(clock)
-        ):
-            raise InvalidConnectionInputError("clock", InputProblem.NOT_CALLABLE)
         validate_bool("allow_explicit_clock", allow_explicit_clock)
+        if clock is not None:
+            if not allow_explicit_clock:
+                raise InvalidConnectionInputError("clock", InputProblem.NOT_ALLOWED)
+            if not callable(clock):
+                raise InvalidConnectionInputError("clock", InputProblem.NOT_CALLABLE)
         self._database = database
         self._timeout = float(timeout_seconds)
         self._zone = zone
