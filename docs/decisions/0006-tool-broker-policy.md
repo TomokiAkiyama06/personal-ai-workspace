@@ -60,6 +60,7 @@ Credential の Plaintext を Agent に渡さないこと、Backend が最終判�
 2. 第三者には、他の User の承認の存在を教えない（`not_found`。Audit には `not_authorised`）。
 3. 取り消しは、委任元 User と Admin / Owner ができる（権利を減らす方向だけなので、Admin / Owner が代われる）。Task の終了（cancelled / failed / completed）で、その Task の Open な承認を取り消す。この取り消しが失敗したときの扱いは「9. Task の終了と承認」。
 4. `STRONG_APPROVAL` は Step-up（PAW-023）の確認が要る。確認できない（Verifier がない、失敗、Timeout）ときは承認できない。Store も `step_up_verified` を受け取り、DB は Step-up なしの強い承認を保存しない。
+5. **人の判断の Store 呼び出しは時間で区切る。** 独立 Review が、応答しない DB に `approve` / `reject` / `revoke` が無期限に待たされると指摘した（`revoke_task`・Step-up・Listener・Audit は区切られていた）。Pool の Session の Query の取り消しは、サーバの確認を待って約 10 秒かかるので、`asyncio.timeout` だけでは区切れない（実測）。`ApprovalService` は 1 回の操作の Store 呼び出し（照会と更新）を **1 つの期限 `timeout_seconds`**（開始時に 1 回数え、残りを渡す。Step-up は数えない）で区切り、期限になれば型付きの `unavailable` を返す。`PostgresApprovalStore` の `get` / `decide` / `revoke` は、変更と履歴の行を 1 つの CTE にした Statement を、中断可能な接続（`Database.fetch_abortable`）で実行する。期限を過ぎた Statement はサーバで続きが実行されうるが、原子的なので、承認と履歴は両方反映されるかどちらも反映されない（呼び直すと真の状態が返る）。取り消しの `revoke_task`（9）と同じ方針。`open_request` / `consume` は Pool の Transaction のままで、Broker の `asyncio.timeout`（応答しない DB では約 10 秒かかりうる）で区切る。これは後続の課題。
 
 ### 5. 承認の表示・件数・却下
 
@@ -105,14 +106,16 @@ Credential の Plaintext を Agent に渡さないこと、Backend が最終判�
 3. **Broker は独立に Fail-closed で止める。** 承認を要する呼び出しは、承認を開くときも使うときも、Task の**現在の状態**（`TaskActivityProvider`）が動ける（`ACTIVE`）ときだけ進む。終了・不明・読めないなら拒否する（`task_not_active` / `task_unknown` / `task_state_unavailable`）。取り消しの成否によらず、終わった Task の承認は使えない。既定の Provider は不明を答える（本物を入れるまで承認は使えない）。
    遷移と取り消しを 1 つの Transaction にする案（`TaskService` が Tool の Table を触る）は、Task と Tool の境界を越えるため採らなかった。
    **使うときの確認と消費は 1 つの Transaction にする。** 独立 Review が、確認（読み取り）と消費が別の操作で、その間に終了の遷移が Commit されると、Commit 後の取り消しと消費が競い、消費が勝った承認が終わった Task で使われると指摘した（再現した）。`consume` は `require_active_task` を受け取り、`PostgresApprovalStore` は同じ Transaction で Task の行を `FOR SHARE` で読み直してから消費する（`ACTIVE` でなければ消費しない）。進行中の遷移は待ち、後の遷移は消費の Commit を待つので、使うことと終了は順序づけられる。Broker の確認は、理由をはっきり返す早い答えとして残す。Task の表を読む（Lock する）のは読み取りだけで、Task の状態は変えない。
+   **開くときの確認も挿入と同じ Transaction にする。** 独立 Review が、同じ競合が承認を「開く」側にもあると指摘した。Broker が `ACTIVE` と読んだ後、要求の挿入の前に終了の遷移が Commit されると、Commit 後の取り消しは何も見つけられず、その後に挿入された要求が終わった Task の承認として残る（`ApprovalService` はそれを承認でき、Retry / Restart の後、Listener の取り消しより先に Worker が消費する窓ができる）。`open_request` も `require_active_task` を受け取り、`PostgresApprovalStore` は (Task, User) の advisory lock の直後に、同じ Transaction で Task の行を `FOR SHARE` で読み直してから挿入する（`ACTIVE` でなければ何も作らず、既存の要求も返さず、`TASK_NOT_ACTIVE` / `TASK_UNKNOWN`）。
    「試行番号（attempt）への結びつけ」（承認を作った試行でだけ使えるようにする）は、Table の列と Migration が要るため採らなかった。Retry / Restart での取り消し（4）と、Task の現在の状態の確認で足りる。
 4. **再び動く Task。** Retry / Restart（終了状態からの遷移）でも Open な承認を取り消す。終了時の取り消しが失敗して残った承認は、再開した Task では使えず、新しい承認を求め直す。
-5. **Human に判断を求める点:** (a) 承認を要する呼び出しだけが Task の状態を見ること（`AUTO` / `SCOPED_AUTO` は見ない。終わった Task へ呼び出しを渡さないのは Orchestrator の責務）。(b) 既定の Provider を「不明 = 拒否」にしたこと（配線を忘れると承認を要する呼び出しが全て通らない）。(c) 再試行の仕組み（再取り消しの Job）を持たず、Broker の Fail-closed に任せること。(d) 使うときの Task の確認を `PostgresApprovalStore` が `tasks` の行で行うこと（Tool の Store が Task の Table を読み Lock する。Task の試行番号への結びつけは持たない）。
+5. **Human に判断を求める点:** (a) 承認を要する呼び出しだけが Task の状態を見ること（`AUTO` / `SCOPED_AUTO` は見ない。終わった Task へ呼び出しを渡さないのは Orchestrator の責務）。(b) 既定の Provider を「不明 = 拒否」にしたこと（配線を忘れると承認を要する呼び出しが全て通らない）。(c) 再試行の仕組み（再取り消しの Job）を持たず、Broker の Fail-closed に任せること。(d) 開くとき・使うときの Task の確認を `PostgresApprovalStore` が `tasks` の行で行うこと（Tool の Store が Task の Table を読み Lock する。Task の試行番号への結びつけは持たない）。
 
 ## 既知の制限と後続の課題
 
 - Symlink の確認と使用の間の競合（TOCTOU）、DNS Rebinding、Redirect は Executor の責務（[README](../../apps/backend/README.md) の「Executor の契約」）。
 - Approval の期限は Application の時計で比較する（Database の時計ではない）。
+- Broker が使う `open_request` / `consume` は Pool の Transaction で、`asyncio.timeout` で区切る。応答しない DB では、取り消しの確認待ちで約 10 秒かかり、`timeout_seconds` ちょうどでは返らない（人の判断の呼び出しは、中断可能な接続で区切っている）。
 - 却下の Cooldown は Hash 単位で、引数を変えた別の呼び出しは止めない（件数の上限が量を抑える）。
 - 引数のない Tool は承認を開けない。承認が要る Tool は、何をするかを表す引数を必須にする。
 - Credential の検出は形のわかる Format と代入の形だけ。
