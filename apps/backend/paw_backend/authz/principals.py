@@ -15,6 +15,19 @@ class PrincipalDirectory(Protocol):
     authority its user had when the task started. Return ``None`` for a user
     that does not exist or is not active. Implemented by the user store
     (PAW-021 / PAW-026).
+
+    The lookup is bounded by the ``Authorizer`` timeout
+    (``PAW_DATABASE_TIMEOUT_SECONDS``), and the authorizer does not depend on
+    how an implementation reacts to cancellation: at the deadline it cancels
+    the lookup, stops waiting for it and denies (``delegator_not_active``,
+    audited); whatever the lookup returns or raises afterwards is discarded.
+    An implementation should still stop its own work when cancelled. One that
+    reads PostgreSQL must use ``Database.fetch_abortable`` (the connection's
+    socket is shut down at the deadline), not a pooled SQLAlchemy/psycopg call:
+    cancelling that waits for a stalled server (about ten seconds, or for
+    good) and the abandoned lookup keeps its connection meanwhile. At most 32
+    abandoned lookups are tolerated at a time; beyond that a new lookup is
+    refused (the same audited denial).
     """
 
     async def get_principal_by_id(self, user_id: uuid.UUID) -> Principal | None: ...

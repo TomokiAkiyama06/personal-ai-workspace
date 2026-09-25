@@ -340,6 +340,10 @@ Agent の操作は、委任した人間の User の操作として判定しま�
 - User の Principal は**判定のたびに** `PrincipalDirectory` から引き直します。Role を外す、User を削除する、といった変更は Agent の次の操作から効きます。
   Directory が User を返さない、例外を出す、`PAW_DATABASE_TIMEOUT_SECONDS` を超える、別の User を返す、または委任元 ID が正規の UUID でないときは、
   Audit を書いたうえで `delegator_not_active` で拒否します（エラーにはしません）。既定の `NoPrincipalDirectory` は誰も返さないので、User Store ができるまで Agent の操作は許可されません。
+  引き直しの期限は、Directory が Cancel にどう反応するかに**依存しません**。引き直しは独立した Task で走らせ、期限まで待ち（`asyncio.wait`）、期限が来たら Cancel を依頼して**その終了を待たずに**拒否します。
+  Directory が PostgreSQL の応答しない Query の Cancel 待ち（約 10 秒、または永久）に入っても、Agent の判定は期限内に Audit 付きの拒否になります。期限後に Task が返した値や例外は捨てます（使わず、Log にも出しません）。
+  Directory の実装は自分でも Cancel で仕事を止めてください。PostgreSQL を読む実装は、Pool 経由の SQLAlchemy / psycopg 呼び出しではなく `Database.fetch_abortable` を使います（期限で接続の Socket を閉じるので、放棄された引き直しが接続を握り続けません）。
+  期限後も終わっていない引き直しは最大 32 件まで許容し、それ以上は新しい引き直しをせずに同じ拒否にします（応答しない Directory に Task を積み上げないため）。
 - Agent の判定は、Capability の Audit Mode に関わらず**常に `REQUIRED`** です（許可した読み取りも記録し、記録できなければ拒否します）。
 - Grant は Backend が Task の範囲から作ります。保存済みの名前から作るときは境界用の `AgentGrant.from_names` を使い、Model が書いた文字列は使いません。
 - 判定 API は `Capability` だけを受け取ります。文字列は（正確な名前でも）解釈せず `unknown_capability` で拒否します。名前から変換するときは `parse_capability` を使います。

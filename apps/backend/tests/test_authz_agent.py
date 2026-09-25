@@ -1,6 +1,8 @@
 import asyncio
+import gc
 import unittest
 import uuid
+from unittest.mock import patch
 
 from paw_backend.authz import (
     ALL_PROJECTS,
@@ -31,6 +33,7 @@ from .authz_support import (
     project,
     repo_resource,
 )
+from .support import wait_until
 from .test_authz_policy import DELEGABLE_CAPS, NON_DELEGABLE_CAPS, resource_for
 
 # A UUID with hex letters, so that upper-casing it changes it.
@@ -480,6 +483,181 @@ class DirectoryFailureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decision.reason, Reason.DELEGATOR_NOT_ACTIVE)
         self.assertEqual(self.sink.events[0].reason, "delegator_not_active")
         self.assertIn("TimeoutError", "\n".join(self.logs.output))
+
+
+class StubbornDirectory:
+    """A user store whose lookup ignores cancellation until the test lets it go.
+
+    This is a lookup stuck inside a driver's cancellation cleanup (psycopg asks
+    the server to cancel and waits for the answer): ``task.cancel()`` does not
+    end it. Once released it answers with ``outcome`` (a principal, or an
+    exception to raise).
+    """
+
+    STUCK_SECONDS = 3
+
+    def __init__(self, outcome) -> None:
+        self.outcome = outcome
+        self.release = asyncio.Event()
+        self.calls = 0
+        self.cancels = 0
+        self.finished = 0
+
+    async def get_principal_by_id(self, user_id):
+        self.calls += 1
+        # A safety net so that broken code fails the test instead of hanging it.
+        asyncio.get_running_loop().call_later(self.STUCK_SECONDS, self.release.set)
+        while True:
+            try:
+                await self.release.wait()
+                break
+            except asyncio.CancelledError:
+                self.cancels += 1  # swallowed, like a cleanup that keeps waiting
+        self.finished += 1
+        if isinstance(self.outcome, BaseException):
+            raise self.outcome
+        return self.outcome
+
+
+class DirectoryCancellationTest(unittest.IsolatedAsyncioTestCase):
+    """The lookup deadline holds however the user store reacts to cancellation.
+
+    ``asyncio.timeout`` cancels the lookup and then WAITS for it to finish; a
+    user store on PostgreSQL can take about ten seconds (or forever) to give up
+    a stalled query. The authorizer must not depend on that: it stops waiting
+    at the deadline and leaves the cancelled lookup to finish on its own.
+    """
+
+    def setUp(self):
+        self.sink = InMemoryAuditSink()
+        self.grant = grant(Capability.PROJECT_REPO_WRITE)
+        self.contributor = principal(
+            SystemRole.USER, user_id=U1, projects={P1: ProjectRole.CONTRIBUTOR}
+        )
+
+    def stubborn(self, outcome):
+        directory = StubbornDirectory(outcome)
+        # Whatever a test does, lookups that ignore cancellation must end.
+        self.addCleanup(directory.release.set)
+        return directory
+
+    async def act(self, authorizer):
+        # A hang here (the bug) must fail the test, not stall the suite.
+        async with asyncio.timeout(5):
+            return await authorizer.authorize_agent_action(
+                U1, self.grant, Capability.PROJECT_REPO_WRITE, project(P1)
+            )
+
+    async def test_a_lookup_that_ignores_cancellation_is_an_audited_denial(self):
+        directory = self.stubborn(self.contributor)  # would ALLOW, but far too late
+        authorizer = Authorizer(self.sink, directory=directory, timeout_seconds=0.1)
+        with self.assertLogs("paw_backend.authz.authorizer", level="WARNING") as logs:
+            decision = await self.act(authorizer)
+        # Returned while the directory is still stuck: it is not awaited.
+        self.assertEqual(directory.finished, 0)
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, Reason.DELEGATOR_NOT_ACTIVE)
+        (event,) = self.sink.events
+        self.assertEqual(
+            (event.actor_id, event.agent_id, event.decision, event.reason),
+            (U1, AGENT, "deny", "delegator_not_active"),
+        )
+        self.assertIn("TimeoutError", "\n".join(logs.output))
+        # The lookup was asked to stop, as it always was.
+        self.assertTrue(await wait_until(lambda: directory.cancels == 1))
+        directory.release.set()
+        self.assertTrue(await wait_until(lambda: directory.finished == 1))
+
+    async def test_the_late_answer_of_an_abandoned_lookup_changes_nothing(self):
+        directory = self.stubborn(self.contributor)
+        authorizer = Authorizer(self.sink, directory=directory, timeout_seconds=0.05)
+        with self.assertLogs("paw_backend.authz.authorizer", level="WARNING"):
+            decision = await self.act(authorizer)
+        self.assertEqual(decision.reason, Reason.DELEGATOR_NOT_ACTIVE)
+        directory.release.set()
+        self.assertTrue(await wait_until(lambda: directory.finished == 1))
+        self.assertEqual([e.reason for e in self.sink.events], ["delegator_not_active"])
+
+    async def test_an_abandoned_lookup_that_fails_later_is_discarded_quietly(self):
+        directory = self.stubborn(ConnectionError(SECRET))
+        authorizer = Authorizer(self.sink, directory=directory, timeout_seconds=0.05)
+        with self.assertLogs("paw_backend.authz.authorizer", level="WARNING") as logs:
+            await self.act(authorizer)
+        # asyncio reports an exception nobody retrieved when the task is
+        # collected ("Task exception was never retrieved", with the message).
+        with self.assertNoLogs("asyncio"):
+            directory.release.set()
+            self.assertTrue(await wait_until(lambda: directory.finished == 1))
+            await asyncio.sleep(0.05)
+            for _ in range(3):
+                gc.collect()
+        self.assertNotIn(SECRET, "\n".join(logs.output))
+        self.assertEqual([e.reason for e in self.sink.events], ["delegator_not_active"])
+
+    async def test_abandoned_lookups_are_capped_and_the_cap_denies(self):
+        directory = self.stubborn(self.contributor)
+        authorizer = Authorizer(self.sink, directory=directory, timeout_seconds=0.05)
+        with patch("paw_backend.authz.authorizer._MAX_ABANDONED_LOOKUPS", 2):
+            with self.assertLogs("paw_backend.authz.authorizer", level="WARNING"):
+                decisions = [await self.act(authorizer) for _ in range(3)]
+            # Two lookups are still stuck: the third is refused without asking.
+            self.assertEqual(directory.calls, 2)
+            self.assertEqual(
+                [d.reason for d in decisions], [Reason.DELEGATOR_NOT_ACTIVE] * 3
+            )
+            self.assertEqual(len(self.sink.events), 3)  # every denial is audited
+            # Once they end, lookups run again (and this one is allowed).
+            directory.release.set()
+            self.assertTrue(await wait_until(lambda: directory.finished == 2))
+            self.assertTrue(await wait_until(lambda: not authorizer._abandoned))
+            directory.outcome = self.contributor
+            decision = await self.act(authorizer)
+        self.assertEqual(directory.calls, 3)
+        self.assertTrue(decision.allowed)
+
+    async def test_a_cancelled_caller_cancels_its_lookup(self):
+        cancelled = asyncio.Event()
+
+        class Cooperative:
+            async def get_principal_by_id(self, user_id):
+                try:
+                    await asyncio.sleep(30)
+                except asyncio.CancelledError:
+                    cancelled.set()
+                    raise
+
+        authorizer = Authorizer(self.sink, directory=Cooperative(), timeout_seconds=30)
+        caller = asyncio.create_task(
+            authorizer.authorize_agent_action(
+                U1, self.grant, Capability.PROJECT_REPO_WRITE, project(P1)
+            )
+        )
+        await asyncio.sleep(0.05)  # inside the lookup now
+        caller.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await asyncio.wait_for(caller, 3)
+        self.assertTrue(await wait_until(cancelled.is_set))
+        self.assertEqual(self.sink.events, [])  # cancelled: nothing was decided
+
+    async def test_a_lookup_that_is_not_awaitable_is_a_denial(self):
+        class Synchronous:
+            def get_principal_by_id(self, user_id):
+                return None  # not a coroutine: `await None` is a TypeError
+
+        authorizer = Authorizer(self.sink, directory=Synchronous())
+        with self.assertLogs("paw_backend.authz.authorizer", level="WARNING") as logs:
+            decision = await self.act(authorizer)
+        self.assertEqual(decision.reason, Reason.DELEGATOR_NOT_ACTIVE)
+        self.assertIn("TypeError", "\n".join(logs.output))
+
+    async def test_a_normal_lookup_leaves_nothing_behind(self):
+        directory = StaticDirectory(self.contributor)
+        authorizer = Authorizer(self.sink, directory=directory)
+        decision = await self.act(authorizer)
+        self.assertTrue(decision.allowed)
+        self.assertEqual(directory.lookups, 1)
+        self.assertEqual(authorizer._abandoned, set())
+        self.assertEqual(asyncio.all_tasks(), {asyncio.current_task()})
 
 
 class DelegatorInputTest(unittest.IsolatedAsyncioTestCase):
