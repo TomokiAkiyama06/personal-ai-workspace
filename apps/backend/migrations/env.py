@@ -16,6 +16,7 @@ from paw_backend.db import Base
 from paw_backend.identity import models as identity_models  # noqa: F401
 from paw_backend.memory import models as memory_models  # noqa: F401
 from paw_backend.memory.shared import models as shared_memory_models  # noqa: F401
+from paw_backend.orchestrator import models as orchestrator_models  # noqa: F401
 from paw_backend.projects import models as project_models  # noqa: F401
 from paw_backend.research.provenance import models as provenance_models  # noqa: F401
 from paw_backend.research.scratch import models as scratch_models  # noqa: F401
