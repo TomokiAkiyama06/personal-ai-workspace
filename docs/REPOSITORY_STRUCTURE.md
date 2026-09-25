@@ -151,6 +151,7 @@ personal-ai-workspace/
 │     ├─ 0003-backend-cli-web-implementation-stack.md
 │     ├─ 0004-rbac-capability-and-audit-policy.md
 │     ├─ 0005-owner-setup-and-recovery.md
+│     ├─ 0014-task-working-set-persistence.md
 │     └─ README.md
 └─ evaluator/
    └─ README.md

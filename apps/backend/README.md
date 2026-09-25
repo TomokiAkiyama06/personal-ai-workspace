@@ -52,7 +52,7 @@ apps/backend/
 │  ├─ identity/            # 最小の users、One-time Token。`redeemer.py` は Web 側、`operator.py`（Owner の作成・Token の発行）は cli だけが使う（PAW-021）
 │  ├─ cli/                 # server-local の管理コマンド `python -m paw_backend.cli`（PAW-021）
 │  ├─ tasks/               # Agent Task の状態遷移と永続化（PAW-032）
-│  ├─ memory/              # Memory / Conversation の Model、ACL 条件、vector 型（PAW-040）
+│  ├─ memory/              # Memory / Conversation の Model、ACL 条件、vector 型、Pin / Importance 変更の Actor（PAW-040）
 │  └─ api/
 │     ├─ deps.py           # FastAPI Dependency
 │     └─ v1/               # /api/v1 の Router（health、events）
@@ -231,6 +231,12 @@ PAW-032 で実装しました。`paw_backend/tasks/` は Task の状態遷移（
 **HTTP の Endpoint はありません。** 認証と RBAC（PAW-022 / PAW-025）が先に必要なためです。
 `TaskService` は認可を行いません。Endpoint を作る側が、権限を確認してから認証済み User を `Actor` として渡します。
 Queue、Budget、Loop 検知（PAW-033）と DAG Orchestration（PAW-034）は含みません。
+**Multi-Repo Task の Working Set（Repo の集合と `referenced` / `working` / `target` の役割、Repo ごとの worktree / Review / PR の状態）は PAW-032 に含みません。**
+PAW-032 の受け入れ条件は Task に 1 組の worktree / review / PR 状態の復元までで（Backlog）、Working Set が指す Repository の登録（PAW-027）はまだなく、
+Repo ごとの Git 状態と統合は PAW-035、Write 範囲の強制は Tool Broker（PAW-031）の責務だからです。
+Working Set の単位、Single-Repo との関係、Repo 追加の承認、Task の完了条件など、要件が決めていない判断があるため、
+[Decision 0014](../../docs/decisions/0014-task-working-set-persistence.md)（Proposed、Human の承認待ち）で提案しています。
+したがって、`task_attempts` の worktree / Review / PR は 1 つの Repo の状態で、どの Repo かは記録せず、`TaskSnapshot`（`restore()`）も Working Set を返しません。
 
 ### 状態
 
@@ -277,7 +283,7 @@ Operator の 6 操作は次のように解釈しています（[要件](../../RE
 | `tasks` | 現在の状態、`wait_reason`、`version`、試行番号、`retry_count`、Agent / Model、`starting_commit`、`input`（Restart の基準） |
 | `task_attempts` | 試行ごとの branch / worktree / head commit、Review 状態、Evaluator 結果、PR の番号・URL・状態 |
 | `task_steps` | Step の実行記録。試行内で最新の行が current step。試行内で `running` は高々 1 つ（Partial Unique Index） |
-| `task_tool_invocations` | Step が呼んだ Tool の実行状態（下記）。ID、Tool 名、状態（`started` / `succeeded` / `failed` / `interrupted`）、開始・終了時刻だけを持つ |
+| `task_tool_invocations` | Step が呼んだ Tool の実行状態（下記）。ID、Tool 名、状態（`started` / `succeeded` / `failed` / `interrupted`）、開始・終了時刻だけを持つ。`started` の行だけの Partial Index（`step_id`）がある |
 | `task_logs` | 試行ごとの Log（`debug` / `info` / `warning` / `error`） |
 | `task_events` | Append-only の履歴。全遷移について、Command、遷移前後の状態、`wait_reason`、Actor（`user` / `system` / `policy` と User の UUID）、理由、その時点の Step 名、`task_version` |
 
@@ -316,6 +322,7 @@ Operator の 6 操作は次のように解釈しています（[要件](../../RE
   Restart で新しい試行が始まった後に旧試行の Worker が書き込むと `StaleAttemptError` になり、何も書き込まれません（新しい試行の Step、Log、worktree の状態は変わりません）。同じ試行の中でも、Step の ID を指定するため、Retry より前の Worker が後から新しい Step を閉じることはできません。
 - **Tool の実行状態**: 要件の「Tool execution state」のうち、Backend が再接続後に再開または中断を判断するのに必要な最小の記録だけを持ちます。
   `begin_tool_invocation` / `finish_tool_invocation` が Tool の ID（Tool Broker が UUID を渡すこともできる）、Tool 名、状態、時刻を記録し、`restore` は現在の Step の Tool を `TaskSnapshot.tool_invocations`（開始が古い順）で返します。`started` のままの Tool は、後から何件開始・終了しても**すべて**返します（Backend が再開または中断を判断できなくなる取りこぼしを避けるため）。終了済みの Tool だけは直近 100 件に絞ります。返す件数が呼び出し側の操作で際限なく増えないよう、1 つの Step で同時に `started` にできる Tool は 1000 件（`MAX_ACTIVE_TOOL_INVOCATIONS`。**暫定の値で、人間の確認待ちです**。下の「人間の判断が必要な点」）までで、1001 件目の `begin_tool_invocation` は `TaskStepError` になります（どれかが終了すると、また開始できます）。
+  `started` の Tool を尋ねる 3 つの問い合わせ（`begin_tool_invocation` の同時数の確認、`restore` が返す `started` の Tool、Step の終了時に行う `interrupted` への更新）は、Step の終了済みの Tool の履歴全体を読みません。`status = 'started'` の行だけの Partial Index `ix_task_tool_invocations_started`（`step_id`）を使うためです。履歴が長い Step でも、Tool を開始するたびの作業量が、その Step の Tool の総数ではなく同時に `started` の数だけで決まります。`started` は Bind Parameter ではなく SQL の文面へ書きます（`_tool_call_started()`）。Parameter にすると、Driver が何度も実行する文を Prepare して PostgreSQL が Plan を使い回す場合に、Partial Index の条件を満たすと判断できず、Index を使えなくなるためです（Test は Plan を使い回す設定でも Index を使うことを確認します）。
   **引数と出力は保存しません。** 権限判定、承認、引数と結果の扱いは Tool Broker（PAW-031）の責務です。Step が終わる（Stop Now / Fail / Restart / `finish_step`）と、`started` のままの Tool は `interrupted` になります。
 - `TaskService.restore(task_id)` は DB だけから Snapshot（状態、current step、直近の Log、worktree / review / PR の状態、直近の Event）を作ります。1 つの Repeatable Read Transaction で読むため、同じ時点の値です。
   状態は Process のメモリに持たないので、Client が切断しても、Backend が再起動しても、別の Process が同じ値を返します。
@@ -703,12 +710,14 @@ Repository / Service は含みません。
 | --- | --- | --- |
 | Raw Conversation | `conversations`、`messages` | 発言、Tool 結果、Agent 結果、Task の経緯。無期限に保持し、LLM Context へ全文は入れない |
 | Session state | `session_states` | Conversation ごとの要約と作業状態（1 Conversation に 1 行） |
-| Long-term Memory | `memories`、`memory_versions`、`memory_relations`、`memory_sources`、`embedding_models`、`memory_embeddings` | 確定した知識。Version、関係、出典、Embedding |
+| Long-term Memory | `memories`、`memory_versions`、`memory_metadata_changes`、`memory_relations`、`memory_sources`、`embedding_models`、`memory_embeddings` | 確定した知識。Version、Pin / Importance の変更履歴、関係、出典、Embedding |
 
 3 つの層は別の Table で、Foreign Key でつながるのは出典（`memory_sources`）だけです。
 Conversation を消しても Memory と他の出典は残り（`ON DELETE SET NULL`）、Session state と Message は一緒に消えます。
 出典の `conversation_id` と `message_id` は組で検証し（複合 Foreign Key）、Message がその Conversation のものでなければ DB が拒否します。
-Message だけを消すと `message_id` だけが NULL になり、Conversation の出典は残ります。Message を指す出典は Conversation も指してください（Conversation が NULL の組は検証されず、Conversation 単位の検索から漏れます）。
+Message だけを消すと `message_id` だけが NULL になり、Conversation の出典は残ります。Message を指す出典は Conversation も指す必要があります。Conversation が NULL の組は複合 Foreign Key の検証（`MATCH SIMPLE`）を通り抜け、Conversation 単位の検索（削除の流れ）から漏れるため、
+遅延（`DEFERRABLE INITIALLY DEFERRED`）Constraint Trigger `tr_memory_sources_message_requires_conversation` が拒否します。違反は INSERT ではなく COMMIT（または `SET CONSTRAINTS ... IMMEDIATE`）で分かります。
+CHECK 制約にしないのは、Conversation の削除で Foreign Key の `SET NULL` が `conversation_id` と `message_id` を 1 列ずつ NULL にするため、途中で（Conversation が NULL、Message あり）の状態を通り、削除が失敗するからです（順序は Object ID 由来で保証されません）。Trigger は行の最終の状態を読み直して判定します。
 
 **Scope と ACL。** 各 Version が `scope`（`user` / `project` / `project_group` / `repo` / `shared`）を持ち、Scope に対応する ID を 1 つだけ持ちます
 （`owner_user_id` / `project_id` / `project_group_id` / `repo_id`、`shared` は無し）。CHECK 制約が組み合わせを強制します。
@@ -717,7 +726,7 @@ Message だけを消すと `message_id` だけが NULL になり、Conversation 
 `Principal.project_group_ids`（呼び出し側が決めた、読める Group の ID）に含まれる場合だけ読めます。
 Project が Group に属していても、それだけでは Group の Memory は読めません（既定は拒否）。
 権限の判定は SQL で行います。`paw_backend.memory.acl` の `readable_memory_versions(principal)` を、
-`memory_versions`（と、それを Join する `memory_embeddings`、`memory_sources`、`memory_relations`）を読む全ての Query に付けます。
+`memory_versions`（と、それを Join する `memory_embeddings`、`memory_sources`、`memory_relations`、`memory_metadata_changes`）を読む全ての Query に付けます。
 Vector 検索でも、順位付けの前に付けるため、見えない行が順位に入ることはありません。
 `Principal` は User の実効的な権限（読める Project、Project Group、Repo の ID）で、RBAC と Membership から Backend が決めます。
 Repo は既定で Project の権限を継承し、Repo 単位の ACL override で外された Repo は `repo_ids` に入れません。
@@ -734,6 +743,18 @@ Scope を広げる編集は新しい Version で行うため、旧 Version は�
 `confirmation_state`（`observed` / `inferred` / `confirmed` / `rejected`）、`freshness_policy`（`permanent` / `revalidate` / `repo_commit` / `expiring` / `session_only`）と、
 方針ごとの必須項目（`verified_at`、`revalidate_after`、`commit_sha`、`expires_at`）、`actor`、`change_reason` も Version が持ちます。
 
+**Pin / Importance の変更履歴。** 要件（Manual Memory Editing）は、Pin と Importance を「即反映可能だが、変更履歴は残す」低リスクの Metadata としています。
+そのため `memory_versions.pinned` / `importance` は Version の中で更新でき（新しい Version は作りません。本文の編集の楽観ロックと衝突させないためです）、
+変更は `memory_metadata_changes` に追記されます（変更前後の `pinned` と `importance`、`actor_type` / `actor_user_id`、時刻）。
+記録は `memory_versions` の Trigger（`tr_memory_versions_record_metadata_change`）が行うので、書き込む側が省略することはできません（Table の Owner でない Application は Trigger を止められません）。
+値が変わらない UPDATE は記録しません。`status` と `stale_since` の更新も対象外です。
+Trigger は誰の操作か知らないため、書き込む側が同じ Transaction の UPDATE の前に `metadata_change_actor(actor_type, actor_user_id)`（`paw_backend.memory.metadata`）で Actor を示します。
+Actor を示さない変更は `memory_metadata_changes.actor_type` の NOT NULL で失敗し、UPDATE も取り消されます。設定は Transaction 内だけ有効（`set_config(..., true)`）で、接続 Pool を通じて次の Request へ残りません。
+`memory_metadata_changes` は追記のみ（Application に UPDATE / DELETE は与えません）で、Version と一緒に Cascade で消えます。
+限界: Actor の ID は Backend が主張する値で、DB は確認しません（User の Table が無いため。`actor_user_id` と同じ扱い）。Application は INSERT を持つので、変更を伴わない行を追加することはできます（既存の行は書き換えられません）。
+`pinned` / `importance` は Trigger が使う列なので、型を変える Migration は Trigger を作り直す必要があります。
+Permanent / Revalidate など鮮度の設定は Version の不変の列なので、変更は新しい Version になり、その履歴が変更履歴です。
+
 **User / Project / Repo の ID は Foreign Key なし。** Project と Repo の Table はまだありません（PAW-026 / 027）。`users`（PAW-021）はありますが、Migration の順序が統合後に決まるため、この Schema からの外部キーは付けていません。
 `owner_user_id`、`project_id`、`project_group_id`、`repo_id`、`actor_user_id` は素の UUID Column で、DB は存在を確認しません。
 Backend は検証した ID だけを書いてください。Table ができた後の Migration で Foreign Key を追加できます。
@@ -748,7 +769,8 @@ Task、Repo 解析、Project Decision の出典も、Table がないため `memo
 | `messages` | SELECT、INSERT | Raw Conversation は追記のみ。履歴を書き換えない。会話ごとの削除は下記の Cascade |
 | `session_states` | SELECT、INSERT、UPDATE（`summary`、`state`、`summarized_through_sequence`、`updated_at`） | 要約と状態は会話の進行で更新する。削除は会話と一緒（Cascade） |
 | `memories` | SELECT、INSERT、DELETE | 更新する列は無い。DELETE は Memory 全体の削除（会話と関連 Memory の削除、Shared Memory の Admin 削除、User 削除時の Private Memory の消去）で、Version は Cascade で消える |
-| `memory_versions` | SELECT、INSERT、UPDATE（`status`、`stale_since`、`pinned`、`importance` のみ） | Version は書き換えない（編集は新しい Version）。本文、Scope と ACL の列、`confirmation_state`、鮮度の設定は変更不可。DELETE は与えず履歴を残す |
+| `memory_versions` | SELECT、INSERT、UPDATE（`status`、`stale_since`、`pinned`、`importance` のみ） | Version は書き換えない（編集は新しい Version）。本文、Scope と ACL の列、`confirmation_state`、鮮度の設定は変更不可。DELETE は与えず履歴を残す。`pinned` / `importance` の UPDATE は Trigger が `memory_metadata_changes` へ記録する |
+| `memory_metadata_changes` | SELECT、INSERT | Pin / Importance の変更履歴は追記のみ。Trigger が Application の権限で INSERT するため INSERT が必要。UPDATE / DELETE は与えない（Version の削除の Cascade でだけ消える） |
 | `memory_relations` | SELECT、INSERT | 履歴 Graph の辺は追記のみ |
 | `memory_sources` | SELECT、INSERT、UPDATE（`source_deleted_at` のみ） | 出典は追記のみ。会話の削除で失われた出典を記録する列だけ更新できる |
 | `embedding_models` | SELECT、INSERT | Benchmark で決めた Model の登録。次元は変えず、Model の廃止は管理者が行う |
@@ -773,7 +795,7 @@ Model の登録は `embedding_models`（Model ID と次元）への通常の INS
 次元の異なる Vector 同士の距離は計算できないため、近傍検索は先に 1 つの `embedding_model_id` に絞ります（この絞り込みで次元の不一致は起きません）。
 ANN Index（HNSW / IVFFlat）はまだありません。Model が決まった後に PAW-043 が追加します。
 
-Model と Migration の一致は Test が検証します（Alembic の autogenerate の差分が空であること、Model から作った Schema と Migration の Catalog が同じであること）。
+Model と Migration の一致は Test が検証します（Alembic の autogenerate の差分が空であること、Model から作った Schema と Migration の Catalog（Trigger を含む）が同じであること）。Trigger は Alembic の比較の対象外なので、Model は DDL Event、Migration は同じ DDL の複製で作り、Trigger 関数の定義も Test が比較します。
 制約名は `paw_backend.db.Base` の命名規則に従います。
 
 ## 依存 Package
