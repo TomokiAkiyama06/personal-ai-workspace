@@ -21,7 +21,8 @@ SQL prefilter is built from.
 * ``repo`` scope: the repositories a :class:`RepoAclSource` describes for the
   projects the caller can read, each decided with ``project.read`` on the
   repository resource (an override without ``read`` denies it). Without a source
-  there is no Repo Memory.
+  there is no Repo Memory, and an explicitly empty ``repo_ids`` skips the scope
+  altogether (the source is not called).
 * ``project_group`` scope: the ids a :class:`ProjectGroupSource` names, as given.
   Without a source there is no Project Group Memory.
 
@@ -104,12 +105,15 @@ class ScopeResolver:
         ):
             contributing.add(MemoryScope.SHARED)
 
+        # An explicitly empty ``repo_ids`` is "no repository memory contributes": the
+        # repository scope is skipped like one that was not asked for, so a repository
+        # source (which may fail, be slow or answer nonsense) is not even called.
+        wants_repos = MemoryScope.REPO in wanted and query.repo_ids != frozenset()
         readable_projects: dict[UUID, ProjectState] = {}
         roles: dict[UUID, ProjectRole] = {}
         if (
-            wanted & {MemoryScope.PROJECT, MemoryScope.REPO}
-            and query.project_ids != frozenset()
-        ):
+            MemoryScope.PROJECT in wanted or wants_repos
+        ) and query.project_ids != frozenset():
             rows = await self._memberships(actor, query)
             roles = {project_id: role for project_id, role, _ in rows}
             # Decide each project with the roles read from the database, never
@@ -130,7 +134,7 @@ class ScopeResolver:
             contributing.add(MemoryScope.PROJECT)
 
         repo_ids: frozenset[UUID] = frozenset()
-        if MemoryScope.REPO in wanted and readable_projects:
+        if wants_repos and readable_projects:
             repo_ids = await self._repos(actor, query, roles, readable_projects)
             if repo_ids:
                 contributing.add(MemoryScope.REPO)
@@ -211,17 +215,19 @@ class ScopeResolver:
             Component.REPO_ACL_SOURCE,
             self._stage_timeout,
         )
-        if (
-            not isinstance(acls, list | tuple)
-            or len(acls) > limits.MAX_REPOS_PER_CALL
-            or not all(isinstance(acl, RepoAcl) for acl in acls)
-            or len({acl.repo_id for acl in acls}) != len(acls)
-        ):
+        listed = _snapshot(
+            acls,
+            (list, tuple),
+            limits.MAX_REPOS_PER_CALL,
+            RepoAcl,
+            Component.REPO_ACL_SOURCE,
+        )
+        if len({acl.repo_id for acl in listed}) != len(listed):
             # A source that lists a repository twice cannot be believed about either.
             raise RetrievalSourceError(Component.REPO_ACL_SOURCE)
         member = Principal(actor.user_id, actor.system_role, roles)
         allowed: set[UUID] = set()
-        for acl in acls:
+        for acl in listed:
             state = readable_projects.get(acl.project_id)
             if state is None:
                 continue  # a repository of a project the caller cannot read
@@ -241,10 +247,40 @@ class ScopeResolver:
             Component.PROJECT_GROUP_SOURCE,
             self._stage_timeout,
         )
-        if (
-            not isinstance(found, list | tuple | set | frozenset)
-            or len(found) > limits.MAX_PROJECT_GROUPS
-            or not all(isinstance(group, UUID) for group in found)
-        ):
-            raise RetrievalSourceError(Component.PROJECT_GROUP_SOURCE)
-        return frozenset(found)
+        return frozenset(
+            _snapshot(
+                found,
+                (list, tuple, set, frozenset),
+                limits.MAX_PROJECT_GROUPS,
+                UUID,
+                Component.PROJECT_GROUP_SOURCE,
+            )
+        )
+
+
+def _snapshot[T](
+    answer: object,
+    kinds: tuple[type, ...],
+    max_items: int,
+    element: type[T],
+    component: Component,
+) -> tuple[T, ...]:
+    """A source's answer as a tuple of ``element`` (at most ``max_items``), or an error.
+
+    The answer is read ONCE, here, and only the copy is used afterwards: a foreign
+    collection may fail from ``len`` or iteration, or answer differently the second
+    time. Any way of not being a collection of that kind is
+    :class:`RetrievalSourceError` (the exception itself is not chained: its text can
+    hold anything).
+    """
+    try:
+        if not isinstance(answer, kinds) or len(answer) > max_items:
+            raise RetrievalSourceError(component)
+        copy = tuple(answer)
+        if len(copy) > max_items or not all(isinstance(item, element) for item in copy):
+            raise RetrievalSourceError(component)
+    except RetrievalSourceError:
+        raise
+    except Exception:
+        raise RetrievalSourceError(component) from None
+    return copy

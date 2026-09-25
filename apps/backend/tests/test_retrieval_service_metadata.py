@@ -501,6 +501,36 @@ class ConflictTest(PostgresRetrievalTestCase):
         self.assertEqual(len(result.conflicts), 1)
         self.assertTrue(all(h.duplicates == () for h in result.hits))
 
+    async def test_a_copy_of_both_ends_of_a_conflict_does_not_hide_the_conflict(self):
+        # ``best`` is a confirmed copy of ``a`` and of ``b``; ``a`` and ``b`` conflict.
+        # Merging both into ``best`` would leave one memory and no trace of the
+        # disagreement: the second copy has to stay a memory of its own.
+        me = self.user()
+        text = "deploy the backend every friday after the merge is green"
+        best = self.seed("Rule", text, owner=me.user_id, importance=100)
+        first = self.seed(
+            "Rule", text, owner=me.user_id, confirmation="inferred", importance=60
+        )
+        second = self.seed(
+            "Rule", text, owner=me.user_id, confirmation="inferred", importance=50
+        )
+        self.seed_relation(first.version_id, second.version_id)
+
+        result = await self.retrieve(me, QUERY)
+
+        self.assertEqual(len(result.hits), 2)
+        ids = {h.version_id: h for h in result.hits}
+        self.assertIn(best.version_id, ids)
+        # The conflict is a group of the two survivors, and nobody chose.
+        self.assertEqual(len(result.conflicts), 1)
+        self.assertEqual(set(result.conflicts[0].version_ids), set(ids))
+        self.assertTrue(all(h.conflict_group == 0 for h in result.hits))
+        # One of the two ends was merged into ``best`` and is listed there.
+        merged = {d for h in result.hits for d in h.duplicates}
+        self.assertEqual(len(merged), 1)
+        self.assertTrue(merged <= {first.version_id, second.version_id})
+        self.assertEqual(ids[best.version_id].duplicates, tuple(merged))
+
     async def test_other_relation_types_do_not_make_a_conflict(self):
         me = self.user()
         a = self.seed("A", "deploy backend friday a", owner=me.user_id, embed=False)

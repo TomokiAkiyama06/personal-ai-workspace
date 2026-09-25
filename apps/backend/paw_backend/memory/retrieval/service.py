@@ -43,7 +43,6 @@ Authorizer records what its capabilities' modes say: ``shared_memory.read`` and
 
 import asyncio
 import logging
-import math
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from uuid import UUID
@@ -93,7 +92,7 @@ from paw_backend.memory.retrieval.records import (
 )
 from paw_backend.memory.retrieval.resolver import ScopeResolver
 from paw_backend.memory.retrieval.scopes import ResolvedScopes
-from paw_backend.memory.retrieval.stages import bounded
+from paw_backend.memory.retrieval.stages import bounded, component_number, unit_vector
 from paw_backend.memory.retrieval.validation import (
     reject,
     require_callable,
@@ -326,29 +325,36 @@ class HybridRetriever:
         return vector
 
     def _checked_vector(self, raw: object) -> list[float] | None:
-        if (
-            not isinstance(raw, Sequence)
-            or isinstance(raw, str | bytes)
-            or len(raw) != 1
-        ):
-            return None
-        row = raw[0]
-        if (
-            not isinstance(row, Sequence)
-            or isinstance(row, str | bytes)
-            or len(row) != self._dimensions
-        ):
-            return None
-        numbers: list[float] = []
-        for value in row:
-            if isinstance(value, bool) or not isinstance(value, int | float):
+        """One good vector of ``dimensions`` finite numbers, scaled to length one.
+
+        ``None`` for anything else, whatever the way it is wrong (a foreign
+        component's answer may raise from ``len``, indexing or a number's
+        conversion): the vector leg degrades, the call does not fail.
+        """
+        try:
+            if (
+                not isinstance(raw, Sequence)
+                or isinstance(raw, str | bytes)
+                or len(raw) != 1
+            ):
                 return None
-            number = float(value)
-            if not math.isfinite(number):
+            row = raw[0]
+            if (
+                not isinstance(row, Sequence)
+                or isinstance(row, str | bytes)
+                or len(row) != self._dimensions
+            ):
                 return None
-            numbers.append(number)
+            numbers: list[float] = []
+            for value in row:
+                number = component_number(value)
+                if number is None:
+                    return None
+                numbers.append(number)
+        except Exception:
+            return None
         # The zero vector has no direction: its cosine distance is undefined.
-        return numbers if any(numbers) else None
+        return unit_vector(numbers)
 
     async def _policy_subjects(self, scopes: ResolvedScopes) -> tuple[str, ...]:
         """The subjects the System Security Policy governs (Decision 0009).
@@ -403,24 +409,33 @@ class HybridRetriever:
             )
         except RetrievalSourceError:
             return None
-        if (
-            not isinstance(raw, Sequence)
-            or isinstance(raw, str | bytes)
-            or len(raw) != len(order)
-        ):
+        scores = self._checked_scores(raw, order)
+        if scores is None:
             logger.warning("retrieval component answered badly: component=reranker")
-            return None
-        scores: dict[UUID, float] = {}
-        for version_id, value in zip(order, raw, strict=True):
+        return scores
+
+    @staticmethod
+    def _checked_scores(raw: object, order: list[UUID]) -> dict[UUID, float] | None:
+        """One score in 0..1 per candidate, by version id; ``None`` if it is not that.
+
+        Never raises, whatever the component's answer is made of (see
+        :func:`~paw_backend.memory.retrieval.stages.component_number`).
+        """
+        try:
             if (
-                isinstance(value, bool)
-                or not isinstance(value, int | float)
-                or not math.isfinite(value)
-                or not 0.0 <= value <= 1.0
+                not isinstance(raw, Sequence)
+                or isinstance(raw, str | bytes)
+                or len(raw) != len(order)
             ):
-                logger.warning("retrieval component answered badly: component=reranker")
                 return None
-            scores[version_id] = float(value)
+            scores: dict[UUID, float] = {}
+            for version_id, value in zip(order, raw, strict=True):
+                number = component_number(value)
+                if number is None or not 0.0 <= number <= 1.0:
+                    return None
+                scores[version_id] = number
+        except Exception:
+            return None
         return scores
 
     def _rank(

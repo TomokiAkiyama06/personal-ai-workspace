@@ -217,5 +217,48 @@ class RetrieveArgumentsTest(unittest.IsolatedAsyncioTestCase):
             await retriever.retrieve(self.actor, self.query)
 
 
+class Raising:
+    """A source that must never be asked: it fails every way there is."""
+
+    def __init__(self):
+        self.calls = 0
+
+    async def repo_acls(self, user_id, project_ids):
+        self.calls += 1
+        raise RuntimeError("must not be called")
+
+    async def project_group_ids(self, user_id):
+        self.calls += 1
+        raise RuntimeError("must not be called")
+
+
+class NothingToReadTest(unittest.IsolatedAsyncioTestCase):
+    """A query that names nothing readable never reaches the database or a source.
+
+    The ``Database`` is not configured: touching it raises
+    ``DatabaseNotConfiguredError``, so a clean, empty answer proves it was not.
+    """
+
+    async def ask(self, **query):
+        source = Raising()
+        retriever = build(repo_acls=source, project_groups=source)
+        actor = Principal(uuid4(), SystemRole.USER)
+        result = await retriever.retrieve(actor, RetrievalQuery("deploy", **query))
+        return result, source
+
+    async def test_only_the_repository_scope_with_no_repository_reads_nothing(self):
+        result, source = await self.ask(scopes=["repo"], repo_ids=[])
+        self.assertEqual((result.hits, result.degraded), ((), ()))
+        self.assertEqual(source.calls, 0)
+
+    async def test_no_scope_reads_nothing(self):
+        result, source = await self.ask(scopes=[])
+        self.assertEqual((result.hits, source.calls), ((), 0))
+
+    async def test_no_project_and_no_repository_reads_nothing_of_either(self):
+        result, source = await self.ask(scopes=["project", "repo"], project_ids=[])
+        self.assertEqual((result.hits, source.calls), ((), 0))
+
+
 if __name__ == "__main__":
     unittest.main()

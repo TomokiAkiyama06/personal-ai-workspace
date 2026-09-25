@@ -7,6 +7,8 @@ fails degrades the answer instead of losing it.
 
 import asyncio
 import math
+from decimal import Decimal
+from fractions import Fraction
 
 from paw_backend.authz import Principal, SystemRole
 from paw_backend.memory.retrieval import (
@@ -22,11 +24,46 @@ from paw_backend.memory.shared import StaticPolicySource, SystemPolicyItem
 from .retrieval_pg_support import (
     CountingPolicies,
     FailingEmbedder,
+    FixedEmbedder,
     PostgresRetrievalTestCase,
     RecordingReranker,
     requires_postgres,
     titles,
 )
+
+
+class ExplodingInt(int):
+    def __float__(self):
+        raise RuntimeError(SECRET)
+
+
+class ExplodingFloat(float):
+    def __float__(self):
+        raise RuntimeError(SECRET)
+
+
+# Everything a faulty component may put where a number belongs.
+HOSTILE_NUMBERS = [
+    10**400,
+    -(10**400),
+    10**309,
+    True,
+    False,
+    math.nan,
+    math.inf,
+    -math.inf,
+    Decimal("1e400"),
+    Decimal("0.5"),
+    Fraction(1, 2),
+    "0.5",
+    b"1",
+    None,
+    complex(1, 0),
+    object(),
+    [1],
+    ExplodingInt(1),
+    ExplodingFloat(1.0),
+]
 
 QUERY = "deploy backend friday"
 TEXT = "deploy backend friday"
@@ -96,6 +133,75 @@ class EmbedderDegradationTest(PostgresRetrievalTestCase):
                 result = await self.retrieve(me, QUERY, retriever=self.failing(answer))
                 self.assertEqual(result.degraded, (DegradedStage.VECTOR,))
                 self.assertEqual(titles(result), ["mine"])
+
+    async def test_hostile_numbers_in_a_vector_degrade_instead_of_failing_the_call(
+        self,
+    ):
+        me = self.user()
+        self.seed("mine", TEXT, owner=me.user_id, embed=False)
+        for value in HOSTILE_NUMBERS:
+            with self.subTest(value=repr(value)[:30]):
+                vector = [value] + [0.5] * (DIMENSIONS - 1)
+                result = await self.retrieve(
+                    me, QUERY, retriever=self.failing([vector])
+                )
+                self.assertEqual(result.degraded, (DegradedStage.VECTOR,))
+                self.assertEqual(titles(result), ["mine"])
+
+    async def test_a_hostile_sequence_degrades_instead_of_failing_the_call(self):
+        class Refuses(list):
+            def __len__(self):
+                raise RuntimeError(SECRET)
+
+        class RefusesToBeRead(list):
+            def __getitem__(self, index):
+                raise RuntimeError(SECRET)
+
+            def __iter__(self):
+                raise RuntimeError(SECRET)
+
+        me = self.user()
+        self.seed("mine", TEXT, owner=me.user_id, embed=False)
+        for answer in (
+            Refuses([GOOD]),
+            [Refuses(GOOD)],
+            RefusesToBeRead([GOOD]),
+            [RefusesToBeRead(GOOD)],
+        ):
+            with self.subTest(answer=type(answer).__name__):
+                result = await self.retrieve(me, QUERY, retriever=self.failing(answer))
+                self.assertEqual(result.degraded, (DegradedStage.VECTOR,))
+
+    async def test_huge_but_finite_values_are_a_direction_not_an_overflow(self):
+        # pgvector refuses 1e39 (float4) and its distance overflows at 1e30: the query
+        # vector is scaled to length one first (the direction is all a cosine uses).
+        me = self.user()
+        for scale in (1e-300, 1.0, 1e30, 1e39, 1e300, 10**39):
+            with self.subTest(scale=scale):
+                self.clean_tables()
+                embedder = FixedEmbedder(
+                    {QUERY: [3 * scale, 4 * scale, 0.0]}, model_id="fixed-test-model"
+                )
+                self.seed(
+                    "aligned",
+                    "x",
+                    owner=me.user_id,
+                    embedding=[0.3, 0.4, 0.0],
+                    model_id="fixed-test-model",
+                )
+                self.seed(
+                    "orthogonal",
+                    "y",
+                    owner=me.user_id,
+                    embedding=[0.0, 0.0, 1.0],
+                    model_id="fixed-test-model",
+                )
+                retriever = self.new_retriever(embedder=embedder)
+                result = await self.retrieve(me, QUERY, retriever=retriever)
+                self.assertEqual(result.degraded, ())
+                self.assertEqual(titles(result)[0], "aligned")
+                self.assertAlmostEqual(result.hits[0].vector_similarity, 1.0, places=5)
+                self.assertAlmostEqual(result.hits[1].vector_similarity, 0.0, places=5)
 
     async def test_a_good_answer_of_ints_and_floats_is_accepted(self):
         me = self.user()
@@ -251,6 +357,37 @@ class RerankerTest(PostgresRetrievalTestCase):
                 result = await self.retrieve(me, QUERY, retriever=retriever)
                 self.assertEqual(result.degraded, (DegradedStage.RERANK,))
                 self.assertEqual(len(result.hits), 2)
+
+    async def test_hostile_numbers_as_scores_degrade_instead_of_failing_the_call(self):
+        me = self.user()
+        self.seed("a", "deploy backend friday a", owner=me.user_id, embed=False)
+        self.seed("b", "deploy backend friday b", owner=me.user_id, embed=False)
+        for value in HOSTILE_NUMBERS:
+            with self.subTest(value=repr(value)[:30]):
+                retriever = self.new_retriever(reranker=RecordingReranker([value, 0.5]))
+                result = await self.retrieve(me, QUERY, retriever=retriever)
+                self.assertEqual(result.degraded, (DegradedStage.RERANK,))
+                self.assertEqual(len(result.hits), 2)
+
+    async def test_a_hostile_sequence_of_scores_degrades_instead_of_failing_the_call(
+        self,
+    ):
+        class Refuses(list):
+            def __len__(self):
+                raise RuntimeError(SECRET)
+
+        class RefusesToBeRead(list):
+            def __iter__(self):
+                raise RuntimeError(SECRET)
+
+        me = self.user()
+        self.seed("a", "deploy backend friday a", owner=me.user_id, embed=False)
+        for answer in (Refuses([0.5]), RefusesToBeRead([0.5])):
+            with self.subTest(answer=type(answer).__name__):
+                retriever = self.new_retriever(reranker=RecordingReranker(answer))
+                result = await self.retrieve(me, QUERY, retriever=retriever)
+                self.assertEqual(result.degraded, (DegradedStage.RERANK,))
+                self.assertEqual(titles(result), ["a"])
 
     async def test_the_boundary_scores_zero_and_one_are_accepted(self):
         me = self.user()

@@ -37,6 +37,17 @@ from .retrieval_pg_support import (
     titles,
 )
 
+
+class RefusesLength(list):
+    def __len__(self):
+        raise RuntimeError("secret-connection-string")
+
+
+class RefusesIteration(list):
+    def __iter__(self):
+        raise RuntimeError("secret-connection-string")
+
+
 QUERY = "deploy backend friday"
 TEXT = "deploy backend friday"
 
@@ -349,6 +360,41 @@ class RepoScopeTest(PostgresRetrievalTestCase):
         )
         self.assertEqual((await self.retrieve(me, QUERY, retriever=retriever)).hits, ())
 
+    async def test_an_empty_repo_ids_means_no_repository_and_no_source_call(self):
+        project, me = await self.setup_member()
+        self.seed("project note", TEXT, scope="project", project=project, embed=False)
+        answers = [
+            RuntimeError("boom secret-connection-string"),
+            "not a list",
+            None,
+            [RepoAcl.inherit(self.repo, project)] * 2,
+        ]
+        for answer in answers:
+            with self.subTest(answer=type(answer).__name__):
+                source = StaticRepoAcls(answer)
+                retriever = self.new_retriever(repo_acls=source)
+                result = await self.retrieve(
+                    me, QUERY, retriever=retriever, repo_ids=[]
+                )
+                # The project memory is still found, the repository is not asked about.
+                self.assertEqual(titles(result), ["project note"])
+                self.assertEqual(source.calls, [])
+                # The same source does fail a call that does want repositories.
+                with self.assertRaises(RetrievalSourceError):
+                    await self.retrieve(me, QUERY, retriever=retriever)
+                self.assertEqual(len(source.calls), 1)
+
+    async def test_only_repository_scope_and_empty_repo_ids_reads_nothing_at_all(self):
+        project, me = await self.setup_member()
+        source = StaticRepoAcls(RuntimeError("boom"))
+        retriever = self.new_retriever(repo_acls=source)
+        result = await self.retrieve(
+            me, QUERY, retriever=retriever, scopes=["repo"], repo_ids=[]
+        )
+        self.assertEqual(result.hits, ())
+        self.assertEqual(source.calls, [])
+        self.assertEqual(self.sink.events, [])
+
     async def test_a_misbehaving_repository_source_fails_the_call_closed(self):
         project, me = await self.setup_member()
         good = RepoAcl.inherit(self.repo, project)
@@ -358,6 +404,8 @@ class RepoScopeTest(PostgresRetrievalTestCase):
             None,
             [good, good],  # the same repository twice
             [good, "x"],
+            RefusesLength([good]),
+            RefusesIteration([good]),
             [RepoAcl.inherit(uuid4(), project)] * 2,
             [
                 RepoAcl.inherit(uuid4(), project)
@@ -402,6 +450,8 @@ class ProjectGroupScopeTest(PostgresRetrievalTestCase):
             "not-a-collection",
             {"not-a-uuid"},
             [uuid4()] * 2 + ["x"],
+            RefusesLength([uuid4()]),
+            RefusesIteration([uuid4()]),
             [uuid4() for _ in range(retrieval_limits.MAX_PROJECT_GROUPS + 1)],
             None,
         ]

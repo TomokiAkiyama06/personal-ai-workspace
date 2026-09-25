@@ -1,5 +1,6 @@
 """Deduplication, conflict groups and the Top-N cut (pure rules, no database)."""
 
+import random
 import unittest
 from uuid import uuid4
 
@@ -201,6 +202,144 @@ class DeduplicateTest(unittest.TestCase):
 
     def test_an_empty_input_gives_nothing(self):
         self.assertEqual(dedup([]), ([], {}))
+
+
+SAME = "deploy the backend every friday after the merge is green"
+
+
+class IndirectMergeTest(unittest.TestCase):
+    """A conflict never disappears through a merge of one end into a third memory."""
+
+    def trio(self):
+        best = make_ranked(score=0.9, content=SAME)  # confirmed: the better claim
+        first = make_ranked(
+            score=0.6, content=SAME, confirmation_state=ConfirmationState.INFERRED
+        )
+        second = make_ranked(
+            score=0.5, content=SAME, confirmation_state=ConfirmationState.INFERRED
+        )
+        edge = (first.candidate.version_id, second.candidate.version_id)
+        return best, first, second, edge
+
+    def test_a_copy_of_both_ends_of_a_conflict_does_not_absorb_both(self):
+        best, first, second, edge = self.trio()
+        survivors, merged = dedup([second, first, best], [edge])
+        # ``first`` is a copy of ``best`` and joins it; ``second`` conflicts with what
+        # ``best`` already stands for, so it stays a memory of its own.
+        self.assertEqual(
+            ids(survivors), [best.candidate.version_id, second.candidate.version_id]
+        )
+        self.assertEqual(
+            merged, {first.candidate.version_id: best.candidate.version_id}
+        )
+        self.assertEqual(survivors[0].duplicates, (first.candidate.version_id,))
+        groups = conflict_groups(survivors, [edge], merged)
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(
+            ids(groups[0]), [best.candidate.version_id, second.candidate.version_id]
+        )
+
+    def test_the_result_does_not_depend_on_the_input_order(self):
+        best, first, second, edge = self.trio()
+        outcomes = set()
+        for order in (
+            [best, first, second],
+            [second, first, best],
+            [first, best, second],
+        ):
+            survivors, merged = dedup(order, [edge])
+            groups = conflict_groups(survivors, [edge], merged)
+            outcomes.add((tuple(ids(survivors)), tuple(tuple(ids(g)) for g in groups)))
+        self.assertEqual(len(outcomes), 1)
+
+    def test_a_chain_of_copies_keeps_every_conflict(self):
+        # a ~ b ~ c ~ d are all copies; a conflicts with c and b with d.
+        items = [make_ranked(score=0.9 - n / 10, content=SAME) for n in range(4)]
+        a, b, c, d = (i.candidate.version_id for i in items)
+        edges = [(a, c), (b, d)]
+        survivors, merged = dedup(items, edges)
+        groups = conflict_groups(survivors, edges, merged)
+        for x, y in edges:
+            self.assertNotEqual(merged.get(x, x), merged.get(y, y))
+            self.assertTrue(
+                any(
+                    {merged.get(x, x), merged.get(y, y)} <= set(ids(group))
+                    for group in groups
+                )
+            )
+
+    def test_copies_that_do_not_conflict_still_merge_into_one(self):
+        best, first, second, _ = self.trio()
+        survivors, merged = dedup([best, first, second], [])
+        self.assertEqual(ids(survivors), [best.candidate.version_id])
+        self.assertEqual(
+            set(merged), {first.candidate.version_id, second.candidate.version_id}
+        )
+
+
+def random_world(rng, size):
+    """Items whose texts are copies of a few templates, and random conflict edges."""
+    templates = [
+        "deploy the backend every friday after the merge is green",
+        "use tabs for indentation in every python module we write",
+        "the staging database is reset every night at midnight",
+    ]
+    items = []
+    for _ in range(size):
+        text = rng.choice(templates)
+        if rng.random() < 0.3:
+            text += " " + rng.choice(["today", "again", "please"])
+        items.append(
+            make_ranked(
+                score=rng.random(),
+                content=text,
+                confirmation_state=rng.choice(list(ConfirmationState)[:3]),
+                scope=rng.choice(list(MemoryScope)),
+                freshness=rng.choice([Freshness.FRESH, Freshness.STALE]),
+                stale_reason=None,
+            )
+        )
+    versions = [i.candidate.version_id for i in items]
+    edges = [
+        (a, b) for a in versions for b in versions if a < b and rng.random() < 0.25
+    ]
+    return items, edges
+
+
+class ConflictsNeverDisappearTest(unittest.TestCase):
+    """Random duplicate / conflict graphs against an oracle written out plainly."""
+
+    def test_every_conflict_between_candidates_ends_up_in_one_group(self):
+        checked_edges = merged_pairs = 0
+        for seed in range(400):
+            rng = random.Random(seed)
+            items, edges = random_world(rng, rng.randint(2, 12))
+            survivors, merged = dedup(items, edges)
+            groups = conflict_groups(survivors, edges, merged)
+            group_of = {}
+            for number, group in enumerate(groups):
+                for member in group:
+                    group_of[member.candidate.version_id] = number
+            survivor_ids = set(ids(survivors))
+            for version_id in ids(items):
+                representative = merged.get(version_id, version_id)
+                self.assertIn(representative, survivor_ids, f"seed {seed}")
+            for x, y in edges:
+                sx, sy = merged.get(x, x), merged.get(y, y)
+                # 1. Two ends of a conflict never share a survivor.
+                self.assertNotEqual(sx, sy, f"seed {seed}: a conflict merged away")
+                # 2. They are in the same group.
+                self.assertIn(sx, group_of, f"seed {seed}")
+                self.assertEqual(group_of[sx], group_of.get(sy), f"seed {seed}")
+                checked_edges += 1
+            merged_pairs += len(merged)
+            # 3. Nothing is lost or invented: each item is a survivor or merged once.
+            self.assertEqual(len(survivors) + len(merged), len(items))
+            # 4. ``duplicates`` says exactly what was merged.
+            listed = {d for s in survivors for d in s.duplicates}
+            self.assertEqual(listed, set(merged))
+        self.assertGreater(checked_edges, 300)
+        self.assertGreater(merged_pairs, 300)
 
 
 class ConflictGroupsTest(unittest.TestCase):

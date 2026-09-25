@@ -15,7 +15,11 @@ relations it is given were read with the ACL condition on **both** ends.
   claim is the general precedence: confirmed before inferred, fresh before stale,
   the more specific scope, then the score. Two memories tied by a
   ``conflicts_with`` relation are never merged: they contradict, they are not
-  copies. The comparison is greedy in precedence order, not transitive.
+  copies. That holds through the memories a survivor already stands for: a memory
+  that conflicts with a copy merged into a survivor is not merged into that
+  survivor either (it stays a survivor of its own, or joins another one), so a
+  conflict between two candidates always ends between two different survivors and
+  is grouped. The comparison is greedy in precedence order, not transitive.
 * **Conflicts** (:func:`conflict_groups`): connected components of two or more
   memories over ``conflicts_with`` relations. Every member stays a result; the
   group says "these disagree" and picks nothing.
@@ -99,7 +103,14 @@ def deduplicate(
         target = None
         for survivor in survivors:
             survivor_id = survivor.candidate.version_id
-            if frozenset((version_id, survivor_id)) in conflicting:
+            # A survivor stands for itself AND for every copy already merged into it.
+            # A conflict with any of them is a conflict with the survivor: merging
+            # ``item`` in would put the two ends of that conflict under one memory
+            # and the conflict would disappear (an ambiguity nobody is told about).
+            represented = (survivor_id, *merged.get(survivor_id, ()))
+            if any(
+                frozenset((version_id, other)) in conflicting for other in represented
+            ):
                 continue
             if survivor.candidate.memory_id == item.candidate.memory_id:
                 target = survivor_id
