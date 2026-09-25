@@ -164,6 +164,30 @@ async def get_project_for_share(
     return None if row is None else project_from_row(row)
 
 
+async def get_project_status_for_share(
+    session: AsyncSession, project_id: uuid.UUID
+) -> ProjectStatus | None:
+    """The project's status with ``SELECT ... FOR SHARE``; ``None`` if it is unknown.
+
+    Only the status is read: the Project state gate of the task lane
+    (``task_gate.py``) needs nothing else, and nothing of the project's content
+    (name, description) passes through the task lane's transaction. The lock is the
+    one of :func:`get_project_for_share`: until the caller's transaction ends the
+    project cannot be archived, deleted or restored (Every lifecycle change locks
+    the row ``FOR UPDATE`` first; share locks do not exclude each other). The lock
+    needs ``UPDATE`` on some column of ``projects`` besides ``SELECT``, which the
+    application role holds (``status`` and six others, migration 0026).
+    """
+    status = (
+        await session.execute(
+            select(PROJECTS.c.status)
+            .where(PROJECTS.c.id == project_id)
+            .with_for_update(read=True)
+        )
+    ).scalar_one_or_none()
+    return None if status is None else ProjectStatus(status)
+
+
 async def insert_project(
     session: AsyncSession,
     *,

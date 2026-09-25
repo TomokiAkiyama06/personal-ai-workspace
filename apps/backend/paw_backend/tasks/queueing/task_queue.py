@@ -2,9 +2,21 @@
 
 The database is the only source of truth (``queue_entries``): nothing is kept in
 process memory, so any number of workers in any number of processes can call
-the same methods concurrently. The queue does not read or change ``tasks.state``;
-the orchestrator (PAW-034) pairs ``claim_next`` with the PAW-032 ``start``
-command. It performs no authorisation and offers no HTTP endpoint.
+the same methods concurrently. The queue never CHANGES ``tasks.state`` (the
+orchestrator (PAW-034) pairs ``claim_next`` with the PAW-032 ``start`` command). It
+READS ``tasks`` in exactly two places, both from Issue #83 (Decision 0008, section
+8) and both optional: ``enqueue`` reads the task's ``project_id`` for the Project
+state gate, and ``cancel(..., only_if_task_terminal=True)`` reads (and share-locks)
+the task's state. It performs no authorisation and offers no HTTP endpoint.
+
+Project state gate. A queue built with a ``ProjectGate`` (``tasks.project_gate``)
+makes ``enqueue`` lock the task's project row ``FOR SHARE`` in the transaction of
+the insert and refuse (``ProjectNotActiveError``, nothing written) unless the project
+is Active, so a Delete that begins meanwhile is serialised with the enqueue. It
+needs ``SELECT`` on ``tasks`` (already granted) and whatever the gate needs on the
+project table (see ``projects.task_gate``: ``SELECT`` and a column ``UPDATE``, which
+``FOR SHARE`` requires; both are already granted). Every other method ignores the
+project: a lease, a heartbeat, a completion and a cancel must work in any state.
 
 Time. The DATABASE clock is the only clock the queue trusts (Decision 0007,
 section 6, Approved 2026-09-25): every instant it compares or stores (``enqueued_at``,
@@ -84,7 +96,15 @@ somebody else the call returns ``None`` immediately. ``heartbeat`` / ``release``
 / ``complete`` run in one transaction of two statements: ``SELECT ... FOR UPDATE``
 of the entry (they wait here for a competing transaction), then a conditional
 ``UPDATE ... RETURNING`` that judges worker, claim generation and lease. ``cancel``
-is one conditional ``UPDATE`` (atomic by itself; it takes no row lock first).
+is one conditional ``UPDATE`` (atomic by itself; it takes no row lock first). With
+``only_if_task_terminal=True`` it first share-locks the TASK row
+(``SELECT state FROM tasks ... FOR SHARE``: it waits for a command in flight, and a
+Restart that starts afterwards waits for it) and cancels the entry only if the task
+is Completed, Failed or Cancelled. That makes "the task is finished, so its entry
+is dead" a decision that cannot go stale before the entry is cancelled: a Restart
+either committed first (the entry belongs to a running task again and is kept) or
+waits until the cancel committed (the task then needs a new entry). ``cancel_in``
+does the same inside a transaction of the caller (see there).
 
 Indexes. Completed and cancelled entries are kept for ever, and both indexes of the
 queue (``ix_queue_entries_claim_order``, ``uq_queue_entries_one_active_per_task``)
@@ -115,10 +135,14 @@ from sqlalchemy import (
     update,
 )
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import BindParameter, ColumnElement
 
 from paw_backend.db import Database
+from paw_backend.tasks.domain import TERMINAL_STATES
 from paw_backend.tasks.errors import TaskNotFoundError
+from paw_backend.tasks.models import TaskRow
+from paw_backend.tasks.project_gate import ProjectGate
 from paw_backend.tasks.queueing.domain import (
     ACTIVE_QUEUE_STATUSES,
     Priority,
@@ -146,6 +170,8 @@ from paw_backend.tasks.queueing.validation import (
     check_int,
     check_member,
     check_now,
+    check_project_gate,
+    check_session,
     check_uuid,
     check_worker_id,
 )
@@ -202,18 +228,24 @@ class TaskQueue:
         *,
         lease_seconds: int = DEFAULT_LEASE_SECONDS,
         allow_explicit_now: bool = False,
+        project_gate: ProjectGate | None = None,
     ) -> None:
         """``lease_seconds``: 1 to ``MAX_LEASE_SECONDS`` (``int``, not ``bool``).
 
         ``allow_explicit_now`` (a ``bool``): the TEST SEAM of the module docstring.
         Leave it ``False`` in production code: the queue then uses only the
         database clock and rejects a caller-supplied ``now``.
+
+        ``project_gate``: the Project state gate of ``enqueue`` (module docstring);
+        ``None`` (the default) enqueues for a task of any project, for tests and tools
+        without projects. Production wiring must pass one (Decision 0020).
         """
         self._database = database
         self._lease_seconds = check_int(
             "lease_seconds", lease_seconds, minimum=1, maximum=MAX_LEASE_SECONDS
         )
         self._allow_explicit_now = check_bool("allow_explicit_now", allow_explicit_now)
+        self._project_gate = check_project_gate("project_gate", project_gate)
 
     @property
     def lease_seconds(self) -> int:
@@ -280,6 +312,11 @@ class TaskQueue:
 
         A task whose previous entry is ``completed`` or ``cancelled`` can be
         enqueued again (after Retry / Restart); that creates a NEW entry.
+
+        With a ``project_gate`` the task's project is locked ``FOR SHARE`` in the
+        transaction of the insert and must be Active: ``ProjectNotActiveError``
+        (nothing written) otherwise. The gate is judged first: for an unknown task
+        ``TaskNotFoundError`` is raised by the lookup of its project.
         """
         check_uuid("task_id", task_id)
         check_member("priority", priority, Priority)
@@ -299,6 +336,8 @@ class TaskQueue:
         )
         try:
             async with self._database.session() as session, session.begin():
+                if self._project_gate is not None:
+                    await self._require_active_project(session, task_id)
                 row = (await session.execute(insert_entry)).scalar_one()
                 return _entry(row)
         except IntegrityError as error:
@@ -459,7 +498,13 @@ class TaskQueue:
             lease_expires_at=None,
         )
 
-    async def cancel(self, task_id: uuid.UUID, now: datetime | None = None) -> bool:
+    async def cancel(
+        self,
+        task_id: uuid.UUID,
+        now: datetime | None = None,
+        *,
+        only_if_task_terminal: bool = False,
+    ) -> bool:
         """Cancel the task's active entry (``queued`` or ``claimed``), if any.
 
         Sets ``status = cancelled``, ``finished_at`` = now (read by this statement
@@ -469,9 +514,65 @@ class TaskQueue:
         ``complete`` raises ``LeaseLostError``. Returns ``True`` when an entry was
         cancelled, ``False`` when the task had no active entry (including an
         unknown task; that is not an error). Idempotent.
+
+        ``only_if_task_terminal`` (a ``bool``): cancel only if the TASK is
+        ``completed``, ``failed`` or ``cancelled``, judged with the task row
+        share-locked (module docstring). For a task that is active, or unknown, the
+        entry is left alone and ``False`` is returned. Use it whenever the decision
+        "this entry is dead" comes from a state that was read earlier: a Restart that
+        committed in between makes the entry the restarted task's own.
         """
         check_uuid("task_id", task_id)
+        check_bool("only_if_task_terminal", only_if_task_terminal)
         current, _ = self._instants(now)
+        async with self._database.session() as session, session.begin():
+            return await self._cancel(session, task_id, current, only_if_task_terminal)
+
+    async def cancel_in(
+        self,
+        session: AsyncSession,
+        task_id: uuid.UUID,
+        now: datetime | None = None,
+        *,
+        only_if_task_terminal: bool = False,
+    ) -> bool:
+        """``cancel`` in the transaction of the caller's ``session``.
+
+        Nothing is committed or rolled back here: the entry is cancelled when the
+        caller's transaction commits, together with whatever else it wrote. This is
+        how the stop processor of a deleted project cancels a task and its entry in
+        ONE transaction (``TaskService.execute(..., in_transaction=...)``), so no
+        crash or Restore can fall between the two. ``session`` must be an
+        ``AsyncSession`` inside a transaction (``InvalidQueueingArgumentError``
+        otherwise); the other arguments are those of ``cancel``.
+        """
+        check_session("session", session)
+        check_uuid("task_id", task_id)
+        check_bool("only_if_task_terminal", only_if_task_terminal)
+        current, _ = self._instants(now)
+        return await self._cancel(session, task_id, current, only_if_task_terminal)
+
+    async def _cancel(
+        self,
+        session: AsyncSession,
+        task_id: uuid.UUID,
+        current: ColumnElement[datetime],
+        only_if_task_terminal: bool,
+    ) -> bool:
+        if only_if_task_terminal:
+            # FOR SHARE conflicts with the FOR NO KEY UPDATE every task command takes
+            # first, so this waits for a command in flight and holds off the next one
+            # until this transaction ends. (It needs UPDATE on some column of
+            # ``tasks``, which the application role has; see the module docstring.)
+            state = (
+                await session.execute(
+                    select(TaskRow.state)
+                    .where(TaskRow.id == task_id)
+                    .with_for_update(read=True)
+                )
+            ).scalar_one_or_none()
+            if state not in TERMINAL_STATES:
+                return False
         cancel_active = (
             update(QueueEntryRow)
             .where(QueueEntryRow.task_id == task_id, _active())
@@ -479,9 +580,26 @@ class TaskQueue:
                 status=QueueStatus.CANCELLED, finished_at=current, lease_expires_at=None
             )
         )
-        async with self._database.session() as session, session.begin():
-            result = await session.execute(cancel_active)
-            return result.rowcount > 0
+        result = await session.execute(cancel_active)
+        return result.rowcount > 0
+
+    async def _require_active_project(
+        self, session: AsyncSession, task_id: uuid.UUID
+    ) -> None:
+        """Lock the task's project through the gate, or refuse (``enqueue``).
+
+        ``tasks.project_id`` never changes, so a plain read of it is enough; the
+        gate takes the lock. An unknown task is ``TaskNotFoundError``.
+        """
+        assert self._project_gate is not None
+        project_id = (
+            await session.execute(
+                select(TaskRow.project_id).where(TaskRow.id == task_id)
+            )
+        ).scalar_one_or_none()
+        if project_id is None:
+            raise TaskNotFoundError()
+        await self._project_gate.require_active(session, project_id)
 
     async def _update_held(
         self,

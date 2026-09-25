@@ -2,6 +2,8 @@
 
 There is no HTTP surface yet: authentication and RBAC (PAW-022 / PAW-025) come
 first. See ``apps/backend/README.md`` for the state machine and the data model.
+The Project state gate (``ProjectGate``, Issue #83) is the one place where the task
+lane looks at a project; ``projects.task_gate`` implements it.
 """
 
 from paw_backend.tasks.domain import (
@@ -22,6 +24,7 @@ from paw_backend.tasks.domain import (
 from paw_backend.tasks.errors import (
     IllegalTransitionError,
     InvalidCommandArgumentError,
+    ProjectNotActiveError,
     StaleAttemptError,
     StaleRunError,
     TaskConflictError,
@@ -29,6 +32,7 @@ from paw_backend.tasks.errors import (
     TaskNotFoundError,
     TaskStepError,
 )
+from paw_backend.tasks.project_gate import ProjectGate
 from paw_backend.tasks.records import (
     AttemptSnapshot,
     EvaluationResult,
@@ -46,7 +50,7 @@ from paw_backend.tasks.records import (
     ToolInvocationStatus,
     WorktreeState,
 )
-from paw_backend.tasks.service import TaskService, TransitionListener
+from paw_backend.tasks.service import InTransactionStep, TaskService, TransitionListener
 
 __all__ = [
     "CONTROL_COMMANDS",
@@ -57,10 +61,13 @@ __all__ = [
     "AttemptSnapshot",
     "EvaluationResult",
     "IllegalTransitionError",
+    "InTransactionStep",
     "Interruption",
     "InvalidCommandArgumentError",
     "LogEntry",
     "LogLevel",
+    "ProjectGate",
+    "ProjectNotActiveError",
     "PullRequestInfo",
     "PullRequestState",
     "ReviewState",

@@ -54,6 +54,22 @@ class TaskStepError(TaskError):
     code = "task_step_error"
 
 
+class ProjectNotActiveError(TaskError):
+    """The project of the task is not Active, so no new work is admitted.
+
+    Raised by ``TaskService.create_task``, Retry and Restart and by
+    ``TaskQueue.enqueue`` when the Project state gate (``tasks.project_gate``) finds
+    the project Archived, Pending deletion or Deleted (Decision 0008, section 8).
+    Nothing is written. An unknown project is refused the same way (default deny).
+    The message names no project, state or task.
+    """
+
+    code = "project_not_active"
+
+    def __init__(self) -> None:
+        super().__init__("The project is not active")
+
+
 class StaleRunError(TaskError):
     """The caller works for a run of the task that a Retry or Restart replaced.
 

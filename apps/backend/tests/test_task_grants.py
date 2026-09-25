@@ -39,7 +39,12 @@ from paw_backend.tasks import (
     WorktreeState,
 )
 
-from . import test_task_races, test_task_service, test_task_tools
+from . import (
+    test_task_in_transaction,
+    test_task_races,
+    test_task_service,
+    test_task_tools,
+)
 from .support import make_settings
 from .task_support import (
     FIRST_RUN,
@@ -179,6 +184,10 @@ class StepsAndLogsAsAppRole(AsAppRole, test_task_service.StepAndLogTest):
 
 class ToolCallsAsAppRole(AsAppRole, test_task_tools.ToolInvocationTest):
     pass
+
+
+class InTransactionAsAppRole(AsAppRole, test_task_in_transaction.InTransactionStepTest):
+    """The step that runs in a command's transaction (issue #83), as the app role."""
 
 
 class SupersededWorkersAsAppRole(AsAppRole, test_task_races.SupersededWorkerTest):

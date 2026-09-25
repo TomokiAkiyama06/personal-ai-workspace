@@ -12,6 +12,8 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, NoReturn
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from paw_backend.tasks.queueing.errors import InvalidQueueingArgumentError
 
 # -- bounds (the single place; the database CHECK constraints repeat them) -----
@@ -94,6 +96,20 @@ def check_approach(value: Any) -> int:
 def check_uuid(name: str, value: Any) -> uuid.UUID:
     """Only a ``uuid.UUID`` instance is accepted (strings are not parsed)."""
     if not isinstance(value, uuid.UUID):
+        _reject(name)
+    return value
+
+
+def check_session(name: str, value: Any) -> AsyncSession:
+    """Only an ``AsyncSession`` (the caller's own transaction) is accepted."""
+    if not isinstance(value, AsyncSession):
+        _reject(name)
+    return value
+
+
+def check_project_gate(name: str, value: Any) -> Any:
+    """``None`` (no Project state gate) or an object with ``require_active``."""
+    if value is not None and not callable(getattr(value, "require_active", None)):
         _reject(name)
     return value
 
