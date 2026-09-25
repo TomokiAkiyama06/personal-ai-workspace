@@ -178,6 +178,7 @@ personal-ai-workspace/
 │     ├─ 0004-rbac-capability-and-audit-policy.md
 │     ├─ 0005-owner-setup-and-recovery.md
 │     ├─ 0007-task-queue-budget-and-loop-policy.md
+│     ├─ 0014-task-working-set-persistence.md
 │     └─ README.md
 └─ evaluator/
    └─ README.md

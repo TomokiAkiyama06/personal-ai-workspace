@@ -10,6 +10,7 @@ from functools import partial
 from uuid import uuid4
 
 from sqlalchemy import delete, func, insert, select, text, update
+from sqlalchemy.exc import IntegrityError
 
 from paw_backend.memory.models import (
     Conversation,
@@ -56,6 +57,7 @@ class LayerSeparationTest(MemoryDatabaseTestCase):
             "session_states",
             "memories",
             "memory_versions",
+            "memory_metadata_changes",
             "memory_relations",
             "memory_sources",
             "memory_embeddings",
@@ -75,6 +77,7 @@ class LayerSeparationTest(MemoryDatabaseTestCase):
                 ("session_states", "conversations"): "c",
                 # Long-term Memory.
                 ("memory_versions", "memories"): "c",
+                ("memory_metadata_changes", "memory_versions"): "c",
                 ("memory_relations", "memory_versions"): "c",
                 ("memory_sources", "memory_versions"): "c",
                 ("memory_embeddings", "memory_versions"): "c",
@@ -914,6 +917,15 @@ class ProvenanceTest(MemoryDatabaseTestCase):
             )
         )
 
+    def settle_deferred_checks(self):
+        """Run the deferred checks now, as a COMMIT would, and defer them again."""
+        self.session.execute(text("SET CONSTRAINTS ALL IMMEDIATE"))
+        self.session.execute(text("SET CONSTRAINTS ALL DEFERRED"))
+
+    def add_source_and_settle(self, version, source_type, **values):
+        self.add_source(version, source_type, **values)
+        self.settle_deferred_checks()
+
     def sources_of(self, version):
         rows = self.session.execute(
             select(
@@ -992,6 +1004,91 @@ class ProvenanceTest(MemoryDatabaseTestCase):
         self.assertEqual(
             [tuple(row) for row in stored], [(conversation_b, message_of_b)]
         )
+
+    def test_a_source_naming_a_message_must_name_its_conversation(self):
+        # ``MATCH SIMPLE`` skips the composite foreign key when the conversation
+        # is NULL, and the standalone message key is satisfied by any message.
+        conversation = self.add_conversation()
+        message = self.add_message(conversation, 0)
+        version = self.add_version(self.add_memory())
+
+        message_only = partial(
+            self.add_source_and_settle, version, "conversation", message_id=message
+        )
+        message_and_conversation = partial(
+            self.add_source_and_settle,
+            version,
+            "conversation",
+            conversation_id=conversation,
+            message_id=message,
+        )
+        conversation_only = partial(
+            self.add_source_and_settle,
+            version,
+            "conversation",
+            conversation_id=conversation,
+        )
+
+        self.assertEqual(
+            self.violation(message_only),
+            "tr_memory_sources_message_requires_conversation",
+        )
+        self.assertIsNone(self.violation(message_and_conversation))
+        self.assertIsNone(self.violation(conversation_only))
+        stored = self.session.execute(
+            select(MemorySource.conversation_id, MemorySource.message_id).order_by(
+                MemorySource.message_id.is_(None)
+            )
+        ).all()
+        self.assertEqual(
+            [tuple(row) for row in stored],
+            [(conversation, message), (conversation, None)],
+        )
+
+    def test_the_conversation_of_a_source_that_names_a_message_cannot_be_cleared(self):
+        conversation = self.add_conversation()
+        message = self.add_message(conversation, 0)
+        version = self.add_version(self.add_memory())
+        self.add_source(
+            version, "conversation", conversation_id=conversation, message_id=message
+        )
+
+        def clear_the_conversation():
+            self.session.execute(update(MemorySource).values(conversation_id=None))
+            self.settle_deferred_checks()
+
+        self.assertEqual(
+            self.violation(clear_the_conversation),
+            "tr_memory_sources_message_requires_conversation",
+        )
+        stored = self.session.execute(
+            select(MemorySource.conversation_id, MemorySource.message_id)
+        ).one()
+        self.assertEqual(tuple(stored), (conversation, message))
+
+    def test_deleting_a_conversation_passes_the_message_requires_conversation_check(
+        self,
+    ):
+        # The foreign keys' SET NULL actions clear conversation_id and message_id
+        # one after the other, so the row passes through (NULL, message). Only
+        # the final state (both NULL) may be judged: a plain CHECK would refuse
+        # the delete.
+        conversation = self.add_conversation()
+        message = self.add_message(conversation, 0)
+        version = self.add_version(self.add_memory())
+        self.add_source(
+            version, "conversation", conversation_id=conversation, message_id=message
+        )
+
+        self.session.execute(
+            delete(Conversation).where(Conversation.id == conversation)
+        )
+        self.settle_deferred_checks()
+
+        stored = self.session.execute(
+            select(MemorySource.conversation_id, MemorySource.message_id)
+        ).one()
+        self.assertEqual(tuple(stored), (None, None))
 
     def test_a_source_may_name_a_conversation_without_naming_a_message(self):
         conversation = self.add_conversation()
@@ -1171,3 +1268,128 @@ class ProvenanceTest(MemoryDatabaseTestCase):
             + [row[0] for row in self.sources_of(v2)],
             ["task", "user_confirmation"],
         )
+
+
+@requires_postgres
+class CommittedProvenanceTest(MemoryDatabaseTestCase):
+    """Provenance rules that only show at COMMIT, on data that is really committed.
+
+    The other tests run in one rolled-back transaction. Here every step commits,
+    because PostgreSQL treats a row inserted in the *same* transaction specially
+    (its foreign key is re-checked even when the key did not change), which hides
+    how a conversation delete behaves for rows that were committed earlier.
+    """
+
+    MESSAGE_REQUIRES_CONVERSATION = "tr_memory_sources_message_requires_conversation"
+
+    def setUp(self) -> None:
+        self.conversation = uuid4()
+        self.message = uuid4()
+        self.memory = uuid4()
+        self.version = uuid4()
+        self.addCleanup(self.remove_rows)
+
+    def remove_rows(self) -> None:
+        with self.engine.begin() as connection:
+            connection.execute(
+                delete(Conversation).where(Conversation.id == self.conversation)
+            )
+            connection.execute(delete(Memory).where(Memory.id == self.memory))
+
+    def commit_conversation_with_a_memory(self) -> None:
+        with self.engine.begin() as connection:
+            connection.execute(
+                insert(Conversation).values(id=self.conversation, owner_user_id=uuid4())
+            )
+            connection.execute(
+                insert(Message).values(
+                    id=self.message,
+                    conversation_id=self.conversation,
+                    turn_id=uuid4(),
+                    event_sequence=0,
+                    role="user",
+                    content="hello",
+                )
+            )
+            connection.execute(insert(Memory).values(id=self.memory))
+            connection.execute(
+                insert(MemoryVersion).values(
+                    id=self.version, **version_values(self.memory)
+                )
+            )
+
+    def commit_source(self, **values) -> None:
+        with self.engine.begin() as connection:
+            connection.execute(
+                insert(MemorySource).values(
+                    memory_version_id=self.version,
+                    source_type="conversation",
+                    **values,
+                )
+            )
+
+    def stored_sources(self) -> list[tuple]:
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(MemorySource.conversation_id, MemorySource.message_id).where(
+                    MemorySource.memory_version_id == self.version
+                )
+            )
+            return [tuple(row) for row in rows]
+
+    def test_committing_a_source_that_names_a_message_without_its_conversation_fails(
+        self,
+    ):
+        self.commit_conversation_with_a_memory()
+
+        with self.assertRaises(IntegrityError) as caught:
+            self.commit_source(message_id=self.message)
+
+        self.assertEqual(
+            caught.exception.orig.diag.constraint_name,
+            self.MESSAGE_REQUIRES_CONVERSATION,
+        )
+        self.assertEqual(self.stored_sources(), [])
+
+    def test_a_conversation_delete_commits_and_clears_both_references(self):
+        self.commit_conversation_with_a_memory()
+        self.commit_source(conversation_id=self.conversation, message_id=self.message)
+
+        with self.engine.begin() as connection:
+            connection.execute(
+                delete(Conversation).where(Conversation.id == self.conversation)
+            )
+
+        self.assertEqual(self.stored_sources(), [(None, None)])
+
+    def test_the_delete_does_not_depend_on_which_foreign_key_action_runs_first(self):
+        # Referential actions of one table fire in the order of the triggers'
+        # names, which come from object ids. Re-creating the messages' foreign
+        # key gives it a newer id: the sources' conversation key now fires
+        # first, and the row passes through (NULL, message) before the message
+        # goes. A plain CHECK on the pair would refuse the delete here.
+        with self.engine.begin() as connection:
+            connection.execute(
+                text(
+                    "ALTER TABLE messages"
+                    " DROP CONSTRAINT fk_messages_conversation_id_conversations"
+                )
+            )
+            connection.execute(
+                text(
+                    "ALTER TABLE messages ADD CONSTRAINT"
+                    " fk_messages_conversation_id_conversations"
+                    " FOREIGN KEY (conversation_id) REFERENCES conversations (id)"
+                    " ON DELETE CASCADE"
+                )
+            )
+        self.commit_conversation_with_a_memory()
+        self.commit_source(conversation_id=self.conversation, message_id=self.message)
+        self.commit_source(conversation_id=self.conversation)
+
+        with self.engine.begin() as connection:
+            connection.execute(
+                delete(Conversation).where(Conversation.id == self.conversation)
+            )
+
+        self.assertEqual(self.stored_sources(), [(None, None), (None, None)])

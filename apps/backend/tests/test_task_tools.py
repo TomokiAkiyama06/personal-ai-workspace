@@ -4,10 +4,12 @@ Only identity and execution state are stored (never arguments or output).
 Skipped unless ``PAW_TEST_DATABASE_URL`` is set.
 """
 
+import json
+import re
 import unittest
 import uuid
 
-from sqlalchemy import text
+from sqlalchemy import event, text
 from sqlalchemy.exc import IntegrityError
 
 from paw_backend.tasks import (
@@ -431,6 +433,131 @@ class ToolInvocationSchemaTest(PostgresTaskTestCase):
                             ),
                             {"t": task_id, "s": step.id},
                         )
+
+    async def running_step(self):
+        task_id = await self.task_in_state(S.RUNNING)
+        return task_id, await self.service.begin_step(task_id, "work", attempt=1)
+
+    async def database_execute(self, sql: str, **parameters) -> None:
+        async with self.database.engine.begin() as connection:
+            await connection.execute(text(sql), parameters)
+
+    async def test_started_calls_have_a_partial_index_on_the_step(self):
+        rows = await self.rows(
+            "SELECT i.relname, x.indisunique, "
+            "array_agg(a.attname::text ORDER BY k.ordinality), "
+            "pg_get_expr(x.indpred, x.indrelid) "
+            "FROM pg_index x "
+            "JOIN pg_class i ON i.oid = x.indexrelid "
+            "JOIN pg_class t ON t.oid = x.indrelid "
+            "CROSS JOIN LATERAL unnest(x.indkey) WITH ORDINALITY AS k(attnum, "
+            "ordinality) "
+            "JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum "
+            "WHERE t.relname = 'task_tool_invocations' AND x.indpred IS NOT NULL "
+            "GROUP BY i.relname, x.indisunique, x.indpred, x.indrelid"
+        )
+        self.assertEqual(len(rows), 1)
+        name, unique, columns, predicate = rows[0]
+        self.assertEqual(name, "ix_task_tool_invocations_started")
+        self.assertFalse(unique)
+        self.assertEqual(columns, ["step_id"])
+        self.assertEqual(predicate, "((status)::text = 'started'::text)")
+
+    async def test_every_query_on_started_calls_can_use_the_partial_index(self):
+        # One long step with a large finished history and two calls in flight:
+        # the queries about the calls in flight must not read the history.
+        task_id, step = await self.running_step()
+        await self.database_execute(
+            "INSERT INTO task_tool_invocations (id, task_id, step_id, tool_name, "
+            "status, started_at, finished_at) "
+            "SELECT gen_random_uuid(), :t, :s, 'shell', 'succeeded', now(), now() "
+            "FROM generate_series(1, 20000)",
+            t=task_id,
+            s=step.id,
+        )
+        for _ in range(2):
+            await self.service.begin_tool_invocation(
+                task_id, step_id=step.id, tool_name="shell"
+            )
+        await self.database_execute("ANALYZE task_tool_invocations")
+
+        captured = []
+
+        def capture(connection, cursor, statement, parameters, context, many):
+            captured.append((statement, dict(parameters)))
+
+        engine = self.database.engine.sync_engine
+        event.listen(engine, "before_cursor_execute", capture)
+        try:
+            await self.service.begin_tool_invocation(
+                task_id, step_id=step.id, tool_name="shell"
+            )
+            await self.service.restore(task_id)
+            await self.service.finish_step(task_id, step.id, StepStatus.SUCCEEDED)
+        finally:
+            event.remove(engine, "before_cursor_execute", capture)
+
+        def statement_on_tool_calls(*, starting: str, excluding: str = "\0"):
+            found = [
+                (sql, parameters)
+                for sql, parameters in captured
+                if sql.lstrip().startswith(starting)
+                and "task_tool_invocations" in sql
+                and excluding not in sql
+                and "task_tool_invocations.status !=" not in sql
+            ]
+            self.assertEqual(len(found), 1, starting)
+            return found[0]
+
+        queries = {
+            "count of started calls": statement_on_tool_calls(
+                starting="SELECT count(*)"
+            ),
+            "started calls to restore": statement_on_tool_calls(
+                starting="SELECT task_tool_invocations", excluding="LIMIT"
+            ),
+            "interrupt started calls": statement_on_tool_calls(
+                starting="UPDATE task_tool_invocations"
+            ),
+        }
+        for label, (sql, parameters) in queries.items():
+            with self.subTest(query=label):
+                plan = await self.generic_plan(sql, parameters)
+                self.assertIn("ix_task_tool_invocations_started", plan)
+                self.assertNotIn("Seq Scan", plan)
+
+    async def generic_plan(self, sql: str, parameters: dict) -> str:
+        """The plan PostgreSQL caches for a prepared statement (parameters unknown).
+
+        A driver prepares a statement it runs often, and PostgreSQL may then
+        stop planning it for each set of parameter values; a partial index can
+        only be used by such a plan when the index condition is written into
+        the statement, not passed as a parameter.
+        """
+        names = list(dict.fromkeys(re.findall(r"%\((\w+)\)s", sql)))
+        numbered = re.sub(
+            r"%\((\w+)\)s", lambda m: f"${names.index(m.group(1)) + 1}", sql
+        )
+
+        def literal(value) -> str:
+            if isinstance(value, int):
+                return str(value)
+            return "'" + str(value).replace("'", "''") + "'"
+
+        arguments = ", ".join(literal(parameters[name]) for name in names)
+        async with self.database.engine.connect() as connection:
+            await connection.exec_driver_sql("SET plan_cache_mode = force_generic_plan")
+            await connection.exec_driver_sql(f"PREPARE started_calls AS {numbered}")
+            try:
+                result = await connection.exec_driver_sql(
+                    "EXPLAIN (FORMAT JSON) EXECUTE started_calls"
+                    + (f"({arguments})" if names else "")
+                )
+                return json.dumps(result.scalar())
+            finally:
+                # The connection goes back to the pool: leave no session state.
+                await connection.exec_driver_sql("DEALLOCATE started_calls")
+                await connection.exec_driver_sql("RESET plan_cache_mode")
 
     async def rows(self, sql: str):
         async with self.database.engine.connect() as connection:
