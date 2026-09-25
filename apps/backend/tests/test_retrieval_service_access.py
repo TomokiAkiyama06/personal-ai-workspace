@@ -8,7 +8,10 @@ from unittest import mock
 from uuid import uuid4
 
 from paw_backend.authz import (
+    DEFAULT_POLICY,
     Authorizer,
+    Capability,
+    Policy,
     Principal,
     ProjectRole,
     RepoAcl,
@@ -419,6 +422,71 @@ class ProjectGroupScopeTest(PostgresRetrievalTestCase):
         self.assertEqual(source.calls, [])
         await self.retrieve(me, QUERY, retriever=retriever)
         self.assertEqual(source.calls, [me.user_id])
+
+
+@requires_postgres
+class PolicyDrivenTest(PostgresRetrievalTestCase):
+    """The decisions are the Authorizer's, not the retrieval's own opinion."""
+
+    def authorizer_without(self, *, system=(), project=None):
+        system_grants = {
+            role: granted - set(system)
+            for role, granted in DEFAULT_POLICY.system_grants.items()
+        }
+        project_grants = dict(DEFAULT_POLICY.project_grants)
+        project_grants.update(project or {})
+        policy = Policy(system_grants=system_grants, project_grants=project_grants)
+        return Authorizer(self.sink, policy=policy, clock=self.clock)
+
+    async def test_a_project_role_without_project_read_reads_no_project_memory(self):
+        project = self.seed_project()
+        self.seed("note", TEXT, scope="project", project=project, embed=False)
+        manager = self.member_of(project, ProjectRole.MANAGER)
+        viewer = self.member_of(project, ProjectRole.VIEWER)
+        only_managers = self.authorizer_without(
+            project={
+                ProjectRole.CONTRIBUTOR: frozenset(),
+                ProjectRole.VIEWER: frozenset(),
+            }
+        )
+        retriever = self.new_retriever(authorizer=only_managers)
+        found = await self.retrieve(manager, QUERY, retriever=retriever)
+        self.assertEqual(titles(found), ["note"])
+        refused = await self.retrieve(viewer, QUERY, retriever=retriever)
+        self.assertEqual(refused.hits, ())
+        denials = [e for e in self.sink.events if e.decision == "deny"]
+        self.assertEqual(
+            [(e.action, e.reason, e.actor_id) for e in denials],
+            [("project.read", "capability_not_granted", viewer.user_id)],
+        )
+
+    async def test_a_policy_that_withholds_shared_memory_read_is_obeyed(self):
+        self.seed("company", TEXT, scope="shared", embed=False)
+        me = self.user()
+        retriever = self.new_retriever(
+            authorizer=self.authorizer_without(system={Capability.SHARED_MEMORY_READ})
+        )
+        self.assertEqual((await self.retrieve(me, QUERY, retriever=retriever)).hits, ())
+
+    async def test_a_policy_that_withholds_memory_use_hides_private_memory(self):
+        me = self.user()
+        self.seed("mine", TEXT, owner=me.user_id, embed=False)
+        retriever = self.new_retriever(
+            authorizer=self.authorizer_without(system={Capability.MEMORY_USE})
+        )
+        self.assertEqual((await self.retrieve(me, QUERY, retriever=retriever)).hits, ())
+
+    async def test_a_repository_of_an_unreadable_project_is_not_even_asked_about(self):
+        mine, theirs = self.seed_project(), self.seed_project()
+        me = self.member_of(mine)
+        repo = self.new_repo_id()
+        self.seed("repo note", TEXT, scope="repo", repo=repo, embed=False)
+        retriever = self.new_retriever(
+            repo_acls=StaticRepoAcls([RepoAcl.inherit(repo, theirs)])
+        )
+        await self.retrieve(me, QUERY, retriever=retriever)
+        # No decision is made (and no denial recorded) for it.
+        self.assertEqual([e for e in self.sink.events if e.decision == "deny"], [])
 
 
 @requires_postgres

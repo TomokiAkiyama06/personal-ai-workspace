@@ -803,9 +803,11 @@ class MemoryEmbedding(Base):
     ``vector_dims`` CHECK together make every row of a model the same size, so
     a nearest-neighbour query that filters one ``embedding_model_id`` never
     meets a dimension mismatch. The query must also join ``memory_versions`` to
-    apply the ACL condition before ranking. No ANN index exists yet: PAW-043
-    adds it once the model is chosen (an HNSW index needs a fixed dimension, so
-    it will be a per-model expression index).
+    apply the ACL condition before ranking (``memory/retrieval/queries.py`` does).
+    No ANN index exists: an HNSW index needs a fixed dimension, so it would be a
+    per-model expression index, and the model is not chosen (PAW-019). Hybrid
+    Retrieval (PAW-043) scans exactly; Decision 0019 says what a later ANN index
+    must keep (the permission condition in the same WHERE).
     """
 
     __tablename__ = "memory_embeddings"

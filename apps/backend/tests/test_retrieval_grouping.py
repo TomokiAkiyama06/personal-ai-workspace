@@ -51,6 +51,24 @@ class PrecedenceTest(unittest.TestCase):
         low = make_ranked(score=0.1)
         self.assertLess(precedence_key(high), precedence_key(low))
 
+    def test_freshness_outweighs_scope_and_scope_outweighs_score(self):
+        stale_repo = make_ranked(
+            score=0.9,
+            scope=MemoryScope.REPO,
+            freshness=Freshness.STALE,
+            stale_reason=StaleReason.MARKED_STALE,
+        )
+        fresh_user = make_ranked(score=0.1, scope=MemoryScope.USER)
+        self.assertLess(precedence_key(fresh_user), precedence_key(stale_repo))
+        # Confirmation outweighs freshness.
+        stale_confirmed = make_ranked(
+            score=0.1, freshness=Freshness.STALE, stale_reason=StaleReason.MARKED_STALE
+        )
+        fresh_inferred = make_ranked(
+            score=0.9, confirmation_state=ConfirmationState.INFERRED
+        )
+        self.assertLess(precedence_key(stale_confirmed), precedence_key(fresh_inferred))
+
     def test_the_final_order_is_by_score_first(self):
         confirmed_low = make_ranked(score=0.1)
         inferred_high = make_ranked(
@@ -94,6 +112,12 @@ class NearDuplicateTest(unittest.TestCase):
         d = self.make(words(9, extra="sigma"))
         self.assertTrue(near_duplicate(c, d, 0.83))
         self.assertFalse(near_duplicate(c, d, 0.84))
+
+    def test_overlap_exactly_at_the_threshold_is_a_copy(self):
+        # Nine shared features (eight words and the title) and one extra: 9 / 10.
+        a, b = self.make(words(8)), self.make(words(9))
+        self.assertTrue(near_duplicate(a, b, 0.9))
+        self.assertFalse(near_duplicate(a, b, 0.9000001))
 
     def test_japanese_copies_are_found_through_character_pairs(self):
         a = self.make("デプロイの手順はマージの後にステージングで確認する")

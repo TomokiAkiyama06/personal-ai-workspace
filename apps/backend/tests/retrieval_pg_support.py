@@ -7,6 +7,7 @@ separate and always commits, and nothing depends on the real clock.
 """
 
 import json
+import re
 from collections.abc import Sequence
 from datetime import datetime, timedelta
 from typing import Any, NamedTuple
@@ -95,6 +96,32 @@ class CountingPolicies:
         if isinstance(self.source, BaseException):
             raise self.source
         return await self.source.items()
+
+
+# The indexes of ``memory_versions`` that no constraint needs (safe to drop in a
+# transaction that is rolled back).
+FREE_INDEXES = """
+SELECT c.relname FROM pg_index i
+JOIN pg_class c ON c.oid = i.indexrelid
+WHERE i.indrelid = 'memory_versions'::regclass
+  AND NOT i.indisprimary
+  AND NOT EXISTS (SELECT 1 FROM pg_constraint k WHERE k.conindid = i.indexrelid)
+"""
+
+
+def _literal(value: Any) -> str:
+    """A parameter value as a SQL literal for ``EXECUTE`` (test statements only)."""
+    if value is None:
+        return "NULL"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int | float):
+        return repr(value)
+    if isinstance(value, list):
+        return "'[" + ",".join(repr(float(x)) for x in value) + "]'"
+    if isinstance(value, datetime):
+        return "'" + value.isoformat() + "'"
+    return "'" + str(value).replace("'", "''") + "'"
 
 
 class Seeded(NamedTuple):
@@ -210,6 +237,65 @@ class PostgresRetrievalTestCase(PostgresProjectTestCase):
 
     def database_url(self) -> str:
         return TEST_DATABASE_URL
+
+    # -- plans ----------------------------------------------------------------------
+
+    def explain(
+        self,
+        statement: Any,
+        *,
+        generic: bool = False,
+        seqscan: bool = True,
+        bitmap: bool = True,
+        only_index: str | None = None,
+    ) -> dict[str, Any]:
+        """The top node of ``EXPLAIN (FORMAT JSON)`` of a SQLAlchemy statement.
+
+        The statement is prepared with ``$n`` parameters like the driver sends it;
+        ``generic`` plans it without the parameter values (``force_generic_plan``),
+        which is what a prepared statement uses after five executions. Unlike
+        ``PostgresTaskTestCase.plan`` (bitmap scans off, which the queue tests rule
+        out to stay stable) bitmap scans stay ON by default here: a GIN index can
+        only be used through a bitmap scan. ``seqscan=False`` makes the planner use
+        an index whenever one applies, so the result never depends on table
+        statistics. ``only_index`` drops every other free-standing index of
+        ``memory_versions`` inside the statement's own transaction (rolled back
+        afterwards), so the plan shows whether THAT index can serve the statement
+        at all, whatever the planner thinks it costs.
+        """
+        compiled = statement.compile(
+            dialect=self.engine.dialect, compile_kwargs={"render_postcompile": True}
+        )
+        names = list(dict.fromkeys(re.findall(r"%\((\w+)\)s", compiled.string)))
+        numbered = re.sub(
+            r"%\((\w+)\)s",
+            lambda m: f"${names.index(m.group(1)) + 1}",
+            compiled.string,
+        )
+        arguments = ", ".join(_literal(compiled.params[name]) for name in names)
+        mode = "force_generic_plan" if generic else "force_custom_plan"
+        with self.engine.connect() as connection:
+            connection.exec_driver_sql(f"SET plan_cache_mode = {mode}")
+            connection.exec_driver_sql(
+                f"SET enable_seqscan = {'on' if seqscan else 'off'}"
+            )
+            connection.exec_driver_sql(
+                f"SET enable_bitmapscan = {'on' if bitmap else 'off'}"
+            )
+            if only_index is not None:
+                for name in connection.exec_driver_sql(FREE_INDEXES).scalars().all():
+                    if name != only_index:
+                        connection.exec_driver_sql(f"DROP INDEX {name}")
+            connection.exec_driver_sql(f"PREPARE checked AS {numbered}")
+            try:
+                found = connection.exec_driver_sql(
+                    "EXPLAIN (FORMAT JSON) EXECUTE checked"
+                    + (f"({arguments})" if names else "")
+                ).scalar()
+            finally:
+                connection.exec_driver_sql("DEALLOCATE checked")
+                connection.rollback()
+        return found[0]["Plan"]
 
     # -- callers ------------------------------------------------------------------
 
