@@ -33,6 +33,7 @@ from paw_backend.tasks import (
     WorktreeState,
 )
 
+from .gate_support import ALWAYS_ACTIVE
 from .support import paw_environment
 from .task_support import (
     FIRST_RUN,
@@ -59,7 +60,7 @@ TASK_TABLES = (
 class ConcurrencyTest(PostgresTaskTestCase):
     async def test_a_stale_expected_version_is_rejected_and_changes_nothing(self):
         task_id = await self.create_task()
-        other_process = TaskService(self.new_database())
+        other_process = TaskService(self.new_database(), project_gate=ALWAYS_ACTIVE)
 
         await self.service.execute(
             task_id, C.START, actor=self.system, expected_version=1
@@ -102,7 +103,7 @@ class ConcurrencyTest(PostgresTaskTestCase):
     async def test_a_command_waiting_behind_a_writer_rejects_its_stale_version(self):
         """Both commands were decided on version 1; only the first one may apply."""
         task_id = await self.create_task()
-        loser = TaskService(self.new_database())
+        loser = TaskService(self.new_database(), project_gate=ALWAYS_ACTIVE)
 
         async with self.database.engine.connect() as winner:
             # The winner updates the row but has not committed yet.
@@ -135,7 +136,7 @@ class ConcurrencyTest(PostgresTaskTestCase):
 
     async def test_a_command_without_a_version_is_judged_on_the_latest_state(self):
         task_id = await self.task_in_state(S.RUNNING)
-        second = TaskService(self.new_database())
+        second = TaskService(self.new_database(), project_gate=ALWAYS_ACTIVE)
 
         async with self.database.engine.connect() as first:
             await first.execute(
@@ -158,7 +159,10 @@ class ConcurrencyTest(PostgresTaskTestCase):
 
     async def test_of_many_simultaneous_cancels_exactly_one_wins(self):
         task_id = await self.task_in_state(S.RUNNING)
-        services = [TaskService(self.new_database()) for _ in range(6)]
+        services = [
+            TaskService(self.new_database(), project_gate=ALWAYS_ACTIVE)
+            for _ in range(6)
+        ]
         results = await asyncio.gather(
             *(
                 service.execute(task_id, C.CANCEL, actor=self.user)
@@ -183,7 +187,10 @@ class ConcurrencyTest(PostgresTaskTestCase):
 
     async def test_two_different_commands_cannot_both_leave_a_running_task(self):
         task_id = await self.task_in_state(S.RUNNING)
-        services = [TaskService(self.new_database()) for _ in range(2)]
+        services = [
+            TaskService(self.new_database(), project_gate=ALWAYS_ACTIVE)
+            for _ in range(2)
+        ]
         commands = [
             (services[0], C.BEGIN_EVALUATION, S.EVALUATING),
             (services[1], C.WAIT, S.WAITING),
@@ -211,7 +218,10 @@ class ConcurrencyTest(PostgresTaskTestCase):
 
     async def test_concurrent_step_starts_leave_a_single_running_step(self):
         task_id = await self.task_in_state(S.RUNNING)
-        services = [TaskService(self.new_database()) for _ in range(4)]
+        services = [
+            TaskService(self.new_database(), project_gate=ALWAYS_ACTIVE)
+            for _ in range(4)
+        ]
         results = await asyncio.gather(
             *(
                 service.begin_step(task_id, "work", run=FIRST_RUN)
@@ -230,7 +240,7 @@ class ConcurrencyTest(PostgresTaskTestCase):
     async def test_stop_now_does_not_overwrite_a_step_the_worker_just_finished(self):
         task_id = await self.task_in_state(S.RUNNING)
         await self.service.begin_step(task_id, "work", run=FIRST_RUN)
-        stopper = TaskService(self.new_database())
+        stopper = TaskService(self.new_database(), project_gate=ALWAYS_ACTIVE)
 
         async with self.database.engine.connect() as worker:
             # The worker finishes its step but has not committed yet.
@@ -294,7 +304,7 @@ class RestoreTest(PostgresTaskTestCase):
     async def test_a_second_independent_service_sees_the_same_truth(self):
         task_id = await self.build_rich_task(self.service)
 
-        other_process = TaskService(self.new_database())
+        other_process = TaskService(self.new_database(), project_gate=ALWAYS_ACTIVE)
         snapshot = await other_process.restore(task_id)
 
         self.assertEqual(snapshot, await self.service.restore(task_id))
@@ -327,12 +337,12 @@ class RestoreTest(PostgresTaskTestCase):
     async def test_state_survives_the_original_process_going_away(self):
         """The 'client' or process that drove the task disconnects for good."""
         first = new_database()
-        service = TaskService(first)
+        service = TaskService(first, project_gate=ALWAYS_ACTIVE)
         task_id = await self.build_rich_task(service)
         before = await service.restore(task_id)
         await first.dispose()  # every connection of the first process is closed
 
-        fresh = TaskService(self.new_database())
+        fresh = TaskService(self.new_database(), project_gate=ALWAYS_ACTIVE)
         self.assertEqual(await fresh.restore(task_id), before)
 
         # ...and the new process can carry on from exactly that state.
@@ -352,7 +362,7 @@ class RestoreTest(PostgresTaskTestCase):
         await self.service.execute(
             task_id, C.PAUSE, actor=self.user, reason="going offline"
         )
-        reconnecting = TaskService(self.new_database())
+        reconnecting = TaskService(self.new_database(), project_gate=ALWAYS_ACTIVE)
         snapshot = await reconnecting.restore(task_id)
         self.assertEqual(snapshot.state, S.PAUSED)
         self.assertEqual(snapshot.last_event.reason, "going offline")

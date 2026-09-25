@@ -21,6 +21,24 @@ Changes of the task's row also increment ``tasks.version`` and are applied with
 it saw earlier passes it as ``expected_version`` so that a stale decision is
 rejected (``TaskConflictError``) even if it arrives later.
 
+Project state gate (Issue #83, Decisions 0008 and 0020). ``create_task``, Retry,
+Restart and Start admit new work or begin the work of a queued task, so every
+service is built with a ``ProjectGate`` (required; see ``tasks.project_gate``) and
+asks it, INSIDE the transaction of the write, to lock the project row ``FOR SHARE``
+and to refuse (``ProjectNotActiveError``, nothing written) unless the project is
+Active. Lock order in every command: the task row first (Retry, Restart, Start), then
+the project row. Every other command (Cancel, Fail, Stop Now, Pause, Resume, Wait,
+Unblock, Begin evaluation, Complete) is never gated: running work is not stopped
+and a stop must always be possible.
+
+A command can also carry a step of its own (``execute(..., in_transaction=step)``):
+the caller's coroutine runs in the SAME transaction, after the command's writes and
+before the commit, so what it writes commits or rolls back with the command. The
+stop processor of a deleted project uses it to cancel the task's queue entry in the
+Cancel's own transaction and to hold the project row under ``FOR SHARE`` while it
+does (``projects.task_stop``). The step is a Backend-internal extension point (never
+built from request data); it must not commit or roll back the session.
+
 Bookkeeping by a worker names the run it works for (``TaskRun``: the attempt,
 which Restart increments, and the retry count, which Retry increments): a step
 is started, a log line is written and the worktree / review / pull request state
@@ -68,7 +86,7 @@ import sys
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime
-from typing import Any
+from typing import Any, Protocol
 
 from sqlalchemy import (
     BindParameter,
@@ -110,6 +128,7 @@ from paw_backend.tasks.models import (
     TaskToolInvocationRow,
     utcnow,
 )
+from paw_backend.tasks.project_gate import ProjectGate
 from paw_backend.tasks.records import (
     AttemptSnapshot,
     EvaluationResult,
@@ -162,6 +181,27 @@ _TRUNCATED = "...[truncated]"
 # This is the hook for audit (PAW-025) and notifications; the durable record is
 # the ``task_events`` table, which a consumer can also read by ``seq``.
 TransitionListener = Callable[[TaskEvent], Awaitable[None]]
+
+
+class InTransactionStep(Protocol):
+    """A coroutine that ``TaskService.execute`` runs in the command's transaction.
+
+    Called with the command's session, the task id and the id of the task's project,
+    after the task row was locked and the command's writes (the task row and the
+    history event) were flushed, and before the commit. Whatever it raises aborts
+    the command: nothing of it is written and the exception propagates unchanged.
+    """
+
+    async def __call__(
+        self, session: AsyncSession, task_id: uuid.UUID, project_id: uuid.UUID
+    ) -> None: ...
+
+
+# The commands that begin or resume WORK from a state where nothing runs, so they are
+# refused in a project that is not Active (Decision 0020). Cancel, Fail, Stop Now,
+# Pause, Resume, Wait, Unblock, Begin evaluation and Complete are not: work that
+# already runs is not stopped, and a stop must always be possible.
+_GATED_COMMANDS = frozenset({TaskCommand.START, TaskCommand.RETRY, TaskCommand.RESTART})
 
 _STEP_ACTIVE_STATES = frozenset(
     {TaskState.RUNNING, TaskState.WAITING, TaskState.EVALUATING}
@@ -541,10 +581,25 @@ def _attempt(row: TaskAttemptRow) -> AttemptSnapshot:
 
 class TaskService:
     def __init__(
-        self, database: Database, *, listeners: Sequence[TransitionListener] = ()
+        self,
+        database: Database,
+        *,
+        project_gate: ProjectGate,
+        listeners: Sequence[TransitionListener] = (),
     ) -> None:
+        """``project_gate`` is REQUIRED: the Project state gate (module docstring).
+
+        There is no default and ``None`` is refused, so a service can never be built
+        that skips the check by omission (Decision 0020, approved 2026-09-26);
+        ``TypeError`` for a missing argument or one without a ``require_active``
+        coroutine. A caller that has no projects (a test, a tool) passes a gate that
+        says so in its name; production wiring passes ``ProjectStateGate``.
+        """
+        if not callable(getattr(project_gate, "require_active", None)):
+            raise TypeError("project_gate must have a require_active coroutine")
         self._database = database
         self._listeners = tuple(listeners)
+        self._project_gate = project_gate
 
     # -- creation and commands ---------------------------------------------
 
@@ -568,6 +623,10 @@ class TaskService:
         ``InvalidCommandArgumentError`` is raised before anything is written, as
         for any other wrong argument (``project_id`` and ``created_by`` are
         ``uuid.UUID`` objects; see the module docstring).
+
+        The project is locked ``FOR SHARE`` (``project_gate``) in the
+        transaction of the insert and must be Active, otherwise
+        ``ProjectNotActiveError`` is raised and nothing is written.
         """
         project_id = _uuid("project_id", project_id)
         created_by = _uuid("created_by", created_by)
@@ -594,6 +653,8 @@ class TaskService:
             updated_at=now,
         )
         async with self._database.session() as session, session.begin():
+            # First, before any write: a refused project leaves no trace.
+            await self._project_gate.require_active(session, project_id)
             session.add(task)
             # No relationship() links the rows, so the task must be flushed
             # before the rows that reference it.
@@ -628,6 +689,7 @@ class TaskService:
         wait_reason: WaitReason | None = None,
         agent: str | None = None,
         model: str | None = None,
+        in_transaction: InTransactionStep | None = None,
     ) -> TaskEvent:
         """Apply ``command`` to the task and return the history event it wrote.
 
@@ -651,6 +713,15 @@ class TaskService:
         missing, blank or non-string reason is refused with
         ``InvalidCommandArgumentError`` before anything is written or the task
         is looked at.
+
+        Retry, Restart and Start also need the project to be Active (``project_gate``;
+        ``ProjectNotActiveError``, nothing written; judged after
+        the transition, so an illegal command is reported as such first).
+        ``in_transaction`` (``None`` or a coroutine function, see
+        ``InTransactionStep``) runs in the same transaction, after the command's
+        writes and before the commit; an exception it raises aborts the command.
+        The session it receives is the command's own, inside ``session.begin()``:
+        the service never hands out a session that is not in a transaction.
         """
         task_id = _uuid("task_id", task_id)
         # The serialised value ("stop_now") is a command too: normalise it to the
@@ -672,6 +743,8 @@ class TaskService:
             raise InvalidCommandArgumentError(
                 "Only Retry and Restart accept an agent or model"
             )
+        if in_transaction is not None and not callable(in_transaction):
+            raise InvalidCommandArgumentError("in_transaction must be callable")
 
         async with self._database.session() as session, session.begin():
             # Lock first, then read: whatever a concurrent begin_step commits is
@@ -682,6 +755,12 @@ class TaskService:
             if expected_version is not None and task.version != expected_version:
                 raise TaskConflictError()
             plan = plan_transition(task.state, command, wait_reason=wait_reason)
+            if command in _GATED_COMMANDS:
+                # Retry and Restart put a finished task back to work, and Start
+                # begins the work of a task that was queued: none may happen in a
+                # project that is not Active. The task row is locked already; the
+                # project row follows.
+                await self._project_gate.require_active(session, task.project_id)
 
             now = utcnow()
             step = await self._latest_step(session, task.id, task.attempt, lock=True)
@@ -751,6 +830,8 @@ class TaskService:
                 step_name=ended_step if command in _NAMES_ENDED_STEP else step_name,
                 detail=detail or None,
             )
+            if in_transaction is not None:
+                await in_transaction(session, task.id, task.project_id)
         await self._notify(event)
         return event
 

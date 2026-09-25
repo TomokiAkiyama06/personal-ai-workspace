@@ -55,6 +55,7 @@ from paw_backend.tools import (
 )
 
 from .fake_postgres import HangingPostgres
+from .gate_support import ALWAYS_ACTIVE
 from .support import make_settings, wait_until
 from .task_support import migrate, new_database, requires_postgres
 from .tools_store_contract import (
@@ -802,7 +803,9 @@ class CrossProcessTest(PostgresTestCase):
     async def live_context(self):
         """The context of a task that exists (the store reads its state when an
         approval is used, so a task the database does not know cannot use one)."""
-        created = await TaskService(self.new_database()).create_task(
+        created = await TaskService(
+            self.new_database(), project_gate=ALWAYS_ACTIVE
+        ).create_task(
             project_id=P1, created_by=U1, title="A task that uses an approval"
         )
         return make_context(task_id=created.task_id)
@@ -937,7 +940,9 @@ class CrossProcessTest(PostgresTestCase):
         clock = Clock()
         h = Harness(approvals=PostgresApprovalStore(self.new_database()), clock=clock)
         tasks = TaskService(
-            self.new_database(), listeners=[h.service.revoke_on_task_end]
+            self.new_database(),
+            listeners=[h.service.revoke_on_task_end],
+            project_gate=ALWAYS_ACTIVE,
         )
         created = await tasks.create_task(
             project_id=P1, created_by=U1, title="Delete the build"
@@ -1098,7 +1103,7 @@ class LockWaits:
 class TaskFixture(PostgresTestCase):
     async def asyncSetUp(self):
         await super().asyncSetUp()
-        self.tasks = TaskService(self.new_database())
+        self.tasks = TaskService(self.new_database(), project_gate=ALWAYS_ACTIVE)
 
     async def new_task(self, tasks: TaskService | None = None) -> uuid.UUID:
         created = await (tasks or self.tasks).create_task(
@@ -1262,7 +1267,9 @@ class TaskEndPathsTest(TaskFixture):
             task_activity=PostgresTaskActivity(self.new_database()),
         )
         self.tasks = TaskService(
-            self.new_database(), listeners=[self.h.service.revoke_on_task_end]
+            self.new_database(),
+            listeners=[self.h.service.revoke_on_task_end],
+            project_gate=ALWAYS_ACTIVE,
         )
         self.task_id = await self.new_task()
         self.context = make_context(task_id=self.task_id)
@@ -1438,7 +1445,7 @@ class ConsumeRacesWithTaskEndTest(LockWaits, TaskFixture):
             approvals=self.store, clock=Clock(), task_activity=self.provider
         )
         # no listener: the revocation after the end has not run (yet)
-        self.tasks = TaskService(self.new_database())
+        self.tasks = TaskService(self.new_database(), project_gate=ALWAYS_ACTIVE)
         self.task_id = await self.new_task()
         self.context = make_context(task_id=self.task_id)
         opened = await self.request()
@@ -1590,7 +1597,7 @@ class OpenRacesWithTaskEndTest(LockWaits, TaskFixture):
             approvals=self.store, clock=Clock(), task_activity=self.provider
         )
         # no listener: the revocation after the end is run by the test
-        self.tasks = TaskService(self.new_database())
+        self.tasks = TaskService(self.new_database(), project_gate=ALWAYS_ACTIVE)
         self.task_id = await self.new_task()
         self.context = make_context(task_id=self.task_id)
 
@@ -1778,7 +1785,9 @@ class RestartWindowTest(LockWaits, TaskFixture):
             task_activity=self.provider,
             **broker,
         )
-        self.tasks = TaskService(self.new_database())  # no listener
+        self.tasks = TaskService(
+            self.new_database(), project_gate=ALWAYS_ACTIVE
+        )  # no listener
         self.task_id = await self.new_task()
         self.user = principal(SystemRole.USER, U1)
         self.approved = await self.request("approved")
@@ -2140,7 +2149,7 @@ class LifecycleRunTest(TaskFixture):
         self.h = Harness(
             approvals=self.store, clock=Clock(), task_activity=self.provider
         )
-        self.tasks = TaskService(self.new_database())
+        self.tasks = TaskService(self.new_database(), project_gate=ALWAYS_ACTIVE)
         self.task_id = await self.new_task()
         self.user = principal(SystemRole.USER, U1)
         event = None
@@ -2247,7 +2256,9 @@ class RevocationDeadlineTest(TaskFixture):
         self.h = Harness(approvals=self.store, clock=Clock())
         self.h.service._timeout_seconds = self.LIMIT
         self.tasks = TaskService(
-            self.new_database(), listeners=[self.h.service.revoke_on_task_end]
+            self.new_database(),
+            listeners=[self.h.service.revoke_on_task_end],
+            project_gate=ALWAYS_ACTIVE,
         )
         self.task_id = await self.new_task()
         self.context = make_context(task_id=self.task_id)

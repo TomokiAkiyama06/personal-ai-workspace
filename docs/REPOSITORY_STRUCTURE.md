@@ -58,6 +58,7 @@ personal-ai-workspace/
 │  │  │     ├─ 0046_shared_memory_candidates.py
 │  │  │     ├─ 0050_research_scratch_store.py
 │  │  │     ├─ 0052_research_provenance.py
+│  │  │     ├─ 0083_tasks_project_state_index.py
 │  │  │     └─ 0087_audit_external_send_details.py
 │  │  ├─ paw_backend/
 │  │  │  ├─ __init__.py
@@ -126,6 +127,7 @@ personal-ai-workspace/
 │  │  │  │  ├─ records.py
 │  │  │  │  ├─ service.py
 │  │  │  │  ├─ store.py
+│  │  │  │  ├─ task_gate.py
 │  │  │  │  ├─ task_stop.py
 │  │  │  │  ├─ transaction.py
 │  │  │  │  └─ validation.py
@@ -170,6 +172,7 @@ personal-ai-workspace/
 │  │  │  │     ├─ service.py
 │  │  │  │     └─ validation.py
 │  │  │  ├─ tasks/
+│  │  │  │  ├─ project_gate.py
 │  │  │  │  └─ queueing/
 │  │  │  │     ├─ __init__.py
 │  │  │  │     ├─ budget.py
@@ -215,6 +218,7 @@ personal-ai-workspace/
 │  │     ├─ auth_http_support.py
 │  │     ├─ auth_support.py
 │  │     ├─ fake_postgres.py
+│  │     ├─ gate_support.py
 │  │     ├─ identity_support.py
 │  │     ├─ privacy_audit_support.py
 │  │     ├─ privacy_support.py
@@ -288,6 +292,8 @@ personal-ai-workspace/
 │  │     ├─ test_provenance_store_validation.py
 │  │     ├─ test_provenance_store_wiring.py
 │  │     ├─ test_provenance_validation.py
+│  │     ├─ test_project_claim_filter.py
+│  │     ├─ test_project_state_gate.py
 │  │     ├─ test_projects_admin_access.py
 │  │     ├─ test_projects_admin_cursor.py
 │  │     ├─ test_projects_admin_grants.py
@@ -304,6 +310,7 @@ personal-ai-workspace/
 │  │     ├─ test_projects_task_stop.py
 │  │     ├─ test_projects_validation.py
 │  │     ├─ test_queueing_budget.py
+│  │     ├─ test_queueing_conditional_cancel.py
 │  │     ├─ test_queueing_domain.py
 │  │     ├─ test_queueing_escalation.py
 │  │     ├─ test_queueing_flow.py
@@ -351,7 +358,10 @@ personal-ai-workspace/
 │  │     ├─ test_shared_memory_service_guards.py
 │  │     ├─ test_shared_memory_service_manage.py
 │  │     ├─ test_shared_memory_service_read.py
+│  │     ├─ test_task_in_transaction.py
 │  │     ├─ test_task_input_snapshot.py
+│  │     ├─ test_task_stop_windows.py
+│  │     ├─ test_tasks_project_index.py
 │  │     ├─ test_tools_approvals.py
 │  │     ├─ test_tools_broker.py
 │  │     ├─ test_tools_credentials.py

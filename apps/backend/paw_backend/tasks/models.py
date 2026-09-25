@@ -1,4 +1,5 @@
-"""ORM models of the task lifecycle (Alembic revision ``0032``).
+"""ORM models of the task lifecycle (Alembic revision ``0032``; the index
+``ix_tasks_project_id_state`` is revision ``0083``).
 
 ``project_id``, ``created_by`` and ``actor_id`` are plain UUID columns without
 foreign keys: the users and projects tables do not exist yet (PAW-021 and the
@@ -108,6 +109,10 @@ class TaskRow(Base):
         ),
         CheckConstraint("attempt >= 1", name="attempt_positive"),
         CheckConstraint("retry_count >= 0", name="retry_count_not_negative"),
+        # The tasks of a project, by state (Alembic revision ``0083``, Issue #83):
+        # the project module lists a project's active tasks (its stop processor,
+        # Decision 0008, section 8) and ``project_id`` has no other index.
+        Index("ix_tasks_project_id_state", "project_id", "state"),
     )
 
 
