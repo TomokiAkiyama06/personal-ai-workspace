@@ -17,10 +17,11 @@ from paw_backend.tools import (
     OpenOutcome,
     RevokeOutcome,
     SummaryItem,
+    TaskRun,
 )
 from paw_backend.tools.scope import Target, TargetKind
 
-from .tools_support import AGENT, NOW, P1, ROOT, U1, U2
+from .tools_support import AGENT, NOW, P1, ROOT, RUN, U1, U2
 
 LIMITS = OpenLimits(max_pending=10, rejection_cooldown=timedelta(minutes=5))
 
@@ -31,6 +32,7 @@ def new_approval(**overrides) -> NewApproval:
         # A task of its own, so that tests sharing a database do not fill each
         # other's per-task cap.
         "task_id": uuid.uuid4(),
+        "task_run": RUN,
         "project_id": P1,
         "agent_id": AGENT,
         "requester_user_id": U1,
@@ -48,6 +50,7 @@ def new_approval(**overrides) -> NewApproval:
 def binding_of(new: NewApproval, **overrides) -> ApprovalBinding:
     arguments = {
         "task_id": new.task_id,
+        "task_run": new.task_run,
         "agent_id": new.agent_id,
         "requester_user_id": new.requester_user_id,
         "tool": new.tool,
@@ -89,6 +92,7 @@ class StoreContract:
             (
                 record.approval_id,
                 record.task_id,
+                record.task_run,
                 record.project_id,
                 record.agent_id,
                 record.requester_user_id,
@@ -106,6 +110,7 @@ class StoreContract:
             (
                 new.approval_id,
                 new.task_id,
+                RUN,
                 P1,
                 AGENT,
                 U1,
@@ -374,6 +379,79 @@ class StoreContract:
             await self.store.consume(new.approval_id, binding_of(new), now=NOW),
             ConsumeOutcome.CONSUMED,
         )
+
+    async def test_a_request_stores_the_run_it_was_made_in(self):
+        for run in (TaskRun(1, 0), TaskRun(3, 0), TaskRun(2, 5)):
+            with self.subTest(run=run):
+                new = new_approval(task_run=run)
+                opened = await self.store.open_request(new, now=NOW, limits=LIMITS)
+                self.assertEqual(opened.record.task_run, run)
+                self.assertEqual((await self.store.get(new.approval_id)).task_run, run)
+
+    async def test_an_approval_can_only_be_used_in_the_run_it_was_requested_in(self):
+        new = await self.approved(task_run=TaskRun(2, 1))
+        for run in (TaskRun(1, 1), TaskRun(3, 1), TaskRun(2, 0), TaskRun(2, 2)):
+            with self.subTest(run=run):
+                outcome = await self.store.consume(
+                    new.approval_id, binding_of(new, task_run=run), now=NOW
+                )
+                self.assertEqual(outcome, ConsumeOutcome.SUPERSEDED)
+        # none of that used it up, and it left no trace in the history
+        self.assertEqual(
+            (await self.store.get(new.approval_id)).status, ApprovalStatus.APPROVED
+        )
+        self.assertEqual(
+            await self.kinds(new.approval_id),
+            [ApprovalEventKind.REQUESTED, ApprovalEventKind.APPROVED],
+        )
+        self.assertEqual(
+            await self.store.consume(new.approval_id, binding_of(new), now=NOW),
+            ConsumeOutcome.CONSUMED,
+        )
+
+    async def test_a_pending_approval_of_another_run_is_superseded_not_pending(self):
+        # it can never be used by that run, so waiting for a decision is pointless
+        new = new_approval(task_run=TaskRun(1, 0))
+        await self.store.open_request(new, now=NOW, limits=LIMITS)
+        outcome = await self.store.consume(
+            new.approval_id, binding_of(new, task_run=TaskRun(2, 0)), now=NOW
+        )
+        self.assertEqual(outcome, ConsumeOutcome.SUPERSEDED)
+
+    async def test_what_an_approval_is_says_more_than_the_run_it_was_requested_in(self):
+        other_run = TaskRun(2, 0)
+        # a call that differs in anything else than the run is a mismatch
+        new = await self.approved()
+        outcome = await self.store.consume(
+            new.approval_id,
+            binding_of(new, task_run=other_run, tool="host.install_package"),
+            now=NOW,
+        )
+        self.assertEqual(outcome, ConsumeOutcome.MISMATCH)
+        # a finished approval reports how it finished, whatever run asks
+        used = await self.approved()
+        await self.store.consume(used.approval_id, binding_of(used), now=NOW)
+        revoked = await self.approved()
+        await self.store.revoke(revoked.approval_id, actor_id=U1, now=NOW)
+        rejected = new_approval()
+        await self.store.open_request(rejected, now=NOW, limits=LIMITS)
+        await self.store.decide(
+            rejected.approval_id, approver_id=U1, approve=False, now=NOW
+        )
+        expired = await self.approved()
+        for label, approval, at, expected in (
+            ("used", used, NOW, ConsumeOutcome.ALREADY_USED),
+            ("revoked", revoked, NOW, ConsumeOutcome.REVOKED),
+            ("rejected", rejected, NOW, ConsumeOutcome.REJECTED),
+            ("expired", expired, NOW + 2 * HOUR, ConsumeOutcome.EXPIRED),
+        ):
+            with self.subTest(approval=label):
+                outcome = await self.store.consume(
+                    approval.approval_id,
+                    binding_of(approval, task_run=other_run),
+                    now=at,
+                )
+                self.assertEqual(outcome, expected)
 
     async def test_an_unknown_approval_cannot_be_consumed(self):
         new = new_approval()

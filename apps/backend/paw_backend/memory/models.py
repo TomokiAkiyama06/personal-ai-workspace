@@ -9,7 +9,8 @@ Separation"):
 * Session state: ``session_states``, one row per conversation (a summary and
   the working state), derived from the raw messages.
 * Long-term Memory: ``memories`` (identity), ``memory_versions`` (every edit is
-  a new row), ``memory_relations`` (version graph), ``memory_sources``
+  a new row), ``memory_metadata_changes`` (history of the in-place pin /
+  importance edits), ``memory_relations`` (version graph), ``memory_sources``
   (provenance), ``embedding_models`` (each model's one dimension) and
   ``memory_embeddings`` (pgvector).
 
@@ -33,6 +34,7 @@ from uuid import UUID
 
 from sqlalchemy import (
     ARRAY,
+    DDL,
     BigInteger,
     Boolean,
     CheckConstraint,
@@ -45,6 +47,7 @@ from sqlalchemy import (
     SmallInteger,
     Text,
     UniqueConstraint,
+    event,
     func,
     text,
 )
@@ -278,6 +281,12 @@ class MemoryVersion(Base):
     ``project_group_id`` / ``repo_id`` (none for ``shared``); ``acl.py`` builds
     the query condition.
 
+    ``pinned`` and ``importance`` are the low-risk metadata that
+    REQUIREMENTS.md lets a person change at once (Manual Memory Editing), so
+    they are updated in place; their change history is kept in
+    ``MemoryMetadataChange`` by a trigger. Everything else about a version is
+    immutable: a new edit is a new version.
+
     ``project_group`` is a memory that applies to a set of projects. The
     requirements only show it as the structured form of a free-text preference
     ("apply to the development projects"); they define no project-group entity,
@@ -416,6 +425,108 @@ class MemoryVersion(Base):
     created_at: Mapped[datetime] = _now_column()
 
 
+# Recording the change is done by a trigger so that no writer can skip it. The
+# actor cannot be a column of ``memory_versions`` (those are immutable), so the
+# writer names it in two transaction-local settings, see ``metadata.py``. The
+# insert runs with the writer's own rights: the application role holds INSERT
+# on the history table, and no UPDATE or DELETE.
+RECORD_METADATA_CHANGE_FUNCTION = """\
+CREATE OR REPLACE FUNCTION paw_record_memory_metadata_change()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    INSERT INTO memory_metadata_changes (
+        memory_version_id, old_pinned, new_pinned, old_importance, new_importance,
+        actor_type, actor_user_id
+    ) VALUES (
+        NEW.id, OLD.pinned, NEW.pinned, OLD.importance, NEW.importance,
+        nullif(current_setting('paw.actor_type', true), ''),
+        nullif(current_setting('paw.actor_user_id', true), '')::uuid
+    );
+    RETURN NULL;
+END
+$$"""
+# ``%(fullname)s`` is the table with its schema, so a schema built in another
+# schema (the drift test) gets its own trigger.
+RECORD_METADATA_CHANGE_TRIGGER = """\
+CREATE TRIGGER tr_memory_versions_record_metadata_change
+AFTER UPDATE OF pinned, importance ON %(fullname)s
+FOR EACH ROW
+WHEN (OLD.pinned IS DISTINCT FROM NEW.pinned
+      OR OLD.importance IS DISTINCT FROM NEW.importance)
+EXECUTE FUNCTION paw_record_memory_metadata_change()"""
+
+for _statement in (
+    RECORD_METADATA_CHANGE_FUNCTION,
+    RECORD_METADATA_CHANGE_TRIGGER,
+):
+    event.listen(
+        MemoryVersion.__table__,
+        "after_create",
+        DDL(_statement).execute_if(dialect="postgresql"),
+    )
+
+
+class MemoryMetadataChange(Base):
+    """One in-place change of ``pinned`` / ``importance`` of a version.
+
+    REQUIREMENTS.md "Manual Memory Editing": Pin and Importance take effect at
+    once, but "変更履歴は残す". The row keeps the old and the new value of both
+    columns (an unchanged one appears twice with the same value) and who made
+    the change. It is append-only for the application (INSERT, no UPDATE or
+    DELETE) and is written by the ``memory_versions`` trigger, never by a
+    service: the trigger cannot be skipped, and a change without a named actor
+    fails on the NOT NULL ``actor_type``. The rows go with their version
+    (cascade); the history graph of versions is not affected, because a
+    metadata change is not a new version (it must not conflict with a text edit
+    that is based on the current version number).
+
+    The actor is *asserted* by the Backend (the same trust as ``actor_user_id``
+    of a version); the database does not know users yet (PAW-021), so it cannot
+    check the id. ``created_at`` is the statement's ``clock_timestamp()``, so
+    two changes of one transaction sort in the order they were made.
+
+    Whoever can read a version can read its history: filter reads with
+    ``readable_memory_versions`` like the other tables that join
+    ``memory_versions``.
+    """
+
+    __tablename__ = "memory_metadata_changes"
+    __table_args__ = (
+        CheckConstraint(
+            "old_importance BETWEEN 0 AND 100 AND new_importance BETWEEN 0 AND 100",
+            name="importance_range",
+        ),
+        CheckConstraint(
+            "old_pinned <> new_pinned OR old_importance <> new_importance",
+            name="something_changed",
+        ),
+        CheckConstraint(_one_of("actor_type", ActorType), name="actor_type_valid"),
+        CheckConstraint(
+            "actor_type <> 'user' OR actor_user_id IS NOT NULL",
+            name="user_actor_has_id",
+        ),
+        Index(
+            "ix_memory_metadata_changes_memory_version_id_created_at",
+            "memory_version_id",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=_UUID_DEFAULT)
+    memory_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey("memory_versions.id", ondelete="CASCADE")
+    )
+    old_pinned: Mapped[bool] = mapped_column(Boolean)
+    new_pinned: Mapped[bool] = mapped_column(Boolean)
+    old_importance: Mapped[int] = mapped_column(SmallInteger)
+    new_importance: Mapped[int] = mapped_column(SmallInteger)
+    actor_type: Mapped[str] = mapped_column(Text)
+    actor_user_id: Mapped[UUID | None]
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.clock_timestamp()
+    )
+
+
 class MemoryRelation(Base):
     """An edge of the version graph, pointing from the newer to the older version."""
 
@@ -450,6 +561,34 @@ class MemoryRelation(Base):
     created_at: Mapped[datetime] = _now_column()
 
 
+# The trigger function reads the row again instead of using ``NEW``: a deferred
+# trigger event carries the row as the statement wrote it, and the same row may
+# have been changed again by a later foreign-key action in the transaction.
+MESSAGE_REQUIRES_CONVERSATION_FUNCTION = """\
+CREATE OR REPLACE FUNCTION paw_check_memory_source_message_conversation()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM memory_sources
+        WHERE id = NEW.id AND message_id IS NOT NULL AND conversation_id IS NULL
+    ) THEN
+        RAISE EXCEPTION 'a source that names a message must name its conversation'
+            USING ERRCODE = 'check_violation',
+                  TABLE = 'memory_sources',
+                  CONSTRAINT = 'tr_memory_sources_message_requires_conversation';
+    END IF;
+    RETURN NULL;
+END
+$$"""
+# ``%(fullname)s`` is the table with its schema, so a schema built in another
+# schema (the drift test) gets its own trigger.
+MESSAGE_REQUIRES_CONVERSATION_TRIGGER = """\
+CREATE CONSTRAINT TRIGGER tr_memory_sources_message_requires_conversation
+AFTER INSERT OR UPDATE OF conversation_id, message_id ON %(fullname)s
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION paw_check_memory_source_message_conversation()"""
+
+
 class MemorySource(Base):
     """Provenance: where a version came from. A version may have many sources.
 
@@ -461,12 +600,23 @@ class MemorySource(Base):
     ``conversation_id`` and ``message_id`` are checked as a pair: when both are
     set, the message must belong to that conversation (composite foreign key).
     Deleting only the message clears ``message_id`` and keeps the conversation
-    (``ON DELETE SET NULL (message_id)``). A writer that names a message must
-    also name its conversation: with a NULL conversation the pair is not
-    checked (``MATCH SIMPLE``), the database then only knows that the message
-    exists, and the deletion-flow lookup by ``conversation_id`` would miss the
-    row. No CHECK requires it because the SET NULL of a conversation deletion
-    passes through that state.
+    (``ON DELETE SET NULL (message_id)``).
+
+    A source that names a message must also name its conversation. The
+    composite key alone does not say so: with a NULL ``conversation_id`` it is
+    skipped (``MATCH SIMPLE``), the database would only know that the message
+    exists, and the deletion flow, which finds the memories of a conversation
+    by ``conversation_id``, would miss the row. A plain CHECK cannot state the
+    rule, because the ``SET NULL`` actions of a conversation delete clear
+    ``conversation_id`` and ``message_id`` one after the other, in an order
+    that depends on object ids, so the row passes through (NULL, message). The
+    rule is therefore a deferred constraint trigger
+    (``MESSAGE_REQUIRES_CONVERSATION_FUNCTION`` and ``..._TRIGGER``) that
+    judges the row as it is at COMMIT. It is not a table constraint, so
+    Alembic does not see it: the migration repeats the DDL and
+    ``tests/test_memory_migration.py`` compares both. A violation therefore
+    surfaces at COMMIT (or at ``SET CONSTRAINTS ... IMMEDIATE``), not at the
+    INSERT.
     """
 
     __tablename__ = "memory_sources"
@@ -521,6 +671,17 @@ class MemorySource(Base):
     source_ref: Mapped[str | None] = mapped_column(Text)
     source_deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = _now_column()
+
+
+for _statement in (
+    MESSAGE_REQUIRES_CONVERSATION_FUNCTION,
+    MESSAGE_REQUIRES_CONVERSATION_TRIGGER,
+):
+    event.listen(
+        MemorySource.__table__,
+        "after_create",
+        DDL(_statement).execute_if(dialect="postgresql"),
+    )
 
 
 class EmbeddingModel(Base):
@@ -592,6 +753,7 @@ TABLE_NAMES: tuple[str, ...] = (
     SessionState.__tablename__,
     Memory.__tablename__,
     MemoryVersion.__tablename__,
+    MemoryMetadataChange.__tablename__,
     MemoryRelation.__tablename__,
     MemorySource.__tablename__,
     MemoryEmbedding.__tablename__,

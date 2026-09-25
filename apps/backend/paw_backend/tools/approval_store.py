@@ -9,10 +9,11 @@ nothing:
   is the delegating user and is not the agent (and, to approve a strong
   approval, a step-up was confirmed);
 * consume: ``status = 'approved' AND expires_at > now AND`` every field of the
-  binding (task, agent, user, tool, level, call hash) equals what was granted.
-  With ``require_active_task`` the task's row is first read **locked**
-  (``FOR SHARE``) in the same transaction, so a use and the end of the task are
-  ordered, never crossed (Decision 0006, section 9);
+  binding (task, the task's **run**, agent, user, tool, level, call hash) equals
+  what was granted. With ``require_active_task`` the task's row is first read
+  **locked** (``FOR SHARE``) in the same transaction, and must be alive *and in
+  the run of the binding*, so a use, the end of the task and a Retry / Restart
+  are ordered, never crossed (Decision 0006, section 9);
 * revoke: ``status IN ('pending', 'approved') AND expires_at > now``.
 
 The history row is written in the same transaction as the change. When an
@@ -40,7 +41,11 @@ lock is taken before the count and released with the transaction. With
 ``require_active_task`` the task's row is then read **locked** (``FOR SHARE``)
 in the same transaction, like ``consume``: a request is never inserted for a
 task whose end was committed, so the revocation that follows that end (which
-only sees what was committed before it) cannot miss it.
+only sees what was committed before it) cannot miss it, nor for a run that a
+Retry / Restart has replaced. The open approvals of the task that belong to an
+earlier run are revoked in the same transaction (as the system, with history):
+nothing can use them any more, and one of them would otherwise keep the new run
+from asking for the same call (at most one open approval per call).
 
 The database enforces the same rules once more with triggers and CHECK
 constraints (migration ``0031``): a wrong statement from a buggy or
@@ -51,12 +56,14 @@ import asyncio
 import uuid
 from datetime import datetime
 
-from sqlalchemy import func, insert, select, text, update
+from sqlalchemy import func, insert, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from paw_backend.db import Database
 from paw_backend.tools.approval_types import (
+    CONSUME_TASK_REFUSAL,
+    OPEN_TASK_REFUSAL,
     ApprovalBinding,
     ApprovalEventKind,
     ApprovalHistoryEntry,
@@ -78,7 +85,7 @@ from paw_backend.tools.approval_types import (
 from paw_backend.tools.capabilities import ApprovalLevel
 from paw_backend.tools.models import ToolApprovalEventRow, ToolApprovalRow
 from paw_backend.tools.scope import Target, TargetKind
-from paw_backend.tools.task_state import TaskActivity, lock_task_activity
+from paw_backend.tools.task_state import TaskActivity, TaskRun, lock_task_activity
 
 _OPEN = (ApprovalStatus.PENDING.value, ApprovalStatus.APPROVED.value)
 # One statement, so that the revocation and its history are atomic without a
@@ -101,9 +108,10 @@ RETURNING approval_id
 """
 # The columns of an approval, in the order of ``ApprovalRecord``'s fields.
 _COLUMNS = (
-    "id, task_id, project_id, agent_id, requester_user_id, tool, level, call_hash,"
-    " targets, summary, status, created_at, expires_at, approver_id, decided_at,"
-    " consumed_at, step_up_verified, revoked_at, revoked_by"
+    "id, task_id, task_attempt, task_retry_count, project_id, agent_id,"
+    " requester_user_id, tool, level, call_hash, targets, summary, status,"
+    " created_at, expires_at, approver_id, decided_at, consumed_at,"
+    " step_up_verified, revoked_at, revoked_by"
 )
 _GET = f"SELECT {_COLUMNS} FROM tool_approvals WHERE id = %(id)s"
 # One statement per change, like ``_REVOKE_TASK``: the update and its history row
@@ -195,6 +203,7 @@ def _record(row: ToolApprovalRow) -> ApprovalRecord:
     return ApprovalRecord(
         approval_id=row.id,
         task_id=row.task_id,
+        task_run=TaskRun(row.task_attempt, row.task_retry_count),
         project_id=row.project_id,
         agent_id=row.agent_id,
         requester_user_id=row.requester_user_id,
@@ -222,6 +231,8 @@ def _record_of_values(values: tuple) -> ApprovalRecord:
     (
         approval_id,
         task_id,
+        task_attempt,
+        task_retry_count,
         project_id,
         agent_id,
         requester_user_id,
@@ -243,6 +254,7 @@ def _record_of_values(values: tuple) -> ApprovalRecord:
     return ApprovalRecord(
         approval_id=approval_id,
         task_id=task_id,
+        task_run=TaskRun(task_attempt, task_retry_count),
         project_id=project_id,
         agent_id=agent_id,
         requester_user_id=requester_user_id,
@@ -337,6 +349,33 @@ async def _mark_expired(
         await _add_event(session, expired_id, ApprovalEventKind.EXPIRED, now)
 
 
+async def _revoke_earlier_runs(
+    session: AsyncSession, task_id: uuid.UUID, run: TaskRun, now: datetime
+) -> None:
+    """Revoke (as the system, with history) the task's open approvals whose run
+    is not ``run``, the task's current run: what a failed revocation left behind
+    when a Retry / Restart re-opened the task. Nothing could use them (``consume``
+    requires the run), but one of them would keep the new run from asking for the
+    same call. Runs in the transaction that holds the task's row locked."""
+    revoked = await session.execute(
+        update(ToolApprovalRow)
+        .where(
+            ToolApprovalRow.task_id == task_id,
+            ToolApprovalRow.status.in_(_OPEN),
+            ToolApprovalRow.expires_at > now,
+            or_(
+                ToolApprovalRow.task_attempt != run.attempt,
+                ToolApprovalRow.task_retry_count != run.retry_count,
+            ),
+        )
+        .values(status=ApprovalStatus.REVOKED.value, revoked_at=now, revoked_by=None)
+        .returning(ToolApprovalRow.id)
+        .execution_options(synchronize_session=False)
+    )
+    for revoked_id in revoked.scalars().all():
+        await _add_event(session, revoked_id, ApprovalEventKind.REVOKED, now)
+
+
 class PostgresApprovalStore:
     """Approvals in ``tool_approvals`` / ``tool_approval_events`` (migration 0031)."""
 
@@ -386,14 +425,16 @@ class PostgresApprovalStore:
                     # A check made before could be overtaken by the end, whose
                     # revocation had then already found nothing: the request
                     # created afterwards would be open for an ended task.
-                    activity = await lock_task_activity(session, new.task_id)
+                    activity = await lock_task_activity(
+                        session, new.task_id, new.task_run
+                    )
                     if activity is not TaskActivity.ACTIVE:
-                        return OpenResult(
-                            OpenOutcome.TASK_NOT_ACTIVE
-                            if activity is TaskActivity.ENDED
-                            else OpenOutcome.TASK_UNKNOWN
-                        )
+                        return OpenResult(OPEN_TASK_REFUSAL[activity])
                 await _mark_expired(session, now, call_hash=new.call_hash)
+                if require_active_task:
+                    # ``new.task_run`` was just found to be the task's current
+                    # run (under the lock), so any other run is an earlier one.
+                    await _revoke_earlier_runs(session, new.task_id, new.task_run, now)
                 existing = (
                     await session.execute(
                         select(ToolApprovalRow).where(
@@ -436,6 +477,8 @@ class PostgresApprovalStore:
                     .values(
                         id=new.approval_id,
                         task_id=new.task_id,
+                        task_attempt=new.task_run.attempt,
+                        task_retry_count=new.task_run.retry_count,
                         project_id=new.project_id,
                         agent_id=new.agent_id,
                         requester_user_id=new.requester_user_id,
@@ -551,27 +594,29 @@ class PostgresApprovalStore:
         async with self._database.session() as session, session.begin():
             if require_active_task:
                 # The task row is read **locked** in this very transaction: a
-                # terminal transition that is in flight is waited for (and its
-                # end is then seen here), one that starts later waits for this
-                # transaction. So the use is ordered before or after the end of
-                # the task, never across it (a check made earlier could be
-                # overtaken by the end, and the consumption would then win
-                # against the revocation that follows it).
-                activity = await lock_task_activity(session, binding.task_id)
+                # terminal transition, a Retry or a Restart that is in flight is
+                # waited for (and its result is then seen here), one that starts
+                # later waits for this transaction. So the use is ordered before
+                # or after it, never across it (a check made earlier could be
+                # overtaken, and the consumption would then win against the
+                # revocation that follows the transition). ``ACTIVE`` means the
+                # task is alive AND still in the run of the binding; the
+                # approval's own run is compared by the UPDATE below.
+                activity = await lock_task_activity(
+                    session, binding.task_id, binding.task_run
+                )
                 if activity is not TaskActivity.ACTIVE:
                     row = await _row(session, approval_id)
                     outcome = diagnose_consume(
                         None if row is None else _record(row), binding, now
                     )
-                    if outcome is ConsumeOutcome.CONSUMED:
-                        # It could have been used: the task is why it is not.
-                        # (A reason about the approval itself - revoked, used,
-                        # for another call - is the more precise one.)
-                        outcome = (
-                            ConsumeOutcome.TASK_NOT_ACTIVE
-                            if activity is TaskActivity.ENDED
-                            else ConsumeOutcome.TASK_UNKNOWN
-                        )
+                    if outcome in (ConsumeOutcome.CONSUMED, ConsumeOutcome.SUPERSEDED):
+                        # It could have been used, or is for another run than
+                        # the caller's, which the task's state explains better:
+                        # the task is why it is not used. (A reason about the
+                        # approval itself - revoked, used, for another call -
+                        # is the more precise one.)
+                        outcome = CONSUME_TASK_REFUSAL[activity]
                     return outcome
             changed = await session.execute(
                 update(ToolApprovalRow)
@@ -580,6 +625,8 @@ class PostgresApprovalStore:
                     ToolApprovalRow.status == ApprovalStatus.APPROVED.value,
                     ToolApprovalRow.expires_at > now,
                     ToolApprovalRow.task_id == binding.task_id,
+                    ToolApprovalRow.task_attempt == binding.task_run.attempt,
+                    ToolApprovalRow.task_retry_count == binding.task_run.retry_count,
                     ToolApprovalRow.agent_id == binding.agent_id,
                     ToolApprovalRow.requester_user_id == binding.requester_user_id,
                     ToolApprovalRow.tool == binding.tool,

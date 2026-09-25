@@ -13,9 +13,9 @@ user can be the approver, never the agent; a strong approval carries a
 step-up; at most one open approval exists per exact call) and triggers that
 allow only the legal state changes (``pending`` -> ``approved`` / ``rejected`` /
 ``revoked`` / ``expired``, ``approved`` -> ``consumed`` / ``revoked`` /
-``expired``), keep everything that identifies the call immutable, and refuse
-DELETE and TRUNCATE. Triggers are not visible to Alembic's autogenerate, so
-``tests/test_tools_migration.py`` checks them.
+``expired``), keep everything that identifies the call (the task's run
+included) immutable, and refuse DELETE and TRUNCATE. Triggers are not visible
+to Alembic's autogenerate, so ``tests/test_tools_migration.py`` checks them.
 """
 
 import uuid
@@ -31,6 +31,7 @@ from sqlalchemy import (
     ForeignKey,
     Identity,
     Index,
+    Integer,
     String,
     Uuid,
     text,
@@ -59,6 +60,11 @@ class ToolApprovalRow(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
     task_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    # The run of the task the request was made in (``tasks.attempt`` and
+    # ``tasks.retry_count`` at that time; Restart / Retry change them, they never
+    # decrease). The approval can only be used in this run.
+    task_attempt: Mapped[int] = mapped_column(Integer)
+    task_retry_count: Mapped[int] = mapped_column(Integer)
     project_id: Mapped[uuid.UUID] = mapped_column(Uuid)
     # The agent that asked, and the human user it acts for (the only one who
     # may approve).
@@ -94,6 +100,8 @@ class ToolApprovalRow(Base):
         CheckConstraint("call_hash ~ '^[0-9a-f]{64}$'", name="call_hash_sha256"),
         CheckConstraint("expires_at > created_at", name="expires_after_creation"),
         CheckConstraint("agent_id <> requester_user_id", name="agent_is_not_user"),
+        CheckConstraint("task_attempt >= 1", name="task_attempt_positive"),
+        CheckConstraint("task_retry_count >= 0", name="task_retry_count_not_negative"),
         # Only the delegating user decides: not the agent, not anybody else.
         CheckConstraint(
             "approver_id IS NULL OR approver_id = requester_user_id",

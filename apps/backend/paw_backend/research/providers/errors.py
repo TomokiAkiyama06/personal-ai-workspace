@@ -30,7 +30,8 @@ class ResearchErrorCode(StrEnum):
     # The provider returned something that breaks the interface contract
     # (wrong type, too many hits, a locator that cannot be canonicalised, ...).
     INVALID_RESPONSE = "invalid_response"
-    # Any other exception raised by the provider. Only its type is ever logged.
+    # Any other exception raised by the provider. Only a fixed classification of
+    # its type is ever logged (``broker.log_type_name``), never its text or name.
     INTERNAL_ERROR = "internal_error"
 
 

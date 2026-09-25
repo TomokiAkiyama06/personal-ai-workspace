@@ -35,7 +35,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import func, select, text, update
+from sqlalchemy import ColumnElement, bindparam, func, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.exc import StaleDataError
@@ -319,6 +319,19 @@ def _step(row: TaskStepRow) -> StepInfo:
         status=row.status,
         started_at=row.started_at,
         finished_at=row.finished_at,
+    )
+
+
+def _tool_call_started() -> ColumnElement[bool]:
+    """``status = 'started'`` of a tool call, written into the SQL text.
+
+    Sent as a bind parameter instead, PostgreSQL could not match the partial
+    index ``ix_task_tool_invocations_started`` in a plan it caches for a prepared
+    statement (the driver prepares a statement it runs often), and the query
+    would read the step's whole history of finished calls again.
+    """
+    return TaskToolInvocationRow.status == bindparam(
+        "started", ToolInvocationStatus.STARTED, literal_execute=True
     )
 
 
@@ -622,10 +635,7 @@ class TaskService:
             active = await session.scalar(
                 select(func.count())
                 .select_from(TaskToolInvocationRow)
-                .where(
-                    TaskToolInvocationRow.step_id == step.id,
-                    TaskToolInvocationRow.status == ToolInvocationStatus.STARTED,
-                )
+                .where(TaskToolInvocationRow.step_id == step.id, _tool_call_started())
             )
             if active >= MAX_ACTIVE_TOOL_INVOCATIONS:
                 raise TaskStepError("The step already runs too many tool calls")
@@ -876,7 +886,7 @@ class TaskService:
                 await session.execute(
                     select(TaskToolInvocationRow).where(
                         TaskToolInvocationRow.step_id == step_id,
-                        TaskToolInvocationRow.status == ToolInvocationStatus.STARTED,
+                        _tool_call_started(),
                     )
                 )
             )
@@ -992,10 +1002,7 @@ class TaskService:
         step.finished_at = now
         await session.execute(
             update(TaskToolInvocationRow)
-            .where(
-                TaskToolInvocationRow.step_id == step.id,
-                TaskToolInvocationRow.status == ToolInvocationStatus.STARTED,
-            )
+            .where(TaskToolInvocationRow.step_id == step.id, _tool_call_started())
             .values(status=ToolInvocationStatus.INTERRUPTED, finished_at=now)
             .execution_options(synchronize_session=False)
         )
