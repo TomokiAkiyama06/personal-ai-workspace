@@ -99,6 +99,7 @@ personal-ai-workspace/
 │  │  │  │     └─ validation.py
 │  │  │  ├─ projects/
 │  │  │  │  ├─ __init__.py
+│  │  │  │  ├─ cursor.py
 │  │  │  │  ├─ domain.py
 │  │  │  │  ├─ errors.py
 │  │  │  │  ├─ limits.py
@@ -206,6 +207,7 @@ personal-ai-workspace/
 │  │     ├─ test_config.py
 │  │     ├─ test_database.py
 │  │     ├─ test_database_run_abortable.py
+│  │     ├─ test_database_run_abortable_slot.py
 │  │     ├─ test_database_slot_wait.py
 │  │     ├─ test_db_transact_abortable.py
 │  │     ├─ test_errors.py
@@ -247,6 +249,10 @@ personal-ai-workspace/
 │  │     ├─ test_provenance_store_validation.py
 │  │     ├─ test_provenance_store_wiring.py
 │  │     ├─ test_provenance_validation.py
+│  │     ├─ test_projects_admin_access.py
+│  │     ├─ test_projects_admin_cursor.py
+│  │     ├─ test_projects_admin_grants.py
+│  │     ├─ test_projects_admin_list.py
 │  │     ├─ test_projects_concurrency.py
 │  │     ├─ test_projects_domain.py
 │  │     ├─ test_projects_grants.py
@@ -271,6 +277,7 @@ personal-ai-workspace/
 │  │     ├─ test_research_contract.py
 │  │     ├─ test_research_locator.py
 │  │     ├─ test_research_normalize.py
+│  │     ├─ test_research_published_offset.py
 │  │     ├─ test_research_registry.py
 │  │     ├─ test_scratch_concurrency.py
 │  │     ├─ test_scratch_grants.py
@@ -299,20 +306,24 @@ personal-ai-workspace/
 │  │     ├─ test_shared_memory_migration.py
 │  │     ├─ test_shared_memory_policy_source.py
 │  │     ├─ test_shared_memory_promotion_refused.py
+│  │     ├─ test_shared_memory_propose_system.py
 │  │     ├─ test_shared_memory_rules_lifecycle.py
 │  │     ├─ test_shared_memory_rules_precedence.py
 │  │     ├─ test_shared_memory_service_guards.py
 │  │     ├─ test_shared_memory_service_manage.py
 │  │     ├─ test_shared_memory_service_read.py
+│  │     ├─ test_task_input_snapshot.py
 │  │     ├─ test_tools_approvals.py
 │  │     ├─ test_tools_broker.py
 │  │     ├─ test_tools_credentials.py
+│  │     ├─ test_tools_diagnostics_columns.py
 │  │     ├─ test_tools_migration.py
 │  │     ├─ test_tools_policy.py
 │  │     ├─ test_tools_postgres.py
 │  │     ├─ test_tools_postgres_roles.py
 │  │     ├─ test_tools_registry.py
 │  │     ├─ test_tools_runner.py
+│  │     ├─ test_tools_runner_accounting.py
 │  │     ├─ test_tools_scope.py
 │  │     ├─ tools_store_contract.py
 │  │     └─ tools_support.py
