@@ -126,6 +126,7 @@ personal-ai-workspace/
 │  │  │  │  │  ├─ broker.py
 │  │  │  │  │  ├─ contract.py
 │  │  │  │  │  ├─ errors.py
+│  │  │  │  │  ├─ guard.py
 │  │  │  │  │  ├─ locator.py
 │  │  │  │  │  ├─ normalize.py
 │  │  │  │  │  ├─ registry.py

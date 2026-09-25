@@ -47,6 +47,7 @@ from paw_backend.research.providers.errors import (
     ResearchErrorCode,
     UnknownProviderError,
 )
+from paw_backend.research.providers.guard import CancelGuard
 from paw_backend.research.providers.locator import canonicalize_locator
 from paw_backend.research.providers.normalize import (
     compute_content_hash,
@@ -166,7 +167,7 @@ def _log_failure(
     """One WARNING per failed provider: identity, code and a fixed exception type.
 
     ``error`` is ``None`` when the adapter raised nothing but asked for the
-    cancellation of the task (see ``_CancelGuard``): the type is ``ADAPTER_ERROR``.
+    cancellation of the task (see ``CancelGuard``): the type is ``ADAPTER_ERROR``.
     """
     logger.warning(
         "research provider failed: provider=%s kind=%s code=%s exception_type=%s",
@@ -184,52 +185,6 @@ def _failed(entry: RegisteredProvider, error: BaseException) -> _Outcome:
     return _Outcome(code=code)
 
 
-class _CancelGuard:
-    """Retract the cancellation requests that synchronous adapter code makes.
-
-    ``with _CancelGuard() as guard:`` around adapter code that runs without an
-    ``await``. Such code can call ``asyncio.current_task().cancel()`` and return
-    normally: nothing is raised, but the request stays on the task and the next
-    ``await`` (or the end of the task) delivers it, cancelling ``gather()`` and
-    discarding the answers of the healthy providers. On exit the guard compares
-    ``Task.cancelling()`` with its value on entry and calls ``Task.uncancel()``
-    for the increase, and only for that: a request that was already there (a
-    caller's own ``cancel()``) stays and is delivered as before. ``retracted`` is
-    the number of requests taken back; a caller treats a non-zero value as a
-    failure of the adapter. It works on the task that runs the guard, and does
-    nothing outside a task (``asyncio.current_task()`` is ``None``).
-
-    Limit: ``Task.uncancel()`` clears the "cancel at the next await" flag only when
-    the count reaches 0, so a task that had a request counted but not pending
-    (its ``CancelledError`` was swallowed, ``uncancel()`` never called) keeps the
-    flag that the adapter set. An adapter that itself calls ``uncancel()`` on the
-    task, lowering the count, is not detected (Decision 0012).
-    """
-
-    __slots__ = ("_before", "_task", "retracted")
-
-    def __init__(self) -> None:
-        self._task: asyncio.Task | None = None
-        self._before = 0
-        self.retracted = 0
-
-    def __enter__(self) -> "_CancelGuard":
-        try:
-            self._task = asyncio.current_task()
-        except RuntimeError:  # no running loop
-            self._task = None
-        if self._task is not None:
-            self._before = self._task.cancelling()
-        return self
-
-    def __exit__(self, *exc_info: object) -> None:
-        if self._task is None:
-            return
-        for _ in range(max(self._task.cancelling() - self._before, 0)):
-            self._task.uncancel()
-            self.retracted += 1
-
-
 def _validated[T](
     entry: RegisteredProvider, produce: Callable[[], T]
 ) -> tuple[T | None, ResearchErrorCode | None]:
@@ -244,7 +199,7 @@ def _validated[T](
     """
     failure: InvalidProviderResponseError | None = None
     result: T | None = None
-    with _CancelGuard() as guard:
+    with CancelGuard() as guard:
         try:
             result = produce()
         except InvalidProviderResponseError as error:
@@ -275,7 +230,7 @@ async def _call_provider(
     classified like any other; it must not cancel ``gather()``. Nor may it ask
     for the cancellation: a ``call()`` that runs ``asyncio.current_task().cancel()``
     and returns normally would have the ``await`` below deliver the request, so
-    the request is retracted (``_CancelGuard``), the awaitable is dropped without
+    the request is retracted (``CancelGuard``), the awaitable is dropped without
     being awaited and the provider is an ``INTERNAL_ERROR``. Only the synchronous
     call is guarded this way: the ``await`` below still lets a real
     ``CancelledError`` (a cancelled ``gather()``, or the timeout) through
@@ -285,7 +240,7 @@ async def _call_provider(
         async with asyncio.timeout_at(deadline):
             failure: BaseException | None = None
             pending: Awaitable[object] | None = None
-            with _CancelGuard() as guard:
+            with CancelGuard() as guard:
                 try:
                     pending = call()
                 except BaseException as error:  # adapter code, synchronous
@@ -494,7 +449,7 @@ class ResearchBroker:
         types, text over ``MAX_DOCUMENT_CHARS``, a ``published_at`` that is naive
         or that UTC cannot express, or whose ``tzinfo`` raises anything at all,
         ``CancelledError`` included, or asks for the cancellation of the task and
-        returns an offset: the request is retracted, see ``_CancelGuard``):
+        returns an offset: the request is retracted, see ``CancelGuard``):
         ``revalidate_document`` reads and validates every field again.
         A ``provider.fetch`` that asks for the cancellation of the task while it is
         read and called, and then returns normally, is an ``INTERNAL_ERROR`` and
