@@ -233,7 +233,13 @@ _INPUT_NOT_JSON = (
 
 
 class _JsonInputCheck:
-    """Walk a caller-supplied ``input`` once, before it is encoded or stored.
+    """Walk a caller-supplied ``input`` once and return the checked copy.
+
+    The walk reads every container of the caller's object exactly once and
+    builds the copy from what it read, so what is checked is what is kept:
+    nothing later (the encoder, the database) reads the caller's object again,
+    and a thread that changes it after (or during) the walk cannot get an
+    unchecked value stored or make the encoder do unbounded work.
 
     Only what ``json.loads`` produces is accepted (exactly ``dict`` with ``str``
     keys, ``list``, ``str``, ``int``, ``float``, ``bool`` and ``None``), so that
@@ -271,17 +277,19 @@ class _JsonInputCheck:
         # that fits).
         self._digit_limit_bits = self._digit_limit * 3322 // 1000 + 1
 
-    def check_object(self, value: object) -> None:
+    def check_object(self, value: object) -> dict[str, Any]:
+        """Check ``value`` and return a detached copy built from that one walk."""
         if type(value) is not dict:
             raise InvalidCommandArgumentError("input must be a JSON object")
-        self._check(value, 1)
+        return self._check(value, 1)
 
     def _spend(self, cost: int) -> None:
         self._budget -= cost
         if self._budget < 0:
             raise InvalidCommandArgumentError(_INPUT_TOO_LARGE)
 
-    def _check(self, value: object, depth: int) -> None:
+    def _check(self, value: Any, depth: int) -> Any:
+        """Check one value and return its copy (scalars are immutable: as is)."""
         kind = type(value)
         if kind is dict or kind is list:
             if depth > MAX_INPUT_DEPTH:
@@ -290,13 +298,13 @@ class _JsonInputCheck:
                 )
             self._spend(2)  # the brackets
             if kind is dict:
+                copy: dict[str, Any] = {}
                 for key, item in value.items():
                     self._check_text(key)
-                    self._check(item, depth + 1)
-            else:
-                for item in value:
-                    self._check(item, depth + 1)
-        elif kind is str:
+                    copy[key] = self._check(item, depth + 1)
+                return copy
+            return [self._check(item, depth + 1) for item in value]
+        if kind is str:
             self._check_text(value)
         elif kind is int:
             self._spend(self._integer_length(value))
@@ -310,6 +318,7 @@ class _JsonInputCheck:
             self._spend(4)  # null
         else:
             raise InvalidCommandArgumentError(_INPUT_NOT_JSON)
+        return value
 
     def _integer_length(self, value: int) -> int:
         """The characters ``json.dumps`` writes for ``value``, sign included.
@@ -1259,25 +1268,29 @@ class TaskService:
     def _checked_input(value: dict[str, Any] | None) -> dict[str, Any]:
         """Return a detached copy of ``value`` if JSONB can hold it, else raise.
 
-        The value is walked first (``_JsonInputCheck``: plain JSON types only,
-        finite numbers, text without NUL or surrogates, bounded depth and work),
-        so nothing that JSONB would refuse at flush time reaches the database
-        and the encoder only sees a value that fits the byte budget (its digit
-        limit for integers included, so it cannot raise ``ValueError`` either).
+        The caller's object is read ONCE (``_JsonInputCheck``: plain JSON types
+        only, finite numbers, text without NUL or surrogates, bounded depth and
+        work) and the copy is built during that same walk, so nothing that JSONB
+        would refuse at flush time reaches the database and what is measured and
+        stored is exactly what was checked, even if another thread changes the
+        caller's object meanwhile. The encoder only sees that copy, which fits
+        the byte budget (its digit limit for integers included, so it cannot
+        raise ``ValueError`` either); its output is measured for the
+        authoritative length check.
         """
         value = {} if value is None else value
-        _JsonInputCheck().check_object(value)
         try:
-            encoded = json.dumps(value, allow_nan=False)
+            copy = _JsonInputCheck().check_object(value)
+        except RuntimeError:
+            # A dict of the caller changed size while it was being read.
+            raise InvalidCommandArgumentError(_INPUT_TOO_LARGE) from None
+        try:
+            encoded = json.dumps(copy, allow_nan=False)
         except (RuntimeError, ValueError, TypeError):
-            # A caller that changes the value while it is being read.
             raise InvalidCommandArgumentError(_INPUT_TOO_LARGE) from None
         if len(encoded) > MAX_INPUT_BYTES:
             raise InvalidCommandArgumentError(_INPUT_TOO_LARGE)
-        # Not the caller's object: a container the caller still holds can change
-        # while a connection is awaited, after the checks above. What is stored
-        # is decoded from the very text that was measured.
-        return json.loads(encoded)
+        return copy
 
     @staticmethod
     def _stop_now_message(interrupted_step: str | None, reason: str) -> str:

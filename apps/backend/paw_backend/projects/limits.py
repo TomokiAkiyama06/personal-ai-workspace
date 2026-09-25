@@ -46,6 +46,10 @@ MAX_MEMBERS_PER_PROJECT = 200
 DEFAULT_LIST_LIMIT = 50
 MAX_LIST_LIMIT = 200
 MAX_LIST_OFFSET = 100_000
+# The longest keyset cursor of the administrator's list (``cursor.py``): the
+# unpadded base64 of ``1.pending_deletion.<18 characters>.<uuid>`` (74 bytes). A
+# test builds the worst case and checks that it is exactly this long.
+MAX_CURSOR_CHARS = 99
 DEFAULT_PURGE_BATCH_SIZE = 50
 MAX_PURGE_BATCH_SIZE = 500
 # Tasks one ``ProjectTaskStopper.stop_project_tasks`` call stops at most (and open

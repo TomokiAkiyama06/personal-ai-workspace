@@ -29,8 +29,10 @@ from sqlalchemy import (
     delete,
     func,
     insert,
+    literal,
     or_,
     select,
+    tuple_,
     update,
 )
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -46,6 +48,7 @@ from paw_backend.projects.models import (
     ProjectTaskStopRow,
 )
 from paw_backend.projects.records import (
+    AdminProjectSummary,
     Member,
     MemberStatus,
     PendingInvite,
@@ -567,6 +570,65 @@ async def list_projects_of(
         .offset(offset)
     )
     return [project_from_row(r) for r in await session.execute(statement)]
+
+
+async def list_projects_page(
+    session: AsyncSession,
+    status: ProjectStatus | None,
+    after: tuple[datetime, uuid.UUID] | None,
+    limit: int,
+) -> list[AdminProjectSummary]:
+    """A page of the administrator's list of all projects (Issue #84).
+
+    Membership is **not** consulted: every project is a candidate. ``status`` is
+    ``None`` for every status except ``DELETED`` (a tombstone is never listed;
+    ``DELETED`` itself is not a valid filter), else the projects in exactly that
+    status. Ordered by ``created_at`` newest first, then ``id`` descending
+    (``id`` is unique, so the order is total). ``after`` is the ``(created_at,
+    id)`` of the last row of the previous page: only rows strictly after it in
+    that order are returned (keyset paging: a row inserted, changed or purged
+    between two pages never makes another row repeat or vanish). At most
+    ``limit`` rows.
+
+    It reads **five columns of ``projects``** (``id``, ``name``, ``status``,
+    ``created_at``, ``deletion_scheduled_at``) and touches no other table: not
+    the description, not the creator, not ``project_members``, and nothing of
+    another area (tests/test_projects_admin_grants.py runs it with SELECT on
+    just those columns).
+    """
+    statement = select(
+        PROJECTS.c.id,
+        PROJECTS.c.name,
+        PROJECTS.c.status,
+        PROJECTS.c.created_at,
+        PROJECTS.c.deletion_scheduled_at,
+    )
+    if status is None:
+        statement = statement.where(PROJECTS.c.status != "deleted")
+    else:
+        statement = statement.where(PROJECTS.c.status == status.value)
+    if after is not None:
+        created_at, project_id = after
+        statement = statement.where(
+            tuple_(PROJECTS.c.created_at, PROJECTS.c.id)
+            < tuple_(
+                literal(created_at, PROJECTS.c.created_at.type),
+                literal(project_id, PROJECTS.c.id.type),
+            )
+        )
+    statement = statement.order_by(
+        PROJECTS.c.created_at.desc(), PROJECTS.c.id.desc()
+    ).limit(limit)
+    return [
+        AdminProjectSummary(
+            id=row.id,
+            name=row.name,
+            status=ProjectStatus(row.status),
+            created_at=row.created_at,
+            deletion_scheduled_at=row.deletion_scheduled_at,
+        )
+        for row in await session.execute(statement)
+    ]
 
 
 async def roles_of(

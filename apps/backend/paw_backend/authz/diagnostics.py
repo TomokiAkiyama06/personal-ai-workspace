@@ -99,12 +99,34 @@ async def warn_if_audit_table_is_mutable(
 # --- tool approvals (PAW-031) -------------------------------------------------
 
 _TOOL_TABLES = ("tool_approvals", "tool_approval_events")
-_TOOL_QUERY = """
+# The columns of ``tool_approvals`` that ``PostgresApprovalStore`` sets (decide,
+# consume, revoke, expire): the application needs UPDATE on EVERY one of them,
+# because a missing one makes the transition that sets it fail with a permission
+# error. Migration 0031 grants exactly these; tests check the list against the
+# store's SQL and against the migrated grants.
+APPROVAL_STATE_COLUMNS = (
+    "status",
+    "approver_id",
+    "decided_at",
+    "step_up_verified",
+    "consumed_at",
+    "revoked_at",
+    "revoked_by",
+)
+_STATE_COLUMN_NAMES = ", ".join(f"'{name}'" for name in APPROVAL_STATE_COLUMNS)
+_TOOL_QUERY = f"""
     SELECT c.relname AS name,
            pg_has_role(current_user, c.relowner, 'MEMBER') AS owns,
            has_table_privilege(current_user, c.oid, 'INSERT') AS can_insert,
            has_table_privilege(current_user, c.oid, 'UPDATE') AS can_update,
            has_any_column_privilege(current_user, c.oid, 'UPDATE') AS can_update_some,
+           (SELECT count(*) = {len(APPROVAL_STATE_COLUMNS)}
+              FROM pg_attribute a
+             WHERE a.attrelid = c.oid
+               AND a.attname IN ({_STATE_COLUMN_NAMES})
+               AND NOT a.attisdropped
+               AND has_column_privilege(current_user, c.oid, a.attnum, 'UPDATE')
+           ) AS can_update_state,
            has_table_privilege(current_user, c.oid, 'DELETE') AS can_delete,
            has_table_privilege(current_user, c.oid, 'TRUNCATE') AS can_truncate
     FROM pg_class c
@@ -118,7 +140,9 @@ class ToolTableAccess:
     """What the connected database user may do to one tool approval table.
 
     ``can_update`` is the privilege on the whole table; ``can_update_some`` is
-    UPDATE of at least one column (the state columns of ``tool_approvals``).
+    UPDATE of at least one column; ``can_update_state`` is UPDATE of EVERY
+    column in ``APPROVAL_STATE_COLUMNS`` (through the table or column by column;
+    always false for the history table, which has no such columns).
     """
 
     name: str
@@ -126,15 +150,21 @@ class ToolTableAccess:
     can_insert: bool
     can_update: bool
     can_update_some: bool
+    can_update_state: bool
     can_delete: bool
     can_truncate: bool
 
     @property
     def cannot_work(self) -> bool:
-        """The application cannot request or use approvals with this access."""
+        """The application cannot request or use approvals with this access.
+
+        INSERT is needed on both tables; ``tool_approvals`` also needs UPDATE of
+        all of its state columns, not just of one of them (``UPDATE(status)``
+        alone lets a request through and then fails every decision).
+        """
         if not self.can_insert:
             return True
-        return self.name == "tool_approvals" and not self.can_update_some
+        return self.name == "tool_approvals" and not self.can_update_state
 
     @property
     def protected(self) -> bool:
@@ -185,7 +215,7 @@ async def warn_if_tool_approval_tables_are_mutable(
                 "needs an approval will be refused. Run the migration with "
                 "PAW_APP_DATABASE_ROLE set to the application's role.",
                 name,
-                ", UPDATE of the state columns" if name == "tool_approvals" else "",
+                " or UPDATE of a state column" if name == "tool_approvals" else "",
             )
         if not table.protected:
             logger.warning(

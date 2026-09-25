@@ -35,6 +35,7 @@ class InputProblem(StrEnum):
     OUT_OF_RANGE = "out_of_range"
     NOT_A_DATETIME = "not_a_datetime"
     NAIVE_DATETIME = "naive_datetime"
+    INVALID_CURSOR = "invalid_cursor"
 
 
 class ProjectError(Exception):

@@ -26,6 +26,8 @@ Authorization of each method:
 * ``create_project``, ``accept_invite``, ``decline_invite``, ``leave_project``:
   **no capability**, see "Self service" below;
 * ``list_projects``, ``list_my_invites``: the user's own memberships only;
+* ``list_all_projects`` (Issue #84): ``admin.projects.manage`` (Owner / Admin,
+  membership is not needed and not consulted; see "The administrator's list");
 * ``roles_of``, ``purge_expired``: backend-internal, not for users.
 
 Self service (Decision 0008, Approved)
@@ -109,6 +111,27 @@ The last accepted Manager cannot be removed, leave or be demoted
 (:class:`LastManagerError`), except that leaving a Pending deletion project is
 always allowed. Invitations never count as Managers.
 
+The administrator's list (Issue #84, Decision 0008 section 6 and Decision 0004)
+-------------------------------------------------------------------------------
+``list_all_projects`` lets an Owner / Admin (``admin.projects.manage``) find a
+project whose id they do not know, to archive, restore or delete it. It returns
+the id, name, status, creation time and deletion deadline of **every project that
+is not Deleted** and nothing else (``AdminProjectSummary``: no description,
+creator, member, invitation or content of another area; managing a project and
+reading what is in it are separate, Decision 0004). Membership is neither needed
+nor read. Pages are keyset pages with a bounded size (``cursor.py``).
+Its checks run in the order above (actor, arguments, **then** the
+Authorizer, **then** one read transaction): the Authorizer is called before a
+database connection is taken, so a denied caller (or an audit store that is down)
+never causes a read of ``projects``. Every authorized-or-denied call writes exactly
+one Audit event through the Authorizer (``REQUIRED``: no event, no list): the
+actor, ``admin.projects.manage``, the decision, and a resource kind that names
+the filter (``project_list_all`` or ``project_list_<status>``). The event holds no
+project id, name, cursor or count. A call whose arguments are invalid, and a
+caller that is not a ``Principal``, makes no decision and so writes no event.
+An agent is not a ``Principal`` and cannot call it; ``admin.projects.manage`` is
+also not delegable, so an agent acting for an Owner is denied by the Authorizer.
+
 Errors and logging
 ------------------
 Every error is a :class:`ProjectError` with a fixed message that contains no
@@ -130,6 +153,7 @@ from paw_backend.authz.policy import Reason
 from paw_backend.authz.roles import ProjectRole, SystemRole
 from paw_backend.db import Database
 from paw_backend.projects import domain, store
+from paw_backend.projects.cursor import decode_cursor, encode_cursor, filter_token
 from paw_backend.projects.errors import (
     AlreadyInvitedError,
     AlreadyMemberError,
@@ -156,6 +180,7 @@ from paw_backend.projects.limits import (
     utc_now,
 )
 from paw_backend.projects.records import (
+    AdminProjectPage,
     InviteState,
     LifecycleAction,
     Member,
@@ -167,6 +192,7 @@ from paw_backend.projects.records import (
 )
 from paw_backend.projects.transaction import transaction
 from paw_backend.projects.validation import (
+    validate_admin_status_filter,
     validate_batch_size,
     validate_confirmation,
     validate_description,
@@ -358,6 +384,54 @@ class ProjectService:
                 session, principal.user_id, status, limit, offset
             )
         return tuple(found)
+
+    async def list_all_projects(
+        self,
+        actor: Principal,
+        *,
+        status: ProjectStatus | str | None = None,
+        limit: int = DEFAULT_LIST_LIMIT,
+        cursor: str | None = None,
+    ) -> AdminProjectPage:
+        """Every project that is not Deleted, for an Owner / Admin (Issue #84).
+
+        Needs ``admin.projects.manage``; the Authorizer records the decision (one
+        Audit event per call, no event when an argument is invalid). ``status``
+        (``None``: all; else ``ACTIVE`` / ``ARCHIVED`` / ``PENDING_DELETION`` as a
+        member or its exact ``str``) filters the list; ``DELETED`` is refused.
+        ``limit`` is 1 to 200 (default 50). ``cursor`` is the ``next_cursor`` of
+        the previous page, unchanged, with the same ``status``; ``None`` starts at
+        the newest project. Newest first, ties by id descending; keyset paging
+        (see ``cursor.py``). Only ``AdminProjectSummary`` fields are returned.
+        ``InvalidProjectInputError`` for a bad argument or cursor;
+        ``ProjectPermissionDeniedError`` when the Authorizer denies (``reason``;
+        ``audit_unavailable`` is the 503 case).
+        """
+        principal = self._actor(actor)
+        status = validate_admin_status_filter(status)
+        limit = validate_limit(limit)
+        after = None if cursor is None else decode_cursor(cursor, status)
+        decision = await self._authorizer.authorize(
+            principal,
+            Capability.ADMIN_PROJECTS_MANAGE,
+            Resource(kind=f"project_list_{filter_token(status)}"),
+        )
+        if not decision.allowed:
+            raise ProjectPermissionDeniedError(decision.reason)
+        async with self._transaction() as session:
+            # One row more than the page tells whether another page follows.
+            found = await store.list_projects_page(
+                session,
+                status,
+                None if after is None else (after.created_at, after.id),
+                limit + 1,
+            )
+        page = found[:limit]
+        next_cursor = None
+        if len(found) > limit:
+            last = page[-1]
+            next_cursor = encode_cursor(status, last.created_at, last.id)
+        return AdminProjectPage(projects=tuple(page), next_cursor=next_cursor)
 
     async def roles_of(self, user_id: uuid.UUID) -> Mapping[uuid.UUID, ProjectRole]:
         """``{project_id: role}`` of the user's accepted memberships (read-only).

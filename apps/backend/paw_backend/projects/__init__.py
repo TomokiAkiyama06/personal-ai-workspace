@@ -8,6 +8,8 @@ Decision 0008 (Approved 2026-09-25). The service performs authorization through
 orchestrator (PAW-034) calls it. ``ProjectStateGate`` is the Project state gate that
 ``TaskService`` and ``TaskQueue`` are built with (Issue #83): it locks the project
 row ``FOR SHARE`` and refuses new work unless the project is Active.
+``ProjectService.list_all_projects`` (Issue #84) lists every project for an Owner /
+Admin (``admin.projects.manage``).
 """
 
 from paw_backend.projects.errors import (
@@ -32,6 +34,8 @@ from paw_backend.projects.errors import (
     ProjectStateError,
 )
 from paw_backend.projects.records import (
+    AdminProjectPage,
+    AdminProjectSummary,
     InviteState,
     LifecycleAction,
     Member,
@@ -47,6 +51,8 @@ from paw_backend.projects.task_gate import ProjectStateGate
 from paw_backend.projects.task_stop import ProjectTaskStopper, TaskStopResult
 
 __all__ = [
+    "AdminProjectPage",
+    "AdminProjectSummary",
     "AlreadyInvitedError",
     "AlreadyMemberError",
     "ConfirmationMismatchError",
