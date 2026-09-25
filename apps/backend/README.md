@@ -45,7 +45,7 @@ Python 側の Package（`pgvector-python`）は使わず、`paw_backend/memory/v
 apps/backend/
 ├─ pyproject.toml          # 依存（完全一致で固定）と Ruff 設定
 ├─ alembic.ini             # Alembic 設定（DB URL は持たない）
-├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0022 は Password / Session / Login Throttle / 認証 Policy、0026 は Project、0027 は Repository 登録・Remote・Checkout、0030 は Shared Connection・Quota・Usage、0031 は Tool Approval、0033 は Queue / Budget / Loop、0040 は Memory Schema、0043 は `memory_versions` の全文検索の Index、0046 は Shared Memory Candidate、0050 は Research Scratch、0052 は Evidence / Claim Provenance、0083 は `tasks (project_id, state)` の Index、0087 は外部送信の Audit の `audit_events.details`）
+├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0022 は Password / Session / Login Throttle / 認証 Policy、0026 は Project、0027 は Repository 登録・Remote・Checkout、0030 は Shared Connection・Quota・Usage、0031 は Tool Approval、0033 は Queue / Budget / Loop、0040 は Memory Schema、0043 は `memory_versions` の全文検索の Index、0046 は Shared Memory Candidate、0050 は Research Scratch、0052 は Evidence / Claim Provenance、0071 は Memory の Status / Stale 状態の変更履歴、0083 は `tasks (project_id, state)` の Index、0087 は外部送信の Audit の `audit_events.details`）
 ├─ paw_backend/
 │  ├─ app.py               # create_app(settings)
 │  ├─ config.py            # PAW_ 環境変数から読む Settings
@@ -61,7 +61,7 @@ apps/backend/
 │  ├─ cli/                 # server-local の管理コマンド `python -m paw_backend.cli`（PAW-021）
 │  ├─ tasks/               # Agent Task の状態遷移と永続化（PAW-032）。`project_gate.py` は Project の状態 Gate の Protocol（Issue #83）
 │  │  └─ queueing/         # Task Queue、Budget、Loop 検知、Escalation の判断（PAW-033）
-│  ├─ memory/              # Memory / Conversation の Model、ACL 条件、vector 型、Pin / Importance 変更の Actor（PAW-040）、全文検索の式 `fulltext.py`（PAW-043）
+│  ├─ memory/              # Memory / Conversation の Model、ACL 条件、vector 型、Pin / Importance / Status / Stale 変更の Actor（PAW-040、#90）、全文検索の式 `fulltext.py`（PAW-043）
 │  │  ├─ shared/           # Shared Memory の管理: Service、Candidate、Rule 関数、Policy の優先（PAW-046）
 │  │  └─ retrieval/        # Hybrid Retrieval: 権限の解決、SQL Prefilter、Keyword + Vector、Rerank、重複・矛盾（PAW-043）
 │  ├─ projects/            # Project、Membership（招待制）、Lifecycle（PAW-026）、管理者向けの全 Project 一覧（Issue #84）。`task_gate.py` は Task Lane に渡す Project の状態 Gate（Issue #83）、`task_stop.py` は Delete 開始時の Task 停止
@@ -1596,7 +1596,7 @@ Index の使用は `test_connections_plan.py`、権限は `test_connections_gran
 
 ## Memory / Conversation Schema
 
-[PAW-040](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/34)（Revision `0040`）で実装した Schema です。
+[PAW-040](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/34)（Revision `0040`）で実装した Schema です。Version の `status` / `stale_since` の変更履歴は、その後 Revision `0071`（Issue #90）で足しました（下記「Status / Stale の変更履歴」）。
 設計は [Memory Architecture](../../docs/MEMORY_ARCHITECTURE.md) と [要件](../../REQUIREMENTS.md) の Memory の節に従います。
 Repository / Service は含みません（Shared Memory の管理だけは [PAW-046](#shared-memory-administration) の `memory/shared/` にあります）。
 
@@ -1604,7 +1604,7 @@ Repository / Service は含みません（Shared Memory の管理だけは [PAW-
 | --- | --- | --- |
 | Raw Conversation | `conversations`、`messages` | 発言、Tool 結果、Agent 結果、Task の経緯。無期限に保持し、LLM Context へ全文は入れない |
 | Session state | `session_states` | Conversation ごとの要約と作業状態（1 Conversation に 1 行） |
-| Long-term Memory | `memories`、`memory_versions`、`memory_metadata_changes`、`memory_relations`、`memory_sources`、`embedding_models`、`memory_embeddings` | 確定した知識。Version、Pin / Importance の変更履歴、関係、出典、Embedding |
+| Long-term Memory | `memories`、`memory_versions`、`memory_metadata_changes`、`memory_relations`、`memory_sources`、`embedding_models`、`memory_embeddings` | 確定した知識。Version、Pin / Importance / Status / Stale 状態の変更履歴、関係、出典、Embedding |
 
 3 つの層は別の Table で、Foreign Key でつながるのは出典（`memory_sources`）だけです。
 Conversation を消しても Memory と他の出典は残り（`ON DELETE SET NULL`）、Session state と Message は一緒に消えます。
@@ -1649,13 +1649,30 @@ Scope を広げる編集は新しい Version で行うため、旧 Version は�
 Trigger の関数は書き込む側の Session で動き、Application の Role も PostgreSQL 既定の `TEMP` 権限を持つため、同名の一時 Table（や一時 Type `uuid`）で履歴の書き込み先をすり替えられないようにしてあります。
 関数は `search_path` を `pg_catalog, pg_temp`（`pg_temp` を明示して最後に置く）へ固定し、履歴 Table は Trigger を持つ Table と同じ Schema（`TG_TABLE_SCHEMA`）で修飾して書き込みます（動的 SQL）。
 Test は Application の Role で、一時 Table を先に作ってから Pin を変更し、実際の履歴に行が残ることを確認します（`tests/test_memory_grants.py` の `ShadowedRelationTest`）。
-値が変わらない UPDATE は記録しません。`status` と `stale_since` の更新も対象外です。
+値が変わらない UPDATE は記録しません。`status` と `stale_since` の変更も同じ Trigger が記録します（Revision `0071`。下記「Status / Stale の変更履歴」）。
 Trigger は誰の操作か知らないため、書き込む側が同じ Transaction の UPDATE の前に `metadata_change_actor(actor_type, actor_user_id)`（`paw_backend.memory.metadata`）で Actor を示します。
 Actor を示さない変更は `memory_metadata_changes.actor_type` の NOT NULL で失敗し、UPDATE も取り消されます。設定は Transaction 内だけ有効（`set_config(..., true)`）で、接続 Pool を通じて次の Request へ残りません。
 `memory_metadata_changes` は追記のみ（Application に UPDATE / DELETE は与えません）で、Version と一緒に Cascade で消えます。
 限界: Actor の ID は Backend が主張する値で、DB は確認しません（User の Table が無いため。`actor_user_id` と同じ扱い）。Application は INSERT を持つので、変更を伴わない行を追加することはできます（既存の行は書き換えられません）。
-`pinned` / `importance` は Trigger が使う列なので、型を変える Migration は Trigger を作り直す必要があります。
+`pinned` / `importance` / `status` / `stale_since` は Trigger が使う列なので、型を変える Migration は Trigger を作り直す必要があります。
 Permanent / Revalidate など鮮度の設定は Version の不変の列なので、変更は新しい Version になり、その履歴が変更履歴です。
+
+**Status / Stale の変更履歴（Issue #90）。** PAW-040（PR #71）の独立 Review が、`memory_versions.status`（`superseded` / `deprecated` / `history` へ変える）と `stale_since`（Stale の候補として印を付ける・外す）が、以前の値・実行者・時刻を残さずに上書きされる、と指摘しました。
+履歴 / Graph が「いつ・誰が Deprecated にした / Stale の印を付けた・外したか」を説明できません。Revision `0071` は、**Pin / Importance と同じ Trigger・同じ追記専用の `memory_metadata_changes`** でこの 2 列も記録します（新しい Table も権限もありません）。
+この履歴と、Shared Memory の管理の Audit（[Decision 0009](../../docs/decisions/0009-shared-memory-administration.md) の 12、13 の試みの行と完了の行）は**併存**します。[Decision 0026](../../docs/decisions/0026-memory-status-change-history.md)（承認済み、2026-09-26）が併存を決め、0009 の「削除・復元は Audit にだけ残る」とした記述だけを置き換えています（0009 のそれ以外、Capability 6 つ、完了の行の値と書き方は変わりません）。
+Audit は管理操作の試みと完了の記録で、この履歴は Scope を問わずすべての `status` / `stale_since` の変更の記録です。
+
+- **列。** `memory_metadata_changes` に `old_status` / `new_status`（Text）と `old_stale_since` / `new_stale_since`（timestamptz）を足しました。4 列とも NULL 可です。Revision `0040` が書いた行は、Status を持ちません（当時は記録しておらず、後から分かりません）。Trigger が書く行は、常に `old_status` と `new_status` の両方を持ち、Stale 時刻の NULL は「印なし」を意味します。
+  CHECK: `status_pair`（Status は両方あるか両方ない）、`status_valid`（既知の Status だけ）、`stale_since_needs_status`（Status のない旧形式の行は Stale 時刻を持たない）、`something_changed`（Pin / Importance / Status / Stale のどれかが変わった行だけ）。
+- **Trigger。** `tr_memory_versions_record_metadata_change` は `UPDATE OF pinned, importance, status, stale_since` になり、関数 `paw_record_memory_metadata_change()` は 4 列の変更前後を書きます（`search_path` の固定と、Schema での修飾は Revision `0040` のまま）。1 回の UPDATE で複数の列が変わっても 1 行です。同じ値の書き込み（`status = 'active'` を `active` の Version へ、など）は記録しません。変更の時刻は DB の `clock_timestamp()` で、書き込む側は指定できません。
+- **Actor。** Pin / Importance と同じです。書き込む側が同じ Transaction の UPDATE の前に `metadata_change_actor(actor_type, actor_user_id)` で示します。**Actor を示さない `status` / `stale_since` の変更は失敗します**（`actor_type` の NOT NULL。UPDATE も取り消されます）。`system` を黙って記録する案は採りませんでした（Actor を示し忘れた書き込みほど「誰が」を誤って答えるため）。Pin / Importance の既存の規則と揃えています。
+  `paw_backend.memory.shared`（`SharedMemoryService`）は、認可した Owner / Admin を `user` の Actor として示してから `superseded`（編集）/ `deprecated`（削除）/ `active`（復元）へ変えます（`tests/test_shared_memory_status_history.py`）。**`memory_versions.status` / `stale_since` を UPDATE する新しいコードは、同じように Actor を示す必要があります**（例: Journal の統合が旧 Version を `superseded` にする処理）。
+- **同時実行。** Trigger は行の Lock を取ってから動くので、`OLD` は直前に Commit された更新の結果です。同時の 2 更新は Lock の順に 1 行ずつ記録され（2 行目の変更前は 1 行目の変更後）、同じ値への 2 回目の更新は記録されません。Rollback した更新の行も残りません。
+- **Downgrade。** `0040` の関数と Trigger を戻します。旧形式は Pin / Importance の変更を持たない行を保持できないため、**Status / Stale の変更だけを記録した行を削除し、4 つの新しい列を落とします**（Pin と一緒に Status も変えた行は残りますが、Status / Stale の値は失われます）。`0040` が書いた行は変わりません。削除した履歴は、上げ直しても戻りません。
+- **限界。** 履歴の Actor は Backend が主張する値です（DB は確認しません。Pin / Importance と同じ）。`status` の遷移の正しさ（`superseded` を `active` に戻さない等）は、これまでどおり Service が守ります。この Trigger は「起きた変更の記録」で、遷移の許可ではありません。
+- **Migration の鎖。** Migration `0071` の `down_revision` は `0027` です（鎖は `0001 → 0025 → 0032 → 0040 → 0021 → 0033 → 0031 → 0050 → 0046 → 0052 → 0026 → 0087 → 0022 → 0083 → 0043 → 0030 → 0027 → 0071`）。Revision ID は Issue 番号で、鎖の順序ではありません。
+
+Test: `tests/test_memory_status_history.py`（Deprecate / Supersede / Stale の印を付ける・外すが、それぞれ 1 行で前後の値と Actor が正しいこと、変更なしの UPDATE は記録なし、Actor なしは拒否、DB の時計、履歴の行の CHECK、同時の遷移と Rollback）、`tests/test_memory_status_history_migration.py`（履歴の行が既にある DB で 0071 を上げる・下げる・上げ直す。旧い行が残ること、Catalog が戻ること）、`tests/test_shared_memory_status_history.py`（Shared Memory の編集・削除・復元）、`tests/test_memory_grants.py`（Application の Role で記録され、新しい列は更新できない）、`tests/test_memory_migration.py`（Model と Migration の差分なし）。
 
 **User / Project / Repo の ID は Foreign Key なし。** `projects`（PAW-026、Revision `0026`）と `users`（PAW-021）の Table は、この Schema の Revision より後にできます（Repo の Table は PAW-027、Revision `0027`）。この Schema からの外部キーは付けていません。
 `owner_user_id`、`project_id`、`project_group_id`、`repo_id`、`actor_user_id` は素の UUID Column で、DB は存在を確認しません。
@@ -1675,8 +1692,8 @@ Task、Repo 解析、Project Decision の出典も、Table がないため `memo
 | `messages` | SELECT、INSERT | Raw Conversation は追記のみ。履歴を書き換えない。会話ごとの削除は下記の Cascade |
 | `session_states` | SELECT、INSERT、UPDATE（`summary`、`state`、`summarized_through_sequence`、`updated_at`） | 要約と状態は会話の進行で更新する。削除は会話と一緒（Cascade） |
 | `memories` | SELECT、INSERT、DELETE | 更新する列は無い。DELETE は Memory 全体の削除（会話と関連 Memory の削除、Shared Memory の Admin 削除、User 削除時の Private Memory の消去）で、Version は Cascade で消える |
-| `memory_versions` | SELECT、INSERT、UPDATE（`status`、`stale_since`、`pinned`、`importance` のみ） | Version は書き換えない（編集は新しい Version）。本文、Scope と ACL の列、`confirmation_state`、鮮度の設定は変更不可。DELETE は与えず履歴を残す。`pinned` / `importance` の UPDATE は Trigger が `memory_metadata_changes` へ記録する |
-| `memory_metadata_changes` | SELECT、INSERT | Pin / Importance の変更履歴は追記のみ。Trigger が Application の権限で INSERT するため INSERT が必要。UPDATE / DELETE は与えない（Version の削除の Cascade でだけ消える） |
+| `memory_versions` | SELECT、INSERT、UPDATE（`status`、`stale_since`、`pinned`、`importance` のみ） | Version は書き換えない（編集は新しい Version）。本文、Scope と ACL の列、`confirmation_state`、鮮度の設定は変更不可。DELETE は与えず履歴を残す。`pinned` / `importance` / `status` / `stale_since` の UPDATE は Trigger が `memory_metadata_changes` へ記録する（Actor を示さない変更は失敗） |
+| `memory_metadata_changes` | SELECT、INSERT | Pin / Importance / Status / Stale の変更履歴は追記のみ（Revision `0071` は列を足しただけで、権限は変えない）。Trigger が Application の権限で INSERT するため INSERT が必要。UPDATE / DELETE は与えない（Version の削除の Cascade でだけ消える） |
 | `memory_relations` | SELECT、INSERT | 履歴 Graph の辺は追記のみ |
 | `memory_sources` | SELECT、INSERT、UPDATE（`source_deleted_at` のみ） | 出典は追記のみ。会話の削除で失われた出典を記録する列だけ更新できる |
 | `embedding_models` | SELECT、INSERT | Benchmark で決めた Model の登録。次元は変えず、Model の廃止は管理者が行う |
@@ -1747,7 +1764,10 @@ Audit の `action` は Capability の値です。Shared Memory を変える操�
 
 #### Audit の Action
 
-削除・復元は `memory_versions` の `status` を変えるだけで、誰がいつ行ったかを行に残しません（[Decision 0009](../../docs/decisions/0009-shared-memory-administration.md) の 7）。履歴は Audit だけです。
+削除・復元は `memory_versions` の `status` を変えるだけで、Version の行には誰がいつ行ったかの列を足しません（[Decision 0009](../../docs/decisions/0009-shared-memory-administration.md) の 7）。
+誰がいつ行ったかは、**2 つの記録が併存**して残します。Audit（この節。管理操作の試みと完了）と、`memory_metadata_changes`（Version の `status` / `stale_since` の状態変化。Revision `0071`）です。
+[Decision 0026](../../docs/decisions/0026-memory-status-change-history.md)（承認済み。0009 の「Audit にだけ残る」とした記述だけを置き換える）が、この併存を決めています。
+Audit は「誰が管理操作を試み、Commit されたか」、履歴は「この Version の状態がいつ・誰によって何から何へ変わったか」に答えます。同じ削除・復元について 2 つの記録は、対象の Memory、操作した Owner / Admin、遷移が一致します（時刻は Service の時計と DB の時計で別です。共通の Key は持たず、Memory、Actor、時刻で結びます）。`tests/test_shared_memory_status_history.py` が一致を確かめます。
 Authorizer は `action` に Capability の値を書くので、全操作が 1 つの Capability（`shared_memory.manage`）だと、削除と復元、作成、編集、承認、却下を見分けられません。
 そこで、変更する 6 つの操作にそれぞれ Capability を追加しました（`authz/capabilities.py`。すべて `Scope.SYSTEM`、委任不可、Audit Mode `REQUIRED`、Owner / Admin だけ）。
 
@@ -1783,7 +1803,7 @@ Authorizer は `action` に Capability の値を書くので、全操作が 1 �
 - **完了の行がある ⇔ 変更が Commit された**。Rollback、失敗した Statement、失敗した Commit は行も戻します。完了の行を書けなければ変更も戻ります（fail-closed。Test は行の INSERT と Commit を失敗させて確認）。
 - 試みの後で失敗した呼び出し（対象がない、状態が違う、版が古い、Lock を待ち切れない、更新が失敗する）は、**完了のない試み**として残ります（`correlation_id` が同じ完了の行がない `allow` の行）。何も変えなかった呼び出し（内容が同じ編集）にも完了の行はありません。
   拒否された試み、Audit を書けずに拒否された試みは、これまでどおりで、完了しません。
-- 「誰がいつ削除・復元したか」は、`resource_id` と `reason = 'completed'` で絞った行の `action`、`actor_id`、`occurred_at` です。
+- 「誰がいつ削除・復元したか」は、`resource_id` と `reason = 'completed'` で絞った行の `action`、`actor_id`、`occurred_at` です。同じ変更は `memory_metadata_changes` にも残ります（Version ごとの `status` の前後と、DB の時刻。[Decision 0026](../../docs/decisions/0026-memory-status-change-history.md)）。完了の行の値と書き方は、その Decision でも変わりません。
 - 権限は増えません。Application の Role が持つ `audit_events` の INSERT / SELECT（Revision `0025`）で書きます。UPDATE、DELETE、TRUNCATE は Trigger と権限が拒否したままです（`tests/test_shared_memory_grants.py` が確認）。
 - 限界:
   - 完了の行は Authorizer の `AuditSink` を通らず、Service が `audit_events` に直接書きます（Sink は別の Transaction で書くため、変更と記録が別れうるからです）。Sink を差し替えた配備では、試みと完了が別の場所に分かれます（現在の Sink は `PostgresAuditSink` だけです）。
@@ -1803,7 +1823,7 @@ Memory は、**現在の Version（`version_number` が最大の Version）** �
 - **作成**: Version 1（`active`、`confirmation_state = 'confirmed'`、`freshness_policy = 'permanent'`、`actor_type = 'user'`）。
 - **編集**: 上書きしません。現在の Version を `superseded` にし、新しい Version `n + 1`（`active`）を書き、新しい側から古い側への `supersedes` 関係（`reason` は変わった項目の名前をアルファベット順に `", "` でつないだもの）を追加します。
   `expected_version` が現在の番号と違えば `SharedMemoryVersionConflictError`（Optimistic Lock）。何も変わらない編集は、何も書かずに現在の Memory を返します。削除済みの Memory は編集できません（先に復元）。
-- **削除**: 現在の Version の `status` を `deprecated` にします（何も消しません）。**復元**は `active` に戻します。Version は増えません。誰がいつ削除・復元したかは、Audit の試みの行と完了の行にだけ残ります（上の「変更の完了の記録」）。
+- **削除**: 現在の Version の `status` を `deprecated` にします（何も消しません）。**復元**は `active` に戻します。Version は増えません。誰がいつ削除・復元したかは、Audit の試みの行と完了の行に残ります（上の「変更の完了の記録」）。Revision `0071` 以降は、`memory_metadata_changes` にも残ります（変更前後の `status`、実行した Owner / Admin、DB の時刻。編集で旧 Version を `superseded` にする変更も同じです。Audit の行と併存する記録で、[Decision 0026](../../docs/decisions/0026-memory-status-change-history.md) が決めています）。Service は認可した Owner / Admin を `metadata_change_actor` で `user` の Actor として示してから `status` を更新します（示さない更新は DB が拒否します。`tests/test_shared_memory_status_history.py`）。
   削除済みの Memory は、一般 User の一覧・取得には出ません（「見つからない」）。
 - 編集できる項目は `title`（200 文字まで）、`content`（20,000 文字まで）、`memory_type`（`[a-z][a-z0-9_]{0,63}`）、`importance`（0〜100）、`policy_subjects`（20 個まで）です。`reason`（500 文字まで）は Version の `change_reason` になります。
 - 一覧は古い順（`memories.created_at`、同時刻は `id`）で、`limit`（1〜200、既定 50）と `offset`（0〜100000）で区切ります。

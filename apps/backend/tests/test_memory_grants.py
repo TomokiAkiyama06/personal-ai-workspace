@@ -40,6 +40,7 @@ from .memory_support import (
     migrate,
     requires_postgres,
     sync_database_url,
+    utc,
     version_values,
 )
 from .support import paw_environment
@@ -294,6 +295,65 @@ class ApplicationFlowTest(ApplicationRoleTestCase):
             [tuple(row) for row in changes],
             [(False, True, 50, 80, "user", editor)],
         )
+
+    def test_a_status_and_stale_change_is_recorded_with_the_application_roles_rights(
+        self,
+    ):
+        # Revision 0071: the trigger of ``memory_versions`` also records ``status``
+        # and ``stale_since``; its INSERT runs as the application role, which holds
+        # INSERT (and no UPDATE / DELETE) on the history.
+        memory = self.add_memory()
+        version = self.add_version(memory, version_number=1)
+        editor = uuid.uuid4()
+        self.session.execute(metadata_change_actor("user", editor))
+
+        self.session.execute(
+            update(MemoryVersion)
+            .where(MemoryVersion.id == version)
+            .values(status="deprecated", stale_since=utc(2026, 9, 1))
+        )
+        self.session.execute(
+            update(MemoryVersion)
+            .where(MemoryVersion.id == version)
+            .values(stale_since=None)
+        )
+
+        changes = self.session.execute(
+            select(
+                MemoryMetadataChange.old_status,
+                MemoryMetadataChange.new_status,
+                MemoryMetadataChange.old_stale_since,
+                MemoryMetadataChange.new_stale_since,
+                MemoryMetadataChange.actor_type,
+                MemoryMetadataChange.actor_user_id,
+            )
+            .where(MemoryMetadataChange.memory_version_id == version)
+            .order_by(MemoryMetadataChange.created_at)
+        ).all()
+        self.assertEqual(
+            [tuple(row) for row in changes],
+            [
+                ("active", "deprecated", None, utc(2026, 9, 1), "user", editor),
+                ("deprecated", "deprecated", utc(2026, 9, 1), None, "user", editor),
+            ],
+        )
+
+    def test_a_status_change_without_a_named_actor_is_refused_for_the_role(self):
+        version = self.add_version(self.add_memory(), version_number=1)
+
+        with self.assertRaises(IntegrityError) as caught:
+            with self.session.begin_nested():
+                self.session.execute(
+                    update(MemoryVersion)
+                    .where(MemoryVersion.id == version)
+                    .values(status="deprecated")
+                )
+
+        self.assertEqual(caught.exception.orig.diag.column_name, "actor_type")
+        status = self.session.execute(
+            select(MemoryVersion.status).where(MemoryVersion.id == version)
+        ).scalar_one()
+        self.assertEqual(status, "active")
 
     def test_acl_filtered_vector_search(self):
         alice, bob, project = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
@@ -584,6 +644,10 @@ class ApplicationDeniedTest(ApplicationRoleTestCase):
                 "new_pinned",
                 "old_importance",
                 "new_importance",
+                "old_status",
+                "new_status",
+                "old_stale_since",
+                "new_stale_since",
                 "actor_type",
                 "actor_user_id",
                 "created_at",

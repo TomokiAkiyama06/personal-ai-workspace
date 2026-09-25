@@ -9,8 +9,9 @@ on these tables. See ``models.py`` for the layout and ``acl.py`` for how
 permissions are filtered in SQL; ``fulltext.py`` is the full-text document of the
 keyword search (its index is revision 0043).
 
-``metadata.py`` names the actor of a pin / importance edit, which a trigger
-records in ``memory_metadata_changes`` (REQUIREMENTS.md "Manual Memory Editing").
+``metadata.py`` names the actor of a pin / importance / status / stale-state
+change, which a trigger records in ``memory_metadata_changes`` (REQUIREMENTS.md
+"Manual Memory Editing"; the status and stale state since revision 0071).
 
 Users, projects and repositories are plain UUID columns without foreign keys,
 because those tables do not exist yet (PAW-021 / PAW-026 / PAW-027). The

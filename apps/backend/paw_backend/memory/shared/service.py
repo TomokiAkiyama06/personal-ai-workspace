@@ -77,10 +77,15 @@ version has another status, is "not found" for this service. Older versions are
   memory cannot be edited (:class:`SharedMemoryStateError`).
 * ``delete_memory``: the current version's status becomes ``deprecated``. Nothing
   is erased. ``restore_memory`` sets it back to ``active``. Who deleted or
-  restored, and when, is only in the audit trail (the memory row keeps neither):
-  the Authorizer's row (the *attempt*: its ``action`` is ``shared_memory.delete``
-  or ``shared_memory.restore``, written before the status changes, so it does not
-  say that the change happened) and the completion row below.
+  restored, and when, is in two records that coexist (Decision 0026, which
+  supersedes only the "Audit only" statements of Decision 0009): the audit trail
+  (the version row keeps neither) with the Authorizer's row (the *attempt*: its
+  ``action`` is ``shared_memory.delete`` or ``shared_memory.restore``, written
+  before the status changes, so it does not say that the change happened) and the
+  completion row below; and ``memory_metadata_changes``, where the database
+  records the old and new status, the acting manager (named with
+  ``metadata_change_actor`` before the update, see ``_set_status``) and its own
+  clock for every status change of a version.
 
 The audit trail of a change (``audit.py``, Decision 0009 section 13)
 --------------------------------------------------------------------
@@ -174,6 +179,7 @@ from paw_backend.authz import (
     SystemRole,
 )
 from paw_backend.db import Database
+from paw_backend.memory.metadata import metadata_change_actor
 from paw_backend.memory.models import (
     ActorType,
     ConfirmationState,
@@ -609,8 +615,16 @@ class SharedMemoryService:
         version_id: UUID,
         old: MemoryStatus,
         new: MemoryStatus,
+        user_id: UUID,
     ) -> None:
-        """Change a version's status if (and only if) it still is ``old``."""
+        """Change a version's status if (and only if) it still is ``old``.
+
+        The database records the change (old and new status, ``user_id`` as the
+        actor, its own clock) in ``memory_metadata_changes``, and refuses it when
+        nobody is named, so the manager is named first, in this transaction
+        (Decision 0026: this history coexists with the audit completion row).
+        """
+        await session.execute(metadata_change_actor(ActorType.USER, user_id))
         result = await session.execute(
             update(_VERSIONS)
             .where(_VERSIONS.c.id == version_id, _VERSIONS.c.status == old.value)
@@ -821,6 +835,7 @@ class SharedMemoryService:
                 current.version_id,
                 MemoryStatus.ACTIVE,
                 MemoryStatus.SUPERSEDED,
+                manager.user_id,
             )
             new_version_id = (
                 await session.execute(
@@ -909,7 +924,9 @@ class SharedMemoryService:
             else:
                 check_restorable(current)
                 old, new = MemoryStatus.DEPRECATED, MemoryStatus.ACTIVE
-            await self._set_status(session, current.version_id, old, new)
+            await self._set_status(
+                session, current.version_id, old, new, manager.user_id
+            )
             await self._complete(
                 session,
                 manager,

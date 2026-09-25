@@ -1,13 +1,19 @@
-"""Naming the actor of a pin / importance change (PAW-040).
+"""Naming the actor of an in-place change of a memory version (PAW-040, #90).
 
-``memory_versions.pinned`` and ``importance`` are updated in place, and a trigger
-records each change in ``memory_metadata_changes`` with its actor
-(REQUIREMENTS.md "Manual Memory Editing": the change history is kept). A trigger
-cannot know who asked, so the writer names the actor first, in the same
-transaction and before the ``UPDATE``::
+``memory_versions.pinned``, ``importance``, ``status`` and ``stale_since`` are
+updated in place, and a trigger records each change in ``memory_metadata_changes``
+with its actor (REQUIREMENTS.md "Manual Memory Editing": the change history is
+kept; revision 0071 added the status and the stale state, so that a deprecation or
+a stale marking can be explained). A trigger cannot know who asked, so the writer
+names the actor first, in the same transaction and before the ``UPDATE``::
 
     session.execute(metadata_change_actor(ActorType.USER, user_id))
     session.execute(update(MemoryVersion)...values(pinned=True))
+    session.execute(update(MemoryVersion)...values(status="deprecated"))
+
+Decision 0026 (approved 2026-09-26) records the contract: this history and the
+Audit of Shared Memory administration (Decision 0009: the attempt and completion
+rows) coexist, the actor is mandatory, and it is never silently ``system``.
 
 The two settings are transaction-local (``set_config(..., true)``), so a pooled
 connection never carries one request's actor into the next. A change without an
@@ -31,7 +37,9 @@ ACTOR_USER_ID_SETTING = "paw.actor_user_id"
 def metadata_change_actor(
     actor_type: ActorType | str, actor_user_id: UUID | None = None
 ) -> Select:
-    """A statement that names who changes ``pinned`` / ``importance`` from now on.
+    """A statement that names who changes a version in place from now on.
+
+    (``pinned``, ``importance``, ``status`` and ``stale_since``.)
 
     It applies to the current transaction only. A ``user`` needs ``actor_user_id``;
     an ``agent`` or the ``system`` may pass one or ``None``. Naming an actor again

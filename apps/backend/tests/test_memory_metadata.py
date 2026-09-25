@@ -5,7 +5,8 @@ takes effect at once, but the change history is kept. The columns stay updatable
 in place; a trigger records every change (old and new value, who) in the
 append-only ``memory_metadata_changes``. The actor is named by the writer with
 ``paw_backend.memory.metadata.metadata_change_actor`` and the write is refused
-without one.
+without one. The same trigger records ``status`` and ``stale_since`` since
+revision 0071: ``tests/test_memory_status_history.py``.
 
 The first class needs no server; the others need PostgreSQL (skipped unless
 ``PAW_TEST_DATABASE_URL`` is set).
@@ -175,12 +176,16 @@ class MetadataHistoryTest(MetadataHistoryBase):
 
         self.assertEqual(self.history(version), [])
 
-    def test_the_other_updatable_columns_record_nothing(self):
+    def test_status_and_stale_since_need_an_actor_like_the_pin(self):
+        # Before revision 0071 these two columns were overwritten without a
+        # trace (and without an actor); ``tests/test_memory_status_history.py``
+        # covers what is recorded now, this is the rule they share with the pin.
         version = self.add_version(self.add_memory())
 
-        # No actor is named: only pinned / importance need one.
-        self.edit(version, status="superseded", stale_since=text("now()"))
-
+        for values in ({"status": "superseded"}, {"stale_since": text("now()")}):
+            with self.subTest(list(values)):
+                column = self.refused_column(lambda v=values: self.edit(version, **v))
+                self.assertEqual(column, ACTOR_REQUIRED)
         self.assertEqual(self.history(version), [])
 
     def test_each_version_has_its_own_history(self):
