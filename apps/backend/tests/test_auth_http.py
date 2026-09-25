@@ -64,6 +64,9 @@ class LoginTest(HttpTestCase):
                     "enrolled": False,
                     "enrollment_required": False,
                     "recommended": True,
+                    "available": False,
+                    "gate": "open",
+                    "next": None,
                 },
                 "step_up": {
                     "method": None,

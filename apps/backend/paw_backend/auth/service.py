@@ -58,11 +58,19 @@ from paw_backend.auth.errors import (
     PasswordProblem,
     SessionEndedError,
     SessionNotFoundError,
+    StepUpMethodInsufficientError,
+    StepUpRequiredError,
     ThrottledError,
     TokenRejectedError,
 )
 from paw_backend.auth.limits import LOGIN_NAME_MAX_INPUT
-from paw_backend.auth.models import AuthMethod, RevokeReason, ThrottleScope
+from paw_backend.auth.models import (
+    AuthMethod,
+    PasskeyGate,
+    PasskeyRequirement,
+    RevokeReason,
+    ThrottleScope,
+)
 from paw_backend.auth.passwords import (
     PasswordHasher,
     normalize_password,
@@ -81,9 +89,11 @@ from paw_backend.auth.state import (
     NoPasskeys,
     PasskeyEnrollment,
     StepUpEvidence,
+    StepUpRefused,
     StepUpVerifier,
     build_auth_state,
 )
+from paw_backend.auth.stepup import require_passkey_step_up_in
 from paw_backend.auth.throttle import Refused, Reservation, Throttle
 from paw_backend.authz.roles import SystemRole
 from paw_backend.authz.subjects import Principal
@@ -103,6 +113,14 @@ logger = logging.getLogger(__name__)
 # Runs in the redemption's transaction, after the password is set: PAW-023 adds
 # one that revokes the user's Passkeys (Decision 0005, point 7).
 CredentialInvalidator = Callable[[AsyncSession, uuid.UUID], Awaitable[None]]
+
+
+# What the audit row of an allowed sign-in says about the session's gate.
+_LOGIN_REASON = {
+    PasskeyGate.OPEN: AuthReason.AUTHENTICATED,
+    PasskeyGate.ASSERTION_REQUIRED: AuthReason.PASSKEY_PENDING,
+    PasskeyGate.ENROLLMENT_REQUIRED: AuthReason.ENROLLMENT_ONLY,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -250,6 +268,10 @@ class AuthService:
         self._policy = policy
         self._redeemer = redeemer
         self._passkeys = passkeys or NoPasskeys()
+        # Passkeys are configured: the requirement is enforced (a restricted
+        # session) and a Passkey step-up can be recorded. A stand-in without the
+        # attribute (a test double) means "off".
+        self._passkeys_on = getattr(self._passkeys, "available", False) is True
         self._timeout = float(timeout_seconds)
         self._verifiers: dict[AuthMethod, StepUpVerifier] = {
             AuthMethod.PASSWORD: PasswordStepUpVerifier(
@@ -435,6 +457,10 @@ class AuthService:
                 raise _Rejected(AuthReason.ACCOUNT_NOT_ACTIVE)
             if stored != verified_hash:
                 raise _Rejected(AuthReason.CREDENTIALS_CHANGED)
+            # The Passkey gate of the new session (Decision 0025). Read under the same
+            # ``FOR SHARE`` lock that keeps a Passkey from being registered or
+            # revoked meanwhile, so the count is the one the session starts with.
+            gate = await self._gate_for_in(session, account)
             if replace_token is not None:
                 await self._sessions.revoke_by_token(
                     session, replace_token, RevokeReason.REPLACED
@@ -452,6 +478,7 @@ class AuthService:
                 account.id,
                 remember_me=remember_me,
                 device_label=device_label,
+                passkey_gate=gate,
             )
             for reservation in reservations:
                 await self._throttle.succeed_in(session, reservation)
@@ -459,7 +486,7 @@ class AuthService:
                 session,
                 self._audit.event(
                     AuthAction.LOGIN,
-                    AuthReason.AUTHENTICATED,
+                    _LOGIN_REASON[gate],
                     allowed=True,
                     correlation_id=context.correlation_id,
                     client_request_id=context.client_request_id,
@@ -482,6 +509,31 @@ class AuthService:
             )
 
         return await run(self._database, work, self._timeout)
+
+    async def _gate_for_in(
+        self, session: AsyncSession, account: _Account
+    ) -> PasskeyGate:
+        """The gate of a session that starts now (see ``PasskeyGate``).
+
+        ``OPEN`` unless Passkeys are configured AND the policy requires one of this
+        role: then ``ASSERTION_REQUIRED`` if the account has a Passkey and
+        ``ENROLLMENT_REQUIRED`` if it has none (never a dead end: the password login
+        that got here is what makes the session, and the session may register one).
+        """
+        if not self._passkeys_on:
+            return PasskeyGate.OPEN
+        policy = await self._policy.get_in(session)
+        if (
+            policy.requirement_for(account.system_role)
+            is not PasskeyRequirement.REQUIRED
+        ):
+            return PasskeyGate.OPEN
+        count = await self._passkeys.count_active_in(session, account.id)
+        return (
+            PasskeyGate.ENROLLMENT_REQUIRED
+            if count == 0
+            else PasskeyGate.ASSERTION_REQUIRED
+        )
 
     async def _login_failed(
         self,
@@ -541,6 +593,7 @@ class AuthService:
                 auth.record,
                 enrolled=enrolled,
                 checked_at=auth.checked_at,
+                available=self._passkeys_on,
             ),
             policy=policy,
         )
@@ -738,9 +791,12 @@ class AuthService:
     ) -> LoginResult:
         """Prove again that the user is the account's owner; the id is rotated.
 
-        The verifier of ``evidence.method`` decides (password now; PAW-023
-        registers a Passkey one). A wrong proof counts against the account like a
-        wrong password does.
+        The verifier of ``evidence.method`` decides (the password one, or the Passkey
+        one when Passkeys are configured). A wrong proof counts against the account
+        like a wrong password does. A Passkey step-up also OPENS the session's
+        Passkey gate (the second half of a restricted sign-in): the credential is
+        confirmed again in the recording transaction, so a Passkey revoked while the
+        assertion was being verified cannot step anything up.
         """
         _require_auth(auth)
         _require_context(context)
@@ -749,24 +805,52 @@ class AuthService:
         verifier = self._verifiers.get(evidence.method)
         if verifier is None:
             raise InvalidAuthInputError("method")
+        passkey = evidence.method is AuthMethod.PASSKEY
+        if passkey:
+            # The challenge belongs to a session: the session of THIS request,
+            # never one a caller names.
+            evidence = replace(evidence, session_id=auth.record.id)
         if evidence.password is not None:
             evidence = StepUpEvidence(
                 evidence.method, _password_or_invalid(evidence.password)
             )
+        action = AuthAction.PASSKEY_AUTHENTICATE if passkey else AuthAction.STEP_UP
         reservations = await self._reserve(context, auth.login_name)
-        if not await verifier.verify(auth.record.user_id, auth.login_name, evidence):
-            await self._record_refusal(
-                auth,
-                context,
-                AuthAction.STEP_UP,
-                AuthReason.INVALID_CREDENTIALS,
-                reservations[1],
+        try:
+            proven = await verifier.verify(
+                auth.record.user_id, auth.login_name, evidence
             )
+            reason = AuthReason.INVALID_CREDENTIALS
+        except StepUpRefused as refused:
+            proven, reason = False, refused.reason
+        if not proven:
+            await self._record_refusal(auth, context, action, reason, reservations[1])
             raise InvalidCredentialsError
 
         async def work(session: AsyncSession) -> LoginResult:
+            passkey_id: uuid.UUID | None = None
+            if passkey and self._passkeys_on:
+                # The credential still has to be an active one of this user, judged
+                # under a lock a revocation must wait for. (Without configured
+                # Passkeys there is no registry to ask: a verifier that was
+                # registered by hand is trusted, and no gate is involved.)
+                assertion = evidence.assertion
+                if assertion is None:
+                    raise _Rejected(AuthReason.UNKNOWN_CREDENTIAL)
+                confirm = getattr(self._passkeys, "confirm_in", None)
+                if confirm is None:
+                    raise _Rejected(AuthReason.UNKNOWN_CREDENTIAL)
+                passkey_id = await confirm(
+                    session, auth.record.user_id, assertion.credential_id
+                )
+                if passkey_id is None:
+                    raise _Rejected(AuthReason.UNKNOWN_CREDENTIAL)
             issued = await self._sessions.record_step_up(
-                session, auth.record.id, auth.token_hash, evidence.method
+                session,
+                auth.record.id,
+                auth.token_hash,
+                evidence.method,
+                passkey_id=passkey_id,
             )
             if issued is None:
                 raise SessionEndedError
@@ -775,7 +859,7 @@ class AuthService:
             await self._audit.record_in(
                 session,
                 self._session_event(
-                    AuthAction.STEP_UP,
+                    action,
                     AuthReason.VERIFIED,
                     auth,
                     context,
@@ -792,7 +876,13 @@ class AuthService:
                 ),
             )
 
-        return await run(self._database, work, self._timeout)
+        try:
+            return await run(self._database, work, self._timeout)
+        except _Rejected as rejected:
+            await self._record_refusal(
+                auth, context, action, rejected.reason, reservations[1]
+            )
+            raise InvalidCredentialsError from None
 
     async def _check_current_password(
         self,
@@ -936,6 +1026,11 @@ class AuthService:
             ),
             {"id": user_id, "hash": new_hash, "now": now},
         )
+        # The credentials go BEFORE the sessions: a Passkey's row is always locked
+        # ahead of the session rows (``PasskeyRegistry.lock_active_in``), so a Step-up
+        # in flight and this recovery cannot wait for each other.
+        for invalidate in self._invalidators:
+            await invalidate(session, user_id)
         recovery = redemption.purpose is TokenPurpose.RECOVERY
         revoked = await self._sessions.revoke_all(
             session,
@@ -945,8 +1040,6 @@ class AuthService:
         await self._throttle.reset_in(
             session, ThrottleScope.LOGIN_ACCOUNT, tokens.account_key(login_name)
         )
-        for invalidate in self._invalidators:
-            await invalidate(session, user_id)
         await session.execute(
             text("SELECT paw_activate_invited_user(:id, :now)"),
             {"id": user_id, "now": now},
@@ -993,26 +1086,56 @@ class AuthService:
     # -- an administrator's unlock --------------------------------------------------
 
     async def unlock_account(
-        self, actor: Principal, target_user_id: uuid.UUID, context: RequestContext
+        self,
+        actor: Principal,
+        target_user_id: uuid.UUID,
+        context: RequestContext,
+        *,
+        session_id: uuid.UUID,
     ) -> None:
         """Lift the login lock of an account (REQUIREMENTS.md: Owner / Admin).
 
         An Admin may unlock a User; unlocking an Admin or the Owner is the
         Owner's. Only the account's counter is cleared (a lock of a *source* is
         not the account's). A lock also ends by itself: it is never permanent.
+
+        A sensitive operation of an Owner or an Admin: it needs a **Passkey step-up
+        of ``session_id``** (the actor's own session) inside the policy's window
+        (PAW-023; a password step-up is refused, like for the policy change). It is
+        checked before the target is looked at, so a session without one learns
+        nothing about which accounts exist.
         """
         if not isinstance(actor, Principal):
             raise InvalidAuthInputError("actor")
         if not isinstance(target_user_id, uuid.UUID):
             raise InvalidAuthInputError("target_user_id")
+        if not isinstance(session_id, uuid.UUID):
+            raise InvalidAuthInputError("session_id")
         _require_context(context)
         if actor.system_role not in (SystemRole.OWNER, SystemRole.ADMIN):
-            await self._deny_unlock(actor, target_user_id, context)
+            await self._deny_unlock(
+                actor, target_user_id, context, AuthReason.ROLE_NOT_ALLOWED
+            )
             raise AuthPermissionError
-        refused = False
+        refused: AuthReason | None = None
 
         async def work(session: AsyncSession) -> None:
             nonlocal refused
+            policy = await self._policy.get_in(session)
+            try:
+                await require_passkey_step_up_in(
+                    session,
+                    session_id=session_id,
+                    user_id=actor.user_id,
+                    window_minutes=policy.stepup_window_minutes,
+                    now=self._audit.now(),
+                )
+            except StepUpMethodInsufficientError:
+                refused = AuthReason.STEP_UP_METHOD_INSUFFICIENT
+                raise
+            except StepUpRequiredError:
+                refused = AuthReason.STEP_UP_REQUIRED
+                raise
             row = (
                 await session.execute(
                     text(
@@ -1027,7 +1150,7 @@ class AuthService:
             if row.system_role != SystemRole.USER.value and (
                 actor.system_role is not SystemRole.OWNER
             ):
-                refused = True
+                refused = AuthReason.ROLE_NOT_ALLOWED
                 raise AuthPermissionError
             await self._throttle.reset_in(
                 session, ThrottleScope.LOGIN_ACCOUNT, tokens.account_key(row.login_name)
@@ -1049,18 +1172,22 @@ class AuthService:
 
         try:
             await run(self._database, work, self._timeout)
-        except AuthPermissionError:
-            if refused:
-                await self._deny_unlock(actor, target_user_id, context)
+        except (AuthPermissionError, StepUpRequiredError):  # and its subclass
+            if refused is not None:
+                await self._deny_unlock(actor, target_user_id, context, refused)
             raise
 
     async def _deny_unlock(
-        self, actor: Principal, target_user_id: uuid.UUID, context: RequestContext
+        self,
+        actor: Principal,
+        target_user_id: uuid.UUID,
+        context: RequestContext,
+        reason: AuthReason,
     ) -> None:
         await self._audit.record_best_effort(
             self._audit.event(
                 AuthAction.UNLOCK,
-                AuthReason.ROLE_NOT_ALLOWED,
+                reason,
                 allowed=False,
                 correlation_id=context.correlation_id,
                 client_request_id=context.client_request_id,

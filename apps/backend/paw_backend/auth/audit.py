@@ -51,6 +51,10 @@ class AuthAction(StrEnum):
     PASSWORD_SET = "auth.password.set"
     STEP_UP = "auth.step_up"
     POLICY_UPDATE = "auth.policy.update"
+    # Passkeys (PAW-023)
+    PASSKEY_REGISTER = "auth.passkey.register"
+    PASSKEY_AUTHENTICATE = "auth.passkey.authenticate"
+    PASSKEY_REVOKE = "auth.passkey.revoke"
 
 
 class AuthReason(StrEnum):
@@ -66,6 +70,10 @@ class AuthReason(StrEnum):
     VERIFIED = "verified"
     UNLOCKED = "unlocked"
     UPDATED = "updated"
+    REGISTERED = "registered"
+    # An allowed sign-in whose session is restricted by the Passkey policy.
+    PASSKEY_PENDING = "authenticated_passkey_pending"
+    ENROLLMENT_ONLY = "authenticated_enrollment_only"
     # deny
     INVALID_CREDENTIALS = "invalid_credentials"
     ACCOUNT_NOT_ACTIVE = "account_not_active"
@@ -76,6 +84,16 @@ class AuthReason(StrEnum):
     STEP_UP_REQUIRED = "step_up_required"
     STEP_UP_METHOD_INSUFFICIENT = "step_up_method_insufficient"
     VERSION_CONFLICT = "version_conflict"
+    # Passkey ceremonies
+    CHALLENGE_INVALID = "challenge_invalid"
+    VERIFICATION_FAILED = "verification_failed"
+    UNKNOWN_CREDENTIAL = "unknown_credential"
+    SIGN_COUNT_REGRESSION = "sign_count_regression"
+    ALREADY_REGISTERED = "already_registered"
+    LIMIT_REACHED = "limit_reached"
+    LAST_PASSKEY = "last_passkey"
+    NOT_FOUND = "not_found"
+    GATE_NOT_ALLOWED = "gate_not_allowed"
 
 
 class AuthAudit:
