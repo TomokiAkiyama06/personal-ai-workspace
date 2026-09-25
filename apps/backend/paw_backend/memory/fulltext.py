@@ -32,6 +32,12 @@ import unicodedata
 MAX_QUERY_TERMS = 64
 MAX_TERM_CHARS = 64
 
+# A tsvector cannot exceed 1 MB, and an INSERT of a memory whose text made one that
+# large would fail inside the index. Only the first ``SEARCH_TEXT_CHARS`` characters
+# of ``title || ' ' || content`` are searched by keyword (Shared Memory allows
+# 20,000, so this only concerns other, larger memories).
+SEARCH_TEXT_CHARS = 100_000
+
 # Hiragana and Katakana (U+3040-30FF, with the prolonged sound mark), CJK
 # Extension A (U+3400-4DBF) and the CJK Unified Ideographs (U+4E00-9FFF). Half
 # width Katakana is folded into the Katakana block by NFKC first.
@@ -136,6 +142,6 @@ def search_document_sql(title: str = "title", content: str = "content") -> str:
     """
     return (
         "to_tsvector('simple'::regconfig, regexp_replace("
-        f"NORMALIZE(({title} || ' '::text) || {content}, NFKC),"
-        f" '([{CJK_CLASS}])'::text, ' \\1 '::text, 'g'::text))"
+        f"left(NORMALIZE(({title} || ' '::text) || {content}, NFKC),"
+        f" {SEARCH_TEXT_CHARS}), '([{CJK_CLASS}])'::text, ' \\1 '::text, 'g'::text))"
     )

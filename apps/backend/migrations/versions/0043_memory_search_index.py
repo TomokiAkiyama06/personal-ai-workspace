@@ -6,7 +6,9 @@ the keyword leg of ``paw_backend.memory.retrieval``, which filters by permission
 (scope, project, repository, status, freshness) in the same statement; the index
 only finds the text matches, it never decides who may read a row.
 
-The document is ``to_tsvector('simple', ...)`` of the NFKC-normalised text with a
+The document is ``to_tsvector('simple', ...)`` of the NFKC-normalised text (its first
+100,000 characters: a tsvector over 1 MB would make the INSERT of a very large memory
+fail inside the index) with a
 blank put around every Hiragana, Katakana and CJK ideograph character: the
 ``simple`` configuration would otherwise keep a Japanese sentence as one token.
 The expression is repeated here on purpose (a migration is a frozen snapshot of
@@ -43,7 +45,7 @@ INDEX_NAME = "ix_memory_versions_search"
 # Frozen copy of ``paw_backend.memory.fulltext.search_document_sql()``.
 SEARCH_DOCUMENT = (
     "to_tsvector('simple'::regconfig, regexp_replace("
-    "NORMALIZE((title || ' '::text) || content, NFKC),"
+    "left(NORMALIZE((title || ' '::text) || content, NFKC), 100000),"
     " '([\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff])'::text, ' \\1 '::text, 'g'::text))"
 )
 

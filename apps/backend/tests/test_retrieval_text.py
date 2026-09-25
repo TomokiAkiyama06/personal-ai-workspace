@@ -122,6 +122,10 @@ class SearchDocumentSqlTest(unittest.TestCase):
         self.assertIn("'simple'::regconfig", sql)
         self.assertIn(f"[{CJK_CLASS}]", sql)
 
+    def test_only_the_first_part_of_a_very_long_text_is_indexed(self):
+        self.assertIn(f"{fulltext.SEARCH_TEXT_CHARS})", search_document_sql())
+        self.assertEqual(fulltext.SEARCH_TEXT_CHARS, 100_000)
+
     def test_columns_can_be_qualified_for_a_query(self):
         self.assertIn(
             "(mv.title || ' '::text) || mv.content",

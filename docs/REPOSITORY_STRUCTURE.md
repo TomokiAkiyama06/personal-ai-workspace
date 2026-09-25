@@ -54,6 +54,7 @@ personal-ai-workspace/
 │  │  │     ├─ 0032_task_lifecycle.py
 │  │  │     ├─ 0033_task_queue_budget_loop.py
 │  │  │     ├─ 0040_memory_schema.py
+│  │  │     ├─ 0043_memory_search_index.py
 │  │  │     ├─ 0046_shared_memory_candidates.py
 │  │  │     ├─ 0050_research_scratch_store.py
 │  │  │     └─ 0052_research_provenance.py
@@ -84,6 +85,24 @@ personal-ai-workspace/
 │  │  │  │  ├─ redeemer.py
 │  │  │  │  └─ tokens.py
 │  │  │  ├─ memory/
+│  │  │  │  ├─ fulltext.py
+│  │  │  │  ├─ retrieval/
+│  │  │  │  │  ├─ __init__.py
+│  │  │  │  │  ├─ candidates.py
+│  │  │  │  │  ├─ errors.py
+│  │  │  │  │  ├─ fakes.py
+│  │  │  │  │  ├─ grouping.py
+│  │  │  │  │  ├─ limits.py
+│  │  │  │  │  ├─ pool.py
+│  │  │  │  │  ├─ protocols.py
+│  │  │  │  │  ├─ queries.py
+│  │  │  │  │  ├─ ranking.py
+│  │  │  │  │  ├─ records.py
+│  │  │  │  │  ├─ resolver.py
+│  │  │  │  │  ├─ scopes.py
+│  │  │  │  │  ├─ service.py
+│  │  │  │  │  ├─ stages.py
+│  │  │  │  │  └─ validation.py
 │  │  │  │  └─ shared/
 │  │  │  │     ├─ __init__.py
 │  │  │  │     ├─ audit.py
@@ -195,6 +214,8 @@ personal-ai-workspace/
 │  │     ├─ projects_support.py
 │  │     ├─ queueing_support.py
 │  │     ├─ research_support.py
+│  │     ├─ retrieval_pg_support.py
+│  │     ├─ retrieval_support.py
 │  │     ├─ scratch_support.py
 │  │     ├─ shared_memory_support.py
 │  │     ├─ support.py
@@ -262,6 +283,22 @@ personal-ai-workspace/
 │  │     ├─ test_research_locator.py
 │  │     ├─ test_research_normalize.py
 │  │     ├─ test_research_registry.py
+│  │     ├─ test_retrieval_fakes.py
+│  │     ├─ test_retrieval_grants.py
+│  │     ├─ test_retrieval_grouping.py
+│  │     ├─ test_retrieval_leakage.py
+│  │     ├─ test_retrieval_migration.py
+│  │     ├─ test_retrieval_plans.py
+│  │     ├─ test_retrieval_queries.py
+│  │     ├─ test_retrieval_query_validation.py
+│  │     ├─ test_retrieval_ranking.py
+│  │     ├─ test_retrieval_service_access.py
+│  │     ├─ test_retrieval_service_concurrency.py
+│  │     ├─ test_retrieval_service_metadata.py
+│  │     ├─ test_retrieval_service_search.py
+│  │     ├─ test_retrieval_service_stages.py
+│  │     ├─ test_retrieval_service_validation.py
+│  │     ├─ test_retrieval_text.py
 │  │     ├─ test_scratch_concurrency.py
 │  │     ├─ test_scratch_grants.py
 │  │     ├─ test_scratch_janitor.py

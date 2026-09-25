@@ -5,6 +5,7 @@ permission prefilter of every one of them is proved on its own (the service test
 would not notice a statement that leaned on another one's filter).
 """
 
+import random
 from datetime import timedelta
 from uuid import uuid4
 
@@ -252,9 +253,35 @@ class MembershipStatementTest(PostgresRetrievalTestCase):
         self.assertEqual(len(rows), 2)
 
 
+ALPHABET = (
+    "abcXYZ019_ -.,;:'\"\\|&!()<>*%$#@[]{}?/"  # ASCII and tsquery syntax
+    "検索日本語のひらがなカタカナー"  # Japanese
+    "ＡＢＣ１２３ｶﾀｶﾅ"  # full width and half width
+    "한국어العربيةעברית"  # other scripts
+    "\u0301\u200d\u200b\u00a0\u3000"  # combining, joiners, spaces
+    "\U0001f600\U0001f1ef\U00010400"  # outside the basic plane
+)
+
+
 @requires_postgres
 class TsqueryTest(PostgresRetrievalTestCase):
     """The query text is a bind value, never SQL (real PostgreSQL)."""
+
+    def test_random_text_never_makes_the_keyword_query_fail(self):
+        rng = random.Random(7)
+        scopes = ResolvedScopes(uuid4(), frozenset({MemoryScope.SHARED}))
+        self.seed("anchor", "検索 alpha", scope="shared", embed=False)
+        tried = 0
+        with self.engine.connect() as connection:
+            for _ in range(400):
+                text_ = "".join(rng.choice(ALPHABET) for _ in range(rng.randint(1, 60)))
+                query = tsquery_text(keyword_terms(text_))
+                if query is None:
+                    continue
+                tried += 1
+                statement = queries.keyword_statement(scopes, T0, query, 5)
+                connection.execute(statement).all()  # must not raise
+        self.assertGreater(tried, 300)
 
     def test_hostile_text_is_matched_as_words(self):
         hostile = "x'); DROP TABLE memories; -- \\ ' | & ! ( ) :*"

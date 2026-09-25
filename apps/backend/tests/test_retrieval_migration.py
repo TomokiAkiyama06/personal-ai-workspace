@@ -179,6 +179,39 @@ class MigrationDatabaseTest(unittest.TestCase):
         self.assertIn(INDEX, plan)
         self.assertEqual(found, ["t0"])
 
+    def test_a_very_large_memory_can_be_written_and_its_beginning_is_searchable(self):
+        migrate("upgrade", REVISION)
+        many_words = " ".join(f"w{n}" for n in range(300_000))  # about 2 MB
+        many_kanji = "検索" * 150_000 + " tail"  # 300,000 characters
+        with self.engine.begin() as connection:
+            for title, content in (("words", many_words), ("kanji", many_kanji)):
+                memory_id = connection.execute(
+                    text("INSERT INTO memories DEFAULT VALUES RETURNING id")
+                ).scalar_one()
+                connection.execute(
+                    text(
+                        "INSERT INTO memory_versions (memory_id, version_number, scope,"
+                        " memory_type, title, content, status, confirmation_state,"
+                        " freshness_policy, actor_type) VALUES (:m, 1, 'shared', 'n',"
+                        " :t, :c, 'active', 'confirmed', 'permanent', 'system')"
+                    ),
+                    {"m": memory_id, "t": title, "c": content},
+                )
+        document = fulltext.search_document_sql()
+        with self.engine.connect() as connection:
+            found = {
+                word: connection.execute(
+                    text(
+                        f"SELECT count(*) FROM memory_versions WHERE {document}"
+                        f" @@ to_tsquery('simple', :q)"
+                    ),
+                    {"q": word},
+                ).scalar()
+                for word in ("'w1'", "'w299999'", "'tail'")
+            }
+        # The first 100,000 characters are indexed, the rest is not searchable.
+        self.assertEqual(found, {"'w1'": 1, "'w299999'": 0, "'tail'": 0})
+
     def test_the_document_folds_width_case_and_separates_japanese_characters(self):
         migrate("upgrade", REVISION)
         document = fulltext.search_document_sql("'ＡＢＣ　ﾃｽﾄ 検索'", "''")
