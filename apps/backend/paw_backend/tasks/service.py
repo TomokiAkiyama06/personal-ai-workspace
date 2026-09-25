@@ -498,6 +498,12 @@ class TaskService:
         ``InvalidCommandArgumentError`` before anything is written or the task
         is looked at.
         """
+        # The serialised value ("stop_now") is a command too: normalise it to the
+        # member first, since the checks below compare by identity.
+        try:
+            command = TaskCommand(command)
+        except (ValueError, TypeError):
+            raise InvalidCommandArgumentError("Unknown command") from None
         reason = _optional_text("reason", reason, MAX_REASON_LENGTH)
         if command is TaskCommand.STOP_NOW and reason is None:
             raise InvalidCommandArgumentError("Stop Now needs a reason")

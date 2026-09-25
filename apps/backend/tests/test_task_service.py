@@ -961,6 +961,32 @@ class TransitionTest(PostgresTaskTestCase):
         await self.assert_stop_now_refused()
         await self.assert_stop_now_refused(reason=None)
 
+    async def test_the_serialised_command_needs_a_reason_like_the_member(self):
+        # "stop_now" (a plain string) is the same command as C.STOP_NOW.
+        task_id = await self.task_in_state(S.RUNNING)
+        with self.assertRaises(InvalidCommandArgumentError):
+            await self.service.execute(task_id, "stop_now", actor=self.user)
+        self.assertEqual((await self.service.restore(task_id)).state, S.RUNNING)
+        event = await self.service.execute(
+            task_id, "stop_now", actor=self.user, reason="runaway"
+        )
+        self.assertEqual((event.command, event.reason), (C.STOP_NOW, "runaway"))
+        self.assertIs(event.command, C.STOP_NOW)
+        snapshot = await self.service.restore(task_id)
+        self.assertTrue(
+            any("(reason: runaway)" in log.message for log in snapshot.recent_logs)
+        )
+
+    async def test_a_command_that_is_not_a_command_is_refused_with_a_typed_error(self):
+        task_id = await self.task_in_state(S.RUNNING)
+        for bad in ("bogus", "", "STOP_NOW", None, 1, object()):
+            with self.subTest(command=repr(bad)):
+                with self.assertRaises(InvalidCommandArgumentError):
+                    await self.service.execute(
+                        task_id, bad, actor=self.user, reason="r"
+                    )
+        self.assertEqual((await self.service.restore(task_id)).state, S.RUNNING)
+
     async def test_stop_now_with_an_empty_or_blank_reason_is_refused(self):
         for blank in ("", " ", "   ", "\t", "\n", " \t\r\n ", "\u3000"):
             with self.subTest(reason=blank):
