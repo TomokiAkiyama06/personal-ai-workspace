@@ -50,6 +50,7 @@ personal-ai-workspace/
 │  │  │     ├─ 0021_owner_setup.py
 │  │  │     ├─ 0025_audit_events.py
 │  │  │     ├─ 0026_projects.py
+│  │  │     ├─ 0030_shared_connections.py
 │  │  │     ├─ 0031_tool_approvals.py
 │  │  │     ├─ 0032_task_lifecycle.py
 │  │  │     ├─ 0033_task_queue_budget_loop.py
@@ -72,6 +73,18 @@ personal-ai-workspace/
 │  │  │  │  ├─ __init__.py
 │  │  │  │  ├─ __main__.py
 │  │  │  │  └─ owner.py
+│  │  │  ├─ connections/
+│  │  │  │  ├─ __init__.py
+│  │  │  │  ├─ adapter.py
+│  │  │  │  ├─ domain.py
+│  │  │  │  ├─ errors.py
+│  │  │  │  ├─ limits.py
+│  │  │  │  ├─ models.py
+│  │  │  │  ├─ records.py
+│  │  │  │  ├─ secret.py
+│  │  │  │  ├─ service.py
+│  │  │  │  ├─ store.py
+│  │  │  │  └─ validation.py
 │  │  │  ├─ identity/
 │  │  │  │  ├─ __init__.py
 │  │  │  │  ├─ audit.py
@@ -188,6 +201,8 @@ personal-ai-workspace/
 │  │  ├─ pyproject.toml
 │  │  └─ tests/
 │  │     ├─ __init__.py
+│  │     ├─ connections_fakes.py
+│  │     ├─ connections_support.py
 │  │     ├─ fake_postgres.py
 │  │     ├─ identity_support.py
 │  │     ├─ privacy_support.py
@@ -200,6 +215,19 @@ personal-ai-workspace/
 │  │     ├─ support.py
 │  │     ├─ teardown_child.py
 │  │     ├─ test_config.py
+│  │     ├─ test_connections_adapter.py
+│  │     ├─ test_connections_admin.py
+│  │     ├─ test_connections_budget.py
+│  │     ├─ test_connections_concurrency.py
+│  │     ├─ test_connections_domain.py
+│  │     ├─ test_connections_execute.py
+│  │     ├─ test_connections_grants.py
+│  │     ├─ test_connections_plan.py
+│  │     ├─ test_connections_quota_admin.py
+│  │     ├─ test_connections_quota_enforcement.py
+│  │     ├─ test_connections_schema.py
+│  │     ├─ test_connections_secret.py
+│  │     ├─ test_connections_validation.py
 │  │     ├─ test_database.py
 │  │     ├─ test_database_run_abortable.py
 │  │     ├─ test_database_slot_wait.py
@@ -358,6 +386,7 @@ personal-ai-workspace/
 │     ├─ 0012-research-provider-adapter-policy.md
 │     ├─ 0013-research-scratch-task-relation.md
 │     ├─ 0014-task-working-set-persistence.md
+│     ├─ 0016-shared-connection-adapter-policy.md
 │     └─ README.md
 └─ evaluator/
    └─ README.md

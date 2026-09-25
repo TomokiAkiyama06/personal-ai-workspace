@@ -9,6 +9,7 @@ Shared Memory の管理（Owner / Admin の作成・編集・削除・復元、C
 Research の一時保存（[PAW-050](#research-scratch-store)、24 時間 TTL、期限切れを消す Janitor つき、HTTP の Endpoint はまだありません）と、Research Provider の Adapter Interface（[PAW-051](#research-provider-adapter)、実際の Provider（Direct Web、Docs、GitHub、OpenCode）はまだありません）と、外部の検索へ送る Query の最小化と送信の Audit（[PAW-053](#research-privacy-filter)、Audit の永続化はまだありません）も実装済みです。
 Claim と Source の対応・回答や Task からの追跡（[PAW-052](#evidence--claim-provenance)、HTTP の Endpoint はまだありません）も実装済みです。
 Project の作成・招待制の Membership・Lifecycle（Active / Archived / Pending deletion / Deleted）は [PAW-026](#project-crud--membership--lifecycle) で実装済みです（Service のみ。HTTP の Endpoint と Session はまだありません）。
+Workspace 共有の Codex / Claude Connection（Credential は不透明な Handle だけ）、User 別 Quota、User と Task への利用量の帰属は [PAW-030](#shared-codex--claude-connection) で実装済みです（Service のみ。実 Adapter と HTTP の Endpoint はまだありません。Quota の意味などは [Decision 0016](../../docs/decisions/0016-shared-connection-adapter-policy.md)（Proposed）の暫定の実装です）。
 
 [Architecture](../../docs/ARCHITECTURE.md) に基づき、最終的に以下の機能を Backend 側で扱います。
 
@@ -42,7 +43,7 @@ Python 側の Package（`pgvector-python`）は使わず、`paw_backend/memory/v
 apps/backend/
 ├─ pyproject.toml          # 依存（完全一致で固定）と Ruff 設定
 ├─ alembic.ini             # Alembic 設定（DB URL は持たない）
-├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0026 は Project、0031 は Tool Approval、0033 は Queue / Budget / Loop、0040 は Memory Schema、0046 は Shared Memory Candidate、0050 は Research Scratch、0052 は Evidence / Claim Provenance）
+├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0026 は Project、0031 は Tool Approval、0033 は Queue / Budget / Loop、0040 は Memory Schema、0046 は Shared Memory Candidate、0050 は Research Scratch、0052 は Evidence / Claim Provenance、0030 は Shared Connection・Quota・Usage）
 ├─ paw_backend/
 │  ├─ app.py               # create_app(settings)
 │  ├─ config.py            # PAW_ 環境変数から読む Settings
@@ -60,6 +61,7 @@ apps/backend/
 │  ├─ memory/              # Memory / Conversation の Model、ACL 条件、vector 型、Pin / Importance 変更の Actor（PAW-040）
 │  │  └─ shared/           # Shared Memory の管理: Service、Candidate、Rule 関数、Policy の優先（PAW-046）
 │  ├─ projects/            # Project、Membership（招待制）、Lifecycle（PAW-026）
+│  ├─ connections/         # Shared Codex / Claude Connection: Adapter の Interface、Secret（Handle）、User 別 Quota、利用量の帰属（PAW-030）
 │  ├─ research/providers/  # Research Provider の Adapter Interface と Broker（PAW-051）
 │  ├─ research/privacy/    # Research の Privacy Filter: Query の最小化と外部送信の Audit（PAW-053）
 │  ├─ research/scratch/    # Research Scratch Store: 24 時間 TTL の一時保存と、期限切れを消す Janitor（PAW-050）
@@ -1187,6 +1189,182 @@ Broker は呼び出しの**前**に判定します。次は、実際に実行す
 - `check` と `charge` の間の競合、Symlink の確認と使用の間の競合（TOCTOU）、Credential 検出が Best Effort であることは上に書いたとおりです。
 - Model の出力から `ToolCall` を作る Adapter は JSON を `benchmarks/json_input.decode_json` と同じ厳密さ（重複 Key、`NaN` を拒否）で読んでください。Broker は Mapping を受け取り、Key と値の型を上の規則で検査します。
 - **後続の課題:** 承認する Process と Agent 側の Process の Role の分離（上）、承認 UI と一覧の Endpoint（PAW-022）、`SECURITY DEFINER` 関数による遷移の限定、Database の時計での期限（Human は Application の時計だけを使う方針で承認した。変える場合は新しい Decision から `Supersedes` する）、`TaskService` への `revoke_on_task_end` の配線と `PostgresTaskActivity` の注入（PAW-034）、終了時の取り消しに失敗した Task の再取り消し（今は `revoke_task` を呼び直す）、共通 Helper（`paw_backend.db_roles.grant_app_privileges`）による GRANT の置き換え。
+
+## Shared Codex / Claude Connection
+
+[PAW-030](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/26) で実装しました（`paw_backend/connections/`、Migration `0030`）。
+Migration `0030` の `down_revision` は `0026` です（鎖は `0001 → 0025 → 0032 → 0040 → 0021 → 0033 → 0031 → 0050 → 0046 → 0052 → 0026 → 0030`。統合時に並びを確認します。`users`（0021）と `tasks`（0032）が先にある必要があります）。
+設計は [要件](../../REQUIREMENTS.md) の「Shared Codex / Claude system connection」「User別Quota」と [SECURITY_RBAC_AUDIT](../../docs/SECURITY_RBAC_AUDIT.md) の External Agent authentication に従い、
+要件が決めていない点は **[Decision 0016（Proposed。未承認）](../../docs/decisions/0016-shared-connection-adapter-policy.md)** に推奨つきで置いています。この節の Quota の意味・期間・実行中の Task の扱いなどは、**承認されるまで暫定の実装**です。
+**HTTP の Endpoint はありません**（Session は PAW-022 以降）。**Network の呼び出しも Process の起動もしません。** Codex / Claude を実際に呼ぶ Adapter は含みません（Provider の規約で共有 Subscription の Credential が許されるかを、Human が確認するまで作りません）。
+
+Codex と Claude は Workspace 全体で共有する System-level Connection です。User ごとの Connection ではなく、**利用量だけが User と Task に帰属**し、User 別の Quota が適用されます。
+
+```python
+service = ConnectionService(
+    database,
+    authorizer,
+    audit_sink,
+    adapters,
+    secrets,
+    budget=budget_tracker,  # 任意。Task の Token Budget（PAW-033）
+    period_timezone="Asia/Tokyo",  # 既定は UTC
+)
+# Owner / Admin。Credential は Handle だけを渡す
+await service.connect(admin, ConnectionKind.CODEX, "cred_" + "0" * 32)
+# Backend の内部（Scheduler）。確認できれば connected になる
+await service.check_health(ConnectionKind.CODEX)
+await service.set_quota(
+    admin, user_id, ConnectionKind.CODEX, QuotaMetric.REQUESTS, QuotaPeriod.DAY, 100
+)
+await service.set_quota(
+    owner,
+    owner_id,
+    ConnectionKind.CODEX,
+    QuotaMetric.REQUESTS,
+    QuotaPeriod.DAY,
+    UNLIMITED,
+)
+# Orchestrator（Backend の内部）が User のために呼ぶ
+result = await service.execute(
+    principal,
+    task_context,
+    ConnectionKind.CODEX,
+    ConnectionRequest(model="gpt-x", purpose=UsagePurpose.CODING, prompt="..."),
+)
+```
+
+### 構成
+
+| File | 内容 |
+| --- | --- |
+| `domain.py` | 閉じた語彙（`ConnectionKind`、`ConnectionStatus`、`UsagePurpose`、`QuotaMetric`、`QuotaPeriod`、`FailureCode`、`RefusalReason`）、`UNLIMITED`、期間の始まりと終わり（純粋関数） |
+| `secret.py` | `Secret`（Adapter だけが見る Credential）と `SecretResolver`（Handle から `Secret` を作る Protocol） |
+| `adapter.py` | `ConnectionAdapter` Protocol、登録時の検証、`AdapterRegistry`、`AdapterRequest` / `AdapterResult` / `AdapterFailure` |
+| `store.py` | SQL（Admission の Transaction、精算、Connection・Quota の変更）。時計は Database のもの |
+| `service.py` | `ConnectionService`（認可、Audit、`execute`） |
+| `models.py` / `records.py` / `validation.py` / `errors.py` / `limits.py` | ORM、返す値、引数の検証、型付きの Error、上限 |
+
+### Credential
+
+- **平文は、Secret Store の Resolver の内側と、Adapter を呼ぶ 1 回の `Secret` にだけ存在します。** DB の行（`shared_connections.secret_handle`）は Handle（`cred_` + 32 桁の 16 進）だけで、CHECK 制約が平文を拒否します。
+  Audit、Log、Error、`repr`、User と Agent への返り値に、平文も Handle も出ません（Owner / Admin の `get_connection` も Handle を返しません）。
+- `Secret` は `repr` / `str` / `format` / `bytes` / Pickle / `copy` / `vars` / JSON のどれでも値を出しません（`Secret(<redacted>)`）。値を読めるのは `reveal()` だけで、呼ぶのは Adapter（Backend の Code）です。
+  この Package は Secret Store を持たず、平文をどの形でも書きません。Secret Store の製品と保存方式は、要件どおり実装時の選択のままです。
+- Adapter の返した文は、返す前に Credential の値そのもの（`Secret.scrub`）と形のわかる Credential（[Tool Broker](#tool-broker--capability-policy) の `redact_text`）を取り除きます。値の一部だけの一致や変形した形は防げません（Best Effort）。
+- Adapter や Resolver が投げた例外の文・名前は、記録も Log も返却もしません。Log に出るのは、固定の許可リスト（`log_type_name`）にある例外の型名だけです。
+- Connection の Handle を Task の `credential_handles` に入れてはいけません（Orchestrator が TaskScope を作るときの規則）。
+
+### Adapter Interface
+
+```python
+class ConnectionAdapter(Protocol):
+    kind: ConnectionKind  # ConnectionKind の Member そのもの。文字列 "codex" は不可
+
+    async def check_health(self, secret: Secret) -> ConnectionStatus: ...
+    async def run(self, secret: Secret, request: AdapterRequest) -> AdapterResult: ...
+```
+
+`AdapterRegistry.register` が登録時に検査します（`ProviderRegistry` と同じ方針）: `kind` の型、2 つの Method が Coroutine 関数で、呼び出しの引数を受けられること。属性の読み取りと検査は Adapter の Code を動かすため、
+何を投げても（`BaseException` も）、Task の Cancel を要求しても、Adapter の中身を含まない固定の `AdapterInterfaceError(member)` になります。1 つの種類に Adapter は 1 つで、重複は `DuplicateAdapterError`（置き換えません）。
+`AdapterFailure(code)` は Adapter が失敗を分類して報告するための例外です（`FailureCode` の Member だけを持ち、メッセージを持ちません）。Adapter の結果は `type(result) is AdapterResult` と各 Field を Service が再検査し、崩れていれば `invalid_response` の失敗です。
+
+### 状態
+
+`shared_connections`: 種類ごとに最大 1 行（`uq_shared_connections_kind`）。`status` は `connected` / `unavailable` / `expired`、`enabled` は Admin の Switch（別の列。Health Check は再有効化しません）。
+作成・Credential の差し替えの直後は `unavailable`（未確認）で、`check_health` が `connected` にします。呼び出しが Provider に Credential を拒否されたとき（`FailureCode.EXPIRED`）は `expired` にします。他の失敗では状態を変えません。
+Health Check の結果は、確認した Credential（Handle）がまだ現在のものであるときだけ保存します（差し替え中に終わった古い確認が、新しい Credential を `expired` にしません）。
+一般の User には `availability` が種類ごとの `available`（有効・確認済み・Adapter あり）だけを返します（理由は見せません）。
+
+### Quota
+
+1 つの Quota は `(User, Connection の種類, 指標, 期間)` ごとの上限で、数値（0 以上 10^12 以下）か **`UNLIMITED`**（DB では `NULL`）です。**`None` や 0 は Unlimited ではありません。**
+
+| 指標 | 数えるもの |
+| --- | --- |
+| `requests` | Admission を通った呼び出し（失敗・取り消し・実行中も数える） |
+| `tasks` | その期間にその Connection を使った Task の数（同じ Task の複数回は 1） |
+| `tokens` | Adapter が返した入力 + 出力（返さない呼び出しは 0） |
+| `runtime_seconds` | 呼び出しの時間の合計。Database の時計で ms まで測り、秒に切り捨てて比較 |
+
+| 期間 | 範囲 |
+| --- | --- |
+| `rolling_5h` | 直近 5 時間（終わりの時刻はない） |
+| `day` / `week` / `month` | 設定した時間帯（既定 UTC）の暦の日・週（月曜始まり）・月 |
+
+- 判定は **「使った量 >= 上限」** の 1 つの比較です（上限 0 はすべて拒否）。1 つの指標に複数の期間、複数の指標を同時に設定でき、設定したものだけを、指標・期間の宣言順に判定して、最初に達したものを報告します。
+- **Quota が 1 つも無い User は、新しい Task を始められません**（`QuotaNotConfiguredError`）。最後の Quota を削除しても無制限にはなりません（Decision 0016 の 2 節）。
+- **Quota は、その Connection をまだ使っていない Task の最初の呼び出し（新規の Task）だけを止めます。** すでに使った Task の以降の呼び出しは Quota に達していても通し、記録します（要件の「実行中Taskを原則完了させ、新規Taskのみ停止する」。Task が使う量の上限は Task の Budget）。
+  始まった呼び出しは、Quota に達しても止めません（Decision 0016 の 3 節）。
+- `requests` と `tasks` は同時の呼び出しでも上限を超えません（下の Admission）。`tokens` と `runtime_seconds` は終わった呼び出しの分だけを数えるので、同時に始まった新規の Task は使った分だけ超えうる。
+- `quota_status` が、Quota ごとに現在の期間の使用量、期間の始まりと終わり、`reached` を返します。自分の分は `agent.use`、他の User の分は `admin.usage.view` です。
+
+### Admission（判定と記録を 1 つの Transaction にする）
+
+`ConnectionStore.admit` は `Database.transact_abortable`（期限で Socket を閉じ、Server にも同じ限度を与える）の 1 つの Transaction で次を行います。
+
+1. Task の行を `FOR SHARE`: 存在し、呼び出す User の Task で、終了しておらず、呼び出した Worker の Run（`TaskContext.run`）が現在のものであること（Task の終了・Retry・Restart と Admission が前後に並び、交差しません。Tool Broker の Approval と同じ規則）。
+2. Connection の行を `FOR SHARE`: 有効・`connected` であること。Admin の `disable` / `replace_credential` は進行中の Admission を待つので、返った後に新しい呼び出しは始まりません。
+3. User と種類の Quota の行を、固定の順序で **`FOR UPDATE`**: この Lock が、同じ User・種類のすべての Admission を直列にします（別の User・別の種類は待ち合いません）。判定に使う値は、Lock を取った**後の**文で読みます（READ COMMITTED では文ごとに Snapshot が新しい）。
+4. 時計を Database の `clock_timestamp()` で 1 回読む（Lock の後）。この時刻が、期間の始まりの計算と、追加する行の `started_at` の両方です。
+5. 判定（新規の Task の場合）と、`in_flight` の使用量の行の INSERT。
+
+`execute` の全体: 引数の検査、`agent.use`（`Resource.owned_by(context.delegator_id)`: Principal が委任元の User でなければ拒否）、Adapter が登録されていること、Task の Budget（`budget` を渡した場合）、Admission、Credential の Handle を `Secret` へ解決して Adapter を実行（`request.timeout_seconds` の 1 つの期限が、解決と実行の両方にかかります）、
+**精算**（`finally` で `asyncio.shield`: Task が Cancel されても、Outcome・Token・Database の時計の経過時間を使用量の行へ書き、Token を Task の Budget へ加算）、Credential を取り除いた結果の返却。
+
+- 失敗は `ConnectionCallError(failure)`（`FailureCode`: `rate_limited` / `unavailable` / `expired` / `timeout` / `invalid_response` / `internal_error`）。記録され、数えられます。呼び出し側の Cancel は `cancelled` として記録し、Cancel を伝えます。
+- 始める前の拒否は、使用量の行を書かず、Adapter も Resolver も呼びません: `TaskNotUsableError`（Task が無い・他人の・終了・古い Run）、`ConnectionUnavailableError`（未設定・無効・未確認・期限切れ・Adapter 無し。理由は 1 つに揃えます）、`QuotaNotConfiguredError`、`QuotaExceededError`（指標・期間・暦の期間の再開時刻 `resets_at`）、`TaskBudgetError`。
+  Database が期限内に答えないときは `ConnectionBusyError`（何も変わっていません。書き込みは COMMIT の前に放棄され、Server も同じ限度で諦めます）。
+
+### Task の Budget との関係（PAW-033）
+
+`ConnectionService(budget=BudgetTracker)` を渡すと、`execute` は Admission の前に `check(task, planned={TOKENS: 1})`（「もう 1 つ使えるか」）を行い、Token の Budget を使い切った Task、Budget の無い Task を拒否します（Budget が無いことは無制限ではありません）。
+呼び出しが Token を返したら `record(task, TOKENS, 入力 + 出力)` で加算します（別の Transaction。失敗は Log に型名だけ残し、呼び出しは失敗にしません）。Quota が止めない実行中の Task が使う量は、この Budget が抑えます。
+
+### 認可と Audit
+
+既存の Capability を使い、新しい Capability は追加していません。
+
+| 操作 | Capability | Resource |
+| --- | --- | --- |
+| `connect` / `replace_credential` / `enable` / `disable` / `disconnect` / `get_connection` / `list_connections` | `admin.config.manage`（Owner / Admin） | `connection` |
+| `set_quota` / `remove_quota` | `admin.quota.manage` | `connection_quota`（対象の User） |
+| 他の User の `quota_status` / `list_usage` | `admin.usage.view` | `connection_usage` |
+| 自分の `quota_status` / `list_usage`、`availability`、`execute` | `agent.use`（`Scope.SELF`。委任不可のまま） | 本人が所有する Resource |
+| `check_health` | なし（Backend 内部） | |
+
+`agent.use` は Agent に委任できないので、Agent が自分で Connection を呼ぶことはできません。呼ぶのは Orchestrator（PAW-034）で、`TaskContext` の委任元 User の現在の `Principal` を渡します。
+
+Authorizer の行（Capability 名）に加えて、この Package が ID と Enum だけの Audit Event を書きます: 変更の結果（`connection.connect` / `.replace` / `.enable` / `.disable` / `.disconnect` / `.quota.set` / `.quota.remove`、reason `succeeded`）、状態の変化（`connection.status`、reason は新しい状態、Actor なし）、
+呼び出しの拒否（`connection.use`、Deny、reason は `RefusalReason`。`quota_exceeded` など）。許可された呼び出しは、使用量の行と Authorizer の `agent.use` の行で記録します。この Event は変更・拒否の後に書く Best Effort です（書けなくても変更は戻らず、拒否は拒否のまま。失敗は Log に型名だけ）。
+拒否は 1 回ごとに 1 行なので、Quota で拒否された呼び出しを繰り返すと Audit が増えます（待たせる側で繰り返さないこと）。
+
+### Database と権限
+
+| Table | 内容 | Application Role への権限 |
+| --- | --- | --- |
+| `shared_connections` | 種類ごとの Connection（Handle、状態、Switch、最後の確認） | SELECT、INSERT、DELETE、UPDATE(`secret_handle`, `status`, `enabled`, `checked_at`, `updated_at`) |
+| `connection_quotas` | User 別の上限（`limit_value` NULL = Unlimited）。`users` に Cascade | SELECT、INSERT、DELETE、UPDATE(`limit_value`, `updated_at`) |
+| `connection_usage` | 呼び出し 1 回 = 1 行。`user_id` と `project_id` は履歴（FK なし）、`task_id` は `tasks` へ RESTRICT | SELECT、INSERT、UPDATE(`status`, `failure_code`, `input_tokens`, `output_tokens`, `finished_at`, `duration_ms`) |
+
+使用量の行に、Prompt・応答・Credential・自由な文字列の列はありません（用途は閉じた Category、Model は名前だけの CHECK）。行は削除せず、誰・どの Task・Model・用途・開始時刻は書き換えません。
+CHECK 制約が、状態と終了・時間・Token・失敗の種類の対応（実行中は終了も Token もない、失敗のときだけ失敗の種類がある、など）と各上限を DB で守ります。`tests/test_connections_grants.py` が、非 Superuser の Role で Service の Test 群を動かし、権限の集合と禁止される文を確かめます。
+
+### 制限と未確認の点
+
+- **実 Adapter が無く、Provider の規約は未確認**（上）。実際の Codex / Claude では動かしていません。Adapter の Interface は In-memory の代役でだけ確かめています。
+- 実行中の Task は Quota で止まらない（暫定。Decision 0016 の 3 節）。`tokens` / `runtime_seconds` は終了後に数える。同時実行数、GPU 時間、期限付きの上限の一時緩和は未実装。
+- Process が Admission と精算の間で落ちた行は `in_flight` のまま残り、要求数にだけ数えられます（掃除は未実装）。精算に失敗した呼び出しは、答えを返し、失敗を Log（型名と使用量の ID）に残します。Task の Budget への加算は精算と別の Transaction です。
+- 精算と Budget の加算は `asyncio.shield` の中で走るため、Database が止まっていると、呼び出し側の Cancel はその分（Database の期限まで）遅れます。
+- Prompt の中身は検査しません（Credential の混入や Privacy の Filter は Orchestrator と Tool Broker の責務）。
+- 使用量の保存期間、集計、Admin の Graph は未実装。Owner の Quota を Admin が変えられる点、Step-up（PAW-023）が Credential の差し替えに効かない点は Decision 0016 に置きました。
+- Health Check を動かす Scheduler と、状態の変化の Owner への通知は Orchestrator / 通知の Issue です。
+
+### Test
+
+`tests/test_connections_*.py`。引数の検証は `test_connections_validation.py`（全 Method × 全引数 × 不正な値の表。Database を使う前に拒否することを、設定されていない Database で確かめる）、
+Schema と Migration の上げ下げは `test_connections_schema.py`（Alembic の差分なし、Catalog の一致、制約 1 つずつ）、同時実行は `test_connections_concurrency.py`（実 PostgreSQL、別の Process を模した複数の Service）、
+Index の使用は `test_connections_plan.py`、権限は `test_connections_grants.py`。
 
 ## Memory / Conversation Schema
 
