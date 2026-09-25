@@ -39,6 +39,7 @@ from . import (
     test_projects_service_members,
     test_projects_store,
     test_projects_task_stop,
+    test_task_stop_windows,
 )
 from .projects_support import FakeClock, PostgresProjectTestCase
 from .support import make_settings
@@ -180,6 +181,7 @@ for _module in (
     test_projects_concurrency,
     test_projects_task_stop,
     test_project_state_gate,
+    test_task_stop_windows,
 ):
     _prefix = (
         _module.__name__.removeprefix("tests.")
@@ -233,9 +235,10 @@ class AppRolePrivilegesTest(PostgresProjectTestCase):
         self.assertIn("ServiceLifecyclePurgeTestAsAppRole", derived)
         self.assertIn("TaskStopStopProjectTasksTestAsAppRole", derived)
         self.assertIn("TaskStopBeginDeletionRecordsTheStopTestAsAppRole", derived)
-        # Issue #83: the Project state gate.
+        # Issue #83: the Project state gate and the windows it closed.
         self.assertIn("ProjectStateGateGateRaceTestAsAppRole", derived)
         self.assertIn("ProjectStateGateGateLockTestAsAppRole", derived)
+        self.assertIn("TaskStopWindowsCrashBetweenTheCommitsTestAsAppRole", derived)
 
     async def test_the_service_really_runs_as_a_non_superuser_role(self):
         for database in (self.app, self.other):

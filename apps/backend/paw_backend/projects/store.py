@@ -715,17 +715,6 @@ async def select_active_task_ids(
     return list((await session.execute(statement)).scalars())
 
 
-async def is_task_terminal(session: AsyncSession, task_id: uuid.UUID) -> bool:
-    """Whether the task exists and is completed, failed or cancelled. A plain read.
-
-    ``False`` for an unknown id (there is nothing to reconcile for it).
-    """
-    state = (
-        await session.execute(select(TASKS.c.state).where(TASKS.c.id == task_id))
-    ).scalar_one_or_none()
-    return state in TERMINAL_STATES
-
-
 async def has_active_task(session: AsyncSession, project_id: uuid.UUID) -> bool:
     """Whether at least one task of the project is active (same rule as above)."""
     return bool(await select_active_task_ids(session, project_id, 1))
