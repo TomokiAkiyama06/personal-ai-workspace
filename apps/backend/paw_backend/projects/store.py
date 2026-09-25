@@ -22,7 +22,17 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import and_, delete, func, insert, or_, select, update
+from sqlalchemy import (
+    ColumnElement,
+    and_,
+    bindparam,
+    delete,
+    func,
+    insert,
+    or_,
+    select,
+    update,
+)
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import NoResultFound
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -42,7 +52,7 @@ from paw_backend.projects.records import (
     Project,
     ProjectStatus,
 )
-from paw_backend.tasks.domain import TERMINAL_STATES
+from paw_backend.tasks.domain import TERMINAL_STATES, TaskState
 from paw_backend.tasks.models import TaskRow
 from paw_backend.tasks.queueing.domain import ACTIVE_QUEUE_STATUSES
 from paw_backend.tasks.queueing.models import QueueEntryRow
@@ -56,6 +66,35 @@ USERS = UserRow.__table__
 # ``TaskService`` / ``TaskQueue``, never by an UPDATE.
 TASKS = TaskRow.__table__
 QUEUE_ENTRIES = QueueEntryRow.__table__
+
+_ACTIVE_STATES = tuple(sorted(set(TaskState) - TERMINAL_STATES))
+_TERMINAL_STATES = tuple(sorted(TERMINAL_STATES))
+
+
+def _written_in(column: Any, values: Any) -> ColumnElement[bool]:
+    """``column IN ('a', 'b')`` with the values written into the SQL text.
+
+    The statements below read ``tasks`` through ``ix_tasks_project_id_state`` and
+    ``queue_entries`` through its partial indexes (``WHERE status IN ('queued',
+    'claimed')``). PostgreSQL uses a partial index only if the statement's own
+    predicate implies the index condition, and it cannot prove that for values sent
+    as bind parameters in the generic plan it may cache for a prepared statement
+    (the driver prepares a statement it runs often). The values are a closed set
+    of constants, so writing them into the statement (``literal_execute``) costs
+    no plan reuse. ``tests/test_tasks_project_index.py`` plans every statement in
+    both ``plan_cache_mode``s.
+    """
+    return column.in_(
+        [
+            bindparam(
+                f"{column.name}_{value.value}",
+                value,
+                type_=column.type,
+                literal_execute=True,
+            )
+            for value in values
+        ]
+    )
 
 
 def project_from_row(row: Any) -> Project:
@@ -644,7 +683,7 @@ async def select_active_task_ids(
         select(TASKS.c.id)
         .where(
             TASKS.c.project_id == project_id,
-            TASKS.c.state.notin_(sorted(TERMINAL_STATES)),
+            _written_in(TASKS.c.state, _ACTIVE_STATES),
         )
         .order_by(TASKS.c.created_at, TASKS.c.id)
         .limit(limit)
@@ -688,10 +727,10 @@ async def select_active_entry_task_ids(
     """
     conditions = [
         TASKS.c.project_id == project_id,
-        QUEUE_ENTRIES.c.status.in_(sorted(ACTIVE_QUEUE_STATUSES)),
+        _written_in(QUEUE_ENTRIES.c.status, sorted(ACTIVE_QUEUE_STATUSES)),
     ]
     if terminal_tasks_only:
-        conditions.append(TASKS.c.state.in_(sorted(TERMINAL_STATES)))
+        conditions.append(_written_in(TASKS.c.state, _TERMINAL_STATES))
     statement = (
         select(QUEUE_ENTRIES.c.task_id)
         .join(TASKS, TASKS.c.id == QUEUE_ENTRIES.c.task_id)
