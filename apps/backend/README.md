@@ -2,7 +2,8 @@
 
 Personal AI Workspace の Core Backend です。
 [PAW-020](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/17) で、後続の Issue が載る最小の Application Skeleton を実装しました。
-認証、User、RBAC、Task、Memory はまだ実装していません（PAW-021 以降）。
+認証、User、RBAC、Memory はまだ実装していません（PAW-021 以降）。
+Task は [Lifecycle と永続化（PAW-032）](#agent-task-lifecycle)だけを実装済みで、HTTP の Endpoint はまだありません。
 
 [Architecture](../../docs/ARCHITECTURE.md) に基づき、最終的に以下の機能を Backend 側で扱います。
 
@@ -46,6 +47,7 @@ apps/backend/
 │  ├─ middleware.py        # Request ID、Host 検証、Security Header
 │  ├─ security.py          # Host / Origin の判定
 │  ├─ authz/               # Role・Capability・認可の判定と Audit Event（PAW-025）
+│  ├─ tasks/               # Agent Task の状態遷移と永続化（PAW-032）
 │  └─ api/
 │     ├─ deps.py           # FastAPI Dependency
 │     └─ v1/               # /api/v1 の Router（health、events）
@@ -212,6 +214,135 @@ alembic -c apps/backend/alembic.ini upgrade head          # 適用
 alembic -c apps/backend/alembic.ini upgrade head --sql    # SQL の出力のみ（DB 接続は不要）
 alembic -c apps/backend/alembic.ini revision -m "説明"    # 新しい Revision
 ```
+
+## Agent Task Lifecycle
+
+PAW-032 で実装しました。`paw_backend/tasks/` は Task の状態遷移（`domain.py`、DB なしの純粋な規則）と、その永続化（`models.py`、`service.py`、Migration `0032`）です。
+**HTTP の Endpoint はありません。** 認証と RBAC（PAW-022 / PAW-025）が先に必要なためです。
+`TaskService` は認可を行いません。Endpoint を作る側が、権限を確認してから認証済み User を `Actor` として渡します。
+Queue、Budget、Loop 検知（PAW-033）と DAG Orchestration（PAW-034）は含みません。
+**Multi-Repo Task の Working Set（Repo の集合と `referenced` / `working` / `target` の役割、Repo ごとの worktree / Review / PR の状態）は PAW-032 に含みません。**
+PAW-032 の受け入れ条件は Task に 1 組の worktree / review / PR 状態の復元までで（Backlog）、Working Set が指す Repository の登録（PAW-027）はまだなく、
+Repo ごとの worktree / branch の作成と統合の処理は PAW-035、Write 範囲の強制は Tool Broker（PAW-031）の責務だからです。
+Working Set の単位、Single-Repo との関係、Repo 追加の承認、Task の完了条件など、要件が決めていない判断があるため、
+[Decision 0014](../../docs/decisions/0014-task-working-set-persistence.md)（Approved、2026-09-25 に Human が承認）で、PAW-032 に含めないことを決めました。
+実装の担当は、PAW-027 の後・PAW-034 の前に立てる新しい Issue [#85](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/85) です。#85 が Working Set と Repo ごとの Git 状態を**保存する表**を持ち、PAW-035 は worktree・統合の**振る舞い**を持って、その結果を #85 の表へ書きます（PAW-035 には保存の表を含めません）。
+上の未決の判断は、#85 の実装の前に別の Decision で決めます。特に Repo の役割と Write 範囲の対応は、保存より先に決めます。
+したがって、`task_attempts` の worktree / Review / PR は 1 つの Repo の状態で、どの Repo かは記録せず、`TaskSnapshot`（`restore()`）も Working Set を返しません。
+
+### 状態
+
+| 状態 | 意味 |
+| --- | --- |
+| `queued` | 実行待ち |
+| `running` | 実行中 |
+| `waiting` | 判断・承認・Resource の待ち。理由は `wait_reason`（`user` / `approval` / `resource`）で、`waiting` のときだけ値を持つ（DB の CHECK 制約） |
+| `paused` | 安全な区切りで停止中 |
+| `evaluating` | Test / Evaluator / Review 中 |
+| `completed` | 完了（何も受け付けない） |
+| `failed` | 実行不能または評価失敗 |
+| `cancelled` | User または Policy により中止 |
+
+### Command と遷移
+
+Command は、Operator の 6 操作（Pause / Resume / Cancel / Retry / Restart / Stop Now）と、Orchestrator・Worker・Policy が進行を報告する Event（Start / Wait / Unblock / Begin evaluation / Complete / Fail）です。
+遷移表は `domain.TRANSITIONS` の 1 か所にあり、表にない組み合わせは `IllegalTransitionError` になります。
+
+| 状態 | 受け付ける Command（遷移先） |
+| --- | --- |
+| `queued` | start（running）、fail（failed）、cancel（cancelled） |
+| `running` | wait（waiting）、begin_evaluation（evaluating）、fail（failed）、pause（paused）、cancel（cancelled）、stop_now（cancelled） |
+| `waiting` | unblock（running）、fail（failed）、cancel（cancelled）、stop_now（cancelled） |
+| `paused` | resume（running）、cancel（cancelled） |
+| `evaluating` | complete（completed）、fail（failed）、cancel（cancelled）、stop_now（cancelled） |
+| `completed` | なし |
+| `failed` | retry（queued）、restart（queued） |
+| `cancelled` | restart（queued） |
+
+Operator の 6 操作は次のように解釈しています（[要件](../../REQUIREMENTS.md)の「Task pause / cancel / retry / restart」）。
+
+- **Pause / Resume**: Pause は実行中の Task だけが対象で、現在の安全な区切りでの停止です。Step は Backend が閉じず、Worker が区切りで `finish_step` を呼びます。Resume は `paused` から `running` へ戻します。
+- **Cancel（graceful）**: Task を終了します。branch / worktree / 途中成果は保持します（削除は別の操作）。実行中の Step は Worker が自分で閉じます（`finish_step`）。Worker が来ないまま Restart されたときは、Restart が旧試行の Step を `interrupted` にします。
+- **Stop Now（immediate）**: 緊急停止です。Cancel と同じ `cancelled` になりますが、実行中の Step を即座に `interrupted` にし、停止理由と中断した Step を Task Log と履歴 Event へ残します。**`reason` は必須**です（[要件](../../REQUIREMENTS.md)の「停止理由と実行中だったstepをAudit / Task logへ残す」を満たすためで、他の Command では任意です）。`reason` がない（`None`）、空または空白だけ、文字列でない、長さの上限（500 文字）を超える、NUL / Surrogate を含む場合は、Task の状態を見る前に、何も書き込まずに `InvalidCommandArgumentError` で拒否します（エラー文に値は含めません）。受け付けた Stop Now は必ず、履歴 Event の `reason` と Task Log の行の両方に理由を残します。Log の行は `Stop Now: interrupted step '<Step 名>' (reason: <理由>)` です。Step が既に終わっていた場合（Worker が先に閉じた場合を含む）は何も中断していないため、Step 名を記録せず、Log は `Stop Now: no step was running (reason: <理由>)` とします（Fail も、自分が終わらせた Step だけを Event に記録します）。実行中に何かが動きうる状態（running / waiting / evaluating）だけが対象で、queued と paused には Cancel を使います。成果物は削除しません。
+  Cancel と Stop Now の違いは Event の Command（`TaskEvent.interruption` が `graceful` / `immediate`）で判別できます。
+- **Retry**: `failed` の Task を、失敗した Step から同じ試行（同じ branch / worktree / Log）で再実行します。`queued` へ戻り、`retry_count` を 1 増やし、Agent / Model を切り替えられます（履歴 Event の `detail` に旧値と新値を残す）。
+- **Restart**: `failed` または `cancelled` の Task を、元の `starting_commit` と Task `input` から最初からやり直します。試行番号（`attempt`）を 1 増やし、新しい branch / worktree / Review / PR の状態を持つ空の試行を作ります。旧試行は `task_attempts` と Step・Log に残り、`TaskSnapshot.previous_attempts` から見えます。
+
+### 永続化
+
+| Table | 内容 |
+| --- | --- |
+| `tasks` | 現在の状態、`wait_reason`、`version`、試行番号、`retry_count`、Agent / Model、`starting_commit`、`input`（Restart の基準） |
+| `task_attempts` | 試行ごとの branch / worktree / head commit、Review 状態、Evaluator 結果、PR の番号・URL・状態 |
+| `task_steps` | Step の実行記録。試行内で最新の行が current step。試行内で `running` は高々 1 つ（Partial Unique Index） |
+| `task_tool_invocations` | Step が呼んだ Tool の実行状態（下記）。ID、Tool 名、状態（`started` / `succeeded` / `failed` / `interrupted`）、開始・終了時刻だけを持つ。`started` の行だけの Partial Index（`step_id`）と、終了済みの行だけの Partial Index（`step_id`、開始の新しい順、`id` の新しい順）がある |
+| `task_logs` | 試行ごとの Log（`debug` / `info` / `warning` / `error`）。行は書いた Run（`attempt` と `retry_count`）を持つ。Index は `(task_id, attempt, seq DESC)`（下記の `restore`） |
+| `task_events` | Append-only の履歴。全遷移について、Command、遷移前後の状態、`wait_reason`、Actor（`user` / `system` / `policy` と User の UUID）、理由、その時点の Step 名、`task_version`、Event 後の Run（`attempt` と `retry_count`。Start では Worker の Run） |
+
+- `project_id`、`created_by`、`actor_id` は UUID だけを持ち、外部キーはありません。users と projects の Table がまだ存在しないためです（Table が入るときに外部キーを追加します）。
+- **引数の検証（`TaskService` のすべての Public メソッド）**: すべての引数を、DB を使う前（Session を開く前）に検査し、型や値が誤っていれば固定文言の `InvalidCommandArgumentError` で拒否します（エラー文に値は含めません）。`AttributeError`、`TypeError`、SQLAlchemy の `StatementError`、`DBAPIError` として漏れることも、黙って成功することもありません（以前は、偽と評価される `invocation_id`（`""` や `0`）が黙って新しい ID に置き換わっていました）。
+  - **ID**（`task_id`、`project_id`、`created_by`、`invocation_id`）は `uuid.UUID` です。**文字列の UUID は解釈せずに拒否します**（簡単さを優先した判断です。ID は Event や Snapshot が返す `uuid.UUID` をそのまま使います）。`invocation_id` は `None`（自動採番）か UUID です。`step_id` は 1 から 9223372036854775807（`BIGINT` の識別列で、1 から始まる）の `int` です。
+  - **Enum**（`command`、`wait_reason`、Step / Tool 呼び出しの `status`、Log の `level`、Review の状態、Evaluator の結果、PR の状態）は、Member か、その直列化した値（ちょうど `str` 型。`"stop_now"` など）を受け付け、以降は Member に揃えて使います。`str` の派生、別の Enum の Member（同じ文字列でも）、bytes、数値、`None`（必須のもの）、未知の値は拒否します。`Actor(kind, id)` も同じ規則で、`kind` は Member かその値、`id` は `uuid.UUID`（User だけが持つ）です。`finish_step` / `finish_tool_invocation` の `status` は、終了を表す値だけを受け付けます。`plan_transition` も、`wait_reason` が `WaitReason` でも値でもなければ、状態に関係なく拒否します。
+  - **整数**（`expected_version`、`log_limit`、`after_seq`、`limit`、PR の番号）は `int` で、`bool` ではありません。`expected_version` は `None` か 1 から 2147483647 です（Task の `version` は 1 から始まるため、0 は「どの Task の version でもない値」として拒否します）。`log_limit` は 0 から 1000、`after_seq` は 0 から 9223372036854775807、`limit` は 1 から 5000、PR の番号は 1 から 2147483647 です。
+  - **オブジェクト**: `actor` は `Actor`、`run` は `TaskRun`、`worktree` / `review` / `pull_request` は `WorktreeState` / `ReviewState` / `PullRequestInfo`（省略時は `None`）で、そのフィールドも上の規則で検査します。PR は URL が必須です。branch / path / head commit / PR の URL は、`str` でない値、空・空白だけの値も拒否します（worktree のフィールドの `None` は「未設定」）。名前や `title`、`reason` も空・空白だけは拒否します。Log の `message` は、Worker が出力の空行をそのまま転送することがあるため空文字列を許します（`str` であることだけを要求します）。
+  - **DB を読んでから判断する規則が 1 つだけあります**: `execute` の `wait_reason` が Command に合わない場合（Wait に無い、Wait 以外にある）は、不正な遷移（`IllegalTransitionError`）を先に報告する Domain の規則（`test_illegal_transition_is_reported_before_a_bad_argument`）のため、Task を読んだ後に同じ `InvalidCommandArgumentError` で拒否します。何も書き込みません。`wait_reason` の型と値そのものは、Transaction を開く前に検査します。
+  - `tests/test_task_argument_validation.py` が、Method × 引数 × 誤った値（`None`、型違い、`int` の代わりの `bool`、bytes、空文字列、未知の Enum 値、`object()`、範囲外の数など）の表で確認します。各値で、型付きエラーであること、エラー文に値が含まれないこと、SQL が 1 文も送られず Session も開かれないこと、Task 関連の全 Table の行が変わらないことを検査します。すべての Public メソッドとすべての引数が表に載っていることも Test しています。
+- **文字列入力の検証**: `TaskService` が受け取る文字列（`title`、`starting_commit`、`agent`、`model`、`reason`（Stop Now では必須）、Step 名、Tool 名、Log の `message`、`update_attempt` の branch / path / head commit / PR の URL）は、NUL（`\u0000`）と Surrogate 文字（不正な Unicode）を含むと `InvalidCommandArgumentError` で拒否します（エラー文に値は含めません）。PostgreSQL の text 列は NUL を保持できず、Surrogate は UTF-8 にできないため、そのままでは書き込み時に DB / 符号化のエラーが漏れます。Log の `message` は、長さの上限で切り捨てる前の全体を検査します。`update_attempt` は、branch（255 文字）、path（1024 文字）、head commit（64 文字）、PR の URL（2048 文字）を、Model の列の長さ（1 か所の定義）で検査して、超えると同じ `InvalidCommandArgumentError` で拒否します（文字数で数えます。空・空白だけの値と `str` でない値も拒否します）。PR の番号は 1 から 2147483647（`INTEGER` 列の最大値）の整数だけを受け付けます（`bool`、`float`、文字列は拒否します）。下限の 1 は、PR の番号が正であることに基づく私の判断で、要件が定める値ではありません。
+- **Task `input` の検証**（`TaskService.create_task`）: `input` は JSON Object で、`json.loads` が返す型（`dict`〔キーは `str`〕、`list`、`str`、`int`、`float`、`bool`、`None`）だけを受け付けます。整数キーや `tuple` などを黙って変換して保存することはしません。次のものは、DB へ書く前に `InvalidCommandArgumentError` で拒否します（エラー文に値は含めません）。
+  - `NaN` / `Infinity` / `-Infinity`（PostgreSQL の JSONB は保持できず、書き込み時に DB のエラーになります）、NUL（`\u0000`）を含む文字列やキー、Surrogate 文字（不正な Unicode）を含む文字列やキー
+  - 入れ子が `MAX_INPUT_DEPTH`（32 段。最上位の Object を 1 段と数え、Object と List の両方が段になります）を超えるもの、循環参照
+  - JSON にした長さが `MAX_INPUT_BYTES`（256 KiB）を超えるもの。エンコードする前に、値が現れるたびにエンコードされる長さを積み上げる予算で検査するため、同じ値や List を何度も共有して展開すると巨大になる構造も、エンコードや DB への送信に至る前に拒否します。整数は 10 進の桁数（負数は符号も）、`float` は `repr` の長さ、`true` / `false` / `null` は 4 / 5 / 4 文字を、出現のたびに積み上げます（1 つの巨大な整数を何万回も参照する入力が、エンコードで数百 MB になることを防ぎます）。文字列は文字数（エンコードは最大 12 倍）、Object と List は括弧だけを積み上げ、区切りは積み上げないため、積み上げ量がエンコード後の長さを超えることはなく、エンコード後の長さの検査が最終的な判定です。
+  - 桁数が `MAX_INPUT_INTEGER_DIGITS`（131072 桁）を超える整数。PostgreSQL の JSONB は数値を `numeric` で保持し、`numeric` は小数点より上に 131072 桁までしか持てないため（超えると `value overflows numeric format`）、その値です（実際の PostgreSQL で 131072 桁は保存でき、131073 桁は拒否されることを Test で確認しています）。Python が整数と文字列を相互に変換する桁数の上限（`sys.get_int_max_str_digits()`。既定は 4300）が設定されていて、これがより小さい場合は、その桁数が上限になります（`json.dumps` がそれを超える整数のエンコードを拒否するためです）。桁数の多い整数は、ビット長だけで判定して拒否し、巨大な整数を文字列に変換することはありません。
+  `MAX_INPUT_DEPTH`、`MAX_INPUT_BYTES`、`MAX_INPUT_INTEGER_DIGITS` は `paw_backend/tasks/service.py` の定数で、`MAX_INPUT_DEPTH` と `MAX_INPUT_BYTES` は要件が定める値ではなく暫定の上限、`MAX_INPUT_INTEGER_DIGITS` は PostgreSQL の限界です。JSONB は数値を正規化するため、`-0.0` は `0.0`、`1e300` は整数として読み戻されます（値の意味は変わりません）。
+- `task_events` は DB の Trigger が UPDATE と DELETE を拒否します。Application からも履歴は書き換えられません。
+- **Application の Role の権限**（Role を分ける構成、`PAW_APP_DATABASE_ROLE`）: Migration `0032` は、すべての Table に [`grant_app_privileges`](#migration-は-application-の-role-に権限を与えるcontributor-向けの規則) で `TaskService` が必要とする最小の権限だけを与えます。DELETE はどこにも与えません（`PUBLIC` の権限は外します）。
+
+  | Table | Application の Role の権限 |
+  | --- | --- |
+  | `task_events`、`task_logs` | SELECT、INSERT だけ（履歴と Log は追記のみ。UPDATE / DELETE / TRUNCATE は `permission denied`） |
+  | `tasks` | SELECT、INSERT、UPDATE は `state`、`wait_reason`、`agent`、`model`、`attempt`、`retry_count`、`version`、`updated_at` の列だけ（`project_id`、`created_by`、`title`、`input`、`starting_commit` は変更できない） |
+  | `task_attempts` | SELECT、INSERT、UPDATE は `branch`、`worktree_path`、`head_commit`、`review_status`、`evaluation_result`、`pr_number`、`pr_url`、`pr_state`、`updated_at` の列だけ |
+  | `task_steps`、`task_tool_invocations` | SELECT、INSERT、UPDATE は `status`、`finished_at` の列だけ（Step 名や Tool 名は変更できない） |
+
+  行の Lock（`SELECT ... FOR NO KEY UPDATE`）には UPDATE 権限が要るため、Lock する Table は列単位の UPDATE を持ちます。主キーは UUID か Identity で、Sequence の権限は要りません。
+  `tests/test_task_grants.py` が、Migration を実際にこの構成で実行し、Superuser でない Role で `TaskService` の Test（状態遷移の全組み合わせ、Step、Tool、Log、Restore など）を実行します。あわせて、この表と Role の権限が一致すること、履歴の書き換えと削除、Task の識別情報の変更、Schema の変更が拒否されることを確認します。
+- 列挙値は Text と CHECK 制約で保持します。Migration に値の一覧を直接書くため、値を増やすときは新しい Revision を追加してください。
+
+### 同時実行と復元
+
+- 状態を変える Command は 1 Transaction です。Command と、Step / Tool / 試行状態を書く操作は、どれも最初に Task 行の Lock（`SELECT ... FOR NO KEY UPDATE`）を取り、それから状態や最新の Step を読みます。同じ Task への書き込みは 1 つずつ実行されるため、次のことが保証されます。
+  - Stop Now / Fail は、並行する `begin_step` が Commit しようとしている Step を見落としません（Lock を待ち、Commit 後の Step を中断・失敗にします）。
+  - Task が終了した後に Step や Tool の呼び出しを開始できません。`begin_step` は Lock を取った後に状態を読み直します。
+  - `complete` は、Step が実行中の間は `TaskStepError` になります（Step が残ったまま Completed になりません）。
+  - 例外は graceful な Cancel です。Cancel の時点で既に実行中だった Step は、Worker が `finish_step` で閉じるまで `running` のままです。Cancel の後に新しい Step を始めることはできません。
+  `tasks.version` を使った `UPDATE ... WHERE version = <読んだ値>` は、これに加えた安全策です。
+  呼び出し側が以前に見た Version を `expected_version` に渡すと、古い判断は Lock を待った後でも `TaskConflictError` で拒否されます。`expected_version` を渡さない Command は、待った後の最新の状態で判定されます。
+- **Run（試行と Retry 回数）**: Worker の記録は、担当する **Run**（`TaskRun(attempt, retry_count)`）を明示します。`attempt` は Restart が 1 増やし、`retry_count` は Retry が 1 増やします。どちらも増えるだけで、失敗または中止した Task の再開は必ずどちらか一方を変えるため、2 つの Run が等しいのは同じ Run のときだけです。Retry は**同じ試行**を再実行する（試行番号は変わらない）ので、試行番号だけでは、失敗した Run の Worker と Retry が始めた Run の Worker を区別できません。`TaskRun` は Tool Broker（PAW-031）が承認を結びつける Run と同じ組です。
+  Worker は、自分を開始した Start の `TaskEvent.run`（`task_events` に `attempt` と `retry_count` がある）から Run を受け取ります。`TaskSnapshot.run` も同じ値です。
+  - Run を明示する書き込み（**現在の Run でなければ何も書かずに拒否**）: `begin_step(task_id, name, run=...)`、`add_log(task_id, message, run=...)`、`update_attempt(task_id, run=..., worktree=... / review=... / pull_request=...)`。Restart が新しい試行を始めた後の旧試行の Worker は `StaleAttemptError`（`stale_attempt`）、Retry が新しい Run を始めた後の（同じ試行の）失敗した Run の Worker は `StaleRunError`（`stale_run`）になります。`StaleAttemptError` は `StaleRunError` の派生で、「自分は置き換えられたか」だけを知りたい Worker は `StaleRunError` を捕まえれば両方を扱えます。試行番号を先に、次に Retry 回数を比べます。`run` が `TaskRun` でない値（試行番号だけの整数など）は、DB に触れる前に `InvalidCommandArgumentError` です（古い `attempt=` の引数はなくなりました）。
+    - `update_attempt` と `begin_step` は Task 行の Lock を取った後に Run を比べます。Retry と競合しても、先に Commit された Retry の後の古い Worker が新しい Run の worktree / Review / Evaluator 結果 / PR の状態を上書きしたり、新しい Run の Step として始めたりすることはできません（Test は、Retry を Lock の先頭に並べて、古い Worker の書き込みがその後ろで拒否されることを確認します）。
+    - `add_log` は Lock を取らないため（Log の書き込みを Task の状態変更と直列にしないため）、Retry と同時に Commit される行があり得ます。そこで行は、Task の現在の Run ではなく**書いた Worker の Run**を持ちます（`task_logs.retry_count`、`LogEntry.retry_count` / `LogEntry.run`）。Retry は同じ試行の Log を続けるので `restore` の `recent_logs` には前の Run の行も出ますが、どの Run の行かは区別できます（Restart との競合で行が試行番号を保つのと同じ考え方です）。Service が自分で書く Stop Now の行は、その時点の Task の Run を持ちます。
+  - Run を明示しない書き込み: `finish_step` は Step の ID、`begin_tool_invocation` は実行中の Step の ID、`finish_tool_invocation` は Tool の ID で対象を指定します。これらは ID だけで Run を区別できます。Retry は Fail の後にしか起きず、Fail は実行中の Step を終わらせ、その Step の `started` の Tool も `interrupted` にするため、前の Run が残した Step や Tool は、Retry 後の Run では `running` / `started` ではありません。前の Run の Worker が後から `finish_step` や Tool の呼び出しをすると `TaskStepError` になり、新しい Run の Step や Tool は変わりません（Test で確認しています）。Restart の場合は、これらも `StaleAttemptError` です。
+  - この Run の扱いは、要件に定めのない製品上の方針ではなく、既存の Restart の保証（`StaleAttemptError`）を Retry へ広げた実装の詳細なので、Decision には上げていません（`docs/decisions/0014-task-working-set-persistence.md` は Working Set の永続化についてで、関係しません）。
+- **Tool の実行状態**: 要件の「Tool execution state」のうち、Backend が再接続後に再開または中断を判断するのに必要な最小の記録だけを持ちます。
+  `begin_tool_invocation` / `finish_tool_invocation` が Tool の ID（Tool Broker が UUID を渡すこともできる）、Tool 名、状態、時刻を記録し、`restore` は現在の Step の Tool を `TaskSnapshot.tool_invocations`（開始が古い順）で返します。`started` のままの Tool は、後から何件開始・終了しても**すべて**返します（Backend が再開または中断を判断できなくなる取りこぼしを避けるため）。終了済みの Tool だけは直近 100 件に絞ります。返す件数が呼び出し側の操作で際限なく増えないよう、1 つの Step で同時に `started` にできる Tool は 1000 件（`MAX_ACTIVE_TOOL_INVOCATIONS`。**暫定の値で、人間の確認待ちです**。下の「人間の判断が必要な点」）までで、1001 件目の `begin_tool_invocation` は `TaskStepError` になります（どれかが終了すると、また開始できます）。
+  `started` の Tool を尋ねる 3 つの問い合わせ（`begin_tool_invocation` の同時数の確認、`restore` が返す `started` の Tool、Step の終了時に行う `interrupted` への更新）は、Step の終了済みの Tool の履歴全体を読みません。`status = 'started'` の行だけの Partial Index `ix_task_tool_invocations_started`（`step_id`）を使うためです。履歴が長い Step でも、Tool を開始するたびの作業量が、その Step の Tool の総数ではなく同時に `started` の数だけで決まります。`started` は Bind Parameter ではなく SQL の文面へ書きます（`_tool_call_started()`）。Parameter にすると、Driver が何度も実行する文を Prepare して PostgreSQL が Plan を使い回す場合に、Partial Index の条件を満たすと判断できず、Index を使えなくなるためです（Test は Plan を使い回す設定でも Index を使うことを確認します）。
+  `restore` が返す終了済みの Tool の問い合わせ（開始の新しい順、`id` の新しい順に 100 件）にも、専用の Partial Index `ix_task_tool_invocations_finished`（`WHERE status <> 'started'`、列は `step_id`、`started_at DESC`、`id DESC`）があります。PostgreSQL はこの Index を並び順のまま読み、100 件で読み取りを止めるため、再接続のたびの作業量が、その Step が積み上げた終了済みの Tool の総数に比例しません（全行を読んで並べ替えることも、`started` の行を読み飛ばすこともしません）。`status <> 'started'` も SQL の文面へ書きます（上と同じ理由です）。Test は、終了済みの Tool が 2 万件ある Step で、Plan を使い回す設定（`force_generic_plan`）でも値ごとに立てる Plan（`force_custom_plan`）でも、Seq Scan と並べ替えがなく、この Index が 100 行だけを読むことを確認します。
+  **引数と出力は保存しません。** 権限判定、承認、引数と結果の扱いは Tool Broker（PAW-031）の責務です。Step が終わる（Stop Now / Fail / Restart / `finish_step`）と、`started` のままの Tool は `interrupted` になります。
+- `TaskService.restore(task_id)` は DB だけから Snapshot（状態、current step、直近の Log、worktree / review / PR の状態、直近の Event）を作ります。1 つの Repeatable Read Transaction で読むため、同じ時点の値です。
+  状態は Process のメモリに持たないので、Client が切断しても、Backend が再起動しても、別の Process が同じ値を返します。
+  `restore` の Log の問い合わせ（現在の試行の行を `seq` の新しい順に `log_limit` 件まで）は、Index `ix_task_logs_task_id_attempt_seq`（`task_id`、`attempt`、`seq DESC`）が受け持ちます。PostgreSQL は現在の試行の位置へ直接移り、その行だけを並び順のまま読んで件数で止まるため、Restart で前の試行の Log が何万行残っていても、再接続のたびの作業量は返す行数で決まります（以前の `(task_id, seq)` の Index では、新しい方から前の試行の行を読んで捨てながら遡っていました）。`(task_id, seq)` の Index は残していません。Log を試行をまたいで読む問い合わせが今はなく、外部キー `task_id` の確認には新しい Index の先頭の列が使えるためです。書き込みの多い Table なので Index を 1 つ減らします。Log を試行をまたいで読む機能を足すときは、その問い合わせに合う Index を、そのときに足してください。`restore` の他の問い合わせは、すでに専用の Index があります（現在の Step は `UNIQUE (task_id, attempt, sequence)`、直近の Event は `(task_id, seq)`、試行の一覧は `UNIQUE (task_id, number)`）。Test は、前の試行の Log と Step が 2 万件ずつ、他の Task の Log と Event が合わせて数万件ある Task で、Plan を使い回す設定（`force_generic_plan`）でも値ごとに立てる Plan（`force_custom_plan`）でも、Seq Scan と並べ替えがなく、Log は現在の試行の行（3 行と 0 行）だけ、現在の Step と直近の Event は 1 行だけを読むことを確認します。
+- `TaskService(database, listeners=[...])` の Listener は Commit 後に、書き込まれた `TaskEvent` を受け取ります。Audit（PAW-025）の接続点です。Listener の失敗は Command を失敗させず、例外の型名だけを Log に残します。
+  取りこぼしを避けたい Consumer は `task_events` を `seq` で読んでください（`TaskService.history(task_id, after_seq=...)`）。
+- 実行中 Task の Runtime 状態（実行中 Process など）の復旧は、要件どおり V1 では保証しません。`tool_invocations` が `started` のままの Task は、Backend が再開または中断を判断するための記録で、Process が生きている保証ではありません。
+
+**人間の判断が必要な点（暫定の上限）。** 次の上限は、要件が定める値ではなく、この実装が置いた**暫定の値**です。人間が確認するまで、既定として承認済みとはみなしません。値は `paw_backend/tasks/service.py` の定数で、変えても Schema は変わりません。
+
+- `MAX_ACTIVE_TOOL_INVOCATIONS` = 1000: 1 つの Step で同時に `started` にできる Tool の呼び出しの数。`restore` が返す件数を、呼び出し側の操作で際限なく増やさないための上限です（超える `begin_tool_invocation` は `TaskStepError`）。
+- `MAX_INPUT_DEPTH` = 32: Task の `input` の入れ子の深さ。
+- `MAX_INPUT_BYTES` = 256 KiB: Task の `input` を JSON にした長さ。
+
+`MAX_RESTORE_TOOL_INVOCATIONS`（`restore` が返す終了済みの Tool の件数、100）、`MAX_RESTORE_LOGS`（1000）も、同じく要件が定めない実装の値です。
 
 ### Migration は Application の Role に権限を与える（Contributor 向けの規則）
 
@@ -430,6 +561,6 @@ CI は pre-commit の専用環境で Test を実行するため、同じ Version
 ## 今後の Issue
 
 [PAW-021](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/18)（Owner Setup）、PAW-022（Login / Session）、
-PAW-025（RBAC）、PAW-032（Task Lifecycle）、PAW-040（Memory Schema）はこの Skeleton の上に実装します。
+PAW-025（RBAC）、PAW-040（Memory Schema）はこの Skeleton の上に実装します。
 受け入れ基準は [Implementation Backlog](../../docs/IMPLEMENTATION_BACKLOG.md)、
 実装時に選択できる事項は [Requirements Freeze Review](../../docs/REQUIREMENTS_FREEZE_REVIEW.md) を参照してください。

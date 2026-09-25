@@ -16,9 +16,10 @@ MIGRATION_URL = "postgresql://owner:0wner-pw@db.internal/paw"
 
 
 def offline_upgrade_sql(**environment: str) -> str:
+    """The SQL of the audit migration (0025) only, whatever migrations follow it."""
     output = io.StringIO()
     with paw_environment(PAW_DATABASE_URL=URL, **environment):
-        command.upgrade(offline_config(output), "head", sql=True)
+        command.upgrade(offline_config(output), "0025", sql=True)
     return output.getvalue()
 
 
