@@ -48,6 +48,7 @@ personal-ai-workspace/
 │  │  │  └─ versions/
 │  │  │     ├─ 0001_baseline.py
 │  │  │     ├─ 0021_owner_setup.py
+│  │  │     ├─ 0022_login_session_password.py
 │  │  │     ├─ 0025_audit_events.py
 │  │  │     ├─ 0026_projects.py
 │  │  │     ├─ 0031_tool_approvals.py
@@ -69,6 +70,24 @@ personal-ai-workspace/
 │  │  │  ├─ middleware.py
 │  │  │  ├─ security.py
 │  │  │  ├─ server.py
+│  │  │  ├─ auth/
+│  │  │  │  ├─ __init__.py
+│  │  │  │  ├─ audit.py
+│  │  │  │  ├─ auth_policy.py
+│  │  │  │  ├─ context.py
+│  │  │  │  ├─ csrf.py
+│  │  │  │  ├─ db.py
+│  │  │  │  ├─ errors.py
+│  │  │  │  ├─ limits.py
+│  │  │  │  ├─ models.py
+│  │  │  │  ├─ passwords.py
+│  │  │  │  ├─ principals.py
+│  │  │  │  ├─ service.py
+│  │  │  │  ├─ sessions.py
+│  │  │  │  ├─ state.py
+│  │  │  │  ├─ throttle.py
+│  │  │  │  ├─ tokens.py
+│  │  │  │  └─ wiring.py
 │  │  │  ├─ cli/
 │  │  │  │  ├─ __init__.py
 │  │  │  │  ├─ __main__.py
@@ -187,11 +206,14 @@ personal-ai-workspace/
 │  │  │     ├─ deps.py
 │  │  │     └─ v1/
 │  │  │        ├─ __init__.py
+│  │  │        ├─ auth.py
 │  │  │        ├─ events.py
 │  │  │        └─ health.py
 │  │  ├─ pyproject.toml
 │  │  └─ tests/
 │  │     ├─ __init__.py
+│  │     ├─ auth_http_support.py
+│  │     ├─ auth_support.py
 │  │     ├─ fake_postgres.py
 │  │     ├─ identity_support.py
 │  │     ├─ privacy_audit_support.py
@@ -204,6 +226,23 @@ personal-ai-workspace/
 │  │     ├─ shared_memory_support.py
 │  │     ├─ support.py
 │  │     ├─ teardown_child.py
+│  │     ├─ test_auth_argument_validation.py
+│  │     ├─ test_auth_csrf.py
+│  │     ├─ test_auth_grants.py
+│  │     ├─ test_auth_http.py
+│  │     ├─ test_auth_http_admin.py
+│  │     ├─ test_auth_migration.py
+│  │     ├─ test_auth_passwords.py
+│  │     ├─ test_auth_plans.py
+│  │     ├─ test_auth_provider.py
+│  │     ├─ test_auth_service_account.py
+│  │     ├─ test_auth_service_admin.py
+│  │     ├─ test_auth_service_login.py
+│  │     ├─ test_auth_service_redeem.py
+│  │     ├─ test_auth_sessions.py
+│  │     ├─ test_auth_settings.py
+│  │     ├─ test_auth_throttle.py
+│  │     ├─ test_auth_tokens.py
 │  │     ├─ test_config.py
 │  │     ├─ test_database.py
 │  │     ├─ test_database_run_abortable.py

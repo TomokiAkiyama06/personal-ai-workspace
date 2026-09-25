@@ -146,8 +146,8 @@ def setUpModule():
     migrate("base", downgrade=True)
     migrate(PREVIOUS_REVISION, PAW_APP_DATABASE_ROLE=APP_ROLE)
     BEFORE_0087.update(asyncio.run(app_privileges()))
-    # ... then to head.
-    migrate(PAW_APP_DATABASE_ROLE=APP_ROLE)
+    # ... then to revision 0087 itself (not to head: a later revision may add tables).
+    migrate(REVISION, PAW_APP_DATABASE_ROLE=APP_ROLE)
 
 
 def tearDownModule():
