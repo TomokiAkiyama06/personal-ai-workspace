@@ -207,6 +207,108 @@ class PrefilterTest(PostgresRetrievalTestCase):
 
 
 @requires_postgres
+class EligibilityStatementTest(PostgresRetrievalTestCase):
+    """Each statement applies the eligibility conditions on its own."""
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        self.me = uuid4()
+        self.scopes = ResolvedScopes(self.me, frozenset(MemoryScope))
+        self.eligible = queries.Eligibility(
+            exclude_stale=True, policy_subjects=("merge",)
+        )
+        self.keep = self.seed("keep", "alpha", owner=self.me)
+        self.stale = self.seed(
+            "stale", "alpha", owner=self.me, stale_since=T0 - timedelta(days=1)
+        )
+        self.covered = self.seed(
+            "covered", "alpha", scope="shared", subjects=["merge.permission"]
+        )
+        self.old = self.seed("old", "alpha", owner=self.me)
+        self.new = self.seed("new", "alpha", owner=self.me)
+        self.seed_relation(self.new.version_id, self.old.version_id, "supersedes")
+        for other in (self.stale, self.covered, self.old):
+            self.seed_relation(self.keep.version_id, other.version_id)
+        # The ineligible memory is the NEWER end of these two.
+        self.keep_too = self.seed("keep too", "alpha", owner=self.me)
+        self.seed_relation(self.stale.version_id, self.keep_too.version_id)
+        self.seed_relation(self.covered.version_id, self.keep_too.version_id)
+
+    def run_statement(self, statement):
+        with self.engine.connect() as connection:
+            return connection.execute(statement).all()
+
+    def test_versions_statement_leaves_out_what_is_not_eligible(self):
+        ids = [s.version_id for s in (self.keep, self.stale, self.covered, self.old)]
+        everything = self.run_statement(
+            queries.versions_statement(self.scopes, T0, ids)
+        )
+        self.assertEqual(
+            {r.title for r in everything}, {"keep", "stale", "covered"}
+        )  # ``old`` is superseded whatever the caller asks for
+        strict = self.run_statement(
+            queries.versions_statement(self.scopes, T0, ids, self.eligible)
+        )
+        self.assertEqual({r.title for r in strict}, {"keep"})
+
+    def test_relations_statement_needs_both_ends_to_be_eligible(self):
+        ids = [self.keep.version_id]
+        lenient = self.run_statement(
+            queries.relations_statement(self.scopes, T0, ids, 100)
+        )
+        self.assertEqual(
+            {r.to_version_id for r in lenient},
+            {self.stale.version_id, self.covered.version_id},
+        )  # the superseded ``old`` is never an end
+        strict = self.run_statement(
+            queries.relations_statement(self.scopes, T0, ids, 100, self.eligible)
+        )
+        self.assertEqual(strict, [])
+        # The other direction: the covered memory is the one asked about.
+        strict = self.run_statement(
+            queries.relations_statement(
+                self.scopes, T0, [self.covered.version_id], 100, self.eligible
+            )
+        )
+        self.assertEqual(strict, [])
+
+    def test_the_newer_end_of_a_relation_must_be_eligible_as_well(self):
+        ids = [self.keep_too.version_id]
+        lenient = self.run_statement(
+            queries.relations_statement(self.scopes, T0, ids, 100)
+        )
+        self.assertEqual(
+            {r.from_version_id for r in lenient},
+            {self.stale.version_id, self.covered.version_id},
+        )
+        strict = self.run_statement(
+            queries.relations_statement(self.scopes, T0, ids, 100, self.eligible)
+        )
+        self.assertEqual(strict, [])
+
+    def test_keyword_and_vector_statements_carry_them_too(self):
+        keyword = self.run_statement(
+            queries.keyword_statement(self.scopes, T0, "'alpha'", 100, self.eligible)
+        )
+        self.assertEqual({r.title for r in keyword}, {"keep", "keep too", "new"})
+        for seeded in (
+            self.keep,
+            self.keep_too,
+            self.stale,
+            self.covered,
+            self.old,
+            self.new,
+        ):
+            self.seed_embedding(seeded.version_id, [1.0, 0.0, 0.0], model_id="m3")
+        vector = self.run_statement(
+            queries.vector_statement(
+                self.scopes, T0, "m3", 3, [1.0, 0.0, 0.0], 100, None, self.eligible
+            )
+        )
+        self.assertEqual({r.title for r in vector}, {"keep", "keep too", "new"})
+
+
+@requires_postgres
 class MembershipStatementTest(PostgresRetrievalTestCase):
     def rows(self, user_id, project_ids=None):
         with self.engine.connect() as connection:

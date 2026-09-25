@@ -167,6 +167,106 @@ class VectorPlanTest(PlanTestCase):
         )
 
 
+ELIGIBILITY_COLUMNS = ("stale_since", "commit_sha", "attributes", "supersedes")
+
+
+@requires_postgres
+class EligibilityPlanTest(PlanTestCase):
+    """The eligibility conditions are part of the scan, not of a later step."""
+
+    def strict(self):
+        return queries.Eligibility(
+            exclude_stale=True,
+            repo_heads={uuid4(): "a" * 40},
+            policy_subjects=("merge", "docs"),
+        )
+
+    def test_the_conditions_sit_in_the_scans_below_the_distance_ordering(self):
+        scopes = self.bulk_seed()
+        statement = queries.vector_statement(
+            scopes, T0, "m3", 3, [0.1, 0.2, 0.3], 10, None, self.strict()
+        )
+        for label, kwargs in (
+            ("custom plan", {"generic": False}),
+            ("generic plan", {"generic": True}),
+            ("no seqscan", {"generic": False, "seqscan": False}),
+        ):
+            with self.subTest(label):
+                root = self.explain(statement, **kwargs)
+                self.assertEqual(root["Node Type"], "Limit")
+                self.assert_filter_below_the_distance_sort(root)
+                nodes = list(plan_nodes(root))
+                sort = next(n for n in nodes if n["Node Type"] == "Sort")
+                below = subtree_ids(sort)
+                below_text = " ".join(conditions(n) for n in nodes if id(n) in below)
+                for column in ELIGIBILITY_COLUMNS:
+                    self.assertIn(column, below_text)
+                for node in nodes:
+                    if id(node) not in below:
+                        for column in ELIGIBILITY_COLUMNS:
+                            self.assertNotIn(column, conditions(node))
+
+    def test_the_keyword_statement_carries_them_in_the_same_scan_as_the_text_match(
+        self,
+    ):
+        scopes = self.bulk_seed()
+        query = tsquery_text(keyword_terms("alpha beta"))
+        statement = queries.keyword_statement(scopes, T0, query, 10, self.strict())
+        root = self.explain(statement, seqscan=False)
+        text_ = " ".join(conditions(n) for n in plan_nodes(root))
+        for column in ("stale_since", "attributes", "to_tsvector"):
+            self.assertIn(column, text_)
+        for node in plan_nodes(root):
+            if node["Node Type"] in ("Limit", "Sort"):
+                for column in (*PERMISSION_COLUMNS, *ELIGIBILITY_COLUMNS):
+                    self.assertNotIn(column, conditions(node))
+
+    def test_the_successor_lookup_can_use_the_unique_partial_index(self):
+        scopes = self.bulk_seed()
+        version = aliased(MemoryVersion, name="mv")
+        statement = select(version.id).where(
+            ~queries._superseded_by_a_readable_version(version, scopes, T0)
+        )
+        root = self.explain(statement, seqscan=False)
+        names = {n.get("Index Name") for n in plan_nodes(root)}
+        self.assertTrue(
+            names
+            & {
+                "ix_memory_relations_one_successor",
+                "ix_memory_relations_to_version_id",
+            },
+            names,
+        )
+
+    def test_the_default_eligibility_adds_no_stale_or_policy_condition(self):
+        scopes = self.bulk_seed()
+        statement = queries.vector_statement(scopes, T0, "m3", 3, [0.1, 0.2, 0.3], 10)
+        root = self.explain(statement)
+        text_ = " ".join(conditions(n) for n in plan_nodes(root))
+        self.assertNotIn("stale_since", text_)
+        self.assertNotIn("starts_with", text_)
+        # The shared scope is searched, but no policy: the declaration is still judged.
+        self.assertIn("attributes", text_)
+
+    def test_without_the_shared_scope_no_policy_condition_is_built(self):
+        scopes = self.bulk_seed()
+        only_user = ResolvedScopes(scopes.user_id, frozenset({MemoryScope.USER}))
+        compiled = str(
+            queries.vector_statement(
+                only_user, T0, "m3", 3, [0.1], 10, None, self.strict()
+            ).compile(dialect=self.engine.dialect)
+        )
+        for fragment in (
+            "jsonb_array_elements",
+            "jsonb_typeof",
+            "starts_with",
+            "unnest",
+        ):
+            self.assertNotIn(fragment, compiled)
+        # The stale condition is still there (the caller asked for it).
+        self.assertIn("mv.stale_since IS NOT NULL", compiled)
+
+
 @requires_postgres
 class KeywordPlanTest(PlanTestCase):
     def statement(self, scopes):

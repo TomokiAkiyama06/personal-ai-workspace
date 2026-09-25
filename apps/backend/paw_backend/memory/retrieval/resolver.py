@@ -6,8 +6,10 @@ comes first): nothing here reads ``memory_versions``. The result,
 SQL prefilter is built from.
 
 * ``user`` scope: ``memory.use`` on a resource owned by the caller. (Its audit mode
-  is ``REQUIRED`` in Decision 0004, so this one decision is recorded per call; see
-  Decision 0019.)
+  is ``REQUIRED`` in Decision 0004, so this one decision is recorded per call. The
+  Human approved moving to a read-only ``memory.read`` (``DENIED_ONLY``) in
+  Decision 0019; the capability itself is Decision 0024, still Proposed, so this
+  stays ``memory.use`` until that is approved and implemented.)
 * ``shared`` scope: ``shared_memory.read`` (``DENIED_ONLY``: nothing is written
   for an allowed read).
 * ``project`` scope: the caller's accepted memberships are READ FROM THE DATABASE

@@ -1,8 +1,9 @@
 """Fusion, freshness and the structured score (pure rules, no database)."""
 
 import unittest
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from paw_backend.memory.models import (
     ConfirmationState,
@@ -120,6 +121,23 @@ class FreshnessTest(unittest.TestCase):
             verified_at=verified - timedelta(days=1),
             **base,
         )
+
+    def test_the_interval_is_absolute_time_whatever_zone_the_driver_returns(self):
+        # A datetime that carries a zone with daylight saving steps by wall-clock
+        # time when a timedelta is added to it; the interval is 20 * 24 hours.
+        verified = datetime(2026, 3, 1, tzinfo=UTC).astimezone(
+            ZoneInfo("America/New_York")
+        )
+        candidate = make_candidate(
+            freshness_policy=FreshnessPolicy.REVALIDATE,
+            verified_at=verified,
+            revalidate_after=timedelta(days=20),
+        )
+        due = datetime(2026, 3, 21, tzinfo=UTC)
+        before = freshness_of(candidate, due - timedelta(minutes=30), None)
+        at = freshness_of(candidate, due, None)
+        self.assertEqual(before, (Freshness.FRESH, None))
+        self.assertEqual(at, (Freshness.STALE, StaleReason.REVALIDATE_DUE))
 
     def test_revalidate_with_a_missing_column_is_stale_not_fresh(self):
         self.check(

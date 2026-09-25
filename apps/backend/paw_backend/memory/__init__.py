@@ -16,7 +16,7 @@ Users, projects and repositories are plain UUID columns without foreign keys,
 because those tables do not exist yet (PAW-021 / PAW-026 / PAW-027). The
 embedding model, and so the vector dimension, is not chosen yet (PAW-019), so
 the ``vector`` column has no fixed dimension and there is no ANN index (Decision
-0019 proposes adding one only after the model is chosen).
+0019 adds one only after the model is chosen, keeping the permission filter).
 """
 
 from paw_backend.memory import models

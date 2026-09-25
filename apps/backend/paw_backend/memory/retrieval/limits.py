@@ -3,7 +3,7 @@
 Every value that comes from a caller, and every list a stage builds, is bounded
 by one of these. The numbers are provisional: nothing in REQUIREMENTS.md or
 MEMORY_ARCHITECTURE.md fixes them (the Context Budget is a ``[BENCHMARK]``
-item), so they are collected here and in Decision 0019 (Proposed) and can be
+item), so they are collected here and in Decision 0019 (Approved) and can be
 changed without a migration.
 """
 

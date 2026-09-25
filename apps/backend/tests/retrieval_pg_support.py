@@ -117,8 +117,16 @@ def _literal(value: Any) -> str:
         return "true" if value else "false"
     if isinstance(value, int | float):
         return repr(value)
+    if isinstance(value, list) and all(isinstance(x, str) for x in value):
+        # A text[] parameter (the subjects of a System Policy).
+        inside = ",".join(
+            '"' + x.replace("\\", "\\\\").replace('"', '\\"') + '"' for x in value
+        )
+        return "'{" + inside + "}'"
     if isinstance(value, list):
         return "'[" + ",".join(repr(float(x)) for x in value) + "]'"
+    if isinstance(value, UUID):
+        return "'" + str(value) + "'"
     if isinstance(value, datetime):
         return "'" + value.isoformat() + "'"
     return "'" + str(value).replace("'", "''") + "'"

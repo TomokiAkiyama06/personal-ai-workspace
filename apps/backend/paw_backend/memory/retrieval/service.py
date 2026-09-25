@@ -12,17 +12,20 @@
    ``memory_versions`` has been touched yet, and the outcome (a
    :class:`~paw_backend.memory.retrieval.scopes.ResolvedScopes`) is the only thing
    the SQL is built from.
-2. **Metadata and text in one statement each** (``queries.py``, ``pool.py``): the
-   keyword query (PostgreSQL full-text) and the vector query (pgvector cosine
-   distance) both carry the permission condition, ``status = 'active'`` and the
-   freshness filter in their own WHERE, so the ranking sees readable rows only.
-   One read-only ``REPEATABLE READ`` transaction on a connection that is shut
+2. **Eligibility and text in one statement each** (``queries.py``, ``pool.py``):
+   the keyword query (PostgreSQL full-text) and the vector query (pgvector cosine
+   distance) both carry, in their own WHERE, the permission condition,
+   ``status = 'active'``, the freshness filter, and every other condition that
+   decides whether a row may be returned at all: not superseded by a readable
+   version, not stale when the caller excludes stale ones, not a shared memory that
+   a System Security Policy covers (Decision 0009; the policy is loaded first, and
+   an unavailable policy source fails the call). They act BEFORE the candidate
+   limits, so a row that will not be returned never takes the place of one that
+   will. One read-only ``REPEATABLE READ`` transaction on a connection that is shut
    down at the deadline (``Database.run_abortable``).
 3. **Fuse** (Reciprocal Rank Fusion), keep the best ``rerank_candidates``, fetch
-   the memories that conflict with them.
-4. **System Policy** (``shared`` memories only): a shared memory that a System
-   Security Policy covers is not returned (Decision 0009); an unavailable policy
-   source fails the call.
+   the memories that conflict with them (under the same conditions).
+4. (Nothing is filtered after the read: see 2.)
 5. **Rerank** (the Reranker Protocol) on memories the caller may read, then the
    structured rules: confirmed above inferred, freshness, importance, pin, scope
    (``ranking.py``).
@@ -71,6 +74,7 @@ from paw_backend.memory.retrieval.protocols import (
     RerankCandidate,
     Reranker,
 )
+from paw_backend.memory.retrieval.queries import Eligibility
 from paw_backend.memory.retrieval.ranking import (
     DEFAULT_RANKING,
     Fused,
@@ -81,7 +85,6 @@ from paw_backend.memory.retrieval.ranking import (
 )
 from paw_backend.memory.retrieval.records import (
     DegradedStage,
-    Freshness,
     MatchSource,
     RetrievalQuery,
     RetrievalResult,
@@ -89,6 +92,7 @@ from paw_backend.memory.retrieval.records import (
     StalePolicy,
 )
 from paw_backend.memory.retrieval.resolver import ScopeResolver
+from paw_backend.memory.retrieval.scopes import ResolvedScopes
 from paw_backend.memory.retrieval.stages import bounded
 from paw_backend.memory.retrieval.validation import (
     reject,
@@ -98,15 +102,8 @@ from paw_backend.memory.retrieval.validation import (
     validate_number,
     validate_text,
 )
-from paw_backend.memory.shared import limits as shared_limits
-from paw_backend.memory.shared.errors import (
-    InputProblem,
-    InvalidSharedMemoryInputError,
-    PolicySourceError,
-)
+from paw_backend.memory.shared.errors import InputProblem, PolicySourceError
 from paw_backend.memory.shared.policy import SystemPolicySource, load_policies
-from paw_backend.memory.shared.precedence import overriding_policy_ids
-from paw_backend.memory.shared.validation import validate_subject
 
 logger = logging.getLogger(__name__)
 
@@ -259,6 +256,12 @@ class HybridRetriever:
         if tsquery is None and vector is None:
             return RetrievalResult(degraded=tuple(degraded))
 
+        eligible = Eligibility(
+            exclude_stale=query.stale_policy is StalePolicy.EXCLUDE,
+            repo_heads=query.repo_heads or {},
+            policy_subjects=await self._policy_subjects(scopes),
+        )
+
         async def work(session: AsyncSession) -> Pool:
             return await read_pool(
                 session,
@@ -272,11 +275,11 @@ class HybridRetriever:
                 vector_candidates=self._vector_candidates,
                 rerank_candidates=self._rerank_candidates,
                 policy=self._ranking,
+                eligible=eligible,
             )
 
         pool = await self._database.run_abortable(work)
-        candidates = await self._apply_system_policy(pool.candidates)
-        candidates = self._drop_excluded_stale(candidates, query, now)
+        candidates = pool.candidates
 
         rerank_scores = await self._rerank(query.text, candidates, pool)
         if rerank_scores is None:
@@ -347,42 +350,23 @@ class HybridRetriever:
         # The zero vector has no direction: its cosine distance is undefined.
         return numbers if any(numbers) else None
 
-    async def _apply_system_policy(
-        self, candidates: dict[UUID, Candidate]
-    ) -> dict[UUID, Candidate]:
-        """Drop the shared memories a System Security Policy covers (Decision 0009).
+    async def _policy_subjects(self, scopes: ResolvedScopes) -> tuple[str, ...]:
+        """The subjects the System Security Policy governs (Decision 0009).
 
-        The policy is loaded only when a shared memory is among the candidates; if
-        it cannot be loaded the call fails (no memory is returned without it). A
-        shared memory whose declared subjects are malformed cannot be judged and is
-        left out.
+        Read BEFORE the candidates, because the shared memories a policy covers are
+        left out by the candidate statements themselves (``queries``), ahead of their
+        limits. Only when the shared scope is searched; if the policy cannot be
+        loaded the call fails (no memory is returned without it).
         """
-        shared = [c for c in candidates.values() if c.scope is MemoryScope.SHARED]
-        if not shared:
-            return candidates
+        if MemoryScope.SHARED not in scopes.scopes:
+            return ()
         try:
             items = await load_policies(
                 self._policies, timeout_seconds=self._stage_timeout
             )
         except PolicySourceError:
             raise RetrievalSourceError(Component.POLICY_SOURCE) from None
-        dropped: set[UUID] = set()
-        for candidate in shared:
-            subjects = _subjects_of(candidate.policy_subjects)
-            if subjects is None or overriding_policy_ids(subjects, items):
-                dropped.add(candidate.version_id)
-        return {k: v for k, v in candidates.items() if k not in dropped}
-
-    def _drop_excluded_stale(
-        self, candidates: dict[UUID, Candidate], query: RetrievalQuery, now: datetime
-    ) -> dict[UUID, Candidate]:
-        if query.stale_policy is not StalePolicy.EXCLUDE:
-            return candidates
-        return {
-            version_id: candidate
-            for version_id, candidate in candidates.items()
-            if freshness_of(candidate, now, query.repo_heads)[0] is Freshness.FRESH
-        }
+        return tuple(sorted({item.subject for item in items}))
 
     async def _rerank(
         self, text: str, candidates: dict[UUID, Candidate], pool: Pool
@@ -473,18 +457,6 @@ class HybridRetriever:
             stale_reason=reason,
             sources=tuple(sources),
         )
-
-
-def _subjects_of(raw: object) -> tuple[str, ...] | None:
-    """The ``policy_subjects`` of a shared memory; ``None`` when malformed."""
-    if raw is None:
-        return ()
-    if not isinstance(raw, list) or len(raw) > shared_limits.MAX_POLICY_SUBJECTS:
-        return None
-    try:
-        return tuple(sorted({validate_subject(item) for item in raw}))
-    except InvalidSharedMemoryInputError:
-        return None
 
 
 def _hit(item: Ranked, group: int | None) -> RetrievedMemory:

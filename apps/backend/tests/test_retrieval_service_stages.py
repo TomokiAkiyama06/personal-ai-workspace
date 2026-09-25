@@ -8,6 +8,7 @@ fails degrades the answer instead of losing it.
 import asyncio
 import math
 
+from paw_backend.authz import Principal, SystemRole
 from paw_backend.memory.retrieval import (
     Component,
     DegradedStage,
@@ -336,19 +337,34 @@ class SystemPolicyTest(PostgresRetrievalTestCase):
             embed=False,
         )
         retriever = self.use(SystemPolicyItem("p", "merge", "rule"))
-        result = await self.retrieve(me, QUERY, retriever=retriever)
-        self.assertEqual(sorted(titles(result)), ["mine", "project"])
-        self.assertEqual(self.counting.calls, 0)
+        # Whether or not the policy is consulted, it never touches these scopes.
+        for scopes in (["user", "project"], None):
+            with self.subTest(scopes=scopes):
+                result = await self.retrieve(
+                    me, QUERY, retriever=retriever, scopes=scopes
+                )
+                self.assertEqual(sorted(titles(result)), ["mine", "project"])
 
-    async def test_the_policy_is_loaded_only_when_a_shared_memory_is_a_candidate(self):
+    async def test_the_policy_is_loaded_only_when_the_shared_scope_is_searched(self):
+        # Loaded BEFORE the candidates (the covered memories are left out by the
+        # candidate statements, ahead of their limits), so it depends on the scope,
+        # not on whether a shared memory happens to be a candidate.
         me = self.user()
         retriever = self.use()
-        await self.retrieve(me, QUERY, retriever=retriever)
+        for scopes in (["user"], ["user", "project"], []):
+            await self.retrieve(me, QUERY, retriever=retriever, scopes=scopes)
         self.assertEqual(self.counting.calls, 0)
-        self.seed("shared", TEXT, scope="shared", embed=False)
         await self.retrieve(me, QUERY, retriever=retriever)
-        await self.retrieve(me, QUERY, retriever=retriever)
+        await self.retrieve(me, QUERY, retriever=retriever, scopes=["shared"])
         self.assertEqual(self.counting.calls, 2)  # once per call, never cached
+
+    async def test_the_policy_is_not_loaded_for_a_caller_who_may_not_read_shared_memory(
+        self,
+    ):
+        system = Principal(self.seed_user(), SystemRole.SYSTEM)
+        retriever = self.use()
+        await self.retrieve(system, QUERY, retriever=retriever)
+        self.assertEqual(self.counting.calls, 0)
 
     async def test_a_policy_that_cannot_be_loaded_fails_the_call_without_any_memory(
         self,

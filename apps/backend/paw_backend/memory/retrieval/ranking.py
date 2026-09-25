@@ -1,9 +1,9 @@
 """How candidates are fused, judged and scored: pure rules, no database, no clock.
 
 All numbers live in :class:`RankingPolicy`. They are **provisional** (no document
-fixes them; Decision 0019 asks the Human to approve them and the benchmark of
-PAW-019 / ``benchmarks/retrieval_runner.py`` is where they are tuned), so they are
-data with validation, not constants spread over the code.
+fixes them; the Human approved them as provisional in Decision 0019, and the
+benchmark of PAW-019 / ``benchmarks/retrieval_runner.py`` is where they are
+tuned), so they are data with validation, not constants spread over the code.
 
 The order of the pipeline (MEMORY_ARCHITECTURE.md section 12) is: permission and
 metadata filter, keyword + vector, rerank, deduplicate and handle conflicts, Top-N.
@@ -23,7 +23,7 @@ This module covers the arithmetic between them:
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from types import MappingProxyType
 from uuid import UUID
 
@@ -45,7 +45,7 @@ from paw_backend.memory.shared.errors import InputProblem
 # Retrieval": Repo > Project > User > Shared). ``project_group`` is not in that
 # list (the requirements do not define a group): it is placed between Project and
 # User because it applies to several projects but is derived from a user's own
-# preference. A guess, listed in Decision 0019.
+# preference. A guess, approved as provisional in Decision 0019.
 SCOPE_SPECIFICITY: Mapping[MemoryScope, int] = MappingProxyType(
     {
         MemoryScope.SHARED: 0,
@@ -249,7 +249,11 @@ def freshness_of(
     if candidate.freshness_policy is FreshnessPolicy.REVALIDATE:
         if candidate.verified_at is None or candidate.revalidate_after is None:
             return Freshness.STALE, StaleReason.REVALIDATE_DUE
-        if now >= candidate.verified_at + candidate.revalidate_after:
+        # In UTC: ``+ timedelta`` on a datetime that carries a zone with daylight
+        # saving (the driver returns instants in the session's zone) steps by
+        # wall-clock time, not by absolute time.
+        due = candidate.verified_at.astimezone(UTC) + candidate.revalidate_after
+        if now >= due:
             return Freshness.STALE, StaleReason.REVALIDATE_DUE
     if (
         candidate.freshness_policy is FreshnessPolicy.REPO_COMMIT

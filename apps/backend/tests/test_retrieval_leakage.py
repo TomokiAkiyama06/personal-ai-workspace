@@ -42,6 +42,7 @@ from paw_backend.authz import (
     SystemRole,
 )
 from paw_backend.memory.retrieval import RetrievalQuery, RetrievalResult
+from paw_backend.memory.shared import StaticPolicySource, SystemPolicyItem
 from paw_backend.projects import MemberStatus, ProjectStatus
 
 from .retrieval_pg_support import (
@@ -86,6 +87,16 @@ class Memory:
     freshness: str = "permanent"
     expires_at: object = None
     text: str = ""
+    subjects: tuple[str, ...] = ()
+    marked_stale: bool = False
+    verified_days_ago: int | None = None
+    commit_sha: str | None = None
+
+
+# What the strict variant asks of the retrieval (see ``Universe.ineligible``).
+POLICY_SUBJECT = "merge"
+SUBJECT_CHOICES = ["merge", "merge.permission", "docs.api", "deploy", "mergeable"]
+CURRENT, MOVED = "c" * 40, "d" * 40
 
 
 @dataclass
@@ -97,6 +108,8 @@ class Universe:
     groups: dict[UUID, set[UUID]] = field(default_factory=dict)
     memories: list[Memory] = field(default_factory=list)
     queries: list[str] = field(default_factory=list)
+    relations: list[tuple[UUID, UUID, str]] = field(default_factory=list)
+    heads: dict[UUID, str] = field(default_factory=dict)
 
     def oracle(self, caller: Principal) -> set[UUID]:
         """The version ids ``caller`` may read: the rules, written out plainly."""
@@ -130,6 +143,49 @@ class Universe:
             ):
                 readable.add(m.version_id)
         return readable
+
+
+def _covered(subjects: tuple[str, ...]) -> bool:
+    return any(
+        subject == POLICY_SUBJECT or subject.startswith(POLICY_SUBJECT + ".")
+        for subject in subjects
+    )
+
+
+def ineligible(u: Universe, readable: set[UUID]) -> set[UUID]:
+    """Readable memories that must not be candidates in the strict variant.
+
+    Written out plainly, independent of the SQL: stale ones (marked, ``revalidate``
+    past 90 days, ``repo_commit`` of another commit than the repository's head),
+    shared ones the System Policy covers, and ones a readable successor supersedes.
+    """
+    found: set[UUID] = set()
+    for m in u.memories:
+        if m.version_id not in readable:
+            continue
+        stale = (
+            m.marked_stale
+            or (m.freshness == "revalidate" and m.verified_days_ago >= 90)
+            or (
+                m.freshness == "repo_commit"
+                and m.repo in u.heads
+                and u.heads[m.repo] != m.commit_sha
+            )
+        )
+        if stale or (m.scope == "shared" and _covered(m.subjects)):
+            found.add(m.version_id)
+    for newer, older, kind in u.relations:
+        if kind == "supersedes" and newer in readable and older in readable:
+            found.add(older)
+    return found
+
+
+def successors_of_readable(u: Universe, readable: set[UUID]) -> set[UUID]:
+    return {
+        newer
+        for newer, older, kind in u.relations
+        if kind == "supersedes" and newer in readable and older in readable
+    }
 
 
 @requires_postgres
@@ -415,9 +471,11 @@ class RandomisedLeakageTest(LeakageTestCase):
             )[0]
             extra = {}
             expires_at = None
+            verified_days_ago = None
             if freshness == "revalidate":
+                verified_days_ago = rng.choice([10, 200])
                 extra = {
-                    "verified_at": T0 - timedelta(days=rng.choice([10, 200])),
+                    "verified_at": T0 - timedelta(days=verified_days_ago),
                     "revalidate_after": timedelta(days=90),
                 }
             elif freshness == "expiring":
@@ -433,7 +491,15 @@ class RandomisedLeakageTest(LeakageTestCase):
                 freshness=freshness,
                 expires_at=expires_at,
                 text=text,
+                verified_days_ago=verified_days_ago,
+                commit_sha=extra.get("commit_sha"),
             )
+            if rng.random() < 0.12:
+                memory.marked_stale = True
+                extra["stale_since"] = T0 - timedelta(days=1)
+            if scope == "shared" and rng.random() < 0.5:
+                memory.subjects = tuple(rng.sample(SUBJECT_CHOICES, rng.randint(1, 2)))
+                extra["subjects"] = list(memory.subjects)
             columns = {}
             if scope == "user":
                 memory.owner = rng.choice(real_ids)
@@ -461,17 +527,28 @@ class RandomisedLeakageTest(LeakageTestCase):
             )
             memory.version_id = seeded.version_id
             u.memories.append(memory)
-        # Relations: conflicts (many), supersedes and extends (a few), anywhere.
+        # Relations: conflicts (many), supersedes and extends (a few), anywhere. A
+        # version takes part in at most one supersedes relation, so that "switch off
+        # what is not eligible" cannot revive a version through a chain.
         versions = [m.version_id for m in u.memories]
-        for _ in range(25):
+        in_a_supersedes: set[UUID] = set()
+        for _ in range(40):
             a, b = rng.sample(versions, 2)
-            kind = rng.choices(["conflicts_with", "supersedes", "extends"], [6, 2, 1])[
+            kind = rng.choices(["conflicts_with", "supersedes", "extends"], [6, 3, 1])[
                 0
             ]
+            if kind == "supersedes" and {a, b} & in_a_supersedes:
+                continue
             try:
                 self.seed_relation(a, b, kind)
             except Exception:  # a duplicate or a second successor: skip it
-                pass
+                continue
+            u.relations.append((a, b, kind))
+            if kind == "supersedes":
+                in_a_supersedes.update((a, b))
+        for repo in repos:
+            if rng.random() < 0.6:
+                u.heads[repo] = rng.choice([CURRENT, MOVED])
         return u
 
     def set_status(self, version_ids, status):
@@ -483,64 +560,115 @@ class RandomisedLeakageTest(LeakageTestCase):
                 {"s": status, "ids": list(version_ids)},
             )
 
+    def retriever_for(self, u, caller, reranker, *, strict):
+        options = {}
+        if strict:
+            # Short candidate lists and a System Policy: ineligible rows above the
+            # limits would crowd the eligible ones out if they were filtered late.
+            options = {
+                "policies": StaticPolicySource(
+                    (SystemPolicyItem("p", POLICY_SUBJECT, "rule"),)
+                ),
+                "keyword_candidates": 4,
+                "vector_candidates": 4,
+                "rerank_candidates": 4,
+            }
+        return self.new_retriever(
+            reranker=reranker,
+            repo_acls=StaticRepoAcls(repo_acls_of(u)),
+            project_groups=StaticGroups(u.groups.get(caller.user_id, set())),
+            **options,
+        )
+
+    def query_for(self, u, text, *, strict):
+        if strict:
+            return RetrievalQuery(
+                text, limit=50, stale_policy="exclude", repo_heads=dict(u.heads)
+            )
+        return RetrievalQuery(text, limit=50)
+
+    async def check_universe(self, seed, *, strict):
+        """Returns (hits seen, hidden matches seen, ineligible matches seen)."""
+        hits = hidden_matches = ineligible_matches = 0
+        self.clean_tables()
+        u = self.build(seed)
+        markers = {m.version_id: m.marker for m in u.memories}
+        everyone_hidden = lambda readable: {  # noqa: E731
+            m.version_id for m in u.memories if m.version_id not in readable
+        }
+        for caller in u.callers:
+            readable = u.oracle(caller)
+            hidden_active = {
+                m.version_id
+                for m in u.memories
+                if m.status == "active" and m.version_id not in readable
+            }
+            skipped = ineligible(u, readable) if strict else set()
+            revivable = successors_of_readable(u, readable)
+            # What is switched off for the reference run: hidden rows always; in the
+            # strict variant also the ineligible ones (but a readable successor stays,
+            # or the version it supersedes would come back).
+            switched_off = hidden_active | (skipped - revivable)
+            for query in u.queries:
+                words = set(query.split())
+                hidden_matches += sum(
+                    1
+                    for m in u.memories
+                    if m.version_id in hidden_active and words & set(m.text.split())
+                )
+                ineligible_matches += sum(
+                    1
+                    for m in u.memories
+                    if m.version_id in skipped and words & set(m.text.split())
+                )
+                reranker = RecordingReranker()
+                retriever = self.retriever_for(u, caller, reranker, strict=strict)
+                ask = self.query_for(u, query, strict=strict)
+                full = await retriever.retrieve(caller, ask)
+                # 1. Oracle: only readable, and (strict) only eligible memories.
+                self.assert_only(full, readable - skipped)
+                # 3. The Reranker never sees the text of a memory that is hidden.
+                for text in reranker.seen_texts:
+                    for version_id in everyone_hidden(readable):
+                        self.assertNotIn(markers[version_id], text)
+                # 2. Non-interference: the same answer, in every field, when the
+                # hidden (and, strict, the ineligible) rows do not exist.
+                self.set_status(switched_off, "history")
+                try:
+                    plain = await retriever.retrieve(caller, ask)
+                finally:
+                    self.set_status(switched_off, "active")
+                self.assertEqual(full, plain, f"seed {seed}, strict={strict}")
+                hits += len(full.hits)
+        return hits, hidden_matches, ineligible_matches
+
     async def test_no_caller_reads_or_is_influenced_by_a_memory_they_may_not_read(self):
-        total_hits = 0
-        total_hidden_matches = 0
+        total_hits = total_hidden_matches = 0
         for seed in self.SEEDS:
             with self.subTest(seed=seed):
-                self.clean_tables()
-                u = self.build(seed)
-                markers = {m.version_id: m.marker for m in u.memories}
-                for caller in u.callers:
-                    readable = u.oracle(caller)
-                    hidden_active = {
-                        m.version_id
-                        for m in u.memories
-                        if m.status == "active" and m.version_id not in readable
-                    }
-                    for query in u.queries:
-                        words = set(query.split())
-                        total_hidden_matches += sum(
-                            1
-                            for m in u.memories
-                            if m.version_id in hidden_active
-                            and words & set(m.text.split())
-                        )
-                        reranker = RecordingReranker()
-                        groups_source = StaticGroups(
-                            u.groups.get(caller.user_id, set())
-                        )
-                        retriever = self.new_retriever(
-                            reranker=reranker,
-                            repo_acls=StaticRepoAcls(repo_acls_of(u)),
-                            project_groups=groups_source,
-                        )
-                        full = await retriever.retrieve(
-                            caller, RetrievalQuery(query, limit=50)
-                        )
-                        # 1. Oracle.
-                        self.assert_only(full, readable)
-                        # 3. Reranker.
-                        for text in reranker.seen_texts:
-                            for version_id in hidden_active | {
-                                m.version_id
-                                for m in u.memories
-                                if m.version_id not in readable
-                            }:
-                                self.assertNotIn(markers[version_id], text)
-                        # 2. Non-interference.
-                        self.set_status(hidden_active, "history")
-                        try:
-                            plain = await self.retrieve_with(retriever, caller, query)
-                        finally:
-                            self.set_status(hidden_active, "active")
-                        self.assertEqual(full, plain)
-                        total_hits += len(full.hits)
+                hits, hidden, _ = await self.check_universe(seed, strict=False)
+                total_hits += hits
+                total_hidden_matches += hidden
         self.assertGreater(total_hits, 100)
         self.assertGreater(total_hidden_matches, 100)
 
-    async def retrieve_with(self, retriever, caller, query):
-        return await retriever.retrieve(caller, RetrievalQuery(query, limit=50))
+    async def test_ineligible_rows_never_spend_a_candidate_place(
+        self,
+    ):
+        # Strict variant: stale ones excluded, a System Policy, candidate lists of 4.
+        # Besides never returning a hidden or ineligible memory, the answer must be
+        # exactly the answer of a database in which those rows do not exist: an
+        # ineligible row never spends a candidate place.
+        total_hits = total_hidden = total_ineligible = 0
+        for seed in self.SEEDS:
+            with self.subTest(seed=seed):
+                hits, hidden, skipped = await self.check_universe(seed, strict=True)
+                total_hits += hits
+                total_hidden += hidden
+                total_ineligible += skipped
+        self.assertGreater(total_hits, 60)
+        self.assertGreater(total_hidden, 100)
+        self.assertGreater(total_ineligible, 100)
 
 
 if __name__ == "__main__":
