@@ -15,7 +15,13 @@ Delete 開始時の確認操作、削除時に消すものを定めている。
 [AGENTS.md](../../AGENTS.md) の「仕様変更」に従い、その選択を一覧にして Human の承認を求め、2026-09-25 に承認された。
 
 **この Decision は 2026-09-25 に Human が承認した（Approved）。** 下の各選択は、承認された方針である（承認時の決定は末尾を参照）。
-数値（招待の有効期間 `INVITE_TTL`、Member と招待の合計 `MAX_MEMBERS_PER_PROJECT`、Project 名と説明の長さ）は、暫定値として承認した。いずれも `paw_backend/projects/limits.py` の定数で、後から変えられ、変えても Schema は変わらない。
+数値（招待の有効期間、Member と招待の合計、Project 名と説明の長さ）は、暫定値として承認した。後から変えられるが、変え方は値ごとに違う（実装の場所は次のとおり）。
+
+- **Project 名（100 文字）と説明（2000 文字）は、定数だけでは変えられない。** `paw_backend/projects/limits.py` の `MAX_NAME_CHARS` / `MAX_DESCRIPTION_CHARS` と、DB の CHECK 制約（`name_length` / `description_length`。Migration `0026_projects.py` と `models.py`）の両方に書いてあり、`tests/test_projects_schema.py` が両者の一致を検証する。
+  変えるには、CHECK 制約を作り直す新しい Revision の Migration と `models.py` の変更が要る。定数だけを上げると、検証は通っても PostgreSQL が拒否する値ができる。
+- **Member と招待の合計（200）は、定数だけで変えられる。** `limits.MAX_MEMBERS_PER_PROJECT` が唯一の場所で、`ProjectService.invite_member` が数える。DB の制約はなく、Migration は要らない。
+- **招待の有効期間（14 日）は、Migration なしで変えられるが、変える場所は `domain.invite_expiry` である。** `timedelta(days=14)` が実際の値を定める。DB が強制するのは「期限が招待の時刻より後」だけで、14 日は強制しない。
+  `limits.INVITE_TTL` は同じ値を記した定数だが、実装は参照していない（Test だけが使う）ため、この定数だけを変えても期限は変わらない。
 承認された内容を変える場合は、この Decision を書き換えず、新しい Decision から `Supersedes` する。
 
 実装は [Backend README](../../apps/backend/README.md) の「Project CRUD / Membership / Lifecycle」に書いている。
@@ -143,7 +149,7 @@ PAW-026 のレビューで、`begin_deletion` が Project の行を更新する�
 
 - Delete 開始を Archived からだけにする: 誤操作の防止は強くなるが、要件にない制約で、Archive を強いる。
 - Purge で Project の行も消す: 墓石が要らなくなるが、他の領域の `project_id` と Audit の ID が宙に浮く。
-- 招待に期限を置かない: 古い招待が残り続ける。期限は Schema に書かず、`INVITE_TTL` で変えられる。
+- 招待に期限を置かない: 古い招待が残り続ける。期限は Schema に書かず、`domain.invite_expiry` で決める（変えても Migration は要らない）。
 - Capability を今すぐ追加する: Audit できるが PAW-025 の Policy と、その網羅 Test の変更が要る。別 Issue [#82](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/82) で行う。
 - Delete 開始の Transaction の中で Task Service を呼んで止める: Task Service は自分の Transaction を持ち、外部の Worker は止められず、失敗しても再実行できない。Project の Transaction に Task の書き込みを混ぜると、Lock の順序も Task Lane と衝突する。
 - Outbox を持たず、Orchestrator が Pending deletion の Project を走査するだけにする: Processor は Project の状態から動くため成り立つが、停止が完了したかの記録がなく、30 日間ずっと全 Project を調べる。Outbox は完了と未完了を区別し、未処理だけを引ける（部分 Index）。ただし走査の併用は、Delete 開始の後に作られた Task を拾うために採る（上の 4。Orchestrator が Pending deletion の Project にも通常の周期で `stop_project_tasks` を呼ぶことは、PAW-034（[#30](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/30)）の受け入れ条件に追記した）。
@@ -152,7 +158,7 @@ PAW-026 のレビューで、`begin_deletion` が Project の行を更新する�
 ## 承認後の扱い
 
 2026-09-25 に承認された。PAW-026 のPRは本Decisionを参照する。
-暫定値として承認した数値は、`paw_backend/projects/limits.py` の定数で変えられる。
+暫定値として承認した数値を変える手順は、「背景」の一覧のとおり値ごとに違う。Project 名と説明の長さは、新しい Migration と `models.py` の変更が要る。
 承認後に方針を変える場合は、この Decision を書き換えず、新しい Decision から `Supersedes` する。
 [REQUIREMENTS.md](../../REQUIREMENTS.md) の原文は書き換えない。
 
@@ -162,7 +168,7 @@ PAW-026 のレビューで、`begin_deletion` が Project の行を更新する�
 - Delete 開始は Active からもでき、Project 名の完全一致の入力を要求する。
 - 削除待ちの復元は `project.lifecycle.manage` を持つ Manager・Owner・Admin（Decision 0004 と一致）で、復元先は Archived とする。
 - 30 日後の消去は、Project の行を墓石として残し、Member と招待の行を削除する。
-- 暫定値（招待の有効期間 14 日、Member と有効な招待の合計 200、Project 名 1〜100 文字・説明 2,000 文字）を承認した。いずれも暫定値で、後から変えられる。
+- 暫定値（招待の有効期間 14 日、Member と有効な招待の合計 200、Project 名 1〜100 文字・説明 2,000 文字）を承認した。いずれも暫定値で、後から変えられる（Project 名と説明の長さは Migration が要る。「背景」を参照）。
 - Membership のルールを承認した。
 - Project の作成・招待の受諾 / 辞退・退出の Capability と Audit は、暫定の作り（Authorizer を通さず、Audit に残らない）で承認した。Capability の追加は Issue [#82](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/82) で行う。承認済みの Decision 0004 は書き換えず、新しい Decision から `Supersedes` する。
 - 管理者向けの全 Project 一覧 API（`admin.projects.manage`）は Issue [#84](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/84) で実装する。

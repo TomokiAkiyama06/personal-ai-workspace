@@ -1893,13 +1893,13 @@ DB を使わない Test（`records`、`validation`、`rules`、`store_validation
 
 [PAW-026](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/23)（Revision `0026`）で実装しました。設計は [要件](../../REQUIREMENTS.md)の「Project roles and membership」「Project lifecycle」「New Project defaults」と
 [Decision 0004](../../docs/decisions/0004-rbac-capability-and-audit-policy.md)（承認済み）に従い、要件が決めていない選択は [Decision 0008（承認済み）](../../docs/decisions/0008-project-membership-and-lifecycle-policy.md)にまとめています。
-**Decision 0008 は 2026-09-25 に Human が承認しました。** 招待の期限（14 日）、Member と招待の合計（200）、Project 名と説明の長さ（1〜100 文字、2,000 文字）は暫定値として承認され、`paw_backend/projects/limits.py` の定数で変えられます。
+**Decision 0008 は 2026-09-25 に Human が承認しました。** 招待の期限（14 日）、Member と招待の合計（200）、Project 名と説明の長さ（1〜100 文字、2,000 文字）は暫定値として承認されました。Project 名と説明の長さは DB の CHECK 制約にも書かれているため、変えるには新しい Migration と `models.py` の変更が要ります（`limits.py` の定数だけでは足りません）。Member と招待の合計は `limits.MAX_MEMBERS_PER_PROJECT` で、招待の期限は `domain.invite_expiry` で決まり、どちらも Migration は要りません（詳しくは Decision 0008 の「背景」）。
 **HTTP の Endpoint はありません**（Session は PAW-022）。`ProjectService` は、認証済みの `Principal` を受け取り、`Authorizer` で判定します。
 
 | ファイル | 内容 |
 | --- | --- |
 | `models.py` | `projects`、`project_members`、`project_task_stops` の Model |
-| `limits.py` | 上限、30 日、招待の期限（Test が DB の CHECK 制約との一致を検証） |
+| `limits.py` | 上限と時間の定数（名と説明の長さ、30 日は DB の CHECK 制約と一致することを Test が検証。招待の期限 `INVITE_TTL` は記録だけで、実際の値は `domain.invite_expiry`） |
 | `records.py`、`errors.py` | 返す値（`Project`、`Member`、`PendingInvite`、`PurgeResult`）、状態の Enum、型付きの Error |
 | `validation.py` | 引数の検証（DB を使わない純粋関数） |
 | `domain.py` | Lifecycle と Membership の規則（純粋関数。状態遷移の表、30 日、招待の期限、最後の Manager） |
@@ -2060,7 +2060,7 @@ AGENTS.md のとおり、同じ失敗を繰り返したのでエスカレーシ�
 Human は [Decision 0008](../../docs/decisions/0008-project-membership-and-lifecycle-policy.md) の各点を、推奨どおり承認しました。
 
 1. **承認した点。** Delete 開始を Active から許し、Project 名の完全一致の入力を要求すること。復元できる人（`project.lifecycle.manage` を持つ Manager、Owner、Admin。復元先は Archived）。墓石を残す Purge。Membership のルール（辞退・退出は行の削除で履歴を持たない、`users` への Foreign Key `ON DELETE RESTRICT` を含む）。
-2. **暫定値として承認した数値。** 招待の期限（14 日）、Member と有効な招待の合計（200）、Project 名（1〜100 文字）と説明（2,000 文字）。定数で変えられます。
+2. **暫定値として承認した数値。** 招待の期限（14 日）、Member と有効な招待の合計（200）、Project 名（1〜100 文字）と説明（2,000 文字）。後から変えられますが、名と説明の長さは DB の CHECK 制約にも書かれているため、新しい Migration と `models.py` の変更が要ります。他の数値は Migration が要りません（Decision 0008 の「背景」）。
 3. **Capability を持たない 4 つの操作**（作成、招待の受諾・辞退、退出）は、暫定の作りで承認されました。Capability と Audit の追加は Issue [#82](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/82) で行います（承認済みの Decision 0004 は書き換えず、新しい Decision から `Supersedes` します）。
 4. **Owner / Admin が全 Project を一覧する API**（管理上の Lifecycle 操作の入口）は、Issue [#84](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/84) です。
 5. **Purge 後の他の領域のデータ削除**は、各 Service が `PurgeResult.purged` を使う分担で承認されました。調査結果（Provenance・Scratch など）の扱いは、Issue [#88](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/88) で決めます。

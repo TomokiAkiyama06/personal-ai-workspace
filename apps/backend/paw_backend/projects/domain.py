@@ -140,7 +140,9 @@ def purge_due(scheduled_at: datetime, now: datetime) -> bool:
 def invite_expiry(invited_at: datetime) -> datetime:
     """When an invitation made at ``invited_at`` expires: +14 days, in UTC.
 
-    Exactly 14 * 24 hours later (``paw_backend.projects.limits.INVITE_TTL``).
+    Exactly 14 * 24 hours later. The 14 days is this literal, not
+    ``paw_backend.projects.limits.INVITE_TTL`` (which records the same value and is
+    read only by the tests): change both together.
     ``ValueError`` when ``invited_at`` is naive, ``TypeError`` when it is not a
     ``datetime``.
 

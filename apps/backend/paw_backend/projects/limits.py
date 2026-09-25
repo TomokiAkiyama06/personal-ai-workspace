@@ -3,9 +3,17 @@
 Every size here bounds something a caller controls. The database repeats the
 name / description limits and the 30 day retention as CHECK constraints
 (migration ``0026``); ``tests/test_projects_schema.py`` fails when the two
-disagree. The invitation lifetime is a product choice that is **not** written
-into the database (Decision 0008 approved it on 2026-09-25 as a provisional value):
-changing it needs no migration.
+disagree. Raising ``MAX_NAME_CHARS`` or ``MAX_DESCRIPTION_CHARS`` therefore needs
+a new migration that replaces the ``name_length`` / ``description_length`` CHECK
+constraints (and ``models.py``): the constant alone would let validation accept
+values PostgreSQL rejects. ``MAX_MEMBERS_PER_PROJECT`` is enforced only by
+``ProjectService.invite_member`` and can be changed alone.
+
+The invitation lifetime is a product choice that is **not** written into the
+database (Decision 0008 approved it on 2026-09-25 as a provisional value):
+changing it needs no migration. Its effective value is the literal in
+``domain.invite_expiry``; ``INVITE_TTL`` records the same value and only the tests
+read it, so change both together.
 """
 
 from datetime import UTC, datetime, timedelta
