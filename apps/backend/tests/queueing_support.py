@@ -37,7 +37,8 @@ def raise_unexpected(results: list, *expected: type[BaseException]) -> None:
 
 
 class FakeClock:
-    """A settable clock for ``BudgetTracker(clock=...)``."""
+    """A settable clock for ``BudgetTracker(clock=..., allow_explicit_clock=True)``:
+    it stands in for the database clock (the test seam of ``budget``)."""
 
     def __init__(self, now: datetime = T0) -> None:
         self.now = now
@@ -64,7 +65,10 @@ class PostgresQueueingTestCase(PostgresTaskTestCase):
         self.clock = FakeClock()
         # Explicit times are the test seam (production queues use the database clock).
         self.queue = TaskQueue(self.database, allow_explicit_now=True)
-        self.budget = BudgetTracker(self.database, clock=self.clock)
+        # The fake clock is the test seam (production trackers use the database's).
+        self.budget = BudgetTracker(
+            self.database, clock=self.clock, allow_explicit_clock=True
+        )
         self.loop_detector = LoopDetector(self.database)
 
     async def owner_sql(self, sql: str, **parameters) -> None:
@@ -106,6 +110,7 @@ class PostgresQueueingTestCase(PostgresTaskTestCase):
 
     def new_budget(self, **kwargs) -> BudgetTracker:
         kwargs.setdefault("clock", self.clock)
+        kwargs.setdefault("allow_explicit_clock", True)
         return BudgetTracker(self.new_database(), **kwargs)
 
     def new_loop_detector(self) -> LoopDetector:

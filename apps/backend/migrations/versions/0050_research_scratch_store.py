@@ -4,8 +4,10 @@ Two tables, separate from Long-term Memory (no foreign key to or from any
 memory table): ``research_scratch_items`` and ``research_scratch_leases``.
 ``expires_at = created_at + 24 hours`` is a CHECK constraint (a generated column
 cannot be used: ``timestamptz + interval`` is not immutable). Deletion is
-deferred for pinned items, items whose promotion is pending and items with an
-active lease; a lease lasts at most one hour.
+deferred for pinned items, saved items (a user's explicit save, kept apart from
+the pin so that clearing one never clears the other; Proposed decision 0013),
+items whose promotion is pending and items with an active lease; a lease lasts
+at most one hour.
 
 ``project_id`` and ``created_by`` are plain UUIDs (the projects and users tables
 do not exist yet). ``task_id`` is a plain UUID too, with no foreign key to
@@ -62,6 +64,9 @@ def upgrade() -> None:
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column(
             "pinned", sa.Boolean(), server_default=sa.text("false"), nullable=False
+        ),
+        sa.Column(
+            "saved", sa.Boolean(), server_default=sa.text("false"), nullable=False
         ),
         sa.Column(
             "promotion_state",
@@ -122,7 +127,9 @@ def upgrade() -> None:
         "ix_research_scratch_items_purgeable",
         "research_scratch_items",
         ["expires_at", "id"],
-        postgresql_where=sa.text("NOT pinned AND promotion_state <> 'pending'"),
+        postgresql_where=sa.text(
+            "NOT pinned AND NOT saved AND promotion_state <> 'pending'"
+        ),
     )
 
     op.create_table(
@@ -142,17 +149,19 @@ def upgrade() -> None:
     )
 
     # Least privilege for the application role (PAW_APP_DATABASE_ROLE), exactly
-    # what ``ScratchStore`` executes: an item is inserted, pinned, put into or
-    # resolved in the promotion workflow (three columns) and deleted by the
-    # purge; a lease is inserted or renewed (two columns) and deleted. Nothing
-    # else may change: an item's content, its owner, its project and above all
-    # its expiry (only pinning exempts it from the purge) stay as written.
+    # what ``ScratchStore`` executes: an item is inserted, pinned or saved (and
+    # unpinned / unsaved: one column each), put into or resolved in the
+    # promotion workflow (two columns) and deleted by the purge; a lease is
+    # inserted or renewed (two columns) and deleted. Nothing else may change: an
+    # item's content, its owner, its project and above all its expiry (only a
+    # pin, a save, a lease or a pending promotion exempts it from the purge)
+    # stay as written.
     grant_app_privileges(
         op,
         "research_scratch_items",
         insert=True,
         delete=True,
-        update_columns=("pinned", "promotion_state", "promotion_requested_at"),
+        update_columns=("pinned", "saved", "promotion_state", "promotion_requested_at"),
     )
     grant_app_privileges(
         op,

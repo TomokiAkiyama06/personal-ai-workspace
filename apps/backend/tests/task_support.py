@@ -1,13 +1,16 @@
 """Shared fixtures for the task tests that need a real PostgreSQL."""
 
 import asyncio
+import contextlib
 import io
+import json
 import os
+import re
 import unittest
 import uuid
 
 from alembic import command as alembic_command
-from sqlalchemy import text
+from sqlalchemy import event, text
 
 from paw_backend.db import Database
 from paw_backend.tasks import (
@@ -134,6 +137,73 @@ class PostgresTaskTestCase(unittest.IsolatedAsyncioTestCase):
     async def scalar(self, sql: str, **parameters):
         async with self.database.engine.connect() as connection:
             return (await connection.execute(text(sql), parameters)).scalar()
+
+    async def generic_plan(self, sql: str, parameters: dict) -> str:
+        """The plan PostgreSQL caches for a prepared statement (parameters unknown).
+
+        A driver prepares a statement it runs often, and PostgreSQL may then
+        stop planning it for each set of parameter values; a partial index can
+        only be used by such a plan when the index condition is written into
+        the statement, not passed as a parameter.
+        """
+        return json.dumps(await self.plan(sql, parameters, "force_generic_plan"))
+
+    async def plan(
+        self, sql: str, parameters: dict, mode: str, *, analyze: bool = False
+    ) -> list:
+        """``EXPLAIN`` of the statement as a prepared statement planned in ``mode``.
+
+        ``mode`` is a value of ``plan_cache_mode`` (``force_generic_plan`` plans
+        without the parameter values, ``force_custom_plan`` with them).
+        ``analyze`` also runs the statement and reports the rows each node read.
+        """
+        names = list(dict.fromkeys(re.findall(r"%\((\w+)\)s", sql)))
+        numbered = re.sub(
+            r"%\((\w+)\)s", lambda m: f"${names.index(m.group(1)) + 1}", sql
+        )
+
+        def literal(value) -> str:
+            if isinstance(value, int):
+                return str(value)
+            return "'" + str(value).replace("'", "''") + "'"
+
+        arguments = ", ".join(literal(parameters[name]) for name in names)
+        options = "ANALYZE, FORMAT JSON" if analyze else "FORMAT JSON"
+        async with self.database.engine.connect() as connection:
+            await connection.exec_driver_sql(f"SET plan_cache_mode = {mode}")
+            await connection.exec_driver_sql(f"PREPARE checked_statement AS {numbered}")
+            try:
+                result = await connection.exec_driver_sql(
+                    f"EXPLAIN ({options}) EXECUTE checked_statement"
+                    + (f"({arguments})" if names else "")
+                )
+                return result.scalar()
+            finally:
+                # The connection goes back to the pool: leave no session state.
+                await connection.exec_driver_sql("DEALLOCATE checked_statement")
+                await connection.exec_driver_sql("RESET plan_cache_mode")
+
+    @staticmethod
+    def plan_nodes(plan: dict):
+        """Every node of an ``EXPLAIN (FORMAT JSON)`` plan tree, parents first."""
+        yield plan
+        for child in plan.get("Plans", ()):
+            yield from PostgresTaskTestCase.plan_nodes(child)
+
+    @contextlib.contextmanager
+    def captured_statements(self):
+        """The SQL statements (and their parameters) the service sends meanwhile."""
+        captured: list[tuple[str, dict]] = []
+
+        def capture(connection, cursor, statement, parameters, context, many):
+            captured.append((statement, dict(parameters)))
+
+        engine = self.database.engine.sync_engine
+        event.listen(engine, "before_cursor_execute", capture)
+        try:
+            yield captured
+        finally:
+            event.remove(engine, "before_cursor_execute", capture)
 
     async def wait_for_lock_waiters(self, count: int, limit: float = 10.0) -> None:
         """Wait until ``count`` backends are blocked on a lock held by another one.

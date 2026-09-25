@@ -263,7 +263,15 @@ def upgrade() -> None:
         ),
     )
     grant_app_privileges(op, "task_logs", insert=True)
-    op.create_index(op.f("ix_task_logs_task_id"), "task_logs", ["task_id", "seq"])
+    # The lines of one attempt of a task, newest first, in the order ``restore``
+    # returns them (its query stops at the limit and sorts nothing), so that the
+    # earlier attempts' lines are never read. It also serves the foreign key on
+    # ``task_id`` (its leading column); nothing reads a task's lines across attempts.
+    op.create_index(
+        "ix_task_logs_task_id_attempt_seq",
+        "task_logs",
+        ["task_id", "attempt", sa.text("seq DESC")],
+    )
 
     op.create_table(
         "task_events",

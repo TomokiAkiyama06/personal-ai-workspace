@@ -851,6 +851,11 @@ class TaskService:
         logs and worktree / review / PR state belong to the same moment. The
         snapshot lists every started tool call of the current step and the
         latest ``MAX_RESTORE_TOOL_INVOCATIONS`` finished ones.
+
+        Every query is bounded by an index that matches its filter and order
+        (``ix_task_logs_task_id_attempt_seq`` for the current attempt's logs,
+        the unique keys of the steps and attempts, ``(task_id, seq)`` of the
+        events), so its cost does not grow with the history of earlier attempts.
         """
         if not 0 <= log_limit <= MAX_RESTORE_LOGS:
             raise InvalidCommandArgumentError(
