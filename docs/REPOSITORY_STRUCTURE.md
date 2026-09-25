@@ -60,6 +60,7 @@ personal-ai-workspace/
 │  │  │     ├─ 0046_shared_memory_candidates.py
 │  │  │     ├─ 0050_research_scratch_store.py
 │  │  │     ├─ 0052_research_provenance.py
+│  │  │     ├─ 0071_memory_status_history.py
 │  │  │     ├─ 0083_tasks_project_state_index.py
 │  │  │     └─ 0087_audit_external_send_details.py
 │  │  ├─ paw_backend/
@@ -314,6 +315,8 @@ personal-ai-workspace/
 │  │     ├─ test_identity_migration.py
 │  │     ├─ test_identity_settings.py
 │  │     ├─ test_identity_tokens.py
+│  │     ├─ test_memory_status_history.py
+│  │     ├─ test_memory_status_history_migration.py
 │  │     ├─ test_middleware.py
 │  │     ├─ test_migrations.py
 │  │     ├─ test_owner_no_web_path.py
@@ -430,6 +433,7 @@ personal-ai-workspace/
 │  │     ├─ test_shared_memory_service_guards.py
 │  │     ├─ test_shared_memory_service_manage.py
 │  │     ├─ test_shared_memory_service_read.py
+│  │     ├─ test_shared_memory_status_history.py
 │  │     ├─ test_task_in_transaction.py
 │  │     ├─ test_task_input_snapshot.py
 │  │     ├─ test_task_stop_windows.py
