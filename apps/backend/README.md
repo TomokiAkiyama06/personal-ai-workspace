@@ -1542,7 +1542,7 @@ User / Project の ID は、他の Memory Table と同じく素の UUID です�
 | --- | --- |
 | `record_user_message(actor, conversation_id, content, *, turn_id=None, priority=NORMAL)` | **Raw の Message、Entry（`pending`）、Job を 1 Transaction で保存**する（どれかが失敗すれば全部戻る）。`JournalReceipt`（ID と `event_sequence`）を返す。人間の `Principal` だけ（Agent は `InvalidJournalInputError`） |
 | `append_message(actor, conversation_id, role, content, *, turn_id)` | Assistant / Tool / Agent / Task の Message を、同じ Sequence で保存する（Raw だけ。Observation も Job もない）。`role` に `user` は不可 |
-| `pending_observations(actor, conversation_id, *, limit=50)` | 整理が済んでいない Observation を `event_sequence` 順に返す（次の Turn が読む）。Dead Letter の Job の Observation も含む |
+| `pending_observations(actor, conversation_id, *, limit=50)` | 整理が済んでいない Observation を返す（次の Turn が読む）。Dead Letter の Job の Observation も含む。**`limit` を超えて溜まっているときは、最新の `limit` 件を選び、古い順（`event_sequence` 順）に並べて返す**（長い GPU 停止のあとでも、直近の指示が外れない）。古い分は `pending` のままで、Queue が通常どおり整理する。Cursor はないので、全件が要る呼び出し側は `sync_status` の件数を見る |
 | `sync_status(actor, conversation_id)` | UI の 4 つの状態の件数: 整理中（`consolidating`）、Worker 待ち（`waiting_for_worker`。GPU に届かなかった）、再試行（`retrying`）、失敗（`failed`。Dead Letter）。全部 0 なら同期済み |
 
 - **Event Sequence。** Conversation の行を `FOR NO KEY UPDATE` で Lock し、その会話の Message の最大値 + 1 を割り当てます（0 から）。同じ会話への書き込みはこの Lock で 1 つずつになるので、番号は重複せず、欠番がなく、Commit の順に並びます。Conversation を削除中の書き込みは Lock を待ち、Commit 後に「見つからない」になります。`(conversation_id, event_sequence)` の Unique（`messages`）が最後の防波堤で、会話の Message は Journal を通してだけ追加する必要があります（自分で番号を選ぶ書き込みは衝突します）。

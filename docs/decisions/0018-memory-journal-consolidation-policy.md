@@ -40,6 +40,7 @@
 
 - 会話ごとに 0 から始まる連番で、欠番がなく、Commit の順に並ぶ。Conversation の行を `FOR NO KEY UPDATE` で Lock し、その会話の最大値 + 1 を割り当てる。
 - **会話の Message は、Journal を通してだけ追加する**（同じ Lock を取るか、`MemoryJournal` を使う）。自分で番号を選ぶ書き込みは、衝突するか順序を壊す。
+- 次の Turn が読む `pending_observations` は、`limit`（既定 50）を超えて溜まっているとき**最新の `limit` 件**を選び、古い順に並べて返す（長い GPU 停止のあとでも直近の指示が外れない。Cursor はなく、古い分は `pending` のまま Queue が整理する）。
 - Project 単位の Sequence は持たない。要件が挙げるのは `conversation_id` / `turn_id` / `event_sequence` で、会話をまたぐ順序は、時刻（DB の時計）と `base_memory_version` 相当の保護（下の 6）で決める。
 
 ### 3. Raw と Journal の保持

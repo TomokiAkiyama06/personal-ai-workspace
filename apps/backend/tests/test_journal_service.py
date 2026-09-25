@@ -8,6 +8,8 @@ import unittest
 from unittest import mock
 from uuid import uuid4
 
+from sqlalchemy import text
+
 from paw_backend.authz import (
     ALL_PROJECTS,
     AgentGrant,
@@ -20,6 +22,7 @@ from paw_backend.memory.journal import (
     InvalidJournalInputError,
     JournalPermissionError,
     Priority,
+    limits,
 )
 from paw_backend.memory.models import MessageRole
 from paw_backend.memory.shared import AgentActor
@@ -203,8 +206,8 @@ class EventSequenceTest(AsyncPostgresJournalTestCase):
 
     async def test_the_entry_and_its_message_carry_the_same_number(self):
         conversation = self.seed_conversation()
-        for text in ("a", "b", "c"):
-            await self.record(text, conversation=conversation)
+        for content in ("a", "b", "c"):
+            await self.record(content, conversation=conversation)
         rows = self.rows(
             "SELECT e.event_sequence AS entry_sequence,"
             " m.event_sequence AS message_sequence"
@@ -381,14 +384,61 @@ class PendingObservationsTest(AsyncPostgresJournalTestCase):
         pending = await self.journal.pending_observations(self.user, conversation)
         self.assertEqual([p.content for p in pending], ["open"])
 
-    async def test_the_limit_keeps_the_oldest(self):
+    async def test_the_limit_keeps_the_newest_and_presents_them_oldest_first(self):
+        # A long outage: more pending observations than the limit. The LATEST
+        # instruction must be among those returned, in the order it was given.
         conversation = self.seed_conversation()
-        for n in range(5):
+        for n in range(6):
             await self.record(f"m{n}", conversation=conversation)
         pending = await self.journal.pending_observations(
-            self.user, conversation, limit=2
+            self.user, conversation, limit=3
         )
-        self.assertEqual([p.content for p in pending], ["m0", "m1"])
+        self.assertEqual(
+            [(p.event_sequence, p.content) for p in pending],
+            [(3, "m3"), (4, "m4"), (5, "m5")],
+        )
+
+    async def test_the_default_limit_returns_the_latest_instruction_of_a_long_backlog(
+        self,
+    ):
+        conversation = self.seed_conversation()
+        total = limits.DEFAULT_PENDING_LIMIT + 7
+        with self.engine.begin() as connection:
+            for n in range(total):
+                message = connection.execute(
+                    text(
+                        "INSERT INTO messages (conversation_id, turn_id,"
+                        " event_sequence, role, content)"
+                        " VALUES (:c, gen_random_uuid(), :n, 'user', :t)"
+                        " RETURNING id"
+                    ),
+                    {"c": conversation, "n": n, "t": f"instruction {n}"},
+                ).scalar_one()
+                connection.execute(
+                    text(
+                        "INSERT INTO memory_journal_entries (conversation_id,"
+                        " message_id, turn_id, event_sequence, owner_user_id)"
+                        " VALUES (:c, :m, gen_random_uuid(), :n, :o)"
+                    ),
+                    {"c": conversation, "m": message, "n": n, "o": USER_ID},
+                )
+        pending = await self.journal.pending_observations(self.user, conversation)
+        self.assertEqual(len(pending), limits.DEFAULT_PENDING_LIMIT)
+        self.assertEqual(pending[-1].content, f"instruction {total - 1}")
+        self.assertEqual(
+            pending[0].event_sequence, total - limits.DEFAULT_PENDING_LIMIT
+        )
+        sequences = [p.event_sequence for p in pending]
+        self.assertEqual(sequences, sorted(sequences))
+
+    async def test_a_limit_above_the_backlog_returns_everything_oldest_first(self):
+        conversation = self.seed_conversation()
+        for n in range(3):
+            await self.record(f"m{n}", conversation=conversation)
+        pending = await self.journal.pending_observations(
+            self.user, conversation, limit=limits.MAX_PENDING_LIMIT
+        )
+        self.assertEqual([p.content for p in pending], ["m0", "m1", "m2"])
 
     async def test_an_observation_with_a_dead_job_is_still_pending(self):
         conversation = self.seed_conversation()

@@ -356,12 +356,18 @@ class MemoryJournal:
         *,
         limit: int = limits.DEFAULT_PENDING_LIMIT,
     ) -> list[PendingObservation]:
-        """The conversation's observations not consolidated yet, oldest first.
+        """The conversation's newest observations not consolidated yet, oldest first.
 
         What the next turn reads next to the session state and the active memories,
         so that an instruction is not lost while consolidation is behind. Includes
         entries whose job is dead: they are still pending. At most ``limit`` (1 to
-        ``MAX_PENDING_LIMIT``) are returned, by ``event_sequence``.
+        ``MAX_PENDING_LIMIT``) are returned. When more are pending (a long outage of
+        the worker), the NEWEST ``limit`` are selected, so that the latest
+        instruction is never the one left out, and they are presented in the order
+        they were given (by ``event_sequence``, oldest of the selected first). The
+        older ones stay pending and are consolidated by the queue as usual; there is
+        no cursor, so a caller that must see every one reads ``sync_status`` for the
+        count.
         """
         self._check_actor(actor)
         conversation_id = validate_uuid("conversation_id", conversation_id)
@@ -382,12 +388,15 @@ class MemoryJournal:
                 # Written into the statement so that the partial index serves it.
                 _ENTRY.c.state == inlined("state_pending", EntryState.PENDING.value),
             )
-            .order_by(_ENTRY.c.event_sequence)
+            # The newest ``limit`` (a backward scan of the partial index) ...
+            .order_by(_ENTRY.c.event_sequence.desc())
             .limit(limit)
         )
         async with self._database.session() as session:
             await self._check_conversation(session, conversation_id, user_id)
             rows = (await session.execute(query)).all()
+        # ... presented in the order the instructions were given.
+        rows.reverse()
         return [
             PendingObservation(
                 entry_id=row.id,
