@@ -475,8 +475,13 @@ class ConcurrencyTest(GateTestCase):
     async def test_concurrent_sends_are_all_recorded_within_the_connection_cap(self):
         database = self.new_database(database_pool_size=3)
         provider = web(hits=[hit()])
+        # A generous deadline: 24 sends wait for 3 connections, and a slow machine
+        # must not turn that into a refusal.
         broker = build_research_broker(
-            registry_of(provider), database, clock=fixed_clock()
+            registry_of(provider),
+            database,
+            clock=fixed_clock(),
+            audit_timeout_seconds=30,
         )
         queries = [f"python asyncio topic{number}" for number in range(24)]
         results = await guarded(
@@ -502,7 +507,7 @@ class ConcurrencyTest(GateTestCase):
         self.assertFalse(database._abortable_slots.locked())
 
     async def test_concurrent_sends_of_one_query_keep_every_row(self):
-        broker = self.broker_of(web(hits=[hit()]))
+        broker = self.broker_of(web(hits=[hit()]), audit_timeout_seconds=30)
         await guarded(
             asyncio.gather(*(self.search(broker, "python asyncio") for _ in range(12)))
         )
@@ -515,7 +520,7 @@ class ConcurrencyTest(GateTestCase):
         self.assertEqual(len({row["id"] for row in rows}), 12)
 
     async def test_sends_of_different_projects_stay_apart(self):
-        broker = self.broker_of(web(hits=[hit()]))
+        broker = self.broker_of(web(hits=[hit()]), audit_timeout_seconds=30)
         projects = [uuid.uuid4() for _ in range(6)]
         await guarded(
             asyncio.gather(

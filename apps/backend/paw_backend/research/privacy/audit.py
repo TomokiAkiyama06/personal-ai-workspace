@@ -141,9 +141,15 @@ def _checked_details(read: dict[str, Any]) -> dict[str, Any]:
         raise TypeError("withheld must be a WithheldCounts")
     if type(read["truncated"]) is not bool:
         raise TypeError("truncated must be a bool")
+    try:
+        withheld_counts = {
+            name: getattr(withheld, name) for name in EXTERNAL_SEND_WITHHELD_KEYS
+        }
+    except AttributeError:
+        raise TypeError("withheld is incomplete") from None
     counts = {
-        name: _exact_int(getattr(withheld, name), name, low=0, high=MAX_CONTEXT_PIECES)
-        for name in EXTERNAL_SEND_WITHHELD_KEYS
+        name: _exact_int(value, name, low=0, high=MAX_CONTEXT_PIECES)
+        for name, value in withheld_counts.items()
     }
     details: dict[str, Any] = {
         "query_fingerprint": fingerprint,

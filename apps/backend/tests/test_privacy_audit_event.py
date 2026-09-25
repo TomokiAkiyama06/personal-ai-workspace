@@ -337,6 +337,13 @@ class ValidationTest(unittest.TestCase):
                 object.__delattr__(record, name)
                 self.refused(record, TypeError)
 
+    def test_a_withheld_count_that_was_never_set_is_a_type_error(self):
+        for name in EXTERNAL_SEND_WITHHELD_KEYS:
+            with self.subTest(label=name):
+                withheld = WithheldCounts()
+                object.__delattr__(withheld, name)
+                self.refused(tampered_record(withheld=withheld), TypeError)
+
     def test_a_subclass_of_a_type_cannot_stand_in_for_it(self):
         good = fingerprint_of("q")
 

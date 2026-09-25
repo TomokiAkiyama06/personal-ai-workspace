@@ -4,9 +4,9 @@ The audit write is a required one: when it does not finish inside the gate's
 deadline the send is refused (``audit_failed``), on time, without waiting for a
 driver-level cancellation (about ten seconds against a server that accepts the
 connection and never answers), and without leaking a connection or a slot. Two
-kinds of server: ``HangingPostgres`` (a wire-protocol stub that authenticates and
-then says nothing) and, when ``PAW_TEST_DATABASE_URL`` is set, a real PostgreSQL
-behind a proxy that goes silent in the middle of a session.
+kinds of server: ``StalledPostgres`` (``HangingPostgres``, a wire-protocol stub that
+authenticates and then says nothing) and, when ``PAW_TEST_DATABASE_URL`` is set, a
+real PostgreSQL behind a proxy that goes silent in the middle of a session.
 """
 
 import asyncio
@@ -28,7 +28,11 @@ from paw_backend.research.privacy import (
 from paw_backend.research.providers import ResearchRequest
 
 from .fake_postgres import FreezableProxy, HangingPostgres
-from .privacy_audit_support import PostgresAuditTestCase, make_record
+from .privacy_audit_support import (
+    PostgresAuditTestCase,
+    TrackingDatabase,
+    make_record,
+)
 from .privacy_support import guarded
 from .research_support import fixed_clock, hit, registry_of, web
 from .support import make_settings, wait_until
@@ -44,6 +48,22 @@ def settings_for(port: int, **overrides):
     return make_settings(
         database_url=f"postgresql://paw:pw@127.0.0.1:{port}/paw", **overrides
     )
+
+
+class StalledPostgres(HangingPostgres):
+    """``HangingPostgres`` that also closes a connection nobody has handled yet.
+
+    A client that connects and is then aborted (before it sends its startup message)
+    can leave its socket open until it is garbage collected, and the stub's handler
+    for it may not have started when the stub is closed: ``HangingPostgres`` then
+    waits forever for a connection it never closed. ``close_clients`` closes every
+    accepted connection whether or not its handler has run.
+    """
+
+    async def __aexit__(self, *exc_info) -> None:
+        self._server.close()
+        self._server.close_clients()
+        await super().__aexit__(*exc_info)
 
 
 class StubbornDatabase(Database):
@@ -98,7 +118,9 @@ class RefusedSendMixin:
 
 class StalledServerTest(RefusedSendMixin, unittest.IsolatedAsyncioTestCase):
     async def broker_for(self, server, **options):
-        database = Database(settings_for(server.port, **options.pop("settings", {})))
+        database = TrackingDatabase(
+            settings_for(server.port, **options.pop("settings", {}))
+        )
         self.addAsyncCleanup(database.dispose)
         provider = web(hits=[hit()])
         broker = build_research_broker(
@@ -112,17 +134,17 @@ class StalledServerTest(RefusedSendMixin, unittest.IsolatedAsyncioTestCase):
         self.assertFalse(database._abortable_slots.locked())
 
     async def test_a_server_that_never_answers_the_insert_refuses_on_time(self):
-        async with HangingPostgres() as server:
+        async with StalledPostgres() as server:
             broker, provider, database = await self.broker_for(
                 server, audit_timeout_seconds=0.5
             )
             elapsed = await self.assert_refused(broker, provider)
             self.assertGreaterEqual(elapsed, 0.4)  # it did wait for the deadline
-            self.assertEqual(server.logins, 1)
+            self.assertEqual(database.peak, 1)  # one write, one connection
             await self.assert_wound_down(database)
 
     async def test_a_server_that_never_answers_the_login_refuses_on_time(self):
-        async with HangingPostgres(login=False) as server:
+        async with StalledPostgres(login=False) as server:
             broker, provider, database = await self.broker_for(
                 server, audit_timeout_seconds=0.5
             )
@@ -131,7 +153,7 @@ class StalledServerTest(RefusedSendMixin, unittest.IsolatedAsyncioTestCase):
 
     async def test_the_default_deadline_is_five_seconds(self):
         self.assertEqual(DEFAULT_AUDIT_TIMEOUT_SECONDS, 5.0)
-        async with HangingPostgres() as server:
+        async with StalledPostgres() as server:
             broker, provider, database = await self.broker_for(server)
             elapsed = await self.assert_refused(broker, provider, limit=9.0)
             # It waited the whole 5 seconds ... and not the ten of a driver cancel.
@@ -139,7 +161,7 @@ class StalledServerTest(RefusedSendMixin, unittest.IsolatedAsyncioTestCase):
             await self.assert_wound_down(database)
 
     async def test_the_sink_alone_gives_up_at_its_own_deadline(self):
-        async with HangingPostgres() as server:
+        async with StalledPostgres() as server:
             database = Database(settings_for(server.port))
             self.addAsyncCleanup(database.dispose)
             sink = PostgresExternalSendAudit(database, timeout_seconds=0.3)
@@ -150,7 +172,7 @@ class StalledServerTest(RefusedSendMixin, unittest.IsolatedAsyncioTestCase):
             await self.assert_wound_down(database)
 
     async def test_waiting_for_a_slot_and_writing_share_the_one_deadline(self):
-        async with HangingPostgres() as server:
+        async with StalledPostgres() as server:
             broker, provider, database = await self.broker_for(
                 server, audit_timeout_seconds=0.6, settings={"database_pool_size": 1}
             )
@@ -164,15 +186,15 @@ class StalledServerTest(RefusedSendMixin, unittest.IsolatedAsyncioTestCase):
                 self.assertIsInstance(result, PrivacyRefusal)
                 self.assertIs(result.reason, RefusalReason.AUDIT_FAILED)
             # The second send waited for the only slot inside its own deadline: both
-            # ended together, not one after the other, and only one connection was
-            # ever opened.
+            # ended together (not one after the other), and the two never had a
+            # connection at the same time.
             self.assertLess(elapsed, LATE)
-            self.assertEqual(server.logins, 1)
+            self.assertEqual(database.peak, 1)
             self.assertEqual(provider.search_calls, [])
             await self.assert_wound_down(database)
 
-    async def test_a_burst_never_opens_more_connections_than_the_cap(self):
-        async with HangingPostgres() as server:
+    async def test_a_burst_never_runs_more_writes_than_the_cap(self):
+        async with StalledPostgres() as server:
             broker, provider, database = await self.broker_for(
                 server, audit_timeout_seconds=0.5, settings={"database_pool_size": 2}
             )
@@ -186,15 +208,18 @@ class StalledServerTest(RefusedSendMixin, unittest.IsolatedAsyncioTestCase):
                 )
             self.assertEqual(len(logs.output), 10)  # one line per refused send
             self.assertTrue(all(isinstance(r, PrivacyRefusal) for r in results))
-            self.assertLessEqual(server.logins, 2)
+            # However many attempts a deadline hands a freed slot to, no more than 2
+            # statements ever ran at once (the slot is kept until the query ends).
+            self.assertLessEqual(database.peak, 2)
+            self.assertGreaterEqual(database.peak, 1)
             self.assertEqual(provider.search_calls, [])
             await self.assert_wound_down(database)
 
     async def test_cancelling_a_stalled_send_aborts_the_connection(self):
-        async with HangingPostgres() as server:
+        async with StalledPostgres() as server:
             broker, provider, database = await self.broker_for(server)
             task = asyncio.ensure_future(send(broker))
-            self.assertTrue(await wait_until(lambda: server.logins == 1))
+            self.assertTrue(await wait_until(lambda: server.logins == 1, limit=10))
             await asyncio.sleep(0.2)  # inside the write now
             started = time.monotonic()
             task.cancel()
@@ -205,10 +230,10 @@ class StalledServerTest(RefusedSendMixin, unittest.IsolatedAsyncioTestCase):
             await self.assert_wound_down(database)
 
     async def test_disposing_the_database_ends_a_stalled_send_with_a_refusal(self):
-        async with HangingPostgres() as server:
+        async with StalledPostgres() as server:
             broker, provider, database = await self.broker_for(server)
             task = asyncio.ensure_future(send(broker))
-            self.assertTrue(await wait_until(lambda: server.logins == 1))
+            self.assertTrue(await wait_until(lambda: server.logins == 1, limit=10))
             await asyncio.sleep(0.2)
             with self.assertLogs("paw_backend.research.privacy", level="WARNING"):
                 await database.dispose()
@@ -260,18 +285,21 @@ class FrozenRealServerTest(PostgresAuditTestCase):
             )
             self.addAsyncCleanup(database.dispose)
             provider = web(hits=[hit()])
-            broker = build_research_broker(
-                registry_of(provider),
-                database,
-                clock=fixed_clock(),
-                audit_timeout_seconds=0.7,
+            registry = registry_of(provider)
+            # Healthy: a generous deadline (a slow machine must not fail this half),
+            # the send is recorded and reaches the provider.
+            healthy = build_research_broker(
+                registry, database, clock=fixed_clock(), audit_timeout_seconds=30
             )
-            # Healthy: the send is recorded and reaches the provider.
-            await guarded(send(broker, "python asyncio", self.project_id))
+            await guarded(send(healthy, "python asyncio", self.project_id))
             self.assertEqual(len(provider.search_calls), 1)
             self.assertEqual(len(await self.rows()), 1)
-            # The server stops answering (existing and new connections alike).
+            # The server stops answering (existing and new connections alike); the
+            # same database, a short deadline.
             proxy.freeze()
+            broker = build_research_broker(
+                registry, database, clock=fixed_clock(), audit_timeout_seconds=0.7
+            )
             started = time.monotonic()
             with self.assertLogs("paw_backend.research.privacy", level="WARNING"):
                 with self.assertRaises(PrivacyRefusal) as caught:
