@@ -25,8 +25,9 @@ jobs:
       # password below is not a secret.
       postgres:
         # Pinned by digest like the actions below; refresh the digest deliberately
-        # (docker buildx imagetools inspect postgres:18) when bumping PostgreSQL.
-        image: postgres:18@sha256:86c951e05bf56c93d95d397747fb8820ac76cc3bedb78f43abd83eedbe3666ae
+        # (docker buildx imagetools inspect pgvector/pgvector:pg18) when bumping PostgreSQL.
+        # pgvector is required by the memory schema (PAW-040).
+        image: pgvector/pgvector:pg18@sha256:2ba9ca5f2e7daa0f0e7723cba1ee9167bab54efd3640516a44ac1a928dd67e7a
         env:
           POSTGRES_PASSWORD: paw-ci-throwaway
         ports:

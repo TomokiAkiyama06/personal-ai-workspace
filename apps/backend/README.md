@@ -2,8 +2,8 @@
 
 Personal AI Workspace の Core Backend です。
 [PAW-020](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/17) で、後続の Issue が載る最小の Application Skeleton を実装しました。
-認証、User、RBAC、Memory はまだ実装していません（PAW-021 以降）。
-Task は [Lifecycle と永続化（PAW-032）](#agent-task-lifecycle)だけを実装済みで、HTTP の Endpoint はまだありません。
+認証と User はまだ実装していません（PAW-021 以降）。
+RBAC と Audit（PAW-025）、Task の Lifecycle と永続化（[PAW-032](#agent-task-lifecycle)、HTTP の Endpoint はまだありません）、Memory の PostgreSQL Schema（[PAW-040](#memory--conversation-schema)）を実装済みです。Memory の保存・整理・検索の処理は PAW-041 以降です。
 
 [Architecture](../../docs/ARCHITECTURE.md) に基づき、最終的に以下の機能を Backend 側で扱います。
 
@@ -28,7 +28,8 @@ Core Backend は GPU 非依存とし、Local Model Runtime を停止できる構
 | Test / Lint | 標準 `unittest`、Ruff |
 | Package 管理 | uv + `pyproject.toml`（依存は完全一致で固定） |
 
-pgvector は Memory Schema の Issue（PAW-040）で導入します。
+pgvector は Memory Schema（PAW-040）の Migration が `vector` extension として有効にします。
+Python 側の Package（`pgvector-python`）は使わず、`paw_backend/memory/vector.py` の Column 型だけで扱います。
 
 ## 構成
 
@@ -36,7 +37,7 @@ pgvector は Memory Schema の Issue（PAW-040）で導入します。
 apps/backend/
 ├─ pyproject.toml          # 依存（完全一致で固定）と Ruff 設定
 ├─ alembic.ini             # Alembic 設定（DB URL は持たない）
-├─ migrations/             # env.py と Revision（0001 は空の Baseline）
+├─ migrations/             # env.py と Revision（0001 は空の Baseline、0040 は Memory Schema）
 ├─ paw_backend/
 │  ├─ app.py               # create_app(settings)
 │  ├─ config.py            # PAW_ 環境変数から読む Settings
@@ -48,6 +49,7 @@ apps/backend/
 │  ├─ security.py          # Host / Origin の判定
 │  ├─ authz/               # Role・Capability・認可の判定と Audit Event（PAW-025）
 │  ├─ tasks/               # Agent Task の状態遷移と永続化（PAW-032）
+│  ├─ memory/              # Memory / Conversation の Model、ACL 条件、vector 型、Pin / Importance 変更の Actor（PAW-040）
 │  └─ api/
 │     ├─ deps.py           # FastAPI Dependency
 │     └─ v1/               # /api/v1 の Router（health、events）
@@ -82,6 +84,7 @@ Repository 全体の検証は `python .github/scripts/run_ci.py` です（[CI](.
 実 PostgreSQL に対する Test は `PAW_TEST_DATABASE_URL` を設定した場合だけ実行し、未設定では Skip します。
 GitHub Actions は使い捨ての PostgreSQL を起動してこの変数を渡すため、CI ではこれらの Test も実行されます。
 この Test は Migration を `head` へ上げて `base` へ戻すため、ローカルでも使い捨ての Database を指定してください。
+Database には pgvector が必要です（CI は `pgvector/pgvector:pg18` を使います）。Migration の実行には `CREATE EXTENSION` の権限が要ります。
 
 ## 設定
 
@@ -548,6 +551,116 @@ Application 起動時に一度、接続 User の権限を確認し、**`WARNING`
 - 重要操作の Step-up 認証の項目は Audit にありません（PAW-023 で追加します）。
 - Migration `0025`、`0032`、`0040` は今は同じ `down_revision="0001"` を持ちます。統合時に 1 本の鎖へつなぎ直します。
 
+## Memory / Conversation Schema
+
+[PAW-040](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/34)（Revision `0040`）で実装した Schema です。
+設計は [Memory Architecture](../../docs/MEMORY_ARCHITECTURE.md) と [要件](../../REQUIREMENTS.md) の Memory の節に従います。
+Repository / Service は含みません。
+
+| 層 | Table | 内容 |
+| --- | --- | --- |
+| Raw Conversation | `conversations`、`messages` | 発言、Tool 結果、Agent 結果、Task の経緯。無期限に保持し、LLM Context へ全文は入れない |
+| Session state | `session_states` | Conversation ごとの要約と作業状態（1 Conversation に 1 行） |
+| Long-term Memory | `memories`、`memory_versions`、`memory_metadata_changes`、`memory_relations`、`memory_sources`、`embedding_models`、`memory_embeddings` | 確定した知識。Version、Pin / Importance の変更履歴、関係、出典、Embedding |
+
+3 つの層は別の Table で、Foreign Key でつながるのは出典（`memory_sources`）だけです。
+Conversation を消しても Memory と他の出典は残り（`ON DELETE SET NULL`）、Session state と Message は一緒に消えます。
+出典の `conversation_id` と `message_id` は組で検証し（複合 Foreign Key）、Message がその Conversation のものでなければ DB が拒否します。
+Message だけを消すと `message_id` だけが NULL になり、Conversation の出典は残ります。Message を指す出典は Conversation も指す必要があります。Conversation が NULL の組は複合 Foreign Key の検証（`MATCH SIMPLE`）を通り抜け、Conversation 単位の検索（削除の流れ）から漏れるため、
+遅延（`DEFERRABLE INITIALLY DEFERRED`）Constraint Trigger `tr_memory_sources_message_requires_conversation` が拒否します。違反は INSERT ではなく COMMIT（または `SET CONSTRAINTS ... IMMEDIATE`）で分かります。
+CHECK 制約にしないのは、Conversation の削除で Foreign Key の `SET NULL` が `conversation_id` と `message_id` を 1 列ずつ NULL にするため、途中で（Conversation が NULL、Message あり）の状態を通り、削除が失敗するからです（順序は Object ID 由来で保証されません）。Trigger は行の最終の状態を読み直して判定します。
+読み直しは、Trigger を持つ Table の Schema と名前（`TG_TABLE_SCHEMA`、`TG_TABLE_NAME`）で修飾して行い、関数は `search_path` を `pg_catalog, pg_temp` に固定します。
+Application の Role も既定の `TEMP` 権限で一時 Table を作れるため、修飾がないと、空の一時 Table `memory_sources` が読み直しの答えを空にし、不正な行が COMMIT を通ってしまいます（`ShadowedRelationTest`）。
+種別 `conversation` の出典が Conversation も Message も指さない行（`conversation_id`、`message_id`、`source_ref` がすべて NULL）は、何の出典かを示さないのに、CHECK 制約を通ります。
+Conversation を削除した後に `ON DELETE SET NULL` が残す状態（正当）と区別できないため、CHECK では拒否できません。そこで INSERT だけを見る `BEFORE INSERT` の Trigger `tr_memory_sources_conversation_source_identified` が、新しい行を INSERT の時点で拒否します。
+UPDATE には働かないので、Conversation の削除（Foreign Key の `SET NULL`）と、削除の流れが `source_deleted_at` を記録する UPDATE は通ります。既に保存された行は検査しません。
+
+**Scope と ACL。** 各 Version が `scope`（`user` / `project` / `project_group` / `repo` / `shared`）を持ち、Scope に対応する ID を 1 つだけ持ちます
+（`owner_user_id` / `project_id` / `project_group_id` / `repo_id`、`shared` は無し）。CHECK 制約が組み合わせを強制します。
+`project_group` は、要件の Inferred Preference の例（自由入力「開発系の Project だけ適用」を `scope: project_group` へ構造化）を保存するための Scope です。
+要件は Project Group の実体、Member、権限を定義していません。そのため Schema は Group の ID（素の UUID）だけを持ち、
+`Principal.project_group_ids`（呼び出し側が決めた、読める Group の ID）に含まれる場合だけ読めます。
+Project が Group に属していても、それだけでは Group の Memory は読めません（既定は拒否）。
+権限の判定は SQL で行います。`paw_backend.memory.acl` の `readable_memory_versions(principal)` を、
+`memory_versions`（と、それを Join する `memory_embeddings`、`memory_sources`、`memory_relations`、`memory_metadata_changes`）を読む全ての Query に付けます。
+Vector 検索でも、順位付けの前に付けるため、見えない行が順位に入ることはありません。
+`Principal` は User の実効的な権限（読める Project、Project Group、Repo の ID）で、RBAC と Membership から Backend が決めます。
+Repo は既定で Project の権限を継承し、Repo 単位の ACL override で外された Repo は `repo_ids` に入れません。
+Memory ごとの権限の写しは持ちません（Member の変更で古くなり、漏れの原因になるため）。
+Scope 別の Index が `status = 'active'` の絞り込みとあわせて ACL 条件を支えます。
+どの Foreign Key にも先頭 Column の Index があり（Conversation や Message の削除が子の Table を全走査しない）、Test が全 Foreign Key を検査します。
+Raw Conversation は所有者だけが読めます（`readable_conversations`）。Admin にも本文は見せません。
+
+**Version と履歴。** 編集は新しい `memory_versions` の行です。旧 Version は消さず `status`（`active` / `superseded` / `deprecated` / `history`）を変えます。
+1 つの `memories` に `active` は最大 1 行（Partial Unique Index）で、`(memory_id, version_number)` の Unique が楽観ロックを兼ねます。
+`memory_relations` が Version の関係（`supersedes`、`extends`、`conflicts_with`、`confirmed_from`、`revalidated_from`、`merged_from`）を新しい側から古い側へ持ちます。
+自分自身への関係と、同じ Version を複数の Version が supersede することは DB が拒否します。
+Scope を広げる編集は新しい Version で行うため、旧 Version は元の Scope のまま非公開です。
+`confirmation_state`（`observed` / `inferred` / `confirmed` / `rejected`）、`freshness_policy`（`permanent` / `revalidate` / `repo_commit` / `expiring` / `session_only`）と、
+方針ごとの必須項目（`verified_at`、`revalidate_after`、`commit_sha`、`expires_at`）、`actor`、`change_reason` も Version が持ちます。
+
+**Pin / Importance の変更履歴。** 要件（Manual Memory Editing）は、Pin と Importance を「即反映可能だが、変更履歴は残す」低リスクの Metadata としています。
+そのため `memory_versions.pinned` / `importance` は Version の中で更新でき（新しい Version は作りません。本文の編集の楽観ロックと衝突させないためです）、
+変更は `memory_metadata_changes` に追記されます（変更前後の `pinned` と `importance`、`actor_type` / `actor_user_id`、時刻）。
+記録は `memory_versions` の Trigger（`tr_memory_versions_record_metadata_change`）が行うので、書き込む側が省略することはできません（Table の Owner でない Application は Trigger を止められません）。
+Trigger の関数は書き込む側の Session で動き、Application の Role も PostgreSQL 既定の `TEMP` 権限を持つため、同名の一時 Table（や一時 Type `uuid`）で履歴の書き込み先をすり替えられないようにしてあります。
+関数は `search_path` を `pg_catalog, pg_temp`（`pg_temp` を明示して最後に置く）へ固定し、履歴 Table は Trigger を持つ Table と同じ Schema（`TG_TABLE_SCHEMA`）で修飾して書き込みます（動的 SQL）。
+Test は Application の Role で、一時 Table を先に作ってから Pin を変更し、実際の履歴に行が残ることを確認します（`tests/test_memory_grants.py` の `ShadowedRelationTest`）。
+値が変わらない UPDATE は記録しません。`status` と `stale_since` の更新も対象外です。
+Trigger は誰の操作か知らないため、書き込む側が同じ Transaction の UPDATE の前に `metadata_change_actor(actor_type, actor_user_id)`（`paw_backend.memory.metadata`）で Actor を示します。
+Actor を示さない変更は `memory_metadata_changes.actor_type` の NOT NULL で失敗し、UPDATE も取り消されます。設定は Transaction 内だけ有効（`set_config(..., true)`）で、接続 Pool を通じて次の Request へ残りません。
+`memory_metadata_changes` は追記のみ（Application に UPDATE / DELETE は与えません）で、Version と一緒に Cascade で消えます。
+限界: Actor の ID は Backend が主張する値で、DB は確認しません（User の Table が無いため。`actor_user_id` と同じ扱い）。Application は INSERT を持つので、変更を伴わない行を追加することはできます（既存の行は書き換えられません）。
+`pinned` / `importance` は Trigger が使う列なので、型を変える Migration は Trigger を作り直す必要があります。
+Permanent / Revalidate など鮮度の設定は Version の不変の列なので、変更は新しい Version になり、その履歴が変更履歴です。
+
+**User / Project / Repo の ID は Foreign Key なし。** User、Project、Repo の Table はまだありません（PAW-021 / 026 / 027）。
+`owner_user_id`、`project_id`、`project_group_id`、`repo_id`、`actor_user_id` は素の UUID Column で、DB は存在を確認しません。
+Backend は検証した ID だけを書いてください。Table ができた後の Migration で Foreign Key を追加できます。
+Task、Repo 解析、Project Decision の出典も、Table がないため `memory_sources.source_ref` の不透明な文字列です。
+種別 `conversation` 以外の出典は、`source_ref` が NULL でなく、1 文字以上であることを CHECK 制約（`ck_memory_sources_other_sources_have_reference`）が求めます。
+空文字は NULL ではありませんが、Task、Repo 解析、確認、Decision のどれも指さず、出典として辿れないため拒否します（`char_length(NULL)` は NULL で CHECK を通り抜けるため、NULL も明示して拒否します）。
+検査するのは長さだけです。空白だけの文字列は DB が受け入れます。`title`、`content`、`memory_type`、Embedding Model の `id` など、この Schema の他の文字列の Column と同じく、DB は文字列の意味を知らず、
+空白の除去や正規化は Backend が行うためです。種別 `conversation` は従来どおり `source_ref` を持てません（`conversation_has_no_opaque_reference`）。Conversation の削除が残す、参照がすべて NULL の状態（正当）はこの CHECK の対象外です。
+
+**Application の Role の権限。** Migration は `PAW_APP_DATABASE_ROLE` の Role に、Table ごとに必要最小限を与えます（[上の規則](#migration-は-application-の-role-に権限を与えるcontributor-向けの規則)）。
+未設定のときは何も与えません。TRUNCATE、ALTER、DROP、GRANT は誰にも与えません。
+
+| Table | 与える権限 | 理由 |
+| --- | --- | --- |
+| `conversations` | SELECT、INSERT、DELETE、UPDATE（`title`、`updated_at` のみ） | 会話の削除は製品の機能。所有者 `owner_user_id`（ACL の境界）と Project / Repo は変更不可 |
+| `messages` | SELECT、INSERT | Raw Conversation は追記のみ。履歴を書き換えない。会話ごとの削除は下記の Cascade |
+| `session_states` | SELECT、INSERT、UPDATE（`summary`、`state`、`summarized_through_sequence`、`updated_at`） | 要約と状態は会話の進行で更新する。削除は会話と一緒（Cascade） |
+| `memories` | SELECT、INSERT、DELETE | 更新する列は無い。DELETE は Memory 全体の削除（会話と関連 Memory の削除、Shared Memory の Admin 削除、User 削除時の Private Memory の消去）で、Version は Cascade で消える |
+| `memory_versions` | SELECT、INSERT、UPDATE（`status`、`stale_since`、`pinned`、`importance` のみ） | Version は書き換えない（編集は新しい Version）。本文、Scope と ACL の列、`confirmation_state`、鮮度の設定は変更不可。DELETE は与えず履歴を残す。`pinned` / `importance` の UPDATE は Trigger が `memory_metadata_changes` へ記録する |
+| `memory_metadata_changes` | SELECT、INSERT | Pin / Importance の変更履歴は追記のみ。Trigger が Application の権限で INSERT するため INSERT が必要。UPDATE / DELETE は与えない（Version の削除の Cascade でだけ消える） |
+| `memory_relations` | SELECT、INSERT | 履歴 Graph の辺は追記のみ |
+| `memory_sources` | SELECT、INSERT、UPDATE（`source_deleted_at` のみ） | 出典は追記のみ。会話の削除で失われた出典を記録する列だけ更新できる |
+| `embedding_models` | SELECT、INSERT | Benchmark で決めた Model の登録。次元は変えず、Model の廃止は管理者が行う |
+| `memory_embeddings` | SELECT、INSERT、DELETE | 再生成できる派生データ。再生成や Model の廃止で削除する。書き換えはしない |
+
+`memories` の DELETE は、要件が書く削除の流れ（Conversation と関連 Memory の削除、Shared Memory の Admin 削除、User 削除時の消去）のために与えています。
+物理削除を Application の Role に持たせたくない場合は、削除だけを行う別の保守用 Role（Owner が実行する Job など）へ移す方法もあります。
+
+外部キーの `ON DELETE CASCADE` / `SET NULL` は Table の Owner の権限で実行されます。
+そのため Application は、会話を削除すると Message と Session state が消え、出典の参照が NULL になり、
+Memory を削除すると Version、関係、出典、Embedding が消えますが、それらの Table への DELETE / UPDATE 権限は持ちません。
+Application の Bug や侵害でも、Version の本文や履歴の関係、Raw Conversation を書き換えたり個別に消したりできません。
+Version の `status` は列の UPDATE で変わるため、遷移の正しさ（`superseded` を `active` に戻さない等）は Service が守ります。
+`downgrade` は Owner の Role が実行し、Table と一緒に権限も消えます。
+
+**pgvector。** Migration が `CREATE EXTENSION IF NOT EXISTS vector` を実行します（Migration の Role に権限が必要。管理者が先に作成済みでもよい）。
+`memory_embeddings` は `(memory_version_id, embedding_model_id)` が Key で、`embedding` は **次元を固定しない** `vector` です。
+Embedding Model と次元は Benchmark（PAW-019）で決めるため、まだ決めていません。Migration は Model を 1 件も登録しません。
+Model の登録は `embedding_models`（Model ID と次元）への通常の INSERT です。
+`memory_embeddings` は `(embedding_model_id, dimensions)` でこの Table を参照し、`dimensions` と実際の次元は CHECK で一致させます。
+そのため 1 つの Model は 1 つの次元だけを持ち、別の次元の Vector は DB が拒否します。Embedding がある間は、Model の次元の変更も Model の削除もできません。
+次元の異なる Vector 同士の距離は計算できないため、近傍検索は先に 1 つの `embedding_model_id` に絞ります（この絞り込みで次元の不一致は起きません）。
+ANN Index（HNSW / IVFFlat）はまだありません。Model が決まった後に PAW-043 が追加します。
+
+Model と Migration の一致は Test が検証します（Alembic の autogenerate の差分が空であること、Model から作った Schema と Migration の Catalog（Trigger を含む）が同じであること）。Trigger は Alembic の比較の対象外なので、Model は DDL Event、Migration は同じ DDL の複製で作り、Trigger 関数の定義も Test が比較します。
+制約名は `paw_backend.db.Base` の命名規則に従います。
+
 ## 依存 Package
 
 依存は `pyproject.toml` で完全一致に固定しています。
@@ -561,6 +674,7 @@ CI は pre-commit の専用環境で Test を実行するため、同じ Version
 ## 今後の Issue
 
 [PAW-021](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/18)（Owner Setup）、PAW-022（Login / Session）、
-PAW-025（RBAC）、PAW-040（Memory Schema）はこの Skeleton の上に実装します。
+RBAC（PAW-025）、Task Lifecycle（PAW-032）、Memory Schema（PAW-040）は、この Skeleton の上に実装済みです。
+Memory の保存・整理・検索は PAW-041 以降で、Memory Schema の上に実装します。
 受け入れ基準は [Implementation Backlog](../../docs/IMPLEMENTATION_BACKLOG.md)、
 実装時に選択できる事項は [Requirements Freeze Review](../../docs/REQUIREMENTS_FREEZE_REVIEW.md) を参照してください。

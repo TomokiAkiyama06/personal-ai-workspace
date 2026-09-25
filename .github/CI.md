@@ -13,7 +13,7 @@ Repositoryでは以下を検証する。
 - 検証スクリプトが正常な文書を許容し、破損した入力を検出する回帰テスト
 - `benchmarks/`と`apps/backend/`のPython codeに対するRuff format / lint
 - Benchmark Task schema、fixture、validator CLIのtest
-- Backendのtest（`apps/backend/tests`。設定、Health、Error Response、Host / Origin検証、Security Header、SSE / WebSocketのEvent経路と購読数の上限、Graceful shutdown、Migration設定）
+- Backendのtest（`apps/backend/tests`。設定、Health、Error Response、Host / Origin検証、Security Header、SSE / WebSocketのEvent経路と購読数の上限、Graceful shutdown、Migration設定、Memory / Conversation Schema。制約、Version、ACL filter、pgvector、ModelとMigrationの一致）
 - Backend依存のversionが`apps/backend/pyproject.toml`、hook環境、`requirements-ci.txt`で一致すること
 
 Markdown の行末の 2 個以上のスペースによる改行は許容する。
@@ -28,8 +28,9 @@ YAML は mapping の merge 展開を 10,000 entries 以下に制限し、循環�
 さらに、merge を含む mapping の展開項目数の累計を YAML ファイル全体で 100,000 entries 以下に制限する。
 複数 document を含むファイルでも累計はリセットせず、上限超過となる mapping の展開前に拒否する。
 これは merge の指数展開を抑える制限であり、通常の sequence alias は参照を共有するため対象外とする。
-実PostgreSQLへのBackend test（DB接続、Readiness、Migrationの`head`への適用と`base`への巻き戻し）は、環境変数`PAW_TEST_DATABASE_URL`が設定された場合だけ実行し、未設定ではSkipする。
-GitHub Actionsでは`repository-checks` jobの`services`で使い捨てのPostgreSQL（`postgres:18`、digestで固定）を起動し、この変数を渡して実行する。
+実PostgreSQLへのBackend test（DB接続、Readiness、Migrationの`head`への適用と`base`への巻き戻し、Memory Schemaの制約・ACL filter・pgvector・ModelとMigrationの差分）は、環境変数`PAW_TEST_DATABASE_URL`が設定された場合だけ実行し、未設定ではSkipする。
+GitHub Actionsでは`repository-checks` jobの`services`で使い捨てのPostgreSQL（`pgvector/pgvector:pg18`、digestで固定）を起動し、この変数を渡して実行する。
+Memory Schema（PAW-040）が`vector` extensionを使うため、公式の`postgres:18`ではなくpgvector入りのImageを使う。Major versionは`18`で同じ。
 このContainerはjob内だけで使い、Passwordはworkflowに書いた使い捨ての値でSecretではない。
 ローカルでは`python .github/scripts/run_ci.py`の前に、使い捨てのDatabaseを指すURLを設定すると同じtestを実行できる。
 Web / CLIのbuild / format / lint / testは各領域のコード構成確定後に追加する（PAW-004）。
