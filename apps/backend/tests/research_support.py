@@ -29,6 +29,8 @@ GUARD_SECONDS = 30.0
 # must succeed answer immediately, so this leaves them a very wide margin.
 SHORT_TIMEOUT = 0.3
 SECRET = "SECRET-TOKEN-4f9a1c"
+# A marker for text that must not reach a log line (a forged record, a name).
+FORGED = "FORGED-RECORD-77d2"
 
 
 def fixed_clock(value: datetime = NOW) -> Callable[[], datetime]:
@@ -327,6 +329,102 @@ def hostile_failures(
             RaisingMetaclass(),
             Code.INTERNAL_ERROR,
         ),
+    }
+
+
+def hostile_named_exceptions(tripwire: Tripwire) -> dict[str, BaseException]:
+    """Label -> exception whose class is named (or looks named) by the adapter.
+
+    None of these has a name that may reach a log line. Every name carries
+    ``SECRET`` or a marker that must not appear either (``FORGED``): text after a
+    newline that looks like another log record, control characters, a name of
+    100,000 characters, non-ASCII / bidi text, format directives, and names that
+    imitate an exception of the allowlist. Where a metaclass hook is defined it
+    records itself in ``tripwire`` while armed.
+    """
+
+    def named(name: str, bases=(Exception,), **namespace) -> BaseException:
+        cls = type(name, bases, namespace)
+        if issubclass(cls, ProviderFailure):
+            return cls(ResearchErrorCode.UNAVAILABLE)
+        return cls()
+
+    renamed = type("Innocent", (Exception,), {})
+    renamed.__name__ = f"access_token={SECRET}\n{FORGED}"
+
+    class HookedMeta(type):
+        def __getattribute__(cls, name):
+            if tripwire.active:
+                tripwire.append(f"meta.{name}")
+                raise RuntimeError(name)
+            return super().__getattribute__(name)
+
+        def __hash__(cls):
+            if tripwire.active:
+                tripwire.append("meta.__hash__")
+                raise RuntimeError("__hash__")
+            return super().__hash__()
+
+        def __eq__(cls, other):
+            if tripwire.active:
+                tripwire.append("meta.__eq__")
+                raise RuntimeError("__eq__")
+            return super().__eq__(other)
+
+        def __repr__(cls):
+            if tripwire.active:
+                tripwire.append("meta.__repr__")
+                return f"{SECRET}\n{FORGED}"
+            return super().__repr__()
+
+        def __str__(cls):
+            if tripwire.active:
+                tripwire.append("meta.__str__")
+                return f"{SECRET}\n{FORGED}"
+            return super().__str__()
+
+    class LyingName(type):
+        @property
+        def __name__(cls):
+            if not tripwire.active:
+                return type.__dict__["__name__"].__get__(cls)
+            tripwire.append("meta.__name__")
+            return f"{SECRET}\n{FORGED}"
+
+    class HookedError(Exception, metaclass=HookedMeta):
+        pass
+
+    class LyingError(Exception, metaclass=LyingName):
+        pass
+
+    return {
+        "a secret in the name": named(f"access_token={SECRET}"),
+        "a forged log line in the name": named(
+            f"x\n2026-09-25 12:00:00 ERROR paw: {FORGED} {SECRET}"
+        ),
+        "CR LF and an escape sequence": named(f"a\r\n\x1b[2J\x07{FORGED}{SECRET}"),
+        "a name of 100,000 characters": named("E" * 100_000 + SECRET),
+        "a non-ASCII name": named(f"例外\u202e\u200b{FORGED}{SECRET}"),
+        "a homoglyph of an allowed name": named("Runtim\u0435Error"),
+        "format directives in the name": named("%s %(x)s %d {0} {SECRET}"),
+        "a class named like a builtin": named("RuntimeError"),
+        "a class named like the package's error": named("InvalidProviderResponseError"),
+        "a class named ProviderFailure": named("ProviderFailure"),
+        "a subclass of a builtin with the same name": named(
+            "RuntimeError", (RuntimeError,)
+        ),
+        "a harmless-looking name": named("Innocent"),
+        "a __qualname__ override": named(
+            "Innocent", __qualname__=f"{SECRET}\n{FORGED}"
+        ),
+        "a __module__ override": named("Innocent", __module__=f"{SECRET}\n{FORGED}"),
+        "a __name__ in the class body": named(
+            "Innocent", __name__=f"{SECRET}\n{FORGED}"
+        ),
+        "a name assigned after creation": renamed(),
+        "a subclass of ProviderFailure": named(f"{SECRET}Failure", (ProviderFailure,)),
+        "a metaclass with lookup, hash, eq, repr and str hooks": HookedError(),
+        "a metaclass whose __name__ lies": LyingError(),
     }
 
 

@@ -26,6 +26,7 @@ from paw_backend.tools import (
     InMemoryApprovalStore,
     ScopedRepository,
     TaskContext,
+    TaskRun,
     ToolBroker,
     ToolCall,
     ToolCapability,
@@ -1872,7 +1873,21 @@ class ConstructionTest(unittest.TestCase):
             make_context(scope={"roots": ["/"]})
         with self.assertRaises(ValueError):
             make_context(task_id="not-a-uuid")
-        self.assertIsInstance(make_context(), TaskContext)
+        for run in ((1, 0), None, "1.0", 1):
+            with self.subTest(run=run):
+                with self.assertRaises(TypeError):
+                    make_context(run=run)  # a TaskRun, nothing else
+        context = make_context()
+        with self.assertRaises(TypeError):  # the run cannot be left out
+            TaskContext(
+                task_id=context.task_id,
+                delegator_id=context.delegator_id,
+                grant=context.grant,
+                scope=context.scope,
+                primary_project_id=context.primary_project_id,
+            )
+        self.assertIsInstance(context, TaskContext)
+        self.assertEqual(context.run, TaskRun(1, 0))
 
 
 if __name__ == "__main__":

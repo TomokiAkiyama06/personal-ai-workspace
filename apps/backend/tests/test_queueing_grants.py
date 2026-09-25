@@ -59,7 +59,7 @@ EXPECTED = {
     ),
     "budget_usages": (
         {"SELECT", "INSERT"},
-        {"preset", "limit_value", "consumed", "running_since"},
+        {"preset", "limit_value", "consumed", "running_since", "runtime_generation"},
     ),
     "loop_failure_signatures": ({"SELECT", "INSERT", "DELETE"}, set()),
 }
@@ -359,10 +359,10 @@ class AppRolePrivilegesTest(AsAppRole, PostgresQueueingTestCase):
         await queue.enqueue(task_id, now=T0, priority=Priority.HIGH)
         claimed = await self.new_queue().claim_next("w1", at(1))
         await self.new_queue().heartbeat(claimed.id, "w1", claimed.claim_count, at(2))
-        await budget.start_runtime(task_id)
+        generation = await budget.start_runtime(task_id)
         await budget.record(task_id, BudgetKind.STEPS, 3)
         self.clock.set(30)
-        usage = await budget.stop_runtime(task_id)
+        usage = await budget.stop_runtime(task_id, generation)
         await self.new_queue().complete(claimed.id, "w1", claimed.claim_count, at(31))
         self.assertEqual(usage.consumed, 30)
         row = await self.entry_row(claimed.id)

@@ -273,6 +273,7 @@ personal-ai-workspace/
 │     ├─ 0010-research-privacy-filter-policy.md
 │     ├─ 0012-research-provider-adapter-policy.md
 │     ├─ 0013-research-scratch-task-relation.md
+│     ├─ 0014-task-working-set-persistence.md
 │     └─ README.md
 └─ evaluator/
    └─ README.md
