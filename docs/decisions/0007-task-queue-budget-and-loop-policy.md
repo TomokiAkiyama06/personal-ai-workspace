@@ -103,6 +103,14 @@ Command（PAW-032 の `wait` / `fail`）を発行するのは Orchestrator（PAW
 - `message` の NUL は拒否しない。`message` は Hash にするだけで保存せず、NUL で失敗しない。拒否すると、NUL を含む出力の失敗を記録できず、その繰り返しの Loop を見逃す。`error_class` と `step` は従来どおり制御文字（NUL を含む）を拒否する。
 - 拒否か整形（Surrogate を置換して記録する）かは、仕様の選択である。ここでは、他の入力（PAW-032 の文字列）と同じく拒否とし、整形は呼び出し側（Worker）に任せる。整形して記録する方が失敗を取りこぼさない、という反対の考えもあるため、承認時に確認したい。
 
+### 10. Runtime の Timer の世代（Fencing token）
+
+- Runtime の Timer（`budget_usages` の `runtime_seconds` の行の `running_since`）は、Task の ID と種類だけで識別されていた。Lease が切れて Entry が Reclaim された（または Task が Restart された）後、まだ動いている古い実行が遅れて `stop_runtime` を呼ぶと、新しい Worker の Timer を終わらせて累積へ加えてしまい、その後の `check` は新しい Worker の Runtime を数えなくなる（Runtime の上限を回避できる）。
+- そこで **Runtime の Session の世代**（`budget_usages.runtime_generation`、`runtime_seconds` の行だけが使う `BIGINT`、既定 0）を Timer の Fencing token とする。`start_runtime` は呼ぶたびに世代を 1 増やし、その値を返す。`stop_runtime` は世代を**必須の引数**として受け取り、現在の世代と違えば、何も書かずに `StaleRuntimeSessionError` にする（新しい Session の `running_since` と累積の Runtime は変わらない）。世代は減らず、Timer が止まっても戻らないため、停止済みの古い Session の重複した停止も、新しい Session を止められない。
+- 世代が現在のもので、すでに停止済みの `stop_runtime` は、従来どおり何も変えず、現在の Runtime を返す（同じ Session の二重の停止は冪等）。Preset の変更は世代を変えない。0033 は未 Merge のため、0033 の Migration に列と CHECK（`runtime_generation >= 0`、`runtime_seconds` 以外の行は 0）を足し、`update_columns` に `runtime_generation` を加えた。
+- すでに Timer が動いているときの `start_runtime` は、Session を**引き継ぐ**。`running_since` は変えず（それまでの時間は失われず、二重にも数えられず、死んだ Worker の Lease が切れるまでの時間も Runtime に入る）、世代だけを増やして前の Session を古くする。Lease に有効期限のない Timer が、止められないまま残って新しい Worker を締め出さないための選択である（新しい Worker は Queue の `claim_next` を通っている）。
+- **限界（承認時に確認したい）。** `BudgetTracker` は Queue を読まないため、`start_runtime` を呼んだ Worker が Lease を持つかは確かめない。Lease を失った古い Worker が `start_runtime` を呼ぶと Session を引き継げてしまう。その場合も、時間は数え続けるので Budget は回避されず、新しい Worker の `stop_runtime` が `StaleRuntimeSessionError` になるので気付ける。Lease を持つ Worker だけが呼ぶ規則は Orchestrator（PAW-034）に置く。
+
 ## 選定理由
 
 - 数値は、1 台の GPU Server で個人〜小規模チームが使うことを想定した、桁を合わせるための仮の値であり、実測に基づかない。
@@ -110,6 +118,7 @@ Command（PAW-032 の `wait` / `fail`）を発行するのは Orchestrator（PAW
 - Budget 超過を Loop より優先するのは、Escalation が予算を追加で消費するため。
 - Lease の世代に `claim_count` を使うのは、既存の列で足り（Migration も Grant も変えない）、Claim のたびに必ず増え、Worker の id・時刻・乱数のような呼び出し側の値に頼らずに、古い Claim を判別できるため。
 - 試行の Fencing に PAW-032 の `tasks.attempt` を使うのは、Restart が既に増やす唯一の Counter で、Step・Log・Tool の書き込みも同じ規則（古い試行は `StaleAttemptError`）で拒否しているため。失敗の行へ試行の Column を足して現在の試行だけを読む案は、当初は「`clear` を Restart の後に呼ぶ規則で足りる」として採らなかったが、独立したレビューで、Restart の Commit の後・`clear` の前に新しい試行が記録した失敗が、Task 全体を消す `clear` で失われる（または古い履歴と一緒に判定される）と指摘され、その規則では足りないと分かったため採る。Grant は変わらない（`tasks` の SELECT は付与済みで、行の UPDATE は不要）。Restart と掃除を 1 つの Transaction にする案は、Restart（PAW-032 の Command）と Loop（PAW-033）の境界を壊すため採らない。新しい試行の Dispatch を掃除の完了まで止める案は、Orchestrator（PAW-034）に順序の規則を課すだけで、それを守らない呼び出しを防げないため採らない。
+- Timer の世代に、Queue の `claim_count` ではなく専用の Counter を使うのは、`claim_count` が Entry ごとに 1 から数え直すため。Restart や再 Enqueue の新しい Entry は、古い Entry と同じ `claim_count` を持ち得て、古い実行の停止を通してしまう。`(Entry の id, claim_count)` を呼び出し側から受け取る案は、Budget の API が Queue の Entry を知る必要があり、渡し間違いを Tracker が確かめられないため採らない。`attempt` は Reclaim（同じ試行の別の Claim）を区別できず、同じ試行の再 Enqueue も区別できないため足りない。
 - Lease の時計を Database に一本化するのは、複数の Process（Worker）が同じ Entry を巡って競うため、判定の基準が呼び出し側ごとに違うと Lease の排他が成り立たないため。関数に `clock_timestamp()` を選ぶのは、Lease の期限を判定する時刻が「判定した瞬間」であるべきで、Transaction の開始時刻（`now()`）では Lock を待った分だけ古くなり、失効した Lease を有効とみなすため。文の中で 1 回だけ読むのは、`claimed_at` と期限を正確に `lease_seconds` 離すためである。
 
 ## 代替案
@@ -120,6 +129,8 @@ Command（PAW-032 の `wait` / `fail`）を発行するのは Orchestrator（PAW
 - Worker id に Process 固有の値（PID、起動時刻）を含めさせる: 呼び出し側の規則に頼ることになり、Queue が古い Claim を拒否する保証にならない。別の Token 列を追加する案は、Claim のたびに増える `claim_count` で足りるため採らない。
 - `now()`（Transaction の開始時刻）を Queue の時計にする: Lock を待った後の Lease の判定が、待つ前の古い時刻になり、失効した Lease を有効とみなす。`now()` は採らない。
 - Lease を 1 つの `UPDATE ... WHERE lease_expires_at > <時刻>` だけで判定する（先に行を Lock しない）: `UPDATE` は Lock を待つ前に `WHERE` を判定し、Lock を持っていた側が Rollback すると判定し直さないため、待つ間に切れた Lease を有効と判定し得る。
+- `start_runtime` が Queue の Entry（`entry_id`、`claim_count`）を受け取り、同じ Transaction の中で「Lease が有効な Claim か」を確かめてから Session を始める: 古い Worker の `start_runtime` も拒否できる。一方で、Budget が Queue に依存し（Tracker の Test も全て Queue の Entry を要する）、Lease の期限の判定に Database の時計と行の Lock を足す必要がある。まず Tracker 単体で世代の Fencing を入れ、Lease の確認が要るかは承認時に決める。
+- Timer が動いている間の `start_runtime` を拒否する（引き継がない）: 死んだ Worker が止めずに残した Timer が、置き換えの Worker を永久に締め出す。
 - 呼び出し側が時刻を渡す（または Process の時計を使う）: 時計のずれや誤った時刻で Lease を奪える。Constructor で時計を注入する案は、Test の呼び出しの書き換えが大きいため、既定で拒否する引数の継ぎ目を選んだ。
 
 ## 承認後の扱い

@@ -12,6 +12,8 @@ from dataclasses import replace
 from datetime import datetime
 
 from paw_backend.tools.approval_types import (
+    CONSUME_TASK_REFUSAL,
+    OPEN_TASK_REFUSAL,
     ApprovalBinding,
     ApprovalEventKind,
     ApprovalHistoryEntry,
@@ -37,9 +39,12 @@ _OPEN = (ApprovalStatus.PENDING, ApprovalStatus.APPROVED)
 
 
 class InMemoryApprovalStore:
-    """``task_activity`` is what ``consume(..., require_active_task=True)`` asks
-    about the task. Without one the flag cannot be honoured (this double has no
-    tasks): the broker's own check before the use is then the only one."""
+    """``task_activity`` is what ``open_request`` / ``consume`` with
+    ``require_active_task=True`` ask about the task and the **run** of the
+    request or binding (``check(task_id, run)``); like PostgreSQL, ``open_request``
+    then revokes the task's open approvals of any other run. Without a provider
+    the flag cannot be honoured (this double has no tasks): the broker's own
+    check before the use is then the only one."""
 
     def __init__(
         self,
@@ -94,13 +99,25 @@ class InMemoryApprovalStore:
         async with self._lock:
             if require_active_task and self._task_activity is not None:
                 # Under the store's lock, like the check of ``consume``.
-                activity = await self._task_activity.check(new.task_id)
+                activity = await self._task_activity.check(new.task_id, new.task_run)
                 if activity is not TaskActivity.ACTIVE:
-                    return OpenResult(
-                        OpenOutcome.TASK_NOT_ACTIVE
-                        if activity is TaskActivity.ENDED
-                        else OpenOutcome.TASK_UNKNOWN
-                    )
+                    return OpenResult(OPEN_TASK_REFUSAL[activity])
+                # ``new.task_run`` is the task's current run: any other is an
+                # earlier one, which nothing can use any more (as PostgreSQL).
+                for record in list(self._records.values()):
+                    if (
+                        record.task_id == new.task_id
+                        and record.task_run != new.task_run
+                        and record.status in _OPEN
+                        and not is_expired(record, now)
+                    ):
+                        self._records[record.approval_id] = replace(
+                            record,
+                            status=ApprovalStatus.REVOKED,
+                            revoked_at=now,
+                            revoked_by=None,
+                        )
+                        self._log(record.approval_id, ApprovalEventKind.REVOKED, now)
             for record in list(self._records.values()):
                 if record.call_hash != new.call_hash:
                     continue
@@ -131,6 +148,7 @@ class InMemoryApprovalStore:
             record = ApprovalRecord(
                 approval_id=new.approval_id,
                 task_id=new.task_id,
+                task_run=new.task_run,
                 project_id=new.project_id,
                 agent_id=new.agent_id,
                 requester_user_id=new.requester_user_id,
@@ -210,18 +228,19 @@ class InMemoryApprovalStore:
                 return outcome
             if outcome is ConsumeOutcome.EXPIRED:
                 self._expire(record, now)
-            if outcome is not ConsumeOutcome.CONSUMED:
+            if outcome not in (ConsumeOutcome.CONSUMED, ConsumeOutcome.SUPERSEDED):
                 return outcome
             if require_active_task and self._task_activity is not None:
                 # Under the store's lock, so no other use interleaves. (A double
-                # has no task store to lock, which PostgreSQL does.)
-                activity = await self._task_activity.check(binding.task_id)
+                # has no task store to lock, which PostgreSQL does.) The task
+                # is why an approval of another run is not used, when it is.
+                activity = await self._task_activity.check(
+                    binding.task_id, binding.task_run
+                )
                 if activity is not TaskActivity.ACTIVE:
-                    return (
-                        ConsumeOutcome.TASK_NOT_ACTIVE
-                        if activity is TaskActivity.ENDED
-                        else ConsumeOutcome.TASK_UNKNOWN
-                    )
+                    return CONSUME_TASK_REFUSAL[activity]
+            if outcome is not ConsumeOutcome.CONSUMED:
+                return outcome
             self._records[approval_id] = replace(
                 record, status=ApprovalStatus.CONSUMED, consumed_at=now
             )

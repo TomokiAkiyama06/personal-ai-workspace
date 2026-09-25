@@ -43,6 +43,7 @@ from paw_backend.tools import (
     PostgresApprovalStore,
     PostgresTaskActivity,
     TaskActivity,
+    TaskRun,
     Verdict,
 )
 
@@ -61,10 +62,12 @@ from .tools_support import (
     NOW,
     P1,
     ROOT,
+    RUN,
     TASK,
     U1,
     U2,
     Clock,
+    FakeTaskActivity,
     Harness,
     StepUp,
     make_call,
@@ -154,6 +157,8 @@ class PostgresStoreContractTest(StoreContract, PostgresTestCase):
 ROW = {
     "id": None,
     "task_id": TASK,
+    "task_attempt": 1,
+    "task_retry_count": 0,
     "project_id": P1,
     "agent_id": AGENT,
     "requester_user_id": U1,
@@ -234,6 +239,23 @@ class ConstraintTest(PostgresTestCase):
 
     async def test_an_agent_cannot_be_the_user_it_acts_for(self):
         await self.refused("ck_tool_approvals_agent_is_not_user", agent_id=U1)
+
+    async def test_the_run_of_the_task_must_be_a_real_run(self):
+        # attempts count from 1, retries from 0 (the columns of ``tasks``)
+        for attempt in (0, -1):
+            await self.refused(
+                "ck_tool_approvals_task_attempt_positive", task_attempt=attempt
+            )
+        await self.refused(
+            "ck_tool_approvals_task_retry_count_not_negative", task_retry_count=-1
+        )
+        await self.insert(task_attempt=1, task_retry_count=0)
+        await self.insert(task_attempt=2**31 - 1, task_retry_count=2**31 - 1)
+        for column in ("task_attempt", "task_retry_count"):
+            with self.subTest(column=column):
+                with self.assertRaises(IntegrityError) as caught:
+                    await self.insert(**{column: None})
+                self.assertIn("not-null", str(caught.exception).lower())
 
     async def test_the_shape_of_a_row_is_checked(self):
         await self.refused("ck_tool_approvals_call_hash_sha256", call_hash="A" * 64)
@@ -475,6 +497,8 @@ class StateMachineTest(PostgresTestCase):
         new = await self.approval()
         for column, value in (
             ("task_id", uuid.uuid4()),
+            ("task_attempt", 2),
+            ("task_retry_count", 1),
             ("project_id", uuid.uuid4()),
             ("agent_id", uuid.uuid4()),
             ("requester_user_id", U2),
@@ -654,12 +678,12 @@ class StateMachineTest(PostgresTestCase):
 
     async def test_a_row_is_born_pending_and_undecided(self):
         head = (
-            "INSERT INTO tool_approvals (id, task_id, project_id, agent_id,"
-            " requester_user_id, tool, level, call_hash, targets, summary, status,"
-            " created_at, expires_at"
+            "INSERT INTO tool_approvals (id, task_id, task_attempt, task_retry_count,"
+            " project_id, agent_id, requester_user_id, tool, level, call_hash,"
+            " targets, summary, status, created_at, expires_at"
         )
         body = (
-            ") VALUES (:id, :t, :p, :a, :u, 'repo.delete_tree', 'approval', :h,"
+            ") VALUES (:id, :t, 1, 0, :p, :a, :u, 'repo.delete_tree', 'approval', :h,"
             " CAST('[]' AS jsonb), CAST('[{}]' AS jsonb), :status, :at, :far"
         )
         cases = {
@@ -1094,25 +1118,50 @@ class PostgresTaskActivityTest(TaskFixture):
                     if state in TERMINAL_STATES
                     else TaskActivity.ACTIVE
                 )
-                self.assertEqual(await self.activity.check(task_id), expected)
+                self.assertEqual(await self.activity.check(task_id, RUN), expected)
 
-    async def test_a_task_that_is_started_again_is_active_again(self):
-        for state, command in (
-            (TaskState.FAILED, C.RETRY),
-            (TaskState.FAILED, C.RESTART),
-            (TaskState.CANCELLED, C.RESTART),
+    async def test_a_task_that_is_started_again_is_active_again_in_a_new_run(self):
+        # Retry counts a new run of the same attempt, Restart a new attempt; the
+        # run that ended (and any earlier one) is superseded, not active.
+        for state, command, new_run in (
+            (TaskState.FAILED, C.RETRY, TaskRun(1, 1)),
+            (TaskState.FAILED, C.RESTART, TaskRun(2, 0)),
+            (TaskState.CANCELLED, C.RESTART, TaskRun(2, 0)),
         ):
             with self.subTest(state=state.value, command=command.value):
                 task_id = await self.new_task()
                 await self.drive(task_id, PATHS_TO_STATES[state])
-                self.assertEqual(await self.activity.check(task_id), TaskActivity.ENDED)
+                self.assertEqual(
+                    await self.activity.check(task_id, RUN), TaskActivity.ENDED
+                )
                 await self.drive(task_id, [(command, {})])
                 self.assertEqual(
-                    await self.activity.check(task_id), TaskActivity.ACTIVE
+                    await self.activity.check(task_id, new_run), TaskActivity.ACTIVE
+                )
+                self.assertEqual(
+                    await self.activity.check(task_id, RUN), TaskActivity.SUPERSEDED
                 )
 
+    async def test_only_the_current_run_is_active(self):
+        task_id = await self.new_task()
+        await self.drive(task_id, PATHS_TO_STATES[TaskState.FAILED])
+        await self.drive(task_id, [(C.RETRY, {})])  # (1, 1)
+        await self.drive(task_id, [(C.FAIL, {})])
+        await self.drive(task_id, [(C.RESTART, {})])  # (2, 1): the count stays
+        for run, expected in (
+            (TaskRun(2, 1), TaskActivity.ACTIVE),
+            (TaskRun(2, 0), TaskActivity.SUPERSEDED),
+            (TaskRun(1, 1), TaskActivity.SUPERSEDED),
+            (TaskRun(1, 0), TaskActivity.SUPERSEDED),
+            (TaskRun(3, 1), TaskActivity.SUPERSEDED),  # not one that exists (yet)
+        ):
+            with self.subTest(run=run):
+                self.assertEqual(await self.activity.check(task_id, run), expected)
+
     async def test_a_task_that_does_not_exist_is_unknown(self):
-        self.assertEqual(await self.activity.check(uuid.uuid4()), TaskActivity.UNKNOWN)
+        self.assertEqual(
+            await self.activity.check(uuid.uuid4(), RUN), TaskActivity.UNKNOWN
+        )
 
 
 class FakeDatabase:
@@ -1127,20 +1176,32 @@ class FakeDatabase:
 
 
 class TaskActivityMappingTest(unittest.IsolatedAsyncioTestCase):
-    async def test_only_a_state_the_lifecycle_knows_is_an_answer(self):
+    async def test_only_a_state_and_a_run_the_lifecycle_knows_are_an_answer(self):
         task_id = uuid.uuid4()
         for rows, expected in (
             ([], TaskActivity.UNKNOWN),
-            ([("weird",)], TaskActivity.UNKNOWN),
-            ([(None,)], TaskActivity.UNKNOWN),
-            ([("Completed",)], TaskActivity.UNKNOWN),  # exact values only
-            ([("completed",)], TaskActivity.ENDED),
-            ([("running",)], TaskActivity.ACTIVE),
+            ([("weird", 1, 0)], TaskActivity.UNKNOWN),
+            ([(None, 1, 0)], TaskActivity.UNKNOWN),
+            ([("Completed", 1, 0)], TaskActivity.UNKNOWN),  # exact values only
+            ([("completed", 1, 0)], TaskActivity.ENDED),
+            ([("running", 1, 0)], TaskActivity.ACTIVE),
+            # another run than the one that asks: superseded (unless it ended)
+            ([("running", 2, 0)], TaskActivity.SUPERSEDED),
+            ([("running", 1, 1)], TaskActivity.SUPERSEDED),
+            ([("queued", 1, 3)], TaskActivity.SUPERSEDED),
+            ([("failed", 2, 0)], TaskActivity.ENDED),
+            # a counter that is not a counter is not an answer (never alive)
+            ([("running", None, 0)], TaskActivity.UNKNOWN),
+            ([("running", 1, None)], TaskActivity.UNKNOWN),
+            ([("running", True, 0)], TaskActivity.UNKNOWN),
+            ([("running", "1", 0)], TaskActivity.UNKNOWN),
+            ([("running", 0, 0)], TaskActivity.UNKNOWN),
+            ([("running", 1, -1)], TaskActivity.UNKNOWN),
         ):
             with self.subTest(rows=rows):
                 database = FakeDatabase(rows)
                 activity = PostgresTaskActivity(database, timeout_seconds=1.5)
-                self.assertEqual(await activity.check(task_id), expected)
+                self.assertEqual(await activity.check(task_id, RUN), expected)
                 # the id is bound by the driver, and the read is bounded
                 ((sql, params, timeout),) = database.calls
                 self.assertEqual(params, {"id": task_id})
@@ -1150,7 +1211,7 @@ class TaskActivityMappingTest(unittest.IsolatedAsyncioTestCase):
     async def test_a_database_failure_is_not_turned_into_an_answer(self):
         activity = PostgresTaskActivity(FakeDatabase(error=ConnectionError("down")))
         with self.assertRaises(ConnectionError):
-            await activity.check(uuid.uuid4())
+            await activity.check(uuid.uuid4(), RUN)
 
 
 class RevokeDownStore(PostgresApprovalStore):
@@ -1255,7 +1316,7 @@ class TaskEndPathsTest(TaskFixture):
                 self.assertIn("ApprovalRevocationError", text_logged)
                 self.assertNotIn("went away", text_logged)
                 # the task did end, though, and the approvals are still open
-                activity = await self.h.task_activity.check(self.task_id)
+                activity = await self.h.task_activity.check(self.task_id, RUN)
                 self.assertEqual(activity, TaskActivity.ENDED)
                 self.assertEqual(
                     await self.statuses(),
@@ -1284,30 +1345,42 @@ class TaskEndPathsTest(TaskFixture):
                 )
 
     async def test_a_task_that_is_started_again_needs_new_approvals(self):
-        for failing in (False, True):
-            with self.subTest(revocation_fails_at_the_end=failing):
-                await self.wire()
-                self.store.down = failing
-                with (
-                    self.assertLogs("paw_backend", "WARNING")
-                    if failing
-                    else contextlib.nullcontext()
+        # Retry starts run (1, 1), Restart run (2, 0); the worker of the new run
+        # has a context that says so (the orchestrator builds it from the task).
+        for command, new_run in ((C.RETRY, TaskRun(1, 1)), (C.RESTART, TaskRun(2, 0))):
+            for failing in (False, True):
+                with self.subTest(
+                    command=command.value, revocation_fails_at_the_end=failing
                 ):
-                    await self.drive(self.task_id, self.ENDS[TaskState.FAILED])
-                self.store.down = False
-                await self.drive(self.task_id, [(C.RETRY, {})])  # failed -> queued
-                self.assertEqual(
-                    await self.statuses(),
-                    [ApprovalStatus.REVOKED, ApprovalStatus.REVOKED],
-                )
-                used = await self.request("approved", self.approved.approval_id)
-                self.assertEqual(
-                    (used.verdict, used.reason),
-                    (Verdict.DENY, BrokerReason.APPROVAL_REVOKED),
-                )
-                fresh = await self.request("approved")  # the run asks again
-                self.assertEqual(fresh.verdict, Verdict.NEEDS_APPROVAL)
-                self.assertNotEqual(fresh.approval_id, self.approved.approval_id)
+                    await self.wire()
+                    self.store.down = failing
+                    with (
+                        self.assertLogs("paw_backend", "WARNING")
+                        if failing
+                        else contextlib.nullcontext()
+                    ):
+                        await self.drive(self.task_id, self.ENDS[TaskState.FAILED])
+                    self.store.down = False
+                    await self.drive(self.task_id, [(command, {})])  # -> queued
+                    self.assertEqual(
+                        await self.statuses(),
+                        [ApprovalStatus.REVOKED, ApprovalStatus.REVOKED],
+                    )
+                    # the worker of the earlier run is not the task's any more
+                    stale = await self.request("approved", self.approved.approval_id)
+                    self.assertEqual(
+                        (stale.verdict, stale.reason),
+                        (Verdict.DENY, BrokerReason.TASK_SUPERSEDED),
+                    )
+                    self.context = make_context(task_id=self.task_id, run=new_run)
+                    used = await self.request("approved", self.approved.approval_id)
+                    self.assertEqual(
+                        (used.verdict, used.reason),
+                        (Verdict.DENY, BrokerReason.APPROVAL_REVOKED),
+                    )
+                    fresh = await self.request("approved")  # the run asks again
+                    self.assertEqual(fresh.verdict, Verdict.NEEDS_APPROVAL)
+                    self.assertNotEqual(fresh.approval_id, self.approved.approval_id)
 
 
 class EndsTheTaskAfterAnswering:
@@ -1321,8 +1394,8 @@ class EndsTheTaskAfterAnswering:
     def __init__(self, inner, end):
         self.inner, self.end, self.armed = inner, end, False
 
-    async def check(self, task_id):
-        activity = await self.inner.check(task_id)
+    async def check(self, task_id, run):
+        activity = await self.inner.check(task_id, run)
         if self.armed and activity is TaskActivity.ACTIVE:
             self.armed = False
             await self.end()
@@ -1384,7 +1457,8 @@ class ConsumeRacesWithTaskEndTest(LockWaits, TaskFixture):
         )
         self.assertEqual(await self.status(), ApprovalStatus.APPROVED)
         self.assertEqual(
-            await self.h.task_activity.inner.check(self.task_id), TaskActivity.ENDED
+            await self.h.task_activity.inner.check(self.task_id, RUN),
+            TaskActivity.ENDED,
         )
         # the revocation that follows the end still finds it, and revokes it
         self.assertEqual(await self.h.service.revoke_task(self.task_id), 1)
@@ -1538,7 +1612,7 @@ class OpenRacesWithTaskEndTest(LockWaits, TaskFixture):
             (Verdict.DENY, BrokerReason.TASK_NOT_ACTIVE, None, None),
         )
         self.assertEqual(
-            await self.provider.inner.check(self.task_id), TaskActivity.ENDED
+            await self.provider.inner.check(self.task_id, RUN), TaskActivity.ENDED
         )
         self.assertEqual(await self.statuses(), [])
         # the revocation that follows the end has nothing to take away, and
@@ -1642,6 +1716,385 @@ class OpenRacesWithTaskEndTest(LockWaits, TaskFixture):
         self.assertEqual(handed.outcome, OpenOutcome.EXISTING)
         new, opened = await open_for(ended)
         self.assertEqual(opened.outcome, OpenOutcome.CREATED)
+
+
+class ReplacesTheRunAfterAnswering:
+    """A provider that says the task is alive, and *then* fails and restarts it.
+
+    The broker has read ``ACTIVE`` for the worker of the run that is current; the
+    task fails and is restarted (both committed, no listener has revoked
+    anything), and only then is the approval used or the request inserted.
+    """
+
+    def __init__(self, inner, replace):
+        self.inner, self.replace, self.armed = inner, replace, False
+
+    async def check(self, task_id, run):
+        activity = await self.inner.check(task_id, run)
+        if self.armed and activity is TaskActivity.ACTIVE:
+            self.armed = False
+            await self.replace()
+        return activity
+
+
+@requires_postgres
+class RestartWindowTest(LockWaits, TaskFixture):
+    """An approval of an earlier run of a task cannot be used by a later one.
+
+    Finding of the review of PR #74 (round 4): a task fails and its revocation
+    fails too (the listener runs after the commit and nothing retries it); the
+    task is restarted, and in the window before the listener revokes what is left,
+    a worker of the new attempt passed the "task is active" check and consumed the
+    approval of the abandoned one, so a destructive call ran on the strength of a
+    decision about another attempt. The approval row and the binding now carry the
+    **run** (attempt and retry count), and the consumption checks it against the
+    locked ``tasks`` row in its own transaction, so it does not depend on the
+    listener at all. Every test here uses the real ``TaskService`` and tables and
+    NO listener: what would revoke has not run.
+    """
+
+    NEW_RUN = {C.RESTART: TaskRun(2, 0), C.RETRY: TaskRun(1, 1)}
+
+    async def wire(self, *, early=None, **broker):
+        self.store = PostgresApprovalStore(self.new_database())
+        self.provider = early or PostgresTaskActivity(self.new_database())
+        self.h = Harness(
+            approvals=self.store,
+            clock=Clock(),
+            task_activity=self.provider,
+            **broker,
+        )
+        self.tasks = TaskService(self.new_database())  # no listener
+        self.task_id = await self.new_task()
+        self.user = principal(SystemRole.USER, U1)
+        self.approved = await self.request("approved")
+        self.assertEqual(self.approved.verdict, Verdict.NEEDS_APPROVAL)
+        await self.h.service.approve(self.approved.approval_id, self.user)
+
+    def context(self, run=RUN):
+        return make_context(task_id=self.task_id, run=run)
+
+    async def request(self, name, approval_id=None, run=RUN):
+        return await self.h.broker.request(
+            make_call(
+                "repo.delete_tree",
+                {"path": f"{ROOT}/{name}"},
+                context=self.context(run),
+            ),
+            approval_id=approval_id,
+        )
+
+    async def restart(self, command=C.RESTART, end=TaskState.FAILED):
+        await self.drive(self.task_id, PATHS_TO_STATES[end], self.tasks)
+        await self.drive(self.task_id, [(command, {})], self.tasks)
+
+    # (``decision or ...`` would be wrong: a decision is falsy unless it allows)
+    async def status(self, decision=None):
+        decision = self.approved if decision is None else decision
+        return (await self.store.get(decision.approval_id)).status
+
+    async def kinds(self, decision=None):
+        decision = self.approved if decision is None else decision
+        history = await self.store.history(decision.approval_id)
+        return [h.kind.value for h in history]
+
+    async def test_the_new_run_cannot_use_what_the_earlier_run_was_granted(self):
+        for command, end in (
+            (C.RESTART, TaskState.FAILED),
+            (C.RESTART, TaskState.CANCELLED),
+            (C.RETRY, TaskState.FAILED),
+        ):
+            with self.subTest(command=command.value, end=end.value):
+                await self.wire()
+                await self.restart(command, end)
+                new_run = self.NEW_RUN[command]
+                # the task is alive again, and nothing revoked the approval
+                self.assertEqual(
+                    await self.provider.check(self.task_id, new_run),
+                    TaskActivity.ACTIVE,
+                )
+                self.assertEqual(await self.status(), ApprovalStatus.APPROVED)
+                used = await self.request(
+                    "approved", self.approved.approval_id, new_run
+                )
+                self.assertEqual(
+                    (used.verdict, used.reason, used.invocation),
+                    (Verdict.DENY, BrokerReason.APPROVAL_SUPERSEDED, None),
+                )
+                # it was not used up, and the refusal left no trace in its history
+                self.assertEqual(await self.status(), ApprovalStatus.APPROVED)
+                self.assertEqual(await self.kinds(), ["requested", "approved"])
+                self.assertEqual(self.h.executor.invocations, [])
+                # the worker of the run that was replaced is refused as well
+                stale = await self.request("approved", self.approved.approval_id, RUN)
+                self.assertEqual(
+                    (stale.verdict, stale.reason),
+                    (Verdict.DENY, BrokerReason.TASK_SUPERSEDED),
+                )
+                self.assertEqual(await self.status(), ApprovalStatus.APPROVED)
+
+    async def test_the_new_run_asks_again_and_uses_what_it_was_granted(self):
+        # After a Restart (the attempt changes) and after a Retry (only the retry
+        # count changes): the earlier request of the very same call is not handed
+        # out again, it is revoked and the new run is asked afresh.
+        for command in (C.RESTART, C.RETRY):
+            with self.subTest(command=command.value):
+                await self.wire()
+                await self.restart(command)
+                run = self.NEW_RUN[command]
+                asked = await self.request("approved", run=run)  # the very call
+                self.assertEqual(
+                    (asked.verdict, asked.reason),
+                    (Verdict.NEEDS_APPROVAL, BrokerReason.APPROVAL_REQUIRED),
+                )
+                self.assertNotEqual(asked.approval_id, self.approved.approval_id)
+                # what the earlier run left open is revoked, as the system, with
+                # history
+                self.assertEqual(await self.status(), ApprovalStatus.REVOKED)
+                self.assertEqual(
+                    await self.kinds(), ["requested", "approved", "revoked"]
+                )
+                record = await self.store.get(asked.approval_id)
+                self.assertEqual(
+                    (record.status, record.task_run), (ApprovalStatus.PENDING, run)
+                )
+                # the decision of the new run is used by the new run, once
+                await self.h.service.approve(asked.approval_id, self.user)
+                used = await self.request("approved", asked.approval_id, run)
+                self.assertEqual(
+                    (used.verdict, used.reason),
+                    (Verdict.ALLOW, BrokerReason.APPROVAL_CONSUMED),
+                )
+                again = await self.request("approved", asked.approval_id, run)
+                self.assertEqual(again.reason, BrokerReason.APPROVAL_ALREADY_USED)
+                # the listener that runs late has nothing left to take away
+                self.assertEqual(await self.h.service.revoke_task(self.task_id), 0)
+
+    async def test_the_earlier_requests_are_revoked_only_for_the_task_they_belong_to(
+        self,
+    ):
+        await self.wire()
+        other = await self.new_task()
+        elsewhere = new_approval(task_id=other)
+        await self.store.open_request(elsewhere, now=NOW, limits=LIMITS)
+        await self.restart()
+        run = self.NEW_RUN[C.RESTART]
+        current = await self.request("current", run=run)
+        await self.request("approved", run=run)  # revokes what is left of run 1
+        self.assertEqual(await self.status(), ApprovalStatus.REVOKED)
+        self.assertEqual(await self.status(current), ApprovalStatus.PENDING)
+        self.assertEqual(
+            (await self.store.get(elsewhere.approval_id)).status,
+            ApprovalStatus.PENDING,
+        )
+
+    async def test_the_earlier_requests_do_not_count_against_the_cap(self):
+        await self.wire(max_pending_approvals=1)  # the approved one is the only slot
+        full = await self.request("another")
+        self.assertEqual(full.reason, BrokerReason.APPROVAL_LIMIT_REACHED)
+        await self.restart()
+        asked = await self.request("another", run=self.NEW_RUN[C.RESTART])
+        self.assertEqual(
+            (asked.verdict, asked.reason),
+            (Verdict.NEEDS_APPROVAL, BrokerReason.APPROVAL_REQUIRED),
+        )
+
+    async def test_a_worker_of_the_replaced_run_gets_no_request(self):
+        await self.wire()
+        await self.restart()
+        before = await self.store.history(self.approved.approval_id)
+        asked = await self.request("other")  # the worker of run (1, 0)
+        self.assertEqual(
+            (asked.verdict, asked.reason, asked.approval_id),
+            (Verdict.DENY, BrokerReason.TASK_SUPERSEDED, None),
+        )
+        async with self.database.engine.begin() as connection:
+            count = (
+                await connection.execute(
+                    text("SELECT count(*) FROM tool_approvals WHERE task_id = :t"),
+                    {"t": self.task_id},
+                )
+            ).scalar_one()
+        self.assertEqual(count, 1)
+        self.assertEqual(await self.status(), ApprovalStatus.APPROVED)
+        self.assertEqual(await self.store.history(self.approved.approval_id), before)
+
+    async def test_the_revocation_that_runs_late_still_finds_what_is_left(self):
+        await self.wire()
+        await self.restart()
+        self.assertEqual(await self.h.service.revoke_task(self.task_id), 1)
+        self.assertEqual(await self.status(), ApprovalStatus.REVOKED)
+        used = await self.request(
+            "approved", self.approved.approval_id, self.NEW_RUN[C.RESTART]
+        )
+        self.assertEqual(used.reason, BrokerReason.APPROVAL_REVOKED)
+
+    async def test_a_run_replaced_after_the_broker_checked_is_still_refused(self):
+        # The window of the finding at its narrowest: the broker read ACTIVE for
+        # the worker of the current run, then the task failed and was restarted,
+        # and only then does the store consume (or insert).
+        provider = ReplacesTheRunAfterAnswering(
+            PostgresTaskActivity(self.new_database()), self.restart
+        )
+        await self.wire(early=provider)
+        provider.armed = True
+        used = await self.request("approved", self.approved.approval_id)
+        self.assertEqual(
+            (used.verdict, used.reason, used.invocation),
+            (Verdict.DENY, BrokerReason.TASK_SUPERSEDED, None),
+        )
+        self.assertEqual(await self.status(), ApprovalStatus.APPROVED)
+        self.assertEqual(
+            await provider.inner.check(self.task_id, self.NEW_RUN[C.RESTART]),
+            TaskActivity.ACTIVE,
+        )
+        # and now the worker of the new run is refused for the approval's own run
+        used = await self.request(
+            "approved", self.approved.approval_id, self.NEW_RUN[C.RESTART]
+        )
+        self.assertEqual(used.reason, BrokerReason.APPROVAL_SUPERSEDED)
+
+    async def test_a_request_after_the_broker_checked_is_refused_for_a_replaced_run(
+        self,
+    ):
+        provider = ReplacesTheRunAfterAnswering(
+            PostgresTaskActivity(self.new_database()), self.restart
+        )
+        await self.wire(early=provider)
+        provider.armed = True
+        asked = await self.request("other")
+        self.assertEqual(
+            (asked.verdict, asked.reason, asked.approval_id),
+            (Verdict.DENY, BrokerReason.TASK_SUPERSEDED, None),
+        )
+        async with self.database.engine.begin() as connection:
+            count = (
+                await connection.execute(
+                    text("SELECT count(*) FROM tool_approvals WHERE task_id = :t"),
+                    {"t": self.task_id},
+                )
+            ).scalar_one()
+        self.assertEqual(count, 1)  # only the approved one of the wiring
+
+    async def in_flight_restart(self, connection):
+        """The task has failed; a Restart holds its row and has not committed."""
+        await self.drive(self.task_id, PATHS_TO_STATES[TaskState.FAILED], self.tasks)
+        await connection.execute(
+            text("UPDATE tasks SET state = 'queued', attempt = 2 WHERE id = :id"),
+            {"id": self.task_id},
+        )
+
+    async def test_a_use_waits_for_a_restart_that_is_in_flight_and_reads_the_new_run(
+        self,
+    ):
+        # The broker's own check is the one that is overtaken: it says ACTIVE.
+        await self.wire(early=FakeTaskActivity())
+        async with self.database.engine.connect() as restarting:
+            await self.in_flight_restart(restarting)
+            use = asyncio.create_task(
+                self.request("approved", self.approved.approval_id)
+            )
+            await self.wait_for_lock_waiters(1, use)
+            self.assertFalse(use.done(), "the use did not wait for the restart")
+            await restarting.commit()
+        used = await use
+        # the state it read was the one AFTER the restart: alive, in another run
+        # (had it read the failed task it would say task_not_active)
+        self.assertEqual(
+            (used.verdict, used.reason, used.invocation),
+            (Verdict.DENY, BrokerReason.TASK_SUPERSEDED, None),
+        )
+        self.assertEqual(await self.status(), ApprovalStatus.APPROVED)
+
+    async def test_a_request_waits_for_a_restart_that_is_in_flight_and_refuses(self):
+        await self.wire(early=FakeTaskActivity())
+        async with self.database.engine.connect() as restarting:
+            await self.in_flight_restart(restarting)
+            asked = asyncio.create_task(self.request("other"))
+            await self.wait_for_lock_waiters(1, asked)
+            self.assertFalse(asked.done(), "the request did not wait for the restart")
+            await restarting.commit()
+        decision = await asked
+        self.assertEqual(
+            (decision.verdict, decision.reason, decision.approval_id),
+            (Verdict.DENY, BrokerReason.TASK_SUPERSEDED, None),
+        )
+
+    async def test_the_store_checks_the_run_against_the_task_only_when_asked_to(self):
+        await self.wire()
+        await self.restart()  # the task is in run (2, 0)
+        current, earlier, future = TaskRun(2, 0), RUN, TaskRun(3, 0)
+        flag = {"require_active_task": True}
+        old = new_approval(task_id=self.task_id, task_run=earlier)
+        await self.store.open_request(old, now=NOW, limits=LIMITS)
+        await self.store.decide(old.approval_id, approver_id=U1, approve=True, now=NOW)
+        # a use: the binding's run must be the task's, and the approval's own
+        for label, run, outcome in (
+            ("binding of the earlier run", earlier, ConsumeOutcome.TASK_SUPERSEDED),
+            ("binding of a future run", future, ConsumeOutcome.TASK_SUPERSEDED),
+            ("approval of the earlier run", current, ConsumeOutcome.SUPERSEDED),
+        ):
+            with self.subTest(use=label):
+                binding = binding_of(old, task_run=run)
+                self.assertEqual(
+                    await self.store.consume(old.approval_id, binding, now=NOW, **flag),
+                    outcome,
+                )
+        self.assertEqual(await self.status(old), ApprovalStatus.APPROVED)
+        # a request: only the current run may be inserted; the earlier and the
+        # future one leave everything as it was ...
+        for label, run in (("earlier", earlier), ("future", future)):
+            with self.subTest(open=label):
+                opened = await self.store.open_request(
+                    new_approval(task_id=self.task_id, task_run=run),
+                    now=NOW,
+                    limits=LIMITS,
+                    **flag,
+                )
+                self.assertEqual(
+                    (opened.outcome, opened.record),
+                    (OpenOutcome.TASK_SUPERSEDED, None),
+                )
+        self.assertEqual(await self.status(old), ApprovalStatus.APPROVED)
+        # ... without the flag the store looks at no task, but the run of the
+        # approval is still what it was granted for
+        self.assertEqual(
+            await self.store.consume(
+                old.approval_id, binding_of(old, task_run=current), now=NOW
+            ),
+            ConsumeOutcome.SUPERSEDED,
+        )
+        # the current run is inserted, and that revokes what the earlier run left
+        opened = await self.store.open_request(
+            new_approval(task_id=self.task_id, task_run=current),
+            now=NOW,
+            limits=LIMITS,
+            **flag,
+        )
+        self.assertEqual(opened.outcome, OpenOutcome.CREATED)
+        self.assertEqual(await self.status(old), ApprovalStatus.REVOKED)
+        self.assertEqual(
+            await self.store.consume(old.approval_id, binding_of(old), now=NOW),
+            ConsumeOutcome.REVOKED,
+        )
+
+    async def test_an_approval_of_the_current_run_is_used_with_the_flag(self):
+        await self.wire()
+        await self.restart()
+        current = TaskRun(2, 0)
+        new = new_approval(task_id=self.task_id, task_run=current)
+        opened = await self.store.open_request(
+            new, now=NOW, limits=LIMITS, require_active_task=True
+        )
+        self.assertEqual(opened.outcome, OpenOutcome.CREATED)
+        await self.store.decide(new.approval_id, approver_id=U1, approve=True, now=NOW)
+        self.assertEqual(
+            await self.store.consume(
+                new.approval_id, binding_of(new), now=NOW, require_active_task=True
+            ),
+            ConsumeOutcome.CONSUMED,
+        )
+        self.assertEqual(await self.status(new), ApprovalStatus.CONSUMED)
 
 
 @requires_postgres
@@ -1777,6 +2230,8 @@ def approval_row(approval_id, **overrides):
     values = {
         "id": approval_id,
         "task_id": TASK,
+        "task_attempt": 1,
+        "task_retry_count": 0,
         "project_id": P1,
         "agent_id": AGENT,
         "requester_user_id": U1,

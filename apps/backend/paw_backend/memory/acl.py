@@ -2,7 +2,8 @@
 
 The Memory schema is filtered by the database, not by the application after
 the fact. Every read of ``memory_versions`` (and of the tables that join it:
-``memory_embeddings``, ``memory_sources``, ``memory_relations``) must contain
+``memory_embeddings``, ``memory_sources``, ``memory_relations``,
+``memory_metadata_changes``) must contain
 :func:`readable_memory_versions`; every read of ``conversations`` must contain
 :func:`readable_conversations`. Apply it before ranking, so that a vector
 search can never rank (and leak) a row the principal cannot see.

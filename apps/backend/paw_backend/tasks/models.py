@@ -5,6 +5,12 @@ foreign keys: the users and projects tables do not exist yet (PAW-021 and the
 project issues). They must gain foreign keys when those tables arrive. Until
 then the service layer trusts its caller for the ids; authorisation is not done
 here (the API layer must do it, see PAW-022 / PAW-025).
+
+The Multi-Repo working set (repositories with the ``referenced`` / ``working`` /
+``target`` roles, each with its own worktree / review / pull request state) is
+not stored: it is outside PAW-032 and proposed in
+``docs/decisions/0014-task-working-set-persistence.md``. ``TaskAttemptRow``
+holds the state of a single repository.
 """
 
 import uuid
@@ -201,6 +207,13 @@ class TaskToolInvocationRow(Base):
 
     __table_args__ = (
         Index(None, "step_id"),
+        # Only the calls in flight (a bounded number per step), so that asking
+        # for them does not read the step's whole history of finished calls.
+        Index(
+            "ix_task_tool_invocations_started",
+            "step_id",
+            postgresql_where=text("status = 'started'"),
+        ),
         _in("status", ToolInvocationStatus, "status_valid"),
         CheckConstraint(
             "(status = 'started') = (finished_at IS NULL)",

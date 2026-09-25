@@ -372,6 +372,7 @@ class BudgetConstraintTest(PostgresQueueingTestCase):
             )
         row = await self.budget_row(task_id, "tokens")
         self.assertEqual((row["consumed"], row["limit_value"]), (0, 10))
+        self.assertEqual(row["runtime_generation"], 0)
         self.assertIsNotNone(row["created_at"])
 
     async def test_one_row_per_task_and_kind(self):
@@ -416,6 +417,19 @@ class BudgetConstraintTest(PostgresQueueingTestCase):
         with self.assertRaises(IntegrityError):
             await self.insert(task_id, kind="steps", running_since=at(0))
         await self.insert(task_id, kind="runtime_seconds", running_since=at(0))
+
+    async def test_the_runtime_generation_is_not_negative_and_only_for_the_runtime_row(
+        self,
+    ):
+        (task_id,) = await self.make_tasks(1)
+        with self.assertRaises(IntegrityError):
+            await self.insert(task_id, kind="runtime_seconds", runtime_generation=-1)
+        with self.assertRaises(IntegrityError):
+            await self.insert(task_id, kind="steps", runtime_generation=1)
+        await self.insert(task_id, kind="steps", runtime_generation=0)
+        await self.insert(task_id, kind="runtime_seconds", runtime_generation=3)
+        row = await self.budget_row(task_id, "runtime_seconds")
+        self.assertEqual(row["runtime_generation"], 3)
 
 
 @requires_postgres

@@ -30,7 +30,7 @@ class FlowTest(PostgresQueueingTestCase):
         claimed = await self.queue.claim_next("local-worker", at(1))
         self.assertEqual(claimed.id, entry.id)
         await self.service.execute(task_id, TaskCommand.START, actor=self.system)
-        await self.budget.start_runtime(task_id)
+        self.runtime_generation = await self.budget.start_runtime(task_id)
         return task_id, claimed
 
     async def fail_step(self, task_id, approach: int):
@@ -116,7 +116,7 @@ class FlowTest(PostgresQueueingTestCase):
         # The worker hands the entry back; the runtime clock stops.
         self.clock.set(120)
         await self.queue.release(entry.id, "local-worker", entry.claim_count, at(20))
-        runtime = await self.budget.stop_runtime(task_id)
+        runtime = await self.budget.stop_runtime(task_id, self.runtime_generation)
         self.assertEqual(runtime.consumed, 120)
 
     async def test_exhausted_retries_fail_the_task_which_can_then_be_retried(self):
