@@ -1456,6 +1456,7 @@ License や `robots.txt` に関する項目はありません。要件と設計�
 1. `request.kinds` に合う Provider を Registry の順序（`ProviderKind` の宣言順、次に名前順。登録順には依存しない）で選びます。
 2. **全 Provider を並行**で実行します。各 Provider の制限時間は、登録時の `timeout_seconds`（既定 10 秒、最大 120 秒）と、全体の Budget の残りの小さい方です。時間切れの Provider は Cancel し、完全に終わるまで待ってから `timeout` として報告します。`gather` が返るとき、起動した Task は残りません。
 3. Provider の例外は Provider ごとに隔離します。他の Provider の結果は失われません。`gather` を Cancel した場合は全 Provider を Cancel して `CancelledError` を伝えます。
+   **`await` の最中の Cancel と、同期で動く Adapter の Code の例外は区別します。** `Task.cancel()` は `await` の地点でしか届きません。`provider.search` を読んで呼ぶ部分（Property、`__getattribute__` など）と、`published_at` の `tzinfo.utcoffset` は `await` を挟まない同期の Code なので、そこが `CancelledError`、`KeyboardInterrupt`、`SystemExit`、`GeneratorExit` などの `BaseException` を出しても、それは Task の Cancel ではなく Adapter 自身の失敗です。前者は `internal_error`、後者は `invalid_response` として報告し、他の Provider の結果を残します（`gather` / `fetch` は Cancel されません）。`await` の最中に届いた Cancel と Timeout は、これまでどおり握りつぶさず伝えます。
 4. Response は Provider ごとに全体を検証します（`list` / `tuple` そのもの、件数が `limit` 以下、全要素が `ProviderHit` で **Field の値も正しい**、全 URL が正規化できる）。1 つでも違反があれば、その Provider の結果は全て捨てて `invalid_response` にします。Field の検証は下の「Constructor を通らない Hit と Document」のとおりです。
    **Container 自体も Adapter の Code を動かしません。** `list` / `tuple` の Subclass（と、`__class__` で `list` を名乗る Object）は、`__len__`、`__iter__`、`__getitem__` を Adapter が上書きでき、Broker の中で例外を出したり、長さを偽って `limit` を超えさせたりできます。そのため Class は `type(x) is list`（または `tuple`）で確かめ（`isinstance` は `__class__` を Object に尋ねます）、Subclass は Hook を一切呼ばずに `invalid_response` にします。
 5. Provider の結果を交互に並べ（各 Provider の 1 位、2 位、…）、正規化した URL で重複を除いて（最初の 1 件を残し、どれか 1 つでも Private なら `private_source` を True にする）、`max_results` 件までにします。
@@ -1465,8 +1466,9 @@ License や `robots.txt` に関する項目はありません。要件と設計�
 そのため `normalize_hits`（`gather` の経路）と `fetch` は、受け取った Object の Field を全て 1 度だけ読み直し、`ProviderHit` / `ProviderDocument` の Constructor と同じ規則で検証し直します（`revalidate_hit` / `revalidate_document`）。以後の処理は、その検証済みの複製だけを使います。
 - Field は `ProviderHit` 自身の Slot から直接読みます。Subclass の Property や `__getattribute__` は呼びません（呼ぶと、任意の例外や、読むたびに変わる値を許すため）。Subclass 自体は使えますが、Property だけで Field を返し Slot を設定しない Subclass は不正な Response です。
 - `str` の Subclass は、`__len__` や `encode` を呼ばずに通常の `str` へ複製してから検証します（長さを偽れません）。`source_type` は `SourceType` そのもの、`private_source` は `bool` そのものだけを受け付けます（`__class__` を偽る Object は不正）。
-- `published_at` は `None` か、UTC に変換できる Timezone つきの `datetime` だけです。変換後は標準の `datetime` の Method だけで行い、通常の UTC の `datetime` にします（Timezone の `utcoffset` が例外を出した場合も不正な Response です）。
+- `published_at` は `None` か、UTC に変換できる Timezone つきの `datetime` だけです。まず標準の `datetime` の Method で Field を通常の `datetime` へ複製し（`datetime.astimezone` は途中の値を Subclass 自身の Constructor で作るため、複製せずに呼ぶと Adapter の Code が動きます）、その複製を UTC へ変換して、通常の UTC の `datetime` にします。動くのは Adapter の `tzinfo.utcoffset` だけで、それが出した例外は、`asyncio.CancelledError`、`KeyboardInterrupt`、`SystemExit`、`GeneratorExit` を含む `BaseException` の全てが不正な Response です（同期の Code に Task の Cancel は届かないため。[Decision 0012](../../docs/decisions/0012-research-provider-adapter-policy.md) の 10）。
 - 違反は全て `InvalidProviderResponseError`（固定の文言。値も例外の文言も含みません）になり、`gather` はその Provider を `invalid_response` にして他の Provider の結果を残します。`fetch` は `errors` に `invalid_response` を 1 件返します。例外は呼び出し元へ出ません。
+- Test: `tests/test_research_normalize.py` の `test_a_timezone_that_raises_a_base_exception_is_an_invalid_response`（5 種類の `BaseException` を `utcoffset` の 1 回目と `astimezone` の 2 回目で出す）と `test_a_datetime_subclass_constructor_never_runs`、`tests/test_research_broker.py` の `SynchronousHookBaseExceptionTest`（`gather` / `fetch` が `invalid_response` / `internal_error` を返し他の Provider の結果を残すことと、`await` の最中の Cancel が `gather` / `fetch` へ伝わること）。
 
 失敗は閉じた `ResearchErrorCode` の値としてだけ報告します。
 
@@ -1506,6 +1508,7 @@ Test: `tests/test_research_broker.py` の `LoggedExceptionTypeTest`（Credential
   4. Credential 用の Query Parameter の一覧は Best effort です。
   5. IPv6 と非 ASCII の Host は拒否し、名前解決はしません。`network` Capability、SSRF、`robots.txt` は呼び出し元（Tool Broker、PAW-031）と個々の Adapter の責任です。
   6. Provider の名前は正規化せず（look-alike は拒否）、`str` の Subclass は厳密な `str` の写しにして保持します。Subclass を拒否する案は採っていません（`StrEnum` の要素を名前にできるため）。
+  7. 同期で動く Adapter の Code（`published_at` の `tzinfo`、`provider.search` を読んで呼ぶ部分）が出した `BaseException` は、`CancelledError`、`KeyboardInterrupt`、`SystemExit` を含めて Adapter の失敗として報告します。同期の Code に Task の Cancel は届かないためです。代償として、その数マイクロ秒の間に Signal で本物の `KeyboardInterrupt` が届くと、それも `invalid_response` になり、握りつぶされます。**限界:** Adapter の非同期の Code（`await` の最中）が自分で出した `CancelledError` は、Task の Cancel と区別せず、これまでどおり `gather` へ伝わります（区別するには `Task.cancelling()` を使う別の判断が要ります）。
 
 ### Test
 
