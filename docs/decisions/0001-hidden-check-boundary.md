@@ -1,10 +1,12 @@
 # Hidden check execution boundary
 
-- Status: Proposed
+- Status: Approved
 - Date: 2026-09-21
 - Scope: PAW-013 Test / Hidden Acceptance Runner
+- Supersedes: なし
+- Approval: 2026-09-25、Humanが作業Session内で、判断メモ（Artifact）の各点について「推奨どおり」と回答して承認（末尾の「承認時の決定」）
 
-## Proposal
+## Decision
 
 Benchmark task manifests retain only opaque hidden `reference_id` values.  The
 evaluator resolves those identifiers from a private `HiddenCheckRegistry` only
@@ -63,3 +65,11 @@ Production execution must use what closes these: a separate OS identity for cand
 and check code, a container or PID and mount namespace with a cgroup v2 hierarchy (killed
 as a unit with `cgroup.kill`), evaluator storage and secrets outside that namespace (or
 mounted read-only), and no evaluator credentials in the environment of any ancestor.
+
+## 承認時の決定（2026-09-25）
+
+- 本文の各点を、提案どおり承認した。
+- 前提として、「このPython実装は、悪意ある候補コードへの防壁ではない。本番では、別のOSユーザー、または隔離コンテナ（PID・マウントの分離とcgroup v2）で境界を作る」ことを承認した。
+- 本番の隔離設計（保管場所・コンテナ構成）は、今は決めず、Benchmarkの詳細の段階で、人間 / Adminが別途承認する。
+- 実装（PAW-013、#63）は、承認前にmainへマージ済みで、このDecisionの承認で、コードの変更はない。
+
