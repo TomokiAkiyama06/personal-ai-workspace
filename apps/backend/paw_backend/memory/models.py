@@ -612,6 +612,34 @@ DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW EXECUTE FUNCTION paw_check_memory_source_message_conversation()"""
 
 
+# A source of type ``conversation`` with no conversation, no message and (by
+# ``conversation_has_no_opaque_reference``) no ``source_ref`` identifies nothing,
+# and looks like a source whose conversation was deleted later
+# (``ON DELETE SET NULL``), which is legitimate. Only the INSERT can tell them
+# apart, so the rule is an INSERT-only trigger: nothing else fires it, and the
+# foreign keys' actions and the deletion flow's UPDATE never meet it. It reads
+# only ``NEW`` (no table), but pins the ``search_path`` like the other functions.
+CONVERSATION_SOURCE_IDENTIFIED_FUNCTION = """\
+CREATE OR REPLACE FUNCTION paw_check_memory_source_conversation_identified()
+RETURNS trigger LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp AS $$
+BEGIN
+    IF NEW.source_type = 'conversation'
+       AND NEW.conversation_id IS NULL AND NEW.message_id IS NULL THEN
+        RAISE EXCEPTION 'a new conversation source must name a conversation'
+            USING ERRCODE = 'check_violation',
+                  TABLE = 'memory_sources',
+                  CONSTRAINT = 'tr_memory_sources_conversation_source_identified';
+    END IF;
+    RETURN NEW;
+END
+$$"""
+CONVERSATION_SOURCE_IDENTIFIED_TRIGGER = """\
+CREATE TRIGGER tr_memory_sources_conversation_source_identified
+BEFORE INSERT ON %(fullname)s
+FOR EACH ROW EXECUTE FUNCTION paw_check_memory_source_conversation_identified()"""
+
+
 class MemorySource(Base):
     """Provenance: where a version came from. A version may have many sources.
 
@@ -640,6 +668,13 @@ class MemorySource(Base):
     ``tests/test_memory_migration.py`` compares both. A violation therefore
     surfaces at COMMIT (or at ``SET CONSTRAINTS ... IMMEDIATE``), not at the
     INSERT.
+
+    A new source of type ``conversation`` must name a conversation or a message
+    (``CONVERSATION_SOURCE_IDENTIFIED_FUNCTION``, a ``BEFORE INSERT`` trigger,
+    refused at the INSERT). Without it a row with nothing set is accepted by
+    the CHECKs and identifies no source. The rule is not a CHECK because that
+    state is exactly what deleting the conversation leaves behind, and it stays
+    valid there.
     """
 
     __tablename__ = "memory_sources"
@@ -699,6 +734,8 @@ class MemorySource(Base):
 for _statement in (
     MESSAGE_REQUIRES_CONVERSATION_FUNCTION,
     MESSAGE_REQUIRES_CONVERSATION_TRIGGER,
+    CONVERSATION_SOURCE_IDENTIFIED_FUNCTION,
+    CONVERSATION_SOURCE_IDENTIFIED_TRIGGER,
 ):
     event.listen(
         MemorySource.__table__,

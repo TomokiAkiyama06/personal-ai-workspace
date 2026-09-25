@@ -551,6 +551,9 @@ Message だけを消すと `message_id` だけが NULL になり、Conversation 
 CHECK 制約にしないのは、Conversation の削除で Foreign Key の `SET NULL` が `conversation_id` と `message_id` を 1 列ずつ NULL にするため、途中で（Conversation が NULL、Message あり）の状態を通り、削除が失敗するからです（順序は Object ID 由来で保証されません）。Trigger は行の最終の状態を読み直して判定します。
 読み直しは、Trigger を持つ Table の Schema と名前（`TG_TABLE_SCHEMA`、`TG_TABLE_NAME`）で修飾して行い、関数は `search_path` を `pg_catalog, pg_temp` に固定します。
 Application の Role も既定の `TEMP` 権限で一時 Table を作れるため、修飾がないと、空の一時 Table `memory_sources` が読み直しの答えを空にし、不正な行が COMMIT を通ってしまいます（`ShadowedRelationTest`）。
+種別 `conversation` の出典が Conversation も Message も指さない行（`conversation_id`、`message_id`、`source_ref` がすべて NULL）は、何の出典かを示さないのに、CHECK 制約を通ります。
+Conversation を削除した後に `ON DELETE SET NULL` が残す状態（正当）と区別できないため、CHECK では拒否できません。そこで INSERT だけを見る `BEFORE INSERT` の Trigger `tr_memory_sources_conversation_source_identified` が、新しい行を INSERT の時点で拒否します。
+UPDATE には働かないので、Conversation の削除（Foreign Key の `SET NULL`）と、削除の流れが `source_deleted_at` を記録する UPDATE は通ります。既に保存された行は検査しません。
 
 **Scope と ACL。** 各 Version が `scope`（`user` / `project` / `project_group` / `repo` / `shared`）を持ち、Scope に対応する ID を 1 つだけ持ちます
 （`owner_user_id` / `project_id` / `project_group_id` / `repo_id`、`shared` は無し）。CHECK 制約が組み合わせを強制します。

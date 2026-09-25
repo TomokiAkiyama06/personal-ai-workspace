@@ -418,6 +418,12 @@ class MemoryMigrationDatabaseTest(unittest.TestCase):
             [row[1:] for row in migrated["triggers"]],
             [
                 (
+                    "tr_memory_sources_conversation_source_identified",
+                    "CREATE TRIGGER tr_memory_sources_conversation_source_identified"
+                    " BEFORE INSERT ON memory_sources FOR EACH ROW EXECUTE FUNCTION"
+                    " paw_check_memory_source_conversation_identified()",
+                ),
+                (
                     "tr_memory_sources_message_requires_conversation",
                     "CREATE CONSTRAINT TRIGGER"
                     " tr_memory_sources_message_requires_conversation"
@@ -512,6 +518,10 @@ class MemoryMigrationDatabaseTest(unittest.TestCase):
                 models.MESSAGE_REQUIRES_CONVERSATION_FUNCTION,
                 "message_id IS NOT NULL AND conversation_id IS NULL",
             ),
+            "paw_check_memory_source_conversation_identified": (
+                models.CONVERSATION_SOURCE_IDENTIFIED_FUNCTION,
+                "NEW.conversation_id IS NULL AND NEW.message_id IS NULL",
+            ),
             "paw_record_memory_metadata_change": (
                 models.RECORD_METADATA_CHANGE_FUNCTION,
                 "OLD.pinned, NEW.pinned, OLD.importance, NEW.importance",
@@ -559,6 +569,9 @@ class MemoryMigrationDatabaseTest(unittest.TestCase):
         self.assertEqual(
             functions,
             {
+                "paw_check_memory_source_conversation_identified": [
+                    "search_path=pg_catalog, pg_temp"
+                ],
                 "paw_check_memory_source_message_conversation": [
                     "search_path=pg_catalog, pg_temp"
                 ],

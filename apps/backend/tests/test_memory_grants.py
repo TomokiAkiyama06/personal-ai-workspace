@@ -419,6 +419,21 @@ class ApplicationFlowTest(ApplicationRoleTestCase):
             "tr_memory_sources_message_requires_conversation",
         )
 
+    def test_a_conversation_source_naming_nothing_is_refused_for_the_application(self):
+        version = self.add_version(self.add_memory())
+
+        def names_nothing():
+            self.session.execute(
+                insert(MemorySource).values(
+                    memory_version_id=version, source_type="conversation"
+                )
+            )
+
+        self.assertEqual(
+            self.violation(names_nothing),
+            "tr_memory_sources_conversation_source_identified",
+        )
+
     def test_deleting_a_memory_removes_its_whole_history_by_cascade(self):
         memory = self.add_memory()
         v1 = self.add_version(memory, version_number=1, status="superseded")

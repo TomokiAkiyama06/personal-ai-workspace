@@ -28,6 +28,10 @@ keys' cascade, which PostgreSQL runs with the owner's rights.
 a message must name its conversation. A CHECK cannot state that, because the
 foreign keys' SET NULL actions of a conversation delete pass through the state
 (NULL conversation, message); the trigger judges the row at COMMIT instead.
+A second trigger, ``BEFORE INSERT`` only, refuses a new ``conversation`` source
+that names neither a conversation nor a message: such a row identifies nothing,
+yet is exactly what a deleted conversation leaves behind (``ON DELETE SET NULL``),
+so only the INSERT can be judged.
 
 ``memory_versions`` keeps ``pinned`` and ``importance`` updatable in place
 (REQUIREMENTS.md "Manual Memory Editing": low-risk metadata takes effect at
@@ -120,6 +124,30 @@ CREATE CONSTRAINT TRIGGER tr_memory_sources_message_requires_conversation
 AFTER INSERT OR UPDATE OF conversation_id, message_id ON memory_sources
 DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW EXECUTE FUNCTION paw_check_memory_source_message_conversation()"""
+
+
+# See ``MemorySource`` in ``paw_backend.memory.models``: an INSERT-only rule,
+# because a conversation source with nothing set is what a deleted conversation
+# leaves behind, and that state must stay valid.
+_CONVERSATION_SOURCE_IDENTIFIED_FUNCTION = """\
+CREATE OR REPLACE FUNCTION paw_check_memory_source_conversation_identified()
+RETURNS trigger LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp AS $$
+BEGIN
+    IF NEW.source_type = 'conversation'
+       AND NEW.conversation_id IS NULL AND NEW.message_id IS NULL THEN
+        RAISE EXCEPTION 'a new conversation source must name a conversation'
+            USING ERRCODE = 'check_violation',
+                  TABLE = 'memory_sources',
+                  CONSTRAINT = 'tr_memory_sources_conversation_source_identified';
+    END IF;
+    RETURN NEW;
+END
+$$"""
+_CONVERSATION_SOURCE_IDENTIFIED_TRIGGER = """\
+CREATE TRIGGER tr_memory_sources_conversation_source_identified
+BEFORE INSERT ON memory_sources
+FOR EACH ROW EXECUTE FUNCTION paw_check_memory_source_conversation_identified()"""
 
 
 # See ``MemoryMetadataChange`` in ``paw_backend.memory.models``, and there for
@@ -618,6 +646,8 @@ def upgrade() -> None:
     )
     op.execute(_MESSAGE_REQUIRES_CONVERSATION_FUNCTION)
     op.execute(_MESSAGE_REQUIRES_CONVERSATION_TRIGGER)
+    op.execute(_CONVERSATION_SOURCE_IDENTIFIED_FUNCTION)
+    op.execute(_CONVERSATION_SOURCE_IDENTIFIED_TRIGGER)
 
     # Nothing is registered here: the model (and dimension) is chosen by the
     # PAW-019 benchmark and registered with an ordinary insert.
@@ -670,6 +700,9 @@ def downgrade() -> None:
     op.drop_table("embedding_models")
     op.drop_table("memory_sources")  # its trigger goes with it
     op.execute("DROP FUNCTION IF EXISTS paw_check_memory_source_message_conversation()")
+    op.execute(
+        "DROP FUNCTION IF EXISTS paw_check_memory_source_conversation_identified()"
+    )
     op.drop_table("memory_relations")
     op.drop_table("memory_metadata_changes")
     op.drop_table("memory_versions")  # its trigger goes with it
