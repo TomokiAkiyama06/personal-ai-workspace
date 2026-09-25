@@ -13,6 +13,7 @@ from unittest.mock import patch
 from paw_backend.memory.shared import (
     CandidateState,
     EditPlan,
+    EffectiveSharedMemory,
     RulesContractError,
     SharedMemoryBusyError,
     SharedMemoryChanges,
@@ -240,9 +241,12 @@ class EditGuardsTest(AsyncPostgresSharedTestCase):
 class EffectiveViewGuardTest(AsyncPostgresSharedTestCase):
     async def test_the_result_of_the_precedence_rule_must_be_a_view(self):
         self.seed_memory()
-        for value in (None, {"memories": []}, (), [1]):
-            with self.subTest(value=str(value)):
-                with patch(f"{SERVICE}.resolve_effective_view", return_value=value):
-                    with self.assertRaises(RulesContractError) as caught:
-                        await self.service.effective_view(self.user)
-                self.assertEqual(caught.exception.rule, "resolve_effective_view")
+        # ``EffectiveSharedMemory((), ())`` is the public view: the rule must
+        # return the internal one (Decision 0009, section 10), so it is refused.
+        for value in (None, {"memories": []}, (), [1], EffectiveSharedMemory((), ())):
+            for method in ("effective_view", "internal_effective_view"):
+                with self.subTest(value=str(value), method=method):
+                    with patch(f"{SERVICE}.resolve_effective_view", return_value=value):
+                        with self.assertRaises(RulesContractError) as caught:
+                            await getattr(self.service, method)(self.user)
+                    self.assertEqual(caught.exception.rule, "resolve_effective_view")

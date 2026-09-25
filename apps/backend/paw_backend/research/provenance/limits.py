@@ -3,6 +3,9 @@
 Every number here bounds something a caller controls. The database repeats the
 text limits as CHECK constraints (migration ``0052``); ``tests/test_provenance_
 migration.py`` fails when the two drift apart.
+
+The numbers are provisional values, approved as such in Decision 0011
+(2026-09-25); they may be changed here (the text limits also in the migration).
 """
 
 from paw_backend.research.providers.contract import MAX_LOCATOR_CHARS

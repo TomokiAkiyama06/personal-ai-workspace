@@ -5,12 +5,14 @@ Input objects (:class:`SharedMemoryDraft`, :class:`SharedMemoryChanges`,
 are built, with the functions of ``validation.py``; a value that is not valid
 cannot be constructed. Result objects (:class:`SharedMemory`,
 :class:`SharedMemoryCandidate`, :class:`EffectiveSharedMemory`, ...) are plain
-records built by the service from database rows; they carry no behaviour.
+records built by the service from database rows; they carry no behaviour, except
+that :class:`InternalEffectiveView` can be reduced to the public
+:class:`EffectiveSharedMemory` (Decision 0009, section 10).
 
 Ids are :class:`uuid.UUID`. Nothing here talks to a database.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from uuid import UUID
@@ -304,14 +306,41 @@ class OverriddenMemory:
 
 @dataclass(frozen=True, slots=True)
 class EffectiveSharedMemory:
-    """Shared Memory as it may be shown to a model, after the policy has won.
+    """Shared Memory as it may be shown to a user or an agent, after the policy won.
 
     ``memories`` are the active memories no policy overrides (input order);
-    ``overridden`` names the ones a policy suppressed (input order);
-    ``applied_policies`` are the policy items that suppressed at least one
-    memory, sorted by ``policy_id``.
+    ``overridden`` names the ones a policy suppressed (input order), by memory
+    id, version id and policy ids only.
+
+    This public view has **no field for the policy wording** (the ``statement``
+    of a :class:`SystemPolicyItem`), so it appears nowhere in it: not in
+    ``repr``, not in ``dataclasses.asdict``. Users and agents never see the
+    wording of a System Policy (Decision 0009, section 10). The wording is in
+    :class:`InternalEffectiveView`, which is for the backend's own context
+    assembly only.
     """
 
     memories: tuple[SharedMemory, ...]
     overridden: tuple[OverriddenMemory, ...]
-    applied_policies: tuple[SystemPolicyItem, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class InternalEffectiveView:
+    """The effective view with the policies that won: **backend-internal only**.
+
+    The same ``memories`` and ``overridden`` as :class:`EffectiveSharedMemory`,
+    plus ``applied_policies``: the policy items (with their ``statement``, the
+    policy wording) that suppressed at least one memory, sorted by
+    ``policy_id``. It is what the backend's context assembly needs; it must
+    never be returned to a user or an agent, put in a response, or logged.
+    ``applied_policies`` is left out of ``repr`` so an accidental log line does
+    not carry the wording. ``public()`` gives the view that may be shown.
+    """
+
+    memories: tuple[SharedMemory, ...]
+    overridden: tuple[OverriddenMemory, ...]
+    applied_policies: tuple[SystemPolicyItem, ...] = field(repr=False)
+
+    def public(self) -> EffectiveSharedMemory:
+        """The same view without the policy wording."""
+        return EffectiveSharedMemory(memories=self.memories, overridden=self.overridden)

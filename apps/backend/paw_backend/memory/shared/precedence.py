@@ -23,7 +23,7 @@ modified. ``subject_covers`` and ``overriding_policy_ids`` validate subjects wit
 from collections.abc import Sequence
 
 from paw_backend.memory.shared.records import (  # noqa: F401
-    EffectiveSharedMemory,
+    InternalEffectiveView,
     OverriddenMemory,
     SharedMemory,
     SharedMemoryStatus,
@@ -96,7 +96,7 @@ def overriding_policy_ids(
 
 def resolve_effective_view(
     memories: Sequence[SharedMemory], policies: Sequence[SystemPolicyItem]
-) -> EffectiveSharedMemory:
+) -> InternalEffectiveView:
     """Apply the precedence rule to ``memories``: the policy wins.
 
     * A memory whose ``status`` is ``DELETED`` is ignored: it appears nowhere in
@@ -110,6 +110,10 @@ def resolve_effective_view(
     * ``applied_policies`` holds the policy items (the objects of ``policies``)
       whose id occurs in any ``OverriddenMemory.policy_ids``, once each, sorted
       by ``policy_id``. A policy that overrides nothing is not listed.
+    * The result is an ``InternalEffectiveView``: it carries the policy items
+      (with their wording) for the backend's context assembly, and its
+      ``public()`` is the ``EffectiveSharedMemory`` without them, the only form
+      a user or an agent may get.
 
     The result holds tuples, never lists. ``memories`` and ``policies`` are not
     modified. Example: memories ``m1`` (subjects ``("merge.permission",)``),
@@ -155,8 +159,8 @@ def resolve_effective_view(
         if policy_id in policy_id_to_policy:
             applied_policies.append(policy_id_to_policy[policy_id])
 
-    # Return as EffectiveSharedMemory object, not a tuple
-    return EffectiveSharedMemory(
+    # Return as InternalEffectiveView object, not a tuple
+    return InternalEffectiveView(
         memories=tuple(result_memories),
         overridden=tuple(result_overridden),
         applied_policies=tuple(applied_policies),

@@ -520,9 +520,13 @@ def broker_of(
     clock: Callable[[], datetime] | None = None,
     timeout_seconds: float = DEFAULT_PROVIDER_TIMEOUT_SECONDS,
 ) -> ResearchBroker:
+    # The PAW-051 tests send fixed, harmless queries and have no privacy gate, so
+    # they use the explicit opt-out. A broker without a pre-flight and without
+    # ``unfiltered=True`` refuses to search (PAW-053).
     return ResearchBroker(
         registry_of(*providers, timeout_seconds=timeout_seconds),
         clock=clock or fixed_clock(),
+        unfiltered=True,
     )
 
 

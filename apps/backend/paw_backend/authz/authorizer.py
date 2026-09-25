@@ -41,6 +41,12 @@ from paw_backend.authz.subjects import AgentGrant, Principal, Resource, to_uuid
 
 logger = logging.getLogger(__name__)
 
+# Lookups that were cancelled at their deadline but have not ended yet (see
+# `Authorizer._lookup`). At this many, a new lookup is refused (an audited
+# denial) instead of piling one more stuck task onto a directory that is not
+# answering.
+_MAX_LIVE_LOOKUPS = 32
+
 
 class Authorizer:
     """Decides in the backend, then audits. The only entry point for callers.
@@ -63,6 +69,12 @@ class Authorizer:
         self._directory = directory
         self._timeout_seconds = timeout_seconds
         self._clock = clock
+        # Every directory lookup that has not ended yet, in flight or abandoned
+        # after its deadline (strong references), and the bound on how many may
+        # exist at once (`_MAX_LIVE_LOOKUPS`): a slot is taken before a lookup
+        # starts and returned only when its task has really ended.
+        self._live: set[asyncio.Task[Principal | None]] = set()
+        self._slots = asyncio.Semaphore(_MAX_LIVE_LOOKUPS)
 
     async def authorize(
         self,
@@ -98,8 +110,9 @@ class Authorizer:
         The delegating user's principal is looked up again through the
         directory on every call, so revoking a role or the user takes effect
         on the agent's very next action. A directory that fails or is slow
-        (bounded by the same timeout as the audit write) counts as "user not
-        active": an audited denial, never an error. Allowed only if both that
+        (bounded by the same timeout as the audit write, however it reacts to
+        cancellation; see ``_lookup``) counts as "user not active": an audited
+        denial, never an error. Allowed only if both that
         user and the grant allow it (``policy.decide_agent``). The event names
         the user as ``actor_id`` and the agent as ``agent_id``.
 
@@ -131,12 +144,57 @@ class Authorizer:
         )
 
     async def _lookup(self, user_id: uuid.UUID) -> Principal | None:
-        """The current principal of ``user_id``; ``None`` on any failure."""
+        """The current principal of ``user_id``; ``None`` on any failure.
+
+        The directory is a database-backed component that can stall, and
+        cancelling a stalled driver call waits for the driver's cleanup (about
+        ten seconds, or for good against a server that never answers). So the
+        deadline must not depend on how the directory reacts to cancellation:
+        the lookup runs as its own task and is waited for with a deadline
+        (``asyncio.wait``, not ``asyncio.timeout``). At the deadline the task
+        is asked to stop and *abandoned*: the caller gets the fail-closed
+        answer at once, and whatever the task eventually returns or raises is
+        discarded, never used and never logged. A directory should still stop
+        its own work on cancellation (``Database.fetch_abortable``), so that an
+        abandoned lookup does not keep a connection; at most
+        ``_MAX_LIVE_LOOKUPS`` lookups (in flight or abandoned) exist at a time:
+        a slot is taken before a lookup starts, within the same deadline, and
+        returned when its task has really ended, so a stalled directory cannot
+        make concurrent requests start more lookups (or connections) than that.
+        """
         if self._directory is None:
             return None
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._timeout_seconds
         try:
-            async with asyncio.timeout(self._timeout_seconds):
-                principal = await self._directory.get_principal_by_id(user_id)
+            await asyncio.wait_for(self._slots.acquire(), self._timeout_seconds)
+        except TimeoutError:
+            logger.warning("Principal lookup refused: earlier lookups have not ended")
+            return None
+        lookup = asyncio.create_task(self._ask_directory(user_id))
+        self._live.add(lookup)
+
+        def ended(task: asyncio.Task[Principal | None]) -> None:
+            self._live.discard(task)
+            self._slots.release()
+            # Retrieve the outcome so that asyncio never logs it (with the
+            # message) when an abandoned lookup fails after its deadline.
+            task.cancelled() or task.exception()
+
+        lookup.add_done_callback(ended)
+        try:
+            await asyncio.wait({lookup}, timeout=max(0.0, deadline - loop.time()))
+        finally:
+            if not lookup.done():  # timed out, or this caller was cancelled
+                lookup.cancel()
+        if not lookup.done():
+            logger.warning("Principal lookup failed (TimeoutError)")
+            return None
+        if lookup.cancelled():  # the directory cancelled itself
+            logger.warning("Principal lookup failed (CancelledError)")
+            return None
+        try:
+            principal = lookup.result()
         except Exception as error:
             # Type name only; a directory error can carry connection details.
             logger.warning("Principal lookup failed (%s)", type(error).__name__)
@@ -144,6 +202,11 @@ class Authorizer:
         if not isinstance(principal, Principal) or principal.user_id != user_id:
             return None  # a directory answering for someone else is refused
         return principal
+
+    async def _ask_directory(self, user_id: uuid.UUID) -> Principal | None:
+        # A coroutine of its own, so that a directory whose method is not
+        # awaitable fails inside the lookup task (a denial), not in the caller.
+        return await self._directory.get_principal_by_id(user_id)
 
     async def authorize_role_change(
         self,
