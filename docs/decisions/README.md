@@ -19,6 +19,7 @@
 | [0012](0012-research-provider-adapter-policy.md) | Research Provider Adapterの方針 | Approved |
 | [0013](0013-research-scratch-task-relation.md) | Research Scratch の Task との関係と Pin / 保存の方針 | Approved |
 | [0014](0014-task-working-set-persistence.md) | Task の Working Set（Multi-Repo）の永続化をPAW-032に含めず、新しいIssueで扱う | Approved |
+| [0023](0023-audit-events-details-for-external-send.md) | 外部送信の Audit を `audit_events.details`（JSONB）へ永続化する方針（Decision 0010 の永続 Sink。0010・0004 への追補） | Approved |
 
 運用は [AGENTS.md](../../AGENTS.md) の「仕様変更」に従います。
 
