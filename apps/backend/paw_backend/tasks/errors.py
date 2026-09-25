@@ -54,15 +54,28 @@ class TaskStepError(TaskError):
     code = "task_step_error"
 
 
-class StaleAttemptError(TaskError):
-    """The caller works for an attempt that is no longer the task's current one.
+class StaleRunError(TaskError):
+    """The caller works for a run of the task that a Retry or Restart replaced.
 
-    Raised for step, tool, log and attempt-state bookkeeping after a Restart
-    started a newer attempt. Nothing is written, so a superseded worker cannot
-    disturb the new attempt.
+    Raised for step, log and attempt-state bookkeeping by a worker whose run
+    (``TaskRun``: attempt and retry count) is no longer the task's current one.
+    Nothing is written, so a superseded worker cannot disturb the run that took
+    over.
+    """
+
+    code = "stale_run"
+    message: ClassVar[str] = "The task has moved on to a newer run"
+
+    def __init__(self) -> None:
+        super().__init__(self.message)
+
+
+class StaleAttemptError(StaleRunError):
+    """A ``StaleRunError`` whose attempt is not the task's current one.
+
+    A Restart started a newer attempt. A worker that only wants to know whether it
+    was superseded catches ``StaleRunError``, which covers this as well.
     """
 
     code = "stale_attempt"
-
-    def __init__(self) -> None:
-        super().__init__("The task has moved on to a newer attempt")
+    message = "The task has moved on to a newer attempt"

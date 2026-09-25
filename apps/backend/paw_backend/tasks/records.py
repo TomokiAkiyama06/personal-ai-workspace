@@ -14,6 +14,7 @@ from paw_backend.tasks.domain import (
     Actor,
     Interruption,
     TaskCommand,
+    TaskRun,
     TaskState,
     WaitReason,
     interruption_of,
@@ -97,7 +98,7 @@ class AttemptSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class StepInfo:
-    """A step execution. ``id`` and ``attempt`` are what a worker passes back."""
+    """A step execution. ``id`` is what a worker passes back to finish it."""
 
     id: int
     attempt: int
@@ -126,11 +127,22 @@ class ToolInvocationInfo:
 
 @dataclass(frozen=True, slots=True)
 class LogEntry:
+    """A log line, tagged with the run (attempt and retry count) that wrote it.
+
+    A Retry continues the attempt's log, so the lines of the runs of one attempt
+    are told apart by ``retry_count``.
+    """
+
     seq: int
     attempt: int
+    retry_count: int
     level: LogLevel
     message: str
     created_at: datetime
+
+    @property
+    def run(self) -> TaskRun:
+        return TaskRun(self.attempt, self.retry_count)
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,12 +153,14 @@ class TaskEvent:
     latest step at the time of the event, except for Stop Now and Fail: they name
     only a step they actually ended (``None`` if no step was running, even when an
     earlier, finished step exists). ``task_version`` is the task version after
-    the event.
+    the event. ``attempt`` and ``retry_count`` are the task's after the event: for
+    Start they are the run the worker is started for (``run``).
     """
 
     seq: int
     task_id: uuid.UUID
     attempt: int
+    retry_count: int
     command: TaskCommand
     from_state: TaskState | None
     to_state: TaskState
@@ -157,6 +171,11 @@ class TaskEvent:
     detail: dict[str, Any] | None
     task_version: int
     created_at: datetime
+
+    @property
+    def run(self) -> TaskRun:
+        """The run of the task after this event (what a Start event hands a worker)."""
+        return TaskRun(self.attempt, self.retry_count)
 
     @property
     def interruption(self) -> Interruption | None:
@@ -197,3 +216,8 @@ class TaskSnapshot:
     # ``started`` (what the backend would have to resume or abort; a step has at
     # most ``MAX_ACTIVE_TOOL_INVOCATIONS`` of them) and the latest 100 finished.
     tool_invocations: tuple[ToolInvocationInfo, ...] = field(default=())
+
+    @property
+    def run(self) -> TaskRun:
+        """The run a worker started now would belong to."""
+        return TaskRun(self.attempt.number, self.retry_count)

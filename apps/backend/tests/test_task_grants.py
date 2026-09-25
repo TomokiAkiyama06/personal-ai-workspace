@@ -42,6 +42,7 @@ from paw_backend.tasks import (
 from . import test_task_races, test_task_service, test_task_tools
 from .support import make_settings
 from .task_support import (
+    FIRST_RUN,
     TEST_DATABASE_URL,
     PostgresTaskTestCase,
     migrate,
@@ -268,11 +269,11 @@ class AppRolePrivilegesTest(AsAppRole, PostgresTaskTestCase):
     async def test_the_app_role_cannot_rewrite_the_history_or_remove_anything(self):
         task_id = await self.create_task(title="Original title", input={"a": 1})
         await self.service.execute(task_id, C.START, actor=self.system)
-        step = await self.service.begin_step(task_id, "work", attempt=1)
+        step = await self.service.begin_step(task_id, "work", run=FIRST_RUN)
         await self.service.begin_tool_invocation(
             task_id, step_id=step.id, tool_name="shell"
         )
-        await self.service.add_log(task_id, "kept", attempt=1)
+        await self.service.add_log(task_id, "kept", run=FIRST_RUN)
         before = await self.service.restore(task_id)
         history = await self.service.history(task_id)
 
@@ -332,14 +333,14 @@ class AppRolePrivilegesTest(AsAppRole, PostgresTaskTestCase):
             await service.execute(
                 task_id, command, actor=self.system, wait_reason=wait_reason
             )
-        step = await service.begin_step(task_id, "implement", attempt=1)
+        step = await service.begin_step(task_id, "implement", run=FIRST_RUN)
         call = await service.begin_tool_invocation(
             task_id, step_id=step.id, tool_name="shell"
         )
-        await service.add_log(task_id, "working", attempt=1)
+        await service.add_log(task_id, "working", run=FIRST_RUN)
         await service.update_attempt(
             task_id,
-            attempt=1,
+            run=FIRST_RUN,
             worktree=WorktreeState("agent/task", "/srv/worktrees/task", "a" * 40),
             review=ReviewState(ReviewStatus.APPROVED, EvaluationResult.PASSED),
             pull_request=PullRequestInfo(

@@ -240,7 +240,9 @@ class TaskLogRow(Base):
 
     seq: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
     task_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tasks.id"))
+    # The run that wrote the line (a Retry continues the attempt's log).
     attempt: Mapped[int] = mapped_column(Integer)
+    retry_count: Mapped[int] = mapped_column(Integer)
     level: Mapped[LogLevel] = mapped_column(_enum(LogLevel))
     message: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
@@ -250,6 +252,7 @@ class TaskLogRow(Base):
     __table_args__ = (
         Index(None, "task_id", "seq"),
         _in("level", LogLevel, "level_valid"),
+        CheckConstraint("retry_count >= 0", name="retry_count_not_negative"),
     )
 
 
@@ -264,7 +267,9 @@ class TaskEventRow(Base):
 
     seq: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
     task_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tasks.id"))
+    # The task's run after the event (for Start: the run of the worker it starts).
     attempt: Mapped[int] = mapped_column(Integer)
+    retry_count: Mapped[int] = mapped_column(Integer)
     command: Mapped[TaskCommand] = mapped_column(_enum(TaskCommand))
     from_state: Mapped[TaskState | None] = mapped_column(_enum(TaskState))
     to_state: Mapped[TaskState] = mapped_column(_enum(TaskState))
@@ -290,4 +295,5 @@ class TaskEventRow(Base):
             "(actor_kind = 'user') = (actor_id IS NOT NULL)",
             name="actor_id_matches_kind",
         ),
+        CheckConstraint("retry_count >= 0", name="retry_count_not_negative"),
     )

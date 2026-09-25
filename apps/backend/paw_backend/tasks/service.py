@@ -21,9 +21,13 @@ Changes of the task's row also increment ``tasks.version`` and are applied with
 it saw earlier passes it as ``expected_version`` so that a stale decision is
 rejected (``TaskConflictError``) even if it arrives later.
 
-Bookkeeping by a worker (steps, tool calls, logs, attempt state) names the
-attempt it works for. Once Restart has started a newer attempt, a superseded
-worker gets ``StaleAttemptError`` and cannot touch the new attempt.
+Bookkeeping by a worker names the run it works for (``TaskRun``: the attempt,
+which Restart increments, and the retry count, which Retry increments): a step
+is started, a log line is written and the worktree / review / pull request state
+is updated for a run. Once Restart or Retry has started a newer run, a superseded
+worker gets ``StaleAttemptError`` / ``StaleRunError`` (nothing is written) and
+cannot touch the new run. Finishing a step or a tool call names the step or the
+call instead, and that is enough: see ``TaskService.finish_step``.
 """
 
 import json
@@ -52,6 +56,7 @@ from paw_backend.db import Database
 from paw_backend.tasks.domain import (
     Actor,
     TaskCommand,
+    TaskRun,
     TaskState,
     WaitReason,
     plan_transition,
@@ -59,6 +64,7 @@ from paw_backend.tasks.domain import (
 from paw_backend.tasks.errors import (
     InvalidCommandArgumentError,
     StaleAttemptError,
+    StaleRunError,
     TaskConflictError,
     TaskNotFoundError,
     TaskStepError,
@@ -300,11 +306,25 @@ def _optional_text(name: str, value: str | None, limit: int) -> str | None:
     return None if value is None else _text(name, value, limit)
 
 
+def _run(run: object) -> TaskRun:
+    """``run`` itself, or ``InvalidCommandArgumentError`` if it is not a ``TaskRun``.
+
+    A caller that still passes a bare attempt number cannot say which run it is,
+    so it fails loudly instead of being treated as some run.
+    """
+    if not isinstance(run, TaskRun):
+        raise InvalidCommandArgumentError(
+            "run must be a TaskRun (the attempt and the retry count)"
+        )
+    return run
+
+
 def _event(row: TaskEventRow) -> TaskEvent:
     return TaskEvent(
         seq=row.seq,
         task_id=row.task_id,
         attempt=row.attempt,
+        retry_count=row.retry_count,
         command=row.command,
         from_state=row.from_state,
         to_state=row.to_state,
@@ -533,6 +553,7 @@ class TaskService:
                     TaskLogRow(
                         task_id=task.id,
                         attempt=task.attempt,
+                        retry_count=task.retry_count,
                         level=LogLevel.WARNING,
                         message=self._stop_now_message(ended_step, reason),
                         created_at=now,
@@ -560,19 +581,22 @@ class TaskService:
     # -- steps, logs and attempt state (bookkeeping by workers) --------------
 
     async def begin_step(
-        self, task_id: uuid.UUID, name: str, *, attempt: int
+        self, task_id: uuid.UUID, name: str, *, run: TaskRun
     ) -> StepInfo:
-        """Start a step of ``attempt``; it becomes the current step.
+        """Start a step of ``run``; it becomes the current step.
 
-        ``attempt`` is the attempt the worker was started for (``TaskEvent.attempt``
-        of its Start event). Allowed while the task is running, waiting
-        (independent safe work may continue) or evaluating, and only if no other
-        step is running. Raises ``StaleAttemptError`` for a superseded attempt.
+        ``run`` is the run the worker was started for (``TaskEvent.run`` of its
+        Start event). Allowed while the task is running, waiting (independent safe
+        work may continue) or evaluating, and only if no other step is running.
+        Raises ``StaleAttemptError`` (Restart) or ``StaleRunError`` (Retry) for a
+        superseded run: after Fail, Retry and Start no step is running, so only the
+        run tells the worker of the failed run from the new one.
         """
         name = _text("name", name, MAX_NAME_LENGTH)
+        run = _run(run)
         async with self._database.session() as session, session.begin():
             task = await self._require_task(session, task_id, lock=True)
-            self._require_current_attempt(task, attempt)
+            self._require_current_run(task, run)
             if task.state not in _STEP_ACTIVE_STATES:
                 raise TaskStepError("A step can only start while the task is active")
             latest = await self._latest_step(session, task.id, task.attempt)
@@ -603,6 +627,13 @@ class TaskService:
         are marked interrupted. Raises ``StaleAttemptError`` if the step belongs
         to an attempt that a Restart replaced, and ``TaskStepError`` if the step
         is unknown or no longer running (for example Stop Now ended it).
+
+        The step's ID is enough to tell runs apart: Retry only follows Fail, which
+        ends the step that is running, so a step that a run left behind is never
+        running in a later run of the same attempt, and its worker gets
+        ``TaskStepError`` instead of touching the new run's step. The same holds
+        for ``begin_tool_invocation`` and ``finish_tool_invocation``, which name a
+        step or a call.
         """
         if status not in _FINISHED_STEP_STATUSES:
             raise InvalidCommandArgumentError(
@@ -703,28 +734,33 @@ class TaskService:
         task_id: uuid.UUID,
         message: str,
         *,
-        attempt: int,
+        run: TaskRun,
         level: LogLevel = LogLevel.INFO,
     ) -> LogEntry:
-        """Append a log line to ``attempt`` (allowed in any task state).
+        """Append a log line, tagged with ``run``, to its attempt (any task state).
 
-        Raises ``StaleAttemptError`` unless ``attempt`` is the current attempt.
+        Raises ``StaleAttemptError`` / ``StaleRunError`` unless ``run`` is the
+        current run. The line is tagged with the run, not the task's current one,
+        so a line whose transaction commits at the same moment as a Retry or
+        Restart is still attributed to the run that wrote it.
         Callers must not pass secrets: redaction is not done here. Messages over
         ``MAX_LOG_MESSAGE_LENGTH`` characters are truncated; text PostgreSQL cannot
         store (NUL, surrogate characters) is refused, in the cut-off part too.
         """
+        run = _run(run)
         _storable("message", message)  # all of it, not only what is kept
         if len(message) > MAX_LOG_MESSAGE_LENGTH:
             message = message[: MAX_LOG_MESSAGE_LENGTH - len(_TRUNCATED)] + _TRUNCATED
         async with self._database.session() as session, session.begin():
-            # No lock: the row is tagged with the caller's attempt, so even when a
-            # Restart commits at the same moment the line stays with its own
-            # attempt and never lands in the new one.
+            # No lock: the row is tagged with the caller's run, so even when a
+            # Restart or Retry commits at the same moment the line stays with its
+            # own run and is never taken for the new one's.
             task = await self._require_task(session, task_id)
-            self._require_current_attempt(task, attempt)
+            self._require_current_run(task, run)
             row = TaskLogRow(
                 task_id=task.id,
-                attempt=attempt,
+                attempt=run.attempt,
+                retry_count=run.retry_count,
                 level=level,
                 message=message,
                 created_at=utcnow(),
@@ -732,28 +768,36 @@ class TaskService:
             session.add(row)
             await session.flush()
             return LogEntry(
-                row.seq, row.attempt, row.level, row.message, row.created_at
+                row.seq,
+                row.attempt,
+                row.retry_count,
+                row.level,
+                row.message,
+                row.created_at,
             )
 
     async def update_attempt(
         self,
         task_id: uuid.UUID,
         *,
-        attempt: int,
+        run: TaskRun,
         worktree: WorktreeState | None = None,
         review: ReviewState | None = None,
         pull_request: PullRequestInfo | None = None,
     ) -> AttemptSnapshot:
-        """Replace the worktree / review / pull request state of ``attempt``.
+        """Replace the worktree / review / pull request state of the run's attempt.
 
         Each group that is given replaces the stored one; groups left as ``None``
         are unchanged. Allowed in any task state (a pull request can be merged
-        after the task completed) but only for the current attempt
-        (``StaleAttemptError`` otherwise). Text longer than its column or that
+        after the task completed) but only for the current run
+        (``StaleAttemptError`` after a Restart, ``StaleRunError`` after a Retry:
+        the new run continues the same attempt's state, so a delayed worker of the
+        failed run must not overwrite it). Text longer than its column or that
         PostgreSQL cannot store (NUL, surrogate characters), and a pull request
         number that is not an integer from 1 to ``MAX_PULL_REQUEST_NUMBER``, raise
         ``InvalidCommandArgumentError``.
         """
+        run = _run(run)
         if worktree is not None:
             _column_text("worktree branch", worktree.branch, "branch")
             _column_text("worktree path", worktree.path, "worktree_path")
@@ -770,7 +814,7 @@ class TaskService:
             _column_text("pull request url", pull_request.url, "pr_url")
         async with self._database.session() as session, session.begin():
             task = await self._require_task(session, task_id, lock=True)
-            self._require_current_attempt(task, attempt)
+            self._require_current_run(task, run)
             row = (
                 await session.execute(
                     select(TaskAttemptRow).where(
@@ -875,7 +919,12 @@ class TaskService:
                 current_step=_step(step) if step is not None else None,
                 recent_logs=tuple(
                     LogEntry(
-                        row.seq, row.attempt, row.level, row.message, row.created_at
+                        row.seq,
+                        row.attempt,
+                        row.retry_count,
+                        row.level,
+                        row.message,
+                        row.created_at,
                     )
                     for row in reversed(logs)
                 ),
@@ -1008,6 +1057,13 @@ class TaskService:
         if attempt != task.attempt:
             raise StaleAttemptError()
 
+    @classmethod
+    def _require_current_run(cls, task: TaskRow, run: TaskRun) -> None:
+        """The attempt first (Restart), then the retry count (Retry)."""
+        cls._require_current_attempt(task, run.attempt)
+        if run.retry_count != task.retry_count:
+            raise StaleRunError()
+
     @staticmethod
     async def _close_step(
         session: AsyncSession, step: TaskStepRow, status: StepStatus, now: datetime
@@ -1058,6 +1114,7 @@ class TaskService:
         row = TaskEventRow(
             task_id=task.id,
             attempt=task.attempt,
+            retry_count=task.retry_count,
             command=command,
             from_state=from_state,
             to_state=task.state,

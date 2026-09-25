@@ -29,7 +29,7 @@ from paw_backend.tasks.service import (
     MAX_RESTORE_TOOL_INVOCATIONS,
 )
 
-from .task_support import PostgresTaskTestCase, requires_postgres
+from .task_support import FIRST_RUN, PostgresTaskTestCase, requires_postgres
 
 C = TaskCommand
 S = TaskState
@@ -40,7 +40,7 @@ T = ToolInvocationStatus
 class ToolInvocationTest(PostgresTaskTestCase):
     async def running_step(self, state: TaskState = S.RUNNING):
         task_id = await self.task_in_state(state)
-        step = await self.service.begin_step(task_id, "run-tests", attempt=1)
+        step = await self.service.begin_step(task_id, "run-tests", run=FIRST_RUN)
         return task_id, step
 
     async def test_a_call_is_recorded_started_and_then_finished(self):
@@ -137,7 +137,7 @@ class ToolInvocationTest(PostgresTaskTestCase):
             task_id, step_id=first.id, tool_name="old-tool"
         )
         await self.service.finish_step(task_id, first.id, StepStatus.SUCCEEDED)
-        second = await self.service.begin_step(task_id, "next", attempt=1)
+        second = await self.service.begin_step(task_id, "next", run=FIRST_RUN)
         current = await self.service.begin_tool_invocation(
             task_id, step_id=second.id, tool_name="new-tool"
         )
@@ -415,7 +415,7 @@ class ToolInvocationSchemaTest(PostgresTaskTestCase):
 
     async def test_the_database_keeps_finished_at_consistent_with_the_status(self):
         task_id = await self.task_in_state(S.RUNNING)
-        step = await self.service.begin_step(task_id, "work", attempt=1)
+        step = await self.service.begin_step(task_id, "work", run=FIRST_RUN)
         for status, finished in (
             ("started", "now()"),
             ("succeeded", "NULL"),
@@ -436,7 +436,7 @@ class ToolInvocationSchemaTest(PostgresTaskTestCase):
 
     async def running_step(self):
         task_id = await self.task_in_state(S.RUNNING)
-        return task_id, await self.service.begin_step(task_id, "work", attempt=1)
+        return task_id, await self.service.begin_step(task_id, "work", run=FIRST_RUN)
 
     async def database_execute(self, sql: str, **parameters) -> None:
         async with self.database.engine.begin() as connection:

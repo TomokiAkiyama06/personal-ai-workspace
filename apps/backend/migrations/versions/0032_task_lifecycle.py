@@ -249,6 +249,7 @@ def upgrade() -> None:
         sa.Column("seq", sa.BigInteger(), sa.Identity(), nullable=False),
         sa.Column("task_id", sa.Uuid(), nullable=False),
         sa.Column("attempt", sa.Integer(), nullable=False),
+        sa.Column("retry_count", sa.Integer(), nullable=False),
         sa.Column("level", sa.String(length=24), nullable=False),
         sa.Column("message", sa.Text(), nullable=False),
         _now(),
@@ -257,6 +258,9 @@ def upgrade() -> None:
             ["task_id"], ["tasks.id"], name=op.f("fk_task_logs_task_id_tasks")
         ),
         _in("level", LOG_LEVELS, "ck_task_logs_level_valid"),
+        sa.CheckConstraint(
+            "retry_count >= 0", name=op.f("ck_task_logs_retry_count_not_negative")
+        ),
     )
     grant_app_privileges(op, "task_logs", insert=True)
     op.create_index(op.f("ix_task_logs_task_id"), "task_logs", ["task_id", "seq"])
@@ -266,6 +270,7 @@ def upgrade() -> None:
         sa.Column("seq", sa.BigInteger(), sa.Identity(), nullable=False),
         sa.Column("task_id", sa.Uuid(), nullable=False),
         sa.Column("attempt", sa.Integer(), nullable=False),
+        sa.Column("retry_count", sa.Integer(), nullable=False),
         sa.Column("command", sa.String(length=24), nullable=False),
         sa.Column("from_state", sa.String(length=24), nullable=True),
         sa.Column("to_state", sa.String(length=24), nullable=False),
@@ -289,6 +294,9 @@ def upgrade() -> None:
         sa.CheckConstraint(
             "(actor_kind = 'user') = (actor_id IS NOT NULL)",
             name=op.f("ck_task_events_actor_id_matches_kind"),
+        ),
+        sa.CheckConstraint(
+            "retry_count >= 0", name=op.f("ck_task_events_retry_count_not_negative")
         ),
     )
     grant_app_privileges(op, "task_events", insert=True)
