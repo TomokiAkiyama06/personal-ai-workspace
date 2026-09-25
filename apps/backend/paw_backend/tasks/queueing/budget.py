@@ -20,24 +20,41 @@ Atomicity. ``record`` is one ``UPDATE ... SET consumed = LEAST(consumed +
 number of processes) never lose an increment, and consumed never exceeds
 ``MAX_CONSUMED`` (saturating, no overflow).
 
-Runtime is measured with the injected ``clock`` (a zero-argument callable that
-returns a timezone-aware ``datetime``; the default reads the real UTC time).
-``start_runtime`` stores ``running_since`` on the ``runtime_seconds`` row;
-``stop_runtime`` adds the elapsed whole seconds and clears it. While a run is in
-progress ``usage`` / ``check`` report ``consumed + elapsed`` WITHOUT writing.
-Elapsed whole seconds are ``floor((now - running_since).total_seconds())``, and
-never negative (a clock that went backwards counts as 0).
+Runtime is measured with ONE clock, the DATABASE's (Decision 0007, 10, Proposed):
+every persisted runtime instant (``running_since``, ``settled_through``) and every
+elapsed time is PostgreSQL's ``clock_timestamp()``, read INSIDE the SQL statement
+(``WITH clock AS (SELECT clock_timestamp() AS ts)``: one reading per statement, as
+in the queue, see ``task_queue``). No process's clock is read, so workers on hosts
+whose clocks disagree cannot charge a session too little (a budget bypass: a host
+that is ahead writes a cutoff that puts the replacement's timer into the future of
+a host that is behind) or too much. ``start_runtime`` stores ``running_since`` on
+the ``runtime_seconds`` row; ``stop_runtime`` adds the elapsed whole seconds and
+clears it. While a run is in progress ``usage`` / ``check`` report ``consumed +
+elapsed`` (the database's reading of the statement that read the row) WITHOUT
+writing. Elapsed whole seconds are ``floor((now - running_since).total_seconds())``,
+and never negative (a clock that went backwards counts as 0).
 
-Ordering of the timer times. The clock is read in Python BEFORE the statement runs,
-so a caller can be delayed between reading and writing. ``stop_runtime`` therefore
-records the cutoff it settled through (``budget_usages.settled_through`` =
-``greatest(clock(), running_since)``), and ``start_runtime`` starts a timer at
-``greatest(clock(), settled_through)``, all inside the (row-locked) statements. A
-start that read its clock earlier than an older session's stop cannot make the
-interval in between count twice, and the cutoff only moves forward, so the charged
-intervals never overlap even when clocks disagree. The alternative of reading the
-database clock inside the statements was not used: it would leave the injected
-clock unused and mix two time sources (Decision 0007, 10).
+Test clock. ``BudgetTracker(database, clock=..., allow_explicit_clock=True)`` is a
+TEST SEAM that stands in for the database clock so that tests move time
+deterministically (no sleeping): ``clock`` is a zero-argument callable that returns
+a timezone-aware ``datetime``, read in Python and bound into the statement in place
+of ``clock_timestamp()``. It is accepted only with ``allow_explicit_clock=True``
+(the same opt-in as ``TaskQueue(allow_explicit_now=True)``); production code builds
+``BudgetTracker(database)``, which uses the database clock and cannot be given a
+process time. Every persisted instant of one deployment must come from the same
+authority: never mix a tracker with a test clock and one without on one database.
+
+Ordering of the timer times. The database clock is read by the statement BEFORE it
+waits for a row lock (as for the queue), and a wall clock can step backwards (NTP
+step, a failover to another server). So ``stop_runtime`` still records the cutoff
+it settled through (``budget_usages.settled_through`` = ``greatest(now,
+running_since)``) and ``start_runtime`` starts a timer at ``greatest(now,
+settled_through)``, inside the (row-locked) statements: a start that took its
+reading before a concurrent stop's cutoff cannot make the interval in between count
+twice, and the cutoff only moves forward, so the charged intervals never overlap.
+The cutoff no longer protects against clocks of different HOSTS (there is only one
+authority now); it is kept because it costs nothing (the column, its CHECK and the
+grant exist) and it closes the reading-before-waiting and backwards-step races.
 
 Runtime sessions (fencing). Every ``start_runtime`` begins a new runtime session
 and returns its generation (``budget_usages.runtime_generation``: it only grows
@@ -59,7 +76,7 @@ task.
 import math
 import uuid
 from collections.abc import Callable, Mapping
-from datetime import UTC, datetime
+from datetime import datetime
 
 from sqlalchemy import (
     BigInteger,
@@ -74,6 +91,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection
+from sqlalchemy.sql.elements import ColumnElement
 
 from paw_backend.db import Database
 from paw_backend.tasks.errors import TaskNotFoundError
@@ -95,14 +113,11 @@ from paw_backend.tasks.queueing.sql import FOREIGN_KEY_VIOLATION, sqlstate
 from paw_backend.tasks.queueing.validation import (
     MAX_CONSUMED,
     check_amount,
+    check_bool,
     check_member,
     check_runtime_generation,
     check_uuid,
 )
-
-
-def _utc_now() -> datetime:
-    return datetime.now(UTC)
 
 
 def _elapsed_seconds(now: datetime, since: datetime) -> int:
@@ -115,14 +130,21 @@ class BudgetTracker:
         self,
         database: Database,
         *,
-        clock: Callable[[], datetime] = _utc_now,
+        clock: Callable[[], datetime] | None = None,
+        allow_explicit_clock: bool = False,
     ) -> None:
-        """``clock`` must be callable, else ``InvalidQueueingArgumentError("clock")``.
+        """Production code passes only ``database``: time is the database clock.
 
-        A clock that returns something other than a timezone-aware ``datetime``
-        makes the calling method raise ``InvalidQueueingArgumentError("clock")``.
+        ``clock`` and ``allow_explicit_clock`` (a ``bool``) are the TEST SEAM of
+        the module docstring. A ``clock`` is accepted only with
+        ``allow_explicit_clock=True`` and must then be callable; otherwise
+        ``InvalidQueueingArgumentError("clock")`` (so a production tracker cannot
+        be given a process clock). A clock that returns something other than a
+        timezone-aware ``datetime`` makes the calling method raise
+        ``InvalidQueueingArgumentError("clock")``.
         """
-        if not callable(clock):
+        allow = check_bool("allow_explicit_clock", allow_explicit_clock)
+        if clock is not None and not (allow and callable(clock)):
             raise InvalidQueueingArgumentError("clock")
         self._database = database
         self._clock = clock
@@ -143,7 +165,6 @@ class BudgetTracker:
         """
         check_uuid("task_id", task_id)
         check_member("preset", preset, BudgetPreset)
-        now = self._now()
         limits = PRESET_LIMITS[preset]
         upsert = insert(BudgetUsageRow).values(
             [
@@ -168,7 +189,7 @@ class BudgetTracker:
         try:
             async with self._database.engine.begin() as connection:
                 await connection.execute(upsert)
-                return await self._read_usage(connection, task_id, now)
+                return await self._read_usage(connection, task_id)
         except IntegrityError as error:
             if sqlstate(error) == FOREIGN_KEY_VIOLATION:
                 raise TaskNotFoundError() from None
@@ -209,10 +230,11 @@ class BudgetTracker:
 
         The generation grows by 1 on every call and must be passed to
         ``stop_runtime``. When no run is in progress ``running_since`` is set to
-        ``greatest(clock(), settled_through)``: never before the cutoff of the last
-        ``stop_runtime`` (a start that read its clock before an older session's stop
-        settled a later time would otherwise charge that interval twice), and plain
-        ``clock()`` when nothing was stopped yet. When a run is already in progress (a
+        ``greatest(now, settled_through)`` where ``now`` is the database clock read
+        by this statement: never before the cutoff of the last ``stop_runtime`` (a
+        start whose reading precedes a concurrent stop's cutoff, or a clock that
+        stepped backwards, would otherwise charge that interval twice), and plain
+        ``now`` when nothing was stopped yet. When a run is already in progress (a
         worker that died without stopping, whose lease expired) the new session
         TAKES OVER: the original ``running_since`` is kept, so the time since then
         is neither lost nor counted twice, and the previous session's generation is
@@ -223,7 +245,7 @@ class BudgetTracker:
         there is no budget.
         """
         check_uuid("task_id", task_id)
-        now = literal(self._now(), DateTime(timezone=True))
+        now = self._instant()
         start = (
             update(BudgetUsageRow)
             .where(
@@ -251,11 +273,12 @@ class BudgetTracker:
 
         ``generation`` is what ``start_runtime`` returned (an ``int`` >= 1;
         otherwise ``InvalidQueueingArgumentError("generation")``). Adds
-        ``max(floor((clock() - running_since).total_seconds()), 0)`` to the
-        runtime consumption (saturating at ``MAX_CONSUMED``), sets
-        ``running_since`` to ``NULL``, records the cutoff ``settled_through =
-        greatest(clock(), running_since)`` (the next start begins no earlier; the
-        cutoff only moves forward) and returns the runtime usage. The read of
+        ``max(floor((now - running_since).total_seconds()), 0)`` to the runtime
+        consumption (saturating at ``MAX_CONSUMED``; ``now`` is the database clock
+        read by this statement), sets ``running_since`` to ``NULL``, records the
+        cutoff ``settled_through = greatest(now, running_since)`` (the next start
+        begins no earlier; the cutoff only moves forward) and returns the runtime
+        usage. The read of
         ``running_since`` and the write are one atomic statement (a second
         concurrent stop must not add the time twice).
 
@@ -268,8 +291,7 @@ class BudgetTracker:
         """
         check_uuid("task_id", task_id)
         check_runtime_generation(generation)
-        now = self._now()
-        stopped_at = literal(now, DateTime(timezone=True))
+        stopped_at = self._instant()
         elapsed = func.greatest(
             cast(
                 func.floor(extract("epoch", stopped_at - BudgetUsageRow.running_since)),
@@ -315,19 +337,19 @@ class BudgetTracker:
             if current != generation:
                 raise StaleRuntimeSessionError()
             # This session has already been stopped: report the runtime so far.
-            usage = await self._read_usage(connection, task_id, now)
+            usage = await self._read_usage(connection, task_id)
         return next(item for item in usage if item.kind is BudgetKind.RUNTIME_SECONDS)
 
     async def usage(self, task_id: uuid.UUID) -> tuple[BudgetUsage, ...]:
         """The six ``BudgetUsage`` in ``BudgetKind`` declaration order.
 
-        The runtime entry includes the run in progress (``consumed + elapsed``
-        at ``clock()``). Read-only. ``BudgetNotConfiguredError`` if none.
+        The runtime entry includes the run in progress (``consumed + elapsed`` at
+        the database clock read by the statement that read the row). Read-only.
+        ``BudgetNotConfiguredError`` if none.
         """
         check_uuid("task_id", task_id)
-        now = self._now()
         async with self._database.engine.connect() as connection:
-            return await self._read_usage(connection, task_id, now)
+            return await self._read_usage(connection, task_id)
 
     async def check(
         self,
@@ -365,24 +387,41 @@ class BudgetTracker:
         status = BudgetStatus.EXCEEDED if exceeded else BudgetStatus.OK
         return BudgetVerdict(status, exceeded, usage)
 
-    def _now(self) -> datetime:
-        """The injected clock's reading; it must be a timezone-aware ``datetime``."""
+    def _instant(self) -> ColumnElement[datetime]:
+        """The current instant as SQL: the database clock (the test clock, if any).
+
+        Without a test clock: a scalar subquery of the CTE ``clock`` =
+        ``SELECT clock_timestamp()``. ``clock_timestamp()`` (the wall clock when it
+        is evaluated; ``now()`` would be the start of the transaction) is read ONCE
+        per statement however often the returned expression is used in it: a CTE
+        that contains a volatile function is evaluated once. The statement using it
+        starts with the ``WITH`` clause SQLAlchemy adds. With a test clock: the
+        clock's reading, checked to be a timezone-aware ``datetime``
+        (``InvalidQueueingArgumentError("clock")`` otherwise), bound as a value.
+        """
+        if self._clock is None:
+            sample = select(func.clock_timestamp().label("ts")).cte("clock")
+            return select(sample.c.ts).scalar_subquery()
         now = self._clock()
         if not isinstance(now, datetime) or now.utcoffset() is None:
             raise InvalidQueueingArgumentError("clock")
-        return now
+        return literal(now, DateTime(timezone=True))
 
-    @staticmethod
     async def _read_usage(
-        connection: AsyncConnection, task_id: uuid.UUID, now: datetime
+        self, connection: AsyncConnection, task_id: uuid.UUID
     ) -> tuple[BudgetUsage, ...]:
-        """The task's six usages in ``BudgetKind`` order, a run in progress included."""
+        """The task's six usages in ``BudgetKind`` order, a run in progress included.
+
+        The instant is read by the same statement as the rows (``_instant``), so a
+        running timer's elapsed time is measured by the database's clock.
+        """
         rows = await connection.execute(
             select(
                 BudgetUsageRow.kind,
                 BudgetUsageRow.consumed,
                 BudgetUsageRow.limit_value,
                 BudgetUsageRow.running_since,
+                self._instant().label("now"),
             ).where(BudgetUsageRow.task_id == task_id)
         )
         by_kind = {row.kind: row for row in rows}
@@ -393,6 +432,6 @@ class BudgetTracker:
             row = by_kind[kind]
             consumed = row.consumed
             if row.running_since is not None:
-                consumed += _elapsed_seconds(now, row.running_since)
+                consumed += _elapsed_seconds(row.now, row.running_since)
             usage.append(BudgetUsage(kind, consumed, row.limit_value))
         return tuple(usage)
