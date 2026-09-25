@@ -45,9 +45,15 @@ from paw_backend.tasks.service import (
     MAX_INPUT_BYTES,
     MAX_INPUT_DEPTH,
     MAX_INPUT_INTEGER_DIGITS,
+    MAX_REASON_LENGTH,
 )
 
-from .task_support import FIRST_RUN, PostgresTaskTestCase, requires_postgres
+from .task_support import (
+    FIRST_RUN,
+    PostgresTaskTestCase,
+    command_reason,
+    requires_postgres,
+)
 from .test_task_domain import EXPECTED
 
 C = TaskCommand
@@ -473,6 +479,12 @@ class UnstorableTextTest(PostgresTaskTestCase):
                     self.idle, C.CANCEL, actor=self.user, reason=bad
                 ),
             ),
+            "execute stop now reason": (
+                self.idle,
+                lambda: service.execute(
+                    self.idle, C.STOP_NOW, actor=self.user, reason=bad
+                ),
+            ),
             "execute agent": (
                 self.failed,
                 lambda: service.execute(
@@ -520,7 +532,7 @@ class UnstorableTextTest(PostgresTaskTestCase):
                 with self.subTest(f"{name}: {label}"):
                     checked += 1
                     await self.assert_refused(task_id, call)
-        self.assertEqual(checked, 11 * len(self.BAD))
+        self.assertEqual(checked, 12 * len(self.BAD))
 
     async def test_create_task_refuses_nul_and_surrogates_in_every_text_field(self):
         count = "SELECT count(*) FROM tasks WHERE project_id = :project_id"
@@ -660,6 +672,7 @@ class TransitionTest(PostgresTaskTestCase):
                                 command,
                                 actor=self.system,
                                 wait_reason=wait_reason,
+                                reason=command_reason(command),
                             )
                         after = await self.service.restore(task_id)
                         self.assertEqual(after.state, state)
@@ -667,7 +680,11 @@ class TransitionTest(PostgresTaskTestCase):
                         self.assertEqual(after.last_event, before.last_event)
                     else:
                         event = await self.service.execute(
-                            task_id, command, actor=self.system, wait_reason=wait_reason
+                            task_id,
+                            command,
+                            actor=self.system,
+                            wait_reason=wait_reason,
+                            reason=command_reason(command),
                         )
                         self.assertEqual(
                             (event.from_state, event.to_state), (state, target)
@@ -690,6 +707,7 @@ class TransitionTest(PostgresTaskTestCase):
                     command,
                     actor=self.system,
                     wait_reason=WaitReason.USER if command is C.WAIT else None,
+                    reason=command_reason(command),
                 )
         self.assertEqual((await self.service.restore(task_id)).state, S.COMPLETED)
 
@@ -834,12 +852,14 @@ class TransitionTest(PostgresTaskTestCase):
 
     async def test_stop_now_without_a_running_step_still_logs(self):
         task_id = await self.task_in_state(S.WAITING)
-        await self.service.execute(task_id, C.STOP_NOW, actor=self.system)
+        await self.service.execute(
+            task_id, C.STOP_NOW, actor=self.system, reason="operator request"
+        )
         snapshot = await self.service.restore(task_id)
         self.assertIsNone(snapshot.current_step)
         self.assertEqual(
             [log.message for log in snapshot.recent_logs],
-            ["Stop Now: no step was running"],
+            ["Stop Now: no step was running (reason: operator request)"],
         )
         self.assertIsNone(snapshot.last_event.step_name)
 
@@ -870,6 +890,126 @@ class TransitionTest(PostgresTaskTestCase):
                 )
                 self.assertNotIn("interrupted", log.message)
 
+    async def test_stop_now_records_its_reason_in_the_event_and_the_log_line(self):
+        """Every accepted Stop Now leaves the reason in both places (REQUIREMENTS)."""
+        reason = "agent loop: 3rd identical tool call"
+        for state, with_step in (
+            (S.RUNNING, True),
+            (S.RUNNING, False),
+            (S.WAITING, False),
+            (S.EVALUATING, False),
+        ):
+            with self.subTest(state=state.value, step=with_step):
+                task_id = await self.task_in_state(state)
+                if with_step:
+                    await self.service.begin_step(task_id, "build", run=FIRST_RUN)
+                event = await self.service.execute(
+                    task_id, C.STOP_NOW, actor=self.user, reason=reason
+                )
+                self.assertEqual(event.reason, reason)
+                self.assertEqual((await self.service.history(task_id))[-1], event)
+                self.assertEqual(
+                    await self.scalar(
+                        "SELECT reason FROM task_events "
+                        "WHERE task_id = :i AND command = 'stop_now'",
+                        i=task_id,
+                    ),
+                    reason,
+                )
+                expected = (
+                    "Stop Now: interrupted step 'build'"
+                    if with_step
+                    else "Stop Now: no step was running"
+                )
+                self.assertEqual(
+                    await self.scalar(
+                        "SELECT message FROM task_logs WHERE task_id = :i", i=task_id
+                    ),
+                    f"{expected} (reason: {reason})",
+                )
+
+    async def assert_stop_now_refused(self, **arguments) -> None:
+        """Stop Now with these arguments fails typed and writes nothing at all."""
+        task_id = await self.task_in_state(S.RUNNING)
+        await self.service.begin_step(task_id, "build", run=FIRST_RUN)
+        before = await self.service.restore(task_id)
+        counts = (
+            "SELECT (SELECT count(*) FROM task_events WHERE task_id = :i), "
+            "(SELECT count(*) FROM task_logs WHERE task_id = :i)"
+        )
+        async with self.database.engine.connect() as connection:
+            rows_before = (await connection.execute(text(counts), {"i": task_id})).one()
+
+        with self.assertRaises(InvalidCommandArgumentError) as caught:
+            await self.service.execute(
+                task_id, C.STOP_NOW, actor=self.user, **arguments
+            )
+        # The message names the argument, never its value.
+        self.assertIn("reason", str(caught.exception))
+        self.assertNotIn("SECRET", str(caught.exception))
+
+        after = await self.service.restore(task_id)
+        self.assertEqual(after, before)  # state, version, last event, logs, steps
+        self.assertEqual(after.state, S.RUNNING)
+        self.assertEqual(after.current_step.status, StepStatus.RUNNING)
+        self.assertEqual(after.recent_logs, ())
+        async with self.database.engine.connect() as connection:
+            rows_after = (await connection.execute(text(counts), {"i": task_id})).one()
+        self.assertEqual(rows_after, rows_before)
+
+    async def test_stop_now_without_a_reason_is_refused_and_writes_nothing(self):
+        await self.assert_stop_now_refused()
+        await self.assert_stop_now_refused(reason=None)
+
+    async def test_stop_now_with_an_empty_or_blank_reason_is_refused(self):
+        for blank in ("", " ", "   ", "\t", "\n", " \t\r\n ", "\u3000"):
+            with self.subTest(reason=blank):
+                await self.assert_stop_now_refused(reason=blank)
+
+    async def test_stop_now_with_a_reason_that_is_not_a_string_is_refused(self):
+        for bad in (0, 1, True, 1.5, b"SECRET", ["SECRET"], {"SECRET": 1}, object()):
+            with self.subTest(reason=type(bad).__name__):
+                await self.assert_stop_now_refused(reason=bad)
+
+    async def test_stop_now_reason_gets_the_same_text_checks_as_other_reasons(self):
+        for name, bad in {
+            "too long": "SECRET" * 100,
+            "NUL": "SECRET\x00",
+            "lone surrogate": "SECRET" + chr(0xD800),
+        }.items():
+            with self.subTest(reason=name):
+                await self.assert_stop_now_refused(reason=bad)
+        # The length limit is inclusive: exactly the limit is accepted.
+        task_id = await self.task_in_state(S.RUNNING)
+        event = await self.service.execute(
+            task_id, C.STOP_NOW, actor=self.user, reason="r" * MAX_REASON_LENGTH
+        )
+        self.assertEqual(event.reason, "r" * MAX_REASON_LENGTH)
+
+    async def test_a_missing_reason_is_judged_before_the_state_of_the_task(self):
+        """The argument is checked up front, so no state is needed to be refused."""
+        for state in (S.QUEUED, S.PAUSED, S.COMPLETED):
+            with self.subTest(state=state.value):
+                task_id = await self.task_in_state(state)
+                with self.assertRaises(InvalidCommandArgumentError):
+                    await self.service.execute(task_id, C.STOP_NOW, actor=self.user)
+                # With a reason the state decides again.
+                with self.assertRaises(IllegalTransitionError):
+                    await self.service.execute(
+                        task_id, C.STOP_NOW, actor=self.user, reason="agent loop"
+                    )
+
+    async def test_other_commands_still_accept_no_reason(self):
+        for command, state in (
+            (C.PAUSE, S.RUNNING),
+            (C.CANCEL, S.RUNNING),
+            (C.FAIL, S.RUNNING),
+        ):
+            with self.subTest(command=command.value):
+                task_id = await self.task_in_state(state)
+                event = await self.service.execute(task_id, command, actor=self.user)
+                self.assertIsNone(event.reason)
+
     async def test_fail_after_the_step_finished_names_no_step(self):
         task_id = await self.task_in_state(S.RUNNING)
         step = await self.service.begin_step(task_id, "run-tests", run=FIRST_RUN)
@@ -891,7 +1031,9 @@ class TransitionTest(PostgresTaskTestCase):
         cancelled = await self.task_in_state(S.RUNNING)
         stopped = await self.task_in_state(S.RUNNING)
         cancel_event = await self.service.execute(cancelled, C.CANCEL, actor=self.user)
-        stop_event = await self.service.execute(stopped, C.STOP_NOW, actor=self.user)
+        stop_event = await self.service.execute(
+            stopped, C.STOP_NOW, actor=self.user, reason="agent loop"
+        )
         self.assertEqual(cancel_event.to_state, stop_event.to_state)
         self.assertNotEqual(cancel_event.interruption, stop_event.interruption)
         restored = await self.service.restore(stopped)
@@ -996,7 +1138,9 @@ class TransitionTest(PostgresTaskTestCase):
         task_id = await self.task_in_state(S.FAILED)
         await self.service.execute(task_id, C.RETRY, actor=self.user)
         await self.service.execute(task_id, C.START, actor=self.system)
-        await self.service.execute(task_id, C.STOP_NOW, actor=self.user)
+        await self.service.execute(
+            task_id, C.STOP_NOW, actor=self.user, reason="agent loop"
+        )
         (line,) = (await self.service.restore(task_id)).recent_logs
         self.assertEqual((line.level, line.run), (LogLevel.WARNING, TaskRun(1, 1)))
         self.assertEqual(

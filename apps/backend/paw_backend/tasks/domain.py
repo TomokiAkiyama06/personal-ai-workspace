@@ -211,7 +211,9 @@ TRANSITIONS: dict[TaskCommand, TransitionRule] = {
     # Stop Now is the emergency stop: it also ends the task, but interrupts
     # generation / tool execution / sub-agents immediately. It only applies
     # where something can be executing, so not to queued or paused tasks (use
-    # Cancel for those).
+    # Cancel for those). The reason and the interrupted step must be kept, so
+    # ``TaskService.execute`` requires a reason for it (the table does not
+    # know about arguments).
     _C.STOP_NOW: TransitionRule(
         frozenset({_S.RUNNING, _S.WAITING, _S.EVALUATING}),
         _S.CANCELLED,

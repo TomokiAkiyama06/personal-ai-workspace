@@ -297,7 +297,9 @@ def _column_text(name: str, value: str | None, column: str) -> None:
 
 
 def _text(name: str, value: str, limit: int) -> str:
-    if not value.strip() or len(value) > limit:
+    # A non-string (or a str subclass, whose methods could lie) is refused with
+    # the same typed error instead of failing with an ``AttributeError``.
+    if type(value) is not str or not value.strip() or len(value) > limit:
         raise InvalidCommandArgumentError(f"{name} must be 1 to {limit} characters")
     return _storable(name, value)
 
@@ -488,8 +490,17 @@ class TaskService:
         for the next run. Raises ``TaskNotFoundError``,
         ``TaskConflictError`` (stale ``expected_version`` or a concurrent
         writer), ``IllegalTransitionError`` and ``InvalidCommandArgumentError``.
+
+        ``reason`` (optional, 1 to ``MAX_REASON_LENGTH`` characters) is kept in
+        the history event. Stop Now REQUIRES one: the emergency stop must leave
+        its reason (and the step it interrupted) in the Audit / Task log, so a
+        missing, blank or non-string reason is refused with
+        ``InvalidCommandArgumentError`` before anything is written or the task
+        is looked at.
         """
         reason = _optional_text("reason", reason, MAX_REASON_LENGTH)
+        if command is TaskCommand.STOP_NOW and reason is None:
+            raise InvalidCommandArgumentError("Stop Now needs a reason")
         agent = _optional_text("agent", agent, MAX_NAME_LENGTH)
         model = _optional_text("model", model, MAX_NAME_LENGTH)
         if (agent or model) and command not in (TaskCommand.RETRY, TaskCommand.RESTART):
@@ -1033,13 +1044,14 @@ class TaskService:
         return value
 
     @staticmethod
-    def _stop_now_message(interrupted_step: str | None, reason: str | None) -> str:
+    def _stop_now_message(interrupted_step: str | None, reason: str) -> str:
+        """The Task log line of a Stop Now: the step it ended and why (both kept)."""
         message = (
             f"Stop Now: interrupted step {interrupted_step!r}"
             if interrupted_step
             else "Stop Now: no step was running"
         )
-        return f"{message} (reason: {reason})" if reason else message
+        return f"{message} (reason: {reason})"
 
     @staticmethod
     async def _require_task(
