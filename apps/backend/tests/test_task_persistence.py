@@ -34,6 +34,7 @@ from paw_backend.tasks import (
 
 from .support import paw_environment
 from .task_support import (
+    FIRST_RUN,
     PostgresTaskTestCase,
     migrate,
     new_database,
@@ -211,7 +212,10 @@ class ConcurrencyTest(PostgresTaskTestCase):
         task_id = await self.task_in_state(S.RUNNING)
         services = [TaskService(self.new_database()) for _ in range(4)]
         results = await asyncio.gather(
-            *(service.begin_step(task_id, "work", attempt=1) for service in services),
+            *(
+                service.begin_step(task_id, "work", run=FIRST_RUN)
+                for service in services
+            ),
             return_exceptions=True,
         )
         started = [result for result in results if not isinstance(result, Exception)]
@@ -224,7 +228,7 @@ class ConcurrencyTest(PostgresTaskTestCase):
 
     async def test_stop_now_does_not_overwrite_a_step_the_worker_just_finished(self):
         task_id = await self.task_in_state(S.RUNNING)
-        await self.service.begin_step(task_id, "work", attempt=1)
+        await self.service.begin_step(task_id, "work", run=FIRST_RUN)
         stopper = TaskService(self.new_database())
 
         async with self.database.engine.connect() as worker:
@@ -265,14 +269,14 @@ class RestoreTest(PostgresTaskTestCase):
             model="model-x",
         )
         await service.execute(task_id, C.START, actor=self.system)
-        await service.begin_step(task_id, "implement", attempt=1)
-        await service.add_log(task_id, "editing parser.py", attempt=1)
+        await service.begin_step(task_id, "implement", run=FIRST_RUN)
+        await service.add_log(task_id, "editing parser.py", run=FIRST_RUN)
         await service.add_log(
-            task_id, "tests are red", attempt=1, level=LogLevel.WARNING
+            task_id, "tests are red", run=FIRST_RUN, level=LogLevel.WARNING
         )
         await service.update_attempt(
             task_id,
-            attempt=1,
+            run=FIRST_RUN,
             worktree=WorktreeState("agent/task-1", "/srv/worktrees/task-1", "b" * 40),
             review=ReviewState(ReviewStatus.IN_REVIEW, EvaluationResult.PASSED),
             pull_request=PullRequestInfo(
@@ -407,7 +411,7 @@ class SchemaTest(PostgresTaskTestCase):
         self,
     ):
         task_id = await self.task_in_state(S.RUNNING)
-        await self.service.begin_step(task_id, "one", attempt=1)
+        await self.service.begin_step(task_id, "one", run=FIRST_RUN)
         with self.assertRaises(IntegrityError):
             async with self.database.engine.begin() as connection:
                 await connection.execute(
@@ -424,11 +428,43 @@ class SchemaTest(PostgresTaskTestCase):
             async with self.database.engine.begin() as connection:
                 await connection.execute(
                     text(
-                        "INSERT INTO task_logs (task_id, attempt, level, message, "
-                        "created_at) VALUES (:id, 1, 'info', 'x', now())"
+                        "INSERT INTO task_logs (task_id, attempt, retry_count, level, "
+                        "message, created_at) VALUES (:id, 1, 0, 'info', 'x', now())"
                     ),
                     {"id": uuid.uuid4()},
                 )
+
+    async def test_a_log_line_and_an_event_must_name_a_run(self):
+        # The same insert is accepted with a valid run, so what is rejected is the
+        # missing or negative retry count.
+        task_id = await self.task_in_state(S.RUNNING)
+        inserts = {
+            "task_logs": (
+                "INSERT INTO task_logs (task_id, attempt, {retry}level, message, "
+                "created_at) VALUES (:id, 1, {value}'info', 'x', now())"
+            ),
+            "task_events": (
+                "INSERT INTO task_events (task_id, attempt, {retry}command, "
+                "to_state, actor_kind, task_version, created_at) "
+                "VALUES (:id, 1, {value}'start', 'running', 'system', 1, now())"
+            ),
+        }
+        for table, template in inserts.items():
+            for retry, value, accepted in (
+                ("retry_count, ", "0, ", True),
+                ("retry_count, ", "2147483647, ", True),
+                ("retry_count, ", "-1, ", False),
+                ("", "", False),  # no retry count at all
+            ):
+                with self.subTest(table=table, retry_count=value or None):
+                    statement = text(template.format(retry=retry, value=value))
+                    if accepted:
+                        async with self.database.engine.begin() as connection:
+                            await connection.execute(statement, {"id": task_id})
+                    else:
+                        with self.assertRaises(IntegrityError):
+                            async with self.database.engine.begin() as connection:
+                                await connection.execute(statement, {"id": task_id})
 
     async def test_ids_of_users_and_projects_have_no_foreign_keys_yet(self):
         # Documented deviation: those tables do not exist yet (PAW-021).

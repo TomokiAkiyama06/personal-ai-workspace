@@ -1,5 +1,6 @@
 """Normalisation of provider output: hashes, titles, hits, merging."""
 
+import asyncio
 import hashlib
 import unittest
 from datetime import UTC, datetime, timedelta, timezone, tzinfo
@@ -18,14 +19,17 @@ from paw_backend.research.providers import (
     normalize_hits,
     normalize_title,
 )
+from paw_backend.research.providers.normalize import published_utc
 
 from .research_support import (
+    BASE_EXCEPTIONS,
     NOW,
     SECRET,
     Tripwire,
     hit,
     hostile_containers,
     malformed_hits,
+    raising_timezone,
 )
 
 JST = timezone(timedelta(hours=9))
@@ -554,6 +558,73 @@ class MalformedTypedHitTest(unittest.TestCase):
         with self.assertRaises(InvalidProviderResponseError) as caught:
             normalize([bad])
         self.assertNotIn(SECRET, repr(caught.exception))
+
+    def test_a_timezone_that_raises_a_base_exception_is_an_invalid_response(self):
+        # ``CancelledError`` and friends are not ``Exception``. ``utcoffset`` runs
+        # synchronously (nothing is awaited), so a real cancellation cannot be
+        # what it raises: it is the adapter's, and an invalid response.
+        for label, error in BASE_EXCEPTIONS.items():
+            for fail_on_call in (1, 2):  # ``utcoffset()`` itself, then ``astimezone``
+                with self.subTest(error=label, fail_on_call=fail_on_call):
+                    zone = raising_timezone(error, fail_on_call=fail_on_call)
+                    stamp = datetime(2026, 9, 1, tzinfo=zone)
+                    with self.assertRaises(InvalidProviderResponseError) as caught:
+                        published_utc(stamp)
+                    self.assertNotIn(SECRET, repr(caught.exception))
+                    self.assertGreaterEqual(zone.calls, fail_on_call)
+
+    def test_a_hit_with_such_a_timezone_is_rejected_as_a_whole(self):
+        for label, error in BASE_EXCEPTIONS.items():
+            with self.subTest(error=label):
+                bad = hit("https://a.example/bad")
+                zone = raising_timezone(error)
+                object.__setattr__(
+                    bad, "published_at", datetime(2026, 9, 1, tzinfo=zone)
+                )
+                with self.assertRaises(InvalidProviderResponseError):
+                    normalize([hit("https://a.example/ok"), bad])
+
+    def test_a_datetime_subclass_constructor_never_runs(self):
+        # ``datetime.astimezone`` builds its intermediate value with the
+        # subclass's own constructor, which is adapter code.
+        built = []
+
+        class Meddling(datetime):
+            armed = False
+
+            def __new__(cls, *args, **kwargs):
+                if Meddling.armed:
+                    built.append(cls)
+                    raise asyncio.CancelledError(SECRET)
+                return super().__new__(cls, *args, **kwargs)
+
+        stamp = Meddling(2026, 9, 1, 9, 30, tzinfo=JST)
+        Meddling.armed = True
+        try:
+            converted = published_utc(stamp)
+        finally:
+            Meddling.armed = False
+
+        self.assertEqual(built, [])
+        self.assertEqual(converted, datetime(2026, 9, 1, 0, 30, tzinfo=UTC))
+        self.assertIs(type(converted), datetime)
+
+    def test_the_timezone_sees_a_plain_datetime_not_the_subclass(self):
+        seen = []
+
+        class Recording(tzinfo):
+            def utcoffset(self, moment):
+                seen.append(type(moment))
+                return timedelta(hours=9)
+
+        class Meddling(datetime):
+            pass
+
+        converted = published_utc(Meddling(2026, 9, 1, 9, 30, tzinfo=Recording()))
+
+        self.assertEqual(converted, datetime(2026, 9, 1, 0, 30, tzinfo=UTC))
+        self.assertTrue(seen)
+        self.assertEqual(set(seen), {datetime})
 
     def test_the_hits_are_not_modified(self):
         first = hit("https://example.com/a", title="  spaced  title ")

@@ -45,8 +45,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
 
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
+import psycopg
 
 from paw_backend.db import Database
 from paw_backend.tasks.domain import TERMINAL_STATES, TaskState
@@ -116,24 +115,25 @@ def activity_of(
 
 
 async def lock_task_activity(
-    session: AsyncSession, task_id: uuid.UUID, run: TaskRun
+    connection: psycopg.AsyncConnection, task_id: uuid.UUID, run: TaskRun
 ) -> TaskActivity:
     """The task's current state and run, read with its row **locked**
     (``FOR SHARE``), and what they mean for ``run``.
 
-    Inside a transaction this serialises the caller with a terminal transition
-    and with Retry / Restart (which change the row): a transition that is in
-    flight makes this wait for its commit and then read the new state and run;
-    one that starts later waits for the caller's transaction to end. So what the
-    caller does next in that transaction is ordered before, or after, the
-    transition, never across it. A row lock needs the UPDATE privilege on
-    ``tasks``, which the application role has (PAW-032).
+    Inside a transaction (the store runs it on ``Database.transact_abortable``)
+    this serialises the caller with a terminal transition and with Retry /
+    Restart (which change the row): a transition that is in flight makes this
+    wait for its commit and then read the new state and run; one that starts
+    later waits for the caller's transaction to end. So what the caller does
+    next in that transaction is ordered before, or after, the transition, never
+    across it. A row lock needs the UPDATE privilege on ``tasks``, which the
+    application role has (PAW-032).
     """
-    rows = await session.execute(
-        text("SELECT state, attempt, retry_count FROM tasks WHERE id = :id FOR SHARE"),
+    cursor = await connection.execute(
+        "SELECT state, attempt, retry_count FROM tasks WHERE id = %(id)s FOR SHARE",
         {"id": task_id},
     )
-    row = rows.one_or_none()
+    row = await cursor.fetchone()
     return TaskActivity.UNKNOWN if row is None else activity_of(*row, run)
 
 

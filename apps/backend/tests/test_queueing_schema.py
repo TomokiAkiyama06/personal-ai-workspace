@@ -431,6 +431,38 @@ class BudgetConstraintTest(PostgresQueueingTestCase):
         row = await self.budget_row(task_id, "runtime_seconds")
         self.assertEqual(row["runtime_generation"], 3)
 
+    async def test_the_settled_cutoff_is_only_for_the_runtime_row(self):
+        (task_id,) = await self.make_tasks(1)
+        with self.assertRaises(IntegrityError):
+            await self.insert(task_id, kind="steps", settled_through=at(0))
+        await self.insert(task_id, kind="steps", settled_through=None)
+        await self.insert(task_id, kind="runtime_seconds", settled_through=at(5))
+        row = await self.budget_row(task_id, "runtime_seconds")
+        self.assertEqual(row["settled_through"], at(5))
+        self.assertIsNone((await self.budget_row(task_id, "steps"))["settled_through"])
+
+    async def test_a_running_timer_does_not_start_before_the_settled_cutoff(self):
+        (task_id,) = await self.make_tasks(1)
+        with self.assertRaises(IntegrityError):
+            await self.insert(
+                task_id,
+                kind="runtime_seconds",
+                running_since=at(99),
+                settled_through=at(100),
+            )
+        await self.insert(
+            task_id,
+            kind="runtime_seconds",
+            running_since=at(100),
+            settled_through=at(100),
+        )
+        # Either column may be empty (a timer that never stopped; a stopped timer).
+        await self.insert(task_id, kind="tokens", limit_value=1)
+        (other,) = await self.make_tasks(1)
+        await self.insert(other, kind="runtime_seconds", running_since=at(1))
+        (third,) = await self.make_tasks(1)
+        await self.insert(third, kind="runtime_seconds", settled_through=at(9))
+
 
 @requires_postgres
 class FailureSignatureConstraintTest(PostgresQueueingTestCase):
