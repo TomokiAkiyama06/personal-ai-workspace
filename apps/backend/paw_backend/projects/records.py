@@ -87,6 +87,40 @@ class Project:
 
 
 @dataclass(frozen=True, slots=True)
+class AdminProjectSummary:
+    """One row of the administrator's list of all projects (Issue #84).
+
+    What an Owner / Admin needs to **find** a project and to manage its
+    lifecycle, and nothing else: the id, the name, the lifecycle status, the
+    creation time and, while the project is Pending deletion, the deadline
+    (``deletion_scheduled_at``: it can be restored before it and is purged from
+    it on; ``None`` in every other status). There is deliberately no
+    description, creator, member, invitation or any other field: Decision 0004
+    separates the operations that manage a project from reading what is in it.
+    The SQL behind it does not read those columns either.
+    """
+
+    id: uuid.UUID
+    name: str
+    status: ProjectStatus
+    created_at: datetime
+    deletion_scheduled_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class AdminProjectPage:
+    """One page of ``ProjectService.list_all_projects``.
+
+    ``projects`` holds at most the requested ``limit`` rows, newest first (ties
+    by id, descending). ``next_cursor`` is an opaque text that a caller passes
+    back as ``cursor`` to get the next page, or ``None`` on the last page.
+    """
+
+    projects: tuple[AdminProjectSummary, ...]
+    next_cursor: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class Member:
     """A membership row: an accepted member or an invitation.
 

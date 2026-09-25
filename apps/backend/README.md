@@ -60,7 +60,7 @@ apps/backend/
 │  ├─ memory/              # Memory / Conversation の Model、ACL 条件、vector 型、Pin / Importance 変更の Actor（PAW-040）
 │  │  ├─ journal/          # Immediate Journal と Background Consolidation: Journal、Queue、Consolidator、Worker の契約（PAW-041）
 │  │  └─ shared/           # Shared Memory の管理: Service、Candidate、Rule 関数、Policy の優先（PAW-046）
-│  ├─ projects/            # Project、Membership（招待制）、Lifecycle（PAW-026）
+│  ├─ projects/            # Project、Membership（招待制）、Lifecycle（PAW-026）、管理者向けの全 Project 一覧（Issue #84）
 │  ├─ research/providers/  # Research Provider の Adapter Interface と Broker（PAW-051）
 │  ├─ research/privacy/    # Research の Privacy Filter: Query の最小化と外部送信の Audit（PAW-053）
 │  ├─ research/scratch/    # Research Scratch Store: 24 時間 TTL の一時保存と、期限切れを消す Janitor（PAW-050）
@@ -225,7 +225,7 @@ URL の Query（`connect_timeout`、`application_name` など）はそのまま�
 Timeout した Probe は、Query の取消（psycopg が Server の確認を待つ、最大約 10 秒）を行わず、接続の Socket を閉じて即座に失敗させます。
 libpq 17 未満（`psycopg[c]` とシステムの libpq など）では、取消が Thread で実行され、`asyncio.run` の終了が長時間止まるためです。
 `Database.dispose()`（Application の終了時）は、実行中の Probe を同じ方法で止め、`PAW_SHUTDOWN_TIMEOUT_SECONDS` の範囲で完了を待ちます。
-同じ仕組みの中断できる接続が、ほかに 2 つあります。1 文を実行する `fetch_abortable` / `execute_abortable`（起動時の診断、Audit の書き込み、承認の取り消し）と、複数の文を 1 Transaction で実行する `run_abortable`（Research Scratch の Purge、[PAW-050](#janitor期限切れの削除)）です。どちらも Pool を使わず、呼び出し元の Cancel と `dispose()` で接続の Socket を閉じます。`run_abortable` は Session を渡す Callback を受け取り、正常に戻れば Commit、例外なら Rollback します。
+同じ仕組みの中断できる接続が、ほかに 2 つあります。1 文を実行する `fetch_abortable` / `execute_abortable`（起動時の診断、Audit の書き込み、承認の取り消し）と、複数の文を 1 Transaction で実行する `run_abortable`（Research Scratch の Purge、[PAW-050](#janitor期限切れの削除)）です。どちらも Pool を使わず、呼び出し元の Cancel と `dispose()` で接続の Socket を閉じます。`run_abortable` は Session を渡す Callback を受け取り、正常に戻れば Commit、例外なら Rollback します。接続の同時数は、どちらも `database_pool_size` までです。Slot は Transaction の Task が終わるまで持ち続け（呼び出し元が戻った時点では返しません）、Cancel された呼び出し元が置いていった Task がまだ動いている間に、次の呼び出しが接続を開くことはありません（`tests/test_database_run_abortable_slot.py`）。
 どちらも同時に開く接続は `PAW_DATABASE_POOL_SIZE` までで、空きがなければ待ちますが、**この空き待ちも中断できる処理の一部**です。待っている呼び出しを Cancel すると待ちがその場で終わり（空きは取りも返しもしません）、`dispose()` は待っている呼び出しを全て `DatabaseDisposedError` で失敗させます（何も実行していません）。`dispose()` の実行中に始まった呼び出しも同じ例外で拒否します。実行中の呼び出しが空きを返した直後に待っていた呼び出しが動き出して、`dispose()` が止める対象を数えた後で Transaction を始めたり、破棄した後の Engine を作り直したりすることはありません（独立 Review の指摘）。`dispose()` が戻った後は、Engine を最初の使用時に作り直すので、再び使えます。空きの管理は `paw_backend/db.py` の小さな `_Slots`（`asyncio.BoundedSemaphore` と同じく先着順で、Cancel された待ちが空きを失わず、返しすぎを拒否する。待っている呼び出しを一度に失敗させられる）です。
 今後 Session を使う Endpoint を追加する場合、終了時に実行中だった Query の取消は psycopg の取消経路に入ります。
 その経路が終了を遅らせないことは、その Issue で確認してください。
@@ -319,6 +319,7 @@ Operator の 6 操作は次のように解釈しています（[要件](../../RE
   - 入れ子が `MAX_INPUT_DEPTH`（32 段。最上位の Object を 1 段と数え、Object と List の両方が段になります）を超えるもの、循環参照
   - JSON にした長さが `MAX_INPUT_BYTES`（256 KiB）を超えるもの。エンコードする前に、値が現れるたびにエンコードされる長さを積み上げる予算で検査するため、同じ値や List を何度も共有して展開すると巨大になる構造も、エンコードや DB への送信に至る前に拒否します。整数は 10 進の桁数（負数は符号も）、`float` は `repr` の長さ、`true` / `false` / `null` は 4 / 5 / 4 文字を、出現のたびに積み上げます（1 つの巨大な整数を何万回も参照する入力が、エンコードで数百 MB になることを防ぎます）。文字列は文字数（エンコードは最大 12 倍）、Object と List は括弧だけを積み上げ、区切りは積み上げないため、積み上げ量がエンコード後の長さを超えることはなく、エンコード後の長さの検査が最終的な判定です。
   - 桁数が `MAX_INPUT_INTEGER_DIGITS`（131072 桁）を超える整数。PostgreSQL の JSONB は数値を `numeric` で保持し、`numeric` は小数点より上に 131072 桁までしか持てないため（超えると `value overflows numeric format`）、その値です（実際の PostgreSQL で 131072 桁は保存でき、131073 桁は拒否されることを Test で確認しています）。Python が整数と文字列を相互に変換する桁数の上限（`sys.get_int_max_str_digits()`。既定は 4300）が設定されていて、これがより小さい場合は、その桁数が上限になります（`json.dumps` がそれを超える整数のエンコードを拒否するためです）。桁数の多い整数は、ビット長だけで判定して拒否し、巨大な整数を文字列に変換することはありません。
+  検査と保存する Copy は、呼び出し元の Object を **1 回だけ走査する同じ処理**で作ります（`_JsonInputCheck.check_object` が検査しながら Copy を返し、エンコードと保存はその Copy だけを使います）。別の Thread が検査の後に呼び出し元の Object を書き換えても（`list` を `tuple` や整数キーの `dict`、巨大な値に置き換えるなど）、検査していない値が保存されたり、上限を超えた量の処理をエンコードが行ったりすることはありません。走査の途中で `dict` の大きさが変わった場合も、`RuntimeError` ではなく `InvalidCommandArgumentError` で拒否します（`tests/test_task_input_snapshot.py`）。
   `MAX_INPUT_DEPTH`、`MAX_INPUT_BYTES`、`MAX_INPUT_INTEGER_DIGITS` は `paw_backend/tasks/service.py` の定数で、`MAX_INPUT_DEPTH` と `MAX_INPUT_BYTES` は要件が定める値ではなく暫定の上限、`MAX_INPUT_INTEGER_DIGITS` は PostgreSQL の限界です。JSONB は数値を正規化するため、`-0.0` は `0.0`、`1e300` は整数として読み戻されます（値の意味は変わりません）。
 - `task_events` は DB の Trigger が UPDATE と DELETE を拒否します。Application からも履歴は書き換えられません。
 - **Application の Role の権限**（Role を分ける構成、`PAW_APP_DATABASE_ROLE`）: Migration `0032` は、すべての Table に [`grant_app_privileges`](#migration-は-application-の-role-に権限を与えるcontributor-向けの規則) で `TaskService` が必要とする最小の権限だけを与えます。DELETE はどこにも与えません（`PUBLIC` の権限は外します）。
@@ -1057,7 +1058,7 @@ Broker は、呼び出しがどの Repository に触れるかを **Backend が�
 2. `PostgresApprovalStore` の `get` / `decide` / `revoke` は、Pool を使わない**中断可能な接続**（`Database.fetch_abortable`）で、変更と履歴の行を 1 つにした CTE の **1 つの Statement**（原子的）として実行し、`decision_timeout_seconds`（既定 3 秒）で Socket を閉じます。拒否の理由を説明する読み取りや、期限切れの印付けが要る呼び出しは、それらと**1 つの期限**を分け合います。
 
 期限を過ぎた Statement は、Server 側では続きが実行されることがあります（`revoke_task` と同じ）。ただし 1 つの Statement なので、承認の行と履歴の行は**両方が反映されるか、どちらも反映されない**かで、部分的な状態にはなりません。呼び直すと真の状態が返ります（反映済みなら `not_pending` / `not_open`）。
-Test（人の判断）: `tests/test_tools_approvals.py` の `DecisionDeadlineTest`（応答しない Store、1 つの期限、Step-up は数えないこと、型名だけの Log）、`tests/test_tools_postgres.py` の `StalledServerTest`（応答しない Server）、`DecisionStatementsShareOneDeadlineTest`（Statement ごとの残り時間）、`DecisionDeadlineTest`（行の Lock で Statement を止めて期限で返ること、承認と履歴が食い違わないこと）。
+Test（人の判断）: `tests/test_tools_approvals.py` の `DecisionDeadlineTest`（応答しない Store、1 つの期限、Step-up は数えないこと、型名だけの Log）、`tests/test_tools_postgres.py` の `StalledServerTest`（応答しない Server）、`DecisionStatementsShareOneDeadlineTest`（Statement ごとの残り時間）、`DecisionDeadlineTest`（行の Lock で Statement を止め、期限で `unavailable` を返すこと。Statement が Server に届いて Lock を待っていることを `pg_stat_activity` で確かめてから期限を待ちます。放棄した Statement の結果は、時間の余裕ではなく順序で決まる 2 つの場合を別々の Test にしています。期限の後に行の Lock を放して反映させる場合（Statement を実行した Server の Process が終わってから状態を読み、承認と履歴が揃うこと、呼び直すと `not_pending` / `not_open` が返ることを確かめます。Lock の待ちが無くなった時点では Commit の途中でありうるため、そこでは読みません）と、接続を確立できず Statement が Server に届かない場合（承認は `pending` のまま、呼び直すと決定できます）です）。
 
 **Broker が呼ぶ `open_request`（要求を開く）と `consume`（使う）も、同じ方法で区切ります。** 独立 Review が、この 2 つが Pool の Transaction で動くため、接続は受け付けるが応答しない PostgreSQL や Lock 待ちでは、Broker の `asyncio.timeout` を超えて待たされ（約 10 秒）、Pool の枠も塞ぐと指摘しました。2 つとも複数の Statement が要ります（`open_request` は (Task, User) ごとの advisory lock、Task の行の `FOR SHARE`、期限切れの印付け、前の Run の取り消し、重複・Cooldown・件数の確認、挿入、`consume` は Task の行の `FOR SHARE` と更新）。1 つの CTE にはできません。READ COMMITTED では Statement が Lock を待つ**前**に Snapshot を取るので、advisory lock の下の件数の確認が古い値で決まり、上限を超えるからです。そこで:
 
@@ -1129,7 +1130,7 @@ Test（要求と使用）: `tests/test_tools_postgres.py` の `StalledServerTest
 - CHECK 制約: 承認者は委任元 User だけで Agent ではない、強い承認は Step-up つき、`summary` は 1〜16 件の配列、`task_attempt` は 1 以上・`task_retry_count` は 0 以上（`tasks` の列と同じ）。
 
 **Application の Role の権限（Migration の末尾の 1 ブロック）。** `PUBLIC` には何も与えません。`PAW_APP_DATABASE_ROLE` があれば、`tool_approvals` に SELECT・INSERT と**状態の列だけ**の UPDATE、履歴に SELECT・INSERT だけを与えます（DELETE・TRUNCATE・識別する列の UPDATE はなし）。
-非 Superuser の Role で、書き換え、Replay、TRUNCATE、Trigger の無効化、他人を承認者にする UPDATE を試して拒否されることを Test しています（`tests/test_tools_postgres_roles.py`）。起動時の診断（`warn_about_loose_privileges`）は、承認の 2 つの Table への過剰な権限（Owner、全体の UPDATE、DELETE、TRUNCATE）と不足（INSERT できない）を警告します。
+非 Superuser の Role で、書き換え、Replay、TRUNCATE、Trigger の無効化、他人を承認者にする UPDATE を試して拒否されることを Test しています（`tests/test_tools_postgres_roles.py`）。起動時の診断（`warn_about_loose_privileges`）は、承認の 2 つの Table への過剰な権限（Owner、全体の UPDATE、DELETE、TRUNCATE）と不足（INSERT できない、または `tool_approvals` の状態の列の UPDATE が 1 つでも欠けている）を警告します。状態の列は、`PostgresApprovalStore` が更新する 7 列（`status`、`approver_id`、`decided_at`、`step_up_verified`、`consumed_at`、`revoked_at`、`revoked_by`。`authz/diagnostics.py` の `APPROVAL_STATE_COLUMNS`）で、「どれか 1 列でも UPDATE できる」（`has_any_column_privilege`）では足りません（`INSERT` と `UPDATE(status)` だけの Role は、要求は書けても、承認・消費・取り消しの遷移が権限エラーになるためです）。列のリストが Store の SQL と Migration の権限に一致することは `tests/test_tools_diagnostics_columns.py` が確認します。
 
 **承認と消費の Role の分離（実装しない。理由）。** Agent 側の Process が承認できない、を Database の権限で保証するには、承認する Process と Agent 側の Process が別の Role で接続する必要があります。
 今の構成は Application の Role が 1 つで、その Role は合法な遷移（`pending` → `approved`）を実行できるため、**Application の Process が侵害されれば、その User の名前で承認を書ける**（承認者は委任元 User でなければならず、強い承認は `step_up_verified` を偽るだけ）ことは、Database では防げません。
@@ -1161,7 +1162,7 @@ Tool の実行を伴う記録（許可と実行後）は Fail-closed で、許�
 | `TaskActivityProvider.check(task_id, run)` | Deployment（`PostgresTaskActivity(database)`） | `FailClosedTaskActivity`（Task は不明 = 承認を要する呼び出しは拒否） |
 | `PathResolver.resolve` | Deployment | `RealpathResolver`。`LexicalPathResolver` は Symlink のない環境の Test 用 |
 
-`ToolRunner(execution_timeout=)` の既定は 600 秒（最大 24 時間。`None` は不可）。実行後の記録（Audit と Budget の Charge）は `finally` で `asyncio.shield` して書くため、Task が Cancel されても、実行後の処理が失敗しても残ります。
+`ToolRunner(execution_timeout=)` の既定は 600 秒（最大 24 時間。`None` は不可）。実行後の記録（Audit と Budget の Charge）は `finally` の中で、専用の Task として実行し、`ToolRunner` がその Task を保持して終わるまで待つため、Task が Cancel されても、実行後の処理が失敗しても残ります。記録が終わる前に届いた Cancel（Audit や Budget の Adapter が遅い間の Cancel、繰り返しの Cancel を含む）は、記録が終わるまで保留して、その後に `CancelledError` として伝えます（`asyncio.timeout` は `TimeoutError` になります）。`asyncio.shield` だけでは、Cancel が届いた時点で `run` が戻り、記録は誰も待たない背景の Task として残って、Event Loop の終了で Cancel されえました。待ちは Broker の Timeout（Audit の書き込みと Charge のそれぞれ）で有界です。Event Loop の終了時に全 Task を Cancel する場合（`asyncio.run`）は、記録の Task も Cancel されるため、防げません。（`tests/test_tools_runner_accounting.py`）
 
 Adapter は Broker / Runner / Service の生成時に検査します（Async Method か、必要な引数の数か）。間違った Adapter は生成時に `TypeError` です。
 
@@ -1337,6 +1338,7 @@ Audit の `action` は Capability の値です。Shared Memory を変える操�
 2. Owner / Admin 以外の `Principal` は `SharedMemoryPermissionError` です。Authorizer が（Policy の変更などで）許可しても、Service が Owner / Admin でなければ拒否します。
 3. Authorizer が `Decision` でない値を返したら拒否します（`invalid_decision`）。
 4. Agent は Candidate を提案できますが、Candidate は `pending` のままです。承認は人間だけで、承認した人が Version の `actor_user_id` になります。
+   `system` role の Principal（Backend 自身の ID、Background Worker）は Candidate も提案できません（[Decision 0009](../../docs/decisions/0009-shared-memory-administration.md) の 2）。既定の Policy は `memory.use` を与えませんが、Policy の変更などで Authorizer が許可しても、`propose_candidate` は Authorizer の判定を記録した後に `system` role を `SharedMemoryPermissionError`（`reason` は `system_role_may_not_propose`）で拒否します。管理の操作の `AutomaticPromotionRefusedError` とは別のエラーで、Candidate は書かれません（`tests/test_shared_memory_propose_system.py`）。Agent が提案する場合、Service は委任元の Role を持たない（`AgentActor` は委任元の ID と Grant だけ）ため、この検査は `Principal` だけが対象で、委任元が `system` role の場合は Authorizer の Policy の判定（既定は `system` に Capability なし）だけが守りです。
 5. Shared Memory を作る・変える経路は、`SharedMemoryService` の上の表のメソッドだけです（`tests/test_shared_memory_contract.py` が公開メソッドの一覧を固定します）。
 
 #### Audit の Action
@@ -1866,9 +1868,9 @@ License や `robots.txt` に関する項目はありません。要件と設計�
 そのため `normalize_hits`（`gather` の経路）と `fetch` は、受け取った Object の Field を全て 1 度だけ読み直し、`ProviderHit` / `ProviderDocument` の Constructor と同じ規則で検証し直します（`revalidate_hit` / `revalidate_document`）。以後の処理は、その検証済みの複製だけを使います。
 - Field は `ProviderHit` 自身の Slot から直接読みます。Subclass の Property や `__getattribute__` は呼びません（呼ぶと、任意の例外や、読むたびに変わる値を許すため）。Subclass 自体は使えますが、Property だけで Field を返し Slot を設定しない Subclass は不正な Response です。
 - `str` の Subclass は、`__len__` や `encode` を呼ばずに通常の `str` へ複製してから検証します（長さを偽れません）。`source_type` は `SourceType` そのもの、`private_source` は `bool` そのものだけを受け付けます（`__class__` を偽る Object は不正）。
-- `published_at` は `None` か、UTC に変換できる Timezone つきの `datetime` だけです。まず標準の `datetime` の Method で Field を通常の `datetime` へ複製し（`datetime.astimezone` は途中の値を Subclass 自身の Constructor で作るため、複製せずに呼ぶと Adapter の Code が動きます）、その複製を UTC へ変換して、通常の UTC の `datetime` にします。動くのは Adapter の `tzinfo.utcoffset` だけで、それが出した例外は、`asyncio.CancelledError`、`KeyboardInterrupt`、`SystemExit`、`GeneratorExit` を含む `BaseException` の全てが不正な Response です（同期の Code に Task の Cancel は届かないため。[Decision 0012](../../docs/decisions/0012-research-provider-adapter-policy.md) の 10）。`utcoffset` が `asyncio.current_task().cancel()` を呼んで Offset を返す場合も同じで、Broker が Response の検証の前後で `Task.cancelling()` を比べ、増えた分を `Task.uncancel()` で取り消して、`invalid_response` にします。
+- `published_at` は `None` か、UTC に変換できる Timezone つきの `datetime` だけです。まず標準の `datetime` の Method で Field を通常の `datetime` へ複製し（`datetime.astimezone` は途中の値を Subclass 自身の Constructor で作るため、複製せずに呼ぶと Adapter の Code が動きます）、その複製を UTC へ変換して、通常の UTC の `datetime` にします。変換は `astimezone` ではなく、1 回目に読んだ `utcoffset` の値で行い、2 回目の読み取りが 1 回目と違う `tzinfo`（`+01:00` の次に `+02:00` を返すなど、呼び出しごとに答えが変わるもの）は不正な Response です（1 回目の検査と 2 回目の変換で別の Offset が使われ、時刻が黙って 1 時間ずれるのを防ぎます。`tests/test_research_published_offset.py`）。動くのは Adapter の `tzinfo.utcoffset` だけで、それが出した例外は、`asyncio.CancelledError`、`KeyboardInterrupt`、`SystemExit`、`GeneratorExit` を含む `BaseException` の全てが不正な Response です（同期の Code に Task の Cancel は届かないため。[Decision 0012](../../docs/decisions/0012-research-provider-adapter-policy.md) の 10）。`utcoffset` が `asyncio.current_task().cancel()` を呼んで Offset を返す場合も同じで、Broker が Response の検証の前後で `Task.cancelling()` を比べ、増えた分を `Task.uncancel()` で取り消して、`invalid_response` にします。
 - 違反は全て `InvalidProviderResponseError`（固定の文言。値も例外の文言も含みません）になり、`gather` はその Provider を `invalid_response` にして他の Provider の結果を残します。`fetch` は `errors` に `invalid_response` を 1 件返します。例外は呼び出し元へ出ません。
-- Test: `tests/test_research_normalize.py` の `test_a_timezone_that_raises_a_base_exception_is_an_invalid_response`（5 種類の `BaseException` を `utcoffset` の 1 回目と `astimezone` の 2 回目で出す）と `test_a_datetime_subclass_constructor_never_runs`、`tests/test_research_broker.py` の `SynchronousHookBaseExceptionTest`（`gather` / `fetch` が `invalid_response` / `internal_error` を返し他の Provider の結果を残すことと、`await` の最中の Cancel が `gather` / `fetch` へ伝わること）、`SynchronousHookCancelRequestTest`（`__getattribute__` と `utcoffset` が現在の Task を Cancel して普通に値を返す場合に、`gather` で他の Provider の結果が残り、`fetch` が `internal_error` / `invalid_response` を返し、Task に要求が残らないこと。窓の前からあった要求は残ること、本物の Cancel と Timeout はこれまでどおり効くこと）と `CancelGuardTest`（取り消す数、前からある要求、Task の外）。
+- Test: `tests/test_research_normalize.py` の `test_a_timezone_that_raises_a_base_exception_is_an_invalid_response`（5 種類の `BaseException` を `utcoffset` の 1 回目と 2 回目の読み取りで出す）と `test_a_datetime_subclass_constructor_never_runs`、`tests/test_research_broker.py` の `SynchronousHookBaseExceptionTest`（`gather` / `fetch` が `invalid_response` / `internal_error` を返し他の Provider の結果を残すことと、`await` の最中の Cancel が `gather` / `fetch` へ伝わること）、`SynchronousHookCancelRequestTest`（`__getattribute__` と `utcoffset` が現在の Task を Cancel して普通に値を返す場合に、`gather` で他の Provider の結果が残り、`fetch` が `internal_error` / `invalid_response` を返し、Task に要求が残らないこと。窓の前からあった要求は残ること、本物の Cancel と Timeout はこれまでどおり効くこと）と `CancelGuardTest`（取り消す数、前からある要求、Task の外）。
 
 失敗は閉じた `ResearchErrorCode` の値としてだけ報告します。
 
@@ -2188,10 +2190,11 @@ DB を使わない Test（`records`、`validation`、`rules`、`store_validation
 | --- | --- |
 | `models.py` | `projects`、`project_members`、`project_task_stops` の Model |
 | `limits.py` | 上限と時間の定数（名と説明の長さ、30 日は DB の CHECK 制約と一致することを Test が検証。招待の期限 `INVITE_TTL` は記録だけで、実際の値は `domain.invite_expiry`） |
-| `records.py`、`errors.py` | 返す値（`Project`、`Member`、`PendingInvite`、`PurgeResult`）、状態の Enum、型付きの Error |
+| `records.py`、`errors.py` | 返す値（`Project`、`Member`、`PendingInvite`、`PurgeResult`、管理者向けの一覧の `AdminProjectSummary` / `AdminProjectPage`）、状態の Enum、型付きの Error |
 | `validation.py` | 引数の検証（DB を使わない純粋関数） |
 | `domain.py` | Lifecycle と Membership の規則（純粋関数。状態遷移の表、30 日、招待の期限、最後の Manager） |
 | `store.py` | SQL（1 文 1 関数。Transaction・Lock・Timeout・認可は持たない） |
+| `cursor.py` | 管理者向けの全 Project 一覧の Keyset Cursor（不透明。符号化と、敵対的な入力の検証）（[Issue #84](#管理者向けの全-project-一覧issue-84)） |
 | `service.py` | `ProjectService`（Transaction、Lock、認可、規則の組み立て。Clock は注入） |
 | `task_stop.py` | `ProjectTaskStopper`: Delete 開始で記録された Task 停止の要求を実行する Processor（[Delete 開始時の Task 停止](#delete-開始時の-task-停止outbox-と-processor)） |
 | `transaction.py` | Lock Timeout 付きの Transaction（`ProjectService` と `ProjectTaskStopper` が共有する） |
@@ -2303,9 +2306,82 @@ Active ⇄ Archived
   Member から外された後の古い `Principal`、自分で Manager と申告した `Principal`、招待中なのに Manager と申告した `Principal` は、効きません。`system_role` と `user_id` だけを呼び出し側から受け取ります。
 - **存在を明かしません。** 認可で拒否され、かつ Actor が受諾済みの Member でないときは、存在しない Project と同じ `ProjectNotFoundError` です（Audit は Authorizer が書きます）。Owner / Admin が Lifecycle 以外を試みた場合も同じです。
   Member への拒否は、状態のため（Archived の変更、Pending deletion の閲覧）は `ProjectStateError`、それ以外は `ProjectPermissionDeniedError`（`reason` は固定の Reason Code。`audit_unavailable` は API 層が 503 にします）です。
-- **一覧は自分の Member の行だけ**です（Owner / Admin も同じ）。Pending deletion の一覧は、復元できる Manager の Project だけです。Owner / Admin が全 Project を探す手段はこの Issue にありません（Decision 0008。管理者向けの全 Project 一覧 API は Issue [#84](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/84) で実装します）。
+- **一覧は自分の Member の行だけ**です（Owner / Admin も同じ）。Pending deletion の一覧は、復元できる Manager の Project だけです。`list_projects` に Owner / Admin が全 Project を探す機能はありません（Decision 0008）。ID を探す手段は、`admin.projects.manage` の `list_all_projects` で、Issue [#84](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/84) が追加しました（下の「管理者向けの全 Project 一覧」）。
 - Audit の行は「判定」を記録します。許可された操作が後から失敗しても（規則の違反、DB の Error）、Audit の行は残ります。
 - `Scope.SELF` の Capability（`chat.use`、`memory.use` など）は、今も Member 資格と Project の状態を見ません。Membership の Table と `roles_of` を用意しただけで、絞り込みは Project の Chat や Memory を実装する Issue が行います。
+
+### 管理者向けの全 Project 一覧（Issue #84）
+
+[Issue #84](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/84) で追加しました（Migration も Table もありません）。`list_projects` は自分が Member の Project だけを返すので、Owner / Admin は、ID を知らない Project（たとえば削除待ちで、復元できる Manager が見つからない Project）を探せませんでした（Decision 0008 の 6）。
+`ProjectService.list_all_projects(actor, *, status=None, limit=50, cursor=None)` が、それを `admin.projects.manage`（Owner / Admin。[Decision 0004](../../docs/decisions/0004-rbac-capability-and-audit-policy.md)）で探せるようにします。**Member であることは要らず、見ません。** 既存の `list_projects`（Member だけ）は変えていません。
+
+```text
+list_all_projects(actor, status, limit, cursor)
+  1. actor が Principal でない（None、Token、Agent の Grant など）      -> ProjectPermissionDeniedError(unauthenticated)   Audit なし
+  2. 引数（status → limit → cursor の順）が不正                          -> InvalidProjectInputError                        Audit なし
+  3. Authorizer.authorize(actor, admin.projects.manage, project_list_<filter>)   Audit REQUIRED: 判定を 1 行書く
+       拒否（User、system の identity）                                   -> ProjectPermissionDeniedError(reason)            拒否の行が 1 つ
+       Audit が書けない                                                   -> ProjectPermissionDeniedError(audit_unavailable) （API 層が 503）
+  4. 許可されたときだけ、DB の Transaction を 1 つ開いて projects を SELECT する（1 文）
+```
+
+Authorizer を、DB の接続を取る**前**に呼びます。拒否された呼び出しと、Audit を書けない呼び出しは、`projects` を 1 行も読みません（`test_projects_admin_access.py` は、DB URL のない `Database` の上で Service を動かし、`DatabaseNotConfiguredError` でなく認可の Error が返ることで、これを確かめます）。
+
+#### 返す値（Project の中身は返さない）
+
+`AdminProjectPage(projects, next_cursor)`。`projects` は `AdminProjectSummary` の並びで、**次の 5 つだけ**を持ちます。
+
+| Field | 内容 |
+| --- | --- |
+| `id` | Project の ID（管理操作 `archive` / `restore` / `begin_deletion` の入力） |
+| `name` | Project 名（要件の受け入れ条件に含まれる） |
+| `status` | `active` / `archived` / `pending_deletion` |
+| `created_at` | 作成時刻 |
+| `deletion_scheduled_at` | 削除待ちの期限（この時刻の前は復元でき、この時刻から Purge の対象。削除待ち以外は `None`） |
+
+説明（`description`）、作成者、Member、招待、Chat・Memory・Task・Repository など他の領域の中身は、**Field として存在せず、SQL も読みません**（Decision 0004: 管理に必要な操作と、中身の閲覧は別）。`store.list_projects_page` は `projects` の 5 列だけを SELECT し、他の Table を JOIN しません。
+`tests/test_projects_admin_grants.py` は、この 5 列の `SELECT` だけを持つ Role（他の列・Table には何も持たない）で一覧を動かして、このことを確かめます（`description` を SELECT に足す変異は、この Test が検出します）。
+**Deleted（墓石）は載せません。** Decision 0008 は Deleted の Project を全ての操作で「存在しない」としており、`list_projects` も墓石を返さないためです（`status` に `deleted` は指定できません）。
+
+#### 認可と Audit
+
+- **許可:** `admin.projects.manage`（Owner と Admin）。Project の Manager でも、Member の全 Project の Manager でも、`project_roles` を持っていても、User には許可されません（`system_role` だけが決めます）。Agent は許可されません: Agent は `Principal` でなく（この Service を呼べません）、`admin.projects.manage` は委任できない Capability なので、Owner の代理の Agent も Authorizer が拒否します（`agent_capability_forbidden`）。
+- **Audit は `REQUIRED`（Decision 0004）。** 1 回の呼び出し（1 ページ）に、Authorizer の `audit_events` の行がちょうど 1 つ残ります: Actor の ID と Role、`action = admin.projects.manage`、判定（`allow` / `deny`）と理由、`resource_kind`。Audit が書けなければ、許可は拒否になり（`audit_unavailable`）、一覧は返りません。
+- **Filter は `resource_kind` に残します。** `audit_events` に Filter の列はなく、Table を変えないため、`resource_kind` が Filter を表す閉じた 4 つの語です: `project_list_all`（Filter なし）、`project_list_active`、`project_list_archived`、`project_list_pending_deletion`。
+- **結果は残しません。** 行の `resource_id` / `project_id` / `repo_id` は空で、Project の ID・名前・件数・Cursor・`limit` は書きません（`test_projects_admin_list.py` が実 DB の行を読んで確かめます）。
+- 拒否と、Audit の失敗の Error は、`reason` が固定の Reason Code で、入力や結果を含みません。引数が不正な呼び出しと、`Principal` でない呼び出しは、判定をしないので行を書きません（他の Method と同じ順序です）。
+- 許可された後に DB の Error が起きても、Audit の行は残ります（Audit は判定を記録します）。
+
+#### ページング（Keyset）と応答の上限
+
+- **1 ページは最大 200 件**（`limit` は 1〜200、既定 50）。1 件は 5 つの Field だけで、名前は最大 100 文字なので、応答の大きさは有界です。`limit + 1` 件を読み、超えた分で「次のページがあるか」を決めます（空のページは返りません）。
+- **並びは `created_at` の新しい順、同じ時刻は `id` の降順**で、全順序です（`list_projects` の並びの同時刻は `id` の昇順で、こちらは異なります）。
+- **Offset でなく Keyset**です。次のページは「最後に返した `(created_at, id)` より後の行」で、`(created_at, id) < (cursor)` の行値比較です。ページの間に Project が作られても、状態が変わっても、Purge されても、**同じ行が 2 回出ることも、元からあった行が飛ばされることもありません**（Offset なら、先頭側への挿入で最後の行が次のページに重なります。`test_projects_admin_list.py` は同じ変更で Offset が重複することを対照として確かめています）。
+- **保証しないこと:** Cursor の位置より**新しい**側（すでに通り過ぎた側）に後から入った行（新しく作られた Project、同時刻で `id` が大きい行）は、その走査には出ません。新しい走査の先頭に出ます。`created_at` は Service の Clock が付けるので、Transaction の順序と一致するとは限りません（Commit が遅れた古い時刻の行は、その時刻を通り過ぎた走査には出ません）。古い側に入った行は、走査がそこに届いたときに出ます。
+- **Cursor は不透明です。** 呼び出し側は、前のページの `next_cursor` をそのまま返します（作らず、読まず、Filter を変えて再利用しません）。中身は `1.<filter>.<created_at のマイクロ秒>.<id>` を Base64URL（Padding なし）にした最大 99 文字の ASCII です（`cursor.py`）。
+- **Cursor は敵対的な入力として検証します。** 厳密な `str`、99 文字以内、Base64URL の文字だけ、正規の Base64、決まった形の ASCII、`<filter>` が呼び出しの Filter と一致（別の Filter の Cursor は使えません）、表せる時刻、正規の UUID のどれかが崩れると `InvalidProjectInputError`（Field は `cursor`、`InputProblem` は `not_a_string` / `too_long` / `invalid_cursor`）で、値は Error に含みません。DB へは 2 つの型付き Parameter として渡すだけで、Cursor の文字列が SQL に入ることはありません。署名はしません（一覧を全部読める人に、位置以外を渡さないため）。
+- **Index は足していません。** 10 万件の Project を入れた実 DB（PostgreSQL 18、ANALYZE 済み）で、1 ページ（51 件）は先頭で約 14 ms、途中のページで約 12 ms、`archived` の Filter 付き（201 件）で約 5 ms でした（`projects` の Sequential Scan と上位 N 件の並べ替え。1 回の測定で、負荷のかかった環境では未確認）。想定する規模（個人・小さなチーム）の Project の数は 10 万よりずっと少ないため、Migration `0084` は作っていません。1 ページの費用は Project の総数に比例し、全ページの走査は総数の 2 乗に比例するので、数十万を超える規模になれば `(created_at DESC, id DESC)` の Index（`status <> 'deleted'` の部分 Index）を足してください。
+
+#### 入力の検証
+
+Method の全ての引数を、DB にも Authorizer にも触れる前に検証します（`test_projects_admin_access.py` が引数ごとに不正な値の表で確かめます）。`status` は `None`、`ProjectStatus` の Member、またはその値の厳密な `str`（`"archived"`）で、Member に正規化します（`"ARCHIVED"`、前後の空白、`bool`、`str` の Subclass、`deleted` は拒否）。`limit` は `bool` でない `int` の 1〜200。`cursor` は `None` か上の形の `str`。未知のキーワード引数は `TypeError` です。
+
+#### HTTP の Endpoint
+
+**ありません（Service までです）。** `api/v1/` にある Router は `health` と `events` だけで、他の管理系の Capability（Shared Memory の管理など）も HTTP の Endpoint を持たず、認証（PAW-022）が無いので `require_capability` の Route は 401 しか返せません。Route を足すときは `Depends(require_capability(Capability.ADMIN_PROJECTS_MANAGE))` を付けて `list_all_projects` を呼びます（Route の Test は `tests/test_authz_routes.py` の一覧が強制します）。
+
+#### 制限と未確認の点
+
+- Filter は `resource_kind` の語で残しています。Cursor と `limit` を Audit に残す場合は、`audit_events` の Schema を変える別の判断です。
+- `system_role` は、他の Method と同じく、呼び出し側（認証の層）が作った `Principal` の値を使います。Owner / Admin から降格された直後の古い `Principal` が、Session が更新されるまで一覧を読める可能性は、PAW-022 の Session の設計に依存します（Service は DB から読み直しません）。
+- 一覧の読み取りは 1 文の Snapshot で、Lock を取らず、待ちません（`test_the_read_does_not_change_anything_or_wait_for_a_lock`）。`READ COMMITTED` の PostgreSQL 18 でだけ確認しました。
+- 一覧に載る `name` は Project の名前で、機微な文字列を含みうる可能性はあります（要件が名前を含めるためです）。一覧を表示する側で扱ってください。
+
+#### Test
+
+`tests/test_projects_admin_cursor.py`（Cursor の符号化と、敵対的な入力の表・乱数の Fuzz。DB なし）、`test_projects_admin_access.py`（Actor・引数の表・拒否・Audit の Fail-closed。DB URL のない `Database` で「DB を読まない」ことを確かめる）、
+`test_projects_admin_list.py`（実 PostgreSQL: 全 Project、状態、削除待ちの期限、Deleted の除外、Keyset の安定（ページの間の挿入・削除・状態変更・同時に走る Writer）、Audit の行）、`test_projects_admin_grants.py`（Application の Role で上の Test を全て実行し、`projects` の 5 列の `SELECT` だけを持つ Role でも一覧が動くこと）です。
+実装の変異 23 個（並びの向き、`id` の向き、行値比較の等号、`id` を落とす、Deleted を含める、Filter の無視、`limit + 1` の先読み、Cursor を先読みの行から作る、認可を外す、別の Capability、Filter を Audit に残さない、Cursor の Filter・正規形・長さ・時刻の範囲・型・先頭の 0・大文字の UUID の検証を緩める、`deleted` の Filter、`status` の大文字小文字、`limit` の検証、認可の前の引数の検証の順序、`description` を SELECT に足す）を、すべて Test が検出しました。
 
 ### 同時実行
 
@@ -2339,7 +2415,7 @@ AGENTS.md のとおり、同じ失敗を繰り返したのでエスカレーシ�
 - HTTP の Endpoint、Session は含みません（PAW-022）。作成・受諾・退出は Audit に残りません（Decision 0008 の 5。暫定の作りとして承認され、Capability と Audit の追加は Issue [#82](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/82) です）。
 - 招待を通知する仕組み（Notification、Email）はありません。招待された人は `list_my_invites` で見つけます。User の削除の流れ（Member を外す、所有権の移譲）は PAW-021 以降の Issue です。
 - Purge を定期的に呼ぶ Janitor、Purge 後の他の領域のデータ削除、Task 停止の Processor を呼ぶ Orchestrator（PAW-034）は含みません。Processor 自体は含みます（上の「Delete 開始時の Task 停止」）。Repository の紐付け（PAW-027）と Repo ACL の保存もありません。
-- Project 名の一意性、Project ごとの設定（Agent Policy、Merge Policy など。要件の「New Project defaults」）、Owner / Admin の全 Project 一覧（Issue #84）は含みません。
+- Project 名の一意性、Project ごとの設定（Agent Policy、Merge Policy など。要件の「New Project defaults」）、Owner / Admin の全 Project 一覧は PAW-026 には含まれず、Issue #84 で追加しました（下の「管理者向けの全 Project 一覧」）。
 - `Authorizer` の呼び出しと Project の Lock は同じ Transaction の中です。Audit の Store が遅いと、その間 Project の行の Lock が続きます（Authorizer の Timeout で有界）。
 - PostgreSQL 18 の実 DB で Test しました。`READ COMMITTED` を前提に、Lock の順序（Project の行が最初）で直列化しています。他の Isolation Level では未確認です。
 
@@ -2350,7 +2426,7 @@ Human は [Decision 0008](../../docs/decisions/0008-project-membership-and-lifec
 1. **承認した点。** Delete 開始を Active から許し、Project 名の完全一致の入力を要求すること。復元できる人（`project.lifecycle.manage` を持つ Manager、Owner、Admin。復元先は Archived）。墓石を残す Purge。Membership のルール（辞退・退出は行の削除で履歴を持たない、`users` への Foreign Key `ON DELETE RESTRICT` を含む）。
 2. **暫定値として承認した数値。** 招待の期限（14 日）、Member と有効な招待の合計（200）、Project 名（1〜100 文字）と説明（2,000 文字）。後から変えられますが、名と説明の長さは DB の CHECK 制約にも書かれているため、新しい Migration と `models.py` の変更が要ります。他の数値は Migration が要りません（Decision 0008 の「背景」）。
 3. **Capability を持たない 4 つの操作**（作成、招待の受諾・辞退、退出）は、暫定の作りで承認されました。Capability と Audit の追加は Issue [#82](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/82) で行います（承認済みの Decision 0004 は書き換えず、新しい Decision から `Supersedes` します）。
-4. **Owner / Admin が全 Project を一覧する API**（管理上の Lifecycle 操作の入口）は、Issue [#84](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/84) です。
+4. **Owner / Admin が全 Project を一覧する API**（管理上の Lifecycle 操作の入口）は、Issue [#84](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/84) で実装しました（Service まで。上の「管理者向けの全 Project 一覧」）。
 5. **Purge 後の他の領域のデータ削除**は、各 Service が `PurgeResult.purged` を使う分担で承認されました。調査結果（Provenance・Scratch など）の扱いは、Issue [#88](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/88) で決めます。
 6. **Delete 開始時の Task 停止**（Decision 0008 の 8）: 停止に Cancel（graceful）を使うこと、Outbox と Processor に分けることを承認しました。Delete 開始の後に作られた Task の競合を閉じる Gate（`create_task` / Retry / Restart / `enqueue` が Project の行を Lock して Active 以外を拒否する）の方針も承認され、実装は Issue [#83](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/83)（PAW-034 の前後。`tasks(project_id, state)` の Index を含む）です。この Issue では入れません。
 7. **`0021` を `0026` より前に置く並び**は、Migration の実装上の順序で、統合時に確認してください。
