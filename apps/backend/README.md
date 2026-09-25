@@ -129,7 +129,7 @@ Database には pgvector が必要です（CI は `pgvector/pgvector:pg18` を�
 | `PAW_SETUP_TOKEN_MAX_ATTEMPTS` | `5` | 1 つの Token に許す試行回数（1〜20）。使い切った Token は無効になる |
 | `PAW_PASSWORD_HASH_TIME_COST` / `PAW_PASSWORD_HASH_MEMORY_KIB` / `PAW_PASSWORD_HASH_PARALLELISM` | `3` / `65536` / `4` | Argon2id の Parameter（RFC 9106 の 2 番目の推奨）。メモリは 19456〜1048576 KiB（OWASP の最小以上）。[Login / Session / Password Policy](#login--session--password-policy) |
 | `PAW_PASSWORD_HASH_CONCURRENCY` | `2` | 同時に計算する Hash の数（1〜16）。待つ Job は最大 64 で、超えると 503 |
-| `PAW_SESSION_IDLE_DAYS` / `PAW_SESSION_REMEMBER_DAYS` / `PAW_SESSION_ABSOLUTE_DAYS` | `30` / `90` / `90` | 通常 Session の無操作の上限、Remember Me の上限（無操作も絶対も）、通常 Session の絶対の上限（日）。前 2 つは要件、絶対の上限は [Decision 0015](../../docs/decisions/0015-login-session-password-policy.md) の提案 |
+| `PAW_SESSION_IDLE_DAYS` / `PAW_SESSION_REMEMBER_DAYS` / `PAW_SESSION_ABSOLUTE_DAYS` | `30` / `90` / `90` | 通常 Session の無操作の上限、Remember Me の上限（無操作も絶対も）、通常 Session の絶対の上限（日）。前 2 つは要件、絶対の上限は [Decision 0015](../../docs/decisions/0015-login-session-password-policy.md) で承認された値 |
 | `PAW_SESSION_TOUCH_INTERVAL_SECONDS` | `60` | Session の最終利用日時を書く間隔の下限（秒） |
 | `PAW_SESSION_COOKIE_SAMESITE` | `strict` | Session Cookie の `SameSite`（`strict` / `lax`）。`Secure` と `HttpOnly` は常に付く |
 | `PAW_LOGIN_ACCOUNT_FREE_ATTEMPTS` / `PAW_LOGIN_SOURCE_FREE_ATTEMPTS` | `5` / `20` | Account と接続元で、Lock が始まる試行の番号（要件: 5 回目で約 30 秒） |
@@ -908,7 +908,7 @@ Login name は小文字の ASCII 英数字と `.` `_` `-` だけ（3〜64 文字
 ## Login / Session / Password Policy
 
 [PAW-022](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/19) で実装しました（`paw_backend/auth/`、Migration `0022`、`api/v1/auth.py`）。
-**数値と選択（Argon2id の Parameter、Backoff の段階、Session の寿命、Cookie の属性、Rate Limit、Password の規則、Audit に残す項目）は [Decision 0015](../../docs/decisions/0015-login-session-password-policy.md)（Proposed。人間の承認待ち）に、推奨つきでまとめています。**
+**数値と選択（Argon2id の Parameter、Backoff の段階、Session の寿命、Cookie の属性、Rate Limit、Password の規則、Audit に残す項目）は [Decision 0015](../../docs/decisions/0015-login-session-password-policy.md)（Approved。2026-09-26 に Human が承認）に、各点の判断と根拠をまとめています。**
 値は設定（`PAW_` の環境変数）または定数で、承認で変わっても Schema は変わりません（Migration は不要）。
 Passkey の登録・認証・強制と Step-up の Passkey は PAW-023 です（この Issue は差し込み口だけを用意しました）。
 
@@ -996,7 +996,7 @@ Passkey の登録・認証・強制と Step-up の Passkey は PAW-023 です（
 
 ### Passkey Policy（Owner が変える設定）と Step-up
 
-- `auth_policy`（1 行、`version` つき）: Owner / Admin / User ごとの Passkey の要求（`required` / `optional`）、User へ Passkey を強く勧めるか、Step-up の有効時間（5〜240 分）。**既定は要件のまま**（Owner・Admin は required、User は optional で勧める、30 分）。Decision 0015 の 12 節が、要件の固定の方針を「Owner が変えられる設定の既定値」に読み替える提案です（Human の指示で、`REQUIREMENTS.md` の `[FIXED]`「Passkey Policy」の本文は変えず、その下に注記だけを追記しました。Human の回答 2026-09-25: Passkey の Step-up を必須にする。PAW-023 まで、この設定変更は本番では使えません）。
+- `auth_policy`（1 行、`version` つき）: Owner / Admin / User ごとの Passkey の要求（`required` / `optional`）、User へ Passkey を強く勧めるか、Step-up の有効時間（5〜240 分）。**既定は要件のまま**（Owner・Admin は required、User は optional で勧める、30 分）。Decision 0015 の 12 節（承認済み）が、要件の固定の方針を「Owner が変えられる設定の既定値」に読み替えます（Human の指示で、`REQUIREMENTS.md` の `[FIXED]`「Passkey Policy」の本文は変えず、その下に注記だけを追記しました。Human の回答 2026-09-25: Passkey の Step-up を必須にする。PAW-023 まで、この設定変更は本番では使えません）。
 - **変更は Owner だけ**（`owner.auth_policy.manage`。Agent に委任できず、Audit は REQUIRED）。**Owner の Session の直近の Passkey の Step-up**（Policy の有効時間の内。Row Lock の下で Database の時計）が要ります。**Password の Step-up は数えません**（403 `step_up_method_insufficient`。Password を盗んだ者が `POST /step-up` で得られる Step-up を受け付けると、Owner / Admin の Passkey の要求を緩められてしまうため。要件: Owner / Admin の重要操作は Passkey の Step-up）。**そのため、PAW-023 が Passkey の Verifier を登録するまで、`PUT /policy` は本番では使えません**（Owner が変えられる Policy は PAW-023 で端から端まで動きます。それまでは既定値、つまり要件どおりの Policy が効きます）。Test は、Passkey の Step-up を Test の Fixture が Session の行へ書いて、この経路を確かめます。Step-up の方法はその方法の Verifier だけが記録し、別の方法の鍵で登録した Verifier は拒否されます。`auth.step_up.satisfied` は「時間内に Step-up があった」だけを表すので、方法の強さは `method` で見ます。`expected_version` が現在と違えば 409 で、**同時の編集で更新が失われません**（別の接続で競わせる Test 済み）。同じ値の更新は Version を上げません。
 - 変更は `auth_policy_changes`（誰が・いつ・各項目の変更前後。追記専用）と Audit（`auth.policy.update`）に、同じ Transaction で残ります。
 - **効く範囲は新しい Sign-in と Session から**です。**既存の Session は失効も降格もしません**（厳しくしても黙って Logout されない。Test 済み）。`GET /session` の `auth.passkey` が、その人の要求（`requirement`）、登録の有無（`enrolled`。PAW-023 まで常に `false`）、`enrollment_required`（`required` で未登録）、`recommended`（User に勧める）を返します。
@@ -1026,7 +1026,7 @@ Passkey の登録・認証・強制と Step-up の Passkey は PAW-023 です（
 - **存在しない名前の失敗は DB へ書きません**（Log に固定の 1 行。誰でも作れる行になり、Audit の Table は削除できないため）。Lock 中に拒否された試行も書きません。
 - **変更と同じ Transaction で書きます**（Login、変更、失効、Token の設定、Policy の変更）。書けなければ変更も起きず、起きなかった変更の行も残りません。拒否は別の短い Transaction で Best Effort に書きます（書けなくても拒否のまま）。
 - 各 Route の Guard（`require_capability`）の判定は、これとは別に `account.manage` などの Capability 名で 1 行残ります（`account.read` は拒否だけ）。認証されていない Request の拒否は DB へ書かず Log だけです（PAW-025）。
-- **限界**: `AuditEvent` に「接続元」「名前の Hash」の項目がないため、存在しない名前の失敗の接続元は残りません。項目を足すには `audit_events` の Migration と Decision 0004 の変更が要ります（Decision 0015 の判断点）。
+- **限界**: `AuditEvent` に「接続元」「名前の Hash」の項目がないため、存在しない名前の失敗の接続元は残りません。項目を足すには `audit_events` の Migration と Decision 0004 の変更が要ります（Decision 0015 で、足さないと決めました）。
 
 ### Database と権限
 

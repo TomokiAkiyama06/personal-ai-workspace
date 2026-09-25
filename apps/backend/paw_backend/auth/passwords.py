@@ -6,7 +6,7 @@ strong policy still needs (NIST SP 800-63B): a password everybody tries, one tha
 is a single repeated pattern, one that is or contains the login name. A password
 is NFKC-normalised before it is checked and hashed, so the same characters typed
 on another device (full-width forms, composed / decomposed kana) verify. The
-numbers are in ``limits`` and are proposed in Decision 0015.
+numbers are in ``limits`` and are decided in Decision 0015 (Approved).
 
 **Hashing** (``PasswordHasher``): Argon2id through ``argon2-cffi``. Every call
 runs on a small dedicated thread pool (Argon2 is CPU- and memory-bound and must

@@ -100,7 +100,8 @@ class Settings(BaseSettings):
     scratch_purge_interval_seconds: int = Field(default=3_600, ge=0, le=86_400)
 
     # Login, sessions and passwords (PAW-022; the values the requirements do not
-    # fix are proposed in Decision 0015 and are changed here, not in the code).
+    # fix are decided in Decision 0015 (Approved, provisional) and are changed
+    # here, not in the code).
     #
     # Argon2id. The defaults are RFC 9106's second recommended option (64 MiB,
     # t=3, p=4); the lower bounds are OWASP's minimum (19 MiB, t=2 is the

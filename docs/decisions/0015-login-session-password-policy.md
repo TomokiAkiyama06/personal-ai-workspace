@@ -1,14 +1,14 @@
 # Login・Session・Password Policy の方針
 
-- Status: Proposed
+- Status: Approved
 - Date: 2026-09-25
 - Scope: PAW-022（Workspace Login / Session / Password Policy、Issue [#19](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/19)）と、その上に載る PAW-023（Passkey / Step-up、[#20](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/20)）、Owner の初期設定・復旧（[Decision 0005](0005-owner-setup-and-recovery.md)）との接続点
-- Supersedes: なし。ただし 12 節は、`REQUIREMENTS.md` の `[FIXED]`「Passkey Policy」を「固定の方針」から「Owner が変えられる設定の**既定値**」へ読み替える提案を含む（`[FIXED]` の本文は変えない。Human の指示（2026-09-25）で、`REQUIREMENTS.md` の該当箇所の下に、既定値であること・Owner が設定で変えられることの**注記だけ**を追記した）
-- Approval: 未承認（Human の承認待ち。個別の点への回答は「人間の回答（2026-09-25）」の節。この Decision 全体はまだ承認されていない）
+- Supersedes: なし。ただし 12 節は、`REQUIREMENTS.md` の `[FIXED]`「Passkey Policy」を「固定の方針」から「Owner が変えられる設定の**既定値**」へ読み替える点を含む（承認済み。`[FIXED]` の本文は変えない。Human の指示（2026-09-25）で、`REQUIREMENTS.md` の該当箇所の下に、既定値であること・Owner が設定で変えられることの**注記だけ**を追記した）
+- Approval: 2026-09-26、Humanが作業Session内で、判断メモの各点に個別に回答し、残りは「推奨どおり」と回答して承認（末尾の「承認時の決定」）
 
-## 人間の回答（2026-09-25）
+## 承認までの個別の回答（2026-09-25）
 
-個別の点への回答である。**この Decision 全体は未承認**で、Status は Proposed のまま。他の点（Argon2id の数値、Password の規則、Cookie、Backoff、Rate Limit、Audit の形、DB Role など）は未回答。
+2026-09-25 に、次の 3 点だけが個別に答えられた。残りの点は 2026-09-26 に「推奨どおり」と答えられ、Decision 全体が承認された（末尾の「承認時の決定」）。
 
 | 点 | 人間の回答 | 反映 |
 | --- | --- | --- |
@@ -29,7 +29,7 @@
 一方で要件は、**具体的な数値・Cookie の属性・Backoff の段階・Argon2id の Parameter・Session の絶対期限・Rate Limit の値・Audit に残す項目**を定めていない。
 [AGENTS.md](../../AGENTS.md) の「仕様変更」は、重要判断を `docs/decisions/` に記録して人間 / Admin の承認を得ると定める。実装（PAW-022）は動かすためにこれらへ値を置いたので、**その全部を 1 か所に集め、各点に推奨を付けて**、Human が 1 回で承認または変更できるようにする。
 
-Decision 0005 は、PAW-022 が満たす条件（Issue #19 に追記済み）として、次の 3 点を定めた。この提案はそれを実装で満たしている。
+Decision 0005 は、PAW-022 が満たす条件（Issue #19 に追記済み）として、次の 3 点を定めた。この Decision の実装（PAW-022）はそれを満たしている。
 
 1. `redeem`（Token を使う処理）を公開する前に、接続元ごとと全体の Rate Limit を付ける。
 2. Web 用 DB Role の権限を最小に保つ（Operator 用の Role と分ける）。
@@ -161,7 +161,7 @@ Decision 0005 は、PAW-022 が満たす条件（Issue #19 に追記済み）と
 - 変更を伴う出来事は、**変更と同じ Transaction で書く**（書けなければ変更も起きない。起きなかった変更の行も残らない）。拒否は別の短い Transaction で Best Effort に書く（書けなくても拒否のまま）。
 - **存在しない名前の失敗は DB へ書かず、Log に固定の 1 行**（名前を含まない）だけ残す。誰でも作れる行になり、Audit の Table は削除できないため（PAW-025 の未認証の拒否、Decision 0005 の未知の Token と同じ方針）。
 - 失敗の行は、Account の ID（`actor_id`、`actor_role` は Account の Role）と、**接続元の Bucket を表す不透明な UUID**（`resource_kind = login_source`、`resource_id`）を持つ。UUID は Bucket の Hash から作る仮名で、同じ接続元は同じ ID になる（グループにできる）が Address そのものは保存しない。Address を知る Operator は計算できる（仮名であって秘匿ではない）。
-- **限界（判断点）。** `AuditEvent` に「接続元」「名前の Hash」の項目がないため、次は Audit へ入らない。存在しない名前の失敗の接続元（Log にもない）、名前の Hash。専用の項目を足すには `audit_events` の Migration と Decision 0004 の変更（新しい Decision で `Supersedes`）が要る。この提案は足さない（推奨）。足す場合は接続元 Bucket と名前の Hash の 2 列。
+- **限界（判断点）。** `AuditEvent` に「接続元」「名前の Hash」の項目がないため、次は Audit へ入らない。存在しない名前の失敗の接続元（Log にもない）、名前の Hash。専用の項目を足すには `audit_events` の Migration と Decision 0004 の変更（新しい Decision で `Supersedes`）が要る。足さない（推奨どおり承認）。足す場合は接続元 Bucket と名前の Hash の 2 列（Decision 0004 を `Supersedes` する新しい Decision）。
 - Owner / Admin の異常な Login 失敗は上の行で記録される。要件の「既存の信頼済み端末への警告」は、端末の登録（PAW-024 相当）と通知の経路がないため、この Issue では実装しない。
 
 ### 10. Password の変更・Reset・Recovery
@@ -190,7 +190,7 @@ Migration `0022` は、Web の Role（`PAW_APP_DATABASE_ROLE`）に各 Table の
 
 ### 12. Passkey Policy を Owner が変えられる設定にする
 
-**この節は、`REQUIREMENTS.md` の `[FIXED]`「Passkey Policy」（Owner 必須、Admin 必須、User 任意で強く推奨、Owner / Admin の重要操作は直近 30 分の Step-up）を、固定の方針から「Owner が変えられる Workspace の設定」の既定値に変える提案である。** Human の指示（「パスキーに関してもオーナー自身が変更できるようにしましょう、設定で」）による。
+**この節は、`REQUIREMENTS.md` の `[FIXED]`「Passkey Policy」（Owner 必須、Admin 必須、User 任意で強く推奨、Owner / Admin の重要操作は直近 30 分の Step-up）を、固定の方針から「Owner が変えられる Workspace の設定」の既定値に変える方針である（承認済み）。** Human の指示（「パスキーに関してもオーナー自身が変更できるようにしましょう、設定で」）による。
 
 - **既定値は要件のまま**: Owner = required、Admin = required、User = optional、User へ Passkey を強く勧める = 有効、Step-up の有効時間 = 30 分。
 - **保存**: `auth_policy`（1 行、`version` つき）と `auth_policy_changes`（変更のたびに 1 行。誰が、いつ、各項目の変更前と変更後。追記専用）。変更は Audit（`auth.policy.update`）にも 1 行。
@@ -238,7 +238,7 @@ Migration `0022` は、Web の Role（`PAW_APP_DATABASE_ROLE`）に各 Table の
 - Login の失敗の行を、存在しない名前でも書く: 誰でも消せない行を増やせる。書かない。
 - Session ID を Hash せずに保存する: DB の読み取りだけで Session を奪える。
 
-## 人間の判断が必要な点（推奨つき）
+## 人間の判断が必要だった点（推奨つき。すべて「承認時の決定」で決まった）
 
 1. **Session の寿命の解釈（4 節。人間の回答 2026-09-25: 承認）**: 「最大 90 日」= 無操作と絶対の両方の上限 90 日（推奨）／無操作 90 日で絶対の上限なし。通常 Session の絶対の上限 90 日（推奨）／なし。
 2. **Argon2id（1 節）**: 64 MiB、t=3、p=4、同時 2（推奨）／OWASP の最小構成。
@@ -263,16 +263,26 @@ Migration `0022` は、Web の Role（`PAW_APP_DATABASE_ROLE`）に各 Table の
 
 ## 承認後の扱い
 
-承認されたら、この Decision の Status を Approved にする（Status と承認の記録だけを更新する。既存の Decision の本文の方針を書き換えるときは新しい Decision から `Supersedes` する）。PAW-022 の PR は本 Decision を参照する。
-値を変えるときは、この Decision を書き換えず新しい Decision から `Supersedes` し、設定の既定値（`config.py`）と Test の期待値を合わせる（Migration は不要）。
-12 節が承認された場合は、PAW-023 の受け入れ条件に「Owner が設定で変える Policy に従って強制する」「`required` で未登録の状態を登録だけができる状態にし、行き止まりにしない」「Passkey の `StepUpVerifier` を `AuthService(step_up_verifiers={AuthMethod.PASSKEY: ...})` に登録して、Policy の変更（`PUT /auth/policy`）を使えるようにする」「Owner / Admin の他の重要操作（Admin による Lock の解除など）にも Passkey の Step-up を要求する」を加える。
+- 2026-09-26 に承認された。`Approval` に記録し、Status を Approved に改めた。PAW-022 の PR は本 Decision を参照する。
+- 承認された数値は**暫定値**で、運用で見直す前提。値は設定（`config.py`、`PAW_` の環境変数）と定数（`auth/limits.py`）にあり、変更しても Schema は変わらない（Migration は不要）。値を変えるときは、この Decision を書き換えず、新しい Decision から `Supersedes` し、既定値と Test の期待値を合わせる。
+- 12 節（Owner が変えられる Passkey Policy）により、PAW-023（Issue [#20](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/20)）の受け入れ条件に次を加える（Issue への追記は別途行う）。
+  - Owner が設定で変える Policy に従って Passkey を強制する。
+  - `required` で未登録の状態を、Passkey の登録だけができる状態にし、行き止まりにしない（Password の Login と `owner-recover` を残す）。
+  - Passkey の `StepUpVerifier` を `AuthService(step_up_verifiers={AuthMethod.PASSKEY: ...})` に登録して、Policy の変更（`PUT /auth/policy`）を使えるようにする。
+  - Owner / Admin の他の重要操作（Admin による Lock の解除など）にも Passkey の Step-up を要求する。Tool Broker の強い承認の `StepUpVerifier`（`tools/approvals.py`）にも結び付ける。
+- Audit に「接続元」「名前の Hash」の列は足さない（9 節）。足す場合は、Decision 0004 を `Supersedes` する新しい Decision と `audit_events` の Migration が要る。
 
-## 決めてほしいこと
+## 承認時の決定（2026-09-26）
 
-1. ~~4 節の Session の寿命の 2 つの解釈~~（人間の回答 2026-09-25: 承認済み）。
-2. 1〜3、5、7〜9 節の数値と選択を、推奨どおりにしてよいか。
-3. 12 節: Passkey Policy を Owner が変えられる設定にすること、Owner 専用の変更、Passkey の Step-up の再認証（PAW-023 が入るまで本番では変更できないこと）、既存 Session に影響しないこと。
-4. 12 節: `users.passkey_required` の扱い（設定を見る。列の整理は PAW-023）。
-5. 9 節: Audit に接続元と名前の Hash の列を足すか（足す場合は Decision 0004 の変更）。
-6. 8 節: 全体の Rate Limit と、Recovery の DoS の許容。
-7. ~~11 節: `REQUIREMENTS.md` をどう直すか~~（人間の回答 2026-09-25: 追記。対応済み。注記の文面は確認してほしい）。
+判断メモの 7 点すべてに答えた。すべて推奨どおりで、本文の変更はない。
+
+1. **4 節 Session の寿命**: 承認（2026-09-25 に個別に答えた）。「最大 90 日」は無操作の上限と絶対の上限の両方（使い続けても 90 日で Login し直す）。通常 Session にも 90 日の絶対の上限を置く。（開いていた問い (a)）
+2. **1〜3、5、7〜9 節の数値と選択**: 推奨どおり。Argon2id は 64 MiB・time 3・並列 4・同時 2、Password の規則（最小 10 文字、最大 256 文字、NFKC、短い一覧、Login name の規則）、Cookie（`__Host-paw_session`、`SameSite=Strict`、通常 Session は Session Cookie）、Backoff（Account 5 回・接続元 20 回、30 秒から 1 時間、24 時間で忘れる）、Audit の形（存在する Account の失敗だけを書き、接続元は仮名の UUID）、Session ID の Rotation に猶予期間を置かない、Web 用 DB Role の `SECURITY DEFINER` の関数。いずれも暫定値として承認された。
+3. **12 節 Passkey Policy を Owner が変えられる設定にする**: 承認。Owner だけが変更でき（Admin は閲覧のみ）、既存の Session を失効も降格もしない。**変更には Owner 自身の直近の Passkey の Step-up が必須で、Password の Step-up は受け付けない**（2026-09-25「オーナーはパスキー必須でいい」）。**PAW-023 まで、この設定変更は本番では使えない**。（開いていた問い (b)）
+4. **12 節 `users.passkey_required` の扱い**: Login の処理は列でなく設定（`auth_policy`）を見る。列の整理は PAW-023。
+5. **9 節 Audit の列**: 「接続元」「名前の Hash」の列は**足さない**（推奨どおり）。存在しない名前の失敗の接続元は Audit に残らない。（開いていた問い (c)）
+6. **8 節 全体の Rate Limit**: 導入する。**全体の枠を使い切られて Owner の Recovery が最大 1 時間遅れる危険を受け入れる**（Recovery はまれな操作で、待てば回復する）。（開いていた問い (d)）
+7. **11 節 `REQUIREMENTS.md` の記述**: 追記する（2026-09-25「追記を行って下さい」）。`[FIXED]`「Passkey Policy」の本文は変えず、その下に注記だけを追記した（規則は既定値であること、Owner だけが設定で変えられること、変更に Passkey の Step-up が要ること、既存の Session に影響しないこと、Passkey 未登録の間 Owner は Password で Login でき `owner-recover` があること）。
+
+- 開いていた問い (a)〜(d) は上のとおり。(a) 承認、(b) Passkey の Step-up を必須にし PAW-023 まで本番では変更できない、(c) Audit の列は足さない、(d) 全体の Rate Limit のリスクを受け入れる。
+- 14 節に挙げた、この Issue に含めないこと（Passkey の登録・強制、複数端末の追加、Admin による強制 Reset の Token の発行、`/api/v1/events` の認証、信頼済み端末への警告）は、それぞれ後続の Issue で扱う。

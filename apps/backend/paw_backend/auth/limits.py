@@ -9,8 +9,8 @@ on what is stored, are constants here so that a schema or a test can name them.
 # REQUIREMENTS.md "Password / Login Failure / Session Policy": at least 10
 # characters, long passphrases allowed, no composition rules.
 PASSWORD_MIN_LENGTH = 10
-# Proposed (Decision 0015). Argon2 accepts far more; the cap bounds the work an
-# anonymous request can cause before it is even hashed.
+# Decision 0015 (Approved, provisional). Argon2 accepts far more; the cap bounds
+# the work an anonymous request can cause before it is even hashed.
 PASSWORD_MAX_LENGTH = 256
 PASSWORD_MAX_UTF8_BYTES = 1_024
 # A password that contains the login name is refused only when the name is at
