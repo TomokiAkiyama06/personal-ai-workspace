@@ -32,14 +32,15 @@ Authorization of each method:
   membership is not needed and not consulted; see "The administrator's list");
 * ``roles_of``, ``purge_expired``: backend-internal, not for users.
 
-Self service (Decision 0022, Proposed; it extends Decision 0004)
------------------------------------------------------------------
+Self service (Decision 0022, Proposed; supersedes Decision 0008 section 5)
+---------------------------------------------------------------------------
 Creating a project, answering one's own invitation and leaving a project used
 to be authorized by identity alone and left no Audit event (Decision 0008, an
-approved provisional arrangement). They now go through the Authorizer like every
-other operation, with an Audit mode of ``REQUIRED``: an allowed **and** a denied
-call each write one event, and an allowed call whose event cannot be written is
-refused (``ProjectPermissionDeniedError(AUDIT_UNAVAILABLE)``; nothing changed).
+approved provisional arrangement, which Decision 0022 supersedes). They now go
+through the Authorizer like every other operation, with an Audit mode of
+``REQUIRED``: an allowed **and** a denied call each write one event, and an
+allowed call whose event cannot be written is refused
+(``ProjectPermissionDeniedError(AUDIT_UNAVAILABLE)``; nothing changed).
 
 * ``project.create`` is ``Scope.SYSTEM``: Owner, Admin and User hold it
   (``SYSTEM`` does not); the resource is the workspace (``Resource.system()``).

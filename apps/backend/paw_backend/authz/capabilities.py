@@ -36,10 +36,12 @@ class Capability(StrEnum):
     GITHUB_USE = "github.use"
     MEMORY_USE = "memory.use"
     PR_CREATE = "pr.create"
-    # A person's own project membership (Decision 0022, extending Decision 0004):
-    # answering an invitation addressed to oneself, and leaving a project one is a
-    # member of. The resource is owned by the actor; the project's state and the
-    # actor's role in it are not consulted (see ``ProjectService``).
+    # A person's own project membership (Decision 0022, Proposed: it extends
+    # Decision 0004's delegation list and Scope.SELF, and supersedes Decision 0008
+    # section 5): answering an invitation addressed to oneself, and leaving a
+    # project one is a member of. The resource is owned by the actor; the
+    # project's state and the actor's role in it are not consulted (see
+    # ``ProjectService``).
     PROJECT_INVITATION_RESPOND = "project.invitation.respond"
     PROJECT_LEAVE = "project.leave"
 

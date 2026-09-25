@@ -2,8 +2,8 @@
 
 - Status: Proposed
 - Date: 2026-09-25
-- Scope: Issue [#82](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/82)（Decision 0004 の追補）と、この 3 操作を呼ぶ以降の Issue（PAW-022 の API、Project の Chat など）
-- Supersedes: なし（0004への追補）
+- Scope: Issue [#82](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/82)（Decision 0008 の 5 の置き換えと、Decision 0004 の Capability 方針の拡張）と、この 3 操作を呼ぶ以降の Issue（PAW-022 の API、Project の Chat など）
+- Supersedes: [Decision 0008](0008-project-membership-and-lifecycle-policy.md) の 5「Capability を持たない操作（暫定の作りで承認）」（表と本文。「承認時の決定」の同じ項目を含む）を**置き換える**。[Decision 0004](0004-rbac-capability-and-audit-policy.md) の 2 の 2「委任できる Capability の許可リスト」の委任不可の一覧と、1 の 3「自分のデータは所有者本人だけ」（`Scope.SELF`）の対象に、この Decision の 3 つの Capability を**加える**（0004 のほかの内容は変えない。範囲は「既存の Decision との関係」の表）
 - Approval: 未承認（Human の承認待ち。承認前の実装は、この Decision を参照する提案として入れている）
 
 ## 背景
@@ -21,10 +21,22 @@ Decision 0008 の決定は「`project.create`（`Scope.SYSTEM`、User 以上）�
 - Audit Mode と、判定を行う時点
 - 招待の受諾と辞退を Audit で区別するか
 
-**承認済みの Decision 0004 と 0008 は書き換えない**（AGENTS.md の「仕様変更」）。この Decision は、0004 の Capability 一覧に 3 つを**足す**追補であり、
-0004 の選択（Role の階層、委任の許可リスト、Audit Mode の既定、Fail-closed）は変えない。
-そのため `Supersedes` はない。0008 の 5 が定めた「暫定の作り」は、この Decision の承認と実装により役目を終える
-（0008 の 5 自身が、Capability の追加を決めている。この Decision はその実行である）。
+**承認済みの Decision 0004 と 0008 は書き換えない**（AGENTS.md の「仕様変更」）。変更は、この新しい Decision の `Supersedes` に、置き換える節を挙げて示す。
+0008 の 5 が定めた暫定の作り（本人確認だけ、Audit なし）は、この Decision が**置き換える**。0004 は、Capability の一覧、委任の許可リスト、自分のデータの範囲を**拡張**するだけで、
+Role の階層、Audit Mode の既定、Fail-closed などの選択は変えない。0004 の「承認時の決定」と 0008 の 5 は、この追加を「新しい Decision から `Supersedes` で行う」と予告しており、この Decision がそれにあたる。
+何が置き換わり、何がそのまま有効かは、次の「既存の Decision との関係」に表にした。
+
+## 既存の Decision との関係（`Supersedes` の範囲）
+
+| Decision と節 | 扱い | 内容 |
+| --- | --- | --- |
+| 0008 の 5「Capability を持たない操作（暫定の作りで承認）」の表と本文 | **置き換える** | 旧: 作成、招待の受諾・辞退、退出を、本人確認だけ（`system_role` が Owner / Admin / User）で許可し、Audit の行を書かない。新: 「提案」の 1 と 2（Authorizer を通し、Audit を `REQUIRED` で残す） |
+| 0008 の「承認時の決定」の、Capability と Audit を暫定の作りで承認した項目 | **置き換える** | 暫定の作りは、この Decision の承認で終わる（Capability の追加を Issue #82 で行うという決定は、この Decision で実行する） |
+| 0004 の 2 の 2（委任の許可リスト）の「委任不可」の一覧 | **拡張** | `project.create`、`project.invitation.respond`、`project.leave` を、委任不可の一覧に加える。委任可の一覧と、「Capability を追加するときは委任の可否を明示する」規則は変えない |
+| 0004 の 1 の 3（自分のデータは所有者本人だけ。`Scope.SELF`） | **拡張** | 自分宛ての招待と、自分の Membership を、自分のデータの対象に加える（招待への応答と退出）。他人の行は、Owner でも動かせない |
+| 0004 の「承認時の決定」の、Capability の追加を Issue #82 で行うという項目 | 実行 | 0004 が予告した「新しい Decision から `Supersedes` で追記する」を、この Decision で行う |
+| 0004 の 1 の 4（Project の状態: Archived、Pending deletion の許可）、3 の 1（Audit Mode の既定と `DENIED_ONLY` の許可リスト）、既知の制限（`Scope.SELF` は Project の状態と Member 資格を見ない） | 変えない | 3 つは `Scope.SELF` / `Scope.SYSTEM` で状態の表を見ず、Audit Mode は既定の `REQUIRED` で、`DENIED_ONLY` の許可リストには加えない |
+| 0008 の 3（Membership のルール。最後の Manager、Pending deletion からの退出、招待の期限）、4（存在を明かさない）、6（一覧） | 変えない | 規則は同じ。4 の「存在を明かさない」は、3 操作でも守られる（拒否は Project を読む前に出て、`ProjectPermissionDeniedError` になる。拒否されるのは `system` identity と Audit の障害のときだけで、`system` identity の `reason`（`capability_not_granted`）は旧来と同じ）。`list_projects` と `list_my_invites` は本人確認のまま |
 
 実装は [Backend README](../../apps/backend/README.md) の「Project CRUD / Membership / Lifecycle」（「認可と Audit」）に書いている。
 
@@ -93,8 +105,11 @@ Decision 0008 の決定は「`project.create`（`Scope.SYSTEM`、User 以上）�
 
 ## 承認後の扱い
 
-承認されたら、この Decision は Decision 0004 の Capability 一覧への追補（3 つの追加）として扱い、Decision 0008 の 5 の暫定の作りは終わったものとして扱う。0004 と 0008 は書き換えない。
-承認前でも、実装（`authz/capabilities.py`、`authz/policy.py`、`projects/service.py`）はこの提案どおりに入っている。Human が名前、Scope、付与先を変えたら、この Decision を更新してから実装と Test を合わせる。
+承認されたら、上の `Supersedes` の範囲が置き換わる。0008 の 5 の暫定の作り（本人確認だけ、Audit なし）は終わり、0004 の委任不可の一覧と `Scope.SELF` の対象は 3 つ分広がる。
+0004 と 0008 は書き換えず、この Decision を新しい参照先とする（README とコードの参照は、0008 の 5 ではなく 0022 を指す）。
+承認前は、0008 の 5 が承認済みの方針として有効で、実装（`authz/capabilities.py`、`authz/policy.py`、`projects/service.py`）はそれと異なる、この提案どおりの作りである。
+そのため、この Decision が承認されるまで、この実装を含む PR は Merge しない（承認されなければ、実装を 0008 の 5 の作りに戻す）。
+Human が名前、Scope、付与先を変えたら、この Decision を更新してから実装と Test を合わせる。
 承認後に方針を変える場合は、この Decision を書き換えず、新しい Decision から `Supersedes` する。[REQUIREMENTS.md](../../REQUIREMENTS.md) の原文は書き換えない。
 
 ## 決めてほしいこと
@@ -109,3 +124,4 @@ Decision 0008 の決定は「`project.create`（`Scope.SYSTEM`、User 以上）�
 6. **判定の記録**: Audit の行は判定だけを記録し、操作の結果（招待がない、最後の Manager、など）は記録しない。推奨: このまま（結果の記録は Audit の Schema の変更を伴うため、別の Issue と Decision で扱う）。
 7. **`list_projects` / `list_my_invites`**: 本人確認のまま（Capability を足さない）。推奨: このまま（自分の行を読むだけで、許可の記録も Decision 0004 の対象外）。
 8. **`project.leave` の Scope**: `Scope.SELF`（Project の状態と Role を見ない。Archived、Pending deletion からも退出できる）。推奨: このとおり（`Scope.PROJECT` にする案は、代替案のとおり採らない）。
+9. **0008 の 5 の置き換えと 0004 の拡張**: 0008 の 5（暫定の作り）を、この Decision で置き換え、0004 の委任不可の一覧と `Scope.SELF` の対象に 3 つを加えてよいか（範囲は「既存の Decision との関係」の表）。推奨: このとおり（0008 の 5 と 0004 の「承認時の決定」が、この置き換えと追記を予定している）。
