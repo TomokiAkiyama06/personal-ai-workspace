@@ -21,8 +21,14 @@ MAX_MODEL_CHARS = 100
 MODEL_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,99}")
 # What an agent asked for. Not stored, not logged: it only travels to the adapter.
 MAX_PROMPT_CHARS = 500_000
-# What an adapter may answer with (a longer answer is an invalid response).
-MAX_RESULT_CHARS = 2_000_000
+# What an adapter may answer with (a longer answer is an invalid response). It is
+# the limit of the credential redaction (``tools.credentials.MAX_TEXT_CHARS``): that
+# function cuts a longer text and says so only with a marker inside the text, so an
+# answer above it would come back shortened as a "successful" call. The service
+# refuses such an answer instead (and checks the limit again after the exact
+# credential value has been replaced, which can lengthen a text);
+# ``tests/test_connections_result_limit.py`` keeps the two equal.
+MAX_RESULT_CHARS = 1_000_000
 # A credential as the secret store hands it to an adapter.
 MAX_SECRET_CHARS = 16_384
 

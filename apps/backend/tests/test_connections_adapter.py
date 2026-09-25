@@ -319,7 +319,7 @@ class AdapterResultTest(unittest.TestCase):
             {"text": 1},
             {"text": None},
             {"text": "a\x00"},
-            {"text": "x" * 2_000_001},
+            {"text": "x" * 1_000_001},
             {"text": "ok", "input_tokens": True},
             {"text": "ok", "input_tokens": -1},
             {"text": "ok", "input_tokens": 1.5},
@@ -332,7 +332,7 @@ class AdapterResultTest(unittest.TestCase):
                     AdapterResult(**arguments)
 
     def test_the_largest_accepted_values(self):
-        result = AdapterResult("x" * 2_000_000, 10**9, 0)
+        result = AdapterResult("x" * 1_000_000, 10**9, 0)
         self.assertEqual((result.input_tokens, result.output_tokens), (10**9, 0))
 
 

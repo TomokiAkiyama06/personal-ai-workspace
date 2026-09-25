@@ -226,8 +226,10 @@ personal-ai-workspace/
 │  │     ├─ test_connections_plan.py
 │  │     ├─ test_connections_quota_admin.py
 │  │     ├─ test_connections_quota_enforcement.py
+│  │     ├─ test_connections_result_limit.py
 │  │     ├─ test_connections_schema.py
 │  │     ├─ test_connections_secret.py
+│  │     ├─ test_connections_settlement_cancel.py
 │  │     ├─ test_connections_validation.py
 │  │     ├─ test_database.py
 │  │     ├─ test_database_run_abortable.py

@@ -1311,7 +1311,7 @@ Health Check の結果は、確認した Credential（Handle）がまだ現在�
 5. 判定（新規の Task の場合）と、`in_flight` の使用量の行の INSERT。
 
 `execute` の全体: 引数の検査、`agent.use`（`Resource.owned_by(context.delegator_id)`: Principal が委任元の User でなければ拒否）、Adapter が登録されていること、Task の Budget（`budget` を渡した場合）、Admission、Credential の Handle を `Secret` へ解決して Adapter を実行（`request.timeout_seconds` の 1 つの期限が、解決と実行の両方にかかります）、
-**精算**（`finally` で `asyncio.shield`: Task が Cancel されても、Outcome・Token・Database の時計の経過時間を使用量の行へ書き、Token を Task の Budget へ加算）、Credential を取り除いた結果の返却。
+**精算**（`finally` の中で、専用の Task として実行し、`execute` がその Task を保持して終わるまで待つ: Outcome・Token・Database の時計の経過時間を使用量の行へ書き、Token を Task の Budget へ加算。精算が終わる前に届いた Cancel（遅い間の Cancel、繰り返しの Cancel を含む）は、精算が終わってから伝えます。`asyncio.timeout` の中の `execute` は `TimeoutError` になります。`ToolRunner` の記録と同じ方式）、Credential を取り除いた結果の返却。
 
 - 失敗は `ConnectionCallError(failure)`（`FailureCode`: `rate_limited` / `unavailable` / `expired` / `timeout` / `invalid_response` / `internal_error`）。記録され、数えられます。呼び出し側の Cancel は `cancelled` として記録し、Cancel を伝えます。
 - 始める前の拒否は、使用量の行を書かず、Adapter も Resolver も呼びません: `TaskNotUsableError`（Task が無い・他人の・終了・古い Run）、`ConnectionUnavailableError`（未設定・無効・未確認・期限切れ・Adapter 無し。理由は 1 つに揃えます）、`QuotaNotConfiguredError`、`QuotaExceededError`（指標・期間・暦の期間の再開時刻 `resets_at`）、`TaskBudgetError`。
@@ -1357,7 +1357,8 @@ CHECK 制約が、状態と終了・時間・Token・失敗の種類の対応（
 - **実 Adapter が無く、Provider の規約は未確認**（上）。実際の Codex / Claude では動かしていません。Adapter の Interface は In-memory の代役でだけ確かめています。
 - 実行中の Task は Quota で止まらない（暫定。Decision 0016 の 3 節）。`tokens` / `runtime_seconds` は終了後に数える。同時実行数、GPU 時間、期限付きの上限の一時緩和は未実装。
 - Process が Admission と精算の間で落ちた行は `in_flight` のまま残り、要求数にだけ数えられます（掃除は未実装）。精算に失敗した呼び出しは、答えを返し、失敗を Log（型名と使用量の ID）に残します。Task の Budget への加算は精算と別の Transaction です。
-- 精算と Budget の加算は `asyncio.shield` の中で走るため、Database が止まっていると、呼び出し側の Cancel はその分（Database の期限まで）遅れます。
+- 精算と Budget の加算が終わるまで呼び出し側の Cancel を伝えないため、Database や Budget の Store が止まっていると、Cancel はその分（使用量の行は Database の期限まで。Budget の加算は `BudgetTracker` が中断できない接続を使うため上限なし）遅れます。Event Loop の終了で Task ごと Cancel された精算は防げず、行が `in_flight` のまま残ります。
+- Adapter の答えは 1,000,000 文字まで（Credential の Redact の上限 `tools.credentials.MAX_TEXT_CHARS` と同じ）です。超える答え、Credential の値の置き換えで超える答えは、途中で切らずに `invalid_response` の失敗にします（`redact_text` は長い文を切って印を付けるだけなので、黙って短くなった答えを成功として返さないため）。
 - Prompt の中身は検査しません（Credential の混入や Privacy の Filter は Orchestrator と Tool Broker の責務）。
 - 使用量の保存期間、集計、Admin の Graph は未実装。Owner の Quota を Admin が変えられる点、Step-up（PAW-023）が Credential の差し替えに効かない点は Decision 0016 に置きました。
 - Health Check を動かす Scheduler と、状態の変化の Owner への通知は Orchestrator / 通知の Issue です。

@@ -545,7 +545,7 @@ class CancellationTest(ExecuteCase):
         running = asyncio.ensure_future(self.call())
         await asyncio.wait_for(self.codex.started.wait(), 30)
         running.cancel()
-        await asyncio.sleep(0)  # the settlement (shielded) is now in progress
+        await asyncio.sleep(0)  # the settlement is now in progress
         running.cancel()
         with self.assertRaises(asyncio.CancelledError):
             await running

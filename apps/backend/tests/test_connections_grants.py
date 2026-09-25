@@ -36,6 +36,8 @@ from . import (
     test_connections_execute,
     test_connections_quota_admin,
     test_connections_quota_enforcement,
+    test_connections_result_limit,
+    test_connections_settlement_cancel,
 )
 from .connections_support import PostgresConnectionTestCase
 from .support import make_settings
@@ -172,6 +174,8 @@ for _module in (
     test_connections_execute,
     test_connections_quota_enforcement,
     test_connections_concurrency,
+    test_connections_result_limit,
+    test_connections_settlement_cancel,
 ):
     _prefix = _module.__name__.removeprefix("tests.test_connections_")
     for _name, _case in _database_test_classes(_module):

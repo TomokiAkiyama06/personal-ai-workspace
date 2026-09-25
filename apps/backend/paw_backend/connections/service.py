@@ -64,10 +64,11 @@ must be registered for the kind; 4. the task's own token budget (PAW-033
 the call; 5. the ADMISSION (``ConnectionStore.admit``): one transaction that checks
 the task, the connection and the quotas and inserts the ``in_flight`` usage row; 6. the
 call: the handle is resolved into a ``Secret`` and the adapter runs, under ONE deadline
-(``request.timeout_seconds``); 7. the SETTLEMENT, always, shielded from cancellation:
-the outcome, the tokens and the database-clock duration are written to the usage row
-and the tokens are charged to the task's budget; 8. the answer, scrubbed of the
-credential.
+(``request.timeout_seconds``); 7. the SETTLEMENT, always, and before any cancellation
+of the caller gets through (it runs as a task the caller keeps and waits for; the
+cancel is raised afterwards): the outcome, the tokens and the database-clock duration
+are written to the usage row and the tokens are charged to the task's budget; 8. the
+answer, scrubbed of the credential.
 
 A quota that is reached never interrupts a call that has started: the check is at the
 admission only, and a running TASK is not refused at its next call either (Decision
@@ -146,7 +147,6 @@ from paw_backend.connections.limits import (
     DEFAULT_HEALTH_TIMEOUT_SECONDS,
     DEFAULT_LIST_LIMIT,
     MAX_HEALTH_TIMEOUT_SECONDS,
-    MAX_RESULT_CHARS,
 )
 from paw_backend.connections.records import (
     ConnectionAvailability,
@@ -175,7 +175,7 @@ from paw_backend.tasks.queueing.budget import BudgetTracker
 from paw_backend.tasks.queueing.domain import BudgetKind
 from paw_backend.tasks.queueing.errors import BudgetNotConfiguredError
 from paw_backend.tools.calls import TaskContext
-from paw_backend.tools.credentials import redact_text
+from paw_backend.tools.credentials import MAX_TEXT_CHARS, redact_text
 from paw_backend.tools.interfaces import require_async_method
 
 logger = logging.getLogger(__name__)
@@ -697,10 +697,8 @@ class ConnectionService:
                 raise
         finally:
             # The call ran (or was cut short): it is recorded, and its tokens are
-            # charged, even if this task is cancelled meanwhile (shielded).
-            record = await asyncio.shield(
-                self._settle(kind, context.task_id, admission, outcome)
-            )
+            # charged, before any cancellation of this task gets through.
+            record = await self._account(kind, context.task_id, admission, outcome)
         if outcome.status is not UsageStatus.SUCCEEDED:
             assert outcome.failure is not None
             raise ConnectionCallError(outcome.failure)
@@ -782,10 +780,19 @@ class ConnectionService:
         # The credential must not come back to the user or the agent, even if the
         # adapter (a bug, an echo of the provider) put it in the answer: the exact
         # value first, then every recognisable format.
-        text, redactions = redact_text(secret.scrub(text))
-        if len(text) > MAX_RESULT_CHARS:
+        text = secret.scrub(text)
+        if len(text) > MAX_TEXT_CHARS:
+            # ``redact_text`` would cut the text and only mark it: an answer is
+            # returned whole or refused, never silently shortened. (The scrub can
+            # lengthen a text: each occurrence of a short credential becomes
+            # ``[REDACTED]``.)
+            logger.warning(
+                "connection call returned an answer that is too long: usage_id=%s",
+                admission.usage_id,
+            )
             outcome.failed(FailureCode.INVALID_RESPONSE)
             return
+        text, redactions = redact_text(text)
         outcome.status = UsageStatus.SUCCEEDED
         outcome.failure = None
         outcome.text = text
@@ -798,6 +805,46 @@ class ConnectionService:
         if type(secret) is not Secret:
             raise TypeError("the resolver did not return a Secret")
         return secret
+
+    async def _account(
+        self,
+        kind: ConnectionKind,
+        task_id: uuid.UUID,
+        admission: Admitted,
+        outcome: _Outcome,
+    ) -> UsageRecord | None:
+        """Settle the call and finish before any cancellation passes.
+
+        The settlement runs as a task of its own that this coroutine keeps a
+        reference to and waits for. A cancellation that arrives meanwhile (the
+        database or the budget store is slow) is held back until the settlement has
+        ended, and then raised: the caller still learns that it was cancelled (an
+        ``asyncio.timeout`` around ``execute`` still becomes ``TimeoutError``), but
+        never before the usage row and the budget charge exist. ``asyncio.shield``
+        alone returned at once and left the settlement as a background task that
+        nothing waited for or kept alive (the pattern is ``ToolRunner._account``).
+
+        The wait is bounded by the settlement's own limits: the database timeout
+        for the usage row, and the budget tracker's (unbounded: it uses a pooled
+        session) for the charge. A task that the event loop itself cancels while it
+        is closing (``asyncio.run`` cancels every task) cancels the settlement too;
+        that cannot be prevented here, and the row then stays ``in_flight``.
+        """
+        settlement = asyncio.create_task(
+            self._settle(kind, task_id, admission, outcome)
+        )
+        cancelled: asyncio.CancelledError | None = None
+        while not settlement.done():
+            try:
+                # Unlike awaiting the task, asyncio.wait() does not cancel it when
+                # this caller is cancelled.
+                await asyncio.wait({settlement})
+            except asyncio.CancelledError as error:
+                cancelled = error  # raised below, once the settlement is done
+        record = settlement.result()  # it never raises for a store or a budget
+        if cancelled is not None:
+            raise cancelled
+        return record
 
     async def _settle(
         self,
