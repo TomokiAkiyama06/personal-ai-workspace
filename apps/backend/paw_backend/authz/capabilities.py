@@ -131,8 +131,12 @@ C = Capability
 CAPABILITIES: MappingProxyType[Capability, CapabilityInfo] = MappingProxyType(
     {
         C.CHAT_USE: _info(Scope.SELF, delegable=True),
-        # Not delegable until PAW-032 defines derived (subset) grants for child
-        # agents: an agent must not start agents that hold more than it does.
+        # Not delegable: an agent must not start agents that hold more than it
+        # does. The derived (subset) grant of a child agent now exists
+        # (``delegation.derive_child_grant``, PAW-034) and the orchestrator is the
+        # only thing that starts sub-agents, so no agent needs this capability;
+        # making it delegable is a policy change for a new Decision
+        # (docs/decisions/0021-*.md, section 9).
         C.AGENT_USE: _info(Scope.SELF, delegable=False),
         C.WORKSPACE_USE: _info(Scope.SELF, delegable=True),
         C.GITHUB_USE: _info(Scope.SELF, delegable=True),
