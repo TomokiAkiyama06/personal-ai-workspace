@@ -44,14 +44,18 @@ from paw_backend.projects.records import (
 )
 from paw_backend.tasks.domain import TERMINAL_STATES
 from paw_backend.tasks.models import TaskRow
+from paw_backend.tasks.queueing.domain import ACTIVE_QUEUE_STATUSES
+from paw_backend.tasks.queueing.models import QueueEntryRow
 
 PROJECTS = ProjectRow.__table__
 MEMBERS = ProjectMemberRow.__table__
 TASK_STOPS = ProjectTaskStopRow.__table__
 USERS = UserRow.__table__
-# The task tables belong to PAW-032. The project module only ever READS them:
-# tasks are stopped through ``TaskService`` / ``TaskQueue``, never by an UPDATE.
+# The task tables belong to PAW-032 (``tasks``) and PAW-033 (``queue_entries``).
+# The project module only ever READS them: tasks and entries are stopped through
+# ``TaskService`` / ``TaskQueue``, never by an UPDATE.
 TASKS = TaskRow.__table__
+QUEUE_ENTRIES = QueueEntryRow.__table__
 
 
 def project_from_row(row: Any) -> Project:
@@ -651,3 +655,32 @@ async def select_active_task_ids(
 async def has_active_task(session: AsyncSession, project_id: uuid.UUID) -> bool:
     """Whether at least one task of the project is active (same rule as above)."""
     return bool(await select_active_task_ids(session, project_id, 1))
+
+
+async def select_active_entry_task_ids(
+    session: AsyncSession, project_id: uuid.UUID, limit: int
+) -> list[uuid.UUID]:
+    """Ids of the project's tasks that have an active queue entry, oldest entry first.
+
+    Active means ``queued`` or ``claimed`` (``ACTIVE_QUEUE_STATUSES``). Found
+    through the project (``queue_entries`` joined to ``tasks``), whatever state
+    the TASK is in: a terminal task can still have an entry (a restart that raced
+    with a stop enqueued it). At most one entry per task is active (a unique
+    index), so the ids are distinct. At most ``limit`` ids. A plain read.
+    """
+    statement = (
+        select(QUEUE_ENTRIES.c.task_id)
+        .join(TASKS, TASKS.c.id == QUEUE_ENTRIES.c.task_id)
+        .where(
+            TASKS.c.project_id == project_id,
+            QUEUE_ENTRIES.c.status.in_(sorted(ACTIVE_QUEUE_STATUSES)),
+        )
+        .order_by(QUEUE_ENTRIES.c.id)
+        .limit(limit)
+    )
+    return list((await session.execute(statement)).scalars())
+
+
+async def has_active_queue_entry(session: AsyncSession, project_id: uuid.UUID) -> bool:
+    """Whether a task of the project has an active queue entry (same rule as above)."""
+    return bool(await select_active_entry_task_ids(session, project_id, 1))

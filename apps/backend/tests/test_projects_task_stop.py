@@ -410,6 +410,157 @@ class StopProjectTasksTest(TaskStopTestCase):
         self.assertEqual(self.task_state(late_running), "cancelled")
         self.assertEqual(self.entry_statuses(late), ["cancelled"])
 
+    async def test_a_queue_entry_created_by_a_raced_restart_does_not_survive(self):
+        # Review finding (PAW-026 round 4): the stopper cancels the entry once;
+        # another caller then cancels the task, restarts it and enqueues the new
+        # attempt; the stopper's own Cancel ends the restarted task again. The
+        # new entry must not outlive the stop, and the request must not be marked
+        # processed while it is active.
+        task_id = await self.seed_task(TaskState.QUEUED)
+        actor = Actor.user(self.team.manager)
+        service, queue = self.seed_tasks, self.seed_queue
+        raced: list[bool] = []
+
+        class Racing(TaskQueue):
+            async def cancel(self, task_id, now=None):
+                cancelled = await super().cancel(task_id, now)
+                if not raced:
+                    raced.append(True)
+                    await service.execute(task_id, TaskCommand.CANCEL, actor=actor)
+                    await service.execute(task_id, TaskCommand.RESTART, actor=actor)
+                    await queue.enqueue(task_id)
+                return cancelled
+
+        await self.begin_deletion()
+        stopper = ProjectTaskStopper(
+            self.database,
+            TaskService(self.database),
+            Racing(self.database),
+            clock=self.clock,
+        )
+
+        result = await stopper.stop_project_tasks(self.project_id)
+
+        self.assertEqual(raced, [True])
+        self.assertEqual(self.task_state(task_id), "cancelled")
+        self.assertEqual(self.entry_statuses(task_id), ["cancelled", "cancelled"])
+        self.assertEqual(result.cancelled_entries, 2)
+        self.assertTrue(result.done)
+        self.assertEqual(self.outbox()["processed_at"], self.clock.now)
+        self.assertEqual(await self.seed_queue.claim_next("worker-1"), None)
+
+    async def test_an_entry_of_a_finished_task_is_found_by_project_on_a_rerun(self):
+        # The task is terminal, so ``select_active_task_ids`` cannot list it: the
+        # entry is found through the project (queue_entries joined to tasks).
+        await self.begin_deletion()
+        stopper = self.new_stopper()
+        self.assertTrue((await stopper.stop_project_tasks(self.project_id)).done)
+        finished = await self.seed_task(TaskState.CANCELLED)
+        await self.seed_queue.enqueue(finished)
+        other = self.seed_project(name="Beta")
+        theirs = await self.seed_task(TaskState.CANCELLED, project_id=other)
+        await self.seed_queue.enqueue(theirs)
+        claimed = await self.seed_queue.claim_next("worker-1")
+        assert claimed is not None
+        self.assertEqual(self.entry_statuses(finished), ["claimed"])
+        events = self.commands(finished)
+
+        result = await stopper.stop_project_tasks(self.project_id)
+
+        self.assertEqual(result, TaskStopResult(self.project_id, (), 1, done=True))
+        self.assertEqual(self.entry_statuses(finished), ["cancelled"])
+        with self.assertRaises(LeaseLostError):  # the worker lost its lease
+            await self.seed_queue.heartbeat(claimed.id, "worker-1", claimed.claim_count)
+        self.assertEqual(self.commands(finished), events)  # no second Cancel
+        self.assertEqual(self.entry_statuses(theirs), ["queued"])
+
+    async def test_the_request_stays_open_while_an_entry_appears_after_the_sweep(self):
+        # An entry is enqueued right after the stopper cancelled one: the task is
+        # terminal, so only the check under the project lock can see it. The
+        # request is not marked processed; the next run cancels the entry.
+        finished = await self.seed_task(TaskState.CANCELLED)
+        await self.seed_queue.enqueue(finished)
+        queue = self.seed_queue
+        raced: list[bool] = []
+
+        class Racing(TaskQueue):
+            async def cancel(self, task_id, now=None):
+                cancelled = await super().cancel(task_id, now)
+                if not raced:
+                    raced.append(True)
+                    await queue.enqueue(task_id)
+                return cancelled
+
+        await self.begin_deletion()
+        stopper = ProjectTaskStopper(
+            self.database,
+            TaskService(self.database),
+            Racing(self.database),
+            clock=self.clock,
+        )
+
+        first = await stopper.stop_project_tasks(self.project_id)
+        self.assertEqual((first.cancelled_entries, first.done), (1, False))
+        self.assertEqual(self.entry_statuses(finished), ["cancelled", "queued"])
+        self.assertIsNone(self.outbox()["processed_at"])
+        self.assertEqual(await stopper.pending_project_ids(), (self.project_id,))
+
+        second = await stopper.stop_project_tasks(self.project_id)
+        self.assertEqual((second.cancelled_entries, second.done), (1, True))
+        self.assertEqual(self.entry_statuses(finished), ["cancelled", "cancelled"])
+        self.assertEqual(self.outbox()["processed_at"], self.clock.now)
+
+    async def test_a_project_restored_meanwhile_keeps_its_entries_in_the_sweep(self):
+        # The project is restored after the first read: the sweep reads it again
+        # and leaves the entries of a live project alone.
+        running = await self.seed_task(TaskState.RUNNING)
+        await self.seed_queue.enqueue(running)
+        finished = await self.seed_task(TaskState.CANCELLED)
+        await self.seed_queue.enqueue(finished)
+        service, manager, project_id = self.service, self.manager, self.project_id
+        restored: list[bool] = []
+
+        class Restoring(TaskQueue):
+            async def cancel(self, task_id, now=None):
+                cancelled = await super().cancel(task_id, now)
+                if not restored:
+                    restored.append(True)
+                    await service.restore(manager, project_id)
+                return cancelled
+
+        await self.begin_deletion()
+        stopper = ProjectTaskStopper(
+            self.database,
+            TaskService(self.database),
+            Restoring(self.database),
+            clock=self.clock,
+        )
+
+        result = await stopper.stop_project_tasks(self.project_id)
+
+        self.assertEqual(self.status(), "archived")
+        self.assertEqual((result.cancelled_entries, result.done), (1, True))
+        self.assertEqual(self.entry_statuses(running), ["cancelled"])
+        self.assertEqual(self.entry_statuses(finished), ["queued"])
+
+    async def test_more_stray_entries_than_a_batch_need_several_runs(self):
+        finished = [await self.seed_task(TaskState.CANCELLED) for _ in range(3)]
+        for task_id in finished:
+            await self.seed_queue.enqueue(task_id)
+        await self.begin_deletion()
+        stopper = self.new_stopper(batch_size=2)
+
+        first = await stopper.stop_project_tasks(self.project_id)
+        self.assertEqual((first.cancelled_entries, first.done), (2, False))
+        self.assertIsNone(self.outbox()["processed_at"])
+
+        second = await stopper.stop_project_tasks(self.project_id)
+        self.assertEqual((second.cancelled_entries, second.done), (1, True))
+        self.assertEqual(
+            [self.entry_statuses(task_id) for task_id in finished],
+            [["cancelled"]] * 3,
+        )
+
     async def test_the_request_stays_open_while_a_task_is_left_active(self):
         tasks = [await self.seed_task(TaskState.RUNNING) for _ in range(5)]
         await self.begin_deletion()

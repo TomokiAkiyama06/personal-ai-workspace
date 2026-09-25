@@ -1876,15 +1876,17 @@ Active ⇄ Archived
 - 各 Task について、まず Queue の Entry を `TaskQueue.cancel` し（Claim できなくなり、Lease を持つ Worker は失う）、次に PAW-032 の **Cancel** を `TaskService.execute` で発行します（Actor は `policy`、理由は固定文 `Project deletion started`）。**Task の状態は直接書きません**（状態遷移表、`task_events` の履歴、Listener が全て適用されます）。
   Entry を先にするのは、途中で止まっても Task が active のまま残り、次の実行が拾えるようにするためです。
 - **Cancel を使う理由。** Cancel は成果物（branch / worktree / 途中成果）を保持し、Worker は現在の Step を安全な区切りで自分で閉じられます（`finish_step`。新しい Step は始められません）。全ての active な状態で使えます。Stop Now（実行中の Step を即時に中断する緊急停止）は queued と paused には使えず、Pause は復元されない限り Resume されない Task を残します。
-- active な Task が 1 つも残っていないことを、Project の行の `FOR SHARE` Lock の下で確認してから `processed_at` を書きます（Project は、その間に復元も再削除もされません）。残っているとき（件数が `batch_size` を超えた、他の書き込みと競合した、Task がまた active になった）は要求を開いたままにし、`done` は `False` です。
+- **Queue の Entry も Project で掃除します（Sweep）。** Task の停止は、Queue の Entry を Task の一覧（active な Task だけ）から 1 回 Cancel します。その間に別の呼び出しが Task を Cancel → Restart し、新しい Attempt を enqueue すると、Processor 自身の Cancel が再開された Task を終わらせ、新しい Entry だけが終了済みの Task の後ろに残ります（Task が終了しているので、Task の一覧では二度と見つかりません）。
+  そのため、Task の停止の後に、Project の Task が持つ active な Entry（queued / claimed）を **Task の状態によらず** Project で引き（`queue_entries` と `tasks` の Join。最大 `batch_size` 件）、`TaskQueue.cancel` で Cancel します。処理済みになった後に現れた Entry も、再実行の Sweep が拾います。Sweep は先に Project を読み直し、Pending deletion / Deleted でなければ何もしません（復元済みの Project の Entry は残ります）。Queue の状態機械は変えません（既存の `cancel` と読み取りだけ）。終了済みの Task の Entry を Cancel すると、その Entry を持つ Worker は Lease を失います（Project は削除中で、Task の結果は Task の側に残るため許容）。`cancelled_entries` はこの Entry も数えます。
+- active な Task が 1 つも残っておらず、Project の Task に active な Queue の Entry も無いことを、Project の行の `FOR SHARE` Lock の下で確認してから `processed_at` を書きます（Project は、その間に復元も再削除もされません）。残っているとき（件数が `batch_size` を超えた、他の書き込みと競合した、Task がまた active になった、Sweep の後に Entry が enqueue された）は要求を開いたままにし、`done` は `False` で、次の実行が残りを止めます。
 - **冪等で再実行できます。** 2 回目は何も変えず（`TaskStopResult(project_id, (), 0, done=True)`）、最初の `processed_at` も変わりません。一覧と Command の間に Task が終わった場合（`IllegalTransitionError`）は数えません。競合（`TaskConflictError`）は Task を active のまま残し、次の実行に任せます。それ以外の Error は、要求を開いたまま伝わります。
 - 認可も Audit も持ちません（`purge_expired` と同じ Backend 内部の部品）。止められた Task には `task_events` の行が残ります。
 
 制限（[Decision 0008](../../docs/decisions/0008-project-membership-and-lifecycle-policy.md) の 8。承認前）。
 
-- **Delete 開始の後に作られた Task。** `project.task.run` は Archived / Pending deletion で Authorizer が拒否します（PAW-025）。残るのは、認可の後、Delete 開始の Commit の前後に `TaskService.create_task`（または Retry / Restart）が実行される競合だけです（`TaskService` は Project の状態を見ません）。
-  この Issue は、その Task を **Processor の再実行で止めます**（Processor は Project の状態から動きます。Test: `test_a_task_created_after_the_deletion_began_is_stopped_on_a_rerun`）。Orchestrator は Pending deletion の Project にも通常の周期で `stop_project_tasks` を呼んでください。競合そのものを閉じるには、Task Lane（PAW-032 / PAW-034）が Insert と同じ Transaction で Project の行を `FOR SHARE` で Lock し、Active 以外を拒否する必要があります。Decision 0008 で提案しています（この Issue は Task Lane を変えません）。
-- **Restore との競合。** Processor が Project の状態を読んだ後、Task の Command の前に Restore が Commit されると、復元された Project の Task を 1 件止めることがあります（Restart できます）。窓は 1 つの Command の間だけで、閉じるには Task Service が Project の行と Transaction を共有する必要があります。
+- **Delete 開始の後に作られた Task と Entry。** `project.task.run` は Archived / Pending deletion で Authorizer が拒否します（PAW-025）。残るのは、認可の後、Delete 開始の Commit の前後に `TaskService.create_task`（または Retry / Restart）や `TaskQueue.enqueue` が実行される競合だけです（`TaskService` も `TaskQueue` も Project の状態を見ません）。
+  この Issue は、その Task と Entry（終了済みの Task の Entry も）を **Processor の再実行で止めます**（Processor は Project の状態から動きます。Test: `test_a_task_created_after_the_deletion_began_is_stopped_on_a_rerun`、`test_an_entry_of_a_finished_task_is_found_by_project_on_a_rerun`、`test_a_queue_entry_created_by_a_raced_restart_does_not_survive`）。Orchestrator は Pending deletion の Project にも通常の周期で `stop_project_tasks` を呼んでください。競合そのものを閉じるには、Task Lane（PAW-032 / PAW-034）の `create_task` / Retry / Restart と Queue Lane（PAW-033）の `enqueue` が、Insert と同じ Transaction で Project の行を `FOR SHARE` で Lock し、Active 以外を拒否する必要があります。Decision 0008 の 4 と 7 で提案しています（この Issue は Task Lane と Queue Lane を変えません）。
+- **Restore との競合。** Processor が Project の状態を読んだ後（Sweep は読み直した後）、Task の Command や Queue の `cancel` の前に Restore が Commit されると、復元された Project の Task（または Entry）を 1 件止めることがあります（Restart できます）。窓は 1 つの Command の間だけで、閉じるには Task Service と Queue が Project の行と Transaction を共有する必要があります。
 - `tasks.project_id` に Index がないため（PAW-032）、Task の一覧は `tasks` の Sequential Scan です。Task 数が増えたら、Task Lane で `(project_id, state)` の Index を足してください。
 - 実行中の Process への停止の伝達は Orchestrator / Worker の責務です。Cancel は状態を `cancelled` にして Lease を失わせますが、Process を殺しません（Worker は Step の区切りで状態を見て止まります）。
 
@@ -1939,7 +1941,7 @@ Project を持たない孤児の行がないことを確認し、`ALTER TABLE <t
 `domain.py`（7 関数）と `store.py`（20 関数）は、仕様（Docstring と `tests/test_projects_*.py`）を先に書き、関数の本体を別の実装者に埋めさせる設計です。Model、Migration、権限、`validation.py`、`service.py` は仕様の作者が実装しています。
 **最終的な実装は Claude の参照実装です。** ローカルの Qwen3-Coder-30B-A3B に、27 関数の実装を 2 回（各約 265 回の Tool 呼び出し）任せましたが、収束しませんでした（1 回目は `domain.py` の書式を壊し、`store.py` は未着手、2 回目は `domain.py` の Test の約半数が通らないまま、`store.py` に届きませんでした）。
 AGENTS.md のとおり、同じ失敗を繰り返したのでエスカレーションし、仕様の Docstring を保ったまま、Claude の参照実装（変異 38 個をすべて Test が検出）に置き換えています。ローカルモデルの成果物は、最終物に含まれていません。
-レビューの指摘（Delete 開始時の Task 停止）への対応で足した `store.py` の 6 関数、`task_stop.py`、`transaction.py` とその Test は、最初から Claude が書いています（ローカルモデルは関与していません）。Test は変異 15 個（要求を書かない、別 Transaction に移す、完了を確認せずに記録する、完了の確認を Project の Lock の外で行う、生きている Project の Task も止める、Queue を取り消さない、他の Project の Task を含める、終了した Task を active と数える、全 Error を握りつぶす、再度の要求を上書きしない、`processed_at` を上書きする、Stop Now を使う、理由を落とす、並びと件数の上限を外す）をすべて検出しました。
+レビューの指摘（Delete 開始時の Task 停止）への対応で足した `store.py` の 8 関数（4 回目のレビューで Project から Queue の Entry を引く 2 関数を追加）、`task_stop.py`、`transaction.py` とその Test は、最初から Claude が書いています（ローカルモデルは関与していません）。Test は変異 15 個（要求を書かない、別 Transaction に移す、完了を確認せずに記録する、完了の確認を Project の Lock の外で行う、生きている Project の Task も止める、Queue を取り消さない、他の Project の Task を含める、終了した Task を active と数える、全 Error を握りつぶす、再度の要求を上書きしない、`processed_at` を上書きする、Stop Now を使う、理由を落とす、並びと件数の上限を外す）をすべて検出しました。4 回目のレビューの Sweep には変異 6 個（Sweep を外す、`processed_at` の前の Entry の確認を外す、Sweep が Project の状態を見ない、Sweep の件数の上限を外す、Entry を Project で絞らない、claimed の Entry を数えない）を足し、すべて検出しました。
 
 ### 制限と未確認の点
 
@@ -1964,7 +1966,7 @@ AGENTS.md のとおり、同じ失敗を繰り返したのでエスカレーシ�
 
 `apps/backend/tests/test_projects_*.py`、`projects_support.py` です。標準 `unittest` だけで、`test_projects_domain.py`、`test_projects_validation.py`、`test_projects_service_validation.py` と Model の Test は DB を使いません。
 それ以外は実 PostgreSQL（`PAW_TEST_DATABASE_URL`）を使い、未設定なら Skip します。時刻は注入した Clock で、速度に依存する Test はありません。
-`test_projects_task_stop.py` は Task と Queue を本物の `TaskService` / `TaskQueue` で作り（SQL で読み戻す）、Delete 開始が要求を同じ Transaction で記録すること（失敗させると Project も Active のまま）、Processor が running / queued などの Task を止めて Queue の Entry を取り消すこと、冪等なこと、他の Project の Task と Active / Archived の Project の Task に触れないこと、Delete 開始の後に作られた Task を再実行で止めること、要求が「Task が残っている間は完了にならない」ことを確認します。`test_projects_grants.py` はこの Test も Application の Role で実行します。
+`test_projects_task_stop.py` は Task と Queue を本物の `TaskService` / `TaskQueue` で作り（SQL で読み戻す）、Delete 開始が要求を同じ Transaction で記録すること（失敗させると Project も Active のまま）、Processor が running / queued などの Task を止めて Queue の Entry を取り消すこと、冪等なこと、他の Project の Task と Active / Archived の Project の Task に触れないこと、Delete 開始の後に作られた Task を再実行で止めること、要求が「Task が残っている間は完了にならない」ことを確認します。Cancel → Restart → enqueue の競合（Queue の `cancel` に差し込んだ処理で再現します）で残る Entry が、終了済みの Task の後ろでも Project から見つかって Cancel され（claimed の Entry の Worker は Lease を失う）、Sweep の後に現れた Entry があると要求が開いたままになること、件数が `batch_size` を超えると複数回に分かれること、Sweep の途中で復元された Project の Entry は残ることを確認します。`test_projects_grants.py` はこの Test も Application の Role で実行します。
 
 ## 依存 Package
 

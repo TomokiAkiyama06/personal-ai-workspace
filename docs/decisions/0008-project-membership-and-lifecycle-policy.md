@@ -103,10 +103,18 @@ PAW-026 のレビューで、`begin_deletion` が Project の行を更新する�
    Stop Now は緊急停止（実行中の Step を即時に中断）で、queued と paused には使えず、この場面の緊急性もない。Pause は、復元されない限り誰も Resume しない Task を残し、復元先の Archived は新規 Agent Task を止める状態なので、意味がない。
 4. **Delete 開始の後に作られた Task。** `project.task.run` は Archived / Pending deletion で Authorizer が拒否する（PAW-025）ため、通常の経路では作られない。残る隙間は、認可の後、Delete 開始の Commit の前後に `TaskService.create_task`（または Retry / Restart）が実行される競合だけである。`TaskService` は Project の状態を見ない（PAW-032 の範囲）。
    - **PAW-026 の範囲でしたこと:** Processor は Project の状態から動くため、要求が処理済みになった後で作られた Task も、再実行で止める（`test_a_task_created_after_the_deletion_began_is_stopped_on_a_rerun`）。Orchestrator は Pending deletion の Project にも通常の周期で `stop_project_tasks` を呼ぶこと。
-   - **別 Lane の変更の提案（承認が要る）:** Task Lane（PAW-032 / PAW-034）の `create_task`、Retry、Restart が、Insert（状態の変更）と同じ Transaction で Project の行を `SELECT ... FOR SHARE` で Lock し、Active 以外なら拒否する。Delete 開始（`FOR UPDATE`）と直列になり、競合が閉じる。
+   - **別 Lane の変更の提案（承認が要る）:** Task Lane（PAW-032 / PAW-034）の `create_task`、Retry、Restart と、Queue Lane（PAW-033）の `TaskQueue.enqueue`（7 の競合）が、Insert（状態の変更）と同じ Transaction で Project の行を `SELECT ... FOR SHARE` で Lock し、Active 以外なら拒否する。Delete 開始（`FOR UPDATE`）と直列になり、競合が閉じる。`enqueue` は `task_id` しか受け取らないため、Gate は Task から Project を引いて判定する。
      `tasks` の Module が `projects` を import しないよう、Project の状態を返す Gate（Protocol）を注入する形を勧める。Database の Trigger で拒否する案は、別 Lane の Table を変えること、Task Lane の Test が存在しない Project の ID を使うことから、この Decision では採らない。
 5. **Restore との競合。** Processor が Project の状態を読んだ後、Task の Command の前に Restore が Commit されると、復元された Project の Task を 1 件止めることがある（Restart できる）。窓は 1 つの Command の間だけで、閉じるには Task Service が Project の行と Transaction を共有する必要があり、採らない。
 6. **`tasks(project_id, state)` の Index。** `tasks.project_id` に Index がないため、Processor の一覧は Sequential Scan になる。Task 数が増えたら Task Lane で Index を足す（この Issue は他の Table を変えない）。
+
+7. **Cancel → Restart → enqueue の競合で残る Queue の Entry（PAW-026 の 4 回目のレビュー）。** Processor は Task ごとに Queue の Entry を 1 回 Cancel してから Task の Cancel を発行する。その間に別の呼び出しが Task を Cancel → Restart し、新しい Attempt を enqueue すると、Processor 自身の Cancel が再開された Task を終わらせ、新しい Entry（queued / claimed）だけが終了済みの Task の後ろに残る。
+   Task が終了しているため、Task を経由する一覧（2）は二度とその Entry を返さず、Processor は Task の状態だけを見て `processed_at` を書いてしまう。
+   - **PAW-026 の範囲でしたこと:** (a) Task の停止の後に、Project の Task が持つ active な Entry（queued / claimed）を、Task の状態によらず Project で引き（`queue_entries` と `tasks` の Join。最大 `batch_size` 件）、`TaskQueue.cancel` で Cancel する。再実行でも同じ Sweep が、処理済みになった後に現れた Entry を拾う。Sweep は先に Project を読み直し、Pending deletion / Deleted でなければ何もしない。
+     (b) `processed_at` は、active な Task が無いことに加え、Project の Task に active な Entry が無いことを、Project の行の `FOR SHARE` Lock の下で確認してから書く。残っていれば要求を開いたままにし（`done = False`）、次の実行が Cancel する。
+     Test: `test_a_queue_entry_created_by_a_raced_restart_does_not_survive`、`test_an_entry_of_a_finished_task_is_found_by_project_on_a_rerun`、`test_the_request_stays_open_while_an_entry_appears_after_the_sweep`、`test_more_stray_entries_than_a_batch_need_several_runs`、`test_a_project_restored_meanwhile_keeps_its_entries_in_the_sweep`。
+   - **変えないもの:** Queue の状態機械。Processor が使うのは既存の `TaskQueue.cancel` と、`queue_entries` / `tasks` の読み取りだけである。終了済みの Task の Entry を Cancel すると、その Entry をまだ持つ Worker は Lease を失う（`complete` が `LeaseLostError`）。Project は削除中で、Task の結果は Task の側に残るため、許容する。
+   - **残る窓（承認が要る変更で閉じる）:** Sweep と確認の後、または `processed_at` の後の `enqueue` は、再実行でしか拾えない（Orchestrator が Pending deletion の Project にも通常の周期で `stop_project_tasks` を呼ぶ前提）。Sweep が Project を読み直してから Cancel するまでの間の Restore（1 回の Queue 操作の窓。5 と同じ）も残る。どちらも、4 の Gate（`create_task`、Retry、Restart に加えて `enqueue`）が Project の行の Lock と直列にすれば閉じる。この Issue は Queue Lane を変えない。
 
 ## 選定理由
 

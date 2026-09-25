@@ -28,11 +28,26 @@ What one call of :meth:`~ProjectTaskStopper.stop_project_tasks` does
    service all apply. The order (entry first) makes a crash between the two
    harmless: the task is still active, so the next run finds it and repeats the
    idempotent queue cancel.
-4. In one short transaction that holds ``SELECT ... FOR SHARE`` on the project
+4. **Sweeps the queue by project.** Steps 2-3 reach a queue entry only through a
+   task that is still active, and the entry is cancelled once, before the
+   Cancel. A concurrent caller can put a NEW entry in between: it cancels the
+   task, restarts it (Restart) and enqueues the new attempt; the Cancel of
+   step 3 then ends the restarted task and the new entry would survive behind a
+   terminal task, unreachable through step 2. So, after the loop, the stopper
+   lists the active queue entries of ALL tasks of the project whatever the
+   state of the task (``queue_entries`` joined to ``tasks``; at most
+   ``batch_size``) and cancels each one with ``TaskQueue.cancel``. The same sweep
+   also finds an entry that appeared after the request was processed (a rerun).
+   It re-reads the project first and does nothing for a project that is not (or
+   no longer) Pending deletion or Deleted. The queue's state machine is not
+   changed: an entry of a task that is already terminal is only cancelled (a
+   worker that still held it loses its lease). Decision 0008, section 8, item 7.
+5. In one short transaction that holds ``SELECT ... FOR SHARE`` on the project
    row (so the project cannot be restored or changed in between), checks that no
-   active task is left and only then sets ``processed_at``. If any is left (the
-   batch was full, a concurrent writer beat the command, or a task became
-   active again) the request stays open and ``done`` is ``False``.
+   active task AND no active queue entry of the project's tasks is left and only
+   then sets ``processed_at``. If any is left (the batch was full, a concurrent
+   writer beat the command, a task became active again, or an entry was
+   enqueued after the sweep) the request stays open and ``done`` is ``False``.
 
 Why Cancel
 ----------
@@ -48,7 +63,7 @@ Decision 0008 records this choice.
 
 Idempotent and re-runnable
 --------------------------
-A second call finds no active task, changes nothing and returns
+A second call finds no active task and no active entry, changes nothing and returns
 ``TaskStopResult(project_id, (), 0, done=True)``; the first ``processed_at``
 stays. Every step is either a state change that is itself idempotent or a read.
 A task that leaves the active states between the list and the command (the
@@ -61,19 +76,23 @@ What the caller must do (limits)
 --------------------------------
 * Keep calling until ``done``; a project with more than ``batch_size`` active
   tasks needs several calls.
-* ``TaskService.create_task`` (and Retry / Restart of an earlier task) do not
-  look at the project, so a task whose creation was authorized just before the
-  deletion began can appear **after** the request was processed. The Authorizer
+* ``TaskService.create_task`` (and Retry / Restart of an earlier task) and
+  ``TaskQueue.enqueue`` do not look at the project, so a task whose creation was
+  authorized just before the deletion began (or a queue entry for a task of the
+  project) can appear **after** the request was processed. The Authorizer
   already refuses ``project.task.run`` in Archived and Pending deletion (PAW-025);
   only that race remains. Until the task service closes it (Decision 0008
-  proposes a gate in the same transaction as the insert), the orchestrator should
-  also call ``stop_project_tasks`` for the projects that are Pending deletion on
-  its regular cycle: the call stops such a task (test:
-  ``test_a_task_created_after_the_deletion_began_is_stopped_on_a_rerun``).
-* A restore that commits between the read of step 1 and a command lets that
-  command cancel a task of a project that has just been restored (a task can be
-  restarted). The window is one task command; closing it would need the task
-  service to share a transaction with the project row.
+  proposes a gate in the same transaction as the insert and the enqueue), the
+  orchestrator should also call ``stop_project_tasks`` for the projects that are
+  Pending deletion on its regular cycle: the call stops such a task and cancels
+  such an entry, also that of a task that is already terminal (tests:
+  ``test_a_task_created_after_the_deletion_began_is_stopped_on_a_rerun``,
+  ``test_an_entry_of_a_finished_task_is_found_by_project_on_a_rerun``).
+* A restore that commits between the read of step 1 (or the re-read of the
+  sweep, step 4) and a command lets that command cancel a task (or a queue
+  entry) of a project that has just been restored (a task can be restarted). The
+  window is one task or queue command; closing it would need the task service
+  and the queue to share a transaction with the project row.
 * ``tasks.project_id`` has no index (PAW-032): the list reads ``tasks`` by a
   sequential scan until the task lane adds one on ``(project_id, state)``.
 
@@ -130,10 +149,11 @@ class TaskStopResult:
     """What one ``stop_project_tasks`` call did.
 
     ``stopped`` lists the tasks whose Cancel this call issued (oldest first).
-    ``cancelled_entries`` counts the queue entries it cancelled. ``done`` is
-    true when no task of the project was left active and the request is marked
-    processed (or the project needs no stop: it is Active or Archived); false
-    means "call again".
+    ``cancelled_entries`` counts the queue entries it cancelled (also those of
+    tasks that are already terminal, see the module docstring, step 4). ``done``
+    is true when no task of the project was left active, no queue entry of its
+    tasks is active and the request is marked processed (or the project needs no
+    stop: it is Active or Archived); false means "call again".
     """
 
     project_id: uuid.UUID
@@ -211,6 +231,7 @@ class ProjectTaskStopper:
                 entries += 1
             if await self._cancel(task_id):
                 stopped.append(task_id)
+        entries += await self._cancel_stray_entries(project_id)
         done = await self._finish(project_id)
         return TaskStopResult(project_id, tuple(stopped), entries, done)
 
@@ -233,19 +254,50 @@ class ProjectTaskStopper:
             return False
         return True
 
-    async def _finish(self, project_id: uuid.UUID) -> bool:
-        """Mark the request processed if no task is active; ``True`` when it is.
+    async def _cancel_stray_entries(self, project_id: uuid.UUID) -> int:
+        """Cancel the active queue entries of the project's tasks; return how many.
 
-        One short transaction under ``FOR SHARE`` on the project row: the project
-        cannot be restored or begun again between the check and the mark.
+        Found through the project, not through the state of the task: a raced
+        Restart can leave an active entry behind a terminal task (module
+        docstring, step 4). The project is read again first, so a project that
+        was restored since the first read keeps its entries. At most
+        ``batch_size`` entries; ``_finish`` keeps the request open if more remain.
+        """
+        async with self._transaction() as session:
+            project = await store.get_project(session, project_id)
+            if project is None:
+                raise ProjectNotFoundError()
+            task_ids = (
+                await store.select_active_entry_task_ids(
+                    session, project_id, self._batch_size
+                )
+                if project.status in _STOPPING
+                else []
+            )
+        cancelled = 0
+        for task_id in task_ids:
+            if await self._queue.cancel(task_id):
+                cancelled += 1
+        return cancelled
+
+    async def _finish(self, project_id: uuid.UUID) -> bool:
+        """Mark the request processed if nothing is active; ``True`` when it is.
+
+        Nothing active: no task of the project in an active state and no active
+        queue entry of any of its tasks (also of a terminal one: the entry that a
+        raced Restart enqueued after the sweep is caught here, and the next run
+        cancels it). One short transaction under ``FOR SHARE`` on the project
+        row: the project cannot be restored or begun again between the check and
+        the mark.
         """
         now = validate_instant("clock", self._clock())
         async with self._transaction() as session:
             project = await store.get_project_for_share(session, project_id)
             if project is None:
                 raise ProjectNotFoundError()
-            if project.status in _STOPPING and await store.has_active_task(
-                session, project_id
+            if project.status in _STOPPING and (
+                await store.has_active_task(session, project_id)
+                or await store.has_active_queue_entry(session, project_id)
             ):
                 return False
             await store.mark_task_stop_processed(session, project_id, now=now)
