@@ -21,6 +21,7 @@ every human role) or a role (``admin.users.manage`` to unlock an account,
 """
 
 import contextlib
+import logging
 import uuid
 from collections.abc import Iterator
 from datetime import datetime
@@ -56,11 +57,13 @@ from paw_backend.auth.limits import (
 from paw_backend.auth.models import AuthMethod
 from paw_backend.auth.principals import AuthContext, authenticated_context
 from paw_backend.auth.service import LoginResult, SessionView
-from paw_backend.auth.sessions import SessionRecord
+from paw_backend.auth.sessions import AuthenticatedSession, SessionRecord
 from paw_backend.auth.state import StepUpEvidence
 from paw_backend.auth.wiring import AuthServices
 from paw_backend.authz import Capability, Principal, require_capability
 from paw_backend.errors import ApiError
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -163,7 +166,10 @@ class AuthOut(BaseModel):
 class SessionResponse(BaseModel):
     user: UserOut
     session: SessionOut
-    auth: AuthOut
+    # ``null`` only in the answer to a login, password change or step-up whose
+    # change COMMITTED but whose policy read failed afterwards: the cookie is in
+    # that response and the change is done; ``GET /auth/session`` has the rest.
+    auth: AuthOut | None = None
 
 
 class SessionListResponse(BaseModel):
@@ -344,6 +350,43 @@ def _set_session_cookie(
     )
 
 
+def _summary_out(session: AuthenticatedSession) -> SessionResponse:
+    """The session and its user, from what the change itself returned (no query)."""
+    return SessionResponse(
+        user=UserOut(
+            id=session.record.user_id,
+            login_name=session.login_name,
+            system_role=session.system_role.value,
+        ),
+        session=_record_out(session.record, session.record.id),
+        auth=None,
+    )
+
+
+async def _answer_committed(
+    response: Response, services: AuthServices, result: LoginResult
+) -> SessionResponse:
+    """The answer to a login / password change / step-up that has COMMITTED.
+
+    The cookie is set first, before anything that can fail: after a rotation the
+    browser's old cookie is already dead, so a failure here must not cost the new
+    one (a 503 without it would sign the user out while telling them the change
+    failed). Describing the session reads the policy (and, later, the Passkey
+    state), which can fail on its own; then the answer degrades to the session and
+    its user with ``auth: null`` instead of failing (the type of the error is
+    logged, never its text).
+    """
+    _set_session_cookie(response, services, result)
+    try:
+        return _view_out(await services.service.view(result.session))
+    except Exception as error:
+        logger.warning(
+            "The session state could not be read after a committed change (%s)",
+            type(error).__name__,
+        )
+        return _summary_out(result.session)
+
+
 def _clear_session_cookie(response: Response, services: AuthServices) -> None:
     response.delete_cookie(
         SESSION_COOKIE_NAME,
@@ -374,9 +417,7 @@ async def login(
             device_label=body.device_name,
             replace_token=request.cookies.get(SESSION_COOKIE_NAME),
         )
-        view = await services.service.view(result.session)
-    _set_session_cookie(response, services, result)
-    return _view_out(view)
+    return await _answer_committed(response, services, result)
 
 
 @router.post(
@@ -488,9 +529,7 @@ async def change_password(
             _context(request),
             revoke_other_sessions=body.revoke_other_sessions,
         )
-        view = await services.service.view(result.session)
-    _set_session_cookie(response, services, result)
-    return _view_out(view)
+    return await _answer_committed(response, services, result)
 
 
 @router.post(
@@ -508,9 +547,7 @@ async def step_up(
             StepUpEvidence(body.method, body.password),
             _context(request),
         )
-        view = await services.service.view(result.session)
-    _set_session_cookie(response, services, result)
-    return _view_out(view)
+    return await _answer_committed(response, services, result)
 
 
 # -- administration -----------------------------------------------------------------

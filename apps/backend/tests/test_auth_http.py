@@ -4,12 +4,15 @@ Real PostgreSQL, the real application, ``TestClient``; time is the injected
 clock, so an expiry is a moment on it and not a wait.
 """
 
+import contextlib
 import unittest
 import uuid
 from datetime import timedelta
+from unittest.mock import patch
 
 from sqlalchemy import text
 
+from paw_backend.auth.errors import AuthUnavailableError
 from paw_backend.auth.limits import SESSION_COOKIE_NAME
 
 from .auth_http_support import (
@@ -646,6 +649,190 @@ class PasswordRoutesTest(HttpTestCase):
             "$argon2id$",
         ):
             self.assertNotIn(secret, output)
+
+
+@requires_postgres
+class CommittedChangeIsAlwaysDeliveredTest(HttpTestCase):
+    """A login, password change or step-up that COMMITTED must hand over its cookie.
+
+    Each of them commits (a session, a rotated session id) and then reads the
+    policy to describe the session. That read can fail (its own query times
+    out); the response must still carry the new cookie and say "done", because
+    the old cookie (after a rotation) is already dead: a 503 without the cookie
+    would sign the user out while telling them the change failed.
+    """
+
+    FAILURES = (
+        ("the policy query is unavailable", AuthUnavailableError()),
+        ("the policy query times out", TimeoutError()),
+        ("an unexpected error", RuntimeError("policy-secret-detail-022")),
+    )
+
+    def setUp(self):
+        super().setUp()
+        self.make_user("alice")
+
+    @contextlib.contextmanager
+    def policy_read_fails(self, error):
+        async def failing(self_):
+            raise error
+
+        with patch.object(type(self.services.policy), "get", failing):
+            yield
+
+    def assert_degraded(self, response, *, cookie_of_new_session=True):
+        """200, the cookie, the user and session; ``auth`` left out (not failed)."""
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertIsNone(body["auth"])
+        self.assertEqual(body["user"]["login_name"], "alice")
+        self.assertTrue(body["session"]["current"])
+        if cookie_of_new_session:
+            self.assertRegex(self.token_of(response), r"^[A-Za-z0-9_-]{43}$")
+
+    def test_a_login_delivers_its_cookie_when_the_policy_read_fails(self):
+        for label, error in self.FAILURES:
+            with self.subTest(label):
+                with self.policy_read_fails(error):
+                    response = self.login()
+                self.assert_degraded(response)
+                token = self.token_of(response)
+                # The session exists: with the policy readable again it is valid,
+                # and the body that was left out is there.
+                described = self.call("GET", "/api/v1/auth/session", token=token)
+                self.assertEqual(described.status_code, 200)
+                self.assertEqual(described.json()["auth"]["method"], "password")
+
+    def test_a_remember_me_login_keeps_its_persistent_cookie(self):
+        with self.policy_read_fails(AuthUnavailableError()):
+            response = self.login(remember_me=True)
+        self.assert_degraded(response)
+        self.assertRegex(set_cookie_header(response), r"Max-Age=7776000")
+
+    def test_a_password_change_delivers_the_rotated_cookie(self):
+        for label, error in self.FAILURES:
+            with self.subTest(label):
+                old = self.login_token(password=PASSWORD)
+                with self.policy_read_fails(error):
+                    response = self.call(
+                        "POST",
+                        "/api/v1/auth/password/change",
+                        token=old,
+                        json={
+                            "current_password": PASSWORD,
+                            "new_password": NEW_PASSWORD,
+                        },
+                    )
+                self.assert_degraded(response)
+                rotated = self.token_of(response)
+                # What was committed: the old id is dead, the new one lives, the
+                # new password is the password.
+                self.assertNotEqual(rotated, old)
+                self.assertEqual(
+                    self.call("GET", "/api/v1/auth/session", token=old).status_code, 401
+                )
+                self.assertEqual(
+                    self.call("GET", "/api/v1/auth/session", token=rotated).status_code,
+                    200,
+                )
+                self.assertEqual(self.login(password=NEW_PASSWORD).status_code, 200)
+                # Back to the original password for the next failure.
+                back = self.call(
+                    "POST",
+                    "/api/v1/auth/password/change",
+                    token=rotated,
+                    json={"current_password": NEW_PASSWORD, "new_password": PASSWORD},
+                )
+                self.assertEqual(back.status_code, 200)
+
+    def test_a_step_up_delivers_the_rotated_cookie(self):
+        for label, error in self.FAILURES:
+            with self.subTest(label):
+                old = self.login_token()
+                with self.policy_read_fails(error):
+                    response = self.call(
+                        "POST",
+                        "/api/v1/auth/step-up",
+                        token=old,
+                        json={"password": PASSWORD},
+                    )
+                self.assert_degraded(response)
+                rotated = self.token_of(response)
+                self.assertNotEqual(rotated, old)
+                self.assertEqual(
+                    self.call("GET", "/api/v1/auth/session", token=old).status_code, 401
+                )
+                described = self.call("GET", "/api/v1/auth/session", token=rotated)
+                self.assertEqual(
+                    described.json()["auth"]["step_up"]["method"], "password"
+                )
+
+    def test_the_passkey_lookup_failing_is_survived_too(self):
+        class Broken:
+            async def is_enrolled(self, user_id):
+                raise RuntimeError("passkey-secret-detail-022")
+
+        token = self.login_token()
+        with patch.object(self.services.service, "_passkeys", Broken()):
+            response = self.call(
+                "POST",
+                "/api/v1/auth/step-up",
+                token=token,
+                json={"password": PASSWORD},
+            )
+        self.assert_degraded(response)
+
+    def test_the_failure_is_logged_by_type_only(self):
+        with self.assertLogs("paw_backend.api.v1.auth", "WARNING") as logs:
+            with self.policy_read_fails(RuntimeError("policy-secret-detail-022")):
+                self.login()
+        output = "\n".join(logs.output)
+        self.assertIn("RuntimeError", output)
+        self.assertNotIn("policy-secret-detail-022", output)
+        self.assertNotIn(PASSWORD, output)
+
+    def test_a_change_that_did_not_commit_still_fails_and_sets_no_cookie(self):
+        token = self.login_token()
+        response = self.call(
+            "POST",
+            "/api/v1/auth/password/change",
+            token=token,
+            json={"current_password": "not my password", "new_password": NEW_PASSWORD},
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(list(cookie_of(response)), [])
+        self.assertEqual(
+            self.call("GET", "/api/v1/auth/session", token=token).status_code, 200
+        )
+
+    def test_a_read_of_the_session_has_no_cookie_to_deliver_and_still_fails_closed(
+        self,
+    ):
+        token = self.login_token()
+        with self.policy_read_fails(AuthUnavailableError()):
+            response = self.call("GET", "/api/v1/auth/session", token=token)
+        self.assertEqual(
+            (response.status_code, error_code(response)), (503, "service_unavailable")
+        )
+        self.assertEqual(list(cookie_of(response)), [])
+
+    def test_the_degraded_answer_is_a_valid_session_response_for_a_client(self):
+        with self.policy_read_fails(AuthUnavailableError()):
+            body = self.login().json()
+        self.assertEqual(sorted(body), ["auth", "session", "user"])
+        self.assertEqual(
+            sorted(body["session"]),
+            [
+                "absolute_expires_at",
+                "created_at",
+                "current",
+                "device_name",
+                "expires_at",
+                "id",
+                "last_used_at",
+                "remember_me",
+            ],
+        )
 
 
 @requires_postgres
