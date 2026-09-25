@@ -14,6 +14,7 @@
 | [0007](0007-task-queue-budget-and-loop-policy.md) | Task Queue・Budget・Loop検知の方針 | Approved |
 | [0009](0009-shared-memory-administration.md) | Shared Memory 管理の方針（Candidate、削除と復元、System Policy との優先関係） | Approved |
 | [0010](0010-research-privacy-filter-policy.md) | Research Privacy Filter と Query 最小化の方針 | Approved |
+| [0011](0011-research-provenance-model.md) | Researchの出典追跡（Evidence / Claim Provenance）の方針 | Approved |
 | [0012](0012-research-provider-adapter-policy.md) | Research Provider Adapterの方針 | Approved |
 | [0013](0013-research-scratch-task-relation.md) | Research Scratch の Task との関係と Pin / 保存の方針 | Approved |
 | [0014](0014-task-working-set-persistence.md) | Task の Working Set（Multi-Repo）の永続化をPAW-032に含めず、新しいIssueで扱う | Approved |

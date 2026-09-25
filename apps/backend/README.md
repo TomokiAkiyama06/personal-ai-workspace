@@ -7,6 +7,7 @@ RBAC と Audit（PAW-025）、Task の Lifecycle と永続化（[PAW-032](#agent
 最小の `users` Table と Owner の初期設定・復旧のコマンド（[PAW-021](#owner-の初期設定と復旧)）を実装済みです。Memory の保存・整理・検索の処理は PAW-041 以降です。
 Shared Memory の管理（Owner / Admin の作成・編集・削除・復元、Candidate の承認、Agent の自動昇格の拒否、System Policy の優先。[PAW-046](#shared-memory-administration)、HTTP の Endpoint はまだありません）も実装済みです。
 Research の一時保存（[PAW-050](#research-scratch-store)、24 時間 TTL、期限切れを消す Janitor つき、HTTP の Endpoint はまだありません）と、Research Provider の Adapter Interface（[PAW-051](#research-provider-adapter)、実際の Provider（Direct Web、Docs、GitHub、OpenCode）はまだありません）と、外部の検索へ送る Query の最小化と送信の Audit（[PAW-053](#research-privacy-filter)、Audit の永続化はまだありません）も実装済みです。
+Claim と Source の対応・回答や Task からの追跡（[PAW-052](#evidence--claim-provenance)、HTTP の Endpoint はまだありません）も実装済みです。
 
 [Architecture](../../docs/ARCHITECTURE.md) に基づき、最終的に以下の機能を Backend 側で扱います。
 
@@ -40,7 +41,7 @@ Python 側の Package（`pgvector-python`）は使わず、`paw_backend/memory/v
 apps/backend/
 ├─ pyproject.toml          # 依存（完全一致で固定）と Ruff 設定
 ├─ alembic.ini             # Alembic 設定（DB URL は持たない）
-├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0031 は Tool Approval、0033 は Queue / Budget / Loop、0040 は Memory Schema、0046 は Shared Memory Candidate、0050 は Research Scratch）
+├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0031 は Tool Approval、0033 は Queue / Budget / Loop、0040 は Memory Schema、0046 は Shared Memory Candidate、0050 は Research Scratch、0052 は Evidence / Claim Provenance）
 ├─ paw_backend/
 │  ├─ app.py               # create_app(settings)
 │  ├─ config.py            # PAW_ 環境変数から読む Settings
@@ -60,6 +61,7 @@ apps/backend/
 │  ├─ research/providers/  # Research Provider の Adapter Interface と Broker（PAW-051）
 │  ├─ research/privacy/    # Research の Privacy Filter: Query の最小化と外部送信の Audit（PAW-053）
 │  ├─ research/scratch/    # Research Scratch Store: 24 時間 TTL の一時保存と、期限切れを消す Janitor（PAW-050）
+│  ├─ research/provenance/ # Evidence / Claim Provenance: Claim と Source の対応、回答・Task からの追跡（PAW-052）
 │  ├─ tools/               # Tool Broker、Capability Policy、Approval（PAW-031）
 │  └─ api/
 │     ├─ deps.py           # FastAPI Dependency
@@ -1596,7 +1598,7 @@ Test は参照実装で成り立つことを確認しながら書いたもので
 
 - 削除は Janitor の間隔だけ遅れます（既定で最大約 1 時間）。ただし、期限切れの Item は削除の前から全ての Method で「存在しない」ので、読み取りは Janitor に依存しません。Janitor が動かない間（`PAW_SCRATCH_PURGE_INTERVAL_SECONDS=0`、`PAW_DATABASE_URL` 未設定、Process の停止、30 秒より短い間隔での再起動の繰り返し）は、期限切れの行と内容が DB に残ります。Janitor の停止や失敗を知らせる仕組み（Metrics、Alert）はなく、あるのは Log の WARNING だけです。詳しくは[Janitor](#janitor期限切れの削除)。
 - `task_id` は素の UUID なので、Task を削除した後は存在しない Task を指し、DB はそれを検査しません（存在の確認は `add` の時点だけ）。[Decision 0013](../../docs/decisions/0013-research-scratch-task-relation.md)で、この選択が承認されています。
-- Claim と Source の対応（Evidence / Provenance）は PAW-052 です。ここでは `source_metadata` に置くだけで、構造化しません。
+- Claim と Source の対応（Evidence / Provenance）は [PAW-052](#evidence--claim-provenance) です。ここでは `source_metadata` に置くだけで、構造化しません。
 - 1 Project あたりの Item 数の上限（Quota）は持ちません。
 - Purge の「Snapshot の後に Commit された Lease」の Race は、実際の同時実行では起こしにくい時間窓です。Test は `purge_probe`（Test 用の接続点）で、その瞬間に exempt が現れる状況を決定的に再現して確認しています。同時実行の Test は複数回繰り返して安定を確認していますが、時間窓そのものを外部から狙って再現しているわけではありません。
 - Migration `0050` の `down_revision` は `0031` です（鎖は `0001 → 0025 → 0032 → 0040 → 0021 → 0033 → 0031 → 0050`）。
@@ -1927,6 +1929,130 @@ AGENTS.md のとおり、同じ失敗を繰り返したのでエスカレーシ�
 `test_privacy_rules_text.py`、`test_privacy_rules_abstract.py`、`test_privacy_rules_properties.py` は `rules.py` の各関数を、`test_privacy_gate.py` は Gate（拒否、最終検査、Audit の失敗。Class 名に Credential や改行を入れた例外、Metaclass の `__name__`・`__getattribute__`・`__hash__`・`__eq__` が例外になる Class を Sink が上げても、Log の型が固定の `adapter_error` で、拒否が `audit_failed` のままであること）を、`test_privacy_broker.py` は `ResearchBroker` への差し込みを、`test_privacy_contract.py` は値の検証を確かめます。
 Timeout の Test は、永遠に待つ Sink を 0.2 秒で打ち切り、成功する経路は即座に終わる構成です（30 秒の Guard で CI の停止を防ぎます）。
 
+## Evidence / Claim Provenance
+
+[PAW-052](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/44)（Revision `0052`）で実装しました。
+`paw_backend/research/provenance/` は、Research の結果について「どの主張（Claim）を、どの出典（Source）が支持または否定するか」と、
+「どの回答・Task がその Claim を使ったか」を **Project ごとに** 残します（[要件](../../REQUIREMENTS.md)の「Evidence / provenance」）。
+Research Scratch（24 時間 TTL）とは別の Table で、Long-term Memory とも Foreign Key でつながりません。Source の本文は保存せず、Hash だけを持ちます。
+**HTTP の Endpoint はありません。** `ProvenanceStore` は `TaskService`、`ScratchStore` と同じく認可を行わず、権限の確認は呼び出す側（API 層）の仕事です。
+選んだ規則のうち要件にないものは [Decision 0011](../../docs/decisions/0011-research-provenance-model.md)（Approved、2026-09-25 に Human が承認）にまとめています。
+
+| ファイル | 内容 |
+| --- | --- |
+| `models.py` | 6 つの Table の Model（`SourceRow`、`ClaimRow`、`ClaimSourceRow`、`ClaimUseRow`、`ClaimRelationRow`、`SourceRelationRow`） |
+| `records.py` | 入力（`SourceInput`、`SourceLinkInput`、`Reference`。作った時点で検証する）と返す値（`Source`、`Claim`、`SourceLink`、`Relation`、`TracedClaim`、`RecordedClaim`、`Trace`） |
+| `validation.py`、`errors.py`、`limits.py` | 引数の検証（DB を使わない純粋関数）、型付きの Error、上限 |
+| `rules.py` | 純粋な規則（正規化と Fingerprint、組の順序、Source の統合、追跡結果の組み立て） |
+| `queries.py` | DB の文（1 つの関数が 1 つの仕事） |
+| `mapping.py` | 行から値への変換 |
+| `store.py` | `ProvenanceStore`（Clock は注入）: 検証、Transaction、Lock、Error の変換 |
+
+### Table
+
+| Table | 内容 |
+| --- | --- |
+| `research_sources` | 取得した Source。`(project_id, locator, content_hash)` で 1 件。`locator` は `canonicalize_locator`（PAW-051）の結果、`source_type`（`SourceType`）、`title`（300 文字まで）、`fetched_at`、`published_at`（不明なら NULL）、`created_at` |
+| `research_claims` | Claim。`(project_id, text_fingerprint)` で 1 件。`claim_text`（2000 文字まで）、`task_id`（`tasks.id` への Foreign Key、`ON DELETE SET NULL`）、`created_by`、`created_at` |
+| `research_claim_sources` | Claim と Source の対応。`(claim_id, source_id)` が Key、`stance`（`supports` / `contradicts`） |
+| `research_claim_uses` | 回答・Task が Claim を使った記録。`(claim_id, ref_kind, ref_id)` が Key（`ref_kind` は `answer` / `task`） |
+| `research_claim_relations`、`research_source_relations` | Claim 同士・Source 同士の対称な Relation `duplicate` / `contradiction`。`low_id < high_id` の組で 1 回だけ持ち、1 組に 1 つ |
+
+- **Project をまたがない。** 対応・使用・Relation の Table は `project_id` を持ち、Claim と Source を複合 Foreign Key `(id, project_id)` で参照します。Application が間違えても、2 つの Project の行を結ぶ行は DB が拒否します。
+  全ての Method は `project_id` を受け取り、その Project の中だけで探します。他の Project の ID は「存在しない」と同じ扱いです。
+- `project_id`、`created_by` は素の UUID です（projects と users の Table がまだありません）。回答の ID（`ref_id`）も、Answer の Table がないため素の UUID で、存在は確認しません。
+- **不変。** Application の Role は 6 つの Table に SELECT と INSERT だけを持ちます（UPDATE も DELETE もできません）。誤りは書き換えではなく、新しい記録で訂正します。
+
+### 記録と重複
+
+`record_claim(project_id, *, created_by, text, sources, task_id=None)` は 1 つの Transaction で次を行います（どれか 1 つでも失敗すれば全て取り消します）。
+
+1. `task_id` があれば、その Project の Task であることを確認します（なければ `InvalidProvenanceInputError("task_id", UNKNOWN_REFERENCE)`）。
+2. Claim: 正規化した本文（NFKC、大文字小文字の畳み込み、空白の連続を 1 つに）の Fingerprint が同じ Claim がその Project にあれば **それを使い**（`created=False`。最初の本文・作成者・Task・時刻が残る）、なければ作ります。
+3. Source: `(locator, content_hash)` が同じ Source があればそれを使い（最初の記録が残る）、なければ作ります。同じ URL でも Hash が違えば別の Source です。
+4. 対応: Claim と Source を Stance 付きで結びます。同じ Stance の再記録は何もせず、逆の Stance は `ProvenanceConflictError` です。
+5. Claim の Source は合計 50 件まで（`ProvenanceLimitError`）。1 回の呼び出しは 1〜20 件です。
+6. `task_id` があれば、その Task を Claim の利用者として登録します。
+
+`SourceInput.from_metadata(metadata)` は PAW-051 の `SourceMetadata` から Source を作ります（`retrieved_at` が `fetched_at` になり、Provider の種類・ID と `private_source` は記録しません）。
+同じ呼び出しを 2 回しても、2 回目は何も変えません（`created=False`、`new_links=0`）。1 回の呼び出しの中で同じ Source が 2 回出てきたら 1 件に統合し（最初が残る）、Stance が食い違えば `sources` / `CONFLICT` です。
+
+### duplicate / contradiction
+
+`mark_related(project_id, *, entity, kind, first_id, second_id, created_by)` は、2 つの Claim（または 2 つの Source）に `duplicate`（同じことを言う）か `contradiction`（両立しない）を張ります。
+
+- 対称です。`(a, b)` と `(b, a)` は同じ Relation で、`low_id < high_id`（`UUID.int` の順）で 1 回だけ保存します。
+- 1 組に Relation は 1 つ。同じ種類の再記録は最初のものを返し、逆の種類は `ProvenanceConflictError` です。自分自身との Relation は `SELF_REFERENCE` です。
+- 推移律は扱いません（A と B、B と C が `duplicate` でも、A と C は張らない限り無関係です）。
+- 表現の違う Claim を自動で `duplicate` にはしません。Fingerprint が同じ場合だけ、記録の時点で 1 つの Claim にまとまります。
+- `list_relations(project_id, entity, entity_id)` は、その Claim（または Source）の Relation を返します（`contradiction` が先、次に相手の ID の順）。
+
+### 回答・Task からの追跡
+
+- `add_reference(project_id, *, reference, claim_ids, created_by)` は、回答（`Reference.answer(id)`）または Task（`Reference.task(id)`）が Claim を使ったことを記録し、新しく記録した数を返します（1〜50 件、重複は 1 件）。Task の参照は、その Project の Task でなければなりません。
+- `trace(project_id, reference, *, limit=100)` は、その参照が使った Claim と、それぞれの Source（`source_type`、`fetched_at`、`published_at`、Stance）と Relation を返します。
+  Claim は `(created_at, id)` の順、1 つの Claim の Source は「支持が先、取得の新しい順、ID の順」です。
+  `limit` は 1〜200 で、超える Claim があれば `truncated` が True です。`Trace.sources` は、全 Claim の Source を重複なく、現れた順に並べます。
+  誰も使っていない参照、存在しない参照、他の Project の参照は、区別なく空の Trace です。1 つの Snapshot（`REPEATABLE READ`、読み取り専用）で、Lock を取りません。
+- `get_claim(project_id, claim_id)` は 1 つの Claim を、同じ形（`TracedClaim`）で返します。
+
+Claim を記録した Task は自動で利用者になるので、`trace(project_id, Reference.task(task_id))` でその Task の Claim と Source を辿れます。回答から辿るには、回答の Claim を `add_reference` で登録します。
+
+### 同時実行と権限
+
+`store.py` の冒頭にも書いています。
+
+1. 同じ本文の Claim を同時に記録すると、一意制約で 2 番目以降は待ち、既存の Claim に Source を足します（`created=True` は 1 つだけ）。
+2. Claim ができた後、その Claim の Advisory Lock（Transaction の間）を取ってから Source を結びます。同じ Claim への同時の追加は順に実行され、50 件の上限を超えません。
+   Row の Lock（`FOR UPDATE`）は使いません。Application の Role に UPDATE がなく、`FOR UPDATE` と `FOR KEY SHARE` は UPDATE 権限を要するためです。
+3. Source は `(locator, content_hash)` の順に作ります。重なる Source を逆順に持つ 2 つの呼び出しが、互いを Deadlock させません。
+4. 書き込みの Transaction は `SET LOCAL lock_timeout`（`lock_timeout_ms`、既定 5000）で始まります。待ちが超えた場合と、DB が Deadlock を解消した場合は `ProvenanceBusyError` です（取り消し済み、再試行できます）。
+5. 読み取り（`get_claim`、`trace`、`list_relations`）は Lock を取らず、待ちません。
+
+**Application の Role の権限。** 共通の `grant_app_privileges`（PAW-025）で、6 つの Table に SELECT と INSERT だけを付けます（UPDATE の列も付けません）。
+`test_provenance_grants.py` は、この Role で Store と Query の Test を全て実行し、権限の一致と、書き換え・削除・`TRUNCATE`・`ON CONFLICT DO UPDATE`・Schema の変更・Project をまたぐ対応の拒否を確かめます。
+
+### 上限と入力の検証
+
+上限は Decision 0011 で暫定値として承認された値で、定数として変更できます。Claim の本文は 2000 文字（Unicode の Code Point）、Source の `title` は 300 文字、Locator は正規化後 2048 文字です。1 回の `record_claim` は Source 20 件、`add_reference` は Claim 50 件、Claim あたりの Source は合計 50 件、`trace` は Claim 200 件までです。
+型は変換しません（`"supports"` は `Stance` でなく、`bool` は `int` でなく、UUID の文字列は UUID でなく、Naive な日時は UTC でありません）。NUL と UTF-8 にできない文字は拒否します。
+全ての要素を検証してから統合します。時刻は全て aware で、UTC の同じ瞬間に変換します。
+Error の Message は固定文字列（Field 名と理由の語彙）で、入力の内容（本文、Locator、ID）・DB の Message を含みません。DB の Error（接続断など）は、Lock の待ち超過と Deadlock 以外は加工せず伝わりますが、SQL の引数を含みうるため、呼び出し側は `str(error)` を User へ見せないでください。
+
+### 呼び出し側の認可
+
+Endpoint は次の Issue の仕事です。次の対応を [Decision 0011](../../docs/decisions/0011-research-provenance-model.md) で承認しました（Backend では未強制）。読み取り（`get_claim`、`trace`、`list_relations`）は `project.read`。`record_claim`、`add_reference`、`mark_related` は `project.task.run`。
+
+### 実装の由来
+
+`rules.py`（純粋な規則）と `queries.py`（DB の文）は、仕様（Contract と Test）を先に固定し、その Test だけを合格基準にして書く前提の Module です。
+それ以外（Model、Migration、`validation.py`、`records.py`、`store.py`、Test）は仕様の側が書いています。
+**最終的な実装は Claude の参照実装です。** ローカルの Qwen3-Coder-30B-A3B に、16 関数の実装を 2 回（各約 265 回の Tool 呼び出し）任せましたが、収束しませんでした（1 回目は SQL の文の構文を壊し、2 回目も構文エラーが残り、全 Test の Module が Import できない状態でした）。
+AGENTS.md のとおり、同じ失敗を繰り返したのでエスカレーションし、仕様の Docstring を保ったまま、Claude の参照実装（変異 76 個のうち 75 個を Test が検出。残る 1 個は同値）に置き換えています。ローカルモデルの成果物は、最終物に含まれていません。
+
+### 制限と未確認の点
+
+- Migration `0052` の `down_revision` は `0046` です（鎖は `0001 → 0025 → 0032 → 0040 → 0021 → 0033 → 0031 → 0050 → 0046 → 0052`）。
+- 回答・Task から Claim への向きだけを引けます。「この Source を使った回答」への逆引き（Source が古くなったときの影響調査）はありません。
+- Source の `private_source`、Provider、License、Claim の `confidence` は記録しません（[Decision 0011](../../docs/decisions/0011-research-provenance-model.md)）。
+- 削除・保持・Project 削除時の扱いはありません（Application は削除できません）。Project 削除時の Provenance の扱い（消す・残す・匿名化する）は、Decision 0011 で今は決めないとし、Issue [#88](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/88) で別の Decision にします。1 Project あたりの件数の上限（Quota）もありません。
+- `published_at` が `fetched_at` より後でも拒否しません（ページの日付は不正確なことがあるため）。
+- Claim の Fingerprint は、正規化した本文が同じかだけを見ます。同じ意味の別の表現は、`mark_related` で明示します。
+- Advisory Lock の Key は Claim の ID の Hash（64 bit）です。衝突すると無関係な 2 つの Claim が互いを待ちますが、結果は正しいままです。
+- Deadlock が実際に起きた場合の `ProvenanceBusyError` への変換は、Driver の Error を作る Test で確認しています。実際の Deadlock を起こす Test はありません（順序を固定して起きないようにしています）。
+
+### 承認済みの点と、残る判断
+
+[Decision 0011](../../docs/decisions/0011-research-provenance-model.md) は 2026-09-25 に承認されました（「承認時の決定」を参照）。
+上限（本文 2000 文字、Source 50 件など）は暫定値として承認されており、定数なので変更できます。
+Project 削除時の Provenance の扱いは、Issue [#88](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/88) で別の Decision にします。
+
+### Test
+
+`apps/backend/tests/test_provenance_*.py` と `provenance_support.py` です。標準 `unittest` だけです。
+DB を使わない Test（`records`、`validation`、`rules`、`store_validation`、`store_wiring`、`migration` の一部）と、実 PostgreSQL の Test（`PAW_TEST_DATABASE_URL` が未設定なら Skip）があります。
+期待値は SQL で用意して SQL で確かめ、Store の別の Method には頼りません。並行の Test は、別の接続で Lock を持たせて「待っている」状態を確かめ、機械の速さに頼りません。
+
 ## 依存 Package
 
 依存は `pyproject.toml` で完全一致に固定しています。
@@ -1940,9 +2066,9 @@ CI は pre-commit の専用環境で Test を実行するため、同じ Version
 ## 今後の Issue
 
 [PAW-021](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/18)（Owner Setup）、
-RBAC（PAW-025）、Task Lifecycle（PAW-032）、Task Queue / Budget / Loop 検知（PAW-033）、Tool Broker（PAW-031）、Memory Schema（PAW-040）、Research Scratch Store（PAW-050）、Research Provider Adapter（PAW-051）、Research Privacy Filter（PAW-053）は、この Skeleton の上に実装済みです。
+RBAC（PAW-025）、Task Lifecycle（PAW-032）、Task Queue / Budget / Loop 検知（PAW-033）、Tool Broker（PAW-031）、Memory Schema（PAW-040）、Research Scratch Store（PAW-050）、Research Provider Adapter（PAW-051）、Research Privacy Filter（PAW-053）、Evidence / Claim Provenance（PAW-052）は、この Skeleton の上に実装済みです。
 PAW-022（Login / Session / Password）と PAW-023（Passkey / Step-up）は Owner Setup の Token を受け取る側で、まだありません。
 Memory の保存・整理・検索は PAW-041 以降で、Memory Schema の上に実装します。
-Research Privacy Filter（PAW-053）は、Research Provider Adapter の上に実装済みです。Research の Provider（Direct Web、Docs、GitHub、OpenCode）の Adapter、Evidence / Claim Provenance（PAW-052）は、Research Provider Adapter の上に実装します。外部送信の Audit を Audit Log へ保存する実装は、後続の Issue です。
+Research Privacy Filter（PAW-053）と Evidence / Claim Provenance（PAW-052）は、Research Provider Adapter の上に実装済みです。Research の Provider（Direct Web、Docs、GitHub、OpenCode）の Adapter は、Research Provider Adapter の上に実装します。外部送信の Audit を Audit Log へ保存する実装は、後続の Issue です。
 受け入れ基準は [Implementation Backlog](../../docs/IMPLEMENTATION_BACKLOG.md)、
 実装時に選択できる事項は [Requirements Freeze Review](../../docs/REQUIREMENTS_FREEZE_REVIEW.md) を参照してください。

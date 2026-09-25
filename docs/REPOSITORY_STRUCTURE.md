@@ -54,7 +54,8 @@ personal-ai-workspace/
 │  │  │     ├─ 0033_task_queue_budget_loop.py
 │  │  │     ├─ 0040_memory_schema.py
 │  │  │     ├─ 0046_shared_memory_candidates.py
-│  │  │     └─ 0050_research_scratch_store.py
+│  │  │     ├─ 0050_research_scratch_store.py
+│  │  │     └─ 0052_research_provenance.py
 │  │  ├─ paw_backend/
 │  │  │  ├─ __init__.py
 │  │  │  ├─ __main__.py
@@ -101,6 +102,17 @@ personal-ai-workspace/
 │  │  │  │  │  ├─ contract.py
 │  │  │  │  │  ├─ gate.py
 │  │  │  │  │  └─ rules.py
+│  │  │  │  ├─ provenance/
+│  │  │  │  │  ├─ __init__.py
+│  │  │  │  │  ├─ errors.py
+│  │  │  │  │  ├─ limits.py
+│  │  │  │  │  ├─ mapping.py
+│  │  │  │  │  ├─ models.py
+│  │  │  │  │  ├─ queries.py
+│  │  │  │  │  ├─ records.py
+│  │  │  │  │  ├─ rules.py
+│  │  │  │  │  ├─ store.py
+│  │  │  │  │  └─ validation.py
 │  │  │  │  ├─ providers/
 │  │  │  │  │  ├─ __init__.py
 │  │  │  │  │  ├─ broker.py
@@ -166,6 +178,7 @@ personal-ai-workspace/
 │  │     ├─ fake_postgres.py
 │  │     ├─ identity_support.py
 │  │     ├─ privacy_support.py
+│  │     ├─ provenance_support.py
 │  │     ├─ queueing_support.py
 │  │     ├─ research_support.py
 │  │     ├─ scratch_support.py
@@ -197,6 +210,19 @@ personal-ai-workspace/
 │  │     ├─ test_privacy_rules_abstract.py
 │  │     ├─ test_privacy_rules_properties.py
 │  │     ├─ test_privacy_rules_text.py
+│  │     ├─ test_provenance_concurrency.py
+│  │     ├─ test_provenance_grants.py
+│  │     ├─ test_provenance_migration.py
+│  │     ├─ test_provenance_queries.py
+│  │     ├─ test_provenance_records.py
+│  │     ├─ test_provenance_rules.py
+│  │     ├─ test_provenance_schema.py
+│  │     ├─ test_provenance_store_record.py
+│  │     ├─ test_provenance_store_relations.py
+│  │     ├─ test_provenance_store_trace.py
+│  │     ├─ test_provenance_store_validation.py
+│  │     ├─ test_provenance_store_wiring.py
+│  │     ├─ test_provenance_validation.py
 │  │     ├─ test_queueing_budget.py
 │  │     ├─ test_queueing_domain.py
 │  │     ├─ test_queueing_escalation.py
@@ -303,6 +329,7 @@ personal-ai-workspace/
 │     ├─ 0006-tool-broker-policy.md
 │     ├─ 0007-task-queue-budget-and-loop-policy.md
 │     ├─ 0010-research-privacy-filter-policy.md
+│     ├─ 0011-research-provenance-model.md
 │     ├─ 0012-research-provider-adapter-policy.md
 │     ├─ 0013-research-scratch-task-relation.md
 │     ├─ 0014-task-working-set-persistence.md
