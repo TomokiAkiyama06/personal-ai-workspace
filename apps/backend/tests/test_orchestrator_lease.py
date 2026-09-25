@@ -26,6 +26,7 @@ from .orchestrator_support import (
     SpyBudget,
     diamond,
     gate_kwargs,
+    hang,
     make_plan,
     node,
     requires_postgres,
@@ -236,6 +237,152 @@ class LeaseTest(PostgresOrchestratorTestCase):
         self.assertEqual(
             await self.states_of(task_id), {"only": "running"}
         )  # untouched
+
+    async def test_a_planner_that_never_returns_is_stopped_when_the_lease_is_lost(
+        self,
+    ):
+        queue = FlakyQueue(self.database, **gate_kwargs(TaskQueue))
+        planner = FakeRuntime("local", script={"plan": hang})
+        # An hour between the looks at the task: only the lost lease itself can
+        # wake the run within the test's (heartbeat) time.
+        h = self.harness(
+            queue=queue, runtimes={"local": planner}, config={"poll_seconds": 3600.0}
+        )
+        task_id = await self.prepare(h)
+        run = asyncio.create_task(h.orchestrator.run_once("w1"))
+        await until(lambda: len(planner.calls_of("plan")) == 1, message="the planner")
+
+        queue.broken = True
+        for _ in range(3):
+            await until(
+                lambda: h.clock.waiting_for(20.0) >= 1, message="a heartbeat timer"
+            )
+            await h.clock.advance(20.0)
+        report = await asyncio.wait_for(run, 120)
+
+        self.assertEqual(report.outcome, Out.LEASE_LOST)
+        # The planner was cancelled (not left to its timeout), nothing was stored.
+        self.assertEqual(
+            [e for e in planner.timeline if e[0] == "end"], [("end", "plan", 1)]
+        )
+        self.assertIsNone(await self.store.get(task_id, 1))
+
+
+@requires_postgres
+class TimerStartTest(PostgresOrchestratorTestCase):
+    """Only the CURRENT lease holder starts the runtime timer, whatever stalled.
+
+    ``BudgetTracker`` does not read the queue, and ``start_runtime`` of a worker
+    that no longer holds the lease would take the runtime session over and make the
+    real holder's ``stop_runtime`` stale. So the lease is proved again immediately
+    before the timer starts, not only at the beginning of the run (Decision 0007,
+    section 10).
+    """
+
+    async def expire_the_lease(self) -> None:
+        await self.owner_sql(
+            "UPDATE queue_entries SET claimed_at = now() - interval '10 seconds',"
+            " lease_expires_at = now() - interval '5 seconds' WHERE status = 'claimed'"
+        )
+
+    async def stalled_worker(self, stall_at: str):
+        """Worker A, stalled at ``stall_at`` (``"start"``: right after the task was
+        started; ``"budget"``: in the first budget check) until ``release`` is set.
+        Returns ``(a, spy_a, run_a, task_id, release)``."""
+        spy_a = SpyBudget(self.database)
+        a = self.harness(runtimes={"local": FakeRuntime("local")}, budget=spy_a)
+        task_id = await self.prepare(a, make_plan(node("only")))
+        stalled, release = asyncio.Event(), asyncio.Event()
+        if stall_at == "start":
+            original = a.tasks.execute
+
+            async def slow_start(tid, command, **kwargs):
+                result = await original(tid, command, **kwargs)
+                if command is TaskCommand.START:
+                    stalled.set()
+                    await release.wait()
+                return result
+
+            a.tasks.execute = slow_start
+        else:
+            original_check = spy_a.check
+            calls = []
+
+            async def slow_check(tid, **kwargs):
+                if not calls:
+                    calls.append(1)
+                    stalled.set()
+                    await release.wait()
+                return await original_check(tid, **kwargs)
+
+            spy_a.check = slow_check
+        run_a = asyncio.create_task(a.orchestrator.run_once("wA"))
+        await until(stalled.is_set, message="worker A to stall")
+        return a, spy_a, run_a, task_id, release
+
+    async def check_the_stale_worker_leaves_the_timer_alone(self, stall_at: str):
+        a, spy_a, run_a, task_id, release = await self.stalled_worker(stall_at)
+        # A stalls for longer than its lease; B claims the entry and runs the task.
+        await self.expire_the_lease()
+        runtime_b = FakeRuntime("local")
+        runtime_b.gate("only")
+        spy_b = SpyBudget(self.database)
+        b = self.harness(runtimes={"local": runtime_b}, budget=spy_b)
+        run_b = asyncio.create_task(b.orchestrator.run_once("wB"))
+        await until(lambda: len(runtime_b.assignments) == 1, message="B's node")
+        generation = await self.scalar(
+            "SELECT runtime_generation FROM budget_usages"
+            " WHERE kind = 'runtime_seconds'"
+        )
+        self.assertEqual(generation, 1)  # B's session
+
+        release.set()  # A wakes up
+        report_a = await asyncio.wait_for(run_a, 120)
+
+        self.assertEqual(report_a.outcome, Out.LEASE_LOST)
+        # A did not start the timer: it did not take B's session over.
+        self.assertEqual(spy_a.started, [])
+        self.assertEqual(
+            await self.scalar(
+                "SELECT runtime_generation FROM budget_usages"
+                " WHERE kind = 'runtime_seconds'"
+            ),
+            1,
+        )
+        runtime_b.gates["only"].set()
+        report_b = await asyncio.wait_for(run_b, 120)
+        self.assertEqual(report_b.outcome, Out.DAG_SUCCEEDED)
+        # B's timer session was never superseded: its stop is the one that counts.
+        self.assertEqual(spy_b.stopped, [(task_id, 1)])
+        self.assertEqual(spy_b.started, [task_id])
+        (entry,) = await self.rows("SELECT status, claim_count FROM queue_entries")
+        self.assertEqual((entry["status"], entry["claim_count"]), ("completed", 2))
+
+    async def test_a_worker_stalled_in_begin_task_beyond_its_lease(self):
+        await self.check_the_stale_worker_leaves_the_timer_alone("start")
+
+    async def test_a_worker_stalled_in_the_budget_check_beyond_its_lease(self):
+        await self.check_the_stale_worker_leaves_the_timer_alone("budget")
+
+    async def test_the_lease_is_extended_just_before_the_timer_starts(self):
+        # A run that is not stalled: the lease it holds at the moment the timer
+        # starts was extended by the heartbeat that came right before.
+        spy = SpyBudget(self.database)
+        h = self.harness(runtimes={"local": FakeRuntime("local")}, budget=spy)
+        await self.prepare(h, make_plan(node("only")))
+        heartbeats = []
+        original = h.queue.heartbeat
+
+        async def heartbeat(*args, **kwargs):
+            heartbeats.append(len(spy.started))  # timers started so far
+            return await original(*args, **kwargs)
+
+        h.queue.heartbeat = heartbeat
+        await h.orchestrator.run_once("w1")
+
+        # One before the task is started, one immediately before the timer.
+        self.assertEqual(heartbeats[:2], [0, 0])
+        self.assertEqual(len(spy.started), 1)
 
 
 if __name__ == "__main__":

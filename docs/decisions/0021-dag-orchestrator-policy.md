@@ -15,7 +15,7 @@
 すでに**承認された Decision が Orchestrator に課した条件**は、選択ではなく守るべき条件として、この Decision の対象外である（実装した場所は README の「DAG Agent Orchestrator」に書いた）。
 
 - Decision 0006（Tool Broker）: 終了した Task へ Tool 呼び出しを渡さない（承認を要する呼び出しだけが Broker で状態を確認する）、`TaskContext.run` を Orchestrator が `TaskSnapshot.run` / `TaskEvent.run` から組み立てる、書き込む Repository を `TaskScope.repositories` として解決し Remote を登録する。
-- Decision 0007（Queue・Budget・Loop）: 失敗の文字列は Worker が整形してから `record_failure` へ渡す、Lease を持つ Worker だけが `BudgetTracker.start_runtime` を呼ぶ。Budget を Loop より優先し、`retries` の超過は `FAIL`、それ以外は `WAIT_FOR_USER`。
+- Decision 0007（Queue・Budget・Loop）: 失敗の文字列は Worker が整形してから `record_failure` へ渡す、Lease を持つ Worker だけが `BudgetTracker.start_runtime` を呼ぶ（Task の開始と Budget の確認が Lease より長くかかり得るため、`start_runtime` の直前にもう一度 Heartbeat で Lease を確かめる）。Budget を Loop より優先し、`retries` の超過は `FAIL`、それ以外は `WAIT_FOR_USER`。
 - Decision 0008（Project）: 削除待ちの Project にも通常の周期で `stop_project_tasks` を呼ぶ。
 - Decision 0014（Working Set）: Working Set の永続化（#85）が終わるまで、書き込む Repository は呼び出し側が入力として渡す（Seam を Documentation に書く）。
 - Decision 0004（RBAC）: `agent.use` / `project.agent.use` は、子 Agent の Grant を親の部分集合として導く仕組みができるまで委任不可。その仕組みは `authz/delegation.py`（`derive_child_grant`）として、この Issue が実装した。**委任可否そのものは変えていない**（9 節）。
@@ -67,14 +67,14 @@ Node の順序は決定的で（Kahn 法。同時に進める Node は Plan に�
 ### 3. Escalation の段（Ladder）と Node ごとの Retry
 
 - 設定（`OrchestratorConfig.ladders`）が、Role ごとに Agent の Label を弱い順に並べる（最大 4 段）。Node は 1 段目で始まり、Escalation で次の段へ移る。Review の独立性（実装した Agent と別の Agent が見る）は、Reviewer の Ladder の並べ方で表す（Orchestrator は強制しない）。
-- Node の失敗ごとに、Loop 検知（Decision 0007。`step` は Node の `key`）と Budget の判定（`retries` を 1 つ足した予定で）を `decide_next_action` に渡す。
+- Node の失敗ごとに、Loop 検知（Decision 0007。`step` は Node の `key`）と、いまの Budget の判定を `decide_next_action` に渡す。**`retries` を 1 つ足した予定の判定は、実際に再試行する失敗にだけ行う**（再試行してよく、段の試行が残っているか、Loop の判定が Escalation を選んだ失敗）。再試行できない失敗（`retryable=False`、段の試行が尽きた、`approach` が上限）は `retries` を使わないので、Counter が上限ちょうどでも Task を止めない（必須でない Node が失敗しても、必須の Node が全て成功すれば DAG は成功する）。
   - `CONTINUE`: 同じ Agent・同じ方法で再試行する。`TRY_ALTERNATIVE`: `approach` を 1 増やして再試行する。`ESCALATE_AGENT`: 次の段へ移る。**`approach` も 1 増やす**（古い方法の履歴が、新しい Agent の最初の失敗を Loop と判定しないように）。
   - `WAIT_FOR_USER`: Node をそのまま残して Run を止め、Task を `waiting`（理由 `user`）にする。`FAIL`（`retries` の超過）: Node を失敗にして Run を止め、Task を `failed` にする。
 - Loop でない失敗（毎回違う Message）は Escalation しない。1 つの段で 1 Node が使える試行は **6 回**（暫定）で、超えたら Node は失敗する（Escalation の代わりではない: 下の「決めてほしいこと」5）。Escalation で段が変わると試行の数え直しから始まる。
 - 再試行の前に待つ（Back-off）: 1 回目の失敗の後 1 秒、以降は倍で最大 60 秒（暫定。0 で無効）。
 - `retryable=False` と答えた失敗は、再試行も Escalation もせず Node を失敗にする。
 - 1 つの Node の 1 回の試行は 30 分（暫定）で打ち切る（`NodeTimeout`。失敗として扱う）。
-- Planner の呼び出しも同じ仕組みで、2 回まで（暫定）。2 回目は Planner の Ladder の次の段が行う。受け入れられる Plan が得られなければ Task を `failed` にする。
+- Planner の呼び出しも同じ仕組みで、2 回まで（暫定）。2 回目は Planner の Ladder の次の段が行う。受け入れられる Plan が得られなければ Task を `failed` にする。Planner の実行中も、Node と同じ周期で Task の状態と Budget 全体を読む（下の 7 節）。
 
 ### 4. 並列数
 
@@ -101,6 +101,7 @@ Node の結果は `NodeResult`（要件の「Subtask output例」）: `summary`�
 **予算の分け方は「親 Task の予算を 1 つの共有の Pool として使う」**。Node ごとの予算は持たない。Node の消費は全て親 Task の `budget_usages` へ記録する（`NodeBudgetHandle.charge`。Tool 呼び出しは Broker の `BudgetProvider`（`TrackerBudgetProvider`）が `tool_calls` として記録する）。Node の起動ごとに `steps` を 1、再試行ごとに `retries` を 1 消費する。Runtime は Lease を持つ Worker の Timer が 1 つ数える。
 
 - 起動の前に `steps` の予定を確認し、超過なら新しい Node を起動しない（Decision 0007 の規則で `WAIT_FOR_USER` か `FAIL`）。
+- **Planner の実行中も同じ周期で Budget を確認する。** Planner の Timeout（Node と同じ 30 分）が `runtime_seconds` の上限より長いことがあり、返らない Planner が上限を超えて Task を走らせ続けないように、Poll のたびに Task の状態と Budget 全体を読む。上限を超えたら Planner を Cancel し（DAG はまだない）、Decision 0007 の規則で Task を止める（`retries` は `failed`、それ以外は `waiting`）。Task の終了・Run の交代・Lease の喪失も Poll（Lease の喪失はすぐ）で Planner を止める。`paused` は Node と同じく Planner を終わらせてから止める。上限の直前に返った Plan は普通に実行され、上限を超えた後に返った Plan は保存したまま Node を 1 つも起動しない。
 - **Budget は Loop が起きるたび（Node の終了ごと、Poll ごと）に全て確認する。** `runtime_seconds` は Tracker の中で増えて Node は報告しないため、これがなければ上限を超えて走り続ける Node（終わらない Node を含む）を止められない。上限を超えたら、終わったばかりの Node の結果を先に保存し、走っている Node を Cancel して（試行は `interrupted`、Node は `ready`）、新しい Node を起動せず、Decision 0007 の規則で Task を止める。
 - Node が報告した消費で Budget が尽きたら、その Node に `NodeStopped` を投げ、同じ Run の他の Node の Tool 呼び出しと報告も拒否する。実行中の Node が使った分は超過として記録される（`check` が予約でないため、超えるのは実行中の呼び出しの分まで）。
 

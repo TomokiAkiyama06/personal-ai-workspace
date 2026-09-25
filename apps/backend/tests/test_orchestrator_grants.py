@@ -4,10 +4,11 @@ The migrations run as the owner of the schema and the backend connects as a
 NON-superuser application role (``PAW_APP_DATABASE_ROLE``). These tests migrate
 the test database that way, then
 
-* run the DAG store, orchestrator, failure, budget, control, lease, planning and
-  tool test classes as that role, so every statement the orchestrator executes is
-  proven to work with exactly the privileges revision 0034 grants (and, through
-  the real stopper, those of the tables it reads), and
+* run the DAG store, orchestrator, failure, budget, control, lease, planning,
+  recovery, fenced-command, runtime-budget and tool test classes as that role, so
+  every statement the orchestrator executes is proven to work with exactly the
+  privileges revision 0034 grants (and, through the real stopper, those of the
+  tables it reads), and
 * check that nothing else is allowed (rewriting the plan or a node's identity,
   deleting history, changing keys, changing the schema).
 
@@ -31,10 +32,13 @@ from . import (
     test_orchestrator_budget,
     test_orchestrator_control,
     test_orchestrator_failures,
+    test_orchestrator_fenced_commands,
     test_orchestrator_lease,
     test_orchestrator_planning,
     test_orchestrator_project_sweep,
+    test_orchestrator_recovery,
     test_orchestrator_run,
+    test_orchestrator_runtime_budget,
     test_orchestrator_shutdown,
     test_orchestrator_store,
     test_orchestrator_tools,
@@ -182,6 +186,12 @@ class IsolationAsAppRole(AsAppRole, test_orchestrator_failures.IsolationTest):
     pass
 
 
+class RetryReservationAsAppRole(
+    AsAppRole, test_orchestrator_failures.RetryReservationTest
+):
+    pass
+
+
 class PlannerAsAppRole(AsAppRole, test_orchestrator_planning.PlannerTest):
     pass
 
@@ -199,6 +209,56 @@ class ControlAsAppRole(AsAppRole, test_orchestrator_control.ControlTest):
 
 
 class LeaseAsAppRole(AsAppRole, test_orchestrator_lease.LeaseTest):
+    pass
+
+
+class TimerStartAsAppRole(AsAppRole, test_orchestrator_lease.TimerStartTest):
+    pass
+
+
+class RuntimeBudgetAsAppRole(
+    AsAppRole, test_orchestrator_runtime_budget.RuntimeBudgetTest
+):
+    pass
+
+
+class PlannerRuntimeBudgetAsAppRole(
+    AsAppRole, test_orchestrator_runtime_budget.PlannerRuntimeBudgetTest
+):
+    pass
+
+
+class TerminalCommandsAsAppRole(
+    AsAppRole, test_orchestrator_fenced_commands.TerminalCommandsAreFencedTest
+):
+    pass
+
+
+class VersionFenceAsAppRole(
+    AsAppRole, test_orchestrator_fenced_commands.TheVersionFenceIsInTheTransactionTest
+):
+    pass
+
+
+class StartFencedAsAppRole(
+    AsAppRole, test_orchestrator_fenced_commands.StartIsFencedTest
+):
+    pass
+
+
+class RetryAfterSucceededAsAppRole(
+    AsAppRole, test_orchestrator_recovery.RetryAfterASucceededDagTest
+):
+    pass
+
+
+class EndedDagAsAppRole(AsAppRole, test_orchestrator_recovery.ADagThatAlreadyEndedTest):
+    pass
+
+
+class UnexpectedErrorsAsAppRole(
+    AsAppRole, test_orchestrator_recovery.UnexpectedErrorsTest
+):
     pass
 
 

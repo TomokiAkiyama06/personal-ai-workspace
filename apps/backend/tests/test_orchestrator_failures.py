@@ -7,10 +7,18 @@ clock. The rules are Decision 0007's (budget before loop, ``TRY_ALTERNATIVE`` th
 
 import asyncio
 import unittest
+from dataclasses import replace
 
-from paw_backend.orchestrator.domain import AttemptState, DagState, RunOutcome
+from paw_backend.orchestrator.domain import (
+    AttemptState,
+    DagState,
+    NextStep,
+    RunOutcome,
+)
+from paw_backend.orchestrator.orchestrator import _Finished
 from paw_backend.tasks import TaskState, WaitReason
-from paw_backend.tasks.queueing import BudgetPreset
+from paw_backend.tasks.queueing import BudgetPreset, NextAction
+from paw_backend.tasks.queueing.validation import MAX_APPROACH
 
 from .orchestrator_support import (
     FakeRuntime,
@@ -286,6 +294,193 @@ class EscalationTest(PostgresOrchestratorTestCase):
         usage = {u.kind.value: u.consumed for u in await h.budget.usage(task_id)}
         self.assertEqual(usage["retries"], 3)
         self.assertEqual(dag.node("b").state.value, "blocked")
+
+
+@requires_postgres
+class RetryReservationTest(PostgresOrchestratorTestCase):
+    """A retry is reserved from the budget only for a failure that WILL retry.
+
+    ``decide_next_action`` is asked whether one more retry fits only when the node
+    is going to retry (the failure says it may, and the rung has an attempt left, or
+    the loop decision escalates). A failure that cannot retry costs no retry, so with
+    the retries counter exactly at its limit it must not stop the task.
+    """
+
+    async def set_retries(self, task_id, *, limit, consumed=0):
+        await self.owner_sql(
+            "UPDATE budget_usages SET limit_value = :limit, consumed = :consumed"
+            " WHERE task_id = :t AND kind = 'retries'",
+            limit=limit,
+            consumed=consumed,
+            t=task_id,
+        )
+
+    async def retries_used(self, h, task_id) -> int:
+        usage = await h.budget.usage(task_id)
+        return next(u.consumed for u in usage if u.kind.value == "retries")
+
+    async def test_an_escalation_needs_a_next_rung_whatever_the_loop_says(self):
+        # The loop decision only says ESCALATE_AGENT when the ladder has a next
+        # agent; the step is still refused without one (never an agent past the end
+        # of the ladder), and an approach counter at its end gives the node up.
+        h = self.harness()
+        dag = await self.make_dag(make_plan(node("a")))
+        record = dag.node("a")
+        failure = _Finished.failure("Boom")
+        retry = h.orchestrator._retry_step
+
+        self.assertEqual(
+            retry(record, NextAction.ESCALATE_AGENT, failure, can_escalate=False),
+            (NextStep.GIVE_UP, {}),
+        )
+        self.assertEqual(
+            retry(record, NextAction.ESCALATE_AGENT, failure, can_escalate=True),
+            (NextStep.ESCALATE, {"agent_index": 1, "approach": 1}),
+        )
+        self.assertEqual(
+            retry(record, NextAction.CONTINUE, failure, can_escalate=False),
+            (NextStep.RETRY, {}),
+        )
+        last = replace(record, approach=MAX_APPROACH)
+        self.assertEqual(
+            retry(last, NextAction.TRY_ALTERNATIVE, failure, can_escalate=True),
+            (NextStep.GIVE_UP, {}),
+        )
+        self.assertEqual(
+            retry(last, NextAction.ESCALATE_AGENT, failure, can_escalate=True),
+            (NextStep.GIVE_UP, {}),
+        )
+        before = replace(record, approach=MAX_APPROACH - 1)
+        self.assertEqual(
+            retry(before, NextAction.TRY_ALTERNATIVE, failure, can_escalate=True),
+            (NextStep.ALTERNATIVE, {"agent_index": 0, "approach": MAX_APPROACH}),
+        )
+
+    async def test_an_optional_node_that_cannot_retry_does_not_stop_the_task(self):
+        rt = runtimes(local={"opt": fail("Fatal", "no way", retryable=False)})
+        h = self.harness(runtimes=rt)
+        task_id = await self.prepare(
+            h, make_plan(node("a"), node("opt", required=False))
+        )
+        await self.set_retries(
+            task_id, limit=0, consumed=0
+        )  # the counter is AT its limit
+
+        report = await h.orchestrator.run_once("w1")
+
+        # Every required node succeeded: the DAG succeeds, the task is evaluated.
+        self.assertEqual(report.outcome, Out.DAG_SUCCEEDED)
+        self.assertEqual(
+            await self.states_of(task_id), {"a": "succeeded", "opt": "failed"}
+        )
+        self.assertEqual((await h.tasks.restore(task_id)).state, TaskState.EVALUATING)
+        self.assertEqual(await self.retries_used(h, task_id), 0)  # nothing was reserved
+
+    async def test_a_required_node_that_cannot_retry_fails_the_dag_not_the_budget(self):
+        rt = runtimes(local={"a": fail("Fatal", "no way", retryable=False)})
+        h = self.harness(runtimes=rt)
+        task_id = await self.prepare(h, make_plan(node("a"), node("free")))
+        await self.set_retries(task_id, limit=0)
+
+        report = await h.orchestrator.run_once("w1")
+
+        self.assertEqual(report.outcome, Out.DAG_FAILED)
+        snapshot = await h.tasks.restore(task_id)
+        self.assertEqual(snapshot.state, TaskState.FAILED)
+        self.assertEqual(snapshot.last_event.reason, "A required node did not succeed")
+        # The independent node was not abandoned.
+        self.assertEqual(
+            await self.states_of(task_id), {"a": "failed", "free": "succeeded"}
+        )
+
+    async def test_a_failure_at_the_end_of_its_rung_reserves_no_retry(self):
+        rt = runtimes(local={"a": fail("Boom", "x")})
+        h = self.harness(runtimes=rt, config={"max_attempts_per_rung": 1})
+        task_id = await self.prepare(h, make_plan(node("a"), node("free")))
+        await self.set_retries(task_id, limit=0)
+
+        report = await h.orchestrator.run_once("w1")
+
+        # The rung had no attempt left, so the failure could not retry anyway.
+        self.assertEqual(report.outcome, Out.DAG_FAILED)
+        self.assertEqual(len(rt["local"].calls_of("a")), 1)
+        self.assertEqual(
+            await self.states_of(task_id), {"a": "failed", "free": "succeeded"}
+        )
+        self.assertEqual(await self.retries_used(h, task_id), 0)
+
+    async def test_the_boundary_of_the_counter_for_a_failure_that_retries(self):
+        # Limit 1: the first retry fits (0 + 1 <= 1), the second does not (1 + 1 > 1).
+        rt = runtimes(local={"a": fail("Boom", "x")})
+        h = self.harness(runtimes=rt)
+        task_id = await self.prepare(h, make_plan(node("a")))
+        await self.set_retries(task_id, limit=1)
+
+        report = await h.orchestrator.run_once("w1")
+
+        self.assertEqual(report.outcome, Out.BUDGET_FAILED)
+        self.assertEqual(len(rt["local"].calls_of("a")), 2)  # one retry, then the stop
+        self.assertEqual(await self.retries_used(h, task_id), 1)
+        self.assertEqual(
+            (await h.tasks.restore(task_id)).last_event.reason,
+            "The retry budget is used up",
+        )
+
+    async def test_the_last_retry_that_fits_is_taken_and_can_succeed(self):
+        rt = runtimes(local={"a": [fail("Flaky", "once"), ok("second try")]})
+        h = self.harness(runtimes=rt)
+        task_id = await self.prepare(h, make_plan(node("a")))
+        await self.set_retries(task_id, limit=1)
+
+        report = await h.orchestrator.run_once("w1")
+
+        self.assertEqual(report.outcome, Out.DAG_SUCCEEDED)
+        self.assertEqual(await self.retries_used(h, task_id), 1)  # exactly at its limit
+
+    async def test_a_retry_that_is_already_over_the_limit_still_stops_everything(self):
+        # Precedence is unchanged: a budget that is already used up stops the run
+        # whatever the failure says about retrying.
+        rt = runtimes(local={"a": fail("Fatal", "no way", retryable=False)})
+        h = self.harness(runtimes=rt)
+        task_id = await self.prepare(
+            h, make_plan(node("a"), node("opt", required=False))
+        )
+        await self.set_retries(task_id, limit=1, consumed=2)
+
+        report = await h.orchestrator.run_once("w1")
+
+        self.assertEqual(report.outcome, Out.BUDGET_FAILED)
+
+    async def test_an_alternative_and_an_escalation_are_retries_and_are_reserved(self):
+        # The same failure again and again on a two-agent ladder: attempts 1-2 retry,
+        # 3 tries an alternative, 4-5 retry, 6 would escalate. Each is a retry.
+        always = fail("Stuck", "the same failure")
+        rt = runtimes(local={"a": always}, codex={"a": ok("by codex")})
+        h = self.harness(runtimes=rt, ladder=("local", "codex"))
+        task_id = await self.prepare(h, make_plan(node("a")), preset=BudgetPreset.LONG)
+        await self.set_retries(task_id, limit=5)  # five retries fit, the sixth does not
+
+        report = await h.orchestrator.run_once("w1")
+
+        self.assertEqual(report.outcome, Out.BUDGET_FAILED)
+        self.assertEqual(len(rt["local"].calls_of("a")), 6)
+        self.assertEqual(
+            len(rt["codex"].calls_of("a")), 0
+        )  # no escalation on an empty budget
+        self.assertEqual(await self.retries_used(h, task_id), 5)
+
+    async def test_with_one_more_retry_in_the_limit_the_escalation_happens(self):
+        always = fail("Stuck", "the same failure")
+        rt = runtimes(local={"a": always}, codex={"a": ok("by codex")})
+        h = self.harness(runtimes=rt, ladder=("local", "codex"))
+        task_id = await self.prepare(h, make_plan(node("a")), preset=BudgetPreset.LONG)
+        await self.set_retries(task_id, limit=6)
+
+        report = await h.orchestrator.run_once("w1")
+
+        self.assertEqual(report.outcome, Out.DAG_SUCCEEDED)
+        self.assertEqual(len(rt["codex"].calls_of("a")), 1)
+        self.assertEqual(await self.retries_used(h, task_id), 6)
 
 
 @requires_postgres

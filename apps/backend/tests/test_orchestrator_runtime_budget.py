@@ -17,6 +17,8 @@ import unittest
 
 from paw_backend.orchestrator import RunOutcome
 from paw_backend.orchestrator.domain import AttemptState
+from paw_backend.orchestrator.result import NodeResult
+from paw_backend.orchestrator.runtime import NodeOutcome
 from paw_backend.tasks import TaskCommand, TaskState, WaitReason
 from paw_backend.tasks.queueing import BudgetKind, BudgetPreset, BudgetTracker
 
@@ -36,8 +38,9 @@ Out = RunOutcome
 STANDARD_RUNTIME = 3_600
 
 
-@requires_postgres
-class RuntimeBudgetTest(PostgresOrchestratorTestCase):
+class TrackerClock:
+    """A tracker whose clock the test moves (its test seam), in a harness."""
+
     def build(self, runtime, **options):
         self.fake = FakeClock()  # the tracker's clock (its test seam)
         tracker = BudgetTracker(
@@ -49,6 +52,9 @@ class RuntimeBudgetTest(PostgresOrchestratorTestCase):
         usage = await h.budget.usage(task_id)
         return next(u.consumed for u in usage if u.kind.value == "runtime_seconds")
 
+
+@requires_postgres
+class RuntimeBudgetTest(TrackerClock, PostgresOrchestratorTestCase):
     async def test_a_node_that_never_finishes_is_stopped_when_the_runtime_is_used_up(
         self,
     ):
@@ -249,6 +255,164 @@ class RuntimeBudgetTest(PostgresOrchestratorTestCase):
         self.assertEqual(report.outcome, Out.BUDGET_FAILED)
         self.assertEqual((await h.tasks.restore(task_id)).state, TaskState.FAILED)
         self.assertEqual(await self.states_of(task_id), {"a": "ready"})
+
+
+PLANNER_TIMEOUT = 7_200.0  # longer than the runtime limit of the Standard preset
+PLAN = NodeOutcome.succeeded(
+    NodeResult("a plan"), plan={"nodes": [node("a"), node("b", "a")]}
+)
+
+
+@requires_postgres
+class PlannerRuntimeBudgetTest(TrackerClock, PostgresOrchestratorTestCase):
+    """The budget is polled while the planner runs, as it is while nodes run: a
+    planner that never returns must not keep a task past its runtime limit (the
+    planner's own timeout is longer than the limit here)."""
+
+    def build(self, runtime, **options):
+        options.setdefault("config", {"node_timeout_seconds": PLANNER_TIMEOUT})
+        return super().build(runtime, **options)
+
+    async def poll(self, h) -> None:
+        await until(lambda: h.clock.waiting_for(2.0) >= 1, message="the poll timer")
+        await h.clock.advance(2.0)
+
+    def planner_ends(self, planner) -> list:
+        return [e for e in planner.timeline if e[0] == "end"]
+
+    async def test_a_planner_that_never_returns_is_stopped_at_the_runtime_limit(self):
+        planner = FakeRuntime("local", script={"plan": hang})
+        h = self.build(planner)
+        task_id = await self.prepare(h)
+        running = asyncio.create_task(h.orchestrator.run_once("w1"))
+        await until(lambda: len(planner.calls_of("plan")) == 1, message="the planner")
+
+        # Before the limit the poll finds nothing to stop.
+        self.fake.set(STANDARD_RUNTIME - 10)
+        await self.poll(h)
+        self.assertFalse(running.done())
+        self.assertEqual(self.planner_ends(planner), [])  # still planning
+        # Past the limit the next poll stops the run, well before the planner's
+        # own timeout (which the clock never reaches).
+        self.fake.set(STANDARD_RUNTIME + 5)
+        await self.poll(h)
+        report = await asyncio.wait_for(running, 120)
+
+        self.assertEqual(report.outcome, Out.WAITING_FOR_USER)
+        self.assertLess(h.clock.monotonic(), PLANNER_TIMEOUT)
+        # The planner was cancelled cleanly, and not asked again.
+        self.assertEqual(self.planner_ends(planner), [("end", "plan", 1)])
+        self.assertEqual(len(planner.calls_of("plan")), 1)
+        self.assertIsNone(await self.store.get(task_id, 1))
+        snapshot = await h.tasks.restore(task_id)
+        self.assertEqual(
+            (snapshot.state, snapshot.wait_reason), (TaskState.WAITING, WaitReason.USER)
+        )
+        self.assertGreaterEqual(await self.runtime_used(h, task_id), STANDARD_RUNTIME)
+        (entry,) = await self.rows("SELECT status FROM queue_entries")
+        self.assertEqual(entry["status"], "completed")
+
+    async def test_a_planner_that_returns_just_before_the_limit_gets_its_plan_run(self):
+        planner = FakeRuntime("local", script={"plan": PLAN})
+        planner.gate("plan")
+        h = self.build(planner)
+        task_id = await self.prepare(h)
+        running = asyncio.create_task(h.orchestrator.run_once("w1"))
+        await until(lambda: len(planner.calls_of("plan")) == 1, message="the planner")
+
+        self.fake.set(STANDARD_RUNTIME - 1)
+        await self.poll(h)  # one second short of the limit: nothing to stop
+        self.assertFalse(running.done())
+        planner.gates["plan"].set()
+        report = await asyncio.wait_for(running, 120)
+
+        self.assertEqual(report.outcome, Out.DAG_SUCCEEDED)
+        self.assertEqual(
+            await self.states_of(task_id), {"a": "succeeded", "b": "succeeded"}
+        )
+        self.assertEqual((await h.tasks.restore(task_id)).state, TaskState.EVALUATING)
+
+    async def test_a_plan_that_arrives_after_the_limit_is_kept_and_starts_nothing(self):
+        planner = FakeRuntime("local", script={"plan": PLAN})
+        planner.gate("plan")
+        h = self.build(planner)
+        task_id = await self.prepare(h)
+        running = asyncio.create_task(h.orchestrator.run_once("w1"))
+        await until(lambda: len(planner.calls_of("plan")) == 1, message="the planner")
+
+        self.fake.set(STANDARD_RUNTIME + 1)  # passes with no poll in between
+        planner.gates["plan"].set()
+        report = await asyncio.wait_for(running, 120)
+
+        self.assertEqual(report.outcome, Out.WAITING_FOR_USER)
+        self.assertEqual(await self.states_of(task_id), {"a": "ready", "b": "pending"})
+        self.assertEqual([a.node_key for a in planner.assignments], ["plan"])
+
+    async def test_a_used_up_retry_budget_found_while_planning_fails_the_task(self):
+        planner = FakeRuntime("local", script={"plan": hang})
+        h = self.build(planner)
+        task_id = await self.prepare(h)
+        running = asyncio.create_task(h.orchestrator.run_once("w1"))
+        await until(lambda: len(planner.calls_of("plan")) == 1, message="the planner")
+        await h.budget.record(task_id, BudgetKind.RETRIES, 11)  # Standard allows 10
+
+        await self.poll(h)
+        report = await asyncio.wait_for(running, 120)
+
+        self.assertEqual(report.outcome, Out.BUDGET_FAILED)
+        self.assertEqual((await h.tasks.restore(task_id)).state, TaskState.FAILED)
+        self.assertIsNone(await self.store.get(task_id, 1))
+        self.assertEqual(self.planner_ends(planner), [("end", "plan", 1)])
+
+    async def test_a_cancelled_task_stops_the_planner_at_the_next_poll(self):
+        planner = FakeRuntime("local", script={"plan": hang})
+        h = self.build(planner)
+        task_id = await self.prepare(h)
+        running = asyncio.create_task(h.orchestrator.run_once("w1"))
+        await until(lambda: len(planner.calls_of("plan")) == 1, message="the planner")
+        await h.tasks.execute(task_id, TaskCommand.CANCEL, actor=self.user)
+
+        await self.poll(h)
+        report = await asyncio.wait_for(running, 120)
+
+        self.assertEqual(report.outcome, Out.TASK_ENDED)
+        self.assertEqual(self.planner_ends(planner), [("end", "plan", 1)])
+        self.assertIsNone(await self.store.get(task_id, 1))
+        self.assertEqual((await h.tasks.restore(task_id)).state, TaskState.CANCELLED)
+
+    async def test_a_restarted_task_stops_the_old_planner_at_the_next_poll(self):
+        planner = FakeRuntime("local", script={"plan": hang})
+        h = self.build(planner)
+        task_id = await self.prepare(h)
+        running = asyncio.create_task(h.orchestrator.run_once("w1"))
+        await until(lambda: len(planner.calls_of("plan")) == 1, message="the planner")
+        await h.tasks.execute(task_id, TaskCommand.CANCEL, actor=self.user)
+        await h.tasks.execute(task_id, TaskCommand.RESTART, actor=self.user)
+
+        await self.poll(h)
+        report = await asyncio.wait_for(running, 120)
+
+        self.assertEqual(report.outcome, Out.SUPERSEDED)
+        self.assertEqual(self.planner_ends(planner), [("end", "plan", 1)])
+        self.assertIsNone(await self.store.get(task_id, 1))
+
+    async def test_a_pause_lets_the_planner_finish(self):
+        planner = FakeRuntime("local", script={"plan": PLAN})
+        planner.gate("plan")
+        h = self.build(planner)
+        task_id = await self.prepare(h)
+        running = asyncio.create_task(h.orchestrator.run_once("w1"))
+        await until(lambda: len(planner.calls_of("plan")) == 1, message="the planner")
+        await h.tasks.execute(task_id, TaskCommand.PAUSE, actor=self.user)
+
+        await self.poll(h)  # the pause is seen; the planner still runs
+        self.assertFalse(running.done())
+        planner.gates["plan"].set()
+        report = await asyncio.wait_for(running, 120)
+
+        self.assertEqual(report.outcome, Out.PAUSED)
+        self.assertEqual(await self.states_of(task_id), {"a": "ready", "b": "pending"})
+        self.assertEqual((await h.tasks.restore(task_id)).state, TaskState.PAUSED)
 
 
 if __name__ == "__main__":

@@ -136,6 +136,8 @@ from paw_backend.tools.interfaces import require_async_method
 
 logger = logging.getLogger(__name__)
 
+_RETRYING_STEPS = frozenset({NextStep.RETRY, NextStep.ALTERNATIVE, NextStep.ESCALATE})
+
 # Recorded as the reason of the task commands the orchestrator issues (fixed text).
 REASON_DAG_SUCCEEDED = "All required nodes succeeded"
 REASON_DAG_FAILED = "A required node did not succeed"
@@ -484,6 +486,18 @@ class Orchestrator:
                 return await self._end_after_stop(
                     run, self._stop_for_budget(action), None
                 )
+            # The lease was proved at the start of the run, but the task was started
+            # and the budget read since, and either can stall for longer than the
+            # lease: another worker may hold the entry now. ``start_runtime`` is the
+            # call only the lease holder may make (``BudgetTracker`` does not read
+            # the queue, and a stale caller would take the runtime session over and
+            # make the real holder's ``stop_runtime`` stale), so the lease is proved
+            # AGAIN immediately before it. A ``LeaseLostError`` here starts nothing
+            # and leaves the entry to its new holder. (The queue API has no combined
+            # "claim still valid and start" operation; the window that is left is
+            # the round trip between this heartbeat, which renews the lease for a
+            # whole ``lease_seconds``, and the call that follows it.)
+            await self._queue.heartbeat(entry.id, worker_id, entry.claim_count)
             run.generation = await self._budget.start_runtime(task_id)
             heartbeat = asyncio.create_task(self._heartbeats(run))
             report = await self._drive(run)
@@ -1183,9 +1197,11 @@ class Orchestrator:
 
         * the failure text is formatted, then hashed by the loop detector
           (``step`` is the node key: nodes are told apart); the text is never stored;
-        * ``decide_next_action`` gets the budget verdict (with one more retry
-          planned) and the loop verdict of the node's failures; whether an escalation
-          is possible is whether the node's ladder has another agent;
+        * ``decide_next_action`` gets the budget verdict as it is and the loop
+          verdict of the node's failures; whether an escalation is possible is
+          whether the node's ladder has another agent; only a failure that WILL
+          retry is then asked again with one more retry planned (a failure that
+          cannot retry costs no retry: ``_retry_step``);
         * ``CONTINUE`` retries, ``TRY_ALTERNATIVE`` changes the approach,
           ``ESCALATE_AGENT`` moves to the next agent (a new approach as well: the
           loop history of the old one must not condemn the new one),
@@ -1214,7 +1230,9 @@ class Orchestrator:
             logger.error("Recording a failure failed (%s)", error_class_of(error))
         ladder = self._config.ladders[node.role]
         can_escalate = node.agent_index + 1 < len(ladder)
-        budget = await self._budget.check(run.task.id, planned={BudgetKind.RETRIES: 1})
+        # Decision 0007 first, on the budget as it is: a budget that is already
+        # used up stops the run whatever the failure says.
+        budget = await self._budget.check(run.task.id)
         decision = decide_next_action(budget, verdict, can_escalate=can_escalate)
 
         stop: _Stop | None = None
@@ -1224,29 +1242,29 @@ class Orchestrator:
             stop = _Stop(_StopKind.FAIL)
         elif decision.action is NextAction.WAIT_FOR_USER:
             step, stop = NextStep.HOLD, _Stop(_StopKind.WAIT)
-        elif finished.retryable:
-            from_limit = node.rung_attempts >= self._config.max_attempts_per_rung
-            next_approach = node.approach + 1
-            if decision.action is NextAction.ESCALATE_AGENT:
-                if can_escalate and next_approach <= MAX_APPROACH:
-                    step = NextStep.ESCALATE
-                    arguments = {
-                        "agent_index": node.agent_index + 1,
-                        "approach": next_approach,
-                    }
-            elif not from_limit:
-                if (
-                    decision.action is NextAction.TRY_ALTERNATIVE
-                    and next_approach <= MAX_APPROACH
-                ):
-                    step = NextStep.ALTERNATIVE
-                    arguments = {
-                        "agent_index": node.agent_index,
-                        "approach": next_approach,
-                    }
-                elif decision.action is NextAction.CONTINUE:
-                    step = NextStep.RETRY
-        if step in (NextStep.RETRY, NextStep.ALTERNATIVE, NextStep.ESCALATE):
+        else:
+            step, arguments = self._retry_step(
+                node, decision.action, finished, can_escalate
+            )
+            if step in _RETRYING_STEPS:
+                # A retry is reserved from the budget only for a failure that WILL
+                # retry (it may, and the rung has an attempt left, or the loop
+                # decision escalates): one that cannot retry costs no retry, so the
+                # retries counter exactly at its limit does not stop the task for
+                # it (an optional node that fails for good while every required node
+                # succeeds must let the DAG succeed).
+                planned = await self._budget.check(
+                    run.task.id, planned={BudgetKind.RETRIES: 1}
+                )
+                reserved = decide_next_action(
+                    planned, verdict, can_escalate=can_escalate
+                )
+                if reserved.action is NextAction.FAIL:
+                    step, arguments, stop = NextStep.GIVE_UP, {}, _Stop(_StopKind.FAIL)
+                elif reserved.action is NextAction.WAIT_FOR_USER:
+                    step, arguments = NextStep.HOLD, {}
+                    stop = _Stop(_StopKind.WAIT)
+        if step in _RETRYING_STEPS:
             await self._budget.record(run.task.id, BudgetKind.RETRIES, 1)
             run.not_before[node.key] = self._clock.monotonic() + self._config.backoff(
                 node.rung_attempts
@@ -1268,6 +1286,40 @@ class Orchestrator:
         )
         return dag, stop
 
+    def _retry_step(
+        self,
+        node: NodeRecord,
+        action: NextAction,
+        finished: _Finished,
+        can_escalate: bool,
+    ) -> tuple[NextStep, dict[str, int]]:
+        """Where a failed node goes for the loop decision ``action`` (before the
+        budget is asked for a retry): a retrying step with its arguments, or
+        ``GIVE_UP`` for a failure that cannot retry (it said so, the rung is out of
+        attempts, or the approach counter is at its end)."""
+        if not finished.retryable:
+            return NextStep.GIVE_UP, {}
+        next_approach = node.approach + 1
+        if action is NextAction.ESCALATE_AGENT:
+            if can_escalate and next_approach <= MAX_APPROACH:
+                return NextStep.ESCALATE, {
+                    "agent_index": node.agent_index + 1,
+                    "approach": next_approach,
+                }
+            return NextStep.GIVE_UP, {}
+        if node.rung_attempts >= self._config.max_attempts_per_rung:
+            return NextStep.GIVE_UP, {}
+        if action is NextAction.TRY_ALTERNATIVE:
+            if next_approach <= MAX_APPROACH:
+                return NextStep.ALTERNATIVE, {
+                    "agent_index": node.agent_index,
+                    "approach": next_approach,
+                }
+            return NextStep.GIVE_UP, {}
+        if action is NextAction.CONTINUE:
+            return NextStep.RETRY, {}
+        return NextStep.GIVE_UP, {}
+
     async def _log(self, run: _Run, level: LogLevel, message: str) -> None:
         """A fixed-format line in the task log (never a failure text). A stale run
         is a stopped run; any other error is only logged."""
@@ -1279,6 +1331,53 @@ class Orchestrator:
             logger.warning("Task log failed (%s)", error_class_of(error))
 
     # -- the decomposition ------------------------------------------------------------
+
+    async def _plan_attempt(
+        self, run: _Run, spec: _Spec
+    ) -> _Finished | _Stop | RunReport:
+        """One call of the planner, watched the way the running nodes are.
+
+        The runtime accrues in the tracker and the planner reports none of it, so
+        nothing but this look would stop a planner that runs past the limit, or one
+        that never returns (its own timeout may be much longer than what is left).
+        Every ``poll_seconds`` (and when the lease is lost) the task's state and the
+        whole budget are read: a task that ended, a run that was replaced or a lost
+        lease stops the planner (the ``RunReport`` says how the run ends), a used-up
+        budget stops it and returns the ``_Stop`` Decision 0007 decides. The planner
+        is always cancelled before this returns (its attempt is never left running).
+        A pause lets the planner finish, like a node. ``_Finished`` is what the
+        planner returned (it may return at any moment, also with the budget used up:
+        the run then ends at the first look of ``_drive``, the plan kept).
+        """
+        work = asyncio.create_task(self._attempt(run, spec))
+        lost_waiter = asyncio.create_task(run.lost.wait())
+        try:
+            while True:
+                timer = asyncio.create_task(
+                    self._clock.sleep(self._config.poll_seconds)
+                )
+                try:
+                    await asyncio.wait(
+                        {work, timer, lost_waiter}, return_when=asyncio.FIRST_COMPLETED
+                    )
+                finally:
+                    timer.cancel()
+                    await asyncio.gather(timer, return_exceptions=True)
+                if work.done():
+                    return self._result_of(work)
+                watch = await self._watch(run)
+                if watch not in (_Watch.RUNNING, _Watch.PAUSED):
+                    return RunReport(
+                        _OUTCOME_OF_WATCH.get(watch, RunOutcome.TASK_ENDED),
+                        run.task.id,
+                    )
+                exhausted = await self._exhausted_budget(run)
+                if exhausted is not None:
+                    return exhausted
+        finally:
+            for task in (work, lost_waiter):
+                task.cancel()
+            await asyncio.gather(work, lost_waiter, return_exceptions=True)
 
     async def _plan(self, run: _Run) -> DagRecord | RunReport:
         """Ask the planner role for a plan until one is accepted (at most
@@ -1312,7 +1411,11 @@ class Orchestrator:
                 approach=0,
                 node=None,
             )
-            finished = await self._attempt(run, spec)
+            finished = await self._plan_attempt(run, spec)
+            if isinstance(finished, RunReport):
+                return finished
+            if isinstance(finished, _Stop):  # the budget ran out while planning
+                return await self._end_after_stop(run, finished, None)
             if finished.stopped is not None:
                 if finished.stopped is StopReason.BUDGET_EXCEEDED:
                     stop = await self._budget_stop(run)
