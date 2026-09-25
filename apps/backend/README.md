@@ -2,11 +2,11 @@
 
 Personal AI Workspace の Core Backend です。
 [PAW-020](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/17) で、後続の Issue が載る最小の Application Skeleton を実装しました。
-Login と Session はまだ実装していません（PAW-022 以降）。
+Login・Session・Password の Policy と、Owner の Token を受け取る Endpoint は [PAW-022](#login--session--password-policy) で実装しました（Passkey の登録・強制と Step-up の Passkey は PAW-023）。
 RBAC と Audit（PAW-025）、Task の Lifecycle と永続化（[PAW-032](#agent-task-lifecycle)、HTTP の Endpoint はまだありません）、Task Queue・Budget・Loop 検知（[PAW-033](#task-queue--budget--loop-検知)）、Tool Broker と Capability Policy（[PAW-031](#tool-broker--capability-policy)、HTTP の Endpoint はまだありません）、Memory の PostgreSQL Schema（[PAW-040](#memory--conversation-schema)）、
 最小の `users` Table と Owner の初期設定・復旧のコマンド（[PAW-021](#owner-の初期設定と復旧)）を実装済みです。Memory の保存・整理・検索の処理は PAW-041 以降です。
 Shared Memory の管理（Owner / Admin の作成・編集・削除・復元、Candidate の承認、Agent の自動昇格の拒否、System Policy の優先。[PAW-046](#shared-memory-administration)、HTTP の Endpoint はまだありません）も実装済みです。
-Research の一時保存（[PAW-050](#research-scratch-store)、24 時間 TTL、期限切れを消す Janitor つき、HTTP の Endpoint はまだありません）と、Research Provider の Adapter Interface（[PAW-051](#research-provider-adapter)、実際の Provider（Direct Web、Docs、GitHub、OpenCode）はまだありません）と、外部の検索へ送る Query の最小化と送信の Audit（[PAW-053](#research-privacy-filter)、Audit の永続化はまだありません）も実装済みです。
+Research の一時保存（[PAW-050](#research-scratch-store)、24 時間 TTL、期限切れを消す Janitor つき、HTTP の Endpoint はまだありません）と、Research Provider の Adapter Interface（[PAW-051](#research-provider-adapter)、実際の Provider（Direct Web、Docs、GitHub、OpenCode）はまだありません）と、外部の検索へ送る Query の最小化と送信の Audit（[PAW-053](#research-privacy-filter)。Audit は [#87](#audit-の永続化issue-87) で `audit_events` に永続化済み。方式は Decision 0023（Approved、2026-09-26）で決めています）も実装済みです。
 Claim と Source の対応・回答や Task からの追跡（[PAW-052](#evidence--claim-provenance)、HTTP の Endpoint はまだありません）も実装済みです。
 Project の作成・招待制の Membership・Lifecycle（Active / Archived / Pending deletion / Deleted）は [PAW-026](#project-crud--membership--lifecycle) で実装済みです（Service のみ。HTTP の Endpoint と Session はまだありません）。
 
@@ -33,6 +33,7 @@ Core Backend は GPU 非依存とし、Local Model Runtime を停止できる構
 | Test / Lint | 標準 `unittest`、Ruff |
 | Package 管理 | uv + `pyproject.toml`（依存は完全一致で固定） |
 
+Password の Hash は `argon2-cffi`（Argon2id。PAW-022 で加えた Package で、`pyproject.toml`、`.pre-commit-config.yaml`、`.github/requirements-ci.txt` に完全一致で固定しています）です。
 pgvector は Memory Schema（PAW-040）の Migration が `vector` extension として有効にします。
 Python 側の Package（`pgvector-python`）は使わず、`paw_backend/memory/vector.py` の Column 型だけで扱います。
 
@@ -42,7 +43,7 @@ Python 側の Package（`pgvector-python`）は使わず、`paw_backend/memory/v
 apps/backend/
 ├─ pyproject.toml          # 依存（完全一致で固定）と Ruff 設定
 ├─ alembic.ini             # Alembic 設定（DB URL は持たない）
-├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0026 は Project、0031 は Tool Approval、0033 は Queue / Budget / Loop、0040 は Memory Schema、0046 は Shared Memory Candidate、0050 は Research Scratch、0052 は Evidence / Claim Provenance、0083 は `tasks (project_id, state)` の Index）
+├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0022 は Password / Session / Login Throttle / 認証 Policy、0026 は Project、0031 は Tool Approval、0033 は Queue / Budget / Loop、0040 は Memory Schema、0046 は Shared Memory Candidate、0050 は Research Scratch、0052 は Evidence / Claim Provenance、0083 は `tasks (project_id, state)` の Index、0087 は外部送信の Audit の `audit_events.details`）
 ├─ paw_backend/
 │  ├─ app.py               # create_app(settings)
 │  ├─ config.py            # PAW_ 環境変数から読む Settings
@@ -53,6 +54,7 @@ apps/backend/
 │  ├─ middleware.py        # Request ID、Host 検証、Security Header
 │  ├─ security.py          # Host / Origin の判定
 │  ├─ authz/               # Role・Capability・認可の判定と Audit Event（PAW-025）
+│  ├─ auth/                # Login、Session、Password（Argon2id）、Backoff、Step-up の差し込み口、認証 Policy、CSRF の Origin 検査（PAW-022）
 │  ├─ identity/            # 最小の users、One-time Token。`redeemer.py` は Web 側、`operator.py`（Owner の作成・Token の発行）は cli だけが使う（PAW-021）
 │  ├─ cli/                 # server-local の管理コマンド `python -m paw_backend.cli`（PAW-021）
 │  ├─ tasks/               # Agent Task の状態遷移と永続化（PAW-032）。`project_gate.py` は Project の状態 Gate の Protocol（Issue #83）
@@ -61,13 +63,13 @@ apps/backend/
 │  │  └─ shared/           # Shared Memory の管理: Service、Candidate、Rule 関数、Policy の優先（PAW-046）
 │  ├─ projects/            # Project、Membership（招待制）、Lifecycle（PAW-026）、管理者向けの全 Project 一覧（Issue #84）。`task_gate.py` は Task Lane に渡す Project の状態 Gate（Issue #83）、`task_stop.py` は Delete 開始時の Task 停止
 │  ├─ research/providers/  # Research Provider の Adapter Interface と Broker（PAW-051）
-│  ├─ research/privacy/    # Research の Privacy Filter: Query の最小化と外部送信の Audit（PAW-053）
+│  ├─ research/privacy/    # Research の Privacy Filter: Query の最小化と外部送信の Audit（PAW-053、永続の Sink は #87）
 │  ├─ research/scratch/    # Research Scratch Store: 24 時間 TTL の一時保存と、期限切れを消す Janitor（PAW-050）
 │  ├─ research/provenance/ # Evidence / Claim Provenance: Claim と Source の対応、回答・Task からの追跡（PAW-052）
 │  ├─ tools/               # Tool Broker、Capability Policy、Approval（PAW-031）
 │  └─ api/
 │     ├─ deps.py           # FastAPI Dependency
-│     └─ v1/               # /api/v1 の Router（health、events）
+│     └─ v1/               # /api/v1 の Router（health、events、auth）
 └─ tests/                  # unittest
 ```
 
@@ -113,7 +115,7 @@ Database には pgvector が必要です（CI は `pgvector/pgvector:pg18` を�
 | `PAW_ALLOW_PLAINTEXT_HTTP` | `false` | Loopback 以外で TLS なしの起動を許可する（下記） |
 | `PAW_HSTS_MAX_AGE_SECONDS` | `31536000` | `Strict-Transport-Security` の max-age。HTTPS の Response にだけ付ける。`0` で付けない |
 | `PAW_ALLOWED_HOSTS` | `localhost,127.0.0.1,[::1]` | 許可する `Host`（Comma 区切り、Port なし）。Reverse Proxy 経由では公開 Host 名を含める |
-| `PAW_ALLOWED_ORIGINS` | 空 | WebSocket を開いてよい Origin（Comma 区切り、例 `https://paw.example.org`） |
+| `PAW_ALLOWED_ORIGINS` | 空 | WebSocket を開いてよい Origin と、状態を変える Request（`POST` / `PUT` / `PATCH` / `DELETE`）を送ってよい Browser の Origin（Comma 区切り、例 `https://paw.example.org`）。Request 自身の Origin（外部の Scheme、Host、Port が同じ）は常に許可（状態を変える Request の検査。WebSocket は Host の Authority だけを見ます） |
 | `PAW_SHUTDOWN_TIMEOUT_SECONDS` | `5` | 停止時に開いたままの SSE / WebSocket を待つ秒数。超えると切断する |
 | `PAW_DATABASE_URL` | なし | `postgresql://` または `postgresql+psycopg://`。未設定でも起動する |
 | `PAW_DATABASE_TIMEOUT_SECONDS` | `3` | 接続と Readiness 確認の Timeout |
@@ -125,6 +127,16 @@ Database には pgvector が必要です（CI は `pgvector/pgvector:pg18` を�
 | `PAW_OPERATOR_DATABASE_ROLE` | なし | 上の Role 名（`PAW_APP_DATABASE_ROLE` と同じ検証）。Migration `0021` が、実在するこの Role に管理コマンドの権限を与える |
 | `PAW_SETUP_TOKEN_TTL_SECONDS` | `1800` | Owner の Setup / Recovery Token の有効期間（60〜14400 秒） |
 | `PAW_SETUP_TOKEN_MAX_ATTEMPTS` | `5` | 1 つの Token に許す試行回数（1〜20）。使い切った Token は無効になる |
+| `PAW_PASSWORD_HASH_TIME_COST` / `PAW_PASSWORD_HASH_MEMORY_KIB` / `PAW_PASSWORD_HASH_PARALLELISM` | `3` / `65536` / `4` | Argon2id の Parameter（RFC 9106 の 2 番目の推奨）。メモリは 19456〜1048576 KiB（OWASP の最小以上）。[Login / Session / Password Policy](#login--session--password-policy) |
+| `PAW_PASSWORD_HASH_CONCURRENCY` | `2` | 同時に計算する Hash の数（1〜16）。待つ Job は最大 64 で、超えると 503 |
+| `PAW_SESSION_IDLE_DAYS` / `PAW_SESSION_REMEMBER_DAYS` / `PAW_SESSION_ABSOLUTE_DAYS` | `30` / `90` / `90` | 通常 Session の無操作の上限、Remember Me の上限（無操作も絶対も）、通常 Session の絶対の上限（日）。前 2 つは要件、絶対の上限は [Decision 0015](../../docs/decisions/0015-login-session-password-policy.md) で承認された値 |
+| `PAW_SESSION_TOUCH_INTERVAL_SECONDS` | `60` | Session の最終利用日時を書く間隔の下限（秒） |
+| `PAW_SESSION_COOKIE_SAMESITE` | `strict` | Session Cookie の `SameSite`（`strict` / `lax`）。`Secure` と `HttpOnly` は常に付く |
+| `PAW_LOGIN_ACCOUNT_FREE_ATTEMPTS` / `PAW_LOGIN_SOURCE_FREE_ATTEMPTS` | `5` / `20` | Account と接続元で、Lock が始まる試行の番号（要件: 5 回目で約 30 秒） |
+| `PAW_LOGIN_BACKOFF_SECONDS` | `30,60,300,900,3600` | Lock の長さ（Comma 区切りの秒。各 1〜86400、減らない。最後を繰り返す） |
+| `PAW_LOGIN_DECAY_SECONDS` | `86400` | 試行がなければ Counter を忘れるまでの秒 |
+| `PAW_REDEEM_SOURCE_FREE_ATTEMPTS` / `PAW_REDEEM_GLOBAL_FREE_ATTEMPTS` | `5` / `30` | Token の受け取りで、接続元ごとと全体の、Lock が始まる試行の番号 |
+| `PAW_REDEEM_BACKOFF_SECONDS` / `PAW_REDEEM_DECAY_SECONDS` | `60,300,900,3600` / `900` | 同、Lock の長さと数え直しの秒 |
 | `PAW_SCRATCH_PURGE_INTERVAL_SECONDS` | `3600` | 期限切れの Research Scratch Item を消す Janitor の間隔（秒）。`0` で Janitor を止める（期限切れの行が DB に残り続ける）。それ以外は 60〜86400。DB が未設定のときも起動しない。[Janitor](#janitor期限切れの削除) |
 | `PAW_EVENT_HEARTBEAT_SECONDS` | `15` | `system.heartbeat` の間隔 |
 | `PAW_EVENT_QUEUE_SIZE` | `100` | 接続ごとの Event Queue。溢れた場合は古い Event を捨てる |
@@ -159,6 +171,7 @@ Endpoint は `/api/v1` 以下です。OpenAPI Schema は `/api/v1/openapi.json` 
 | `GET /api/v1/health/ready` | Readiness。DB へ `SELECT 1` を実行する |
 | `GET /api/v1/events/stream` | Server-Sent Events |
 | `WebSocket /api/v1/events/ws` | WebSocket |
+| `/api/v1/auth/*` | Login、Session、Password、Step-up、Owner の Token、認証 Policy（12 個の Endpoint）。[Login / Session / Password Policy](#login--session--password-policy) |
 
 Readiness は 200 または 503 で、Body の形は同じです。
 
@@ -204,12 +217,12 @@ User、Project、Task、Memory のデータは含みません。
   - 負けた接続は、Response の Header を送る前に SSE が 503（`event_capacity_reached`）、WebSocket が Close Code 1013 になります。
   - 枠は、Stream の終了、切断（Stream の開始前を含む）、エラー、キャンセルのどの場合も必ず解放されます。
 
-PAW-022（Login / Session）は、システム Event 以外を配信する前に次を実装する必要があります。
+Session は PAW-022 で実装済みです。この 2 つの Endpoint は、システム Event しか流さない間は認証なしのままで、非公開の Event を足す Issue は、配信する前に次を実装する必要があります。
 
 - 認証済み Session の要求（`Origin` 検査は Session Cookie を使う WebSocket に必須だが、認証の代わりにはならない）
 - Event 種別ごとの認可
 
-該当箇所には `TODO(PAW-022)` を置いています。
+該当箇所には `TODO(PAW-022)` を置いています（Session の認証は使える状態になったので、`require_capability` を付けるだけです）。
 
 ## Database と Migration
 
@@ -393,7 +406,7 @@ Authorizer（PAW-025）は `project.task.run` を Archived / Pending deletion �
 
 Test: `tests/test_project_state_gate.py`（5 つの操作 × Active 以外の状態、書き込みが残らないこと、Lock が Commit まで続くこと、有界の待ちと `lock_timeout` の復元、引数、Gate の必須化と Production に `AlwaysActiveGate` がないこと、Delete と書き込みの両方の順序の競合）、`tests/test_project_claim_filter.py`（Claim の Filter、Start、Claim と Archive の競合、Plan）、`tests/test_tasks_project_index.py`（Index の Migration の Up / Down / Up と Autogenerate の差分なし、Plan）。これらは `test_projects_grants.py` が Superuser でない Role でも実行します。
 
-Migration `0083`（Index だけ。Table を作らないので権限の変更はありません）の `down_revision` は `0026` です（鎖は `0001 → 0025 → 0032 → 0040 → 0021 → 0033 → 0031 → 0050 → 0046 → 0052 → 0026 → 0083`。統合時に並べ替えます）。
+Migration `0083`（Index だけ。Table を作らないので権限の変更はありません）の `down_revision` は `0022` です（鎖は `0001 → 0025 → 0032 → 0040 → 0021 → 0033 → 0031 → 0050 → 0046 → 0052 → 0026 → 0087 → 0022 → 0083`）。
 
 
 ### Migration は Application の Role に権限を与える（Contributor 向けの規則）
@@ -659,10 +672,9 @@ Resource を作る関数は**認証済みの User の Request にだけ**呼び�
 
 `/api/v1` のすべての Route は `require_capability` で守るか、`tests/test_authz_routes.py` の公開一覧に理由付きで載せる必要があります（載せ忘れると Test が失敗します）。守りの有無は Route の**操作（HTTP Method と Path の組、WebSocket は `WEBSOCKET` と Path の組）ごと**に調べます。同じ Path の `GET` を守っても `POST` を守ったことにはならず、公開一覧の `GET` は同じ Path の他の Method を公開しません。
 
-**現在、認証は未実装（PAW-022）なので、`require_capability` を付けた Endpoint はすべて 401 を返します。**
-既定の `UnauthenticatedProvider` が誰も認証しないためです。PAW-022 は `PrincipalProvider`（Request から有効な User の `Principal` を返す）を実装し、
-`install_authz(app, ..., principal_provider=...)` で差し替えます。Provider は保存済みのデータから `Principal` を作ることが必須で、Client が申告した Role を使ってはいけません。
-`/api/v1/events` の 2 つの Endpoint は現在も認証なしです（`TODO(PAW-022)`。公開一覧に載っています）。
+**認証は PAW-022 の Session Cookie です**（[Login / Session / Password Policy](#login--session--password-policy)）。`create_app` は `SessionPrincipalProvider`（Cookie から有効な User の `Principal` を返す）を `install_authz` で組み込み、Cookie が無い Request は 401 です。
+Provider は保存済みのデータから `Principal` を作り、Client が申告した Role は使いません。`install_authz` の既定の `UnauthenticatedProvider`（誰も認証しない）は、Provider を渡さない呼び出し（Test）のためだけに残っています。
+`/api/v1/events` の 2 つの Endpoint は、システム Event しか流さないため現在も認証なしです（`TODO(PAW-022)`。公開一覧に載っています）。
 
 ### Agent と LLM
 
@@ -698,14 +710,24 @@ Tool Broker の Capability（read / write / execute / network / credential-use /
 `resource_kind` / `resource_id` / `project_id` / `repo_id` / `repo_acl`（Repository のときだけ `inherit` か `override`）、`decision`（`allow` / `deny`）、`reason`（固定の Reason Code）、
 `old_role` / `new_role`（User の Role 変更のときだけ）、
 `client_request_id`（Client が送った `X-Request-ID`。検証済みで 64 文字以内だが**偽造できる**ので、Request の識別には使わない）です。
-Table は加えて `recorded_at`（Database の時計。INSERT 時に Trigger が `now()` へ上書きするので、INSERT できる Role も指定できない）を持ちます。Secret、Prompt、本文は持ちません。
+Table は加えて `recorded_at`（Database の時計。INSERT 時に Trigger が `now()` へ上書きするので、INSERT できる Role も指定できない）と、`details`（Migration `0087`、NULL 可の JSONB）を持ちます。Secret、Prompt、本文は持ちません。
+`AuditEvent` には `details` がなく、ほとんどの行では NULL です。`details` を使うのは、下の `research.external_send` の行だけです（[Audit の永続化](#audit-の永続化issue-87)）。
+
+**`action` の一覧**（`audit_events` に新しい `action` を足すときは、ここと、必要なら Migration の CHECK 制約に登録します）:
+
+| `action` | 出所 | `reason` の例 |
+| --- | --- | --- |
+| Capability の値（`project.repo.write`、`shared_memory.delete` など）。存在しない Capability は `unknown` | `Authorizer` の判定（PAW-025）。Shared Memory の変更の完了の行は、同じ `action` で `reason` が `completed`（PAW-046） | `Reason` の値（`granted_by_system_role`、`audit_unavailable` など） |
+| `tool.<Tool 名>`、`tool.unknown`、`tool.approval.approve` / `reject` / `revoke` | Tool Broker（PAW-031） | `BrokerReason` の値 |
+| `owner.create`、`owner.replace`、`owner.setup_token.issue`、`owner.recovery_token.issue`、`owner.token.revoke`、`owner.token.redeem` | Owner の設定・復旧（PAW-021） | `AuditReason` の値 |
+| `research.external_send` | Research Privacy Filter の永続の Sink（Issue [#87](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/87)） | `send_authorized`（`decision` は `allow`。`actor_role` は `system`、`resource_kind` は `research_query`） |
 
 **Audit Mode**（`CAPABILITIES[...].audit`）は Capability ごとに決まり、既定は `REQUIRED` です。
 
 | Mode | 対象 | 記録 | Audit を書けないとき |
 | --- | --- | --- | --- |
 | `REQUIRED`（既定） | 上記以外のすべて（副作用のある操作、管理系、`admin.audit.view` / `admin.usage.view` も含む） | 許可も拒否も記録する | **許可を拒否に変える**（`audit_unavailable`、HTTP 503）。拒否は拒否のまま |
-| `DENIED_ONLY` | 読み取り専用の許可リスト（`project.read`、`shared_memory.read`）だけ | 拒否だけを Best Effort で記録し、許可した読み取りは記録しない | 読み取りは止めない |
+| `DENIED_ONLY` | 読み取り専用の許可リスト（`project.read`、`shared_memory.read`、`account.read`）だけ | 拒否だけを Best Effort で記録し、許可した読み取りは記録しない | 読み取りは止めない |
 
 - **認証されていない Request の拒否は Database に書きません。** 誰でも作れる行になり、Table は削除できないためです。
   代わりに `INFO` の Log（Reason、Action、Resource の種類、`correlation_id`、`client_request_id`。例外の文は含めない）に出します。
@@ -745,14 +767,14 @@ Application 起動時に一度、接続 User の権限を確認し、**`WARNING`
 #### 残っているリスクと既知の制限
 
 - 許可した読み取り（`DENIED_ONLY`。人間の `project.read`、`shared_memory.read`）は記録しません。誰が何を読んだかは Audit から分かりません（Agent の読み取りは記録します）。
-- 認証済みの User の拒否は、1 回ごとに 1 行を書きます。回数制限は PAW-022（Rate Limit、Lockout）までありません。未認証の拒否は Log だけです。
+- 認証済みの User の拒否は、1 回ごとに 1 行を書きます。この拒否の回数制限はありません（Login の Backoff と Token の Rate Limit は別で、[Login / Session / Password Policy](#login--session--password-policy)）。未認証の拒否は Log だけです。
 - 保存期間・Partition・古い行の退避は未実装です（Table は削除できないため、行数は増え続けます）。
 - Repository の ACL の保存と解決は呼び出す側（PAW-027 など）の責任です。この Backend は、渡された `RepoAcl` を判定するだけです。
   Override が Project の Role を広げてよいか、User 単位の許可リストを持つかは、要件が定めておらず、Decision 0004 で Human が「狭めるだけ・権限の集合」で承認しました（2026-09-25）。
 - `Scope.SELF` の Capability（`chat.use`、`memory.use` など）は `Project` の状態と Member 資格を見ません
   （たとえば Pending deletion の Project の Chat、Member から外された後の Memory）。Project との Member 関係は PAW-026 の `project_members` にありますが、これらの Capability の判定はまだ Member 資格を見ません（[Project CRUD / Membership / Lifecycle](#project-crud--membership--lifecycle)）。
 - `tests/test_authz_routes.py` が調べるのは `/api/v1` の Route だけで、FastAPI の内部（`effective_route_contexts`）に依存します。Method の一覧を持たない Route（`Mount` など）は Method `*` の 1 操作として報告し、見逃しません。
-- `create_app` は既定の Provider と Directory を組み込みます。PAW-022 が `install_authz` を呼んで差し替えるまで、全 Endpoint が 401 です。
+- `create_app` は PAW-022 の `SessionPrincipalProvider` と `DatabasePrincipalDirectory` を組み込みます（Session Cookie が無い Request は 401）。
 - 重要操作の Step-up 認証の項目は Audit にありません（PAW-023 で追加します）。
 - Migration の鎖は `0001 → 0025 → 0032 → 0040 → 0021` です（`0021` の Revision ID は Issue 番号で、鎖の順序ではありません。統合時に並びを確認します）。
 
@@ -767,7 +789,7 @@ Application 起動時に一度、接続 User の権限を確認し、**`WARNING`
 - Web 側が使う `TokenRedeemer` は Token を**使う**ことしかできません。Owner の作成と Token の発行は Operator 側の `OwnerOperator`（`identity/operator.py`）だけで、Web の Database Role には Token を作る権限もありません（下記「Database の Role」）。
 - 管理コマンド `python -m paw_backend.cli` は Backend の Package の一部で、Server 上で Operator の DB の認証情報を使って実行します。
   [`apps/cli/`](../cli/README.md) の Client は Backend の公開 HTTP API だけを呼ぶため、**最初の Owner を作れず**、復旧もできません（HTTP API に該当する経路がないためです）。
-- コマンドが作るのは Owner の行（`invited`、認証情報なし）と 1 回限りの Token だけです。Password と Passkey の登録は Token を受け取る Web 側（PAW-022 / PAW-023）が行います。
+- コマンドが作るのは Owner の行（`invited`、認証情報なし）と 1 回限りの Token だけです。Password の設定は Token を受け取る Web 側（PAW-022 の `POST /api/v1/auth/token/redeem`）が、Passkey の登録は PAW-023 が行います。
 
 ### 手順
 
@@ -781,7 +803,7 @@ python -m paw_backend.cli owner-setup --login-name tomoki
 
 - **stdout に Token だけが 1 行**出ます（`pawst1.<Token ID>.<Secret>`）。stderr に owner_id、login name、実行した Process の uid（`operator uid=... sudo_uid=...`）、有効期限が出ます。Token は**この 1 回しか表示されません**（保存しないため再表示できません）。
   端末のスクロールバックの記録、`tee`、CI の Log、`script` に Token を残さないでください。`TOKEN=$(...)` のように取り込めますが、Shell の履歴やプロセス一覧に出さないでください（Token は引数ではなく出力です）。
-- Token を Web の Setup 画面へ入力します（PAW-022 で実装。それまでは受け取る側がありません）。**有効期間は既定で 30 分**（`PAW_SETUP_TOKEN_TTL_SECONDS`。上限 4 時間）、使えるのは 1 回だけです。
+- Token を Web の Setup 画面から `POST /api/v1/auth/token/redeem` へ渡します（PAW-022 で実装。Web Client の画面はまだありません）。**有効期間は既定で 30 分**（`PAW_SETUP_TOKEN_TTL_SECONDS`。上限 4 時間）、使えるのは 1 回だけです。
 - Owner は Passkey が必須です（`users.passkey_required = true`）。Passkey の登録の強制は PAW-023 です。
 
 ```bash
@@ -795,7 +817,7 @@ python -m paw_backend.cli owner-recover --confirm-owner-recovery
 - **Token を表示できなかった場合**（終了コード 3、下記）も、`owner-recover` で新しい Token を発行します。
 - **Owner のアカウントが削除待ち（`pending_deletion`）または削除済み（`deleted`）の場合**: `owner-setup` も `owner-recover` も、実際の状態を報告して拒否します（終了コード 1）。
   `owner-setup --login-name <新しい名前> --replace-non-live-owner` を明示すると、古いアカウントを一般の `user` に降格し（状態とデータはそのまま）、その Token を無効にして、新しい Owner を作ります。1 つの Transaction で、`owner.replace` を含めて Audit に残ります。**生きている Owner（`invited` / `active`）は、このフラグを付けても置き換えません。**
-- Recovery Token で Owner を復旧する Web 側は、既存の全 Session、現在の Password、既存の Passkey を無効にする（または再登録を必須にする）必要があります（下記「PAW-022 / PAW-023 との接続」）。
+- Recovery Token で Owner を復旧する Web 側は、既存の全 Session と現在の Password を無効にします（PAW-022 で実装済み）。既存の Passkey は PAW-023 が無効にします（下記「PAW-022 / PAW-023 との接続」）。
 
 | 終了コード | 意味 |
 | --- | --- |
@@ -827,7 +849,7 @@ Token の行を **INSERT できる Role は、Owner を乗っ取れます**（�
 - Operator の `audit_events` への INSERT の権限は、`audit_events`（Migration `0025`）がある場合だけ与えます。統合後に `0021` が `0025` より前に来る場合は、`0025` の後で `GRANT INSERT ON audit_events TO <operator role>` を実行してください。
 
 **守れないもの**: Schema の Owner の Role と Superuser は何でもできます。Web の Role は、未使用の Token を使用済みにしたり（`used_at`）試行を使い切らせたり（`attempts`）できます。Owner が Token を使えなくなる可用性の問題で、乗っ取りではなく、Operator の `owner-recover` で回復します。
-PAW-022 / PAW-023 が Password と Passkey の Table を追加すると、Application はそれを書けなければならないため、**Application が侵害されれば、Owner の認証情報をそこで変えられる可能性は残ります**。この分離が塞ぐのは Token の偽造による乗っ取りで、それ以外の経路は PAW-023 の Step-up などで守る必要があります。
+PAW-022 が Password と Session の Table を追加した（Application はそれを書けなければならないため）ので、**Application が侵害されれば、Owner の認証情報をそこで変えられる可能性は残ります**。この分離が塞ぐのは Token の偽造による乗っ取りで、それ以外の経路は PAW-023 の Step-up などで守る必要があります。
 
 ### Token
 
@@ -868,7 +890,7 @@ PAW-022 / PAW-023 が Password と Passkey の Table を追加すると、Applic
 
 ### PAW-022 / PAW-023 との接続
 
-`paw_backend.identity.TokenRedeemer` が Web 側に使わせる API です（`paw_backend.identity` の `__init__` は Operator 側を Import しません）。HTTP の Endpoint はこの Issue では追加していません。
+`paw_backend.identity.TokenRedeemer` が Web 側に使わせる API です（`paw_backend.identity` の `__init__` は Operator 側を Import しません）。HTTP の Endpoint はこの Issue（PAW-021）では追加せず、PAW-022 が `POST /api/v1/auth/token/redeem` を追加しました（[Owner の Token](#owner-の-tokensetup--recovery)）。
 
 ```python
 redeemer = TokenRedeemer.from_settings(settings, database, PostgresAuditSink(database))
@@ -901,7 +923,7 @@ redemption = await redeemer.redeem(token_from_request, apply=set_credentials)
 
 `users`: `id`（UUID）、`login_name`（正規化済み・一意）、`system_role`（`owner` / `admin` / `user`。`system` は人間の User ではなく行を持たない）、
 `status`（`invited` / `active` / `pending_deletion` / `deleted`。要件の User Lifecycle）、`passkey_required`、`created_at`、`updated_at`。
-**Password の Hash、Session、Passkey の列はありません**（PAW-022 / PAW-023 が追加します）。
+**Password の Hash、Session、Passkey の列はありません**（PAW-022 が別の Table `password_credentials`、`auth_sessions` などを追加しました。Passkey は PAW-023 が追加します）。
 `setup_tokens`: `id`（Token ID、検索用の鍵）、`audit_ref`（Audit と Log での呼び名、一意）、`user_id`（`users` への外部キー、`ON DELETE CASCADE`）、`purpose`（`setup` / `recovery`）、`salt`、`secret_hash`、`created_at`、`expires_at`、`used_at`、`revoked_at`、`attempts`、`locked_at`、`issued_by_uid`、`issued_by_sudo_uid`。
 列挙値と制約（login name の形式を含む）は DB の CHECK 制約でも強制します。
 
@@ -914,10 +936,175 @@ Login name は小文字の ASCII 英数字と `.` `_` `-` だけ（3〜64 文字
 
 - Token ID を知っている人は、試行を使い切らせて正規の使用を妨げられます（Token ID は Token の一部で、通常は Token を知る人しか持ちません。Audit と Log には書かないため、Audit を読める人は知りません）。回復は `owner-recover` です。
 - 比較と DB 往復の回数は全経路で同じですが、**時間そのものは揃えていません**。既存の Token に対する失敗だけは Audit の INSERT が加わるため僅かに長く、これを観測できるのは Token ID を知る人だけです。
-- **Rate Limit は Token ごとの試行の上限だけです。** 接続元ごと・全体の Limit は PAW-022 の Endpoint の責務です（受け入れ条件として Issue [#19](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/19) に追記済み）。
+- **Rate Limit は Token ごとの試行の上限だけです。** 接続元ごと・全体の Limit は PAW-022 の Endpoint（`POST /api/v1/auth/token/redeem`）が実装しました（[Login と Backoff](#login-と-backoff)）。
 - 実行した OS User は Token の行に uid として残ります。`owner-recover` は実効 uid が 0 でなければ拒否しますが、`SUDO_UID` は手掛かりにすぎません。この確認は、DB の認証情報を持つ Process が誤って実行することを防ぐもので、境界そのものではありません（境界は認証情報のファイルの権限）。同じ Process の中の Code は `os.geteuid` の差し替えも DB への直接の書き込みもできるため、Service の確認は Library として呼ばれる場合の**誤用と Identity の偽装の防止**であり、悪意ある Code への防御ではありません。root の Process や、User Namespace の中の uid 0 は通ります。Container で root 以外として実行する構成では Recovery できません。
 - 発行・使用の成功時は Transaction と Audit のために接続を 2 本同時に使います（Pool の既定は 5）。失敗の経路は同時に持ちません。
-- Token の Web 側での Password・Passkey の扱い（Recovery の Contract）は PAW-022 / PAW-023 の実装で、この Issue の範囲は Token の発行・使用・失効と Audit までです。
+- Token の Web 側での Password・Session の扱い（Recovery の Contract）は PAW-022 が実装しました。Passkey は PAW-023 で、この Issue の範囲は Token の発行・使用・失効と Audit までです。
+
+## Login / Session / Password Policy
+
+[PAW-022](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/19) で実装しました（`paw_backend/auth/`、Migration `0022`、`api/v1/auth.py`）。
+**数値と選択（Argon2id の Parameter、Backoff の段階、Session の寿命、Cookie の属性、Rate Limit、Password の規則、Audit に残す項目）は [Decision 0015](../../docs/decisions/0015-login-session-password-policy.md)（Approved。2026-09-26 に Human が承認）に、各点の判断と根拠をまとめています。**
+値は設定（`PAW_` の環境変数）または定数で、承認で変わっても Schema は変わりません（Migration は不要）。
+Passkey の登録・認証・強制と Step-up の Passkey は PAW-023 です（この Issue は差し込み口だけを用意しました）。
+
+### Endpoint
+
+`/api/v1/auth` 以下。誤りの Response は共通の形式（`error.code`）です。
+
+| Endpoint | 認可 | 内容 |
+| --- | --- | --- |
+| `POST /login` | 公開（`tests/test_authz_routes.py` の公開一覧に理由つき） | Login name と Password（と `remember_me`、`device_name`）で Session を始める。Cookie を設定する |
+| `POST /token/redeem` | 公開（同上） | Owner の Setup / Recovery Token と新しい Password を受け取る |
+| `GET /session` | `account.read` | 現在の Session、User、`auth`（Passkey の要求、Step-up の状態） |
+| `GET /sessions` | `account.read` | 自分の端末（有効な Session）の一覧。最終利用日時つき |
+| `POST /logout` | `account.manage` | 現在の Session を終える。Cookie を消す |
+| `DELETE /sessions/{id}` | `account.manage` | 自分の別の端末を Logout する（他人の Session、存在しない ID は 404） |
+| `POST /sessions/revoke-others` | `account.manage` | 他のすべての端末を Logout する |
+| `POST /password/change` | `account.manage` | 現在の Password で本人確認して変更する（`revoke_other_sessions` で他の端末を Logout） |
+| `POST /step-up` | `account.manage` | Password を再入力して Step-up する（Session ID を作り直す） |
+| `POST /users/{id}/unlock` | `admin.users.manage` | Login の Lock を解除する（Admin は User だけ、Admin と Owner は Owner だけ） |
+| `GET /policy` | `admin.auth_policy.view`（Admin、Owner） | Workspace の認証 Policy |
+| `PUT /policy` | `owner.auth_policy.manage`（**Owner だけ**） | Policy を変える（`expected_version` と直近の **Passkey の** Step-up が要る。PAW-023 まで本番では使えない） |
+
+| 状態 | Code |
+| --- | --- |
+| Login の失敗（誤り・存在しない名前・Login できない Account、すべて同じ応答） | 401 `invalid_credentials`（変更や Step-up の Password の誤りは 403） |
+| Lock 中 | 429 `rate_limited` と `Retry-After`（秒） |
+| Password が Policy を満たさない | 422 `password_policy`（Message に規則の Code だけ。入力は返さない） |
+| Token が受け付けられない（すべて同じ応答） | 400 `invalid_token` |
+| 別の Origin からの状態を変える Request | 403 `forbidden_origin` |
+| Policy の変更に Step-up がない / Step-up が Password だけ / Version が古い | 403 `step_up_required` / 403 `step_up_method_insufficient` / 409 `version_conflict` |
+| DB・Audit・Hash の計算が使えない | 503 `service_unavailable`（何も変更されず、認証されない） |
+
+未知の Field、型違い（`"remember_me": "yes"`、数値の Password）、長すぎる入力は 422 です（入力は返しません）。
+
+**Login・Password の変更・Step-up は、変更が Commit された後に Cookie を先に応答へ設定します。** その後の Session の説明の読み取り（Policy の Query など）が失敗しても、応答は 503 にならず、**200 で `auth: null`**（`user` と `session` は変更の結果から作ります）を返し、新しい Cookie を必ず渡します（Rotation の後は古い Cookie が既に効かないので、失うと Logout されたうえ変更は失敗したと伝えてしまうため）。`auth` は `GET /session` で読めます。失敗は型名だけを Log に残します。Commit 自体が期限で中断された場合（Socket を閉じた場合）は結果が分からず、その応答には Cookie がありません（`Database.run_abortable` の限界）。
+
+### Session Cookie から Principal へ
+
+`SessionPrincipalProvider`（`auth/principals.py`）が、`authz/deps.py` の `PrincipalProvider` の実体です。`create_app` が `install_authz` で組み込みます。
+
+- Cookie（`__Host-paw_session`）の値を読み、**保存済みのデータだけ**から `Principal` を作ります（`users` の Role、受諾済みの `project_members` の Role）。Client が申告した Role・Header は読みません（Test 済み）。
+- Cookie が無い、または Session ID の形（43 文字の URL-safe Base64）でなければ、**DB へ触れずに**匿名です。
+- Session が有効でも、`users.status` が `active` でなければ匿名です（削除待ち・削除済みの User は即座に効かなくなる）。Role の変更も次の Request から効きます。
+- DB が使えないときは 401 ではなく **503**（WebSocket は 1013）。Client が誤って Session が切れたと解釈しないためです。
+- 同じ Request の複数の Guard は、Session を 1 回だけ引きます（Request に保存）。
+- `DatabasePrincipalDirectory` は、Agent の操作のたびに User の現在の `Principal` を引き直す `PrincipalDirectory` です（`authz` の `authorize_agent_action`）。
+
+### Session
+
+- ID は 256 bit の乱数（`secrets`）。**DB には SHA-256 だけを保存**します（ID は Cookie にだけある）。
+- Cookie: `__Host-paw_session`、`Secure`、`HttpOnly`、`SameSite=Strict`（設定で `Lax`）、`Path=/`、Domain なし。Remember Me のときだけ `Max-Age`（残りの寿命）。
+- 寿命（既定）: **通常は 30 日間使わなければ失効し、開始から 90 日で必ず失効**。**Remember Me は最大 90 日**（使わなくても、使っても）。有効かどうかは、判定する文の中で **Database の時計**（`clock_timestamp()`）を読んで決めます。Test が差し込む時計は「Process の時計と Database の時計の新しいほう」として使うので、Process の時計が遅れていても寿命は長くなりません。
+- 最終利用日時の更新は 60 秒に 1 回まで。**終わってから 30 日**たった行は、Login のたびに 50 行ずつ消します。終わった時刻は、無操作の期限（最後の利用 + 無操作の上限）と失効の時刻の早いほうで、Database の時計で判定します（無操作の期限は絶対の期限を超えず、CHECK 制約が保つので、絶対の期限だけを見ると 30 日で無操作になった通常 Session が 120 日目まで残ります）。
+- **Rotation**: Login のたびに新しい ID を作り、Browser が持っていた古い Session は失効します（Session Fixation の防止）。Password の変更と Step-up では、同じ Session の ID を作り直し、古い ID は即座に効かなくなります。同時の Rotation は 1 つだけが成功します（Compare-and-Swap）。
+- Role の変更では ID を作り直しません。ID は Role を持たず、Role は Request ごとに `users` から読むので、昇格・降格は次の Request から効きます。
+- 端末の管理: 一覧、個別の Logout、他の全端末の Logout、Logout。失効の理由（`logout`、`revoked_by_user`、`logout_others`、`password_changed`、`password_reset`、`recovery`、`account_closed`、`admin`、`replaced`）は行に残ります。`AuthService.revoke_all_sessions_of` は、User を削除待ちにする処理が呼ぶための部品です（`users.status` が `active` でなくなれば Session は効かなくなりますが、復元されても生き返らないように行も終わらせます）。
+
+### Login と Backoff
+
+- **Argon2id**（`argon2-cffi`）。既定は 64 MiB、time 3、並列 4（RFC 9106 の 2 番目の推奨）。計算は専用の Thread（同時 2 件、待つ Job は最大 64）で行い、Event Loop を止めません。Login に成功したとき、Hash が現在の Parameter より弱ければ計算し直します（同時の変更を上書きしない）。
+- **User の存在が分からない。** 誤った Password、存在しない名前、形が不正な名前、Login できない Account（`invited`、削除待ち、Password なし）は、同じ Error・同じ DB の処理回数・Password の検証 1 回（相手がなければ固定の Hash に対して検証）で失敗します（Test が DB の Transaction 数と検証の回数を比べます）。存在しない名前も、同じ Backoff で Lock されます（Account の Counter は Login name の Hash が鍵）。**時間は完全には揃えていません**（存在する Account の失敗は Audit を 1 行書く分だけ数 ms 長い。Argon2 は約数十 ms）。
+- **Backoff**（`auth/throttle.py`）: Account は 5 回目の試行で Lock が始まる（1〜4 回は通常）。Lock は 30 秒、1 分、5 分、15 分、1 時間（最後を繰り返す）。接続元は 20 回目から同じ段階。24 時間試行がなければ忘れる。**永久 Lock はなく**（最大 1 時間）、Lock 中の試行は数えません。
+  - 試行は Password を比べる**前**に、1 つの文で数えて予約します。Lock を作った試行は続きを判定し、Lock 中の試行は比べずに拒否します。**同時に大量の試行が来ても、比べられる Password は上限（5 つ）まで**です（別の接続で競わせる Test 済み）。
+  - 成功すると Account の Counter は消え、接続元の Counter は自分の 1 回分だけ戻ります（その接続元の他の失敗は消えない）。
+  - 接続元は `request.client.host`（IPv4 はそのまま、IPv6 は上位 64 bit）。Reverse Proxy 経由では Uvicorn が `X-Forwarded-For` から解決した Address なので、**信頼する Proxy の設定（`FORWARDED_ALLOW_IPS`）が前提**です。Proxy の設定が誤って全員が同じ Address に見えると、接続元の Lock が全員の Lock になります。
+  - Password の変更と Step-up の Password の誤りも、同じ Account の Counter に数えます。
+  - **Owner / Admin が解除**できます（`POST /users/{id}/unlock`。Admin は User だけ）。Owner が Lock された場合は、最大 1 時間待つか、`owner-recover` の Token を受け取れば Lock も消えます。
+- **Rate Limit（Token の受け取り。Decision 0005 の条件）**: `POST /token/redeem` は、Token を読む前・Password の Hash を計算する前に、接続元ごと（5 回で Lock、60 秒から）と全体（30 回で Lock）を数えます。拒否された試行は Token の試行回数を使いません（Test 済み）。
+
+### Password
+
+- 最小 10 文字（要件）、文字種の強制なし、最大 256 文字（1,024 byte）。NFKC で正規化してから検査・Hash します。制御文字・Surrogate・未割り当ての Code Point は使えません。広く知られた Password（87 個の短い一覧）、3 種類以下の文字だけの Password、Login name と同じ、または 6 文字以上の Login name を含む Password、現在と同じ Password は拒否します（Code は `too_short`、`too_long`、`invalid_character`、`too_common`、`contains_login_name`、`same_as_current`）。
+- **保存するのは Argon2id の Encoding だけ**です（`$argon2id$v=19$m=...`）。Password は Log・DB・Audit・Error のどこにも入りません（Test が全 Table の行と Log を検査します。SQLAlchemy の SQL 表示を運営者が有効にした場合、Hash の値が Parameter として表示されますが、Password と Session ID は表示されません）。
+- **変更**は現在の Password を要求します。既定は他の端末の Session を維持（要件）、`revoke_other_sessions: true` で他の全端末を Logout します。この端末の Session ID は作り直します。
+- **Reset・Recovery**（`AuthService` の Token を受け取る処理と、その共通の部品）は、全 Session を失効し、Password を置き換え、その Account の Login の Lock を消します。
+
+### Owner の Token（Setup / Recovery）
+
+`POST /api/v1/auth/token/redeem`（`{token, new_password}`）が `TokenRedeemer.redeem` を呼びます（[Owner の初期設定と復旧](#owner-の初期設定と復旧)）。
+
+1. 上の Rate Limit を数える（超えれば 429。何も読まない）。
+2. Password の Policy を検査し、Hash を計算する（Token を使う前。悪ければ Token は消費されない）。
+3. `redeem` の `apply` が、**Token の消費と同じ Transaction で**、Password を設定し（既存の Hash は置き換わる）、**その User の全 Session を失効**し、Login の Lock を消し、`invited` の Owner を `active` にし、Credential 無効化の Hook（PAW-023 が Passkey の失効を足す）を実行し、Audit を書く。1 つでも失敗すれば全体を Rollback し、Token は消費されません。
+4. 応答は `{purpose, passkey_required, next: "login"}`。**Session は作りません**（設定した後に通常の Login をします）。`passkey_required` は Owner の現在の Passkey Policy です。
+
+`users.status` の更新に Web 用の Role へ UPDATE 権限を与えず、`SECURITY DEFINER` の関数 `paw_activate_invited_user`（EXECUTE のみ）を使います（下の「Database と権限」）。
+
+### Passkey Policy（Owner が変える設定）と Step-up
+
+- `auth_policy`（1 行、`version` つき）: Owner / Admin / User ごとの Passkey の要求（`required` / `optional`）、User へ Passkey を強く勧めるか、Step-up の有効時間（5〜240 分）。**既定は要件のまま**（Owner・Admin は required、User は optional で勧める、30 分）。Decision 0015 の 12 節（承認済み）が、要件の固定の方針を「Owner が変えられる設定の既定値」に読み替えます（Human の指示で、`REQUIREMENTS.md` の `[FIXED]`「Passkey Policy」の本文は変えず、その下に注記だけを追記しました。Human の回答 2026-09-25: Passkey の Step-up を必須にする。PAW-023 まで、この設定変更は本番では使えません）。
+- **変更は Owner だけ**（`owner.auth_policy.manage`。Agent に委任できず、Audit は REQUIRED）。**Owner の Session の直近の Passkey の Step-up**（Policy の有効時間の内。Row Lock の下で Database の時計）が要ります。**Password の Step-up は数えません**（403 `step_up_method_insufficient`。Password を盗んだ者が `POST /step-up` で得られる Step-up を受け付けると、Owner / Admin の Passkey の要求を緩められてしまうため。要件: Owner / Admin の重要操作は Passkey の Step-up）。**そのため、PAW-023 が Passkey の Verifier を登録するまで、`PUT /policy` は本番では使えません**（Owner が変えられる Policy は PAW-023 で端から端まで動きます。それまでは既定値、つまり要件どおりの Policy が効きます）。Test は、Passkey の Step-up を Test の Fixture が Session の行へ書いて、この経路を確かめます。Step-up の方法はその方法の Verifier だけが記録し、別の方法の鍵で登録した Verifier は拒否されます。`auth.step_up.satisfied` は「時間内に Step-up があった」だけを表すので、方法の強さは `method` で見ます。`expected_version` が現在と違えば 409 で、**同時の編集で更新が失われません**（別の接続で競わせる Test 済み）。同じ値の更新は Version を上げません。
+- 変更は `auth_policy_changes`（誰が・いつ・各項目の変更前後。追記専用）と Audit（`auth.policy.update`）に、同じ Transaction で残ります。
+- **効く範囲は新しい Sign-in と Session から**です。**既存の Session は失効も降格もしません**（厳しくしても黙って Logout されない。Test 済み）。`GET /session` の `auth.passkey` が、その人の要求（`requirement`）、登録の有無（`enrolled`。PAW-023 まで常に `false`）、`enrollment_required`（`required` で未登録）、`recommended`（User に勧める）を返します。
+- **この Issue は Passkey を強制しません**（PAW-023）。したがって、どの設定でも Owner は Password で Login できます。PAW-023 は「`required` で未登録」を登録だけができる状態にし、Password Login と `owner-recover` を残さなければなりません（行き止まりを作らない）。`users.passkey_required` 列は Owner / Admin では CHECK 制約で `false` にできないため、**Login の処理はこの列を見ず `auth_policy` を見ます**（列の整理は PAW-023）。
+- **PAW-023 の差し込み口（まとめ）**: (1) `AuthService(step_up_verifiers={AuthMethod.PASSKEY: ...})` に Passkey の `StepUpVerifier`（`method = AuthMethod.PASSKEY`。別の方法の鍵での登録は拒否される）を登録する。これで `PUT /policy` が使えるようになる。(2) `PasskeyEnrollment` を差し替える。(3) `AuthService(credential_invalidators=...)` に Passkey の失効を足す（Token の受け取りと同じ Transaction で走る）。(4) `auth_sessions.auth_method` と `stepup_method` の CHECK は `passkey` を許すので、Session の Table の変更は要らない。(5) Passkey は 1 User に複数あるため `password_credentials` へは足さず、別の Table にする。(6) 要求は `auth_policy` から `AuthPolicy.requirement_for(role)` で読む。
+- **Step-up の差し込み口**: `StepUpVerifier`（`method`、`verify`）と `StepUpEvidence`。Password の実装（`PasswordStepUpVerifier`）が入っています。`POST /step-up` は成功すると Session に時刻と方法を記録して ID を作り直し、`auth.step_up`（方法、時刻、期限、`satisfied`）に出ます。PAW-023 は Passkey の Verifier を `AuthService(step_up_verifiers=...)` に登録するだけでよく、`PasskeyEnrollment`（既定は誰も登録していない）も同様に差し替えます。
+
+### CSRF
+
+`SameSite=Strict` に加えて、`OriginCheckMiddleware`（`auth/csrf.py`）が、状態を変える Request（`POST`、`PUT`、`PATCH`、`DELETE`）の Origin を検査します。`Origin` があれば、**Request 自身の Origin（Scheme、Host、Port がすべて同じ。既定の Port を理解する。`https://h` は `https://h:443`）**か `PAW_ALLOWED_ORIGINS` のどれかであること（`null` は拒否）。**Authority だけの一致は認めません**（`https://h` への Request に `Origin: http://h` を付けて、HTTP の Page から POST する Login CSRF を防ぐため）。Request の Scheme は外部の Scheme（`scope["scheme"]`）で、Uvicorn が接続から、また `FORWARDED_ALLOW_IPS`（既定は Loopback）に載せた Proxy からの `X-Forwarded-Proto` から決めます（`server.py` が `proxy_headers=True` を明示しています。Login の接続元の Address と同じ信頼の設定です）。**Scheme が `http` でも `https` でもないとき（不明）は、`PAW_ALLOWED_ORIGINS` に載せた Origin（Scheme を含む完全な Origin）だけが一致します（既定は拒否）。** TLS を終端する Proxy の背後で、Proxy を `FORWARDED_ALLOW_IPS` に載せていないと、Browser の `https://…` の Origin は `http` の Request と一致せず拒否されるので、載せるか `PAW_ALLOWED_ORIGINS` に公開 Origin を書いてください。WebSocket の Handshake の Origin 検査（`require_allowed_origin`）は別で、Scheme を見ません（Session を使う Event を足す Issue で、この検査に合わせます）。`Origin` がなく `Sec-Fetch-Site` があれば `same-origin` か `none`。どちらもなければ Browser ではないとして通します（CLI、Script）。Login も対象です。拒否は 403 `forbidden_origin` で、Application は Request を見ません。`Host` の検証（`HostValidationMiddleware`）の内側で動きます。
+
+### Audit
+
+すべての認証の出来事を `audit_events` に**ID と列挙値だけ**で残します。Password、Hash、Session ID、Token、Login name は入りません。
+
+| `action` | 内容 |
+| --- | --- |
+| `auth.login` | allow `authenticated` / deny `invalid_credentials`、`account_not_active`、`no_password`、`credentials_changed`（**存在する Account のときだけ**） |
+| `auth.lockout` | deny `backoff_started`（Lock を始めた失敗 1 件につき 1 行） |
+| `auth.unlock` | allow `unlocked` / deny `role_not_allowed` |
+| `auth.logout`、`auth.session.revoke`、`auth.session.revoke_others`、`auth.session.revoke_all` | Session の失効 |
+| `auth.password.change`、`auth.password.set`（`setup`、`recovery`） | Password の変更・設定 |
+| `auth.step_up` | allow `verified` / deny |
+| `auth.policy.update` | allow `updated` / deny `role_not_allowed`、`step_up_required`、`step_up_method_insufficient`、`version_conflict` |
+
+- Login の行は、Account の ID（`actor_id`、`actor_role`）と、接続元の Bucket を表す**不透明な UUID**（`resource_kind = login_source`。Bucket の Hash から作る仮名で、Address は保存しない）を持ちます。
+- **存在しない名前の失敗は DB へ書きません**（Log に固定の 1 行。誰でも作れる行になり、Audit の Table は削除できないため）。Lock 中に拒否された試行も書きません。
+- **変更と同じ Transaction で書きます**（Login、変更、失効、Token の設定、Policy の変更）。書けなければ変更も起きず、起きなかった変更の行も残りません。拒否は別の短い Transaction で Best Effort に書きます（書けなくても拒否のまま）。
+- 各 Route の Guard（`require_capability`）の判定は、これとは別に `account.manage` などの Capability 名で 1 行残ります（`account.read` は拒否だけ）。認証されていない Request の拒否は DB へ書かず Log だけです（PAW-025）。
+- **限界**: `AuditEvent` に「接続元」「名前の Hash」の項目がないため、存在しない名前の失敗の接続元は残りません。項目を足すには `audit_events` の Migration と Decision 0004 の変更が要ります（Decision 0015 で、足さないと決めました）。
+
+### Database と権限
+
+Migration `0022`（`down_revision` は `0087`。鎖は `0001 → 0025 → 0032 → 0040 → 0021 → 0033 → 0031 → 0050 → 0046 → 0052 → 0026 → 0087 → 0022` です）は次の 5 つの Table を作り、Web の Role（`PAW_APP_DATABASE_ROLE`）に**各 Service が実際に使う最小の権限**だけを与えます（正確な一覧と Test は `tests/test_auth_grants.py`）。
+
+| Table | 内容 | Web の Role の権限 |
+| --- | --- | --- |
+| `password_credentials` | User ごとの Argon2id の Encoding | SELECT、INSERT、`hash` と `changed_at` の UPDATE |
+| `auth_sessions` | Session（ID の SHA-256、無操作・絶対の期限、Step-up、失効） | SELECT、INSERT、DELETE、寿命で変わる列の UPDATE（`user_id`、`created_at`、期限の上限は不可） |
+| `auth_throttles` | Login の Backoff と Token の Rate Limit（`scope` と Hash した鍵ごと） | SELECT、INSERT、DELETE、Counter の列の UPDATE |
+| `auth_policy` | 認証 Policy の 1 行（Trigger が Version を必ず 1 上げさせる） | SELECT と Policy の列の UPDATE（INSERT、DELETE なし） |
+| `auth_policy_changes` | Policy の変更の履歴（追記専用） | SELECT、INSERT（Trigger が UPDATE、DELETE を拒否） |
+
+- **`users` は変えていません**（Web の Role は SELECT と `updated_at` の UPDATE だけ）。Owner の Password を設定するとき `invited` → `active` にするために、`SECURITY DEFINER` の関数 `paw_activate_invited_user(user_id, now)`（`search_path` を固定し、`users` を Schema 名つきで参照する）を作り、Web の Role に **EXECUTE だけ**を与えます。`invited` の行を `active` にするだけで、削除済みの User の復活も、有効な User の削除もできません（Test 済み）。
+- Web の Role は Token を作れず（Decision 0005 の条件 2）、Password の Table を書けます。**Application が侵害されれば Password を変えられる**点は Decision 0005 で受け入れ済みで、PAW-023 の Step-up が防ぐ手段です。
+- 認証の処理は Pool を使わない専用の接続（`Database.run_abortable`）で、期限（`PAW_DATABASE_TIMEOUT_SECONDS`）で接続の Socket を閉じて止めます。DB が応答しなくても Login が固まらず、何も変更せずに 503 になります。Token を受け取る処理だけは、`TokenRedeemer` の既存の作り（Pool の Session）のままです。
+
+### 同時実行
+
+- Backoff の予約は 1 つの文（`INSERT ... ON CONFLICT DO UPDATE ... WHERE <Lock 中でない>`）で、別の接続から競わせても、比べられる Password は上限までです。
+- `users` の行が Account の Credential の Lock です。Password の変更・Recovery は `FOR UPDATE`、Login は `FOR SHARE` を取り、Session を作る前に Credential が確認した値のままかを見直します。**古い Password を確認した Login が、Reset の後に Session を作ることはありません**（Test 済み）。
+- 同じ Session の同時の Rotation・Step-up・Password の変更は 1 つだけが成功します。Policy の同時の変更も 1 つだけです。
+
+### 制限と未確認の点
+
+- **`PUT /api/v1/auth/policy`（Owner が変えられる Passkey Policy の変更）は、PAW-023 が Passkey の Step-up を入れるまで本番では使えません**（Passkey の Step-up を要求し、Password の Step-up は数えないため。上の「Passkey Policy」）。Owner / Admin の他の重要操作（Admin による Lock の解除など）にも Step-up は要求していません（要件の「重要操作」の範囲と Passkey の Step-up は PAW-023 と各操作の Issue で決めます）。Tool Broker の強い承認は別の `StepUpVerifier`（`tools/approvals.py`、Fail Closed）を持ち、この Session の `stepup_*` は読みません。PAW-023 は両方に Passkey の Step-up を結び付けます。
+- **Passkey は登録も強制もしません**（PAW-023）。Owner / Admin の Passkey が必須という要件は、PAW-023 が入るまで Login では強制されず、Password だけで Login できます。
+- 複数端末の追加（QR / Link の Pairing、Owner / Admin の既存端末での承認）、Admin による強制 Reset の Token の発行、Owner / Admin の異常な失敗の信頼済み端末への警告は含みません（Decision 0015 の 14 節）。
+- `/api/v1/events` の 2 つの Endpoint は、System Event しか流さない間は認証なしのままです（公開一覧に理由つきで載っています）。非公開の Event を足す Issue が `require_capability` を付けます。
+- 存在しない名前と存在する名前の**時間は完全には揃っていません**（上記）。時間の差は Argon2 に比べて小さく、Rate Limit で回数が抑えられています。
+- 認証の各呼び出しは新しい DB 接続を作ります（Pool を使わない）。Login 1 回で 2〜3 本、認証済みの Request ごとに 1 本です。負荷が高くなれば見直しが要ります。
+- Session の ID の Rotation に猶予期間はありません（Password の変更の瞬間の別の Tab の Request は 401）。
+- 失効・期限切れの Session と Backoff の行は、新しい Session・新しい鍵を作るたびに少量ずつ消します（別の Job はありません）。Login が長く無いと行が残りますが、Table は Session の数だけです。
+- Cookie は常に `Secure` で、名前は `__Host-` つきです。開発で `http://localhost` を使う場合、Browser が `Secure` の Cookie を受け付けるか（Chrome と Firefox は `localhost` を安全な Context として扱う）は確かめていません。
+- 実際の Browser、Reverse Proxy、TLS を通した動作は確かめていません（`TestClient` と実 PostgreSQL まで）。Cookie の属性は応答の `Set-Cookie` を検査しています。
+- Web Client（UI）はありません（Login 画面、端末の一覧、Passkey の勧めの表示）。
+
+### Test
+
+`tests/test_auth_*.py`。Unit（`passwords`、`tokens`、`settings`、`argument_validation`、`csrf`、`provider`）、実 PostgreSQL の Service（`sessions`、`throttle`、`service_login`、`service_account`、`service_redeem`、`service_admin`。別の接続で競わせる Test を含む）、HTTP（`http`、`http_admin`。Cookie の属性、Role の一覧、CSRF、Rate Limit）、Migration（`migration`。Model との差分なし、上げ下げ、Trigger・関数）、Query Plan（`plans`。実際に送る文が Index を使えること。部分 Index を含む）、権限（`grants`。同じ Service の Test を非 Superuser の Web の Role で実行し、権限を列まで固定し、してはいけない操作を拒否）。時間は注入した時計で動かします（待たない）。
 
 ## Tool Broker / Capability Policy
 
@@ -1838,8 +2025,9 @@ Timeout の Test は、永遠に待つ Provider を 0.3 秒で打ち切り、成
 
 [PAW-053](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/45) で実装した、外部の検索へ送る Query を最小化し、送信を Audit する層です（`paw_backend/research/privacy/`）。
 設計は [要件](../../REQUIREMENTS.md)の「Web Research / Knowledge Layer」の Privacy に従い、数値と規則は [Decision 0010](../../docs/decisions/0010-research-privacy-filter-policy.md)（Approved。2026-09-25 に Human が承認）で決めています。数値は暫定値として承認されたもので、変更できます。
-**永続の Audit Sink（Issue [#87](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/87)）が接続されるまでは、Private 由来の Context を Research へ自動で入れる設計を有効にしません**（承認時の条件）。
-**Provider には依存しません。** HTTP の Endpoint も、永続化する Store もありません（Audit の保存先は `ExternalSendAudit`（Protocol）で、後続の Issue が接続します）。Migration もありません。
+**永続の Audit Sink は接続済みです**（Issue [#87](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/87)、Migration `0087`。[Audit の永続化](#audit-の永続化issue-87)）。
+**2026-09-26 の追記（#87）: Decision 0010 の承認時の条件（永続の Audit Sink の接続）が満たされました。** 条件は「永続の Audit Sink が接続されるまで、Private 由来の Context を Research へ自動で入れる設計を有効にしない」でした。Sink は接続済みで（`build_research_broker` / `build_privacy_gate`）、その方式（`audit_events` への JSONB 列 `details`、CHECK 制約、`NOT VALID`、`downgrade` が `details` を破棄すること、拒否した要求を Audit しないこと、`actor_id` を持たないこと）は [Decision 0023](../../docs/decisions/0023-audit-events-details-for-external-send.md)（Approved、2026-09-26）で Human が承認しました。そのため、Private 由来の Context を Research へ自動で入れる設計は、**`build_research_broker`（または `build_privacy_gate`）で作った Broker を通す場合に限り**、その設計を所有する呼び出し側（Research を呼ぶ Issue）が有効にできます（下の「許可されること・まだ許可されないこと」）。この Repository のコードは、まだ有効にしていません。この追記は、承認済みの Decision 0010 を書き換えるものではなく、条件が満たされたことの記録です。
+**Provider には依存しません。** HTTP の Endpoint はありません。永続化する Store は、Authorizer の `audit_events` Table だけです（新しい Table はなく、Migration `0087` はその Table に列を 1 つ足します）。
 
 Main Agent（または Research Worker）は、書いた Query の**下書き**と、その下書きの元になった Context（各 Piece に `ContextLabel` を付けたもの）を Gate に渡します。
 Gate は、外へ出してよい `MinimizedQuery` を返すか、`PrivacyRefusal` で拒否します。
@@ -1849,6 +2037,8 @@ Gate は、外へ出してよい `MinimizedQuery` を返すか、`PrivacyRefusal
 | `contract.py` | `ContextLabel`、`ContextPiece`、`PrivacyInput`、`MinimizedQuery`、`ExternalSendRecord`、`WithheldCounts`、`RefusalReason` / `PrivacyRefusal`、`ExternalSendAudit`（Protocol）、`InMemoryExternalSendAudit`、上限の定数 |
 | `rules.py` | 最小化の規則（小さな純粋関数）。正規化、写しの検出、Credential の除去、抽象化の規則、切り詰め、Fingerprint |
 | `gate.py` | `PrivacyGate`: 入力の検証、Default deny、規則を呼ぶ順序、Rule とは別の最終検査、Audit してから返す |
+| `audit.py` | `PostgresExternalSendAudit`（Record を `audit_events` へ 1 行追記する Sink）、`external_send_event`（Record → 行の変換。I/O なし）（#87） |
+| `factory.py` | `build_privacy_gate` / `build_research_broker`: 永続の Sink をつないだ Gate と Broker の**本番の構築経路**（#87） |
 
 ### Context のラベル
 
@@ -1906,12 +2096,51 @@ Gate は、外へ出してよい `MinimizedQuery` を返すか、`PrivacyRefusal
 Record は Query の本文、消した文字列、Context の本文を**持ちません**（Field 自体がありません）。`ContextPiece` の本文は `repr` にも出ません。
 Sink が例外を出す、5 秒（既定）以内に終わらない、満杯である場合は、`audit_failed` で拒否し、送りません。ログには例外の型を 1 行（WARNING）だけ出しますが、それは**固定の分類**で、Sink が決められる文字列は入りません。Sink が上げた例外の Class 名は Sink のデータです（`type("access_token=SECRET\nforged", (Exception,), {})()` のように、Credential や、次の Log 行を偽造する改行を入れられ、Metaclass の `__name__` や `__getattribute__` を上書きして、名前を読む処理そのものを例外にもできます）。そのため Gate は `type(error)` が組み込みの例外、またはこの Package の例外の Class **そのもの**（`is` で照合。Subclass や名前だけ似せた Class は含まない）のときだけその Class 名（`RuntimeError`、時間切れの `TimeoutError` など）を出し、それ以外は固定の `adapter_error` にします。これは Provider Broker の `log_type_name`（「例外の文言は Code にも Result にも Log にも入りません」の節。一覧は `broker.py` の `LOGGED_EXCEPTION_TYPES`）をそのまま使っており、Class の属性は 1 つも読まず、`id` で一覧を引くので、Metaclass の Hook（`__getattribute__`、`__name__`、`__hash__`、`__eq__`）は呼ばれず、どんな Class の例外でも拒否は `audit_failed` のままです。組み込み以外の Library の例外（DB Driver の例外など）は `adapter_error` になり、型では区別できません。
 Record は「送ってよいと判断した」記録で、Provider が答えたかは含みません。拒否した要求は Record を作りません。
+保存先は、Test では `InMemoryExternalSendAudit`（最大 1,000 件）、本番では `PostgresExternalSendAudit`（次の節）です。
+
+#### Audit の永続化（Issue #87）
+
+`PostgresExternalSendAudit(database, timeout_seconds=5.0)`（`audit.py`）は、Gate が渡す `ExternalSendRecord` を、Authorizer と同じ追記専用の `audit_events` Table（PAW-025）へ 1 行として書きます。**Query の本文は、どの列にも入りません。**
+
+| 列 | 値 |
+| --- | --- |
+| `action` / `reason` / `decision` | `research.external_send` / `send_authorized` / `allow`（拒否した要求は Record を作らないので、`deny` の行はありません） |
+| `resource_kind` / `resource_id` | `research_query` / なし |
+| `project_id` | Record の Project |
+| `actor_role` / `actor_id` | `system`（Backend が判断する。Record には User がない）/ なし |
+| `occurred_at` / `recorded_at` | Gate の時計（送ってよいと判断した時刻）/ Database の時計（Trigger） |
+| `id` / `correlation_id` | 新しい UUID（Gate は Request の `correlation_id` を持たないので、送信ごとに 1 つ） |
+| `details`（JSONB） | `query_fingerprint`（`sha256:` と 64 桁の 16 進数）、`query_chars`、`provider_kinds`（`web` `docs` `github` `opencode` のうち送った種類、`ProviderKind` の順）、`withheld`（Label ごとに外した Piece の数）、`credentials_removed`、`pieces_matched`、`abstractions`、`truncated` |
+
+- **Query の SHA-256 は、Provider が受け取る最小化済みの Query の SHA-256 です**（`MinimizedQuery.fingerprint`）。塩なしなので、Query が Public な内容になっていることが前提です（上の「制限と未確認の点」）。Test は、Provider が実際に受け取った Query の SHA-256 と行の値が一致すること、Database 自身が `sha256()` で再計算した値とも一致することを確かめます。
+- **本文が入らないことは、3 つの層で守ります。** (1) `ExternalSendRecord` に本文の Field がありません。(2) `external_send_event` は、Record が作られた後に書き換えられていないか（`object.__setattr__`）、`str` / `int` の Subclass でないか、Slot が消えていないかを、Field ごとに型と形（`sha256:` + 64 桁の小文字の 16 進数、範囲内の整数、`ProviderKind` の Member、`bool`）で確かめ直し、**新しい**プレーンな値（`str` `int` `bool` `list` `dict`）だけで `details` を作ります。合わなければ Database に触れる前に `TypeError` / `ValueError`（固定の文言。値は含まない）です。(3) Migration `0087` の CHECK 制約 `ck_audit_events_external_send_details` が、`research.external_send` の行に、決まった 8 つの Key（`withheld` の中は 4 つ）と値の形（指紋は `sha256:` と 64 桁の小文字の 16 進数ちょうど、数は Record の上限の範囲内の整数（`query_chars` は 1〜256、Piece の数は 0〜32、`credentials_removed` と `abstractions` は 0〜1,000,000。数字だけ）、Boolean、`provider_kinds` は `ProviderKind` の値（`web` `docs` `github` `opencode`）だけの 1〜4 個の配列）以外を許しません。`ProviderKind` 以外の Token（Credential や Query の断片）は、Provider の種類として入りません。**Provider の種類を足す（`ProviderKind` に値を足す）には、新しい Migration が要ります**（足さないと、その種類への送信は全て記録できず拒否されます。`tests/test_privacy_audit_schema.py` が、Enum と CHECK の食い違いを検出します）。Key の追加も、Query を入れる場所になる Fingerprint の別の書式も、Application の Role からも拒否されます。**`details` を持てるのは、登録された `action` だけです**（`ck_audit_events_details_registered`: `details` は NULL か、`action` が登録簿（今は `research.external_send` だけ）にあり、JSON の Object で 2,048 Byte 以内）。それ以外の `action`（既存の Capability の値、`tool.*`、`owner.*`、存在しない名前を含む全て）の行は、`details` が NULL でなければ拒否されます。INSERT できる Role の Bug や侵害が、別の `action` の行に本文を残すことはできません。
+- **Fail closed です。** 書き込みは `Database.execute_abortable`（`PostgresAuditSink` と同じ、Pool を使わない 1 文専用の中断可能な接続）で、`timeout_seconds`（既定は Gate の既定と同じ 5 秒）で**接続の Socket を閉じて**止めます。接続の枠の待ちと実行は 1 つの期限を共有し、同時に動く書き込み（専用接続）は `PAW_DATABASE_POOL_SIZE` を超えません（枠は Query の Task が実際に終わるまで保持します）。書けない、時間切れ、権限がない、接続できない、Database が停止中は、いずれも例外になり、Gate が `audit_failed` で拒否して **Provider を 1 つも呼びません**。Gate の時間切れがそのまま書き込みの Cancel になり、Cancel は握りつぶしません。
+- **打ち切られた書き込みは Commit されたか分かりません。** Gate が拒否したのに行が残ることがあります（「承認済み」と書かれた行があるのに、送っていない）。逆（送ったのに行がない）は起きません: 行が確認される前に Query は返りません。
+- **本番の構築経路は `factory.py` です。** `build_research_broker(registry, database, audit_timeout_seconds=5.0, clock=None)` は、Gate と Sink に**同じ期限**を渡し、`ResearchBroker(registry, preflight=gate)` を返します（`unfiltered` ではありません）。`build_privacy_gate(database, ...)` は Gate だけを返します。`database` は `Database` で、URL が設定されていなければ `DatabaseNotConfiguredError`（記録できない Gate は、全ての送信を拒否するだけなので、作りません）。作るときに接続はしません。
+- **権限。** Application の Role は `audit_events` に INSERT と SELECT だけを持ち（Migration `0025`）、Migration `0087` は何も付与しません（列は Table 単位の権限に含まれます）。送信の行を UPDATE、DELETE、TRUNCATE することも、Trigger や CHECK 制約を外すこともできません（`tests/test_privacy_audit_grants.py` が非 Superuser の Role で確かめます）。`PAW_APP_DATABASE_ROLE` に INSERT が無い Role では、記録できず、送信は全て拒否されます。
+
+#### 許可されること・まだ許可されないこと
+
+Decision 0010 の承認時の条件は「永続の Sink の接続」で、実装が接続し、その方式を [Decision 0023](../../docs/decisions/0023-audit-events-details-for-external-send.md)（Approved、2026-09-26）が承認したので、満たされました。次は**許可されます**:
+
+- Private 由来の Context（`PRIVATE_SOURCE`、`PRIVATE_MEMORY`、`RAW_CONVERSATION`、`SECRET` の Label を付けた `ContextPiece`）を Gate に渡して、Research の Query の下書きから写しを除き、最小化した Query を外部の Provider へ送ること。**ただし `build_research_broker` / `build_privacy_gate` で作った Broker を通す場合だけです。** 送信ごとに、Query の SHA-256 などが `audit_events` に残ります。
+
+次は**今も許可されません**:
+
+- Sink の無い `ResearchBroker`（`preflight` も `unfiltered=True` も無い Broker は `PreflightRequiredError` で検索しません）。`unfiltered=True` の Broker（最小化も Audit もしない。Private 由来の Query には使わない）。
+- `PrivacyGate(InMemoryExternalSendAudit())`（Test 用。Process が終わると Record が消え、1,000 件で満杯になる）を、本番で Private 由来の Context に使うこと。
+- この Repository には、`build_research_broker` を呼ぶ Application のコードも、Provider の実装（Direct Web、Docs、GitHub、OpenCode）も、HTTP の Endpoint も**まだありません**。条件が外れたのは、それらの Issue が Private 由来の Context を渡してよい、ということで、渡す実装があるわけではありません。有効にするのは、その Context を渡す呼び出し側（その設計を所有する Issue）で、この Repository は、有効にする Code を持ちません。
 
 ### Broker への差し込み
 
 ```python
-gate = PrivacyGate(audit)  # audit は ExternalSendAudit
-broker = ResearchBroker(registry, preflight=gate)
+# 本番: 永続の Sink（audit_events）をつないだ Broker。database は Database（URL が必須）
+broker = build_research_broker(registry, database)
+
+# Test: メモリ上の Sink
+# gate = PrivacyGate(InMemoryExternalSendAudit())
+# broker = ResearchBroker(registry, preflight=gate)
+
 result = await broker.gather(
     ResearchRequest(draft_query),
     preflight_input=PrivacyInput(context_pieces, project_id),
@@ -1926,6 +2155,13 @@ result = await broker.gather(
 - 選ばれた Provider が 1 つもなければ、何も送られないので、Gate も Audit も動きません。
 - 1 回の `gather` につき Record は 1 つです。Time Budget は pre-flight の後から数えます。
 - **`ResearchBroker.fetch` は Gate を通りません**（Decision 0010）。`fetch` は Query を持たず、Provider が以前返した Source の Locator（正規化済み）を、その Provider へ戻すだけです。そのため、`preflight` の有無にも `unfiltered=True` にも関係なく、どの Broker でも使えます（`preflight` も `unfiltered=True` も無い Broker でも動きます）。Private な Source を取得してよいかは、Tool Broker（PAW-031）と個々の Adapter の責任です。
+
+### Migration `0087`
+
+`0087_audit_external_send_details.py` は、`audit_events` に NULL 可の JSONB 列 `details` と CHECK 制約 2 つ（`ck_audit_events_details_registered`、`ck_audit_events_external_send_details`）を足します。Table も Trigger も権限も作らず、変えません（上の「Audit の永続化」）。**規則: `details` は、登録された `action` にだけ許します**（登録簿は Model の `DETAILS_ACTIONS` と `ck_audit_events_details_registered`。登録された `action` は、それぞれ閉じた Schema の CHECK 制約を持ちます。今は `research.external_send` の 1 つだけ）。**`action` を登録する（別の `action` が `details` を使う）には、新しい Migration が要ります**（登録簿の制約の置き換えと、その `action` の閉じた Schema の制約）。既定では何も登録しません。この方式と、下の `NOT VALID`・`downgrade` の扱い、拒否した要求を Audit しないこと、`actor_id` を持たないことは、[Decision 0023](../../docs/decisions/0023-audit-events-details-for-external-send.md)（Approved、2026-09-26）が決めています（各点の決定は Decision の末尾の「承認時の決定」）。CHECK 制約は `NOT VALID` で足し、検証しません（追記専用の大きな Table を `ACCESS EXCLUSIVE` の Lock で走査しないため。新しい行は、制約を足した時から検査されます。検証しないのは、下げて上げ直したとき、`details` を失った古い送信の行が検証に失敗しないためでもあります）。
+`downgrade` は `details` の列を落とすので、**記録済みの外部送信の Query の指紋と数を破棄します**（行は残ります）。開発・Test 用で、本番では実行しないでください。
+`down_revision` は `0026` です（鎖は `0001 → 0025 → 0032 → 0040 → 0021 → 0033 → 0031 → 0050 → 0046 → 0052 → 0026 → 0087`）。Revision ID は Issue 番号で、鎖の順序ではありません。統合時に Orchestrator が並びを確認します。
+Model（`authz/models.py`）と Migration は同じ CHECK の文を繰り返しており（Migration は凍結した写し）、`tests/test_privacy_audit_schema.py` が食い違いを検出します。
 
 ### 実装の由来
 
@@ -1949,13 +2185,20 @@ AGENTS.md のとおり、同じ失敗を繰り返したのでエスカレーシ�
 - 写しの検出は文字の並びの比較です。Case folding は Unicode の 1 文字ずつの対応（`str.casefold`）だけで、言語ごとの規則（トルコ語の `I` と `ı` など）、発音が同じ別の綴り、アクセント記号の有無の違い（`e` と `é`）は同じとはみなしません。
 - 日付（`2026/09/24`）など、規則に当たる正当な語も消えます（過剰に消す方向に倒しています）。
 - 処理は同期で、CPU を使います。上限（Draft 2,000 文字、Context 合計 400,000 文字。書かれたままの文字数と、NFKC・Case folding 後の文字数の両方）で処理量を抑えていますが、Event Loop の上で動きます。展開する Text（U+FDFA など）は、展開後の文字数で拒否するので、窓の集合は作られません。上限ぎりぎりの Context は、通常の Text でも、Event Loop を数十ミリ秒から 0.1 秒程度止めます（この Repository の開発機で測った目安で、保証する値ではありません。`test_a_context_that_expands_past_the_limit_is_refused_before_any_text_work` は 1 秒未満だけを確かめます）。
-- Audit の Sink は、メモリ上の Test 用（`InMemoryExternalSendAudit`、最大 1,000 件で満杯になると拒否する）だけです。永続化と Audit Log への接続は、後続の Issue [#87](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/87) です。それまで、Private 由来の Context を Research へ自動で入れる設計は有効にしません（Decision 0010 の承認時の条件）。
+- **拒否した要求は Audit しません**（Decision 0010）。拒否の理由（`unclassified_context` など）は、Record にも `audit_events` にも残りません。Audit できなかった送信（`audit_failed`）も、記録できなかったから拒否したので、記録がありません（Log に固定の型名が 1 行出るだけです）。
+- Audit の行は、Query の指紋（SHA-256）と数だけです。**何を検索したかは、行から分かりません**（本文を持たない、という要件のとおり）。Query を知っている人が、その SHA-256 で行を探すことはできます。
+- 保存期間、Partition、古い行の退避はありません。`audit_events` は削除できないので、送信ごとに 1 行ずつ増え続けます（認可の節の制限と同じ）。
+- 送信の行は、Application の Role が INSERT できる Table にあるため、**Application が侵害されれば偽の行を足せます**（認可の節の「守れないもの」と同じ）。本文が入らない、行を書き換えられない、は CHECK 制約と権限が守ります。
+- `PostgresExternalSendAudit` は、PostgreSQL 18 の実 DB、ソケットを閉じる Stub Server、Proxy で途中から止まる実 DB で確かめました。Database が遅い・落ちているとき、Research の検索は全て止まります（Fail closed の意図した結果です）。
+- 期限は Gate の引数（`audit_timeout_seconds`）で、環境変数の設定はありません（Decision 0010 が暫定値として承認した 5 秒）。
+- **接続の確立の途中で打ち切られた書き込み**（`Database._abort` が、まだ接続の無い Task を Cancel する経路）は、Task が終わっても、その接続の Socket が Python の Garbage Collection まで開いたままに見えることがあります（応答しない Stub Server を使う Test で、Server の終了が止まる現象として観測しました。原因は推測で、確認していません）。枠（同時に動く書き込み）は Task が終わるまで保持するので、**同時に動く書き込みは Pool の大きさまで**ですが、開いている Socket の数は、その瞬間、それを超えることがあります。`Database` の既存の動作で、この Issue では変えていません（Test は `HangingPostgres` の終了で `close_clients` を使い、動く書き込みの数の上限だけを確かめます）。
 - `Fingerprint` は塩なしの SHA-256 です。Query が Public な内容になっていることが前提です。
 - 数値と規則は [Decision 0010](../../docs/decisions/0010-research-privacy-filter-policy.md)（Approved、2026-09-25）にまとめています。数値は暫定値として承認されたもので、変更する場合は新しい Decision から `Supersedes` します。
 
 ### Test
 
-`apps/backend/tests/test_privacy_*.py` です。標準 `unittest` だけで、DB も Network も使いません。
+`apps/backend/tests/test_privacy_*.py` です。標準 `unittest` だけです。`test_privacy_audit_*.py`（永続の Sink、#87）以外は、DB も Network も使いません。
+`test_privacy_audit_event.py`（Record → 行の変換、Field ごとの検証、改ざんされた Record、本文が入らないこと）と `test_privacy_audit_factory.py`（Sink と構築経路の引数、`Database` を差し替えた Broker の順序と失敗）は DB なしで、`test_privacy_audit_postgres.py`（実 PostgreSQL: 行の中身、Provider が受け取った Query の SHA-256 との一致、追記専用、並行、Fail closed）、`test_privacy_audit_schema.py`（Migration `0087` の上げ下げ、Model との差、CHECK 制約の各条項）、`test_privacy_audit_grants.py`（非 Superuser の Role: `0087` が何も付与しないこと、`audit_events` の権限が INSERT と SELECT だけであること、その Role で `test_privacy_audit_postgres.py` の Class を実行）、`test_privacy_audit_stall.py`（応答しない Server が Gate の期限で拒否になること、枠と接続が戻ること。Stub と、途中で止まる Proxy 越しの実 DB）は `PAW_TEST_DATABASE_URL` を設定したときに実行します（`test_privacy_audit_stall.py` の Stub の Test は設定なしでも動きます）。
 `test_privacy_rules_text.py`、`test_privacy_rules_abstract.py`、`test_privacy_rules_properties.py` は `rules.py` の各関数を、`test_privacy_gate.py` は Gate（拒否、最終検査、Audit の失敗。Class 名に Credential や改行を入れた例外、Metaclass の `__name__`・`__getattribute__`・`__hash__`・`__eq__` が例外になる Class を Sink が上げても、Log の型が固定の `adapter_error` で、拒否が `audit_failed` のままであること）を、`test_privacy_broker.py` は `ResearchBroker` への差し込みを、`test_privacy_contract.py` は値の検証を確かめます。
 Timeout の Test は、永遠に待つ Sink を 0.2 秒で打ち切り、成功する経路は即座に終わる構成です（30 秒の Guard で CI の停止を防ぎます）。
 
@@ -2355,7 +2598,7 @@ CI は pre-commit の専用環境で Test を実行するため、同じ Version
 
 [PAW-021](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/18)（Owner Setup）、
 RBAC（PAW-025）、Task Lifecycle（PAW-032）、Task Queue / Budget / Loop 検知（PAW-033）、Tool Broker（PAW-031）、Memory Schema（PAW-040）、Research Scratch Store（PAW-050）、Research Provider Adapter（PAW-051）、Research Privacy Filter（PAW-053）、Evidence / Claim Provenance（PAW-052）は、この Skeleton の上に実装済みです。
-PAW-022（Login / Session / Password）と PAW-023（Passkey / Step-up）は Owner Setup の Token を受け取る側で、まだありません。
+PAW-022（Login / Session / Password）は Owner Setup の Token を受け取る側として実装済みです（[Login / Session / Password Policy](#login--session--password-policy)）。PAW-023（Passkey / Step-up）はまだありません。
 Memory の保存・整理・検索は PAW-041 以降で、Memory Schema の上に実装します。
 Research Privacy Filter（PAW-053）と Evidence / Claim Provenance（PAW-052）は、Research Provider Adapter の上に実装済みです。Research の Provider（Direct Web、Docs、GitHub、OpenCode）の Adapter は、Research Provider Adapter の上に実装します。外部送信の Audit を Audit Log へ保存する実装は、後続の Issue です。
 受け入れ基準は [Implementation Backlog](../../docs/IMPLEMENTATION_BACKLOG.md)、

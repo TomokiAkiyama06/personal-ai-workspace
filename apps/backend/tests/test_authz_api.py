@@ -7,6 +7,10 @@ from fastapi import Depends
 from starlette.websockets import WebSocketDisconnect
 
 from paw_backend.app import create_app
+from paw_backend.auth.principals import (
+    DatabasePrincipalDirectory,
+    SessionPrincipalProvider,
+)
 from paw_backend.authz import (
     Capability,
     PostgresAuditSink,
@@ -59,9 +63,15 @@ def error_without_request_id(response) -> dict:
 
 
 class UnauthenticatedTest(unittest.TestCase):
-    def test_create_app_installs_a_provider_that_authenticates_nobody(self):
+    def test_create_app_installs_the_session_provider_and_the_directory(self):
+        # PAW-022 replaced the placeholder that authenticated nobody: the cookie
+        # of a session is what authenticates (tests/test_auth_http.py).
         app = create_app(make_settings(), database=FakeDatabase())
-        self.assertIsInstance(app.state.principal_provider, UnauthenticatedProvider)
+        self.assertIsInstance(app.state.principal_provider, SessionPrincipalProvider)
+        self.assertNotIsInstance(app.state.principal_provider, UnauthenticatedProvider)
+        self.assertIsInstance(
+            app.state.authorizer._directory, DatabasePrincipalDirectory
+        )
 
     def test_protected_endpoints_answer_401_until_authentication_exists(self):
         app, sink, calls = make_test_app(default_provider=True)

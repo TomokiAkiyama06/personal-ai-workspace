@@ -48,6 +48,7 @@ personal-ai-workspace/
 │  │  │  └─ versions/
 │  │  │     ├─ 0001_baseline.py
 │  │  │     ├─ 0021_owner_setup.py
+│  │  │     ├─ 0022_login_session_password.py
 │  │  │     ├─ 0025_audit_events.py
 │  │  │     ├─ 0026_projects.py
 │  │  │     ├─ 0031_tool_approvals.py
@@ -57,7 +58,8 @@ personal-ai-workspace/
 │  │  │     ├─ 0046_shared_memory_candidates.py
 │  │  │     ├─ 0050_research_scratch_store.py
 │  │  │     ├─ 0052_research_provenance.py
-│  │  │     └─ 0083_tasks_project_state_index.py
+│  │  │     ├─ 0083_tasks_project_state_index.py
+│  │  │     └─ 0087_audit_external_send_details.py
 │  │  ├─ paw_backend/
 │  │  │  ├─ __init__.py
 │  │  │  ├─ __main__.py
@@ -69,6 +71,24 @@ personal-ai-workspace/
 │  │  │  ├─ middleware.py
 │  │  │  ├─ security.py
 │  │  │  ├─ server.py
+│  │  │  ├─ auth/
+│  │  │  │  ├─ __init__.py
+│  │  │  │  ├─ audit.py
+│  │  │  │  ├─ auth_policy.py
+│  │  │  │  ├─ context.py
+│  │  │  │  ├─ csrf.py
+│  │  │  │  ├─ db.py
+│  │  │  │  ├─ errors.py
+│  │  │  │  ├─ limits.py
+│  │  │  │  ├─ models.py
+│  │  │  │  ├─ passwords.py
+│  │  │  │  ├─ principals.py
+│  │  │  │  ├─ service.py
+│  │  │  │  ├─ sessions.py
+│  │  │  │  ├─ state.py
+│  │  │  │  ├─ throttle.py
+│  │  │  │  ├─ tokens.py
+│  │  │  │  └─ wiring.py
 │  │  │  ├─ cli/
 │  │  │  │  ├─ __init__.py
 │  │  │  │  ├─ __main__.py
@@ -115,7 +135,9 @@ personal-ai-workspace/
 │  │  │  │  ├─ __init__.py
 │  │  │  │  ├─ privacy/
 │  │  │  │  │  ├─ __init__.py
+│  │  │  │  │  ├─ audit.py
 │  │  │  │  │  ├─ contract.py
+│  │  │  │  │  ├─ factory.py
 │  │  │  │  │  ├─ gate.py
 │  │  │  │  │  └─ rules.py
 │  │  │  │  ├─ provenance/
@@ -187,14 +209,18 @@ personal-ai-workspace/
 │  │  │     ├─ deps.py
 │  │  │     └─ v1/
 │  │  │        ├─ __init__.py
+│  │  │        ├─ auth.py
 │  │  │        ├─ events.py
 │  │  │        └─ health.py
 │  │  ├─ pyproject.toml
 │  │  └─ tests/
 │  │     ├─ __init__.py
+│  │     ├─ auth_http_support.py
+│  │     ├─ auth_support.py
 │  │     ├─ fake_postgres.py
 │  │     ├─ gate_support.py
 │  │     ├─ identity_support.py
+│  │     ├─ privacy_audit_support.py
 │  │     ├─ privacy_support.py
 │  │     ├─ provenance_support.py
 │  │     ├─ projects_support.py
@@ -204,6 +230,23 @@ personal-ai-workspace/
 │  │     ├─ shared_memory_support.py
 │  │     ├─ support.py
 │  │     ├─ teardown_child.py
+│  │     ├─ test_auth_argument_validation.py
+│  │     ├─ test_auth_csrf.py
+│  │     ├─ test_auth_grants.py
+│  │     ├─ test_auth_http.py
+│  │     ├─ test_auth_http_admin.py
+│  │     ├─ test_auth_migration.py
+│  │     ├─ test_auth_passwords.py
+│  │     ├─ test_auth_plans.py
+│  │     ├─ test_auth_provider.py
+│  │     ├─ test_auth_service_account.py
+│  │     ├─ test_auth_service_admin.py
+│  │     ├─ test_auth_service_login.py
+│  │     ├─ test_auth_service_redeem.py
+│  │     ├─ test_auth_sessions.py
+│  │     ├─ test_auth_settings.py
+│  │     ├─ test_auth_throttle.py
+│  │     ├─ test_auth_tokens.py
 │  │     ├─ test_config.py
 │  │     ├─ test_database.py
 │  │     ├─ test_database_run_abortable.py
@@ -224,6 +267,12 @@ personal-ai-workspace/
 │  │     ├─ test_owner_setup_service.py
 │  │     ├─ test_owner_token_roles.py
 │  │     ├─ test_postgres_integration.py
+│  │     ├─ test_privacy_audit_event.py
+│  │     ├─ test_privacy_audit_factory.py
+│  │     ├─ test_privacy_audit_grants.py
+│  │     ├─ test_privacy_audit_postgres.py
+│  │     ├─ test_privacy_audit_schema.py
+│  │     ├─ test_privacy_audit_stall.py
 │  │     ├─ test_privacy_broker.py
 │  │     ├─ test_privacy_contract.py
 │  │     ├─ test_privacy_gate.py
@@ -379,6 +428,7 @@ personal-ai-workspace/
 │     ├─ 0012-research-provider-adapter-policy.md
 │     ├─ 0013-research-scratch-task-relation.md
 │     ├─ 0014-task-working-set-persistence.md
+│     ├─ 0023-audit-events-details-for-external-send.md
 │     └─ README.md
 └─ evaluator/
    └─ README.md

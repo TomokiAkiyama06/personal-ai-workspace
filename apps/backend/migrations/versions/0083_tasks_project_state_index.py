@@ -18,7 +18,7 @@ changes: the application role already holds SELECT on ``tasks``.
 when this revision is applied; the cost is a short pause of task writes.
 
 Revision ID: 0083
-Revises: 0026
+Revises: 0022
 Create Date: 2026-09-25
 """
 
@@ -27,7 +27,7 @@ from collections.abc import Sequence
 from alembic import op
 
 revision: str = "0083"
-down_revision: str | Sequence[str] | None = "0026"
+down_revision: str | Sequence[str] | None = "0022"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
