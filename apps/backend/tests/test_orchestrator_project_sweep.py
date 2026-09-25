@@ -366,6 +366,24 @@ class RealProjectSweepTest(PostgresOrchestratorTestCase):
         )
         return project_id
 
+    async def set_project_state(self, project_id, status: str) -> None:
+        """Move a project between the states with SQL (the deletion times the
+        database requires go with them). Tasks are created while a project is
+        Active: a project that is not is (or will be, issue #83) refused new
+        tasks by the task lane itself."""
+        times = (
+            "now(), now() + interval '720 hours'"
+            if status == "pending_deletion"
+            else "NULL, NULL"
+        )
+        await self.owner_sql(
+            "UPDATE projects SET status = :status,"
+            f" (deletion_started_at, deletion_scheduled_at) = ({times})"
+            " WHERE id = :id",
+            id=project_id,
+            status=status,
+        )
+
     async def task_in(self, project_id, *, enqueue=True):
         task_id = await self.create_task(project_id=project_id)
         if enqueue:
@@ -377,11 +395,13 @@ class RealProjectSweepTest(PostgresOrchestratorTestCase):
 
     async def test_a_cycle_stops_the_tasks_of_a_pending_deletion_project_only(self):
         await self.owner_sql("TRUNCATE projects CASCADE")
-        pending = await self.seed_project("pending_deletion")
+        pending = await self.seed_project("active")
         live = await self.seed_project("active")
-        archived = await self.seed_project("archived")
+        archived = await self.seed_project("active")
         doomed = [await self.task_in(pending) for _ in range(3)]
         safe = [await self.task_in(live), await self.task_in(archived)]
+        await self.set_project_state(pending, "pending_deletion")
+        await self.set_project_state(archived, "archived")
         loop = build_project_stop_loop(self.new_database(), interval_seconds=60)
 
         report = await loop.run_cycle()
@@ -406,9 +426,12 @@ class RealProjectSweepTest(PostgresOrchestratorTestCase):
         first = await loop.run_cycle()  # nothing to stop yet
         self.assertEqual((first.projects, first.stopped_tasks), (1, 0))
 
-        late = await self.task_in(
-            pending
-        )  # a create_task / enqueue that raced the deletion
+        # A task that raced the deletion request: it was created while the project
+        # was still Active (the project is Active again for a moment, then its
+        # deletion begins again), after the first cycle had found nothing.
+        await self.set_project_state(pending, "active")
+        late = await self.task_in(pending)
+        await self.set_project_state(pending, "pending_deletion")
         second = await loop.run_cycle()
 
         self.assertEqual(second.stopped_tasks, 1)
@@ -416,13 +439,10 @@ class RealProjectSweepTest(PostgresOrchestratorTestCase):
 
     async def test_a_restored_project_is_left_alone(self):
         await self.owner_sql("TRUNCATE projects CASCADE")
-        project = await self.seed_project("pending_deletion")
+        project = await self.seed_project("active")
         task_id = await self.task_in(project)
-        await self.owner_sql(
-            "UPDATE projects SET status = 'archived', deletion_started_at = NULL,"
-            " deletion_scheduled_at = NULL WHERE id = :id",
-            id=project,
-        )
+        await self.set_project_state(project, "pending_deletion")
+        await self.set_project_state(project, "archived")  # restored
         loop = build_project_stop_loop(self.new_database())
 
         report = await loop.run_cycle()
@@ -432,8 +452,9 @@ class RealProjectSweepTest(PostgresOrchestratorTestCase):
 
     async def test_the_loop_runs_and_shuts_down_cleanly(self):
         await self.owner_sql("TRUNCATE projects CASCADE")
-        project = await self.seed_project("pending_deletion")
+        project = await self.seed_project("active")
         task_id = await self.task_in(project)
+        await self.set_project_state(project, "pending_deletion")
         clock = ManualClock()
         loop = build_project_stop_loop(self.new_database(), clock=clock)
         run = asyncio.create_task(loop.run())
