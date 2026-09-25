@@ -1006,14 +1006,22 @@ Broker は、呼び出しがどの Repository に触れるかを **Backend が�
 
 `ApprovalService` は Broker と**別の Object**です。Agent の Runtime へは Broker（または Runner）だけを渡し、`ApprovalService` は渡さないでください（渡さなくても上の規則が守られますが、それが最初の防御です）。
 
-**人の判断（承認・却下・取り消し）の Store 呼び出しは、時間で区切ります。** 独立 Review が、接続は受け付けるが Query に答えない PostgreSQL に、`approve` / `reject` / `revoke` の照会（`get`）と更新（`decide` / `revoke`）が無期限に待たされ、承認の HTTP 要求と Pool の枠が塞がると指摘しました（`revoke_task`・Step-up・Listener・Audit は区切られていました）。Pool の Session の Query を `asyncio.timeout` で取り消しても、サーバが取り消しを確認しないため約 10 秒かかり、期限になりません（実測）。そこで 2 段にしました。
+**人の判断（承認・却下・取り消し）の Store 呼び出し、そして Broker が呼ぶ要求と使用も、時間で区切ります。** 独立 Review が、接続は受け付けるが Query に答えない PostgreSQL に、`approve` / `reject` / `revoke` の照会（`get`）と更新（`decide` / `revoke`）が無期限に待たされ、承認の HTTP 要求と Pool の枠が塞がると指摘しました（`revoke_task`・Step-up・Listener・Audit は区切られていました）。Pool の Session の Query を `asyncio.timeout` で取り消しても、サーバが取り消しを確認しないため約 10 秒かかり、期限になりません（実測）。そこで 2 段にしました。
 
 1. `ApprovalService` は、1 回の操作の Store 呼び出し（照会と更新）を**1 つの期限 `timeout_seconds`** で区切ります。期限は操作の開始時に 1 回だけ数え、各呼び出しには残りを渡します（呼び出しごとに数え直すと、1 回の操作が 2 倍かかります）。使い切った後は次の呼び出しを始めません。期限になれば型付きの結果 `ApprovalOutcome.UNAVAILABLE` を返し、型名だけを Log に残します（Audit 行は、照会に成功して更新まで進んだ場合に `unavailable` で残ります）。Step-up は自分の期限を持つので、この期限には数えません。
 2. `PostgresApprovalStore` の `get` / `decide` / `revoke` は、Pool を使わない**中断可能な接続**（`Database.fetch_abortable`）で、変更と履歴の行を 1 つにした CTE の **1 つの Statement**（原子的）として実行し、`decision_timeout_seconds`（既定 3 秒）で Socket を閉じます。拒否の理由を説明する読み取りや、期限切れの印付けが要る呼び出しは、それらと**1 つの期限**を分け合います。
 
 期限を過ぎた Statement は、Server 側では続きが実行されることがあります（`revoke_task` と同じ）。ただし 1 つの Statement なので、承認の行と履歴の行は**両方が反映されるか、どちらも反映されない**かで、部分的な状態にはなりません。呼び直すと真の状態が返ります（反映済みなら `not_pending` / `not_open`）。
-Test: `tests/test_tools_approvals.py` の `DecisionDeadlineTest`（応答しない Store、1 つの期限、Step-up は数えないこと、型名だけの Log）、`tests/test_tools_postgres.py` の `StalledServerTest`（応答しない Server）、`DecisionStatementsShareOneDeadlineTest`（Statement ごとの残り時間）、`DecisionDeadlineTest`（行の Lock で Statement を止めて期限で返ること、承認と履歴が食い違わないこと）。
-限界: `open_request` / `consume` / `history` は Pool の Transaction で動き、Broker が `asyncio.timeout` で区切ります。応答しない Server では約 10 秒かかることがあり、`timeout_seconds` ちょうどでは返りません（この範囲外。後続の課題）。中断可能な接続は呼び出しごとに接続を張るので、Pool の Session より重いです（承認の Endpoint は低頻度です）。
+Test（人の判断）: `tests/test_tools_approvals.py` の `DecisionDeadlineTest`（応答しない Store、1 つの期限、Step-up は数えないこと、型名だけの Log）、`tests/test_tools_postgres.py` の `StalledServerTest`（応答しない Server）、`DecisionStatementsShareOneDeadlineTest`（Statement ごとの残り時間）、`DecisionDeadlineTest`（行の Lock で Statement を止めて期限で返ること、承認と履歴が食い違わないこと）。
+
+**Broker が呼ぶ `open_request`（要求を開く）と `consume`（使う）も、同じ方法で区切ります。** 独立 Review が、この 2 つが Pool の Transaction で動くため、接続は受け付けるが応答しない PostgreSQL や Lock 待ちでは、Broker の `asyncio.timeout` を超えて待たされ（約 10 秒）、Pool の枠も塞ぐと指摘しました。2 つとも複数の Statement が要ります（`open_request` は (Task, User) ごとの advisory lock、Task の行の `FOR SHARE`、期限切れの印付け、前の Run の取り消し、重複・Cooldown・件数の確認、挿入、`consume` は Task の行の `FOR SHARE` と更新）。1 つの CTE にはできません。READ COMMITTED では Statement が Lock を待つ**前**に Snapshot を取るので、advisory lock の下の件数の確認が古い値で決まり、上限を超えるからです。そこで:
+
+- `Database.transact_abortable`（新規）が、`fetch_abortable` と同じ**中断可能な接続**（Pool を使わない。空き待ちと実行が**1 つの期限**を共有。期限、呼び出し側の Cancel、`dispose()` で Socket を閉じる）の上で、**1 つの `BEGIN` / `COMMIT`** の Transaction を実行します。`PostgresApprovalStore.open_request` / `consume` は、上の規則を生の SQL にして（Statement は 1 つずつ別のまま）これで実行し、`transaction_timeout_seconds`（既定 3 秒）で呼び出し全体を区切ります。`open_request` が競合で再試行する分も、この期限を共有します。時間切れは `TimeoutError` で、Broker は型付きの `approval_unavailable`（Log は型名だけ）にします。Broker の `asyncio.timeout` が先に来ても同じです（Cancel も Socket を閉じるので、約 10 秒待ちません）。
+- **打ち切られた Transaction は、全部か何もか**です。Server は閉じた接続しか見ず、次の Statement も `COMMIT` も受け取らないので、Transaction を巻き戻します（承認の行、履歴、取り消しの全て）。`COMMIT` の最中に打ち切られたときだけ、反映されたかどうかが分かりません。呼び直すと分かります（要求は `EXISTING`、使ったものは `already_used`）。使う側は失敗（Fail-closed）に倒れます（承認が使われたのに Tool が動かないことはあっても、その逆はありません）。
+- **Server にも上限を伝えます。** Lock を待っている Backend は、閉じた Socket に気づきません（送るものができるまで気づかない）。そのままだと、打ち切られた Transaction が Lock の持ち主が終わるまで待ち続け、取った advisory lock と Server の接続を持ち続けます。そこで Transaction の最初に `SET LOCAL lock_timeout` / `statement_timeout` を、残り時間に `_SERVER_GRACE_SECONDS`（1 秒）を足した値にします（呼び出し側の期限が必ず先に来て `TimeoutError` になり、Server の側は少し後に自分で手を引きます）。
+
+Test（要求と使用）: `tests/test_tools_postgres.py` の `StalledServerTest`（応答しない Server に、Store と Broker が期限で返ること、Pool を使わないこと、Log に接続先を出さないこと。旧実装は 10.3 秒かかり失敗）、`RequestAttemptsShareOneDeadlineTest`（再試行が 1 つの期限を共有）、`TransactionDeadlineTest`（advisory lock と Task の行と承認の行を別の Transaction で Lock して止め、期限で返ること、打ち切られた Transaction が何も残さず、Lock の持ち主が残っていても Server の Backend が自分で去ること）、`tests/test_db_transact_abortable.py`（`Database.transact_abortable` の Commit・Rollback・打ち切り・Server 側の上限・Slot の共有・`dispose()`）。
+限界: `history`（Test と診断が読む。どの Request の経路からも呼ばれない）は Pool の Session で動き、期限で区切っていません。中断可能な接続は呼び出しごとに接続を張るので、Pool の Session より重いです（承認の要求と使用は Tool 呼び出しごとに 1 回で、承認の Endpoint は低頻度です。接続数は Pool の大きさで抑えています）。
 
 #### Task の終了と承認
 

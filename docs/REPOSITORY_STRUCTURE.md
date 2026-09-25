@@ -128,6 +128,7 @@ personal-ai-workspace/
 │  │     ├─ teardown_child.py
 │  │     ├─ test_config.py
 │  │     ├─ test_database.py
+│  │     ├─ test_db_transact_abortable.py
 │  │     ├─ test_errors.py
 │  │     ├─ test_events.py
 │  │     ├─ test_health.py

@@ -48,7 +48,7 @@ from paw_backend.tools import (
 )
 
 from .fake_postgres import HangingPostgres
-from .support import make_settings
+from .support import make_settings, wait_until
 from .task_support import migrate, new_database, requires_postgres
 from .tools_store_contract import (
     HOUR,
@@ -2394,6 +2394,352 @@ class StalledServerTest(unittest.IsolatedAsyncioTestCase):
                     )
                     self.assertIn("TimeoutError", "\n".join(logs.output))
             self.assertEqual(sink.events, [])  # nothing to attribute a row to
+
+    async def test_a_request_and_a_use_give_up_at_their_deadline(self):
+        """Finding of the fifth review of PR #74: ``open_request`` and ``consume``
+        ran in pooled transactions, so a server that stops answering held them
+        for about ten seconds whatever limit they were given."""
+        new = new_approval()
+        async with HangingPostgres() as server:
+            database = Database(stalled_settings(server))
+            self.addAsyncCleanup(database.dispose)
+            store = PostgresApprovalStore(database, transaction_timeout_seconds=0.3)
+            for active in (False, True):
+                calls = {
+                    "open_request": lambda active=active: store.open_request(
+                        new, now=NOW, limits=LIMITS, require_active_task=active
+                    ),
+                    "consume": lambda active=active: store.consume(
+                        new.approval_id,
+                        binding_of(new),
+                        now=NOW,
+                        require_active_task=active,
+                    ),
+                }
+                for name, call in calls.items():
+                    with self.subTest(call=name, require_active_task=active):
+                        started = time.monotonic()
+                        with self.assertRaises(TimeoutError):
+                            async with asyncio.timeout(20):
+                                await call()
+                        self.assertLess(time.monotonic() - started, self.FAR)
+            # nothing went through the pool (so no pool slot can be held), and the
+            # abortable connections and their slots are all given back
+            self.assertIsNone(database._engine)
+            self.assertTrue(
+                await wait_until(
+                    lambda: (
+                        not database._probes
+                        and not database._probe_connections
+                        and database._abortable_slots._value
+                        == database._settings.database_pool_size
+                    ),
+                    limit=3,
+                )
+            )
+
+    async def test_the_limit_of_the_store_is_hard_even_for_one_the_broker_did_not_set(
+        self,
+    ):
+        """The broker's ``asyncio.timeout`` alone bounds the call, too: it cancels
+        the store call, and cancelling an abortable call shuts the socket down
+        (a pooled query waited about ten seconds for the server)."""
+        async with HangingPostgres() as server:
+            database = Database(stalled_settings(server))
+            self.addAsyncCleanup(database.dispose)
+            store = PostgresApprovalStore(database)  # its own limit: 3 seconds
+            new = new_approval()
+            for name, call in {
+                "open_request": lambda: store.open_request(
+                    new, now=NOW, limits=LIMITS, require_active_task=True
+                ),
+                "consume": lambda: store.consume(
+                    new.approval_id, binding_of(new), now=NOW, require_active_task=True
+                ),
+            }.items():
+                with self.subTest(call=name):
+                    started = time.monotonic()
+                    with self.assertRaises(TimeoutError):
+                        async with asyncio.timeout(self.LIMIT):
+                            await call()
+                    self.assertLess(time.monotonic() - started, self.FAR)
+
+    async def test_the_broker_refuses_with_a_typed_reason_when_the_server_stalls(self):
+        approval_id = uuid.uuid4()
+        # (the limit of the store, the limit of the broker): either one that is
+        # reached first ends the call, and the outcome is the same
+        for store_limit, broker_limit in ((self.LIMIT, 30.0), (30.0, self.LIMIT)):
+            async with HangingPostgres() as server:
+                database = Database(stalled_settings(server))
+                self.addAsyncCleanup(database.dispose)
+                store = PostgresApprovalStore(
+                    database, transaction_timeout_seconds=store_limit
+                )
+                h = Harness(approvals=store, timeout_seconds=broker_limit)
+                for use in (False, True):
+                    with self.subTest(store_limit=store_limit, use=use):
+                        started = time.monotonic()
+                        with self.assertLogs("paw_backend", "ERROR") as logs:
+                            decision = await asyncio.wait_for(
+                                h.broker.request(
+                                    make_call("repo.delete_tree", DELETE),
+                                    approval_id=approval_id if use else None,
+                                ),
+                                20,
+                            )
+                        self.assertLess(time.monotonic() - started, self.FAR)
+                        self.assertEqual(
+                            (decision.allowed, decision.verdict, decision.reason),
+                            (False, Verdict.DENY, BrokerReason.APPROVAL_UNAVAILABLE),
+                        )
+                        # the type of the failure, nothing the driver said
+                        logged = "\n".join(logs.output)
+                        self.assertIn("(TimeoutError)", logged)
+                        self.assertNotIn("127.0.0.1", logged)
+                        self.assertNotIn(str(server.port), logged)
+
+
+class SlowTransactions:
+    """Answers each ``transact_abortable`` from a script after ``step`` seconds, and
+    records the time limit each was given (it does not enforce it)."""
+
+    def __init__(self, results, step=0.0):
+        self.results, self.step, self.timeouts = list(results), step, []
+
+    async def transact_abortable(self, work, *, timeout_seconds=None):
+        self.timeouts.append(timeout_seconds)
+        await asyncio.sleep(self.step)
+        return self.results.pop(0)
+
+
+class RequestAttemptsShareOneDeadlineTest(unittest.IsolatedAsyncioTestCase):
+    """The attempts of one ``open_request`` share ONE limit, like the statements
+    of a decision: a request that keeps losing the race to open the same call is
+    tried again, and each attempt used to be given the full limit."""
+
+    LIMIT = 1.0
+
+    async def test_each_attempt_gets_what_is_left_of_one_limit(self):
+        database = SlowTransactions([None, None, None], step=0.2)
+        store = PostgresApprovalStore(database, transaction_timeout_seconds=self.LIMIT)
+        with self.assertRaises(RuntimeError):  # three lost races
+            await store.open_request(new_approval(), now=NOW, limits=LIMITS)
+        self.assertEqual(len(database.timeouts), 3)
+        first, *rest = database.timeouts
+        self.assertLessEqual(first, self.LIMIT)
+        self.assertGreater(first, self.LIMIT - 0.1)
+        for before, after in zip(database.timeouts, rest, strict=False):
+            self.assertLess(after, before - 0.15)  # less by what that one took
+
+    async def test_a_limit_that_the_first_attempt_used_up_starts_no_second(self):
+        database = SlowTransactions([None, None], step=0.4)
+        store = PostgresApprovalStore(database, transaction_timeout_seconds=0.3)
+        with self.assertRaises(TimeoutError):
+            await store.open_request(new_approval(), now=NOW, limits=LIMITS)
+        self.assertEqual(len(database.timeouts), 1)
+
+    async def test_a_use_gets_the_whole_limit_in_one_transaction(self):
+        new = new_approval()
+        database = SlowTransactions([ConsumeOutcome.CONSUMED])
+        store = PostgresApprovalStore(database, transaction_timeout_seconds=0.7)
+        outcome = await store.consume(new.approval_id, binding_of(new), now=NOW)
+        self.assertEqual(outcome, ConsumeOutcome.CONSUMED)
+        self.assertEqual(database.timeouts, [0.7])
+
+    async def test_the_limit_must_be_positive(self):
+        for value in (0, -1, float("nan")):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    PostgresApprovalStore(
+                        SlowTransactions([]), transaction_timeout_seconds=value
+                    )
+
+
+@requires_postgres
+class TransactionDeadlineTest(LockWaits, TaskFixture):
+    """A request or a use that waits on a lock returns on time, leaves nothing
+    behind, and leaves the server too.
+
+    Finding of the fifth review of PR #74: ``open_request`` and ``consume`` ran
+    in pooled transactions, which a server that stops answering holds past any
+    limit (``StalledServerTest``). They now run in ONE transaction on an
+    abortable connection (``Database.transact_abortable``). Here the stall is a
+    lock that another transaction holds, which makes the statement wait exactly
+    like a stalled one would. The transaction is all or nothing: the server never
+    receives the ``COMMIT`` of a call that was abandoned, so it is rolled back.
+    """
+
+    LIMIT = 0.5
+    GUARD = 10  # far above the limit: only reached by a call that ignores it
+
+    async def wire(self):
+        self.store = PostgresApprovalStore(
+            self.new_database(), transaction_timeout_seconds=self.LIMIT
+        )
+        self.task_id = await self.new_task()
+        self.new = new_approval(task_id=self.task_id)
+
+    @contextlib.asynccontextmanager
+    async def holding(self, sql: str, **parameters):
+        """Another transaction that holds the lock ``sql`` takes."""
+        async with self.database.engine.connect() as holder:
+            await holder.execute(text(sql), parameters)
+            try:
+                yield
+            finally:
+                await holder.rollback()
+
+    def hold_the_task(self):
+        return self.holding(
+            "SELECT id FROM tasks WHERE id = :id FOR UPDATE", id=self.task_id
+        )
+
+    def hold_the_approval(self):
+        return self.holding(
+            "SELECT id FROM tool_approvals WHERE id = :id FOR UPDATE",
+            id=self.new.approval_id,
+        )
+
+    async def gives_up(self, call) -> float:
+        """Run ``call`` (which must wait for a lock) and return the seconds it
+        took to raise ``TimeoutError``."""
+        started = time.monotonic()
+        with self.assertRaises(TimeoutError):
+            async with asyncio.timeout(self.GUARD):
+                await call()
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed, self.GUARD / 2)
+        return elapsed
+
+    async def waiters_leave(self):
+        """Until no backend waits on a lock any more (the holder still holds it)."""
+        async with asyncio.timeout(self.GUARD):
+            while True:
+                if await self.lock_waiters() == 0:
+                    return
+                await asyncio.sleep(0.02)
+
+    async def settled(self):
+        """Until no other backend is running a statement or holds a transaction."""
+        async with asyncio.timeout(self.GUARD):
+            while True:
+                async with self.database.engine.begin() as connection:
+                    busy = (
+                        await connection.execute(
+                            text(
+                                "SELECT count(*) FROM pg_stat_activity WHERE datname ="
+                                " current_database() AND pid <> pg_backend_pid() AND"
+                                " state IN ('active', 'idle in transaction',"
+                                " 'idle in transaction (aborted)')"
+                            )
+                        )
+                    ).scalar_one()
+                if busy == 0:
+                    return
+                await asyncio.sleep(0.02)
+
+    async def approved(self):
+        """An approved, unused approval of the task."""
+        opened = await self.store.open_request(self.new, now=NOW, limits=LIMITS)
+        self.assertEqual(opened.outcome, OpenOutcome.CREATED)
+        decided = await self.store.decide(
+            self.new.approval_id, approver_id=U1, approve=True, now=NOW
+        )
+        self.assertEqual(decided.outcome, DecideOutcome.DECIDED)
+
+    async def kinds(self):
+        history = await self.store.history(self.new.approval_id)
+        return [entry.kind.value for entry in history]
+
+    async def test_a_request_that_waits_for_the_advisory_lock_gives_up_in_time(self):
+        await self.wire()
+        # the lock that serialises the requests of a (task, user)
+        key = f"tool_approvals:{self.new.task_id}:{self.new.requester_user_id}"
+        async with self.holding(
+            "SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))", key=key
+        ):
+            await self.gives_up(
+                lambda: self.store.open_request(self.new, now=NOW, limits=LIMITS)
+            )
+            # the abandoned statement stops waiting on its own, whatever the
+            # holder does (the closed socket alone would not wake it)
+            await self.waiters_leave()
+        await self.settled()
+        self.assertIsNone(await self.store.get(self.new.approval_id))
+        self.assertEqual(await self.kinds(), [])
+        # nothing is left behind: the same call opens at once
+        opened = await self.store.open_request(self.new, now=NOW, limits=LIMITS)
+        self.assertEqual(opened.outcome, OpenOutcome.CREATED)
+        self.assertEqual(await self.kinds(), ["requested"])
+
+    async def test_a_request_that_waits_for_the_task_gives_up_in_time(self):
+        await self.wire()
+        async with self.hold_the_task():
+            await self.gives_up(
+                lambda: self.store.open_request(
+                    self.new, now=NOW, limits=LIMITS, require_active_task=True
+                )
+            )
+            # it also gives up the advisory lock it took first
+            await self.waiters_leave()
+        await self.settled()
+        self.assertIsNone(await self.store.get(self.new.approval_id))
+        opened = await self.store.open_request(
+            self.new, now=NOW, limits=LIMITS, require_active_task=True
+        )
+        self.assertEqual(opened.outcome, OpenOutcome.CREATED)
+
+    async def test_a_use_that_waits_for_the_task_gives_up_in_time(self):
+        await self.wire()
+        await self.approved()
+        async with self.hold_the_task():
+            await self.gives_up(
+                lambda: self.store.consume(
+                    self.new.approval_id,
+                    binding_of(self.new),
+                    now=NOW,
+                    require_active_task=True,
+                )
+            )
+            await self.waiters_leave()
+        await self.settled()
+        record = await self.store.get(self.new.approval_id)
+        self.assertEqual(record.status, ApprovalStatus.APPROVED)
+        self.assertEqual(await self.kinds(), ["requested", "approved"])
+        # still usable, exactly once
+        for expected in (ConsumeOutcome.CONSUMED, ConsumeOutcome.ALREADY_USED):
+            used = await self.store.consume(
+                self.new.approval_id,
+                binding_of(self.new),
+                now=NOW,
+                require_active_task=True,
+            )
+            self.assertEqual(used, expected)
+
+    async def test_a_use_that_is_abandoned_while_it_changes_the_row_is_rolled_back(
+        self,
+    ):
+        await self.wire()
+        await self.approved()
+        async with self.hold_the_approval():
+            await self.gives_up(
+                lambda: self.store.consume(
+                    self.new.approval_id, binding_of(self.new), now=NOW
+                )
+            )
+        # The holder is gone within the server-side limit, so the abandoned
+        # statement now gets the row and changes it, but the connection is
+        # closed: no COMMIT ever reaches the server, and the change is undone.
+        await self.settled()
+        record = await self.store.get(self.new.approval_id)
+        self.assertEqual(record.status, ApprovalStatus.APPROVED)
+        self.assertIsNone(record.consumed_at)
+        self.assertEqual(await self.kinds(), ["requested", "approved"])
+        used = await self.store.consume(
+            self.new.approval_id, binding_of(self.new), now=NOW
+        )
+        self.assertEqual(used, ConsumeOutcome.CONSUMED)
+        self.assertEqual(await self.kinds(), ["requested", "approved", "consumed"])
 
 
 @requires_postgres
