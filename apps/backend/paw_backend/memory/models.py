@@ -55,6 +55,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from paw_backend.db import Base
+from paw_backend.memory.fulltext import search_document_sql
 from paw_backend.memory.vector import Vector
 
 
@@ -375,6 +376,17 @@ class MemoryVersion(Base):
             "ix_memory_versions_shared_status",
             "status",
             postgresql_where=text("scope = 'shared'"),
+        ),
+        # Full-text search over title and content (PAW-043, revision 0043): the
+        # keyword leg of Hybrid Retrieval. Only active versions are searched, so
+        # the index holds no history. The expression is the one the queries use
+        # (``memory/fulltext.py``); the ACL condition is applied by the same query
+        # (``memory/retrieval/``), never by this index.
+        Index(
+            "ix_memory_versions_search",
+            text(search_document_sql()),
+            postgresql_using="gin",
+            postgresql_where=text("status = 'active'"),
         ),
     )
 
