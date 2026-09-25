@@ -425,6 +425,7 @@ class AbstractHostsTest(Table, unittest.TestCase):
                 ("db.internal.:5432", ("", 1)),
                 ("ssh admin@10.0.0.5", ("ssh", 1)),
                 ("ping fe80::1%eth0", ("ping", 1)),
+                ("net fd00::, 2001:db8::.", ("net", 2)),
                 ("docs at example.com.", ("docs at example.com.", 0)),
                 ("example.com.:8080", ("example.com.:8080", 0)),
                 ("python 3.13 server1 file.py", ("python 3.13 server1 file.py", 0)),
@@ -570,6 +571,105 @@ class AbstractHostsTest(Table, unittest.TestCase):
                 ("::", ("::", 0)),
                 (":::1", (":::1", 0)),
                 ("1:2:3:4:5:6:7:8:9", ("1:2:3:4:5:6:7:8:9", 0)),
+            )
+        )
+
+    def test_a_compressed_ipv6_address_that_ends_in_colons_is_removed(self):
+        # The "::" that ends ``fd00::`` is part of the address, not punctuation:
+        # cutting it off left ``fd00`` (a word) or ``2001:db8`` (not an address),
+        # and the address reached the provider.
+        self.check(
+            (
+                ("fd00::", ("", 1)),
+                ("2001:db8::", ("", 1)),
+                ("fe80::", ("", 1)),
+                ("fd12:3456:789a::", ("", 1)),
+                ("1::", ("", 1)),
+                ("ping fd00:: now", ("ping now", 1)),
+                ("net 2001:db8:: is down", ("net is down", 1)),
+                # Mixed case.
+                ("FD00::", ("", 1)),
+                ("2001:DB8::", ("", 1)),
+                ("Fe80::", ("", 1)),
+                # Sentence punctuation and quotes after the address.
+                ("fd00::.", ("", 1)),
+                ("fd00::,", ("", 1)),
+                ("fd00::;", ("", 1)),
+                ("fd00::!", ("", 1)),
+                ("fd00::?", ("", 1)),
+                ("fd00::)", ("", 1)),
+                ("(fd00::)", ("", 1)),
+                ("(fd00::).", ("", 1)),
+                ('"fd00::"', ("", 1)),
+                ("'2001:db8::',", ("", 1)),
+                ("<fe80::>", ("", 1)),
+                ("{fd00::}", ("", 1)),
+                ("see fd00::, then", ("see then", 1)),
+                ("(see 2001:db8::.)", ("(see", 1)),
+                # A colon after the "::" is punctuation as well.
+                ("fd00:::", ("", 1)),
+                ("fd00::):", ("", 1)),
+                ("fd00::.:", ("", 1)),
+                # Any word that is a valid address goes (Decision 0010): ``a::b`` did
+                # already, and ``Bad::`` (hex letters) does now.
+                ("Bad::", ("", 1)),
+                ("a::b", ("", 1)),
+                # An address that does not end in "::" was never affected.
+                ("fd00::1.", ("", 1)),
+                ("2001:db8::1,", ("", 1)),
+            )
+        )
+
+    def test_a_bracketed_compressed_ipv6_address_with_a_port_is_removed(self):
+        self.check(
+            (
+                ("[fd00::]", ("", 1)),
+                ("[fd00::]:8080", ("", 1)),
+                ("[2001:db8::]:443/x", ("", 1)),
+                ("[FD00::]:8080", ("", 1)),
+                ("([fe80::]:80).", ("", 1)),
+                ("see [fd00::], then", ("see then", 1)),
+                ("[fd00::]:", ("", 1)),
+                ("root@[fd00::]:22", ("", 1)),
+                ("[fe80::%eth0]:8080", ("", 1)),
+            )
+        )
+
+    def test_an_endpoint_keeps_its_verdict_when_colons_follow_it(self):
+        # The second look at "core + ::" must not replace the first one.
+        self.check(
+            (
+                ("db.internal::", ("", 1)),
+                ("10.0.0.5::", ("", 1)),
+                ("localhost:::", ("", 1)),
+                ("db.internal:5432::", ("", 1)),
+                ("fe80::1::", ("", 1)),
+                ("example.com::", ("example.com::", 0)),
+                ("docs.python.org::", ("docs.python.org::", 0)),
+            )
+        )
+
+    def test_words_that_end_in_a_colon_are_not_taken_for_ipv6_addresses(self):
+        self.check(
+            (
+                ("note: fd00 is a prefix", ("note: fd00 is a prefix", 0)),
+                ("fd00: next", ("fd00: next", 0)),
+                ("fd00:", ("fd00:", 0)),
+                ("2001:db8:", ("2001:db8:", 0)),
+                ("at 10:30: meeting", ("at 10:30: meeting", 0)),
+                ("10:30:", ("10:30:", 0)),
+                ("10:30:45:", ("10:30:45:", 0)),
+                ("aa:bb:cc:dd:ee:ff:", ("aa:bb:cc:dd:ee:ff:", 0)),
+                ("std::", ("std::", 0)),
+                ("Foo::", ("Foo::", 0)),
+                ("gpu::", ("gpu::", 0)),
+                # No group in front of the "::": a bare "::" is not an address here.
+                ("::", ("::", 0)),
+                ("::.", ("::.", 0)),
+                (":::", (":::", 0)),
+                ("fe80::g::", ("fe80::g::", 0)),
+                ("12345::", ("12345::", 0)),
+                ("1:2:3:4:5:6:7:8:9::", ("1:2:3:4:5:6:7:8:9::", 0)),
             )
         )
 

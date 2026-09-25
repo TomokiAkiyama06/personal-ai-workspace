@@ -405,11 +405,11 @@ def _percent_host(host):
     return None
 
 
-def _endpoint_host(core):
-    """The bare host of an endpoint token, or ``None`` if ``core`` is not one."""
-    match = _ENDPOINT.fullmatch(core)
-    if match:
-        return match.group("v6") or match.group("name")
+def _bare_v6_host(core):
+    """The address of ``core`` if it is an IPv6 address without brackets, else ``None``.
+
+    The zone identifier, if any, is not part of the returned address.
+    """
     match = _BARE_V6.fullmatch(core)
     if match:
         try:
@@ -417,6 +417,17 @@ def _endpoint_host(core):
         except ValueError:
             return None
         return match.group("address")
+    return None
+
+
+def _endpoint_host(core):
+    """The bare host of an endpoint token, or ``None`` if ``core`` is not one."""
+    match = _ENDPOINT.fullmatch(core)
+    if match:
+        return match.group("v6") or match.group("name")
+    host = _bare_v6_host(core)
+    if host is not None:
+        return host
     match = _PCT_ENDPOINT.fullmatch(core) if "%" in core else None
     if match:
         return _percent_host(match.group("host"))
@@ -450,6 +461,17 @@ def abstract_hosts(text):
     optional zone identifier (``%`` and any characters except white space, ``[``,
     ``]`` and ``/``). It has no port and no user information.
 
+    The ``:`` characters that ended the token may belong to the address: a
+    compressed address can end in ``::`` (``fd00::``, ``2001:db8::``, ``fe80::``).
+    So when ``core`` is not an endpoint and is not empty, and the characters that
+    were removed after it begin with ``::`` (the sentence punctuation after the
+    address, ``fd00::.``, ``(fd00::)``, or one more ``:``, may follow), the token is
+    tried ONCE more as ``core`` plus exactly ``::``, as an IPv6 address without
+    brackets. ``ipaddress.IPv6Address`` decides, so ``note:``, ``10:30:``, ``fd00:``
+    and ``std::`` are unchanged; a bare ``::`` has no ``core`` and is unchanged. Any
+    word that is a valid address is dropped, as ``a::b`` already is (``Bad::``
+    too: Decision 0010).
+
     A core that contains ``%`` and is neither of those is a host too (and
     ``is_private_host`` is True, as it is for every host that contains ``%``) when it
     is, after the optional user information, ONE dotted name, an optional port and an
@@ -472,17 +494,25 @@ def abstract_hosts(text):
     ``("see", 1)``; ``"[::1]:8080"`` -> ``("", 1)``;
     ``"[fe80::1%eth0]:8080"`` -> ``("", 1)``; ``"db.internal.:5432"`` ->
     ``("", 1)``; ``"ssh admin@10.0.0.5"`` -> ``("ssh", 1)``; ``"ping fe80::1%eth0"``
-    -> ``("ping", 1)``; ``"docs at example.com."``, ``"example.com.:8080"``,
-    ``"python 3.13"``, ``"server1"``, ``"user@db:5432"`` and ``"file.py"`` are
-    unchanged, 0 (public, or a single label that cannot be told from a word);
+    -> ``("ping", 1)``; ``"net fd00::, 2001:db8::."`` -> ``("net", 2)``;
+    ``"docs at example.com."``, ``"example.com.:8080"``, ``"python 3.13"``,
+    ``"server1"``, ``"user@db:5432"`` and ``"file.py"`` are unchanged, 0 (public, or
+    a single label that cannot be told from a word);
     ``"db.internal%eth0"``, ``"db.%69nternal:5432"`` and ``"db%2einternal"`` are
     dropped, 1; ``"3.5%"`` and ``"100%"`` are unchanged, 0.
     """
     kept = []
     count = 0
     for token in text.split():
-        core = token.lstrip("\"'({<").rstrip("\"')}>,;:.!?")
+        opened = token.lstrip("\"'({<")
+        core = opened.rstrip("\"')}>,;:.!?")
         host = _endpoint_host(core)
+        if host is None and core and opened.startswith("::", len(core)):
+            # The colons that ended the token may be the end of a compressed
+            # address (``fd00::``), not punctuation: try the address that keeps
+            # exactly two of them (a valid address never ends in a single ``:``
+            # or in three), once, so the time stays linear.
+            host = _bare_v6_host(core + "::")
         if host is not None and is_private_host(host):
             count += 1
         else:

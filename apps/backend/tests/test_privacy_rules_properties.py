@@ -105,6 +105,8 @@ HOSTILE = {
     "userinfo dots": "a." * (MAX_DRAFT_CHARS // 2 - 1) + "@a.b",
     "absolute": "a." * (MAX_DRAFT_CHARS // 2 - 1) + ".:1",
     "ports": "a.b:1" * (MAX_DRAFT_CHARS // 5),
+    "hex double colons": "a::" * (MAX_DRAFT_CHARS // 3),
+    "hex then colons": "f" * (MAX_DRAFT_CHARS - 3) + ":::",
     **percent_shapes(MAX_DRAFT_CHARS),
 }
 
@@ -122,6 +124,9 @@ LONG_TOKENS = {
     "userinfo dots": "a." * (LONG // 2) + "@a.b",
     "absolute": "a." * (LONG // 2) + ".:1",
     "labels": "a.b" * (LONG // 3),
+    "hex then colons": "f" * LONG + ":::",
+    "groups then colons": "a:" * (LONG // 2) + "::",
+    "hex double colons": "a::" * (LONG // 3),
     "percents": "%" * LONG,
     "ats": "a@" * (LONG // 2),
     **percent_shapes(LONG),
