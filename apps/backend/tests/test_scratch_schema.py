@@ -135,11 +135,27 @@ class ItemColumnConstraintTest(ScratchSchemaTestCase):
         row = self.item_row(item_id)
 
         self.assertFalse(row["pinned"])
+        self.assertFalse(row["saved"])
         self.assertEqual(row["promotion_state"], "none")
         self.assertIsNone(row["promotion_requested_at"])
         self.assertEqual(row["source_metadata"], {})
         self.assertIsNone(row["task_id"])
         self.assertIsNotNone(row["id"])
+
+    def test_pinned_and_saved_are_separate_required_markers(self):
+        item_id = self.add_item(pinned=True)
+        saved_id = self.add_item(saved=True)
+
+        pinned_row, saved_row = self.item_row(item_id), self.item_row(saved_id)
+
+        self.assertEqual((pinned_row["pinned"], pinned_row["saved"]), (True, False))
+        self.assertEqual((saved_row["pinned"], saved_row["saved"]), (False, True))
+        for column in ("pinned", "saved"):
+            with self.subTest(column):
+                with self.assertRaises(IntegrityError) as raised:
+                    with self.session.begin_nested():
+                        self.add_item(**{column: None})
+                self.assertEqual(raised.exception.orig.diag.column_name, column)
 
     def test_an_item_needs_a_summary_or_a_content(self):
         self.assertIsNone(self.try_item(summary="s", content=None))

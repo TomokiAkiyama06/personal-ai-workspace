@@ -1275,7 +1275,7 @@ Model と Migration の一致は Test が検証します（Alembic の autogener
 
 | Table | 内容 |
 | --- | --- |
-| `research_scratch_items` | 調査結果 1 件。`query`、`title`、`summary`、`content`（`summary` か `content` のどちらかは必須）、`source_metadata`（JSON Object。URL、種別、`fetched_at`、`published_at`、抽出した Claim など。16 KiB まで）、`created_at`、`expires_at`、`pinned`、`promotion_state`（`none` / `pending` / `promoted` / `rejected`）、`promotion_requested_at` |
+| `research_scratch_items` | 調査結果 1 件。`query`、`title`、`summary`、`content`（`summary` か `content` のどちらかは必須）、`source_metadata`（JSON Object。URL、種別、`fetched_at`、`published_at`、抽出した Claim など。16 KiB まで）、`created_at`、`expires_at`、`pinned`（Pin）、`saved`（User の明示保存）、`promotion_state`（`none` / `pending` / `promoted` / `rejected`）、`promotion_requested_at` |
 | `research_scratch_leases` | 「今使っている」印。`(item_id, holder_id)` が Key。`holder_id` は Task や Worker の実行の UUID |
 
 - **TTL**: `expires_at = created_at + interval '24 hours'` を CHECK 制約で強制します（Generated Column は `timestamptz + interval` が immutable ではないため使えません）。`expires_at` は変更しません。延期は TTL の延長ではなく削除の保留です。
@@ -1286,14 +1286,16 @@ Model と Migration の一致は Test が検証します（Alembic の autogener
 
 次のどれかに当てはまる Item は削除を延期します（**exempt**）。
 
-- **Pin 済み**（`pinned`）。要件の「User が明示保存」も Pin で表します。
+- **Pin 済み**（`pinned`）。一時的に残す印です。
+- **User が明示保存**（`saved`）。要件は「Pin 済み」と「User が明示保存」を別の延期理由として挙げているため、Pin とは**別の独立した印**にしています（[Decision 0013](../../docs/decisions/0013-research-scratch-task-relation.md)（Proposed）の「Pin と明示保存」）。
 - **Memory 昇格の確認中**（`promotion_state = 'pending'`）。
 - **使用中**（`expires_at > now` の Lease が 1 つ以上ある）。
 
 Item は `now < expires_at` または exempt のとき **見える**（visible）ことにします。見えない Item は、`purge_expired` がまだ行を消していなくても、全ての Method で「存在しない」（`ScratchItemNotFoundError`）です。
-挙動が Janitor の実行時刻に左右されないようにするためです。期限切れで exempt でない Item は、Pin も Lease も昇格要求もできません（復活させない）。
-最後の exempt 理由が終わる（Unpin、Lease の終了・Release、昇格の解決）と、期限切れの Item は見えなくなり、次の `purge_expired` が削除します。延期用の別の状態や Queue はありません。
+挙動が Janitor の実行時刻に左右されないようにするためです。期限切れで exempt でない Item は、Pin も保存も Lease も昇格要求もできません（復活させない）。
+最後の exempt 理由が終わる（Unpin、Unsave、Lease の終了・Release、昇格の解決）と、期限切れの Item は見えなくなり、次の `purge_expired` が削除します。延期用の別の状態や Queue はありません。
 
+- **Pin と保存は独立。** `pin` / `unpin` は `pinned` の 1 列だけ、`save` / `unsave` は `saved` の 1 列だけを、Item の行を Lock した後の 1 つの `UPDATE` で変えます（もう一方の印は読み直した値のまま残り、同時の変更を失いません）。`unpin` は保存を消さず、`unsave` は Pin を消しません。どちらか一方でも立っていれば Item は残り、**両方**が下りて TTL が過ぎたときに限り、次の `purge_expired` が削除します。TTL は延びません。どちらも冪等で、探し方は `pin` と同じです（存在しない・他の Project・見えない Item は `ScratchItemNotFoundError`）。Test は `test_scratch_saved.py`（Pin + 保存の後の `unpin` で Purge を越えて残る、保存だけ、Pin だけ、両方を下ろすと TTL の後に削除される、`unpin` と `unsave` の同時実行、Lock を待つ間に他方の印が変わっても消えない）と `test_scratch_purge.py` です。
 - **Lease**: `acquire_use` が `lease_seconds`（既定 300、1〜3600）の Lease を作ります。同じ Holder の再取得は更新（短くもできる）、Holder ごとに別の行、同時に有効な Lease は 1 Item に 16 まで（`ScratchLeaseLimitError`）。
   Lease は `[leased_at, expires_at)` の間だけ有効で、更新も Release もされなければ最長 1 時間（CHECK 制約）で終わります。落ちた Worker が Item を固定し続けることはありません。期限切れの Lease は次の `acquire_use` が消します。`release_use` は何度呼んでも、Item が既に消えていても Error になりません。
 - **昇格**: `request_promotion` で `pending`（`none` と `rejected` から。`pending` は何もしない。`promoted` は `ScratchStateError`）。`resolve_promotion(outcome)` で `promoted` / `rejected`（`pending` のときだけ。同じ結果の再実行は何もしない。それ以外は `ScratchStateError`）。Store は Memory Candidate を作りません。それは昇格の Flow の仕事です。
@@ -1313,7 +1315,7 @@ Item は `now < expires_at` または exempt のとき **見える**（visible�
 
 ### 呼び出し側の認可（提案）
 
-Endpoint は次の Issue の仕事です。次の対応を提案します（未強制）。読み取り（`get`、`list_items`）は `project.read`。`add`、`acquire_use`、`release_use`、`pin`、`unpin` は `project.task.run`。
+Endpoint は次の Issue の仕事です。次の対応を提案します（未強制）。読み取り（`get`、`list_items`）は `project.read`。`add`、`acquire_use`、`release_use`、`pin`、`unpin` は `project.task.run`。`save`、`unsave` も暫定で `project.task.run` としますが、誰が明示保存を付け・外せるかは未決です（[Decision 0013](../../docs/decisions/0013-research-scratch-task-relation.md)）。
 `request_promotion` は `project.memory.use`、`resolve_promotion` は `project.memory.manage`（Agent へ委任できない: 調査結果を Agent の判断だけで Long-term Memory へ送らないため）。`purge_expired` は Backend 自身の Janitor だけ（User も Agent も呼べない）。
 
 ### 上限と入力の検証
@@ -1336,7 +1338,7 @@ Test は参照実装で成り立つことを確認しながら書いたもので
 
 - **間隔。** `PAW_SCRATCH_PURGE_INTERVAL_SECONDS`（既定 3600、`0` で止める。それ以外は 60〜86400 で、1〜59 と範囲外は起動時の設定 Error）。起動の 30 秒後（間隔が短ければその間隔）に最初の Tick、その後は間隔ごとです。すぐには実行しないので、起動処理や Diagnostic と競合せず、すぐ止められた Backend は Purge の接続を開きません。
 - **1 回の Tick。** `purge_expired` を 500 件の Batch で、これ以上消せる行がない（`has_more` が偽）まで呼びます。1 Tick は最大 100 Batch（5 万行）で、上限に達して残りがあれば、次の Tick は 5 秒後です。Batch は 1 Transaction なので、途中で失敗しても、済んだ Batch の削除は残ります。
-- **削除の条件は Store のまま。** 期限は Store の Clock が決めます。Pin 済み・使用中（Lease）・昇格確認中の Item は消えず、その事情が終わった後の最初の Tick で消えます。TTL は延びません。Long-term Memory には触れません。
+- **削除の条件は Store のまま。** 期限は Store の Clock が決めます。Pin 済み・保存済み・使用中（Lease）・昇格確認中の Item は消えず、その事情が終わった後の最初の Tick で消えます。TTL は延びません。Long-term Memory には触れません。
 - **失敗。** Tick が失敗しても Loop は止まりません。WARNING に**例外の型名だけ**を出し（Message、SQL、調査内容は出さず、Traceback も付けません）、30 秒から倍にして間隔まで待ち、成功で元に戻ります。削除できた件数は INFO に出します。
 - **停止。** Lifespan の終了で Cancel し、`PAW_SHUTDOWN_TIMEOUT_SECONDS` の範囲で待ってから `Database.dispose()` を呼びます（Diagnostic と同じ）。Purge が Query の途中でも、PostgreSQL が応答しなくても、Janitor はその場で終わります（下記「止まらない PostgreSQL」）。待ちを打ち切って Task を見捨てるのは、Cancel を無視する Task だけで、その数を WARNING に出します。
 - **複数 Process。** それぞれが Janitor を持ってかまいません。`purge_expired` は `SKIP LOCKED` なので、互いに待たず、同じ行を二重に消しません（`test_two_janitors_at_once_delete_every_row_exactly_once`）。
@@ -1360,12 +1362,12 @@ Test は参照実装で成り立つことを確認しながら書いたもので
 - 1 Project あたりの Item 数の上限（Quota）は持ちません。
 - Purge の「Snapshot の後に Commit された Lease」の Race は、実際の同時実行では起こしにくい時間窓です。Test は `purge_probe`（Test 用の接続点）で、その瞬間に exempt が現れる状況を決定的に再現して確認しています。同時実行の Test は複数回繰り返して安定を確認していますが、時間窓そのものを外部から狙って再現しているわけではありません。
 - Migration `0050` の `down_revision` は `0031` です（鎖は `0001 → 0025 → 0032 → 0040 → 0021 → 0033 → 0031 → 0050`）。
-- **Application Role の権限。** 共通の `grant_app_privileges`（PAW-025）で、`ScratchStore` が実行する文に必要な最小の権限だけを付けます。`research_scratch_items` は SELECT / INSERT / DELETE と、UPDATE は `pinned`・`promotion_state`・`promotion_requested_at` の 3 列だけ、`research_scratch_leases` は SELECT / INSERT / DELETE と、UPDATE は `leased_at`・`expires_at` だけです。したがって Application は `expires_at`（Item の期限）、内容、`project_id` などを SQL で書き換えられず、TRUNCATE と Schema の変更もできません。`test_scratch_grants.py` は、この Role で `ScratchStore` の Test を全て実行し、上の権限の一致と、禁止した文の拒否を確かめます。
+- **Application Role の権限。** 共通の `grant_app_privileges`（PAW-025）で、`ScratchStore` が実行する文に必要な最小の権限だけを付けます。`research_scratch_items` は SELECT / INSERT / DELETE と、UPDATE は `pinned`・`saved`・`promotion_state`・`promotion_requested_at` の 4 列だけ、`research_scratch_leases` は SELECT / INSERT / DELETE と、UPDATE は `leased_at`・`expires_at` だけです。したがって Application は `expires_at`（Item の期限）、内容、`project_id` などを SQL で書き換えられず、TRUNCATE と Schema の変更もできません。`test_scratch_grants.py` は、この Role で `ScratchStore` の Test を全て実行し、上の権限の一致と、禁止した文の拒否を確かめます。
 
 ### 人間の判断が必要な点
 
 1. **昇格の確認中（`pending`）の期限。** 期限がないため、確認の Flow が止まると、その Item は残り続けます（`promotion_requested_at` で見つけられます）。期限を付けるか。
-2. **「User が明示保存」。** [要件](../../REQUIREMENTS.md)の 4 つ目の延期理由は Pin で表しています。別の状態にするか。
+2. **「User が明示保存」。** [要件](../../REQUIREMENTS.md)の「Pin 済み」と「User が明示保存」は別の延期理由なので、Pin を 1 つの真偽値で兼ねると `unpin` が保存まで消して期限切れの Item を削除させてしまいます（Review の指摘）。そこで Pin（`pinned`）と保存（`saved`）を**独立した 2 つの印**にしました（情報を失わない最小の案。[Decision 0013](../../docs/decisions/0013-research-scratch-task-relation.md)（Proposed）の「Pin と明示保存」）。残る判断は、保存と Pin で**見え方**（UI、一覧）・**Quota**・**誰が付け外しできるか**（User 本人だけか、Agent に委任できるか）を分けるか、誰が・いつ保存したかを記録するか（現在は真偽値だけ）、複数の User の保存を別々の参照として持つか（現在は 1 つの印で、誰かが `unsave` すれば消えます）です。
 3. **Claim と Source の置き場所。** PAW-052 まで `source_metadata`（16 KiB まで）に置きます。
 4. **Task を削除したときの `task_id`。** Review は、最初の実装（`tasks.id` への Foreign Key、`ON DELETE SET NULL`）は Task の削除で `task_id` を失い、Pin 済みの Item が Project / Task の関係を保てないと指摘しました。要件は Task 削除時の扱いを定めていないため、[Decision 0013](../../docs/decisions/0013-research-scratch-task-relation.md)（**Proposed**、承認待ち）として、Foreign Key を持たない素の UUID にしました。Task の削除は止められず（`RESTRICT` は止める）、Pin 済みは消えず（`CASCADE` は消す）、期限切れは消え、関係は残ります。代わりに DB は存在を保証せず、削除された Task を指す `task_id` が残ります。`RESTRICT` など別の選択にするか、Task を論理削除にして Foreign Key に戻すか。
 5. **認可の対応。** 上の「呼び出し側の認可（提案）」で、特に `resolve_promotion` を委任不可の `project.memory.manage` にする点。

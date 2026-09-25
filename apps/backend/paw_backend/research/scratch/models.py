@@ -9,9 +9,13 @@ issue); the store just records ``promotion_state``.
 
 * ``research_scratch_items``: one research result. ``expires_at`` is
   ``created_at + 24 hours``, enforced by a CHECK constraint (a generated column
-  is impossible: ``timestamptz + interval`` is not immutable). Three things
-  defer deletion: ``pinned``, ``promotion_state = 'pending'`` and an active row
-  in ``research_scratch_leases`` (the item is in use).
+  is impossible: ``timestamptz + interval`` is not immutable). Four things
+  defer deletion: ``pinned``, ``saved``, ``promotion_state = 'pending'`` and an
+  active row in ``research_scratch_leases`` (the item is in use). ``pinned``
+  (a temporary keep) and ``saved`` (a user's explicit save) are two separate
+  markers because REQUIREMENTS.md lists "Pin済み" and "Userが明示保存" as separate
+  reasons: each is set and cleared on its own, so clearing one never removes the
+  other, and the item stays while either is set (proposed decision 0013).
 * ``research_scratch_leases``: who is using an item right now. A lease has an
   end (at most one hour) so that a crashed worker cannot keep an item alive.
 
@@ -111,7 +115,9 @@ class ScratchItemRow(Base):
             "ix_research_scratch_items_purgeable",
             "expires_at",
             "id",
-            postgresql_where=text("NOT pinned AND promotion_state <> 'pending'"),
+            postgresql_where=text(
+                "NOT pinned AND NOT saved AND promotion_state <> 'pending'"
+            ),
         ),
     )
 
@@ -132,6 +138,8 @@ class ScratchItemRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     pinned: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    # A user's explicit save, independent of ``pinned`` (decision 0013).
+    saved: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
     promotion_state: Mapped[str] = mapped_column(Text, server_default=text("'none'"))
     promotion_requested_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True)
