@@ -6,7 +6,7 @@ Login と Session はまだ実装していません（PAW-022 以降）。
 RBAC と Audit（PAW-025）、Task の Lifecycle と永続化（[PAW-032](#agent-task-lifecycle)、HTTP の Endpoint はまだありません）、Task Queue・Budget・Loop 検知（[PAW-033](#task-queue--budget--loop-検知)）、Tool Broker と Capability Policy（[PAW-031](#tool-broker--capability-policy)、HTTP の Endpoint はまだありません）、Memory の PostgreSQL Schema（[PAW-040](#memory--conversation-schema)）、
 最小の `users` Table と Owner の初期設定・復旧のコマンド（[PAW-021](#owner-の初期設定と復旧)）を実装済みです。Memory の保存・整理・検索の処理は PAW-041 以降です。
 Shared Memory の管理（Owner / Admin の作成・編集・削除・復元、Candidate の承認、Agent の自動昇格の拒否、System Policy の優先。[PAW-046](#shared-memory-administration)、HTTP の Endpoint はまだありません）も実装済みです。
-Research の一時保存（[PAW-050](#research-scratch-store)、24 時間 TTL、期限切れを消す Janitor つき、HTTP の Endpoint はまだありません）と、Research Provider の Adapter Interface（[PAW-051](#research-provider-adapter)、実際の Provider（Direct Web、Docs、GitHub、OpenCode）はまだありません）も実装済みです。
+Research の一時保存（[PAW-050](#research-scratch-store)、24 時間 TTL、期限切れを消す Janitor つき、HTTP の Endpoint はまだありません）と、Research Provider の Adapter Interface（[PAW-051](#research-provider-adapter)、実際の Provider（Direct Web、Docs、GitHub、OpenCode）はまだありません）と、外部の検索へ送る Query の最小化と送信の Audit（[PAW-053](#research-privacy-filter)、Audit の永続化はまだありません）も実装済みです。
 
 [Architecture](../../docs/ARCHITECTURE.md) に基づき、最終的に以下の機能を Backend 側で扱います。
 
@@ -58,6 +58,7 @@ apps/backend/
 │  ├─ memory/              # Memory / Conversation の Model、ACL 条件、vector 型、Pin / Importance 変更の Actor（PAW-040）
 │  │  └─ shared/           # Shared Memory の管理: Service、Candidate、Rule 関数、Policy の優先（PAW-046）
 │  ├─ research/providers/  # Research Provider の Adapter Interface と Broker（PAW-051）
+│  ├─ research/privacy/    # Research の Privacy Filter: Query の最小化と外部送信の Audit（PAW-053）
 │  ├─ research/scratch/    # Research Scratch Store: 24 時間 TTL の一時保存と、期限切れを消す Janitor（PAW-050）
 │  ├─ tools/               # Tool Broker、Capability Policy、Approval（PAW-031）
 │  └─ api/
@@ -1630,6 +1631,7 @@ Provider の違い（API の形、Response の形、失敗の仕方）は Broker
 | `locator.py` | `canonicalize_locator`: URL の正規化と無害化 |
 | `normalize.py` | `normalize_hits`（Provider の Response を検証して統一形式へ）、`merge_items`（交互配置・重複除去・件数制限） |
 | `registry.py` | `ProviderRegistry`: 登録時の Interface 検証、一意な名前、決定的な順序 |
+| `preflight.py` | `SearchPreflight`（Protocol）: Provider を呼ぶ前に Request を書き換える・拒否する差し込み口（PAW-053 の Privacy Filter が実装する。`gather` に必須）、`PreflightNotConfiguredError` / `PreflightRequiredError` |
 | `broker.py` | `ResearchBroker.gather` / `fetch`: 並行実行、Timeout、失敗の隔離 |
 | `static.py` | `StaticProvider`: Test 用の Fake（Network を使わない） |
 
@@ -1677,7 +1679,7 @@ Registry は登録時に `name` と `kind` の形、`search` と `fetch` が `as
 
 | 項目 | 内容 |
 | --- | --- |
-| `query` | 1 〜 512 文字、空白のみ不可、改行・Tab を含む制御文字は不可。PAW-053 の Privacy Filter で最小化済みの Query を渡す。Broker は中身を見ず、書き換えない |
+| `query` | 1 〜 512 文字、空白のみ不可、改行・Tab を含む制御文字は不可。Privacy Filter（PAW-053）で最小化済みの Query を渡す。Broker は中身を見ず、書き換えない（pre-flight を設定した場合だけ、pre-flight が Query を差し替える。pre-flight の無い Broker は `unfiltered=True` を明示しない限り検索しない。[Research Privacy Filter](#research-privacy-filter)） |
 | `max_results` | 1 〜 50（既定 10）。各 Provider に頼む件数と、結果の最大件数の両方 |
 | `kinds` | `ProviderKind` の空でない `frozenset`（既定は全種類）。Provider 名では選べない |
 | `time_budget_seconds` | 1 回の `gather` 全体の上限。0 より大きく 120 以下（既定 30） |
@@ -1721,9 +1723,10 @@ License や `robots.txt` に関する項目はありません。要件と設計�
 
 ### Broker の動作
 
-`ResearchBroker(registry).gather(request)` は次のとおり動きます。
+`ResearchBroker(registry, preflight=gate).gather(request, preflight_input=...)` は次のとおり動きます（`preflight` が無く `unfiltered=True` でもない Broker の `gather` は、次の手順に入る前に `PreflightRequiredError` で拒否し、Provider を 1 つも呼びません。[Research Privacy Filter](#research-privacy-filter)）。
 
 1. `request.kinds` に合う Provider を Registry の順序（`ProviderKind` の宣言順、次に名前順。登録順には依存しない）で選びます。
+   `ResearchBroker(registry, preflight=...)` で pre-flight を設定した場合は、ここで、どの Provider も呼ぶ前に `preflight.preflight(request, kinds, preflight_input)` が走り、返された Request が以降の全ての段階で使われます（拒否は例外として `gather` から出て、Provider は呼ばれません。詳しくは [Research Privacy Filter](#research-privacy-filter)）。`unfiltered=True` の Broker（pre-flight が無い）では、この段階は何もせず、Query はそのまま Provider へ渡ります。
 2. **全 Provider を並行**で実行します。各 Provider の制限時間は、登録時の `timeout_seconds`（既定 10 秒、最大 120 秒）と、全体の Budget の残りの小さい方です。時間切れの Provider は Cancel し、完全に終わるまで待ってから `timeout` として報告します。`gather` が返るとき、起動した Task は残りません。
 3. Provider の例外は Provider ごとに隔離します。他の Provider の結果は失われません。`gather` を Cancel した場合は全 Provider を Cancel して `CancelledError` を伝えます。
    **`await` の最中の Cancel と、同期で動く Adapter の Code の例外は区別します。** `Task.cancel()` は `await` の地点でしか届きません。`provider.search` を読んで呼ぶ部分（Property、`__getattribute__` など）と、`published_at` の `tzinfo.utcoffset` は `await` を挟まない同期の Code なので、そこが `CancelledError`、`KeyboardInterrupt`、`SystemExit`、`GeneratorExit` などの `BaseException` を出しても、それは Task の Cancel ではなく Adapter 自身の失敗です。前者は `internal_error`、後者は `invalid_response` として報告し、他の Provider の結果を残します（`gather` / `fetch` は Cancel されません）。`await` の最中に届いた Cancel と Timeout は、これまでどおり握りつぶさず伝えます。
@@ -1762,7 +1765,7 @@ Test: `tests/test_research_broker.py` の `LoggedExceptionTypeTest`（Credential
 
 - `network` Capability の確認は、この層の呼び出し元（Tool Broker、PAW-031）の責任です。この層は認可の判断も Network の Access もしません。
 - どの Host へ接続してよいか（SSRF、Private Address、`robots.txt`）は、具体的な Adapter と Network Policy の責任です。`canonicalize_locator` は名前を解決しません。
-- Query の最小化と Secret の除去は PAW-053 の責任です。`private_source` はその Filter が使います。
+- Query の最小化と Secret の除去は、Privacy Filter（PAW-053、[Research Privacy Filter](#research-privacy-filter)）が、pre-flight として行います。`private_source` は、以前の結果を Context の Piece にする `context_pieces_from_items` が使います。pre-flight を設定しない Broker の `gather` は `PreflightRequiredError` で拒否します（Fail closed）。Query をそのまま Provider へ渡すのは、`unfiltered=True` を明示した Broker だけです。
 - 全ての入力（Query、件数、文字数、Provider 数）に上限があります。Registry は 32 Provider までです。
 
 #### 各 Adapter の受け入れ条件
@@ -1799,6 +1802,131 @@ Direct Web、Docs、GitHub、OpenCode などの Adapter の Issue は、受け�
 `apps/backend/tests/test_research_*.py` です。標準 `unittest` だけで、DB も Network も使いません。
 Timeout の Test は、永遠に待つ Provider を 0.3 秒で打ち切り、成功する Provider は即座に答える構成です（所要時間を厳密には検査せず、30 秒の Guard で CI の停止を防ぎます）。
 
+## Research Privacy Filter
+
+[PAW-053](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/45) で実装した、外部の検索へ送る Query を最小化し、送信を Audit する層です（`paw_backend/research/privacy/`）。
+設計は [要件](../../REQUIREMENTS.md)の「Web Research / Knowledge Layer」の Privacy に従い、数値と規則は [Decision 0010](../../docs/decisions/0010-research-privacy-filter-policy.md)（Approved。2026-09-25 に Human が承認）で決めています。数値は暫定値として承認されたもので、変更できます。
+**永続の Audit Sink（Issue [#87](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/87)）が接続されるまでは、Private 由来の Context を Research へ自動で入れる設計を有効にしません**（承認時の条件）。
+**Provider には依存しません。** HTTP の Endpoint も、永続化する Store もありません（Audit の保存先は `ExternalSendAudit`（Protocol）で、後続の Issue が接続します）。Migration もありません。
+
+Main Agent（または Research Worker）は、書いた Query の**下書き**と、その下書きの元になった Context（各 Piece に `ContextLabel` を付けたもの）を Gate に渡します。
+Gate は、外へ出してよい `MinimizedQuery` を返すか、`PrivacyRefusal` で拒否します。
+
+| Module | 内容 |
+| --- | --- |
+| `contract.py` | `ContextLabel`、`ContextPiece`、`PrivacyInput`、`MinimizedQuery`、`ExternalSendRecord`、`WithheldCounts`、`RefusalReason` / `PrivacyRefusal`、`ExternalSendAudit`（Protocol）、`InMemoryExternalSendAudit`、上限の定数 |
+| `rules.py` | 最小化の規則（小さな純粋関数）。正規化、写しの検出、Credential の除去、抽象化の規則、切り詰め、Fingerprint |
+| `gate.py` | `PrivacyGate`: 入力の検証、Default deny、規則を呼ぶ順序、Rule とは別の最終検査、Audit してから返す |
+
+### Context のラベル
+
+| `ContextLabel` | 意味 | Query に入ってよいか |
+| --- | --- | --- |
+| `PUBLIC` | Public な文書、Web の結果 | 入ってよい（Gate は書き換えない） |
+| `PRIVATE_SOURCE` | Private な Repository・File の本文 | 写しは入らない |
+| `PRIVATE_MEMORY` | User の Private Memory | 写しは入らない |
+| `RAW_CONVERSATION` | 会話の Raw Text | 写しは入らない |
+| `SECRET` | Credential、Token、Password、Key | 写しは（4 文字以上でも）入らない |
+
+ラベルは、出所を知っている Backend のコードが付けます。LLM や Client の申告、Text の中身から推測することはしません。
+`context_pieces_from_items` は、以前の Research の結果（`ResearchItem`）を、`private_source` が True なら `PRIVATE_SOURCE`（本文と、あれば Title）、False なら `PUBLIC` の Piece にします。
+
+### Query が外へ出るまで
+
+`PrivacyGate.minimize(draft, context)` は、次の順に処理します（正確な定義は `rules.py` の Docstring）。
+
+1. **拒否の判定**（Text を読む前）: Context に `ContextPiece` でないもの（ラベルの無い文字列など）があれば `unclassified_context`。Draft が 2,000 文字を超えれば `draft_too_long`。Context が 32 個、または合計 400,000 文字（1 個は 200,000 文字）を超えれば `context_too_large`。**文字数の上限は 2 通りに数えます**: 書かれたままの文字数（早い段階の安価な拒否）と、NFKC と完全な Case folding をかけたあとの文字数（`gate.folded_length` = `len(unicodedata.normalize("NFKC", text).casefold())`）です。どちらかが上限を超えれば拒否します。NFKC は 1 文字を最大 18 文字（U+FDFA）に増やせるので、書かれたままの上限（400,000 文字）の範囲でも、展開後は 700 万文字を超え、正規化と窓の集合（`find_copied_spans`）が Event Loop の上で 1 秒を超える時間と数百 MB のメモリを使えたためです（開発機で測った例: U+FDFA 200,000 文字の Piece 1 個で、正規化に約 0.35 秒、窓の集合に約 0.2 秒、最大 RSS 約 360 MB。Piece は 2 個まで作れます）。Folding 後の形は、写しの検出と最終検査が比べる形です。上限の数値は変えていません（Draft 2,000、1 個 200,000、合計 400,000 を、展開後の文字数にも当てます）。Piece は 1 個ずつ測り、超えた時点で止めるので、展開する Context は、`rules.py` が 1 文字も正規化・比較しないうちに拒否されます（最悪でも、200,000 文字までの 1 Piece に NFKC を 1 回かける分の時間とメモリです）。数える対象は全ての Label の Piece です（`PUBLIC` の Text は読みませんが、規則を 1 つにするため数えます）。`ß`（`ss`）のように Case folding で増える文字も数えるので、書かれたままでは上限内の Draft や Piece が、展開後に上限を超えて拒否されることがあります（Decision 0010 の承認後の訂正）。
+2. **正規化**: NFKC、制御文字・ゼロ幅文字の除去、空白の圧縮（`normalize_text`）。
+3. **Credential の除去**（`strip_credentials`）: PAW-031 の `redact_text` が認識するものを、Draft に書かれたままの形で、**最初に**消します。Text を切る処理（手順 4）を先に走らせると、Credential が断片（`ghp_ABCDEF` と `abcdefghij` など）に切られて、この規則も最終検査も認識できなくなり、断片が外へ出るためです（`ghp_` + 36 文字の GitHub Token が、Private な Context と 16 文字を共有しただけで送られていました）。Credential と同じ文字列の `SECRET` の Piece があっても、Credential として先に消えるので、その Piece は「写しがあった」とは数えません（`credentials_removed` に数えます）。
+4. **写しの除去**: `PUBLIC` 以外の Piece ごとに、Draft の中で Piece にもある 16 文字以上（`SECRET` は 4 文字以上。Piece がそれより短ければ Piece の長さ）の連続を、大文字小文字を無視して検出し、全部消します（`find_copied_spans`）。大文字小文字の無視は、Unicode の**完全な Case folding**（`str.casefold`）です。`ß` と `SS`（`ẞ` も）、`İ` と `i` + 結合文字の点（U+0307）、語末の `ς` と `σ` は同じとみなします（`lower()` では一致しません）。窓の長さは Folding 後の文字数で数えます（`ß` は 2 文字）。消す範囲は Draft の**元の文字**の位置で、`ß` のように 1 文字が複数の文字に展開される文字は、一部だけ一致しても、その文字全体を消します。消した場所は空白にし、前後の語が連結することはありません。
+   **ただし、消す範囲が、手順 6 の抽象化の規則が書き換える語（Path、Private Host、IP Address、ID、URL、E-mail、長い Token、Version）に触れるときは、その語の全体を消します。** 語の一部だけを切ると、その語を丸ごと消すはずだった規則が語を認識できなくなり、断片が残るためです（Private な Path `/srv/billing/secret-plan-2026.md` の途中の 17 文字だけが Context と共通だと、`an-2026.md` が残っていました。UUID の `123e4567-` と、Private Host の `printer-` も同じでした）。どの規則も書き換えない語（普通の単語）は、これまでどおり写しの部分だけを消します。語は、空白で区切られた 1 続きの文字です。
+5. **Credential の再確認**: 手順 4 で Text が変わったときは、`strip_credentials` をもう一度かけます。写しを消すと、隣の文字に隠れていた Credential（`abcdefghijklmnopsk-…` の `abcdefghijklmnop` を消すと `sk-…` が現れる）が見えるようになるためです。
+6. **抽象化**（URL → E-mail → File Path → Private Host → ID → 長い Token → Version の順）: 内容は次の表のとおりです。手順 5 と、この手順の各規則のあと、`redact_text` が見つける Credential の数が、その手順の前より**増えて**いれば、直ちに `credential_remains` で拒否します。規則が Credential を作ってしまうと、後の規則がそれを断片に切って、最終検査から隠せるためです。
+7. **切り詰め**: 256 文字を超えたら、語の区切りで切ります（`truncated`）。
+8. **最終検査**（`rules.py` を使わない）: 単語の文字が 1 つもなければ `empty_query`。`redact_text` が Credential を見つければ `credential_remains`。`PUBLIC` 以外の Piece の全文、または `SECRET` の 4 文字以上の単語が残っていれば `private_text_remains`（NFKC、制御文字・ゼロ幅文字の除去のあと、`rules.py` とは別に `str.casefold` で比べます。`rules.py` と同じ完全な Case folding です）。Rule に不具合があっても、Private な Text は外へ出ません。
+
+| 抽象化の規則 | 内容 |
+| --- | --- |
+| `abstract_urls` | URL を Host だけにする。Host が Private（IP、`localhost`、Dot の無い名前、末尾が `local` `internal` `corp` など）なら消す |
+| `abstract_emails` | E-mail Address を消す |
+| `abstract_paths` | `/`、`~/`、`./`、`../`、ドライブ、UNC で始まる語と、区切りを 2 つ以上含む語を消す |
+| `abstract_hosts` | Private な Host・IP の語を消す。Port、Path、User 情報（`admin@10.0.0.5`）、IPv6 の `[...]` と Zone ID（`[fe80::1%eth0]:8080`）、`[]` の無い IPv6（`fe80::1%eth0`。`fd00::`、`2001:db8::` のように `::` で終わる圧縮形も、後ろに句読点（`.` `,` `)` など）が付いていても消す）、IPv6 の Network（CIDR 形式。`fd12:3456:789a::/48`、`fe80::1%eth0/64`、`[fd12::/48]`）、末尾の Dot の付いた絶対名（`db.internal.:5432`）を含む。判定の前に、User 情報、Port、Path、`[]`、Zone ID、末尾の Dot を取り除く。`%` を含む名前（Zone ID の付いた名前 `db.internal%eth0`、`1.2.3.4%eth0`、`%` 符号化を含む名前 `db.%69nternal`、`db%2einternal`）も、`is_private_host` が Private とみなすので消す（下の「制限と未確認の点」）。Dot の無い名前は単語と区別できないので残す |
+| `abstract_ids` | UUID、Credential Handle、12 桁以上の 16 進数、5 桁以上の数字を消す（小数は残す） |
+| `drop_opaque_tokens` | 40 文字以上の Base64 風の連続を消す |
+| `generalize_versions` | `3.13.15` を `3.13` にする |
+
+例: `explain <Private な Note の 1 文> in stripe at /srv/billing/app.py` は `explain in stripe at` になります。
+
+### Audit
+
+`PrivacyGate.authorize(...)`（`ResearchBroker` は pre-flight として呼ぶ）は、`minimize` のあと、`ExternalSendRecord` を `ExternalSendAudit.record` へ渡し、**受理されてから** Query を返します。
+
+| Record の項目 | 内容 |
+| --- | --- |
+| `recorded_at` | 送ってよいと判断した時刻（UTC） |
+| `project_id` | Project の UUID |
+| `query_fingerprint` / `query_chars` | Query の SHA-256（`sha256:` + 64 桁の 16 進数）と文字数 |
+| `provider_kinds` | 実際に Query を送る Provider の種類（`ProviderKind` の順） |
+| `withheld` | Label ごとの、Query から外した Piece の数 |
+| `credentials_removed` / `pieces_matched` / `abstractions` | 除いた Credential の数、写しがあった Piece の数、抽象化した数 |
+| `truncated` | 長さの上限で切ったか |
+
+Record は Query の本文、消した文字列、Context の本文を**持ちません**（Field 自体がありません）。`ContextPiece` の本文は `repr` にも出ません。
+Sink が例外を出す、5 秒（既定）以内に終わらない、満杯である場合は、`audit_failed` で拒否し、送りません。ログには例外の型を 1 行（WARNING）だけ出しますが、それは**固定の分類**で、Sink が決められる文字列は入りません。Sink が上げた例外の Class 名は Sink のデータです（`type("access_token=SECRET\nforged", (Exception,), {})()` のように、Credential や、次の Log 行を偽造する改行を入れられ、Metaclass の `__name__` や `__getattribute__` を上書きして、名前を読む処理そのものを例外にもできます）。そのため Gate は `type(error)` が組み込みの例外、またはこの Package の例外の Class **そのもの**（`is` で照合。Subclass や名前だけ似せた Class は含まない）のときだけその Class 名（`RuntimeError`、時間切れの `TimeoutError` など）を出し、それ以外は固定の `adapter_error` にします。これは Provider Broker の `log_type_name`（「例外の文言は Code にも Result にも Log にも入りません」の節。一覧は `broker.py` の `LOGGED_EXCEPTION_TYPES`）をそのまま使っており、Class の属性は 1 つも読まず、`id` で一覧を引くので、Metaclass の Hook（`__getattribute__`、`__name__`、`__hash__`、`__eq__`）は呼ばれず、どんな Class の例外でも拒否は `audit_failed` のままです。組み込み以外の Library の例外（DB Driver の例外など）は `adapter_error` になり、型では区別できません。
+Record は「送ってよいと判断した」記録で、Provider が答えたかは含みません。拒否した要求は Record を作りません。
+
+### Broker への差し込み
+
+```python
+gate = PrivacyGate(audit)  # audit は ExternalSendAudit
+broker = ResearchBroker(registry, preflight=gate)
+result = await broker.gather(
+    ResearchRequest(draft_query),
+    preflight_input=PrivacyInput(context_pieces, project_id),
+)
+```
+
+- **`gather` は Fail closed です。** `preflight` を渡さず、`unfiltered=True` も渡さない Broker（`ResearchBroker(registry)` だけの呼び出しを含む）の `gather` は、Registry の中身にかかわらず、どの Provider も呼ぶ前に `PreflightRequiredError` を出します。Query が Privacy Filter を通らず、Audit もされずに外へ出るのを、渡し忘れで起こさないためです。例外の文言は固定で、Query も Provider 名も含みません。
+- **唯一の明示的な Opt-out は `ResearchBroker(registry, unfiltered=True)` です。** Test と、Private な情報を何も持たない呼び出し側のためのもので、Query を**そのまま**（最小化も Audit も検査もせず）全ての選ばれた Provider へ渡します。Private Source、Memory、会話、Secret から Agent が書いた Query には使わないでください。`preflight` と同時には指定できず（`ValueError`）、`bool` 以外は `TypeError` です。PAW-051 の Test は、この Opt-out で今までどおり通ります。
+- `preflight` が無い Broker（`unfiltered=True` を含む）に `preflight_input` を渡すと `PreflightNotConfiguredError` です（確認されると思った Query が、確認されずに出るのを防ぐため）。`unfiltered=True` でない Broker では、先に `PreflightRequiredError`（`PreflightNotConfiguredError` の下位の型）になります。
+- `preflight` がある Broker に `preflight_input` を渡さない（`None`）、または `PrivacyInput` でないものを渡すと、Gate は `unclassified_context` で拒否します（Default deny）。
+- Provider を選んだ後、どの Provider も呼ぶ前に、Gate が Query を最小化して Audit します。Provider が受け取る Query は、最小化した Query だけです。拒否されると、Provider は 1 つも呼ばれず、`PrivacyRefusal` が `gather` から出ます。
+- 選ばれた Provider が 1 つもなければ、何も送られないので、Gate も Audit も動きません。
+- 1 回の `gather` につき Record は 1 つです。Time Budget は pre-flight の後から数えます。
+- **`ResearchBroker.fetch` は Gate を通りません**（Decision 0010）。`fetch` は Query を持たず、Provider が以前返した Source の Locator（正規化済み）を、その Provider へ戻すだけです。そのため、`preflight` の有無にも `unfiltered=True` にも関係なく、どの Broker でも使えます（`preflight` も `unfiltered=True` も無い Broker でも動きます）。Private な Source を取得してよいかは、Tool Broker（PAW-031）と個々の Adapter の責任です。
+
+### 実装の由来
+
+`rules.py` の各関数は、仕様（Docstring）と Test（270 件）を先に固定してから実装しています。
+**最終的な実装は Claude の参照実装です。** ローカルの Qwen3-Coder-30B-A3B に、14 関数の実装を 2 回（各約 265 回の Tool 呼び出し）任せましたが、収束しませんでした。
+1 回目は `query_fingerprint`、`truncate_query`、`fold_for_match`、`normalize_text` の 4 関数が Test を通り、2 回目は `abstract_emails` も通りましたが、正規表現を使う残りの関数（`is_private_host`、`strip_credentials`、`abstract_ids`、`abstract_paths`、`abstract_hosts`、`abstract_urls` など）は Test を通せず、途中で構文エラーや、仕様に反する挙動（Credential を除かずに `[REDACTED]` を残すなど）が残りました。
+AGENTS.md のとおり、同じ失敗を繰り返したのでエスカレーションし、仕様の Docstring を保ったまま、Claude の参照実装（変異 176 個のうち 173 個を Test が検出。残る 3 個は同値）に置き換えています。ローカルモデルの成果物は、最終物に含まれていません。`abstract_hosts` と `is_private_host` の Host の書式（IPv6 の Zone ID、末尾の Dot、User 情報、`[]` の無い IPv6）の追加分は、その後に Claude が拡張し、その部分の正規表現と判定に手で入れた変異 40 個のうち 38 個を Test が検出しました（残る 2 個は同値: `[]` の無い IPv6 の `:` の後が空でもよいか、と、空の Host の判定が `%` の判定の前にあるか。どちらも結果が変わりません）。
+上の「Test を通り」は、当時の仕様のことです。`fold_for_match` と `find_copied_spans` の当時の仕様（1 文字ずつ `lower()`、長さは変わらない）は、`ß` と `SS` などを別の文字として扱う誤りがあったため、独立レビューを受けて、完全な Case folding（`str.casefold`、長さが増えることがある）に改めました。Docstring と Test は新しい仕様に合わせて更新し、現在の実装はその仕様に対する Claude の実装です。
+
+### 制限と未確認の点
+
+- **検出できるのは Text の写しだけです。** 言い換え、翻訳、Base64 以外の符号化、文字を分けて送る方法、Context に載っていない情報は検出できません。Prompt Injection を受けた Agent に対する完全な防御ではありません。
+- ラベルは呼び出し側が付けます。付け忘れた Private な Text は、`PUBLIC` として扱われます（ラベルを付けない場合は拒否されます）。
+- Private な Host の判定は構文だけです（IP、`localhost`、Dot の無い名前、末尾が `local` `internal` `lan` `home` `corp` `intranet` `localdomain` `private` `arpa`、`%` を含む名前。`%` は IPv6 の Zone ID（`fe80::1%eth0`、URL では `%25eth0`）で、DNS の名前には無いので、公開名とはみなしません。IPv4 に Zone は無いので `1.2.3.4%eth0` のような組み合わせも同じ扱いで、`%` を含む名前は、`%` の前が何であっても Private として消します）。`git.example.com` のような、外から見ると普通の名前の Private な Host は判定できず、URL の Host としては残ります。Dot の無い名前は、単語との区別がつかないため、URL の外では残ります。
+- URL の外の Host は、空白で区切られた 1 語の全体が Host（User 情報、Port、Path を除く）である場合だけ消えます。`host=db.internal` や `db.internal,port=5432` のように他の文字と続いている語、`_` や ASCII 以外の文字を含む名前（`my_db.internal`、`データ.corp`）、Zone ID に `/` や `[` `]` を含むもの（`[fe80::1%a/b]:80`）は 1 語の Host として認識できず残ります（URL の中の Host は `urlsplit` が解析するので、名前の文字の制限はありません）。
+- `%` を含む名前は、URL の外でも 1 語の全体が次のどちらかの形であれば Host として認識し、`is_private_host`（`%` を含む Host は Private）に渡して消します。(1) Dot で区切った 2 つ以上の Label（`A-Z a-z 0-9 _ -`、`%` と 16 進数 2 桁の符号化を含んでもよい）。Dot を表す `%2e`（と、もう一度符号化した `%252e`）は Dot として扱います（`db.%69nternal`、`db%2einternal`、`10.0.0.%31`）。(2) (1) の後に `%` と Zone ID（`A-Z a-z 0-9 . _ ~ % -`）が付いたもの（`db.internal%eth0`、`1.2.3.4%25eth0`、`db.internal%`）。Zone ID の前の名前には ASCII の英字が 1 つ以上要ります（`%` 符号化の 16 進数の字も数えます。数字だけの点線 4 つ組の IPv4 は除く）。`3.5%`、`12.5%off`、`3.5%increase` のような割合を Host にしないためです。ここでは Port（`:5432`）、Path、User 情報も付けられます。**残るもの**: Dot の無い語（`100%`、`50%off`、`%eth0`、`db%eth0`、`C%2B%2B`、`hello%20world`）、`%` の後が 16 進数 2 桁でも Zone ID でもない Label（`db.%zzinternal`、`%.2f`、`%s.%d`）、空の Label（`db..%69nternal`、`db.%2einternal`）、3 回以上符号化した Dot（`%25252e`）、`_` を含む名前の Path にだけ `%` があるもの（`my_db.internal/a%20b`。`%` を含む Host ではないので、上の `_` の制限のまま残ります）。**過剰に消すもの**: `%` 符号化を含む Dot 付きの名前は、Host でなくても消えます（`my%20file.txt`、`report%202024.pdf`）。`%` が Private な Label のどの文字でも隠せるためで、Decision 0010（Approved）が「過剰に消す方向」として承認しています。Regex は 2 段で、名前を貪欲に 1 回だけ読み（`%2e` は Label の文字にならないので曖昧さがなく、線形時間）、Zone ID は文字クラス 1 つです（`test_the_host_rules_take_linear_time_on_one_very_long_token` が 40 万文字の 1 語で確かめます）。`[]` の無い IPv6 は `ipaddress` が受理する書式だけを消すので、`12:30`、`aa:bb:cc:dd:ee:ff`（MAC）、`std::vector` は残りますが、`a::b` のように IPv6 として有効な語は消えます。語末の `:` は先に句読点として取り除くので、`::` で終わる圧縮形（`fd00::`、`2001:db8::`）は、取り除いた部分が `::` で始まり、取り除いた後の語が空でないときに限り、`::` を付け直した形を 1 回だけ IPv6 として調べます（`fd00::.`、`(fd00::)` も消えます。`::` を付け直すのは 2 個までで、線形時間です）。`note:`、`fd00:`、`10:30:`、`std::` と、前の語が無い `::` だけの語は残ります。この形の語も、有効な Address であれば消えるので、16 進数の字だけで作れる語（`Bad::`、`Face::`）も消えます。この過剰な除去は、Decision 0010（Approved）で Human が承認しています。
+- **Credential を先に消すので、写しの検出は Credential を除いた Draft に対して行います。** Draft が Private な Context の 1 続きの写しで、その途中に Credential があると、Credential の前後に分かれた 2 つの写しが、それぞれ窓（16 文字、`SECRET` は 4 文字）より短いと、その断片は写しとして検出できず残ります。断片は窓の長さ未満で、Credential 自体は残りません。
+- **写しが触れた語は全体を消します**（上の手順 4）。書き換えられる語は「1 続きの文字」単位で判断するので、URL の Path の一部だけが Context と共通でも、URL の Host まで消えます（Private な Context から来た URL とみなします）。この過剰な除去は、Decision 0010（Approved）で Human が承認しています。
+- **IPv6 の Network（CIDR 形式）は、`[]` の有無にかかわらず消します**（Decision 0010）。Address（`ipaddress` が受理するもの。Zone ID があってもよい）、`/`、1 桁以上の ASCII 数字が、語の全体であるときです（`fd12:3456:789a::/48`、`fd00::/8`、`fe80::1%eth0/64`、`::/0`、`::1/128`、`[fd12::/48]`、`[fd12::]/48`、`[fd12::/48, fd00::/8]` の各項目）。以前は、`/` が 1 つで Path の規則に当たらず、`[]` が無いので Host の規則にも当たらず、`fd12:3456:789a::/48` が外へ出ていました。**Prefix 長の範囲（0〜128）は検査しません**: `fd12::/129` のように不正でも、Address が分かるので消します（IPv4 の `10.0.0.0/8` を消すのと同じ方向です）。`/` の後が数字だけでない語（`a::b/c`、`fd12::/`、`fd12::/48x`、`fd12::/4/8`）は Network ではないので残し、Address でない語（`10:30/12:00`、`aa:bb:cc:dd:ee:ff/48`、`std::a/2`、`3:2/5`）、日付（`2020/01/02` は Path の規則が消すことがあります）、分数も残ります。`--subnet=fd12::/48` のように他の文字と続く語と、`["fd12::/48"]` のように `[` の内側に引用符がある語は、1 語の Host として認識できず残ります（`[` は IPv6 の Literal のために取り除かないので、IPv4 の `[10.0.0.0/8]` のように `[` で始まる語も、以前から残ります）。Regex は文字クラスが 1 つの `:` で分かれる形で、線形時間です（`test_the_host_rules_take_linear_time_on_one_very_long_token` が 40 万文字の 1 語で確かめます）。
+- 4 文字の窓は、`SECRET` に近い普通の語（`internal` の `nter` など）も消します。Query が読めなくなることがあります。
+- 写しの検出は文字の並びの比較です。Case folding は Unicode の 1 文字ずつの対応（`str.casefold`）だけで、言語ごとの規則（トルコ語の `I` と `ı` など）、発音が同じ別の綴り、アクセント記号の有無の違い（`e` と `é`）は同じとはみなしません。
+- 日付（`2026/09/24`）など、規則に当たる正当な語も消えます（過剰に消す方向に倒しています）。
+- 処理は同期で、CPU を使います。上限（Draft 2,000 文字、Context 合計 400,000 文字。書かれたままの文字数と、NFKC・Case folding 後の文字数の両方）で処理量を抑えていますが、Event Loop の上で動きます。展開する Text（U+FDFA など）は、展開後の文字数で拒否するので、窓の集合は作られません。上限ぎりぎりの Context は、通常の Text でも、Event Loop を数十ミリ秒から 0.1 秒程度止めます（この Repository の開発機で測った目安で、保証する値ではありません。`test_a_context_that_expands_past_the_limit_is_refused_before_any_text_work` は 1 秒未満だけを確かめます）。
+- Audit の Sink は、メモリ上の Test 用（`InMemoryExternalSendAudit`、最大 1,000 件で満杯になると拒否する）だけです。永続化と Audit Log への接続は、後続の Issue [#87](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/87) です。それまで、Private 由来の Context を Research へ自動で入れる設計は有効にしません（Decision 0010 の承認時の条件）。
+- `Fingerprint` は塩なしの SHA-256 です。Query が Public な内容になっていることが前提です。
+- 数値と規則は [Decision 0010](../../docs/decisions/0010-research-privacy-filter-policy.md)（Approved、2026-09-25）にまとめています。数値は暫定値として承認されたもので、変更する場合は新しい Decision から `Supersedes` します。
+
+### Test
+
+`apps/backend/tests/test_privacy_*.py` です。標準 `unittest` だけで、DB も Network も使いません。
+`test_privacy_rules_text.py`、`test_privacy_rules_abstract.py`、`test_privacy_rules_properties.py` は `rules.py` の各関数を、`test_privacy_gate.py` は Gate（拒否、最終検査、Audit の失敗。Class 名に Credential や改行を入れた例外、Metaclass の `__name__`・`__getattribute__`・`__hash__`・`__eq__` が例外になる Class を Sink が上げても、Log の型が固定の `adapter_error` で、拒否が `audit_failed` のままであること）を、`test_privacy_broker.py` は `ResearchBroker` への差し込みを、`test_privacy_contract.py` は値の検証を確かめます。
+Timeout の Test は、永遠に待つ Sink を 0.2 秒で打ち切り、成功する経路は即座に終わる構成です（30 秒の Guard で CI の停止を防ぎます）。
+
 ## 依存 Package
 
 依存は `pyproject.toml` で完全一致に固定しています。
@@ -1812,9 +1940,9 @@ CI は pre-commit の専用環境で Test を実行するため、同じ Version
 ## 今後の Issue
 
 [PAW-021](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/18)（Owner Setup）、
-RBAC（PAW-025）、Task Lifecycle（PAW-032）、Task Queue / Budget / Loop 検知（PAW-033）、Tool Broker（PAW-031）、Memory Schema（PAW-040）、Research Scratch Store（PAW-050）、Research Provider Adapter（PAW-051）は、この Skeleton の上に実装済みです。
+RBAC（PAW-025）、Task Lifecycle（PAW-032）、Task Queue / Budget / Loop 検知（PAW-033）、Tool Broker（PAW-031）、Memory Schema（PAW-040）、Research Scratch Store（PAW-050）、Research Provider Adapter（PAW-051）、Research Privacy Filter（PAW-053）は、この Skeleton の上に実装済みです。
 PAW-022（Login / Session / Password）と PAW-023（Passkey / Step-up）は Owner Setup の Token を受け取る側で、まだありません。
 Memory の保存・整理・検索は PAW-041 以降で、Memory Schema の上に実装します。
-Research の Provider（Direct Web、Docs、GitHub、OpenCode）の Adapter、Privacy Filter（PAW-053）、Evidence / Claim Provenance（PAW-052）は、Research Provider Adapter の上に実装します。
+Research Privacy Filter（PAW-053）は、Research Provider Adapter の上に実装済みです。Research の Provider（Direct Web、Docs、GitHub、OpenCode）の Adapter、Evidence / Claim Provenance（PAW-052）は、Research Provider Adapter の上に実装します。外部送信の Audit を Audit Log へ保存する実装は、後続の Issue です。
 受け入れ基準は [Implementation Backlog](../../docs/IMPLEMENTATION_BACKLOG.md)、
 実装時に選択できる事項は [Requirements Freeze Review](../../docs/REQUIREMENTS_FREEZE_REVIEW.md) を参照してください。

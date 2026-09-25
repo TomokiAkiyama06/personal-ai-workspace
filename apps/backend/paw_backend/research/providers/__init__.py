@@ -5,6 +5,9 @@ The Main Agent uses ``ResearchBroker`` with a ``ResearchRequest`` and receives a
 for Direct Web, Docs, GitHub and a future OpenCode implement
 ``ResearchProvider`` and are registered in a ``ProviderRegistry``. No concrete
 adapter exists yet: they need credentials and a network policy.
+
+``ResearchBroker.gather`` needs a privacy pre-flight (PAW-053): without one it
+refuses to search unless the broker was built with ``unfiltered=True``.
 """
 
 from paw_backend.research.providers.broker import ResearchBroker, classify_failure
@@ -50,6 +53,12 @@ from paw_backend.research.providers.normalize import (
     normalize_hits,
     normalize_title,
 )
+from paw_backend.research.providers.preflight import (
+    PreflightNotConfiguredError,
+    PreflightRequiredError,
+    SearchPreflight,
+    validate_preflight,
+)
 from paw_backend.research.providers.registry import (
     ProviderRegistry,
     RegisteredProvider,
@@ -78,6 +87,8 @@ __all__ = [
     "ProviderHit",
     "ProviderInterfaceError",
     "ProviderKind",
+    "PreflightNotConfiguredError",
+    "PreflightRequiredError",
     "ProviderRegistry",
     "ProviderRegistryError",
     "RegisteredProvider",
@@ -89,6 +100,7 @@ __all__ = [
     "ResearchProvider",
     "ResearchRequest",
     "ResearchResult",
+    "SearchPreflight",
     "SourceMetadata",
     "SourceType",
     "StaticProvider",
@@ -99,5 +111,6 @@ __all__ = [
     "merge_items",
     "normalize_hits",
     "normalize_title",
+    "validate_preflight",
     "validate_provider",
 ]
