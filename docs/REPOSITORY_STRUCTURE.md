@@ -289,6 +289,7 @@ personal-ai-workspace/
 │  │     ├─ test_shared_memory_migration.py
 │  │     ├─ test_shared_memory_policy_source.py
 │  │     ├─ test_shared_memory_promotion_refused.py
+│  │     ├─ test_shared_memory_propose_system.py
 │  │     ├─ test_shared_memory_rules_lifecycle.py
 │  │     ├─ test_shared_memory_rules_precedence.py
 │  │     ├─ test_shared_memory_service_guards.py

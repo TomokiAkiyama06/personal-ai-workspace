@@ -1337,6 +1337,7 @@ Audit の `action` は Capability の値です。Shared Memory を変える操�
 2. Owner / Admin 以外の `Principal` は `SharedMemoryPermissionError` です。Authorizer が（Policy の変更などで）許可しても、Service が Owner / Admin でなければ拒否します。
 3. Authorizer が `Decision` でない値を返したら拒否します（`invalid_decision`）。
 4. Agent は Candidate を提案できますが、Candidate は `pending` のままです。承認は人間だけで、承認した人が Version の `actor_user_id` になります。
+   `system` role の Principal（Backend 自身の ID、Background Worker）は Candidate も提案できません（[Decision 0009](../../docs/decisions/0009-shared-memory-administration.md) の 2）。既定の Policy は `memory.use` を与えませんが、Policy の変更などで Authorizer が許可しても、`propose_candidate` は Authorizer の判定を記録した後に `system` role を `SharedMemoryPermissionError`（`reason` は `system_role_may_not_propose`）で拒否します。管理の操作の `AutomaticPromotionRefusedError` とは別のエラーで、Candidate は書かれません（`tests/test_shared_memory_propose_system.py`）。Agent が提案する場合、Service は委任元の Role を持たない（`AgentActor` は委任元の ID と Grant だけ）ため、この検査は `Principal` だけが対象で、委任元が `system` role の場合は Authorizer の Policy の判定（既定は `system` に Capability なし）だけが守りです。
 5. Shared Memory を作る・変える経路は、`SharedMemoryService` の上の表のメソッドだけです（`tests/test_shared_memory_contract.py` が公開メソッドの一覧を固定します）。
 
 #### Audit の Action
