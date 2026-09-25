@@ -25,6 +25,7 @@ from paw_backend.db import Database
 from paw_backend.projects import store
 from paw_backend.projects.errors import ProjectBusyError
 from paw_backend.projects.records import ProjectStatus
+from paw_backend.projects.validation import validate_session
 
 
 @asynccontextmanager
@@ -57,7 +58,12 @@ async def share_lock_status(
     keep them. A wait that exceeds it is :class:`ProjectBusyError` (the caller's
     transaction is aborted by the error and must end). Only the type of the driver's
     error is read, never its text.
+
+    ``session`` must be an ``AsyncSession`` that is INSIDE a transaction
+    (``InvalidProjectInputError``, before anything is sent): the lock lives as long
+    as that transaction and no longer.
     """
+    validate_session("session", session)
     previous = (
         await session.execute(select(func.current_setting("lock_timeout")))
     ).scalar_one()

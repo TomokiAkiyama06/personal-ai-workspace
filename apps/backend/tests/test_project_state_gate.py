@@ -25,6 +25,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.exc import DBAPIError
 
 from paw_backend.projects import (
+    InputProblem,
     InvalidProjectInputError,
     ProjectBusyError,
     ProjectStateGate,
@@ -51,6 +52,7 @@ from paw_backend.tasks.queueing import (
 from . import test_projects_task_stop as stop_tests
 from .gate_support import ALWAYS_ACTIVE
 from .projects_support import T0, requires_postgres
+from .task_support import PostgresTaskTestCase
 
 NOT_ACTIVE = (
     ProjectStatus.ARCHIVED,
@@ -145,6 +147,12 @@ class GateTestCase(stop_tests.TaskStopTestCase):
     """A project with a team; gated task and queue services on ``self.database``."""
 
     gate = ProjectStateGate()
+
+    # The helpers of the task tests' base class that explain a statement and record
+    # the SQL a service sends (this class is built on the project tests' base).
+    plan = PostgresTaskTestCase.plan
+    plan_nodes = staticmethod(PostgresTaskTestCase.plan_nodes)
+    captured_statements = PostgresTaskTestCase.captured_statements
 
     # The gated services are built from ``self.database`` when they are used, not in
     # ``asyncSetUp``: ``test_projects_grants`` swaps ``self.database`` for one that
@@ -571,6 +579,42 @@ class GateLockTest(GateTestCase):
         self.assertEqual(self.rows_of_tasks(), before)
         event = await self.create(tasks)  # the lock is free: it works
         self.assertEqual(self.task_state(event.task_id), "queued")
+
+    async def test_a_session_without_a_transaction_is_refused_before_anything_is_sent(
+        self,
+    ):
+        # A lock taken in a session that has no transaction of the caller's would be
+        # released when the session closes, not held for the write it guards.
+        for bad_project in (self.project_id, uuid4()):
+            async with self.database.session() as session:
+                self.assertFalse(session.in_transaction())
+                with self.captured_statements() as statements:
+                    with self.assertRaises(InvalidProjectInputError) as caught:
+                        await self.gate.require_active(session, bad_project)
+                self.assertEqual(
+                    (caught.exception.field, caught.exception.problem),
+                    ("session", InputProblem.NO_TRANSACTION),
+                )
+                self.assertEqual(statements, [])
+                self.assertFalse(session.in_transaction())
+
+    async def test_something_that_is_not_a_session_is_refused_too(self):
+        for bad in (None, object(), "session", self.database, 5):
+            with self.subTest(session=type(bad).__name__):
+                with self.assertRaises(InvalidProjectInputError) as caught:
+                    await self.gate.require_active(bad, self.project_id)
+                self.assertEqual(
+                    (caught.exception.field, caught.exception.problem),
+                    ("session", InputProblem.NOT_A_SESSION),
+                )
+
+    async def test_a_transaction_the_session_began_by_itself_is_accepted(self):
+        async with self.database.session() as session:
+            await session.execute(select(1))
+            await self.gate.require_active(session, self.project_id)
+            self.assertTrue(self.project_is_share_locked(self.project_id))
+            await session.rollback()
+        self.assertFalse(self.project_is_share_locked(self.project_id))
 
     async def test_the_lock_timeout_of_the_transaction_is_put_back(self):
         async def timeout_after_the_gate(setting: str | None) -> str:

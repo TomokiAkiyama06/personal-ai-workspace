@@ -32,7 +32,6 @@ from paw_backend.tasks.queueing import Priority, TaskQueue
 
 from .projects_support import requires_postgres
 from .queueing_support import at
-from .task_support import PostgresTaskTestCase
 from .test_project_state_gate import DEADLINE, NOT_ACTIVE, GateTestCase, PausingGate
 
 WORKER = "worker-1"
@@ -364,12 +363,6 @@ class ClaimFilterPlanTest(ClaimTestCase):
     HISTORY = 20_000
     SKIPPED = 300
     CLAIMABLE = 2_000
-
-    # The helpers of the task tests' base class that explain a statement and record
-    # the SQL a service sends (this class is built on the project tests' base).
-    plan = PostgresTaskTestCase.plan
-    plan_nodes = staticmethod(PostgresTaskTestCase.plan_nodes)
-    captured_statements = PostgresTaskTestCase.captured_statements
 
     async def sql(self, sql: str, **parameters) -> None:
         """Run ``sql`` as the OWNER of the schema (the tests' seeding connection),

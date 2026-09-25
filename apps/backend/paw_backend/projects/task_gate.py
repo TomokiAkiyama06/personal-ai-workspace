@@ -61,10 +61,13 @@ class ProjectStateGate:
     ) -> None:
         """Lock the project ``FOR SHARE`` and require ``Active``.
 
-        ``InvalidProjectInputError`` for a ``project_id`` that is not a ``uuid.UUID``,
-        ``ProjectNotActiveError`` (a ``TaskError``) for a project that is not Active or
-        does not exist, ``ProjectBusyError`` when the lock is not granted in time.
-        Nothing is written.
+        ``InvalidProjectInputError`` for a ``project_id`` that is not a ``uuid.UUID``
+        and for a ``session`` that is not an ``AsyncSession`` inside a transaction
+        (``InputProblem.NOT_A_SESSION`` / ``NO_TRANSACTION``: a lock taken outside a
+        transaction would be released when the session closes, not held for the
+        write it guards), ``ProjectNotActiveError`` (a ``TaskError``) for a project
+        that is not Active or does not exist, ``ProjectBusyError`` when the lock is not
+        granted in time. Nothing is written.
         """
         project_id = validate_uuid("project_id", project_id)
         status = await share_lock_status(session, project_id, self._lock_timeout_ms)

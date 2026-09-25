@@ -720,6 +720,8 @@ class TaskService:
         ``in_transaction`` (``None`` or a coroutine function, see
         ``InTransactionStep``) runs in the same transaction, after the command's
         writes and before the commit; an exception it raises aborts the command.
+        The session it receives is the command's own, inside ``session.begin()``:
+        the service never hands out a session that is not in a transaction.
         """
         task_id = _uuid("task_id", task_id)
         # The serialised value ("stop_now") is a command too: normalise it to the

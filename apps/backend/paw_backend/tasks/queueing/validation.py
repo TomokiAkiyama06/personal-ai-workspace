@@ -101,8 +101,16 @@ def check_uuid(name: str, value: Any) -> uuid.UUID:
 
 
 def check_session(name: str, value: Any) -> AsyncSession:
-    """Only an ``AsyncSession`` (the caller's own transaction) is accepted."""
-    if not isinstance(value, AsyncSession):
+    """An ``AsyncSession`` that is INSIDE a transaction (the caller's own).
+
+    A session that has no transaction (a fresh one, or one whose transaction was
+    committed or rolled back) would begin one silently when the statement runs and
+    give it up when the session is closed, so a write reported as done would be
+    rolled back and a lock reported as held would be released. ``in_transaction()``
+    is true inside ``session.begin()`` and after any statement that began the
+    transaction by itself; the caller then commits or rolls it back.
+    """
+    if not isinstance(value, AsyncSession) or not value.in_transaction():
         _reject(name)
     return value
 

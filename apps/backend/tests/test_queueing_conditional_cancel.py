@@ -189,7 +189,7 @@ class ConditionalCancelTest(CancelTestCase):
                     with self.assertRaises(InvalidQueueingArgumentError) as caught:
                         await self.queue.cancel(bad, only_if_task_terminal=True)
                     self.assertEqual(caught.exception.parameter, "task_id")
-            async with self.database.session() as session:
+            async with self.database.session() as session, session.begin():
                 for bad in (None, object(), "session", self.database, 5):
                     with self.subTest(session=repr(bad)):
                         with self.assertRaises(InvalidQueueingArgumentError) as caught:
@@ -208,6 +208,68 @@ class ConditionalCancelTest(CancelTestCase):
 @requires_postgres
 class CancelInTest(CancelTestCase):
     """``cancel_in`` writes in the caller's transaction and commits nothing itself."""
+
+    async def test_a_session_without_a_transaction_is_refused_and_nothing_is_written(
+        self,
+    ):
+        # A fresh session has no transaction: the UPDATE would autobegin one, report
+        # ``True``, and closing the session would roll it back, so the caller would
+        # be told that the entry was cancelled when it was not.
+        task_id = await self.task_in_state(TaskState.QUEUED)
+        await self.queue.enqueue(task_id)
+
+        for conditional in (False, True):
+            with self.subTest(only_if_task_terminal=conditional):
+                async with self.database.session() as session:
+                    self.assertFalse(session.in_transaction())
+                    with self.captured_statements() as statements:
+                        with self.assertRaises(InvalidQueueingArgumentError) as caught:
+                            await self.queue.cancel_in(
+                                session, task_id, only_if_task_terminal=conditional
+                            )
+                    self.assertEqual(caught.exception.parameter, "session")
+                    self.assertEqual(statements, [])  # not one statement was sent
+                    self.assertFalse(session.in_transaction())  # none was begun
+
+                self.assertEqual(await self.statuses(task_id), ["queued"])
+
+    async def test_a_session_whose_transaction_has_ended_is_refused(self):
+        task_id = await self.task_in_state(TaskState.QUEUED)
+        await self.queue.enqueue(task_id)
+
+        async with self.database.session() as session:
+            async with session.begin():
+                pass  # committed: the session is outside a transaction again
+            self.assertFalse(session.in_transaction())
+            with self.assertRaises(InvalidQueueingArgumentError) as caught:
+                await self.queue.cancel_in(session, task_id)
+            self.assertEqual(caught.exception.parameter, "session")
+
+        self.assertEqual(await self.statuses(task_id), ["queued"])
+
+    async def test_a_transaction_the_session_began_by_itself_is_the_callers_transaction(
+        self,
+    ):
+        # ``in_transaction()`` is true after an ordinary statement (SQLAlchemy begins
+        # the transaction on first use): that IS the caller's transaction, the caller
+        # commits or rolls it back, and the entry follows.
+        kept = await self.task_in_state(TaskState.QUEUED)
+        cancelled = await self.task_in_state(TaskState.QUEUED)
+        await self.queue.enqueue(kept)
+        await self.queue.enqueue(cancelled)
+
+        async with self.database.session() as session:
+            await session.execute(text("SELECT 1"))
+            self.assertTrue(session.in_transaction())
+            self.assertIs(await self.queue.cancel_in(session, cancelled), True)
+            await session.commit()
+        async with self.database.session() as session:
+            await session.execute(text("SELECT 1"))
+            self.assertIs(await self.queue.cancel_in(session, kept), True)
+            await session.rollback()
+
+        self.assertEqual(await self.statuses(cancelled), ["cancelled"])
+        self.assertEqual(await self.statuses(kept), ["queued"])
 
     async def test_the_entry_is_cancelled_when_the_callers_transaction_commits(self):
         task_id = await self.task_in_state(TaskState.QUEUED)

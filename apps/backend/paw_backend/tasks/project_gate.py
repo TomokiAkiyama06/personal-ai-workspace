@@ -57,8 +57,12 @@ class ProjectGate(Protocol):
         The lock is held until the caller's transaction ends (the gate never
         commits). Raises ``ProjectNotActiveError`` for a project that is not Active
         and for one that does not exist; an implementation may raise its own error
-        for a lock that could not be taken in time. ``session`` is inside a
-        transaction that the caller began.
+        for a lock that could not be taken in time. ``session`` must be inside a
+        transaction that the caller began (``session.in_transaction()``): the lock
+        lives exactly as long as that transaction, so an implementation refuses a
+        session that is not in one (``ProjectStateGate``:
+        ``InvalidProjectInputError``, before anything is sent) instead of taking a
+        lock that the closing session would release at once.
         """
         ...
 

@@ -585,8 +585,13 @@ class TaskQueue:
         how the stop processor of a deleted project cancels a task and its entry in
         ONE transaction (``TaskService.execute(..., in_transaction=...)``), so no
         crash or Restore can fall between the two. ``session`` must be an
-        ``AsyncSession`` inside a transaction (``InvalidQueueingArgumentError``
-        otherwise); the other arguments are those of ``cancel``.
+        ``AsyncSession`` that is INSIDE a transaction now (``session.in_transaction()``:
+        true inside ``session.begin()`` and after a statement that began it by
+        itself); otherwise ``InvalidQueueingArgumentError("session")`` is raised
+        before anything is sent. A session without a transaction would begin one
+        silently and give it up when it is closed, so the call would report
+        ``True`` for an entry that was never cancelled. The other arguments are
+        those of ``cancel``.
         """
         check_session("session", session)
         check_uuid("task_id", task_id)

@@ -62,6 +62,7 @@ class InTransactionStepTest(PostgresTaskTestCase):
             # Another connection sees nothing of the command yet.
             seen["other connection"] = await self.state_and_version(step_task)
             seen["ids"] = (step_task, step_project)
+            seen["in transaction"] = session.in_transaction()
 
         event = await self.service.execute(
             task_id,
@@ -75,6 +76,9 @@ class InTransactionStepTest(PostgresTaskTestCase):
         self.assertEqual(seen["events in own session"], 3)
         self.assertEqual(seen["other connection"], ("running", 2, None))
         self.assertEqual(seen["ids"], (task_id, self.project_id))
+        # The session the step gets is inside the command's transaction, so whatever
+        # the step writes (``cancel_in``, a project lock) is atomic with the command.
+        self.assertIs(seen["in transaction"], True)
         self.assertEqual((event.to_state, event.task_version), (TaskState.CANCELLED, 3))
         self.assertEqual(await self.state_and_version(task_id), ("cancelled", 3, None))
 
