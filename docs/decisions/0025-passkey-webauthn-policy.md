@@ -1,10 +1,10 @@
 # Passkey（WebAuthn）と Step-up の方針
 
-- Status: Proposed
+- Status: Approved
 - Date: 2026-09-26
 - Scope: PAW-023（Passkey / Step-up Authentication、Issue [#20](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/20)）。[Decision 0015](0015-login-session-password-policy.md) の 12 節・13 節・「承認時の決定」が PAW-023 に残した点、[Decision 0005](0005-owner-setup-and-recovery.md) の 7 節（Recovery で Passkey を無効にする）、[Decision 0006](0006-tool-broker-policy.md)（強い承認の Step-up）との接続点
 - Supersedes: なし。Decision 0015 は書き換えない（0015 の 12 節が「PAW-023 で決める」とした `users.passkey_required` 列の扱いは、この Decision の 9 節で決める）
-- Approval: 未承認
+- Approval: 2026-09-26、Humanが作業Session内で、判断メモの各点に個別に回答し、残りは「推奨どおり」と回答して承認（末尾の「承認時の決定」）
 
 ## 背景
 
@@ -57,7 +57,7 @@ Decision 0015（承認済み）は、PAW-023 の受け入れ条件に次を加�
 
 **採らなかった案**: `fido2`（依存が小さい利点があるが、Server 側の検証を Origin の Callback と自前の Flag 検査で組み立てる部分が多く、`webauthn` の方が検証の責務が明確）。自前の実装（上記）。
 
-**注意（リスク）**: 3.0.1 は固定した日の前日の公開で、実運用の時間が短い。3.0.0（3 か月前）へ下げる選択もあるが、3.0.1 は Attestation の `fmt` の型の検査の修正だけの差で、この Backend は `fmt` を自前で先に検査するため、3.0.0 でも同じ結果になる（決めてほしいこと 1）。
+**注意（リスク）**: 3.0.1 は固定した日の前日の公開で、実運用の時間が短い。3.0.0（3 か月前）へ下げる選択もあるが、3.0.1 は Attestation の `fmt` の型の検査の修正だけの差で、この Backend は `fmt` を自前で先に検査するため、3.0.0 でも同じ結果になる（判断点 1）。
 
 **Library の呼び出しは 1 つの Module（`auth/passkeys/ceremony.py`）に閉じる。** Library が扱わない、または緩い点は、その Module が補う。
 
@@ -104,7 +104,7 @@ Decision 0015（承認済み）は、PAW-023 の受け入れ条件に次を加�
 - 満たさない場合は、その Step-up を**拒否**し（403 `invalid_credentials`、Audit は deny `sign_count_regression`）、固定の Warning を Log に残す（Credential の ID や Counter の値は出さない）。**Credential は自動では失効しない。** 保存した Counter も進めない。
 - Backup の適格性（`backup_eligible`）は登録時の値で不変とし、認証で変わったら拒否する（`verification_failed`）。`backed_up` は認証のたびに更新する（表示用）。
 
-自動で失効しない理由: Clone が本当に起きたときに Owner の Passkey を自動で失効すると、Owner を締め出す操作を攻撃者が誘発できる（Clone の Key を持つ者が、意図的に小さい Counter を送る）。同期される Passkey は Counter が不安定なことがあり、誤検知で自動失効すると正規の Owner を締め出す。Audit の行が、疑いの検知の手掛かりになる。**代案**: 自動で失効する（決めてほしいこと 5）。
+自動で失効しない理由: Clone が本当に起きたときに Owner の Passkey を自動で失効すると、Owner を締め出す操作を攻撃者が誘発できる（Clone の Key を持つ者が、意図的に小さい Counter を送る）。同期される Passkey は Counter が不安定なことがあり、誤検知で自動失効すると正規の Owner を締め出す。Audit の行が、疑いの検知の手掛かりになる。**代案**: 自動で失効する（判断点 5）。
 
 ### 5. 「Passkey 必須」の強制: Session の Gate
 
@@ -145,8 +145,8 @@ R2 の実装（Migration `0023` の `auth_sessions.passkey_gate`）:
 | Passkey の失効 | 要求が `required` の Role: Passkey の Step-up。それ以外: 任意の Step-up | この Issue |
 | Tool Broker の強い承認 | 下記 | この Issue |
 
-- **Owner・Admin の重要操作は、Role の Passkey の要求が `optional` に変えられていても、Passkey の Step-up を要求する**（要件の `[FIXED]` は Owner・Admin の重要操作に Passkey の Step-up を求める。設定で変えられるのは Passkey の「要求」と「有効時間」であり、Step-up の要否ではない）。その結果、Passkey を持たない Admin は Lock の解除ができない（Fail Closed）。決めてほしいこと 7。
-- **Tool Broker の強い承認**（`ApprovalService(step_up=...)`）: `PasskeyApprovalStepUp`（`AuthServices.approval_step_up`）を渡すと、承認する User の**有効な Session のどれかに**、Policy の有効時間内の Passkey の Step-up があるとき `True` を返す（Password の Step-up、Gate が開いていない Session、`active` でない User は数えない）。`ApprovalService` の既定は `FailClosedStepUp` のまま変えない（Verifier を渡した Deployment だけが有効にする）。**限界**: Step-up は User と時間に結び付き、承認そのもの・承認を決める Session には結び付かない（`ApprovalService` が Session も Challenge も渡さないため）。承認の Endpoint（未実装）は、決める Session で `AuthService.step_up` を先に行うか、承認に結び付いた Challenge を使うべきである（決めてほしいこと 8）。Passkey を持たない User の強い承認は Pending のまま残る。
+- **Owner・Admin の重要操作は、Role の Passkey の要求が `optional` に変えられていても、Passkey の Step-up を要求する**（要件の `[FIXED]` は Owner・Admin の重要操作に Passkey の Step-up を求める。設定で変えられるのは Passkey の「要求」と「有効時間」であり、Step-up の要否ではない）。その結果、Passkey を持たない Admin は Lock の解除ができない（Fail Closed）。判断点 7。
+- **Tool Broker の強い承認**（`ApprovalService(step_up=...)`）: `PasskeyApprovalStepUp`（`AuthServices.approval_step_up`）を渡すと、承認する User の**有効な Session のどれかに**、Policy の有効時間内の Passkey の Step-up があるとき `True` を返す（Password の Step-up、Gate が開いていない Session、`active` でない User は数えない）。`ApprovalService` の既定は `FailClosedStepUp` のまま変えない（Verifier を渡した Deployment だけが有効にする）。**限界**: Step-up は User と時間に結び付き、承認そのもの・承認を決める Session には結び付かない（`ApprovalService` が Session も Challenge も渡さないため）。承認の Endpoint（未実装）は、決める Session で `AuthService.step_up` を先に行うか、承認に結び付いた Challenge を使うべきである（判断点 8）。Passkey を持たない User の強い承認は Pending のまま残る。
 - `POST /auth/step-up` は Password だけを受け付ける（`method: passkey` は 422）。Passkey の Step-up は `/auth/passkeys/authenticate/*`（Begin と Finish）の専用の Ceremony で行う。
 
 ### 7. Passkey の失効（Device の Revoke）
@@ -161,7 +161,7 @@ R2 の実装（Migration `0023` の `auth_sessions.passkey_gate`）:
 6. その User の開いている Challenge を消す。
 7. Audit を同じ Transaction で書く。
 
-- **Passkey を失った User の復旧**: Owner は `owner-recover`（0005）。Admin と User には、この Issue では経路がない（**Admin が全 Passkey を失うと、Owner の介入手段がない**）。Admin による他 User の強制 Reset（0015 の 14 節が別の Issue とした）を先に作る必要がある。決めてほしいこと 10。
+- **Passkey を失った User の復旧**: Owner は `owner-recover`（0005）。Admin と User には、この Issue では経路がない（**Admin が全 Passkey を失うと、Owner の介入手段がない**）。Admin による他 User の強制 Reset（0015 の 14 節が別の Issue とした）を先に作る必要がある。判断点 10。
 - **最後の Owner を締め出さない**: (a) 設定がなければ Gate は開く。(b) `required` で Passkey が 0 なら登録の Session（Password の Login と `owner-recover` が常に使える）。(c) 最後の Passkey は失効できない。(d) Recovery は全 Passkey を失効して、次の Sign-in を登録の Session にする。
 
 ### 8. Recovery（Decision 0005 の 7 節）
@@ -178,7 +178,7 @@ R2 の実装（Migration `0023` の `auth_sessions.passkey_gate`）:
 | B | CHECK を外す | 列が設定と食い違ってよくなる代わりに、列の意味がさらに曖昧になる |
 | C | 列を捨てる | 意味は最も明確だが、`users` の Model、Migration 0021、Owner の作成の Code、8 つの Test File の `INSERT`（`passkey_required` の指定）に触れ、並行する他の Migration・Issue と衝突する |
 
-**A を実装した。** Test（`test_passkey_gate`）は、(1) Owner の列が `true` のまま、設定が `optional` なら Gate が開くこと、(2) User の列が `false` のまま、設定が `required` なら Gate が閉じることを固定する。将来 C にする場合は、他の Lane が落ち着いてから、新しい Decision で扱う（決めてほしいこと 9）。
+**A を実装した。** Test（`test_passkey_gate`）は、(1) Owner の列が `true` のまま、設定が `optional` なら Gate が開くこと、(2) User の列が `false` のまま、設定が `required` なら Gate が閉じることを固定する。将来 C にする場合は、他の Lane が落ち着いてから、新しい Decision で扱う（判断点 9）。
 
 ### 10. 認証の試行の制限
 
@@ -259,7 +259,7 @@ Web の Role（`PAW_APP_DATABASE_ROLE`）の権限は、実際に実行する文
 - Password の Step-up でも Lock の解除ができる: Password の侵害だけで Owner・Admin の重要操作ができてしまう（0015 の 12 節と同じ理由）。
 - Tool Broker の Step-up を承認ごとの Challenge にする: 承認の Endpoint がまだない。
 
-## 人間の判断が必要な点（推奨つき）
+## 人間の判断が必要だった点（推奨つき。すべて「承認時の決定」で決まった）
 
 1. **Library**: `webauthn` 3.0.1（推奨）／3.0.0 へ下げる／`fido2` 2.2.1。
 2. **強制の意味**: R2（`required` の Role は Sign-in ごとに Passkey。推奨）／R1（登録の強制だけ）。
@@ -287,23 +287,46 @@ Web の Role（`PAW_APP_DATABASE_ROLE`）の権限は、実際に実行する文
 
 ## 承認後の扱い
 
-- 承認されたら `Approval` に記録し、Status を Approved に改める。PAW-023 の PR は本 Decision を参照する。
-- 承認された後、Human の指示で、`REQUIREMENTS.md` の `[FIXED]`「Passkey Policy」の注記の 1 文（「Passkey実装（PAW-023）まで、この設定変更は本番では使えない」）を、実装の状態（Passkey を設定した環境で使える）に合わせて更新する（0015 の 11 節と同じく、本文は変えず注記だけ）。
-- 数値（Challenge の有効時間、Passkey の上限）を変えるときは、この Decision を書き換えず、新しい Decision から `Supersedes` する。
+- 2026-09-26 に承認された。`Approval` に記録し、Status を Approved に改めた。PAW-023 の PR（[#107](https://github.com/TomokiAkiyama06/personal-ai-workspace/pull/107)）は本 Decision を参照する。
+- `REQUIREMENTS.md` の `[FIXED]`「Passkey Policy」の注記（Decision 0015 の 11 節で追記したもの）のうち、「Passkey実装（PAW-023）まで、この設定変更は本番では使えない」と「PAW-022はPasskeyを強制しない」の 2 か所を、実装の状態（Passkey を設定した環境では Passkey の Step-up で変更できる。強制は制限された Session）に合わせて更新した。`[FIXED]` の箇条書き（規則）と、Human が指示した他の注記の文は変えていない。
+- 承認された数値（Challenge の有効時間 5 分、Passkey の上限 10 個）と各選択は、変えるときにこの Decision を書き換えず、新しい Decision から `Supersedes` する。数値は設定（`PAW_PASSKEY_CHALLENGE_TTL_SECONDS`）と定数（`MAX_PASSKEYS_PER_USER`）で、Schema は変わらない（Migration は不要）。
 - 運用: `PAW_PASSKEY_RP_ID`、`PAW_PASSKEY_ORIGINS` を設定してから、Owner が Sign-in して Passkey を登録する（設定前は要求が強制されない）。
+- 別の Issue にする範囲（判断点 10）は、次の「後続の Issue」を Issue として起票する（起票は Human または Coordinator が行う。この Decision は本文だけを用意する）。
 
-## 決めてほしいこと
+### 後続の Issue: Owner による Passkey の Reset（Passkey を全部失った Admin・User の復旧）
 
-推奨は上の「人間の判断が必要な点」のとおり。1 回の回答で、番号ごとに承認・変更・保留を答えてほしい。
+**Title**: Owner による他 Account の Passkey の Reset を実装する（PAW-023 の後続）
 
-1. Library（`webauthn` 3.0.1）。
-2. 強制の意味（R2）。
-3. 設定がないときの扱い（強制しない、警告）。
-4. Ceremony の方針（Attestation none、UV required、Resident Key preferred）。
-5. 署名 Counter の後退の扱い（拒否、自動失効なし）。
-6. 失効の規則（最後の必須の Passkey は失効できない）。
-7. Owner・Admin の重要操作（要求が `optional` でも Passkey の Step-up）。
-8. Tool Broker の強い承認の結び付け（User 単位）。
-9. `users.passkey_required` 列（A）。
-10. 別の Issue にする範囲（特に Admin・Owner による Passkey の Reset）。
-11. 数値（5 分、10 個）。
+**Goal**: Passkey の Device を全部失った Admin（と User）が、Owner の操作で Passkey を登録し直せるようにする。PAW-023 では、Owner は `owner-recover` で戻れるが、Admin と User には経路がない。要求が `required` の Admin が Device を全部失うと、その Passkey は有効なまま残るので、Password で Sign-in しても「認証だけができる」Session（`assertion_required`）から出られず、Passkey を登録し直すことも失効することもできない（行き止まり。Owner の介入手段がない）。
+
+**背景**: Decision 0025 の 7 節と「リスク」。Decision 0015 の 14 節は「Admin による強制 Reset の Token の発行（1 回限りの再設定フロー）」を User 管理の Issue とした。この Issue はそれと組み合わせて扱ってよい。
+
+**受け入れ条件（案。Issue の作成時に確定する）**
+
+- [ ] Owner は、Admin と User の Passkey をすべて失効できる（`POST /api/v1/auth/users/{id}/passkeys/reset` など。Owner 専用で Agent に委任できない Capability。Admin が User の Passkey を Reset できるかは Issue で決める。Unlock と同じ規則（Admin は User だけ）を推奨）。Owner 自身の Passkey は対象にしない（Owner は `owner-recover`）。
+- [ ] 操作した Owner の直近の Passkey の Step-up を要求する（対象を調べる前に判定する）。
+- [ ] 同じ Transaction で、対象の全 Passkey を失効し（`revoked_reason` に `admin_reset` を足す。`user_passkeys` の CHECK 制約の Migration が要る）、開いている Challenge を消し、対象の全 Session を失効する（`revoked_reason = admin`）。次の Sign-in は、登録だけができる Session（Gate）になる。
+- [ ] Password の扱いを決める（Passkey だけを Reset すると、登録の最初の 1 つが Password の信頼に戻る。0025 の 5 節の限界）。既定は、Passkey の Reset と同時に、0015 の 14 節の 1 回限りの Password の再設定を必須にする（Owner が対象の Password を見ることはできない）。
+- [ ] Audit（`auth.passkey.reset`。allow / deny の理由は列挙値）。Owner・対象の ID だけを残す。
+- [ ] 最後の Owner を巻き込まない（Owner を対象にしない）。同時の操作（Reset と、対象の Sign-in・登録・Step-up）の Race を、Passkey の行を Session の行より先に Lock する順序（0025 の 15 節）で防ぐ。
+- [ ] Test: 全 Method の引数検査、Race（別の接続で競わせる）、権限（非 Superuser の Web Role の最小権限）、Migration の上げ下げと差分なし。
+
+**依存**: PAW-023（[#20](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/20)）、PAW-022（[#19](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/19)）、User 管理の Issue（0015 の 14 節）。
+
+## 承認時の決定（2026-09-26）
+
+判断点 1〜11 のすべてに、Human が作業 Session 内の質問 Tool で個別に回答した。すべて推奨どおりで、本文の変更はない。
+
+1. **Library**: `webauthn`（py_webauthn）3.0.1 を完全一致で固定する（`cryptography==50.0.1` も）。3.0.0 への引き下げと `fido2` は採らない。
+2. **強制の意味**: R2。`required` の Role は Password で Sign-in して制限された Session を得て、Passkey の登録（未登録）または認証（登録済み）を終えるまで、許された少数の Route だけが使える。R1（登録の強制だけ）は採らない。
+3. **設定がないとき**: `PAW_PASSKEY_RP_ID` と `PAW_PASSKEY_ORIGINS` がなければ Passkey の機能を切り、要求を強制しない。起動時に警告し、`passkey.available: false` を返す。起動の拒否は採らない。
+4. **Ceremony**: Attestation `none`（それ以外は拒否）、User Verification required、Resident Key preferred、Algorithm は EdDSA・ES256・RS256、Origin は設定との完全一致。Attestation `direct` や Device-bound の Key の要求は採らない。
+5. **署名 Counter の後退**: 拒否して Audit に残す（`sign_count_regression`）。自動では失効しない。
+6. **失効の規則**: `required` の Role の最後の Passkey は失効できない。失効には Passkey の Step-up（`required` の Role）または任意の Step-up が要る。失効した Passkey が開けた Session は終わり、User の Session の Passkey の Step-up は忘れる。
+7. **Owner・Admin の重要操作**: 要求が `optional` に変えられていても Passkey の Step-up を要求する（Password の Step-up は数えない）。Passkey を持たない Admin は Lock を解除できない。
+8. **Tool Broker の強い承認**: User 単位・時間単位の Passkey の Step-up（`PasskeyApprovalStepUp`）。`ApprovalService` の既定は `FailClosedStepUp` のまま。承認の Endpoint が入るときに、決める Session で Step-up する形にする。承認に結び付いた Challenge は今は作らない。
+9. **`users.passkey_required` 列**: A（そのまま）。列も CHECK も変えず、強制は `auth_policy` だけが決める。CHECK を外す案（B）と列を捨てる案（C）は採らない。
+10. **別の Issue にする範囲**: Owner による他 Account の Passkey の Reset（Passkey を全部失った Admin の経路）、Passkey だけの Sign-in、複数端末の追加（Pairing）、Passkey の名前の変更は、この Issue に含めない。**Reset は、上の「後続の Issue」の文で起票する**（Admin が全 Passkey を失うと復旧できないため、優先して扱う）。
+11. **数値**: Challenge の有効時間 5 分、Passkey の上限 10 個。どちらも設定・定数で変えられる。
+
+- 実機（Browser、Authenticator）での検証、Reverse Proxy と TLS を通した動作の確認は、この承認に含まれない（リスクとして残る）。

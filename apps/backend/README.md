@@ -1117,7 +1117,7 @@ Migration `0022`（`down_revision` は `0087`。鎖は `0001 → 0025 → 0032 �
 ## Passkey / Step-up
 
 [PAW-023](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/20) で実装しました（`paw_backend/auth/passkeys/`、`auth/stepup.py`、Migration `0023`、`api/v1/passkeys.py`）。
-**Library の選定、Attestation・User Verification・Resident Key・署名 Counter の方針、「Passkey 必須」の強制の意味、重要操作の一覧、失効の規則、`users.passkey_required` 列の扱いは、[Decision 0025](../../docs/decisions/0025-passkey-webauthn-policy.md)（Proposed。人間の承認は未了）にまとめ、各点に推奨を付けています。** 承認で変わる点は、Decision の「決めてほしいこと」に列挙しています。
+**Library の選定、Attestation・User Verification・Resident Key・署名 Counter の方針、「Passkey 必須」の強制の意味、重要操作の一覧、失効の規則、`users.passkey_required` 列の扱いは、[Decision 0025](../../docs/decisions/0025-passkey-webauthn-policy.md)（Approved。2026-09-26 に Human が承認）にまとめています。** 各点の判断と根拠、承認された内容は、Decision の本文と末尾の「承認時の決定」を参照してください。
 Decision 0015 の 12・13 節と Issue #20 の追加条件（Owner が設定で変える Policy に従った強制、「必須で未登録」を行き止まりにしない、Passkey の `StepUpVerifier` の登録、他の重要操作と Tool Broker への結び付け、`users.passkey_required` 列の整理）を、すべてこの Issue で実装しています。
 
 **実際の Browser と Authenticator では確かめていません。** Test は、W3C の仕様から書いた Software Authenticator（`tests/passkey_support.py`。`cryptography` で実際に署名し、CBOR と Authenticator Data を自前で組み立てる。検証する Library と Code を共有しない）が作る WebAuthn の Payload で、登録・認証の全体を通しています。
@@ -3015,7 +3015,7 @@ PAW-023 は `webauthn`（py_webauthn。WebAuthn の検証。`auth/passkeys/cerem
 
 [PAW-021](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/18)（Owner Setup）、
 RBAC（PAW-025）、Task Lifecycle（PAW-032）、Task Queue / Budget / Loop 検知（PAW-033）、Tool Broker（PAW-031）、Memory Schema（PAW-040）、Research Scratch Store（PAW-050）、Research Provider Adapter（PAW-051）、Research Privacy Filter（PAW-053）、Evidence / Claim Provenance（PAW-052）は、この Skeleton の上に実装済みです。
-PAW-022（Login / Session / Password）は Owner Setup の Token を受け取る側として実装済みです（[Login / Session / Password Policy](#login--session--password-policy)）。PAW-023（Passkey / Step-up）も実装済みです（[Passkey / Step-up](#passkey--step-up)。Decision 0025 は Proposed）。
+PAW-022（Login / Session / Password）は Owner Setup の Token を受け取る側として実装済みです（[Login / Session / Password Policy](#login--session--password-policy)）。PAW-023（Passkey / Step-up）も実装済みです（[Passkey / Step-up](#passkey--step-up)。Decision 0025 は Approved）。
 Memory の保存・整理は PAW-041 以降で、Memory Schema の上に実装します。検索は [Hybrid Retrieval（PAW-043）](#hybrid-retrieval) が Memory Schema の上に実装済みです。
 Research Privacy Filter（PAW-053）と Evidence / Claim Provenance（PAW-052）は、Research Provider Adapter の上に実装済みです。Research の Provider（Direct Web、Docs、GitHub、OpenCode）の Adapter は、Research Provider Adapter の上に実装します。外部送信の Audit を Audit Log へ保存する実装は、後続の Issue です。
 受け入れ基準は [Implementation Backlog](../../docs/IMPLEMENTATION_BACKLOG.md)、
