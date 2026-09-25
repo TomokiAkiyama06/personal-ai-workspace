@@ -1,10 +1,10 @@
 # 外部送信の Audit を `audit_events.details`（JSONB）へ永続化する方針
 
-- Status: Proposed
+- Status: Approved
 - Date: 2026-09-25
 - Scope: Issue [#87](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/87)（Decision 0010 の承認時の条件）と、`audit_events` に「Id と Enum だけ」では足りない記録を足す以降の Issue
 - Supersedes: なし（Decision 0010 と Decision 0004 への追補。どちらも書き換えず、選択も変えない）
-- Approval: 未承認（Human の承認待ち。承認前の実装は、この Decision を参照する提案として入れている）
+- Approval: 2026-09-26、Humanが作業Session内で、判断メモの各点に個別に回答し、残りは「推奨どおり」と回答して承認（末尾の「承認時の決定」）
 
 ## 背景
 
@@ -19,7 +19,7 @@ Test も Field の一覧を固定している）、Query の SHA-256（64 桁）
 
 要件（[SECURITY_RBAC_AUDIT.md](../SECURITY_RBAC_AUDIT.md) の Audit の項目）は最低項目に `metadata` を挙げるが、現在の Schema にはない。
 Decision 0004 にも 0010 にも、「`audit_events` にどう足すか」は書かれていない。実装は動かすために、次を選んだ。
-[AGENTS.md](../../AGENTS.md) の「仕様変更」に従い、その選択を一覧にして Human の承認を求める。
+[AGENTS.md](../../AGENTS.md) の「仕様変更」に従い、その選択を一覧にして Human の承認を求め、2026-09-26 に承認された。
 
 **承認済みの Decision 0010 と 0004 は書き換えない。** この Decision は、0010 の 5（Audit の Record と Fail closed）と、0004 の Audit の Schema に**足す**追補で、
 0010 の Record の内容、Gate の順序（Audit してから送る）、拒否の理由、時間切れ（既定 5 秒）、0004 の追記専用の保証、Application の Role の権限（INSERT と SELECT だけ）は変えない。
@@ -109,19 +109,20 @@ Decision 0010 は「Record は『送ってよいと判断した』記録で、�
 
 ## 承認後の扱い
 
-承認されたら、この Decision は Decision 0010 の 5 と 0004 の Audit の Schema への追補として扱う。`details` を持つ `audit_events` と、`research.external_send` の行の形が、承認された方針になる。0010 と 0004 は書き換えない。
-承認前でも、実装（Migration `0087`、`authz/models.py`、`research/privacy/audit.py`、`research/privacy/factory.py`）はこの提案どおりに入っている。
-Human が方針を変えたら、この Decision を更新してから、実装と Test を合わせる。**適用済みの Migration `0087` は書き換えず**、新しい Migration で変える。
-承認後に方針を変える場合は、この Decision を書き換えず、新しい Decision から `Supersedes` する。
+2026-09-26 に承認された。この Decision は Decision 0010 の 5 と 0004 の Audit の Schema への追補として扱う。`details` を持つ `audit_events` と、`research.external_send` の行の形が、承認された方針である。0010 と 0004 は書き換えない。
+実装（Migration `0087`、`authz/models.py`、`research/privacy/audit.py`、`research/privacy/factory.py`）は、この Decision のとおりに入っている。
+方針を変える場合は、この Decision を書き換えず、新しい Decision から `Supersedes` する。Migration `0087` が適用された後は、`0087` を書き換えず、新しい Migration で変える。
+`details` を使う別の `action` を足すのは、新しい Migration と、その `action` の形を決める Decision（または、この Decision の追補）による。
 
-Decision 0010 の承認時の条件は「永続の Audit Sink が接続されるまで、Private 由来の Context を Research へ自動で入れる設計を有効にしない」である。
-実装は Sink を接続した（`build_research_broker`）が、その方式はこの Decision が提案する `audit_events.details` である。
-**この Decision が承認されるまで、条件が満たされたとは扱わない**（README の日付つきの追記も、そのように書いている）。承認されたら、Private 由来の Context を、
-`build_research_broker` / `build_privacy_gate` で作った Broker を通して Research へ入れてよい。他の Broker（Sink の無い Broker、`unfiltered=True`）は、これまでどおり使えない。
+Decision 0010 の承認時の条件は「永続の Audit Sink が接続されるまで、Private 由来の Context を Research へ自動で入れる設計を有効にしない」だった。
+実装は Sink を接続し（`build_research_broker` / `build_privacy_gate`）、その方式をこの Decision が承認したので、**条件は満たされた**（README に日付つきで記録した）。
+その結果、Private 由来の Context を Research へ自動で入れる設計は、`build_research_broker` / `build_privacy_gate` で作った Broker を通す場合に限り、その設計を所有する呼び出し側が有効にできる。
+この Decision が定めるのは条件が外れたことだけで、どの呼び出し側が有効にするか、どの Context を渡してよいかは、その呼び出し側の Issue が決める。
+Sink の無い Broker と `unfiltered=True` の Broker は、これまでどおり、Private 由来の Context に使えない。
 
-## 決めてほしいこと
+## 決めてほしかったこと（承認済み）
 
-推奨の答えを添える。承認は Human が行い、承認されるまで Status は Proposed のままとする。
+推奨の答えを添えて Human に問うた。答えは、末尾の「承認時の決定」に記録している。
 
 1. **保存先と方式**: 外部送信の Audit を、`audit_events` に NULL 可の JSONB 列 `details` を足して書く（`AuditEvent` は変えない）。別の Table にする、`AuditEvent` に一般の Field を足す、既存の列に詰める、は採らない。
    推奨: 提案どおり。これを承認すると、Decision 0010 の条件（永続の Sink の接続）が満たされたと扱う。
@@ -140,3 +141,17 @@ Decision 0010 の承認時の条件は「永続の Audit Sink が接続される
    推奨: 今回は足さない（Decision 0010 の Record の内容を変えないため）。Research を呼ぶ API の Issue が、Task や Request の `correlation_id` で認可の行と結び付ける設計を、その時に提案する。
 8. **保存期間と削除**: `research.external_send` の行の保存期間、Partition、古い行の退避は決めない（`audit_events` の既知の制限と同じ）。
    推奨: 決めない（`audit_events` 全体の方針として、別の Issue で扱う）。
+
+## 承認時の決定（2026-09-26）
+
+Human は、1 に「承認」と答え、それ以外は「推奨どおり」と答えた。**設計に変更はない**（本文のとおり承認された）。
+
+1. **保存先と方式**: 承認。`audit_events` に NULL 可の JSONB 列 `details` を足して、外部送信の Audit を書く（`AuditEvent` は変えない）。別の Table、`AuditEvent` への一般の Field、既存の列への詰め込みは採らない。
+   この承認には、拒否した要求を Audit しないこと（6）と、`actor_id` を持たないこと（7）が含まれる。これにより、Decision 0010 の承認時の条件（永続の Sink の接続）が満たされたと扱う。
+2. **`details` の制限**: 推奨どおり。`details` を持てるのは登録された `action` だけ（今は `research.external_send` の 1 つ）。登録された `action` の `details` は JSON の Object・2,048 Byte 以内で、`research.external_send` は決まった 8 つの Key（`withheld` の中は 4 つ）と値の形だけ。Key を増やす、`action` を登録するときは、新しい Migration と Decision の更新で行う。
+3. **CHECK 制約は `NOT VALID` のまま検証しない**: 推奨どおり。新しい行には効く。
+4. **`downgrade` が `details` を破棄すること**: 推奨どおり。開発・Test 用とし、本番では実行しない。
+5. **指紋を塩なしで永続化する**: 推奨どおり。塩なしのまま。前提が崩れる設計になったら、新しい Decision で塩を導入する。
+6. **拒否した要求の Audit**: 推奨どおり。今回は書かない。必要なら、別の Issue と Decision で、Project と拒否の理由だけを持つ `deny` の行として提案する。
+7. **`actor_id` を持たない**: 推奨どおり。今回は足さない。Research を呼ぶ API の Issue が、Task や Request の `correlation_id` で認可の行と結び付ける設計を、その時に提案する。
+8. **保存期間と削除**: 推奨どおり。決めない。`audit_events` 全体の方針として、別の Issue で扱う。

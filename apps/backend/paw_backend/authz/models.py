@@ -6,9 +6,9 @@ separate database role that only holds INSERT and SELECT it cannot remove the
 triggers either (see ``apps/backend/README.md`` for exactly what this does and
 does not guarantee).
 
-Migration ``0087`` (issue #87, Decision 0010, proposed in Decision 0023) adds the
-nullable ``details`` column for the one action whose record needs more than ids and
-enum values: the persistent audit of an external research send
+Migration ``0087`` (issue #87, Decision 0010, approved in Decision 0023 on 2026-09-26)
+adds the nullable ``details`` column for the one action whose record needs more than
+ids and enum values: the persistent audit of an external research send
 (``research.external_send``). **``details`` is allowed only for registered actions**:
 an action that has no closed schema for it (every action of the audit trail except
 that one, existing or invented) has ``details`` NULL, whatever a writer with INSERT
