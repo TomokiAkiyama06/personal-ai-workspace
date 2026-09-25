@@ -23,6 +23,7 @@
 | [0016](0016-shared-connection-adapter-policy.md) | Shared Codex / Claude Connection の Quota・Usage・Credential の方針（Quota 未設定は無制限、期間の既定は Asia/Tokyo） | Approved |
 | [0019](0019-hybrid-retrieval-policy.md) | Hybrid Retrieval の方針（権限を先に、Keyword・Vector・Rerank、暫定値、部品の失敗） | Approved |
 | [0020](0020-project-state-gate.md) | Task / Queue の Project 状態 Gate の適用範囲（Gate の必須化、Restore 後の Restart、Active でない Project の Claim と Start） | Approved |
+| [0022](0022-project-lifecycle-capabilities.md) | Project の作成・招待への応答・退出の Capability と Audit の方針（0008 の 5 を置き換え、0004 を拡張） | Approved |
 | [0023](0023-audit-events-details-for-external-send.md) | 外部送信の Audit を `audit_events.details`（JSONB）へ永続化する方針（Decision 0010 の永続 Sink。0010・0004 への追補） | Approved |
 
 運用は [AGENTS.md](../../AGENTS.md) の「仕様変更」に従います。
