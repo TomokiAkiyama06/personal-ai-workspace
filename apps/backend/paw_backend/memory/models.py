@@ -669,6 +669,14 @@ class MemorySource(Base):
     surfaces at COMMIT (or at ``SET CONSTRAINTS ... IMMEDIATE``), not at the
     INSERT.
 
+    Every other source is named by ``source_ref``, an opaque, non-empty string
+    (``other_sources_have_reference``: not NULL, at least one character). An
+    empty string is not NULL but names nothing, so it cannot be resolved to its
+    task, repository analysis, confirmation or decision. Only the length is
+    checked, as for the other free-text columns (``title``, ``content``): what
+    the string means, and trimming it, is the Backend's job. A conversation
+    source has no ``source_ref`` (``conversation_has_no_opaque_reference``).
+
     A new source of type ``conversation`` must name a conversation or a message
     (``CONVERSATION_SOURCE_IDENTIFIED_FUNCTION``, a ``BEFORE INSERT`` trigger,
     refused at the INSERT). Without it a row with nothing set is accepted by
@@ -687,8 +695,12 @@ class MemorySource(Base):
             " OR source_type = 'conversation'",
             name="conversation_reference_only_for_conversation",
         ),
+        # ``char_length(NULL)`` is NULL and a CHECK accepts NULL, so the NULL is
+        # refused explicitly. Only the length is checked (like ``title`` and
+        # ``content``): the reference is opaque to the database.
         CheckConstraint(
-            "source_type = 'conversation' OR source_ref IS NOT NULL",
+            "source_type = 'conversation'"
+            " OR (source_ref IS NOT NULL AND char_length(source_ref) >= 1)",
             name="other_sources_have_reference",
         ),
         CheckConstraint(
