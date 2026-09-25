@@ -28,6 +28,9 @@ RAW_TEXT_FACTOR = 10
 # --- registry sizes ----------------------------------------------------------------
 
 MAX_REMOTES_PER_REPOSITORY = MAX_REMOTES
+# Provisional (Decision 0017): the ready checkouts of one user a scope is derived
+# against (every one is verified on the file system for each scope).
+MAX_SCOPE_CHECKOUTS = 500
 # Provisional (Decision 0017): the repositories one project can hold.
 MAX_REPOSITORIES_PER_PROJECT = 100
 # The readable part of a project's directory name (``<slug>-<8 hex of the id>``).

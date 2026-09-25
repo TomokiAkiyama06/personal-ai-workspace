@@ -286,9 +286,11 @@ personal-ai-workspace/
 │  │     ├─ test_repositories_github.py
 │  │     ├─ test_repositories_grants.py
 │  │     ├─ test_repositories_min_uid.py
+│  │     ├─ test_repositories_path_length.py
 │  │     ├─ test_repositories_paths.py
 │  │     ├─ test_repositories_policy.py
 │  │     ├─ test_repositories_schema.py
+│  │     ├─ test_repositories_scope_roots.py
 │  │     ├─ test_repositories_service_checkout.py
 │  │     ├─ test_repositories_service_manage.py
 │  │     ├─ test_repositories_service_register.py

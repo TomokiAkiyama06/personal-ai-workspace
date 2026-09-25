@@ -2351,11 +2351,11 @@ Project の **Repository** は論理的な共有の記録で、User や Agent �
 | --- | --- |
 | `repositories` | Repository 1 件。`project_id`（→ `projects`）、`name`（安全な名前、100 文字まで。**Project の中で大文字小文字を区別せず一意**）、`default_branch`、`source`（`github_clone` / `existing_path` / `new_local` / `new_github`）、`acl_allowed`（`NULL` は `inherit`。それ以外は `read` / `write` / `agent` の部分集合で、Project の Role を**狭める**だけ）、`created_by`、時刻。`(id, project_id)` は一意（子の Table が組で参照する） |
 | `repository_remotes` | Repository を表す `https` の URL（Tool Broker の URL と Repository の対応、Decision 0006 の 8(d) が求める登録）。`(repository_id, url)` が主キー、**`(project_id, url)` は一意**（1 つの URL は Project の 1 つの Repository を表す）。URL は `tools.scope.normalise_remote` の正規形 |
-| `repository_checkouts` | User の Checkout。`(repository_id, user_id)` は一意（**User ごとに 1 つ**）、`path` は一意（**Directory は 1 つの Checkout に属す**）。`state` は `pending`（作成中の予約）か `ready`。`user_id` は `users` を `RESTRICT` で参照する |
+| `repository_checkouts` | User の Checkout。`(repository_id, user_id)` は一意（**User ごとに 1 つ**）、`path` は一意（**Directory は 1 つの Checkout に属す**）。`state` は `pending`（作成中の予約）か `ready`。`ready` のときだけ、その Directory の識別 `root_device` / `root_inode`（`st_dev`、`st_ino`。64 bit 符号なしを厳密に持てる `NUMERIC`）を持つ（DB の CHECK 制約。Scope を作るとき、置き換えられた Directory を見分けるため）。`user_id` は `users` を `RESTRICT` で参照する |
 
 - 子の Table は `(repository_id, project_id)` の組で `repositories` を参照するため、Project が食い違う行は作れません（DB の制約）。Repository の削除で Remote と Checkout の行も消えます（`CASCADE`）。**File と GitHub の Repository は消えません。**
 - Migration `0027` の `down_revision` は `0026` で、`0021`（`users`）と `0026`（`projects`）より後に置く必要があります（統合時の並べ直しでも保つこと）。`projects` と `users` への外部キーは、`0026` と同じ理由（`test_task_persistence.OfflineMigrationTest` が鎖全体の SQL の `FOREIGN KEY(project_id)` の有無を見る）で、`ALTER TABLE ... ADD CONSTRAINT` の手書きの文にしています。
-- 入れ子の Repository の Table はありません。Checkout の Path の包含関係から都度求めます（下の「Tool Broker との継ぎ目」）。
+- 入れ子の Repository の Table はありません。Checkout の Root が**今指している Directory**から都度求めます（下の「Tool Broker との継ぎ目」）。
 - 許す値と長さは DB の CHECK 制約にも書かれています。`tests/test_repositories_schema.py` が、Model・Migration・実際の DB の一致と、各制約を破ったときの動作を検証します。
 
 ### Repository を追加する 3 つの経路（Manager。`project.repo.add`）
@@ -2414,6 +2414,9 @@ Backend が作る Checkout は、`workspaces` と Project の Directory（0700�
 ### Tool Broker との継ぎ目
 
 - `scope_entries(user_id, project_id, repository_id)` は、Tool Broker の `TaskScope.repositories` に入れる `ScopedRepository`（Path、解決した ACL、登録した Remote）を返します。最初が要求した Repository、続けて、同じ User の**入れ子の Checkout**（包含する・される `ready` のもの。それぞれの Project の ACL つき）です（Decision 0006 の 8(b)）。`tests/test_repositories_service_manage.py` が、Broker の `classify_targets` で「内側の Path が両方の Repository に触れる」ことと、URL が Remote で Repository に結び付くことを確かめます。
+- **`scope_entries` は、Root が変わっていたら Scope を作りません（fail closed）。** Tool Broker は Root を `realpath` で解決するため、登録後に Checkout A が B への Symbolic Link に置き換えられる、B が A の Path へ改名される、といった操作の後で、保存した Path の文字列だけから入れ子を求めると、A の Scope に B が入らず、B の厳しい ACL が効きません。そこで、その User の `ready` な Checkout すべてを毎回検査します（保存した Path が実 Path で、Symbolic Link がなく、Directory で、Account の持ち主で、`ready` になったときに記録した `(st_dev, st_ino)` と一致）。要求した Checkout が登録どおりでなければ `CheckoutChangedError`。他の Checkout は、保存した Path または今解決される Path が同じ・上・下なら関連とし、関連するものが変わっていれば `CheckoutChangedError`、変わっていなければ入れ子として含めます。関連しない Checkout の変化は無視します。500 を超える Checkout は `TooManyCheckoutsError`（一部だけの Scope は作らない）。Error に Path は含まず、Log には Checkout / Repository の ID と理由だけを出します。
+  - **閉じていないこと。** 確認は、読んだ瞬間の事実です。Scope を作ってから Broker が呼び出しを解決するまでの窓（check-then-use）は、Broker が呼び出しごとに Root と識別を確かめ直さない限り残ります（この Issue では行っていません）。`(st_dev, st_ino)` は Directory の中身の差し替えを見ません。Inode 番号は、削除の直後に再利用されうる（同じ Directory を消して作り直すと同じ識別になる可能性）ため、識別は Symbolic Link・改名による差し替えを検出する手段であって、完全な証明ではありません。
+  - `tests/test_repositories_scope_roots.py` が、実際の Symbolic Link への置き換え（A → B）、B を A の Path へ改名、同じ Path の別の Directory、削除、File への置き換え、持ち主の変更、Path の途中の Symbolic Link、入れ子の移動、関連しない変化の無視、変わらない Tree、を確かめます。
 - `purge_projects(project_ids)` は、`ProjectService.purge_expired` が返した ID のうち **Deleted になっている** Project の登録を消します。File と GitHub の Repository は消しません（要件）。
 
 ### 上限と入力の検証
@@ -2425,7 +2428,8 @@ Backend が作る Checkout は、`workspaces` と Project の Directory（0700�
 
 - **Per-user の Clone は、Backend の Process の User が Checkout の持ち主のときだけ動く。** 別の User の Home へは書けず、User を切り替える実行の仕組みは、この Issue にない（Decision 0017 の 4。PAW-028 も必要とする）。
 - Private Repository の Clone、GitHub での新規作成は PAW-028 まで動かない（Global の git 設定と Credential Helper を読まないため）。作成後に登録が失敗しても、GitHub の Repository は削除しない（Log に 1 行）。
-- Path の検証は確認した瞬間の事実で、持ち主は後で差し替えられる。Tool Broker が呼び出しごとに解決し直すことに依存する。
+- Path の検証は確認した瞬間の事実で、持ち主は後で差し替えられる。`scope_entries` は Scope を作る瞬間に Root と識別を確かめるが、その後 Tool Broker が呼び出しを解決するまでの窓は残る（Broker が呼び出しごとに確かめ直すことに依存する）。
+- Backend が生成する Checkout の Path は DB が保存できる 1024 文字までで、長い Home の Account が超える Path を作ると、挿入の前に `PathRejectedError`（`too_long`）で拒否する（`tests/test_repositories_path_length.py`。境界は 1024 文字が可、1025 文字が不可）。
 - 既存の Directory を、登録済みの Repository の自分の Checkout として取り込む操作は、この Issue にない（Remote の照合が要る）。名前の変更もない。
 - 別の Linux User の権限での実 Clone は、この環境では試せていない（別の User の Account を作れない）。「別の User の Directory」の拒否は、その Path だけ別の持ち主を返す方法と、別の uid の Account で確かめている。
 - 「アクセスできる GitHub の Repository の一覧から選ぶ」（要件）は、GitHub の認証（PAW-028）と UI（PAW-061）に依存し、この Issue にない。`clone_from_github` は、指定された Repository を Clone するだけ。

@@ -16,7 +16,7 @@ from collections.abc import Collection, Sequence
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import bindparam, delete, func, insert, literal, select, update
+from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from paw_backend.authz.capabilities import RepoPermission
@@ -79,6 +79,8 @@ def checkout_from_row(row: Any) -> Checkout:
         state=CheckoutState(row.state),
         created_at=row.created_at,
         updated_at=row.updated_at,
+        root_device=None if row.root_device is None else int(row.root_device),
+        root_inode=None if row.root_inode is None else int(row.root_inode),
     )
 
 
@@ -340,8 +342,9 @@ async def insert_checkout(
     path: str,
     state: CheckoutState,
     now: datetime,
+    identity: tuple[int, int] | None = None,
 ) -> Checkout:
-    """Insert a checkout row.
+    """Insert a checkout row (``identity`` is ``(st_dev, st_ino)``; ``ready`` only).
 
     ``IntegrityError`` when the user has a checkout of this repository
     (``uq_repository_checkouts_repository_id``) or the path is registered
@@ -357,6 +360,8 @@ async def insert_checkout(
                 user_id=user_id,
                 path=path,
                 state=state.value,
+                root_device=None if identity is None else identity[0],
+                root_inode=None if identity is None else identity[1],
                 created_at=now,
                 updated_at=now,
             )
@@ -384,14 +389,25 @@ async def get_checkout_of(
 
 
 async def mark_ready(
-    session: AsyncSession, checkout_id: uuid.UUID, now: datetime
+    session: AsyncSession,
+    checkout_id: uuid.UUID,
+    now: datetime,
+    identity: tuple[int, int],
 ) -> Checkout | None:
-    """``pending`` becomes ``ready``; the checkout, ``None`` if gone or not pending."""
+    """``pending`` becomes ``ready`` and records the directory identity.
+
+    The checkout, or ``None`` if it is gone or not pending.
+    """
     row = (
         await session.execute(
             update(CHECKOUTS)
             .where(CHECKOUTS.c.id == checkout_id, CHECKOUTS.c.state == "pending")
-            .values(state="ready", updated_at=now)
+            .values(
+                state="ready",
+                root_device=identity[0],
+                root_inode=identity[1],
+                updated_at=now,
+            )
             .returning(*CHECKOUTS.c)
         )
     ).first()
@@ -422,29 +438,18 @@ async def list_checkouts_of(
     return [checkout_from_row(row) for row in rows]
 
 
-async def nested_checkouts(
-    session: AsyncSession, user_id: uuid.UUID, path: str, ancestors: Sequence[str]
+async def list_ready_checkouts_of(
+    session: AsyncSession, user_id: uuid.UUID, limit: int
 ) -> list[Checkout]:
-    """The user's other ``ready`` checkouts that enclose or are enclosed by ``path``.
+    """The user's ``ready`` checkouts by path, at most ``limit`` (for scope building).
 
-    ``ancestors`` are the proper ancestor directories of ``path`` (``/a``,
-    ``/a/b`` for ``/a/b/c``): a checkout at one of them encloses this one (found
-    through the unique index on the path). A checkout below ``path`` is found by a
-    prefix comparison that does not interpret ``%`` or ``_`` in a path
-    (``starts_with``). Only this user's rows are looked at: nesting is a fact of one
-    user's file system. ``path`` itself is not returned.
+    Nesting is derived from the directories these paths lead to *now*
+    (``paths.inspect_checkout_root``), not by a comparison of the stored text here.
     """
-    enclosing = CHECKOUTS.c.path.in_(list(ancestors)) if ancestors else literal(False)
-    enclosed = func.starts_with(CHECKOUTS.c.path, bindparam("prefix"))
     rows = await session.execute(
         select(CHECKOUTS)
-        .where(
-            CHECKOUTS.c.user_id == user_id,
-            CHECKOUTS.c.state == "ready",
-            CHECKOUTS.c.path != path,
-            enclosing | enclosed,
-        )
-        .order_by(CHECKOUTS.c.path),
-        {"prefix": path + "/"},
+        .where(CHECKOUTS.c.user_id == user_id, CHECKOUTS.c.state == "ready")
+        .order_by(CHECKOUTS.c.path, CHECKOUTS.c.id)
+        .limit(limit)
     )
     return [checkout_from_row(row) for row in rows]

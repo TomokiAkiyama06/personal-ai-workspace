@@ -14,7 +14,10 @@
   one checkout per repository and a directory belongs to one checkout, so
   per-user isolation holds in the database, not only in the code. ``state`` is
   ``pending`` while the directory is being created (a reservation) and ``ready``
-  when it can be used.
+  when it can be used. A ``ready`` checkout also records the identity of its
+  directory (``root_device`` / ``root_inode``: ``st_dev`` and ``st_ino`` when it
+  became ready), so a later replacement of the directory (a symbolic link, another
+  directory renamed into place) can be told from the registered one.
 
 Rows are removed with their repository (``ON DELETE CASCADE``); the files on disk
 and the GitHub repository are never touched by that (``REQUIREMENTS.md``: a
@@ -38,6 +41,7 @@ from sqlalchemy import (
     ForeignKey,
     ForeignKeyConstraint,
     Index,
+    Numeric,
     Text,
     UniqueConstraint,
     Uuid,
@@ -156,6 +160,19 @@ class RepositoryCheckoutRow(Base):
             " AND path NOT LIKE '%/' AND path !~ '(^|/)\\.\\.?(/|$)'",
             name="path_valid",
         ),
+        # The identity of the directory that was registered (``st_dev`` and
+        # ``st_ino``) exists exactly while the checkout is ``ready``: every scope
+        # is derived only from a root that still is that directory.
+        CheckConstraint(
+            "(state = 'ready') = (root_device IS NOT NULL)"
+            " AND (root_device IS NULL) = (root_inode IS NULL)",
+            name="identity_matches_state",
+        ),
+        CheckConstraint(
+            "(root_device IS NULL OR root_device >= 0)"
+            " AND (root_inode IS NULL OR root_inode >= 0)",
+            name="identity_not_negative",
+        ),
         # One checkout per user per repository ...
         UniqueConstraint("repository_id", "user_id"),
         # ... and a directory belongs to one checkout.
@@ -172,5 +189,8 @@ class RepositoryCheckoutRow(Base):
     user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
     path: Mapped[str] = mapped_column(Text)
     state: Mapped[str] = mapped_column(Text)
+    # ``st_dev`` / ``st_ino`` are unsigned 64-bit numbers; NUMERIC holds them exactly.
+    root_device: Mapped[int | None] = mapped_column(Numeric(20, 0))
+    root_inode: Mapped[int | None] = mapped_column(Numeric(20, 0))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

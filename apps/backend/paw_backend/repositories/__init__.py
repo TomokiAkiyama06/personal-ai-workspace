@@ -13,6 +13,7 @@ from paw_backend.repositories.accounts import (
     LoginNameAccountDirectory,
 )
 from paw_backend.repositories.errors import (
+    CheckoutChangedError,
     CheckoutExistsError,
     CheckoutGoneError,
     CheckoutInProgressError,
@@ -38,6 +39,7 @@ from paw_backend.repositories.errors import (
     RepositoryNameTakenError,
     RepositoryNotFoundError,
     RepositoryPermissionDeniedError,
+    TooManyCheckoutsError,
 )
 from paw_backend.repositories.git import (
     GitClient,
@@ -68,6 +70,7 @@ from paw_backend.repositories.service import RepositoryService
 __all__ = [
     "AccountDirectory",
     "Checkout",
+    "CheckoutChangedError",
     "CheckoutExistsError",
     "CheckoutGoneError",
     "CheckoutInProgressError",
@@ -110,6 +113,7 @@ __all__ = [
     "RepositoryService",
     "RepositorySource",
     "SubprocessGitRunner",
+    "TooManyCheckoutsError",
     "UnavailableGitHubGateway",
     "parse_github_source",
 ]

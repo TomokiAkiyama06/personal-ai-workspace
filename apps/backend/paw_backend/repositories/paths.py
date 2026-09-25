@@ -45,7 +45,7 @@ from dataclasses import dataclass
 
 from paw_backend.authz.subjects import to_uuid
 from paw_backend.repositories.errors import PathProblem, PathRejectedError
-from paw_backend.repositories.limits import MAX_PROJECT_SLUG_CHARS
+from paw_backend.repositories.limits import MAX_PATH_CHARS, MAX_PROJECT_SLUG_CHARS
 from paw_backend.tools.scope import TargetError, normalise_path, path_within
 
 _USERNAME = re.compile(r"[a-z0-9_][a-z0-9_.-]{0,63}")
@@ -108,15 +108,6 @@ def project_directory_name(project_name: str, project_id: uuid.UUID) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", folded.decode("ascii").lower()).strip("-")
     slug = slug[:MAX_PROJECT_SLUG_CHARS].strip("-") or "project"
     return f"{slug}-{project_id.hex[:8]}"
-
-
-def ancestor_paths(path: str) -> list[str]:
-    """The proper ancestor directories of a canonical absolute ``path``, top first.
-
-    ``/a/b/c`` gives ``["/a", "/a/b"]`` (never ``/``: no checkout is the root).
-    """
-    parts = path.split("/")[1:-1]
-    return ["/" + "/".join(parts[: index + 1]) for index in range(len(parts))]
 
 
 def _resolve(path: str, problem: PathProblem) -> str:
@@ -188,7 +179,72 @@ def plan_checkout_path(
         except OSError:
             raise PathRejectedError(PathProblem.NOT_FOUND) from None
         _require_owned_directory(info, account.uid)
-    return f"{root}/{project_directory}/{repository_name}"
+    path = f"{root}/{project_directory}/{repository_name}"
+    if len(path) > MAX_PATH_CHARS:
+        # The database stores at most this many characters (and 1024 characters
+        # never exceed the 4096 bytes of PATH_MAX). A long home can make a valid
+        # account generate such a path: refused here, before anything is inserted.
+        raise PathRejectedError(PathProblem.TOO_LONG)
+    return path
+
+
+@dataclass(frozen=True, slots=True)
+class RootState:
+    """What a registered checkout root is *now* (``inspect_checkout_root``).
+
+    ``problem`` is ``None`` when the root is exactly what was registered.
+    ``resolved`` is the real path the stored path leads to (``None`` when it leads
+    nowhere); ``identity`` is ``(st_dev, st_ino)`` of the entry at the stored path.
+    """
+
+    problem: PathProblem | None
+    resolved: str | None
+    identity: tuple[int, int] | None
+
+
+def inspect_checkout_root(
+    path: str, uid: int, expected: tuple[int, int] | None
+) -> RootState:
+    """Whether ``path`` is still the directory that was registered as a checkout.
+
+    Checked, in this order: the path leads somewhere (``NOT_FOUND``); it is its own
+    real path, no symbolic link in it anywhere (``SYMLINK``); the entry is a
+    directory (``NOT_A_DIRECTORY``) of the account (``NOT_OWNER``); and, when
+    ``expected`` is given, it is the same directory (``st_dev``, ``st_ino``) that was
+    recorded when the checkout became ready (``CHANGED``). This is what the Tool
+    Broker will resolve, so a scope must be derived from this, not from the stored
+    text. A fact of the instant it is read (the Broker still resolves again when a
+    tool runs).
+    """
+    try:
+        resolved = os.path.realpath(path, strict=True)
+        info = os.lstat(path)
+    except (OSError, ValueError):
+        return RootState(PathProblem.NOT_FOUND, None, None)
+    identity = (info.st_dev, info.st_ino)
+    problem: PathProblem | None = None
+    if resolved != path:
+        problem = PathProblem.SYMLINK
+    elif not stat.S_ISDIR(info.st_mode):
+        problem = PathProblem.NOT_A_DIRECTORY
+    elif info.st_uid != uid:
+        problem = PathProblem.NOT_OWNER
+    elif expected is not None and identity != expected:
+        problem = PathProblem.CHANGED
+    return RootState(problem, resolved, identity)
+
+
+def read_checkout_identity(path: str, account: LinuxAccount) -> tuple[int, int]:
+    """``(st_dev, st_ino)`` of a checkout root that is being registered.
+
+    The root must already be what a checkout root has to be (resolved, a directory
+    of the account); otherwise ``PathRejectedError``. The pair is recorded with the
+    checkout and compared by every later ``inspect_checkout_root``.
+    """
+    state = inspect_checkout_root(path, account.uid, None)
+    if state.problem is not None or state.identity is None:
+        raise PathRejectedError(state.problem or PathProblem.NOT_FOUND)
+    return state.identity
 
 
 def _open_directory(name: str, dir_fd: int, uid: int) -> int:

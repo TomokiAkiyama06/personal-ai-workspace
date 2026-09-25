@@ -31,6 +31,8 @@ from . import (
     test_repositories_accounts,
     test_repositories_concurrency,
     test_repositories_min_uid,
+    test_repositories_path_length,
+    test_repositories_scope_roots,
     test_repositories_service_checkout,
     test_repositories_service_manage,
     test_repositories_service_register,
@@ -53,7 +55,10 @@ EXPECTED = {
         {"default_branch", "acl_allowed", "updated_at"},
     ),
     "repository_remotes": ({"SELECT", "INSERT", "DELETE"}, set()),
-    "repository_checkouts": ({"SELECT", "INSERT", "DELETE"}, {"state", "updated_at"}),
+    "repository_checkouts": (
+        {"SELECT", "INSERT", "DELETE"},
+        {"state", "updated_at", "root_device", "root_inode"},
+    ),
 }
 ALL_PRIVILEGES = (
     "SELECT",
@@ -155,6 +160,8 @@ for _module in (
     test_repositories_concurrency,
     test_repositories_unregister_race,
     test_repositories_min_uid,
+    test_repositories_path_length,
+    test_repositories_scope_roots,
     test_repositories_accounts,
 ):
     _prefix = _module.__name__.removeprefix("tests.test_repositories_")
@@ -226,6 +233,8 @@ class AppRolePrivilegesTest(PostgresRepositoryTestCase):
             "UnregisterRaceUnregisterDuringCreateGitHubTestAsAppRole", derived
         )
         self.assertIn("MinUidMinimumUidOnTheServicePathTestAsAppRole", derived)
+        self.assertIn("ScopeRootsReplacedRootTestAsAppRole", derived)
+        self.assertIn("PathLengthGeneratedPathLengthTestAsAppRole", derived)
 
     async def test_the_service_really_runs_as_a_non_superuser_role(self):
         for database in (self.app, self.other):
@@ -392,7 +401,8 @@ class AppRolePrivilegesTest(PostgresRepositoryTestCase):
             await session.execute(
                 text(
                     "UPDATE repository_checkouts SET state = 'ready',"
-                    " updated_at = now() WHERE id = :c AND state = 'pending'"
+                    " root_device = 7, root_inode = 9, updated_at = now()"
+                    " WHERE id = :c AND state = 'pending'"
                 ),
                 {"c": checkout},
             )

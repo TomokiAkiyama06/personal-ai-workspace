@@ -10,7 +10,9 @@ Three tables:
   Tool Broker's URL-to-repository mapping needs, Decision 0006 section 8). A URL
   belongs to one repository of a project.
 * ``repository_checkouts``: one user's working copy (``pending`` while it is being
-  created, then ``ready``). One per user and repository, one per directory.
+  created, then ``ready``). One per user and repository, one per directory. A
+  ``ready`` checkout records the identity of its directory (``root_device`` /
+  ``root_inode``, ``st_dev`` and ``st_ino``) so a replaced directory is detected.
 
 The child tables cascade from ``repositories``; a repository row is deleted only
 by ``RepositoryService`` (remove / purge). Files on disk and GitHub repositories
@@ -130,6 +132,8 @@ def upgrade() -> None:
         sa.Column("user_id", sa.Uuid(), nullable=False),
         sa.Column("path", sa.Text(), nullable=False),
         sa.Column("state", sa.Text(), nullable=False),
+        sa.Column("root_device", sa.Numeric(20, 0), nullable=True),
+        sa.Column("root_inode", sa.Numeric(20, 0), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("id"),
@@ -142,6 +146,16 @@ def upgrade() -> None:
         ),
         sa.ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="RESTRICT"),
         sa.CheckConstraint("state IN ('pending', 'ready')", name="state_valid"),
+        sa.CheckConstraint(
+            "(state = 'ready') = (root_device IS NOT NULL)"
+            " AND (root_device IS NULL) = (root_inode IS NULL)",
+            name="identity_matches_state",
+        ),
+        sa.CheckConstraint(
+            "(root_device IS NULL OR root_device >= 0)"
+            " AND (root_inode IS NULL OR root_inode >= 0)",
+            name="identity_not_negative",
+        ),
         sa.CheckConstraint(
             "char_length(path) BETWEEN 2 AND 1024 AND path LIKE '/%'"
             " AND path NOT LIKE '%/' AND path !~ '(^|/)\\.\\.?(/|$)'",
@@ -160,8 +174,10 @@ def upgrade() -> None:
     #   (a rename would also move the directory, which no operation does).
     # * repository_remotes: inserted and deleted; a row is never rewritten.
     # * repository_checkouts: inserted as ``pending``; only the state and
-    #   updated_at change (``ready``); deleted (remove a checkout, a failed or
-    #   stale reservation). Its repository, project, user and path never change.
+    #   updated_at change, and the recorded directory identity (root_device,
+    #   root_inode) is written together with ``ready``; deleted (remove a
+    #   checkout, a failed or stale reservation). Its repository, project, user and
+    #   path never change.
     # The service also reads ``projects``, ``project_members`` (revision 0026) and
     # ``users`` (revision 0021), whose grants those revisions gave.
     grant_app_privileges(
@@ -177,7 +193,7 @@ def upgrade() -> None:
         "repository_checkouts",
         insert=True,
         delete=True,
-        update_columns=("state", "updated_at"),
+        update_columns=("state", "updated_at", "root_device", "root_inode"),
     )
 
 

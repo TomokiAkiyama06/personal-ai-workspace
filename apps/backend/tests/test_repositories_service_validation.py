@@ -139,6 +139,7 @@ ACCOUNT_FIRST = {
     "create_local",
     "create_github",
     "create_checkout",
+    "scope_entries",  # the Linux account (its uid) is needed to verify the roots
 }
 # The bad values of each argument name.
 BAD = {

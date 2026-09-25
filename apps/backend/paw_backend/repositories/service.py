@@ -131,12 +131,15 @@ from paw_backend.repositories.accounts import (
     LoginNameAccountDirectory,
 )
 from paw_backend.repositories.errors import (
+    CheckoutChangedError,
     CheckoutExistsError,
     CheckoutGoneError,
     CheckoutInProgressError,
     CheckoutNotFoundError,
     GitHubUnavailableError,
     NoCloneSourceError,
+    PathProblem,
+    PathRejectedError,
     ProjectNotActiveError,
     ProjectUnavailableError,
     RemoteAlreadyRegisteredError,
@@ -147,6 +150,7 @@ from paw_backend.repositories.errors import (
     RepositoryNameTakenError,
     RepositoryNotFoundError,
     RepositoryPermissionDeniedError,
+    TooManyCheckoutsError,
 )
 from paw_backend.repositories.git import GitClient, GitRunner
 from paw_backend.repositories.github import (
@@ -162,15 +166,17 @@ from paw_backend.repositories.limits import (
     MAX_LOCK_TIMEOUT_MS,
     MAX_REMOTES_PER_REPOSITORY,
     MAX_REPOSITORIES_PER_PROJECT,
+    MAX_SCOPE_CHECKOUTS,
     MIN_LOCK_TIMEOUT_MS,
 )
 from paw_backend.repositories.paths import (
     LinuxAccount,
-    ancestor_paths,
     check_existing_repository,
     create_checkout_directory,
+    inspect_checkout_root,
     plan_checkout_path,
     project_directory_name,
+    read_checkout_identity,
     remove_directory,
 )
 from paw_backend.repositories.policy import RepositoryPolicy
@@ -196,7 +202,7 @@ from paw_backend.repositories.validation import (
     validate_remote_url,
     validate_uuid,
 )
-from paw_backend.tools.scope import ScopedRepository
+from paw_backend.tools.scope import ScopedRepository, path_within
 
 logger = logging.getLogger(__name__)
 
@@ -222,6 +228,10 @@ _VIOLATIONS: MappingProxyType[str, Callable[[], Exception]] = MappingProxyType(
         "pk_repository_remotes": RemoteAlreadyRegisteredError,
         "uq_repository_checkouts_path": CheckoutExistsError,
         "uq_repository_checkouts_repository_id": CheckoutExistsError,
+        # Unreachable through the service (the path is validated first); a defence.
+        "ck_repository_checkouts_path_valid": lambda: PathRejectedError(
+            PathProblem.NOT_CANONICAL
+        ),
         # The repository was removed while an operation of its own was running.
         "fk_repository_remotes_repository_id_repositories": CheckoutGoneError,
         "fk_repository_checkouts_repository_id_repositories": CheckoutGoneError,
@@ -495,6 +505,8 @@ class RepositoryService:
         )
         facts = await self._git.inspect(path, account)
         remotes = remote_urls_from_origin(facts.origin_url, self._policy.clone_hosts)
+        # Which directory this is, for every later scope (a replaced root differs).
+        identity = await asyncio.to_thread(read_checkout_identity, path, account)
         now = self._now()
         repository_id, checkout_id = uuid.uuid4(), uuid.uuid4()
         try:
@@ -535,6 +547,7 @@ class RepositoryService:
                     path=path,
                     state=CheckoutState.READY,
                     now=now,
+                    identity=identity,
                 )
         except IntegrityError as error:
             raise _violation(error) from None
@@ -756,8 +769,13 @@ class RepositoryService:
             await asyncio.to_thread(create_checkout_directory, path, account)
             created_directory = True
             populated = await populate(path)
+            identity = await asyncio.to_thread(read_checkout_identity, path, account)
             checkout, stored = await self._finish(
-                repository, checkout_id, populated.default_branch, populated.remotes
+                repository,
+                checkout_id,
+                populated.default_branch,
+                populated.remotes,
+                identity,
             )
         except BaseException:
             if source is RepositorySource.NEW_GITHUB and populated is not None:
@@ -792,6 +810,7 @@ class RepositoryService:
         checkout_id: uuid.UUID,
         default_branch: str | None,
         extra_remotes: tuple[str, ...],
+        identity: tuple[int, int],
     ) -> tuple[Checkout, Repository]:
         """The second transaction: branch, remotes, then the checkout is ``ready``.
 
@@ -823,7 +842,7 @@ class RepositoryService:
                         url=url,
                         now=now,
                     )
-                checkout = await store.mark_ready(session, checkout_id, now)
+                checkout = await store.mark_ready(session, checkout_id, now, identity)
                 stored = await store.get_repository(
                     session, stored.project_id, stored.id
                 )
@@ -946,9 +965,10 @@ class RepositoryService:
             await asyncio.to_thread(create_checkout_directory, path, account)
             created_directory = True
             await self._git.clone(source, path, account)
+            identity = await asyncio.to_thread(read_checkout_identity, path, account)
             now = self._now()
             async with self._transaction() as session:
-                checkout = await store.mark_ready(session, checkout_id, now)
+                checkout = await store.mark_ready(session, checkout_id, now, identity)
             if checkout is None:
                 raise CheckoutGoneError()
         except BaseException:
@@ -1224,10 +1244,29 @@ class RepositoryService:
         or lies inside it (Decision 0006 section 8(b): nested repositories obey both
         ACLs). Each entry is the repository's own, with the ACL of *its* project. A
         pending checkout is not usable: ``CheckoutNotFoundError``.
+
+        **Fails closed on a changed root.** The Tool Broker resolves every root with
+        ``realpath``, so the nesting must come from the directories the roots lead to
+        now, not from the text stored at registration. Every ``ready`` checkout of the
+        user is inspected (``paths.inspect_checkout_root``: its real path is the
+        stored path, a directory of the user's account, and the ``(st_dev, st_ino)``
+        recorded when it became ready). The requested checkout must be exactly what
+        was registered, else :class:`CheckoutChangedError`. Another checkout is
+        related to it when its stored path *or* the path it now resolves to is the
+        same, above or below; a related checkout that changed makes the whole scope
+        :class:`CheckoutChangedError` (a link that now leads into another checkout, a
+        checkout renamed into another one's place), while a changed checkout that has
+        nothing to do with it is left out. More than ``MAX_SCOPE_CHECKOUTS`` checkouts
+        are :class:`TooManyCheckoutsError` (never a partial scope).
+
+        What this does **not** close: the answer is a fact of the moment it is read.
+        The Broker resolves again when a tool runs, and a root replaced in between
+        is not seen here (Decision 0017, "Remaining limit").
         """
         user_id = validate_uuid("user_id", user_id)
         project_id = validate_uuid("project_id", project_id)
         repository_id = validate_uuid("repository_id", repository_id)
+        account = await self._accounts.account_of(user_id)
         async with self._transaction() as session:
             repository = await store.get_repository(session, project_id, repository_id)
             if repository is None:
@@ -1235,17 +1274,62 @@ class RepositoryService:
             checkout = await store.get_checkout_of(session, repository_id, user_id)
             if checkout is None or checkout.state is not CheckoutState.READY:
                 raise CheckoutNotFoundError()
-            nested = await store.nested_checkouts(
-                session, user_id, checkout.path, ancestor_paths(checkout.path)
+            ready = await store.list_ready_checkouts_of(
+                session, user_id, MAX_SCOPE_CHECKOUTS + 1
             )
+            if len(ready) > MAX_SCOPE_CHECKOUTS:
+                raise TooManyCheckoutsError()
+            related = await self._related_checkouts(account, checkout, ready)
             entries = [await self._entry(session, repository, checkout)]
-            for other in nested:
+            for other in related:
                 found = await store.get_repository_any_project(
                     session, other.repository_id
                 )
                 if found is not None:
                     entries.append(await self._entry(session, found, other))
         return tuple(entries)
+
+    @staticmethod
+    async def _related_checkouts(
+        account: LinuxAccount, checkout: Checkout, ready: list[Checkout]
+    ) -> list[Checkout]:
+        """The verified checkouts enclosing or inside ``checkout``; else refuse."""
+
+        def inspect_all():
+            return {
+                item.id: inspect_checkout_root(
+                    item.path,
+                    account.uid,
+                    (item.root_device, item.root_inode)
+                    if item.root_device is not None and item.root_inode is not None
+                    else None,
+                )
+                for item in ready
+            }
+
+        states = await asyncio.to_thread(inspect_all)
+        own = states[checkout.id]
+        if own.problem is not None:
+            _log_changed_root(checkout, own.problem)
+            raise CheckoutChangedError(own.problem, checkout.id)
+        root = checkout.path
+
+        def related(path: str) -> bool:
+            return path == root or path_within(path, root) or path_within(root, path)
+
+        found: list[Checkout] = []
+        for other in ready:
+            if other.id == checkout.id:
+                continue
+            state = states[other.id]
+            leads_to = {other.path} | ({state.resolved} if state.resolved else set())
+            if not any(related(path) for path in leads_to):
+                continue  # nothing to do with this checkout, whatever happened to it
+            if state.problem is not None:
+                _log_changed_root(other, state.problem)
+                raise CheckoutChangedError(PathProblem.CHANGED, other.id)
+            found.append(other)
+        return found
 
     @staticmethod
     async def _entry(
@@ -1277,3 +1361,13 @@ class RepositoryService:
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+def _log_changed_root(checkout: Checkout, problem: PathProblem) -> None:
+    """A checkout root is not what was registered (ids and the reason only)."""
+    logger.warning(
+        "Checkout root changed (checkout=%s, repository=%s, problem=%s)",
+        checkout.id,
+        checkout.repository_id,
+        problem.value,
+    )

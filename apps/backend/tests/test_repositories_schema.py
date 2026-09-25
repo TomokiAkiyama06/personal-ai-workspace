@@ -168,7 +168,10 @@ class ModelsMetadataTest(unittest.TestCase):
             for constraint in table.constraints:
                 if isinstance(
                     constraint,
-                    UniqueConstraint | PrimaryKeyConstraint | ForeignKeyConstraint,
+                    UniqueConstraint
+                    | PrimaryKeyConstraint
+                    | ForeignKeyConstraint
+                    | CheckConstraint,
                 ):
                     names.add(constraint.name)
             names.update(
@@ -578,12 +581,23 @@ class ConstraintsTest(MemoryDatabaseTestCase):
             created_at=T0,
         )
 
-    def checkout(self, repository, project, user, path="/home/a/tool", state="ready"):
+    def checkout(
+        self,
+        repository,
+        project,
+        user,
+        path="/home/a/tool",
+        state="ready",
+        identity="default",
+    ):
+        if identity == "default":  # a ready checkout records where it is
+            identity = (2049, 131) if state == "ready" else (None, None)
         return self.session.execute(
             text(
                 "INSERT INTO repository_checkouts (repository_id, project_id, user_id,"
-                " path, state, created_at, updated_at) VALUES (:r, :p, :u, :path,"
-                " :state, :now, :now) RETURNING id"
+                " path, state, root_device, root_inode, created_at, updated_at)"
+                " VALUES (:r, :p, :u, :path, :state, :dev, :ino, :now, :now)"
+                " RETURNING id"
             ),
             {
                 "r": repository,
@@ -591,6 +605,8 @@ class ConstraintsTest(MemoryDatabaseTestCase):
                 "u": user,
                 "path": path,
                 "state": state,
+                "dev": identity[0],
+                "ino": identity[1],
                 "now": T0,
             },
         ).scalar_one()
@@ -800,6 +816,65 @@ class ConstraintsTest(MemoryDatabaseTestCase):
                 lambda: self.checkout(repository, project, user, state="failed")
             ),
             "ck_repository_checkouts_state_valid",
+        )
+
+    def test_the_directory_identity_exists_exactly_for_a_ready_checkout(self):
+        project, user = self.project(), self.user()
+        repository = self.repository(project)
+        ready_without = self.violation(
+            lambda: self.checkout(repository, project, user, identity=(None, None))
+        )
+        self.assertEqual(
+            ready_without, "ck_repository_checkouts_identity_matches_state"
+        )
+        pending_with = self.violation(
+            lambda: self.checkout(
+                repository, project, user, "/h/p", state="pending", identity=(1, 2)
+            )
+        )
+        self.assertEqual(pending_with, "ck_repository_checkouts_identity_matches_state")
+        half = self.violation(
+            lambda: self.checkout(repository, project, user, "/h/q", identity=(1, None))
+        )
+        self.assertEqual(half, "ck_repository_checkouts_identity_matches_state")
+        self.assertIsNone(
+            self.violation(
+                lambda: self.checkout(
+                    repository,
+                    project,
+                    user,
+                    "/h/r",
+                    state="pending",
+                    identity=(None, None),
+                )
+            )
+        )
+
+    def test_the_directory_identity_is_not_negative_and_holds_64_bits(self):
+        project = self.project()
+        repository = self.repository(project)
+        for index, identity in enumerate(((-1, 1), (1, -1))):
+            user = self.user()
+            with self.subTest(identity=identity):
+                self.assertEqual(
+                    self.violation(
+                        lambda u=user, i=identity, n=index: self.checkout(
+                            repository, project, u, f"/h/n{n}", identity=i
+                        )
+                    ),
+                    "ck_repository_checkouts_identity_not_negative",
+                )
+        biggest = 2**64 - 1  # an unsigned 64-bit st_dev / st_ino
+        self.assertIsNone(
+            self.violation(
+                lambda: self.checkout(
+                    repository,
+                    project,
+                    self.user(),
+                    "/h/big",
+                    identity=(biggest, biggest),
+                )
+            )
         )
 
     def test_a_user_has_one_checkout_per_repository_and_a_path_belongs_to_one(self):

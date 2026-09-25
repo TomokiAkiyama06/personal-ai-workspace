@@ -504,6 +504,105 @@ class RemoveDirectoryTest(PathTestCase):
         self.assertTrue(os.path.isfile(path))
 
 
+class InspectCheckoutRootTest(PathTestCase):
+    def registered(self, relative="src/tool"):
+        path = f"{self.home}/{relative}"
+        os.makedirs(path)
+        info = os.lstat(path)
+        return path, (info.st_dev, info.st_ino)
+
+    def inspect(self, path, identity=None, uid=None):
+        return paths.inspect_checkout_root(
+            path, self.account.uid if uid is None else uid, identity
+        )
+
+    def test_the_registered_directory_is_as_registered(self):
+        path, identity = self.registered()
+        state = self.inspect(path, identity)
+        self.assertEqual((state.problem, state.resolved), (None, path))
+        self.assertEqual(state.identity, identity)
+
+    def test_without_an_expected_identity_only_the_kind_of_entry_is_checked(self):
+        path, _ = self.registered()
+        self.assertIsNone(self.inspect(path).problem)
+
+    def test_every_way_a_root_can_stop_being_what_was_registered(self):
+        path, identity = self.registered("src/a")
+        other, _ = self.registered("src/b")
+        cases = {}
+        cases[PathProblem.NOT_FOUND] = (f"{self.home}/nothing", identity)
+        link = f"{self.home}/link"
+        os.symlink(other, link)
+        cases[PathProblem.SYMLINK] = (link, identity)
+        file = f"{self.home}/file"
+        Path(file).write_text("x")
+        cases[PathProblem.NOT_A_DIRECTORY] = (file, identity)
+        cases[PathProblem.CHANGED] = (other, identity)  # a directory, but not that one
+        for problem, (target, expected) in cases.items():
+            with self.subTest(problem=problem):
+                state = self.inspect(target, expected)
+                self.assertIs(state.problem, problem)
+        # Ownership: another uid than the account's.
+        self.assertIs(
+            self.inspect(path, identity, uid=os.geteuid() + 1).problem,
+            PathProblem.NOT_OWNER,
+        )
+
+    def test_a_link_reports_where_it_leads(self):
+        target, _ = self.registered("src/target")
+        link = f"{self.home}/link"
+        os.symlink(target, link)
+        state = self.inspect(link, None)
+        self.assertEqual((state.problem, state.resolved), (PathProblem.SYMLINK, target))
+
+    def test_a_missing_path_leads_nowhere(self):
+        state = self.inspect(f"{self.home}/nothing")
+        self.assertEqual(
+            (state.problem, state.resolved, state.identity),
+            (PathProblem.NOT_FOUND, None, None),
+        )
+
+    def test_a_link_in_the_middle_of_the_path_is_a_link(self):
+        real, _ = self.registered("src/real")
+        os.symlink(f"{self.home}/src", f"{self.home}/alias")
+        self.assertIs(
+            self.inspect(f"{self.home}/alias/real").problem, PathProblem.SYMLINK
+        )
+
+    def test_the_identity_of_a_root_being_registered_is_read_once_it_is_valid(self):
+        path, identity = self.registered()
+        self.assertEqual(paths.read_checkout_identity(path, self.account), identity)
+        link = f"{self.home}/link"
+        os.symlink(path, link)
+        for bad, problem in (
+            (link, PathProblem.SYMLINK),
+            (f"{self.home}/nothing", PathProblem.NOT_FOUND),
+        ):
+            with self.subTest(problem=problem):
+                self.assertRejected(
+                    problem, paths.read_checkout_identity, bad, self.account
+                )
+        other = LinuxAccount(uuid.uuid4(), "mallory", os.geteuid() + 1, self.home)
+        self.assertRejected(
+            PathProblem.NOT_OWNER, paths.read_checkout_identity, path, other
+        )
+
+
+class PlannedPathLengthTest(PathTestCase):
+    def plan(self, name):
+        return paths.plan_checkout_path(self.account, SUBDIR, "p-12345678", name)
+
+    def test_a_path_up_to_the_stored_limit_is_planned(self):
+        prefix = f"{self.home}/{SUBDIR}/p-12345678/"
+        name = "n" * (1024 - len(prefix))
+        self.assertEqual(len(self.plan(name)), 1024)
+
+    def test_one_character_more_is_refused(self):
+        prefix = f"{self.home}/{SUBDIR}/p-12345678/"
+        name = "n" * (1025 - len(prefix))
+        self.assertRejected(PathProblem.TOO_LONG, self.plan, name)
+
+
 class LinuxAccountTest(unittest.TestCase):
     def test_a_valid_account(self):
         account = LinuxAccount(str(uuid.uuid4()), "alice", 1000, "/home/alice")
@@ -568,11 +667,6 @@ class PureHelpersTest(unittest.TestCase):
         name = "a" * 39 + "-" + "b" * 10
         directory = paths.project_directory_name(name, uuid.UUID(int=1))
         self.assertEqual(directory, "a" * 39 + "-00000000")
-
-    def test_ancestor_paths_are_the_proper_ancestors_top_first(self):
-        self.assertEqual(paths.ancestor_paths("/a/b/c"), ["/a", "/a/b"])
-        self.assertEqual(paths.ancestor_paths("/a/b"), ["/a"])
-        self.assertEqual(paths.ancestor_paths("/a"), [])
 
     def test_a_root_template_is_expanded_by_plain_replacement(self):
         account = LinuxAccount(uuid.uuid4(), "alice", 1000, "/home/alice")

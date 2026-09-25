@@ -335,14 +335,27 @@ class PostgresRepositoryTestCase(PostgresProjectTestCase):
         *,
         state: str = "ready",
         created_at: Any = T0,
+        identity: tuple[int, int] | None = None,
     ) -> UUID:
+        """Insert a checkout row. A ``ready`` one records the identity of ``path``.
+
+        The identity is that of the directory when it exists, else a fake one
+        ``(1, 1)`` (for rows whose path is never looked at).
+        """
+        if state == "ready" and identity is None:
+            try:
+                info = os.lstat(path)
+                identity = (info.st_dev, info.st_ino)
+            except OSError:
+                identity = (1, 1)
         checkout_id = uuid.uuid4()
         with self.engine.begin() as connection:
             connection.execute(
                 text(
                     "INSERT INTO repository_checkouts (id, repository_id, project_id,"
-                    " user_id, path, state, created_at, updated_at) VALUES (:id, :r,"
-                    " :p, :u, :path, :state, :now, :now)"
+                    " user_id, path, state, root_device, root_inode, created_at,"
+                    " updated_at) VALUES (:id, :r, :p, :u, :path, :state, :dev, :ino,"
+                    " :now, :now)"
                 ),
                 {
                     "id": checkout_id,
@@ -351,6 +364,8 @@ class PostgresRepositoryTestCase(PostgresProjectTestCase):
                     "u": user_id,
                     "path": path,
                     "state": state,
+                    "dev": None if identity is None else identity[0],
+                    "ino": None if identity is None else identity[1],
                     "now": created_at,
                 },
             )

@@ -98,13 +98,17 @@
 - Backend は GitHub の Token を持たず、読まず、渡さない。Clone は User 自身の環境（`gh auth`、PAW-028）に任せる。今の実行環境は Global の git 設定を読まないため、Private Repository の Clone は PAW-028 が `extra_config`（Credential Helper）を足すまで通らない。
 - 「GitHub にも新規作成」は `GitHubGateway`（継ぎ目）を呼ぶ。既定の実装は拒否する。PAW-028 が、User 自身の GitHub の権限で作成する実装を渡す。作成後に登録が失敗しても、GitHub の Repository は削除しない（削除の権限を Backend に持たせない）。ログに 1 行残す。
 
-### 11. 入れ子の Repository
+### 11. 入れ子の Repository と、Scope を作るときの Root の再確認
 
-- 入れ子は禁止しない。同じ User の Checkout の Path の包含関係から、都度求める（Table は持たない。移動・削除でずれる複製を作らない）。`scope_entries` が、要求した Repository の Entry に続けて、包含される・包含する**他の** Checkout（`ready` のもの、それぞれの Project の ACL つき）を返し、Tool Broker が両方の ACL を効かせる（Decision 0006 の 8(b)）。Working Set に入れる責務は Orchestrator にある。
+- 入れ子は禁止しない。Table は持たない（移動・削除でずれる複製を作らない）。`scope_entries` が、要求した Repository の Entry に続けて、包含される・包含する**他の** Checkout（`ready` のもの、それぞれの Project の ACL つき）を返し、Tool Broker が両方の ACL を効かせる（Decision 0006 の 8(b)）。Working Set に入れる責務は Orchestrator にある。
+- **入れ子は、登録時に保存した Path の文字列ではなく、Root が今指している Directory から求める。** Tool Broker は Root を `realpath` で解決するため、登録後に Checkout A が B への Symbolic Link に置き換えられる、または B が A の Path へ改名されると、文字列だけの比較では A の Scope に B が入らず、A を通る呼び出しが B へ解決されても B の厳しい ACL が効かない（書き込める Repository が、厳しい入れ子の ACL を迂回できる）。そこで Checkout が `ready` になるとき、Directory の識別（`st_dev`、`st_ino`）を DB に記録する（`repository_checkouts.root_device` / `root_inode`。`ready` のときだけ値がある。DB の CHECK 制約）。
+- `scope_entries` は、その User の `ready` な Checkout すべてを毎回検査する: 保存した Path がそれ自身の実 Path（どの成分も Symbolic Link でない）、Directory で、Account の持ち主、記録した識別と一致。**要求した Checkout が登録どおりでなければ `CheckoutChangedError`**（Scope を作らない）。他の Checkout は、保存した Path **または今解決される Path** が、同じ・上・下のどれかなら関連とし、関連する Checkout が変わっていれば `CheckoutChangedError`、変わっていなければ入れ子として含める。関連しない Checkout が変わっていても無視する。User の `ready` な Checkout が 500 を超えると、一部だけの Scope は作らず `TooManyCheckoutsError`。
+- **閉じていないこと（残る限界）。** 確認は、それを読んだ瞬間の事実である。`scope_entries` を作ってから Tool Broker が呼び出しを解決するまでの間に Root が差し替えられると、ここでは見えない（check-then-use の窓）。窓を閉じるには、Broker が呼び出しごとに Root と識別を再確認する必要があり、この Issue では行っていない。`(st_dev, st_ino)` は、同じ Directory の内容の変更（Repository の中身の差し替え）を見ない。Directory の識別は、削除して同じ Inode 番号が再利用された場合に区別できない可能性がある（同じ Directory を削除して別の Directory を作った直後の再利用）。
 
 ### 12. 上限
 
-- 1 つの Project の Repository は 100 まで、1 つの Repository の Remote は 8 まで（Tool Broker の `MAX_REMOTES`）。いずれも暫定値。
+- 1 つの Project の Repository は 100 まで、1 つの Repository の Remote は 8 まで（Tool Broker の `MAX_REMOTES`）、1 つの Scope を確かめる User の `ready` な Checkout は 500 まで。いずれも暫定値。
+- Backend が生成する Checkout の Path（`<home>/workspaces/<project>/<repository>`）は、DB が保存できる 1024 文字までとし、超える Path は挿入の前に `PathRejectedError`（`too_long`）で拒否する（Home の長さは Account が最大 1024 文字を許すため、長い Home では生成した Path が超えうる）。1024 文字は PATH_MAX（4096 Byte）を超えない。
 - 途中で終わった Clone の予約（`pending`）は、Clone の Timeout の 2 倍を過ぎると古いとみなし、同じ User の次の作成が置き換える。**その Process が残した Directory は自動では消さない**（後から中身が変わっているかもしれないため）。次の作成は「既にある」で止まり、持ち主が消してから再実行する。
 
 ### 13. 管理 Markdown を入れない
@@ -134,12 +138,13 @@
 7. 削除は登録だけ（7）。推奨: 承認（要件のとおり）。
 8. Remote のない Repository は他の User が Clone できない（8）。推奨: 承認。
 9. Clone の Host は `github.com` だけを既定にする（9）。推奨: 承認。GitHub Enterprise は設定で足す。
-10. 上限（Repository 100、Timeout）は暫定値（12）。推奨: 暫定値として承認。
+10. 上限（Repository 100、Scope の Checkout 500、Timeout）は暫定値（12）。推奨: 暫定値として承認。
+11. Scope を作るときの Root の再確認と、変わっていたら拒否する方針（11）。推奨: 承認。窓を閉じる、Broker の呼び出しごとの再確認は別の Issue にする。
 
 ## リスク
 
 - Backend が Service 用の 1 つの User で動く配備では、Clone・既存 Repository の検証が動かない（4）。Human が、User を切り替える仕組みを決めるまで、Per-user の Checkout は実運用に使えない。
-- Path の検証は、確認した瞬間の事実で、持ち主は後から Directory を差し替えられる（5）。Backend が Agent に渡す Path は、Tool Broker が呼び出しごとに解決し直すことに依存する。
+- Path の検証は、確認した瞬間の事実で、持ち主は後から Directory を差し替えられる（5、11）。`scope_entries` は Scope を作る瞬間に Root と識別を再確認するが、その後 Broker が呼び出しを解決するまでの窓は残る。Broker が呼び出しごとに Root を確認し直すことに依存する。
 - Private Repository の Clone と GitHub への作成は PAW-028 まで動かない（10）。
 - `users.login_name` と Linux の User 名が一致しない環境では、Account を引けない（3）。
 
@@ -159,4 +164,5 @@
 7. 削除を登録の削除だけにする方針でよいか。
 8. Remote のない Repository を、他の User が Clone できないままにしてよいか。
 9. Clone の Host の既定を `github.com` だけにしてよいか。
-10. 上限（Project あたり 100 Repository、Remote 8、Timeout）を暫定値にしてよいか。
+10. 上限（Project あたり 100 Repository、Remote 8、Scope を確かめる Checkout 500、Timeout）を暫定値にしてよいか。
+11. Scope を作るとき、Root が変わっていたら（入れ子に関連するものも含めて）Scope を作らずに拒否する方針でよいか。Broker 側で呼び出しごとの Root の再確認を求める別の Issue が要るか。

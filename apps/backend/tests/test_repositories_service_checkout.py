@@ -92,6 +92,19 @@ class CreateCheckoutTest(CheckoutTestCase):
             (row["user_id"], row["path"], row["state"]), (self.member, path, "ready")
         )
 
+    async def test_the_identity_of_the_directory_is_recorded_with_the_checkout(self):
+        result = await self.checkout(self.member)
+
+        info = os.lstat(result.path)
+        (row,) = self.checkout_rows(self.repository)
+        self.assertEqual(
+            (int(row["root_device"]), int(row["root_inode"])),
+            (info.st_dev, info.st_ino),
+        )
+        self.assertEqual(
+            (result.root_device, result.root_inode), (info.st_dev, info.st_ino)
+        )
+
     async def test_every_user_has_a_separate_directory_in_their_own_home(self):
         one = await self.checkout(self.manager)
         two = await self.checkout(self.member)

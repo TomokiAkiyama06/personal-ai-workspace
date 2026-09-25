@@ -14,6 +14,7 @@ project (and no rule of the policy lets them act), the project is reported as
 :class:`ProjectUnavailableError`, exactly like a project that does not exist.
 """
 
+import uuid
 from enum import StrEnum
 from typing import ClassVar
 
@@ -59,6 +60,8 @@ class PathProblem(StrEnum):
     UNSUPPORTED_BRANCH = "unsupported_branch"  # a branch name this module refuses
     EXISTS = "exists"  # something is at the path already
     HOME_UNSAFE = "home_unsafe"  # the home directory cannot be used
+    TOO_LONG = "too_long"  # the generated path is longer than a stored path may be
+    CHANGED = "changed"  # not the directory that was registered (or overlapping one)
 
 
 class GitFailure(StrEnum):
@@ -228,6 +231,32 @@ class NoCloneSourceError(RepositoryError):
 
     def __init__(self) -> None:
         super().__init__("The repository has no remote to clone from")
+
+
+class CheckoutChangedError(RepositoryError):
+    """A checkout root is not what was registered, so no scope is derived from it.
+
+    ``problem`` says why (``SYMLINK`` / ``NOT_FOUND`` / ``NOT_A_DIRECTORY`` /
+    ``NOT_OWNER`` for the checkout itself, ``CHANGED`` for another identity or for a
+    changed checkout that overlaps it); ``checkout_id`` is the opaque id of the
+    checkout that changed. No path is ever part of the error.
+    """
+
+    code = "checkout_changed"
+
+    def __init__(self, problem: PathProblem, checkout_id: uuid.UUID | None = None):
+        self.problem = problem
+        self.checkout_id = checkout_id
+        super().__init__(f"Checkout changed: {problem.value}")
+
+
+class TooManyCheckoutsError(RepositoryError):
+    """The user has more checkouts than one scope can be verified against."""
+
+    code = "too_many_checkouts"
+
+    def __init__(self) -> None:
+        super().__init__("Too many checkouts to derive a scope")
 
 
 class PathRejectedError(RepositoryError):

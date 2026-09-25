@@ -89,7 +89,8 @@ class Checkout:
 
     ``path`` is absolute and fully resolved (no symbolic link in it). A user has
     at most one checkout per repository, and a directory belongs to at most one
-    checkout.
+    checkout. ``root_device`` / ``root_inode`` identify the directory that was
+    registered (set exactly while the checkout is ``ready``).
     """
 
     id: uuid.UUID
@@ -100,10 +101,22 @@ class Checkout:
     state: CheckoutState
     created_at: datetime
     updated_at: datetime
+    # ``st_dev`` / ``st_ino`` of the directory when the checkout became ready.
+    root_device: int | None = None
+    root_inode: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.state, CheckoutState):
             raise ValueError("state must be a CheckoutState")
+        identity = (self.root_device, self.root_inode)
+        if any(
+            value is not None
+            and (isinstance(value, bool) or not isinstance(value, int) or value < 0)
+            for value in identity
+        ):
+            raise ValueError("the directory identity must be non-negative integers")
+        if (self.state is CheckoutState.READY) != all(v is not None for v in identity):
+            raise ValueError("a ready checkout, and only it, has a directory identity")
         _aware("created_at", self.created_at)
         _aware("updated_at", self.updated_at)
 
