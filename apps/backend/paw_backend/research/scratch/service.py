@@ -11,8 +11,10 @@ exposed over HTTP by this issue. The intended mapping to the capabilities of
 ``paw_backend.authz`` (a proposal for that issue, not enforced here):
 
 * ``get``, ``list_items``: ``project.read`` on ``project_id``;
-* ``add``, ``acquire_use``, ``release_use``, ``pin``, ``unpin``:
-  ``project.task.run`` on ``project_id``;
+* ``add``, ``acquire_use``, ``release_use``, ``pin``, ``unpin``, ``save``,
+  ``unsave``: ``project.task.run`` on ``project_id`` (for ``save`` / ``unsave``
+  this is provisional: who may set or clear a user's explicit save is still an
+  open question of decision 0013);
 * ``request_promotion``: ``project.memory.use``; ``resolve_promotion``:
   ``project.memory.manage`` (not delegable to an agent: research is never saved
   to Long-term Memory on an agent's own say-so);
@@ -26,6 +28,7 @@ Visibility, exemptions and TTL
 An item is *exempt* from deletion at instant ``now`` when any of these holds:
 
 * it is pinned (``pinned``);
+* it is saved (``saved``: the user's explicit save, independent of the pin);
 * its promotion is pending (``promotion_state == 'pending'``);
 * it is in use: a lease with ``expires_at > now`` exists.
 
@@ -33,10 +36,13 @@ An item is *visible* at ``now`` when ``now < expires_at`` or it is exempt.
 Everything that is not visible is gone for every method of the store
 ("not found") even if ``purge_expired`` has not removed the row yet, so
 behaviour never depends on when the janitor happens to run. ``expires_at`` is
-never changed: exemptions defer the deletion, they do not extend the TTL. When
-the last exemption ends (unpin, release / lease end, promotion resolved) an
-expired item is not visible any more and the next ``purge_expired`` deletes it;
-no extra state or queue is needed for that.
+never changed: exemptions defer the deletion, they do not extend the TTL.
+``pinned`` and ``saved`` are two independent markers (REQUIREMENTS.md lists
+"Pin済み" and "Userが明示保存" separately; decision 0013): ``pin`` / ``unpin`` only
+touch ``pinned``, ``save`` / ``unsave`` only ``saved``, and the item stays while
+either one is set. When the last exemption ends (unpin, unsave, release / lease
+end, promotion resolved) an expired item is not visible any more and the next
+``purge_expired`` deletes it; no extra state or queue is needed for that.
 
 Time
 ----
@@ -52,10 +58,14 @@ The database runs at the default READ COMMITTED level. Rules that make the
 purge / lease race safe:
 
 1. Every operation that changes an item or its leases (``pin``, ``unpin``,
-   ``acquire_use``, ``release_use``, ``request_promotion``,
+   ``save``, ``unsave``, ``acquire_use``, ``release_use``, ``request_promotion``,
    ``resolve_promotion``) starts a transaction and first locks the item row:
    ``SELECT ... FOR UPDATE`` (it waits). Only then does it evaluate visibility
    and change anything. The item row is always locked before its lease rows.
+   ``pin`` / ``unpin`` / ``save`` / ``unsave`` then run one ``UPDATE`` that sets
+   only their own column, and the snapshot they return is read after the lock
+   was granted: a concurrent change of the other marker is neither lost nor
+   overwritten.
 2. ``add`` locks the task row ``FOR KEY SHARE`` while it checks that the task
    exists and belongs to ``project_id`` (a concurrent delete of the task waits
    until the item is inserted). There is no foreign key (decision 0013): this
@@ -177,6 +187,7 @@ def _exempt(now: datetime) -> ColumnElement[bool]:
     """Deletion of the item is deferred at ``now`` (see the module docstring)."""
     return or_(
         _ITEMS.c.pinned,
+        _ITEMS.c.saved,
         _ITEMS.c.promotion_state == PromotionState.PENDING.value,
         _has_active_lease(now),
     )
@@ -215,6 +226,7 @@ def _snapshot(row: Mapping[str, Any], now: datetime, *, in_use: bool) -> Scratch
         expires_at=row["expires_at"],
         expired=now >= row["expires_at"],
         pinned=row["pinned"],
+        saved=row["saved"],
         in_use=in_use,
         promotion_state=PromotionState(row["promotion_state"]),
         promotion_requested_at=row["promotion_requested_at"],
@@ -325,19 +337,27 @@ class ScratchStore:
                 return item
         raise ScratchItemNotFoundError()
 
-    async def _set_pinned(
-        self, project_id: object, item_id: object, pinned: bool
+    async def _set_marker(
+        self, project_id: object, item_id: object, marker: str, value: bool
     ) -> ScratchItem:
+        """Set one deferral marker (``pinned`` or ``saved``) and nothing else.
+
+        The two markers are independent: the ``UPDATE`` names only ``marker``,
+        so the other one keeps whatever the row holds (the row is locked, and
+        the snapshot was read after the lock was granted).
+        """
         project = validate_uuid("project_id", project_id)
         item_uuid = validate_uuid("item_id", item_id)
         now = self._now()
         async with self._transaction() as session:
             item = await self._lock_visible(session, project, item_uuid, now)
-            if item.pinned != pinned:
+            if getattr(item, marker) != value:
                 await session.execute(
-                    update(_ITEMS).where(_ITEMS.c.id == item_uuid).values(pinned=pinned)
+                    update(_ITEMS)
+                    .where(_ITEMS.c.id == item_uuid)
+                    .values({marker: value})
                 )
-            return replace(item, pinned=pinned)
+            return replace(item, **{marker: value})
 
     # -- create and read ----------------------------------------------------
 
@@ -483,28 +503,55 @@ class ScratchStore:
             rows = (await session.execute(statement)).mappings().all()
         return [_snapshot(row, now, in_use=row["in_use"]) for row in rows]
 
-    # -- pin ------------------------------------------------------------------
+    # -- pin and save -----------------------------------------------------------
 
     async def pin(self, project_id: UUID, item_id: UUID) -> ScratchItem:
-        """Keep the item beyond its TTL until it is unpinned.
+        """Keep the item beyond its TTL while it is pinned.
 
-        Locks the item row (concurrency rule 1). ``ScratchItemNotFoundError``
-        when it is missing, belongs to another project, or is not visible (a
-        pin cannot bring an expired, unexempt item back). Idempotent: pinning a
-        pinned item changes nothing and returns its snapshot. Returns the
-        snapshot after the change (``pinned`` True).
+        Changes only ``pinned``: a user's explicit save (:meth:`save`) is
+        independent. Locks the item row (concurrency rule 1).
+        ``ScratchItemNotFoundError`` when it is missing, belongs to another
+        project, or is not visible (a pin cannot bring an expired, unexempt
+        item back). Idempotent: pinning a pinned item changes nothing and
+        returns its snapshot. Returns the snapshot after the change (``pinned``
+        True).
         """
-        return await self._set_pinned(project_id, item_id, True)
+        return await self._set_marker(project_id, item_id, "pinned", True)
 
     async def unpin(self, project_id: UUID, item_id: UUID) -> ScratchItem:
-        """Remove the pin. Idempotent; same lookup rules as :meth:`pin`.
+        """Remove the pin only. Idempotent; same lookup rules as :meth:`pin`.
 
-        Returns the snapshot after the change. If the pin was the last
-        exemption of an expired item, that snapshot has ``expired`` True and
-        the item is gone for later calls (``get`` raises
-        ``ScratchItemNotFoundError``) and is deleted by the next purge.
+        A user's explicit save (:meth:`save`) is not touched: an item that is
+        pinned and saved stays after ``unpin``. Returns the snapshot after the
+        change. If the pin was the last exemption of an expired item, that
+        snapshot has ``expired`` True and the item is gone for later calls
+        (``get`` raises ``ScratchItemNotFoundError``) and is deleted by the next
+        purge.
         """
-        return await self._set_pinned(project_id, item_id, False)
+        return await self._set_marker(project_id, item_id, "pinned", False)
+
+    async def save(self, project_id: UUID, item_id: UUID) -> ScratchItem:
+        """Record a user's explicit save: keep the item beyond its TTL.
+
+        REQUIREMENTS.md names "Userが明示保存" as a reason to defer deletion next
+        to "Pin済み"; the two are separate markers (decision 0013). ``save``
+        changes only ``saved`` and is cleared only by :meth:`unsave` (never by
+        :meth:`unpin`). Same lookup rules as :meth:`pin`: not found when the item
+        is missing, in another project or not visible (a save cannot bring an
+        expired, unexempt item back). Idempotent. Returns the snapshot after the
+        change (``saved`` True). It does not extend ``expires_at`` and does not
+        promote the item to Long-term Memory.
+        """
+        return await self._set_marker(project_id, item_id, "saved", True)
+
+    async def unsave(self, project_id: UUID, item_id: UUID) -> ScratchItem:
+        """Remove the explicit save only. Idempotent; same rules as :meth:`save`.
+
+        A pin (:meth:`pin`) is not touched. Returns the snapshot after the
+        change; if the save was the last exemption of an expired item the item is
+        gone for later calls and is deleted by the next purge.
+        """
+        return await self._set_marker(project_id, item_id, "saved", False)
 
     # -- use (leases) ------------------------------------------------------------
 

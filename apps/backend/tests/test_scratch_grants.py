@@ -32,6 +32,7 @@ from . import (
     test_scratch_concurrency,
     test_scratch_janitor_postgres,
     test_scratch_purge,
+    test_scratch_saved,
     test_scratch_store_items,
     test_scratch_store_use,
 )
@@ -49,7 +50,7 @@ ROLE_PASSWORD = "dummy-test-password-scratch"
 EXPECTED = {
     "research_scratch_items": (
         {"SELECT", "INSERT", "DELETE"},
-        {"pinned", "promotion_state", "promotion_requested_at"},
+        {"pinned", "saved", "promotion_state", "promotion_requested_at"},
     ),
     "research_scratch_leases": (
         {"SELECT", "INSERT", "DELETE"},
@@ -147,6 +148,18 @@ class ListItemsAsAppRole(AsAppRole, test_scratch_store_items.ListItemsTest):
 
 
 class PinAsAppRole(AsAppRole, test_scratch_store_items.PinTest):
+    pass
+
+
+class SaveAsAppRole(AsAppRole, test_scratch_saved.SaveTest):
+    pass
+
+
+class PinAndSaveAsAppRole(AsAppRole, test_scratch_saved.PinAndSaveAreIndependentTest):
+    pass
+
+
+class ConcurrentMarkersAsAppRole(AsAppRole, test_scratch_saved.ConcurrentMarkersTest):
     pass
 
 
@@ -337,6 +350,21 @@ class AppRolePrivilegesTest(PostgresScratchTestCase):
                 await self.refused(self.app, sql)
 
         self.assertEqual(self.snapshot(), before)
+
+    async def test_the_app_role_can_save_and_unsave(self):
+        item = self.seed_item()
+        for value in ("true", "false"):
+            async with self.app.session() as session:
+                await session.execute(
+                    text(f"UPDATE research_scratch_items SET saved = {value}")
+                )
+                await session.commit()
+            self.assertEqual(
+                self.owner_scalar(
+                    "SELECT saved FROM research_scratch_items WHERE id = :i", i=item
+                ),
+                value == "true",
+            )
 
     async def test_the_app_role_can_pin_and_delete(self):
         item = self.seed_item()

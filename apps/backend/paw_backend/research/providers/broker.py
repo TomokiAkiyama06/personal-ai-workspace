@@ -23,6 +23,7 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
+from types import CoroutineType
 from typing import NamedTuple
 
 from paw_backend.research.providers.contract import (
@@ -160,15 +161,19 @@ def log_type_name(error: BaseException) -> str:
 
 
 def _log_failure(
-    entry: RegisteredProvider, code: ResearchErrorCode, error: BaseException
+    entry: RegisteredProvider, code: ResearchErrorCode, error: BaseException | None
 ) -> None:
-    """One WARNING per failed provider: identity, code and a fixed exception type."""
+    """One WARNING per failed provider: identity, code and a fixed exception type.
+
+    ``error`` is ``None`` when the adapter raised nothing but asked for the
+    cancellation of the task (see ``_CancelGuard``): the type is ``ADAPTER_ERROR``.
+    """
     logger.warning(
         "research provider failed: provider=%s kind=%s code=%s exception_type=%s",
         entry.name,
         entry.kind.value,
         code.value,
-        log_type_name(error),
+        ADAPTER_ERROR if error is None else log_type_name(error),
     )
 
 
@@ -177,6 +182,77 @@ def _failed(entry: RegisteredProvider, error: BaseException) -> _Outcome:
     code = classify_failure(error)
     _log_failure(entry, code, error)
     return _Outcome(code=code)
+
+
+class _CancelGuard:
+    """Retract the cancellation requests that synchronous adapter code makes.
+
+    ``with _CancelGuard() as guard:`` around adapter code that runs without an
+    ``await``. Such code can call ``asyncio.current_task().cancel()`` and return
+    normally: nothing is raised, but the request stays on the task and the next
+    ``await`` (or the end of the task) delivers it, cancelling ``gather()`` and
+    discarding the answers of the healthy providers. On exit the guard compares
+    ``Task.cancelling()`` with its value on entry and calls ``Task.uncancel()``
+    for the increase, and only for that: a request that was already there (a
+    caller's own ``cancel()``) stays and is delivered as before. ``retracted`` is
+    the number of requests taken back; a caller treats a non-zero value as a
+    failure of the adapter. It works on the task that runs the guard, and does
+    nothing outside a task (``asyncio.current_task()`` is ``None``).
+
+    Limit: ``Task.uncancel()`` clears the "cancel at the next await" flag only when
+    the count reaches 0, so a task that had a request counted but not pending
+    (its ``CancelledError`` was swallowed, ``uncancel()`` never called) keeps the
+    flag that the adapter set. An adapter that itself calls ``uncancel()`` on the
+    task, lowering the count, is not detected (Decision 0012).
+    """
+
+    __slots__ = ("_before", "_task", "retracted")
+
+    def __init__(self) -> None:
+        self._task: asyncio.Task | None = None
+        self._before = 0
+        self.retracted = 0
+
+    def __enter__(self) -> "_CancelGuard":
+        try:
+            self._task = asyncio.current_task()
+        except RuntimeError:  # no running loop
+            self._task = None
+        if self._task is not None:
+            self._before = self._task.cancelling()
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        if self._task is None:
+            return
+        for _ in range(max(self._task.cancelling() - self._before, 0)):
+            self._task.uncancel()
+            self.retracted += 1
+
+
+def _validated[T](
+    entry: RegisteredProvider, produce: Callable[[], T]
+) -> tuple[T | None, ResearchErrorCode | None]:
+    """Run ``produce`` (validation of a provider's answer) as one guarded window.
+
+    Returns ``(result, None)``, or ``(None, INVALID_RESPONSE)`` (and the one
+    WARNING) if ``produce`` raises ``InvalidProviderResponseError`` or asked for the
+    cancellation of the task in the meantime (a ``tzinfo.utcoffset`` that calls
+    ``asyncio.current_task().cancel()`` and returns an offset, for example). The
+    request is retracted and the answer discarded: an adapter that cancels the
+    broker is not a valid one (Decision 0012). Any other exception propagates.
+    """
+    failure: InvalidProviderResponseError | None = None
+    result: T | None = None
+    with _CancelGuard() as guard:
+        try:
+            result = produce()
+        except InvalidProviderResponseError as error:
+            failure = error
+    if failure is None and not guard.retracted:
+        return result, None
+    _log_failure(entry, ResearchErrorCode.INVALID_RESPONSE, failure)
+    return None, ResearchErrorCode.INVALID_RESPONSE
 
 
 async def _call_provider(
@@ -196,17 +272,31 @@ async def _call_provider(
     awaited. A cancellation of this task is delivered at an ``await``, never
     there, so whatever ``call()`` raises, ``BaseException`` included (a property
     that raises ``CancelledError``, say), is the adapter's own failure and is
-    classified like any other; it must not cancel ``gather()``. Only the
-    synchronous call is guarded this way: the ``await`` below still lets a real
+    classified like any other; it must not cancel ``gather()``. Nor may it ask
+    for the cancellation: a ``call()`` that runs ``asyncio.current_task().cancel()``
+    and returns normally would have the ``await`` below deliver the request, so
+    the request is retracted (``_CancelGuard``), the awaitable is dropped without
+    being awaited and the provider is an ``INTERNAL_ERROR``. Only the synchronous
+    call is guarded this way: the ``await`` below still lets a real
     ``CancelledError`` (a cancelled ``gather()``, or the timeout) through
     (Decision 0012).
     """
     try:
         async with asyncio.timeout_at(deadline):
-            try:
-                pending = call()
-            except BaseException as error:  # adapter code, synchronous: see above
-                return _failed(entry, error)
+            failure: BaseException | None = None
+            pending: Awaitable[object] | None = None
+            with _CancelGuard() as guard:
+                try:
+                    pending = call()
+                except BaseException as error:  # adapter code, synchronous
+                    failure = error
+            if failure is not None:
+                return _failed(entry, failure)
+            if guard.retracted:
+                if type(pending) is CoroutineType:  # never started: no warning
+                    pending.close()
+                _log_failure(entry, ResearchErrorCode.INTERNAL_ERROR, None)
+                return _Outcome(code=ResearchErrorCode.INTERNAL_ERROR)
             return _Outcome(response=await pending)
     except Exception as error:
         return _failed(entry, error)
@@ -293,7 +383,10 @@ class ResearchBroker:
            synchronous part of the call (reading ``provider.search`` and calling
            it): no cancellation can be delivered there, so a ``BaseException``
            from it is the adapter's own failure (``INTERNAL_ERROR``, see
-           ``_call_provider``).
+           ``_call_provider``). So is a request to cancel the task (a
+           ``__getattribute__`` that runs ``asyncio.current_task().cancel()`` and
+           returns the method): it is retracted with ``Task.uncancel()``, the
+           awaitable is not awaited, and the other providers keep their answers.
         4. ``retrieved_at = clock()`` is read exactly once per ``gather`` call,
            AFTER all providers have finished or timed out, and shared by all
            items.
@@ -309,7 +402,10 @@ class ResearchBroker:
            hooks (``__len__``, ``__iter__``, ...) can run. The one hook that does
            run is a ``published_at``'s ``tzinfo.utcoffset``; whatever it raises,
            ``asyncio.CancelledError`` included, is an invalid response too
-           (see ``published_utc``).
+           (see ``published_utc``), and so is a call that asks for the
+           cancellation of the task (``asyncio.current_task().cancel()``) and
+           returns an offset: the request is retracted (``_validated``), the
+           provider contributes no item.
         6. ``merge_items`` over the successful providers' items (in registry
            order) with ``max_results=request.max_results`` gives ``items`` and
            ``truncated``.
@@ -347,19 +443,18 @@ class ResearchBroker:
         for entry, outcome in zip(entries, outcomes, strict=True):
             code = outcome.code
             if code is None:
-                try:
-                    batches.append(
-                        normalize_hits(
-                            provider_id=entry.name,
-                            kind=entry.kind,
-                            hits=outcome.response,
-                            limit=request.max_results,
-                            retrieved_at=retrieved_at,
-                        )
-                    )
-                except InvalidProviderResponseError as error:
-                    code = ResearchErrorCode.INVALID_RESPONSE
-                    _log_failure(entry, code, error)
+                batch, code = _validated(
+                    entry,
+                    lambda outcome=outcome, entry=entry: normalize_hits(
+                        provider_id=entry.name,
+                        kind=entry.kind,
+                        hits=outcome.response,
+                        limit=request.max_results,
+                        retrieved_at=retrieved_at,
+                    ),
+                )
+                if batch is not None:
+                    batches.append(batch)
             if code is not None:
                 errors.append(ResearchError(entry.name, entry.kind, code))
         items, truncated = merge_items(batches, max_results=request.max_results)
@@ -398,8 +493,12 @@ class ResearchBroker:
         ``ProviderDocument`` whose live fields are invalid (unset slots, wrong
         types, text over ``MAX_DOCUMENT_CHARS``, a ``published_at`` that is naive
         or that UTC cannot express, or whose ``tzinfo`` raises anything at all,
-        ``CancelledError`` included): ``revalidate_document`` reads and validates
-        every field again.
+        ``CancelledError`` included, or asks for the cancellation of the task and
+        returns an offset: the request is retracted, see ``_CancelGuard``):
+        ``revalidate_document`` reads and validates every field again.
+        A ``provider.fetch`` that asks for the cancellation of the task while it is
+        read and called, and then returns normally, is an ``INTERNAL_ERROR`` and
+        is not awaited (see ``_call_provider``).
         On success the result has one item, ``providers_queried=1``, no errors,
         ``truncated=False``:
         ``ResearchItem(source=SourceMetadata(provider_kind=source.provider_kind,
@@ -432,14 +531,13 @@ class ResearchBroker:
             started + min(entry.timeout_seconds, time_budget_seconds),
         )
         code = outcome.code
+        document = None
         if code is None:
             # Not just ``isinstance``: an object built around the constructor
             # (unset slots, wrong types, over-long text) is invalid, not a crash.
-            try:
-                document = revalidate_document(outcome.response)
-            except InvalidProviderResponseError as error:
-                code = ResearchErrorCode.INVALID_RESPONSE
-                _log_failure(entry, code, error)
+            document, code = _validated(
+                entry, lambda: revalidate_document(outcome.response)
+            )
         if code is not None:
             return self._failed_fetch(entry.name, entry.kind, code)
 

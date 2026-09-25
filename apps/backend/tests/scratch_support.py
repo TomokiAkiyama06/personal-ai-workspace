@@ -321,6 +321,7 @@ class PostgresScratchTestCase(unittest.IsolatedAsyncioTestCase):
             expires_at=row["expires_at"],
             expired=now >= row["expires_at"],
             pinned=row["pinned"],
+            saved=row["saved"],
             in_use=in_use,
             promotion_state=PromotionState(row["promotion_state"]),
             promotion_requested_at=row["promotion_requested_at"],

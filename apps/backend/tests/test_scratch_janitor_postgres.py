@@ -134,6 +134,19 @@ class TickTest(PostgresScratchTestCase):
         self.assertEqual((await janitor.tick()).purged, 1)
         self.assertFalse(self.exists(pinned))
 
+    async def test_a_saved_row_survives_the_ticks_until_it_is_unsaved(self):
+        saved = self.seed_item(expires_at=T0 - HOUR, pinned=True, saved=True)
+        janitor = self.new_janitor()
+
+        self.assertEqual((await janitor.tick()).purged, 0)
+        self.set_item(saved, pinned=False)
+        self.assertEqual((await janitor.tick()).purged, 0)
+        self.assertTrue(self.exists(saved))
+
+        self.set_item(saved, saved=False)
+        self.assertEqual((await janitor.tick()).purged, 1)
+        self.assertFalse(self.exists(saved))
+
     async def test_a_lease_that_ends_lets_the_row_go(self):
         item_id = self.seed_item(expires_at=T0 - HOUR)
         self.seed_lease(item_id, T0 + 5 * MINUTE)
