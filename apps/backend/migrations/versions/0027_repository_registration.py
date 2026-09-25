@@ -18,8 +18,8 @@ The child tables cascade from ``repositories``; a repository row is deleted only
 by ``RepositoryService`` (remove / purge). Files on disk and GitHub repositories
 are never touched by a delete.
 
-**Depends on revisions 0021 (``users``) and 0026 (``projects``).** The
-orchestrator re-chains at integration and must keep both before 0027.
+**Depends on revisions 0021 (``users``) and 0026 (``projects``).** Both are in
+this revision's ancestry (0027 follows 0030).
 
 The foreign keys to ``projects`` and ``users`` are hand-written statements,
 spelled ``FOREIGN KEY (project_id)`` with a space: the existing offline test
@@ -37,7 +37,7 @@ when the two drift apart. Constraint names come from the naming convention of
 ``paw_backend.db.Base.metadata``.
 
 Revision ID: 0027
-Revises: 0026
+Revises: 0030
 Create Date: 2026-09-25
 """
 
@@ -49,7 +49,7 @@ from alembic import op
 from paw_backend.db_roles import grant_app_privileges
 
 revision: str = "0027"
-down_revision: str | Sequence[str] | None = "0026"
+down_revision: str | Sequence[str] | None = "0030"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

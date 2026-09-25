@@ -5,8 +5,11 @@ Decision 0008 (Approved 2026-09-25). The service performs authorization through
 ``paw_backend.authz.Authorizer``; there is no HTTP endpoint yet.
 ``ProjectTaskStopper`` carries out the "stop the project's tasks" request that
 ``ProjectService.begin_deletion`` records (Decision 0008, section 8); the
-orchestrator (PAW-034) calls it. ``ProjectService.list_all_projects`` (Issue #84)
-lists every project for an Owner / Admin (``admin.projects.manage``).
+orchestrator (PAW-034) calls it. ``ProjectStateGate`` is the Project state gate that
+``TaskService`` and ``TaskQueue`` are built with (Issue #83): it locks the project
+row ``FOR SHARE`` and refuses new work unless the project is Active.
+``ProjectService.list_all_projects`` (Issue #84) lists every project for an Owner /
+Admin (``admin.projects.manage``).
 """
 
 from paw_backend.projects.errors import (
@@ -44,6 +47,7 @@ from paw_backend.projects.records import (
     TransitionPlan,
 )
 from paw_backend.projects.service import ProjectService
+from paw_backend.projects.task_gate import ProjectStateGate
 from paw_backend.projects.task_stop import ProjectTaskStopper, TaskStopResult
 
 __all__ = [
@@ -75,6 +79,7 @@ __all__ = [
     "ProjectPermissionDeniedError",
     "ProjectService",
     "ProjectStateError",
+    "ProjectStateGate",
     "ProjectStatus",
     "ProjectTaskStopper",
     "PurgeResult",

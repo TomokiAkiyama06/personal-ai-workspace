@@ -239,7 +239,7 @@ class ModelsMetadataTest(unittest.TestCase):
         self.assertEqual(migration.BRANCH_PATTERN, BRANCH_SQL_PATTERN)
         self.assertEqual(migration.REMOTE_PATTERN, REMOTE_SQL_PATTERN)
         self.assertEqual(
-            (migration.revision, migration.down_revision), ("0027", "0026")
+            (migration.revision, migration.down_revision), ("0027", "0030")
         )
 
 
