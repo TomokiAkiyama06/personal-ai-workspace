@@ -355,3 +355,69 @@ GPU telemetryが必要な場合は `NvidiaSmiGpuSampler` を注入します。�
 ```bash
 .venv/bin/python -m benchmarks.validate_result benchmarks/tests/fixtures/result-schema/valid/complete.json
 ```
+
+## Memory Worker benchmark
+
+`benchmarks.memory_worker_runner`はGold付きのcaseをMemory Workerへ渡し、出力を
+[`memory-worker-output-v1.schema.json`](schemas/memory-worker-output-v1.schema.json)で検証して比較します。
+算出する指標は、抽出Recall、不要Memory率、Scope / Confirmed・Inferred / Supersedesの正解率、
+JSON Schema遵守率、latency（mean / p50 / p95、nearest-rank）です。
+`extraction_recall`はkey単位の一致で、抽出した事実の正しさは見ません。
+`scope`は要件の可視範囲class（`user` / `project` / `repo` / `shared`。`REQUIREMENTS.md`のScope）だけを受け付けます。
+Worker出力はschemaの`enum`でschema不適合になり、Goldはcase loaderでcase fileの不備（終了code 1）になります。
+このため`schedule`や`user_preferences`のような話題ラベルは、Goldとの一致でscope_accuracyを得られません。
+`session`と、Inferred Preferenceの例にある`project_group`は、Memory抽出Workerの出力に含めるかが未決定のため受け付けません（追加はschemaの`enum`と`MEMORY_SCOPES`の同時変更です）。
+Gold recordは`content`（抽出すべき事実）を必須とします。`content`がない（省略・`null`・空文字列・空白だけ）Goldは、case fileの不備（終了code 1、`Invalid gold record at index N in case 'ID': missing 'content'`。値は表示しません）です。
+`content`がないと、その記録はkeyだけでしか採点できず、Workerが事実を出力しない、または作り話を出力しても`exact_recall`が1.0になり、事実を評価していないのに満点に見えるためです。
+`exact_recall`は、keyと内容の両方が一致したGold memoryの割合（Goldの全件が分母）です。
+`content_accuracy`は、key一致したもののうち内容が一致した割合です（NFKC・大文字小文字・空白を正規化して比較）。
+Worker出力の`content`はschema上は任意ですが、省略した記録は内容が一致しない扱いで、`exact_recall`と`content_accuracy`では不正解です（schema遵守率には影響しません）。
+`load_cases`を通さず`MemoryWorkerCase`を直接組み立てて`content`のないGoldを渡した場合は、`exact_recall`を`null`（算出不能）にします。keyだけの一致を完全一致として報告しないためです。
+このときcaseの`comparison.content_unlabelled`に、内容を確かめられないGoldの件数が入ります。
+`conflicts_with`（衝突するMemoryのkey）は`conflict_accuracy`で採点し、Goldが`conflicts_with`を持つkey一致recordだけを対象にします。
+Goldの空配列（`[]`）は「衝突なし」というlabelで、Workerが関係を出力すれば不正解、出力しなければ正解として採点します。
+`conflicts_with`がないGoldは未labelとして採点せず、Workerが関係を出力しても評価対象は変わりません（候補の出力に依存して対象recordが増減しません）。
+Worker出力で`conflicts_with`を省略した場合と`[]`は、どちらも関係なしの宣言として扱います。
+Goldに`conflicts_with`がなければ、`conflict_accuracy`は`null`（未labelの記録は採点しない）になります。
+case fileの未知のfield（`supercedes`や`conflict_with`のような綴り誤り）は、黙って無視せず不備（終了code 1）として拒否します。
+case fileとWorker出力のJSONは、既存のvalidatorと同じ厳格なdecoder（`benchmarks.json_input.decode_json`）で読み、同じ名前のmemberの重複や`NaN`などの非標準の定数は、後の値で上書きせずに拒否します（Worker出力はschema不適合として数えます）。
+`key`、`supersedes`（nullでないとき）、`conflicts_with`の各key、`content`は、空白だけの文字列を受け付けません（空文字列も同様）。空白だけのkeyやsupersedesがGoldとWorker出力の両方に現れると、存在しえない識別子で一致して抽出・分類・置換関係の得点になるためです。
+Worker出力はschemaの`pattern`（`\S`）でschema不適合になり、Goldはcase loaderで、他の不備と同じ形式（`Invalid gold record at index N in case 'ID': key must be a non-empty string`。値は表示しません）のcase file不備（終了code 1）になります。
+`supersedes`は置換する側のMemoryが置き換える対象のkeyで、「対象なし」は`null`（Goldでは省略も同じ）です。空文字列は対象ではなく、`null`とは読み替えません。
+Workerが`null`の代わりに`""`を出力した場合は、補正せずschema不適合として扱います（他のschema違反と同じく、そのcaseの全予測を捨て、`schema_adherence_rate`にも不適合として数えます）。Goldの`"supersedes": ""`は`null`と書き直すよう、case file不備（終了code 1）になります。
+ここでの空白は`str.strip()`が取り除く文字（Unicodeの空白。半角space、tab、改行、no-break space（U+00A0）、全角space（U+3000）など）で、Pythonの`re`が`\s`として扱う集合と同じです（testで全code pointについて一致を確認しています）。
+ゼロ幅文字（U+200B、U+200C、U+200D、U+2060、U+FEFFなど）は空白ではなく書式文字なので、それだけのkeyやsupersedesも拒否しません。keyとsupersedesは完全一致で比較し、trimもしないため、Goldに同じ文字列がなければ、keyは不要Memoryとして数えるだけ、supersedesは不正解になるだけで、得点にはなりません。Gold作成時に目視で気付けるよう、Datasetのreviewで確認してください。
+`unneeded`はGoldに一致しない予測と、同じkeyの2回目以降の予測の合計で、予測件数を超えません。
+Workerが例外を出したcaseは、予測なしの失敗caseとして記録して続行します（記録するのは例外の型だけです）。
+`extract`の各呼び出しは、runnerが強制するdeadline（`--timeout-seconds`、有限の正の数）の中で実行します。
+deadlineの値は運用者が決めるもので、Harnessは既定値を持ちません（要件は全候補に共通のTimeoutを求めますが、値は定めていません）。
+`--timeout-seconds`（`run_benchmark`では`timeout_seconds`引数）は必須で、省略すると実行前にエラー（CLIは`the following arguments are required: --timeout-seconds`で終了code 2、`run_benchmark`は`TypeError`）になります。
+短すぎる既定値が、遅いが正しい候補を失敗caseとして記録してモデル選定を左右することを避けるためです。
+候補ごとに値を変えず、全候補へ同じ値を指定してください（[公平比較の規則](../docs/BENCHMARK_EVALUATOR.md)のTimeout）。
+deadlineまでに戻らない呼び出しは、予測なしの失敗caseとして`error_type`を`deadline_exceeded`（Candidate adapterと同じ公開code）にします。
+そのcaseのlatencyはdeadlineまで待った時間で、latencyの統計へも含まれます（後述の、呼び出しが終わるのを待つ時間は含みません）。設定したdeadlineはReportの`timeout_seconds`に記録します。
+`extract`は呼び出しごとのdaemon threadで実行します（main threadではありません。thread localな状態に依存するWorkerは注意してください）。
+Pythonはthreadを強制停止できないため、deadlineを過ぎた呼び出しは中止されず、Workerが自然に戻るまで動き続けます（出力は捨てます）。
+同じWorkerで`extract`が2つ重なると、共有状態の破壊、VRAMなどの資源の競合、後続caseのlatency / VRAM測定の歪み、遅れて終わる呼び出しの誤帰属が起きます。
+このためRunnerは重なりを許さず、deadlineを過ぎた呼び出しについて、次のcase（最後のcaseならReportの作成）へ進む前に、さらに`timeout_seconds`だけその呼び出しが終わるのを待ちます。この間、Workerへ次の呼び出しはしません。
+その間に終わらなければRunを止めます（`run_benchmark`は`WorkerStuckError`、CLIは`extract() had not ended N seconds after its deadline in case 'ID'; ...`をstderrへ出して終了code 2）。
+このときReportは作りません。部分的なReportはmetricsの母数を変えてしまうためです。Workerを直すか、deadlineを見直して最初からやり直してください。止まった呼び出しのthreadはdaemonなので、processの終了は妨げません。
+したがって止まったWorkerは、1 caseあたり最悪でも`2 × timeout`でRunを終わらせ（hangしません）、Reportを返したRunでは`extract`が同時に2つ動いたことがありません。
+限界: 呼び出しそのものを中止する仕組み（呼び出しごとのprocess隔離）は入れていません。Workerはfactoryが作る、modelを保持した呼び出し元processのobjectで、呼び出しごとにprocessを分けるとmodelの再読み込みがlatencyを歪め、常駐processとのIPCはWorkerの形（`extract(input_text) -> str`）を変えてしまうためです。
+Worker自身が別processへ隔離し、deadline超過時にそのprocessを止めて`extract`を戻す実装であれば、上の待ち時間の中で終わり、Runは続行します。
+factoryが`extract(input_text)`を持たないobjectを返した場合は、全caseが失敗した報告にせず、実行前にエラー（終了code 2）にします。
+
+```bash
+# TIMEOUT_SECONDSは運用者が決めた値です（全候補で同じ値を使います）。
+python -m benchmarks.run_memory_worker_benchmark \
+  --cases benchmarks/tests/fixtures/memory-worker/valid-cases.json \
+  --worker benchmarks.tests.fixture_workers:make_worker \
+  --timeout-seconds "$TIMEOUT_SECONDS" \
+  --output report.json
+```
+
+`--worker`は`module:factory`で、引数なしのfactoryが`extract(input_text) -> str`を持つobjectを返します。
+importしたmoduleは呼び出し元の権限で実行されるため、信頼できるcodeだけを指定してください。
+Reportには入力text、Workerの生出力、例外messageを含めません。終了codeは、成功が0、caseファイルの不備が1、
+Workerの指定・Workerの停止（上記）・Report出力の不備が2です。`--collect-resources`を付けると、実行全体のwall clockと、`nvidia-smi`が使える環境ではVRAM・GPU utilizationのpeakを`resources`へ含めます（付けない場合は含みません）。
+Datasetの正式な形式はSeed Benchmark Dataset（PAW-016）で確定するため、現在のcase形式は暫定です。

@@ -1,0 +1,17 @@
+{
+    "cases": [
+        {
+            "id": "test-1",
+            "input": "Test input",
+            "gold": [
+                {
+                    "key": "",
+                    "scope": "user",
+                    "state": "confirmed",
+                    "supersedes": null,
+                    "content": "Fact."
+                }
+            ]
+        }
+    ]
+}
