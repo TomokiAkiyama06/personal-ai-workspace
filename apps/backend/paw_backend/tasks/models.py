@@ -201,6 +201,13 @@ class TaskToolInvocationRow(Base):
 
     __table_args__ = (
         Index(None, "step_id"),
+        # Only the calls in flight (a bounded number per step), so that asking
+        # for them does not read the step's whole history of finished calls.
+        Index(
+            "ix_task_tool_invocations_started",
+            "step_id",
+            postgresql_where=text("status = 'started'"),
+        ),
         _in("status", ToolInvocationStatus, "status_valid"),
         CheckConstraint(
             "(status = 'started') = (finished_at IS NULL)",
