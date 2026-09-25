@@ -16,6 +16,7 @@ part of this issue).
 """
 
 from paw_backend.memory.journal import models
+from paw_backend.memory.journal.consolidator import Consolidator
 from paw_backend.memory.journal.domain import (
     AppendedMessage,
     EntryState,
@@ -59,6 +60,7 @@ __all__ = [
     "AppendedMessage",
     "Backoff",
     "ConsolidationQueue",
+    "Consolidator",
     "ConversationNotFoundError",
     "EntryNotFoundError",
     "EntryNotPendingError",
