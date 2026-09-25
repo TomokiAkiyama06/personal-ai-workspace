@@ -240,6 +240,7 @@ personal-ai-workspace/
 │  │     ├─ test_journal_rules.py
 │  │     ├─ test_journal_schema.py
 │  │     ├─ test_journal_service.py
+│  │     ├─ test_journal_status_history.py
 │  │     ├─ test_journal_worker_contract.py
 │  │     ├─ test_middleware.py
 │  │     ├─ test_migrations.py

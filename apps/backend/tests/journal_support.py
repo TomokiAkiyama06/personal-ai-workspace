@@ -33,6 +33,8 @@ from paw_backend.memory.journal import (
     Consolidator,
     MemoryJournal,
 )
+from paw_backend.memory.metadata import metadata_change_actor
+from paw_backend.memory.models import ActorType
 
 from .authz_support import StaticDirectory, uid
 from .memory_support import (
@@ -282,6 +284,8 @@ class AsyncPostgresJournalTestCase(unittest.IsolatedAsyncioTestCase):
                 ),
                 {"m": memory_id},
             ).one()
+            # The user's confirmation widens it; a status change needs a named actor.
+            connection.execute(metadata_change_actor(ActorType.USER, USER_ID))
             connection.execute(
                 text("UPDATE memory_versions SET status = 'superseded' WHERE id = :i"),
                 {"i": row.id},

@@ -32,6 +32,7 @@ from . import (
     test_journal_gpu_unavailable,
     test_journal_queue,
     test_journal_service,
+    test_journal_status_history,
 )
 from .journal_support import (
     AsyncPostgresJournalTestCase,
@@ -83,6 +84,9 @@ NEEDED_FROM_0040 = {
     "memory_versions": {"SELECT", "INSERT"},
     "memory_relations": {"SELECT", "INSERT"},
     "memory_sources": {"SELECT", "INSERT"},
+    # The trigger that records a status change (revision 0071) inserts with the
+    # writer's own rights.
+    "memory_metadata_changes": {"INSERT"},
 }
 ALL_PRIVILEGES = (
     "SELECT",
@@ -216,6 +220,10 @@ class WidenedAsAppRole(AsAppRole, test_journal_consolidator.WidenedMemoryTest):
 
 
 class ItemOrderAsAppRole(AsAppRole, test_journal_consolidator.ItemOrderTest):
+    pass
+
+
+class StatusHistoryAsAppRole(AsAppRole, test_journal_status_history.StatusHistoryTest):
     pass
 
 

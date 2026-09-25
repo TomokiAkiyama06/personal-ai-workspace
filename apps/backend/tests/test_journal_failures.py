@@ -16,9 +16,12 @@ from paw_backend.memory.journal import (
     ItemResult,
     RunOutcome,
 )
+from paw_backend.memory.metadata import metadata_change_actor
+from paw_backend.memory.models import ActorType
 
 from .journal_support import (
     OTHER_USER_ID,
+    USER_ID,
     AsyncPostgresJournalTestCase,
     ScriptedWorker,
     memory,
@@ -289,6 +292,9 @@ class ApplyFailureTest(FailureTestCase):
         connection = self.engine.connect()
         editor = connection.begin()
         self.addCleanup(connection.close)
+        # A person edits: the database records a status change with its actor and
+        # refuses one that names nobody (revision 0071).
+        connection.execute(metadata_change_actor(ActorType.USER, USER_ID))
         connection.execute(
             text(
                 "UPDATE memory_versions SET status = 'superseded'"
@@ -353,6 +359,7 @@ class ApplyFailureTest(FailureTestCase):
         connection = self.engine.connect()
         person = connection.begin()
         self.addCleanup(connection.close)
+        connection.execute(metadata_change_actor(ActorType.USER, USER_ID))
         connection.execute(
             text(
                 "UPDATE memory_versions SET status = 'deprecated' WHERE memory_id = :m"

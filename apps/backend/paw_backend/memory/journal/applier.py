@@ -67,6 +67,7 @@ from paw_backend.memory.journal.rules import (
     supersede_target,
 )
 from paw_backend.memory.journal.worker import CONTRACT, WorkerMemory
+from paw_backend.memory.metadata import metadata_change_actor
 from paw_backend.memory.models import (
     ActorType,
     ConfirmationState,
@@ -299,7 +300,16 @@ async def _load_latest(
 
 
 async def _supersede(session: AsyncSession, version_id: UUID) -> None:
-    """``active`` -> ``superseded`` of ONE version; anything else is a lost update."""
+    """``active`` -> ``superseded`` of ONE version; anything else is a lost update.
+
+    A status change is recorded by the database in ``memory_metadata_changes`` with
+    its actor (revision 0071) and REFUSED when no actor is named, so the actor is
+    named first, in this transaction. It is the ``system``: the background Memory
+    Worker retires the version, not the user (whose words it read), and the version
+    it writes carries ``actor_type = 'system'`` too. The user owner is deliberately
+    not named: the history would then say that they retired it by hand.
+    """
+    await session.execute(metadata_change_actor(ActorType.SYSTEM))
     result = await session.execute(
         update(_VERSION)
         .where(
