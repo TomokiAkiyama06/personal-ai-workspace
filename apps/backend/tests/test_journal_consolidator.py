@@ -406,6 +406,126 @@ class VersioningTest(ConsolidatorTestCase):
             (active["ide"]["id"], editor["id"], "supersedes"),
         )
 
+    async def test_a_supersession_guards_the_retired_key_against_an_older_turn(self):
+        """The retired key's ordering guard moves to the superseding turn.
+
+        ``editor`` is retired by the turn (sequence 2) that says ``ide`` replaces
+        it. An observation about ``editor`` from an OLDER turn (sequence 1) that
+        finishes afterwards must not bring ``editor`` back beside ``ide``.
+        """
+        conversation = self.seed_conversation()
+        await self.record(
+            "editor first", conversation=conversation, priority=Priority.HIGH
+        )
+        await self.record("editor again", conversation=conversation)  # sequence 1
+        await self.record(
+            "switch to ide", conversation=conversation, priority=Priority.HIGH
+        )  # sequence 2: newer than "editor again", processed before it
+        worker = ScriptedWorker(
+            worker_output(memory("editor", content="Uses vim.")),
+            worker_output(memory("ide", content="Uses VS Code.", supersedes="editor")),
+            worker_output(memory("editor", content="Uses vim with plugins.")),
+        )
+
+        first, second, third = await self.consolidate(worker, count=3)
+
+        self.assertEqual(
+            worker.inputs, ["editor first", "switch to ide", "editor again"]
+        )
+        self.assertEqual(
+            [first.items, second.items, third.items],
+            [(ItemResult.CREATED,), (ItemResult.CREATED,), (ItemResult.STALE,)],
+        )
+        self.assertEqual(sorted(self.active_versions()), ["ide"])
+        editor = [v for v in self.versions() if v["key"] == "editor"]
+        self.assertEqual(
+            [(v["version_number"], v["status"]) for v in editor], [(1, "superseded")]
+        )
+        # The guard of the retired key is the superseding turn, not the old one.
+        self.assertEqual(
+            self.scalar(
+                "SELECT applied_event_sequence FROM memory_consolidation_keys"
+                " WHERE key = 'editor'"
+            ),
+            2,
+        )
+
+    async def test_a_turn_newer_than_the_supersession_may_bring_the_key_back(self):
+        conversation = self.seed_conversation()
+        await self.record(
+            "editor first", conversation=conversation, priority=Priority.HIGH
+        )
+        await self.record(
+            "switch to ide", conversation=conversation, priority=Priority.HIGH
+        )
+        await self.record("back to vim", conversation=conversation)  # sequence 2
+        worker = ScriptedWorker(
+            worker_output(memory("editor", content="Uses vim.")),
+            worker_output(memory("ide", content="Uses VS Code.", supersedes="editor")),
+            worker_output(memory("editor", content="Uses vim again.")),
+        )
+
+        await self.consolidate(worker, count=3)
+
+        active = self.active_versions()
+        self.assertEqual(sorted(active), ["editor", "ide"])
+        self.assertEqual(
+            (active["editor"]["version_number"], active["editor"]["content"]),
+            (2, "Uses vim again."),
+        )
+
+    async def test_a_supersession_by_an_older_turn_does_not_retire_a_newer_memory(self):
+        conversation = self.seed_conversation()
+        await self.record("editor", conversation=conversation, priority=Priority.HIGH)
+        await self.record("switch to ide", conversation=conversation)  # sequence 1
+        await self.record(
+            "editor updated", conversation=conversation, priority=Priority.HIGH
+        )  # sequence 2, processed before the older turn
+        worker = ScriptedWorker(
+            worker_output(memory("editor", content="Uses vim.")),
+            worker_output(memory("editor", content="Uses neovim.")),
+            worker_output(memory("ide", content="Uses VS Code.", supersedes="editor")),
+        )
+
+        first, second, third = await self.consolidate(worker, count=3)
+
+        self.assertEqual(worker.inputs, ["editor", "editor updated", "switch to ide"])
+        self.assertEqual(third.items, (ItemResult.CREATED,))
+        active = self.active_versions()
+        # ``ide`` is written (it is a statement of its own) but the newer editor stays.
+        self.assertEqual(sorted(active), ["editor", "ide"])
+        self.assertEqual(active["editor"]["content"], "Uses neovim.")
+        self.assertEqual(self.scalar("SELECT count(*) FROM memory_relations"), 1)
+        self.assertEqual(
+            self.scalar("SELECT relation_type FROM memory_relations"),
+            "supersedes",  # only editor v1 -> v2
+        )
+        self.assertIsNotNone((first, second))
+
+    async def test_a_memory_written_in_the_same_output_can_be_retired_by_it(self):
+        receipt = await self.record("one output")
+        worker = ScriptedWorker(worker_output(memory("x"), memory("y", supersedes="x")))
+        await self.consolidate(worker)
+        self.assertEqual(self.results_of(receipt.entry_id), ["created", "created"])
+        self.assertEqual(sorted(self.active_versions()), ["y"])
+        self.assertEqual(self.scalar("SELECT count(*) FROM memory_relations"), 1)
+
+    async def test_a_key_retired_by_an_output_is_not_revived_by_the_same_output(self):
+        # Later items of one output see the moved guard: the retirement stands.
+        conversation = self.seed_conversation()
+        await self.record("editor", conversation=conversation)
+        receipt = await self.record("both at once", conversation=conversation)
+        worker = ScriptedWorker(
+            worker_output(memory("editor", content="Uses vim.")),
+            worker_output(
+                memory("ide", content="Uses VS Code.", supersedes="editor"),
+                memory("editor", content="Uses vim again."),
+            ),
+        )
+        await self.consolidate(worker, count=2)
+        self.assertEqual(self.results_of(receipt.entry_id), ["created", "stale"])
+        self.assertEqual(sorted(self.active_versions()), ["ide"])
+
     async def test_a_candidate_cannot_supersede_a_confirmed_memory_of_another_key(self):
         self.seed_key_memory("editor", "Uses vim.", "confirmed")
         receipt = await self.record("switch")

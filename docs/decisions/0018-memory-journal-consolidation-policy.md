@@ -93,7 +93,7 @@
 
 ### 9. Version の関係（最小）
 
-- 同じ key の新しい Version は、直前の `active` を `superseded` にし、`supersedes` の関係を追加する。Worker の `supersedes` が別の key を指し、その Memory が Confirmed でなければ、同様に置き換える（Confirmed なら `held_confirmed`）。`conflicts_with` は関係を追加するだけで、どちらの Memory も変えない。未知の key は無視する。
+- 同じ key の新しい Version は、直前の `active` を `superseded` にし、`supersedes` の関係を追加する。Worker の `supersedes` が別の key を指し、その Memory が Confirmed でなければ、同様に置き換える（Confirmed なら `held_confirmed`）。`conflicts_with` は関係を追加するだけで、どちらの Memory も変えない。未知の key は無視する。**退役させた key の順序の印は、同じ Transaction で今回の Entry へ進める**（6 と同じ規則。退役より古い Observation が後から終わっても、退役した Memory は戻らない）。対象の key をすでに今回より新しい Turn が更新していれば、古い Turn の `supersedes` は退役させない。
 - 本格的な Conflict / Freshness の扱いは PAW-042。本 Issue は、Consolidator が Schema の規則を破らない最小の範囲に留める。
 
 ### 10. 権限

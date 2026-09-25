@@ -299,6 +299,74 @@ class RacingConsolidatorsTest(AsyncPostgresJournalTestCase):
         )
         self.assertEqual(stale + len(versions), 10)
 
+    async def test_a_supersession_and_an_older_observation_end_in_one_state(self):
+        """Whichever finishes first, the retired key is not brought back.
+
+        ``editor`` exists; a NEWER turn says ``ide`` replaces it and an OLDER turn
+        restates ``editor``. The two run at the same time on two consolidators, in
+        several rounds (the queue order alternates) so that both finishing orders
+        occur. The result must always be: ``ide`` active, no active ``editor``.
+        """
+        for round_number in range(6):
+            with self.subTest(round=round_number):
+                self.clean_tables()
+                conversation = self.seed_conversation()
+                # Odd rounds put the OLDER observation first in the queue, so that
+                # it starts (and can finish) before the newer supersession.
+                older_first = round_number % 2 == 1
+                await self.record(
+                    "editor", conversation=conversation, priority=Priority.HIGH
+                )
+                await self.record(
+                    "editor again",
+                    conversation=conversation,
+                    priority=Priority.HIGH if older_first else Priority.NORMAL,
+                )
+                await self.record(
+                    "switch to ide",
+                    conversation=conversation,
+                    priority=Priority.NORMAL if older_first else Priority.HIGH,
+                )
+                await self.new_consolidator(
+                    ScriptedWorker(
+                        worker_output(memory("editor", content="Uses vim."))
+                    ),
+                    worker_id="setup",
+                ).run_once()
+
+                def answer(text_):
+                    if text_ == "switch to ide":
+                        return worker_output(
+                            memory("ide", content="Uses VS Code.", supersedes="editor")
+                        )
+                    return worker_output(memory("editor", content="Uses vim again."))
+
+                consolidators = [
+                    self.new_consolidator(
+                        ScriptedWorker(fallback=answer),
+                        queue=self.new_queue(),
+                        worker_id=f"w-{n}",
+                    )
+                    for n in range(2)
+                ]
+                results = await asyncio.gather(
+                    *(c.run_once() for c in consolidators), return_exceptions=True
+                )
+                raise_unexpected(results)
+
+                self.assertEqual({r.outcome for r in results}, {RunOutcome.COMPLETED})
+                self.assertEqual(sorted(self.active_versions()), ["ide"])
+                editor = [v for v in self.versions() if v["key"] == "editor"]
+                self.assertNotIn("active", [v["status"] for v in editor])
+                # The guard ended at the superseding turn (sequence 2) either way.
+                self.assertEqual(
+                    self.scalar(
+                        "SELECT applied_event_sequence FROM memory_consolidation_keys"
+                        " WHERE key = 'editor'"
+                    ),
+                    2,
+                )
+
     async def test_two_consolidators_needing_the_same_keys_do_not_deadlock(self):
         first = self.seed_conversation()
         second = self.seed_conversation()

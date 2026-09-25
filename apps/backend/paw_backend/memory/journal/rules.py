@@ -206,6 +206,31 @@ class CurrentMemory:
         )
 
 
+def supersede_target(
+    entry: OrderKey, target: CurrentMemory | None, guard: OrderKey | None
+) -> CurrentMemory | None:
+    """The memory ``entry`` may retire through ``supersedes``, or ``None``.
+
+    ``target`` is the latest version of the memory the item's ``supersedes`` key
+    names and ``guard`` the order key of the entry behind it (the ordering guard of
+    that key). A turn that is OLDER than the last one to touch the target must not
+    retire it: a newer statement about the target came first, and retiring it now
+    would undo that. Only a guard that is strictly newer than ``entry`` protects the
+    target; the same turn (an output that writes a key and retires it in the same
+    answer) and older turns do not.
+
+    The retirement also moves the target's guard to ``entry`` (the applier does it
+    in the same transaction), so that an OLDER observation about the target that
+    finishes later is refused by :func:`plan_item` as ``stale`` instead of bringing
+    the retired memory back next to the one that replaced it.
+    """
+    if target is None:
+        return None
+    if guard is not None and is_newer(guard, entry):
+        return None
+    return target
+
+
 def plan_item(
     item: WorkerMemory,
     *,
@@ -219,8 +244,9 @@ def plan_item(
     ``current`` is the latest version of the memory the item's key already names
     (``None``: the key is new). ``applied`` is the order key of the entry that
     produced it. ``supersedes_target`` is the latest version of the memory named by
-    ``item.supersedes`` (``None`` when there is none, or it names the item's own
-    key). The first matching rule wins:
+    ``item.supersedes`` (``None`` when there is none, it names the item's own
+    key, or a newer turn has touched it: see :func:`supersede_target`). The first
+    matching rule wins:
 
     1. ``shared`` scope: refused. 2. No content: nothing to store.
     3. A high-risk area: held. 4. A new key: created (held instead if it would

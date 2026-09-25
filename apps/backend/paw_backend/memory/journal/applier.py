@@ -25,7 +25,9 @@ tables of the Memory schema (PAW-040) and nothing else:
   being overwritten.
 * A new version supersedes the previous ``active`` one of the same key (status
   ``superseded``, a ``supersedes`` relation from the new to the old); the memory
-  the item's ``supersedes`` key names is superseded the same way; ``conflicts_with``
+  the item's ``supersedes`` key names is superseded the same way, unless a NEWER
+  turn touched it (``rules.supersede_target``), and its ordering guard moves to this
+  turn so that an older observation about it cannot bring it back; ``conflicts_with``
   keys get a ``conflicts_with`` relation and are left alone. The source of a
   version is its conversation and message (``memory_sources``), so deleting the
   conversation finds and reports it.
@@ -56,6 +58,7 @@ from paw_backend.memory.journal.rules import (
     OrderKey,
     plan_item,
     stored_state,
+    supersede_target,
 )
 from paw_backend.memory.journal.worker import CONTRACT, WorkerMemory
 from paw_backend.memory.models import (
@@ -358,6 +361,13 @@ async def apply_items(
             else None
         )
         target = latest.get(target_registered.memory_id) if target_registered else None
+        # A turn older than the last one to touch the target does not retire it.
+        if target is not None and target_registered is not None:
+            if (
+                supersede_target(order, target.summary, target_registered.applied)
+                is None
+            ):
+                target = None
 
         result = plan_item(
             item,
@@ -526,6 +536,15 @@ async def _write_version(
                 replaced.summary.content,
             ),
         )
+        # The retired key's ordering guard moves to this turn (in this transaction,
+        # under the key's advisory lock): only an observation NEWER than the
+        # supersession can bring the key back. Without it an older observation
+        # about the retired key, finishing later, would pass ``plan_item`` as newer
+        # than the entry behind the retired version and create a new active version
+        # next to the one that replaced it.
+        assert item.supersedes is not None  # a target exists only for a named key
+        await _advance(session, owner, item.supersedes, order)
+        registry[item.supersedes] = _Registered(target_memory_id, order)
     outcome.memory_id = memory_id
     outcome.version_number = number
 

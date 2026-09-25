@@ -24,6 +24,7 @@ from paw_backend.memory.journal.rules import (
     is_newer,
     plan_item,
     stored_state,
+    supersede_target,
 )
 from paw_backend.memory.models import ConfirmationState, MemoryStatus
 
@@ -136,6 +137,63 @@ class OrderTest(unittest.TestCase):
         b = order(3, conversation=CONVERSATION_B, seconds=7)
         self.assertNotEqual(is_newer(a, b), is_newer(b, a))  # exactly one is newer
         self.assertTrue(is_newer(b, a))  # the larger id
+
+
+class SupersedeTargetTest(unittest.TestCase):
+    """A turn may retire another key's memory only if no NEWER turn has touched it."""
+
+    def test_the_target_survives_only_when_no_newer_turn_touched_it(self):
+        target = current(content="Uses vim.")
+        cases = [
+            # name, the entry doing the superseding, the target's guard, retires?
+            ("no guard (never registered by an entry)", order(5), None, True),
+            ("an older turn touched it", order(5), order(4), True),
+            ("the same turn touched it", order(5), order(5), True),
+            ("a newer turn touched it", order(5), order(6), False),
+            (
+                "a newer turn of another conversation",
+                order(5, seconds=0),
+                order(0, conversation=CONVERSATION_B, seconds=10),
+                False,
+            ),
+            (
+                "an older turn of another conversation",
+                order(5, seconds=10),
+                order(9, conversation=CONVERSATION_B, seconds=0),
+                True,
+            ),
+        ]
+        for name, entry, guard, retires in cases:
+            with self.subTest(name):
+                result = supersede_target(entry, target, guard)
+                self.assertIs(result, target if retires else None)
+
+    def test_no_target_is_no_target(self):
+        self.assertIsNone(supersede_target(order(5), None, order(1)))
+        self.assertIsNone(supersede_target(order(5), None, None))
+
+    def test_a_retired_key_then_refuses_an_older_observation(self):
+        """The two rules together: retire at turn 5, then turn 4 finishes late."""
+        retired = current(status=MemoryStatus.SUPERSEDED)
+        guard_after_the_supersession = order(5)
+        older = worker_memory(key="editor", content="Uses vim with plugins.")
+        result = plan_item(
+            older,
+            entry=order(4),
+            current=retired,
+            applied=guard_after_the_supersession,
+            supersedes_target=None,
+        )
+        self.assertEqual(result, ItemResult.STALE)
+        # A turn newer than the supersession may bring it back.
+        newer = plan_item(
+            older,
+            entry=order(6),
+            current=retired,
+            applied=guard_after_the_supersession,
+            supersedes_target=None,
+        )
+        self.assertEqual(newer, ItemResult.UPDATED)
 
 
 class StoredStateTest(unittest.TestCase):
