@@ -1,7 +1,10 @@
 """``validate_provider`` and ``ProviderRegistry``: up-front validation, order."""
 
 import asyncio
+import inspect
+import logging
 import re
+import traceback
 import unicodedata
 import unittest
 from enum import StrEnum
@@ -24,7 +27,16 @@ from paw_backend.research.providers import (
 )
 from paw_backend.research.providers.contract import PROVIDER_NAME_PATTERN
 
-from .research_support import GUARD_SECONDS, NOW, SECRET, fixed_clock, hit
+from .research_support import (
+    BASE_EXCEPTIONS,
+    FORGED,
+    GUARD_SECONDS,
+    NOW,
+    SECRET,
+    cancel_current_task,
+    fixed_clock,
+    hit,
+)
 
 
 class Good:
@@ -792,6 +804,448 @@ class LookupTest(unittest.TestCase):
         with self.assertRaises(UnknownProviderError) as caught:
             ProviderRegistry().get(SECRET)
         self.assertNotIn(SECRET, str(caught.exception))
+
+
+# Text that must never leave the adapter: a credential, and a newline followed by a
+# line that would forge a log record.
+HOSTILE_TEXT = f"{SECRET}\nWARNING forged log line {FORGED}"
+MEMBERS = ("name", "kind", "search", "fetch")
+
+
+class WeirdError(Exception):
+    """An adapter exception whose own hooks (text, repr, class) are hostile."""
+
+    def __str__(self):
+        return HOSTILE_TEXT
+
+    def __repr__(self):
+        return HOSTILE_TEXT
+
+
+# Label -> an exception class raised as ``cls(HOSTILE_TEXT)``.
+HOOK_EXCEPTIONS: dict[str, type[BaseException]] = {
+    "RuntimeError": RuntimeError,
+    "RecursionError": RecursionError,
+    "an exception with hostile __str__ / __repr__": WeirdError,
+    **BASE_EXCEPTIONS,
+}
+
+
+async def good_search(self, query, *, limit):
+    return ()
+
+
+async def good_fetch(self, locator):
+    return None
+
+
+GOOD_MEMBERS = {
+    "name": "hostile-ok",
+    "kind": ProviderKind.WEB,
+    "search": good_search,
+    "fetch": good_fetch,
+}
+
+
+def raising_property(member, make, calls):
+    def getter(self):
+        calls.append(member)
+        raise make(HOSTILE_TEXT)
+
+    return type("RaisingProperty", (Good,), {member: property(getter)})()
+
+
+def raising_getattribute(member, make, calls):
+    def hook(self, attr):
+        if attr == member:
+            calls.append(member)
+            raise make(HOSTILE_TEXT)
+        return object.__getattribute__(self, attr)
+
+    return type("RaisingGetattribute", (Good,), {"__getattribute__": hook})()
+
+
+def raising_getattr(member, make, calls):
+    """The member is missing, so Python asks ``__getattr__``, which raises."""
+    members = {key: value for key, value in GOOD_MEMBERS.items() if key != member}
+
+    def hook(self, attr):
+        calls.append(attr)
+        raise make(HOSTILE_TEXT)
+
+    members["__getattr__"] = hook
+    return type("RaisingGetattr", (), members)()
+
+
+def raising_descriptor(member, make, calls):
+    class Raising:
+        def __get__(self, instance, owner):
+            calls.append(member)
+            raise make(HOSTILE_TEXT)
+
+    return type("RaisingDescriptor", (Good,), {member: Raising()})()
+
+
+READ_STYLES = {
+    "a property": raising_property,
+    "__getattribute__": raising_getattribute,
+    "__getattr__": raising_getattr,
+    "a descriptor": raising_descriptor,
+}
+
+
+def hostile_instance(make, calls):
+    """An object (callable) whose every attribute read raises, ``__class__`` included.
+
+    ``inspect.iscoroutinefunction`` asks an object for its ``__class__`` (through
+    ``isinstance``), so what ``search`` / ``fetch`` return is adapter code too.
+    """
+
+    def hook(self, attr):
+        calls.append(attr)
+        raise make(HOSTILE_TEXT)
+
+    async def call(self, *args, **kwargs):
+        return None
+
+    return type("HostileCallable", (), {"__getattribute__": hook, "__call__": call})()
+
+
+def hostile_metaclass_class(make, calls):
+    """A class (so callable) whose metaclass raises on every attribute read."""
+
+    class Meta(type):
+        def __getattribute__(cls, attr):
+            calls.append(attr)
+            raise make(HOSTILE_TEXT)
+
+    return Meta("HostileClass", (), {})
+
+
+def hostile_signature_function(make, calls):
+    """An ``async def`` whose ``__signature__`` is a ``Signature`` that raises."""
+
+    class Raising(inspect.Signature):
+        def bind(self, *args, **kwargs):
+            calls.append("bind")
+            raise make(HOSTILE_TEXT)
+
+    async def method(*args, **kwargs):
+        return None
+
+    method.__signature__ = Raising(
+        [
+            inspect.Parameter("query", inspect.Parameter.POSITIONAL_OR_KEYWORD),
+            inspect.Parameter("limit", inspect.Parameter.KEYWORD_ONLY),
+        ]
+    )
+    return method
+
+
+PROBE_STYLES = {
+    "an object that raises on any attribute read": hostile_instance,
+    "a class with a metaclass that raises on any attribute read": (
+        hostile_metaclass_class
+    ),
+    "a Signature whose bind raises": hostile_signature_function,
+}
+
+
+class HostileAdapterTestCase(unittest.TestCase):
+    def assertFixedRejection(self, member, function, *args, **kwargs):
+        """``function(...)`` raises exactly ``ProviderInterfaceError(member)``.
+
+        The error must be self-contained: no text of the adapter in ``str`` /
+        ``repr`` / ``args`` / the formatted traceback (what ``logger.exception``
+        would write), and no adapter exception as ``__context__`` or ``__cause__``.
+        """
+        caught = escaped = None
+        try:
+            function(*args, **kwargs)
+        except ProviderInterfaceError as error:
+            caught = error
+        except BaseException as error:  # the adapter's own exception escaped
+            escaped = type(error).__name__
+        if escaped is not None:
+            self.fail(f"{escaped} of the adapter escaped ({member})")
+        if caught is None:
+            self.fail(f"no error was raised ({member})")
+        self.assertIs(type(caught), ProviderInterfaceError)
+        self.assertEqual(caught.member, member)
+        message = f"Provider does not satisfy ResearchProvider: {member}"
+        self.assertEqual(caught.args, (message,))
+        self.assertEqual(str(caught), message)
+        self.assertEqual(repr(caught), f"ProviderInterfaceError({message!r})")
+        self.assertIsNone(caught.__cause__)
+        self.assertIsNone(caught.__context__)
+        record = logging.LogRecord(
+            "paw_backend.research.providers",
+            logging.ERROR,
+            __file__,
+            0,
+            "registration failed",
+            (),
+            (type(caught), caught, caught.__traceback__),
+        )
+        logged = logging.Formatter().format(record)
+        rendered = "".join(traceback.format_exception(caught)) + logged
+        for text in (SECRET, FORGED, "forged log line", "WeirdError"):
+            self.assertNotIn(text, rendered)
+
+
+class HostileMemberReadTest(HostileAdapterTestCase):
+    """Reading a member is adapter code: whatever it raises is a fixed error.
+
+    A property, ``__getattribute__``, ``__getattr__`` or descriptor of the adapter
+    can raise anything, ``BaseException`` included. Neither ``validate_provider``
+    nor ``register`` may let it (or its text) out: the caller gets the documented
+    ``ProviderInterfaceError`` for that member, with nothing chained to it.
+    """
+
+    def test_a_raising_read_of_any_member_is_the_fixed_interface_error(self):
+        for member in MEMBERS:
+            for style, build in READ_STYLES.items():
+                for label, make in HOOK_EXCEPTIONS.items():
+                    with self.subTest(member=member, style=style, raises=label):
+                        calls = []
+                        provider = build(member, make, calls)
+                        self.assertFixedRejection(member, validate_provider, provider)
+                        self.assertEqual(len(calls), 1)  # the hook did run
+
+                        calls = []
+                        provider = build(member, make, calls)
+                        registry = ProviderRegistry()
+                        self.assertFixedRejection(
+                            member, registry.register, provider, timeout_seconds=5
+                        )
+                        self.assertEqual(len(calls), 1)
+                        self.assertEqual(len(registry), 0)
+                        self.assertEqual(registry.names(), ())
+
+    def test_the_first_failing_member_is_the_one_reported(self):
+        calls = []
+        provider = raising_property("kind", RuntimeError, calls)
+        provider.search = None  # also wrong, but kind comes first
+        self.assertFixedRejection("kind", validate_provider, provider)
+        # A hostile name wins over a hostile kind.
+        both = type(
+            "Both",
+            (Good,),
+            {
+                "name": property(lambda self: 1 / 0),
+                "kind": property(lambda self: 1 / 0),
+            },
+        )()
+        self.assertFixedRejection("name", validate_provider, both)
+
+    def test_a_registry_that_failed_on_a_hostile_read_stays_usable(self):
+        registry = ProviderRegistry()
+        registry.register(adapter(name="first"), timeout_seconds=5)
+        provider = raising_property("fetch", RuntimeError, [])
+        self.assertFixedRejection("fetch", registry.register, provider)
+        registry.register(adapter(name="second"), timeout_seconds=5)
+        self.assertEqual(registry.names(), ("first", "second"))
+
+    def test_a_raising_member_is_rejected_when_nothing_else_is_wrong(self):
+        # The same adapter without the hook registers, so it was the read that failed.
+        self.assertEqual(ProviderRegistry().register(Good()).name, "good")
+
+
+class HostileMemberProbeTest(HostileAdapterTestCase):
+    """What ``search`` / ``fetch`` return is inspected: that is adapter code too.
+
+    ``inspect.iscoroutinefunction`` and ``inspect.signature`` read attributes of
+    the object they are given (``__class__``, ``__signature__``, ``__wrapped__``)
+    and call its ``Signature.bind``. An object returned by the adapter can raise
+    there; that is a wrong adapter, not an error of the registry.
+    """
+
+    def test_a_search_or_fetch_that_raises_when_inspected_is_rejected(self):
+        for member in ("search", "fetch"):
+            for style, build in PROBE_STYLES.items():
+                for label, make in HOOK_EXCEPTIONS.items():
+                    with self.subTest(member=member, style=style, raises=label):
+                        calls = []
+                        provider = adapter(**{member: build(make, calls)})
+                        self.assertFixedRejection(member, validate_provider, provider)
+                        self.assertGreaterEqual(len(calls), 1)  # the hook ran
+
+                        calls = []
+                        provider = adapter(**{member: build(make, calls)})
+                        registry = ProviderRegistry()
+                        self.assertFixedRejection(member, registry.register, provider)
+                        self.assertGreaterEqual(len(calls), 1)
+                        self.assertEqual(len(registry), 0)
+
+    def test_name_and_kind_objects_with_hostile_classes_are_rejected(self):
+        """``name`` / ``kind`` values whose metaclass and instance hooks all raise."""
+
+        def hostile_value():
+            calls = []
+
+            class Meta(type):
+                def __getattribute__(cls, attr):
+                    calls.append(attr)
+                    raise RuntimeError(HOSTILE_TEXT)
+
+                def __eq__(cls, other):
+                    raise RuntimeError(HOSTILE_TEXT)
+
+                def __hash__(cls):
+                    raise RuntimeError(HOSTILE_TEXT)
+
+                def __instancecheck__(cls, instance):
+                    raise RuntimeError(HOSTILE_TEXT)
+
+                def __subclasscheck__(cls, subclass):
+                    raise RuntimeError(HOSTILE_TEXT)
+
+            def boom(self, *args, **kwargs):
+                raise RuntimeError(HOSTILE_TEXT)
+
+            hooks = {
+                name: boom
+                for name in (
+                    "__getattribute__",
+                    "__eq__",
+                    "__hash__",
+                    "__str__",
+                    "__repr__",
+                    "__len__",
+                    "__iter__",
+                )
+            }
+            return Meta("HostileValue", (), hooks)()
+
+        for member in ("name", "kind"):
+            with self.subTest(member=member):
+                provider = adapter(**{member: hostile_value()})
+                self.assertFixedRejection(member, validate_provider, provider)
+                self.assertFixedRejection(member, ProviderRegistry().register, provider)
+
+
+def hostile_cancellers(member):
+    """Providers whose read of ``member`` cancels the running task and returns fine.
+
+    Nothing is raised, and the value is a valid one: without a guard the adapter
+    would register, and the request would stay on the task.
+    """
+    values = dict(GOOD_MEMBERS)
+
+    def getter(self):
+        cancel_current_task()
+        return (
+            values[member]
+            if member in ("name", "kind")
+            else values[member].__get__(self)
+        )
+
+    def hook(self, attr):
+        if attr == member:
+            cancel_current_task()
+        return object.__getattribute__(self, attr)
+
+    return {
+        "a property": type("CancellingProperty", (Good,), {member: property(getter)})(),
+        "__getattribute__": type(
+            "CancellingGetattribute", (Good,), {"__getattribute__": hook}
+        )(),
+    }
+
+
+class RegistrationCancellationTest(
+    HostileAdapterTestCase, unittest.IsolatedAsyncioTestCase
+):
+    """Registration is synchronous, so the cancellation guard is the broker's.
+
+    ``register`` and ``validate_provider`` never await: a real ``Task.cancel()``
+    (from the caller, or the loop) can only be delivered at the caller's next
+    ``await``, never in the middle of a read. A ``CancelledError`` raised by an
+    adapter's hook is therefore the adapter's own failure. A hook that asks for
+    the cancellation of the running task and then returns normally is retracted
+    (``CancelGuard``, the broker's) and rejected; a request that was there before
+    the call is left alone and still delivered.
+    """
+
+    async def test_a_hook_that_cancels_the_task_and_returns_is_retracted(self):
+        task = asyncio.current_task()
+        for member in MEMBERS:
+            for style, provider in hostile_cancellers(member).items():
+                for call in ("validate_provider", "register"):
+                    with self.subTest(member=member, style=style, call=call):
+                        registry = ProviderRegistry()
+                        run = (
+                            validate_provider
+                            if call == "validate_provider"
+                            else registry.register
+                        )
+                        self.assertFixedRejection(member, run, provider)
+                        self.assertEqual(task.cancelling(), 0)
+                        self.assertEqual(len(registry), 0)
+                        await asyncio.sleep(0)  # nothing is delivered
+
+    async def test_a_hook_that_cancels_and_raises_is_also_retracted(self):
+        task = asyncio.current_task()
+
+        def hook(self, attr):
+            if attr == "name":
+                cancel_current_task(2)
+                raise asyncio.CancelledError(HOSTILE_TEXT)
+            return object.__getattribute__(self, attr)
+
+        provider = type("Both", (Good,), {"__getattribute__": hook})()
+        self.assertFixedRejection("name", validate_provider, provider)
+        self.assertEqual(task.cancelling(), 0)
+        await asyncio.sleep(0)
+
+    async def test_a_cancel_requested_before_the_call_is_kept_and_delivered(self):
+        reached = []
+        registered = []
+
+        async def body():
+            task = asyncio.current_task()
+            registry = ProviderRegistry()
+            task.cancel()  # a real request: cancelling() == 1
+            registry.register(StaticProvider("p", ProviderKind.WEB))
+            registered.append(len(registry))
+            validate_provider(Good())
+            self.assertEqual(task.cancelling(), 1)  # neither call uncancelled it
+            await asyncio.sleep(0)
+            reached.append("not cancelled")
+
+        task = asyncio.create_task(body())
+        await asyncio.wait({task}, timeout=GUARD_SECONDS)
+
+        self.assertTrue(task.cancelled())  # delivered at the first await
+        self.assertEqual(registered, [1])  # registration itself was not interrupted
+        self.assertEqual(reached, [])
+
+    async def test_a_hostile_hook_does_not_retract_a_request_from_before(self):
+        outcome = []
+
+        async def body():
+            task = asyncio.current_task()
+            task.cancel()  # the caller's own request
+            provider = hostile_cancellers("name")["a property"]  # asks twice over
+            self.assertFixedRejection("name", validate_provider, provider)
+            outcome.append(task.cancelling())  # only the hook's request is retracted
+            await asyncio.sleep(0)
+            outcome.append("not cancelled")
+
+        task = asyncio.create_task(body())
+        await asyncio.wait({task}, timeout=GUARD_SECONDS)
+
+        self.assertTrue(task.cancelled())
+        self.assertEqual(outcome, [1])
+
+    async def test_a_raised_cancelled_error_does_not_cancel_the_caller(self):
+        task = asyncio.current_task()
+        for label, make in BASE_EXCEPTIONS.items():
+            with self.subTest(raises=label):
+                provider = raising_property("kind", make, [])
+                self.assertFixedRejection("kind", ProviderRegistry().register, provider)
+                self.assertEqual(task.cancelling(), 0)
+        await asyncio.sleep(0)  # the awaiting task was never cancelled
 
 
 if __name__ == "__main__":

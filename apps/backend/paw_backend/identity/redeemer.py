@@ -144,17 +144,22 @@ class TokenRedeemer:
         token is not consumed, and the exception propagates unchanged. The hook
         must not commit, roll back or close the session: that is refused
         (``RedeemHookError``) and rolls everything back. The Owner's ``users``
-        row is locked (``SELECT ... FOR UPDATE``) until the redemption ends, so
-        keep the hook short. The attempt counter still counts the try, so
-        validate input before calling ``redeem``.
+        row and the token's row are locked (``SELECT ... FOR UPDATE``) until the
+        redemption ends, so keep the hook short. The attempt counter still
+        counts the try, so validate input before calling ``redeem``.
 
         The expiry is judged twice: cheaply at the start (an expired token
-        never waits for the Owner lock), and again, for good, by the statement
-        that consumes the token, after the Owner lock was obtained (a wait for
-        that lock cannot let a token be used after its ``expires_at``). The
-        consuming statement counts a token as expired as soon as this process's
-        clock (read again after the lock) or the database's ``clock_timestamp()``
-        says so, so a clock that is ahead can only shorten the lifetime.
+        never waits for the Owner lock), and again, for good, once BOTH the
+        Owner's row and the token's row are locked (``SELECT ... FOR UPDATE``,
+        in that order, in this transaction). Only then are the clocks read and
+        the consuming ``UPDATE`` run, on a row this transaction already holds,
+        so that no wait for a lock, of either row, can come between the
+        judgement and the consumption (a statement that waits for a row can go
+        on without judging its conditions again when the holder releases the
+        row unchanged). The consuming statement counts a token as expired as
+        soon as this process's clock (read after the locks) or the database's
+        ``clock_timestamp()`` says so, so a clock that is ahead can only
+        shorten the lifetime; ``used_at`` is the reading taken after the locks.
 
         Attempts are bounded per token: an attempt is reserved (and committed)
         *before* the secret is compared, so at most ``max_attempts`` comparisons
@@ -265,14 +270,34 @@ class TokenRedeemer:
                 or user.status not in LIVE_STATUSES
             ):
                 raise _Refused(AuditReason.USER_NOT_ELIGIBLE)
-            # The lock above may have been waited for, so the instant the attempt
+            # Then the token's row, locked before any clock is read: a wait for
+            # it (any transaction may hold the row, the application role can
+            # lock it) must come first, because an UPDATE that waits for a row
+            # continues, once the holder lets go of it unchanged, with the
+            # conditions it judged before the wait. Under this lock the state
+            # cannot change, so it also says why a token cannot be spent.
+            token = (
+                await session.execute(
+                    select(SetupTokenRow.used_at, SetupTokenRow.revoked_at)
+                    .where(SetupTokenRow.id == attempt.token_id)
+                    .with_for_update()
+                )
+            ).first()
+            if (
+                token is None
+                or token.used_at is not None
+                or token.revoked_at is not None
+            ):
+                raise _Refused(AuditReason.TOKEN_UNAVAILABLE)  # used / revoked
+            # Both locks may have been waited for, so the instant the attempt
             # began with says nothing about whether the token is still live: the
             # expiry is judged now, by the consuming statement itself (Decision
-            # 0005, point 10). The token is expired as soon as EITHER this
-            # process's clock (read again, after the lock: the seam of the
-            # tests) OR the database's says so. ``clock_timestamp()`` is the
-            # wall clock at the moment the statement judges the row, not
-            # ``now()`` (the start of the transaction).
+            # 0005, point 10), which cannot wait any more. The token is expired
+            # as soon as EITHER this process's clock (read here, after the
+            # locks: the seam of the tests) OR the database's says so.
+            # ``clock_timestamp()`` is the wall clock at the moment the
+            # statement judges the row, not ``now()`` (the start of the
+            # transaction).
             now = self._audit.now()
             consumed = (
                 await session.execute(
@@ -293,7 +318,9 @@ class TokenRedeemer:
                 )
             ).first()
             if consumed is None:
-                raise _Refused(await self._why_not_consumed(session, attempt))
+                # Unused and unrevoked under the lock: the expiry is all that
+                # is left of the statement's conditions.
+                raise _Refused(AuditReason.TOKEN_EXPIRED)
             redemption = Redemption(
                 user_id=user.id,
                 audit_ref=attempt.audit_ref,
@@ -326,24 +353,6 @@ class TokenRedeemer:
             )
             await session.commit()
         return redemption
-
-    async def _why_not_consumed(
-        self, session: AsyncSession, attempt: _Attempt
-    ) -> AuditReason:
-        """Why the consuming statement matched nothing (the Owner row is locked).
-
-        Nobody can use or revoke the token meanwhile (both take the user's lock
-        first), so if it is still unused and unrevoked, the expiry is all that
-        is left of the statement's conditions.
-        """
-        still_open = await session.scalar(
-            select(
-                SetupTokenRow.used_at.is_(None) & SetupTokenRow.revoked_at.is_(None)
-            ).where(SetupTokenRow.id == attempt.token_id)
-        )
-        if still_open:
-            return AuditReason.TOKEN_EXPIRED
-        return AuditReason.TOKEN_UNAVAILABLE  # used / revoked while redeeming
 
     async def _record_failure(
         self, attempt: _Attempt, reason: AuditReason, correlation_id: uuid.UUID
