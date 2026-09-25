@@ -1297,6 +1297,77 @@ class ProvenanceTest(MemoryDatabaseTestCase):
             with self.subTest(expected):
                 self.assertEqual(self.violation(action), expected)
 
+    OTHER_SOURCE_TYPES = (
+        "task",
+        "repo_analysis",
+        "user_confirmation",
+        "project_decision",
+    )
+    EMPTY_REFERENCE = "ck_memory_sources_other_sources_have_reference"
+
+    def test_a_source_that_is_not_a_conversation_must_have_a_non_empty_reference(self):
+        # An empty string satisfies "IS NOT NULL" and names nothing: the row
+        # could not be resolved to its task, analysis, confirmation or decision.
+        version = self.add_version(self.add_memory())
+        for kind in self.OTHER_SOURCE_TYPES:
+            for reference in (None, ""):
+                with self.subTest(source_type=kind, source_ref=reference):
+                    self.assertEqual(
+                        self.violation(
+                            partial(
+                                self.add_source, version, kind, source_ref=reference
+                            )
+                        ),
+                        self.EMPTY_REFERENCE,
+                    )
+            with self.subTest(source_type=kind, case="omitted"):
+                self.assertEqual(
+                    self.violation(partial(self.add_source, version, kind)),
+                    self.EMPTY_REFERENCE,
+                )
+        self.assertEqual(self.sources_of(version), [])
+
+    def test_a_reference_of_one_character_is_enough_and_only_its_length_is_checked(
+        self,
+    ):
+        # The boundary of the rule. The other free-text columns of the schema
+        # (title, content, memory type, embedding model id) are checked by
+        # length only as well: the reference is opaque to the database, and
+        # trimming or normalising input is the Backend's job.
+        version = self.add_version(self.add_memory())
+        for kind in self.OTHER_SOURCE_TYPES:
+            for reference in ("x", " "):
+                with self.subTest(source_type=kind, source_ref=reference):
+                    self.assertIsNone(
+                        self.violation(
+                            partial(
+                                self.add_source, version, kind, source_ref=reference
+                            )
+                        )
+                    )
+        self.assertEqual(
+            sorted(row[0] for row in self.sources_of(version)),
+            sorted(self.OTHER_SOURCE_TYPES * 2),
+        )
+
+    def test_a_conversation_source_still_cannot_carry_an_opaque_reference(self):
+        conversation = self.add_conversation()
+        version = self.add_version(self.add_memory())
+        for reference in ("", "x"):
+            with self.subTest(source_ref=reference):
+                self.assertEqual(
+                    self.violation(
+                        partial(
+                            self.add_source,
+                            version,
+                            "conversation",
+                            conversation_id=conversation,
+                            source_ref=reference,
+                        )
+                    ),
+                    "ck_memory_sources_conversation_has_no_opaque_reference",
+                )
+
     def test_every_source_type_is_accepted(self):
         conversation = self.add_conversation()
         version = self.add_version(self.add_memory())

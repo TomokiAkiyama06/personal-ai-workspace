@@ -172,6 +172,8 @@ class OperationsWaitForTheRowLockTest(PostgresScratchTestCase):
         calls = {
             "pin": lambda: busy_store.pin(project, item_id),
             "unpin": lambda: busy_store.unpin(project, item_id),
+            "save": lambda: busy_store.save(project, item_id),
+            "unsave": lambda: busy_store.unsave(project, item_id),
             "acquire_use": lambda: busy_store.acquire_use(project, item_id, uuid4()),
             "release_use": lambda: busy_store.release_use(project, item_id, holder),
             "request_promotion": lambda: busy_store.request_promotion(project, item_id),

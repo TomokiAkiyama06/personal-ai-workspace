@@ -82,7 +82,7 @@ class ServiceValidationTest(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_the_change_operations_reject_bad_ids(self):
-        for name in ("pin", "unpin", "request_promotion"):
+        for name in ("pin", "unpin", "save", "unsave", "request_promotion"):
             with self.subTest(name):
                 await self.assertRejected(
                     "item_id",

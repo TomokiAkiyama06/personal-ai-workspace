@@ -26,6 +26,14 @@ token. Tests change what the service reads by replacing ``os.geteuid`` (the
 ``running_as`` helper of ``tests/identity_support.py``); production code has no
 other way to set it.
 
+**A token's lifetime starts when it is stored, not when the command began**
+(Decision 0005, point 10): the clock is read after the Owner's row lock, and
+again after the last statement that can wait (revoking the older tokens, the
+INSERT of a new Owner), and ``created_at`` / ``expires_at`` (and the returned
+``IssuedToken.expires_at``) come from that last read. However long another
+transaction held a lock, the operator is shown a token with its whole lifetime
+left.
+
 Token handling: see ``paw_backend.identity.tokens``. The plaintext exists only in
 the returned ``IssuedToken``; the database keeps a salted HMAC.
 """
@@ -194,6 +202,9 @@ class OwnerOperator:
         demoted to a plain ``user`` (its status and data untouched), its tokens
         are revoked, and the new Owner is created, all in one audited
         transaction. A live Owner is never replaced.
+
+        The token's lifetime starts once it is stored, after any wait for a
+        lock (see the module docstring, Decision 0005 point 10).
         """
         if not isinstance(replace_non_live_owner, bool):
             raise TypeError("replace_non_live_owner must be a bool")
@@ -227,12 +238,14 @@ class OwnerOperator:
         operator: OperatorIdentity | None,
         correlation_id: uuid.UUID,
     ) -> IssuedToken:
-        now = self._audit.now()
         user_id = uuid.uuid4()
         new = tokens.generate()
         try:
             async with self._database.session() as session:
                 old_owner = await _lock_owner(session)
+                # Read after the Owner lock, which may have been waited for: what
+                # this step stamps says when it happened, not when it began.
+                now = self._audit.now()
                 replaced_events = []
                 if old_owner is not None:
                     if old_owner.status in LIVE_STATUSES:
@@ -274,8 +287,15 @@ class OwnerOperator:
                     )
                 )
                 await session.flush()
+                # The lifetime of the token starts here, after every statement
+                # that could wait for a lock (the Owner's row above, and the
+                # INSERT just flushed, which waits for a rival's uncommitted
+                # Owner row): see Decision 0005, point 10.
+                issued_at = self._audit.now()
                 session.add(
-                    self._token_row(new, user_id, TokenPurpose.SETUP, now, operator)
+                    self._token_row(
+                        new, user_id, TokenPurpose.SETUP, issued_at, operator
+                    )
                 )
                 await session.flush()
                 for event in replaced_events:
@@ -311,7 +331,7 @@ class OwnerOperator:
             user_id=user_id,
             login_name=name,
             purpose=TokenPurpose.SETUP,
-            expires_at=now + self._ttl,
+            expires_at=issued_at + self._ttl,
             operator=operator,
         )
 
@@ -329,6 +349,10 @@ class OwnerOperator:
 
         The caller supplies no identity: one it could supply is one it could
         forge. The uid the check uses is the uid stored on the token.
+
+        The token's lifetime starts once it is stored: a wait for the Owner's
+        row lock (or for a token's row while revoking) does not use it up
+        (see the module docstring, Decision 0005 point 10).
         """
         correlation_id = uuid.uuid4()
         operator = OperatorIdentity.from_environment()
@@ -363,7 +387,6 @@ class OwnerOperator:
     async def _issue_recovery(
         self, operator: OperatorIdentity | None, correlation_id: uuid.UUID
     ) -> IssuedToken:
-        now = self._audit.now()
         new = tokens.generate()
         async with self._database.session() as session:
             # The row lock serialises concurrent recoveries (and a redemption,
@@ -374,9 +397,17 @@ class OwnerOperator:
                 raise OwnerNotFoundError
             if owner.status not in LIVE_STATUSES:
                 raise OwnerNotLiveError(owner.status)
-            revoked = await _revoke_outstanding(session, owner.id, now)
+            # The clock is read after the lock, which may have been waited for
+            # (however long another transaction held it), and once more after
+            # the revoking statement, which can wait for a token's row. The
+            # lifetime of the new token starts at the second read, so that a
+            # wait can never use it up (Decision 0005, point 10).
+            revoked = await _revoke_outstanding(session, owner.id, self._audit.now())
+            issued_at = self._audit.now()
             session.add(
-                self._token_row(new, owner.id, TokenPurpose.RECOVERY, now, operator)
+                self._token_row(
+                    new, owner.id, TokenPurpose.RECOVERY, issued_at, operator
+                )
             )
             await session.flush()
             for audit_ref in revoked:
@@ -405,7 +436,7 @@ class OwnerOperator:
             user_id=user_id,
             login_name=login_name,
             purpose=TokenPurpose.RECOVERY,
-            expires_at=now + self._ttl,
+            expires_at=issued_at + self._ttl,
             operator=operator,
         )
 
@@ -416,9 +447,10 @@ class OwnerOperator:
         new: tokens.NewToken,
         user_id: uuid.UUID,
         purpose: TokenPurpose,
-        now: datetime,
+        issued_at: datetime,
         operator: OperatorIdentity | None,
     ) -> SetupTokenRow:
+        """The row of a new token, whose lifetime starts at ``issued_at``."""
         return SetupTokenRow(
             id=new.token_id,
             audit_ref=new.audit_ref,
@@ -426,8 +458,8 @@ class OwnerOperator:
             purpose=purpose.value,
             salt=new.salt,
             secret_hash=new.secret_hash,
-            created_at=now,
-            expires_at=now + self._ttl,
+            created_at=issued_at,
+            expires_at=issued_at + self._ttl,
             attempts=0,
             issued_by_uid=operator.uid if operator is not None else None,
             issued_by_sudo_uid=operator.sudo_uid if operator is not None else None,
