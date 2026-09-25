@@ -69,6 +69,12 @@ name only in the log).
 ``history`` (read by tests and diagnostics, not by any request path) still runs
 on a pooled session.
 
+**PostgreSQL 18 or newer** is required for this path (``transaction_timeout``;
+decided by the human on 2026-09-25, Decision 0006; it is what the tests and CI
+run). A server older than 17 does not know the setting and fails these calls at
+the first statement, closed; 17 knows it but is neither tested nor supported.
+Nothing checks the version at start-up.
+
 Opening a request is serialised **per (task, user)** by a transaction-scoped
 advisory lock, so that the cap on open approvals holds under concurrency (a
 count followed by an insert would let simultaneous requests all pass). The
@@ -98,6 +104,7 @@ from psycopg.types.json import Jsonb
 from sqlalchemy import select
 
 from paw_backend.db import Database
+from paw_backend.tasks import TaskRun
 from paw_backend.tools.approval_types import (
     CONSUME_TASK_REFUSAL,
     OPEN_TASK_REFUSAL,
@@ -122,7 +129,7 @@ from paw_backend.tools.approval_types import (
 from paw_backend.tools.capabilities import ApprovalLevel
 from paw_backend.tools.models import ToolApprovalEventRow
 from paw_backend.tools.scope import Target, TargetKind
-from paw_backend.tools.task_state import TaskActivity, TaskRun, lock_task_activity
+from paw_backend.tools.task_state import TaskActivity, lock_task_activity
 
 _OPEN = (ApprovalStatus.PENDING.value, ApprovalStatus.APPROVED.value)
 # One statement, so that the revocation and its history are atomic without a

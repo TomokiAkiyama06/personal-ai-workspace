@@ -10,6 +10,12 @@ normalised message. Only signatures are stored, never the raw message.
 Everything is independent of the budget preset: an Unlimited task is still
 stopped by a detected loop.
 
+Scope. Only repeated FAILURES are detected. REQUIREMENTS.md also names repeated
+tool calls and same-kind modifications; repeated successful or no-op tool calls and
+edits never enter the window and cannot produce TRY_ALTERNATIVE / ESCALATE (only the
+budgets stop them, and not an Unlimited task). No issue owns them yet: see
+Decision 0007, section 3 (Proposed).
+
 The detector part is split in three pure functions (``normalize_failure_message``,
 ``failure_signature``, ``evaluate_loop``) and the database part
 (``LoopDetector``) that persists a bounded window of ``FailureRecord`` per task
