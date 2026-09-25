@@ -5,6 +5,7 @@ Personal AI Workspace の Core Backend です。
 Login と Session はまだ実装していません（PAW-022 以降）。
 RBAC と Audit（PAW-025）、Task の Lifecycle と永続化（[PAW-032](#agent-task-lifecycle)、HTTP の Endpoint はまだありません）、Task Queue・Budget・Loop 検知（[PAW-033](#task-queue--budget--loop-検知)）、Tool Broker と Capability Policy（[PAW-031](#tool-broker--capability-policy)、HTTP の Endpoint はまだありません）、Memory の PostgreSQL Schema（[PAW-040](#memory--conversation-schema)）、
 最小の `users` Table と Owner の初期設定・復旧のコマンド（[PAW-021](#owner-の初期設定と復旧)）を実装済みです。Memory の保存・整理・検索の処理は PAW-041 以降です。
+Research の一時保存（[PAW-050](#research-scratch-store)、24 時間 TTL、期限切れを消す Janitor つき、HTTP の Endpoint はまだありません）も実装済みです。
 
 [Architecture](../../docs/ARCHITECTURE.md) に基づき、最終的に以下の機能を Backend 側で扱います。
 
@@ -38,12 +39,12 @@ Python 側の Package（`pgvector-python`）は使わず、`paw_backend/memory/v
 apps/backend/
 ├─ pyproject.toml          # 依存（完全一致で固定）と Ruff 設定
 ├─ alembic.ini             # Alembic 設定（DB URL は持たない）
-├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0031 は Tool Approval、0033 は Queue / Budget / Loop、0040 は Memory Schema）
+├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0031 は Tool Approval、0033 は Queue / Budget / Loop、0040 は Memory Schema、0050 は Research Scratch）
 ├─ paw_backend/
 │  ├─ app.py               # create_app(settings)
 │  ├─ config.py            # PAW_ 環境変数から読む Settings
 │  ├─ server.py            # Uvicorn 起動（TLS 設定）
-│  ├─ db.py                # 非同期 Engine / Session、Readiness 確認
+│  ├─ db.py                # 非同期 Engine / Session、Readiness 確認、中断できる接続（`fetch_abortable`、`run_abortable`）
 │  ├─ events.py            # プロセス内 Event Bus と Heartbeat
 │  ├─ errors.py            # 共通の Error Response
 │  ├─ middleware.py        # Request ID、Host 検証、Security Header
@@ -54,6 +55,7 @@ apps/backend/
 │  ├─ tasks/               # Agent Task の状態遷移と永続化（PAW-032）
 │  │  └─ queueing/         # Task Queue、Budget、Loop 検知、Escalation の判断（PAW-033）
 │  ├─ memory/              # Memory / Conversation の Model、ACL 条件、vector 型、Pin / Importance 変更の Actor（PAW-040）
+│  ├─ research/scratch/    # Research Scratch Store: 24 時間 TTL の一時保存と、期限切れを消す Janitor（PAW-050）
 │  ├─ tools/               # Tool Broker、Capability Policy、Approval（PAW-031）
 │  └─ api/
 │     ├─ deps.py           # FastAPI Dependency
@@ -115,6 +117,7 @@ Database には pgvector が必要です（CI は `pgvector/pgvector:pg18` を�
 | `PAW_OPERATOR_DATABASE_ROLE` | なし | 上の Role 名（`PAW_APP_DATABASE_ROLE` と同じ検証）。Migration `0021` が、実在するこの Role に管理コマンドの権限を与える |
 | `PAW_SETUP_TOKEN_TTL_SECONDS` | `1800` | Owner の Setup / Recovery Token の有効期間（60〜14400 秒） |
 | `PAW_SETUP_TOKEN_MAX_ATTEMPTS` | `5` | 1 つの Token に許す試行回数（1〜20）。使い切った Token は無効になる |
+| `PAW_SCRATCH_PURGE_INTERVAL_SECONDS` | `3600` | 期限切れの Research Scratch Item を消す Janitor の間隔（秒）。`0` で Janitor を止める（期限切れの行が DB に残り続ける）。それ以外は 60〜86400。DB が未設定のときも起動しない。[Janitor](#janitor期限切れの削除) |
 | `PAW_EVENT_HEARTBEAT_SECONDS` | `15` | `system.heartbeat` の間隔 |
 | `PAW_EVENT_QUEUE_SIZE` | `100` | 接続ごとの Event Queue。溢れた場合は古い Event を捨てる |
 | `PAW_EVENT_MAX_SUBSCRIBERS` | `100` | 同時に接続できる SSE / WebSocket の数。超えた接続は SSE が 503、WebSocket が Close Code 1013 |
@@ -213,6 +216,8 @@ URL の Query（`connect_timeout`、`application_name` など）はそのまま�
 Timeout した Probe は、Query の取消（psycopg が Server の確認を待つ、最大約 10 秒）を行わず、接続の Socket を閉じて即座に失敗させます。
 libpq 17 未満（`psycopg[c]` とシステムの libpq など）では、取消が Thread で実行され、`asyncio.run` の終了が長時間止まるためです。
 `Database.dispose()`（Application の終了時）は、実行中の Probe を同じ方法で止め、`PAW_SHUTDOWN_TIMEOUT_SECONDS` の範囲で完了を待ちます。
+同じ仕組みの中断できる接続が、ほかに 2 つあります。1 文を実行する `fetch_abortable` / `execute_abortable`（起動時の診断、Audit の書き込み、承認の取り消し）と、複数の文を 1 Transaction で実行する `run_abortable`（Research Scratch の Purge、[PAW-050](#janitor期限切れの削除)）です。どちらも Pool を使わず、呼び出し元の Cancel と `dispose()` で接続の Socket を閉じます。`run_abortable` は Session を渡す Callback を受け取り、正常に戻れば Commit、例外なら Rollback します。
+どちらも同時に開く接続は `PAW_DATABASE_POOL_SIZE` までで、空きがなければ待ちますが、**この空き待ちも中断できる処理の一部**です。待っている呼び出しを Cancel すると待ちがその場で終わり（空きは取りも返しもしません）、`dispose()` は待っている呼び出しを全て `DatabaseDisposedError` で失敗させます（何も実行していません）。`dispose()` の実行中に始まった呼び出しも同じ例外で拒否します。実行中の呼び出しが空きを返した直後に待っていた呼び出しが動き出して、`dispose()` が止める対象を数えた後で Transaction を始めたり、破棄した後の Engine を作り直したりすることはありません（独立 Review の指摘）。`dispose()` が戻った後は、Engine を最初の使用時に作り直すので、再び使えます。空きの管理は `paw_backend/db.py` の小さな `_Slots`（`asyncio.BoundedSemaphore` と同じく先着順で、Cancel された待ちが空きを失わず、返しすぎを拒否する。待っている呼び出しを一度に失敗させられる）です。
 今後 Session を使う Endpoint を追加する場合、終了時に実行中だった Query の取消は psycopg の取消経路に入ります。
 その経路が終了を遅らせないことは、その Issue で確認してください。
 `Database.session()` と `paw_backend.api.deps.get_session` が Session を提供します。
@@ -1285,6 +1290,127 @@ ANN Index（HNSW / IVFFlat）はまだありません。Model が決まった後
 Model と Migration の一致は Test が検証します（Alembic の autogenerate の差分が空であること、Model から作った Schema と Migration の Catalog（Trigger を含む）が同じであること）。Trigger は Alembic の比較の対象外なので、Model は DDL Event、Migration は同じ DDL の複製で作り、Trigger 関数の定義も Test が比較します。
 制約名は `paw_backend.db.Base` の命名規則に従います。
 
+## Research Scratch Store
+
+[PAW-050](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/42)（Revision `0050`）で実装しました。
+`paw_backend/research/scratch/` は、Web / Research の調査結果を **`created_at + 24 時間`** だけ置く一時保存です。
+**Long-term Memory とは別の Table** で、どちらの向きにも Foreign Key はありません。Long-term Memory へ自動では保存しません（[要件](../../REQUIREMENTS.md)の「Memory promotion」）。
+**HTTP の Endpoint はありません。** `ScratchStore` は `TaskService` と同じく認可を行わず、権限の確認は呼び出す側（API 層）の仕事です。
+
+| ファイル | 内容 |
+| --- | --- |
+| `models.py` | `research_scratch_items`、`research_scratch_leases` の Model |
+| `limits.py` | TTL と各種の上限（Test が DB の CHECK 制約との一致を検証） |
+| `records.py`、`errors.py` | 返す値（`ScratchItem`、`Lease`、`PurgeResult`）と型付きの Error |
+| `validation.py` | 引数の検証（DB を使わない純粋関数） |
+| `service.py` | `ScratchStore`（Clock は注入） |
+| `janitor.py` | `ScratchJanitor`: `purge_expired` を定期的に呼ぶ Loop（`sleep` は注入）。`create_app` の Lifespan が起動する |
+
+### Table
+
+| Table | 内容 |
+| --- | --- |
+| `research_scratch_items` | 調査結果 1 件。`query`、`title`、`summary`、`content`（`summary` か `content` のどちらかは必須）、`source_metadata`（JSON Object。URL、種別、`fetched_at`、`published_at`、抽出した Claim など。16 KiB まで）、`created_at`、`expires_at`、`pinned`（Pin）、`saved`（User の明示保存）、`promotion_state`（`none` / `pending` / `promoted` / `rejected`）、`promotion_requested_at` |
+| `research_scratch_leases` | 「今使っている」印。`(item_id, holder_id)` が Key。`holder_id` は Task や Worker の実行の UUID |
+
+- **TTL**: `expires_at = created_at + interval '24 hours'` を CHECK 制約で強制します（Generated Column は `timestamptz + interval` が immutable ではないため使えません）。`expires_at` は変更しません。延期は TTL の延長ではなく削除の保留です。
+- **Project / Task の関係**: `project_id` も `task_id` も**素の UUID**で、Foreign Key はありません（projects の Table がまだなく、`task_id` の理由は [Decision 0013](../../docs/decisions/0013-research-scratch-task-relation.md)（2026-09-25 に承認）にあります）。Task を削除しても、削除が調査結果に止められることも、Pin 済みなどの調査結果が Task と一緒に消えることもなく、Item は `task_id` を保ちます（`list_items(project_id, task_id=...)` で読めます）。期限切れの削除は Task と無関係に働きます。`add` は、Task の行を `FOR KEY SHARE` で Lock して、Task が存在し、その `project_id` が同じであることを確認します（存在しない Task と他の Project の Task は区別しません）。**DB は `task_id` の存在を検査しません**（この確認が唯一で、削除された Task を指す `task_id` は残ります）。
+- 全ての Method は `project_id` を受け取り、その Project の中だけで Item を探します。他の Project の ID は「存在しない」と同じ扱いです。
+
+### 削除の延期
+
+次のどれかに当てはまる Item は削除を延期します（**exempt**）。
+
+- **Pin 済み**（`pinned`）。一時的に残す印です。
+- **User が明示保存**（`saved`）。要件は「Pin 済み」と「User が明示保存」を別の延期理由として挙げているため、Pin とは**別の独立した印**にしています（[Decision 0013](../../docs/decisions/0013-research-scratch-task-relation.md)（2026-09-25 に承認）の「Pin と明示保存」）。
+- **Memory 昇格の確認中**（`promotion_state = 'pending'`）。
+- **使用中**（`expires_at > now` の Lease が 1 つ以上ある）。
+
+Item は `now < expires_at` または exempt のとき **見える**（visible）ことにします。見えない Item は、`purge_expired` がまだ行を消していなくても、全ての Method で「存在しない」（`ScratchItemNotFoundError`）です。
+挙動が Janitor の実行時刻に左右されないようにするためです。期限切れで exempt でない Item は、Pin も保存も Lease も昇格要求もできません（復活させない）。
+最後の exempt 理由が終わる（Unpin、Unsave、Lease の終了・Release、昇格の解決）と、期限切れの Item は見えなくなり、次の `purge_expired` が削除します。延期用の別の状態や Queue はありません。
+
+- **Pin と保存は独立。** `pin` / `unpin` は `pinned` の 1 列だけ、`save` / `unsave` は `saved` の 1 列だけを、Item の行を Lock した後の 1 つの `UPDATE` で変えます（もう一方の印は読み直した値のまま残り、同時の変更を失いません）。`unpin` は保存を消さず、`unsave` は Pin を消しません。どちらか一方でも立っていれば Item は残り、**両方**が下りて TTL が過ぎたときに限り、次の `purge_expired` が削除します。TTL は延びません。どちらも冪等で、探し方は `pin` と同じです（存在しない・他の Project・見えない Item は `ScratchItemNotFoundError`）。Test は `test_scratch_saved.py`（Pin + 保存の後の `unpin` で Purge を越えて残る、保存だけ、Pin だけ、両方を下ろすと TTL の後に削除される、`unpin` と `unsave` の同時実行、Lock を待つ間に他方の印が変わっても消えない）と `test_scratch_purge.py` です。
+- **Lease**: `acquire_use` が `lease_seconds`（既定 300、1〜3600）の Lease を作ります。同じ Holder の再取得は更新（短くもできる）、Holder ごとに別の行、同時に有効な Lease は 1 Item に 16 まで（`ScratchLeaseLimitError`）。
+  Lease は `[leased_at, expires_at)` の間だけ有効で、更新も Release もされなければ最長 1 時間（CHECK 制約）で終わります。落ちた Worker が Item を固定し続けることはありません。期限切れの Lease は次の `acquire_use` が消します。`release_use` は何度呼んでも、Item が既に消えていても Error になりません。
+- **昇格**: `request_promotion` で `pending`（`none` と `rejected` から。`pending` は何もしない。`promoted` は `ScratchStateError`）。`resolve_promotion(outcome)` で `promoted` / `rejected`（`pending` のときだけ。同じ結果の再実行は何もしない。それ以外は `ScratchStateError`）。Store は Memory Candidate を作りません。それは昇格の Flow の仕事です。
+
+### Purge と同時実行
+
+`purge_expired(now=None, batch_size=500)` は全 Project を対象に、`expires_at <= now` で exempt でない行を最大 `batch_size`（1〜5000）件、1 Transaction で削除します。`PurgeResult(purged, deferred, has_more)` の意味は次のとおりです。
+
+- `purged`: 削除した行数。`deferred`: 期限切れで exempt のために残っている行数（複数の理由があっても 1）。`has_more`: バッチに入りきらなかった削除対象が残っている（呼び出し側は繰り返す）。
+- 古い exempt の行がバッチを埋めて削除対象を飢えさせないよう、exempt の行は選択の段階で除外します。
+
+同時実行の規則（`service.py` の冒頭にも書いています）。
+
+1. Item / Lease を変える操作は、先に Item の行を `SELECT ... FOR UPDATE` で Lock します（待ちます）。Lock 待ちは `lock_timeout_ms`（既定 5000）で `ScratchBusyError` になります。読み取り（`get`、`list_items`）は Lock も待ちもしません。
+2. `purge_expired` は待たずに `FOR UPDATE ... SKIP LOCKED` で候補を Lock し、**別の Statement** で exempt を再確認して削除します。Purge の Snapshot の後に Commit された Lease / Pin も見えるため、Purge より前に取得された Item は消えません。Lock 中の行は飛ばされ（数にも入らない）、次の呼び出しが扱います。Purge が先に Lock した場合、待っていた操作は「存在しない」になります。
+3. 2 つの Purge が同時に動いても、各行は 1 回だけ削除されます。
+
+### 呼び出し側の認可（提案）
+
+Endpoint は次の Issue の仕事です。次の対応を提案します（未強制）。読み取り（`get`、`list_items`）は `project.read`。`add`、`acquire_use`、`release_use`、`pin`、`unpin` は `project.task.run`。`pin`、`unpin` は Agent へ委任できます。
+**`save`、`unsave` は User 本人だけができる操作で、Agent へ委任できません**（[Decision 0013](../../docs/decisions/0013-research-scratch-task-relation.md)で 2026-09-25 に承認。要件の「User が明示保存」は人の意思表示であり、Agent が調査結果を TTL から免れさせられないようにするためです）。`ScratchStore` 自体は認可をしないので、この制限は呼び出し側（API 層）が強制します。`save`、`unsave` を、Agent の権限（委任元 User と `AgentGrant` の積集合）では呼べない経路にしてください。専用の Capability を新設するかと、その id はここでは決めていません。新設するときは、委任不可（`CapabilityInfo.delegable=False`）にしてください（[Decision 0004](../../docs/decisions/0004-rbac-capability-and-audit-policy.md) は、Capability を追加するときに委任の可否を明示することを求めます）。
+`request_promotion` は `project.memory.use`、`resolve_promotion` は `project.memory.manage`（Agent へ委任できない: 調査結果を Agent の判断だけで Long-term Memory へ送らないため）。`purge_expired` は Backend 自身の Janitor だけ（User も Agent も呼べない）。
+
+### 上限と入力の検証
+
+`query` 1000 文字、`title` 500、`summary` 8000、`content` 100000（Unicode の Code Point）、`source_metadata` は Compact な UTF-8 JSON で 16384 Byte・深さ 6・Key 128 文字。
+整数は ±(2^53 - 1)、浮動小数点は有限で 0 か 1e-6 以上 1e15 未満（PostgreSQL は数値を 10 進で持つため、極端な指数で Size の上限が意味を失うのを防ぐ）。
+型は変換しません（`"false"` は真偽値でなく、`bool` は `int` でなく、UUID の文字列は UUID でない）。NUL と UTF-8 にできない文字は拒否します。
+Error の Message は固定文字列（Field 名と理由の語彙）で、入力の内容・ID・DB の Message を含みません。DB の Error（接続断など）は加工せず伝わりますが、SQL の引数を含みうるため、呼び出し側は `str(error)` を User へ見せないでください。
+
+### 実装の経緯
+
+`validation.py` と `service.py` は、当初 Local Model（Qwen3-Coder-30B-A3B）に実装させる計画でした。仕様（Contract、Model、Migration、Test）は Claude が先に書き、Local Model の合格基準は Test だけでした。
+Local Model の試行は収束せず、構文エラーを含む部分的なコードしか作れなかったため、**この 2 つの Module は Claude の参照実装**です（人間の判断が必要な点は下記）。
+Test は参照実装で成り立つことを確認しながら書いたものです。Local Model の試行の前に確定しており、その後の変更は、負荷の高い環境で 20 件の同時 `acquire_use` が Lock Timeout に達しないよう、その 1 件の Test の `lock_timeout_ms` を伸ばしただけです。
+
+### Janitor（期限切れの削除）
+
+`ScratchStore` は期限切れの Item を全ての Method で見えなくしますが、行と調査内容を消すのは `purge_expired` だけです。呼ぶ処理がなければ 24 時間の TTL は DB で実施されません。
+`janitor.py` の `ScratchJanitor` がその Loop です。`create_app` の Lifespan が、**DB が設定されていて `PAW_SCRATCH_PURGE_INTERVAL_SECONDS` が 0 より大きいとき**だけ、Heartbeat や権限の Diagnostic と同じ場所で起動します。
+
+- **間隔。** `PAW_SCRATCH_PURGE_INTERVAL_SECONDS`（既定 3600、`0` で止める。それ以外は 60〜86400 で、1〜59 と範囲外は起動時の設定 Error）。起動の 30 秒後（間隔が短ければその間隔）に最初の Tick、その後は間隔ごとです。すぐには実行しないので、起動処理や Diagnostic と競合せず、すぐ止められた Backend は Purge の接続を開きません。
+- **1 回の Tick。** `purge_expired` を 500 件の Batch で、これ以上消せる行がない（`has_more` が偽）まで呼びます。1 Tick は最大 100 Batch（5 万行）で、上限に達して残りがあれば、次の Tick は 5 秒後です。Batch は 1 Transaction なので、途中で失敗しても、済んだ Batch の削除は残ります。
+- **削除の条件は Store のまま。** 期限は Store の Clock が決めます。Pin 済み・保存済み・使用中（Lease）・昇格確認中の Item は消えず、その事情が終わった後の最初の Tick で消えます。TTL は延びません。Long-term Memory には触れません。
+- **失敗。** Tick が失敗しても Loop は止まりません。WARNING に**例外の型名だけ**を出し（Message、SQL、調査内容は出さず、Traceback も付けません）、30 秒から倍にして間隔まで待ち、成功で元に戻ります。削除できた件数は INFO に出します。
+- **停止。** Lifespan の終了で Cancel し、`PAW_SHUTDOWN_TIMEOUT_SECONDS` の範囲で待ってから `Database.dispose()` を呼びます（Diagnostic と同じ）。Purge が Query の途中でも、PostgreSQL が応答しなくても、Janitor はその場で終わります（下記「止まらない PostgreSQL」）。待ちを打ち切って Task を見捨てるのは、Cancel を無視する Task だけで、その数を WARNING に出します。
+- **複数 Process。** それぞれが Janitor を持ってかまいません。`purge_expired` は `SKIP LOCKED` なので、互いに待たず、同じ行を二重に消しません（`test_two_janitors_at_once_delete_every_row_exactly_once`）。
+- **権限。** `PAW_APP_DATABASE_ROLE` の Role のままで動きます。Migration `0050` の SELECT / DELETE だけを使います（`test_scratch_grants.py` が Janitor の Test もその Role で実行します）。
+- **Test。** `test_scratch_janitor.py`（Fake の Store と `sleep`）、`test_scratch_janitor_settings.py`、`test_scratch_janitor_lifespan.py`（起動する・しない、Cancel が `dispose` より先、待ちが有界）、`test_scratch_janitor_postgres.py`（実際の PostgreSQL で期限切れの行が消え、Pin・使用中・昇格確認中は残る。Application 全体でも確認。`StalledPurgeTest` は PostgreSQL の前に置いた Proxy を Purge の途中で止めて、Cancel と `dispose()` がその場で Purge を止めることを確かめます）、`test_scratch_janitor_stall.py`（応答しない PostgreSQL の Fake で、Purge の途中の Janitor が Lifespan の終了で本当に終わること、Process も遅れずに終わること）、`test_database_run_abortable.py`（`Database.run_abortable` の Commit・Rollback・同時数・Cancel）、`test_database_slot_wait.py`（空き待ちの Cancel と `dispose()`。応答しない PostgreSQL の Fake を、`database_pool_size=1` の唯一の空きを持ったまま止まる呼び出しにして確かめます）。
+
+**止まらない PostgreSQL。** PostgreSQL が接続を受け付けたまま応答しなくなると、通常の Pool の Query は Cancel でも止まりません（psycopg がサーバに Cancel を頼んで、答えを待ちます。約 10 秒、libpq が 17 未満なら Interpreter が終了時に待つ Thread から）。Lifespan の待ちは `PAW_SHUTDOWN_TIMEOUT_SECONDS` で打ち切れても、Task と接続は残り、Process の終了が遅れます（独立 Review の指摘）。そこで `purge_expired` は、Transaction 全体を `Database.run_abortable` で実行します。
+
+- Pool を使わない**専用の接続**で、Purge 専用の Task の中で動きます。Janitor はその Task を待つだけです。
+- Janitor の Cancel と `Database.dispose()` は、その接続の **Socket を閉じます**（起動時の Diagnostic の `fetch_abortable` と同じ仕組み）。実行中の文はすぐ失敗し、サーバー側の Transaction は接続が切れたときに Rollback されます。接続を開く途中や、SQLAlchemy が新しい接続で最初に実行する Query の途中でも同じです（接続は作った時点で登録します）。
+- `SKIP LOCKED`、行の Lock、2 つ目の文での再確認、`lock_timeout_ms` と `ScratchBusyError`、`purge_probe` は変わりません。Transaction が途中で止められても、消す文が Commit されるのは全体が成功したときだけで、次の Tick が同じ仕事をやり直します（冪等）。`COMMIT` が既にサーバーへ届いていた場合は、適用されていることがあります。
+- Test は、応答しない PostgreSQL の Fake（`HangingPostgres`）で、Lifespan の終了が待ちの上限を使い切らず Janitor が終わること、Process が遅れず終わること（libpq 17 と、17 未満の Thread による Cancel の両方）を、PostgreSQL の前に置いた Proxy で、Purge の Transaction の途中（行を選んで Lock した後）で止めた場合を確かめます。実装を Pool 経由の Transaction に戻すと、どちらも失敗します。
+
+限界: 接続は 1 Batch ごとに開いて閉じます（1 Tick に最大 100 回）。Purge には**独自の時間切れがありません**。アプリケーションが動き続けたまま PostgreSQL だけが止まると、Tick は接続が失敗するか Janitor が止められるまで待ちます（以前の Pool 経由でも同じで、この Issue では時間切れを足していません）。
+
+### 制限と未確認の点
+
+- 削除は Janitor の間隔だけ遅れます（既定で最大約 1 時間）。ただし、期限切れの Item は削除の前から全ての Method で「存在しない」ので、読み取りは Janitor に依存しません。Janitor が動かない間（`PAW_SCRATCH_PURGE_INTERVAL_SECONDS=0`、`PAW_DATABASE_URL` 未設定、Process の停止、30 秒より短い間隔での再起動の繰り返し）は、期限切れの行と内容が DB に残ります。Janitor の停止や失敗を知らせる仕組み（Metrics、Alert）はなく、あるのは Log の WARNING だけです。詳しくは[Janitor](#janitor期限切れの削除)。
+- `task_id` は素の UUID なので、Task を削除した後は存在しない Task を指し、DB はそれを検査しません（存在の確認は `add` の時点だけ）。[Decision 0013](../../docs/decisions/0013-research-scratch-task-relation.md)で、この選択が承認されています。
+- Claim と Source の対応（Evidence / Provenance）は PAW-052 です。ここでは `source_metadata` に置くだけで、構造化しません。
+- 1 Project あたりの Item 数の上限（Quota）は持ちません。
+- Purge の「Snapshot の後に Commit された Lease」の Race は、実際の同時実行では起こしにくい時間窓です。Test は `purge_probe`（Test 用の接続点）で、その瞬間に exempt が現れる状況を決定的に再現して確認しています。同時実行の Test は複数回繰り返して安定を確認していますが、時間窓そのものを外部から狙って再現しているわけではありません。
+- Migration `0050` の `down_revision` は `0031` です（鎖は `0001 → 0025 → 0032 → 0040 → 0021 → 0033 → 0031 → 0050`）。
+- **Application Role の権限。** 共通の `grant_app_privileges`（PAW-025）で、`ScratchStore` が実行する文に必要な最小の権限だけを付けます。`research_scratch_items` は SELECT / INSERT / DELETE と、UPDATE は `pinned`・`saved`・`promotion_state`・`promotion_requested_at` の 4 列だけ、`research_scratch_leases` は SELECT / INSERT / DELETE と、UPDATE は `leased_at`・`expires_at` だけです。したがって Application は `expires_at`（Item の期限）、内容、`project_id` などを SQL で書き換えられず、TRUNCATE と Schema の変更もできません。`test_scratch_grants.py` は、この Role で `ScratchStore` の Test を全て実行し、上の権限の一致と、禁止した文の拒否を確かめます。
+
+### 人間の判断が必要な点
+
+1. **昇格の確認中（`pending`）の期限。** 期限がないため、確認の Flow が止まると、その Item は残り続けます（`promotion_requested_at` で見つけられます）。期限を付けるか。
+2. **「User が明示保存」（[Decision 0013](../../docs/decisions/0013-research-scratch-task-relation.md)で承認済み）。** [要件](../../REQUIREMENTS.md)の「Pin 済み」と「User が明示保存」は別の延期理由なので、Pin を 1 つの真偽値で兼ねると `unpin` が保存まで消して期限切れの Item を削除させてしまいます（Review の指摘）。そこで Pin（`pinned`）と保存（`saved`）を**独立した 2 つの印**にしました（情報を失わない最小の案）。承認された内容は次のとおりです。保存と Pin は UI・一覧で今は区別しない。保存済み・Pin 済みの件数の Quota は今は持たない。`save` / `unsave` は User 本人だけができる操作で Agent へ委任できない（`pin` / `unpin` は従来どおり）。誰が・いつ保存したかは記録せず、1 人の `unsave` で保存の印が消える。保存に最大の期間は付けない。
+3. **Claim と Source の置き場所。** PAW-052 まで `source_metadata`（16 KiB まで）に置きます。
+4. **Task を削除したときの `task_id`。** Review は、最初の実装（`tasks.id` への Foreign Key、`ON DELETE SET NULL`）は Task の削除で `task_id` を失い、Pin 済みの Item が Project / Task の関係を保てないと指摘しました。要件は Task 削除時の扱いを定めていないため、[Decision 0013](../../docs/decisions/0013-research-scratch-task-relation.md)（2026-09-25 に承認）として、Foreign Key を持たない素の UUID にしました。Task の削除は止められず（`RESTRICT` は止める）、Pin 済みは消えず（`CASCADE` は消す）、期限切れは消え、関係は残ります。代わりに DB は存在を保証せず、削除された Task を指す `task_id` が残ります。`RESTRICT` など別の選択にするか、Task を論理削除にして Foreign Key に戻すかは、Task の削除の方針（物理か論理か）や Project の Table が入ったときに、新しい Decision で見直します。
+5. **認可の対応。** 上の「呼び出し側の認可（提案）」で、特に `resolve_promotion` を委任不可の `project.memory.manage` にする点。
+6. **Quota。** Item 数の上限。保存済み・Pin 済みの件数の上限は、[Decision 0013](../../docs/decisions/0013-research-scratch-task-relation.md)で今は持たないと承認されています。
+7. **Janitor の既定値。** 間隔（1 時間）、起動の 30 秒後に最初の Tick、1 Tick の上限（500 件 × 100 Batch）。仕様に数値がないため、最も単純な値を選びました。
+8. **PostgreSQL が止まったときの終了。** Review の指摘に従い、Purge は中断できる専用の接続で行い、Cancel と `dispose()` で接続の Socket を閉じます（上の「止まらない PostgreSQL」）。残る判断は、Purge の 1 Batch に**時間切れ**を付けるか（付ければ、応答しない PostgreSQL の間も Janitor が自分で諦めて次の Tick に進みます。値は仕様にないため付けていません）と、1 Batch ごとに接続を開くコストを許すかです。
+
 ## 依存 Package
 
 依存は `pyproject.toml` で完全一致に固定しています。
@@ -1298,7 +1424,7 @@ CI は pre-commit の専用環境で Test を実行するため、同じ Version
 ## 今後の Issue
 
 [PAW-021](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/18)（Owner Setup）、
-RBAC（PAW-025）、Task Lifecycle（PAW-032）、Task Queue / Budget / Loop 検知（PAW-033）、Tool Broker（PAW-031）、Memory Schema（PAW-040）は、この Skeleton の上に実装済みです。
+RBAC（PAW-025）、Task Lifecycle（PAW-032）、Task Queue / Budget / Loop 検知（PAW-033）、Tool Broker（PAW-031）、Memory Schema（PAW-040）、Research Scratch Store（PAW-050）は、この Skeleton の上に実装済みです。
 PAW-022（Login / Session / Password）と PAW-023（Passkey / Step-up）は Owner Setup の Token を受け取る側で、まだありません。
 Memory の保存・整理・検索は PAW-041 以降で、Memory Schema の上に実装します。
 受け入れ基準は [Implementation Backlog](../../docs/IMPLEMENTATION_BACKLOG.md)、

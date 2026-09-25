@@ -392,11 +392,15 @@ class ShutdownWaitIsBoundedTest(unittest.IsolatedAsyncioTestCase):
 
         database = FakeDatabase()
         app = create_app(make_settings(shutdown_timeout_seconds=1), database=database)
-        with patch("paw_backend.app.warn_about_loose_privileges", stubborn):
+        with (
+            patch("paw_backend.app.warn_about_loose_privileges", stubborn),
+            self.assertLogs("paw_backend.app", level="WARNING") as logs,
+        ):
             async with app.router.lifespan_context(app):
                 await asyncio.sleep(0.1)
                 started = time.monotonic()
         elapsed = time.monotonic() - started
+        self.assertEqual(len(logs.records), 1)  # the task given up on is reported
         # It waits for the shutdown budget (1 s), not for the task (2 s) ...
         self.assertGreater(elapsed, 0.8)
         self.assertLess(elapsed, 1.7)

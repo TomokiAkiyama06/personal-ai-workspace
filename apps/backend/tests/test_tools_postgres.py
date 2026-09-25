@@ -2552,7 +2552,7 @@ class StalledServerTest(unittest.IsolatedAsyncioTestCase):
                     lambda: (
                         not database._probes
                         and not database._probe_connections
-                        and database._abortable_slots._value
+                        and database._abortable_slots.free
                         == database._settings.database_pool_size
                     ),
                     limit=3,

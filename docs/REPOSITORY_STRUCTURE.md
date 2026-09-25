@@ -52,7 +52,8 @@ personal-ai-workspace/
 │  │  │     ├─ 0031_tool_approvals.py
 │  │  │     ├─ 0032_task_lifecycle.py
 │  │  │     ├─ 0033_task_queue_budget_loop.py
-│  │  │     └─ 0040_memory_schema.py
+│  │  │     ├─ 0040_memory_schema.py
+│  │  │     └─ 0050_research_scratch_store.py
 │  │  ├─ paw_backend/
 │  │  │  ├─ __init__.py
 │  │  │  ├─ __main__.py
@@ -79,6 +80,17 @@ personal-ai-workspace/
 │  │  │  │  ├─ operator.py
 │  │  │  │  ├─ redeemer.py
 │  │  │  │  └─ tokens.py
+│  │  │  ├─ research/
+│  │  │  │  ├─ __init__.py
+│  │  │  │  └─ scratch/
+│  │  │  │     ├─ __init__.py
+│  │  │  │     ├─ errors.py
+│  │  │  │     ├─ janitor.py
+│  │  │  │     ├─ limits.py
+│  │  │  │     ├─ models.py
+│  │  │  │     ├─ records.py
+│  │  │  │     ├─ service.py
+│  │  │  │     └─ validation.py
 │  │  │  ├─ tasks/
 │  │  │  │  └─ queueing/
 │  │  │  │     ├─ __init__.py
@@ -124,10 +136,13 @@ personal-ai-workspace/
 │  │     ├─ fake_postgres.py
 │  │     ├─ identity_support.py
 │  │     ├─ queueing_support.py
+│  │     ├─ scratch_support.py
 │  │     ├─ support.py
 │  │     ├─ teardown_child.py
 │  │     ├─ test_config.py
 │  │     ├─ test_database.py
+│  │     ├─ test_database_run_abortable.py
+│  │     ├─ test_database_slot_wait.py
 │  │     ├─ test_db_transact_abortable.py
 │  │     ├─ test_errors.py
 │  │     ├─ test_events.py
@@ -152,6 +167,22 @@ personal-ai-workspace/
 │  │     ├─ test_queueing_loop_db.py
 │  │     ├─ test_queueing_queue.py
 │  │     ├─ test_queueing_schema.py
+│  │     ├─ test_scratch_concurrency.py
+│  │     ├─ test_scratch_grants.py
+│  │     ├─ test_scratch_janitor.py
+│  │     ├─ test_scratch_janitor_lifespan.py
+│  │     ├─ test_scratch_janitor_postgres.py
+│  │     ├─ test_scratch_janitor_settings.py
+│  │     ├─ test_scratch_janitor_stall.py
+│  │     ├─ test_scratch_migration.py
+│  │     ├─ test_scratch_purge.py
+│  │     ├─ test_scratch_records.py
+│  │     ├─ test_scratch_saved.py
+│  │     ├─ test_scratch_schema.py
+│  │     ├─ test_scratch_service_validation.py
+│  │     ├─ test_scratch_store_items.py
+│  │     ├─ test_scratch_store_use.py
+│  │     ├─ test_scratch_validation.py
 │  │     ├─ test_security.py
 │  │     ├─ test_server.py
 │  │     ├─ test_tools_approvals.py
@@ -213,6 +244,7 @@ personal-ai-workspace/
 │     ├─ 0005-owner-setup-and-recovery.md
 │     ├─ 0006-tool-broker-policy.md
 │     ├─ 0007-task-queue-budget-and-loop-policy.md
+│     ├─ 0013-research-scratch-task-relation.md
 │     ├─ 0014-task-working-set-persistence.md
 │     └─ README.md
 └─ evaluator/

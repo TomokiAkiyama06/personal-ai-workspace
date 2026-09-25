@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.pool import NullPool
 
 from paw_backend.config import Settings
 
@@ -58,6 +59,86 @@ class DatabaseNotConfiguredError(RuntimeError):
     """``PAW_DATABASE_URL`` is not set."""
 
 
+class DatabaseDisposedError(RuntimeError):
+    """``dispose()`` ran (or is running): abortable work is not started.
+
+    Raised by ``fetch_abortable`` / ``run_abortable`` to a call that was waiting
+    for a connection slot when ``dispose()`` began, or that started while it ran.
+    Nothing of the call was executed.
+    """
+
+
+class _Slots:
+    """A bounded counting gate whose waiters can be failed all at once.
+
+    Like ``asyncio.BoundedSemaphore`` (first come, first served; a cancelled
+    waiter neither keeps nor loses a slot; releasing a slot nobody holds is an
+    error), plus ``fail_waiters``, which ``Database.dispose()`` uses to end
+    every wait with an error instead of leaving the waiters to start work once a
+    running call gives its slot back.
+    """
+
+    def __init__(self, size: int) -> None:
+        self._size = size
+        self._in_use = 0  # slots taken, including one handed to a waiter
+        # The waiting callers, oldest first (a dict is an ordered set here).
+        self._waiters: dict[asyncio.Future[None], None] = {}
+
+    @property
+    def free(self) -> int:
+        return self._size - self._in_use
+
+    @property
+    def waiting(self) -> int:
+        return len(self._waiters)
+
+    def locked(self) -> bool:
+        """``True`` when no slot is free (the ``asyncio.Semaphore`` name)."""
+        return self.free <= 0
+
+    async def acquire(self) -> None:
+        # A slot that is handed to a waiter stays "in use", so there is never a
+        # free slot while somebody waits: a new call cannot overtake a waiter.
+        if self._in_use < self._size:
+            self._in_use += 1
+            return
+        waiter = asyncio.get_running_loop().create_future()
+        self._waiters[waiter] = None
+        try:
+            await waiter
+        except asyncio.CancelledError:
+            if (
+                waiter.done()
+                and not waiter.cancelled()
+                and waiter.exception() is None  # not one that was failed
+            ):
+                # The slot was handed to this waiter just before the
+                # cancellation: nobody will use it, so give it back (once).
+                self.release()
+            raise
+        finally:
+            self._waiters.pop(waiter, None)
+
+    def release(self) -> None:
+        if self._in_use == 0:
+            raise ValueError("A slot that nobody holds was released")
+        while self._waiters:
+            waiter = next(iter(self._waiters))
+            del self._waiters[waiter]
+            if not waiter.done():  # not one that was cancelled a moment ago
+                waiter.set_result(None)  # the slot moves to it: still in use
+                return
+        self._in_use -= 1
+
+    def fail_waiters(self, make_error: Callable[[], Exception]) -> None:
+        """Fail every waiting caller with its own error; held slots are kept."""
+        waiters = list(self._waiters)
+        self._waiters.clear()
+        for waiter in waiters:
+            if not waiter.done():
+                waiter.set_exception(make_error())
+
+
 class Database:
     """Owns the SQLAlchemy async engine.
 
@@ -80,8 +161,16 @@ class Database:
         self._recent: tuple[float, DatabaseStatus] | None = None
         # Abortable statements use connections outside the pool: at most as many
         # at once as the pool would allow, so a burst cannot exhaust the server.
-        # A slot is held by the query task until it has ended (`fetch_abortable`).
-        self._abortable_slots = asyncio.Semaphore(settings.database_pool_size)
+        self._abortable_slots = _Slots(settings.database_pool_size)
+        # `dispose()`: how many are running, and how many have started. A call
+        # that waited for a slot across the start of one must not run (see
+        # `_acquire_slot`).
+        self._disposing = 0
+        self._disposals = 0
+        # The engine of `run_abortable`: no pool, every transaction connects
+        # through `_connect_abortable`, which registers the driver connection.
+        self._abortable_engine: AsyncEngine | None = None
+        self._abortable_sessions: async_sessionmaker[AsyncSession] | None = None
 
     @property
     def configured(self) -> bool:
@@ -103,6 +192,18 @@ class Database:
     @property
     def _connect_timeout(self) -> int:
         return max(1, round(self._settings.database_timeout_seconds))
+
+    def _connect_kwargs(self, *, autocommit: bool) -> dict[str, Any]:
+        """The arguments for ``psycopg.AsyncConnection.connect`` of a dedicated one.
+
+        The same translation SQLAlchemy applies before it calls psycopg. The URL
+        may already carry `connect_timeout` (or `autocommit`), so the caller's
+        own values are merged in and win instead of being passed a second time.
+        """
+        url = make_url(self._settings.database_url.get_secret_value())
+        _, kwargs = url.get_dialect()().create_connect_args(url)
+        kwargs.update(autocommit=autocommit, connect_timeout=self._connect_timeout)
+        return kwargs
 
     def session(self) -> AsyncSession:
         """Return a new session; use it as ``async with database.session()``."""
@@ -135,14 +236,9 @@ class Database:
         by this task from the first byte so that it can be torn down (see
         ``_abort``).
         """
-        # The same translation SQLAlchemy applies before it calls psycopg. The
-        # URL may already carry `connect_timeout` (or `autocommit`), so the
-        # probe's own values are merged in and win instead of being passed a
-        # second time.
-        url = make_url(self._settings.database_url.get_secret_value())
-        _, kwargs = url.get_dialect()().create_connect_args(url)
-        kwargs.update(autocommit=True, connect_timeout=self._connect_timeout)
-        connection = await psycopg.AsyncConnection.connect(**kwargs)
+        connection = await psycopg.AsyncConnection.connect(
+            **self._connect_kwargs(autocommit=True)
+        )
         probe = asyncio.current_task()
         self._probe_connections[probe] = connection
         try:
@@ -150,6 +246,24 @@ class Database:
         finally:
             self._probe_connections.pop(probe, None)
             await connection.close()
+
+    async def _acquire_slot(self) -> None:
+        """Wait for a free slot of the abortable connections; take it.
+
+        The wait is part of the abortable work: cancelling the caller ends it
+        without taking a slot, and ``dispose()`` fails it with
+        ``DatabaseDisposedError`` (no slot is kept). A call is also refused
+        while ``dispose()`` runs, and one that was given a slot just before
+        ``dispose()`` began gives it back, so that no call starts work after
+        ``dispose()`` has taken stock of what to abort.
+        """
+        if self._disposing:
+            raise DatabaseDisposedError("The database is being disposed")
+        disposals = self._disposals
+        await self._abortable_slots.acquire()
+        if self._disposals != disposals:
+            self._abortable_slots.release()
+            raise DatabaseDisposedError("The database was disposed while waiting")
 
     async def fetch_abortable(
         self,
@@ -168,9 +282,10 @@ class Database:
         query (see ``_abort``). The limit is ONE deadline for the whole call:
         waiting for a free slot (see ``__init__``) and running the statement
         share it, so a call never takes longer than ``timeout_seconds``. Raises
-        ``TimeoutError`` at the deadline and the driver's error if the
-        connection fails. ``params`` are bound by the driver (``%(name)s``
-        placeholders), never formatted into ``sql``.
+        ``TimeoutError`` at the deadline, ``DatabaseDisposedError`` if
+        ``dispose()`` ran while it waited (see ``_acquire_slot``) and the
+        driver's error if the connection fails. ``params`` are bound by the
+        driver (``%(name)s`` placeholders), never formatted into ``sql``.
 
         A write that is aborted may or may not have been committed: the caller
         learns only that it did not finish in time.
@@ -281,7 +396,7 @@ class Database:
         # the statement share the limit (the query gets only what is left).
         loop = asyncio.get_running_loop()
         deadline = loop.time() + limit
-        await asyncio.wait_for(self._abortable_slots.acquire(), limit)
+        await asyncio.wait_for(self._acquire_slot(), limit)
         query = asyncio.create_task(start(deadline))
         # The slot belongs to the query task, not to this call: it is given back
         # when the task has really ended. A query that is aborted (or cancelled)
@@ -311,6 +426,89 @@ class Database:
     ) -> None:
         """``fetch_abortable`` for a statement whose rows are not needed."""
         await self.fetch_abortable(sql, params, timeout_seconds=timeout_seconds)
+
+    async def run_abortable[T](self, work: Callable[[AsyncSession], Awaitable[T]]) -> T:
+        """Run ``work(session)`` in ONE transaction that can be aborted at once.
+
+        For a unit of several statements that must not outlive the caller or
+        the database (the Research Scratch janitor's purge, PAW-050), where
+        ``fetch_abortable`` (one autocommit statement) does not fit. Like it,
+        the transaction runs on a dedicated connection outside the pool, in a
+        task of its own, and the caller only waits for it. When the caller is
+        cancelled, or the database is disposed, the connection's socket is shut
+        down instead of asking a possibly stalled server to cancel the query
+        (see ``_abort``): the statement in flight fails at once, the server
+        rolls the transaction back, and the caller's cancellation is not held
+        up. The connection is registered from the moment it exists, so the
+        statements SQLAlchemy runs on a new connection are covered too.
+
+        ``work`` gets an ``AsyncSession`` that is already in a transaction; a
+        normal return commits, an exception rolls back and is re-raised. It must
+        not start a transaction of its own, and its result must not be a
+        connection-bound object. An aborted transaction may or may not have been
+        committed: the caller learns only that it did not finish. There is no
+        deadline of its own (a caller that needs one wraps the call in
+        ``asyncio.timeout``: the expiry cancels the caller and so aborts the
+        connection). Waiting for a free slot (see ``__init__``) is cancellable
+        the same way, and ``dispose()`` fails it with ``DatabaseDisposedError``
+        (see ``_acquire_slot``).
+        """
+        if not self.configured:
+            raise DatabaseNotConfiguredError("PAW_DATABASE_URL is not set")
+        await self._acquire_slot()
+        try:
+            transaction = asyncio.create_task(self._run_transaction(work))
+            self._probes.add(transaction)
+            transaction.add_done_callback(self._probes.discard)
+            # Retrieve the outcome so that asyncio does not log it as unhandled.
+            transaction.add_done_callback(
+                lambda task: task.cancelled() or task.exception()
+            )
+            try:
+                # Unlike awaiting the task, asyncio.wait() does not cancel it
+                # when this caller is cancelled: the socket is shut down below.
+                await asyncio.wait({transaction})
+            finally:
+                if not transaction.done():  # this caller was cancelled
+                    self._abort(transaction)
+            return transaction.result()
+        finally:
+            self._abortable_slots.release()
+
+    async def _run_transaction[T](
+        self, work: Callable[[AsyncSession], Awaitable[T]]
+    ) -> T:
+        """The task of ``run_abortable``: one session on its own connection."""
+        task = asyncio.current_task()
+        if self._abortable_sessions is None:
+            self._abortable_engine = create_async_engine(
+                # Only its dialect is used: `_connect_abortable` connects.
+                self._settings.database_url.get_secret_value(),
+                poolclass=NullPool,
+                async_creator=self._connect_abortable,
+            )
+            self._abortable_sessions = async_sessionmaker(
+                self._abortable_engine, expire_on_commit=False
+            )
+        try:
+            async with self._abortable_sessions() as session, session.begin():
+                return await work(session)
+        finally:
+            self._probe_connections.pop(task, None)
+
+    async def _connect_abortable(self) -> psycopg.AsyncConnection:
+        """Open the driver connection of a transaction and register it at once.
+
+        SQLAlchemy runs its own statements on a new connection (the dialect's
+        version and settings queries) before it hands it out, and a stalled
+        server can leave any of them unanswered: registering here, before
+        SQLAlchemy sees the connection, lets ``_abort`` shut it down then too.
+        """
+        connection = await psycopg.AsyncConnection.connect(
+            **self._connect_kwargs(autocommit=False)
+        )
+        self._probe_connections[asyncio.current_task()] = connection
+        return connection
 
     async def check(self) -> DatabaseStatus:
         """Run ``SELECT 1``. Never raises and never reports connection details.
@@ -401,7 +599,27 @@ class Database:
         probe.cancel()
 
     async def dispose(self) -> None:
-        """Stop readiness probes and close the pool, within the shutdown budget."""
+        """Stop readiness probes and abortable work, close the pool, in the budget.
+
+        Abortable work (``fetch_abortable`` and ``run_abortable``) that is still
+        running is aborted like a readiness probe. A call that is still waiting
+        for a slot fails with ``DatabaseDisposedError`` at once (it has not
+        started anything), and so does one that starts while this runs: no
+        abortable work begins after the disposal took stock of what to stop.
+        Once ``dispose()`` has returned the object is usable again (the engines
+        are created on first use).
+        """
+        self._disposals += 1
+        self._disposing += 1
+        try:
+            self._abortable_slots.fail_waiters(
+                lambda: DatabaseDisposedError("The database was disposed while waiting")
+            )
+            await self._stop_work_and_close_engines()
+        finally:
+            self._disposing -= 1
+
+    async def _stop_work_and_close_engines(self) -> None:
         probes = set(self._probes)
         for probe in probes:
             self._abort(probe)
@@ -420,6 +638,10 @@ class Database:
                         len(stuck),
                     )
         self._recent = None
+        if self._abortable_engine is not None:
+            await self._abortable_engine.dispose()
+            self._abortable_engine = None
+            self._abortable_sessions = None
         if self._engine is not None:
             await self._engine.dispose()
             self._engine = None
