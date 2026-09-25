@@ -19,12 +19,7 @@
 | [0012](0012-research-provider-adapter-policy.md) | Research Provider Adapterの方針 | Approved |
 | [0013](0013-research-scratch-task-relation.md) | Research Scratch の Task との関係と Pin / 保存の方針 | Approved |
 | [0014](0014-task-working-set-persistence.md) | Task の Working Set（Multi-Repo）の永続化をPAW-032に含めず、新しいIssueで扱う | Approved |
-
-承認待ち（Proposed）の判断は次のとおりです。承認されるまで、実装はこの提案を前提にした暫定の選択です。
-
-| Decision | 内容 | Status |
-| --- | --- | --- |
-| [0017](0017-repository-registration-policy.md) | Repository の登録と Checkout の方針（置き場所、Linux Account との対応、既存 Repository の検証、削除の意味など） | Proposed |
+| [0017](0017-repository-registration-policy.md) | Repository の登録と Checkout の方針（置き場所、Linux Account との対応、既存 Repository の検証、削除の意味、Scope を作るときの Root の再確認など） | Approved |
 
 運用は [AGENTS.md](../../AGENTS.md) の「仕様変更」に従います。
 

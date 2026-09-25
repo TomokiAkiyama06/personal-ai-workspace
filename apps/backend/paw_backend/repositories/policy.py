@@ -5,7 +5,7 @@ which existing directories may be registered, which hosts may be cloned from and
 how long git may run. Every value is validated when the policy is built, so a
 bad configuration fails at start, not at the first registration.
 
-The defaults are the ones of Decision 0017 (Proposed): checkouts under
+The defaults are the ones of Decision 0017 (Approved): checkouts under
 ``<home>/workspaces``, existing repositories anywhere in the user's own home,
 clones from ``github.com`` only.
 """

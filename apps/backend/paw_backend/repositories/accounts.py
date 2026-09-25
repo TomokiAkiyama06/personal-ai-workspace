@@ -2,8 +2,8 @@
 
 A checkout is a directory of one Linux user (``REQUIREMENTS.md``: Linux user
 separation, ``/home/<user>/workspaces/...``). The mapping "workspace user" to
-"Linux account" is **not defined by the requirements**; Decision 0017 (Proposed)
-proposes the simplest one, :class:`LoginNameAccountDirectory`: the user's
+"Linux account" is **not defined by the requirements**; Decision 0017 (Approved)
+chose the simplest one, :class:`LoginNameAccountDirectory`: the user's
 ``login_name`` is the Linux user name. The seam (:class:`AccountDirectory`) lets a
 deployment with another rule (a mapping table, LDAP) replace it.
 

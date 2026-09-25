@@ -77,7 +77,7 @@ class RootTemplateTest(unittest.TestCase):
 
 
 class OtherFieldsTest(unittest.TestCase):
-    def test_the_defaults_are_the_proposed_ones(self):
+    def test_the_defaults_are_the_approved_ones(self):
         policy = RepositoryPolicy()
         self.assertEqual(
             (

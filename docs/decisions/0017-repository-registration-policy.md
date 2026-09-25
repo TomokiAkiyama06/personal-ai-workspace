@@ -1,10 +1,10 @@
 # Repository の登録と Checkout の方針
 
-- Status: Proposed
+- Status: Approved
 - Date: 2026-09-25
 - Scope: PAW-027（Repository Registration / Per-user Checkout）と、Repository・Checkout を使う以降の Issue（PAW-028 GitHub 接続、PAW-031 / PAW-034 の Working Set、PAW-035 Worktree、PAW-061 Project / Repo UI）
 - Supersedes: なし
-- Approval: 未承認（Human の承認待ち）
+- Approval: 2026-09-26、Humanが作業Session内で、判断メモの各点に個別に回答し、残りは「推奨どおり」と回答して承認（第11点も承認）（末尾の「承認時の決定」）
 
 ## 背景
 
@@ -18,8 +18,9 @@
 - Tool Broker は、Backend が登録した Remote で URL を Repository に結び付け、Path で入れ子の Repository の両方の ACL を効かせる（[Decision 0006](0006-tool-broker-policy.md) の 8、承認済み）。
 
 一方で、次は要件も Backlog も決めていない。PAW-027 の実装は、動かすために下の選択を置いた。
-[AGENTS.md](../../AGENTS.md) は、仕様にない重要判断を勝手に確定しないと定める。そこで、実装が置いた選択を一覧にし、Human が承認または変更できるようにする。
-**この Decision は未承認である。** 承認前の実装は、下の各点を前提にしている（承認されなければ、この Decision を書き換えず、新しい Decision から `Supersedes` する）。
+[AGENTS.md](../../AGENTS.md) は、仕様にない重要判断を勝手に確定しないと定める。そこで、実装が置いた選択を一覧にし、Human が承認または変更できるようにした。
+**この Decision は 2026-09-26 に Human が承認した（Approved）。** 下の各点は、承認された方針である（承認時の決定は末尾を参照）。数値（上限、Timeout、探索の上限、Path の Byte 数）は暫定値として承認された。
+値や選択を変えるときは、この Decision を書き換えず、新しい Decision から `Supersedes` する。
 
 実装は [Backend README](../../apps/backend/README.md) の「Repository Registration / Per-user Checkout」に書いている。
 
@@ -47,7 +48,7 @@
 
 - git は **Backend の Process の Linux User として**動かす。Process の User が Checkout の持ち主の Account でなければ、実行を拒否する（`identity_mismatch`）。権限の昇格（`sudo`、`setuid` など）は実装していない。
 - したがって、Backend が Service 用の 1 つの User で動く配備では、Per-user の Clone は、Account の User に切り替える実行の仕組み（User ごとの Worker、特権を分けた Helper など）を配備側が `GitRunner` として渡すまで動かない。PAW-028（`gh auth` は Linux User ごと）も同じ仕組みを必要とする。
-- **人間の回答 2026-09-25: Userごとに割り振られたSSHで実行する方針。実装は別Issue #105。この PR は Backend の Process の User でだけ動く（従来どおり）。** 方向は、Backend → `ssh <linux user>@localhost`（User ごとの専用 Key。`command=` で決まった Wrapper に固定し、`from=127.0.0.1`・`no-pty`・`no-agent-forwarding`・`no-port-forwarding` を付け、Host Key を固定する）で、その User 自身として git を実行する `GitRunner` を後から差し込むこと。この Decision と PR は、その実装も設定も含まない。Decision は Proposed のままである。
+- **人間の回答 2026-09-25: Userごとに割り振られたSSHで実行する方針。実装は別Issue #105。この PR は Backend の Process の User でだけ動く（従来どおり）。** 方向は、Backend → `ssh <linux user>@localhost`（User ごとの専用 Key。`command=` で決まった Wrapper に固定し、`from=127.0.0.1`・`no-pty`・`no-agent-forwarding`・`no-port-forwarding` を付け、Host Key を固定する）で、その User 自身として git を実行する `GitRunner` を後から差し込むこと。この Decision と PR は、その実装も設定も含まない。
 - git の環境は許可リストだけ（`PATH` 固定、`HOME`、Locale、`GIT_*`）。`GIT_CONFIG_GLOBAL=/dev/null`、`GIT_CONFIG_NOSYSTEM=1`、Hook 無効（`core.hooksPath=/dev/null`）、`core.fsmonitor=false`、`protocol.allow=never`（許可した Transport だけ `always`。既定は `https`）、Submodule の再帰なし。Credential は渡さない・Log に出さない。Timeout（通常 30 秒、Clone 900 秒）と出力の上限（64 KiB）がある。
 
 ### 5. 「既存 Repository の登録」で確かめること
@@ -151,19 +152,28 @@
 
 ## 承認後の扱い
 
-承認されたら、この Decision の Status を Approved にし、承認時の決定を末尾に追記する（数値は暫定値として扱い、変更は設定・定数と Test の期待値で行う。Repository 名・Branch・URL・Path の長さと形式は DB の CHECK 制約にも書かれているため、変えるには新しい Migration が要る）。
-承認されない点があれば、この Decision を書き換えず、新しい Decision から `Supersedes` する。
+- 2026-09-26 に承認され、`Approval` に記録して Status を Approved に改めた。
+- 数値（上限、Timeout、探索の上限、Path の Byte 数）は暫定値として扱い、変更は設定・定数と Test の期待値で行う。Repository 名・Branch・URL・Path の長さ（文字数と Byte 数）と形式は DB の CHECK 制約にも書かれているため、変えるには新しい Migration が要る。
+- 承認後に別の選択へ変える場合は、この Decision を書き換えず、新しい Decision から `Supersedes` する。Migration `0027` が未 Merge のうちは、`0027` と Model、Test を直してよい（統合前の実装の修正であり、方針の変更ではない）。
+- User ごとに Linux User として git を実行する `GitRunner`（SSH 経由）は、別 Issue #105 で実装する。この Decision の承認は、その実装を含まない。この PR の実行の挙動は、Backend の Process の User でだけ動く（従来どおり）。
+- Tool Broker が呼び出しごとに Root と識別を確かめ直すこと（11 の「閉じていないこと」の check-then-use の窓）は、この Decision の範囲ではない。別の Issue が要る。
 
-## 決めてほしいこと
+## 承認時の決定（2026-09-26）
 
-1. Workspace の User と Linux の User の対応（`login_name`）でよいか。
-2. Checkout の置き場所（`<home>/workspaces/<slug>-<id8>/<name>`）でよいか。
-3. git を Backend の Process の User で動かし、別の User では動かさない方針でよいか。User を切り替える仕組みは、人間の回答（2026-09-25）のとおり User ごとの SSH とし、別 Issue #105 で実装する。この PR の実行の挙動（Backend の Process の User でだけ動く）を、その Issue が入るまでの暫定として承認してよいか。
-4. 既存 Repository の検証の範囲（隠し Directory、`.git` の File、Linked Worktree の拒否）でよいか。
-5. Viewer に Checkout を許してよいか。
-6. ACL の設定を Manager（`project.settings.manage`）に限ってよいか。
-7. 削除を登録の削除だけにする方針でよいか。
-8. Remote のない Repository を、他の User が Clone できないままにしてよいか。
-9. Clone の Host の既定を `github.com` だけにしてよいか。
-10. 上限（Project あたり 100 Repository、Remote 8、Scope を確かめる Checkout 500、Timeout）を暫定値にしてよいか。
-11. Scope を作るとき、Root が変わっていたら（入れ子に関連するものも含めて）Scope を作らずに拒否する方針でよいか。Broker 側で呼び出しごとの Root の再確認を求める別の Issue が要るか。
+- 本文の各点を、提案どおり（推奨どおり）承認した。Human は個別に回答した点（3）と、残りの点への「推奨どおり」で答え、**第 11 点（実装の途中で足した点）も承認した**。
+1. Workspace の User と Linux の User の対応は `login_name` とする（3）。Mapping Table や LDAP が要るなら `AccountDirectory` を置き換える。System の Account（uid が最小値未満、`nobody`、`nologin` / `false`）は拒否する。最小の uid の値は設定（`RepositoryPolicy.min_uid`）だけとする。
+2. Checkout の置き場所は `<home>/workspaces/<slug>-<Project ID の先頭 8 桁>/<repository name>`（1）。
+3. git は、この PR では Backend の Process の User でだけ動かし、別の User なら拒否する（4）。**人間の回答: Userごとに割り振られたSSHで実行する方針（「ユーザーごとに割り振られたSSHでいい。このServerはすでにLinux Userを分けている」）。実装は別Issue #105。** この PR の実行の挙動は変えない。
+4. 既存 Repository の検証の範囲（5）: 絶対・正規・解決済みの Path、自分の Root の内側、隠し成分なし、持ち主が Account、`.git` は実際の Directory（Linked Worktree・Submodule は登録しない）、`git rev-parse` との一致、Bare 不可。
+5. Viewer にも自分の Checkout を許す（6）。
+6. ACL の設定は `project.settings.manage`（Manager）（6）。新しい Capability は足さない。
+7. 削除は登録の削除だけ（7）。Directory も GitHub の Repository も消さない。クローンの実行中に登録解除があったとき、実行中の呼び出しは Directory を消さない。
+8. Remote のない Repository は、他の User が Clone できない（8）。Remote を足せば Clone できる。
+9. Clone の Host は既定で `github.com` だけ（9）。GitHub Enterprise などは設定で足す。
+10. 上限（Project あたり Repository 100、Repository あたり Remote 8、Clone の Timeout など）は暫定値として承認した（12）。値の変更は設定・定数で行える。
+11. Scope を作るときの Root の再確認と、関連する後始末・検証の方針を承認した（11、6、10、12）:
+    - Checkout が `ready` になるとき、Directory の識別（`st_dev`、`st_ino`）を記録する。`scope_entries` は、その User の `ready` な Checkout すべてを検査し、要求した Checkout、または関連する Checkout が登録どおりでなければ、Scope を作らずに `CheckoutChangedError`（fail closed）。Path の上で無関係でも、変わった（消えた・移った・置き換わった）Checkout の識別は、要求した Root の下の Directory から探す（Directory だけを走査、Symbolic Link は辿らない、**上限 20,000 Directory**。見つかる、または不在を証明できないときは拒否）。
+    - Scope を確かめる User の `ready` な Checkout は **500 まで**（超えると `TooManyCheckoutsError`）。
+    - Path は **1024 文字かつ UTF-8 で 2048 Byte** まで（一意な Index の Entry の上限のため）。
+    - `pending` を `ready` にする完了の Transaction で、Project を `FOR SHARE` で Lock して Active かを確かめ直す。GitHub の Gateway が返した Repository は、Host・Owner・名前の 3 つすべてを検証してから登録する。
+    - 閉じていないこと（check-then-use の窓など）は、11 の本文のとおり残る。Broker が呼び出しごとに確かめ直す Issue は、まだない。

@@ -2327,7 +2327,8 @@ Human は [Decision 0008](../../docs/decisions/0008-project-membership-and-lifec
 [PAW-027](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/24)（Revision `0027`）で実装しました。要件は「Project / Repository registration and per-user checkout」と
 [Decision 0004](../../docs/decisions/0004-rbac-capability-and-audit-policy.md)・[Decision 0006](../../docs/decisions/0006-tool-broker-policy.md) の 8（どちらも承認済み）に従い、
 要件が決めていない選択（Checkout の置き場所、Linux Account との対応、既存 Repository の検証、削除の意味など）は
-[Decision 0017](../../docs/decisions/0017-repository-registration-policy.md)（**Proposed、未承認**）にまとめています。承認前の実装は、その提案を前提にした暫定の選択です。
+[Decision 0017](../../docs/decisions/0017-repository-registration-policy.md)（承認済み）にまとめています。
+**Decision 0017 は 2026-09-26 に Human が承認しました**（第 11 点の Scope を作るときの Root の再確認を含む）。上限・Timeout・探索の上限・Path の Byte 数などの数値は暫定値として承認されました（設定・定数で変えられます。Path の長さは DB の CHECK 制約にも書かれているため、変えるには新しい Migration が要ります）。User ごとに Linux User として git を実行する仕組み（SSH 経由）は、別 Issue [#105](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/105) です。
 **HTTP の Endpoint はありません**（Session は PAW-022）。`RepositoryService` は、認証済みの `Principal` を受け取り、`Authorizer` で判定します。
 **GitHub の認証（`gh auth`）は PAW-028 で、この Issue の範囲外です**（`GitHubGateway` が継ぎ目）。
 

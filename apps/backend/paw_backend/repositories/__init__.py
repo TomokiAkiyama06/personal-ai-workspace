@@ -1,8 +1,8 @@
 """Repository registration and per-user checkouts (PAW-027).
 
 See ``apps/backend/README.md`` ("Repository Registration / Per-user Checkout") and
-Decision 0017 (Proposed). A project's repositories are logical records; what a
-user or an agent edits is that user's own checkout in their own Linux account.
+Decision 0017 (Approved 2026-09-26). A project's repositories are logical records;
+what a user or an agent edits is that user's own checkout in their own Linux account.
 The service performs authorization through ``paw_backend.authz.Authorizer``;
 there is no HTTP endpoint yet. GitHub credentials (``gh auth``, PAW-028) are not
 part of this issue: ``GitHubGateway`` is the seam.

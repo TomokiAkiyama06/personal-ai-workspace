@@ -35,7 +35,7 @@ caller passes are **ignored**: the role of the actor in the project is read from
 ``project_members`` in the same transaction. Only ``Principal.user_id`` and
 ``Principal.system_role`` are taken from the caller.
 
-Authorization and audit (Decision 0004, Approved; Decision 0017, Proposed):
+Authorization and audit (Decision 0004 and Decision 0017, both Approved):
 
 * ``clone_from_github``, ``register_existing``, ``create_local``,
   ``create_github``, ``remove_repository``, ``add_remote``, ``remove_remote``:
