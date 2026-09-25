@@ -1282,7 +1282,7 @@ Model と Migration の一致は Test が検証します（Alembic の autogener
 Workspace 全体で共有する Memory（Shared Memory）の閲覧・作成・編集・削除・復元と、Shared Memory Candidate の提案・承認・却下、
 System Security Policy を優先する Effective View を扱う `SharedMemoryService` です。**HTTP の Endpoint はまだありません**（API の Issue が呼びます）。
 要件は [REQUIREMENTS.md](../../REQUIREMENTS.md) の「Shared Memory permissions」、
-要件が決めていない選択は [Decision 0009](../../docs/decisions/0009-shared-memory-administration.md)（**Proposed、未承認**）です。
+要件が決めていない選択は [Decision 0009](../../docs/decisions/0009-shared-memory-administration.md)（**Approved、2026-09-25 に Human が承認**）です。
 
 Shared Memory は PAW-040 の Table（`memories` と、`scope = 'shared'` の `memory_versions`）に置きます。新しい Table は Candidate 用の `shared_memory_candidates` 1 つです。
 Candidate を Version にしないのは、`shared` の Version は全 User が読める（`memory.acl`）のに対し、Candidate は承認前で、Private な Memory から来た内容を持つためです。
@@ -1457,15 +1457,15 @@ Model の実装は、Test を通すことに必要な範囲で素直な書き方
 - Migration `0046` の `down_revision` は `0050` です（鎖は `0001 → 0025 → 0032 → 0040 → 0021 → 0033 → 0031 → 0050 → 0046`）。Revision ID は Issue 番号で、鎖の順序ではありません。統合時に Orchestrator が並びを確認します。
 - 一覧の同時刻の並び（`id` の副次キー）は決定的にするためのもので、Test は「同時刻の 12 件が `id` 順」だけを確認します。Query Plan によっては副次キーがなくても同じ順になるため、その Test だけでは副次キーの削除を検出できません（変異 Test で確認済み）。
 
-### 人間の判断が必要な点
+### 承認された判断
 
-[Decision 0009](../../docs/decisions/0009-shared-memory-administration.md)（Proposed）の次の点です。
+[Decision 0009](../../docs/decisions/0009-shared-memory-administration.md)（Approved、2026-09-25 に Human が承認）の次の点は、承認された方針です。
 
-1. Candidate を別 Table にすること、Agent の提案を許すこと、提案者に Candidate を見せないこと、`pending` 50 件の上限。
-2. 削除・復元を `status` の切り替えにし、Version を増やさないこと（誰が削除したかは Audit Event だけ）。その Audit の `action` を操作ごとに分けるために Capability を 6 つ追加したこと（Decision 0009 の 12）と、変更の完了を Audit の行として同じ Transaction で書くこと（同 13。Service が `audit_events` に直接書く）。
-3. `policy_subjects` の宣言で Policy との衝突を決めること（宣言がなければ上書きされない）。
-4. `effective_view` が、上書きした Policy の `statement` を User にも返すこと。
-5. 承認した Shared Memory の鮮度を `permanent` にすること。
+1. Candidate を別 Table にすること、Agent の提案を許すこと、提案者に Candidate を見せない（結果を返す仕組みは今は作らない）こと、`pending` 50 件の上限（暫定値として承認）。
+2. 削除・復元を `status` の切り替えにし、Version を増やさないこと（誰が削除したかは Audit Event だけ）。その Audit の `action` を操作ごとに分けるために Capability を 6 つ追加したこと（閲覧は `shared_memory.manage` のまま。Decision 0009 の 12）と、変更の完了を Audit の行として同じ Transaction で書くこと（同 13。Service が `audit_events` に直接書く）。
+3. `policy_subjects` の宣言で Policy との衝突を決めること（宣言がなければ上書きされない。この限界を受け入れた）。
+4. `effective_view` は、上書きした Policy の `statement`（文言）を User にも Agent にも返さないこと。文言は Backend 内部の `internal_effective_view` だけが受け取ります（Global System Prompt との関係は、公開する場合に別途決める。Decision 0009 の 10）。
+5. 承認した Shared Memory の鮮度を `permanent` にすること（PAW-042 で見直す）。
 
 ### Test
 
