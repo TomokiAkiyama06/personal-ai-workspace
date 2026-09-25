@@ -136,7 +136,11 @@ class BudgetUsageRow(Base):
 
     ``limit_value`` ``NULL`` means unlimited and is used by, and only by, the
     ``unlimited`` preset. ``running_since`` is set only on the ``runtime_seconds``
-    row while a run is in progress.
+    row while a run is in progress. ``runtime_generation`` (also only meaningful
+    on the ``runtime_seconds`` row, 0 elsewhere) is the runtime session generation:
+    every ``start_runtime`` increments it and ``stop_runtime`` must present the
+    current value, so a superseded session cannot stop the newer one's timer. It
+    only grows and is kept when the timer stops.
     """
 
     __tablename__ = "budget_usages"
@@ -149,6 +153,9 @@ class BudgetUsageRow(Base):
     )
     limit_value: Mapped[int | None] = mapped_column(BigInteger)
     running_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    runtime_generation: Mapped[int] = mapped_column(
+        BigInteger, default=0, server_default=text("0")
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()")
     )
@@ -169,6 +176,11 @@ class BudgetUsageRow(Base):
         CheckConstraint(
             "running_since IS NULL OR kind = 'runtime_seconds'",
             name="running_only_for_runtime",
+        ),
+        CheckConstraint(
+            "runtime_generation >= 0"
+            " AND (kind = 'runtime_seconds' OR runtime_generation = 0)",
+            name="runtime_generation_valid",
         ),
     )
 

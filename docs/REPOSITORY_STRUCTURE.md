@@ -259,6 +259,7 @@ personal-ai-workspace/
 │     ├─ 0007-task-queue-budget-and-loop-policy.md
 │     ├─ 0012-research-provider-adapter-policy.md
 │     ├─ 0013-research-scratch-task-relation.md
+│     ├─ 0014-task-working-set-persistence.md
 │     └─ README.md
 └─ evaluator/
    └─ README.md

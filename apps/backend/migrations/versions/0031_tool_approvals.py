@@ -8,6 +8,16 @@ Create Date: 2026-09-24
 ``tool_approval_events`` is its history. The ids carry no foreign keys to users,
 projects or tasks (see ``paw_backend/tools/models.py``).
 
+``task_attempt`` / ``task_retry_count`` are the run of the task (``tasks.attempt``
+and ``tasks.retry_count``) in which the request was made. A Retry or Restart
+starts a new run; ``consume`` only takes an approval in the run it was requested
+in, and checks that run against the locked ``tasks`` row in the same transaction
+(Decision 0006, section 9), so an approval of an earlier run cannot be used in
+the window before the revocation that follows the transition has run. The run
+is written by the application and never changes (the trigger below); there is
+deliberately no trigger that reads ``tasks`` (no coupling to that table's
+lifecycle, and evidence must stay readable when a task is archived).
+
 The database enforces the rules an approval stands on, so that a bug (or a
 compromise) of the application cannot approve its own request, replay a used
 approval or rewrite what was approved:
@@ -19,8 +29,8 @@ approval or rewrite what was approved:
 * a BEFORE UPDATE trigger: the only legal changes are ``pending`` ->
   ``approved`` / ``rejected`` / ``revoked`` / ``expired`` and ``approved`` ->
   ``consumed`` / ``revoked`` / ``expired``, each setting only its own columns;
-  everything that identifies the call (ids, tool, level, ``call_hash``,
-  targets, summary, ``created_at``, ``expires_at``) is immutable;
+  everything that identifies the call (ids, the task's run, tool, level,
+  ``call_hash``, targets, summary, ``created_at``, ``expires_at``) is immutable;
 * DELETE and TRUNCATE are refused on both tables, and UPDATE / DELETE /
   TRUNCATE on the history. Every trigger is ``ENABLE ALWAYS``: they also fire
   under ``session_replication_role = replica`` (as for ``audit_events``);
@@ -81,6 +91,8 @@ LANGUAGE plpgsql AS $$
 BEGIN
     IF NEW.id IS DISTINCT FROM OLD.id
        OR NEW.task_id IS DISTINCT FROM OLD.task_id
+       OR NEW.task_attempt IS DISTINCT FROM OLD.task_attempt
+       OR NEW.task_retry_count IS DISTINCT FROM OLD.task_retry_count
        OR NEW.project_id IS DISTINCT FROM OLD.project_id
        OR NEW.agent_id IS DISTINCT FROM OLD.agent_id
        OR NEW.requester_user_id IS DISTINCT FROM OLD.requester_user_id
@@ -212,6 +224,8 @@ def upgrade() -> None:
         "tool_approvals",
         sa.Column("id", sa.Uuid(), nullable=False),
         sa.Column("task_id", sa.Uuid(), nullable=False),
+        sa.Column("task_attempt", sa.Integer(), nullable=False),
+        sa.Column("task_retry_count", sa.Integer(), nullable=False),
         sa.Column("project_id", sa.Uuid(), nullable=False),
         sa.Column("agent_id", sa.Uuid(), nullable=False),
         sa.Column("requester_user_id", sa.Uuid(), nullable=False),
@@ -248,6 +262,13 @@ def upgrade() -> None:
         sa.CheckConstraint(
             "agent_id <> requester_user_id",
             name=op.f("ck_tool_approvals_agent_is_not_user"),
+        ),
+        sa.CheckConstraint(
+            "task_attempt >= 1", name=op.f("ck_tool_approvals_task_attempt_positive")
+        ),
+        sa.CheckConstraint(
+            "task_retry_count >= 0",
+            name=op.f("ck_tool_approvals_task_retry_count_not_negative"),
         ),
         sa.CheckConstraint(
             "approver_id IS NULL OR approver_id = requester_user_id",

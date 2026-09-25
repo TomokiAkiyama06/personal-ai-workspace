@@ -195,7 +195,7 @@ def only_memory_objects(obj, name, type_, reflected, compare_to) -> bool:
 
 
 def catalog(connection, schema: str) -> dict[str, list[tuple]]:
-    """Columns, constraints and indexes of the memory tables in ``schema``.
+    """Columns, constraints, indexes and triggers of the memory tables in ``schema``.
 
     Schema qualifiers are removed so that two schemas can be compared.
     """
@@ -235,6 +235,18 @@ def catalog(connection, schema: str) -> dict[str, list[tuple]]:
             """
             SELECT tablename, indexname, indexdef FROM pg_indexes
             WHERE schemaname = :schema AND tablename = ANY (:tables)
+            """
+        ),
+        # Triggers are not part of the metadata Alembic compares: the models
+        # create them with DDL events and the migration repeats the DDL.
+        "triggers": rows(
+            """
+            SELECT c.relname, t.tgname, pg_get_triggerdef(t.oid)
+            FROM pg_trigger t
+            JOIN pg_class c ON c.oid = t.tgrelid
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = :schema AND c.relname = ANY (:tables)
+              AND NOT t.tgisinternal
             """
         ),
     }
@@ -342,7 +354,8 @@ class MemoryMigrationDatabaseTest(unittest.TestCase):
             for statement in (
                 "DROP INDEX ix_memory_versions_one_active",
                 "ALTER TABLE memory_versions ALTER COLUMN pinned DROP DEFAULT",
-                "ALTER TABLE memory_versions ALTER COLUMN importance TYPE integer",
+                # (not ``importance``: a trigger uses it, so its type cannot change)
+                "ALTER TABLE memory_versions ALTER COLUMN version_number TYPE bigint",
                 "ALTER TABLE memory_versions ADD COLUMN unexpected text",
                 "ALTER TABLE memory_versions ALTER COLUMN title DROP NOT NULL",
             ):
@@ -393,7 +406,7 @@ class MemoryMigrationDatabaseTest(unittest.TestCase):
             migrated = catalog(connection, "public")
         created = self.scratch_catalog()
 
-        for kind in ("columns", "constraints", "indexes"):
+        for kind in ("columns", "constraints", "indexes", "triggers"):
             with self.subTest(kind):
                 self.assertEqual(migrated[kind], created[kind])
         # The comparison is not vacuous.
@@ -401,6 +414,28 @@ class MemoryMigrationDatabaseTest(unittest.TestCase):
         self.assertIn("ck_memory_versions_status_valid", names)
         self.assertIn("ck_memory_versions_freshness_fields", names)
         self.assertIn("fk_memory_sources_conversation_id_conversations", names)
+        self.assertEqual(
+            [row[1:] for row in migrated["triggers"]],
+            [
+                (
+                    "tr_memory_sources_message_requires_conversation",
+                    "CREATE CONSTRAINT TRIGGER"
+                    " tr_memory_sources_message_requires_conversation"
+                    " AFTER INSERT OR UPDATE OF conversation_id, message_id"
+                    " ON memory_sources DEFERRABLE INITIALLY DEFERRED"
+                    " FOR EACH ROW EXECUTE FUNCTION"
+                    " paw_check_memory_source_message_conversation()",
+                ),
+                (
+                    "tr_memory_versions_record_metadata_change",
+                    "CREATE TRIGGER tr_memory_versions_record_metadata_change"
+                    " AFTER UPDATE OF pinned, importance ON memory_versions"
+                    " FOR EACH ROW WHEN (((old.pinned IS DISTINCT FROM new.pinned)"
+                    " OR (old.importance IS DISTINCT FROM new.importance)))"
+                    " EXECUTE FUNCTION paw_record_memory_metadata_change()",
+                ),
+            ],
+        )
         index_definitions = {row[1]: row[2] for row in migrated["indexes"]}
         self.assertIn(
             "WHERE (status = 'active'::text)",
@@ -433,6 +468,84 @@ class MemoryMigrationDatabaseTest(unittest.TestCase):
 
         self.assertEqual(before["columns"], after["columns"])
         self.assertNotEqual(before["constraints"], after["constraints"])
+
+    def test_the_catalog_check_notices_a_changed_trigger(self):
+        migrate("upgrade", "head")
+        with self.engine.connect() as connection, connection.begin() as transaction:
+            before = catalog(connection, "public")
+            connection.execute(
+                text(
+                    "DROP TRIGGER tr_memory_sources_message_requires_conversation"
+                    " ON memory_sources"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE CONSTRAINT TRIGGER"
+                    " tr_memory_sources_message_requires_conversation"
+                    " AFTER INSERT ON memory_sources"
+                    " FOR EACH ROW EXECUTE FUNCTION"
+                    " paw_check_memory_source_message_conversation()"
+                )
+            )
+            after = catalog(connection, "public")
+            transaction.rollback()
+
+        self.assertNotEqual(before["constraints"], after["constraints"])
+        self.assertNotEqual(before["triggers"], after["triggers"])
+
+    def function_definition(self, connection, name: str) -> str:
+        return connection.execute(
+            text(
+                "SELECT pg_get_functiondef(p.oid) FROM pg_proc p"
+                " WHERE p.pronamespace = 'public'::regnamespace"
+                "   AND p.proname = :name"
+            ),
+            {"name": name},
+        ).scalar_one()
+
+    def test_the_trigger_functions_of_the_migration_equal_the_models_definitions(self):
+        migrate("upgrade", "head")
+        # name -> (the models' DDL, a fragment that proves the body is compared)
+        functions = {
+            "paw_check_memory_source_message_conversation": (
+                models.MESSAGE_REQUIRES_CONVERSATION_FUNCTION,
+                "message_id IS NOT NULL AND conversation_id IS NULL",
+            ),
+            "paw_record_memory_metadata_change": (
+                models.RECORD_METADATA_CHANGE_FUNCTION,
+                "OLD.pinned, NEW.pinned, OLD.importance, NEW.importance",
+            ),
+        }
+
+        for name, (model_ddl, fragment) in functions.items():
+            with self.subTest(name):
+                with (
+                    self.engine.connect() as connection,
+                    connection.begin() as transaction,
+                ):
+                    migrated = self.function_definition(connection, name)
+                    connection.execute(text(model_ddl))
+                    from_models = self.function_definition(connection, name)
+                    transaction.rollback()
+
+                self.assertEqual(migrated, from_models)
+                self.assertIn(fragment, migrated)
+
+    def test_downgrade_drops_the_trigger_functions(self):
+        migrate("upgrade", "head")
+        migrate("downgrade", "base")
+
+        with self.engine.connect() as connection:
+            leftovers = connection.execute(
+                text(
+                    "SELECT proname FROM pg_proc"
+                    " WHERE pronamespace = 'public'::regnamespace"
+                    "   AND (proname LIKE 'paw\\_check\\_memory%'"
+                    "        OR proname LIKE 'paw\\_record\\_memory%')"
+                )
+            ).scalars()
+            self.assertEqual(list(leftovers), [])
 
 
 if __name__ == "__main__":
