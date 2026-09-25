@@ -56,6 +56,11 @@
     そのため、開始時の判定は「期限切れの Token が Lock を待たない」ための早道にとどめ、正本は、Owner の Lock を得た後の、消費する `UPDATE` の条件（`expires_at > greatest(<Lock の後に読み直した Process の Clock>, clock_timestamp())`）とする。`clock_timestamp()` はその文が行を判定する時点の DB の時計で、Transaction の開始時刻（`now()`）ではない。
     Process の Clock を残すのは、Test が時計を動かせるようにするためで、どちらか一方でも期限切れと言えば期限切れ（Clock のずれは Token の寿命を短くする側にしか働かない）。単一の Host の想定なので、Clock のずれを補正する仕組みは置かない。
     消費できなかった理由は、Token が未使用・未無効のままなら `token_expired`、使用済み・無効化済みなら `token_unavailable` として Audit に残す（外へ返す失敗は他と同じ）。
+    **発行する側も同じ理由で、寿命は保存の瞬間から数える（Review の指摘）。** `owner-setup --replace-non-live-owner` と `owner-recover` は Owner の行を Lock し、古い Token を無効にしてから新しい Token を保存する。
+    別の Transaction がその Lock を持つ間は待たされるため、待つ前に測った時刻から `created_at` / `expires_at` を決めると、待ちが TTL に近ければ、保存・表示された時点で期限切れの Token ができてしまう。
+    そのため Process の Clock は Owner の Lock を得た後に読み（無効化の `revoked_at`、旧 Owner の降格、新 User の `created_at` / `updated_at` にはこの値を使う）、Token の `created_at` / `expires_at` と、返す `IssuedToken.expires_at` は、待ちうる文（古い Token の無効化、新しい Owner の INSERT）がすべて終わった後にもう一度読んだ値から決める。
+    Audit の時刻は、Event を作る時点（Lock の後）の Clock で、元から待ちの後である。発行する側は Process の Clock だけを使い、`clock_timestamp()` は使わない: Clock のずれは、受け取る側の `greatest(...)`（上の判定）が Token の寿命を短くする側にだけ働かせる。
+    Owner がまだいない最初の `owner-setup` では、Lock する行がなく、待つ可能性があるのは、競合する別の未 Commit の Owner の INSERT が Unique Index を占めている間の新 User の INSERT だけである。その INSERT の `users.created_at` は待つ前の時刻のままだが、これは記録用で、Token の寿命には関わらない。
 
 ## リスク
 
