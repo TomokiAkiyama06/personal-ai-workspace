@@ -267,8 +267,18 @@ do not become durable logs.
   found, so one that has not installed its own handler yet dies of the default action;
   a member of the check's own group that a handler forks after the group signal is not
   sent a `SIGTERM` (the group signal is the only one group members get) and is killed
-  with the group at the end.  Whatever remains when the grace period ends gets
-  `SIGKILL`, and pipe reading stops after `drain_seconds` (1 s).
+  with the group at the end.  A newcomer gets a whole grace period counted from its
+  own `SIGTERM`, not what is left of the first one: a handler that starts a helper
+  1.8 s into a 2 s grace period does not have the helper's cleanup cut off after
+  0.2 s.  Whatever remains when the wait ends gets `SIGKILL`, and pipe reading stops
+  after `drain_seconds` (1 s).
+  The wait is bounded: however many processes a handler keeps starting, it ends
+  `max_grace_periods` (2) grace periods after the first `SIGTERM` at the latest, so a
+  newcomer found in the second half of that time gets only what is left of it.  With
+  the defaults, a check that times out takes at most `timeout` + 4 s (the two grace
+  periods) + 1 s (`drain_seconds`, for what the killed processes left in the pipes), and
+  2 s more only if the killed leader cannot be reaped (it is stuck in uninterruptible
+  sleep).
   If the output capture cannot be set up after the launch (descriptor exhaustion), the
   child is killed and reaped and the check is reported as an `error`, not left running.
   The child's pid and start time are recorded right after the launch, and nothing is

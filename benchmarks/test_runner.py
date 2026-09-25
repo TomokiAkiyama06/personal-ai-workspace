@@ -163,16 +163,21 @@ class TestRunner:
     the check's process group, the processes below it, and every process that still
     carries the marker are terminated, then killed after ``term_grace_seconds``; a
     process that a ``SIGTERM`` handler starts meanwhile (found by the same means, on
-    every round of the wait) gets its own ``SIGTERM`` and is waited for too; when
-    the check ends any other way (it exits, or its setup fails) whatever is left of
-    those is killed, including processes that left the group (own session, double
-    fork plus ``setsid``).  That covers a process that keeps its environment or was
-    seen below the check while it ran; one that replaced its environment and was
-    re-parented unseen cannot be found from here.  Production needs a container or
-    cgroup for that.
+    every round of the wait) gets its own ``SIGTERM`` and a whole grace period from
+    that moment, though the wait ends ``max_grace_periods`` grace periods after the
+    first ``SIGTERM`` at the latest.  When the check ends any other way (it exits,
+    or its setup fails) whatever is left of those is killed, including processes
+    that left the group (own session, double fork plus ``setsid``).  That covers a
+    process that keeps its environment or was seen below the check while it ran; one
+    that replaced its environment and was re-parented unseen cannot be found from
+    here.  Production needs a container or cgroup for that.
     """
 
     term_grace_seconds = 2.0
+    # The longest the wait after the first SIGTERM can get, in grace periods: every
+    # process that a handler starts meanwhile gets a whole one from its own SIGTERM,
+    # but a handler that never stops starting processes cannot hold the runner.
+    max_grace_periods = 2
     drain_seconds = 1.0
     poll_seconds = 0.05
 
@@ -364,13 +369,24 @@ class TestRunner:
         # snapshot: a TERM handler may start processes of its own.  Each round
         # looks again and sends whatever is new its own SIGTERM (and counts it as
         # running), so that it gets its cleanup too instead of the final SIGKILL.
-        deadline = time.monotonic() + self.term_grace_seconds
+        # A newcomer gets a whole grace period counted from its own SIGTERM, not
+        # what is left of the first one: a handler that starts a helper near the
+        # end must not have the helper's cleanup cut off.  The wait cannot be
+        # extended for ever by a handler that keeps starting processes, so it never
+        # runs past ``max_grace_periods`` grace periods after the first SIGTERM.
+        term_sent = time.monotonic()
+        deadline = term_sent + self.term_grace_seconds
+        limit = term_sent + self.max_grace_periods * self.term_grace_seconds
         while time.monotonic() < deadline:
             # The exit is observed before the table is read, so whatever the leader
             # started before it exited is in the table.
             exited = leader.has_exited()
             table = _process_table()
-            _term_newcomers(leader, tracked, table)
+            if _term_newcomers(leader, tracked, table):
+                deadline = max(
+                    deadline,
+                    min(time.monotonic() + self.term_grace_seconds, limit),
+                )
             if exited and not _anything_alive(leader, tracked, table):
                 break
             if capture.open:
@@ -911,8 +927,9 @@ def _term_newcomers(
     leader: _Leader,
     tracked: dict[int, int],
     table: dict[int, tuple[str, int, int, int]],
-) -> None:
+) -> int:
     """SIGTERM what the check started since ``tracked`` was taken, and track it.
+    Returns how many processes were signalled.
 
     ``spawned`` finds the processes below the leader that were recorded meanwhile
     and every live process that carries the check's marker; the ones already in
@@ -922,12 +939,15 @@ def _term_newcomers(
     check's own group are not signalled individually (the leader's guarded group
     signal is the only one they get; a member forked after it is only killed).
     """
+    signalled = 0
     for pid, started in leader.spawned(table).items():
         state, _, _, seen = table.get(pid, ("X", 0, 0, -1))
         if state in "ZX" or seen != started or tracked.get(pid) == started:
             continue
         tracked[pid] = started
         _signal_identified(pid, started, signal.SIGTERM)
+        signalled += 1
+    return signalled
 
 
 def _anything_alive(

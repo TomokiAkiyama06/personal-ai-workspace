@@ -116,15 +116,19 @@ time.sleep(60)
 # the check can find it.  The helper is started with SIGTERM blocked and unblocks it
 # once its handler is installed and its pid published, so a SIGTERM that reaches it
 # early is held back instead of killing it: the test does not depend on how soon after
-# its start the runner first sees it.
+# its start the runner first sees it.  Optional arguments: how long the check's handler
+# waits before it starts the helper (default 0) and how long the helper's cleanup takes
+# (default 0.3), both in seconds.
 TERM_HANDLER_STARTS_HELPER = """
 import os, signal, subprocess, sys, time
 mode, pid_file, done, ready = sys.argv[1:5]
+delay = float(sys.argv[5]) if len(sys.argv) > 5 else 0.0
+cleanup_seconds = sys.argv[6] if len(sys.argv) > 6 else '0.3'
 HELPER = (
     'import os, signal, sys, time\\n'
     'pid_file, done = sys.argv[1:3]\\n'
     'def cleanup(signum, frame):\\n'
-    '    time.sleep(0.3)\\n'
+    '    time.sleep(' + cleanup_seconds + ')\\n'
     '    open(done, "w").write("cleaned")\\n'
     '    os._exit(0)\\n'
     'signal.signal(signal.SIGTERM, cleanup)\\n'
@@ -145,6 +149,7 @@ def on_term(signum, frame):
     if started:
         return
     started = True
+    time.sleep(delay)
     null = subprocess.DEVNULL
     # The child inherits the blocked signal mask across fork and exec.
     old = signal.pthread_sigmask(signal.SIG_BLOCK, [signal.SIGTERM])
@@ -158,6 +163,34 @@ def on_term(signum, frame):
     if mode.endswith('wait'):
         wait_for(done)
     os._exit(0)
+
+signal.signal(signal.SIGTERM, on_term)
+open(ready, 'w').close()
+time.sleep(60)
+"""
+
+# Check whose SIGTERM handler never stops starting processes that ignore SIGTERM, each
+# in a session of its own, one every 0.2 s for up to 15 s, and records their pids.
+# Every one is a newcomer for the runner; its wait must end anyway.
+TERM_HANDLER_KEEPS_STARTING_PROCESSES = """
+import signal, subprocess, sys, time
+pids, ready = sys.argv[1:3]
+SLEEPER = (
+    'import signal, time\\n'
+    'signal.signal(signal.SIGTERM, signal.SIG_IGN)\\n'
+    'time.sleep(60)\\n'
+)
+
+def on_term(signum, frame):
+    null = subprocess.DEVNULL
+    for _ in range(75):
+        child = subprocess.Popen(
+            [sys.executable, '-c', SLEEPER],
+            start_new_session=True, stdin=null, stdout=null, stderr=null,
+        )
+        with open(pids, 'a') as handle:
+            handle.write(str(child.pid) + '\\n')
+        time.sleep(0.2)
 
 signal.signal(signal.SIGTERM, on_term)
 open(ready, 'w').close()
@@ -1252,6 +1285,74 @@ class TestRunnerTest(unittest.TestCase):
                     [n for pid, n in calls if pid == helper and n == signal.SIGTERM],
                     [signal.SIGTERM],
                 )
+
+    def test_a_process_started_late_in_the_grace_period_gets_a_full_grace_period(
+        self,
+    ):
+        # The grace period is not one fixed deadline for everything: a process that a
+        # handler starts near its end (here after 1.8 s of 2 s) is sent SIGTERM when it
+        # is found and gets a whole grace period from then on, so its 0.5 s of cleanup
+        # is not cut short by the SIGKILL that the original deadline would have sent.
+        self.runner.term_grace_seconds = 2.0
+        for mode in ("exit", "wait"):
+            with self.subTest(mode=mode):
+                pid_file = self.pid_file(f"late-{mode}.pid")
+                done = self.root / f"late-{mode}.done"
+                ready = self.root / f"late-{mode}.ready"
+                check = self.python_check(
+                    f"starts-late-helper-{mode}",
+                    TERM_HANDLER_STARTS_HELPER,
+                    mode,
+                    pid_file,
+                    done,
+                    ready,
+                    1.8,
+                    0.5,
+                )
+
+                (result,) = self.runner.run_visible((check,), 2.0)
+
+                self.assertTrue(ready.exists(), "the check never installed its handler")
+                self.assertEqual(result.status, "timed_out")
+                self.assertTrue(
+                    done.exists(),
+                    "the late helper was killed in the middle of its cleanup",
+                )
+                self.assertEqual(done.read_text(encoding="utf-8"), "cleaned")
+                helper = self.read_pid(pid_file)
+                self.assertTrue(
+                    wait_until(lambda helper=helper: not is_running(helper))
+                )
+
+    def test_the_wait_for_newcomers_ends_however_many_a_handler_keeps_starting(self):
+        # Every newcomer extends the wait, but only up to ``max_grace_periods`` grace
+        # periods after the first SIGTERM.  The handler here would go on starting
+        # processes that ignore SIGTERM for 15 s; the runner stops after about
+        # 2 s (timeout) + 2 x 1 s (grace periods) and kills all of them.
+        self.runner.term_grace_seconds = 1.0
+        pids = self.root / "sleepers.pids"
+        ready = self.root / "sleepers.ready"
+        check = self.python_check(
+            "keeps-starting", TERM_HANDLER_KEEPS_STARTING_PROCESSES, pids, ready
+        )
+
+        started = time.monotonic()
+        try:
+            (result,) = self.runner.run_visible((check,), 2.0)
+            elapsed = time.monotonic() - started
+            sleepers = [int(line) for line in pids.read_text().split()]
+        finally:
+            if pids.exists():
+                for line in pids.read_text().split():
+                    with contextlib.suppress(OSError):
+                        os.kill(int(line), signal.SIGKILL)
+
+        self.assertTrue(ready.exists(), "the check never installed its handler")
+        self.assertEqual(result.status, "timed_out")
+        self.assertGreaterEqual(len(sleepers), 3)
+        self.assertLess(elapsed, 12)
+        for sleeper in sleepers:
+            self.assertTrue(wait_until(lambda sleeper=sleeper: not is_running(sleeper)))
 
     def test_a_newcomer_is_signalled_once_and_only_while_it_is_the_recorded_process(
         self,
