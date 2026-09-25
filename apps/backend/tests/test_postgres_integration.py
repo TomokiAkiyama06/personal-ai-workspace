@@ -10,10 +10,13 @@ downgrades it to ``base`` again.
 """
 
 import asyncio
+import contextlib
 import io
 import os
 import unittest
+from unittest import mock
 
+import psycopg
 from alembic import command
 from sqlalchemy import text
 
@@ -74,40 +77,59 @@ class PostgresIntegrationTest(unittest.IsolatedAsyncioTestCase):
         finally:
             await database.dispose()
 
+    @contextlib.contextmanager
+    def counted_connections(self):
+        """The connections that are opened while the block runs, counted.
+
+        Every connection the backend opens (the readiness probe's own and the
+        pooled ones SQLAlchemy asks its driver for) goes through
+        ``psycopg.AsyncConnection.connect``: it is wrapped here, and the real
+        connection is still made. The count is the number of calls, so it does
+        not depend on when the server accounts for a session, and nothing but
+        the block's own code is counted. (The server's statistics, the
+        ``pg_stat_database.sessions`` this test used to read, count every
+        session of the database, also the ones that earlier tests closed a
+        moment ago, at a time the server chooses: the test failed with
+        ``2 != 1`` in about one CI run in three, issue #91.)
+        """
+        connect = psycopg.AsyncConnection.connect  # the bound classmethod
+        opened: list[dict] = []
+
+        async def counting(*args, **kwargs):
+            opened.append(kwargs)
+            return await connect(*args, **kwargs)
+
+        with mock.patch.object(psycopg.AsyncConnection, "connect", counting):
+            yield opened
+
     async def test_concurrent_readiness_checks_open_one_connection(self):
         probes = Database(self.settings)
-        monitor = Database(self.settings)
-
-        async def sessions_established() -> int:
-            # Counted by the server when a session ends, so it lags slightly.
-            async with monitor.session() as session:
-                result = await session.execute(
-                    text(
-                        "SELECT sessions FROM pg_stat_database"
-                        " WHERE datname = current_database()"
-                    )
-                )
-                return result.scalar()
-
-        async def settled() -> int:
-            # Sessions that ended a moment ago (earlier tests) may still be
-            # reported; read until the value stops changing.
-            value, unchanged = await sessions_established(), 0
-            while unchanged < 3:
-                await asyncio.sleep(0.1)
-                latest = await sessions_established()
-                value, unchanged = latest, (unchanged + 1 if latest == value else 0)
-            return value
-
         try:
-            before = await settled()
-            results = await asyncio.gather(*(probes.check() for _ in range(50)))
-            opened = await settled() - before
+            with self.counted_connections() as opened:
+                results = await asyncio.gather(*(probes.check() for _ in range(50)))
         finally:
-            await asyncio.gather(probes.dispose(), monitor.dispose())
+            await probes.dispose()
 
-        self.assertEqual(set(results), {DatabaseStatus.OK})
-        self.assertEqual(opened, 1, "concurrent checks opened several connections")
+        self.assertEqual(results, [DatabaseStatus.OK] * 50)
+        self.assertEqual(len(opened), 1, "concurrent checks opened several connections")
+
+    async def test_every_connection_a_check_opens_is_counted(self):
+        # The control of the test above: with the result cache off, each check
+        # that runs one after the other opens a connection of its own, and the
+        # count sees every one (a count that stays at 1 would prove nothing).
+        probes = Database(
+            make_settings(
+                database_url=TEST_DATABASE_URL, database_readiness_cache_seconds=0
+            )
+        )
+        try:
+            with self.counted_connections() as opened:
+                results = [await probes.check() for _ in range(3)]
+        finally:
+            await probes.dispose()
+
+        self.assertEqual(results, [DatabaseStatus.OK] * 3)
+        self.assertEqual(len(opened), 3)
 
     async def test_migrations_upgrade_and_downgrade(self):
         def migrate():
