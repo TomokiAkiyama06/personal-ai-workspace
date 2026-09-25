@@ -10,6 +10,7 @@ Research の一時保存（[PAW-050](#research-scratch-store)、24 時間 TTL、
 Claim と Source の対応・回答や Task からの追跡（[PAW-052](#evidence--claim-provenance)、HTTP の Endpoint はまだありません）も実装済みです。
 Project の作成・招待制の Membership・Lifecycle（Active / Archived / Pending deletion / Deleted）は [PAW-026](#project-crud--membership--lifecycle) で実装済みです（Service のみ。HTTP の Endpoint と Session はまだありません）。
 Workspace 共有の Codex / Claude Connection（Credential は不透明な Handle だけ）、User 別 Quota、User と Task への利用量の帰属は [PAW-030](#shared-codex--claude-connection) で実装済みです（Service のみ。実 Adapter と HTTP の Endpoint はまだありません。Quota の意味・期間・実行中の Task の扱いは [Decision 0016](../../docs/decisions/0016-shared-connection-adapter-policy.md)（Approved、2026-09-26）に従います）。
+Project への Repository の登録（GitHub から clone、Ubuntu 上の既存 Repository、新規作成）と、User ごとに分離した Checkout は [PAW-027](#repository-registration--per-user-checkout) で実装済みです（Service のみ。GitHub の認証は PAW-028）。
 
 [Architecture](../../docs/ARCHITECTURE.md) に基づき、最終的に以下の機能を Backend 側で扱います。
 
@@ -44,7 +45,7 @@ Python 側の Package（`pgvector-python`）は使わず、`paw_backend/memory/v
 apps/backend/
 ├─ pyproject.toml          # 依存（完全一致で固定）と Ruff 設定
 ├─ alembic.ini             # Alembic 設定（DB URL は持たない）
-├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0022 は Password / Session / Login Throttle / 認証 Policy、0026 は Project、0030 は Shared Connection・Quota・Usage、0031 は Tool Approval、0033 は Queue / Budget / Loop、0040 は Memory Schema、0043 は `memory_versions` の全文検索の Index、0046 は Shared Memory Candidate、0050 は Research Scratch、0052 は Evidence / Claim Provenance、0083 は `tasks (project_id, state)` の Index、0087 は外部送信の Audit の `audit_events.details`）
+├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0022 は Password / Session / Login Throttle / 認証 Policy、0026 は Project、0027 は Repository 登録・Remote・Checkout、0030 は Shared Connection・Quota・Usage、0031 は Tool Approval、0033 は Queue / Budget / Loop、0040 は Memory Schema、0043 は `memory_versions` の全文検索の Index、0046 は Shared Memory Candidate、0050 は Research Scratch、0052 は Evidence / Claim Provenance、0083 は `tasks (project_id, state)` の Index、0087 は外部送信の Audit の `audit_events.details`）
 ├─ paw_backend/
 │  ├─ app.py               # create_app(settings)
 │  ├─ config.py            # PAW_ 環境変数から読む Settings
@@ -65,6 +66,7 @@ apps/backend/
 │  │  └─ retrieval/        # Hybrid Retrieval: 権限の解決、SQL Prefilter、Keyword + Vector、Rerank、重複・矛盾（PAW-043）
 │  ├─ projects/            # Project、Membership（招待制）、Lifecycle（PAW-026）、管理者向けの全 Project 一覧（Issue #84）。`task_gate.py` は Task Lane に渡す Project の状態 Gate（Issue #83）、`task_stop.py` は Delete 開始時の Task 停止
 │  ├─ connections/         # Shared Codex / Claude Connection: Adapter の Interface、Secret（Handle）、User 別 Quota、利用量の帰属（PAW-030）
+│  ├─ repositories/        # Repository の登録、Remote、User ごとの Checkout、Path の安全性、git の安全な実行（PAW-027）
 │  ├─ research/providers/  # Research Provider の Adapter Interface と Broker（PAW-051）
 │  ├─ research/privacy/    # Research の Privacy Filter: Query の最小化と外部送信の Audit（PAW-053、永続の Sink は #87）
 │  ├─ research/scratch/    # Research Scratch Store: 24 時間 TTL の一時保存と、期限切れを消す Janitor（PAW-050）
@@ -141,6 +143,11 @@ Database には pgvector が必要です（CI は `pgvector/pgvector:pg18` を�
 | `PAW_REDEEM_SOURCE_FREE_ATTEMPTS` / `PAW_REDEEM_GLOBAL_FREE_ATTEMPTS` | `5` / `30` | Token の受け取りで、接続元ごとと全体の、Lock が始まる試行の番号 |
 | `PAW_REDEEM_BACKOFF_SECONDS` / `PAW_REDEEM_DECAY_SECONDS` | `60,300,900,3600` / `900` | 同、Lock の長さと数え直しの秒 |
 | `PAW_SCRATCH_PURGE_INTERVAL_SECONDS` | `3600` | 期限切れの Research Scratch Item を消す Janitor の間隔（秒）。`0` で Janitor を止める（期限切れの行が DB に残り続ける）。それ以外は 60〜86400。DB が未設定のときも起動しない。[Janitor](#janitor期限切れの削除) |
+| `PAW_REPOSITORY_WORKSPACE_SUBDIR` | `workspaces` | Backend が作る Checkout の置き場所（`<home>/<この名前>/<project>/<repo>`）。1 つの安全な名前（[Repository 登録](#repository-registration--per-user-checkout)） |
+| `PAW_REPOSITORY_EXISTING_ROOTS` | `{home}` | 既存 Repository を登録してよい Root（Comma 区切り、8 つまで）。各 Root は絶対 Path で `{home}`（先頭だけ）か `{user}` を含む（全員で共有する Directory は拒否） |
+| `PAW_REPOSITORY_CLONE_HOSTS` | `github.com` | Clone してよい Host（Comma 区切り、8 つまで。小文字の DNS 名。IP Address は不可） |
+| `PAW_REPOSITORY_MIN_LINUX_UID` | `1000` | Checkout の持ち主になれる Linux Account の最小の uid（`root` などの System Account を拒否する）。**Account を引くときに実際に適用される唯一の値**（`RepositoryService.from_policy` が同じ Policy から `LoginNameAccountDirectory` を組み立てる） |
+| `PAW_REPOSITORY_GIT_TIMEOUT_SECONDS` / `PAW_REPOSITORY_CLONE_TIMEOUT_SECONDS` | `30` / `900` | git の Command / Clone の Timeout（秒）。超えると Process Group ごと止める。途中の Clone の予約は Clone の Timeout の 2 倍で古いとみなす |
 | `PAW_EVENT_HEARTBEAT_SECONDS` | `15` | `system.heartbeat` の間隔 |
 | `PAW_EVENT_QUEUE_SIZE` | `100` | 接続ごとの Event Queue。溢れた場合は古い Event を捨てる |
 | `PAW_EVENT_MAX_SUBSCRIBERS` | `100` | 同時に接続できる SSE / WebSocket の数。超えた接続は SSE が 503、WebSocket が Close Code 1013 |
@@ -1650,7 +1657,7 @@ Actor を示さない変更は `memory_metadata_changes.actor_type` の NOT NULL
 `pinned` / `importance` は Trigger が使う列なので、型を変える Migration は Trigger を作り直す必要があります。
 Permanent / Revalidate など鮮度の設定は Version の不変の列なので、変更は新しい Version になり、その履歴が変更履歴です。
 
-**User / Project / Repo の ID は Foreign Key なし。** `projects`（PAW-026、Revision `0026`）と `users`（PAW-021）の Table は、この Schema の Revision より後にできます（Repo の Table はまだありません: PAW-027）。この Schema からの外部キーは付けていません。
+**User / Project / Repo の ID は Foreign Key なし。** `projects`（PAW-026、Revision `0026`）と `users`（PAW-021）の Table は、この Schema の Revision より後にできます（Repo の Table は PAW-027、Revision `0027`）。この Schema からの外部キーは付けていません。
 `owner_user_id`、`project_id`、`project_group_id`、`repo_id`、`actor_user_id` は素の UUID Column で、DB は存在を確認しません。
 Backend は検証した ID だけを書いてください。Table ができた後の Migration で Foreign Key を追加できます。
 Task、Repo 解析、Project Decision の出典も、Table がないため `memory_sources.source_ref` の不透明な文字列です。
@@ -2878,6 +2885,129 @@ Rerank（Reranker Protocol）→ 構造化 Score（confirmed・鮮度・importan
 乱数で作った世界（User・Project の全状態・Membership・Repository の Override・Group・全 Scope と Status・鮮度・Relation。`random.Random(seed)`）で、Caller ごとに (1) 独立に書いた Oracle が読めるとする集合に、Hit・Conflict Group・`duplicates` が収まること、(2) 読めない Memory を無効にした DB の結果と**全 Field が等しい**こと、(3) Reranker が読めない Memory の本文を見ないことを確かめます。
 `benchmarks/retrieval_metrics.py` の Permission Leakage（Top-K のうち許可されていない ID の数）と同じ考えを、Backend の Test として実装しています（Backend は `benchmarks` を import しません）。
 実装の SQL を変えて Test が失敗することも確認しました（Vector / Keyword の権限条件を外す、Relation の片端・相手の取得の条件を外す、`scope IN` を外す、招待・Pending deletion を含める、Status・期限・`session_only` の条件を外す、Resolver の判定を外す、など）。
+
+## Repository Registration / Per-user Checkout
+
+[PAW-027](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/24)（Revision `0027`）で実装しました。要件は「Project / Repository registration and per-user checkout」と
+[Decision 0004](../../docs/decisions/0004-rbac-capability-and-audit-policy.md)・[Decision 0006](../../docs/decisions/0006-tool-broker-policy.md) の 8（どちらも承認済み）に従い、
+要件が決めていない選択（Checkout の置き場所、Linux Account との対応、既存 Repository の検証、削除の意味など）は
+[Decision 0017](../../docs/decisions/0017-repository-registration-policy.md)（承認済み）にまとめています。
+**Decision 0017 は 2026-09-26 に Human が承認しました**（第 11 点の Scope を作るときの Root の再確認を含む）。上限・Timeout・探索の上限・Path の Byte 数などの数値は暫定値として承認されました（設定・定数で変えられます。Path の長さは DB の CHECK 制約にも書かれているため、変えるには新しい Migration が要ります）。User ごとに Linux User として git を実行する仕組み（SSH 経由）は、別 Issue [#105](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/105) です。
+**HTTP の Endpoint はありません**（Session は PAW-022）。`RepositoryService` は、認証済みの `Principal` を受け取り、`Authorizer` で判定します。
+**GitHub の認証（`gh auth`）は PAW-028 で、この Issue の範囲外です**（`GitHubGateway` が継ぎ目）。
+
+Project の **Repository** は論理的な共有の記録で、User や Agent が編集するのは、その User の Linux Account の中にある **Checkout**（作業コピー）です。
+複数の User が 1 つの Working Tree を編集することはありません。
+
+| ファイル | 内容 |
+| --- | --- |
+| `models.py`、`records.py`、`errors.py`、`limits.py` | Table の Model（`repositories`、`repository_remotes`、`repository_checkouts`）、返す値、型付きの Error、上限 |
+| `validation.py` | 引数の検証（DB を使わない純粋関数。名前、Branch、Path、URL、ACL の権限） |
+| `paths.py` | Path の安全性（Linux Account、Checkout の Path、既存 Repository の検査、`O_NOFOLLOW` での Directory 作成） |
+| `accounts.py` | Workspace の User から Linux Account への対応（`LoginNameAccountDirectory`。継ぎ目は `AccountDirectory`）。最小の uid は `RepositoryPolicy.min_uid` だけ（Directory に別の値はない）。Directory と Service の Policy が食い違うと、Service の構築が `ValueError` |
+| `git.py` | git の実行（許可リストの環境、Hook 無効、Timeout、出力の上限、Shell なし）と、必要な操作（`inspect`、`clone`、`init`、`add_origin`） |
+| `github.py` | GitHub の指定の解析、origin URL の登録形式、`GitHubGateway`（PAW-028 の継ぎ目。既定は拒否） |
+| `policy.py` | 設定（`PAW_REPOSITORY_*`）を検証した値 `RepositoryPolicy` |
+| `store.py`、`transaction.py`、`service.py` | SQL（1 文 1 関数）、Lock Timeout 付きの Transaction、`RepositoryService` |
+
+### Table
+
+| Table | 内容 |
+| --- | --- |
+| `repositories` | Repository 1 件。`project_id`（→ `projects`）、`name`（安全な名前、100 文字まで。**Project の中で大文字小文字を区別せず一意**）、`default_branch`、`source`（`github_clone` / `existing_path` / `new_local` / `new_github`）、`acl_allowed`（`NULL` は `inherit`。それ以外は `read` / `write` / `agent` の部分集合で、Project の Role を**狭める**だけ）、`created_by`、時刻。`(id, project_id)` は一意（子の Table が組で参照する） |
+| `repository_remotes` | Repository を表す `https` の URL（Tool Broker の URL と Repository の対応、Decision 0006 の 8(d) が求める登録）。`(repository_id, url)` が主キー、**`(project_id, url)` は一意**（1 つの URL は Project の 1 つの Repository を表す）。URL は `tools.scope.normalise_remote` の正規形 |
+| `repository_checkouts` | User の Checkout。`(repository_id, user_id)` は一意（**User ごとに 1 つ**）、`path` は一意（**Directory は 1 つの Checkout に属す**）。`state` は `pending`（作成中の予約）か `ready`。`ready` のときだけ、その Directory の識別 `root_device` / `root_inode`（`st_dev`、`st_ino`。64 bit 符号なしを厳密に持てる `NUMERIC`）を持つ（DB の CHECK 制約。Scope を作るとき、置き換えられた Directory を見分けるため）。`user_id` は `users` を `RESTRICT` で参照する |
+
+- 子の Table は `(repository_id, project_id)` の組で `repositories` を参照するため、Project が食い違う行は作れません（DB の制約）。Repository の削除で Remote と Checkout の行も消えます（`CASCADE`）。**File と GitHub の Repository は消えません。**
+- Migration `0027` の `down_revision` は `0030` です（鎖は `0001 → 0025 → 0032 → 0040 → 0021 → 0033 → 0031 → 0050 → 0046 → 0052 → 0026 → 0087 → 0022 → 0083 → 0043 → 0030 → 0027`）。`0021`（`users`）と `0026`（`projects`）より後に置く必要があります（並べ直しでも保つこと）。`projects` と `users` への外部キーは、`0026` と同じ理由（`test_task_persistence.OfflineMigrationTest` が鎖全体の SQL の `FOREIGN KEY(project_id)` の有無を見る）で、`ALTER TABLE ... ADD CONSTRAINT` の手書きの文にしています。
+- 入れ子の Repository の Table はありません。Checkout の Root が**今指している Directory**から都度求めます（下の「Tool Broker との継ぎ目」）。
+- 許す値と長さは DB の CHECK 制約にも書かれています。`tests/test_repositories_schema.py` が、Model・Migration・実際の DB の一致と、各制約を破ったときの動作を検証します。
+
+### Repository を追加する 3 つの経路（Manager。`project.repo.add`）
+
+| 経路 | 内容 |
+| --- | --- |
+| `clone_from_github` | `owner/repo` または `https://<host>/<owner>/<repo>[.git]`（許可 Host だけ）を、実行 User の `<home>/workspaces/<project>/<repo>` へ `git clone` して登録する。`https` の綴り 2 つ（`.../r` と `.../r.git`）を Remote に登録する |
+| `register_existing` | Ubuntu 上の既存 Repository を、そのまま登録する（Clone しない）。その Directory が実行 User の Checkout になる。名前は Directory 名（指定も可）。既定の Branch と `HEAD` を取得する |
+| `create_local` / `create_github` | 新しい**空の** Repository を作る（`git init`。Template なし、File も Commit もなし）。`create_github` は `GitHubGateway` で GitHub にも作り、`origin` と Remote を登録する（既定の Gateway は `GitHubUnavailableError`）。**Gateway が返した Repository は、`origin` を書く前・Remote を保存する前に、Host・Owner・名前の 3 つすべてを `parse_github_source` と同じ規則（ドット区切り、`/`、制御文字、見た目の似た Unicode、長すぎる名前、`.git`、大文字の Host を拒否）で検証し、要求した名前と一致すること、導出する URL が Tool Broker の `normalise_remote` を通ることも確かめる。** 通らなければ `GitHubUnavailableError`（値は出さない。GitHub に Repository があるかもしれない旨を Log に 1 行） |
+
+- **Project Repository へ管理ファイルを自動注入しません。** Backend が書くのは、`git clone` / `git init` が作るものだけです（`AGENTS.md`、`MEMORY.md`、`.personal-ai/` を作らず、Commit せず、Working Tree に File を足しません）。`tests/test_repositories_service_register.py` は、登録の前後で Repository の全 File と `git status`・`HEAD`・Commit 数が同じことを確かめます。
+- **Checkout の分離。** Checkout は実行 User の Home の下に作られ（`<home>/workspaces/<slug>-<Project ID の先頭 8 桁>/<name>`）、他の User の Home には触れません。User ごとに 1 つ（`create_checkout`）で、他の Member は登録済みの Remote から自分で Clone します（Remote のない Repository は、作った User だけが Checkout を持つ。Decision 0017 の 8）。
+- 登録は、Project 行の `FOR UPDATE`、名前・URL・Path の一意制約、上限（Repository 100 まで、Remote 8 まで）で、同時実行でも 1 つだけが通ります。長い Clone は Transaction を持たず、`pending` の行が名前と Path を予約します（この呼び出し自身の失敗・Cancel では、**自分の `pending` の行がまだあるときだけ**、その行、Directory、他の誰も Checkout を持たない新規の Repository を消します。行を先に消せなかった（`remove_checkout` / `remove_repository` が先に登録を解除した）ときは、**Directory を消さず**、呼び出しは `CheckoutGoneError` で終わります。登録解除は File に触れない約束で、解除の後に持ち主が Directory に足した作業を守るためです。Process が死んだ予約は Clone の Timeout の 2 倍で古いとみなし、次の作成が置き換えます。**残された Directory は自動では消しません**（次の作成は「既にある」で止まり、持ち主が消してから再実行します））。
+
+### Path の安全性
+
+既存 Repository の登録は、次を**この順に**確かめます（最初の失敗が答え。`PathProblem` の Enum で、Path そのものは Error に出ません）。
+
+1. 絶対 Path で、正規の綴り（`..`、`~`、`\`、`%2e`、`//`、`/./`、末尾の `/`、制御文字を拒否）。解決済み（**どの成分も Symbolic Link でない**）。
+2. 実行 User の Root（既定は Home。`{home}` / `{user}` を含む Root だけ許す）の**内側**（Root 自身は不可）。**他人の Home は Root の外**で、`/home/alice2` は `/home/alice` の内側ではありません。
+3. Root より下に**隠し（`.` で始まる）成分がない**。Checkout Root（`workspaces`）自身とそれを含む Directory は不可。
+4. Directory の持ち主が**実行 User の Linux Account**（uid）で、誰でも書ける（`o+w`）のではない。
+5. `.git` は実際の Directory（File・Symbolic Link は不可。Linked Worktree と Submodule は登録しない）で、持ち主が同じ。`HEAD` / `config` が通常の File、`objects` / `refs` が実際の Directory、`objects/info/alternates` と `commondir` がない。
+6. `git rev-parse` が、Work Tree と Git Directory は `path` と `path/.git`、Bare でない、と答える（`core.worktree` / `core.bare` の細工を拒否）。
+7. 既定の Branch を決められる（`origin/HEAD`、なければ現在の Branch。Detached HEAD で決まらなければ拒否）。`origin` の URL は、`https`（User 情報なし）または許可 Host の GitHub の `ssh` 形式だけを登録し、**User 情報を含む URL は拒否**（値は Error にも出ません）。
+
+Backend が作る Checkout は、`workspaces` と Project の Directory（0700）を **Home から 1 段ずつ `O_NOFOLLOW` で開いて**作り、最後の Directory は `mkdir` で作ります。確認と使用の間に Symbolic Link を差し込まれても拒否され、既にある Directory は再利用しません。
+
+### git の実行
+
+`git.py` の `SubprocessGitRunner` が、次を守ります（`tests/test_repositories_git.py` が、罠を仕掛けて「実行されないこと」と「同じ罠が素の git では動くこと」を確かめます）。
+
+- **Shell を使わない**（`exec` 形式。呼び出し側の値は検証済みで、`--` の後か Option の値にだけ置く）。
+- **環境は許可リスト**（`PATH` 固定、`HOME`、`LC_ALL`、`GIT_*` だけ）。Backend の環境変数（DB URL、Token、`GIT_DIR`、`SSH_*`）は渡らない。`GIT_CONFIG_GLOBAL=/dev/null`・`GIT_CONFIG_NOSYSTEM=1` で、User と System の設定も読まない。
+- **Repository の設定に勝つ Option**（`-c core.hooksPath=/dev/null` / `core.fsmonitor=false` / `protocol.allow=never`（許可した Transport だけ `always`、既定は `https`）/ `submodule.recurse=false`）を毎回付ける。
+- **Credential を Command 行にも Log にも出さない。** Log には Sub-command 名と理由だけ。Error は `GitFailure`（Timeout、出力超過、非 0 の終了、UTF-8 でない出力）の Enum だけで、git の出力を持たない。
+- **Timeout と出力の上限**（既定 30 秒 / Clone 900 秒、64 KiB）。超えると **Process Group ごと** Kill する（Cancel でも Kill する）。
+- **実行 User。** git は Backend の Process の Linux User として動く。それが Checkout の持ち主の Account でなければ、実行を拒否する（`identity_mismatch`）。**User を切り替える仕組みは実装していない**（配備で `GitRunner` を渡す。Decision 0017 の 4）。**人間の回答 2026-09-25: Userごとに割り振られたSSHで実行する方針。実装は別Issue [#105](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/105)。この PR は Backend の Process の User でだけ動く（従来どおり）。**
+
+### 認可と Audit
+
+| 操作 | Capability | 備考 |
+| --- | --- | --- |
+| `clone_from_github`、`register_existing`、`create_local`、`create_github`、`remove_repository`、`add_remote`、`remove_remote` | `project.repo.add` | Manager だけ。Project は Active。Audit `REQUIRED`。Audit の `resource_id` は Repository の ID |
+| `set_acl` | `project.settings.manage` | Manager だけ。Active。Audit `REQUIRED` |
+| `create_checkout` | `project.read`（Repository の ACL の `read`）と `workspace.use`（自分の Checkout） | Viewer も可。Active。`workspace.use` の Decision が `REQUIRED` の記録（`resource_kind=checkout`） |
+| `remove_checkout` | `workspace.use` | 本人だけ。**File は消さない**。Project の状態を問わない |
+| `get_repository`、`list_repositories` | `project.read` | ACL が `read` を許さない Repository は見えない |
+| `list_my_checkouts` | なし（自分の行だけ） | Audit なし |
+| `scope_entries`、`purge_projects` | なし（Backend 内部） | 下記 |
+
+- 新しい Capability は足していません。呼び出し側が渡す `Principal` の Project の Role は**無視**し、同じ Transaction で `project_members` から読みます。Owner / Admin も Member でなければ登録できません。
+- **存在を明かしません。** Member でない User には、存在しない Project と同じ `ProjectUnavailableError`。ACL が `read` を許さない Repository は `RepositoryNotFoundError`。Audit を書けなければ許可は拒否になります（`Reason.AUDIT_UNAVAILABLE`）。Audit は Decision の記録で、結果の記録ではありません（失敗しても Event は残る）。
+- `register_existing` は、認可の前に Path と git の検証をします（自分の Directory を自分の Linux User として読むだけで、Project の情報は出ません）。
+
+### Tool Broker との継ぎ目
+
+- `scope_entries(user_id, project_id, repository_id)` は、Tool Broker の `TaskScope.repositories` に入れる `ScopedRepository`（Path、解決した ACL、登録した Remote）を返します。最初が要求した Repository、続けて、同じ User の**入れ子の Checkout**（包含する・される `ready` のもの。それぞれの Project の ACL つき）です（Decision 0006 の 8(b)）。`tests/test_repositories_service_manage.py` が、Broker の `classify_targets` で「内側の Path が両方の Repository に触れる」ことと、URL が Remote で Repository に結び付くことを確かめます。
+- **`scope_entries` は、Root が変わっていたら Scope を作りません（fail closed）。** Tool Broker は Root を `realpath` で解決するため、登録後に Checkout A が B への Symbolic Link に置き換えられる、B が A の Path へ改名される、といった操作の後で、保存した Path の文字列だけから入れ子を求めると、A の Scope に B が入らず、B の厳しい ACL が効きません。そこで、その User の `ready` な Checkout すべてを毎回検査します（保存した Path が実 Path で、Symbolic Link がなく、Directory で、Account の持ち主で、`ready` になったときに記録した `(st_dev, st_ino)` と一致）。要求した Checkout が登録どおりでなければ `CheckoutChangedError`。他の Checkout は、保存した Path または今解決される Path が同じ・上・下なら関連とし、関連するものが変わっていれば `CheckoutChangedError`、変わっていなければ入れ子として含めます。**変わった（消えた・移った・置き換わった）Checkout が Path の上では無関係でも、無条件には無視しません**: そのような Checkout（B）は、要求した Root（A）の下の新しい Directory へ**改名**されているかもしれず、そうなると Broker は A を通して B の File に触れ、A の ACL だけで分類してしまいます。そこで、`ready` になったときに記録した B の識別 `(st_dev, st_ino)` を、**A の Root の下の Directory から探します**（Directory だけを走査。Symbolic Link は辿らない。Directory Entry の Inode で絞り、一致したときだけ `lstat`。走査の上限は 20,000 Directory）。見つかれば `CheckoutChangedError`、上限に達して不在を証明できなくても（推測せず）`CheckoutChangedError`。**Checkout が 1 つも変わっていなければ、走査はしません。** 遠くで消えた Checkout が、A の走査で見つからなければ A の Scope を止めません。500 を超える Checkout は `TooManyCheckoutsError`（一部だけの Scope は作らない）。Error に Path は含まず、Log には Checkout / Repository の ID と理由だけを出します。
+  - **閉じていないこと。** 確認は、読んだ瞬間の事実です。Scope を作ってから Broker が呼び出しを解決するまでの窓（check-then-use）は、Broker が呼び出しごとに Root と識別を確かめ直さない限り残ります（この Issue では行っていません）。`(st_dev, st_ino)` は Directory の中身の差し替えを見ません。Inode 番号は、削除の直後に再利用されうる（同じ Directory を消して作り直すと同じ識別になる可能性）ため、識別は Symbolic Link・改名による差し替えを検出する手段であって、完全な証明ではありません。Root の下の探索も、読んだ瞬間の事実です（探した後に B が A の下へ改名されると見えません）。別の Device へ複製（`cp`）された内容は、識別が違うので見つけられません（複製は登録された Directory ではない）。探索の上限（20,000 Directory）を超える大きな Root は、他の Checkout が変わっている間は Scope を作れません（安全側の誤検知）。
+  - `tests/test_repositories_scope_roots.py` が、実際の Symbolic Link への置き換え（A → B）、B を A の Path へ改名、同じ Path の別の Directory、削除、File への置き換え、持ち主の変更、Path の途中の Symbolic Link、入れ子の移動、関連しない変化の無視、変わらない Tree、を確かめます。
+- `purge_projects(project_ids)` は、`ProjectService.purge_expired` が返した ID のうち **Deleted になっている** Project の登録を消します。File と GitHub の Repository は消しません（要件）。
+
+### 上限と入力の検証
+
+全 Public Method が、DB と File System に触れる前に、全引数を型と範囲で検証し、`InvalidRepositoryInputError`（Field 名と `InputProblem` の Enum だけ。値は出さない）で拒否します（`bool` は `int` でない、ID は `uuid.UUID` か正規の文字列、Enum は Member、余計な値・制御文字・Surrogate・長すぎる値の拒否）。
+`tests/test_repositories_service_validation.py` が、全 Method × 全引数 × 不正な値の表で確かめます。
+
+### 制限と未確認の点
+
+- **Per-user の Clone は、Backend の Process の User が Checkout の持ち主のときだけ動く。** 別の User の Home へは書けず、User を切り替える実行の仕組みは、この Issue にない（Decision 0017 の 4。PAW-028 も必要とする）。人間の回答 2026-09-25: Userごとに割り振られたSSHで実行する方針。実装は別Issue [#105](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/105)（SSH 経由の `GitRunner`）で、この PR には含まない。
+- Private Repository の Clone、GitHub での新規作成は PAW-028 まで動かない（Global の git 設定と Credential Helper を読まないため）。作成後に登録が失敗しても、GitHub の Repository は削除しない（Log に 1 行）。
+- Path の検証は確認した瞬間の事実で、持ち主は後で差し替えられる。`scope_entries` は Scope を作る瞬間に Root と識別を確かめるが、その後 Tool Broker が呼び出しを解決するまでの窓は残る（Broker が呼び出しごとに確かめ直すことに依存する）。
+- Checkout の Path は、DB が保存できる **1024 文字かつ UTF-8 で 2048 Byte まで**です（`path` は一意な B-tree Index の Key で、Index の 1 Entry には約 2700 Byte の上限があり、1 文字は最大 4 Byte のため、文字数だけでは足りません。CHECK 制約 `ck_repository_checkouts_path_valid` にも同じ上限）。長い Home の Account が超える Path を作ると挿入の前に `PathRejectedError`（`too_long`）、`register_existing` の Path は `InvalidRepositoryInputError`（`too_long`）で拒否します（`tests/test_repositories_path_length.py`。境界は、ASCII の 1024 文字が可・1025 文字が不可、4 Byte 文字を含む 2048 Byte が可・2049 Byte が不可）。Remote の URL も同じ理由で Byte 数（1024）で上限を持ちます。
+- 既存の Directory を、登録済みの Repository の自分の Checkout として取り込む操作は、この Issue にない（Remote の照合が要る）。名前の変更もない。
+- 別の Linux User の権限での実 Clone は、この環境では試せていない（別の User の Account を作れない）。「別の User の Directory」の拒否は、その Path だけ別の持ち主を返す方法と、別の uid の Account で確かめている。
+- 「アクセスできる GitHub の Repository の一覧から選ぶ」（要件）は、GitHub の認証（PAW-028）と UI（PAW-061）に依存し、この Issue にない。`clone_from_github` は、指定された Repository を Clone するだけ。
+- Web の UI（PAW-061）と HTTP の Endpoint はない。
+
+### 実装の由来
+
+以前の Issue の独立 Review が見つけた指摘（入力の検証、Error に値を出さない、Resource の後始末、Test は変異させて確かめる、など）を、実装の前に適用した。この Issue の独立 Review（Claude / Codex）は、まだ受けていない。
+
+### Test
+
+`PAW_TEST_DATABASE_URL` を設定すると、実 PostgreSQL と実 git（一時 Directory の Repository。`https://github.com/` は Local の Bare Repository に向ける）で動きます。設定がなくても、検証・Path・git・GitHub の解析・設定の Test は動きます。
+`tests/test_repositories_grants.py` は、Service の Test Class を **Superuser でない Application の Role** で実行し、Migration が与える権限が過不足ないことを確かめます。
 
 ## 依存 Package
 
