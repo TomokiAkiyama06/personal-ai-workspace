@@ -62,6 +62,11 @@ def published_utc(value: object) -> datetime | None:
     constructor of the subclass, which is adapter code), so a subclass cannot run
     its own code, and the ``tzinfo`` sees a plain ``datetime``.
 
+    ``utcoffset`` is read twice and the two readings must agree (the conversion
+    itself uses the first one and never calls ``astimezone``): a ``tzinfo`` whose
+    answer changes between calls is a malformed response, not a time to be
+    converted with whichever offset it names last.
+
     Only ``value.tzinfo`` is the provider's code (``utcoffset``), and it runs
     synchronously: nothing is awaited between the call and its answer, so a
     cancellation of the broker's task cannot arrive inside it (``Task.cancel()``
@@ -87,12 +92,20 @@ def published_utc(value: object) -> datetime | None:
     exact = datetime.combine(datetime.date(value), datetime.timetz(value))
     try:
         offset = exact.utcoffset()
-        converted = None if offset is None else exact.astimezone(UTC)
+        if offset is None:  # naive
+            raise InvalidProviderResponseError()
+        # The conversion uses THIS reading, not a second one made by
+        # ``astimezone``: a ``tzinfo`` whose answer changes from call to call
+        # (+01:00, then +02:00) would otherwise be checked with one offset and
+        # converted with the other, silently shifting the time. A second reading
+        # that differs from the first is a malformed response.
+        wall = exact.replace(tzinfo=None)
+        converted = wall - offset
+        if wall - exact.utcoffset() != converted:
+            raise InvalidProviderResponseError()
     except BaseException:  # the provider's tzinfo, run synchronously (see above)
         raise InvalidProviderResponseError() from None
-    if converted is None:  # naive
-        raise InvalidProviderResponseError()
-    return datetime.combine(datetime.date(converted), datetime.timetz(converted))
+    return converted.replace(tzinfo=UTC)
 
 
 def _plain_str(value: object) -> str:

@@ -10,13 +10,17 @@ the single winner among concurrent callers on separate connection pools.
 
 import asyncio
 import contextlib
+import dataclasses
 import functools
 import hashlib
 import time
 import unittest
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
+from unittest import mock
 
+import psycopg
 import psycopg.errors
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError, IntegrityError
@@ -34,6 +38,7 @@ from paw_backend.tasks import (
 from paw_backend.tools import (
     ApprovalLevel,
     ApprovalOutcome,
+    ApprovalResult,
     ApprovalService,
     ApprovalStatus,
     BrokerReason,
@@ -3160,20 +3165,54 @@ class ExpiryAfterLockWaitTest(LockWaits, TaskFixture):
                     PostgresApprovalStore(self.new_database(), monotonic=bad)
 
 
+@dataclasses.dataclass
+class Abandoned:
+    """A call that gave up on a stalled statement, and the statement it left."""
+
+    result: ApprovalResult
+    elapsed: float  # seconds the call took, from its start to its return
+    log: str  # what the call logged (at ERROR)
+    backend: tuple  # the server process that still runs the abandoned statement
+    release: Callable[[], Awaitable[None]]  # lets the statement go on: frees the row
+
+
 @requires_postgres
 class DecisionDeadlineTest(LockWaits, PostgresTestCase):
-    """A decision that meets a stalled statement returns, and stays atomic.
+    """A decision that meets a stalled statement returns in time, and stays atomic.
 
     Here the stall is a row lock that another transaction holds, which makes the
-    UPDATE wait exactly like a stalled statement would. The statement that was
-    abandoned may still finish once the lock is released (the server does not
-    notice the closed socket before it has something to send), so what is
-    asserted is not "nothing changed" but that the change is all or nothing:
-    the approval and its history row agree, and repeating the call says which.
+    UPDATE wait exactly like a stalled statement would. The call gives up at its
+    deadline, but its statement stays on the server (the server does not notice
+    the closed socket before it has something to send). What it does next is not
+    the caller's to know, and the tests keep the two questions apart:
+
+    * Does the call meet its deadline, and say ``UNAVAILABLE``? (The first
+      test; the call must have something to give up on: its statement is
+      waiting on the server, which is proven, not assumed from the elapsed time.)
+    * What does the abandoned statement leave? Each legal outcome is driven to
+      on purpose, so that it is asserted exactly and no test depends on how fast
+      the machine is. Applied after the deadline: the row is freed only after
+      the call gave up, and the state is read only once the statement's server
+      process has ended (a read made while it commits sees the approval before
+      the commit and its history after it: the flake of issue #92, which had
+      waited for "nobody waits on a lock" instead). Never applied: the
+      connection to the server cannot be made. Either way the approval and its
+      history agree, and repeating the call says which it was.
+
+    The deadline of the call under test is ``LIMIT``; everything else (reading
+    the state, repeating a call) has ``GUARD``.
     """
 
-    LIMIT = 0.5
+    LIMIT = 1.0
     GUARD = 10  # far above the limit: only reached by a call that ignores it
+
+    # What an applied call leaves (the approval's status and the last kind of
+    # its history), and what repeating it says once it was applied.
+    OPERATIONS = {
+        "approve": (ApprovalStatus.APPROVED, "approved", ApprovalOutcome.NOT_PENDING),
+        "reject": (ApprovalStatus.REJECTED, "rejected", ApprovalOutcome.NOT_PENDING),
+        "revoke": (ApprovalStatus.REVOKED, "revoked", ApprovalOutcome.NOT_OPEN),
+    }
 
     async def wire(self):
         self.store = PostgresApprovalStore(
@@ -3187,91 +3226,213 @@ class DecisionDeadlineTest(LockWaits, PostgresTestCase):
             clock=Clock(),
             timeout_seconds=self.LIMIT,
         )
+        # What only looks at the outcome (the state, a repeated call) is not the
+        # subject: it has a generous deadline of its own.
+        self.patient = PostgresApprovalStore(
+            self.new_database(), decision_timeout_seconds=self.GUARD
+        )
+        self.repeat_sink = InMemoryAuditSink()
+        self.repeater = ApprovalService(
+            self.patient,
+            self.repeat_sink,
+            step_up=StepUp(True),
+            clock=Clock(),
+            timeout_seconds=self.GUARD,
+        )
         self.new = new_approval()
         await self.store.open_request(self.new, now=NOW, limits=LIMITS)
         self.user = principal(SystemRole.USER, U1)
 
+    async def waiting_backends(self) -> set[tuple]:
+        """The server processes (id, start) that wait on a lock, except ours."""
+        async with self.database.engine.begin() as connection:
+            rows = await connection.execute(
+                text(
+                    "SELECT pid, backend_start FROM pg_stat_activity WHERE datname ="
+                    " current_database() AND wait_event_type = 'Lock'"
+                    " AND pid <> pg_backend_pid()"
+                )
+            )
+            return {(pid, started) for pid, started in rows}
+
+    async def settled(self, backend: tuple) -> None:
+        """Until the server process that ran the abandoned statement has ended.
+
+        The statement is then over: applied and committed, or failed. Before
+        that a reader may see a half-way state (the approval before the commit,
+        its history after it), and "nobody waits on a lock" does not mean it:
+        the process stops waiting when it gets the row, and only then commits.
+        """
+        pid, started = backend
+        async with asyncio.timeout(self.GUARD):
+            while True:
+                async with self.database.engine.begin() as connection:
+                    running = (
+                        await connection.execute(
+                            text(
+                                "SELECT count(*) FROM pg_stat_activity WHERE pid ="
+                                " :pid AND backend_start = :started"
+                            ),
+                            {"pid": pid, "started": started},
+                        )
+                    ).scalar_one()
+                if not running:
+                    return
+                await asyncio.sleep(0.02)
+
     @contextlib.asynccontextmanager
-    async def stalled(self):
-        """Hold the approval row, as a statement that is stalled would."""
+    async def abandoned(self, operation: str):
+        """Call ``operation`` on an approval whose row another transaction holds,
+        and let the call run out of time.
+
+        The block starts once the call has returned; the row is still held then
+        (``Abandoned.release`` frees it). When it ends the row is freed, if it
+        was not yet, and the abandoned statement's server process is waited for,
+        so that nothing outlives the block.
+        """
+        loop = asyncio.get_running_loop()
+        finished: list[float] = []
+        call = backend = None
         async with self.database.engine.connect() as holder:
             await holder.execute(
                 text("SELECT id FROM tool_approvals WHERE id = :id FOR UPDATE"),
                 {"id": self.new.approval_id},
             )
             try:
-                yield
+                started = loop.time()
+                with self.assertLogs("paw_backend", "ERROR") as logs:
+                    call = asyncio.create_task(
+                        getattr(self.service, operation)(
+                            self.new.approval_id, self.user
+                        )
+                    )
+                    call.add_done_callback(lambda _: finished.append(loop.time()))
+                    # The statement is on the server and waits for the row: the
+                    # call has something to give up on.
+                    await self.wait_for_lock_waiters(1, call)
+                    self.assertFalse(
+                        call.done(),
+                        "the call ended before its statement stalled on the server",
+                    )
+                    waiting = await self.waiting_backends()
+                    self.assertEqual(len(waiting), 1)
+                    (backend,) = waiting
+                    done, _ = await asyncio.wait({call}, timeout=self.GUARD)
+                    self.assertTrue(done, "the call ignored its deadline")
+                yield Abandoned(
+                    result=call.result(),
+                    elapsed=finished[0] - started,
+                    log="\n".join(logs.output),
+                    backend=backend,
+                    release=holder.rollback,
+                )
             finally:
+                if call is not None and not call.done():
+                    call.cancel()
                 await holder.rollback()
-
-    async def settled(self):
-        """Wait until the abandoned statement has left the database."""
-        async with asyncio.timeout(self.GUARD):
-            while True:
-                if await self.lock_waiters() == 0:
-                    return
-                await asyncio.sleep(0.02)
+                if backend is not None:
+                    await self.settled(backend)
 
     async def state(self):
-        record = await self.store.get(self.new.approval_id)
-        kinds = [h.kind.value for h in await self.store.history(self.new.approval_id)]
-        return record.status, kinds
+        record = await self.patient.get(self.new.approval_id)
+        history = await self.patient.history(self.new.approval_id)
+        return record.status, tuple(entry.kind.value for entry in history)
 
     async def test_a_decision_meets_a_stalled_statement_in_time(self):
-        expected = {
-            # what the abandoned statement leaves, whichever way it ends: the
-            # approval and its history row agree
-            "approve": {
-                (ApprovalStatus.PENDING, ("requested",)),
-                (ApprovalStatus.APPROVED, ("requested", "approved")),
-            },
-            "reject": {
-                (ApprovalStatus.PENDING, ("requested",)),
-                (ApprovalStatus.REJECTED, ("requested", "rejected")),
-            },
-            "revoke": {
-                (ApprovalStatus.PENDING, ("requested",)),
-                (ApprovalStatus.REVOKED, ("requested", "revoked")),
-            },
-        }
-        for operation, allowed in expected.items():
+        for operation, (status, kind, _) in self.OPERATIONS.items():
             with self.subTest(operation=operation):
                 await self.wire()
-                started = time.monotonic()
-                async with self.stalled():
-                    with self.assertLogs("paw_backend", "ERROR") as logs:
-                        async with asyncio.timeout(self.GUARD):
-                            result = await getattr(self.service, operation)(
-                                self.new.approval_id, self.user
-                            )
-                    elapsed = time.monotonic() - started
-                self.assertLess(elapsed, self.GUARD / 2)
+                async with self.abandoned(operation) as abandoned:
+                    # The row is held until the call has returned, so only the
+                    # call's own deadline can have ended it.
+                    self.assertLess(abandoned.elapsed, self.GUARD / 2)
+                    self.assertEqual(
+                        abandoned.result.outcome, ApprovalOutcome.UNAVAILABLE
+                    )
+                    self.assertIn("TimeoutError", abandoned.log)
+                    self.assertEqual(
+                        [(e.action, e.decision, e.reason) for e in self.sink.events],
+                        [(f"tool.approval.{operation}", "deny", "unavailable")],
+                    )
+                # Whichever way the abandoned statement ended (the block waits
+                # for it), the approval and its history agree.
+                self.assertIn(
+                    await self.state(),
+                    {
+                        (ApprovalStatus.PENDING, ("requested",)),
+                        (status, ("requested", kind)),
+                    },
+                )
+
+    async def test_a_statement_applied_after_the_deadline_leaves_the_decision_whole(
+        self,
+    ):
+        for operation, (status, kind, repeated) in self.OPERATIONS.items():
+            with self.subTest(operation=operation):
+                await self.wire()
+                async with self.abandoned(operation) as abandoned:
+                    self.assertEqual(
+                        abandoned.result.outcome, ApprovalOutcome.UNAVAILABLE
+                    )
+                    # The order is fixed: the row is freed only now, after the
+                    # call gave up, and the state is read after the statement
+                    # is over. It was received in full, so it is applied.
+                    await abandoned.release()
+                    await self.settled(abandoned.backend)
+                    decided = (status, ("requested", kind))
+                    self.assertEqual(await self.state(), decided)
+                # Repeating the call says so, and changes nothing.
+                again = await getattr(self.repeater, operation)(
+                    self.new.approval_id, self.user
+                )
+                self.assertEqual(again.outcome, repeated)
+                self.assertEqual(await self.state(), decided)
+                self.assertEqual(
+                    [(e.action, e.decision, e.reason) for e in self.repeat_sink.events],
+                    [(f"tool.approval.{operation}", "deny", repeated.value)],
+                )
+
+    async def test_a_statement_that_never_reaches_the_server_leaves_it_open(self):
+        # The other legal outcome: the abandoned statement was never applied.
+        # The lookup connects; the connection of the decision cannot be made,
+        # so nothing of it ever reaches the server.
+        connect = psycopg.AsyncConnection.connect  # the bound classmethod
+        attempts: list[dict] = []
+
+        async def connect_once(*args, **kwargs):
+            attempts.append(kwargs)
+            if len(attempts) > 1:
+                await asyncio.Event().wait()  # never
+            return await connect(*args, **kwargs)
+
+        for operation, (status, kind, _) in self.OPERATIONS.items():
+            with self.subTest(operation=operation):
+                await self.wire()
+                attempts.clear()
+                with (
+                    mock.patch.object(psycopg.AsyncConnection, "connect", connect_once),
+                    self.assertLogs("paw_backend", "ERROR") as logs,
+                ):
+                    async with asyncio.timeout(self.GUARD):
+                        result = await getattr(self.service, operation)(
+                            self.new.approval_id, self.user
+                        )
+                self.assertEqual(len(attempts), 2)  # the lookup, the decision
                 self.assertEqual(result.outcome, ApprovalOutcome.UNAVAILABLE)
                 self.assertIn("TimeoutError", "\n".join(logs.output))
                 self.assertEqual(
                     [(e.action, e.decision, e.reason) for e in self.sink.events],
                     [(f"tool.approval.{operation}", "deny", "unavailable")],
                 )
-                await self.settled()
-                status, kinds = await self.state()
-                self.assertIn((status, tuple(kinds)), allowed)
-                # repeating the call says which it was, and the pool still works
-                if status is ApprovalStatus.PENDING:
-                    outcome = {
-                        "approve": ApprovalOutcome.APPROVED,
-                        "reject": ApprovalOutcome.REJECTED,
-                        "revoke": ApprovalOutcome.REVOKED,
-                    }[operation]
-                else:
-                    outcome = (
-                        ApprovalOutcome.NOT_OPEN
-                        if operation == "revoke"
-                        else ApprovalOutcome.NOT_PENDING
-                    )
-                again = await getattr(self.service, operation)(
+                self.assertEqual(
+                    await self.state(), (ApprovalStatus.PENDING, ("requested",))
+                )
+                # Repeating the call says so: now it is decided, once.
+                again = await getattr(self.repeater, operation)(
                     self.new.approval_id, self.user
                 )
-                self.assertEqual(again.outcome, outcome)
+                self.assertEqual(again.outcome, ApprovalOutcome(kind))
+                self.assertEqual(await self.state(), (status, ("requested", kind)))
 
     async def test_a_decision_returns_the_stored_record_and_writes_its_history(self):
         # (the contract tests check every outcome; this one reads back what the

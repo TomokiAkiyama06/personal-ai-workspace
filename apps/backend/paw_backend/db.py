@@ -451,29 +451,38 @@ class Database:
         ``asyncio.timeout``: the expiry cancels the caller and so aborts the
         connection). Waiting for a free slot (see ``__init__``) is cancellable
         the same way, and ``dispose()`` fails it with ``DatabaseDisposedError``
-        (see ``_acquire_slot``).
+        (see ``_acquire_slot``). The slot is held until the transaction task has
+        exited, not until the caller returns: a cancelled caller's task may outlive
+        it, and the number of dedicated connections stays within the cap.
         """
         if not self.configured:
             raise DatabaseNotConfiguredError("PAW_DATABASE_URL is not set")
         await self._acquire_slot()
         try:
             transaction = asyncio.create_task(self._run_transaction(work))
-            self._probes.add(transaction)
-            transaction.add_done_callback(self._probes.discard)
-            # Retrieve the outcome so that asyncio does not log it as unhandled.
-            transaction.add_done_callback(
-                lambda task: task.cancelled() or task.exception()
-            )
-            try:
-                # Unlike awaiting the task, asyncio.wait() does not cancel it
-                # when this caller is cancelled: the socket is shut down below.
-                await asyncio.wait({transaction})
-            finally:
-                if not transaction.done():  # this caller was cancelled
-                    self._abort(transaction)
-            return transaction.result()
+        except BaseException:
+            self._abortable_slots.release()  # nothing was started
+            raise
+        self._probes.add(transaction)
+        transaction.add_done_callback(self._probes.discard)
+        # The slot belongs to the transaction task, not to this call: it is given
+        # back when the task has really ended (as in ``_abortable``). A caller
+        # that is cancelled returns at once, but the task it abandons lives on
+        # until the driver has cleaned up (the socket shutdown makes the statement
+        # fail; the server may keep running it), and its connection exists until
+        # then. Releasing the slot at the caller's return would let the next call
+        # open a connection beyond ``database_pool_size``.
+        transaction.add_done_callback(lambda _: self._abortable_slots.release())
+        # Retrieve the outcome so that asyncio does not log it as unhandled.
+        transaction.add_done_callback(lambda task: task.cancelled() or task.exception())
+        try:
+            # Unlike awaiting the task, asyncio.wait() does not cancel it
+            # when this caller is cancelled: the socket is shut down below.
+            await asyncio.wait({transaction})
         finally:
-            self._abortable_slots.release()
+            if not transaction.done():  # this caller was cancelled
+                self._abort(transaction)
+        return transaction.result()
 
     async def _run_transaction[T](
         self, work: Callable[[AsyncSession], Awaitable[T]]
