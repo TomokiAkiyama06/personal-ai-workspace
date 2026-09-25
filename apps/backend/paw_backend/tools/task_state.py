@@ -16,12 +16,16 @@ failed or cancelled task can be retried or restarted later; that makes the task
 run asks again).
 
 **The run.** A Retry or a Restart starts a new *run* of the same task
-(:class:`TaskRun`: the attempt, which Restart increments, and the retry count,
-which Retry increments; both only ever grow). What a worker asks is "can *my*
-run still act?" (``check(task_id, run)``): a run that a Retry / Restart has
-replaced is ``SUPERSEDED`` (unless the task has ended: ``ENDED`` is said first).
-Every approval is
-stamped with the run it was requested in and can only be used by that run. The
+(``paw_backend.tasks.TaskRun``: the attempt, which Restart increments, and the
+retry count, which Retry increments; both only ever grow). It is the task
+lifecycle's own class, the type of ``TaskEvent.run`` and ``TaskSnapshot.run``,
+and the only one: the broker has no ``TaskRun`` of its own, so the run a worker
+was started with is passed to a ``TaskContext`` as it is (two look-alike classes
+would never compare equal, and the current run would be ``SUPERSEDED``). What a
+worker asks is "can *my* run still act?" (``check(task_id, run)``): a run that a
+Retry / Restart has replaced is ``SUPERSEDED`` (unless the task has ended:
+``ENDED`` is said first). Every approval is stamped with the run it was
+requested in and can only be used by that run. The
 revocation that a Retry / Restart triggers runs *after* the transition has
 committed, in a listener whose failure nothing retries, so it cannot be what
 keeps an approval of the earlier run from a worker of the new one: the run is.
@@ -41,42 +45,14 @@ as with ``BudgetProvider``.
 """
 
 import uuid
-from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
 
 import psycopg
 
 from paw_backend.db import Database
-from paw_backend.tasks.domain import TERMINAL_STATES, TaskState
-
-# ``tasks.attempt`` and ``tasks.retry_count`` are 32-bit ``INTEGER`` columns.
-_MAX_COUNTER = 2**31 - 1
-
-
-def _counter(value: object, name: str, minimum: int) -> None:
-    if type(value) is not int or not minimum <= value <= _MAX_COUNTER:
-        raise ValueError(f"{name} must be an integer from {minimum} to {_MAX_COUNTER}")
-
-
-@dataclass(frozen=True, slots=True)
-class TaskRun:
-    """Which run of a task a worker (or an approval) belongs to.
-
-    ``attempt`` is ``tasks.attempt`` (from 1; Restart increments it) and
-    ``retry_count`` is ``tasks.retry_count`` (from 0; Retry increments it). Every
-    re-opening of a failed or cancelled task changes exactly one of them, and
-    neither ever decreases, so two runs of a task are equal only if they are the
-    same run. The orchestrator builds it from the task it starts the worker for
-    (``TaskSnapshot.attempt.number`` and ``TaskSnapshot.retry_count``).
-    """
-
-    attempt: int
-    retry_count: int
-
-    def __post_init__(self) -> None:
-        _counter(self.attempt, "attempt", 1)
-        _counter(self.retry_count, "retry_count", 0)
+from paw_backend.tasks.domain import TERMINAL_STATES, TaskRun, TaskState
+from paw_backend.tasks.errors import InvalidCommandArgumentError
 
 
 class TaskActivity(StrEnum):
@@ -100,14 +76,15 @@ def activity_of(
 ) -> TaskActivity:
     """What a stored task (its state and run) means for the worker of ``run``.
 
-    ``UNKNOWN`` for a state this code does not know, or a counter that is not an
-    integer (never read as alive); ``ENDED`` before ``SUPERSEDED`` (a task that
+    ``UNKNOWN`` for a state this code does not know, or a counter that is not a
+    valid one (``TaskRun`` refuses it with ``InvalidCommandArgumentError``; never
+    read as alive); ``ENDED`` before ``SUPERSEDED`` (a task that
     has ended has no run that can act, and that is the more useful thing to say).
     """
     try:
         task_state = TaskState(state)
         current = TaskRun(attempt, retry_count)
-    except ValueError:
+    except (ValueError, InvalidCommandArgumentError):
         return TaskActivity.UNKNOWN
     if task_state in TERMINAL_STATES:
         return TaskActivity.ENDED

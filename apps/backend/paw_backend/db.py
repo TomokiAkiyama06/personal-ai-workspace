@@ -320,11 +320,13 @@ class Database:
         finish in time).
 
         The server is also told to give up, and the limit is on the WHOLE
-        transaction: ``transaction_timeout`` (``SET LOCAL``, PostgreSQL 17 or
-        later; this project targets 18) is set to the time that is left plus
-        ``_SERVER_GRACE_SECONDS``, and the server ends the session when it runs
-        out, whatever the transaction is doing (a statement waiting on a lock,
-        the pause between two statements, the ``COMMIT``). A statement that is
+        transaction: ``transaction_timeout`` (``SET LOCAL``; a setting since
+        PostgreSQL 17, but the Tool Broker path requires PostgreSQL 18 or newer,
+        decided by the human on 2026-09-25, see Decision 0006) is set to the
+        time that is left plus ``_SERVER_GRACE_SECONDS``, and the server ends
+        the session when it runs out, whatever the transaction is doing (a
+        statement waiting on a lock, the pause between two statements, the
+        ``COMMIT``). A statement that is
         waiting on a lock when the caller aborts is not woken by the closed
         socket (the server notices it only when it has something to send), so
         without a limit the abandoned backend would wait for the lock for as long
@@ -342,7 +344,8 @@ class Database:
 
         A server older than 17 does not know ``transaction_timeout``: the
         transaction then fails at its first statement (fail closed) instead of
-        running with a weaker limit.
+        running with a weaker limit. 17 knows it but is neither tested nor
+        supported (the requirement is 18 or newer); the version is not checked.
         """
         loop = asyncio.get_running_loop()
 

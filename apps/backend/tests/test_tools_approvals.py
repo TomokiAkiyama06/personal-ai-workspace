@@ -13,7 +13,9 @@ from paw_backend.authz import (
     ProjectRole,
     SystemRole,
 )
-from paw_backend.tasks import TaskState
+from paw_backend.tasks import Actor, InvalidCommandArgumentError, TaskCommand, TaskState
+from paw_backend.tasks import TaskEvent as LifecycleEvent
+from paw_backend.tasks import TaskRun as LifecycleRun
 from paw_backend.tools import (
     ApprovalEventKind,
     ApprovalLevel,
@@ -40,9 +42,10 @@ from paw_backend.tools import (
     Verdict,
 )
 from paw_backend.tools.scope import Target, TargetKind
+from paw_backend.tools.task_state import activity_of
 
 from .authz_support import AGENT, SECRET, FailingSink, StaticDirectory, principal
-from .tools_store_contract import LIMITS, StoreContract, new_approval
+from .tools_store_contract import LIMITS, StoreContract, binding_of, new_approval
 from .tools_support import (
     NOW,
     P1,
@@ -148,8 +151,103 @@ class TaskRunTypeTest(unittest.TestCase):
             (1, None),
         ):
             with self.subTest(attempt=attempt, retry_count=retry_count):
-                with self.assertRaises(ValueError):
+                # the lifecycle's class (the broker has none of its own) refuses
+                # with the lifecycle's error, which is not a ``ValueError``
+                with self.assertRaises(InvalidCommandArgumentError):
                     TaskRun(attempt, retry_count)
+
+
+class LifecycleRunTypeTest(unittest.IsolatedAsyncioTestCase):
+    """The run of the task lifecycle (``TaskEvent.run``) is the run of the broker.
+
+    Finding of the review of PR #74 (round 7): the broker had a ``TaskRun`` class
+    of its own, unrelated to the lifecycle's, so a context built from the event
+    that started a worker raised ``TypeError`` and the two were never equal. These
+    tests take the run from a real ``TaskEvent`` and hand it to everything that
+    binds a run (the real-database counterpart is
+    ``test_tools_postgres.LifecycleRunTest``).
+    """
+
+    def start_event(self, attempt, retry_count) -> LifecycleEvent:
+        return LifecycleEvent(
+            seq=1,
+            task_id=TASK,
+            attempt=attempt,
+            retry_count=retry_count,
+            command=TaskCommand.START,
+            from_state=TaskState.QUEUED,
+            to_state=TaskState.RUNNING,
+            wait_reason=None,
+            actor=Actor.system(),
+            reason=None,
+            step_name=None,
+            detail=None,
+            task_version=2,
+            created_at=NOW,
+        )
+
+    def test_there_is_one_task_run_class(self):
+        self.assertIs(TaskRun, LifecycleRun)
+        self.assertIs(type(self.start_event(1, 0).run), TaskRun)
+        self.assertEqual(TaskRun.__module__, "paw_backend.tasks.domain")
+
+    def test_everything_that_binds_a_run_takes_the_run_of_an_event(self):
+        run = self.start_event(2, 1).run
+        self.assertEqual(make_context(run=run).run, run)
+        new = new_approval(task_run=run)
+        self.assertEqual(new.task_run, run)
+        self.assertEqual(binding_of(new).task_run, run)
+
+    def test_the_activity_of_a_stored_task_is_judged_for_the_run_of_an_event(self):
+        for row, attempt, retry_count, expected in (
+            (("running", 2, 1), 2, 1, TaskActivity.ACTIVE),
+            (("running", 2, 1), 2, 0, TaskActivity.SUPERSEDED),
+            (("running", 2, 1), 1, 1, TaskActivity.SUPERSEDED),
+            (("failed", 2, 1), 2, 1, TaskActivity.ENDED),
+        ):
+            with self.subTest(row=row, run=(attempt, retry_count)):
+                run = self.start_event(attempt, retry_count).run
+                self.assertEqual(activity_of(*row, run), expected)
+
+    async def test_a_worker_started_with_a_lifecycle_run_uses_its_approval(self):
+        for attempt, retry_count in ((1, 0), (1, 2), (3, 0), (3, 4)):
+            with self.subTest(run=(attempt, retry_count)):
+                run = self.start_event(attempt, retry_count).run
+                task = TaskOfRuns(current=run)
+                store = InMemoryApprovalStore(task_activity=task)
+                h = Harness(approvals=store, task_activity=task)
+                call = make_call(
+                    "repo.delete_tree", DELETE, context=make_context(run=run)
+                )
+                asked = await h.broker.request(call)
+                self.assertEqual(asked.verdict, Verdict.NEEDS_APPROVAL)
+                await h.service.approve(
+                    asked.approval_id, principal(SystemRole.USER, U1)
+                )
+                used = await h.broker.request(call, approval_id=asked.approval_id)
+                self.assertEqual(
+                    (used.verdict, used.reason), (Verdict.ALLOW, R.APPROVAL_CONSUMED)
+                )
+                self.assertEqual((await store.get(asked.approval_id)).task_run, run)
+
+    async def test_a_lifecycle_run_that_is_not_the_current_one_is_superseded(self):
+        current = self.start_event(1, 1).run
+        task = TaskOfRuns(current=current)
+        h = Harness(
+            approvals=InMemoryApprovalStore(task_activity=task), task_activity=task
+        )
+        for run, expected in (
+            (current, Verdict.NEEDS_APPROVAL),
+            (self.start_event(1, 0).run, Verdict.DENY),
+            (self.start_event(2, 0).run, Verdict.DENY),
+        ):
+            with self.subTest(run=run):
+                decision = await h.broker.request(
+                    make_call("repo.delete_tree", DELETE, context=make_context(run=run))
+                )
+                self.assertEqual(decision.verdict, expected)
+                if expected is Verdict.DENY:
+                    self.assertEqual(decision.reason, R.TASK_SUPERSEDED)
 
 
 class ApprovalFlowTest(unittest.IsolatedAsyncioTestCase):

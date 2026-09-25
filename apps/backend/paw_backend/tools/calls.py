@@ -22,6 +22,7 @@ from types import MappingProxyType
 
 from paw_backend.authz import AgentGrant
 from paw_backend.authz.subjects import to_uuid
+from paw_backend.tasks import TaskRun
 from paw_backend.tools.approval_types import SummaryItem, summary_value
 from paw_backend.tools.capabilities import ApprovalLevel, ToolCapability
 from paw_backend.tools.credentials import (
@@ -44,7 +45,6 @@ from paw_backend.tools.scope import (
     normalise_repository,
     normalise_url,
 )
-from paw_backend.tools.task_state import TaskRun
 
 HASH_VERSION = 1
 # All text arguments of one call together (each is also bounded by its kind).

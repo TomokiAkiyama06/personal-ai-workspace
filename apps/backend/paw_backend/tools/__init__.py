@@ -7,6 +7,10 @@ narrows the PAW-025 authorization decision and never widens it. See
 ``apps/backend/README.md`` ("Tool Broker / Capability Policy").
 """
 
+# The run of a task is the lifecycle's own class (``TaskEvent.run``,
+# ``TaskSnapshot.run``); the broker has none of its own. Re-exported so that
+# ``from paw_backend.tools import TaskRun`` keeps working: it is the same object.
+from paw_backend.tasks import TaskRun
 from paw_backend.tools.approval_memory import InMemoryApprovalStore
 from paw_backend.tools.approval_store import PostgresApprovalStore
 from paw_backend.tools.approval_types import (
@@ -78,7 +82,6 @@ from paw_backend.tools.task_state import (
     PostgresTaskActivity,
     TaskActivity,
     TaskActivityProvider,
-    TaskRun,
 )
 
 __all__ = [
