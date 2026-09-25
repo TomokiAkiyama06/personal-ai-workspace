@@ -130,6 +130,34 @@ def validate_status_filter(value: object, field: str = "status") -> ProjectStatu
     return value
 
 
+def validate_admin_status_filter(
+    value: object, field: str = "status"
+) -> ProjectStatus | None:
+    """The status filter of the administrator's list: ``None`` (every status that is
+    not Deleted), or ``ACTIVE`` / ``ARCHIVED`` / ``PENDING_DELETION``.
+
+    A :class:`ProjectStatus` member, or its exact serialised value (``"archived"``:
+    an exact ``str``, no case folding or trimming), is accepted and normalised to
+    the member. ``DELETED`` (either spelling) is refused: a tombstone is never
+    listed (Decision 0008: a Deleted project is "not found" for every operation).
+    Anything else (a ``bool``, a number, another ``str`` subclass) is not a status.
+    """
+    if value is None:
+        return None
+    if isinstance(value, ProjectStatus):
+        status = value
+    elif type(value) is str:
+        try:
+            status = ProjectStatus(value)
+        except ValueError:
+            raise _fail(field, InputProblem.NOT_A_STATUS) from None
+    else:
+        raise _fail(field, InputProblem.NOT_A_STATUS)
+    if status is ProjectStatus.DELETED:
+        raise _fail(field, InputProblem.OUT_OF_RANGE)
+    return status
+
+
 def _bounded_int(field: str, value: object, low: int, high: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise _fail(field, InputProblem.NOT_AN_INTEGER)
