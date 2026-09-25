@@ -233,6 +233,151 @@ storage.  The candidate can likewise modify the main repository's `.git`, which 
 worktree shares.  See `docs/decisions/0001-hidden-check-boundary.md` (added by PAW-013)
 for the same boundary applied to hidden checks.
 
+## Test / hidden acceptance runner
+
+`benchmarks.test_runner.TestRunner` executes visible checks supplied by the task and
+hidden checks resolved from an evaluator-owned `HiddenCheckRegistry`.  The manifest
+continues to contain only the opaque `reference_id`; the registry and its command
+content are never placed in the candidate worktree or durable check log.  A check
+record includes its status, timeout, exit code, duration, and, per stream, the byte
+count, the SHA-256 of the retained bytes, and a truncation flag.  Raw stdout/stderr
+stay in memory for the trusted evaluator caller, so credentials emitted by a command
+do not become durable logs.
+
+- Output is read while the check runs.  Only the first 64 KiB per stream is kept;
+  the rest is counted and discarded, so evaluator memory does not depend on how much
+  a check prints.  `truncated` is set when a stream exceeded 64 KiB.
+- A check gets an explicit environment: only `PATH`, `LANG`, `LANGUAGE`, `LC_ALL`,
+  `LC_CTYPE` and `TZ` are inherited, plus a private temporary `HOME` removed after the
+  check.  Credential variables and every `GIT_*` selector are dropped.  One variable is
+  added, `PAW_CHECK_RUN`, with a random value of its own for every check (see the next
+  item for what it is for).
+- On timeout the check's process group and the processes found below it in `/proc`
+  (or carrying its marker, see below) get `SIGTERM`.  The grace period
+  (`term_grace_seconds`, 2 s) applies to all of them, not only the leader: the runner
+  waits until the leader has exited and no group member
+  or known descendant is still running, so a descendant finishing its `SIGTERM` handler
+  is not cut short.  Output keeps being drained during the grace period, so a handler
+  that writes more than a pipe holds is not blocked (and killed) on a full pipe.
+  The set of processes is not fixed when the first `SIGTERM` goes out: on every round of
+  the wait the runner looks again (recorded descendants and the marker), and a process
+  that a `SIGTERM` handler started meanwhile, in a session of its own for instance, gets
+  its own `SIGTERM` once and is waited for like the others, so its cleanup can run
+  instead of meeting the final `SIGKILL`.  A new process is stopped as soon as it is
+  found, so one that has not installed its own handler yet dies of the default action;
+  a member of the check's own group that a handler forks after the group signal is not
+  sent a `SIGTERM` (the group signal is the only one group members get) and is killed
+  with the group at the end.  A newcomer gets a whole grace period counted from its
+  own `SIGTERM`, not what is left of the first one: a handler that starts a helper
+  1.8 s into a 2 s grace period does not have the helper's cleanup cut off after
+  0.2 s.  Whatever remains when the wait ends gets `SIGKILL`, and pipe reading stops
+  after `drain_seconds` (1 s).
+  The wait is bounded: however many processes a handler keeps starting, it ends
+  `max_grace_periods` (2) grace periods after the first `SIGTERM` at the latest, so a
+  newcomer found in the second half of that time gets only what is left of it.  With
+  the defaults, a check that times out takes at most `timeout` + 4 s (the two grace
+  periods) + 1 s (`drain_seconds`, for what the killed processes left in the pipes), and
+  2 s more only if the killed leader cannot be reaped (it is stuck in uninterruptible
+  sleep).
+  If the output capture cannot be set up after the launch (descriptor exhaustion), the
+  child is killed and reaped and the check is reported as an `error`, not left running.
+  The child's pid and start time are recorded right after the launch, and nothing is
+  signalled unless it is still the runner's own unreaped child (`waitid` with
+  `WNOWAIT`) with that start time: a child that something else already reaped may have
+  had its pid, which is also its process group id, reused, so then nothing is sent and
+  nothing is waited for.  A child with no recorded start time (no `/proc`, or the read
+  failed) is not signalled at all, because `waitid` alone cannot tell it from another
+  direct child that was given the same pid; a leader whose start time differs from the
+  one recorded at launch is not signalled either.  Once the leader object exists its
+  guarded signalling (recorded members, identity re-check at every signal) is used
+  instead, after one last unthrottled look at the group: a member the check forked
+  since the leader was built is recorded even if another reaper collected the leader
+  in the meantime.  The pipes are closed first, so the identity checks can still read
+  `/proc` under descriptor exhaustion.
+- What a check left behind is killed when the check exits normally (or its setup fails)
+  too, not only on timeout: leftover group members, and the processes that left the
+  group, whether they started a session of their own (`start_new_session`, `setsid`) or
+  daemonized (double fork plus `setsid`).  Those are found in two ways.  The processes
+  below the leader are recorded while it runs (every 0.2 s, by pid and start time, and
+  only while the leader is still the runner's own unreaped child, so a leader collected
+  elsewhere never makes a stranger's children look like the check's).  And every live
+  process whose initial environment carries this check's marker
+  (`PAW_CHECK_RUN=<random value>`) is found by scanning `/proc/<pid>/environ` when the
+  check ends.  The marker survives re-parenting, `setsid` and double forks, so a check
+  that starts a server in a session of its own and exits at once is still cleaned up.
+  Only the whole marker variable is looked for (a longer or shorter value, or the same
+  text inside another variable, does not match) and nothing else of another process's
+  environment is kept; processes whose environment cannot be read (another user, not
+  dumpable) are skipped.  The value is random per check, so concurrent runs never match
+  each other's processes.  On timeout these processes get `SIGTERM` and the grace
+  period like the group does; a process the group signal already reaches (the leader
+  and the group's members) is not signalled a second time, so a `SIGTERM` handler is
+  not interrupted by another `SIGTERM`.  The kill is repeated (at most 20 rounds) until
+  none of them is left running, because a process that forked just before its
+  `SIGKILL` may have left a child.
+- Descendants are tracked by identity, not by pid alone (pid plus the start time in
+  `/proc/<pid>/stat`).  Before every `SIGTERM`/`SIGKILL` the identity is re-checked, and
+  a pid now held by a different process is dropped and neither signalled nor waited
+  for.  Where `pidfd_open` exists (Linux 5.3+, Python 3.9+) the pidfd is opened first
+  and the identity checked afterwards, so the signal cannot reach a newcomer; without
+  it a window of microseconds remains between the check and `kill`.  The check's
+  leader is left unreaped until the last process-group signal, so the group id cannot
+  be reused before it.
+- If something else reaps the check's leader (the evaluator ignores `SIGCHLD`, or
+  another reaper collects it), its exit status is lost, so the check is reported as
+  `error` with no exit code, never as `passed`.  The runner reaps the leader itself, so
+  it notices a reaper that got there first at any point, and it re-checks at every group
+  signal that the leader is still its own unreaped child (pid and start time).  Once it
+  is not, its pid may be reused as an unrelated process group id, so the group is
+  signalled only while a process recorded earlier as its member (same pid and start
+  time) is still in it; otherwise nothing is sent.  Members are recorded every 0.2 s
+  while the leader runs, once more when it is first seen as a zombie (which still
+  reserves the group id), and once more at the moment it is seen to have vanished, so a
+  child forked just before the exit is still known even if another reaper collects the
+  leader before the final group kill.  A listing is adopted only if the leader was still
+  its own unreaped child after it (so it was taken while the group id was reserved),
+  and the listing after a vanished leader is dropped when some process now holds the
+  leader's own number (the id was reused, so that group is a stranger's).  If the
+  leader turns out to have been collected after a listing was read (a reaper acting
+  between the table read and the ownership check, including in the last look of the
+  setup-failure cleanup), or at a group signal since it was last observed, the
+  untrusted listing is dropped and the snapshot of the vanished leader's group is taken
+  at once, exactly as if the loss had been seen when it happened; the leader is not
+  merely marked released, so a member forked just before the loss is not forgotten.
+- Without a recorded start time (no `/proc`) the runner has no identity to check, so it
+  sends no signal to the check's group and cannot stop it: a check that exceeds the
+  timeout is reported `timed_out` but keeps running, and one that finishes is still
+  reported with its real exit status.  Production needs a container or cgroup there.
+- **Documented residuals** (not closable in-process; see Decision 0001): a process that
+  leaves the group, is re-parented before the runner recorded it (the check exits within
+  0.2 s of starting it, or double-forks a daemon) *and* does not carry the marker (it
+  was started with an explicit or empty environment, for example `env -i`, or its
+  environment cannot be read) can outlive the check.  The marker is a best-effort
+  recogniser for cooperative code, not a boundary: a hostile check can drop it.  A
+  check-then-signal gap of microseconds remains because a process group cannot be
+  signalled through a pidfd, and the snapshot of a vanished leader's group assumes its
+  id was not reused, by a group whose leader has already gone, since the leader was last
+  observed (one polling interval of 50 ms; after a timeout, the drain of up to
+  `drain_seconds`).  A member forked into the group only after the leader was reaped and
+  the snapshot was taken, or by members that have all exited before the signal, is
+  missed.  Containing descendants reliably needs a PID namespace or a cgroup
+  (`cgroup.kill`).
+- A check command needs a non-empty `argv[0]`; later arguments may be any string,
+  including `""` (for example `("python3", "-c", "")`), as the task schema allows.
+- The check log directory is created `0700` and the log `0600` at creation, opened
+  with `O_NOFOLLOW`, and refused (`TestRunnerError`) if it is a symlink, has extra
+  hard links, is not owned by the evaluator, or sits in a group/other-writable
+  directory.  A wider mode on an existing log is tightened on the open descriptor
+  before anything is written.
+- An unknown hidden reference raises a `KeyError` that carries neither the reference
+  nor a chained exception (`__cause__` and `__context__` are `None`).
+
+The runner is a data/process boundary, not a hostile-code sandbox: checks run under
+the evaluator's own OS user, so code under test can still open evaluator files it can
+locate.  Production must run candidate code and private evaluator storage under
+separately enforced OS or container permissions.  The proposed boundary is recorded in
+[Decision 0001](../docs/decisions/0001-hidden-check-boundary.md).
+
 ## Candidate adapter interface
 
 [`candidate_adapter.py`](candidate_adapter.py) defines the provider-neutral boundary used by
