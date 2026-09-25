@@ -9,6 +9,7 @@
 | [0002](0002-start-workspace-implementation-before-model-comparison.md) | Workspace本体の実装をModel比較Runより先に始める | Approved |
 | [0003](0003-backend-cli-web-implementation-stack.md) | Backend / CLI / Web の実装スタック | Approved（承認範囲は本文を参照） |
 | [0004](0004-rbac-capability-and-audit-policy.md) | RBAC・Capability・Auditの方針 | Approved |
+| [0005](0005-owner-setup-and-recovery.md) | Owner の初期設定と復旧の方針 | Approved |
 | [0014](0014-task-working-set-persistence.md) | Task の Working Set（Multi-Repo）の永続化をPAW-032に含めず、新しいIssueで扱う | Approved |
 
 運用は [AGENTS.md](../../AGENTS.md) の「仕様変更」に従います。

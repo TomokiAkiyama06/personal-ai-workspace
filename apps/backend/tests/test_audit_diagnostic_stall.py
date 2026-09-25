@@ -31,6 +31,10 @@ from paw_backend.authz.diagnostics import (
     warn_if_audit_table_is_mutable,
 )
 from paw_backend.db import Database, DatabaseNotConfiguredError
+from paw_backend.identity.diagnostics import (
+    read_token_table_access,
+    warn_if_tokens_can_be_minted,
+)
 
 from .authz_support import P1, U1, principal, repo_resource
 from .fake_postgres import HangingPostgres
@@ -328,6 +332,21 @@ class DiagnosticStallTest(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(TimeoutError):
                 await read_audit_table_access(database, 0.3)
 
+    async def test_a_stalled_token_privilege_query_is_given_up_on_time(self):
+        async with HangingPostgres() as server:
+            database = Database(settings_for(server))
+            self.addAsyncCleanup(database.dispose)
+            started = time.monotonic()
+            with self.assertLogs(
+                "paw_backend.identity.diagnostics", level="INFO"
+            ) as logs:
+                await warn_if_tokens_can_be_minted(database, 0.3)
+            self.assertLess(time.monotonic() - started, 1.5)
+            (line,) = logs.output
+            self.assertIn("skipped (TimeoutError)", line)
+            with self.assertRaises(TimeoutError):
+                await read_token_table_access(database, 0.3)
+
     async def test_the_application_leaves_its_lifespan_on_time_with_a_stalled_query(
         self,
     ):
@@ -340,8 +359,9 @@ class DiagnosticStallTest(unittest.IsolatedAsyncioTestCase):
             async with asyncio.timeout(8):  # without the fix: ~10 s (or a hang)
                 started = None
                 async with app.router.lifespan_context(app):
-                    self.assertTrue(await wait_until(lambda: server.logins == 1))
-                    await asyncio.sleep(0.3)  # the diagnostic is inside its query
+                    # The audit and the Owner-token diagnostics, one connection each.
+                    self.assertTrue(await wait_until(lambda: server.logins == 2))
+                    await asyncio.sleep(0.3)  # both are inside their query
                     started = time.monotonic()
                 self.assertLess(time.monotonic() - started, 1.5)
 
