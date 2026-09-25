@@ -15,7 +15,7 @@ Role の名前、Owner / Admin の分担、Audit の最小項目、Agent が権�
 承認前の Product Policy を実装が暗黙に確定させないよう、選択を一覧にして Human が承認または変更できるようにする。
 
 実装は [Backend README](../../apps/backend/README.md) の「認可（RBAC / Capability）と Audit」に書いている。
-**この Decision は Proposed であり、Human の承認を得ていない。** 承認されるまで、実装の選択は暫定である。
+**この Decision は 2026-09-25 に Human が承認した（Approved）。** 下の各選択は、承認された方針である（承認時の決定は末尾を参照）。
 
 ## 提案
 
@@ -92,7 +92,7 @@ Tool Broker の Approval（Human Approval、Step-up）で、委任不可の操�
 
 - 保存期間、Partition、古い行の退避は未実装（Table は削除できず、行数は増え続ける）。
 - Repository の ACL の保存と解決は呼び出す側（PAW-027 など）の責任で、この Backend は渡された `RepoAcl` を判定するだけである。
-  Override が Project の Role を広げてよいか、User 単位の許可リストを持つかは要件が定めておらず、Human の判断を待つ（今は狭めるだけ・権限の集合）。
+  Override が Project の Role を広げてよいか、User 単位の許可リストを持つかは要件が定めておらず、Human が「狭めるだけ・権限の集合」で承認した（2026-09-25）。
 - `Scope.SELF` の Capability は Project の状態と Member 資格を見ない（Pending deletion の Project の Chat、Member から外れた後の Memory など）。PAW-026 で Project との関係をモデル化する。
 - 全 Route の保護を調べる Test は `/api/v1` だけを対象にし、FastAPI の内部に依存する。
 - `create_app` が既定の Provider と Directory を組み込み、PAW-022 が `install_authz` を呼ぶまで全 Endpoint が 401 になる。
@@ -108,7 +108,7 @@ Tool Broker の Approval（Human Approval、Step-up）で、委任不可の操�
 
 ## 承認後の扱い
 
-承認された場合、PAW-025 のPRは本Decisionを参照する。
+2026-09-25 に承認された。PAW-025 のPRは本Decisionを参照する。
 Human が変更を指示した項目は、この Decision を更新してから実装を合わせる。
 承認後に方針を変える場合は、この Decision を書き換えず、新しい Decision から `Supersedes` する。
 [REQUIREMENTS.md](../../REQUIREMENTS.md) の原文は書き換えない。
