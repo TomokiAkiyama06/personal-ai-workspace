@@ -371,7 +371,9 @@ class AppRolePrivilegesTest(AsAppRole, PostgresTaskTestCase):
         task_id = await self.task_in_state(TaskState.FAILED)
         await self.service.execute(task_id, C.RETRY, actor=self.user, agent="codex")
         await self.service.execute(task_id, C.START, actor=self.system)
-        await self.service.execute(task_id, C.STOP_NOW, actor=self.user)
+        await self.service.execute(
+            task_id, C.STOP_NOW, actor=self.user, reason="agent loop"
+        )
         await self.service.execute(task_id, C.RESTART, actor=self.user, model="big")
         snapshot = await self.service.restore(task_id)
         self.assertEqual(

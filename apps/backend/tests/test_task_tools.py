@@ -82,7 +82,9 @@ class ToolInvocationTest(PostgresTaskTestCase):
         running = await self.service.begin_tool_invocation(
             task_id, step_id=step.id, tool_name="shell"
         )
-        await self.service.execute(task_id, C.STOP_NOW, actor=self.user)
+        await self.service.execute(
+            task_id, C.STOP_NOW, actor=self.user, reason="dangerous tool call"
+        )
 
         snapshot = await self.service.restore(task_id)
         by_id = {call.id: call for call in snapshot.tool_invocations}
