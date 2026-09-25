@@ -604,6 +604,10 @@ Permanent / Revalidate など鮮度の設定は Version の不変の列なので
 `owner_user_id`、`project_id`、`project_group_id`、`repo_id`、`actor_user_id` は素の UUID Column で、DB は存在を確認しません。
 Backend は検証した ID だけを書いてください。Table ができた後の Migration で Foreign Key を追加できます。
 Task、Repo 解析、Project Decision の出典も、Table がないため `memory_sources.source_ref` の不透明な文字列です。
+種別 `conversation` 以外の出典は、`source_ref` が NULL でなく、1 文字以上であることを CHECK 制約（`ck_memory_sources_other_sources_have_reference`）が求めます。
+空文字は NULL ではありませんが、Task、Repo 解析、確認、Decision のどれも指さず、出典として辿れないため拒否します（`char_length(NULL)` は NULL で CHECK を通り抜けるため、NULL も明示して拒否します）。
+検査するのは長さだけです。空白だけの文字列は DB が受け入れます。`title`、`content`、`memory_type`、Embedding Model の `id` など、この Schema の他の文字列の Column と同じく、DB は文字列の意味を知らず、
+空白の除去や正規化は Backend が行うためです。種別 `conversation` は従来どおり `source_ref` を持てません（`conversation_has_no_opaque_reference`）。Conversation の削除が残す、参照がすべて NULL の状態（正当）はこの CHECK の対象外です。
 
 **Application の Role の権限。** Migration は `PAW_APP_DATABASE_ROLE` の Role に、Table ごとに必要最小限を与えます（[上の規則](#migration-は-application-の-role-に権限を与えるcontributor-向けの規則)）。
 未設定のときは何も与えません。TRUNCATE、ALTER、DROP、GRANT は誰にも与えません。
