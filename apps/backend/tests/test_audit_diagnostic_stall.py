@@ -16,6 +16,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import psycopg
+
 from paw_backend.app import create_app
 from paw_backend.authz import (
     Authorizer,
@@ -43,6 +45,38 @@ def settings_for(server: HangingPostgres, **overrides):
     return make_settings(
         database_url=f"postgresql://paw:pw@127.0.0.1:{server.port}/paw", **overrides
     )
+
+
+class StubbornQueryDatabase(Database):
+    """A driver whose statement does not end when it is aborted or cancelled.
+
+    The situation behind the slot accounting: ``_abort`` shut the socket down
+    (or cancelled the task) and the query is still running, for example inside
+    a driver cleanup that keeps waiting. ``release`` lets it end.
+    """
+
+    def __init__(self, settings) -> None:
+        super().__init__(settings)
+        self.release = asyncio.Event()
+        self.started = 0
+        self.running = 0
+        self.peak = 0
+
+    async def _query(self, sql, params=None):
+        self.started += 1
+        self.running += 1
+        self.peak = max(self.peak, self.running)
+        # A safety net so that broken code fails the test instead of hanging it.
+        asyncio.get_running_loop().call_later(4, self.release.set)
+        try:
+            while True:
+                try:
+                    await self.release.wait()
+                    return [(1,)]
+                except asyncio.CancelledError:
+                    pass  # swallowed, like a cleanup that keeps waiting
+        finally:
+            self.running -= 1
 
 
 class FetchAbortableTest(unittest.IsolatedAsyncioTestCase):
@@ -153,6 +187,102 @@ class FetchAbortableTest(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(Exception) as caught:
                 await asyncio.wait_for(caller, 3)
             self.assertNotIsInstance(caught.exception, TimeoutError)
+
+    async def test_calls_beyond_the_cap_wait_for_a_query_that_will_not_end(self):
+        database = StubbornQueryDatabase(
+            make_settings(
+                database_url="postgresql://paw:pw@127.0.0.1:1/paw",
+                database_pool_size=1,
+            )
+        )
+        self.addAsyncCleanup(database.dispose)
+        with self.assertRaises(TimeoutError):  # aborted, but the query goes on
+            await database.fetch_abortable("SELECT 1", timeout_seconds=0.2)
+        self.assertEqual((database.started, database.running), (1, 1))
+        with self.assertRaises(TimeoutError):  # no free slot within its limit
+            await database.fetch_abortable("SELECT 1", timeout_seconds=0.2)
+        self.assertEqual((database.started, database.running), (1, 1))
+        # A patient caller waits for the slot instead of running beside it.
+        waiting = asyncio.create_task(
+            database.fetch_abortable("SELECT 1", timeout_seconds=10)
+        )
+        await asyncio.sleep(0.3)
+        self.assertEqual((database.started, waiting.done()), (1, False))
+        database.release.set()  # the first query ends at last
+        self.assertEqual(await asyncio.wait_for(waiting, 3), [(1,)])
+        self.assertEqual((database.started, database.peak), (2, 1))
+
+    async def test_a_query_that_fails_or_is_cancelled_gives_its_slot_back(self):
+        # Connection refused: the driver's error, three times in a row on the
+        # only slot (a slot that leaked would turn the second into a TimeoutError).
+        refused = Database(
+            make_settings(
+                database_url="postgresql://paw:pw@127.0.0.1:1/paw",
+                database_pool_size=1,
+            )
+        )
+        self.addAsyncCleanup(refused.dispose)
+        for _ in range(3):
+            with self.assertRaises(psycopg.OperationalError):
+                await refused.fetch_abortable("SELECT 1", timeout_seconds=5)
+        self.assertFalse(refused._abortable_slots.locked())
+        # A caller that is cancelled while its statement stalls.
+        async with HangingPostgres() as server:
+            database = Database(settings_for(server, database_pool_size=1))
+            self.addAsyncCleanup(database.dispose)
+            caller = asyncio.create_task(database.fetch_abortable("SELECT 1"))
+            self.assertTrue(await wait_until(lambda: server.logins == 1))
+            await asyncio.sleep(0.2)
+            caller.cancel()
+            await asyncio.gather(caller, return_exceptions=True)
+            self.assertTrue(
+                await wait_until(lambda: not database._abortable_slots.locked(), 3)
+            )
+
+    async def test_a_slot_stays_held_while_an_aborted_query_is_still_running(self):
+        """Socket shutdown failed (or the driver's cleanup blocks): still running."""
+        async with HangingPostgres() as server:
+            database = Database(settings_for(server, database_pool_size=1))
+            self.addAsyncCleanup(database.dispose)
+            with patch.object(Database, "_abort", lambda self, task: None):
+                with self.assertRaises(TimeoutError):
+                    await database.fetch_abortable("SELECT 1", timeout_seconds=0.3)
+                self.assertEqual(server.logins, 1)
+                self.assertEqual(len(database._probes), 1)  # it did not end
+                with self.assertRaises(TimeoutError):  # no slot: it does not connect
+                    await database.fetch_abortable("SELECT 1", timeout_seconds=0.3)
+                await asyncio.sleep(0.3)
+                self.assertEqual(server.logins, 1)  # not a second connection
+            # Really abort it now (dispose does): the slot comes back.
+            await database.dispose()
+            self.assertTrue(await wait_until(lambda: not database._probes, limit=3))
+            with self.assertRaises(TimeoutError):
+                await database.fetch_abortable("SELECT 1", timeout_seconds=0.3)
+            self.assertEqual(server.logins, 2)  # it got the slot and connected
+
+    async def test_dispose_keeps_its_budget_and_the_slot_is_freed_later(self):
+        database = StubbornQueryDatabase(
+            make_settings(
+                database_url="postgresql://paw:pw@127.0.0.1:1/paw",
+                database_pool_size=1,
+                shutdown_timeout_seconds=1,
+            )
+        )
+        self.addAsyncCleanup(database.dispose)
+        caller = asyncio.create_task(
+            database.fetch_abortable("SELECT 1", timeout_seconds=30)
+        )
+        self.assertTrue(await wait_until(lambda: database.started == 1))
+        started = time.monotonic()
+        with self.assertLogs("paw_backend.db", level="WARNING"):
+            await database.dispose()  # the query ignores it: the budget ends it
+        self.assertLess(time.monotonic() - started, 2.0)
+        self.assertTrue(database._abortable_slots.locked())  # it is still running
+        database.release.set()
+        self.assertEqual(await asyncio.wait_for(caller, 3), [(1,)])
+        self.assertTrue(
+            await wait_until(lambda: not database._abortable_slots.locked())
+        )
 
 
 class AuditWriteStallTest(unittest.IsolatedAsyncioTestCase):

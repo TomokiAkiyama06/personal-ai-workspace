@@ -49,10 +49,14 @@ class EvaluatorResultSchemaTest(unittest.TestCase):
             {
                 "wall_clock_ms",
                 "token_count",
+                "context_tokens",
                 "agent_steps",
+                "retries",
+                "tool_calls",
                 "diff_size",
                 "tool_failures",
                 "peak_vram_bytes",
+                "peak_gpu_utilization_percent",
                 "human_correction_ms",
             },
         )

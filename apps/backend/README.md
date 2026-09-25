@@ -233,9 +233,11 @@ PAW-032 で実装しました。`paw_backend/tasks/` は Task の状態遷移（
 Queue、Budget、Loop 検知（PAW-033）と DAG Orchestration（PAW-034）は含みません。
 **Multi-Repo Task の Working Set（Repo の集合と `referenced` / `working` / `target` の役割、Repo ごとの worktree / Review / PR の状態）は PAW-032 に含みません。**
 PAW-032 の受け入れ条件は Task に 1 組の worktree / review / PR 状態の復元までで（Backlog）、Working Set が指す Repository の登録（PAW-027）はまだなく、
-Repo ごとの Git 状態と統合は PAW-035、Write 範囲の強制は Tool Broker（PAW-031）の責務だからです。
+Repo ごとの worktree / branch の作成と統合の処理は PAW-035、Write 範囲の強制は Tool Broker（PAW-031）の責務だからです。
 Working Set の単位、Single-Repo との関係、Repo 追加の承認、Task の完了条件など、要件が決めていない判断があるため、
-[Decision 0014](../../docs/decisions/0014-task-working-set-persistence.md)（Proposed、Human の承認待ち）で提案しています。
+[Decision 0014](../../docs/decisions/0014-task-working-set-persistence.md)（Approved、2026-09-25 に Human が承認）で、PAW-032 に含めないことを決めました。
+実装の担当は、PAW-027 の後・PAW-034 の前に立てる新しい Issue [#85](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/85) です。#85 が Working Set と Repo ごとの Git 状態を**保存する表**を持ち、PAW-035 は worktree・統合の**振る舞い**を持って、その結果を #85 の表へ書きます（PAW-035 には保存の表を含めません）。
+上の未決の判断は、#85 の実装の前に別の Decision で決めます。特に Repo の役割と Write 範囲の対応は、保存より先に決めます。
 したがって、`task_attempts` の worktree / Review / PR は 1 つの Repo の状態で、どの Repo かは記録せず、`TaskSnapshot`（`restore()`）も Working Set を返しません。
 
 ### 状態
@@ -271,7 +273,7 @@ Operator の 6 操作は次のように解釈しています（[要件](../../RE
 
 - **Pause / Resume**: Pause は実行中の Task だけが対象で、現在の安全な区切りでの停止です。Step は Backend が閉じず、Worker が区切りで `finish_step` を呼びます。Resume は `paused` から `running` へ戻します。
 - **Cancel（graceful）**: Task を終了します。branch / worktree / 途中成果は保持します（削除は別の操作）。実行中の Step は Worker が自分で閉じます（`finish_step`）。Worker が来ないまま Restart されたときは、Restart が旧試行の Step を `interrupted` にします。
-- **Stop Now（immediate）**: 緊急停止です。Cancel と同じ `cancelled` になりますが、実行中の Step を即座に `interrupted` にし、停止理由と中断した Step を Task Log と履歴 Event へ残します。Step が既に終わっていた場合（Worker が先に閉じた場合を含む）は何も中断していないため、Step 名を記録せず、Log も `Stop Now: no step was running` とします（Fail も、自分が終わらせた Step だけを Event に記録します）。実行中に何かが動きうる状態（running / waiting / evaluating）だけが対象で、queued と paused には Cancel を使います。成果物は削除しません。
+- **Stop Now（immediate）**: 緊急停止です。Cancel と同じ `cancelled` になりますが、実行中の Step を即座に `interrupted` にし、停止理由と中断した Step を Task Log と履歴 Event へ残します。**`reason` は必須**です（[要件](../../REQUIREMENTS.md)の「停止理由と実行中だったstepをAudit / Task logへ残す」を満たすためで、他の Command では任意です）。`reason` がない（`None`）、空または空白だけ、文字列でない、長さの上限（500 文字）を超える、NUL / Surrogate を含む場合は、Task の状態を見る前に、何も書き込まずに `InvalidCommandArgumentError` で拒否します（エラー文に値は含めません）。受け付けた Stop Now は必ず、履歴 Event の `reason` と Task Log の行の両方に理由を残します。Log の行は `Stop Now: interrupted step '<Step 名>' (reason: <理由>)` です。Step が既に終わっていた場合（Worker が先に閉じた場合を含む）は何も中断していないため、Step 名を記録せず、Log は `Stop Now: no step was running (reason: <理由>)` とします（Fail も、自分が終わらせた Step だけを Event に記録します）。実行中に何かが動きうる状態（running / waiting / evaluating）だけが対象で、queued と paused には Cancel を使います。成果物は削除しません。
   Cancel と Stop Now の違いは Event の Command（`TaskEvent.interruption` が `graceful` / `immediate`）で判別できます。
 - **Retry**: `failed` の Task を、失敗した Step から同じ試行（同じ branch / worktree / Log）で再実行します。`queued` へ戻り、`retry_count` を 1 増やし、Agent / Model を切り替えられます（履歴 Event の `detail` に旧値と新値を残す）。
 - **Restart**: `failed` または `cancelled` の Task を、元の `starting_commit` と Task `input` から最初からやり直します。試行番号（`attempt`）を 1 増やし、新しい branch / worktree / Review / PR の状態を持つ空の試行を作ります。旧試行は `task_attempts` と Step・Log に残り、`TaskSnapshot.previous_attempts` から見えます。
@@ -288,7 +290,14 @@ Operator の 6 操作は次のように解釈しています（[要件](../../RE
 | `task_events` | Append-only の履歴。全遷移について、Command、遷移前後の状態、`wait_reason`、Actor（`user` / `system` / `policy` と User の UUID）、理由、その時点の Step 名、`task_version`、Event 後の Run（`attempt` と `retry_count`。Start では Worker の Run） |
 
 - `project_id`、`created_by`、`actor_id` は UUID だけを持ち、外部キーはありません。projects の Table がまだ存在せず、`users`（PAW-021、Revision `0021`）は Migration の順序が統合後に決まるためです（両方が揃った後の Revision で外部キーを追加します）。
-- **文字列入力の検証**: `TaskService` が受け取る文字列（`title`、`starting_commit`、`agent`、`model`、`reason`、Step 名、Tool 名、Log の `message`、`update_attempt` の branch / path / head commit / PR の URL）は、NUL（`\u0000`）と Surrogate 文字（不正な Unicode）を含むと `InvalidCommandArgumentError` で拒否します（エラー文に値は含めません）。PostgreSQL の text 列は NUL を保持できず、Surrogate は UTF-8 にできないため、そのままでは書き込み時に DB / 符号化のエラーが漏れます。Log の `message` は、長さの上限で切り捨てる前の全体を検査します。`update_attempt` は、branch（255 文字）、path（1024 文字）、head commit（64 文字）、PR の URL（2048 文字）を、Model の列の長さ（1 か所の定義）で検査して、超えると同じ `InvalidCommandArgumentError` で拒否します（文字数で数えます）。PR の番号は 1 から 2147483647（`INTEGER` 列の最大値）の整数だけを受け付けます（`bool`、`float`、文字列は拒否します）。下限の 1 は、PR の番号が正であることに基づく私の判断で、要件が定める値ではありません。
+- **引数の検証（`TaskService` のすべての Public メソッド）**: すべての引数を、DB を使う前（Session を開く前）に検査し、型や値が誤っていれば固定文言の `InvalidCommandArgumentError` で拒否します（エラー文に値は含めません）。`AttributeError`、`TypeError`、SQLAlchemy の `StatementError`、`DBAPIError` として漏れることも、黙って成功することもありません（以前は、偽と評価される `invocation_id`（`""` や `0`）が黙って新しい ID に置き換わっていました）。
+  - **ID**（`task_id`、`project_id`、`created_by`、`invocation_id`）は `uuid.UUID` です。**文字列の UUID は解釈せずに拒否します**（簡単さを優先した判断です。ID は Event や Snapshot が返す `uuid.UUID` をそのまま使います）。`invocation_id` は `None`（自動採番）か UUID です。`step_id` は 1 から 9223372036854775807（`BIGINT` の識別列で、1 から始まる）の `int` です。
+  - **Enum**（`command`、`wait_reason`、Step / Tool 呼び出しの `status`、Log の `level`、Review の状態、Evaluator の結果、PR の状態）は、Member か、その直列化した値（ちょうど `str` 型。`"stop_now"` など）を受け付け、以降は Member に揃えて使います。`str` の派生、別の Enum の Member（同じ文字列でも）、bytes、数値、`None`（必須のもの）、未知の値は拒否します。`Actor(kind, id)` も同じ規則で、`kind` は Member かその値、`id` は `uuid.UUID`（User だけが持つ）です。`finish_step` / `finish_tool_invocation` の `status` は、終了を表す値だけを受け付けます。`plan_transition` も、`wait_reason` が `WaitReason` でも値でもなければ、状態に関係なく拒否します。
+  - **整数**（`expected_version`、`log_limit`、`after_seq`、`limit`、PR の番号）は `int` で、`bool` ではありません。`expected_version` は `None` か 1 から 2147483647 です（Task の `version` は 1 から始まるため、0 は「どの Task の version でもない値」として拒否します）。`log_limit` は 0 から 1000、`after_seq` は 0 から 9223372036854775807、`limit` は 1 から 5000、PR の番号は 1 から 2147483647 です。
+  - **オブジェクト**: `actor` は `Actor`、`run` は `TaskRun`、`worktree` / `review` / `pull_request` は `WorktreeState` / `ReviewState` / `PullRequestInfo`（省略時は `None`）で、そのフィールドも上の規則で検査します。PR は URL が必須です。branch / path / head commit / PR の URL は、`str` でない値、空・空白だけの値も拒否します（worktree のフィールドの `None` は「未設定」）。名前や `title`、`reason` も空・空白だけは拒否します。Log の `message` は、Worker が出力の空行をそのまま転送することがあるため空文字列を許します（`str` であることだけを要求します）。
+  - **DB を読んでから判断する規則が 1 つだけあります**: `execute` の `wait_reason` が Command に合わない場合（Wait に無い、Wait 以外にある）は、不正な遷移（`IllegalTransitionError`）を先に報告する Domain の規則（`test_illegal_transition_is_reported_before_a_bad_argument`）のため、Task を読んだ後に同じ `InvalidCommandArgumentError` で拒否します。何も書き込みません。`wait_reason` の型と値そのものは、Transaction を開く前に検査します。
+  - `tests/test_task_argument_validation.py` が、Method × 引数 × 誤った値（`None`、型違い、`int` の代わりの `bool`、bytes、空文字列、未知の Enum 値、`object()`、範囲外の数など）の表で確認します。各値で、型付きエラーであること、エラー文に値が含まれないこと、SQL が 1 文も送られず Session も開かれないこと、Task 関連の全 Table の行が変わらないことを検査します。すべての Public メソッドとすべての引数が表に載っていることも Test しています。
+- **文字列入力の検証**: `TaskService` が受け取る文字列（`title`、`starting_commit`、`agent`、`model`、`reason`（Stop Now では必須）、Step 名、Tool 名、Log の `message`、`update_attempt` の branch / path / head commit / PR の URL）は、NUL（`\u0000`）と Surrogate 文字（不正な Unicode）を含むと `InvalidCommandArgumentError` で拒否します（エラー文に値は含めません）。PostgreSQL の text 列は NUL を保持できず、Surrogate は UTF-8 にできないため、そのままでは書き込み時に DB / 符号化のエラーが漏れます。Log の `message` は、長さの上限で切り捨てる前の全体を検査します。`update_attempt` は、branch（255 文字）、path（1024 文字）、head commit（64 文字）、PR の URL（2048 文字）を、Model の列の長さ（1 か所の定義）で検査して、超えると同じ `InvalidCommandArgumentError` で拒否します（文字数で数えます。空・空白だけの値と `str` でない値も拒否します）。PR の番号は 1 から 2147483647（`INTEGER` 列の最大値）の整数だけを受け付けます（`bool`、`float`、文字列は拒否します）。下限の 1 は、PR の番号が正であることに基づく私の判断で、要件が定める値ではありません。
 - **Task `input` の検証**（`TaskService.create_task`）: `input` は JSON Object で、`json.loads` が返す型（`dict`〔キーは `str`〕、`list`、`str`、`int`、`float`、`bool`、`None`）だけを受け付けます。整数キーや `tuple` などを黙って変換して保存することはしません。次のものは、DB へ書く前に `InvalidCommandArgumentError` で拒否します（エラー文に値は含めません）。
   - `NaN` / `Infinity` / `-Infinity`（PostgreSQL の JSONB は保持できず、書き込み時に DB のエラーになります）、NUL（`\u0000`）を含む文字列やキー、Surrogate 文字（不正な Unicode）を含む文字列やキー
   - 入れ子が `MAX_INPUT_DEPTH`（32 段。最上位の Object を 1 段と数え、Object と List の両方が段になります）を超えるもの、循環参照
@@ -380,8 +389,8 @@ def upgrade() -> None:
 （[設計](../../docs/SECURITY_RBAC_AUDIT.md)、[Tool 権限](../../docs/SECURITY_TOOL_PERMISSIONS.md)、[Decision 0004](../../docs/decisions/0004-rbac-capability-and-audit-policy.md)）。
 呼び出す側は `Authorizer` を使います。判定だけを行う `policy.decide` などは Audit を書かないため、`paw_backend.authz` から公開していません。
 
-**[Decision 0004](../../docs/decisions/0004-rbac-capability-and-audit-policy.md) は Proposed（Human の承認前）です。**
-この節の Owner / Admin の権限、Agent への委任、Audit Mode、Fail-closed の選択は、承認されるまで暫定です。
+**[Decision 0004](../../docs/decisions/0004-rbac-capability-and-audit-policy.md) は、2026-09-25 に Human が承認しました（Approved）。**
+この節の Owner / Admin の権限、Agent への委任、Audit Mode、Fail-closed の選択は、承認された方針です。
 
 | 層 | Role | 内容 |
 | --- | --- | --- |
@@ -472,6 +481,10 @@ Agent の操作は、委任した人間の User の操作として判定しま�
 - User の Principal は**判定のたびに** `PrincipalDirectory` から引き直します。Role を外す、User を削除する、といった変更は Agent の次の操作から効きます。
   Directory が User を返さない、例外を出す、`PAW_DATABASE_TIMEOUT_SECONDS` を超える、別の User を返す、または委任元 ID が正規の UUID でないときは、
   Audit を書いたうえで `delegator_not_active` で拒否します（エラーにはしません）。既定の `NoPrincipalDirectory` は誰も返さないので、User Store ができるまで Agent の操作は許可されません。
+  引き直しの期限は、Directory が Cancel にどう反応するかに**依存しません**。引き直しは独立した Task で走らせ、期限まで待ち（`asyncio.wait`）、期限が来たら Cancel を依頼して**その終了を待たずに**拒否します。
+  Directory が PostgreSQL の応答しない Query の Cancel 待ち（約 10 秒、または永久）に入っても、Agent の判定は期限内に Audit 付きの拒否になります。期限後に Task が返した値や例外は捨てます（使わず、Log にも出しません）。
+  Directory の実装は自分でも Cancel で仕事を止めてください。PostgreSQL を読む実装は、Pool 経由の SQLAlchemy / psycopg 呼び出しではなく `Database.fetch_abortable` を使います（期限で接続の Socket を閉じるので、放棄された引き直しが接続を握り続けません）。
+  期限後も終わっていない引き直しは最大 32 件まで許容し、それ以上は新しい引き直しをせずに同じ拒否にします（応答しない Directory に Task を積み上げないため）。
 - Agent の判定は、Capability の Audit Mode に関わらず**常に `REQUIRED`** です（許可した読み取りも記録し、記録できなければ拒否します）。
 - Grant は Backend が Task の範囲から作ります。保存済みの名前から作るときは境界用の `AgentGrant.from_names` を使い、Model が書いた文字列は使いません。
 - 判定 API は `Capability` だけを受け取ります。文字列は（正確な名前でも）解釈せず `unknown_capability` で拒否します。名前から変換するときは `parse_capability` を使います。
@@ -500,7 +513,7 @@ Table は加えて `recorded_at`（Database の時計。INSERT 時に Trigger �
   代わりに `INFO` の Log（Reason、Action、Resource の種類、`correlation_id`、`client_request_id`。例外の文は含めない）に出します。
 - 保存先は `audit_events` Table（Migration `0025`）で、`PostgresAuditSink` が Request の Transaction とは別の短い Transaction で INSERT します。Test 用に `InMemoryAuditSink` があります。
 - Audit の Write は `PAW_DATABASE_TIMEOUT_SECONDS` で打ち切り、失敗は Log（例外の型名だけ）に残します。
-  Write は接続 Pool を使わず、その 1 文専用の接続（自動 Commit）で行い、期限（と呼び出し側の Cancel、`dispose()`）で**接続の Socket を閉じて**止めます。接続を受け付けたまま応答しない PostgreSQL に対して、Driver がサーバーへ Cancel を依頼して待つ（約 10 秒、または古い libpq では Thread の完了待ち）のを避けるためです（`Database.execute_abortable`、起動時の診断と同じ仕組み）。同時に開く接続は Pool の大きさまでで、空きがなければ待ちますが、空き待ちと実行は**1 つの期限を共有**します（空き待ちに使った分だけ実行に使える時間が減り、1 回の呼び出しが期限を超えることはありません）。打ち切られた Write は Commit されたかどうか分かりません（許可は拒否に変わり、Audit 行が残っていることがあります）。
+  Write は接続 Pool を使わず、その 1 文専用の接続（自動 Commit）で行い、期限（と呼び出し側の Cancel、`dispose()`）で**接続の Socket を閉じて**止めます。接続を受け付けたまま応答しない PostgreSQL に対して、Driver がサーバーへ Cancel を依頼して待つ（約 10 秒、または古い libpq では Thread の完了待ち）のを避けるためです（`Database.execute_abortable`、起動時の診断と同じ仕組み）。同時に開く接続は Pool の大きさまでで、空きがなければ待ちますが、空き待ちと実行は**1 つの期限を共有**します（空き待ちに使った分だけ実行に使える時間が減り、1 回の呼び出しが期限を超えることはありません）。接続の枠は Query の Task が**実際に終わるまで**保持します（呼び出しが期限で戻っても、Socket の Shutdown に失敗した、Driver の後始末が終わらない、といった理由で Query がまだ動いていれば、枠は空きません）。そのため、DB の障害中でも専用接続が `PAW_DATABASE_POOL_SIZE` を超えて増えることはなく、次の Audit の Write は枠が空くまで待つか、期限で失敗します（許可は拒否になります）。打ち切られた Write は Commit されたかどうか分かりません（許可は拒否に変わり、Audit 行が残っていることがあります）。
 - 保存するのは不透明な UUID だけです。User の削除後の匿名化（`Deleted User`）は、Audit の行を書き換えず、User Store 側で ID と個人の対応を消して行います。
 
 #### 追記専用について保証すること・しないこと
@@ -537,7 +550,7 @@ Application 起動時に一度、接続 User の権限を確認し、**`WARNING`
 - 認証済みの User の拒否は、1 回ごとに 1 行を書きます。回数制限は PAW-022（Rate Limit、Lockout）までありません。未認証の拒否は Log だけです。
 - 保存期間・Partition・古い行の退避は未実装です（Table は削除できないため、行数は増え続けます）。
 - Repository の ACL の保存と解決は呼び出す側（PAW-027 など）の責任です。この Backend は、渡された `RepoAcl` を判定するだけです。
-  Override が Project の Role を広げてよいか、User 単位の許可リストを持つかは、要件が定めておらず、Decision 0004 で Human の判断を待っています（今は狭めるだけ・権限の集合）。
+  Override が Project の Role を広げてよいか、User 単位の許可リストを持つかは、要件が定めておらず、Decision 0004 で Human が「狭めるだけ・権限の集合」で承認しました（2026-09-25）。
 - `Scope.SELF` の Capability（`chat.use`、`memory.use` など）は `Project` の状態と Member 資格を見ません
   （たとえば Pending deletion の Project の Chat、Member から外された後の Memory）。Project との関係のモデル化は PAW-026 で行います。
 - `tests/test_authz_routes.py` が調べるのは `/api/v1` の Route だけで、FastAPI の内部（`effective_route_contexts`）に依存します。Method の一覧を持たない Route（`Mount` など）は Method `*` の 1 操作として報告し、見逃しません。
