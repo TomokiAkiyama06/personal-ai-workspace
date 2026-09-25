@@ -64,7 +64,7 @@ from alembic import op
 from paw_backend.db_roles import configured_app_role, grant_app_privileges
 
 revision: str = "0022"
-down_revision: str | Sequence[str] | None = "0026"
+down_revision: str | Sequence[str] | None = "0087"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

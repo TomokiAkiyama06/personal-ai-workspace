@@ -172,8 +172,8 @@ class OfflineMigrationTest(unittest.TestCase):
             getattr(command, action)(offline_config(output), revisions, sql=True)
         return output.getvalue()
 
-    def test_the_revision_follows_0026(self):
-        self.assertEqual(previous_revision(), "0026")
+    def test_the_revision_follows_0087(self):
+        self.assertEqual(previous_revision(), "0087")
 
     def test_upgrade_creates_the_tables_and_the_function(self):
         sql = self.sql("upgrade", f"{previous_revision()}:{REVISION}")
