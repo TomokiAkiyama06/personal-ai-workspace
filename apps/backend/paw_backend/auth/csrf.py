@@ -7,10 +7,14 @@ another origin is refused before the application sees it, whether or not it
 carries a cookie (a login is a CSRF target too: "login CSRF" signs the victim
 in as the attacker).
 
-* ``Origin`` present: it must be this server's own origin (its authority equals
-  ``Host``, which ``HostValidationMiddleware`` already restricted) or one of
-  ``PAW_ALLOWED_ORIGINS``. ``Origin: null`` (sandboxed pages, some redirects)
-  is refused.
+* ``Origin`` present: it must be this request's own origin (the same scheme, host
+  and port: the scheme is the trusted external one, ``scope["scheme"]``, which
+  Uvicorn takes from ``X-Forwarded-Proto`` only for a proxy listed in
+  ``FORWARDED_ALLOW_IPS``; ``Host`` was already restricted by
+  ``HostValidationMiddleware``) or one of ``PAW_ALLOWED_ORIGINS``. ``Origin:
+  http://h`` is not the origin of a request to ``https://h``. A scheme that is
+  not known (neither ``http`` nor ``https``) matches nothing but a listed
+  origin. ``Origin: null`` (sandboxed pages, some redirects) is refused.
 * ``Origin`` absent but ``Sec-Fetch-Site`` present (a browser that does not send
   ``Origin`` on this request): it must say ``same-origin`` or ``none``.
 * Neither: not a browser that can be tricked into a cross-site request (a CLI, a
@@ -27,7 +31,7 @@ from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from paw_backend.errors import error_response
-from paw_backend.security import origin_allowed
+from paw_backend.security import origin_matches_request
 
 UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 _SAME_SITE_VALUES = frozenset({"same-origin", "none"})
@@ -51,7 +55,12 @@ class OriginCheckMiddleware:
         headers = Headers(scope=scope)
         origin = headers.get("origin")
         if origin is not None:
-            allowed = origin_allowed(origin, headers.get("host"), self.allowed_origins)
+            allowed = origin_matches_request(
+                origin,
+                headers.get("host"),
+                scope.get("scheme"),
+                self.allowed_origins,
+            )
         else:
             fetch_site = headers.get("sec-fetch-site")
             allowed = fetch_site is None or fetch_site.lower() in _SAME_SITE_VALUES

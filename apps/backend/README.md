@@ -115,7 +115,7 @@ Database には pgvector が必要です（CI は `pgvector/pgvector:pg18` を�
 | `PAW_ALLOW_PLAINTEXT_HTTP` | `false` | Loopback 以外で TLS なしの起動を許可する（下記） |
 | `PAW_HSTS_MAX_AGE_SECONDS` | `31536000` | `Strict-Transport-Security` の max-age。HTTPS の Response にだけ付ける。`0` で付けない |
 | `PAW_ALLOWED_HOSTS` | `localhost,127.0.0.1,[::1]` | 許可する `Host`（Comma 区切り、Port なし）。Reverse Proxy 経由では公開 Host 名を含める |
-| `PAW_ALLOWED_ORIGINS` | 空 | WebSocket を開いてよい Origin と、状態を変える Request（`POST` / `PUT` / `PATCH` / `DELETE`）を送ってよい Browser の Origin（Comma 区切り、例 `https://paw.example.org`）。Request 自身の Host と同じ Origin は常に許可 |
+| `PAW_ALLOWED_ORIGINS` | 空 | WebSocket を開いてよい Origin と、状態を変える Request（`POST` / `PUT` / `PATCH` / `DELETE`）を送ってよい Browser の Origin（Comma 区切り、例 `https://paw.example.org`）。Request 自身の Origin（外部の Scheme、Host、Port が同じ）は常に許可（状態を変える Request の検査。WebSocket は Host の Authority だけを見ます） |
 | `PAW_SHUTDOWN_TIMEOUT_SECONDS` | `5` | 停止時に開いたままの SSE / WebSocket を待つ秒数。超えると切断する |
 | `PAW_DATABASE_URL` | なし | `postgresql://` または `postgresql+psycopg://`。未設定でも起動する |
 | `PAW_DATABASE_TIMEOUT_SECONDS` | `3` | 接続と Readiness 確認の Timeout |
@@ -943,6 +943,8 @@ Passkey の登録・認証・強制と Step-up の Passkey は PAW-023 です（
 
 未知の Field、型違い（`"remember_me": "yes"`、数値の Password）、長すぎる入力は 422 です（入力は返しません）。
 
+**Login・Password の変更・Step-up は、変更が Commit された後に Cookie を先に応答へ設定します。** その後の Session の説明の読み取り（Policy の Query など）が失敗しても、応答は 503 にならず、**200 で `auth: null`**（`user` と `session` は変更の結果から作ります）を返し、新しい Cookie を必ず渡します（Rotation の後は古い Cookie が既に効かないので、失うと Logout されたうえ変更は失敗したと伝えてしまうため）。`auth` は `GET /session` で読めます。失敗は型名だけを Log に残します。Commit 自体が期限で中断された場合（Socket を閉じた場合）は結果が分からず、その応答には Cookie がありません（`Database.run_abortable` の限界）。
+
 ### Session Cookie から Principal へ
 
 `SessionPrincipalProvider`（`auth/principals.py`）が、`authz/deps.py` の `PrincipalProvider` の実体です。`create_app` が `install_authz` で組み込みます。
@@ -1006,7 +1008,7 @@ Passkey の登録・認証・強制と Step-up の Passkey は PAW-023 です（
 
 ### CSRF
 
-`SameSite=Strict` に加えて、`OriginCheckMiddleware`（`auth/csrf.py`）が、状態を変える Request（`POST`、`PUT`、`PATCH`、`DELETE`）の Origin を検査します。`Origin` があれば、Request 自身の Host と同じか `PAW_ALLOWED_ORIGINS` のどれかであること（`null` は拒否）。`Origin` がなく `Sec-Fetch-Site` があれば `same-origin` か `none`。どちらもなければ Browser ではないとして通します（CLI、Script）。Login も対象です。拒否は 403 `forbidden_origin` で、Application は Request を見ません。`Host` の検証（`HostValidationMiddleware`）の内側で動きます。
+`SameSite=Strict` に加えて、`OriginCheckMiddleware`（`auth/csrf.py`）が、状態を変える Request（`POST`、`PUT`、`PATCH`、`DELETE`）の Origin を検査します。`Origin` があれば、**Request 自身の Origin（Scheme、Host、Port がすべて同じ。既定の Port を理解する。`https://h` は `https://h:443`）**か `PAW_ALLOWED_ORIGINS` のどれかであること（`null` は拒否）。**Authority だけの一致は認めません**（`https://h` への Request に `Origin: http://h` を付けて、HTTP の Page から POST する Login CSRF を防ぐため）。Request の Scheme は外部の Scheme（`scope["scheme"]`）で、Uvicorn が接続から、また `FORWARDED_ALLOW_IPS`（既定は Loopback）に載せた Proxy からの `X-Forwarded-Proto` から決めます（`server.py` が `proxy_headers=True` を明示しています。Login の接続元の Address と同じ信頼の設定です）。**Scheme が `http` でも `https` でもないとき（不明）は、`PAW_ALLOWED_ORIGINS` に載せた Origin（Scheme を含む完全な Origin）だけが一致します（既定は拒否）。** TLS を終端する Proxy の背後で、Proxy を `FORWARDED_ALLOW_IPS` に載せていないと、Browser の `https://…` の Origin は `http` の Request と一致せず拒否されるので、載せるか `PAW_ALLOWED_ORIGINS` に公開 Origin を書いてください。WebSocket の Handshake の Origin 検査（`require_allowed_origin`）は別で、Scheme を見ません（Session を使う Event を足す Issue で、この検査に合わせます）。`Origin` がなく `Sec-Fetch-Site` があれば `same-origin` か `none`。どちらもなければ Browser ではないとして通します（CLI、Script）。Login も対象です。拒否は 403 `forbidden_origin` で、Application は Request を見ません。`Host` の検証（`HostValidationMiddleware`）の内側で動きます。
 
 ### Audit
 
