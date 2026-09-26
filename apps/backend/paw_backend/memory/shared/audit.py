@@ -13,9 +13,13 @@ operation that changes Shared Memory appends one more ``audit_events`` row, the
   resource and the transition time (``occurred_at``: the service clock, the same
   reading that stamps a new version; ``recorded_at`` is the database's).
 
-It is the only place where a delete or a restore, which change ``status`` and
-nothing else, keep their actor and time: ``memory_versions`` gets no new column
-(PAW-040 lets the application update ``status`` only).
+It is the record of the *operation*: who managed Shared Memory, and that the
+change committed. A delete or a restore, which change ``status`` and nothing else,
+keep their actor and time here, and also in ``memory_metadata_changes`` (Decision
+0026, which supersedes only the statements of Decision 0009 that made this row
+the only such record): the database records every ``status`` change of a version
+there, whatever wrote it. ``memory_versions`` gets no new column (PAW-040 lets the
+application update ``status`` only).
 
 The row is written by the service into the ``audit_events`` table itself, not
 through the Authorizer's ``AuditSink``: a sink writes in a transaction of its

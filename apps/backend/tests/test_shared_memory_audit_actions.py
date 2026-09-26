@@ -182,7 +182,9 @@ class EachOperationHasItsOwnActionTest(AuditActionTestCase):
 
     async def test_the_history_of_one_memory_tells_delete_from_restore(self):
         # The case of the review finding: the memory row carries neither actor nor
-        # time of a status change, so the audit history is the only record.
+        # time of a status change. The audit history tells the operations apart by
+        # ``action`` (the version's own history, ``memory_metadata_changes``, is in
+        # ``test_shared_memory_status_history.py``; Decision 0026).
         admin = self.person(SystemRole.ADMIN)
         memory_id = self.seed_memory(title="Rule")
         await self.service.edit_memory(

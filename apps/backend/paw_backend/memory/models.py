@@ -1,4 +1,4 @@
-"""ORM models of the Memory / Conversation schema (revision ``0040``).
+"""ORM models of the Memory / Conversation schema (revisions ``0040``, ``0071``).
 
 The layers are separate tables that never share rows (MEMORY_ARCHITECTURE.md
 sections 10, 14 and REQUIREMENTS.md "Raw Conversation / Long-term Memory
@@ -10,7 +10,8 @@ Separation"):
   the working state), derived from the raw messages.
 * Long-term Memory: ``memories`` (identity), ``memory_versions`` (every edit is
   a new row), ``memory_metadata_changes`` (history of the in-place pin /
-  importance edits), ``memory_relations`` (version graph), ``memory_sources``
+  importance / status / stale-state changes), ``memory_relations`` (version
+  graph), ``memory_sources``
   (provenance), ``embedding_models`` (each model's one dimension) and
   ``memory_embeddings`` (pgvector).
 
@@ -437,11 +438,19 @@ class MemoryVersion(Base):
     created_at: Mapped[datetime] = _now_column()
 
 
-# Recording the change is done by a trigger so that no writer can skip it. The
-# actor cannot be a column of ``memory_versions`` (those are immutable), so the
-# writer names it in two transaction-local settings, see ``metadata.py``. The
-# insert runs with the writer's own rights: the application role holds INSERT
-# on the history table, and no UPDATE or DELETE.
+# Recording the change is done by a trigger so that no writer can skip it. It
+# covers every column of ``memory_versions`` the application may update in place:
+# ``pinned`` and ``importance`` (revision 0040), and ``status`` and
+# ``stale_since`` (revision 0071, issue #90: a deprecation or a stale marking used
+# to be overwritten without a trace). The actor cannot be a column of
+# ``memory_versions`` (those are immutable), so the writer names it in two
+# transaction-local settings, see ``metadata.py``. The insert runs with the
+# writer's own rights: the application role holds INSERT on the history table,
+# and no UPDATE or DELETE. One UPDATE that changes several of the columns is one
+# history row. The trigger runs after the row lock is held, so ``OLD`` is the
+# row as the last committed update left it: concurrent updates are recorded one
+# after the other, each exactly once, and an update that writes the value that is
+# already there records nothing (the ``WHEN`` clause).
 #
 # The function runs in the writer's session, and every role holds PostgreSQL's
 # default TEMP privilege: a temporary table (or type) named like a table the
@@ -459,10 +468,12 @@ BEGIN
     EXECUTE 'INSERT INTO ' || quote_ident(TG_TABLE_SCHEMA)
         || '.memory_metadata_changes ('
         || 'memory_version_id, old_pinned, new_pinned, old_importance,'
-        || ' new_importance, actor_type, actor_user_id'
-        || ') VALUES ($1, $2, $3, $4, $5, $6, $7)'
+        || ' new_importance, old_status, new_status,'
+        || ' old_stale_since, new_stale_since, actor_type, actor_user_id'
+        || ') VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)'
     USING
         NEW.id, OLD.pinned, NEW.pinned, OLD.importance, NEW.importance,
+        OLD.status, NEW.status, OLD.stale_since, NEW.stale_since,
         nullif(current_setting('paw.actor_type', true), ''),
         nullif(current_setting('paw.actor_user_id', true), '')::uuid;
     RETURN NULL;
@@ -472,10 +483,12 @@ $$"""
 # schema (the drift test) gets its own trigger.
 RECORD_METADATA_CHANGE_TRIGGER = """\
 CREATE TRIGGER tr_memory_versions_record_metadata_change
-AFTER UPDATE OF pinned, importance ON %(fullname)s
+AFTER UPDATE OF pinned, importance, status, stale_since ON %(fullname)s
 FOR EACH ROW
 WHEN (OLD.pinned IS DISTINCT FROM NEW.pinned
-      OR OLD.importance IS DISTINCT FROM NEW.importance)
+      OR OLD.importance IS DISTINCT FROM NEW.importance
+      OR OLD.status IS DISTINCT FROM NEW.status
+      OR OLD.stale_since IS DISTINCT FROM NEW.stale_since)
 EXECUTE FUNCTION paw_record_memory_metadata_change()"""
 
 for _statement in (
@@ -490,18 +503,27 @@ for _statement in (
 
 
 class MemoryMetadataChange(Base):
-    """One in-place change of ``pinned`` / ``importance`` of a version.
+    """One in-place change of pin, importance, status or stale state of a version.
 
     REQUIREMENTS.md "Manual Memory Editing": Pin and Importance take effect at
-    once, but "変更履歴は残す". The row keeps the old and the new value of both
-    columns (an unchanged one appears twice with the same value) and who made
-    the change. It is append-only for the application (INSERT, no UPDATE or
-    DELETE) and is written by the ``memory_versions`` trigger, never by a
-    service: the trigger cannot be skipped, and a change without a named actor
-    fails on the NOT NULL ``actor_type``. The rows go with their version
-    (cascade); the history graph of versions is not affected, because a
-    metadata change is not a new version (it must not conflict with a text edit
-    that is based on the current version number).
+    once, but "変更履歴は残す"; and a version that is superseded, deprecated,
+    marked stale or cleared has to be explainable (when, by whom, from what).
+    The row keeps the old and the new value of all four columns (an unchanged
+    one appears twice with the same value) and who made the change. It is
+    append-only for the application (INSERT, no UPDATE or DELETE) and is
+    written by the ``memory_versions`` trigger, never by a service: the trigger
+    cannot be skipped, and a change without a named actor fails on the NOT NULL
+    ``actor_type``. The rows go with their version (cascade); the history graph
+    of versions is not affected, because a metadata or status change is not a
+    new version (it must not conflict with a text edit that is based on the
+    current version number).
+
+    Rows written before revision 0071 have no status columns (``old_status`` and
+    ``new_status`` are NULL, and so are the two stale times): they recorded
+    pin / importance changes only, and what the status was then is not known.
+    A row written by the trigger always has both statuses; ``NULL`` in a stale
+    time then means "not marked". ``status_pair`` and ``stale_since_needs_status``
+    keep the two kinds of row apart.
 
     The actor is *asserted* by the Backend (the same trust as ``actor_user_id``
     of a version); the database does not know users yet (PAW-021), so it cannot
@@ -520,8 +542,23 @@ class MemoryMetadataChange(Base):
             name="importance_range",
         ),
         CheckConstraint(
-            "old_pinned <> new_pinned OR old_importance <> new_importance",
+            "old_pinned <> new_pinned OR old_importance <> new_importance"
+            " OR old_status IS DISTINCT FROM new_status"
+            " OR old_stale_since IS DISTINCT FROM new_stale_since",
             name="something_changed",
+        ),
+        CheckConstraint(
+            "(old_status IS NULL) = (new_status IS NULL)", name="status_pair"
+        ),
+        CheckConstraint(
+            f"{_one_of('old_status', MemoryStatus)}"
+            f" AND {_one_of('new_status', MemoryStatus)}",
+            name="status_valid",
+        ),
+        CheckConstraint(
+            "old_status IS NOT NULL"
+            " OR (old_stale_since IS NULL AND new_stale_since IS NULL)",
+            name="stale_since_needs_status",
         ),
         CheckConstraint(_one_of("actor_type", ActorType), name="actor_type_valid"),
         CheckConstraint(
@@ -543,6 +580,10 @@ class MemoryMetadataChange(Base):
     new_pinned: Mapped[bool] = mapped_column(Boolean)
     old_importance: Mapped[int] = mapped_column(SmallInteger)
     new_importance: Mapped[int] = mapped_column(SmallInteger)
+    old_status: Mapped[str | None] = mapped_column(Text)
+    new_status: Mapped[str | None] = mapped_column(Text)
+    old_stale_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    new_stale_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     actor_type: Mapped[str] = mapped_column(Text)
     actor_user_id: Mapped[UUID | None]
     created_at: Mapped[datetime] = mapped_column(
