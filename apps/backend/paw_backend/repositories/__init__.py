@@ -66,6 +66,12 @@ from paw_backend.repositories.records import (
     RepositorySource,
 )
 from paw_backend.repositories.service import RepositoryService
+from paw_backend.repositories.ssh import (
+    SshGitRunner,
+    SshGitRunnerPolicy,
+    SshKeyDirectory,
+    TemplateSshKeyDirectory,
+)
 
 __all__ = [
     "AccountDirectory",
@@ -112,7 +118,11 @@ __all__ = [
     "RepositoryPolicy",
     "RepositoryService",
     "RepositorySource",
+    "SshGitRunner",
+    "SshGitRunnerPolicy",
+    "SshKeyDirectory",
     "SubprocessGitRunner",
+    "TemplateSshKeyDirectory",
     "TooManyCheckoutsError",
     "UnavailableGitHubGateway",
     "parse_github_source",

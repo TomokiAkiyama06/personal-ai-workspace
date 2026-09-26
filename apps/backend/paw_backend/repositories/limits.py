@@ -73,3 +73,13 @@ PENDING_TIMEOUT_FACTOR = 2.0
 DEFAULT_MIN_LINUX_UID = 1000
 MAX_ROOT_TEMPLATES = 8
 MAX_CLONE_HOSTS = 8
+
+# --- SSH (SshGitRunner, Issue #105 / Decision 0029) -----------------------------------
+
+# How long the SSH handshake (TCP connect and authentication) may take before
+# ``ssh`` gives up; independent of ``timeout_s`` (the whole call: handshake plus
+# the wrapper running git), which ``RepositoryPolicy.git_timeout_s`` /
+# ``clone_timeout_s`` already bound.
+DEFAULT_SSH_CONNECT_TIMEOUT_S = 10
+MAX_SSH_CONNECT_TIMEOUT_S = 300
+DEFAULT_SSH_PORT = 22

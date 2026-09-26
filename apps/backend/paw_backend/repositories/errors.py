@@ -73,6 +73,15 @@ class GitFailure(StrEnum):
     OUTPUT_TOO_LARGE = "output_too_large"
     NONZERO_EXIT = "nonzero_exit"
     UNSAFE_OUTPUT = "unsafe_output"
+    # SshGitRunner only (Issue #105 / Decision 0029). ``ssh`` itself exits 255 for a
+    # connection-level failure (unreachable host, rejected key, host key mismatch,
+    # the account's Linux user missing or locked); 0-254 are the remote command's
+    # own exit codes and never become this value.
+    SSH_UNAVAILABLE = "ssh_unavailable"
+    # SshGitRunner only. The account's private key file is missing, or is not
+    # exactly what this process alone may read (a symlink, not a regular file,
+    # readable/writable by another account, not owned by this process).
+    SSH_KEY_UNAVAILABLE = "ssh_key_unavailable"
 
 
 class RemoteProblem(StrEnum):

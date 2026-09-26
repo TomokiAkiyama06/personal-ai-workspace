@@ -335,7 +335,11 @@ class RepositoryService:
         built from it, so ``PAW_REPOSITORY_MIN_LINUX_UID`` is applied when a Linux
         account is looked up, whatever else is configured. ``account_lookup``
         replaces ``pwd.getpwnam`` (tests only); ``runner`` is the ``GitRunner`` of the
-        deployment (``SubprocessGitRunner`` unless git must run as another user).
+        deployment: ``SubprocessGitRunner`` when the backend already runs as every
+        checkout's own Linux user, ``paw_backend.repositories.ssh.SshGitRunner``
+        when it must reach another Linux user over SSH instead (Issue #105,
+        Decision 0029). Swapping ``runner`` is the whole migration between the two:
+        neither changes ``policy``, ``accounts`` or anything already registered.
         """
         if not isinstance(policy, RepositoryPolicy):
             raise TypeError("policy must be a RepositoryPolicy")
