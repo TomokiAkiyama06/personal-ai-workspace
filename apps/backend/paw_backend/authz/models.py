@@ -1,4 +1,5 @@
-"""ORM model of the append-only ``audit_events`` table (migrations ``0025``, ``0087``).
+"""ORM model of the append-only ``audit_events`` table (migrations ``0025``, ``0087``,
+``0086``).
 
 Rows are only ever inserted. UPDATE, DELETE and TRUNCATE are rejected by
 triggers created in the migration, and when the application runs as a
@@ -23,6 +24,18 @@ action takes a new migration that adds it to ``DETAILS_ACTIONS`` (the registry
 constraint) and adds its own closed-schema constraint. ``AuditEvent`` (``audit.py``)
 has no ``details`` field and is unchanged; ``paw_backend.research.privacy.audit``
 writes that row.
+
+Migration ``0086`` (issue #86, Decision 0027, proposed) makes ``audit_events`` a
+partitioned table (``PARTITION BY RANGE (recorded_at)``, monthly), which is why
+the primary key is ``(id, recorded_at)`` and not ``id`` alone: PostgreSQL requires
+every unique / primary key constraint on a partitioned table to include its
+partition key. Nothing about *content* changes — the columns, the three CHECK
+constraints above and every row's meaning are the same; only what can be a
+partition boundary (``recorded_at``, forced to the database clock by the
+``0025`` trigger, so it only ever moves forward) had to become part of identity
+too. See ``paw_backend/authz/retention/`` (the rules and the service that
+creates, archives and purges partitions) and
+``docs/decisions/0027-audit-retention-and-partitioning.md``.
 """
 
 import uuid
@@ -153,10 +166,12 @@ class AuditEventRecord(Base):
     correlation_id: Mapped[uuid.UUID] = mapped_column(Uuid)
     # The application's clock (when the decision was made) ...
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
-    # ... and the database's clock (when the row was stored), which the
-    # application cannot choose.
+    # ... and the database's clock (when the row was stored, and, since
+    # Migration 0086, which partition it lives in), which the application
+    # cannot choose. Part of the primary key: the partition key of a
+    # partitioned table must be part of every unique / primary key constraint.
     recorded_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=text("now()")
+        DateTime(timezone=True), server_default=text("now()"), primary_key=True
     )
     # Who (a user, or the user an agent acts for) and in which role.
     actor_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
