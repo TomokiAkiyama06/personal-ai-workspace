@@ -1,7 +1,7 @@
 # 設計判断の記録
 
 重要な仕様・設計判断の提案と、承認された判断の経緯を保存するディレクトリです。
-承認済みの判断は次の表のとおりです。
+判断は次の表のとおりです（`Proposed` は人間の承認を待つ提案で、承認されるまで方針としては使いません）。
 
 | Decision | 内容 | Status |
 | --- | --- | --- |
@@ -27,6 +27,7 @@
 | [0022](0022-project-lifecycle-capabilities.md) | Project の作成・招待への応答・退出の Capability と Audit の方針（0008 の 5 を置き換え、0004 を拡張） | Approved |
 | [0023](0023-audit-events-details-for-external-send.md) | 外部送信の Audit を `audit_events.details`（JSONB）へ永続化する方針（Decision 0010 の永続 Sink。0010・0004 への追補） | Approved |
 | [0026](0026-memory-status-change-history.md) | Memory Version の Status・Stale 状態の変更履歴を Audit の記録と併存させる方針（Decision 0009 の 7・12・13 の一部を Supersede） | Approved |
+| [0030](0030-task-working-set-model.md) | Task Working Set（Multi-Repo）の単位・承認・Write範囲・完了条件（Decision 0014「決まっていないこと」1〜5を埋める） | Proposed（未承認） |
 
 運用は [AGENTS.md](../../AGENTS.md) の「仕様変更」に従います。
 
