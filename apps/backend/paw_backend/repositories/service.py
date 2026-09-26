@@ -345,7 +345,11 @@ class RepositoryService:
         the same policy as everything else -- unless ``github`` is given explicitly
         (then ``gh_runner`` is rejected: one gateway, not two). Neither given: the
         default ``UnavailableGitHubGateway`` (``create_github`` refuses), exactly as
-        before PAW-028.
+        before PAW-028. ``gh_runner`` also makes ``clone_from_github`` add gh's own
+        credential helper to the clone (``GitClient(..., credential_helper=True)``),
+        so a private repository clones under the same actor's ``gh auth login`` --
+        the other half of the seam PAW-028 was asked to close (the dependency
+        ``docs/decisions/0017-repository-registration-policy.md`` names).
         """
         if not isinstance(policy, RepositoryPolicy):
             raise TypeError("policy must be a RepositoryPolicy")
@@ -364,7 +368,7 @@ class RepositoryService:
             database,
             authorizer,
             accounts,
-            GitClient(runner, policy),
+            GitClient(runner, policy, credential_helper=gh_runner is not None),
             policy=policy,
             github=github,
             clock=clock,
@@ -607,10 +611,15 @@ class RepositoryService:
         ``source`` is ``owner/repo`` or ``https://<host>/<owner>/<repo>[.git]`` on
         an allowed host (``github.parse_github_source``). ``name`` defaults to the
         repository's name; ``branch`` (optional) is checked out instead of the
-        remote's default. The clone runs as the actor's Linux user with the actor's
-        own git configuration and no credential from this backend (PAW-028): a
-        private repository needs the user's own ``gh auth``. Both ``https``
-        spellings of the URL are registered as remotes. ``project.repo.add``.
+        remote's default. The clone runs as the actor's Linux user; no credential
+        is ever held by this backend (PAW-028). When this service was built with a
+        ``gh_runner`` (``from_policy``), a private repository clones under the
+        actor's own ``gh auth login`` (gh's own credential helper, added only to
+        this clone -- ``GitClient``). Without a ``gh_runner``, a private repository
+        cannot be cloned: nothing here reads the actor's own ``~/.gitconfig``
+        either (git runs with ``GIT_CONFIG_GLOBAL=/dev/null``, see ``git.py``).
+        Both ``https`` spellings of the URL are registered as remotes.
+        ``project.repo.add``.
         """
         principal = self._human(actor)
         project_id = validate_uuid("project_id", project_id)

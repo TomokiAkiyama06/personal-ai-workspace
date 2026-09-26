@@ -262,12 +262,35 @@ class RepositoryFacts:
     origin_url: str | None
 
 
-class GitClient:
-    """The few git operations the service needs, each with fixed arguments."""
+#: ``git clone``'s own ``-c`` (documented, and applied before the fetch itself,
+#: unlike a plain ``-c`` before the subcommand which only ever reaches
+#: ``.git/config``): the same string ``gh auth setup-git`` writes. A fixed
+#: literal, never built from a caller -- ``gh`` resolves the account's own
+#: ``gh auth login`` from ``HOME`` (already the only identity git's own
+#: environment allowlist carries; see :func:`git_environment`).
+_GH_CREDENTIAL_HELPER_ARGS = ("-c", "credential.helper=!gh auth git-credential")
 
-    def __init__(self, runner: GitRunner, policy: RepositoryPolicy) -> None:
+
+class GitClient:
+    """The few git operations the service needs, each with fixed arguments.
+
+    ``credential_helper`` (PAW-028) makes :meth:`clone` add gh's own credential
+    helper to the clone, so a private GitHub repository can be cloned under the
+    acting Linux user's own ``gh auth login`` -- this backend never sees or
+    stores the token. Fixed at construction like ``extra_config``
+    (:class:`SubprocessGitRunner`), never a per-call choice.
+    """
+
+    def __init__(
+        self,
+        runner: GitRunner,
+        policy: RepositoryPolicy,
+        *,
+        credential_helper: bool = False,
+    ) -> None:
         self._runner = runner
         self._policy = policy
+        self._credential_helper = credential_helper
 
     async def _run(
         self,
@@ -379,8 +402,13 @@ class GitClient:
 
         ``url`` and ``branch`` are validated by the caller; both are placed where
         git cannot read them as options (``--branch <b>`` and after ``--``).
+        ``credential_helper`` (PAW-028), when this client was built with one,
+        is added as ``clone``'s own ``-c`` so a private ``https`` remote can
+        authenticate; without it a private remote fails exactly as before.
         """
         args = ["clone", "--quiet"]
+        if self._credential_helper:
+            args.extend(_GH_CREDENTIAL_HELPER_ARGS)
         if branch is not None:
             args.extend(("--branch", branch))
         args.extend(("--", url, destination))

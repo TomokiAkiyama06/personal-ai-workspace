@@ -472,9 +472,16 @@ class FromPolicyWiringTest(unittest.TestCase):
         service = self.build(gh_runner=RecordingRunner())
         self.assertIsInstance(service._github, GhCliGitHubGateway)
 
+    def test_a_gh_runner_also_wires_the_clone_credential_helper(self):
+        # PAW-028's other half of the seam (Codex P1): a private clone must be
+        # able to use the same actor's gh auth login, not just status checks.
+        service = self.build(gh_runner=RecordingRunner())
+        self.assertTrue(service._git._credential_helper)
+
     def test_neither_given_keeps_the_gateway_unavailable(self):
         service = self.build()
         self.assertIsInstance(service._github, UnavailableGitHubGateway)
+        self.assertFalse(service._git._credential_helper)
 
     def test_github_and_gh_runner_together_is_rejected(self):
         with self.assertRaises(TypeError):

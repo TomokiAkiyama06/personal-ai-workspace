@@ -514,6 +514,35 @@ class OperationsTest(GitTestCase):
             "https://github.com/acme/tool.git",
         )
 
+    async def test_a_credential_helper_clone_adds_ghs_own_helper(self):
+        # PAW-028: a client built with credential_helper=True clones under gh's
+        # own credential helper (``gh auth setup-git`` writes the same string).
+        bare = self.world.make_bare("acme", "priv")
+        destination = f"{self.home}/priv"
+        os.makedirs(destination)
+        allowed = self.runner(allowed_protocols=("https", "file"))
+        client = GitClient(allowed, RepositoryPolicy(), credential_helper=True)
+
+        await client.clone(f"file://{bare}", destination, self.account)
+
+        self.assertEqual(
+            git("config", "--local", "--get", "credential.helper", cwd=destination),
+            "!gh auth git-credential",
+        )
+
+    async def test_a_plain_clone_never_sets_a_credential_helper(self):
+        # The default (no gh_runner wired) is unchanged: no helper is added.
+        bare = self.world.make_bare("acme", "pub")
+        destination = f"{self.home}/pub"
+        os.makedirs(destination)
+
+        await self.client(allowed_protocols=("https", "file")).clone(
+            f"file://{bare}", destination, self.account
+        )
+
+        with self.assertRaises(AssertionError):
+            git("config", "--local", "--get", "credential.helper", cwd=destination)
+
 
 if __name__ == "__main__":
     unittest.main()
