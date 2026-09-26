@@ -22,7 +22,8 @@ exposed over HTTP by this issue. The intended mapping to the capabilities of
 * ``request_promotion``: ``project.memory.use``; ``resolve_promotion``:
   ``project.memory.manage`` (not delegable to an agent: research is never saved
   to Long-term Memory on an agent's own say-so);
-* ``purge_expired``: the Backend's own janitor only (no user or agent).
+* ``purge_expired``, ``purge_projects``: the Backend's own janitor / orchestrator
+  only (no user or agent; Decision 0028 for ``purge_projects``).
 
 Every per-item method takes ``project_id`` and finds the item only inside that
 project: an id from another project is "not found", exactly like a missing id.
@@ -104,6 +105,7 @@ logs nothing that contains caller content.
 """
 
 import inspect
+import logging
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import replace
@@ -128,6 +130,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from paw_backend.db import Database
+from paw_backend.projects.models import ProjectRow
 from paw_backend.research.scratch.errors import (
     InputProblem,
     InvalidScratchInputError,
@@ -163,9 +166,12 @@ from paw_backend.research.scratch.validation import (
     validate_new_item,
     validate_optional_uuid,
     validate_outcome,
+    validate_project_ids,
     validate_uuid,
 )
 from paw_backend.tasks.models import TaskRow
+
+logger = logging.getLogger(__name__)
 
 Clock = Callable[[], datetime]
 # Test seam of ``purge_expired`` (see its docstring): called with the session of
@@ -180,6 +186,10 @@ MAX_LOCK_TIMEOUT_MS = 60_000
 _ITEMS = ScratchItemRow.__table__
 _LEASES = ScratchLeaseRow.__table__
 _TASKS = TaskRow.__table__
+# Read-only: only ``purge_projects`` (Decision 0028) touches this table, and only
+# to find which of the caller's ids are actually a tombstone (``status =
+# 'deleted'``); it never writes to ``projects``.
+_PROJECTS = ProjectRow.__table__
 
 
 def _has_active_lease(now: datetime) -> ColumnElement[bool]:
@@ -859,3 +869,52 @@ class ScratchStore:
             # cancelled or the database disposed, never cancelled on the server
             # (see the docstring): the janitor must stop with the application.
             return await self._database.run_abortable(batch)
+
+    async def purge_projects(self, project_ids: object) -> tuple[UUID, ...]:
+        """Delete every item of projects that are **Deleted** (Decision 0028).
+
+        Backend-internal, like ``purge_expired``: no actor, no Authorizer, no
+        Capability. ``ProjectService.purge_expired`` returns the ids of the
+        projects it just marked Deleted; the orchestrator passes them here
+        (Decision 0008 section 2: each area removes its own data), the same way
+        it already passes them to ``RepositoryService.purge_projects``.
+
+        Every item of a named project is deleted **regardless of** ``pinned``,
+        ``saved``, ``promotion_state`` or an active lease: those markers defer
+        the TTL purge (``purge_expired``) so that work a live project still
+        needs is not lost to the clock, but once the project itself is gone
+        (Pending deletion for 30 days, then purged) there is no project left for
+        the deferral to protect. Leases of a deleted item are removed with it
+        (the foreign key cascades).
+
+        Validation: ``project_ids`` must satisfy :func:`validate_project_ids`
+        (``InvalidScratchInputError`` before the database is touched); an empty
+        collection returns ``()`` without opening a transaction. A project that
+        is not (yet) a tombstone keeps its items, whatever the caller says: the
+        ``DELETE`` is scoped, in the same statement, to the ids among
+        ``project_ids`` whose ``projects.status`` is ``'deleted'`` at the instant
+        the statement runs (a plain, unlocked read: this method takes no lock of
+        its own and does not race the project's own lifecycle transactions for
+        correctness, exactly like ``RepositoryService.purge_projects``). One
+        transaction. Idempotent: a second call finds nothing left to delete.
+
+        Returns the ids that had at least one item removed, sorted ascending;
+        an id with no items, or whose project turned out not to be Deleted, is
+        left out (not an error).
+        """
+        ids = validate_project_ids(project_ids)
+        if not ids:
+            return ()
+        due = select(_PROJECTS.c.id).where(
+            _PROJECTS.c.id.in_(ids), _PROJECTS.c.status == "deleted"
+        )
+        async with self._transaction() as session:
+            deleted = await session.execute(
+                delete(_ITEMS)
+                .where(_ITEMS.c.project_id.in_(due))
+                .returning(_ITEMS.c.project_id)
+            )
+            purged = sorted({row.project_id for row in deleted})
+        if purged:
+            logger.info("Scratch items purged for %d deleted project(s)", len(purged))
+        return tuple(purged)

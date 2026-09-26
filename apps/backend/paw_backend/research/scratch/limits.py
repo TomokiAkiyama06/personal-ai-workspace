@@ -51,6 +51,10 @@ DEFAULT_LIST_LIMIT = 100
 MAX_LIST_LIMIT = 200
 DEFAULT_PURGE_BATCH_SIZE = 500
 MAX_PURGE_BATCH_SIZE = 5000
+# ``purge_projects`` (Decision 0028): projects one call may name. The same value
+# as ``paw_backend.repositories.limits.MAX_PURGE_PROJECTS``, for the same reason
+# (it bounds the caller's list, not a database read).
+MAX_PURGE_PROJECTS = 500
 
 
 def utc_now() -> datetime:

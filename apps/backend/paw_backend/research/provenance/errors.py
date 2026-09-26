@@ -31,6 +31,7 @@ class InputProblem(StrEnum):
     )
     SELF_REFERENCE = "self_reference"  # a relation between something and itself
     CONFLICT = "conflict"  # contradictory values inside one argument
+    NOT_A_COLLECTION = "not_a_collection"  # not a list/tuple/set of ids
 
 
 class ProvenanceError(Exception):

@@ -20,6 +20,7 @@ class InputProblem(StrEnum):
     BLANK = "blank"  # an empty or whitespace-only string
     TOO_LONG = "too_long"  # more characters than allowed
     TOO_LARGE = "too_large"  # more bytes than allowed
+    TOO_MANY = "too_many"  # more elements than allowed
     TOO_DEEP = "too_deep"  # nested deeper than allowed
     OUT_OF_RANGE = "out_of_range"  # a number outside its allowed range
     INVALID_CHARACTERS = "invalid_characters"  # NUL or not encodable as UTF-8
@@ -27,6 +28,7 @@ class InputProblem(StrEnum):
     UNKNOWN_REFERENCE = (
         "unknown_reference"  # a task that is missing or not the project's
     )
+    NOT_A_COLLECTION = "not_a_collection"  # not a list/tuple/set of ids
 
 
 class ScratchError(Exception):
