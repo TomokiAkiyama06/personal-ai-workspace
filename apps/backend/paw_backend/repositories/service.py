@@ -14,8 +14,9 @@ Manager):
   account, verified (``paths.check_existing_repository`` and ``git rev-parse``)
   and registered as it is;
 * ``create_local`` / ``create_github``: a new empty repository (``git init``),
-  local only, or also on GitHub through the :class:`GitHubGateway` seam (PAW-028:
-  the default gateway refuses).
+  local only, or also on GitHub through the :class:`GitHubGateway` seam (PAW-028's
+  ``GhCliGitHubGateway`` fills it when ``from_policy`` is given a ``gh_runner``;
+  the default gateway still refuses).
 
 Every other member with ``project.read`` (and the repository's ``read`` ACL) makes
 their own checkout with ``create_checkout`` (a clone from a registered remote).
@@ -162,6 +163,7 @@ from paw_backend.repositories.github import (
     parse_github_source,
     remote_urls_from_origin,
 )
+from paw_backend.repositories.github_connection import GhCliGitHubGateway, GhRunner
 from paw_backend.repositories.limits import (
     DEFAULT_LIST_LIMIT,
     DEFAULT_LOCK_TIMEOUT_MS,
@@ -325,6 +327,7 @@ class RepositoryService:
         accounts: AccountDirectory | None = None,
         account_lookup: Callable[[str], pwd.struct_passwd] | None = None,
         github: GitHubGateway | None = None,
+        gh_runner: GhRunner | None = None,
         clock: Clock | None = None,
         lock_timeout_ms: int = DEFAULT_LOCK_TIMEOUT_MS,
     ) -> "RepositoryService":
@@ -336,6 +339,13 @@ class RepositoryService:
         account is looked up, whatever else is configured. ``account_lookup``
         replaces ``pwd.getpwnam`` (tests only); ``runner`` is the ``GitRunner`` of the
         deployment (``SubprocessGitRunner`` unless git must run as another user).
+
+        ``gh_runner`` (PAW-028) closes the ``GitHubGateway`` seam with
+        ``GhCliGitHubGateway`` -- ``policy.clone_hosts`` and ``policy.gh_timeout_s``,
+        the same policy as everything else -- unless ``github`` is given explicitly
+        (then ``gh_runner`` is rejected: one gateway, not two). Neither given: the
+        default ``UnavailableGitHubGateway`` (``create_github`` refuses), exactly as
+        before PAW-028.
         """
         if not isinstance(policy, RepositoryPolicy):
             raise TypeError("policy must be a RepositoryPolicy")
@@ -344,6 +354,12 @@ class RepositoryService:
             accounts = LoginNameAccountDirectory(database, policy=policy, **options)
         elif account_lookup is not None:
             raise TypeError("account_lookup is for the default account directory")
+        if gh_runner is not None:
+            if github is not None:
+                raise TypeError("github and gh_runner are exclusive")
+            github = GhCliGitHubGateway(
+                accounts, gh_runner, policy.clone_hosts, timeout_s=policy.gh_timeout_s
+            )
         return cls(
             database,
             authorizer,
