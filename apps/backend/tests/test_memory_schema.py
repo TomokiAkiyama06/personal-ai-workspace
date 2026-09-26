@@ -12,10 +12,12 @@ from uuid import uuid4
 from sqlalchemy import delete, func, insert, select, text, update
 from sqlalchemy.exc import IntegrityError
 
+from paw_backend.memory.metadata import metadata_change_actor
 from paw_backend.memory.models import (
     Conversation,
     Memory,
     MemoryEmbedding,
+    MemoryMetadataChange,
     MemoryRelation,
     MemorySource,
     MemoryVersion,
@@ -463,6 +465,8 @@ class MemoryVersionRulesTest(MemoryDatabaseTestCase):
             revalidate_after=timedelta(days=90),
         )
 
+        # A stale marking is recorded with its actor (revision 0071).
+        self.session.execute(metadata_change_actor("system"))
         self.session.execute(
             update(MemoryVersion)
             .where(MemoryVersion.id == version)
@@ -475,6 +479,18 @@ class MemoryVersionRulesTest(MemoryDatabaseTestCase):
             )
         ).one()
         self.assertEqual(tuple(stored), ("active", utc(2026, 4, 1)))
+        recorded = self.session.execute(
+            select(
+                MemoryMetadataChange.old_status,
+                MemoryMetadataChange.new_status,
+                MemoryMetadataChange.old_stale_since,
+                MemoryMetadataChange.new_stale_since,
+            ).where(MemoryMetadataChange.memory_version_id == version)
+        ).all()
+        self.assertEqual(
+            [tuple(row) for row in recorded],
+            [("active", "active", None, utc(2026, 4, 1))],
+        )
 
     def test_a_sha256_commit_id_is_accepted(self):
         version = self.add_version(
@@ -599,6 +615,7 @@ class VersioningTest(MemoryDatabaseTestCase):
         )
         self.assertEqual(both_active, "ix_memory_versions_one_active")
 
+        self.session.execute(metadata_change_actor("system"))
         self.session.execute(
             update(MemoryVersion)
             .where(MemoryVersion.id == v1)
@@ -634,6 +651,7 @@ class VersioningTest(MemoryDatabaseTestCase):
         self.relation(v2, v1)
 
         # Undo: v2 becomes superseded, v3 copies v1's content and becomes active.
+        self.session.execute(metadata_change_actor("system"))
         self.session.execute(
             update(MemoryVersion)
             .where(MemoryVersion.id == v2)
