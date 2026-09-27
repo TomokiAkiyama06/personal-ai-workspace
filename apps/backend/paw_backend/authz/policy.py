@@ -104,6 +104,7 @@ _USER = frozenset(
         C.WORKSPACE_USE,
         C.GITHUB_USE,
         C.MEMORY_USE,
+        C.MEMORY_READ,  # the same roles as memory.use (Decision 0024)
         C.PR_CREATE,
         C.SHARED_MEMORY_READ,
         # Any human user (Owner and Admin include User): create a project, answer

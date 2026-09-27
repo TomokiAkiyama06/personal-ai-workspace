@@ -1,7 +1,7 @@
 """User invitations, device pairing and the user lifecycle (PAW-024).
 
 Revision ID: 0124
-Revises: 0041
+Revises: 0034
 Create Date: 2026-09-28
 
 The revision id is the issue's (PAW-024), written 0124 so that it is not read as
@@ -73,7 +73,7 @@ from alembic import op
 from paw_backend.db_roles import configured_app_role, grant_app_privileges
 
 revision: str = "0124"
-down_revision: str | Sequence[str] | None = "0041"
+down_revision: str | Sequence[str] | None = "0034"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

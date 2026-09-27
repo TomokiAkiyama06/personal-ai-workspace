@@ -40,6 +40,7 @@ Backend が、Memory を 1 行も読む前に、`Authorizer` で Scope ごとに
 - 拒否は Scope が何も返さないだけで、エラーにも応答にも出さない（存在を明かさないため）。エラーにするのは「決定を記録できない」（`audit_unavailable`）だけ。
 - **Audit の量。** `memory.use` は `REQUIRED` のため、User Scope を含む Retrieval が 1 回ごとに Audit の行を 1 つ書く。Chat の Turn ごとに呼ぶと量が多い。
   **人間の回答 2026-09-25: 推奨の方向（読み取り専用の Capability `memory.read` を `DENIED_ONLY` で足す）で承認。具体化は [Decision 0024](0024-memory-read-capability.md)（Proposed）で行う。** 0024 が承認され実装されるまで、コードは Decision 0004 を変えずに `memory.use`（`REQUIRED`）を使い続ける。
+  （参照の更新: Decision 0024 は 2026-09-27 に Approved となり、Issue #115 で実装された。User Scope の認可は `memory.read`（`DENIED_ONLY`）である。）
 - Project Group は、要件に実体・Member・権限がない（`memory/acl.py`）。呼び出し側が決めた ID を信用する。Source がなければ Group の Memory は読めない。Repository も、Table（PAW-027）がないため Source が要る。Source がなければ Repo Memory は読めない。
 - Agent（`AgentGrant`）経由の Retrieval はこの Issue に含めない。Backend の Context 組み立てが Task の User の `Principal` で呼ぶことを想定する。
 
@@ -141,6 +142,7 @@ PostgreSQL の全文検索（`simple` 設定）を使う。`simple` は日本語
 2026-09-26 に承認された。PAW-043 の PR は本 Decision を参照する。承認された値は暫定値で、`ranking.py` / `limits.py` の設定と Backend README の記述に合わせてある。
 値だけの変更は Migration が要らない（この Decision を書き換えず、新しい Decision から `Supersedes` する。そのとき `RankingPolicy` / `limits.py` と Test の期待値を新しい値に合わせる）。
 ANN Index、`memory.read`（[Decision 0024](0024-memory-read-capability.md)、Proposed。承認されるまで `memory.use` のまま）、Agent 経由の Retrieval、HTTP の Endpoint は、それぞれ別の Issue / Decision で扱う。
+（参照の更新: Decision 0024 は 2026-09-27 に Approved となり、Issue #115 で実装された。`memory.read` は別の Issue で扱う対象ではなくなった。）
 
 ## 承認時の決定（2026-09-26）
 
@@ -148,6 +150,7 @@ ANN Index、`memory.read`（[Decision 0024](0024-memory-read-capability.md)、Pr
 
 1. **User Memory の Retrieval の Audit。** 推奨の方向（読み取り専用の Capability `memory.read` を `DENIED_ONLY` で足す）で承認した（個別の回答、2026-09-25）。具体化は [Decision 0024](0024-memory-read-capability.md)（Proposed）で行う。
    **0024 が承認され実装されるまで、コードは `memory.use`（`REQUIRED`）のまま**で、Decision 0004 を変えない。
+   （参照の更新: 0024 は 2026-09-27 に Approved、Issue #115 で実装された。）
 2. **Viewer が `project.read` で Project / Repo Memory を読める**ことを承認した（個別の回答、2026-09-25）。
 3. 日本語の Keyword を「文字の組 + 全文検索」で近似することを承認した（形態素解析の拡張を入れられる環境になったら見直す）。
 4. ANN Index を作らず、権限の条件を保つ条件つきで、Model の決定後に足す方針を承認した。

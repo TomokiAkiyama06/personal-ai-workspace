@@ -199,6 +199,7 @@ class EmissionTest(unittest.IsolatedAsyncioTestCase):
         for capability, resource in (
             (Capability.PROJECT_READ, project(P1)),
             (Capability.SHARED_MEMORY_READ, Resource.system()),
+            (Capability.MEMORY_READ, Resource.owned_by(member.user_id, "memory")),
         ):
             self.assertTrue(await checker.authorize(member, capability, resource))
         self.assertEqual(sink.events, [])
@@ -279,6 +280,23 @@ class EmissionTest(unittest.IsolatedAsyncioTestCase):
             (U1, AGENT, "project.read", "allow"),
         )
 
+    async def test_an_agents_allowed_memory_read_is_recorded(self):
+        # Decision 0024: delegating memory.read does not reduce what an agent's
+        # reads leave behind.
+        sink = InMemoryAuditSink()
+        user = principal(SystemRole.USER, user_id=U1)
+        checker = authorizer(sink, directory=StaticDirectory(user))
+        grant = AgentGrant(AGENT, frozenset({Capability.MEMORY_READ}), ALL_PROJECTS)
+        by_agent = await checker.authorize_agent_action(
+            U1, grant, Capability.MEMORY_READ, Resource.owned_by(U1, "memory")
+        )
+        self.assertTrue(by_agent)
+        (event,) = sink.events
+        self.assertEqual(
+            (event.actor_id, event.agent_id, event.action, event.decision),
+            (U1, AGENT, "memory.read", "allow"),
+        )
+
     async def test_every_other_allowed_decision_is_recorded_exactly_once(self):
         # REQUIRED is the default: only the read-only allowlist is exempt.
         who = principal(SystemRole.OWNER, projects={P1: ProjectRole.MANAGER})
@@ -301,6 +319,12 @@ class EmissionTest(unittest.IsolatedAsyncioTestCase):
         owner = principal(SystemRole.OWNER, user_id=U1)
         attempts = [
             (owner, Capability.MEMORY_USE, Resource.owned_by(U2, "memory")),
+            (owner, Capability.MEMORY_READ, Resource.owned_by(U2, "memory")),
+            (
+                principal(SystemRole.SYSTEM, user_id=U2),
+                Capability.MEMORY_READ,
+                Resource.owned_by(U2, "memory"),
+            ),
             (owner, Capability.PROJECT_READ, project(P1)),
             (owner, "not.a.capability", Resource.system()),
             (owner, Capability.PROJECT_READ, None),

@@ -7,6 +7,7 @@ import uuid
 
 from paw_backend.tasks import (
     StaleAttemptError,
+    StaleRunError,
     TaskCommand,
     TaskNotFoundError,
     TaskService,
@@ -381,6 +382,27 @@ class ClearTest(LoopTestCase):
         first = await self.fail(task_id, attempt=2)
         self.assertEqual((first.verdict, first.repeats), (V.CONTINUE, 1))
         self.assertEqual(len(await self.stored(task_id)), 1)
+
+    async def test_a_failure_of_a_replaced_or_ended_run_is_not_counted(self):
+        # ``run``: the retry count is checked too (a Retry keeps the attempt), and
+        # an ended task records nothing, under the same share lock as the attempt.
+        task_id = await self.task_in_state(TaskState.RUNNING)
+        first = (await self.service.restore(task_id)).run
+        await self.fail(task_id, run=first)
+        await self.service.execute(task_id, TaskCommand.FAIL, actor=self.system)
+        with self.assertRaises(StaleRunError):  # ended
+            await self.fail(task_id, run=first)
+        await self.service.execute(task_id, TaskCommand.RETRY, actor=self.user)
+        with self.assertRaises(StaleRunError):  # replaced by the Retry
+            await self.fail(task_id, run=first)
+        retried = (await self.service.restore(task_id)).run
+        self.assertEqual((retried.attempt, retried.retry_count), (1, 1))
+        await self.fail(task_id, run=retried)
+        with self.assertRaises(InvalidQueueingArgumentError):  # not the attempt
+            await self.fail(task_id, attempt=2, run=retried)
+        with self.assertRaises(InvalidQueueingArgumentError):
+            await self.fail(task_id, run=(1, 1))
+        self.assertEqual(len(await self.stored(task_id)), 2)
 
     async def test_an_unknown_task_is_not_found_whatever_the_attempt(self):
         with self.assertRaises(TaskNotFoundError):
