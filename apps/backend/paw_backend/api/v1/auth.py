@@ -18,6 +18,12 @@ with the reason):
 Every other route needs a session (``account.read`` / ``account.manage``, held by
 every human role) or a role (``admin.users.manage`` to unlock an account,
 ``admin.auth_policy.view`` / ``owner.auth_policy.manage`` for the policy).
+
+A session that the Passkey policy restricts (PAW-023: a required Passkey not yet
+registered / used) is refused by EVERY route with 403 ``passkey_required`` except
+``GET /session``, ``POST /logout`` and the Passkey ceremonies of
+``paw_backend.api.v1.passkeys`` (``require_capability(..., allow_restricted=True)``).
+Unlocking an account and changing the policy need a recent Passkey step-up.
 """
 
 import contextlib
@@ -25,7 +31,7 @@ import logging
 import uuid
 from collections.abc import Iterator
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr
@@ -39,6 +45,15 @@ from paw_backend.auth.errors import (
     AuthUnavailableError,
     InvalidAuthInputError,
     InvalidCredentialsError,
+    LastPasskeyError,
+    NoPasskeyError,
+    PasskeyChallengeError,
+    PasskeyExistsError,
+    PasskeyLimitError,
+    PasskeyNotFoundError,
+    PasskeyRequiredError,
+    PasskeyUnavailableError,
+    PasskeyVerificationError,
     PasswordPolicyError,
     PolicyVersionConflictError,
     SessionEndedError,
@@ -106,7 +121,10 @@ class ChangePasswordRequest(_Body):
 
 
 class StepUpRequest(_Body):
-    method: AuthMethod = AuthMethod.PASSWORD
+    # The password Step-up. A Passkey Step-up has its own ceremony
+    # (``/auth/passkeys/authenticate/begin`` and ``/finish``); naming it here is a
+    # validation error, not a proof that fails.
+    method: Literal[AuthMethod.PASSWORD] = AuthMethod.PASSWORD
     password: StrictStr | None = Field(default=None, max_length=_PASSWORD_INPUT_MAX)
 
 
@@ -147,6 +165,13 @@ class PasskeyOut(BaseModel):
     enrolled: bool
     enrollment_required: bool
     recommended: bool
+    # Passkeys are configured on this server; if not, nothing is enforced.
+    available: bool
+    # What THIS session may do: ``open``, or restricted (``enrollment_required``:
+    # only register a Passkey; ``assertion_required``: only complete a Passkey
+    # authentication) until ``next`` is done. See ``/auth/passkeys``.
+    gate: str
+    next: str | None
 
 
 class StepUpOut(BaseModel):
@@ -241,6 +266,38 @@ def api_errors(
         raise ApiError(404, "not_found", "Not Found") from None
     except SessionEndedError:
         raise ApiError(401, "unauthorized", "Authentication required") from None
+    except PasskeyUnavailableError:
+        raise ApiError(
+            503, "passkey_unavailable", "Passkeys are not configured on this server"
+        ) from None
+    except PasskeyRequiredError:
+        raise ApiError(
+            403, "passkey_required", "A passkey is required for this session"
+        ) from None
+    except PasskeyChallengeError:
+        raise ApiError(
+            400, "challenge_invalid", "The challenge is not valid; start again"
+        ) from None
+    except PasskeyVerificationError:
+        raise ApiError(
+            400, "passkey_rejected", "The passkey response was not accepted"
+        ) from None
+    except NoPasskeyError:
+        raise ApiError(409, "no_passkey", "The account has no passkey") from None
+    except PasskeyNotFoundError:
+        raise ApiError(404, "not_found", "Not Found") from None
+    except PasskeyExistsError:
+        raise ApiError(
+            409, "passkey_exists", "That credential is already registered"
+        ) from None
+    except PasskeyLimitError:
+        raise ApiError(
+            409, "passkey_limit", "Too many passkeys are registered"
+        ) from None
+    except LastPasskeyError:
+        raise ApiError(
+            409, "last_passkey", "The last required passkey cannot be revoked"
+        ) from None
     except StepUpMethodInsufficientError:
         raise ApiError(
             403,
@@ -314,6 +371,9 @@ def _view_out(view: SessionView) -> SessionResponse:
                 enrolled=auth.passkey.enrolled,
                 enrollment_required=auth.passkey.enrollment_required,
                 recommended=auth.passkey.recommended,
+                available=auth.passkey.available,
+                gate=auth.passkey.gate.value,
+                next=auth.passkey.next_step,
             ),
             step_up=StepUpOut(
                 method=auth.step_up.method.value if auth.step_up.method else None,
@@ -443,7 +503,9 @@ async def redeem_owner_token(
 @router.get(
     "/session",
     response_model=SessionResponse,
-    dependencies=[Depends(require_capability(Capability.ACCOUNT_READ))],
+    dependencies=[
+        Depends(require_capability(Capability.ACCOUNT_READ, allow_restricted=True))
+    ],
     summary="The current session, its user and the authentication state",
 )
 async def current_session(request: Request, services: Auth) -> SessionResponse:
@@ -469,7 +531,9 @@ async def list_sessions(request: Request, services: Auth) -> SessionListResponse
 @router.post(
     "/logout",
     status_code=status.HTTP_204_NO_CONTENT,
-    dependencies=[Depends(require_capability(Capability.ACCOUNT_MANAGE))],
+    dependencies=[
+        Depends(require_capability(Capability.ACCOUNT_MANAGE, allow_restricted=True))
+    ],
     summary="End the current session",
 )
 async def logout(request: Request, response: Response, services: Auth) -> Response:
@@ -556,7 +620,10 @@ async def step_up(
 @router.post(
     "/users/{user_id}/unlock",
     status_code=status.HTTP_204_NO_CONTENT,
-    summary="Lift an account's login lock (an Admin for a User, the Owner for anyone)",
+    summary=(
+        "Lift an account's login lock (an Admin for a User, the Owner for anyone; "
+        "needs a recent Passkey step-up)"
+    ),
 )
 async def unlock_account(
     user_id: uuid.UUID,
@@ -567,7 +634,12 @@ async def unlock_account(
     ],
 ) -> Response:
     with api_errors():
-        await services.service.unlock_account(principal, user_id, _context(request))
+        await services.service.unlock_account(
+            principal,
+            user_id,
+            _context(request),
+            session_id=_session_of(request).session.record.id,
+        )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
