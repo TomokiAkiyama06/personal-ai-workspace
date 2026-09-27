@@ -35,6 +35,11 @@ class Capability(StrEnum):
     WORKSPACE_USE = "workspace.use"
     GITHUB_USE = "github.use"
     MEMORY_USE = "memory.use"
+    # Reading one's own Long-term Memory (Hybrid Retrieval's user scope):
+    # Decision 0024 (Approved) supersedes Decision 0004 for it alone, adding it to
+    # the read-only allowlist and to the delegation list. ``memory.use`` keeps
+    # covering writing and proposing (``REQUIRED``). Held by the same roles.
+    MEMORY_READ = "memory.read"
     PR_CREATE = "pr.create"
     # A person's own project membership (Decision 0022, Approved: it extends
     # Decision 0004's delegation list and Scope.SELF, and supersedes Decision 0008
@@ -157,6 +162,8 @@ CAPABILITIES: MappingProxyType[Capability, CapabilityInfo] = MappingProxyType(
         C.WORKSPACE_USE: _info(Scope.SELF, delegable=True),
         C.GITHUB_USE: _info(Scope.SELF, delegable=True),
         C.MEMORY_USE: _info(Scope.SELF, delegable=True),
+        # An agent's decision is REQUIRED whatever the mode (Decision 0004).
+        C.MEMORY_READ: _info(Scope.SELF, delegable=True, read_only=True),
         C.PR_CREATE: _info(Scope.SELF, delegable=True),
         # Answering one's own invitation and leaving a project change who belongs
         # to a project: a person's own act, never an agent's (Decision 0022).
