@@ -70,12 +70,14 @@ from paw_backend.tools.runner import (
     ToolRunner,
 )
 from paw_backend.tools.scope import (
+    ROLE_WRITE_CEILING,
     LexicalPathResolver,
     PathResolver,
     RealpathResolver,
     ScopedRepository,
     TargetError,
     TaskScope,
+    with_working_set_roles,
 )
 from paw_backend.tools.task_state import (
     FailClosedTaskActivity,
@@ -83,9 +85,20 @@ from paw_backend.tools.task_state import (
     TaskActivity,
     TaskActivityProvider,
 )
+from paw_backend.tools.working_set import (
+    WORKING_SET_TOOL_SPECS,
+    BaselineProvider,
+    FailClosedRegistrations,
+    FailClosedWriteRecorder,
+    RepositoryWriteRecorder,
+    WorkingSetExecutor,
+    WorkingSetRegistrations,
+)
 
 __all__ = [
     "DEFAULT_TOOL_POLICY",
+    "ROLE_WRITE_CEILING",
+    "WORKING_SET_TOOL_SPECS",
     "ApprovalBinding",
     "ApprovalEvent",
     "ApprovalEventKind",
@@ -100,6 +113,7 @@ __all__ = [
     "ApprovalStore",
     "ArgumentKind",
     "ArgumentSpec",
+    "BaselineProvider",
     "BrokerDecision",
     "BrokerReason",
     "BudgetProvider",
@@ -109,8 +123,10 @@ __all__ = [
     "Environment",
     "ExecutionStatus",
     "FailClosedBudgetProvider",
+    "FailClosedRegistrations",
     "FailClosedStepUp",
     "FailClosedTaskActivity",
+    "FailClosedWriteRecorder",
     "InMemoryApprovalStore",
     "LexicalPathResolver",
     "NewApproval",
@@ -120,6 +136,7 @@ __all__ = [
     "PostgresApprovalStore",
     "PostgresTaskActivity",
     "RealpathResolver",
+    "RepositoryWriteRecorder",
     "RevokeOutcome",
     "ScopeStatus",
     "ScopedRepository",
@@ -142,7 +159,10 @@ __all__ = [
     "ToolRunner",
     "ToolSpec",
     "Verdict",
+    "WorkingSetExecutor",
+    "WorkingSetRegistrations",
     "contains_credential_plaintext",
     "is_credential_handle",
     "redact_value",
+    "with_working_set_roles",
 ]

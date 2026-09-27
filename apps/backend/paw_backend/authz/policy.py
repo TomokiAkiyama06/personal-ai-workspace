@@ -159,6 +159,10 @@ _CONTRIBUTOR_ONLY = frozenset(
         C.PROJECT_AGENT_USE,
         C.PROJECT_PR_CREATE,
         C.PROJECT_MEMORY_USE,
+        # Who runs a task may shape its Working Set (#85 constraint 3): the
+        # members that may run tasks and write repositories (Contributor, and
+        # Manager, which includes it). A Viewer may do neither.
+        C.PROJECT_TASK_WORKING_SET_MANAGE,
     }
 )
 _MANAGER_ONLY = frozenset(

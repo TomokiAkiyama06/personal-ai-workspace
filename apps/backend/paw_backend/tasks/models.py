@@ -1,5 +1,6 @@
 """ORM models of the task lifecycle (Alembic revision ``0032``; the index
-``ix_tasks_project_id_state`` is revision ``0083``).
+``ix_tasks_project_id_state`` is revision ``0083``; the Working Set, revision
+``0085``).
 
 ``project_id``, ``created_by`` and ``actor_id`` are plain UUID columns without
 foreign keys: the users and projects tables do not exist yet (PAW-021 and the
@@ -7,12 +8,16 @@ project issues). They must gain foreign keys when those tables arrive. Until
 then the service layer trusts its caller for the ids; authorisation is not done
 here (the API layer must do it, see PAW-022 / PAW-025).
 
-The Multi-Repo working set (repositories with the ``referenced`` / ``working`` /
-``target`` roles, each with its own worktree / review / pull request state) is
-not stored: it is outside PAW-032 (Human approved this on 2026-09-25 in
-``docs/decisions/0014-task-working-set-persistence.md``, which assigns it to a
-new issue, #85, after PAW-027 and before PAW-034). ``TaskAttemptRow``
-holds the state of a single repository.
+The Working Set (issue #85, Decisions 0014 and 0030) is ``task_repositories``: the
+repositories of a task and their roles (``referenced`` / ``working`` / ``target``),
+each with its own starting commit, kept across Restart. The worktree / review /
+pull request state of a repository in an attempt is ``task_attempt_repositories``:
+a Single-Repo task is a Working Set of one ``target``, stored the same way (no
+second model). ``task_repositories.repository_id`` has no foreign key to
+``repositories``: a task's history outlives the registration (a project's purge
+deletes its repositories, never its tasks), exactly as ``tasks.project_id``
+outlives nothing it points to. The backend checks the registration when a
+repository is added (``RepositoryService.working_set_acl``).
 """
 
 import uuid
@@ -22,10 +27,12 @@ from typing import Any
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
     DateTime,
     Enum,
     ForeignKey,
+    ForeignKeyConstraint,
     Identity,
     Index,
     Integer,
@@ -39,7 +46,13 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from paw_backend.db import Base
-from paw_backend.tasks.domain import ActorKind, TaskCommand, TaskState, WaitReason
+from paw_backend.tasks.domain import (
+    ActorKind,
+    RepoRole,
+    TaskCommand,
+    TaskState,
+    WaitReason,
+)
 from paw_backend.tasks.records import (
     EvaluationResult,
     LogLevel,
@@ -78,9 +91,9 @@ class TaskRow(Base):
     project_id: Mapped[uuid.UUID] = mapped_column(Uuid)
     created_by: Mapped[uuid.UUID] = mapped_column(Uuid)
     title: Mapped[str] = mapped_column(String(200))
-    # The original task input and starting commit: Restart starts over from them.
+    # The original task input: Restart starts over from it (and from the starting
+    # commit of each repository, ``task_repositories.starting_commit``).
     input: Mapped[dict[str, Any]] = mapped_column(JSONB)
-    starting_commit: Mapped[str | None] = mapped_column(String(64))
     state: Mapped[TaskState] = mapped_column(_enum(TaskState))
     wait_reason: Mapped[WaitReason | None] = mapped_column(_enum(WaitReason))
     agent: Mapped[str | None] = mapped_column(String(100))
@@ -117,9 +130,8 @@ class TaskRow(Base):
 
 
 class TaskAttemptRow(Base):
-    """Branch / worktree / review / pull request state of one attempt.
-
-    Restart starts a new attempt and keeps the earlier rows as history.
+    """One attempt of a task. Restart starts a new one and keeps the earlier rows
+    as history; the state of each repository in it is ``TaskAttemptRepositoryRow``.
     """
 
     __tablename__ = "task_attempts"
@@ -127,6 +139,74 @@ class TaskAttemptRow(Base):
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
     task_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tasks.id"))
     number: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+
+    __table_args__ = (
+        UniqueConstraint("task_id", "number"),
+        CheckConstraint("number >= 1", name="number_positive"),
+    )
+
+
+class TaskRepositoryRow(Base):
+    """One repository of a task's Working Set (kept across Retry and Restart).
+
+    ``starting_commit`` is the repository's own baseline (#85 constraint 1), set
+    when it joined the Working Set; ``None`` when it was not known (nothing can
+    then be verified as discarded). A repository leaves the Working Set by
+    ``removed_at`` (the row stays: nothing of a task is ever deleted); joining it
+    again sets a new baseline. ``added_by_kind`` / ``added_by`` are who added it
+    or last changed its role; the full history is in ``task_events``.
+    """
+
+    __tablename__ = "task_repositories"
+
+    task_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tasks.id"), primary_key=True)
+    repository_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    # The order the repositories joined in (``restore`` lists them so; rows added
+    # in one transaction share ``added_at``).
+    seq: Mapped[int] = mapped_column(BigInteger, Identity())
+    role: Mapped[RepoRole] = mapped_column(_enum(RepoRole))
+    starting_commit: Mapped[str | None] = mapped_column(String(64))
+    added_by_kind: Mapped[ActorKind] = mapped_column(_enum(ActorKind))
+    added_by: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+    removed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        _in("role", RepoRole, "role_valid"),
+        _in("added_by_kind", ActorKind, "added_by_kind_valid"),
+        CheckConstraint(
+            "(added_by_kind = 'user') = (added_by IS NOT NULL)",
+            name="added_by_matches_kind",
+        ),
+    )
+
+
+class TaskAttemptRepositoryRow(Base):
+    """Branch / worktree / review / pull request state of one repository in one
+    attempt (Decision 0030, section 2).
+
+    ``strongest_role`` is the strongest role the repository held in the attempt and
+    ``modified`` whether a repository write on it was allowed in the attempt: a
+    changed repository keeps the obligations of that role (section 5) until the
+    change is verifiably discarded. A repository removed from the Working Set
+    keeps its row.
+    """
+
+    __tablename__ = "task_attempt_repositories"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    task_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    attempt: Mapped[int] = mapped_column(Integer)
+    repository_id: Mapped[uuid.UUID] = mapped_column(Uuid)
     branch: Mapped[str | None] = mapped_column(String(255))
     worktree_path: Mapped[str | None] = mapped_column(String(1024))
     head_commit: Mapped[str | None] = mapped_column(String(64))
@@ -139,6 +219,8 @@ class TaskAttemptRow(Base):
     pr_number: Mapped[int | None] = mapped_column(Integer)
     pr_url: Mapped[str | None] = mapped_column(String(2048))
     pr_state: Mapped[PullRequestState | None] = mapped_column(_enum(PullRequestState))
+    strongest_role: Mapped[RepoRole] = mapped_column(_enum(RepoRole))
+    modified: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow
     )
@@ -147,11 +229,20 @@ class TaskAttemptRow(Base):
     )
 
     __table_args__ = (
-        UniqueConstraint("task_id", "number"),
+        # The attempt it belongs to; its task follows from that.
+        ForeignKeyConstraint(
+            ["task_id", "attempt"], ["task_attempts.task_id", "task_attempts.number"]
+        ),
+        # A repository of the task's Working Set (a removed one keeps its row).
+        ForeignKeyConstraint(
+            ["task_id", "repository_id"],
+            ["task_repositories.task_id", "task_repositories.repository_id"],
+        ),
+        UniqueConstraint("task_id", "attempt", "repository_id"),
         _in("review_status", ReviewStatus, "review_status_valid"),
         _in("evaluation_result", EvaluationResult, "evaluation_result_valid"),
         _in("pr_state", PullRequestState, "pr_state_valid"),
-        CheckConstraint("number >= 1", name="number_positive"),
+        _in("strongest_role", RepoRole, "strongest_role_valid"),
         # A pull request is either fully described or absent.
         CheckConstraint(
             "(pr_number IS NULL) = (pr_url IS NULL)"

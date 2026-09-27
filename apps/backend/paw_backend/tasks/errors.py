@@ -96,3 +96,75 @@ class StaleAttemptError(StaleRunError):
 
     code = "stale_attempt"
     message = "The task has moved on to a newer attempt"
+
+
+class WorkingSetError(TaskError):
+    """A change of the Working Set, or a transition it guards, is refused.
+
+    Nothing is written. The message names no repository, role or task.
+    """
+
+    code = "working_set_error"
+    message: ClassVar[str] = "The working set does not allow this"
+
+    def __init__(self) -> None:
+        super().__init__(self.message)
+
+
+class WorkingSetChangeInvalidError(WorkingSetError):
+    """The operation does not apply to the repository's current role (adding one
+    that is already in the Working Set, promoting to the role it has, ...)."""
+
+    code = "working_set_change_invalid"
+    message = "The operation does not apply to the repository's current role"
+
+
+class WorkingSetConflictError(WorkingSetError):
+    """The repository's role is not the one the change was decided on.
+
+    The Tool Broker decides a change on the role the task scope showed; the role
+    stored now differs (another change came first), so the decision does not hold.
+    """
+
+    code = "working_set_conflict"
+    message = "The working set changed; decide again"
+
+
+class LastTargetRemovalRefusedError(WorkingSetError):
+    """The change would leave the task without a ``target`` repository
+    (Decision 0030, sections 2 and 3: a task always has one)."""
+
+    code = "last_target_removal_refused"
+    message = "The only target repository cannot be downgraded or removed"
+
+
+class ModifiedRepositoryDowngradeRefusedError(WorkingSetError):
+    """A repository the current attempt could have changed is downgraded or
+    removed, and the backend could not verify that the change was discarded
+    (clean worktree, HEAD at the repository's starting commit, branch not pushed,
+    no open pull request). Decision 0030, section 3; fail-closed."""
+
+    code = "modified_repository_downgrade_refused"
+    message = "The repository's changes were not verifiably discarded"
+
+
+class NoTargetRepositoryError(WorkingSetError):
+    """Start of a task whose Working Set has no ``target`` repository."""
+
+    code = "no_target_repository"
+    message = "The task has no target repository"
+
+
+class CompletionRequirementsNotMetError(WorkingSetError):
+    """Complete of a task one of whose repositories lacks what it must have
+    (Decision 0030, section 5): see ``TaskSnapshot`` for which one."""
+
+    code = "completion_requirements_not_met"
+    message = "A repository of the task does not meet its completion requirements"
+
+
+class RepositoryNotInAttemptError(WorkingSetError):
+    """Attempt state for a repository the task's current attempt does not have."""
+
+    code = "repository_not_in_attempt"
+    message = "The repository is not part of the task's current attempt"

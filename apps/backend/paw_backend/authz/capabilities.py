@@ -101,6 +101,11 @@ class Capability(StrEnum):
     PROJECT_MEMBERS_MANAGE = "project.members.manage"
     PROJECT_AGENT_POLICY_MANAGE = "project.agent_policy.manage"
     PROJECT_LIFECYCLE_MANAGE = "project.lifecycle.manage"
+    # Change the Working Set of a task of the project (issue #85, Decision 0030):
+    # add a repository, change its role, remove it. Decided on the project; the
+    # repository itself is decided separately, with the permission of the change
+    # (``tasks.working_set.required_permission``), and both must allow.
+    PROJECT_TASK_WORKING_SET_MANAGE = "project.task.working_set.manage"
 
 
 class RepoPermission(StrEnum):
@@ -205,6 +210,14 @@ CAPABILITIES: MappingProxyType[Capability, CapabilityInfo] = MappingProxyType(
         C.PROJECT_MEMBERS_MANAGE: _info(Scope.PROJECT, delegable=False),
         C.PROJECT_AGENT_POLICY_MANAGE: _info(Scope.PROJECT, delegable=False),
         C.PROJECT_LIFECYCLE_MANAGE: _info(Scope.PROJECT, delegable=False),
+        # Delegable (#85 constraint 3): the Working Set is changed through tools
+        # an agent calls (Decision 0030, section 3); a non-delegable capability
+        # would refuse every such call before its approval. It never widens what
+        # the agent may do on a repository: every change also needs the
+        # repository permission of the change (``project.read`` / ``project.repo
+        # .write``, AND), and every change but adding a ``referenced`` repository
+        # needs STRONG_APPROVAL (a human, with Step-up).
+        C.PROJECT_TASK_WORKING_SET_MANAGE: _info(Scope.PROJECT, delegable=True),
     }
 )
 del C

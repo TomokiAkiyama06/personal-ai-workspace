@@ -14,6 +14,7 @@ from paw_backend.authz import (
     RepoAcl,
     SystemRole,
 )
+from paw_backend.tasks import RepoRole
 from paw_backend.tools import (
     ApprovalLevel,
     ApprovalService,
@@ -195,6 +196,8 @@ def make_scope(**overrides) -> TaskScope:
                 ROOT,
                 RepoAcl.inherit(REPO, P1),
                 remotes=[REPO_REMOTE, REPO_REMOTE + ".git", REPO_API],
+                # The task's target: its role allows everything the ACL does.
+                role=RepoRole.TARGET,
             )
         ],
     }
@@ -333,6 +336,34 @@ class StepUp:
         return self.answer
 
 
+class WriteRecorder:
+    """Records the repository writes the broker allowed (or fails with ``error``)."""
+
+    def __init__(self, *, error=None) -> None:
+        self.error = error
+        self.writes: list[tuple[uuid.UUID, TaskRun, tuple[uuid.UUID, ...]]] = []
+
+    async def record_repository_writes(self, task_id, run, repository_ids):
+        if self.error is not None:
+            raise self.error
+        self.writes.append((task_id, run, tuple(repository_ids)))
+
+
+class Registrations:
+    """The registered ACLs a test knows about (anything else is unregistered)."""
+
+    def __init__(self, *acls: RepoAcl, error=None) -> None:
+        self.acls = {acl.repo_id: acl for acl in acls}
+        self.error = error
+        self.asked: list[uuid.UUID] = []
+
+    async def working_set_acl(self, repository_id):
+        self.asked.append(repository_id)
+        if self.error is not None:
+            raise self.error
+        return self.acls.get(repository_id)
+
+
 class Harness:
     """A broker with in-memory adapters, wired the way production wires it."""
 
@@ -357,6 +388,8 @@ class Harness:
         # The broker's own audit sink can be a different (failing) one.
         self.broker_sink = overrides.pop("broker_sink", self.sink)
         self.executor = overrides.pop("executor", FakeExecutor())
+        self.write_recorder = overrides.pop("write_recorder", WriteRecorder())
+        self.registrations = overrides.pop("registrations", Registrations())
         self.events: list = []
         listeners = overrides.pop("listeners", (self.events.append,))
         self.broker = ToolBroker(
@@ -367,6 +400,8 @@ class Harness:
             budget=self.budget,
             task_activity=self.task_activity,
             path_resolver=overrides.pop("path_resolver", LexicalPathResolver()),
+            registrations=self.registrations,
+            write_recorder=self.write_recorder,
             clock=self.clock,
             listeners=listeners,
             **overrides,

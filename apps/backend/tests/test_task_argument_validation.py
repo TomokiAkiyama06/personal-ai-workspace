@@ -45,6 +45,7 @@ from paw_backend.tasks import (
     LogLevel,
     PullRequestInfo,
     PullRequestState,
+    RepoRole,
     ReviewState,
     ReviewStatus,
     StepInfo,
@@ -57,6 +58,8 @@ from paw_backend.tasks import (
     ToolInvocationInfo,
     ToolInvocationStatus,
     WaitReason,
+    WorkingSetEntry,
+    WorkingSetOperation,
     WorktreeState,
     plan_transition,
 )
@@ -83,6 +86,8 @@ TABLES = (
     ("task_tool_invocations", "id"),
     ("task_logs", "seq"),
     ("task_events", "seq"),
+    ("task_repositories", "task_id, t.repository_id"),
+    ("task_attempt_repositories", "id"),
 )
 
 
@@ -322,6 +327,46 @@ def not_a_pull_request() -> list[Any]:
     return groups
 
 
+def not_a_working_set() -> list[Any]:
+    """What ``create_task(repositories=...)`` refuses (issue #85)."""
+    target = RepoRole.TARGET
+    repository = uuid.uuid4()
+    values: list[Any] = [
+        None,
+        CANARY,
+        b"",
+        1,
+        True,
+        object(),
+        {"repository_id": repository, "role": "target"},
+        [object()],
+        [(repository, target, None)],
+        # a repository listed twice
+        [WorkingSetEntry(repository, target), WorkingSetEntry(repository, target)],
+        # a Working Set without a target
+        [WorkingSetEntry(uuid.uuid4(), RepoRole.WORKING)],
+        # more repositories than a Working Set holds
+        [WorkingSetEntry(uuid.uuid4(), target) for _ in range(33)],
+    ]
+    values += [[WorkingSetEntry(value, target)] for value in not_a_uuid()]
+    values += [
+        [WorkingSetEntry(uuid.uuid4(), value)] for value in not_an_enum(RepoRole)
+    ]
+    values += [
+        [WorkingSetEntry(uuid.uuid4(), target, value)]
+        for value in not_text(64, allow_none=True)
+    ]
+    return values
+
+
+def not_repository_ids() -> list[Any]:
+    """What ``record_repository_writes(repository_ids=...)`` refuses."""
+    values: list[Any] = [None, CANARY, b"", 1, object(), [], (), {uuid.uuid4()}]
+    values += [[value] for value in not_a_uuid()]
+    values.append([uuid.uuid4() for _ in range(33)])
+    return values
+
+
 # -- the fixture and the baselines --------------------------------------------------
 
 
@@ -335,6 +380,7 @@ class Fixture:
     idle: uuid.UUID  # running, no step yet
     failed: uuid.UUID
     user: Actor
+    repository: uuid.UUID  # the target of every task of the fixture
 
 
 Baseline = Callable[[Fixture], dict[str, Any]]
@@ -346,7 +392,7 @@ def create_baseline(fx: Fixture) -> dict[str, Any]:
         created_by=uuid.uuid4(),
         title="Fix the parser",
         input={"k": ["v", 1, 2.5, True, None]},
-        starting_commit="abc123",
+        repositories=[WorkingSetEntry(uuid.uuid4(), RepoRole.TARGET, "abc123")],
         agent="codex",
         model="gpt",
     )
@@ -411,12 +457,31 @@ def update_attempt_baseline(fx: Fixture) -> dict[str, Any]:
     return dict(
         task_id=fx.running,
         run=FIRST_RUN,
+        repository_id=fx.repository,
         worktree=WorktreeState("agent/x", "/srv/worktrees/x", "b" * 40),
         review=ReviewState(ReviewStatus.APPROVED, EvaluationResult.PASSED),
         pull_request=PullRequestInfo(
             1, "https://example.test/pr/1", PullRequestState.OPEN
         ),
     )
+
+
+def change_working_set_baseline(fx: Fixture) -> dict[str, Any]:
+    return dict(
+        task_id=fx.running,
+        operation=WorkingSetOperation.ADD_REFERENCED,
+        repository_id=uuid.uuid4(),
+        actor=fx.user,
+        expected_role=None,
+        starting_commit="c" * 40,
+        agent_id=uuid.uuid4(),
+        reason="to read its API",
+        expected_version=None,
+    )
+
+
+def record_writes_baseline(fx: Fixture) -> dict[str, Any]:
+    return dict(task_id=fx.running, run=FIRST_RUN, repository_ids=[fx.repository])
 
 
 def restore_baseline(fx: Fixture) -> dict[str, Any]:
@@ -437,6 +502,8 @@ BASELINES: dict[str, tuple[str, Baseline]] = {
     "finish_tool_invocation": ("finish_tool_invocation", finish_tool_baseline),
     "add_log": ("add_log", add_log_baseline),
     "update_attempt": ("update_attempt", update_attempt_baseline),
+    "change_working_set": ("change_working_set", change_working_set_baseline),
+    "record_repository_writes": ("record_repository_writes", record_writes_baseline),
     "restore": ("restore", restore_baseline),
     "history": ("history", history_baseline),
 }
@@ -462,7 +529,7 @@ CASES = [
     case("create_task", "created_by", not_a_uuid(allow_none=False)),
     case("create_task", "title", not_text(MAX_TITLE_LENGTH)),
     case("create_task", "input", not_a_json_object()),
-    case("create_task", "starting_commit", not_text(64, allow_none=True)),
+    case("create_task", "repositories", not_a_working_set()),
     case("create_task", "agent", not_text(MAX_NAME_LENGTH, allow_none=True)),
     case("create_task", "model", not_text(MAX_NAME_LENGTH, allow_none=True)),
     # -- execute
@@ -544,9 +611,28 @@ CASES = [
     # -- update_attempt
     case("update_attempt", "task_id", not_a_uuid()),
     case("update_attempt", "run", not_a_run()),
+    case("update_attempt", "repository_id", not_a_uuid()),
     case("update_attempt", "worktree", not_a_worktree()),
     case("update_attempt", "review", not_a_review()),
     case("update_attempt", "pull_request", not_a_pull_request()),
+    # -- change_working_set (issue #85)
+    case("change_working_set", "task_id", not_a_uuid()),
+    case("change_working_set", "operation", not_an_enum(WorkingSetOperation)),
+    case("change_working_set", "repository_id", not_a_uuid()),
+    case("change_working_set", "actor", not_an_actor()),
+    case("change_working_set", "expected_role", not_an_enum(RepoRole, allow_none=True)),
+    case("change_working_set", "starting_commit", not_text(64, allow_none=True)),
+    case("change_working_set", "agent_id", not_a_uuid(allow_none=True)),
+    case("change_working_set", "reason", not_text(MAX_REASON_LENGTH, allow_none=True)),
+    case(
+        "change_working_set",
+        "expected_version",
+        not_an_integer(1, 2**31 - 1, allow_none=True),
+    ),
+    # -- record_repository_writes (issue #85)
+    case("record_repository_writes", "task_id", not_a_uuid()),
+    case("record_repository_writes", "run", not_a_run()),
+    case("record_repository_writes", "repository_ids", not_repository_ids()),
     # -- restore
     case("restore", "task_id", not_a_uuid()),
     case("restore", "log_limit", not_an_integer(0, 1000)),
@@ -566,6 +652,8 @@ PUBLIC_METHODS = {
     "finish_tool_invocation",
     "add_log",
     "update_attempt",
+    "change_working_set",
+    "record_repository_writes",
     "restore",
     "history",
 }
@@ -592,6 +680,7 @@ class ArgumentValidationTest(PostgresTaskTestCase):
             idle=await self.task_in_state(S.RUNNING),
             failed=await self.task_in_state(S.FAILED),
             user=self.user,
+            repository=self.repository_id,
         )
 
     async def snapshot(self) -> dict[str, tuple[int, str]]:
@@ -742,6 +831,7 @@ class ArgumentValidationTest(PostgresTaskTestCase):
         attempt = await service.update_attempt(
             fixture.running,
             run=FIRST_RUN,
+            repository_id=fixture.repository,
             review=ReviewState("changes_requested", "failed"),
             pull_request=PullRequestInfo(3, "https://example.test/pr/3", "merged"),
         )

@@ -46,7 +46,7 @@ Python 側の Package（`pgvector-python`）は使わず、`paw_backend/memory/v
 apps/backend/
 ├─ pyproject.toml          # 依存（完全一致で固定）と Ruff 設定
 ├─ alembic.ini             # Alembic 設定（DB URL は持たない）
-├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0022 は Password / Session / Login Throttle / 認証 Policy、0023 は Passkey / Passkey の Challenge / Session の Gate、0026 は Project、0027 は Repository 登録・Remote・Checkout、0030 は Shared Connection・Quota・Usage、0031 は Tool Approval、0033 は Queue / Budget / Loop、0040 は Memory Schema、0041 は Memory Journal / Consolidation Queue、0043 は `memory_versions` の全文検索の Index、0046 は Shared Memory Candidate、0050 は Research Scratch、0052 は Evidence / Claim Provenance、0071 は Memory の Status / Stale 状態の変更履歴、0083 は `tasks (project_id, state)` の Index、0087 は外部送信の Audit の `audit_events.details`）
+├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0022 は Password / Session / Login Throttle / 認証 Policy、0023 は Passkey / Passkey の Challenge / Session の Gate、0026 は Project、0027 は Repository 登録・Remote・Checkout、0030 は Shared Connection・Quota・Usage、0031 は Tool Approval、0033 は Queue / Budget / Loop、0040 は Memory Schema、0041 は Memory Journal / Consolidation Queue、0043 は `memory_versions` の全文検索の Index、0046 は Shared Memory Candidate、0050 は Research Scratch、0052 は Evidence / Claim Provenance、0071 は Memory の Status / Stale 状態の変更履歴、0083 は `tasks (project_id, state)` の Index、0085 は Task の Working Set、0087 は外部送信の Audit の `audit_events.details`）
 ├─ paw_backend/
 │  ├─ app.py               # create_app(settings)
 │  ├─ config.py            # PAW_ 環境変数から読む Settings
@@ -279,14 +279,8 @@ PAW-032 で実装しました。`paw_backend/tasks/` は Task の状態遷移（
 **HTTP の Endpoint はありません。** 認証と RBAC（PAW-022 / PAW-025）が先に必要なためです。
 `TaskService` は認可を行いません。Endpoint を作る側が、権限を確認してから認証済み User を `Actor` として渡します。
 Queue、Budget、Loop 検知（PAW-033、[別の節](#task-queue--budget--loop-検知)）と DAG Orchestration（PAW-034）は、この節の対象外です。
-**Multi-Repo Task の Working Set（Repo の集合と `referenced` / `working` / `target` の役割、Repo ごとの worktree / Review / PR の状態）は PAW-032 に含みません。**
-PAW-032 の受け入れ条件は Task に 1 組の worktree / review / PR 状態の復元までで（Backlog）、Working Set が指す Repository の登録（PAW-027）はまだなく、
-Repo ごとの worktree / branch の作成と統合の処理は PAW-035、Write 範囲の強制は Tool Broker（PAW-031）の責務だからです。
-Working Set の単位、Single-Repo との関係、Repo 追加の承認、Task の完了条件など、要件が決めていない判断があるため、
-[Decision 0014](../../docs/decisions/0014-task-working-set-persistence.md)（Approved、2026-09-25 に Human が承認）で、PAW-032 に含めないことを決めました。
-実装の担当は、PAW-027 の後・PAW-034 の前に立てる新しい Issue [#85](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/85) です。#85 が Working Set と Repo ごとの Git 状態を**保存する表**を持ち、PAW-035 は worktree・統合の**振る舞い**を持って、その結果を #85 の表へ書きます（PAW-035 には保存の表を含めません）。
-上の未決の判断は、#85 の実装の前に別の Decision で決めます。特に Repo の役割と Write 範囲の対応は、保存より先に決めます。
-したがって、`task_attempts` の worktree / Review / PR は 1 つの Repo の状態で、どの Repo かは記録せず、`TaskSnapshot`（`restore()`）も Working Set を返しません。
+**Task の Working Set（Repo の集合と `referenced` / `working` / `target` の役割、Repo ごとの worktree / Review / PR の状態）は、Issue [#85](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/85) で、[Decision 0030](../../docs/decisions/0030-task-working-set-model.md) が示す形で持ちます**（[下の節](#working-setissue-85)。PAW-032 には含めないことを [Decision 0014](../../docs/decisions/0014-task-working-set-persistence.md) で決めていました）。
+Single-Repo Task も、Working Set に `target` が 1 つだけある Task として同じ表に保存します（`task_attempts` は試行そのものだけを持ち、Repo ごとの状態は `task_attempt_repositories` です）。
 
 ### 状態
 
@@ -324,14 +318,16 @@ Operator の 6 操作は次のように解釈しています（[要件](../../RE
 - **Stop Now（immediate）**: 緊急停止です。Cancel と同じ `cancelled` になりますが、実行中の Step を即座に `interrupted` にし、停止理由と中断した Step を Task Log と履歴 Event へ残します。**`reason` は必須**です（[要件](../../REQUIREMENTS.md)の「停止理由と実行中だったstepをAudit / Task logへ残す」を満たすためで、他の Command では任意です）。`reason` がない（`None`）、空または空白だけ、文字列でない、長さの上限（500 文字）を超える、NUL / Surrogate を含む場合は、Task の状態を見る前に、何も書き込まずに `InvalidCommandArgumentError` で拒否します（エラー文に値は含めません）。受け付けた Stop Now は必ず、履歴 Event の `reason` と Task Log の行の両方に理由を残します。Log の行は `Stop Now: interrupted step '<Step 名>' (reason: <理由>)` です。Step が既に終わっていた場合（Worker が先に閉じた場合を含む）は何も中断していないため、Step 名を記録せず、Log は `Stop Now: no step was running (reason: <理由>)` とします（Fail も、自分が終わらせた Step だけを Event に記録します）。実行中に何かが動きうる状態（running / waiting / evaluating）だけが対象で、queued と paused には Cancel を使います。成果物は削除しません。
   Cancel と Stop Now の違いは Event の Command（`TaskEvent.interruption` が `graceful` / `immediate`）で判別できます。
 - **Retry**: `failed` の Task を、失敗した Step から同じ試行（同じ branch / worktree / Log）で再実行します。`queued` へ戻り、`retry_count` を 1 増やし、Agent / Model を切り替えられます（履歴 Event の `detail` に旧値と新値を残す）。
-- **Restart**: `failed` または `cancelled` の Task を、元の `starting_commit` と Task `input` から最初からやり直します。試行番号（`attempt`）を 1 増やし、新しい branch / worktree / Review / PR の状態を持つ空の試行を作ります。旧試行は `task_attempts` と Step・Log に残り、`TaskSnapshot.previous_attempts` から見えます。
+- **Restart**: `failed` または `cancelled` の Task を、Working Set の各 Repo の `starting_commit` と Task `input` から最初からやり直します。試行番号（`attempt`）を 1 増やし、Working Set の Repo ごとに、新しい branch / worktree / Review / PR の状態を持つ空の行を作ります（Working Set そのものは変わりません）。旧試行は `task_attempts` / `task_attempt_repositories` と Step・Log に残り、`TaskSnapshot.previous_attempts` から見えます。
 
 ### 永続化
 
 | Table | 内容 |
 | --- | --- |
-| `tasks` | 現在の状態、`wait_reason`、`version`、試行番号、`retry_count`、Agent / Model、`starting_commit`、`input`（Restart の基準）。Index `ix_tasks_project_id_state`（`project_id`、`state`。Revision `0083`、Issue #83）が、Project ごとの Task の一覧を受け持つ |
-| `task_attempts` | 試行ごとの branch / worktree / head commit、Review 状態、Evaluator 結果、PR の番号・URL・状態 |
+| `tasks` | 現在の状態、`wait_reason`、`version`、試行番号、`retry_count`、Agent / Model、`input`（Restart の基準）。Index `ix_tasks_project_id_state`（`project_id`、`state`。Revision `0083`、Issue #83）が、Project ごとの Task の一覧を受け持つ |
+| `task_attempts` | 試行（番号と作成時刻）。Repo ごとの状態は `task_attempt_repositories` |
+| `task_repositories` | Working Set（Revision `0085`）。Repo、役割、その Repo の `starting_commit`、追加した（最後に役割を変えた）Actor と時刻、Working Set から外れた時刻（`removed_at`）。行は消さない |
+| `task_attempt_repositories` | 試行と Repo ごとの branch / worktree / head commit、Review 状態、Evaluator 結果、PR の番号・URL・状態、試行中に持った最も強い役割（`strongest_role`）、試行中に書き込みが許可されたか（`modified`） |
 | `task_steps` | Step の実行記録。試行内で最新の行が current step。試行内で `running` は高々 1 つ（Partial Unique Index） |
 | `task_tool_invocations` | Step が呼んだ Tool の実行状態（下記）。ID、Tool 名、状態（`started` / `succeeded` / `failed` / `interrupted`）、開始・終了時刻だけを持つ。`started` の行だけの Partial Index（`step_id`）と、終了済みの行だけの Partial Index（`step_id`、開始の新しい順、`id` の新しい順）がある |
 | `task_logs` | 試行ごとの Log（`debug` / `info` / `warning` / `error`）。行は書いた Run（`attempt` と `retry_count`）を持つ。Index は `(task_id, attempt, seq DESC)`（下記の `restore`） |
@@ -345,7 +341,7 @@ Operator の 6 操作は次のように解釈しています（[要件](../../RE
   - **オブジェクト**: `actor` は `Actor`、`run` は `TaskRun`、`worktree` / `review` / `pull_request` は `WorktreeState` / `ReviewState` / `PullRequestInfo`（省略時は `None`）で、そのフィールドも上の規則で検査します。PR は URL が必須です。branch / path / head commit / PR の URL は、`str` でない値、空・空白だけの値も拒否します（worktree のフィールドの `None` は「未設定」）。名前や `title`、`reason` も空・空白だけは拒否します。Log の `message` は、Worker が出力の空行をそのまま転送することがあるため空文字列を許します（`str` であることだけを要求します）。
   - **DB を読んでから判断する規則が 1 つだけあります**: `execute` の `wait_reason` が Command に合わない場合（Wait に無い、Wait 以外にある）は、不正な遷移（`IllegalTransitionError`）を先に報告する Domain の規則（`test_illegal_transition_is_reported_before_a_bad_argument`）のため、Task を読んだ後に同じ `InvalidCommandArgumentError` で拒否します。何も書き込みません。`wait_reason` の型と値そのものは、Transaction を開く前に検査します。
   - `tests/test_task_argument_validation.py` が、Method × 引数 × 誤った値（`None`、型違い、`int` の代わりの `bool`、bytes、空文字列、未知の Enum 値、`object()`、範囲外の数など）の表で確認します。各値で、型付きエラーであること、エラー文に値が含まれないこと、SQL が 1 文も送られず Session も開かれないこと、Task 関連の全 Table の行が変わらないことを検査します。すべての Public メソッドとすべての引数が表に載っていることも Test しています。
-- **文字列入力の検証**: `TaskService` が受け取る文字列（`title`、`starting_commit`、`agent`、`model`、`reason`（Stop Now では必須）、Step 名、Tool 名、Log の `message`、`update_attempt` の branch / path / head commit / PR の URL）は、NUL（`\u0000`）と Surrogate 文字（不正な Unicode）を含むと `InvalidCommandArgumentError` で拒否します（エラー文に値は含めません）。PostgreSQL の text 列は NUL を保持できず、Surrogate は UTF-8 にできないため、そのままでは書き込み時に DB / 符号化のエラーが漏れます。Log の `message` は、長さの上限で切り捨てる前の全体を検査します。`update_attempt` は、branch（255 文字）、path（1024 文字）、head commit（64 文字）、PR の URL（2048 文字）を、Model の列の長さ（1 か所の定義）で検査して、超えると同じ `InvalidCommandArgumentError` で拒否します（文字数で数えます。空・空白だけの値と `str` でない値も拒否します）。PR の番号は 1 から 2147483647（`INTEGER` 列の最大値）の整数だけを受け付けます（`bool`、`float`、文字列は拒否します）。下限の 1 は、PR の番号が正であることに基づく私の判断で、要件が定める値ではありません。
+- **文字列入力の検証**: `TaskService` が受け取る文字列（`title`、Working Set の各 Repo の `starting_commit`、`agent`、`model`、`reason`（Stop Now では必須）、Step 名、Tool 名、Log の `message`、`update_attempt` の branch / path / head commit / PR の URL）は、NUL（`\u0000`）と Surrogate 文字（不正な Unicode）を含むと `InvalidCommandArgumentError` で拒否します（エラー文に値は含めません）。PostgreSQL の text 列は NUL を保持できず、Surrogate は UTF-8 にできないため、そのままでは書き込み時に DB / 符号化のエラーが漏れます。Log の `message` は、長さの上限で切り捨てる前の全体を検査します。`update_attempt` は、branch（255 文字）、path（1024 文字）、head commit（64 文字）、PR の URL（2048 文字）を、Model の列の長さ（1 か所の定義）で検査して、超えると同じ `InvalidCommandArgumentError` で拒否します（文字数で数えます。空・空白だけの値と `str` でない値も拒否します）。PR の番号は 1 から 2147483647（`INTEGER` 列の最大値）の整数だけを受け付けます（`bool`、`float`、文字列は拒否します）。下限の 1 は、PR の番号が正であることに基づく私の判断で、要件が定める値ではありません。
 - **Task `input` の検証**（`TaskService.create_task`）: `input` は JSON Object で、`json.loads` が返す型（`dict`〔キーは `str`〕、`list`、`str`、`int`、`float`、`bool`、`None`）だけを受け付けます。整数キーや `tuple` などを黙って変換して保存することはしません。次のものは、DB へ書く前に `InvalidCommandArgumentError` で拒否します（エラー文に値は含めません）。
   - `NaN` / `Infinity` / `-Infinity`（PostgreSQL の JSONB は保持できず、書き込み時に DB のエラーになります）、NUL（`\u0000`）を含む文字列やキー、Surrogate 文字（不正な Unicode）を含む文字列やキー
   - 入れ子が `MAX_INPUT_DEPTH`（32 段。最上位の Object を 1 段と数え、Object と List の両方が段になります）を超えるもの、循環参照
@@ -359,8 +355,10 @@ Operator の 6 操作は次のように解釈しています（[要件](../../RE
   | Table | Application の Role の権限 |
   | --- | --- |
   | `task_events`、`task_logs` | SELECT、INSERT だけ（履歴と Log は追記のみ。UPDATE / DELETE / TRUNCATE は `permission denied`） |
-  | `tasks` | SELECT、INSERT、UPDATE は `state`、`wait_reason`、`agent`、`model`、`attempt`、`retry_count`、`version`、`updated_at` の列だけ（`project_id`、`created_by`、`title`、`input`、`starting_commit` は変更できない） |
-  | `task_attempts` | SELECT、INSERT、UPDATE は `branch`、`worktree_path`、`head_commit`、`review_status`、`evaluation_result`、`pr_number`、`pr_url`、`pr_state`、`updated_at` の列だけ |
+  | `tasks` | SELECT、INSERT、UPDATE は `state`、`wait_reason`、`agent`、`model`、`attempt`、`retry_count`、`version`、`updated_at` の列だけ（`project_id`、`created_by`、`title`、`input` は変更できない） |
+  | `task_attempts` | SELECT、INSERT だけ（Revision `0085` から。Repo ごとの状態は下の表） |
+  | `task_repositories` | SELECT、INSERT、UPDATE は `role`、`starting_commit`、`added_by_kind`、`added_by`、`added_at`、`updated_at`、`removed_at` の列だけ（Task と Repo は変更できない。DELETE なし） |
+  | `task_attempt_repositories` | SELECT、INSERT、UPDATE は `branch`、`worktree_path`、`head_commit`、`review_status`、`evaluation_result`、`pr_number`、`pr_url`、`pr_state`、`strongest_role`、`modified`、`updated_at` の列だけ |
   | `task_steps`、`task_tool_invocations` | SELECT、INSERT、UPDATE は `status`、`finished_at` の列だけ（Step 名や Tool 名は変更できない） |
 
   行の Lock（`SELECT ... FOR NO KEY UPDATE`）には UPDATE 権限が要るため、Lock する Table は列単位の UPDATE を持ちます。主キーは UUID か Identity で、Sequence の権限は要りません。
@@ -378,7 +376,7 @@ Operator の 6 操作は次のように解釈しています（[要件](../../RE
   呼び出し側が以前に見た Version を `expected_version` に渡すと、古い判断は Lock を待った後でも `TaskConflictError` で拒否されます。`expected_version` を渡さない Command は、待った後の最新の状態で判定されます。
 - **Run（試行と Retry 回数）**: Worker の記録は、担当する **Run**（`TaskRun(attempt, retry_count)`）を明示します。`attempt` は Restart が 1 増やし、`retry_count` は Retry が 1 増やします。どちらも増えるだけで、失敗または中止した Task の再開は必ずどちらか一方を変えるため、2 つの Run が等しいのは同じ Run のときだけです。Retry は**同じ試行**を再実行する（試行番号は変わらない）ので、試行番号だけでは、失敗した Run の Worker と Retry が始めた Run の Worker を区別できません。`TaskRun`（`paw_backend.tasks.TaskRun`）は Tool Broker（PAW-031）が承認を結びつける Run と**同じクラス**です（Broker に別の `TaskRun` はありません。`paw_backend.tools.TaskRun` はこれの再 Export です）。
   Worker は、自分を開始した Start の `TaskEvent.run`（`task_events` に `attempt` と `retry_count` がある）から Run を受け取ります。`TaskSnapshot.run` も同じ値です。
-  - Run を明示する書き込み（**現在の Run でなければ何も書かずに拒否**）: `begin_step(task_id, name, run=...)`、`add_log(task_id, message, run=...)`、`update_attempt(task_id, run=..., worktree=... / review=... / pull_request=...)`。Restart が新しい試行を始めた後の旧試行の Worker は `StaleAttemptError`（`stale_attempt`）、Retry が新しい Run を始めた後の（同じ試行の）失敗した Run の Worker は `StaleRunError`（`stale_run`）になります。`StaleAttemptError` は `StaleRunError` の派生で、「自分は置き換えられたか」だけを知りたい Worker は `StaleRunError` を捕まえれば両方を扱えます。試行番号を先に、次に Retry 回数を比べます。`run` が `TaskRun` でない値（試行番号だけの整数など）は、DB に触れる前に `InvalidCommandArgumentError` です（古い `attempt=` の引数はなくなりました）。
+  - Run を明示する書き込み（**現在の Run でなければ何も書かずに拒否**）: `begin_step(task_id, name, run=...)`、`add_log(task_id, message, run=...)`、`update_attempt(task_id, run=..., repository_id=..., worktree=... / review=... / pull_request=...)`。Restart が新しい試行を始めた後の旧試行の Worker は `StaleAttemptError`（`stale_attempt`）、Retry が新しい Run を始めた後の（同じ試行の）失敗した Run の Worker は `StaleRunError`（`stale_run`）になります。`StaleAttemptError` は `StaleRunError` の派生で、「自分は置き換えられたか」だけを知りたい Worker は `StaleRunError` を捕まえれば両方を扱えます。試行番号を先に、次に Retry 回数を比べます。`run` が `TaskRun` でない値（試行番号だけの整数など）は、DB に触れる前に `InvalidCommandArgumentError` です（古い `attempt=` の引数はなくなりました）。
     - `update_attempt` と `begin_step` は Task 行の Lock を取った後に Run を比べます。Retry と競合しても、先に Commit された Retry の後の古い Worker が新しい Run の worktree / Review / Evaluator 結果 / PR の状態を上書きしたり、新しい Run の Step として始めたりすることはできません（Test は、Retry を Lock の先頭に並べて、古い Worker の書き込みがその後ろで拒否されることを確認します）。
     - `add_log` は Lock を取らないため（Log の書き込みを Task の状態変更と直列にしないため）、Retry と同時に Commit される行があり得ます。そこで行は、Task の現在の Run ではなく**書いた Worker の Run**を持ちます（`task_logs.retry_count`、`LogEntry.retry_count` / `LogEntry.run`）。Retry は同じ試行の Log を続けるので `restore` の `recent_logs` には前の Run の行も出ますが、どの Run の行かは区別できます（Restart との競合で行が試行番号を保つのと同じ考え方です）。Service が自分で書く Stop Now の行は、その時点の Task の Run を持ちます。
   - Run を明示しない書き込み: `finish_step` は Step の ID、`begin_tool_invocation` は実行中の Step の ID、`finish_tool_invocation` は Tool の ID で対象を指定します。これらは ID だけで Run を区別できます。Retry は Fail の後にしか起きず、Fail は実行中の Step を終わらせ、その Step の `started` の Tool も `interrupted` にするため、前の Run が残した Step や Tool は、Retry 後の Run では `running` / `started` ではありません。前の Run の Worker が後から `finish_step` や Tool の呼び出しをすると `TaskStepError` になり、新しい Run の Step や Tool は変わりません（Test で確認しています）。Restart の場合は、これらも `StaleAttemptError` です。
@@ -402,6 +400,22 @@ Operator の 6 操作は次のように解釈しています（[要件](../../RE
 - `MAX_INPUT_BYTES` = 256 KiB: Task の `input` を JSON にした長さ。
 
 `MAX_RESTORE_TOOL_INVOCATIONS`（`restore` が返す終了済みの Tool の件数、100）、`MAX_RESTORE_LOGS`（1000）も、同じく要件が定めない実装の値です。
+
+### Working Set（Issue #85）
+
+[Decision 0030](../../docs/decisions/0030-task-working-set-model.md)（Approved）と、Issue #85 に引き継いだ 5 つの必須の制約（Codex Review の P1）を実装しました。
+
+- **単位と保存（Decision 0030 の 1・2 節）**: Working Set は Task に属し、Retry でも Restart でも変わりません。`create_task(repositories=[WorkingSetEntry(repository_id, role, starting_commit), ...])` で作り（通常は `target` が 1 つの Single-Repo Task）、後の変更はすべて `TaskService.change_working_set` を通します。`restore()` の `TaskSnapshot.working_set` が Working Set（Repo、役割、`starting_commit`、追加した Actor と時刻。追加順）を、`attempt.repositories`（と `previous_attempts`）が Repo ごとの状態を返します。`update_attempt` は `repository_id` で Repo を指定します（試行にない Repo は `RepositoryNotInAttemptError`）。`task_repositories.repository_id` には `repositories` への外部キーを付けません（Project の Purge は Repo の登録を消しますが、Task の履歴は残すため。`tasks.project_id` と同じ扱い）。Tool Broker は、Working Set への追加の前に Repo の登録を `RepositoryService.working_set_acl` で確かめます。
+- **Repo ごとの開始 Commit（#85 の制約 1）**: `starting_commit` は `tasks` の 1 つの値ではなく Repo ごとに持ちます（Revision `0085` で `tasks.starting_commit` を削除）。途中で加わった Repo は、加わったときの Commit を持ち（`change_working_set(..., starting_commit=...)`。Tool の経路では Executor の `BaselineProvider` が渡す）、Restart はそれを使い回します。一度外れて再び加わった Repo は、新しい基準を持ちます。
+- **変更の種類と承認（3 節）**: 変更の種類（`WorkingSetOperation`）ごとに別の Tool（`tools.working_set.WORKING_SET_TOOL_SPECS`）で、結果の役割は Tool で決まり、引数では選べません。`referenced` としての追加だけが `SCOPED_AUTO`、それ以外（`working` / `target` への追加・昇格、降格、削除）は `STRONG_APPROVAL` です（`ToolSpec` は Operation の Level より低い `min_level` を登録で拒否します）。Broker は、Task の Project に対する `project.task.working_set.manage` と、対象 Repo（登録済みの ACL から組み立てる Repository 資源）に対する代理の Capability（追加・`referenced` の削除は `project.read`、それ以外は `project.repo.write`）の**両方**を判定します。Repo は Task の Scope の Project に登録済みでなければなりません（`working_set_repository_unresolved` / `repository_out_of_scope`）。役割に合わない Operation は `working_set_change_invalid`、役割が解決できない Repo の降格・削除は `repository_role_unresolved` です。
+- **`project.task.working_set.manage` の付与と委任（#85 の制約 3）**: Project の Contributor と Manager に与え（Viewer にはない）、`delegable=True` です。Decision 0030 の変更の経路は Agent が呼ぶ Tool なので、既存の `*.manage` と同じく委任不可にすると、`referenced` の追加（`SCOPED_AUTO`）を含むすべての呼び出しが Approval の前に拒否されます。委任しても、Agent が Repo に対してできることは広がりません（対象 Repo の `project.read` / `project.repo.write` も必要で、`referenced` の追加以外は Step-up つきの `STRONG_APPROVAL`）。付与先は、Task を実行し Repo に書き込める Role（`project.task.run` / `project.repo.write` を持つ Contributor 以上）にそろえました。この 2 点は Decision 0030 の設計（Agent の Tool 経路と AND の判定）から導いた実装上の選択で、新しい Decision は立てていません。
+- **最後の `target` の保護の直列化（#85 の制約 4）**: `change_working_set` は、Task 行の Lock（`FOR NO KEY UPDATE`）を取ってから Working Set を読み、検査と変更を同じ Transaction で行います。同時に承認された 2 つの降格は 1 つずつ判定され、後の方が `LastTargetRemovalRefusedError` になります。変更は Task の `version` を 1 増やします。
+- **降格・削除と変更の破棄（3 節）**: その試行で `working` / `target` だった（または書き込みが許可された）Repo の降格・削除は、`RepositoryChangeInspector`（`TaskService(change_inspector=...)`）が Repo を調べて、worktree が clean、HEAD がその Repo の `starting_commit`、branch が push されていない、open の PR がない（保存された PR が `open` / `draft` でもない）と確かめたときだけ許します。Inspector がない（既定の `FailClosedChangeInspector`）、判定できない、失敗する、`starting_commit` が不明のときはすべて拒否します（`ModifiedRepositoryDowngradeRefusedError`）。確かめた内容は Event の `detail["discarded"]` に残し、その Repo の完了義務を外します。
+- **履歴**: 作成時の Working Set は `create` Event の `detail["working_set"]`、以後の変更は `change_working_set` Event（状態は変わらない）に、Actor、変更前後の役割、Operation、設定した `starting_commit`、Agent の ID（Tool の経路）とともに残します。
+- **Start と Complete（2・5 節、#85 の制約 5）**: `target` のない Task は Start できません（`NoTargetRepositoryError`）。Complete は、試行のすべての Repo の必要条件を満たすときだけです（`CompletionRequirementsNotMetError`、何も書かない）。`target` は Evaluation が PASS、PR が `open` か `merged`、**Review が `approved`**。変更された `working` は Evaluation が PASS。`referenced` と変更されていない `working` は条件なし。試行中に変更された Repo（書き込みが許可された、PR がある、記録された HEAD が `starting_commit` と違う）は、降格・削除の後も、試行中に持った最も強い役割の義務を負います（変更が確かめられて破棄された場合を除く）。`begin_evaluation` の前提は変えていません。
+- **Tool Broker の役割の Ceiling（4 節、#85 の制約 2）**: `ScopedRepository.role` は Backend が保存された Working Set から埋めます（`tools.scope.with_working_set_roles(entries, snapshot.working_set)`。PAW-034 の `TaskScope.repositories` はこの値をそのまま引き継ぎます）。詳しくは「[Tool Broker](#tool-broker--capability-policy)」の「Working Set の役割の Ceiling」です。
+- **Migration**: Revision `0085`（`down_revision` は `0041`。鎖は `0001 → 0025 → 0032 → 0040 → 0021 → 0033 → 0031 → 0050 → 0046 → 0052 → 0026 → 0087 → 0022 → 0083 → 0043 → 0030 → 0027 → 0071 → 0086 → 0088 → 0023 → 0041 → 0085`）は、2 つの Table を作り、`task_attempts` の Repo ごとの列と `tasks.starting_commit` を削除し、`task_events.command` に `change_working_set` を加えます。**Upgrade は、既存の試行の worktree / Review / PR の状態と `tasks.starting_commit` を捨てます**（どの Repo の状態かが記録されていないため）。既存の Task には Working Set がないので、`queued` のものは `target` を加えるまで Start できません。Downgrade は列を戻し、Repo が 1 つだけの試行と Task の値を書き戻します。`task_events` は追記専用なので、`change_working_set` の履歴は Downgrade 後も残し、古い値の一覧の CHECK はその行について検証しません（`NOT VALID`）。
+- **Test**: `tests/test_task_working_set.py`（PostgreSQL。同時の降格、破棄の確認、完了条件、Tool から保存まで）、`tests/test_task_working_set_rules.py`、`tests/test_tools_working_set.py`、`tests/test_task_working_set_migration.py`。`tests/test_task_grants.py` が Working Set の Test を Application の Role で実行します。
 
 ### Project の状態 Gate（Issue #83）
 
@@ -1416,6 +1430,22 @@ Broker は、呼び出しがどの Repository に触れるかを **Backend が�
 - 読み取りと Agent 実行（`project.read`、`project.task.run` など）で、触れる Repository がない呼び出しは、これまでどおり Project の Resource で判定します。引数のない Tool は Repository の ACL では判定できないことを、既知の制限に書きます。
 - Repository を表さない Project の Capability（`project.chat`、`project.settings.manage` など）は Project の Resource のままです（PAW-025 は、これらに Repository の Resource を渡すと拒否します）。
 - 判断の理由と、Human が承認した点（2026-09-25）は [Decision 0006](../../docs/decisions/0006-tool-broker-policy.md) の「8. Repository の ACL」。
+
+### Working Set の役割の Ceiling
+
+Issue #85（[Decision 0030](../../docs/decisions/0030-task-working-set-model.md) の 4 節、#85 の制約 2）。Repository の ACL（上）とは別の軸で、呼び出しが触れる Repository ごとに、Task の Working Set での役割（`ScopedRepository.role`）が上限を掛けます。**両方が許すときだけ**許可し（AND）、**Approval があっても超えられません**（Approval を開く前に拒否します）。役割を上げるには Working Set の Tool を通します。
+
+| 役割 | `project.repo.write` | `project.pr.create` | `execute` の Tool |
+| --- | --- | --- | --- |
+| `referenced` | 拒否 | 拒否 | 拒否 |
+| `working` | 可 | 拒否 | 可 |
+| `target` | 可 | 可 | 可 |
+
+- 判定は `authorize_agent_action` の前（Level の表の `DENY` の後）です。役割が解決できない Repository（`role=None`: Working Set にない、壊れた項目）に触れる呼び出しは、読み取りも含めて `repository_role_unresolved` です（`referenced` とは読みません）。上限を超える呼び出しは `repository_role_insufficient`。
+- **書き込みの Capability の一致**: `write` / `destructive` を持ち、Repository に触れる呼び出し（Path、`repository` 引数、Remote の下の URL のどれでも）の `authz_capability` は `project.repo.write` か `project.pr.create` でなければなりません（`repository_write_capability_mismatch`。`project.task.run` などで Ceiling の外から書き換える経路を塞ぐ）。登録時にも、`project_local` で `write` / `destructive` を持ち Path か Repository の引数を持つ Tool は、この 2 つ以外の Capability では `ToolSpec` が `ValueError` です（URL だけで Repository を指す Tool は登録では見えないため、呼び出し時の検査が要ります）。
+- **`execute` の Tool**（Test、Build、任意の Command。#85 の制約 2）は、`authz_capability` に関係なく、触れる Repository が `working` か `target` のときだけ通します。Repository に触れない実行（Task の Root の、どの Repository の外か）は従来どおりです。
+- **書き込みの記録**: 許可した Repository への書き込み（`authz_capability` が `project.repo.write` / `project.pr.create`）は、許可を返す前に `RepositoryWriteRecorder`（`TaskService.record_repository_writes`）でその試行の Repo を「変更あり」にします。記録できなければ `repository_write_unrecorded` で拒否します（既定の `FailClosedWriteRecorder` は常に失敗します）。完了条件（「[Working Set](#working-setissue-85)」）がこの記録を使います。
+- **Working Set の Tool**（`task.working_set.add_referenced` / `set_working` / `set_target` / `downgrade_to_working` / `downgrade_to_referenced` / `remove`）は、`working_set_repository` 引数（Working Set にまだない Repository も指せる正規形の UUID。Scope の判定からは外れる）を 1 つだけ必須で持ち、ほかの対象の引数を持てません。この引数と `project.task.working_set.manage` は、互いにこの Tool の組でしか使えません（登録時に `ValueError`）。判定は、Task の Project への `project.task.working_set.manage` と、`WorkingSetRegistrations`（`RepositoryService.working_set_acl`、既定は `FailClosedRegistrations`）が返す登録済みの ACL による Repository 資源への代理の Capability の AND です。実行は `WorkingSetExecutor` が `TaskService.change_working_set` を呼び、判定に使った役割（Scope の役割）と保存された役割が違えば `WorkingSetConflictError` で何も変えません。
 
 ### Credential
 
