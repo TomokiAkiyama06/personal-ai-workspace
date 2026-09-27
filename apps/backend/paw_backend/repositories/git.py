@@ -311,12 +311,53 @@ class RepositoryFacts:
     origin_url: str | None
 
 
-class GitClient:
-    """The few git operations the service needs, each with fixed arguments."""
+def _gh_credential_helper_args(gh_executable: str) -> tuple[str, str]:
+    """``git clone``'s own ``-c`` (documented, and applied before the fetch
+    itself, unlike a plain ``-c`` before the subcommand which only ever reaches
+    ``.git/config``): the same string ``gh auth setup-git`` writes for
+    ``gh_executable``. Never built from caller input beyond that one fixed
+    path -- ``gh`` resolves the account's own ``gh auth login`` from ``HOME``
+    (already the only identity git's own environment allowlist carries; see
+    :func:`git_environment`).
+    """
+    return ("-c", f"credential.helper=!{gh_executable} auth git-credential")
 
-    def __init__(self, runner: GitRunner, policy: RepositoryPolicy) -> None:
+
+class GitClient:
+    """The few git operations the service needs, each with fixed arguments.
+
+    ``credential_helper`` (PAW-028) makes :meth:`clone` add gh's own credential
+    helper to the clone, so a private GitHub repository can be cloned under the
+    acting Linux user's own ``gh auth login`` -- this backend never sees or
+    stores the token. Fixed at construction like ``extra_config``
+    (:class:`SubprocessGitRunner`), never a per-call choice. ``gh_executable``
+    (default ``"gh"``, resolved from git's own fixed ``PATH``, ``SAFE_PATH`` --
+    never the caller's) must name the same binary a ``gh_runner`` given to
+    ``RepositoryService.from_policy`` was configured with
+    (``SubprocessGhRunner(gh_executable=...)``), so the credential helper `gh`
+    invokes during a clone is the one that is actually installed; git's own
+    ``PATH`` does not necessarily agree with the runner's (Codex review: a
+    ``gh`` outside ``SAFE_PATH`` made every private clone fail with the helper
+    not found, even though status checks and repository creation, which go
+    through the configured ``gh_runner`` directly, worked).
+    """
+
+    def __init__(
+        self,
+        runner: GitRunner,
+        policy: RepositoryPolicy,
+        *,
+        credential_helper: bool = False,
+        gh_executable: str = "gh",
+    ) -> None:
+        if type(credential_helper) is not bool:
+            raise TypeError("credential_helper must be a bool")
+        if type(gh_executable) is not str or not gh_executable:
+            raise TypeError("gh_executable must be a non-empty str")
         self._runner = runner
         self._policy = policy
+        self._credential_helper = credential_helper
+        self._gh_executable = gh_executable
 
     async def _run(
         self,
@@ -428,8 +469,13 @@ class GitClient:
 
         ``url`` and ``branch`` are validated by the caller; both are placed where
         git cannot read them as options (``--branch <b>`` and after ``--``).
+        ``credential_helper`` (PAW-028), when this client was built with one,
+        is added as ``clone``'s own ``-c`` so a private ``https`` remote can
+        authenticate; without it a private remote fails exactly as before.
         """
         args = ["clone", "--quiet"]
+        if self._credential_helper:
+            args.extend(_gh_credential_helper_args(self._gh_executable))
         if branch is not None:
             args.extend(("--branch", branch))
         args.extend(("--", url, destination))

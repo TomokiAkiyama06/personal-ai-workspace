@@ -1,11 +1,13 @@
-"""Repository registration and per-user checkouts (PAW-027).
+"""Repository registration and per-user checkouts (PAW-027), and GitHub user
+connections (PAW-028).
 
 See ``apps/backend/README.md`` ("Repository Registration / Per-user Checkout") and
 Decision 0017 (Approved 2026-09-26). A project's repositories are logical records;
 what a user or an agent edits is that user's own checkout in their own Linux account.
 The service performs authorization through ``paw_backend.authz.Authorizer``;
-there is no HTTP endpoint yet. GitHub credentials (``gh auth``, PAW-028) are not
-part of this issue: ``GitHubGateway`` is the seam.
+there is no HTTP endpoint yet. GitHub credentials (``gh auth``, PAW-028,
+``github_connection.py``) are per Linux user, never held by the backend:
+``GitHubGateway`` is the seam PAW-028 fills with ``GhCliGitHubGateway``.
 """
 
 from paw_backend.repositories.accounts import (
@@ -18,6 +20,8 @@ from paw_backend.repositories.errors import (
     CheckoutGoneError,
     CheckoutInProgressError,
     CheckoutNotFoundError,
+    GhCommandError,
+    GhFailure,
     GitCommandError,
     GitFailure,
     GitHubUnavailableError,
@@ -54,6 +58,15 @@ from paw_backend.repositories.github import (
     UnavailableGitHubGateway,
     parse_github_source,
 )
+from paw_backend.repositories.github_connection import (
+    GhCliGitHubGateway,
+    GhResult,
+    GhRunner,
+    GitHubConnectionService,
+    GitHubConnectionState,
+    GitHubConnectionStatus,
+    SubprocessGhRunner,
+)
 from paw_backend.repositories.paths import LinuxAccount
 from paw_backend.repositories.policy import RepositoryPolicy
 from paw_backend.repositories.records import (
@@ -82,9 +95,17 @@ __all__ = [
     "CheckoutInProgressError",
     "CheckoutNotFoundError",
     "CheckoutState",
+    "GhCliGitHubGateway",
+    "GhCommandError",
+    "GhFailure",
+    "GhResult",
+    "GhRunner",
     "GitClient",
     "GitCommandError",
     "GitFailure",
+    "GitHubConnectionService",
+    "GitHubConnectionState",
+    "GitHubConnectionStatus",
     "GitHubGateway",
     "GitHubRepo",
     "GitHubUnavailableError",
@@ -121,6 +142,7 @@ __all__ = [
     "SshGitRunner",
     "SshGitRunnerPolicy",
     "SshKeyDirectory",
+    "SubprocessGhRunner",
     "SubprocessGitRunner",
     "TemplateSshKeyDirectory",
     "TooManyCheckoutsError",

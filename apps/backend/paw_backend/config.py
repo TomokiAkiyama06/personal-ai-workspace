@@ -117,6 +117,10 @@ class Settings(BaseSettings):
     repository_min_linux_uid: int = Field(default=1000, ge=1, le=4_294_967_295)
     repository_git_timeout_seconds: float = Field(default=30.0, gt=0, le=7_200)
     repository_clone_timeout_seconds: float = Field(default=900.0, gt=0, le=7_200)
+    # How long ``gh`` may run for one command (PAW-028, GitHub user connection:
+    # ``gh auth status``, ``gh repo create``). ``repository_clone_hosts`` is also
+    # the host list ``gh`` is asked about; there is no separate setting for it.
+    repository_gh_timeout_seconds: float = Field(default=30.0, gt=0, le=7_200)
 
     # Per-user git over SSH (Issue #105, Decision 0029, approved). Unused unless a
     # deployment constructs ``SshGitRunner`` in place of ``SubprocessGitRunner``;
