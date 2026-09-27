@@ -19,6 +19,17 @@ from paw_backend.security import normalize_origin
 
 _DRIVER = "postgresql+psycopg"
 _HOST = re.compile(r"\[[0-9a-f:.]+\]|[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?")
+_RP_ID = re.compile(
+    r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*"
+)
+
+
+def _is_ip(value: str) -> bool:
+    try:
+        ip_address(value)
+    except ValueError:
+        return False
+    return True
 
 
 class Settings(BaseSettings):
@@ -117,6 +128,18 @@ class Settings(BaseSettings):
     repository_min_linux_uid: int = Field(default=1000, ge=1, le=4_294_967_295)
     repository_git_timeout_seconds: float = Field(default=30.0, gt=0, le=7_200)
     repository_clone_timeout_seconds: float = Field(default=900.0, gt=0, le=7_200)
+    # How long ``gh`` may run for one command (PAW-028, GitHub user connection:
+    # ``gh auth status``, ``gh repo create``). ``repository_clone_hosts`` is also
+    # the host list ``gh`` is asked about; there is no separate setting for it.
+    repository_gh_timeout_seconds: float = Field(default=30.0, gt=0, le=7_200)
+
+    # Per-user git over SSH (Issue #105, Decision 0029, approved). Unused unless a
+    # deployment constructs ``SshGitRunner`` in place of ``SubprocessGitRunner``;
+    # ``SshGitRunnerPolicy.from_settings`` validates the values strictly.
+    repository_ssh_host: str = Field(default="127.0.0.1")
+    repository_ssh_port: int = Field(default=22, ge=1, le=65_535)
+    repository_ssh_connect_timeout_seconds: int = Field(default=10, ge=1, le=300)
+    repository_ssh_known_hosts_path: str = Field(default="/etc/paw/ssh_known_hosts")
 
     # Login, sessions and passwords (PAW-022; the values the requirements do not
     # fix are decided in Decision 0015 (Approved, provisional) and are changed
@@ -163,6 +186,20 @@ class Settings(BaseSettings):
     )
     redeem_decay_seconds: int = Field(default=900, ge=60, le=86_400)
 
+    # Passkeys (PAW-023; Decision 0025). All or nothing: ``passkey_rp_id`` (the
+    # WebAuthn Relying Party ID: a registrable domain of the public host name, or
+    # ``localhost``) and ``passkey_origins`` (the exact origins a browser may run
+    # the ceremony from: ``https://host[:port]``, or ``http://localhost[:port]``)
+    # are set together. Unset, the Passkey feature is OFF: nobody can register a
+    # Passkey, so a Passkey requirement cannot be enforced either (an account
+    # would otherwise be stuck in an enrolment it cannot finish); the session
+    # response says ``passkey.available: false`` and the server logs a warning.
+    passkey_rp_id: str | None = None
+    passkey_rp_name: str = "Personal AI Workspace"
+    passkey_origins: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    # How long a registration / authentication challenge may be answered.
+    passkey_challenge_ttl_seconds: int = Field(default=300, ge=30, le=900)
+
     log_level: str = "info"
 
     @field_validator(
@@ -173,6 +210,7 @@ class Settings(BaseSettings):
         "operator_database_url",
         "app_database_role",
         "operator_database_role",
+        "passkey_rp_id",
         mode="before",
     )
     @classmethod
@@ -207,6 +245,7 @@ class Settings(BaseSettings):
     @field_validator(
         "allowed_hosts",
         "allowed_origins",
+        "passkey_origins",
         "repository_existing_roots",
         "repository_clone_hosts",
         "login_backoff_seconds",
@@ -251,6 +290,51 @@ class Settings(BaseSettings):
             )
         return [origin for origin in origins if origin is not None]
 
+    @field_validator("passkey_rp_id")
+    @classmethod
+    def _valid_passkey_rp_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        rp_id = value.strip().lower()
+        if not _RP_ID.fullmatch(rp_id) or len(rp_id) > 253 or _is_ip(rp_id):
+            raise ValueError(
+                "passkey_rp_id must be a domain name (no scheme, port, path or "
+                "IP address)"
+            )
+        return rp_id
+
+    @field_validator("passkey_rp_name")
+    @classmethod
+    def _valid_passkey_rp_name(cls, value: str) -> str:
+        name = value.strip()
+        if not 1 <= len(name) <= 64 or not name.isprintable():
+            raise ValueError("passkey_rp_name must be 1 to 64 printable characters")
+        return name
+
+    @field_validator("passkey_origins")
+    @classmethod
+    def _valid_passkey_origins(cls, value: list[str]) -> list[str]:
+        origins: list[str] = []
+        for origin in value:
+            normalized = normalize_origin(origin)
+            if normalized is None:
+                raise ValueError(
+                    "passkey_origins entries must look like https://host[:port]"
+                )
+            scheme, _, authority = normalized.partition("://")
+            host = authority.rpartition(":")[0] if ":" in authority else authority
+            # A browser runs WebAuthn only in a secure context: https, or the
+            # ``localhost`` development exception.
+            if scheme != "https" and host != "localhost":
+                raise ValueError(
+                    "passkey_origins must be https (http is allowed for localhost)"
+                )
+            if normalized not in origins:
+                origins.append(normalized)
+        if len(origins) > 8:
+            raise ValueError("passkey_origins lists too many origins (at most 8)")
+        return origins
+
     @field_validator("scratch_purge_interval_seconds")
     @classmethod
     def _purge_interval_is_off_or_at_least_a_minute(cls, value: int) -> int:
@@ -279,6 +363,25 @@ class Settings(BaseSettings):
             raise ValueError(
                 "session_remember_days must not be below session_idle_days"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _passkey_settings_are_consistent(self) -> Self:
+        if (self.passkey_rp_id is None) != (not self.passkey_origins):
+            raise ValueError("passkey_rp_id and passkey_origins must be set together")
+        if self.passkey_rp_id is not None:
+            for origin in self.passkey_origins:
+                authority = origin.partition("://")[2]
+                host = authority.rpartition(":")[0] if ":" in authority else authority
+                # The RP ID must be the origin's host or a registrable suffix of it
+                # (WebAuthn); anything else can never complete a ceremony.
+                if host != self.passkey_rp_id and not host.endswith(
+                    "." + self.passkey_rp_id
+                ):
+                    raise ValueError(
+                        "every passkey_origins host must be passkey_rp_id or a "
+                        "sub-domain of it"
+                    )
         return self
 
     @model_validator(mode="after")

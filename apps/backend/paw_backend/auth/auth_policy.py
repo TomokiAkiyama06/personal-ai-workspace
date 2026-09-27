@@ -19,18 +19,18 @@ migration seeds the requirements' values.
   within the policy's window (REQUIREMENTS.md: the Owner's sensitive operations).
   A password step-up is refused (``StepUpMethodInsufficientError``): whoever holds
   the password can obtain one, so accepting it would let a stolen password relax
-  the policy. **Until PAW-023 provides Passkeys this operation is therefore
-  unavailable in production**; the path is proved with a passkey step-up that the
-  tests write. The window is judged by the database's clock after the row lock is
-  held.
+  the policy. PAW-023 provides the Passkey step-up (``/auth/passkeys/authenticate``),
+  so this works end to end wherever Passkeys are configured (``PAW_PASSKEY_RP_ID``);
+  elsewhere it stays unavailable (fail closed). The window is judged by the
+  database's clock after the row lock is held (``stepup.py``).
 * **History.** Every change writes ``auth_policy_changes`` (who, when, each field
   before and after) and an audit event, in the same transaction.
 * **Effect.** The policy applies to NEW sign-ins and new sessions. Changing it
   never touches an existing session (tightening does not silently sign anyone
   out); a client learns the current requirement from the session response.
-* **No lock-out.** Nothing in this issue enforces a Passkey, so the Owner can
-  always sign in with the password whatever is set. PAW-023 must keep that true:
-  "required" and not enrolled is an enrollment-only state, never a dead end, and
+* **No lock-out.** PAW-023 enforces the requirement (Decision 0025) but never
+  makes a dead end: "required" and not enrolled is an enrolment-only session (the
+  password sign-in works and the session may register a Passkey), and
   ``owner-recover`` stays.
 """
 
@@ -51,6 +51,7 @@ from paw_backend.auth.errors import (
 )
 from paw_backend.auth.models import AuthMethod, PasskeyRequirement
 from paw_backend.auth.state import AuthPolicy
+from paw_backend.auth.stepup import require_passkey_step_up_in
 from paw_backend.authz.roles import SystemRole
 from paw_backend.authz.subjects import Principal
 from paw_backend.db import Database
@@ -185,47 +186,28 @@ class AuthPolicyService:
                 denial = AuthReason.VERSION_CONFLICT
                 raise PolicyVersionConflictError
             # The step-up is judged now, under the row lock, by the later of the
-            # service clock and the database's: one that is older than the current
-            # window is no step-up. Its METHOD is read with it (see below).
-            method = (
-                await session.execute(
-                    text(
-                        """
-                        WITH clock AS (SELECT greatest(CAST(:now AS timestamptz),
-                                                       clock_timestamp()) AS ts)
-                        SELECT s.stepup_method FROM clock, auth_sessions s
-                         WHERE s.id = :id AND s.user_id = :user_id
-                           AND s.revoked_at IS NULL
-                           AND s.idle_expires_at > clock.ts
-                           AND s.absolute_expires_at > clock.ts
-                           AND s.stepup_at IS NOT NULL
-                           AND s.stepup_at + :window * interval '1 minute'
-                               > clock.ts
-                        """
-                    ),
-                    {
-                        "now": self._audit.now(),
-                        "id": session_id,
-                        "user_id": actor.user_id,
-                        "window": current.stepup_window_minutes,
-                    },
+            # service clock and the database's (``stepup.require_passkey_step_up_in``:
+            # it locks the session row, then reads the clock). A step-up older than
+            # the current window is no step-up, and a PASSWORD step-up is refused
+            # even though the session has a fresh one: whoever holds the Owner's
+            # password can obtain that (``POST /auth/step-up``), so accepting it would
+            # let a stolen password relax the policy. The method is only ever
+            # written by the verifier of that method (``AuthService`` refuses a
+            # verifier registered under another method's key).
+            try:
+                await require_passkey_step_up_in(
+                    session,
+                    session_id=session_id,
+                    user_id=actor.user_id,
+                    window_minutes=current.stepup_window_minutes,
+                    now=self._audit.now(),
                 )
-            ).scalar_one_or_none()
-            if method is None:
-                denial = AuthReason.STEP_UP_REQUIRED
-                raise StepUpRequiredError
-            # REQUIREMENTS.md: the Owner's sensitive operations need a PASSKEY
-            # step-up. A password step-up is refused here even though the session
-            # has a fresh one: whoever holds the Owner's password can obtain that
-            # (``POST /auth/step-up``), so accepting it would let a stolen password
-            # relax the policy. Until PAW-023 registers a passkey verifier no
-            # session can hold a passkey step-up, so this operation is unavailable
-            # in production (fail closed). The method is only ever written by the
-            # verifier of that method (``AuthService`` refuses a verifier
-            # registered under another method's key).
-            if method != POLICY_CHANGE_STEP_UP_METHOD.value:
+            except StepUpMethodInsufficientError:
                 denial = AuthReason.STEP_UP_METHOD_INSUFFICIENT
-                raise StepUpMethodInsufficientError
+                raise
+            except StepUpRequiredError:
+                denial = AuthReason.STEP_UP_REQUIRED
+                raise
             if all(getattr(current, field) == value for field, value in new.items()):
                 return current
             now = self._audit.now()

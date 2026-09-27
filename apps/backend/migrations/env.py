@@ -11,12 +11,14 @@ from sqlalchemy.ext.asyncio import create_async_engine
 # Import every module that defines ORM models here, so that autogenerate sees
 # them.
 from paw_backend.auth import models as auth_models  # noqa: F401
+from paw_backend.auth.passkeys import models as passkey_models  # noqa: F401
 from paw_backend.authz import models as authz_models  # noqa: F401
 from paw_backend.config import Settings
 from paw_backend.connections import models as connection_models  # noqa: F401
 from paw_backend.db import Base
 from paw_backend.identity import models as identity_models  # noqa: F401
 from paw_backend.memory import models as memory_models  # noqa: F401
+from paw_backend.memory.journal import models as journal_models  # noqa: F401
 from paw_backend.memory.shared import models as shared_memory_models  # noqa: F401
 from paw_backend.projects import models as project_models  # noqa: F401
 from paw_backend.repositories import models as repository_models  # noqa: F401

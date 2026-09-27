@@ -84,6 +84,8 @@ def get_principal_provider(connection: HTTPConnection) -> PrincipalProvider:
 def require_capability(
     capability: Capability,
     resource: Resource | ResourceResolver | None = None,
+    *,
+    allow_restricted: bool = False,
 ) -> Callable[..., Awaitable[Principal]]:
     """Dependency that lets a request through only if the backend allows it.
 
@@ -107,16 +109,29 @@ def require_capability(
     (``forbidden``) when the user may not do this, 503 when an action that
     must be audited cannot be. The bodies are fixed and never say which rule
     denied the request.
+
+    ``allow_restricted`` (PAW-023): a session that the Passkey policy restricts
+    (it must still register / use a Passkey) is refused by the provider on every
+    route, with 403 ``passkey_required``. The few routes that exist to get a
+    session out of that state (its own description, sign-out, the Passkey
+    ceremonies) pass ``allow_restricted=True``; the provider is asked for the
+    principal of a restricted session through ``get_principal_allowing_restricted``
+    if it has one (a provider without the notion has no restricted sessions).
     """
     if not isinstance(capability, Capability):
         raise TypeError("require_capability needs a Capability member")
+    if not isinstance(allow_restricted, bool):
+        raise TypeError("allow_restricted must be a bool")
 
     async def dependency(
         connection: HTTPConnection,
         authorizer: Annotated[Authorizer, Depends(get_authorizer)],
         provider: Annotated[PrincipalProvider, Depends(get_principal_provider)],
     ) -> Principal:
-        principal = await provider.get_principal(connection)
+        getter = provider.get_principal
+        if allow_restricted:
+            getter = getattr(provider, "get_principal_allowing_restricted", getter)
+        principal = await getter(connection)
         target: Resource | None = None
         # Nobody is always UNAUTHENTICATED whatever the resource is, so an
         # anonymous request must not make the resolver load state from storage.
@@ -143,6 +158,7 @@ def require_capability(
 
     # Lets tests (and reviewers) find every guarded route.
     dependency.paw_capability = capability  # type: ignore[attr-defined]
+    dependency.paw_allow_restricted = allow_restricted  # type: ignore[attr-defined]
     return dependency
 
 

@@ -56,6 +56,18 @@ class AdminTestCase(PostgresAuthTestCase):
     def principal(self, user) -> Principal:
         return Principal(user.id, SystemRole(user.role))
 
+    async def open_session(self, user, password, *, step_up=True) -> uuid.UUID:
+        """A signed-in session of ``user``, with a fresh Passkey step-up by default.
+
+        Unlocking an account is a sensitive operation (PAW-023): it needs a Passkey
+        step-up of the actor's own session. The step-up is written by the fixture
+        here (the ceremony itself is tested in ``test_passkey_*``).
+        """
+        logged = await self.auth.login(user.login_name, password, context())
+        if step_up:
+            await self.fake_passkey_step_up(logged.session.record.id)
+        return logged.session.record.id
+
     async def lock(self, name, password="wrong wrong wrong", times=5):
         for _ in range(times):
             with self.assertRaises(InvalidCredentialsError):
@@ -72,10 +84,11 @@ class AdminTestCase(PostgresAuthTestCase):
 @requires_postgres
 class UnlockTest(AdminTestCase):
     async def test_an_admin_can_unlock_a_user(self):
+        session_id = await self.open_session(self.admin, "admin passphrase")
         await self.lock("alice")
         self.assertTrue(await self.is_locked("alice", PASSWORD))
         await self.auth.unlock_account(
-            self.principal(self.admin), self.alice.id, context()
+            self.principal(self.admin), self.alice.id, context(), session_id=session_id
         )
         self.assertFalse(await self.is_locked("alice", PASSWORD))
         summary = await self.audit_summary()
@@ -87,23 +100,28 @@ class UnlockTest(AdminTestCase):
         )
 
     async def test_the_owner_can_unlock_anyone_an_admin_included(self):
+        session_id = await self.open_session(self.owner, "owner passphrase")
         await self.lock("admin-one")
         await self.lock("boss")
         for target in (self.admin, self.owner):
             await self.auth.unlock_account(
-                self.principal(self.owner), target.id, context()
+                self.principal(self.owner), target.id, context(), session_id=session_id
             )
         self.assertFalse(await self.is_locked("admin-one", "admin passphrase"))
         self.assertFalse(await self.is_locked("boss", "owner passphrase"))
 
     async def test_an_admin_cannot_unlock_an_admin_or_the_owner(self):
+        session_id = await self.open_session(self.admin, "admin passphrase")
         await self.lock("admin-two")
         await self.lock("boss")
         for target in (self.other_admin, self.owner, self.admin):
             with self.subTest(target=target.login_name):
                 with self.assertRaises(AuthPermissionError):
                     await self.auth.unlock_account(
-                        self.principal(self.admin), target.id, context()
+                        self.principal(self.admin),
+                        target.id,
+                        context(),
+                        session_id=session_id,
                     )
         self.assertTrue(await self.is_locked("admin-two", "admin passphrase"))
         self.assertTrue(await self.is_locked("boss", "owner passphrase"))
@@ -116,7 +134,10 @@ class UnlockTest(AdminTestCase):
         for target in (self.alice, self.admin):
             with self.assertRaises(AuthPermissionError):
                 await self.auth.unlock_account(
-                    self.principal(self.alice), target.id, context()
+                    self.principal(self.alice),
+                    target.id,
+                    context(),
+                    session_id=uuid.uuid4(),
                 )
         self.assertTrue(await self.is_locked("alice", PASSWORD))
         self.assertEqual(
@@ -126,14 +147,19 @@ class UnlockTest(AdminTestCase):
     async def test_an_unknown_account_or_one_that_is_closed_is_not_found(self):
         gone = await self.make_user("gone-user", status="deleted")
         pending = await self.make_user("pending-user", status="pending_deletion")
+        session_id = await self.open_session(self.admin, "admin passphrase")
         for target in (uuid.uuid4(), gone.id, pending.id):
             with self.subTest(target=str(target)[:8]):
                 with self.assertRaises(AccountNotFoundError):
                     await self.auth.unlock_account(
-                        self.principal(self.admin), target, context()
+                        self.principal(self.admin),
+                        target,
+                        context(),
+                        session_id=session_id,
                     )
 
     async def test_unlocking_clears_only_the_accounts_counter_not_the_sources(self):
+        session_id = await self.open_session(self.admin, "admin passphrase")
         for index in range(20):
             with self.assertRaises(InvalidCredentialsError):
                 await self.auth.login(
@@ -142,7 +168,7 @@ class UnlockTest(AdminTestCase):
         with self.assertRaises(ThrottledError):
             await self.auth.login("alice", PASSWORD, context(SOURCE))
         await self.auth.unlock_account(
-            self.principal(self.admin), self.alice.id, context()
+            self.principal(self.admin), self.alice.id, context(), session_id=session_id
         )
         # The account is free, but this source is still locked.
         with self.assertRaises(ThrottledError):
@@ -162,7 +188,13 @@ class UnlockTest(AdminTestCase):
         ):
             with self.subTest(args=repr(args)[:40]):
                 with self.assertRaises(InvalidAuthInputError):
-                    await self.auth.unlock_account(*args)
+                    await self.auth.unlock_account(*args, session_id=uuid.uuid4())
+        for bad in (None, str(uuid.uuid4()), 5, b"x"):
+            with self.subTest(session_id=repr(bad)[:20]):
+                with self.assertRaises(InvalidAuthInputError):
+                    await self.auth.unlock_account(
+                        admin, self.alice.id, context(), session_id=bad
+                    )
         self.assertEqual(await self.audit_rows(), [])
 
 

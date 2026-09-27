@@ -9,6 +9,11 @@ from fastapi import FastAPI
 
 from paw_backend.auth.audit import AuthAudit
 from paw_backend.auth.auth_policy import AuthPolicyService
+from paw_backend.auth.models import AuthMethod
+from paw_backend.auth.passkeys.approvals import PasskeyApprovalStepUp
+from paw_backend.auth.passkeys.config import PasskeyConfig
+from paw_backend.auth.passkeys.service import PasskeyService, PasskeyStepUpVerifier
+from paw_backend.auth.passkeys.store import PasskeyRegistry
 from paw_backend.auth.passwords import PasswordHasher
 from paw_backend.auth.principals import (
     DatabasePrincipalDirectory,
@@ -39,11 +44,25 @@ class AuthServices:
     hasher: PasswordHasher
     audit_sink: AuditSink
     samesite: str
+    passkeys: PasskeyService
+    # The Tool Broker's strong-approval ``StepUpVerifier``, answered by the Passkey
+    # Step-up: pass it as ``ApprovalService(step_up=...)``. Not installed anywhere by
+    # itself: ``ApprovalService`` keeps its fail-closed default until a deployment
+    # (the approval endpoint) opts in.
+    approval_step_up: PasskeyApprovalStepUp
 
     async def start(self) -> None:
         """Make the dummy hash now, so that the first unknown login is not slower."""
         with contextlib.suppress(Exception):
             await self.hasher.warm()
+        if not self.passkeys.available:
+            # Loud, once: the requirement is not enforced without this.
+            logger.warning(
+                "Passkeys are not configured (PAW_PASSKEY_RP_ID, PAW_PASSKEY_ORIGINS): "
+                "the Owner / Admin Passkey requirement is NOT enforced and Passkey "
+                "step-up is unavailable, so the sensitive operations that need it "
+                "(policy change, unlocking an account) are refused."
+            )
 
     def close(self) -> None:
         self.hasher.close()
@@ -76,6 +95,21 @@ def build_auth(
         timeout_seconds=timeout,
     )
     policy = AuthPolicyService(database, audit, timeout_seconds=timeout)
+    registry = PasskeyRegistry(
+        database,
+        PasskeyConfig.from_settings(settings),
+        clock=clock,
+        timeout_seconds=timeout,
+    )
+    verifiers = (
+        {
+            AuthMethod.PASSKEY: PasskeyStepUpVerifier(
+                database, registry, timeout_seconds=timeout
+            )
+        }
+        if registry.available
+        else {}
+    )
     redeemer = TokenRedeemer(
         database,
         sink,
@@ -91,6 +125,10 @@ def build_auth(
         audit=audit,
         policy=policy,
         redeemer=redeemer,
+        passkeys=registry,
+        step_up_verifiers=verifiers,
+        # Owner Recovery ends every Passkey with the token's transaction.
+        credential_invalidators=(registry.revoke_all_in,),
         timeout_seconds=timeout,
     )
     return AuthServices(
@@ -103,6 +141,18 @@ def build_auth(
         hasher=hasher,
         audit_sink=sink,
         samesite=settings.session_cookie_samesite,
+        passkeys=PasskeyService(
+            database,
+            registry,
+            sessions,
+            throttle,
+            audit,
+            policy,
+            timeout_seconds=timeout,
+        ),
+        approval_step_up=PasskeyApprovalStepUp(
+            database, clock=clock, timeout_seconds=timeout
+        ),
     )
 
 

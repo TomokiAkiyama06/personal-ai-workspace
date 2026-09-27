@@ -4,13 +4,14 @@ Personal AI Workspace の Core Backend です。
 [PAW-020](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/17) で、後続の Issue が載る最小の Application Skeleton を実装しました。
 Login・Session・Password の Policy と、Owner の Token を受け取る Endpoint は [PAW-022](#login--session--password-policy) で実装しました（Passkey の登録・強制と Step-up の Passkey は PAW-023）。
 RBAC と Audit（PAW-025）、Task の Lifecycle と永続化（[PAW-032](#agent-task-lifecycle)、HTTP の Endpoint はまだありません）、Task Queue・Budget・Loop 検知（[PAW-033](#task-queue--budget--loop-検知)）、Tool Broker と Capability Policy（[PAW-031](#tool-broker--capability-policy)、HTTP の Endpoint はまだありません）、Memory の PostgreSQL Schema（[PAW-040](#memory--conversation-schema)）、
-最小の `users` Table と Owner の初期設定・復旧のコマンド（[PAW-021](#owner-の初期設定と復旧)）を実装済みです。Memory の保存・整理の処理は PAW-041 以降です。Memory の検索（Hybrid Retrieval。[PAW-043](#hybrid-retrieval)、HTTP の Endpoint はまだありません）は実装済みです。
+最小の `users` Table と Owner の初期設定・復旧のコマンド（[PAW-021](#owner-の初期設定と復旧)）を実装済みです。Memory の Journal と背景の整理は [PAW-041](#immediate-journal--background-consolidation) で実装済みです。Memory の検索（Hybrid Retrieval。[PAW-043](#hybrid-retrieval)、HTTP の Endpoint はまだありません）も実装済みで、Conflict の整理は PAW-042 以降です。
 Shared Memory の管理（Owner / Admin の作成・編集・削除・復元、Candidate の承認、Agent の自動昇格の拒否、System Policy の優先。[PAW-046](#shared-memory-administration)、HTTP の Endpoint はまだありません）も実装済みです。
 Research の一時保存（[PAW-050](#research-scratch-store)、24 時間 TTL、期限切れを消す Janitor つき、HTTP の Endpoint はまだありません）と、Research Provider の Adapter Interface（[PAW-051](#research-provider-adapter)、実際の Provider（Direct Web、Docs、GitHub、OpenCode）はまだありません）と、外部の検索へ送る Query の最小化と送信の Audit（[PAW-053](#research-privacy-filter)。Audit は [#87](#audit-の永続化issue-87) で `audit_events` に永続化済み。方式は Decision 0023（Approved、2026-09-26）で決めています）も実装済みです。
 Claim と Source の対応・回答や Task からの追跡（[PAW-052](#evidence--claim-provenance)、HTTP の Endpoint はまだありません）も実装済みです。
 Project の作成・招待制の Membership・Lifecycle（Active / Archived / Pending deletion / Deleted）は [PAW-026](#project-crud--membership--lifecycle) で実装済みです（Service のみ。HTTP の Endpoint と Session はまだありません）。
 Workspace 共有の Codex / Claude Connection（Credential は不透明な Handle だけ）、User 別 Quota、User と Task への利用量の帰属は [PAW-030](#shared-codex--claude-connection) で実装済みです（Service のみ。実 Adapter と HTTP の Endpoint はまだありません。Quota の意味・期間・実行中の Task の扱いは [Decision 0016](../../docs/decisions/0016-shared-connection-adapter-policy.md)（Approved、2026-09-26）に従います）。
-Project への Repository の登録（GitHub から clone、Ubuntu 上の既存 Repository、新規作成）と、User ごとに分離した Checkout は [PAW-027](#repository-registration--per-user-checkout) で実装済みです（Service のみ。GitHub の認証は PAW-028）。
+Project への Repository の登録（GitHub から clone、Ubuntu 上の既存 Repository、新規作成）と、User ごとに分離した Checkout は [PAW-027](#repository-registration--per-user-checkout) で実装済みです（Service のみ）。
+Linux User ごとの GitHub 接続状態（`gh auth status`）の認識と、GitHub への新規作成（`create_github`）を対象 User 自身の Identity で実行する経路は [PAW-028](#github-user-connectiongh-auth) で実装済みです（Service のみ。Migration・新しい Capability はありません）。
 
 [Architecture](../../docs/ARCHITECTURE.md) に基づき、最終的に以下の機能を Backend 側で扱います。
 
@@ -45,7 +46,7 @@ Python 側の Package（`pgvector-python`）は使わず、`paw_backend/memory/v
 apps/backend/
 ├─ pyproject.toml          # 依存（完全一致で固定）と Ruff 設定
 ├─ alembic.ini             # Alembic 設定（DB URL は持たない）
-├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0022 は Password / Session / Login Throttle / 認証 Policy、0026 は Project、0027 は Repository 登録・Remote・Checkout、0030 は Shared Connection・Quota・Usage、0031 は Tool Approval、0033 は Queue / Budget / Loop、0040 は Memory Schema、0043 は `memory_versions` の全文検索の Index、0046 は Shared Memory Candidate、0050 は Research Scratch、0052 は Evidence / Claim Provenance、0071 は Memory の Status / Stale 状態の変更履歴、0083 は `tasks (project_id, state)` の Index、0087 は外部送信の Audit の `audit_events.details`）
+├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0022 は Password / Session / Login Throttle / 認証 Policy、0023 は Passkey / Passkey の Challenge / Session の Gate、0026 は Project、0027 は Repository 登録・Remote・Checkout、0030 は Shared Connection・Quota・Usage、0031 は Tool Approval、0033 は Queue / Budget / Loop、0040 は Memory Schema、0041 は Memory Journal / Consolidation Queue、0043 は `memory_versions` の全文検索の Index、0046 は Shared Memory Candidate、0050 は Research Scratch、0052 は Evidence / Claim Provenance、0071 は Memory の Status / Stale 状態の変更履歴、0083 は `tasks (project_id, state)` の Index、0087 は外部送信の Audit の `audit_events.details`）
 ├─ paw_backend/
 │  ├─ app.py               # create_app(settings)
 │  ├─ config.py            # PAW_ 環境変数から読む Settings
@@ -56,12 +57,14 @@ apps/backend/
 │  ├─ middleware.py        # Request ID、Host 検証、Security Header
 │  ├─ security.py          # Host / Origin の判定
 │  ├─ authz/               # Role・Capability・認可の判定と Audit Event（PAW-025）
-│  ├─ auth/                # Login、Session、Password（Argon2id）、Backoff、Step-up の差し込み口、認証 Policy、CSRF の Origin 検査（PAW-022）
+│  ├─ auth/                # Login、Session、Password（Argon2id）、Backoff、Step-up、認証 Policy、CSRF の Origin 検査（PAW-022）。`stepup.py` は重要操作の Passkey Step-up の判定（PAW-023）
+│  │  └─ passkeys/         # Passkey（WebAuthn）: Ceremony の検証、Challenge、登録・認証・失効、Passkey の Step-up の Verifier、Tool Broker の強い承認の Step-up（PAW-023）
 │  ├─ identity/            # 最小の users、One-time Token。`redeemer.py` は Web 側、`operator.py`（Owner の作成・Token の発行）は cli だけが使う（PAW-021）
 │  ├─ cli/                 # server-local の管理コマンド `python -m paw_backend.cli`（PAW-021）
 │  ├─ tasks/               # Agent Task の状態遷移と永続化（PAW-032）。`project_gate.py` は Project の状態 Gate の Protocol（Issue #83）
 │  │  └─ queueing/         # Task Queue、Budget、Loop 検知、Escalation の判断（PAW-033）
 │  ├─ memory/              # Memory / Conversation の Model、ACL 条件、vector 型、Pin / Importance / Status / Stale 変更の Actor（PAW-040、#90）、全文検索の式 `fulltext.py`（PAW-043）
+│  │  ├─ journal/          # Immediate Journal と Background Consolidation: Journal、Queue、Consolidator、Worker の契約（PAW-041）
 │  │  ├─ shared/           # Shared Memory の管理: Service、Candidate、Rule 関数、Policy の優先（PAW-046）
 │  │  └─ retrieval/        # Hybrid Retrieval: 権限の解決、SQL Prefilter、Keyword + Vector、Rerank、重複・矛盾（PAW-043）
 │  ├─ projects/            # Project、Membership（招待制）、Lifecycle（PAW-026）、管理者向けの全 Project 一覧（Issue #84）。`task_gate.py` は Task Lane に渡す Project の状態 Gate（Issue #83）、`task_stop.py` は Delete 開始時の Task 停止
@@ -74,7 +77,7 @@ apps/backend/
 │  ├─ tools/               # Tool Broker、Capability Policy、Approval（PAW-031）
 │  └─ api/
 │     ├─ deps.py           # FastAPI Dependency
-│     └─ v1/               # /api/v1 の Router（health、events、auth）
+│     └─ v1/               # /api/v1 の Router（health、events、auth、passkeys）
 └─ tests/                  # unittest
 ```
 
@@ -142,12 +145,17 @@ Database には pgvector が必要です（CI は `pgvector/pgvector:pg18` を�
 | `PAW_LOGIN_DECAY_SECONDS` | `86400` | 試行がなければ Counter を忘れるまでの秒 |
 | `PAW_REDEEM_SOURCE_FREE_ATTEMPTS` / `PAW_REDEEM_GLOBAL_FREE_ATTEMPTS` | `5` / `30` | Token の受け取りで、接続元ごとと全体の、Lock が始まる試行の番号 |
 | `PAW_REDEEM_BACKOFF_SECONDS` / `PAW_REDEEM_DECAY_SECONDS` | `60,300,900,3600` / `900` | 同、Lock の長さと数え直しの秒 |
+| `PAW_PASSKEY_RP_ID` / `PAW_PASSKEY_ORIGINS` | なし | WebAuthn の Relying Party ID（Domain）と、Browser が Ceremony を実行してよい Origin の完全一致（Comma 区切り、最大 8）。**両方か、どちらもなしか**。なしのとき Passkey の機能は切れ、要求は強制されない。[Passkey / Step-up](#passkey--step-up) |
+| `PAW_PASSKEY_RP_NAME` / `PAW_PASSKEY_CHALLENGE_TTL_SECONDS` | `Personal AI Workspace` / `300` | Authenticator に見せる名前と、Challenge に答えられる秒（30〜900） |
 | `PAW_SCRATCH_PURGE_INTERVAL_SECONDS` | `3600` | 期限切れの Research Scratch Item を消す Janitor の間隔（秒）。`0` で Janitor を止める（期限切れの行が DB に残り続ける）。それ以外は 60〜86400。DB が未設定のときも起動しない。[Janitor](#janitor期限切れの削除) |
 | `PAW_REPOSITORY_WORKSPACE_SUBDIR` | `workspaces` | Backend が作る Checkout の置き場所（`<home>/<この名前>/<project>/<repo>`）。1 つの安全な名前（[Repository 登録](#repository-registration--per-user-checkout)） |
 | `PAW_REPOSITORY_EXISTING_ROOTS` | `{home}` | 既存 Repository を登録してよい Root（Comma 区切り、8 つまで）。各 Root は絶対 Path で `{home}`（先頭だけ）か `{user}` を含む（全員で共有する Directory は拒否） |
 | `PAW_REPOSITORY_CLONE_HOSTS` | `github.com` | Clone してよい Host（Comma 区切り、8 つまで。小文字の DNS 名。IP Address は不可） |
 | `PAW_REPOSITORY_MIN_LINUX_UID` | `1000` | Checkout の持ち主になれる Linux Account の最小の uid（`root` などの System Account を拒否する）。**Account を引くときに実際に適用される唯一の値**（`RepositoryService.from_policy` が同じ Policy から `LoginNameAccountDirectory` を組み立てる） |
 | `PAW_REPOSITORY_GIT_TIMEOUT_SECONDS` / `PAW_REPOSITORY_CLONE_TIMEOUT_SECONDS` | `30` / `900` | git の Command / Clone の Timeout（秒）。超えると Process Group ごと止める。途中の Clone の予約は Clone の Timeout の 2 倍で古いとみなす |
+| `PAW_REPOSITORY_SSH_HOST` / `PAW_REPOSITORY_SSH_PORT` | `127.0.0.1` / `22` | `SshGitRunner`（Issue #105、Decision 0029、承認済み）が接続する宛先。本番の呼び出し経路にはまだ配線していない（`SshGitRunnerPolicy.from_settings` が使う） |
+| `PAW_REPOSITORY_SSH_CONNECT_TIMEOUT_SECONDS` | `10` | `ssh` の Handshake（接続・認証）だけの Timeout（秒）。呼び出し全体の Timeout は `PAW_REPOSITORY_GIT_TIMEOUT_SECONDS` / `_CLONE_TIMEOUT_SECONDS` と同じ値を使う |
+| `PAW_REPOSITORY_SSH_KNOWN_HOSTS_PATH` | `/etc/paw/ssh_known_hosts` | 固定した Host Key の File（Trust On First Use にしない）。配備側が用意する |
 | `PAW_EVENT_HEARTBEAT_SECONDS` | `15` | `system.heartbeat` の間隔 |
 | `PAW_EVENT_QUEUE_SIZE` | `100` | 接続ごとの Event Queue。溢れた場合は古い Event を捨てる |
 | `PAW_EVENT_MAX_SUBSCRIBERS` | `100` | 同時に接続できる SSE / WebSocket の数。超えた接続は SSE が 503、WebSocket が Close Code 1013 |
@@ -182,6 +190,7 @@ Endpoint は `/api/v1` 以下です。OpenAPI Schema は `/api/v1/openapi.json` 
 | `GET /api/v1/events/stream` | Server-Sent Events |
 | `WebSocket /api/v1/events/ws` | WebSocket |
 | `/api/v1/auth/*` | Login、Session、Password、Step-up、Owner の Token、認証 Policy（12 個の Endpoint）。[Login / Session / Password Policy](#login--session--password-policy) |
+| `/api/v1/auth/passkeys/*` | Passkey の登録・認証（Step-up）・一覧・失効（6 個の Endpoint）。[Passkey / Step-up](#passkey--step-up) |
 
 Readiness は 200 または 503 で、Body の形は同じです。
 
@@ -237,6 +246,7 @@ Session は PAW-022 で実装済みです。この 2 つの Endpoint は、シ�
 ## Database と Migration
 
 Engine は最初に使うときに作られ、その時点でも接続はしません。
+Engine（Pool の Engine と `run_abortable` の Engine）は `hide_parameters=True` で作ります。SQLAlchemy のエラーの文言に Bind した値（Message、Secret など）を載せないためです（`tests/test_database.py`、`tests/test_database_run_abortable.py`）。PostgreSQL 自身のエラー（`DETAIL` の行の引用など）は隠れないので、利用者の本文を書く Service は、エラーを自分の型に変えて元のエラーを切り離します（Memory Journal は `JournalDatabaseError`）。
 そのため PostgreSQL が停止していても Process は起動し、Liveness に応答します。
 Readiness は Pool を使わず、専用の接続で `SELECT 1` を実行し、`PAW_DATABASE_TIMEOUT_SECONDS` で必ず応答します。
 `/api/v1/health/ready` は到達できる誰でも呼べるため、開く接続数を制限しています。
@@ -776,18 +786,39 @@ Application 起動時に一度、接続 User の権限を確認し、**`WARNING`
 
 **`downgrade` は Table ごと監査履歴を破棄します。** 開発・Test 用で、本番では実行しないでください。
 
+#### 保存期間・Partition・退避（Issue #86、Migration `0086`）
+
+Issue [#86](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/86) と [Decision 0027](../../docs/decisions/0027-audit-retention-and-partitioning.md)（2026-09-27 に Human が承認）が、
+`audit_events` の保存期間・Partition・退避の方針を決める。**定期的に呼び出す仕組み（cron・systemd timer・Admin Capability）は別 Issue で用意するまで無いため、下の仕組みはコードとして持つだけで、まだ実運用では動かない。**
+
+- `audit_events` を `recorded_at`（Database の時計。Trigger が強制するので単調に増える）で**月ごとの Range Partition** にする。
+  Migration `0086` は、既存の Table を `audit_events_p_legacy`（Migration 適用時までの全行、`FOR VALUES FROM (MINVALUE)`）に改名し、その場所に新しい Partition 化された `audit_events` を作る
+  （`ATTACH PARTITION` は Metadata だけの操作で、行の再書き込みは起きない）。PK が `(id)` から `(id, recorded_at)` に変わる（PostgreSQL の要求）以外、列・CHECK 制約は変わらない。
+- 退避先は、同じ形のもう一つの Partition 親 `audit_events_archive`。「退避」は `DETACH` / `ATTACH`（行のコピーなし）で、`PAW_APP_DATABASE_ROLE` には SELECT だけを与える（INSERT は与えない）。
+- `paw_backend/authz/retention/`（`rules.py` が純粋関数、`service.py` の `AuditRetentionService` が唯一 SQL を実行する Store。PAW-046 の Lifecycle / PAW-053 の Privacy Filter と同じ構成）が、
+  `ensure_partitions`（先の月の Partition を用意する）・`archive_due_partitions`・`purge_due_partitions`（既定で無効。明示的に設定したときだけ）を提供する。
+  退避・削除の操作自体も、既存の `audit_events` に新しい `action`（`audit.retention.partition_created` / `partition_archived` / `partition_purged`）として記録する（列や CHECK 制約は増やさない。Partition 名は `reason` 列に入る）。
+- **実行スケジューラはない**（Issue の指示どおり）。`AuditRetentionService.run_maintenance()` を、cron・systemd timer・将来の Admin Capability のいずれかから呼ぶ想定。
+- `AuditRetentionService` は `PAW_MIGRATION_DATABASE_URL`（Table の Owner）が要る。Partition の作成・退避・削除はいずれも DDL で、`PAW_APP_DATABASE_ROLE` では実行できない。
+- 追記専用の Trigger は親に 1 つ定義すれば新しい Partition にも自動で複製されるが、**文レベルの TRUNCATE 拒否 Trigger は複製されない**（PostgreSQL の仕様）。
+  `AuditRetentionService` が新しい Partition を作る・受け取るたびに、明示的にこの Trigger を作る。
+- `archive_due_partitions` / `purge_due_partitions` は、Policy や呼び出し側の Clock が何であれ、**実際の壁時計が指す暦月の Partition には決して触れない**
+  （`recorded_at` は常に Database の実時計であり、この操作自身の Audit 行もそこへ書かれるため）。
+- 詳細・未決点・リスクは [Decision 0027](../../docs/decisions/0027-audit-retention-and-partitioning.md) と、`tests/test_retention_rules.py` / `tests/test_retention_postgres.py` を参照。
+- **Migration の鎖。** Migration `0086` の `down_revision` は `0071` です（鎖は `0001 → 0025 → 0032 → 0040 → 0021 → 0033 → 0031 → 0050 → 0046 → 0052 → 0026 → 0087 → 0022 → 0083 → 0043 → 0030 → 0027 → 0071 → 0086`）。`0071`（このPRが分岐した時点の後にmainへ入った#109）と同様、`audit_events` に触れる直前の Revision（`0025`、`0087`）より後であれば足りるため、mainの最新に合わせて並べています。
+
 #### 残っているリスクと既知の制限
 
 - 許可した読み取り（`DENIED_ONLY`。人間の `project.read`、`shared_memory.read`）は記録しません。誰が何を読んだかは Audit から分かりません（Agent の読み取りは記録します）。
 - 認証済みの User の拒否は、1 回ごとに 1 行を書きます。この拒否の回数制限はありません（Login の Backoff と Token の Rate Limit は別で、[Login / Session / Password Policy](#login--session--password-policy)）。未認証の拒否は Log だけです。
-- 保存期間・Partition・古い行の退避は未実装です（Table は削除できないため、行数は増え続けます）。
+- 保存期間・Partition・古い行の退避は、上の「保存期間・Partition・退避（Issue #86）」のとおり Decision 0027 は承認済みですが、定期的に呼び出す仕組みが別 Issue で用意されるまで、実運用はまだしません。
 - Repository の ACL の保存と解決は呼び出す側（PAW-027 など）の責任です。この Backend は、渡された `RepoAcl` を判定するだけです。
   Override が Project の Role を広げてよいか、User 単位の許可リストを持つかは、要件が定めておらず、Decision 0004 で Human が「狭めるだけ・権限の集合」で承認しました（2026-09-25）。
 - `Scope.SELF` の Capability（`chat.use`、`memory.use` など）は `Project` の状態と Member 資格を見ません
   （たとえば Pending deletion の Project の Chat、Member から外された後の Memory）。Project との Member 関係は PAW-026 の `project_members` にありますが、これらの Capability の判定はまだ Member 資格を見ません（[Project CRUD / Membership / Lifecycle](#project-crud--membership--lifecycle)）。
 - `tests/test_authz_routes.py` が調べるのは `/api/v1` の Route だけで、FastAPI の内部（`effective_route_contexts`）に依存します。Method の一覧を持たない Route（`Mount` など）は Method `*` の 1 操作として報告し、見逃しません。
 - `create_app` は PAW-022 の `SessionPrincipalProvider` と `DatabasePrincipalDirectory` を組み込みます（Session Cookie が無い Request は 401）。
-- 重要操作の Step-up 認証の項目は Audit にありません（PAW-023 で追加します）。
+- 重要操作の Step-up 認証の Audit は、PAW-023 が追加しました（`auth.passkey.authenticate`、`auth.passkey.register`、`auth.passkey.revoke`。[Passkey / Step-up](#passkey--step-up)）。
 - Migration の鎖は `0001 → 0025 → 0032 → 0040 → 0021` です（`0021` の Revision ID は Issue 番号で、鎖の順序ではありません。統合時に並びを確認します）。
 
 ## Owner の初期設定と復旧
@@ -816,7 +847,7 @@ python -m paw_backend.cli owner-setup --login-name tomoki
 - **stdout に Token だけが 1 行**出ます（`pawst1.<Token ID>.<Secret>`）。stderr に owner_id、login name、実行した Process の uid（`operator uid=... sudo_uid=...`）、有効期限が出ます。Token は**この 1 回しか表示されません**（保存しないため再表示できません）。
   端末のスクロールバックの記録、`tee`、CI の Log、`script` に Token を残さないでください。`TOKEN=$(...)` のように取り込めますが、Shell の履歴やプロセス一覧に出さないでください（Token は引数ではなく出力です）。
 - Token を Web の Setup 画面から `POST /api/v1/auth/token/redeem` へ渡します（PAW-022 で実装。Web Client の画面はまだありません）。**有効期間は既定で 30 分**（`PAW_SETUP_TOKEN_TTL_SECONDS`。上限 4 時間）、使えるのは 1 回だけです。
-- Owner は Passkey が必須です（`users.passkey_required = true`）。Passkey の登録の強制は PAW-023 です。
+- Owner は Passkey が必須です（`users.passkey_required = true`）。Passkey の要求の強制は PAW-023 が実装しました（Session の Gate。強制は `auth_policy` が決め、この列は見ません。[Passkey / Step-up](#passkey--step-up)）。
 
 ```bash
 # Owner が全 Passkey / 端末を失った、または Token を失ったとき
@@ -925,7 +956,7 @@ redemption = await redeemer.redeem(token_from_request, apply=set_credentials)
 - `apply` の間は Owner の `users` 行と Token の行を Lock（`SELECT ... FOR UPDATE`）したままなので、時間のかかる処理（外部への通信など）は入れないでください。他の `redeem` や `owner-recover` は、その間待たされます（Test 済み）。
 - `redeem` は User を作らず、`users.status` を変えず、Session も作りません。`invited` から `active` への移行、Password、Session は PAW-022、Passkey は PAW-023 の責務です。
 - **Recovery の Contract**（要件: 全 Passkey / 端末を失った Owner の復旧、Owner Recovery では既存 Session を全失効）: `purpose` が `recovery` の `apply` は、同じ Transaction で **既存の全 Session を失効させ、現在の Password を無効にして新しい Password を設定させ（または再設定を必須にし）、既存の Passkey をすべて失効させて（または再登録を必須にして）**ください。
-  復旧が必要な状況は、認証情報が盗まれた可能性を含むためです。Passkey が必須（`passkey_required`）の Owner に、Passkey が 1 つも登録されていないまま通常の操作を許してはいけません（PAW-023）。この Contract は Code では強制できないため、PAW-022 / PAW-023 の受け入れ条件です。
+  復旧が必要な状況は、認証情報が盗まれた可能性を含むためです。Passkey が必須（`passkey_required`）の Owner に、Passkey が 1 つも登録されていないまま通常の操作を許してはいけません。この Contract は Code では強制できないため、PAW-022 / PAW-023 の受け入れ条件でした。PAW-023 は、Token の受け取りと同じ Transaction で全 Passkey を失効し（`credential_invalidators`）、次の Sign-in を登録だけができる Session（Gate）にして、これを満たしました。
 - Web の Endpoint は誰でも呼べる**公開 Route**になるため、`tests/test_authz_routes.py` の `PUBLIC_ROUTES` に理由付きで載せ、**Client（接続元）単位と全体の Rate Limit** を付けてください。
   上限は Token ごとにしか効かず、未知の Token ID への試行は数える相手がありません。
 - **Passkey の必須化**: `users.passkey_required` は Owner と Admin では DB の CHECK 制約で `false` にできず、`Redemption.passkey_required` も `true` です。
@@ -951,14 +982,14 @@ Login name は小文字の ASCII 英数字と `.` `_` `-` だけ（3〜64 文字
 - **Rate Limit は Token ごとの試行の上限だけです。** 接続元ごと・全体の Limit は PAW-022 の Endpoint（`POST /api/v1/auth/token/redeem`）が実装しました（[Login と Backoff](#login-と-backoff)）。
 - 実行した OS User は Token の行に uid として残ります。`owner-recover` は実効 uid が 0 でなければ拒否しますが、`SUDO_UID` は手掛かりにすぎません。この確認は、DB の認証情報を持つ Process が誤って実行することを防ぐもので、境界そのものではありません（境界は認証情報のファイルの権限）。同じ Process の中の Code は `os.geteuid` の差し替えも DB への直接の書き込みもできるため、Service の確認は Library として呼ばれる場合の**誤用と Identity の偽装の防止**であり、悪意ある Code への防御ではありません。root の Process や、User Namespace の中の uid 0 は通ります。Container で root 以外として実行する構成では Recovery できません。
 - 発行・使用の成功時は Transaction と Audit のために接続を 2 本同時に使います（Pool の既定は 5）。失敗の経路は同時に持ちません。
-- Token の Web 側での Password・Session の扱い（Recovery の Contract）は PAW-022 が実装しました。Passkey は PAW-023 で、この Issue の範囲は Token の発行・使用・失効と Audit までです。
+- Token の Web 側での Password・Session の扱い（Recovery の Contract）は PAW-022 が実装しました。Passkey の失効は PAW-023 が実装しました。この Issue の範囲は Token の発行・使用・失効と Audit までです。
 
 ## Login / Session / Password Policy
 
 [PAW-022](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/19) で実装しました（`paw_backend/auth/`、Migration `0022`、`api/v1/auth.py`）。
 **数値と選択（Argon2id の Parameter、Backoff の段階、Session の寿命、Cookie の属性、Rate Limit、Password の規則、Audit に残す項目）は [Decision 0015](../../docs/decisions/0015-login-session-password-policy.md)（Approved。2026-09-26 に Human が承認）に、各点の判断と根拠をまとめています。**
 値は設定（`PAW_` の環境変数）または定数で、承認で変わっても Schema は変わりません（Migration は不要）。
-Passkey の登録・認証・強制と Step-up の Passkey は PAW-023 です（この Issue は差し込み口だけを用意しました）。
+Passkey の登録・認証・強制と Step-up の Passkey は PAW-023 で実装しました（[Passkey / Step-up](#passkey--step-up)。この Issue は差し込み口だけを用意していました）。
 
 ### Endpoint
 
@@ -974,10 +1005,10 @@ Passkey の登録・認証・強制と Step-up の Passkey は PAW-023 です（
 | `DELETE /sessions/{id}` | `account.manage` | 自分の別の端末を Logout する（他人の Session、存在しない ID は 404） |
 | `POST /sessions/revoke-others` | `account.manage` | 他のすべての端末を Logout する |
 | `POST /password/change` | `account.manage` | 現在の Password で本人確認して変更する（`revoke_other_sessions` で他の端末を Logout） |
-| `POST /step-up` | `account.manage` | Password を再入力して Step-up する（Session ID を作り直す） |
-| `POST /users/{id}/unlock` | `admin.users.manage` | Login の Lock を解除する（Admin は User だけ、Admin と Owner は Owner だけ） |
+| `POST /step-up` | `account.manage` | **Password を**再入力して Step-up する（Session ID を作り直す。Passkey の Step-up は `/auth/passkeys/authenticate/*`） |
+| `POST /users/{id}/unlock` | `admin.users.manage` | Login の Lock を解除する（Admin は User だけ、Admin と Owner は Owner だけ）。**直近の Passkey の Step-up が要る**（PAW-023） |
 | `GET /policy` | `admin.auth_policy.view`（Admin、Owner） | Workspace の認証 Policy |
-| `PUT /policy` | `owner.auth_policy.manage`（**Owner だけ**） | Policy を変える（`expected_version` と直近の **Passkey の** Step-up が要る。PAW-023 まで本番では使えない） |
+| `PUT /policy` | `owner.auth_policy.manage`（**Owner だけ**） | Policy を変える（`expected_version` と直近の **Passkey の** Step-up が要る。Passkey を設定した環境で使える） |
 
 | 状態 | Code |
 | --- | --- |
@@ -1046,13 +1077,13 @@ Passkey の登録・認証・強制と Step-up の Passkey は PAW-023 です（
 
 ### Passkey Policy（Owner が変える設定）と Step-up
 
-- `auth_policy`（1 行、`version` つき）: Owner / Admin / User ごとの Passkey の要求（`required` / `optional`）、User へ Passkey を強く勧めるか、Step-up の有効時間（5〜240 分）。**既定は要件のまま**（Owner・Admin は required、User は optional で勧める、30 分）。Decision 0015 の 12 節（承認済み）が、要件の固定の方針を「Owner が変えられる設定の既定値」に読み替えます（Human の指示で、`REQUIREMENTS.md` の `[FIXED]`「Passkey Policy」の本文は変えず、その下に注記だけを追記しました。Human の回答 2026-09-25: Passkey の Step-up を必須にする。PAW-023 まで、この設定変更は本番では使えません）。
-- **変更は Owner だけ**（`owner.auth_policy.manage`。Agent に委任できず、Audit は REQUIRED）。**Owner の Session の直近の Passkey の Step-up**（Policy の有効時間の内。Row Lock の下で Database の時計）が要ります。**Password の Step-up は数えません**（403 `step_up_method_insufficient`。Password を盗んだ者が `POST /step-up` で得られる Step-up を受け付けると、Owner / Admin の Passkey の要求を緩められてしまうため。要件: Owner / Admin の重要操作は Passkey の Step-up）。**そのため、PAW-023 が Passkey の Verifier を登録するまで、`PUT /policy` は本番では使えません**（Owner が変えられる Policy は PAW-023 で端から端まで動きます。それまでは既定値、つまり要件どおりの Policy が効きます）。Test は、Passkey の Step-up を Test の Fixture が Session の行へ書いて、この経路を確かめます。Step-up の方法はその方法の Verifier だけが記録し、別の方法の鍵で登録した Verifier は拒否されます。`auth.step_up.satisfied` は「時間内に Step-up があった」だけを表すので、方法の強さは `method` で見ます。`expected_version` が現在と違えば 409 で、**同時の編集で更新が失われません**（別の接続で競わせる Test 済み）。同じ値の更新は Version を上げません。
+- `auth_policy`（1 行、`version` つき）: Owner / Admin / User ごとの Passkey の要求（`required` / `optional`）、User へ Passkey を強く勧めるか、Step-up の有効時間（5〜240 分）。**既定は要件のまま**（Owner・Admin は required、User は optional で勧める、30 分）。Decision 0015 の 12 節（承認済み）が、要件の固定の方針を「Owner が変えられる設定の既定値」に読み替えます（Human の指示で、`REQUIREMENTS.md` の `[FIXED]`「Passkey Policy」の本文は変えず、その下に注記だけを追記しました。Human の回答 2026-09-25: Passkey の Step-up を必須にする。PAW-023 まで、この設定変更は本番では使えません。この制限は PAW-023 で解消しました）。
+- **変更は Owner だけ**（`owner.auth_policy.manage`。Agent に委任できず、Audit は REQUIRED）。**Owner の Session の直近の Passkey の Step-up**（Policy の有効時間の内。Row Lock の下で Database の時計）が要ります。**Password の Step-up は数えません**（403 `step_up_method_insufficient`。Password を盗んだ者が `POST /step-up` で得られる Step-up を受け付けると、Owner / Admin の Passkey の要求を緩められてしまうため。要件: Owner / Admin の重要操作は Passkey の Step-up）。**そのため `PUT /policy` は、PAW-023 が入れた Passkey の Step-up（Passkey を設定した環境）で使えます**（Passkey が設定されていない間は既定値、つまり要件どおりの Policy が効きます）。PAW-022 の Test は Passkey の Step-up を Test の Fixture が Session の行へ書いて確かめ、PAW-023 の Test（`tests/test_passkey_http.py`）は実際の Passkey の Ceremony で端から端まで確かめます。Step-up の方法はその方法の Verifier だけが記録し、別の方法の鍵で登録した Verifier は拒否されます。`auth.step_up.satisfied` は「時間内に Step-up があった」だけを表すので、方法の強さは `method` で見ます。`expected_version` が現在と違えば 409 で、**同時の編集で更新が失われません**（別の接続で競わせる Test 済み）。同じ値の更新は Version を上げません。
 - 変更は `auth_policy_changes`（誰が・いつ・各項目の変更前後。追記専用）と Audit（`auth.policy.update`）に、同じ Transaction で残ります。
-- **効く範囲は新しい Sign-in と Session から**です。**既存の Session は失効も降格もしません**（厳しくしても黙って Logout されない。Test 済み）。`GET /session` の `auth.passkey` が、その人の要求（`requirement`）、登録の有無（`enrolled`。PAW-023 まで常に `false`）、`enrollment_required`（`required` で未登録）、`recommended`（User に勧める）を返します。
-- **この Issue は Passkey を強制しません**（PAW-023）。したがって、どの設定でも Owner は Password で Login できます。PAW-023 は「`required` で未登録」を登録だけができる状態にし、Password Login と `owner-recover` を残さなければなりません（行き止まりを作らない）。`users.passkey_required` 列は Owner / Admin では CHECK 制約で `false` にできないため、**Login の処理はこの列を見ず `auth_policy` を見ます**（列の整理は PAW-023）。
-- **PAW-023 の差し込み口（まとめ）**: (1) `AuthService(step_up_verifiers={AuthMethod.PASSKEY: ...})` に Passkey の `StepUpVerifier`（`method = AuthMethod.PASSKEY`。別の方法の鍵での登録は拒否される）を登録する。これで `PUT /policy` が使えるようになる。(2) `PasskeyEnrollment` を差し替える。(3) `AuthService(credential_invalidators=...)` に Passkey の失効を足す（Token の受け取りと同じ Transaction で走る）。(4) `auth_sessions.auth_method` と `stepup_method` の CHECK は `passkey` を許すので、Session の Table の変更は要らない。(5) Passkey は 1 User に複数あるため `password_credentials` へは足さず、別の Table にする。(6) 要求は `auth_policy` から `AuthPolicy.requirement_for(role)` で読む。
-- **Step-up の差し込み口**: `StepUpVerifier`（`method`、`verify`）と `StepUpEvidence`。Password の実装（`PasswordStepUpVerifier`）が入っています。`POST /step-up` は成功すると Session に時刻と方法を記録して ID を作り直し、`auth.step_up`（方法、時刻、期限、`satisfied`）に出ます。PAW-023 は Passkey の Verifier を `AuthService(step_up_verifiers=...)` に登録するだけでよく、`PasskeyEnrollment`（既定は誰も登録していない）も同様に差し替えます。
+- **効く範囲は新しい Sign-in と Session から**です。**既存の Session は失効も降格もしません**（厳しくしても黙って Logout されない。Test 済み）。`GET /session` の `auth.passkey` が、その人の要求（`requirement`）、登録の有無（`enrolled`。PAW-023 が `PasskeyRegistry` で答える）、`enrollment_required`（`required` で未登録）、`recommended`（User に勧める）を返します。
+- **Passkey の強制は PAW-023 が実装しました**（[Passkey / Step-up](#passkey--step-up)）。`required` の Role は、Password で Sign-in すると制限された Session を得ます（Passkey がなければ登録だけ、あれば認証だけ）。Password の Login と `owner-recover` は常に使え、行き止まりはありません。`users.passkey_required` 列は Owner / Admin では CHECK 制約で `false` にできませんが、**Sign-in の処理はこの列を見ず `auth_policy` を見ます**（列と CHECK はそのままにする。Decision 0025 の 9 節）。
+- **PAW-023 が差し込み口を埋めました**: (1) `AuthService(step_up_verifiers={AuthMethod.PASSKEY: PasskeyStepUpVerifier})`（Passkey を設定したときだけ。別の方法の鍵での登録は拒否される）。これで `PUT /policy` が端から端まで動きます。(2) `PasskeyEnrollment` は `PasskeyRegistry`（設定がなければ `NoPasskeys`）。(3) `credential_invalidators=(registry.revoke_all_in,)`（Token の受け取りと同じ Transaction で全 Passkey を失効する）。(4) Passkey は `password_credentials` ではなく別の Table `user_passkeys`。(5) 要求は `AuthPolicy.requirement_for(role)`。(6) `auth_sessions` に Gate の列を足した（0023）。
+- **Step-up の差し込み口**: `StepUpVerifier`（`method`、`verify`）と `StepUpEvidence`。Password の実装（`PasswordStepUpVerifier`）が入っています。`POST /step-up` は成功すると Session に時刻と方法を記録して ID を作り直し、`auth.step_up`（方法、時刻、期限、`satisfied`）に出ます。Passkey の Verifier（`PasskeyStepUpVerifier`）は、Passkey を設定したとき `AuthService` に登録されます。Passkey の Step-up は専用の Ceremony（`/auth/passkeys/authenticate/*`）で記録します。
 
 ### CSRF
 
@@ -1066,11 +1097,12 @@ Passkey の登録・認証・強制と Step-up の Passkey は PAW-023 です（
 | --- | --- |
 | `auth.login` | allow `authenticated` / deny `invalid_credentials`、`account_not_active`、`no_password`、`credentials_changed`（**存在する Account のときだけ**） |
 | `auth.lockout` | deny `backoff_started`（Lock を始めた失敗 1 件につき 1 行） |
-| `auth.unlock` | allow `unlocked` / deny `role_not_allowed` |
+| `auth.unlock` | allow `unlocked` / deny `role_not_allowed`、`step_up_required`、`step_up_method_insufficient` |
 | `auth.logout`、`auth.session.revoke`、`auth.session.revoke_others`、`auth.session.revoke_all` | Session の失効 |
 | `auth.password.change`、`auth.password.set`（`setup`、`recovery`） | Password の変更・設定 |
-| `auth.step_up` | allow `verified` / deny |
+| `auth.step_up` | allow `verified` / deny（Password の Step-up。Passkey は `auth.passkey.authenticate`） |
 | `auth.policy.update` | allow `updated` / deny `role_not_allowed`、`step_up_required`、`step_up_method_insufficient`、`version_conflict` |
+| `auth.passkey.*`（PAW-023） | 登録・認証・失効。[Passkey / Step-up](#passkey--step-up) |
 
 - Login の行は、Account の ID（`actor_id`、`actor_role`）と、接続元の Bucket を表す**不透明な UUID**（`resource_kind = login_source`。Bucket の Hash から作る仮名で、Address は保存しない）を持ちます。
 - **存在しない名前の失敗は DB へ書きません**（Log に固定の 1 行。誰でも作れる行になり、Audit の Table は削除できないため）。Lock 中に拒否された試行も書きません。
@@ -1102,8 +1134,8 @@ Migration `0022`（`down_revision` は `0087`。鎖は `0001 → 0025 → 0032 �
 
 ### 制限と未確認の点
 
-- **`PUT /api/v1/auth/policy`（Owner が変えられる Passkey Policy の変更）は、PAW-023 が Passkey の Step-up を入れるまで本番では使えません**（Passkey の Step-up を要求し、Password の Step-up は数えないため。上の「Passkey Policy」）。Owner / Admin の他の重要操作（Admin による Lock の解除など）にも Step-up は要求していません（要件の「重要操作」の範囲と Passkey の Step-up は PAW-023 と各操作の Issue で決めます）。Tool Broker の強い承認は別の `StepUpVerifier`（`tools/approvals.py`、Fail Closed）を持ち、この Session の `stepup_*` は読みません。PAW-023 は両方に Passkey の Step-up を結び付けます。
-- **Passkey は登録も強制もしません**（PAW-023）。Owner / Admin の Passkey が必須という要件は、PAW-023 が入るまで Login では強制されず、Password だけで Login できます。
+- **`PUT /api/v1/auth/policy`（Owner が変えられる Passkey Policy の変更）は、Passkey を設定した環境（`PAW_PASSKEY_RP_ID` と `PAW_PASSKEY_ORIGINS`）で使えます**。設定がなければ Passkey の Step-up を作れないので、Fail Closed のまま使えません（起動時に警告する）。Account の Lock の解除にも Passkey の Step-up を要求します（PAW-023）。Tool Broker の強い承認は別の `StepUpVerifier`（`tools/approvals.py`、Fail Closed）を持ち、`AuthServices.approval_step_up`（`PasskeyApprovalStepUp`）を渡した Deployment だけが Passkey の Step-up に結び付きます（User 単位の限界は [Passkey / Step-up](#passkey--step-up)）。
+- Owner / Admin の Passkey が必須という要件は、PAW-023 が **Passkey を設定した環境で**強制します（制限された Session）。設定がなければ強制されず、Password だけで Login できます。
 - 複数端末の追加（QR / Link の Pairing、Owner / Admin の既存端末での承認）、Admin による強制 Reset の Token の発行、Owner / Admin の異常な失敗の信頼済み端末への警告は含みません（Decision 0015 の 14 節）。
 - `/api/v1/events` の 2 つの Endpoint は、System Event しか流さない間は認証なしのままです（公開一覧に理由つきで載っています）。非公開の Event を足す Issue が `require_capability` を付けます。
 - 存在しない名前と存在する名前の**時間は完全には揃っていません**（上記）。時間の差は Argon2 に比べて小さく、Rate Limit で回数が抑えられています。
@@ -1118,13 +1150,158 @@ Migration `0022`（`down_revision` は `0087`。鎖は `0001 → 0025 → 0032 �
 
 `tests/test_auth_*.py`。Unit（`passwords`、`tokens`、`settings`、`argument_validation`、`csrf`、`provider`）、実 PostgreSQL の Service（`sessions`、`throttle`、`service_login`、`service_account`、`service_redeem`、`service_admin`。別の接続で競わせる Test を含む）、HTTP（`http`、`http_admin`。Cookie の属性、Role の一覧、CSRF、Rate Limit）、Migration（`migration`。Model との差分なし、上げ下げ、Trigger・関数）、Query Plan（`plans`。実際に送る文が Index を使えること。部分 Index を含む）、権限（`grants`。同じ Service の Test を非 Superuser の Web の Role で実行し、権限を列まで固定し、してはいけない操作を拒否）。時間は注入した時計で動かします（待たない）。
 
+## Passkey / Step-up
+
+[PAW-023](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/20) で実装しました（`paw_backend/auth/passkeys/`、`auth/stepup.py`、Migration `0023`、`api/v1/passkeys.py`）。
+**Library の選定、Attestation・User Verification・Resident Key・署名 Counter の方針、「Passkey 必須」の強制の意味、重要操作の一覧、失効の規則、`users.passkey_required` 列の扱いは、[Decision 0025](../../docs/decisions/0025-passkey-webauthn-policy.md)（Approved。2026-09-26 に Human が承認）にまとめています。** 各点の判断と根拠、承認された内容は、Decision の本文と末尾の「承認時の決定」を参照してください。
+Decision 0015 の 12・13 節と Issue #20 の追加条件（Owner が設定で変える Policy に従った強制、「必須で未登録」を行き止まりにしない、Passkey の `StepUpVerifier` の登録、他の重要操作と Tool Broker への結び付け、`users.passkey_required` 列の整理）を、すべてこの Issue で実装しています。
+
+**実際の Browser と Authenticator では確かめていません。** Test は、W3C の仕様から書いた Software Authenticator（`tests/passkey_support.py`。`cryptography` で実際に署名し、CBOR と Authenticator Data を自前で組み立てる。検証する Library と Code を共有しない）が作る WebAuthn の Payload で、登録・認証の全体を通しています。
+
+### 有効にする
+
+Passkey は、次の 2 つの設定をしたときだけ有効です（両方か、どちらもなしか。片方だけは起動時に拒否）。
+
+```text
+PAW_PASSKEY_RP_ID=paw.example.org
+PAW_PASSKEY_ORIGINS=https://paw.example.org
+```
+
+- `PAW_PASSKEY_RP_ID` は WebAuthn の Relying Party ID（公開 Host 名の Domain。IP は不可）。`PAW_PASSKEY_ORIGINS` は、Browser が Ceremony を実行してよい Origin の完全一致（Scheme・Host・Port。最大 8、`https`。`localhost` だけ `http` も可。Host は RP ID か、その Sub-domain）です。Browser が署名した `clientDataJSON` の Origin がこの一覧のどれかと**文字列として**一致しなければ拒否します。`PAW_ALLOWED_ORIGINS`（CSRF と WebSocket）とは別の設定です。
+- **設定がなければ Passkey の機能は切れ、Passkey の要求は強制されません**（Passkey を登録できない環境で要求を強制すると、Owner が登録だけができる状態から出られず、行き止まりになるため）。起動時に警告を出し、`GET /auth/session` の `auth.passkey.available` が `false` になります。この間は、Passkey の Step-up が要る操作（Policy の変更、Account の Lock の解除）は使えません（Fail Closed）。
+- `PAW_PASSKEY_RP_NAME`（既定 `Personal AI Workspace`）、`PAW_PASSKEY_CHALLENGE_TTL_SECONDS`（既定 300、30〜900）。
+
+### Endpoint
+
+`/api/v1/auth/passkeys` 以下（すべて `require_capability`。CSRF の Origin の検査と Body の 16 KiB の上限は他の認証 Route と同じ）。登録の Path が `enroll` なのは、`tests/test_owner_no_web_path.py` が「Owner の Setup・Recovery・登録の Route を持たない」ことを Path の語（`register` など）で確かめるためです（Python の Method 名は `register_begin` などで、WebAuthn の用語のまま）。`options` は `navigator.credentials.create()` / `get()` にそのまま渡せる JSON、Client の答えは `PublicKeyCredential.toJSON()` です。
+
+| Endpoint | 認可 | 制限された Session | 内容 |
+| --- | --- | --- | --- |
+| `POST /enroll/begin` | `account.manage` | 可 | 登録の Options を返し、Challenge を保存する |
+| `POST /enroll/finish` | `account.manage` | 可 | 答え（`credential`、任意の `name`）を検証して Passkey を登録する。Gate が開いたときは Session ID が変わり、新しい Cookie を設定する |
+| `POST /authenticate/begin` | `account.manage` | 可 | 認証の Options（自分の有効な Passkey だけ）を返し、Challenge を保存する |
+| `POST /authenticate/finish` | `account.manage` | 可 | 答えを検証する。**Passkey の Step-up として記録し、Session ID を作り直す**。制限された Session は Gate が開く |
+| `GET /` | `account.read` | 可 | 自分の Passkey の一覧（ID、名前、作成・最終利用の日時、同期される Passkey か）。Credential の ID や公開鍵は返さない |
+| `DELETE /{id}` | `account.manage` | 不可 | 自分の Passkey を失効する（Step-up が要る） |
+
+| 状態 | Code |
+| --- | --- |
+| 制限された Session が、許されていない Route を呼んだ | 403 `passkey_required` |
+| Step-up がない / Passkey の Step-up でない | 403 `step_up_required` / 403 `step_up_method_insufficient` |
+| Challenge がない・期限切れ・使用済み | 400 `challenge_invalid`（Begin からやり直す） |
+| 答えが検証に通らない（登録） | 400 `passkey_rejected`。認証の答えは、他の証明と同じ 403 `invalid_credentials` |
+| 認証する Passkey がない | 409 `no_passkey` |
+| その Credential は登録済み / 上限（10 個） / 必須の最後の Passkey | 409 `passkey_exists` / `passkey_limit` / `last_passkey` |
+| 他人の・存在しない・失効済みの Passkey | 404 `not_found`（区別しない） |
+| Passkey が設定されていない | 503 `passkey_unavailable` |
+| 誤りが続く | 429 `rate_limited` と `Retry-After`（Password と同じ Backoff） |
+
+形が正しくない答え（未知の Field、型違い、正準でない Base64url、大きすぎる値、Extension が多すぎるなど）は 422 です（値は返しません）。`POST /auth/step-up` は Password だけを受け付けます（`method: passkey` は 422）。
+
+### 「Passkey 必須」を強制する: Session の Gate
+
+Owner が設定する Policy（`auth_policy`）が `required` の Role（既定は Owner と Admin）は、**Password で Sign-in すると制限された Session** を得ます（`auth_sessions.passkey_gate`）。
+
+| Gate | 条件 | Session ができること |
+| --- | --- | --- |
+| `open` | 要求が `optional`、Passkey が設定されていない、手順を終えた、または機能の前からある Session | 制限なし |
+| `enrollment_required` | `required` で有効な Passkey が 0 | Passkey の**登録だけ**。行き止まりではない（Password の Login と `owner-recover` は常に使える） |
+| `assertion_required` | `required` で Passkey が 1 つ以上 | Passkey の**認証だけ** |
+
+- 制限された Session は、**すべての Route で既定で 403 `passkey_required`**（`SessionPrincipalProvider.get_principal`。WebSocket は 1008）。次の 7 つだけが通ります: `GET /auth/session`、`POST /auth/logout`、`GET /auth/passkeys`、`enroll/begin`・`enroll/finish`、`authenticate/begin`・`authenticate/finish`（`require_capability(..., allow_restricted=True)`。`tests/test_passkey_http.py` が、その一覧が正確にこれであることと、他の Route がすべて拒否することを固定します）。Agent が User の名前で行う操作は Session を持たないので、この Gate の対象ではありません。
+- **Gate は Sign-in の Transaction の中で決めます**（Policy の要求と有効な Passkey の数を、User の行の `FOR SHARE` の下で読む。Passkey の登録と失効は `FOR UPDATE` で同じ行を Lock する）。`GET /auth/session` の `auth.passkey` が `gate`、`next`（`register` / `authenticate` / `null`）、`available` を返します。Sign-in の Audit の理由は、制限された Session のとき `authenticated_passkey_pending` / `authenticated_enrollment_only` です。
+- **手順を終える**: 登録の Finish は Gate を開いて Session ID を作り直し、その Session を登録した Passkey に結び付けます。**登録は Step-up として記録しません**（Password だけで登録した Credential は、まだ何も証明していないため）。認証の Finish は Gate を開き、Session ID を作り直し、Passkey の Step-up を記録し、認証した Passkey に結び付けます。`assertion_required` の Session で、その間に Passkey がすべて失効した場合は、`enrollment_required` として扱います（登録を許す）。
+- **既存の Session は影響を受けません**（Migration は既存の行を `open` にする。Owner が Policy を変えても、動いている Session は失効も降格もしない。0015）。
+- **`users.passkey_required` 列（0021）は、強制に使いません**（Decision 0025 の 9 節。強制は `auth_policy` だけが決める。列と CHECK はそのまま）。
+
+### Step-up と重要操作
+
+Owner・Admin の重要操作は、Session に**Passkey の Step-up**（Policy の有効時間内。Password の Step-up は数えない）を要求します。判定は 1 か所（`auth/stepup.py`）で、Session の行を `FOR SHARE` で Lock してから Database の時計で `stepup_at + 有効時間 > now` を見ます（Lock の待ちで期限切れの Step-up が通らず、判定の後に Session が失効することもありません）。
+
+| 操作 | 要求 |
+| --- | --- |
+| Policy の変更（`PUT /auth/policy`、Owner） | Passkey の Step-up（0015 で実装済み。**Passkey を設定した環境で端から端まで動く**。`tests/test_passkey_http.py` の Owner の一連の Test） |
+| Account の Lock の解除（`POST /auth/users/{id}/unlock`、Admin・Owner） | Passkey の Step-up。対象を調べる前に判定する（Step-up のない Session に、Account の存在を教えない） |
+| Passkey の追加 | すでに Passkey がある User: Passkey の Step-up。ない User: 直近の認証（Sign-in が有効時間内、または任意の Step-up） |
+| Passkey の失効 | 要求が `required` の Role: Passkey の Step-up。それ以外: 任意の Step-up |
+| Tool Broker の強い承認 | 下記 |
+
+- 要求が `optional` に変えられた Role の重要操作にも、Passkey の Step-up を要求します（設定で変えられるのは「要求」と「有効時間」で、Step-up の要否ではない。Passkey を持たない Admin は Lock を解除できない）。
+- **Tool Broker の強い承認**: `ApprovalService(step_up=services.approval_step_up)`（`PasskeyApprovalStepUp`）を渡すと、承認する User の**有効な Session のどれかに**、Policy の有効時間内の Passkey の Step-up があるときだけ `True` を返します（Password の Step-up、Gate が開いていない Session、`active` でない User は数えない。DB の失敗は例外で、`ApprovalService` が「Step-up なし」に倒す）。`ApprovalService` の既定は `FailClosedStepUp` のままで、Verifier を渡した Deployment だけが有効にします。**限界**: Step-up は User と時間に結び付き、承認そのもの・決める Session には結び付きません（`ApprovalService` が渡さないため）。承認の Endpoint（未実装）が入るときに、決める Session で Step-up する形にします。
+
+### 登録と認証の Ceremony
+
+- **Challenge**: 32 byte の乱数。`passkey_challenges` に **Session と用途（登録・認証）ごとに 1 行**（再度 Begin すると置き換わる）。**単回使用**（消費は `DELETE ... RETURNING`。答えが誤りでも消費する）、期限（既定 5 分）は**Database の時計で、行を Lock した後に**判定します。別の Session の答えは、Challenge を見つけられません（同じ User の別端末も）。
+- **検証**（`ceremony.py`。WebAuthn の Library `webauthn` 3.0.1 を import する唯一の Module）: **User Verification は必須**、**Attestation は `none` だけ**（`none` 以外、`attStmt` の未知の Member、3 つ以外の Member は拒否）、Origin は設定との完全一致、RP ID Hash、`crossOrigin` と `topOrigin` の拒否、Algorithm は EdDSA・ES256・RS256、User Handle の一致。Library の例外の文（Client の Origin と Challenge を含む）は返しも Log もしません。
+- **署名 Counter**: 保存した値より大きい、または両方が 0（Counter を持たない Authenticator）のとき受け付けます。判定と保存は 1 つの条件付き `UPDATE` で、同じ Assertion の同時の使用や再送が両方成功することはありません。満たさなければ拒否し（Audit は `sign_count_regression`、Log は固定の Warning）、**自動では失効しません**。
+- **Credential の確認**: Step-up を記録する Transaction が、Credential が今も有効かを `FOR SHARE` で確かめます。検証している間に失効した Passkey は、Step-up を作れません。失効の UPDATE は、その Transaction を待ちます。
+- **登録の上限は 1 User 10 個**。同じ Authenticator の Credential は `excludeCredentials` で重複させません。Credential の ID は全 User で一意です。
+- **試行の制限**: 登録と認証の Finish の失敗は、Password の誤りと同じ Account と接続元の Backoff に数えます。
+
+### 失効（Device の Revoke）
+
+`DELETE /auth/passkeys/{id}` は 1 つの Transaction で、User の行を `FOR UPDATE` で Lock し、次を行います。
+
+1. Passkey を失効する（行は残す。`revoked_reason = revoked_by_user`）。**要求が `required` の Role の最後の Passkey は失効できません**（409 `last_passkey`。全体を Rollback する）。
+2. **その Passkey が開けた Session を終える**（`revoked_reason = passkey_revoked`。呼んだ Session 自身が該当すれば、その Session も終わり、応答は `signed_out: true` で Cookie を消す）。
+3. **User のすべての Session の Passkey の Step-up を忘れる**（どの Credential でどの Step-up かは持たず、安全な側に倒す）。開いている Challenge も消す。
+4. Audit（`auth.passkey.revoke`）を同じ Transaction で書く。
+
+同時の失効（同じ Passkey、または 2 つの Passkey）は、User の行の Lock で 1 つずつになります（別の接続で競わせる Test 済み）。
+
+**Lock の順序**: Passkey の行を、Session の行より先に Lock します（Step-up は Credential を `FOR SHARE` で確かめてから Session を更新し、失効と Recovery は Session の行に触れる前に Passkey の行を Lock する。Recovery は Passkey の失効を Session の失効より先に行う）。順序が逆だと、同じ Session の Step-up と失効が互いを待つ Deadlock になります（Lock を保持して競わせる Test が、逆にすると失敗することを確かめています）。
+
+**Owner Recovery**（Decision 0005 の 7 節）: `AuthService(credential_invalidators=(registry.revoke_all_in,))` が、Token の消費と**同じ Transaction**で、全 Passkey を失効し（`revoked_reason = recovery`）、開いている Challenge を消します。どれか 1 つが失敗すれば全体を Rollback します。Recovery の後の Sign-in は `enrollment_required` の Session です。
+
+### Audit
+
+| `action` | 内容 |
+| --- | --- |
+| `auth.passkey.register` | allow `registered` / deny `challenge_invalid`、`verification_failed`、`already_registered`、`limit_reached`、`gate_not_allowed`、`step_up_required`、`step_up_method_insufficient` |
+| `auth.passkey.authenticate` | allow `verified` / deny `challenge_invalid`、`unknown_credential`、`verification_failed`、`sign_count_regression`、`invalid_credentials` |
+| `auth.passkey.revoke` | allow `revoked` / deny `step_up_required`、`step_up_method_insufficient`、`last_passkey`、`not_found`、`gate_not_allowed` |
+
+Credential の ID、公開鍵、Challenge、名前、Origin は入りません（ID と列挙値だけ）。変更は同じ Transaction、拒否は別の短い Transaction で Best Effort に書きます。制限された Session の 403 は書きません（Sign-in の行に理由が残る）。
+
+### Database と権限
+
+Migration `0023`（`down_revision` は `0088`。鎖は `... → 0087 → 0022 → 0083 → 0043 → 0030 → 0027 → 0071 → 0086 → 0088 → 0023`）は、`user_passkeys`（Credential の ID、公開鍵、署名 Counter、名前、Authenticator の種類、Backup の状態、作成・最終利用・失効の日時と理由）と `passkey_challenges` を作り、`auth_sessions` に `passkey_gate`（既存の行は `open`）と `passkey_id`（Session を開けた Passkey）を足し、`revoked_reason` に `passkey_revoked` を加えます。
+
+Web の Role（`PAW_APP_DATABASE_ROLE`）の権限は、実際に実行する文だけです（`tests/test_passkey_grants.py`）。
+
+| Table | 権限 |
+| --- | --- |
+| `user_passkeys` | SELECT、INSERT、`sign_count`・`last_used_at`・`backed_up`・`revoked_at`・`revoked_reason` の UPDATE。DELETE なし。`credential_id`・`public_key`・`user_id` は変えられない |
+| `passkey_challenges` | SELECT、INSERT、DELETE、`challenge`・`created_at`・`expires_at` の UPDATE |
+| `auth_sessions`（追加分） | `passkey_gate`・`passkey_id` の UPDATE。`auth_method` は変えられない |
+
+**守れないもの（Decision 0005 が Password で受け入れたものと同じ）**: Web の Role は Passkey の行と Gate を書けなければならないので、**Application が侵害されれば、自分の Passkey を登録し、Gate を開けられます**。
+
+`downgrade()` は 2 つの Table と 2 つの列を破棄します（**登録された Passkey がすべて失われる**。開発・Test 用）。`passkey_revoked` の Session は `admin` に付け替えます。
+
+### 制限と未確認の点
+
+- **実際の Browser、Authenticator（Touch ID、Windows Hello、Security Key）、Reverse Proxy、TLS を通した動作は確かめていません**（Software Authenticator と `TestClient`、実 PostgreSQL まで）。Counter・Flag・Attestation の匿名化・`transports` の実機の癖は未確認です。
+- 固定した Library（`webauthn` 3.0.1、`cryptography` 50.0.1）は、最新であることと、公開された脆弱性がないことを 2026-09-26 に PyPI と GitHub で確かめましたが、3.0.1 は固定の前日の公開です（Decision 0025）。
+- **Passkey を設定しなければ、要求は強制されません**（上）。
+- Owner が最初の Passkey を登録する前は、Password を盗んだ者が先に自分の Passkey を登録できます（最初の 1 つは Password の信頼に依存する）。
+- **Admin が全 Passkey を失う経路はありません**（Owner が Passkey を Reset する機能は別の Issue）。Owner は `owner-recover` で戻れます。
+- Attestation を検証しないので、同期される Passkey（`backup_eligible`）も使えます（記録はしている）。
+- Tool Broker の Step-up は User 単位です（上）。
+- Passkey だけの Sign-in、複数端末の追加（Pairing）、Passkey の名前の変更は含みません。
+- Commit が期限で中断された場合、登録や Step-up が反映されたかは分かりません（一覧で確かめる。Session ID を作り直す応答が届かなければ、Sign-in し直す）。
+
+### Test
+
+`tests/test_passkey_*.py`。Unit（`settings`、`types`、`ceremony`、`argument_validation`。全 Method × 引数 × 不正な値、DB に届かないことを確認）、実 PostgreSQL の Service（`registration`、`authenticate`、`gate`、`revoke`、`sensitive`。別の接続で競わせる Test、Lock を保持して待つことを確かめる Test を含む）、HTTP（`http`。Owner の一連の流れ、制限された Session の Route の一覧、Error の形、Cookie の配信、CSRF、Body の上限）、Migration（`migration`。Model との差分なし、上げ下げ、全制約の境界）、Query Plan（`plans`）、権限（`grants`。同じ Service と HTTP の Test を非 Superuser の Web の Role で実行し、権限を列まで固定し、してはいけない操作を拒否）。時間は注入した時計で動かします（待たない）。Software Authenticator は `tests/passkey_support.py` です。
+
 ## Tool Broker / Capability Policy
 
 [PAW-031](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/27) で実装しました（`paw_backend/tools/`、Migration `0031`）。
 Migration `0031` の `down_revision` は `0033` です（鎖は `0001 → 0025 → 0032 → 0040 → 0021 → 0033 → 0031`）。Application Role への権限は、共通の `grant_app_privileges`（PAW-025）で付与します。
 設計は [Tool 権限](../../docs/SECURITY_TOOL_PERMISSIONS.md) と [要件](../../REQUIREMENTS.md) の「Tool Broker / Capability Policy / Secret Isolation」「Tool approval boundary」に従います。
 **HTTP の Endpoint はありません**（承認の Endpoint は認証済みの Session が必要なため PAW-022 以降）。`create_app` にも組み込んでいません。呼び出すのは後続の Orchestrator（PAW-034）と API です。
-Tool の実装、Sandbox、Task Budget（PAW-033）、Step-up 認証（PAW-023）は含まず、それぞれ差し込み口（Protocol）だけを持ちます。
+Tool の実装、Sandbox、Task Budget（PAW-033）、Step-up 認証（PAW-023。Passkey の Step-up の Verifier は `paw_backend.auth.passkeys.approvals.PasskeyApprovalStepUp`）は含まず、それぞれ差し込み口（Protocol）だけを持ちます。
 
 Agent の Tool 呼び出しは `ToolBroker.request(call)` を通り、`ALLOW` / `NEEDS_APPROVAL` / `DENY` と固定の理由コードを返します。
 **Broker は何も実行しません。** 許可された呼び出しの実行は、注入する `ToolExecutor` を呼ぶ `ToolRunner.run` だけが行います（Broker に実行の入口はありません）。
@@ -1270,7 +1447,7 @@ Broker は、呼び出しがどの Repository に触れるかを **Backend が�
 | 別の呼び出し | 引数・Tool・Task・Agent・User・Level のどれかが違えば `approval_mismatch`（承認は消費されません） |
 | 別の Run | 同じ呼び出しでも、承認を求めた Run（`tool_approvals.task_attempt` / `task_retry_count`）と違う Run の Worker は使えません（`approval_superseded`。承認は消費されません）。下の「Task の終了と承認」の「Run への結びつけ」 |
 | 承認できる人 | Agent が働いている **User 本人だけ**（`ApprovalService.approve / reject`、引数は人間の `Principal`）。Agent 自身の ID は `self_approval`。他の人は Admin / Owner でも、存在を教えず `not_found`（Audit には `not_authorised`）。DB の CHECK 制約も、承認者が委任元 User であること、Agent が User と別であることを保証します |
-| `STRONG_APPROVAL` | 承認のとき `StepUpVerifier.verify(user_id, approval_id)` が**明示的な `True`** を返す必要があります（PAW-023 が実装）。Verifier がない、`False`、例外、Timeout、`True` 以外の答えは `step_up_required` で、承認は保留のままです。Store の `decide` も `step_up_verified` を受け取り、Step-up なしには強い承認を保存しません（`step_up_verified` の列と CHECK 制約。Store を直接呼ぶ側にも効きます） |
+| `STRONG_APPROVAL` | 承認のとき `StepUpVerifier.verify(user_id, approval_id)` が**明示的な `True`** を返す必要があります（PAW-023 が `PasskeyApprovalStepUp` を実装。渡さなければ既定は Fail Closed）。Verifier がない、`False`、例外、Timeout、`True` 以外の答えは `step_up_required` で、承認は保留のままです。Store の `decide` も `step_up_verified` を受け取り、Step-up なしには強い承認を保存しません（`step_up_verified` の列と CHECK 制約。Store を直接呼ぶ側にも効きます） |
 | 取り消し | `ApprovalService.revoke`。委任元 User と、Admin / Owner（権利を減らす方向だけなので代われる）。pending・承認済みで未使用の承認だけ。Task の終了での取り消しは、下の「Task の終了と承認」。使うときは `approval_revoked` |
 | 使うとき | 認可・Scope・Budget を**もう一度**判定します。承認は権限を広げません。拒否された使用は承認を消費しません |
 
@@ -1382,7 +1559,7 @@ Tool の実行を伴う記録（許可と実行後）は Fail-closed で、許�
 | --- | --- | --- |
 | `ToolExecutor.execute(invocation)` | 各 Tool の実装（別 Issue） | なし（`ToolRunner` に必須）。契約は下の「Executor の契約」 |
 | `BudgetProvider.check / charge` | PAW-033 | `FailClosedBudgetProvider`（予算なし = 予算が必要な Tool は拒否）。`check` は何も消費せず、同時の呼び出しは上限を少し超えうる。厳密な上限には PAW-033 が原子的な予約を追加する |
-| `StepUpVerifier.verify` | PAW-023 | `FailClosedStepUp`（Step-up の承認はできない） |
+| `StepUpVerifier.verify` | PAW-023（`PasskeyApprovalStepUp`） | `FailClosedStepUp`（Step-up の承認はできない） |
 | `TaskActivityProvider.check(task_id, run)` | Deployment（`PostgresTaskActivity(database)`） | `FailClosedTaskActivity`（Task は不明 = 承認を要する呼び出しは拒否） |
 | `PathResolver.resolve` | Deployment | `RealpathResolver`。`LexicalPathResolver` は Symlink のない環境の Test 用 |
 
@@ -1923,6 +2100,144 @@ Migration（上げ下げ、Model との差分、制約）、権限（非 Superus
 操作ごとの Audit の `action`（`..._audit_actions.py`。実 `audit_events` の行を読み、非 Superuser の Role でも実行）、
 変更の完了の記録（`..._completion.py`。成功は完了の行が続くこと、失敗・Lock の待ち切れ・更新の失敗・Commit の失敗は完了の行がなく変更もないこと、完了の行を書けなければ変更も戻ること。非 Superuser の Role でも実行）があります。
 
+## Immediate Journal / Background Consolidation
+
+[PAW-041](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/35)（Revision `0041`、`paw_backend/memory/journal/`）で実装しました。
+User Message を受けたら Raw Conversation と Pending Observation を**同じ Transaction で即時に保存**し（`MemoryJournal`）、
+Memory の整理は**背景の Queue**（`ConsolidationQueue`）から Worker（`Consolidator` と `MemoryWorker`）が行います。
+**HTTP の Endpoint も、Worker の Process もまだありません**（Chat の層が `MemoryJournal` を呼び、Worker の Process が `Consolidator.run_batch` を定期的に呼びます）。
+要件は [REQUIREMENTS.md](../../REQUIREMENTS.md) の「Immediate Journal / Background Consolidation」と [Memory Architecture](../../docs/MEMORY_ARCHITECTURE.md) の 18 節、
+要件が決めていない選択（Scope と State の扱い、優先度の割り当て、Queue の数値、保持、高リスクの領域）は
+[Decision 0018](../../docs/decisions/0018-memory-journal-consolidation-policy.md)（**Approved、2026-09-26 に Human が承認**。8 点すべて推奨どおり）です。
+数値と高リスクの語彙は、実測に基づかない**暫定値として承認**されています（下の「承認された判断」）。
+
+```text
+User Message
+   |  MemoryJournal.record_user_message        （1 Transaction。GPU も Model も使わない）
+   v
+messages（Raw）  +  memory_journal_entries（state = pending: Pending Observation）  +  memory_consolidation_queue（Job）
+   |
+   |  Assistant の応答 ......... 次の Turn は pending_observations を読む（未整理でも直前の指示を失わない）
+   v
+Consolidator.run_once / run_batch                       （背景。GPU が止まっていれば Job は待つ）
+   1. claim_next    ... Lease（claim_count が Fencing Token）
+   2. worker.extract(本文)  ... 検証は書き込みの前に出力全体を
+   3. 1 Transaction ... Lease の確認 -> Candidate の Version -> Entry を consolidated -> Job を completed
+```
+
+### Table
+
+| Table | 内容 |
+| --- | --- |
+| `memory_journal_entries` | User Message 1 件につき 1 行。会話・Message・Turn・`event_sequence`・Owner・Project / Repo・記録時刻（書き換えない）と、処理状態（`state`、`consolidated_at`、`outcome`）。`state = 'pending'` の行が Pending Observation。本文は複製せず `messages` を指す（複合 Foreign Key、`ON DELETE CASCADE`: Conversation を消すと Entry も Job も消える） |
+| `memory_consolidation_queue` | Job。優先度、Lease（`claim_count` が Fencing Token）、再試行（`attempts`、`deferrals`、`available_at`）、Dead Letter（`status = 'dead'`）。1 つの Entry に有効な Job は 1 つ（Partial Unique Index） |
+| `memory_consolidation_keys` | Worker の `key`（Owner ごと）が指す Memory と、その現在の Version を作った Entry の順序の印（古い Turn が新しい Memory を上書きしないための Guard）。Memory と一緒に消える |
+
+3 つとも PAW-040 の Memory の層に属し、Foreign Key は Memory の層の内側だけです（`tests/test_memory_schema.py` の許される辺に、この 3 本を足しました）。
+User / Project の ID は、他の Memory Table と同じく素の UUID です。
+
+### Journal（同期の半分）
+
+`MemoryJournal(database, authorizer)` の 4 つのメソッドです。すべての引数を最初に検証し（Authorizer にも Database にも触れる前）、次に `memory.use` を Authorizer に問い、最後に Database を使います。
+
+| メソッド | 動作 |
+| --- | --- |
+| `record_user_message(actor, conversation_id, content, *, turn_id=None, priority=NORMAL)` | **Raw の Message、Entry（`pending`）、Job を 1 Transaction で保存**する（どれかが失敗すれば全部戻る）。`JournalReceipt`（ID と `event_sequence`）を返す。人間の `Principal` だけ（Agent は `InvalidJournalInputError`） |
+| `append_message(actor, conversation_id, role, content, *, turn_id)` | Assistant / Tool / Agent / Task の Message を、同じ Sequence で保存する（Raw だけ。Observation も Job もない）。`role` に `user` は不可 |
+| `pending_observations(actor, conversation_id, *, limit=50)` | 整理が済んでいない Observation を返す（次の Turn が読む）。Dead Letter の Job の Observation も含む。**`limit` を超えて溜まっているときは、最新の `limit` 件を選び、古い順（`event_sequence` 順）に並べて返す**（長い GPU 停止のあとでも、直近の指示が外れない）。古い分は `pending` のままで、Queue が通常どおり整理する。Cursor はないので、全件が要る呼び出し側は `sync_status` の件数を見る |
+| `sync_status(actor, conversation_id)` | UI の 4 つの状態の件数: 整理中（`consolidating`）、Worker 待ち（`waiting_for_worker`。GPU に届かなかった）、再試行（`retrying`）、失敗（`failed`。Dead Letter）。全部 0 なら同期済み |
+
+- **Event Sequence。** Conversation の行を `FOR NO KEY UPDATE` で Lock し、その会話の Message の最大値 + 1 を割り当てます（0 から）。同じ会話への書き込みはこの Lock で 1 つずつになるので、番号は重複せず、欠番がなく、Commit の順に並びます。Conversation を削除中の書き込みは Lock を待ち、Commit 後に「見つからない」になります。`(conversation_id, event_sequence)` の Unique（`messages`）が最後の防波堤で、会話の Message は Journal を通してだけ追加する必要があります（自分で番号を選ぶ書き込みは衝突します）。
+- **優先度は呼び出し側が決めます**（HIGH: 明示的な Preference / Decision、NORMAL: 既定、LOW: 再処理）。Journal は本文を読んで判断しません。
+- **権限。** `memory.use`（`Scope.SELF`）だけを使います。**新しい Capability は追加していません**。自分の Conversation だけを扱え、他の User（Admin を含む）の Conversation は、存在しない Conversation と同じ `ConversationNotFoundError` です。`AgentActor` は、委任元の Grant に `memory.use` があれば `append_message`、`pending_observations`、`sync_status` を呼べます。
+- **Lock。** 書き込みの Transaction は `SET LOCAL lock_timeout`（`lock_timeout_ms`、既定 3000）で始まり、待ち切れなければ何も保存せず `JournalBusyError` です。それ以外の Database のエラー（制約違反、権限、接続の失敗など）は、何も保存せず `JournalDatabaseError` です。**SQLAlchemy / psycopg のエラーは渡しません**: その文言には Bind した値（Message の `content`。個人的な内容や Credential のことがある）が入り、PostgreSQL の `DETAIL` は失敗した行を引用するためです。`JournalDatabaseError` の文言は固定で、持つのは閉じた `sqlstate`（`23514` など）だけです。`__cause__` も `__context__` も元のエラーを指さない（`raise ... from None` だけでは `__context__` が残るため、Raise の後で外す）ので、Traceback・Log・`repr` のどこからも元のエラーに届きません（`paw_backend/memory/journal/sql.py`、`tests/test_journal_failures.py` の `DatabaseErrorPrivacyTest`。この Test は `hide_parameters` なしの Engine で、Journal の変換だけで漏れないことを確かめます）。
+
+### Queue（背景）
+
+`ConsolidationQueue(database, *, lease_seconds=300, max_attempts=5, backoff=Backoff(), lock_timeout_ms=3000)`。Task Queue（PAW-033、[Decision 0007](../../docs/decisions/0007-task-queue-budget-and-loop-policy.md)）と同じ作りで、Database が唯一の Source of Truth、時刻は Database の `clock_timestamp()` だけです（時刻を渡す口はありません。Test は Database 側の行を動かします）。
+
+- **優先度。** `priority_rank`（HIGH 0、NORMAL 1、LOW 2）、`enqueued_at`、`id` の順に Claim します。再試行した Job も元の位置に戻ります。Aging はなく、HIGH は実行中の Job を中断しません。
+- **Claim。** `FOR UPDATE SKIP LOCKED` で 1 件を選び、Lease を与えます。他の Claimer が Lock している行は待たずに飛ばします。`queued` で `available_at` を過ぎたもの、または Lease が切れた `claimed` が対象です。
+- **Lease と Fencing。** Claim のたびに `claim_count` が 1 増え、`heartbeat` / `fail` / `dead_letter`（と Consolidator の完了）は、この世代を**必須の引数**として受け取ります。Lease が切れて別の Worker（同じ Worker ID でも）が Claim し直した Job に、古い世代は何もできません（`LeaseLostError`）。Lease は Row Lock を取った**後**の Statement で、Database の時計で判定します。
+- **再試行と Dead Letter。** `fail` は Job を遅延つきで `queued` に戻すか、`dead` にします。遅延は `30 秒 × 2^(n-1)`、上限 900 秒（`Backoff`）。数える失敗（Timeout、Worker の例外、出力の契約違反、書き込みの失敗）は `attempts` を増やし、5 回目で `dead` です。**Worker が使えない（GPU 停止）は数えません**（`deferrals` だけが増え、遅延は伸びますが Dead Letter にならず、復帰後に再開します）。Lease が切れた Job の再 Claim は、失敗 1 回として数えます（Worker を落とし続ける Job が無限に続かない）。
+- **Dead Letter は Observation を消しません**（Entry は `pending` のまま、`pending_observations` に出ます）。`enqueue(entry_id, priority)` が新しい Job を作ります（冪等: 有効な Job がある Entry には、その Job を返します）。
+- **Index。** Claim の Index と一意性の Index は Partial（`WHERE status IN ('queued', 'claimed')`）で、完了・Dead の Job を残しても使えるよう、Status を SQL の文面に書き込みます（`tests/test_journal_queue.py` が Generic Plan で確認）。
+
+### Consolidator と Memory Worker
+
+`Consolidator(database, queue, worker, *, worker_id, worker_timeout_seconds=120, batch_size=10)`。`run_once()` は 1 Job を最後まで進め、`run_batch()` は `batch_size` 回まで繰り返します（Job がなくなるか、Worker が使えなかった時点で止まるので、止まった GPU に Job ごとには問い合わせません）。
+
+- **`MemoryWorker`**（Protocol）は Memory Worker Benchmark（PAW-018）が評価する契約です。`async def extract(input_text: str) -> str` が `memory-worker-output-v1`（`key`、`scope`、`state`、`supersedes`、任意の `content` と `conflicts_with`）の JSON 文字列を返します。GPU に届かないときは `WorkerUnavailableError`（または `ConnectionError`）を送出します。**Model は入力の本文しか受け取りません**（User ID も他の User の Memory も渡りません）。`tests/test_journal_worker_contract.py` が Schema File と比べ、`jsonschema` がある環境では同じ文書を両方の Validator に通します。
+- **出力は書き込みの前に全体を検証します**（`parse_worker_output`）。Schema の規則に、Backend の上限（20 件、`key` 200 文字で制御文字なし、`content` 8,000 文字、`conflicts_with` 10 件、出力 400,000 文字）と、重複した Member 名・`NaN`・深い入れ子の拒否を足しています。**1 つでも違反すれば出力全体を捨てます**（Benchmark の `schema_adherence` と同じ）。エラーは閉じた Code だけで、出力の文言を含みません。
+- **Worker の主張は主張です**（`rules.py`、[Decision 0018](../../docs/decisions/0018-memory-journal-consolidation-policy.md)）。
+
+| Worker の出力 | Backend が書くもの |
+| --- | --- |
+| `scope` が `user` / `project` / `repo` | どれも **`user` Scope（会話の Owner だけが読める）**。Owner は DB の Conversation から取る。`project` / `repo` は `attributes.recommended_scope` に残すだけで、範囲を広げるのは確認 Flow（PAW-044）の新しい Version |
+| `scope` が `shared` | 書かない（`refused_shared`）。Shared Memory へ自動で昇格しない |
+| `state` が `inferred` | `inferred` |
+| `state` が `confirmed` | **`observed`**（Confirmed は User の確認だけ。元の主張は `attributes.worker_state`） |
+| key または内容が高リスクの領域（Merge、Delete、公開、ACL・Role・権限、Credential・Secret、外部送信） | Memory にせず、Outcome に候補を保存して保留（`held_high_risk`）。語彙は暫定の一覧で、補助の網。どの状態の Memory も権限や実行を与えない |
+| 既存の **Confirmed** の Memory と内容が違う | 書かない（`held_confirmed`）。同じ内容なら重複（`duplicate`） |
+| User が**範囲を広げた** Memory（`project` / `repo` の新しい Version。確認 Flow が作る） | 書かない・退役させない（`held_widened`。同じ内容なら `duplicate`）。Worker は、User が決めた範囲を変えない。key で Memory を探すときは、Owner の `user` Scope の Version を 1 つ持つ Memory を、最新の Version（広げた Version）まで含めて読む（広げた Version には Owner の列がないため。他人の Memory を指す Registry の行は、何も読まずに失敗する） |
+| User が却下・無効化した Memory | 書かない（`blocked_by_user`） |
+| 同じ key の既存の弱い Memory | 新しい Version（`active`）、前の Version は `superseded`、`supersedes` の関係。`supersedes` が別の key なら、その Memory も（Confirmed でなければ）同様に置き換える。`conflicts_with` は関係を足すだけ |
+| 古い Turn の結果 | 書かない（`stale`）。下の「順序」 |
+
+書く Version は `memory_type = 'worker_candidate'`、`title` は key、`freshness_policy = 'permanent'`、`actor_type = 'system'`、出典は `memory_sources`（Conversation と Message）です。
+Memory の Query の ACL（`readable_memory_versions`）は、他の User にも、同じ Project の Member にも、この Memory を見せません（`tests/test_journal_consolidator.py`）。
+
+- **順序（古い Turn が新しい Memory を上書きしない）。** Claim の順は優先度で、適用時に Event の順で守ります。Memory の現在の Version を作った Entry の順序の印を `memory_consolidation_keys` に持ち、Candidate は**それより新しい**ときだけ適用します（同じ会話は `event_sequence`、会話が違えば記録時刻）。古い結果は `stale` として Outcome に残り、Memory に書きません。`supersedes` で別の key の Memory を退役させるときは、**その key の順序の印も同じ Transaction で今回の Entry へ進めます**（退役より古い Observation が後から終わっても、退役した Memory は戻りません。退役より**新しい** Observation だけが戻せます）。逆に、対象の key を、今回の Entry より新しい Turn がすでに更新していれば、古い Turn の `supersedes` はその Memory を退役させません（`ide` 自体は書きます）。key ごとの Advisory Lock（Hash 順に取る）が同じ key の適用を直列にし、`(memory_id, version_number)` の Unique と `UPDATE ... WHERE status = 'active'` の行数が、手動編集など Lock を取らない書き込みとの Lost Update を失敗にします（Transaction は戻り、Job は新しい状態で再試行）。
+- **Version を退役させる変更は、Actor を名乗ります。** Version の `status` の変更（`superseded` への退役。`applier._supersede` の 1 か所だけ）は、Database の Trigger が `memory_metadata_changes` に、変更前後の `status` と Actor つきで記録します。Actor を名乗らない変更は、Revision `0071`（PR #109）以降は `actor_type` の NOT NULL で失敗します（Trigger は緩めていません）。Consolidator は、同じ Transaction の `UPDATE` の直前に `metadata_change_actor(ActorType.SYSTEM)` を実行します。**Actor は `system`（背景の Memory Worker）で、会話の Owner ではありません**: Owner を名乗ると、履歴が「Owner が手で退役させた」と答えてしまうためです（書く Version の `actor_type` も `system`）。退役させた Version 1 つにつき履歴が 1 行で、新しい Version の INSERT や、何も退役させない結果（`duplicate`、保留、`stale`）は何も記録せず、Transaction が戻れば履歴も戻ります。Migration `0041` は `0071` より後（`0023` の後）に適用されるため、履歴の `status` の列は常にあり、`tests/test_journal_status_history.py` は履歴の行を常に検査します。
+- **出力の中の順序に依存しません。** 1 つの出力の項目は、参照される Memory を先に適用します（`supersedes` で退役させる key、`conflicts_with` の key。`rules.processing_order`）。`y`（`x` を退役させる）が `x` より先に並んでいても、`x` が先に書かれてから `y` が退役させます。循環（`a` が `b` を、`b` が `a` を退役させる）は、並んだ順に適用し、退役で進めた順序の印を、次の項目が見ます。同じ key の 2 番目以降は `duplicate_key`、同じ key を退役させる項目が 2 つあれば、先に並んだ方が退役させます。
+- **適用は 1 Transaction です**（Lease の確認、Candidate、Entry の `consolidated`、Job の `completed`）。Lease の確認は Job の Row Lock の後なので、Lease を失った Worker の結果は捨てられます。失敗した書き込みは全部戻ります（途中まで書いた出力は残りません）。
+- **GPU が使えないとき。** Worker の `WorkerUnavailableError` は Job を遅延つきで戻すだけで、Entry は `pending`、Raw は保存済みです。GPU が復帰して遅延が過ぎれば、Event の順（同じ優先度では古い Entry から）に再開します（`tests/test_journal_gpu_unavailable.py`）。
+- **Privacy。** Log、エラー、`repr`、Audit に、会話の本文・key・内容を出しません（Job の ID と閉じた Code だけ。Worker の例外の文言は読みません）。`PendingObservation` と `WorkerMemory` は本文を `repr` から外しています。Outcome（保留した Candidate の本文を含む）は Owner の行にあり、Conversation と一緒に消え、Admin にも見せません。
+
+### Database と権限
+
+Migration `0041` の `down_revision` は `0023` です（鎖は `0001 → 0025 → 0032 → 0040 → 0021 → 0033 → 0031 → 0050 → 0046 → 0052 → 0026 → 0087 → 0022 → 0083 → 0043 → 0030 → 0027 → 0071 → 0086 → 0088 → 0023 → 0041`）。Revision ID は Issue 番号で、鎖の順序ではありません。統合時に Orchestrator が並びを確認します。
+Application の Role には、Service が実行する最小の権限だけを与えます（[上の規則](#migration-は-application-の-role-に権限を与えるcontributor-向けの規則)）。
+
+| Table | 与える権限 | 理由 |
+| --- | --- | --- |
+| `memory_journal_entries` | SELECT、INSERT、UPDATE（`state`、`consolidated_at`、`outcome` のみ） | 保存（INSERT）と、整理の結果（UPDATE。`SELECT ... FOR UPDATE` はこの UPDATE 権限で足りる）。会話・Message・Turn・Sequence・Owner・Context・時刻は書き換えられず、DELETE も与えない（Conversation と一緒に消える） |
+| `memory_consolidation_queue` | SELECT、INSERT、UPDATE（`status`、`available_at`、`attempts`、`deferrals`、`claim_count`、`claimed_by`、`claimed_at`、`lease_expires_at`、`last_failure`、`finished_at` のみ） | Enqueue と、Claim・延長・失敗・完了。`entry_id`、優先度、`enqueued_at` は変えられず、Queue 済みの Job を優先度の変更や付け替えで操作できない。DELETE なし（完了・Dead の Job は履歴） |
+| `memory_consolidation_keys` | SELECT、INSERT、UPDATE（`applied_conversation_id`、`applied_event_sequence`、`applied_recorded_at` のみ） | key の登録と、順序の印の更新。Owner と Memory は変えられない。Memory と一緒に消える |
+| `messages`、`conversations`、`memories`、`memory_versions`、`memory_relations`、`memory_sources`、`memory_metadata_changes` | Revision `0040` のまま | Journal は Message の INSERT、Conversation の行 Lock（`FOR NO KEY UPDATE` は `updated_at` などの UPDATE 権限で足りる）、Candidate の INSERT と `memory_versions.status` の UPDATE だけを使う。Version の本文・`confirmation_state`・Scope は書き換えられない。`memory_metadata_changes` への INSERT は、Version の `status` の変更を記録する Trigger（Revision `0071`）が、書き込む側の権限で行う |
+
+`tests/test_journal_grants.py` は、Journal、Queue、Consolidator の Test を非 Superuser の Role で実行し、権限が過不足ないこと、書き換えを禁じた列と Schema の変更が拒否されることを検査します。
+
+### 承認された判断
+
+[Decision 0018](../../docs/decisions/0018-memory-journal-consolidation-policy.md)（Approved、2026-09-26 に Human が承認。8 点すべて推奨どおり）の次の点は、承認された方針です。
+
+1. Worker の `confirmed` は `observed` に下げる（Confirmed は User の確認だけ）。
+2. すべての Candidate を `user` Scope に置く（`project` / `repo` は推奨として残し、範囲を広げるのは確認 Flow）。`shared` は書かない。
+3. 高リスクの領域（key と内容、英日の語）は保留する。語彙は暫定。
+4. 優先度は呼び出し側が決める（本文の Keyword では決めない）。
+5. Timeout は失敗として数え、Worker が使えないことは数えない。
+6. Queue の数値（Lease 300 秒、Worker 120 秒、失敗 5 回、Backoff 30 秒から 15 分、Batch 10、Lock の待ち 3 秒）は暫定値として承認された。
+7. 保留した Candidate の本文は Entry の `outcome` に持つ。
+8. Dead Letter の復旧は運用（`enqueue`）で、自動の再投入は置かない。
+
+### 制限と未確認の点
+
+- HTTP の Endpoint、Worker の Process（`run_batch` を呼び続ける Loop）、User 向けの「再試行」、通知はありません。
+- **Worker は Test の `ScriptedWorker`（Model なし）でだけ確認しています。** 実 GPU・実 Model の Adapter、Prompt（既存 Memory を渡して `supersedes` を出させる）、Benchmark で採用された Model との接続は未確認です。
+- 高リスクの語彙（英日）は暫定値として承認されたもので、見逃しと過剰な保留がありえます（Decision 0018）。key の正規化はしないので、同じ意味の別の key は別の Memory になります。
+- Conflict / Freshness / Retrieval / Confirmation Flow（PAW-042、043、044）は含みません。関係は最小（同じ key の置き換え、`supersedes`、`conflicts_with`）で、鮮度は `permanent` 固定、Embedding と Markdown Projection は行いません。
+- 数値（Lease 300 秒、5 回、Backoff、Batch 10、上限の件数と文字数）は実測に基づかない暫定値で、`journal/limits.py` にあります。
+- 同じ key を別の User が使っても Memory は別ですが、User ごとの Advisory Lock の名前空間は、Hash の衝突で無関係な key を直列にすることがあります（正しさには影響しません）。
+- Worker の呼び出しの間は Lease を延長しません（`worker_timeout_seconds` は Lease の半分以下でなければなりません）。それを超えても、結果の適用は Fencing が拒否します。
+- Journal を通らない Message の追加は、Sequence を守りません（Unique 制約が衝突を失敗にします）。
+
+### Test
+
+`tests/test_journal_*.py`。純粋な Test（Database なし）は、引数の検証（`..._argument_validation.py`。すべてのメソッド × 引数 × 不正値の表で、Authorizer と Database に触れる前に拒否されること）、Worker の契約（`..._worker_contract.py`）、規則（`..._rules.py`）、
+実 PostgreSQL の Test（`PAW_TEST_DATABASE_URL` がないと Skip）は、Journal（`..._service.py`）、Queue（`..._queue.py`）、Consolidator（`..._consolidator.py`）、失敗と Lease の Fencing（`..._failures.py`）、GPU が使えないとき（`..._gpu_unavailable.py`）、
+同時実行（`..._concurrency.py`。Sequence の一意性と Commit 順、Lock の待ち、競合する Consolidator）、Schema の制約（`..._schema.py`）、Migration（`..._migration.py`。上げ下げ、Model との差分、Catalog の比較）、権限（`..._grants.py`）です。
+
 ## Research Scratch Store
 
 [PAW-050](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/42)（Revision `0050`）で実装しました。
@@ -1981,11 +2296,17 @@ Item は `now < expires_at` または exempt のとき **見える**（visible�
 2. `purge_expired` は待たずに `FOR UPDATE ... SKIP LOCKED` で候補を Lock し、**別の Statement** で exempt を再確認して削除します。Purge の Snapshot の後に Commit された Lease / Pin も見えるため、Purge より前に取得された Item は消えません。Lock 中の行は飛ばされ（数にも入らない）、次の呼び出しが扱います。Purge が先に Lock した場合、待っていた操作は「存在しない」になります。
 3. 2 つの Purge が同時に動いても、各行は 1 回だけ削除されます。
 
+### Project 削除時の扱い（Issue #88、Decision 0028）
+
+`purge_projects(project_ids)` は、`ProjectService.purge_expired` が Deleted にした Project の ID を受け取り、その Project の Item を **`pinned` / `saved` / `promotion_state` / Lease に関わらず全て削除**します（`RepositoryService.purge_projects` と同じ、Decision 0008 の「各領域の Service が消す」分担）。
+Project 自体は素の UUID の参照（外部キーなし）なので、対象は呼び出しごとに `projects.status = 'deleted'` を確認してから絞り込み、まだ Deleted でない Project の Item には触れません。Backend 自身の Orchestrator だけが呼ぶ内部 Method（User も Agent も呼べません）で、`project_ids` は最大 `MAX_PURGE_PROJECTS`（500）件、空でも Error にはならず `()` を返します。少なくとも 1 件の Item を消した Project の ID だけを返し、冪等です（2 回目の呼び出しは何も見つけません）。Leases は Item と一緒に消えます（外部キーの `CASCADE`）。
+削除の理由は「TTL の猶予」ではなく「Project 自体がもう無い」ことなので、`purge_expired` の exempt 判定（Pin・保存・使用中・昇格確認中）は適用しません。新しい Role 権限は不要です（Migration `0050` の DELETE をそのまま使います）。Test は `tests/test_scratch_purge.py::PurgeProjectsTest`、`tests/test_scratch_grants.py::PurgeProjectsAsAppRole`。
+
 ### 呼び出し側の認可（提案）
 
 Endpoint は次の Issue の仕事です。次の対応を提案します（未強制）。読み取り（`get`、`list_items`）は `project.read`。`add`、`acquire_use`、`release_use`、`pin`、`unpin` は `project.task.run`。`pin`、`unpin` は Agent へ委任できます。
 **`save`、`unsave` は User 本人だけができる操作で、Agent へ委任できません**（[Decision 0013](../../docs/decisions/0013-research-scratch-task-relation.md)で 2026-09-25 に承認。要件の「User が明示保存」は人の意思表示であり、Agent が調査結果を TTL から免れさせられないようにするためです）。`ScratchStore` 自体は認可をしないので、この制限は呼び出し側（API 層）が強制します。`save`、`unsave` を、Agent の権限（委任元 User と `AgentGrant` の積集合）では呼べない経路にしてください。専用の Capability を新設するかと、その id はここでは決めていません。新設するときは、委任不可（`CapabilityInfo.delegable=False`）にしてください（[Decision 0004](../../docs/decisions/0004-rbac-capability-and-audit-policy.md) は、Capability を追加するときに委任の可否を明示することを求めます）。
-`request_promotion` は `project.memory.use`、`resolve_promotion` は `project.memory.manage`（Agent へ委任できない: 調査結果を Agent の判断だけで Long-term Memory へ送らないため）。`purge_expired` は Backend 自身の Janitor だけ（User も Agent も呼べない）。
+`request_promotion` は `project.memory.use`、`resolve_promotion` は `project.memory.manage`（Agent へ委任できない: 調査結果を Agent の判断だけで Long-term Memory へ送らないため）。`purge_expired`、`purge_projects`（Decision 0028）は Backend 自身の Janitor / Orchestrator だけ（User も Agent も呼べない）。
 
 ### 上限と入力の検証
 
@@ -2446,7 +2767,7 @@ Research Scratch（24 時間 TTL）とは別の Table で、Long-term Memory と
 - **Project をまたがない。** 対応・使用・Relation の Table は `project_id` を持ち、Claim と Source を複合 Foreign Key `(id, project_id)` で参照します。Application が間違えても、2 つの Project の行を結ぶ行は DB が拒否します。
   全ての Method は `project_id` を受け取り、その Project の中だけで探します。他の Project の ID は「存在しない」と同じ扱いです。
 - `project_id`、`created_by` は素の UUID です（projects と users の Table がまだありません）。回答の ID（`ref_id`）も、Answer の Table がないため素の UUID で、存在は確認しません。
-- **不変。** Application の Role は 6 つの Table に SELECT と INSERT だけを持ちます（UPDATE も DELETE もできません）。誤りは書き換えではなく、新しい記録で訂正します。
+- **不変。** Application の Role は 6 つの Table に SELECT と INSERT を持ちます（UPDATE は持ちません。誤りは書き換えではなく、新しい記録で訂正します）。DELETE は Decision 0028（Issue #88、Migration `0088`）で `purge_projects` のためだけに追加され、それ以外の経路はいまも読み取りと追加しかしません。
 
 ### 記録と重複
 
@@ -2494,8 +2815,17 @@ Claim を記録した Task は自動で利用者になるので、`trace(project
 4. 書き込みの Transaction は `SET LOCAL lock_timeout`（`lock_timeout_ms`、既定 5000）で始まります。待ちが超えた場合と、DB が Deadlock を解消した場合は `ProvenanceBusyError` です（取り消し済み、再試行できます）。
 5. 読み取り（`get_claim`、`trace`、`list_relations`）は Lock を取らず、待ちません。
 
-**Application の Role の権限。** 共通の `grant_app_privileges`（PAW-025）で、6 つの Table に SELECT と INSERT だけを付けます（UPDATE の列も付けません）。
-`test_provenance_grants.py` は、この Role で Store と Query の Test を全て実行し、権限の一致と、書き換え・削除・`TRUNCATE`・`ON CONFLICT DO UPDATE`・Schema の変更・Project をまたぐ対応の拒否を確かめます。
+**Application の Role の権限。** 共通の `grant_app_privileges`（PAW-025）で、6 つの Table に SELECT・INSERT・DELETE（DELETE は Migration `0088`、Decision 0028）を付けます（UPDATE の列は付けません）。
+`test_provenance_grants.py` は、この Role で Store と Query の Test を全て実行し、権限の一致と、書き換え・`TRUNCATE`・`ON CONFLICT DO UPDATE`・Schema の変更・Project をまたぐ対応の拒否を確かめます。DELETE は Table 単位の付与で、PostgreSQL には「`purge_projects` からだけ」という絞り方はありません。実際に DELETE を実行する経路は `purge_projects` の 1 つだけで、他の全ての Method は今までどおり読み取りと追加しかしません。
+**Migration の鎖。** Migration `0088` の `down_revision` は `0086` です（鎖は `0001 → 0025 → 0032 → 0040 → 0021 → 0033 → 0031 → 0050 → 0046 → 0052 → 0026 → 0087 → 0022 → 0083 → 0043 → 0030 → 0027 → 0071 → 0086 → 0088`）。Table を作らず権限を広げるだけなので、Revision 0052（この 6 Table を作った）より後であれば足り、Merge の順に、その時点の最新（`0086`）の後ろへ並べています。
+
+### Project 削除時の扱い（Issue #88、Decision 0028）
+
+`purge_projects(project_ids)` は、`ProjectService.purge_expired` が Deleted にした Project の ID を受け取り、その Project の 6 つの Table の行を**全て削除**します（`RepositoryService.purge_projects`、`ScratchStore.purge_projects` と同じ、Decision 0008 の「各領域の Service が消す」分担）。
+Project 自体は素の UUID の参照（外部キーなし）なので、対象は呼び出しごとに `projects.status = 'deleted'` を確認してから絞り込み、まだ Deleted でない Project の Provenance には触れません。1 つの Transaction の中で、外部キーの向き（`research_claim_sources` → `research_claim_uses` → `research_claim_relations` → `research_source_relations` → `research_claims` → `research_sources`）どおり、子から先に削除します。
+Backend 自身の Orchestrator だけが呼ぶ内部 Method（User も Agent も呼べません）で、`project_ids` は最大 `MAX_PURGE_PROJECTS`（500）件、空でも Error にはならず `()` を返します。少なくとも 1 つの Table に行があった Project の ID だけを返し、冪等です。
+Decision 0011 が今回まで残していた「Project 削除時に Provenance をどう扱うか」（消す・残す・匿名化する）を、Decision 0028 が「消す」と決めています。「唯一の Provenance を失う Memory」（[要件](../../REQUIREMENTS.md)の「User Memory」）は、Long-term Memory がまだ Research の Provenance / Scratch のどの行も参照していない（`memory_sources.source_type` に `research_claim` 等の種類がない）ため、この PR の対象外です。Decision 0028 を参照してください。
+Test は `tests/test_provenance_purge.py`、`tests/test_provenance_grants.py::PurgeProjectsAsAppRole`。
 
 ### 上限と入力の検証
 
@@ -2606,7 +2936,8 @@ Active ⇄ Archived
 - Delete 開始は `confirm_name` が Project 名と**完全に一致**しなければ `ConfirmationMismatchError`（認可の後に検査するので、権限のない人には名前の一致を教えません）。
 - Purge は **`now >= deletion_scheduled_at`** から（復元は `now < deletion_scheduled_at`。同じ瞬間に両方が真にはなりません）。1 回の Transaction で、期限の古い順に最大 `batch_size`（1〜500、既定 50）件を `FOR UPDATE SKIP LOCKED` で選び、各 Project の Member と招待を全て削除して墓石にします。
   Lock 中の Project は待たずに飛ばし、`has_more` は「まだ期限の来た Project が残っている」（Lock 中を含む）ことを示します。二重に呼んでも安全です。Scheduler は含みません（別の Issue）。
-- **他の領域のデータは、この Issue では消しません。** Chat、Memory、Task、Repo の紐付け、調査結果の `project_id` は素の UUID で、各領域の Service が `PurgeResult.purged` の ID を使って消します（各 Issue へ引き継ぎます。調査結果の扱い（消す・残す・匿名化）は Issue [#88](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/88) で決めます）。
+- **他の領域のデータは、この Issue では消しません。** Chat、Memory、Task、Repo の紐付け、調査結果の `project_id` は素の UUID で、各領域の Service が `PurgeResult.purged` の ID を使って消します（各 Issue へ引き継ぎます）。
+  調査結果（Evidence / Claim Provenance、Research Scratch）の扱い（消す・残す・匿名化）は Issue [#88](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/88) / [Decision 0028](../../docs/decisions/0028-project-deletion-research-data.md) が決め、`ProvenanceStore.purge_projects` / `ScratchStore.purge_projects` が消します（上の各節）。GitHub、Repo の登録（`RepositoryService.purge_projects`、PAW-027）も同じ分担です。
   GitHub、Local checkout などの外部資源は消しません（要件）。
 
 ### Delete 開始時の Task 停止（Outbox と Processor）
@@ -2814,6 +3145,7 @@ Human は [Decision 0008](../../docs/decisions/0008-project-membership-and-lifec
 3. **Capability を持たなかった 4 つの操作**（作成、招待の受諾・辞退、退出）は、暫定の作りで承認されました。Capability と Audit は Issue [#82](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/82) で追加しました（[Decision 0022](../../docs/decisions/0022-project-lifecycle-capabilities.md)。Human が 2026-09-26 に承認しました。承認済みの Decision 0004 と 0008 は書き換えていません）。この作りは、0008 の暫定の作りに代わりました。
 4. **Owner / Admin が全 Project を一覧する API**（管理上の Lifecycle 操作の入口）は、Issue [#84](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/84) で実装しました（Service まで。上の「管理者向けの全 Project 一覧」）。
 5. **Purge 後の他の領域のデータ削除**は、各 Service が `PurgeResult.purged` を使う分担で承認されました。調査結果（Provenance・Scratch など）の扱いは、Issue [#88](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/88) で決めます。
+   → [Decision 0028](../../docs/decisions/0028-project-deletion-research-data.md) で決め（Provenance と Scratch はどちらも削除）、`ProvenanceStore.purge_projects` / `ScratchStore.purge_projects` を実装しました（上の各節）。「唯一の Provenance を失う Memory」（要件の「User Memory」）は、Long-term Memory が Research のどの行もまだ参照していないため、この PR の対象外です。
 6. **Delete 開始時の Task 停止**（Decision 0008 の 8）: 停止に Cancel（graceful）を使うこと、Outbox と Processor に分けることを承認しました。Delete 開始の後に作られた Task の競合を閉じる Gate（`create_task` / Retry / Restart / Start / `enqueue` が Project の行を Lock して Active 以外を拒否し、Claim が Active でない Project の Entry を飛ばす）の方針も承認され、実装は Issue [#83](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/83)（`tasks(project_id, state)` の Index を含む）で行いました（[Project の状態 Gate](#project-の状態-gateissue-83)）。Gate の適用範囲（Gate の必須化、Restore の後の Restart、Active でない Project の Claim と Start）は [Decision 0020](../../docs/decisions/0020-project-state-gate.md)（Approved、2026-09-26）で決めました。
 7. **`0021` を `0026` より前に置く並び**は、Migration の実装上の順序で、統合時に確認してください。
 
@@ -2866,7 +3198,7 @@ Rerank（Reranker Protocol）→ 構造化 Score（confirmed・鮮度・importan
   除いた行は順位にも影響しません。除いた行を無効にした DB と結果が全 Field で等しいことを、短い候補の上限で Test します（`test_retrieval_leakage.py`、`test_retrieval_eligibility.py`）。
 - **Scope ごとの認可**（Decision 0019 の 1、2）: `user` は `memory.use`（`REQUIRED`: 呼び出し 1 回に Audit 1 行）、`shared` は `shared_memory.read`、`project` は DB から読み直した受諾済み Membership と `project.read`（Archived は読める。Pending deletion / Deleted / 招待中は読めず、尋ねもしない）、
   `repo` は `RepoAclSource` の ACL を `project.read` の Repository Resource で判定（`repo_ids` が明示的に空なら、Repository の Scope は飛ばし、Source を呼びません）、`project_group` は `ProjectGroupSource` の ID。Source の答えは 1 回だけ読んでコピーし、コピーできない・型や上限が違うものは `RetrievalSourceError` です。`Principal.project_roles` は信用しません。拒否は「その Scope が何も返さない」だけで、応答に出しません。
-  決定を記録できない（`audit_unavailable`）ときだけ `RetrievalPermissionError` です。`DENIED_ONLY` の `shared_memory.read` / `project.read` は、許可した読み取りを記録しません（この実装は Audit を増やしません。`memory.use` の 1 行は Decision 0004 のとおり）。**`user` を読み取り専用の `memory.read`（`DENIED_ONLY`）に切り替える**ことは、Human が推奨の方向で承認済み（Decision 0019 の 1）ですが、Capability の追加は [Decision 0024](../../docs/decisions/0024-memory-read-capability.md)（Proposed）で決めます。承認され実装されるまで、コードは `memory.use`（`REQUIRED`）のままで、切り替えはその後続の Issue です（authz の Capability の表は、この Issue では変えません）。
+  決定を記録できない（`audit_unavailable`）ときだけ `RetrievalPermissionError` です。`DENIED_ONLY` の `shared_memory.read` / `project.read` は、許可した読み取りを記録しません（この実装は Audit を増やしません。`memory.use` の 1 行は Decision 0004 のとおり）。**`user` を読み取り専用の `memory.read`（`DENIED_ONLY`）に切り替える**ことは、Human が推奨の方向で承認済み（Decision 0019 の 1）ですが、Capability の追加は [Decision 0024](../../docs/decisions/0024-memory-read-capability.md)（2026-09-27 承認）で決めました。Issue #115 で実装されるまで、コードは `memory.use`（`REQUIRED`）のままです（authz の Capability の表は、この Issue では変えません）。
 - **結果は読める Memory についてしか語りません。** 件数・合計・「他に n 件」は無く、Conflict Group・`duplicates`・Rerank の入力・順位・Score・`conflicts_incomplete` も、読める Memory だけから決まります。
 - **Keyword**: PostgreSQL の全文検索（`simple`）。日本語は、Index 側で CJK の 1 文字ごとに空白を入れ、Query 側で隣り合う 2 文字の句を OR で並べます（形態素解析ではない近似。英語の機能語とひらがな 2 文字の組は Query から除く）。Index は Migration 0043 の `ix_memory_versions_search`（GIN、`status = 'active'` のみ）。
 - **Vector**: Cosine 距離（`<=>`）。1 つの `embedding_model_id` だけを比べます。**ANN Index は作っていません**（Decision 0019 の 4）。`min_vector_similarity` の既定は `None`（Model が決まるまで下限を置かない）。
@@ -2912,9 +3244,9 @@ Rerank（Reranker Protocol）→ 構造化 Score（confirmed・鮮度・importan
 [Decision 0004](../../docs/decisions/0004-rbac-capability-and-audit-policy.md)・[Decision 0006](../../docs/decisions/0006-tool-broker-policy.md) の 8（どちらも承認済み）に従い、
 要件が決めていない選択（Checkout の置き場所、Linux Account との対応、既存 Repository の検証、削除の意味など）は
 [Decision 0017](../../docs/decisions/0017-repository-registration-policy.md)（承認済み）にまとめています。
-**Decision 0017 は 2026-09-26 に Human が承認しました**（第 11 点の Scope を作るときの Root の再確認を含む）。上限・Timeout・探索の上限・Path の Byte 数などの数値は暫定値として承認されました（設定・定数で変えられます。Path の長さは DB の CHECK 制約にも書かれているため、変えるには新しい Migration が要ります）。User ごとに Linux User として git を実行する仕組み（SSH 経由）は、別 Issue [#105](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/105) です。
+**Decision 0017 は 2026-09-26 に Human が承認しました**（第 11 点の Scope を作るときの Root の再確認を含む）。上限・Timeout・探索の上限・Path の Byte 数などの数値は暫定値として承認されました（設定・定数で変えられます。Path の長さは DB の CHECK 制約にも書かれているため、変えるには新しい Migration が要ります）。User ごとに Linux User として git を実行する仕組み（SSH 経由）は、別 Issue [#105](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/105)、`GitRunner` の実装（`SshGitRunner`）とその方針は [Decision 0029](../../docs/decisions/0029-per-user-git-runner-ssh.md)（2026-09-27 承認）です。
 **HTTP の Endpoint はありません**（Session は PAW-022）。`RepositoryService` は、認証済みの `Principal` を受け取り、`Authorizer` で判定します。
-**GitHub の認証（`gh auth`）は PAW-028 で、この Issue の範囲外です**（`GitHubGateway` が継ぎ目）。
+**GitHub の認証（`gh auth`）は PAW-028 で実装しました**（`GitHubGateway` の継ぎ目。下の「GitHub User Connection」を参照）。
 
 Project の **Repository** は論理的な共有の記録で、User や Agent が編集するのは、その User の Linux Account の中にある **Checkout**（作業コピー）です。
 複数の User が 1 つの Working Tree を編集することはありません。
@@ -2925,7 +3257,8 @@ Project の **Repository** は論理的な共有の記録で、User や Agent �
 | `validation.py` | 引数の検証（DB を使わない純粋関数。名前、Branch、Path、URL、ACL の権限） |
 | `paths.py` | Path の安全性（Linux Account、Checkout の Path、既存 Repository の検査、`O_NOFOLLOW` での Directory 作成） |
 | `accounts.py` | Workspace の User から Linux Account への対応（`LoginNameAccountDirectory`。継ぎ目は `AccountDirectory`）。最小の uid は `RepositoryPolicy.min_uid` だけ（Directory に別の値はない）。Directory と Service の Policy が食い違うと、Service の構築が `ValueError` |
-| `git.py` | git の実行（許可リストの環境、Hook 無効、Timeout、出力の上限、Shell なし）と、必要な操作（`inspect`、`clone`、`init`、`add_origin`） |
+| `git.py` | git の実行（許可リストの環境、Hook 無効、Timeout、出力の上限、Shell なし）と、必要な操作（`inspect`、`clone`、`init`、`add_origin`）。`SubprocessGitRunner` と `ssh.py` の `SshGitRunner` が共有する Process 実行（`run_subprocess`）もここにある |
+| `ssh.py` | `GitRunner` のもう 1 つの実装 `SshGitRunner`（Issue #105、[Decision 0029](../../docs/decisions/0029-per-user-git-runner-ssh.md)、承認済み）。User ごとの専用鍵で `ssh <linux user>@127.0.0.1` へ接続し、Forced Command の Wrapper（この Repository には実装しない）に決まった形式（`build_remote_command`）で委ねる。鍵の在り処は `SshKeyDirectory`（継ぎ目。既定は `TemplateSshKeyDirectory`） |
 | `github.py` | GitHub の指定の解析、origin URL の登録形式、`GitHubGateway`（PAW-028 の継ぎ目。既定は拒否） |
 | `policy.py` | 設定（`PAW_REPOSITORY_*`）を検証した値 `RepositoryPolicy` |
 | `store.py`、`transaction.py`、`service.py` | SQL（1 文 1 関数）、Lock Timeout 付きの Transaction、`RepositoryService` |
@@ -2980,6 +3313,14 @@ Backend が作る Checkout は、`workspaces` と Project の Directory（0700�
 - **Timeout と出力の上限**（既定 30 秒 / Clone 900 秒、64 KiB）。超えると **Process Group ごと** Kill する（Cancel でも Kill する）。
 - **実行 User。** git は Backend の Process の Linux User として動く。それが Checkout の持ち主の Account でなければ、実行を拒否する（`identity_mismatch`）。**User を切り替える仕組みは実装していない**（配備で `GitRunner` を渡す。Decision 0017 の 4）。**人間の回答 2026-09-25: Userごとに割り振られたSSHで実行する方針。実装は別Issue [#105](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/105)。この PR は Backend の Process の User でだけ動く（従来どおり）。**
 
+`ssh.py` の `SshGitRunner` は、同じ `GitRunner` Protocol のもう 1 つの実装です（Issue #105、[Decision 0029](../../docs/decisions/0029-per-user-git-runner-ssh.md)、2026-09-27 に Human が承認）。`SubprocessGitRunner` と `run_subprocess`（Timeout・出力上限・Process Group ごとの Kill）を共有し、次の点だけが違います。
+
+- **接続。** `ssh <linux user>@127.0.0.1`（既定。`SshGitRunnerPolicy.host`）。User ごとの専用鍵（`SshKeyDirectory`。既定は `TemplateSshKeyDirectory`、ひな型 `{user}` を Linux User 名で埋める）。鍵 File は、接続の**前に毎回**「通常 File・group/other の権限ビットが 0・Backend の Process の実効 User の所有」を確認し、満たさなければ `ssh` を起動せず `GitFailure.SSH_KEY_UNAVAILABLE`。
+- **ローカルの `ssh` 自身の環境も `PATH` だけ**（Backend 自身の環境・継承した `SSH_*` は渡らない）。`-F <ssh_config_path>`（既定 `/dev/null`）で Backend の Process の User 自身の `~/.ssh/config` を無視し、固定の Host Key（`known_hosts_path`）、`BatchMode=yes`・`StrictHostKeyChecking=yes`・`IdentitiesOnly=yes`・`RequestTTY=no`・`ForwardAgent=no` などを毎回付ける。
+- **送る内容は 1 本の文字列。** `build_remote_command` が、Protocol Tag・cwd・`GIT_CEILING_DIRECTORIES`・`--`・`git_config_arguments` の列・git の副コマンドを、語ごとに `shlex.quote` してから空白で連結する（`ssh` 自身の連結に依存しない。Decision 0029 の 2）。**Forced Command の Wrapper（この Repository には実装しない）** が、この形式を解釈し、許可した副コマンド（`rev-parse`・`symbolic-ref`・`config`（読み取りだけ）・`clone`・`init`・`remote add`。Decision 0029 の 3 の表）だけを、Client の申告した `-c` を信用せず自分の Hardening で実行する契約になっている。
+- **エラー。** `ssh` 自身が接続・認証を終えられない（Host unreachable、鍵拒否、Host Key 不一致、対象の Linux User が無い）ときは、`ssh` の慣例どおり終了コード 255 になり、`GitFailure.SSH_UNAVAILABLE`。0〜254 は Wrapper 経由の git 自身の終了コードで、これまでどおり `GitResult` として返る（`NONZERO_EXIT` の判定は呼び出し元）。SSH 接続失敗と Linux User 未作成は、この経路からは区別できない（Decision 0029 の 5）。
+- **この PR は配線しない。** `SshGitRunner` は本番の呼び出し経路（`RepositoryService.from_policy` の `runner`）に差し込まれていません。実際に per-user Clone が動くのは、Wrapper Script・鍵・`sshd_config` が揃う配備後の別 Issue からです。`tests/test_repositories_ssh.py` は、実 SSH にも実 Linux User にも依存しない Fake の実行 File で確かめます。
+
 ### 認可と Audit
 
 | 操作 | Capability | 備考 |
@@ -3011,13 +3352,13 @@ Backend が作る Checkout は、`workspaces` と Project の Directory（0700�
 
 ### 制限と未確認の点
 
-- **Per-user の Clone は、Backend の Process の User が Checkout の持ち主のときだけ動く。** 別の User の Home へは書けず、User を切り替える実行の仕組みは、この Issue にない（Decision 0017 の 4。PAW-028 も必要とする）。人間の回答 2026-09-25: Userごとに割り振られたSSHで実行する方針。実装は別Issue [#105](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/105)（SSH 経由の `GitRunner`）で、この PR には含まない。
-- Private Repository の Clone、GitHub での新規作成は PAW-028 まで動かない（Global の git 設定と Credential Helper を読まないため）。作成後に登録が失敗しても、GitHub の Repository は削除しない（Log に 1 行）。
+- **Per-user の Clone は、Backend の Process の User が Checkout の持ち主のときだけ動く。** 別の User の Home へは書けず、User を切り替える実行の仕組みは、この Issue にない（Decision 0017 の 4。PAW-028 も必要とする）。人間の回答 2026-09-25: Userごとに割り振られたSSHで実行する方針。SSH 経由の `GitRunner`（`SshGitRunner`）は Issue [#105](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/105) / [Decision 0029](../../docs/decisions/0029-per-user-git-runner-ssh.md)（2026-09-27 承認）で実装したが、**本番の呼び出し経路には配線していない**（Forced Command の Wrapper Script・鍵配布・`sshd_config` の変更は範囲外。実際に per-user Clone が動くのは、それらを備えた配備後の別 Issue から）。
+- `create_github`（GitHub への新規作成）は PAW-028 の `GhCliGitHubGateway` で動く（`RepositoryService.from_policy` に `gh_runner` を渡したときだけ。渡さなければ既定どおり `GitHubUnavailableError`）。**Private Repository の Clone**（`clone_from_github`）も、`gh_runner` を渡したときだけ動く: `GitClient` が `clone` 自身の `-c credential.helper=!gh auth git-credential`（`gh auth setup-git` と同じ文字列）を付けて実行し、`gh` が呼び出し元 Linux User 自身の `gh auth login` から資格情報を解決する（この Backend は Token に触れない）。Global の git 設定は相変わらず読まない（`GIT_CONFIG_GLOBAL=/dev/null`）ため、`gh_runner` を渡さない構成では Private Repository の Clone はできない（下の「GitHub User Connection」の限界も参照）。作成後に登録が失敗しても、GitHub の Repository は削除しない（Log に 1 行）。
 - Path の検証は確認した瞬間の事実で、持ち主は後で差し替えられる。`scope_entries` は Scope を作る瞬間に Root と識別を確かめるが、その後 Tool Broker が呼び出しを解決するまでの窓は残る（Broker が呼び出しごとに確かめ直すことに依存する）。
 - Checkout の Path は、DB が保存できる **1024 文字かつ UTF-8 で 2048 Byte まで**です（`path` は一意な B-tree Index の Key で、Index の 1 Entry には約 2700 Byte の上限があり、1 文字は最大 4 Byte のため、文字数だけでは足りません。CHECK 制約 `ck_repository_checkouts_path_valid` にも同じ上限）。長い Home の Account が超える Path を作ると挿入の前に `PathRejectedError`（`too_long`）、`register_existing` の Path は `InvalidRepositoryInputError`（`too_long`）で拒否します（`tests/test_repositories_path_length.py`。境界は、ASCII の 1024 文字が可・1025 文字が不可、4 Byte 文字を含む 2048 Byte が可・2049 Byte が不可）。Remote の URL も同じ理由で Byte 数（1024）で上限を持ちます。
 - 既存の Directory を、登録済みの Repository の自分の Checkout として取り込む操作は、この Issue にない（Remote の照合が要る）。名前の変更もない。
 - 別の Linux User の権限での実 Clone は、この環境では試せていない（別の User の Account を作れない）。「別の User の Directory」の拒否は、その Path だけ別の持ち主を返す方法と、別の uid の Account で確かめている。
-- 「アクセスできる GitHub の Repository の一覧から選ぶ」（要件）は、GitHub の認証（PAW-028）と UI（PAW-061）に依存し、この Issue にない。`clone_from_github` は、指定された Repository を Clone するだけ。
+- 「アクセスできる GitHub の Repository の一覧から選ぶ」（要件）は UI（PAW-061）に依存し、この Issue にない。`clone_from_github` は、指定された Repository を Clone するだけ。
 - Web の UI（PAW-061）と HTTP の Endpoint はない。
 
 ### 実装の由来
@@ -3028,6 +3369,38 @@ Backend が作る Checkout は、`workspaces` と Project の Directory（0700�
 
 `PAW_TEST_DATABASE_URL` を設定すると、実 PostgreSQL と実 git（一時 Directory の Repository。`https://github.com/` は Local の Bare Repository に向ける）で動きます。設定がなくても、検証・Path・git・GitHub の解析・設定の Test は動きます。
 `tests/test_repositories_grants.py` は、Service の Test Class を **Superuser でない Application の Role** で実行し、Migration が与える権限が過不足ないことを確かめます。
+`tests/test_repositories_ssh.py`（`SshGitRunner`。DB を使わない）は、実 SSH にも実 Linux User にも依存しません。`ssh_executable` を、この Test だけが書く Fake の実行 File に差し替え、Fixed Option（鍵・Port・`BatchMode` 等）の送出、Wire Format の往復（敵対的な文字列を含む）、`ssh` 自身の終了コード 255 の特別扱い、鍵が使えないときに `ssh` を 1 度も起動しないこと、を確かめます。
+
+## GitHub User Connection（`gh auth`）
+
+[PAW-028](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/25)で実装しました。要件は「Git / GitHub」の `[FIXED] GitHub認証方式`（V1 は GitHub App を使わず、Linux User ごとに `gh auth login` する）と、
+Implementation Backlog の受け入れ条件（Linux User ごとの認証状態を認識する、token / private key を Admin UI へ出さない、issue / PR / API 操作を対象 User の Identity で実行する）です。
+**Migration も新しい Table もありません**（下の「新しい Decision を起票しなかった理由」）。`repositories/github_connection.py` の 1 File で、既存の `repositories` package を拡張しています。
+
+- **接続状態の認識。** `GitHubConnectionService.status(actor, user_id, *, hostname=None)` が `gh auth status --hostname <host> --json hosts` を、その User の Linux Account **として**（`GhRunner`）実行し、`CONNECTED`（`login` 付き）/ `NOT_CONNECTED` の 2 値のどちらかを返します。`--show-token` は一切渡さないため、`gh` 自身が返す JSON に token は元から入りません。パースできない出力・`gh` 自身が Fatal と報告した終了コード（`--json` は認証状態だけでは 0 のまま終わるため、非 0 は「確認できなかった」の意味）は `GhCommandError` で拒否し、`NOT_CONNECTED` に丸めません（推測しない。fail closed）。
+- **Admin UI に token / private key を出さない。** `GitHubConnectionStatus`（`hostname`・`state`・`login` の 3 Field だけ）には、そもそも token や鍵を入れる Field がありません（`__post_init__` が `login` の形も検査し、`gh` の出力を無条件に信用しません）。
+- **issue / PR / API 操作を対象 User の Identity で実行する経路。** `GhRunner`（`SubprocessGhRunner`）が、その経路そのものです。`git.py` の `GitRunner` と同じ規律（許可リストの環境、Shell なし、Timeout、出力の上限、**実行 User が Account の持ち主でなければ拒否**）で `gh` を動かします。`GhCliGitHubGateway` が、`repositories/github.py` の継ぎ目 `GitHubGateway` をこれで実装し（`create_repository` は `gh repo create` を実行 User 自身の Identity で呼ぶ）、`RepositoryService.from_policy(..., gh_runner=...)` で配線します（`gh_runner` を渡さなければ、従来どおり `UnavailableGitHubGateway`）。issue / PR の作成はまだ呼び出す側がなく（`pr.create` / `project.pr.create` は Capability だけが宣言済み）、`GhRunner` は後続の Issue が同じ経路を再利用するための土台です。
+- **認可。** 自分の状態を見るのは `github.use`（`Scope.SELF`、Decision 0004）。**他の User の状態を見るのは、新しい Capability を足さず、既存の `admin.usage.view` を使います**（`docs/SECURITY_RBAC_AUDIT.md` の Usage Dashboard が User 別に「Repos/PRs」を含む一覧であるため、その一部として扱いました。`ConnectionService`（PAW-030）が自分 / 他人の閲覧をまさに `agent.use` / `admin.usage.view` で分けているのと同じ形です）。`Authorizer` が判定のたびに Audit を書きます（`REQUIRED`）。
+- **実行 User の制約は Decision 0017 の 4 のまま。** `gh` も git と同じく、Backend の Process の Linux User としてしか動きません。別の User として動かす仕組み（User ごとの SSH）は別 Issue [#105](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/105) で、この PR には含みません。Decision 0017 の 4 は「PAW-028 も同じ仕組みを必要とする」と既に書いており、この制約自体は新しい判断ではありません。
+- **Private Repository の Clone（`repositories/service.py::clone_from_github`）にも同じ経路を使う。** `RepositoryService.from_policy(..., gh_runner=...)` は `GitClient` を `credential_helper=True` で組み立て、`clone` だけに `-c credential.helper=!gh auth git-credential` を足します（`git clone` 自身の `-c` で、`.git/config` にだけでなく Clone そのものにも効く。git の File 由来の設定を全て切る `GIT_CONFIG_GLOBAL=/dev/null` の影響を受けない）。`gh` は Command Line から渡された固定の文字列であり、この Backend が Token を読み書きすることはありません。`gh_runner` を渡さない構成（既定）では、この `-c` は付かず、以前と同じく Private Repository の Clone は失敗します。
+- **`gh` が `SAFE_PATH` の外にある構成。** `SubprocessGhRunner(gh_executable=...)` を使うときは、`from_policy(..., gh_executable=...)` にも同じ実行File Pathを渡してください（既定は `"gh"`）。渡さないと、状態確認・Repository作成は設定した実行Fileで動くのに、Private Repository の Clone だけ、gitの固定 `PATH`（`SAFE_PATH`）上のbareな `gh` を探しに行き、見つからず失敗します（Codex Reviewの指摘、P2）。
+
+### 新しい Decision を起票しなかった理由
+
+Implementation Backlog の受け入れ条件 3 つは、上のとおり実装できました。曖昧な判断が必要な点は次のように解消し、新しい Decision（`0030` 相当）は起票していません。
+
+1. **認証手段（対話的な `gh auth login` か token 配置か）**: 要件が `[FIXED]` で「Linux User 自身の `gh auth login`」と決めており、選択の余地がありません。Backend は `gh auth login` 自体を一切起動しません（対話的な Web 認証は User 自身の端末で行う。REQUIREMENTS の「GUI から接続フローを開始できるようにする」は HTTP の Endpoint も UI もまだない現状のこの Package の範囲外で、PAW-027 の README も同じ理由で「HTTP の Endpoint はない」と明記しています）。
+2. **複数 User が同じ Linux User を共有するケース**: Decision 0017 の 3 が `login_name` を Linux User 名とし、Workspace の User と Linux Account を 1 対 1 に決めています。この PR はその対応をそのまま再利用するだけで、新しい選択をしていません。
+3. **失効・再認証の UI / API の範囲**: `gh auth logout` や再認証を始める API はこの PR にありません（HTTP の Endpoint がまだ存在しないため、Admin UI からの失効操作という具体的な形も定まりません）。状態は `gh auth status` を都度実行して求めるだけの読み取りで、Backend は何も保存しないため、「失効」という操作の対象になる保存済みの状態自体がありません。
+4. **他の User の接続状態を見る Capability**: 新しい Capability を足さず、既存の `admin.usage.view`（Decision 0004、Scope.SYSTEM、委任不可、Audit `REQUIRED`）を再利用しました。Decision 0024 が示すとおり、この Repository は新しい Capability を足すこと自体を Decision の対象にしていますが、今回は**足していない**ため、その対象になりません。
+
+### GitHub User Connection の制限と未確認の点
+
+- Decision 0017 の 4 と同じ理由で、**この環境では 1 つの Backend Process の User の分しか確認・実行できません**（他の Linux User の `gh auth status` は `IDENTITY_MISMATCH` で拒否されます）。Issue [#105](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/105) の SSH 経由の Runner ができるまで、複数 User の接続状態を Admin が一度に見る運用はできません。
+- 実際の GitHub アカウントでの `gh auth login` / `gh repo create` は試していません（`SubprocessGhRunner` に差し込む `gh` は Test 用の Script で、実 `gh` 自体の動作は本物の `gh` の契約を信用しています）。
+- `gh auth status` の JSON がホストごとに複数の Active でない Account を持つ場合、`active: true` の 1 件だけを見ます（`gh` 自身が Host ごとに Active な Account を高々 1 つに保つ前提）。
+- `gh repo create` の出力を、GitHub の URL として `parse_github_source` でもう一度検証していますが、これは `create_local` / `create_github` の既存の契約（`check_created_repository`）をそのまま踏襲したもので、この PR 独自の検証ではありません。
+- Admin が他の User の接続状態を一覧で見る画面・API はありません（`GitHubConnectionService.status` は 1 User ずつです）。
 
 ## 依存 Package
 
@@ -3038,13 +3411,14 @@ CI は pre-commit の専用環境で Test を実行するため、同じ Version
 3 か所の一致と、Backend が import する Package の宣言漏れは
 [test_dependency_pins.py](../../.github/scripts/test_dependency_pins.py) が検査します。
 依存を追加・更新する場合は 3 か所を同時に変更してください。
+PAW-023 は `webauthn`（py_webauthn。WebAuthn の検証。`auth/passkeys/ceremony.py` だけが import する）と `cryptography`（Test の Software Authenticator が実際に署名するために直接 import する）を追加しました。どちらも最新の Version を固定しています（選定の理由は Decision 0025）。
 
 ## 今後の Issue
 
 [PAW-021](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/18)（Owner Setup）、
 RBAC（PAW-025）、Task Lifecycle（PAW-032）、Task Queue / Budget / Loop 検知（PAW-033）、Tool Broker（PAW-031）、Memory Schema（PAW-040）、Research Scratch Store（PAW-050）、Research Provider Adapter（PAW-051）、Research Privacy Filter（PAW-053）、Evidence / Claim Provenance（PAW-052）は、この Skeleton の上に実装済みです。
-PAW-022（Login / Session / Password）は Owner Setup の Token を受け取る側として実装済みです（[Login / Session / Password Policy](#login--session--password-policy)）。PAW-023（Passkey / Step-up）はまだありません。
-Memory の保存・整理は PAW-041 以降で、Memory Schema の上に実装します。検索は [Hybrid Retrieval（PAW-043）](#hybrid-retrieval) が Memory Schema の上に実装済みです。
+PAW-022（Login / Session / Password）は Owner Setup の Token を受け取る側として実装済みです（[Login / Session / Password Policy](#login--session--password-policy)）。PAW-023（Passkey / Step-up）も実装済みです（[Passkey / Step-up](#passkey--step-up)。Decision 0025 は Approved）。
+Memory の Journal と背景の整理（PAW-041）は、Memory Schema の上に実装済みです。検索は [Hybrid Retrieval（PAW-043）](#hybrid-retrieval) が Memory Schema の上に実装済みです。Conflict / Versioning と確認 Flow は PAW-042 以降で、その上に実装します。
 Research Privacy Filter（PAW-053）と Evidence / Claim Provenance（PAW-052）は、Research Provider Adapter の上に実装済みです。Research の Provider（Direct Web、Docs、GitHub、OpenCode）の Adapter は、Research Provider Adapter の上に実装します。外部送信の Audit を Audit Log へ保存する実装は、後続の Issue です。
 受け入れ基準は [Implementation Backlog](../../docs/IMPLEMENTATION_BACKLOG.md)、
 実装時に選択できる事項は [Requirements Freeze Review](../../docs/REQUIREMENTS_FREEZE_REVIEW.md) を参照してください。

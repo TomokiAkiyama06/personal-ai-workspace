@@ -49,6 +49,7 @@ personal-ai-workspace/
 │  │  │     ├─ 0001_baseline.py
 │  │  │     ├─ 0021_owner_setup.py
 │  │  │     ├─ 0022_login_session_password.py
+│  │  │     ├─ 0023_passkeys.py
 │  │  │     ├─ 0025_audit_events.py
 │  │  │     ├─ 0026_projects.py
 │  │  │     ├─ 0027_repository_registration.py
@@ -57,6 +58,7 @@ personal-ai-workspace/
 │  │  │     ├─ 0032_task_lifecycle.py
 │  │  │     ├─ 0033_task_queue_budget_loop.py
 │  │  │     ├─ 0040_memory_schema.py
+│  │  │     ├─ 0041_memory_journal.py
 │  │  │     ├─ 0043_memory_search_index.py
 │  │  │     ├─ 0046_shared_memory_candidates.py
 │  │  │     ├─ 0050_research_scratch_store.py
@@ -85,11 +87,21 @@ personal-ai-workspace/
 │  │  │  │  ├─ errors.py
 │  │  │  │  ├─ limits.py
 │  │  │  │  ├─ models.py
+│  │  │  │  ├─ passkeys/
+│  │  │  │  │  ├─ __init__.py
+│  │  │  │  │  ├─ approvals.py
+│  │  │  │  │  ├─ ceremony.py
+│  │  │  │  │  ├─ config.py
+│  │  │  │  │  ├─ models.py
+│  │  │  │  │  ├─ service.py
+│  │  │  │  │  ├─ store.py
+│  │  │  │  │  └─ types.py
 │  │  │  │  ├─ passwords.py
 │  │  │  │  ├─ principals.py
 │  │  │  │  ├─ service.py
 │  │  │  │  ├─ sessions.py
 │  │  │  │  ├─ state.py
+│  │  │  │  ├─ stepup.py
 │  │  │  │  ├─ throttle.py
 │  │  │  │  ├─ tokens.py
 │  │  │  │  └─ wiring.py
@@ -122,6 +134,20 @@ personal-ai-workspace/
 │  │  │  │  └─ tokens.py
 │  │  │  ├─ memory/
 │  │  │  │  ├─ fulltext.py
+│  │  │  │  ├─ journal/
+│  │  │  │  │  ├─ __init__.py
+│  │  │  │  │  ├─ applier.py
+│  │  │  │  │  ├─ consolidator.py
+│  │  │  │  │  ├─ domain.py
+│  │  │  │  │  ├─ errors.py
+│  │  │  │  │  ├─ limits.py
+│  │  │  │  │  ├─ models.py
+│  │  │  │  │  ├─ queue.py
+│  │  │  │  │  ├─ rules.py
+│  │  │  │  │  ├─ service.py
+│  │  │  │  │  ├─ sql.py
+│  │  │  │  │  ├─ validation.py
+│  │  │  │  │  └─ worker.py
 │  │  │  │  ├─ retrieval/
 │  │  │  │  │  ├─ __init__.py
 │  │  │  │  │  ├─ candidates.py
@@ -260,7 +286,8 @@ personal-ai-workspace/
 │  │  │        ├─ __init__.py
 │  │  │        ├─ auth.py
 │  │  │        ├─ events.py
-│  │  │        └─ health.py
+│  │  │        ├─ health.py
+│  │  │        └─ passkeys.py
 │  │  ├─ pyproject.toml
 │  │  └─ tests/
 │  │     ├─ __init__.py
@@ -271,6 +298,10 @@ personal-ai-workspace/
 │  │     ├─ fake_postgres.py
 │  │     ├─ gate_support.py
 │  │     ├─ identity_support.py
+│  │     ├─ journal_support.py
+│  │     ├─ passkey_http_support.py
+│  │     ├─ passkey_pg_support.py
+│  │     ├─ passkey_support.py
 │  │     ├─ privacy_audit_support.py
 │  │     ├─ privacy_support.py
 │  │     ├─ provenance_support.py
@@ -332,6 +363,19 @@ personal-ai-workspace/
 │  │     ├─ test_identity_migration.py
 │  │     ├─ test_identity_settings.py
 │  │     ├─ test_identity_tokens.py
+│  │     ├─ test_journal_argument_validation.py
+│  │     ├─ test_journal_concurrency.py
+│  │     ├─ test_journal_consolidator.py
+│  │     ├─ test_journal_failures.py
+│  │     ├─ test_journal_gpu_unavailable.py
+│  │     ├─ test_journal_grants.py
+│  │     ├─ test_journal_migration.py
+│  │     ├─ test_journal_queue.py
+│  │     ├─ test_journal_rules.py
+│  │     ├─ test_journal_schema.py
+│  │     ├─ test_journal_service.py
+│  │     ├─ test_journal_status_history.py
+│  │     ├─ test_journal_worker_contract.py
 │  │     ├─ test_memory_status_history.py
 │  │     ├─ test_memory_status_history_migration.py
 │  │     ├─ test_middleware.py
@@ -340,6 +384,19 @@ personal-ai-workspace/
 │  │     ├─ test_owner_setup_cli.py
 │  │     ├─ test_owner_setup_service.py
 │  │     ├─ test_owner_token_roles.py
+│  │     ├─ test_passkey_argument_validation.py
+│  │     ├─ test_passkey_authenticate.py
+│  │     ├─ test_passkey_ceremony.py
+│  │     ├─ test_passkey_gate.py
+│  │     ├─ test_passkey_grants.py
+│  │     ├─ test_passkey_http.py
+│  │     ├─ test_passkey_migration.py
+│  │     ├─ test_passkey_plans.py
+│  │     ├─ test_passkey_registration.py
+│  │     ├─ test_passkey_revoke.py
+│  │     ├─ test_passkey_sensitive.py
+│  │     ├─ test_passkey_settings.py
+│  │     ├─ test_passkey_types.py
 │  │     ├─ test_postgres_integration.py
 │  │     ├─ test_privacy_audit_event.py
 │  │     ├─ test_privacy_audit_factory.py
@@ -544,6 +601,7 @@ personal-ai-workspace/
 │     ├─ 0014-task-working-set-persistence.md
 │     ├─ 0016-shared-connection-adapter-policy.md
 │     ├─ 0017-repository-registration-policy.md
+│     ├─ 0018-memory-journal-consolidation-policy.md
 │     ├─ 0022-project-lifecycle-capabilities.md
 │     ├─ 0023-audit-events-details-for-external-send.md
 │     ├─ 0026-memory-status-change-history.md

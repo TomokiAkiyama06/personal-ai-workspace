@@ -67,9 +67,28 @@ MAX_GIT_TIMEOUT_S = 7_200.0
 # died): the next attempt takes it over.
 PENDING_TIMEOUT_FACTOR = 2.0
 
+# --- gh (PAW-028) --------------------------------------------------------------------
+
+# What one ``gh`` command may write to stdout or stderr before it is stopped. ``gh
+# auth status --json`` for one host is a few hundred bytes; this is the same bound
+# as git's own commands, not a tighter one, since a hostile ``gh`` is not otherwise
+# distinguished from a hostile git.
+MAX_GH_OUTPUT_BYTES = 65_536
+DEFAULT_GH_TIMEOUT_S = 30.0
+
 # --- accounts and roots --------------------------------------------------------------
 
 # The first uid of a human account on Ubuntu (``UID_MIN`` of ``/etc/login.defs``).
 DEFAULT_MIN_LINUX_UID = 1000
 MAX_ROOT_TEMPLATES = 8
 MAX_CLONE_HOSTS = 8
+
+# --- SSH (SshGitRunner, Issue #105 / Decision 0029) -----------------------------------
+
+# How long the SSH handshake (TCP connect and authentication) may take before
+# ``ssh`` gives up; independent of ``timeout_s`` (the whole call: handshake plus
+# the wrapper running git), which ``RepositoryPolicy.git_timeout_s`` /
+# ``clone_timeout_s`` already bound.
+DEFAULT_SSH_CONNECT_TIMEOUT_S = 10
+MAX_SSH_CONNECT_TIMEOUT_S = 300
+DEFAULT_SSH_PORT = 22

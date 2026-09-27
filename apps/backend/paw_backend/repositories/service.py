@@ -14,8 +14,9 @@ Manager):
   account, verified (``paths.check_existing_repository`` and ``git rev-parse``)
   and registered as it is;
 * ``create_local`` / ``create_github``: a new empty repository (``git init``),
-  local only, or also on GitHub through the :class:`GitHubGateway` seam (PAW-028:
-  the default gateway refuses).
+  local only, or also on GitHub through the :class:`GitHubGateway` seam (PAW-028's
+  ``GhCliGitHubGateway`` fills it when ``from_policy`` is given a ``gh_runner``;
+  the default gateway still refuses).
 
 Every other member with ``project.read`` (and the repository's ``read`` ACL) makes
 their own checkout with ``create_checkout`` (a clone from a registered remote).
@@ -162,6 +163,7 @@ from paw_backend.repositories.github import (
     parse_github_source,
     remote_urls_from_origin,
 )
+from paw_backend.repositories.github_connection import GhCliGitHubGateway, GhRunner
 from paw_backend.repositories.limits import (
     DEFAULT_LIST_LIMIT,
     DEFAULT_LOCK_TIMEOUT_MS,
@@ -325,6 +327,8 @@ class RepositoryService:
         accounts: AccountDirectory | None = None,
         account_lookup: Callable[[str], pwd.struct_passwd] | None = None,
         github: GitHubGateway | None = None,
+        gh_runner: GhRunner | None = None,
+        gh_executable: str = "gh",
         clock: Clock | None = None,
         lock_timeout_ms: int = DEFAULT_LOCK_TIMEOUT_MS,
     ) -> "RepositoryService":
@@ -335,7 +339,27 @@ class RepositoryService:
         built from it, so ``PAW_REPOSITORY_MIN_LINUX_UID`` is applied when a Linux
         account is looked up, whatever else is configured. ``account_lookup``
         replaces ``pwd.getpwnam`` (tests only); ``runner`` is the ``GitRunner`` of the
-        deployment (``SubprocessGitRunner`` unless git must run as another user).
+        deployment: ``SubprocessGitRunner`` when the backend already runs as every
+        checkout's own Linux user, ``paw_backend.repositories.ssh.SshGitRunner``
+        when it must reach another Linux user over SSH instead (Issue #105,
+        Decision 0029). Swapping ``runner`` is the whole migration between the two:
+        neither changes ``policy``, ``accounts`` or anything already registered.
+
+        ``gh_runner`` (PAW-028) closes the ``GitHubGateway`` seam with
+        ``GhCliGitHubGateway`` -- ``policy.clone_hosts`` and ``policy.gh_timeout_s``,
+        the same policy as everything else -- unless ``github`` is given explicitly
+        (then ``gh_runner`` is rejected: one gateway, not two). Neither given: the
+        default ``UnavailableGitHubGateway`` (``create_github`` refuses), exactly as
+        before PAW-028. ``gh_runner`` also makes ``clone_from_github`` add gh's own
+        credential helper to the clone (``GitClient(..., credential_helper=True)``),
+        so a private repository clones under the same actor's ``gh auth login`` --
+        the other half of the seam PAW-028 was asked to close (the dependency
+        ``docs/decisions/0017-repository-registration-policy.md`` names). When ``gh``
+        is not on git's own fixed ``PATH`` (``SAFE_PATH``), pass the same
+        ``gh_executable`` given to the ``gh_runner``
+        (``SubprocessGhRunner(gh_executable=...)``) here too, so the credential
+        helper names the binary that is actually installed rather than a bare
+        ``gh`` git's own ``PATH`` cannot find.
         """
         if not isinstance(policy, RepositoryPolicy):
             raise TypeError("policy must be a RepositoryPolicy")
@@ -344,11 +368,22 @@ class RepositoryService:
             accounts = LoginNameAccountDirectory(database, policy=policy, **options)
         elif account_lookup is not None:
             raise TypeError("account_lookup is for the default account directory")
+        if gh_runner is not None:
+            if github is not None:
+                raise TypeError("github and gh_runner are exclusive")
+            github = GhCliGitHubGateway(
+                accounts, gh_runner, policy.clone_hosts, timeout_s=policy.gh_timeout_s
+            )
         return cls(
             database,
             authorizer,
             accounts,
-            GitClient(runner, policy),
+            GitClient(
+                runner,
+                policy,
+                credential_helper=gh_runner is not None,
+                gh_executable=gh_executable,
+            ),
             policy=policy,
             github=github,
             clock=clock,
@@ -591,10 +626,15 @@ class RepositoryService:
         ``source`` is ``owner/repo`` or ``https://<host>/<owner>/<repo>[.git]`` on
         an allowed host (``github.parse_github_source``). ``name`` defaults to the
         repository's name; ``branch`` (optional) is checked out instead of the
-        remote's default. The clone runs as the actor's Linux user with the actor's
-        own git configuration and no credential from this backend (PAW-028): a
-        private repository needs the user's own ``gh auth``. Both ``https``
-        spellings of the URL are registered as remotes. ``project.repo.add``.
+        remote's default. The clone runs as the actor's Linux user; no credential
+        is ever held by this backend (PAW-028). When this service was built with a
+        ``gh_runner`` (``from_policy``), a private repository clones under the
+        actor's own ``gh auth login`` (gh's own credential helper, added only to
+        this clone -- ``GitClient``). Without a ``gh_runner``, a private repository
+        cannot be cloned: nothing here reads the actor's own ``~/.gitconfig``
+        either (git runs with ``GIT_CONFIG_GLOBAL=/dev/null``, see ``git.py``).
+        Both ``https`` spellings of the URL are registered as remotes.
+        ``project.repo.add``.
         """
         principal = self._human(actor)
         project_id = validate_uuid("project_id", project_id)
