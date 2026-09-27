@@ -8,6 +8,7 @@ and races between separate connection pools (a second worker process).
 """
 
 import asyncio
+import contextlib
 import unittest
 import uuid
 
@@ -25,6 +26,7 @@ from paw_backend.orchestrator.errors import (
     DagAlreadyExistsError,
     DagNotFoundError,
     DagStateError,
+    InvalidOrchestratorArgumentError,
     NodeStateError,
     StaleDagEpochError,
     StaleNodeAttemptError,
@@ -158,6 +160,19 @@ class AcquireTest(PostgresOrchestratorTestCase):
 
         self.assertEqual((first.epoch, first.owner), (1, "worker-1"))
         self.assertEqual((second.epoch, second.owner), (2, "worker-2"))
+
+    async def test_a_take_over_in_the_callers_transaction_needs_one(self):
+        dag = await self.make_dag()
+        async with self.database.session() as session:
+            with self.assertRaises(InvalidOrchestratorArgumentError):
+                await self.store.acquire_in(session, dag.id, "w1", RUN)
+        # Rolled back with the caller's transaction: nothing was taken over.
+        with contextlib.suppress(RuntimeError):
+            async with self.database.session() as session, session.begin():
+                taken = await self.store.acquire_in(session, dag.id, "w1", RUN)
+                self.assertEqual(taken.epoch, 1)
+                raise RuntimeError("the caller gives up")
+        self.assertEqual((await self.store.get_by_id(dag.id)).epoch, 0)
 
     async def test_concurrent_take_overs_get_distinct_epochs(self):
         dag = await self.make_dag()

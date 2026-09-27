@@ -361,7 +361,19 @@ class DagStore:
     # -- taking a DAG over ------------------------------------------------------
 
     async def acquire(self, dag_id: uuid.UUID, owner: str, run: TaskRun) -> DagRecord:
-        """Take the DAG over for ``owner`` (a worker holding the queue lease).
+        """``acquire_in`` in a transaction of its own. The orchestrator never calls
+        it: it takes a DAG over only together with the proof of its queue lease
+        (``acquire_in``, ``Orchestrator._acquire_dag``)."""
+        self._check_acquire(dag_id, owner, run)
+        async with self._database.session() as session, session.begin():
+            return await self.acquire_in(session, dag_id, owner, run)
+
+    async def acquire_in(
+        self, session: AsyncSession, dag_id: uuid.UUID, owner: str, run: TaskRun
+    ) -> DagRecord:
+        """Take the DAG over for ``owner`` (a worker holding the queue lease), in
+        the transaction of the caller's ``session`` (inside a transaction; nothing
+        is committed here).
 
         Adds 1 to the epoch: every write of an earlier owner is refused from now
         on. Also, in the same transaction:
@@ -375,34 +387,44 @@ class DagStore:
 
         ``run.attempt`` must be the DAG's attempt. A cancelled DAG cannot be taken
         over (``DagStateError``): a cancelled task is restarted, not retried.
+
+        The DAG row is locked first; the caller proves its lease afterwards in the
+        same transaction (``TaskQueue.heartbeat_in``, which locks the queue entry:
+        the lock order is DAG, then entry, and nothing locks them the other way
+        round). A refused lease rolls the take-over back, epoch included.
         """
+        if not isinstance(session, AsyncSession) or not session.in_transaction():
+            raise InvalidOrchestratorArgumentError("session")
+        self._check_acquire(dag_id, owner, run)
+        locked = await self._open(session, dag_id, None, require_active=False)
+        dag = locked.dag
+        if run.attempt != dag.attempt or dag.state is DagState.CANCELLED:
+            raise DagStateError()
+        dag.epoch += 1
+        dag.owner = owner
+        dag.updated_at = func.now()
+        if run.retry_count > dag.task_retry_count:
+            dag.task_retry_count = run.retry_count
+            if dag.state is DagState.FAILED:
+                dag.state = DagState.ACTIVE
+            for row in locked.nodes.values():
+                if row.state in _SETTLED_FOR_REOPEN:
+                    row.state = NodeState.PENDING
+                    row.rung_attempts = 0
+                    row.error_class = None
+                    row.finished_at = None
+                    row.updated_at = func.now()
+        await self._interrupt_running(session, locked, NodeState.READY)
+        locked.settle()
+        await session.flush()
+        return await _record(session, dag)
+
+    @staticmethod
+    def _check_acquire(dag_id: uuid.UUID, owner: str, run: TaskRun) -> None:
         check_uuid("dag_id", dag_id)
         check_worker_id(owner, "owner")
         if not isinstance(run, TaskRun):
             raise InvalidOrchestratorArgumentError("run")
-        async with self._database.session() as session, session.begin():
-            locked = await self._open(session, dag_id, None, require_active=False)
-            dag = locked.dag
-            if run.attempt != dag.attempt or dag.state is DagState.CANCELLED:
-                raise DagStateError()
-            dag.epoch += 1
-            dag.owner = owner
-            dag.updated_at = func.now()
-            if run.retry_count > dag.task_retry_count:
-                dag.task_retry_count = run.retry_count
-                if dag.state is DagState.FAILED:
-                    dag.state = DagState.ACTIVE
-                for row in locked.nodes.values():
-                    if row.state in _SETTLED_FOR_REOPEN:
-                        row.state = NodeState.PENDING
-                        row.rung_attempts = 0
-                        row.error_class = None
-                        row.finished_at = None
-                        row.updated_at = func.now()
-            await self._interrupt_running(session, locked, NodeState.READY)
-            locked.settle()
-            await session.flush()
-            return await _record(session, dag)
 
     # -- the writes of the owner --------------------------------------------------
 

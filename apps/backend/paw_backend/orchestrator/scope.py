@@ -33,17 +33,44 @@ from paw_backend.orchestrator.domain import (
 )
 from paw_backend.orchestrator.errors import ScopeEscalationError
 from paw_backend.orchestrator.records import NodeRecord
+from paw_backend.tasks import TaskRun
 from paw_backend.tools import TaskScope
 from paw_backend.tools.scope import path_within
 
 # Sub-agent identities are derived, never random: the same node attempt of the
-# same task is always the same agent in an audit row.
+# same run of the task is always the same agent in an audit row, and no two
+# attempts share one.
 _AGENT_NAMESPACE = uuid.UUID("6f0a7c3e-3a58-4d0b-9c7e-0d34f5b1a034")
 
 
-def agent_id_of(task_id: uuid.UUID, node_key: str, attempt: int) -> uuid.UUID:
-    """The id of the agent that plays one attempt of one node."""
-    return uuid.uuid5(_AGENT_NAMESPACE, f"{task_id}/{node_key}/{attempt}")
+def agent_id_of(
+    task_id: uuid.UUID,
+    run: TaskRun,
+    node_key: str,
+    attempt: int,
+    *,
+    claim: tuple[int, int] | None = None,
+) -> uuid.UUID:
+    """The id of the agent that plays one attempt of one node (Decision 0021,
+    section 3: derived from the task, the node and the attempt).
+
+    The attempt is named in full, so that no two attempts share an agent:
+
+    * ``run`` (the task attempt and retry count, ``TaskRun``): a Restart gives the
+      task a new DAG whose node attempts count from 1 again, and a Retry runs the
+      planner again from its first attempt;
+    * ``claim`` (the queue entry id and its ``claim_count``), for the planner only:
+      its attempts are counted by the worker that plans, so a worker that takes the
+      run over (a new claim), or a new entry of the same run (after a Resume),
+      counts from 1 again. The attempts of a node are counted in the DAG
+      (``attempt_count``, never reset within a task attempt) and need no claim.
+    """
+    parts = [str(task_id), f"{run.attempt}.{run.retry_count}", node_key]
+    if claim is not None:
+        entry_id, claim_count = claim
+        parts.append(f"claim-{entry_id}.{claim_count}")
+    parts.append(str(attempt))
+    return uuid.uuid5(_AGENT_NAMESPACE, "/".join(parts))
 
 
 def node_grant(

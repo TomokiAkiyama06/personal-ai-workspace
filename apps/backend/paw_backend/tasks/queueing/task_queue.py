@@ -530,6 +530,40 @@ class TaskQueue:
             lease_expires_at=func.greatest(QueueEntryRow.lease_expires_at, lease_end),
         )
 
+    async def heartbeat_in(
+        self,
+        session: AsyncSession,
+        entry_id: int,
+        worker_id: str,
+        claim_count: int,
+        now: datetime | None = None,
+    ) -> QueueEntry:
+        """``heartbeat`` in the transaction of the caller's ``session`` (inside a
+        transaction; see ``cancel_in``).
+
+        The entry row stays locked (``FOR UPDATE``) until the caller's transaction
+        ends, so a claim by another worker (``FOR UPDATE SKIP LOCKED``) cannot
+        slip in between this proof of the lease and the caller's commit, and
+        after the commit the lease runs for a whole ``lease_seconds``: whatever
+        the caller wrote in the same transaction was written by the holder of a
+        valid lease. The orchestrator takes a DAG over this way
+        (``DagStore.acquire_in``). ``LeaseLostError`` as ``heartbeat``; after
+        one, the caller's transaction must be rolled back.
+        """
+        check_session("session", session)
+        check_entry_id(entry_id)
+        check_worker_id(worker_id)
+        check_claim_count(claim_count)
+        current, lease_end = self._instants(now)
+        return await self._update_held_in(
+            session,
+            entry_id,
+            worker_id,
+            claim_count,
+            current,
+            lease_expires_at=func.greatest(QueueEntryRow.lease_expires_at, lease_end),
+        )
+
     async def release(
         self,
         entry_id: int,

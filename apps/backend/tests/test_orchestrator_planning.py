@@ -10,9 +10,11 @@ from paw_backend.orchestrator.errors import (
     InvalidPlanError,
     PlanReason,
 )
+from paw_backend.orchestrator.orchestrator import PLANNER_IDENTITY
 from paw_backend.orchestrator.result import NodeResult
 from paw_backend.orchestrator.runtime import NodeOutcome
-from paw_backend.tasks import TaskCommand, TaskNotFoundError, TaskState
+from paw_backend.orchestrator.scope import agent_id_of
+from paw_backend.tasks import TaskCommand, TaskNotFoundError, TaskRun, TaskState
 from paw_backend.tasks.queueing import BudgetKind
 
 from .orchestrator_support import (
@@ -216,9 +218,6 @@ class PlannerTest(PostgresOrchestratorTestCase):
     async def test_a_node_keyed_plan_is_not_the_planner(self):
         # The planner is given the node key ``plan``, and a plan may name a node
         # ``plan`` too: their agent identities and failure histories stay apart.
-        from paw_backend.orchestrator.orchestrator import PLANNER_IDENTITY
-        from paw_backend.orchestrator.scope import agent_id_of
-
         async def planner(assignment):
             await assignment.tools.call("repo.read_file", {"path": "a.py"})
             return planned(node("plan"))
@@ -239,12 +238,20 @@ class PlannerTest(PostgresOrchestratorTestCase):
         await h.orchestrator.run_once("w1")
 
         planner_call, node_call = tools.calls
+        (entry,) = await self.rows("SELECT id, claim_count FROM queue_entries")
         self.assertEqual(
             planner_call.context.grant.agent_id,
-            agent_id_of(task_id, PLANNER_IDENTITY, 1),
+            agent_id_of(
+                task_id,
+                TaskRun(1, 0),
+                PLANNER_IDENTITY,
+                1,
+                claim=(entry["id"], entry["claim_count"]),
+            ),
         )
         self.assertEqual(
-            node_call.context.grant.agent_id, agent_id_of(task_id, "plan", 1)
+            node_call.context.grant.agent_id,
+            agent_id_of(task_id, TaskRun(1, 0), "plan", 1),
         )
         self.assertNotEqual(
             planner_call.context.grant.agent_id, node_call.context.grant.agent_id
@@ -273,6 +280,89 @@ class PlannerTest(PostgresOrchestratorTestCase):
         history = await h.loops.history(task_id)
         self.assertEqual(len(history), 2)
         self.assertNotEqual(history[0].signature, history[1].signature)
+
+    async def agents_of(self, tools: FakeTools) -> list:
+        return [call.context.grant.agent_id for call in tools.calls]
+
+    async def test_a_restarted_task_runs_its_nodes_with_new_agents(self):
+        # Attempt 2 of the task has a new DAG whose nodes count their attempts
+        # from 1 again: the agent of node ``a`` attempt 1 must not be attempt 1's.
+        async def reads(assignment):
+            await assignment.tools.call("repo.read_file", {"path": "a.py"})
+            return fail("Boom", "no", retryable=False)
+
+        tools = FakeTools()
+        runtime = FakeRuntime("local", script={"a": reads})
+        h = self.harness(runtimes={"local": runtime}, tools=tools)
+        task_id = await self.prepare(h, make_plan(node("a")))
+        self.assertEqual((await h.orchestrator.run_once("w1")).outcome, Out.DAG_FAILED)
+
+        await h.tasks.execute(task_id, TaskCommand.RESTART, actor=self.user)
+        await h.orchestrator.submit_plan(task_id, make_plan(node("a")))
+        await h.orchestrator.enqueue_task(task_id, preset="standard")
+        await h.orchestrator.run_once("w1")
+
+        first, second = tools.calls
+        self.assertEqual(
+            [c.context.run for c in (first, second)], [TaskRun(1, 0), TaskRun(2, 0)]
+        )
+        self.assertNotEqual(first.context.grant.agent_id, second.context.grant.agent_id)
+
+    async def test_a_retried_planner_is_a_new_agent(self):
+        # The planning attempts start at 1 again after a Retry: the planner of the
+        # retried run is not the planner that failed.
+        async def reads(assignment):
+            await assignment.tools.call("repo.read_file", {"path": "a.py"})
+            return fail("Boom", "no", retryable=False)
+
+        tools = FakeTools()
+        runtime = FakeRuntime("local", script={"plan": reads})
+        h = self.harness(runtimes={"local": runtime}, tools=tools)
+        task_id = await self.prepare(h)
+        report = await h.orchestrator.run_once("w1")
+        self.assertEqual(report.outcome, Out.PLAN_FAILED)
+
+        await h.tasks.execute(task_id, TaskCommand.RETRY, actor=self.user)
+        await h.orchestrator.enqueue_task(task_id, preset="standard")
+        await h.orchestrator.run_once("w1")
+
+        self.assertEqual([a.attempt for a in runtime.calls_of("plan")], [1, 1])
+        first, second = await self.agents_of(tools)
+        self.assertNotEqual(first, second)
+
+    async def test_a_planner_that_takes_a_run_over_is_a_new_agent(self):
+        # A worker that takes the run over (a new claim of the same entry, same
+        # task run) counts its planning attempts from 1 again.
+        async def reads(assignment):
+            await assignment.tools.call("repo.read_file", {"path": "a.py"})
+            return planned(node("a"))
+
+        tools = FakeTools()
+        runtime = FakeRuntime("local", script={"plan": reads})
+        h = self.harness(runtimes={"local": runtime}, tools=tools)
+        task_id = await self.prepare(h)
+        # A first worker started the task, and planned, and died.
+        entry = await h.queue.claim_next("dead")
+        await h.tasks.execute(task_id, TaskCommand.START, actor=self.system)
+        await self.owner_sql(
+            "UPDATE queue_entries SET claimed_at = now() - interval '10 seconds',"
+            " lease_expires_at = now() - interval '5 seconds'"
+        )
+        dead_planner = agent_id_of(
+            task_id, TaskRun(1, 0), PLANNER_IDENTITY, 1, claim=(entry.id, 1)
+        )
+
+        await h.orchestrator.run_once("w2")
+
+        (planner_agent,) = await self.agents_of(tools)
+        self.assertEqual(runtime.calls_of("plan")[0].attempt, 1)
+        self.assertNotEqual(planner_agent, dead_planner)
+        self.assertEqual(
+            planner_agent,
+            agent_id_of(
+                task_id, TaskRun(1, 0), PLANNER_IDENTITY, 1, claim=(entry.id, 2)
+            ),
+        )
 
     async def test_a_plan_submitted_beforehand_skips_the_planner(self):
         planner = FakeRuntime("local", script={"plan": CYCLE})

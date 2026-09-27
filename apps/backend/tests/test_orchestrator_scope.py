@@ -35,6 +35,7 @@ from paw_backend.orchestrator.scope import (
     node_grant,
     scope_within,
 )
+from paw_backend.tasks import TaskRun
 from paw_backend.tools import ScopedRepository, TaskScope
 from paw_backend.tools.scope import (
     LexicalPathResolver,
@@ -45,6 +46,8 @@ from paw_backend.tools.scope import (
 )
 
 from .authz_support import AGENT, P1, P2, uid
+
+RUN = TaskRun(1, 0)
 
 C = Capability
 R1, R2, R3 = uid(801), uid(802), uid(803)
@@ -275,7 +278,7 @@ class ScopeWithinTest(unittest.TestCase):
 class NodeGrantTest(unittest.TestCase):
     def grant(self, node=None, role=NodeRole.WORKER, agent=None):
         return node_grant(
-            PARENT_GRANT, node, role, agent or agent_id_of(uid(1), "n", 1)
+            PARENT_GRANT, node, role, agent or agent_id_of(uid(1), RUN, "n", 1)
         )
 
     def test_a_node_without_a_request_gets_its_roles_ceiling_narrowed_to_the_parent(
@@ -317,15 +320,41 @@ class NodeGrantTest(unittest.TestCase):
 
     def test_the_agent_of_a_node_attempt_is_derived_and_never_the_parent(self):
         seen = {
-            agent_id_of(uid(1), "a", 1),
-            agent_id_of(uid(1), "a", 2),
-            agent_id_of(uid(1), "b", 1),
-            agent_id_of(uid(2), "a", 1),
+            agent_id_of(uid(1), RUN, "a", 1),
+            agent_id_of(uid(1), RUN, "a", 2),
+            agent_id_of(uid(1), RUN, "b", 1),
+            agent_id_of(uid(2), RUN, "a", 1),
         }
         self.assertEqual(len(seen), 4)
-        self.assertEqual(agent_id_of(uid(1), "a", 1), agent_id_of(uid(1), "a", 1))
+        self.assertEqual(
+            agent_id_of(uid(1), RUN, "a", 1), agent_id_of(uid(1), RUN, "a", 1)
+        )
         self.assertNotIn(AGENT, seen)
-        self.assertEqual(self.grant().agent_id, agent_id_of(uid(1), "n", 1))
+        self.assertEqual(self.grant().agent_id, agent_id_of(uid(1), RUN, "n", 1))
+
+    def test_the_agent_of_a_later_run_of_the_task_is_another_agent(self):
+        # A Restart (the task attempt) or a Retry (its retry count) runs the same
+        # node, and its attempt numbers, again: the agent is not the same one.
+        seen = {
+            agent_id_of(uid(1), TaskRun(1, 0), "a", 1),
+            agent_id_of(uid(1), TaskRun(2, 0), "a", 1),
+            agent_id_of(uid(1), TaskRun(1, 1), "a", 1),
+            agent_id_of(uid(1), TaskRun(2, 1), "a", 1),
+        }
+        self.assertEqual(len(seen), 4)
+
+    def test_every_claim_of_the_entry_plans_with_its_own_agent(self):
+        # The planning attempts are counted per worker: a take-over (a new claim
+        # of the entry) or a new entry starts again at 1 and must not reuse the
+        # agent of an earlier planner.
+        seen = {
+            agent_id_of(uid(1), RUN, "@planner", 1, claim=(7, 1)),
+            agent_id_of(uid(1), RUN, "@planner", 1, claim=(7, 2)),
+            agent_id_of(uid(1), RUN, "@planner", 1, claim=(8, 1)),
+            agent_id_of(uid(1), RUN, "@planner", 2, claim=(7, 1)),
+            agent_id_of(uid(1), RUN, "@planner", 1),
+        }
+        self.assertEqual(len(seen), 5)
 
     def test_the_child_can_never_be_the_parent(self):
         with self.assertRaises(GrantEscalationError):

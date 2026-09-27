@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from paw_backend.orchestrator.domain import AttemptState, DagState, RunOutcome
 from paw_backend.orchestrator.errors import StaleDagEpochError
 from paw_backend.orchestrator.result import NodeResult
+from paw_backend.orchestrator.runtime import NodeOutcome
 from paw_backend.tasks import TaskCommand, TaskState
 from paw_backend.tasks.queueing import (
     LeaseLostError,
@@ -35,6 +36,10 @@ from .orchestrator_support import (
 
 Out = RunOutcome
 LONG_AGO = datetime(2020, 1, 1, tzinfo=UTC)
+
+
+def planned(*nodes: dict) -> NodeOutcome:
+    return NodeOutcome.succeeded(NodeResult("a plan"), plan={"nodes": list(nodes)})
 
 
 def final_e_summary(dag) -> str:
@@ -266,6 +271,74 @@ class LeaseTest(PostgresOrchestratorTestCase):
             [e for e in planner.timeline if e[0] == "end"], [("end", "plan", 1)]
         )
         self.assertIsNone(await self.store.get(task_id, 1))
+
+    async def test_a_stale_planner_cannot_take_the_dag_from_its_replacement(self):
+        # Worker A plans for longer than its lease. B claims the entry, plans
+        # too, takes the DAG over (epoch 1) and runs its node. When A's planner
+        # finally returns, A must not take the DAG over: its lease is gone, and
+        # the take-over is bound to the lease in one transaction, so it cannot
+        # fence the legitimate owner B.
+        release = asyncio.Event()
+
+        async def slow_plan(_assignment):
+            await release.wait()
+            return planned(node("only"))
+
+        runtime_a = FakeRuntime("local", script={"plan": slow_plan})
+        spy_a = SpyBudget(self.database)
+        a = self.harness(runtimes={"local": runtime_a}, budget=spy_a)
+        task_id = await self.prepare(a)
+        run_a = asyncio.create_task(a.orchestrator.run_once("wA"))
+        await until(lambda: len(runtime_a.calls_of("plan")) == 1, message="A plans")
+
+        await self.expire_the_lease()
+        runtime_b = FakeRuntime("local", script={"plan": planned(node("only"))})
+        runtime_b.gate("only")
+        b = self.harness(runtimes={"local": runtime_b})
+        run_b = asyncio.create_task(b.orchestrator.run_once("wB"))
+        await until(lambda: len(runtime_b.calls_of("only")) == 1, message="B's node")
+        taken = await self.store.get(task_id, 1)
+        self.assertEqual((taken.epoch, taken.owner), (1, "wB"))
+
+        release.set()  # A's planner returns (its plan loses: B's DAG stands)
+        report_a = await asyncio.wait_for(run_a, 120)
+
+        self.assertEqual(report_a.outcome, Out.LEASE_LOST)
+        after = await self.store.get(task_id, 1)
+        self.assertEqual((after.epoch, after.owner), (1, "wB"))
+        self.assertEqual(runtime_a.calls_of("only"), [])
+        runtime_b.gates["only"].set()
+        report_b = await asyncio.wait_for(run_b, 120)
+        self.assertEqual(report_b.outcome, Out.DAG_SUCCEEDED)
+        (entry,) = await self.rows("SELECT status, claim_count FROM queue_entries")
+        self.assertEqual((entry["status"], entry["claim_count"]), ("completed", 2))
+
+    async def test_a_take_over_is_refused_with_the_lease_it_needs(self):
+        # The DAG is taken over in the transaction that proves the lease: a
+        # refused lease leaves the epoch as it was, a valid one is extended.
+        h = self.harness()
+        task_id = await self.prepare(h, make_plan(node("only")))
+        entry = await h.queue.claim_next("w1")
+        event = await h.tasks.execute(task_id, TaskCommand.START, actor=self.system)
+        dag = await self.store.get(task_id, 1)
+        before = await self.scalar("SELECT lease_expires_at FROM queue_entries")
+
+        taken = await h.orchestrator._acquire_dag(dag.id, entry, "w1", event.run)
+        self.assertEqual((taken.epoch, taken.owner), (1, "w1"))
+        extended = await self.scalar("SELECT lease_expires_at FROM queue_entries")
+        self.assertGreaterEqual(extended, before)
+
+        await self.expire_the_lease()
+        with self.assertRaises(LeaseLostError):
+            await h.orchestrator._acquire_dag(dag.id, entry, "w1", event.run)
+        replacement = await h.queue.claim_next("w2")
+        with self.assertRaises(LeaseLostError):
+            await h.orchestrator._acquire_dag(dag.id, entry, "w1", event.run)
+        with self.assertRaises(LeaseLostError):  # the claim of another worker
+            await h.orchestrator._acquire_dag(dag.id, replacement, "w1", event.run)
+        self.assertEqual((await self.store.get_by_id(dag.id)).epoch, 1)
+        again = await h.orchestrator._acquire_dag(dag.id, replacement, "w2", event.run)
+        self.assertEqual((again.epoch, again.owner), (2, "w2"))
 
 
 @requires_postgres

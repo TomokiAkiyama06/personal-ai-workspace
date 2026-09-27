@@ -39,7 +39,9 @@ order, by the loop of ``_drive``, so the writes of one run are sequential and th
 order is a function of the DAG (the store's row lock also serialises them against
 another worker). All the state is in PostgreSQL: a crashed worker leaves nothing
 in memory that matters, and the next lease holder takes the DAG over
-(``DagStore.acquire``).
+(``_acquire_dag``: the take-over and the proof of the lease commit in one
+transaction, so a worker that lost its lease can never raise the epoch after its
+replacement did).
 """
 
 import asyncio
@@ -786,7 +788,9 @@ class Orchestrator:
             if isinstance(planned, RunReport):
                 return planned
             dag = planned
-        dag = await self._store.acquire(dag.id, run.worker_id, run.run)
+        if run.lost.is_set():  # the heartbeats gave up while it planned
+            return RunReport(RunOutcome.LEASE_LOST, task_id)
+        dag = await self._acquire_dag(dag.id, run.entry, run.worker_id, run.run)
         run.epoch = dag.epoch
         if dag.state is not DagState.ACTIVE:
             # A DAG that already ended is not run again (one DAG per task attempt;
@@ -877,6 +881,29 @@ class Orchestrator:
             await asyncio.gather(lost_waiter, return_exceptions=True)
 
         return await self._finish_dag(run, dag, stop)
+
+    async def _acquire_dag(
+        self, dag_id: uuid.UUID, entry: QueueEntry, worker_id: str, run: TaskRun
+    ) -> DagRecord:
+        """Take the DAG over, bound to the queue lease in ONE transaction.
+
+        Planning can take up to a node timeout, and the lease may have been lost
+        and the entry claimed by another worker meanwhile (which may have taken
+        the DAG over already). A heartbeat before a separate take-over would leave
+        a window in which a stale worker raises the epoch after its replacement
+        did and fences it (both would then stop). So the take-over
+        (``DagStore.acquire_in``, DAG row locked) and the proof of the lease
+        (``TaskQueue.heartbeat_in``, entry row locked until the commit, which
+        a competing claim skips) commit together or not at all: ``LeaseLostError``
+        rolls the epoch back, and a committed take-over was made by the holder of
+        a valid lease whose lease then runs for a whole ``lease_seconds``. This is
+        the only place where the orchestrator raises an epoch."""
+        async with self._queue.database.session() as session, session.begin():
+            dag = await self._store.acquire_in(session, dag_id, worker_id, run)
+            await self._queue.heartbeat_in(
+                session, entry.id, worker_id, entry.claim_count
+            )
+        return dag
 
     async def _close_dag_of_a_cancelled_task(self, run: _Run, dag: DagRecord) -> None:
         """After a lost lease, best effort: a task whose entry was cancelled with
@@ -1223,8 +1250,13 @@ class Orchestrator:
             spec.role,
             agent_id_of(
                 run.task.id,
+                run.run,
                 PLANNER_IDENTITY if spec.node is None else spec.key,
                 spec.attempt,
+                # The planner's attempts are counted per claim (``_plan``).
+                claim=(
+                    (run.entry.id, run.entry.claim_count) if spec.node is None else None
+                ),
             ),
         )
         scope = derive_child_scope(

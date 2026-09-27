@@ -11,6 +11,8 @@ import inspect
 import unittest
 import uuid
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from paw_backend.db import Database
 from paw_backend.orchestrator import (
     DagStore,
@@ -91,6 +93,14 @@ def database() -> Database:
     return Database(make_settings())  # no URL: touching it raises
 
 
+def open_session() -> AsyncSession:
+    """A session inside a transaction that has not touched the database (the
+    connection is taken only by the first statement)."""
+    session = AsyncSession()
+    session.sync_session.begin()
+    return session
+
+
 def entry(**overrides) -> QueueEntry:
     data = {
         "id": 1,
@@ -150,6 +160,15 @@ class StoreArgumentTest(unittest.IsolatedAsyncioTestCase):
             "acquire": (
                 {"dag_id": DAG, "owner": "w1", "run": run},
                 {
+                    "dag_id": not_a_uuid(),
+                    "owner": [None, "", " w", "w w", "w" * 101, 5, b"w", CANARY + "\n"],
+                    "run": [None, (1, 0), 1, CANARY, object()],
+                },
+            ),
+            "acquire_in": (
+                {"session": open_session(), "dag_id": DAG, "owner": "w1", "run": run},
+                {
+                    "session": [None, AsyncSession(), CANARY, object()],
                     "dag_id": not_a_uuid(),
                     "owner": [None, "", " w", "w w", "w" * 101, 5, b"w", CANARY + "\n"],
                     "run": [None, (1, 0), 1, CANARY, object()],
