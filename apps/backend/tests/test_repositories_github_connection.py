@@ -477,11 +477,22 @@ class FromPolicyWiringTest(unittest.TestCase):
         # able to use the same actor's gh auth login, not just status checks.
         service = self.build(gh_runner=RecordingRunner())
         self.assertTrue(service._git._credential_helper)
+        self.assertEqual(service._git._gh_executable, "gh")
+
+    def test_a_configured_gh_executable_reaches_the_credential_helper_too(self):
+        # PAW-028 (Codex P2): the same gh_executable a SubprocessGhRunner was
+        # configured with must reach GitClient, or the helper names a "gh"
+        # that git's own fixed PATH cannot find.
+        service = self.build(
+            gh_runner=RecordingRunner(), gh_executable="/opt/gh/bin/gh"
+        )
+        self.assertEqual(service._git._gh_executable, "/opt/gh/bin/gh")
 
     def test_neither_given_keeps_the_gateway_unavailable(self):
         service = self.build()
         self.assertIsInstance(service._github, UnavailableGitHubGateway)
         self.assertFalse(service._git._credential_helper)
+        self.assertEqual(service._git._gh_executable, "gh")
 
     def test_github_and_gh_runner_together_is_rejected(self):
         with self.assertRaises(TypeError):

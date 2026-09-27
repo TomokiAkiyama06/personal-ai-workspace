@@ -328,6 +328,7 @@ class RepositoryService:
         account_lookup: Callable[[str], pwd.struct_passwd] | None = None,
         github: GitHubGateway | None = None,
         gh_runner: GhRunner | None = None,
+        gh_executable: str = "gh",
         clock: Clock | None = None,
         lock_timeout_ms: int = DEFAULT_LOCK_TIMEOUT_MS,
     ) -> "RepositoryService":
@@ -349,7 +350,12 @@ class RepositoryService:
         credential helper to the clone (``GitClient(..., credential_helper=True)``),
         so a private repository clones under the same actor's ``gh auth login`` --
         the other half of the seam PAW-028 was asked to close (the dependency
-        ``docs/decisions/0017-repository-registration-policy.md`` names).
+        ``docs/decisions/0017-repository-registration-policy.md`` names). When ``gh``
+        is not on git's own fixed ``PATH`` (``SAFE_PATH``), pass the same
+        ``gh_executable`` given to the ``gh_runner``
+        (``SubprocessGhRunner(gh_executable=...)``) here too, so the credential
+        helper names the binary that is actually installed rather than a bare
+        ``gh`` git's own ``PATH`` cannot find.
         """
         if not isinstance(policy, RepositoryPolicy):
             raise TypeError("policy must be a RepositoryPolicy")
@@ -368,7 +374,12 @@ class RepositoryService:
             database,
             authorizer,
             accounts,
-            GitClient(runner, policy, credential_helper=gh_runner is not None),
+            GitClient(
+                runner,
+                policy,
+                credential_helper=gh_runner is not None,
+                gh_executable=gh_executable,
+            ),
             policy=policy,
             github=github,
             clock=clock,

@@ -543,6 +543,36 @@ class OperationsTest(GitTestCase):
         with self.assertRaises(AssertionError):
             git("config", "--local", "--get", "credential.helper", cwd=destination)
 
+    async def test_a_configured_gh_executable_names_the_helper(self):
+        # PAW-028 (Codex review P2): when gh is outside SAFE_PATH, the helper
+        # must name the same executable the configured gh_runner uses, not a
+        # bare "gh" that git's own fixed PATH may not resolve.
+        bare = self.world.make_bare("acme", "priv2")
+        destination = f"{self.home}/priv2"
+        os.makedirs(destination)
+        allowed = self.runner(allowed_protocols=("https", "file"))
+        client = GitClient(
+            allowed,
+            RepositoryPolicy(),
+            credential_helper=True,
+            gh_executable="/opt/gh/bin/gh",
+        )
+
+        await client.clone(f"file://{bare}", destination, self.account)
+
+        self.assertEqual(
+            git("config", "--local", "--get", "credential.helper", cwd=destination),
+            "!/opt/gh/bin/gh auth git-credential",
+        )
+
+    def test_gh_executable_rejects_the_wrong_shapes(self):
+        for bad in (None, 123, "", b"gh"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(TypeError):
+                    GitClient(self.runner(), RepositoryPolicy(), gh_executable=bad)
+        with self.assertRaises(TypeError):
+            GitClient(self.runner(), RepositoryPolicy(), credential_helper="yes")
+
 
 if __name__ == "__main__":
     unittest.main()
