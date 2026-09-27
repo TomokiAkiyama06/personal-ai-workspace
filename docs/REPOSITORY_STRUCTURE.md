@@ -58,6 +58,7 @@ personal-ai-workspace/
 │  │  │     ├─ 0032_task_lifecycle.py
 │  │  │     ├─ 0033_task_queue_budget_loop.py
 │  │  │     ├─ 0040_memory_schema.py
+│  │  │     ├─ 0041_memory_journal.py
 │  │  │     ├─ 0043_memory_search_index.py
 │  │  │     ├─ 0046_shared_memory_candidates.py
 │  │  │     ├─ 0050_research_scratch_store.py
@@ -133,6 +134,20 @@ personal-ai-workspace/
 │  │  │  │  └─ tokens.py
 │  │  │  ├─ memory/
 │  │  │  │  ├─ fulltext.py
+│  │  │  │  ├─ journal/
+│  │  │  │  │  ├─ __init__.py
+│  │  │  │  │  ├─ applier.py
+│  │  │  │  │  ├─ consolidator.py
+│  │  │  │  │  ├─ domain.py
+│  │  │  │  │  ├─ errors.py
+│  │  │  │  │  ├─ limits.py
+│  │  │  │  │  ├─ models.py
+│  │  │  │  │  ├─ queue.py
+│  │  │  │  │  ├─ rules.py
+│  │  │  │  │  ├─ service.py
+│  │  │  │  │  ├─ sql.py
+│  │  │  │  │  ├─ validation.py
+│  │  │  │  │  └─ worker.py
 │  │  │  │  ├─ retrieval/
 │  │  │  │  │  ├─ __init__.py
 │  │  │  │  │  ├─ candidates.py
@@ -283,6 +298,7 @@ personal-ai-workspace/
 │  │     ├─ fake_postgres.py
 │  │     ├─ gate_support.py
 │  │     ├─ identity_support.py
+│  │     ├─ journal_support.py
 │  │     ├─ passkey_http_support.py
 │  │     ├─ passkey_pg_support.py
 │  │     ├─ passkey_support.py
@@ -347,6 +363,19 @@ personal-ai-workspace/
 │  │     ├─ test_identity_migration.py
 │  │     ├─ test_identity_settings.py
 │  │     ├─ test_identity_tokens.py
+│  │     ├─ test_journal_argument_validation.py
+│  │     ├─ test_journal_concurrency.py
+│  │     ├─ test_journal_consolidator.py
+│  │     ├─ test_journal_failures.py
+│  │     ├─ test_journal_gpu_unavailable.py
+│  │     ├─ test_journal_grants.py
+│  │     ├─ test_journal_migration.py
+│  │     ├─ test_journal_queue.py
+│  │     ├─ test_journal_rules.py
+│  │     ├─ test_journal_schema.py
+│  │     ├─ test_journal_service.py
+│  │     ├─ test_journal_status_history.py
+│  │     ├─ test_journal_worker_contract.py
 │  │     ├─ test_memory_status_history.py
 │  │     ├─ test_memory_status_history_migration.py
 │  │     ├─ test_middleware.py
@@ -572,6 +601,7 @@ personal-ai-workspace/
 │     ├─ 0014-task-working-set-persistence.md
 │     ├─ 0016-shared-connection-adapter-policy.md
 │     ├─ 0017-repository-registration-policy.md
+│     ├─ 0018-memory-journal-consolidation-policy.md
 │     ├─ 0022-project-lifecycle-capabilities.md
 │     ├─ 0023-audit-events-details-for-external-send.md
 │     ├─ 0026-memory-status-change-history.md

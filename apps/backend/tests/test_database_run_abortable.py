@@ -184,6 +184,27 @@ class TransactionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.count(), 0)
         self.assertEqual(self.database._probe_connections, {})
 
+    async def test_an_error_of_either_engine_does_not_show_the_bound_values(self):
+        # ``hide_parameters``: the text of a StatementError carries no bound value
+        # (a message, a secret) into a log, from the pooled engine or this one.
+        secret = "hidden-value-7f3a"
+        statement = text("SELECT length(CAST(:secret AS text)) / 0")
+
+        async def work(session):
+            await session.execute(statement, {"secret": secret})
+
+        with self.assertRaises(DBAPIError) as abortable:
+            await self.database.run_abortable(work)
+        with self.assertRaises(DBAPIError) as pooled:
+            async with self.database.session() as session:
+                await work(session)
+
+        for caught in (abortable.exception, pooled.exception):
+            self.assertIsInstance(caught.orig, psycopg.errors.DivisionByZero)
+            self.assertTrue(caught.hide_parameters)
+            self.assertNotIn(secret, str(caught))
+            self.assertNotIn(secret, repr(caught))
+
     async def test_all_statements_run_in_one_transaction(self):
         async def work(session):
             first = (await session.execute(text("SELECT txid_current()"))).scalar_one()
