@@ -10,8 +10,7 @@ purpose — and let a **forced command** on the other end (``command=`` in that
 user's ``authorized_keys``, plus ``from="127.0.0.1"``, ``no-pty``,
 ``no-agent-forwarding``, ``no-port-forwarding``, ``no-X11-forwarding``) run git,
 never a shell. Decision 0029 (``docs/decisions/0029-per-user-git-runner-ssh.md``,
-**Proposed**: this module implements its proposal, not yet an approved
-Decision) works out the details: the wrapper's allowed sub-commands, key
+approved 2026-09-27) works out the details: the wrapper's allowed sub-commands, key
 rotation and revocation, error handling, and the migration from
 ``SubprocessGitRunner``.
 

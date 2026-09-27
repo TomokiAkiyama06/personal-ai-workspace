@@ -118,7 +118,7 @@ class Settings(BaseSettings):
     repository_git_timeout_seconds: float = Field(default=30.0, gt=0, le=7_200)
     repository_clone_timeout_seconds: float = Field(default=900.0, gt=0, le=7_200)
 
-    # Per-user git over SSH (Issue #105, Decision 0029, Proposed). Unused unless a
+    # Per-user git over SSH (Issue #105, Decision 0029, approved). Unused unless a
     # deployment constructs ``SshGitRunner`` in place of ``SubprocessGitRunner``;
     # ``SshGitRunnerPolicy.from_settings`` validates the values strictly.
     repository_ssh_host: str = Field(default="127.0.0.1")

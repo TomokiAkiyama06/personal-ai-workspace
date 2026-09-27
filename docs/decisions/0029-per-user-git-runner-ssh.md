@@ -1,10 +1,10 @@
 # User ごとの Linux User で git を実行する SshGitRunner（SSH 経由）
 
-- Status: Proposed
+- Status: Approved
 - Date: 2026-09-27
 - Scope: Issue [#105](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/105)（PAW-027 / [Decision 0017](0017-repository-registration-policy.md) の追補）。`GitRunner`（`apps/backend/paw_backend/repositories/git.py`）の**もう1つの実装**（`paw_backend.repositories.ssh.SshGitRunner`）と、その周辺（鍵、`SshGitRunnerPolicy`、Wrapper の契約）だけを扱う。PAW-028（`gh auth` の User ごとの実行）が同じ仕組みを必要とすることは Decision 0017 の 4 で述べたとおりだが、この Decision は git 以外の実行（`gh` コマンドなど）を承認しない。
 - Supersedes: なし。Decision 0017 の 4・11 点目・「承認後の扱い」・「リスク」に「別 Issue #105」として残した宿題への回答であり、0017 の本文は書き換えない。
-- Approval: 未承認
+- Approval: 2026-09-27、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで「全部推奨どおり」と回答して承認（末尾の「承認時の決定」）
 
 ## 背景
 
@@ -128,3 +128,9 @@ Wrapper は、5 語目以降の**最初の非 `-c` 語**（`-c key=value` の列
 - `paw_backend/repositories/errors.py`: `GitFailure.SSH_UNAVAILABLE` / `SSH_KEY_UNAVAILABLE` を追加。
 - `paw_backend/config.py`: `PAW_REPOSITORY_SSH_*` の設定。
 - `tests/test_repositories_ssh.py`: 実 SSH・実 Linux User に依存しない Test（`ssh_executable` を Fake の実行 File に差し替える。既存の `tests/test_repositories_git.py` の「罠を仕掛けて確かめる」流儀に合わせた）。
+
+## 承認時の決定（2026-09-27）
+
+Human は、作業 Session で上の 6 点について推奨つきの説明を受け、「全部推奨どおり」と回答して承認した（6 点を一括で。個別の変更はない）。**6 点すべてが推奨どおりで、設計の変更はない。**
+
+承認後に方針を変える場合は、この Decision を書き換えず、新しい Decision から `Supersedes` する。

@@ -148,7 +148,7 @@ Database には pgvector が必要です（CI は `pgvector/pgvector:pg18` を�
 | `PAW_REPOSITORY_CLONE_HOSTS` | `github.com` | Clone してよい Host（Comma 区切り、8 つまで。小文字の DNS 名。IP Address は不可） |
 | `PAW_REPOSITORY_MIN_LINUX_UID` | `1000` | Checkout の持ち主になれる Linux Account の最小の uid（`root` などの System Account を拒否する）。**Account を引くときに実際に適用される唯一の値**（`RepositoryService.from_policy` が同じ Policy から `LoginNameAccountDirectory` を組み立てる） |
 | `PAW_REPOSITORY_GIT_TIMEOUT_SECONDS` / `PAW_REPOSITORY_CLONE_TIMEOUT_SECONDS` | `30` / `900` | git の Command / Clone の Timeout（秒）。超えると Process Group ごと止める。途中の Clone の予約は Clone の Timeout の 2 倍で古いとみなす |
-| `PAW_REPOSITORY_SSH_HOST` / `PAW_REPOSITORY_SSH_PORT` | `127.0.0.1` / `22` | `SshGitRunner`（Issue #105、Decision 0029、**Proposed**）が接続する宛先。本番の呼び出し経路にはまだ配線していない（`SshGitRunnerPolicy.from_settings` が使う） |
+| `PAW_REPOSITORY_SSH_HOST` / `PAW_REPOSITORY_SSH_PORT` | `127.0.0.1` / `22` | `SshGitRunner`（Issue #105、Decision 0029、承認済み）が接続する宛先。本番の呼び出し経路にはまだ配線していない（`SshGitRunnerPolicy.from_settings` が使う） |
 | `PAW_REPOSITORY_SSH_CONNECT_TIMEOUT_SECONDS` | `10` | `ssh` の Handshake（接続・認証）だけの Timeout（秒）。呼び出し全体の Timeout は `PAW_REPOSITORY_GIT_TIMEOUT_SECONDS` / `_CLONE_TIMEOUT_SECONDS` と同じ値を使う |
 | `PAW_REPOSITORY_SSH_KNOWN_HOSTS_PATH` | `/etc/paw/ssh_known_hosts` | 固定した Host Key の File（Trust On First Use にしない）。配備側が用意する |
 | `PAW_EVENT_HEARTBEAT_SECONDS` | `15` | `system.heartbeat` の間隔 |
@@ -2929,7 +2929,7 @@ Project の **Repository** は論理的な共有の記録で、User や Agent �
 | `paths.py` | Path の安全性（Linux Account、Checkout の Path、既存 Repository の検査、`O_NOFOLLOW` での Directory 作成） |
 | `accounts.py` | Workspace の User から Linux Account への対応（`LoginNameAccountDirectory`。継ぎ目は `AccountDirectory`）。最小の uid は `RepositoryPolicy.min_uid` だけ（Directory に別の値はない）。Directory と Service の Policy が食い違うと、Service の構築が `ValueError` |
 | `git.py` | git の実行（許可リストの環境、Hook 無効、Timeout、出力の上限、Shell なし）と、必要な操作（`inspect`、`clone`、`init`、`add_origin`）。`SubprocessGitRunner` と `ssh.py` の `SshGitRunner` が共有する Process 実行（`run_subprocess`）もここにある |
-| `ssh.py` | `GitRunner` のもう 1 つの実装 `SshGitRunner`（Issue #105、[Decision 0029](../../docs/decisions/0029-per-user-git-runner-ssh.md)、**Proposed**）。User ごとの専用鍵で `ssh <linux user>@127.0.0.1` へ接続し、Forced Command の Wrapper（この Repository には実装しない）に決まった形式（`build_remote_command`）で委ねる。鍵の在り処は `SshKeyDirectory`（継ぎ目。既定は `TemplateSshKeyDirectory`） |
+| `ssh.py` | `GitRunner` のもう 1 つの実装 `SshGitRunner`（Issue #105、[Decision 0029](../../docs/decisions/0029-per-user-git-runner-ssh.md)、承認済み）。User ごとの専用鍵で `ssh <linux user>@127.0.0.1` へ接続し、Forced Command の Wrapper（この Repository には実装しない）に決まった形式（`build_remote_command`）で委ねる。鍵の在り処は `SshKeyDirectory`（継ぎ目。既定は `TemplateSshKeyDirectory`） |
 | `github.py` | GitHub の指定の解析、origin URL の登録形式、`GitHubGateway`（PAW-028 の継ぎ目。既定は拒否） |
 | `policy.py` | 設定（`PAW_REPOSITORY_*`）を検証した値 `RepositoryPolicy` |
 | `store.py`、`transaction.py`、`service.py` | SQL（1 文 1 関数）、Lock Timeout 付きの Transaction、`RepositoryService` |
@@ -2984,7 +2984,7 @@ Backend が作る Checkout は、`workspaces` と Project の Directory（0700�
 - **Timeout と出力の上限**（既定 30 秒 / Clone 900 秒、64 KiB）。超えると **Process Group ごと** Kill する（Cancel でも Kill する）。
 - **実行 User。** git は Backend の Process の Linux User として動く。それが Checkout の持ち主の Account でなければ、実行を拒否する（`identity_mismatch`）。**User を切り替える仕組みは実装していない**（配備で `GitRunner` を渡す。Decision 0017 の 4）。**人間の回答 2026-09-25: Userごとに割り振られたSSHで実行する方針。実装は別Issue [#105](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/105)。この PR は Backend の Process の User でだけ動く（従来どおり）。**
 
-`ssh.py` の `SshGitRunner` は、同じ `GitRunner` Protocol のもう 1 つの実装です（Issue #105、[Decision 0029](../../docs/decisions/0029-per-user-git-runner-ssh.md)、**Proposed、未承認**）。`SubprocessGitRunner` と `run_subprocess`（Timeout・出力上限・Process Group ごとの Kill）を共有し、次の点だけが違います。
+`ssh.py` の `SshGitRunner` は、同じ `GitRunner` Protocol のもう 1 つの実装です（Issue #105、[Decision 0029](../../docs/decisions/0029-per-user-git-runner-ssh.md)、2026-09-27 に Human が承認）。`SubprocessGitRunner` と `run_subprocess`（Timeout・出力上限・Process Group ごとの Kill）を共有し、次の点だけが違います。
 
 - **接続。** `ssh <linux user>@127.0.0.1`（既定。`SshGitRunnerPolicy.host`）。User ごとの専用鍵（`SshKeyDirectory`。既定は `TemplateSshKeyDirectory`、ひな型 `{user}` を Linux User 名で埋める）。鍵 File は、接続の**前に毎回**「通常 File・group/other の権限ビットが 0・Backend の Process の実効 User の所有」を確認し、満たさなければ `ssh` を起動せず `GitFailure.SSH_KEY_UNAVAILABLE`。
 - **ローカルの `ssh` 自身の環境も `PATH` だけ**（Backend 自身の環境・継承した `SSH_*` は渡らない）。`-F <ssh_config_path>`（既定 `/dev/null`）で Backend の Process の User 自身の `~/.ssh/config` を無視し、固定の Host Key（`known_hosts_path`）、`BatchMode=yes`・`StrictHostKeyChecking=yes`・`IdentitiesOnly=yes`・`RequestTTY=no`・`ForwardAgent=no` などを毎回付ける。
