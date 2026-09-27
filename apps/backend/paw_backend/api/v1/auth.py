@@ -41,12 +41,17 @@ from paw_backend.auth import tokens
 from paw_backend.auth.context import RequestContext
 from paw_backend.auth.errors import (
     AccountNotFoundError,
+    AccountStateError,
     AuthPermissionError,
     AuthUnavailableError,
     InvalidAuthInputError,
     InvalidCredentialsError,
+    InvitationNotFoundError,
     LastPasskeyError,
+    LoginNameTakenError,
     NoPasskeyError,
+    OwnershipTransferRequiredError,
+    PairingNotFoundError,
     PasskeyChallengeError,
     PasskeyExistsError,
     PasskeyLimitError,
@@ -56,6 +61,7 @@ from paw_backend.auth.errors import (
     PasskeyVerificationError,
     PasswordPolicyError,
     PolicyVersionConflictError,
+    RetentionExpiredError,
     SessionEndedError,
     SessionNotFoundError,
     StepUpMethodInsufficientError,
@@ -314,6 +320,27 @@ def api_errors(
         ) from None
     except AuthPermissionError:
         raise ApiError(403, "forbidden", "Permission denied") from None
+    # Invitations, pairing and the user lifecycle (PAW-024).
+    except (InvitationNotFoundError, PairingNotFoundError):
+        raise ApiError(404, "not_found", "Not Found") from None
+    except LoginNameTakenError:
+        raise ApiError(
+            409, "login_name_taken", "That login name is already in use"
+        ) from None
+    except AccountStateError:
+        raise ApiError(
+            409, "invalid_state", "The account is not in a state for this"
+        ) from None
+    except OwnershipTransferRequiredError:
+        raise ApiError(
+            409,
+            "ownership_transfer_required",
+            "The user is the last manager of a project: transfer it first",
+        ) from None
+    except RetentionExpiredError:
+        raise ApiError(
+            409, "retention_expired", "The account can no longer be restored"
+        ) from None
     except AuthUnavailableError:
         raise ApiError(
             503, "service_unavailable", "Service temporarily unavailable"

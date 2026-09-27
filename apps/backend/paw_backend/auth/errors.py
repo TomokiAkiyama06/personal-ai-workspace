@@ -216,3 +216,52 @@ class NoPasskeyError(PasskeyError):
 
     def __init__(self) -> None:
         super().__init__("the account has no passkey")
+
+
+# -- invitations, device pairing, the user lifecycle (PAW-024) -------------------
+
+
+class LoginNameTakenError(AuthError):
+    """The login name of an invitation is somebody's already (409)."""
+
+    def __init__(self) -> None:
+        super().__init__("login name taken")
+
+
+class AccountStateError(AuthError):
+    """The account is not in a state the operation applies to (409).
+
+    For example: reissuing the invitation of a user who is already active, deleting a
+    user who is already pending deletion, restoring one who is not.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("account state")
+
+
+class OwnershipTransferRequiredError(AuthError):
+    """The user is the last Manager of a project: hand it over first (409)."""
+
+    def __init__(self) -> None:
+        super().__init__("ownership transfer required")
+
+
+class RetentionExpiredError(AuthError):
+    """The 30 days in which a deleted user may be restored have passed (409)."""
+
+    def __init__(self) -> None:
+        super().__init__("retention expired")
+
+
+class InvitationNotFoundError(AuthError):
+    """No outstanding invitation token of that user (404)."""
+
+    def __init__(self) -> None:
+        super().__init__("not found")
+
+
+class PairingNotFoundError(AuthError):
+    """No such pairing waiting for this user's decision (404)."""
+
+    def __init__(self) -> None:
+        super().__init__("not found")

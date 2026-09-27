@@ -105,6 +105,12 @@ class Settings(BaseSettings):
     # is locked out for good.
     setup_token_ttl_seconds: int = Field(default=1_800, ge=60, le=14_400)
     setup_token_max_attempts: int = Field(default=5, ge=1, le=20)
+    # User invitations and device pairing (PAW-024; Decision 0033, Proposed). An
+    # invitation token lives this long (72 hours by default); a pairing token and a
+    # new device's wait for its approval each live ``pairing_token_ttl_seconds``
+    # (REQUIREMENTS.md: 10 minutes initially). Both share the attempt limit above.
+    invitation_ttl_seconds: int = Field(default=259_200, ge=600, le=1_209_600)
+    pairing_token_ttl_seconds: int = Field(default=600, ge=60, le=3_600)
 
     # How often the Research Scratch Store's janitor deletes expired items
     # (PAW-050). 0 turns it off: expired research would then stay in PostgreSQL.

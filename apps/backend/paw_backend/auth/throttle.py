@@ -110,6 +110,21 @@ def policies_from_settings(settings: Settings) -> dict[ThrottleScope, ThrottlePo
             settings.redeem_decay_seconds,
             OnSuccess.KEEP,
         ),
+        # The public pairing routes (PAW-024, Decision 0033): the numbers of the
+        # token endpoint, but a correct token or claim gives its attempt back (a new
+        # device asks again and again while it waits for its approval).
+        ThrottleScope.PAIRING_SOURCE: ThrottlePolicy(
+            settings.redeem_source_free_attempts,
+            redeem,
+            settings.redeem_decay_seconds,
+            OnSuccess.REFUND,
+        ),
+        ThrottleScope.PAIRING_GLOBAL: ThrottlePolicy(
+            settings.redeem_global_free_attempts,
+            redeem,
+            settings.redeem_decay_seconds,
+            OnSuccess.REFUND,
+        ),
     }
 
 
