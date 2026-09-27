@@ -26,6 +26,7 @@
 | [0020](0020-project-state-gate.md) | Task / Queue の Project 状態 Gate の適用範囲（Gate の必須化、Restore 後の Restart、Active でない Project の Claim と Start） | Approved |
 | [0022](0022-project-lifecycle-capabilities.md) | Project の作成・招待への応答・退出の Capability と Audit の方針（0008 の 5 を置き換え、0004 を拡張） | Approved |
 | [0023](0023-audit-events-details-for-external-send.md) | 外部送信の Audit を `audit_events.details`（JSONB）へ永続化する方針（Decision 0010 の永続 Sink。0010・0004 への追補） | Approved |
+| [0024](0024-memory-read-capability.md) | 読み取り専用の Capability `memory.read`（`DENIED_ONLY`）を足し、Retrieval の User Scope の認可に使う方針（Retrieval の Audit の量。Decision 0019 の 1 の具体化） | Approved |
 | [0025](0025-passkey-webauthn-policy.md) | Passkey（WebAuthn）と Step-up の方針（Library、Attestation・User Verification・Resident Key・署名 Counter、Session の Gate、重要操作の Step-up、失効、`users.passkey_required` 列の扱い） | Approved |
 | [0026](0026-memory-status-change-history.md) | Memory Version の Status・Stale 状態の変更履歴を Audit の記録と併存させる方針（Decision 0009 の 7・12・13 の一部を Supersede） | Approved |
 | [0027](0027-audit-retention-and-partitioning.md) | `audit_events` の保存期間・Partition（月ごとの Range Partition）・退避先（`audit_events_archive`）の方針（Decision 0004 の 5.5 への追補） | Approved |
