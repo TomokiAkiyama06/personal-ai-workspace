@@ -195,6 +195,10 @@ class RetentionWorkflowAsAppRole(AsAppRole, test_scratch_purge.RetentionWorkflow
     pass
 
 
+class PurgeProjectsAsAppRole(AsAppRole, test_scratch_purge.PurgeProjectsTest):
+    pass
+
+
 class PurgeSkipsLockedRowsAsAppRole(
     AsAppRole, test_scratch_concurrency.PurgeSkipsLockedRowsTest
 ):

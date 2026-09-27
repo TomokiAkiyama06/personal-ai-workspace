@@ -17,6 +17,8 @@ from sqlalchemy import create_engine, insert, text
 
 from paw_backend.db import Database
 from paw_backend.memory.models import Memory, MemoryVersion
+from paw_backend.projects.limits import DELETED_PROJECT_NAME, DELETION_RETENTION
+from paw_backend.projects.records import ProjectStatus
 from paw_backend.research.scratch import (
     PromotionState,
     ScratchItem,
@@ -195,6 +197,61 @@ class PostgresScratchTestCase(unittest.IsolatedAsyncioTestCase):
                 text("DELETE FROM tasks WHERE id = :id"), {"id": task_id}
             )
 
+    def seed_project(
+        self,
+        status: ProjectStatus | str = ProjectStatus.DELETED,
+        *,
+        project_id: UUID | None = None,
+        name: str = "Alpha",
+        created_at: datetime = T0,
+    ) -> UUID:
+        """A minimal ``projects`` row for ``purge_projects`` (Decision 0028).
+
+        Only what the CHECK constraints of migration ``0026`` require; not
+        ``ProjectService``. Deleted (the default) is a tombstone (name forced to
+        ``DELETED_PROJECT_NAME``, no description) with both deletion timestamps
+        set, exactly like ``ProjectService.purge_expired`` leaves it.
+        """
+        status = ProjectStatus(status)
+        project_id = project_id or uuid4()
+        description: str | None = "A project"
+        started = scheduled = deleted_at = None
+        if status in (ProjectStatus.PENDING_DELETION, ProjectStatus.DELETED):
+            started = created_at
+            scheduled = started + DELETION_RETENTION
+        if status is ProjectStatus.DELETED:
+            name, description = DELETED_PROJECT_NAME, None
+            deleted_at = scheduled
+        with self.engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO projects (id, name, description, status, created_by,"
+                    " created_at, updated_at, deletion_started_at,"
+                    " deletion_scheduled_at, deleted_at) VALUES (:id, :name, :desc,"
+                    " :status, :by, :created, :created, :started, :scheduled,"
+                    " :deleted)"
+                ),
+                {
+                    "id": project_id,
+                    "name": name,
+                    "desc": description,
+                    "status": status.value,
+                    "by": None,  # opaque; projects.created_by has no test user row
+                    "created": created_at,
+                    "started": started,
+                    "scheduled": scheduled,
+                    "deleted": deleted_at,
+                },
+            )
+        self.addCleanup(self.delete_project, project_id)
+        return project_id
+
+    def delete_project(self, project_id: UUID) -> None:
+        with self.engine.begin() as connection:
+            connection.execute(
+                text("DELETE FROM projects WHERE id = :id"), {"id": project_id}
+            )
+
     def seed_memory(self) -> UUID:
         """A Long-term Memory row (with a version), to see that it is left alone."""
         with self.engine.begin() as connection:
@@ -293,6 +350,18 @@ class PostgresScratchTestCase(unittest.IsolatedAsyncioTestCase):
         return self.hold_row_lock(
             "SELECT id FROM research_scratch_items WHERE id = :id FOR UPDATE",
             id=item_id,
+        )
+
+    def lock_project_for_share(self, project_id: UUID):
+        """Hold the same ``FOR SHARE`` lock ``_guard_project`` takes (Decision 0028)."""
+        return self.hold_row_lock(
+            "SELECT id FROM projects WHERE id = :id FOR SHARE", id=project_id
+        )
+
+    def lock_project_for_update(self, project_id: UUID):
+        """Hold the ``FOR UPDATE`` lock ``purge_projects`` takes (Decision 0028)."""
+        return self.hold_row_lock(
+            "SELECT id FROM projects WHERE id = :id FOR UPDATE", id=project_id
         )
 
     def snapshot(
