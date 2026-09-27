@@ -1,5 +1,5 @@
 import sys
 
-from paw_backend.cli.owner import main
+from paw_backend.cli.dispatch import main
 
 sys.exit(main())

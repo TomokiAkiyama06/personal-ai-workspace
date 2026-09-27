@@ -1,0 +1,52 @@
+# Audit retention maintenance of the Personal AI Workspace (Issue #117,
+# Decision 0027 / 0031). Started once a day by paw-audit-retention.timer.
+#
+# User: a dedicated OS user (here paw-maint),
+# never the user the backend runs as. This job holds the table owner's credential; a process of the same uid
+# can read it from /proc/<pid>/environ, and a user who can write the code or the
+# venv this runs can make the next run do anything as the table owner. So a
+# compromised web process must not be that user: create it with
+#   useradd --system --no-create-home --shell /usr/sbin/nologin paw-maint
+# and keep /opt/paw/apps/backend and /opt/paw/venv root-owned and not writable
+# by the backend's user nor by paw-maint (the same rule as the operator
+# credential in apps/backend/README.md: the backend user must never be able
+# to read it).
+#
+# Install (as root), adjusting the paths and the User to your deployment:
+#   cp paw-audit-retention.service paw-audit-retention.timer \
+#      paw-audit-retention-failure.service /etc/systemd/system/
+#   systemctl daemon-reload
+#   systemctl enable --now paw-audit-retention.timer
+#
+# /etc/paw/audit-retention.env must set PAW_MIGRATION_DATABASE_URL (the table
+# owner, the role migrations run as) and be readable by root only
+# (chmod 600): it is the most privileged database credential of the system.
+# Never put the URL on the ExecStart line or in Environment=.
+
+[Unit]
+Description=Personal AI Workspace audit_events retention maintenance
+Wants=network-online.target
+After=network-online.target postgresql.service
+# A non-zero exit (a failed step, a coverage gap, an unrecordable outcome, an
+# unreachable database, a concurrent run) starts the failure unit.
+OnFailure=paw-audit-retention-failure.service
+
+[Service]
+Type=oneshot
+User=paw-maint
+EnvironmentFile=/etc/paw/audit-retention.env
+WorkingDirectory=/opt/paw/apps/backend
+ExecStart=/opt/paw/venv/bin/python -m paw_backend.cli audit-retention-run
+# Each step waits at most a few seconds for a lock (DDL_LOCK_TIMEOUT_MS of
+# paw_backend.cli.retention), so a healthy run takes seconds. This is the
+# backstop for anything else that hangs: systemd then sends SIGTERM, the
+# command records the step it was in as audit.retention.maintenance_failed and
+# exits 3 (OnFailure= fires); TimeoutStopSec leaves it time to do so before
+# SIGKILL.
+TimeoutStartSec=30min
+KillSignal=SIGTERM
+TimeoutStopSec=60s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true

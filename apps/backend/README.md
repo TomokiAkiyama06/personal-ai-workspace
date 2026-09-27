@@ -62,7 +62,7 @@ apps/backend/
 │  ├─ auth/                # Login、Session、Password（Argon2id）、Backoff、Step-up、認証 Policy、CSRF の Origin 検査（PAW-022）。`stepup.py` は重要操作の Passkey Step-up の判定（PAW-023）
 │  │  └─ passkeys/         # Passkey（WebAuthn）: Ceremony の検証、Challenge、登録・認証・失効、Passkey の Step-up の Verifier、Tool Broker の強い承認の Step-up（PAW-023）
 │  ├─ identity/            # 最小の users、One-time Token。`redeemer.py` は Web 側、`operator.py`（Owner の作成・Token の発行）は cli だけが使う（PAW-021）
-│  ├─ cli/                 # server-local の管理コマンド `python -m paw_backend.cli`（PAW-021）
+│  ├─ cli/                 # server-local の管理コマンド `python -m paw_backend.cli`（PAW-021。`audit-retention-*` は Issue #117）
 │  ├─ orchestrator/        # DAG Agent Orchestrator: Plan、Scheduler、DAG の永続化と Fencing、Runtime の Protocol、Tool・Budget の Gateway、Project 削除の Sweep（PAW-034）
 │  ├─ tasks/               # Agent Task の状態遷移と永続化（PAW-032）。`project_gate.py` は Project の状態 Gate の Protocol（Issue #83）
 │  │  └─ queueing/         # Task Queue、Budget、Loop 検知、Escalation の判断（PAW-033）
@@ -81,6 +81,7 @@ apps/backend/
 │  └─ api/
 │     ├─ deps.py           # FastAPI Dependency
 │     └─ v1/               # /api/v1 の Router（health、events、auth、passkeys）
+├─ deploy/systemd/         # Audit の保存期間・退避の定期実行の Unit File の例（Issue #117）
 └─ tests/                  # unittest
 ```
 
@@ -792,7 +793,7 @@ Application 起動時に一度、接続 User の権限を確認し、**`WARNING`
 #### 保存期間・Partition・退避（Issue #86、Migration `0086`）
 
 Issue [#86](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/86) と [Decision 0027](../../docs/decisions/0027-audit-retention-and-partitioning.md)（2026-09-27 に Human が承認）が、
-`audit_events` の保存期間・Partition・退避の方針を決める。**定期的に呼び出す仕組み（cron・systemd timer・Admin Capability）は別 Issue で用意するまで無いため、下の仕組みはコードとして持つだけで、まだ実運用では動かない。**
+`audit_events` の保存期間・Partition・退避の方針を決める。定期的に呼び出す仕組みは、下の「定期実行（Issue #117）」（[Decision 0031](../../docs/decisions/0031-audit-retention-scheduler.md)、2026-09-28 承認）にある。**運用者が Timer を有効にするまでは、実運用では動かない。**
 
 - `audit_events` を `recorded_at`（Database の時計。Trigger が強制するので単調に増える）で**月ごとの Range Partition** にする。
   Migration `0086` は、既存の Table を `audit_events_p_legacy`（Migration 適用時までの全行、`FOR VALUES FROM (MINVALUE)`）に改名し、その場所に新しい Partition 化された `audit_events` を作る
@@ -801,7 +802,7 @@ Issue [#86](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/86) 
 - `paw_backend/authz/retention/`（`rules.py` が純粋関数、`service.py` の `AuditRetentionService` が唯一 SQL を実行する Store。PAW-046 の Lifecycle / PAW-053 の Privacy Filter と同じ構成）が、
   `ensure_partitions`（先の月の Partition を用意する）・`archive_due_partitions`・`purge_due_partitions`（既定で無効。明示的に設定したときだけ）を提供する。
   退避・削除の操作自体も、既存の `audit_events` に新しい `action`（`audit.retention.partition_created` / `partition_archived` / `partition_purged`）として記録する（列や CHECK 制約は増やさない。Partition 名は `reason` 列に入る）。
-- **実行スケジューラはない**（Issue の指示どおり）。`AuditRetentionService.run_maintenance()` を、cron・systemd timer・将来の Admin Capability のいずれかから呼ぶ想定。
+- `AuditRetentionService` 自体はスケジューラを持たない。定期実行は下の「定期実行（Issue #117）」の Command と systemd timer が行う。
 - `AuditRetentionService` は `PAW_MIGRATION_DATABASE_URL`（Table の Owner）が要る。Partition の作成・退避・削除はいずれも DDL で、`PAW_APP_DATABASE_ROLE` では実行できない。
 - 追記専用の Trigger は親に 1 つ定義すれば新しい Partition にも自動で複製されるが、**文レベルの TRUNCATE 拒否 Trigger は複製されない**（PostgreSQL の仕様）。
   `AuditRetentionService` が新しい Partition を作る・受け取るたびに、明示的にこの Trigger を作る。
@@ -810,12 +811,49 @@ Issue [#86](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/86) 
 - 詳細・未決点・リスクは [Decision 0027](../../docs/decisions/0027-audit-retention-and-partitioning.md) と、`tests/test_retention_rules.py` / `tests/test_retention_postgres.py` を参照。
 - **Migration の鎖。** Migration `0086` の `down_revision` は `0071` です（鎖は `0001 → 0025 → 0032 → 0040 → 0021 → 0033 → 0031 → 0050 → 0046 → 0052 → 0026 → 0087 → 0022 → 0083 → 0043 → 0030 → 0027 → 0071 → 0086`）。`0071`（このPRが分岐した時点の後にmainへ入った#109）と同様、`audit_events` に触れる直前の Revision（`0025`、`0087`）より後であれば足りるため、mainの最新に合わせて並べています。
 
+##### 定期実行（Issue #117）
+
+Issue [#117](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/117) と [Decision 0031](../../docs/decisions/0031-audit-retention-scheduler.md)（2026-09-28 承認。運用者が Unit File を配備し Timer を有効にしてから実運用で動く）。
+
+- `python -m paw_backend.cli audit-retention-run` が 1 回の保守を行う（`paw_backend/authz/retention/runner.py` の `run_scheduled_maintenance`）。
+  Advisory Lock を取り（別の実行が進行中なら何もせず終了コード 1）、`ensure_partitions` → `archive_due_partitions` → `purge_due_partitions` を順に実行し（最初の失敗で止める）、
+  Live の Partition が翌月末まで途切れずにあるかを確かめ、結果を `audit_events` に 1 行書く（`audit.retention.maintenance_completed`、`reason` は `created=N archived=N purged=N`／
+  `audit.retention.maintenance_failed`、`reason` は `<step>:<例外の型>`。`resource_kind` は `audit_retention_run`。Step とは別の Transaction なので、失敗も記録される）。
+- 接続は **`PAW_MIGRATION_DATABASE_URL` だけ**（Table の Owner）。`PAW_DATABASE_URL` へは Fallback しない（無ければ終了コード 2）。単一 Role の開発環境では両方に同じ URL を設定する。
+- 終了コード: `0` 成功、`1` 拒否（使い方、不正な値、同時実行）、`2` 環境（設定、URL 未設定、Database に到達できない）、`3` 保守の失敗（Step の例外、被覆の不足、結果を Audit に書けない、SIGTERM で打ち切られた）。
+  URL・例外の Message は表示しない（型の名前だけ）。
+- 各 Step の Transaction は `lock_timeout` を 5 秒にする（`paw_backend/cli/retention.py` の `DDL_LOCK_TIMEOUT_MS`）。`audit_events` の親への DDL が長い読み取り（pg_dump など）の後ろで待つと、
+  その間すべての `audit_events` への INSERT が後ろに並ぶため。待ちきれない Step は失敗（`<step>:OperationalError`、終了コード 3）として記録し、翌日の実行がやり直す。
+- SIGTERM（systemd の `TimeoutStartSec`・`systemctl stop`）は実行中の Task の取り消しに変え、止まった Step を `<step>:CancelledError` として記録してから終了コード 3 で終わる。
+  SIGKILL・電源断などで Process が消えた場合は行が残らない（Lock は PostgreSQL が Connection とともに解放する）。
+- Lock 用の Connection が実行中にサーバーに切られた場合（`idle_session_timeout` など）、Lock はそこで外れる。解放の失敗は Log に残すだけで、実行の結果を置き換えない。
+- Purge は `--purge-after-days N`（180 以上）を指定したときだけ。`archive_after_days`・`horizon_months` は Decision 0027 の値で固定。
+- `python -m paw_backend.cli audit-retention-check [--months-ahead N]`（既定 1）は読み取りだけの確認。被覆が足りなければ終了コード 3。外部の監視から呼べる。
+- systemd の Unit File の例は [`deploy/systemd/`](deploy/systemd/)。`paw-audit-retention.timer`（`OnCalendar=daily`、`Persistent=true`）が `paw-audit-retention.service`（oneshot）を起動し、
+  0 以外で終わると `OnFailure=` の `paw-audit-retention-failure.service`（`crit` の Journal Entry と `wall`。通知経路は配備ごとに差し替える）が動く。
+  `PAW_MIGRATION_DATABASE_URL` は root だけが読める `/etc/paw/audit-retention.env`（`chmod 600`）に置く。cron でも同じ Command を使える。
+- **Backend を動かす OS User で実行しない。** この Job は Table の Owner の Credential を持つ。同じ uid の Process は `/proc/<pid>/environ` からそれを読め、
+  Job が実行する Code や venv に書き込める User は次の実行に何でもさせられる。例の Unit は専用の `paw-maint`（`useradd --system --no-create-home --shell /usr/sbin/nologin paw-maint`）で動かす。
+  `/opt/paw/apps/backend` と `/opt/paw/venv` は root が所有し、Backend の User にも `paw-maint` にも書き込ませない（Operator の Credential を Backend の User に読ませないのと同じ規則）。
+
+```bash
+# 配備（root。Path と User は配備に合わせて Unit File を直す）
+cp apps/backend/deploy/systemd/paw-audit-retention*.{service,timer} /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now paw-audit-retention.timer
+systemctl list-timers paw-audit-retention.timer
+journalctl -u paw-audit-retention.service
+```
+
+- Test: `tests/test_retention_schedule.py`（Database なし。被覆の規則、Fake の Service での Runner、Command の終了コード、Unit File の内容）、
+  `tests/test_retention_cli_postgres.py`（実 PostgreSQL。Owner での成功と Audit、冪等性、Lock、別 Process、Owner でない Role での失敗と Audit、`lock_timeout`、Lock の Connection の切断、SIGTERM）。
+
 #### 残っているリスクと既知の制限
 
 - 許可した読み取り（`DENIED_ONLY`。人間の `project.read`、`shared_memory.read`、`memory.read`）は記録しません。誰が何を読んだかは Audit から分かりません（Agent の読み取りは記録します）。
   `memory.read`（自分の Long-term Memory の読み取り。Hybrid Retrieval の `user` Scope）は [Decision 0024](../../docs/decisions/0024-memory-read-capability.md) で足しました。Role は `memory.use` と同じ（User / Admin / Owner。`system` は持たない）で、委任できます。`memory.use`（書き込み・Candidate の提案など）は `REQUIRED` のままです。読める範囲を誤ることへの備えは Audit ではなく、Backend の ACL と Permission Leakage 0 の Test（`test_retrieval_leakage.py`、`test_retrieval_eligibility.py`）です。
 - 認証済みの User の拒否は、1 回ごとに 1 行を書きます。この拒否の回数制限はありません（Login の Backoff と Token の Rate Limit は別で、[Login / Session / Password Policy](#login--session--password-policy)）。未認証の拒否は Log だけです。
-- 保存期間・Partition・古い行の退避は、上の「保存期間・Partition・退避（Issue #86）」のとおり Decision 0027 は承認済みですが、定期的に呼び出す仕組みが別 Issue で用意されるまで、実運用はまだしません。
+- 保存期間・Partition・古い行の退避は、上の「保存期間・Partition・退避（Issue #86）」のとおり Decision 0027 は承認済みです。定期実行の仕組み（「定期実行（Issue #117）」）は Decision 0031 が 2026-09-28 に承認済みですが、運用者が Timer を有効にするまで、実運用はまだしません。
 - Repository の ACL の保存と解決は呼び出す側（PAW-027 など）の責任です。この Backend は、渡された `RepoAcl` を判定するだけです。
   Override が Project の Role を広げてよいか、User 単位の許可リストを持つかは、要件が定めておらず、Decision 0004 で Human が「狭めるだけ・権限の集合」で承認しました（2026-09-25）。
 - `Scope.SELF` の Capability（`chat.use`、`memory.use` など）は `Project` の状態と Member 資格を見ません
