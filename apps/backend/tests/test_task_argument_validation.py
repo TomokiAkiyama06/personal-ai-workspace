@@ -89,6 +89,7 @@ TABLES = (
     ("task_events", "seq"),
     ("task_repositories", "task_id, t.repository_id"),
     ("task_attempt_repositories", "id"),
+    ("task_repository_writes", "id, t.repository_id"),
 )
 
 
@@ -496,6 +497,10 @@ def admit_use_baseline(fx: Fixture) -> dict[str, Any]:
     )
 
 
+def release_use_baseline(fx: Fixture) -> dict[str, Any]:
+    return dict(task_id=fx.running, reservation_id=uuid.uuid4())
+
+
 def restore_baseline(fx: Fixture) -> dict[str, Any]:
     return dict(task_id=fx.running, log_limit=10)
 
@@ -516,6 +521,7 @@ BASELINES: dict[str, tuple[str, Baseline]] = {
     "update_attempt": ("update_attempt", update_attempt_baseline),
     "change_working_set": ("change_working_set", change_working_set_baseline),
     "admit_repository_use": ("admit_repository_use", admit_use_baseline),
+    "release_repository_use": ("release_repository_use", release_use_baseline),
     "restore": ("restore", restore_baseline),
     "history": ("history", history_baseline),
 }
@@ -647,6 +653,9 @@ CASES = [
     case("admit_repository_use", "repository_ids", not_repository_ids()),
     case("admit_repository_use", "capability", not_an_enum(Capability)),
     case("admit_repository_use", "executes", not_a_bool()),
+    # -- release_repository_use (issue #85)
+    case("release_repository_use", "task_id", not_a_uuid()),
+    case("release_repository_use", "reservation_id", not_a_uuid()),
     # -- restore
     case("restore", "task_id", not_a_uuid()),
     case("restore", "log_limit", not_an_integer(0, 1000)),
@@ -668,6 +677,7 @@ PUBLIC_METHODS = {
     "update_attempt",
     "change_working_set",
     "admit_repository_use",
+    "release_repository_use",
     "restore",
     "history",
 }

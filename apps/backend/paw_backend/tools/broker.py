@@ -47,10 +47,16 @@ narrow what the previous one allowed:
    ceiling is applied again (``repository_role_unresolved`` /
    ``repository_role_insufficient``), and a write or something executed is
    recorded as a change of the repository in the attempt (section 5; a command
-   can write, and the backend cannot tell). A use that cannot be admitted is
-   denied (``repository_write_unrecorded``, or ``repository_role_unresolved``
-   for a read). For a call that needs an approval this happens before the
-   approval is consumed, so a refused use leaves it unused;
+   can write, and the backend cannot tell). Such a use is also **reserved**
+   (``BrokerDecision.reservation_id``) until :meth:`ToolBroker.record_execution`
+   releases it after the executor returned or failed (or it expires): until
+   then the repositories are not downgraded or removed, so the admission holds
+   through the execution (Codex review of #85). A decision that ends up not
+   allowed releases it at once. A use that cannot be admitted, or a write
+   admitted without a reservation, is denied (``repository_write_unrecorded``,
+   or ``repository_role_unresolved`` for a read). For a call that needs an
+   approval this happens before the approval is consumed, so a refused use
+   leaves it unused;
 7. ``AUTO`` / ``SCOPED_AUTO`` are allowed; ``APPROVAL`` / ``STRONG_APPROVAL``
    need an approval bound to this exact call. **The task must still be able to
    act, in the worker's run** (:class:`~.task_state.TaskActivityProvider`: not
@@ -257,6 +263,7 @@ class ToolBroker:
         require_async_method(self._registrations, "working_set_acl", 1)
         self._use_gate: RepositoryUseGate = use_gate or FailClosedUseGate()
         require_async_method(self._use_gate, "admit_repository_use", 3)
+        require_async_method(self._use_gate, "release_repository_use", 2)
         if not isinstance(approval_ttl, timedelta) or not (
             MIN_APPROVAL_TTL <= approval_ttl <= MAX_APPROVAL_TTL
         ):
@@ -296,7 +303,13 @@ class ToolBroker:
             else uuid.uuid4()
         )
         decision = await self._evaluate(call, correlation_id, approval_id)
-        return await self._audited(decision, call.context)
+        decision = await self._audited(decision, call.context)
+        if not decision.allowed and decision.reservation_id is not None:
+            # Admitted, but it does not run after all (its decision could not be
+            # recorded): nothing is in flight on the repositories.
+            await self._release(call.context, decision.reservation_id)
+            decision = replace(decision, reservation_id=None)
+        return decision
 
     async def record_execution(
         self, decision: BrokerDecision, *, succeeded: bool
@@ -304,12 +317,16 @@ class ToolBroker:
         """Record that an allowed call ran: the audit row and the budget charge.
 
         Called by the runner after the executor returned or failed. It never
-        raises for a store failure (the call already ran).
+        raises for a store failure (the call already ran). It first releases the
+        call's repository reservation (the write is no longer in flight; one that
+        cannot be released expires, fail-closed).
         """
         invocation = decision.invocation
         if not decision.allowed or invocation is None:
             raise ValueError("only an allowed call can have been executed")
         context = invocation.context
+        if decision.reservation_id is not None:
+            await self._release(context, decision.reservation_id)
         reason = BrokerReason.EXECUTED if succeeded else BrokerReason.EXECUTION_FAILED
         await record_event(
             self._audit,
@@ -462,7 +479,9 @@ class ToolBroker:
                 )
 
         if level in (ApprovalLevel.AUTO, ApprovalLevel.SCOPED_AUTO):
-            use_reason = await self._use_denial(spec, context, classification)
+            use_reason, reservation = await self._admit_use(
+                spec, context, classification
+            )
             if use_reason is not None:
                 return self._refuse(
                     use_reason,
@@ -477,7 +496,14 @@ class ToolBroker:
                 else BrokerReason.SCOPED_AUTO
             )
             return self._allow(
-                spec, parsed, context, level, call_hash, correlation_id, reason
+                spec,
+                parsed,
+                context,
+                level,
+                call_hash,
+                correlation_id,
+                reason,
+                reservation_id=reservation,
             )
         task_reason = await self._task_denial(context)
         if task_reason is not None:
@@ -497,8 +523,9 @@ class ToolBroker:
         # refuses (or that cannot be admitted) leaves the human's one-shot
         # approval unused. The other way round, a use admitted for an approval
         # that is then not consumed marks the repository changed although the
-        # call did not run: that only adds an obligation (fail-closed).
-        use_reason = await self._use_denial(spec, context, classification)
+        # call did not run: that only adds an obligation (fail-closed), and its
+        # reservation is released at once.
+        use_reason, reservation = await self._admit_use(spec, context, classification)
         if use_reason is not None:
             return self._refuse(
                 use_reason,
@@ -508,28 +535,42 @@ class ToolBroker:
                 call_hash=call_hash,
                 approval_id=approval_id,
             )
-        return await self._consume_approval(
-            spec, parsed, context, level, call_hash, correlation_id, approval_id
+        decision = await self._consume_approval(
+            spec,
+            parsed,
+            context,
+            level,
+            call_hash,
+            correlation_id,
+            approval_id,
+            reservation_id=reservation,
         )
+        if not decision.allowed and reservation is not None:
+            await self._release(context, reservation)
+        return decision
 
-    async def _use_denial(
+    async def _admit_use(
         self,
         spec: ToolSpec,
         context: TaskContext,
         classification: Classification,
-    ) -> BrokerReason | None:
+    ) -> tuple[BrokerReason | None, uuid.UUID | None]:
         """Admit the call's use of the repositories it touches on the roles
         stored NOW (``RepositoryUseGate``; Decision 0030, 4.1 / 4.6): the task
         scope's roles, which :meth:`_role_denial` checked, may be older than a
         downgrade or a removal. A write or an execution is recorded as a change
-        of the repository (section 5). ``None`` when admitted."""
+        of the repository (section 5) and reserved until the call ended (Codex
+        review of #85: the repositories are not downgraded or removed while its
+        executor may still write). Returns the refusal (``None`` when admitted)
+        and the reservation to release after the execution (``None``: none)."""
         if not classification.repositories:
-            return None
+            return None, None
         capability = spec.authz_capability
         executes = ToolCapability.EXECUTE in spec.capabilities
+        changes = marks_changed(capability, executes=executes)
         try:
             async with asyncio.timeout(self._timeout_seconds):
-                await self._use_gate.admit_repository_use(
+                reservation = await self._use_gate.admit_repository_use(
                     context.task_id,
                     context.run,
                     classification.repositories,
@@ -537,24 +578,43 @@ class ToolBroker:
                     executes=executes,
                 )
         except RepositoryRoleUnresolvedError:
-            return BrokerReason.REPOSITORY_ROLE_UNRESOLVED
+            return BrokerReason.REPOSITORY_ROLE_UNRESOLVED, None
         except RepositoryRoleInsufficientError:
-            return BrokerReason.REPOSITORY_ROLE_INSUFFICIENT
+            return BrokerReason.REPOSITORY_ROLE_INSUFFICIENT, None
         except StaleRunError:
             # A Retry / Restart started another run: this one acts no more.
-            return BrokerReason.TASK_SUPERSEDED
+            return BrokerReason.TASK_SUPERSEDED, None
         except TaskNotFoundError:
-            return BrokerReason.TASK_UNKNOWN
+            return BrokerReason.TASK_UNKNOWN, None
         except Exception as error:
             logger.error("Repository use not admitted (%s)", type(error).__name__)
             # A change that cannot be recorded does not run; a read whose stored
             # role cannot be read is a role that is not resolved.
             return (
                 BrokerReason.REPOSITORY_WRITE_UNRECORDED
-                if marks_changed(capability, executes=executes)
+                if changes
                 else BrokerReason.REPOSITORY_ROLE_UNRESOLVED
+            ), None
+        if not isinstance(reservation, uuid.UUID):
+            if changes:
+                # A write that holds no reservation could outlive a downgrade.
+                logger.error("Repository write admitted without a reservation")
+                return BrokerReason.REPOSITORY_WRITE_UNRECORDED, None
+            reservation = None
+        return None, reservation
+
+    async def _release(self, context: TaskContext, reservation_id: uuid.UUID) -> None:
+        """Release a repository reservation; never raises (one that cannot be
+        released expires: until then the repositories are not narrowed)."""
+        try:
+            async with asyncio.timeout(self._timeout_seconds):
+                await self._use_gate.release_repository_use(
+                    context.task_id, reservation_id
+                )
+        except Exception as error:
+            logger.error(
+                "Repository reservation not released (%s)", type(error).__name__
             )
-        return None
 
     def _allow(
         self,
@@ -566,6 +626,8 @@ class ToolBroker:
         correlation_id: uuid.UUID,
         reason: BrokerReason,
         approval_id: uuid.UUID | None = None,
+        *,
+        reservation_id: uuid.UUID | None = None,
     ) -> BrokerDecision:
         return BrokerDecision(
             Verdict.ALLOW,
@@ -575,6 +637,7 @@ class ToolBroker:
             level=level,
             call_hash=call_hash,
             approval_id=approval_id,
+            reservation_id=reservation_id,
             invocation=ToolInvocation(
                 tool=spec.name,
                 arguments=parsed.values,
@@ -922,6 +985,8 @@ class ToolBroker:
         call_hash: str,
         correlation_id: uuid.UUID,
         approval_id: uuid.UUID,
+        *,
+        reservation_id: uuid.UUID | None = None,
     ) -> BrokerDecision:
         now = self._clock()
         binding = ApprovalBinding(
@@ -961,6 +1026,7 @@ class ToolBroker:
                 correlation_id,
                 BrokerReason.APPROVAL_CONSUMED,
                 approval_id,
+                reservation_id=reservation_id,
             )
         if outcome is ConsumeOutcome.PENDING:
             return BrokerDecision(

@@ -58,6 +58,7 @@ TASK_TABLES = (
     "task_repositories",
     "task_attempt_repositories",
     "task_attempt_state_archive",
+    "task_repository_writes",
 )
 
 

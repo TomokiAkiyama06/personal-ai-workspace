@@ -37,6 +37,7 @@ from paw_backend.tasks import (
     RepositoryNotInAttemptError,
     RepositoryRoleInsufficientError,
     RepositoryRoleUnresolvedError,
+    RepositoryWriteInFlightError,
     ReviewState,
     ReviewStatus,
     StaleAttemptError,
@@ -71,6 +72,7 @@ from .task_support import (
     OPEN_PULL_REQUEST,
     PASSED_REVIEW,
     PostgresTaskTestCase,
+    new_database,
     requires_postgres,
 )
 from .tools_support import (
@@ -148,15 +150,20 @@ class WorkingSetTestCase(PostgresTaskTestCase):
             **kwargs,
         )
 
-    async def write_to(self, task_id, *repository_ids, run=FIRST_RUN):
-        """The Tool Broker admitted a repository write on them."""
-        await self.service.admit_repository_use(
+    async def write_to(self, task_id, *repository_ids, run=FIRST_RUN, ended=True):
+        """The Tool Broker admitted a repository write on them and, when
+        ``ended``, the call ran and released its reservation. Returns the
+        reservation."""
+        reservation = await self.service.admit_repository_use(
             task_id,
             run,
             list(repository_ids),
             capability=Capability.PROJECT_REPO_WRITE,
             executes=False,
         )
+        if ended:
+            await self.service.release_repository_use(task_id, reservation)
+        return reservation
 
     async def roles(self, task_id) -> dict[uuid.UUID, RepoRole]:
         snapshot = await self.service.restore(task_id)
@@ -937,6 +944,258 @@ class CompletionTest(WorkingSetTestCase):
 
 
 @requires_postgres
+class WriteReservationTest(WorkingSetTestCase):
+    """Codex review of #85 (P1): an admitted write holds its admission until the
+    call ended. Between the admission and the executor's write the repository is
+    still clean; a downgrade or a removal in that window would find it clean,
+    reset its obligations, and the already authorized executor would then write
+    into a repository that is ``referenced`` or out of the Working Set."""
+
+    NARROWINGS = (
+        (Op.DOWNGRADE_TO_WORKING, TARGET),
+        (Op.DOWNGRADE_TO_REFERENCED, TARGET),
+        (Op.REMOVE, TARGET),
+    )
+
+    async def live_reservations(self, task_id) -> int:
+        return await self.scalar(
+            "SELECT count(*) FROM task_repository_writes "
+            "WHERE task_id = :id AND released_at IS NULL",
+            id=task_id,
+        )
+
+    async def expire(self, reservation) -> None:
+        """The executor of ``reservation`` crashed long ago (owner SQL: the
+        application cannot change a reservation's expiry)."""
+        database = new_database()
+        try:
+            async with database.engine.begin() as connection:
+                await connection.execute(
+                    text(
+                        "UPDATE task_repository_writes "
+                        "SET expires_at = admitted_at + interval '1 microsecond' "
+                        "WHERE id = :id"
+                    ),
+                    {"id": reservation},
+                )
+        finally:
+            await database.dispose()
+
+    async def test_a_write_in_flight_keeps_its_repository_from_being_narrowed(self):
+        task_id = await self.two_targets()
+        await self.write_to(task_id, self.other, ended=False)
+        # The executor has not written yet: the repository looks untouched.
+        self.inspector.clean_at(self.other, BASE_B)
+        counts = await self.table_counts()
+        for operation, role in self.NARROWINGS:
+            with self.subTest(operation=operation.value):
+                with self.assertRaises(RepositoryWriteInFlightError):
+                    await self.change(task_id, operation, self.other, role)
+        self.assertEqual(await self.table_counts(), counts)
+        # Refused before anything was judged discarded.
+        self.assertEqual(self.inspector.calls, [])
+        # Another repository of the task is not held.
+        self.inspector.clean_at(self.repository_id, BASE_A)
+        await self.change(
+            task_id, Op.DOWNGRADE_TO_REFERENCED, self.repository_id, TARGET
+        )
+
+    async def test_the_reviews_interleaving_keeps_the_obligations(self):
+        """Admit, downgrade while the repository is still clean, then the write:
+        the downgrade is refused, and once the call ended the write is found."""
+        task_id = await self.two_targets()
+        reservation = await self.write_to(task_id, self.other, ended=False)
+        self.inspector.clean_at(self.other, BASE_B)
+        with self.assertRaises(RepositoryWriteInFlightError):
+            await self.change(task_id, Op.DOWNGRADE_TO_REFERENCED, self.other, TARGET)
+        # The executor writes and the call ends.
+        self.inspector.states[self.other] = RepositoryChangeState(
+            False, BASE_B, False, False
+        )
+        await self.service.release_repository_use(task_id, reservation)
+        self.assertEqual(await self.live_reservations(task_id), 0)
+        with self.assertRaises(ModifiedRepositoryDowngradeRefusedError):
+            await self.change(task_id, Op.DOWNGRADE_TO_REFERENCED, self.other, TARGET)
+        snapshot = await self.service.restore(task_id)
+        state = snapshot.attempt.repository(self.other)
+        self.assertEqual((state.modified, state.strongest_role), (True, TARGET))
+        self.assertEqual(snapshot.repository(self.other).role, TARGET)
+
+    async def test_after_the_call_a_discarded_change_can_be_narrowed(self):
+        task_id = await self.two_targets()
+        await self.write_to(task_id, self.other)
+        self.inspector.clean_at(self.other, BASE_B)
+        await self.change(task_id, Op.REMOVE, self.other, TARGET)
+        self.assertNotIn(self.other, await self.roles(task_id))
+
+    async def test_a_reservation_that_expired_is_judged_on_the_repository(self):
+        """An executor that crashed does not hold the repository for ever, and
+        what it may have written still counts (fail-closed)."""
+        task_id = await self.two_targets()
+        reservation = await self.write_to(task_id, self.other, ended=False)
+        await self.expire(reservation)
+        self.inspector.states[self.other] = RepositoryChangeState(
+            False, BASE_B, False, False
+        )
+        with self.assertRaises(ModifiedRepositoryDowngradeRefusedError):
+            await self.change(task_id, Op.DOWNGRADE_TO_WORKING, self.other, TARGET)
+        self.inspector.clean_at(self.other, BASE_B)
+        await self.change(task_id, Op.DOWNGRADE_TO_WORKING, self.other, TARGET)
+
+    async def test_an_execution_is_reserved_too_and_a_read_is_not(self):
+        task_id = await self.create_task(
+            repositories=[
+                WorkingSetEntry(self.repository_id, TARGET, BASE_A),
+                WorkingSetEntry(self.other, WORKING, BASE_B),
+            ]
+        )
+        await self.service.execute(task_id, C.START, actor=self.system)
+        read = await self.service.admit_repository_use(
+            task_id,
+            FIRST_RUN,
+            [self.other],
+            capability=Capability.PROJECT_READ,
+            executes=False,
+        )
+        self.assertIsNone(read)
+        self.assertEqual(await self.live_reservations(task_id), 0)
+        await self.service.admit_repository_use(
+            task_id,
+            FIRST_RUN,
+            [self.other],
+            capability=Capability.PROJECT_TASK_RUN,
+            executes=True,
+        )
+        self.inspector.clean_at(self.other, BASE_B)
+        with self.assertRaises(RepositoryWriteInFlightError):
+            await self.change(task_id, Op.DOWNGRADE_TO_REFERENCED, self.other, WORKING)
+
+    async def test_one_reservation_holds_every_repository_it_touches(self):
+        task_id = await self.two_targets()
+        reservation = await self.write_to(
+            task_id, self.repository_id, self.other, ended=False
+        )
+        self.assertIsInstance(reservation, uuid.UUID)
+        self.assertEqual(await self.live_reservations(task_id), 2)
+        for repository_id, base in ((self.repository_id, BASE_A), (self.other, BASE_B)):
+            self.inspector.clean_at(repository_id, base)
+            with self.subTest(repository=repository_id):
+                with self.assertRaises(RepositoryWriteInFlightError):
+                    await self.change(
+                        task_id, Op.DOWNGRADE_TO_WORKING, repository_id, TARGET
+                    )
+        await self.service.release_repository_use(task_id, reservation)
+        self.assertEqual(await self.live_reservations(task_id), 0)
+
+    async def test_a_write_of_an_earlier_attempt_still_holds_the_repository(self):
+        """A Restart starts a new attempt; the old run's executor may still be
+        writing, so the repository is not narrowed meanwhile either."""
+        task_id = await self.two_targets()
+        await self.write_to(task_id, self.other, ended=False)
+        await self.service.execute(task_id, C.FAIL, actor=self.system)
+        await self.service.execute(task_id, C.RESTART, actor=self.user)
+        self.inspector.clean_at(self.other, BASE_B)
+        with self.assertRaises(RepositoryWriteInFlightError):
+            await self.change(task_id, Op.DOWNGRADE_TO_REFERENCED, self.other, TARGET)
+
+    async def test_widening_is_not_held(self):
+        task_id = await self.create_task(
+            repositories=[
+                WorkingSetEntry(self.repository_id, TARGET, BASE_A),
+                WorkingSetEntry(self.other, WORKING, BASE_B),
+            ]
+        )
+        await self.service.execute(task_id, C.START, actor=self.system)
+        await self.write_to(task_id, self.other, ended=False)
+        await self.change(task_id, Op.SET_TARGET, self.other, WORKING)
+        self.assertEqual((await self.roles(task_id))[self.other], TARGET)
+
+    async def test_a_release_is_idempotent_and_only_of_its_own_task(self):
+        task_id = await self.two_targets()
+        other_task = await self.two_targets()
+        reservation = await self.write_to(task_id, self.other, ended=False)
+        await self.service.release_repository_use(other_task, reservation)
+        await self.service.release_repository_use(task_id, uuid.uuid4())
+        self.assertEqual(await self.live_reservations(task_id), 1)
+        await self.service.release_repository_use(task_id, reservation)
+        released = await self.scalar(
+            "SELECT released_at FROM task_repository_writes WHERE id = :id",
+            id=reservation,
+        )
+        await self.service.release_repository_use(task_id, reservation)
+        self.assertEqual(
+            await self.scalar(
+                "SELECT released_at FROM task_repository_writes WHERE id = :id",
+                id=reservation,
+            ),
+            released,
+        )
+
+    async def test_a_refused_admission_reserves_nothing(self):
+        task_id = await self.two_targets()
+        with self.assertRaises(RepositoryRoleUnresolvedError):
+            await self.write_to(task_id, self.other, uuid.uuid4(), ended=False)
+        self.assertEqual(await self.live_reservations(task_id), 0)
+
+    async def test_a_concurrent_admission_and_downgrade_never_both_hold(self):
+        """Both wait for the task's row lock; whichever goes first, the write is
+        never admitted on a repository that a downgrade judged discarded."""
+        for first in ("admission", "downgrade"):
+            with self.subTest(first=first):
+                task_id = await self.two_targets()
+                self.inspector.clean_at(self.other, BASE_B)
+                admitting = TaskService(self.new_database(), project_gate=ALWAYS_ACTIVE)
+                narrowing = TaskService(
+                    self.new_database(),
+                    project_gate=ALWAYS_ACTIVE,
+                    change_inspector=self.inspector,
+                )
+                admit = admitting.admit_repository_use(
+                    task_id,
+                    FIRST_RUN,
+                    [self.other],
+                    capability=Capability.PROJECT_REPO_WRITE,
+                    executes=False,
+                )
+                downgrade = narrowing.change_working_set(
+                    task_id,
+                    Op.DOWNGRADE_TO_REFERENCED,
+                    self.other,
+                    actor=self.user,
+                    expected_role=TARGET,
+                )
+                ordered = (
+                    (admit, downgrade) if first == "admission" else (downgrade, admit)
+                )
+                async with self.database.engine.connect() as blocker:
+                    await blocker.execute(
+                        text("SELECT 1 FROM tasks WHERE id = :id FOR UPDATE"),
+                        {"id": task_id},
+                    )
+                    started = [asyncio.create_task(ordered[0])]
+                    await self.wait_for_lock_waiters(1)
+                    started.append(asyncio.create_task(ordered[1]))
+                    await self.wait_for_lock_waiters(2)
+                    await blocker.rollback()
+                results = await asyncio.gather(*started, return_exceptions=True)
+                refused = [r for r in results if isinstance(r, Exception)]
+                self.assertEqual(len(refused), 1, results)
+                self.assertIsInstance(
+                    refused[0],
+                    RepositoryWriteInFlightError
+                    if first == "admission"
+                    else RepositoryRoleInsufficientError,
+                )
+                snapshot = await self.service.restore(task_id)
+                role = snapshot.repository(self.other).role
+                state = snapshot.attempt.repository(self.other)
+                if first == "admission":
+                    self.assertEqual((role, state.modified), (TARGET, True))
+                else:
+                    self.assertEqual((role, state.modified), (REFERENCED, False))
+
+
+@requires_postgres
 class ToolExecutionTest(WorkingSetTestCase):
     """A Working Set tool, from the broker's decision to the stored change."""
 
@@ -1060,6 +1319,67 @@ class ToolExecutionTest(WorkingSetTestCase):
             make_call("repo.read_file", {"path": f"{ROOT}/new/x"}, context=stale)
         )
         self.assertTrue(read.allowed)
+
+    async def test_a_downgrade_during_an_allowed_write_is_refused(self):
+        """The Codex review's interleaving end to end: the broker admitted a
+        write on NEW; while its executor runs, a downgrade finds NEW still
+        clean, and is refused; after the call the write is found."""
+        await self.change(
+            self.task_id, Op.SET_WORKING, self.NEW, None, starting_commit=BASE_B
+        )
+        self.inspector.clean_at(self.NEW, BASE_B)
+        service, inspector, new = self.service, self.inspector, self.NEW
+        seen: list[BaseException] = []
+
+        class DowngradedMeanwhile:
+            async def execute(self, invocation):
+                try:
+                    await service.change_working_set(
+                        invocation.context.task_id,
+                        Op.DOWNGRADE_TO_REFERENCED,
+                        new,
+                        actor=Actor.user(invocation.context.delegator_id),
+                        expected_role=WORKING,
+                    )
+                except Exception as error:
+                    seen.append(error)
+                # Then the executor writes.
+                inspector.states[new] = RepositoryChangeState(
+                    False, BASE_B, False, False
+                )
+                return {"written": True}
+
+        h = Harness(
+            registry=ToolRegistry([*sample_specs(), *WORKING_SET_TOOL_SPECS]),
+            registrations=self.registrations,
+            use_gate=self.service,
+            directory=self.h.directory,
+        )
+        runner = ToolRunner(h.broker, DowngradedMeanwhile())
+        outcome = await runner.run(
+            make_call(
+                "repo.write_file",
+                {"path": f"{ROOT}/new/x", "content": "1"},
+                context=await self.context(),
+            )
+        )
+        self.assertEqual(outcome.status, ExecutionStatus.COMPLETED)
+        self.assertEqual(
+            [type(error) for error in seen], [RepositoryWriteInFlightError]
+        )
+        self.assertEqual(
+            await self.scalar(
+                "SELECT count(*) FROM task_repository_writes "
+                "WHERE task_id = :id AND released_at IS NULL",
+                id=self.task_id,
+            ),
+            0,
+        )
+        with self.assertRaises(ModifiedRepositoryDowngradeRefusedError):
+            await self.change(
+                self.task_id, Op.DOWNGRADE_TO_REFERENCED, self.NEW, WORKING
+            )
+        self.assertEqual((await self.roles(self.task_id))[self.NEW], WORKING)
 
     async def test_a_stale_decision_does_not_change_the_working_set(self):
         # The scope still shows the repository as absent, but it joined meanwhile.

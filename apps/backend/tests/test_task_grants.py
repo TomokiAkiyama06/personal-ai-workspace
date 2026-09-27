@@ -112,6 +112,8 @@ EXPECTED = {
     # What the per-attempt columns held before revision 0085 (kept for an
     # operator and for a downgrade): the application never touches it.
     "task_attempt_state_archive": (set(), set()),
+    # An admitted repository write in flight (issue #85): only ever released.
+    "task_repository_writes": ({"SELECT", "INSERT"}, {"released_at"}),
     "task_steps": ({"SELECT", "INSERT"}, {"status", "finished_at"}),
     "task_tool_invocations": ({"SELECT", "INSERT"}, {"status", "finished_at"}),
     "task_logs": ({"SELECT", "INSERT"}, set()),
@@ -239,6 +241,12 @@ class WorkingSetUsesAsAppRole(AsAppRole, test_task_working_set.RepositoryUseTest
 
 
 class WorkingSetCompletionAsAppRole(AsAppRole, test_task_working_set.CompletionTest):
+    pass
+
+
+class WorkingSetWriteReservationsAsAppRole(
+    AsAppRole, test_task_working_set.WriteReservationTest
+):
     pass
 
 

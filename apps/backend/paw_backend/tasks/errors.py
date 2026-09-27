@@ -148,6 +148,17 @@ class ModifiedRepositoryDowngradeRefusedError(WorkingSetError):
     message = "The repository's changes were not verifiably discarded"
 
 
+class RepositoryWriteInFlightError(WorkingSetError):
+    """A repository is downgraded or removed while a write (or an execution) on
+    it that the Tool Broker admitted may still be running: its executor has not
+    released the reservation, which has not expired either. A clean worktree then
+    says nothing about the write to come, so nothing is judged discarded; the
+    change is asked again once the call ended (Codex review of #85, P1)."""
+
+    code = "repository_write_in_flight"
+    message = "A write on the repository may still be running"
+
+
 class NoTargetRepositoryError(WorkingSetError):
     """Start of a task whose Working Set has no ``target`` repository."""
 

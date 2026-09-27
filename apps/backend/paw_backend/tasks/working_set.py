@@ -113,6 +113,15 @@ def marks_changed(capability: Capability, *, executes: bool) -> bool:
     return executes or capability in ROLE_GATED_CAPABILITIES
 
 
+# How long an admitted repository write (or execution) keeps its repository from
+# being downgraded or removed when its executor never releases it (it crashed):
+# longer than the longest call ``tools.runner.ToolRunner`` lets run (24 hours,
+# ``MAX_EXECUTION_TIMEOUT``, which a test pins below this), plus a margin for the
+# broker's own steps. Once it has expired, a downgrade is still judged on the
+# repository itself (the write is recorded as a change). Codex review of #85.
+WRITE_RESERVATION_SECONDS = 86_400.0 + 900.0
+
+
 def approval_level(operation: WorkingSetOperation) -> str:
     """The least approval level of ``operation`` (a value of ``ApprovalLevel``)."""
     return _LEVEL[operation]

@@ -131,6 +131,11 @@ class BrokerDecision:
     authz_reason: Reason | None = None
     # Present exactly when ``verdict`` is ALLOW: what the executor may run.
     invocation: "ToolInvocation | None" = field(default=None, repr=False)
+    # An allowed repository write (or execution): the reservation that keeps the
+    # repositories from being downgraded or removed until the call ended
+    # (``TaskService.admit_repository_use``). ``ToolBroker.record_execution``
+    # releases it; ``None`` for anything else.
+    reservation_id: uuid.UUID | None = field(default=None, repr=False)
 
     def __bool__(self) -> bool:
         # ``if await broker.request(call)`` must mean "may run now". Without

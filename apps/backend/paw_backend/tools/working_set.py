@@ -9,8 +9,9 @@
   :class:`WorkingSetRegistrations` (the registered ACL of a repository that is
   not in the task's scope yet: ``RepositoryService.working_set_acl``) and
   :class:`RepositoryUseGate` (admits every allowed call that touches a
-  repository on the roles stored now, and marks a write or an execution as a
-  change: ``TaskService.admit_repository_use``).
+  repository on the roles stored now, marks a write or an execution as a
+  change and reserves the repositories until the call ended:
+  ``TaskService.admit_repository_use`` / ``release_repository_use``).
 * :class:`WorkingSetExecutor`: runs an allowed Working Set tool call by calling
   ``TaskService.change_working_set``, the same function a human's change goes
   through, which checks again under the task's row lock.
@@ -87,7 +88,13 @@ class RepositoryUseGate(Protocol):
     marks a write or an execution as a change (``TaskService
     .admit_repository_use``). It raises ``RepositoryRoleUnresolvedError`` /
     ``RepositoryRoleInsufficientError`` for a use the stored role refuses; any
-    other failure refuses the use too."""
+    other failure refuses the use too.
+
+    A write or an execution returns the id of a reservation that keeps the
+    repositories from being downgraded or removed until
+    ``release_repository_use`` (the call ended) or its expiry: the admission
+    holds through the execution. A read returns ``None``; a write for which no
+    reservation is returned is refused (``repository_write_unrecorded``)."""
 
     async def admit_repository_use(
         self,
@@ -97,6 +104,10 @@ class RepositoryUseGate(Protocol):
         *,
         capability: Capability,
         executes: bool,
+    ) -> uuid.UUID | None: ...
+
+    async def release_repository_use(
+        self, task_id: uuid.UUID, reservation_id: uuid.UUID
     ) -> None: ...
 
 
@@ -111,8 +122,13 @@ class FailClosedUseGate:
         *,
         capability: Capability,
         executes: bool,
-    ) -> None:
+    ) -> uuid.UUID | None:
         raise RuntimeError("no repository use gate is configured")
+
+    async def release_repository_use(
+        self, task_id: uuid.UUID, reservation_id: uuid.UUID
+    ) -> None:
+        return None
 
 
 class BaselineProvider(Protocol):

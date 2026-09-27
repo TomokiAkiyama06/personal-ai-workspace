@@ -6,7 +6,8 @@
   refused (#85 constraint 2); a write behind a capability the ceiling does not
   cover is refused, at registration and at run time;
 * an allowed repository write is recorded as a change of the repository, or it
-  does not run;
+  does not run; it holds a reservation until the call ended (Codex review), which
+  the broker releases after the executor, or at once when the call does not run;
 * the Working Set tools (section 3): one per operation, SCOPED_AUTO only to add a
   ``referenced`` repository, decided on the task's project AND on the repository
   (its registered ACL, with the permission of the change);
@@ -33,6 +34,7 @@ from paw_backend.authz import (
 from paw_backend.authz.policy import DEFAULT_POLICY
 from paw_backend.tasks import RepoRole, WorkingSetOperation, WorkingSetRepository
 from paw_backend.tasks.domain import Actor
+from paw_backend.tasks.working_set import WRITE_RESERVATION_SECONDS
 from paw_backend.tools import (
     ROLE_WRITE_CEILING,
     WORKING_SET_TOOL_SPECS,
@@ -50,11 +52,13 @@ from paw_backend.tools import (
     Verdict,
     with_working_set_roles,
 )
+from paw_backend.tools.runner import MAX_EXECUTION_TIMEOUT, ExecutionStatus
 from paw_backend.tools.working_set import TOOL_OPERATIONS
 
-from .authz_support import P1, P2, U1, U2, StaticDirectory, principal
+from .authz_support import P1, P2, U1, U2, FailingSink, StaticDirectory, principal
 from .tools_support import (
     ROOT,
+    FakeExecutor,
     Harness,
     Registrations,
     UseGate,
@@ -490,6 +494,121 @@ class RepositoryUseTest(unittest.IsolatedAsyncioTestCase):
             "repo.delete_tree", delete, ctx, h, approval_id=pending.approval_id
         )
         self.assertEqual(outcome(used), (Verdict.ALLOW, R.APPROVAL_CONSUMED))
+
+
+class ObservingExecutor(FakeExecutor):
+    """Notes which reservations were still held while it ran."""
+
+    def __init__(self, gate: UseGate, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.gate = gate
+        self.held: list[list[uuid.UUID]] = []
+
+    async def execute(self, invocation):
+        self.held.append(self.gate.in_flight())
+        return await super().execute(invocation)
+
+
+class WriteReservationTest(unittest.IsolatedAsyncioTestCase):
+    """Codex review of #85 (P1): an admitted repository write keeps its
+    admission (the reservation the gate returns) through the execution; the
+    broker releases it only once the executor returned or failed, and at once
+    for a call that does not run after all."""
+
+    async def test_the_reservation_is_held_while_the_executor_runs(self):
+        for error in (None, OSError("disk")):
+            with self.subTest(error=error):
+                gate = UseGate()
+                executor = ObservingExecutor(gate, error=error)
+                h = harness(use_gate=gate, executor=executor)
+                ctx = context()
+                if error is None:
+                    result = await h.runner.run(
+                        make_call("repo.write_file", write("wrk"), context=ctx)
+                    )
+                else:
+                    with self.assertLogs("paw_backend.tools.runner", "ERROR"):
+                        result = await h.runner.run(
+                            make_call("repo.write_file", write("wrk"), context=ctx)
+                        )
+                (reservation,) = gate.reservations
+                self.assertEqual(result.decision.reservation_id, reservation)
+                self.assertEqual(executor.held, [[reservation]])
+                self.assertEqual(gate.released, [(ctx.task_id, reservation)])
+                self.assertEqual(
+                    result.status,
+                    ExecutionStatus.COMPLETED
+                    if error is None
+                    else ExecutionStatus.FAILED,
+                )
+
+    async def test_an_execution_is_reserved_and_a_read_is_not(self):
+        h = harness()
+        read = await decide("repo.read_file", {"path": f"{ROOT}/wrk/x"}, h=h)
+        self.assertTrue(read.allowed)
+        self.assertIsNone(read.reservation_id)
+        run = await decide("tests.run_in", {"path": f"{ROOT}/wrk"}, h=h)
+        self.assertTrue(run.allowed)
+        self.assertEqual(h.use_gate.reservations, [run.reservation_id])
+
+    async def test_a_write_admitted_without_a_reservation_does_not_run(self):
+        h = harness()
+        h.use_gate.reserve = False
+        with self.assertLogs("paw_backend.tools.broker", "ERROR"):
+            decision = await decide("repo.write_file", write("wrk"), h=h)
+        self.assertEqual(
+            outcome(decision), (Verdict.DENY, R.REPOSITORY_WRITE_UNRECORDED)
+        )
+        self.assertIsNone(decision.invocation)
+        # A read needs none.
+        read = await decide("repo.read_file", {"path": f"{ROOT}/wrk/x"}, h=h)
+        self.assertTrue(read.allowed)
+
+    async def test_an_approval_that_is_not_consumed_releases_the_reservation(self):
+        h = harness()
+        ctx = context()
+        pending = await decide("repo.delete_tree", {"path": f"{ROOT}/tgt/a"}, ctx, h)
+        await h.service.approve(
+            pending.approval_id,
+            principal(SystemRole.USER, U1, {P1: ProjectRole.CONTRIBUTOR}),
+        )
+        # The approval is for another call: admitted first, then not consumed.
+        refused = await decide(
+            "repo.delete_tree",
+            {"path": f"{ROOT}/tgt/b"},
+            ctx,
+            h,
+            approval_id=pending.approval_id,
+        )
+        self.assertEqual(refused.verdict, Verdict.DENY)
+        self.assertIsNone(refused.reservation_id)
+        (reservation,) = h.use_gate.reservations
+        self.assertEqual(h.use_gate.released, [(ctx.task_id, reservation)])
+        self.assertEqual(h.use_gate.in_flight(), [])
+
+    async def test_a_decision_that_cannot_be_recorded_releases_the_reservation(self):
+        h = harness(broker_sink=FailingSink())
+        ctx = context()
+        with self.assertLogs("paw_backend", "ERROR"):
+            decision = await decide("repo.write_file", write("wrk"), ctx, h)
+        self.assertEqual(outcome(decision), (Verdict.DENY, R.AUDIT_UNAVAILABLE))
+        self.assertIsNone(decision.reservation_id)
+        (reservation,) = h.use_gate.reservations
+        self.assertEqual(h.use_gate.released, [(ctx.task_id, reservation)])
+
+    async def test_a_release_that_fails_does_not_fail_the_call(self):
+        """It expires instead (fail-closed: the repository stays held until then)."""
+        h = harness()
+        h.use_gate.release_error = OSError("down")
+        with self.assertLogs("paw_backend.tools.broker", "ERROR"):
+            result = await h.runner.run(
+                make_call("repo.write_file", write("wrk"), context=context())
+            )
+        self.assertEqual(result.status, ExecutionStatus.COMPLETED)
+        self.assertEqual(len(h.use_gate.in_flight()), 1)
+
+    def test_a_reservation_outlives_the_longest_call(self):
+        self.assertGreater(WRITE_RESERVATION_SECONDS, MAX_EXECUTION_TIMEOUT)
 
 
 class StoredRoleTest(unittest.IsolatedAsyncioTestCase):

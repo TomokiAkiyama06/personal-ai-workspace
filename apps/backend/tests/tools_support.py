@@ -21,7 +21,7 @@ from paw_backend.tasks import (
     RepositoryRoleInsufficientError,
     RepositoryRoleUnresolvedError,
 )
-from paw_backend.tasks.working_set import role_allows
+from paw_backend.tasks.working_set import marks_changed, role_allows
 from paw_backend.tools import (
     ApprovalLevel,
     ApprovalService,
@@ -351,9 +351,15 @@ class UseGate:
     def __init__(self, *, roles=None, error=None) -> None:
         self.roles = roles
         self.error = error
+        # ``reserve=False``: a gate that admits a write without a reservation.
+        self.reserve = True
+        self.release_error: Exception | None = None
         self.uses: list[
             tuple[uuid.UUID, TaskRun, tuple[uuid.UUID, ...], Capability, bool]
         ] = []
+        # The reservations handed out, and those released (in order).
+        self.reservations: list[uuid.UUID] = []
+        self.released: list[tuple[uuid.UUID, uuid.UUID]] = []
 
     async def admit_repository_use(
         self, task_id, run, repository_ids, *, capability, executes
@@ -368,6 +374,21 @@ class UseGate:
                 if not role_allows(role, capability, executes=executes):
                     raise RepositoryRoleInsufficientError()
         self.uses.append((task_id, run, tuple(repository_ids), capability, executes))
+        if not self.reserve or not marks_changed(capability, executes=executes):
+            return None
+        reservation = uuid.uuid4()
+        self.reservations.append(reservation)
+        return reservation
+
+    async def release_repository_use(self, task_id, reservation_id):
+        if self.release_error is not None:
+            raise self.release_error
+        self.released.append((task_id, reservation_id))
+
+    def in_flight(self) -> list[uuid.UUID]:
+        """The reservations handed out and not released."""
+        released = {reservation for _, reservation in self.released}
+        return [r for r in self.reservations if r not in released]
 
     def changes(self) -> list[tuple[uuid.UUID, TaskRun, tuple[uuid.UUID, ...]]]:
         """The admitted uses that mark their repositories as changed (a write,

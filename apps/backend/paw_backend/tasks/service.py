@@ -92,7 +92,7 @@ import math
 import sys
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Protocol
 
 from sqlalchemy import (
@@ -134,6 +134,7 @@ from paw_backend.tasks.errors import (
     RepositoryNotInAttemptError,
     RepositoryRoleInsufficientError,
     RepositoryRoleUnresolvedError,
+    RepositoryWriteInFlightError,
     StaleAttemptError,
     StaleRunError,
     TaskConflictError,
@@ -148,6 +149,7 @@ from paw_backend.tasks.models import (
     TaskEventRow,
     TaskLogRow,
     TaskRepositoryRow,
+    TaskRepositoryWriteRow,
     TaskRow,
     TaskStepRow,
     TaskToolInvocationRow,
@@ -175,6 +177,7 @@ from paw_backend.tasks.records import (
     WorktreeState,
 )
 from paw_backend.tasks.working_set import (
+    WRITE_RESERVATION_SECONDS,
     AttemptRepositoryFacts,
     FailClosedChangeInspector,
     RepositoryChangeInspector,
@@ -1348,7 +1351,11 @@ class TaskService:
           change verifiably discarded, as the ``change_inspector`` finds it in the
           repository: clean worktree, HEAD at the repository's starting commit,
           branch not pushed, no open pull request (neither stored nor found).
-          Otherwise ``ModifiedRepositoryDowngradeRefusedError``, fail-closed.
+          Otherwise ``ModifiedRepositoryDowngradeRefusedError``, fail-closed;
+        * a downgrade or a removal is refused while a write (or an execution) on
+          the repository that ``admit_repository_use`` admitted, in any attempt,
+          is neither released nor expired (``RepositoryWriteInFlightError``): its
+          executor may write after the inspection found the repository clean.
 
         ``starting_commit`` is the baseline of a repository that joins the Working
         Set (it is kept for every later attempt); for one that is promoted and has
@@ -1410,6 +1417,10 @@ class TaskService:
             state_row = await self._attempt_repository_row(
                 session, task, repository_id, lock=True
             )
+            if narrows(operation) and await self._write_in_flight(
+                session, task.id, repository_id
+            ):
+                raise RepositoryWriteInFlightError()
             discarded = None
             if narrows(operation) and self._could_have_changed(current, state_row):
                 discarded = await verify_discarded(
@@ -1515,7 +1526,7 @@ class TaskService:
         *,
         capability: Capability,
         executes: bool,
-    ) -> None:
+    ) -> uuid.UUID | None:
         """Admit a use of the repositories by the run (the Tool Broker, for every
         call it allows that touches one), on the roles stored NOW.
 
@@ -1528,7 +1539,12 @@ class TaskService:
         ``capability`` and, when ``executes``, running something
         (``tasks.working_set.role_allows``; ``RepositoryRoleInsufficientError``).
         A write, or something executed, marks the repositories as changed in the
-        attempt (section 5; ``marks_changed``); a read changes nothing. Stale runs
+        attempt (section 5; ``marks_changed``) and is **reserved** until the
+        caller releases it (``release_repository_use``) after the executor
+        returned or failed, or ``WRITE_RESERVATION_SECONDS`` passed: meanwhile
+        the repositories are not downgraded or removed (Codex review of #85: the
+        admission must hold through the execution). Returns the reservation's id,
+        or ``None`` for a read (which changes and reserves nothing). Stale runs
         raise ``StaleAttemptError`` / ``StaleRunError``. Nothing is written when
         anything is refused.
         """
@@ -1554,6 +1570,8 @@ class TaskService:
                 row.repository_id: row for row in await self._members(session, task.id)
             }
             now = utcnow()
+            reservation = uuid.uuid4() if changes else None
+            expires_at = now + timedelta(seconds=WRITE_RESERVATION_SECONDS)
             for repository_id in dict.fromkeys(ids):
                 member = members.get(repository_id)
                 state_row = await self._attempt_repository_row(
@@ -1563,13 +1581,66 @@ class TaskService:
                     raise RepositoryRoleUnresolvedError()
                 if not role_allows(member.role, capability, executes=executes):
                     raise RepositoryRoleInsufficientError()
-                if not changes:
+                if reservation is None:
                     continue
                 state_row.modified = True
                 if member.role.strength > state_row.strongest_role.strength:
                     state_row.strongest_role = member.role
                 state_row.updated_at = now
+                session.add(
+                    TaskRepositoryWriteRow(
+                        id=reservation,
+                        repository_id=repository_id,
+                        task_id=task.id,
+                        attempt=task.attempt,
+                        admitted_at=now,
+                        expires_at=expires_at,
+                    )
+                )
             await session.flush()
+        return reservation
+
+    async def release_repository_use(
+        self, task_id: uuid.UUID, reservation_id: uuid.UUID
+    ) -> None:
+        """Release the reservation ``admit_repository_use`` returned (the Tool
+        Broker, once the executor returned or failed, or when the admitted call
+        is not allowed after all). Idempotent; a reservation that is unknown, of
+        another task, or already released changes nothing. The repositories stay
+        recorded as changed: only a verified discard undoes that."""
+        task_id = _uuid("task_id", task_id)
+        reservation_id = _uuid("reservation_id", reservation_id)
+        async with self._database.session() as session, session.begin():
+            await session.execute(
+                update(TaskRepositoryWriteRow)
+                .where(
+                    TaskRepositoryWriteRow.id == reservation_id,
+                    TaskRepositoryWriteRow.task_id == task_id,
+                    TaskRepositoryWriteRow.released_at.is_(None),
+                )
+                .values(released_at=utcnow())
+            )
+
+    @staticmethod
+    async def _write_in_flight(
+        session: AsyncSession, task_id: uuid.UUID, repository_id: uuid.UUID
+    ) -> bool:
+        """Whether an admitted write on the repository may still be running (a
+        reservation of any attempt that is neither released nor expired). Read
+        under the task's row lock, which every admission takes too."""
+        row = (
+            await session.execute(
+                select(TaskRepositoryWriteRow.id)
+                .where(
+                    TaskRepositoryWriteRow.task_id == task_id,
+                    TaskRepositoryWriteRow.repository_id == repository_id,
+                    TaskRepositoryWriteRow.released_at.is_(None),
+                    TaskRepositoryWriteRow.expires_at > utcnow(),
+                )
+                .limit(1)
+            )
+        ).first()
+        return row is not None
 
     # -- reading ---------------------------------------------------------------
 

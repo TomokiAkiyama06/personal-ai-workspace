@@ -106,7 +106,11 @@ class OfflineMigrationTest(unittest.TestCase):
 
     def test_the_grants_are_the_least_privileges_of_the_service(self):
         sql = self.upgrade_sql(PAW_APP_DATABASE_ROLE="paw_app")
-        for table in ("task_repositories", "task_attempt_repositories"):
+        for table in (
+            "task_repositories",
+            "task_attempt_repositories",
+            "task_repository_writes",
+        ):
             self.assertIn(f'GRANT INSERT, SELECT ON {table} TO "paw_app"', sql)
             self.assertNotIn("DELETE", sql)
         # Nothing of the application reads or writes the archive.
@@ -122,6 +126,9 @@ class OfflineMigrationTest(unittest.TestCase):
             "evaluation_result, pr_number, pr_url, pr_state, strongest_role, "
             'modified, updated_at) ON task_attempt_repositories TO "paw_app"',
             sql,
+        )
+        self.assertIn(
+            'GRANT UPDATE (released_at) ON task_repository_writes TO "paw_app"', sql
         )
         self.assertIn('REVOKE UPDATE (updated_at) ON task_attempts FROM "paw_app"', sql)
 

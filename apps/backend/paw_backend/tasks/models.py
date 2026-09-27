@@ -253,6 +253,49 @@ class TaskAttemptRepositoryRow(Base):
     )
 
 
+class TaskRepositoryWriteRow(Base):
+    """A repository write (or something executed) the Tool Broker admitted and
+    whose executor may still be running (Codex review of #85, P1).
+
+    ``TaskService.admit_repository_use`` inserts one row per repository under the
+    task's row lock, with the id it returns (the reservation); the Tool Broker
+    releases it (``released_at``) once the executor returned or failed. While a
+    row is neither released nor expired, the repository is not downgraded or
+    removed (``RepositoryWriteInFlightError``): a still-clean worktree says nothing
+    about a write that has been authorized but not yet made. ``expires_at`` bounds
+    a reservation whose executor crashed; after it, a downgrade still needs the
+    change to be verified as discarded (the write is recorded as ``modified``).
+    Nothing is deleted.
+    """
+
+    __tablename__ = "task_repository_writes"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    repository_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    task_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    attempt: Mapped[int] = mapped_column(Integer)
+    admitted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["task_id", "attempt"], ["task_attempts.task_id", "task_attempts.number"]
+        ),
+        ForeignKeyConstraint(
+            ["task_id", "repository_id"],
+            ["task_repositories.task_id", "task_repositories.repository_id"],
+        ),
+        CheckConstraint("expires_at > admitted_at", name="expires_after_admission"),
+        CheckConstraint(
+            "released_at IS NULL OR released_at >= admitted_at",
+            name="released_after_admission",
+        ),
+        # The narrowing check reads the live reservations of one repository.
+        Index(None, "task_id", "repository_id"),
+    )
+
+
 class TaskAttemptStateArchiveRow(Base):
     """What an attempt's state columns held before revision 0085 (archived by it).
 

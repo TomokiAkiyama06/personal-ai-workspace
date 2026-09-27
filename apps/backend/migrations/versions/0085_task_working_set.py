@@ -27,10 +27,14 @@ Create Date: 2026-09-28
   downgrade puts the columns back with the state of an attempt that has exactly
   one repository, and the archived state of an attempt that has none (then drops
   the archive).
+* ``task_repository_writes``: a repository write (or execution) the Tool Broker
+  admitted and whose executor may still be running (Codex review of #85): a
+  repository with a live one (not released, not expired) is not downgraded or
+  removed. Released by ``released_at``; nothing is deleted.
 * ``task_events.command`` accepts ``change_working_set``.
 
-The application role gets INSERT and SELECT on both tables and UPDATE on the columns
-``TaskService`` changes (never the identity of a row); DELETE nowhere.
+The application role gets INSERT and SELECT on the three tables and UPDATE on the
+columns ``TaskService`` changes (never the identity of a row); DELETE nowhere.
 """
 
 from collections.abc import Sequence
@@ -226,6 +230,46 @@ def upgrade() -> None:
         ),
     )
 
+    op.create_table(
+        "task_repository_writes",
+        sa.Column("id", sa.Uuid(), nullable=False),
+        sa.Column("repository_id", sa.Uuid(), nullable=False),
+        sa.Column("task_id", sa.Uuid(), nullable=False),
+        sa.Column("attempt", sa.Integer(), nullable=False),
+        sa.Column("admitted_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("released_at", sa.DateTime(timezone=True), nullable=True),
+        sa.PrimaryKeyConstraint(
+            "id", "repository_id", name=op.f("pk_task_repository_writes")
+        ),
+        sa.ForeignKeyConstraint(
+            ["task_id", "attempt"],
+            ["task_attempts.task_id", "task_attempts.number"],
+            name=op.f("fk_task_repository_writes_task_id_task_attempts"),
+        ),
+        sa.ForeignKeyConstraint(
+            ["task_id", "repository_id"],
+            ["task_repositories.task_id", "task_repositories.repository_id"],
+            name=op.f("fk_task_repository_writes_task_id_task_repositories"),
+        ),
+        sa.CheckConstraint(
+            "expires_at > admitted_at",
+            name=op.f("ck_task_repository_writes_expires_after_admission"),
+        ),
+        sa.CheckConstraint(
+            "released_at IS NULL OR released_at >= admitted_at",
+            name=op.f("ck_task_repository_writes_released_after_admission"),
+        ),
+    )
+    op.create_index(
+        op.f("ix_task_repository_writes_task_id"),
+        "task_repository_writes",
+        ["task_id", "repository_id"],
+    )
+    grant_app_privileges(
+        op, "task_repository_writes", insert=True, update_columns=("released_at",)
+    )
+
     # What the columns hold is kept before they are dropped (Claude review of #85:
     # no data loss). Plain text, no CHECK: it keeps whatever was there.
     op.create_table(
@@ -369,5 +413,6 @@ def downgrade() -> None:
         f"GRANT UPDATE ({', '.join((*ATTEMPT_STATE_COLUMNS, 'updated_at'))}) "
         "ON task_attempts TO {role}"
     )
+    op.drop_table("task_repository_writes")
     op.drop_table("task_attempt_repositories")
     op.drop_table("task_repositories")
