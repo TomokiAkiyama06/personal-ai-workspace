@@ -263,6 +263,12 @@ class UnexpectedErrorsAsAppRole(
     pass
 
 
+class RuntimeTimerStopFailureAsAppRole(
+    AsAppRole, test_orchestrator_recovery.RuntimeTimerStopFailureTest
+):
+    pass
+
+
 class ShutdownAsAppRole(AsAppRole, test_orchestrator_shutdown.ShutdownTest):
     pass
 

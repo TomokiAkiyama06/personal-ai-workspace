@@ -524,8 +524,14 @@ class Orchestrator:
             if heartbeat is not None:
                 heartbeat.cancel()
                 await asyncio.gather(heartbeat, return_exceptions=True)
-            await self._stop_runtime(run)
-            if complete_entry and not run.lost.is_set():
+            # The entry is completed only once the runtime timer is durably
+            # stopped: a completed entry is never claimed again, so a timer left
+            # running behind it would keep ``running_since`` set and accrue runtime
+            # for good. When the stop fails (a transient database error, say) the
+            # entry stays claimed; its lease expires and the next worker that
+            # claims it settles the timer (``_begin_task``) or takes the run over.
+            timer_stopped = await self._stop_runtime(run)
+            if complete_entry and timer_stopped and not run.lost.is_set():
                 await self._complete_entry(run)
 
     async def _fail_safely(self, run: _Run) -> bool:
@@ -591,7 +597,11 @@ class Orchestrator:
             return event.run
         if snapshot.state is TaskState.RUNNING:
             return snapshot.run
-        await self._complete_quietly(entry, worker_id)
+        # A task that no longer runs (paused, waiting, evaluating, failed, ...):
+        # the entry is done, but a worker whose ``stop_runtime`` failed may have
+        # left the runtime timer running behind it; settle it first.
+        if await self._settle_runtime(entry, worker_id):
+            await self._complete_quietly(entry, worker_id)
         return None
 
     async def _complete_quietly(self, entry: QueueEntry, worker_id: str) -> None:
@@ -601,17 +611,57 @@ class Orchestrator:
     async def _complete_entry(self, run: _Run) -> None:
         await self._complete_quietly(run.entry, run.worker_id)
 
-    async def _stop_runtime(self, run: _Run) -> None:
+    async def _stop_runtime(self, run: _Run) -> bool:
+        """Stop this run's runtime session. ``True``: nothing of ours is left
+        running (stopped now, never started, or superseded by a newer session).
+        ``False``: the stop could not be written; the caller must not complete the
+        entry (see ``_run_entry``)."""
         if run.generation is None:
-            return
+            return True
         try:
             await self._budget.stop_runtime(run.task.id, run.generation)
         except StaleRuntimeSessionError:
-            pass  # a newer worker's session: its timer is not ours to stop
+            return True  # a newer worker's session: its timer is not ours to stop
         except Exception as error:
             logger.error(
-                "Stopping the runtime timer failed (%s)", error_class_of(error)
+                "Stopping the runtime timer failed (%s); the entry is left claimed "
+                "until its lease expires",
+                error_class_of(error),
             )
+            return False
+        return True
+
+    async def _settle_runtime(self, entry: QueueEntry, worker_id: str) -> bool:
+        """Stop a runtime session that an earlier worker left running, before an
+        entry whose task no longer runs is completed.
+
+        An earlier worker whose ``stop_runtime`` failed left its entry claimed
+        (``_run_entry``); this worker claimed it after the lease expired and holds
+        it now (one active entry per task, so no other worker runs the task). Only
+        the lease holder may call ``start_runtime``, so the lease is proved first
+        (``LeaseLostError`` propagates: the entry is someone else's). Taking the
+        session over keeps its ``running_since`` (the time is neither lost nor
+        counted twice) and stopping it settles that time; a task with no session
+        in progress gets a new one stopped at once (0 seconds). ``True``: nothing
+        is left running and the entry may be completed. ``False``: the settlement
+        could not be written; the entry stays claimed for the next worker.
+        """
+        await self._queue.heartbeat(entry.id, worker_id, entry.claim_count)
+        try:
+            generation = await self._budget.start_runtime(entry.task_id)
+            await self._budget.stop_runtime(entry.task_id, generation)
+        except BudgetNotConfiguredError:
+            return True  # no budget: no timer
+        except StaleRuntimeSessionError:
+            return True  # only a lease holder starts a session: it settles its own
+        except Exception as error:
+            logger.error(
+                "Settling a runtime timer failed (%s); the entry is left claimed "
+                "until its lease expires",
+                error_class_of(error),
+            )
+            return False
+        return True
 
     async def _abandon(self, run: _Run) -> None:
         """Best effort on cancellation (shutdown): the entry goes back to the queue
@@ -1397,12 +1447,24 @@ class Orchestrator:
                 return RunReport(
                     _OUTCOME_OF_WATCH.get(watch, RunOutcome.TASK_ENDED), task_id
                 )
-            verdict = await self._budget.check(task_id, planned={BudgetKind.STEPS: 1})
+            # Every call of the planner is a step; a call after the first is also a
+            # retry (Decision 0021, section 3: the planner follows the same rules
+            # as a node, whose retries are charged to ``retries``). The retry is
+            # reserved only here, when it is about to be made: a failure that
+            # cannot retry leaves the loop below without charging one.
+            planned = {BudgetKind.STEPS: 1}
+            if attempt > 1:
+                planned[BudgetKind.RETRIES] = 1
+            verdict = await self._budget.check(task_id, planned=planned)
             if verdict.status is BudgetStatus.EXCEEDED:
+                action = decide_next_action(
+                    verdict, LoopVerdict.CONTINUE, can_escalate=False
+                ).action
                 return await self._end_after_stop(
-                    run, await self._budget_stop(run), None
+                    run, self._stop_for_budget(action), None
                 )
-            await self._budget.record(task_id, BudgetKind.STEPS, 1)
+            for kind, amount in planned.items():
+                await self._budget.record(task_id, kind, amount)
             spec = _Spec(
                 key=PLAN_STEP,
                 role=NodeRole.PLANNER,

@@ -131,6 +131,87 @@ class PlannerTest(PostgresOrchestratorTestCase):
             (len(weak.calls_of("plan")), len(strong.calls_of("plan"))), (1, 1)
         )
 
+    async def retries_used(self, h, task_id) -> int:
+        usage = {u.kind: u.consumed for u in await h.budget.usage(task_id)}
+        return usage[BudgetKind.RETRIES]
+
+    async def set_retries(self, task_id, *, limit):
+        await self.owner_sql(
+            "UPDATE budget_usages SET limit_value = :limit"
+            " WHERE task_id = :t AND kind = 'retries'",
+            limit=limit,
+            t=task_id,
+        )
+
+    async def test_a_second_planning_attempt_is_charged_as_a_retry(self):
+        # Decision 0021, section 3: the planner follows the rules of a node, so
+        # the call after the first is a retry (and, like every call, a step).
+        planner = FakeRuntime("local", script={"plan": [CYCLE, GOOD]})
+        h = self.harness(runtimes={"local": planner})
+        task_id = await self.prepare(h)
+
+        report = await h.orchestrator.run_once("w1")
+
+        self.assertEqual(report.outcome, Out.DAG_SUCCEEDED)
+        self.assertEqual(await self.retries_used(h, task_id), 1)
+        usage = {u.kind: u.consumed for u in await h.budget.usage(task_id)}
+        self.assertEqual(usage[BudgetKind.STEPS], 4)  # two planner calls, two nodes
+
+    async def test_a_plan_on_the_first_attempt_costs_no_retry(self):
+        planner = FakeRuntime("local", script={"plan": GOOD})
+        h = self.harness(runtimes={"local": planner})
+        task_id = await self.prepare(h)
+
+        await h.orchestrator.run_once("w1")
+
+        self.assertEqual(await self.retries_used(h, task_id), 0)
+
+    async def test_a_planner_failure_that_cannot_retry_costs_no_retry(self):
+        planner = FakeRuntime(
+            "local", script={"plan": fail("Refused", "no", retryable=False)}
+        )
+        h = self.harness(runtimes={"local": planner})
+        task_id = await self.prepare(h)
+        await self.set_retries(task_id, limit=0)
+
+        report = await h.orchestrator.run_once("w1")
+
+        # It fails for its plan, not for the budget: no retry was ever made.
+        self.assertEqual(report.outcome, Out.PLAN_FAILED)
+        self.assertEqual(await self.retries_used(h, task_id), 0)
+        self.assertEqual(
+            (await h.tasks.restore(task_id)).last_event.reason, "No acceptable plan"
+        )
+
+    async def test_a_used_up_retry_budget_stops_the_second_planning_attempt(self):
+        planner = FakeRuntime("local", script={"plan": [CYCLE, GOOD]})
+        h = self.harness(runtimes={"local": planner})
+        task_id = await self.prepare(h)
+        await self.set_retries(task_id, limit=0)
+
+        report = await h.orchestrator.run_once("w1")
+
+        # Decision 0007: retries over the limit fail the task; the planner is not
+        # called again and nothing is planned.
+        self.assertEqual(report.outcome, Out.BUDGET_FAILED)
+        self.assertEqual(len(planner.calls_of("plan")), 1)
+        self.assertEqual(await self.retries_used(h, task_id), 0)
+        self.assertIsNone(await self.store.get(task_id, 1))
+        snapshot = await h.tasks.restore(task_id)
+        self.assertEqual(snapshot.state, TaskState.FAILED)
+        self.assertEqual(snapshot.last_event.reason, "The retry budget is used up")
+
+    async def test_the_last_retry_that_fits_makes_the_second_planning_attempt(self):
+        planner = FakeRuntime("local", script={"plan": [CYCLE, GOOD]})
+        h = self.harness(runtimes={"local": planner})
+        task_id = await self.prepare(h)
+        await self.set_retries(task_id, limit=1)
+
+        report = await h.orchestrator.run_once("w1")
+
+        self.assertEqual(report.outcome, Out.DAG_SUCCEEDED)
+        self.assertEqual(await self.retries_used(h, task_id), 1)
+
     async def test_a_plan_submitted_beforehand_skips_the_planner(self):
         planner = FakeRuntime("local", script={"plan": CYCLE})
         h = self.harness(runtimes={"local": planner})

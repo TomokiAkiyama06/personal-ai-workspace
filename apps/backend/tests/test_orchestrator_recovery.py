@@ -313,5 +313,115 @@ class UnexpectedErrorsTest(PostgresOrchestratorTestCase):
         self.assertEqual((await h.tasks.restore(task_id)).state, TaskState.FAILED)
 
 
+@requires_postgres
+class RuntimeTimerStopFailureTest(PostgresOrchestratorTestCase):
+    """A run whose ``stop_runtime`` fails must not complete its entry.
+
+    A completed entry is never claimed again, so a runtime timer left running
+    behind it would keep ``running_since`` set and accrue runtime for good. The
+    entry stays claimed instead; once its lease expires, the next worker that
+    claims it finds a task that no longer runs, settles the timer (the time is
+    charged once) and only then completes the entry.
+    """
+
+    async def timer(self, task_id) -> dict:
+        (row,) = await self.rows(
+            "SELECT running_since, consumed FROM budget_usages"
+            " WHERE task_id = :t AND kind = 'runtime_seconds'",
+            t=task_id,
+        )
+        return row
+
+    async def entry_status(self) -> str:
+        (entry,) = await self.rows("SELECT status FROM queue_entries")
+        return entry["status"]
+
+    async def expire_the_lease(self) -> None:
+        await self.owner_sql(
+            "UPDATE queue_entries SET claimed_at = now() - interval '10 seconds',"
+            " lease_expires_at = now() - interval '5 seconds' WHERE status = 'claimed'"
+        )
+
+    def break_stop(self, h) -> list:
+        calls = []
+
+        async def unreachable(task_id, generation):
+            calls.append(generation)
+            raise ConnectionError(SECRET)  # a transient database error
+
+        h.budget.stop_runtime = unreachable
+        return calls
+
+    async def test_the_entry_stays_claimed_and_the_next_worker_stops_the_timer(self):
+        h = self.harness()
+        task_id = await self.prepare(h, make_plan(node("a")))
+        calls = self.break_stop(h)
+
+        with self.assertLogs("paw_backend.orchestrator.orchestrator", "ERROR") as logs:
+            report = await h.orchestrator.run_once("w1")
+
+        self.assertEqual(report.outcome, Out.DAG_SUCCEEDED)
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn(SECRET, "\n".join(logs.output))
+        self.assertEqual((await h.tasks.restore(task_id)).state, TaskState.EVALUATING)
+        # The timer still runs, so the entry is NOT completed.
+        self.assertIsNotNone((await self.timer(task_id))["running_since"])
+        self.assertEqual(await self.entry_status(), "claimed")
+        # Time passes on the database clock while the timer runs.
+        await self.owner_sql(
+            "UPDATE budget_usages SET running_since = running_since"
+            " - interval '30 seconds' WHERE task_id = :t AND kind = 'runtime_seconds'",
+            t=task_id,
+        )
+
+        # While the lease holds, nobody else takes the entry.
+        rescuer = self.harness()
+        self.assertEqual((await rescuer.orchestrator.run_once("w2")).outcome, Out.IDLE)
+
+        await self.expire_the_lease()
+        report = await rescuer.orchestrator.run_once("w2")
+
+        self.assertEqual(report.outcome, Out.SKIPPED)
+        timer = await self.timer(task_id)
+        self.assertIsNone(timer["running_since"])
+        self.assertGreaterEqual(timer["consumed"], 30)  # charged once, not lost
+        self.assertEqual(await self.entry_status(), "completed")
+        # The task was left where the run put it.
+        self.assertEqual((await h.tasks.restore(task_id)).state, TaskState.EVALUATING)
+
+    async def test_a_settlement_that_fails_leaves_the_entry_claimed_again(self):
+        h = self.harness()
+        task_id = await self.prepare(h, make_plan(node("a")))
+        self.break_stop(h)
+        with self.assertLogs("paw_backend.orchestrator.orchestrator", "ERROR"):
+            await h.orchestrator.run_once("w1")
+        await self.expire_the_lease()
+
+        second = self.harness()
+        self.break_stop(second)
+        with self.assertLogs("paw_backend.orchestrator.orchestrator", "ERROR"):
+            report = await second.orchestrator.run_once("w2")
+
+        self.assertEqual(report.outcome, Out.SKIPPED)
+        self.assertIsNotNone((await self.timer(task_id))["running_since"])
+        self.assertEqual(await self.entry_status(), "claimed")
+
+        await self.expire_the_lease()
+        third = self.harness()
+        await third.orchestrator.run_once("w3")
+        self.assertIsNone((await self.timer(task_id))["running_since"])
+        self.assertEqual(await self.entry_status(), "completed")
+
+    async def test_a_stop_that_works_completes_the_entry_at_once(self):
+        h = self.harness()
+        task_id = await self.prepare(h, make_plan(node("a")))
+
+        report = await h.orchestrator.run_once("w1")
+
+        self.assertEqual(report.outcome, Out.DAG_SUCCEEDED)
+        self.assertIsNone((await self.timer(task_id))["running_since"])
+        self.assertEqual(await self.entry_status(), "completed")
+
+
 if __name__ == "__main__":
     unittest.main()
