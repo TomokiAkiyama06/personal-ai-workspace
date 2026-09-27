@@ -138,6 +138,27 @@ class ServiceValidationTest(unittest.IsolatedAsyncioTestCase):
                 self.project, self.item, PromotionOutcome.PROMOTED
             )
 
+    async def test_purge_projects_rejects_bad_arguments(self):
+        await self.assertRejected(
+            "project_ids",
+            InputProblem.NOT_A_COLLECTION,
+            self.store.purge_projects("not-a-list"),
+        )
+        await self.assertRejected(
+            "project_ids",
+            InputProblem.WRONG_TYPE,
+            self.store.purge_projects(["not-a-uuid"]),
+        )
+
+    async def test_an_empty_purge_projects_call_never_reaches_the_database(self):
+        self.assertEqual(await self.store.purge_projects([]), ())
+
+    async def test_a_non_empty_purge_projects_call_reaches_the_database_layer(self):
+        from paw_backend.db import DatabaseNotConfiguredError
+
+        with self.assertRaises(DatabaseNotConfiguredError):
+            await self.store.purge_projects([self.project])
+
 
 if __name__ == "__main__":
     unittest.main()
