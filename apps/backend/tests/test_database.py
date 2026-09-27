@@ -50,6 +50,8 @@ class ConfiguredDatabaseTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(engine.dialect.driver, "psycopg")
         self.assertEqual(engine.pool.size(), 3)
         self.assertNotIn(PASSWORD, repr(engine.url))
+        # Errors carry no bound values (a message, a secret) in their text.
+        self.assertTrue(engine.sync_engine.hide_parameters)
         self.assertIs(database.engine, engine)
         await database.dispose()
         self.assertIsNone(database._engine)

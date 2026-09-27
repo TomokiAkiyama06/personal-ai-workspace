@@ -4,7 +4,7 @@ Personal AI Workspace の Core Backend です。
 [PAW-020](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/17) で、後続の Issue が載る最小の Application Skeleton を実装しました。
 Login・Session・Password の Policy と、Owner の Token を受け取る Endpoint は [PAW-022](#login--session--password-policy) で実装しました（Passkey の登録・強制と Step-up の Passkey は PAW-023）。
 RBAC と Audit（PAW-025）、Task の Lifecycle と永続化（[PAW-032](#agent-task-lifecycle)、HTTP の Endpoint はまだありません）、Task Queue・Budget・Loop 検知（[PAW-033](#task-queue--budget--loop-検知)）、Tool Broker と Capability Policy（[PAW-031](#tool-broker--capability-policy)、HTTP の Endpoint はまだありません）、Memory の PostgreSQL Schema（[PAW-040](#memory--conversation-schema)）、
-最小の `users` Table と Owner の初期設定・復旧のコマンド（[PAW-021](#owner-の初期設定と復旧)）を実装済みです。Memory の保存・整理の処理は PAW-041 以降です。Memory の検索（Hybrid Retrieval。[PAW-043](#hybrid-retrieval)、HTTP の Endpoint はまだありません）は実装済みです。
+最小の `users` Table と Owner の初期設定・復旧のコマンド（[PAW-021](#owner-の初期設定と復旧)）を実装済みです。Memory の Journal と背景の整理は [PAW-041](#immediate-journal--background-consolidation) で実装済みです。Memory の検索（Hybrid Retrieval。[PAW-043](#hybrid-retrieval)、HTTP の Endpoint はまだありません）も実装済みで、Conflict の整理は PAW-042 以降です。
 Shared Memory の管理（Owner / Admin の作成・編集・削除・復元、Candidate の承認、Agent の自動昇格の拒否、System Policy の優先。[PAW-046](#shared-memory-administration)、HTTP の Endpoint はまだありません）も実装済みです。
 Research の一時保存（[PAW-050](#research-scratch-store)、24 時間 TTL、期限切れを消す Janitor つき、HTTP の Endpoint はまだありません）と、Research Provider の Adapter Interface（[PAW-051](#research-provider-adapter)、実際の Provider（Direct Web、Docs、GitHub、OpenCode）はまだありません）と、外部の検索へ送る Query の最小化と送信の Audit（[PAW-053](#research-privacy-filter)。Audit は [#87](#audit-の永続化issue-87) で `audit_events` に永続化済み。方式は Decision 0023（Approved、2026-09-26）で決めています）も実装済みです。
 Claim と Source の対応・回答や Task からの追跡（[PAW-052](#evidence--claim-provenance)、HTTP の Endpoint はまだありません）も実装済みです。
@@ -48,7 +48,7 @@ Python 側の Package（`pgvector-python`）は使わず、`paw_backend/memory/v
 apps/backend/
 ├─ pyproject.toml          # 依存（完全一致で固定）と Ruff 設定
 ├─ alembic.ini             # Alembic 設定（DB URL は持たない）
-├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0022 は Password / Session / Login Throttle / 認証 Policy、0023 は Passkey / Passkey の Challenge / Session の Gate、0026 は Project、0027 は Repository 登録・Remote・Checkout、0030 は Shared Connection・Quota・Usage、0031 は Tool Approval、0033 は Queue / Budget / Loop、0034 は DAG Agent Orchestrator（Plan・DAG・Node の試行）、0040 は Memory Schema、0043 は `memory_versions` の全文検索の Index、0046 は Shared Memory Candidate、0050 は Research Scratch、0052 は Evidence / Claim Provenance、0071 は Memory の Status / Stale 状態の変更履歴、0083 は `tasks (project_id, state)` の Index、0087 は外部送信の Audit の `audit_events.details`）
+├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0022 は Password / Session / Login Throttle / 認証 Policy、0023 は Passkey / Passkey の Challenge / Session の Gate、0026 は Project、0027 は Repository 登録・Remote・Checkout、0030 は Shared Connection・Quota・Usage、0031 は Tool Approval、0033 は Queue / Budget / Loop、0034 は DAG Agent Orchestrator（Plan・DAG・Node の試行）、0040 は Memory Schema、0041 は Memory Journal / Consolidation Queue、0043 は `memory_versions` の全文検索の Index、0046 は Shared Memory Candidate、0050 は Research Scratch、0052 は Evidence / Claim Provenance、0071 は Memory の Status / Stale 状態の変更履歴、0083 は `tasks (project_id, state)` の Index、0087 は外部送信の Audit の `audit_events.details`）
 ├─ paw_backend/
 │  ├─ app.py               # create_app(settings)
 │  ├─ config.py            # PAW_ 環境変数から読む Settings
@@ -67,6 +67,7 @@ apps/backend/
 │  ├─ tasks/               # Agent Task の状態遷移と永続化（PAW-032）。`project_gate.py` は Project の状態 Gate の Protocol（Issue #83）
 │  │  └─ queueing/         # Task Queue、Budget、Loop 検知、Escalation の判断（PAW-033）
 │  ├─ memory/              # Memory / Conversation の Model、ACL 条件、vector 型、Pin / Importance / Status / Stale 変更の Actor（PAW-040、#90）、全文検索の式 `fulltext.py`（PAW-043）
+│  │  ├─ journal/          # Immediate Journal と Background Consolidation: Journal、Queue、Consolidator、Worker の契約（PAW-041）
 │  │  ├─ shared/           # Shared Memory の管理: Service、Candidate、Rule 関数、Policy の優先（PAW-046）
 │  │  └─ retrieval/        # Hybrid Retrieval: 権限の解決、SQL Prefilter、Keyword + Vector、Rerank、重複・矛盾（PAW-043）
 │  ├─ projects/            # Project、Membership（招待制）、Lifecycle（PAW-026）、管理者向けの全 Project 一覧（Issue #84）。`task_gate.py` は Task Lane に渡す Project の状態 Gate（Issue #83）、`task_stop.py` は Delete 開始時の Task 停止
@@ -248,6 +249,7 @@ Session は PAW-022 で実装済みです。この 2 つの Endpoint は、シ�
 ## Database と Migration
 
 Engine は最初に使うときに作られ、その時点でも接続はしません。
+Engine（Pool の Engine と `run_abortable` の Engine）は `hide_parameters=True` で作ります。SQLAlchemy のエラーの文言に Bind した値（Message、Secret など）を載せないためです（`tests/test_database.py`、`tests/test_database_run_abortable.py`）。PostgreSQL 自身のエラー（`DETAIL` の行の引用など）は隠れないので、利用者の本文を書く Service は、エラーを自分の型に変えて元のエラーを切り離します（Memory Journal は `JournalDatabaseError`）。
 そのため PostgreSQL が停止していても Process は起動し、Liveness に応答します。
 Readiness は Pool を使わず、専用の接続で `SELECT 1` を実行し、`PAW_DATABASE_TIMEOUT_SECONDS` で必ず応答します。
 `/api/v1/health/ready` は到達できる誰でも呼べるため、開く接続数を制限しています。
@@ -2101,6 +2103,144 @@ Migration（上げ下げ、Model との差分、制約）、権限（非 Superus
 操作ごとの Audit の `action`（`..._audit_actions.py`。実 `audit_events` の行を読み、非 Superuser の Role でも実行）、
 変更の完了の記録（`..._completion.py`。成功は完了の行が続くこと、失敗・Lock の待ち切れ・更新の失敗・Commit の失敗は完了の行がなく変更もないこと、完了の行を書けなければ変更も戻ること。非 Superuser の Role でも実行）があります。
 
+## Immediate Journal / Background Consolidation
+
+[PAW-041](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/35)（Revision `0041`、`paw_backend/memory/journal/`）で実装しました。
+User Message を受けたら Raw Conversation と Pending Observation を**同じ Transaction で即時に保存**し（`MemoryJournal`）、
+Memory の整理は**背景の Queue**（`ConsolidationQueue`）から Worker（`Consolidator` と `MemoryWorker`）が行います。
+**HTTP の Endpoint も、Worker の Process もまだありません**（Chat の層が `MemoryJournal` を呼び、Worker の Process が `Consolidator.run_batch` を定期的に呼びます）。
+要件は [REQUIREMENTS.md](../../REQUIREMENTS.md) の「Immediate Journal / Background Consolidation」と [Memory Architecture](../../docs/MEMORY_ARCHITECTURE.md) の 18 節、
+要件が決めていない選択（Scope と State の扱い、優先度の割り当て、Queue の数値、保持、高リスクの領域）は
+[Decision 0018](../../docs/decisions/0018-memory-journal-consolidation-policy.md)（**Approved、2026-09-26 に Human が承認**。8 点すべて推奨どおり）です。
+数値と高リスクの語彙は、実測に基づかない**暫定値として承認**されています（下の「承認された判断」）。
+
+```text
+User Message
+   |  MemoryJournal.record_user_message        （1 Transaction。GPU も Model も使わない）
+   v
+messages（Raw）  +  memory_journal_entries（state = pending: Pending Observation）  +  memory_consolidation_queue（Job）
+   |
+   |  Assistant の応答 ......... 次の Turn は pending_observations を読む（未整理でも直前の指示を失わない）
+   v
+Consolidator.run_once / run_batch                       （背景。GPU が止まっていれば Job は待つ）
+   1. claim_next    ... Lease（claim_count が Fencing Token）
+   2. worker.extract(本文)  ... 検証は書き込みの前に出力全体を
+   3. 1 Transaction ... Lease の確認 -> Candidate の Version -> Entry を consolidated -> Job を completed
+```
+
+### Table
+
+| Table | 内容 |
+| --- | --- |
+| `memory_journal_entries` | User Message 1 件につき 1 行。会話・Message・Turn・`event_sequence`・Owner・Project / Repo・記録時刻（書き換えない）と、処理状態（`state`、`consolidated_at`、`outcome`）。`state = 'pending'` の行が Pending Observation。本文は複製せず `messages` を指す（複合 Foreign Key、`ON DELETE CASCADE`: Conversation を消すと Entry も Job も消える） |
+| `memory_consolidation_queue` | Job。優先度、Lease（`claim_count` が Fencing Token）、再試行（`attempts`、`deferrals`、`available_at`）、Dead Letter（`status = 'dead'`）。1 つの Entry に有効な Job は 1 つ（Partial Unique Index） |
+| `memory_consolidation_keys` | Worker の `key`（Owner ごと）が指す Memory と、その現在の Version を作った Entry の順序の印（古い Turn が新しい Memory を上書きしないための Guard）。Memory と一緒に消える |
+
+3 つとも PAW-040 の Memory の層に属し、Foreign Key は Memory の層の内側だけです（`tests/test_memory_schema.py` の許される辺に、この 3 本を足しました）。
+User / Project の ID は、他の Memory Table と同じく素の UUID です。
+
+### Journal（同期の半分）
+
+`MemoryJournal(database, authorizer)` の 4 つのメソッドです。すべての引数を最初に検証し（Authorizer にも Database にも触れる前）、次に `memory.use` を Authorizer に問い、最後に Database を使います。
+
+| メソッド | 動作 |
+| --- | --- |
+| `record_user_message(actor, conversation_id, content, *, turn_id=None, priority=NORMAL)` | **Raw の Message、Entry（`pending`）、Job を 1 Transaction で保存**する（どれかが失敗すれば全部戻る）。`JournalReceipt`（ID と `event_sequence`）を返す。人間の `Principal` だけ（Agent は `InvalidJournalInputError`） |
+| `append_message(actor, conversation_id, role, content, *, turn_id)` | Assistant / Tool / Agent / Task の Message を、同じ Sequence で保存する（Raw だけ。Observation も Job もない）。`role` に `user` は不可 |
+| `pending_observations(actor, conversation_id, *, limit=50)` | 整理が済んでいない Observation を返す（次の Turn が読む）。Dead Letter の Job の Observation も含む。**`limit` を超えて溜まっているときは、最新の `limit` 件を選び、古い順（`event_sequence` 順）に並べて返す**（長い GPU 停止のあとでも、直近の指示が外れない）。古い分は `pending` のままで、Queue が通常どおり整理する。Cursor はないので、全件が要る呼び出し側は `sync_status` の件数を見る |
+| `sync_status(actor, conversation_id)` | UI の 4 つの状態の件数: 整理中（`consolidating`）、Worker 待ち（`waiting_for_worker`。GPU に届かなかった）、再試行（`retrying`）、失敗（`failed`。Dead Letter）。全部 0 なら同期済み |
+
+- **Event Sequence。** Conversation の行を `FOR NO KEY UPDATE` で Lock し、その会話の Message の最大値 + 1 を割り当てます（0 から）。同じ会話への書き込みはこの Lock で 1 つずつになるので、番号は重複せず、欠番がなく、Commit の順に並びます。Conversation を削除中の書き込みは Lock を待ち、Commit 後に「見つからない」になります。`(conversation_id, event_sequence)` の Unique（`messages`）が最後の防波堤で、会話の Message は Journal を通してだけ追加する必要があります（自分で番号を選ぶ書き込みは衝突します）。
+- **優先度は呼び出し側が決めます**（HIGH: 明示的な Preference / Decision、NORMAL: 既定、LOW: 再処理）。Journal は本文を読んで判断しません。
+- **権限。** `memory.use`（`Scope.SELF`）だけを使います。**新しい Capability は追加していません**。自分の Conversation だけを扱え、他の User（Admin を含む）の Conversation は、存在しない Conversation と同じ `ConversationNotFoundError` です。`AgentActor` は、委任元の Grant に `memory.use` があれば `append_message`、`pending_observations`、`sync_status` を呼べます。
+- **Lock。** 書き込みの Transaction は `SET LOCAL lock_timeout`（`lock_timeout_ms`、既定 3000）で始まり、待ち切れなければ何も保存せず `JournalBusyError` です。それ以外の Database のエラー（制約違反、権限、接続の失敗など）は、何も保存せず `JournalDatabaseError` です。**SQLAlchemy / psycopg のエラーは渡しません**: その文言には Bind した値（Message の `content`。個人的な内容や Credential のことがある）が入り、PostgreSQL の `DETAIL` は失敗した行を引用するためです。`JournalDatabaseError` の文言は固定で、持つのは閉じた `sqlstate`（`23514` など）だけです。`__cause__` も `__context__` も元のエラーを指さない（`raise ... from None` だけでは `__context__` が残るため、Raise の後で外す）ので、Traceback・Log・`repr` のどこからも元のエラーに届きません（`paw_backend/memory/journal/sql.py`、`tests/test_journal_failures.py` の `DatabaseErrorPrivacyTest`。この Test は `hide_parameters` なしの Engine で、Journal の変換だけで漏れないことを確かめます）。
+
+### Queue（背景）
+
+`ConsolidationQueue(database, *, lease_seconds=300, max_attempts=5, backoff=Backoff(), lock_timeout_ms=3000)`。Task Queue（PAW-033、[Decision 0007](../../docs/decisions/0007-task-queue-budget-and-loop-policy.md)）と同じ作りで、Database が唯一の Source of Truth、時刻は Database の `clock_timestamp()` だけです（時刻を渡す口はありません。Test は Database 側の行を動かします）。
+
+- **優先度。** `priority_rank`（HIGH 0、NORMAL 1、LOW 2）、`enqueued_at`、`id` の順に Claim します。再試行した Job も元の位置に戻ります。Aging はなく、HIGH は実行中の Job を中断しません。
+- **Claim。** `FOR UPDATE SKIP LOCKED` で 1 件を選び、Lease を与えます。他の Claimer が Lock している行は待たずに飛ばします。`queued` で `available_at` を過ぎたもの、または Lease が切れた `claimed` が対象です。
+- **Lease と Fencing。** Claim のたびに `claim_count` が 1 増え、`heartbeat` / `fail` / `dead_letter`（と Consolidator の完了）は、この世代を**必須の引数**として受け取ります。Lease が切れて別の Worker（同じ Worker ID でも）が Claim し直した Job に、古い世代は何もできません（`LeaseLostError`）。Lease は Row Lock を取った**後**の Statement で、Database の時計で判定します。
+- **再試行と Dead Letter。** `fail` は Job を遅延つきで `queued` に戻すか、`dead` にします。遅延は `30 秒 × 2^(n-1)`、上限 900 秒（`Backoff`）。数える失敗（Timeout、Worker の例外、出力の契約違反、書き込みの失敗）は `attempts` を増やし、5 回目で `dead` です。**Worker が使えない（GPU 停止）は数えません**（`deferrals` だけが増え、遅延は伸びますが Dead Letter にならず、復帰後に再開します）。Lease が切れた Job の再 Claim は、失敗 1 回として数えます（Worker を落とし続ける Job が無限に続かない）。
+- **Dead Letter は Observation を消しません**（Entry は `pending` のまま、`pending_observations` に出ます）。`enqueue(entry_id, priority)` が新しい Job を作ります（冪等: 有効な Job がある Entry には、その Job を返します）。
+- **Index。** Claim の Index と一意性の Index は Partial（`WHERE status IN ('queued', 'claimed')`）で、完了・Dead の Job を残しても使えるよう、Status を SQL の文面に書き込みます（`tests/test_journal_queue.py` が Generic Plan で確認）。
+
+### Consolidator と Memory Worker
+
+`Consolidator(database, queue, worker, *, worker_id, worker_timeout_seconds=120, batch_size=10)`。`run_once()` は 1 Job を最後まで進め、`run_batch()` は `batch_size` 回まで繰り返します（Job がなくなるか、Worker が使えなかった時点で止まるので、止まった GPU に Job ごとには問い合わせません）。
+
+- **`MemoryWorker`**（Protocol）は Memory Worker Benchmark（PAW-018）が評価する契約です。`async def extract(input_text: str) -> str` が `memory-worker-output-v1`（`key`、`scope`、`state`、`supersedes`、任意の `content` と `conflicts_with`）の JSON 文字列を返します。GPU に届かないときは `WorkerUnavailableError`（または `ConnectionError`）を送出します。**Model は入力の本文しか受け取りません**（User ID も他の User の Memory も渡りません）。`tests/test_journal_worker_contract.py` が Schema File と比べ、`jsonschema` がある環境では同じ文書を両方の Validator に通します。
+- **出力は書き込みの前に全体を検証します**（`parse_worker_output`）。Schema の規則に、Backend の上限（20 件、`key` 200 文字で制御文字なし、`content` 8,000 文字、`conflicts_with` 10 件、出力 400,000 文字）と、重複した Member 名・`NaN`・深い入れ子の拒否を足しています。**1 つでも違反すれば出力全体を捨てます**（Benchmark の `schema_adherence` と同じ）。エラーは閉じた Code だけで、出力の文言を含みません。
+- **Worker の主張は主張です**（`rules.py`、[Decision 0018](../../docs/decisions/0018-memory-journal-consolidation-policy.md)）。
+
+| Worker の出力 | Backend が書くもの |
+| --- | --- |
+| `scope` が `user` / `project` / `repo` | どれも **`user` Scope（会話の Owner だけが読める）**。Owner は DB の Conversation から取る。`project` / `repo` は `attributes.recommended_scope` に残すだけで、範囲を広げるのは確認 Flow（PAW-044）の新しい Version |
+| `scope` が `shared` | 書かない（`refused_shared`）。Shared Memory へ自動で昇格しない |
+| `state` が `inferred` | `inferred` |
+| `state` が `confirmed` | **`observed`**（Confirmed は User の確認だけ。元の主張は `attributes.worker_state`） |
+| key または内容が高リスクの領域（Merge、Delete、公開、ACL・Role・権限、Credential・Secret、外部送信） | Memory にせず、Outcome に候補を保存して保留（`held_high_risk`）。語彙は暫定の一覧で、補助の網。どの状態の Memory も権限や実行を与えない |
+| 既存の **Confirmed** の Memory と内容が違う | 書かない（`held_confirmed`）。同じ内容なら重複（`duplicate`） |
+| User が**範囲を広げた** Memory（`project` / `repo` の新しい Version。確認 Flow が作る） | 書かない・退役させない（`held_widened`。同じ内容なら `duplicate`）。Worker は、User が決めた範囲を変えない。key で Memory を探すときは、Owner の `user` Scope の Version を 1 つ持つ Memory を、最新の Version（広げた Version）まで含めて読む（広げた Version には Owner の列がないため。他人の Memory を指す Registry の行は、何も読まずに失敗する） |
+| User が却下・無効化した Memory | 書かない（`blocked_by_user`） |
+| 同じ key の既存の弱い Memory | 新しい Version（`active`）、前の Version は `superseded`、`supersedes` の関係。`supersedes` が別の key なら、その Memory も（Confirmed でなければ）同様に置き換える。`conflicts_with` は関係を足すだけ |
+| 古い Turn の結果 | 書かない（`stale`）。下の「順序」 |
+
+書く Version は `memory_type = 'worker_candidate'`、`title` は key、`freshness_policy = 'permanent'`、`actor_type = 'system'`、出典は `memory_sources`（Conversation と Message）です。
+Memory の Query の ACL（`readable_memory_versions`）は、他の User にも、同じ Project の Member にも、この Memory を見せません（`tests/test_journal_consolidator.py`）。
+
+- **順序（古い Turn が新しい Memory を上書きしない）。** Claim の順は優先度で、適用時に Event の順で守ります。Memory の現在の Version を作った Entry の順序の印を `memory_consolidation_keys` に持ち、Candidate は**それより新しい**ときだけ適用します（同じ会話は `event_sequence`、会話が違えば記録時刻）。古い結果は `stale` として Outcome に残り、Memory に書きません。`supersedes` で別の key の Memory を退役させるときは、**その key の順序の印も同じ Transaction で今回の Entry へ進めます**（退役より古い Observation が後から終わっても、退役した Memory は戻りません。退役より**新しい** Observation だけが戻せます）。逆に、対象の key を、今回の Entry より新しい Turn がすでに更新していれば、古い Turn の `supersedes` はその Memory を退役させません（`ide` 自体は書きます）。key ごとの Advisory Lock（Hash 順に取る）が同じ key の適用を直列にし、`(memory_id, version_number)` の Unique と `UPDATE ... WHERE status = 'active'` の行数が、手動編集など Lock を取らない書き込みとの Lost Update を失敗にします（Transaction は戻り、Job は新しい状態で再試行）。
+- **Version を退役させる変更は、Actor を名乗ります。** Version の `status` の変更（`superseded` への退役。`applier._supersede` の 1 か所だけ）は、Database の Trigger が `memory_metadata_changes` に、変更前後の `status` と Actor つきで記録します。Actor を名乗らない変更は、Revision `0071`（PR #109）以降は `actor_type` の NOT NULL で失敗します（Trigger は緩めていません）。Consolidator は、同じ Transaction の `UPDATE` の直前に `metadata_change_actor(ActorType.SYSTEM)` を実行します。**Actor は `system`（背景の Memory Worker）で、会話の Owner ではありません**: Owner を名乗ると、履歴が「Owner が手で退役させた」と答えてしまうためです（書く Version の `actor_type` も `system`）。退役させた Version 1 つにつき履歴が 1 行で、新しい Version の INSERT や、何も退役させない結果（`duplicate`、保留、`stale`）は何も記録せず、Transaction が戻れば履歴も戻ります。Migration `0041` は `0071` より後（`0023` の後）に適用されるため、履歴の `status` の列は常にあり、`tests/test_journal_status_history.py` は履歴の行を常に検査します。
+- **出力の中の順序に依存しません。** 1 つの出力の項目は、参照される Memory を先に適用します（`supersedes` で退役させる key、`conflicts_with` の key。`rules.processing_order`）。`y`（`x` を退役させる）が `x` より先に並んでいても、`x` が先に書かれてから `y` が退役させます。循環（`a` が `b` を、`b` が `a` を退役させる）は、並んだ順に適用し、退役で進めた順序の印を、次の項目が見ます。同じ key の 2 番目以降は `duplicate_key`、同じ key を退役させる項目が 2 つあれば、先に並んだ方が退役させます。
+- **適用は 1 Transaction です**（Lease の確認、Candidate、Entry の `consolidated`、Job の `completed`）。Lease の確認は Job の Row Lock の後なので、Lease を失った Worker の結果は捨てられます。失敗した書き込みは全部戻ります（途中まで書いた出力は残りません）。
+- **GPU が使えないとき。** Worker の `WorkerUnavailableError` は Job を遅延つきで戻すだけで、Entry は `pending`、Raw は保存済みです。GPU が復帰して遅延が過ぎれば、Event の順（同じ優先度では古い Entry から）に再開します（`tests/test_journal_gpu_unavailable.py`）。
+- **Privacy。** Log、エラー、`repr`、Audit に、会話の本文・key・内容を出しません（Job の ID と閉じた Code だけ。Worker の例外の文言は読みません）。`PendingObservation` と `WorkerMemory` は本文を `repr` から外しています。Outcome（保留した Candidate の本文を含む）は Owner の行にあり、Conversation と一緒に消え、Admin にも見せません。
+
+### Database と権限
+
+Migration `0041` の `down_revision` は `0023` です（鎖は `0001 → 0025 → 0032 → 0040 → 0021 → 0033 → 0031 → 0050 → 0046 → 0052 → 0026 → 0087 → 0022 → 0083 → 0043 → 0030 → 0027 → 0071 → 0086 → 0088 → 0023 → 0041`）。Revision ID は Issue 番号で、鎖の順序ではありません。統合時に Orchestrator が並びを確認します。
+Application の Role には、Service が実行する最小の権限だけを与えます（[上の規則](#migration-は-application-の-role-に権限を与えるcontributor-向けの規則)）。
+
+| Table | 与える権限 | 理由 |
+| --- | --- | --- |
+| `memory_journal_entries` | SELECT、INSERT、UPDATE（`state`、`consolidated_at`、`outcome` のみ） | 保存（INSERT）と、整理の結果（UPDATE。`SELECT ... FOR UPDATE` はこの UPDATE 権限で足りる）。会話・Message・Turn・Sequence・Owner・Context・時刻は書き換えられず、DELETE も与えない（Conversation と一緒に消える） |
+| `memory_consolidation_queue` | SELECT、INSERT、UPDATE（`status`、`available_at`、`attempts`、`deferrals`、`claim_count`、`claimed_by`、`claimed_at`、`lease_expires_at`、`last_failure`、`finished_at` のみ） | Enqueue と、Claim・延長・失敗・完了。`entry_id`、優先度、`enqueued_at` は変えられず、Queue 済みの Job を優先度の変更や付け替えで操作できない。DELETE なし（完了・Dead の Job は履歴） |
+| `memory_consolidation_keys` | SELECT、INSERT、UPDATE（`applied_conversation_id`、`applied_event_sequence`、`applied_recorded_at` のみ） | key の登録と、順序の印の更新。Owner と Memory は変えられない。Memory と一緒に消える |
+| `messages`、`conversations`、`memories`、`memory_versions`、`memory_relations`、`memory_sources`、`memory_metadata_changes` | Revision `0040` のまま | Journal は Message の INSERT、Conversation の行 Lock（`FOR NO KEY UPDATE` は `updated_at` などの UPDATE 権限で足りる）、Candidate の INSERT と `memory_versions.status` の UPDATE だけを使う。Version の本文・`confirmation_state`・Scope は書き換えられない。`memory_metadata_changes` への INSERT は、Version の `status` の変更を記録する Trigger（Revision `0071`）が、書き込む側の権限で行う |
+
+`tests/test_journal_grants.py` は、Journal、Queue、Consolidator の Test を非 Superuser の Role で実行し、権限が過不足ないこと、書き換えを禁じた列と Schema の変更が拒否されることを検査します。
+
+### 承認された判断
+
+[Decision 0018](../../docs/decisions/0018-memory-journal-consolidation-policy.md)（Approved、2026-09-26 に Human が承認。8 点すべて推奨どおり）の次の点は、承認された方針です。
+
+1. Worker の `confirmed` は `observed` に下げる（Confirmed は User の確認だけ）。
+2. すべての Candidate を `user` Scope に置く（`project` / `repo` は推奨として残し、範囲を広げるのは確認 Flow）。`shared` は書かない。
+3. 高リスクの領域（key と内容、英日の語）は保留する。語彙は暫定。
+4. 優先度は呼び出し側が決める（本文の Keyword では決めない）。
+5. Timeout は失敗として数え、Worker が使えないことは数えない。
+6. Queue の数値（Lease 300 秒、Worker 120 秒、失敗 5 回、Backoff 30 秒から 15 分、Batch 10、Lock の待ち 3 秒）は暫定値として承認された。
+7. 保留した Candidate の本文は Entry の `outcome` に持つ。
+8. Dead Letter の復旧は運用（`enqueue`）で、自動の再投入は置かない。
+
+### 制限と未確認の点
+
+- HTTP の Endpoint、Worker の Process（`run_batch` を呼び続ける Loop）、User 向けの「再試行」、通知はありません。
+- **Worker は Test の `ScriptedWorker`（Model なし）でだけ確認しています。** 実 GPU・実 Model の Adapter、Prompt（既存 Memory を渡して `supersedes` を出させる）、Benchmark で採用された Model との接続は未確認です。
+- 高リスクの語彙（英日）は暫定値として承認されたもので、見逃しと過剰な保留がありえます（Decision 0018）。key の正規化はしないので、同じ意味の別の key は別の Memory になります。
+- Conflict / Freshness / Retrieval / Confirmation Flow（PAW-042、043、044）は含みません。関係は最小（同じ key の置き換え、`supersedes`、`conflicts_with`）で、鮮度は `permanent` 固定、Embedding と Markdown Projection は行いません。
+- 数値（Lease 300 秒、5 回、Backoff、Batch 10、上限の件数と文字数）は実測に基づかない暫定値で、`journal/limits.py` にあります。
+- 同じ key を別の User が使っても Memory は別ですが、User ごとの Advisory Lock の名前空間は、Hash の衝突で無関係な key を直列にすることがあります（正しさには影響しません）。
+- Worker の呼び出しの間は Lease を延長しません（`worker_timeout_seconds` は Lease の半分以下でなければなりません）。それを超えても、結果の適用は Fencing が拒否します。
+- Journal を通らない Message の追加は、Sequence を守りません（Unique 制約が衝突を失敗にします）。
+
+### Test
+
+`tests/test_journal_*.py`。純粋な Test（Database なし）は、引数の検証（`..._argument_validation.py`。すべてのメソッド × 引数 × 不正値の表で、Authorizer と Database に触れる前に拒否されること）、Worker の契約（`..._worker_contract.py`）、規則（`..._rules.py`）、
+実 PostgreSQL の Test（`PAW_TEST_DATABASE_URL` がないと Skip）は、Journal（`..._service.py`）、Queue（`..._queue.py`）、Consolidator（`..._consolidator.py`）、失敗と Lease の Fencing（`..._failures.py`）、GPU が使えないとき（`..._gpu_unavailable.py`）、
+同時実行（`..._concurrency.py`。Sequence の一意性と Commit 順、Lock の待ち、競合する Consolidator）、Schema の制約（`..._schema.py`）、Migration（`..._migration.py`。上げ下げ、Model との差分、Catalog の比較）、権限（`..._grants.py`）です。
+
 ## Research Scratch Store
 
 [PAW-050](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/42)（Revision `0050`）で実装しました。
@@ -3105,7 +3245,7 @@ Rerank（Reranker Protocol）→ 構造化 Score（confirmed・鮮度・importan
 
 [PAW-034](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/30)（Revision `0034`、`paw_backend/orchestrator/`）で実装しました。設計は [要件](../../REQUIREMENTS.md)の「Agent Orchestration / Parallel-first execution」に従い、要件が決めていない選択（Plan の形、Role の上限、Escalation の段、並列数、結果の大きさ、Sub-Agent の予算、Sweep の周期）は **[Decision 0021（Approved、2026-09-26）](../../docs/decisions/0021-dag-orchestrator-policy.md)** にまとめ、人間が承認しました。数値は暫定値として承認されたもので、`orchestrator/limits.py` と Test の期待値で変えられます（DB の CHECK に書いた項目を除く）。
 **HTTP の Endpoint はありません**（Session は PAW-022）。Orchestrator は Worker Process が `Orchestrator.run_once` / `serve` で駆動し、Agent の Runtime は Protocol で、実際の Codex / Claude / Local の Runtime は別の Issue です（Test は Fake の Runtime で動かします）。認可は行いません（Task の権利は呼び出し側が渡す `TaskAuthority`）。
-Migration `0034` の `down_revision` は `0023` です（鎖は `0001 → 0025 → 0032 → 0040 → 0021 → 0033 → 0031 → 0050 → 0046 → 0052 → 0026 → 0087 → 0022 → 0083 → 0043 → 0030 → 0027 → 0071 → 0086 → 0088 → 0023 → 0034`）。Revision ID は Issue 番号で、鎖の順序ではありません。他の PR が先に Merge されたら、統合時に鎖をつなぎ直します（`down_revision`、Migration の Docstring の `Revises`、`tests/test_orchestrator_migration.py` の `PREVIOUS`、この文を同時に変えます）。
+Migration `0034` の `down_revision` は `0041` です（鎖は `0001 → 0025 → 0032 → 0040 → 0021 → 0033 → 0031 → 0050 → 0046 → 0052 → 0026 → 0087 → 0022 → 0083 → 0043 → 0030 → 0027 → 0071 → 0086 → 0088 → 0023 → 0041 → 0034`）。Revision ID は Issue 番号で、鎖の順序ではありません。他の PR が先に Merge されたら、統合時に鎖をつなぎ直します（`down_revision`、Migration の Docstring の `Revises`、`tests/test_orchestrator_migration.py` の `PREVIOUS`、この文を同時に変えます）。
 
 ```text
 Queue の Entry を Claim ─→ Task を Start（または、死んだ Worker の Run を引き継ぐ）
@@ -3487,7 +3627,7 @@ PAW-023 は `webauthn`（py_webauthn。WebAuthn の検証。`auth/passkeys/cerem
 [PAW-021](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/18)（Owner Setup）、
 RBAC（PAW-025）、Task Lifecycle（PAW-032）、Task Queue / Budget / Loop 検知（PAW-033）、Tool Broker（PAW-031）、Memory Schema（PAW-040）、Research Scratch Store（PAW-050）、Research Provider Adapter（PAW-051）、Research Privacy Filter（PAW-053）、Evidence / Claim Provenance（PAW-052）は、この Skeleton の上に実装済みです。
 PAW-022（Login / Session / Password）は Owner Setup の Token を受け取る側として実装済みです（[Login / Session / Password Policy](#login--session--password-policy)）。PAW-023（Passkey / Step-up）も実装済みです（[Passkey / Step-up](#passkey--step-up)。Decision 0025 は Approved）。
-Memory の保存・整理は PAW-041 以降で、Memory Schema の上に実装します。検索は [Hybrid Retrieval（PAW-043）](#hybrid-retrieval) が Memory Schema の上に実装済みです。
+Memory の Journal と背景の整理（PAW-041）は、Memory Schema の上に実装済みです。検索は [Hybrid Retrieval（PAW-043）](#hybrid-retrieval) が Memory Schema の上に実装済みです。Conflict / Versioning と確認 Flow は PAW-042 以降で、その上に実装します。
 Research Privacy Filter（PAW-053）と Evidence / Claim Provenance（PAW-052）は、Research Provider Adapter の上に実装済みです。Research の Provider（Direct Web、Docs、GitHub、OpenCode）の Adapter は、Research Provider Adapter の上に実装します。外部送信の Audit を Audit Log へ保存する実装は、後続の Issue です。
 受け入れ基準は [Implementation Backlog](../../docs/IMPLEMENTATION_BACKLOG.md)、
 実装時に選択できる事項は [Requirements Freeze Review](../../docs/REQUIREMENTS_FREEZE_REVIEW.md) を参照してください。

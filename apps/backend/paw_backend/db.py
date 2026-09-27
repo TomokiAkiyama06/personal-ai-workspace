@@ -186,6 +186,9 @@ class Database:
                 pool_size=self._settings.database_pool_size,
                 pool_pre_ping=True,
                 connect_args={"connect_timeout": self._connect_timeout},
+                # The text of a StatementError / DBAPIError would otherwise carry
+                # the bound values (a message, a secret) into every log of it.
+                hide_parameters=True,
             )
         return self._engine
 
@@ -495,6 +498,7 @@ class Database:
                 self._settings.database_url.get_secret_value(),
                 poolclass=NullPool,
                 async_creator=self._connect_abortable,
+                hide_parameters=True,  # as ``engine``: no bound values in errors
             )
             self._abortable_sessions = async_sessionmaker(
                 self._abortable_engine, expire_on_commit=False

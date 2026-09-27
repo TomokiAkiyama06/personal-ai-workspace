@@ -30,7 +30,7 @@ from .test_migrations import offline_config
 REVISION = "0034"
 # The revision this one follows: the chain is re-linked when other revisions merge
 # first, and this constant, the migration and the README then change together.
-PREVIOUS = "0023"
+PREVIOUS = "0041"
 SCHEMA = "paw_orchestrator_drift_check"
 DAGS, NODES, EDGES, ATTEMPTS = TABLE_NAMES
 
