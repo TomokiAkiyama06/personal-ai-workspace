@@ -31,6 +31,10 @@ MAX_CLAIMS_PER_CALL = 50
 # Claims one ``trace`` returns.
 DEFAULT_TRACE_LIMIT = 100
 MAX_TRACE_LIMIT = 200
+# ``purge_projects`` (Decision 0028): projects one call may name. The same value
+# as ``paw_backend.repositories.limits.MAX_PURGE_PROJECTS``, for the same reason
+# (it bounds the caller's list, not a database read).
+MAX_PURGE_PROJECTS = 500
 
 # --- locks --------------------------------------------------------------------
 

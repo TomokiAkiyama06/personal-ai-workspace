@@ -5,11 +5,13 @@ NON-superuser application role (``PAW_APP_DATABASE_ROLE``). These tests migrate
 the test database that way, then
 
 * run the store and query test classes as that role, so every statement the
-  code executes is proven to work with exactly the privileges revision 0052
-  grants (SELECT and INSERT: nothing is ever updated or deleted), and
+  code executes is proven to work with exactly the privileges revisions 0052
+  and 0088 grant (SELECT, INSERT and, since Decision 0028, DELETE for
+  ``ProvenanceStore.purge_projects`` alone: no table- or column-level UPDATE
+  anywhere, so nothing is ever rewritten), and
 * check that nothing else is allowed: rewriting a source, a claim, a stance or a
-  relation, deleting evidence, ``ON CONFLICT DO UPDATE``, truncating, changing
-  the schema, or linking rows of two projects.
+  relation, ``ON CONFLICT DO UPDATE``, truncating, changing the schema, or
+  linking rows of two projects.
 
 Role names are unique per run and dropped afterwards; the test user must be
 allowed to create roles. Skipped unless ``PAW_TEST_DATABASE_URL`` is set.
@@ -30,6 +32,7 @@ from paw_backend.research.provenance import ProvenanceStore
 
 from . import (
     test_provenance_concurrency,
+    test_provenance_purge,
     test_provenance_queries,
     test_provenance_store_record,
     test_provenance_store_relations,
@@ -44,8 +47,11 @@ APP_ROLE = f"paw_prov_app_{_RUN}"
 OTHER_ROLE = f"paw_prov_other_{_RUN}"
 ROLE_PASSWORD = "dummy-test-password-provenance"
 
-# The application only reads and inserts: no table-level UPDATE / DELETE and no
-# column-level UPDATE anywhere. The exact copy of the choice in migration 0052.
+# The application reads and inserts everywhere, and (since Decision 0028,
+# migration 0088) deletes: but only ``ProvenanceStore.purge_projects`` ever
+# issues a DELETE, and only for a project that is itself Deleted. No table- or
+# column-level UPDATE anywhere. The exact copy of the choice in migrations 0052
+# and 0088.
 TABLES = (
     "research_sources",
     "research_claims",
@@ -54,7 +60,7 @@ TABLES = (
     "research_claim_relations",
     "research_source_relations",
 )
-EXPECTED_PRIVILEGES = {"SELECT", "INSERT"}
+EXPECTED_PRIVILEGES = {"SELECT", "INSERT", "DELETE"}
 ALL_PRIVILEGES = (
     "SELECT",
     "INSERT",
@@ -209,6 +215,10 @@ class TraceScenarioAsAppRole(AsAppRole, test_provenance_store_trace.TraceScenari
 class TraceEdgeCasesAsAppRole(
     AsAppRole, test_provenance_store_trace.TraceEdgeCasesTest
 ):
+    pass
+
+
+class PurgeProjectsAsAppRole(AsAppRole, test_provenance_purge.PurgeProjectsTest):
     pass
 
 
@@ -369,7 +379,7 @@ class AppRolePrivilegesTest(PostgresProvenanceTestCase):
                 await self.refused(self.other, f"SELECT count(*) FROM {table}")
                 await self.refused(self.other, f"DELETE FROM {table}")
 
-    async def test_the_app_role_cannot_rewrite_delete_or_truncate_evidence(self):
+    async def test_the_app_role_cannot_rewrite_or_truncate_evidence(self):
         claim = self.seed_claim("Claim")
         other_claim = self.seed_claim("Other claim")
         source = self.seed_source()
@@ -400,13 +410,7 @@ class AppRolePrivilegesTest(PostgresProvenanceTestCase):
             "UPDATE research_claim_uses SET ref_id = gen_random_uuid()",
             "UPDATE research_claim_relations SET kind = 'contradiction'",
             "UPDATE research_source_relations SET kind = 'contradiction'",
-            # Nothing is deleted or truncated by the application.
-            "DELETE FROM research_sources",
-            "DELETE FROM research_claims",
-            "DELETE FROM research_claim_sources",
-            "DELETE FROM research_claim_uses",
-            "DELETE FROM research_claim_relations",
-            "DELETE FROM research_source_relations",
+            # DELETE is granted (Decision 0028), but never TRUNCATE.
             "TRUNCATE research_claim_sources",
             "TRUNCATE research_claims CASCADE",
             "TRUNCATE research_sources CASCADE",
@@ -422,6 +426,19 @@ class AppRolePrivilegesTest(PostgresProvenanceTestCase):
                 await self.refused(self.app, sql)
 
         self.assertEqual(self.snapshot(), before)
+
+    async def test_the_app_role_holds_delete_but_the_store_is_the_only_caller(self):
+        """Decision 0028: DELETE is a table-level grant, PostgreSQL cannot scope it
+        to "only a Deleted project's rows"; ``ProvenanceStore.purge_projects`` is
+        the only code path that issues one (``PurgeProjectsAsAppRole`` proves it
+        works end to end under this exact role). This test only proves the grant
+        itself reaches every one of the six tables, independently of the store.
+        """
+        for table in TABLES:
+            with self.subTest(table=table):
+                async with self.app.session() as session:
+                    await session.execute(text(f"DELETE FROM {table}"))
+                    await session.commit()
 
     async def test_on_conflict_do_update_is_not_available_to_the_app_role(self):
         claim = self.seed_claim("Claim")

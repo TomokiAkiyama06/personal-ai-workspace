@@ -2142,11 +2142,17 @@ Item は `now < expires_at` または exempt のとき **見える**（visible�
 2. `purge_expired` は待たずに `FOR UPDATE ... SKIP LOCKED` で候補を Lock し、**別の Statement** で exempt を再確認して削除します。Purge の Snapshot の後に Commit された Lease / Pin も見えるため、Purge より前に取得された Item は消えません。Lock 中の行は飛ばされ（数にも入らない）、次の呼び出しが扱います。Purge が先に Lock した場合、待っていた操作は「存在しない」になります。
 3. 2 つの Purge が同時に動いても、各行は 1 回だけ削除されます。
 
+### Project 削除時の扱い（Issue #88、Decision 0028）
+
+`purge_projects(project_ids)` は、`ProjectService.purge_expired` が Deleted にした Project の ID を受け取り、その Project の Item を **`pinned` / `saved` / `promotion_state` / Lease に関わらず全て削除**します（`RepositoryService.purge_projects` と同じ、Decision 0008 の「各領域の Service が消す」分担）。
+Project 自体は素の UUID の参照（外部キーなし）なので、対象は呼び出しごとに `projects.status = 'deleted'` を確認してから絞り込み、まだ Deleted でない Project の Item には触れません。Backend 自身の Orchestrator だけが呼ぶ内部 Method（User も Agent も呼べません）で、`project_ids` は最大 `MAX_PURGE_PROJECTS`（500）件、空でも Error にはならず `()` を返します。少なくとも 1 件の Item を消した Project の ID だけを返し、冪等です（2 回目の呼び出しは何も見つけません）。Leases は Item と一緒に消えます（外部キーの `CASCADE`）。
+削除の理由は「TTL の猶予」ではなく「Project 自体がもう無い」ことなので、`purge_expired` の exempt 判定（Pin・保存・使用中・昇格確認中）は適用しません。新しい Role 権限は不要です（Migration `0050` の DELETE をそのまま使います）。Test は `tests/test_scratch_purge.py::PurgeProjectsTest`、`tests/test_scratch_grants.py::PurgeProjectsAsAppRole`。
+
 ### 呼び出し側の認可（提案）
 
 Endpoint は次の Issue の仕事です。次の対応を提案します（未強制）。読み取り（`get`、`list_items`）は `project.read`。`add`、`acquire_use`、`release_use`、`pin`、`unpin` は `project.task.run`。`pin`、`unpin` は Agent へ委任できます。
 **`save`、`unsave` は User 本人だけができる操作で、Agent へ委任できません**（[Decision 0013](../../docs/decisions/0013-research-scratch-task-relation.md)で 2026-09-25 に承認。要件の「User が明示保存」は人の意思表示であり、Agent が調査結果を TTL から免れさせられないようにするためです）。`ScratchStore` 自体は認可をしないので、この制限は呼び出し側（API 層）が強制します。`save`、`unsave` を、Agent の権限（委任元 User と `AgentGrant` の積集合）では呼べない経路にしてください。専用の Capability を新設するかと、その id はここでは決めていません。新設するときは、委任不可（`CapabilityInfo.delegable=False`）にしてください（[Decision 0004](../../docs/decisions/0004-rbac-capability-and-audit-policy.md) は、Capability を追加するときに委任の可否を明示することを求めます）。
-`request_promotion` は `project.memory.use`、`resolve_promotion` は `project.memory.manage`（Agent へ委任できない: 調査結果を Agent の判断だけで Long-term Memory へ送らないため）。`purge_expired` は Backend 自身の Janitor だけ（User も Agent も呼べない）。
+`request_promotion` は `project.memory.use`、`resolve_promotion` は `project.memory.manage`（Agent へ委任できない: 調査結果を Agent の判断だけで Long-term Memory へ送らないため）。`purge_expired`、`purge_projects`（Decision 0028）は Backend 自身の Janitor / Orchestrator だけ（User も Agent も呼べない）。
 
 ### 上限と入力の検証
 
@@ -2607,7 +2613,7 @@ Research Scratch（24 時間 TTL）とは別の Table で、Long-term Memory と
 - **Project をまたがない。** 対応・使用・Relation の Table は `project_id` を持ち、Claim と Source を複合 Foreign Key `(id, project_id)` で参照します。Application が間違えても、2 つの Project の行を結ぶ行は DB が拒否します。
   全ての Method は `project_id` を受け取り、その Project の中だけで探します。他の Project の ID は「存在しない」と同じ扱いです。
 - `project_id`、`created_by` は素の UUID です（projects と users の Table がまだありません）。回答の ID（`ref_id`）も、Answer の Table がないため素の UUID で、存在は確認しません。
-- **不変。** Application の Role は 6 つの Table に SELECT と INSERT だけを持ちます（UPDATE も DELETE もできません）。誤りは書き換えではなく、新しい記録で訂正します。
+- **不変。** Application の Role は 6 つの Table に SELECT と INSERT を持ちます（UPDATE は持ちません。誤りは書き換えではなく、新しい記録で訂正します）。DELETE は Decision 0028（Issue #88、Migration `0088`）で `purge_projects` のためだけに追加され、それ以外の経路はいまも読み取りと追加しかしません。
 
 ### 記録と重複
 
@@ -2655,8 +2661,17 @@ Claim を記録した Task は自動で利用者になるので、`trace(project
 4. 書き込みの Transaction は `SET LOCAL lock_timeout`（`lock_timeout_ms`、既定 5000）で始まります。待ちが超えた場合と、DB が Deadlock を解消した場合は `ProvenanceBusyError` です（取り消し済み、再試行できます）。
 5. 読み取り（`get_claim`、`trace`、`list_relations`）は Lock を取らず、待ちません。
 
-**Application の Role の権限。** 共通の `grant_app_privileges`（PAW-025）で、6 つの Table に SELECT と INSERT だけを付けます（UPDATE の列も付けません）。
-`test_provenance_grants.py` は、この Role で Store と Query の Test を全て実行し、権限の一致と、書き換え・削除・`TRUNCATE`・`ON CONFLICT DO UPDATE`・Schema の変更・Project をまたぐ対応の拒否を確かめます。
+**Application の Role の権限。** 共通の `grant_app_privileges`（PAW-025）で、6 つの Table に SELECT・INSERT・DELETE（DELETE は Migration `0088`、Decision 0028）を付けます（UPDATE の列は付けません）。
+`test_provenance_grants.py` は、この Role で Store と Query の Test を全て実行し、権限の一致と、書き換え・`TRUNCATE`・`ON CONFLICT DO UPDATE`・Schema の変更・Project をまたぐ対応の拒否を確かめます。DELETE は Table 単位の付与で、PostgreSQL には「`purge_projects` からだけ」という絞り方はありません。実際に DELETE を実行する経路は `purge_projects` の 1 つだけで、他の全ての Method は今までどおり読み取りと追加しかしません。
+**Migration の鎖。** Migration `0088` の `down_revision` は `0086` です（鎖は `0001 → 0025 → 0032 → 0040 → 0021 → 0033 → 0031 → 0050 → 0046 → 0052 → 0026 → 0087 → 0022 → 0083 → 0043 → 0030 → 0027 → 0071 → 0086 → 0088`）。Table を作らず権限を広げるだけなので、Revision 0052（この 6 Table を作った）より後であれば足り、Merge の順に、その時点の最新（`0086`）の後ろへ並べています。
+
+### Project 削除時の扱い（Issue #88、Decision 0028）
+
+`purge_projects(project_ids)` は、`ProjectService.purge_expired` が Deleted にした Project の ID を受け取り、その Project の 6 つの Table の行を**全て削除**します（`RepositoryService.purge_projects`、`ScratchStore.purge_projects` と同じ、Decision 0008 の「各領域の Service が消す」分担）。
+Project 自体は素の UUID の参照（外部キーなし）なので、対象は呼び出しごとに `projects.status = 'deleted'` を確認してから絞り込み、まだ Deleted でない Project の Provenance には触れません。1 つの Transaction の中で、外部キーの向き（`research_claim_sources` → `research_claim_uses` → `research_claim_relations` → `research_source_relations` → `research_claims` → `research_sources`）どおり、子から先に削除します。
+Backend 自身の Orchestrator だけが呼ぶ内部 Method（User も Agent も呼べません）で、`project_ids` は最大 `MAX_PURGE_PROJECTS`（500）件、空でも Error にはならず `()` を返します。少なくとも 1 つの Table に行があった Project の ID だけを返し、冪等です。
+Decision 0011 が今回まで残していた「Project 削除時に Provenance をどう扱うか」（消す・残す・匿名化する）を、Decision 0028 が「消す」と決めています。「唯一の Provenance を失う Memory」（[要件](../../REQUIREMENTS.md)の「User Memory」）は、Long-term Memory がまだ Research の Provenance / Scratch のどの行も参照していない（`memory_sources.source_type` に `research_claim` 等の種類がない）ため、この PR の対象外です。Decision 0028 を参照してください。
+Test は `tests/test_provenance_purge.py`、`tests/test_provenance_grants.py::PurgeProjectsAsAppRole`。
 
 ### 上限と入力の検証
 
@@ -2767,7 +2782,8 @@ Active ⇄ Archived
 - Delete 開始は `confirm_name` が Project 名と**完全に一致**しなければ `ConfirmationMismatchError`（認可の後に検査するので、権限のない人には名前の一致を教えません）。
 - Purge は **`now >= deletion_scheduled_at`** から（復元は `now < deletion_scheduled_at`。同じ瞬間に両方が真にはなりません）。1 回の Transaction で、期限の古い順に最大 `batch_size`（1〜500、既定 50）件を `FOR UPDATE SKIP LOCKED` で選び、各 Project の Member と招待を全て削除して墓石にします。
   Lock 中の Project は待たずに飛ばし、`has_more` は「まだ期限の来た Project が残っている」（Lock 中を含む）ことを示します。二重に呼んでも安全です。Scheduler は含みません（別の Issue）。
-- **他の領域のデータは、この Issue では消しません。** Chat、Memory、Task、Repo の紐付け、調査結果の `project_id` は素の UUID で、各領域の Service が `PurgeResult.purged` の ID を使って消します（各 Issue へ引き継ぎます。調査結果の扱い（消す・残す・匿名化）は Issue [#88](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/88) で決めます）。
+- **他の領域のデータは、この Issue では消しません。** Chat、Memory、Task、Repo の紐付け、調査結果の `project_id` は素の UUID で、各領域の Service が `PurgeResult.purged` の ID を使って消します（各 Issue へ引き継ぎます）。
+  調査結果（Evidence / Claim Provenance、Research Scratch）の扱い（消す・残す・匿名化）は Issue [#88](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/88) / [Decision 0028](../../docs/decisions/0028-project-deletion-research-data.md) が決め、`ProvenanceStore.purge_projects` / `ScratchStore.purge_projects` が消します（上の各節）。GitHub、Repo の登録（`RepositoryService.purge_projects`、PAW-027）も同じ分担です。
   GitHub、Local checkout などの外部資源は消しません（要件）。
 
 ### Delete 開始時の Task 停止（Outbox と Processor）
@@ -2975,6 +2991,7 @@ Human は [Decision 0008](../../docs/decisions/0008-project-membership-and-lifec
 3. **Capability を持たなかった 4 つの操作**（作成、招待の受諾・辞退、退出）は、暫定の作りで承認されました。Capability と Audit は Issue [#82](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/82) で追加しました（[Decision 0022](../../docs/decisions/0022-project-lifecycle-capabilities.md)。Human が 2026-09-26 に承認しました。承認済みの Decision 0004 と 0008 は書き換えていません）。この作りは、0008 の暫定の作りに代わりました。
 4. **Owner / Admin が全 Project を一覧する API**（管理上の Lifecycle 操作の入口）は、Issue [#84](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/84) で実装しました（Service まで。上の「管理者向けの全 Project 一覧」）。
 5. **Purge 後の他の領域のデータ削除**は、各 Service が `PurgeResult.purged` を使う分担で承認されました。調査結果（Provenance・Scratch など）の扱いは、Issue [#88](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/88) で決めます。
+   → [Decision 0028](../../docs/decisions/0028-project-deletion-research-data.md) で決め（Provenance と Scratch はどちらも削除）、`ProvenanceStore.purge_projects` / `ScratchStore.purge_projects` を実装しました（上の各節）。「唯一の Provenance を失う Memory」（要件の「User Memory」）は、Long-term Memory が Research のどの行もまだ参照していないため、この PR の対象外です。
 6. **Delete 開始時の Task 停止**（Decision 0008 の 8）: 停止に Cancel（graceful）を使うこと、Outbox と Processor に分けることを承認しました。Delete 開始の後に作られた Task の競合を閉じる Gate（`create_task` / Retry / Restart / Start / `enqueue` が Project の行を Lock して Active 以外を拒否し、Claim が Active でない Project の Entry を飛ばす）の方針も承認され、実装は Issue [#83](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/83)（`tasks(project_id, state)` の Index を含む）で行いました（[Project の状態 Gate](#project-の状態-gateissue-83)）。Gate の適用範囲（Gate の必須化、Restore の後の Restart、Active でない Project の Claim と Start）は [Decision 0020](../../docs/decisions/0020-project-state-gate.md)（Approved、2026-09-26）で決めました。
 7. **`0021` を `0026` より前に置く並び**は、Migration の実装上の順序で、統合時に確認してください。
 
@@ -3027,7 +3044,7 @@ Rerank（Reranker Protocol）→ 構造化 Score（confirmed・鮮度・importan
   除いた行は順位にも影響しません。除いた行を無効にした DB と結果が全 Field で等しいことを、短い候補の上限で Test します（`test_retrieval_leakage.py`、`test_retrieval_eligibility.py`）。
 - **Scope ごとの認可**（Decision 0019 の 1、2）: `user` は `memory.use`（`REQUIRED`: 呼び出し 1 回に Audit 1 行）、`shared` は `shared_memory.read`、`project` は DB から読み直した受諾済み Membership と `project.read`（Archived は読める。Pending deletion / Deleted / 招待中は読めず、尋ねもしない）、
   `repo` は `RepoAclSource` の ACL を `project.read` の Repository Resource で判定（`repo_ids` が明示的に空なら、Repository の Scope は飛ばし、Source を呼びません）、`project_group` は `ProjectGroupSource` の ID。Source の答えは 1 回だけ読んでコピーし、コピーできない・型や上限が違うものは `RetrievalSourceError` です。`Principal.project_roles` は信用しません。拒否は「その Scope が何も返さない」だけで、応答に出しません。
-  決定を記録できない（`audit_unavailable`）ときだけ `RetrievalPermissionError` です。`DENIED_ONLY` の `shared_memory.read` / `project.read` は、許可した読み取りを記録しません（この実装は Audit を増やしません。`memory.use` の 1 行は Decision 0004 のとおり）。**`user` を読み取り専用の `memory.read`（`DENIED_ONLY`）に切り替える**ことは、Human が推奨の方向で承認済み（Decision 0019 の 1）ですが、Capability の追加は [Decision 0024](../../docs/decisions/0024-memory-read-capability.md)（Proposed）で決めます。承認され実装されるまで、コードは `memory.use`（`REQUIRED`）のままで、切り替えはその後続の Issue です（authz の Capability の表は、この Issue では変えません）。
+  決定を記録できない（`audit_unavailable`）ときだけ `RetrievalPermissionError` です。`DENIED_ONLY` の `shared_memory.read` / `project.read` は、許可した読み取りを記録しません（この実装は Audit を増やしません。`memory.use` の 1 行は Decision 0004 のとおり）。**`user` を読み取り専用の `memory.read`（`DENIED_ONLY`）に切り替える**ことは、Human が推奨の方向で承認済み（Decision 0019 の 1）ですが、Capability の追加は [Decision 0024](../../docs/decisions/0024-memory-read-capability.md)（2026-09-27 承認）で決めました。Issue #115 で実装されるまで、コードは `memory.use`（`REQUIRED`）のままです（authz の Capability の表は、この Issue では変えません）。
 - **結果は読める Memory についてしか語りません。** 件数・合計・「他に n 件」は無く、Conflict Group・`duplicates`・Rerank の入力・順位・Score・`conflicts_incomplete` も、読める Memory だけから決まります。
 - **Keyword**: PostgreSQL の全文検索（`simple`）。日本語は、Index 側で CJK の 1 文字ごとに空白を入れ、Query 側で隣り合う 2 文字の句を OR で並べます（形態素解析ではない近似。英語の機能語とひらがな 2 文字の組は Query から除く）。Index は Migration 0043 の `ix_memory_versions_search`（GIN、`status = 'active'` のみ）。
 - **Vector**: Cosine 距離（`<=>`）。1 つの `embedding_model_id` だけを比べます。**ANN Index は作っていません**（Decision 0019 の 4）。`min_vector_similarity` の既定は `None`（Model が決まるまで下限を置かない）。
