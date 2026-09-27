@@ -554,7 +554,11 @@ class RandomisedLeakageTest(LeakageTestCase):
     def set_status(self, version_ids, status):
         from sqlalchemy import text
 
+        from paw_backend.memory.metadata import metadata_change_actor
+
         with self.engine.begin() as connection:
+            # A status change needs a named actor (revision 0071).
+            connection.execute(metadata_change_actor("system"))
             connection.execute(
                 text("UPDATE memory_versions SET status = :s WHERE id = ANY(:ids)"),
                 {"s": status, "ids": list(version_ids)},

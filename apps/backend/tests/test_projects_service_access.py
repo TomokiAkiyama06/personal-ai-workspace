@@ -141,10 +141,14 @@ class CreateProjectTest(AccessTestCase):
         self.assertEqual(set(self.member_rows(project.id)), {user})
         self.assertEqual(self.table_count("project_members"), 1)
 
-    async def test_creating_is_self_service_and_writes_no_audit_event(self):
+    async def test_creating_is_audited_as_one_allowed_project_create(self):
         user = self.seed_user()
         await self.service.create_project(self.actor(user), "Alpha")
-        self.assertEqual(self.sink.events, [])
+        (event,) = self.sink.events
+        self.assertEqual(
+            (event.action, event.decision, event.reason, event.actor_id),
+            ("project.create", "allow", "granted_by_system_role", user),
+        )
 
     async def test_invalid_names_create_nothing(self):
         user = self.seed_user()
@@ -401,13 +405,31 @@ class AuditFailureTest(AccessTestCase):
                 self.broken.get_project(self.actor(self.seed_user()), self.project_id)
             )
 
-    async def test_the_self_service_methods_do_not_use_the_audit_store(self):
+    async def test_creating_and_leaving_that_cannot_be_audited_are_refused(self):
         user = self.seed_user()
-        project = await self.broken.create_project(self.actor(user), "Beta")
-        listed = await self.broken.list_projects(self.actor(user))
-        self.assertEqual([p.id for p in listed], [project.id])
-        await self.broken.leave_project(self.actor(self.team.viewer), self.project_id)
-        self.assertIsNone(self.member_row(self.project_id, self.team.viewer))
+        before = self.snapshot()
+        with self.assertLogs("paw_backend.authz.authorizer", level="ERROR"):
+            await self.assertDenied(
+                self.broken.create_project(self.actor(user), "Beta"),
+                Reason.AUDIT_UNAVAILABLE,
+            )
+        with self.assertLogs("paw_backend.authz.authorizer", level="ERROR"):
+            await self.assertDenied(
+                self.broken.leave_project(
+                    self.actor(self.team.viewer), self.project_id
+                ),
+                Reason.AUDIT_UNAVAILABLE,
+            )
+        self.assertEqual(self.snapshot(), before)
+
+    async def test_the_own_data_reads_do_not_use_the_audit_store(self):
+        # list_projects / list_my_invites only read the actor's own rows; they
+        # keep the identity check and write no event (Decision 0022).
+        listed = await self.broken.list_projects(self.actor(self.team.viewer))
+        self.assertEqual([p.id for p in listed], [self.project_id])
+        self.assertEqual(
+            await self.broken.list_my_invites(self.actor(self.team.viewer)), ()
+        )
 
 
 @requires_postgres

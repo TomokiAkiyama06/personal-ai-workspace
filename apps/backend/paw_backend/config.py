@@ -104,6 +104,25 @@ class Settings(BaseSettings):
     # after a project's deletion began would then keep running.
     project_task_stop_interval_seconds: int = Field(default=60, ge=0, le=3_600)
 
+    # Repository registration (PAW-027, Decision 0017). Where a user's checkouts
+    # live below their home; the roots (per user: ``{home}`` and ``{user}``) an
+    # existing repository may be registered from; the hosts a repository may be
+    # cloned from; the lowest uid that counts as a person (system accounts never
+    # get a checkout); and how long git may run. ``RepositoryPolicy.from_settings``
+    # validates the values strictly.
+    repository_workspace_subdir: str = Field(
+        default="workspaces", pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+    )
+    repository_existing_roots: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["{home}"], min_length=1, max_length=8
+    )
+    repository_clone_hosts: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["github.com"], min_length=1, max_length=8
+    )
+    repository_min_linux_uid: int = Field(default=1000, ge=1, le=4_294_967_295)
+    repository_git_timeout_seconds: float = Field(default=30.0, gt=0, le=7_200)
+    repository_clone_timeout_seconds: float = Field(default=900.0, gt=0, le=7_200)
+
     # Login, sessions and passwords (PAW-022; the values the requirements do not
     # fix are decided in Decision 0015 (Approved, provisional) and are changed
     # here, not in the code).
@@ -193,6 +212,8 @@ class Settings(BaseSettings):
     @field_validator(
         "allowed_hosts",
         "allowed_origins",
+        "repository_existing_roots",
+        "repository_clone_hosts",
         "login_backoff_seconds",
         "redeem_backoff_seconds",
         mode="before",
