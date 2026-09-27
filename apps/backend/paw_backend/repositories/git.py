@@ -29,8 +29,15 @@ The rules, all enforced here and nowhere else:
 * **Only as the account's own user.** git runs as the backend's own Linux user. It
   is refused (``GitFailure.IDENTITY_MISMATCH``) unless that user is the account
   the checkout belongs to: a backend that runs as another user must supply a
-  :class:`GitRunner` that really switches identity (deployment work, see the
-  README; nothing here escalates privileges).
+  :class:`GitRunner` that really switches identity. ``SubprocessGitRunner`` (this
+  module) is that identity check done the simple way, for a backend that already
+  runs as the single Linux user every checkout belongs to.
+  ``paw_backend.repositories.ssh.SshGitRunner`` is the other implementation of the
+  same :class:`GitRunner` protocol: a backend that runs as one Linux user reaches
+  *another* Linux user's checkout over a restricted SSH connection instead
+  (Issue #105, Decision 0029). Both share the process-running machinery below
+  (:func:`run_subprocess`); they differ only in which executable, argument list
+  and environment they build.
 """
 
 import asyncio
@@ -101,6 +108,75 @@ async def _drain(stream: asyncio.StreamReader, limit: int) -> bytes:
     return b"".join(chunks)
 
 
+async def run_subprocess(
+    argv: Sequence[str],
+    *,
+    env: Mapping[str, str],
+    cwd: str | None,
+    timeout_s: float,
+    max_output_bytes: int,
+    log_name: str,
+) -> GitResult:
+    """Run ``argv`` to completion and return its result, or raise a closed
+    :class:`GitFailure`.
+
+    Shared by every :class:`GitRunner`: the executable is missing
+    (``NOT_INSTALLED``), the whole process group is killed if ``timeout_s``
+    passes (``TIMEOUT``) or if a stream writes more than ``max_output_bytes``
+    (``OUTPUT_TOO_LARGE``), the same on ``asyncio.CancelledError`` (the ``finally``
+    below runs regardless of why the ``try`` exited), and output must decode as
+    UTF-8 (``UNSAFE_OUTPUT``). ``log_name`` is the only thing a failure logs: never
+    an argument, a path or output (the module docstring). The caller has already
+    decided the executable, every argument, the environment and the identity this
+    runs as; this function knows none of that.
+    """
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *argv,
+            cwd=cwd,
+            env=dict(env),
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,  # its own process group, killed as one
+        )
+    except OSError:
+        raise GitCommandError(log_name, GitFailure.NOT_INSTALLED) from None
+    assert process.stdout is not None and process.stderr is not None
+    readers = [
+        asyncio.ensure_future(_drain(process.stdout, max_output_bytes)),
+        asyncio.ensure_future(_drain(process.stderr, max_output_bytes)),
+    ]
+    failure: GitFailure | None = None
+    output = b""
+    try:
+        async with asyncio.timeout(timeout_s):
+            output, _ = await asyncio.gather(*readers)
+            await process.wait()
+    except TimeoutError:
+        failure = GitFailure.TIMEOUT
+    except _OutputTooLarge:
+        failure = GitFailure.OUTPUT_TOO_LARGE
+    finally:
+        if process.returncode is None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        for reader in readers:
+            reader.cancel()
+        await asyncio.gather(*readers, return_exceptions=True)
+        await process.wait()
+    if failure is not None:
+        logger.warning("git %s stopped (%s)", log_name, failure.value)
+        raise GitCommandError(log_name, failure)
+    try:
+        text = output.decode("utf-8")
+    except UnicodeDecodeError:
+        raise GitCommandError(log_name, GitFailure.UNSAFE_OUTPUT) from None
+    return GitResult(process.returncode or 0, text)
+
+
 def git_environment(
     account: LinuxAccount, *, path: str = SAFE_PATH, ceiling: str | None = None
 ) -> dict[str, str]:
@@ -119,6 +195,20 @@ def git_environment(
     if ceiling is not None:
         environment["GIT_CEILING_DIRECTORIES"] = ceiling
     return environment
+
+
+def validate_allowed_protocols(allowed_protocols: Collection[str]) -> tuple[str, ...]:
+    """A non-empty tuple of protocol names, or ``ValueError``.
+
+    Shared by every :class:`GitRunner` construction (local or SSH): a caller-built
+    collection is never trusted to already hold safe values.
+    """
+    protocols = tuple(allowed_protocols)
+    if not protocols or not all(
+        isinstance(p, str) and _PROTOCOLS.fullmatch(p) for p in protocols
+    ):
+        raise ValueError("allowed_protocols must be protocol names")
+    return protocols
 
 
 def git_config_arguments(
@@ -159,11 +249,7 @@ class SubprocessGitRunner:
         path: str = SAFE_PATH,
         max_output_bytes: int = MAX_GIT_OUTPUT_BYTES,
     ) -> None:
-        protocols = tuple(allowed_protocols)
-        if not protocols or not all(
-            isinstance(p, str) and _PROTOCOLS.fullmatch(p) for p in protocols
-        ):
-            raise ValueError("allowed_protocols must be protocol names")
+        protocols = validate_allowed_protocols(allowed_protocols)
         if isinstance(max_output_bytes, bool) or not (
             isinstance(max_output_bytes, int) and max_output_bytes >= 1
         ):
@@ -199,51 +285,14 @@ class SubprocessGitRunner:
             *git_config_arguments(self._protocols, self._extra),
             *args,
         ]
-        try:
-            process = await asyncio.create_subprocess_exec(
-                *argv,
-                cwd=cwd,
-                env=git_environment(account, path=self._path, ceiling=ceiling),
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                start_new_session=True,  # its own process group, killed as one
-            )
-        except OSError:
-            raise GitCommandError(name, GitFailure.NOT_INSTALLED) from None
-        assert process.stdout is not None and process.stderr is not None
-        readers = [
-            asyncio.ensure_future(_drain(process.stdout, self._max_output)),
-            asyncio.ensure_future(_drain(process.stderr, self._max_output)),
-        ]
-        failure: GitFailure | None = None
-        output = b""
-        try:
-            async with asyncio.timeout(timeout_s):
-                output, _ = await asyncio.gather(*readers)
-                await process.wait()
-        except TimeoutError:
-            failure = GitFailure.TIMEOUT
-        except _OutputTooLarge:
-            failure = GitFailure.OUTPUT_TOO_LARGE
-        finally:
-            if process.returncode is None:
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-            for reader in readers:
-                reader.cancel()
-            await asyncio.gather(*readers, return_exceptions=True)
-            await process.wait()
-        if failure is not None:
-            logger.warning("git %s stopped (%s)", name, failure.value)
-            raise GitCommandError(name, failure)
-        try:
-            text = output.decode("utf-8")
-        except UnicodeDecodeError:
-            raise GitCommandError(name, GitFailure.UNSAFE_OUTPUT) from None
-        return GitResult(process.returncode or 0, text)
+        return await run_subprocess(
+            argv,
+            env=git_environment(account, path=self._path, ceiling=ceiling),
+            cwd=cwd,
+            timeout_s=timeout_s,
+            max_output_bytes=self._max_output,
+            log_name=name,
+        )
 
 
 @dataclass(frozen=True, slots=True)

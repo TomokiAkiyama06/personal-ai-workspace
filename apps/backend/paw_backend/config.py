@@ -122,6 +122,14 @@ class Settings(BaseSettings):
     # the host list ``gh`` is asked about; there is no separate setting for it.
     repository_gh_timeout_seconds: float = Field(default=30.0, gt=0, le=7_200)
 
+    # Per-user git over SSH (Issue #105, Decision 0029, approved). Unused unless a
+    # deployment constructs ``SshGitRunner`` in place of ``SubprocessGitRunner``;
+    # ``SshGitRunnerPolicy.from_settings`` validates the values strictly.
+    repository_ssh_host: str = Field(default="127.0.0.1")
+    repository_ssh_port: int = Field(default=22, ge=1, le=65_535)
+    repository_ssh_connect_timeout_seconds: int = Field(default=10, ge=1, le=300)
+    repository_ssh_known_hosts_path: str = Field(default="/etc/paw/ssh_known_hosts")
+
     # Login, sessions and passwords (PAW-022; the values the requirements do not
     # fix are decided in Decision 0015 (Approved, provisional) and are changed
     # here, not in the code).

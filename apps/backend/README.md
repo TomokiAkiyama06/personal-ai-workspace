@@ -149,6 +149,9 @@ Database には pgvector が必要です（CI は `pgvector/pgvector:pg18` を�
 | `PAW_REPOSITORY_CLONE_HOSTS` | `github.com` | Clone してよい Host（Comma 区切り、8 つまで。小文字の DNS 名。IP Address は不可） |
 | `PAW_REPOSITORY_MIN_LINUX_UID` | `1000` | Checkout の持ち主になれる Linux Account の最小の uid（`root` などの System Account を拒否する）。**Account を引くときに実際に適用される唯一の値**（`RepositoryService.from_policy` が同じ Policy から `LoginNameAccountDirectory` を組み立てる） |
 | `PAW_REPOSITORY_GIT_TIMEOUT_SECONDS` / `PAW_REPOSITORY_CLONE_TIMEOUT_SECONDS` | `30` / `900` | git の Command / Clone の Timeout（秒）。超えると Process Group ごと止める。途中の Clone の予約は Clone の Timeout の 2 倍で古いとみなす |
+| `PAW_REPOSITORY_SSH_HOST` / `PAW_REPOSITORY_SSH_PORT` | `127.0.0.1` / `22` | `SshGitRunner`（Issue #105、Decision 0029、承認済み）が接続する宛先。本番の呼び出し経路にはまだ配線していない（`SshGitRunnerPolicy.from_settings` が使う） |
+| `PAW_REPOSITORY_SSH_CONNECT_TIMEOUT_SECONDS` | `10` | `ssh` の Handshake（接続・認証）だけの Timeout（秒）。呼び出し全体の Timeout は `PAW_REPOSITORY_GIT_TIMEOUT_SECONDS` / `_CLONE_TIMEOUT_SECONDS` と同じ値を使う |
+| `PAW_REPOSITORY_SSH_KNOWN_HOSTS_PATH` | `/etc/paw/ssh_known_hosts` | 固定した Host Key の File（Trust On First Use にしない）。配備側が用意する |
 | `PAW_EVENT_HEARTBEAT_SECONDS` | `15` | `system.heartbeat` の間隔 |
 | `PAW_EVENT_QUEUE_SIZE` | `100` | 接続ごとの Event Queue。溢れた場合は古い Event を捨てる |
 | `PAW_EVENT_MAX_SUBSCRIBERS` | `100` | 同時に接続できる SSE / WebSocket の数。超えた接続は SSE が 503、WebSocket が Close Code 1013 |
@@ -2951,7 +2954,7 @@ Rerank（Reranker Protocol）→ 構造化 Score（confirmed・鮮度・importan
 [Decision 0004](../../docs/decisions/0004-rbac-capability-and-audit-policy.md)・[Decision 0006](../../docs/decisions/0006-tool-broker-policy.md) の 8（どちらも承認済み）に従い、
 要件が決めていない選択（Checkout の置き場所、Linux Account との対応、既存 Repository の検証、削除の意味など）は
 [Decision 0017](../../docs/decisions/0017-repository-registration-policy.md)（承認済み）にまとめています。
-**Decision 0017 は 2026-09-26 に Human が承認しました**（第 11 点の Scope を作るときの Root の再確認を含む）。上限・Timeout・探索の上限・Path の Byte 数などの数値は暫定値として承認されました（設定・定数で変えられます。Path の長さは DB の CHECK 制約にも書かれているため、変えるには新しい Migration が要ります）。User ごとに Linux User として git を実行する仕組み（SSH 経由）は、別 Issue [#105](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/105) です。
+**Decision 0017 は 2026-09-26 に Human が承認しました**（第 11 点の Scope を作るときの Root の再確認を含む）。上限・Timeout・探索の上限・Path の Byte 数などの数値は暫定値として承認されました（設定・定数で変えられます。Path の長さは DB の CHECK 制約にも書かれているため、変えるには新しい Migration が要ります）。User ごとに Linux User として git を実行する仕組み（SSH 経由）は、別 Issue [#105](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/105)、`GitRunner` の実装（`SshGitRunner`）とその方針は [Decision 0029](../../docs/decisions/0029-per-user-git-runner-ssh.md)（2026-09-27 承認）です。
 **HTTP の Endpoint はありません**（Session は PAW-022）。`RepositoryService` は、認証済みの `Principal` を受け取り、`Authorizer` で判定します。
 **GitHub の認証（`gh auth`）は PAW-028 で実装しました**（`GitHubGateway` の継ぎ目。下の「GitHub User Connection」を参照）。
 
@@ -2964,7 +2967,8 @@ Project の **Repository** は論理的な共有の記録で、User や Agent �
 | `validation.py` | 引数の検証（DB を使わない純粋関数。名前、Branch、Path、URL、ACL の権限） |
 | `paths.py` | Path の安全性（Linux Account、Checkout の Path、既存 Repository の検査、`O_NOFOLLOW` での Directory 作成） |
 | `accounts.py` | Workspace の User から Linux Account への対応（`LoginNameAccountDirectory`。継ぎ目は `AccountDirectory`）。最小の uid は `RepositoryPolicy.min_uid` だけ（Directory に別の値はない）。Directory と Service の Policy が食い違うと、Service の構築が `ValueError` |
-| `git.py` | git の実行（許可リストの環境、Hook 無効、Timeout、出力の上限、Shell なし）と、必要な操作（`inspect`、`clone`、`init`、`add_origin`） |
+| `git.py` | git の実行（許可リストの環境、Hook 無効、Timeout、出力の上限、Shell なし）と、必要な操作（`inspect`、`clone`、`init`、`add_origin`）。`SubprocessGitRunner` と `ssh.py` の `SshGitRunner` が共有する Process 実行（`run_subprocess`）もここにある |
+| `ssh.py` | `GitRunner` のもう 1 つの実装 `SshGitRunner`（Issue #105、[Decision 0029](../../docs/decisions/0029-per-user-git-runner-ssh.md)、承認済み）。User ごとの専用鍵で `ssh <linux user>@127.0.0.1` へ接続し、Forced Command の Wrapper（この Repository には実装しない）に決まった形式（`build_remote_command`）で委ねる。鍵の在り処は `SshKeyDirectory`（継ぎ目。既定は `TemplateSshKeyDirectory`） |
 | `github.py` | GitHub の指定の解析、origin URL の登録形式、`GitHubGateway`（PAW-028 の継ぎ目。既定は拒否） |
 | `policy.py` | 設定（`PAW_REPOSITORY_*`）を検証した値 `RepositoryPolicy` |
 | `store.py`、`transaction.py`、`service.py` | SQL（1 文 1 関数）、Lock Timeout 付きの Transaction、`RepositoryService` |
@@ -3019,6 +3023,14 @@ Backend が作る Checkout は、`workspaces` と Project の Directory（0700�
 - **Timeout と出力の上限**（既定 30 秒 / Clone 900 秒、64 KiB）。超えると **Process Group ごと** Kill する（Cancel でも Kill する）。
 - **実行 User。** git は Backend の Process の Linux User として動く。それが Checkout の持ち主の Account でなければ、実行を拒否する（`identity_mismatch`）。**User を切り替える仕組みは実装していない**（配備で `GitRunner` を渡す。Decision 0017 の 4）。**人間の回答 2026-09-25: Userごとに割り振られたSSHで実行する方針。実装は別Issue [#105](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/105)。この PR は Backend の Process の User でだけ動く（従来どおり）。**
 
+`ssh.py` の `SshGitRunner` は、同じ `GitRunner` Protocol のもう 1 つの実装です（Issue #105、[Decision 0029](../../docs/decisions/0029-per-user-git-runner-ssh.md)、2026-09-27 に Human が承認）。`SubprocessGitRunner` と `run_subprocess`（Timeout・出力上限・Process Group ごとの Kill）を共有し、次の点だけが違います。
+
+- **接続。** `ssh <linux user>@127.0.0.1`（既定。`SshGitRunnerPolicy.host`）。User ごとの専用鍵（`SshKeyDirectory`。既定は `TemplateSshKeyDirectory`、ひな型 `{user}` を Linux User 名で埋める）。鍵 File は、接続の**前に毎回**「通常 File・group/other の権限ビットが 0・Backend の Process の実効 User の所有」を確認し、満たさなければ `ssh` を起動せず `GitFailure.SSH_KEY_UNAVAILABLE`。
+- **ローカルの `ssh` 自身の環境も `PATH` だけ**（Backend 自身の環境・継承した `SSH_*` は渡らない）。`-F <ssh_config_path>`（既定 `/dev/null`）で Backend の Process の User 自身の `~/.ssh/config` を無視し、固定の Host Key（`known_hosts_path`）、`BatchMode=yes`・`StrictHostKeyChecking=yes`・`IdentitiesOnly=yes`・`RequestTTY=no`・`ForwardAgent=no` などを毎回付ける。
+- **送る内容は 1 本の文字列。** `build_remote_command` が、Protocol Tag・cwd・`GIT_CEILING_DIRECTORIES`・`--`・`git_config_arguments` の列・git の副コマンドを、語ごとに `shlex.quote` してから空白で連結する（`ssh` 自身の連結に依存しない。Decision 0029 の 2）。**Forced Command の Wrapper（この Repository には実装しない）** が、この形式を解釈し、許可した副コマンド（`rev-parse`・`symbolic-ref`・`config`（読み取りだけ）・`clone`・`init`・`remote add`。Decision 0029 の 3 の表）だけを、Client の申告した `-c` を信用せず自分の Hardening で実行する契約になっている。
+- **エラー。** `ssh` 自身が接続・認証を終えられない（Host unreachable、鍵拒否、Host Key 不一致、対象の Linux User が無い）ときは、`ssh` の慣例どおり終了コード 255 になり、`GitFailure.SSH_UNAVAILABLE`。0〜254 は Wrapper 経由の git 自身の終了コードで、これまでどおり `GitResult` として返る（`NONZERO_EXIT` の判定は呼び出し元）。SSH 接続失敗と Linux User 未作成は、この経路からは区別できない（Decision 0029 の 5）。
+- **この PR は配線しない。** `SshGitRunner` は本番の呼び出し経路（`RepositoryService.from_policy` の `runner`）に差し込まれていません。実際に per-user Clone が動くのは、Wrapper Script・鍵・`sshd_config` が揃う配備後の別 Issue からです。`tests/test_repositories_ssh.py` は、実 SSH にも実 Linux User にも依存しない Fake の実行 File で確かめます。
+
 ### 認可と Audit
 
 | 操作 | Capability | 備考 |
@@ -3050,7 +3062,7 @@ Backend が作る Checkout は、`workspaces` と Project の Directory（0700�
 
 ### 制限と未確認の点
 
-- **Per-user の Clone は、Backend の Process の User が Checkout の持ち主のときだけ動く。** 別の User の Home へは書けず、User を切り替える実行の仕組みは、この Issue にない（Decision 0017 の 4。PAW-028 も必要とする）。人間の回答 2026-09-25: Userごとに割り振られたSSHで実行する方針。実装は別Issue [#105](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/105)（SSH 経由の `GitRunner`）で、この PR には含まない。
+- **Per-user の Clone は、Backend の Process の User が Checkout の持ち主のときだけ動く。** 別の User の Home へは書けず、User を切り替える実行の仕組みは、この Issue にない（Decision 0017 の 4。PAW-028 も必要とする）。人間の回答 2026-09-25: Userごとに割り振られたSSHで実行する方針。SSH 経由の `GitRunner`（`SshGitRunner`）は Issue [#105](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/105) / [Decision 0029](../../docs/decisions/0029-per-user-git-runner-ssh.md)（2026-09-27 承認）で実装したが、**本番の呼び出し経路には配線していない**（Forced Command の Wrapper Script・鍵配布・`sshd_config` の変更は範囲外。実際に per-user Clone が動くのは、それらを備えた配備後の別 Issue から）。
 - `create_github`（GitHub への新規作成）は PAW-028 の `GhCliGitHubGateway` で動く（`RepositoryService.from_policy` に `gh_runner` を渡したときだけ。渡さなければ既定どおり `GitHubUnavailableError`）。**Private Repository の Clone**（`clone_from_github`）も、`gh_runner` を渡したときだけ動く: `GitClient` が `clone` 自身の `-c credential.helper=!gh auth git-credential`（`gh auth setup-git` と同じ文字列）を付けて実行し、`gh` が呼び出し元 Linux User 自身の `gh auth login` から資格情報を解決する（この Backend は Token に触れない）。Global の git 設定は相変わらず読まない（`GIT_CONFIG_GLOBAL=/dev/null`）ため、`gh_runner` を渡さない構成では Private Repository の Clone はできない（下の「GitHub User Connection」の限界も参照）。作成後に登録が失敗しても、GitHub の Repository は削除しない（Log に 1 行）。
 - Path の検証は確認した瞬間の事実で、持ち主は後で差し替えられる。`scope_entries` は Scope を作る瞬間に Root と識別を確かめるが、その後 Tool Broker が呼び出しを解決するまでの窓は残る（Broker が呼び出しごとに確かめ直すことに依存する）。
 - Checkout の Path は、DB が保存できる **1024 文字かつ UTF-8 で 2048 Byte まで**です（`path` は一意な B-tree Index の Key で、Index の 1 Entry には約 2700 Byte の上限があり、1 文字は最大 4 Byte のため、文字数だけでは足りません。CHECK 制約 `ck_repository_checkouts_path_valid` にも同じ上限）。長い Home の Account が超える Path を作ると挿入の前に `PathRejectedError`（`too_long`）、`register_existing` の Path は `InvalidRepositoryInputError`（`too_long`）で拒否します（`tests/test_repositories_path_length.py`。境界は、ASCII の 1024 文字が可・1025 文字が不可、4 Byte 文字を含む 2048 Byte が可・2049 Byte が不可）。Remote の URL も同じ理由で Byte 数（1024）で上限を持ちます。
@@ -3067,6 +3079,7 @@ Backend が作る Checkout は、`workspaces` と Project の Directory（0700�
 
 `PAW_TEST_DATABASE_URL` を設定すると、実 PostgreSQL と実 git（一時 Directory の Repository。`https://github.com/` は Local の Bare Repository に向ける）で動きます。設定がなくても、検証・Path・git・GitHub の解析・設定の Test は動きます。
 `tests/test_repositories_grants.py` は、Service の Test Class を **Superuser でない Application の Role** で実行し、Migration が与える権限が過不足ないことを確かめます。
+`tests/test_repositories_ssh.py`（`SshGitRunner`。DB を使わない）は、実 SSH にも実 Linux User にも依存しません。`ssh_executable` を、この Test だけが書く Fake の実行 File に差し替え、Fixed Option（鍵・Port・`BatchMode` 等）の送出、Wire Format の往復（敵対的な文字列を含む）、`ssh` 自身の終了コード 255 の特別扱い、鍵が使えないときに `ssh` を 1 度も起動しないこと、を確かめます。
 
 ## GitHub User Connection（`gh auth`）
 
