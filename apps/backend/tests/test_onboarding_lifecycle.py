@@ -1,7 +1,10 @@
 """The user lifecycle (PAW-024): delete, cancel an invitation, restore (PostgreSQL)."""
 
+import asyncio
 import uuid
 from datetime import timedelta
+
+from sqlalchemy import text
 
 from paw_backend.auth.errors import (
     AccountNotFoundError,
@@ -180,6 +183,94 @@ class DeleteTest(OnboardingTestCase):
             now=T0,
         )
         await self.delete(bob.id)
+
+    async def test_a_co_manager_pending_deletion_does_not_count(self):
+        # A and B manage the project; A is deleted (B is the other Manager). B is
+        # now the only Manager who is not being deleted: B must hand over first.
+        bob = await self.make_user("bob")
+        carol = await self.make_user("carol")
+        await self.make_project(bob, carol)
+        await self.delete(bob.id)
+        with self.assertRaises(OwnershipTransferRequiredError):
+            await self.delete(carol.id)
+        self.assertEqual(await self.status_of(carol.id), "active")
+
+    async def test_two_co_managers_deleted_at_once_leave_one(self):
+        bob = await self.make_user("bob")
+        carol = await self.make_user("carol")
+        await self.make_project(bob, carol)
+        targets = [bob.id, carol.id]
+
+        async def attempt(services, index):
+            return await services.lifecycle.delete_user(
+                self.admin,
+                targets[index],
+                self.context(),
+                session_id=self.admin_auth.record.id,
+            )
+
+        results = await self.gather_on_own_engines(2, attempt)
+        refused = [r for r in results if isinstance(r, OwnershipTransferRequiredError)]
+        self.assertEqual(len(refused), 1, results)
+        statuses = sorted(
+            [await self.status_of(bob.id), await self.status_of(carol.id)]
+        )
+        self.assertEqual(statuses, ["active", "pending_deletion"])
+
+    async def test_deleting_waits_for_a_membership_change_of_the_project(self):
+        # The project module serialises every membership change with the project
+        # row's lock: a Manager leaving holds it until it commits. The deletion of
+        # the other Manager must wait for it and then see that it is the last one.
+        bob = await self.make_user("bob")
+        carol = await self.make_user("carol")
+        project = await self.make_project(bob, carol)
+        async with self.database.session() as held, held.begin():
+            await held.execute(
+                text("SELECT id FROM projects WHERE id = :id FOR UPDATE"),
+                {"id": project},
+            )
+            await held.execute(
+                text(
+                    "DELETE FROM project_members WHERE project_id = :p AND user_id = :u"
+                ),
+                {"p": project, "u": carol.id},
+            )
+            deleting = asyncio.ensure_future(self.delete(bob.id))
+            await asyncio.sleep(0.5)
+            self.assertFalse(deleting.done())
+        with self.assertRaises(OwnershipTransferRequiredError):
+            await deleting
+        self.assertEqual(await self.status_of(bob.id), "active")
+
+    async def test_deleting_does_not_deadlock_with_adding_a_member(self):
+        # The project module locks the project row and then inserts a membership
+        # (whose foreign key takes KEY SHARE on the user's row); the deletion locks
+        # the user's row and then the project's. The user's lock must not exclude
+        # KEY SHARE, or the two wait for each other.
+        bob = await self.make_user("bob")
+        carol = await self.make_user("carol")
+        project = await self.make_project(bob, carol)
+        async with self.database.session() as held, held.begin():
+            await held.execute(
+                text("SELECT id FROM projects WHERE id = :id FOR UPDATE"),
+                {"id": project},
+            )
+            deleting = asyncio.ensure_future(self.delete(bob.id))
+            await asyncio.sleep(0.5)
+            await held.execute(
+                text(
+                    "INSERT INTO project_members (project_id, user_id, role, "
+                    "status, invited_at, invite_expires_at) VALUES (:p, :u, "
+                    "'viewer', 'invited', :now, :later)"
+                ),
+                {
+                    "p": await self.make_project(),
+                    "u": bob.id,
+                    "now": T0,
+                    "later": T0 + timedelta(days=7),
+                },
+            )
+        self.assertIs(await deleting, UserStatus.PENDING_DELETION)
 
     async def test_a_project_being_deleted_does_not_hold_its_manager(self):
         bob = await self.make_user("bob")

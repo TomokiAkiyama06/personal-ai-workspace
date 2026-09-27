@@ -63,6 +63,7 @@ EXPECTED = {
         {
             "state",
             "approval_required",
+            "claim_id",
             "claim_salt",
             "claim_hash",
             "device_label",

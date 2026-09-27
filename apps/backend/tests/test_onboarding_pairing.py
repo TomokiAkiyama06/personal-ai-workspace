@@ -289,6 +289,33 @@ class ApprovalTest(OnboardingTestCase):
         with self.assertRaises(TokenRejectedError):
             await self.pairing.claim(outcome.claim, "Tablet", self.context())
 
+    async def test_the_claims_lookup_key_is_not_the_pairing_tokens(self):
+        issued, outcome = await self.claimed()
+        pairing_key = issued.token.split(".")[1]
+        claim_key = outcome.claim.split(".")[1]
+        self.assertNotEqual(pairing_key, claim_key)
+
+    async def test_whoever_saw_the_qr_code_cannot_lock_the_waiting_device_out(self):
+        issued, outcome = await self.claimed()
+        # A bystander knows the pairing token's id (it is in the QR code): claims
+        # made up from it, and wrong pairing tokens after the claim, count nothing.
+        forged = "pawpc1." + issued.token.split(".")[1] + "." + "x" * 43
+        for index in range(6):
+            source = self.context(f"10.6.0.{index}")
+            with self.assertRaises(TokenRejectedError):
+                await self.pairing.complete(forged, source)
+            with self.assertRaises(TokenRejectedError):
+                await self.pairing.claim(wrong(issued.token), "Evil", source)
+        self.assertIsNone(
+            await self.scalar(
+                "SELECT locked_at FROM device_pairings WHERE audit_ref = :r",
+                r=issued.pairing_id,
+            )
+        )
+        await self.pairing.approve(self.trusted, issued.pairing_id, self.context())
+        done = await self.pairing.complete(outcome.claim, self.context())
+        self.assertTrue(done.completed)
+
 
 @requires_postgres
 class PairingGateTest(OnboardingTestCase):

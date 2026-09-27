@@ -146,8 +146,8 @@ class UserInvitationRow(Base):
 class DevicePairingRow(Base):
     __tablename__ = "device_pairings"
 
-    # The lookup key of both the pairing token (``pawpr1.<id>.<secret>``) and the
-    # new device's claim (``pawpc1.<id>.<secret>``). Never audited or logged.
+    # The lookup key of the pairing token (``pawpr1.<id>.<secret>``), shown in the
+    # QR code / link. Never audited or logged.
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
     audit_ref: Mapped[uuid.UUID] = mapped_column(Uuid)
     user_id: Mapped[uuid.UUID] = mapped_column(
@@ -163,7 +163,11 @@ class DevicePairingRow(Base):
     approval_required: Mapped[bool] = mapped_column(Boolean)
     salt: Mapped[bytes] = mapped_column(LargeBinary)
     secret_hash: Mapped[bytes] = mapped_column(LargeBinary)
-    # The new device's claim (only while an approval is involved).
+    # The new device's claim (only while an approval is involved). ``claim_id``
+    # is its own lookup key (``pawpc1.<claim_id>.<secret>``), a fresh random one:
+    # whoever saw the QR code knows ``id`` but not this one, so cannot spend the
+    # claim's attempts. Never audited or logged.
+    claim_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
     claim_salt: Mapped[bytes | None] = mapped_column(LargeBinary)
     claim_hash: Mapped[bytes | None] = mapped_column(LargeBinary)
     # What the new device asked for.
@@ -189,6 +193,7 @@ class DevicePairingRow(Base):
 
     __table_args__ = (
         UniqueConstraint("audit_ref"),
+        UniqueConstraint("claim_id"),
         # What the referential actions of ``users`` and ``auth_sessions`` (the
         # session purge sets these to NULL) need to find the referencing rows.
         Index("ix_device_pairings_user_id", "user_id"),
@@ -226,6 +231,9 @@ class DevicePairingRow(Base):
         ),
         CheckConstraint(
             "(claim_salt IS NULL) = (claim_hash IS NULL)", name="claim_complete"
+        ),
+        CheckConstraint(
+            "(claim_id IS NULL) = (claim_hash IS NULL)", name="claim_has_id"
         ),
         CheckConstraint(
             f"device_label IS NULL OR char_length(device_label) "
@@ -277,8 +285,10 @@ class UserStatusChangeRow(Base):
     __tablename__ = "user_status_changes"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    # RESTRICT: the history is append-only, so a user who has one is never
+    # hard-deleted (the users row stays as a tombstone, Decision 0033).
     user_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE")
+        ForeignKey("users.id", ondelete="RESTRICT")
     )
     # ``NULL`` for the row that created the user (an invitation).
     old_status: Mapped[str | None] = mapped_column(Text)

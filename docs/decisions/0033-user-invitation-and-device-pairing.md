@@ -63,9 +63,9 @@ issued / claimed / approved ──(本人が失効 / 新しい発行で置き換
 - **発行**（`POST /api/v1/auth/pairing`、`account.manage`）: 信頼済み端末（**Passkey の Gate が開いた有効な Session**）が発行する。同じ User の生きている Pairing（issued / claimed / approved）をすべて失効してから、新しい Token を 1 度だけ返す（「同時に有効な Token は 1 つまで」）。有効期限は **10 分**（要件の初期値。`PAW_PAIRING_TOKEN_TTL_SECONDS`、60〜3600 秒）。
 - **QR / リンクに載せる形**: 応答の `link_path` は `/pair#<Token>`（Token は URL の **Fragment** に置く。Fragment は Server へ送られず、Access Log・`Referer` に残らない）。QR は Client がこのリンク（公開 Origin + `link_path`）を符号化する。Backend は Origin を知らないので Path だけを返す。
   - 代案: Query（`/pair?token=...`）。Proxy の Access Log に Token が残るので採らない（判断点 4）。
-- **新端末の Token の提出**（`POST /api/v1/auth/pairing/claim`、公開）: Token、**端末名（必須）**、`remember_me` を受け取る。接続元ごと・全体の Rate Limit（新しい `pairing_source` / `pairing_global`。値は `redeem_*` の設定を使い、**正しい Token・Claim の要求は数えた回数を戻す**。承認待ちの Polling で Lock されないため）と、Token ごとの試行の上限（5）を数える。
+- **新端末の Token の提出**（`POST /api/v1/auth/pairing/claim`、公開）: Token、**端末名（必須）**、`remember_me` を受け取る。接続元ごと・全体の Rate Limit（新しい `pairing_source` / `pairing_global`。値は `redeem_*` の設定を使い、**正しい Token・Claim の要求は数えた回数を戻す**。承認待ちの Polling で Lock されないため）と、Token ごとの試行の上限（5）を数える。**Token ごとの試行は Token が `issued` の間だけ数える**（使用済みの Token への誤った提出で、承認待ちの行が Lock されないため）。
   - **一般 User**: Token が正しく期限内なら、その場で新しい Session を作り（Cookie を設定）、Token を使用済みにする（`completed`）。
-  - **Owner / Admin**（**提出の時点の** Role で判定する）: Token を使用済みにし（`claimed`。同じ QR をもう一度使えない）、新端末に**別の 1 回限りの Claim**（`pawpc1.<ID>.<Secret>`）を返す。承認の待ち時間は Claim の時点から 10 分（同じ設定）。
+  - **Owner / Admin**（**提出の時点の** Role で判定する）: Token を使用済みにし（`claimed`。同じ QR をもう一度使えない）、新端末に**別の 1 回限りの Claim**（`pawpc1.<Claim ID>.<Secret>`）を返す。**Claim ID は Pairing の ID（QR に載る）とは別の新しい乱数**で、QR を見た者が Claim を作って試行の回数を使い切り、正しい端末の完了を妨げることはできない。承認の待ち時間は Claim の時点から 10 分（同じ設定）。
 - **本人確認の意味（推奨）**: 一般 User の新端末では、**信頼済み端末にだけ表示された 1 回限り・10 分の Token を持っていること**を本人確認とする（要件の「一般 User は有効な QR / 共有リンクによるペアリングで新規端末を追加可能」）。Password の再入力は求めない。Owner / Admin は、これに加えて信頼済み端末での明示承認（下記）を要る。
   - 代案 A: 新端末で Password も入力させる（QR が肩越しに盗み見られても足りない）。Pairing の利点（Password を打たない）が消える。代案 B: 新端末に短い確認 Code を表示し、信頼済み端末で入力させる（一般 User にも承認を求める形）。要件は一般 User に承認を求めていない（判断点 5）。
 - **承認**（`GET /api/v1/auth/pairing/pending`、`POST /pairing/{id}/approve`、`POST /pairing/{id}/reject`）: 同じ User の信頼済み端末が、承認待ちの端末（端末名、提出の時刻、期限）を見て承認または拒否する。**Owner / Admin の承認は、承認する Session の直近の Passkey の Step-up を要る**（重要操作。Decision 0025 の 7。Passkey が設定されていない環境では、Owner / Admin は Pairing で端末を追加できず、Password（と Passkey）の通常の Login が代わりの経路として残る）。拒否は Step-up を要らない（安全な側の操作）。
@@ -93,8 +93,10 @@ issued / claimed / approved ──(本人が失効 / 新しい発行で置き換
 - **削除・招待の取消・復元はすべて Owner / Admin の重要操作として、直近の Passkey の Step-up を要る**（1 節と同じ。判断点 1）。
 - **`users.status` の変更は `SECURITY DEFINER` の関数 `paw_change_user_status(user_id, from, to, now, actor)` だけ**（上の表の 4 つの遷移だけを許し、Owner の行は変えない）。Web の Role は EXECUTE だけを持ち、`users.status` の UPDATE 権限は持たない（0022 の方針のまま）。関数は同じ文で、変更の履歴（`user_status_changes`。追記専用、Web の Role は SELECT だけ）を 1 行書く。30 日の起点は、この履歴の `pending_deletion` への最新の変更の時刻である。
 - **削除（`active` → `pending_deletion`）が同じ Transaction で行うこと**: 全 Session の失効（`account_closed`）、生きている Pairing の失効。既存の `SessionPrincipalProvider` は `active` 以外の User を匿名にするので、Session は行が残っていても効かない（0022 の `revoke_all_sessions_of` の意図のとおり、行も終わらせる）。
-- **所有権の移譲**（要件「共有 Project 等を所有していれば削除前に移譲を要求」）: 対象が、Active / Archived の Project の**唯一の受諾済み Manager** なら削除を拒否する（409 `ownership_transfer_required`）。Repository は Project に属するので、Project の Manager の確認で足りる（推測。判断点 7）。
+- **所有権の移譲**（要件「共有 Project 等を所有していれば削除前に移譲を要求」）: 対象が、Active / Archived の Project の**唯一の生きた Manager**（受諾済みで、本人の Account が `active`。`pending_deletion` の共同 Manager は数えない）なら削除を拒否する（409 `ownership_transfer_required`）。確認の前に、対象が Manager である Project の行を Project の Service と同じ `FOR UPDATE` で Lock する（同時の 2 人の Manager の削除、Manager の退出・降格と直列にするため）。Repository は Project に属するので、Project の Manager の確認で足りる（推測。判断点 7）。
 - **招待の取消を `deleted` にする理由**: `invited` の User には Password・Passkey・Chat・Memory がなく、消す個人データがない（`users` の行と招待 Token の履歴だけ）。30 日の保留を置く意味がないので、直ちに `deleted` にする（代案: `invited` も `pending_deletion` を経る。判断点 8）。
+- **Login name の再利用**: `users.login_name` は状態によらず一意（既存の制約）なので、招待の取消・削除の後も Login name は予約されたままで、同じ Login name で招待し直せない（取消した `alice` を招待し直すと `409 login_name_taken`）。実装はこのまま（推奨。過去の Audit・履歴の行が指す人を取り違えない）。代案: 取消・消去の完了で Login name を解放する（判断点 10）。
+- **`users` の行は物理削除しない（Tombstone）**: `user_status_changes`（追記専用）の `user_id` の外部キーは `RESTRICT` で、履歴を持つ User の `users` の行は DELETE できない。後続の消去（`pending_deletion` → `deleted`）は、`users` の行を消さずに個人データを消して行を残す設計になる（推奨）。代案: 消去の経路だけが履歴の Trigger を意図して外す（判断点 11）。
 - **この Issue に含めないこと（推奨。後続の Issue にする）**:
   - `pending_deletion` → `deleted`（30 日後の個人データの完全削除）。要件は Password hash・Passkey・Private Chat・Private Memory・個人設定・GitHub 認証情報・個人用 Files、さらに Recovery Projection・Recovery Git 履歴・clone / cache・DB backup / WAL の消去と検証を求め、**消去と検証が終わるまで `Deleted` と表示しない**。この Issue で状態だけを `deleted` にすると、この要件に反する。関数 `paw_change_user_status` もこの遷移を許さない。
   - 実行中 Agent の安全停止、GitHub / Codex / Claude の外部認証の停止（Session の失効と `active` でない User の匿名化で、新規の Login・新規の Agent の実行（Session を要る経路）は止まる。Agent の委任は `DatabasePrincipalDirectory` が `active` 以外を拒否するかを、後続の Issue で確かめる）。
@@ -138,7 +140,10 @@ issued / claimed / approved ──(本人が失効 / 新しい発行で置き換
 6. 端末に紐づく Passkey しか持たない Owner / Admin が、Pairing した新端末で Passkey を追加できるようにするか（推奨は**この Issue では変えない**。変えるなら、承認済みの Pairing の Session を「登録の直近の認証」に数える案を後続の Issue にする）。
 7. 削除の前の所有権の確認を「Active / Archived の Project の唯一の受諾済み Manager なら拒否」とする（推奨）か、別の基準にするか。
 8. 招待の取消で `invited` を直ちに `deleted` にする（推奨）か、`pending_deletion` を経るか。
-9. `pending_deletion` → `deleted`（30 日後の完全削除と消去の検証）、実行中 Agent の停止、外部認証の停止を**後続の Issue にする**（推奨）か、この Issue に含めるか。
+9. `pending_deletion` → `deleted`（30 日後の完全削除と消去の検証）、実行中 Agent の停止、外部認証の停止を**後続の Issue にする**（推奨）か、この Issue に含めるか。後続にする場合は、承認の後に Issue を作る。
+10. 招待の取消・削除の後も Login name を**予約したままにする**（推奨）か、解放して再利用できるようにするか。
+11. `users` の行を**物理削除しない（Tombstone）**（推奨。`user_status_changes` の外部キーは `RESTRICT`）か、後続の消去で行を消せるようにするか。
+12. Owner / Admin の Pairing の承認で、承認する端末に見えるのは新端末が名乗った端末名だけで、承認と新端末を結びつけるもの（両方に表示する確認 Code など）はない。QR を見た者が正しい端末より先に提出すると、承認待ちはその者の 1 件になり、Step-up つきの承認でその者が Gate `open` の Admin の Session を得る。**この Issue では確認 Code を入れない**（推奨。承認の画面で提出の時刻と端末名を確かめる運用）か、確認 Code（判断点 5 の代案 B を Owner / Admin の承認に適用）を入れるか。
 
 ## 推測した点（実装者が要件から解釈した点）
 

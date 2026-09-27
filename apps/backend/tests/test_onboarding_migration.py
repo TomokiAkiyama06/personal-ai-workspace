@@ -401,6 +401,23 @@ class DatabaseTest(unittest.TestCase):
         )
         self.assertEqual(self.refused("DELETE FROM user_status_changes"), "23001")
 
+    def test_a_user_with_a_history_is_never_hard_deleted(self):
+        # The foreign key says what the append-only history enforces: RESTRICT,
+        # not a CASCADE that its trigger would refuse anyway. The users row is a
+        # tombstone (Decision 0033, section 3).
+        migrate("upgrade", "head")
+        self.assertEqual(
+            self.scalars(
+                "SELECT confdeltype FROM pg_constraint "
+                "WHERE conname = 'fk_user_status_changes_user_id_users'"
+            ),
+            ["r"],
+        )
+        self.run_sql(
+            "SELECT paw_invite_user(gen_random_uuid(), 'bob', 'user', now(), NULL)"
+        )
+        self.assertEqual(self.refused("DELETE FROM users"), "23001")
+
     def test_one_outstanding_invitation_and_one_live_pairing_per_user(self):
         migrate("upgrade", "head")
         user = self.insert_user(status="invited")

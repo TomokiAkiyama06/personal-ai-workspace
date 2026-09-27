@@ -16,9 +16,11 @@ values are Decision 0033 section 2 (Proposed)::
   link path ``/pair#<token>`` (a URL fragment never reaches the server's logs).
 * **Claiming** (public, the new device): rate limited per source and in total
   (``pairing_*``: a correct token or claim gives its attempt back) and per token
-  (``setup_token_max_attempts``). A User's new device gets its session at once. An
-  Owner's or Admin's (judged by the role at that moment) gets a one-time claim
-  (``onetime.CLAIM``) and waits, at most the same lifetime, for a trusted device's
+  (``setup_token_max_attempts``, counted only while the token is ``issued``). A
+  User's new device gets its session at once. An Owner's or Admin's (judged by
+  the role at that moment) gets a one-time claim (``onetime.CLAIM``, with its own
+  random lookup key ``claim_id``: whoever saw the QR code knows the pairing's id,
+  never the claim's) and waits, at most the same lifetime, for a trusted device's
   explicit approval, which needs a recent **Passkey Step-up** of the approving
   session (a rejection does not). Either way the token is spent: the same QR code
   cannot be used twice.
@@ -452,16 +454,22 @@ class PairingService:
             matches = onetime.verify(parsed, row.salt, row.secret_hash)
             if row.locked_at is not None:
                 return _locked()
-            refusal = await self._count_attempt_in(session, row, now, matches)
+            if row.state != PairingState.ISSUED.value:
+                # The token is spent already: attempts no longer count, so that
+                # whoever saw the QR code cannot lock a claimed pairing out (its
+                # locked_at would refuse the waiting device's claim too).
+                refusal = (
+                    AuthReason.TOKEN_MISMATCH
+                    if not matches
+                    else AuthReason.TOKEN_REVOKED
+                    if row.state
+                    in (PairingState.REVOKED.value, PairingState.REJECTED.value)
+                    else AuthReason.TOKEN_USED
+                )
+            else:
+                refusal = await self._count_attempt_in(session, row, now, matches)
             if refusal is None:
-                if row.state != PairingState.ISSUED.value:
-                    refusal = (
-                        AuthReason.TOKEN_REVOKED
-                        if row.state
-                        in (PairingState.REVOKED.value, PairingState.REJECTED.value)
-                        else AuthReason.TOKEN_USED
-                    )
-                elif row.expired:
+                if row.expired:
                     refusal = AuthReason.TOKEN_EXPIRED
                 elif user.status != "active":
                     refusal = AuthReason.USER_NOT_ELIGIBLE
@@ -470,17 +478,21 @@ class PairingService:
             for reservation in reservations:
                 await self._throttle.succeed_in(session, reservation)
             if SystemRole(user.system_role) in APPROVAL_ROLES:
-                claim = onetime.CLAIM.generate(token_id=row.id)
+                # A fresh lookup key, not the pairing's id (which the QR code
+                # shows): see ``DevicePairingRow.claim_id``.
+                claim = onetime.CLAIM.generate()
                 expires_at = now + self._ttl
                 await session.execute(
                     text(
                         "UPDATE device_pairings SET state = 'claimed', "
-                        "approval_required = true, claim_salt = :salt, "
+                        "approval_required = true, claim_id = :claim_id, "
+                        "claim_salt = :salt, "
                         "claim_hash = :hash, device_label = :label, "
                         "remember_me = :remember, claimed_at = :now, "
                         "expires_at = :expires WHERE id = :id"
                     ),
                     {
+                        "claim_id": claim.token_id,
                         "salt": claim.salt,
                         "hash": claim.secret_hash,
                         "label": label,
@@ -534,7 +546,7 @@ class PairingService:
         parsed = onetime.CLAIM.parse(claim)
 
         async def work(session: AsyncSession) -> PairingOutcome | TokenRefusal:
-            found = await self._lock_pairing_in(session, parsed)
+            found = await self._lock_pairing_in(session, parsed, by_claim=True)
             if isinstance(found, TokenRefusal):
                 return found
             user, row, now = found
@@ -609,12 +621,18 @@ class PairingService:
             )
         raise TokenRejectedError
 
-    async def _lock_pairing_in(self, session: AsyncSession, parsed):
-        """The user's row and the pairing's, locked in that order; or a refusal."""
+    async def _lock_pairing_in(
+        self, session: AsyncSession, parsed, *, by_claim: bool = False
+    ):
+        """The user's row and the pairing's, locked in that order; or a refusal.
+
+        ``by_claim``: ``parsed`` is a claim, looked up by ``claim_id``.
+        """
         lookup = parsed.token_id if parsed is not None else uuid.uuid4()
+        key = "claim_id" if by_claim else "id"
         user_id = (
             await session.execute(
-                text("SELECT user_id FROM device_pairings WHERE id = :id"),
+                text(f"SELECT user_id FROM device_pairings WHERE {key} = :id"),
                 {"id": lookup},
             )
         ).scalar_one_or_none()
@@ -640,7 +658,7 @@ class PairingService:
                            p.secret_hash, p.claim_salt, p.claim_hash,
                            p.device_label, p.remember_me, p.attempts, p.locked_at,
                            p.expires_at, p.expires_at <= clock.ts AS expired
-                      FROM clock, device_pairings p WHERE p.id = :id
+                      FROM clock, device_pairings p WHERE p.{key} = :id
                        FOR UPDATE OF p"""
                 ),
                 {"id": lookup, "now": now},

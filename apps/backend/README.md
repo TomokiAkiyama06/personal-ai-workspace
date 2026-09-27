@@ -1355,10 +1355,10 @@ issued / claimed / approved ──(本人の失効・新しい発行・User の�
 
 - **信頼済み端末**は、Passkey の Gate が開いた有効な Session です（制限された Session は発行も承認もできない）。
 - Pairing Token（`pawpr1.…`）の有効期間は **10 分**（要件の初期値。`PAW_PAIRING_TOKEN_TTL_SECONDS`、60〜3600 秒）。**1 User に生きている Pairing は 1 つまで**で、新しい発行は旧 Token を先に失効します（Partial Unique Index も同じ）。Token は URL の Fragment（`/pair#<Token>`）に置くので、Server の Access Log や `Referer` に残りません。QR は Client が「公開 Origin + `link_path`」を符号化します。
-- 新しい端末の提出は、接続元ごと・全体の Rate Limit（新しい `pairing_source` / `pairing_global`。値は `redeem_*` の設定。**正しい Token・Claim は数えた回数を戻す**ので、承認待ちの Polling で Lock されない）と、Token ごとの試行の上限（`PAW_SETUP_TOKEN_MAX_ATTEMPTS`）を数えます。**同じ Token の同時の提出は片方だけが成功**します（別の接続で競わせる Test 済み）。
-- **一般 User** は Token の所持だけで新しい Session を得ます（Decision 0033 の判断点 5）。**Owner / Admin**（提出の時点の Role で判定）は Token を使用済みにして、1 回限りの Claim（`pawpc1.…`、同じ行の ID に別の Secret）を受け取り、**Claim の時点から 10 分以内**に同じ User の信頼済み端末が承認するのを待ちます。**承認には、承認する Session の直近の Passkey の Step-up が要ります**（拒否には要らない）。Passkey が設定されていない環境では Owner / Admin は Pairing で端末を追加できず、Password の通常の Login が残ります。
+- 新しい端末の提出は、接続元ごと・全体の Rate Limit（新しい `pairing_source` / `pairing_global`。値は `redeem_*` の設定。**正しい Token・Claim は数えた回数を戻す**ので、承認待ちの Polling で Lock されない）と、Token ごとの試行の上限（`PAW_SETUP_TOKEN_MAX_ATTEMPTS`。**Token が `issued` の間だけ数える**。使用済みの Token への誤った提出は数えないので、QR を見た第三者が承認待ちの行を Lock できない）を数えます。**同じ Token の同時の提出は片方だけが成功**します（別の接続で競わせる Test 済み）。
+- **一般 User** は Token の所持だけで新しい Session を得ます（Decision 0033 の判断点 5）。**Owner / Admin**（提出の時点の Role で判定）は Token を使用済みにして、1 回限りの Claim（`pawpc1.…`。**検索の鍵は Pairing の ID ではなく、新しい乱数の `claim_id`**。QR に載る Pairing の ID を知っていても Claim を当てられず、Claim の試行の回数も使えない）を受け取り、**Claim の時点から 10 分以内**に同じ User の信頼済み端末が承認するのを待ちます。**承認には、承認する Session の直近の Passkey の Step-up が要ります**（拒否には要らない）。Passkey が設定されていない環境では Owner / Admin は Pairing で端末を追加できず、Password の通常の Login が残ります。
 - 新しい Session は `auth_method = pairing`（`auth_sessions` の CHECK に追加。Step-up の方法ではない）で、Step-up を持ちません。Passkey の Gate は、一般 User は Password の Sign-in と同じ規則、承認された Owner / Admin は `open`（承認した端末の Passkey の Step-up が、新しい端末での Passkey の認証の代わり）です。Passkey の登録は既存の `/auth/passkeys/enroll/*` で、既存の規則（既に Passkey を持つ User は Passkey の Step-up が要る）のままです（Decision 0033 の判断点 6）。
-- Lock の順序は、どの操作も User の行（`FOR UPDATE`）→ Pairing の行です。
+- Lock の順序は、どの操作も User の行（`FOR UPDATE`。削除・復元は `FOR NO KEY UPDATE`）→ Pairing の行です。
 
 ### User の状態遷移（Lifecycle）
 
@@ -1371,8 +1371,8 @@ issued / claimed / approved ──(本人の失効・新しい発行・User の�
 | `pending_deletion` → `active` | 復元（Owner だけ、30 日 = 720 時間以内。Database の時計で判定） |
 | `pending_deletion` → `deleted` | **この Issue に含めません**（30 日後の個人データの消去と検証が先。Decision 0033 の 3 節） |
 
-- `users.status` を変えるのは `SECURITY DEFINER` の関数 `paw_change_user_status(user_id, from, to, now, actor)` だけで、上の 4 つの遷移だけを許し、**Owner の行は変えません**。Web の Role に `users.status` の UPDATE 権限はありません。関数は同じ文で `user_status_changes`（追記専用。Trigger が UPDATE・DELETE を拒否し、Web の Role は SELECT だけ）に履歴を 1 行書きます。30 日の起点はこの履歴です。
-- 削除は、User の行の Lock の下で、状態の変更、**全 Session の失効**（`account_closed`）、生きている Pairing の失効、Audit を 1 つの Transaction で行います。Active / Archived の Project の唯一の受諾済み Manager は削除できません（`ownership_transfer_required`）。
+- `users.status` を変えるのは `SECURITY DEFINER` の関数 `paw_change_user_status(user_id, from, to, now, actor)` だけで、上の 4 つの遷移だけを許し、**Owner の行は変えません**。Web の Role に `users.status` の UPDATE 権限はありません。関数は同じ文で `user_status_changes`（追記専用。Trigger が UPDATE・DELETE を拒否し、Web の Role は SELECT だけ）に履歴を 1 行書きます。30 日の起点はこの履歴です。`user_status_changes.user_id` の外部キーは **RESTRICT** で、履歴を持つ User（招待で作った User は全員）の `users` の行は物理削除できず、Tombstone として残ります（後続の消去の設計の制約。Decision 0033 の判断点 11）。
+- 削除は、User の行の Lock（`FOR NO KEY UPDATE`。Project の Service が Member の行を足すときの外部キーの `KEY SHARE` と衝突しない）と、その User が Manager である Project の行の Lock（`FOR UPDATE`、ID の順。Project の Service が Member の変更ごとに取る Lock）の下で、状態の変更、**全 Session の失効**（`account_closed`）、生きている Pairing の失効、Audit を 1 つの Transaction で行います。Active / Archived の Project の**唯一の生きた Manager**（受諾済みで、本人の Account が `active`。削除待ちの共同 Manager は数えない）は削除できません（`ownership_transfer_required`）。同時の 2 人の Manager の削除、Manager の退出・降格との競合は、Project の行の Lock で直列になります。
 - Admin は User を、Owner は User と Admin を削除できます。Owner と自分自身は対象になりません。削除・招待の取消・復元はすべて Passkey の Step-up が要ります。
 - 実行中 Agent の安全停止と、GitHub / Codex / Claude の外部認証の停止は含みません（Decision 0033 の判断点 9。`active` でない User は `SessionPrincipalProvider` が匿名にするので、Session を要る経路は止まります）。
 
@@ -1410,7 +1410,7 @@ Migration `0124`（Revision ID は Issue の番号で、Decision 0024 と紛れ�
 - Decision 0033 は **Proposed** です。承認で値や流れが変わる可能性があります。
 - 実際の Browser・QR の読み取り・Reverse Proxy を通した動作は確かめていません（`TestClient` と実 PostgreSQL まで）。
 - 一般 User の Pairing は Token の所持だけで Session ができます（QR の盗み見・リンクの転送。10 分以内）。Pairing の完了は Audit に残り、端末の一覧から個別に Logout できます。
-- 削除の前の所有権の確認は、同時の Manager の変更（Project の Service 側）と Lock を共有しません（同時に最後の 2 人の Manager を削除すると、両方が通りうる）。
+- 招待の取消・削除の後も `users.login_name` は一意のまま予約され、同じ Login name で招待し直せません（Decision 0033 の判断点 10）。
 - `pending_deletion` → `deleted`（30 日後の消去）、実行中 Agent の停止、外部認証の停止、User の一覧の Endpoint、Web の画面は後続の Issue です。
 - 公開 Route の時間は揃えていません（存在する Token の失敗は Audit の INSERT が加わる）。
 

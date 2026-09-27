@@ -15,9 +15,11 @@ their rules are Decision 0033 section 3 (Proposed):
 changes ``users.status``. The Owner is never a target (the CLI owns that account).
 
 Deleting (``active`` to ``pending_deletion``), in one transaction under the user's
-row lock: the status, every session of the user ended (``account_closed``), every
-live pairing ended, the audit rows. A user who is the only accepted Manager of an
-active or archived project is refused (``OwnershipTransferRequiredError``). Deleting
+row lock (``FOR NO KEY UPDATE``) and then the rows of the projects the user manages
+(``FOR UPDATE``, the project module's lock): the status, every session of the user
+ended (``account_closed``), every live pairing ended, the audit rows. A user who is
+the only live Manager (accepted, and whose account is ``active``) of an active or
+archived project is refused (``OwnershipTransferRequiredError``). Deleting
 an ``invited`` user cancels the invitation: straight to ``deleted`` (there is no
 personal data to erase) and the outstanding token ends. Deleting and restoring are
 sensitive operations: a recent Passkey Step-up of the administrator's own session.
@@ -302,9 +304,13 @@ class UserLifecycleService:
             )
             row = (
                 await session.execute(
+                    # NO KEY UPDATE: the status is not a key, and the lock must
+                    # not exclude the KEY SHARE that a foreign key to the user
+                    # takes (the project module inserts a membership while it
+                    # holds the project row, which this then waits for).
                     text(
                         "SELECT system_role, status FROM users WHERE id = :id "
-                        "FOR UPDATE"
+                        "FOR NO KEY UPDATE"
                     ),
                     {"id": user_id},
                 )
@@ -401,7 +407,27 @@ class UserLifecycleService:
 
 
 async def _is_last_manager_in(session: AsyncSession, user_id: uuid.UUID) -> bool:
-    """Whether the user is the only accepted Manager of an active / archived project."""
+    """Whether the user is the only live Manager of an active / archived project.
+
+    "Live": an accepted Manager whose own account is ``active`` (a co-Manager who
+    is pending deletion hands nothing over). The projects the user manages are
+    locked ``FOR UPDATE`` first, in the order of their ids, the lock the project
+    module takes for every membership change (``projects.service``): a co-Manager
+    leaving, being demoted or being deleted at the same time commits first and
+    the check below (a new statement, so a new snapshot) sees it.
+    """
+    await session.execute(
+        text(
+            """
+            SELECT p.id FROM projects p
+             WHERE p.id IN (SELECT m.project_id FROM project_members m
+                             WHERE m.user_id = :id AND m.status = 'active'
+                               AND m.role = 'manager')
+             ORDER BY p.id FOR UPDATE OF p
+            """
+        ),
+        {"id": user_id},
+    )
     row = (
         await session.execute(
             text(
@@ -411,6 +437,7 @@ async def _is_last_manager_in(session: AsyncSession, user_id: uuid.UUID) -> bool
                    AND p.status IN ('active', 'archived')
                    AND NOT EXISTS (
                        SELECT 1 FROM project_members o
+                         JOIN users u ON u.id = o.user_id AND u.status = 'active'
                         WHERE o.project_id = m.project_id AND o.user_id <> :id
                           AND o.status = 'active' AND o.role = 'manager')
                  LIMIT 1

@@ -20,7 +20,9 @@ Tables (every column and constraint is spelled out below; the models in
   waits for a trusted device's approval (at most one live pairing per user; a
   CHECK caps each lifetime at an hour).
 * ``user_status_changes``: the append-only history of ``users.status`` (a
-  trigger rejects UPDATE and DELETE). Only the two functions below write it.
+  trigger rejects UPDATE and DELETE). Only the two functions below write it. Its
+  foreign key to ``users`` is RESTRICT: a user who has a history (every invited
+  user) is never hard-deleted; the row stays as a tombstone.
 
 Functions (``SECURITY DEFINER``, ``search_path`` pinned to ``pg_catalog, pg_temp``,
 ``users`` named by the schema this migration ran in, like 0022's
@@ -249,6 +251,7 @@ def upgrade() -> None:
         sa.Column("approval_required", sa.Boolean(), nullable=False),
         sa.Column("salt", sa.LargeBinary(), nullable=False),
         sa.Column("secret_hash", sa.LargeBinary(), nullable=False),
+        sa.Column("claim_id", sa.Uuid(), nullable=True),
         sa.Column("claim_salt", sa.LargeBinary(), nullable=True),
         sa.Column("claim_hash", sa.LargeBinary(), nullable=True),
         sa.Column("device_label", sa.Text(), nullable=True),
@@ -285,6 +288,10 @@ def upgrade() -> None:
         sa.CheckConstraint(
             "(claim_salt IS NULL) = (claim_hash IS NULL)",
             name=op.f("ck_device_pairings_claim_complete"),
+        ),
+        sa.CheckConstraint(
+            "(claim_id IS NULL) = (claim_hash IS NULL)",
+            name=op.f("ck_device_pairings_claim_has_id"),
         ),
         sa.CheckConstraint(
             "device_label IS NULL OR char_length(device_label) BETWEEN 1 AND 64",
@@ -353,6 +360,7 @@ def upgrade() -> None:
         ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_device_pairings")),
         sa.UniqueConstraint("audit_ref", name=op.f("uq_device_pairings_audit_ref")),
+        sa.UniqueConstraint("claim_id", name=op.f("uq_device_pairings_claim_id")),
     )
     # The referential actions of ``users`` and ``auth_sessions`` (the session purge
     # sets the three session columns to NULL) find the referencing rows by these.
@@ -379,6 +387,7 @@ def upgrade() -> None:
         update_columns=(
             "state",
             "approval_required",
+            "claim_id",
             "claim_salt",
             "claim_hash",
             "device_label",
@@ -417,7 +426,10 @@ def upgrade() -> None:
             ["user_id"],
             ["users.id"],
             name=op.f("fk_user_status_changes_user_id_users"),
-            ondelete="CASCADE",
+            # RESTRICT: the history is append-only (the trigger below), so a
+            # users row that has one is never hard-deleted; it is a tombstone
+            # (Decision 0033, section 3). A CASCADE would only be refused.
+            ondelete="RESTRICT",
         ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_user_status_changes")),
     )
