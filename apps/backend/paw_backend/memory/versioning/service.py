@@ -1,0 +1,923 @@
+"""Manual Memory versioning (PAW-042): edit, restore, retire, revalidate, relate.
+
+A person changes a memory through this service (the Memory UI of a later issue
+calls it with the authenticated user). It writes the PAW-040 tables and nothing
+else; the choices the requirements leave open are proposed in Decision 0034.
+
+Versions are never overwritten
+------------------------------
+REQUIREMENTS.md "Manual Memory Editing": an edit is a **new version**, and the
+old one stays as history.
+
+* ``edit_memory``: the current version ``n`` (``active``) becomes ``superseded``;
+  version ``n + 1`` is written ``active`` and ``confirmed`` with the person as its
+  actor, and a ``supersedes`` relation (reason: the changed field names) points
+  from ``n + 1`` to ``n``. When ``n`` was not confirmed (a worker's ``observed`` or
+  ``inferred`` candidate) a ``confirmed_from`` relation records the promotion too.
+  An edit that changes nothing writes nothing and returns the current version.
+* ``restore_version``: MEMORY_ARCHITECTURE.md section 15, "過去versionへ戻す場合、
+  古いversionを直接activeへ戻すのではなく": version ``n + 1`` is written with the
+  content of the chosen old version; the current one is retired as by an edit
+  (a deprecated current version stays ``deprecated``; the relation still says what
+  replaced it). ``attributes.restored_from_version`` names the source.
+* ``deprecate_memory``: the current version becomes ``deprecated`` (explicitly
+  invalidated). Nothing is erased; ``restore_version`` brings the content back.
+* ``revalidate_memory``: the stale-candidate answer "still true". Version
+  ``n + 1`` repeats the content with ``verified_at`` = now and no stale mark, with
+  ``supersedes`` and ``revalidated_from`` relations to ``n``.
+* ``relate_memories``: a relation between the current versions of two memories.
+  ``supersedes`` retires the older one (only between memories with the same
+  audience); ``extends`` and ``conflicts_with`` leave both ``active``.
+
+``expected_version`` is the Optimistic Lock of every change: it must be the
+current version number, else :class:`MemoryVersionConflictError` and nothing is
+written. The "current version" is the one with the highest ``version_number``.
+
+Every status change is recorded by the database in ``memory_metadata_changes``
+with the person as its actor (revision 0071; ``metadata_change_actor`` is named
+first in the same transaction). Every new version carries ``actor_type = 'user'``
+and the person's id. The retrieval (PAW-043) offers ``active`` versions only, so a
+superseded, deprecated or history version never reaches a normal LLM context.
+
+Who may change what (Decision 0034)
+-----------------------------------
+Only a human :class:`~paw_backend.authz.Principal` calls this service: a manual
+edit is a person's act, and the version it writes is ``confirmed``. (Agents and the
+background worker write candidates through the Immediate Journal, PAW-041.)
+
+* ``user`` scope: capability ``memory.use`` on a resource owned by the memory's
+  owner. Only the owner passes.
+* ``project`` scope: capability ``project.memory.use`` on the project, decided with
+  the role and the project state READ FROM THE DATABASE (never the roles the
+  caller's ``Principal`` carries). A Viewer, and any member of an archived
+  project, is refused.
+* ``shared``: :class:`MemoryScopeNotSupportedError` (``SharedMemoryService`` owns
+  it). ``repo`` and ``project_group``: :class:`MemoryNotFoundError` (their write
+  permission is an open point of Decision 0034).
+
+The Authorizer records every decision (both capabilities are ``REQUIRED``). A
+denial because the memory is somebody else's (``not_resource_owner``) or belongs to
+a project the actor is not a member of (``not_project_member``) is reported as
+:class:`MemoryNotFoundError`, like a missing id, so that the answer does not tell
+whether such a memory exists. Any other denial is :class:`MemoryPermissionError`.
+
+Order of every call
+-------------------
+1. Arguments are validated (:class:`InvalidMemoryInputError`).
+2. A transaction starts with ``SET LOCAL lock_timeout``, takes a transaction-level
+   advisory lock per memory (``memory_lock_key``; two memories in a fixed order),
+   and reads the current version ``FOR UPDATE``.
+3. The actor is authorized against that version's scope.
+4. The change is written; a lock wait over the timeout is :class:`MemoryBusyError`.
+
+The Immediate Journal's consolidator does not take these advisory locks. It
+supersedes with ``UPDATE ... WHERE status = 'active'`` and inserts under the unique
+``(memory_id, version_number)``, so whichever writer comes second fails (the
+consolidator retries its job; this service raises
+:class:`MemoryVersionConflictError`) instead of overwriting the other.
+"""
+
+import logging
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime
+from typing import Any
+from uuid import UUID
+
+import psycopg.errors
+from sqlalchemy import func, insert, select, text, update
+from sqlalchemy.exc import DBAPIError, IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from paw_backend.authz import (
+    Authorizer,
+    Capability,
+    Decision,
+    Principal,
+    ProjectRole,
+    ProjectState,
+    Reason,
+    Resource,
+)
+from paw_backend.db import Database
+from paw_backend.memory.metadata import metadata_change_actor
+from paw_backend.memory.models import (
+    ActorType,
+    ConfirmationState,
+    FreshnessPolicy,
+    Memory,
+    MemoryRelation,
+    MemoryScope,
+    MemoryStatus,
+    MemoryVersion,
+    RelationType,
+)
+from paw_backend.memory.versioning import limits, rules
+from paw_backend.memory.versioning.errors import (
+    InputProblem,
+    MemoryBusyError,
+    MemoryNotFoundError,
+    MemoryPermissionError,
+    MemoryScopeNotSupportedError,
+    MemoryStateError,
+    MemoryVersionConflictError,
+    StateProblem,
+)
+from paw_backend.memory.versioning.records import (
+    FreshnessSpec,
+    ManualRelation,
+    MemoryChanges,
+    MemoryDraft,
+    MemoryRelationView,
+    MemoryVersionView,
+)
+from paw_backend.memory.versioning.validation import (
+    reject,
+    validate_aware_datetime,
+    validate_enum,
+    validate_int,
+    validate_optional_text,
+    validate_uuid,
+    validate_version_number,
+)
+from paw_backend.projects.models import ProjectMemberRow, ProjectRow
+
+logger = logging.getLogger(__name__)
+
+Clock = Callable[[], datetime]
+
+RESOURCE_MEMORY = "memory"
+
+_MEMORIES = Memory.__table__
+_VERSIONS = MemoryVersion.__table__
+_RELATIONS = MemoryRelation.__table__
+_PROJECTS = ProjectRow.__table__
+_MEMBERS = ProjectMemberRow.__table__
+
+_LOCK_SQL = text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))")
+# The denials that mean "not yours": reported as "not found" (see the module text).
+_HIDDEN_DENIALS = frozenset({Reason.NOT_RESOURCE_OWNER, Reason.NOT_PROJECT_MEMBER})
+# The unique constraints another writer's version can run into.
+_VERSION_RACES = frozenset(
+    {"uq_memory_versions_memory_id_version_number", "ix_memory_versions_one_active"}
+)
+_RELATION_RACES = frozenset(
+    {
+        "uq_memory_relations_from_version_id_to_version_id_relation_type",
+        "ix_memory_relations_one_successor",
+    }
+)
+
+# Reachability over the acyclic relations, from ``start`` towards older versions.
+_REACHES = text(
+    "WITH RECURSIVE reach(id) AS ("
+    " SELECT CAST(:start AS uuid)"
+    " UNION"
+    " SELECT r.to_version_id FROM memory_relations r"
+    " JOIN reach ON r.from_version_id = reach.id"
+    " WHERE r.relation_type = ANY (CAST(:kinds AS text[]))"
+    ") SELECT EXISTS (SELECT 1 FROM reach WHERE id = CAST(:target AS uuid))"
+)
+
+
+def memory_lock_key(memory_id: UUID) -> str:
+    """The advisory-lock key that serialises manual changes of one memory."""
+    return f"paw.memory.{memory_id}"
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _view(row: Any) -> MemoryVersionView:
+    return MemoryVersionView(
+        memory_id=row.memory_id,
+        version_id=row.id,
+        version_number=row.version_number,
+        scope=MemoryScope(row.scope),
+        owner_user_id=row.owner_user_id,
+        project_id=row.project_id,
+        project_group_id=row.project_group_id,
+        repo_id=row.repo_id,
+        memory_type=row.memory_type,
+        title=row.title,
+        content=row.content,
+        importance=row.importance,
+        pinned=row.pinned,
+        status=MemoryStatus(row.status),
+        confirmation_state=ConfirmationState(row.confirmation_state),
+        freshness_policy=FreshnessPolicy(row.freshness_policy),
+        verified_at=row.verified_at,
+        revalidate_after=row.revalidate_after,
+        revalidate_triggers=tuple(row.revalidate_triggers or ()),
+        expires_at=row.expires_at,
+        commit_sha=row.commit_sha,
+        branch=row.branch,
+        stale_since=row.stale_since,
+        actor_type=ActorType(row.actor_type),
+        actor_user_id=row.actor_user_id,
+        change_reason=row.change_reason,
+        created_at=row.created_at,
+    )
+
+
+def _freshness_columns(spec: FreshnessSpec, now: datetime) -> dict[str, Any]:
+    """The freshness columns of a new version written at ``now`` from ``spec``."""
+    return {
+        "freshness_policy": spec.policy.value,
+        # A person wrote (or re-read) this version now: that is the verification.
+        "verified_at": now if spec.policy is FreshnessPolicy.REVALIDATE else None,
+        "revalidate_after": spec.revalidate_after,
+        "revalidate_triggers": [trigger.value for trigger in spec.revalidate_triggers],
+        "expires_at": spec.expires_at,
+        "commit_sha": spec.commit_sha,
+        "branch": spec.branch,
+        "stale_since": None,
+    }
+
+
+def _kept_freshness(version: MemoryVersionView, now: datetime) -> dict[str, Any]:
+    """The freshness columns of a new version that keeps ``version``'s policy.
+
+    A ``revalidate`` memory is verified again (a person saved it now) and loses its
+    stale mark; the other columns are copied as they are.
+    """
+    revalidate = version.freshness_policy is FreshnessPolicy.REVALIDATE
+    return {
+        "freshness_policy": version.freshness_policy.value,
+        "verified_at": now if revalidate else version.verified_at,
+        "revalidate_after": version.revalidate_after,
+        "revalidate_triggers": list(version.revalidate_triggers),
+        "expires_at": version.expires_at,
+        "commit_sha": version.commit_sha,
+        "branch": version.branch,
+        "stale_since": None,
+    }
+
+
+class MemoryVersioningService:
+    """Manual versioning of User and Project Memory (see the module docstring)."""
+
+    def __init__(
+        self,
+        database: Database,
+        authorizer: Authorizer,
+        *,
+        clock: Clock = _utc_now,
+        lock_timeout_ms: int = limits.DEFAULT_LOCK_TIMEOUT_MS,
+    ) -> None:
+        if not isinstance(database, Database):
+            raise reject("database", InputProblem.WRONG_TYPE)
+        if not callable(getattr(authorizer, "authorize", None)):
+            raise reject("authorizer", InputProblem.WRONG_TYPE)
+        if not callable(clock):
+            raise reject("clock", InputProblem.WRONG_TYPE)
+        validate_int(
+            "lock_timeout_ms", lock_timeout_ms, low=1, high=limits.MAX_LOCK_TIMEOUT_MS
+        )
+        self._database = database
+        self._authorizer = authorizer
+        self._clock = clock
+        self._lock_timeout_ms = lock_timeout_ms
+
+    # -- helpers ---------------------------------------------------------------
+
+    def _now(self) -> datetime:
+        return validate_aware_datetime("clock", self._clock())
+
+    @staticmethod
+    def _check_actor(actor: object) -> Principal:
+        if actor is None:
+            raise reject("actor", InputProblem.REQUIRED)
+        if not isinstance(actor, Principal):
+            raise reject("actor", InputProblem.WRONG_TYPE)
+        return actor
+
+    @asynccontextmanager
+    async def _transaction(self, *memory_ids: UUID) -> AsyncIterator[AsyncSession]:
+        """One transaction with the lock timeout and an advisory lock per memory."""
+        try:
+            async with self._database.session() as session, session.begin():
+                await session.execute(
+                    select(
+                        func.set_config(
+                            "lock_timeout", str(self._lock_timeout_ms), True
+                        )
+                    )
+                )
+                for key in sorted({memory_lock_key(m) for m in memory_ids}):
+                    await session.execute(_LOCK_SQL, {"key": key})
+                yield session
+        except DBAPIError as error:
+            # Only the type of the driver's error is read, never its text.
+            if isinstance(error.orig, psycopg.errors.LockNotAvailable):
+                raise MemoryBusyError from None
+            raise
+
+    @staticmethod
+    async def _current(
+        session: AsyncSession, memory_id: UUID, *, lock: bool = True
+    ) -> MemoryVersionView:
+        """The current (highest numbered) version, locked ``FOR UPDATE``."""
+        statement = (
+            select(*_VERSIONS.c)
+            .where(_VERSIONS.c.memory_id == memory_id)
+            .order_by(_VERSIONS.c.version_number.desc())
+            .limit(1)
+        )
+        if lock:
+            statement = statement.with_for_update()
+        row = (await session.execute(statement)).first()
+        if row is None:
+            raise MemoryNotFoundError
+        return _view(row)
+
+    @staticmethod
+    async def _version(
+        session: AsyncSession, memory_id: UUID, number: int
+    ) -> MemoryVersionView | None:
+        row = (
+            await session.execute(
+                select(*_VERSIONS.c).where(
+                    _VERSIONS.c.memory_id == memory_id,
+                    _VERSIONS.c.version_number == number,
+                )
+            )
+        ).first()
+        return None if row is None else _view(row)
+
+    async def _project_member(
+        self, session: AsyncSession, actor: Principal, project_id: UUID
+    ) -> tuple[Principal, ProjectState] | None:
+        """The actor with its role READ FROM THE DATABASE, and the project's state.
+
+        ``None`` when the project does not exist or is deleted. An invitation is
+        not a membership (the principal then has no role in the project).
+        """
+        row = (
+            await session.execute(
+                select(_PROJECTS.c.status, _MEMBERS.c.role)
+                .select_from(
+                    _PROJECTS.outerjoin(
+                        _MEMBERS,
+                        (_MEMBERS.c.project_id == _PROJECTS.c.id)
+                        & (_MEMBERS.c.user_id == actor.user_id)
+                        & (_MEMBERS.c.status == "active"),
+                    )
+                )
+                .where(_PROJECTS.c.id == project_id)
+            )
+        ).first()
+        if row is None:
+            return None
+        try:
+            state = ProjectState(row.status)
+        except ValueError:
+            return None  # ``deleted``: gone for everybody
+        roles = {} if row.role is None else {project_id: ProjectRole(row.role)}
+        return Principal(actor.user_id, actor.system_role, roles), state
+
+    async def _decide(
+        self, principal: Principal, capability: Capability, resource: Resource
+    ) -> Decision:
+        decision = await self._authorizer.authorize(principal, capability, resource)
+        if not isinstance(decision, Decision):
+            raise MemoryPermissionError("invalid_decision")
+        return decision
+
+    async def _authorize_version(
+        self,
+        session: AsyncSession,
+        actor: Principal,
+        version: MemoryVersionView,
+        *,
+        write: bool,
+    ) -> None:
+        """May ``actor`` change (or, ``write=False``, read) this memory?"""
+        if version.scope is MemoryScope.SHARED:
+            raise MemoryScopeNotSupportedError
+        if version.scope is MemoryScope.USER:
+            assert version.owner_user_id is not None  # the scope CHECK
+            decision = await self._decide(
+                actor,
+                Capability.MEMORY_USE,
+                Resource.owned_by(
+                    version.owner_user_id, RESOURCE_MEMORY, version.memory_id
+                ),
+            )
+        elif version.scope is MemoryScope.PROJECT:
+            assert version.project_id is not None  # the scope CHECK
+            member = await self._project_member(session, actor, version.project_id)
+            if member is None:
+                raise MemoryNotFoundError
+            principal, state = member
+            decision = await self._decide(
+                principal,
+                Capability.PROJECT_MEMORY_USE if write else Capability.PROJECT_READ,
+                Resource.project(version.project_id, state),
+            )
+        else:
+            raise MemoryNotFoundError  # repo / project_group: not handled here
+        if decision.allowed:
+            return
+        if decision.reason in _HIDDEN_DENIALS:
+            raise MemoryNotFoundError
+        raise MemoryPermissionError(decision.reason.value)
+
+    @staticmethod
+    def _check_expected(current: MemoryVersionView, expected: int) -> None:
+        if current.version_number != expected:
+            raise MemoryVersionConflictError(expected, current.version_number)
+
+    @staticmethod
+    async def _set_status(
+        session: AsyncSession,
+        version: MemoryVersionView,
+        new: MemoryStatus,
+        actor: Principal,
+    ) -> None:
+        """``active`` -> ``new`` of one version (row locked by ``_current``)."""
+        await session.execute(metadata_change_actor(ActorType.USER, actor.user_id))
+        result = await session.execute(
+            update(_VERSIONS)
+            .where(
+                _VERSIONS.c.id == version.version_id,
+                _VERSIONS.c.status == version.status.value,
+            )
+            .values(status=new.value)
+        )
+        if result.rowcount != 1:
+            raise MemoryVersionConflictError(
+                version.version_number, version.version_number
+            )
+
+    @staticmethod
+    async def _relate(
+        session: AsyncSession,
+        newer: UUID,
+        older: UUID,
+        kind: RelationType,
+        reason: str | None,
+        now: datetime,
+    ) -> MemoryRelationView:
+        await session.execute(
+            insert(_RELATIONS).values(
+                from_version_id=newer,
+                to_version_id=older,
+                relation_type=kind.value,
+                reason=reason,
+                created_at=now,
+            )
+        )
+        return MemoryRelationView(newer, older, kind, reason)
+
+    @staticmethod
+    async def _insert_version(
+        session: AsyncSession,
+        base: MemoryVersionView,
+        *,
+        values: dict[str, Any],
+        actor: Principal,
+        now: datetime,
+    ) -> MemoryVersionView:
+        """Insert version ``base.version_number + 1`` with ``base``'s scope."""
+        row = {
+            "memory_id": base.memory_id,
+            "version_number": base.version_number + 1,
+            "scope": base.scope.value,
+            "owner_user_id": base.owner_user_id,
+            "project_id": base.project_id,
+            "project_group_id": base.project_group_id,
+            "repo_id": base.repo_id,
+            "memory_type": base.memory_type,
+            "title": base.title,
+            "content": base.content,
+            "importance": base.importance,
+            "pinned": base.pinned,
+            "status": MemoryStatus.ACTIVE.value,
+            # A person saved it (REQUIREMENTS.md "Manual Memory Editing").
+            "confirmation_state": ConfirmationState.CONFIRMED.value,
+            "attributes": {},
+            "actor_type": ActorType.USER.value,
+            "actor_user_id": actor.user_id,
+            "change_reason": None,
+            "created_at": now,
+        }
+        row.update(values)
+        inserted = (
+            await session.execute(
+                insert(_VERSIONS).values(**row).returning(*_VERSIONS.c)
+            )
+        ).first()
+        assert inserted is not None
+        return _view(inserted)
+
+    # -- read ------------------------------------------------------------------
+
+    async def history(
+        self, actor: Principal, memory_id: UUID
+    ) -> tuple[MemoryVersionView, ...]:
+        """Every version of a memory, oldest first (the History Graph's nodes).
+
+        Readable by whoever may read the memory's current version: its owner
+        (``memory.use``) or a member of its project (``project.read``).
+        """
+        actor = self._check_actor(actor)
+        memory_id = validate_uuid("memory_id", memory_id)
+        async with self._transaction() as session:
+            current = await self._current(session, memory_id, lock=False)
+            await self._authorize_version(session, actor, current, write=False)
+            rows = await session.execute(
+                select(*_VERSIONS.c)
+                .where(_VERSIONS.c.memory_id == memory_id)
+                .order_by(_VERSIONS.c.version_number)
+            )
+            return tuple(_view(row) for row in rows)
+
+    # -- create ----------------------------------------------------------------
+
+    async def create_memory(
+        self, actor: Principal, draft: MemoryDraft
+    ) -> MemoryVersionView:
+        """A new memory written by a person: version 1, ``active``, ``confirmed``."""
+        actor = self._check_actor(actor)
+        if not isinstance(draft, MemoryDraft):
+            raise reject("draft", InputProblem.WRONG_TYPE)
+        now = self._now()
+        rules.check_manual_freshness(draft.freshness, draft.scope, now)
+        async with self._transaction() as session:
+            if draft.scope is MemoryScope.USER:
+                decision = await self._decide(
+                    actor,
+                    Capability.MEMORY_USE,
+                    Resource.owned_by(actor.user_id, RESOURCE_MEMORY),
+                )
+            else:
+                assert draft.project_id is not None  # MemoryDraft requires it
+                member = await self._project_member(session, actor, draft.project_id)
+                if member is None:
+                    raise MemoryPermissionError(Reason.NOT_PROJECT_MEMBER.value)
+                principal, state = member
+                decision = await self._decide(
+                    principal,
+                    Capability.PROJECT_MEMORY_USE,
+                    Resource.project(draft.project_id, state),
+                )
+            if not decision.allowed:
+                raise MemoryPermissionError(decision.reason.value)
+            memory_id = (
+                await session.execute(
+                    insert(_MEMORIES).values(created_at=now).returning(_MEMORIES.c.id)
+                )
+            ).scalar_one()
+            row = {
+                "memory_id": memory_id,
+                "version_number": 1,
+                "scope": draft.scope.value,
+                "owner_user_id": actor.user_id
+                if draft.scope is MemoryScope.USER
+                else None,
+                "project_id": draft.project_id,
+                "memory_type": draft.memory_type,
+                "title": draft.title,
+                "content": draft.content,
+                "importance": draft.importance,
+                "status": MemoryStatus.ACTIVE.value,
+                "confirmation_state": ConfirmationState.CONFIRMED.value,
+                "attributes": {},
+                "actor_type": ActorType.USER.value,
+                "actor_user_id": actor.user_id,
+                "change_reason": draft.reason,
+                "created_at": now,
+                **_freshness_columns(draft.freshness, now),
+            }
+            inserted = (
+                await session.execute(
+                    insert(_VERSIONS).values(**row).returning(*_VERSIONS.c)
+                )
+            ).first()
+            assert inserted is not None
+            return _view(inserted)
+
+    # -- edit / restore / retire / revalidate ------------------------------------
+
+    async def edit_memory(
+        self,
+        actor: Principal,
+        memory_id: UUID,
+        expected_version: int,
+        changes: MemoryChanges,
+    ) -> MemoryVersionView:
+        """A new version with ``changes``; the current one becomes ``superseded``."""
+        actor = self._check_actor(actor)
+        memory_id = validate_uuid("memory_id", memory_id)
+        expected_version = validate_version_number("expected_version", expected_version)
+        if not isinstance(changes, MemoryChanges):
+            raise reject("changes", InputProblem.WRONG_TYPE)
+        now = self._now()
+        try:
+            async with self._transaction(memory_id) as session:
+                current = await self._current(session, memory_id)
+                await self._authorize_version(session, actor, current, write=True)
+                self._check_expected(current, expected_version)
+                rules.check_active(current)
+                changed = rules.changed_fields(current, changes)
+                if not changed:
+                    return current
+                values: dict[str, Any] = {
+                    name: getattr(changes, name)
+                    for name in ("title", "content", "memory_type", "importance")
+                    if name in changed
+                }
+                if changes.freshness is not None and "freshness" in changed:
+                    rules.check_manual_freshness(changes.freshness, current.scope, now)
+                    values.update(_freshness_columns(changes.freshness, now))
+                else:
+                    values.update(_kept_freshness(current, now))
+                values["change_reason"] = changes.reason
+                values["attributes"] = {"edited_from_version": current.version_number}
+                await self._set_status(session, current, MemoryStatus.SUPERSEDED, actor)
+                new = await self._insert_version(
+                    session, current, values=values, actor=actor, now=now
+                )
+                reason = ", ".join(changed)
+                await self._relate(
+                    session,
+                    new.version_id,
+                    current.version_id,
+                    RelationType.SUPERSEDES,
+                    reason,
+                    now,
+                )
+                for kind in rules.confirmation_after_edit(current):
+                    await self._relate(
+                        session, new.version_id, current.version_id, kind, reason, now
+                    )
+                return new
+        except IntegrityError as error:
+            await self._raise_race(error, memory_id, expected_version)
+            raise
+
+    async def restore_version(
+        self,
+        actor: Principal,
+        memory_id: UUID,
+        expected_version: int,
+        source_version: int,
+        *,
+        freshness: FreshnessSpec | None = None,
+        reason: str | None = None,
+    ) -> MemoryVersionView:
+        """A new active version with the content of ``source_version``.
+
+        ``freshness`` replaces the source's freshness (needed when the source was
+        an ``expiring`` memory whose time has passed: an expiry that is not ahead
+        is refused). The current version is retired: ``superseded`` if it was
+        ``active``; a ``deprecated`` one stays ``deprecated``.
+        """
+        actor = self._check_actor(actor)
+        memory_id = validate_uuid("memory_id", memory_id)
+        expected_version = validate_version_number("expected_version", expected_version)
+        source_version = validate_version_number("source_version", source_version)
+        if freshness is not None and not isinstance(freshness, FreshnessSpec):
+            raise reject("freshness", InputProblem.WRONG_TYPE)
+        reason = validate_optional_text(
+            "reason", reason, max_chars=limits.MAX_REASON_CHARS
+        )
+        now = self._now()
+        try:
+            async with self._transaction(memory_id) as session:
+                current = await self._current(session, memory_id)
+                await self._authorize_version(session, actor, current, write=True)
+                self._check_expected(current, expected_version)
+                source = await self._version(session, memory_id, source_version)
+                if source is None:
+                    raise MemoryStateError(StateProblem.UNKNOWN_VERSION)
+                rules.check_restorable(current, source)
+                if source.scope is not current.scope or source.audience != (
+                    current.audience
+                ):
+                    # A restore never changes who can read the memory.
+                    raise MemoryStateError(StateProblem.SCOPE_MISMATCH)
+                if freshness is not None:
+                    rules.check_manual_freshness(freshness, current.scope, now)
+                    kept = _freshness_columns(freshness, now)
+                else:
+                    kept = _kept_freshness(source, now)
+                    if source.freshness_policy is FreshnessPolicy.EXPIRING and not (
+                        source.expires_at is not None and source.expires_at > now
+                    ):
+                        raise reject("expires_at", InputProblem.OUT_OF_RANGE)
+                    if source.freshness_policy is FreshnessPolicy.SESSION_ONLY:
+                        raise reject("freshness", InputProblem.NOT_ALLOWED)
+                values = {
+                    "memory_type": source.memory_type,
+                    "title": source.title,
+                    "content": source.content,
+                    "importance": source.importance,
+                    "change_reason": reason,
+                    "attributes": {"restored_from_version": source.version_number},
+                    **kept,
+                }
+                if current.status is MemoryStatus.ACTIVE:
+                    await self._set_status(
+                        session, current, MemoryStatus.SUPERSEDED, actor
+                    )
+                new = await self._insert_version(
+                    session, current, values=values, actor=actor, now=now
+                )
+                await self._relate(
+                    session,
+                    new.version_id,
+                    current.version_id,
+                    RelationType.SUPERSEDES,
+                    "restore",
+                    now,
+                )
+                return new
+        except IntegrityError as error:
+            await self._raise_race(error, memory_id, expected_version)
+            raise
+
+    async def deprecate_memory(
+        self, actor: Principal, memory_id: UUID, expected_version: int
+    ) -> MemoryVersionView:
+        """The current version becomes ``deprecated``. Nothing is erased."""
+        actor = self._check_actor(actor)
+        memory_id = validate_uuid("memory_id", memory_id)
+        expected_version = validate_version_number("expected_version", expected_version)
+        async with self._transaction(memory_id) as session:
+            current = await self._current(session, memory_id)
+            await self._authorize_version(session, actor, current, write=True)
+            self._check_expected(current, expected_version)
+            rules.check_active(current)
+            await self._set_status(session, current, MemoryStatus.DEPRECATED, actor)
+            return await self._current(session, memory_id, lock=False)
+
+    async def revalidate_memory(
+        self,
+        actor: Principal,
+        memory_id: UUID,
+        expected_version: int,
+        *,
+        reason: str | None = None,
+    ) -> MemoryVersionView:
+        """ "Still true": a new version verified now, without the stale mark.
+
+        Only a ``revalidate`` memory (MEMORY_ARCHITECTURE.md section 11: a stale
+        candidate is re-checked when it is needed). A memory that is no longer true
+        is edited (``edit_memory``) or retired (``deprecate_memory``) instead.
+        """
+        actor = self._check_actor(actor)
+        memory_id = validate_uuid("memory_id", memory_id)
+        expected_version = validate_version_number("expected_version", expected_version)
+        reason = validate_optional_text(
+            "reason", reason, max_chars=limits.MAX_REASON_CHARS
+        )
+        now = self._now()
+        try:
+            async with self._transaction(memory_id) as session:
+                current = await self._current(session, memory_id)
+                await self._authorize_version(session, actor, current, write=True)
+                self._check_expected(current, expected_version)
+                rules.check_revalidatable(current)
+                values = {
+                    **_kept_freshness(current, now),
+                    "change_reason": reason,
+                    "attributes": {"revalidated_from_version": current.version_number},
+                }
+                await self._set_status(session, current, MemoryStatus.SUPERSEDED, actor)
+                new = await self._insert_version(
+                    session, current, values=values, actor=actor, now=now
+                )
+                for kind in (RelationType.SUPERSEDES, RelationType.REVALIDATED_FROM):
+                    await self._relate(
+                        session,
+                        new.version_id,
+                        current.version_id,
+                        kind,
+                        "revalidate",
+                        now,
+                    )
+                return new
+        except IntegrityError as error:
+            await self._raise_race(error, memory_id, expected_version)
+            raise
+
+    # -- relations -------------------------------------------------------------
+
+    async def relate_memories(
+        self,
+        actor: Principal,
+        relation: ManualRelation,
+        *,
+        newer_memory_id: UUID,
+        newer_expected_version: int,
+        older_memory_id: UUID,
+        older_expected_version: int,
+        reason: str | None = None,
+    ) -> MemoryRelationView:
+        """Record ``relation`` from the newer memory's current version to the older's.
+
+        Both memories must be changeable by the actor and ``active``, and both
+        expected versions current. ``supersedes`` retires the older memory and
+        needs the same audience on both sides; ``extends`` and ``conflicts_with``
+        keep both active. A relation that would make the history graph cyclic, or
+        that exists already (for ``conflicts_with``: in either direction), is
+        refused.
+        """
+        actor = self._check_actor(actor)
+        relation = validate_enum("relation", relation, ManualRelation)
+        newer_id = validate_uuid("newer_memory_id", newer_memory_id)
+        older_id = validate_uuid("older_memory_id", older_memory_id)
+        newer_expected = validate_version_number(
+            "newer_expected_version", newer_expected_version
+        )
+        older_expected = validate_version_number(
+            "older_expected_version", older_expected_version
+        )
+        reason = validate_optional_text(
+            "reason", reason, max_chars=limits.MAX_REASON_CHARS
+        )
+        if newer_id == older_id:
+            raise MemoryStateError(StateProblem.SAME_MEMORY)
+        now = self._now()
+        kind = relation.relation_type
+        try:
+            async with self._transaction(newer_id, older_id) as session:
+                # Rows are locked in the order of the ids, like the advisory locks.
+                currents: dict[UUID, MemoryVersionView] = {}
+                for memory_id in sorted((newer_id, older_id)):
+                    currents[memory_id] = await self._current(session, memory_id)
+                newer, older = currents[newer_id], currents[older_id]
+                for version in (newer, older):
+                    await self._authorize_version(session, actor, version, write=True)
+                self._check_expected(newer, newer_expected)
+                self._check_expected(older, older_expected)
+                rules.check_relatable(relation, newer, older)
+                await self._check_graph(session, kind, newer, older)
+                if relation is ManualRelation.SUPERSEDES:
+                    await self._set_status(
+                        session, older, MemoryStatus.SUPERSEDED, actor
+                    )
+                return await self._relate(
+                    session, newer.version_id, older.version_id, kind, reason, now
+                )
+        except IntegrityError as error:
+            if _constraint(error) in _RELATION_RACES:
+                raise MemoryStateError(StateProblem.ALREADY_RELATED) from None
+            raise
+
+    @staticmethod
+    async def _check_graph(
+        session: AsyncSession,
+        kind: RelationType,
+        newer: MemoryVersionView,
+        older: MemoryVersionView,
+    ) -> None:
+        existing = await session.execute(
+            select(_RELATIONS.c.from_version_id, _RELATIONS.c.relation_type).where(
+                _RELATIONS.c.from_version_id.in_((newer.version_id, older.version_id)),
+                _RELATIONS.c.to_version_id.in_((newer.version_id, older.version_id)),
+            )
+        )
+        for row in existing:
+            same_direction = row.from_version_id == newer.version_id
+            if row.relation_type == kind.value and (
+                same_direction or kind is RelationType.CONFLICTS_WITH
+            ):
+                raise MemoryStateError(StateProblem.ALREADY_RELATED)
+        if kind in rules.ACYCLIC_RELATIONS:
+            cyclic = (
+                await session.execute(
+                    _REACHES,
+                    {
+                        "start": older.version_id,
+                        "target": newer.version_id,
+                        "kinds": sorted(k.value for k in rules.ACYCLIC_RELATIONS),
+                    },
+                )
+            ).scalar_one()
+            if cyclic:
+                raise MemoryStateError(StateProblem.WOULD_CYCLE)
+
+    async def _raise_race(
+        self, error: IntegrityError, memory_id: UUID, expected: int
+    ) -> None:
+        """A unique race with another writer is a version conflict; else return.
+
+        The other writer's version is committed, so a new session sees it and the
+        conflict names the current number. The driver error is not chained (its
+        text can hold the row's values).
+        """
+        if _constraint(error) not in _VERSION_RACES:
+            return
+        async with self._database.session() as session:
+            current = await self._current(session, memory_id, lock=False)
+        raise MemoryVersionConflictError(expected, current.version_number) from None
+
+
+def _constraint(error: IntegrityError) -> str | None:
+    """The name of the constraint a driver error names (never its message)."""
+    diag = getattr(error.orig, "diag", None)
+    return getattr(diag, "constraint_name", None)
