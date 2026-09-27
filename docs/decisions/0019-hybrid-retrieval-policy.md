@@ -141,7 +141,8 @@ PostgreSQL の全文検索（`simple` 設定）を使う。`simple` は日本語
 
 2026-09-26 に承認された。PAW-043 の PR は本 Decision を参照する。承認された値は暫定値で、`ranking.py` / `limits.py` の設定と Backend README の記述に合わせてある。
 値だけの変更は Migration が要らない（この Decision を書き換えず、新しい Decision から `Supersedes` する。そのとき `RankingPolicy` / `limits.py` と Test の期待値を新しい値に合わせる）。
-ANN Index、`memory.read`（[Decision 0024](0024-memory-read-capability.md)。2026-09-27 Approved、Issue #115 で実装済み）、Agent 経由の Retrieval、HTTP の Endpoint は、それぞれ別の Issue / Decision で扱う。
+ANN Index、`memory.read`（[Decision 0024](0024-memory-read-capability.md)、Proposed。承認されるまで `memory.use` のまま）、Agent 経由の Retrieval、HTTP の Endpoint は、それぞれ別の Issue / Decision で扱う。
+（参照の更新: Decision 0024 は 2026-09-27 に Approved となり、Issue #115 で実装された。`memory.read` は別の Issue で扱う対象ではなくなった。）
 
 ## 承認時の決定（2026-09-26）
 
