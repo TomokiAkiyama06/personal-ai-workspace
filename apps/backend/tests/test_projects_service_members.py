@@ -886,5 +886,82 @@ class ChangeRoleTest(MembersTestCase):
             await self.service.remove_member(self.manager, uuid4(), self.team.viewer)
 
 
+@requires_postgres
+class ManagerWhoseAccountIsNotActiveTest(MembersTestCase):
+    """A Manager whose own account is not ``active`` is no Manager to hand over to.
+
+    The account's deletion (PAW-024, Decision 0033) keeps the membership rows so
+    that a restore gives them back; until then that Manager cannot sign in, so
+    the last-Manager rule counts only the accepted Managers whose account is
+    ``active``.
+    """
+
+    NOT_ACTIVE = ("pending_deletion", "deleted", "invited")
+
+    def seed_manager_with_account(self, status: str) -> object:
+        return self.seed_manager(self.project_id, user_id=self.seed_user(status=status))
+
+    def set_account(self, user_id, status: str) -> None:
+        with self.engine.begin() as connection:
+            connection.execute(
+                text("UPDATE users SET status = :s WHERE id = :id"),
+                {"s": status, "id": user_id},
+            )
+
+    async def test_the_last_live_manager_cannot_leave(self):
+        for status in self.NOT_ACTIVE:
+            with self.subTest(status=status):
+                other = self.seed_manager_with_account(status)
+                before = self.snapshot()
+                with self.assertRaises(LastManagerError):
+                    await self.service.leave_project(self.manager, self.project_id)
+                await self.assertUnchanged(before)
+                with self.engine.begin() as connection:
+                    connection.execute(
+                        text("DELETE FROM project_members WHERE user_id = :u"),
+                        {"u": other},
+                    )
+
+    async def test_the_last_live_manager_cannot_be_removed_or_demoted(self):
+        self.seed_manager_with_account("pending_deletion")
+        before = self.snapshot()
+        with self.assertRaises(LastManagerError):
+            await self.service.remove_member(
+                self.manager, self.project_id, self.team.manager
+            )
+        for role in (CONTRIBUTOR, VIEWER):
+            with self.subTest(role=role.value):
+                with self.assertRaises(LastManagerError):
+                    await self.service.change_role(
+                        self.manager, self.project_id, self.team.manager, role
+                    )
+        await self.assertUnchanged(before)
+
+    async def test_the_last_live_manager_cannot_leave_an_archived_project(self):
+        self.seed_manager_with_account("pending_deletion")
+        self.set_project(self.project_id, status="archived")
+        with self.assertRaises(LastManagerError):
+            await self.service.leave_project(self.manager, self.project_id)
+
+    async def test_a_manager_being_deleted_can_still_be_removed_or_demoted(self):
+        # The live Manager stays, so nothing is left without a Manager.
+        other = self.seed_manager_with_account("pending_deletion")
+        changed = await self.service.change_role(
+            self.manager, self.project_id, other, VIEWER
+        )
+        self.assertEqual(changed.role, VIEWER)
+        await self.service.remove_member(self.manager, self.project_id, other)
+        self.assertIsNone(self.member_row(self.project_id, other))
+
+    async def test_a_restored_manager_counts_again(self):
+        other = self.seed_manager_with_account("pending_deletion")
+        with self.assertRaises(LastManagerError):
+            await self.service.leave_project(self.manager, self.project_id)
+        self.set_account(other, "active")
+        await self.service.leave_project(self.manager, self.project_id)
+        self.assertIsNone(self.member_row(self.project_id, self.team.manager))
+        self.assertEqual(self.member_row(self.project_id, other)["role"], "manager")
+
+
 if __name__ == "__main__":
     unittest.main()

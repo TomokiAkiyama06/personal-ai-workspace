@@ -16,8 +16,10 @@ from paw_backend.auth.errors import (
     StepUpRequiredError,
     TokenRejectedError,
 )
-from paw_backend.authz.roles import SystemRole
+from paw_backend.authz import Authorizer, InMemoryAuditSink
+from paw_backend.authz.roles import ProjectRole, SystemRole
 from paw_backend.identity import UserStatus
+from paw_backend.projects import LastManagerError, ProjectService
 
 from .auth_support import T0, requires_postgres
 from .onboarding_support import PASSWORD, OnboardingTestCase
@@ -194,6 +196,36 @@ class DeleteTest(OnboardingTestCase):
         with self.assertRaises(OwnershipTransferRequiredError):
             await self.delete(carol.id)
         self.assertEqual(await self.status_of(carol.id), "active")
+
+    async def test_a_deleted_co_manager_does_not_let_the_other_one_go(self):
+        # Codex P1 on PR #123: after bob's deletion carol is the only Manager who
+        # can sign in. The project rules must see that too: carol may not leave
+        # or be demoted, and bob's membership stays for a restore.
+        bob = await self.make_user("bob")
+        carol = await self.make_user("carol")
+        project = await self.make_project(bob, carol)
+        await self.delete(bob.id)
+        projects = ProjectService(
+            self.service_database,
+            Authorizer(InMemoryAuditSink(), clock=self.clock),
+            clock=self.clock,
+        )
+        carol_actor = self.principal(carol)
+        with self.assertRaises(LastManagerError):
+            await projects.leave_project(carol_actor, project)
+        with self.assertRaises(LastManagerError):
+            await projects.change_role(
+                carol_actor, project, carol.id, ProjectRole.VIEWER
+            )
+        roles = await self.query(
+            "SELECT user_id, role, status FROM project_members "
+            "WHERE project_id = :p ORDER BY user_id",
+            p=project,
+        )
+        self.assertEqual(
+            sorted((r.user_id, r.role, r.status) for r in roles),
+            sorted([(bob.id, "manager", "active"), (carol.id, "manager", "active")]),
+        )
 
     async def test_two_co_managers_deleted_at_once_leave_one(self):
         bob = await self.make_user("bob")

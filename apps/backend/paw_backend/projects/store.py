@@ -519,6 +519,29 @@ async def list_active_members(
     return [member_from_row(r) for r in rows]
 
 
+async def list_live_members(
+    session: AsyncSession, project_id: uuid.UUID
+) -> list[Member]:
+    """The ACTIVE members whose own account (``users.status``) is ``active``.
+
+    Ordered like ``list_active_members``. This is the set the Manager rules count
+    (the last Manager, the restore's "a Manager is left"): the deletion of an
+    account (PAW-024, Decision 0033) keeps its membership rows so that a restore
+    gives them back, but until then that user cannot sign in and manages nothing.
+    """
+    rows = await session.execute(
+        select(MEMBERS)
+        .join(USERS, USERS.c.id == MEMBERS.c.user_id)
+        .where(
+            MEMBERS.c.project_id == project_id,
+            MEMBERS.c.status == "active",
+            USERS.c.status == "active",
+        )
+        .order_by(MEMBERS.c.joined_at, MEMBERS.c.user_id)
+    )
+    return [member_from_row(r) for r in rows]
+
+
 async def list_open_invites(
     session: AsyncSession, project_id: uuid.UUID, now: datetime
 ) -> list[Member]:
