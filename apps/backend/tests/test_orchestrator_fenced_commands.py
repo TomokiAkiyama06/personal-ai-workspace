@@ -26,6 +26,7 @@ from .orchestrator_support import (
     fail,
     make_plan,
     node,
+    ok,
     requires_postgres,
 )
 
@@ -297,6 +298,152 @@ class StartIsFencedTest(PostgresOrchestratorTestCase):
         # A replaced run: skipped, not started.
         self.assertEqual(report.outcome, Out.SKIPPED)
         self.assertEqual((await h.tasks.restore(task_id)).state, TaskState.QUEUED)
+
+
+@requires_postgres
+class NodeWritesAreFencedByTheRunTest(PostgresOrchestratorTestCase):
+    """A node's outcome is fenced by the task's run, not only by the DAG epoch.
+
+    Between the orchestrator's last look at the task and a node's write, the task
+    can be failed and retried (or restarted): until the new worker takes the DAG
+    over, the old worker still holds the epoch, and its outcome would be consumed
+    by the new run. The store refuses it (``StaleRunError``, nothing written)."""
+
+    async def interfere(self, task_id, *commands):
+        other = TaskService(self.new_database(), project_gate=ALWAYS_ACTIVE)
+        actors = {
+            TaskCommand.FAIL: self.system,
+            TaskCommand.RETRY: self.user,
+            TaskCommand.START: self.system,
+            TaskCommand.RESTART: self.user,
+        }
+        for command in commands:
+            await other.execute(task_id, command, actor=actors[command])
+
+    async def run_with_interference(self, *commands):
+        calls = []
+
+        async def a(assignment):
+            calls.append(assignment.attempt)
+            if len(calls) == 1:
+                await self.interfere(task_id, *commands)  # the window
+                return ok("stale result of the old run")
+            return ok("result of the new run")
+
+        runtime = FakeRuntime("local", script={"a": a})
+        h = self.harness(runtimes={"local": runtime})
+        task_id = await self.prepare(h, make_plan(node("a"), node("b", "a")))
+        report = await h.orchestrator.run_once("w1")
+        return h, runtime, task_id, report
+
+    async def test_a_fail_and_retry_in_the_window_keeps_the_old_outcome_out(self):
+        h, runtime, task_id, report = await self.run_with_interference(
+            TaskCommand.FAIL, TaskCommand.RETRY
+        )
+
+        self.assertEqual(report.outcome, Out.SUPERSEDED)
+        dag = await self.store.get(task_id, 1)
+        self.assertIsNone(dag.node("a").result)  # nothing of the old run
+        self.assertNotEqual(dag.node("a").state.value, "succeeded")
+
+        # The new run does the node again and uses its own result.
+        await h.queue.enqueue(task_id)
+        report = await h.orchestrator.run_once("w2")
+        self.assertEqual(report.outcome, Out.DAG_SUCCEEDED)
+        self.assertEqual(len(runtime.calls_of("a")), 2)
+        dag = await self.store.get(task_id, 1)
+        self.assertEqual(dag.node("a").result.summary, "result of the new run")
+        (b_call,) = runtime.calls_of("b")
+        self.assertEqual(b_call.upstream["a"].summary, "result of the new run")
+
+    async def test_a_fail_retry_and_start_in_the_window_keeps_the_old_outcome_out(
+        self,
+    ):
+        h, runtime, task_id, report = await self.run_with_interference(
+            TaskCommand.FAIL, TaskCommand.RETRY, TaskCommand.START
+        )
+        self.assertEqual(report.outcome, Out.SUPERSEDED)
+        dag = await self.store.get(task_id, 1)
+        self.assertIsNone(dag.node("a").result)
+
+    async def test_a_fail_in_the_window_keeps_the_outcome_out_of_the_ended_run(self):
+        h, runtime, task_id, report = await self.run_with_interference(TaskCommand.FAIL)
+        self.assertEqual((await h.tasks.restore(task_id)).state, TaskState.FAILED)
+        dag = await self.store.get(task_id, 1)
+        self.assertIsNone(dag.node("a").result)
+        # A later Retry does the work again.
+        await self.interfere(task_id, TaskCommand.RETRY)
+        await h.queue.enqueue(task_id)
+        report = await h.orchestrator.run_once("w2")
+        self.assertEqual(report.outcome, Out.DAG_SUCCEEDED)
+        self.assertEqual(
+            (await self.store.get(task_id, 1)).node("a").result.summary,
+            "result of the new run",
+        )
+
+    async def assert_writes_refused(self, commands) -> None:
+        from paw_backend.orchestrator.domain import NextStep
+        from paw_backend.orchestrator.result import NodeResult
+        from paw_backend.tasks import StaleRunError
+
+        from .test_orchestrator_store import SIGNATURE
+
+        h = self.harness()
+        task_id = await self.prepare(h, make_plan(node("a"), node("b")))
+        await h.tasks.execute(task_id, TaskCommand.START, actor=self.system)
+        dag = await self.store.get(task_id, 1)
+        dag = await self.store.acquire(dag.id, "w1", TaskRun(1, 0))
+        started = await self.store.start_node(dag.id, dag.epoch, "a", max_attempts=6)
+        await self.interfere(task_id, *commands)
+        store, dag_id, epoch, number = self.store, dag.id, dag.epoch, started.number
+        writes = {
+            "complete_node": lambda: store.complete_node(
+                dag_id, epoch, "a", number, NodeResult("stale")
+            ),
+            "fail_node": lambda: store.fail_node(
+                dag_id,
+                epoch,
+                "a",
+                number,
+                error_class="E",
+                signature=SIGNATURE,
+                step=NextStep.GIVE_UP,
+            ),
+            "start_node": lambda: store.start_node(dag_id, epoch, "b", max_attempts=6),
+            "give_up_node": lambda: store.give_up_node(
+                dag_id, epoch, "b", error_class="E"
+            ),
+            "finalize": lambda: store.finalize(dag_id, epoch),
+        }
+        before = await store.get(task_id, 1)
+        for name, write in writes.items():
+            with self.subTest(write=name), self.assertRaises(StaleRunError):
+                await write()
+        self.assertEqual(await store.get(task_id, 1), before)
+
+    async def test_the_store_refuses_a_node_write_for_a_failed_run(self):
+        await self.assert_writes_refused((TaskCommand.FAIL,))
+
+    async def test_the_store_refuses_a_node_write_for_a_retried_run(self):
+        await self.assert_writes_refused((TaskCommand.FAIL, TaskCommand.RETRY))
+
+    async def test_the_store_refuses_a_node_write_for_a_restarted_run(self):
+        await self.assert_writes_refused((TaskCommand.FAIL, TaskCommand.RESTART))
+
+    async def test_a_paused_or_waiting_task_still_takes_its_nodes_outcomes(self):
+        from paw_backend.orchestrator.result import NodeResult
+
+        h = self.harness()
+        task_id = await self.prepare(h, make_plan(node("a")))
+        await h.tasks.execute(task_id, TaskCommand.START, actor=self.system)
+        dag = await self.store.get(task_id, 1)
+        dag = await self.store.acquire(dag.id, "w1", TaskRun(1, 0))
+        started = await self.store.start_node(dag.id, dag.epoch, "a", max_attempts=6)
+        await h.tasks.execute(task_id, TaskCommand.PAUSE, actor=self.user)
+        done = await self.store.complete_node(
+            dag.id, dag.epoch, "a", started.number, NodeResult("while paused")
+        )
+        self.assertEqual(done.node("a").result.summary, "while paused")
 
 
 if __name__ == "__main__":

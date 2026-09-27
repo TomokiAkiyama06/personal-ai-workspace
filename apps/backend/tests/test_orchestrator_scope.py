@@ -36,6 +36,13 @@ from paw_backend.orchestrator.scope import (
     scope_within,
 )
 from paw_backend.tools import ScopedRepository, TaskScope
+from paw_backend.tools.scope import (
+    LexicalPathResolver,
+    ScopeStatus,
+    Target,
+    TargetKind,
+    classify_targets,
+)
 
 from .authz_support import AGENT, P1, P2, uid
 
@@ -151,6 +158,37 @@ class DeriveScopeTest(unittest.TestCase):
             ).repositories,
             (),
         )
+
+    def test_the_repositories_left_out_stay_known_as_excluded(self):
+        parent = parent_scope()
+        child = derive_child_scope(parent, role=NodeRole.WORKER, repositories=[R2])
+        self.assertEqual(child.excluded_repositories, (parent.repository(R1),))
+        self.assertEqual(
+            derive_child_scope(
+                parent, role=NodeRole.WORKER, repositories=None
+            ).excluded_repositories,
+            (),
+        )
+        # A grandchild keeps what its parent excluded, and excludes more.
+        grandchild = derive_child_scope(child, role=NodeRole.WORKER, repositories=[])
+        self.assertEqual(
+            {r.repo_id for r in grandchild.excluded_repositories}, {R1, R2}
+        )
+        self.assertTrue(scope_within(grandchild, child))
+        # A scope that forgets an exclusion of its parent is wider than it.
+        forgetful = TaskScope(
+            path_roots=child.path_roots,
+            hosts=child.hosts,
+            projects=dict(child.projects),
+            repositories=child.repositories,
+        )
+        self.assertFalse(scope_within(forgetful, child))
+
+    def test_a_scope_cannot_both_hold_and_exclude_a_repository(self):
+        with self.assertRaises(ValueError):
+            parent_scope(excluded_repositories=[repository(R1)])
+        with self.assertRaises(TypeError):
+            parent_scope(excluded_repositories=[object()])
 
     def test_the_remotes_of_a_repository_reach_the_node_unchanged(self):
         child = derive_child_scope(
@@ -345,6 +383,50 @@ class RandomParentTest(unittest.TestCase):
                     )
                     self.assertTrue(scope_within(derived, scope))
         self.assertGreater(checked, 400)
+
+
+class ExcludedRepositoryClassificationTest(unittest.IsolatedAsyncioTestCase):
+    """A node given a subset of the working set cannot reach a left-out
+    repository through the parent's broad path roots or hosts (fail closed)."""
+
+    async def classify(self, scope, *, paths=(), urls=()):
+        targets = [Target(TargetKind.PATH, path) for path in paths]
+        targets += [Target(TargetKind.HOST, "github.com") for _ in urls]
+        return await classify_targets(
+            targets, scope, LexicalPathResolver(), urls=list(urls)
+        )
+
+    async def test_a_path_or_url_of_a_left_out_repository_is_out_of_scope(self):
+        parent = parent_scope()
+        child = derive_child_scope(parent, role=NodeRole.WORKER, repositories=[R2])
+        r1_path = f"{parent.repository(R1).root}/src/secret.py"
+        r2_path = f"{parent.repository(R2).root}/src/main.py"
+        r1_url = "https://github.com/org/one/blob/main/secret.py"
+
+        # The parent reaches R1 (through its ACL).
+        in_parent = await self.classify(parent, paths=[r1_path])
+        self.assertEqual(in_parent.status, ScopeStatus.IN_SCOPE)
+        self.assertEqual(in_parent.repositories, (R1,))
+        # The child does not, by path or by URL, although R1 lies below its root
+        # and on its host.
+        by_path = await self.classify(child, paths=[r1_path])
+        self.assertEqual(
+            (by_path.status, by_path.offending),
+            (ScopeStatus.OUT_OF_SCOPE, TargetKind.PATH),
+        )
+        by_url = await self.classify(child, urls=[r1_url])
+        self.assertEqual(
+            (by_url.status, by_url.offending),
+            (ScopeStatus.OUT_OF_SCOPE, TargetKind.URL),
+        )
+        # With a path of its own repository in the same call: still refused.
+        mixed = await self.classify(child, paths=[r2_path, r1_path])
+        self.assertEqual(mixed.status, ScopeStatus.OUT_OF_SCOPE)
+        # Its own repository, and the rest of the root, are unchanged.
+        own = await self.classify(child, paths=[r2_path])
+        self.assertEqual((own.status, own.repositories), (ScopeStatus.IN_SCOPE, (R2,)))
+        other = await self.classify(child, paths=[f"{ROOT}/notes.txt"])
+        self.assertEqual(other.status, ScopeStatus.IN_SCOPE)
 
 
 if __name__ == "__main__":

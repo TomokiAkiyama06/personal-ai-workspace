@@ -270,6 +270,12 @@ class RuntimeTimerStopFailureAsAppRole(
     pass
 
 
+class NodeWritesFencedByTheRunAsAppRole(
+    AsAppRole, test_orchestrator_fenced_commands.NodeWritesAreFencedByTheRunTest
+):
+    pass
+
+
 class StubbornRuntimeAsAppRole(
     AsAppRole, test_orchestrator_abandon.StubbornRuntimeTest
 ):

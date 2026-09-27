@@ -79,7 +79,8 @@ from paw_backend.orchestrator.validation import (
     check_uuid,
     check_worker_id,
 )
-from paw_backend.tasks import TaskNotFoundError, TaskRun
+from paw_backend.tasks import StaleRunError, TaskNotFoundError, TaskRun, TaskState
+from paw_backend.tasks.models import TaskRow
 from paw_backend.tasks.queueing.sql import (
     FOREIGN_KEY_VIOLATION,
     UNIQUE_VIOLATION,
@@ -90,6 +91,11 @@ from paw_backend.tasks.queueing.validation import MAX_APPROACH
 
 ONE_DAG_PER_ATTEMPT = "uq_agent_dags_task_id"
 _SETTLED_FOR_REOPEN = frozenset({NodeState.FAILED, NodeState.BLOCKED})
+# A node's start and outcome are refused once the task has ended in one of these
+# states (its run is over; a Retry or Restart starts another one).
+_ENDED_TASK_STATES = frozenset(
+    {TaskState.COMPLETED, TaskState.FAILED, TaskState.CANCELLED}
+)
 
 
 class _Locked:
@@ -417,7 +423,7 @@ class DagStore:
             "max_attempts", max_attempts, minimum=1, maximum=MAX_ATTEMPTS_PER_RUNG
         )
         async with self._database.session() as session, session.begin():
-            locked = await self._open(session, dag_id, epoch)
+            locked = await self._open(session, dag_id, epoch, check_run=True)
             row = locked.nodes.get(key)
             if row is None:
                 raise NodeStateError()
@@ -458,7 +464,7 @@ class DagStore:
         if not isinstance(result, NodeResult):
             raise InvalidOrchestratorArgumentError("result")
         async with self._database.session() as session, session.begin():
-            locked = await self._open(session, dag_id, epoch)
+            locked = await self._open(session, dag_id, epoch, check_run=True)
             row = self._running(locked, key, attempt_number)
             row.state = NodeState.SUCCEEDED
             row.result = result.to_json()
@@ -510,7 +516,7 @@ class DagStore:
         elif approach is not None:
             raise InvalidOrchestratorArgumentError("approach")
         async with self._database.session() as session, session.begin():
-            locked = await self._open(session, dag_id, epoch)
+            locked = await self._open(session, dag_id, epoch, check_run=True)
             row = self._running(locked, key, attempt_number)
             if step is NextStep.ALTERNATIVE:
                 if agent_index != row.agent_index or approach <= row.approach:
@@ -552,7 +558,7 @@ class DagStore:
         check_label("key", key, maximum=32)
         check_label("error_class", error_class, maximum=MAX_ERROR_CLASS_CHARS)
         async with self._database.session() as session, session.begin():
-            locked = await self._open(session, dag_id, epoch)
+            locked = await self._open(session, dag_id, epoch, check_run=True)
             row = locked.nodes.get(key)
             if row is None or row.state is not NodeState.READY:
                 raise NodeStateError()
@@ -611,7 +617,7 @@ class DagStore:
         check_uuid("dag_id", dag_id)
         check_int("epoch", epoch, minimum=1, maximum=MAX_INT32)
         async with self._database.session() as session, session.begin():
-            locked = await self._open(session, dag_id, epoch)
+            locked = await self._open(session, dag_id, epoch, check_run=True)
             verdict = dag_verdict(locked.views())
             if verdict is DagVerdict.ACTIVE:
                 raise DagStateError()
@@ -633,9 +639,22 @@ class DagStore:
         epoch: int | None,
         *,
         require_active: bool = True,
+        check_run: bool = False,
     ) -> _Locked:
         """Lock the DAG row, check the fence (``epoch``; ``None`` skips it: only
-        ``acquire``) and load the nodes and edges."""
+        ``acquire``) and load the nodes and edges.
+
+        ``check_run`` (a node's start and outcome, and ``finalize``): the DAG is
+        fenced a second time by the TASK's current run, read under a share lock
+        in the same transaction. The epoch alone does not cover a task that was
+        failed and retried (or restarted) while the old worker still held the
+        epoch: until the new worker takes the DAG over, the old one could write an
+        outcome the new run would then consume. Refused with ``StaleRunError``
+        when the task's attempt or retry count is no longer the run that last took
+        the DAG over, or the task has ended (completed, failed, cancelled). A task
+        command waits for this lock (it updates the row), so the check and the
+        write are one step for it.
+        """
         dag = (
             await session.execute(
                 select(DagRow)
@@ -650,6 +669,21 @@ class DagStore:
             raise StaleDagEpochError()
         if require_active and dag.state is not DagState.ACTIVE:
             raise DagStateError()
+        if check_run:
+            task = (
+                await session.execute(
+                    select(TaskRow.state, TaskRow.attempt, TaskRow.retry_count)
+                    .where(TaskRow.id == dag.task_id)
+                    .with_for_update(read=True)
+                )
+            ).one_or_none()
+            if (
+                task is None
+                or task.attempt != dag.attempt
+                or task.retry_count != dag.task_retry_count
+                or task.state in _ENDED_TASK_STATES
+            ):
+                raise StaleRunError()
         rows = (
             await session.execute(
                 select(DagNodeRow)

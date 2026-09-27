@@ -70,6 +70,7 @@ def derive_child_scope(
     is not in the parent's working set."""
     if not isinstance(parent, TaskScope):
         raise TypeError("parent must be a TaskScope")
+    excluded = parent.excluded_repositories
     if repositories is None:
         chosen = parent.repositories
     else:
@@ -80,6 +81,17 @@ def derive_child_scope(
                 raise ScopeEscalationError()
             found.append(repository)
         chosen = tuple(found)
+        # The repositories left out stay KNOWN to the child as excluded: the
+        # child keeps the parent's path roots and hosts (a repository's worktree
+        # usually lies below a root, its remote on an allowed host), and without
+        # this a path or a URL of a left-out repository would be in scope and
+        # attributed to no repository, so no ACL would be asked. Fail closed.
+        chosen_ids = {repository.repo_id for repository in chosen}
+        excluded = excluded + tuple(
+            repository
+            for repository in parent.repositories
+            if repository.repo_id not in chosen_ids
+        )
     child = TaskScope(
         path_roots=parent.path_roots,
         hosts=parent.hosts,
@@ -88,6 +100,7 @@ def derive_child_scope(
             dict(parent.credential_handles) if role in ROLES_WITH_CREDENTIALS else {}
         ),
         repositories=chosen,
+        excluded_repositories=excluded,
     )
     if not scope_within(child, parent):
         raise ScopeEscalationError()
@@ -113,7 +126,13 @@ def scope_within(child: TaskScope, parent: TaskScope) -> bool:
         allowed = parent.credential_handles.get(handle)
         if allowed is None or not hosts <= allowed:
             return False
-    return all(
+    if not all(
         parent.repository(repository.repo_id) == repository
         for repository in child.repositories
+    ):
+        return False
+    # What the parent may not touch, the child may not either.
+    return all(
+        repository in child.excluded_repositories
+        for repository in parent.excluded_repositories
     )

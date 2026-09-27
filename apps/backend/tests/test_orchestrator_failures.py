@@ -53,7 +53,7 @@ def runtimes(**scripts):
 class RetryTest(PostgresOrchestratorTestCase):
     async def test_a_node_that_fails_once_is_retried_and_the_run_succeeds(self):
         rt = runtimes(
-            local={"a": [fail("Flaky", "timeout after 3s"), ok("second try")]}
+            local={"a": [fail("TimeoutError", "timeout after 3s"), ok("second try")]}
         )
         h = self.harness(runtimes=rt)
         task_id = await self.prepare(h, make_plan(node("a"), node("b", "a")))
@@ -69,7 +69,10 @@ class RetryTest(PostgresOrchestratorTestCase):
         attempts = await self.store.attempts(dag.id, "a")
         self.assertEqual(
             [(a.number, a.state, a.error_class) for a in attempts],
-            [(1, AttemptState.FAILED, "Flaky"), (2, AttemptState.SUCCEEDED, None)],
+            [
+                (1, AttemptState.FAILED, "TimeoutError"),
+                (2, AttemptState.SUCCEEDED, None),
+            ],
         )
         # One retry was charged to the task's budget; a step per start (3 starts).
         usage = {u.kind.value: u.consumed for u in await h.budget.usage(task_id)}
@@ -173,18 +176,44 @@ class RetryTest(PostgresOrchestratorTestCase):
 
         self.assertEqual(len(await h.loops.history(task_id)), 1)
 
-    async def test_the_error_class_a_runtime_names_is_reduced_to_a_safe_name(self):
-        rt = runtimes(local={"a": [fail("Bad Class/Name: \u00e9" + "x" * 150), ok()]})
+    async def test_the_error_class_a_runtime_names_is_one_of_a_closed_list(self):
+        # A runtime's own name is data the adapter chose: only the fixed names
+        # are kept, anything else is recorded (and logged) as AdapterError.
+        smuggled = "Bad Class/Name: \u00e9" + "x" * 150
+        rt = runtimes(
+            local={
+                "a": [fail(smuggled), ok()],
+                "b": [fail("token=" + SECRET), ok()],
+                "c": [fail("NodeTimeout"), ok()],  # the orchestrator's own name
+                "d": [fail("TimeoutError"), ok()],  # a fixed name: kept
+            }
+        )
         h = self.harness(runtimes=rt)
-        task_id = await self.prepare(h, make_plan(node("a")))
+        task_id = await self.prepare(h, make_plan(*(node(k) for k in "abcd")))
 
         await h.orchestrator.run_once("w1")
 
         dag = await self.store.get(task_id, 1)
-        (first, _second) = await self.store.attempts(dag.id, "a")
-        self.assertEqual(first.error_class, "Bad_Class_Name___" + "x" * 83)
-        self.assertEqual(len(first.error_class), 100)
-        self.assertEqual(len(await h.loops.history(task_id)), 1)
+        first = {
+            key: (await self.store.attempts(dag.id, key))[0].error_class
+            for key in "abcd"
+        }
+        self.assertEqual(
+            first,
+            {
+                "a": "AdapterError",
+                "b": "AdapterError",
+                "c": "AdapterError",
+                "d": "TimeoutError",
+            },
+        )
+        self.assertEqual(len(await h.loops.history(task_id)), 4)
+        for table in ("agent_dag_node_attempts", "agent_dag_nodes", "task_logs"):
+            dump = await self.scalar(
+                f"SELECT coalesce(string_agg(t::text, ' '), '') FROM {table} t"
+            )
+            self.assertNotIn(SECRET, dump, table)
+            self.assertNotIn("Bad_Class", dump, table)
 
 
 @requires_postgres
@@ -289,8 +318,9 @@ class EscalationTest(PostgresOrchestratorTestCase):
         dag = await self.store.get(task_id, 1)
         self.assertEqual(dag.node("a").state.value, "failed")
         # The fourth failure itself gave the node up (no fifth retry was charged
-        # and queued): the node failed with the class of that failure.
-        self.assertEqual(dag.node("a").error_class, "E")
+        # and queued): the node failed with the class of that failure (a name
+        # of the runtime's own is recorded as AdapterError).
+        self.assertEqual(dag.node("a").error_class, "AdapterError")
         usage = {u.kind.value: u.consumed for u in await h.budget.usage(task_id)}
         self.assertEqual(usage["retries"], 3)
         self.assertEqual(dag.node("b").state.value, "blocked")
@@ -549,6 +579,37 @@ class IsolationTest(PostgresOrchestratorTestCase):
         self.assertEqual(report.outcome, Out.DAG_FAILED)
         self.assertEqual(await self.states_of(task_id), {"a": "failed"})
         self.assertEqual(len(rt["local"].calls_of("a")), 1)  # not retryable
+
+
+class RuntimeErrorClassTest(unittest.TestCase):
+    def test_only_the_fixed_names_are_kept(self):
+        from paw_backend.orchestrator.errors import (
+            RUNTIME_ERROR_CLASSES,
+            runtime_error_class,
+        )
+
+        class Sneaky(str):
+            def __eq__(self, other):
+                return True
+
+            __hash__ = str.__hash__
+
+        for name in ("ValueError", "TimeoutError", "AdapterError"):
+            self.assertEqual(runtime_error_class(name), name)
+        for name in (
+            "Boom",
+            "valueerror",
+            "ValueError ",
+            "NodeTimeout",
+            "GrantEscalation",
+            Sneaky("ValueError"),
+            None,
+            5,
+            "",
+        ):
+            with self.subTest(name=repr(name)):
+                self.assertEqual(runtime_error_class(name), "AdapterError")
+        self.assertNotIn("NodeTimeout", RUNTIME_ERROR_CLASSES)
 
 
 if __name__ == "__main__":

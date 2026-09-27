@@ -237,6 +237,24 @@ INVALID_OUTCOME = "InvalidNodeOutcome"
 GRANT_ESCALATION = "GrantEscalation"
 
 
+# The failure classes an agent runtime may REPORT (``NodeOutcome.failed``): the
+# fixed names above, nothing else. A runtime's own name is data the adapter chose
+# (it could smuggle text into the records and the task log), so it is recorded
+# as ``ADAPTER_ERROR`` (Decision 0021, section 3: fixed names only; an adapter's
+# own class is ``AdapterError``). The orchestrator's own names (``NodeTimeout``,
+# ``GrantEscalation``, ...) are not in the list: a runtime cannot claim them.
+RUNTIME_ERROR_CLASSES = frozenset(_NAMED.values()) | {ADAPTER_ERROR}
+
+
+def runtime_error_class(name: object) -> str:
+    """The recorded class for a failure class a runtime reported: the name when
+    it is one of :data:`RUNTIME_ERROR_CLASSES` (compared as an exact ``str``),
+    else ``ADAPTER_ERROR``. Never raises."""
+    if type(name) is str and name in RUNTIME_ERROR_CLASSES:
+        return name
+    return ADAPTER_ERROR
+
+
 def error_class_of(error: BaseException) -> str:
     """A fixed name for ``error``; it never raises and never reads an attribute.
 

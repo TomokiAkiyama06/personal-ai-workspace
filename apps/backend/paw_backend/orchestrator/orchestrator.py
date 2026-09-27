@@ -73,6 +73,7 @@ from paw_backend.orchestrator.errors import (
     StaleNodeAttemptError,
     StopReason,
     error_class_of,
+    runtime_error_class,
 )
 from paw_backend.orchestrator.gateway import (
     AttemptFence,
@@ -860,9 +861,16 @@ class Orchestrator:
         for key in sorted(done, key=lambda k: dag.node(k).ordinal):
             task = running.pop(key)
             finished = self._result_of(task)
-            dag, extra = await self._settle(
-                run, dag, dag.node(key), numbers.pop(key), finished
-            )
+            try:
+                dag, extra = await self._settle(
+                    run, dag, dag.node(key), numbers.pop(key), finished
+                )
+            except StaleRunError:
+                # The store refused the outcome: the task ended, or a Retry /
+                # Restart replaced this run, after the last look at it (the DAG is
+                # fenced by the task's run too). Nothing was written; the next look
+                # (``_watch``) sees why and closes the run.
+                break
             stop = stop or extra
         return dag, stop
 
@@ -1035,9 +1043,12 @@ class Orchestrator:
             node = dag.node(key)
             if node.rung_attempts >= self._config.max_attempts_per_rung:
                 # A run that resumed a node whose rung had no attempt left.
-                dag = await self._store.give_up_node(
-                    dag.id, run.epoch, key, error_class="AttemptsExhausted"
-                )
+                try:
+                    dag = await self._store.give_up_node(
+                        dag.id, run.epoch, key, error_class="AttemptsExhausted"
+                    )
+                except StaleRunError:
+                    return None  # the run is over: ``_watch`` says why
                 continue
             verdict = await self._budget.check(
                 run.task.id, planned={BudgetKind.STEPS: 1}
@@ -1048,9 +1059,15 @@ class Orchestrator:
                 )
                 return self._stop_for_budget(decision.action)
             await self._budget.record(run.task.id, BudgetKind.STEPS, 1)
-            attempt = await self._store.start_node(
-                dag.id, run.epoch, key, max_attempts=self._config.max_attempts_per_rung
-            )
+            try:
+                attempt = await self._store.start_node(
+                    dag.id,
+                    run.epoch,
+                    key,
+                    max_attempts=self._config.max_attempts_per_rung,
+                )
+            except StaleRunError:
+                return None  # the run is over: ``_watch`` says why
             spec = self._spec_of(dag, node, attempt)
             running[key] = asyncio.create_task(self._attempt(run, spec))
             numbers[key] = attempt.number
@@ -1289,7 +1306,7 @@ class Orchestrator:
                 return dag, None
         elif outcome is not None:
             finished = _Finished(
-                error_class=outcome.error_class or "Error",
+                error_class=runtime_error_class(outcome.error_class),
                 message=outcome.message,
                 retryable=outcome.retryable,
             )
@@ -1559,7 +1576,8 @@ class Orchestrator:
             )
             outcome = finished.outcome
             if outcome is not None and not outcome.ok:
-                failure, message = outcome.error_class or "Error", outcome.message
+                failure = runtime_error_class(outcome.error_class)
+                message = outcome.message
                 retryable = outcome.retryable
             elif outcome is not None and outcome.plan is None:
                 failure, message, retryable = "NoPlan", "", True
