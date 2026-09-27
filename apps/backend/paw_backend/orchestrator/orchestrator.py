@@ -268,6 +268,7 @@ class RunReport:
 class _Watch(StrEnum):
     RUNNING = "running"
     PAUSED = "paused"
+    WAITING = "waiting"  # someone else put the task in waiting: quiesce too
     ENDED = "ended"  # completed / failed / evaluating under the run
     CANCELLED = "cancelled"
     SUPERSEDED = "superseded"  # a Retry / Restart replaced the run
@@ -276,6 +277,7 @@ class _Watch(StrEnum):
 
 class _StopKind(StrEnum):
     PAUSE = "pause"  # the task was paused: quiesce
+    HOLD = "hold"  # the task was put in waiting by someone else: quiesce
     WAIT = "wait"  # budget or loop: a human decides (task waits)
     FAIL = "fail"  # the retry budget is used up (task fails)
 
@@ -421,10 +423,14 @@ class Orchestrator:
         preset: BudgetPreset,
         priority: Priority = Priority.NORMAL,
     ) -> QueueEntry:
-        """Give the task its budget and put it in the queue.
+        """Give the task its budget and put it in the queue, in ONE transaction.
 
         A task without a budget is never run (``BudgetNotConfiguredError`` is not
-        read as "unlimited"), so the preset is part of enqueuing. Raises
+        read as "unlimited"), so the preset is part of enqueuing. The preset and
+        the entry commit together: an enqueue that loses (``TaskAlreadyQueuedError``:
+        the task has an active entry, maybe one a worker is running) changes no
+        budget, so a duplicate call cannot switch a running task to another preset,
+        and no worker can claim the entry before its budget exists. Raises
         ``TaskNotFoundError`` and ``TaskAlreadyQueuedError`` like the queue.
         """
         check_uuid("task_id", task_id)
@@ -432,8 +438,11 @@ class Orchestrator:
             preset = check_member("preset", preset, BudgetPreset)
         if not isinstance(priority, Priority):
             priority = check_member("priority", priority, Priority)
-        await self._budget.set_preset(task_id, preset)
-        return await self._queue.enqueue(task_id, priority=priority)
+        database = self._queue.database
+        async with database.session() as session, session.begin():
+            entry = await self._queue.enqueue_in(session, task_id, priority=priority)
+            await self._budget.set_preset_in(session, task_id, preset)
+        return entry
 
     async def submit_plan(
         self, task_id: uuid.UUID, plan: Plan | Mapping[str, object]
@@ -601,6 +610,13 @@ class Orchestrator:
         database is unreachable, say): the entry must stay claimed, its lease will
         expire and the next worker takes the run over.
         """
+        if run.epoch:
+            # Best effort: the nodes this run left running are ready again (their
+            # attempts interrupted), as a later owner's ``acquire`` would make them.
+            with contextlib.suppress(Exception):
+                dag = await self._store.get(run.task.id, run.run.attempt)
+                if dag is not None:
+                    await self._store.interrupt(dag.id, run.epoch)
         try:
             await self._end_task(run, TaskCommand.FAIL, Actor.system(), REASON_INTERNAL)
         except StaleRunError:
@@ -663,8 +679,12 @@ class Orchestrator:
         return None
 
     async def _complete_quietly(self, entry: QueueEntry, worker_id: str) -> None:
+        """End this worker's hold on the entry: completed, or given back when the
+        task needs a worker again (``TaskQueue.finish``: a Retry, Restart, Resume
+        or Unblock that committed while the entry was still claimed could not
+        enqueue, since a task has one active entry; the entry then serves it)."""
         with contextlib.suppress(LeaseLostError):
-            await self._queue.complete(entry.id, worker_id, entry.claim_count)
+            await self._queue.finish(entry.id, worker_id, entry.claim_count)
 
     async def _complete_entry(self, run: _Run) -> None:
         await self._complete_quietly(run.entry, run.worker_id)
@@ -787,6 +807,8 @@ class Orchestrator:
                 watch = await self._watch(run)
                 if watch is _Watch.LOST or watch is _Watch.SUPERSEDED:
                     await self._cancel_all(running)
+                    if watch is _Watch.LOST:
+                        await self._close_dag_of_a_cancelled_task(run, dag)
                     outcome = (
                         RunOutcome.LEASE_LOST
                         if watch is _Watch.LOST
@@ -803,8 +825,16 @@ class Orchestrator:
                     return RunReport(RunOutcome.TASK_ENDED, task_id, final.state)
                 if watch is _Watch.PAUSED:
                     stop = stop or _Stop(_StopKind.PAUSE)
-                elif stop is not None and stop.kind is _StopKind.PAUSE:
-                    stop = None  # resumed while the nodes were finishing
+                elif watch is _Watch.WAITING:
+                    # Waiting (an approval, a user, a resource) is a graceful stop
+                    # like a pause: no new node starts, the running ones finish,
+                    # and the task stays waiting until whoever unblocks it.
+                    stop = stop or _Stop(_StopKind.HOLD)
+                elif stop is not None and stop.kind in (
+                    _StopKind.PAUSE,
+                    _StopKind.HOLD,
+                ):
+                    stop = None  # resumed / unblocked while the nodes were finishing
 
                 # The whole budget is looked at every time the loop wakes (a node
                 # ended, or the poll fired): the runtime accrues in the tracker and
@@ -847,6 +877,23 @@ class Orchestrator:
             await asyncio.gather(lost_waiter, return_exceptions=True)
 
         return await self._finish_dag(run, dag, stop)
+
+    async def _close_dag_of_a_cancelled_task(self, run: _Run, dag: DagRecord) -> None:
+        """After a lost lease, best effort: a task whose entry was cancelled with
+        it (the stop of a deleted project cancels both in one transaction) is not
+        run by anybody again, so its DAG would stay ``active`` with running nodes
+        for ever. When the task is cancelled, close the DAG as a Cancel would; the
+        write is fenced by this run's epoch (and so refused if another worker took
+        the DAG over). Any failure is only logged."""
+        try:
+            snapshot = await self._tasks.restore(run.task.id, log_limit=0)
+            if snapshot.state is TaskState.CANCELLED and snapshot.run == run.run:
+                await self._store.cancel(dag.id, run.epoch)
+        except Exception as error:
+            logger.info(
+                "Closing the DAG of a cancelled task skipped (%s)",
+                error_class_of(error),
+            )
 
     async def _process_done(
         self,
@@ -891,7 +938,12 @@ class Orchestrator:
     def _sooner(current: _Stop | None, new: _Stop | None) -> _Stop | None:
         """The stop that wins when two apply: failing beats waiting beats pausing
         (a used-up retry budget must not be hidden by a pause or a wait)."""
-        order = {_StopKind.FAIL: 0, _StopKind.WAIT: 1, _StopKind.PAUSE: 2}
+        order = {
+            _StopKind.FAIL: 0,
+            _StopKind.WAIT: 1,
+            _StopKind.PAUSE: 2,
+            _StopKind.HOLD: 2,
+        }
         candidates = [stop for stop in (current, new) if stop is not None]
         return min(candidates, key=lambda stop: order[stop.kind], default=None)
 
@@ -931,6 +983,8 @@ class Orchestrator:
         state = None if dag is None else dag.state
         if stop.kind is _StopKind.PAUSE:
             return RunReport(RunOutcome.PAUSED, task_id, state)
+        if stop.kind is _StopKind.HOLD:
+            return RunReport(RunOutcome.WAITING, task_id, state)
         if stop.kind is _StopKind.WAIT:
             ended = await self._end_task(
                 run, TaskCommand.WAIT, Actor.policy(), REASON_WAIT, WaitReason.USER
@@ -1021,7 +1075,11 @@ class Orchestrator:
             return _Watch.ENDED
         if state is TaskState.QUEUED or reason is StopReason.TASK_ENDED:
             return _Watch.ENDED
-        return _Watch.PAUSED if state is TaskState.PAUSED else _Watch.RUNNING
+        if state is TaskState.PAUSED:
+            return _Watch.PAUSED
+        if state is TaskState.WAITING:
+            return _Watch.WAITING
+        return _Watch.RUNNING
 
     async def _dispatch(
         self,
@@ -1501,7 +1559,7 @@ class Orchestrator:
                 if work.done():
                     return self._result_of(work)
                 watch = await self._watch(run)
-                if watch not in (_Watch.RUNNING, _Watch.PAUSED):
+                if watch not in (_Watch.RUNNING, _Watch.PAUSED, _Watch.WAITING):
                     return RunReport(
                         _OUTCOME_OF_WATCH.get(watch, RunOutcome.TASK_ENDED),
                         run.task.id,
@@ -1624,6 +1682,7 @@ _OUTCOME_OF_WATCH = {
     _Watch.LOST: RunOutcome.LEASE_LOST,
     _Watch.SUPERSEDED: RunOutcome.SUPERSEDED,
     _Watch.PAUSED: RunOutcome.PAUSED,
+    _Watch.WAITING: RunOutcome.WAITING,
 }
 _OUTCOME_OF_STOP = {
     StopReason.LEASE_LOST: RunOutcome.LEASE_LOST,

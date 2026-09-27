@@ -91,7 +91,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncConnection
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
 from paw_backend.db import Database
@@ -117,6 +117,7 @@ from paw_backend.tasks.queueing.validation import (
     check_bool,
     check_member,
     check_runtime_generation,
+    check_session,
     check_uuid,
 )
 
@@ -166,6 +167,40 @@ class BudgetTracker:
         """
         check_uuid("task_id", task_id)
         check_member("preset", preset, BudgetPreset)
+        upsert = self._preset_upsert(task_id, preset)
+        try:
+            async with self._database.engine.begin() as connection:
+                await connection.execute(upsert)
+                return await self._read_usage(connection, task_id)
+        except IntegrityError as error:
+            if sqlstate(error) == FOREIGN_KEY_VIOLATION:
+                raise TaskNotFoundError() from None
+            raise
+
+    @property
+    def database(self) -> Database:
+        return self._database
+
+    async def set_preset_in(
+        self, session: AsyncSession, task_id: uuid.UUID, preset: BudgetPreset
+    ) -> None:
+        """``set_preset`` in the transaction of the caller's ``session`` (inside a
+        transaction; see ``TaskQueue.enqueue_in``). Nothing is committed here: the
+        preset changes only if the caller's transaction commits (the orchestrator
+        commits it together with the queue entry, so a refused enqueue changes no
+        budget). ``TaskNotFoundError`` for an unknown task."""
+        check_session("session", session)
+        check_uuid("task_id", task_id)
+        check_member("preset", preset, BudgetPreset)
+        try:
+            await session.execute(self._preset_upsert(task_id, preset))
+        except IntegrityError as error:
+            if sqlstate(error) == FOREIGN_KEY_VIOLATION:
+                raise TaskNotFoundError() from None
+            raise
+
+    @staticmethod
+    def _preset_upsert(task_id: uuid.UUID, preset: BudgetPreset):
         limits = PRESET_LIMITS[preset]
         upsert = insert(BudgetUsageRow).values(
             [
@@ -187,14 +222,7 @@ class BudgetTracker:
                 "limit_value": upsert.excluded.limit_value,
             },
         )
-        try:
-            async with self._database.engine.begin() as connection:
-                await connection.execute(upsert)
-                return await self._read_usage(connection, task_id)
-        except IntegrityError as error:
-            if sqlstate(error) == FOREIGN_KEY_VIOLATION:
-                raise TaskNotFoundError() from None
-            raise
+        return upsert
 
     async def record(
         self, task_id: uuid.UUID, kind: BudgetKind, amount: int

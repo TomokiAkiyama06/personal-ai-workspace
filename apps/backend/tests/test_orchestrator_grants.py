@@ -34,6 +34,7 @@ from . import (
     test_orchestrator_control,
     test_orchestrator_failures,
     test_orchestrator_fenced_commands,
+    test_orchestrator_handover,
     test_orchestrator_lease,
     test_orchestrator_planning,
     test_orchestrator_project_gate,
@@ -272,6 +273,34 @@ class RuntimeTimerStopFailureAsAppRole(
 
 class NodeWritesFencedByTheRunAsAppRole(
     AsAppRole, test_orchestrator_fenced_commands.NodeWritesAreFencedByTheRunTest
+):
+    pass
+
+
+class EnqueueIsAtomicAsAppRole(
+    AsAppRole, test_orchestrator_handover.EnqueueIsAtomicTest
+):
+    pass
+
+
+class FinishAsAppRole(AsAppRole, test_orchestrator_handover.FinishTest):
+    pass
+
+
+class ReplacementWhileTheEntryIsHeldAsAppRole(
+    AsAppRole, test_orchestrator_handover.ReplacementWhileTheEntryIsHeldTest
+):
+    pass
+
+
+class WaitingIsAGracefulStopAsAppRole(
+    AsAppRole, test_orchestrator_handover.WaitingIsAGracefulStopTest
+):
+    pass
+
+
+class CancelledWithItsEntryAsAppRole(
+    AsAppRole, test_orchestrator_handover.CancelledWithItsEntryTest
 ):
     pass
 

@@ -269,12 +269,21 @@ class StartIsFencedTest(PostgresOrchestratorTestCase):
         self.assertEqual(
             (snapshot.state, snapshot.attempt.number), (TaskState.QUEUED, 2)
         )
+        # The entry is given back, not completed: the restarted task is queued
+        # and its own enqueue was refused while this entry was claimed (one active
+        # entry per task), so this entry is the one that must serve it.
         (entry,) = await self.rows("SELECT status FROM queue_entries")
-        self.assertEqual(entry["status"], "completed")
+        self.assertEqual(entry["status"], "queued")
         self.assertEqual(
             await self.scalar("SELECT count(*) FROM agent_dags"), 1
         )  # the plan only
         self.assertEqual((await self.store.get(task_id, 1)).epoch, 0)  # nobody drove it
+        # The next worker starts the replacement (attempt 2) from that entry.
+        h.tasks.execute = original
+        await h.orchestrator.submit_plan(task_id, make_plan(node("a")))
+        report = await h.orchestrator.run_once("w2")
+        self.assertEqual(report.outcome, Out.DAG_SUCCEEDED)
+        self.assertEqual((await h.tasks.restore(task_id)).attempt.number, 2)
 
     async def test_a_retry_between_the_read_and_the_start_skips_the_old_entry(self):
         h = self.harness()
@@ -346,8 +355,11 @@ class NodeWritesAreFencedByTheRunTest(PostgresOrchestratorTestCase):
         self.assertIsNone(dag.node("a").result)  # nothing of the old run
         self.assertNotEqual(dag.node("a").state.value, "succeeded")
 
-        # The new run does the node again and uses its own result.
-        await h.queue.enqueue(task_id)
+        # The new run does the node again and uses its own result. The old
+        # worker gave its entry back (the retried task is queued), so the caller's
+        # enqueue is not needed, and would be refused (one active entry).
+        (entry,) = await self.rows("SELECT status FROM queue_entries")
+        self.assertEqual(entry["status"], "queued")
         report = await h.orchestrator.run_once("w2")
         self.assertEqual(report.outcome, Out.DAG_SUCCEEDED)
         self.assertEqual(len(runtime.calls_of("a")), 2)

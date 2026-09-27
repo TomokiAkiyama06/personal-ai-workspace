@@ -85,6 +85,9 @@ class RunOutcome(StrEnum):
     BUDGET_FAILED = "budget_failed"  # retries used up: the task failed
     BUDGET_NOT_CONFIGURED = "budget_not_configured"  # no preset: the task failed
     PAUSED = "paused"  # the task was paused: quiesced, entry completed
+    # Someone else (an approval, a user, a resource) put the task in waiting:
+    # quiesced like a pause; whoever unblocks it enqueues it again.
+    WAITING = "waiting"
     TASK_ENDED = "task_ended"  # cancelled / failed / completed under the run
     SUPERSEDED = "superseded"  # a Retry / Restart replaced the run
     # An unexpected error or state: the task was failed safely (or, when even that
