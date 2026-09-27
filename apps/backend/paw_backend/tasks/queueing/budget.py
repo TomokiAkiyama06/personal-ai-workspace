@@ -95,7 +95,9 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
 from paw_backend.db import Database
-from paw_backend.tasks.errors import TaskNotFoundError
+from paw_backend.tasks.domain import TERMINAL_STATES, TaskRun, TaskState
+from paw_backend.tasks.errors import StaleRunError, TaskNotFoundError
+from paw_backend.tasks.models import TaskRow
 from paw_backend.tasks.queueing.domain import (
     PRESET_LIMITS,
     BudgetKind,
@@ -225,7 +227,12 @@ class BudgetTracker:
         return upsert
 
     async def record(
-        self, task_id: uuid.UUID, kind: BudgetKind, amount: int
+        self,
+        task_id: uuid.UUID,
+        kind: BudgetKind,
+        amount: int,
+        *,
+        run: TaskRun | None = None,
     ) -> BudgetUsage:
         """Atomically add ``amount`` to the consumption of ``kind``; return it.
 
@@ -236,12 +243,25 @@ class BudgetTracker:
         Recording is allowed even when the budget is already exceeded (the work
         happened); the returned ``BudgetUsage`` is the state after the increment.
         Raises ``BudgetNotConfiguredError`` if the task has no budget.
+
+        ``run`` (a ``TaskRun``, or ``None``): a charge made ON BEHALF OF that run
+        of the task (the orchestrator and its nodes, PAW-034). The usage is kept
+        per task, not per run, so a worker whose run was replaced (Retry,
+        Restart) or ended would otherwise spend the budget of the run that took
+        over. The task row is read with a share lock (``FOR SHARE``) in the
+        transaction of the increment, and nothing is written (``StaleRunError``)
+        unless the task still exists, has not ended (completed, failed,
+        cancelled) and its attempt and retry count are ``run``: a Fail, Retry or
+        Restart either committed before (and is seen) or waits until the charge
+        committed. There is no window between the check and the write.
         """
         check_uuid("task_id", task_id)
         check_member("kind", kind, BudgetKind)
         if kind is BudgetKind.RUNTIME_SECONDS:
             raise InvalidQueueingArgumentError("kind")
         check_amount("amount", amount)
+        if run is not None and not isinstance(run, TaskRun):
+            raise InvalidQueueingArgumentError("run")
         add = (
             update(BudgetUsageRow)
             .where(BudgetUsageRow.task_id == task_id, BudgetUsageRow.kind == kind)
@@ -249,6 +269,20 @@ class BudgetTracker:
             .returning(BudgetUsageRow.consumed, BudgetUsageRow.limit_value)
         )
         async with self._database.engine.begin() as connection:
+            if run is not None:
+                task = (
+                    await connection.execute(
+                        select(TaskRow.state, TaskRow.attempt, TaskRow.retry_count)
+                        .where(TaskRow.id == task_id)
+                        .with_for_update(read=True)
+                    )
+                ).one_or_none()
+                if (
+                    task is None
+                    or TaskState(task.state) in TERMINAL_STATES
+                    or TaskRun(task.attempt, task.retry_count) != run
+                ):
+                    raise StaleRunError()
             row = (await connection.execute(add)).one_or_none()
         if row is None:
             raise BudgetNotConfiguredError()

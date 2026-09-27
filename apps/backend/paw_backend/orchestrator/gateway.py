@@ -26,10 +26,10 @@ which is what makes the acceptance conditions of Decisions 0006 and 0007 hold:
 import logging
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
-from typing import Protocol
+from typing import NoReturn, Protocol
 
 from paw_backend.orchestrator.errors import NodeStopped, StopReason, error_class_of
-from paw_backend.tasks import TaskRun
+from paw_backend.tasks import StaleRunError, TaskRun
 from paw_backend.tasks.queueing import (
     BudgetKind,
     BudgetNotConfiguredError,
@@ -76,6 +76,21 @@ class RunGuard:
     @property
     def stop_reason(self) -> StopReason | None:
         return self._stop_reason
+
+    @property
+    def run(self) -> TaskRun:
+        """The run this guard speaks for (what a fenced write presents)."""
+        return self._run
+
+    async def refused(self) -> NoReturn:
+        """A fenced write for this run was refused (``StaleRunError``: the run was
+        replaced or the task ended). Stop the run for the reason the task gives
+        now, and raise ``NodeStopped``."""
+        await self.ensure_active()
+        # The task looks active again (read after the refusal): the run the write
+        # was refused for is not the one that acts now, so it is stopped anyway.
+        self.stop(StopReason.SUPERSEDED)
+        raise NodeStopped(self._stop_reason or StopReason.SUPERSEDED)
 
     def stop(self, reason: StopReason) -> None:
         if self._stop_reason is None:
@@ -188,8 +203,15 @@ class NodeBudgetHandle:
         if self._guard.stop_reason is not None:
             raise NodeStopped(self._guard.stop_reason)
         # ``record`` validates the kind (runtime is measured by the tracker, not
-        # reported) and the amount before anything is written.
-        await self._tracker.record(self._task_id, kind, amount)
+        # reported) and the amount before anything is written. The charge is
+        # fenced by the run (``run=``): the tracker checks the task's current run
+        # under the task row's share lock in the transaction of the increment, so
+        # a run that a Fail + Retry / Restart replaced since the last look spends
+        # nothing of the run that took over (the usage is kept per task).
+        try:
+            await self._tracker.record(self._task_id, kind, amount, run=self._guard.run)
+        except StaleRunError:
+            await self._guard.refused()
         verdict = await self._tracker.check(self._task_id)
         if verdict.status is BudgetStatus.EXCEEDED:
             self._guard.stop(StopReason.BUDGET_EXCEEDED)
@@ -213,6 +235,13 @@ class TrackerBudgetProvider(BudgetProvider):
     at the same moment can both pass and the limit is exceeded by at most the calls
     in flight (Decision 0006 and ``tools/budget.py``). A task with no budget is
     ``UNKNOWN``: a call that needs a budget is denied.
+
+    ``charge`` is NOT fenced by the run (unlike ``NodeBudgetHandle.charge``): the
+    Broker's seam passes no run, and it charges a call after it ran, a call that
+    ``NodeToolGateway.call`` handed over only after it checked the run. So what it
+    records is work that happened; after a run is replaced, only the calls that
+    were already in flight are recorded (the gateway refuses every new one), and
+    hiding them would under-count executed calls.
     """
 
     def __init__(self, tracker: BudgetTracker) -> None:

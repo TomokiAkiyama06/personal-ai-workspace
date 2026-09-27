@@ -99,6 +99,76 @@ class BudgetTest(PostgresOrchestratorTestCase):
             {"a": "failed", "b": "blocked", "free": "succeeded"},
         )
 
+    async def replaced_while_charging(self, command: TaskCommand):
+        """A node that charges only after its task was failed and ``command``
+        (Retry / Restart) replaced its run, before the orchestrator looked again
+        (an hour between the looks). Returns ``(h, task_id, stopped)``."""
+        release = asyncio.Event()
+        stopped = []
+
+        async def late_spender(assignment):
+            await release.wait()
+            try:
+                await assignment.budget.charge(BudgetKind.TOKENS, 100)
+            except NodeStopped as stop:
+                stopped.append(stop.reason)
+                raise
+            return ok("charged")
+
+        rt = {"local": FakeRuntime("local", script={"spend": late_spender})}
+        h = self.harness(runtimes=rt, config={"poll_seconds": 3600.0})
+        task_id = await self.prepare(h, make_plan(node("spend")))
+        run = asyncio.create_task(h.orchestrator.run_once("w1"))
+        await until(lambda: len(rt["local"].assignments) == 1, message="the node")
+        before = await self.consumed(h, task_id)
+
+        other = self.harness()
+        await other.tasks.execute(task_id, TaskCommand.FAIL, actor=self.system)
+        await other.tasks.execute(task_id, command, actor=self.user)
+        release.set()
+        await until(lambda: stopped, message="the refused charge")
+        self.assertEqual(await self.consumed(h, task_id), before)
+        run.cancel()
+        await asyncio.gather(run, return_exceptions=True)
+        return h, task_id, stopped
+
+    async def test_a_replaced_run_cannot_charge_the_budget_after_a_retry(self):
+        _, _, stopped = await self.replaced_while_charging(TaskCommand.RETRY)
+        self.assertEqual(stopped, [StopReason.SUPERSEDED])
+
+    async def test_a_replaced_run_cannot_charge_the_budget_after_a_restart(self):
+        _, _, stopped = await self.replaced_while_charging(TaskCommand.RESTART)
+        self.assertEqual(stopped, [StopReason.SUPERSEDED])
+
+    async def test_an_ended_run_cannot_charge_the_budget(self):
+        release = asyncio.Event()
+        stopped = []
+
+        async def late_spender(assignment):
+            await release.wait()
+            try:
+                await assignment.budget.charge(BudgetKind.TOKENS, 100)
+            except NodeStopped as stop:
+                stopped.append(stop.reason)
+                raise
+            return ok("charged")
+
+        rt = {"local": FakeRuntime("local", script={"spend": late_spender})}
+        h = self.harness(runtimes=rt, config={"poll_seconds": 3600.0})
+        task_id = await self.prepare(h, make_plan(node("spend")))
+        run = asyncio.create_task(h.orchestrator.run_once("w1"))
+        await until(lambda: len(rt["local"].assignments) == 1, message="the node")
+        before = await self.consumed(h, task_id)
+
+        await self.harness().tasks.execute(task_id, TaskCommand.FAIL, actor=self.system)
+        release.set()
+        await until(lambda: stopped, message="the refused charge")
+
+        self.assertEqual(stopped, [StopReason.TASK_ENDED])
+        self.assertEqual(await self.consumed(h, task_id), before)
+        run.cancel()
+        await asyncio.gather(run, return_exceptions=True)
+
     async def test_a_node_that_spends_the_budget_stops_every_node_and_tool_call(self):
         tools = FakeTools()
         stopped = []

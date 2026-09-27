@@ -49,7 +49,7 @@ import contextlib
 import copy
 import logging
 import uuid
-from collections.abc import Mapping
+from collections.abc import Awaitable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -162,6 +162,15 @@ SHUTDOWN_GRACE_SECONDS = 5.0
 # the node, the task and the queue lease forever.
 CANCEL_GRACE_SECONDS = 10.0
 HEARTBEAT_FAILURES_TO_LOSE = 3
+# The deadline of one heartbeat attempt, as a fraction of the interval (and
+# never past the time the run is lost): a stalled heartbeat is a failure.
+HEARTBEAT_TIMEOUT_FRACTION = 0.5
+
+
+class HeartbeatTimeoutError(Exception):
+    """A heartbeat attempt did not end within its deadline."""
+
+
 # The node key a planner runtime is given for a planning attempt.
 PLAN_STEP = "plan"
 # The planner's name in its agent identity (``agent_id_of``) and in the loop
@@ -334,6 +343,7 @@ class _Run:
     lost: asyncio.Event = field(default_factory=asyncio.Event)
     epoch: int = 0
     generation: int | None = None
+    proved_at: float = 0.0  # the injected clock when the last lease proof began
     not_before: dict[str, float] = field(default_factory=dict)
 
     def lose(self) -> None:
@@ -567,6 +577,7 @@ class Orchestrator:
             # "claim still valid and start" operation; the window that is left is
             # the round trip between this heartbeat, which renews the lease for a
             # whole ``lease_seconds``, and the call that follows it.)
+            run.proved_at = self._clock.monotonic()
             await self._queue.heartbeat(entry.id, worker_id, entry.claim_count)
             run.generation = await self._budget.start_runtime(task_id)
             heartbeat = asyncio.create_task(self._heartbeats(run))
@@ -760,23 +771,73 @@ class Orchestrator:
             await asyncio.wait_for(release(), SHUTDOWN_GRACE_SECONDS)
 
     async def _heartbeats(self, run: _Run) -> None:
+        """Extend the lease every ``heartbeat_seconds``; lose the run (fail
+        closed) before the lease can expire (invariant I11).
+
+        The last proof of the lease STARTED at ``proved`` (``run.proved_at`` for
+        the heartbeat just before the runtime timer started), so the lease runs
+        at least until ``proved + lease_seconds``. The run is lost when
+        ``HEARTBEAT_FAILURES_TO_LOSE`` attempts in a row fail, or at the latest
+        ``HEARTBEAT_FAILURES_TO_LOSE × heartbeat_seconds`` after ``proved``
+        (strictly less than the lease: checked when the orchestrator is built),
+        whichever comes first. Every attempt has a deadline
+        (``HEARTBEAT_TIMEOUT_FRACTION`` of the interval, and never past the loss
+        deadline): a heartbeat whose connection or query stalls counts as a
+        failure instead of holding the loop up while the lease runs out, and is
+        abandoned (cancelled). All the times are the injected clock's."""
+        interval = self._heartbeat_seconds
+        lose_after = interval * HEARTBEAT_FAILURES_TO_LOSE
+        deadline = run.proved_at + lose_after
         failures = 0
         while True:
-            await self._clock.sleep(self._heartbeat_seconds)
+            await self._clock.sleep(
+                max(0.0, min(interval, deadline - self._clock.monotonic()))
+            )
+            remaining = deadline - self._clock.monotonic()
+            if remaining <= 0:
+                run.lose()
+                return
+            started = self._clock.monotonic()
             try:
-                await self._queue.heartbeat(
-                    run.entry.id, run.worker_id, run.entry.claim_count
+                await self._within(
+                    self._queue.heartbeat(
+                        run.entry.id, run.worker_id, run.entry.claim_count
+                    ),
+                    min(interval * HEARTBEAT_TIMEOUT_FRACTION, remaining),
                 )
-                failures = 0
             except LeaseLostError:
                 run.lose()
                 return
             except Exception as error:
                 failures += 1
                 logger.warning("Lease heartbeat failed (%s)", error_class_of(error))
-                if failures >= HEARTBEAT_FAILURES_TO_LOSE:
+                if (
+                    failures >= HEARTBEAT_FAILURES_TO_LOSE
+                    or self._clock.monotonic() >= deadline
+                ):
                     run.lose()  # fail closed: a lease we cannot extend is lost
                     return
+                continue
+            failures = 0
+            deadline = started + lose_after
+
+    async def _within(self, awaitable: Awaitable[object], seconds: float) -> object:
+        """``await awaitable`` for at most ``seconds`` of the injected clock;
+        ``HeartbeatTimeoutError`` (and the awaitable is cancelled and left to
+        end) when the time is up first."""
+        call = asyncio.ensure_future(awaitable)
+        timer = asyncio.ensure_future(self._clock.sleep(seconds))
+        try:
+            await asyncio.wait({call, timer}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            timer.cancel()
+            timed_out = not call.done()
+            if timed_out:
+                call.cancel()
+                call.add_done_callback(_forget)
+        if timed_out:
+            raise HeartbeatTimeoutError()
+        return call.result()
 
     # -- the DAG ------------------------------------------------------------------
 
@@ -1143,8 +1204,10 @@ class Orchestrator:
                     verdict, LoopVerdict.CONTINUE, can_escalate=False
                 )
                 return self._stop_for_budget(decision.action)
-            await self._budget.record(run.task.id, BudgetKind.STEPS, 1)
             try:
+                # Fenced by the run like the start that follows: a replaced or
+                # ended run charges nothing to the run that took over.
+                await self._budget.record(run.task.id, BudgetKind.STEPS, 1, run=run.run)
                 attempt = await self._store.start_node(
                     dag.id,
                     run.epoch,
@@ -1490,7 +1553,7 @@ class Orchestrator:
                     step, arguments = NextStep.HOLD, {}
                     stop = _Stop(_StopKind.WAIT)
         if step in _RETRYING_STEPS:
-            await self._budget.record(run.task.id, BudgetKind.RETRIES, 1)
+            await self._budget.record(run.task.id, BudgetKind.RETRIES, 1, run=run.run)
             run.not_before[node.key] = self._clock.monotonic() + self._config.backoff(
                 node.rung_attempts
             )
@@ -1633,7 +1696,7 @@ class Orchestrator:
                     run, self._stop_for_budget(action), None
                 )
             for kind, amount in planned.items():
-                await self._budget.record(task_id, kind, amount)
+                await self._budget.record(task_id, kind, amount, run=run.run)
             spec = _Spec(
                 key=PLAN_STEP,
                 role=NodeRole.PLANNER,

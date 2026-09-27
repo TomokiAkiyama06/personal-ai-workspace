@@ -13,7 +13,7 @@ from unittest import mock
 
 from sqlalchemy import event, text
 
-from paw_backend.tasks import TaskNotFoundError
+from paw_backend.tasks import StaleRunError, TaskCommand, TaskNotFoundError, TaskRun
 from paw_backend.tasks.queueing import (
     PRESET_LIMITS,
     RECORDABLE_KINDS,
@@ -280,6 +280,37 @@ class RecordTest(BudgetTestCase):
                 K.GPU_SECONDS: 50,
             },
         )
+
+    async def test_a_charge_for_a_run_is_recorded_only_while_that_run_is_current(
+        self,
+    ):
+        # ``run``: the task's run is checked under the task row's share lock in
+        # the transaction of the increment. A replaced run (Retry / Restart) or
+        # an ended task records nothing.
+        task_id = await self.configured_task()
+        started = await self.service.execute(
+            task_id, TaskCommand.START, actor=self.system
+        )
+        first = started.run
+        usage = await self.budget.record(task_id, K.TOKENS, 5, run=first)
+        self.assertEqual(usage.consumed, 5)
+
+        await self.service.execute(task_id, TaskCommand.FAIL, actor=self.system)
+        with self.assertRaises(StaleRunError):  # ended
+            await self.budget.record(task_id, K.TOKENS, 7, run=first)
+        await self.service.execute(task_id, TaskCommand.RETRY, actor=self.user)
+        with self.assertRaises(StaleRunError):  # replaced by the Retry
+            await self.budget.record(task_id, K.TOKENS, 7, run=first)
+        retried = (await self.service.restore(task_id)).run
+        self.assertNotEqual(retried, first)
+        self.assertEqual(
+            (await self.budget.record(task_id, K.TOKENS, 1, run=retried)).consumed, 6
+        )
+        with self.assertRaises(StaleRunError):  # a run that never existed
+            await self.budget.record(task_id, K.TOKENS, 7, run=TaskRun(9, 9))
+        with self.assertRaises(InvalidQueueingArgumentError):
+            await self.budget.record(task_id, K.TOKENS, 7, run=(1, 0))
+        self.assertEqual((await self.budget_row(task_id, "tokens"))["consumed"], 6)
 
     async def test_recording_zero_changes_nothing(self):
         task_id = await self.configured_task()

@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 
 from paw_backend.orchestrator.domain import AttemptState, DagState, RunOutcome
 from paw_backend.orchestrator.errors import StaleDagEpochError
+from paw_backend.orchestrator.orchestrator import HEARTBEAT_FAILURES_TO_LOSE
 from paw_backend.orchestrator.result import NodeResult
 from paw_backend.orchestrator.runtime import NodeOutcome
 from paw_backend.tasks import TaskCommand, TaskState
@@ -54,6 +55,23 @@ class FlakyQueue(TaskQueue):
     async def heartbeat(self, *args, **kwargs):
         if self.broken:
             raise ConnectionError("the database is gone")
+        return await super().heartbeat(*args, **kwargs)
+
+
+class HangingQueue(TaskQueue):
+    """A queue whose heartbeat can be made to hang (a stalled connection)."""
+
+    hanging = False
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.release = asyncio.Event()
+        self.hung = 0
+
+    async def heartbeat(self, *args, **kwargs):
+        if self.hanging:
+            self.hung += 1
+            await self.release.wait()
         return await super().heartbeat(*args, **kwargs)
 
 
@@ -242,6 +260,46 @@ class LeaseTest(PostgresOrchestratorTestCase):
         self.assertEqual(
             await self.states_of(task_id), {"only": "running"}
         )  # untouched
+
+    async def test_a_heartbeat_that_hangs_loses_the_run_before_the_lease_expires(
+        self,
+    ):
+        # A heartbeat whose connection or query stalls never returns: each attempt
+        # has a deadline and counts as a failure, and the run is lost (fail
+        # closed, its node cancelled) within ``HEARTBEAT_FAILURES_TO_LOSE``
+        # intervals of the last proof of the lease: before the lease can expire
+        # and another worker claim the entry (invariant I11).
+        queue = HangingQueue(self.database, project_gate=ALWAYS_ACTIVE)
+        runtime = FakeRuntime("local")
+        runtime.gate("only")
+        h = self.harness(queue=queue, runtimes={"local": runtime})
+        task_id = await self.prepare(h, make_plan(node("only")))
+        run = asyncio.create_task(h.orchestrator.run_once("w1"))
+        await until(lambda: len(runtime.assignments) == 1, message="the node")
+        interval = h.orchestrator._heartbeat_seconds
+        lose_by = interval * HEARTBEAT_FAILURES_TO_LOSE
+        self.assertLess(lose_by, queue.lease_seconds)
+
+        queue.hanging = True
+        advanced = 0.0
+        step = interval / 8
+        while not run.done() and advanced < lose_by:
+            await h.clock.advance(step)
+            advanced += step
+            for _ in range(20):  # let the woken tasks run
+                await asyncio.sleep(0)
+            await asyncio.sleep(0.02)
+        try:
+            report = await asyncio.wait_for(asyncio.shield(run), 5)
+        finally:
+            queue.release.set()
+        self.assertLessEqual(advanced, lose_by)
+        self.assertEqual(report.outcome, Out.LEASE_LOST)
+        self.assertEqual(
+            [e for e in runtime.timeline if e[0] == "end"], [("end", "only", 1)]
+        )
+        self.assertGreaterEqual(queue.hung, 1)
+        self.assertEqual(await self.states_of(task_id), {"only": "running"})
 
     async def test_a_planner_that_never_returns_is_stopped_when_the_lease_is_lost(
         self,
