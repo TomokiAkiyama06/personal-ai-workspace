@@ -10,6 +10,8 @@ import unicodedata
 import uuid
 from datetime import UTC, datetime
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from paw_backend.authz.roles import ProjectRole
 from paw_backend.authz.subjects import to_uuid
 from paw_backend.projects.errors import InputProblem, InvalidProjectInputError
@@ -31,6 +33,24 @@ _FORBIDDEN_CATEGORIES = frozenset({"Cc", "Cs", "Zl", "Zp"})
 
 def _fail(field: str, problem: InputProblem) -> InvalidProjectInputError:
     return InvalidProjectInputError(field, problem)
+
+
+def validate_session(field: str, value: object) -> AsyncSession:
+    """An ``AsyncSession`` that is inside a transaction (the caller's own).
+
+    For the functions that lock or write in a transaction of their CALLER
+    (:func:`~paw_backend.projects.transaction.share_lock_status`, the gate): a session
+    without a transaction would begin one silently and give it up when it is closed,
+    so a lock reported as held would be released and a write reported as done rolled
+    back. ``NOT_A_SESSION`` for anything but an ``AsyncSession``, ``NO_TRANSACTION``
+    for one that is not inside a transaction now (``in_transaction()``: true inside
+    ``session.begin()`` and after a statement that began it by itself).
+    """
+    if not isinstance(value, AsyncSession):
+        raise _fail(field, InputProblem.NOT_A_SESSION)
+    if not value.in_transaction():
+        raise _fail(field, InputProblem.NO_TRANSACTION)
+    return value
 
 
 def validate_uuid(field: str, value: object) -> uuid.UUID:

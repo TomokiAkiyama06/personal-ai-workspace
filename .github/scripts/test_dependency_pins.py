@@ -53,6 +53,9 @@ def requirements_ci():
 # generated directories contain third-party code that is not ours.
 SCANNED_DIRECTORIES = ("paw_backend", "tests", "migrations")
 FIRST_PARTY = {"paw_backend", "tests", "migrations"}
+# Packages whose import name is not their distribution name (the rest is the
+# same name with `_` / `.` folded to `-`, see `imported_third_party_packages`).
+DISTRIBUTION_OF_IMPORT = {"argon2": "argon2-cffi"}
 
 
 def imported_third_party_packages(backend):
@@ -75,7 +78,10 @@ def imported_third_party_packages(backend):
                     elif isinstance(node, ast.ImportFrom) and not node.level:
                         imported.add(node.module.split(".")[0])
     third_party = imported - set(sys.stdlib_module_names) - FIRST_PARTY
-    return {re.sub(r"[-_.]+", "-", name) for name in third_party}
+    return {
+        DISTRIBUTION_OF_IMPORT.get(name, re.sub(r"[-_.]+", "-", name))
+        for name in third_party
+    }
 
 
 def backend_pins():
@@ -125,6 +131,16 @@ class ImportScanTest(unittest.TestCase):
             self.write(directory, "build/z.py", "import requests\n")
             found = imported_third_party_packages(Path(directory))
         self.assertEqual(found, {"fastapi", "httpx", "alembic"})
+
+    def test_an_import_name_that_differs_from_its_distribution_is_mapped(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.write(
+                directory,
+                "paw_backend/auth/passwords.py",
+                "from argon2 import PasswordHasher\nimport argon2.exceptions\n",
+            )
+            found = imported_third_party_packages(Path(directory))
+        self.assertEqual(found, {"argon2-cffi"})
 
     def test_first_party_and_relative_imports_are_not_third_party(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -27,11 +27,22 @@ PUBLIC_ROUTES = {
     ("GET", "/api/v1/health"),
     ("GET", "/api/v1/health/ready"),
     ("GET", "/api/v1/openapi.json"),
-    # TODO(PAW-022): unauthenticated until Login / Session exists; they carry
-    # system events only (see apps/backend/README.md). PAW-022 must guard
-    # them with require_capability and remove them from this list.
+    # Unauthenticated while they carry system events only (see
+    # apps/backend/README.md). Sessions exist now (PAW-022): the Issue that adds
+    # the first non-public event must guard them with require_capability and
+    # remove them from this list.
     ("GET", "/api/v1/events/stream"),
     (WEBSOCKET, "/api/v1/events/ws"),
+    # PAW-022. Signing in cannot need a session. The route is rate limited per
+    # account and per source (progressive backoff, ``paw_backend.auth.throttle``),
+    # answers every failure alike (no user enumeration), and audits a known
+    # account's failures. The state-changing Origin check covers it (login CSRF).
+    ("POST", "/api/v1/auth/login"),
+    # PAW-022. Spends an Owner setup / recovery token and sets the Owner's
+    # password (Decision 0005: the person has no session yet). Rate limited per
+    # source and in total BEFORE the token is looked at, on top of the token's
+    # own attempt limit; every failure is the same answer.
+    ("POST", "/api/v1/auth/token/redeem"),
 }
 
 
@@ -241,7 +252,9 @@ class RouteInventoryTest(unittest.TestCase):
 
     def test_head_is_not_a_separate_operation_of_a_get_route(self):
         methods = {method for method, _, _ in route_guards(build_app())}
-        self.assertEqual(methods, {"GET", WEBSOCKET})
+        self.assertNotIn("HEAD", methods)
+        # The auth routes (PAW-022) are the first that change something.
+        self.assertEqual(methods, {"GET", "POST", "PUT", "DELETE", WEBSOCKET})
 
 
 if __name__ == "__main__":

@@ -30,6 +30,7 @@ from paw_backend.tasks import (
     WorktreeState,
 )
 
+from .gate_support import ALWAYS_ACTIVE
 from .task_support import (
     FIRST_RUN,
     PostgresTaskTestCase,
@@ -76,8 +77,10 @@ class BeginStepRacesWithEndingCommandsTest(PostgresTaskTestCase):
             for command, start, target in ENDING_COMMANDS:
                 with self.subTest(command=command.value):
                     task_id = await self.task_in_state(start)
-                    stepper = TaskService(self.new_database())
-                    ender = TaskService(self.new_database())
+                    stepper = TaskService(
+                        self.new_database(), project_gate=ALWAYS_ACTIVE
+                    )
+                    ender = TaskService(self.new_database(), project_gate=ALWAYS_ACTIVE)
 
                     async with self.database.engine.connect() as blocker:
                         # An uncommitted row with the key begin_step is about to
@@ -153,8 +156,10 @@ class BeginStepRacesWithEndingCommandsTest(PostgresTaskTestCase):
                     await self.service.finish_step(
                         task_id, finished.id, StepStatus.SUCCEEDED
                     )
-                    ender = TaskService(self.new_database())
-                    stepper = TaskService(self.new_database())
+                    ender = TaskService(self.new_database(), project_gate=ALWAYS_ACTIVE)
+                    stepper = TaskService(
+                        self.new_database(), project_gate=ALWAYS_ACTIVE
+                    )
 
                     async with self.database.engine.connect() as blocker:
                         # The command takes the task lock, then waits for the row
@@ -192,8 +197,8 @@ class BeginStepRacesWithEndingCommandsTest(PostgresTaskTestCase):
     async def test_tool_call_start_also_waits_for_a_transition_and_is_rejected(self):
         task_id = await self.task_in_state(S.RUNNING)
         step = await self.service.begin_step(task_id, "work", run=FIRST_RUN)
-        ender = TaskService(self.new_database())
-        tooler = TaskService(self.new_database())
+        ender = TaskService(self.new_database(), project_gate=ALWAYS_ACTIVE)
+        tooler = TaskService(self.new_database(), project_gate=ALWAYS_ACTIVE)
 
         async with self.database.engine.connect() as blocker:
             await blocker.execute(
@@ -330,8 +335,8 @@ class SupersededWorkerTest(PostgresTaskTestCase):
 
     async def test_a_restart_racing_a_stale_log_keeps_the_line_in_its_own_attempt(self):
         task_id = await self.task_in_state(S.CANCELLED)
-        writer = TaskService(self.new_database())
-        restarter = TaskService(self.new_database())
+        writer = TaskService(self.new_database(), project_gate=ALWAYS_ACTIVE)
+        restarter = TaskService(self.new_database(), project_gate=ALWAYS_ACTIVE)
 
         async with self.database.engine.connect() as blocker:
             # Hold the task row so that the restart is in flight but uncommitted.
@@ -582,8 +587,8 @@ class RetriedRunTest(PostgresTaskTestCase):
 
     async def test_a_stale_write_that_waits_for_the_retry_is_refused_after_it(self):
         task_id = await self.task_in_state(S.FAILED)
-        retrier = TaskService(self.new_database())
-        worker = TaskService(self.new_database())
+        retrier = TaskService(self.new_database(), project_gate=ALWAYS_ACTIVE)
+        worker = TaskService(self.new_database(), project_gate=ALWAYS_ACTIVE)
         old_run = TaskRun(1, 0)
 
         async with self.database.engine.connect() as blocker:
@@ -627,8 +632,8 @@ class RetriedRunTest(PostgresTaskTestCase):
 
     async def test_a_retry_racing_a_late_log_keeps_the_line_with_its_own_run(self):
         task_id = await self.task_in_state(S.FAILED)
-        writer = TaskService(self.new_database())
-        retrier = TaskService(self.new_database())
+        writer = TaskService(self.new_database(), project_gate=ALWAYS_ACTIVE)
+        retrier = TaskService(self.new_database(), project_gate=ALWAYS_ACTIVE)
 
         async with self.database.engine.connect() as blocker:
             # The Retry is in flight but uncommitted, so run (1, 0) is still the

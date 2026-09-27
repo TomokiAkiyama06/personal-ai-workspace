@@ -62,6 +62,17 @@ class BuildServerConfigTest(unittest.TestCase):
         self.assertFalse(config.server_header)
         self.assertEqual(config.ws_max_size, WEBSOCKET_MAX_MESSAGE_BYTES)
 
+    def test_proxy_headers_are_honoured_only_from_the_trusted_proxies(self):
+        # The Origin check of PAW-022 compares the request's external scheme
+        # (scope["scheme"]) and the login backoff counts the client address; both
+        # are what Uvicorn makes of X-Forwarded-Proto / -For from a proxy in
+        # FORWARDED_ALLOW_IPS (default: loopback), never from anybody else.
+        config = self.build()
+        self.assertTrue(config.proxy_headers)
+        self.assertEqual(config.forwarded_allow_ips, "127.0.0.1,::1")
+        with paw_environment(FORWARDED_ALLOW_IPS="10.0.0.5"):
+            self.assertEqual(self.build().forwarded_allow_ips, "10.0.0.5")
+
     def test_graceful_shutdown_is_bounded(self):
         self.assertEqual(self.build().timeout_graceful_shutdown, 5)
         config = self.build(shutdown_timeout_seconds=2)

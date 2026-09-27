@@ -23,6 +23,7 @@ from paw_backend.tasks import (
     WaitReason,
 )
 
+from .gate_support import ALWAYS_ACTIVE
 from .support import make_settings, paw_environment
 from .test_migrations import offline_config
 
@@ -110,7 +111,7 @@ class PostgresTaskTestCase(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self):
         self.database = self.new_database()
-        self.service = TaskService(self.database)
+        self.service = TaskService(self.database, project_gate=ALWAYS_ACTIVE)
         self.project_id = uuid.uuid4()
         self.user_id = uuid.uuid4()
         self.user = Actor.user(self.user_id)

@@ -29,6 +29,7 @@ from paw_backend.tasks.queueing import BudgetKind, BudgetPreset, Priority
 
 from . import (
     test_queueing_budget,
+    test_queueing_conditional_cancel,
     test_queueing_flow,
     test_queueing_loop_db,
     test_queueing_queue,
@@ -171,6 +172,20 @@ class TrustedClockAsAppRole(AsAppRole, test_queueing_queue.TrustedClockTest):
     pass
 
 
+class ConditionalCancelAsAppRole(
+    AsAppRole, test_queueing_conditional_cancel.ConditionalCancelTest
+):
+    """``cancel(only_if_task_terminal=True)`` share-locks a task row (issue #83)."""
+
+
+class CancelInAsAppRole(AsAppRole, test_queueing_conditional_cancel.CancelInTest):
+    pass
+
+
+class RestartRaceAsAppRole(AsAppRole, test_queueing_conditional_cancel.RestartRaceTest):
+    pass
+
+
 class BudgetConfigurationAsAppRole(AsAppRole, test_queueing_budget.ConfigurationTest):
     pass
 
@@ -285,6 +300,33 @@ class AppRolePrivilegesTest(AsAppRole, PostgresQueueingTestCase):
                     ):
                         updatable.add(column)
                 self.assertEqual(updatable, update_columns)
+
+    async def test_the_conditional_cancel_needs_no_privilege_beyond_the_task_lane(self):
+        # ``cancel(only_if_task_terminal=True)`` and the Project state gate lock rows
+        # ``FOR SHARE``, which needs SELECT and UPDATE on a column of the table. The
+        # application role holds both on ``tasks`` since migration 0032 (nothing was
+        # added for issue #83); a role without grants can lock nothing.
+        (task_id,) = await self.make_tasks(1)
+        async with self.database.session() as session, session.begin():
+            state = (
+                await session.execute(
+                    text("SELECT state FROM tasks WHERE id = :t FOR SHARE"),
+                    {"t": task_id},
+                )
+            ).scalar_one()
+        self.assertEqual(state, "queued")
+        await self.refused(
+            self.other, "SELECT state FROM tasks WHERE id = :t FOR SHARE", t=task_id
+        )
+        for privilege in ("SELECT", "INSERT", "DELETE", "TRUNCATE"):
+            self.assertEqual(
+                await self.scalar(
+                    "SELECT has_table_privilege(:r, 'tasks', :p)",
+                    r=APP_ROLE,
+                    p=privilege,
+                ),
+                privilege in ("SELECT", "INSERT"),
+            )
 
     async def test_a_role_without_grants_reaches_no_queueing_table(self):
         for table in EXPECTED:

@@ -211,7 +211,10 @@ class EverySuccessfulChangeIsCompletedTest(CompletionTestCase):
         self,
     ):
         # The case of the review finding: a status change stores no actor and no
-        # time on the memory, so the trail is the only record of who did it.
+        # time on the version row, so the audit trail is where the operation is
+        # recorded (``memory_metadata_changes`` records the state change too,
+        # Decision 0026: ``test_shared_memory_status_history.py`` checks that the
+        # two agree).
         first = self.person(SystemRole.ADMIN)
         second = self.person(SystemRole.OWNER)
         memory_id = self.seed_memory(title="Rule")

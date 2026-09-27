@@ -52,6 +52,12 @@ def build_server_config(settings: Settings, app: FastAPI) -> uvicorn.Config:
         # (closing the database engine) would not run.
         timeout_graceful_shutdown=settings.shutdown_timeout_seconds,
         ws_max_size=WEBSOCKET_MAX_MESSAGE_BYTES,
+        # The external scheme of a request (``scope["scheme"]``, which the Origin
+        # check of the state-changing routes compares) and the client address (the
+        # login backoff's source) come from ``X-Forwarded-Proto`` / ``-For`` ONLY
+        # when the connection is from a proxy in ``FORWARDED_ALLOW_IPS`` (default:
+        # loopback). Written out so that the dependency is visible and tested.
+        proxy_headers=True,
     )
 
 

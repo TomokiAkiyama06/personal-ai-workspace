@@ -7,18 +7,12 @@ retires a version in exactly one place (``applier._supersede``) and names the
 ``system`` there: the background Memory Worker does it, not the owner of the
 conversation. These tests read the history rows the database wrote.
 
-The columns of the history rows (``old_status``, ``new_status``) exist only from
-revision 0071 (PR #109). The code under test names the actor already and works
-before it (naming an actor is harmless), so the tests that read the rows skip when
-the columns are absent.
-
-REMOVE THE ``require_status_history`` GUARD when PR #109 has landed: from then on
-the columns always exist and these tests must run.
+The columns of the history rows (``old_status``, ``new_status``) come from revision
+0071 (PR #109), which revision 0041 follows in the migration chain, so they always
+exist when these tests run.
 """
 
 import unittest
-
-from sqlalchemy import text
 
 from paw_backend.memory.journal import ItemResult, Priority, RunOutcome
 
@@ -30,31 +24,9 @@ from .journal_support import (
     worker_output,
 )
 
-HISTORY_COLUMN = (
-    "SELECT count(*) FROM information_schema.columns"
-    " WHERE table_name = 'memory_metadata_changes' AND column_name = 'old_status'"
-)
-
 
 @requires_postgres
 class StatusHistoryTest(AsyncPostgresJournalTestCase):
-    has_status_history = False
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        super().setUpClass()
-        with cls.engine.connect() as connection:
-            cls.has_status_history = (
-                connection.execute(text(HISTORY_COLUMN)).scalar() == 1
-            )
-
-    def require_status_history(self) -> None:
-        # Guard (see the module docstring): remove it when revision 0071 has landed.
-        if not self.has_status_history:
-            self.skipTest(
-                "memory_metadata_changes has no status columns (revision 0071)"
-            )
-
     async def consolidate(self, worker, count: int = 1):
         consolidator = self.new_consolidator(worker)
         return [await consolidator.run_once() for _ in range(count)]
@@ -87,7 +59,6 @@ class StatusHistoryTest(AsyncPostgresJournalTestCase):
         self.assertEqual(row["status_now"], "superseded")
 
     async def test_a_newer_version_that_retires_the_previous_one_writes_one_row(self):
-        self.require_status_history()
         conversation = self.seed_conversation()
         await self.record("Use tabs.", conversation=conversation)
         await self.record("Actually spaces.", conversation=conversation)
@@ -111,7 +82,6 @@ class StatusHistoryTest(AsyncPostgresJournalTestCase):
         self.assertEqual(version_two["status"], "active")
 
     async def test_retiring_another_keys_memory_writes_one_row_for_that_version(self):
-        self.require_status_history()
         conversation = self.seed_conversation()
         await self.record("editor", conversation=conversation)
         await self.record("switch", conversation=conversation)
@@ -126,7 +96,6 @@ class StatusHistoryTest(AsyncPostgresJournalTestCase):
         self.assert_retired_by_the_system(row, "editor", 1)
 
     async def test_an_item_that_retires_two_versions_writes_two_rows(self):
-        self.require_status_history()
         conversation = self.seed_conversation()
         for text_ in ("editor", "ide", "both"):
             await self.record(text_, conversation=conversation)
@@ -151,7 +120,6 @@ class StatusHistoryTest(AsyncPostgresJournalTestCase):
         self.assertEqual(len({r["memory_version_id"] for r in rows}), 2)
 
     async def test_nothing_retired_nothing_recorded(self):
-        self.require_status_history()
         conversation = self.seed_conversation()
         await self.record("first", conversation=conversation)
         await self.record("again", conversation=conversation)
@@ -169,7 +137,6 @@ class StatusHistoryTest(AsyncPostgresJournalTestCase):
         self.assertEqual(self.history(), [])
 
     async def test_a_held_or_stale_candidate_records_nothing(self):
-        self.require_status_history()
         self.seed_key_memory("indent_style", "Use spaces.", "confirmed")
         await self.record("Use tabs now.")
         (result,) = await self.consolidate(
@@ -186,7 +153,6 @@ class StatusHistoryTest(AsyncPostgresJournalTestCase):
         history row of the retirement goes with it: nothing was retired, so there is
         nothing to explain.
         """
-        self.require_status_history()
         self.seed_key_memory("first", "old", "inferred")
         foreign = self.seed_key_memory(
             "theirs",
@@ -219,9 +185,8 @@ class StatusHistoryTest(AsyncPostgresJournalTestCase):
         self.assertEqual((first["content"], first["status"]), ("old", "active"))
 
     async def test_the_consolidation_works_whether_or_not_the_history_exists(self):
-        # Not guarded: naming the actor is harmless before revision 0071, and after
-        # it the same call is what lets the UPDATE through. Either way the version
-        # is retired and the job completes.
+        # Naming the actor is what lets the UPDATE through the trigger of revision
+        # 0071: the version is retired and the job completes.
         conversation = self.seed_conversation()
         await self.record("one", conversation=conversation)
         await self.record("two", conversation=conversation)

@@ -36,8 +36,19 @@ class Capability(StrEnum):
     GITHUB_USE = "github.use"
     MEMORY_USE = "memory.use"
     PR_CREATE = "pr.create"
+    # A person's own project membership (Decision 0022, Approved: it extends
+    # Decision 0004's delegation list and Scope.SELF, and supersedes Decision 0008
+    # section 5): answering an invitation addressed to oneself, and leaving a
+    # project one is a member of. The resource is owned by the actor; the
+    # project's state and the actor's role in it are not consulted (see
+    # ``ProjectService``).
+    PROJECT_INVITATION_RESPOND = "project.invitation.respond"
+    PROJECT_LEAVE = "project.leave"
 
     # --- Scope.SYSTEM: workspace-wide ---
+    # Any human user may create a project (REQUIREMENTS.md does not restrict who
+    # may; Decision 0022). The creator becomes its first Manager.
+    PROJECT_CREATE = "project.create"
     SHARED_MEMORY_READ = "shared_memory.read"
     # Reads what only managers may see (deleted memories, Candidates). The
     # operations that change Shared Memory each have a capability of their own
@@ -49,6 +60,11 @@ class Capability(StrEnum):
     SHARED_MEMORY_RESTORE = "shared_memory.restore"
     SHARED_MEMORY_CANDIDATE_APPROVE = "shared_memory.candidate.approve"
     SHARED_MEMORY_CANDIDATE_REJECT = "shared_memory.candidate.reject"
+    # A person's own account (PAW-022): who is signed in and from where, changing
+    # the password, signing devices out. Any human role holds them; an Agent
+    # never does. ``account.read`` also covers the read-only view of the sessions.
+    ACCOUNT_READ = "account.read"
+    ACCOUNT_MANAGE = "account.manage"
     # Admin (and Owner): "Admin-only" in docs/SECURITY_RBAC_AUDIT.md.
     ADMIN_USERS_MANAGE = "admin.users.manage"
     ADMIN_USAGE_VIEW = "admin.usage.view"
@@ -60,12 +76,16 @@ class Capability(StrEnum):
     ADMIN_PERMISSIONS_MANAGE = "admin.permissions.manage"
     ADMIN_CONFIG_MANAGE = "admin.config.manage"
     ADMIN_PROJECTS_MANAGE = "admin.projects.manage"
+    # The workspace authentication policy (Passkey requirement per role, Step-up
+    # window; Decision 0015): an Admin may look at it, only the Owner changes it.
+    ADMIN_AUTH_POLICY_VIEW = "admin.auth_policy.view"
     # Owner only.
     OWNER_ADMINS_MANAGE = "owner.admins.manage"
     OWNER_OWNERSHIP_TRANSFER = "owner.ownership.transfer"
     OWNER_RECOVERY_MANAGE = "owner.recovery.manage"
     OWNER_USER_RESTORE = "owner.user_restore"
     OWNER_BACKUP_MANAGE = "owner.backup.manage"
+    OWNER_AUTH_POLICY_MANAGE = "owner.auth_policy.manage"
 
     # --- Scope.PROJECT: inside one project ---
     PROJECT_READ = "project.read"
@@ -138,6 +158,15 @@ CAPABILITIES: MappingProxyType[Capability, CapabilityInfo] = MappingProxyType(
         C.GITHUB_USE: _info(Scope.SELF, delegable=True),
         C.MEMORY_USE: _info(Scope.SELF, delegable=True),
         C.PR_CREATE: _info(Scope.SELF, delegable=True),
+        # Answering one's own invitation and leaving a project change who belongs
+        # to a project: a person's own act, never an agent's (Decision 0022).
+        C.PROJECT_INVITATION_RESPOND: _info(Scope.SELF, delegable=False),
+        C.PROJECT_LEAVE: _info(Scope.SELF, delegable=False),
+        C.PROJECT_CREATE: _info(Scope.SYSTEM, delegable=False),
+        # The person's own account: never delegable (an Agent must not read or
+        # change credentials and sessions). Reading is on the read-only allowlist.
+        C.ACCOUNT_READ: _info(Scope.SYSTEM, delegable=False, read_only=True),
+        C.ACCOUNT_MANAGE: _info(Scope.SYSTEM, delegable=False),
         C.SHARED_MEMORY_READ: _info(Scope.SYSTEM, delegable=True, read_only=True),
         C.SHARED_MEMORY_MANAGE: _info(Scope.SYSTEM, delegable=False),
         C.SHARED_MEMORY_CREATE: _info(Scope.SYSTEM, delegable=False),
@@ -156,11 +185,13 @@ CAPABILITIES: MappingProxyType[Capability, CapabilityInfo] = MappingProxyType(
         C.ADMIN_PERMISSIONS_MANAGE: _info(Scope.SYSTEM, delegable=False),
         C.ADMIN_CONFIG_MANAGE: _info(Scope.SYSTEM, delegable=False),
         C.ADMIN_PROJECTS_MANAGE: _info(Scope.SYSTEM, delegable=False),
+        C.ADMIN_AUTH_POLICY_VIEW: _info(Scope.SYSTEM, delegable=False),
         C.OWNER_ADMINS_MANAGE: _info(Scope.SYSTEM, delegable=False),
         C.OWNER_OWNERSHIP_TRANSFER: _info(Scope.SYSTEM, delegable=False),
         C.OWNER_RECOVERY_MANAGE: _info(Scope.SYSTEM, delegable=False),
         C.OWNER_USER_RESTORE: _info(Scope.SYSTEM, delegable=False),
         C.OWNER_BACKUP_MANAGE: _info(Scope.SYSTEM, delegable=False),
+        C.OWNER_AUTH_POLICY_MANAGE: _info(Scope.SYSTEM, delegable=False),
         C.PROJECT_READ: _info(Scope.PROJECT, delegable=True, read_only=True),
         C.PROJECT_CHAT: _info(Scope.PROJECT, delegable=True),
         C.PROJECT_TASK_RUN: _info(Scope.PROJECT, delegable=True),

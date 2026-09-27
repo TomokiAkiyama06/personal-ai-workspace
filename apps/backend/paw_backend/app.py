@@ -10,7 +10,10 @@ from fastapi import FastAPI
 
 from paw_backend import __version__
 from paw_backend.api.v1 import router as api_v1
-from paw_backend.authz import install_authz
+from paw_backend.auth.body_limit import AuthBodyLimitMiddleware
+from paw_backend.auth.csrf import OriginCheckMiddleware
+from paw_backend.auth.limits import AUTH_BODY_MAX_BYTES
+from paw_backend.auth.wiring import AuthServices, build_auth, install_auth
 from paw_backend.authz.diagnostics import warn_about_loose_privileges
 from paw_backend.config import Settings
 from paw_backend.db import Database
@@ -32,20 +35,24 @@ def create_app(
     *,
     database: Database | None = None,
     event_bus: EventBus | None = None,
+    auth: AuthServices | None = None,
 ) -> FastAPI:
     """Build the FastAPI application.
 
-    ``database`` and ``event_bus`` can be injected (tests do); by default they
-    are built from ``settings``, which itself defaults to the environment.
+    ``database``, ``event_bus`` and ``auth`` (the authentication services, with
+    their clock) can be injected (tests do); by default they are built from
+    ``settings``, which itself defaults to the environment.
     """
     settings = settings or Settings()
     database = database or Database(settings)
     event_bus = event_bus or EventBus(
         settings.event_queue_size, settings.event_max_subscribers
     )
+    auth = auth or build_auth(settings, database)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        await auth.start()
         heartbeat = asyncio.create_task(
             publish_heartbeats(event_bus, settings.event_heartbeat_seconds)
         )
@@ -88,6 +95,7 @@ def create_app(
             with contextlib.suppress(asyncio.CancelledError):
                 await heartbeat
             await database.dispose()
+            auth.close()
 
     app = FastAPI(
         title="Personal AI Workspace Backend",
@@ -103,12 +111,15 @@ def create_app(
     app.state.settings = settings
     app.state.database = database
     app.state.event_bus = event_bus
-    install_authz(app, settings=settings, database=database)
+    install_auth(app, auth, settings=settings, database=database)
 
     register_error_handlers(app)
     # Added last = outermost. Request ID wraps everything, so the middleware
     # inside it can read the ID and every response carries it; the security
-    # headers also cover the Host-validation error.
+    # headers also cover the Host-validation error. The Origin check (CSRF) sits
+    # inside the Host check: it compares Origin with a Host that is already valid.
+    app.add_middleware(AuthBodyLimitMiddleware, max_bytes=AUTH_BODY_MAX_BYTES)
+    app.add_middleware(OriginCheckMiddleware, allowed_origins=settings.allowed_origins)
     app.add_middleware(HostValidationMiddleware, allowed_hosts=settings.allowed_hosts)
     app.add_middleware(
         SecurityHeadersMiddleware,

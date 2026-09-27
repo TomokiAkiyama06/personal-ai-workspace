@@ -50,6 +50,11 @@ USER_CAPS = {
     "memory.use",
     "pr.create",
     "shared_memory.read",
+    "project.create",
+    "project.invitation.respond",
+    "project.leave",
+    "account.read",
+    "account.manage",
 }
 ADMIN_CAPS = USER_CAPS | {
     "shared_memory.manage",
@@ -69,6 +74,7 @@ ADMIN_CAPS = USER_CAPS | {
     "admin.permissions.manage",
     "admin.config.manage",
     "admin.projects.manage",
+    "admin.auth_policy.view",
     "project.lifecycle.manage",
 }
 OWNER_ONLY_CAPS = {
@@ -77,6 +83,7 @@ OWNER_ONLY_CAPS = {
     "owner.recovery.manage",
     "owner.user_restore",
     "owner.backup.manage",
+    "owner.auth_policy.manage",
 }
 OWNER_CAPS = ADMIN_CAPS | OWNER_ONLY_CAPS
 SYSTEM_MATRIX = {
@@ -129,6 +136,11 @@ NON_DELEGABLE_CAPS = {
     # grants for child agents.
     "agent.use",
     "project.agent.use",
+    # A person's own account and the authentication policy: never an Agent's.
+    "account.read",
+    "account.manage",
+    "admin.auth_policy.view",
+    "owner.auth_policy.manage",
     "shared_memory.manage",
     "shared_memory.create",
     "shared_memory.edit",
@@ -151,6 +163,10 @@ NON_DELEGABLE_CAPS = {
     "owner.recovery.manage",
     "owner.user_restore",
     "owner.backup.manage",
+    # A person's own project membership (Decision 0022): never an agent's act.
+    "project.create",
+    "project.invitation.respond",
+    "project.leave",
     "project.memory.manage",
     "project.settings.manage",
     "project.repo.add",
@@ -159,7 +175,7 @@ NON_DELEGABLE_CAPS = {
     "project.lifecycle.manage",
 }
 # The only capabilities whose *allowed* decisions are not persisted.
-READ_ONLY_CAPS = {"shared_memory.read", "project.read"}
+READ_ONLY_CAPS = {"shared_memory.read", "project.read", "account.read"}
 
 
 def resource_for(capability: Capability, who: Principal) -> Resource:
@@ -286,6 +302,9 @@ class CapabilityTableTest(unittest.TestCase):
             "project.memory.manage",
             "admin.audit.view",
             "admin.usage.view",
+            "project.create",
+            "project.invitation.respond",
+            "project.leave",
         ):
             self.assertIs(CAPABILITIES[Capability(value)].audit, AuditMode.REQUIRED)
 
