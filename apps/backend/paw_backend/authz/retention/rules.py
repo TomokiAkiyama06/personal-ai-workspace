@@ -1,6 +1,6 @@
 """Retention / partitioning rules of ``audit_events``: pure functions, no database.
 
-Decision 0027 (Issue #86, proposed; see ``docs/decisions/0027-audit-retention-and-
+Decision 0027 (Issue #86, approved; see ``docs/decisions/0027-audit-retention-and-
 partitioning.md``) partitions ``audit_events`` by calendar month on ``recorded_at``
 (the database clock; append-only and forced by trigger, so it only ever moves
 forward) and gives old partitions a life cycle:

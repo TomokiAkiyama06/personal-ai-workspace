@@ -1,10 +1,10 @@
 # `audit_events` の保存期間・Partition・退避の方針
 
-- Status: Proposed
+- Status: Approved
 - Date: 2026-09-27
 - Scope: Issue [#86](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/86)（[Decision 0004](0004-rbac-capability-and-audit-policy.md) の 5 の 5「保存期間、Partition、古い行の退避は未決とする」を埋める）。Migration `0086`、`paw_backend/authz/retention/` を使う以降の Issue
 - Supersedes: なし。[Decision 0004](0004-rbac-capability-and-audit-policy.md) の 5（Audit Table の保護）を書き換えず、その未決事項（5 の 5）に**答える**追補。追記専用の保証（Trigger が UPDATE / DELETE / TRUNCATE を拒否する、`PUBLIC` の権限を外す、`PAW_APP_DATABASE_ROLE` には INSERT と SELECT だけ）は変えない
-- Approval: 未承認（Proposed）。この Decision が承認されるまで、実装（Migration `0086`）はコードとしては入るが、保存期間・退避の**運用**（`AuditRetentionService` を実際に呼び出すこと）は行わない前提とする
+- Approval: 2026-09-27、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで「全部推奨どおり」と回答して承認（末尾の「承認時の決定」）
 
 ## 背景
 
@@ -182,3 +182,11 @@ REQUIREMENTS.md に保存期間の定めはなく、法令上の保存義務も�
 承認された場合、この Decision が Migration `0086` と `paw_backend/authz/retention/` の設計判断を裏付ける。Decision 0004 の 5 の 5（保存期間・Partition・退避は未決）は、
 この Decision によって埋まったものとして扱う（0004 の本文は書き換えない）。方針を変える場合は、この Decision を書き換えず、新しい Decision から `Supersedes` する。
 承認されるまで、`AuditRetentionService` を実運用で呼び出す（cron・Admin Capability などに配線する）ことはしない。
+
+## 承認時の決定（2026-09-27）
+
+Human は、作業 Session で上の 6 点について推奨つきの説明を受け、「全部推奨どおり」と回答して承認した（6 点を一括で。個別の変更はない）。**6 点すべてが推奨どおりで、設計の変更はない。**
+
+6 点目（別 Issue の定期実行の仕組みを待つか）は、**待たずに今承認する**。ただし `AuditRetentionService.run_maintenance` を定期的に呼ぶ仕組み（cron・systemd timer・Admin Capability のいずれか）は、実運用に入る前に別 Issue で用意する。それまでは誰も呼ばないため、保存期間の適用・退避は実際には起きない。
+
+承認後に方針を変える場合は、この Decision を書き換えず、新しい Decision から `Supersedes` する。

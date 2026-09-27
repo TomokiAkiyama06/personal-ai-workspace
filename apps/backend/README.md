@@ -778,8 +778,8 @@ Application 起動時に一度、接続 User の権限を確認し、**`WARNING`
 
 #### 保存期間・Partition・退避（Issue #86、Migration `0086`）
 
-Issue [#86](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/86) と [Decision 0027](../../docs/decisions/0027-audit-retention-and-partitioning.md)（**Proposed、未承認**）が、
-`audit_events` の保存期間・Partition・退避の方針を決める。**承認されるまで、下の仕組みをコードとして持つだけで、実運用（定期的に呼び出すこと）はしない。**
+Issue [#86](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/86) と [Decision 0027](../../docs/decisions/0027-audit-retention-and-partitioning.md)（2026-09-27 に Human が承認）が、
+`audit_events` の保存期間・Partition・退避の方針を決める。**定期的に呼び出す仕組み（cron・systemd timer・Admin Capability）は別 Issue で用意するまで無いため、下の仕組みはコードとして持つだけで、まだ実運用では動かない。**
 
 - `audit_events` を `recorded_at`（Database の時計。Trigger が強制するので単調に増える）で**月ごとの Range Partition** にする。
   Migration `0086` は、既存の Table を `audit_events_p_legacy`（Migration 適用時までの全行、`FOR VALUES FROM (MINVALUE)`）に改名し、その場所に新しい Partition 化された `audit_events` を作る
@@ -801,7 +801,7 @@ Issue [#86](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/86) 
 
 - 許可した読み取り（`DENIED_ONLY`。人間の `project.read`、`shared_memory.read`）は記録しません。誰が何を読んだかは Audit から分かりません（Agent の読み取りは記録します）。
 - 認証済みの User の拒否は、1 回ごとに 1 行を書きます。この拒否の回数制限はありません（Login の Backoff と Token の Rate Limit は別で、[Login / Session / Password Policy](#login--session--password-policy)）。未認証の拒否は Log だけです。
-- 保存期間・Partition・古い行の退避は、上の「保存期間・Partition・退避（Issue #86）」のとおり Decision 0027 が Proposed（未承認）のため、実運用はまだしません。
+- 保存期間・Partition・古い行の退避は、上の「保存期間・Partition・退避（Issue #86）」のとおり Decision 0027 は承認済みですが、定期的に呼び出す仕組みが別 Issue で用意されるまで、実運用はまだしません。
 - Repository の ACL の保存と解決は呼び出す側（PAW-027 など）の責任です。この Backend は、渡された `RepoAcl` を判定するだけです。
   Override が Project の Role を広げてよいか、User 単位の許可リストを持つかは、要件が定めておらず、Decision 0004 で Human が「狭めるだけ・権限の集合」で承認しました（2026-09-25）。
 - `Scope.SELF` の Capability（`chat.use`、`memory.use` など）は `Project` の状態と Member 資格を見ません

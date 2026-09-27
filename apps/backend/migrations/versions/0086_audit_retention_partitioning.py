@@ -5,7 +5,7 @@ Revises: 0071
 Create Date: 2026-09-27
 
 Decision 0004 (PAW-025) left the retention period, the partitioning scheme and
-where old rows go undecided (its 5.5). Decision 0027 (proposed;
+where old rows go undecided (its 5.5). Decision 0027 (approved;
 ``docs/decisions/0027-audit-retention-and-partitioning.md``) answers this:
 monthly ``PARTITION BY RANGE (recorded_at)``, a second parent
 ``audit_events_archive`` that old partitions move to (a metadata-only

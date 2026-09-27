@@ -25,7 +25,7 @@ constraint) and adds its own closed-schema constraint. ``AuditEvent`` (``audit.p
 has no ``details`` field and is unchanged; ``paw_backend.research.privacy.audit``
 writes that row.
 
-Migration ``0086`` (issue #86, Decision 0027, proposed) makes ``audit_events`` a
+Migration ``0086`` (issue #86, Decision 0027, approved) makes ``audit_events`` a
 partitioned table (``PARTITION BY RANGE (recorded_at)``, monthly), which is why
 the primary key is ``(id, recorded_at)`` and not ``id`` alone: PostgreSQL requires
 every unique / primary key constraint on a partitioned table to include its
