@@ -3,7 +3,9 @@
 Which sources back a claim, which claims an answer or a task used, and which
 claims (or sources) duplicate or contradict each other. Kept apart from
 Long-term Memory and from the Research Scratch Store: provenance is permanent
-and is never deleted by the application (see ``models.py``).
+and is never rewritten by the application, and is deleted only once, when the
+project it belongs to is itself purged (see ``models.py`` and ``purge_projects``,
+Decision 0028).
 
 Who may call it
 ---------------
@@ -12,7 +14,9 @@ The store performs **no authorisation**, like ``TaskService`` and
 it has checked. There is no HTTP surface yet. The intended mapping to the
 capabilities of ``paw_backend.authz`` (a proposal, not enforced here):
 ``get_claim``, ``trace`` and ``list_relations``: ``project.read``;
-``record_claim``, ``add_reference`` and ``mark_related``: ``project.task.run``.
+``record_claim``, ``add_reference`` and ``mark_related``: ``project.task.run``;
+``purge_projects``: the Backend's own orchestrator only (no user or agent;
+Decision 0028), like ``ScratchStore.purge_projects``.
 
 What is written where (this module orchestrates; the rules live in ``rules.py``
 and the statements in ``queries.py``)
@@ -68,6 +72,7 @@ unchanged; their text can contain SQL parameters, so a caller must never show
 
 import hashlib
 import inspect
+import logging
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -75,16 +80,20 @@ from typing import Any
 from uuid import UUID
 
 import psycopg.errors
-from sqlalchemy import BigInteger, Table, func, literal, select, text
+from sqlalchemy import BigInteger, Table, delete, func, literal, select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from paw_backend.db import Database
+from paw_backend.projects.models import ProjectRow
+from paw_backend.projects.records import ProjectStatus
+from paw_backend.projects.store import get_project_status_for_share
 from paw_backend.research.provenance import queries
 from paw_backend.research.provenance.errors import (
     ClaimNotFoundError,
     InputProblem,
     InvalidProvenanceInputError,
+    ProjectUnavailableError,
     ProvenanceBusyError,
     ProvenanceLimitError,
     SourceNotFoundError,
@@ -100,7 +109,14 @@ from paw_backend.research.provenance.limits import (
     MAX_TRACE_LIMIT,
     MIN_LOCK_TIMEOUT_MS,
 )
-from paw_backend.research.provenance.models import CLAIM_SOURCES, CLAIMS, SOURCES
+from paw_backend.research.provenance.models import (
+    CLAIM_RELATIONS,
+    CLAIM_SOURCES,
+    CLAIM_USES,
+    CLAIMS,
+    SOURCE_RELATIONS,
+    SOURCES,
+)
 from paw_backend.research.provenance.records import (
     EntityKind,
     RecordedClaim,
@@ -125,14 +141,31 @@ from paw_backend.research.provenance.validation import (
     validate_datetime,
     validate_enum,
     validate_optional_uuid,
+    validate_project_ids,
     validate_text,
     validate_uuid,
 )
 from paw_backend.tasks.models import TaskRow
 
+logger = logging.getLogger(__name__)
+
 Clock = Callable[[], datetime]
 
 _TASKS = TaskRow.__table__
+# Never written here. ``purge_projects`` (Decision 0028) locks the caller's ids
+# ``FOR UPDATE`` to find which are a tombstone (``status = 'deleted'``); every
+# writer (``record_claim``, ``add_reference``, ``mark_related``) locks its own
+# project ``FOR SHARE`` first (``_guard_project``), the same row, so the two
+# are serialised: a write cannot land after its table was already purged, and
+# a purge cannot run while an overlapping write still believes the project
+# is usable (Decision 0028, review follow-up).
+_PROJECTS = ProjectRow.__table__
+# Children first, so a ``DELETE`` never meets a foreign key it still satisfies:
+# the three link tables and the two relation tables reference ``research_claims``
+# / ``research_sources`` (composite foreign keys on ``(id, project_id)``), which
+# are deleted last, sources after claims (a claim link points at both).
+_CHILDREN_FIRST = (CLAIM_SOURCES, CLAIM_USES, CLAIM_RELATIONS, SOURCE_RELATIONS)
+_PARENTS_LAST = (CLAIMS, SOURCES)
 
 
 def _utc_now() -> datetime:
@@ -275,6 +308,24 @@ class ProvenanceStore:
             raise ClaimNotFoundError() if table is CLAIMS else SourceNotFoundError()
 
     @staticmethod
+    async def _guard_project(session: AsyncSession, project_id: UUID) -> None:
+        """Lock the project row ``FOR SHARE`` (rule 4); refuse a deleted one.
+
+        The same row :meth:`purge_projects` locks ``FOR UPDATE``, so the two
+        are serialised: this call either sees the project before a purge that
+        runs later (and the purge, deleting broadly by ``project_id``, still
+        catches whatever this call is about to write), or it waits for a
+        purge already in flight and then sees ``'deleted'`` and refuses. A
+        project this store has never heard of (``None``: every existing test
+        and caller that never seeded a ``projects`` row, since these tables
+        carry no foreign key to it -- module docstring) is left alone, exactly
+        as before this guard existed.
+        """
+        status = await get_project_status_for_share(session, project_id)
+        if status is ProjectStatus.DELETED:
+            raise ProjectUnavailableError()
+
+    @staticmethod
     async def _serialize_claim(session: AsyncSession, claim_id: UUID) -> None:
         """Wait for, then hold until the transaction ends, the advisory lock of
         the claim (rule 2). Two claims whose keys collide only wait for each
@@ -342,6 +393,7 @@ class ProvenanceStore:
         linked: dict[tuple[str, str], SourceLink] = {}
         new_links = 0
         async with self._transaction() as session:
+            await self._guard_project(session, project)
             if task is not None:
                 await self._require_task(session, project, task)
             claim, created = await queries.ensure_claim(
@@ -417,6 +469,7 @@ class ProvenanceStore:
         now = self._now()
         added = 0
         async with self._transaction() as session:
+            await self._guard_project(session, project)
             if used_by.kind is ReferenceKind.TASK:
                 try:
                     await self._require_task(session, project, used_by.id)
@@ -467,6 +520,7 @@ class ProvenanceStore:
         now = self._now()
         table = CLAIMS if kind_of_entity is EntityKind.CLAIM else SOURCES
         async with self._transaction() as session:
+            await self._guard_project(session, project)
             await self._require_rows(session, table, project, [low, high])
             relation, _ = await queries.insert_relation(
                 session, project, kind_of_entity, relation_kind, low, high, creator, now
@@ -552,3 +606,76 @@ class ProvenanceStore:
                 session, project, kind_of_entity, [item_id]
             )
         return order_relations(kind_of_entity, item_id, relations)
+
+    # -- purge (Decision 0028) --------------------------------------------------
+
+    async def purge_projects(self, project_ids: object) -> tuple[UUID, ...]:
+        """Delete every source, claim, link and relation of projects that are
+        **Deleted** (Decision 0028).
+
+        Backend-internal, like ``ProjectService.purge_expired``: no actor, no
+        Authorizer, no Capability. ``purge_expired`` returns the ids of the
+        projects it just marked Deleted; the orchestrator passes them here
+        (Decision 0008 section 2: each area removes its own data), the same way
+        it already passes them to ``RepositoryService.purge_projects``.
+
+        This is the one place the provenance store ever deletes a row: every
+        other operation only ever reads and inserts (module docstring). Deletion
+        is scoped to a Project's own lifecycle-confirmed removal, not to
+        correcting a mistaken Source or Claim (which is still never done by
+        rewriting or deleting one; see ``record_claim``).
+
+        Validation: ``project_ids`` must satisfy :func:`validate_project_ids`
+        (``InvalidProvenanceInputError`` before the database is touched); an
+        empty collection returns ``()`` without opening a transaction. A project
+        that is not (yet) a tombstone keeps its provenance, whatever the caller
+        says: every ``DELETE`` is scoped, in its own statement, to the ids among
+        ``project_ids`` whose ``projects.status`` is ``'deleted'`` **under a
+        ``FOR UPDATE`` lock taken first, in this same transaction**, on every
+        id in ``project_ids`` (missing ids lock nothing). This is the other
+        half of ``_guard_project``'s ``FOR SHARE``: the two calls serialise
+        against each other on the same row, so a write from ``record_claim`` /
+        ``add_reference`` / ``mark_related`` either fully precedes this purge
+        (and is swept up by it, since every ``DELETE`` below is scoped broadly
+        by ``project_id``, not by the ids that existed when this method
+        started) or fully follows it (and then finds the project ``'deleted'``
+        and refuses itself).
+
+        One transaction, six statements in foreign-key order: the three link /
+        relation tables that reference a claim or a source
+        (``research_claim_sources``, ``research_claim_uses``,
+        ``research_claim_relations``, ``research_source_relations``) first, then
+        ``research_claims``, then ``research_sources`` last (a claim's link also
+        references its source). Idempotent: a second call finds nothing left to
+        delete for the same ids.
+
+        Returns the ids that had at least one row removed from any of the six
+        tables, sorted ascending; an id with no provenance, or whose project
+        turned out not to be Deleted, is left out (not an error).
+        """
+        ids = validate_project_ids(project_ids)
+        if not ids:
+            return ()
+        purged: set[UUID] = set()
+        async with self._transaction() as session:
+            locked = (
+                await session.execute(
+                    select(_PROJECTS.c.id)
+                    .where(_PROJECTS.c.id.in_(ids), _PROJECTS.c.status == "deleted")
+                    .with_for_update()
+                )
+            ).all()
+            due = tuple(row.id for row in locked)
+            if not due:
+                return ()
+            for table in (*_CHILDREN_FIRST, *_PARENTS_LAST):
+                result = await session.execute(
+                    delete(table)
+                    .where(table.c.project_id.in_(due))
+                    .returning(table.c.project_id)
+                )
+                purged.update(row.project_id for row in result)
+        ordered = tuple(sorted(purged))
+        if ordered:
+            logger.info("Provenance purged for %d deleted project(s)", len(ordered))
+        return ordered

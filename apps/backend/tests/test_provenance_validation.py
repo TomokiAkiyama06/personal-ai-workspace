@@ -10,6 +10,7 @@ from paw_backend.research.provenance.errors import (
     InvalidProvenanceInputError,
     ProvenanceError,
 )
+from paw_backend.research.provenance.limits import MAX_PURGE_PROJECTS
 from paw_backend.research.provenance.records import Stance
 from paw_backend.research.provenance.validation import (
     validate_bounded_int,
@@ -19,6 +20,7 @@ from paw_backend.research.provenance.validation import (
     validate_locator,
     validate_optional_datetime,
     validate_optional_uuid,
+    validate_project_ids,
     validate_text,
     validate_uuid,
 )
@@ -62,6 +64,7 @@ class ErrorTypesTest(unittest.TestCase):
                 "unknown_reference",
                 "self_reference",
                 "conflict",
+                "not_a_collection",
             },
         )
 
@@ -408,6 +411,68 @@ class ContentHashTest(unittest.TestCase):
             Problem(self, validate_content_hash, "h", GOOD_HASH.encode()).problem,
             InputProblem.WRONG_TYPE,
         )
+
+
+class ProjectIdsTest(unittest.TestCase):
+    """``validate_project_ids`` (``ProvenanceStore.purge_projects``, Decision 0028)."""
+
+    def test_an_empty_or_missing_collection_is_fine(self):
+        self.assertEqual(validate_project_ids([]), ())
+        self.assertEqual(validate_project_ids(()), ())
+        self.assertEqual(validate_project_ids(set()), ())
+
+    def test_a_list_tuple_or_set_of_uuids_is_accepted(self):
+        a, b = uuid4(), uuid4()
+        self.assertEqual(set(validate_project_ids([a, b])), {a, b})
+        self.assertEqual(set(validate_project_ids((a, b))), {a, b})
+        self.assertEqual(set(validate_project_ids({a, b})), {a, b})
+
+    def test_duplicates_collapse_and_the_first_order_is_kept(self):
+        a, b = uuid4(), uuid4()
+        self.assertEqual(validate_project_ids([a, b, a, b, a]), (a, b))
+
+    def test_a_string_or_bytes_is_not_a_collection_of_ids(self):
+        for bad in ("not-a-list", b"not-a-list", None, 5, uuid4()):
+            with self.subTest(repr(bad)):
+                self.assertEqual(
+                    Problem(self, validate_project_ids, bad).problem,
+                    InputProblem.NOT_A_COLLECTION,
+                )
+
+    def test_every_element_must_be_a_uuid(self):
+        self.assertEqual(
+            Problem(self, validate_project_ids, ["not-a-uuid"]).problem,
+            InputProblem.WRONG_TYPE,
+        )
+        # None is REQUIRED, not WRONG_TYPE (validate_uuid's own rule).
+        self.assertEqual(
+            Problem(self, validate_project_ids, [None]).problem,
+            InputProblem.REQUIRED,
+        )
+
+    def test_more_than_the_maximum_is_too_many_even_with_duplicates(self):
+        self.assertEqual(
+            len(validate_project_ids([uuid4() for _ in range(MAX_PURGE_PROJECTS)])),
+            MAX_PURGE_PROJECTS,
+        )
+        self.assertEqual(
+            Problem(
+                self,
+                validate_project_ids,
+                [uuid4() for _ in range(MAX_PURGE_PROJECTS + 1)],
+            ).problem,
+            InputProblem.TOO_MANY,
+        )
+        one = uuid4()
+        self.assertEqual(
+            Problem(
+                self, validate_project_ids, [one] * (MAX_PURGE_PROJECTS + 1)
+            ).problem,
+            InputProblem.TOO_MANY,
+        )
+
+    def test_a_custom_field_name_is_used_in_the_error(self):
+        self.assertEqual(Problem(self, validate_project_ids, "bad", "ids").field, "ids")
 
 
 if __name__ == "__main__":

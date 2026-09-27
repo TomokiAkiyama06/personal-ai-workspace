@@ -8,6 +8,7 @@ deletes expired items regularly. There is no HTTP surface yet; see
 from paw_backend.research.scratch.errors import (
     InputProblem,
     InvalidScratchInputError,
+    ProjectUnavailableError,
     ScratchBusyError,
     ScratchError,
     ScratchItemNotFoundError,
@@ -49,6 +50,7 @@ __all__ = [
     "InputProblem",
     "InvalidScratchInputError",
     "Lease",
+    "ProjectUnavailableError",
     "PromotionOutcome",
     "PromotionState",
     "PurgeResult",

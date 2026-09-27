@@ -1,18 +1,24 @@
 """ScratchStore.purge_expired and the acceptance workflows (real PostgreSQL)."""
 
+import asyncio
 from datetime import timedelta, timezone
 from uuid import uuid4
 
+from paw_backend.projects.records import ProjectStatus
 from paw_backend.research.scratch import (
     DeferralReason,
     InputProblem,
     InvalidScratchInputError,
+    ProjectUnavailableError,
     PromotionOutcome,
     PurgeResult,
     ScratchItemNotFoundError,
 )
 
 from .scratch_support import T0, PostgresScratchTestCase, requires_postgres
+
+DEADLINE = 15  # seconds; only a hung implementation ever waits this long
+STILL_WAITING = 0.5  # seconds
 
 HOUR = timedelta(hours=1)
 MINUTE = timedelta(minutes=1)
@@ -509,3 +515,197 @@ class RetentionWorkflowTest(PostgresScratchTestCase):
         self.assertEqual(
             (self.table_count("memory_versions"), self.table_count("memories")), before
         )
+
+
+@requires_postgres
+class PurgeProjectsTest(PostgresScratchTestCase):
+    """``ScratchStore.purge_projects`` (Decision 0028)."""
+
+    async def test_an_empty_collection_deletes_nothing_and_opens_no_transaction(self):
+        self.assertEqual(await self.store.purge_projects([]), ())
+        self.assertEqual(await self.store.purge_projects(()), ())
+
+    async def test_unknown_ids_are_fine_and_purge_nothing(self):
+        self.assertEqual(await self.store.purge_projects([uuid4()]), ())
+
+    async def test_bad_input_is_rejected_before_the_database_is_touched(self):
+        item_id = self.seed_item(expires_at=T0 + timedelta(hours=1))
+        for bad, problem in (
+            ("not-a-list", InputProblem.NOT_A_COLLECTION),
+            (b"not-a-list", InputProblem.NOT_A_COLLECTION),
+            (None, InputProblem.NOT_A_COLLECTION),
+            (["not-a-uuid"], InputProblem.WRONG_TYPE),
+            ([None], InputProblem.REQUIRED),  # validate_uuid's own rule
+        ):
+            with self.subTest(bad=bad):
+                with self.assertRaises(InvalidScratchInputError) as raised:
+                    await self.store.purge_projects(bad)
+                self.assertEqual(
+                    (raised.exception.field, raised.exception.problem),
+                    ("project_ids", problem),
+                )
+        self.assertTrue(self.exists(item_id))
+
+    async def test_a_project_that_is_not_yet_a_tombstone_keeps_its_items(self):
+        for status in (
+            ProjectStatus.ACTIVE,
+            ProjectStatus.ARCHIVED,
+            ProjectStatus.PENDING_DELETION,
+        ):
+            with self.subTest(status=status):
+                project_id = self.seed_project(status)
+                item_id = self.seed_item(
+                    project_id=project_id, expires_at=T0 + timedelta(hours=1)
+                )
+
+                purged = await self.store.purge_projects([project_id])
+
+                self.assertEqual(purged, ())
+                self.assertTrue(self.exists(item_id))
+
+    async def test_every_item_of_a_deleted_project_goes_whatever_its_state(self):
+        project_id = self.seed_project(ProjectStatus.DELETED)
+        unexpired = self.seed_item(
+            project_id=project_id, expires_at=T0 + timedelta(hours=1)
+        )
+        pinned = self.seed_item(
+            project_id=project_id, expires_at=T0 - timedelta(hours=1), pinned=True
+        )
+        saved = self.seed_item(
+            project_id=project_id, expires_at=T0 - timedelta(hours=1), saved=True
+        )
+        pending = self.seed_pending(
+            project_id=project_id, expires_at=T0 - timedelta(hours=1)
+        )
+        in_use = self.seed_item(
+            project_id=project_id, expires_at=T0 - timedelta(hours=1)
+        )
+        self.seed_lease(in_use, T0 + timedelta(hours=1))
+
+        purged = await self.store.purge_projects([project_id])
+
+        self.assertEqual(purged, (project_id,))
+        self.assertFalse({unexpired, pinned, saved, pending, in_use} & self.item_ids())
+        self.assertEqual(self.table_count("research_scratch_leases"), 0)
+
+    async def test_other_projects_are_left_alone(self):
+        gone = self.seed_project(ProjectStatus.DELETED)
+        kept_project = self.seed_project(ProjectStatus.ACTIVE)
+        removed = self.seed_item(project_id=gone, expires_at=T0 + timedelta(hours=1))
+        kept_item = self.seed_item(
+            project_id=kept_project, expires_at=T0 + timedelta(hours=1)
+        )
+
+        purged = await self.store.purge_projects([gone, kept_project])
+
+        self.assertEqual(purged, (gone,))
+        self.assertEqual(self.item_ids(), {kept_item})
+        self.assertFalse(self.exists(removed))
+
+    async def test_only_projects_with_at_least_one_item_are_returned(self):
+        with_items = self.seed_project(ProjectStatus.DELETED)
+        without_items = self.seed_project(ProjectStatus.DELETED)
+        self.seed_item(project_id=with_items, expires_at=T0 + timedelta(hours=1))
+
+        purged = await self.store.purge_projects([with_items, without_items])
+
+        self.assertEqual(purged, (with_items,))
+
+    async def test_the_result_is_sorted_and_duplicates_collapse(self):
+        first = self.seed_project(ProjectStatus.DELETED)
+        second = self.seed_project(ProjectStatus.DELETED)
+        self.seed_item(project_id=first, expires_at=T0 + timedelta(hours=1))
+        self.seed_item(project_id=second, expires_at=T0 + timedelta(hours=1))
+
+        purged = await self.store.purge_projects([second, first, first, second])
+
+        self.assertEqual(purged, tuple(sorted((first, second))))
+
+    async def test_a_second_call_finds_nothing_left(self):
+        project_id = self.seed_project(ProjectStatus.DELETED)
+        self.seed_item(project_id=project_id, expires_at=T0 + timedelta(hours=1))
+
+        first = await self.store.purge_projects([project_id])
+        second = await self.store.purge_projects([project_id])
+
+        self.assertEqual(first, (project_id,))
+        self.assertEqual(second, ())
+
+    async def test_a_deleted_project_with_purged_items_is_logged(self):
+        project_id = self.seed_project(ProjectStatus.DELETED)
+        self.seed_item(project_id=project_id, expires_at=T0 + timedelta(hours=1))
+
+        with self.assertLogs("paw_backend.research.scratch.service", level="INFO"):
+            await self.store.purge_projects([project_id])
+
+    async def test_nothing_purged_is_not_logged(self):
+        with self.assertRaises(AssertionError):
+            with self.assertLogs("paw_backend.research.scratch.service", level="INFO"):
+                await self.store.purge_projects([uuid4()])
+
+
+@requires_postgres
+class AddAfterDeleteTest(PostgresScratchTestCase):
+    """``add`` refuses a project ``purge_projects`` already deleted
+    (``_guard_project``, Decision 0028)."""
+
+    async def test_add_refuses_a_deleted_project(self):
+        project_id = self.seed_project(ProjectStatus.DELETED)
+
+        with self.assertRaises(ProjectUnavailableError):
+            await self.store.add(
+                project_id, created_by=self.user_id, summary="A new result"
+            )
+
+        self.assertEqual(self.table_count("research_scratch_items"), 0)
+
+    async def test_a_project_this_store_has_no_row_for_is_unaffected(self):
+        # Most tests never seed a ``projects`` row (module docstring: no
+        # foreign key); the guard must stay a no-op for them.
+        unknown_project = uuid4()
+
+        item = await self.store.add(
+            unknown_project, created_by=self.user_id, summary="Fine"
+        )
+
+        self.assertEqual(item.summary, "Fine")
+
+
+@requires_postgres
+class PurgeProjectsSerializationTest(PostgresScratchTestCase):
+    """An ``add`` and ``purge_projects`` that overlap are serialised by the
+    project row lock (``_guard_project`` / Decision 0028)."""
+
+    async def test_a_purge_that_holds_the_lock_makes_add_wait_then_refuse(self):
+        project_id = self.seed_project(ProjectStatus.DELETED)
+        _, transaction = self.lock_project_for_update(project_id)
+        task = self.spawn(
+            self.store.add(project_id, created_by=self.user_id, summary="New")
+        )
+        await asyncio.sleep(STILL_WAITING)
+        self.assertWaiting(task)
+
+        transaction.commit()  # the simulated purge "finishes": still deleted
+
+        with self.assertRaises(ProjectUnavailableError):
+            await asyncio.wait_for(task, DEADLINE)
+        self.assertEqual(self.table_count("research_scratch_items"), 0)
+
+    async def test_an_add_that_holds_the_lock_makes_the_purge_wait_then_sweep_it_up(
+        self,
+    ):
+        project_id = self.seed_project(ProjectStatus.DELETED)
+        _, transaction = self.lock_project_for_share(project_id)
+        task = self.spawn(self.store.purge_projects([project_id]))
+        await asyncio.sleep(STILL_WAITING)
+        self.assertWaiting(task)
+
+        # A real ``add`` would insert under this same held lock
+        # (``_guard_project`` takes exactly this ``FOR SHARE``); a plain
+        # ``INSERT`` stands in for it here, needing no lock of its own.
+        self.seed_item(project_id=project_id, expires_at=T0 + timedelta(hours=1))
+        transaction.commit()
+
+        purged = await asyncio.wait_for(task, DEADLINE)
+        self.assertEqual(purged, (project_id,))
+        self.assertEqual(self.table_count("research_scratch_items"), 0)

@@ -11,6 +11,7 @@ from paw_backend.research.scratch import (
     PromotionOutcome,
     PromotionState,
 )
+from paw_backend.research.scratch.limits import MAX_PURGE_PROJECTS
 from paw_backend.research.scratch.validation import (
     NewItem,
     validate_bool,
@@ -20,6 +21,7 @@ from paw_backend.research.scratch.validation import (
     validate_optional_text,
     validate_optional_uuid,
     validate_outcome,
+    validate_project_ids,
     validate_source_metadata,
     validate_uuid,
 )
@@ -566,6 +568,63 @@ class BoolAndOutcomeTest(ValidationTestCase):
         for bad in ("promoted", "rejected", PromotionState.PROMOTED, 1, True):
             with self.subTest(repr(bad)):
                 self.assertInvalid("outcome", P.WRONG_TYPE, validate_outcome, bad)
+
+
+class ProjectIdsTest(ValidationTestCase):
+    """``validate_project_ids`` (``ScratchStore.purge_projects``, Decision 0028)."""
+
+    def test_an_empty_or_missing_collection_is_fine(self):
+        self.assertEqual(validate_project_ids([]), ())
+        self.assertEqual(validate_project_ids(()), ())
+        self.assertEqual(validate_project_ids(set()), ())
+
+    def test_a_list_tuple_or_set_of_uuids_is_accepted(self):
+        a, b = uuid4(), uuid4()
+        self.assertEqual(set(validate_project_ids([a, b])), {a, b})
+        self.assertEqual(set(validate_project_ids((a, b))), {a, b})
+        self.assertEqual(set(validate_project_ids({a, b})), {a, b})
+
+    def test_duplicates_collapse_and_the_first_order_is_kept(self):
+        a, b = uuid4(), uuid4()
+        self.assertEqual(validate_project_ids([a, b, a, b, a]), (a, b))
+
+    def test_a_string_or_bytes_is_not_a_collection_of_ids(self):
+        for bad in ("not-a-list", b"not-a-list", None, 5, uuid4()):
+            with self.subTest(repr(bad)):
+                self.assertInvalid(
+                    "project_ids", P.NOT_A_COLLECTION, validate_project_ids, bad
+                )
+
+    def test_every_element_must_be_a_uuid(self):
+        self.assertInvalid(
+            "project_ids", P.WRONG_TYPE, validate_project_ids, ["not-a-uuid"]
+        )
+        # None is REQUIRED, not WRONG_TYPE (validate_uuid's own rule).
+        self.assertInvalid("project_ids", P.REQUIRED, validate_project_ids, [None])
+
+    def test_more_than_the_maximum_is_too_many_even_with_duplicates(self):
+        self.assertEqual(
+            len(validate_project_ids([uuid4() for _ in range(MAX_PURGE_PROJECTS)])),
+            MAX_PURGE_PROJECTS,
+        )
+        self.assertInvalid(
+            "project_ids",
+            P.TOO_MANY,
+            validate_project_ids,
+            [uuid4() for _ in range(MAX_PURGE_PROJECTS + 1)],
+        )
+        one = uuid4()
+        self.assertInvalid(
+            "project_ids",
+            P.TOO_MANY,
+            validate_project_ids,
+            [one] * (MAX_PURGE_PROJECTS + 1),
+        )
+
+    def test_a_custom_field_name_is_used_in_the_error(self):
+        self.assertInvalid(
+            "ids", P.NOT_A_COLLECTION, validate_project_ids, "bad", "ids"
+        )
 
 
 if __name__ == "__main__":

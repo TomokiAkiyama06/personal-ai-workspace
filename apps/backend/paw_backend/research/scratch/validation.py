@@ -17,6 +17,7 @@ Problem mapping (used by every function): ``None`` where a value is required is
 
 import json
 import math
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -59,6 +60,28 @@ def validate_optional_uuid(field: str, value: object) -> UUID | None:
     if value is None:
         return None
     return validate_uuid(field, value)
+
+
+def validate_project_ids(value: object, field: str = "project_ids") -> tuple[UUID, ...]:
+    """At most ``MAX_PURGE_PROJECTS`` project ids (``ScratchStore.purge_projects``).
+
+    Not an ``Iterable``, or a bare ``str`` / ``bytes`` (each iterates into
+    characters or ints, never what a caller means by "a collection of ids"):
+    ``NOT_A_COLLECTION``. More than ``MAX_PURGE_PROJECTS`` elements, counting
+    duplicates so a caller cannot dodge the bound by repeating one id:
+    ``TOO_MANY``. Every element must satisfy :func:`validate_uuid`. Duplicates
+    collapse; the input order is kept.
+    """
+    if isinstance(value, str | bytes) or not isinstance(value, Iterable):
+        raise InvalidScratchInputError(field, InputProblem.NOT_A_COLLECTION)
+    found: dict[UUID, None] = {}
+    seen = 0
+    for item in value:
+        seen += 1
+        if seen > limits.MAX_PURGE_PROJECTS:
+            raise InvalidScratchInputError(field, InputProblem.TOO_MANY)
+        found[validate_uuid(field, item)] = None
+    return tuple(found)
 
 
 def validate_optional_text(field: str, value: object, *, max_chars: int) -> str | None:

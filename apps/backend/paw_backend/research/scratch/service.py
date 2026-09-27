@@ -22,7 +22,8 @@ exposed over HTTP by this issue. The intended mapping to the capabilities of
 * ``request_promotion``: ``project.memory.use``; ``resolve_promotion``:
   ``project.memory.manage`` (not delegable to an agent: research is never saved
   to Long-term Memory on an agent's own say-so);
-* ``purge_expired``: the Backend's own janitor only (no user or agent).
+* ``purge_expired``, ``purge_projects``: the Backend's own janitor / orchestrator
+  only (no user or agent; Decision 0028 for ``purge_projects``).
 
 Every per-item method takes ``project_id`` and finds the item only inside that
 project: an id from another project is "not found", exactly like a missing id.
@@ -104,6 +105,7 @@ logs nothing that contains caller content.
 """
 
 import inspect
+import logging
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import replace
@@ -128,9 +130,13 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from paw_backend.db import Database
+from paw_backend.projects.models import ProjectRow
+from paw_backend.projects.records import ProjectStatus
+from paw_backend.projects.store import get_project_status_for_share
 from paw_backend.research.scratch.errors import (
     InputProblem,
     InvalidScratchInputError,
+    ProjectUnavailableError,
     ScratchBusyError,
     ScratchItemNotFoundError,
     ScratchLeaseLimitError,
@@ -163,9 +169,12 @@ from paw_backend.research.scratch.validation import (
     validate_new_item,
     validate_optional_uuid,
     validate_outcome,
+    validate_project_ids,
     validate_uuid,
 )
 from paw_backend.tasks.models import TaskRow
+
+logger = logging.getLogger(__name__)
 
 Clock = Callable[[], datetime]
 # Test seam of ``purge_expired`` (see its docstring): called with the session of
@@ -180,6 +189,13 @@ MAX_LOCK_TIMEOUT_MS = 60_000
 _ITEMS = ScratchItemRow.__table__
 _LEASES = ScratchLeaseRow.__table__
 _TASKS = TaskRow.__table__
+# Never written here. ``purge_projects`` (Decision 0028) locks the caller's ids
+# ``FOR UPDATE`` to find which are a tombstone (``status = 'deleted'``); ``add``
+# locks its own project ``FOR SHARE`` first (``_guard_project``), the same row,
+# so the two are serialised: an item cannot be created after its project was
+# already purged, and a purge cannot run while an overlapping ``add`` still
+# believes the project is usable (Decision 0028, review follow-up).
+_PROJECTS = ProjectRow.__table__
 
 
 def _has_active_lease(now: datetime) -> ColumnElement[bool]:
@@ -316,6 +332,25 @@ class ScratchStore:
         return None if row is None else _snapshot(row, now, in_use=row["in_use"])
 
     @staticmethod
+    async def _guard_project(session: AsyncSession, project_id: UUID) -> None:
+        """Lock the project row ``FOR SHARE`` (module docstring, rule 4);
+        refuse a deleted one.
+
+        The same row :meth:`purge_projects` locks ``FOR UPDATE``, so the two
+        are serialised: this call either sees the project before a purge that
+        runs later (and the purge, deleting broadly by ``project_id``, still
+        catches whatever this call is about to insert), or it waits for a
+        purge already in flight and then sees ``'deleted'`` and refuses. A
+        project this store has never heard of (``None``: every existing test
+        and caller that never seeded a ``projects`` row, since these tables
+        carry no foreign key to it -- module docstring) is left alone, exactly
+        as before this guard existed.
+        """
+        status = await get_project_status_for_share(session, project_id)
+        if status is ProjectStatus.DELETED:
+            raise ProjectUnavailableError()
+
+    @staticmethod
     async def _lock(session: AsyncSession, project_id: UUID, item_id: UUID) -> bool:
         """Lock the item's row (waiting); False when there is no such item."""
         statement = (
@@ -411,6 +446,7 @@ class ScratchStore:
         )
         now = self._now()
         async with self._transaction() as session:
+            await self._guard_project(session, fields.project_id)
             if fields.task_id is not None:
                 task = (
                     select(_TASKS.c.id)
@@ -859,3 +895,64 @@ class ScratchStore:
             # cancelled or the database disposed, never cancelled on the server
             # (see the docstring): the janitor must stop with the application.
             return await self._database.run_abortable(batch)
+
+    async def purge_projects(self, project_ids: object) -> tuple[UUID, ...]:
+        """Delete every item of projects that are **Deleted** (Decision 0028).
+
+        Backend-internal, like ``purge_expired``: no actor, no Authorizer, no
+        Capability. ``ProjectService.purge_expired`` returns the ids of the
+        projects it just marked Deleted; the orchestrator passes them here
+        (Decision 0008 section 2: each area removes its own data), the same way
+        it already passes them to ``RepositoryService.purge_projects``.
+
+        Every item of a named project is deleted **regardless of** ``pinned``,
+        ``saved``, ``promotion_state`` or an active lease: those markers defer
+        the TTL purge (``purge_expired``) so that work a live project still
+        needs is not lost to the clock, but once the project itself is gone
+        (Pending deletion for 30 days, then purged) there is no project left for
+        the deferral to protect. Leases of a deleted item are removed with it
+        (the foreign key cascades).
+
+        Validation: ``project_ids`` must satisfy :func:`validate_project_ids`
+        (``InvalidScratchInputError`` before the database is touched); an empty
+        collection returns ``()`` without opening a transaction. A project that
+        is not (yet) a tombstone keeps its items, whatever the caller says: the
+        ``DELETE`` is scoped to the ids among ``project_ids`` whose
+        ``projects.status`` is ``'deleted'`` **under a ``FOR UPDATE`` lock taken
+        first, in this same transaction**, on every id in ``project_ids``
+        (missing ids lock nothing). This is the other half of
+        ``_guard_project``'s ``FOR SHARE``: the two calls serialise against
+        each other on the same row, so an ``add`` either fully precedes this
+        purge (and is swept up by it, since the ``DELETE`` below is scoped
+        broadly by ``project_id``, not by the ids that existed when this
+        method started) or fully follows it (and then finds the project
+        ``'deleted'`` and refuses itself). One transaction. Idempotent: a
+        second call finds nothing left to delete.
+
+        Returns the ids that had at least one item removed, sorted ascending;
+        an id with no items, or whose project turned out not to be Deleted, is
+        left out (not an error).
+        """
+        ids = validate_project_ids(project_ids)
+        if not ids:
+            return ()
+        async with self._transaction() as session:
+            locked = (
+                await session.execute(
+                    select(_PROJECTS.c.id)
+                    .where(_PROJECTS.c.id.in_(ids), _PROJECTS.c.status == "deleted")
+                    .with_for_update()
+                )
+            ).all()
+            due = tuple(row.id for row in locked)
+            if not due:
+                return ()
+            deleted = await session.execute(
+                delete(_ITEMS)
+                .where(_ITEMS.c.project_id.in_(due))
+                .returning(_ITEMS.c.project_id)
+            )
+            purged = sorted({row.project_id for row in deleted})
+        if purged:
+            logger.info("Scratch items purged for %d deleted project(s)", len(purged))
+        return tuple(purged)
