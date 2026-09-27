@@ -7,9 +7,16 @@ provenance store test.
 from uuid import uuid4
 
 from paw_backend.projects.records import ProjectStatus
-from paw_backend.research.provenance import InputProblem, InvalidProvenanceInputError
+from paw_backend.research.provenance import (
+    EntityKind,
+    InputProblem,
+    InvalidProvenanceInputError,
+    ProjectUnavailableError,
+    Reference,
+    RelationKind,
+)
 
-from .provenance_support import PostgresProvenanceTestCase, requires_postgres
+from .provenance_support import PostgresProvenanceTestCase, link, requires_postgres
 
 
 @requires_postgres
@@ -148,3 +155,65 @@ class PurgeProjectsTest(PostgresProvenanceTestCase):
         with self.assertRaises(AssertionError):
             with self.assertLogs("paw_backend.research.provenance.store", level="INFO"):
                 await self.store.purge_projects([uuid4()])
+
+
+@requires_postgres
+class WriteAfterDeleteTest(PostgresProvenanceTestCase):
+    """``record_claim`` / ``add_reference`` / ``mark_related`` refuse a project
+    ``purge_projects`` already deleted (``_guard_project``, Decision 0028)."""
+
+    async def test_record_claim_refuses_a_deleted_project(self):
+        project_id = self.seed_project(ProjectStatus.DELETED)
+
+        with self.assertRaises(ProjectUnavailableError):
+            await self.store.record_claim(
+                project_id,
+                created_by=self.user_id,
+                text="A new claim",
+                sources=[link()],
+            )
+
+        self.assertEqual(self.table_count("research_claims"), 0)
+        self.assertEqual(self.table_count("research_sources"), 0)
+
+    async def test_add_reference_refuses_a_deleted_project(self):
+        project_id = self.seed_project(ProjectStatus.DELETED)
+        claim = self.seed_claim("Claim", project_id=project_id)
+
+        with self.assertRaises(ProjectUnavailableError):
+            await self.store.add_reference(
+                project_id,
+                reference=Reference.answer(uuid4()),
+                claim_ids=[claim],
+                created_by=self.user_id,
+            )
+
+        self.assertEqual(self.table_count("research_claim_uses"), 0)
+
+    async def test_mark_related_refuses_a_deleted_project(self):
+        project_id = self.seed_project(ProjectStatus.DELETED)
+        first = self.seed_claim("First", project_id=project_id)
+        second = self.seed_claim("Second", project_id=project_id)
+
+        with self.assertRaises(ProjectUnavailableError):
+            await self.store.mark_related(
+                project_id,
+                entity=EntityKind.CLAIM,
+                kind=RelationKind.DUPLICATE,
+                first_id=first,
+                second_id=second,
+                created_by=self.user_id,
+            )
+
+        self.assertEqual(self.table_count("research_claim_relations"), 0)
+
+    async def test_a_project_this_store_has_no_row_for_is_unaffected(self):
+        # Most tests never seed a ``projects`` row (module docstring: no
+        # foreign key); the guard must stay a no-op for them.
+        unknown_project = uuid4()
+
+        recorded = await self.store.record_claim(
+            unknown_project, created_by=self.user_id, text="Fine", sources=[link()]
+        )
+
+        self.assertTrue(recorded.created)

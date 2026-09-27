@@ -110,3 +110,18 @@ class ProvenanceBusyError(ProvenanceError):
 
     def __init__(self) -> None:
         super().__init__("Provenance store is busy; retry later")
+
+
+class ProjectUnavailableError(ProvenanceError):
+    """The project was deleted (Decision 0028's ``purge_projects``).
+
+    Raised by ``record_claim``, ``add_reference`` and ``mark_related`` when the
+    project's row, locked ``FOR SHARE`` at the start of the write, is already a
+    tombstone -- never for a project this store has no row for at all (most
+    tests: these tables carry no foreign key to ``projects``, module docstring).
+    """
+
+    code = "project_unavailable"
+
+    def __init__(self) -> None:
+        super().__init__("Project unavailable")

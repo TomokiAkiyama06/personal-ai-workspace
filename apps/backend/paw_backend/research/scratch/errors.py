@@ -91,3 +91,18 @@ class ScratchBusyError(ScratchError):
 
     def __init__(self) -> None:
         super().__init__("Scratch item is busy; retry later")
+
+
+class ProjectUnavailableError(ScratchError):
+    """The project was deleted (Decision 0028's ``purge_projects``).
+
+    Raised by ``add`` when the project's row, locked ``FOR SHARE`` at the start
+    of the write, is already a tombstone -- never for a project this store has
+    no row for at all (most tests: these tables carry no foreign key to
+    ``projects``, module docstring).
+    """
+
+    code = "project_unavailable"
+
+    def __init__(self) -> None:
+        super().__init__("Project unavailable")

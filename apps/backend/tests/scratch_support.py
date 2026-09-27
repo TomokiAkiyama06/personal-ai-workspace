@@ -352,6 +352,18 @@ class PostgresScratchTestCase(unittest.IsolatedAsyncioTestCase):
             id=item_id,
         )
 
+    def lock_project_for_share(self, project_id: UUID):
+        """Hold the same ``FOR SHARE`` lock ``_guard_project`` takes (Decision 0028)."""
+        return self.hold_row_lock(
+            "SELECT id FROM projects WHERE id = :id FOR SHARE", id=project_id
+        )
+
+    def lock_project_for_update(self, project_id: UUID):
+        """Hold the ``FOR UPDATE`` lock ``purge_projects`` takes (Decision 0028)."""
+        return self.hold_row_lock(
+            "SELECT id FROM projects WHERE id = :id FOR UPDATE", id=project_id
+        )
+
     def snapshot(
         self,
         item_id: UUID,
