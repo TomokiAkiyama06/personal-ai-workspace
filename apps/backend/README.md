@@ -2935,7 +2935,7 @@ Rerank（Reranker Protocol）→ 構造化 Score（confirmed・鮮度・importan
 
 [PAW-034](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/30)（Revision `0034`、`paw_backend/orchestrator/`）で実装しました。設計は [要件](../../REQUIREMENTS.md)の「Agent Orchestration / Parallel-first execution」に従い、要件が決めていない選択（Plan の形、Role の上限、Escalation の段、並列数、結果の大きさ、Sub-Agent の予算、Sweep の周期）は **[Decision 0021（Approved、2026-09-26）](../../docs/decisions/0021-dag-orchestrator-policy.md)** にまとめ、人間が承認しました。数値は暫定値として承認されたもので、`orchestrator/limits.py` と Test の期待値で変えられます（DB の CHECK に書いた項目を除く）。
 **HTTP の Endpoint はありません**（Session は PAW-022）。Orchestrator は Worker Process が `Orchestrator.run_once` / `serve` で駆動し、Agent の Runtime は Protocol で、実際の Codex / Claude / Local の Runtime は別の Issue です（Test は Fake の Runtime で動かします）。認可は行いません（Task の権利は呼び出し側が渡す `TaskAuthority`）。
-Migration `0034` の `down_revision` は `0030` です（鎖は `0001 → 0025 → 0032 → 0040 → 0021 → 0033 → 0031 → 0050 → 0046 → 0052 → 0026 → 0087 → 0022 → 0083 → 0043 → 0030 → 0034`）。Revision ID は Issue 番号で、鎖の順序ではありません。他の PR が先に Merge されたら、統合時に鎖をつなぎ直します（`down_revision`、Migration の Docstring の `Revises`、`tests/test_orchestrator_migration.py` の `PREVIOUS`、この文を同時に変えます）。
+Migration `0034` の `down_revision` は `0086` です（鎖は `0001 → 0025 → 0032 → 0040 → 0021 → 0033 → 0031 → 0050 → 0046 → 0052 → 0026 → 0087 → 0022 → 0083 → 0043 → 0030 → 0027 → 0071 → 0086 → 0034`）。Revision ID は Issue 番号で、鎖の順序ではありません。他の PR が先に Merge されたら、統合時に鎖をつなぎ直します（`down_revision`、Migration の Docstring の `Revises`、`tests/test_orchestrator_migration.py` の `PREVIOUS`、この文を同時に変えます）。
 
 ```text
 Queue の Entry を Claim ─→ Task を Start（または、死んだ Worker の Run を引き継ぐ）

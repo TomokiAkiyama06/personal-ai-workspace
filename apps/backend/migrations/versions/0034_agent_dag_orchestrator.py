@@ -1,7 +1,7 @@
 """DAG orchestrator: DAGs, nodes, edges and node attempts (PAW-034).
 
 Revision ID: 0034
-Revises: 0071
+Revises: 0086
 Create Date: 2026-09-25
 
 ``agent_dags``: one DAG per task attempt, with ``epoch``, the fencing token of the
@@ -33,7 +33,7 @@ from sqlalchemy.dialects import postgresql
 from paw_backend.db_roles import grant_app_privileges
 
 revision: str = "0034"
-down_revision: str | Sequence[str] | None = "0071"
+down_revision: str | Sequence[str] | None = "0086"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
