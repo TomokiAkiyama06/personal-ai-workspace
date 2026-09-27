@@ -380,5 +380,30 @@ class ReadValidationTest(StoreValidationTestCase):
         )
 
 
+class PurgeProjectsValidationTest(StoreValidationTestCase):
+    """``purge_projects`` (Decision 0028): validated before the database is touched."""
+
+    async def test_an_empty_collection_never_reaches_the_database(self):
+        self.assertEqual(await self.store.purge_projects([]), ())
+        self.assertEqual(await self.store.purge_projects(()), ())
+
+    async def test_a_non_empty_collection_reaches_the_database(self):
+        await self.reaches_the_database(self.store.purge_projects([uuid4()]))
+
+    async def test_bad_input_is_rejected(self):
+        self.assertEqual(
+            await self.rejected(self.store.purge_projects("not-a-list")),
+            ("project_ids", InputProblem.NOT_A_COLLECTION),
+        )
+        self.assertEqual(
+            await self.rejected(self.store.purge_projects(None)),
+            ("project_ids", InputProblem.NOT_A_COLLECTION),
+        )
+        self.assertEqual(
+            await self.rejected(self.store.purge_projects(["not-a-uuid"])),
+            ("project_ids", InputProblem.WRONG_TYPE),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

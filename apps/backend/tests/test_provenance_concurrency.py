@@ -13,8 +13,10 @@ import psycopg.errors
 from sqlalchemy.exc import DBAPIError, OperationalError
 
 from paw_backend.db import Database
+from paw_backend.projects.records import ProjectStatus
 from paw_backend.research.provenance import (
     EntityKind,
+    ProjectUnavailableError,
     ProvenanceBusyError,
     ProvenanceConflictError,
     ProvenanceLimitError,
@@ -399,3 +401,58 @@ class ConcurrentRelationTest(PostgresProvenanceTestCase):
             ["ProvenanceConflictError", "RecordedClaim"],
         )
         self.assertEqual(self.table_count("research_claim_sources"), 1)
+
+
+@requires_postgres
+class PurgeSerializationTest(PostgresProvenanceTestCase):
+    """A write and ``purge_projects`` that overlap are serialised by the
+    project row lock (``_guard_project`` / Decision 0028)."""
+
+    async def record(self, project_id):
+        return await self.store.record_claim(
+            project_id, created_by=self.user_id, text=SKY, sources=[link()]
+        )
+
+    async def test_a_purge_that_holds_the_lock_makes_the_write_wait_then_refuse(self):
+        project_id = self.seed_project(ProjectStatus.DELETED)
+        _, transaction = self.lock_project_for_update(project_id)
+        task = self.spawn(self.record(project_id))
+        await asyncio.sleep(0.5)
+        self.assertWaiting(task)
+
+        transaction.commit()  # the simulated purge "finishes": still deleted
+
+        with self.assertRaises(ProjectUnavailableError):
+            await guarded(task)
+        self.assertEqual(self.table_count("research_claims"), 0)
+        self.assertEqual(self.table_count("research_sources"), 0)
+
+    async def test_a_write_that_holds_the_lock_makes_the_purge_wait_then_sweep_it_up(
+        self,
+    ):
+        project_id = self.seed_project(ProjectStatus.DELETED)
+        _, transaction = self.lock_project_for_share(project_id)
+        task = self.spawn(self.store.purge_projects([project_id]))
+        await asyncio.sleep(0.5)
+        self.assertWaiting(task)
+
+        # A real ``record_claim`` would insert under this same held lock
+        # (``_guard_project`` takes exactly this ``FOR SHARE``); a plain
+        # ``INSERT`` stands in for it here, needing no lock of its own.
+        self.seed_source(project_id=project_id)
+        transaction.commit()
+
+        purged = await guarded(task)
+        self.assertEqual(purged, (project_id,))
+        self.assertEqual(self.table_count("research_sources"), 0)
+
+    async def test_a_purge_that_waits_too_long_is_busy_and_writes_nothing(self):
+        project_id = self.seed_project(ProjectStatus.DELETED)
+        self.seed_source(project_id=project_id)
+        self.lock_project_for_share(project_id)
+        store = self.new_store(lock_timeout_ms=200)
+
+        with self.assertRaises(ProvenanceBusyError):
+            await guarded(store.purge_projects([project_id]))
+
+        self.assertEqual(self.table_count("research_sources"), 1)

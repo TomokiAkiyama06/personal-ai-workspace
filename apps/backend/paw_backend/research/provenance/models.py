@@ -1,8 +1,11 @@
 """ORM models of the Evidence / Claim Provenance store (Alembic revision ``0052``).
 
-Six tables. Nothing in them is ever updated or deleted by the application: the
-application role holds SELECT and INSERT only (see the migration), so evidence
-cannot be rewritten in SQL.
+Six tables. Nothing in them is ever rewritten by the application: the
+application role holds SELECT, INSERT and (since migration ``0088``, Decision
+0028) DELETE, but never UPDATE, so evidence cannot be edited in SQL. DELETE is
+used for exactly one thing: ``ProvenanceStore.purge_projects`` removing the
+rows of a project that is itself Deleted (a tombstone); every other operation
+only ever reads and inserts.
 
 * ``research_sources``: a source as it was fetched. Unique per ``(project_id,
   locator, content_hash)``: the same page with other content is another row.

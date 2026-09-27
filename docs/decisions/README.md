@@ -30,6 +30,7 @@
 | [0025](0025-passkey-webauthn-policy.md) | Passkey（WebAuthn）と Step-up の方針（Library、Attestation・User Verification・Resident Key・署名 Counter、Session の Gate、重要操作の Step-up、失効、`users.passkey_required` 列の扱い） | Approved |
 | [0026](0026-memory-status-change-history.md) | Memory Version の Status・Stale 状態の変更履歴を Audit の記録と併存させる方針（Decision 0009 の 7・12・13 の一部を Supersede） | Approved |
 | [0027](0027-audit-retention-and-partitioning.md) | `audit_events` の保存期間・Partition（月ごとの Range Partition）・退避先（`audit_events_archive`）の方針（Decision 0004 の 5.5 への追補） | Approved |
+| [0028](0028-project-deletion-research-data.md) | Project 削除時の調査結果（Evidence / Claim Provenance、Research Scratch）の扱い（削除・DELETE 権限の追加・唯一の Provenance を失う Memory の扱い） | Approved |
 
 運用は [AGENTS.md](../../AGENTS.md) の「仕様変更」に従います。
 
