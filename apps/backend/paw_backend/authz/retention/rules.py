@@ -166,3 +166,45 @@ def partitions_due_for_purge(
     ]
     due.sort(key=lambda window: window.upper)
     return due
+
+
+def first_uncovered_moment(
+    now: datetime, existing: Sequence[PartitionWindow], months_ahead: int
+) -> datetime | None:
+    """The earliest moment an INSERT into ``audit_events`` would find no partition.
+
+    Checked from ``now`` to the end of the calendar month ``months_ahead`` months
+    after the one containing ``now`` (``0``: to the end of this month; ``1``: to
+    the end of next month). Only ``LIVE`` windows count: an archived or purged
+    partition no longer receives rows. ``None`` when that whole span is covered;
+    otherwise the first uncovered moment (``now`` itself when even the present
+    has no partition, the start of the missing month otherwise).
+
+    Issue #117 uses this after every scheduled run and in ``audit-retention-
+    check``: ``plan_missing_partitions`` only plans ahead when something calls
+    it, so a scheduler that silently stopped would otherwise be noticed only
+    when the first INSERT of an uncovered month fails. ``months_ahead`` counts
+    whole calendar months, like ``RetentionPolicy.horizon_months``.
+    """
+    _require_aware(now)
+    if isinstance(months_ahead, bool) or not isinstance(months_ahead, int):
+        raise TypeError(
+            f"months_ahead must be an int, not {type(months_ahead).__name__}"
+        )
+    if months_ahead < 0:
+        raise ValueError(f"months_ahead must be >= 0, got {months_ahead}")
+    end = next_month_start(now)
+    for _ in range(months_ahead):
+        end = next_month_start(end)
+    live = [window for window in existing if window.status == PartitionStatus.LIVE]
+    point = now
+    while point < end:
+        covering = [
+            window
+            for window in live
+            if (window.lower is None or window.lower <= point) and point < window.upper
+        ]
+        if not covering:
+            return point
+        point = max(window.upper for window in covering)
+    return None

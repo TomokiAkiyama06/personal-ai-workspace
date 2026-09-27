@@ -1,0 +1,35 @@
+# Audit retention maintenance of the Personal AI Workspace (Issue #117,
+# Decision 0027 / 0031). Started once a day by paw-audit-retention.timer.
+#
+# Install (as root), adjusting the paths and the User to your deployment:
+#   cp paw-audit-retention.service paw-audit-retention.timer \
+#      paw-audit-retention-failure.service /etc/systemd/system/
+#   systemctl daemon-reload
+#   systemctl enable --now paw-audit-retention.timer
+#
+# /etc/paw/audit-retention.env must set PAW_MIGRATION_DATABASE_URL (the table
+# owner, the role migrations run as) and be readable by root only
+# (chmod 600): it is the most privileged database credential of the system.
+# Never put the URL on the ExecStart line or in Environment=.
+
+[Unit]
+Description=Personal AI Workspace audit_events retention maintenance
+Wants=network-online.target
+After=network-online.target postgresql.service
+# A non-zero exit (a failed step, a coverage gap, an unrecordable outcome, an
+# unreachable database, a concurrent run) starts the failure unit.
+OnFailure=paw-audit-retention-failure.service
+
+[Service]
+Type=oneshot
+User=paw
+EnvironmentFile=/etc/paw/audit-retention.env
+WorkingDirectory=/opt/paw/apps/backend
+ExecStart=/opt/paw/venv/bin/python -m paw_backend.cli audit-retention-run
+# Partition DDL waits for locks on audit_events; do not let a stuck run hold
+# the maintenance lock forever (the next day's run then reports it).
+TimeoutStartSec=30min
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true

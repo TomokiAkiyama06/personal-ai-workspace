@@ -14,14 +14,19 @@ as the application role fails with a PostgreSQL permission error on the first
 statement, inside the transaction, so nothing is half-done.
 
 There is no scheduler here (Decision 0027 explicitly leaves one out): call
-``run_maintenance()`` from whatever invokes it (a cron entry, a systemd timer, an
-admin command, a test). Each call is idempotent to run again immediately after
-a partial failure: a step already done (a partition already created, already
-archived, already purged) is simply not in ``rules.py``'s next answer.
+``run_maintenance()`` from whatever invokes it. The scheduled caller is
+``runner.run_scheduled_maintenance`` (Issue #117, Decision 0031), which adds the
+lock (``maintenance_lock``), the coverage check and the run's own audit row
+(``record_maintenance_outcome``), run by ``python -m paw_backend.cli
+audit-retention-run`` from a systemd timer. Each call is idempotent to run
+again immediately after a partial failure: a step already done (a partition
+already created, already archived, already purged) is simply not in
+``rules.py``'s next answer.
 """
 
+import contextlib
 import re
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -31,9 +36,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from paw_backend.authz.retention.audit import (
     RetentionAction,
     RetentionActor,
+    record_maintenance_event,
     record_partition_event,
 )
 from paw_backend.authz.retention.errors import (
+    MaintenanceAlreadyRunningError,
     PartitionAlreadyExistsError,
     PartitionNotArchivedError,
     PartitionNotLiveError,
@@ -63,6 +70,13 @@ from paw_backend.db import Database
 # writer today, but the check is cheap and the alternative is string-formatting
 # an identifier from the database into DDL unchecked).
 _SAFE_PARTITION_NAME = re.compile(r"^audit_events_p(?:_legacy|\d{4}_\d{2})$")
+
+
+# The key of the session-level advisory lock that serializes maintenance runs
+# (Issue #117): ``b"paw_ret1"`` read as a big-endian signed 64-bit integer. Any
+# fixed value works; it only has to be the same for every run and unlikely to
+# collide with another application's advisory lock on the same database.
+MAINTENANCE_LOCK_KEY = 0x7061775F72657431
 
 
 def _quoted(name: str) -> str:
@@ -348,6 +362,57 @@ class AuditRetentionService:
         await session.execute(text(f"DROP TABLE {name}"))
         record.status = PartitionStatus.PURGED.value
         record.purged_at = occurred_at
+
+    @contextlib.asynccontextmanager
+    async def maintenance_lock(self) -> AsyncIterator[None]:
+        """Hold the maintenance advisory lock for the ``async with`` block.
+
+        A session-level ``pg_try_advisory_lock`` on a connection of its own,
+        held while the steps run on their own sessions: a second run (another
+        timer, a manual run, a second host) that tries meanwhile gets
+        ``MaintenanceAlreadyRunningError`` at once instead of waiting or
+        racing. Released on exit, and by PostgreSQL itself if this process
+        dies (the connection closes). Decision 0027's "リスク" named this as
+        the job of the Issue that adds a scheduler (#117).
+        """
+        async with self.database.engine.connect() as connection:
+            acquired = (
+                await connection.execute(
+                    text("SELECT pg_try_advisory_lock(:key)"),
+                    {"key": MAINTENANCE_LOCK_KEY},
+                )
+            ).scalar()
+            await connection.commit()
+            if not acquired:
+                raise MaintenanceAlreadyRunningError()
+            try:
+                yield
+            finally:
+                await connection.execute(
+                    text("SELECT pg_advisory_unlock(:key)"),
+                    {"key": MAINTENANCE_LOCK_KEY},
+                )
+                await connection.commit()
+
+    async def record_maintenance_outcome(
+        self,
+        action: RetentionAction,
+        reason: str,
+        *,
+        actor: RetentionActor | None = None,
+    ) -> None:
+        """Write one run-level audit row in a transaction of its own.
+
+        Separate from the steps' transactions on purpose: a failed step has
+        rolled its own transaction back, and its failure must still be
+        recorded (the same reason ``PostgresAuditSink`` records a denial in a
+        short transaction of its own).
+        """
+        now = self._now()
+        async with self.database.session() as session, session.begin():
+            await record_maintenance_event(
+                session, action, reason, occurred_at=now, actor=actor
+            )
 
     async def run_maintenance(
         self,
