@@ -31,6 +31,7 @@
 | [0026](0026-memory-status-change-history.md) | Memory Version の Status・Stale 状態の変更履歴を Audit の記録と併存させる方針（Decision 0009 の 7・12・13 の一部を Supersede） | Approved |
 | [0027](0027-audit-retention-and-partitioning.md) | `audit_events` の保存期間・Partition（月ごとの Range Partition）・退避先（`audit_events_archive`）の方針（Decision 0004 の 5.5 への追補） | Approved |
 | [0028](0028-project-deletion-research-data.md) | Project 削除時の調査結果（Evidence / Claim Provenance、Research Scratch）の扱い（削除・DELETE 権限の追加・唯一の Provenance を失う Memory の扱い） | Approved |
+| [0029](0029-per-user-git-runner-ssh.md) | User ごとの Linux User で git を実行する `SshGitRunner`（SSH 経由。Wrapper の許可副コマンド、鍵の発行・失効・回転、エラー処理、移行。Decision 0017 の 4 への追補。Issue #105） | Approved |
 
 運用は [AGENTS.md](../../AGENTS.md) の「仕様変更」に従います。
 
