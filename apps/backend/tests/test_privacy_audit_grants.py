@@ -159,7 +159,29 @@ class AsAppRole:
     """Mixed into a ``PostgresAuditTestCase``: the code under test writes as the app.
 
     Reading (``self.reader``) and everything else stay with the owner.
+
+    ``PostgresAuditTestCase.setUpClass`` (inherited from the mixed-in
+    ``test_privacy_audit_postgres`` class) migrates to ``head`` with no
+    ``PAW_APP_DATABASE_ROLE`` in the environment. Since Migration 0086
+    recreates ``audit_events`` (partitioning it), that unqualified call grants
+    the role nothing on the new relation (``grant_app_privileges`` silently
+    does nothing without the role configured — the "single-role development"
+    case — see ``paw_backend/db_roles.py``), even though every earlier
+    migration in this module's own setup was run *with* the role. Overriding
+    ``setUpClass`` here to migrate to ``REVISION`` (0087, this module's
+    subject; matching ``setUpModule``) with the role every time keeps this
+    class's database state — and the application role's grant — the one this
+    file is actually testing, regardless of what order these classes run in
+    relative to each other or to ``Revision0087GrantsNothingTest`` below.
+    Down to ``base`` first: plainly asking to "upgrade" to 0087 is a no-op
+    when another class already migrated past it (Alembic only walks forward),
+    which would otherwise still leave this class at ``head`` with no grant.
     """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        migrate("base", downgrade=True)
+        migrate(REVISION, PAW_APP_DATABASE_ROLE=APP_ROLE)
 
     def database_url(self) -> str:
         url = make_url(TEST_DATABASE_URL).set(username=APP_ROLE, password=ROLE_PASSWORD)
@@ -194,6 +216,16 @@ class SinkDirectAsAppRole(AsAppRole, postgres.SinkDirectTest):
 
 @requires_postgres
 class Revision0087GrantsNothingTest(unittest.IsolatedAsyncioTestCase):
+    """Independent of class execution order in this module (see ``AsAppRole``):
+
+    re-assert exactly revision 0087, with the role, before every test here.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        migrate("base", downgrade=True)
+        migrate(REVISION, PAW_APP_DATABASE_ROLE=APP_ROLE)
+
     async def test_the_privileges_of_the_app_role_are_the_same_as_before_0087(self):
         self.assertTrue(BEFORE_0087["tables"])  # the snapshot was really taken
         after = await app_privileges()
@@ -269,6 +301,20 @@ class Revision0087GrantsNothingTest(unittest.IsolatedAsyncioTestCase):
 
 @requires_postgres
 class AppRoleCannotTest(PostgresAuditTestCase):
+    """Some tests here need ``self.app`` (``APP_ROLE``) to have its real grant
+
+    on ``audit_events`` (reading back what it wrote), not only to be denied
+    things; see ``AsAppRole`` for why ``setUpClass`` must be overridden here
+    the same way (Migration 0086 recreates ``audit_events``, so an unqualified
+    ``migrate()`` past revision 0087 — the inherited ``PostgresAuditTestCase``
+    behaviour — would otherwise leave the role without a grant on it).
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        migrate("base", downgrade=True)
+        migrate(REVISION, PAW_APP_DATABASE_ROLE=APP_ROLE)
+
     async def asyncSetUp(self):
         await super().asyncSetUp()
         self.app = role_database(APP_ROLE)
