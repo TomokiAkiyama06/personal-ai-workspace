@@ -137,11 +137,13 @@ class StoreArgumentTest(unittest.IsolatedAsyncioTestCase):
         # method -> (valid keyword arguments, {argument: wrong values})
         return {
             "create": (
-                {"task_id": GOOD_ID, "attempt": 1, "plan": plan},
+                {"task_id": GOOD_ID, "attempt": 1, "plan": plan, "run": run},
                 {
                     "task_id": not_a_uuid(),
                     "attempt": not_an_int(1, big - 1) + [0],
                     "plan": [None, {"nodes": []}, CANARY, plan.to_mapping(), object()],
+                    # Not a run, or a run of another attempt.
+                    "run": [(1, 0), 1, CANARY, object(), TaskRun(2, 0)],
                 },
             ),
             "get": (
@@ -686,6 +688,10 @@ class ValueObjectArgumentTest(unittest.IsolatedAsyncioTestCase):
             (BudgetKind.TOKENS, 1.5),
             (BudgetKind.TOKENS, True),
             (BudgetKind.RUNTIME_SECONDS, 5),
+            # Counted by the orchestrator and the Broker, never by a node.
+            (BudgetKind.STEPS, 5),
+            (BudgetKind.RETRIES, 5),
+            (BudgetKind.TOOL_CALLS, 5),
         ]:
             with (
                 self.subTest(kind=kind, amount=amount),

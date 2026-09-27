@@ -75,6 +75,23 @@ class HangingQueue(TaskQueue):
         return await super().heartbeat(*args, **kwargs)
 
 
+class HangingBudget(SpyBudget):
+    """A tracker whose ``check`` can be made to hang (a stalled query)."""
+
+    hanging = False
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.release = asyncio.Event()
+        self.hung = 0
+
+    async def check(self, *args, **kwargs):
+        if self.hanging:
+            self.hung += 1
+            await self.release.wait()
+        return await super().check(*args, **kwargs)
+
+
 @requires_postgres
 class LeaseTest(PostgresOrchestratorTestCase):
     async def expire_the_lease(self) -> None:
@@ -301,6 +318,65 @@ class LeaseTest(PostgresOrchestratorTestCase):
         self.assertGreaterEqual(queue.hung, 1)
         self.assertEqual(await self.states_of(task_id), {"only": "running"})
 
+    async def test_a_first_proof_that_hangs_starts_nothing(self):
+        # The proof at the start of the run has a deadline too: a worker whose
+        # first heartbeat never returns starts neither the task nor the timer.
+        queue = HangingQueue(self.database, project_gate=ALWAYS_ACTIVE)
+        queue.hanging = True
+        spy = SpyBudget(self.database)
+        h = self.harness(queue=queue, budget=spy)
+        task_id = await self.prepare(h, make_plan(node("only")))
+        run = asyncio.create_task(h.orchestrator.run_once("w1"))
+        await until(lambda: queue.hung == 1, message="the first proof")
+
+        await until(lambda: h.clock.sleeping >= 1, message="its deadline")
+        await h.clock.advance(h.orchestrator._heartbeat_seconds)
+        try:
+            report = await asyncio.wait_for(asyncio.shield(run), 5)
+        finally:
+            queue.release.set()
+
+        self.assertEqual(report.outcome, Out.LEASE_LOST)
+        self.assertEqual(spy.started, [])
+        self.assertEqual((await h.tasks.restore(task_id)).state, TaskState.QUEUED)
+
+    async def test_a_run_stuck_in_the_database_is_stopped_when_the_lease_is_lost(
+        self,
+    ):
+        # The DAG loop itself waits on the database (here: the budget check after
+        # the poll) and never returns; the heartbeats fail meanwhile. The lost
+        # lease must still end the run and its nodes, not only the heartbeats.
+        queue = HangingQueue(self.database, project_gate=ALWAYS_ACTIVE)
+        budget = HangingBudget(self.database)
+        runtime = FakeRuntime("local")
+        runtime.gate("only")
+        h = self.harness(queue=queue, budget=budget, runtimes={"local": runtime})
+        await self.prepare(h, make_plan(node("only")))
+        run = asyncio.create_task(h.orchestrator.run_once("w1"))
+        await until(lambda: len(runtime.assignments) == 1, message="the node")
+
+        budget.hanging = True
+        queue.hanging = True
+        interval = h.orchestrator._heartbeat_seconds
+        limit = interval * (HEARTBEAT_FAILURES_TO_LOSE + 1)  # loss, then its grace
+        advanced, step = 0.0, interval / 8
+        while not run.done() and advanced < limit:
+            await h.clock.advance(step)
+            advanced += step
+            for _ in range(20):
+                await asyncio.sleep(0)
+            await asyncio.sleep(0.02)
+        try:
+            report = await asyncio.wait_for(asyncio.shield(run), 30)
+        finally:
+            budget.release.set()
+            queue.release.set()
+        self.assertGreaterEqual(budget.hung, 1)
+        self.assertEqual(report.outcome, Out.LEASE_LOST)
+        self.assertEqual(
+            [e for e in runtime.timeline if e[0] == "end"], [("end", "only", 1)]
+        )
+
     async def test_a_planner_that_never_returns_is_stopped_when_the_lease_is_lost(
         self,
     ):
@@ -496,24 +572,76 @@ class TimerStartTest(PostgresOrchestratorTestCase):
         await self.check_the_stale_worker_leaves_the_timer_alone("budget")
 
     async def test_the_lease_is_extended_just_before_the_timer_starts(self):
-        # A run that is not stalled: the lease it holds at the moment the timer
-        # starts was extended by the heartbeat that came right before.
+        # A run that is not stalled: the timer starts in the very transaction
+        # that proves (and extends) the lease, after the proof at the start.
         spy = SpyBudget(self.database)
         h = self.harness(runtimes={"local": FakeRuntime("local")}, budget=spy)
         await self.prepare(h, make_plan(node("only")))
-        heartbeats = []
-        original = h.queue.heartbeat
+        proofs = []
+        original, original_in = h.queue.heartbeat, h.queue.heartbeat_in
+        original_start = spy.start_runtime_in
 
         async def heartbeat(*args, **kwargs):
-            heartbeats.append(len(spy.started))  # timers started so far
+            proofs.append(("alone", len(spy.started)))
             return await original(*args, **kwargs)
 
+        async def heartbeat_in(session, *args, **kwargs):
+            proofs.append(("in", id(session)))
+            return await original_in(session, *args, **kwargs)
+
+        async def start_runtime_in(session, *args, **kwargs):
+            proofs.append(("timer", id(session)))
+            return await original_start(session, *args, **kwargs)
+
         h.queue.heartbeat = heartbeat
+        h.queue.heartbeat_in = heartbeat_in
+        spy.start_runtime_in = start_runtime_in
         await h.orchestrator.run_once("w1")
 
-        # One before the task is started, one immediately before the timer.
-        self.assertEqual(heartbeats[:2], [0, 0])
+        # One proof before the task is started; then the timer and a proof in ONE
+        # transaction (the same session).
+        self.assertEqual(proofs[0], ("alone", 0))
+        (timer,) = [p for p in proofs if p[0] == "timer"]
+        self.assertIn(("in", timer[1]), proofs)
         self.assertEqual(len(spy.started), 1)
+
+    async def test_the_timer_is_started_only_together_with_a_valid_lease(self):
+        # Whatever stalled before (the response of an earlier proof, say), the
+        # timer start and the proof of the lease commit together: a stale worker
+        # can never start the timer, or take a newer session over, after its
+        # lease was given to another worker.
+        h = self.harness()
+        task_id = await self.prepare(h, make_plan(node("only")))
+        entry = await h.queue.claim_next("w1")
+        event = await h.tasks.execute(task_id, TaskCommand.START, actor=self.system)
+        before = await self.scalar("SELECT lease_expires_at FROM queue_entries")
+
+        generation = await h.orchestrator._start_runtime_with_lease(
+            entry, "w1", event.run
+        )
+        self.assertEqual(generation, 1)
+        extended = await self.scalar("SELECT lease_expires_at FROM queue_entries")
+        self.assertGreaterEqual(extended, before)
+
+        await self.expire_the_lease()
+        with self.assertRaises(LeaseLostError):
+            await h.orchestrator._start_runtime_with_lease(entry, "w1", event.run)
+        replacement = await h.queue.claim_next("w2")
+        with self.assertRaises(LeaseLostError):
+            await h.orchestrator._start_runtime_with_lease(entry, "w1", event.run)
+        self.assertEqual(
+            await self.scalar(
+                "SELECT runtime_generation FROM budget_usages"
+                " WHERE kind = 'runtime_seconds'"
+            ),
+            1,
+        )
+        self.assertEqual(
+            await h.orchestrator._start_runtime_with_lease(
+                replacement, "w2", event.run
+            ),
+            2,
+        )
 
 
 if __name__ == "__main__":

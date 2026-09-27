@@ -7,7 +7,11 @@ import unittest
 from paw_backend.orchestrator.domain import RunOutcome
 from paw_backend.orchestrator.errors import NodeStopped, StopReason
 from paw_backend.tasks import TaskCommand, TaskState, WaitReason
-from paw_backend.tasks.queueing import BudgetKind, BudgetPreset
+from paw_backend.tasks.queueing import (
+    BudgetKind,
+    BudgetPreset,
+    InvalidQueueingArgumentError,
+)
 
 from .orchestrator_support import (
     FakeRuntime,
@@ -168,6 +172,71 @@ class BudgetTest(PostgresOrchestratorTestCase):
         self.assertEqual(await self.consumed(h, task_id), before)
         run.cancel()
         await asyncio.gather(run, return_exceptions=True)
+
+    async def test_a_node_charges_only_what_a_runtime_reports(self):
+        # Steps, retries and tool calls are counted by the orchestrator and the
+        # Broker (and the runtime by the timer): a node may report tokens and GPU
+        # time only. Anything else is refused before anything is written.
+        refused = []
+
+        async def cheat(assignment):
+            for kind in (
+                BudgetKind.STEPS,
+                BudgetKind.RETRIES,
+                BudgetKind.TOOL_CALLS,
+                BudgetKind.RUNTIME_SECONDS,
+                "tokens",
+                None,
+            ):
+                try:
+                    await assignment.budget.charge(kind, 1000)
+                except InvalidQueueingArgumentError as error:
+                    refused.append((kind, error.parameter))
+            await assignment.budget.charge(BudgetKind.TOKENS, 7)
+            await assignment.budget.charge(BudgetKind.GPU_SECONDS, 2)
+            return ok()
+
+        rt = {"local": FakeRuntime("local", script={"a": cheat})}
+        h = self.harness(runtimes=rt)
+        task_id = await self.prepare(h, make_plan(node("a")))
+
+        report = await h.orchestrator.run_once("w1")
+
+        self.assertEqual(report.outcome, Out.DAG_SUCCEEDED)
+        self.assertEqual(len(refused), 6)
+        self.assertEqual({p for _, p in refused}, {"kind"})
+        consumed = await self.consumed(h, task_id)
+        self.assertEqual(
+            (consumed["steps"], consumed["retries"], consumed["tool_calls"]),
+            (1, 0, 0),
+        )
+        self.assertEqual((consumed["tokens"], consumed["gpu_seconds"]), (7, 2))
+
+    async def test_a_failure_of_a_replaced_run_is_not_counted_for_the_new_one(self):
+        # The node fails after its task was failed and retried (before the next
+        # look): its failure must not enter the loop history of the new run.
+        release = asyncio.Event()
+
+        async def late_failure(_assignment):
+            await release.wait()
+            return fail("Boom", "late")
+
+        rt = {"local": FakeRuntime("local", script={"a": late_failure})}
+        h = self.harness(runtimes=rt, config={"poll_seconds": 3600.0})
+        task_id = await self.prepare(h, make_plan(node("a")))
+        run = asyncio.create_task(h.orchestrator.run_once("w1"))
+        await until(lambda: len(rt["local"].assignments) == 1, message="the node")
+        before = await self.consumed(h, task_id)
+
+        other = self.harness()
+        await other.tasks.execute(task_id, TaskCommand.FAIL, actor=self.system)
+        await other.tasks.execute(task_id, TaskCommand.RETRY, actor=self.user)
+        release.set()
+        await asyncio.wait_for(run, 120)
+
+        self.assertEqual(await h.loops.history(task_id), ())
+        after = await self.consumed(h, task_id)
+        self.assertEqual(after["retries"], before["retries"])
 
     async def test_a_node_that_spends_the_budget_stops_every_node_and_tool_call(self):
         tools = FakeTools()

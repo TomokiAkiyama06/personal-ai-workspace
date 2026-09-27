@@ -476,7 +476,12 @@ class Orchestrator:
             TaskState.CANCELLED,
         ):
             raise DagStateError()
-        return await self._store.create(task_id, snapshot.attempt.number, plan)
+        # Fenced by the run that was read: a Retry or Restart that commits in
+        # between refuses the plan (``StaleRunError``) instead of giving it to
+        # the new run unseen.
+        return await self._store.create(
+            task_id, snapshot.attempt.number, plan, run=snapshot.run
+        )
 
     async def run_once(self, worker_id: str) -> RunReport:
         """Claim the next queue entry and run it (``IDLE`` when there is none)."""
@@ -534,9 +539,15 @@ class Orchestrator:
         except TaskNotFoundError:
             return RunReport(RunOutcome.SKIPPED, task_id)
         # Prove the lease NOW, before anything that only the lease holder may do.
+        # The proof has a deadline like every heartbeat: a proof that does not
+        # come back in time is no proof, and nothing is started (the entry is
+        # left to its lease).
         try:
-            await self._queue.heartbeat(entry.id, worker_id, entry.claim_count)
-        except LeaseLostError:
+            await self._within(
+                self._queue.heartbeat(entry.id, worker_id, entry.claim_count),
+                self._heartbeat_seconds * HEARTBEAT_TIMEOUT_FRACTION,
+            )
+        except (LeaseLostError, HeartbeatTimeoutError):
             return RunReport(RunOutcome.LEASE_LOST, task_id)
 
         run_id = await self._begin_task(snapshot, entry, worker_id)
@@ -571,17 +582,18 @@ class Orchestrator:
             # lease: another worker may hold the entry now. ``start_runtime`` is the
             # call only the lease holder may make (``BudgetTracker`` does not read
             # the queue, and a stale caller would take the runtime session over and
-            # make the real holder's ``stop_runtime`` stale), so the lease is proved
-            # AGAIN immediately before it. A ``LeaseLostError`` here starts nothing
-            # and leaves the entry to its new holder. (The queue API has no combined
-            # "claim still valid and start" operation; the window that is left is
-            # the round trip between this heartbeat, which renews the lease for a
-            # whole ``lease_seconds``, and the call that follows it.)
+            # make the real holder's ``stop_runtime`` stale), so the timer starts
+            # only in the transaction that proves the lease
+            # (``_start_runtime_with_lease``): a ``LeaseLostError`` starts nothing
+            # and leaves the entry to its new holder. ``proved_at`` is taken before
+            # that proof begins: the heartbeats lose the run before the lease it
+            # renewed can expire.
             run.proved_at = self._clock.monotonic()
-            await self._queue.heartbeat(entry.id, worker_id, entry.claim_count)
-            run.generation = await self._budget.start_runtime(task_id)
+            run.generation = await self._start_runtime_with_lease(
+                entry, worker_id, run.run
+            )
             heartbeat = asyncio.create_task(self._heartbeats(run))
-            report = await self._drive(run)
+            report = await self._drive_until_lost(run)
             complete_entry = report.outcome is not RunOutcome.LEASE_LOST
             return report
         except asyncio.CancelledError:
@@ -722,6 +734,31 @@ class Orchestrator:
             return False
         return True
 
+    async def _start_runtime_with_lease(
+        self, entry: QueueEntry, worker_id: str, run: TaskRun | None
+    ) -> int:
+        """Start (or take over) the task's runtime session and prove the queue
+        lease in ONE transaction; return the session's generation.
+
+        ``start_runtime_in`` share-locks the task row (and, for ``run``, refuses a
+        replaced or ended run with ``StaleRunError``) and updates the timer;
+        ``heartbeat_in`` then locks the entry, judges the lease by the database
+        clock and extends it. Both commit or neither does: a worker whose lease was
+        given to another worker (however long an earlier call stalled) raises
+        ``LeaseLostError`` and starts nothing, so it can never supersede the
+        legitimate holder's session. While the transaction is open the entry row
+        is locked and no other worker can claim it (``SKIP LOCKED``); after the
+        commit the lease runs a whole ``lease_seconds``. Lock order: task, budget
+        row, entry (no path locks them the other way round)."""
+        async with self._queue.database.session() as session, session.begin():
+            generation = await self._budget.start_runtime_in(
+                session, entry.task_id, run=run
+            )
+            await self._queue.heartbeat_in(
+                session, entry.id, worker_id, entry.claim_count
+            )
+        return generation
+
     async def _settle_runtime(self, entry: QueueEntry, worker_id: str) -> bool:
         """Stop a runtime session that an earlier worker left running, before an
         entry whose task no longer runs is completed.
@@ -729,17 +766,17 @@ class Orchestrator:
         An earlier worker whose ``stop_runtime`` failed left its entry claimed
         (``_run_entry``); this worker claimed it after the lease expired and holds
         it now (one active entry per task, so no other worker runs the task). Only
-        the lease holder may call ``start_runtime``, so the lease is proved first
-        (``LeaseLostError`` propagates: the entry is someone else's). Taking the
+        the lease holder may call ``start_runtime``, so the session is taken over
+        in the transaction that proves the lease (``_start_runtime_with_lease``;
+        ``LeaseLostError`` propagates: the entry is someone else's). Taking the
         session over keeps its ``running_since`` (the time is neither lost nor
         counted twice) and stopping it settles that time; a task with no session
         in progress gets a new one stopped at once (0 seconds). ``True``: nothing
         is left running and the entry may be completed. ``False``: the settlement
         could not be written; the entry stays claimed for the next worker.
         """
-        await self._queue.heartbeat(entry.id, worker_id, entry.claim_count)
         try:
-            generation = await self._budget.start_runtime(entry.task_id)
+            generation = await self._start_runtime_with_lease(entry, worker_id, None)
             await self._budget.stop_runtime(entry.task_id, generation)
         except BudgetNotConfiguredError:
             return True  # no budget: no timer
@@ -838,6 +875,40 @@ class Orchestrator:
         if timed_out:
             raise HeartbeatTimeoutError()
         return call.result()
+
+    async def _drive_until_lost(self, run: _Run) -> RunReport:
+        """``_drive``, but never past a lost lease.
+
+        ``_drive`` reacts to a lost lease itself whenever it waits (the lost
+        waiter), but a call it is in (a database read or write that stalls) can
+        outlast the lease. When the heartbeats lose the run, ``_drive`` is given
+        ``heartbeat_seconds`` (the injected clock) to end on its own (closing its
+        nodes as it does); after that it is cancelled (its ``finally`` cancels the
+        running attempts) and the run ends as ``LEASE_LOST``. Every write it could
+        still have in flight is fenced (epoch, run, claim or generation)."""
+        drive = asyncio.ensure_future(self._drive(run))
+        lost = asyncio.ensure_future(run.lost.wait())
+        try:
+            await asyncio.wait({drive, lost}, return_when=asyncio.FIRST_COMPLETED)
+            if not drive.done():
+                grace = asyncio.ensure_future(
+                    self._clock.sleep(self._heartbeat_seconds)
+                )
+                try:
+                    await asyncio.wait(
+                        {drive, grace}, return_when=asyncio.FIRST_COMPLETED
+                    )
+                finally:
+                    grace.cancel()
+            if drive.done():
+                return drive.result()
+            await _cancel_and_wait([drive], 2 * CANCEL_GRACE_SECONDS)
+            return RunReport(RunOutcome.LEASE_LOST, run.task.id)
+        except asyncio.CancelledError:
+            await _cancel_and_wait([drive], 2 * CANCEL_GRACE_SECONDS)
+            raise
+        finally:
+            lost.cancel()
 
     # -- the DAG ------------------------------------------------------------------
 
@@ -1510,6 +1581,7 @@ class Orchestrator:
                 step=node.key,
                 message=message,
                 approach=node.approach,
+                run=run.run,
             )
             verdict = assessment.verdict
         except Exception as error:
@@ -1741,7 +1813,9 @@ class Orchestrator:
                         if isinstance(outcome.plan, Plan)
                         else Plan.from_mapping(outcome.plan)
                     )
-                    dag = await self._store.create(task_id, run.run.attempt, accepted)
+                    dag = await self._store.create(
+                        task_id, run.run.attempt, accepted, run=run.run
+                    )
                 except DagAlreadyExistsError:
                     # Another worker planned this attempt first: its plan stands.
                     return await self._store.get(task_id, run.run.attempt)
@@ -1761,6 +1835,7 @@ class Orchestrator:
                     error_class=format_error_class(failure),
                     step=PLANNER_IDENTITY,
                     message=format_failure_text(message),
+                    run=run.run,
                 )
             except StaleRunError:
                 raise

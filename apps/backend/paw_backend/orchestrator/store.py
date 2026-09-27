@@ -237,18 +237,36 @@ class DagStore:
 
     # -- creation and reading -----------------------------------------------
 
-    async def create(self, task_id: uuid.UUID, attempt: int, plan: Plan) -> DagRecord:
+    async def create(
+        self,
+        task_id: uuid.UUID,
+        attempt: int,
+        plan: Plan,
+        *,
+        run: TaskRun | None = None,
+    ) -> DagRecord:
         """Store an accepted plan as the DAG of ``attempt`` of the task.
 
         One transaction writes the DAG, the nodes and the edges. Nodes without a
         dependency start ``ready``, the others ``pending``. Raises
         ``TaskNotFoundError`` for an unknown task and ``DagAlreadyExistsError`` when
         the attempt already has a DAG (a plan is accepted once per attempt).
+
+        ``run`` (a ``TaskRun`` of ``attempt``, or ``None``): the run the plan was
+        made for (the orchestrator always passes it). The task row is read with a
+        share lock in the same transaction, before the insert, and the plan is
+        refused (``StaleRunError``, nothing stored) unless the task has not ended
+        and its attempt and retry count are ``run``: a Fail + Retry (or Start of
+        the retried run) while the plan was being made cannot let the old run's
+        plan become the DAG the new run executes. The DAG records ``run``'s retry
+        count (``task_retry_count``), like a take-over.
         """
         check_uuid("task_id", task_id)
         check_int("attempt", attempt, minimum=1, maximum=MAX_INT32)
         if not isinstance(plan, Plan):
             raise InvalidOrchestratorArgumentError("plan")
+        if run is not None and (not isinstance(run, TaskRun) or run.attempt != attempt):
+            raise InvalidOrchestratorArgumentError("run")
         dag_id = uuid.uuid4()
         views = [
             NodeView(
@@ -259,6 +277,8 @@ class DagStore:
         initial = settle_states(views)
         try:
             async with self._database.session() as session, session.begin():
+                if run is not None:
+                    await self._require_run(session, task_id, run)
                 session.add(
                     DagRow(
                         id=dag_id,
@@ -266,6 +286,7 @@ class DagStore:
                         attempt=attempt,
                         node_count=len(plan.nodes),
                         plan_bytes=plan.encoded_bytes,
+                        task_retry_count=0 if run is None else run.retry_count,
                     )
                 )
                 await session.flush()
@@ -715,6 +736,28 @@ class DagStore:
         ).scalars()
         nodes = {row.key: row for row in rows}
         return _Locked(dag, nodes, await _dependencies(session, dag_id))
+
+    @staticmethod
+    async def _require_run(
+        session: AsyncSession, task_id: uuid.UUID, run: TaskRun
+    ) -> None:
+        """The task row share-locked for the rest of the transaction; refused
+        (``StaleRunError``) unless the task has not ended and ``run`` is its
+        current run (``TaskNotFoundError`` for an unknown task)."""
+        task = (
+            await session.execute(
+                select(TaskRow.state, TaskRow.attempt, TaskRow.retry_count)
+                .where(TaskRow.id == task_id)
+                .with_for_update(read=True)
+            )
+        ).one_or_none()
+        if task is None:
+            raise TaskNotFoundError()
+        if (
+            task.state in _ENDED_TASK_STATES
+            or TaskRun(task.attempt, task.retry_count) != run
+        ):
+            raise StaleRunError()
 
     @staticmethod
     def _running(locked: _Locked, key: str, attempt_number: int) -> DagNodeRow:

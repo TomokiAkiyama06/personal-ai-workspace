@@ -312,6 +312,37 @@ class RecordTest(BudgetTestCase):
             await self.budget.record(task_id, K.TOKENS, 7, run=(1, 0))
         self.assertEqual((await self.budget_row(task_id, "tokens"))["consumed"], 6)
 
+    async def test_a_timer_for_a_run_starts_only_in_the_callers_transaction_for_it(
+        self,
+    ):
+        # ``start_runtime_in(session, task_id, run=...)``: the session is the
+        # caller's (the orchestrator proves its lease in it), and the task's run
+        # is checked under the task row's share lock first.
+        task_id = await self.configured_task()
+        first = (
+            await self.service.execute(task_id, TaskCommand.START, actor=self.system)
+        ).run
+        async with self.database.session() as session:
+            with self.assertRaises(InvalidQueueingArgumentError):  # no transaction
+                await self.budget.start_runtime_in(session, task_id, run=first)
+        async with self.database.session() as session, session.begin():
+            generation = await self.budget.start_runtime_in(session, task_id, run=first)
+        self.assertEqual(generation, 1)
+        await self.budget.stop_runtime(task_id, generation)
+
+        await self.service.execute(task_id, TaskCommand.FAIL, actor=self.system)
+        await self.service.execute(task_id, TaskCommand.RETRY, actor=self.user)
+        with self.assertRaises(StaleRunError):
+            async with self.database.session() as session, session.begin():
+                await self.budget.start_runtime_in(session, task_id, run=first)
+        # Rolled back with the caller: nothing started.
+        with contextlib.suppress(RuntimeError):
+            async with self.database.session() as session, session.begin():
+                await self.budget.start_runtime_in(session, task_id)
+                raise RuntimeError("the caller gives up")
+        row = await self.budget_row(task_id, "runtime_seconds")
+        self.assertEqual((row["runtime_generation"], row["running_since"]), (1, None))
+
     async def test_recording_zero_changes_nothing(self):
         task_id = await self.configured_task()
         usage = await self.budget.record(task_id, K.STEPS, 0)

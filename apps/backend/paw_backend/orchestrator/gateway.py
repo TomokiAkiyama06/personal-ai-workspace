@@ -35,6 +35,7 @@ from paw_backend.tasks.queueing import (
     BudgetNotConfiguredError,
     BudgetStatus,
     BudgetTracker,
+    InvalidQueueingArgumentError,
 )
 from paw_backend.tools import (
     BudgetProvider,
@@ -181,6 +182,10 @@ class NodeToolGateway:
         )
 
 
+# What a node may report through ``NodeBudgetHandle.charge``.
+NODE_CHARGEABLE_KINDS = frozenset({BudgetKind.TOKENS, BudgetKind.GPU_SECONDS})
+
+
 class NodeBudgetHandle:
     """The ``budget`` of a ``NodeAssignment``: charges go to the parent task."""
 
@@ -197,6 +202,13 @@ class NodeBudgetHandle:
         self._fence = fence or AttemptFence()
 
     async def charge(self, kind: BudgetKind, amount: int) -> None:
+        # Only what a runtime measures itself: steps and retries are counted by
+        # the orchestrator, tool calls by the Broker, the runtime by the timer. A
+        # node that reports one of those would spend (or forge) the counters the
+        # orchestrator decides by; it is refused before anything is written.
+        # (The tracker's own error for a kind it does not take.)
+        if not isinstance(kind, BudgetKind) or kind not in NODE_CHARGEABLE_KINDS:
+            raise InvalidQueueingArgumentError("kind")
         # An abandoned attempt's charge is refused (nothing is recorded): the
         # orchestrator no longer counts that attempt's work.
         self._fence.ensure_open()

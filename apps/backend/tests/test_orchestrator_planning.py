@@ -1,5 +1,6 @@
 """Decomposing a task into a DAG: the planner proposes, the orchestrator decides."""
 
+import asyncio
 import unittest
 import uuid
 
@@ -26,6 +27,7 @@ from .orchestrator_support import (
     make_plan,
     node,
     requires_postgres,
+    until,
 )
 
 Out = RunOutcome
@@ -363,6 +365,32 @@ class PlannerTest(PostgresOrchestratorTestCase):
                 task_id, TaskRun(1, 0), PLANNER_IDENTITY, 1, claim=(entry.id, 2)
             ),
         )
+
+    async def test_a_plan_of_a_replaced_run_is_not_stored(self):
+        # The task is failed and retried while its planner works (before the
+        # orchestrator looks again): the plan belongs to the old run and must not
+        # become the DAG the retried run executes.
+        release = asyncio.Event()
+
+        async def slow(_assignment):
+            await release.wait()
+            return planned(node("stale"))
+
+        runtime = FakeRuntime("local", script={"plan": slow})
+        h = self.harness(runtimes={"local": runtime}, config={"poll_seconds": 3600.0})
+        task_id = await self.prepare(h)
+        run = asyncio.create_task(h.orchestrator.run_once("w1"))
+        await until(lambda: len(runtime.calls_of("plan")) == 1, message="planning")
+
+        other = self.harness()
+        await other.tasks.execute(task_id, TaskCommand.FAIL, actor=self.system)
+        await other.tasks.execute(task_id, TaskCommand.RETRY, actor=self.user)
+        release.set()
+        report = await asyncio.wait_for(run, 120)
+
+        self.assertEqual(report.outcome, Out.SUPERSEDED)
+        self.assertIsNone(await self.store.get(task_id, 1))
+        self.assertEqual(await self.scalar("SELECT count(*) FROM agent_dags"), 0)
 
     async def test_a_plan_submitted_beforehand_skips_the_planner(self):
         planner = FakeRuntime("local", script={"plan": CYCLE})

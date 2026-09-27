@@ -55,8 +55,12 @@ class NodeTools(Protocol):
 
 class NodeBudget(Protocol):
     async def charge(self, kind: BudgetKind, amount: int) -> None:
-        """Report consumption (tokens, tool calls, GPU seconds, ...) to the parent
-        task's budget. Raises ``NodeStopped`` when the budget is now used up."""
+        """Report consumption to the parent task's budget: ``TOKENS`` and
+        ``GPU_SECONDS`` only (steps, retries and tool calls are counted by the
+        orchestrator and the Broker, the runtime by the timer; any other kind is
+        ``InvalidQueueingArgumentError("kind")``, nothing written). Raises
+        ``NodeStopped`` when the budget is now used up, or the run can no longer
+        act (it ended or was replaced: the charge is then not recorded)."""
         ...
 
     async def remaining(self) -> Mapping[BudgetKind, int | None]:

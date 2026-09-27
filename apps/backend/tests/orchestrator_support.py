@@ -5,7 +5,7 @@ import heapq
 import uuid
 from collections.abc import Awaitable, Callable
 
-from sqlalchemy import text
+from sqlalchemy import event, text
 
 from paw_backend.authz import AgentGrant, Capability, ProjectState
 from paw_backend.orchestrator.config import OrchestratorConfig
@@ -403,6 +403,18 @@ class SpyBudget(BudgetTracker):
     async def start_runtime(self, task_id):
         self.started.append(task_id)
         return await super().start_runtime(task_id)
+
+    async def start_runtime_in(self, session, task_id, **kwargs):
+        # Started only if the caller's transaction commits (the orchestrator
+        # proves its lease in it; a refused lease rolls the start back).
+        generation = await super().start_runtime_in(session, task_id, **kwargs)
+        event.listen(
+            session.sync_session,
+            "after_commit",
+            lambda _session: self.started.append(task_id),
+            once=True,
+        )
+        return generation
 
     async def stop_runtime(self, task_id, generation):
         self.stopped.append((task_id, generation))

@@ -270,19 +270,7 @@ class BudgetTracker:
         )
         async with self._database.engine.begin() as connection:
             if run is not None:
-                task = (
-                    await connection.execute(
-                        select(TaskRow.state, TaskRow.attempt, TaskRow.retry_count)
-                        .where(TaskRow.id == task_id)
-                        .with_for_update(read=True)
-                    )
-                ).one_or_none()
-                if (
-                    task is None
-                    or TaskState(task.state) in TERMINAL_STATES
-                    or TaskRun(task.attempt, task.retry_count) != run
-                ):
-                    raise StaleRunError()
+                await _require_run(connection, task_id, run)
             row = (await connection.execute(add)).one_or_none()
         if row is None:
             raise BudgetNotConfiguredError()
@@ -308,8 +296,46 @@ class BudgetTracker:
         there is no budget.
         """
         check_uuid("task_id", task_id)
+        start = self._start_statement(task_id)
+        async with self._database.engine.begin() as connection:
+            row = (await connection.execute(start)).one_or_none()
+        if row is None:
+            raise BudgetNotConfiguredError()
+        return row.runtime_generation
+
+    async def start_runtime_in(
+        self,
+        session: AsyncSession,
+        task_id: uuid.UUID,
+        *,
+        run: TaskRun | None = None,
+    ) -> int:
+        """``start_runtime`` in the transaction of the caller's ``session`` (inside
+        a transaction; see ``TaskQueue.enqueue_in``). Nothing is committed here.
+
+        The orchestrator proves its queue lease in the same transaction
+        (``TaskQueue.heartbeat_in``), so the timer starts only together with a
+        valid lease: "only the lease holder calls ``start_runtime``" (Decision
+        0007, 10) holds without a window. ``run`` (a ``TaskRun`` or ``None``): the
+        timer is started on behalf of that run; the task row is share-locked
+        first and ``StaleRunError`` is raised (nothing started) unless the task
+        has not ended and ``run`` is its current run. Lock order: the task row,
+        then the budget row (the caller then locks the queue entry).
+        """
+        check_session("session", session)
+        check_uuid("task_id", task_id)
+        if run is not None and not isinstance(run, TaskRun):
+            raise InvalidQueueingArgumentError("run")
+        if run is not None:
+            await _require_run(session, task_id, run)
+        row = (await session.execute(self._start_statement(task_id))).one_or_none()
+        if row is None:
+            raise BudgetNotConfiguredError()
+        return row.runtime_generation
+
+    def _start_statement(self, task_id: uuid.UUID):
         now = self._instant()
-        start = (
+        return (
             update(BudgetUsageRow)
             .where(
                 BudgetUsageRow.task_id == task_id,
@@ -325,11 +351,6 @@ class BudgetTracker:
             )
             .returning(BudgetUsageRow.runtime_generation)
         )
-        async with self._database.engine.begin() as connection:
-            row = (await connection.execute(start)).one_or_none()
-        if row is None:
-            raise BudgetNotConfiguredError()
-        return row.runtime_generation
 
     async def stop_runtime(self, task_id: uuid.UUID, generation: int) -> BudgetUsage:
         """End the run of session ``generation``: add the elapsed seconds, clear it.
@@ -498,3 +519,24 @@ class BudgetTracker:
                 consumed += _elapsed_seconds(row.now, row.running_since)
             usage.append(BudgetUsage(kind, consumed, row.limit_value))
         return tuple(usage)
+
+
+async def _require_run(
+    executor: AsyncConnection | AsyncSession, task_id: uuid.UUID, run: TaskRun
+) -> None:
+    """Share-lock the task row for the rest of the transaction and require that
+    the task has not ended and ``run`` is its current run (``StaleRunError``;
+    also for an unknown task: there is no run to act for)."""
+    task = (
+        await executor.execute(
+            select(TaskRow.state, TaskRow.attempt, TaskRow.retry_count)
+            .where(TaskRow.id == task_id)
+            .with_for_update(read=True)
+        )
+    ).one_or_none()
+    if (
+        task is None
+        or TaskState(task.state) in TERMINAL_STATES
+        or TaskRun(task.attempt, task.retry_count) != run
+    ):
+        raise StaleRunError()

@@ -32,8 +32,15 @@ from paw_backend.orchestrator.errors import (
     StaleNodeAttemptError,
 )
 from paw_backend.orchestrator.result import NodeResult
-from paw_backend.tasks import TaskNotFoundError, TaskRun
+from paw_backend.tasks import (
+    StaleRunError,
+    TaskCommand,
+    TaskNotFoundError,
+    TaskRun,
+    TaskService,
+)
 
+from .gate_support import ALWAYS_ACTIVE
 from .orchestrator_support import (
     PostgresOrchestratorTestCase,
     diamond,
@@ -148,6 +155,32 @@ class CreateTest(PostgresOrchestratorTestCase):
         )
         self.assertEqual(await self.scalar("SELECT count(*) FROM agent_dags"), 1)
         self.assertEqual(await self.scalar("SELECT count(*) FROM agent_dag_nodes"), 5)
+
+
+@requires_postgres
+class CreateForARunTest(PostgresOrchestratorTestCase):
+    async def test_a_plan_is_stored_only_for_the_current_run_of_the_task(self):
+        # ``run``: the task's current run is checked under the task row's share
+        # lock in the transaction of the insert. A plan of a run that a Retry
+        # replaced, or of an ended task, is not stored.
+        service = TaskService(self.database, project_gate=ALWAYS_ACTIVE)
+        task_id = await self.create_task()
+        first = (
+            await service.execute(task_id, TaskCommand.START, actor=self.system)
+        ).run
+        await service.execute(task_id, TaskCommand.FAIL, actor=self.system)
+        with self.assertRaises(StaleRunError):  # ended
+            await self.store.create(task_id, 1, diamond(), run=first)
+        await service.execute(task_id, TaskCommand.RETRY, actor=self.user)
+        with self.assertRaises(StaleRunError):  # replaced by the Retry
+            await self.store.create(task_id, 1, diamond(), run=first)
+        with self.assertRaises(InvalidOrchestratorArgumentError):  # not the attempt
+            await self.store.create(task_id, 2, diamond(), run=TaskRun(1, 1))
+        self.assertIsNone(await self.store.get(task_id, 1))
+
+        retried = TaskRun(1, 1)
+        dag = await self.store.create(task_id, 1, diamond(), run=retried)
+        self.assertEqual((dag.attempt, dag.task_retry_count), (1, 1))
 
 
 @requires_postgres
