@@ -36,8 +36,10 @@ from paw_backend.tasks import (
     StaleRunError,
     TaskCommand,
     TaskNotFoundError,
+    TaskNotRunningError,
     TaskRun,
     TaskService,
+    WaitReason,
 )
 
 from .gate_support import ALWAYS_ACTIVE
@@ -181,6 +183,51 @@ class CreateForARunTest(PostgresOrchestratorTestCase):
         retried = TaskRun(1, 1)
         dag = await self.store.create(task_id, 1, diamond(), run=retried)
         self.assertEqual((dag.attempt, dag.task_retry_count), (1, 1))
+
+
+@requires_postgres
+class StartNeedsARunningTaskTest(PostgresOrchestratorTestCase):
+    async def test_a_node_starts_only_while_the_task_runs(self):
+        # A new attempt is new work: it starts only while the task is RUNNING
+        # (checked under the task row's share lock with the start). The outcome
+        # of an attempt that is already running is still accepted while the task
+        # quiesces (paused, waiting): a graceful stop lets it finish.
+        service = TaskService(self.database, project_gate=ALWAYS_ACTIVE)
+        task_id = await self.create_task()
+        run = (await service.execute(task_id, TaskCommand.START, actor=self.system)).run
+        dag = await self.store.create(task_id, 1, make_plan(node("a"), node("b")))
+        dag = await self.store.acquire(dag.id, "w1", run)
+        running = await self.store.start_node(dag.id, dag.epoch, "a", max_attempts=6)
+
+        for command, wait_reason in (
+            (TaskCommand.PAUSE, None),
+            (TaskCommand.WAIT, WaitReason.USER),
+        ):
+            with self.subTest(command=command.value):
+                actor = self.user if command is TaskCommand.PAUSE else self.system
+                await service.execute(
+                    task_id, command, actor=actor, wait_reason=wait_reason
+                )
+                with self.assertRaises(TaskNotRunningError):
+                    await self.store.start_node(dag.id, dag.epoch, "b", max_attempts=6)
+                self.assertEqual(
+                    (await self.store.get_by_id(dag.id)).node("b").state, S.READY
+                )
+                back = (
+                    TaskCommand.RESUME
+                    if command is TaskCommand.PAUSE
+                    else TaskCommand.UNBLOCK
+                )
+                await service.execute(task_id, back, actor=self.user)
+
+        await service.execute(task_id, TaskCommand.PAUSE, actor=self.user)
+        done = await self.store.complete_node(
+            dag.id, dag.epoch, "a", running.number, result("a done")
+        )
+        self.assertEqual(done.node("a").state, S.SUCCEEDED)
+        await service.execute(task_id, TaskCommand.RESUME, actor=self.user)
+        started = await self.store.start_node(dag.id, dag.epoch, "b", max_attempts=6)
+        self.assertEqual(started.number, 1)
 
 
 @requires_postgres
@@ -730,9 +777,8 @@ class FencingTest(PostgresOrchestratorTestCase):
     async def test_two_nodes_finishing_at_once_still_make_their_join_ready(self):
         for round_ in range(15):
             with self.subTest(round=round_):
-                task_id = await self.create_task()
-                dag = await self.store.create(
-                    task_id, 1, make_plan(node("x"), node("y"), node("j", "x", "y"))
+                dag = await self.make_dag(
+                    make_plan(node("x"), node("y"), node("j", "x", "y"))
                 )
                 await self.store.acquire(dag.id, "w", RUN)
                 x = await self.store.start_node(dag.id, 1, "x", max_attempts=6)

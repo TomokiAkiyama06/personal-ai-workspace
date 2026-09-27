@@ -24,6 +24,7 @@ from paw_backend.tasks import ProjectNotActiveError, TaskCommand, TaskRun, TaskS
 from .orchestrator_support import (
     FakeRuntime,
     PostgresOrchestratorTestCase,
+    SpyBudget,
     fail,
     make_plan,
     node,
@@ -85,6 +86,39 @@ class RetryAfterASucceededDagTest(PostgresOrchestratorTestCase):
         # The entry of the second run is completed, and the task has left `running`.
         entries = await self.rows("SELECT status FROM queue_entries ORDER BY id")
         self.assertEqual([e["status"] for e in entries], ["completed", "completed"])
+
+    async def test_a_used_up_budget_does_not_keep_a_succeeded_dag_from_evaluation(
+        self,
+    ):
+        # The work is done and its results stand: a Retry after a failed
+        # evaluation goes back to evaluation even when the budget is used up
+        # meanwhile (the runtime timer's last stop pushed it over, say). No
+        # budget stop, no runtime timer: nothing runs.
+        spy = SpyBudget(self.database)
+        runtime = FakeRuntime("local")
+        h = self.harness(runtimes={"local": runtime}, budget=spy)
+        task_id = await self.prepare(h, make_plan(node("a")))
+        self.assertEqual(
+            (await h.orchestrator.run_once("w1")).outcome, Out.DAG_SUCCEEDED
+        )
+        for kind in ("steps", "runtime_seconds"):
+            await self.owner_sql(
+                "UPDATE budget_usages SET limit_value = 0, consumed = 5"
+                " WHERE task_id = :t AND kind = :k",
+                t=task_id,
+                k=kind,
+            )
+        started = list(spy.started)
+
+        report = await self.cycle(h, task_id, "w2")
+
+        self.assertEqual(report.outcome, Out.DAG_SUCCEEDED)
+        snapshot = await h.tasks.restore(task_id)
+        self.assertEqual(
+            (snapshot.state, snapshot.run), (TaskState.EVALUATING, TaskRun(1, 1))
+        )
+        self.assertEqual(spy.started, started)  # no timer for a run that runs nothing
+        self.assertEqual(len(runtime.assignments), 1)
 
     async def test_it_can_happen_again_and_again(self):
         runtime = FakeRuntime("local")
@@ -236,6 +270,43 @@ class UnexpectedErrorsTest(PostgresOrchestratorTestCase):
             self.assertNotIn(SECRET, dump, table)
         # A human can retry it: it does not stay in a limbo.
         await h.tasks.execute(task_id, TaskCommand.RETRY, actor=self.user)
+
+    async def test_when_the_nodes_cannot_be_interrupted_the_entry_stays_claimed(
+        self,
+    ):
+        # An unexpected error while a node runs: the task may be failed only once
+        # the nodes this run left running are ready again (their attempts
+        # interrupted). When that write fails, failing the task would leave the
+        # attempts "running" for ever (a Restart never takes this DAG over); the
+        # task stays running and the entry claimed, and the next worker's
+        # take-over interrupts them.
+        runtime = FakeRuntime("local")
+        runtime.gate("a")
+        h = self.harness(runtimes={"local": runtime})
+        task_id = await self.prepare(h, make_plan(node("a"), node("b")))
+        original_start = h.store.start_node
+        started = []
+
+        async def start_then_break(dag_id, epoch, key, **kwargs):
+            if started:
+                raise BrokenStep(SECRET)  # the second start: an error of ours
+            started.append(key)
+            return await original_start(dag_id, epoch, key, **kwargs)
+
+        async def broken_interrupt(*args, **kwargs):
+            raise ConnectionError(SECRET)
+
+        h.store.start_node = start_then_break
+        h.store.interrupt = broken_interrupt
+
+        with self.assertLogs("paw_backend.orchestrator.orchestrator", "ERROR"):
+            report = await h.orchestrator.run_once("w1")
+
+        self.assertEqual(report.outcome, Out.ERROR)
+        self.assertEqual((await h.tasks.restore(task_id)).state, TaskState.RUNNING)
+        (entry,) = await self.rows("SELECT status FROM queue_entries")
+        self.assertEqual(entry["status"], "claimed")
+        self.assertEqual(await self.states_of(task_id), {"a": "running", "b": "ready"})
 
     async def test_when_even_the_failure_cannot_be_written_the_entry_stays_claimed(
         self,

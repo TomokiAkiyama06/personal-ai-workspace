@@ -96,7 +96,11 @@ from sqlalchemy.sql.elements import ColumnElement
 
 from paw_backend.db import Database
 from paw_backend.tasks.domain import TERMINAL_STATES, TaskRun, TaskState
-from paw_backend.tasks.errors import StaleRunError, TaskNotFoundError
+from paw_backend.tasks.errors import (
+    StaleRunError,
+    TaskNotFoundError,
+    TaskNotRunningError,
+)
 from paw_backend.tasks.models import TaskRow
 from paw_backend.tasks.queueing.domain import (
     PRESET_LIMITS,
@@ -233,6 +237,7 @@ class BudgetTracker:
         amount: int,
         *,
         run: TaskRun | None = None,
+        require_running: bool = False,
     ) -> BudgetUsage:
         """Atomically add ``amount`` to the consumption of ``kind``; return it.
 
@@ -254,6 +259,12 @@ class BudgetTracker:
         cancelled) and its attempt and retry count are ``run``: a Fail, Retry or
         Restart either committed before (and is seen) or waits until the charge
         committed. There is no window between the check and the write.
+
+        ``require_running`` (with ``run``): the charge is for STARTING work (the
+        step of a node start or a planner call), so the task must also be
+        ``running`` (``TaskNotRunningError`` for a paused or waiting task,
+        nothing written). A charge for work that already ran (``run`` alone) is
+        accepted while the task quiesces.
         """
         check_uuid("task_id", task_id)
         check_member("kind", kind, BudgetKind)
@@ -262,6 +273,9 @@ class BudgetTracker:
         check_amount("amount", amount)
         if run is not None and not isinstance(run, TaskRun):
             raise InvalidQueueingArgumentError("run")
+        check_bool("require_running", require_running)
+        if require_running and run is None:
+            raise InvalidQueueingArgumentError("require_running")
         add = (
             update(BudgetUsageRow)
             .where(BudgetUsageRow.task_id == task_id, BudgetUsageRow.kind == kind)
@@ -270,7 +284,7 @@ class BudgetTracker:
         )
         async with self._database.engine.begin() as connection:
             if run is not None:
-                await _require_run(connection, task_id, run)
+                await _require_run(connection, task_id, run, require_running)
             row = (await connection.execute(add)).one_or_none()
         if row is None:
             raise BudgetNotConfiguredError()
@@ -319,7 +333,8 @@ class BudgetTracker:
         0007, 10) holds without a window. ``run`` (a ``TaskRun`` or ``None``): the
         timer is started on behalf of that run; the task row is share-locked
         first and ``StaleRunError`` is raised (nothing started) unless the task
-        has not ended and ``run`` is its current run. Lock order: the task row,
+        has not ended and ``run`` is its current run, and ``TaskNotRunningError``
+        unless it is ``running`` (a timer is new work). Lock order: the task row,
         then the budget row (the caller then locks the queue entry).
         """
         check_session("session", session)
@@ -327,7 +342,8 @@ class BudgetTracker:
         if run is not None and not isinstance(run, TaskRun):
             raise InvalidQueueingArgumentError("run")
         if run is not None:
-            await _require_run(session, task_id, run)
+            # A run's timer is new work: the task must be running.
+            await _require_run(session, task_id, run, require_running=True)
         row = (await session.execute(self._start_statement(task_id))).one_or_none()
         if row is None:
             raise BudgetNotConfiguredError()
@@ -522,11 +538,15 @@ class BudgetTracker:
 
 
 async def _require_run(
-    executor: AsyncConnection | AsyncSession, task_id: uuid.UUID, run: TaskRun
+    executor: AsyncConnection | AsyncSession,
+    task_id: uuid.UUID,
+    run: TaskRun,
+    require_running: bool = False,
 ) -> None:
     """Share-lock the task row for the rest of the transaction and require that
     the task has not ended and ``run`` is its current run (``StaleRunError``;
-    also for an unknown task: there is no run to act for)."""
+    also for an unknown task: there is no run to act for) and, with
+    ``require_running``, that it is ``running`` (``TaskNotRunningError``)."""
     task = (
         await executor.execute(
             select(TaskRow.state, TaskRow.attempt, TaskRow.retry_count)
@@ -540,3 +560,5 @@ async def _require_run(
         or TaskRun(task.attempt, task.retry_count) != run
     ):
         raise StaleRunError()
+    if require_running and TaskState(task.state) is not TaskState.RUNNING:
+        raise TaskNotRunningError()

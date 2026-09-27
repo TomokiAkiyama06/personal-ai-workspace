@@ -79,7 +79,13 @@ from paw_backend.orchestrator.validation import (
     check_uuid,
     check_worker_id,
 )
-from paw_backend.tasks import StaleRunError, TaskNotFoundError, TaskRun, TaskState
+from paw_backend.tasks import (
+    StaleRunError,
+    TaskNotFoundError,
+    TaskNotRunningError,
+    TaskRun,
+    TaskState,
+)
 from paw_backend.tasks.models import TaskRow
 from paw_backend.tasks.queueing.sql import (
     FOREIGN_KEY_VIOLATION,
@@ -458,6 +464,12 @@ class DagStore:
         the number the owner presents when it reports the outcome. A node that
         already used ``max_attempts`` on this rung is refused (``NodeStateError``),
         as is a node that is not ready.
+
+        A start is NEW work: besides the run fence of every write, the task must be
+        ``running`` (``TaskNotRunningError`` for a paused or waiting task), read
+        under the same share lock. An outcome of an attempt that already runs is
+        still accepted while the task quiesces (``complete_node`` / ``fail_node``
+        need only a task that has not ended).
         """
         check_uuid("dag_id", dag_id)
         check_int("epoch", epoch, minimum=1, maximum=MAX_INT32)
@@ -466,7 +478,9 @@ class DagStore:
             "max_attempts", max_attempts, minimum=1, maximum=MAX_ATTEMPTS_PER_RUNG
         )
         async with self._database.session() as session, session.begin():
-            locked = await self._open(session, dag_id, epoch, check_run=True)
+            locked = await self._open(
+                session, dag_id, epoch, check_run=True, require_running=True
+            )
             row = locked.nodes.get(key)
             if row is None:
                 raise NodeStateError()
@@ -683,6 +697,7 @@ class DagStore:
         *,
         require_active: bool = True,
         check_run: bool = False,
+        require_running: bool = False,
     ) -> _Locked:
         """Lock the DAG row, check the fence (``epoch``; ``None`` skips it: only
         ``acquire``) and load the nodes and edges.
@@ -696,7 +711,8 @@ class DagStore:
         when the task's attempt or retry count is no longer the run that last took
         the DAG over, or the task has ended (completed, failed, cancelled). A task
         command waits for this lock (it updates the row), so the check and the
-        write are one step for it.
+        write are one step for it. ``require_running`` (with ``check_run``; a
+        node's start): the task must also be ``running`` (``TaskNotRunningError``).
         """
         dag = (
             await session.execute(
@@ -727,6 +743,8 @@ class DagStore:
                 or task.state in _ENDED_TASK_STATES
             ):
                 raise StaleRunError()
+            if require_running and TaskState(task.state) is not TaskState.RUNNING:
+                raise TaskNotRunningError()
         rows = (
             await session.execute(
                 select(DagNodeRow)

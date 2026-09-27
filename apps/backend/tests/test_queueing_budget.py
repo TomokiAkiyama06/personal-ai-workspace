@@ -13,7 +13,13 @@ from unittest import mock
 
 from sqlalchemy import event, text
 
-from paw_backend.tasks import StaleRunError, TaskCommand, TaskNotFoundError, TaskRun
+from paw_backend.tasks import (
+    StaleRunError,
+    TaskCommand,
+    TaskNotFoundError,
+    TaskNotRunningError,
+    TaskRun,
+)
 from paw_backend.tasks.queueing import (
     PRESET_LIMITS,
     RECORDABLE_KINDS,
@@ -342,6 +348,28 @@ class RecordTest(BudgetTestCase):
                 raise RuntimeError("the caller gives up")
         row = await self.budget_row(task_id, "runtime_seconds")
         self.assertEqual((row["runtime_generation"], row["running_since"]), (1, None))
+
+    async def test_a_charge_that_starts_work_needs_a_running_task(self):
+        # ``require_running``: the step of a planner or node start is charged
+        # only while the task RUNS (a pause or a wait that committed meanwhile
+        # refuses it: no new work starts). A plain ``run=`` charge (what running
+        # work used) is still accepted while the task quiesces.
+        task_id = await self.configured_task()
+        run = (
+            await self.service.execute(task_id, TaskCommand.START, actor=self.system)
+        ).run
+        await self.budget.record(task_id, K.STEPS, 1, run=run, require_running=True)
+        await self.service.execute(task_id, TaskCommand.PAUSE, actor=self.user)
+        with self.assertRaises(TaskNotRunningError):
+            await self.budget.record(task_id, K.STEPS, 1, run=run, require_running=True)
+        await self.budget.record(task_id, K.TOKENS, 3, run=run)
+        with self.assertRaises(TaskNotRunningError):
+            async with self.database.session() as session, session.begin():
+                await self.budget.start_runtime_in(session, task_id, run=run)
+        with self.assertRaises(InvalidQueueingArgumentError):  # needs the run
+            await self.budget.record(task_id, K.STEPS, 1, require_running=True)
+        self.assertEqual((await self.budget_row(task_id, "steps"))["consumed"], 1)
+        self.assertEqual((await self.budget_row(task_id, "tokens"))["consumed"], 3)
 
     async def test_recording_zero_changes_nothing(self):
         task_id = await self.configured_task()

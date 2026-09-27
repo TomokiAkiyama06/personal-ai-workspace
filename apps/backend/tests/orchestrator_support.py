@@ -14,7 +14,7 @@ from paw_backend.orchestrator.plan import Plan
 from paw_backend.orchestrator.result import NodeResult
 from paw_backend.orchestrator.runtime import NodeAssignment, NodeOutcome
 from paw_backend.orchestrator.store import DagStore
-from paw_backend.tasks import TaskRun, TaskService
+from paw_backend.tasks import TaskCommand, TaskRun, TaskService
 from paw_backend.tasks.queueing import (
     BudgetPreset,
     BudgetTracker,
@@ -350,7 +350,11 @@ class PostgresOrchestratorTestCase(PostgresTaskTestCase):
         return Harness(self.new_database(), **options)
 
     async def make_dag(self, plan: Plan | None = None, *, task_id=None):
-        task_id = task_id or await self.create_task()
+        """A DAG of attempt 1. A new task is STARTED first (run 1.0): a node
+        starts only while its task runs (``DagStore.start_node``)."""
+        if task_id is None:
+            task_id = await self.create_task()
+            await self.service.execute(task_id, TaskCommand.START, actor=self.system)
         return await self.store.create(task_id, 1, plan or diamond())
 
     async def taken_dag(self, plan: Plan | None = None, owner: str = "w1"):

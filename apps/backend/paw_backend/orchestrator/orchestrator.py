@@ -112,6 +112,7 @@ from paw_backend.tasks import (
     TaskCommand,
     TaskConflictError,
     TaskNotFoundError,
+    TaskNotRunningError,
     TaskRun,
     TaskService,
     TaskSnapshot,
@@ -563,6 +564,14 @@ class Orchestrator:
         heartbeat: asyncio.Task[None] | None = None
         complete_entry = True
         try:
+            # A DAG that already ended for good (it succeeded, or failed in this
+            # same run) is not run again: the task is only handed on as its
+            # outcome says. Nothing runs, so the budget does not gate it (a used-up
+            # budget must not keep finished work from its evaluation) and no
+            # runtime timer is started.
+            ended = await self._store.get(task_id, run.run.attempt)
+            if ended is not None and _ended_for_good(ended, run.run):
+                return await self._hand_on_ended_dag(run, ended)
             try:
                 verdict = await self._budget.check(task_id)
             except BudgetNotConfiguredError:
@@ -603,6 +612,13 @@ class Orchestrator:
         except StaleDagEpochError:
             complete_entry = False  # another worker owns the DAG: so the entry
             return RunReport(RunOutcome.LEASE_LOST, task_id)
+        except TaskNotRunningError:
+            # New work was refused: the task was paused or put in waiting since
+            # the last look (whoever resumes or unblocks it enqueues it again).
+            watch = await self._watch(run)
+            return RunReport(
+                _OUTCOME_OF_WATCH.get(watch, RunOutcome.TASK_ENDED), task_id
+            )
         except StaleRunError:
             return RunReport(RunOutcome.SUPERSEDED, task_id)
         except LeaseLostError:
@@ -636,12 +652,27 @@ class Orchestrator:
         expire and the next worker takes the run over.
         """
         if run.epoch:
-            # Best effort: the nodes this run left running are ready again (their
-            # attempts interrupted), as a later owner's ``acquire`` would make them.
-            with contextlib.suppress(Exception):
+            # The nodes this run left running are ready again (their attempts
+            # interrupted), as a later owner's ``acquire`` would make them. This
+            # must succeed BEFORE the task is failed: a failed task is restarted
+            # into a new DAG, and nobody would ever take this one over again, so
+            # its attempts would stay "running" for ever. When it fails, the task
+            # keeps running and the entry claimed: the next worker's take-over
+            # interrupts them. (``StaleDagEpochError``: another worker took the DAG
+            # over already, and so interrupted them; the entry is its.)
+            try:
                 dag = await self._store.get(run.task.id, run.run.attempt)
                 if dag is not None:
                     await self._store.interrupt(dag.id, run.epoch)
+            except StaleDagEpochError:
+                return False
+            except Exception as error:
+                logger.error(
+                    "Interrupting the nodes after an error failed (%s); the entry "
+                    "is left claimed until its lease expires",
+                    error_class_of(error),
+                )
+                return False
         try:
             await self._end_task(run, TaskCommand.FAIL, Actor.system(), REASON_INTERNAL)
         except StaleRunError:
@@ -876,6 +907,20 @@ class Orchestrator:
             raise HeartbeatTimeoutError()
         return call.result()
 
+    async def _hand_on_ended_dag(self, run: _Run, dag: DagRecord) -> RunReport:
+        """Hand the task on as a DAG that ended for good says: back to evaluation
+        after a Retry of a failed evaluation (the results stand), or failed for a
+        crash between closing the DAG and failing the task. The DAG is taken over
+        (bound to the lease, ``_acquire_dag``: it records the run and fences the
+        worker before) but nothing runs, so neither the budget nor the timer is
+        involved; the task command is fenced by the run (``_end_task``)."""
+        taken = await self._acquire_dag(dag.id, run.entry, run.worker_id, run.run)
+        run.epoch = taken.epoch
+        if taken.state is DagState.ACTIVE:  # re-opened meanwhile: not ended
+            raise DagStateError()
+        await self._log(run, LogLevel.INFO, f"The DAG had already {taken.state.value}")
+        return await self._finish_dag(run, taken, None)
+
     async def _drive_until_lost(self, run: _Run) -> RunReport:
         """``_drive``, but never past a lost lease.
 
@@ -926,9 +971,8 @@ class Orchestrator:
         run.epoch = dag.epoch
         if dag.state is not DagState.ACTIVE:
             # A DAG that already ended is not run again (one DAG per task attempt;
-            # Decision 0021, section 6). The task is handed on as the DAG's outcome
-            # says: back to evaluation after a retry of a failed evaluation, or
-            # failed for a crash between closing the DAG and failing the task.
+            # Decision 0021, section 6). Usually seen before the budget check
+            # (``_run_entry``, ``_hand_on_ended_dag``); here when it ended since.
             # (A cancelled DAG cannot be taken over: ``acquire`` refused it.)
             await self._log(
                 run, LogLevel.INFO, f"The DAG had already {dag.state.value}"
@@ -1044,15 +1088,22 @@ class Orchestrator:
         for ever. When the task is cancelled, close the DAG as a Cancel would; the
         write is fenced by this run's epoch (and so refused if another worker took
         the DAG over). Any failure is only logged."""
-        try:
-            snapshot = await self._tasks.restore(run.task.id, log_limit=0)
-            if snapshot.state is TaskState.CANCELLED and snapshot.run == run.run:
-                await self._store.cancel(dag.id, run.epoch)
-        except Exception as error:
-            logger.info(
-                "Closing the DAG of a cancelled task skipped (%s)",
-                error_class_of(error),
-            )
+        # Nobody can take this DAG over again (the entry was cancelled with the
+        # task), so a transient failure is tried again a few times rather than
+        # left to a later owner.
+        for _ in range(COMMAND_ATTEMPTS):
+            try:
+                snapshot = await self._tasks.restore(run.task.id, log_limit=0)
+                if snapshot.state is TaskState.CANCELLED and snapshot.run == run.run:
+                    await self._store.cancel(dag.id, run.epoch)
+                return
+            except (StaleDagEpochError, TaskNotFoundError):
+                return  # another worker owns it, or the task is gone
+            except Exception as error:
+                logger.info(
+                    "Closing the DAG of a cancelled task failed (%s)",
+                    error_class_of(error),
+                )
 
     async def _process_done(
         self,
@@ -1276,17 +1327,21 @@ class Orchestrator:
                 )
                 return self._stop_for_budget(decision.action)
             try:
-                # Fenced by the run like the start that follows: a replaced or
-                # ended run charges nothing to the run that took over.
-                await self._budget.record(run.task.id, BudgetKind.STEPS, 1, run=run.run)
+                # Fenced by the run like the start that follows (a replaced or
+                # ended run charges nothing to the run that took over), and both
+                # need a RUNNING task: a pause or a wait that committed since the
+                # last look starts nothing.
+                await self._budget.record(
+                    run.task.id, BudgetKind.STEPS, 1, run=run.run, require_running=True
+                )
                 attempt = await self._store.start_node(
                     dag.id,
                     run.epoch,
                     key,
                     max_attempts=self._config.max_attempts_per_rung,
                 )
-            except StaleRunError:
-                return None  # the run is over: ``_watch`` says why
+            except (StaleRunError, TaskNotRunningError):
+                return None  # the run is over or quiesces: ``_watch`` says why
             spec = self._spec_of(dag, node, attempt)
             running[key] = asyncio.create_task(self._attempt(run, spec))
             numbers[key] = attempt.number
@@ -1768,7 +1823,10 @@ class Orchestrator:
                     run, self._stop_for_budget(action), None
                 )
             for kind, amount in planned.items():
-                await self._budget.record(task_id, kind, amount, run=run.run)
+                # Starting a planner call is new work: a RUNNING task only.
+                await self._budget.record(
+                    task_id, kind, amount, run=run.run, require_running=True
+                )
             spec = _Spec(
                 key=PLAN_STEP,
                 role=NodeRole.PLANNER,
@@ -1845,6 +1903,15 @@ class Orchestrator:
                 break
         await self._end_task(run, TaskCommand.FAIL, Actor.system(), REASON_PLAN_FAILED)
         return RunReport(RunOutcome.PLAN_FAILED, task_id)
+
+
+def _ended_for_good(dag: DagRecord, run: TaskRun) -> bool:
+    """Whether a take-over by ``run`` leaves the DAG ended: it succeeded (never
+    re-opened, Decision 0021, section 6), or it failed and ``run`` is not a later
+    Retry (only a Retry re-opens a failed DAG, ``DagStore.acquire_in``)."""
+    if dag.state is DagState.SUCCEEDED:
+        return True
+    return dag.state is DagState.FAILED and run.retry_count <= dag.task_retry_count
 
 
 _TIMED_OUT = object()
