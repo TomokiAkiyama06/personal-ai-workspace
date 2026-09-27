@@ -1,10 +1,10 @@
 # Task Working Set（Multi-Repo）の単位・承認・Write範囲・完了条件
 
-- Status: Proposed
+- Status: Approved
 - Date: 2026-09-27
 - Scope: Issue [#85](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/85)（Task Working Setの永続化）の実装に**先立って**決める、[Decision 0014](0014-task-working-set-persistence.md)「決まっていないこと」1〜5（Working Setの単位、Single-Repo Taskとの関係、Repo追加・役割変更の権限と承認、役割とWrite範囲の対応、Task全体の完了条件）。関連: PAW-027（#24）、PAW-031（#27）、PAW-032（#28、PR #70）、PAW-034（#30、PR #106、未Merge）、PAW-035（#31）、PAW-061 / 062
 - Supersedes: なし（[Decision 0014](0014-task-working-set-persistence.md) を書き換えず、その「決まっていないこと」1〜5 を埋める補完 Decision。0014 の「提案」「想定する形」「承認後の扱い」はそのまま有効）
-- Approval: 未承認
+- Approval: 2026-09-27、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで「全部推奨どおり」と回答して承認。その後、Codex Review の P1 を反映して厳しくした版を承認済みとして記録し、残りの P1 を #85 の制約とすることも Human が選択（末尾の「承認時の決定」）
 
 ## 背景
 
@@ -173,3 +173,13 @@ Restart は Repo ごとの Git 状態（branch / worktree / head_commit / review
 4. **role（referenced / working / target）による Write 範囲の Ceiling を、RBAC（`RepoAcl`）とは別の軸として Tool Broker に追加し、両方を満たしたときだけ許可する（AND）。Approval があっても Ceiling は超えられない。Ceilingがカバーする2つの`authz_capability`以外でRepositoryへの書き込み効果を持つToolの登録を拒否する一貫性検査と、remote 配下の URL を含めて Repo に接触する書き込み呼び出しを同じ条件で拒否する実行時検査を追加する**（4 節）でよいか。推奨: はい（この Decision の核。一貫性検査と、URL を含む実行時検査はCodex Reviewの指摘で追加）。
 5. **role が解決できないときは、その Repo に対するすべての Capability を拒否する（`referenced` として扱わない、fail-closed）**（4 節の 5）でよいか。推奨: はい（Codex Reviewの指摘で「`referenced` として扱う」から訂正）。
 6. **Task全体の完了条件を、`complete`遷移でのみ判定する（`begin_evaluation`はこのDecisionの対象外）。`target` Repoはevaluation PASS + PRが`open`か`merged`のいずれか、`working` Repoはevaluation PASSのみ、`referenced` Repoは対象外、とする。ただし試行中に変更した Repo は、降格・削除後も試行中に持った最も強い role の義務を負う（検証可能な破棄を除く）**（5 節）でよいか。推奨: はい（Codex Reviewの指摘で、`begin_evaluation`を対象から外し、PR状態を`merged`のみから`open`/`merged`へ訂正し、変更済み Repo の義務の保持を追加）。
+
+## 承認時の決定（2026-09-27）
+
+Human は、作業 Session で上の 6 点について推奨つきの説明を受け、「全部推奨どおり」と回答して承認した（6 点を一括で。個別の変更はない）。**6 点すべてが推奨どおり**で、下の補足のとおり、承認後に Codex Review の P1 を反映して厳しくした版を承認済みとして記録した。
+
+**承認後の扱いの補足（2026-09-27、Human が作業 Session 内で直接回答）。** Human が「推奨どおり」と回答した時点の版（a94e825）には、Codex Review の P1 が 5 件あった。承認後にそれらを反映した版（d736470）は、承認時より**厳しい方向にだけ**変わっている（すべての降格・削除を `STRONG_APPROVAL` にする、Attempt 中に変更した Repo は降格・削除しても最も強い役割の完了義務を残す、役割ごとに別の Tool Spec にする、対象 Repo の `RepoAcl` を別に確かめる、URL で Repository を指す書き込みも一貫性検査に含める、解決できない role は `referenced` ではなく拒否する）。Human はこの厳しくした版を承認済みとして記録することを選んだ。
+
+その版に対する Codex Review（d736470）の P1 5 件（Repo ごとの開始 Commit、`EXECUTE` の Tool への Ceiling、新しい Capability の付与先と委任、最後の `target` を守る検査の直列化、`target` の完了条件に Review の承認を加えること）は、この Decision の本文を書き換えず、実装 Issue [#85](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/85) の**必須の制約**として引き継ぐ（Human が 2026-09-27 に選択）。#85 の実装はこれらを満たすまで完了としない。いずれも安全側に狭める内容であり、本文の方針を緩めるものではない。
+
+承認後に方針を変える場合は、この Decision を書き換えず、新しい Decision から `Supersedes` する。
