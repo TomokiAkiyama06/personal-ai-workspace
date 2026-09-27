@@ -5,11 +5,9 @@ comes first): nothing here reads ``memory_versions``. The result,
 :class:`~paw_backend.memory.retrieval.scopes.ResolvedScopes`, is the only thing the
 SQL prefilter is built from.
 
-* ``user`` scope: ``memory.use`` on a resource owned by the caller. (Its audit mode
-  is ``REQUIRED`` in Decision 0004, so this one decision is recorded per call. The
-  Human approved moving to a read-only ``memory.read`` (``DENIED_ONLY``) in
-  Decision 0019; the capability itself is Decision 0024 (approved 2026-09-27), and this
-  stays ``memory.use`` until issue #115 implements it.)
+* ``user`` scope: ``memory.read`` on a resource owned by the caller (Decision 0024:
+  ``DENIED_ONLY``, so an allowed read writes nothing and only a denial is recorded).
+  ``memory.use`` is not asked here: it stays for writing and proposing.
 * ``shared`` scope: ``shared_memory.read`` (``DENIED_ONLY``: nothing is written
   for an allowed read).
 * ``project`` scope: the caller's accepted memberships are READ FROM THE DATABASE
@@ -28,7 +26,9 @@ SQL prefilter is built from.
 
 A denial makes a scope contribute nothing; it is not reported (an answer that told
 the caller which of the projects it named exist would be a leak). The one failure
-that is an error is a decision that could not be recorded (``audit_unavailable``).
+that is an error is a decision that could not be recorded (``audit_unavailable``:
+every capability asked here is ``DENIED_ONLY``, so the real Authorizer only answers
+that for a decision its mode requires recording, never for a person's allowed read).
 """
 
 import logging
@@ -94,7 +94,7 @@ class ScopeResolver:
 
         if MemoryScope.USER in wanted and await self._allowed(
             actor,
-            Capability.MEMORY_USE,
+            Capability.MEMORY_READ,
             Resource.owned_by(actor.user_id, RESOURCE_MEMORY),
         ):
             contributing.add(MemoryScope.USER)

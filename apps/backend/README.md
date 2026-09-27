@@ -704,7 +704,7 @@ Agent の操作は、委任した人間の User の操作として判定しま�
 
 - 許可されるのは、**User 本人が許可される** かつ **`AgentGrant` に含まれる** かつ **委任可能（`delegable`）な Capability** の操作だけです（積集合）。
   Grant は権限を狭めるだけで、User の権限を超えることはありません。
-- 委任できる Capability は許可リストです（Chat、Workspace、GitHub、Memory、PR、Shared Memory の閲覧、Project の閲覧・Chat・Task・Repository 編集・PR・Memory 利用）。
+- 委任できる Capability は許可リストです（Chat、Workspace、GitHub、Memory の利用と閲覧（`memory.use`、`memory.read`）、PR、Shared Memory の閲覧、Project の閲覧・Chat・Task・Repository 編集・PR・Memory 利用）。
   `CapabilityInfo.delegable` には既定値がなく、Capability を追加するときは必ず決める必要があります。
   Project 設定・Repository 追加・Project Memory 管理を含む管理系、`admin.*`、`owner.*`、`shared_memory.manage` と Shared Memory を変える操作の Capability（`shared_memory.create` など）、Member / Agent Policy / Lifecycle、Project の作成・招待への応答・退出（`project.create`、`project.invitation.respond`、`project.leave`）は Grant に書いてあっても拒否します（自己権限昇格の禁止）。
   **`agent.use` と `project.agent.use`（Agent を起動する操作）も委任できません。** 子 Agent の Grant を親の部分集合として導く仕組み（PAW-032）ができるまで、Agent が自分より強い Agent を作れないようにするためです。
@@ -749,7 +749,7 @@ Table は加えて `recorded_at`（Database の時計。INSERT 時に Trigger �
 | Mode | 対象 | 記録 | Audit を書けないとき |
 | --- | --- | --- | --- |
 | `REQUIRED`（既定） | 上記以外のすべて（副作用のある操作、管理系、`admin.audit.view` / `admin.usage.view` も含む） | 許可も拒否も記録する | **許可を拒否に変える**（`audit_unavailable`、HTTP 503）。拒否は拒否のまま |
-| `DENIED_ONLY` | 読み取り専用の許可リスト（`project.read`、`shared_memory.read`、`account.read`）だけ | 拒否だけを Best Effort で記録し、許可した読み取りは記録しない | 読み取りは止めない |
+| `DENIED_ONLY` | 読み取り専用の許可リスト（`project.read`、`shared_memory.read`、`account.read`、`memory.read`）だけ | 拒否だけを Best Effort で記録し、許可した読み取りは記録しない | 読み取りは止めない |
 
 - **認証されていない Request の拒否は Database に書きません。** 誰でも作れる行になり、Table は削除できないためです。
   代わりに `INFO` の Log（Reason、Action、Resource の種類、`correlation_id`、`client_request_id`。例外の文は含めない）に出します。
@@ -809,7 +809,8 @@ Issue [#86](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/86) 
 
 #### 残っているリスクと既知の制限
 
-- 許可した読み取り（`DENIED_ONLY`。人間の `project.read`、`shared_memory.read`）は記録しません。誰が何を読んだかは Audit から分かりません（Agent の読み取りは記録します）。
+- 許可した読み取り（`DENIED_ONLY`。人間の `project.read`、`shared_memory.read`、`memory.read`）は記録しません。誰が何を読んだかは Audit から分かりません（Agent の読み取りは記録します）。
+  `memory.read`（自分の Long-term Memory の読み取り。Hybrid Retrieval の `user` Scope）は [Decision 0024](../../docs/decisions/0024-memory-read-capability.md) で足しました。Role は `memory.use` と同じ（User / Admin / Owner。`system` は持たない）で、委任できます。`memory.use`（書き込み・Candidate の提案など）は `REQUIRED` のままです。読める範囲を誤ることへの備えは Audit ではなく、Backend の ACL と Permission Leakage 0 の Test（`test_retrieval_leakage.py`、`test_retrieval_eligibility.py`）です。
 - 認証済みの User の拒否は、1 回ごとに 1 行を書きます。この拒否の回数制限はありません（Login の Backoff と Token の Rate Limit は別で、[Login / Session / Password Policy](#login--session--password-policy)）。未認証の拒否は Log だけです。
 - 保存期間・Partition・古い行の退避は、上の「保存期間・Partition・退避（Issue #86）」のとおり Decision 0027 は承認済みですが、定期的に呼び出す仕組みが別 Issue で用意されるまで、実運用はまだしません。
 - Repository の ACL の保存と解決は呼び出す側（PAW-027 など）の責任です。この Backend は、渡された `RepoAcl` を判定するだけです。
@@ -3196,9 +3197,9 @@ Rerank（Reranker Protocol）→ 構造化 Score（confirmed・鮮度・importan
   Stale: `stale_since`、`revalidate` の期限（`verified_at + revalidate_after`。Transaction を UTC にして 1 日を 24 時間で数える）、`repo_commit` が渡された Head と違う、を SQL で判定します（`ranking.freshness_of` と同じ規則で、`test_retrieval_eligibility.py` が行ごとに突き合わせます）。
   System Policy: Policy を**候補より前に**読み（Shared を検索するときだけ）、`policy_subjects` が Policy の Subject と等しいか、その下にある Shared Memory を除きます（`starts_with(subject, policy || '.')`。`LIKE` は `_` が Wildcard のため使いません）。宣言が壊れた（配列でない、21 個以上、書式違反、文字列でない）Shared Memory は判定できないため除きます（Shared Memory の規則と同じ）。
   除いた行は順位にも影響しません。除いた行を無効にした DB と結果が全 Field で等しいことを、短い候補の上限で Test します（`test_retrieval_leakage.py`、`test_retrieval_eligibility.py`）。
-- **Scope ごとの認可**（Decision 0019 の 1、2）: `user` は `memory.use`（`REQUIRED`: 呼び出し 1 回に Audit 1 行）、`shared` は `shared_memory.read`、`project` は DB から読み直した受諾済み Membership と `project.read`（Archived は読める。Pending deletion / Deleted / 招待中は読めず、尋ねもしない）、
+- **Scope ごとの認可**（Decision 0019 の 1、2）: `user` は `memory.read`（`DENIED_ONLY`: 許可した読み取りは記録せず、拒否だけを 1 行。[Decision 0024](../../docs/decisions/0024-memory-read-capability.md)、Issue #115）、`shared` は `shared_memory.read`、`project` は DB から読み直した受諾済み Membership と `project.read`（Archived は読める。Pending deletion / Deleted / 招待中は読めず、尋ねもしない）、
   `repo` は `RepoAclSource` の ACL を `project.read` の Repository Resource で判定（`repo_ids` が明示的に空なら、Repository の Scope は飛ばし、Source を呼びません）、`project_group` は `ProjectGroupSource` の ID。Source の答えは 1 回だけ読んでコピーし、コピーできない・型や上限が違うものは `RetrievalSourceError` です。`Principal.project_roles` は信用しません。拒否は「その Scope が何も返さない」だけで、応答に出しません。
-  決定を記録できない（`audit_unavailable`）ときだけ `RetrievalPermissionError` です。`DENIED_ONLY` の `shared_memory.read` / `project.read` は、許可した読み取りを記録しません（この実装は Audit を増やしません。`memory.use` の 1 行は Decision 0004 のとおり）。**`user` を読み取り専用の `memory.read`（`DENIED_ONLY`）に切り替える**ことは、Human が推奨の方向で承認済み（Decision 0019 の 1）ですが、Capability の追加は [Decision 0024](../../docs/decisions/0024-memory-read-capability.md)（2026-09-27 承認）で決めました。Issue #115 で実装されるまで、コードは `memory.use`（`REQUIRED`）のままです（authz の Capability の表は、この Issue では変えません）。
+  決定を記録できない（`audit_unavailable`）ときだけ `RetrievalPermissionError` です。Retrieval が尋ねる Capability（`memory.read` / `shared_memory.read` / `project.read`）はすべて `DENIED_ONLY` のため、人間の許可した Retrieval は Audit の行を書かず、Audit の障害でも止まりません（拒否は記録します。`system` role の `user` Scope など）。`memory.use` は Retrieval では尋ねません（書き込み・提案に使い続けます）。Decision 0019 の 1 の `memory.use` を、Decision 0024 で `memory.read` に置き換えました（Issue #115 で実装）。
 - **結果は読める Memory についてしか語りません。** 件数・合計・「他に n 件」は無く、Conflict Group・`duplicates`・Rerank の入力・順位・Score・`conflicts_incomplete` も、読める Memory だけから決まります。
 - **Keyword**: PostgreSQL の全文検索（`simple`）。日本語は、Index 側で CJK の 1 文字ごとに空白を入れ、Query 側で隣り合う 2 文字の句を OR で並べます（形態素解析ではない近似。英語の機能語とひらがな 2 文字の組は Query から除く）。Index は Migration 0043 の `ix_memory_versions_search`（GIN、`status = 'active'` のみ）。
 - **Vector**: Cosine 距離（`<=>`）。1 つの `embedding_model_id` だけを比べます。**ANN Index は作っていません**（Decision 0019 の 4）。`min_vector_similarity` の既定は `None`（Model が決まるまで下限を置かない）。
