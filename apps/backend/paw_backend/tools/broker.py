@@ -39,9 +39,19 @@ narrow what the previous one allowed:
    names, resolved from its registration, with the permission of the change
    (``tasks.working_set.required_permission``);
 5. the task budget (:class:`~.budget.BudgetProvider`); unknown means denied;
-6. ``AUTO`` / ``SCOPED_AUTO`` are allowed (an allowed repository write is first
-   recorded as a change of the repository in the task's attempt, or denied:
-   ``repository_write_unrecorded``); ``APPROVAL`` / ``STRONG_APPROVAL``
+6. a call that touches a repository is admitted on the roles the Working Set
+   holds **now** (:class:`~.working_set.RepositoryUseGate`, i.e.
+   ``TaskService.admit_repository_use``): the roles of step 4 are those of the
+   caller's task scope, which can be older than a downgrade or a removal, and
+   the stored table is the one truth (Decision 0030, 4.1 / 4.6). The same
+   ceiling is applied again (``repository_role_unresolved`` /
+   ``repository_role_insufficient``), and a write or something executed is
+   recorded as a change of the repository in the attempt (section 5; a command
+   can write, and the backend cannot tell). A use that cannot be admitted is
+   denied (``repository_write_unrecorded``, or ``repository_role_unresolved``
+   for a read). For a call that needs an approval this happens before the
+   approval is consumed, so a refused use leaves it unused;
+7. ``AUTO`` / ``SCOPED_AUTO`` are allowed; ``APPROVAL`` / ``STRONG_APPROVAL``
    need an approval bound to this exact call. **The task must still be able to
    act, in the worker's run** (:class:`~.task_state.TaskActivityProvider`: not
    completed / failed / cancelled, not unknown or unreadable, and the run in
@@ -85,7 +95,17 @@ from paw_backend.authz import (
 )
 from paw_backend.authz.capabilities import REPO_PERMISSION_OF
 from paw_backend.tasks.domain import RepoRole, accepts_role
-from paw_backend.tasks.working_set import required_permission
+from paw_backend.tasks.errors import (
+    RepositoryRoleInsufficientError,
+    RepositoryRoleUnresolvedError,
+    StaleRunError,
+    TaskNotFoundError,
+)
+from paw_backend.tasks.working_set import (
+    marks_changed,
+    required_permission,
+    role_allows,
+)
 from paw_backend.tools.approval_types import (
     ApprovalBinding,
     ApprovalEvent,
@@ -123,9 +143,6 @@ from paw_backend.tools.interfaces import require_async_method
 from paw_backend.tools.policy import DEFAULT_TOOL_POLICY, ToolPolicy
 from paw_backend.tools.registry import ToolRegistry, ToolSpec
 from paw_backend.tools.scope import (
-    EXECUTING_ROLES,
-    ROLE_GATED_CAPABILITIES,
-    ROLE_WRITE_CEILING,
     Classification,
     PathResolutionError,
     PathResolver,
@@ -140,8 +157,8 @@ from paw_backend.tools.task_state import (
 )
 from paw_backend.tools.working_set import (
     FailClosedRegistrations,
-    FailClosedWriteRecorder,
-    RepositoryWriteRecorder,
+    FailClosedUseGate,
+    RepositoryUseGate,
     WorkingSetRegistrations,
 )
 
@@ -207,7 +224,7 @@ class ToolBroker:
         task_activity: TaskActivityProvider | None = None,
         path_resolver: PathResolver | None = None,
         registrations: WorkingSetRegistrations | None = None,
-        write_recorder: RepositoryWriteRecorder | None = None,
+        use_gate: RepositoryUseGate | None = None,
         approval_ttl: timedelta = DEFAULT_APPROVAL_TTL,
         max_pending_approvals: int = 10,
         rejection_cooldown: timedelta = timedelta(minutes=5),
@@ -233,15 +250,13 @@ class ToolBroker:
         self._resolver: PathResolver = path_resolver or RealpathResolver()
         require_async_method(self._resolver, "resolve", 1)
         # Both fail closed when not wired: no Working Set change is decided, and
-        # no repository write is allowed.
+        # no call that touches a repository is allowed.
         self._registrations: WorkingSetRegistrations = (
             registrations or FailClosedRegistrations()
         )
         require_async_method(self._registrations, "working_set_acl", 1)
-        self._write_recorder: RepositoryWriteRecorder = (
-            write_recorder or FailClosedWriteRecorder()
-        )
-        require_async_method(self._write_recorder, "record_repository_writes", 3)
+        self._use_gate: RepositoryUseGate = use_gate or FailClosedUseGate()
+        require_async_method(self._use_gate, "admit_repository_use", 3)
         if not isinstance(approval_ttl, timedelta) or not (
             MIN_APPROVAL_TTL <= approval_ttl <= MAX_APPROVAL_TTL
         ):
@@ -447,18 +462,22 @@ class ToolBroker:
                 )
 
         if level in (ApprovalLevel.AUTO, ApprovalLevel.SCOPED_AUTO):
+            use_reason = await self._use_denial(spec, context, classification)
+            if use_reason is not None:
+                return self._refuse(
+                    use_reason,
+                    correlation_id,
+                    tool=name,
+                    level=level,
+                    call_hash=call_hash,
+                )
             reason = (
                 BrokerReason.AUTO
                 if level is ApprovalLevel.AUTO
                 else BrokerReason.SCOPED_AUTO
             )
-            return await self._recorded(
-                self._allow(
-                    spec, parsed, context, level, call_hash, correlation_id, reason
-                ),
-                spec,
-                context,
-                classification,
+            return self._allow(
+                spec, parsed, context, level, call_hash, correlation_id, reason
             )
         task_reason = await self._task_denial(context)
         if task_reason is not None:
@@ -474,44 +493,68 @@ class ToolBroker:
             return await self._open_approval(
                 spec, parsed, context, level, call_hash, correlation_id
             )
-        return await self._recorded(
-            await self._consume_approval(
-                spec, parsed, context, level, call_hash, correlation_id, approval_id
-            ),
-            spec,
-            context,
-            classification,
+        # Admitted BEFORE the approval is consumed: a use the stored Working Set
+        # refuses (or that cannot be admitted) leaves the human's one-shot
+        # approval unused. The other way round, a use admitted for an approval
+        # that is then not consumed marks the repository changed although the
+        # call did not run: that only adds an obligation (fail-closed).
+        use_reason = await self._use_denial(spec, context, classification)
+        if use_reason is not None:
+            return self._refuse(
+                use_reason,
+                correlation_id,
+                tool=name,
+                level=level,
+                call_hash=call_hash,
+                approval_id=approval_id,
+            )
+        return await self._consume_approval(
+            spec, parsed, context, level, call_hash, correlation_id, approval_id
         )
 
-    async def _recorded(
+    async def _use_denial(
         self,
-        decision: BrokerDecision,
         spec: ToolSpec,
         context: TaskContext,
         classification: Classification,
-    ) -> BrokerDecision:
-        """An allowed repository write, once it is recorded as a change of the
-        repositories it touches (Decision 0030, section 5); otherwise a denial."""
-        if (
-            not decision.allowed
-            or not classification.repositories
-            or REPO_PERMISSION_OF.get(spec.authz_capability) is not RepoPermission.WRITE
-        ):
-            return decision
+    ) -> BrokerReason | None:
+        """Admit the call's use of the repositories it touches on the roles
+        stored NOW (``RepositoryUseGate``; Decision 0030, 4.1 / 4.6): the task
+        scope's roles, which :meth:`_role_denial` checked, may be older than a
+        downgrade or a removal. A write or an execution is recorded as a change
+        of the repository (section 5). ``None`` when admitted."""
+        if not classification.repositories:
+            return None
+        capability = spec.authz_capability
+        executes = ToolCapability.EXECUTE in spec.capabilities
         try:
             async with asyncio.timeout(self._timeout_seconds):
-                await self._write_recorder.record_repository_writes(
-                    context.task_id, context.run, classification.repositories
+                await self._use_gate.admit_repository_use(
+                    context.task_id,
+                    context.run,
+                    classification.repositories,
+                    capability=capability,
+                    executes=executes,
                 )
+        except RepositoryRoleUnresolvedError:
+            return BrokerReason.REPOSITORY_ROLE_UNRESOLVED
+        except RepositoryRoleInsufficientError:
+            return BrokerReason.REPOSITORY_ROLE_INSUFFICIENT
+        except StaleRunError:
+            # A Retry / Restart started another run: this one acts no more.
+            return BrokerReason.TASK_SUPERSEDED
+        except TaskNotFoundError:
+            return BrokerReason.TASK_UNKNOWN
         except Exception as error:
-            logger.error("Repository write not recorded (%s)", type(error).__name__)
-            return replace(
-                decision,
-                verdict=Verdict.DENY,
-                reason=BrokerReason.REPOSITORY_WRITE_UNRECORDED,
-                invocation=None,
+            logger.error("Repository use not admitted (%s)", type(error).__name__)
+            # A change that cannot be recorded does not run; a read whose stored
+            # role cannot be read is a role that is not resolved.
+            return (
+                BrokerReason.REPOSITORY_WRITE_UNRECORDED
+                if marks_changed(capability, executes=executes)
+                else BrokerReason.REPOSITORY_ROLE_UNRESOLVED
             )
-        return decision
+        return None
 
     def _allow(
         self,
@@ -670,11 +713,7 @@ class ToolBroker:
             role = repository.role if repository is not None else None
             if role is None:
                 return BrokerReason.REPOSITORY_ROLE_UNRESOLVED
-            if capability in ROLE_GATED_CAPABILITIES and (
-                capability not in ROLE_WRITE_CEILING[role]
-            ):
-                return BrokerReason.REPOSITORY_ROLE_INSUFFICIENT
-            if executes and role not in EXECUTING_ROLES:
+            if not role_allows(role, capability, executes=executes):
                 return BrokerReason.REPOSITORY_ROLE_INSUFFICIENT
         return None
 

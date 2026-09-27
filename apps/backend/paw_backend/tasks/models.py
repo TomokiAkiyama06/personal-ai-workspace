@@ -195,7 +195,8 @@ class TaskAttemptRepositoryRow(Base):
     attempt (Decision 0030, section 2).
 
     ``strongest_role`` is the strongest role the repository held in the attempt and
-    ``modified`` whether a repository write on it was allowed in the attempt: a
+    ``modified`` whether a repository write on it, or something executed in it,
+    was allowed in the attempt: a
     changed repository keeps the obligations of that role (section 5) until the
     change is verifiably discarded. A repository removed from the Working Set
     keeps its row.
@@ -248,6 +249,41 @@ class TaskAttemptRepositoryRow(Base):
             "(pr_number IS NULL) = (pr_url IS NULL)"
             " AND (pr_number IS NULL) = (pr_state IS NULL)",
             name="pull_request_complete",
+        ),
+    )
+
+
+class TaskAttemptStateArchiveRow(Base):
+    """What an attempt's state columns held before revision 0085 (archived by it).
+
+    Before the Working Set an attempt had one branch / worktree / review /
+    evaluation / pull request and its task one ``starting_commit``, naming no
+    repository, so revision 0085 cannot attribute them to one and does not guess:
+    it copies every attempt here before dropping the columns, and its downgrade
+    puts them back. Nothing of the application reads or writes it (no privilege);
+    it is for an operator who gives such a task its Working Set. The values are
+    kept as they were (text, no CHECK: an archive refuses nothing it held).
+    """
+
+    __tablename__ = "task_attempt_state_archive"
+
+    task_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    number: Mapped[int] = mapped_column(Integer, primary_key=True)
+    branch: Mapped[str | None] = mapped_column(String(255))
+    worktree_path: Mapped[str | None] = mapped_column(String(1024))
+    head_commit: Mapped[str | None] = mapped_column(String(64))
+    review_status: Mapped[str] = mapped_column(String(24))
+    evaluation_result: Mapped[str] = mapped_column(String(24))
+    pr_number: Mapped[int | None] = mapped_column(Integer)
+    pr_url: Mapped[str | None] = mapped_column(String(2048))
+    pr_state: Mapped[str | None] = mapped_column(String(24))
+    # The task's ``starting_commit`` (the same for each of its attempts).
+    starting_commit: Mapped[str | None] = mapped_column(String(64))
+    archived_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["task_id", "number"], ["task_attempts.task_id", "task_attempts.number"]
         ),
     )
 

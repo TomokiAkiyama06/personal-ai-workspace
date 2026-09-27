@@ -34,6 +34,7 @@
 | [0028](0028-project-deletion-research-data.md) | Project 削除時の調査結果（Evidence / Claim Provenance、Research Scratch）の扱い（削除・DELETE 権限の追加・唯一の Provenance を失う Memory の扱い） | Approved |
 | [0029](0029-per-user-git-runner-ssh.md) | User ごとの Linux User で git を実行する `SshGitRunner`（SSH 経由。Wrapper の許可副コマンド、鍵の発行・失効・回転、エラー処理、移行。Decision 0017 の 4 への追補。Issue #105） | Approved |
 | [0030](0030-task-working-set-model.md) | Task Working Set（Multi-Repo）の単位・承認・Write範囲・完了条件（Decision 0014「決まっていないこと」1〜5を埋める） | Approved |
+| [0035](0035-working-set-capability-grants-and-legacy-tasks.md) | `project.task.working_set.manage` の付与先と委任、作成時の Working Set、Revision 0085 より前の Task の状態の退避（Issue #85。Decision 0030 が決めていない点） | Proposed |
 
 運用は [AGENTS.md](../../AGENTS.md) の「仕様変更」に従います。
 

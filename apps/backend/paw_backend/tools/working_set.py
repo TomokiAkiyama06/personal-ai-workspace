@@ -8,8 +8,9 @@
 * The seams the broker uses, each fail-closed when it is not wired:
   :class:`WorkingSetRegistrations` (the registered ACL of a repository that is
   not in the task's scope yet: ``RepositoryService.working_set_acl``) and
-  :class:`RepositoryWriteRecorder` (marks the repositories an allowed write
-  touches as changed: ``TaskService.record_repository_writes``).
+  :class:`RepositoryUseGate` (admits every allowed call that touches a
+  repository on the roles stored now, and marks a write or an execution as a
+  change: ``TaskService.admit_repository_use``).
 * :class:`WorkingSetExecutor`: runs an allowed Working Set tool call by calling
   ``TaskService.change_working_set``, the same function a human's change goes
   through, which checks again under the task's row lock.
@@ -81,21 +82,37 @@ class FailClosedRegistrations:
         return None
 
 
-class RepositoryWriteRecorder(Protocol):
-    """Marks repositories as changed in a task's attempt (``TaskService``)."""
+class RepositoryUseGate(Protocol):
+    """Admits a use of repositories by a task's run on the roles stored now, and
+    marks a write or an execution as a change (``TaskService
+    .admit_repository_use``). It raises ``RepositoryRoleUnresolvedError`` /
+    ``RepositoryRoleInsufficientError`` for a use the stored role refuses; any
+    other failure refuses the use too."""
 
-    async def record_repository_writes(
-        self, task_id: uuid.UUID, run: TaskRun, repository_ids: Sequence[uuid.UUID]
+    async def admit_repository_use(
+        self,
+        task_id: uuid.UUID,
+        run: TaskRun,
+        repository_ids: Sequence[uuid.UUID],
+        *,
+        capability: Capability,
+        executes: bool,
     ) -> None: ...
 
 
-class FailClosedWriteRecorder:
-    """Nothing can be recorded, so no repository write is ever allowed."""
+class FailClosedUseGate:
+    """Nothing can be admitted, so no call that touches a repository is allowed."""
 
-    async def record_repository_writes(
-        self, task_id: uuid.UUID, run: TaskRun, repository_ids: Sequence[uuid.UUID]
+    async def admit_repository_use(
+        self,
+        task_id: uuid.UUID,
+        run: TaskRun,
+        repository_ids: Sequence[uuid.UUID],
+        *,
+        capability: Capability,
+        executes: bool,
     ) -> None:
-        raise RuntimeError("no repository write recorder is configured")
+        raise RuntimeError("no repository use gate is configured")
 
 
 class BaselineProvider(Protocol):

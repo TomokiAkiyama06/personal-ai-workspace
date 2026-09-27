@@ -35,6 +35,8 @@ from paw_backend.tasks import (
     RepoRole,
     RepositoryChangeState,
     RepositoryNotInAttemptError,
+    RepositoryRoleInsufficientError,
+    RepositoryRoleUnresolvedError,
     ReviewState,
     ReviewStatus,
     StaleAttemptError,
@@ -50,9 +52,13 @@ from paw_backend.tasks import (
 from paw_backend.tasks.service import MAX_WORKING_SET_REPOSITORIES
 from paw_backend.tools import (
     WORKING_SET_TOOL_SPECS,
+    ArgumentKind,
+    ArgumentSpec,
     ScopedRepository,
+    ToolCapability,
     ToolRegistry,
     ToolRunner,
+    ToolSpec,
     WorkingSetExecutor,
     with_working_set_roles,
 )
@@ -85,6 +91,16 @@ Op = WorkingSetOperation
 REFERENCED, WORKING, TARGET = RepoRole.REFERENCED, RepoRole.WORKING, RepoRole.TARGET
 BASE_A = "a" * 40
 BASE_B = "b" * 40
+
+
+def run_in_repository() -> ToolSpec:
+    """Tests / a build / a command in a repository (``project.task.run``)."""
+    return ToolSpec(
+        "tests.run_in",
+        frozenset({ToolCapability.EXECUTE}),
+        Capability.PROJECT_TASK_RUN,
+        {"path": ArgumentSpec(ArgumentKind.PATH)},
+    )
 
 
 class Inspector:
@@ -130,6 +146,16 @@ class WorkingSetTestCase(PostgresTaskTestCase):
             actor=kwargs.pop("actor", self.user),
             expected_role=expected,
             **kwargs,
+        )
+
+    async def write_to(self, task_id, *repository_ids, run=FIRST_RUN):
+        """The Tool Broker admitted a repository write on them."""
+        await self.service.admit_repository_use(
+            task_id,
+            run,
+            list(repository_ids),
+            capability=Capability.PROJECT_REPO_WRITE,
+            executes=False,
         )
 
     async def roles(self, task_id) -> dict[uuid.UUID, RepoRole]:
@@ -209,6 +235,25 @@ class PersistenceTest(WorkingSetTestCase):
                 await self.change(task_id, Op.SET_TARGET, self.repository_id, None)
                 event = await self.service.execute(task_id, C.START, actor=self.system)
                 self.assertEqual(event.to_state, S.RUNNING)
+
+    async def test_no_command_puts_a_task_without_a_target_back_to_running(self):
+        """A task of before revision 0085 has an empty Working Set: Resume and
+        Unblock (not only Start) refuse to run it until it gets a target."""
+        for state, command in ((S.PAUSED, C.RESUME), (S.WAITING, C.UNBLOCK)):
+            with self.subTest(command=command.value):
+                task_id = await self.task_in_state(state)
+                async with self.database.engine.begin() as connection:
+                    await connection.execute(
+                        text(
+                            "UPDATE task_repositories SET removed_at = now() "
+                            "WHERE task_id = :t"
+                        ),
+                        {"t": task_id},
+                    )
+                before = await self.service.restore(task_id)
+                with self.assertRaises(NoTargetRepositoryError):
+                    await self.service.execute(task_id, command, actor=self.user)
+                self.assertEqual(await self.service.restore(task_id), before)
 
     async def test_a_working_set_needs_a_target_when_it_is_given(self):
         with self.assertRaises(InvalidCommandArgumentError):
@@ -579,24 +624,90 @@ class DiscardTest(WorkingSetTestCase):
 
 
 @requires_postgres
-class WriteRecordTest(WorkingSetTestCase):
+class RepositoryUseTest(WorkingSetTestCase):
+    """``admit_repository_use``: the Tool Broker's use of a repository, judged on
+    the role stored now (Decision 0030, 4.1 / 4.6), with the ceiling of section 4
+    (#85 constraint 2); a write or an execution marks it changed (section 5)."""
+
+    async def use(self, task_id, repository_id, capability, executes=False):
+        await self.service.admit_repository_use(
+            task_id,
+            FIRST_RUN,
+            [repository_id],
+            capability=capability,
+            executes=executes,
+        )
+
+    async def modified(self, task_id, repository_id) -> bool:
+        snapshot = await self.service.restore(task_id)
+        return snapshot.attempt.repository(repository_id).modified
+
     async def test_a_write_marks_the_repository_changed(self):
         task_id = await self.two_targets()
-        await self.service.record_repository_writes(task_id, FIRST_RUN, [self.other])
-        state = (await self.service.restore(task_id)).attempt.repository(self.other)
-        self.assertTrue(state.modified)
+        await self.write_to(task_id, self.other)
+        self.assertTrue(await self.modified(task_id, self.other))
 
-    async def test_only_a_working_or_target_repository_of_the_attempt_is_written(self):
+    async def test_an_execution_marks_a_working_repository_changed(self):
+        task_id = await self.create_task(
+            repositories=[
+                WorkingSetEntry(self.repository_id, TARGET, BASE_A),
+                WorkingSetEntry(self.other, WORKING, BASE_B),
+            ]
+        )
+        await self.service.execute(task_id, C.START, actor=self.system)
+        await self.use(task_id, self.other, Capability.PROJECT_READ)
+        self.assertFalse(await self.modified(task_id, self.other))
+        await self.use(task_id, self.other, Capability.PROJECT_TASK_RUN, True)
+        self.assertTrue(await self.modified(task_id, self.other))
+
+    async def test_the_stored_role_decides_not_the_callers_scope(self):
+        """A target downgraded to ``working`` gets no pull request, and one
+        downgraded to ``referenced`` runs nothing, whatever a stale scope says."""
+        task_id = await self.two_targets()
+        self.inspector.clean_at(self.other, BASE_B)
+        await self.change(task_id, Op.DOWNGRADE_TO_WORKING, self.other, TARGET)
+        counts = await self.table_counts()
+        with self.assertRaises(RepositoryRoleInsufficientError):
+            await self.use(task_id, self.other, Capability.PROJECT_PR_CREATE)
+        self.assertEqual(await self.table_counts(), counts)
+        await self.change(task_id, Op.DOWNGRADE_TO_REFERENCED, self.other, WORKING)
+        counts = await self.table_counts()
+        for capability, executes in (
+            (Capability.PROJECT_REPO_WRITE, False),
+            (Capability.PROJECT_TASK_RUN, True),
+        ):
+            with self.subTest(capability=capability.value):
+                with self.assertRaises(RepositoryRoleInsufficientError):
+                    await self.use(task_id, self.other, capability, executes)
+        self.assertEqual(await self.table_counts(), counts)
+        # Reading a referenced repository is what it is for.
+        await self.use(task_id, self.other, Capability.PROJECT_READ)
+
+    async def test_a_repository_outside_the_working_set_is_unresolved(self):
+        task_id = await self.two_targets()
+        new = uuid.uuid4()
+        await self.change(task_id, Op.ADD_REFERENCED, new, None)
+        await self.change(task_id, Op.REMOVE, new, REFERENCED)
+        counts = await self.table_counts()
+        for repository_ids in ([new], [uuid.uuid4()], [self.other, new]):
+            with self.subTest(repository_ids=repository_ids):
+                with self.assertRaises(RepositoryRoleUnresolvedError):
+                    await self.service.admit_repository_use(
+                        task_id,
+                        FIRST_RUN,
+                        repository_ids,
+                        capability=Capability.PROJECT_READ,
+                        executes=False,
+                    )
+        self.assertEqual(await self.table_counts(), counts)
+
+    async def test_only_a_working_or_target_repository_is_written(self):
         task_id = await self.two_targets()
         new = uuid.uuid4()
         await self.change(task_id, Op.ADD_REFERENCED, new, None)
         counts = await self.table_counts()
-        for repository_ids in ([new], [uuid.uuid4()], [self.other, new]):
-            with self.subTest(repository_ids=repository_ids):
-                with self.assertRaises(RepositoryNotInAttemptError):
-                    await self.service.record_repository_writes(
-                        task_id, FIRST_RUN, repository_ids
-                    )
+        with self.assertRaises(RepositoryRoleInsufficientError):
+            await self.write_to(task_id, self.other, new)
         self.assertEqual(await self.table_counts(), counts)
 
     async def test_a_superseded_run_writes_nothing(self):
@@ -604,9 +715,7 @@ class WriteRecordTest(WorkingSetTestCase):
         await self.service.execute(task_id, C.FAIL, actor=self.system)
         await self.service.execute(task_id, C.RESTART, actor=self.user)
         with self.assertRaises(StaleAttemptError):
-            await self.service.record_repository_writes(
-                task_id, FIRST_RUN, [self.other]
-            )
+            await self.write_to(task_id, self.other)
 
 
 @requires_postgres
@@ -704,7 +813,7 @@ class CompletionTest(WorkingSetTestCase):
             ]
         )
         await self.service.execute(task_id, C.START, actor=self.system)
-        await self.service.record_repository_writes(task_id, FIRST_RUN, [self.other])
+        await self.write_to(task_id, self.other)
         await self.service.execute(task_id, C.BEGIN_EVALUATION, actor=self.system)
         await self.meet(task_id, self.repository_id)
         await self.assert_not_completable(task_id)
@@ -718,6 +827,8 @@ class CompletionTest(WorkingSetTestCase):
         await self.service.execute(task_id, C.COMPLETE, actor=self.system)
 
     async def test_untouched_working_and_referenced_repositories_need_nothing(self):
+        """Untouched as the backend verifies it in the repository (clean, HEAD at
+        its starting commit, not pushed, no pull request)."""
         task_id = await self.evaluating(
             [
                 WorkingSetEntry(self.repository_id, TARGET, BASE_A),
@@ -725,8 +836,67 @@ class CompletionTest(WorkingSetTestCase):
                 WorkingSetEntry(uuid.uuid4(), REFERENCED, None),
             ]
         )
+        self.inspector.clean_at(self.other, BASE_B)
         await self.meet(task_id, self.repository_id)
         await self.service.execute(task_id, C.COMPLETE, actor=self.system)
+        # Only the working one was inspected: a referenced one cannot be changed.
+        self.assertEqual([call[2] for call in self.inspector.calls], [self.other])
+
+    async def test_a_working_repository_that_cannot_be_verified_counts_as_changed(
+        self,
+    ):
+        """Decision 0030, section 5: what the backend cannot tell is a change
+        (fail-closed). An agent may have changed it with a command that the
+        broker did not see as a write."""
+        cases = {
+            "the inspector cannot tell": None,
+            "a dirty worktree": RepositoryChangeState(False, BASE_B, False, False),
+            "HEAD moved": RepositoryChangeState(True, "e" * 40, False, False),
+            "the branch was pushed": RepositoryChangeState(True, BASE_B, True, False),
+        }
+        for label, found in cases.items():
+            with self.subTest(label):
+                task_id = await self.evaluating(
+                    [
+                        WorkingSetEntry(self.repository_id, TARGET, BASE_A),
+                        WorkingSetEntry(self.other, WORKING, BASE_B),
+                    ]
+                )
+                self.inspector.states[self.other] = found
+                await self.meet(task_id, self.repository_id)
+                await self.assert_not_completable(task_id)
+                await self.service.update_attempt(
+                    task_id,
+                    run=FIRST_RUN,
+                    repository_id=self.other,
+                    review=ReviewState(
+                        ReviewStatus.NOT_STARTED, EvaluationResult.PASSED
+                    ),
+                )
+                await self.service.execute(task_id, C.COMPLETE, actor=self.system)
+
+    async def test_an_execution_in_a_working_repository_needs_its_evaluation(self):
+        """The review's scenario: a command ran in ``working`` W, the worker reported
+        nothing for W; Complete still judges W."""
+        task_id = await self.create_task(
+            repositories=[
+                WorkingSetEntry(self.repository_id, TARGET, BASE_A),
+                WorkingSetEntry(self.other, WORKING, BASE_B),
+            ]
+        )
+        await self.service.execute(task_id, C.START, actor=self.system)
+        await self.service.admit_repository_use(
+            task_id,
+            FIRST_RUN,
+            [self.other],
+            capability=Capability.PROJECT_TASK_RUN,
+            executes=True,
+        )
+        # Even an inspector that finds it clean does not undo a recorded change.
+        self.inspector.clean_at(self.other, BASE_B)
+        await self.service.execute(task_id, C.BEGIN_EVALUATION, actor=self.system)
+        await self.meet(task_id, self.repository_id)
+        await self.assert_not_completable(task_id)
 
     async def test_a_changed_repository_keeps_its_obligations(self):
         """A target that was written to cannot shed its pull request by a downgrade:
@@ -739,7 +909,7 @@ class CompletionTest(WorkingSetTestCase):
             ]
         )
         await self.service.execute(task_id, C.START, actor=self.system)
-        await self.service.record_repository_writes(task_id, FIRST_RUN, [self.other])
+        await self.write_to(task_id, self.other)
         self.inspector.states[self.other] = RepositoryChangeState(
             False, "c" * 40, True, False
         )
@@ -812,6 +982,7 @@ class ToolExecutionTest(WorkingSetTestCase):
             grant=make_grant(
                 Capability.PROJECT_READ,
                 Capability.PROJECT_REPO_WRITE,
+                Capability.PROJECT_TASK_RUN,
                 Capability.PROJECT_TASK_WORKING_SET_MANAGE,
             ),
             delegator_id=self.user_id,
@@ -856,6 +1027,39 @@ class ToolExecutionTest(WorkingSetTestCase):
             make_call("repo.write_file", write_new, context=context)
         )
         self.assertEqual(write.reason.value, "repository_role_insufficient")
+
+    async def test_a_scope_built_before_a_downgrade_does_not_lift_the_role(self):
+        """The Claude review's scenario on the real service: the worker keeps a
+        context in which NEW is ``working``; NEW is downgraded to ``referenced``
+        (its change verifiably discarded); the broker refuses a write and an
+        execution on NEW because the stored role decides."""
+        await self.change(
+            self.task_id, Op.SET_WORKING, self.NEW, None, starting_commit=BASE_B
+        )
+        stale = await self.context()
+        self.inspector.clean_at(self.NEW, BASE_B)
+        await self.change(self.task_id, Op.DOWNGRADE_TO_REFERENCED, self.NEW, WORKING)
+        h = Harness(
+            registry=ToolRegistry(
+                [*sample_specs(), run_in_repository(), *WORKING_SET_TOOL_SPECS]
+            ),
+            registrations=self.registrations,
+            use_gate=self.service,
+            directory=self.h.directory,
+        )
+        for tool, arguments in (
+            ("repo.write_file", {"path": f"{ROOT}/new/x", "content": "1"}),
+            ("tests.run_in", {"path": f"{ROOT}/new"}),
+        ):
+            with self.subTest(tool=tool):
+                decision = await h.broker.request(
+                    make_call(tool, arguments, context=stale)
+                )
+                self.assertEqual(decision.reason.value, "repository_role_insufficient")
+        read = await h.broker.request(
+            make_call("repo.read_file", {"path": f"{ROOT}/new/x"}, context=stale)
+        )
+        self.assertTrue(read.allowed)
 
     async def test_a_stale_decision_does_not_change_the_working_set(self):
         # The scope still shows the repository as absent, but it joined meanwhile.

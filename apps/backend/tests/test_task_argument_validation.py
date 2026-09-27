@@ -36,6 +36,7 @@ from unittest import mock
 
 from sqlalchemy import text
 
+from paw_backend.authz import Capability
 from paw_backend.tasks import (
     Actor,
     ActorKind,
@@ -179,6 +180,11 @@ def lookalike(enum_class: type[enum.StrEnum]) -> Any:
     """A member of ANOTHER enum with the serialised value of ``enum_class``'s first."""
     other = enum.StrEnum("Lookalike", {"FIRST": next(iter(enum_class)).value})
     return other.FIRST
+
+
+def not_a_bool() -> list[Any]:
+    """What a ``bool`` argument refuses (only ``True`` / ``False`` are one)."""
+    return [None, CANARY, "", "true", 0, 1, 1.0, b"", object(), [True]]
 
 
 def not_an_enum(enum_class: type[enum.StrEnum], *, allow_none: bool = False) -> list:
@@ -360,7 +366,7 @@ def not_a_working_set() -> list[Any]:
 
 
 def not_repository_ids() -> list[Any]:
-    """What ``record_repository_writes(repository_ids=...)`` refuses."""
+    """What ``admit_repository_use(repository_ids=...)`` refuses."""
     values: list[Any] = [None, CANARY, b"", 1, object(), [], (), {uuid.uuid4()}]
     values += [[value] for value in not_a_uuid()]
     values.append([uuid.uuid4() for _ in range(33)])
@@ -480,8 +486,14 @@ def change_working_set_baseline(fx: Fixture) -> dict[str, Any]:
     )
 
 
-def record_writes_baseline(fx: Fixture) -> dict[str, Any]:
-    return dict(task_id=fx.running, run=FIRST_RUN, repository_ids=[fx.repository])
+def admit_use_baseline(fx: Fixture) -> dict[str, Any]:
+    return dict(
+        task_id=fx.running,
+        run=FIRST_RUN,
+        repository_ids=[fx.repository],
+        capability=Capability.PROJECT_REPO_WRITE,
+        executes=False,
+    )
 
 
 def restore_baseline(fx: Fixture) -> dict[str, Any]:
@@ -503,7 +515,7 @@ BASELINES: dict[str, tuple[str, Baseline]] = {
     "add_log": ("add_log", add_log_baseline),
     "update_attempt": ("update_attempt", update_attempt_baseline),
     "change_working_set": ("change_working_set", change_working_set_baseline),
-    "record_repository_writes": ("record_repository_writes", record_writes_baseline),
+    "admit_repository_use": ("admit_repository_use", admit_use_baseline),
     "restore": ("restore", restore_baseline),
     "history": ("history", history_baseline),
 }
@@ -629,10 +641,12 @@ CASES = [
         "expected_version",
         not_an_integer(1, 2**31 - 1, allow_none=True),
     ),
-    # -- record_repository_writes (issue #85)
-    case("record_repository_writes", "task_id", not_a_uuid()),
-    case("record_repository_writes", "run", not_a_run()),
-    case("record_repository_writes", "repository_ids", not_repository_ids()),
+    # -- admit_repository_use (issue #85)
+    case("admit_repository_use", "task_id", not_a_uuid()),
+    case("admit_repository_use", "run", not_a_run()),
+    case("admit_repository_use", "repository_ids", not_repository_ids()),
+    case("admit_repository_use", "capability", not_an_enum(Capability)),
+    case("admit_repository_use", "executes", not_a_bool()),
     # -- restore
     case("restore", "task_id", not_a_uuid()),
     case("restore", "log_limit", not_an_integer(0, 1000)),
@@ -653,7 +667,7 @@ PUBLIC_METHODS = {
     "add_log",
     "update_attempt",
     "change_working_set",
-    "record_repository_writes",
+    "admit_repository_use",
     "restore",
     "history",
 }

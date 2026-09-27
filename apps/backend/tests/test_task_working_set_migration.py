@@ -94,6 +94,13 @@ class OfflineMigrationTest(unittest.TestCase):
         ):
             self.assertIn(f"ALTER TABLE task_attempts DROP COLUMN {column}", sql)
         self.assertIn("ALTER TABLE tasks DROP COLUMN starting_commit", sql)
+        # What the columns held is archived first (Claude review: no data loss).
+        archived = sql.index("INSERT INTO task_attempt_state_archive")
+        self.assertLess(
+            sql.index("CREATE TABLE task_attempt_state_archive ("), archived
+        )
+        self.assertLess(archived, sql.index("ALTER TABLE task_attempts DROP COLUMN"))
+        self.assertLess(archived, sql.index("ALTER TABLE tasks DROP COLUMN"))
         # No foreign key to ``repositories``: a task's history outlives a purge.
         self.assertNotIn("REFERENCES repositories", sql)
 
@@ -102,6 +109,9 @@ class OfflineMigrationTest(unittest.TestCase):
         for table in ("task_repositories", "task_attempt_repositories"):
             self.assertIn(f'GRANT INSERT, SELECT ON {table} TO "paw_app"', sql)
             self.assertNotIn("DELETE", sql)
+        # Nothing of the application reads or writes the archive.
+        self.assertIn("REVOKE ALL ON task_attempt_state_archive FROM PUBLIC", sql)
+        self.assertNotRegex(sql, r"GRANT [^;]* ON task_attempt_state_archive")
         self.assertIn(
             "GRANT UPDATE (role, starting_commit, added_by_kind, added_by, added_at, "
             'updated_at, removed_at) ON task_repositories TO "paw_app"',
@@ -240,6 +250,76 @@ class RoundTripTest(PostgresTaskTestCase):
                 )
             ).one()
         self.assertEqual(tuple(row), ("agent/y", "c" * 40, 3, "merged", "not_started"))
+
+    async def test_an_upgrade_archives_the_old_state_and_a_downgrade_restores_it(
+        self,
+    ):
+        """A task that exists before revision 0085 (made here by going down) keeps
+        its per-attempt state and its starting commit in
+        ``task_attempt_state_archive``; the next downgrade puts them back."""
+        task_id = await self.create_task()
+        await self.service.update_attempt(
+            task_id,
+            run=FIRST_RUN,
+            repository_id=self.repository_id,
+            worktree=WorktreeState("agent/z", "/srv/w/z", "d" * 40),
+            review=ReviewState(ReviewStatus.CHANGES_REQUESTED, EvaluationResult.PASSED),
+            pull_request=PullRequestInfo(
+                5, "https://example.test/pr/5", PullRequestState.OPEN
+            ),
+        )
+        query = (
+            "SELECT branch, worktree_path, head_commit, review_status, "
+            "evaluation_result, pr_number, pr_url, pr_state FROM {table} "
+            "WHERE task_id = :t"
+        )
+        expected = (
+            "agent/z",
+            "/srv/w/z",
+            "d" * 40,
+            "changes_requested",
+            "passed",
+            5,
+            "https://example.test/pr/5",
+            "open",
+        )
+        await asyncio.to_thread(migrate, previous_revision(), downgrade=True)
+        await asyncio.to_thread(migrate)
+        # The old task has no Working Set in the new tables...
+        self.assertEqual(
+            await self.scalar(
+                "SELECT count(*) FROM task_repositories WHERE task_id = :t", t=task_id
+            ),
+            0,
+        )
+        # ...but nothing it held is lost.
+        self.assertEqual(
+            await self.row(query.format(table="task_attempt_state_archive"), task_id),
+            expected,
+        )
+        self.assertEqual(
+            await self.scalar(
+                "SELECT starting_commit FROM task_attempt_state_archive "
+                "WHERE task_id = :t AND number = 1",
+                t=task_id,
+            ),
+            "0" * 40,
+        )
+        await asyncio.to_thread(migrate, previous_revision(), downgrade=True)
+        self.assertNotIn("task_attempt_state_archive", await self.tables())
+        self.assertEqual(
+            await self.row(query.format(table="task_attempts"), task_id), expected
+        )
+        self.assertEqual(
+            await self.scalar(
+                "SELECT starting_commit FROM tasks WHERE id = :t", t=task_id
+            ),
+            "0" * 40,
+        )
+
+    async def row(self, sql: str, task_id) -> tuple:
+        async with self.database.engine.connect() as connection:
+            return tuple((await connection.execute(text(sql), {"t": task_id})).one())
 
     async def tables(self) -> set[str]:
         async with self.database.engine.connect() as connection:

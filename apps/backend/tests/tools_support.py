@@ -12,9 +12,16 @@ from paw_backend.authz import (
     ProjectRole,
     ProjectState,
     RepoAcl,
+    RepoPermission,
     SystemRole,
 )
-from paw_backend.tasks import RepoRole
+from paw_backend.authz.capabilities import REPO_PERMISSION_OF
+from paw_backend.tasks import (
+    RepoRole,
+    RepositoryRoleInsufficientError,
+    RepositoryRoleUnresolvedError,
+)
+from paw_backend.tasks.working_set import role_allows
 from paw_backend.tools import (
     ApprovalLevel,
     ApprovalService,
@@ -336,17 +343,40 @@ class StepUp:
         return self.answer
 
 
-class WriteRecorder:
-    """Records the repository writes the broker allowed (or fails with ``error``)."""
+class UseGate:
+    """Admits the repository uses the broker allowed, the way
+    ``TaskService.admit_repository_use`` does: against the roles stored now
+    (``roles``; ``None`` admits every use), or it fails with ``error``."""
 
-    def __init__(self, *, error=None) -> None:
+    def __init__(self, *, roles=None, error=None) -> None:
+        self.roles = roles
         self.error = error
-        self.writes: list[tuple[uuid.UUID, TaskRun, tuple[uuid.UUID, ...]]] = []
+        self.uses: list[
+            tuple[uuid.UUID, TaskRun, tuple[uuid.UUID, ...], Capability, bool]
+        ] = []
 
-    async def record_repository_writes(self, task_id, run, repository_ids):
+    async def admit_repository_use(
+        self, task_id, run, repository_ids, *, capability, executes
+    ):
         if self.error is not None:
             raise self.error
-        self.writes.append((task_id, run, tuple(repository_ids)))
+        if self.roles is not None:
+            for repository_id in repository_ids:
+                role = self.roles.get(repository_id)
+                if role is None:
+                    raise RepositoryRoleUnresolvedError()
+                if not role_allows(role, capability, executes=executes):
+                    raise RepositoryRoleInsufficientError()
+        self.uses.append((task_id, run, tuple(repository_ids), capability, executes))
+
+    def changes(self) -> list[tuple[uuid.UUID, TaskRun, tuple[uuid.UUID, ...]]]:
+        """The admitted uses that mark their repositories as changed (a write,
+        or something executed)."""
+        return [
+            (task_id, run, ids)
+            for task_id, run, ids, capability, executes in self.uses
+            if executes or REPO_PERMISSION_OF.get(capability) is RepoPermission.WRITE
+        ]
 
 
 class Registrations:
@@ -388,7 +418,7 @@ class Harness:
         # The broker's own audit sink can be a different (failing) one.
         self.broker_sink = overrides.pop("broker_sink", self.sink)
         self.executor = overrides.pop("executor", FakeExecutor())
-        self.write_recorder = overrides.pop("write_recorder", WriteRecorder())
+        self.use_gate = overrides.pop("use_gate", UseGate())
         self.registrations = overrides.pop("registrations", Registrations())
         self.events: list = []
         listeners = overrides.pop("listeners", (self.events.append,))
@@ -401,7 +431,7 @@ class Harness:
             task_activity=self.task_activity,
             path_resolver=overrides.pop("path_resolver", LexicalPathResolver()),
             registrations=self.registrations,
-            write_recorder=self.write_recorder,
+            use_gate=self.use_gate,
             clock=self.clock,
             listeners=listeners,
             **overrides,

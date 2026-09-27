@@ -31,9 +31,10 @@ import logging
 import uuid
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Protocol
 
-from paw_backend.authz import RepoPermission
+from paw_backend.authz import Capability, RepoPermission
 from paw_backend.tasks.domain import RepoRole, WorkingSetOperation
 from paw_backend.tasks.records import (
     EvaluationResult,
@@ -67,6 +68,49 @@ if set(_LEVEL) != set(WorkingSetOperation):  # pragma: no cover
 DELIVERED_PULL_REQUEST_STATES = frozenset(
     {PullRequestState.OPEN, PullRequestState.MERGED}
 )
+
+
+# What each role of the Working Set lets a call do on a repository, for the two
+# capabilities that change one (Decision 0030, section 4.2). It applies on top of
+# the repository's ACL (both must allow) and an approval cannot lift it.
+# ``referenced`` reads only; ``working`` may also write; only a ``target`` may
+# also get a pull request. Something executed in a repository (tests, a build, a
+# command) needs ``working`` or ``target`` too (#85 constraint 2). The Tool Broker
+# applies it on the caller's task scope first, and ``TaskService
+# .admit_repository_use`` again on the roles stored now (the one truth, 4.6).
+ROLE_GATED_CAPABILITIES = frozenset(
+    {Capability.PROJECT_REPO_WRITE, Capability.PROJECT_PR_CREATE}
+)
+ROLE_WRITE_CEILING: MappingProxyType[RepoRole, frozenset[Capability]] = (
+    MappingProxyType(
+        {
+            RepoRole.REFERENCED: frozenset(),
+            RepoRole.WORKING: frozenset({Capability.PROJECT_REPO_WRITE}),
+            RepoRole.TARGET: frozenset(
+                {Capability.PROJECT_REPO_WRITE, Capability.PROJECT_PR_CREATE}
+            ),
+        }
+    )
+)
+# The roles in which a repository may run what a tool executes.
+EXECUTING_ROLES = frozenset({RepoRole.WORKING, RepoRole.TARGET})
+
+
+def role_allows(role: RepoRole, capability: Capability, *, executes: bool) -> bool:
+    """Whether ``role`` lets a call with ``capability`` (that executes something
+    when ``executes``) use the repository (the ceiling above)."""
+    if capability in ROLE_GATED_CAPABILITIES and (
+        capability not in ROLE_WRITE_CEILING[role]
+    ):
+        return False
+    return not executes or role in EXECUTING_ROLES
+
+
+def marks_changed(capability: Capability, *, executes: bool) -> bool:
+    """Whether an allowed use counts as a change of the repository (section 5): a
+    repository write, or something executed in it (a command can write, and the
+    backend cannot tell: fail-closed)."""
+    return executes or capability in ROLE_GATED_CAPABILITIES
 
 
 def approval_level(operation: WorkingSetOperation) -> str:

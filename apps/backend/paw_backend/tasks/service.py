@@ -108,6 +108,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.exc import StaleDataError
 
+from paw_backend.authz import Capability
 from paw_backend.db import Database
 from paw_backend.tasks.domain import (
     Actor,
@@ -131,6 +132,8 @@ from paw_backend.tasks.errors import (
     ModifiedRepositoryDowngradeRefusedError,
     NoTargetRepositoryError,
     RepositoryNotInAttemptError,
+    RepositoryRoleInsufficientError,
+    RepositoryRoleUnresolvedError,
     StaleAttemptError,
     StaleRunError,
     TaskConflictError,
@@ -175,6 +178,8 @@ from paw_backend.tasks.working_set import (
     AttemptRepositoryFacts,
     FailClosedChangeInspector,
     RepositoryChangeInspector,
+    marks_changed,
+    role_allows,
     unmet_repositories,
     verify_discarded,
 )
@@ -952,14 +957,15 @@ class TaskService:
             # Read before anything is changed (a query flushes pending changes).
             members = (
                 await self._members(session, task.id)
-                if command in (TaskCommand.START, TaskCommand.RESTART)
+                if command is TaskCommand.RESTART or plan.target is TaskState.RUNNING
                 else []
             )
-            if command is TaskCommand.START and not any(
+            if plan.target is TaskState.RUNNING and not any(
                 member.role is RepoRole.TARGET for member in members
             ):
                 # A task always has a target (Decision 0030, section 2): it does
-                # not begin its work without one.
+                # not run without one. Start, and Resume / Unblock too: a task of
+                # before revision 0085 has an empty Working Set.
                 raise NoTargetRepositoryError()
             if command is TaskCommand.COMPLETE:
                 await self._require_completion(session, task)
@@ -1501,17 +1507,30 @@ class TaskService:
         await self._notify(event)
         return event
 
-    async def record_repository_writes(
-        self, task_id: uuid.UUID, run: TaskRun, repository_ids: Sequence[uuid.UUID]
+    async def admit_repository_use(
+        self,
+        task_id: uuid.UUID,
+        run: TaskRun,
+        repository_ids: Sequence[uuid.UUID],
+        *,
+        capability: Capability,
+        executes: bool,
     ) -> None:
-        """Mark the repositories as changed in the run's attempt (Decision 0030,
-        section 5): the Tool Broker allowed a repository write on them.
+        """Admit a use of the repositories by the run (the Tool Broker, for every
+        call it allows that touches one), on the roles stored NOW.
 
-        Every one must be a repository of the attempt that is in the Working Set as
-        ``working`` or ``target`` (the role ceiling allows writes nowhere else);
-        otherwise ``RepositoryNotInAttemptError`` and nothing is marked. The
-        broker does not let the write run when this fails. Stale runs raise
-        ``StaleAttemptError`` / ``StaleRunError``.
+        The broker decided the call on the roles of the caller's task scope, which
+        can be older than a downgrade or a removal; the stored Working Set is the
+        one truth (Decision 0030, 4.1 / 4.6), so the role ceiling is applied again
+        here, under the task's row lock: every repository must be in the Working
+        Set with a state row in the current attempt
+        (``RepositoryRoleUnresolvedError``) and its role must allow
+        ``capability`` and, when ``executes``, running something
+        (``tasks.working_set.role_allows``; ``RepositoryRoleInsufficientError``).
+        A write, or something executed, marks the repositories as changed in the
+        attempt (section 5; ``marks_changed``); a read changes nothing. Stale runs
+        raise ``StaleAttemptError`` / ``StaleRunError``. Nothing is written when
+        anything is refused.
         """
         task_id = _uuid("task_id", task_id)
         run = _run(run)
@@ -1524,6 +1543,10 @@ class TaskService:
             raise InvalidCommandArgumentError(
                 f"repository_ids must hold 1 to {MAX_WORKING_SET_REPOSITORIES} ids"
             )
+        capability = enum_member("capability", Capability, capability)
+        if type(executes) is not bool:
+            raise InvalidCommandArgumentError("executes must be a bool")
+        changes = marks_changed(capability, executes=executes)
         async with self._database.session() as session, session.begin():
             task = await self._require_task(session, task_id, lock=True)
             self._require_current_run(task, run)
@@ -1534,14 +1557,14 @@ class TaskService:
             for repository_id in dict.fromkeys(ids):
                 member = members.get(repository_id)
                 state_row = await self._attempt_repository_row(
-                    session, task, repository_id, lock=True
+                    session, task, repository_id, lock=changes
                 )
-                if (
-                    member is None
-                    or member.role is RepoRole.REFERENCED
-                    or state_row is None
-                ):
-                    raise RepositoryNotInAttemptError()
+                if member is None or state_row is None:
+                    raise RepositoryRoleUnresolvedError()
+                if not role_allows(member.role, capability, executes=executes):
+                    raise RepositoryRoleInsufficientError()
+                if not changes:
+                    continue
                 state_row.modified = True
                 if member.role.strength > state_row.strongest_role.strength:
                     state_row.strongest_role = member.role
@@ -1882,17 +1905,42 @@ class TaskService:
         facts = []
         for state in states:
             member = by_id.get(state.repository_id)
+            role = (
+                member.role
+                if member is not None and member.removed_at is None
+                else None
+            )
+            starting_commit = None if member is None else member.starting_commit
+            modified = state.modified
+            if (
+                not modified
+                and role is not RepoRole.TARGET
+                and state.pr_state is None
+                and self._could_have_changed(role, state)
+            ):
+                # The attempt could have changed it (it may be written to or run
+                # in) and nothing was recorded: only the repository itself can
+                # tell, and what cannot be verified unchanged counts as changed
+                # (Decision 0030, section 5; fail-closed).
+                modified = (
+                    await verify_discarded(
+                        self._inspector,
+                        task_id=task.id,
+                        attempt=task.attempt,
+                        repository_id=state.repository_id,
+                        starting_commit=starting_commit,
+                        open_pull_request=False,
+                        timeout_seconds=self._inspection_timeout,
+                    )
+                    is None
+                )
             facts.append(
                 AttemptRepositoryFacts(
                     repository_id=state.repository_id,
-                    role=(
-                        member.role
-                        if member is not None and member.removed_at is None
-                        else None
-                    ),
-                    starting_commit=None if member is None else member.starting_commit,
+                    role=role,
+                    starting_commit=starting_commit,
                     strongest_role=state.strongest_role,
-                    modified=state.modified,
+                    modified=modified,
                     head_commit=state.head_commit,
                     evaluation=state.evaluation_result,
                     review=state.review_status,

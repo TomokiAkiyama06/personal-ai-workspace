@@ -109,6 +109,9 @@ EXPECTED = {
             "updated_at",
         },
     ),
+    # What the per-attempt columns held before revision 0085 (kept for an
+    # operator and for a downgrade): the application never touches it.
+    "task_attempt_state_archive": (set(), set()),
     "task_steps": ({"SELECT", "INSERT"}, {"status", "finished_at"}),
     "task_tool_invocations": ({"SELECT", "INSERT"}, {"status", "finished_at"}),
     "task_logs": ({"SELECT", "INSERT"}, set()),
@@ -231,7 +234,7 @@ class WorkingSetDiscardAsAppRole(AsAppRole, test_task_working_set.DiscardTest):
     pass
 
 
-class WorkingSetWritesAsAppRole(AsAppRole, test_task_working_set.WriteRecordTest):
+class WorkingSetUsesAsAppRole(AsAppRole, test_task_working_set.RepositoryUseTest):
     pass
 
 

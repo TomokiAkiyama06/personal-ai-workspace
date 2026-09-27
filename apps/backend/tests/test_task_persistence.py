@@ -57,6 +57,7 @@ TASK_TABLES = (
     # The Working Set (revision 0085, issue #85).
     "task_repositories",
     "task_attempt_repositories",
+    "task_attempt_state_archive",
 )
 
 

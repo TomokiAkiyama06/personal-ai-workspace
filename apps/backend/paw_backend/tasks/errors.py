@@ -168,3 +168,21 @@ class RepositoryNotInAttemptError(WorkingSetError):
 
     code = "repository_not_in_attempt"
     message = "The repository is not part of the task's current attempt"
+
+
+class RepositoryRoleUnresolvedError(WorkingSetError):
+    """A use of a repository that is not in the task's Working Set now (never
+    added, removed, or without a state row in the current attempt): its role
+    cannot be resolved, so nothing may touch it (Decision 0030, 4.5)."""
+
+    code = "repository_role_unresolved"
+    message = "The repository has no role in the task's working set"
+
+
+class RepositoryRoleInsufficientError(WorkingSetError):
+    """A use of a repository that its stored role does not allow (a write outside
+    ``working`` / ``target``, a pull request outside ``target``, something
+    executed in a ``referenced`` one; Decision 0030, 4.2, #85 constraint 2)."""
+
+    code = "repository_role_insufficient"
+    message = "The repository's role in the working set does not allow this"

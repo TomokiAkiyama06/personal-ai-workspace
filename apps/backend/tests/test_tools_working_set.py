@@ -41,7 +41,7 @@ from paw_backend.tools import (
     ArgumentSpec,
     BrokerReason,
     Environment,
-    FailClosedWriteRecorder,
+    FailClosedUseGate,
     ScopedRepository,
     ToolBroker,
     ToolCapability,
@@ -57,7 +57,7 @@ from .tools_support import (
     ROOT,
     Harness,
     Registrations,
-    WriteRecorder,
+    UseGate,
     make_call,
     make_context,
     make_grant,
@@ -373,22 +373,40 @@ class WriteCapabilityMismatchTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(decision.reason, R.REPOSITORY_WRITE_CAPABILITY_MISMATCH)
 
 
-class WriteRecordingTest(unittest.IsolatedAsyncioTestCase):
+class RepositoryUseTest(unittest.IsolatedAsyncioTestCase):
+    """Every allowed call that touches a repository is admitted on the roles
+    stored NOW (Decision 0030, 4.1 / 4.6: the table is the one truth), not on the
+    roles of the caller's task scope; a write or something executed marks the
+    repository as changed (section 5)."""
+
     async def test_an_allowed_write_is_recorded_on_the_repositories_it_touches(self):
         h = harness()
         ctx = context()
         decision = await decide("repo.write_file", write("wrk"), ctx, h)
         self.assertTrue(decision.allowed)
-        self.assertEqual(h.write_recorder.writes, [(ctx.task_id, ctx.run, (WRK,))])
+        self.assertEqual(h.use_gate.changes(), [(ctx.task_id, ctx.run, (WRK,))])
 
-    async def test_reads_and_executions_are_not_recorded(self):
+    async def test_an_execution_marks_the_repository_changed_and_a_read_does_not(
+        self,
+    ):
+        # A command or a build can write too: the backend cannot tell, so it counts
+        # as a change (fail-closed).
         h = harness()
-        await decide("repo.read_file", {"path": f"{ROOT}/wrk/x"}, h=h)
-        await decide("tests.run_in", {"path": f"{ROOT}/wrk"}, h=h)
-        self.assertEqual(h.write_recorder.writes, [])
+        ctx = context()
+        await decide("repo.read_file", {"path": f"{ROOT}/wrk/x"}, ctx, h)
+        await decide("tests.run_in", {"path": f"{ROOT}/wrk"}, ctx, h)
+        self.assertEqual(h.use_gate.changes(), [(ctx.task_id, ctx.run, (WRK,))])
+        # The read was admitted on the stored role too, without marking anything.
+        self.assertEqual(
+            [(use[2], use[3], use[4]) for use in h.use_gate.uses],
+            [
+                ((WRK,), Capability.PROJECT_READ, False),
+                ((WRK,), Capability.PROJECT_TASK_RUN, True),
+            ],
+        )
 
-    async def test_a_write_that_cannot_be_recorded_does_not_run(self):
-        h = harness(write_recorder=WriteRecorder(error=OSError("down")))
+    async def test_a_use_that_cannot_be_admitted_does_not_run(self):
+        h = harness(use_gate=UseGate(error=OSError("down")))
         with self.assertLogs("paw_backend.tools.broker", "ERROR"):
             decision = await decide("repo.write_file", write("wrk"), h=h)
         self.assertEqual(
@@ -399,8 +417,12 @@ class WriteRecordingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             (row.decision, row.reason), ("deny", "repository_write_unrecorded")
         )
+        # A read whose stored role cannot be read: unresolved, never allowed.
+        with self.assertLogs("paw_backend.tools.broker", "ERROR"):
+            read = await decide("repo.read_file", {"path": f"{ROOT}/wrk/x"}, h=h)
+        self.assertEqual(outcome(read), (Verdict.DENY, R.REPOSITORY_ROLE_UNRESOLVED))
 
-    async def test_without_a_recorder_no_repository_write_runs(self):
+    async def test_without_a_gate_no_repository_is_used(self):
         h = harness()
         broker = ToolBroker(
             registry(),
@@ -412,14 +434,22 @@ class WriteRecordingTest(unittest.IsolatedAsyncioTestCase):
             path_resolver=h.broker._resolver,
             registrations=h.registrations,
         )
-        self.assertIsInstance(broker._write_recorder, FailClosedWriteRecorder)
-        with self.assertLogs("paw_backend.tools.broker", "ERROR"):
-            decision = await broker.request(
-                make_call("repo.write_file", write("wrk"), context=context())
-            )
-        self.assertEqual(
-            outcome(decision), (Verdict.DENY, R.REPOSITORY_WRITE_UNRECORDED)
-        )
+        self.assertIsInstance(broker._use_gate, FailClosedUseGate)
+        for tool, arguments, reason in (
+            ("repo.write_file", write("wrk"), R.REPOSITORY_WRITE_UNRECORDED),
+            ("repo.read_file", {"path": f"{ROOT}/wrk/x"}, R.REPOSITORY_ROLE_UNRESOLVED),
+        ):
+            with self.subTest(tool=tool):
+                with self.assertLogs("paw_backend.tools.broker", "ERROR"):
+                    decision = await broker.request(
+                        make_call(tool, arguments, context=context())
+                    )
+                self.assertEqual(outcome(decision), (Verdict.DENY, reason))
+
+    async def test_a_call_that_touches_no_repository_is_not_gated(self):
+        h = harness(use_gate=UseGate(error=OSError("down")))
+        decision = await decide("tests.run_in", {"path": f"{ROOT}/build"}, h=h)
+        self.assertEqual(outcome(decision), (Verdict.ALLOW, R.SCOPED_AUTO))
 
     async def test_a_consumed_approval_is_recorded_before_the_write_runs(self):
         h = harness()
@@ -427,7 +457,7 @@ class WriteRecordingTest(unittest.IsolatedAsyncioTestCase):
         delete = {"path": f"{ROOT}/tgt/build"}
         pending = await decide("repo.delete_tree", delete, ctx, h)
         self.assertEqual(pending.verdict, Verdict.NEEDS_APPROVAL)
-        self.assertEqual(h.write_recorder.writes, [])
+        self.assertEqual(h.use_gate.changes(), [])
         await h.service.approve(
             pending.approval_id,
             principal(SystemRole.USER, U1, {P1: ProjectRole.CONTRIBUTOR}),
@@ -436,7 +466,96 @@ class WriteRecordingTest(unittest.IsolatedAsyncioTestCase):
             "repo.delete_tree", delete, ctx, h, approval_id=pending.approval_id
         )
         self.assertTrue(used.allowed)
-        self.assertEqual(h.write_recorder.writes, [(ctx.task_id, ctx.run, (TGT,))])
+        self.assertEqual(h.use_gate.changes(), [(ctx.task_id, ctx.run, (TGT,))])
+
+    async def test_an_approval_is_not_used_up_by_a_call_that_is_not_admitted(self):
+        """The use is admitted BEFORE the one-shot approval is consumed: a call
+        the gate refuses (or cannot answer) leaves the human's approval usable."""
+        h = harness()
+        ctx = context()
+        delete = {"path": f"{ROOT}/tgt/build"}
+        pending = await decide("repo.delete_tree", delete, ctx, h)
+        await h.service.approve(
+            pending.approval_id,
+            principal(SystemRole.USER, U1, {P1: ProjectRole.CONTRIBUTOR}),
+        )
+        h.use_gate.error = TimeoutError()
+        with self.assertLogs("paw_backend.tools.broker", "ERROR"):
+            failed = await decide(
+                "repo.delete_tree", delete, ctx, h, approval_id=pending.approval_id
+            )
+        self.assertEqual(outcome(failed), (Verdict.DENY, R.REPOSITORY_WRITE_UNRECORDED))
+        h.use_gate.error = None
+        used = await decide(
+            "repo.delete_tree", delete, ctx, h, approval_id=pending.approval_id
+        )
+        self.assertEqual(outcome(used), (Verdict.ALLOW, R.APPROVAL_CONSUMED))
+
+
+class StoredRoleTest(unittest.IsolatedAsyncioTestCase):
+    """A task scope built before a downgrade or a removal shows a role the stored
+    Working Set no longer holds: the stored one decides (Claude review, P1)."""
+
+    def gate(self, **roles):
+        stored = {REF: REFERENCED, WRK: WORKING, TGT: TARGET}
+        stored.update(roles)
+        return UseGate(roles={k: v for k, v in stored.items() if v is not None})
+
+    async def test_a_pull_request_on_a_target_downgraded_meanwhile_is_refused(self):
+        h = harness(use_gate=self.gate())
+        h.use_gate.roles[TGT] = WORKING  # the scope still says target
+        pr = {
+            "url": "https://github.com/org/tgt",
+            "repository": str(TGT),
+            "title": "t",
+        }
+        decision = await decide("issues.create", pr, h=h)
+        self.assertEqual(
+            outcome(decision), (Verdict.DENY, R.REPOSITORY_ROLE_INSUFFICIENT)
+        )
+        self.assertEqual(h.use_gate.uses, [])
+
+    async def test_execution_in_a_repository_downgraded_to_referenced_is_refused(
+        self,
+    ):
+        h = harness(use_gate=self.gate())
+        h.use_gate.roles[WRK] = REFERENCED
+        decision = await decide("tests.run_in", {"path": f"{ROOT}/wrk"}, h=h)
+        self.assertEqual(
+            outcome(decision), (Verdict.DENY, R.REPOSITORY_ROLE_INSUFFICIENT)
+        )
+
+    async def test_a_repository_removed_meanwhile_is_refused_even_for_a_read(self):
+        h = harness(use_gate=self.gate())
+        del h.use_gate.roles[WRK]
+        for tool, arguments in (
+            ("repo.read_file", {"path": f"{ROOT}/wrk/x"}),
+            ("repo.write_file", write("wrk")),
+        ):
+            with self.subTest(tool=tool):
+                decision = await decide(tool, arguments, h=h)
+                self.assertEqual(
+                    outcome(decision), (Verdict.DENY, R.REPOSITORY_ROLE_UNRESOLVED)
+                )
+
+    async def test_a_refused_use_leaves_the_approval_unused(self):
+        h = harness(use_gate=self.gate())
+        ctx = context()
+        delete = {"path": f"{ROOT}/tgt/build"}
+        pending = await decide("repo.delete_tree", delete, ctx, h)
+        await h.service.approve(
+            pending.approval_id,
+            principal(SystemRole.USER, U1, {P1: ProjectRole.CONTRIBUTOR}),
+        )
+        h.use_gate.roles[TGT] = REFERENCED
+        refused = await decide(
+            "repo.delete_tree", delete, ctx, h, approval_id=pending.approval_id
+        )
+        self.assertEqual(
+            outcome(refused), (Verdict.DENY, R.REPOSITORY_ROLE_INSUFFICIENT)
+        )
+        (record,) = h.approvals._records.values()
+        self.assertIsNone(record.consumed_at)
 
 
 class WorkingSetToolSpecTest(unittest.TestCase):

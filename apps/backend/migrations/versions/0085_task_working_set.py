@@ -17,10 +17,16 @@ Create Date: 2026-09-28
 * The per-attempt state moves there: ``task_attempts`` loses ``branch``,
   ``worktree_path``, ``head_commit``, ``review_status``, ``evaluation_result`` and
   ``pr_*`` (one model for Single- and Multi-Repo tasks, section 2), and ``tasks``
-  loses ``starting_commit`` (a commit per repository instead). **The upgrade drops
-  what those columns held**: an existing attempt names no repository, so its state
-  cannot be attributed to one. The downgrade puts the columns back and copies the
-  state of an attempt that has exactly one repository.
+  loses ``starting_commit`` (a commit per repository instead). An existing
+  attempt names no repository, so its state cannot be attributed to one and the
+  upgrade does not guess: **it first copies every attempt's state, with its
+  task's starting commit, to ``task_attempt_state_archive``** (nothing is lost;
+  the application has no privilege on it). Such a task has an empty Working Set:
+  it cannot run (Start, Resume, Unblock need a ``target``), complete or touch a
+  repository until it is given one (``TaskService.change_working_set``). The
+  downgrade puts the columns back with the state of an attempt that has exactly
+  one repository, and the archived state of an attempt that has none (then drops
+  the archive).
 * ``task_events.command`` accepts ``change_working_set``.
 
 The application role gets INSERT and SELECT on both tables and UPDATE on the columns
@@ -49,6 +55,15 @@ OLD_COMMANDS = tuple(
     "pause resume cancel retry restart stop_now".split()
 )
 NEW_COMMANDS = (*OLD_COMMANDS, "change_working_set")
+# What the columns below held before this revision (see the module docstring).
+ARCHIVE = "task_attempt_state_archive"
+# The archive is for an operator (and the downgrade): the application never reads
+# or writes it, so it gets no privilege (``REVOKE ALL ... FROM PUBLIC`` only).
+NO_APP_GRANTS = {
+    "task_attempt_state_archive": (
+        "archive of the pre-0085 attempt state, never used by the application"
+    ),
+}
 # The columns of revision 0032 that move to ``task_attempt_repositories``.
 ATTEMPT_STATE_COLUMNS = (
     "branch",
@@ -211,6 +226,37 @@ def upgrade() -> None:
         ),
     )
 
+    # What the columns hold is kept before they are dropped (Claude review of #85:
+    # no data loss). Plain text, no CHECK: it keeps whatever was there.
+    op.create_table(
+        "task_attempt_state_archive",
+        sa.Column("task_id", sa.Uuid(), nullable=False),
+        sa.Column("number", sa.Integer(), nullable=False),
+        *_state_columns(),
+        sa.Column("starting_commit", sa.String(length=64), nullable=True),
+        sa.Column("archived_at", sa.DateTime(timezone=True), nullable=False),
+        sa.PrimaryKeyConstraint(
+            "task_id", "number", name=op.f("pk_task_attempt_state_archive")
+        ),
+        sa.ForeignKeyConstraint(
+            ["task_id", "number"],
+            ["task_attempts.task_id", "task_attempts.number"],
+            name=op.f("fk_task_attempt_state_archive_task_id_task_attempts"),
+        ),
+    )
+    # Nothing of the application reads or writes it.
+    op.execute(f"REVOKE ALL ON {ARCHIVE} FROM PUBLIC")
+    columns = ", ".join(ATTEMPT_STATE_COLUMNS)
+    selected = ", ".join(f"a.{c}" for c in ATTEMPT_STATE_COLUMNS)
+    op.execute(
+        f"""
+        INSERT INTO {ARCHIVE}
+            (task_id, number, {columns}, starting_commit, archived_at)
+        SELECT a.task_id, a.number, {selected}, t.starting_commit, now()
+        FROM task_attempts AS a JOIN tasks AS t ON t.id = a.task_id
+        """
+    )
+
     # Dropping a column drops the constraints that name it (the value checks and
     # ``pull_request_complete``) and the column privileges on it.
     for column in ATTEMPT_STATE_COLUMNS:
@@ -274,6 +320,28 @@ def downgrade() -> None:
                WHERE o.task_id = t.id) = 1
         """
     )
+    # An attempt with no repository (one of before this revision): its archived
+    # state, and its task's starting commit when the task has no repository.
+    op.execute(
+        f"""
+        UPDATE task_attempts AS a SET
+            {", ".join(f"{c} = s.{c}" for c in ATTEMPT_STATE_COLUMNS)}
+        FROM {ARCHIVE} AS s
+        WHERE s.task_id = a.task_id AND s.number = a.number
+          AND NOT EXISTS (SELECT 1 FROM task_attempt_repositories AS o
+                          WHERE o.task_id = a.task_id AND o.attempt = a.number)
+        """
+    )
+    op.execute(
+        f"""
+        UPDATE tasks AS t SET starting_commit = s.starting_commit
+        FROM {ARCHIVE} AS s
+        WHERE s.task_id = t.id AND s.number = 1
+          AND NOT EXISTS (SELECT 1 FROM task_repositories AS o
+                          WHERE o.task_id = t.id)
+        """
+    )
+    op.drop_table(ARCHIVE)
     for column in ("review_status", "evaluation_result"):
         op.alter_column("task_attempts", column, server_default=None)
     op.create_check_constraint(

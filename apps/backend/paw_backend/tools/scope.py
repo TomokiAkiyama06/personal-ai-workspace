@@ -60,10 +60,18 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Protocol
 
-from paw_backend.authz import Capability, ProjectState, RepoAcl
+from paw_backend.authz import ProjectState, RepoAcl
 from paw_backend.authz.subjects import to_uuid
 from paw_backend.tasks.domain import RepoRole
 from paw_backend.tasks.records import WorkingSetRepository
+
+# The role ceiling (Decision 0030, section 4.2) is defined with the Working Set's
+# other rules and re-exported here, where the broker's scope lives.
+from paw_backend.tasks.working_set import EXECUTING_ROLES as EXECUTING_ROLES
+from paw_backend.tasks.working_set import (
+    ROLE_GATED_CAPABILITIES as ROLE_GATED_CAPABILITIES,
+)
+from paw_backend.tasks.working_set import ROLE_WRITE_CEILING as ROLE_WRITE_CEILING
 from paw_backend.tools.capabilities import ScopeStatus
 from paw_backend.tools.credentials import is_credential_handle
 
@@ -370,31 +378,6 @@ class ScopedRepository:
             if canonical not in normalised:
                 normalised.append(canonical)
         object.__setattr__(self, "remotes", tuple(normalised))
-
-
-# What each role of the Working Set lets a call do on a repository, for the two
-# capabilities that change one (Decision 0030, section 4.2). The broker applies it
-# on top of the repository's ACL (both must allow) and an approval cannot lift it.
-# ``referenced`` reads only; ``working`` may also write; only a ``target`` may
-# also get a pull request. A tool that executes something in a repository (tests,
-# a build, a command) needs ``working`` or ``target`` too (#85 constraint 2; see
-# ``ToolBroker``).
-ROLE_GATED_CAPABILITIES = frozenset(
-    {Capability.PROJECT_REPO_WRITE, Capability.PROJECT_PR_CREATE}
-)
-ROLE_WRITE_CEILING: MappingProxyType[RepoRole, frozenset[Capability]] = (
-    MappingProxyType(
-        {
-            RepoRole.REFERENCED: frozenset(),
-            RepoRole.WORKING: frozenset({Capability.PROJECT_REPO_WRITE}),
-            RepoRole.TARGET: frozenset(
-                {Capability.PROJECT_REPO_WRITE, Capability.PROJECT_PR_CREATE}
-            ),
-        }
-    )
-)
-# The roles in which a repository may run what a tool executes.
-EXECUTING_ROLES = frozenset({RepoRole.WORKING, RepoRole.TARGET})
 
 
 def with_working_set_roles(
