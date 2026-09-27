@@ -70,14 +70,13 @@ Restart は Repo ごとの Git 状態（branch / worktree / head_commit / review
 - 新しい Capability `project.task.working_set.manage`（Scope.PROJECT）を `authz/capabilities.py` に追加する。既存の `project.repo.add`（プロジェクトへ Repo を登録する Capability、Decision 0017）とは別物であり、こちらは「特定 Task の Working Set にどの Repo をどの role で入れるか」を扱う。
 - 呼び出し元（Human、または Human の承認を経た Orchestrator の提案の確定）が、対象 Repo に対して RBAC 上（`RepoAcl`）どこまでの `RepoPermission` を持つかで、必要な Approval Level を決める（既存の `REPO_PERMISSION_OF` の考え方を流用する）。
   - `referenced` への追加: 対象 Repo に `RepoPermission.READ` があれば `SCOPED_AUTO`（要件「Read 範囲は比較的広く取ってよい」に対応）。
-  - `working` への追加・昇格: 対象 Repo に `RepoPermission.WRITE` を要求し、`APPROVAL`（要件「Write 対象 Repo を増やす場合は Read 対象追加より慎重に」に対応）。
-  - `target` への追加・昇格（PR 作成まで許す）: 同じく `RepoPermission.WRITE` を要求し、`APPROVAL`。`STRONG_APPROVAL` まで上げるかは「決めてほしいこと」に残す。
-  - role を下げる（`target → working` 等）や `referenced` へ戻すことは、Write 範囲を狭める操作なので `SCOPED_AUTO` でよい。
-- 承認は新しい待ち状態を作らず、既存の `TaskState.WAITING`（`wait_reason = WaitReason.APPROVAL`）を使う。`WaitReason.APPROVAL` は既に「Merge / Delete / ACL / permission change」のための理由として定義されており（`tasks/domain.py`）、Repo の role 変更はまさに「permission change」に当たる。
+  - `working` への追加・昇格、`target` への追加・昇格（PR 作成まで許す）: 対象 Repo に `RepoPermission.WRITE` を要求し、どちらも **`STRONG_APPROVAL`**（Step-up 認証必須、Decision 0015）。REQUIREMENTS.md の Approval Level の固定表（`[FIXED]`、4節）が「ACL / Role / Permission変更」を`STRONG_APPROVAL`と定めており、Task が Repo に対して持てる Write / PR 作成の権限を広げるこの操作はまさにそれに当たる。`APPROVAL`（Step-up なし）では固定要件に満たない（**Codex Reviewの指摘で `APPROVAL` から訂正**）。
+  - role を下げる（`target → working` 等）や `referenced` へ戻すことは、Write 範囲を狭める操作なので `SCOPED_AUTO` でよい。**ただし、その Repo がその試行の唯一の `target` である場合、`target` からの降格・削除は拒否する**（`ScopeEscalation`と対になる `LastTargetRemovalRefused`のような理由）。2節の不変条件（Task は必ず 1 つ以上の `target` を持つ）は `running` への遷移時だけでなく、Working Set のあらゆる変更（このCapabilityの確定時）でも保つ。唯一の `target` を本当に外したいなら、先に別の Repo を `target` に上げてからでなければならない（同一操作内で 1 つ減らして 1 つ増やすのは許可してよい）。
+- 承認は新しい待ち状態を作らず、既存の `TaskState.WAITING`（`wait_reason = WaitReason.APPROVAL`）を使う。`WaitReason.APPROVAL` は既に「Merge / Delete / ACL / permission change」のための理由として定義されており（`tasks/domain.py`）、Repo の role 変更はまさに「permission change」に当たる。`STRONG_APPROVAL`のStep-up確認自体は、既存の`StepUpVerifier`（PAW-023）が行う。
 - 変更は `task_events`（追記専用）へ、Actor・変更前後の role・理由とともに記録する（Decision 0014 で既に決定済みの方針をそのまま踏襲する）。
 - Planner / Orchestrator（PAW-034）は Working Set の変更を**提案**できるだけで、確定させるのは Backend の認可判定（および必要な Approval）である。Decision 0021 §2 の「Plan が親の持たない Capability・Working Set にない Repository を求めた Node は Escalation せず失敗させる（`ScopeEscalation`）」という既存方針と整合させる。
 
-根拠: 要件が空白にしている「誰が・どう承認するか」を、新しい仕組みを作らず既存の Tool Broker の Approval Level と Task の Waiting 状態に載せることで、承認経路を 1 本化する。RBAC（そのユーザーがそもそもその Repo に Write できるか）と Task 側の承認（この Task の目的でこの Repo を書いてよいか）は別の質問であり、両方を要求する。
+根拠: 要件が空白にしている「誰が・どう承認するか」を、新しい仕組みを作らず既存の Tool Broker の Approval Level と Task の Waiting 状態に載せることで、承認経路を 1 本化する。RBAC（そのユーザーがそもそもその Repo に Write できるか）と Task 側の承認（この Task の目的でこの Repo を書いてよいか）は別の質問であり、両方を要求する。`working`/`target`昇格を`STRONG_APPROVAL`にするのは、REQUIREMENTS.mdの固定表を実装が緩めないため（Approval Levelは「狭める方向にしか動かせない」という既存原則、Decision 0006の考え方と同じ）。唯一の`target`の降格を拒否するのは、2節の不変条件を「作成時だけ守ればよい」ものにしないため（Codex Reviewの指摘: そうしないと5節の完了条件が`target`のPR義務をすり抜けられてしまう）。
 
 ### 4. 役割と Write 範囲の対応（最重要点）
 
@@ -94,6 +93,8 @@ Restart は Repo ごとの Git 状態（branch / worktree / head_commit / review
    | `working` | 上記に加えて `project.repo.write`。`project.pr.create` は拒否 |
    | `target` | 上記に加えて `project.pr.create` |
 
+   この表は `spec.authz_capability` が `project.repo.write` / `project.pr.create` である Tool だけを見る。`ToolSpec.capabilities` に `ToolCapability.WRITE` / `DESTRUCTIVE` を宣言していながら、対象が Repository で `authz_capability` がこの2つ**以外**（例: `project.task.run`）という Tool は、この表からは見えず Ceiling をすり抜ける（Codex Reviewの指摘: 全roleで拒否されるか、逆にreferencedでも素通りするかのどちらかになる）。これを防ぐため、Tool 登録時の一貫性検査（`ToolSpec.__post_init__`、既存の「Repository の書き込みは Path か Repository を要求する」検査と同じ場所）に次を追加する: **`environment` が `PROJECT_LOCAL` で、`capabilities` に `WRITE` か `DESTRUCTIVE` を含み、対象引数の種別（`ArgumentKind`）に `PATH` か `REPOSITORY` を含む Tool は、`authz_capability` が `REPO_PERMISSION_OF` で `RepoPermission.WRITE` に写る（= `project.repo.write` か `project.pr.create`）ものでなければならない**（さもなくば登録時に `ValueError`）。これにより、role Ceiling の対象になり得る「Repositoryへの書き込み効果を持つ Tool」は、必ずこの表がカバーする2つの `authz_capability` のどちらかを宣言することになり、すり抜けが構造的になくなる。
+
 3. ある Repo 資源への Capability 行使は、**RBAC（`RepoAcl` が許す `RepoPermission`）と role Ceiling（上の表）の両方を満たしたときだけ許可する（AND、狭める方向にしか働かない）**。どちらか一方が拒否すれば拒否になる。実装は `tools/broker.py::_resources` / `_authorize` に、既存の RBAC 判定（`authorize_agent_action`）とは別に、role Ceiling を見る判定を 1 段追加する形になる（既存の RBAC 判定のコードは変更しない）。
 4. **Approval があっても role Ceiling は超えられない。** `referenced` の Repo に対する書き込みは、Human が個別に Approval を与えても許可しない（Decision 0006 §1.2「Approval は認可・Scope・Budget を使うときにもう一度確認する」と同じ考え方で、role Ceiling は Scope の一部として扱う）。role を上げたいなら 3 節の Working Set 変更の手続きを通す。これによって「誤って `target` でない Repo に書き込めてしまう」穴を、個別の呼び出しの Approval では回避できない形にする。
 5. role が解決できない（Working Set にその Repo がない、または壊れた状態で role が読めない）場合は、**`referenced` として扱う（fail-closed）**。これは `RepoAcl` が未解決のとき `inherit` と読まずに拒否する既存の設計（`authz/subjects.py::RepoAcl` の docstring）と対称的な安全側のデフォルトである。新しい `BrokerReason`（例: `repository_role_insufficient`）を追加し、`repo_acl_unresolved` と同様に「未解決は常に拒否」という性質を明示する。
@@ -107,17 +108,19 @@ Restart は Repo ごとの Git 状態（branch / worktree / head_commit / review
 
 ### 5. Task 全体の完了条件
 
-**推奨**: `begin_evaluation` / `complete` への遷移は、Working Set 内の Repo ごとの必要条件を集約して判定する。
+**推奨**: `complete` への遷移だけを、Working Set 内の Repo ごとの必要条件を集約して判定する。**`begin_evaluation`（`running` → 評価中）はこの節の対象外とし、PAW-032 が今すでに持つ前提条件（Repo・Working Setと無関係）から変えない**（Codex Reviewの指摘: 新しい試行は evaluation が `NOT_RUN` から始まるため、`begin_evaluation` の前提に「evaluation が PASS していること」を含めると、評価そのものが始められなくなる循環になる）。
 
-- 各 `target` Repo: その試行の `task_attempt_repositories` 行の evaluation が PASS し、かつ有効な PR が存在すること（`pr_state` が成功側の終端にあること）。
+- 各 `target` Repo: その試行の `task_attempt_repositories` 行の evaluation が PASS し、かつ **PR が存在し `pr_state` が `open` か `merged` のいずれかであること**（`draft` はまだ「作成された」と扱わず不十分、`closed`（unmerged）は目的を達しなかった終端として不十分。REQUIREMENTS.md の `target` は「PR 作成まで行う対象」であり Merge そのものは求めない: Mergeは常に人間の権限（AGENTS.md）で、通常のTaskは自分ではMergeしないため、`merged` だけを要求すると通常経路のTaskが永久に`complete`できなくなる。**Codex Reviewの指摘で「成功側の終端（`merged`）」から訂正**）。
 - 各 `working` Repo（実際に変更が加わったもの）: evaluation が PASS していること。PR は要求しない（`target` ではないため）。
 - `referenced` Repo: 完了条件に含めない（読み取り専用であり、evaluation も PR も発生しない）。
 - 1 つでも必要条件を満たさない Repo があれば、Task 全体は `complete` に遷移しない。新しい状態は作らず、既存の `Failed` / `Waiting` の状態機械（PAW-032）をそのまま使う。
 - `restore()` の `TaskSnapshot` は Repo ごとの evaluation / PR 状態を全て返し、呼び出し側（UI、Orchestrator）が「どの Repo が未完了か」を判別できるようにする。
 
-根拠: REQUIREMENTS.md の「Task 全体の完了判定は、対象 Repo ごとの必要条件が満たされたかで判断する」をそのまま実装した形であり、Decision 0014「想定する形」がすでに Repo ごとの evaluation / PR 状態を持たせる設計を示している。
+根拠: REQUIREMENTS.md の「Task 全体の完了判定は、対象 Repo ごとの必要条件が満たされたかで判断する」をそのまま実装した形であり、Decision 0014「想定する形」がすでに Repo ごとの evaluation / PR 状態を持たせる設計を示している。`begin_evaluation`を対象外にするのは、既存の状態機械（PAW-032）の遷移条件をこのDecisionが書き換えない（このDecisionはWorking Setの5点を埋めるだけで、既存のTask Lifecycleの前提を変える権限を持たない）ことの帰結でもある。
 
-**検討した他の案**: 全 Repo 一律で evaluation の PASS だけを完了条件とし、PR の有無は Task の完了条件に含めない（PR 作成を完了後の別処理にする）。却下。REQUIREMENTS.md の `target` の定義そのものが「PR 作成まで行う対象」であり、PR 作成を `target` の完了要件から外すと要件を弱めることになる。
+**検討した他の案**:
+- 全 Repo 一律で evaluation の PASS だけを完了条件とし、PR の有無は Task の完了条件に含めない（PR 作成を完了後の別処理にする）。却下。REQUIREMENTS.md の `target` の定義そのものが「PR 作成まで行う対象」であり、PR 作成を `target` の完了要件から外すと要件を弱めることになる。
+- `target` の完了条件に `merged` を要求する。却下（Codex Reviewの指摘、上記）。
 
 ## 影響
 
@@ -138,14 +141,14 @@ Restart は Repo ごとの Git 状態（branch / worktree / head_commit / review
 次は要件に明記がなく、実装者（この Decision の提案者）が既存コードの慣習（`REPO_PERMISSION_OF`、`WaitReason.APPROVAL`、PAW-034 の `ROLE_CEILING`）に合わせて解釈した細部である。5 節の主要な決定より優先度が低く、#85 の実装時に Backend README で確定させる程度でよいと考える。
 
 - 新しい Capability の名前 `project.task.working_set.manage` と、新しい `BrokerReason` の名前 `repository_role_insufficient`。命名規則（小文字ドット区切り、既存の列挙との整合）は #85 実装時に合わせる。
-- role を下げる操作（`target → working` など）は `SCOPED_AUTO` でよいとした点（Write 範囲を狭める方向のみであり、要件の「慎重に扱う」対象は増やす方向だけと読んだ）。
-- `working` への昇格と `target` への昇格を同じ `APPROVAL` レベルにそろえた点（要件はこの 2 つを区別する記述をしていない）。
+- role を下げる操作（`target → working` など、唯一の `target` を巻き込まないもの）は `SCOPED_AUTO` でよいとした点（Write 範囲を狭める方向のみであり、要件の「慎重に扱う」対象は増やす方向だけと読んだ）。
+- `working` への昇格と `target` への昇格を同じ `STRONG_APPROVAL` レベルにそろえた点（要件はこの 2 つを区別する記述をしていない）。
 
 ## 決めてほしいこと
 
 1. **Working Set は Task 単位とし、Restart でも維持する**（1 節）でよいか。推奨: はい。
 2. **Single-Repo Task も `task_repositories` に 1 行（role=target）を持つ統一モデルにし、`task_attempts` の worktree / review / PR 列を Repo ごとの新しい表（`task_attempt_repositories`）へ移す**（2 節）でよいか。推奨: はい。
-3. **Repo の追加・役割変更を新しい Capability `project.task.working_set.manage` 経由にし、`referenced` 追加は `SCOPED_AUTO`、`working` / `target` への追加・昇格は `APPROVAL` とする**（3 節）でよいか。推奨: はい。`target` への昇格を `STRONG_APPROVAL`（Approval + Step-up 認証、Decision 0015）まで上げるべきかは、実運用の様子を見てから別途判断する。
-4. **role（referenced / working / target）による Write 範囲の Ceiling を、RBAC（`RepoAcl`）とは別の軸として Tool Broker に追加し、両方を満たしたときだけ許可する（AND）。Approval があっても Ceiling は超えられない**（4 節）でよいか。推奨: はい（この Decision の核）。
+3. **Repo の追加・役割変更を新しい Capability `project.task.working_set.manage` 経由にし、`referenced` 追加は `SCOPED_AUTO`、`working` / `target` への追加・昇格は `STRONG_APPROVAL` とする（REQUIREMENTS.mdの固定表「ACL/Role/Permission変更」に合わせる）。唯一の`target`の降格・削除は拒否する**（3 節）でよいか。推奨: はい（Codex Reviewの指摘で`APPROVAL`から`STRONG_APPROVAL`へ、また唯一のtarget保護を追加で訂正）。
+4. **role（referenced / working / target）による Write 範囲の Ceiling を、RBAC（`RepoAcl`）とは別の軸として Tool Broker に追加し、両方を満たしたときだけ許可する（AND）。Approval があっても Ceiling は超えられない。Ceilingがカバーする2つの`authz_capability`以外でRepositoryへの書き込み効果を持つToolの登録を拒否する一貫性検査を追加する**（4 節）でよいか。推奨: はい（この Decision の核。一貫性検査はCodex Reviewの指摘で追加）。
 5. **role が解決できないときは `referenced` として扱う（fail-closed）**（4 節の 5）でよいか。推奨: はい。
-6. **Task 全体の完了条件を、`target` Repo は evaluation PASS + PR 成立、`working` Repo は evaluation PASS のみ、`referenced` Repo は対象外、とする**（5 節）でよいか。推奨: はい。
+6. **Task全体の完了条件を、`complete`遷移でのみ判定する（`begin_evaluation`はこのDecisionの対象外）。`target` Repoはevaluation PASS + PRが`open`か`merged`のいずれか、`working` Repoはevaluation PASSのみ、`referenced` Repoは対象外、とする**（5 節）でよいか。推奨: はい（Codex Reviewの指摘で、`begin_evaluation`を対象から外し、PR状態を`merged`のみから`open`/`merged`へ訂正）。
