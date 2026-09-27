@@ -122,6 +122,10 @@ class Settings(BaseSettings):
     repository_min_linux_uid: int = Field(default=1000, ge=1, le=4_294_967_295)
     repository_git_timeout_seconds: float = Field(default=30.0, gt=0, le=7_200)
     repository_clone_timeout_seconds: float = Field(default=900.0, gt=0, le=7_200)
+    # How long ``gh`` may run for one command (PAW-028, GitHub user connection:
+    # ``gh auth status``, ``gh repo create``). ``repository_clone_hosts`` is also
+    # the host list ``gh`` is asked about; there is no separate setting for it.
+    repository_gh_timeout_seconds: float = Field(default=30.0, gt=0, le=7_200)
 
     # Login, sessions and passwords (PAW-022; the values the requirements do not
     # fix are decided in Decision 0015 (Approved, provisional) and are changed

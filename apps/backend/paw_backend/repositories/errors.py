@@ -75,6 +75,26 @@ class GitFailure(StrEnum):
     UNSAFE_OUTPUT = "unsafe_output"
 
 
+class GhFailure(StrEnum):
+    """Why a ``gh`` command did not give a usable result (PAW-028). A closed set.
+
+    Mirrors :class:`GitFailure`: the same reasons apply to running ``gh`` as
+    another Linux user's process (Decision 0017, section 4, extended to PAW-028
+    by that Decision's own text). ``INVALID_RESPONSE`` is ``gh``'s own: unlike a
+    git command (whose text this module never parses), ``gh auth status --json``
+    is parsed, so a value that is not the shape ``gh`` promises is a distinct
+    failure, not a caller error.
+    """
+
+    NOT_INSTALLED = "not_installed"
+    IDENTITY_MISMATCH = "identity_mismatch"  # the process is not the account's user
+    TIMEOUT = "timeout"
+    OUTPUT_TOO_LARGE = "output_too_large"
+    NONZERO_EXIT = "nonzero_exit"
+    UNSAFE_OUTPUT = "unsafe_output"
+    INVALID_RESPONSE = "invalid_response"  # not the JSON gh's own --json promises
+
+
 class RemoteProblem(StrEnum):
     """Why a repository's own remote URL is refused. A closed set."""
 
@@ -296,6 +316,17 @@ class GitHubUnavailableError(RepositoryError):
 
     def __init__(self) -> None:
         super().__init__("GitHub is not available")
+
+
+class GhCommandError(RepositoryError):
+    """A ``gh`` command failed. Only ``operation`` and ``failure`` are known here."""
+
+    code = "gh_command_failed"
+
+    def __init__(self, operation: str, failure: GhFailure) -> None:
+        self.operation = operation
+        self.failure = failure
+        super().__init__(f"gh {operation} failed: {failure.value}")
 
 
 class RepositoryBusyError(RepositoryError):

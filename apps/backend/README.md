@@ -12,7 +12,8 @@ Project の作成・招待制の Membership・Lifecycle（Active / Archived / Pe
 DAG Agent Orchestrator（Task を Dependency DAG へ分解し、独立した Node を並列に実行し、Node ごとに Retry / Escalate し、Sub-Agent が親の権限と予算を超えない。[PAW-034](#dag-agent-orchestrator)、Agent の Runtime は Protocol で実際の Runtime は別の Issue、HTTP の Endpoint はまだありません）と、削除待ちの Project の Task を周期的に止める Loop も実装済みです。
 
 Workspace 共有の Codex / Claude Connection（Credential は不透明な Handle だけ）、User 別 Quota、User と Task への利用量の帰属は [PAW-030](#shared-codex--claude-connection) で実装済みです（Service のみ。実 Adapter と HTTP の Endpoint はまだありません。Quota の意味・期間・実行中の Task の扱いは [Decision 0016](../../docs/decisions/0016-shared-connection-adapter-policy.md)（Approved、2026-09-26）に従います）。
-Project への Repository の登録（GitHub から clone、Ubuntu 上の既存 Repository、新規作成）と、User ごとに分離した Checkout は [PAW-027](#repository-registration--per-user-checkout) で実装済みです（Service のみ。GitHub の認証は PAW-028）。
+Project への Repository の登録（GitHub から clone、Ubuntu 上の既存 Repository、新規作成）と、User ごとに分離した Checkout は [PAW-027](#repository-registration--per-user-checkout) で実装済みです（Service のみ）。
+Linux User ごとの GitHub 接続状態（`gh auth status`）の認識と、GitHub への新規作成（`create_github`）を対象 User 自身の Identity で実行する経路は [PAW-028](#github-user-connectiongh-auth) で実装済みです（Service のみ。Migration・新しい Capability はありません）。
 
 [Architecture](../../docs/ARCHITECTURE.md) に基づき、最終的に以下の機能を Backend 側で扱います。
 
@@ -2917,7 +2918,7 @@ Rerank（Reranker Protocol）→ 構造化 Score（confirmed・鮮度・importan
 [Decision 0017](../../docs/decisions/0017-repository-registration-policy.md)（承認済み）にまとめています。
 **Decision 0017 は 2026-09-26 に Human が承認しました**（第 11 点の Scope を作るときの Root の再確認を含む）。上限・Timeout・探索の上限・Path の Byte 数などの数値は暫定値として承認されました（設定・定数で変えられます。Path の長さは DB の CHECK 制約にも書かれているため、変えるには新しい Migration が要ります）。User ごとに Linux User として git を実行する仕組み（SSH 経由）は、別 Issue [#105](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/105) です。
 **HTTP の Endpoint はありません**（Session は PAW-022）。`RepositoryService` は、認証済みの `Principal` を受け取り、`Authorizer` で判定します。
-**GitHub の認証（`gh auth`）は PAW-028 で、この Issue の範囲外です**（`GitHubGateway` が継ぎ目）。
+**GitHub の認証（`gh auth`）は PAW-028 で実装しました**（`GitHubGateway` の継ぎ目。下の「GitHub User Connection」を参照）。
 
 Project の **Repository** は論理的な共有の記録で、User や Agent が編集するのは、その User の Linux Account の中にある **Checkout**（作業コピー）です。
 複数の User が 1 つの Working Tree を編集することはありません。
@@ -3015,12 +3016,12 @@ Backend が作る Checkout は、`workspaces` と Project の Directory（0700�
 ### 制限と未確認の点
 
 - **Per-user の Clone は、Backend の Process の User が Checkout の持ち主のときだけ動く。** 別の User の Home へは書けず、User を切り替える実行の仕組みは、この Issue にない（Decision 0017 の 4。PAW-028 も必要とする）。人間の回答 2026-09-25: Userごとに割り振られたSSHで実行する方針。実装は別Issue [#105](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/105)（SSH 経由の `GitRunner`）で、この PR には含まない。
-- Private Repository の Clone、GitHub での新規作成は PAW-028 まで動かない（Global の git 設定と Credential Helper を読まないため）。作成後に登録が失敗しても、GitHub の Repository は削除しない（Log に 1 行）。
+- `create_github`（GitHub への新規作成）は PAW-028 の `GhCliGitHubGateway` で動く（`RepositoryService.from_policy` に `gh_runner` を渡したときだけ。渡さなければ既定どおり `GitHubUnavailableError`）。**Private Repository の Clone**（`clone_from_github`）も、`gh_runner` を渡したときだけ動く: `GitClient` が `clone` 自身の `-c credential.helper=!gh auth git-credential`（`gh auth setup-git` と同じ文字列）を付けて実行し、`gh` が呼び出し元 Linux User 自身の `gh auth login` から資格情報を解決する（この Backend は Token に触れない）。Global の git 設定は相変わらず読まない（`GIT_CONFIG_GLOBAL=/dev/null`）ため、`gh_runner` を渡さない構成では Private Repository の Clone はできない（下の「GitHub User Connection」の限界も参照）。作成後に登録が失敗しても、GitHub の Repository は削除しない（Log に 1 行）。
 - Path の検証は確認した瞬間の事実で、持ち主は後で差し替えられる。`scope_entries` は Scope を作る瞬間に Root と識別を確かめるが、その後 Tool Broker が呼び出しを解決するまでの窓は残る（Broker が呼び出しごとに確かめ直すことに依存する）。
 - Checkout の Path は、DB が保存できる **1024 文字かつ UTF-8 で 2048 Byte まで**です（`path` は一意な B-tree Index の Key で、Index の 1 Entry には約 2700 Byte の上限があり、1 文字は最大 4 Byte のため、文字数だけでは足りません。CHECK 制約 `ck_repository_checkouts_path_valid` にも同じ上限）。長い Home の Account が超える Path を作ると挿入の前に `PathRejectedError`（`too_long`）、`register_existing` の Path は `InvalidRepositoryInputError`（`too_long`）で拒否します（`tests/test_repositories_path_length.py`。境界は、ASCII の 1024 文字が可・1025 文字が不可、4 Byte 文字を含む 2048 Byte が可・2049 Byte が不可）。Remote の URL も同じ理由で Byte 数（1024）で上限を持ちます。
 - 既存の Directory を、登録済みの Repository の自分の Checkout として取り込む操作は、この Issue にない（Remote の照合が要る）。名前の変更もない。
 - 別の Linux User の権限での実 Clone は、この環境では試せていない（別の User の Account を作れない）。「別の User の Directory」の拒否は、その Path だけ別の持ち主を返す方法と、別の uid の Account で確かめている。
-- 「アクセスできる GitHub の Repository の一覧から選ぶ」（要件）は、GitHub の認証（PAW-028）と UI（PAW-061）に依存し、この Issue にない。`clone_from_github` は、指定された Repository を Clone するだけ。
+- 「アクセスできる GitHub の Repository の一覧から選ぶ」（要件）は UI（PAW-061）に依存し、この Issue にない。`clone_from_github` は、指定された Repository を Clone するだけ。
 - Web の UI（PAW-061）と HTTP の Endpoint はない。
 
 ### 実装の由来
@@ -3031,6 +3032,37 @@ Backend が作る Checkout は、`workspaces` と Project の Directory（0700�
 
 `PAW_TEST_DATABASE_URL` を設定すると、実 PostgreSQL と実 git（一時 Directory の Repository。`https://github.com/` は Local の Bare Repository に向ける）で動きます。設定がなくても、検証・Path・git・GitHub の解析・設定の Test は動きます。
 `tests/test_repositories_grants.py` は、Service の Test Class を **Superuser でない Application の Role** で実行し、Migration が与える権限が過不足ないことを確かめます。
+
+## GitHub User Connection（`gh auth`）
+
+[PAW-028](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/25)で実装しました。要件は「Git / GitHub」の `[FIXED] GitHub認証方式`（V1 は GitHub App を使わず、Linux User ごとに `gh auth login` する）と、
+Implementation Backlog の受け入れ条件（Linux User ごとの認証状態を認識する、token / private key を Admin UI へ出さない、issue / PR / API 操作を対象 User の Identity で実行する）です。
+**Migration も新しい Table もありません**（下の「新しい Decision を起票しなかった理由」）。`repositories/github_connection.py` の 1 File で、既存の `repositories` package を拡張しています。
+
+- **接続状態の認識。** `GitHubConnectionService.status(actor, user_id, *, hostname=None)` が `gh auth status --hostname <host> --json hosts` を、その User の Linux Account **として**（`GhRunner`）実行し、`CONNECTED`（`login` 付き）/ `NOT_CONNECTED` の 2 値のどちらかを返します。`--show-token` は一切渡さないため、`gh` 自身が返す JSON に token は元から入りません。パースできない出力・`gh` 自身が Fatal と報告した終了コード（`--json` は認証状態だけでは 0 のまま終わるため、非 0 は「確認できなかった」の意味）は `GhCommandError` で拒否し、`NOT_CONNECTED` に丸めません（推測しない。fail closed）。
+- **Admin UI に token / private key を出さない。** `GitHubConnectionStatus`（`hostname`・`state`・`login` の 3 Field だけ）には、そもそも token や鍵を入れる Field がありません（`__post_init__` が `login` の形も検査し、`gh` の出力を無条件に信用しません）。
+- **issue / PR / API 操作を対象 User の Identity で実行する経路。** `GhRunner`（`SubprocessGhRunner`）が、その経路そのものです。`git.py` の `GitRunner` と同じ規律（許可リストの環境、Shell なし、Timeout、出力の上限、**実行 User が Account の持ち主でなければ拒否**）で `gh` を動かします。`GhCliGitHubGateway` が、`repositories/github.py` の継ぎ目 `GitHubGateway` をこれで実装し（`create_repository` は `gh repo create` を実行 User 自身の Identity で呼ぶ）、`RepositoryService.from_policy(..., gh_runner=...)` で配線します（`gh_runner` を渡さなければ、従来どおり `UnavailableGitHubGateway`）。issue / PR の作成はまだ呼び出す側がなく（`pr.create` / `project.pr.create` は Capability だけが宣言済み）、`GhRunner` は後続の Issue が同じ経路を再利用するための土台です。
+- **認可。** 自分の状態を見るのは `github.use`（`Scope.SELF`、Decision 0004）。**他の User の状態を見るのは、新しい Capability を足さず、既存の `admin.usage.view` を使います**（`docs/SECURITY_RBAC_AUDIT.md` の Usage Dashboard が User 別に「Repos/PRs」を含む一覧であるため、その一部として扱いました。`ConnectionService`（PAW-030）が自分 / 他人の閲覧をまさに `agent.use` / `admin.usage.view` で分けているのと同じ形です）。`Authorizer` が判定のたびに Audit を書きます（`REQUIRED`）。
+- **実行 User の制約は Decision 0017 の 4 のまま。** `gh` も git と同じく、Backend の Process の Linux User としてしか動きません。別の User として動かす仕組み（User ごとの SSH）は別 Issue [#105](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/105) で、この PR には含みません。Decision 0017 の 4 は「PAW-028 も同じ仕組みを必要とする」と既に書いており、この制約自体は新しい判断ではありません。
+- **Private Repository の Clone（`repositories/service.py::clone_from_github`）にも同じ経路を使う。** `RepositoryService.from_policy(..., gh_runner=...)` は `GitClient` を `credential_helper=True` で組み立て、`clone` だけに `-c credential.helper=!gh auth git-credential` を足します（`git clone` 自身の `-c` で、`.git/config` にだけでなく Clone そのものにも効く。git の File 由来の設定を全て切る `GIT_CONFIG_GLOBAL=/dev/null` の影響を受けない）。`gh` は Command Line から渡された固定の文字列であり、この Backend が Token を読み書きすることはありません。`gh_runner` を渡さない構成（既定）では、この `-c` は付かず、以前と同じく Private Repository の Clone は失敗します。
+- **`gh` が `SAFE_PATH` の外にある構成。** `SubprocessGhRunner(gh_executable=...)` を使うときは、`from_policy(..., gh_executable=...)` にも同じ実行File Pathを渡してください（既定は `"gh"`）。渡さないと、状態確認・Repository作成は設定した実行Fileで動くのに、Private Repository の Clone だけ、gitの固定 `PATH`（`SAFE_PATH`）上のbareな `gh` を探しに行き、見つからず失敗します（Codex Reviewの指摘、P2）。
+
+### 新しい Decision を起票しなかった理由
+
+Implementation Backlog の受け入れ条件 3 つは、上のとおり実装できました。曖昧な判断が必要な点は次のように解消し、新しい Decision（`0030` 相当）は起票していません。
+
+1. **認証手段（対話的な `gh auth login` か token 配置か）**: 要件が `[FIXED]` で「Linux User 自身の `gh auth login`」と決めており、選択の余地がありません。Backend は `gh auth login` 自体を一切起動しません（対話的な Web 認証は User 自身の端末で行う。REQUIREMENTS の「GUI から接続フローを開始できるようにする」は HTTP の Endpoint も UI もまだない現状のこの Package の範囲外で、PAW-027 の README も同じ理由で「HTTP の Endpoint はない」と明記しています）。
+2. **複数 User が同じ Linux User を共有するケース**: Decision 0017 の 3 が `login_name` を Linux User 名とし、Workspace の User と Linux Account を 1 対 1 に決めています。この PR はその対応をそのまま再利用するだけで、新しい選択をしていません。
+3. **失効・再認証の UI / API の範囲**: `gh auth logout` や再認証を始める API はこの PR にありません（HTTP の Endpoint がまだ存在しないため、Admin UI からの失効操作という具体的な形も定まりません）。状態は `gh auth status` を都度実行して求めるだけの読み取りで、Backend は何も保存しないため、「失効」という操作の対象になる保存済みの状態自体がありません。
+4. **他の User の接続状態を見る Capability**: 新しい Capability を足さず、既存の `admin.usage.view`（Decision 0004、Scope.SYSTEM、委任不可、Audit `REQUIRED`）を再利用しました。Decision 0024 が示すとおり、この Repository は新しい Capability を足すこと自体を Decision の対象にしていますが、今回は**足していない**ため、その対象になりません。
+
+### GitHub User Connection の制限と未確認の点
+
+- Decision 0017 の 4 と同じ理由で、**この環境では 1 つの Backend Process の User の分しか確認・実行できません**（他の Linux User の `gh auth status` は `IDENTITY_MISMATCH` で拒否されます）。Issue [#105](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/105) の SSH 経由の Runner ができるまで、複数 User の接続状態を Admin が一度に見る運用はできません。
+- 実際の GitHub アカウントでの `gh auth login` / `gh repo create` は試していません（`SubprocessGhRunner` に差し込む `gh` は Test 用の Script で、実 `gh` 自体の動作は本物の `gh` の契約を信用しています）。
+- `gh auth status` の JSON がホストごとに複数の Active でない Account を持つ場合、`active: true` の 1 件だけを見ます（`gh` 自身が Host ごとに Active な Account を高々 1 つに保つ前提）。
+- `gh repo create` の出力を、GitHub の URL として `parse_github_source` でもう一度検証していますが、これは `create_local` / `create_github` の既存の契約（`check_created_repository`）をそのまま踏襲したもので、この PR 独自の検証ではありません。
+- Admin が他の User の接続状態を一覧で見る画面・API はありません（`GitHubConnectionService.status` は 1 User ずつです）。
 
 ## 依存 Package
 

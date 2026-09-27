@@ -514,6 +514,65 @@ class OperationsTest(GitTestCase):
             "https://github.com/acme/tool.git",
         )
 
+    async def test_a_credential_helper_clone_adds_ghs_own_helper(self):
+        # PAW-028: a client built with credential_helper=True clones under gh's
+        # own credential helper (``gh auth setup-git`` writes the same string).
+        bare = self.world.make_bare("acme", "priv")
+        destination = f"{self.home}/priv"
+        os.makedirs(destination)
+        allowed = self.runner(allowed_protocols=("https", "file"))
+        client = GitClient(allowed, RepositoryPolicy(), credential_helper=True)
+
+        await client.clone(f"file://{bare}", destination, self.account)
+
+        self.assertEqual(
+            git("config", "--local", "--get", "credential.helper", cwd=destination),
+            "!gh auth git-credential",
+        )
+
+    async def test_a_plain_clone_never_sets_a_credential_helper(self):
+        # The default (no gh_runner wired) is unchanged: no helper is added.
+        bare = self.world.make_bare("acme", "pub")
+        destination = f"{self.home}/pub"
+        os.makedirs(destination)
+
+        await self.client(allowed_protocols=("https", "file")).clone(
+            f"file://{bare}", destination, self.account
+        )
+
+        with self.assertRaises(AssertionError):
+            git("config", "--local", "--get", "credential.helper", cwd=destination)
+
+    async def test_a_configured_gh_executable_names_the_helper(self):
+        # PAW-028 (Codex review P2): when gh is outside SAFE_PATH, the helper
+        # must name the same executable the configured gh_runner uses, not a
+        # bare "gh" that git's own fixed PATH may not resolve.
+        bare = self.world.make_bare("acme", "priv2")
+        destination = f"{self.home}/priv2"
+        os.makedirs(destination)
+        allowed = self.runner(allowed_protocols=("https", "file"))
+        client = GitClient(
+            allowed,
+            RepositoryPolicy(),
+            credential_helper=True,
+            gh_executable="/opt/gh/bin/gh",
+        )
+
+        await client.clone(f"file://{bare}", destination, self.account)
+
+        self.assertEqual(
+            git("config", "--local", "--get", "credential.helper", cwd=destination),
+            "!/opt/gh/bin/gh auth git-credential",
+        )
+
+    def test_gh_executable_rejects_the_wrong_shapes(self):
+        for bad in (None, 123, "", b"gh"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(TypeError):
+                    GitClient(self.runner(), RepositoryPolicy(), gh_executable=bad)
+        with self.assertRaises(TypeError):
+            GitClient(self.runner(), RepositoryPolicy(), credential_helper="yes")
+
 
 if __name__ == "__main__":
     unittest.main()
