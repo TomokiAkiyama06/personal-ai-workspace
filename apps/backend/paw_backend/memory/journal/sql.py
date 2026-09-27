@@ -3,6 +3,8 @@
 Every write runs in a transaction that begins with ``SET LOCAL lock_timeout``: a
 wait for a row or advisory lock longer than ``lock_timeout_ms`` is
 :class:`JournalBusyError` (nothing changed, try again), never an unbounded wait.
+Any other database error is :class:`JournalDatabaseError`, without the driver's
+text, the SQL or its parameters.
 
 Time. The DATABASE clock is the only clock the queue trusts (Decision 0007,
 section 6, for the task queue; the same reasoning here): every instant it stores
@@ -17,32 +19,64 @@ clock. There is no way to pass a time in: a test moves the database-side rows
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import NoReturn
 
 import psycopg.errors
 from sqlalchemy import Text, bindparam, func, select
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import DBAPIError, StatementError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import BindParameter
 
 from paw_backend.db import Database
-from paw_backend.memory.journal.errors import JournalBusyError
+from paw_backend.memory.journal.errors import (
+    JournalBusyError,
+    JournalDatabaseError,
+    JournalError,
+)
 
 
 @asynccontextmanager
 async def transaction(
     database: Database, lock_timeout_ms: int
 ) -> AsyncIterator[AsyncSession]:
-    """One transaction with the lock timeout; commits on return, rolls back on error."""
+    """One transaction with the lock timeout; commits on return, rolls back on error.
+
+    A database error leaves as :class:`JournalBusyError` (a lock timed out) or
+    :class:`JournalDatabaseError`, detached from the original (see
+    :func:`_detached`): the text of SQLAlchemy's error carries the bound parameters
+    (a message's ``content``) and PostgreSQL's ``DETAIL`` can quote the row.
+    """
     try:
         async with database.session() as session, session.begin():
             await session.execute(
                 select(func.set_config("lock_timeout", str(lock_timeout_ms), True))
             )
             yield session
-    except DBAPIError as error:
-        # Only the type of the driver's error is read, never its text.
-        if isinstance(error.orig, psycopg.errors.LockNotAvailable):
-            raise JournalBusyError from None
+    except StatementError as error:
+        # Only the type and the SQLSTATE of the driver's error are read, never text.
+        _detached(_translated(error))
+
+
+def _translated(error: StatementError) -> JournalError:
+    orig = error.orig if isinstance(error, DBAPIError) else None
+    if isinstance(orig, psycopg.errors.LockNotAvailable):
+        return JournalBusyError()
+    sqlstate = getattr(orig, "sqlstate", None)
+    return JournalDatabaseError(sqlstate if isinstance(sqlstate, str) else None)
+
+
+def _detached(error: JournalError) -> NoReturn:
+    """Raise ``error`` with no link to the exception being handled.
+
+    ``raise ... from None`` clears ``__cause__`` but still sets ``__context__`` to
+    the original (only its display is suppressed), so the original, with its SQL
+    parameters, stays reachable from the new error. The context is cleared after
+    the raise and the error re-raised as it is (a bare ``raise`` does not chain).
+    """
+    try:
+        raise error from None
+    except JournalError as clean:
+        clean.__context__ = None
         raise
 
 

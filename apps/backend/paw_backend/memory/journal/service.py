@@ -40,7 +40,10 @@ must not write a user's words. The methods that do not put words in a user's mou
 also take an ``AgentActor`` (the delegating user's grant must list ``memory.use``).
 
 Privacy. Errors, logs and the audit row (the Authorizer's, written with ids and
-the capability only) never contain message text. ``PendingObservation`` keeps its
+the capability only) never contain message text. A database error is
+:class:`JournalDatabaseError` (or :class:`JournalBusyError`), detached from the
+driver's error, whose text would carry the bound ``content``
+(``paw_backend.memory.journal.sql``). ``PendingObservation`` keeps its
 text out of ``repr``.
 """
 
@@ -256,8 +259,10 @@ class MemoryJournal:
 
         Raises :class:`InvalidJournalInputError` (before anything else),
         :class:`JournalPermissionError`, :class:`ConversationNotFoundError` (no such
-        conversation of this user) and :class:`JournalBusyError` (a lock timed out;
-        nothing was saved, retry).
+        conversation of this user), :class:`JournalBusyError` (a lock timed out;
+        nothing was saved, retry) and :class:`JournalDatabaseError` (the database
+        refused or failed; nothing was saved, and the error carries neither the
+        content nor the driver's error).
         """
         self._check_actor(actor, human_only=True)
         conversation_id = validate_uuid("conversation_id", conversation_id)
@@ -312,6 +317,7 @@ class MemoryJournal:
 
         Raw Conversation only: no observation and no job. ``role`` may not be
         ``user`` (``record_user_message`` is the one way in for a user's words).
+        Raises the same errors as ``record_user_message``.
         """
         self._check_actor(actor)
         conversation_id = validate_uuid("conversation_id", conversation_id)

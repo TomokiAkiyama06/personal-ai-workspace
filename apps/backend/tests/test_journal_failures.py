@@ -7,17 +7,23 @@ rules of the queue. A worker whose lease is gone can not apply its answer.
 
 import asyncio
 import logging
+import traceback
 import unittest
 from uuid import uuid4
 
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from paw_backend.memory.journal import (
     ItemResult,
+    JournalDatabaseError,
+    JournalError,
+    MemoryJournal,
     RunOutcome,
 )
 from paw_backend.memory.metadata import metadata_change_actor
-from paw_backend.memory.models import ActorType
+from paw_backend.memory.models import ActorType, MessageRole
 
 from .journal_support import (
     OTHER_USER_ID,
@@ -28,6 +34,7 @@ from .journal_support import (
     requires_postgres,
     worker_output,
 )
+from .memory_support import sync_database_url
 
 SECRET = "SECRET-MARKER-" + "7f3a9c"  # stands for a conversation's text
 
@@ -468,6 +475,156 @@ class LeaseFencingEndToEndTest(FailureTestCase):
         self.assertEqual(
             [j["status"] for j in self.jobs_of(receipt.entry_id)],
             ["completed", "completed"],
+        )
+
+
+def exception_chain(error: BaseException) -> list[BaseException]:
+    """``error`` and every exception reachable by ``__cause__`` / ``__context__``."""
+    seen: list[BaseException] = []
+    pending = [error]
+    while pending:
+        current = pending.pop()
+        if current is None or any(current is known for known in seen):
+            continue
+        seen.append(current)
+        pending += [current.__cause__, current.__context__]
+    return seen
+
+
+@requires_postgres
+class DatabaseErrorPrivacyTest(FailureTestCase):
+    """A database error of a write never carries the message's content.
+
+    SQLAlchemy's error text lists the bound parameters (``content``), and
+    PostgreSQL's ``DETAIL`` of a check violation quotes the failing row. The engine
+    here is built WITHOUT ``hide_parameters`` (the shared ``Database`` sets it; the
+    journal must not depend on that), and the failures are provoked by a check
+    constraint and a trigger that the test adds as the schema's owner.
+    """
+
+    async def asyncSetUp(self) -> None:
+        await super().asyncSetUp()
+        database = self.new_database()
+        # The URL with the psycopg driver (it serves the async engine as well).
+        database._engine = create_async_engine(
+            sync_database_url(), hide_parameters=False
+        )
+        self.leaky = database
+        self.journal = MemoryJournal(database, self.authorizer)
+
+    def reject_the_secret_by_a_check(self) -> None:
+        self.execute(
+            "ALTER TABLE messages ADD CONSTRAINT paw_test_no_secret"
+            f" CHECK (position('{SECRET}' IN content) = 0) NOT VALID"
+        )
+        self.addCleanup(
+            self.execute,
+            "ALTER TABLE messages DROP CONSTRAINT IF EXISTS paw_test_no_secret",
+        )
+
+    def reject_every_message_by_a_trigger(self) -> None:
+        # The trigger's own message quotes the content: the driver's text leaks too.
+        self.execute(
+            "CREATE FUNCTION paw_test_reject_message() RETURNS trigger"
+            " LANGUAGE plpgsql AS $$ BEGIN"
+            " RAISE EXCEPTION 'rejected: %', NEW.content; END $$"
+        )
+        self.execute(
+            "CREATE TRIGGER paw_test_reject_message BEFORE INSERT ON messages"
+            " FOR EACH ROW EXECUTE FUNCTION paw_test_reject_message()"
+        )
+        self.addCleanup(
+            self.execute, "DROP FUNCTION IF EXISTS paw_test_reject_message() CASCADE"
+        )
+
+    def assert_leaks_nothing(self, error: JournalDatabaseError) -> None:
+        chain = exception_chain(error)
+        self.assertEqual(chain, [error])  # no __cause__, no __context__
+        self.assertIsNone(error.__cause__)
+        self.assertIsNone(error.__context__)
+        for shown in (
+            str(error),
+            repr(error),
+            repr(error.args),
+            "".join(traceback.format_exception(error)),
+        ):
+            self.assertNotIn(SECRET, shown)
+        self.assertNotIn(SECRET, self.logs.text())
+
+    def assert_nothing_saved(self) -> None:
+        for table in (
+            "messages",
+            "memory_journal_entries",
+            "memory_consolidation_queue",
+        ):
+            self.assertEqual(self.scalar(f"SELECT count(*) FROM {table}"), 0, table)
+
+    async def test_the_engine_would_leak_the_content_so_the_test_can_see_it(self):
+        # Without the journal's translation the same failure shows the content:
+        # the assertions below would catch a regression.
+        self.reject_the_secret_by_a_check()
+        conversation = self.seed_conversation()
+        with self.assertRaises(DBAPIError) as caught:
+            async with self.leaky.session() as session, session.begin():
+                await session.execute(
+                    text(
+                        "INSERT INTO messages (conversation_id, turn_id,"
+                        " event_sequence, role, content)"
+                        " VALUES (:c, :t, 0, 'user', :content)"
+                    ),
+                    {"c": conversation, "t": uuid4(), "content": SECRET},
+                )
+        self.assertIn(SECRET, str(caught.exception))
+
+    async def test_a_refused_user_message_is_a_typed_error_without_the_content(self):
+        self.reject_the_secret_by_a_check()
+        conversation = self.seed_conversation()
+
+        with self.assertRaises(JournalDatabaseError) as caught:
+            await self.journal.record_user_message(
+                self.user, conversation, f"my password is {SECRET}"
+            )
+
+        self.assertIsInstance(caught.exception, JournalError)
+        self.assertEqual(caught.exception.code, "journal_database_error")
+        self.assertEqual(caught.exception.sqlstate, "23514")  # check violation
+        self.assert_leaks_nothing(caught.exception)
+        self.assert_nothing_saved()
+
+    async def test_a_refused_appended_message_is_a_typed_error_without_the_content(
+        self,
+    ):
+        conversation = self.seed_conversation()
+        self.reject_every_message_by_a_trigger()
+
+        with self.assertRaises(JournalDatabaseError) as caught:
+            await self.journal.append_message(
+                self.user,
+                conversation,
+                MessageRole.ASSISTANT,
+                f"the token is {SECRET}",
+                turn_id=uuid4(),
+            )
+
+        self.assertEqual(caught.exception.sqlstate, "P0001")  # raise_exception
+        self.assert_leaks_nothing(caught.exception)
+        self.assert_nothing_saved()
+
+    async def test_the_journal_works_again_once_the_database_accepts(self):
+        self.reject_the_secret_by_a_check()
+        conversation = self.seed_conversation()
+        with self.assertRaises(JournalDatabaseError):
+            await self.journal.record_user_message(self.user, conversation, SECRET)
+        receipt = await self.journal.record_user_message(
+            self.user, conversation, "fine"
+        )
+        self.assertEqual(receipt.event_sequence, 0)
+
+    def test_a_sqlstate_that_is_not_a_code_is_not_kept(self):
+        self.assertIsNone(JournalDatabaseError(f"x {SECRET}").sqlstate)
+        self.assertEqual(JournalDatabaseError("23505").sqlstate, "23505")
+        self.assertEqual(
+            str(JournalDatabaseError("23505")), "Journal database operation failed"
         )
 
 

@@ -4,11 +4,19 @@ Messages are fixed strings built from closed vocabularies (argument names,
 :class:`InputProblem`, :class:`OutputProblem`, authorization reasons). They never
 contain a caller's text, a message, a key or a content of a memory, an id, a
 driver message or SQL: a raw conversation must not reach a log or an API response
-through an error. ``code`` is the stable machine-readable identifier. Database
-errors the services do not handle propagate unchanged; their text can contain SQL
-parameters, so a caller must never show ``str(error)`` of those to a user.
+through an error. ``code`` is the stable machine-readable identifier.
+
+A database error is never passed on as it is: the text of SQLAlchemy's
+``StatementError`` / ``DBAPIError`` carries the bound parameters (a message's
+``content``, which may be private or a credential), and PostgreSQL's ``DETAIL``
+can quote the failing row. ``paw_backend.memory.journal.sql.transaction`` turns it
+into :class:`JournalBusyError` (a lock timed out) or :class:`JournalDatabaseError`
+(anything else) and detaches the original: neither ``__cause__`` nor
+``__context__`` refers to it, so no traceback, log or ``repr`` of the chain can
+show it.
 """
 
+import re
 from enum import StrEnum
 from typing import ClassVar
 
@@ -107,6 +115,28 @@ class JournalBusyError(JournalError):
 
     def __init__(self) -> None:
         super().__init__("Journal is busy; try again")
+
+
+class JournalDatabaseError(JournalError):
+    """The database refused or failed the operation; nothing was saved.
+
+    The transaction was rolled back. ``sqlstate`` is PostgreSQL's five-character
+    SQLSTATE code when the driver reported one (``None`` otherwise): a closed code
+    that says which kind of failure it was (``23514`` a check violation, ``42501``
+    a missing privilege, ...) without any value of the row. The driver's message,
+    the SQL and its parameters are not kept.
+    """
+
+    code = "journal_database_error"
+
+    def __init__(self, sqlstate: str | None = None) -> None:
+        if sqlstate is not None and not _SQLSTATE.fullmatch(sqlstate):
+            sqlstate = None
+        self.sqlstate = sqlstate
+        super().__init__("Journal database operation failed")
+
+
+_SQLSTATE = re.compile(r"[0-9A-Z]{5}")
 
 
 class LeaseLostError(JournalError):

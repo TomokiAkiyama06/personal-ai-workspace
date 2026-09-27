@@ -242,6 +242,7 @@ Session は PAW-022 で実装済みです。この 2 つの Endpoint は、シ�
 ## Database と Migration
 
 Engine は最初に使うときに作られ、その時点でも接続はしません。
+Engine（Pool の Engine と `run_abortable` の Engine）は `hide_parameters=True` で作ります。SQLAlchemy のエラーの文言に Bind した値（Message、Secret など）を載せないためです（`tests/test_database.py`、`tests/test_database_run_abortable.py`）。PostgreSQL 自身のエラー（`DETAIL` の行の引用など）は隠れないので、利用者の本文を書く Service は、エラーを自分の型に変えて元のエラーを切り離します（Memory Journal は `JournalDatabaseError`）。
 そのため PostgreSQL が停止していても Process は起動し、Liveness に応答します。
 Readiness は Pool を使わず、専用の接続で `SELECT 1` を実行し、`PAW_DATABASE_TIMEOUT_SECONDS` で必ず応答します。
 `/api/v1/health/ready` は到達できる誰でも呼べるため、開く接続数を制限しています。
@@ -1999,7 +2000,7 @@ User / Project の ID は、他の Memory Table と同じく素の UUID です�
 - **Event Sequence。** Conversation の行を `FOR NO KEY UPDATE` で Lock し、その会話の Message の最大値 + 1 を割り当てます（0 から）。同じ会話への書き込みはこの Lock で 1 つずつになるので、番号は重複せず、欠番がなく、Commit の順に並びます。Conversation を削除中の書き込みは Lock を待ち、Commit 後に「見つからない」になります。`(conversation_id, event_sequence)` の Unique（`messages`）が最後の防波堤で、会話の Message は Journal を通してだけ追加する必要があります（自分で番号を選ぶ書き込みは衝突します）。
 - **優先度は呼び出し側が決めます**（HIGH: 明示的な Preference / Decision、NORMAL: 既定、LOW: 再処理）。Journal は本文を読んで判断しません。
 - **権限。** `memory.use`（`Scope.SELF`）だけを使います。**新しい Capability は追加していません**。自分の Conversation だけを扱え、他の User（Admin を含む）の Conversation は、存在しない Conversation と同じ `ConversationNotFoundError` です。`AgentActor` は、委任元の Grant に `memory.use` があれば `append_message`、`pending_observations`、`sync_status` を呼べます。
-- **Lock。** 書き込みの Transaction は `SET LOCAL lock_timeout`（`lock_timeout_ms`、既定 3000）で始まり、待ち切れなければ何も保存せず `JournalBusyError` です。
+- **Lock。** 書き込みの Transaction は `SET LOCAL lock_timeout`（`lock_timeout_ms`、既定 3000）で始まり、待ち切れなければ何も保存せず `JournalBusyError` です。それ以外の Database のエラー（制約違反、権限、接続の失敗など）は、何も保存せず `JournalDatabaseError` です。**SQLAlchemy / psycopg のエラーは渡しません**: その文言には Bind した値（Message の `content`。個人的な内容や Credential のことがある）が入り、PostgreSQL の `DETAIL` は失敗した行を引用するためです。`JournalDatabaseError` の文言は固定で、持つのは閉じた `sqlstate`（`23514` など）だけです。`__cause__` も `__context__` も元のエラーを指さない（`raise ... from None` だけでは `__context__` が残るため、Raise の後で外す）ので、Traceback・Log・`repr` のどこからも元のエラーに届きません（`paw_backend/memory/journal/sql.py`、`tests/test_journal_failures.py` の `DatabaseErrorPrivacyTest`。この Test は `hide_parameters` なしの Engine で、Journal の変換だけで漏れないことを確かめます）。
 
 ### Queue（背景）
 

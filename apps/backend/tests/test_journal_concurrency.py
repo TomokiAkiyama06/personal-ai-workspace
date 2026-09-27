@@ -176,9 +176,12 @@ class ConversationLockTest(AsyncPostgresJournalTestCase):
             {"c": conversation},
         )
 
-        with self.assertRaises(JournalBusyError):
+        with self.assertRaises(JournalBusyError) as caught:
             await journal.record_user_message(self.user, conversation, "blocked")
         holder.rollback()
+        # Detached from the driver's error, whose text carries the bound values.
+        self.assertIsNone(caught.exception.__cause__)
+        self.assertIsNone(caught.exception.__context__)
 
         self.assertEqual(self.scalar("SELECT count(*) FROM messages"), 0)
         # Once the lock is free the same call works: nothing was left behind.
