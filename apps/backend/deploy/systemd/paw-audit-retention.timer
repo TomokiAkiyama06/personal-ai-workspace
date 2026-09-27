@@ -1,0 +1,17 @@
+# Runs paw-audit-retention.service once a day (Issue #117, Decision 0031).
+# With Decision 0027's horizon_months = 3, a run that keeps failing is reported
+# every day for about three months before an INSERT into audit_events would
+# fail for lack of a partition.
+
+[Unit]
+Description=Daily audit_events retention maintenance of the Personal AI Workspace
+
+[Timer]
+OnCalendar=daily
+# Run at the next boot when the server was off at the scheduled time.
+Persistent=true
+RandomizedDelaySec=15min
+Unit=paw-audit-retention.service
+
+[Install]
+WantedBy=timers.target
