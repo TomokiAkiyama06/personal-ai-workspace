@@ -32,7 +32,12 @@ from paw_backend.authz import (
     SystemRole,
 )
 from paw_backend.authz.policy import DEFAULT_POLICY
-from paw_backend.tasks import RepoRole, WorkingSetOperation, WorkingSetRepository
+from paw_backend.tasks import (
+    RepoRole,
+    TaskNotActiveError,
+    WorkingSetOperation,
+    WorkingSetRepository,
+)
 from paw_backend.tasks.domain import Actor
 from paw_backend.tasks.working_set import WRITE_RESERVATION_SECONDS
 from paw_backend.tools import (
@@ -606,6 +611,12 @@ class WriteReservationTest(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(result.status, ExecutionStatus.COMPLETED)
         self.assertEqual(len(h.use_gate.in_flight()), 1)
+
+    async def test_a_task_that_ended_gets_no_write(self):
+        h = harness(use_gate=UseGate(error=TaskNotActiveError()))
+        decision = await decide("repo.write_file", write("wrk"), h=h)
+        self.assertEqual(outcome(decision), (Verdict.DENY, R.TASK_NOT_ACTIVE))
+        self.assertIsNone(decision.invocation)
 
     def test_a_reservation_outlives_the_longest_call(self):
         self.assertGreater(WRITE_RESERVATION_SECONDS, MAX_EXECUTION_TIMEOUT)

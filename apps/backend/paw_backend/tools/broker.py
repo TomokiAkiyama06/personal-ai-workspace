@@ -105,6 +105,7 @@ from paw_backend.tasks.errors import (
     RepositoryRoleInsufficientError,
     RepositoryRoleUnresolvedError,
     StaleRunError,
+    TaskNotActiveError,
     TaskNotFoundError,
 )
 from paw_backend.tasks.working_set import (
@@ -586,6 +587,9 @@ class ToolBroker:
             return BrokerReason.TASK_SUPERSEDED, None
         except TaskNotFoundError:
             return BrokerReason.TASK_UNKNOWN, None
+        except TaskNotActiveError:
+            # The task ended: nothing more is written for it.
+            return BrokerReason.TASK_NOT_ACTIVE, None
         except Exception as error:
             logger.error("Repository use not admitted (%s)", type(error).__name__)
             # A change that cannot be recorded does not run; a read whose stored

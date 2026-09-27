@@ -250,6 +250,18 @@ class WorkingSetWriteReservationsAsAppRole(
     pass
 
 
+class WorkingSetResultsBoundToRevisionAsAppRole(
+    AsAppRole, test_task_working_set.ResultsBoundToRevisionTest
+):
+    pass
+
+
+class WorkingSetWritesInFlightAsAppRole(
+    AsAppRole, test_task_working_set.WritesInFlightLifecycleTest
+):
+    pass
+
+
 @requires_postgres
 class AppRolePrivilegesTest(AsAppRole, PostgresTaskTestCase):
     async def asyncSetUp(self):

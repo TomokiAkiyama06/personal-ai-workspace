@@ -63,6 +63,24 @@ PR #124 は、実装を動かすために下の推奨どおりの値をすでに
 
 検討した他の案: Project に登録された Repo が 1 つだけなら、それに割り当てる（推測を含み、Project に後から Repo が加わった場合に誤るので却下）。状態を捨てる（最初の版。復旧の手がかりがなくなるので却下）。
 
+### 5. 許可済みの書き込みが実行中の間の Task の Command
+
+PR #124 に対する Codex Review は、Broker が書き込み（または `execute`）を許可してから Executor が書き込むまでの間に、Repo の降格・削除がまだ clean な Repo を見て義務を外せる、と指摘した。PR #124 は、許可した書き込みを `task_repository_writes` の予約として、Executor が終わるまで（落ちた Executor の場合は Runner の最長実行時間より長い期限まで）残す。その間の降格・削除は拒否する（0030 の 3 節の「破棄を確かめる」を、確かめられる状態になるまで待つだけで、0030 の意味は変えない）。同じ間に Task の各 Command をどう扱うかは 0030 / 0014 が決めていないので、次を提案する。
+
+**推奨（PR #124 に実装済み）:**
+
+- **Begin evaluation と Complete は拒否する**（`RepositoryWriteInFlightError`。何も書かない。呼び出し側は、呼び出しが終わってからもう一度頼む）。どちらも Repo を今の状態で判定する Command で、まだ変わり得る Repo を判定しない。どの試行・どの実行の予約でも拒否する（Retry は同じ worktree で続けるので、前の実行の Executor の書き込みも同じ試行に届く）。
+- **Stop Now・Fail・Cancel・Pause などは止めない。** 停止はいつでもできなければならない。代わりに、Event の `detail["writes_in_flight"]`（Repo、試行、Retry 回数）に残し、Stop Now の Task log にも「許可済みの書き込みがまだ実行中かもしれない」と書く。
+- **Retry・Restart は新しい実行を始める。** 前の実行は、予約を取ることも、試行の状態を書くことも（`StaleRunError` / `StaleAttemptError`）できない。前の実行の予約の解放は、新しい実行の状態を変えない。Restart の新しい試行は 0030 の 1 節どおり新しい状態から始める。その試行の Begin evaluation / Complete は、前の実行の予約が解放されるか期限が切れるまで上と同じく待つ。
+- **終わった Task（Completed・Failed・Cancelled。Stop Now を含む）には、書き込み・実行をもう許可しない**（`TaskNotActiveError`、Broker では `task_not_active`）。読み取りは許す。Complete の後や停止の後に書き込みが入らないようにするためである。
+
+検討した他の案:
+
+- Begin evaluation / Complete を**待たせる**（Lock を持ったまま解放を待つ）。Executor が長く動くと Task 行の Lock を持ち続けて、停止も妨げるので却下。
+- 現在の試行の予約だけで判定する。Retry は同じ worktree を使うので却下。
+- **落ちた Executor の予約を Human / Operator が解放できるようにする。** 今は、期限（約 24 時間）まで Begin evaluation / Complete と、その Repo の降格・削除ができない。Executor が確実に止まったと Human が確かめたときに解放する操作（Audit つき）を加えるかどうかは、この Decision では決めず、必要になったら別の Issue にする。期限を Runner ごとの実行時間に合わせて短くする案も同じ扱いにする。
+- Graceful な Cancel の後も、Worker が今の Step を終えるための書き込みを許す。Cancel は Task を終わらせる Command なので、fail-closed の側（許さない）を選ぶ。
+
 ## 影響
 
 - 1・2 が承認されれば、PR #124 の `authz/policy.py`（`_CONTRIBUTOR_ONLY`）と `authz/capabilities.py`（`delegable=True`）はそのまま方針になる。変更されれば、その 2 か所と `tests/test_authz_policy.py`・`tests/test_tools_working_set.py` の表を変える。
@@ -79,3 +97,4 @@ PR #124 は、実装を動かすために下の推奨どおりの値をすでに
 2. **`project.task.working_set.manage` を委任可能（`delegable=True`）にする。これにより Agent は、委任者が READ できる Scope 内の登録済み Repo を、Human なしに `referenced` として加えられる**（2 節）でよいか。推奨: はい。
 3. **作成時の Working Set は API 層の作成者の認可（`project.task.run` と各 Repo の ACL）で足り、追加の `STRONG_APPROVAL` は求めない。Orchestrator の Sub-task は親の Working Set の部分集合だけを持てる。`target` のない作成は認め、`target` がない間は `running` にしない**（3 節）でよいか。推奨: はい。
 4. **Revision 0085 より前の試行の状態と `starting_commit` は `task_attempt_state_archive` に退避して Repo に割り当てず、既存の Task は `target` を与えられるまで動かさない**（4 節）でよいか。推奨: はい。
+5. **許可済みの書き込みが実行中の間は、Begin evaluation と Complete を拒否し、停止系の Command と Retry / Restart は止めずに記録する。終わった Task には書き込み・実行を許可しない。落ちた Executor の予約は期限まで残す（Human が解放する操作は今は作らない）**（5 節）でよいか。推奨: はい。

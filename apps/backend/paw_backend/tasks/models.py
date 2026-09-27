@@ -273,7 +273,9 @@ class TaskRepositoryWriteRow(Base):
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
     repository_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
     task_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    # The run that was admitted (``TaskRun``): a Retry keeps the attempt.
     attempt: Mapped[int] = mapped_column(Integer)
+    retry_count: Mapped[int] = mapped_column(Integer)
     admitted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -286,6 +288,7 @@ class TaskRepositoryWriteRow(Base):
             ["task_id", "repository_id"],
             ["task_repositories.task_id", "task_repositories.repository_id"],
         ),
+        CheckConstraint("retry_count >= 0", name="retry_count_not_negative"),
         CheckConstraint("expires_at > admitted_at", name="expires_after_admission"),
         CheckConstraint(
             "released_at IS NULL OR released_at >= admitted_at",

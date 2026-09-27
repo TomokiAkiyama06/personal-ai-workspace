@@ -28,9 +28,10 @@ Create Date: 2026-09-28
   one repository, and the archived state of an attempt that has none (then drops
   the archive).
 * ``task_repository_writes``: a repository write (or execution) the Tool Broker
-  admitted and whose executor may still be running (Codex review of #85): a
-  repository with a live one (not released, not expired) is not downgraded or
-  removed. Released by ``released_at``; nothing is deleted.
+  admitted and whose executor may still be running (Codex review of #85), with
+  the run it was admitted for: a repository with a live one (not released, not
+  expired) is not downgraded or removed, and its task does not begin evaluation
+  or complete. Released by ``released_at``; nothing is deleted.
 * ``task_events.command`` accepts ``change_working_set``.
 
 The application role gets INSERT and SELECT on the three tables and UPDATE on the
@@ -236,6 +237,7 @@ def upgrade() -> None:
         sa.Column("repository_id", sa.Uuid(), nullable=False),
         sa.Column("task_id", sa.Uuid(), nullable=False),
         sa.Column("attempt", sa.Integer(), nullable=False),
+        sa.Column("retry_count", sa.Integer(), nullable=False),
         sa.Column("admitted_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("released_at", sa.DateTime(timezone=True), nullable=True),
@@ -251,6 +253,10 @@ def upgrade() -> None:
             ["task_id", "repository_id"],
             ["task_repositories.task_id", "task_repositories.repository_id"],
             name=op.f("fk_task_repository_writes_task_id_task_repositories"),
+        ),
+        sa.CheckConstraint(
+            "retry_count >= 0",
+            name=op.f("ck_task_repository_writes_retry_count_not_negative"),
         ),
         sa.CheckConstraint(
             "expires_at > admitted_at",

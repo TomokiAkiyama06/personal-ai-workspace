@@ -138,6 +138,7 @@ from paw_backend.tasks.errors import (
     StaleAttemptError,
     StaleRunError,
     TaskConflictError,
+    TaskNotActiveError,
     TaskNotFoundError,
     TaskStepError,
     WorkingSetChangeInvalidError,
@@ -246,6 +247,12 @@ _GATED_COMMANDS = frozenset({TaskCommand.START, TaskCommand.RETRY, TaskCommand.R
 _STEP_ACTIVE_STATES = frozenset(
     {TaskState.RUNNING, TaskState.WAITING, TaskState.EVALUATING}
 )
+# A task in these states is over (Complete, Fail, Cancel, Stop Now): no repository
+# write or execution is admitted for it any more (issue #85).
+_ENDED_STATES = frozenset({TaskState.COMPLETED, TaskState.FAILED, TaskState.CANCELLED})
+# The commands that judge the repositories as they are: refused while an admitted
+# write may still change one (issue #85, Codex review).
+_JUDGING_COMMANDS = frozenset({TaskCommand.BEGIN_EVALUATION, TaskCommand.COMPLETE})
 _FINISHED_STEP_STATUSES = frozenset(
     {StepStatus.SUCCEEDED, StepStatus.FAILED, StepStatus.INTERRUPTED}
 )
@@ -499,6 +506,11 @@ def _worktree(
     _column_text("worktree path", path, "worktree_path")
     _column_text("worktree head_commit", head_commit, "head_commit")
     return branch, path, head_commit
+
+
+def _is_passing(status: ReviewStatus, result: EvaluationResult) -> bool:
+    """Whether a review / evaluation state counts towards Complete."""
+    return status is ReviewStatus.APPROVED or result is EvaluationResult.PASSED
 
 
 def _review(review: object) -> tuple[ReviewStatus, EvaluationResult] | None:
@@ -902,6 +914,16 @@ class TaskService:
         ``InvalidCommandArgumentError`` before anything is written or the task
         is looked at.
 
+        While a repository write (or an execution) that ``admit_repository_use``
+        admitted may still be running (a reservation of any run of the task that
+        is neither released nor expired), Begin evaluation and Complete are
+        refused (``RepositoryWriteInFlightError``, nothing written): neither judges
+        a repository that may still change. Every other command goes ahead (a stop
+        must always be possible; Retry / Restart start a run whose admissions the
+        old run cannot make) and its event records the reservations in
+        ``detail["writes_in_flight"]`` (repository, attempt, retry count); Stop
+        Now's Task log line says so too. Issue #85, Codex review.
+
         Retry, Restart and Start also need the project to be Active (``project_gate``;
         ``ProjectNotActiveError``, nothing written; judged after
         the transition, so an illegal command is reported as such first).
@@ -970,9 +992,27 @@ class TaskService:
                 # not run without one. Start, and Resume / Unblock too: a task of
                 # before revision 0085 has an empty Working Set.
                 raise NoTargetRepositoryError()
+            # Under the task's row lock, which every admission takes too.
+            in_flight = await self._live_writes(session, task.id)
+            if command in _JUDGING_COMMANDS and in_flight:
+                # An evaluation or a completion would judge a repository that an
+                # executor may still write to.
+                raise RepositoryWriteInFlightError()
             if command is TaskCommand.COMPLETE:
                 await self._require_completion(session, task)
             detail: dict[str, Any] = {}
+            if in_flight:
+                # Nothing else waits for them (a stop must always be possible;
+                # Retry / Restart start a run whose own admissions are fenced
+                # by it), but the history says an executor may still be running.
+                detail["writes_in_flight"] = [
+                    {
+                        "repository_id": str(row.repository_id),
+                        "attempt": row.attempt,
+                        "retry_count": row.retry_count,
+                    }
+                    for row in in_flight
+                ]
 
             task.state = plan.target
             task.wait_reason = plan.wait_reason
@@ -1021,7 +1061,9 @@ class TaskService:
                         attempt=task.attempt,
                         retry_count=task.retry_count,
                         level=LogLevel.WARNING,
-                        message=self._stop_now_message(ended_step, reason),
+                        message=self._stop_now_message(
+                            ended_step, reason, len(in_flight)
+                        ),
                         created_at=now,
                     )
                 )
@@ -1274,8 +1316,16 @@ class TaskService:
         be merged), otherwise ``RepositoryNotInAttemptError``.
 
         Each group that is given replaces the stored one; groups left as ``None``
-        are unchanged. Allowed in any task state (a pull request can be merged
-        after the task completed) but only for the current run
+        are unchanged. The review and evaluation results belong to the revision
+        they were recorded for (Codex review of #85): a worktree whose HEAD moves
+        without results in the same call resets them (``not_started`` /
+        ``not_run``), ``admit_repository_use`` resets them when it admits a change,
+        and an ``approved`` review or a ``passed`` evaluation is refused while an
+        admitted write on the repository may still be running
+        (``RepositoryWriteInFlightError``, nothing written).
+
+        Allowed in any task state (a pull request can be merged after the task
+        completed) but only for the current run
         (``StaleAttemptError`` after a Restart, ``StaleRunError`` after a Retry:
         the new run continues the same attempt's state, so a delayed worker of the
         failed run must not overwrite it). Text that is not ``str``, blank, longer
@@ -1302,8 +1352,21 @@ class TaskService:
             )
             if row is None:
                 raise RepositoryNotInAttemptError()
+            if (
+                review_fields is not None
+                and _is_passing(*review_fields)
+                and await self._live_writes(session, task.id, repository_id)
+            ):
+                # Evaluated or reviewed while an admitted write may still change
+                # the repository: not a result of the revision it will have.
+                raise RepositoryWriteInFlightError()
             if worktree_fields is not None:
+                head_moved = worktree_fields[2] != row.head_commit
                 row.branch, row.worktree_path, row.head_commit = worktree_fields
+                if head_moved and review_fields is None:
+                    # The results were for another revision (issue #85).
+                    row.evaluation_result = EvaluationResult.NOT_RUN
+                    row.review_status = ReviewStatus.NOT_STARTED
             if review_fields is not None:
                 row.review_status, row.evaluation_result = review_fields
             if pull_request_fields is not None:
@@ -1417,7 +1480,7 @@ class TaskService:
             state_row = await self._attempt_repository_row(
                 session, task, repository_id, lock=True
             )
-            if narrows(operation) and await self._write_in_flight(
+            if narrows(operation) and await self._live_writes(
                 session, task.id, repository_id
             ):
                 raise RepositoryWriteInFlightError()
@@ -1544,8 +1607,12 @@ class TaskService:
         returned or failed, or ``WRITE_RESERVATION_SECONDS`` passed: meanwhile
         the repositories are not downgraded or removed (Codex review of #85: the
         admission must hold through the execution). Returns the reservation's id,
-        or ``None`` for a read (which changes and reserves nothing). Stale runs
-        raise ``StaleAttemptError`` / ``StaleRunError``. Nothing is written when
+        or ``None`` for a read (which changes and reserves nothing); meanwhile the
+        task does not begin evaluation or complete either (``execute``). A write
+        or an execution for a task that ended (completed, failed, cancelled) is
+        ``TaskNotActiveError``. Stale runs raise ``StaleAttemptError`` /
+        ``StaleRunError``: an old run's executor never gets a reservation, or a
+        change recorded, in the run that replaced it. Nothing is written when
         anything is refused.
         """
         task_id = _uuid("task_id", task_id)
@@ -1566,6 +1633,8 @@ class TaskService:
         async with self._database.session() as session, session.begin():
             task = await self._require_task(session, task_id, lock=True)
             self._require_current_run(task, run)
+            if changes and task.state in _ENDED_STATES:
+                raise TaskNotActiveError()
             members = {
                 row.repository_id: row for row in await self._members(session, task.id)
             }
@@ -1586,6 +1655,11 @@ class TaskService:
                 state_row.modified = True
                 if member.role.strength > state_row.strongest_role.strength:
                     state_row.strongest_role = member.role
+                # What was evaluated or reviewed is not what the repository will
+                # be: the results go, in the transaction that admits the change
+                # (Codex review of #85). Complete needs them again.
+                state_row.evaluation_result = EvaluationResult.NOT_RUN
+                state_row.review_status = ReviewStatus.NOT_STARTED
                 state_row.updated_at = now
                 session.add(
                     TaskRepositoryWriteRow(
@@ -1593,6 +1667,7 @@ class TaskService:
                         repository_id=repository_id,
                         task_id=task.id,
                         attempt=task.attempt,
+                        retry_count=task.retry_count,
                         admitted_at=now,
                         expires_at=expires_at,
                     )
@@ -1622,25 +1697,28 @@ class TaskService:
             )
 
     @staticmethod
-    async def _write_in_flight(
-        session: AsyncSession, task_id: uuid.UUID, repository_id: uuid.UUID
-    ) -> bool:
-        """Whether an admitted write on the repository may still be running (a
-        reservation of any attempt that is neither released nor expired). Read
-        under the task's row lock, which every admission takes too."""
-        row = (
-            await session.execute(
-                select(TaskRepositoryWriteRow.id)
-                .where(
-                    TaskRepositoryWriteRow.task_id == task_id,
-                    TaskRepositoryWriteRow.repository_id == repository_id,
-                    TaskRepositoryWriteRow.released_at.is_(None),
-                    TaskRepositoryWriteRow.expires_at > utcnow(),
-                )
-                .limit(1)
-            )
-        ).first()
-        return row is not None
+    async def _live_writes(
+        session: AsyncSession,
+        task_id: uuid.UUID,
+        repository_id: uuid.UUID | None = None,
+    ) -> list[TaskRepositoryWriteRow]:
+        """The admitted writes of the task (of one repository) that may still be
+        running: reservations of any run that are neither released nor expired,
+        oldest first. Read under the task's row lock, which every admission takes
+        too."""
+        query = select(TaskRepositoryWriteRow).where(
+            TaskRepositoryWriteRow.task_id == task_id,
+            TaskRepositoryWriteRow.released_at.is_(None),
+            TaskRepositoryWriteRow.expires_at > utcnow(),
+        )
+        if repository_id is not None:
+            query = query.where(TaskRepositoryWriteRow.repository_id == repository_id)
+        query = query.order_by(
+            TaskRepositoryWriteRow.admitted_at,
+            TaskRepositoryWriteRow.id,
+            TaskRepositoryWriteRow.repository_id,
+        )
+        return list((await session.execute(query)).scalars().all())
 
     # -- reading ---------------------------------------------------------------
 
@@ -1867,14 +1945,24 @@ class TaskService:
         return copy
 
     @staticmethod
-    def _stop_now_message(interrupted_step: str | None, reason: str) -> str:
-        """The Task log line of a Stop Now: the step it ended and why (both kept)."""
+    def _stop_now_message(
+        interrupted_step: str | None, reason: str, writes_in_flight: int = 0
+    ) -> str:
+        """The Task log line of a Stop Now: the step it ended and why (both kept),
+        and whether an admitted repository write may still be running (issue #85:
+        a Stop Now is never refused for it, but it does not hide it)."""
         message = (
             f"Stop Now: interrupted step {interrupted_step!r}"
             if interrupted_step
             else "Stop Now: no step was running"
         )
-        return f"{message} (reason: {reason})"
+        message = f"{message} (reason: {reason})"
+        if writes_in_flight:
+            message += (
+                f"; {writes_in_flight} admitted repository write(s) may still be "
+                "running"
+            )
+        return message
 
     @staticmethod
     async def _require_task(

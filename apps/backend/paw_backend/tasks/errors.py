@@ -70,6 +70,17 @@ class ProjectNotActiveError(TaskError):
         super().__init__("The project is not active")
 
 
+class TaskNotActiveError(TaskError):
+    """A repository write (or an execution) is asked for a task that ended
+    (completed, failed or cancelled: a Stop Now too). Nothing is admitted or
+    written (issue #85: no write lands after the task was judged or stopped)."""
+
+    code = "task_not_active"
+
+    def __init__(self) -> None:
+        super().__init__("The task has ended")
+
+
 class StaleRunError(TaskError):
     """The caller works for a run of the task that a Retry or Restart replaced.
 
@@ -149,11 +160,13 @@ class ModifiedRepositoryDowngradeRefusedError(WorkingSetError):
 
 
 class RepositoryWriteInFlightError(WorkingSetError):
-    """A repository is downgraded or removed while a write (or an execution) on
-    it that the Tool Broker admitted may still be running: its executor has not
-    released the reservation, which has not expired either. A clean worktree then
-    says nothing about the write to come, so nothing is judged discarded; the
-    change is asked again once the call ended (Codex review of #85, P1)."""
+    """A write (or an execution) that the Tool Broker admitted may still be
+    running: its executor has not released the reservation, which has not
+    expired either (Codex review of #85, P1). Raised for a downgrade or a removal
+    of that repository (a clean worktree says nothing about the write to come, so
+    nothing is judged discarded), and for Begin evaluation and Complete of the
+    task (neither judges a repository that may still change). The command is
+    asked again once the call ended."""
 
     code = "repository_write_in_flight"
     message = "A write on the repository may still be running"

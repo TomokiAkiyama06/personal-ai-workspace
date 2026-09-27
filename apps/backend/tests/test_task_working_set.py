@@ -41,7 +41,10 @@ from paw_backend.tasks import (
     ReviewState,
     ReviewStatus,
     StaleAttemptError,
+    StaleRunError,
     TaskCommand,
+    TaskNotActiveError,
+    TaskRun,
     TaskService,
     TaskState,
     WorkingSetChangeInvalidError,
@@ -164,6 +167,30 @@ class WorkingSetTestCase(PostgresTaskTestCase):
         if ended:
             await self.service.release_repository_use(task_id, reservation)
         return reservation
+
+    async def live_reservations(self, task_id) -> int:
+        return await self.scalar(
+            "SELECT count(*) FROM task_repository_writes "
+            "WHERE task_id = :id AND released_at IS NULL",
+            id=task_id,
+        )
+
+    async def expire(self, reservation) -> None:
+        """The executor of ``reservation`` crashed long ago (owner SQL: the
+        application cannot change a reservation's expiry)."""
+        database = new_database()
+        try:
+            async with database.engine.begin() as connection:
+                await connection.execute(
+                    text(
+                        "UPDATE task_repository_writes "
+                        "SET expires_at = admitted_at + interval '1 microsecond' "
+                        "WHERE id = :id"
+                    ),
+                    {"id": reservation},
+                )
+        finally:
+            await database.dispose()
 
     async def roles(self, task_id) -> dict[uuid.UUID, RepoRole]:
         snapshot = await self.service.restore(task_id)
@@ -892,13 +919,15 @@ class CompletionTest(WorkingSetTestCase):
             ]
         )
         await self.service.execute(task_id, C.START, actor=self.system)
-        await self.service.admit_repository_use(
+        reservation = await self.service.admit_repository_use(
             task_id,
             FIRST_RUN,
             [self.other],
             capability=Capability.PROJECT_TASK_RUN,
             executes=True,
         )
+        # The command ran and ended.
+        await self.service.release_repository_use(task_id, reservation)
         # Even an inspector that finds it clean does not undo a recorded change.
         self.inspector.clean_at(self.other, BASE_B)
         await self.service.execute(task_id, C.BEGIN_EVALUATION, actor=self.system)
@@ -956,30 +985,6 @@ class WriteReservationTest(WorkingSetTestCase):
         (Op.DOWNGRADE_TO_REFERENCED, TARGET),
         (Op.REMOVE, TARGET),
     )
-
-    async def live_reservations(self, task_id) -> int:
-        return await self.scalar(
-            "SELECT count(*) FROM task_repository_writes "
-            "WHERE task_id = :id AND released_at IS NULL",
-            id=task_id,
-        )
-
-    async def expire(self, reservation) -> None:
-        """The executor of ``reservation`` crashed long ago (owner SQL: the
-        application cannot change a reservation's expiry)."""
-        database = new_database()
-        try:
-            async with database.engine.begin() as connection:
-                await connection.execute(
-                    text(
-                        "UPDATE task_repository_writes "
-                        "SET expires_at = admitted_at + interval '1 microsecond' "
-                        "WHERE id = :id"
-                    ),
-                    {"id": reservation},
-                )
-        finally:
-            await database.dispose()
 
     async def test_a_write_in_flight_keeps_its_repository_from_being_narrowed(self):
         task_id = await self.two_targets()
@@ -1193,6 +1198,402 @@ class WriteReservationTest(WorkingSetTestCase):
                     self.assertEqual((role, state.modified), (TARGET, True))
                 else:
                     self.assertEqual((role, state.modified), (REFERENCED, False))
+
+
+@requires_postgres
+class WritesInFlightLifecycleTest(WorkingSetTestCase):
+    """The task's commands while an admitted write may still be running
+    (issue #85, Codex review; Decision 0035, point 5): Begin evaluation and
+    Complete wait for it (refused); Stop Now, Fail, Cancel, Retry and Restart go
+    ahead and record it; an old run's executor gets nothing in the new run; no
+    write is admitted for a task that ended."""
+
+    SECOND_RUN = TaskRun(attempt=1, retry_count=1)
+    RESTARTED = TaskRun(attempt=2, retry_count=0)
+
+    async def evaluating_two_targets(self) -> uuid.UUID:
+        """Evaluating, with every requirement met for both targets."""
+        task_id = await self.two_targets()
+        await self.service.execute(task_id, C.BEGIN_EVALUATION, actor=self.system)
+        for repository_id in (self.repository_id, self.other):
+            await self.service.update_attempt(
+                task_id,
+                run=FIRST_RUN,
+                repository_id=repository_id,
+                review=PASSED_REVIEW,
+                pull_request=OPEN_PULL_REQUEST,
+            )
+        return task_id
+
+    async def test_begin_evaluation_waits_for_a_write_in_flight(self):
+        task_id = await self.two_targets()
+        reservation = await self.write_to(task_id, self.other, ended=False)
+        before = await self.service.restore(task_id)
+        with self.assertRaises(RepositoryWriteInFlightError):
+            await self.service.execute(task_id, C.BEGIN_EVALUATION, actor=self.system)
+        self.assertEqual(await self.service.restore(task_id), before)
+        await self.service.release_repository_use(task_id, reservation)
+        await self.service.execute(task_id, C.BEGIN_EVALUATION, actor=self.system)
+
+    async def reevaluate(self, task_id, repository_id):
+        """Evaluated and reviewed again after the change (the admission took the
+        earlier results away)."""
+        await self.service.update_attempt(
+            task_id, run=FIRST_RUN, repository_id=repository_id, review=PASSED_REVIEW
+        )
+
+    async def test_complete_waits_for_a_write_in_flight(self):
+        task_id = await self.evaluating_two_targets()
+        reservation = await self.write_to(task_id, self.other, ended=False)
+        before = await self.service.restore(task_id)
+        with self.assertRaises(RepositoryWriteInFlightError):
+            await self.service.execute(task_id, C.COMPLETE, actor=self.system)
+        self.assertEqual(await self.service.restore(task_id), before)
+        await self.service.release_repository_use(task_id, reservation)
+        await self.reevaluate(task_id, self.other)
+        await self.service.execute(task_id, C.COMPLETE, actor=self.system)
+
+    async def test_an_expired_reservation_does_not_hold_complete(self):
+        task_id = await self.evaluating_two_targets()
+        await self.expire(await self.write_to(task_id, self.other, ended=False))
+        await self.reevaluate(task_id, self.other)
+        await self.service.execute(task_id, C.COMPLETE, actor=self.system)
+
+    async def test_a_stop_goes_ahead_and_records_the_write(self):
+        for command in (C.STOP_NOW, C.FAIL, C.CANCEL):
+            with self.subTest(command=command.value):
+                task_id = await self.two_targets()
+                await self.write_to(task_id, self.other, ended=False)
+                event = await self.service.execute(
+                    task_id, command, actor=self.user, reason="operator"
+                )
+                self.assertEqual(
+                    event.detail["writes_in_flight"],
+                    [
+                        {
+                            "repository_id": str(self.other),
+                            "attempt": 1,
+                            "retry_count": 0,
+                        }
+                    ],
+                )
+                snapshot = await self.service.restore(task_id)
+                if command is C.STOP_NOW:
+                    self.assertIn(
+                        "1 admitted repository write(s) may still be running",
+                        snapshot.recent_logs[-1].message,
+                    )
+                # The reservation stays until its call ended.
+                self.assertEqual(await self.live_reservations(task_id), 1)
+
+    async def test_nothing_is_recorded_without_a_write_in_flight(self):
+        task_id = await self.two_targets()
+        await self.write_to(task_id, self.other)
+        event = await self.service.execute(
+            task_id, C.STOP_NOW, actor=self.user, reason="operator"
+        )
+        self.assertNotIn("writes_in_flight", event.detail or {})
+        snapshot = await self.service.restore(task_id)
+        self.assertNotIn("may still be running", snapshot.recent_logs[-1].message)
+
+    async def test_no_write_is_admitted_for_a_task_that_ended(self):
+        for command in (C.STOP_NOW, C.FAIL, C.CANCEL, C.COMPLETE):
+            with self.subTest(command=command.value):
+                if command is C.COMPLETE:
+                    task_id = await self.evaluating_two_targets()
+                else:
+                    task_id = await self.two_targets()
+                await self.service.execute(
+                    task_id, command, actor=self.user, reason="operator"
+                )
+                counts = await self.table_counts()
+                for capability, executes in (
+                    (Capability.PROJECT_REPO_WRITE, False),
+                    (Capability.PROJECT_TASK_RUN, True),
+                ):
+                    with self.assertRaises(TaskNotActiveError):
+                        await self.service.admit_repository_use(
+                            task_id,
+                            FIRST_RUN,
+                            [self.other],
+                            capability=capability,
+                            executes=executes,
+                        )
+                self.assertEqual(await self.table_counts(), counts)
+                self.assertEqual(await self.live_reservations(task_id), 0)
+                # Reading what the task left is still possible.
+                read = await self.service.admit_repository_use(
+                    task_id,
+                    FIRST_RUN,
+                    [self.other],
+                    capability=Capability.PROJECT_READ,
+                    executes=False,
+                )
+                self.assertIsNone(read)
+
+    async def test_retry_fences_the_old_run_and_waits_for_its_write(self):
+        """Retry runs again in the same attempt (same worktree): the old run's
+        executor may still write there, so the new run does not evaluate until
+        it ended; the old run gets no reservation or state in the new run."""
+        task_id = await self.two_targets()
+        old = await self.write_to(task_id, self.other, ended=False)
+        await self.service.execute(task_id, C.FAIL, actor=self.system)
+        retried = await self.service.execute(task_id, C.RETRY, actor=self.user)
+        self.assertEqual(len(retried.detail["writes_in_flight"]), 1)
+        await self.service.execute(task_id, C.START, actor=self.system)
+        with self.assertRaises(StaleRunError):
+            await self.write_to(task_id, self.other, ended=False)
+        with self.assertRaises(StaleRunError):
+            await self.service.update_attempt(
+                task_id,
+                run=FIRST_RUN,
+                repository_id=self.other,
+                review=PASSED_REVIEW,
+            )
+        new = await self.write_to(
+            task_id, self.repository_id, run=self.SECOND_RUN, ended=False
+        )
+        self.assertEqual(
+            await self.scalar(
+                "SELECT retry_count FROM task_repository_writes WHERE id = :id",
+                id=new,
+            ),
+            1,
+        )
+        await self.service.release_repository_use(task_id, new)
+        with self.assertRaises(RepositoryWriteInFlightError):
+            await self.service.execute(task_id, C.BEGIN_EVALUATION, actor=self.system)
+        # The old run's release changes nothing of the new run's state.
+        counts = await self.table_counts()
+        await self.service.release_repository_use(task_id, old)
+        self.assertEqual(await self.table_counts(), counts)
+        await self.service.execute(task_id, C.BEGIN_EVALUATION, actor=self.system)
+
+    async def test_restart_starts_fresh_but_the_old_write_holds_the_judgement(self):
+        """Restart gives each repository fresh state (Decision 0030, section 1);
+        the old attempt's executor gets nothing in the new attempt, and the new
+        attempt is not judged while it may still run."""
+        task_id = await self.two_targets()
+        old = await self.write_to(task_id, self.other, ended=False)
+        await self.service.execute(task_id, C.STOP_NOW, actor=self.user, reason="x")
+        restarted = await self.service.execute(task_id, C.RESTART, actor=self.user)
+        self.assertEqual(
+            restarted.detail["writes_in_flight"][0]["attempt"], FIRST_RUN.attempt
+        )
+        await self.service.execute(task_id, C.START, actor=self.system)
+        snapshot = await self.service.restore(task_id)
+        self.assertFalse(snapshot.attempt.repository(self.other).modified)
+        with self.assertRaises(StaleAttemptError):
+            await self.write_to(task_id, self.other, ended=False)
+        with self.assertRaises(RepositoryWriteInFlightError):
+            await self.service.execute(task_id, C.BEGIN_EVALUATION, actor=self.system)
+        counts = await self.table_counts()
+        await self.service.release_repository_use(task_id, old)
+        self.assertEqual(await self.table_counts(), counts)
+        await self.service.execute(task_id, C.BEGIN_EVALUATION, actor=self.system)
+
+    async def test_a_concurrent_admission_and_complete_never_both_hold(self):
+        """Both wait for the task's row lock: a write admitted first holds
+        Complete back; a Complete first leaves nothing to admit."""
+        for first in ("admission", "complete"):
+            with self.subTest(first=first):
+                task_id = await self.evaluating_two_targets()
+                admitting = TaskService(self.new_database(), project_gate=ALWAYS_ACTIVE)
+                completing = TaskService(
+                    self.new_database(),
+                    project_gate=ALWAYS_ACTIVE,
+                    change_inspector=self.inspector,
+                )
+                admit = admitting.admit_repository_use(
+                    task_id,
+                    FIRST_RUN,
+                    [self.other],
+                    capability=Capability.PROJECT_REPO_WRITE,
+                    executes=False,
+                )
+                complete = completing.execute(task_id, C.COMPLETE, actor=self.system)
+                ordered = (
+                    (admit, complete) if first == "admission" else (complete, admit)
+                )
+                async with self.database.engine.connect() as blocker:
+                    await blocker.execute(
+                        text("SELECT 1 FROM tasks WHERE id = :id FOR UPDATE"),
+                        {"id": task_id},
+                    )
+                    started = [asyncio.create_task(ordered[0])]
+                    await self.wait_for_lock_waiters(1)
+                    started.append(asyncio.create_task(ordered[1]))
+                    await self.wait_for_lock_waiters(2)
+                    await blocker.rollback()
+                results = await asyncio.gather(*started, return_exceptions=True)
+                refused = [r for r in results if isinstance(r, Exception)]
+                self.assertEqual(len(refused), 1, results)
+                snapshot = await self.service.restore(task_id)
+                if first == "admission":
+                    self.assertIsInstance(refused[0], RepositoryWriteInFlightError)
+                    self.assertIs(snapshot.state, S.EVALUATING)
+                    self.assertEqual(await self.live_reservations(task_id), 1)
+                else:
+                    self.assertIsInstance(refused[0], TaskNotActiveError)
+                    self.assertIs(snapshot.state, S.COMPLETED)
+                    self.assertEqual(await self.live_reservations(task_id), 0)
+
+
+@requires_postgres
+class ResultsBoundToRevisionTest(WorkingSetTestCase):
+    """Codex review of #85 (P1): an evaluation or a review is of the revision it
+    was made on. A change admitted afterwards (a repository write, something
+    executed) or a HEAD that moves takes the results away, so Complete never
+    accepts results from before the change."""
+
+    async def results(self, task_id, repository_id):
+        state = (await self.service.restore(task_id)).attempt.repository(repository_id)
+        return (state.review.review_status, state.review.evaluation_result)
+
+    async def evaluating_two_targets(self) -> uuid.UUID:
+        task_id = await self.two_targets()
+        await self.service.execute(task_id, C.BEGIN_EVALUATION, actor=self.system)
+        for repository_id in (self.repository_id, self.other):
+            await self.service.update_attempt(
+                task_id,
+                run=FIRST_RUN,
+                repository_id=repository_id,
+                review=PASSED_REVIEW,
+                pull_request=OPEN_PULL_REQUEST,
+            )
+        return task_id
+
+    async def assert_not_completable(self, task_id):
+        with self.assertRaises(CompletionRequirementsNotMetError):
+            await self.service.execute(task_id, C.COMPLETE, actor=self.system)
+
+    async def test_a_write_admitted_after_the_results_takes_them_away(self):
+        task_id = await self.evaluating_two_targets()
+        await self.write_to(task_id, self.other)
+        self.assertEqual(
+            await self.results(task_id, self.other),
+            (ReviewStatus.NOT_STARTED, EvaluationResult.NOT_RUN),
+        )
+        # The other repository keeps its own.
+        self.assertEqual(
+            await self.results(task_id, self.repository_id),
+            (ReviewStatus.APPROVED, EvaluationResult.PASSED),
+        )
+        await self.assert_not_completable(task_id)
+        # Evaluated and reviewed again, on what the repository is now.
+        await self.service.update_attempt(
+            task_id, run=FIRST_RUN, repository_id=self.other, review=PASSED_REVIEW
+        )
+        await self.service.execute(task_id, C.COMPLETE, actor=self.system)
+
+    async def test_an_execution_takes_the_results_away_and_a_read_does_not(self):
+        task_id = await self.create_task(
+            repositories=[
+                WorkingSetEntry(self.repository_id, TARGET, BASE_A),
+                WorkingSetEntry(self.other, WORKING, BASE_B),
+            ]
+        )
+        await self.service.execute(task_id, C.START, actor=self.system)
+        await self.service.update_attempt(
+            task_id, run=FIRST_RUN, repository_id=self.other, review=PASSED_REVIEW
+        )
+        await self.service.admit_repository_use(
+            task_id,
+            FIRST_RUN,
+            [self.other],
+            capability=Capability.PROJECT_READ,
+            executes=False,
+        )
+        self.assertEqual(
+            await self.results(task_id, self.other),
+            (ReviewStatus.APPROVED, EvaluationResult.PASSED),
+        )
+        reservation = await self.service.admit_repository_use(
+            task_id,
+            FIRST_RUN,
+            [self.other],
+            capability=Capability.PROJECT_TASK_RUN,
+            executes=True,
+        )
+        await self.service.release_repository_use(task_id, reservation)
+        self.assertEqual(
+            await self.results(task_id, self.other),
+            (ReviewStatus.NOT_STARTED, EvaluationResult.NOT_RUN),
+        )
+
+    async def test_a_refused_admission_keeps_the_results(self):
+        task_id = await self.evaluating_two_targets()
+        counts = await self.table_counts()
+        with self.assertRaises(RepositoryRoleUnresolvedError):
+            await self.write_to(task_id, self.other, uuid.uuid4())
+        self.assertEqual(await self.table_counts(), counts)
+
+    async def test_no_passing_result_is_recorded_while_a_write_is_in_flight(self):
+        """Evaluated while the executor may still write: not a result of the
+        revision the repository will have."""
+        task_id = await self.two_targets()
+        await self.service.execute(task_id, C.BEGIN_EVALUATION, actor=self.system)
+        reservation = await self.write_to(task_id, self.other, ended=False)
+        counts = await self.table_counts()
+        for review in (
+            PASSED_REVIEW,
+            ReviewState(ReviewStatus.APPROVED, EvaluationResult.NOT_RUN),
+            ReviewState(ReviewStatus.IN_REVIEW, EvaluationResult.PASSED),
+        ):
+            with self.subTest(review=review):
+                with self.assertRaises(RepositoryWriteInFlightError):
+                    await self.service.update_attempt(
+                        task_id, run=FIRST_RUN, repository_id=self.other, review=review
+                    )
+        self.assertEqual(await self.table_counts(), counts)
+        # A failing result, or another repository's, is not held back.
+        await self.service.update_attempt(
+            task_id,
+            run=FIRST_RUN,
+            repository_id=self.other,
+            review=ReviewState(ReviewStatus.CHANGES_REQUESTED, EvaluationResult.FAILED),
+        )
+        await self.service.update_attempt(
+            task_id,
+            run=FIRST_RUN,
+            repository_id=self.repository_id,
+            review=PASSED_REVIEW,
+        )
+        await self.service.release_repository_use(task_id, reservation)
+        await self.service.update_attempt(
+            task_id, run=FIRST_RUN, repository_id=self.other, review=PASSED_REVIEW
+        )
+
+    async def test_a_head_that_moves_takes_the_results_away(self):
+        task_id = await self.evaluating_two_targets()
+        worktree = WorktreeState("agent/b", "/srv/w/b", BASE_B)
+        # Recorded with its results: they are of that revision.
+        await self.service.update_attempt(
+            task_id,
+            run=FIRST_RUN,
+            repository_id=self.other,
+            worktree=worktree,
+            review=PASSED_REVIEW,
+        )
+        # The same HEAD again: nothing moved.
+        await self.service.update_attempt(
+            task_id, run=FIRST_RUN, repository_id=self.other, worktree=worktree
+        )
+        self.assertEqual(
+            await self.results(task_id, self.other),
+            (ReviewStatus.APPROVED, EvaluationResult.PASSED),
+        )
+        await self.service.update_attempt(
+            task_id,
+            run=FIRST_RUN,
+            repository_id=self.other,
+            worktree=WorktreeState("agent/b", "/srv/w/b", "c" * 40),
+        )
+        self.assertEqual(
+            await self.results(task_id, self.other),
+            (ReviewStatus.NOT_STARTED, EvaluationResult.NOT_RUN),
+        )
+        await self.assert_not_completable(task_id)
 
 
 @requires_postgres
