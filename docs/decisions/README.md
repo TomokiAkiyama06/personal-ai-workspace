@@ -1,7 +1,7 @@
 # 設計判断の記録
 
 重要な仕様・設計判断の提案と、承認された判断の経緯を保存するディレクトリです。
-承認済みの判断は次の表のとおりです。
+判断は次の表のとおりです（`Proposed` は人間の承認を待つ提案で、承認されるまで方針としては使いません）。
 
 | Decision | 内容 | Status |
 | --- | --- | --- |
@@ -33,6 +33,7 @@
 | [0027](0027-audit-retention-and-partitioning.md) | `audit_events` の保存期間・Partition（月ごとの Range Partition）・退避先（`audit_events_archive`）の方針（Decision 0004 の 5.5 への追補） | Approved |
 | [0028](0028-project-deletion-research-data.md) | Project 削除時の調査結果（Evidence / Claim Provenance、Research Scratch）の扱い（削除・DELETE 権限の追加・唯一の Provenance を失う Memory の扱い） | Approved |
 | [0029](0029-per-user-git-runner-ssh.md) | User ごとの Linux User で git を実行する `SshGitRunner`（SSH 経由。Wrapper の許可副コマンド、鍵の発行・失効・回転、エラー処理、移行。Decision 0017 の 4 への追補。Issue #105） | Approved |
+| [0030](0030-task-working-set-model.md) | Task Working Set（Multi-Repo）の単位・承認・Write範囲・完了条件（Decision 0014「決まっていないこと」1〜5を埋める） | Approved |
 
 運用は [AGENTS.md](../../AGENTS.md) の「仕様変更」に従います。
 
