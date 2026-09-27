@@ -75,6 +75,21 @@ Timer とは別の監視（外部の Monitoring、手動の確認）から、Par
 `--purge-after-days N` を指定したときだけ Purge が有効になる（0027 の 3 のとおり、既定は無効）。`archive_after_days`（180）より短い値は拒否する（`RetentionPolicy` の検証）。
 `archive_after_days` と `horizon_months` は Command から変えられない（0027 の値を変えるには新しい Decision が要るため）。
 
+### 6. 実行する OS User と、Lock・時間の上限
+
+- **Backend を動かす OS User で実行しない。** この Job は最も強い DB の Credential（Table の Owner）を持つ。Backend と同じ uid なら、Web 側の侵害で
+  `/proc/<pid>/environ` から読めるうえ、Job が実行する Code・venv に Backend の User が書き込めれば、次の実行に Owner として何でもさせられる
+  （Partition の DROP、追記専用の Trigger の無効化）。`chmod 600` の `EnvironmentFile` の意味も、2 の「Backend に Migration の Credential を持たせない」（0004 の 5 の 2）も失われる。
+  例の Unit は専用の System User `paw-maint` で動かし、`/opt/paw/apps/backend` と `/opt/paw/venv` は root が所有して Backend の User にも `paw-maint` にも書き込ませない
+  （README の Operator の Credential と同じ規則）。
+- **各 Step の Transaction で `lock_timeout` を 5 秒にする**（`SET LOCAL`、`DDL_LOCK_TIMEOUT_MS`）。`DETACH PARTITION` / `CREATE TABLE ... PARTITION OF` は `audit_events` の親に強い Lock を取り、
+  長い読み取り（pg_dump、長い Audit の Query）の後ろで待つ間、すべての `audit_events` への INSERT（REQUIRED の Audit mode では全操作）がその後ろに並ぶ。
+  待ちきれない Step は失敗（`<step>:OperationalError`、終了コード 3、`OnFailure=`）とし、翌日の実行がやり直す（各 Step は冪等）。同じ実行の中での再試行はしない。
+- **SIGTERM は取り消しに変える。** systemd の `TimeoutStartSec=30min`（Lock の上限があるので、それ以外の停止への保険）や `systemctl stop` の SIGTERM を受けると、
+  実行中の Step を取り消し、`<step>:CancelledError` を `maintenance_failed` として記録してから終了コード 3 で終わる。`TimeoutStopSec=60s` がその記録の時間を残す。
+- `RandomizedDelaySec=15min`（毎日 0 時ちょうどに他の Job と重ならないため）は例の値。
+- Lock を持つ Connection が実行中にサーバーに切られた場合（`idle_session_timeout`、TCP の切断）、解放の失敗は Log に残すだけで、実行の結果（終了コードと Audit）を置き換えない。
+
 ## 代替案
 
 - **cron**: 同じ Command で動く。推奨しない理由は 1 のとおり（逃した実行の補完・失敗時の Hook・Journal が標準で揃わない）。systemd の無い配備では cron を使ってよい。
@@ -90,7 +105,11 @@ Timer とは別の監視（外部の Monitoring、手動の確認）から、Par
 - **通知先は配備に依存する。** 例の失敗 Unit は Journal と `wall` だけで、ログインしていない Owner には届かない。Mail・Chat などへの差し替えは配備の作業。
 - **Timer 自体が無効化・削除された場合**、失敗 Unit も動かない。`audit-retention-check` を別の監視から呼ぶことで補える（この Repository は外部の監視を用意しない）。
 - **被覆の確認は Bookkeeping Table（`audit_retention_partitions`）を信じる。** PostgreSQL の Catalog と食い違った場合（0027 の「リスク」）は検知できない。
-- Unit File の Path（`/opt/paw/...`）・User（`paw`）は例であり、配備に合わせた変更が要る。
+- Unit File の Path（`/opt/paw/...`）・User（`paw-maint`）は例であり、配備に合わせた変更が要る。User を Backend と同じにすると 6 の保護が失われる（Unit File は防げない。配備の作業）。
+- **SIGKILL・電源断など、取り消しを経ずに Process が消えた実行は Audit に残らない。** `OnFailure=` と、翌日以降の実行・`audit-retention-check` だけが頼りになる。
+- **Lock の Connection が実行中に切られると、その後の実行は排他されない。** 同時に始めた別の実行と同じ Partition を触り得る（各 Step は Transaction の中で Bookkeeping を確かめるため、
+  片方が `PartitionAlreadyExistsError` などで失敗して記録される）。
+- 同時実行の拒否（終了コード 1）も `OnFailure=` の通知を起こす（手動の実行と Timer が重なったときの誤報になり得るが、実行されなかったことは通知する）。
 
 ## 決めてほしいこと
 
@@ -105,6 +124,8 @@ Timer とは別の監視（外部の Monitoring、手動の確認）から、Par
 4. **Audit の追加**: 実行ごとの 1 行（`audit.retention.maintenance_completed` / `maintenance_failed`、`resource_kind = audit_retention_run`、別 Transaction）。
    推奨: 提案どおり。
 5. **排他**: Advisory Lock で同時実行を拒否する（2 つ目は終了コード 1）。
+   推奨: 提案どおり。
+6. **実行 User と上限**: 専用の OS User（例 `paw-maint`、Code・venv は root 所有）、各 Step の `lock_timeout` 5 秒、SIGTERM の記録、`TimeoutStartSec=30min` / `TimeoutStopSec=60s`。
    推奨: 提案どおり。
 
 ## 承認後の扱い

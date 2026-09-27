@@ -817,13 +817,21 @@ Issue [#117](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/117
   Live の Partition が翌月末まで途切れずにあるかを確かめ、結果を `audit_events` に 1 行書く（`audit.retention.maintenance_completed`、`reason` は `created=N archived=N purged=N`／
   `audit.retention.maintenance_failed`、`reason` は `<step>:<例外の型>`。`resource_kind` は `audit_retention_run`。Step とは別の Transaction なので、失敗も記録される）。
 - 接続は **`PAW_MIGRATION_DATABASE_URL` だけ**（Table の Owner）。`PAW_DATABASE_URL` へは Fallback しない（無ければ終了コード 2）。単一 Role の開発環境では両方に同じ URL を設定する。
-- 終了コード: `0` 成功、`1` 拒否（使い方、不正な値、同時実行）、`2` 環境（設定、URL 未設定、Database に到達できない）、`3` 保守の失敗（Step の例外、被覆の不足、結果を Audit に書けない）。
+- 終了コード: `0` 成功、`1` 拒否（使い方、不正な値、同時実行）、`2` 環境（設定、URL 未設定、Database に到達できない）、`3` 保守の失敗（Step の例外、被覆の不足、結果を Audit に書けない、SIGTERM で打ち切られた）。
   URL・例外の Message は表示しない（型の名前だけ）。
+- 各 Step の Transaction は `lock_timeout` を 5 秒にする（`paw_backend/cli/retention.py` の `DDL_LOCK_TIMEOUT_MS`）。`audit_events` の親への DDL が長い読み取り（pg_dump など）の後ろで待つと、
+  その間すべての `audit_events` への INSERT が後ろに並ぶため。待ちきれない Step は失敗（`<step>:OperationalError`、終了コード 3）として記録し、翌日の実行がやり直す。
+- SIGTERM（systemd の `TimeoutStartSec`・`systemctl stop`）は実行中の Task の取り消しに変え、止まった Step を `<step>:CancelledError` として記録してから終了コード 3 で終わる。
+  SIGKILL・電源断などで Process が消えた場合は行が残らない（Lock は PostgreSQL が Connection とともに解放する）。
+- Lock 用の Connection が実行中にサーバーに切られた場合（`idle_session_timeout` など）、Lock はそこで外れる。解放の失敗は Log に残すだけで、実行の結果を置き換えない。
 - Purge は `--purge-after-days N`（180 以上）を指定したときだけ。`archive_after_days`・`horizon_months` は Decision 0027 の値で固定。
 - `python -m paw_backend.cli audit-retention-check [--months-ahead N]`（既定 1）は読み取りだけの確認。被覆が足りなければ終了コード 3。外部の監視から呼べる。
 - systemd の Unit File の例は [`deploy/systemd/`](deploy/systemd/)。`paw-audit-retention.timer`（`OnCalendar=daily`、`Persistent=true`）が `paw-audit-retention.service`（oneshot）を起動し、
   0 以外で終わると `OnFailure=` の `paw-audit-retention-failure.service`（`crit` の Journal Entry と `wall`。通知経路は配備ごとに差し替える）が動く。
   `PAW_MIGRATION_DATABASE_URL` は root だけが読める `/etc/paw/audit-retention.env`（`chmod 600`）に置く。cron でも同じ Command を使える。
+- **Backend を動かす OS User で実行しない。** この Job は Table の Owner の Credential を持つ。同じ uid の Process は `/proc/<pid>/environ` からそれを読め、
+  Job が実行する Code や venv に書き込める User は次の実行に何でもさせられる。例の Unit は専用の `paw-maint`（`useradd --system --no-create-home --shell /usr/sbin/nologin paw-maint`）で動かす。
+  `/opt/paw/apps/backend` と `/opt/paw/venv` は root が所有し、Backend の User にも `paw-maint` にも書き込ませない（Operator の Credential を Backend の User に読ませないのと同じ規則）。
 
 ```bash
 # 配備（root。Path と User は配備に合わせて Unit File を直す）
@@ -835,7 +843,7 @@ journalctl -u paw-audit-retention.service
 ```
 
 - Test: `tests/test_retention_schedule.py`（Database なし。被覆の規則、Fake の Service での Runner、Command の終了コード、Unit File の内容）、
-  `tests/test_retention_cli_postgres.py`（実 PostgreSQL。Owner での成功と Audit、冪等性、Lock、別 Process、Owner でない Role での失敗と Audit）。
+  `tests/test_retention_cli_postgres.py`（実 PostgreSQL。Owner での成功と Audit、冪等性、Lock、別 Process、Owner でない Role での失敗と Audit、`lock_timeout`、Lock の Connection の切断、SIGTERM）。
 
 #### 残っているリスクと既知の制限
 

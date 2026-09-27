@@ -19,7 +19,10 @@ scheduled run, here:
    (``audit.retention.maintenance_completed`` / ``maintenance_failed``), in a
    transaction of its own, so a failure is recorded although the failed step
    rolled back. Only the step and the error's **type** are recorded, never its
-   message (it may carry a connection detail).
+   message (it may carry a connection detail). A run **cancelled** mid-step
+   (the command turns systemd's SIGTERM, e.g. from ``TimeoutStartSec``, into a
+   cancellation) is recorded the same way (``<step>:CancelledError``) before
+   the cancellation propagates.
 
 The caller (``paw_backend.cli.retention``) turns ``MaintenanceRunResult.ok``
 into the process exit code, which is what the scheduler (the systemd timer of
@@ -27,6 +30,7 @@ into the process exit code, which is what the scheduler (the systemd timer of
 tests drive it with a fake service.
 """
 
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -129,7 +133,8 @@ async def run_scheduled_maintenance(
 
     Raises ``MaintenanceAlreadyRunningError`` (nothing done, nothing recorded)
     when another run holds the lock, and whatever taking the lock raises (the
-    database is unreachable: nothing could be recorded either). Every other
+    database is unreachable: nothing could be recorded either). A cancellation
+    is recorded as ``maintenance_failed`` and then re-raised. Every other
     failure is returned, not raised.
     """
     policy = policy or default_policy()
@@ -143,11 +148,15 @@ async def run_scheduled_maintenance(
             (MaintenanceStep.ARCHIVE, service.archive_due_partitions),
             (MaintenanceStep.PURGE, service.purge_due_partitions),
         )
+        cancelled: asyncio.CancelledError | None = None
         for step, method in steps:
             try:
                 done[step] = tuple(await method(policy, actor=actor))
             except Exception as error:
                 failed_step, error_type = step, type(error).__name__
+                break
+            except asyncio.CancelledError as error:
+                failed_step, error_type, cancelled = step, type(error).__name__, error
                 break
         if failed_step is None:
             try:
@@ -161,6 +170,9 @@ async def run_scheduled_maintenance(
             except Exception as error:
                 failed_step = MaintenanceStep.VERIFY_COVERAGE
                 error_type = type(error).__name__
+            except asyncio.CancelledError as error:
+                failed_step = MaintenanceStep.VERIFY_COVERAGE
+                error_type, cancelled = type(error).__name__, error
         report = MaintenanceReport(
             created=done.get(MaintenanceStep.ENSURE_PARTITIONS, ()),
             archived=done.get(MaintenanceStep.ARCHIVE, ()),
@@ -180,6 +192,9 @@ async def run_scheduled_maintenance(
             audited = True
         except Exception:
             audited = False
+        if cancelled is not None:
+            # Recorded (if the database took it); the cancellation goes on.
+            raise cancelled
         return MaintenanceRunResult(
             report=report,
             failed_step=failed_step,

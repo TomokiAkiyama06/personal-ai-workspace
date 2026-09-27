@@ -7,6 +7,7 @@ text. ``tests/test_retention_cli_postgres.py`` runs the same command against a
 real PostgreSQL.
 """
 
+import asyncio
 import configparser
 import contextlib
 import io
@@ -292,6 +293,53 @@ class RunScheduledMaintenanceTest(unittest.IsolatedAsyncioTestCase):
             await run_scheduled_maintenance(service)
         self.assertEqual(service.calls, [])
 
+    async def test_a_cancelled_run_is_audited_as_failed_and_stays_cancelled(self):
+        # SIGTERM from systemd's TimeoutStartSec cancels the run (the command
+        # turns the signal into a cancellation): the step it was waiting in is
+        # recorded as maintenance_failed before the cancellation goes on.
+        service = FakeService()
+        waiting = asyncio.Event()
+
+        async def hang(policy=None, *, actor=None):
+            service.calls.append("archive_due_partitions")
+            waiting.set()
+            await asyncio.Event().wait()
+
+        service.archive_due_partitions = hang
+        task = asyncio.create_task(run_scheduled_maintenance(service))
+        await waiting.wait()
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertEqual(
+            service.outcomes,
+            [
+                (
+                    RetentionAction.MAINTENANCE_FAILED,
+                    "archive_due_partitions:CancelledError",
+                    None,
+                )
+            ],
+        )
+        self.assertEqual(service.calls[-2:], ["record", "unlock"])
+
+    async def test_a_cancelled_run_whose_audit_fails_is_still_cancelled(self):
+        service = FakeService()
+        service.fail_audit = True
+        waiting = asyncio.Event()
+
+        async def hang(policy=None, *, actor=None):
+            waiting.set()
+            await asyncio.Event().wait()
+
+        service.ensure_partitions = hang
+        task = asyncio.create_task(run_scheduled_maintenance(service))
+        await waiting.wait()
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertEqual(service.calls[-2:], ["record", "unlock"])
+
     async def test_a_long_reason_is_cut_to_the_column_width(self):
         class AnErrorWhoseNameIsMuchLongerThanAnyoneWouldEverReasonablyChoose(
             Exception
@@ -328,6 +376,12 @@ class CommandWithoutDatabaseTest(unittest.TestCase):
             ),
             (0, 1, 2, 3),
         )
+
+    def test_the_scheduled_ddl_waits_for_locks_only_a_few_seconds(self):
+        # A DDL step queued behind a long reader would block every INSERT into
+        # audit_events behind it; the command bounds that wait (Decision 0031).
+        self.assertGreaterEqual(cli.DDL_LOCK_TIMEOUT_MS, 1000)
+        self.assertLessEqual(cli.DDL_LOCK_TIMEOUT_MS, 30000)
 
     def test_help_lists_both_commands(self):
         code, out, _ = run(["--help"])
@@ -420,6 +474,21 @@ class SystemdUnitTest(unittest.TestCase):
         self.assertNotIn(
             "PAW_MIGRATION_DATABASE_URL=", service["Service"].get("Environment", "")
         )
+
+    def test_the_service_does_not_run_as_the_backends_user(self):
+        # The job holds the table owner's credential: it must not run as the
+        # OS user the web backend runs as (a web-side compromise could read
+        # /proc/<pid>/environ of a same-uid process or rewrite its code).
+        service = unit("paw-audit-retention.service")
+        self.assertEqual(service["Service"]["User"], "paw-maint")
+        text = (SYSTEMD_DIR / "paw-audit-retention.service").read_text("utf-8")
+        self.assertIn("never the user the backend runs as", text)
+        self.assertIn("root-owned", text)
+
+    def test_a_terminated_run_has_time_to_record_its_failure(self):
+        service = unit("paw-audit-retention.service")
+        self.assertEqual(service["Service"]["KillSignal"], "SIGTERM")
+        self.assertIn("TimeoutStopSec", service["Service"])
 
     def test_a_failed_run_triggers_the_failure_unit(self):
         service = unit("paw-audit-retention.service")

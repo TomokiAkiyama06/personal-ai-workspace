@@ -14,8 +14,10 @@ Exit codes (the convention of ``paw_backend.cli.owner``):
 * ``2``  environment error: the configuration is invalid,
   ``PAW_MIGRATION_DATABASE_URL`` is not set, or the database cannot be reached
   (nothing was done, and nothing could be recorded);
-* ``3``  the maintenance FAILED: a step raised, or the partitions do not cover
-  the checked span, or (``run``) the outcome could not be recorded. ``run``
+* ``3``  the maintenance FAILED: a step raised (including a step that waited
+  for a lock longer than ``DDL_LOCK_TIMEOUT_MS``), the run was terminated
+  (SIGTERM), or the partitions do not cover the checked span, or (``run``) the
+  outcome could not be recorded. ``run``
   records the failure as ``audit.retention.maintenance_failed`` whenever the
   database accepts the row, and says on stderr whether it did.
 
@@ -34,6 +36,7 @@ exception message is printed (only its type): what is printed goes to stderr.
 import argparse
 import asyncio
 import contextlib
+import signal
 import sys
 from collections.abc import Sequence
 from typing import NoReturn, TextIO
@@ -58,6 +61,13 @@ EXIT_OK = 0
 EXIT_REFUSED = 1
 EXIT_ENVIRONMENT = 2
 EXIT_MAINTENANCE_FAILED = 3
+
+# How long each maintenance step may wait for a lock (Decision 0031). The DDL
+# takes strong locks on the ``audit_events`` parent; while it waits behind a
+# long reader (a pg_dump, a long audit query), every INSERT into audit_events
+# queues behind it. Better to fail this run (exit 3, audited) and let the next
+# daily run do it again than to stall every audited request.
+DDL_LOCK_TIMEOUT_MS = 5000
 
 RUN_COMMAND = "audit-retention-run"
 CHECK_COMMAND = "audit-retention-check"
@@ -215,6 +225,15 @@ def _run(arguments: argparse.Namespace, err: TextIO | None) -> int:
             result = asyncio.run(_maintain(connection, policy))
         else:
             return asyncio.run(_check(connection, arguments.months_ahead, err))
+    except asyncio.CancelledError:
+        _say(
+            err,
+            "FAILED: the run was terminated (SIGTERM, e.g. systemd's "
+            "TimeoutStartSec) before it finished. The step it was in was "
+            "recorded as audit.retention.maintenance_failed if the database "
+            "accepted it.",
+        )
+        return EXIT_MAINTENANCE_FAILED
     except MaintenanceAlreadyRunningError:
         _say(
             err,
@@ -232,10 +251,35 @@ async def _maintain(
     settings: Settings, policy: RetentionPolicy | None
 ) -> MaintenanceRunResult:
     database = Database(settings)
+    service = AuditRetentionService(database, lock_timeout_ms=DDL_LOCK_TIMEOUT_MS)
     try:
-        return await run_scheduled_maintenance(AuditRetentionService(database), policy)
+        with _cancel_on_sigterm():
+            return await run_scheduled_maintenance(service, policy)
     finally:
         await database.dispose()
+
+
+@contextlib.contextmanager
+def _cancel_on_sigterm():
+    """Turn SIGTERM into a cancellation of the running task while inside.
+
+    Python's default for SIGTERM ends the process at once, without ``finally``
+    or ``except``: a run killed by systemd (``TimeoutStartSec``, ``systemctl
+    stop``) would then leave no ``maintenance_failed`` row. Cancelling instead
+    lets the runner record the failed step first. Only possible in the main
+    thread (a no-op elsewhere, e.g. when a test calls ``main`` from a thread).
+    """
+    loop = asyncio.get_running_loop()
+    task = asyncio.current_task()
+    try:
+        loop.add_signal_handler(signal.SIGTERM, task.cancel)
+    except (NotImplementedError, RuntimeError, ValueError):
+        yield
+        return
+    try:
+        yield
+    finally:
+        loop.remove_signal_handler(signal.SIGTERM)
 
 
 async def _check(settings: Settings, months_ahead: int, err: TextIO | None) -> int:
