@@ -780,11 +780,32 @@ Application 起動時に一度、接続 User の権限を確認し、**`WARNING`
 
 **`downgrade` は Table ごと監査履歴を破棄します。** 開発・Test 用で、本番では実行しないでください。
 
+#### 保存期間・Partition・退避（Issue #86、Migration `0086`）
+
+Issue [#86](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/86) と [Decision 0027](../../docs/decisions/0027-audit-retention-and-partitioning.md)（2026-09-27 に Human が承認）が、
+`audit_events` の保存期間・Partition・退避の方針を決める。**定期的に呼び出す仕組み（cron・systemd timer・Admin Capability）は別 Issue で用意するまで無いため、下の仕組みはコードとして持つだけで、まだ実運用では動かない。**
+
+- `audit_events` を `recorded_at`（Database の時計。Trigger が強制するので単調に増える）で**月ごとの Range Partition** にする。
+  Migration `0086` は、既存の Table を `audit_events_p_legacy`（Migration 適用時までの全行、`FOR VALUES FROM (MINVALUE)`）に改名し、その場所に新しい Partition 化された `audit_events` を作る
+  （`ATTACH PARTITION` は Metadata だけの操作で、行の再書き込みは起きない）。PK が `(id)` から `(id, recorded_at)` に変わる（PostgreSQL の要求）以外、列・CHECK 制約は変わらない。
+- 退避先は、同じ形のもう一つの Partition 親 `audit_events_archive`。「退避」は `DETACH` / `ATTACH`（行のコピーなし）で、`PAW_APP_DATABASE_ROLE` には SELECT だけを与える（INSERT は与えない）。
+- `paw_backend/authz/retention/`（`rules.py` が純粋関数、`service.py` の `AuditRetentionService` が唯一 SQL を実行する Store。PAW-046 の Lifecycle / PAW-053 の Privacy Filter と同じ構成）が、
+  `ensure_partitions`（先の月の Partition を用意する）・`archive_due_partitions`・`purge_due_partitions`（既定で無効。明示的に設定したときだけ）を提供する。
+  退避・削除の操作自体も、既存の `audit_events` に新しい `action`（`audit.retention.partition_created` / `partition_archived` / `partition_purged`）として記録する（列や CHECK 制約は増やさない。Partition 名は `reason` 列に入る）。
+- **実行スケジューラはない**（Issue の指示どおり）。`AuditRetentionService.run_maintenance()` を、cron・systemd timer・将来の Admin Capability のいずれかから呼ぶ想定。
+- `AuditRetentionService` は `PAW_MIGRATION_DATABASE_URL`（Table の Owner）が要る。Partition の作成・退避・削除はいずれも DDL で、`PAW_APP_DATABASE_ROLE` では実行できない。
+- 追記専用の Trigger は親に 1 つ定義すれば新しい Partition にも自動で複製されるが、**文レベルの TRUNCATE 拒否 Trigger は複製されない**（PostgreSQL の仕様）。
+  `AuditRetentionService` が新しい Partition を作る・受け取るたびに、明示的にこの Trigger を作る。
+- `archive_due_partitions` / `purge_due_partitions` は、Policy や呼び出し側の Clock が何であれ、**実際の壁時計が指す暦月の Partition には決して触れない**
+  （`recorded_at` は常に Database の実時計であり、この操作自身の Audit 行もそこへ書かれるため）。
+- 詳細・未決点・リスクは [Decision 0027](../../docs/decisions/0027-audit-retention-and-partitioning.md) と、`tests/test_retention_rules.py` / `tests/test_retention_postgres.py` を参照。
+- **Migration の鎖。** Migration `0086` の `down_revision` は `0071` です（鎖は `0001 → 0025 → 0032 → 0040 → 0021 → 0033 → 0031 → 0050 → 0046 → 0052 → 0026 → 0087 → 0022 → 0083 → 0043 → 0030 → 0027 → 0071 → 0086`）。`0071`（このPRが分岐した時点の後にmainへ入った#109）と同様、`audit_events` に触れる直前の Revision（`0025`、`0087`）より後であれば足りるため、mainの最新に合わせて並べています。
+
 #### 残っているリスクと既知の制限
 
 - 許可した読み取り（`DENIED_ONLY`。人間の `project.read`、`shared_memory.read`）は記録しません。誰が何を読んだかは Audit から分かりません（Agent の読み取りは記録します）。
 - 認証済みの User の拒否は、1 回ごとに 1 行を書きます。この拒否の回数制限はありません（Login の Backoff と Token の Rate Limit は別で、[Login / Session / Password Policy](#login--session--password-policy)）。未認証の拒否は Log だけです。
-- 保存期間・Partition・古い行の退避は未実装です（Table は削除できないため、行数は増え続けます）。
+- 保存期間・Partition・古い行の退避は、上の「保存期間・Partition・退避（Issue #86）」のとおり Decision 0027 は承認済みですが、定期的に呼び出す仕組みが別 Issue で用意されるまで、実運用はまだしません。
 - Repository の ACL の保存と解決は呼び出す側（PAW-027 など）の責任です。この Backend は、渡された `RepoAcl` を判定するだけです。
   Override が Project の Role を広げてよいか、User 単位の許可リストを持つかは、要件が定めておらず、Decision 0004 で Human が「狭めるだけ・権限の集合」で承認しました（2026-09-25）。
 - `Scope.SELF` の Capability（`chat.use`、`memory.use` など）は `Project` の状態と Member 資格を見ません
