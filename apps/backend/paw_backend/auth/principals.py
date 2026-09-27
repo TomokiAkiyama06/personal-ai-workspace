@@ -15,6 +15,12 @@ body, a claimed role) is read.
   WebSocket, 1013), never a wrong 401 that would sign the user out in a client.
 * The answer is cached on the request, so several guards of one route look the
   session up once (and touch it once).
+* **A restricted session gets nothing** (PAW-023, Decision 0025): a session whose
+  Passkey gate is not open (the policy requires a Passkey of this role and the
+  session has not registered / used one) is refused with 403 ``passkey_required``
+  by ``get_principal``, on EVERY route: default deny. Only the few routes that
+  ask for it (``require_capability(..., allow_restricted=True)``: the session
+  itself, sign-out, the Passkey ceremonies) reach ``get_principal_allowing_restricted``.
 
 ``DatabasePrincipalDirectory`` implements ``PrincipalDirectory``: the
 authorizer asks it for the *current* principal of a user on every Agent action,
@@ -34,6 +40,7 @@ from starlette.requests import HTTPConnection
 from paw_backend.auth.db import run
 from paw_backend.auth.errors import AuthUnavailableError
 from paw_backend.auth.limits import SESSION_COOKIE_NAME
+from paw_backend.auth.models import PasskeyGate
 from paw_backend.auth.sessions import AuthenticatedSession, SessionStore
 from paw_backend.auth.tokens import parse_session_token
 from paw_backend.authz.roles import SystemRole
@@ -89,6 +96,22 @@ class SessionPrincipalProvider:
         return context
 
     async def get_principal(self, connection: HTTPConnection) -> Principal | None:
+        context = await self.authenticate(connection)
+        if context is None:
+            return None
+        if context.session.record.passkey_gate is not PasskeyGate.OPEN:
+            # Authenticated, but not allowed to use the workspace yet: neither
+            # anonymous (401 would say "sign in again") nor a principal.
+            if connection.scope["type"] == "websocket":
+                raise WebSocketException(status.WS_1008_POLICY_VIOLATION)
+            raise ApiError(403, "passkey_required", "A passkey is required")
+        return context.principal
+
+    async def get_principal_allowing_restricted(
+        self, connection: HTTPConnection
+    ) -> Principal | None:
+        """The principal of a session whatever its Passkey gate (the few routes that
+        exist to get through the gate ask for this one)."""
         context = await self.authenticate(connection)
         return None if context is None else context.principal
 
