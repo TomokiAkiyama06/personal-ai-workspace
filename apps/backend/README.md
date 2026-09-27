@@ -1260,7 +1260,7 @@ Credential の ID、公開鍵、Challenge、名前、Origin は入りません�
 
 ### Database と権限
 
-Migration `0023`（`down_revision` は `0071`。鎖は `... → 0087 → 0022 → 0083 → 0043 → 0030 → 0027 → 0071 → 0023`）は、`user_passkeys`（Credential の ID、公開鍵、署名 Counter、名前、Authenticator の種類、Backup の状態、作成・最終利用・失効の日時と理由）と `passkey_challenges` を作り、`auth_sessions` に `passkey_gate`（既存の行は `open`）と `passkey_id`（Session を開けた Passkey）を足し、`revoked_reason` に `passkey_revoked` を加えます。
+Migration `0023`（`down_revision` は `0086`。鎖は `... → 0087 → 0022 → 0083 → 0043 → 0030 → 0027 → 0071 → 0086 → 0023`）は、`user_passkeys`（Credential の ID、公開鍵、署名 Counter、名前、Authenticator の種類、Backup の状態、作成・最終利用・失効の日時と理由）と `passkey_challenges` を作り、`auth_sessions` に `passkey_gate`（既存の行は `open`）と `passkey_id`（Session を開けた Passkey）を足し、`revoked_reason` に `passkey_revoked` を加えます。
 
 Web の Role（`PAW_APP_DATABASE_ROLE`）の権限は、実際に実行する文だけです（`tests/test_passkey_grants.py`）。
 
