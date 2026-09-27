@@ -1,7 +1,7 @@
 """The user lifecycle: Invited / Active / Pending deletion / Deleted (PAW-024).
 
 REQUIREMENTS.md "User Lifecycle" and "User Deletion Retention"; the transitions and
-their rules are Decision 0033 section 3 (Proposed):
+their rules are Decision 0033 section 3 (Approved 2026-09-28):
 
 * (none) to ``invited``: an invitation (``invitations``);
 * ``invited`` to ``active``: the invitation token is redeemed;

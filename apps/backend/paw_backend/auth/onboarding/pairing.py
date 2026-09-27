@@ -1,7 +1,7 @@
 """Adding a device from a trusted one: QR code / link pairing (PAW-024).
 
 REQUIREMENTS.md "User Invitation / Multi-device Login"; the state machine and the
-values are Decision 0033 section 2 (Proposed)::
+values are Decision 0033 section 2 (Approved 2026-09-28)::
 
     issued --(a User's new device hands the token in)------------------> completed
     issued --(an Owner's / Admin's new device)--> claimed --(approve)--> approved
@@ -24,6 +24,18 @@ values are Decision 0033 section 2 (Proposed)::
   explicit approval, which needs a recent **Passkey Step-up** of the approving
   session (a rejection does not). Either way the token is spent: the same QR code
   cannot be used twice.
+* **The confirmation code** (Decision 0033, point 12, approved 2026-09-28): with
+  its claim, an Owner's / Admin's new device is given a short code
+  (``CONFIRMATION_LENGTH`` characters of ``CONFIRMATION_ALPHABET``, from the
+  operating system's CSPRNG, independent of the token and the claim). The new
+  device shows it; the approver types it in on the trusted device, which is never
+  told it (so whoever handed a seen QR code in first cannot be approved: the code
+  is on their screen, not on the approver's). Only a salted HMAC-SHA256 is
+  stored, compared in constant time; a missing or wrong code refuses the approval
+  and counts (after the Step-up check, in the same transaction as its audit
+  event), and the ``CONFIRMATION_MAX_ATTEMPTS``-th wrong one ends the pairing
+  (``confirmation_failed``). The code lives as long as its claim. A User's pairing
+  has no approval and no code (point 5).
 * **Completing** (public, the new device): with an approved claim, the session;
   with a claim still waiting, ``Pending`` and nothing changes; anything else is the
   one ``TokenRejectedError``.
@@ -38,7 +50,9 @@ values are Decision 0033 section 2 (Proposed)::
   ``audit_ref``, never by its id, token, claim or device name.
 """
 
+import hmac
 import logging
+import secrets
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -52,6 +66,7 @@ from paw_backend.auth.auth_policy import AuthPolicyService
 from paw_backend.auth.context import RequestContext
 from paw_backend.auth.db import run
 from paw_backend.auth.errors import (
+    ConfirmationCodeError,
     InvalidAuthInputError,
     PairingNotFoundError,
     PasskeyRequiredError,
@@ -75,7 +90,12 @@ from paw_backend.auth.onboarding.common import (
     require_token_text,
     require_uuid,
 )
-from paw_backend.auth.onboarding.models import PairingEnd, PairingState
+from paw_backend.auth.onboarding.models import (
+    HASH_BYTES,
+    SALT_BYTES,
+    PairingEnd,
+    PairingState,
+)
 from paw_backend.auth.service import LoginResult
 from paw_backend.auth.sessions import (
     AuthenticatedSession,
@@ -94,6 +114,55 @@ _CLOCK = (
     "clock_timestamp()) AS ts)"
 )
 _LIVE = "('issued', 'claimed', 'approved')"
+
+# The confirmation code of an Owner's / Admin's claim (Decision 0033, point 12).
+# No 0 / O, 1 / I / L or U: easy to read out and type. 30 ** 8 is about 2 ** 39.
+CONFIRMATION_ALPHABET = "23456789ABCDEFGHJKMNPQRSTVWXYZ"
+CONFIRMATION_LENGTH = 8
+CONFIRMATION_MAX_ATTEMPTS = 3
+_CODE_INPUT_MAX = 32
+_DUMMY_SALT = bytes(SALT_BYTES)
+_DUMMY_CODE = "!" * CONFIRMATION_LENGTH
+_DUMMY_HASH = onetime.hash_secret(_DUMMY_SALT, "?" * CONFIRMATION_LENGTH)
+
+
+def new_confirmation_code() -> str:
+    """A fresh confirmation code from the operating system's CSPRNG."""
+    return "".join(
+        secrets.choice(CONFIRMATION_ALPHABET) for _ in range(CONFIRMATION_LENGTH)
+    )
+
+
+def _normalised_code(value: object) -> str | None:
+    """What a person typed, without case, spaces and hyphens; ``None`` if malformed."""
+    if not isinstance(value, str) or len(value) > _CODE_INPUT_MAX:
+        return None
+    code = value.replace("-", "").replace(" ", "").upper()
+    if len(code) != CONFIRMATION_LENGTH or not all(
+        char in CONFIRMATION_ALPHABET for char in code
+    ):
+        return None
+    return code
+
+
+def confirmation_matches(
+    value: object, salt: bytes | None, digest: bytes | None
+) -> bool:
+    """Whether ``value`` is the code stored as ``salt`` / ``digest``.
+
+    The same work (one HMAC, one constant-time comparison) whatever ``value`` is.
+    """
+    code = _normalised_code(value)
+    stored = (
+        isinstance(salt, bytes)
+        and isinstance(digest, bytes)
+        and len(digest) == HASH_BYTES
+    )
+    candidate = onetime.hash_secret(
+        salt if stored else _DUMMY_SALT, code if code is not None else _DUMMY_CODE
+    )
+    same = hmac.compare_digest(candidate, digest if stored else _DUMMY_HASH)
+    return same and stored and code is not None
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +192,8 @@ class PairingOutcome:
 
     login: LoginResult | None = None
     claim: str | None = field(default=None, repr=False)
+    # With the claim: the code the new device shows for the approver to enter.
+    confirmation_code: str | None = field(default=None, repr=False)
     expires_at: datetime | None = None
 
     @property
@@ -250,9 +321,9 @@ class PairingService:
                 text(
                     "INSERT INTO device_pairings (id, audit_ref, user_id, "
                     "issued_by_session, state, approval_required, salt, "
-                    "secret_hash, created_at, expires_at, attempts) VALUES (:id, "
-                    ":ref, :user_id, :session_id, 'issued', :approval, :salt, "
-                    ":hash, :now, :expires, 0)"
+                    "secret_hash, created_at, expires_at, attempts, "
+                    "confirm_attempts) VALUES (:id, :ref, :user_id, :session_id, "
+                    "'issued', :approval, :salt, :hash, :now, :expires, 0, 0)"
                 ),
                 {
                     "id": new.token_id,
@@ -335,9 +406,18 @@ class PairingService:
         auth: AuthenticatedSession,
         pairing_id: uuid.UUID,
         context: RequestContext,
+        *,
+        confirmation_code: str | None,
     ) -> None:
-        """Approve a waiting new device (a recent Passkey Step-up of this session)."""
-        await self._decide(auth, pairing_id, context, approve=True)
+        """Approve a waiting new device with the code it shows.
+
+        Needs a recent Passkey Step-up of this session. ``ConfirmationCodeError``
+        when the code is missing or wrong (counted; the last allowed wrong one
+        ends the pairing).
+        """
+        await self._decide(
+            auth, pairing_id, context, approve=True, code=confirmation_code
+        )
 
     async def reject(
         self,
@@ -355,6 +435,7 @@ class PairingService:
         context: RequestContext,
         *,
         approve: bool,
+        code: str | None = None,
     ) -> None:
         auth = _require_auth(auth)
         require_uuid("pairing_id", pairing_id)
@@ -362,7 +443,7 @@ class PairingService:
         action = AuthAction.PAIRING_APPROVE if approve else AuthAction.PAIRING_REJECT
         guard = StepUpGuard(self._policy)
 
-        async def work(session: AsyncSession) -> None:
+        async def work(session: AsyncSession) -> bool:
             await self._lock_trusted_in(session, auth)
             now = self._audit.now()
             if approve:
@@ -376,7 +457,9 @@ class PairingService:
                 await session.execute(
                     text(
                         f"""{_CLOCK}
-                        SELECT p.id FROM clock, device_pairings p
+                        SELECT p.id, p.confirm_salt, p.confirm_hash,
+                               p.confirm_attempts
+                          FROM clock, device_pairings p
                          WHERE p.audit_ref = :ref AND p.user_id = :user_id
                            AND p.state = 'claimed' AND p.expires_at > clock.ts
                            FOR UPDATE OF p"""
@@ -386,6 +469,11 @@ class PairingService:
             ).first()
             if row is None:
                 raise PairingNotFoundError
+            if approve and not confirmation_matches(
+                code, row.confirm_salt, row.confirm_hash
+            ):
+                await self._count_code_in(session, row, now, auth, context, pairing_id)
+                return False
             await session.execute(
                 text(
                     "UPDATE device_pairings SET state = :state, decided_at = :now, "
@@ -408,15 +496,59 @@ class PairingService:
                 context,
                 pairing_id,
             )
+            return True
 
         try:
-            await run(self._database, work, self._timeout)
+            decided = await run(self._database, work, self._timeout)
         except StepUpRequiredError:
             if guard.refused is not None:
                 await self._audit.record_best_effort(
                     self._event(action, guard.refused, auth, context, pairing_id)
                 )
             raise
+        if not decided:
+            raise ConfirmationCodeError
+
+    async def _count_code_in(
+        self, session: AsyncSession, row, now: datetime, auth, context, pairing_id
+    ) -> None:
+        """Count one missing / wrong confirmation code; the last one ends the pairing.
+
+        Committed with its audit event (the caller returns, never raises, so that
+        the count is not rolled back).
+        """
+        attempts = row.confirm_attempts + 1
+        exhausted = attempts >= CONFIRMATION_MAX_ATTEMPTS
+        await session.execute(
+            text(
+                "UPDATE device_pairings SET confirm_attempts = :attempts, "
+                "state = CASE WHEN :exhausted THEN 'revoked' ELSE state END, "
+                "ended_at = CASE WHEN :exhausted THEN CAST(:now AS timestamptz) "
+                "ELSE ended_at END, "
+                "ended_reason = CASE WHEN :exhausted THEN :reason "
+                "ELSE ended_reason END WHERE id = :id"
+            ),
+            {
+                "attempts": attempts,
+                "exhausted": exhausted,
+                "now": now,
+                "reason": PairingEnd.CONFIRMATION_FAILED.value,
+                "id": row.id,
+            },
+        )
+        await self._audit.record_in(
+            session,
+            self._event(
+                AuthAction.PAIRING_APPROVE,
+                AuthReason.CONFIRMATION_ATTEMPTS_EXHAUSTED
+                if exhausted
+                else AuthReason.CONFIRMATION_CODE_MISMATCH,
+                auth,
+                context,
+                pairing_id,
+            ),
+        )
+        logger.info("Pairing approval refused (confirmation code)")
 
     # -- the new device (public) -------------------------------------------------------
 
@@ -481,13 +613,16 @@ class PairingService:
                 # A fresh lookup key, not the pairing's id (which the QR code
                 # shows): see ``DevicePairingRow.claim_id``.
                 claim = onetime.CLAIM.generate()
+                code = new_confirmation_code()
+                code_salt = secrets.token_bytes(SALT_BYTES)
                 expires_at = now + self._ttl
                 await session.execute(
                     text(
                         "UPDATE device_pairings SET state = 'claimed', "
                         "approval_required = true, claim_id = :claim_id, "
                         "claim_salt = :salt, "
-                        "claim_hash = :hash, device_label = :label, "
+                        "claim_hash = :hash, confirm_salt = :code_salt, "
+                        "confirm_hash = :code_hash, device_label = :label, "
                         "remember_me = :remember, claimed_at = :now, "
                         "expires_at = :expires WHERE id = :id"
                     ),
@@ -495,6 +630,8 @@ class PairingService:
                         "claim_id": claim.token_id,
                         "salt": claim.salt,
                         "hash": claim.secret_hash,
+                        "code_salt": code_salt,
+                        "code_hash": onetime.hash_secret(code_salt, code),
                         "label": label,
                         "remember": remember_me,
                         "now": now,
@@ -514,7 +651,9 @@ class PairingService:
                         row.audit_ref,
                     ),
                 )
-                return PairingOutcome(claim=claim.token, expires_at=expires_at)
+                return PairingOutcome(
+                    claim=claim.token, confirmation_code=code, expires_at=expires_at
+                )
             login = await self._complete_in(
                 session,
                 row,

@@ -265,3 +265,13 @@ class PairingNotFoundError(AuthError):
 
     def __init__(self) -> None:
         super().__init__("not found")
+
+
+class ConfirmationCodeError(AuthError):
+    """The confirmation code entered to approve a new device did not match (403).
+
+    The message is fixed: the code (entered or expected) is never in it.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("confirmation code mismatch")

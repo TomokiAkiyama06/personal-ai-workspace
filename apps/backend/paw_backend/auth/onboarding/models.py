@@ -78,6 +78,8 @@ class PairingEnd(StrEnum):
     REVOKED_BY_USER = "revoked_by_user"
     SUPERSEDED = "superseded"
     ACCOUNT_CLOSED = "account_closed"
+    # The approver entered a wrong confirmation code too many times.
+    CONFIRMATION_FAILED = "confirmation_failed"
 
 
 def _in(column: str, values: Iterable[str], name: str) -> CheckConstraint:
@@ -170,6 +172,14 @@ class DevicePairingRow(Base):
     claim_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
     claim_salt: Mapped[bytes | None] = mapped_column(LargeBinary)
     claim_hash: Mapped[bytes | None] = mapped_column(LargeBinary)
+    # The confirmation code of the claim (Decision 0033, point 12): shown on the
+    # new device only, entered on the approving device. Generated with the claim
+    # (a CSPRNG, independent of the token and the claim), stored as a salted
+    # HMAC-SHA256 and compared in constant time; wrong entries are counted.
+    # Never audited or logged.
+    confirm_salt: Mapped[bytes | None] = mapped_column(LargeBinary)
+    confirm_hash: Mapped[bytes | None] = mapped_column(LargeBinary)
+    confirm_attempts: Mapped[int] = mapped_column(Integer, server_default=text("0"))
     # What the new device asked for.
     device_label: Mapped[str | None] = mapped_column(Text)
     remember_me: Mapped[bool | None] = mapped_column(Boolean)
@@ -235,6 +245,22 @@ class DevicePairingRow(Base):
         CheckConstraint(
             "(claim_id IS NULL) = (claim_hash IS NULL)", name="claim_has_id"
         ),
+        CheckConstraint(
+            f"confirm_salt IS NULL OR octet_length(confirm_salt) = {SALT_BYTES}",
+            name="confirm_salt_length",
+        ),
+        CheckConstraint(
+            f"confirm_hash IS NULL OR octet_length(confirm_hash) = {HASH_BYTES}",
+            name="confirm_hash_length",
+        ),
+        CheckConstraint(
+            "(confirm_salt IS NULL) = (confirm_hash IS NULL)", name="confirm_complete"
+        ),
+        CheckConstraint(
+            "(claim_hash IS NULL) = (confirm_hash IS NULL)",
+            name="claim_has_confirmation",
+        ),
+        CheckConstraint("confirm_attempts >= 0", name="confirm_attempts_not_negative"),
         CheckConstraint(
             f"device_label IS NULL OR char_length(device_label) "
             f"BETWEEN 1 AND {DEVICE_LABEL_MAX_LENGTH}",

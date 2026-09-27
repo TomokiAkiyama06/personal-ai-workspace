@@ -125,6 +125,8 @@ class AuthReason(StrEnum):
     TOKEN_USED = "token_used"
     TOKEN_REVOKED = "token_revoked"
     ATTEMPTS_EXHAUSTED = "attempts_exhausted"
+    CONFIRMATION_CODE_MISMATCH = "confirmation_code_mismatch"
+    CONFIRMATION_ATTEMPTS_EXHAUSTED = "confirmation_attempts_exhausted"
     USER_NOT_ELIGIBLE = "user_not_eligible"
     LOGIN_NAME_TAKEN = "login_name_taken"
     OWNERSHIP_TRANSFER_REQUIRED = "ownership_transfer_required"

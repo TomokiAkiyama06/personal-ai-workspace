@@ -14,7 +14,7 @@ DAG Agent Orchestrator（Task を Dependency DAG へ分解し、独立した Nod
 Workspace 共有の Codex / Claude Connection（Credential は不透明な Handle だけ）、User 別 Quota、User と Task への利用量の帰属は [PAW-030](#shared-codex--claude-connection) で実装済みです（Service のみ。実 Adapter と HTTP の Endpoint はまだありません。Quota の意味・期間・実行中の Task の扱いは [Decision 0016](../../docs/decisions/0016-shared-connection-adapter-policy.md)（Approved、2026-09-26）に従います）。
 Project への Repository の登録（GitHub から clone、Ubuntu 上の既存 Repository、新規作成）と、User ごとに分離した Checkout は [PAW-027](#repository-registration--per-user-checkout) で実装済みです（Service のみ）。
 Linux User ごとの GitHub 接続状態（`gh auth status`）の認識と、GitHub への新規作成（`create_github`）を対象 User 自身の Identity で実行する経路は [PAW-028](#github-user-connectiongh-auth) で実装済みです（Service のみ。Migration・新しい Capability はありません）。
-User の招待（invite-only registration）、信頼済み端末からの QR / リンクによる新規端末の追加（Owner / Admin は信頼済み端末の承認が必須）、User の状態（Invited / Active / Pending deletion / Deleted）の遷移は [PAW-024](#user-invite--device-pairing--lifecycle) で実装済みです（Backend だけ。値と流れは [Decision 0033](../../docs/decisions/0033-user-invitation-and-device-pairing.md)（Proposed）の推奨）。
+User の招待（invite-only registration）、信頼済み端末からの QR / リンクによる新規端末の追加（Owner / Admin は信頼済み端末の承認が必須）、User の状態（Invited / Active / Pending deletion / Deleted）の遷移は [PAW-024](#user-invite--device-pairing--lifecycle) で実装済みです（Backend だけ。値と流れは [Decision 0033](../../docs/decisions/0033-user-invitation-and-device-pairing.md)（Approved、2026-09-28。判断点 12 は確認 Code を要る形に変更）のとおり）。
 
 [Architecture](../../docs/ARCHITECTURE.md) に基づき、最終的に以下の機能を Backend 側で扱います。
 
@@ -140,7 +140,7 @@ Database には pgvector が必要です（CI は `pgvector/pgvector:pg18` を�
 | `PAW_OPERATOR_DATABASE_ROLE` | なし | 上の Role 名（`PAW_APP_DATABASE_ROLE` と同じ検証）。Migration `0021` が、実在するこの Role に管理コマンドの権限を与える |
 | `PAW_SETUP_TOKEN_TTL_SECONDS` | `1800` | Owner の Setup / Recovery Token の有効期間（60〜14400 秒） |
 | `PAW_SETUP_TOKEN_MAX_ATTEMPTS` | `5` | 1 つの Token に許す試行回数（1〜20）。使い切った Token は無効になる |
-| `PAW_INVITATION_TTL_SECONDS` / `PAW_PAIRING_TOKEN_TTL_SECONDS` | `259200` / `600` | 招待 Token の有効期間（600 秒〜14 日）と、Pairing Token・承認待ちの有効期間（60〜3600 秒。要件の初期値は 10 分）。試行の上限は `PAW_SETUP_TOKEN_MAX_ATTEMPTS` を共有する。[User Invite / Device Pairing / Lifecycle](#user-invite--device-pairing--lifecycle)（Decision 0033、Proposed） |
+| `PAW_INVITATION_TTL_SECONDS` / `PAW_PAIRING_TOKEN_TTL_SECONDS` | `259200` / `600` | 招待 Token の有効期間（600 秒〜14 日）と、Pairing Token・承認待ちの有効期間（60〜3600 秒。要件の初期値は 10 分）。試行の上限は `PAW_SETUP_TOKEN_MAX_ATTEMPTS` を共有する。[User Invite / Device Pairing / Lifecycle](#user-invite--device-pairing--lifecycle)（Decision 0033、Approved） |
 | `PAW_PASSWORD_HASH_TIME_COST` / `PAW_PASSWORD_HASH_MEMORY_KIB` / `PAW_PASSWORD_HASH_PARALLELISM` | `3` / `65536` / `4` | Argon2id の Parameter（RFC 9106 の 2 番目の推奨）。メモリは 19456〜1048576 KiB（OWASP の最小以上）。[Login / Session / Password Policy](#login--session--password-policy) |
 | `PAW_PASSWORD_HASH_CONCURRENCY` | `2` | 同時に計算する Hash の数（1〜16）。待つ Job は最大 64 で、超えると 503 |
 | `PAW_SESSION_IDLE_DAYS` / `PAW_SESSION_REMEMBER_DAYS` / `PAW_SESSION_ABSOLUTE_DAYS` | `30` / `90` / `90` | 通常 Session の無操作の上限、Remember Me の上限（無操作も絶対も）、通常 Session の絶対の上限（日）。前 2 つは要件、絶対の上限は [Decision 0015](../../docs/decisions/0015-login-session-password-policy.md) で承認された値 |
@@ -1307,7 +1307,7 @@ Web の Role（`PAW_APP_DATABASE_ROLE`）の権限は、実際に実行する文
 ## User Invite / Device Pairing / Lifecycle
 
 [PAW-024](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/21) で実装しました（`paw_backend/auth/onboarding/`、Migration `0124`、`api/v1/accounts.py`）。**Backend（API・Service・DB）だけで、Web の画面（招待の受け取り、QR の表示・読み取り、承認の画面）はありません。**
-Issue #21 には Goal の本文がないため、要件（`REQUIREMENTS.md` の「User Invitation / Multi-device Login」「User Lifecycle」「User Deletion Retention」）が決めていない値と選択（招待 Token の有効期限、Pairing の状態遷移と承認の流れ、「本人確認」の意味、User の状態遷移と削除・復元の権限、この Issue に含めないこと）は、**[Decision 0033](../../docs/decisions/0033-user-invitation-and-device-pairing.md)（Proposed。Human の承認待ち）** に推奨つきでまとめ、実装はその推奨どおりです。承認で変わる数値は設定か定数です。
+Issue #21 には Goal の本文がないため、要件（`REQUIREMENTS.md` の「User Invitation / Multi-device Login」「User Lifecycle」「User Deletion Retention」）が決めていない値と選択（招待 Token の有効期限、Pairing の状態遷移と承認の流れ、「本人確認」の意味、User の状態遷移と削除・復元の権限、この Issue に含めないこと）は、**[Decision 0033](../../docs/decisions/0033-user-invitation-and-device-pairing.md)（Approved。2026-09-28 に Human が承認）** にまとめました。判断点 12 以外は推奨どおりに承認され、判断点 12 は **Owner / Admin の承認に確認 Code を要る**に変わりました（下記）。数値は設定か定数です。
 
 ### Endpoint
 
@@ -1324,9 +1324,9 @@ Issue #21 には Goal の本文がないため、要件（`REQUIREMENTS.md` の�
 | `POST /pairing` | `account.manage`（信頼済み端末） | 新規端末の追加: 1 回限りの Pairing Token（`link_path` は `/pair#<Token>`）。同じ User の生きている Pairing は失効する |
 | `DELETE /pairing` | `account.manage` | 同じ User の生きている Pairing をすべて失効する |
 | `GET /pairing/pending` | `account.read` | 承認を待つ新しい端末（端末名、提出の時刻、期限） |
-| `POST /pairing/{pairing_id}/approve` | `account.manage` + Passkey の Step-up | 承認を待つ端末を承認する |
+| `POST /pairing/{pairing_id}/approve` | `account.manage` + Passkey の Step-up | 承認を待つ端末を承認する。Body は `{"confirmation_code": "…"}`（新しい端末に表示された確認 Code。必須） |
 | `POST /pairing/{pairing_id}/reject` | `account.manage` | 承認を待つ端末を拒否する |
-| `POST /pairing/claim` | **公開** | 新しい端末が Token（と必須の端末名、`remember_me`）を出す。一般 User は `200 completed`（Cookie を設定）、Owner / Admin は `202 pending_approval` と 1 回限りの `claim` |
+| `POST /pairing/claim` | **公開** | 新しい端末が Token（と必須の端末名、`remember_me`）を出す。一般 User は `200 completed`（Cookie を設定）、Owner / Admin は `202 pending_approval` と 1 回限りの `claim`、確認 Code `confirmation_code`（どちらもこの応答で 1 度だけ） |
 | `POST /pairing/complete` | **公開** | 新しい端末が `claim` を出す。承認済みなら `200 completed`（Cookie）、承認待ちなら `202 pending_approval` |
 
 | 状態 | Code |
@@ -1338,7 +1338,8 @@ Issue #21 には Goal の本文がないため、要件（`REQUIREMENTS.md` の�
 | 復元の 30 日を過ぎた | 409 `retention_expired` |
 | Role の規則（Admin が Admin を招待・削除、自分自身の削除など） | 403 `forbidden` |
 | Step-up がない / Passkey の Step-up でない | 403 `step_up_required` / 403 `step_up_method_insufficient` |
-| 対象がない（存在しない User、Owner、他人の Pairing） | 404 `not_found` |
+| 確認 Code がない・違う（承認の時。回数を数える） | 403 `confirmation_code_mismatch`（Body がなければ 422） |
+| 対象がない（存在しない User、Owner、他人の Pairing、確認 Code の試行を使い切った Pairing） | 404 `not_found` |
 | 公開 Route の Rate Limit | 429 `rate_limited` と `Retry-After` |
 
 ### 招待（invite-only registration）
@@ -1361,6 +1362,14 @@ issued / claimed / approved ──(本人の失効・新しい発行・User の�
 - Pairing Token（`pawpr1.…`）の有効期間は **10 分**（要件の初期値。`PAW_PAIRING_TOKEN_TTL_SECONDS`、60〜3600 秒）。**1 User に生きている Pairing は 1 つまで**で、新しい発行は旧 Token を先に失効します（Partial Unique Index も同じ）。Token は URL の Fragment（`/pair#<Token>`）に置くので、Server の Access Log や `Referer` に残りません。QR は Client が「公開 Origin + `link_path`」を符号化します。
 - 新しい端末の提出は、接続元ごと・全体の Rate Limit（新しい `pairing_source` / `pairing_global`。値は `redeem_*` の設定。**正しい Token・Claim は数えた回数を戻す**ので、承認待ちの Polling で Lock されない）と、Token ごとの試行の上限（`PAW_SETUP_TOKEN_MAX_ATTEMPTS`。**Token が `issued` の間だけ数える**。使用済みの Token への誤った提出は数えないので、QR を見た第三者が承認待ちの行を Lock できない）を数えます。**同じ Token の同時の提出は片方だけが成功**します（別の接続で競わせる Test 済み）。
 - **一般 User** は Token の所持だけで新しい Session を得ます（Decision 0033 の判断点 5）。**Owner / Admin**（提出の時点の Role で判定）は Token を使用済みにして、1 回限りの Claim（`pawpc1.…`。**検索の鍵は Pairing の ID ではなく、新しい乱数の `claim_id`**。QR に載る Pairing の ID を知っていても Claim を当てられず、Claim の試行の回数も使えない）を受け取り、**Claim の時点から 10 分以内**に同じ User の信頼済み端末が承認するのを待ちます。**承認には、承認する Session の直近の Passkey の Step-up が要ります**（拒否には要らない）。Passkey が設定されていない環境では Owner / Admin は Pairing で端末を追加できず、Password の通常の Login が残ります。
+- **確認 Code**（Decision 0033 の判断点 12。Human が 2026-09-28 に確認 Code を要ると決定）: Owner / Admin の新しい端末は、Claim と一緒に短い確認 Code（8 文字。`23456789ABCDEFGHJKMNPQRSTVWXYZ` の 30 文字。約 39 bit）を 1 度だけ受け取り、画面に表示します。承認する人は、**新しい端末に表示された Code を信頼済み端末で入力**します（`approve` の `confirmation_code`。大文字・小文字、空白、`-` は区別しない）。Code がない・違うと承認は拒否されます。
+  - **生成**: Claim の時に OS の CSPRNG（`secrets`）で作ります。Pairing Token とも Claim とも独立なので、Token から推測できません。**Claim ごとの Code** で、別の Claim（置き換えられた前の Pairing、他の User の Pairing）の Code は通りません。
+  - **保存と比較**: DB には Code ごとの乱数の Salt と `HMAC-SHA256(Salt, Code)`（`confirm_salt` / `confirm_hash`）だけを置き、`hmac.compare_digest` で比べます。形式が不正な入力も同じ量の計算をします。
+  - **試行の上限**: 違う Code・Code なしは `confirm_attempts` を 1 増やし（Step-up の確認の**後**。Step-up のない Session は Code を試せない）、Audit（deny `confirmation_code_mismatch`）と同じ Transaction で Commit します。**3 回目で Pairing を終わらせます**（`revoked`、`ended_reason = confirmation_failed`、Audit は deny `confirmation_attempts_exhausted`）。同時の承認も Pairing の行の Lock で直列になり、回数は漏れません（別の接続で競わせる Test 済み）。
+  - **期限**: Code は Claim と同じ行にあり、Claim の期限（10 分）が過ぎれば承認できません。
+  - **表示しない場所**: 承認待ちの一覧（`GET /pairing/pending`）には Code を出しません。承認する人に「両方の画面を見比べて押す」だけをさせず、自分の新しい端末から読んで入力させるためです。Log、Audit、例外の Message、`repr` のどれにも Code は入りません（Test で確かめる）。
+  - **防ぐもの**: QR を盗み見た第三者が正しい端末より先に Token を出すと、承認待ちは第三者の 1 件になり、正しい端末の提出は拒否されます。承認する人の端末には Code が表示されていないので、承認は通らず、3 回で Pairing は終わります（判断点 12 の乗っ取り。Test 済み）。
+  - **一般 User の Pairing** は承認がないので確認 Code もありません（判断点 5 は推奨どおり Token の所持だけ）。
 - 新しい Session は `auth_method = pairing`（`auth_sessions` の CHECK に追加。Step-up の方法ではない）で、Step-up を持ちません。Passkey の Gate は、一般 User は Password の Sign-in と同じ規則、承認された Owner / Admin は `open`（承認した端末の Passkey の Step-up が、新しい端末での Passkey の認証の代わり）です。Passkey の登録は既存の `/auth/passkeys/enroll/*` で、既存の規則（既に Passkey を持つ User は Passkey の Step-up が要る）のままです（Decision 0033 の判断点 6）。
 - Lock の順序は、どの操作も User の行（`FOR UPDATE`。削除・復元は `FOR NO KEY UPDATE`）→ Pairing の行です。
 
@@ -1387,14 +1396,14 @@ issued / claimed / approved ──(本人の失効・新しい発行・User の�
 | `auth.invitation.issue` | allow `issued` / `reissued`、deny `role_not_allowed`・`step_up_required`・`step_up_method_insufficient`・`login_name_taken`・`invalid_state` |
 | `auth.invitation.revoke` | allow `revoked` / `superseded` / `cancelled` |
 | `auth.invitation.redeem` | allow `redeemed`、deny `token_mismatch`・`token_expired`・`token_used`・`token_revoked`・`attempts_exhausted`・`user_not_eligible` |
-| `auth.pairing.issue`、`auth.pairing.revoke`（`revoked`・`superseded`・`account_closed`） | 発行と失効 |
+| `auth.pairing.issue`、`auth.pairing.revoke`（`revoked`・`superseded`・`account_closed`） | 発行と失効（確認 Code の試行を使い切った終了は `auth.pairing.approve` の deny `confirmation_attempts_exhausted` で残る） |
 | `auth.pairing.claim` | allow `pending_approval`、deny（Token の理由） |
-| `auth.pairing.approve`、`auth.pairing.reject` | allow `approved` / `rejected`、deny `step_up_required` など |
+| `auth.pairing.approve`、`auth.pairing.reject` | allow `approved` / `rejected`、deny `step_up_required`・`confirmation_code_mismatch`・`confirmation_attempts_exhausted` など |
 | `auth.pairing.complete` | allow `completed`（`resource_id` は新しい Session。新規端末の登録）、deny（Claim の理由） |
 | `auth.user.delete` | allow `deletion_pending` / `invitation_cancelled`、deny `role_not_allowed`・`step_up_required`・`ownership_transfer_required`・`invalid_state` |
 | `auth.user.restore` | allow `restored`、deny `role_not_allowed`・`retention_expired`・`invalid_state`・`step_up_required` |
 
-ID と列挙値だけです（Token、Token ID、Claim、Login name、端末名は入りません。Token は `audit_ref`、Pairing は `audit_ref` を `pairing_id` として外に見せます）。変更は同じ Transaction、拒否は別の短い Transaction で Best Effort に書きます。**未知の Token ID と形式不正の Token、Lock 後の試行は DB に書かず**、Log に固定の 1 行だけです（誰でも作れる行になるため。Owner の Token と同じ方針）。
+ID と列挙値だけです（Token、Token ID、Claim、確認 Code、Login name、端末名は入りません。Token は `audit_ref`、Pairing は `audit_ref` を `pairing_id` として外に見せます）。変更は同じ Transaction、拒否は別の短い Transaction で Best Effort に書きます。**未知の Token ID と形式不正の Token、Lock 後の試行は DB に書かず**、Log に固定の 1 行だけです（誰でも作れる行になるため。Owner の Token と同じ方針）。
 
 ### Database と権限
 
@@ -1403,7 +1412,7 @@ Migration `0124`（Revision ID は Issue の番号で、Decision 0024 と紛れ�
 | Table | Web の Role の権限 |
 | --- | --- |
 | `user_invitations` | SELECT、INSERT、`attempts`・`used_at`・`revoked_at`・`revoked_reason`・`locked_at` の UPDATE（Hash・Salt・User・期限は変えられない） |
-| `device_pairings` | SELECT、INSERT、Pairing の寿命で変わる列の UPDATE（`user_id`、Token の Salt・Hash、`created_at`、`issued_by_session` は不可）。DELETE なし |
+| `device_pairings` | SELECT、INSERT、Pairing の寿命で変わる列の UPDATE（Claim と確認 Code の Salt・Hash・試行の回数を含む。`user_id`、Token の Salt・Hash、`created_at`、`issued_by_session` は不可）。DELETE なし |
 | `user_status_changes` | SELECT だけ（書くのは 2 つの関数） |
 | 関数 `paw_invite_user`、`paw_change_user_status` | EXECUTE だけ（`PUBLIC` からは外す） |
 
@@ -1411,7 +1420,7 @@ Migration `0124`（Revision ID は Issue の番号で、Decision 0024 と紛れ�
 
 ### 制限と未確認の点
 
-- Decision 0033 は **Proposed** です。承認で値や流れが変わる可能性があります。
+- Decision 0033 は **Approved**（2026-09-28）です。判断点 12 だけが推奨から変わり、確認 Code を実装しました。確認 Code の長さ（8 文字）・文字の集合・試行の上限（3 回）は実装が置いた値です（定数。`paw_backend/auth/onboarding/pairing.py`）。
 - 実際の Browser・QR の読み取り・Reverse Proxy を通した動作は確かめていません（`TestClient` と実 PostgreSQL まで）。
 - 一般 User の Pairing は Token の所持だけで Session ができます（QR の盗み見・リンクの転送。10 分以内）。Pairing の完了は Audit に残り、端末の一覧から個別に Logout できます。
 - 招待の取消・削除の後も `users.login_name` は一意のまま予約され、同じ Login name で招待し直せません（Decision 0033 の判断点 10）。
@@ -3760,7 +3769,7 @@ PAW-023 は `webauthn`（py_webauthn。WebAuthn の検証。`auth/passkeys/cerem
 
 [PAW-021](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/18)（Owner Setup）、
 RBAC（PAW-025）、Task Lifecycle（PAW-032）、Task Queue / Budget / Loop 検知（PAW-033）、Tool Broker（PAW-031）、Memory Schema（PAW-040）、Research Scratch Store（PAW-050）、Research Provider Adapter（PAW-051）、Research Privacy Filter（PAW-053）、Evidence / Claim Provenance（PAW-052）は、この Skeleton の上に実装済みです。
-PAW-022（Login / Session / Password）は Owner Setup の Token を受け取る側として実装済みです（[Login / Session / Password Policy](#login--session--password-policy)）。PAW-023（Passkey / Step-up）も実装済みです（[Passkey / Step-up](#passkey--step-up)。Decision 0025 は Approved）。PAW-024（User Invite / Device Pairing）も実装済みです（[User Invite / Device Pairing / Lifecycle](#user-invite--device-pairing--lifecycle)。Decision 0033 は Proposed）。
+PAW-022（Login / Session / Password）は Owner Setup の Token を受け取る側として実装済みです（[Login / Session / Password Policy](#login--session--password-policy)）。PAW-023（Passkey / Step-up）も実装済みです（[Passkey / Step-up](#passkey--step-up)。Decision 0025 は Approved）。PAW-024（User Invite / Device Pairing）も実装済みです（[User Invite / Device Pairing / Lifecycle](#user-invite--device-pairing--lifecycle)。Decision 0033 は Approved）。
 Memory の Journal と背景の整理（PAW-041）は、Memory Schema の上に実装済みです。検索は [Hybrid Retrieval（PAW-043）](#hybrid-retrieval) が Memory Schema の上に実装済みです。Conflict / Versioning と確認 Flow は PAW-042 以降で、その上に実装します。
 Research Privacy Filter（PAW-053）と Evidence / Claim Provenance（PAW-052）は、Research Provider Adapter の上に実装済みです。Research の Provider（Direct Web、Docs、GitHub、OpenCode）の Adapter は、Research Provider Adapter の上に実装します。外部送信の Audit を Audit Log へ保存する実装は、後続の Issue です。
 受け入れ基準は [Implementation Backlog](../../docs/IMPLEMENTATION_BACKLOG.md)、

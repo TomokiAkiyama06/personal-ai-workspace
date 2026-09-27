@@ -1,10 +1,10 @@
 # User の招待・端末の Pairing・User Lifecycle の方針
 
-- Status: Proposed
+- Status: Approved
 - Date: 2026-09-28
 - Scope: PAW-024（User Invite / Device Pairing、Issue [#21](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/21)）。[Decision 0015](0015-login-session-password-policy.md) の 14 節が「この Issue に含めない」とした複数端末の追加（QR / Link の Pairing、Owner / Admin の既存端末での承認）と、User の作成・招待・削除待ち・復元
 - Supersedes: なし（0005・0015・0025 は書き換えない。0015 の 14 節が後の Issue に送った点を、この Decision で埋める）
-- Approval: 未承認（Human の承認を待つ。承認されるまで、この Decision の推奨は方針として使わない）
+- Approval: 2026-09-28、Human（Repository の Owner）が作業 Session 内で直接回答して承認。判断点 1〜11 と 13 は推奨どおり、判断点 12 だけは推奨（確認 Code を入れない）を採らず、**Owner / Admin の Pairing の承認に確認 Code を必須とする**（末尾の「承認時の決定」）
 
 ## 背景
 
@@ -153,3 +153,24 @@ issued / claimed / approved ──(本人が失効 / 新しい発行で置き換
 - 「信頼済み端末」を「Passkey の Gate が開いた有効な Session」と解釈した（Passkey が設定されていない環境では、有効な Session すべて）。
 - 「発行元の信頼済み端末から失効」を「同じ User の信頼済み端末から失効」に広げた。
 - 承認の待ち時間（Claim から 10 分）は要件にない。Pairing Token と同じ設定を使った。
+
+## 承認時の決定（2026-09-28）
+
+Human は、作業 Session で上の 13 点について推奨つきの説明を受け、次のとおり直接回答して承認した。
+
+- **判断点 1〜11 と 13 は推奨どおり**（個別の変更はない）。判断点 5（一般 User の Pairing は Token の所持だけ）も推奨どおりで、一般 User には確認 Code を求めない。
+- **判断点 12 は推奨を採らない。** Owner / Admin の端末の Pairing の承認は**確認 Code を必須とする**。同じ短い Code を新しい端末と承認する信頼済み端末の両方で扱い、承認する人がそれを確認・入力する。Code がない・一致しないときは Pairing を拒否する。Code は Server が CSPRNG で作り、特定の Claim に結びつけ（Token から推測できない）、Hash で保存するか定数時間で比べ、試行の回数を限り、Claim と一緒に期限が切れ、Log に出さない。Audit には成功と失敗を Code なしで残す。
+
+判断点 12 の実装（PR [#123](https://github.com/TomokiAkiyama06/personal-ai-workspace/pull/123)、`paw_backend/auth/onboarding/pairing.py`）:
+
+- **生成と結びつき**: Owner / Admin の新しい端末が Pairing Token を出して Claim を受け取るとき（`POST /api/v1/auth/pairing/claim` の `202 pending_approval`）、Server が OS の CSPRNG（`secrets`）で **8 文字の確認 Code**（`23456789ABCDEFGHJKMNPQRSTVWXYZ` の 30 文字。紛らわしい 0 / O / 1 / I / L / U を除く。約 39 bit）を作り、Claim と一緒に 1 度だけ返す。Code は Pairing Token とも Claim とも独立の乱数で、Token から推測できない。Code はその Claim（`device_pairings` の 1 行）にだけ結びつき、置き換えられた前の Pairing や他の User の Pairing の Code は通らない。
+- **確認の方法**: 新しい端末が Code を表示し、承認する人がそれを**信頼済み端末で入力する**（`POST /pairing/{id}/approve` の Body `{"confirmation_code": "…"}`。大文字・小文字、空白、`-` は区別しない）。承認待ちの一覧（`GET /pairing/pending`）には Code を**出さない**。両方の画面に Code を出して見比べるだけにすると、承認する人が見比べずに押せてしまい、QR を盗み見て先に出した第三者の Code もそのまま通るため、入力を求める（「確認・入力する」のうち、より強い入力の側を採った。Code を目にする場所は新しい端末と、入力する信頼済み端末の 2 つ）。
+- **保存と比較**: DB には Code ごとの乱数の Salt と `HMAC-SHA256(Salt, Code)`（`device_pairings.confirm_salt` / `confirm_hash`）だけを置き、`hmac.compare_digest` で比べる。形式が不正な入力も同じ量の計算をする。
+- **試行の上限**: 確認は Passkey の Step-up の確認の後に行う（Step-up のない Session は Code を試せない）。Code がない・違うときは `confirm_attempts` を 1 増やし、Audit と同じ Transaction で Commit して `403 confirmation_code_mismatch` を返す。**3 回目の誤りで Pairing を終わらせる**（`state = revoked`、`ended_reason = confirmation_failed`）。同時の承認は Pairing の行の Lock（`FOR UPDATE`）で直列になり、回数は漏れない。
+- **期限**: Code は Claim の行にあり、Claim の期限（Claim から 10 分、`PAW_PAIRING_TOKEN_TTL_SECONDS`）が過ぎれば承認できない。
+- **Log・Audit・例外**: Code は Log、Audit、例外の Message、`repr` のどれにも入らない。Audit は `auth.pairing.approve` の allow `approved`、deny `confirmation_code_mismatch`・`confirmation_attempts_exhausted`（Code なし、`audit_ref` だけ）。
+- **塞いだもの**: QR を盗み見た第三者が正しい端末より先に Token を出すと、承認待ちは第三者の 1 件になり、正しい端末の提出は拒否される。承認する人の手元の新しい端末には Code が表示されないので、承認は通らず、3 回の誤りで Pairing は終わる（判断点 12 が述べた乗っ取り）。
+- **実装が置いた値**: Code の長さ（8 文字）、文字の集合、試行の上限（3 回）は要件にも回答にもない値で、実装が置いた定数（`CONFIRMATION_LENGTH`、`CONFIRMATION_ALPHABET`、`CONFIRMATION_MAX_ATTEMPTS`）である。変えても Schema は変わらない。
+- Schema: Migration `0124` の `device_pairings` に `confirm_salt`、`confirm_hash`、`confirm_attempts` の列と CHECK 制約（Claim があるときだけ Code があるなど）、`ended_reason` の値 `confirmation_failed` を足した（この Migration はまだ main に入っていないので、新しい Revision にせず 0124 を変えた）。
+
+承認後に方針を変える場合は、この Decision を書き換えず、新しい Decision から `Supersedes` する。

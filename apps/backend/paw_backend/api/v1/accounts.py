@@ -125,6 +125,12 @@ class CompleteRequest(_Body):
     claim: StrictStr = Field(min_length=1, max_length=_TOKEN_MAX)
 
 
+class ApproveRequest(_Body):
+    # The code the new device shows (Decision 0033, point 12), typed in by the
+    # approver. Case, spaces and hyphens do not matter.
+    confirmation_code: StrictStr = Field(min_length=1, max_length=32)
+
+
 class PairingProgressResponse(BaseModel):
     # ``completed``: the cookie is in this response and ``session`` describes it.
     # ``pending_approval``: wait for a trusted device, then ``POST /pairing/complete``
@@ -132,6 +138,9 @@ class PairingProgressResponse(BaseModel):
     status: Literal["completed", "pending_approval"]
     session: SessionResponse | None = None
     claim: str | None = None
+    # With the claim, once: the short code the new device shows, which the user
+    # enters on the approving trusted device.
+    confirmation_code: str | None = None
     expires_at: datetime | None = None
 
 
@@ -335,14 +344,20 @@ async def pending_pairings(request: Request, services: Auth) -> PendingPairingsR
     "/pairing/{pairing_id}/approve",
     status_code=status.HTTP_204_NO_CONTENT,
     dependencies=[Depends(require_capability(Capability.ACCOUNT_MANAGE))],
-    summary="Approve a waiting new device (needs a recent Passkey step-up)",
+    summary=(
+        "Approve a waiting new device with the code it shows "
+        "(needs a recent Passkey step-up)"
+    ),
 )
 async def approve_pairing(
-    pairing_id: uuid.UUID, request: Request, services: Auth
+    pairing_id: uuid.UUID, body: ApproveRequest, request: Request, services: Auth
 ) -> Response:
     with api_errors():
         await services.pairing.approve(
-            _session_of(request).session, pairing_id, _context(request)
+            _session_of(request).session,
+            pairing_id,
+            _context(request),
+            confirmation_code=body.confirmation_code,
         )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -374,7 +389,10 @@ async def _progress(
         return PairingProgressResponse(status="completed", session=session)
     response.status_code = status.HTTP_202_ACCEPTED
     return PairingProgressResponse(
-        status="pending_approval", claim=outcome.claim, expires_at=outcome.expires_at
+        status="pending_approval",
+        claim=outcome.claim,
+        confirmation_code=outcome.confirmation_code,
+        expires_at=outcome.expires_at,
     )
 
 

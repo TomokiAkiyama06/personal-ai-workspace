@@ -249,8 +249,25 @@ class PairingRoutesTest(OnboardingHttpCase):
             [(p["pairing_id"], p["device_name"]) for p in pending["pending"]],
             [(body["pairing_id"], "Tablet")],
         )
+        code = claimed.json()["confirmation_code"]
+        self.assertIsNone(waiting.json()["confirmation_code"])
+        self.assertNotIn(code, str(pending))
+        approve_path = f"/api/v1/auth/pairing/{body['pairing_id']}/approve"
+        missing = self.call("POST", approve_path, token=trusted)
+        self.assertEqual(missing.status_code, 422, missing.text)
+        mismatch = self.call(
+            "POST",
+            approve_path,
+            token=trusted,
+            json={"confirmation_code": "2" * 8 if code != "2" * 8 else "3" * 8},
+        )
+        self.assertEqual(
+            (mismatch.status_code, error_code(mismatch)),
+            (403, "confirmation_code_mismatch"),
+        )
+        self.assertNotIn(code, mismatch.text)
         approved = self.call(
-            "POST", f"/api/v1/auth/pairing/{body['pairing_id']}/approve", token=trusted
+            "POST", approve_path, token=trusted, json={"confirmation_code": code}
         )
         self.assertEqual(approved.status_code, 204, approved.text)
         done = self.call("POST", "/api/v1/auth/pairing/complete", json={"claim": claim})
@@ -272,7 +289,10 @@ class PairingRoutesTest(OnboardingHttpCase):
             json={"token": body["token"], "device_name": "Tablet"},
         )
         refused = self.call(
-            "POST", f"/api/v1/auth/pairing/{body['pairing_id']}/approve", token=trusted
+            "POST",
+            f"/api/v1/auth/pairing/{body['pairing_id']}/approve",
+            token=trusted,
+            json={"confirmation_code": "ABCD2345"},
         )
         self.assertEqual(
             (refused.status_code, error_code(refused)), (403, "step_up_required")

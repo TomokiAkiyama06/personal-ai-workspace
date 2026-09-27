@@ -44,6 +44,7 @@ from paw_backend.auth.errors import (
     AccountStateError,
     AuthPermissionError,
     AuthUnavailableError,
+    ConfirmationCodeError,
     InvalidAuthInputError,
     InvalidCredentialsError,
     InvitationNotFoundError,
@@ -323,6 +324,12 @@ def api_errors(
     # Invitations, pairing and the user lifecycle (PAW-024).
     except (InvitationNotFoundError, PairingNotFoundError):
         raise ApiError(404, "not_found", "Not Found") from None
+    except ConfirmationCodeError:
+        raise ApiError(
+            403,
+            "confirmation_code_mismatch",
+            "The confirmation code does not match the new device's",
+        ) from None
     except LoginNameTakenError:
         raise ApiError(
             409, "login_name_taken", "That login name is already in use"

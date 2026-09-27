@@ -6,7 +6,7 @@ Create Date: 2026-09-28
 
 The revision id is the issue's (PAW-024), written 0124 so that it is not read as
 Decision 0024; it is not an order in the chain. The design and every value it
-chose is Decision 0033 (Proposed).
+chose is Decision 0033 (Approved 2026-09-28).
 
 Tables (every column and constraint is spelled out below; the models in
 ``paw_backend.auth.onboarding.models`` repeat them and
@@ -17,8 +17,9 @@ Tables (every column and constraint is spelled out below; the models in
   at 14 days).
 * ``device_pairings``: one "add a new device" (QR code / link): the one-time
   pairing token, and the new device's claim while an Owner's / Admin's pairing
-  waits for a trusted device's approval (at most one live pairing per user; a
-  CHECK caps each lifetime at an hour).
+  waits for a trusted device's approval, with the claim's confirmation code (a
+  salted HMAC and a count of wrong entries: Decision 0033, point 12) (at most one
+  live pairing per user; a CHECK caps each lifetime at an hour).
 * ``user_status_changes``: the append-only history of ``users.status`` (a
   trigger rejects UPDATE and DELETE). Only the two functions below write it. Its
   foreign key to ``users`` is RESTRICT: a user who has a history (every invited
@@ -86,7 +87,9 @@ OLD_THROTTLE_SCOPES = (
 NEW_THROTTLE_SCOPES = OLD_THROTTLE_SCOPES + ", 'pairing_source', 'pairing_global'"
 INVITATION_ENDS = "'revoked', 'superseded', 'cancelled'"
 PAIRING_STATES = "'issued', 'claimed', 'approved', 'completed', 'rejected', 'revoked'"
-PAIRING_ENDS = "'revoked_by_user', 'superseded', 'account_closed'"
+PAIRING_ENDS = (
+    "'revoked_by_user', 'superseded', 'account_closed', 'confirmation_failed'"
+)
 USER_STATUSES = "'invited', 'active', 'pending_deletion', 'deleted'"
 
 _INVITE_FUNCTION = """\
@@ -254,6 +257,9 @@ def upgrade() -> None:
         sa.Column("claim_id", sa.Uuid(), nullable=True),
         sa.Column("claim_salt", sa.LargeBinary(), nullable=True),
         sa.Column("claim_hash", sa.LargeBinary(), nullable=True),
+        sa.Column("confirm_salt", sa.LargeBinary(), nullable=True),
+        sa.Column("confirm_hash", sa.LargeBinary(), nullable=True),
+        sa.Column("confirm_attempts", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("device_label", sa.Text(), nullable=True),
         sa.Column("remember_me", sa.Boolean(), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
@@ -292,6 +298,26 @@ def upgrade() -> None:
         sa.CheckConstraint(
             "(claim_id IS NULL) = (claim_hash IS NULL)",
             name=op.f("ck_device_pairings_claim_has_id"),
+        ),
+        sa.CheckConstraint(
+            "confirm_salt IS NULL OR octet_length(confirm_salt) = 16",
+            name=op.f("ck_device_pairings_confirm_salt_length"),
+        ),
+        sa.CheckConstraint(
+            "confirm_hash IS NULL OR octet_length(confirm_hash) = 32",
+            name=op.f("ck_device_pairings_confirm_hash_length"),
+        ),
+        sa.CheckConstraint(
+            "(confirm_salt IS NULL) = (confirm_hash IS NULL)",
+            name=op.f("ck_device_pairings_confirm_complete"),
+        ),
+        sa.CheckConstraint(
+            "(claim_hash IS NULL) = (confirm_hash IS NULL)",
+            name=op.f("ck_device_pairings_claim_has_confirmation"),
+        ),
+        sa.CheckConstraint(
+            "confirm_attempts >= 0",
+            name=op.f("ck_device_pairings_confirm_attempts_not_negative"),
         ),
         sa.CheckConstraint(
             "device_label IS NULL OR char_length(device_label) BETWEEN 1 AND 64",
@@ -390,6 +416,9 @@ def upgrade() -> None:
             "claim_id",
             "claim_salt",
             "claim_hash",
+            "confirm_salt",
+            "confirm_hash",
+            "confirm_attempts",
             "device_label",
             "remember_me",
             "expires_at",

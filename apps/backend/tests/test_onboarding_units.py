@@ -16,7 +16,14 @@ from paw_backend.auth.models import (
 from paw_backend.auth.onboarding import onetime
 from paw_backend.auth.onboarding.common import may_administer
 from paw_backend.auth.onboarding.lifecycle import TRANSITIONS, transition_allowed
-from paw_backend.auth.onboarding.pairing import IssuedPairing
+from paw_backend.auth.onboarding.pairing import (
+    CONFIRMATION_ALPHABET,
+    CONFIRMATION_LENGTH,
+    IssuedPairing,
+    PairingOutcome,
+    confirmation_matches,
+    new_confirmation_code,
+)
 from paw_backend.auth.throttle import OnSuccess, policies_from_settings
 from paw_backend.authz.roles import SystemRole
 from paw_backend.authz.subjects import Principal
@@ -73,6 +80,47 @@ class OneTimeTokenTest(unittest.TestCase):
     def test_a_bad_prefix_is_refused(self):
         with self.assertRaises(ValueError):
             onetime.TokenKind("nope")
+
+
+class ConfirmationCodeUnitTest(unittest.TestCase):
+    """The confirmation code of an Owner's / Admin's pairing (Decision 0033, 12)."""
+
+    def stored(self, code):
+        salt = bytes(range(16))
+        return salt, onetime.hash_secret(salt, code)
+
+    def test_codes_are_short_random_and_readable(self):
+        codes = {new_confirmation_code() for _ in range(200)}
+        self.assertGreater(len(codes), 195)
+        for code in codes:
+            self.assertEqual(len(code), CONFIRMATION_LENGTH)
+            self.assertTrue(set(code) <= set(CONFIRMATION_ALPHABET))
+        for ambiguous in "01ILOU":
+            self.assertNotIn(ambiguous, CONFIRMATION_ALPHABET)
+
+    def test_matching_ignores_case_spaces_and_hyphens_only(self):
+        salt, digest = self.stored("K7MXQ3PR")
+        for typed in ("K7MXQ3PR", "k7mx-q3pr", " K7MX Q3PR "):
+            self.assertTrue(confirmation_matches(typed, salt, digest), typed)
+        for typed in (
+            None,
+            "",
+            "K7MXQ3P",
+            "K7MXQ3PRR",
+            "K7MXQ3PS",
+            "K7MXQ3P\u0280",
+            "K" * 100,
+            12345678,
+        ):
+            self.assertFalse(confirmation_matches(typed, salt, digest), typed)
+
+    def test_nothing_stored_never_matches(self):
+        for salt, digest in ((None, None), (bytes(16), None), (bytes(16), b"x")):
+            self.assertFalse(confirmation_matches("K7MXQ3PR", salt, digest))
+
+    def test_the_outcome_does_not_show_the_code(self):
+        outcome = PairingOutcome(claim="pawpc1.x", confirmation_code="K7MXQ3PR")
+        self.assertNotIn("K7MXQ3PR", repr(outcome))
 
 
 class LifecycleTableTest(unittest.TestCase):
