@@ -31,7 +31,7 @@ deployment, no ``PAW_APP_DATABASE_ROLE``, has nothing to revoke from and is a
 no-op, exactly as ``upgrade`` is a no-op for it).
 
 Revision ID: 0088
-Revises: 0071
+Revises: 0086
 Create Date: 2026-09-27
 """
 
@@ -47,7 +47,7 @@ from paw_backend.db_roles import (
 )
 
 revision: str = "0088"
-down_revision: str | Sequence[str] | None = "0071"
+down_revision: str | Sequence[str] | None = "0086"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
