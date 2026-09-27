@@ -284,19 +284,19 @@ class UnexpectedErrorsTest(PostgresOrchestratorTestCase):
         runtime.gate("a")
         h = self.harness(runtimes={"local": runtime})
         task_id = await self.prepare(h, make_plan(node("a"), node("b")))
-        original_start = h.store.start_node
+        original_start = h.store.start_node_in
         started = []
 
-        async def start_then_break(dag_id, epoch, key, **kwargs):
+        async def start_then_break(session, dag_id, epoch, key, **kwargs):
             if started:
                 raise BrokenStep(SECRET)  # the second start: an error of ours
             started.append(key)
-            return await original_start(dag_id, epoch, key, **kwargs)
+            return await original_start(session, dag_id, epoch, key, **kwargs)
 
         async def broken_interrupt(*args, **kwargs):
             raise ConnectionError(SECRET)
 
-        h.store.start_node = start_then_break
+        h.store.start_node_in = start_then_break
         h.store.interrupt = broken_interrupt
 
         with self.assertLogs("paw_backend.orchestrator.orchestrator", "ERROR"):

@@ -185,6 +185,22 @@ class StoreArgumentTest(unittest.IsolatedAsyncioTestCase):
                     "max_attempts": not_an_int(1, 20) + [0],
                 },
             ),
+            "start_node_in": (
+                {
+                    "session": open_session(),
+                    "dag_id": DAG,
+                    "epoch": 1,
+                    "key": "a",
+                    "max_attempts": 6,
+                },
+                {
+                    "session": [None, AsyncSession(), CANARY, object()],
+                    "dag_id": not_a_uuid(),
+                    "epoch": epoch() + [0],
+                    "key": not_text(),
+                    "max_attempts": not_an_int(1, 20) + [0],
+                },
+            ),
             "complete_node": (
                 {
                     "dag_id": DAG,

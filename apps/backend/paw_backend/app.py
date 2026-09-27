@@ -25,6 +25,7 @@ from paw_backend.middleware import (
     RequestIdMiddleware,
     SecurityHeadersMiddleware,
 )
+from paw_backend.orchestrator.connection_reaper import build_connection_reaper
 from paw_backend.orchestrator.project_sweep import build_project_stop_loop
 from paw_backend.projects import ProjectStateGate
 from paw_backend.research.scratch import ScratchJanitor, ScratchStore
@@ -70,6 +71,7 @@ def create_app(
         )
         background = {audit_check, token_check}
         stop_loop = None
+        reaper = None
         try:
             # Expired Research Scratch items are only hidden until something
             # deletes them (PAW-050): purge them regularly, from the start on.
@@ -91,10 +93,20 @@ def create_app(
                     interval_seconds=settings.project_task_stop_interval_seconds,
                 )
                 background.add(asyncio.create_task(stop_loop.run()))
+            # Calls through a shared connection that a crashed process left
+            # ``in_flight`` are settled as failed (PAW-034, Decision 0016).
+            if database.configured and settings.connection_reap_interval_seconds > 0:
+                reaper = build_connection_reaper(
+                    database,
+                    interval_seconds=settings.connection_reap_interval_seconds,
+                )
+                background.add(asyncio.create_task(reaper.run()))
             yield
         finally:
             if stop_loop is not None:
                 stop_loop.stop()
+            if reaper is not None:
+                reaper.stop()
             # Cancelling aborts the connection each of them is using (a diagnostic
             # its own, the janitor the one of its purge transaction: neither waits
             # for a stalled server to answer), and the wait is bounded anyway.

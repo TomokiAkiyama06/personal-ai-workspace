@@ -5,8 +5,8 @@ import asyncio
 import unittest
 
 from paw_backend.orchestrator.domain import RunOutcome
-from paw_backend.orchestrator.errors import NodeStopped, StopReason
-from paw_backend.tasks import TaskCommand, TaskState, WaitReason
+from paw_backend.orchestrator.errors import NodeStateError, NodeStopped, StopReason
+from paw_backend.tasks import TaskCommand, TaskNotRunningError, TaskState, WaitReason
 from paw_backend.tasks.queueing import (
     BudgetKind,
     BudgetPreset,
@@ -237,6 +237,67 @@ class BudgetTest(PostgresOrchestratorTestCase):
         self.assertEqual(await h.loops.history(task_id), ())
         after = await self.consumed(h, task_id)
         self.assertEqual(after["retries"], before["retries"])
+
+    async def started_run(self, h, plan):
+        """A task whose run a worker holds (claimed, started, DAG taken over)."""
+        from paw_backend.orchestrator.gateway import RunGuard
+        from paw_backend.orchestrator.orchestrator import _Run
+
+        task_id = await self.prepare(h, plan)
+        entry = await h.queue.claim_next("w1")
+        event = await h.tasks.execute(task_id, TaskCommand.START, actor=self.system)
+        snapshot = await h.tasks.restore(task_id, log_limit=0)
+        dag = await self.store.acquire(
+            (await self.store.get(task_id, 1)).id, "w1", event.run
+        )
+        run = _Run(
+            snapshot, event.run, entry, "w1", RunGuard(task_id, event.run, h.activity)
+        )
+        run.epoch = dag.epoch
+        return task_id, dag, run
+
+    async def test_a_step_is_charged_only_with_the_start_it_pays_for(self):
+        # The start of an attempt and its step are ONE transaction: a refused
+        # start (a node that is not ready, a paused task) charges nothing, and a
+        # charged step always has its attempt.
+        h = self.harness()
+        task_id, dag, run = await self.started_run(
+            h, make_plan(node("a"), node("b", "a"))
+        )
+
+        with self.assertRaises(NodeStateError):  # "b" waits for "a"
+            await h.orchestrator._start_node(run, dag.id, "b")
+        await h.tasks.execute(task_id, TaskCommand.PAUSE, actor=self.user)
+        with self.assertRaises(TaskNotRunningError):
+            await h.orchestrator._start_node(run, dag.id, "a")
+        self.assertEqual((await self.consumed(h, task_id))["steps"], 0)
+        self.assertEqual(await self.states_of(task_id), {"a": "ready", "b": "pending"})
+
+        await h.tasks.execute(task_id, TaskCommand.RESUME, actor=self.user)
+        attempt = await h.orchestrator._start_node(run, dag.id, "a")
+        self.assertEqual(attempt.number, 1)
+        self.assertEqual((await self.consumed(h, task_id))["steps"], 1)
+        self.assertEqual(
+            await self.states_of(task_id), {"a": "running", "b": "pending"}
+        )
+
+    async def test_a_planner_call_starts_with_its_charges_in_one_transaction(self):
+        # The step and the retry of a planner call are charged together, and
+        # only while the task runs: that charge is the call's durable start.
+        h = self.harness()
+        task_id, _, run = await self.started_run(h, make_plan(node("a")))
+        both = {BudgetKind.STEPS: 1, BudgetKind.RETRIES: 1}
+
+        await h.tasks.execute(task_id, TaskCommand.PAUSE, actor=self.user)
+        with self.assertRaises(TaskNotRunningError):
+            await h.orchestrator._start_planner_call(run, both)
+        consumed = await self.consumed(h, task_id)
+        self.assertEqual((consumed["steps"], consumed["retries"]), (0, 0))
+
+        await h.tasks.execute(task_id, TaskCommand.RESUME, actor=self.user)
+        await h.orchestrator._start_planner_call(run, both)
+        consumed = await self.consumed(h, task_id)
+        self.assertEqual((consumed["steps"], consumed["retries"]), (1, 1))
 
     async def test_a_node_that_spends_the_budget_stops_every_node_and_tool_call(self):
         tools = FakeTools()

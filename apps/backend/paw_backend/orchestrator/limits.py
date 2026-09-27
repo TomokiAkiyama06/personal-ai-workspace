@@ -63,3 +63,10 @@ DEFAULT_PROJECTS_PER_CYCLE = 50
 MAX_PROJECTS_PER_CYCLE = 500
 DEFAULT_ROUNDS_PER_PROJECT = 5
 MAX_ROUNDS_PER_PROJECT = 50
+
+# The reaper of abandoned connection calls (``connection_reaper.py``): how often it
+# looks. A row is abandoned only after a day and an hour (``connections.limits``),
+# so there is nothing to gain from looking often.
+DEFAULT_REAP_INTERVAL_SECONDS = 600.0
+MIN_REAP_INTERVAL_SECONDS = 60.0
+MAX_REAP_INTERVAL_SECONDS = 86_400.0

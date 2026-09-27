@@ -907,6 +907,56 @@ class Orchestrator:
             raise HeartbeatTimeoutError()
         return call.result()
 
+    async def _start_node(
+        self, run: _Run, dag_id: uuid.UUID, key: str
+    ) -> AttemptRecord:
+        """Start one attempt of a node: ONE transaction checks that the task is
+        running in this run (under the task row's share lock), makes the attempt
+        durable (the node ``running``, its attempt row) and charges its step. They
+        commit together or not at all (a refused start charges nothing, a charged
+        step always has its attempt), and the runtime is launched only after the
+        commit. A pause or a wait that commits after it is a graceful stop: the
+        attempt finishes and its outcome is accepted, nothing new starts."""
+        async with self._queue.database.session() as session, session.begin():
+            attempt = await self._store.start_node_in(
+                session,
+                dag_id,
+                run.epoch,
+                key,
+                max_attempts=self._config.max_attempts_per_rung,
+            )
+            await self._budget.record_in(
+                session,
+                run.task.id,
+                BudgetKind.STEPS,
+                1,
+                run=run.run,
+                require_running=True,
+            )
+        return attempt
+
+    async def _start_planner_call(
+        self, run: _Run, planned: Mapping[BudgetKind, int]
+    ) -> None:
+        """Start one planner call: ONE transaction checks that the task is running
+        in this run and charges the call's step (and, after the first call, its
+        retry). That charge is the call's durable start record; the planner is
+        launched only after it committed. A pause or a wait that commits after it
+        is a graceful stop, as for a node: the call finishes, and its plan is kept
+        (``DagStore.create(run=)``: fenced to the run, refused for an ended task),
+        like the outcome of a node that was running; no node of it starts until
+        the task runs again (``start_node`` requires ``running``)."""
+        async with self._queue.database.session() as session, session.begin():
+            for kind, amount in planned.items():
+                await self._budget.record_in(
+                    session,
+                    run.task.id,
+                    kind,
+                    amount,
+                    run=run.run,
+                    require_running=True,
+                )
+
     async def _hand_on_ended_dag(self, run: _Run, dag: DagRecord) -> RunReport:
         """Hand the task on as a DAG that ended for good says: back to evaluation
         after a Retry of a failed evaluation (the results stand), or failed for a
@@ -1327,19 +1377,7 @@ class Orchestrator:
                 )
                 return self._stop_for_budget(decision.action)
             try:
-                # Fenced by the run like the start that follows (a replaced or
-                # ended run charges nothing to the run that took over), and both
-                # need a RUNNING task: a pause or a wait that committed since the
-                # last look starts nothing.
-                await self._budget.record(
-                    run.task.id, BudgetKind.STEPS, 1, run=run.run, require_running=True
-                )
-                attempt = await self._store.start_node(
-                    dag.id,
-                    run.epoch,
-                    key,
-                    max_attempts=self._config.max_attempts_per_rung,
-                )
+                attempt = await self._start_node(run, dag.id, key)
             except (StaleRunError, TaskNotRunningError):
                 return None  # the run is over or quiesces: ``_watch`` says why
             spec = self._spec_of(dag, node, attempt)
@@ -1822,11 +1860,7 @@ class Orchestrator:
                 return await self._end_after_stop(
                     run, self._stop_for_budget(action), None
                 )
-            for kind, amount in planned.items():
-                # Starting a planner call is new work: a RUNNING task only.
-                await self._budget.record(
-                    task_id, kind, amount, run=run.run, require_running=True
-                )
+            await self._start_planner_call(run, planned)
             spec = _Spec(
                 key=PLAN_STEP,
                 role=NodeRole.PLANNER,

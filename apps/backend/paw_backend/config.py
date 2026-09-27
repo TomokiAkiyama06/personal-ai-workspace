@@ -114,6 +114,11 @@ class Settings(BaseSettings):
     # began (PAW-034, Decision 0008 section 8). 0 turns it off: tasks that appear
     # after a project's deletion began would then keep running.
     project_task_stop_interval_seconds: int = Field(default=60, ge=0, le=3_600)
+    # How often calls through a shared connection that a crashed process left
+    # ``in_flight`` are settled as failed (PAW-034, Decision 0016). A row is
+    # reaped only a day and an hour after it started. 0 turns it off: such rows
+    # would then stay ``in_flight`` (counted as requests, without an end).
+    connection_reap_interval_seconds: int = Field(default=600, ge=0, le=86_400)
 
     # Repository registration (PAW-027, Decision 0017). Where a user's checkouts
     # live below their home; the roots (per user: ``{home}`` and ``{user}``) an
@@ -357,6 +362,15 @@ class Settings(BaseSettings):
         if 0 < value < 10:
             raise ValueError(
                 "project_task_stop_interval_seconds must be 0 (off) or 10 to 3600"
+            )
+        return value
+
+    @field_validator("connection_reap_interval_seconds")
+    @classmethod
+    def _reap_interval_is_off_or_at_least_a_minute(cls, value: int) -> int:
+        if 0 < value < 60:
+            raise ValueError(
+                "connection_reap_interval_seconds must be 0 (off) or 60 to 86400"
             )
         return value
 

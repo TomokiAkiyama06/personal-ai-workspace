@@ -266,29 +266,31 @@ class BudgetTracker:
         nothing written). A charge for work that already ran (``run`` alone) is
         accepted while the task quiesces.
         """
-        check_uuid("task_id", task_id)
-        check_member("kind", kind, BudgetKind)
-        if kind is BudgetKind.RUNTIME_SECONDS:
-            raise InvalidQueueingArgumentError("kind")
-        check_amount("amount", amount)
-        if run is not None and not isinstance(run, TaskRun):
-            raise InvalidQueueingArgumentError("run")
-        check_bool("require_running", require_running)
-        if require_running and run is None:
-            raise InvalidQueueingArgumentError("require_running")
-        add = (
-            update(BudgetUsageRow)
-            .where(BudgetUsageRow.task_id == task_id, BudgetUsageRow.kind == kind)
-            .values(consumed=func.least(BudgetUsageRow.consumed + amount, MAX_CONSUMED))
-            .returning(BudgetUsageRow.consumed, BudgetUsageRow.limit_value)
-        )
+        _check_record(task_id, kind, amount, run, require_running)
         async with self._database.engine.begin() as connection:
-            if run is not None:
-                await _require_run(connection, task_id, run, require_running)
-            row = (await connection.execute(add)).one_or_none()
-        if row is None:
-            raise BudgetNotConfiguredError()
-        return BudgetUsage(kind, row.consumed, row.limit_value)
+            return await _record(
+                connection, task_id, kind, amount, run, require_running
+            )
+
+    async def record_in(
+        self,
+        session: AsyncSession,
+        task_id: uuid.UUID,
+        kind: BudgetKind,
+        amount: int,
+        *,
+        run: TaskRun | None = None,
+        require_running: bool = False,
+    ) -> BudgetUsage:
+        """``record`` in the transaction of the caller's ``session`` (inside a
+        transaction; nothing is committed here). The orchestrator charges the step
+        of a node start in the transaction that starts the node
+        (``DagStore.start_node_in``), and the step and retry of a planner call in
+        one transaction: the charge and the start commit together or not at all.
+        """
+        check_session("session", session)
+        _check_record(task_id, kind, amount, run, require_running)
+        return await _record(session, task_id, kind, amount, run, require_running)
 
     async def start_runtime(self, task_id: uuid.UUID) -> int:
         """Begin a new runtime session and return its generation (>= 1).
@@ -562,3 +564,44 @@ async def _require_run(
         raise StaleRunError()
     if require_running and TaskState(task.state) is not TaskState.RUNNING:
         raise TaskNotRunningError()
+
+
+def _check_record(
+    task_id: uuid.UUID,
+    kind: BudgetKind,
+    amount: int,
+    run: TaskRun | None,
+    require_running: bool,
+) -> None:
+    check_uuid("task_id", task_id)
+    check_member("kind", kind, BudgetKind)
+    if kind is BudgetKind.RUNTIME_SECONDS:
+        raise InvalidQueueingArgumentError("kind")
+    check_amount("amount", amount)
+    if run is not None and not isinstance(run, TaskRun):
+        raise InvalidQueueingArgumentError("run")
+    check_bool("require_running", require_running)
+    if require_running and run is None:
+        raise InvalidQueueingArgumentError("require_running")
+
+
+async def _record(
+    executor: AsyncConnection | AsyncSession,
+    task_id: uuid.UUID,
+    kind: BudgetKind,
+    amount: int,
+    run: TaskRun | None,
+    require_running: bool,
+) -> BudgetUsage:
+    if run is not None:
+        await _require_run(executor, task_id, run, require_running)
+    add = (
+        update(BudgetUsageRow)
+        .where(BudgetUsageRow.task_id == task_id, BudgetUsageRow.kind == kind)
+        .values(consumed=func.least(BudgetUsageRow.consumed + amount, MAX_CONSUMED))
+        .returning(BudgetUsageRow.consumed, BudgetUsageRow.limit_value)
+    )
+    row = (await executor.execute(add)).one_or_none()
+    if row is None:
+        raise BudgetNotConfiguredError()
+    return BudgetUsage(kind, row.consumed, row.limit_value)

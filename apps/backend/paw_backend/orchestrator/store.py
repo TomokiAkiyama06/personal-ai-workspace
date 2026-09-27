@@ -478,32 +478,67 @@ class DagStore:
             "max_attempts", max_attempts, minimum=1, maximum=MAX_ATTEMPTS_PER_RUNG
         )
         async with self._database.session() as session, session.begin():
-            locked = await self._open(
-                session, dag_id, epoch, check_run=True, require_running=True
-            )
-            row = locked.nodes.get(key)
-            if row is None:
-                raise NodeStateError()
-            if row.state is not NodeState.READY or row.rung_attempts >= max_attempts:
-                raise NodeStateError()
-            row.state = NodeState.RUNNING
-            row.attempt_count += 1
-            row.rung_attempts += 1
-            row.finished_at = None
-            row.updated_at = func.now()
-            attempt = DagNodeAttemptRow(
-                dag_id=dag_id,
-                node_key=key,
-                number=row.attempt_count,
-                agent_index=row.agent_index,
-                approach=row.approach,
-                epoch=epoch,
-                state=AttemptState.RUNNING,
-            )
-            session.add(attempt)
-            await session.flush()
-            await session.refresh(attempt)
-            return _attempt_record(attempt)
+            return await self._start_node(session, dag_id, epoch, key, max_attempts)
+
+    async def start_node_in(
+        self,
+        session: AsyncSession,
+        dag_id: uuid.UUID,
+        epoch: int,
+        key: str,
+        *,
+        max_attempts: int,
+    ) -> AttemptRecord:
+        """``start_node`` in the transaction of the caller's ``session`` (inside a
+        transaction; nothing is committed here). The orchestrator charges the
+        start's step in the same transaction (``BudgetTracker.record_in``), so a
+        refused start charges nothing and a charged step always has its attempt.
+        Lock order: the DAG row, then the task row (share), then the budget row.
+        """
+        if not isinstance(session, AsyncSession) or not session.in_transaction():
+            raise InvalidOrchestratorArgumentError("session")
+        check_uuid("dag_id", dag_id)
+        check_int("epoch", epoch, minimum=1, maximum=MAX_INT32)
+        check_label("key", key, maximum=32)
+        check_int(
+            "max_attempts", max_attempts, minimum=1, maximum=MAX_ATTEMPTS_PER_RUNG
+        )
+        return await self._start_node(session, dag_id, epoch, key, max_attempts)
+
+    async def _start_node(
+        self,
+        session: AsyncSession,
+        dag_id: uuid.UUID,
+        epoch: int,
+        key: str,
+        max_attempts: int,
+    ) -> AttemptRecord:
+        locked = await self._open(
+            session, dag_id, epoch, check_run=True, require_running=True
+        )
+        row = locked.nodes.get(key)
+        if row is None:
+            raise NodeStateError()
+        if row.state is not NodeState.READY or row.rung_attempts >= max_attempts:
+            raise NodeStateError()
+        row.state = NodeState.RUNNING
+        row.attempt_count += 1
+        row.rung_attempts += 1
+        row.finished_at = None
+        row.updated_at = func.now()
+        attempt = DagNodeAttemptRow(
+            dag_id=dag_id,
+            node_key=key,
+            number=row.attempt_count,
+            agent_index=row.agent_index,
+            approach=row.approach,
+            epoch=epoch,
+            state=AttemptState.RUNNING,
+        )
+        session.add(attempt)
+        await session.flush()
+        await session.refresh(attempt)
+        return _attempt_record(attempt)
 
     async def complete_node(
         self,
