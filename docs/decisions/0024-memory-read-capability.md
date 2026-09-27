@@ -1,10 +1,10 @@
 # Memory の読み取り Capability `memory.read`（Retrieval の Audit の量）
 
-- Status: Proposed
+- Status: Approved
 - Date: 2026-09-26
 - Scope: PAW-043（Hybrid Retrieval）と、Long-term Memory を読む以降の Issue（Context の組み立て、Memory 画面の検索など）。書き込みや Shared Memory の管理の Capability は範囲外
 - Supersedes: [Decision 0004](0004-rbac-capability-and-audit-policy.md) のうち、Memory の**読み取り**に関する次の 2 点だけ。「3. Audit の記録と Fail-closed」の 1 の `DENIED_ONLY` の許可リスト（`project.read`、`shared_memory.read`）に `memory.read` を足すこと、「2. Agent への委任」の 2 の委任可の一覧に `memory.read` を足すこと。0004 の他の点（`memory.use` が `REQUIRED` であること、Agent の判定が常に `REQUIRED` であることを含む）は変わらない
-- Approval: 未承認
+- Approval: 2026-09-27、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで「全部推奨どおり」と回答して承認（末尾の「承認時の決定」）
 
 ## 背景
 
@@ -18,7 +18,7 @@ Retrieval は Chat の Turn ごとに呼ぶ（Context の組み立て）ため�
 自分自身の Memory の読み取りだけが `REQUIRED` なのは、読み取りの扱いとして一貫しない。
 Human は 2026-09-25 に、Decision 0019 の 1 を「推奨の方向で承認。0024 で具体化する」と回答した。この Decision がその具体化である。
 
-**この Decision は未承認（Proposed）である。** 承認されるまで、実装は `memory.use`（`REQUIRED`）のままにする（下の「承認後の扱い」）。
+**この Decision は 2026-09-27 に Human が承認した（Approved）。** 実装は Issue [#115](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/115) で行い、それまでコードは `memory.use`（`REQUIRED`）のままである（下の「承認後の扱い」）。
 
 ## 提案
 
@@ -70,7 +70,7 @@ Human は 2026-09-25 に、Decision 0019 の 1 を「推奨の方向で承認。
 
 ## 承認後の扱い
 
-承認されたら、別の Issue（Decision 0019 の実装の後続）として、次を 1 つの PR で行う。
+承認されたら、別の Issue（Decision 0019 の実装の後続。Issue [#115](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/115)）として、次を 1 つの PR で行う。
 
 - `authz/capabilities.py`（Capability、`CAPABILITIES` の Scope・委任・`read_only=True`）、`authz/policy.py`（`_USER` の集合）を変える。Decision 0004 は書き換えない。
 - `retrieval/resolver.py` の User Scope の認可を `memory.use` から `memory.read` にする。`memory.use` の呼び出し（Shared Memory の Candidate の提案など）は変えない。
@@ -88,3 +88,11 @@ authz の Capability の表は他の Issue も変えるため、Merge の順序�
 4. `memory.use`（`REQUIRED`）を、書き込み・提案などの読み取り以外に使い続けること（推奨: 承認）。
 5. 許可した読み取りが Audit に残らないリスクを、Permission Leakage 0 の Test を安全網として受け入れること（推奨: 承認）。
 6. 許可した読み取りの**回数の集計**（Audit ではなく Metric）を後で足すか（推奨: 今は決めない。必要になったら別の Issue）。
+
+## 承認時の決定（2026-09-27）
+
+Human は、作業 Session で上の 6 点について推奨つきの説明を受け、「全部推奨どおり」と回答して承認した（6 点を一括で。個別の変更はない）。**6 点すべてが推奨どおりで、設計の変更はない。**
+
+6 点目（許可した読み取りの回数の集計）は、推奨どおり今は決めない。必要になったら別の Issue で扱う。実装（`memory.read` の追加と Retrieval の User Scope の認可の置き換え）は、下の「承認後の扱い」のとおり別の Issue で行う。
+
+承認後に方針を変える場合は、この Decision を書き換えず、新しい Decision から `Supersedes` する。
