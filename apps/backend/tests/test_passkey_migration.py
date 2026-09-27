@@ -39,7 +39,7 @@ from .support import paw_environment
 from .test_migrations import offline_config
 
 REVISION = "0023"
-PREVIOUS = "0086"
+PREVIOUS = "0088"
 NEW_TABLES = ("user_passkeys", "passkey_challenges")
 COMPARED = (*NEW_TABLES, "auth_sessions")
 SCHEMA = "paw_passkey_drift_check"
