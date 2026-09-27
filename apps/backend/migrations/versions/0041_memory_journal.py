@@ -18,7 +18,7 @@ the two drift apart. Constraint names come from the naming convention of
 ``paw_backend.db.Base.metadata``.
 
 Revision ID: 0041
-Revises: 0086
+Revises: 0088
 Create Date: 2026-09-25
 """
 
@@ -31,7 +31,7 @@ from sqlalchemy.dialects import postgresql
 from paw_backend.db_roles import grant_app_privileges
 
 revision: str = "0041"
-down_revision: str | Sequence[str] | None = "0086"
+down_revision: str | Sequence[str] | None = "0088"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
