@@ -63,7 +63,7 @@ Retrieval（PAW-043）は `active` だけを候補にし、`session_only` と期
 - `shared`: 扱わない（`SharedMemoryService`、Decision 0009）。
 - `repo` と `project_group`: **この Issue では扱わない**（Not Found と同じに見せる）。Repo Memory の書き込みに Repo の ACL Override の `write` を要するか（`project.memory.use` は Repo では `read` に対応する）、Project Group とは何か、が決まっていないため。
 - 「他人の Memory」「メンバーでない Project の Memory」への拒否は、存在しない ID と同じ Not Found にする（存在を教えない）。Authorizer は Project の状態をメンバーかどうかより先に見るので、メンバーでない人の Archived / Pending deletion の Project の Memory への拒否（`project_state_forbids`）も Not Found にする。
-- 履歴（`history`）は現在の Version を読める人に返し、公開範囲が現在と違う過去の Version（後の Flow で広げた Memory など）は、その公開範囲も読める人にだけ含める。広げた後の読者に、広げる前の Private な内容を見せないため。判断はすべて Authorizer が Audit に記録する（どちらの Capability も `REQUIRED`）。Shared Memory のような完了行（Decision 0009 の 13）は書かない。
+- 履歴（`history`）は現在の Version を読める人に返し、公開範囲が現在と違う過去の Version（後の Flow で広げた Memory など）は、その公開範囲も読める人にだけ含める。広げた後の読者に、広げる前の Private な内容を見せないため。この絞り込みは SQL で行う（`memory/acl.py` の `readable_memory_versions` と `scope IN` を、Authorizer が許した公開範囲から作る）。読めない Version の内容は Backend にも届かない。認可の前に読むのは公開範囲の列（`scope` と Scope ID）だけで、これと循環検査（真偽だけを返す）を ACL の例外として文書化する。判断はすべて Authorizer が Audit に記録する（どちらの Capability も `REQUIRED`）。Shared Memory のような完了行（Decision 0009 の 13）は書かない。
 
 ### 4. 手動で書ける鮮度
 

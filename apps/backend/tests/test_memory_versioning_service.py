@@ -473,6 +473,85 @@ class AccessTest(PostgresVersioningTestCase):
         mine = await self.versioning.history(owner, private.memory_id)
         self.assertEqual([v.version_number for v in mine], [1, 2])
 
+    def widened(self):
+        """A private version 1 (superseded) and a project-scoped version 2."""
+        project = self.seed_project()
+        team = self.seed_team(project)
+        owner = self.actor(team.contributor)
+        private = self.seed(
+            "private draft",
+            "owner only secret",
+            owner=owner.user_id,
+            status="superseded",
+        )
+        self.seed(
+            "team rule",
+            "deploy backend friday",
+            scope="project",
+            project=project,
+            memory_id=private.memory_id,
+            version_number=2,
+        )
+        return team, owner, private
+
+    async def test_the_earlier_private_version_never_leaves_the_database(self):
+        # memory/acl.py: every read of memory_versions applies the ACL in SQL, so a
+        # reader of the project never receives the owner's private version, not
+        # even to filter it out afterwards.
+        team, owner, private = self.widened()
+        for reader in (team.viewer, team.manager):
+            with self.subTest(reader):
+                seen, values = await self.returned_values(
+                    lambda service, reader=reader: service.history(
+                        self.actor(reader), private.memory_id
+                    )
+                )
+                self.assertEqual([v.version_number for v in seen], [2])
+                self.assertIn("team rule", values)
+                self.assertNotIn("private draft", values)
+                self.assertNotIn("owner only secret", values)
+        # The owner reads both, through the same filtered query.
+        mine, values = await self.returned_values(
+            lambda service: service.history(owner, private.memory_id)
+        )
+        self.assertEqual([v.version_number for v in mine], [1, 2])
+        self.assertIn("owner only secret", values)
+
+    async def test_restoring_a_private_version_does_not_read_its_content(self):
+        team, _owner, private = self.widened()
+        for writer in (team.contributor, team.manager):
+            with self.subTest(writer):
+                outcome, values = await self.returned_values(
+                    lambda service, writer=writer: service.restore_version(
+                        self.actor(writer), private.memory_id, 2, 1
+                    )
+                )
+                self.assertIsInstance(outcome, MemoryStateError)
+                self.assertEqual(outcome.problem, StateProblem.SCOPE_MISMATCH)
+                self.assertNotIn("private draft", values)
+                self.assertNotIn("owner only secret", values)
+        self.assertEqual(len(self.versions(private.memory_id)), 2)
+
+    async def test_a_denied_reader_receives_no_content_at_all(self):
+        owner, other = self.user(), self.user()
+        created = await self.versioning.create_memory(
+            owner, draft(title="mine only", content="owner only secret")
+        )
+        calls = (
+            lambda service: service.history(other, created.memory_id),
+            lambda service: service.edit_memory(
+                other, created.memory_id, 1, MemoryChanges(content="x")
+            ),
+            lambda service: service.restore_version(other, created.memory_id, 1, 1),
+            lambda service: service.deprecate_memory(other, created.memory_id, 1),
+            lambda service: service.revalidate_memory(other, created.memory_id, 1),
+        )
+        for call in calls:
+            outcome, values = await self.returned_values(call)
+            self.assertIsInstance(outcome, MemoryNotFoundError)
+            self.assertNotIn("mine only", values)
+            self.assertNotIn("owner only secret", values)
+
 
 @requires_postgres
 class RestoreDeprecateRevalidateTest(PostgresVersioningTestCase):

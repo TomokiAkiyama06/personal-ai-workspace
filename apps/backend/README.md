@@ -3279,6 +3279,8 @@ Rerank（Reranker Protocol）→ 構造化 Score（confirmed・鮮度・importan
 
 他人の Memory・メンバーでない Project の Memory への拒否は、存在しない ID と同じ `MemoryNotFoundError` です（存在を教えない）。エラーの文言は閉じた語彙だけで、本文・ID・Driver の文言を含みません。
 
+**ACL は SQL で掛けます**（`memory/acl.py` の不変条件）。Version の内容（題・本文・属性など）を読む Query はどれも、Authorizer が許した公開範囲から作った `readable_memory_versions` と `scope IN` を WHERE に含みます。読めない Version（広げる前の Private な Version など）は Backend に届かず、後から捨てるのではありません。例外は 2 つだけで、どちらも ACL の入力しか返しません: 認可の前に読む**公開範囲の列**（`scope` と 4 つの Scope ID、現在の Version の ID と番号。ACL はこの列から決まり、拒否の Audit と Not Found のために要る）と、手動の `supersedes` / `extends` の**循環検査**（Graph 全体を辿り、真偽を 1 つ返す）。鮮度の Job は `system` の Actor で UPDATE して件数を返すだけで、内容を読みません。`test_memory_versioning_service.py` は、実行された SELECT を取り出して再実行し、返った値に Private な題・本文がないことを確かめます。
+
 ### 鮮度の Job（`FreshnessMaintenance`）
 
 Backend 内部の Job です（認可はなく、変更は `system` を Actor として記録されます）。1 回の呼び出しで最大 `batch`（既定 500）件を、ロックした CTE（`FOR UPDATE SKIP LOCKED`）で選んで変え、変えた件数を返します。0 になるまで繰り返します。同じ Version に 2 回印を付けません。

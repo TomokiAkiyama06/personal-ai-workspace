@@ -6,10 +6,11 @@ and the retriever of PAW-043 checks what a normal retrieval gets afterwards.
 Results are read back with SQL. Nothing depends on the real clock.
 """
 
+from collections.abc import Awaitable, Callable
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import text
+from sqlalchemy import event, text
 
 from paw_backend.db import Database
 from paw_backend.memory.versioning import (
@@ -74,3 +75,48 @@ class PostgresVersioningTestCase(PostgresRetrievalTestCase):
 
     def audit_actions(self) -> list[tuple[str, str]]:
         return [(event.action, event.decision) for event in self.sink.events]
+
+    # -- what leaves the database ------------------------------------------------------
+
+    async def returned_values(
+        self, call: Callable[[MemoryVersioningService], Awaitable[Any]]
+    ) -> tuple[Any, set[Any]]:
+        """Run ``call`` and collect every value its reads of memories returned.
+
+        Each SELECT that names ``memory_versions`` is captured with its parameters
+        and executed again, afterwards, on a connection of the test (the database
+        has not changed in between for a read). The values of the rows it returns
+        are what the backend received. ``call``'s exception is returned, not raised.
+        """
+        database = self._database()
+        service = MemoryVersioningService(database, self.authorizer, clock=self.clock)
+        captured: list[tuple[str, Any]] = []
+
+        def record(connection, cursor, statement, parameters, *_):
+            head = statement.lstrip().upper()
+            if "memory_versions" in statement and head.startswith(("SELECT", "WITH")):
+                captured.append((statement, parameters))
+
+        engine = database.engine.sync_engine
+        event.listen(engine, "before_cursor_execute", record)
+        try:
+            try:
+                outcome: Any = await call(service)
+            except Exception as error:  # noqa: BLE001 - returned to the test
+                outcome = error
+        finally:
+            event.remove(engine, "before_cursor_execute", record)
+        values: set[Any] = set()
+        raw = self.engine.raw_connection()
+        try:
+            cursor = raw.cursor()
+            for statement, parameters in captured:
+                cursor.execute(statement, parameters)
+                for row in cursor.fetchall():
+                    values.update(
+                        value for value in row if isinstance(value, str | UUID)
+                    )
+            raw.rollback()
+        finally:
+            raw.close()
+        return outcome, values

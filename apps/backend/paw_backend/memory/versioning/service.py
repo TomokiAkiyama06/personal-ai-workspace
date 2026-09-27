@@ -72,9 +72,36 @@ Order of every call
    advisory lock per memory (``memory_lock_key``; two memories in a fixed order;
    a ``supersedes`` / ``extends`` relation also takes ``RELATION_GRAPH_LOCK_KEY``
    so that its cycle check sees every other such relation), and reads the current
-   version ``FOR UPDATE``.
-3. The actor is authorized against that version's scope.
-4. The change is written; a lock wait over the timeout is :class:`MemoryBusyError`.
+   version's **audience** ``FOR UPDATE`` (see "The ACL in SQL").
+3. The actor is authorized against that audience.
+4. The version's content is read with the ACL in SQL, then the change is written;
+   a lock wait over the timeout is :class:`MemoryBusyError`.
+
+The ACL in SQL
+--------------
+``memory/acl.py``: every read of ``memory_versions`` applies
+:func:`~paw_backend.memory.acl.readable_memory_versions`, so that a row the actor
+may not read never reaches the backend, not even to be filtered out afterwards.
+Every read of a version's content (title, content, attributes and the other
+columns: ``_load``, ``history``) applies that condition, built from the audiences
+the Authorizer allowed (``_readable``), and ``scope IN`` those audiences' scopes.
+
+Two reads are documented exceptions, because the ACL cannot be decided without
+them and nothing but the ACL's own inputs is returned:
+
+* the **audience** of a version (``_AUDIENCE_COLUMNS``: its scope and the four
+  scope ids, plus the id and number of the current version to lock and compare).
+  The ACL is derived from exactly these columns; reading them lets the Authorizer
+  decide (and audit) the actor's access, and a denial is reported as not found;
+* the **cycle check** (``_REACHES``) of a manual ``supersedes`` / ``extends``,
+  which walks the whole relation graph (a cycle through versions the actor cannot
+  read must be refused too) and returns one boolean.
+
+The duplicate check of a relation reads ``memory_relations`` only between the two
+versions the actor was just allowed to change, and only their ids and type.
+
+The freshness jobs (``freshness.py``) run as the ``system`` actor, not for a
+person: they UPDATE rows and return a count, and read no content.
 
 The Immediate Journal's consolidator does not take these advisory locks. It
 supersedes with ``UPDATE ... WHERE status = 'active'`` and inserts under the unique
@@ -84,14 +111,15 @@ consolidator retries its job; this service raises
 """
 
 import logging
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
 import psycopg.errors
-from sqlalchemy import func, insert, select, text, update
+from sqlalchemy import ColumnElement, and_, func, insert, select, text, update
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -106,6 +134,8 @@ from paw_backend.authz import (
     Resource,
 )
 from paw_backend.db import Database
+from paw_backend.memory.acl import Principal as AclPrincipal
+from paw_backend.memory.acl import readable_memory_versions
 from paw_backend.memory.metadata import metadata_change_actor
 from paw_backend.memory.models import (
     ActorType,
@@ -198,6 +228,87 @@ def memory_lock_key(memory_id: UUID) -> str:
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+# The columns the ACL is derived from (see "The ACL in SQL"): read before the actor
+# is authorized, and nothing else is.
+_SCOPE_COLUMNS = (
+    _VERSIONS.c.scope,
+    _VERSIONS.c.owner_user_id,
+    _VERSIONS.c.project_id,
+    _VERSIONS.c.project_group_id,
+    _VERSIONS.c.repo_id,
+)
+_AUDIENCE_COLUMNS = (
+    _VERSIONS.c.id,
+    _VERSIONS.c.memory_id,
+    _VERSIONS.c.version_number,
+    *_SCOPE_COLUMNS,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _Audience:
+    """Who can read a version: what the Authorizer decides on (no content)."""
+
+    memory_id: UUID
+    scope: MemoryScope
+    owner_user_id: UUID | None
+    project_id: UUID | None
+    project_group_id: UUID | None
+    repo_id: UUID | None
+    version_id: UUID | None = None
+    version_number: int | None = None
+
+    @classmethod
+    def of(cls, memory_id: UUID, row: Any) -> "_Audience":
+        mapping = row._mapping
+        return cls(
+            memory_id=memory_id,
+            scope=MemoryScope(row.scope),
+            owner_user_id=row.owner_user_id,
+            project_id=row.project_id,
+            project_group_id=row.project_group_id,
+            repo_id=row.repo_id,
+            version_id=mapping.get("id"),
+            version_number=mapping.get("version_number"),
+        )
+
+    @property
+    def audience(
+        self,
+    ) -> tuple[str, UUID | None, UUID | None, UUID | None, UUID | None]:
+        """The same tuple as :attr:`MemoryVersionView.audience`."""
+        return (
+            self.scope.value,
+            self.owner_user_id,
+            self.project_id,
+            self.project_group_id,
+            self.repo_id,
+        )
+
+
+def _readable(actor: Principal, allowed: Iterable[_Audience]) -> ColumnElement[bool]:
+    """The ACL of ``memory/acl.py`` over the audiences the Authorizer allowed.
+
+    Only ``user`` and ``project`` audiences are ever allowed here. ``scope IN``
+    those scopes narrows ``readable_memory_versions`` (whose ``shared`` scope is
+    open to every principal); with nothing allowed, the condition matches no row.
+    """
+    audiences = list(allowed)
+    principal = AclPrincipal(
+        actor.user_id,
+        project_ids=frozenset(
+            a.project_id
+            for a in audiences
+            if a.scope is MemoryScope.PROJECT and a.project_id is not None
+        ),
+    )
+    scopes = sorted({a.scope.value for a in audiences})
+    return and_(
+        readable_memory_versions(principal, MemoryVersion),
+        MemoryVersion.scope.in_(scopes),
+    )
 
 
 def _view(row: Any) -> MemoryVersionView:
@@ -351,12 +462,16 @@ class MemoryVersioningService:
             raise
 
     @staticmethod
-    async def _current(
+    async def _current_audience(
         session: AsyncSession, memory_id: UUID, *, lock: bool = True
-    ) -> MemoryVersionView:
-        """The current (highest numbered) version, locked ``FOR UPDATE``."""
+    ) -> _Audience:
+        """The current (highest numbered) version's audience, locked ``FOR UPDATE``.
+
+        Only ``_AUDIENCE_COLUMNS`` (see "The ACL in SQL"): the actor is not
+        authorized yet.
+        """
         statement = (
-            select(*_VERSIONS.c)
+            select(*_AUDIENCE_COLUMNS)
             .where(_VERSIONS.c.memory_id == memory_id)
             .order_by(_VERSIONS.c.version_number.desc())
             .limit(1)
@@ -366,21 +481,71 @@ class MemoryVersioningService:
         row = (await session.execute(statement)).first()
         if row is None:
             raise MemoryNotFoundError
-        return _view(row)
+        return _Audience.of(memory_id, row)
 
     @staticmethod
-    async def _version(
+    async def _version_audience(
         session: AsyncSession, memory_id: UUID, number: int
-    ) -> MemoryVersionView | None:
+    ) -> _Audience | None:
+        """Version ``number``'s audience only (``_SCOPE_COLUMNS``)."""
         row = (
             await session.execute(
-                select(*_VERSIONS.c).where(
+                select(*_SCOPE_COLUMNS).where(
                     _VERSIONS.c.memory_id == memory_id,
                     _VERSIONS.c.version_number == number,
                 )
             )
         ).first()
-        return None if row is None else _view(row)
+        return None if row is None else _Audience.of(memory_id, row)
+
+    @staticmethod
+    async def _load(
+        session: AsyncSession,
+        actor: Principal,
+        allowed: _Audience,
+        memory_id: UUID,
+        number: int,
+    ) -> MemoryVersionView:
+        """Version ``number`` with its content, read through the ACL in SQL.
+
+        ``allowed`` is an audience the Authorizer allowed; a version of another
+        audience is not returned (:class:`MemoryNotFoundError`).
+        """
+        row = (
+            await session.execute(
+                select(*_VERSIONS.c).where(
+                    _VERSIONS.c.memory_id == memory_id,
+                    _VERSIONS.c.version_number == number,
+                    _readable(actor, (allowed,)),
+                )
+            )
+        ).first()
+        if row is None:
+            raise MemoryNotFoundError
+        return _view(row)
+
+    async def _current(
+        self,
+        session: AsyncSession,
+        actor: Principal,
+        memory_id: UUID,
+        *,
+        write: bool,
+        lock: bool = True,
+    ) -> MemoryVersionView:
+        """The current version, authorized, then read through the ACL in SQL."""
+        audience = await self._current_audience(session, memory_id, lock=lock)
+        await self._authorize_version(session, actor, audience, write=write)
+        return await self._load_current(session, actor, audience)
+
+    async def _load_current(
+        self, session: AsyncSession, actor: Principal, audience: _Audience
+    ) -> MemoryVersionView:
+        """``_load`` of the version whose audience ``_current_audience`` read."""
+        assert audience.version_number is not None  # _AUDIENCE_COLUMNS has it
+        return await self._load(
+            session, actor, audience, audience.memory_id, audience.version_number
+        )
 
     async def _project_member(
         self, session: AsyncSession, actor: Principal, project_id: UUID
@@ -425,11 +590,11 @@ class MemoryVersioningService:
         self,
         session: AsyncSession,
         actor: Principal,
-        version: MemoryVersionView,
+        version: _Audience,
         *,
         write: bool,
     ) -> None:
-        """May ``actor`` change (or, ``write=False``, read) this memory?"""
+        """May ``actor`` change (or, ``write=False``, read) this audience?"""
         if version.scope is MemoryScope.SHARED:
             raise MemoryScopeNotSupportedError
         principal = actor
@@ -572,29 +737,34 @@ class MemoryVersioningService:
         actor = self._check_actor(actor)
         memory_id = validate_uuid("memory_id", memory_id)
         async with self._transaction() as session:
-            current = await self._current(session, memory_id, lock=False)
+            current = await self._current_audience(session, memory_id, lock=False)
             await self._authorize_version(session, actor, current, write=False)
-            rows = await session.execute(
-                select(*_VERSIONS.c)
+            # The other audiences of the memory: scope columns only (no content).
+            others = await session.execute(
+                select(*_SCOPE_COLUMNS)
                 .where(_VERSIONS.c.memory_id == memory_id)
-                .order_by(_VERSIONS.c.version_number)
+                .distinct()
             )
-            versions = tuple(_view(row) for row in rows)
-            readable = {current.audience: True}
-            for version in versions:
-                if version.audience in readable:
+            allowed = [current]
+            for row in others:
+                audience = _Audience.of(memory_id, row)
+                if audience.audience == current.audience:
                     continue
                 try:
-                    await self._authorize_version(session, actor, version, write=False)
+                    await self._authorize_version(session, actor, audience, write=False)
                 except (
                     MemoryNotFoundError,
                     MemoryPermissionError,
                     MemoryScopeNotSupportedError,
                 ):
-                    readable[version.audience] = False
-                else:
-                    readable[version.audience] = True
-            return tuple(v for v in versions if readable[v.audience])
+                    continue
+                allowed.append(audience)
+            rows = await session.execute(
+                select(*_VERSIONS.c)
+                .where(_VERSIONS.c.memory_id == memory_id, _readable(actor, allowed))
+                .order_by(_VERSIONS.c.version_number)
+            )
+            return tuple(_view(row) for row in rows)
 
     # -- create ----------------------------------------------------------------
 
@@ -679,8 +849,7 @@ class MemoryVersioningService:
         now = self._now()
         try:
             async with self._transaction(memory_id) as session:
-                current = await self._current(session, memory_id)
-                await self._authorize_version(session, actor, current, write=True)
+                current = await self._current(session, actor, memory_id, write=True)
                 self._check_expected(current, expected_version)
                 rules.check_active(current)
                 changed = rules.changed_fields(current, changes)
@@ -749,18 +918,21 @@ class MemoryVersioningService:
         now = self._now()
         try:
             async with self._transaction(memory_id) as session:
-                current = await self._current(session, memory_id)
-                await self._authorize_version(session, actor, current, write=True)
+                current = await self._current(session, actor, memory_id, write=True)
                 self._check_expected(current, expected_version)
-                source = await self._version(session, memory_id, source_version)
-                if source is None:
+                audience = await self._version_audience(
+                    session, memory_id, source_version
+                )
+                if audience is None:
                     raise MemoryStateError(StateProblem.UNKNOWN_VERSION)
-                rules.check_restorable(current, source)
-                if source.scope is not current.scope or source.audience != (
-                    current.audience
-                ):
-                    # A restore never changes who can read the memory.
+                if audience.audience != current.audience:
+                    # A restore never changes who can read the memory. Decided on
+                    # the audience alone: the source's content is not read.
                     raise MemoryStateError(StateProblem.SCOPE_MISMATCH)
+                source = await self._load(
+                    session, actor, audience, memory_id, source_version
+                )
+                rules.check_restorable(current, source)
                 if freshness is not None:
                     rules.check_manual_freshness(freshness, current.scope, now)
                     kept = _freshness_columns(freshness, now)
@@ -803,12 +975,11 @@ class MemoryVersioningService:
         memory_id = validate_uuid("memory_id", memory_id)
         expected_version = validate_version_number("expected_version", expected_version)
         async with self._transaction(memory_id) as session:
-            current = await self._current(session, memory_id)
-            await self._authorize_version(session, actor, current, write=True)
+            current = await self._current(session, actor, memory_id, write=True)
             self._check_expected(current, expected_version)
             rules.check_active(current)
             await self._set_status(session, current, MemoryStatus.DEPRECATED, actor)
-            return await self._current(session, memory_id, lock=False)
+            return replace(current, status=MemoryStatus.DEPRECATED)
 
     async def revalidate_memory(
         self,
@@ -833,8 +1004,7 @@ class MemoryVersioningService:
         now = self._now()
         try:
             async with self._transaction(memory_id) as session:
-                current = await self._current(session, memory_id)
-                await self._authorize_version(session, actor, current, write=True)
+                current = await self._current(session, actor, memory_id, write=True)
                 self._check_expected(current, expected_version)
                 rules.check_revalidatable(current)
                 values = {
@@ -904,12 +1074,17 @@ class MemoryVersioningService:
                 newer_id, older_id, graph=kind in rules.ACYCLIC_RELATIONS
             ) as session:
                 # Rows are locked in the order of the ids, like the advisory locks.
-                currents: dict[UUID, MemoryVersionView] = {}
+                audiences: dict[UUID, _Audience] = {}
                 for memory_id in sorted((newer_id, older_id)):
-                    currents[memory_id] = await self._current(session, memory_id)
-                newer, older = currents[newer_id], currents[older_id]
-                for version in (newer, older):
-                    await self._authorize_version(session, actor, version, write=True)
+                    audiences[memory_id] = await self._current_audience(
+                        session, memory_id
+                    )
+                for memory_id in (newer_id, older_id):
+                    await self._authorize_version(
+                        session, actor, audiences[memory_id], write=True
+                    )
+                newer = await self._load_current(session, actor, audiences[newer_id])
+                older = await self._load_current(session, actor, audiences[older_id])
                 self._check_expected(newer, newer_expected)
                 self._check_expected(older, older_expected)
                 rules.check_relatable(relation, newer, older)
@@ -971,7 +1146,7 @@ class MemoryVersioningService:
         if _constraint(error) not in _VERSION_RACES:
             return
         async with self._database.session() as session:
-            current = await self._current(session, memory_id, lock=False)
+            current = await self._current_audience(session, memory_id, lock=False)
         raise MemoryVersionConflictError(expected, current.version_number) from None
 
 
