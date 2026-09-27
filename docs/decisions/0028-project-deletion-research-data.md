@@ -1,10 +1,10 @@
 # Project 削除時の調査結果（Evidence / Claim Provenance、Research Scratch）の扱い
 
-- Status: Proposed
+- Status: Approved
 - Date: 2026-09-27
 - Scope: Issue [#88](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/88)。[Decision 0008](0008-project-membership-and-lifecycle-policy.md) の 2 節が保留した「調査結果の扱い」と、[Decision 0011](0011-research-provenance-model.md) の 6 節が保留した「Project 削除時の Provenance の扱い」に答える。対象は `paw_backend/research/provenance/`（`ProvenanceStore.purge_projects`）と `paw_backend/research/scratch/`（`ScratchStore.purge_projects`）、Migration `0088`（Application Role への DELETE 権限の追加）。Long-term Memory（`memories` / `memory_sources`）のスキーマ変更は対象外（背景・4 節を参照）
 - Supersedes: なし（0008 と 0011 を書き換えず、両者が「別の Decision で決める」と予告した空欄を埋める）
-- Approval: 未承認
+- Approval: 2026-09-27、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで「全部推奨どおり」と回答して承認（末尾の「承認時の決定」）
 
 ## 背景
 
@@ -109,3 +109,9 @@
 3. **「唯一の Provenance を失う Memory」の扱いは、対応する Schema がまだ存在しないため、今回は実装せず、将来 Memory ↔ Research の対応を作る Issue への制約（4 節）として引き継ぐ**でよいか。推奨: はい。
 4. **Outbox（Decision 0008 の 8 節と同じ冪等な Processor）を新設せず、`RepositoryService.purge_projects` と同じ「呼び出しごとに `projects.status` を確認するだけ」の形にする**（3 節）でよいか。クラッシュ時に一部の Project の Purge が次回まで持ち越されず失われる（次の `purge_expired` はそのIDをもう返さない）リスクを許容するか。推奨: はい（先例と揃え、必要になれば別 Decision で Outbox 化する）。
 5. **Audit は `audit_events` への行を書かず、削除した Project 数だけを `logging` の INFO に残す**（5 節）ことでよいか。推奨: はい（`purge_expired` / `ProjectTaskStopper` / `RepositoryService.purge_projects` と同じ扱い）。
+
+## 承認時の決定（2026-09-27）
+
+Human は、作業 Session で上の 5 点について推奨つきの説明を受け、「全部推奨どおり」と回答して承認した（5 点を一括で。個別の変更はない）。**5 点すべてが推奨どおりで、設計の変更はない。**
+
+承認後に方針を変える場合は、この Decision を書き換えず、新しい Decision から `Supersedes` する。
