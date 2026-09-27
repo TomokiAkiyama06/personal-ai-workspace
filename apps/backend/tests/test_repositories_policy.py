@@ -87,8 +87,9 @@ class OtherFieldsTest(unittest.TestCase):
                 policy.min_uid,
                 policy.git_timeout_s,
                 policy.clone_timeout_s,
+                policy.gh_timeout_s,
             ),
-            ("workspaces", ("{home}",), ("github.com",), 1000, 30.0, 900.0),
+            ("workspaces", ("{home}",), ("github.com",), 1000, 30.0, 900.0, 30.0),
         )
         self.assertEqual(policy.pending_timeout_s, 1800.0)
 
@@ -153,11 +154,17 @@ class OtherFieldsTest(unittest.TestCase):
             {"git_timeout_s": limits.MAX_GIT_TIMEOUT_S + 1},
             {"clone_timeout_s": 0},
             {"clone_timeout_s": None},
+            {"gh_timeout_s": 0},
+            {"gh_timeout_s": -1},
+            {"gh_timeout_s": True},
+            {"gh_timeout_s": "30"},
+            {"gh_timeout_s": limits.MAX_GIT_TIMEOUT_S + 1},
         ):
             with self.subTest(kwargs=kwargs):
                 with self.assertRaises(ValueError):
                     RepositoryPolicy(**kwargs)
         self.assertEqual(RepositoryPolicy(git_timeout_s=5).git_timeout_s, 5.0)
+        self.assertEqual(RepositoryPolicy(gh_timeout_s=5).gh_timeout_s, 5.0)
         self.assertEqual(RepositoryPolicy(min_uid=1).min_uid, 1)
 
 
@@ -170,6 +177,7 @@ class SettingsTest(unittest.TestCase):
             PAW_REPOSITORY_MIN_LINUX_UID="2000",
             PAW_REPOSITORY_GIT_TIMEOUT_SECONDS="12.5",
             PAW_REPOSITORY_CLONE_TIMEOUT_SECONDS="60",
+            PAW_REPOSITORY_GH_TIMEOUT_SECONDS="9.5",
         ):
             policy = RepositoryPolicy.from_settings(Settings())
 
@@ -181,6 +189,7 @@ class SettingsTest(unittest.TestCase):
                 policy.min_uid,
                 policy.git_timeout_s,
                 policy.clone_timeout_s,
+                policy.gh_timeout_s,
             ),
             (
                 "work",
@@ -189,6 +198,7 @@ class SettingsTest(unittest.TestCase):
                 2000,
                 12.5,
                 60.0,
+                9.5,
             ),
         )
 
@@ -217,6 +227,7 @@ class SettingsTest(unittest.TestCase):
             ("repository_min_linux_uid", 0),
             ("repository_git_timeout_seconds", 0),
             ("repository_clone_timeout_seconds", 7201),
+            ("repository_gh_timeout_seconds", 0),
         ):
             with self.subTest(name=name, value=value):
                 with self.assertRaises(ValueError):

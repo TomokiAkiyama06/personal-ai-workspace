@@ -427,21 +427,29 @@ class RoleSplitTest(AuditPostgresTestCase):
         )
 
     async def test_even_an_insert_capable_role_cannot_choose_recorded_at(self):
-        # The trigger overrides the value, so the database clock is the only one.
-        before = datetime.now(UTC) - timedelta(seconds=5)
-        async with self.app_db.session() as session:
-            await session.execute(
-                text(
-                    "INSERT INTO audit_events (id, correlation_id, occurred_at, "
-                    "recorded_at, action, resource_kind, decision, reason) VALUES "
-                    "(gen_random_uuid(), gen_random_uuid(), '2000-01-01', "
-                    "'2000-01-01', 'a', 'system', 'deny', 'r')"
-                )
-            )
-            await session.commit()
-        (row,) = await self.rows()
-        self.assertEqual(row.occurred_at, datetime(2000, 1, 1, tzinfo=UTC))
-        self.assertGreater(row.recorded_at, before)  # not 2000-01-01
+        # The trigger still forces recorded_at to the database clock (Migration
+        # 0025), unconditionally. Since Migration 0086 (#86, Decision 0027) made
+        # ``recorded_at`` the partition key, a value far enough from "now" to
+        # fall in a different partition (the legacy one, here) cannot be
+        # silently corrected: PostgreSQL has already routed the row to that
+        # partition before the BEFORE ROW trigger runs, and does not support a
+        # BEFORE ROW trigger moving a row to a different one. So the insert is
+        # refused outright instead of silently corrected — a *stronger* form of
+        # the same guarantee (a fabricated ``recorded_at`` is never stored,
+        # whether accepted-and-corrected or refused). A default-driven insert
+        # (no explicit ``recorded_at``, what every real writer does — see
+        # ``paw_backend.authz.audit`` and ``paw_backend.auth.audit``) is
+        # unaffected: the default already evaluates to "now", so there is
+        # nothing for the trigger to move.
+        error = await self.execute_rejected(
+            "INSERT INTO audit_events (id, correlation_id, occurred_at, "
+            "recorded_at, action, resource_kind, decision, reason) VALUES "
+            "(gen_random_uuid(), gen_random_uuid(), '2000-01-01', "
+            "'2000-01-01', 'a', 'system', 'deny', 'r')",
+            self.app_db,
+        )
+        self.assertIsInstance(error.orig, psycopg.errors.FeatureNotSupported)
+        self.assertEqual(await self.scalar("SELECT count(*) FROM audit_events"), 0)
 
     async def test_public_has_no_access_to_the_table(self):
         # OTHER_ROLE exists but was not granted anything.
