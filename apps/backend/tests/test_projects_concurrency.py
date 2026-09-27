@@ -11,8 +11,11 @@ import asyncio
 import unittest
 from datetime import timedelta
 
+from sqlalchemy import text
+
 from paw_backend.authz.roles import ProjectRole
 from paw_backend.projects import (
+    AccountNotActiveError,
     LastManagerError,
     MemberStatus,
     ProjectBusyError,
@@ -229,6 +232,93 @@ class ConcurrencyTest(AccessTestCase):
         result = await self.service.purge_expired()
         self.assertEqual(result.purged, ())
         self.assertEqual(self.project_row(self.project_id)["status"], "archived")
+
+
+@requires_postgres
+class AccountDeletionRaceTest(AccessTestCase):
+    """Becoming a Manager is serialised with the deletion of the user's account.
+
+    The deletion (PAW-024, ``auth.onboarding.lifecycle``) locks the user's row
+    ``FOR NO KEY UPDATE``, then the projects the user manages, checks that each
+    keeps a live Manager and sets ``pending_deletion``. An operation that makes
+    a user an accepted Manager (creating a project, accepting an invitation,
+    a promotion) locks that user's row ``FOR SHARE`` and re-reads the status in
+    its own transaction: either the deletion then sees the new Manager, or the
+    operation sees the deletion and is refused (Codex P1 on PR #123). The test
+    holds the deletion's lock and change itself, as the deletion would.
+    """
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        self.project_id = self.seed_project(name="Alpha")
+        self.manager = self.seed_manager(self.project_id)
+
+    def hold_deletion(self, user_id):
+        """The deletion of ``user_id`` between its row lock and its commit."""
+        connection, transaction = self.hold_row_lock(
+            "SELECT id FROM users WHERE id = :id FOR NO KEY UPDATE", id=user_id
+        )
+        connection.execute(
+            text("UPDATE users SET status = 'pending_deletion' WHERE id = :id"),
+            {"id": user_id},
+        )
+        return transaction
+
+    async def finish(self, task):
+        async with asyncio.timeout(DEADLINE):
+            return await asyncio.gather(task, return_exceptions=True)
+
+    async def test_creating_a_project_waits_for_the_deletion_and_is_refused(self):
+        creator = self.seed_user()
+        transaction = self.hold_deletion(creator)
+        task = self.spawn(self.service.create_project(self.actor(creator), "Beta"))
+        await asyncio.sleep(0.3)
+        self.assertWaiting(task)
+        transaction.commit()
+        (result,) = await self.finish(task)
+        self.assertIsInstance(result, AccountNotActiveError)
+        self.assertEqual(str(result), "The user's account is not active")
+        self.assertEqual(self.table_count("projects"), 1)
+
+    async def test_creating_goes_on_when_the_deletion_is_rolled_back(self):
+        creator = self.seed_user()
+        transaction = self.hold_deletion(creator)
+        task = self.spawn(self.service.create_project(self.actor(creator), "Beta"))
+        await asyncio.sleep(0.3)
+        self.assertWaiting(task)
+        transaction.rollback()
+        (project,) = await self.finish(task)
+        self.assertEqual(self.member_row(project.id, creator)["role"], "manager")
+
+    async def test_accepting_an_invitation_waits_for_the_deletion_and_is_refused(self):
+        invitee = self.seed_member(
+            self.project_id, role=MANAGER, status=MemberStatus.INVITED
+        )
+        transaction = self.hold_deletion(invitee)
+        task = self.spawn(
+            self.service.accept_invite(self.actor(invitee), self.project_id)
+        )
+        await asyncio.sleep(0.3)
+        self.assertWaiting(task)
+        transaction.commit()
+        (result,) = await self.finish(task)
+        self.assertIsInstance(result, AccountNotActiveError)
+        self.assertEqual(self.member_row(self.project_id, invitee)["status"], "invited")
+
+    async def test_a_promotion_waits_for_the_deletion_and_is_refused(self):
+        viewer = self.seed_member(self.project_id, role=VIEWER)
+        transaction = self.hold_deletion(viewer)
+        task = self.spawn(
+            self.service.change_role(
+                self.actor(self.manager), self.project_id, viewer, MANAGER
+            )
+        )
+        await asyncio.sleep(0.3)
+        self.assertWaiting(task)
+        transaction.commit()
+        (result,) = await self.finish(task)
+        self.assertIsInstance(result, AccountNotActiveError)
+        self.assertEqual(self.member_row(self.project_id, viewer)["role"], "viewer")
 
 
 if __name__ == "__main__":

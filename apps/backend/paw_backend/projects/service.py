@@ -141,7 +141,10 @@ always allowed. Invitations never count as Managers, nor does an accepted
 Manager whose own account is not ``active`` (being deleted, PAW-024 / Decision
 0033): the deletion keeps that user's membership rows so that a restore of the
 account gives them back, but until then the user cannot sign in. Only the
-"live" Managers (accepted, account ``active``) count.
+"live" Managers (accepted, account ``active``) count. Only an ``active`` account
+becomes an accepted Manager: ``create_project``, ``accept_invite`` and a
+``change_role`` to ``MANAGER`` lock that user's row ``FOR SHARE`` and re-read the
+status (:class:`AccountNotActiveError`), which serialises them with the deletion.
 
 The administrator's list (Issue #84, Decision 0008 section 6 and Decision 0004)
 -------------------------------------------------------------------------------
@@ -187,6 +190,7 @@ from paw_backend.db import Database
 from paw_backend.projects import domain, store
 from paw_backend.projects.cursor import decode_cursor, encode_cursor, filter_token
 from paw_backend.projects.errors import (
+    AccountNotActiveError,
     AlreadyInvitedError,
     AlreadyMemberError,
     ConfirmationMismatchError,
@@ -253,6 +257,7 @@ _JOINABLE = (ProjectStatus.ACTIVE, ProjectStatus.ARCHIVED)
 # The audit resource kinds of the actor's own invitation / membership row.
 _INVITATION_KIND = "project_invitation"
 _MEMBERSHIP_KIND = "project_membership"
+_ACTIVE_ACCOUNT = "active"  # ``users.status`` of an account that can sign in
 
 
 def _own_row(kind: str, project_id: uuid.UUID, user_id: uuid.UUID) -> Resource:
@@ -393,6 +398,7 @@ class ProjectService:
         )
         now = self._now()
         async with self._transaction() as session:
+            await self._require_active_account(session, principal.user_id)
             project = await store.insert_project(
                 session,
                 name=name,
@@ -644,6 +650,9 @@ class ProjectService:
         # expired invitation look valid.
         now = self._now()
         async with self._transaction() as session:
+            # The user's row first, then the project's: the order the account
+            # deletion takes them in (see ``_require_active_account``).
+            status = await store.lock_user_status(session, principal.user_id)
             project = await store.get_project(session, project_id, for_update=True)
             if project is None or project.status not in _JOINABLE:
                 raise InviteNotFoundError()
@@ -655,6 +664,8 @@ class ProjectService:
                 raise InviteExpiredError()
             if state is InviteState.MEMBER and existing is not None:
                 return existing
+            if status != _ACTIVE_ACCOUNT:
+                raise AccountNotActiveError()
             return await store.activate_invite(
                 session, project_id, principal.user_id, joined_at=now
             )
@@ -767,8 +778,32 @@ class ProjectService:
                 raise MemberNotFoundError()
             if target.role is role:
                 return target
+            if role is ProjectRole.MANAGER:
+                # A promotion makes a Manager: only of an active account, and
+                # serialised with its deletion. The project row is held; the
+                # deletion of this user never waits for it (the user is not a
+                # Manager of this project yet), so the two cannot deadlock.
+                await self._require_active_account(session, user_id)
             await self._require_manager_left(session, target, project_id, role)
             return await store.set_member_role(session, project_id, user_id, role)
+
+    @staticmethod
+    async def _require_active_account(
+        session: AsyncSession, user_id: uuid.UUID
+    ) -> None:
+        """``AccountNotActiveError`` unless the user's account is ``active``.
+
+        Called by every operation that makes the user an accepted Manager
+        (``create_project``, ``change_role`` to ``MANAGER``; ``accept_invite``
+        does the same in two steps). The user's row is locked ``FOR SHARE``
+        (``store.lock_user_status``) in this transaction, so it is serialised
+        with the account's deletion, which locks that row before it checks that
+        every project it leaves keeps a live Manager (Decision 0033). A missing
+        row is left to the foreign key of the membership (``IntegrityError``).
+        """
+        status = await store.lock_user_status(session, user_id)
+        if status is not None and status != _ACTIVE_ACCOUNT:
+            raise AccountNotActiveError()
 
     @staticmethod
     async def _require_manager_left(

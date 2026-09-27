@@ -737,6 +737,24 @@ async def list_open_invites_of(
     ]
 
 
+async def lock_user_status(session: AsyncSession, user_id: uuid.UUID) -> str | None:
+    """Lock the user's row ``FOR SHARE`` and return its ``status`` (``None``: none).
+
+    ``FOR SHARE`` conflicts with the ``FOR NO KEY UPDATE`` that the deletion of
+    the account takes (PAW-024, ``auth.onboarding.lifecycle``) before it checks
+    the projects the user manages and sets ``pending_deletion``: whoever comes
+    second sees the other's committed change. Two operations of the project
+    module on the same user do not wait for each other.
+    """
+    return (
+        await session.execute(
+            select(USERS.c.status)
+            .where(USERS.c.id == user_id)
+            .with_for_update(read=True)
+        )
+    ).scalar_one_or_none()
+
+
 async def user_is_active(session: AsyncSession, user_id: uuid.UUID) -> bool:
     """Whether ``users`` has a row with this id and ``status = 'active'``."""
     row = (

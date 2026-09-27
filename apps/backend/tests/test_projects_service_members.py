@@ -16,6 +16,7 @@ from paw_backend.authz import Principal, SystemRole
 from paw_backend.authz.policy import Reason
 from paw_backend.authz.roles import ProjectRole
 from paw_backend.projects import (
+    AccountNotActiveError,
     AlreadyInvitedError,
     AlreadyMemberError,
     InvalidProjectInputError,
@@ -952,6 +953,53 @@ class ManagerWhoseAccountIsNotActiveTest(MembersTestCase):
         self.assertEqual(changed.role, VIEWER)
         await self.service.remove_member(self.manager, self.project_id, other)
         self.assertIsNone(self.member_row(self.project_id, other))
+
+    async def test_a_user_whose_account_is_not_active_is_not_made_a_manager(self):
+        # Only an active account may become a Manager: otherwise the deletion's
+        # "a live Manager remains" check could be passed by a Manager who
+        # cannot sign in (Codex P1 on PR #123).
+        for status in self.NOT_ACTIVE:
+            with self.subTest(status=status):
+                viewer = self.seed_member(
+                    self.project_id, user_id=self.seed_user(status=status), role=VIEWER
+                )
+                before = self.snapshot()
+                with self.assertRaises(AccountNotActiveError):
+                    await self.service.change_role(
+                        self.manager, self.project_id, viewer, MANAGER
+                    )
+                await self.assertUnchanged(before)
+                # Other role changes of that member are not a Manager's.
+                changed = await self.service.change_role(
+                    self.manager, self.project_id, viewer, CONTRIBUTOR
+                )
+                self.assertEqual(changed.role, CONTRIBUTOR)
+
+    async def test_a_user_whose_account_is_not_active_cannot_accept(self):
+        for status in self.NOT_ACTIVE:
+            with self.subTest(status=status):
+                invitee = self.seed_member(
+                    self.project_id,
+                    user_id=self.seed_user(status=status),
+                    role=MANAGER,
+                    status=INVITED,
+                )
+                before = self.snapshot()
+                with self.assertRaises(AccountNotActiveError):
+                    await self.service.accept_invite(
+                        self.actor(invitee), self.project_id
+                    )
+                await self.assertUnchanged(before)
+
+    async def test_a_user_whose_account_is_not_active_cannot_create(self):
+        for status in self.NOT_ACTIVE:
+            with self.subTest(status=status):
+                before = self.snapshot()
+                with self.assertRaises(AccountNotActiveError):
+                    await self.service.create_project(
+                        self.actor(self.seed_user(status=status)), "Beta"
+                    )
+                await self.assertUnchanged(before)
 
     async def test_a_restored_manager_counts_again(self):
         other = self.seed_manager_with_account("pending_deletion")

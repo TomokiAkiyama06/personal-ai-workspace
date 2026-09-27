@@ -414,7 +414,11 @@ async def _is_last_manager_in(session: AsyncSession, user_id: uuid.UUID) -> bool
     locked ``FOR UPDATE`` first, in the order of their ids, the lock the project
     module takes for every membership change (``projects.service``): a co-Manager
     leaving, being demoted or being deleted at the same time commits first and
-    the check below (a new statement, so a new snapshot) sees it.
+    the check below (a new statement, so a new snapshot) sees it. Becoming a
+    Manager of a project the user does not manage yet (creating one, accepting
+    an invitation, a promotion) locks the user's row ``FOR SHARE``, which waits
+    for the caller's ``FOR NO KEY UPDATE`` of it: such a project is either seen
+    here or refused there (``AccountNotActiveError``).
     """
     await session.execute(
         text(

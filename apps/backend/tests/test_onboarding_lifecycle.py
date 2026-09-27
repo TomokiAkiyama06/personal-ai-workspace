@@ -19,7 +19,11 @@ from paw_backend.auth.errors import (
 from paw_backend.authz import Authorizer, InMemoryAuditSink
 from paw_backend.authz.roles import ProjectRole, SystemRole
 from paw_backend.identity import UserStatus
-from paw_backend.projects import LastManagerError, ProjectService
+from paw_backend.projects import (
+    AccountNotActiveError,
+    LastManagerError,
+    ProjectService,
+)
 
 from .auth_support import T0, requires_postgres
 from .onboarding_support import PASSWORD, OnboardingTestCase
@@ -273,6 +277,52 @@ class DeleteTest(OnboardingTestCase):
         with self.assertRaises(OwnershipTransferRequiredError):
             await deleting
         self.assertEqual(await self.status_of(bob.id), "active")
+
+    async def test_deleting_waits_for_a_project_being_created_by_the_user(self):
+        # Codex P1 on PR #123: the project module creates a project (and its
+        # sole Manager) holding the creator's row FOR SHARE. The deletion's row
+        # lock must wait for it and then see the new project it manages.
+        bob = await self.make_user("bob")
+        async with self.database.session() as held, held.begin():
+            await held.execute(
+                text("SELECT status FROM users WHERE id = :id FOR SHARE"),
+                {"id": bob.id},
+            )
+            deleting = asyncio.ensure_future(self.delete(bob.id))
+            await asyncio.sleep(0.5)
+            self.assertFalse(deleting.done())
+            project = uuid.uuid4()
+            await held.execute(
+                text(
+                    "INSERT INTO projects (id, name, status, created_by, "
+                    "created_at, updated_at) VALUES (:id, 'p', 'active', :u, "
+                    ":now, :now)"
+                ),
+                {"id": project, "u": bob.id, "now": T0},
+            )
+            await held.execute(
+                text(
+                    "INSERT INTO project_members (project_id, user_id, role, "
+                    "status, invited_at, joined_at) VALUES (:p, :u, 'manager', "
+                    "'active', :now, :now)"
+                ),
+                {"p": project, "u": bob.id, "now": T0},
+            )
+        with self.assertRaises(OwnershipTransferRequiredError):
+            await deleting
+        self.assertEqual(await self.status_of(bob.id), "active")
+
+    async def test_a_deleted_user_cannot_create_a_project(self):
+        bob = await self.make_user("bob")
+        await self.delete(bob.id)
+        projects = ProjectService(
+            self.service_database,
+            Authorizer(InMemoryAuditSink(), clock=self.clock),
+            clock=self.clock,
+        )
+        with self.assertRaises(AccountNotActiveError):
+            await projects.create_project(self.principal(bob), "Beta")
+        self.assertEqual(await self.scalar("SELECT count(*) FROM projects"), 0)
 
     async def test_deleting_does_not_deadlock_with_adding_a_member(self):
         # The project module locks the project row and then inserts a membership

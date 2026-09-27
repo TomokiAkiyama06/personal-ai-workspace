@@ -206,6 +206,24 @@ class InviteeUnavailableError(ProjectError):
         super().__init__("The user cannot be invited")
 
 
+class AccountNotActiveError(ProjectError):
+    """The user who would become an accepted member has no ``active`` account.
+
+    Raised when the creator of a project, the user accepting an invitation, or
+    the member being promoted to Manager is not ``active`` (being deleted, or
+    not yet registered) when the operation re-reads the account under the
+    user's row lock. That lock is what serialises becoming a Manager with the
+    account's deletion (PAW-024, Decision 0033): without it the deletion could
+    see "another live Manager remains" while a new Manager who cannot sign in
+    is being committed.
+    """
+
+    code = "account_not_active"
+
+    def __init__(self) -> None:
+        super().__init__("The user's account is not active")
+
+
 class MemberLimitError(ProjectError):
     """The project holds the maximum number of members plus open invitations."""
 
