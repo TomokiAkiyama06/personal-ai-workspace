@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from paw_backend.config import Settings
 from paw_backend.repositories.limits import (
     DEFAULT_CLONE_TIMEOUT_S,
+    DEFAULT_GH_TIMEOUT_S,
     DEFAULT_GIT_TIMEOUT_S,
     DEFAULT_MIN_LINUX_UID,
     MAX_CLONE_HOSTS,
@@ -93,6 +94,9 @@ class RepositoryPolicy:
     min_uid: int = DEFAULT_MIN_LINUX_UID
     git_timeout_s: float = DEFAULT_GIT_TIMEOUT_S
     clone_timeout_s: float = DEFAULT_CLONE_TIMEOUT_S
+    # How long ``gh`` may run (PAW-028): the same allowed host list (``clone_hosts``)
+    # is what ``gh`` is asked about, so it has no setting of its own.
+    gh_timeout_s: float = DEFAULT_GH_TIMEOUT_S
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -116,7 +120,7 @@ class RepositoryPolicy:
             or not 1 <= self.min_uid <= _MAX_UID
         ):
             raise ValueError("min_uid must be an int from 1 to 4294967295")
-        for name in ("git_timeout_s", "clone_timeout_s"):
+        for name in ("git_timeout_s", "clone_timeout_s", "gh_timeout_s"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int | float):
                 raise ValueError(f"{name} must be a number")
@@ -139,6 +143,7 @@ class RepositoryPolicy:
             min_uid=settings.repository_min_linux_uid,
             git_timeout_s=settings.repository_git_timeout_seconds,
             clone_timeout_s=settings.repository_clone_timeout_seconds,
+            gh_timeout_s=settings.repository_gh_timeout_seconds,
         )
 
 
