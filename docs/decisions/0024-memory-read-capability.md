@@ -78,7 +78,7 @@ Human は 2026-09-25 に、Decision 0019 の 1 を「推奨の方向で承認。
 - Backend README の「認可（RBAC / Capability）と Audit」の `DENIED_ONLY` の一覧、「Hybrid Retrieval」の記述を合わせる。
 
 authz の Capability の表は他の Issue も変えるため、Merge の順序に依存して Conflict しやすい。そのため、この Issue（PAW-043）の PR では変えない。
-承認されるまで、Retrieval は `memory.use`（`REQUIRED`）を使い続け、この Decision の値を前提にした実装はしない。
+Issue #115 で実装されるまで、Retrieval は `memory.use`（`REQUIRED`）を使い続ける（承認済みでも、実装前にこの Decision の値を前提にしたコードは書かない）。
 
 ## 決めてほしいこと
 
