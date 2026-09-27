@@ -3263,7 +3263,8 @@ Rerank（Reranker Protocol）→ 構造化 Score（confirmed・鮮度・importan
 - **Optimistic Lock。** 変更はどれも `expected_version`（手動の Relation は両方の Memory の分）を取り、現在の番号と違えば `MemoryVersionConflictError`（何も書かない）。Memory ごとの Advisory Lock と現在の Version の `FOR UPDATE` で、この Service どうしは直列になります。Lock を取らない Journal の Consolidator とは、`UPDATE ... WHERE status = 'active'` の行数と `(memory_id, version_number)` の Unique で、後から来た方が失敗します（Lost Update にならない）。
 - **履歴。** Status の変更は Database の Trigger が `memory_metadata_changes` に本人を Actor として記録します（Revision `0071`。`metadata_change_actor` を同じ Transaction で先に実行）。`history` は全 Version を古い順に返します（History Graph の Node）。
 - **Retrieval は `active` だけ。** 編集・復元・廃止・Relation の後の Retrieval（PAW-043）は、新しい `active` の Version だけを返します（`test_memory_versioning_service.py` が Retrieval で確かめます）。
-- **変えられないもの。** Scope（広げるのは確認の Flow、PAW-044）。`session_only` と `repo_commit`（Repo Memory だけ）の鮮度は手動で書けません。`expiring` は今より後、`revalidate` の間隔は 1 時間〜10 年、Trigger は閉じた語彙（`related_setting_changed`、`member_changed`、`model_changed`、`external_service_changed`、`phase_changed`）。
+- **Scope は狭めるだけ。** `edit_memory(..., MemoryChanges(scope=MemoryScope.USER))` は `project` の Memory を編集者本人の `user` の Memory にします（REQUIREMENTS.md「Scope変更」: 即反映）。`user` の `n + 1` を書くのと `project` の `n` を `superseded` にするのは同じ Transaction です。要る権限は `project.memory.use`（Contributor 以上）と自分の `memory.use`（Decision 0034 の 3、未決 12）。以後メンバーには履歴も Not Found で、`project` の Version からの復元は `SCOPE_MISMATCH` です。
+- **変えられないもの。** Scope を広げること（確認の Flow、PAW-044。`InvalidMemoryInputError` の `scope` / `not_allowed`）。`session_only` と `repo_commit`（Repo Memory だけ）の鮮度は手動で書けません。`expiring` は今より後、`revalidate` の間隔は 1 時間〜10 年、Trigger は閉じた語彙（`related_setting_changed`、`member_changed`、`model_changed`、`external_service_changed`、`phase_changed`）。
 - **分類の意味。** `rules.plan_relation` は LLM の分類（`same` / `extends` / `supersedes` / `conflicts` / `unrelated`）を、書くか・どの Relation か・古い方を退役させるか・人の確認が要るかに対応させます。退役させるのは `supersedes` だけで、`conflicts` は人の確認を要します。
 
 ### 誰が変えられるか
@@ -3277,7 +3278,7 @@ Rerank（Reranker Protocol）→ 構造化 Score（confirmed・鮮度・importan
 | `shared` | — | `MemoryScopeNotSupportedError`（`SharedMemoryService` が扱う） |
 | `repo`、`project_group` | — | まだ扱わない（Decision 0034 の 3）。Not Found |
 
-他人の Memory・メンバーでない Project の Memory への拒否は、存在しない ID と同じ `MemoryNotFoundError` です（存在を教えない）。エラーの文言は閉じた語彙だけで、本文・ID・Driver の文言を含みません。
+他人の Memory・メンバーでない Project の Memory への拒否は、存在しない ID と同じ `MemoryNotFoundError` です（存在を教えない）。エラーの文言は閉じた語彙だけで、本文・ID・Driver の文言を含みません。Database のエラーはそのまま外に出しません（SQLAlchemy の文言は Bind Parameter を、PostgreSQL の `DETAIL` は行を含みうる）。Lock の Timeout は `MemoryBusyError`、他の Writer との競合は `MemoryVersionConflictError` / `MemoryStateError`（`already_related`）、それ以外は `MemoryDatabaseError`（`sqlstate` だけを持つ）にし、`__cause__` / `__context__` から元のエラーを外します。鮮度の Job も同じです（`tests/test_memory_versioning_errors.py`）。
 
 **ACL は SQL で掛けます**（`memory/acl.py` の不変条件）。Version の内容（題・本文・属性など）を読む Query はどれも、Authorizer が許した公開範囲から作った `readable_memory_versions` と `scope IN` を WHERE に含みます。読めない Version（広げる前の Private な Version など）は Backend に届かず、後から捨てるのではありません。例外は 2 つだけで、どちらも ACL の入力しか返しません: 認可の前に読む**公開範囲の列**（`scope` と 4 つの Scope ID、現在の Version の ID と番号。ACL はこの列から決まり、拒否の Audit と Not Found のために要る）と、手動の `supersedes` / `extends` の**循環検査**（Graph 全体を辿り、真偽を 1 つ返す）。鮮度の Job は `system` の Actor で UPDATE して件数を返すだけで、内容を読みません。`test_memory_versioning_service.py` は、実行された SELECT を取り出して再実行し、返った値に Private な題・本文がないことを確かめます。
 

@@ -237,10 +237,14 @@ class MemoryDraft:
 class MemoryChanges:
     """A manual edit: the fields to change. ``None`` leaves a field as it is.
 
-    At least one of ``title``, ``content``, ``memory_type``, ``importance`` and
-    ``freshness`` must be given (``reason`` alone is not a change). The scope is not
-    editable here: widening it needs the confirmation flow (REQUIREMENTS.md
-    "Scope変更"), and a narrower audience is a new memory.
+    At least one of ``title``, ``content``, ``memory_type``, ``importance``,
+    ``freshness`` and ``scope`` must be given (``reason`` alone is not a change).
+
+    ``scope`` may only **narrow** the audience (REQUIREMENTS.md "Scope変更": a
+    narrowing takes effect at once): ``user`` on a ``project`` memory makes it the
+    editor's own private memory, in the same transaction that retires the project
+    version (Decision 0034, 3). Any widening (``user`` to ``project``, anything to
+    ``shared``) needs the confirmation flow (PAW-044) and is ``NOT_ALLOWED`` here.
     """
 
     title: str | None = None
@@ -249,8 +253,13 @@ class MemoryChanges:
     importance: int | None = None
     freshness: FreshnessSpec | None = None
     reason: str | None = None
+    scope: MemoryScope | None = None
 
     def __post_init__(self) -> None:
+        if self.scope is not None:
+            object.__setattr__(
+                self, "scope", validate_enum("scope", self.scope, MemoryScope)
+            )
         if self.title is not None:
             validate_text("title", self.title, max_chars=limits.MAX_TITLE_CHARS)
         if self.content is not None:
@@ -264,7 +273,14 @@ class MemoryChanges:
         validate_optional_text("reason", self.reason, max_chars=limits.MAX_REASON_CHARS)
         if all(
             getattr(self, name) is None
-            for name in ("title", "content", "memory_type", "importance", "freshness")
+            for name in (
+                "title",
+                "content",
+                "memory_type",
+                "importance",
+                "freshness",
+                "scope",
+            )
         ):
             raise reject("changes", InputProblem.REQUIRED)
 

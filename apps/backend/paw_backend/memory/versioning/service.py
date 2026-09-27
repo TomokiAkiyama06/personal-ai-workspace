@@ -15,6 +15,9 @@ old one stays as history.
   from ``n + 1`` to ``n``. When ``n`` was not confirmed (a worker's ``observed`` or
   ``inferred`` candidate) a ``confirmed_from`` relation records the promotion too.
   An edit that changes nothing writes nothing and returns the current version.
+  An edit may also **narrow** a ``project`` memory to the editor's own ``user``
+  scope (REQUIREMENTS.md "Scope変更": at once), in the same transaction; it never
+  widens one.
 * ``restore_version``: MEMORY_ARCHITECTURE.md section 15, "過去versionへ戻す場合、
   古いversionを直接activeへ戻すのではなく": version ``n + 1`` is written with the
   content of the chosen old version; the current one is retired as by an edit
@@ -120,7 +123,7 @@ from uuid import UUID
 
 import psycopg.errors
 from sqlalchemy import ColumnElement, and_, func, insert, select, text, update
-from sqlalchemy.exc import DBAPIError, IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError, StatementError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from paw_backend.authz import (
@@ -152,12 +155,15 @@ from paw_backend.memory.versioning import limits, rules
 from paw_backend.memory.versioning.errors import (
     InputProblem,
     MemoryBusyError,
+    MemoryDatabaseError,
     MemoryNotFoundError,
     MemoryPermissionError,
     MemoryScopeNotSupportedError,
     MemoryStateError,
     MemoryVersionConflictError,
+    MemoryVersioningError,
     StateProblem,
+    raise_detached,
 )
 from paw_backend.memory.versioning.records import (
     FreshnessSpec,
@@ -433,16 +439,28 @@ class MemoryVersioningService:
 
     @asynccontextmanager
     async def _transaction(
-        self, *memory_ids: UUID, graph: bool = False
+        self,
+        *memory_ids: UUID,
+        graph: bool = False,
+        race: tuple[UUID, int] | None = None,
+        relation_race: bool = False,
     ) -> AsyncIterator[AsyncSession]:
         """One transaction with the lock timeout and an advisory lock per memory.
 
         ``graph`` also takes ``RELATION_GRAPH_LOCK_KEY``. All keys are taken in one
         sorted order, so two transactions never wait for each other in a circle.
+
+        A database error never leaves as it is (``errors`` module text): it becomes
+        :class:`MemoryBusyError` (a lock timed out), :class:`MemoryVersionConflictError`
+        (``race`` = the memory and the expected version, when another writer's
+        version took the number), ``ALREADY_RELATED`` (``relation_race``, when
+        another writer recorded the relation) or :class:`MemoryDatabaseError`,
+        detached from the original.
         """
         keys = {memory_lock_key(m) for m in memory_ids}
         if graph:
             keys.add(RELATION_GRAPH_LOCK_KEY)
+        failure: MemoryVersioningError | None = None
         try:
             async with self._database.session() as session, session.begin():
                 await session.execute(
@@ -455,11 +473,40 @@ class MemoryVersioningService:
                 for key in sorted(keys):
                     await session.execute(_LOCK_SQL, {"key": key})
                 yield session
-        except DBAPIError as error:
-            # Only the type of the driver's error is read, never its text.
-            if isinstance(error.orig, psycopg.errors.LockNotAvailable):
-                raise MemoryBusyError from None
-            raise
+        except StatementError as error:
+            failure = await self._translated(error, race, relation_race)
+        if failure is not None:
+            # Raised outside the handler: nothing links it to the driver's error.
+            raise_detached(failure)
+
+    async def _translated(
+        self,
+        error: StatementError,
+        race: tuple[UUID, int] | None,
+        relation_race: bool,
+    ) -> MemoryVersioningError:
+        """The typed error for a database error. Only its type, SQLSTATE and
+        constraint name are read, never its text."""
+        orig = error.orig if isinstance(error, DBAPIError) else None
+        if isinstance(orig, psycopg.errors.LockNotAvailable):
+            return MemoryBusyError()
+        constraint = _constraint(error) if isinstance(error, IntegrityError) else None
+        if race is not None and constraint in _VERSION_RACES:
+            memory_id, expected = race
+            # The other writer's version is committed: a new session sees it and
+            # the conflict names the current number.
+            try:
+                async with self._database.session() as session:
+                    current = await self._current_audience(
+                        session, memory_id, lock=False
+                    )
+            except (StatementError, MemoryNotFoundError):
+                return MemoryDatabaseError(_sqlstate(orig))
+            assert current.version_number is not None  # _AUDIENCE_COLUMNS has it
+            return MemoryVersionConflictError(expected, current.version_number)
+        if relation_race and constraint in _RELATION_RACES:
+            return MemoryStateError(StateProblem.ALREADY_RELATED)
+        return MemoryDatabaseError(_sqlstate(orig))
 
     @staticmethod
     async def _current_audience(
@@ -631,6 +678,16 @@ class MemoryVersioningService:
             # ``project_state_forbids`` that the memory exists.
             raise MemoryNotFoundError
         raise MemoryPermissionError(decision.reason.value)
+
+    async def _authorize_narrowing(self, actor: Principal) -> None:
+        """May ``actor`` hold the narrowed memory as its own (``memory.use``)?"""
+        decision = await self._decide(
+            actor,
+            Capability.MEMORY_USE,
+            Resource.owned_by(actor.user_id, RESOURCE_MEMORY),
+        )
+        if not decision.allowed:
+            raise MemoryPermissionError(decision.reason.value)
 
     @staticmethod
     def _check_expected(current: MemoryVersionView, expected: int) -> None:
@@ -840,54 +897,73 @@ class MemoryVersioningService:
         expected_version: int,
         changes: MemoryChanges,
     ) -> MemoryVersionView:
-        """A new version with ``changes``; the current one becomes ``superseded``."""
+        """A new version with ``changes``; the current one becomes ``superseded``.
+
+        ``changes.scope`` = ``user`` on a ``project`` memory narrows it to the
+        actor's own private memory (REQUIREMENTS.md "Scope変更": at once). The
+        project version is retired in the same transaction, so no moment exists in
+        which both are active or neither is. Narrowing needs the right to change the
+        project memory (``project.memory.use``, as any edit) and ``memory.use`` for
+        the actor's own memory (as ``create_memory``). Any other change of scope
+        widens the audience and is ``NOT_ALLOWED`` (the confirmation flow, PAW-044).
+        """
         actor = self._check_actor(actor)
         memory_id = validate_uuid("memory_id", memory_id)
         expected_version = validate_version_number("expected_version", expected_version)
         if not isinstance(changes, MemoryChanges):
             raise reject("changes", InputProblem.WRONG_TYPE)
         now = self._now()
-        try:
-            async with self._transaction(memory_id) as session:
-                current = await self._current(session, actor, memory_id, write=True)
-                self._check_expected(current, expected_version)
-                rules.check_active(current)
-                changed = rules.changed_fields(current, changes)
-                if not changed:
-                    return current
-                values: dict[str, Any] = {
-                    name: getattr(changes, name)
-                    for name in ("title", "content", "memory_type", "importance")
-                    if name in changed
-                }
-                if changes.freshness is not None and "freshness" in changed:
-                    rules.check_manual_freshness(changes.freshness, current.scope, now)
-                    values.update(_freshness_columns(changes.freshness, now))
-                else:
-                    values.update(_carried_freshness(current, now))
-                values["change_reason"] = changes.reason
-                values["attributes"] = {"edited_from_version": current.version_number}
-                await self._set_status(session, current, MemoryStatus.SUPERSEDED, actor)
-                new = await self._insert_version(
-                    session, current, values=values, actor=actor, now=now
+        async with self._transaction(
+            memory_id, race=(memory_id, expected_version)
+        ) as session:
+            current = await self._current(session, actor, memory_id, write=True)
+            self._check_expected(current, expected_version)
+            rules.check_active(current)
+            changed = rules.changed_fields(current, changes)
+            if not changed:
+                return current
+            values: dict[str, Any] = {
+                name: getattr(changes, name)
+                for name in ("title", "content", "memory_type", "importance")
+                if name in changed
+            }
+            scope = current.scope
+            if changes.scope is not None and "scope" in changed:
+                rules.check_narrowing(current.scope, changes.scope)
+                await self._authorize_narrowing(actor)
+                scope = changes.scope
+                values.update(
+                    scope=scope.value,
+                    owner_user_id=actor.user_id,
+                    project_id=None,
+                    project_group_id=None,
+                    repo_id=None,
                 )
-                reason = ", ".join(changed)
+            if changes.freshness is not None and "freshness" in changed:
+                rules.check_manual_freshness(changes.freshness, scope, now)
+                values.update(_freshness_columns(changes.freshness, now))
+            else:
+                values.update(_carried_freshness(current, now))
+            values["change_reason"] = changes.reason
+            values["attributes"] = {"edited_from_version": current.version_number}
+            await self._set_status(session, current, MemoryStatus.SUPERSEDED, actor)
+            new = await self._insert_version(
+                session, current, values=values, actor=actor, now=now
+            )
+            reason = ", ".join(changed)
+            await self._relate(
+                session,
+                new.version_id,
+                current.version_id,
+                RelationType.SUPERSEDES,
+                reason,
+                now,
+            )
+            for kind in rules.confirmation_after_edit(current):
                 await self._relate(
-                    session,
-                    new.version_id,
-                    current.version_id,
-                    RelationType.SUPERSEDES,
-                    reason,
-                    now,
+                    session, new.version_id, current.version_id, kind, reason, now
                 )
-                for kind in rules.confirmation_after_edit(current):
-                    await self._relate(
-                        session, new.version_id, current.version_id, kind, reason, now
-                    )
-                return new
-        except IntegrityError as error:
-            await self._raise_race(error, memory_id, expected_version)
-            raise
+            return new
 
     async def restore_version(
         self,
@@ -916,56 +992,50 @@ class MemoryVersioningService:
             "reason", reason, max_chars=limits.MAX_REASON_CHARS
         )
         now = self._now()
-        try:
-            async with self._transaction(memory_id) as session:
-                current = await self._current(session, actor, memory_id, write=True)
-                self._check_expected(current, expected_version)
-                audience = await self._version_audience(
-                    session, memory_id, source_version
-                )
-                if audience is None:
-                    raise MemoryStateError(StateProblem.UNKNOWN_VERSION)
-                if audience.audience != current.audience:
-                    # A restore never changes who can read the memory. Decided on
-                    # the audience alone: the source's content is not read.
-                    raise MemoryStateError(StateProblem.SCOPE_MISMATCH)
-                source = await self._load(
-                    session, actor, audience, memory_id, source_version
-                )
-                rules.check_restorable(current, source)
-                if freshness is not None:
-                    rules.check_manual_freshness(freshness, current.scope, now)
-                    kept = _freshness_columns(freshness, now)
-                else:
-                    kept = _carried_freshness(source, now)
-                values = {
-                    "memory_type": source.memory_type,
-                    "title": source.title,
-                    "content": source.content,
-                    "importance": source.importance,
-                    "change_reason": reason,
-                    "attributes": {"restored_from_version": source.version_number},
-                    **kept,
-                }
-                if current.status is MemoryStatus.ACTIVE:
-                    await self._set_status(
-                        session, current, MemoryStatus.SUPERSEDED, actor
-                    )
-                new = await self._insert_version(
-                    session, current, values=values, actor=actor, now=now
-                )
-                await self._relate(
-                    session,
-                    new.version_id,
-                    current.version_id,
-                    RelationType.SUPERSEDES,
-                    "restore",
-                    now,
-                )
-                return new
-        except IntegrityError as error:
-            await self._raise_race(error, memory_id, expected_version)
-            raise
+        async with self._transaction(
+            memory_id, race=(memory_id, expected_version)
+        ) as session:
+            current = await self._current(session, actor, memory_id, write=True)
+            self._check_expected(current, expected_version)
+            audience = await self._version_audience(session, memory_id, source_version)
+            if audience is None:
+                raise MemoryStateError(StateProblem.UNKNOWN_VERSION)
+            if audience.audience != current.audience:
+                # A restore never changes who can read the memory. Decided on
+                # the audience alone: the source's content is not read.
+                raise MemoryStateError(StateProblem.SCOPE_MISMATCH)
+            source = await self._load(
+                session, actor, audience, memory_id, source_version
+            )
+            rules.check_restorable(current, source)
+            if freshness is not None:
+                rules.check_manual_freshness(freshness, current.scope, now)
+                kept = _freshness_columns(freshness, now)
+            else:
+                kept = _carried_freshness(source, now)
+            values = {
+                "memory_type": source.memory_type,
+                "title": source.title,
+                "content": source.content,
+                "importance": source.importance,
+                "change_reason": reason,
+                "attributes": {"restored_from_version": source.version_number},
+                **kept,
+            }
+            if current.status is MemoryStatus.ACTIVE:
+                await self._set_status(session, current, MemoryStatus.SUPERSEDED, actor)
+            new = await self._insert_version(
+                session, current, values=values, actor=actor, now=now
+            )
+            await self._relate(
+                session,
+                new.version_id,
+                current.version_id,
+                RelationType.SUPERSEDES,
+                "restore",
+                now,
+            )
+            return new
 
     async def deprecate_memory(
         self, actor: Principal, memory_id: UUID, expected_version: int
@@ -1002,33 +1072,31 @@ class MemoryVersioningService:
             "reason", reason, max_chars=limits.MAX_REASON_CHARS
         )
         now = self._now()
-        try:
-            async with self._transaction(memory_id) as session:
-                current = await self._current(session, actor, memory_id, write=True)
-                self._check_expected(current, expected_version)
-                rules.check_revalidatable(current)
-                values = {
-                    **_kept_freshness(current, now),
-                    "change_reason": reason,
-                    "attributes": {"revalidated_from_version": current.version_number},
-                }
-                await self._set_status(session, current, MemoryStatus.SUPERSEDED, actor)
-                new = await self._insert_version(
-                    session, current, values=values, actor=actor, now=now
+        async with self._transaction(
+            memory_id, race=(memory_id, expected_version)
+        ) as session:
+            current = await self._current(session, actor, memory_id, write=True)
+            self._check_expected(current, expected_version)
+            rules.check_revalidatable(current)
+            values = {
+                **_kept_freshness(current, now),
+                "change_reason": reason,
+                "attributes": {"revalidated_from_version": current.version_number},
+            }
+            await self._set_status(session, current, MemoryStatus.SUPERSEDED, actor)
+            new = await self._insert_version(
+                session, current, values=values, actor=actor, now=now
+            )
+            for kind in (RelationType.SUPERSEDES, RelationType.REVALIDATED_FROM):
+                await self._relate(
+                    session,
+                    new.version_id,
+                    current.version_id,
+                    kind,
+                    "revalidate",
+                    now,
                 )
-                for kind in (RelationType.SUPERSEDES, RelationType.REVALIDATED_FROM):
-                    await self._relate(
-                        session,
-                        new.version_id,
-                        current.version_id,
-                        kind,
-                        "revalidate",
-                        now,
-                    )
-                return new
-        except IntegrityError as error:
-            await self._raise_race(error, memory_id, expected_version)
-            raise
+            return new
 
     # -- relations -------------------------------------------------------------
 
@@ -1069,37 +1137,31 @@ class MemoryVersioningService:
             raise MemoryStateError(StateProblem.SAME_MEMORY)
         now = self._now()
         kind = relation.relation_type
-        try:
-            async with self._transaction(
-                newer_id, older_id, graph=kind in rules.ACYCLIC_RELATIONS
-            ) as session:
-                # Rows are locked in the order of the ids, like the advisory locks.
-                audiences: dict[UUID, _Audience] = {}
-                for memory_id in sorted((newer_id, older_id)):
-                    audiences[memory_id] = await self._current_audience(
-                        session, memory_id
-                    )
-                for memory_id in (newer_id, older_id):
-                    await self._authorize_version(
-                        session, actor, audiences[memory_id], write=True
-                    )
-                newer = await self._load_current(session, actor, audiences[newer_id])
-                older = await self._load_current(session, actor, audiences[older_id])
-                self._check_expected(newer, newer_expected)
-                self._check_expected(older, older_expected)
-                rules.check_relatable(relation, newer, older)
-                await self._check_graph(session, kind, newer, older)
-                if relation is ManualRelation.SUPERSEDES:
-                    await self._set_status(
-                        session, older, MemoryStatus.SUPERSEDED, actor
-                    )
-                return await self._relate(
-                    session, newer.version_id, older.version_id, kind, reason, now
+        async with self._transaction(
+            newer_id,
+            older_id,
+            graph=kind in rules.ACYCLIC_RELATIONS,
+            relation_race=True,
+        ) as session:
+            # Rows are locked in the order of the ids, like the advisory locks.
+            audiences: dict[UUID, _Audience] = {}
+            for memory_id in sorted((newer_id, older_id)):
+                audiences[memory_id] = await self._current_audience(session, memory_id)
+            for memory_id in (newer_id, older_id):
+                await self._authorize_version(
+                    session, actor, audiences[memory_id], write=True
                 )
-        except IntegrityError as error:
-            if _constraint(error) in _RELATION_RACES:
-                raise MemoryStateError(StateProblem.ALREADY_RELATED) from None
-            raise
+            newer = await self._load_current(session, actor, audiences[newer_id])
+            older = await self._load_current(session, actor, audiences[older_id])
+            self._check_expected(newer, newer_expected)
+            self._check_expected(older, older_expected)
+            rules.check_relatable(relation, newer, older)
+            await self._check_graph(session, kind, newer, older)
+            if relation is ManualRelation.SUPERSEDES:
+                await self._set_status(session, older, MemoryStatus.SUPERSEDED, actor)
+            return await self._relate(
+                session, newer.version_id, older.version_id, kind, reason, now
+            )
 
     @staticmethod
     async def _check_graph(
@@ -1134,23 +1196,13 @@ class MemoryVersioningService:
             if cyclic:
                 raise MemoryStateError(StateProblem.WOULD_CYCLE)
 
-    async def _raise_race(
-        self, error: IntegrityError, memory_id: UUID, expected: int
-    ) -> None:
-        """A unique race with another writer is a version conflict; else return.
-
-        The other writer's version is committed, so a new session sees it and the
-        conflict names the current number. The driver error is not chained (its
-        text can hold the row's values).
-        """
-        if _constraint(error) not in _VERSION_RACES:
-            return
-        async with self._database.session() as session:
-            current = await self._current_audience(session, memory_id, lock=False)
-        raise MemoryVersionConflictError(expected, current.version_number) from None
-
 
 def _constraint(error: IntegrityError) -> str | None:
     """The name of the constraint a driver error names (never its message)."""
     diag = getattr(error.orig, "diag", None)
     return getattr(diag, "constraint_name", None)
+
+
+def _sqlstate(orig: object) -> str | None:
+    sqlstate = getattr(orig, "sqlstate", None)
+    return sqlstate if isinstance(sqlstate, str) else None

@@ -4,13 +4,24 @@ Messages are fixed strings built from closed vocabularies (field names,
 :class:`InputProblem` and :class:`StateProblem` values, authorization reasons of
 ``paw_backend.authz``). They never contain caller content (titles, memory text,
 ids), driver messages or SQL, so they are safe to log and to map to an API
-response. ``code`` is the stable machine-readable identifier. Database errors the
-service does not handle propagate unchanged; their text can contain SQL
-parameters, so a caller must never show ``str(error)`` of those to a user.
+response. ``code`` is the stable machine-readable identifier.
+
+A database error is never passed on as it is: the text of SQLAlchemy's
+``StatementError`` / ``DBAPIError`` carries the bound parameters (a title, a
+content), and PostgreSQL's ``DETAIL`` can quote the failing row. Every public
+method of ``MemoryVersioningService`` and ``FreshnessMaintenance`` turns it into
+:class:`MemoryBusyError` (a lock timed out), :class:`MemoryVersionConflictError` /
+:class:`MemoryStateError` (a known race), or :class:`MemoryDatabaseError`
+(anything else), and detaches the original (:func:`raise_detached`): neither
+``__cause__`` nor ``__context__`` refers to it, so no traceback, log or ``repr``
+of the chain can show it.
 """
 
+import re
 from enum import StrEnum
-from typing import ClassVar
+from typing import ClassVar, NoReturn
+
+_SQLSTATE = re.compile(r"[0-9A-Z]{5}")
 
 
 class InputProblem(StrEnum):
@@ -124,3 +135,39 @@ class MemoryBusyError(MemoryVersioningError):
 
     def __init__(self) -> None:
         super().__init__("Memory is busy; retry later")
+
+
+class MemoryDatabaseError(MemoryVersioningError):
+    """The database refused or failed the operation; nothing was changed.
+
+    The transaction was rolled back. ``sqlstate`` is PostgreSQL's five-character
+    SQLSTATE code when the driver reported one (``None`` otherwise): a closed code
+    (``23514`` a check violation, ``42501`` a missing privilege, ...) without any
+    value of the row. The driver's message, the SQL and its parameters are not kept.
+    """
+
+    code = "memory_database_error"
+
+    def __init__(self, sqlstate: str | None = None) -> None:
+        if not (isinstance(sqlstate, str) and _SQLSTATE.fullmatch(sqlstate)):
+            sqlstate = None
+        self.sqlstate = sqlstate
+        super().__init__(
+            "Database error" if sqlstate is None else f"Database error: {sqlstate}"
+        )
+
+
+def raise_detached(error: MemoryVersioningError) -> NoReturn:
+    """Raise ``error`` with no link to the exception being handled.
+
+    ``raise ... from None`` clears ``__cause__`` but still sets ``__context__`` to
+    the original (only its display is suppressed), so the original, with its SQL
+    parameters, would stay reachable from the new error. The context is cleared
+    after the raise and the error re-raised as it is (a bare ``raise`` does not
+    chain).
+    """
+    try:
+        raise error from None
+    except MemoryVersioningError as clean:
+        clean.__context__ = None
+        raise

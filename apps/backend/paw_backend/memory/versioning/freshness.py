@@ -28,12 +28,16 @@ invalidates a memory. What each policy leads to (Decision 0034, 4 and 5):
 * ``permanent``: nothing.
 
 Every method is backend-internal (a scheduled job or an event handler): there is
-no caller to authorize, and the changes are recorded by the database in
-``memory_metadata_changes`` with the ``system`` actor. Each call changes at most
+no caller to authorize (the ``system`` actor; the jobs UPDATE and count and read no
+content, so the ACL of ``memory/acl.py`` has no reader to apply to), and the
+changes are recorded by the database in ``memory_metadata_changes`` with the
+``system`` actor. Each call changes at most
 ``batch`` versions (``FOR UPDATE SKIP LOCKED``: a version a person is editing is
 left for the next call) and returns how many it changed; a job repeats a call until
 it returns 0. A version is never marked twice (``stale_since IS NULL``), so running
-a call again changes nothing.
+a call again changes nothing. A database error leaves as
+:class:`~paw_backend.memory.versioning.errors.MemoryDatabaseError`, detached from
+the driver's error (whose text can quote a memory).
 """
 
 from collections.abc import Callable
@@ -41,6 +45,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import ColumnElement, and_, exists, or_, select, text, update
+from sqlalchemy.exc import DBAPIError, StatementError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from paw_backend.db import Database
@@ -54,7 +59,11 @@ from paw_backend.memory.models import (
     SourceType,
 )
 from paw_backend.memory.versioning import limits
-from paw_backend.memory.versioning.errors import InputProblem
+from paw_backend.memory.versioning.errors import (
+    InputProblem,
+    MemoryDatabaseError,
+    raise_detached,
+)
 from paw_backend.memory.versioning.records import (
     RevalidateTrigger,
     TargetKind,
@@ -117,14 +126,27 @@ class FreshnessMaintenance:
             .with_for_update(skip_locked=True)
             .cte("chosen")
         )
-        async with self._database.session() as session, session.begin():
-            await self._prepare(session)
-            result = await session.execute(
-                update(_V)
-                .where(_V.c.id.in_(select(chosen.c.id)), _V.c.status == _ACTIVE)
-                .values(**values)
+        failure: MemoryDatabaseError | None = None
+        try:
+            async with self._database.session() as session, session.begin():
+                await self._prepare(session)
+                result = await session.execute(
+                    update(_V)
+                    .where(_V.c.id.in_(select(chosen.c.id)), _V.c.status == _ACTIVE)
+                    .values(**values)
+                )
+                count = result.rowcount
+        except StatementError as error:
+            # The driver's text can quote the row (``errors`` module): only the
+            # SQLSTATE is kept, and the original is not linked.
+            orig = error.orig if isinstance(error, DBAPIError) else None
+            sqlstate = getattr(orig, "sqlstate", None)
+            failure = MemoryDatabaseError(
+                sqlstate if isinstance(sqlstate, str) else None
             )
-            return result.rowcount
+        if failure is not None:
+            raise_detached(failure)
+        return count
 
     @staticmethod
     async def _prepare(session: AsyncSession) -> None:

@@ -41,12 +41,14 @@ Retrieval（PAW-043）は `active` だけを候補にし、`session_only` と期
 - **手動の `supersedes` は、この Issue では取り消せない**。古い方の現在の Version は `superseded` のままで、編集・復元・廃止・Revalidate はできない（誤って記録した場合は、古い方の内容で新しい Memory を作る）。取り消しの操作（Relation を外して古い方を `active` に戻すか、古い方に新しい Version を書くか）は History Graph（UI）の Issue で決める。
 - LLM の分類の意味（`rules.plan_relation`）: `same` は何も書かない。`extends` は新しい Memory を書き `extends` を張る。`supersedes` は新しい Memory を書き古い方を `superseded` にする。`conflicts` は新しい Memory を書き `conflicts_with` を張って**人の確認を要する**（何も退役させない）。`unrelated` は Relation なしで書く。**退役させるのは `supersedes` だけ**。Background Consolidation（PAW-041）は Decision 0018 の規則のまま（ここでは変えない）。
 
-`supersedes` を同じ公開範囲に限るのは、置き換えで古い Memory を後継を読めない人から隠さないためである（例: User Memory が Project Memory を置き換えると、他のメンバーから Project Memory が消える）。
+`supersedes` を同じ公開範囲に限るのは、置き換えで古い Memory を後継を読めない人から隠さないためである（例: User Memory が Project Memory を置き換えると、他のメンバーから Project Memory が消える）。例外は、編集による**公開範囲の縮小**（2・3）だけで、これは要件が即時反映を許す、人が明示的に行う操作である。
 
 ### 2. 手動編集・復元・廃止の Version
 
 - **編集**（`edit_memory`）: 現在の Version `n`（`active`）を `superseded` にし、`n + 1` を `active`・`confirmed`・Actor は本人で書く。`supersedes`（理由は変えた項目名）を張り、`n` が未確認なら `confirmed_from` も張る。何も変えない編集は何も書かない。
-  - 変えられる項目: Title、本文、種類、Importance、鮮度。**Scope は変えられない**（広げるのは確認の Flow（PAW-044）、狭めるのは新しい Memory）。
+  - 変えられる項目: Title、本文、種類、Importance、鮮度、**Scope の縮小**。
+  - **Scope の縮小**（REQUIREMENTS.md「Scope変更」: 公開範囲を狭める変更は即反映可能）: `MemoryChanges(scope=user)` で `project` の Memory を**編集者本人の** `user` の Memory にする。同じ Memory の `n + 1` を `user`（Owner は編集者）で書き、`project` の `n` を `superseded` にする。これを**同じ Transaction** で行うので、両方が `active` の瞬間も、どちらも `active` でない瞬間もない。`supersedes` の理由には `scope` が入る。他の項目も同時に変えられる。以後 Project のメンバーには、この Memory は（履歴も）Not Found になる。`project` の `n` からの復元は公開範囲が違うので `SCOPE_MISMATCH`（復元で広げ直すことはできない）。
+  - 縮小以外の Scope の変更（`user → project`、何でも `→ shared`、`→ repo` / `project_group`）は `InvalidMemoryInputError`（`scope`、`not_allowed`）。広げるのは確認の Flow（PAW-044）。
   - 変えなかった項目・Pin は引き継ぐ。`attributes` は引き継がず、`edited_from_version` だけを持つ（Worker の候補の情報を人の Version に残さない）。
   - `revalidate` の Memory は、人が保存した時点で確かめたとみなし、`verified_at` を今にし、Stale の印を外す。
   - 鮮度を変えない編集でも、人が書けない鮮度（4）は引き継がない: `session_only` の Version と、期限を過ぎた `expiring` の Version は、新しい鮮度を渡さない限り編集できない（復元と同じ）。
@@ -63,6 +65,7 @@ Retrieval（PAW-043）は `active` だけを候補にし、`session_only` と期
 - `shared`: 扱わない（`SharedMemoryService`、Decision 0009）。
 - `repo` と `project_group`: **この Issue では扱わない**（Not Found と同じに見せる）。Repo Memory の書き込みに Repo の ACL Override の `write` を要するか（`project.memory.use` は Repo では `read` に対応する）、Project Group とは何か、が決まっていないため。
 - 「他人の Memory」「メンバーでない Project の Memory」への拒否は、存在しない ID と同じ Not Found にする（存在を教えない）。Authorizer は Project の状態をメンバーかどうかより先に見るので、メンバーでない人の Archived / Pending deletion の Project の Memory への拒否（`project_state_forbids`）も Not Found にする。
+- **Scope の縮小**（2）: その Project の Memory を編集できる人（`project.memory.use`、Contributor 以上）で、かつ自分の Memory を持てる人（`memory.use`、`create_memory` と同じ）。Contributor は廃止（`deprecate_memory`）で Project Memory をメンバーから外せるので、縮小はそれ以上の力を与えない（廃止して自分の Memory を作るのと同じ結果を、1 つの Transaction で行う）。Manager だけに限るかは下の「決めてほしいこと」12。
 - 履歴（`history`）は現在の Version を読める人に返し、公開範囲が現在と違う過去の Version（後の Flow で広げた Memory など）は、その公開範囲も読める人にだけ含める。広げた後の読者に、広げる前の Private な内容を見せないため。この絞り込みは SQL で行う（`memory/acl.py` の `readable_memory_versions` と `scope IN` を、Authorizer が許した公開範囲から作る）。読めない Version の内容は Backend にも届かない。認可の前に読むのは公開範囲の列（`scope` と Scope ID）だけで、これと循環検査（真偽だけを返す）を ACL の例外として文書化する。判断はすべて Authorizer が Audit に記録する（どちらの Capability も `REQUIRED`）。Shared Memory のような完了行（Decision 0009 の 13）は書かない。
 
 ### 4. 手動で書ける鮮度
@@ -130,7 +133,7 @@ Revision `0042` は Index を 1 つ足すだけ: `ix_memory_versions_freshness_d
 
 1. Relation の意味（1 の表）。退役させるのは `supersedes` だけで、同じ公開範囲に限ること（推奨: 承認）。
 2. `confirmed_from` / `revalidated_from` を操作が自動で張り、`merged_from` をこの Issue で扱わないこと（推奨: 承認）。
-3. 手動編集・復元・廃止の Version の作り方（2）。Scope を編集で変えないこと（推奨: 承認）。
+3. 手動編集・復元・廃止の Version の作り方（2）。Scope は編集で**狭めることだけ**ができ（`project → user`、編集者本人の Memory になる。同じ Transaction で `project` の Version を退役させる）、広げることはできないこと（推奨: 承認）。
 4. 手動の変更を人間の `user`（`memory.use`）と `project`（`project.memory.use`、Contributor 以上）に限り、`repo` / `project_group` を今は扱わないこと（推奨: 承認。Repo は別の Decision で `write` Override を要するかを決める）。
 5. 手動で書ける鮮度（4 の表）と、`revalidate_triggers` の閉じた語彙（推奨: 承認）。
 6. Stale Candidate・期限切れ・Session / Task 終了の処理（5 の表。Task の出典を `source_ref = str(task_id)` で照合することを含む）、Revalidate で新しい Version を作ること（推奨: 承認）。
@@ -139,3 +142,4 @@ Revision `0042` は Index を 1 つ足すだけ: `ix_memory_versions_freshness_d
 9. 編集・復元・Revalidate の新しい Version に `memory_sources` を写さないこと（推奨: この Issue では写さず、会話削除の Flow の Issue で「写す」か「`user_confirmation` の出典を足す」かを決める）。
 10. `extends` / `conflicts_with` に両方の Memory の書き込み権限を要し、公開範囲をまたいでも許すこと（推奨: 承認）。
 11. 履歴を公開範囲ごとに絞り、復元は同じ公開範囲の Version からだけ行うこと（推奨: 承認）。
+12. Scope の縮小（`project → user`）を誰に許すか。案 A: Contributor 以上（その Project Memory を編集・廃止できる人。実装はこれ）。案 B: Manager だけ（メンバーから Memory を外す操作を管理者に限る）。推奨: **A**。Contributor は既に廃止で同じ結果を得られ、B にしても「廃止して自分で作る」で回避できるため。縮小先を編集者本人以外の User にすることは扱わない（他人の Private Memory を作ることになる）。

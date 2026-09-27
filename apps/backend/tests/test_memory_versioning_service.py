@@ -554,6 +554,118 @@ class AccessTest(PostgresVersioningTestCase):
 
 
 @requires_postgres
+class NarrowingTest(PostgresVersioningTestCase):
+    """REQUIREMENTS.md "Scope変更": narrowing takes effect at once; widening does not.
+
+    An edit may narrow a project memory to the editor's own (``user``) scope: the
+    narrowed version and the retirement of the project version are one transaction.
+    """
+
+    def project_memory(self):
+        project = self.seed_project()
+        team = self.seed_team(project)
+        seeded = self.seed(
+            "team rule", "deploy backend friday", scope="project", project=project
+        )
+        return project, team, seeded
+
+    async def test_an_edit_narrows_a_project_memory_to_the_editor_at_once(self):
+        project, team, seeded = self.project_memory()
+        editor = self.actor(team.contributor)
+        new = await self.versioning.edit_memory(
+            editor,
+            seeded.memory_id,
+            1,
+            MemoryChanges(scope=MemoryScope.USER, content="deploy backend thursday"),
+        )
+        self.assertEqual(
+            (new.version_number, new.scope, new.owner_user_id, new.project_id),
+            (2, MemoryScope.USER, editor.user_id, None),
+        )
+        v1, v2 = self.versions(seeded.memory_id)
+        self.assertEqual((v1.status, v1.scope), ("superseded", "project"))
+        self.assertEqual(
+            (v2.status, v2.scope, v2.owner_user_id, v2.project_id),
+            ("active", "user", editor.user_id, None),
+        )
+        self.assertEqual(v2.confirmation_state, "confirmed")
+        self.assertIn((v2.id, v1.id, "supersedes", "content, scope"), self.relations())
+        # The project's members no longer see the memory (not even its history).
+        for reader in (team.viewer, team.manager):
+            with self.subTest(reader), self.assertRaises(MemoryNotFoundError):
+                await self.versioning.history(self.actor(reader), seeded.memory_id)
+        mine = await self.versioning.history(editor, seeded.memory_id)
+        self.assertEqual([v.version_number for v in mine], [1, 2])
+        # Restoring the project version would widen it again: refused.
+        with self.assertRaises(MemoryStateError) as caught:
+            await self.versioning.restore_version(editor, seeded.memory_id, 2, 1)
+        self.assertEqual(caught.exception.problem, StateProblem.SCOPE_MISMATCH)
+
+    async def test_narrowing_alone_is_a_change(self):
+        _project, team, seeded = self.project_memory()
+        editor = self.actor(team.manager)
+        new = await self.versioning.edit_memory(
+            editor, seeded.memory_id, 1, MemoryChanges(scope=MemoryScope.USER)
+        )
+        self.assertEqual(
+            (new.scope, new.content), (MemoryScope.USER, "deploy backend friday")
+        )
+        self.assertEqual([r[3] for r in self.relations()], ["scope"])
+
+    async def test_a_viewer_may_not_narrow(self):
+        _project, team, seeded = self.project_memory()
+        with self.assertRaises(MemoryPermissionError):
+            await self.versioning.edit_memory(
+                self.actor(team.viewer),
+                seeded.memory_id,
+                1,
+                MemoryChanges(scope=MemoryScope.USER),
+            )
+        self.assertEqual(len(self.versions(seeded.memory_id)), 1)
+
+    async def test_an_edit_never_widens(self):
+        me = self.user()
+        created = await self.versioning.create_memory(me, draft())
+        _project, team, seeded = self.project_memory()
+        cases = (
+            (me, created.memory_id, MemoryScope.PROJECT),
+            (me, created.memory_id, MemoryScope.SHARED),
+            (self.actor(team.contributor), seeded.memory_id, MemoryScope.SHARED),
+            (self.actor(team.contributor), seeded.memory_id, MemoryScope.REPO),
+            (
+                self.actor(team.contributor),
+                seeded.memory_id,
+                MemoryScope.PROJECT_GROUP,
+            ),
+        )
+        for actor, memory_id, scope in cases:
+            with self.subTest(scope), self.assertRaises(InvalidMemoryInputError) as c:
+                await self.versioning.edit_memory(
+                    actor, memory_id, 1, MemoryChanges(scope=scope)
+                )
+            self.assertEqual(
+                (c.exception.field, c.exception.problem),
+                ("scope", InputProblem.NOT_ALLOWED),
+            )
+        self.assertEqual(len(self.versions(created.memory_id)), 1)
+        self.assertEqual(len(self.versions(seeded.memory_id)), 1)
+
+    async def test_the_same_scope_changes_nothing(self):
+        me = self.user()
+        created = await self.versioning.create_memory(me, draft())
+        same = await self.versioning.edit_memory(
+            me, created.memory_id, 1, MemoryChanges(scope=MemoryScope.USER)
+        )
+        self.assertEqual(same.version_number, 1)
+        self.assertEqual(len(self.versions(created.memory_id)), 1)
+
+    def test_the_scope_of_a_change_is_validated(self):
+        with self.assertRaises(InvalidMemoryInputError) as caught:
+            MemoryChanges(scope="nowhere")
+        self.assertEqual(caught.exception.field, "scope")
+
+
+@requires_postgres
 class RestoreDeprecateRevalidateTest(PostgresVersioningTestCase):
     async def test_a_restore_writes_a_new_version_from_the_old_content(self):
         me = self.user()

@@ -145,7 +145,22 @@ def changed_fields(
             changed.append(name)
     if changes.freshness is not None and not same_freshness(current, changes.freshness):
         changed.append("freshness")
+    if changes.scope is not None and changes.scope is not current.scope:
+        changed.append("scope")
     return tuple(changed)
+
+
+# The narrowings an edit may make (REQUIREMENTS.md "Scope変更"): from the scope to
+# the scope the new version gets. ``project`` to ``user`` is the only one among the
+# scopes this service edits; every other change of scope widens (or moves) the
+# audience and needs the confirmation flow.
+NARROWINGS = frozenset({(MemoryScope.PROJECT, MemoryScope.USER)})
+
+
+def check_narrowing(current: MemoryScope, new: MemoryScope) -> None:
+    """Refuse a change of scope that is not a narrowing (``NOT_ALLOWED``)."""
+    if (current, new) not in NARROWINGS:
+        raise reject("scope", InputProblem.NOT_ALLOWED)
 
 
 def check_active(current: MemoryVersionView) -> None:
