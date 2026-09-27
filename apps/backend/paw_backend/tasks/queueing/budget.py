@@ -91,11 +91,17 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncConnection
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
 from paw_backend.db import Database
-from paw_backend.tasks.errors import TaskNotFoundError
+from paw_backend.tasks.domain import TERMINAL_STATES, TaskRun, TaskState
+from paw_backend.tasks.errors import (
+    StaleRunError,
+    TaskNotFoundError,
+    TaskNotRunningError,
+)
+from paw_backend.tasks.models import TaskRow
 from paw_backend.tasks.queueing.domain import (
     PRESET_LIMITS,
     BudgetKind,
@@ -117,6 +123,7 @@ from paw_backend.tasks.queueing.validation import (
     check_bool,
     check_member,
     check_runtime_generation,
+    check_session,
     check_uuid,
 )
 
@@ -166,6 +173,40 @@ class BudgetTracker:
         """
         check_uuid("task_id", task_id)
         check_member("preset", preset, BudgetPreset)
+        upsert = self._preset_upsert(task_id, preset)
+        try:
+            async with self._database.engine.begin() as connection:
+                await connection.execute(upsert)
+                return await self._read_usage(connection, task_id)
+        except IntegrityError as error:
+            if sqlstate(error) == FOREIGN_KEY_VIOLATION:
+                raise TaskNotFoundError() from None
+            raise
+
+    @property
+    def database(self) -> Database:
+        return self._database
+
+    async def set_preset_in(
+        self, session: AsyncSession, task_id: uuid.UUID, preset: BudgetPreset
+    ) -> None:
+        """``set_preset`` in the transaction of the caller's ``session`` (inside a
+        transaction; see ``TaskQueue.enqueue_in``). Nothing is committed here: the
+        preset changes only if the caller's transaction commits (the orchestrator
+        commits it together with the queue entry, so a refused enqueue changes no
+        budget). ``TaskNotFoundError`` for an unknown task."""
+        check_session("session", session)
+        check_uuid("task_id", task_id)
+        check_member("preset", preset, BudgetPreset)
+        try:
+            await session.execute(self._preset_upsert(task_id, preset))
+        except IntegrityError as error:
+            if sqlstate(error) == FOREIGN_KEY_VIOLATION:
+                raise TaskNotFoundError() from None
+            raise
+
+    @staticmethod
+    def _preset_upsert(task_id: uuid.UUID, preset: BudgetPreset):
         limits = PRESET_LIMITS[preset]
         upsert = insert(BudgetUsageRow).values(
             [
@@ -187,17 +228,16 @@ class BudgetTracker:
                 "limit_value": upsert.excluded.limit_value,
             },
         )
-        try:
-            async with self._database.engine.begin() as connection:
-                await connection.execute(upsert)
-                return await self._read_usage(connection, task_id)
-        except IntegrityError as error:
-            if sqlstate(error) == FOREIGN_KEY_VIOLATION:
-                raise TaskNotFoundError() from None
-            raise
+        return upsert
 
     async def record(
-        self, task_id: uuid.UUID, kind: BudgetKind, amount: int
+        self,
+        task_id: uuid.UUID,
+        kind: BudgetKind,
+        amount: int,
+        *,
+        run: TaskRun | None = None,
+        require_running: bool = False,
     ) -> BudgetUsage:
         """Atomically add ``amount`` to the consumption of ``kind``; return it.
 
@@ -208,23 +248,49 @@ class BudgetTracker:
         Recording is allowed even when the budget is already exceeded (the work
         happened); the returned ``BudgetUsage`` is the state after the increment.
         Raises ``BudgetNotConfiguredError`` if the task has no budget.
+
+        ``run`` (a ``TaskRun``, or ``None``): a charge made ON BEHALF OF that run
+        of the task (the orchestrator and its nodes, PAW-034). The usage is kept
+        per task, not per run, so a worker whose run was replaced (Retry,
+        Restart) or ended would otherwise spend the budget of the run that took
+        over. The task row is read with a share lock (``FOR SHARE``) in the
+        transaction of the increment, and nothing is written (``StaleRunError``)
+        unless the task still exists, has not ended (completed, failed,
+        cancelled) and its attempt and retry count are ``run``: a Fail, Retry or
+        Restart either committed before (and is seen) or waits until the charge
+        committed. There is no window between the check and the write.
+
+        ``require_running`` (with ``run``): the charge is for STARTING work (the
+        step of a node start or a planner call), so the task must also be
+        ``running`` (``TaskNotRunningError`` for a paused or waiting task,
+        nothing written). A charge for work that already ran (``run`` alone) is
+        accepted while the task quiesces.
         """
-        check_uuid("task_id", task_id)
-        check_member("kind", kind, BudgetKind)
-        if kind is BudgetKind.RUNTIME_SECONDS:
-            raise InvalidQueueingArgumentError("kind")
-        check_amount("amount", amount)
-        add = (
-            update(BudgetUsageRow)
-            .where(BudgetUsageRow.task_id == task_id, BudgetUsageRow.kind == kind)
-            .values(consumed=func.least(BudgetUsageRow.consumed + amount, MAX_CONSUMED))
-            .returning(BudgetUsageRow.consumed, BudgetUsageRow.limit_value)
-        )
+        _check_record(task_id, kind, amount, run, require_running)
         async with self._database.engine.begin() as connection:
-            row = (await connection.execute(add)).one_or_none()
-        if row is None:
-            raise BudgetNotConfiguredError()
-        return BudgetUsage(kind, row.consumed, row.limit_value)
+            return await _record(
+                connection, task_id, kind, amount, run, require_running
+            )
+
+    async def record_in(
+        self,
+        session: AsyncSession,
+        task_id: uuid.UUID,
+        kind: BudgetKind,
+        amount: int,
+        *,
+        run: TaskRun | None = None,
+        require_running: bool = False,
+    ) -> BudgetUsage:
+        """``record`` in the transaction of the caller's ``session`` (inside a
+        transaction; nothing is committed here). The orchestrator charges the step
+        of a node start in the transaction that starts the node
+        (``DagStore.start_node_in``), and the step and retry of a planner call in
+        one transaction: the charge and the start commit together or not at all.
+        """
+        check_session("session", session)
+        _check_record(task_id, kind, amount, run, require_running)
+        return await _record(session, task_id, kind, amount, run, require_running)
 
     async def start_runtime(self, task_id: uuid.UUID) -> int:
         """Begin a new runtime session and return its generation (>= 1).
@@ -246,8 +312,48 @@ class BudgetTracker:
         there is no budget.
         """
         check_uuid("task_id", task_id)
+        start = self._start_statement(task_id)
+        async with self._database.engine.begin() as connection:
+            row = (await connection.execute(start)).one_or_none()
+        if row is None:
+            raise BudgetNotConfiguredError()
+        return row.runtime_generation
+
+    async def start_runtime_in(
+        self,
+        session: AsyncSession,
+        task_id: uuid.UUID,
+        *,
+        run: TaskRun | None = None,
+    ) -> int:
+        """``start_runtime`` in the transaction of the caller's ``session`` (inside
+        a transaction; see ``TaskQueue.enqueue_in``). Nothing is committed here.
+
+        The orchestrator proves its queue lease in the same transaction
+        (``TaskQueue.heartbeat_in``), so the timer starts only together with a
+        valid lease: "only the lease holder calls ``start_runtime``" (Decision
+        0007, 10) holds without a window. ``run`` (a ``TaskRun`` or ``None``): the
+        timer is started on behalf of that run; the task row is share-locked
+        first and ``StaleRunError`` is raised (nothing started) unless the task
+        has not ended and ``run`` is its current run, and ``TaskNotRunningError``
+        unless it is ``running`` (a timer is new work). Lock order: the task row,
+        then the budget row (the caller then locks the queue entry).
+        """
+        check_session("session", session)
+        check_uuid("task_id", task_id)
+        if run is not None and not isinstance(run, TaskRun):
+            raise InvalidQueueingArgumentError("run")
+        if run is not None:
+            # A run's timer is new work: the task must be running.
+            await _require_run(session, task_id, run, require_running=True)
+        row = (await session.execute(self._start_statement(task_id))).one_or_none()
+        if row is None:
+            raise BudgetNotConfiguredError()
+        return row.runtime_generation
+
+    def _start_statement(self, task_id: uuid.UUID):
         now = self._instant()
-        start = (
+        return (
             update(BudgetUsageRow)
             .where(
                 BudgetUsageRow.task_id == task_id,
@@ -263,11 +369,6 @@ class BudgetTracker:
             )
             .returning(BudgetUsageRow.runtime_generation)
         )
-        async with self._database.engine.begin() as connection:
-            row = (await connection.execute(start)).one_or_none()
-        if row is None:
-            raise BudgetNotConfiguredError()
-        return row.runtime_generation
 
     async def stop_runtime(self, task_id: uuid.UUID, generation: int) -> BudgetUsage:
         """End the run of session ``generation``: add the elapsed seconds, clear it.
@@ -436,3 +537,71 @@ class BudgetTracker:
                 consumed += _elapsed_seconds(row.now, row.running_since)
             usage.append(BudgetUsage(kind, consumed, row.limit_value))
         return tuple(usage)
+
+
+async def _require_run(
+    executor: AsyncConnection | AsyncSession,
+    task_id: uuid.UUID,
+    run: TaskRun,
+    require_running: bool = False,
+) -> None:
+    """Share-lock the task row for the rest of the transaction and require that
+    the task has not ended and ``run`` is its current run (``StaleRunError``;
+    also for an unknown task: there is no run to act for) and, with
+    ``require_running``, that it is ``running`` (``TaskNotRunningError``)."""
+    task = (
+        await executor.execute(
+            select(TaskRow.state, TaskRow.attempt, TaskRow.retry_count)
+            .where(TaskRow.id == task_id)
+            .with_for_update(read=True)
+        )
+    ).one_or_none()
+    if (
+        task is None
+        or TaskState(task.state) in TERMINAL_STATES
+        or TaskRun(task.attempt, task.retry_count) != run
+    ):
+        raise StaleRunError()
+    if require_running and TaskState(task.state) is not TaskState.RUNNING:
+        raise TaskNotRunningError()
+
+
+def _check_record(
+    task_id: uuid.UUID,
+    kind: BudgetKind,
+    amount: int,
+    run: TaskRun | None,
+    require_running: bool,
+) -> None:
+    check_uuid("task_id", task_id)
+    check_member("kind", kind, BudgetKind)
+    if kind is BudgetKind.RUNTIME_SECONDS:
+        raise InvalidQueueingArgumentError("kind")
+    check_amount("amount", amount)
+    if run is not None and not isinstance(run, TaskRun):
+        raise InvalidQueueingArgumentError("run")
+    check_bool("require_running", require_running)
+    if require_running and run is None:
+        raise InvalidQueueingArgumentError("require_running")
+
+
+async def _record(
+    executor: AsyncConnection | AsyncSession,
+    task_id: uuid.UUID,
+    kind: BudgetKind,
+    amount: int,
+    run: TaskRun | None,
+    require_running: bool,
+) -> BudgetUsage:
+    if run is not None:
+        await _require_run(executor, task_id, run, require_running)
+    add = (
+        update(BudgetUsageRow)
+        .where(BudgetUsageRow.task_id == task_id, BudgetUsageRow.kind == kind)
+        .values(consumed=func.least(BudgetUsageRow.consumed + amount, MAX_CONSUMED))
+        .returning(BudgetUsageRow.consumed, BudgetUsageRow.limit_value)
+    )
+    row = (await executor.execute(add)).one_or_none()
+    if row is None:
+        raise BudgetNotConfiguredError()
+    return BudgetUsage(kind, row.consumed, row.limit_value)

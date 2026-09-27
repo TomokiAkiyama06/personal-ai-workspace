@@ -2,7 +2,7 @@
 
 A person changes a memory through this service (the Memory UI of a later issue
 calls it with the authenticated user). It writes the PAW-040 tables and nothing
-else; the choices the requirements leave open are proposed in Decision 0034.
+else; the choices the requirements leave open are decided in Decision 0034 (Approved).
 
 Versions are never overwritten
 ------------------------------

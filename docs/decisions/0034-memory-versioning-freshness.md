@@ -1,9 +1,10 @@
 # Memory の Relation・手動編集の Version・Freshness と Stale Candidate の扱い
 
-- Status: Proposed
+- Status: Approved
 - Date: 2026-09-28
 - Scope: Issue [#36](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/36)（PAW-042: Memory Conflict / Versioning / Freshness）。関連: PAW-040（#34、Schema）、PAW-041（#35、[Decision 0018](0018-memory-journal-consolidation-policy.md)）、PAW-043（Hybrid Retrieval、[Decision 0019](0019-hybrid-retrieval-policy.md)）、PAW-046（Shared Memory、[Decision 0009](0009-shared-memory-administration.md)）、[Decision 0026](0026-memory-status-change-history.md)（Status / Stale の変更履歴）、PAW-044（Inferred Preference の確認）、PAW-045（Markdown Projection）
 - Supersedes: なし（既存の Decision を書き換えない。要件が決めていない点を埋める）
+- Approval: 2026-09-28、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで「推奨どおり」と回答して承認（追加した 12 を含む全点。末尾の「承認時の決定」）
 
 ## 背景
 
@@ -143,3 +144,22 @@ Revision `0042` は Index を 1 つ足すだけ: `ix_memory_versions_freshness_d
 10. `extends` / `conflicts_with` に両方の Memory の書き込み権限を要し、公開範囲をまたいでも許すこと（推奨: 承認）。
 11. 履歴を公開範囲ごとに絞り、復元は同じ公開範囲の Version からだけ行うこと（推奨: 承認）。
 12. Scope の縮小（`project → user`）を誰に許すか。案 A: Contributor 以上（その Project Memory を編集・廃止できる人。実装はこれ）。案 B: Manager だけ（メンバーから Memory を外す操作を管理者に限る）。推奨: **A**。Contributor は既に廃止で同じ結果を得られ、B にしても「廃止して自分で作る」で回避できるため。縮小先を編集者本人以外の User にすることは扱わない（他人の Private Memory を作ることになる）。
+
+## 承認時の決定（2026-09-28）
+
+Human は、作業 Session で上の 12 点について推奨つきの説明を受け、「推奨どおり」と回答して承認した（12 点を一括で。個別の変更はない）。**12 点すべてが推奨どおり**である。
+
+1. Relation の意味（1 の表）。退役させるのは `supersedes` だけで、同じ公開範囲に限る: 推奨どおり承認。
+2. `confirmed_from` / `revalidated_from` を操作が自動で張り、`merged_from` をこの Issue で扱わない: 推奨どおり承認。
+3. 手動編集・復元・廃止の Version の作り方（2）。Scope は編集で狭めることだけができ（`project → user`、編集者本人の Memory になる。同じ Transaction で `project` の Version を退役させる）、広げることはできない: 推奨どおり承認。
+4. 手動の変更を人間の `user`（`memory.use`）と `project`（`project.memory.use`、Contributor 以上）に限り、`repo` / `project_group` を今は扱わない: 推奨どおり承認（Repo は別の Decision で `write` Override を要するかを決める）。
+5. 手動で書ける鮮度（4 の表）と、`revalidate_triggers` の閉じた語彙: 推奨どおり承認。
+6. Stale Candidate・期限切れ・Session / Task 終了の処理（5 の表。Task の出典を `source_ref = str(task_id)` で照合することを含む）、Revalidate で新しい Version を作る: 推奨どおり承認。
+7. Job を呼ぶ Scheduler / Event の配線（`end_task` を `TaskService` の Transition Listener に配線することを含む）を後の Issue にする: 推奨どおり承認（後続の課題）。
+8. 手動の `supersedes` を今は取り消せず、取り消しの操作を History Graph（UI）の Issue で決める: 推奨どおり承認。
+9. 編集・復元・Revalidate の新しい Version に `memory_sources` を写さない: 推奨どおり、この Issue では写さず、会話削除の Flow の Issue で「写す」か「`user_confirmation` の出典を足す」かを決める。
+10. `extends` / `conflicts_with` に両方の Memory の書き込み権限を要し、公開範囲をまたいでも許す: 推奨どおり承認。
+11. 履歴を公開範囲ごとに絞り、復元は同じ公開範囲の Version からだけ行う: 推奨どおり承認。
+12. Scope の縮小（`project → user`）を許す相手: 推奨どおり**案 A（Contributor 以上）**。縮小先を編集者本人以外の User にすることは扱わない。
+
+承認後に方針を変える場合は、この Decision を書き換えず、新しい Decision から `Supersedes` する。

@@ -95,7 +95,8 @@ Limits (stated, not hidden)
   runtime quota by what they use (requests and tasks are exact under concurrency).
 * A usage row that was never settled (the process died between admission and
   settlement) stays ``in_flight``: it counts as a request but has no tokens or
-  duration. There is no reaper yet.
+  duration, until the orchestrator's reaper (``orchestrator/connection_reaper.py``,
+  Decision 0016) settles it as ``failed`` a day and an hour after it started.
 * The budget charge is a separate transaction from the settlement.
 * A prompt is not inspected here (credential detection and privacy filtering of what
   is sent to a cloud provider belong to the Orchestrator and the Tool Broker).

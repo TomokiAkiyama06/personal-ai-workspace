@@ -5,7 +5,7 @@ every branch with plain values, and lets a reviewer read the policy in one place
 The sources are REQUIREMENTS.md "Memory Conflict / Versioning / Retrieval",
 "Memory Freshness / Revalidate Policy", "Manual Memory Editing / Concurrency" and
 docs/MEMORY_ARCHITECTURE.md sections 10, 11, 15 and 17; the choices they leave
-open are proposed in Decision 0034 (Proposed):
+open are decided in Decision 0034 (Approved 2026-09-28):
 
 * **Versions are never overwritten.** An edit, a restore and a revalidation each
   write version ``n + 1``; the version they replace becomes ``superseded`` and a

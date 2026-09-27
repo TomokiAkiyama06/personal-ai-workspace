@@ -13,7 +13,13 @@ from unittest import mock
 
 from sqlalchemy import event, text
 
-from paw_backend.tasks import TaskNotFoundError
+from paw_backend.tasks import (
+    StaleRunError,
+    TaskCommand,
+    TaskNotFoundError,
+    TaskNotRunningError,
+    TaskRun,
+)
 from paw_backend.tasks.queueing import (
     PRESET_LIMITS,
     RECORDABLE_KINDS,
@@ -280,6 +286,90 @@ class RecordTest(BudgetTestCase):
                 K.GPU_SECONDS: 50,
             },
         )
+
+    async def test_a_charge_for_a_run_is_recorded_only_while_that_run_is_current(
+        self,
+    ):
+        # ``run``: the task's run is checked under the task row's share lock in
+        # the transaction of the increment. A replaced run (Retry / Restart) or
+        # an ended task records nothing.
+        task_id = await self.configured_task()
+        started = await self.service.execute(
+            task_id, TaskCommand.START, actor=self.system
+        )
+        first = started.run
+        usage = await self.budget.record(task_id, K.TOKENS, 5, run=first)
+        self.assertEqual(usage.consumed, 5)
+
+        await self.service.execute(task_id, TaskCommand.FAIL, actor=self.system)
+        with self.assertRaises(StaleRunError):  # ended
+            await self.budget.record(task_id, K.TOKENS, 7, run=first)
+        await self.service.execute(task_id, TaskCommand.RETRY, actor=self.user)
+        with self.assertRaises(StaleRunError):  # replaced by the Retry
+            await self.budget.record(task_id, K.TOKENS, 7, run=first)
+        retried = (await self.service.restore(task_id)).run
+        self.assertNotEqual(retried, first)
+        self.assertEqual(
+            (await self.budget.record(task_id, K.TOKENS, 1, run=retried)).consumed, 6
+        )
+        with self.assertRaises(StaleRunError):  # a run that never existed
+            await self.budget.record(task_id, K.TOKENS, 7, run=TaskRun(9, 9))
+        with self.assertRaises(InvalidQueueingArgumentError):
+            await self.budget.record(task_id, K.TOKENS, 7, run=(1, 0))
+        self.assertEqual((await self.budget_row(task_id, "tokens"))["consumed"], 6)
+
+    async def test_a_timer_for_a_run_starts_only_in_the_callers_transaction_for_it(
+        self,
+    ):
+        # ``start_runtime_in(session, task_id, run=...)``: the session is the
+        # caller's (the orchestrator proves its lease in it), and the task's run
+        # is checked under the task row's share lock first.
+        task_id = await self.configured_task()
+        first = (
+            await self.service.execute(task_id, TaskCommand.START, actor=self.system)
+        ).run
+        async with self.database.session() as session:
+            with self.assertRaises(InvalidQueueingArgumentError):  # no transaction
+                await self.budget.start_runtime_in(session, task_id, run=first)
+        async with self.database.session() as session, session.begin():
+            generation = await self.budget.start_runtime_in(session, task_id, run=first)
+        self.assertEqual(generation, 1)
+        await self.budget.stop_runtime(task_id, generation)
+
+        await self.service.execute(task_id, TaskCommand.FAIL, actor=self.system)
+        await self.service.execute(task_id, TaskCommand.RETRY, actor=self.user)
+        with self.assertRaises(StaleRunError):
+            async with self.database.session() as session, session.begin():
+                await self.budget.start_runtime_in(session, task_id, run=first)
+        # Rolled back with the caller: nothing started.
+        with contextlib.suppress(RuntimeError):
+            async with self.database.session() as session, session.begin():
+                await self.budget.start_runtime_in(session, task_id)
+                raise RuntimeError("the caller gives up")
+        row = await self.budget_row(task_id, "runtime_seconds")
+        self.assertEqual((row["runtime_generation"], row["running_since"]), (1, None))
+
+    async def test_a_charge_that_starts_work_needs_a_running_task(self):
+        # ``require_running``: the step of a planner or node start is charged
+        # only while the task RUNS (a pause or a wait that committed meanwhile
+        # refuses it: no new work starts). A plain ``run=`` charge (what running
+        # work used) is still accepted while the task quiesces.
+        task_id = await self.configured_task()
+        run = (
+            await self.service.execute(task_id, TaskCommand.START, actor=self.system)
+        ).run
+        await self.budget.record(task_id, K.STEPS, 1, run=run, require_running=True)
+        await self.service.execute(task_id, TaskCommand.PAUSE, actor=self.user)
+        with self.assertRaises(TaskNotRunningError):
+            await self.budget.record(task_id, K.STEPS, 1, run=run, require_running=True)
+        await self.budget.record(task_id, K.TOKENS, 3, run=run)
+        with self.assertRaises(TaskNotRunningError):
+            async with self.database.session() as session, session.begin():
+                await self.budget.start_runtime_in(session, task_id, run=run)
+        with self.assertRaises(InvalidQueueingArgumentError):  # needs the run
+            await self.budget.record(task_id, K.STEPS, 1, require_running=True)
+        self.assertEqual((await self.budget_row(task_id, "steps"))["consumed"], 1)
+        self.assertEqual((await self.budget_row(task_id, "tokens"))["consumed"], 3)
 
     async def test_recording_zero_changes_nothing(self):
         task_id = await self.configured_task()

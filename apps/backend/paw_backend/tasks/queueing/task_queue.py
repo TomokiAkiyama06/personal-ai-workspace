@@ -4,11 +4,13 @@ The database is the only source of truth (``queue_entries``): nothing is kept in
 process memory, so any number of workers in any number of processes can call
 the same methods concurrently. The queue never CHANGES ``tasks.state`` (the
 orchestrator (PAW-034) pairs ``claim_next`` with the PAW-032 ``start`` command). It
-READS ``tasks`` (and, through the gate, the project table) in three places, all from
+READS ``tasks`` (and, through the gate, the project table) in four places: three from
 Issue #83 (Decisions 0008 and 0020): ``enqueue`` reads the task's ``project_id`` for
 the Project state gate, ``claim_next`` skips the entries of a project that is not
 Active, and ``cancel(..., only_if_task_terminal=True)`` reads (and share-locks) the
-task's state. It performs no authorisation and offers no HTTP endpoint.
+task's state; and one from PAW-034: ``finish`` reads (and share-locks) the task's
+state to complete the entry, or give it back when the task needs a worker again.
+It performs no authorisation and offers no HTTP endpoint.
 
 Project state gate. Every queue is built with a ``ProjectGate``
 (``tasks.project_gate``; required, Decision 0020). Its ``enqueue`` locks the task's
@@ -162,7 +164,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import BindParameter, ColumnElement
 
 from paw_backend.db import Database
-from paw_backend.tasks.domain import TERMINAL_STATES
+from paw_backend.tasks.domain import TERMINAL_STATES, TaskState
 from paw_backend.tasks.errors import TaskNotFoundError
 from paw_backend.tasks.models import TaskRow
 from paw_backend.tasks.project_gate import ProjectGate
@@ -200,6 +202,9 @@ from paw_backend.tasks.queueing.validation import (
 )
 
 ONE_ACTIVE_ENTRY_PER_TASK = "uq_queue_entries_one_active_per_task"
+# The task states in which the task needs a worker, so ``finish`` gives the entry
+# back instead of completing it.
+_NEEDS_A_WORKER = frozenset({TaskState.QUEUED, TaskState.RUNNING})
 
 
 def _inlined(status: QueueStatus) -> BindParameter[QueueStatus]:
@@ -345,6 +350,62 @@ class TaskQueue:
         """
         check_uuid("task_id", task_id)
         check_member("priority", priority, Priority)
+        try:
+            async with self._database.session() as session, session.begin():
+                return await self._enqueue(session, task_id, now, priority)
+        except IntegrityError as error:
+            self._raise_enqueue_error(error)
+            raise
+
+    @property
+    def database(self) -> Database:
+        """The database of the queue (``enqueue_in`` needs a session of it)."""
+        return self._database
+
+    async def enqueue_in(
+        self,
+        session: AsyncSession,
+        task_id: uuid.UUID,
+        *,
+        now: datetime | None = None,
+        priority: Priority = Priority.NORMAL,
+    ) -> QueueEntry:
+        """``enqueue`` in the transaction of the caller's ``session`` (a session of
+        :attr:`database` that is inside a transaction; see ``cancel_in``).
+
+        The entry exists when the caller's transaction commits, together with
+        whatever else it wrote: the orchestrator sets the task's budget preset in
+        the same transaction, so a losing or duplicate enqueue
+        (``TaskAlreadyQueuedError``) changes nothing at all. The errors are those
+        of ``enqueue``; after one, the caller's transaction must be rolled back
+        (leaving the ``session.begin()`` block with the exception does that).
+        """
+        check_session("session", session)
+        check_uuid("task_id", task_id)
+        check_member("priority", priority, Priority)
+        try:
+            return await self._enqueue(session, task_id, now, priority)
+        except IntegrityError as error:
+            self._raise_enqueue_error(error)
+            raise
+
+    @staticmethod
+    def _raise_enqueue_error(error: IntegrityError) -> None:
+        if sqlstate(error) == FOREIGN_KEY_VIOLATION:
+            raise TaskNotFoundError() from None
+        if (
+            sqlstate(error) == UNIQUE_VIOLATION
+            and constraint_name(error) == ONE_ACTIVE_ENTRY_PER_TASK
+        ):
+            raise TaskAlreadyQueuedError() from None
+
+    async def _enqueue(
+        self,
+        session: AsyncSession,
+        task_id: uuid.UUID,
+        now: datetime | None,
+        priority: Priority,
+    ) -> QueueEntry:
         current, _ = self._instants(now)
         insert_entry = (
             insert(QueueEntryRow)
@@ -359,20 +420,9 @@ class TaskQueue:
             .returning(QueueEntryRow)
             .execution_options(populate_existing=True)
         )
-        try:
-            async with self._database.session() as session, session.begin():
-                await self._require_active_project(session, task_id)
-                row = (await session.execute(insert_entry)).scalar_one()
-                return _entry(row)
-        except IntegrityError as error:
-            if sqlstate(error) == FOREIGN_KEY_VIOLATION:
-                raise TaskNotFoundError() from None
-            if (
-                sqlstate(error) == UNIQUE_VIOLATION
-                and constraint_name(error) == ONE_ACTIVE_ENTRY_PER_TASK
-            ):
-                raise TaskAlreadyQueuedError() from None
-            raise
+        await self._require_active_project(session, task_id)
+        row = (await session.execute(insert_entry)).scalar_one()
+        return _entry(row)
 
     async def claim_next(
         self, worker_id: str, now: datetime | None = None
@@ -480,6 +530,40 @@ class TaskQueue:
             lease_expires_at=func.greatest(QueueEntryRow.lease_expires_at, lease_end),
         )
 
+    async def heartbeat_in(
+        self,
+        session: AsyncSession,
+        entry_id: int,
+        worker_id: str,
+        claim_count: int,
+        now: datetime | None = None,
+    ) -> QueueEntry:
+        """``heartbeat`` in the transaction of the caller's ``session`` (inside a
+        transaction; see ``cancel_in``).
+
+        The entry row stays locked (``FOR UPDATE``) until the caller's transaction
+        ends, so a claim by another worker (``FOR UPDATE SKIP LOCKED``) cannot
+        slip in between this proof of the lease and the caller's commit, and
+        after the commit the lease runs for a whole ``lease_seconds``: whatever
+        the caller wrote in the same transaction was written by the holder of a
+        valid lease. The orchestrator takes a DAG over this way
+        (``DagStore.acquire_in``). ``LeaseLostError`` as ``heartbeat``; after
+        one, the caller's transaction must be rolled back.
+        """
+        check_session("session", session)
+        check_entry_id(entry_id)
+        check_worker_id(worker_id)
+        check_claim_count(claim_count)
+        current, lease_end = self._instants(now)
+        return await self._update_held_in(
+            session,
+            entry_id,
+            worker_id,
+            claim_count,
+            current,
+            lease_expires_at=func.greatest(QueueEntryRow.lease_expires_at, lease_end),
+        )
+
     async def release(
         self,
         entry_id: int,
@@ -539,6 +623,67 @@ class TaskQueue:
             finished_at=current,
             lease_expires_at=None,
         )
+
+    async def finish(
+        self,
+        entry_id: int,
+        worker_id: str,
+        claim_count: int,
+        now: datetime | None = None,
+    ) -> QueueEntry:
+        """End a worker's hold on an entry, as the TASK needs it now.
+
+        ``complete`` when the task needs no worker (it is paused, waiting,
+        evaluating or ended); ``release`` (the entry is ``queued`` again, keeping
+        its place) when the task needs one: it is ``queued`` (a Retry or Restart
+        committed while this entry was still claimed, so the caller's ``enqueue``
+        was refused with ``TaskAlreadyQueuedError``) or ``running`` (a Resume or
+        an Unblock did the same, or the run was left running). The task's state is
+        read under a share lock in the same transaction as the update of the entry,
+        so a command either committed before (and is seen) or waits until the entry
+        is ended (and the caller's ``enqueue`` then succeeds): a task never needs a
+        worker while it has no active entry because of this call.
+
+        The task row is locked BEFORE the entry row (the order of a task command
+        that cancels its entry in the same transaction, ``cancel_in``). The lease
+        rules are those of ``complete`` / ``release`` (``LeaseLostError``); the
+        returned entry says which it was (``status``).
+        """
+        check_entry_id(entry_id)
+        check_worker_id(worker_id)
+        check_claim_count(claim_count)
+        current, _ = self._instants(now)
+        async with self._database.session() as session, session.begin():
+            task_id = (
+                await session.execute(
+                    select(QueueEntryRow.task_id).where(QueueEntryRow.id == entry_id)
+                )
+            ).scalar_one_or_none()
+            if task_id is None:
+                raise LeaseLostError()
+            state = (
+                await session.execute(
+                    select(TaskRow.state)
+                    .where(TaskRow.id == task_id)
+                    .with_for_update(read=True)
+                )
+            ).scalar_one_or_none()
+            if state in _NEEDS_A_WORKER:
+                values: dict[str, Any] = {
+                    "status": QueueStatus.QUEUED,
+                    "claimed_by": None,
+                    "claimed_at": None,
+                    "lease_expires_at": None,
+                }
+            else:
+                values = {
+                    "status": QueueStatus.COMPLETED,
+                    "finished_at": current,
+                    "lease_expires_at": None,
+                }
+            return await self._update_held_in(
+                session, entry_id, worker_id, claim_count, current, **values
+            )
 
     async def cancel(
         self,
@@ -667,6 +812,20 @@ class TaskQueue:
         and does not judge it again when the lock holder rolled back, so a single
         statement would accept a lease that ran out while it waited.
         """
+        async with self._database.session() as session, session.begin():
+            return await self._update_held_in(
+                session, entry_id, worker_id, claim_count, current, **values
+            )
+
+    async def _update_held_in(
+        self,
+        session: AsyncSession,
+        entry_id: int,
+        worker_id: str,
+        claim_count: int,
+        current: ColumnElement[datetime],
+        **values: Any,
+    ) -> QueueEntry:
         lock_entry = (
             select(QueueEntryRow.id)
             .where(QueueEntryRow.id == entry_id)
@@ -685,10 +844,9 @@ class TaskQueue:
             .returning(QueueEntryRow)
             .execution_options(populate_existing=True)
         )
-        async with self._database.session() as session, session.begin():
-            if (await session.execute(lock_entry)).scalar_one_or_none() is None:
-                raise LeaseLostError()
-            row = (await session.execute(update_held)).scalar_one_or_none()
-            if row is None:
-                raise LeaseLostError()
-            return _entry(row)
+        if (await session.execute(lock_entry)).scalar_one_or_none() is None:
+            raise LeaseLostError()
+        row = (await session.execute(update_held)).scalar_one_or_none()
+        if row is None:
+            raise LeaseLostError()
+        return _entry(row)

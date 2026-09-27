@@ -25,6 +25,7 @@
 | [0018](0018-memory-journal-consolidation-policy.md) | Memory の Immediate Journal と Background Consolidation の方針（Worker 出力の Scope と State、優先度、Queue の数値、高リスク領域の保留） | Approved |
 | [0019](0019-hybrid-retrieval-policy.md) | Hybrid Retrieval の方針（権限を先に、Keyword・Vector・Rerank、暫定値、部品の失敗） | Approved |
 | [0020](0020-project-state-gate.md) | Task / Queue の Project 状態 Gate の適用範囲（Gate の必須化、Restore 後の Restart、Active でない Project の Claim と Start） | Approved |
+| [0021](0021-dag-orchestrator-policy.md) | DAG Agent Orchestrator の方針（Plan の形、Role、Escalation、並列数、結果の受け渡し、Sub-Agent の権限と予算） | Approved |
 | [0022](0022-project-lifecycle-capabilities.md) | Project の作成・招待への応答・退出の Capability と Audit の方針（0008 の 5 を置き換え、0004 を拡張） | Approved |
 | [0023](0023-audit-events-details-for-external-send.md) | 外部送信の Audit を `audit_events.details`（JSONB）へ永続化する方針（Decision 0010 の永続 Sink。0010・0004 への追補） | Approved |
 | [0024](0024-memory-read-capability.md) | 読み取り専用の Capability `memory.read`（`DENIED_ONLY`）を足し、Retrieval の User Scope の認可に使う方針（Retrieval の Audit の量。Decision 0019 の 1 の具体化） | Approved |
@@ -34,7 +35,8 @@
 | [0028](0028-project-deletion-research-data.md) | Project 削除時の調査結果（Evidence / Claim Provenance、Research Scratch）の扱い（削除・DELETE 権限の追加・唯一の Provenance を失う Memory の扱い） | Approved |
 | [0029](0029-per-user-git-runner-ssh.md) | User ごとの Linux User で git を実行する `SshGitRunner`（SSH 経由。Wrapper の許可副コマンド、鍵の発行・失効・回転、エラー処理、移行。Decision 0017 の 4 への追補。Issue #105） | Approved |
 | [0030](0030-task-working-set-model.md) | Task Working Set（Multi-Repo）の単位・承認・Write範囲・完了条件（Decision 0014「決まっていないこと」1〜5を埋める） | Approved |
-| [0034](0034-memory-versioning-freshness.md) | Memory の Relation の意味・手動編集の Version（誰がどの Scope を変えられるか）・手動で書ける鮮度・Stale Candidate / 期限切れ / Session 終了の処理（PAW-042。Issue #36） | Proposed |
+| [0031](0031-audit-retention-scheduler.md) | `audit_events` の保存期間・退避を定期実行する仕組み（systemd timer + Server ローカルの Command `audit-retention-run`、失敗の検知・通知、実行ごとの Audit、Advisory Lock。Decision 0027 の 6 への追補。Issue #117） | Approved |
+| [0034](0034-memory-versioning-freshness.md) | Memory の Relation の意味・手動編集の Version（誰がどの Scope を変えられるか）・手動で書ける鮮度・Stale Candidate / 期限切れ / Session 終了の処理（PAW-042。Issue #36） | Approved |
 
 運用は [AGENTS.md](../../AGENTS.md) の「仕様変更」に従います。
 

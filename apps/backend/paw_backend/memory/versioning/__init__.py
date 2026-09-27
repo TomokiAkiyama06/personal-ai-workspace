@@ -12,8 +12,8 @@
   ``unrelated``) leads to.
 
 Retrieval (PAW-043) offers only ``active`` versions; nothing here changes that. The
-open choices are proposed in Decision 0034 (Proposed). See ``apps/backend/README.md``
-("Memory Versioning / Freshness").
+open choices are decided in Decision 0034 (Approved 2026-09-28). See
+``apps/backend/README.md`` ("Memory Versioning / Freshness").
 """
 
 from paw_backend.memory.versioning.errors import (
