@@ -6,7 +6,7 @@
   between memories; revalidation of a stale candidate.
 * ``freshness.FreshnessMaintenance``: the backend-internal jobs of the freshness
   policies (``revalidate`` and ``repo_commit`` stale candidates, ``expiring``
-  expiry, ``session_only`` at session end).
+  expiry, ``session_only`` at session or task end).
 * ``rules``: the pure decisions, including what a classification of a new memory
   against an old one (``same`` / ``extends`` / ``supersedes`` / ``conflicts`` /
   ``unrelated``) leads to.

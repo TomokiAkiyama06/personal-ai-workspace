@@ -2,7 +2,7 @@
 
 ``revalidate`` and ``repo_commit`` memories become stale candidates (still active,
 lower priority in retrieval), ``expiring`` ones are deprecated at their expiry,
-``session_only`` ones when their session ends. Every change is recorded with the
+``session_only`` ones when their session or task ends. Every change is recorded with the
 ``system`` actor, and running a job again changes nothing.
 """
 
@@ -248,9 +248,96 @@ class ExpiryAndSessionTest(PostgresVersioningTestCase):
             {mine: "deprecated", theirs: "active", long_term: "active"},
         )
 
+    def task_source(self, seeded, ref, kind="task"):
+        with self.engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO memory_sources (memory_version_id, source_type,"
+                    " source_ref) VALUES (:v, :k, :r)"
+                ),
+                {"v": seeded.version_id, "k": kind, "r": ref},
+            )
+
+    async def test_session_only_memories_end_with_their_task(self):
+        # REQUIREMENTS.md: session_only is not kept after a Session or a Task ends.
+        me = self.user()
+        task, other = uuid4(), uuid4()
+        mine = self.seed("task note", owner=me.user_id, freshness="session_only")
+        theirs = self.seed("other task", owner=me.user_id, freshness="session_only")
+        long_term = self.seed("long term", owner=me.user_id)
+        # Only the canonical text of the task id names the task.
+        near_miss = self.seed("near miss", owner=me.user_id, freshness="session_only")
+        self.task_source(mine, str(task))
+        self.task_source(theirs, str(other))
+        self.task_source(long_term, str(task))
+        self.task_source(near_miss, f"{task}-x")
+        self.task_source(near_miss, str(task).upper())
+        # Only a task source names a task.
+        analysis = self.seed("analysis", owner=me.user_id, freshness="session_only")
+        self.task_source(analysis, str(task), kind="repo_analysis")
+        self.assertEqual(await self.freshness.end_task(task), 1)
+        statuses = {
+            seeded: self.versions(seeded.memory_id)[0].status
+            for seeded in (mine, theirs, long_term, near_miss, analysis)
+        }
+        self.assertEqual(
+            statuses,
+            {
+                mine: "deprecated",
+                theirs: "active",
+                long_term: "active",
+                near_miss: "active",
+                analysis: "active",
+            },
+        )
+        (change,) = self.changes(mine.version_id)
+        self.assertEqual(
+            (change.old_status, change.new_status, change.actor_type),
+            ("active", "deprecated", "system"),
+        )
+        # Nothing is erased, and running it again changes nothing.
+        self.assertEqual(len(self.versions(mine.memory_id)), 1)
+        self.assertEqual(await self.freshness.end_task(task), 0)
+        self.assertEqual(len(self.changes(mine.version_id)), 1)
+
+    async def test_a_session_end_does_not_retire_a_task_memory(self):
+        # A task source has no conversation; a conversation source has no task.
+        me = self.user()
+        task = uuid4()
+        seeded = self.seed("task note", owner=me.user_id, freshness="session_only")
+        self.task_source(seeded, str(task))
+        self.assertEqual(await self.freshness.end_session(task), 0)
+        self.assertEqual(self.versions(seeded.memory_id)[0].status, "active")
+
+    async def test_ending_a_task_is_batched_and_skips_locked_versions(self):
+        me = self.user()
+        task = uuid4()
+        seeded = [
+            self.seed(f"note {n}", owner=me.user_id, freshness="session_only")
+            for n in range(3)
+        ]
+        for one in seeded:
+            self.task_source(one, str(task))
+        freshness = self.new_freshness(batch=2)
+        with self.engine.connect() as locker:
+            locker.execute(
+                text("SELECT id FROM memory_versions WHERE id = :v FOR UPDATE"),
+                {"v": seeded[0].version_id},
+            )
+            self.assertEqual(await freshness.end_task(task), 2)
+            self.assertEqual(await freshness.end_task(task), 0)
+            locker.rollback()
+        self.assertEqual(await freshness.end_task(task), 1)
+        self.assertEqual(
+            {self.versions(one.memory_id)[0].status for one in seeded},
+            {"deprecated"},
+        )
+
     async def test_the_jobs_validate_their_arguments(self):
         with self.assertRaises(InvalidMemoryInputError):
             await self.freshness.end_session(str(uuid4()))
+        with self.assertRaises(InvalidMemoryInputError):
+            await self.freshness.end_task(str(uuid4()))
         with self.assertRaises(InvalidMemoryInputError):
             await self.freshness.mark_triggered(
                 "model_changed", TriggerTarget.workspace()

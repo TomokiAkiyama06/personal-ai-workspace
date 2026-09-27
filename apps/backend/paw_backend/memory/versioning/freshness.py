@@ -1,4 +1,4 @@
-"""Freshness maintenance (PAW-042): stale candidates, expiry and session end.
+"""Freshness maintenance (PAW-042): stale candidates, expiry, session and task end.
 
 MEMORY_ARCHITECTURE.md section 11 and REQUIREMENTS.md "Memory Freshness /
 Revalidate Policy": there is no single TTL, and reaching ``revalidate_after`` never
@@ -17,10 +17,14 @@ invalidates a memory. What each policy leads to (Decision 0034, 4 and 5):
 * ``expiring``: gone at ``expires_at``. The retrieval already leaves an expired
   version out; :meth:`~FreshnessMaintenance.expire_due` also sets it ``deprecated``
   so that the Memory UI shows it as ended.
-* ``session_only``: never Long-term Memory. The retrieval never offers it;
+* ``session_only``: never Long-term Memory (REQUIREMENTS.md: not kept after a
+  Session or a Task ends). The retrieval never offers it;
   :meth:`~FreshnessMaintenance.end_session` sets the ones that came from a
   conversation (a ``memory_sources`` row naming it) ``deprecated`` when the session
-  ends. Nothing is erased: erasing belongs to the conversation deletion flow.
+  ends, and :meth:`~FreshnessMaintenance.end_task` the ones that came from a task
+  (a ``task`` source whose ``source_ref`` is the task id's canonical text,
+  ``str(task_id)``) when the task ends. Nothing is erased: erasing belongs to the
+  conversation deletion flow.
 * ``permanent``: nothing.
 
 Every method is backend-internal (a scheduled job or an event handler): there is
@@ -47,6 +51,7 @@ from paw_backend.memory.models import (
     MemorySource,
     MemoryStatus,
     MemoryVersion,
+    SourceType,
 )
 from paw_backend.memory.versioning import limits
 from paw_backend.memory.versioning.errors import InputProblem
@@ -221,6 +226,29 @@ class FreshnessMaintenance:
             and_(
                 _V.c.freshness_policy == FreshnessPolicy.SESSION_ONLY.value,
                 from_conversation,
+            ),
+            {"status": MemoryStatus.DEPRECATED.value},
+        )
+
+    async def end_task(self, task_id: UUID) -> int:
+        """``session_only`` versions from the task ``task_id``: ``deprecated``.
+
+        A task source names its task by ``source_ref`` (the database has no foreign
+        key to ``tasks``): the canonical text of the id, ``str(task_id)``. Another
+        spelling names no task here.
+        """
+        task_id = validate_uuid("task_id", task_id)
+        from_task = exists(
+            select(_S.c.id).where(
+                _S.c.memory_version_id == _V.c.id,
+                _S.c.source_type == SourceType.TASK.value,
+                _S.c.source_ref == str(task_id),
+            )
+        )
+        return await self._apply(
+            and_(
+                _V.c.freshness_policy == FreshnessPolicy.SESSION_ONLY.value,
+                from_task,
             ),
             {"status": MemoryStatus.DEPRECATED.value},
         )

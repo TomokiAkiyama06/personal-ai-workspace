@@ -77,7 +77,7 @@ Retrieval（PAW-043）は `active` だけを候補にし、`session_only` と期
 
 `revalidate_triggers` の語彙は閉じた集合にする: `related_setting_changed`、`member_changed`、`model_changed`、`external_service_changed`、`phase_changed`（要件の例: 関連設定、Project メンバー、メインの Local LLM、外部サービス、開発フェーズ）。Event と Memory が同じ綴りで待ち合わせるため。
 
-### 5. Stale Candidate・期限・Session の処理
+### 5. Stale Candidate・期限・Session / Task 終了の処理
 
 Backend 内部の Job（`FreshnessMaintenance`）として行う。呼び出しの認可はなく、変更は `system` を Actor として `memory_metadata_changes` に残る。1 回の呼び出しで最大 `batch`（既定 500）件、`FOR UPDATE SKIP LOCKED`（人が編集中の Version は次回に回す）。同じ Version に 2 回印を付けない（何度実行しても同じ）。
 
@@ -88,13 +88,14 @@ Backend 内部の Job（`FreshnessMaintenance`）として行う。呼び出し�
 | `repo_commit` | Repository の Head が Memory の commit と違う | 同上。別の Branch の Memory は、その Branch の Head でだけ判定する（Branch のない Memory は判定する） |
 | `expiring` | `expires_at` を過ぎた | `deprecated` にする（Retrieval は元々除く。UI で終わったことが分かるように） |
 | `session_only` | Session の終了（その Conversation を `memory_sources` に持つもの） | `deprecated` にする。消さない（消すのは会話削除の Flow） |
+| `session_only` | Task の終了（その Task を `memory_sources` に持つもの: `source_type = task` で `source_ref` が Task ID の正規の文字列 `str(task_id)`。大文字や前後の飾りなど別の綴りは一致させない） | 同上 |
 
 Stale Candidate への人の答え:
 
 - まだ正しい → **Revalidate**（`revalidate_memory`）: 同じ内容で `n + 1` を書き、`verified_at` を今に、Stale の印なし。`supersedes` と `revalidated_from` を張る。`revalidate` の Memory だけ。
 - 変わった → 編集。もう正しくない → 廃止。
 
-Stale の印は古い Version に残る（いつ Stale になったかの履歴）。Job を呼ぶ Scheduler・Event の配線は、この Issue では作らない（呼び出し口だけ）。
+Stale の印は古い Version に残る（いつ Stale になったかの履歴）。Job を呼ぶ Scheduler・Event の配線は、この Issue では作らない（呼び出し口だけ）。Task 終了の `end_task(task_id)` も呼び出し口だけで、`TaskService` の終了の遷移（`TaskService(listeners=[...])` の Transition Listener）への配線はしない（本番で `TaskService` を組み立てる Composition Root がまだなく、Approval の `revoke_on_task_end` と同じく後続の Issue で配線する）。配線されるまで、Task 由来の `session_only` は Task が終わっても `active` のまま残る（Retrieval は `session_only` を元々返さないので、候補には出ない）。
 
 ### 6. Migration
 
@@ -132,8 +133,8 @@ Revision `0042` は Index を 1 つ足すだけ: `ix_memory_versions_freshness_d
 3. 手動編集・復元・廃止の Version の作り方（2）。Scope を編集で変えないこと（推奨: 承認）。
 4. 手動の変更を人間の `user`（`memory.use`）と `project`（`project.memory.use`、Contributor 以上）に限り、`repo` / `project_group` を今は扱わないこと（推奨: 承認。Repo は別の Decision で `write` Override を要するかを決める）。
 5. 手動で書ける鮮度（4 の表）と、`revalidate_triggers` の閉じた語彙（推奨: 承認）。
-6. Stale Candidate・期限切れ・Session 終了の処理（5 の表）、Revalidate で新しい Version を作ること（推奨: 承認）。
-7. Job を呼ぶ Scheduler / Event の配線を後の Issue にすること（推奨: 承認）。
+6. Stale Candidate・期限切れ・Session / Task 終了の処理（5 の表。Task の出典を `source_ref = str(task_id)` で照合することを含む）、Revalidate で新しい Version を作ること（推奨: 承認）。
+7. Job を呼ぶ Scheduler / Event の配線を後の Issue にすること。Task 終了の `end_task` を `TaskService` の Transition Listener に配線することを含む（推奨: 承認。後続の課題）。
 8. 手動の `supersedes` を今は取り消せないこと、取り消しの操作を History Graph（UI）の Issue で決めること（推奨: 承認）。
 9. 編集・復元・Revalidate の新しい Version に `memory_sources` を写さないこと（推奨: この Issue では写さず、会話削除の Flow の Issue で「写す」か「`user_confirmation` の出典を足す」かを決める）。
 10. `extends` / `conflicts_with` に両方の Memory の書き込み権限を要し、公開範囲をまたいでも許すこと（推奨: 承認）。

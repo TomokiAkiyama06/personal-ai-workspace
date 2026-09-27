@@ -3245,7 +3245,7 @@ Rerank（Reranker Protocol）→ 構造化 Score（confirmed・鮮度・importan
 要件は [REQUIREMENTS.md](../../REQUIREMENTS.md) の「Memory Conflict / Versioning / Retrieval」「Memory Freshness / Revalidate Policy」「Manual Memory Editing / Concurrency」と
 [Memory Architecture](../../docs/MEMORY_ARCHITECTURE.md) の 10・11・15・17 節です。要件が決めていない選択（Relation ごとの意味、誰がどの Scope を変えられるか、手動で書ける鮮度、Stale Candidate・期限・Session 終了の処理）は
 [Decision 0034](../../docs/decisions/0034-memory-versioning-freshness.md)（**Proposed。Human の承認待ち**）の推奨どおりに実装しており、承認されない点は別の PR で直します。
-**HTTP の Endpoint も、Job を呼ぶ Scheduler / Event の配線もまだありません**（Memory UI の層が `MemoryVersioningService` を、定期 Job と Event の Handler が `FreshnessMaintenance` を呼びます）。
+**HTTP の Endpoint も、Job を呼ぶ Scheduler / Event の配線もまだありません**（`end_task` を `TaskService` の Transition Listener に繋ぐのも後続です）（Memory UI の層が `MemoryVersioningService` を、定期 Job と Event の Handler が `FreshnessMaintenance` を呼びます）。
 
 ### Version（`MemoryVersioningService`）
 
@@ -3290,6 +3290,7 @@ Backend 内部の Job です（認可はなく、変更は `system` を Actor �
 | `mark_repo_head(repo_id, commit_sha, branch=)` | その Repository の `repo_commit` で commit が Head と違う（別の Branch の Memory は除く） | 同上 |
 | `expire_due` | `expiring` で `expires_at` を過ぎた | `deprecated` |
 | `end_session(conversation_id)` | その Conversation を Source に持つ `session_only` | `deprecated`（消さない） |
+| `end_task(task_id)` | その Task を Source に持つ `session_only`（`source_type = task`、`source_ref = str(task_id)`） | `deprecated`（消さない） |
 
 Stale Candidate への答えは、まだ正しければ `revalidate_memory`、変わったなら `edit_memory`、もう正しくなければ `deprecate_memory` です。
 
