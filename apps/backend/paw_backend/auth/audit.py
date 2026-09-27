@@ -55,6 +55,8 @@ class AuthAction(StrEnum):
     PASSKEY_REGISTER = "auth.passkey.register"
     PASSKEY_AUTHENTICATE = "auth.passkey.authenticate"
     PASSKEY_REVOKE = "auth.passkey.revoke"
+    # Another account's Passkeys (and password) reset by the Owner / an Admin (#108).
+    PASSKEY_RESET = "auth.passkey.reset"
 
 
 class AuthReason(StrEnum):
@@ -71,6 +73,9 @@ class AuthReason(StrEnum):
     UNLOCKED = "unlocked"
     UPDATED = "updated"
     REGISTERED = "registered"
+    # #108: an account's Passkeys reset; a password set with a reset token.
+    RESET = "reset"
+    PASSWORD_RESET = "password_reset"
     # An allowed sign-in whose session is restricted by the Passkey policy.
     PASSKEY_PENDING = "authenticated_passkey_pending"
     ENROLLMENT_ONLY = "authenticated_enrollment_only"
