@@ -25,7 +25,8 @@ from paw_backend.auth.errors import InvalidAuthInputError
 from paw_backend.identity import tokens as identity_tokens
 
 # Bounds of ``Settings.password_reset_token_ttl_seconds``; the database function
-# refuses anything longer than 72 hours as well.
+# refuses anything longer than 72 hours as well, and a ``created_at`` (``now``)
+# more than 5 minutes off its own clock.
 MIN_RESET_TOKEN_TTL_SECONDS = 600
 MAX_RESET_TOKEN_TTL_SECONDS = 259_200
 DEFAULT_RESET_TOKEN_TTL_SECONDS = 86_400

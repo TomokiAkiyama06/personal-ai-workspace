@@ -48,7 +48,7 @@ REQUIREMENTS.md（`[FIXED]`）は次を定める。
 
 **推奨: Owner の Setup / Recovery の Token と同じ Table（`setup_tokens`）・同じ形式（`pawst1.<id>.<secret>`）・同じ受け取り（`POST /auth/token/redeem`、試行回数の上限、Rate Limit）を使い、新しい `purpose = password_reset` を足す。Token の行は `SECURITY DEFINER` の関数 `paw_issue_password_reset_token` だけが作る。**
 
-- 0005 は「Token の行を INSERT できる者は Owner の Account を取れる」ため、Web の Role に `setup_tokens` の INSERT を与えていない。**この境界は変えない**（Web の Role は今も INSERT できない）。関数は **Owner と、`invited` / `active` でない Account を拒否し**（何も変えずに `false`）、同じ処理の中で対象の未使用の Token を失効し、Password を消し、新しい Token を作る。有効期間は 72 時間までに制限する。`search_path` は `pg_catalog, pg_temp` に固定し、EXECUTE は Web の Role だけに与える（PUBLIC から取り消す）。
+- 0005 は「Token の行を INSERT できる者は Owner の Account を取れる」ため、Web の Role に `setup_tokens` の INSERT を与えていない。**この境界は変えない**（Web の Role は今も INSERT できない）。関数は **Owner と、`invited` / `active` でない Account を拒否し**（何も変えずに `false`）、同じ処理の中で対象の未使用の Token を失効し、Password を消し、新しい Token を作る。有効期間は 72 時間までに制限する（`created_at` から数えるため、`created_at` 自体も Database の `clock_timestamp()` の前後 5 分以内に限る。そうしないと呼び出し側が `created_at` を未来にして期間を延ばせる）。`search_path` は `pg_catalog, pg_temp` に固定し、EXECUTE は Web の Role だけに与える（PUBLIC から取り消す）。
 - 受け取る側（`TokenRedeemer`）は、Setup / Recovery の Token は Owner だけ、`password_reset` の Token は Admin と User だけに使わせる（役割は受け取るときに User の行の Lock の下で見直す。Token の発行の後に Owner が移譲された場合も拒否する）。
 - 0015 の 10 節は「将来の Admin による強制 Reset の Token も同じ経路を使える」としていた。これに沿う。
 

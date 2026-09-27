@@ -57,9 +57,19 @@ def principal(user) -> Principal:
     return Principal(user.id, SystemRole(user.role))
 
 
+# How far ahead of the database's clock the fake clock starts (under the 5 minutes
+# the token function allows, and far enough that the database clock stays behind
+# it for the whole test).
+CLOCK_LEAD = timedelta(minutes=1)
+
+
 class ResetCase(PasskeyTestCase):
     async def asyncSetUp(self):
         await super().asyncSetUp()
+        # The fake clock starts just ahead of the database's clock here: the token
+        # function refuses a ``created_at`` more than 5 minutes off
+        # ``clock_timestamp()``.
+        self.clock.now = self.started_at + CLOCK_LEAD
         self.owner = await self.make_owner()
         self.admin = await self.make_admin()
 
@@ -481,6 +491,30 @@ class TokenBoundaryTest(ResetCase):
             await self.call_issue(self.admin.id, expires_at=now + timedelta(hours=72)),
             True,
         )
+
+    async def test_the_function_refuses_a_created_at_off_the_database_clock(self):
+        # The 72-hour cap is relative to ``created_at``, so a caller could stretch
+        # the lifetime by choosing ``created_at``; the database bounds it too.
+        now = await self.scalar("SELECT clock_timestamp()")
+        for created_at in (
+            now + timedelta(days=3650),
+            now + timedelta(minutes=6),
+            now - timedelta(minutes=6),
+            now - timedelta(days=3650),
+        ):
+            with self.subTest(created_at=created_at):
+                self.assertIs(
+                    await self.call_issue(self.admin.id, created_at=created_at),
+                    False,
+                )
+        self.assertEqual(await self.query("SELECT * FROM setup_tokens"), [])
+        self.assertIsNotNone(await self.password_of(self.admin.id))
+        for created_at in (now - timedelta(minutes=4), now + timedelta(minutes=4)):
+            with self.subTest(created_at=created_at):
+                self.assertIs(
+                    await self.call_issue(self.admin.id, created_at=created_at),
+                    True,
+                )
 
     async def test_a_reset_token_of_an_account_that_became_the_owner_is_refused(
         self,

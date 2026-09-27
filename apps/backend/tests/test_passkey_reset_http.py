@@ -8,6 +8,7 @@ Agent, a restricted session, another origin.
 """
 
 import uuid
+from datetime import timedelta
 
 from .auth_support import requires_postgres
 from .passkey_http_support import (
@@ -28,6 +29,12 @@ def reset_url(user_id) -> str:
 
 @requires_postgres
 class ResetStoryTest(PasskeyHttpTestCase):
+    def setUp(self):
+        super().setUp()
+        # The token function refuses a ``created_at`` more than 5 minutes off the
+        # database's clock: the fake clock starts just ahead of it.
+        self.clock.now = self.started_at + timedelta(minutes=1)
+
     def test_the_owner_brings_back_an_admin_who_lost_every_device(self):
         admin_token, _lost = self.enrolled("admin-one", ADMIN_PASSWORD, role="admin")
         admin_id = self.scalar("SELECT id FROM users WHERE login_name = 'admin-one'")

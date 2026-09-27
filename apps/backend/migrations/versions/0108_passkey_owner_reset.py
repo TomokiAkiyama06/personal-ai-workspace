@@ -25,7 +25,9 @@ the follow-up issue; the choices are proposed in Decision 0032):
   reset token can be outstanding for a non-Owner), deletes the password (the old
   password stops working at once: a reset that left it would let whoever stole it
   enrol the first new Passkey) and stores the new token. The expiry must lie in
-  ``(created_at, created_at + 72 hours]``.
+  ``(created_at, created_at + 72 hours]`` and ``created_at`` within 5 minutes of
+  the database's ``clock_timestamp()`` (so the lifetime is bounded in real time,
+  not only relative to a ``created_at`` the caller chose).
 
 Privileges: EXECUTE on the function for ``PAW_APP_DATABASE_ROLE`` only (revoked from
 PUBLIC). No table privilege changes: the web role still has no INSERT on
@@ -55,6 +57,10 @@ NEW_PASSKEY_REVOKE_REASONS = OLD_PASSKEY_REVOKE_REASONS + ", 'admin_reset'"
 OLD_TOKEN_PURPOSES = "'setup', 'recovery'"
 NEW_TOKEN_PURPOSES = OLD_TOKEN_PURPOSES + ", 'password_reset'"
 MAX_RESET_TOKEN_LIFETIME = "interval '72 hours'"
+# How far ``p_created_at`` may be from the database clock (the application's clock
+# and the database's may drift apart a little). Without it the 72-hour cap, which
+# is relative to ``p_created_at``, would not bound the lifetime at all.
+MAX_CLOCK_SKEW = "interval '5 minutes'"
 
 SIGNATURE = (
     "paw_issue_password_reset_token(uuid, uuid, uuid, bytea, bytea, "
@@ -73,7 +79,9 @@ DECLARE
 BEGIN
     IF p_created_at IS NULL OR p_expires_at IS NULL
        OR p_expires_at <= p_created_at
-       OR p_expires_at > p_created_at + {max_lifetime} THEN
+       OR p_expires_at > p_created_at + {max_lifetime}
+       OR p_created_at < clock_timestamp() - {max_skew}
+       OR p_created_at > clock_timestamp() + {max_skew} THEN
         RETURN false;
     END IF;
     SELECT system_role, status INTO v_role, v_status
@@ -121,7 +129,9 @@ def upgrade() -> None:
     )
     op.execute(
         _ISSUE_FUNCTION.format(
-            schema=_schema_of_this_migration(), max_lifetime=MAX_RESET_TOKEN_LIFETIME
+            schema=_schema_of_this_migration(),
+            max_lifetime=MAX_RESET_TOKEN_LIFETIME,
+            max_skew=MAX_CLOCK_SKEW,
         )
     )
     op.execute(f"REVOKE ALL ON FUNCTION {SIGNATURE} FROM PUBLIC")
