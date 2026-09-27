@@ -1,10 +1,10 @@
 # `audit_events` の保存期間・退避を定期実行する仕組み（systemd timer + Server ローカルの Command）
 
-- Status: Proposed
+- Status: Approved
 - Date: 2026-09-28
 - Scope: Issue [#117](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/117)（[Decision 0027](0027-audit-retention-and-partitioning.md) の 6 と「承認時の決定」が残した「`AuditRetentionService.run_maintenance` を定期的に呼ぶ仕組み」）。`paw_backend/authz/retention/runner.py`、`paw_backend/cli/retention.py`、`apps/backend/deploy/systemd/`
 - Supersedes: なし。Decision 0027 を書き換えない追補。0027 の保存期間・Partition・退避の方式、`RetentionPolicy` の値、Partition 単位の Audit 行（0027 の 5）は変えない
-- Approval: 未承認（Human / Admin の承認待ち）
+- Approval: 2026-09-28、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで「推奨どおり」と回答して承認（末尾の「承認時の決定」）
 
 ## 背景
 
@@ -132,3 +132,9 @@ Timer とは別の監視（外部の Monitoring、手動の確認）から、Par
 
 承認されるまで、Command・Runner・Unit File はコードとして入るが、実運用の Server に Timer を有効化（`systemctl enable --now paw-audit-retention.timer`）しない。
 承認されたら、運用者が Unit File を配備し、Timer を有効にする。方針を変える場合は、この Decision を書き換えず、新しい Decision から `Supersedes` する。
+
+## 承認時の決定（2026-09-28）
+
+Human は、作業 Session で上の「決めてほしいこと」の 6 点について推奨つきの説明を受け、「推奨どおり」と回答して承認した（6 点を一括で。個別の変更はない）。**6 点すべてが推奨どおり**（呼び出し元、接続、失敗の扱い、Audit の追加、排他、実行 User と上限）で、本文の提案をそのまま採る。
+
+「承認後の扱い」のとおり、運用者が Unit File を配備し、Timer を有効にしてよい。承認後に方針を変える場合は、この Decision を書き換えず、新しい Decision から `Supersedes` する。

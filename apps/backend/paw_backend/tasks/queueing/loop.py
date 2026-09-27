@@ -33,7 +33,12 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from paw_backend.db import Database
-from paw_backend.tasks.errors import StaleAttemptError, TaskNotFoundError
+from paw_backend.tasks.domain import TERMINAL_STATES, TaskRun, TaskState
+from paw_backend.tasks.errors import (
+    StaleAttemptError,
+    StaleRunError,
+    TaskNotFoundError,
+)
 from paw_backend.tasks.models import TaskRow
 from paw_backend.tasks.queueing.domain import (
     DEFAULT_LOOP_POLICY,
@@ -216,8 +221,16 @@ class LoopDetector:
         step: str,
         message: str,
         approach: int = 0,
+        run: TaskRun | None = None,
     ) -> LoopAssessment:
         """Record one failure of ``attempt`` and return the assessment including it.
+
+        ``run`` (a ``TaskRun`` of ``attempt``, or ``None``): the failure is reported
+        on behalf of that run (the orchestrator, PAW-034). A Retry keeps the
+        attempt, so the attempt alone would let the failure of a replaced run land
+        in the history of the run that took over; with ``run`` the retry count is
+        compared too, and a task that has ended (completed, failed, cancelled)
+        records nothing, under the same share lock (``StaleRunError``).
 
         ``attempt`` (required, an ``int`` from 1; ``validation.check_attempt``) is
         the task attempt the reporting worker works for. In ONE transaction: take
@@ -248,10 +261,12 @@ class LoopDetector:
         check_uuid("task_id", task_id)
         check_attempt(attempt)
         check_approach(approach)
+        if run is not None and (not isinstance(run, TaskRun) or run.attempt != attempt):
+            raise InvalidQueueingArgumentError("run")
         signature = failure_signature(error_class, step, message)
         async with self._database.session() as session, session.begin():
             await self._lock_failures(session, task_id)
-            await self._require_current_attempt(session, task_id, attempt)
+            await self._require_current_attempt(session, task_id, attempt, run)
             session.add(
                 FailureSignatureRow(
                     task_id=task_id,
@@ -278,7 +293,10 @@ class LoopDetector:
 
     @staticmethod
     async def _require_current_attempt(
-        session: AsyncSession, task_id: uuid.UUID, attempt: int
+        session: AsyncSession,
+        task_id: uuid.UUID,
+        attempt: int,
+        run: TaskRun | None = None,
     ) -> None:
         """Lock the task row ``FOR SHARE`` and require ``attempt`` to be current.
 
@@ -287,17 +305,22 @@ class LoopDetector:
         does not conflict with the ``FOR KEY SHARE`` of foreign-key checks or with
         other ``record_failure`` calls (which the failure lock serialises anyway).
         """
-        current = (
+        task = (
             await session.execute(
-                select(TaskRow.attempt)
+                select(TaskRow.attempt, TaskRow.retry_count, TaskRow.state)
                 .where(TaskRow.id == task_id)
                 .with_for_update(read=True)
             )
-        ).scalar_one_or_none()
-        if current is None:
+        ).one_or_none()
+        if task is None:
             raise TaskNotFoundError()
-        if current != attempt:
+        if task.attempt != attempt:
             raise StaleAttemptError()
+        if run is not None and (
+            task.retry_count != run.retry_count
+            or TaskState(task.state) in TERMINAL_STATES
+        ):
+            raise StaleRunError()
 
     @staticmethod
     async def _lock_failures(session: AsyncSession, task_id: uuid.UUID) -> None:

@@ -11,9 +11,11 @@ from paw_backend.authz import (
     DEFAULT_POLICY,
     Authorizer,
     Capability,
+    Decision,
     Policy,
     Principal,
     ProjectRole,
+    Reason,
     RepoAcl,
     RepoPermission,
     SystemRole,
@@ -518,13 +520,24 @@ class PolicyDrivenTest(PostgresRetrievalTestCase):
         )
         self.assertEqual((await self.retrieve(me, QUERY, retriever=retriever)).hits, ())
 
-    async def test_a_policy_that_withholds_memory_use_hides_private_memory(self):
+    async def test_a_policy_that_withholds_memory_read_hides_private_memory(self):
+        me = self.user()
+        self.seed("mine", TEXT, owner=me.user_id, embed=False)
+        retriever = self.new_retriever(
+            authorizer=self.authorizer_without(system={Capability.MEMORY_READ})
+        )
+        self.assertEqual((await self.retrieve(me, QUERY, retriever=retriever)).hits, ())
+
+    async def test_private_memory_is_read_with_memory_read_not_memory_use(self):
+        # Decision 0024: the user scope is authorized with the read-only
+        # capability; memory.use (writing, proposing) is not asked.
         me = self.user()
         self.seed("mine", TEXT, owner=me.user_id, embed=False)
         retriever = self.new_retriever(
             authorizer=self.authorizer_without(system={Capability.MEMORY_USE})
         )
-        self.assertEqual((await self.retrieve(me, QUERY, retriever=retriever)).hits, ())
+        found = await self.retrieve(me, QUERY, retriever=retriever)
+        self.assertEqual(titles(found), ["mine"])
 
     async def test_a_repository_of_an_unreadable_project_is_not_even_asked_about(self):
         mine, theirs = self.seed_project(), self.seed_project()
@@ -541,7 +554,9 @@ class PolicyDrivenTest(PostgresRetrievalTestCase):
 
 @requires_postgres
 class AuditTest(PostgresRetrievalTestCase):
-    async def test_a_default_call_records_only_the_memory_use_decision(self):
+    async def test_an_allowed_default_call_records_nothing(self):
+        # Decision 0024: memory.read is DENIED_ONLY, so a retrieval that reads
+        # the caller's own memory (with shared and project) writes no audit row.
         project = self.seed_project()
         me = self.member_of(project)
         self.seed("mine", TEXT, owner=me.user_id, embed=False)
@@ -549,9 +564,18 @@ class AuditTest(PostgresRetrievalTestCase):
         self.seed("project", TEXT, scope="project", project=project, embed=False)
         result = await self.retrieve(me, QUERY)
         self.assertEqual(sorted(titles(result)), ["mine", "project", "shared"])
+        self.assertEqual(self.sink.events, [])
+
+    async def test_a_denied_user_read_is_recorded_as_one_denial(self):
+        system = Principal(self.seed_user(), SystemRole.SYSTEM)
+        self.seed("its own", TEXT, owner=system.user_id, embed=False)
+        result = await self.retrieve(system, QUERY, scopes=["user"])
+        self.assertEqual(result.hits, ())
         (event,) = self.sink.events
-        self.assertEqual((event.action, event.decision), ("memory.use", "allow"))
-        self.assertEqual(event.actor_id, me.user_id)
+        self.assertEqual(
+            (event.action, event.decision, event.actor_id),
+            ("memory.read", "deny", system.user_id),
+        )
 
     async def test_shared_and_project_reads_write_nothing_when_allowed(self):
         project = self.seed_project()
@@ -575,30 +599,35 @@ class AuditTest(PostgresRetrievalTestCase):
         dumped = repr([e.model_dump() for e in self.sink.events])
         self.assertNotIn("secret", dumped)
 
-    async def test_an_audit_failure_stops_a_call_that_needs_memory_use(self):
-        me = self.user()
-        self.seed("mine", TEXT, owner=me.user_id, embed=False)
-        failing = FailingSink()
-        retriever = self.new_retriever(authorizer=Authorizer(failing, clock=self.clock))
-        with self.assertRaises(RetrievalPermissionError) as caught:
-            await self.retrieve(me, QUERY, retriever=retriever)
-        self.assertEqual(caught.exception.reason, "audit_unavailable")
-        self.assertEqual(failing.attempts, 1)
-
     async def test_an_audit_failure_does_not_block_reads_whose_allow_is_not_audited(
         self,
     ):
+        # Every scope is DENIED_ONLY now (Decision 0024): the audit table being
+        # down never stops a retrieval of a person, private memory included.
         project = self.seed_project()
         me = self.member_of(project)
+        self.seed("mine", TEXT, owner=me.user_id, embed=False)
         self.seed("shared", TEXT, scope="shared", embed=False)
         self.seed("project", TEXT, scope="project", project=project, embed=False)
-        retriever = self.new_retriever(
-            authorizer=Authorizer(FailingSink(), clock=self.clock)
-        )
-        result = await self.retrieve(
-            me, QUERY, retriever=retriever, scopes=["shared", "project"]
-        )
-        self.assertEqual(sorted(titles(result)), ["project", "shared"])
+        failing = FailingSink()
+        retriever = self.new_retriever(authorizer=Authorizer(failing, clock=self.clock))
+        result = await self.retrieve(me, QUERY, retriever=retriever)
+        self.assertEqual(sorted(titles(result)), ["mine", "project", "shared"])
+        self.assertEqual(failing.attempts, 0)
+
+    async def test_a_decision_that_could_not_be_recorded_is_an_error(self):
+        # An Authorizer that fails closed (a REQUIRED decision it could not
+        # record) stops the call instead of reading less.
+        class Unrecorded:
+            async def authorize(self, principal, capability, resource):
+                return Decision.deny(Reason.AUDIT_UNAVAILABLE, capability)
+
+        me = self.user()
+        self.seed("mine", TEXT, owner=me.user_id, embed=False)
+        retriever = self.new_retriever(authorizer=Unrecorded())
+        with self.assertRaises(RetrievalPermissionError) as caught:
+            await self.retrieve(me, QUERY, retriever=retriever)
+        self.assertEqual(caught.exception.reason, "audit_unavailable")
 
     async def test_a_decision_that_is_not_a_decision_is_an_error(self):
         class Broken:

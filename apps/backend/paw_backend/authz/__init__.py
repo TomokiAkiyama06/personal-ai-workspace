@@ -21,6 +21,12 @@ from paw_backend.authz.capabilities import (
     Scope,
     parse_capability,
 )
+from paw_backend.authz.delegation import (
+    EscalationReason,
+    GrantEscalationError,
+    derive_child_grant,
+    is_subgrant,
+)
 from paw_backend.authz.deps import (
     PrincipalProvider,
     UnauthenticatedProvider,
@@ -50,6 +56,8 @@ __all__ = [
     "Authorizer",
     "Capability",
     "Decision",
+    "EscalationReason",
+    "GrantEscalationError",
     "InMemoryAuditSink",
     "NoPrincipalDirectory",
     "Policy",
@@ -66,7 +74,9 @@ __all__ = [
     "Scope",
     "SystemRole",
     "UnauthenticatedProvider",
+    "derive_child_grant",
     "install_authz",
+    "is_subgrant",
     "parse_capability",
     "require_capability",
 ]
