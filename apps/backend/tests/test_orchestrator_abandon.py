@@ -58,6 +58,7 @@ class Stubborn:
                     lambda: assignment.tools.call("repo.read_file", {"path": "a.py"}),
                 ),
                 ("budget", lambda: assignment.budget.charge(BudgetKind.TOKENS, 5)),
+                ("remaining", lambda: assignment.budget.remaining()),
             ):
                 try:
                     await act()
@@ -91,7 +92,11 @@ class StubbornRuntimeTest(PostgresOrchestratorTestCase):
         await self.let_it_act()
         self.assertEqual(
             self.stubborn.after,
-            {"tool": StopReason.ABANDONED, "budget": StopReason.ABANDONED},
+            {
+                "tool": StopReason.ABANDONED,
+                "budget": StopReason.ABANDONED,
+                "remaining": StopReason.ABANDONED,
+            },
         )
         self.assertEqual(tools.calls, [])
         tokens = await self.scalar(

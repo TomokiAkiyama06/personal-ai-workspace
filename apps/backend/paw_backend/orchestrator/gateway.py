@@ -196,6 +196,11 @@ class NodeBudgetHandle:
             raise NodeStopped(StopReason.BUDGET_EXCEEDED)
 
     async def remaining(self) -> Mapping[BudgetKind, int | None]:
+        # The same gates as ``charge``: an abandoned attempt, or a run that was
+        # told to stop, learns nothing more about the task's budget.
+        self._fence.ensure_open()
+        if self._guard.stop_reason is not None:
+            raise NodeStopped(self._guard.stop_reason)
         usage = await self._tracker.usage(self._task_id)
         return {item.kind: item.remaining for item in usage}
 

@@ -355,8 +355,11 @@ class Orchestrator:
         """Every collaborator is checked here, once, so that a wrong one fails
         loudly at construction (``TypeError``, or ``InvalidOrchestratorArgumentError``
         for a value): a missing method, a plain function where a coroutine is
-        required, a ladder that names an agent nobody runs, a heartbeat that is
-        not shorter than the lease."""
+        required, a ladder that names an agent nobody runs, a heartbeat interval
+        whose ``HEARTBEAT_FAILURES_TO_LOSE`` failures in a row would not end before
+        the lease does (the run must give its lease up, fail closed, while the
+        lease still holds: otherwise another worker could take the entry over
+        while this one still runs its nodes)."""
         for name, value, expected in (
             ("tasks", tasks, TaskService),
             ("queue", queue, TaskQueue),
@@ -387,9 +390,13 @@ class Orchestrator:
         interval = (
             config.heartbeat_seconds
             if config.heartbeat_seconds is not None
-            else queue.lease_seconds / 3
+            else queue.lease_seconds / (HEARTBEAT_FAILURES_TO_LOSE + 1)
         )
-        if not 0 < interval < queue.lease_seconds:
+        # The last successful heartbeat renews the lease for ``lease_seconds``;
+        # the run declares the lease lost after the ``HEARTBEAT_FAILURES_TO_LOSE``
+        # failures that follow it, ``interval`` apart. That must happen strictly
+        # before the lease expires.
+        if not 0 < interval * HEARTBEAT_FAILURES_TO_LOSE < queue.lease_seconds:
             raise InvalidOrchestratorArgumentError("heartbeat_seconds")
         self._tasks = tasks
         self._queue = queue

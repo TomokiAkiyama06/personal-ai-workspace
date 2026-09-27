@@ -49,6 +49,7 @@ from paw_backend.orchestrator.errors import (
     StaleDagEpochError,
     StaleNodeAttemptError,
 )
+from paw_backend.orchestrator.jsonvalue import thaw_json
 from paw_backend.orchestrator.limits import (
     MAX_ATTEMPTS_PER_RUNG,
     MAX_ERROR_CLASS_CHARS,
@@ -271,7 +272,7 @@ class DagStore:
                             role=node.role,
                             title=node.title,
                             goal=node.goal,
-                            input=dict(node.input),
+                            input=thaw_json(node.input),
                             required=node.required,
                             capabilities=(
                                 None

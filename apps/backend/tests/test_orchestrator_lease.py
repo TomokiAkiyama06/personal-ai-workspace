@@ -106,7 +106,7 @@ class LeaseTest(PostgresOrchestratorTestCase):
         await until(lambda: len(runtime.assignments) == 1, message="the node")
         before = await self.scalar("SELECT lease_expires_at FROM queue_entries")
 
-        await h.clock.advance(20.0)  # the heartbeat interval: a third of the lease
+        await h.clock.advance(15.0)  # the heartbeat interval: a quarter of the lease
         after = before
         for _ in range(500):
             after = await self.scalar("SELECT lease_expires_at FROM queue_entries")
@@ -164,9 +164,9 @@ class LeaseTest(PostgresOrchestratorTestCase):
 
         # w1 notices at its next heartbeat and stops without writing anything.
         await until(
-            lambda: a.clock.waiting_for(20.0) >= 1, message="w1's heartbeat timer"
+            lambda: a.clock.waiting_for(15.0) >= 1, message="w1's heartbeat timer"
         )
-        await a.clock.advance(20.0)
+        await a.clock.advance(15.0)
         report_a = await asyncio.wait_for(run_a, 120)
         self.assertEqual(report_a.outcome, Out.LEASE_LOST)
         self.assertEqual(await self.store.get(task_id, 1), final)
@@ -228,9 +228,9 @@ class LeaseTest(PostgresOrchestratorTestCase):
         queue.broken = True
         for _ in range(3):
             await until(
-                lambda: h.clock.waiting_for(20.0) >= 1, message="a heartbeat timer"
+                lambda: h.clock.waiting_for(15.0) >= 1, message="a heartbeat timer"
             )
-            await h.clock.advance(20.0)
+            await h.clock.advance(15.0)
         report = await asyncio.wait_for(run, 120)
 
         self.assertEqual(report.outcome, Out.LEASE_LOST)
@@ -255,9 +255,9 @@ class LeaseTest(PostgresOrchestratorTestCase):
         queue.broken = True
         for _ in range(3):
             await until(
-                lambda: h.clock.waiting_for(20.0) >= 1, message="a heartbeat timer"
+                lambda: h.clock.waiting_for(15.0) >= 1, message="a heartbeat timer"
             )
-            await h.clock.advance(20.0)
+            await h.clock.advance(15.0)
         report = await asyncio.wait_for(run, 120)
 
         self.assertEqual(report.outcome, Out.LEASE_LOST)

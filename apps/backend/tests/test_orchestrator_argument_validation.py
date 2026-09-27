@@ -405,6 +405,37 @@ class OrchestratorArgumentTest(unittest.IsolatedAsyncioTestCase):
                 self.build(**overrides)
         self.build()  # the baseline is valid
 
+    def test_three_failed_heartbeats_must_end_before_the_lease(self):
+        # The run declares its lease lost after three failed heartbeats in a row;
+        # that must happen strictly before the lease (renewed by the last good
+        # heartbeat) expires, or another worker could take the entry over while
+        # this one still runs its nodes.
+        def build(lease, heartbeat=None):
+            db = database()
+            return self.build(
+                queue=TaskQueue(db, project_gate=ALWAYS_ACTIVE, lease_seconds=lease),
+                config=OrchestratorConfig.uniform(
+                    ["local"], heartbeat_seconds=heartbeat
+                ),
+            )
+
+        for lease, heartbeat in ((60, 20.0), (60, 25.0), (60, 60.0), (30, 10.0)):
+            with (
+                self.subTest(lease=lease, heartbeat=heartbeat),
+                self.assertRaises(InvalidOrchestratorArgumentError) as caught,
+            ):
+                build(lease, heartbeat)
+            self.assertEqual(caught.exception.parameter, "heartbeat_seconds")
+        for lease, heartbeat in ((60, 19.99), (60, 0.5), (30, 9.99)):
+            with self.subTest(lease=lease, heartbeat=heartbeat):
+                orchestrator = build(lease, heartbeat)
+                self.assertEqual(orchestrator._heartbeat_seconds, heartbeat)
+        # The default is a quarter of the lease (3 x 1/4 < 1), for any lease.
+        for lease in (1, 3, 60, 3600):
+            with self.subTest(default_for=lease):
+                orchestrator = build(lease)
+                self.assertEqual(orchestrator._heartbeat_seconds, lease / 4)
+
     async def test_every_public_method_and_argument_is_in_the_table(self):
         public = {
             name
@@ -599,6 +630,30 @@ class ValueObjectArgumentTest(unittest.IsolatedAsyncioTestCase):
     def test_the_outcome_keeps_the_failure_text_out_of_its_repr(self):
         outcome = NodeOutcome.failed("Boom", "token=hunter2")
         self.assertNotIn("hunter2", repr(outcome))
+
+    async def test_remaining_is_gated_like_charge(self):
+        # A stopped run, or a closed (abandoned) attempt, learns nothing more of
+        # the budget: both are refused before the database is touched.
+        from paw_backend.orchestrator.errors import NodeStopped, StopReason
+        from paw_backend.orchestrator.gateway import AttemptFence
+        from paw_backend.tasks.queueing import BudgetKind
+
+        guard = RunGuard(GOOD_ID, TaskRun(1, 0), PostgresTaskActivity(database()))
+        guard.stop(StopReason.TASK_ENDED)
+        stopped = NodeBudgetHandle(guard, BudgetTracker(database()), GOOD_ID)
+        for call in (stopped.remaining, lambda: stopped.charge(BudgetKind.TOKENS, 1)):
+            with self.assertRaises(NodeStopped) as caught:
+                await call()
+            self.assertEqual(caught.exception.reason, StopReason.TASK_ENDED)
+
+        fence = AttemptFence()
+        fence.close()
+        open_guard = RunGuard(GOOD_ID, TaskRun(1, 0), PostgresTaskActivity(database()))
+        closed = NodeBudgetHandle(open_guard, BudgetTracker(database()), GOOD_ID, fence)
+        for call in (closed.remaining, lambda: closed.charge(BudgetKind.TOKENS, 1)):
+            with self.assertRaises(NodeStopped) as caught:
+                await call()
+            self.assertEqual(caught.exception.reason, StopReason.ABANDONED)
 
     async def test_a_node_charge_is_validated_before_the_database(self):
         from paw_backend.tasks.queueing import BudgetKind, InvalidQueueingArgumentError

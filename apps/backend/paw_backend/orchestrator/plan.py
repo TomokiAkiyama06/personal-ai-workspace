@@ -38,6 +38,7 @@ import re
 import uuid
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any
 
 from paw_backend.authz import Capability
@@ -48,6 +49,8 @@ from paw_backend.orchestrator.jsonvalue import (
     JsonProblem,
     check_json_object,
     encoded_size,
+    freeze_json,
+    thaw_json,
 )
 from paw_backend.orchestrator.limits import (
     KEY_PATTERN,
@@ -168,12 +171,18 @@ def _repositories(value: object) -> tuple[uuid.UUID, ...] | None:
     return tuple(sorted(found, key=str))
 
 
-def _input(value: object) -> dict[str, Any]:
+def _input(value: object) -> Mapping[str, Any]:
+    """The checked input, read-only all the way down (``freeze_json``): an accepted
+    plan cannot be changed through a node's input after it was judged."""
+    if isinstance(value, MappingProxyType):
+        value = thaw_json(value)  # an accepted node's own input (``replace``)
     if not isinstance(value, dict):
         _refuse(PlanReason.BAD_TYPE)
     try:
-        return check_json_object(
-            value, max_bytes=MAX_NODE_INPUT_BYTES, max_depth=MAX_NODE_INPUT_DEPTH
+        return freeze_json(
+            check_json_object(
+                value, max_bytes=MAX_NODE_INPUT_BYTES, max_depth=MAX_NODE_INPUT_DEPTH
+            )
         )
     except JsonProblem as problem:
         _refuse(
@@ -242,7 +251,7 @@ class PlanNode:
             "goal": self.goal,
             "depends_on": list(self.depends_on),
             "required": self.required,
-            "input": dict(self.input),
+            "input": thaw_json(self.input),
             "capabilities": (
                 None
                 if self.capabilities is None

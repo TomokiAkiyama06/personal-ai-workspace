@@ -6,9 +6,11 @@ the whole schema; a random-graph property test checks the topological order and
 the cycle detection on hundreds of DAGs.
 """
 
+import dataclasses
 import random
 import unittest
 import uuid
+from types import MappingProxyType
 
 from paw_backend.authz import Capability
 from paw_backend.orchestrator.domain import ROLE_CEILING, NodeRole
@@ -406,8 +408,30 @@ class AcceptedPlansTest(unittest.TestCase):
         inner["list"].append(3)
         data["nodes"][0]["goal"] = "changed"
 
-        self.assertEqual(accepted.nodes[0].input, {"list": [1, 2]})
+        self.assertEqual(accepted.nodes[0].to_mapping()["input"], {"list": [1, 2]})
         self.assertEqual(accepted.nodes[0].goal, "Do it")
+
+    def test_an_accepted_input_is_read_only_all_the_way_down(self):
+        accepted = Plan.from_mapping(
+            plan(node("a", input={"list": [1, {"deep": [2]}], "map": {"k": "v"}}))
+        ).nodes[0]
+        frozen = accepted.input
+        self.assertIsInstance(frozen, MappingProxyType)
+        self.assertIsInstance(frozen["list"], tuple)
+        self.assertIsInstance(frozen["list"][1], MappingProxyType)
+        with self.assertRaises(TypeError):
+            frozen["new"] = 1
+        with self.assertRaises(TypeError):
+            frozen["map"]["k"] = "changed"
+        with self.assertRaises(AttributeError):
+            frozen["list"][1]["deep"].append(3)
+        # The data form is a fresh plain copy, and it reads back to the same node.
+        data = accepted.to_mapping()
+        self.assertIs(type(data["input"]["list"]), list)
+        data["input"]["map"]["k"] = "changed"
+        self.assertEqual(accepted.to_mapping()["input"]["map"], {"k": "v"})
+        self.assertEqual(PlanNode.from_mapping(accepted.to_mapping()), accepted)
+        self.assertEqual(dataclasses.replace(accepted, title="Other").input, frozen)
 
     def test_a_plan_survives_a_round_trip_through_data(self):
         accepted = Plan.from_mapping(

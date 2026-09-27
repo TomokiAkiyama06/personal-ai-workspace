@@ -71,7 +71,8 @@ class OrchestratorConfig:
     ``node_timeout_seconds``: an attempt that runs longer is failed.
     ``poll_seconds``: how often a running task's state is read for a Pause, a
     Cancel or a Stop Now. ``heartbeat_seconds``: how often the lease is extended
-    (``None``: a third of the lease).
+    (``None``: a quarter of the lease; ``Orchestrator`` refuses an interval
+    whose three failed heartbeats in a row would not end before the lease does).
     ``retry_backoff_seconds``: the wait after the first failed attempt of a node;
     it doubles with each attempt on the rung (0 turns it off).
     ``max_attempts_per_rung``: attempts of one node on one agent in one run.
