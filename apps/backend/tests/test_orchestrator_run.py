@@ -163,6 +163,47 @@ class HappyPathTest(PostgresOrchestratorTestCase):
         self.assertEqual(stored.changed_files, ("b.py",))
         self.assertEqual(stored.discovered_facts, ("a fact",))
 
+    async def test_a_dependent_cannot_change_the_result_the_others_receive(self):
+        seen = {}
+
+        async def produce(assignment):
+            return ok("a", test_result={"passed": [1], "suite": {"ok": True}})
+
+        async def tamper(assignment):
+            upstream = assignment.upstream["a"].test_result
+            attempts = (
+                lambda: upstream["passed"].append(2),
+                lambda: upstream.__setitem__("passed", [9]),
+                lambda: upstream["suite"].__setitem__("ok", False),
+            )
+            refused = 0
+            for attempt in attempts:
+                try:
+                    attempt()
+                except (TypeError, AttributeError):
+                    refused += 1
+            seen["refused"] = refused
+            return ok("b")
+
+        async def read(assignment):
+            seen["c"] = assignment.upstream["a"].to_json()["test_result"]
+            return ok("c")
+
+        runtime = FakeRuntime("local", script={"a": produce, "b": tamper, "c": read})
+        h = self.harness(runtimes={"local": runtime})
+        task_id = await self.prepare(
+            h, make_plan(node("a"), node("b", "a"), node("c", "a", "b"))
+        )
+
+        await h.orchestrator.run_once("w1")
+
+        self.assertEqual(seen["refused"], 3)
+        self.assertEqual(seen["c"], {"passed": [1], "suite": {"ok": True}})
+        stored = (await self.store.get(task_id, 1)).node("a").result
+        self.assertEqual(
+            stored.to_json()["test_result"], {"passed": [1], "suite": {"ok": True}}
+        )
+
     async def test_the_assignment_carries_the_node_and_its_own_agent(self):
         runtime = FakeRuntime("local")
         h = self.harness(runtimes={"local": runtime})

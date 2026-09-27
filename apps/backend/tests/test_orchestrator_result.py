@@ -1,6 +1,9 @@
 """The structured result a node passes on, and the bounded JSON it is made of."""
 
+import dataclasses
+import json
 import unittest
+from types import MappingProxyType
 
 from paw_backend.orchestrator.errors import InvalidNodeResultError, ResultReason
 from paw_backend.orchestrator.jsonvalue import JsonProblem, check_json_object
@@ -224,7 +227,54 @@ class AcceptedResultsTest(unittest.TestCase):
         inner["passed"].append(2)
 
         self.assertEqual(result.changed_files, ("a.py",))
-        self.assertEqual(result.test_result, {"passed": [1]})
+        self.assertEqual(result.to_json()["test_result"], {"passed": [1]})
+
+    def test_the_test_result_is_read_only_all_the_way_down(self):
+        result = NodeResult(
+            "s",
+            test_result={"suite": {"failed": [{"name": "t1"}], "ok": False}, "n": 1},
+        )
+        frozen = result.test_result
+        self.assertIsInstance(frozen, MappingProxyType)
+        self.assertIsInstance(frozen["suite"], MappingProxyType)
+        self.assertIsInstance(frozen["suite"]["failed"], tuple)
+        self.assertIsInstance(frozen["suite"]["failed"][0], MappingProxyType)
+        with self.assertRaises(TypeError):
+            frozen["n"] = 2
+        with self.assertRaises(TypeError):
+            frozen["suite"]["ok"] = True
+        with self.assertRaises(TypeError):
+            frozen["suite"]["failed"][0]["name"] = "changed"
+        with self.assertRaises(AttributeError):
+            frozen["suite"]["failed"].append({"name": "t2"})
+        self.assertEqual(
+            result.to_json()["test_result"],
+            {"suite": {"failed": [{"name": "t1"}], "ok": False}, "n": 1},
+        )
+
+    def test_to_json_is_a_fresh_plain_copy(self):
+        result = NodeResult("s", test_result={"passed": [1], "meta": {"k": "v"}})
+        first = result.to_json()
+        self.assertIs(type(first["test_result"]), dict)
+        self.assertIs(type(first["test_result"]["passed"]), list)
+        json.dumps(first)  # plain JSON, as the store writes it
+        first["test_result"]["passed"].append(2)
+        first["test_result"]["meta"]["k"] = "changed"
+        self.assertEqual(
+            result.to_json()["test_result"], {"passed": [1], "meta": {"k": "v"}}
+        )
+
+    def test_a_frozen_result_round_trips_and_can_be_replaced(self):
+        result = NodeResult("s", test_result={"passed": [1, 2]})
+        again = NodeResult.from_json(result.to_json())
+        self.assertEqual(again, result)
+        replaced = dataclasses.replace(result, summary="t")
+        self.assertEqual(replaced.to_json()["test_result"], {"passed": [1, 2]})
+        self.assertIsInstance(replaced.test_result, MappingProxyType)
+        # Another mapping type is still refused (only a plain dict, or a result's
+        # own frozen value, is a test result).
+        with self.assertRaises(InvalidNodeResultError):
+            NodeResult("s", test_result=[("passed", 1)])
 
     def test_the_size_of_what_a_node_receives_is_the_sum_of_its_dependencies(self):
         one = NodeResult("x" * 100)

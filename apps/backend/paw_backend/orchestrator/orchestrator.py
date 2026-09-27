@@ -75,6 +75,7 @@ from paw_backend.orchestrator.errors import (
     error_class_of,
 )
 from paw_backend.orchestrator.gateway import (
+    AttemptFence,
     NodeBudgetHandle,
     NodeToolGateway,
     RunGuard,
@@ -152,9 +153,58 @@ REASON_INTERNAL = "The orchestrator stopped on an unexpected error"
 COMMAND_ATTEMPTS = 5
 # The wait for cleaning up after a cancellation (shutdown).
 SHUTDOWN_GRACE_SECONDS = 5.0
+# The longest the orchestrator waits (real time) for cancelled attempts to end (a
+# timed-out runtime, a Cancel, a budget stop): a runtime that ignores its
+# cancellation is abandoned (its ``AttemptFence`` is closed) instead of holding
+# the node, the task and the queue lease forever.
+CANCEL_GRACE_SECONDS = 10.0
 HEARTBEAT_FAILURES_TO_LOSE = 3
-# The planning attempts are named like a node in the loop detector's records.
+# The node key a planner runtime is given for a planning attempt.
 PLAN_STEP = "plan"
+# The planner's name in its agent identity (``agent_id_of``) and in the loop
+# detector's records. It is not a valid node key (a key starts with a letter), so
+# a plan node keyed ``plan`` never shares an identity or a failure history with
+# the planner.
+PLANNER_IDENTITY = "@planner"
+
+
+def _forget(task: asyncio.Future) -> None:
+    """Retrieve the end of an abandoned task (so asyncio does not warn about an
+    exception nobody read); what it was is of no interest any more."""
+    if not task.cancelled():
+        task.exception()
+
+
+async def _cancel_and_wait(
+    tasks: list[asyncio.Future], grace: float | None = None
+) -> None:
+    """Cancel ``tasks`` and wait for them, at most ``grace`` seconds (default
+    ``CANCEL_GRACE_SECONDS``).
+
+    A task that has not ended by then (a runtime that swallows ``CancelledError``)
+    is abandoned: it is left to run, and its end is retrieved when it comes. The
+    attempt it belongs to has its ``AttemptFence`` closed by ``_attempt`` (the
+    abandoned runtime can no longer call a tool or charge the budget), and the
+    node's state is written through the DAG's fenced store as for any other end.
+    """
+    grace = CANCEL_GRACE_SECONDS if grace is None else grace
+    for task in tasks:
+        task.cancel()
+    pending = [task for task in tasks if not task.done()]
+    if pending:
+        _, pending_set = await asyncio.wait(pending, timeout=grace)
+        pending = list(pending_set)
+    for task in tasks:
+        if task in pending:
+            task.add_done_callback(_forget)
+        else:
+            _forget(task)
+    if pending:
+        logger.error(
+            "%d cancelled task(s) did not end within %.0f s and were abandoned",
+            len(pending),
+            grace,
+        )
 
 
 def format_failure_text(text: object) -> str:
@@ -1063,10 +1113,9 @@ class Orchestrator:
 
     @staticmethod
     async def _cancel_all(running: dict[str, asyncio.Task[_Finished]]) -> None:
-        tasks = list(running.values())
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        # An attempt's own wait for its runtime is bounded by the grace, so the
+        # attempts themselves get twice as long before they are abandoned.
+        await _cancel_and_wait(list(running.values()), 2 * CANCEL_GRACE_SECONDS)
         running.clear()
 
     @staticmethod
@@ -1090,7 +1139,11 @@ class Orchestrator:
             parent_grant,
             spec.node,
             spec.role,
-            agent_id_of(run.task.id, spec.key, spec.attempt),
+            agent_id_of(
+                run.task.id,
+                PLANNER_IDENTITY if spec.node is None else spec.key,
+                spec.attempt,
+            ),
         )
         scope = derive_child_scope(
             parent_scope,
@@ -1108,6 +1161,7 @@ class Orchestrator:
 
     async def _attempt(self, run: _Run, spec: _Spec) -> _Finished:
         """Run one attempt through the agent runtime; only cancellation escapes."""
+        fence = AttemptFence()
         try:
             await self._context(run, spec)  # fail early on a grant / scope problem
             assignment = NodeAssignment(
@@ -1122,9 +1176,9 @@ class Orchestrator:
                 attempt=spec.attempt,
                 approach=spec.approach,
                 tools=NodeToolGateway(
-                    run.guard, self._tools, lambda: self._context(run, spec)
+                    run.guard, self._tools, lambda: self._context(run, spec), fence
                 ),
-                budget=NodeBudgetHandle(run.guard, self._budget, run.task.id),
+                budget=NodeBudgetHandle(run.guard, self._budget, run.task.id, fence),
             )
             outcome = await self._with_timeout(
                 self._runtimes[spec.agent].run_node(assignment)
@@ -1142,6 +1196,10 @@ class Orchestrator:
             raise
         except Exception as error:
             return _Finished.failure(error_class_of(error))
+        finally:
+            # The orchestrator no longer waits for this attempt: whatever of it may
+            # still run (a runtime that ignored its cancellation) cannot act.
+            fence.close()
         if outcome is _TIMED_OUT:
             return _Finished.failure(NODE_TIMEOUT)
         if not isinstance(outcome, NodeOutcome):
@@ -1157,13 +1215,12 @@ class Orchestrator:
             await asyncio.wait({work, timer}, return_when=asyncio.FIRST_COMPLETED)
             if work.done():
                 return work.result()
-            work.cancel()
-            await asyncio.gather(work, return_exceptions=True)
             return _TIMED_OUT
         finally:
-            for task in (work, timer):
-                task.cancel()
-            await asyncio.gather(work, timer, return_exceptions=True)
+            # Bounded: a runtime that swallows its cancellation is abandoned after
+            # ``CANCEL_GRACE_SECONDS`` (``_attempt`` closes its fence), so the
+            # node still fails and the run goes on.
+            await _cancel_and_wait([work, timer])
 
     # -- what an ended attempt means ------------------------------------------------
 
@@ -1429,16 +1486,14 @@ class Orchestrator:
                 if exhausted is not None:
                     return exhausted
         finally:
-            for task in (work, lost_waiter):
-                task.cancel()
-            await asyncio.gather(work, lost_waiter, return_exceptions=True)
+            await _cancel_and_wait([work, lost_waiter], 2 * CANCEL_GRACE_SECONDS)
 
     async def _plan(self, run: _Run) -> DagRecord | RunReport:
         """Ask the planner role for a plan until one is accepted (at most
         ``max_plan_attempts`` times). The planner proposes; ``Plan`` judges: an
         invalid plan is a failed attempt like any other (recorded for loop
-        detection under the step ``plan``), and the next attempt is made by the
-        next agent of the planner ladder."""
+        detection under the step ``PLANNER_IDENTITY``), and the next attempt is
+        made by the next agent of the planner ladder."""
         task_id = run.task.id
         ladder = self._config.ladders[NodeRole.PLANNER]
         for attempt in range(1, self._config.max_plan_attempts + 1):
@@ -1526,7 +1581,7 @@ class Orchestrator:
                     task_id,
                     attempt=run.run.attempt,
                     error_class=format_error_class(failure),
-                    step=PLAN_STEP,
+                    step=PLANNER_IDENTITY,
                     message=format_failure_text(message),
                 )
             except StaleRunError:

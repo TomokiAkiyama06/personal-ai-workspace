@@ -100,6 +100,36 @@ class RunGuard:
         raise NodeStopped(self._stop_reason or reason)
 
 
+class AttemptFence:
+    """Closes the tools and the budget of ONE attempt once the orchestrator no
+    longer waits for it.
+
+    An attempt whose runtime ignores its cancellation (a timeout, a Cancel, a
+    budget stop) is abandoned after a bounded wait so that the node, the task and
+    the queue lease are not held by it. Its coroutine may still be running; the
+    fence makes every later tool call and budget charge of that attempt raise
+    ``NodeStopped(StopReason.ABANDONED)``, so an abandoned runtime cannot act for
+    the task any more. The orchestrator closes the fence whenever it stops waiting
+    for an attempt (also after a normal end: nothing may act after its outcome).
+    """
+
+    __slots__ = ("_closed",)
+
+    def __init__(self) -> None:
+        self._closed = False
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    def close(self) -> None:
+        self._closed = True
+
+    def ensure_open(self) -> None:
+        if self._closed:
+            raise NodeStopped(StopReason.ABANDONED)
+
+
 class NodeToolGateway:
     """The ``tools`` of a ``NodeAssignment``."""
 
@@ -108,10 +138,12 @@ class NodeToolGateway:
         guard: RunGuard,
         runner: ToolCaller,
         context_factory: Callable[[], Awaitable[TaskContext]],
+        fence: AttemptFence | None = None,
     ) -> None:
         self._guard = guard
         self._runner = runner
         self._context_factory = context_factory
+        self._fence = fence or AttemptFence()
 
     async def call(
         self,
@@ -125,8 +157,10 @@ class NodeToolGateway:
         # smaller the window in which the task can end unseen. For a call that
         # needs an approval the Broker closes that window itself (Decision 0006,
         # section 9).
+        self._fence.ensure_open()
         context = await self._context_factory()
         await self._guard.ensure_active()
+        self._fence.ensure_open()
         return await self._runner.run(
             ToolCall(tool, arguments, context), approval_id=approval_id
         )
@@ -136,13 +170,21 @@ class NodeBudgetHandle:
     """The ``budget`` of a ``NodeAssignment``: charges go to the parent task."""
 
     def __init__(
-        self, guard: RunGuard, tracker: BudgetTracker, task_id: uuid.UUID
+        self,
+        guard: RunGuard,
+        tracker: BudgetTracker,
+        task_id: uuid.UUID,
+        fence: AttemptFence | None = None,
     ) -> None:
         self._guard = guard
         self._tracker = tracker
         self._task_id = task_id
+        self._fence = fence or AttemptFence()
 
     async def charge(self, kind: BudgetKind, amount: int) -> None:
+        # An abandoned attempt's charge is refused (nothing is recorded): the
+        # orchestrator no longer counts that attempt's work.
+        self._fence.ensure_open()
         if self._guard.stop_reason is not None:
             raise NodeStopped(self._guard.stop_reason)
         # ``record`` validates the kind (runtime is measured by the tracker, not

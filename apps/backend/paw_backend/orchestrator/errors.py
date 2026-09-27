@@ -175,6 +175,9 @@ class StopReason(StrEnum):
     LEASE_LOST = "lease_lost"  # the worker no longer holds the queue lease
     BUDGET_EXCEEDED = "budget_exceeded"  # the parent task's budget is used up
     SHUTDOWN = "shutdown"  # the orchestrator is stopping
+    # The orchestrator stopped waiting for this attempt (it timed out or was
+    # cancelled and did not end within the grace): its tools and budget are closed.
+    ABANDONED = "abandoned"
 
 
 class NodeStopped(Exception):

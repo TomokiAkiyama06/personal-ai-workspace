@@ -29,6 +29,7 @@ from paw_backend.db import Database
 from paw_backend.tasks import TaskRun
 
 from . import (
+    test_orchestrator_abandon,
     test_orchestrator_budget,
     test_orchestrator_control,
     test_orchestrator_failures,
@@ -265,6 +266,12 @@ class UnexpectedErrorsAsAppRole(
 
 class RuntimeTimerStopFailureAsAppRole(
     AsAppRole, test_orchestrator_recovery.RuntimeTimerStopFailureTest
+):
+    pass
+
+
+class StubbornRuntimeAsAppRole(
+    AsAppRole, test_orchestrator_abandon.StubbornRuntimeTest
 ):
     pass
 

@@ -17,6 +17,7 @@ from paw_backend.tasks.queueing import BudgetKind
 
 from .orchestrator_support import (
     FakeRuntime,
+    FakeTools,
     PostgresOrchestratorTestCase,
     diamond,
     fail,
@@ -211,6 +212,67 @@ class PlannerTest(PostgresOrchestratorTestCase):
 
         self.assertEqual(report.outcome, Out.DAG_SUCCEEDED)
         self.assertEqual(await self.retries_used(h, task_id), 1)
+
+    async def test_a_node_keyed_plan_is_not_the_planner(self):
+        # The planner is given the node key ``plan``, and a plan may name a node
+        # ``plan`` too: their agent identities and failure histories stay apart.
+        from paw_backend.orchestrator.orchestrator import PLANNER_IDENTITY
+        from paw_backend.orchestrator.scope import agent_id_of
+
+        async def planner(assignment):
+            await assignment.tools.call("repo.read_file", {"path": "a.py"})
+            return planned(node("plan"))
+
+        async def the_node(assignment):
+            await assignment.tools.call("repo.read_file", {"path": "a.py"})
+            return fail("Boom", "same text")
+
+        tools = FakeTools()
+        runtime = FakeRuntime("local", script={"plan": [planner, the_node]})
+        h = self.harness(
+            runtimes={"local": runtime},
+            tools=tools,
+            config={"max_attempts_per_rung": 1},
+        )
+        task_id = await self.prepare(h)
+
+        await h.orchestrator.run_once("w1")
+
+        planner_call, node_call = tools.calls
+        self.assertEqual(
+            planner_call.context.grant.agent_id,
+            agent_id_of(task_id, PLANNER_IDENTITY, 1),
+        )
+        self.assertEqual(
+            node_call.context.grant.agent_id, agent_id_of(task_id, "plan", 1)
+        )
+        self.assertNotEqual(
+            planner_call.context.grant.agent_id, node_call.context.grant.agent_id
+        )
+
+    async def test_a_planner_failure_and_a_node_plan_failure_are_told_apart(self):
+        # The same error class and text for the planner and for a node keyed
+        # ``plan`` are two different failure signatures in the loop detector.
+        runtime = FakeRuntime(
+            "local",
+            script={
+                "plan": [
+                    fail("Boom", "same text"),
+                    planned(node("plan")),
+                    fail("Boom", "same text"),
+                ]
+            },
+        )
+        h = self.harness(
+            runtimes={"local": runtime}, config={"max_attempts_per_rung": 1}
+        )
+        task_id = await self.prepare(h)
+
+        await h.orchestrator.run_once("w1")
+
+        history = await h.loops.history(task_id)
+        self.assertEqual(len(history), 2)
+        self.assertNotEqual(history[0].signature, history[1].signature)
 
     async def test_a_plan_submitted_beforehand_skips_the_planner(self):
         planner = FakeRuntime("local", script={"plan": CYCLE})

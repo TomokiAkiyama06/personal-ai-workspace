@@ -11,13 +11,18 @@ a node receives the results of its direct dependencies only, at most
 ``NodeResult`` is validated when it is built (unknown fields, wrong types, texts
 with a NUL or a surrogate, lists that are too long, a JSON that is too large are
 refused with ``InvalidNodeResultError``) and is immutable and detached from the
-caller's containers. ``to_json`` / ``from_json`` are the storage form.
+caller's containers, all the way down: ``test_result`` is a read-only mapping
+(``MappingProxyType``) whose nested objects are read-only mappings and whose
+lists are tuples, so a node that receives it as an upstream result cannot change
+what the other dependents see. ``to_json`` / ``from_json`` are the storage form
+(``to_json`` returns a fresh, plain copy).
 """
 
 import math
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any
 
 from paw_backend.orchestrator.errors import InvalidNodeResultError, ResultReason
@@ -25,6 +30,8 @@ from paw_backend.orchestrator.jsonvalue import (
     JsonProblem,
     check_json_object,
     encoded_size,
+    freeze_json,
+    thaw_json,
 )
 from paw_backend.orchestrator.limits import (
     MAX_CHANGED_FILES,
@@ -130,11 +137,16 @@ class NodeResult:
                 _text(self.commit, limit=MAX_COMMIT_CHARS, multiline=False),
             )
         if self.test_result is not None:
-            if not isinstance(self.test_result, dict):
+            test_result = self.test_result
+            if isinstance(test_result, MappingProxyType):
+                # Another result's frozen value (``dataclasses.replace``): checked
+                # again from a plain copy like any other.
+                test_result = thaw_json(test_result)
+            if not isinstance(test_result, dict):
                 _refuse(ResultReason.BAD_TYPE)
             try:
                 checked = check_json_object(
-                    self.test_result,
+                    test_result,
                     max_bytes=MAX_TEST_RESULT_BYTES,
                     max_depth=MAX_TEST_RESULT_DEPTH,
                 )
@@ -144,7 +156,10 @@ class NodeResult:
                     if problem.kind == "size"
                     else ResultReason.BAD_TYPE
                 )
-            set_(self, "test_result", checked)
+            # Read-only all the way down: a result is handed to every dependent
+            # node, and none of them may change what the others (or the stored
+            # record) see.
+            set_(self, "test_result", freeze_json(checked))
         for name in ("discovered_facts", "dependency_notes", "unresolved_questions"):
             set_(
                 self,
@@ -182,7 +197,9 @@ class NodeResult:
             "summary": self.summary,
             "changed_files": list(self.changed_files),
             "commit": self.commit,
-            "test_result": None if self.test_result is None else dict(self.test_result),
+            "test_result": (
+                None if self.test_result is None else thaw_json(self.test_result)
+            ),
             "discovered_facts": list(self.discovered_facts),
             "dependency_notes": list(self.dependency_notes),
             "unresolved_questions": list(self.unresolved_questions),
