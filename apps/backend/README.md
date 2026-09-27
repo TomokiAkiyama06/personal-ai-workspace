@@ -9,6 +9,8 @@ Shared Memory の管理（Owner / Admin の作成・編集・削除・復元、C
 Research の一時保存（[PAW-050](#research-scratch-store)、24 時間 TTL、期限切れを消す Janitor つき、HTTP の Endpoint はまだありません）と、Research Provider の Adapter Interface（[PAW-051](#research-provider-adapter)、実際の Provider（Direct Web、Docs、GitHub、OpenCode）はまだありません）と、外部の検索へ送る Query の最小化と送信の Audit（[PAW-053](#research-privacy-filter)。Audit は [#87](#audit-の永続化issue-87) で `audit_events` に永続化済み。方式は Decision 0023（Approved、2026-09-26）で決めています）も実装済みです。
 Claim と Source の対応・回答や Task からの追跡（[PAW-052](#evidence--claim-provenance)、HTTP の Endpoint はまだありません）も実装済みです。
 Project の作成・招待制の Membership・Lifecycle（Active / Archived / Pending deletion / Deleted）は [PAW-026](#project-crud--membership--lifecycle) で実装済みです（Service のみ。HTTP の Endpoint と Session はまだありません）。
+DAG Agent Orchestrator（Task を Dependency DAG へ分解し、独立した Node を並列に実行し、Node ごとに Retry / Escalate し、Sub-Agent が親の権限と予算を超えない。[PAW-034](#dag-agent-orchestrator)、Agent の Runtime は Protocol で実際の Runtime は別の Issue、HTTP の Endpoint はまだありません）と、削除待ちの Project の Task を周期的に止める Loop も実装済みです。
+
 Workspace 共有の Codex / Claude Connection（Credential は不透明な Handle だけ）、User 別 Quota、User と Task への利用量の帰属は [PAW-030](#shared-codex--claude-connection) で実装済みです（Service のみ。実 Adapter と HTTP の Endpoint はまだありません。Quota の意味・期間・実行中の Task の扱いは [Decision 0016](../../docs/decisions/0016-shared-connection-adapter-policy.md)（Approved、2026-09-26）に従います）。
 Project への Repository の登録（GitHub から clone、Ubuntu 上の既存 Repository、新規作成）と、User ごとに分離した Checkout は [PAW-027](#repository-registration--per-user-checkout) で実装済みです（Service のみ）。
 Linux User ごとの GitHub 接続状態（`gh auth status`）の認識と、GitHub への新規作成（`create_github`）を対象 User 自身の Identity で実行する経路は [PAW-028](#github-user-connectiongh-auth) で実装済みです（Service のみ。Migration・新しい Capability はありません）。
@@ -46,7 +48,7 @@ Python 側の Package（`pgvector-python`）は使わず、`paw_backend/memory/v
 apps/backend/
 ├─ pyproject.toml          # 依存（完全一致で固定）と Ruff 設定
 ├─ alembic.ini             # Alembic 設定（DB URL は持たない）
-├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0022 は Password / Session / Login Throttle / 認証 Policy、0023 は Passkey / Passkey の Challenge / Session の Gate、0026 は Project、0027 は Repository 登録・Remote・Checkout、0030 は Shared Connection・Quota・Usage、0031 は Tool Approval、0033 は Queue / Budget / Loop、0040 は Memory Schema、0041 は Memory Journal / Consolidation Queue、0043 は `memory_versions` の全文検索の Index、0046 は Shared Memory Candidate、0050 は Research Scratch、0052 は Evidence / Claim Provenance、0071 は Memory の Status / Stale 状態の変更履歴、0083 は `tasks (project_id, state)` の Index、0087 は外部送信の Audit の `audit_events.details`）
+├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0022 は Password / Session / Login Throttle / 認証 Policy、0023 は Passkey / Passkey の Challenge / Session の Gate、0026 は Project、0027 は Repository 登録・Remote・Checkout、0030 は Shared Connection・Quota・Usage、0031 は Tool Approval、0033 は Queue / Budget / Loop、0034 は DAG Agent Orchestrator（Plan・DAG・Node の試行）、0040 は Memory Schema、0041 は Memory Journal / Consolidation Queue、0043 は `memory_versions` の全文検索の Index、0046 は Shared Memory Candidate、0050 は Research Scratch、0052 は Evidence / Claim Provenance、0071 は Memory の Status / Stale 状態の変更履歴、0083 は `tasks (project_id, state)` の Index、0087 は外部送信の Audit の `audit_events.details`）
 ├─ paw_backend/
 │  ├─ app.py               # create_app(settings)
 │  ├─ config.py            # PAW_ 環境変数から読む Settings
@@ -56,11 +58,12 @@ apps/backend/
 │  ├─ errors.py            # 共通の Error Response
 │  ├─ middleware.py        # Request ID、Host 検証、Security Header
 │  ├─ security.py          # Host / Origin の判定
-│  ├─ authz/               # Role・Capability・認可の判定と Audit Event（PAW-025）
+│  ├─ authz/               # Role・Capability・認可の判定と Audit Event（PAW-025）、子 Agent の Grant の導出（`delegation.py`、PAW-034）
 │  ├─ auth/                # Login、Session、Password（Argon2id）、Backoff、Step-up、認証 Policy、CSRF の Origin 検査（PAW-022）。`stepup.py` は重要操作の Passkey Step-up の判定（PAW-023）
 │  │  └─ passkeys/         # Passkey（WebAuthn）: Ceremony の検証、Challenge、登録・認証・失効、Passkey の Step-up の Verifier、Tool Broker の強い承認の Step-up（PAW-023）
 │  ├─ identity/            # 最小の users、One-time Token。`redeemer.py` は Web 側、`operator.py`（Owner の作成・Token の発行）は cli だけが使う（PAW-021）
 │  ├─ cli/                 # server-local の管理コマンド `python -m paw_backend.cli`（PAW-021）
+│  ├─ orchestrator/        # DAG Agent Orchestrator: Plan、Scheduler、DAG の永続化と Fencing、Runtime の Protocol、Tool・Budget の Gateway、Project 削除の Sweep（PAW-034）
 │  ├─ tasks/               # Agent Task の状態遷移と永続化（PAW-032）。`project_gate.py` は Project の状態 Gate の Protocol（Issue #83）
 │  │  └─ queueing/         # Task Queue、Budget、Loop 検知、Escalation の判断（PAW-033）
 │  ├─ memory/              # Memory / Conversation の Model、ACL 条件、vector 型、Pin / Importance / Status / Stale 変更の Actor（PAW-040、#90）、全文検索の式 `fulltext.py`（PAW-043）
@@ -460,7 +463,7 @@ def upgrade() -> None:
 ## Task Queue / Budget / Loop 検知
 
 PAW-033（Revision `0033`）で実装しました。`paw_backend/tasks/queueing/` は、PAW-032 の Task Lifecycle（`paw_backend/tasks/`）を変更せずにその上へ載せた部品です。
-**HTTP の Endpoint も Orchestration（PAW-034）もありません。** Orchestrator が呼ぶ部品だけです。認可も行いません（Endpoint を作る側が権限を確認してください）。
+**HTTP の Endpoint も Orchestration もありません**（Orchestration は [PAW-034](#dag-agent-orchestrator) が実装しました）。Orchestrator が呼ぶ部品だけです。認可も行いません（Endpoint を作る側が権限を確認してください）。
 状態は全て PostgreSQL にあり、Process のメモリには何も持たないため、複数の Worker Process が同じ Table を同時に使えます。
 
 | Module | 内容 |
@@ -607,10 +610,10 @@ Budget 超過のときに Escalation しないのは、使い切った予算を�
 制限。
 
 - 量は 0 以上の整数だけです。GPU 時間は整数秒で、`float` は拒否します（呼び出し側が切り上げてください）。
-- Queue は `tasks` を変更しません（読むのは `enqueue` の Gate と条件つきの `cancel` だけ。上の Queue の節）。`claim_next` と PAW-032 の `start` を組み合わせるのは PAW-034 です。
+- Queue は `tasks` を変更しません（読むのは `enqueue` の Gate と条件つきの `cancel` だけ。上の Queue の節）。`claim_next` と PAW-032 の `start` を組み合わせるのは PAW-034 です（[実装済み](#dag-agent-orchestrator)）。
 - Lease の切れた Entry は、次の `claim_next` が自動で取り直します。実行中の Process を止める処理（`stop_now` など）は含みません。期限を過ぎた Worker の完了報告は拒否されます。
 - 優先度の引き上げ、Preset の変更、Queue の一覧は認可付きの操作で、Endpoint と一緒に追加します。
-- `start_runtime` は、`BudgetTracker` が Queue を読まないため、呼んだ Worker が Lease を持つかを確認しません。Lease を失った古い Worker が `start_runtime` を呼ぶと、Session を引き継げてしまいます（時間は数え続けるので Budget は回避されませんが、新しい Worker の `stop_runtime` は `StaleRuntimeSessionError` になります）。Lease を持つ Worker だけが呼ぶ規則は、Orchestrator（PAW-034）の責務です。Tracker が Queue の Entry を確かめる案は採らないことを、[Decision 0007](../../docs/decisions/0007-task-queue-budget-and-loop-policy.md) の 10 で承認しています（2026-09-25。「Lease を持つ Worker だけが呼ぶ」規則は PAW-034 の受け入れ条件に置きます）。
+- `start_runtime` は、`BudgetTracker` が Queue を読まないため、呼んだ Worker が Lease を持つかを確認しません。Lease を失った古い Worker が `start_runtime` を呼ぶと、Session を引き継げてしまいます（時間は数え続けるので Budget は回避されませんが、新しい Worker の `stop_runtime` は `StaleRuntimeSessionError` になります）。Lease を持つ Worker だけが呼ぶ規則は、Orchestrator（PAW-034）の責務です（`Orchestrator` は `start_runtime` の直前に Heartbeat で Lease を確かめます）。Tracker が Queue の Entry を確かめる案は採らないことを、[Decision 0007](../../docs/decisions/0007-task-queue-budget-and-loop-policy.md) の 10 で承認しています（2026-09-25。「Lease を持つ Worker だけが呼ぶ」規則は PAW-034 の受け入れ条件に置きます）。
 - Migration `0033` の `down_revision` は `0021` です（鎖は `0001 → 0025 → 0032 → 0040 → 0021 → 0033`）。
 
 ## 認可（RBAC / Capability）と Audit
@@ -1590,7 +1593,7 @@ Broker は呼び出しの**前**に判定します。次は、実際に実行す
 - 却下の Cooldown は Hash 単位で、引数を変えた別の呼び出しは止めません（件数の上限が量を抑えます）。
 - `check` と `charge` の間の競合、Symlink の確認と使用の間の競合（TOCTOU）、Credential 検出が Best Effort であることは上に書いたとおりです。
 - Model の出力から `ToolCall` を作る Adapter は JSON を `benchmarks/json_input.decode_json` と同じ厳密さ（重複 Key、`NaN` を拒否）で読んでください。Broker は Mapping を受け取り、Key と値の型を上の規則で検査します。
-- **後続の課題:** 承認する Process と Agent 側の Process の Role の分離（上）、承認 UI と一覧の Endpoint（PAW-022）、`SECURITY DEFINER` 関数による遷移の限定、Database の時計での期限（Human は Application の時計だけを使う方針で承認した。変える場合は新しい Decision から `Supersedes` する）、`TaskService` への `revoke_on_task_end` の配線と `PostgresTaskActivity` の注入（PAW-034）、終了時の取り消しに失敗した Task の再取り消し（今は `revoke_task` を呼び直す）、共通 Helper（`paw_backend.db_roles.grant_app_privileges`）による GRANT の置き換え。
+- **後続の課題:** 承認する Process と Agent 側の Process の Role の分離（上）、承認 UI と一覧の Endpoint（PAW-022）、`SECURITY DEFINER` 関数による遷移の限定、Database の時計での期限（Human は Application の時計だけを使う方針で承認した。変える場合は新しい Decision から `Supersedes` する）、`TaskService` への `revoke_on_task_end` の配線と `PostgresTaskActivity` の注入（PAW-034）（[DAG Agent Orchestrator](#dag-agent-orchestrator) の「組み立て」と Project 削除の Sweep が、この配線の形です）、終了時の取り消しに失敗した Task の再取り消し（今は `revoke_task` を呼び直す）、共通 Helper（`paw_backend.db_roles.grant_app_privileges`）による GRANT の置き換え。
 
 ## Shared Codex / Claude Connection
 
@@ -1758,7 +1761,13 @@ CHECK 制約が、状態と終了・時間・Token・失敗の種類の対応（
 - **PostgreSQL 18 以上が必要です。** Admission と書き込みは `Database.transact_abortable`（`transaction_timeout`。[Decision 0006](../../docs/decisions/0006-tool-broker-policy.md) で承認された要件）を使います。
 - **実 Adapter がありません。** 実際の Codex / Claude では動かしていません（Provider の規約は確認済みで、実 Adapter の前提は満たされています）。Adapter の Interface は In-memory の代役でだけ確かめています。
 - 実行中の Task は Quota で止まらない（承認済み。Decision 0016 の 3 節）。`tokens` / `runtime_seconds` は終了後に数える。同時実行数、GPU 時間、期限付きの上限の一時緩和は未実装。
-- Process が Admission と精算の間で落ちた行は `in_flight` のまま残り、要求数にだけ数えられます（掃除は未実装）。精算に失敗した呼び出しは、答えを返し、失敗を Log（型名と使用量の ID）に残します。Task の Budget への加算は精算と別の Transaction です。
+- Process が Admission と精算の間で落ちた行は、`in_flight` のまま要求数にだけ数えられます。ただし、開始から `ABANDONED_CALL_AGE_SECONDS`（呼び出しの最長 `MAX_CALL_TIMEOUT_SECONDS` = 1 日に、精算の余裕 1 時間を足した時間。Database の時計で測る）を過ぎた行は、Orchestrator の Lane が動かす Reaper（`paw_backend/orchestrator/connection_reaper.py`、Decision 0016 で承認済み）が `failed` / `internal_error` に精算します。
+  - Reaper は `PAW_CONNECTION_REAP_INTERVAL_SECONDS`（既定 600。0 で停止、それ以外は 60〜86,400）ごとに、古い順に最大 1,000 行を 1 つの Statement で精算します（`ConnectionStore.reap_abandoned`。`SKIP LOCKED` を使い、まだ `in_flight` の行だけを変えます）。
+  - Decision が決めていない精算の中身は、安全な側を選んでいます。Token は不明のまま（NULL）で、誰にも請求しません（Task の Budget への加算も、実行されなかった精算の一部です）。`finished_at` は Reaper が見つけた時刻です。`duration_ms` は開始からの経過時間ですが、呼び出しの最長時間を上限とします（Deadline がそれより前に呼び出しを終わらせているため。実際には常に上限の値になります）。
+  - 精算した行は 1 行ずつ Audit に残します（`connection.usage.abandon`、`system` の Role、使用量の行と Project）。Audit は精算の Commit の後に Best Effort で書きます（失敗は型名だけを Log に残し、精算は取り消しません）。
+  - `in_flight` の行を探す Index はありません。表の大きさに比例した走査になりますが、周期が長いので許容しています（Index を足すには Migration が必要です）。
+  - 精算より後に届いた本来の精算は、何も変えません（`status = 'in_flight'` が条件のため）。
+  精算に失敗した呼び出しは、答えを返し、失敗を Log（型名と使用量の ID）に残します。Task の Budget への加算は精算と別の Transaction です。
 - 精算と Budget の加算が終わるまで呼び出し側の Cancel を伝えないため、Database や Budget の Store が止まっていると、Cancel はその分（使用量の行は Database の期限まで。Budget の加算は `BudgetTracker` が中断できない接続を使うため上限なし）遅れます。Event Loop の終了で Task ごと Cancel された精算は防げず、行が `in_flight` のまま残ります。
 - Adapter の答えは 1,000,000 文字までです（Credential の Redact の上限 `tools.credentials.MAX_TEXT_CHARS` と同じ）。**返す文の長さで判定します**: Adapter が返した長さ、Credential の値の置き換え（短い Credential は `[REDACTED]` になり長くなる）の後、形のわかる Credential の Redact（`token=abcdef` が `token=[REDACTED]` になるように**長くなりうる**）の後の、どれかが上限を超える答えは、途中で切らずに `invalid_response` の失敗にします（`redact_text` は長い文を切って印を付けるだけなので、黙って短くなった答え、上限を超えて長くなった答えを成功として返さないため）。
 - 答えを返せない失敗（`invalid_response`）でも、Adapter が返した Token 数が有効なら、使用量の行・Token の Quota・Task の Budget が数えます（Provider は消費しているため）。入力と出力の Token 数は、答えの本文とも互いにも**別々に**検査し、有効な数は保存し（もう一方が無効でも数える）、有効でない数（負、上限超、bool、非整数）は保存しません（NULL）。どちらかが無効なら、答えは `invalid_response` です。
@@ -2948,7 +2957,7 @@ Active ⇄ Archived
 
 1. **要求（同じ Transaction）。** `begin_deletion` が、Project の状態を変える Transaction で `project_task_stops` の行を書きます（`requested_at = now`、`processed_at = NULL`）。両方が Commit されるか、どちらも Commit されません（Test は要求の書き込みを失敗させ、Project が Active のまま残ることを確認します）。
    何も書かない再度の呼び出し（すでに Pending deletion）と、失敗した Delete 開始（確認の不一致、権限なし、状態の誤り）は行を書きません。復元してからの再度の Delete 開始は、同じ行を新しい要求にします（`requested_at` を更新し、`processed_at` を消す）。
-2. **実行（Processor）。** `ProjectTaskStopper(database, task_service, task_queue)`。Orchestrator（PAW-034。この Issue にはありません）が、`pending_project_ids()` が返す Project のそれぞれについて `stop_project_tasks(project_id)` を、`TaskStopResult.done` になるまで呼びます。
+2. **実行（Processor）。** `ProjectTaskStopper(database, task_service, task_queue)`。Orchestrator（PAW-034 の `ProjectTaskStopLoop`。[別の節](#project-削除の-sweepprojecttaskstoploop)）が、`pending_project_ids()` が返す Project のそれぞれについて `stop_project_tasks(project_id)` を、`TaskStopResult.done` になるまで呼びます。
 
 `stop_project_tasks` の動き。
 
@@ -3132,7 +3141,7 @@ AGENTS.md のとおり、同じ失敗を繰り返したのでエスカレーシ�
 
 - HTTP の Endpoint、Session は含みません（PAW-022）。作成・受諾・辞退・退出は Authorizer を通り Audit に残ります（Issue [#82](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/82)、[Decision 0022](../../docs/decisions/0022-project-lifecycle-capabilities.md)。Approved、2026-09-26）。Audit は判定を記録し、操作の結果は記録しません。
 - 招待を通知する仕組み（Notification、Email）はありません。招待された人は `list_my_invites` で見つけます。User の削除の流れ（Member を外す、所有権の移譲）は PAW-021 以降の Issue です。
-- Purge を定期的に呼ぶ Janitor、Purge 後の他の領域のデータ削除、Task 停止の Processor を呼ぶ Orchestrator（PAW-034）は含みません。Processor 自体は含みます（上の「Delete 開始時の Task 停止」）。Repository の紐付け（PAW-027）と Repo ACL の保存もありません。
+- Purge を定期的に呼ぶ Janitor、Purge 後の他の領域のデータ削除、Task 停止の Processor を周期的に呼ぶ Loop（PAW-034 の `ProjectTaskStopLoop`）は含みません。Processor 自体は含みます（上の「Delete 開始時の Task 停止」）。Repository の紐付け（PAW-027）と Repo ACL の保存もありません。
 - Project 名の一意性、Project ごとの設定（Agent Policy、Merge Policy など。要件の「New Project defaults」）、Owner / Admin の全 Project 一覧は PAW-026 には含まれず、Issue #84 で追加しました（下の「管理者向けの全 Project 一覧」）。
 - `Authorizer` の呼び出しと Project の Lock は同じ Transaction の中です（作成・招待への応答・退出を除く）。Audit の Store が遅いと、その間 Project の行の Lock が続きます（Authorizer の Timeout で有界）。
 - PostgreSQL 18 の実 DB で Test しました。`READ COMMITTED` を前提に、Lock の順序（Project の行が最初）で直列化しています。他の Isolation Level では未確認です。
@@ -3238,6 +3247,216 @@ Rerank（Reranker Protocol）→ 構造化 Score（confirmed・鮮度・importan
 乱数で作った世界（User・Project の全状態・Membership・Repository の Override・Group・全 Scope と Status・鮮度・Relation。`random.Random(seed)`）で、Caller ごとに (1) 独立に書いた Oracle が読めるとする集合に、Hit・Conflict Group・`duplicates` が収まること、(2) 読めない Memory を無効にした DB の結果と**全 Field が等しい**こと、(3) Reranker が読めない Memory の本文を見ないことを確かめます。
 `benchmarks/retrieval_metrics.py` の Permission Leakage（Top-K のうち許可されていない ID の数）と同じ考えを、Backend の Test として実装しています（Backend は `benchmarks` を import しません）。
 実装の SQL を変えて Test が失敗することも確認しました（Vector / Keyword の権限条件を外す、Relation の片端・相手の取得の条件を外す、`scope IN` を外す、招待・Pending deletion を含める、Status・期限・`session_only` の条件を外す、Resolver の判定を外す、など）。
+
+## DAG Agent Orchestrator
+
+[PAW-034](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/30)（Revision `0034`、`paw_backend/orchestrator/`）で実装しました。設計は [要件](../../REQUIREMENTS.md)の「Agent Orchestration / Parallel-first execution」に従い、要件が決めていない選択（Plan の形、Role の上限、Escalation の段、並列数、結果の大きさ、Sub-Agent の予算、Sweep の周期）は **[Decision 0021（Approved、2026-09-26）](../../docs/decisions/0021-dag-orchestrator-policy.md)** にまとめ、人間が承認しました。数値は暫定値として承認されたもので、`orchestrator/limits.py` と Test の期待値で変えられます（DB の CHECK に書いた項目を除く）。
+**HTTP の Endpoint はありません**（Session は PAW-022）。Orchestrator は Worker Process が `Orchestrator.run_once` / `serve` で駆動し、Agent の Runtime は Protocol で、実際の Codex / Claude / Local の Runtime は別の Issue です（Test は Fake の Runtime で動かします）。認可は行いません（Task の権利は呼び出し側が渡す `TaskAuthority`）。
+Migration `0034` の `down_revision` は `0041` です（鎖は `0001 → 0025 → 0032 → 0040 → 0021 → 0033 → 0031 → 0050 → 0046 → 0052 → 0026 → 0087 → 0022 → 0083 → 0043 → 0030 → 0027 → 0071 → 0086 → 0088 → 0023 → 0041 → 0034`）。Revision ID は Issue 番号で、鎖の順序ではありません。他の PR が先に Merge されたら、統合時に鎖をつなぎ直します（`down_revision`、Migration の Docstring の `Revises`、`tests/test_orchestrator_migration.py` の `PREVIOUS`、この文を同時に変えます）。
+
+```text
+Queue の Entry を Claim ─→ Task を Start（または、死んだ Worker の Run を引き継ぐ）
+   │                         │
+   │   Lease を Heartbeat で確認 ─→ Runtime の Timer を開始（Lease を持つ Worker だけ）
+   ▼
+DAG がなければ Planner に分解させ、Plan を検査して保存 ─→ DAG を引き継ぐ（epoch + 1）
+   ▼
+Loop:  Task の状態を読む ─→ 準備のできた Node を並列に起動（Budget の確認つき）
+        ─→ 終わった Node を順に処理（成功: 結果を保存 / 失敗: Retry・別の方法・Escalation・見放す）
+   ▼
+DAG の判定 ─→ 成功: Task を evaluating へ / 失敗: Task を failed へ / 予算・Loop: Task を waiting へ
+```
+
+| Module | 内容 |
+| --- | --- |
+| `plan.py` | `Plan` / `PlanNode`: Planner の出力の検査（Cycle、上限、Role の上限）と、決定的な位相順 |
+| `result.py`、`jsonvalue.py` | `NodeResult`（構造化された結果）と、大きさを制限した JSON |
+| `scheduling.py` | 純粋関数の Scheduler の規則: 準備のできた Node、失敗の伝播、DAG の判定 |
+| `domain.py`、`limits.py` | Role・状態の Enum、Role ごとの Capability の上限（データ）、上限の定数 |
+| `models.py`、`store.py`、`records.py`、Migration `0034` | DAG の永続化と Fencing（SQL だけ。方針は持たない） |
+| `runtime.py` | `AgentRuntime` の Protocol、`NodeAssignment`、`NodeOutcome` |
+| `scope.py`、`authz/delegation.py` | 子 Agent の Grant と Scope を親のものから導く（広げられない） |
+| `gateway.py` | Node へ渡す Tool（`NodeToolGateway`）と Budget（`NodeBudgetHandle`）、Broker の `BudgetProvider`（`TrackerBudgetProvider`） |
+| `orchestrator.py` | `Orchestrator`: 上の全てを組み立てる |
+| `project_sweep.py` | 削除待ちの Project の Task を周期的に止める `ProjectTaskStopLoop` |
+
+### Plan（Task を Dependency DAG へ分解する）
+
+Planner が返す JSON を `Plan.from_mapping` が検査します。**Plan を作った時点で全て検査される**ため、`Plan` の Object は常に受け入れ可能です。Cycle（`cycle`）、未知・自己・重複した依存、Node・依存・Edge・鎖の長さの超過、大きさの超過、未知の Field（綴りの誤りが「依存なし」にならないため）、Role の上限を超える Capability の要求は、固定の理由 Code（`PlanReason`）の `InvalidPlanError` になり、何も保存しません（エラー文に Plan の内容は含めません）。Node の順序は決定的です（Kahn 法。同時に進める Node は Plan に書かれた順）。
+
+| 項目 | 上限（暫定。Decision 0021 の 1） |
+| --- | --- |
+| Node | 1〜32。1 Node の依存 8、全体の Edge 96、鎖の長さ 16 |
+| `key` | `[a-z][a-z0-9_-]{0,31}`。`title` 100 文字（1 行）、`goal` 4,000 文字 |
+| `input` | JSON Object で 16 KiB（UTF-8 の Byte）、入れ子 8 段 |
+| Plan 全体 | Plan を Compact な UTF-8 の JSON にした大きさが 128 KiB まで（`Plan.encoded_bytes`。**Byte で数え**、`key`・`title`・`goal`・`input`・依存・Capability 名・Repository の ID を全て含みます。4 Byte 文字は 4 Byte です）。`agent_dags.plan_bytes` に記録し、DB が範囲を CHECK します |
+| `required`（既定 true） | 全て false の Plan は拒否 |
+
+Plan の提出は `Orchestrator.submit_plan(task_id, plan)`（Task の現在の試行の DAG として保存。1 試行に 1 回）か、DAG がなければ Planner Role の Runtime を Orchestrator が呼びます（2 回まで。2 回目は Planner の Ladder の次の Agent）。**新しい Node を提案できるのは Planner の最初の呼び出しだけ**で、他の Node が Plan を返すと失敗として扱います。
+
+### Role・Grant・Scope（Sub-Agent は親を超えない）
+
+| Role | Capability の上限（`domain.ROLE_CEILING`） | Credential Handle |
+| --- | --- | --- |
+| Planner / Researcher / Reviewer | `project.read`、`project.memory.use`、`shared_memory.read`（**読み取り専用**） | なし |
+| Worker | 上記 + `project.task.run`、`project.repo.write` | Task の Handle |
+
+- **Grant**: `authz.derive_child_grant(parent, child_agent_id, capabilities, project_ids)` が子 Agent の Grant を作ります。Capability も Project も**親の部分集合**だけで、親が持たないものを求めると `GrantEscalationError`（削らずに拒否）、委任不可の Capability（`agent.use` など）と親自身の ID も拒否します。`is_subgrant(child, parent)` で判定できます。Node の Grant は「Role の上限 ∩ Plan が求めたもの ∩ 親の Grant」で、Plan が親の持たないものを求めた Node は失敗します（再試行しません。`GrantEscalation`）。Sub-Agent の ID は Task・Node・試行から導きます（`uuid5`）。試行は Task の Run（`TaskRun` の試行と Retry 回数）を含めて数えるので、Restart や Retry の後の同じ Node・同じ試行番号も別の Agent です。Planner の試行は計画する Worker ごとに数えるため、Queue Entry の Claim（Entry の ID と `claim_count`）も含めます（引き継いだ Worker の Planner も別の Agent）。`agent.use` / `project.agent.use` は**委任不可のまま**です（Decision 0004。委任可能にするのは Agent が起動を要求する Tool を作るときの新しい Decision。0021 の 9）。
+- **Scope**: `derive_child_scope(parent_scope, role, repositories)` が親の `TaskScope` を狭めます。Repository は Plan が求めた Working Set の一部（外の ID は `ScopeEscalationError`）で、ACL と Remote は親の値のまま、読み取り専用の Role には Credential Handle を渡しません。`scope_within(child, parent)` は Orchestrator が導いた Scope ごとに確認し、Test が手で作った広い Scope も検出します。
+- **予算**: Sub-Agent の予算は**親 Task の予算の共有 Pool**で、Node ごとの予算は持ちません。Node の消費は全て親 Task の `budget_usages` へ記録されます（下の「予算」）。
+
+### 実行（Parallel-first、決定的な Scheduler）
+
+- **準備のできた Node（依存が全て成功した Node）を、`ordinal` の小さい順に、`max_parallel_nodes`（既定 4）まで並列に起動します。** 並列数の上限は静的で、要件の動的な並列数は PAW-036（GPU / Resource Scheduler）の担当です。
+- 1 つの Run の書き込みは 1 つの Loop（`_drive`）が順に行い、終わった Node は Node の順に処理します。同じ DAG は同じ順で起動されます。時計は注入する `Clock`（Heartbeat、Poll、Back-off、Node の Timeout）で、Test は手で動かします。
+- **Task の状態を、Node の終了ごとと Poll（既定 2 秒）に読みます。** `cancelled`（Cancel と Stop Now）は走っている Node を即座に止めて DAG を `cancelled` にし、`failed`（外部の Fail）は Node を `ready` に戻し（Retry が続きから実行）、`paused` は新しい Node を起動せず走っている Node は終わらせてから止め（Resume されたら再開）、Retry / Restart で Run が替わったら（`superseded`）何も書かずに止まります。Resume と `unblock` の後の再 Enqueue は呼び出し側（API 層）が行います。
+- Node の 1 回の試行は `node_timeout_seconds`（既定 30 分）で打ち切ります。
+- **Planner の実行中も、同じ周期（Poll）で Task の状態と Budget 全体を読みます。** Planner の Timeout が `runtime_seconds` の上限より長くても、返らない Planner が上限を超えて走り続けることはありません。上限を超えたら Planner を Cancel し（Planner の呼び出しは終わり、DAG は作られません）、Decision 0007 の規則で Task を止めます（`retries` は `failed`、それ以外は `waiting`（理由 `user`）。Entry は完了）。Task の終了（Cancel など）・Run の交代・Lease の喪失も Planner を止めます（Lease の喪失は Poll を待ちません）。`paused` は Node と同じく Planner を終わらせてから止め、上限の直前に返った Plan は普通に実行され、上限の後に返った Plan は保存したまま Node を 1 つも起動しません（`test_orchestrator_runtime_budget.py` の `PlannerRuntimeBudgetTest`）。
+- **Budget は Loop が起きるたびに全部確認します**（Node の終了ごと、Poll ごと）。`runtime_seconds` は Tracker の中で増えていき、どの Node も報告しないため、これがなければ上限を超えて走り続ける Node（終わらない Node を含む）を止められません。上限を超えたら、**終わったばかりの Node の結果を先に保存し**、走っている Node を Cancel し（試行は `interrupted`、Node は `ready` に戻る。次の Run が続きから実行する）、新しい Node を起動せず、Decision 0007 の規則（`retries` は Task を `failed`、それ以外は `waiting`（理由 `user`））で Task を止めます（`test_orchestrator_runtime_budget.py`）。
+- **Task への終了の Command（`begin_evaluation`、`fail`、`wait`）と Start は、その Run に限って発行します。** 毎回 Task を読み直し、Run（`TaskRun`）が違えば型付きの `StaleAttemptError` / `StaleRunError` で何も書かず、そうでなければ読んだ Version を `expected_version` に付けて 1 つの Transaction で比較と遷移を行います（同じ Run のまま Version だけが動いたときは、読み直して最大 5 回まで再判定）。最後の `_watch` の後に、Task が `fail` → Retry → Start されても、古い Run の Command は新しい Run に届きません（Barrier で窓を再現する `test_orchestrator_fenced_commands.py`）。Start は Snapshot の Version で発行し、変わっていれば（その Entry を Claim した Run はもうない）Entry を完了して何も始めません。Start を Project の Gate が拒否した（Project が Active でない、または Gate の Lock が時間内に取れない。Issue #83、Decision 0020）ときは、Entry を Queue へ**戻します**（完了すると、Claim される Entry のない `queued` の Task が残るため。下の Gate の段落）。
+- **Run が終わるとき、`running` の Task に仕事が残らない状態を作りません。** Task は `evaluating` / `failed` / `waiting` / `paused` へ進むか、Entry を Claim されたまま残して Lease の失効で次の Worker に引き継がせるかのどちらかです。予期しない Error や状態（たとえば DAG が `cancelled` なのに Task が `running`）は、固定の Reason（`The orchestrator stopped on an unexpected error`）で Task を `failed` にし（`RunOutcome.ERROR`。Error の型名だけを Log に出します）、その `fail` も書けないとき（DB に届かない）は Entry を完了せず、Lease の失効で次の Worker が引き継ぎます（`test_orchestrator_recovery.py`）。
+
+### Node ごとの Retry / Escalate
+
+Node が失敗するたび（Runtime が失敗を返す、例外を送出する、Timeout、`NodeOutcome` でない値を返す）、Orchestrator は次の順で判断します。
+
+1. 失敗の文字列を**整形**（`format_failure_text`: UTF-8 にできない文字を置換）してから `LoopDetector.record_failure` へ渡します（Decision 0007 の 9。Surrogate を含む文字列は拒否されるので、整形を忘れると Loop 検知に入りません）。`step` は Node の `key`、`attempt` は Task の試行、`approach` は Node の方法の番号です。Error の Class 名は固定の名前に減らします（Adapter の独自の Class は `AdapterError`）。**失敗の文字列は保存も Log もしません**。Node の試行の記録は Class 名と Signature（Hash）だけです。
+2. いまの Budget の判定と Loop の判定を `decide_next_action` に渡します（Budget が Loop に優先）。再試行する失敗（再試行してよく、段の試行が残る、または Loop の判定が Escalation）にだけ、`retries` を 1 つ足した予定の判定をもう一度行い、その分を記録し Back-off を置きます。再試行できない失敗は `retries` を使わないので、Counter が上限ちょうどでも Task を止めません（必須でない Node の失敗で、必須の Node が全て成功したときは DAG が成功します。`test_orchestrator_failures.py` の `RetryReservationTest`）。
+
+| 判断 | Node の行き先 |
+| --- | --- |
+| `CONTINUE` | 同じ Agent・同じ方法で再試行（1 つの段で 6 回まで。超えたら失敗） |
+| `TRY_ALTERNATIVE` | `approach` を 1 増やして再試行 |
+| `ESCALATE_AGENT` | 次の段（Ladder の次の Agent）へ。`approach` も増やし、その段の試行を数え直す |
+| `WAIT_FOR_USER`（Budget、Loop で上位がない） | Node を残して Run を止め、Task を `waiting`（理由 `user`） |
+| `FAIL`（`retries` の超過） | Node を失敗にして Run を止め、Task を `failed` |
+| `retryable=False` の失敗 | 再試行せず Node を失敗にする |
+
+再試行の前に Back-off（`retry_backoff_seconds`、倍で最大 60 秒）で待ちます。Escalation の段は `OrchestratorConfig.ladders`（Role ごとの Agent の並び）です。
+
+**失敗の伝播（要件の Dependency / failure isolation）**: 失敗した Node に依存する Node（推移的）だけが `blocked` になり、独立した Node は最後まで実行します。実行できる Node がなくなったとき、`required` な Node が全て成功なら DAG は `succeeded`（Task は `evaluating`。**完了は Evaluator の責務**）、そうでなければ `failed`（Task は `failed`。Retry が失敗・Blocked の Node を開き直す）。
+
+### 構造化された結果の受け渡し
+
+`NodeResult`（`summary` 必須、`changed_files`、`commit`、`test_result`、`discovered_facts`、`dependency_notes`、`unresolved_questions`、`confidence`、`artifacts`。要件の「Subtask output例」）。未知の Field、NUL / Surrogate を含む文字列、長すぎる List は拒否し、1 つの結果は JSON で 32 KiB まで（DB の CHECK は 64 KiB の予備）。Node は**直接の依存の結果だけ**を `NodeAssignment.upstream` として受け取ります（会話履歴は渡しません）。`test_result` は奥まで読み取り専用です（Object は `MappingProxyType`、List は Tuple）。同じ結果を受け取る複数の Node の 1 つが中身を変えて、他の Node や保存された記録が見るものを変えることはできません（`to_json` は新しい普通の `dict` / `list` を返します）。受け入れた Plan の Node の `input`（`PlanNode.input`）も同じく奥まで読み取り専用です（`to_mapping` と保存は新しい普通の写し）。
+
+### Runtime の契約
+
+```python
+class AgentRuntime(Protocol):
+    async def run_node(self, assignment: NodeAssignment) -> NodeOutcome: ...
+```
+
+`Orchestrator(...)` を作るとき、全ての Runtime を `validate_runtime`（`async run_node` が 1 引数か）で検査し、Ladder が名前を挙げる Agent の Runtime がなければ失敗します。`NodeAssignment` は Goal・Input・上流の結果・Agent の Label・試行と方法の番号と、`tools`（Tool の呼び出し）、`budget`（消費の報告）を持ちます。**Runtime は Broker、Runner、`TaskContext`、Grant、Scope、DB 接続を受け取りません。** `NodeStopped`（Task が終わった、Lease を失った、Budget が尽きた）は Runtime が通さなければなりません。`NodeOutcome.succeeded(result, plan=...)` / `NodeOutcome.failed(error_class, message, retryable=...)`。
+
+### Tool Broker との接続（Decision 0006 の条件）
+
+| 条件 | 実装 | Test |
+| --- | --- | --- |
+| 終了した Task へ Tool 呼び出しを渡さない（承認を要しない呼び出しも） | `NodeToolGateway.call` が、**全ての**呼び出しの直前に `TaskActivityProvider.check`（本番は `PostgresTaskActivity`）を確認し、`ACTIVE` 以外・不明・エラー・Timeout は `NodeStopped`（Broker へ渡さない） | `test_orchestrator_control.test_a_cancelled_task_is_never_handed_a_tool_call`、`test_orchestrator_tools.test_an_approval_of_a_task_that_ends_is_revoked_and_no_call_follows` |
+| `TaskContext.run` は `TaskSnapshot.run` / `TaskEvent.run` から組み立てる | Start の `TaskEvent.run`（または引き継ぐ Run の `TaskSnapshot.run`）を `TaskContext.run` に使う。Retry の後は新しい Run | `test_orchestrator_tools.test_a_node_reaches_the_tools_through_a_context_the_backend_built`、`test_a_retried_task_hands_its_new_run_to_the_broker` |
+| 書き込む Repository は `TaskScope.repositories`、Remote を登録する | 呼び出し側の `TaskAuthority.parent_scope(task)`（**Working Set の Seam**。#85 が保存するまで呼び出し側が渡す）。`ScopedRepository`（Worktree、解決済みの ACL、Remote）は Node の Scope へ**そのまま**渡る。Remote のない Repository では URL を伴う呼び出しが通らない（Broker の既定拒否） | `test_a_url_passes_only_under_a_registered_remote_of_the_working_set`、`test_a_repository_without_a_registered_remote_lets_no_url_through` |
+
+`TaskContext` は**呼び出しごとに**作り直します（`TaskAuthority` を毎回呼ぶ）。ACL を狭める、Project を Archive する、Grant を縮めるは、次の呼び出しから効きます（`test_an_acl_narrowed_meanwhile_takes_effect_on_the_next_call`）。承認を要する呼び出しの承認は、Task の終了で取り消されます（`TaskService(listeners=[approval_service.revoke_on_task_end])` を配線した構成を Test しています）。
+
+### Queue・Budget・Loop との接続（Decision 0007 の条件）
+
+- **Lease を持つ Worker だけが `BudgetTracker.start_runtime` を呼ぶ**: Run は、Task を読んだ後と、**`start_runtime` の直前にもう一度**、`TaskQueue.heartbeat` で Lease を確かめます。Task の開始（`_begin_task`）と Budget の確認は Lease より長くかかり得て、その間に Lease が切れて別の Worker が Entry を Claim すると、`BudgetTracker`（Queue を読まない）は古い Worker の `start_runtime` で新しい Worker の Timer の Session を引き継いでしまうためです。Lease を失った Worker は `start_runtime` に到達しません（`test_a_worker_whose_lease_has_expired_does_nothing`、`TimerStartTest`）。**Timer の開始は Lease の証明と 1 つの Transaction** です（`Orchestrator._start_runtime_with_lease`: `BudgetTracker.start_runtime_in(session, task_id, run=)` が Task の行を `FOR SHARE` で Lock して Run を確かめ Timer を始め、`TaskQueue.heartbeat_in` が Entry の行を Commit まで Lock して Lease を判定・延長。Lock の順は Task → Budget の行 → Entry）。前の呼び出しの応答がどれだけ遅れても、Lease を他の Worker に渡した後の古い Worker が Timer を始めたり新しい Session を奪ったりすることはありません（`test_the_timer_is_started_only_together_with_a_valid_lease`）。Run の最初の Lease の証明にも Heartbeat と同じ期限があります。Run 中は周期的に Heartbeat し、**Lease を失う（3 回続けて Heartbeat に失敗する場合も）と Node を止めて、何も書かずに終わります**。**Heartbeat の 1 回ごとに期限**（間隔の半分。注入された Clock）があり、接続の取得や Query が止まった Heartbeat も失敗として数えて Cancel します。さらに、最後に成功した Lease の証明の開始から `heartbeat_seconds × 3`（Lease より短い）を過ぎたら、失敗の回数によらず Run を失ったとします。こうして Lease が切れて別の Worker が Claim できるようになる前に、必ず Run を止めます（`test_a_heartbeat_that_hangs_loses_the_run_before_the_lease_expires`）。DAG のループ自身が Database の呼び出しで止まっていても、Run を失ったら `heartbeat_seconds` の猶予の後にループを Cancel し（走っている Node も Cancel）、`LEASE_LOST` で終わります（`Orchestrator._drive_until_lost`、`test_a_run_stuck_in_the_database_is_stopped_when_the_lease_is_lost`）。`stop_runtime` は `start_runtime` が返した世代で呼びます（新しい Session に奪われたら `StaleRuntimeSessionError` を無視）。**`stop_runtime` が失敗したら（一時的な Database の Error など）、Entry を完了しません。** 完了した Entry は二度と Claim されないので、Timer が `running_since` を残したまま Runtime を数え続けてしまうためです。Entry は Claim されたまま残り、Lease が切れた後に Claim した次の Worker が、Task がもう走らない（`evaluating` / `failed` / `waiting` / `paused` など）なら、Lease を確かめてから Session を引き継いで止め（`start_runtime` → `stop_runtime`。`running_since` を保つので、時間は失われず二重にも数えられません）、止められたときにだけ Entry を完了します。止められなければ Entry をまた残します。Task が `running` のままなら、次の Worker が Run を引き継ぎます（`RuntimeTimerStopFailureTest`）。
+- **Entry の終わり方（`TaskQueue.finish`）**: Worker は Entry を `complete` せず `finish` で終えます。Task の行を `FOR SHARE` で読み（Task の Command と同じく Task → Entry の順に Lock）、Task が Worker を必要とする状態（`queued` / `running`）なら Entry を返し（`queued` に戻し、順番は保つ）、それ以外なら完了にします。Entry が Claim されている間に Retry・Restart・Resume・Unblock が Commit されると、呼び出し側の `enqueue` は 1 Task 1 Entry の Index で拒否されるので、その Entry が Task を受け持ちます（`running` なら次の Worker が Run を引き継ぎます）。「Worker を必要とする Task に有効な Entry がない」状態は作りません（`test_orchestrator_handover.py`）。
+- **Budget の Preset と Entry は 1 つの Transaction**: `enqueue_task` は `TaskQueue.enqueue_in` と `BudgetTracker.set_preset_in` を同じ Transaction で行います。負けた・重複した Enqueue（`TaskAlreadyQueuedError`）は Budget を変えず、Budget のない Entry が Claim されることもありません。
+- **`waiting` は穏やかな停止**: 他の誰か（承認、User、Resource）が Task を `waiting` にしたら、Pause と同じく新しい Node を起動せず、走っている Node を終わらせてから Run を終えます（`RunOutcome.WAITING`。Task は `waiting` のまま、Unblock した側が Enqueue します）。終わらせている間に Unblock されたら続けます。Planner の実行中も同じです。
+- **Lease を失った Run と、Entry ごと Cancel された Task**: 削除する Project の Task の停止は Task と Entry を 1 つの Transaction で Cancel するので、Worker は Heartbeat で Lease の喪失として知ります。その DAG を走らせる者はもういないので、Task が `cancelled` なら DAG を Cancel します（自分の `epoch` で Fencing。別の Worker が引き継いでいれば拒否されます）。予期しない Error で Task を失敗にするときは、まず走っていた Node を `ready` に戻します。**戻せなければ Task を失敗にせず、Entry を Claim したまま残し**、Lease が切れた後の引き継ぎ（`acquire`）が戻します（失敗にすると、Restart は新しい DAG を使うため、古い試行が `running` のまま残るため）。Cancel された Task の DAG を閉じる処理は数回やり直します（失敗は Log だけ）。
+- **Node の書き込みは Task の Run でも Fencing します**: `start_node` / `complete_node` / `fail_node` / `give_up_node` / `finalize` は、DAG の行の Lock の後に Task の行を `FOR SHARE` で読み、Task の `attempt` / `retry_count` が DAG を最後に引き継いだ Run と違うか、Task が終わっていれば（`completed` / `failed` / `cancelled`）`StaleRunError` で何も書きません。Epoch だけでは、Task が Fail・Retry（や Restart）された後、新しい Worker が DAG を引き継ぐ前に、古い Worker の結果が書かれて新しい Run に使われてしまうためです。Orchestrator はそれを受けたら書かずに次の `_watch` で Run を閉じます（`NodeWritesAreFencedByTheRunTest`）。
+- **Runtime が報告する失敗の Class は閉じた一覧だけ**: `NodeOutcome.failed` の `error_class` は、`errors.RUNTIME_ERROR_CLASSES`（標準の例外の固定の名前）にあるときだけそのまま記録し、それ以外は `AdapterError` にします（Decision 0021 の 3: 固定の名前だけ、Adapter の独自の Class は `AdapterError`）。Orchestrator 自身の名前（`NodeTimeout` など）は Runtime には名乗らせません。
+- **一部の Repository だけを受け取った Node**: 親の Path Root と Host はそのままなので、除いた Repository は子の `TaskScope.excluded_repositories` に残し、その Worktree の Path と Remote の下の URL は範囲外（`OUT_OF_SCOPE`）にします（fail closed）。孫は親の除外を引き継ぎ、`scope_within` は除外を忘れた Scope を広すぎるとして拒否します。
+- **Planner の Identity**: Planner の Runtime には Node の Key として `plan` を渡しますが、Sub-Agent の ID（`agent_id_of`）と Loop 検知の `step` には `@planner` を使います。Node の Key は英字で始まるので、Plan が `plan` という Node を持っても、Planner と ID や失敗の履歴を共有しません。
+- **Cancel に応じない Runtime**: Timeout・Cancel・Budget の停止で Runtime の Coroutine を Cancel したら、その終わりを待つのは `CANCEL_GRACE_SECONDS`（10 秒。実時間）までです（Node の Task を束ねて待つ側はその 2 倍）。`CancelledError` を握りつぶす Runtime は**見捨て**（Log は件数だけ）、Node は通常どおり（`NodeTimeout` などで）失敗し、DAG の書き込みは `epoch` で Fencing され、Run は終わって Entry と Runtime の Timer も解放されます。見捨てた Coroutine はまだ動いているかもしれないので、試行ごとの `AttemptFence` を閉じ、その後の Tool 呼び出しと Budget の `charge` / `remaining` は `NodeStopped(ABANDONED)` になります（何も記録しません。`remaining` は `charge` と同じく、止まった Run でも `NodeStopped` です）。Orchestrator は試行を待ち終えたら、正常な終わりでも Fence を閉じます（`test_orchestrator_abandon.py`）。
+- **Budget**: Node の起動ごとに `steps` を確認・記録し、再試行ごとに `retries` を記録します。Planner の呼び出しも同じで、どの呼び出しも `steps` を 1 つ、2 回目の呼び出しは `retries` も 1 つ使います（呼び出しの直前に予定の判定をし、使い切っていれば呼ばずに Decision 0007 の規則で止めます。再試行しない失敗は `retries` を使いません）。Node は `NodeBudgetHandle.charge(kind, amount)`（`tokens` と `gpu_seconds` だけ。`steps` / `retries` / `tool_calls` / `runtime_seconds` は Orchestrator・Broker・Timer が数えるもので、Node からは `InvalidQueueingArgumentError("kind")`）で報告し（**Run で Fencing**: `BudgetTracker.record(..., run=)` が Task の行を `FOR SHARE` で読み、同じ Transaction で現在の Run と終わっていないことを確かめてから記録します。Fail + Retry / Restart で置き換えられた Run や終わった Task の `charge` は何も記録せず `NodeStopped`（`SUPERSEDED` / `TASK_ENDED`）。**新しい仕事を始める書き込みは Task が `running` のときだけ**（`TaskNotRunningError`、同じ共有 Lock の下）: Node の試行の開始（`DagStore.start_node`）、Node の起動と Planner の呼び出しの `steps`（`record(..., require_running=True)`）、Run の Runtime の Timer（`start_runtime_in(..., run=)`）。`paused` / `waiting` の間も、走っている試行の結果（`complete_node` / `fail_node`、Node の `charge`、失敗の記録）は受け付けます（穏やかな停止）。**仕事の開始は 1 つの Transaction** です: Node の試行は `DagStore.start_node_in` と `BudgetTracker.record_in(STEPS)` を、Planner の呼び出しは `steps`（と `retries`）の `record_in` を、それぞれ 1 つの Transaction で行い（`Orchestrator._start_node` / `_start_planner_call`）、Commit の後にだけ Runtime を起動します。拒否された開始は何も課金せず、課金した Step には必ず開始があります。開始の Commit の後に PAUSE / WAIT が Commit した場合は穏やかな停止です。Planner は今の呼び出しを終え、その計画は保存します（`create(run=)` は「未終了」が条件で、`running` は要求しません）。計画は課金済みの呼び出しの結果で、保存しても何も始まらないからです（Node は再開まで始まりません）。捨てると、再開後に同じ呼び出しをもう一度課金することになります。Orchestrator 自身の `steps` / `retries` の記録、Loop 検知の失敗の記録（`LoopDetector.record_failure(..., run=)`）、計画の保存（`DagStore.create(..., run=)`）も同じ Fencing です。Broker の `tool_calls` の記録は、Gateway が Run を確かめて渡し実行し終えた呼び出しの記録なので Fencing しません）、Budget が尽きた Node と、同じ Run の他の Node は `NodeStopped` で止まります。Tool 呼び出しは Broker の `BudgetProvider`（`TrackerBudgetProvider`）が `tool_calls` として原子的に記録します。Budget を使い切った時の遷移は Decision 0007 のとおりです（`retries` は `failed`、それ以外は `waiting`）。`BudgetPreset` の設定は `Orchestrator.enqueue_task(task_id, preset=...)`（Preset のない Task は `budget_not_configured` として `failed` にし、Timer を開始しません）。
+
+### DAG の永続化と Fencing
+
+| Table | 内容 |
+| --- | --- |
+| `agent_dags` | Task の**試行ごと**に 1 つ（`UNIQUE (task_id, attempt)`）。`state`（`active` / `succeeded` / `failed` / `cancelled`）、`epoch`（Fencing Token）、`owner`、`task_retry_count`（Retry の検出）、`plan_bytes`（受け入れた Plan の UTF-8 の大きさ。行をまたぐ合計は CHECK で測れないため、Service が宣言し DB が範囲を強制する。変更不可） |
+| `agent_dag_nodes` | Node（`ordinal`、Role、`goal`、`input`、`required`、Plan が求めた Capability / Repository、`state`、Ladder の段 `agent_index`、`approach`、`attempt_count`、`rung_attempts`、`result`、`error_class`）。結果は JSONB（64 KiB の CHECK） |
+| `agent_dag_edges` | `node_key` が `depends_on_key` に依存（追加のみ） |
+| `agent_dag_node_attempts` | Node の起動ごとの記録（Agent の段、`approach`、起動した `epoch`、`running` / `succeeded` / `failed` / `interrupted`、失敗の Class と Signature） |
+
+- **Fencing**: Worker が DAG を引き継ぐ（`acquire`）たびに `epoch` を 1 増やし、書き込みは全て自分の `epoch` を示します。書き込みは DAG の行を `SELECT ... FOR NO KEY UPDATE` で Lock してから `epoch` を比べ、引き継ぎと同じ Lock を取るため、**引き継ぎの後の書き込みも、引き継ぎを Lock 待ちしていた書き込みも、古い `epoch` なら何も変えずに `StaleDagEpochError`** になります。**引き継ぎは Queue の Lease の証明と 1 つの Transaction** です（`Orchestrator._acquire_dag`: `DagStore.acquire_in` が DAG の行を Lock し、`TaskQueue.heartbeat_in` が Entry の行を Commit まで Lock して Lease を判定・延長。Lock の順は DAG → Entry）。計画に時間がかかる間に Lease を失い、別の Worker が Entry を Claim して DAG を引き継いでいても、古い Worker の引き継ぎは `LeaseLostError` で Rollback され、`epoch` を上げて正当な Worker を Fencing することはありません（`test_a_stale_planner_cannot_take_the_dag_from_its_replacement`）。同じ Lock が 1 つの DAG の書き込みを直列にするので、同時に終わった 2 つの Node の合流点は必ず `ready` になります。Node の試行も Fencing します（`attempt_count` を示さない報告は `StaleNodeAttemptError`）。
+- **Worker が死んだ場合（Crash）**: 次の Lease 保持者が Task を引き継ぎ（Task が `running` のまま）、`acquire` が走っていた Node を `ready` に戻し試行を `interrupted` にします。中断された試行も、その段の試行数に数えます。死んだ Worker が戻って報告しても、Queue（`LeaseLostError`）、Runtime の Timer（`StaleRuntimeSessionError`）、DAG（`StaleDagEpochError`）のどれでも拒否されます（`test_a_crash_mid_node_is_recovered_and_the_zombie_is_refused`）。
+- **Retry / Restart**: Retry（同じ試行の新しい Run）は `acquire` が失敗・Blocked の Node を開き直して続きから実行します。Restart は新しい試行なので新しい DAG です（古い DAG は履歴）。**すでに `succeeded` の DAG は開き直しません**: Evaluator が Task を `failed` にして Retry された場合、Orchestrator は同じ DAG の結果をそのまま使って Task を `evaluating` へ戻します（Node は再実行せず、Budget も使いません。1 試行に 1 つの DAG で、結果は確定しているためです。仕事をやり直したいときは Restart です。Decision 0021 の 6）。このとき Budget の確認も Runtime の Timer も行いません（何も走らないので、使い切った Budget が評価への引き渡しを止めることはありません）。同じ Run のまま DAG だけが閉じていた場合（DAG を閉じた後、Task の Command の前に Worker が死んだ）も、DAG の結果のとおりに Task を進めます（`succeeded` は `evaluating` へ、`failed` は `failed` へ）。
+- **Application の Role の権限**（Role を分ける構成、`PAW_APP_DATABASE_ROLE`）: Migration `0034` は 4 つの Table のそれぞれに [`grant_app_privileges`](#migration-は-application-の-role-に権限を与えるcontributor-向けの規則) で必要な最小の権限だけを与えます。DELETE と TRUNCATE はどこにも与えません。
+
+  | Table | Application の Role の権限 |
+  | --- | --- |
+  | `agent_dags` | SELECT、INSERT、UPDATE は `state`、`epoch`、`owner`、`task_retry_count`、`updated_at` だけ（`task_id`、`attempt`、`node_count`、`plan_bytes` は変えられない。`FOR NO KEY UPDATE` の Lock に UPDATE 権限が要る） |
+  | `agent_dag_nodes` | SELECT、INSERT、UPDATE は `state`、`agent_index`、`approach`、`attempt_count`、`rung_attempts`、`result`、`error_class`、`finished_at`、`updated_at` だけ（Plan が言ったこと `key`、`ordinal`、`role`、`goal`、`input`、`required`、要求は変えられない） |
+  | `agent_dag_edges` | SELECT、INSERT だけ |
+  | `agent_dag_node_attempts` | SELECT、INSERT、UPDATE は `state`、`error_class`、`failure_signature`、`finished_at` だけ |
+
+  `tests/test_orchestrator_grants.py` が、Migration を実際にこの構成で実行し、Superuser でない Role で DAG Store・Orchestrator・Planner・Budget・制御・Lease・Tool の Test を全て実行します。あわせて、この表と Role の権限が一致すること、Plan や履歴の書き換え、削除、Schema の変更が拒否されることを確認します。
+
+### Project 削除の Sweep（`ProjectTaskStopLoop`）
+
+Decision 0008 の 8 が Orchestrator に課した「削除待ちの Project にも通常の周期で `stop_project_tasks` を呼ぶ」の実装です。Application の Lifespan が、DB があり `PAW_PROJECT_TASK_STOP_INTERVAL_SECONDS`（既定 60、0 で停止、10〜3,600）が 0 でないとき起動し、終了時に `stop()` と Cancel で止めます（DB を破棄する前）。同じ場所で、放置された接続の呼び出しの Reaper（`PAW_CONNECTION_REAP_INTERVAL_SECONDS`、既定 600、0 で停止、60〜86,400）も起動・停止します（「共有接続」の節）。
+
+- **1 周期**: 未処理の要求（`pending_project_ids`）の Project を先に、次に**削除待ちの全 Project**（要求が処理済みでも。処理の後で作られた Task と Entry を止めるため）を id の順に、前の周期の続きから（Cursor）最大 50 件（`projects_per_cycle`）。1 Project に 1 周期で最大 5 回（`rounds_per_project`）呼び、`done` にならなければ次の周期が続けます。
+- **周期**: 最初の周期は起動の 5 秒後、以降は周期ごと（未完了があれば 5 秒後）。周期全体が失敗したら 10 秒から倍で、周期を上限に待ちます。1 つの Project の失敗は他を止めません（Log は Exception の型名だけ）。
+- 削除待ちの一覧は、状態を Statement に書き込んだ（`literal_execute`）部分 Index `ix_projects_pending_deletion` の Query です（Plan の Test つき）。停止は `TaskService(listeners=[revoke_on_task_end])` で行うので、止めた Task の承認も取り消されます。
+
+### 組み立て
+
+```python
+gate = ProjectStateGate()  # Issue #83（Decision 0020）: TaskService と TaskQueue に必須
+approvals = ApprovalService(PostgresApprovalStore(database), audit_sink)
+tasks = TaskService(
+    database, project_gate=gate, listeners=[approvals.revoke_on_task_end]
+)
+budget = BudgetTracker(database)
+broker = ToolBroker(
+    registry,
+    authorizer,
+    PostgresApprovalStore(database),
+    audit_sink,
+    budget=TrackerBudgetProvider(budget),
+    task_activity=PostgresTaskActivity(database),
+)
+orchestrator = Orchestrator(
+    tasks=tasks,
+    queue=TaskQueue(database, project_gate=gate),
+    budget=budget,
+    loops=LoopDetector(database),
+    store=DagStore(database),
+    activity=PostgresTaskActivity(database),
+    tools=ToolRunner(broker, executor),
+    authority=authority,  # TaskAuthority: 親の Grant と、呼び出しごとに現在の Scope（Working Set）
+    runtimes={"local": local_runtime, "codex": codex_runtime},
+    config=OrchestratorConfig.uniform(["local", "codex"]),
+)
+await orchestrator.enqueue_task(task_id, preset=BudgetPreset.STANDARD)
+await orchestrator.serve("worker-1", stop_event)  # または run_once("worker-1")
+```
+
+**Project state Gate（Issue #83、Decision 0020）は明示的に渡します。** `TaskService` と `TaskQueue` は `project_gate` を必須の keyword にし、`None` を拒否するため、省略に頼る組み立ては起動時に `TypeError`（Queue は `InvalidQueueingArgumentError`）になります。Orchestrator がこの 2 つを作る Production の場所は、Application の Lifespan が起動する `build_project_stop_loop(database, project_gate=...)` だけです。Lifespan は `ProjectStateGate()`（`paw_backend.projects`）を渡し、Loop が自分の `TaskService` と `TaskQueue` を Gate つきで作ります（`project_gate` は既定値のない引数）。Gate を持たない Test（Project を作らない Test）は `tests/gate_support.py` の `ALWAYS_ACTIVE`（何でも Active とする名前つきの Gate）を毎回明示して渡します（`Harness` の `project_gate=` の既定値もそれです）。Production の Code はその名前を持ちません（#83 の Test が確かめます）。`test_orchestrator_wiring.py` が Gate の受け渡しと拒否を、`test_orchestrator_project_sweep_app.py` が Lifespan が実際の `ProjectStateGate` を渡すことを確かめます。
+
+**Project が Active でないときの Orchestrator（Decision 0020）**: `TaskQueue.claim_next` は Active でない Project の Entry を Claim せず（Entry は `queued` のまま、Unarchive の後に Claim されます）、Start は Gate を通ります。Claim の後に Project が Archive / 削除の開始になり、Gate が Start を拒否した（`ProjectNotActiveError`、または Lock を時間内に取れない `ProjectBusyError`）ときは、Entry を Queue へ**戻し**（`release`。順番と世代は保たれます）、Task は `queued` のままで、Runtime の Timer・Node・Budget・DAG の `epoch` のどれにも触れません（`RunOutcome.SKIPPED`。Project が Active になれば次の Claim が実行します）。すでに**走っている** Task は止めません（`begin_evaluation`・`fail`・`wait` は Gate を通りません）。走っている Task の Worker が死んで Project が Archived のままなら、その Entry は Lease が切れても Claim されず、Unarchive の後に次の Worker が引き継ぎます（Start しないので Gate は通りません）。`enqueue_task` は Active でない Project の Task を `ProjectNotActiveError` で拒否します（`test_orchestrator_project_gate.py`）。
+
+これは Decision 0006 の「後続の課題」（`TaskService` への `revoke_on_task_end` の配線と `PostgresTaskActivity` の注入は PAW-034）の実装の形です。Application の Process が Agent の Runtime へ DB 接続を渡さないこと（Decision 0006 の前提）は、この組み立てを行う側の責務です。
+
+### 制限と未確認の点
+
+- Agent の Runtime、実 Model、実際の Tool の Executor はありません（Fake で Test）。Runtime が `NodeStopped` を通す契約と、Executor の契約（Tool Broker の節）は実装側の責務です。
+- 承認待ち（`NEEDS_APPROVAL`）で Task を `waiting`（`approval`）にする配線はありません（承認の Endpoint が PAW-022 以降）。Runtime は `NEEDS_APPROVAL` の結果を受け取り、承認後に `approval_id` を付けて呼び直します。
+- Node の停止は、Cancel と Stop Now を区別しません（どちらも Node を即座に止めます。成果物は Worktree に残ります）。
+- Worktree の作成・統合（PAW-035）、Evaluator による完了、Resource Scheduler による並列数（PAW-036）、Working Set の永続化（#85）、Node ごとの予算は含みません。
+- **実 PostgreSQL 18 で Test しました。** 複数の Process が同じ DAG を触る競合（Lock の順序）は、別の接続 Pool（別の Worker Process の代わり）を使った Test で確かめています。
+- 削除待ちの Project の Sweep は、Task Lane / Queue Lane の Gate（Issue #83）の実装ではありません。競合そのものは閉じず、周期の再実行で止めます。
+- `TaskQueue` の Lease は Database の時計で判定され、Worker の Heartbeat の間隔（既定は Lease の 1/4。`Orchestrator` は、3 回続けて失敗する Heartbeat が Lease の切れる前に終わらない間隔（`heartbeat_seconds × 3 ≥ lease_seconds`）を作成時に拒否します）の間は、Lease を失った Worker が気づかず Node の Runtime を動かし続けることがあります（書き込みは `epoch` が拒否します）。Runtime の副作用（File への書き込み）は At-least-once で、Node の冪等性は Runtime の責務です。
+
+### Test
+
+`apps/backend/tests/test_orchestrator_*.py`、`orchestrator_support.py`、`test_authz_delegation.py`。標準 `unittest` だけで、`test_orchestrator_plan.py`（Plan の検査の表と、ランダムな DAG の位相順・Cycle 検出）、`test_orchestrator_result.py`、`test_orchestrator_scheduling.py`（純粋な規則と、ランダムな DAG の Property Test）、`test_orchestrator_scope.py`、`test_orchestrator_argument_validation.py`（全 Public Method × 全引数 × 誤った値の表。DB を設定しない Database を渡し、DB に届く前に型付きのエラーになること）、`test_orchestrator_migration.py` の前半と `test_orchestrator_project_sweep.py` の前半は DB を使いません。
+それ以外は実 PostgreSQL（`PAW_TEST_DATABASE_URL`）を使い、未設定なら Skip します: 永続化と Fencing の競合（`test_orchestrator_store.py`: 引き継ぎ・書き込み・Lock 待ちの順序、同時に終わる 2 Node、同じ Node の 2 重の起動）、実行・並列・結果の受け渡し（`test_orchestrator_run.py`）、失敗・Retry・Escalation・Isolation（`test_orchestrator_failures.py`）、Plan の受け入れ（`test_orchestrator_planning.py`）、Budget（`test_orchestrator_budget.py`）、Pause / Cancel / Retry / Restart（`test_orchestrator_control.py`）、Lease・Crash・引き継ぎ（`test_orchestrator_lease.py`）、終了の Command と Start の Fencing（`test_orchestrator_fenced_commands.py`: Barrier で「最後の確認の後、Command の前」に `fail` → Retry → Start を割り込ませる）、`succeeded` の DAG の Retry と予期しない Error の後始末（`test_orchestrator_recovery.py`）、走っている間の Runtime の Budget（`test_orchestrator_runtime_budget.py`）、Gate の明示的な組み立て（`test_orchestrator_wiring.py`）、Project が Active でないときの Claim・Start・走行中の Task（実際の `ProjectStateGate`。`test_orchestrator_project_gate.py`）、Worker の停止と `serve`（`test_orchestrator_shutdown.py`）、実際の Tool Broker と（`test_orchestrator_tools.py`）、ランダムな DAG を Orchestrator 全体で動かす Property Test（`test_orchestrator_property.py`）、Migration の上げ下げと Model との一致（`test_orchestrator_migration.py`）、Sweep（`test_orchestrator_project_sweep.py`）、非 Superuser の Role（`test_orchestrator_grants.py`）。時間は注入した `ManualClock` で、速度に依存する Test はありません（Lock 待ちや非同期の進行は上限を長く取った待機で確かめます）。
 
 ## Repository Registration / Per-user Checkout
 

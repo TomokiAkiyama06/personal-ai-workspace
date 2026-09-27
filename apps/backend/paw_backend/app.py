@@ -25,6 +25,9 @@ from paw_backend.middleware import (
     RequestIdMiddleware,
     SecurityHeadersMiddleware,
 )
+from paw_backend.orchestrator.connection_reaper import build_connection_reaper
+from paw_backend.orchestrator.project_sweep import build_project_stop_loop
+from paw_backend.projects import ProjectStateGate
 from paw_backend.research.scratch import ScratchJanitor, ScratchStore
 
 logger = logging.getLogger(__name__)
@@ -67,6 +70,8 @@ def create_app(
             warn_if_tokens_can_be_minted(database, settings.database_timeout_seconds)
         )
         background = {audit_check, token_check}
+        stop_loop = None
+        reaper = None
         try:
             # Expired Research Scratch items are only hidden until something
             # deletes them (PAW-050): purge them regularly, from the start on.
@@ -76,8 +81,32 @@ def create_app(
                     interval_seconds=settings.scratch_purge_interval_seconds,
                 )
                 background.add(asyncio.create_task(janitor.run()))
+            # Tasks of a project whose deletion began are stopped on a schedule,
+            # also those created after the deletion request was processed (PAW-034).
+            if database.configured and settings.project_task_stop_interval_seconds > 0:
+                # The Project state gate is given explicitly (Issue #83, Decision
+                # 0020: the task lane requires it): the loop's task service and
+                # queue are built with it, never without.
+                stop_loop = build_project_stop_loop(
+                    database,
+                    project_gate=ProjectStateGate(),
+                    interval_seconds=settings.project_task_stop_interval_seconds,
+                )
+                background.add(asyncio.create_task(stop_loop.run()))
+            # Calls through a shared connection that a crashed process left
+            # ``in_flight`` are settled as failed (PAW-034, Decision 0016).
+            if database.configured and settings.connection_reap_interval_seconds > 0:
+                reaper = build_connection_reaper(
+                    database,
+                    interval_seconds=settings.connection_reap_interval_seconds,
+                )
+                background.add(asyncio.create_task(reaper.run()))
             yield
         finally:
+            if stop_loop is not None:
+                stop_loop.stop()
+            if reaper is not None:
+                reaper.stop()
             # Cancelling aborts the connection each of them is using (a diagnostic
             # its own, the janitor the one of its purge transaction: neither waits
             # for a stalled server to answer), and the wait is bounded anyway.
