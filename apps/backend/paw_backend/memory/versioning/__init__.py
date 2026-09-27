@@ -45,6 +45,7 @@ from paw_backend.memory.versioning.records import (
 )
 from paw_backend.memory.versioning.rules import plan_relation
 from paw_backend.memory.versioning.service import (
+    RELATION_GRAPH_LOCK_KEY,
     MemoryVersioningService,
     memory_lock_key,
 )
@@ -68,6 +69,7 @@ __all__ = [
     "MemoryVersionView",
     "MemoryVersioningError",
     "MemoryVersioningService",
+    "RELATION_GRAPH_LOCK_KEY",
     "RelationClassification",
     "RelationPlan",
     "RevalidateTrigger",

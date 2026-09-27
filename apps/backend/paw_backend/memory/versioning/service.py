@@ -59,14 +59,20 @@ The Authorizer records every decision (both capabilities are ``REQUIRED``). A
 denial because the memory is somebody else's (``not_resource_owner``) or belongs to
 a project the actor is not a member of (``not_project_member``) is reported as
 :class:`MemoryNotFoundError`, like a missing id, so that the answer does not tell
-whether such a memory exists. Any other denial is :class:`MemoryPermissionError`.
+whether such a memory exists; so is any denial of a project memory to a person who
+is not a member of the project (the Authorizer checks the project state first, and
+``project_state_forbids`` would tell a non-member that the memory exists). Any other
+denial is :class:`MemoryPermissionError`. ``history`` returns a version whose
+audience differs from the current one only to a reader of that audience too.
 
 Order of every call
 -------------------
 1. Arguments are validated (:class:`InvalidMemoryInputError`).
 2. A transaction starts with ``SET LOCAL lock_timeout``, takes a transaction-level
-   advisory lock per memory (``memory_lock_key``; two memories in a fixed order),
-   and reads the current version ``FOR UPDATE``.
+   advisory lock per memory (``memory_lock_key``; two memories in a fixed order;
+   a ``supersedes`` / ``extends`` relation also takes ``RELATION_GRAPH_LOCK_KEY``
+   so that its cycle check sees every other such relation), and reads the current
+   version ``FOR UPDATE``.
 3. The actor is authorized against that version's scope.
 4. The change is written; a lock wait over the timeout is :class:`MemoryBusyError`.
 
@@ -180,6 +186,11 @@ _REACHES = text(
 )
 
 
+# Taken by every manual relation of an acyclic kind: the cycle check reads the whole
+# graph, and two relations of disjoint pairs could otherwise close a cycle together.
+RELATION_GRAPH_LOCK_KEY = "paw.memory-relation-graph"
+
+
 def memory_lock_key(memory_id: UUID) -> str:
     """The advisory-lock key that serialises manual changes of one memory."""
     return f"paw.memory.{memory_id}"
@@ -255,6 +266,22 @@ def _kept_freshness(version: MemoryVersionView, now: datetime) -> dict[str, Any]
     }
 
 
+def _carried_freshness(version: MemoryVersionView, now: datetime) -> dict[str, Any]:
+    """``_kept_freshness`` of a version a person writes again, if still writable.
+
+    A person never writes ``session_only`` (Decision 0034 section 4), nor an
+    ``expiring`` version whose time has passed: the caller then has to give a new
+    freshness (:class:`InvalidMemoryInputError` on ``freshness`` / ``expires_at``).
+    """
+    if version.freshness_policy is FreshnessPolicy.SESSION_ONLY:
+        raise reject("freshness", InputProblem.NOT_ALLOWED)
+    if version.freshness_policy is FreshnessPolicy.EXPIRING and not (
+        version.expires_at is not None and version.expires_at > now
+    ):
+        raise reject("expires_at", InputProblem.OUT_OF_RANGE)
+    return _kept_freshness(version, now)
+
+
 class MemoryVersioningService:
     """Manual versioning of User and Project Memory (see the module docstring)."""
 
@@ -294,8 +321,17 @@ class MemoryVersioningService:
         return actor
 
     @asynccontextmanager
-    async def _transaction(self, *memory_ids: UUID) -> AsyncIterator[AsyncSession]:
-        """One transaction with the lock timeout and an advisory lock per memory."""
+    async def _transaction(
+        self, *memory_ids: UUID, graph: bool = False
+    ) -> AsyncIterator[AsyncSession]:
+        """One transaction with the lock timeout and an advisory lock per memory.
+
+        ``graph`` also takes ``RELATION_GRAPH_LOCK_KEY``. All keys are taken in one
+        sorted order, so two transactions never wait for each other in a circle.
+        """
+        keys = {memory_lock_key(m) for m in memory_ids}
+        if graph:
+            keys.add(RELATION_GRAPH_LOCK_KEY)
         try:
             async with self._database.session() as session, session.begin():
                 await session.execute(
@@ -305,7 +341,7 @@ class MemoryVersioningService:
                         )
                     )
                 )
-                for key in sorted({memory_lock_key(m) for m in memory_ids}):
+                for key in sorted(keys):
                     await session.execute(_LOCK_SQL, {"key": key})
                 yield session
         except DBAPIError as error:
@@ -396,6 +432,7 @@ class MemoryVersioningService:
         """May ``actor`` change (or, ``write=False``, read) this memory?"""
         if version.scope is MemoryScope.SHARED:
             raise MemoryScopeNotSupportedError
+        principal = actor
         if version.scope is MemoryScope.USER:
             assert version.owner_user_id is not None  # the scope CHECK
             decision = await self._decide(
@@ -420,7 +457,13 @@ class MemoryVersioningService:
             raise MemoryNotFoundError  # repo / project_group: not handled here
         if decision.allowed:
             return
-        if decision.reason in _HIDDEN_DENIALS:
+        if decision.reason in _HIDDEN_DENIALS or (
+            version.scope is MemoryScope.PROJECT
+            and version.project_id not in principal.project_roles
+        ):
+            # The Authorizer checks the project state before the membership, so a
+            # non-member of an archived project would otherwise learn from
+            # ``project_state_forbids`` that the memory exists.
             raise MemoryNotFoundError
         raise MemoryPermissionError(decision.reason.value)
 
@@ -520,7 +563,11 @@ class MemoryVersioningService:
         """Every version of a memory, oldest first (the History Graph's nodes).
 
         Readable by whoever may read the memory's current version: its owner
-        (``memory.use``) or a member of its project (``project.read``).
+        (``memory.use``) or a member of its project (``project.read``). A version
+        with another audience than the current one (a memory widened by a later
+        flow, e.g. PAW-044) is returned only if the actor may read that audience
+        too, so widening never shows the earlier private content to the new
+        readers.
         """
         actor = self._check_actor(actor)
         memory_id = validate_uuid("memory_id", memory_id)
@@ -532,7 +579,22 @@ class MemoryVersioningService:
                 .where(_VERSIONS.c.memory_id == memory_id)
                 .order_by(_VERSIONS.c.version_number)
             )
-            return tuple(_view(row) for row in rows)
+            versions = tuple(_view(row) for row in rows)
+            readable = {current.audience: True}
+            for version in versions:
+                if version.audience in readable:
+                    continue
+                try:
+                    await self._authorize_version(session, actor, version, write=False)
+                except (
+                    MemoryNotFoundError,
+                    MemoryPermissionError,
+                    MemoryScopeNotSupportedError,
+                ):
+                    readable[version.audience] = False
+                else:
+                    readable[version.audience] = True
+            return tuple(v for v in versions if readable[v.audience])
 
     # -- create ----------------------------------------------------------------
 
@@ -633,7 +695,7 @@ class MemoryVersioningService:
                     rules.check_manual_freshness(changes.freshness, current.scope, now)
                     values.update(_freshness_columns(changes.freshness, now))
                 else:
-                    values.update(_kept_freshness(current, now))
+                    values.update(_carried_freshness(current, now))
                 values["change_reason"] = changes.reason
                 values["attributes"] = {"edited_from_version": current.version_number}
                 await self._set_status(session, current, MemoryStatus.SUPERSEDED, actor)
@@ -703,13 +765,7 @@ class MemoryVersioningService:
                     rules.check_manual_freshness(freshness, current.scope, now)
                     kept = _freshness_columns(freshness, now)
                 else:
-                    kept = _kept_freshness(source, now)
-                    if source.freshness_policy is FreshnessPolicy.EXPIRING and not (
-                        source.expires_at is not None and source.expires_at > now
-                    ):
-                        raise reject("expires_at", InputProblem.OUT_OF_RANGE)
-                    if source.freshness_policy is FreshnessPolicy.SESSION_ONLY:
-                        raise reject("freshness", InputProblem.NOT_ALLOWED)
+                    kept = _carried_freshness(source, now)
                 values = {
                     "memory_type": source.memory_type,
                     "title": source.title,
@@ -844,7 +900,9 @@ class MemoryVersioningService:
         now = self._now()
         kind = relation.relation_type
         try:
-            async with self._transaction(newer_id, older_id) as session:
+            async with self._transaction(
+                newer_id, older_id, graph=kind in rules.ACYCLIC_RELATIONS
+            ) as session:
                 # Rows are locked in the order of the ids, like the advisory locks.
                 currents: dict[UUID, MemoryVersionView] = {}
                 for memory_id in sorted((newer_id, older_id)):

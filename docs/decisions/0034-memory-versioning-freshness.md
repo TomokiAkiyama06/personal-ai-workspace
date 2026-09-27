@@ -36,6 +36,9 @@ Retrieval（PAW-043）は `active` だけを候補にし、`session_only` と期
 
 - Relation は新しい方から古い方へ向く。`supersedes` / `extends` / `confirmed_from` / `revalidated_from` / `merged_from` の辺で**循環を作る記録は拒否**する。同じ Relation の重複（`conflicts_with` は逆向きも）も拒否する。
 - 手動の Relation は、両方の Memory の**現在の Version**（最大の `version_number`）の間に記録する。両方とも `active` であること、両方の `expected_version` が現在の番号であること（Optimistic Lock）を要する。
+- 循環の検査は Graph 全体を読むので、循環を作りうる種類（`supersedes` / `extends`）の手動の記録は、両方の Memory の Lock に加えて Graph 全体の Advisory Lock を 1 つ取り、1 件ずつ行う（別々の 2 組を同時に記録して一緒に循環を作ることがない）。`conflicts_with` と、編集などが新しい Version から張る Relation（新しい Version に入る辺はないので循環を作らない）はこの Lock を取らない。
+- `extends` / `conflicts_with` も両方の Memory を変えられる人だけが記録できる。公開範囲をまたぐ `extends` / `conflicts_with` は確認なしで許す（どちらも何も退役させないため）。
+- **手動の `supersedes` は、この Issue では取り消せない**。古い方の現在の Version は `superseded` のままで、編集・復元・廃止・Revalidate はできない（誤って記録した場合は、古い方の内容で新しい Memory を作る）。取り消しの操作（Relation を外して古い方を `active` に戻すか、古い方に新しい Version を書くか）は History Graph（UI）の Issue で決める。
 - LLM の分類の意味（`rules.plan_relation`）: `same` は何も書かない。`extends` は新しい Memory を書き `extends` を張る。`supersedes` は新しい Memory を書き古い方を `superseded` にする。`conflicts` は新しい Memory を書き `conflicts_with` を張って**人の確認を要する**（何も退役させない）。`unrelated` は Relation なしで書く。**退役させるのは `supersedes` だけ**。Background Consolidation（PAW-041）は Decision 0018 の規則のまま（ここでは変えない）。
 
 `supersedes` を同じ公開範囲に限るのは、置き換えで古い Memory を後継を読めない人から隠さないためである（例: User Memory が Project Memory を置き換えると、他のメンバーから Project Memory が消える）。
@@ -46,6 +49,8 @@ Retrieval（PAW-043）は `active` だけを候補にし、`session_only` と期
   - 変えられる項目: Title、本文、種類、Importance、鮮度。**Scope は変えられない**（広げるのは確認の Flow（PAW-044）、狭めるのは新しい Memory）。
   - 変えなかった項目・Pin は引き継ぐ。`attributes` は引き継がず、`edited_from_version` だけを持つ（Worker の候補の情報を人の Version に残さない）。
   - `revalidate` の Memory は、人が保存した時点で確かめたとみなし、`verified_at` を今にし、Stale の印を外す。
+  - 鮮度を変えない編集でも、人が書けない鮮度（4）は引き継がない: `session_only` の Version と、期限を過ぎた `expiring` の Version は、新しい鮮度を渡さない限り編集できない（復元と同じ）。
+  - 編集・復元・Revalidate の新しい Version には `memory_sources` を写さない（出典は古い Version に残る）。そのため会話削除の Flow は、会話から来た Version の内容を写した `n + 1` を出典から見つけない。出典を写すか、Decision 0009 の Shared Memory のように `user_confirmation` の出典を足すかは未決（下の「決めてほしいこと」）。
 - **復元**（`restore_version`）: 選んだ過去の Version の内容で `n + 1` を書く（`attributes.restored_from_version`）。現在の Version が `active` なら `superseded` に、`deprecated` ならそのまま。`supersedes`（理由 `restore`）を張る。公開範囲が違う Version からは戻さない。期限を過ぎた `expiring` は、新しい鮮度を渡さない限り戻さない。
 - **廃止**（`deprecate_memory`）: 現在の Version を `deprecated` にする。何も消さない。`deprecated` の Memory は編集できず、復元で戻す。
 - Status の変更はすべて `memory_metadata_changes` に本人を Actor として残る（Decision 0026）。
@@ -57,7 +62,8 @@ Retrieval（PAW-043）は `active` だけを候補にし、`session_only` と期
 - `project`: Capability `project.memory.use`。Role と Project の状態は**Database から読む**（呼び出し側の `Principal` の Role は信じない）。Contributor 以上。Viewer と、Archived の Project では拒否。履歴の閲覧は `project.read`。
 - `shared`: 扱わない（`SharedMemoryService`、Decision 0009）。
 - `repo` と `project_group`: **この Issue では扱わない**（Not Found と同じに見せる）。Repo Memory の書き込みに Repo の ACL Override の `write` を要するか（`project.memory.use` は Repo では `read` に対応する）、Project Group とは何か、が決まっていないため。
-- 「他人の Memory」「メンバーでない Project の Memory」への拒否は、存在しない ID と同じ Not Found にする（存在を教えない）。判断はすべて Authorizer が Audit に記録する（どちらの Capability も `REQUIRED`）。Shared Memory のような完了行（Decision 0009 の 13）は書かない。
+- 「他人の Memory」「メンバーでない Project の Memory」への拒否は、存在しない ID と同じ Not Found にする（存在を教えない）。Authorizer は Project の状態をメンバーかどうかより先に見るので、メンバーでない人の Archived / Pending deletion の Project の Memory への拒否（`project_state_forbids`）も Not Found にする。
+- 履歴（`history`）は現在の Version を読める人に返し、公開範囲が現在と違う過去の Version（後の Flow で広げた Memory など）は、その公開範囲も読める人にだけ含める。広げた後の読者に、広げる前の Private な内容を見せないため。判断はすべて Authorizer が Audit に記録する（どちらの Capability も `REQUIRED`）。Shared Memory のような完了行（Decision 0009 の 13）は書かない。
 
 ### 4. 手動で書ける鮮度
 
@@ -116,6 +122,8 @@ Revision `0042` は Index を 1 つ足すだけ: `ix_memory_versions_freshness_d
 - 手動の Relation に Actor の列はない（`memory_relations` に Actor 列がない）。誰が記録したかは Authorizer の Audit の行（`memory.use` / `project.memory.use`）と、`supersedes` の場合は Status 変更の履歴で分かる。Relation 自体に Actor を持たせるなら Migration が要る（History Graph（UI）の Issue で判断）。
 - Job を定期的に呼ぶ仕組みはまだない。呼ばれるまで、`revalidate` の期限切れは Retrieval が時刻で判定して Stale として扱う（PAW-043 の既存の動作）ので、低い Score になることは変わらない。印（`stale_since`）と履歴が付くのが遅れるだけである。
 - 暫定の範囲（1 時間〜10 年、Batch 500 など）は実運用で見直す可能性がある。Migration なしで変えられる。
+- 手動の `supersedes` を誤って記録すると、この Issue の範囲では元に戻せない（1）。
+- 循環を作りうる手動の Relation は Workspace 全体で 1 件ずつになる。手動の操作なので量は小さいとみなす。
 
 ## 決めてほしいこと
 
@@ -126,3 +134,7 @@ Revision `0042` は Index を 1 つ足すだけ: `ix_memory_versions_freshness_d
 5. 手動で書ける鮮度（4 の表）と、`revalidate_triggers` の閉じた語彙（推奨: 承認）。
 6. Stale Candidate・期限切れ・Session 終了の処理（5 の表）、Revalidate で新しい Version を作ること（推奨: 承認）。
 7. Job を呼ぶ Scheduler / Event の配線を後の Issue にすること（推奨: 承認）。
+8. 手動の `supersedes` を今は取り消せないこと、取り消しの操作を History Graph（UI）の Issue で決めること（推奨: 承認）。
+9. 編集・復元・Revalidate の新しい Version に `memory_sources` を写さないこと（推奨: この Issue では写さず、会話削除の Flow の Issue で「写す」か「`user_confirmation` の出典を足す」かを決める）。
+10. `extends` / `conflicts_with` に両方の Memory の書き込み権限を要し、公開範囲をまたいでも許すこと（推奨: 承認）。
+11. 履歴を公開範囲ごとに絞り、復元は同じ公開範囲の Version からだけ行うこと（推奨: 承認）。

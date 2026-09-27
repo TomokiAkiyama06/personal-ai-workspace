@@ -10,13 +10,17 @@ import asyncio
 from datetime import timedelta
 from uuid import uuid4
 
+from sqlalchemy import text
+
 from paw_backend.authz import Principal, ProjectRole, SystemRole
 from paw_backend.memory.models import FreshnessPolicy, MemoryScope
 from paw_backend.memory.versioning import (
+    RELATION_GRAPH_LOCK_KEY,
     FreshnessSpec,
     InputProblem,
     InvalidMemoryInputError,
     ManualRelation,
+    MemoryBusyError,
     MemoryChanges,
     MemoryDraft,
     MemoryNotFoundError,
@@ -284,6 +288,37 @@ class EditTest(PostgresVersioningTestCase):
             )
         self.assertEqual(caught.exception.problem, StateProblem.NOT_ACTIVE)
 
+    async def test_an_edit_does_not_carry_a_freshness_a_person_cannot_write(self):
+        me = self.user()
+        session = self.seed(
+            "session note",
+            "deploy backend friday",
+            owner=me.user_id,
+            freshness="session_only",
+        )
+        expired = self.seed(
+            "old window",
+            "deploy backend friday",
+            owner=me.user_id,
+            freshness="expiring",
+            expires_at=T0 - timedelta(seconds=1),
+        )
+        for seeded, field in ((session, "freshness"), (expired, "expires_at")):
+            with self.subTest(field):
+                with self.assertRaises(InvalidMemoryInputError) as caught:
+                    await self.versioning.edit_memory(
+                        me, seeded.memory_id, 1, MemoryChanges(title="renamed")
+                    )
+                self.assertEqual(caught.exception.field, field)
+                self.assertEqual(len(self.versions(seeded.memory_id)), 1)
+                new = await self.versioning.edit_memory(
+                    me,
+                    seeded.memory_id,
+                    1,
+                    MemoryChanges(title="renamed", freshness=FreshnessSpec.permanent()),
+                )
+                self.assertEqual(new.freshness_policy, FreshnessPolicy.PERMANENT)
+
 
 @requires_postgres
 class AccessTest(PostgresVersioningTestCase):
@@ -378,6 +413,65 @@ class AccessTest(PostgresVersioningTestCase):
             self.audit_actions(),
             [("memory.use", "allow"), ("memory.use", "allow"), ("memory.use", "deny")],
         )
+
+    async def test_a_non_member_cannot_tell_a_closed_project_memory_exists(self):
+        outsider = self.user()
+        mine = await self.versioning.create_memory(outsider, draft())
+        for status in (ProjectStatus.ARCHIVED, ProjectStatus.PENDING_DELETION):
+            with self.subTest(status):
+                project = self.seed_project(status)
+                seeded = self.seed(
+                    "team rule",
+                    "deploy backend friday",
+                    scope="project",
+                    project=project,
+                )
+                memory = seeded.memory_id
+                calls = (
+                    self.versioning.history(outsider, memory),
+                    self.versioning.edit_memory(
+                        outsider, memory, 1, MemoryChanges(content="x")
+                    ),
+                    self.versioning.restore_version(outsider, memory, 1, 1),
+                    self.versioning.deprecate_memory(outsider, memory, 1),
+                    self.versioning.revalidate_memory(outsider, memory, 1),
+                    self.versioning.relate_memories(
+                        outsider,
+                        ManualRelation.EXTENDS,
+                        newer_memory_id=mine.memory_id,
+                        newer_expected_version=1,
+                        older_memory_id=memory,
+                        older_expected_version=1,
+                    ),
+                )
+                for call in calls:
+                    with self.assertRaises(MemoryNotFoundError):
+                        await call
+                self.assertEqual(len(self.versions(memory)), 1)
+
+    async def test_history_shows_an_earlier_audience_only_to_its_readers(self):
+        project = self.seed_project()
+        team = self.seed_team(project)
+        owner = self.actor(team.contributor)
+        private = self.seed(
+            "private draft",
+            "deploy backend friday",
+            owner=owner.user_id,
+            status="superseded",
+        )
+        # A later flow (PAW-044) widens the memory by a project-scoped version.
+        self.seed(
+            "team rule",
+            "deploy backend friday",
+            scope="project",
+            project=project,
+            memory_id=private.memory_id,
+            version_number=2,
+        )
+        seen = await self.versioning.history(self.actor(team.viewer), private.memory_id)
+        self.assertEqual([v.version_number for v in seen], [2])
+        mine = await self.versioning.history(owner, private.memory_id)
+        self.assertEqual([v.version_number for v in mine], [1, 2])
 
 
 @requires_postgres
@@ -559,3 +653,60 @@ class RelationTest(PostgresVersioningTestCase):
             await self.relate(me, ManualRelation.EXTENDS, newer, newer)
         self.assertEqual(caught.exception.problem, StateProblem.SAME_MEMORY)
         self.assertEqual(self.relations(), [])
+
+    async def test_acyclic_relations_are_recorded_one_at_a_time(self):
+        me = self.user()
+        newer, older = await self.two(me)
+        quick = self.new_versioning(lock_timeout_ms=50)
+        with self.engine.connect() as holder, holder.begin():
+            # Another relation of two other memories is checking the graph.
+            holder.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"),
+                {"k": RELATION_GRAPH_LOCK_KEY},
+            )
+            for relation in (ManualRelation.EXTENDS, ManualRelation.SUPERSEDES):
+                with self.subTest(relation), self.assertRaises(MemoryBusyError):
+                    await quick.relate_memories(
+                        me,
+                        relation,
+                        newer_memory_id=newer.memory_id,
+                        newer_expected_version=1,
+                        older_memory_id=older.memory_id,
+                        older_expected_version=1,
+                    )
+            # A conflict is not part of the acyclic graph, nor is an edit.
+            await self.relate(me, ManualRelation.CONFLICTS_WITH, newer, older)
+            await quick.edit_memory(
+                me, newer.memory_id, 1, MemoryChanges(content="deploy friday v2")
+            )
+        self.assertEqual(
+            [r[2] for r in self.relations()], ["conflicts_with", "supersedes"]
+        )
+
+    async def test_relations_of_disjoint_pairs_do_not_close_a_cycle_together(self):
+        me = self.user()
+        a, b, c, d = [
+            await self.versioning.create_memory(
+                me, draft(title=f"rule {name}", content=f"deploy {name}")
+            )
+            for name in "abcd"
+        ]
+        await self.relate(me, ManualRelation.EXTENDS, a, b)
+        await self.relate(me, ManualRelation.EXTENDS, c, d)
+        other = self.new_versioning()
+        results = await asyncio.gather(
+            self.relate(me, ManualRelation.EXTENDS, b, c),
+            other.relate_memories(
+                me,
+                ManualRelation.EXTENDS,
+                newer_memory_id=d.memory_id,
+                newer_expected_version=1,
+                older_memory_id=a.memory_id,
+                older_expected_version=1,
+            ),
+            return_exceptions=True,
+        )
+        refused = [r for r in results if isinstance(r, MemoryStateError)]
+        self.assertEqual(len(refused), 1, results)
+        self.assertEqual(refused[0].problem, StateProblem.WOULD_CYCLE)
+        self.assertEqual(len(self.relations()), 3)
