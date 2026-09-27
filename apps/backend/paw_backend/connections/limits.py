@@ -62,3 +62,13 @@ ROLLING_WINDOW_HOURS = 5
 DEFAULT_LIST_LIMIT = 50
 MAX_LIST_LIMIT = 200
 MAX_LIST_OFFSET = 100_000
+
+# An ``in_flight`` usage row older than this belongs to no live call: every call
+# ends within its deadline (at most ``MAX_CALL_TIMEOUT_SECONDS``) and is settled
+# right after it, so only a process that died between the admission and the
+# settlement leaves one this old (Decision 0016: settled as failed by a reaper).
+# The margin covers the settlement itself (a slow database, the budget charge).
+ABANDONED_CALL_MARGIN_SECONDS = 3_600.0
+ABANDONED_CALL_AGE_SECONDS = MAX_CALL_TIMEOUT_SECONDS + ABANDONED_CALL_MARGIN_SECONDS
+# The most rows one reaping statement settles (the next cycle takes the rest).
+MAX_REAPED_PER_CYCLE = 1_000

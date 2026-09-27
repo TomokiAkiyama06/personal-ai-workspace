@@ -30,6 +30,7 @@ from paw_backend.tasks.errors import (
     TaskConflictError,
     TaskError,
     TaskNotFoundError,
+    TaskNotRunningError,
     TaskStepError,
 )
 from paw_backend.tasks.project_gate import ProjectGate
@@ -74,6 +75,7 @@ __all__ = [
     "ReviewStatus",
     "StaleAttemptError",
     "StaleRunError",
+    "TaskNotRunningError",
     "StepInfo",
     "StepStatus",
     "TaskCommand",

@@ -1,7 +1,7 @@
 """An administrator's reset of another account's Passkeys and password (Issue #108).
 
 Revision ID: 0108
-Revises: 0041
+Revises: 0034
 Create Date: 2026-09-28
 
 The way back for an Admin or a User who lost every Passkey (Decision 0025 section 7,
@@ -47,7 +47,7 @@ from alembic import op
 from paw_backend.db_roles import configured_app_role
 
 revision: str = "0108"
-down_revision: str | Sequence[str] | None = "0041"
+down_revision: str | Sequence[str] | None = "0034"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

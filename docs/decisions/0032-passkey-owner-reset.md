@@ -1,10 +1,10 @@
 # 他の Account の Passkey の Reset と 1 回限りの Password 再設定の方針
 
-- Status: Proposed
+- Status: Approved
 - Date: 2026-09-28
 - Scope: Issue [#108](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/108)（Owner による他 Account の Passkey の Reset。PAW-023 の後続）。[Decision 0025](0025-passkey-webauthn-policy.md) の 7 節・「リスク」・「後続の Issue」、[Decision 0015](0015-login-session-password-policy.md) の 14 節（Admin による強制 Reset の Token の発行）、[Decision 0005](0005-owner-setup-and-recovery.md)（Web の Role は Token の行を INSERT できない）との接続点
 - Supersedes: なし（0025・0015・0005 を書き換えない。0025 の「後続の Issue」の受け入れ条件（案）で「Issue で決める」とされた点と、0015 の 14 節が別の Issue とした Token の発行を、ここで提案する）
-- Approval: 未承認（Human の承認待ち）
+- Approval: 2026-09-28、Human（Repository の Owner）が作業 Session 内で、判断点ごとの説明（推奨つき）を受けたうえで「推奨どおり」と回答して承認（末尾の「承認時の決定」）
 
 ## 背景
 
@@ -109,3 +109,15 @@ Migration `0108`（`down_revision` は `0041`）: `user_passkeys.revoked_reason`
 - 承認されたら `Approval` と末尾の「承認時の決定」に記録し、Status を Approved に改める（Agent は自分で Approved にしない）。
 - 推奨と違う選択になった場合: 1 の「Owner だけ」は Capability と Route の依存の変更（Migration 不要）。2 の「Passkey だけ」は Service から Token の発行を外す（関数と `password_reset` は残してよい）。3 の「別の Table」は新しい Migration。4 の数値は設定の既定値と関数の上限（関数の上限を変えるなら新しい Migration）。
 - 既存の Decision（0005・0015・0025）は書き換えない。
+
+## 承認時の決定（2026-09-28）
+
+Human は、作業 Session で上の「人間の判断が必要な点」5 点について推奨つきの説明を受け、「推奨どおり」と回答して承認した（5 点を一括で。個別の変更はない）。**5 点すべてが推奨どおり**である。
+
+1. **誰が誰を**: Owner は Admin と User、Admin は User だけ（`admin.users.manage`）。
+2. **Password**: Reset と同時に Password を消し、1 回限りの再設定 Token を必須にする。
+3. **Token の仕組み**: `setup_tokens` に `password_reset` を足し、Owner を拒否する `SECURITY DEFINER` の関数だけが作る。
+4. **有効期間**: 既定 24 時間（600〜259200 秒の設定、関数の上限 72 時間）。
+5. **Token の渡し方**: 操作した人への応答で 1 回だけ返し、別の経路で渡す。
+
+承認後に方針を変える場合は、この Decision を書き換えず、新しい Decision から `Supersedes` する。

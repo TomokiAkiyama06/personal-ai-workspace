@@ -46,8 +46,9 @@ class RetrievalPermissionError(RetrievalError):
     """The retrieval cannot be authorized right now.
 
     Only raised when the decision could not be made or recorded
-    (``reason="audit_unavailable"``: the audit write of ``memory.use`` failed and
-    the Authorizer fails closed, or ``invalid_decision``). A policy denial is not
+    (``reason="audit_unavailable"``: the Authorizer failed closed because a
+    decision its mode requires recording could not be written, or
+    ``invalid_decision``). A policy denial is not
     an error: the scope it covers simply contributes nothing (an answer that says
     which project or repository exists would be a leak).
     """

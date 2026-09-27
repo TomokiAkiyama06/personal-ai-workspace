@@ -36,9 +36,9 @@ answers nonsense the call still succeeds and says so in ``RetrievalResult.degrad
 The permission step never degrades: it either decides or raises.
 
 Audit (Decision 0004): this class writes no audit event of its own. The
-Authorizer records what its capabilities' modes say: ``shared_memory.read`` and
-``project.read`` are ``DENIED_ONLY`` (an allowed read writes nothing) and
-``memory.use`` is ``REQUIRED`` (one decision per call that asks for user scope).
+Authorizer records what its capabilities' modes say: ``memory.read`` (user scope,
+Decision 0024), ``shared_memory.read`` and ``project.read`` are all ``DENIED_ONLY``
+(an allowed read writes nothing, a denial is recorded).
 """
 
 import asyncio

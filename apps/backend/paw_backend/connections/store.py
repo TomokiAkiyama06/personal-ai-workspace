@@ -75,8 +75,11 @@ from paw_backend.connections.domain import (
 )
 from paw_backend.connections.errors import InputProblem, InvalidConnectionInputError
 from paw_backend.connections.limits import (
+    ABANDONED_CALL_AGE_SECONDS,
     DEFAULT_DATABASE_TIMEOUT_SECONDS,
+    MAX_CALL_TIMEOUT_SECONDS,
     MAX_DATABASE_TIMEOUT_SECONDS,
+    MAX_REAPED_PER_CYCLE,
 )
 from paw_backend.connections.records import (
     ConnectionInfo,
@@ -698,6 +701,50 @@ class ConnectionStore:
         return await self._database.transact_abortable(
             work, timeout_seconds=self._timeout
         )
+
+    async def reap_abandoned(
+        self, *, limit: int = MAX_REAPED_PER_CYCLE
+    ) -> tuple[UsageRecord, ...]:
+        """Settle the ``in_flight`` usage rows that no live call can own any more
+        (Decision 0016: a process died between the admission and the
+        settlement), at most ``limit`` of them, oldest first; return them.
+
+        A row is abandoned when it started more than ``ABANDONED_CALL_AGE_SECONDS``
+        ago by the database's clock (the longest a call may run, plus a margin for
+        its settlement). It becomes ``failed`` with ``internal_error``; what is
+        known is kept and nothing is invented: the tokens stay unknown (NULL: they
+        are counted nowhere), ``finished_at`` is when it was found and the duration
+        is what elapsed since the start, capped at the longest a call may run
+        (``MAX_CALL_TIMEOUT_SECONDS``: its deadline ended it at the latest). One
+        statement in one transaction; the rows are locked ``SKIP LOCKED`` and
+        updated only while still ``in_flight``, so a concurrent reaper (another
+        process) or a very late settlement changes each row at most once.
+        """
+        if isinstance(limit, bool) or not isinstance(limit, int):
+            raise InvalidConnectionInputError("limit", InputProblem.NOT_AN_INTEGER)
+        if not 1 <= limit <= MAX_REAPED_PER_CYCLE:
+            raise InvalidConnectionInputError("limit", InputProblem.OUT_OF_RANGE)
+        clock, params = self._clock_cte()
+        rows = await self._write(
+            f"WITH {clock}, doomed AS (SELECT id FROM connection_usage"
+            " WHERE status = 'in_flight' AND started_at <"
+            " (SELECT ts FROM clock) - make_interval(secs => %(age)s)"
+            " ORDER BY started_at LIMIT %(limit)s FOR UPDATE SKIP LOCKED)"
+            " UPDATE connection_usage SET status = 'failed',"
+            " failure_code = 'internal_error',"
+            " finished_at = GREATEST((SELECT ts FROM clock), started_at),"
+            " duration_ms = LEAST(%(max_ms)s, GREATEST(0, floor(extract(epoch FROM"
+            " ((SELECT ts FROM clock) - started_at)) * 1000))::bigint)"
+            " WHERE id IN (SELECT id FROM doomed) AND status = 'in_flight'"
+            f" RETURNING {_USAGE_COLUMNS}",
+            {
+                **params,
+                "age": ABANDONED_CALL_AGE_SECONDS,
+                "limit": limit,
+                "max_ms": int(MAX_CALL_TIMEOUT_SECONDS * 1000),
+            },
+        )
+        return tuple(usage_record(row) for row in rows)
 
     async def settle(
         self,
