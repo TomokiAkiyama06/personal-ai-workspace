@@ -2502,6 +2502,7 @@ Claim を記録した Task は自動で利用者になるので、`trace(project
 
 **Application の Role の権限。** 共通の `grant_app_privileges`（PAW-025）で、6 つの Table に SELECT・INSERT・DELETE（DELETE は Migration `0088`、Decision 0028）を付けます（UPDATE の列は付けません）。
 `test_provenance_grants.py` は、この Role で Store と Query の Test を全て実行し、権限の一致と、書き換え・`TRUNCATE`・`ON CONFLICT DO UPDATE`・Schema の変更・Project をまたぐ対応の拒否を確かめます。DELETE は Table 単位の付与で、PostgreSQL には「`purge_projects` からだけ」という絞り方はありません。実際に DELETE を実行する経路は `purge_projects` の 1 つだけで、他の全ての Method は今までどおり読み取りと追加しかしません。
+**Migration の鎖。** Migration `0088` の `down_revision` は `0071` です（鎖は `0001 → 0025 → 0032 → 0040 → 0021 → 0033 → 0031 → 0050 → 0046 → 0052 → 0026 → 0087 → 0022 → 0083 → 0043 → 0030 → 0027 → 0071 → 0088`）。Table を作らず権限を広げるだけなので、Revision 0052（この 6 Table を作った）より後であれば足り、`0071`（このPRが分岐した時点の最新）に合わせて並べています。
 
 ### Project 削除時の扱い（Issue #88、Decision 0028）
 
