@@ -1124,6 +1124,10 @@ fieldset {
   text-align: left;
 }
 
+.menu-error {
+  margin: 4px 14px 6px;
+}
+
 .menu-theme {
   display: flex;
   align-items: center;

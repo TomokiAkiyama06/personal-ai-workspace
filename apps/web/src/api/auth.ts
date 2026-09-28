@@ -84,7 +84,8 @@ export interface PairingProgress {
 type Json = Record<string, unknown>;
 
 export const authApi = {
-  session: () => apiRequest<SessionResponse>("GET", "/auth/session"),
+  session: () =>
+    apiRequest<SessionResponse>("GET", "/auth/session", undefined, { announceSessionEnd: false }),
   login: (body: {
     login_name: string;
     password: string;

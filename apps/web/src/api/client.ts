@@ -76,8 +76,23 @@ export const SESSION_ENDED_EVENT = "paw:session-ended";
 
 export type Method = "GET" | "POST" | "PUT" | "DELETE";
 
+export interface RequestOptions {
+  /**
+   * Whether a 401 `unauthorized` announces that the session ended
+   * (SESSION_ENDED_EVENT). The startup probe of GET /auth/session says no: its 401
+   * only means "not signed in", and a late one must not end a session that was
+   * accepted meanwhile (a pairing that completed first).
+   */
+  announceSessionEnd?: boolean;
+}
+
 /** Send one request; resolve with the JSON body (`undefined` for 204). */
-export async function apiRequest<T>(method: Method, path: string, body?: unknown): Promise<T> {
+export async function apiRequest<T>(
+  method: Method,
+  path: string,
+  body?: unknown,
+  options: RequestOptions = {},
+): Promise<T> {
   const headers: Record<string, string> = { Accept: "application/json" };
   const init: RequestInit = {
     method,
@@ -98,7 +113,11 @@ export async function apiRequest<T>(method: Method, path: string, body?: unknown
   }
   if (!response.ok) {
     const error = await errorFrom(response);
-    if (error.status === 401 && error.code === "unauthorized") {
+    if (
+      error.status === 401 &&
+      error.code === "unauthorized" &&
+      options.announceSessionEnd !== false
+    ) {
       window.dispatchEvent(new Event(SESSION_ENDED_EVENT));
     }
     throw error;

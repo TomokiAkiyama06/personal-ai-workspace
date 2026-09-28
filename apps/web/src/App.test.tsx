@@ -222,6 +222,75 @@ describe("App", () => {
   });
 });
 
+describe("signing out", () => {
+  it("stays signed in and says so when the server could not be told", async () => {
+    mockApi({
+      "GET /auth/session": reply(200, session()),
+      "POST /auth/logout": apiError(503, "service_unavailable"),
+    });
+    renderApp("/");
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "アカウントメニュー" }));
+    await user.click(screen.getByRole("button", { name: "サインアウト" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("一時的に利用できません");
+    expect(screen.getByRole("navigation", { name: "メインナビゲーション" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "サインイン" })).not.toBeInTheDocument();
+  });
+
+  it("treats a session the server already ended as signed out", async () => {
+    mockApi({
+      "GET /auth/session": reply(200, session()),
+      "POST /auth/logout": apiError(401, "unauthorized"),
+    });
+    renderApp("/");
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "アカウントメニュー" }));
+    await user.click(screen.getByRole("button", { name: "サインアウト" }));
+    expect(await screen.findByRole("heading", { name: "サインイン" })).toBeInTheDocument();
+  });
+});
+
+describe("the startup session probe", () => {
+  it("does not undo a pairing that completed before its late 401", async () => {
+    mockApi({
+      "POST /auth/pairing/claim": reply(200, {
+        status: "completed",
+        session: session(),
+        claim: null,
+        confirmation_code: null,
+        expires_at: null,
+      }),
+    });
+    const tableFetch = globalThis.fetch;
+    let answerProbe: (response: Response) => void = () => {};
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        if (String(input).endsWith("/auth/session")) {
+          return new Promise<Response>((resolve) => {
+            answerProbe = resolve;
+          });
+        }
+        return tableFetch(input, init);
+      }),
+    );
+    renderApp("/pair#tok_123");
+    const user = userEvent.setup();
+    await user.type(await screen.findByLabelText("この端末の名前"), "Phone");
+    await user.click(screen.getByRole("button", { name: "続ける" }));
+    expect(await screen.findByRole("navigation", { name: "メインナビゲーション" })).toBeVisible();
+    answerProbe(
+      new Response(JSON.stringify({ error: { code: "unauthorized", message: "x" } }), {
+        status: 401,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(screen.getByRole("navigation", { name: "メインナビゲーション" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "サインイン" })).not.toBeInTheDocument();
+  });
+});
+
 describe("an ended session", () => {
   it("returns to the sign-in page with a message when any request finds it ended", async () => {
     mockApi({

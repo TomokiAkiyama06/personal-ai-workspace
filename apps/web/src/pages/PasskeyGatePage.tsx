@@ -85,7 +85,14 @@ export function PasskeyGatePage() {
             <strong>{t("passkey.verifying")}</strong> {t("passkey.verifyingBody")}
           </p>
         )}
-        <button type="button" className="secondary" onClick={() => void signOut()}>
+        <button
+          type="button"
+          className="secondary"
+          onClick={() => {
+            setError(null);
+            signOut().catch((caught: unknown) => setError(errorMessage(t, caught)));
+          }}
+        >
           {t("user.signOut")}
         </button>
       </section>

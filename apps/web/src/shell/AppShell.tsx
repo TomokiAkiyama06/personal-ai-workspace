@@ -8,6 +8,7 @@ import { type ReactNode, useCallback, useEffect, useId, useRef, useState } from 
 import { authApi } from "../api/auth";
 import { showsAdmin, useSession, useSignedIn } from "../auth/session";
 import { useI18n } from "../i18n";
+import { errorMessage } from "../i18n/errors";
 import { NotificationBanners, NotificationBell } from "../notifications/NotificationCenter";
 import { useNotifications } from "../notifications/store";
 import { Link, useRouter } from "../router";
@@ -105,6 +106,7 @@ function UserMenu() {
   const footer = useFooterText();
   const [open, setOpen] = useState(false);
   const [pending, setPending] = useState(0);
+  const [signOutError, setSignOutError] = useState<string | null>(null);
   const menuId = useId();
   const container = useRef<HTMLDivElement>(null);
   const close = useCallback(() => setOpen(false), []);
@@ -197,7 +199,19 @@ function UserMenu() {
             <ThemeSegments />
           </div>
           <div className="menu-group">
-            <button type="button" className="menu-item danger" onClick={() => void signOut()}>
+            {signOutError && (
+              <p className="form-error menu-error" role="alert">
+                {signOutError}
+              </p>
+            )}
+            <button
+              type="button"
+              className="menu-item danger"
+              onClick={() => {
+                setSignOutError(null);
+                signOut().catch((caught: unknown) => setSignOutError(errorMessage(t, caught)));
+              }}
+            >
               <Icon name="signOut" size={16} />
               <span className="menu-item-label">{t("user.signOut")}</span>
             </button>

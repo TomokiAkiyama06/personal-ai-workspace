@@ -299,7 +299,7 @@ export function DevicesSection() {
                     disabled={busy}
                     onClick={() =>
                       session.current
-                        ? void signOut()
+                        ? void act(signOut)
                         : void act(async () => {
                             await authApi.revokeSession(session.id);
                             await loadSessions();
