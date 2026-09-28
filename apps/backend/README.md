@@ -131,6 +131,7 @@ Database には pgvector が必要です（CI は `pgvector/pgvector:pg18` を�
 | `PAW_HSTS_MAX_AGE_SECONDS` | `31536000` | `Strict-Transport-Security` の max-age。HTTPS の Response にだけ付ける。`0` で付けない |
 | `PAW_ALLOWED_HOSTS` | `localhost,127.0.0.1,[::1]` | 許可する `Host`（Comma 区切り、Port なし）。Reverse Proxy 経由では公開 Host 名を含める |
 | `PAW_ALLOWED_ORIGINS` | 空 | WebSocket を開いてよい Origin と、状態を変える Request（`POST` / `PUT` / `PATCH` / `DELETE`）を送ってよい Browser の Origin（Comma 区切り、例 `https://paw.example.org`）。Request 自身の Origin（外部の Scheme、Host、Port が同じ）は常に許可（状態を変える Request の検査。WebSocket は Host の Authority だけを見ます） |
+| `PAW_WEB_DIST_DIR` | なし | Build 済みの Web App（`apps/web` の `npm run build` が作る `dist` の絶対 Path。`index.html` を含むこと）。設定すると同じ Origin で配信する（下記「Web App の配信」）。未設定では API だけ |
 | `PAW_SHUTDOWN_TIMEOUT_SECONDS` | `5` | 停止時に開いたままの SSE / WebSocket を待つ秒数。超えると切断する |
 | `PAW_DATABASE_URL` | なし | `postgresql://` または `postgresql+psycopg://`。未設定でも起動する |
 | `PAW_DATABASE_TIMEOUT_SECONDS` | `3` | 接続と Readiness 確認の Timeout |
@@ -187,6 +188,17 @@ Health Check が別の `Host`（Container の IP など）で Request する場�
 
 `Strict-Transport-Security` は、HTTPS で受けた Request（Uvicorn が TLS を終端している、または信頼した Proxy が `X-Forwarded-Proto: https` を渡している）にだけ付けます。
 TLS を終端する Reverse Proxy の背後で Backend が HTTP を受ける場合は、Proxy 側で HSTS を送ってください。
+
+## Web App の配信
+
+[Decision 0044](../../docs/decisions/0044-web-app-serving-and-session.md)（Proposed。推奨どおりに実装）により、Build 済みの [Web App](../web/README.md) は Backend が **API と同じ Origin** で配信します（`paw_backend/web.py` の `WebAppMiddleware`）。
+Session Cookie（`__Host-`、`Secure`、`SameSite=Strict`）と Origin 検査（`OriginCheckMiddleware`）は同じ Origin を前提にしているため、Web App を別の Origin に置く構成（CORS）は取りません。
+
+- `PAW_WEB_DIST_DIR` を設定したときだけ有効です。起動時に、絶対 Path で `index.html` を含む Directory であることを検査します。
+- `/api` の外への `GET` / `HEAD` だけを扱い、それ以外（`/api/*`、状態を変える Method）は従来どおり API に渡します。
+- Build の File があればその File、最後の Segment に `.` のない Path（`/settings/devices`、Pairing の `/pair` など Client 側の Route）は `index.html`、それ以外は API の JSON の 404 です。`.` で始まる Segment と、Directory の外へ出る Path（`..`、Symlink）は配信しません。
+- Page 用の `Content-Security-Policy`（`default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`）を付けます。API の Response の CSP（`default-src 'none'`）は変えません。その他の Security Header（`X-Frame-Options` など）は API と同じです。
+- `index.html` などは `Cache-Control: no-cache`（毎回再検証）、Content Hash つきの `assets/` は 1 年の `immutable` です。
 
 ## API
 

@@ -15,6 +15,7 @@ Repositoryでは以下を検証する。
 - Benchmark Task schema、fixture、validator CLIのtest
 - Backendのtest（`apps/backend/tests`。設定、Health、Error Response、Host / Origin検証、Security Header、SSE / WebSocketのEvent経路と購読数の上限、Graceful shutdown、Migration設定、Memory / Conversation Schema。制約、Version、ACL filter、pgvector、ModelとMigrationの一致、Owner Setup / Recovery（Token、Audit、同時実行、Lockout、CLI、users / setup_tokensのMigrationとWeb / Operator Roleの権限））
 - Backend依存のversionが`apps/backend/pyproject.toml`、hook環境、`requirements-ci.txt`で一致すること
+- Web App（`apps/web`、PAW-060）の`npm ci`（`package-lock.json`どおりの導入。Install scriptは実行しない）と`npm run ci`（Biomeのlint / format検査、TypeScriptの型検査、Vitest + Testing Libraryのunit test、Viteのproduction build）
 
 Markdown の行末の 2 個以上のスペースによる改行は許容する。
 conflict marker の検出対象は、行頭で `<` / `=` / `>` / `|` の同一記号が 7 文字以上連続し、空白または行末が続く場合とする。
@@ -33,11 +34,14 @@ GitHub Actionsでは`repository-checks` jobの`services`で使い捨てのPostgr
 Memory Schema（PAW-040）が`vector` extensionを使うため、公式の`postgres:18`ではなくpgvector入りのImageを使う。Major versionは`18`で同じ。
 このContainerはjob内だけで使い、Passwordはworkflowに書いた使い捨ての値でSecretではない。
 ローカルでは`python .github/scripts/run_ci.py`の前に、使い捨てのDatabaseを指すURLを設定すると同じtestを実行できる。
-Web / CLIのbuild / format / lint / testは各領域のコード構成確定後に追加する（PAW-004）。
+Webのbuild / format / lint / testは、Node.js（`apps/web/.node-version`のversion。GitHub Actionsでは`actions/setup-node`をcommit SHAで固定して導入）で実行する。
+GitHub Actions（`GITHUB_ACTIONS=true`）と`PAW_REQUIRE_WEB_CHECKS=1`のときは必須で、`npm`がなければ失敗する。
+それ以外のローカル環境で`npm`がない場合は、警告を出してWebの検証だけをSkipし、他の検証は実行する（Node.jsを導入すれば同じ検証を実行できる）。
+CLIのbuild / format / lint / testはコード構成確定後に追加する（PAW-004）。
 
 GitHub Actions と Git の pre-commit hook は、[.pre-commit-config.yaml](../.pre-commit-config.yaml) の同じ hook を実行する。
 共通 entry の [run_ci.py](scripts/run_ci.py) はBenchmark codeとBackend codeのformat / lint、回帰テスト、
-Benchmark schema test、Backend test、Repository検証を順に実行し、いずれかの失敗をcommit拒否として返す。
+Benchmark schema test、Backend test、Repository検証、Web Appの検証を順に実行し、いずれかの失敗をcommit拒否として返す。
 検証ライブラリとBackendの実行・test依存の version は hook の `additional_dependencies` に固定し、pre-commit が専用環境へ導入する。
 同じversionを [requirements-ci.txt](requirements-ci.txt) にも固定し、standalone validatorを実行する
 virtual environmentへ明示的に導入できるようにする。

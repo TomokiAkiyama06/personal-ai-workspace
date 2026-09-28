@@ -29,6 +29,7 @@ from paw_backend.orchestrator.connection_reaper import build_connection_reaper
 from paw_backend.orchestrator.project_sweep import build_project_stop_loop
 from paw_backend.projects import ProjectStateGate
 from paw_backend.research.scratch import ScratchJanitor, ScratchStore
+from paw_backend.web import WebAppMiddleware
 
 logger = logging.getLogger(__name__)
 
@@ -143,6 +144,10 @@ def create_app(
     install_auth(app, auth, settings=settings, database=database)
 
     register_error_handlers(app)
+    # Innermost: the built Web App (Decision 0044), only when configured. It answers
+    # GET / HEAD outside /api only, inside every check and header below.
+    if settings.web_dist_dir is not None:
+        app.add_middleware(WebAppMiddleware, dist_dir=settings.web_dist_dir)
     # Added last = outermost. Request ID wraps everything, so the middleware
     # inside it can read the ID and every response carries it; the security
     # headers also cover the Host-validation error. The Origin check (CSRF) sits
