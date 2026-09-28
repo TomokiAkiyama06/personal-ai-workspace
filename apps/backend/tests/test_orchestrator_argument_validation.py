@@ -10,12 +10,14 @@ typed error, so a passing case proves that nothing was sent.
 import inspect
 import unittest
 import uuid
+from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from paw_backend.db import Database
 from paw_backend.orchestrator import (
     DagStore,
+    ExecutionPlacement,
     NextStep,
     NodeBudgetHandle,
     NodeOutcome,
@@ -27,6 +29,7 @@ from paw_backend.orchestrator import (
     RunGuard,
     validate_runtime,
 )
+from paw_backend.orchestrator.audit import CloudSend
 from paw_backend.orchestrator.errors import (
     InvalidOrchestratorArgumentError,
     InvalidPlanError,
@@ -63,6 +66,12 @@ GOOD_ID = uuid.uuid4()
 DAG = uuid.uuid4()
 RESULT = NodeResult("done")
 SIGNATURE = "a" * 64
+CLOUD_SEND = CloudSend(
+    content_fingerprint="sha256:" + "0" * 64,
+    content_bytes=1,
+    agent_id=uuid.uuid4(),
+    occurred_at=datetime.now(UTC),
+)
 
 
 class TextSubclass(str):
@@ -235,6 +244,29 @@ class StoreArgumentTest(unittest.IsolatedAsyncioTestCase):
                     "step": [None, "sideways", NextStep, 5, CANARY],
                     "agent_index": [0, 1],  # only with alternative / escalate
                     "approach": [0, 1],
+                },
+            ),
+            "record_placement": (
+                {
+                    "dag_id": DAG,
+                    "epoch": 1,
+                    "key": "a",
+                    "attempt_number": 1,
+                    "placement": ExecutionPlacement.LOCAL_GPU,
+                    "agent": "local",
+                    "model": "main",
+                    "cloud": None,
+                },
+                {
+                    "dag_id": not_a_uuid(),
+                    "epoch": epoch() + [0],
+                    "key": not_text(),
+                    "attempt_number": not_an_int(1, big - 1) + [0],
+                    "placement": [None, "elsewhere", ExecutionPlacement, 5, CANARY],
+                    "agent": not_text() + ["Local", "l" * 65, CANARY + "\n"],
+                    "model": [None, "", "a model", "m" * 129, 5, CANARY + "\n"],
+                    # A local placement has no audit of a send.
+                    "cloud": [CANARY, object(), CLOUD_SEND],
                 },
             ),
             "give_up_node": (

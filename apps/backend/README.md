@@ -51,7 +51,7 @@ Python 側の Package（`pgvector-python`）は使わず、`paw_backend/memory/v
 apps/backend/
 ├─ pyproject.toml          # 依存（完全一致で固定）と Ruff 設定
 ├─ alembic.ini             # Alembic 設定（DB URL は持たない）
-├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0022 は Password / Session / Login Throttle / 認証 Policy、0023 は Passkey / Passkey の Challenge / Session の Gate、0026 は Project、0027 は Repository 登録・Remote・Checkout、0030 は Shared Connection・Quota・Usage、0031 は Tool Approval、0033 は Queue / Budget / Loop、0034 は DAG Agent Orchestrator（Plan・DAG・Node の試行）、0040 は Memory Schema、0041 は Memory Journal / Consolidation Queue、0042 は Memory の鮮度の Job の Index、0043 は `memory_versions` の全文検索の Index、0046 は Shared Memory Candidate、0050 は Research Scratch、0052 は Evidence / Claim Provenance、0071 は Memory の Status / Stale 状態の変更履歴、0083 は `tasks (project_id, state)` の Index、0085 は Task の Working Set、0087 は外部送信の Audit の `audit_events.details`、0108 は他の Account の Passkey の Reset（`admin_reset`）と 1 回限りの Password 再設定 Token（`password_reset`）とその発行の関数、0124 は招待・端末の Pairing・User の状態の履歴）
+├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0022 は Password / Session / Login Throttle / 認証 Policy、0023 は Passkey / Passkey の Challenge / Session の Gate、0026 は Project、0027 は Repository 登録・Remote・Checkout、0030 は Shared Connection・Quota・Usage、0031 は Tool Approval、0033 は Queue / Budget / Loop、0034 は DAG Agent Orchestrator（Plan・DAG・Node の試行）、0040 は Memory Schema、0041 は Memory Journal / Consolidation Queue、0042 は Memory の鮮度の Job の Index、0043 は `memory_versions` の全文検索の Index、0046 は Shared Memory Candidate、0050 は Research Scratch、0052 は Evidence / Claim Provenance、0071 は Memory の Status / Stale 状態の変更履歴、0083 は `tasks (project_id, state)` の Index、0085 は Task の Working Set、0087 は外部送信の Audit の `audit_events.details`、0108 は他の Account の Passkey の Reset（`admin_reset`）と 1 回限りの Password 再設定 Token（`password_reset`）とその発行の関数、0124 は招待・端末の Pairing・User の状態の履歴、0133 は Node の試行の Placement（Local / Cloud と Agent・Model）と Cloud の外部送信の Audit の対応）
 ├─ paw_backend/
 │  ├─ app.py               # create_app(settings)
 │  ├─ config.py            # PAW_ 環境変数から読む Settings
@@ -3576,7 +3576,8 @@ DAG の判定 ─→ 成功: Task を evaluating へ / 失敗: Task を failed �
 | `scheduling.py` | 純粋関数の Scheduler の規則: 準備のできた Node、失敗の伝播、DAG の判定 |
 | `domain.py`、`limits.py` | Role・状態の Enum、Role ごとの Capability の上限（データ）、上限の定数 |
 | `models.py`、`store.py`、`records.py`、Migration `0034` | DAG の永続化と Fencing（SQL だけ。方針は持たない） |
-| `runtime.py` | `AgentRuntime` の Protocol、`NodeAssignment`、`NodeOutcome` |
+| `runtime.py` | `AgentRuntime` の Protocol、`NodeAssignment`、`NodeOutcome`、`NodePlacement` の Protocol |
+| `placement.py`、`audit.py`、Migration `0133` | Node の試行の Placement の記録（`NodePlacementHandle`、内容の指紋）と、Cloud の外部送信の `audit_events` の行（Issue #133） |
 | `scope.py`、`authz/delegation.py` | 子 Agent の Grant と Scope を親のものから導く（広げられない） |
 | `gateway.py` | Node へ渡す Tool（`NodeToolGateway`）と Budget（`NodeBudgetHandle`）、Broker の `BudgetProvider`（`TrackerBudgetProvider`） |
 | `orchestrator.py` | `Orchestrator`: 上の全てを組み立てる |
@@ -3651,6 +3652,15 @@ class AgentRuntime(Protocol):
 
 `Orchestrator(...)` を作るとき、全ての Runtime を `validate_runtime`（`async run_node` が 1 引数か）で検査し、Ladder が名前を挙げる Agent の Runtime がなければ失敗します。`NodeAssignment` は Goal・Input・上流の結果・Agent の Label・試行と方法の番号と、`tools`（Tool の呼び出し）、`budget`（消費の報告）を持ちます。**Runtime は Broker、Runner、`TaskContext`、Grant、Scope、DB 接続を受け取りません。** `NodeStopped`（Task が終わった、Lease を失った、Budget が尽きた）は Runtime が通さなければなりません。`NodeOutcome.succeeded(result, plan=...)` / `NodeOutcome.failed(error_class, message, retryable=...)`。
 
+### Placement（Node をどこで走らせたか。Issue #133）
+
+Decision 0037 の 14（Approved）は、Cloud（Codex / Claude）へ回した Node の実際の Placement を Orchestrator の記録（Audit）に残すこと、それまでは `CloudPolicy` を注入しないことを決めました。記録の方式は **[Decision 0048（Proposed）](../../docs/decisions/0048-node-placement-audit.md)** で承認を待っています。
+
+- DAG の Node の試行の `NodeAssignment` は `placement`（`NodePlacementHandle`）を持ちます（Planner の呼び出しは試行の行がないので `None`）。Runtime は、Node を走らせる**前に** `await assignment.placement.record(ExecutionPlacement.CLOUD, agent="codex", model="gpt-5-codex")` のように 1 回だけ記録します（`local_gpu` / `local_cpu` / `cloud`。Agent は `[a-z][a-z0-9._-]{0,63}`、Model は `[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}` の識別子）。
+- `DagStore.record_placement` が、試行の行（`agent_dag_node_attempts`）の `placement`・`placement_agent`・`placement_model`・`placed_at` に書きます。結果と同じく `epoch`・Task の Run・試行で Fencing し（`StaleDagEpochError` / `StaleRunError` / `StaleNodeAttemptError`）、1 回だけです（2 回目は `InvalidOrchestratorArgumentError("placement")`。DB の Trigger `tr_agent_dag_node_attempts_placement_once` も、記録された Placement の変更を誰が書いても拒否します）。
+- **Cloud のときは外部送信の Audit**: 同じ Transaction で `audit_events` に 1 行を足します（`action` `orchestrator.cloud_send`、`reason` `cloud_placement`、`resource_kind` `task`、`resource_id` Task、`project_id`、`actor_id` Task の委任者、`actor_role` `system`、`agent_id` Node の Agent ID。`details` は NULL で、Decision 0023 の登録簿は変えません）。試行の行には、Orchestrator が Node に渡した内容（Key・Role・Title・Goal・Input・上流の結果）の SHA-256（`content_fingerprint`）と UTF-8 の大きさ（`content_bytes`）と、その行の ID（`placement_audit_id`）を残します。内容そのものは残しません。Placement と Audit の行は一緒に Commit されるか、どちらも残りません。**`record` が失敗したら Runtime は送りません**（`HybridRuntime` は `ComputeUnavailable`、Retry 可）。
+- 記録しない Runtime（Fake や、Cloud へ回さない Runtime）の試行は、Placement が NULL のままです。
+
 ### Tool Broker との接続（Decision 0006 の条件）
 
 | 条件 | 実装 | Test |
@@ -3682,7 +3692,7 @@ class AgentRuntime(Protocol):
 | `agent_dags` | Task の**試行ごと**に 1 つ（`UNIQUE (task_id, attempt)`）。`state`（`active` / `succeeded` / `failed` / `cancelled`）、`epoch`（Fencing Token）、`owner`、`task_retry_count`（Retry の検出）、`plan_bytes`（受け入れた Plan の UTF-8 の大きさ。行をまたぐ合計は CHECK で測れないため、Service が宣言し DB が範囲を強制する。変更不可） |
 | `agent_dag_nodes` | Node（`ordinal`、Role、`goal`、`input`、`required`、Plan が求めた Capability / Repository、`state`、Ladder の段 `agent_index`、`approach`、`attempt_count`、`rung_attempts`、`result`、`error_class`）。結果は JSONB（64 KiB の CHECK） |
 | `agent_dag_edges` | `node_key` が `depends_on_key` に依存（追加のみ） |
-| `agent_dag_node_attempts` | Node の起動ごとの記録（Agent の段、`approach`、起動した `epoch`、`running` / `succeeded` / `failed` / `interrupted`、失敗の Class と Signature） |
+| `agent_dag_node_attempts` | Node の起動ごとの記録（Agent の段、`approach`、起動した `epoch`、`running` / `succeeded` / `failed` / `interrupted`、失敗の Class と Signature）。Revision `0133` から、実際に走らせた場所と Agent・Model（`placement`、`placement_agent`、`placement_model`、`placed_at`）と、Cloud のときの内容の SHA-256・大きさ・`audit_events` の行の ID（上の「Placement」） |
 
 - **Fencing**: Worker が DAG を引き継ぐ（`acquire`）たびに `epoch` を 1 増やし、書き込みは全て自分の `epoch` を示します。書き込みは DAG の行を `SELECT ... FOR NO KEY UPDATE` で Lock してから `epoch` を比べ、引き継ぎと同じ Lock を取るため、**引き継ぎの後の書き込みも、引き継ぎを Lock 待ちしていた書き込みも、古い `epoch` なら何も変えずに `StaleDagEpochError`** になります。**引き継ぎは Queue の Lease の証明と 1 つの Transaction** です（`Orchestrator._acquire_dag`: `DagStore.acquire_in` が DAG の行を Lock し、`TaskQueue.heartbeat_in` が Entry の行を Commit まで Lock して Lease を判定・延長。Lock の順は DAG → Entry）。計画に時間がかかる間に Lease を失い、別の Worker が Entry を Claim して DAG を引き継いでいても、古い Worker の引き継ぎは `LeaseLostError` で Rollback され、`epoch` を上げて正当な Worker を Fencing することはありません（`test_a_stale_planner_cannot_take_the_dag_from_its_replacement`）。同じ Lock が 1 つの DAG の書き込みを直列にするので、同時に終わった 2 つの Node の合流点は必ず `ready` になります。Node の試行も Fencing します（`attempt_count` を示さない報告は `StaleNodeAttemptError`）。
 - **Worker が死んだ場合（Crash）**: 次の Lease 保持者が Task を引き継ぎ（Task が `running` のまま）、`acquire` が走っていた Node を `ready` に戻し試行を `interrupted` にします。中断された試行も、その段の試行数に数えます。死んだ Worker が戻って報告しても、Queue（`LeaseLostError`）、Runtime の Timer（`StaleRuntimeSessionError`）、DAG（`StaleDagEpochError`）のどれでも拒否されます（`test_a_crash_mid_node_is_recovered_and_the_zombie_is_refused`）。
@@ -3694,7 +3704,7 @@ class AgentRuntime(Protocol):
   | `agent_dags` | SELECT、INSERT、UPDATE は `state`、`epoch`、`owner`、`task_retry_count`、`updated_at` だけ（`task_id`、`attempt`、`node_count`、`plan_bytes` は変えられない。`FOR NO KEY UPDATE` の Lock に UPDATE 権限が要る） |
   | `agent_dag_nodes` | SELECT、INSERT、UPDATE は `state`、`agent_index`、`approach`、`attempt_count`、`rung_attempts`、`result`、`error_class`、`finished_at`、`updated_at` だけ（Plan が言ったこと `key`、`ordinal`、`role`、`goal`、`input`、`required`、要求は変えられない） |
   | `agent_dag_edges` | SELECT、INSERT だけ |
-  | `agent_dag_node_attempts` | SELECT、INSERT、UPDATE は `state`、`error_class`、`failure_signature`、`finished_at` だけ |
+  | `agent_dag_node_attempts` | SELECT、INSERT、UPDATE は `state`、`error_class`、`failure_signature`、`finished_at` と、Migration `0133` の Placement の 7 列（`placement`、`placement_agent`、`placement_model`、`placed_at`、`content_fingerprint`、`content_bytes`、`placement_audit_id`。一度書いたら Trigger が変更を拒否する）だけ |
 
   `tests/test_orchestrator_grants.py` が、Migration を実際にこの構成で実行し、Superuser でない Role で DAG Store・Orchestrator・Planner・Budget・制御・Lease・Tool の Test を全て実行します。あわせて、この表と Role の権限が一致すること、Plan や履歴の書き換え、削除、Schema の変更が拒否されることを確認します。
 
@@ -3758,7 +3768,7 @@ await orchestrator.serve("worker-1", stop_event)  # または run_once("worker-1
 ### Test
 
 `apps/backend/tests/test_orchestrator_*.py`、`orchestrator_support.py`、`test_authz_delegation.py`。標準 `unittest` だけで、`test_orchestrator_plan.py`（Plan の検査の表と、ランダムな DAG の位相順・Cycle 検出）、`test_orchestrator_result.py`、`test_orchestrator_scheduling.py`（純粋な規則と、ランダムな DAG の Property Test）、`test_orchestrator_scope.py`、`test_orchestrator_argument_validation.py`（全 Public Method × 全引数 × 誤った値の表。DB を設定しない Database を渡し、DB に届く前に型付きのエラーになること）、`test_orchestrator_migration.py` の前半と `test_orchestrator_project_sweep.py` の前半は DB を使いません。
-それ以外は実 PostgreSQL（`PAW_TEST_DATABASE_URL`）を使い、未設定なら Skip します: 永続化と Fencing の競合（`test_orchestrator_store.py`: 引き継ぎ・書き込み・Lock 待ちの順序、同時に終わる 2 Node、同じ Node の 2 重の起動）、実行・並列・結果の受け渡し（`test_orchestrator_run.py`）、失敗・Retry・Escalation・Isolation（`test_orchestrator_failures.py`）、Plan の受け入れ（`test_orchestrator_planning.py`）、Budget（`test_orchestrator_budget.py`）、Pause / Cancel / Retry / Restart（`test_orchestrator_control.py`）、Lease・Crash・引き継ぎ（`test_orchestrator_lease.py`）、終了の Command と Start の Fencing（`test_orchestrator_fenced_commands.py`: Barrier で「最後の確認の後、Command の前」に `fail` → Retry → Start を割り込ませる）、`succeeded` の DAG の Retry と予期しない Error の後始末（`test_orchestrator_recovery.py`）、走っている間の Runtime の Budget（`test_orchestrator_runtime_budget.py`）、Gate の明示的な組み立て（`test_orchestrator_wiring.py`）、Project が Active でないときの Claim・Start・走行中の Task（実際の `ProjectStateGate`。`test_orchestrator_project_gate.py`）、Worker の停止と `serve`（`test_orchestrator_shutdown.py`）、実際の Tool Broker と（`test_orchestrator_tools.py`）、ランダムな DAG を Orchestrator 全体で動かす Property Test（`test_orchestrator_property.py`）、Migration の上げ下げと Model との一致（`test_orchestrator_migration.py`）、Sweep（`test_orchestrator_project_sweep.py`）、非 Superuser の Role（`test_orchestrator_grants.py`）。時間は注入した `ManualClock` で、速度に依存する Test はありません（Lock 待ちや非同期の進行は上限を長く取った待機で確かめます）。
+それ以外は実 PostgreSQL（`PAW_TEST_DATABASE_URL`）を使い、未設定なら Skip します: 永続化と Fencing の競合（`test_orchestrator_store.py`: 引き継ぎ・書き込み・Lock 待ちの順序、同時に終わる 2 Node、同じ Node の 2 重の起動）、実行・並列・結果の受け渡し（`test_orchestrator_run.py`）、失敗・Retry・Escalation・Isolation（`test_orchestrator_failures.py`）、Plan の受け入れ（`test_orchestrator_planning.py`）、Budget（`test_orchestrator_budget.py`）、Pause / Cancel / Retry / Restart（`test_orchestrator_control.py`）、Lease・Crash・引き継ぎ（`test_orchestrator_lease.py`）、終了の Command と Start の Fencing（`test_orchestrator_fenced_commands.py`: Barrier で「最後の確認の後、Command の前」に `fail` → Retry → Start を割り込ませる）、`succeeded` の DAG の Retry と予期しない Error の後始末（`test_orchestrator_recovery.py`）、走っている間の Runtime の Budget（`test_orchestrator_runtime_budget.py`）、Gate の明示的な組み立て（`test_orchestrator_wiring.py`）、Project が Active でないときの Claim・Start・走行中の Task（実際の `ProjectStateGate`。`test_orchestrator_project_gate.py`）、Worker の停止と `serve`（`test_orchestrator_shutdown.py`）、実際の Tool Broker と（`test_orchestrator_tools.py`）、ランダムな DAG を Orchestrator 全体で動かす Property Test（`test_orchestrator_property.py`）、Migration の上げ下げと Model との一致（`test_orchestrator_migration.py`、Revision `0133` は `test_orchestrator_placement_migration.py`）、Placement の記録と Cloud の外部送信の Audit（`test_orchestrator_placement.py`: Fencing・1 回だけ・Audit の行と同じ Transaction・DB の CHECK と Trigger・`HybridRuntime` を Orchestrator に入れた Local / Cloud）、Sweep（`test_orchestrator_project_sweep.py`）、非 Superuser の Role（`test_orchestrator_grants.py`）。時間は注入した `ManualClock` で、速度に依存する Test はありません（Lock 待ちや非同期の進行は上限を長く取った待機で確かめます）。
 
 ## GPU / Compute Resource Scheduler
 
@@ -3799,6 +3809,7 @@ Probe が見る使用量（Actual）と、Scheduler が約束した量（Reserve
 ### Local / Cloud の振り分けと、他の領域との接続
 
 - `HybridRuntime(scheduler, local_runtime, deployment="main", cloud=cloud_runtime, cloud_policy=policy)` を Orchestrator の `runtimes` に渡すと、Node ごとに Lease を取ってから Local の Model で走らせます。Local に入れず、`CloudPolicy.allows(assignment)` が許すときは Cloud の Runtime で走らせます（Policy が Task の Permission・Quota・依存を判断します。Policy が無ければ Cloud へは回しません）。Local で待てる上限を超えると Node は `ComputeUnavailable`（Retry 可）で失敗します。Local の Lease を持っていた秒数は Task の Budget の `GPU_SECONDS` に計上します（Local の Runtime が例外を投げた・Cancel されたときも計上し、そのときは Runtime の例外の方を伝えます）。Task の `GPU_SECONDS` が残っていなければ Local では始めず、同じ Task の Local の呼び出しが同時に走っているときはそれらが合わせて使った秒数を残りから引き、残りを使い切った時点で走っているものをすべて Cancel します（どちらも `NodeStopped(BUDGET_EXCEEDED)`。遅い呼び出しや並列の呼び出しで上限を超え続けないため。同じプロセス内の `HybridRuntime` の間で共有します）。Cancel しても止まらない Local の Runtime は、止まるまで Lease を持ったままにし、その GPU の容量を他へ渡しません（その待ちがもう一度 Cancel されても同じ）。止まるまでに使った秒数も Meter に数え、止まったときに計上します。そのころには Orchestrator が Node の Attempt を閉じて Node の Budget が計上を断るので、`late_gpu_charge=TrackerLateGpuCharge(budget_tracker)` を渡すと Task の Budget へ直接（Attempt と Run の Fence なしに、実際に使った時間として）計上します。渡さなければその秒数は Log に残るだけです。Background の Class で使うときは、VRAM pressure で Lease が `revoked` になると Local の呼び出しを Cancel し、`ComputeUnavailable`（Retry 可）で終えます。`CloudPolicy` は Cloud で走らせる直前にもう一度尋ね（待つ間に Permission や Quota が変わりうるため）、Policy が例外を投げたときは Local に留めます。
+- **Placement の記録（Issue #133、Decision 0037 の 14、提案は Decision 0048）**: `HybridRuntime` は、Node をどこで走らせるか（`local_gpu` / `local_cpu` / `cloud`）と Agent・Model を、走らせる**前に** `assignment.placement.record(...)` で記録します。Local は Ladder の Label と `local_model`（既定は Deployment 名）、Cloud は `cloud_agent` と `cloud_model`（`cloud=` を渡すときは必須）です。Orchestrator はこれを Node の Attempt の行に書き、Cloud のときは同じ Transaction で `audit_events` に外部送信の行を足します（[DAG Agent Orchestrator](#dag-agent-orchestrator) の「Placement」）。記録できない Node はそこで走らせません（`ComputeUnavailable`、Retry 可。Cloud へは何も送りません）。`placement` の無い Assignment（Planner の呼び出しなど、記録する行がない）は Cloud へ回さず、Local では記録なしで走らせます。
 - `ScheduledMemoryWorker` は Memory Worker（PAW-041）を包み、Background の Lease が取れないとき（Unload 中、縮退中、Exclusive）は `WorkerUnavailableError` を投げます。Consolidator はこれを失敗に数えずに延期します（Decision 0018）。走っている Job の Lease が `revoked` になったとき（VRAM pressure、Unload の前）も Job を Cancel して `WorkerUnavailableError` で延期し、縮退の次の段を止めません（Cancel しても止まらない Job は止まるまで Lease を持ったまま）。`PlacedEmbedder` の GPU の呼び出しも、Lease が `revoked` になると（CPU へ移す・Unload する段の前）Cancel して `ComputeUnavailableError` で終え、Retrieval は縮退します。
 - `PlacedEmbedder` は Embedding Model の GPU と CPU の Copy を包み、Scheduler が置いた方を使います（取れなければ `ComputeUnavailableError` で、Retrieval は Degrade します。Decision 0019）。
 
@@ -3852,8 +3863,11 @@ runtime = HybridRuntime(
     scheduler,
     local_runtime,
     deployment="main",
+    local_model="Qwen/Qwen3-Coder-30B-A3B-Instruct",
     cloud=codex_runtime,
     cloud_policy=policy,
+    cloud_agent="codex",
+    cloud_model="gpt-5-codex",
 )
 # Orchestrator(..., runtimes={"local": runtime, ...}) と、別の Task で scheduler.serve(stop)
 ```
@@ -3873,7 +3887,7 @@ python -m paw_backend.cli compute-status --headroom-min-mib 8192 --headroom-frac
 - 数値はすべて実測に基づかない暫定値です。Model と Runtime が決まったら Benchmark で見直します。Model の Footprint は Admin が与え、Scheduler は測りません。
 - 実際の Runtime（vLLM / SGLang など）の KV 使用率の取得、Runtime の Adapter、Application への組み込み、Exclusive の認可と API、走っている Task の Safe pause / Drain と `Waiting for Resource` への遷移（PAW-037）、System Health の表示（PAW-066）は含みません。
 - Background の停止は協調的（`revoked`）で、仕事がそれを無視すると VRAM は戻りません。
-- Cloud へ回した Node は、Orchestrator の記録上は Ladder の Label のままです（Placement は Scheduler の Status と Log に出ます）。外部への送信と Audit の正確さに関わるため、Decision 0037 の 14 で、Placement を Orchestrator の記録（Audit）に残す別の Issue が済むまで **`CloudPolicy` を注入しない**（どの Node も Cloud へ回さない）ことに決まっています。
+- Cloud へ回した Node の Placement は、Issue #133 で Orchestrator の記録（Node の Attempt の行）と `audit_events` に残るようになりました。Decision 0037 の 14 は「この記録ができるまで **`CloudPolicy` を注入しない**」と決めており、その記録の方式は Decision 0048（Proposed）で承認を待っています。承認されるまで、そして本番の組み立て（Codex / Claude の Cloud Runtime、Task の Permission・Quota を判断する `CloudPolicy` の実装、それらを Orchestrator に渡す Wiring）ができるまで、`CloudPolicy` は注入しません。
 - `NvidiaSmiProbe` は `nvidia-smi` を PATH から探さず、絶対 Path（既定 `/usr/bin/nvidia-smi`、`executable=` で変更）で実行します。
 - 管理する GPU は `gpu_index` の 1 枚です。MIG は使いません。
 - Probe が読む GPU 利用率（`utilization_percent`）は `status()` に出すだけで、Admission にはまだ使っていません（要件の入力の一つ。使い方の方針は Decision 0037 に無く、別の Decision で提案します）。

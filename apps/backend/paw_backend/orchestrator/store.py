@@ -34,9 +34,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from paw_backend.authz import Capability
 from paw_backend.db import Database
+from paw_backend.orchestrator.audit import (
+    CloudSend,
+    cloud_send_event,
+    record_cloud_send,
+)
 from paw_backend.orchestrator.domain import (
     AttemptState,
     DagState,
+    ExecutionPlacement,
     NextStep,
     NodeState,
 )
@@ -72,9 +78,11 @@ from paw_backend.orchestrator.scheduling import (
 )
 from paw_backend.orchestrator.validation import (
     MAX_INT32,
+    check_agent_label,
     check_int,
     check_label,
     check_member,
+    check_model,
     check_signature,
     check_uuid,
     check_worker_id,
@@ -183,6 +191,13 @@ def _attempt_record(row: DagNodeAttemptRow) -> AttemptRecord:
         failure_signature=row.failure_signature,
         started_at=row.started_at,
         finished_at=row.finished_at,
+        placement=row.placement,
+        placement_agent=row.placement_agent,
+        placement_model=row.placement_model,
+        placed_at=row.placed_at,
+        content_fingerprint=row.content_fingerprint,
+        content_bytes=row.content_bytes,
+        placement_audit_id=row.placement_audit_id,
     )
 
 
@@ -569,6 +584,92 @@ class DagStore:
             locked.settle()
             await session.flush()
             return await _record(session, locked.dag)
+
+    async def record_placement(
+        self,
+        dag_id: uuid.UUID,
+        epoch: int,
+        key: str,
+        attempt_number: int,
+        *,
+        placement: ExecutionPlacement,
+        agent: str,
+        model: str,
+        cloud: CloudSend | None = None,
+    ) -> AttemptRecord:
+        """Record where a running attempt runs, on which agent and model (issue
+        #133). ``cloud`` is required for ``CLOUD`` and refused otherwise: the
+        send's ``audit_events`` row is appended in the SAME transaction
+        (``orchestrator/audit.py``), so the placement and its audit commit
+        together or not at all.
+
+        Fenced like an outcome: the epoch, the task's run (``StaleRunError``) and
+        the attempt, which must still be running (``StaleNodeAttemptError``). A
+        placement is recorded once: a second one is
+        ``InvalidOrchestratorArgumentError("placement")`` (and the database's
+        trigger refuses to change one, whoever writes)."""
+        check_uuid("dag_id", dag_id)
+        check_int("epoch", epoch, minimum=1, maximum=MAX_INT32)
+        check_label("key", key, maximum=32)
+        check_int("attempt_number", attempt_number, minimum=1, maximum=MAX_INT32)
+        placement = check_member("placement", placement, ExecutionPlacement)
+        check_agent_label("agent", agent)
+        check_model("model", model)
+        if (placement is ExecutionPlacement.CLOUD) != (cloud is not None):
+            raise InvalidOrchestratorArgumentError("cloud")
+        if cloud is not None and type(cloud) is not CloudSend:
+            raise InvalidOrchestratorArgumentError("cloud")
+        async with self._database.session() as session, session.begin():
+            locked = await self._open(session, dag_id, epoch, check_run=True)
+            self._running(locked, key, attempt_number)
+            attempt = (
+                await session.execute(
+                    select(DagNodeAttemptRow)
+                    .where(
+                        DagNodeAttemptRow.dag_id == dag_id,
+                        DagNodeAttemptRow.node_key == key,
+                        DagNodeAttemptRow.number == attempt_number,
+                        DagNodeAttemptRow.state == AttemptState.RUNNING,
+                    )
+                    .execution_options(populate_existing=True)
+                )
+            ).scalar_one_or_none()
+            if attempt is None:
+                raise StaleNodeAttemptError()
+            if attempt.placement is not None:
+                raise InvalidOrchestratorArgumentError("placement")
+            if cloud is not None:
+                # The audit row first: the attempt's columns are set together
+                # afterwards (a flush in between would write a cloud placement
+                # without its audit id, which the database refuses).
+                task = (
+                    await session.execute(
+                        select(TaskRow.project_id, TaskRow.created_by).where(
+                            TaskRow.id == locked.dag.task_id
+                        )
+                    )
+                ).one()
+                audit_id = uuid.uuid4()
+                await record_cloud_send(
+                    session,
+                    cloud_send_event(
+                        cloud,
+                        event_id=audit_id,
+                        task_id=locked.dag.task_id,
+                        project_id=task.project_id,
+                        delegator_id=task.created_by,
+                    ),
+                )
+                attempt.content_fingerprint = cloud.content_fingerprint
+                attempt.content_bytes = cloud.content_bytes
+                attempt.placement_audit_id = audit_id
+            attempt.placement = placement
+            attempt.placement_agent = agent
+            attempt.placement_model = model
+            attempt.placed_at = func.now()
+            await session.flush()
+            await session.refresh(attempt)
+            return _attempt_record(attempt)
 
     async def fail_node(
         self,
