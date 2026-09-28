@@ -2,10 +2,10 @@
 
 This package is the PostgreSQL schema, plus ``shared/`` (the administration of
 Shared Memory, PAW-046), ``journal/`` (the Immediate Journal and the background
-consolidation, PAW-041) and ``retrieval/`` (Hybrid Retrieval, PAW-043: permission
-first, keyword + vector, rerank, dedup and conflicts). There are no other
-repositories or services here: conflict handling (PAW-042) and Markdown projection
-(PAW-045) come later and build on these tables. See ``models.py`` for the layout and
+consolidation, PAW-041), ``retrieval/`` (Hybrid Retrieval, PAW-043: permission
+first, keyword + vector, rerank, dedup and conflicts) and ``versioning/`` (manual
+versions, relations and the freshness jobs, PAW-042). Markdown projection (PAW-045)
+comes later and builds on these tables. See ``models.py`` for the layout and
 ``acl.py`` for how permissions are filtered in SQL; ``fulltext.py`` is the
 full-text document of the keyword search (its index is revision 0043).
 

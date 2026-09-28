@@ -49,7 +49,7 @@ Python 側の Package（`pgvector-python`）は使わず、`paw_backend/memory/v
 apps/backend/
 ├─ pyproject.toml          # 依存（完全一致で固定）と Ruff 設定
 ├─ alembic.ini             # Alembic 設定（DB URL は持たない）
-├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0022 は Password / Session / Login Throttle / 認証 Policy、0023 は Passkey / Passkey の Challenge / Session の Gate、0026 は Project、0027 は Repository 登録・Remote・Checkout、0030 は Shared Connection・Quota・Usage、0031 は Tool Approval、0033 は Queue / Budget / Loop、0034 は DAG Agent Orchestrator（Plan・DAG・Node の試行）、0040 は Memory Schema、0041 は Memory Journal / Consolidation Queue、0043 は `memory_versions` の全文検索の Index、0046 は Shared Memory Candidate、0050 は Research Scratch、0052 は Evidence / Claim Provenance、0071 は Memory の Status / Stale 状態の変更履歴、0083 は `tasks (project_id, state)` の Index、0087 は外部送信の Audit の `audit_events.details`、0108 は他の Account の Passkey の Reset（`admin_reset`）と 1 回限りの Password 再設定 Token（`password_reset`）とその発行の関数、0124 は招待・端末の Pairing・User の状態の履歴）
+├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0022 は Password / Session / Login Throttle / 認証 Policy、0023 は Passkey / Passkey の Challenge / Session の Gate、0026 は Project、0027 は Repository 登録・Remote・Checkout、0030 は Shared Connection・Quota・Usage、0031 は Tool Approval、0033 は Queue / Budget / Loop、0034 は DAG Agent Orchestrator（Plan・DAG・Node の試行）、0040 は Memory Schema、0041 は Memory Journal / Consolidation Queue、0042 は Memory の鮮度の Job の Index、0043 は `memory_versions` の全文検索の Index、0046 は Shared Memory Candidate、0050 は Research Scratch、0052 は Evidence / Claim Provenance、0071 は Memory の Status / Stale 状態の変更履歴、0083 は `tasks (project_id, state)` の Index、0087 は外部送信の Audit の `audit_events.details`、0108 は他の Account の Passkey の Reset（`admin_reset`）と 1 回限りの Password 再設定 Token（`password_reset`）とその発行の関数、0124 は招待・端末の Pairing・User の状態の履歴）
 ├─ paw_backend/
 │  ├─ app.py               # create_app(settings)
 │  ├─ config.py            # PAW_ 環境変数から読む Settings
@@ -71,7 +71,8 @@ apps/backend/
 │  ├─ memory/              # Memory / Conversation の Model、ACL 条件、vector 型、Pin / Importance / Status / Stale 変更の Actor（PAW-040、#90）、全文検索の式 `fulltext.py`（PAW-043）
 │  │  ├─ journal/          # Immediate Journal と Background Consolidation: Journal、Queue、Consolidator、Worker の契約（PAW-041）
 │  │  ├─ shared/           # Shared Memory の管理: Service、Candidate、Rule 関数、Policy の優先（PAW-046）
-│  │  └─ retrieval/        # Hybrid Retrieval: 権限の解決、SQL Prefilter、Keyword + Vector、Rerank、重複・矛盾（PAW-043）
+│  │  ├─ retrieval/        # Hybrid Retrieval: 権限の解決、SQL Prefilter、Keyword + Vector、Rerank、重複・矛盾（PAW-043）
+│  │  └─ versioning/       # Memory の Relation・手動編集の Version（Optimistic Lock）・Revalidate、鮮度の Job（Stale Candidate、期限、Session 終了）（PAW-042）
 │  ├─ projects/            # Project、Membership（招待制）、Lifecycle（PAW-026）、管理者向けの全 Project 一覧（Issue #84）。`task_gate.py` は Task Lane に渡す Project の状態 Gate（Issue #83）、`task_stop.py` は Delete 開始時の Task 停止
 │  ├─ connections/         # Shared Codex / Claude Connection: Adapter の Interface、Secret（Handle）、User 別 Quota、利用量の帰属（PAW-030）
 │  ├─ repositories/        # Repository の登録、Remote、User ごとの Checkout、Path の安全性、git の安全な実行（PAW-027）
@@ -3441,6 +3442,76 @@ Rerank（Reranker Protocol）→ 構造化 Score（confirmed・鮮度・importan
 乱数で作った世界（User・Project の全状態・Membership・Repository の Override・Group・全 Scope と Status・鮮度・Relation。`random.Random(seed)`）で、Caller ごとに (1) 独立に書いた Oracle が読めるとする集合に、Hit・Conflict Group・`duplicates` が収まること、(2) 読めない Memory を無効にした DB の結果と**全 Field が等しい**こと、(3) Reranker が読めない Memory の本文を見ないことを確かめます。
 `benchmarks/retrieval_metrics.py` の Permission Leakage（Top-K のうち許可されていない ID の数）と同じ考えを、Backend の Test として実装しています（Backend は `benchmarks` を import しません）。
 実装の SQL を変えて Test が失敗することも確認しました（Vector / Keyword の権限条件を外す、Relation の片端・相手の取得の条件を外す、`scope IN` を外す、招待・Pending deletion を含める、Status・期限・`session_only` の条件を外す、Resolver の判定を外す、など）。
+
+## Memory Versioning / Freshness
+
+[PAW-042](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/36)（Revision `0042`、`paw_backend/memory/versioning/`）で実装しました。
+要件は [REQUIREMENTS.md](../../REQUIREMENTS.md) の「Memory Conflict / Versioning / Retrieval」「Memory Freshness / Revalidate Policy」「Manual Memory Editing / Concurrency」と
+[Memory Architecture](../../docs/MEMORY_ARCHITECTURE.md) の 10・11・15・17 節です。要件が決めていない選択（Relation ごとの意味、誰がどの Scope を変えられるか、手動で書ける鮮度、Stale Candidate・期限・Session 終了の処理）は
+[Decision 0034](../../docs/decisions/0034-memory-versioning-freshness.md)（**Approved、2026-09-28。Human が全点を推奨どおりに承認**）の推奨どおりに実装しました。
+**HTTP の Endpoint も、Job を呼ぶ Scheduler / Event の配線もまだありません**（`end_task` を `TaskService` の Transition Listener に繋ぐのも後続です）（Memory UI の層が `MemoryVersioningService` を、定期 Job と Event の Handler が `FreshnessMaintenance` を呼びます）。
+
+### Version（`MemoryVersioningService`）
+
+どの変更も**新しい Version**で、古い Version は履歴に残ります（物理的な上書き・削除はしません）。現在の Version は `version_number` が最大のものです。
+
+| 操作 | 現在の Version `n` | 新しい Version | Relation（新 → 旧） |
+| --- | --- | --- | --- |
+| `create_memory` | — | `1`、`active`、`confirmed`、Actor は本人 | — |
+| `edit_memory` | `active` → `superseded` | `n + 1`、`active`、`confirmed`、変えなかった項目と Pin は引き継ぐ | `supersedes`（理由は変えた項目名）。`n` が `observed` / `inferred` なら `confirmed_from` も |
+| `restore_version` | `active` → `superseded`（`deprecated` はそのまま） | 選んだ過去の Version の内容で `n + 1` | `supersedes`（理由 `restore`） |
+| `deprecate_memory` | `active` → `deprecated` | 書かない | — |
+| `revalidate_memory` | `active` → `superseded` | 同じ内容で `n + 1`、`verified_at` は今、Stale の印なし | `supersedes` と `revalidated_from` |
+| `relate_memories` | — | 書かない | 2 つの Memory の現在の Version の間に `supersedes`（古い方を `superseded`。同じ公開範囲だけ）、`extends`、`conflicts_with`（両方 `active` のまま） |
+
+- **Optimistic Lock。** 変更はどれも `expected_version`（手動の Relation は両方の Memory の分）を取り、現在の番号と違えば `MemoryVersionConflictError`（何も書かない）。Memory ごとの Advisory Lock と現在の Version の `FOR UPDATE` で、この Service どうしは直列になります。Lock を取らない Journal の Consolidator とは、`UPDATE ... WHERE status = 'active'` の行数と `(memory_id, version_number)` の Unique で、後から来た方が失敗します（Lost Update にならない）。Consolidator が Version `n` を Lock したまま `n + 1` を Commit した場合は、`FOR UPDATE` の後に最大の番号を新しい Statement で読み直し、新しい Version を Lock し直すので、`NOT_ACTIVE` ではなく現在の番号を示す `MemoryVersionConflictError` になります（`tests/test_memory_versioning_races.py`）。
+- **履歴。** Status の変更は Database の Trigger が `memory_metadata_changes` に本人を Actor として記録します（Revision `0071`。`metadata_change_actor` を同じ Transaction で先に実行）。`history` は全 Version を古い順に返します（History Graph の Node）。
+- **Retrieval は `active` だけ。** 編集・復元・廃止・Relation の後の Retrieval（PAW-043）は、新しい `active` の Version だけを返します（`test_memory_versioning_service.py` が Retrieval で確かめます）。
+- **Scope は狭めるだけ。** `edit_memory(..., MemoryChanges(scope=MemoryScope.USER))` は `project` の Memory を編集者本人の `user` の Memory にします（REQUIREMENTS.md「Scope変更」: 即反映）。`user` の `n + 1` を書くのと `project` の `n` を `superseded` にするのは同じ Transaction です。要る権限は `project.memory.use`（Contributor 以上）と自分の `memory.use`（Decision 0034 の 3 と 12。12 は案 A で承認）。以後メンバーには履歴も Not Found で、`project` の Version からの復元は `SCOPE_MISMATCH` です。
+- **変えられないもの。** Scope を広げること（確認の Flow、PAW-044。`InvalidMemoryInputError` の `scope` / `not_allowed`）。`session_only` と `repo_commit`（Repo Memory だけ）の鮮度は手動で書けません。`expiring` は今より後、`revalidate` の間隔は 1 時間〜10 年、Trigger は閉じた語彙（`related_setting_changed`、`member_changed`、`model_changed`、`external_service_changed`、`phase_changed`）。
+- **分類の意味。** `rules.plan_relation` は LLM の分類（`same` / `extends` / `supersedes` / `conflicts` / `unrelated`）を、書くか・どの Relation か・古い方を退役させるか・人の確認が要るかに対応させます。退役させるのは `supersedes` だけで、`conflicts` は人の確認を要します。
+
+### 誰が変えられるか
+
+呼べるのは人間の `Principal` だけです（Agent と `system` は Journal 経由で候補を書く）。Authorizer はどの判断も Audit に記録します。
+
+| Scope | Capability | 備考 |
+| --- | --- | --- |
+| `user` | `memory.use`（Owner 本人） | Owner / Admin でも他人の Private Memory は変えられない |
+| `project` | `project.memory.use`（Contributor 以上）。履歴の閲覧は `project.read` | Role と Project の状態は Database から読む（呼び出し側の Role は信じない）。Archived の Project は拒否。書き込みは先に `projects` の行を `FOR SHARE` で Lock してから状態と Role を読むので、`ProjectService` の Archive・メンバーの削除・Role の変更（その行を `FOR UPDATE` で Lock する）と直列になる（`tests/test_memory_versioning_races.py`） |
+| `shared` | — | `MemoryScopeNotSupportedError`（`SharedMemoryService` が扱う） |
+| `repo`、`project_group` | — | まだ扱わない（Decision 0034 の 3）。Not Found |
+
+他人の Memory・メンバーでない Project の Memory への拒否は、存在しない ID と同じ `MemoryNotFoundError` です（存在を教えない）。エラーの文言は閉じた語彙だけで、本文・ID・Driver の文言を含みません。Database のエラーはそのまま外に出しません（SQLAlchemy の文言は Bind Parameter を、PostgreSQL の `DETAIL` は行を含みうる）。Lock の Timeout は `MemoryBusyError`、他の Writer との競合は `MemoryVersionConflictError` / `MemoryStateError`（`already_related`）、それ以外は `MemoryDatabaseError`（`sqlstate` だけを持つ）にし、`__cause__` / `__context__` から元のエラーを外します。鮮度の Job も同じです（`tests/test_memory_versioning_errors.py`）。
+
+**ACL は SQL で掛けます**（`memory/acl.py` の不変条件）。Version の内容（題・本文・属性など）を読む Query はどれも、Authorizer が許した公開範囲から作った `readable_memory_versions` と `scope IN` を WHERE に含みます。読めない Version（広げる前の Private な Version など）は Backend に届かず、後から捨てるのではありません。例外は 2 つだけで、どちらも ACL の入力しか返しません: 認可の前に読む**公開範囲の列**（`scope` と 4 つの Scope ID、現在の Version の ID と番号。ACL はこの列から決まり、拒否の Audit と Not Found のために要る）と、手動の `supersedes` / `extends` の**循環検査**（Graph 全体を辿り、真偽を 1 つ返す）。鮮度の Job は `system` の Actor で UPDATE して件数を返すだけで、内容を読みません。`test_memory_versioning_service.py` は、実行された SELECT を取り出して再実行し、返った値に Private な題・本文がないことを確かめます。
+
+### 鮮度の Job（`FreshnessMaintenance`）
+
+Backend 内部の Job です（認可はなく、変更は `system` を Actor として記録されます）。1 回の呼び出しで最大 `batch`（既定 500）件を、ロックした CTE（`FOR UPDATE SKIP LOCKED`）で選んで変え、変えた件数を返します。0 になるまで繰り返します。同じ Version に 2 回印を付けません。
+
+| Method | 対象 | 何をするか |
+| --- | --- | --- |
+| `mark_revalidation_due` | `revalidate` で `verified_at + revalidate_after` を過ぎた（UTC） | `stale_since` を付ける（`active` のまま。Retrieval は Stale の印つき・低い Score で返す） |
+| `mark_triggered(trigger, target)` | その Trigger を待つ `revalidate`。対象は User / Project / Repo / Workspace 全体 | 同上 |
+| `mark_repo_head(repo_id, commit_sha, branch=)` | その Repository の `repo_commit` で commit が Head と違う（別の Branch の Memory は除く） | 同上 |
+| `expire_due` | `expiring` で `expires_at` を過ぎた | `deprecated` |
+| `end_session(conversation_id)` | その Conversation を Source に持つ `session_only` | `deprecated`（消さない） |
+| `end_task(task_id)` | その Task を Source に持つ `session_only`（`source_type = task`、`source_ref = str(task_id)`） | `deprecated`（消さない） |
+
+Stale Candidate への答えは、まだ正しければ `revalidate_memory`、変わったなら `edit_memory`、もう正しくなければ `deprecate_memory` です。
+
+### Database と権限
+
+Migration `0042` の `down_revision` は `0124` です（鎖は `0001 → 0025 → 0032 → 0040 → 0021 → 0033 → 0031 → 0050 → 0046 → 0052 → 0026 → 0087 → 0022 → 0083 → 0043 → 0030 → 0027 → 0071 → 0086 → 0088 → 0023 → 0041 → 0034 → 0108 → 0124 → 0042`）。Revision ID は Issue 番号で、鎖の順序ではありません。統合時に Orchestrator が並びを確認します。
+Index を 1 つ足すだけです: `ix_memory_versions_freshness_due`（`memory_versions (freshness_policy) WHERE status = 'active' AND freshness_policy <> 'permanent'`）。Job が履歴全体を読まないためで、Table・列・制約・Trigger・権限は変えません。
+Service と Job は、Revision `0026` / `0040` / `0071` が与えた権限（`memories` / `memory_versions` / `memory_relations` の INSERT、`memory_versions` の `status` と `stale_since` の UPDATE、Trigger の `memory_metadata_changes` の INSERT、`projects` / `project_members` の SELECT、`projects` の行の `FOR SHARE`（Revision `0026` の `projects` の列の UPDATE の権限で足りる））だけを使います。
+
+### Test
+
+`apps/backend/tests/test_memory_versioning_*.py`、`test_memory_freshness*.py`、`versioning_support.py` です。`test_memory_versioning_rules.py` は DB を使いません。
+それ以外は実 PostgreSQL（`PAW_TEST_DATABASE_URL`）を使い、未設定なら Skip します。時刻は注入した Clock です。
+`test_memory_versioning_grants.py` は Service と Job の Test を非 Superuser の Application の Role で実行し、その Role が Version の本文や `verified_at` を書き換えられず、履歴を消せず、Index を落とせないことを確かめます。
 
 ## DAG Agent Orchestrator
 
