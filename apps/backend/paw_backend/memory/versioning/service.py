@@ -46,7 +46,14 @@ Who may change what (Decision 0034)
 -----------------------------------
 Only a human :class:`~paw_backend.authz.Principal` calls this service: a manual
 edit is a person's act, and the version it writes is ``confirmed``. (Agents and the
-background worker write candidates through the Immediate Journal, PAW-041.)
+background worker write candidates through the Immediate Journal, PAW-041.) A
+``Principal`` whose system role is ``SystemRole.SYSTEM`` (the backend's own
+identity) is refused by every method, ``history`` included, with
+:class:`MemoryPermissionError` (``capability_not_granted``) right after the type
+check of the actor: before the arguments, the Authorizer and the database, and so
+without an audit event, as ``ProjectService`` and ``RepositoryService`` refuse it.
+The project role below is read from the database by the user id alone, so without
+this check the system identity carrying an active Contributor's id would pass.
 
 * ``user`` scope: capability ``memory.use`` on a resource owned by the memory's
   owner. Only the owner passes.
@@ -70,7 +77,8 @@ audience differs from the current one only to a reader of that audience too.
 
 Order of every call
 -------------------
-1. Arguments are validated (:class:`InvalidMemoryInputError`).
+1. The actor is checked (a ``Principal`` of a person, see above), then the
+   arguments are validated (:class:`InvalidMemoryInputError`).
 2. A transaction starts with ``SET LOCAL lock_timeout``, takes a transaction-level
    advisory lock per memory (``memory_lock_key``; two memories in a fixed order;
    a ``supersedes`` / ``extends`` relation also takes ``RELATION_GRAPH_LOCK_KEY``
@@ -135,6 +143,7 @@ from paw_backend.authz import (
     ProjectState,
     Reason,
     Resource,
+    SystemRole,
 )
 from paw_backend.db import Database
 from paw_backend.memory.acl import Principal as AclPrincipal
@@ -199,6 +208,9 @@ _MEMBERS = ProjectMemberRow.__table__
 _LOCK_SQL = text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))")
 # The denials that mean "not yours": reported as "not found" (see the module text).
 _HIDDEN_DENIALS = frozenset({Reason.NOT_RESOURCE_OWNER, Reason.NOT_PROJECT_MEMBER})
+# The system roles of a person. ``SystemRole.SYSTEM`` (the backend's own identity)
+# is refused by every method (see "Who may change what").
+_HUMAN_ROLES = frozenset({SystemRole.OWNER, SystemRole.ADMIN, SystemRole.USER})
 # The unique constraints another writer's version can run into, by the names
 # PostgreSQL reports: the naming convention ``uq_%(table_name)s_%(column_0_name)s``
 # names a composite unique constraint after its first column only
@@ -438,6 +450,12 @@ class MemoryVersioningService:
             raise reject("actor", InputProblem.REQUIRED)
         if not isinstance(actor, Principal):
             raise reject("actor", InputProblem.WRONG_TYPE)
+        if actor.system_role not in _HUMAN_ROLES:
+            # Before the Authorizer: a project role is read from the database by
+            # the user id alone, so the system identity with a Contributor's id
+            # would otherwise be allowed to write that person's ``confirmed``
+            # change (Decision 0034 point 4; Codex P2 on #122).
+            raise MemoryPermissionError(Reason.CAPABILITY_NOT_GRANTED.value)
         return actor
 
     @asynccontextmanager
