@@ -28,6 +28,12 @@ old one stays as history.
 * ``revalidate_memory``: the stale-candidate answer "still true". Version
   ``n + 1`` repeats the content with ``verified_at`` = now and no stale mark, with
   ``supersedes`` and ``revalidated_from`` relations to ``n``.
+* Sources (Decision 0045): every version written from an earlier one by an
+  edit, a restore or a revalidation carries a copy of that earlier version's
+  ``memory_sources`` (for a restore: the restored version's) and a
+  ``user_confirmation`` source of the person (``source_ref =
+  "memory_confirmed_by:<user id>"``), so that deleting a conversation or a Task
+  finds every version whose content came from it (``derivation.py``).
 * ``relate_memories``: a relation between the current versions of two memories.
   ``supersedes`` retires the older one (only between memories with the same
   audience); ``extends`` and ``conflicts_with`` leave both ``active``.
@@ -130,7 +136,17 @@ from typing import Any
 from uuid import UUID
 
 import psycopg.errors
-from sqlalchemy import ColumnElement, and_, func, insert, select, text, update
+from sqlalchemy import (
+    ColumnElement,
+    and_,
+    exists,
+    func,
+    insert,
+    literal,
+    select,
+    text,
+    update,
+)
 from sqlalchemy.exc import DBAPIError, IntegrityError, StatementError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -156,9 +172,11 @@ from paw_backend.memory.models import (
     Memory,
     MemoryRelation,
     MemoryScope,
+    MemorySource,
     MemoryStatus,
     MemoryVersion,
     RelationType,
+    SourceType,
 )
 from paw_backend.memory.versioning import limits, rules
 from paw_backend.memory.versioning.errors import (
@@ -202,6 +220,7 @@ RESOURCE_MEMORY = "memory"
 _MEMORIES = Memory.__table__
 _VERSIONS = MemoryVersion.__table__
 _RELATIONS = MemoryRelation.__table__
+_SOURCES = MemorySource.__table__
 _PROJECTS = ProjectRow.__table__
 _MEMBERS = ProjectMemberRow.__table__
 
@@ -245,6 +264,28 @@ RELATION_GRAPH_LOCK_KEY = "paw.memory-relation-graph"
 def memory_lock_key(memory_id: UUID) -> str:
     """The advisory-lock key that serialises manual changes of one memory."""
     return f"paw.memory.{memory_id}"
+
+
+# ``source_ref`` of the ``user_confirmation`` source that a person's new version
+# carries (Decision 0045): ``memory_confirmed_by:<user id>``.
+CONFIRMATION_SOURCE_PREFIX = "memory_confirmed_by:"
+
+
+def confirmation_source_ref(user_id: UUID) -> str:
+    """The ``source_ref`` of the ``user_confirmation`` source of ``user_id``."""
+    return f"{CONFIRMATION_SOURCE_PREFIX}{user_id}"
+
+
+# The copied columns of a source (Decision 0045): everything but the row's own id
+# and version. ``created_at`` is kept: it says when the source was recorded.
+_COPIED_SOURCE_COLUMNS = (
+    _SOURCES.c.source_type,
+    _SOURCES.c.conversation_id,
+    _SOURCES.c.message_id,
+    _SOURCES.c.source_ref,
+    _SOURCES.c.source_deleted_at,
+    _SOURCES.c.created_at,
+)
 
 
 def _utc_now() -> datetime:
@@ -835,6 +876,73 @@ class MemoryVersioningService:
         assert inserted is not None
         return _view(inserted)
 
+    @staticmethod
+    async def _carry_sources(
+        session: AsyncSession,
+        origin: MemoryVersionView,
+        new: MemoryVersionView,
+        actor: Principal,
+        now: datetime,
+    ) -> None:
+        """Copy ``origin``'s sources to ``new`` and add the person's confirmation.
+
+        Decision 0045: a version a person writes from an earlier one keeps where
+        the content came from, so that deleting a conversation or a Task finds
+        it (``derivation.MemoryDerivation``), and says that the person confirmed
+        it (a ``user_confirmation`` source, ``confirmation_source_ref``). The
+        confirmation is not repeated when the copied sources hold it already
+        (a chain of edits by the same person).
+
+        A ``conversation`` source whose conversation was deleted names nothing
+        (both ids NULL); the database refuses such a new row, and it could not
+        be found by a conversation anyway, so it is not copied (Decision 0045
+        point 3). The origin keeps it.
+
+        The sources are read inside the database only (``INSERT ... SELECT``):
+        nothing of them reaches the backend. ``origin`` is a version the actor
+        was just allowed to change, or one of the same audience.
+        """
+        copied = select(
+            literal(new.version_id, _SOURCES.c.memory_version_id.type).label(
+                "memory_version_id"
+            ),
+            *_COPIED_SOURCE_COLUMNS,
+        ).where(
+            _SOURCES.c.memory_version_id == origin.version_id,
+            ~(
+                (_SOURCES.c.source_type == SourceType.CONVERSATION.value)
+                & _SOURCES.c.conversation_id.is_(None)
+                & _SOURCES.c.message_id.is_(None)
+            ),
+        )
+        await session.execute(
+            insert(_SOURCES).from_select(
+                ["memory_version_id", *(c.name for c in _COPIED_SOURCE_COLUMNS)],
+                copied,
+            )
+        )
+        reference = confirmation_source_ref(actor.user_id)
+        already = (
+            await session.execute(
+                select(
+                    exists().where(
+                        _SOURCES.c.memory_version_id == new.version_id,
+                        _SOURCES.c.source_type == SourceType.USER_CONFIRMATION.value,
+                        _SOURCES.c.source_ref == reference,
+                    )
+                )
+            )
+        ).scalar_one()
+        if not already:
+            await session.execute(
+                insert(_SOURCES).values(
+                    memory_version_id=new.version_id,
+                    source_type=SourceType.USER_CONFIRMATION.value,
+                    source_ref=reference,
+                    created_at=now,
+                )
+            )
+
     # -- read ------------------------------------------------------------------
 
     async def history(
@@ -1010,6 +1118,7 @@ class MemoryVersioningService:
             new = await self._insert_version(
                 session, current, values=values, actor=actor, now=now
             )
+            await self._carry_sources(session, current, new, actor, now)
             reason = ", ".join(changed)
             await self._relate(
                 session,
@@ -1087,6 +1196,8 @@ class MemoryVersioningService:
             new = await self._insert_version(
                 session, current, values=values, actor=actor, now=now
             )
+            # The content is the source version's, so are its sources (0045 pt 2).
+            await self._carry_sources(session, source, new, actor, now)
             await self._relate(
                 session,
                 new.version_id,
@@ -1147,6 +1258,7 @@ class MemoryVersioningService:
             new = await self._insert_version(
                 session, current, values=values, actor=actor, now=now
             )
+            await self._carry_sources(session, current, new, actor, now)
             for kind in (RelationType.SUPERSEDES, RelationType.REVALIDATED_FROM):
                 await self._relate(
                     session,
