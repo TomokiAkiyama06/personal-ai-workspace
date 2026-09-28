@@ -32,6 +32,7 @@ from paw_backend.tasks.queueing import Priority, TaskQueue
 
 from .projects_support import requires_postgres
 from .queueing_support import at
+from .task_support import FIRST_RUN, make_completable
 from .test_project_state_gate import DEADLINE, NOT_ACTIVE, GateTestCase, PausingGate
 
 WORKER = "worker-1"
@@ -244,6 +245,9 @@ class StartGateTest(ClaimTestCase):
         # work in every project state, so an Archive stops nothing that already runs.
         project_id = self.project_in(ProjectStatus.ARCHIVED)
         task_id = await self.seed_task(TaskState.RUNNING, project_id=project_id)
+        await make_completable(
+            self.seed_tasks, task_id, self.seed_repositories[task_id], FIRST_RUN
+        )
 
         for command, wait in (
             (TaskCommand.PAUSE, None),

@@ -112,7 +112,9 @@ class TransitionMatrixTest(unittest.TestCase):
                         result = plan(state, command)
                         self.assertEqual(result.target, target)
                         self.assertEqual(result.from_state, state)
-        self.assertEqual(checked, 8 * 13)
+        # 14 commands: the 13 of PAW-032 and ``change_working_set`` (issue #85),
+        # which, like ``create``, no state accepts as a command.
+        self.assertEqual(checked, 8 * 14)
 
     def test_allowed_commands_lists_exactly_the_accepted_commands(self):
         for state in TaskState:

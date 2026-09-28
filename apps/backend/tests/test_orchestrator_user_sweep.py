@@ -22,13 +22,13 @@ from paw_backend.orchestrator.user_sweep import (
     UserTaskStopper,
     build_user_stop_loop,
 )
-from paw_backend.tasks import Actor, TaskService, TaskState
+from paw_backend.tasks import Actor, TaskCommand, TaskService, TaskState
 from paw_backend.tasks.queueing import TaskQueue
 
 from .auth_support import TEST_DATABASE_URL, requires_postgres
 from .gate_support import ALWAYS_ACTIVE
 from .onboarding_support import OnboardingTestCase
-from .task_support import PATH_TO_STATE
+from .task_support import FIRST_RUN, PATH_TO_STATE, make_completable, single_target
 
 
 class UserSweepTestCase(OnboardingTestCase):
@@ -61,10 +61,19 @@ class UserSweepTestCase(OnboardingTestCase):
     async def seed(
         self, user, state: TaskState = TaskState.QUEUED, *, queue: bool = True
     ) -> uuid.UUID:
+        # A Single-Repo task: one target (Decision 0030; it does not start without).
+        repository_id = uuid.uuid4()
         event = await self.seed_tasks.create_task(
-            project_id=uuid.uuid4(), created_by=user.id, title="Agent work"
+            project_id=uuid.uuid4(),
+            created_by=user.id,
+            title="Agent work",
+            repositories=single_target(repository_id),
         )
         for command, wait_reason in PATH_TO_STATE[state]:
+            if command is TaskCommand.COMPLETE:
+                await make_completable(
+                    self.seed_tasks, event.task_id, repository_id, FIRST_RUN
+                )
             await self.seed_tasks.execute(
                 event.task_id, command, actor=Actor.system(), wait_reason=wait_reason
             )

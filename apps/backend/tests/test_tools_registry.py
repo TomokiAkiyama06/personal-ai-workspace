@@ -141,9 +141,11 @@ class ConsistencyTest(unittest.TestCase):
         for label, case in cases.items():
             with self.subTest(label=label):
                 self.refused(caps=frozenset(case["caps"]), args=case["args"])
-        # ... one required target is enough, optional ones may come with it
+        # ... one required target is enough, optional ones may come with it (a
+        # write with a path is a repository write, Decision 0030)
         tool = spec(
             caps=frozenset({C.WRITE}),
+            authz=Capability.PROJECT_REPO_WRITE,
             args={"p": ArgumentSpec(A.PATH), "q": optional},
         )
         self.assertIn(C.WRITE, tool.capabilities)
@@ -157,7 +159,12 @@ class ConsistencyTest(unittest.TestCase):
                 )
         for kind in (A.PATH, A.PROJECT):
             with self.subTest(kind=kind):
-                tool = spec(caps=frozenset({C.WRITE}), args={"t": ArgumentSpec(kind)})
+                tool = spec(
+                    caps=frozenset({C.WRITE}),
+                    # A write with a path is a repository write (Decision 0030).
+                    authz=Capability.PROJECT_REPO_WRITE if kind is A.PATH else None,
+                    args={"t": ArgumentSpec(kind)},
+                )
                 self.assertIn(C.WRITE, tool.capabilities)
 
     def test_a_host_wide_write_needs_no_target_because_it_is_never_automatic(self):

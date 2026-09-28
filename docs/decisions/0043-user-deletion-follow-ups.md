@@ -46,7 +46,7 @@ Decision 0033（PR #123）は削除を `pending_deletion` にするところま�
   2. 消す（判断点 5）: Password の Hash、Passkey、Passkey の Challenge、Session、Pairing、招待、Setup / Reset の Token、本人の Conversation とその Message・Session State・Journal（Private Chat。これを出典にした Memory の Source には `source_deleted_at` を付け、参照は外部キーの `SET NULL` で外れる）、`user` Scope の Memory の Version と Version が 1 つも残らない Memory、Consolidation の Key、本人が提案して**承認されなかった** Shared Memory の候補（`shared_memory_candidates` の `pending`・`rejected`。候補は出典の Memory の Title・本文の複製を持つ。`pending` を残すと消去の後に Admin が承認して全員に見える Shared Memory になり、`rejected` を残すと本文がずっと残る）（Private Memory。後から Project へ広げた Memory は広げた Version が残る）、`connection_quotas`（個人設定）、Project の Membership（判断点 9）。
   3. 検証: 同じ Transaction で、それらの Table（と `repository_checkouts`、`user` Scope の Memory、本人の `pending`・`rejected` の候補）にその User の行が 0 行であることを数え直す。違えば全体を戻す（`verification_failed`）。
   4. `users.status` を `deleted` にし、`user_status_changes` に 1 行（`changed_by` は NULL = System）、`auth.user.erase` / `erased`（Actor なし）を書く。状態・履歴・Audit は消去と一緒に Commit するか、何も残らない。
-- **User を指す列の全体と、消去での扱い**（判断点 5）。Schema の User を指す列（`user_id`・`owner_user_id`・`created_by`・`requester_user_id`・`proposer_user_id`・`actor_user_id`・`actor_id`・`approver_id`・`decided_by`・`changed_by`・`invited_by`・`revoked_by`・`updated_by`）を持つ Table をすべて挙げる。「ID だけ残す」は、残る行が User の ID を指すが本人の書いた本文を持たないもの。「本文ごと残す」は、本人が書いた・本人に由来する本文が消去の後も残るもの。
+- **User を指す列の全体と、消去での扱い**（判断点 5）。Schema の User を指す列（`user_id`・`owner_user_id`・`created_by`・`requester_user_id`・`proposer_user_id`・`actor_user_id`・`actor_id`・`approver_id`・`decided_by`・`changed_by`・`invited_by`・`revoked_by`・`updated_by`・`added_by`）を持つ Table をすべて挙げる。「ID だけ残す」は、残る行が User の ID を指すが本人の書いた本文を持たないもの。「本文ごと残す」は、本人が書いた・本人に由来する本文が消去の後も残るもの。
 
   | Table（列） | 扱い |
   |---|---|
@@ -59,7 +59,8 @@ Decision 0033（PR #123）は削除を `pending_deletion` にするところま�
   | `users`（ID・Login name・Role・時刻）、`user_status_changes`（`user_id`・`changed_by`） | ID だけ残す（最小限の削除記録。Login name は 0033 の判断点 10 のとおり予約のまま） |
   | `audit_events`（`actor_id`・`resource_id`） | ID だけ残す（表示は「Deleted User」） |
   | `auth_policy_changes`・`auth_policy`（`changed_by`・`updated_by`）、`user_invitations`（他人の招待の `invited_by`）、`shared_memory_candidates`（他人の候補の `decided_by`）、`tool_approvals`（`approver_id`・`revoked_by`）、`projects`・`repositories`（`created_by`） | ID だけ残す（本人が行った決定・操作の記録） |
-  | `connection_usage`（`user_id`） | ID だけ残す（使用量の記録。種類・Model・目的・状態だけで本文はない） |
+  | `task_repositories`（`added_by`。Working Set に Repo を加えた User。Revision 0085） | ID だけ残す（Project の Task の記録。Repo の ID・役割・Commit だけで本文はない） |
+| `connection_usage`（`user_id`） | ID だけ残す（使用量の記録。種類・Model・目的・状態だけで本文はない） |
   | `shared_memory_candidates`（`proposer_user_id`、`state = 'approved'`） | **本文ごと残す**（決定の記録。その本文は承認で Shared Memory になっている） |
   | `memory_versions`（`scope` が `user` 以外の `actor_user_id`）と `memory_metadata_changes`（`user` 以外の Version の `actor_user_id`） | **本文ごと残す**。特に、**本人が Private で作り後から Project へ広げた Memory は、広げた Version が Private の Version と同じ本文を持つ**（Private の Version を消しても、その本文は Project の Version に残る） |
   | `tasks`（`created_by`。`title`・`input`）、`task_events`（`actor_id`。`reason`・`detail`） | **本文ごと残す**（Project の記録。Task の入力は本人が書いた本文） |
