@@ -1315,6 +1315,11 @@ class ComputeScheduler:
             )
             async with self._control_lock:
                 await self._sample()
+            if self._clock.monotonic() >= deadline:
+                # The poll ended after the caller's limit: VRAM freed too late
+                # does not start the drain (nothing is unloaded).
+                if self._fresh() and self._external_room(request):
+                    raise ExclusiveUnavailableError(ExclusiveFailure.NOT_FREED)
         self._exclusive_waits_for_vram = False
 
     async def _drain(self, deadline: float) -> None:

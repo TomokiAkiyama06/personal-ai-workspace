@@ -538,6 +538,24 @@ class ExclusiveFreeVramTest(unittest.IsolatedAsyncioTestCase):
         )
         await lease.release()
 
+    async def test_vram_freed_after_the_deadline_does_not_start_the_drain(self):
+        self.probe.external = 20 * GIB
+        job = asyncio.create_task(
+            self.scheduler.acquire(
+                ComputeRequest(EX, vram_bytes=80 * GIB), wait_seconds=60
+            )
+        )
+        await settle()
+        # The other workload ends while the job sleeps, but the poll that sees
+        # it comes after the deadline: the caller's limit has passed.
+        self.probe.external = 0
+        await self.clock.advance(61)
+        with self.assertRaises(ExclusiveUnavailableError) as raised:
+            await job
+        self.assertEqual(raised.exception.failure, ExclusiveFailure.NOT_FREED)
+        self.assertEqual(self.control.actions, [])
+        self.assertEqual(self.scheduler.status().mode, SchedulerMode.NORMAL)
+
     async def test_a_probe_lost_while_waiting_gives_up_as_unavailable(self):
         self.probe.external = 20 * GIB
         job = asyncio.create_task(
