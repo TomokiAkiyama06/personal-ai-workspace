@@ -53,9 +53,11 @@ connection reaper audits.
 
 The loop (:class:`UserTaskStopLoop`) is the project sweep's: a first cycle shortly
 after the start, then every ``interval_seconds`` (less while a user is unfinished;
-a back-off after a failed cycle); one user that raises does not stop the others;
-``stop`` ends it. Several Backend processes may each run one (the commands are
-idempotent; a conflict is left for the next cycle).
+a back-off after a failed cycle); a cycle lists at most ``users_per_cycle`` users
+in id order from where the previous cycle stopped (a cursor, so users beyond the
+bound are reached even while the first ones stay unfinished); one user that raises
+does not stop the others; ``stop`` ends it. Several Backend processes may each run
+one (the commands are idempotent; a conflict is left for the next cycle).
 """
 
 import asyncio
@@ -144,6 +146,7 @@ _STOPPING_USERS = text(
                          JOIN queue_entries q ON q.task_id = t.id
                         WHERE t.created_by = u.id
                           AND q.status IN ({_ACTIVE_ENTRIES})))
+       AND (CAST(:after AS uuid) IS NULL OR u.id > CAST(:after AS uuid))
      ORDER BY u.id
      LIMIT :limit
     """
@@ -251,12 +254,20 @@ class UserTaskStopper:
         self._batch_size = check_int("batch_size", batch_size, minimum=1, maximum=500)
 
     async def stopping_user_ids(
-        self, limit: int = DEFAULT_PROJECTS_PER_CYCLE
+        self,
+        limit: int = DEFAULT_PROJECTS_PER_CYCLE,
+        *,
+        after: uuid.UUID | None = None,
     ) -> tuple[uuid.UUID, ...]:
-        """Users being deleted who still have something active, in id order."""
+        """Users being deleted who still have something active, in id order,
+        with ids greater than ``after`` (the loop's cursor)."""
         check_int("limit", limit, minimum=1, maximum=MAX_PROJECTS_PER_CYCLE)
+        if after is not None:
+            check_uuid("after", after)
         async with self._database.session() as session, session.begin():
-            rows = await session.execute(_STOPPING_USERS, {"limit": limit})
+            rows = await session.execute(
+                _STOPPING_USERS, {"limit": limit, "after": after}
+            )
             return tuple(rows.scalars())
 
     async def stop_user_tasks(self, user_id: uuid.UUID) -> UserTaskStopResult:
@@ -440,6 +451,9 @@ class UserTaskStopLoop:
         require_async_method(clock, "sleep", 1)
         self._stopper = stopper
         self._clock = clock
+        # Where the previous cycle's listing stopped: users beyond the bound are
+        # reached even while the first ones stay unfinished (the project sweep's).
+        self._cursor: uuid.UUID | None = None
         self._stopping = asyncio.Event()
 
     def stop(self) -> None:
@@ -448,7 +462,8 @@ class UserTaskStopLoop:
 
     async def run_cycle(self) -> UserSweepReport:
         """One cycle: every listed user gets up to ``rounds_per_user`` calls."""
-        ids = await self._stopper.stopping_user_ids(self._per_cycle)
+        ids = await self._stopper.stopping_user_ids(self._per_cycle, after=self._cursor)
+        self._cursor = ids[-1] if len(ids) == self._per_cycle else None
         stopped = entries = unfinished = failed = 0
         for user_id in ids:
             if self._stopping.is_set():

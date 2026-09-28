@@ -158,6 +158,18 @@ class StopTest(UserSweepTestCase):
         )
         self.assertEqual(await stopper.stopping_user_ids(), ())
 
+    async def test_the_listing_pages_after_a_cursor(self):
+        await self.seed(self.bob, TaskState.RUNNING)
+        await self.seed(self.carol, TaskState.RUNNING)
+        await self.delete(self.bob)
+        await self.delete(self.carol)
+        first, second = sorted((self.bob.id, self.carol.id))
+        stopper = self.stopper()
+
+        self.assertEqual(await stopper.stopping_user_ids(1), (first,))
+        self.assertEqual(await stopper.stopping_user_ids(1, after=first), (second,))
+        self.assertEqual(await stopper.stopping_user_ids(1, after=second), ())
+
     async def test_a_second_call_changes_nothing(self):
         await self.seed(self.bob, TaskState.RUNNING)
         await self.delete(self.bob)
@@ -277,10 +289,34 @@ class StopTest(UserSweepTestCase):
         self.assertEqual(report.cancelled_entries, 1)
 
 
+class LoopRotationTest(unittest.IsolatedAsyncioTestCase):
+    async def test_users_beyond_the_bound_are_reached_when_the_first_stay_unfinished(
+        self,
+    ):
+        # Codex Review: without a cursor the same lowest ids came back every cycle.
+        users = sorted(uuid.uuid4() for _ in range(3))
+        visited: list[uuid.UUID] = []
+
+        class NeverFinishes:
+            async def stopping_user_ids(self, limit, *, after=None):
+                return tuple(u for u in users if after is None or u > after)[:limit]
+
+            async def stop_user_tasks(self, user_id):
+                visited.append(user_id)
+                return user_sweep.UserTaskStopResult(user_id, (), 0, False)
+
+        loop = UserTaskStopLoop(NeverFinishes(), users_per_cycle=2, rounds_per_user=1)
+
+        for _ in range(3):
+            await loop.run_cycle()
+
+        self.assertEqual(visited, [users[0], users[1], users[2], users[0], users[1]])
+
+
 class LoopArgumentTest(unittest.TestCase):
     def test_bad_arguments_fail_at_construction(self):
         class Stopper:
-            async def stopping_user_ids(self, limit):
+            async def stopping_user_ids(self, limit, *, after=None):
                 return ()
 
             async def stop_user_tasks(self, user_id):
