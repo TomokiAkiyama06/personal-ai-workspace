@@ -58,6 +58,10 @@ class TaskCommand(StrEnum):
     # Not a transition of an existing task: ``TaskService.create_task`` records
     # it as the first history event. Every state rejects it.
     CREATE = "create"
+    # Not a transition either: ``TaskService.change_working_set`` records a change
+    # of the task's Working Set (issue #85, Decision 0030) with it. The state does
+    # not change; every state rejects it as a command of ``execute``.
+    CHANGE_WORKING_SET = "change_working_set"
 
     # Lifecycle events reported by the orchestrator, a worker or a policy.
     START = "start"
@@ -202,6 +206,99 @@ class TaskRun:
                 raise InvalidCommandArgumentError(
                     f"{name} must be an integer from {minimum} to {_MAX_COUNTER}"
                 )
+
+
+class RepoRole(StrEnum):
+    """The role of a repository in a task's Working Set (``REQUIREMENTS.md``,
+    "Multi-Repo Task / Working Set"; Decision 0030).
+
+    * ``referenced``: investigate, search, read only;
+    * ``working``: may also be edited and tested;
+    * ``target``: may also get a pull request (what the task delivers).
+    """
+
+    REFERENCED = "referenced"
+    WORKING = "working"
+    TARGET = "target"
+
+    @property
+    def strength(self) -> int:
+        """``referenced`` < ``working`` < ``target``: what the role lets a task do."""
+        return _ROLE_STRENGTH[self]
+
+
+_ROLE_STRENGTH = {RepoRole.REFERENCED: 0, RepoRole.WORKING: 1, RepoRole.TARGET: 2}
+
+
+class WorkingSetOperation(StrEnum):
+    """One change of a Working Set (Decision 0030, section 3).
+
+    The resulting role is fixed by the operation, never chosen by an argument: a
+    tool of the Tool Broker does exactly one of these (``ToolSpec``), so that the
+    approval level of the tool can be the level of its operation.
+    """
+
+    # A repository that is not in the Working Set, as ``referenced``.
+    ADD_REFERENCED = "add_referenced"
+    # Add as ``working``, or promote a ``referenced`` one.
+    SET_WORKING = "set_working"
+    # Add as ``target``, or promote a ``referenced`` / ``working`` one.
+    SET_TARGET = "set_target"
+    # ``target`` -> ``working``.
+    DOWNGRADE_TO_WORKING = "downgrade_to_working"
+    # ``working`` / ``target`` -> ``referenced``.
+    DOWNGRADE_TO_REFERENCED = "downgrade_to_referenced"
+    # Out of the Working Set (whatever its role).
+    REMOVE = "remove"
+
+
+# The roles an operation accepts the repository in (``None``: not in the Working
+# Set), and the role it leaves it in (``None``: removed).
+_OPERATION_RULES: dict[
+    WorkingSetOperation, tuple[frozenset[RepoRole | None], RepoRole | None]
+] = {
+    WorkingSetOperation.ADD_REFERENCED: (frozenset({None}), RepoRole.REFERENCED),
+    WorkingSetOperation.SET_WORKING: (
+        frozenset({None, RepoRole.REFERENCED}),
+        RepoRole.WORKING,
+    ),
+    WorkingSetOperation.SET_TARGET: (
+        frozenset({None, RepoRole.REFERENCED, RepoRole.WORKING}),
+        RepoRole.TARGET,
+    ),
+    WorkingSetOperation.DOWNGRADE_TO_WORKING: (
+        frozenset({RepoRole.TARGET}),
+        RepoRole.WORKING,
+    ),
+    WorkingSetOperation.DOWNGRADE_TO_REFERENCED: (
+        frozenset({RepoRole.WORKING, RepoRole.TARGET}),
+        RepoRole.REFERENCED,
+    ),
+    WorkingSetOperation.REMOVE: (
+        frozenset({RepoRole.REFERENCED, RepoRole.WORKING, RepoRole.TARGET}),
+        None,
+    ),
+}
+
+
+def accepts_role(operation: WorkingSetOperation, role: RepoRole | None) -> bool:
+    """Whether ``operation`` applies to a repository now in ``role`` (``None``:
+    not in the Working Set)."""
+    return role in _OPERATION_RULES[operation][0]
+
+
+def role_after(operation: WorkingSetOperation) -> RepoRole | None:
+    """The role ``operation`` leaves the repository in (``None``: removed)."""
+    return _OPERATION_RULES[operation][1]
+
+
+def narrows(operation: WorkingSetOperation) -> bool:
+    """A downgrade or a removal: what the task may do with the repository shrinks."""
+    return operation in (
+        WorkingSetOperation.DOWNGRADE_TO_WORKING,
+        WorkingSetOperation.DOWNGRADE_TO_REFERENCED,
+        WorkingSetOperation.REMOVE,
+    )
 
 
 @dataclass(frozen=True, slots=True)

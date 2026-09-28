@@ -15,12 +15,19 @@ from sqlalchemy import event, text
 from paw_backend.db import Database
 from paw_backend.tasks import (
     Actor,
+    EvaluationResult,
+    PullRequestInfo,
+    PullRequestState,
+    RepoRole,
+    ReviewState,
+    ReviewStatus,
     TaskCommand,
     TaskEvent,
     TaskRun,
     TaskService,
     TaskState,
     WaitReason,
+    WorkingSetEntry,
 )
 
 from .gate_support import ALWAYS_ACTIVE
@@ -56,6 +63,34 @@ def new_database() -> Database:
 # The run of a task that has not been retried or restarted: what a worker started
 # by the first Start event passes to ``begin_step`` / ``add_log`` / ``update_attempt``.
 FIRST_RUN = TaskRun(1, 0)
+
+
+# The starting commit of the repository a test task works on.
+BASELINE = "0" * 40
+# What the target of a task needs before Complete (Decision 0030, section 5): the
+# evaluation passed, the review approved, a pull request open.
+PASSED_REVIEW = ReviewState(ReviewStatus.APPROVED, EvaluationResult.PASSED)
+OPEN_PULL_REQUEST = PullRequestInfo(
+    1, "https://example.test/pr/1", PullRequestState.OPEN
+)
+
+
+def single_target(repository_id: uuid.UUID) -> list[WorkingSetEntry]:
+    """The Working Set of a Single-Repo task: one ``target``."""
+    return [WorkingSetEntry(repository_id, RepoRole.TARGET, BASELINE)]
+
+
+async def make_completable(
+    service: TaskService, task_id: uuid.UUID, repository_id: uuid.UUID, run: TaskRun
+) -> None:
+    """Give the task's target what Complete requires."""
+    await service.update_attempt(
+        task_id,
+        run=run,
+        repository_id=repository_id,
+        review=PASSED_REVIEW,
+        pull_request=OPEN_PULL_REQUEST,
+    )
 
 
 def command_reason(command: TaskCommand) -> str | None:
@@ -113,6 +148,8 @@ class PostgresTaskTestCase(unittest.IsolatedAsyncioTestCase):
         self.database = self.new_database()
         self.service = TaskService(self.database, project_gate=ALWAYS_ACTIVE)
         self.project_id = uuid.uuid4()
+        # The repository of the task's Working Set (a Single-Repo task).
+        self.repository_id = uuid.uuid4()
         self.user_id = uuid.uuid4()
         self.user = Actor.user(self.user_id)
         self.system = Actor.system()
@@ -130,6 +167,7 @@ class PostgresTaskTestCase(unittest.IsolatedAsyncioTestCase):
             "project_id": self.project_id,
             "created_by": self.user_id,
             "title": "Fix the parser",
+            "repositories": single_target(self.repository_id),
         }
         arguments.update(overrides)
         event = await (service or self.service).create_task(**arguments)
@@ -141,6 +179,8 @@ class PostgresTaskTestCase(unittest.IsolatedAsyncioTestCase):
         service = service or self.service
         task_id = await self.create_task(service)
         for command, wait_reason in PATH_TO_STATE[state]:
+            if command is TaskCommand.COMPLETE:
+                await make_completable(service, task_id, self.repository_id, FIRST_RUN)
             await service.execute(
                 task_id, command, actor=self.system, wait_reason=wait_reason
             )

@@ -102,6 +102,8 @@ CONTRIBUTOR_CAPS = VIEWER_CAPS | {
     "project.agent.use",
     "project.pr.create",
     "project.memory.use",
+    # Issue #85 constraint 3: who may run tasks may shape their Working Set.
+    "project.task.working_set.manage",
 }
 MANAGER_CAPS = CONTRIBUTOR_CAPS | {
     "project.members.manage",
@@ -132,6 +134,10 @@ DELEGABLE_CAPS = {
     "project.repo.write",
     "project.pr.create",
     "project.memory.use",
+    # Issue #85 constraint 3: agents change the Working Set through tools; every
+    # change also needs the repository's own permission and, but for adding a
+    # ``referenced`` repository, STRONG_APPROVAL.
+    "project.task.working_set.manage",
 }
 NON_DELEGABLE_CAPS = {
     # Starting agents: not delegable until PAW-032 defines derived (subset)

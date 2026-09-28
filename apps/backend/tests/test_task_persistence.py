@@ -41,6 +41,7 @@ from .task_support import (
     migrate,
     new_database,
     requires_postgres,
+    single_target,
 )
 from .test_migrations import offline_config
 
@@ -53,6 +54,11 @@ TASK_TABLES = (
     "task_tool_invocations",
     "task_logs",
     "task_events",
+    # The Working Set (revision 0085, issue #85).
+    "task_repositories",
+    "task_attempt_repositories",
+    "task_attempt_state_archive",
+    "task_repository_writes",
 )
 
 
@@ -277,7 +283,7 @@ class RestoreTest(PostgresTaskTestCase):
         task_id = await self.create_task(
             service,
             input={"prompt": "Make it faster"},
-            starting_commit="a" * 40,
+            repositories=single_target(self.repository_id),
             agent="codex",
             model="model-x",
         )
@@ -290,6 +296,7 @@ class RestoreTest(PostgresTaskTestCase):
         await service.update_attempt(
             task_id,
             run=FIRST_RUN,
+            repository_id=self.repository_id,
             worktree=WorktreeState("agent/task-1", "/srv/worktrees/task-1", "b" * 40),
             review=ReviewState(ReviewStatus.IN_REVIEW, EvaluationResult.PASSED),
             pull_request=PullRequestInfo(
@@ -320,15 +327,15 @@ class RestoreTest(PostgresTaskTestCase):
             [(LogLevel.INFO, "editing parser.py"), (LogLevel.WARNING, "tests are red")],
         )
         self.assertEqual(
-            snapshot.attempt.worktree,
+            snapshot.attempt.repository(self.repository_id).worktree,
             WorktreeState("agent/task-1", "/srv/worktrees/task-1", "b" * 40),
         )
         self.assertEqual(
-            snapshot.attempt.review,
+            snapshot.attempt.repository(self.repository_id).review,
             ReviewState(ReviewStatus.IN_REVIEW, EvaluationResult.PASSED),
         )
         self.assertEqual(
-            snapshot.attempt.pull_request,
+            snapshot.attempt.repository(self.repository_id).pull_request,
             PullRequestInfo(12, "https://example.test/pr/12", PullRequestState.OPEN),
         )
         self.assertEqual(snapshot.last_event.command, C.WAIT)
@@ -375,7 +382,7 @@ class RestoreTest(PostgresTaskTestCase):
         self.assertNotEqual(first, second)
         self.assertEqual(snapshot.state, S.PAUSED)
         self.assertEqual(snapshot.recent_logs, ())
-        self.assertIsNone(snapshot.attempt.pull_request)
+        self.assertIsNone(snapshot.attempt.repository(self.repository_id).pull_request)
 
 
 @requires_postgres

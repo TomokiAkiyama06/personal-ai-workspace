@@ -10,6 +10,12 @@ human).
 
 Time: the tracker gets a settable clock (its test seam) that the tests move with
 the orchestrator's ``ManualClock``; nothing waits for real time.
+
+A poll's look (the task's state, the budget) reads the database, so it is not over
+when ``ManualClock.advance`` returns. A test that moves the tracker's clock after a
+poll that must find nothing first waits for the orchestrator to start its next poll
+timer (``poll_that_stops_nothing``), which it does only once the look is over; else
+the look still running may already read the moved clock (Issue #136).
 """
 
 import asyncio
@@ -48,6 +54,26 @@ class TrackerClock:
         )
         return self.harness(runtimes={"local": runtime}, budget=tracker, **options)
 
+    async def poll(self, h) -> None:
+        """Fire the poll of the task's state as soon as the orchestrator waits
+        for it."""
+        await until(lambda: h.clock.waiting_for(2.0) >= 1, message="the poll timer")
+        await h.clock.advance(2.0)
+
+    async def poll_that_stops_nothing(self, h, running: asyncio.Task) -> None:
+        """Fire the poll, and wait until its look is over and found nothing to
+        stop: the orchestrator waits for the next poll and the run goes on.
+
+        ``advance`` returns while the look may still be reading the database; the
+        next poll timer starts only after it (``_wait_for``, ``_plan_attempt``).
+        Until then the test must not move the tracker's clock."""
+        await self.poll(h)
+        await until(
+            lambda: h.clock.waiting_for(2.0) >= 1 or running.done(),
+            message="the next poll",
+        )
+        self.assertFalse(running.done(), "a poll that should find nothing stopped")
+
     async def runtime_used(self, h, task_id) -> int:
         usage = await h.budget.usage(task_id)
         return next(u.consumed for u in usage if u.kind.value == "runtime_seconds")
@@ -78,13 +104,10 @@ class RuntimeBudgetTest(TrackerClock, PostgresOrchestratorTestCase):
 
         # Before the limit: the poll finds nothing to stop.
         self.fake.set(STANDARD_RUNTIME - 10)
-        await until(lambda: h.clock.waiting_for(2.0) >= 1, message="the poll timer")
-        await h.clock.advance(2.0)
-        self.assertFalse(running.done())
+        await self.poll_that_stops_nothing(h, running)
         # Past the limit: the next poll stops the run.
         self.fake.set(STANDARD_RUNTIME + 5)
-        await until(lambda: h.clock.waiting_for(2.0) >= 1, message="the next poll")
-        await h.clock.advance(2.0)
+        await self.poll(h)
         report = await asyncio.wait_for(running, 120)
 
         self.assertEqual(report.outcome, Out.WAITING_FOR_USER)
@@ -192,9 +215,7 @@ class RuntimeBudgetTest(TrackerClock, PostgresOrchestratorTestCase):
         running = asyncio.create_task(h.orchestrator.run_once("w1"))
         await until(lambda: len(runtime.assignments) == 1, message="the node")
         self.fake.set(10**7)
-        await until(lambda: h.clock.waiting_for(2.0) >= 1, message="the poll timer")
-        await h.clock.advance(2.0)
-        self.assertFalse(running.done())
+        await self.poll_that_stops_nothing(h, running)
 
         runtime.gates["a"].set()
         report = await asyncio.wait_for(running, 120)
@@ -273,10 +294,6 @@ class PlannerRuntimeBudgetTest(TrackerClock, PostgresOrchestratorTestCase):
         options.setdefault("config", {"node_timeout_seconds": PLANNER_TIMEOUT})
         return super().build(runtime, **options)
 
-    async def poll(self, h) -> None:
-        await until(lambda: h.clock.waiting_for(2.0) >= 1, message="the poll timer")
-        await h.clock.advance(2.0)
-
     def planner_ends(self, planner) -> list:
         return [e for e in planner.timeline if e[0] == "end"]
 
@@ -289,8 +306,7 @@ class PlannerRuntimeBudgetTest(TrackerClock, PostgresOrchestratorTestCase):
 
         # Before the limit the poll finds nothing to stop.
         self.fake.set(STANDARD_RUNTIME - 10)
-        await self.poll(h)
-        self.assertFalse(running.done())
+        await self.poll_that_stops_nothing(h, running)
         self.assertEqual(self.planner_ends(planner), [])  # still planning
         # Past the limit the next poll stops the run, well before the planner's
         # own timeout (which the clock never reaches).
@@ -321,8 +337,7 @@ class PlannerRuntimeBudgetTest(TrackerClock, PostgresOrchestratorTestCase):
         await until(lambda: len(planner.calls_of("plan")) == 1, message="the planner")
 
         self.fake.set(STANDARD_RUNTIME - 1)
-        await self.poll(h)  # one second short of the limit: nothing to stop
-        self.assertFalse(running.done())
+        await self.poll_that_stops_nothing(h, running)  # one second short
         planner.gates["plan"].set()
         report = await asyncio.wait_for(running, 120)
 
@@ -405,8 +420,7 @@ class PlannerRuntimeBudgetTest(TrackerClock, PostgresOrchestratorTestCase):
         await until(lambda: len(planner.calls_of("plan")) == 1, message="the planner")
         await h.tasks.execute(task_id, TaskCommand.PAUSE, actor=self.user)
 
-        await self.poll(h)  # the pause is seen; the planner still runs
-        self.assertFalse(running.done())
+        await self.poll_that_stops_nothing(h, running)  # paused; the planner runs on
         planner.gates["plan"].set()
         report = await asyncio.wait_for(running, 120)
 

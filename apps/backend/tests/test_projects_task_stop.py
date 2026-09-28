@@ -49,7 +49,13 @@ from paw_backend.tasks.queueing import LeaseLostError, TaskQueue
 from .gate_support import ALWAYS_ACTIVE
 from .projects_support import T0, requires_postgres
 from .support import make_settings
-from .task_support import PATH_TO_STATE, TEST_DATABASE_URL
+from .task_support import (
+    FIRST_RUN,
+    PATH_TO_STATE,
+    TEST_DATABASE_URL,
+    make_completable,
+    single_target,
+)
 from .test_projects_service_lifecycle import LifecycleTestCase
 
 ACTIVE_STATES = (
@@ -80,6 +86,7 @@ class TaskStopTestCase(LifecycleTestCase):
         self.owner = Database(make_settings(database_url=TEST_DATABASE_URL))
         self.addAsyncCleanup(self.owner.dispose)
         self.seed_tasks = TaskService(self.owner, project_gate=ALWAYS_ACTIVE)
+        self.seed_repositories: dict[UUID, UUID] = {}
         self.seed_queue = TaskQueue(self.owner, project_gate=ALWAYS_ACTIVE)
 
     def new_stopper(
@@ -101,13 +108,23 @@ class TaskStopTestCase(LifecycleTestCase):
         project_id: UUID | None = None,
         queue: bool = True,
     ) -> UUID:
-        """A task of the project in ``state``; a queued one also gets a queue entry."""
+        """A task of the project in ``state``; a queued one also gets a queue entry.
+
+        Its Working Set is one target (``seed_repositories`` has its id).
+        """
+        repository_id = uuid4()
         event = await self.seed_tasks.create_task(
             project_id=project_id or self.project_id,
             created_by=self.team.manager,
             title="Fix the parser",
+            repositories=single_target(repository_id),
         )
+        self.seed_repositories[event.task_id] = repository_id
         for command, wait_reason in PATH_TO_STATE[state]:
+            if command is TaskCommand.COMPLETE:
+                await make_completable(
+                    self.seed_tasks, event.task_id, repository_id, FIRST_RUN
+                )
             await self.seed_tasks.execute(
                 event.task_id, command, actor=Actor.system(), wait_reason=wait_reason
             )
