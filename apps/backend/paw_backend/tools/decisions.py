@@ -58,6 +58,28 @@ class BrokerReason(StrEnum):
     # A call that touches a repository carries a URL that lies below no remote
     # of a repository of the working set: whose ACL it is is unknown.
     REMOTE_NOT_IN_REPOSITORY = "remote_not_in_repository"
+    # --- DENY: the Working Set (issue #85, Decision 0030, section 4) ---
+    # A call that writes or deletes something in a repository has a capability
+    # the role ceiling does not cover (not ``project.repo.write`` /
+    # ``project.pr.create``): it could change a ``referenced`` repository.
+    REPOSITORY_WRITE_CAPABILITY_MISMATCH = "repository_write_capability_mismatch"
+    # The repository's role in the Working Set does not allow what the call does
+    # (a write outside ``working`` / ``target``, a pull request outside
+    # ``target``, something executed in a ``referenced`` repository). An approval
+    # cannot lift it: the role is changed through the Working Set tools.
+    REPOSITORY_ROLE_INSUFFICIENT = "repository_role_insufficient"
+    # The repository's role could not be resolved (not in the Working Set, or a
+    # broken entry): every call that touches it is refused.
+    REPOSITORY_ROLE_UNRESOLVED = "repository_role_unresolved"
+    # A Working Set tool whose operation does not apply to the repository's
+    # current role (adding one that is in the Working Set, ...).
+    WORKING_SET_CHANGE_INVALID = "working_set_change_invalid"
+    # The repository a Working Set tool names is not registered (or its
+    # registration could not be read): there is no ACL to decide on.
+    WORKING_SET_REPOSITORY_UNRESOLVED = "working_set_repository_unresolved"
+    # An allowed repository write could not be recorded in the task's attempt
+    # (Decision 0030, section 5): it does not run unrecorded.
+    REPOSITORY_WRITE_UNRECORDED = "repository_write_unrecorded"
     AUTHZ_DENIED = "authz_denied"
     AUTHZ_UNAVAILABLE = "authz_unavailable"
     POLICY_DENIED = "policy_denied"
@@ -109,6 +131,11 @@ class BrokerDecision:
     authz_reason: Reason | None = None
     # Present exactly when ``verdict`` is ALLOW: what the executor may run.
     invocation: "ToolInvocation | None" = field(default=None, repr=False)
+    # An allowed repository write (or execution): the reservation that keeps the
+    # repositories from being downgraded or removed until the call ended
+    # (``TaskService.admit_repository_use``). ``ToolBroker.record_execution``
+    # releases it; ``None`` for anything else.
+    reservation_id: uuid.UUID | None = field(default=None, repr=False)
 
     def __bool__(self) -> bool:
         # ``if await broker.request(call)`` must mean "may run now". Without

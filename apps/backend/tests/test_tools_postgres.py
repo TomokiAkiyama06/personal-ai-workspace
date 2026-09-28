@@ -57,7 +57,13 @@ from paw_backend.tools import (
 from .fake_postgres import HangingPostgres
 from .gate_support import ALWAYS_ACTIVE
 from .support import make_settings, wait_until
-from .task_support import migrate, new_database, requires_postgres
+from .task_support import (
+    make_completable,
+    migrate,
+    new_database,
+    requires_postgres,
+    single_target,
+)
 from .tools_store_contract import (
     HOUR,
     LIMITS,
@@ -69,6 +75,7 @@ from .tools_support import (
     AGENT,
     NOW,
     P1,
+    REPO,
     ROOT,
     RUN,
     TASK,
@@ -1107,12 +1114,19 @@ class TaskFixture(PostgresTestCase):
 
     async def new_task(self, tasks: TaskService | None = None) -> uuid.UUID:
         created = await (tasks or self.tasks).create_task(
-            project_id=P1, created_by=U1, title="A task with approvals"
+            project_id=P1,
+            created_by=U1,
+            title="A task with approvals",
+            # Its Working Set: the repository of the tools' default task scope.
+            repositories=single_target(REPO),
         )
         return created.task_id
 
     async def drive(self, task_id, steps, tasks: TaskService | None = None):
         for command, arguments in steps:
+            if command is C.COMPLETE:
+                snapshot = await (tasks or self.tasks).restore(task_id)
+                await make_completable(tasks or self.tasks, task_id, REPO, snapshot.run)
             await (tasks or self.tasks).execute(
                 task_id, command, actor=Actor.system(), **arguments
             )
