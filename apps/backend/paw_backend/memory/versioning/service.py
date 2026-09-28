@@ -199,13 +199,16 @@ _MEMBERS = ProjectMemberRow.__table__
 _LOCK_SQL = text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))")
 # The denials that mean "not yours": reported as "not found" (see the module text).
 _HIDDEN_DENIALS = frozenset({Reason.NOT_RESOURCE_OWNER, Reason.NOT_PROJECT_MEMBER})
-# The unique constraints another writer's version can run into.
+# The unique constraints another writer's version can run into, by the names
+# PostgreSQL reports: the naming convention ``uq_%(table_name)s_%(column_0_name)s``
+# names a composite unique constraint after its first column only
+# (``test_memory_versioning_errors.py`` provokes each real violation).
 _VERSION_RACES = frozenset(
-    {"uq_memory_versions_memory_id_version_number", "ix_memory_versions_one_active"}
+    {"uq_memory_versions_memory_id", "ix_memory_versions_one_active"}
 )
 _RELATION_RACES = frozenset(
     {
-        "uq_memory_relations_from_version_id_to_version_id_relation_type",
+        "uq_memory_relations_from_version_id",
         "ix_memory_relations_one_successor",
     }
 )
