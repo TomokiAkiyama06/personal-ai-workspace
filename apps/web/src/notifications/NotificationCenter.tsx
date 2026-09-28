@@ -1,42 +1,137 @@
-import { useEffect, useId, useRef, useState } from "react";
+// Notification Center (the PAW-060 design: NotificationCenter / MobileNotifications).
+// Desktop and tablet: the bell opens a non-modal dropdown. Phone (< 768px): the
+// bell and the 通知 bottom tab open the full-screen list at /notifications.
+import { useCallback, useId, useRef, useState } from "react";
 import { useI18n } from "../i18n";
-import { type NotificationItem, useNotifications } from "./store";
+import { Link, useRouter } from "../router";
+import { PHONE_QUERY, useDismiss, useMediaQuery } from "../shell/common";
+import { Icon } from "../shell/icons";
+import {
+  matchesFilter,
+  NOTIFICATION_FILTERS,
+  type NotificationFilter,
+  type NotificationItem,
+  useNotifications,
+} from "./store";
 
-function SeverityLabel({ item }: { item: NotificationItem }) {
-  const { t } = useI18n();
+function NotificationEntry({ item }: { item: NotificationItem }) {
+  const { t, formatTime } = useI18n();
   return (
-    <span className={`severity severity-${item.severity}`}>
-      {t(`notifications.severity.${item.severity}`)}
-    </span>
+    <li className={`notification severity-${item.severity} ${item.read ? "read" : "unread"}`}>
+      <span className="notification-dot" aria-hidden="true" />
+      <div className="notification-body">
+        <div className="notification-meta">
+          <span className="severity-label">
+            {t(`notifications.severity.${item.severity}`)}
+            {item.read && ` · ${t("notifications.read")}`}
+          </span>
+          {item.count > 1 ? (
+            <span className="chip-count">{t("notifications.grouped", { count: item.count })}</span>
+          ) : (
+            item.source && <span className="notification-source">{item.source}</span>
+          )}
+          <time dateTime={item.at} className="notification-time">
+            {formatTime(item.at)}
+          </time>
+        </div>
+        <p className="notification-title">{item.title}</p>
+        {item.body && <p className="notification-text">{item.body}</p>}
+      </div>
+    </li>
   );
 }
 
-/** The bell in the header and its panel (a non-modal popover). */
-export function NotificationBell() {
-  const { t, formatDate } = useI18n();
+/** Header (未読 N / すべて既読), the filter chips and the list. */
+export function NotificationList({ headingLevel = 2 }: { headingLevel?: 1 | 2 }) {
+  const { t } = useI18n();
   const { items, unread, markAllRead } = useNotifications();
+  const [filter, setFilter] = useState<NotificationFilter>("all");
+  const shown = items.filter((item) => matchesFilter(item, filter));
+  const Heading = headingLevel === 1 ? "h1" : "h2";
+  return (
+    <>
+      <div className="notifications-head">
+        <Heading>{t("notifications.title")}</Heading>
+        {unread > 0 && (
+          <span className="count-chip">{t("notifications.unread", { count: unread })}</span>
+        )}
+        <button
+          type="button"
+          className="text-button accent"
+          onClick={markAllRead}
+          disabled={unread === 0}
+        >
+          {t("notifications.markAllRead")}
+        </button>
+      </div>
+      <fieldset className="filter-chips">
+        <legend className="visually-hidden">{t("notifications.filter")}</legend>
+        {NOTIFICATION_FILTERS.map((value) => (
+          <button
+            key={value}
+            type="button"
+            className="chip"
+            aria-pressed={filter === value}
+            onClick={() => setFilter(value)}
+          >
+            {t(`notifications.filter.${value}`)}
+          </button>
+        ))}
+      </fieldset>
+      {shown.length === 0 ? (
+        <p className="notifications-empty">
+          {items.length === 0 ? t("notifications.empty") : t("notifications.emptyFiltered")}
+        </p>
+      ) : (
+        <ul className="notification-list">
+          {shown.map((item) => (
+            <NotificationEntry key={item.key} item={item} />
+          ))}
+        </ul>
+      )}
+    </>
+  );
+}
+
+function BellIcon({ unread }: { unread: number }) {
+  return (
+    <>
+      <Icon name="bell" size={19} />
+      {unread > 0 && (
+        <span className="badge" aria-hidden="true">
+          {unread > 99 ? "99+" : unread}
+        </span>
+      )}
+    </>
+  );
+}
+
+/** The bell in the header and its dropdown panel. */
+export function NotificationBell() {
+  const { t } = useI18n();
+  const { navigate } = useRouter();
+  const { unread } = useNotifications();
+  const phone = useMediaQuery(PHONE_QUERY);
   const [open, setOpen] = useState(false);
   const panelId = useId();
   const container = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
-    };
-    const onPointer = (event: PointerEvent) => {
-      if (container.current && !container.current.contains(event.target as Node)) setOpen(false);
-    };
-    document.addEventListener("keydown", onKey);
-    document.addEventListener("pointerdown", onPointer);
-    return () => {
-      document.removeEventListener("keydown", onKey);
-      document.removeEventListener("pointerdown", onPointer);
-    };
-  }, [open]);
+  const close = useCallback(() => setOpen(false), []);
+  useDismiss(open, container, close);
 
   const label =
     unread > 0 ? t("notifications.bellUnread", { count: unread }) : t("notifications.bell");
+  if (phone) {
+    return (
+      <button
+        type="button"
+        className="icon-button bell"
+        aria-label={label}
+        onClick={() => navigate("/notifications")}
+      >
+        <BellIcon unread={unread} />
+      </button>
+    );
+  }
   return (
     <div className="notification-center" ref={container}>
       <button
@@ -47,59 +142,34 @@ export function NotificationBell() {
         aria-controls={panelId}
         onClick={() => setOpen((value) => !value)}
       >
-        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false">
-          <path
-            fill="currentColor"
-            d="M12 22a2.5 2.5 0 0 0 2.45-2h-4.9A2.5 2.5 0 0 0 12 22Zm7-6V11a7 7 0 0 0-5.5-6.84V3a1.5 1.5 0 0 0-3 0v1.16A7 7 0 0 0 5 11v5l-2 2v1h18v-1l-2-2Z"
-          />
-        </svg>
-        {unread > 0 && (
-          <span className="badge" aria-hidden="true">
-            {unread > 99 ? "99+" : unread}
-          </span>
-        )}
+        <BellIcon unread={unread} />
       </button>
       {open && (
-        <section id={panelId} className="notification-panel" aria-label={t("notifications.title")}>
-          <header>
-            <h2>{t("notifications.title")}</h2>
-            <button
-              type="button"
-              className="link-button"
-              onClick={markAllRead}
-              disabled={unread === 0}
-            >
-              {t("notifications.markAllRead")}
-            </button>
-          </header>
-          {items.length === 0 ? (
-            <p className="muted">{t("notifications.empty")}</p>
-          ) : (
-            <ul>
-              {items.map((item) => (
-                <li key={item.key} className={item.read ? "read" : "unread"}>
-                  <SeverityLabel item={item} />
-                  <div>
-                    <p className="notification-title">
-                      {item.title}
-                      {item.count > 1 && (
-                        <span className="muted">
-                          {" "}
-                          · {t("notifications.repeated", { count: item.count })}
-                        </span>
-                      )}
-                    </p>
-                    {item.body && <p className="muted">{item.body}</p>}
-                    <time dateTime={item.at} className="muted">
-                      {formatDate(item.at)}
-                    </time>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
+        <aside
+          id={panelId}
+          className="popover notification-panel"
+          aria-label={t("notifications.title")}
+        >
+          <NotificationList />
+          <div className="popover-footer">
+            <Link to="/notifications" onClick={close}>
+              {t("notifications.seeAll")}
+            </Link>
+            <Link to="/settings/notifications" onClick={close}>
+              {t("notifications.rules")}
+            </Link>
+          </div>
+        </aside>
       )}
+    </div>
+  );
+}
+
+/** The full-screen list (phone) and the "すべての通知を見る" page. */
+export function NotificationsPage() {
+  return (
+    <div className="page notifications-page">
+      <NotificationList headingLevel={1} />
     </div>
   );
 }
@@ -120,10 +190,16 @@ export function NotificationBanners() {
           className={`banner banner-${item.severity}`}
           role={item.severity === "critical" ? "alert" : "status"}
         >
-          <SeverityLabel item={item} />
+          <span className="severity-pill">{t(`notifications.severity.${item.severity}`)}</span>
           <span className="banner-text">{item.title}</span>
-          <button type="button" className="link-button" onClick={() => dismiss(item.key)}>
-            {t("notifications.dismiss")}
+          {item.body && <span className="banner-detail">{item.body}</span>}
+          <button
+            type="button"
+            className="banner-close"
+            aria-label={t("notifications.dismiss")}
+            onClick={() => dismiss(item.key)}
+          >
+            ×
           </button>
         </div>
       ))}

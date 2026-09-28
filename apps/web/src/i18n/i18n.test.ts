@@ -8,7 +8,7 @@ import { ja } from "./ja";
 describe("i18n", () => {
   it("defaults to Japanese", () => {
     expect(DEFAULT_LOCALE).toBe("ja");
-    expect(translate("ja", "login.title")).toBe("ログイン");
+    expect(translate("ja", "login.title")).toBe("サインイン");
   });
 
   it("has the same keys and placeholders in every catalog", () => {
@@ -21,7 +21,7 @@ describe("i18n", () => {
 
   it("replaces placeholders and leaves unknown ones", () => {
     expect(translate("ja", "devices.revokedOthers", { count: 3 })).toBe(
-      "3 台の端末をログアウトさせました。",
+      "3 件のセッションをサインアウトさせました。",
     );
     expect(translate("en", "devices.revokedOthers", {})).toContain("{count}");
   });
@@ -45,6 +45,18 @@ describe("errorMessage", () => {
   it("says how long to wait when the server does", () => {
     const error = new ApiError(429, "rate_limited", "x", { retryAfterSeconds: 30 });
     expect(errorMessage(t, error)).toContain("30 秒");
+  });
+
+  it("has a message for the pairing refusal the Backend returns (invalid_token)", () => {
+    expect(errorMessage(t, new ApiError(400, "invalid_token", "x"))).toBe(
+      ja["error.invalid_token"],
+    );
+  });
+
+  it("uses the design's words: サインイン, not ログイン", () => {
+    for (const [key, text] of Object.entries(ja)) {
+      expect(text, key).not.toMatch(/ログイン|ログアウト|パスキー/);
+    }
   });
 
   it("names an unknown code instead of hiding it", () => {

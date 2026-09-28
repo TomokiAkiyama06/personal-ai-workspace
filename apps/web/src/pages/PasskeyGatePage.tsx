@@ -4,6 +4,7 @@ import { useSession, useSignedIn } from "../auth/session";
 import { createPasskey, getPasskey } from "../auth/webauthn";
 import { useI18n } from "../i18n";
 import { errorMessage } from "../i18n/errors";
+import { AuthLayout } from "./AuthLayout";
 
 /** A session the passkey policy restricts: register or use a passkey first (Decision 0025). */
 export function PasskeyGatePage() {
@@ -46,9 +47,8 @@ export function PasskeyGatePage() {
   };
 
   return (
-    <main className="auth-page">
-      <section className="panel auth-card" aria-labelledby="gate-title">
-        <p className="brand">{t("app.name")}</p>
+    <AuthLayout>
+      <section className="stack-lg" aria-labelledby="gate-title">
         <h1 id="gate-title">{t("passkeyGate.title")}</h1>
         {passkey && !passkey.available ? (
           <p>{t("passkeyGate.unavailable")}</p>
@@ -63,8 +63,8 @@ export function PasskeyGatePage() {
         {passkey?.available !== false &&
           (enrolling ? (
             <form onSubmit={register} className="stack">
-              <label>
-                {t("passkey.name")}
+              <label className="field">
+                <span>{t("passkey.name")}</span>
                 <input
                   value={name}
                   onChange={(event) => setName(event.target.value)}
@@ -76,14 +76,19 @@ export function PasskeyGatePage() {
               </button>
             </form>
           ) : (
-            <button type="button" onClick={authenticate} disabled={busy}>
+            <button type="button" className="wide" onClick={authenticate} disabled={busy}>
               {t("passkeyGate.authenticate")}
             </button>
           ))}
+        {busy && (
+          <p className="notice" role="status">
+            <strong>{t("passkey.verifying")}</strong> {t("passkey.verifyingBody")}
+          </p>
+        )}
         <button type="button" className="secondary" onClick={() => void signOut()}>
-          {t("user.logout")}
+          {t("user.signOut")}
         </button>
       </section>
-    </main>
+    </AuthLayout>
   );
 }

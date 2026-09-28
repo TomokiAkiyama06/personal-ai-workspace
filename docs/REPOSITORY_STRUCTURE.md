@@ -607,7 +607,7 @@ personal-ai-workspace/
 │     ├─ package-lock.json
 │     ├─ package.json
 │     ├─ public/
-│     ├─ src/            # App、i18n、api、auth、notifications、shell、pages と各 *.test.ts(x)
+│     ├─ src/            # App、theme、i18n、api、auth、notifications、shell、pages と各 *.test.ts(x)
 │     ├─ tsconfig.json
 │     └─ vite.config.ts
 ├─ benchmarks/

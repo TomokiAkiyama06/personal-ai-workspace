@@ -7,6 +7,7 @@ import { SessionProvider } from "../auth/session";
 import { I18nProvider, type Locale } from "../i18n";
 import { NotificationProvider, type NotificationSource } from "../notifications/store";
 import { RouterProvider } from "../router";
+import { ThemeProvider } from "../theme";
 
 export interface Reply {
   status: number;
@@ -121,11 +122,13 @@ export function Providers({
 }) {
   return (
     <I18nProvider initialLocale={locale}>
-      <RouterProvider>
-        <SessionProvider>
-          <NotificationProvider source={source}>{children}</NotificationProvider>
-        </SessionProvider>
-      </RouterProvider>
+      <ThemeProvider>
+        <RouterProvider>
+          <SessionProvider>
+            <NotificationProvider source={source}>{children}</NotificationProvider>
+          </SessionProvider>
+        </RouterProvider>
+      </ThemeProvider>
     </I18nProvider>
   );
 }

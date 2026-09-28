@@ -23,6 +23,10 @@ Backend の認証（PAW-022 / PAW-023 / PAW-024、[Decision 0015](0015-login-ses
 - Pairing の QR / リンクは `/pair#<token>`（Token は URL の Fragment で、Server の Log に残らない）。
 - 重要な操作は最近の Step-up を要し、足りなければ 403 `step_up_required` / `step_up_method_insufficient` を返す。
 
+画面そのもの（Layout、Design Token、文言、役割ごとの Menu、Breakpoint、状態遷移）は、Human が Comment を反映して承認した **PAW-060 の Design Canvas**（claude.ai Artifact `BkiwvDocfuuXxfU9TA14pa`「PAW-060 Web Shell UI/UX」、36 Artboard、v10）を正本にする。
+この Issue に関わる Artboard は Login / LoginLight、PasskeyStates、DeviceAdd、ShellDark / ShellLight、NotificationCenter、UserMenu、Roles、SettingsDevices、SettingsLanguage、MobileLogin / MobileShell / MobileMenu / MobileNotifications、Tablet、StateFlows、Tokens、ApiContract である。
+Design Canvas と実際の Backend の API・承認済みの Decision が食い違うところは **Backend / Decision を優先**し、下の「Design Canvas との差分」に 1 件ずつ挙げる。
+
 一方で、**次のことは要件・Backlog・既存の Decision のどれも決めていない。**
 Web App をどこからどう配信するか（同じ Origin か、別の Origin + CORS か）、Page の CSP と Cache、Session と CSRF の扱いを Web 側で足すか、Client 側の Routing、Package 管理・Lint / Format・Test の Tool と CI での扱い、i18n の仕組み、Step-up の画面の出し方、Notification Center の Data の出どころ。
 [AGENTS.md](../../AGENTS.md) の「仕様変更」に従い、実装（この Issue の PR）はこれらを下の推奨で置き、この Decision で承認を求める。数値と選択の多くは設定か定数で、変えても Schema は変わらない（Migration はない）。
@@ -45,7 +49,7 @@ Web App をどこからどう配信するか（同じ Origin か、別の Origin
 ### 3. Session / CSRF は既存の仕組みに依拠し、Web 側に CSRF Token を足さない
 
 - **推奨**: Web App は `fetch` を `credentials: "same-origin"`、`redirect: "error"`、`cache: "no-store"` で送るだけにし、CSRF Token（Double Submit Cookie、Header Token）は足さない。CSRF は既存の 2 層（`SameSite=Strict` の Cookie と、状態を変える Request の Origin 検査）で防ぐ。Session の識別子は `HttpOnly` のままで、JavaScript からは読めない。
-- **推奨**: Web App は Credential・Token・Session の情報を `localStorage` / `sessionStorage` に保存しない（保存するのは表示言語の選択だけ）。Pairing の Token は Fragment から読んだ直後に Address Bar と履歴から消す（`history.replaceState`）。
+- **推奨**: Web App は Credential・Token・Session の情報を `localStorage` / `sessionStorage` に保存しない（保存するのは Theme の選択だけ。13 を参照）。Pairing の Token は Fragment から読んだ直後に Address Bar と履歴から消す（`history.replaceState`）。
 - 代案: 追加の CSRF Token を導入する。現在の 2 層で防げない攻撃（同じ Site の別の Origin からの Request）は、Origin 検査が Origin の完全一致で拒否するため、得るものがない。Backend の変更（Token の発行・検証）も要る。
 
 ### 4. 権限の最終判定は Backend だけが行い、Web は表示を選ぶだけにする
@@ -54,7 +58,7 @@ Web App をどこからどう配信するか（同じ Origin か、別の Origin
 
 ### 5. Client 側の Routing は History API と Backend の Fallback で行う
 
-- **推奨**: Router の Library を使わず、History API の小さな Router（`src/router.tsx`）で固定の Path（`/`、`/projects`、`/agents`、`/memory`、`/pulls`、`/usage`、`/admin`、`/settings`、`/settings/security`、`/settings/devices`、`/pair`）を扱う。Backend は Client 側の Route に `index.html` を返す（1）。
+- **推奨**: Router の Library を使わず、History API の小さな Router（`src/router.tsx`）で固定の Path（`/`、`/chat/new`、`/projects`、`/agents`、`/memory`、`/pulls`、`/admin`、`/notifications`、`/settings` と `/settings/<項目>`（`profile`、`devices`、`appearance` ほか後続の Issue の Placeholder）、`/pair`）を扱う。Backend は Client 側の Route に `index.html` を返す（1）。
 - 理由: Backend がすでに Pairing のリンクを `/pair#<token>` の形で決めている（Hash Routing にすると `#` を Token と分け合えない）。Path の数が少なく、Library の依存を増やす理由がない。Path が増えて Nested Route・Loader などが要るようになったら、その Issue で Library（React Router など）を検討する。
 
 ### 6. Package 管理は npm にする（Decision 0003 の既定の pnpm を変える）
@@ -76,12 +80,13 @@ Web App をどこからどう配信するか（同じ Origin か、別の Origin
 
 ### 9. i18n は型つきの自前の Catalog で行い、日本語を既定にする
 
-- **推奨**: i18n の Library を使わず、日本語の Catalog（`src/i18n/ja.ts`）をキーの正本にし、他の言語はその型に合わせる（キーの漏れは型検査と Test が検出する）。V1 は日本語が既定で、英語の Catalog も同梱し、設定画面で切り替えられる（選択は `localStorage` に保存。使えなければ保存しないだけ）。日時は `Intl.DateTimeFormat` で Locale に合わせる。Backend のエラーは安定した `error.code` から Catalog の文言に変換する（Backend の英語の `message` は表示しない）。
+- **推奨**: i18n の Library を使わず、日本語の Catalog（`src/i18n/ja.ts`）をキーの正本にし、他の言語はその型に合わせる（キーの漏れは型検査と Test が検出する）。文言は Design Canvas のもの（サインイン / サインアウト、ユーザー名、この端末を信頼する、端末とセッション、Passkey など）。**V1 の表示言語は日本語に固定し、他言語の選択肢は画面に出さない**（Design の SettingsLanguage）。英語の Catalog は i18n-ready のために同梱するが、切り替えの UI は出さない（出すかどうかは下の Q1）。日時は `Intl.DateTimeFormat` で Locale に合わせる。Backend のエラーは安定した `error.code` から Catalog の文言に変換する（Backend の英語の `message` は表示しない）。
 - 理由: [UI Design](../UI_DESIGN.md) の `[FIXED]`「V1 の基本 UI 言語は日本語」「i18n-ready」を満たし、依存を増やさない。複数形・性などの複雑な規則が要る言語を足す時点で、ICU MessageFormat を持つ Library を検討する。
 
 ### 10. Step-up は「まず操作し、要求されたら同じ画面の中で確認する」
 
-- **推奨**: Step-up が要る操作（Passkey の登録・削除、Owner / Admin の新しい端末の承認など）は、まず Request を送り、Backend が `step_up_required` / `step_up_method_insufficient` を返したときだけ、同じ画面の中（Modal ではない）に本人確認の欄を出す。Passkey が登録済みで使えるなら Passkey の確認を出し、`step_up_method_insufficient` でなければ Password の確認も出す。確認が済めば元の操作を 1 回だけ再送する。取り消せば何もしない。
+- **推奨**: Step-up が要る操作（Passkey の登録・削除、Owner / Admin の新しい端末の承認など）は、まず Request を送り、Backend が `step_up_required` / `step_up_method_insufficient` を返したときだけ、同じ画面の中（Modal ではない。文言は Design の PasskeyStates D）に本人確認の欄を出す。Passkey が登録済みで使えるなら Passkey の確認を出し、`step_up_method_insufficient` でなければ Password の確認も出す。確認が済めば元の操作を再送する。取り消せば何もしない。
+- 新しい端末の承認は Backend が常に Passkey の Step-up を求める（Decision 0033、`StepUpGuard`）ので、最初から Passkey の確認だけを出す。それ以外の操作で、Step-up がない状態の `step_up_required` に Password で答えたあとの再送が `step_up_method_insufficient` なら、Passkey だけでもう一度確認を求める（Password の確認を無駄にさせたまま Error にしない）。
 - 理由: Step-up の窓（Decision 0015 / 0025）の中なら確認を求めずに済み、要否の判断を Backend だけに置ける。UI Design の「通常操作では画面を不要な Modal で遮らない」に合わせる。
 
 ### 11. Notification Center はこの Issue では Shell だけにする
@@ -91,13 +96,47 @@ Web App をどこからどう配信するか（同じ Origin か、別の Origin
 
 ### 12. Pairing の画面の待ち方
 
-- **推奨**: 新しい端末は、承認待ちのあいだ確認 Code を大きく表示し、`POST /api/v1/auth/pairing/complete` を **3 秒ごと**に呼ぶ（正しい Claim は Rate Limit の試行を返すので、待つ端末は Lock されない。429 のときは `Retry-After` だけ待つ。404 は期限切れか拒否として終わる）。承認する信頼済み端末は、QR を表示して承認が要る（`approval_required`）あいだ、承認待ちの一覧を **5 秒ごと**に読み直す。承認は確認 Code の入力を必須にする（Decision 0033 の 12）。
+- **推奨**: 新しい端末は、承認待ちのあいだ確認 Code を大きく表示し、`POST /api/v1/auth/pairing/complete` を **3 秒ごと**に呼ぶ（正しい Claim は Rate Limit の試行を返すので、待つ端末は Lock されない。429 のときは `Retry-After` だけ待つ）。拒否・取り消し・期限切れ・使用済み・Lock の Pairing に Backend が返す 400 `invalid_token`（`auth/onboarding/pairing.py` の `_finish`）と 404 `not_found` は終わりとして扱い、Poll をやめて「期限が切れたか、拒否または取り消された」と表示する（拒否された呼び出しは Rate Limit の試行を返さないので、続けると `rate_limited` になる）。QR / リンクの Claim が `invalid_token` のときも同じ表示にする。承認する信頼済み端末は、QR を表示して承認が要る（`approval_required`）あいだ、承認待ちの一覧を **5 秒ごと**に読み直す。承認は確認 Code の入力を必須にする（Decision 0033 の 12）。
 - QR Code は `uqr`（依存のない小さな Library、正確な Version で固定）で行列を作り、SVG の Path として描く（`innerHTML` を使わない）。QR の中身は `location.origin` と Backend の `link_path` をつないだ URL。
+
+### 13. Design Token・Font・Theme・Breakpoint は Design Canvas に合わせる
+
+- **推奨**: Design の Tokens の値を CSS 変数として `src/styles.css` に置く（ダーク: 背景 `#14161A`・ナビ `#191C22`・カード `#1B1E24`・入力 `#232730`・罫線 `#2E333D` / `#3C424E`、文字 `#E8EBF0` / `#A6AEBC` / `#79818F`、アクセント `#9B87F5`、選択面 `#2A2540`。ライト: `#F7F6F3` / `#F1EFEA` / `#FFFFFF` / `#EEEBE5` / `#E2DFD8` / `#CBC7BE`、`#1B1D21` / `#59606B` / `#757C88`、`#5B45B8`、`#EDE8FB`。Severity は `#4CAF7D` / `#5B9DF0` / `#E0A34A` / `#E5675B` / `#E0486E`）。角丸は 6 Badge / 9 入力 / 13 Card / 999 Chip、Focus は 3px のアクセント 30% の Ring、Tap 対象は 44px 以上。
+- **推奨**: Font は IBM Plex Sans JP（400 / 500 / 600）と IBM Plex Mono（400 / 500）を `@fontsource/*`（OFL-1.1、正確な Version で固定）で Build の `assets/` に同梱する。CSP の `font-src 'self'` のままにでき、外部の Font CDN を使わない。Unicode Range で分割されているので、Browser は使う文字の分だけを読む（`dist/` は約 12 MB、CSS は gzip で約 110 KB）。
+- **推奨**: Theme はシステム / ライト / ダーク（既定はシステム。`prefers-color-scheme` がない環境では Design の既定のダーク）。User Menu、設定 › 言語と外観、サインイン画面の「表示」で切り替える。選択は **この Browser の `localStorage`** に保存する（使えなければ保存しないだけ）。Account の設定の API がまだないため、Design の「このアカウントのすべての端末に適用」にはしない（差分 D11）。
+- **推奨**: Breakpoint は Design の Tablet のとおり 3 段階: 1280px 以上は Sidebar（252px）と Header の検索、768–1279px は Icon Rail（78px、短い Label）、768px 未満は Drawer（320px）と下部 Tab（チャット / タスク / メモリ / 通知 / 設定）、通知は全画面（`/notifications`）。情報構造はすべての幅で同じにする。下部 Tab は Design の ApiContract が V1 に含めるかを未確定としているため、Design どおりに作ったうえで Q2 で確認する。
+- **推奨**: Navigation は Design の Roles: 新しいチャット、チャット、プロジェクト、エージェント / タスク、メモリ、プルリクエスト、区切り、管理（Owner / Admin だけ。役割の Badge つき）、設定。使用状況は管理と設定 › 自分の使用状況に置き、Main の Menu には出さない。Role の表示名は Owner / Admin / Member。User Menu と設定の Sidebar（アカウント / ワークスペース、権限制御は Owner だけ）も Design のとおりにし、後続の Issue の項目は Placeholder にする。
+
+## Design Canvas との差分（Backend / Decision を優先したもの）
+
+| # | Design Canvas | 実装（優先したもの） |
+| --- | --- | --- |
+| D1 | サインイン画面の「Passkey でサインイン」（Passkey を先に使うサインイン） | 出さない。Backend のサインインはユーザー名とパスワードだけで、Passkey はその後の Gate / Step-up（Decision 0025）。Design の「またはパスワードで続行」の区切りも出さない |
+| D2 | 「この端末を信頼する（30 日間）」 | 「この端末を信頼する」。Backend の `remember_me` の期間は設定値（`PAW_SESSION_REMEMBER_DAYS`、既定 90 日）で、画面に固定の日数を書かない |
+| D3 | 端末追加は既存端末に表示した 6 文字のコードを新しい端末に入力する（DeviceAdd 2）。新しい端末の記録情報（OS / UA / IP / 地域） | Backend は QR / リンクの Token（`/pair#<token>`）を新しい端末で開き、Owner / Admin では新しい端末に表示した確認コードを承認する端末で入力する（Decision 0033）。コードの向きが逆。OS / UA / IP / 地域は Backend の応答にないため出さない |
+| D4 | 状態変更の Request に CSRF Token、Step-up は `X-Step-Up-Token` Header（5 分・1 操作）（ApiContract） | CSRF は `SameSite=Strict` の Cookie と Origin 検査（本 Decision の 3）、Step-up は Session に結び付いた窓（Decision 0015 / 0025）。Token と Header は使わない |
+| D5 | 端末一覧の「IP / 地域」「Passkey」の列（SettingsDevices） | Backend の Session の応答に IP・地域・端末ごとの Passkey がないため、「有効期限」の列にする。Passkey は別の Card で一覧する |
+| D6 | 「他のすべての端末からサインアウト」は Passkey の再認証（STRONG_APPROVAL）が必要 | Backend の `POST /auth/sessions/revoke-others` は Step-up を求めないため、その説明文を出さない |
+| D7 | Passkey の失敗回数と「5 回で 15 分ロック」の表示（PasskeyStates B） | Backend は失敗回数を返さない（429 と `Retry-After` だけ）。待ち時間だけを表示する |
+| D8 | Header の状態 Chip（GPU / Queue、Backup 異常）、サインイン画面のシステム状態（Local LLM・GPU・Memory Backup・Codex / Claude）、`GET /api/v1/health/summary` | Backend にその API がない。Header の Chip は出さず、サインイン画面は `GET /api/v1/health/ready`（認証なし、DB の状態だけ）で「Backend」の 1 行だけを出す |
+| D9 | 通知の API（`/api/v1/notifications`、既読・非表示・SSE）と通知ごとの操作ボタン（今すぐ再試行、タスクを開くなど） | Backend に通知の API がない。Shell だけを作り、Source は接続しない（本 Decision の 11）。通知ごとの操作ボタンは API が決まる Issue で足す |
+| D10 | Sidebar の実行中のタスク、Menu の件数 Badge、Project の選択、Header の検索（⌘K） | Task / Project / 検索の API は後続の Issue。実行中のタスクと件数は出さず、検索欄は無効の状態で置く（Global Search と Command Palette の範囲は ApiContract でも未確定） |
+| D11 | 言語と外観の設定は「このアカウントのすべての端末に適用」、タイムゾーン・日付形式・配色・情報密度の選択 | Account の設定の API がない。Theme はこの Browser に保存し、タイムゾーンは端末の値を表示だけ、日付形式・配色・情報密度は後続の Issue |
+| D12 | サインイン画面の「パスワードをお忘れですか」の再設定の Flow | Backend は Owner / Admin が発行する 1 回限りの再設定（Decision 0032）だけ。その案内を表示する（Token の使用の画面は後続の Issue） |
+| D13 | Mobile のサインイン画面の言語切替（日本語 / English） | SettingsLanguage の「V1 は日本語に固定」を優先して出さない。代わりに Theme の切り替えを置く |
+
+## Human への質問
+
+- **Q1（English）**: V1 は表示言語を日本語に固定し、英語の Catalog を画面に出さない（Design の SettingsLanguage）でよいか。ApiContract の未確定事項「English (Beta) を翻訳が揃う前から設定画面に出すか」への回答として、出す場合は設定 › 言語と外観に切り替えを戻す。
+- **Q2（下部 Tab）**: スマートフォンの下部 Tab（チャット / タスク / メモリ / 通知 / 設定）を V1 に含めてよいか（Design どおりに実装済み。ApiContract では未確定）。
+- **Q3（Font）**: IBM Plex Sans JP / Mono を Build に同梱する（`dist/` が約 12 MB になる）方式でよいか。代案は System Font への Fallback だけにすること。
+- **Q4（Theme の保存先）**: Theme の選択を Browser ごと（`localStorage`）にしてよいか。Account 全体に適用するには Backend に Account の設定の API が要る。
+- **Q5**: 上の 1–12 の推奨（配信、CSP、CSRF、npm、Biome、Node.js、Step-up、Notification、Pairing）をそのまま承認するか。
 
 ## この Issue に含めないこと
 
 - 招待の受け取り（`POST /api/v1/auth/invitations/redeem`）、Owner の Setup / Recovery Token と Password Reset Token の使用（`POST /api/v1/auth/token/redeem`）、Password の変更の画面。Backend の API はあるが Issue #46 の受け入れ条件（login / passkey / device management）の外で、後続の Issue で足す。
-- 管理画面（User の招待・削除・復元、Auth Policy、Passkey の Reset）と、Chat / Project / Agent / Memory / PR / Usage の中身（Navigation の行き先は「後続の Issue で実装します」の Placeholder）。
+- 管理画面（User の招待・削除・復元、Auth Policy、Passkey の Reset）と、Chat / Project / Agent / Memory / PR / Usage / 設定の他の項目の中身（Navigation と設定の Sidebar の行き先は「後続の Issue で実装します」の Placeholder）。
 - Desktop（Tauri）と Mobile の PWA 化（Manifest、Service Worker）。
 - 実際の Browser と実際の Passkey（Authenticator）を使った E2E Test。Unit Test は WebAuthn の Browser API を Fake にしている。
 

@@ -24,7 +24,33 @@ export interface IncomingNotification {
   severity: Severity;
   title: string;
   body?: string;
+  /** Where it comes from, shown next to the severity ("Backup", "Project · Task #203"). */
+  source?: string;
+  /** "task" notifications are listed by the タスク filter. */
+  category?: "task" | "system";
   at: string;
+}
+
+export type NotificationFilter = "all" | "unread" | "important" | "task";
+export const NOTIFICATION_FILTERS: readonly NotificationFilter[] = [
+  "all",
+  "unread",
+  "important",
+  "task",
+];
+
+/** The design's filters: 未読, 重要 (ERROR / CRITICAL) and タスク. */
+export function matchesFilter(item: NotificationItem, filter: NotificationFilter): boolean {
+  switch (filter) {
+    case "all":
+      return true;
+    case "unread":
+      return !item.read;
+    case "important":
+      return item.severity === "error" || item.severity === "critical";
+    case "task":
+      return item.category === "task";
+  }
 }
 
 export interface NotificationItem extends IncomingNotification {

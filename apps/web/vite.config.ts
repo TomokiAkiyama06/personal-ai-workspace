@@ -1,6 +1,7 @@
 /// <reference types="vitest/config" />
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
+import packageJson from "./package.json" with { type: "json" };
 
 // The Web App talks to the Backend on its own origin only (Decision 0044): in
 // development Vite forwards /api to the Backend on the loopback and keeps the
@@ -11,6 +12,8 @@ const backend = "http://127.0.0.1:8000";
 
 export default defineConfig({
   plugins: [react()],
+  // Shown in the user menu and on the sign-in page (the design's "host · v0.1.0").
+  define: { __APP_VERSION__: JSON.stringify(packageJson.version) },
   server: {
     host: "localhost",
     port: 5173,

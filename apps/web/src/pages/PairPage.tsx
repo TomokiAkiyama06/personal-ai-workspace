@@ -1,15 +1,27 @@
-import { type FormEvent, useEffect, useState } from "react";
+import { type FormEvent, useEffect, useId, useState } from "react";
 import { authApi, DEVICE_NAME_MAX } from "../api/auth";
 import { isApiError } from "../api/client";
+import { describeDevice } from "../auth/device";
 import { useSession } from "../auth/session";
 import { useI18n } from "../i18n";
 import { errorMessage } from "../i18n/errors";
-import { useRouter } from "../router";
+import { Link, useRouter } from "../router";
+import { AuthLayout } from "./AuthLayout";
 
 // How often a new device that waits for its approval asks whether it came. A
 // correct claim gives its rate-limit attempt back (Decision 0033), so polling
 // does not lock the device out.
 export const COMPLETE_POLL_MS = 3000;
+
+/**
+ * The Backend's answers that end a pairing for good: 400 `invalid_token` (the
+ * pairing was refused, revoked, expired, used or locked: paw_backend
+ * auth/onboarding/pairing.py `_finish`) and 404 `not_found`. Polling after them
+ * would only burn rate-limit attempts, which a refused call does not give back.
+ */
+function isTerminal(error: unknown): boolean {
+  return isApiError(error, "invalid_token", "not_found");
+}
 
 /** The pairing token of `/pair#<token>` (a fragment never reaches the server's logs). */
 function tokenFromLocation(): string | null {
@@ -33,8 +45,9 @@ export function PairPage() {
   const { accept } = useSession();
   const { navigate } = useRouter();
   const [token] = useState(tokenFromLocation);
-  const [deviceName, setDeviceName] = useState("");
+  const [deviceName, setDeviceName] = useState(describeDevice);
   const [rememberMe, setRememberMe] = useState(false);
+  const titleId = useId();
   const [stage, setStage] = useState<Stage>({ name: "form" });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -65,7 +78,8 @@ export function PairPage() {
           if (cancelled) return;
           if (isApiError(caught, "rate_limited")) {
             void poll(Math.max(COMPLETE_POLL_MS, (caught.retryAfterSeconds ?? 0) * 1000));
-          } else if (isApiError(caught, "not_found")) {
+          } else if (isTerminal(caught)) {
+            setError(null);
             setStage({ name: "ended" });
           } else {
             setError(errorMessage(t, caught));
@@ -106,32 +120,38 @@ export function PairPage() {
         });
       }
     } catch (caught) {
-      setError(errorMessage(t, caught));
+      if (isTerminal(caught)) setStage({ name: "ended" });
+      else setError(errorMessage(t, caught));
     } finally {
       setBusy(false);
     }
   };
 
   return (
-    <main className="auth-page">
-      <section className="panel auth-card" aria-labelledby="pair-title">
-        <p className="brand">{t("app.name")}</p>
-        <h1 id="pair-title">{t("pair.title")}</h1>
+    <AuthLayout>
+      <section className="stack-lg" aria-labelledby={titleId}>
+        <div className="stack-xs">
+          <h1 id={titleId}>{t("pair.title")}</h1>
+          {token && stage.name === "form" && <p className="muted">{t("pair.intro")}</p>}
+        </div>
         {error && (
           <p className="form-error" role="alert">
             {error}
           </p>
         )}
-        {!token ? (
-          <p>{t("pair.noToken")}</p>
-        ) : stage.name === "ended" ? (
-          <p>{t("pair.expired")}</p>
+        {!token || stage.name === "ended" ? (
+          <>
+            <p role={token ? "status" : undefined}>
+              {token ? t("pair.expired") : t("pair.noToken")}
+            </p>
+            <Link to="/">{t("pair.toSignIn")}</Link>
+          </>
         ) : stage.name === "waiting" ? (
           <div className="stack" aria-live="polite">
             <p>{t("pair.waiting")}</p>
             {stage.code && (
               <div className="confirmation-code">
-                <span className="muted">{t("pair.codeLabel")}</span>
+                <span className="section-label">{t("pair.codeLabel")}</span>
                 <output aria-label={t("pair.codeLabel")}>{stage.code}</output>
                 <span className="muted small">{t("pair.codeHint")}</span>
               </div>
@@ -143,9 +163,9 @@ export function PairPage() {
             )}
           </div>
         ) : (
-          <form onSubmit={submit} className="stack">
-            <label>
-              {t("pair.deviceName")}
+          <form onSubmit={submit} className="stack-lg">
+            <label className="field">
+              <span>{t("pair.deviceName")}</span>
               <input
                 value={deviceName}
                 onChange={(event) => setDeviceName(event.target.value)}
@@ -159,14 +179,14 @@ export function PairPage() {
                 checked={rememberMe}
                 onChange={(event) => setRememberMe(event.target.checked)}
               />
-              {t("pair.rememberMe")}
+              {t("pair.trust")}
             </label>
-            <button type="submit" disabled={busy || deviceName.trim() === ""}>
+            <button type="submit" className="wide" disabled={busy || deviceName.trim() === ""}>
               {t("pair.submit")}
             </button>
           </form>
         )}
       </section>
-    </main>
+    </AuthLayout>
   );
 }

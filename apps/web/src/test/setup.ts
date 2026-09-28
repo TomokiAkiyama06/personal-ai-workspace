@@ -7,3 +7,7 @@ afterEach(() => {
   window.localStorage.clear();
   window.history.replaceState(null, "", "/");
 });
+
+afterEach(() => {
+  delete document.documentElement.dataset.theme;
+});
