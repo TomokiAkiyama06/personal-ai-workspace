@@ -34,7 +34,7 @@
 - 空き VRAM の確認は `vram_bytes` > 0 の仕事にだけ効く。
 - 理由: vLLM / SGLang は Load のときに KV Cache Pool を丸ごと確保するので（`gpu_memory_utilization`）、Probe は常駐 Model の Footprint を**使用中**と見る。この Memory は 0037 の勘定で予約として数えている。KV だけを使う Request にも「空き ≥ Headroom」を求めると、自分の常駐 Model の事前確保をもう一度数えることになり、何も確保しない Request を理由なく止める（96 GB で Footprint を 90% とすると、Scheduler の外に何もなくても空きは約 9.6 GB で、Memory Worker と Embedding を置けば Headroom の 4.8 GB を割りうる）。Footprint の内側の仕事は、外の Workload が増えても自分の Memory は既に持っているので OOM にならない。Pressure への対応は 0037 の縮退の段のままにする。
 - 判定: `観測した空き − (Scheduler が約束したが Probe にまだ見えない量) ≥ 要求量 + Headroom`。「まだ見えない量」は Load 中の Model の予約や、Admission 済みでまだ確保していない仕事の `vram_bytes`（同じ読み取りの間に 2 つの仕事が同じ空きを数えないため）。0037 の `committed` は Probe の使用量を下回らないので、これは `available ≥ 要求量` と同じ値になる（Test が固定する）。
-- `vram_bytes` を持つ Lease は、その量を予約として数える。仕事が実際に確保した VRAM（どの Model の Process でもない）は、0037 の Exclusive と同じく、Lease を与えた時点の `external` を超えた分だけ Lease の予約で吸収し、`external` に二重に数えない（それ以前からある他の Workload の分は `external` のまま）。Lease を返した後に残った Memory は `external` になる。
+- `vram_bytes` を持つ Lease は、その量を予約として数える。仕事が実際に確保した VRAM（どの Model の Process でもない）は、0037 の Exclusive と同じく、Lease を与えた時点の `external` を超えた分だけ Lease の予約で吸収し、`external` に二重に数えない（それ以前からある他の Workload の分は `external` のまま）。Lease を返した後に残った Memory は `external` になる。Lease が複数あるときは、どの Lease の Process がどれだけ確保したかは分からないので、返した Lease はその予約の範囲で吸収していた分をすべて持っていたとみなして `external` に移す（残りの Lease がまだ確保していない予約を、返した Lease の残った Memory で埋めない）。残った Lease が確保した分がその Lease の終わりまで二重に数えられることはあるが、GPU を過剰に約束することはない。
 - CPU / Cloud に置いた Lease は VRAM を持たない（`vram_bytes` は 0 になる）。
 
 ### 2. 足りない仕事は待ち行列で待ち、VRAM を要る後の仕事に追い越させない
@@ -42,6 +42,7 @@
 - 空きが足りない仕事は `Refusal.INSUFFICIENT_FREE_VRAM` で待つ（0037 の 4 の待ち行列。拒否しない）。
 - VRAM は GPU 全体のものなので、**VRAM を要る仕事の待ちは、同じか下の Class の、後から来た VRAM を要る仕事を（Model に関係なく）止める**（小さい Job が続いて大きい Job が永久に待つことを防ぐ。0037 の 4 と同じ考え方）。
 - VRAM を要らない仕事（Footprint の内側）と上の Class の仕事は、VRAM を待つ仕事の後ろに並ばない。同じ Model の、VRAM だけを待っている待ちも、VRAM を要らない新しい仕事を止めない。
+- 他の Model の仕事を止めるのは、VRAM を待っている（最後の拒否が `INSUFFICIENT_FREE_VRAM`）待ちだけとする。自分の Model の空き（`NOT_RESIDENT` / `SEQUENCES_FULL` など）を待つ待ちは、他の Model の VRAM を要る仕事を止めない。CPU の複製に置かれる仕事は VRAM を持たないので、この順番に加わらない。
 
 ### 3. Probe の古さは 0037 の 15 秒のまま、読み取りの間は約束した量で埋める
 

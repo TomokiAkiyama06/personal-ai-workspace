@@ -63,6 +63,9 @@ class VramView:
     committed: int
     headroom: int
     available: int  # total - headroom - committed; negative under pressure
+    # What the VRAM leases (an Exclusive job's, or the shared ones with
+    # ``vram_bytes``) use, absorbed by their reservations (see account).
+    extra_use: int = 0
 
     @property
     def under_pressure(self) -> bool:
@@ -167,4 +170,5 @@ def account(
         committed=committed,
         headroom=headroom,
         available=device.total_bytes - headroom - committed,
+        extra_use=exclusive_use,
     )

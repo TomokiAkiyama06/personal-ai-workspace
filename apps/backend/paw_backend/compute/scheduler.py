@@ -779,7 +779,7 @@ class ComputeScheduler:
         if tokens > spec.max_context_tokens:
             return Refusal.CONTEXT_TOO_LONG, Placement.LOCAL_GPU
         available = not entry.busy and not entry.draining
-        on_cpu = available and entry.state is DeploymentState.CPU
+        on_cpu = self._on_cpu(entry)
         # The GPU KV share limits GPU placements only: a CPU lease reserves no KV.
         if (
             not on_cpu
@@ -796,7 +796,7 @@ class ComputeScheduler:
         if on_cpu:
             # The CPU copy needs neither the probe nor the GPU (it also serves
             # while an Exclusive job holds the GPU).
-            if queue and self._queued_ahead(request):
+            if queue and self._queued_ahead(request, gpu=False):
                 return Refusal.QUEUED_BEHIND, Placement.LOCAL_CPU
             if len(entry.leases) >= spec.max_sequences:
                 return Refusal.SEQUENCES_FULL, Placement.LOCAL_CPU
@@ -805,7 +805,7 @@ class ComputeScheduler:
             return Refusal.EXCLUSIVE_MODE, Placement.LOCAL_GPU
         if not available or entry.state is not DeploymentState.GPU:
             return Refusal.NOT_RESIDENT, Placement.LOCAL_GPU
-        if queue and self._queued_ahead(request):
+        if queue and self._queued_ahead(request, gpu=True):
             return Refusal.QUEUED_BEHIND, Placement.LOCAL_GPU
         if not self._fresh():
             return Refusal.PROBE_UNAVAILABLE, Placement.LOCAL_GPU
@@ -832,15 +832,24 @@ class ComputeScheduler:
             refusal = Refusal.INSUFFICIENT_FREE_VRAM
         return refusal, Placement.LOCAL_GPU
 
-    def _queued_ahead(self, request: ComputeRequest) -> bool:
+    @staticmethod
+    def _on_cpu(entry: _Deployment) -> bool:
+        """Work on ``entry`` is placed on its CPU copy now."""
+        return (
+            not entry.busy and not entry.draining and entry.state is DeploymentState.CPU
+        )
+
+    def _queued_ahead(self, request: ComputeRequest, *, gpu: bool) -> bool:
         rank = CLASS_RANK[request.resource_class]
-        needs_vram = request.vram_bytes > 0
+        # Only a GPU placement holds VRAM (a CPU lease holds none).
+        needs_vram = gpu and request.vram_bytes > 0
         return any(
             CLASS_RANK[waiter.request.resource_class] <= rank
             and (
                 # VRAM is the whole GPU's: work that needs some queues behind
-                # earlier work that needs some, whatever its model ...
-                (needs_vram and waiter.request.vram_bytes > 0)
+                # earlier work that waits for it, whatever its model (as in
+                # _pump; a waiter held back by its own model does not count) ...
+                (needs_vram and waiter.last is Refusal.INSUFFICIENT_FREE_VRAM)
                 # ... and work on the same model queues behind its waiters,
                 # except those that only wait for VRAM when it needs none.
                 or (
@@ -906,18 +915,27 @@ class ComputeScheduler:
             entry = self._deployments[lease.deployment]
             if lease in entry.leases:
                 if lease.vram_bytes:
-                    self._rebase()
+                    self._rebase(released=lease.vram_bytes)
                 entry.leases.discard(lease)
                 entry.reserved_tokens -= lease.tokens
         if self._drained is not None and not self._local_gpu_leases():
             self._drained.set()
         self._pump()
 
-    def _rebase(self) -> None:
+    def _rebase(self, *, released: int = 0) -> None:
         """Before the shared VRAM leases change: what is external now is not
-        theirs (see account: only what grows over it is absorbed)."""
+        theirs (see account: only what grows over it is absorbed).
+
+        On a release (``released``: that lease's reservation), what the lease
+        absorbed becomes external too: its process may keep the memory (a
+        caching allocator), and it must not cover what the remaining leases
+        promised and have not allocated yet. Which lease's process holds what is
+        not known, so the released lease is taken to have absorbed as much as it
+        could (``min(released, extra_use)``): memory a remaining lease holds may
+        be counted twice until that lease ends, never overcommitted."""
         if self._device is not None:
-            self._extra_baseline = self._vram().external
+            view = self._vram()
+            self._extra_baseline = view.external + min(released, view.extra_use)
 
     def _local_gpu_leases(self) -> int:
         return sum(
@@ -935,9 +953,12 @@ class ComputeScheduler:
             if waiter.future.done():
                 continue
             deployment = waiter.request.deployment
-            needs_vram = waiter.request.vram_bytes > 0
             if deployment in blocked:
                 continue
+            # A waiter placed on the CPU copy holds no VRAM.
+            needs_vram = waiter.request.vram_bytes > 0 and not self._on_cpu(
+                self._deployments[deployment]
+            )
             if needs_vram and vram_blocked:
                 waiter.last = Refusal.INSUFFICIENT_FREE_VRAM
                 continue

@@ -152,6 +152,59 @@ class FreeVramAdmissionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status.vram.external, 2 * GIB)
         self.assertEqual(status.vram.reserved, 80 * GIB)
 
+    async def test_memory_a_released_lease_leaves_behind_stays_external(self):
+        # Two VRAM leases; the first allocated its 5 GiB, the second nothing
+        # yet. The first is released but its process keeps the memory (a
+        # caching allocator): it must not cover the second lease's promise.
+        first = (await self.scheduler.try_acquire(coding(vram=5 * GIB))).lease
+        second = (await self.scheduler.try_acquire(coding(vram=5 * GIB))).lease
+        self.probe.resident[JOB_PID] = 5 * GIB
+        status = await self.scheduler.refresh()
+        self.assertEqual(status.vram.external, 0)
+        self.assertEqual(status.vram.committed, 90 * GIB)
+        await first.release()
+        status = await self.scheduler.refresh()
+        self.assertEqual(status.vram.external, 5 * GIB)
+        self.assertEqual(status.vram.committed, 90 * GIB)
+        self.assertEqual(status.vram.available, 6 * GIB - HEADROOM)
+        # 6.1 GiB would overcommit the GPU once the second lease allocates.
+        self.assertEqual(
+            (await self.scheduler.try_acquire(coding(vram=int(6.1 * GIB)))).refusal,
+            Refusal.INSUFFICIENT_FREE_VRAM,
+        )
+        self.assertEqual(
+            (await self.scheduler.try_acquire(coding(vram=2 * GIB))).refusal,
+            Refusal.INSUFFICIENT_FREE_VRAM,
+        )
+        del self.probe.resident[JOB_PID]  # the memory is freed at last
+        status = await self.scheduler.refresh()
+        self.assertEqual(status.vram.external, 0)
+        self.assertEqual(status.vram.committed, 85 * GIB)
+        await second.release()
+        status = await self.scheduler.refresh()
+        self.assertEqual(status.vram.committed, 80 * GIB)
+
+    async def test_an_ambiguous_release_errs_on_the_safe_side_and_heals(self):
+        # Which lease's process holds the memory is not known: when a lease
+        # that allocated nothing is released beside one that did, the memory
+        # is taken for the released lease's (external) until the other ends.
+        first = (await self.scheduler.try_acquire(coding(vram=5 * GIB))).lease
+        second = (await self.scheduler.try_acquire(coding(vram=5 * GIB))).lease
+        self.probe.resident[JOB_PID] = 5 * GIB  # the second lease's
+        await self.scheduler.refresh()
+        await first.release()
+        status = await self.scheduler.refresh()
+        self.assertEqual(status.vram.external, 5 * GIB)
+        self.assertEqual(status.vram.committed, 90 * GIB)  # never less
+        await second.release()
+        del self.probe.resident[JOB_PID]
+        status = await self.scheduler.refresh()
+        self.assertEqual(status.vram.external, 0)
+        self.assertEqual(status.vram.committed, 80 * GIB)
+        self.assertIsNotNone(
+            (await self.scheduler.try_acquire(coding(vram=11 * GIB))).lease
+        )
+
     async def test_another_workload_defers_the_work_with_a_warning(self):
         self.probe.external = 10 * GIB  # not under pressure: 1.2 GiB left
         await self.scheduler.refresh()
@@ -327,6 +380,58 @@ class FreeVramAdmissionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(admitted.lease.placement, Placement.LOCAL_CPU)
         self.assertEqual(admitted.lease.vram_bytes, 0)
         self.assertEqual(sink.events, [])
+
+    async def test_a_cpu_placement_does_not_queue_behind_a_vram_waiter(self):
+        scheduler, probe, _, _, _ = build_with_sink(
+            (main_spec(), memory_spec(), embedding_spec(initial=DeploymentState.CPU)),
+            external=8 * GIB,  # 3.2 GiB left beyond the headroom
+        )
+        await scheduler.refresh()
+        large = asyncio.create_task(
+            scheduler.acquire(
+                ComputeRequest(SU, deployment="memory", vram_bytes=6 * GIB),
+                wait_seconds=600,
+            )
+        )
+        await settle()
+        self.assertEqual(scheduler.status().vram_waiting, 1)
+        request = ComputeRequest(SU, deployment="embed", vram_bytes=GIB)
+        admitted = await scheduler.try_acquire(request)
+        self.assertEqual(admitted.lease.placement, Placement.LOCAL_CPU)
+        self.assertEqual(admitted.lease.vram_bytes, 0)
+        # A waiter that would run on the CPU is admitted by the pump too.
+        await admitted.lease.release()
+        for _ in range(8):
+            await scheduler.try_acquire(ComputeRequest(SU, deployment="embed"))
+        cpu_waiter = asyncio.create_task(scheduler.acquire(request, wait_seconds=600))
+        await settle()
+        self.assertFalse(cpu_waiter.done())  # SEQUENCES_FULL on the CPU copy
+        [held, *_] = scheduler._deployments["embed"].leases
+        await held.release()
+        await settle()
+        self.assertEqual((await cpu_waiter).placement, Placement.LOCAL_CPU)
+        self.assertFalse(large.done())
+        large.cancel()
+
+    async def test_only_waiters_for_vram_hold_back_other_models(self):
+        # A VRAM request on the memory model waits for a sequence of its own
+        # model, not for VRAM: work that needs VRAM on another model goes on.
+        for _ in range(4):
+            await self.scheduler.try_acquire(ComputeRequest(SU, deployment="memory"))
+        waiting = asyncio.create_task(
+            self.scheduler.acquire(
+                ComputeRequest(SU, deployment="memory", vram_bytes=GIB),
+                wait_seconds=600,
+            )
+        )
+        await settle()
+        self.assertEqual(self.scheduler.status().vram_waiting, 0)
+        admitted = await self.scheduler.try_acquire(
+            ComputeRequest(SU, deployment="embed", vram_bytes=GIB)
+        )
+        self.assertIsNotNone(admitted.lease)
+        self.assertFalse(waiting.done())
+        waiting.cancel()
 
 
 class ModelLoadWarningTest(unittest.IsolatedAsyncioTestCase):
