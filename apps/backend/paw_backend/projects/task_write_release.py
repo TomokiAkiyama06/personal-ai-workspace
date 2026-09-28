@@ -1,6 +1,6 @@
 """Releasing, by hand, the repository write a crashed process left (issue #129).
 
-Decision 0048 (Proposed; it supersedes the last sentence of Decision 0035, section
+Decision 0049 (Proposed; it supersedes the last sentence of Decision 0035, section
 5). The Tool Broker reserves every repository write (or execution) it admits
 (``task_repository_writes``) until the executor returned; meanwhile the task does
 not begin evaluation or complete and the repository is not downgraded or removed.

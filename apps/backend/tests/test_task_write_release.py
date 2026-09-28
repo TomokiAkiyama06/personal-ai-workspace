@@ -1,6 +1,6 @@
 """Releasing by hand the repository write of a crashed process (issue #129).
 
-Decision 0048 (Proposed). ``TaskService.release_stale_repository_write`` (the
+Decision 0049 (Proposed). ``TaskService.release_stale_repository_write`` (the
 release itself: refused for a live holder, allowed for a stale one, the
 repositories count as written, the history records who and why) and
 ``projects.TaskWriteReleaser`` (who may: authorization, audit, Passkey Step-up).
@@ -259,7 +259,7 @@ class ReleaseTest(ReleaseTestCase):
         (Decision 0007, section 7). The new holder's valid lease refuses the
         release of the crashed executor's reservation too (the lease is not tied
         to the run that reserved), until that lease ends as well: the task is
-        paused or stopped (Decision 0048, section 4), or the worker crashes."""
+        paused or stopped (Decision 0049, section 4), or the worker crashes."""
         task_id = await self.two_targets()
         reservation = await self.write_to(task_id, self.other, ended=False)
         await self.claimed(task_id)
@@ -442,7 +442,7 @@ class FailingSink:
 
 @requires_postgres
 class ReleaserTest(ReleaseTestCase):
-    """Who may release (Decision 0048 Proposed): the project Manager and the
+    """Who may release (Decision 0049 Proposed): the project Manager and the
     Owner / Admin, with a Passkey Step-up; every decision is audited."""
 
     async def asyncSetUp(self):

@@ -208,7 +208,7 @@ class RepositoryWriteNotHeldError(WorkingSetError):
 
 class RepositoryWriteHolderAliveError(WorkingSetError):
     """A manual release while a worker still holds a valid lease on the task's
-    queue entry (issue #129, Decision 0048 Proposed): the process that was
+    queue entry (issue #129, Decision 0049 Proposed): the process that was
     admitted the write may be alive, so its reservation is not given up by
     hand. Asked again once the lease ended."""
 

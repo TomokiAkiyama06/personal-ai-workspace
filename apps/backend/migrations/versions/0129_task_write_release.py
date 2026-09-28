@@ -4,7 +4,7 @@ Revision ID: 0129
 Revises: 0085
 Create Date: 2026-09-28
 
-Decision 0048 (Proposed): a person may release, by hand, the repository write
+Decision 0049 (Proposed): a person may release, by hand, the repository write
 reservation (``task_repository_writes``) of a process that crashed, instead of
 waiting for it to expire (Decision 0035, section 5). The release uses the columns
 revision 0085 already has (``released_at``, and the attempt state it marks as

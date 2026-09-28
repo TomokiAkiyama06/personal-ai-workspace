@@ -112,7 +112,7 @@ class Capability(StrEnum):
     # (``tasks.working_set.required_permission``), and both must allow.
     PROJECT_TASK_WORKING_SET_MANAGE = "project.task.working_set.manage"
     # Release, by hand, the repository write reservation a crashed process left
-    # on a task of the project (issue #129, Decision 0048 Proposed): project
+    # on a task of the project (issue #129, Decision 0049 Proposed): project
     # Manager, and Owner / Admin. Not delegable; a Passkey Step-up besides
     # (``projects.task_write_release``).
     PROJECT_TASK_WRITE_RESERVATION_RELEASE = "project.task.write_reservation.release"
@@ -235,7 +235,7 @@ CAPABILITIES: MappingProxyType[Capability, CapabilityInfo] = MappingProxyType(
         # .write``, AND), and every change but adding a ``referenced`` repository
         # needs STRONG_APPROVAL (a human, with Step-up).
         C.PROJECT_TASK_WORKING_SET_MANAGE: _info(Scope.PROJECT, delegable=True),
-        # Not delegable (Decision 0048 Proposed): it lifts a guard that exists
+        # Not delegable (Decision 0049 Proposed): it lifts a guard that exists
         # because an agent's executor may still be writing; a person decides,
         # after checking that the executor is gone.
         C.PROJECT_TASK_WRITE_RESERVATION_RELEASE: _info(Scope.PROJECT, delegable=False),
