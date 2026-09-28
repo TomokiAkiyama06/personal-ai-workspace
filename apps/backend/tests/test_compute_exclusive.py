@@ -129,6 +129,24 @@ class ExclusiveTest(unittest.IsolatedAsyncioTestCase):
         )  # a running coding task is not stopped
         await running.release()
 
+    async def test_running_background_work_is_waited_for_not_stopped(self):
+        # Decision 0037's 7: the drain waits for running work, Background work
+        # too (its safe pause is PAW-037's); it is not asked to stop.
+        running = (
+            await self.scheduler.try_acquire(
+                ComputeRequest(
+                    ResourceClass.BACKGROUND, deployment="memory", context_tokens=1_000
+                )
+            )
+        ).lease
+        job = asyncio.create_task(self.scheduler.acquire(exclusive(), wait_seconds=60))
+        await settle()
+        self.assertFalse(running.revoked.is_set())
+        self.assertFalse(job.done())
+        await running.release()
+        lease = await job
+        await lease.release()
+
     async def test_only_one_exclusive_job_at_a_time(self):
         lease = await self.scheduler.acquire(exclusive(), wait_seconds=60)
         with self.assertRaises(ExclusiveUnavailableError) as raised:

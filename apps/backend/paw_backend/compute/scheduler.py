@@ -583,20 +583,30 @@ class ComputeScheduler:
         if device is None:
             self._lose_sample("GpuNotFound")
             return
+        sampled_at = self._clock.monotonic()
+        # The models are asked about their processes and KV use (commands that
+        # can take a while) before anything of this reading is published: the
+        # reading, its freshness and what the models said become visible to
+        # admission together, never a fresh reading beside the previous one's
+        # KV use.
+        inspected: dict[_Deployment, tuple[frozenset[int] | None, float | None]] = {}
+        for entry in self._ordered:
+            if not entry.busy and entry.counts_on_gpu:
+                inspected[entry] = await self._inspect(entry)
         if self._probe_failing:
             logger.info("GPU probe is available again")
         self._probe_failing = False
         self._device = device
         self._processes = sample.processes_on(device)
-        self._sampled_at = self._clock.monotonic()
+        self._sampled_at = sampled_at
         for entry in self._ordered:
             if entry.busy:
                 continue
             if not entry.counts_on_gpu:
                 entry.pids = frozenset()
                 entry.observed = None
-                continue
-            entry.pids, entry.observed = await self._inspect(entry)
+            elif entry in inspected:
+                entry.pids, entry.observed = inspected[entry]
 
     async def _inspect(
         self, entry: _Deployment
@@ -1086,8 +1096,9 @@ class ComputeScheduler:
                 entry.counts_on_gpu for entry in self._ordered
             ):
                 raise ExclusiveUnavailableError(ExclusiveFailure.CANNOT_UNLOAD)
+            # Running work is waited for, not stopped (Background work too: its
+            # safe pause / drain is PAW-037's).
             logger.info("Exclusive GPU job requested: draining local GPU work")
-            self._revoke(lambda lease: lease.resource_class is ResourceClass.BACKGROUND)
             if self._local_gpu_leases():
                 self._drained = asyncio.Event()
                 waiter = asyncio.ensure_future(self._drained.wait())

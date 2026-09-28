@@ -102,6 +102,33 @@ class AdmissionTest(unittest.IsolatedAsyncioTestCase):
             self.scheduler.status().deployment("main").observed_kv_fraction, 0.85
         )
 
+    async def test_a_reading_is_published_only_with_what_the_models_said(self):
+        # No reading yet (the probe failed); the next one is being taken and the
+        # model control is slow to answer: admission does not use the new
+        # reading beside the previous KV use (none), it waits for all of it.
+        self.probe.fail = True
+        await self.scheduler.refresh()
+        self.probe.fail = False
+        self.control.kv["main"] = 0.85
+        answer = asyncio.Event()
+        processes = self.control.processes
+
+        async def slow_processes(deployment):
+            await answer.wait()
+            return await processes(deployment)
+
+        self.control.processes = slow_processes
+        refreshing = asyncio.create_task(self.scheduler.refresh())
+        await settle()
+        try:
+            admission = await self.scheduler.try_acquire(request(IC, tokens=8_000))
+            self.assertEqual(admission.refusal, Refusal.PROBE_UNAVAILABLE)
+        finally:
+            answer.set()
+            await refreshing
+        admission = await self.scheduler.try_acquire(request(IC, tokens=8_000))
+        self.assertEqual(admission.refusal, Refusal.KV_FULL)
+
     async def test_background_leaves_room_for_interactive_and_coding(self):
         # 70,000 tokens reserved: 53% of the pool.
         held = [
