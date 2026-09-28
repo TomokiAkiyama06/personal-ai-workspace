@@ -402,6 +402,26 @@ JSON-serializable itself: adapters build provider payloads from
 of a tool or request work and re-validate the copy; `dataclasses.asdict` is not supported for
 tools and raises `TypeError`, so use `to_dict()` instead.
 
+## Seed benchmark dataset
+
+[`seed-tasks/paw-seed-v1`](seed-tasks/paw-seed-v1/README.md) is the seed task set of PAW-016
+([Decision 0038](../docs/decisions/0038-seed-benchmark-dataset.md), Proposed): 24 tasks from this
+repository (11 historical from merged PRs, 6 spec, 7 injected bugs), each with its difficulty and
+categories in `manifest.json`.  Only task manifests are public; hidden tests, golden patches and the
+per-task repositories live in the evaluator-private `/data/datasets/paw-seed-v1`.
+
+- `python -m benchmarks.seed_dataset check` validates the index and every task (schema, naming,
+  opaque `reference_id`, no public `known_good_commit`, no credential-shaped strings).
+- `build` recreates the private per-task repositories (starting commit and its ancestors only;
+  injected-bug tasks get a parentless snapshot commit with fixed metadata, so its id is
+  reproducible) and the golden patches of historical tasks.
+- `verify` checks golden behaviour with `WorktreeRunner` and `TestRunner`: every hidden check
+  must have its expected status on the starting state and on the golden state.
+- Hidden checks run `benchmarks/seed_check.py` from the evaluator's checkout.  It copies the
+  candidate worktree to a private temporary directory, lays the hidden tests over the copy
+  (the candidate worktree is never written), fails on skipped tests, and gives PostgreSQL tests a
+  throwaway database `paw_seed_<random>` that it drops afterwards.
+
 ## Validator
 
 standalone CLIはprojectの安定したvirtual environmentへCI依存を導入して実行します。

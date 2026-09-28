@@ -1,0 +1,45 @@
+{
+  "schema_version": "1.0",
+  "task_id": "paw-seed-v1-bug-01-ndcg-ideal-cutoff",
+  "kind": "injected_bug",
+  "repository": {
+    "locator": "paw-dataset://paw-seed-v1/paw-seed-v1-bug-01-ndcg-ideal-cutoff",
+    "starting_commit": "90bddaf4f95faf40817f488fe435565f4177a678"
+  },
+  "issue_text": "# nDCG@Kが、relevantなmemoryがKより多いqueryで1.0にならない\n\nRetrieval benchmarkで、上位K件がすべてrelevantなのにnDCG@Kが1.0未満になるqueryがあります。\nrelevantなmemoryの数がKより多いqueryで起きています（例: relevantが3件、K=1で先頭がrelevant）。\nbinary relevanceのnDCG@Kでは、理想のrankingは`min(relevantの数, K)`件のrelevantなidを先頭に並べたものです。\n原因を直してください。`benchmarks/tests/test_retrieval_metrics.py`が失敗しています。\n\n## 作業の条件\n\n- 作業はこのRepositoryのstarting commitから始めます。既存のTestを削除・無効化したり、期待値を不当に緩めたりしてはいけません。\n- 評価はExecutable Evaluatorが行います。公開されたcheck（visible checks）に加えて、候補から見えないHidden checkがあります。\n- Credential・秘密情報をcode・log・commitへ入れないでください（SECURITY.md）。\n",
+  "visible_checks": [
+    {
+      "id": "lint",
+      "type": "lint",
+      "command": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "benchmarks"
+      ]
+    },
+    {
+      "id": "retrieval-metrics-tests",
+      "type": "unit",
+      "command": [
+        "python",
+        "-m",
+        "unittest",
+        "benchmarks.tests.test_retrieval_metrics"
+      ]
+    }
+  ],
+  "hidden_checks": [
+    {
+      "id": "hidden-acceptance",
+      "type": "acceptance",
+      "reference_id": "seed-v1-d4197c4e0d31"
+    },
+    {
+      "id": "hidden-regression",
+      "type": "regression",
+      "reference_id": "seed-v1-324991b280ad"
+    }
+  ]
+}
