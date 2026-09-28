@@ -766,6 +766,30 @@ class EmbedderTest(unittest.IsolatedAsyncioTestCase):
         await embedder.embed(["a"])
         self.assertEqual((gpu.calls, cpu.calls), (1, 1))
 
+    async def test_a_revoked_lease_stops_a_gpu_embedding_call(self):
+        scheduler, *_ = build()
+        await scheduler.refresh()
+        started = asyncio.Event()
+
+        class Hung(self.Embedder):
+            async def embed(self, texts):
+                started.set()
+                await asyncio.Event().wait()
+
+        embedder = PlacedEmbedder(scheduler, deployment="embed", gpu=Hung("gpu"))
+        call = asyncio.create_task(embedder.embed(["hello"]))
+        await started.wait()
+        lease = next(iter(scheduler._deployments["embed"].leases))
+        lease.revoked.set()  # a relief step is about to move the model
+        await settle()
+        try:
+            self.assertTrue(call.done())
+            with self.assertRaises(ComputeUnavailableError):
+                await call
+            self.assertTrue(lease.released)
+        finally:
+            call.cancel()
+
     async def test_no_room_is_an_error_the_retrieval_degrades_on(self):
         scheduler, *_ = build(
             (main_spec(), embedding_spec(initial=DeploymentState.UNLOADED)),

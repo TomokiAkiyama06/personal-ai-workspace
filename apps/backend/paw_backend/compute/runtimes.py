@@ -34,7 +34,7 @@ import logging
 import math
 import uuid
 import weakref
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Coroutine, Sequence
 from typing import Protocol
 
 from paw_backend.compute.domain import (
@@ -97,6 +97,26 @@ async def _cancel_and_wait(work: asyncio.Future, lease: ComputeLease) -> None:
             "A local runtime did not stop when it was cancelled: its lease is "
             "kept until it ends"
         )
+
+
+async def _until_revoked[T](
+    call: Coroutine[object, object, T],
+    lease: ComputeLease,
+    stopped: Callable[[], BaseException],
+) -> T:
+    """Await ``call``; when ``lease`` is revoked first, cancel it and raise
+    ``stopped()``. A call that does not stop when it is cancelled keeps the lease
+    until it ends (its GPU capacity is not given away)."""
+    work = asyncio.ensure_future(call)
+    revoked = asyncio.ensure_future(lease.revoked.wait())
+    try:
+        await asyncio.wait({work, revoked}, return_when=asyncio.FIRST_COMPLETED)
+        if work.done():
+            return work.result()
+        raise stopped()
+    finally:
+        revoked.cancel()
+        await _cancel_and_wait(work, lease)
 
 
 def _retrieve(task: asyncio.Future) -> None:
@@ -573,18 +593,10 @@ class ScheduledMemoryWorker:
         async with admission.lease as lease:
             # A revoked lease (VRAM pressure on Background work, or the model is
             # about to be unloaded) stops the job: it is deferred, not failed,
-            # and the relief steps are not held up by it. A job that does not
-            # stop when it is cancelled keeps the lease until it ends.
-            work = asyncio.ensure_future(self._worker.extract(input_text))
-            revoked = asyncio.ensure_future(lease.revoked.wait())
-            try:
-                await asyncio.wait({work, revoked}, return_when=asyncio.FIRST_COMPLETED)
-                if work.done():
-                    return work.result()
-                raise WorkerUnavailableError()
-            finally:
-                revoked.cancel()
-                await _cancel_and_wait(work, lease)
+            # and the relief steps are not held up by it.
+            return await _until_revoked(
+                self._worker.extract(input_text), lease, WorkerUnavailableError
+            )
 
 
 class PlacedEmbedder:
@@ -643,4 +655,11 @@ class PlacedEmbedder:
                 if self._cpu is None:
                     raise ComputeUnavailableError(Refusal.NOT_RESIDENT)
                 return await self._cpu.embed(texts)
-            return await self._gpu.embed(texts)
+            # The GPU copy is about to be moved to the CPU or unloaded (a relief
+            # step waits for its leases): a revoked lease stops the call, and the
+            # retrieval degrades (Decision 0019).
+            return await _until_revoked(
+                self._gpu.embed(texts),
+                lease,
+                lambda: ComputeUnavailableError(Refusal.NOT_RESIDENT),
+            )
