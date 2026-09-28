@@ -36,7 +36,9 @@ The rules (Decision 0025), and where each lives:
   target is looked at. In ONE transaction: the target's row is locked ``FOR UPDATE``,
   every Passkey of the target is revoked (``admin_reset``) and its open challenges
   deleted, then every session ends (``admin``: the Passkey rows before the session
-  rows, the lock order of Decision 0025 section 15), and a one-time password reset
+  rows, the lock order of Decision 0025 section 15), every live device pairing
+  ends (``credentials_reset``, PAW-024: a pairing token or an approved claim from
+  before the reset gives no session after it), and a one-time password reset
   token is issued, which also deletes the password (``reset_tokens``). The token is
   returned once to the actor, who hands it to the target; the target sets a new
   password with it (``POST /auth/token/redeem``) and signs in into an enrolment-only
@@ -81,6 +83,8 @@ from paw_backend.auth.models import (
     RevokeReason,
     ThrottleScope,
 )
+from paw_backend.auth.onboarding.models import PairingEnd
+from paw_backend.auth.onboarding.pairing import end_live_pairings_in
 from paw_backend.auth.passkeys import ceremony
 from paw_backend.auth.passkeys.config import PasskeyConfig
 from paw_backend.auth.passkeys.models import (
@@ -571,11 +575,32 @@ class PasskeyService:
             ended = await self._sessions.revoke_all(
                 session, target_user_id, RevokeReason.ADMIN
             )
+            # And every live pairing (PAW-024): a pairing token or an approved
+            # claim issued before the reset must not give a new session after it.
+            # The target's row is locked, the pairing's lock order.
+            now = self._audit.now()
+            for ref in await end_live_pairings_in(
+                session, target_user_id, PairingEnd.CREDENTIALS_RESET, now
+            ):
+                await self._audit.record_in(
+                    session,
+                    self._audit.event(
+                        AuthAction.PAIRING_REVOKE,
+                        AuthReason.RESET,
+                        allowed=True,
+                        correlation_id=context.correlation_id,
+                        client_request_id=context.client_request_id,
+                        actor_id=actor.user_id,
+                        actor_role=actor.system_role,
+                        resource_kind="device_pairing",
+                        resource_id=ref,
+                    ),
+                )
             try:
                 token = await issue_in(
                     session,
                     target_user_id,
-                    now=self._audit.now(),
+                    now=now,
                     ttl_seconds=self._reset_ttl,
                 )
             except ResetTokenRefused:  # (cannot happen: the row is locked)

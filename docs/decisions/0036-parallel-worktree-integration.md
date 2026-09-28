@@ -1,10 +1,10 @@
 # Parallel Worktree / Integration Node の方針（Worker ごとの worktree・branch、統合の方法、Conflict の扱い、統合後の Test / Evaluator / Review、default branch の保護）
 
-- Status: Proposed
+- Status: Approved
 - Date: 2026-09-28
 - Scope: PAW-035（[#31](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/31)）の実装（`paw_backend/integration/`、`paw_backend/orchestrator/workspaces.py`、`Orchestrator(worktrees=...)`、`TaskScope.excluded_paths` とその切り出しの規則）。Migration はない
-- Supersedes: なし（[Decision 0021](0021-dag-orchestrator-policy.md)・[Decision 0017](0017-repository-registration-policy.md)・[Decision 0029](0029-per-user-git-runner-ssh.md) は書き換えない。0029 の 3 の表への追加は下の 13 で提案し、承認されたらその部分だけを Supersede する）
-- Approval: なし（Human の判断待ち）
+- Supersedes: なし（[Decision 0021](0021-dag-orchestrator-policy.md)・[Decision 0017](0017-repository-registration-policy.md)・[Decision 0029](0029-per-user-git-runner-ssh.md) は書き換えない。0029 の 3 の表への追加は下の 13 のとおりで、承認によりその部分だけを Supersede する。Wrapper の実装は [#134](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/134)）
+- Approval: 2026-09-28、Human（Repository の Owner）が作業 Session 内で、判断点ごとの説明（推奨つき）を受けたうえで「推奨どおり」と回答して承認（16 点すべて）。13 には条件つき（末尾の「承認時の決定」）
 
 ## 背景
 
@@ -185,3 +185,28 @@ worktree の中で動かす `status`・`merge`・`symbolic-ref`・`rev-parse --v
 ## 承認後の扱い
 
 承認されたら `Status` と `Approval` を改める（Human が行う。この Decision を Agent が Approved にしない）。方針を変えるときは、この Decision を書き換えず、新しい Decision から `Supersedes` する。[REQUIREMENTS.md](../../REQUIREMENTS.md) の原文は書き換えない。
+
+## 承認時の決定（2026-09-28）
+
+Human（Repository の Owner）は、作業 Session で上の 16 点について推奨つきの説明を受け、「推奨どおり」と回答して承認した（16 点を一括で）。**16 点すべてが推奨どおり**で、13 にだけ下の条件が付いた。
+
+1. 置き場所と名前: 推奨どおり（`<home>/<workspace_subdir>/.paw-worktrees/<task id>/<attempt>/<repository id>/<node key>`、`paw/<task id>/<attempt>/<node key>`、`_integration`）。
+2. worktree を与える Node と Node の Scope: 推奨どおり（`TaskScope.excluded_paths` と切り出しの規則、置き場所全体と `.git` の除外を含む）。#124 の Merge 後は `working` / `target` の Repository に限る。
+3. Worker の branch の起点（依存先の branch を merge）と、依存先との Conflict で Node を再試行なしに失敗させること: 推奨どおり。
+4. Integration の base（default branch の local の先端、fetch しない）: 推奨どおり。
+5. Integration の時期・順序・`--no-ff`・固定の作者・署名しない、進行中の merge を中断しない、Conflict でない merge の失敗を git の失敗にする、worktree の git を `--git-dir` / `--work-tree` で固定する: 推奨どおり。
+6. Conflict で Repository を止め、Task を `waiting`（`user`）にし、Human の解消後に再統合する: 推奨どおり。
+7. 未 Commit の変更で止め、自動で Commit も破棄もしない: 推奨どおり。
+8. git の失敗で Task を `failed` にする: 推奨どおり。
+9. 統合後の Test → Evaluator → Review の Gate、全部通ったら `completed`（Merge Ready）、未 Commit の integration worktree を検査しない: 推奨どおり。
+10. PR の作成と integration branch の Push をこの PR に含めず別 Issue にする: 推奨どおり。担当は [#132](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/132)。
+11. 新しい Table を作らない: 推奨どおり。#124 の Merge 後に Repository ごとの試行の状態に記録する。
+12. worktree / branch を残し、削除を別の操作にする: 推奨どおり。
+13. Wrapper の許可リストへの追加（Decision 0029 の 3 の表のこの部分を Supersede）: 推奨どおり、**ただし次の条件つき**。Wrapper の実装は [#134](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/134) で行い、この条件を満たすまで完了としない。
+    - `-c` は、固定の一覧にある固定の値のときだけ受け入れる（`user.name=Personal AI Workspace`、`user.email=integration@paw.invalid`、`commit.gpgSign=false`、`merge.verifySignatures=false` のように、キーと値の組をそのまま一覧にする。任意の値やキーは拒否する）。
+    - `--git-dir=` / `--work-tree=` は、正規化した Path が、その User の `workspaces` の下（`.paw-worktrees` を含む）にあるときだけ受け入れる。Symbolic Link を解決した結果がその外に出る Path（Symlink による脱出）は拒否する。
+14. git 2.38 以降を Server の要件にする: 推奨どおり。
+15. DAG の中で Worker の後に置いた読み取り専用の Node が上流の Worker の変更を見ないこと: 推奨どおり（制限として明記し、統合された結果の Review は `IntegrationGate` が行う）。
+16. worktree を受け取らない Worker の Scope に worktree の置き場所を含めたままにすること: 推奨どおり。
+
+承認後に方針を変える場合は、この Decision を書き換えず、新しい Decision から `Supersedes` する。

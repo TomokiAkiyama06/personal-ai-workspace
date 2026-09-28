@@ -43,6 +43,18 @@ PUBLIC_ROUTES = {
     # source and in total BEFORE the token is looked at, on top of the token's
     # own attempt limit; every failure is the same answer.
     ("POST", "/api/v1/auth/token/redeem"),
+    # PAW-024 (Decision 0033). An invited person has no session yet: they set their
+    # password with the one-time invitation token. Rate limited per source and in
+    # total (the Owner token's scopes) BEFORE the token is looked at, on top of the
+    # token's own attempt limit; every failure is the same answer; no session.
+    ("POST", "/api/v1/auth/invitations/redeem"),
+    # PAW-024. The new device of a QR code / link has no session: it hands in the
+    # one-time pairing token and, for an Owner / Admin, completes with its one-time
+    # claim once a trusted device approved it. Rate limited per source and in total
+    # (``pairing_*``; a correct token or claim gives its attempt back) and per
+    # token; every failure is the same answer.
+    ("POST", "/api/v1/auth/pairing/claim"),
+    ("POST", "/api/v1/auth/pairing/complete"),
 }
 
 

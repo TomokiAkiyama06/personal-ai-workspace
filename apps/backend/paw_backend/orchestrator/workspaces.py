@@ -20,7 +20,7 @@ is the implementation), it asks it for two things and nothing else:
 
 Without a ``NodeWorkspaces`` the orchestrator behaves as PAW-034 did (no
 worktree, no integration): the seam is optional so that a deployment without
-checkouts keeps working. Decision 0036 (Proposed) lists the choices.
+checkouts keeps working. Decision 0036 (Approved) lists the choices.
 """
 
 import uuid

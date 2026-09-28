@@ -7,7 +7,7 @@ branch; conflicts are detected and reported), and the integrated result is what
 the tests, the Evaluator and the review check (``gate.py``). git runs through the
 deployment's ``GitRunner`` as the task creator's own Linux account. See
 ``apps/backend/README.md`` ("Parallel Worktree / Integration") and
-``docs/decisions/0036-parallel-worktree-integration.md`` (Proposed).
+``docs/decisions/0036-parallel-worktree-integration.md`` (Approved).
 """
 
 from paw_backend.integration.coordinator import (

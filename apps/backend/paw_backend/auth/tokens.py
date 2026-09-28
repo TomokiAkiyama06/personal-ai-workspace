@@ -95,6 +95,8 @@ def source_key(bucket: str) -> bytes:
 
 
 GLOBAL_KEY = _digest("global", "redeem")
+# The total of the public pairing routes (PAW-024): a counter of its own.
+PAIRING_GLOBAL_KEY = _digest("global", "pairing")
 
 
 def source_audit_id(bucket: str) -> uuid.UUID:

@@ -31,7 +31,7 @@ bounded output). This module adds the rules of its own:
   a person, makes an integration merge (``MERGE_IDENTITY``); ``commit.gpgSign``
   is off (a repository's own configuration cannot make the merge need a key).
 
-The sub-commands used here are listed in Decision 0036 (Proposed) as additions to
+The sub-commands used here are listed in Decision 0036 (Approved) as additions to
 the Wrapper's allowlist of Decision 0029.
 """
 

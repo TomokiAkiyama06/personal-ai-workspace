@@ -13,7 +13,7 @@ key starts with a letter, so no node can be called that) on the branch
 ``paw/<task>/<attempt>/_integration``. Every branch is inside the ``paw/``
 namespace: a default branch inside it is refused (``WorktreeProblem.
 DEFAULT_BRANCH_IN_NAMESPACE``), so no branch the backend writes can ever be the
-default branch. Decision 0036 (Proposed) lists these choices.
+default branch. Decision 0036 (Approved) lists these choices.
 """
 
 import re

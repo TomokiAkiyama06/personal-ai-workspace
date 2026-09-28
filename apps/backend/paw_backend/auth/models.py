@@ -48,6 +48,13 @@ class AuthMethod(StrEnum):
 
     PASSWORD = "password"
     PASSKEY = "passkey"
+    # A session a trusted device added through a QR code / link (PAW-024). A
+    # sign-in method only: nothing is ever stepped up by pairing.
+    PAIRING = "pairing"
+
+
+# The methods a Step-up can be proven by (a pairing proves no Step-up).
+STEP_UP_METHODS = (AuthMethod.PASSWORD, AuthMethod.PASSKEY)
 
 
 class RevokeReason(StrEnum):
@@ -91,6 +98,10 @@ class ThrottleScope(StrEnum):
     LOGIN_SOURCE = "login_source"
     REDEEM_SOURCE = "redeem_source"
     REDEEM_GLOBAL = "redeem_global"
+    # The public pairing routes (PAW-024): a correct token or claim gives its
+    # attempt back, so that a new device polling for its approval is not locked.
+    PAIRING_SOURCE = "pairing_source"
+    PAIRING_GLOBAL = "pairing_global"
 
 
 class PasskeyRequirement(StrEnum):
@@ -187,7 +198,7 @@ class AuthSessionRow(Base):
         ),
         _in(
             "stepup_method",
-            [m.value for m in AuthMethod],
+            [m.value for m in STEP_UP_METHODS],
             "stepup_method_valid",
         ),
         _in(

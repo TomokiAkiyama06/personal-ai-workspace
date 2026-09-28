@@ -48,7 +48,7 @@ worktrees lie in ``<home>/<workspace_subdir>/.paw-worktrees``)::
 Nothing here pushes, and no branch outside ``paw/`` is ever written: the default
 branch cannot be integrated into (``layout.py``). Worktrees and branches are kept
 after the task (``REQUIREMENTS.md``: stopping a task keeps its branch / worktree;
-deleting them is a separate operation). Decision 0036 (Proposed) lists the
+deleting them is a separate operation). Decision 0036 (Approved) lists the
 choices.
 """
 
