@@ -214,6 +214,54 @@ describe("Passkeys (設定 › 端末とセッション)", () => {
     });
   });
 
+  it("ignores a read of the passkeys that was in flight while one was registered", async () => {
+    fakeWebAuthn();
+    mockApi({
+      ...devicesPage,
+      "GET /auth/session": [reply(200, session()), reply(200, session({ enrolled: true }))],
+      "POST /auth/passkeys/enroll/begin": reply(200, {
+        options: {
+          challenge: "AQ",
+          rp: { name: "PAW" },
+          user: { id: "AQ", name: "t", displayName: "t" },
+          pubKeyCredParams: [],
+        },
+      }),
+      "POST /auth/passkeys/enroll/finish": reply(200, { passkey, session: null }),
+    });
+    const tableFetch = globalThis.fetch;
+    let reads = 0;
+    let answerFirst: (response: Response) => void = () => {};
+    const json = (body: unknown) =>
+      new Response(JSON.stringify(body), { headers: { "Content-Type": "application/json" } });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        if (String(input).endsWith("/auth/passkeys") && (init?.method ?? "GET") === "GET") {
+          reads += 1;
+          if (reads === 1) {
+            return new Promise<Response>((resolve) => {
+              answerFirst = resolve;
+            });
+          }
+          return Promise.resolve(json({ passkeys: [passkey] }));
+        }
+        return tableFetch(input, init);
+      }),
+    );
+    renderApp("/settings/devices");
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "この端末に追加" }));
+    await user.type(screen.getByLabelText("端末名"), "MacBook");
+    await user.click(screen.getByRole("button", { name: "登録する" }));
+    expect(await screen.findByText("Passkey を登録しました。")).toBeInTheDocument();
+    await waitFor(() => expect(within(passkeyCard()).getByText("MacBook")).toBeInTheDocument());
+    // The first read, started before the registration, answers last.
+    answerFirst(json({ passkeys: [] }));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(within(passkeyCard()).getByText("MacBook")).toBeInTheDocument();
+  });
+
   it("reports a browser without passkey support when registering", async () => {
     vi.stubGlobal("PublicKeyCredential", undefined);
     mockApi({

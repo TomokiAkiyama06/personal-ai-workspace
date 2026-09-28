@@ -325,6 +325,29 @@ describe("設定 › 端末とセッション", () => {
     expect(within(trusted()).queryByText("Phone")).not.toBeInTheDocument();
   }, 10000);
 
+  it("keeps waiting for the approved device when the step-up rotated this session", async () => {
+    const soon = { ...waiting, expires_at: new Date(Date.now() + 60_000).toISOString() };
+    const rotated = { ...session().session, id: "s-rotated" };
+    const newDevice = { ...otherSession, id: "s-3", device_name: "Approved phone" };
+    mockApi({
+      ...base,
+      "GET /auth/sessions": [
+        reply(200, { sessions: [session().session] }),
+        // Right after the approval: only this session, under its new id.
+        reply(200, { sessions: [rotated] }),
+        reply(200, { sessions: [rotated, newDevice] }),
+      ],
+      "GET /auth/pairing/pending": [reply(200, { pending: [soon] }), reply(200, { pending: [] })],
+      "POST /auth/pairing/p-1/approve": reply(204),
+    });
+    renderApp("/settings/devices");
+    const user = userEvent.setup();
+    await user.type(await screen.findByLabelText("新しい端末に表示されている確認コード"), "AB12");
+    await user.click(screen.getByRole("button", { name: "承認" }));
+    expect(await screen.findByText("端末を承認しました。")).toBeInTheDocument();
+    expect(await screen.findByText("Approved phone", {}, { timeout: 7000 })).toBeInTheDocument();
+  }, 10000);
+
   it("shows a wrong confirmation code as such", async () => {
     mockApi({
       ...base,

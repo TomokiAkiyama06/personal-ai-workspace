@@ -1,6 +1,6 @@
 // The Passkey card of 設定 › 端末とセッション (the design's SettingsDevices) and
 // its registration panel (PasskeyStates C).
-import { type FormEvent, useCallback, useEffect, useId, useState } from "react";
+import { type FormEvent, useCallback, useEffect, useId, useRef, useState } from "react";
 import { authApi, PASSKEY_NAME_MAX, type Passkey } from "../api/auth";
 import { StepUpCancelledError, useStepUp } from "../auth/StepUp";
 import { useSession, useSignedIn } from "../auth/session";
@@ -24,11 +24,16 @@ export function PasskeysSection({ onSessionsChanged }: { onSessionsChanged?: () 
   const [notice, setNotice] = useState<string | null>(null);
   const requirement = data.auth?.passkey;
 
+  // Only the newest read counts: an earlier one answering after a registration
+  // or removal must not bring the old list back.
+  const reads = useRef(0);
   const load = useCallback(async () => {
+    const mine = ++reads.current;
     try {
-      setPasskeys((await authApi.passkeys()).passkeys);
+      const { passkeys: next } = await authApi.passkeys();
+      if (mine === reads.current) setPasskeys(next);
     } catch (caught) {
-      setError(errorMessage(t, caught));
+      if (mine === reads.current) setError(errorMessage(t, caught));
     }
   }, [t]);
 

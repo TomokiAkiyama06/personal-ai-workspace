@@ -212,7 +212,9 @@ export function DevicesSection() {
 
   useEffect(() => {
     if (!awaiting) return;
-    if (sessions?.some((session) => !awaiting.known.has(session.id))) {
+    // This device's own session is never the new one: a passkey step-up for
+    // the approval rotates its id.
+    if (sessions?.some((session) => !session.current && !awaiting.known.has(session.id))) {
       setAwaiting(null);
       if (awaiting.dropsPairing) {
         setPairing(null);
