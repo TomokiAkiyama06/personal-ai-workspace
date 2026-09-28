@@ -41,6 +41,7 @@
 | [0034](0034-memory-versioning-freshness.md) | Memory の Relation の意味・手動編集の Version（誰がどの Scope を変えられるか）・手動で書ける鮮度・Stale Candidate / 期限切れ / Session 終了の処理（PAW-042。Issue #36） | Approved |
 | [0035](0035-working-set-capability-grants-and-legacy-tasks.md) | `project.task.working_set.manage` の付与先と委任、作成時の Working Set、Revision 0085 より前の Task の状態の退避（Issue #85。Decision 0030 が決めていない点） | Approved |
 | [0037](0037-gpu-compute-scheduler.md) | GPU / Compute Resource Scheduler の方針（状態をプロセス内に持つ、KV Cache の Token による Admission、Actual / Reserved の VRAM と Safety Headroom の暫定値、Class の優先、縮退の段と復帰、Exclusive、Local / Cloud の振り分け。PAW-036、Issue #32） | Approved |
+| [0047](0047-task-execution-composition-and-task-end-effects.md) | 本番の Task 実行の組み立て（本番の `TaskAuthority` の Scope と Grant、App の起動時の `TaskService` / Tool Broker / Orchestrator）、Task 終了時の承認の取り消しと `session_only` の退役（Commit 後の Listener と、残りを探す再実行の Sweep）、鮮度の Job の定期実行（Issue #125） | Proposed |
 
 運用は [AGENTS.md](../../AGENTS.md) の「仕様変更」に従います。
 

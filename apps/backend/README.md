@@ -3525,7 +3525,7 @@ Rerank（Reranker Protocol）→ 構造化 Score（confirmed・鮮度・importan
 
 ### 鮮度の Job（`FreshnessMaintenance`）
 
-Backend 内部の Job です（認可はなく、変更は `system` を Actor として記録されます）。1 回の呼び出しで最大 `batch`（既定 500）件を、ロックした CTE（`FOR UPDATE SKIP LOCKED`）で選んで変え、変えた件数を返します。0 になるまで繰り返します。同じ Version に 2 回印を付けません。
+Backend 内部の Job です（認可はなく、変更は `system` を Actor として記録されます）。Application は `mark_revalidation_due` と `expire_due` を周期で、`end_task` を Task の終了で呼びます（Issue #125、Decision 0047。「DAG Agent Orchestrator」の「本番の組み立て」）。1 回の呼び出しで最大 `batch`（既定 500）件を、ロックした CTE（`FOR UPDATE SKIP LOCKED`）で選んで変え、変えた件数を返します。0 になるまで繰り返します。同じ Version に 2 回印を付けません。
 
 | Method | 対象 | 何をするか |
 | --- | --- | --- |
@@ -3704,7 +3704,7 @@ Decision 0008 の 8 が Orchestrator に課した「削除待ちの Project に�
 
 - **1 周期**: 未処理の要求（`pending_project_ids`）の Project を先に、次に**削除待ちの全 Project**（要求が処理済みでも。処理の後で作られた Task と Entry を止めるため）を id の順に、前の周期の続きから（Cursor）最大 50 件（`projects_per_cycle`）。1 Project に 1 周期で最大 5 回（`rounds_per_project`）呼び、`done` にならなければ次の周期が続けます。
 - **周期**: 最初の周期は起動の 5 秒後、以降は周期ごと（未完了があれば 5 秒後）。周期全体が失敗したら 10 秒から倍で、周期を上限に待ちます。1 つの Project の失敗は他を止めません（Log は Exception の型名だけ）。
-- 削除待ちの一覧は、状態を Statement に書き込んだ（`literal_execute`）部分 Index `ix_projects_pending_deletion` の Query です（Plan の Test つき）。停止は `TaskService(listeners=[revoke_on_task_end])` で行うので、止めた Task の承認も取り消されます。
+- 削除待ちの一覧は、状態を Statement に書き込んだ（`literal_execute`）部分 Index `ix_projects_pending_deletion` の Query です（Plan の Test つき）。停止は Application の `TaskService`（下の「本番の組み立て」。Listener は Task 終了の後処理）で行うので、止めた Task の承認も取り消され、Task から来た `session_only` の Memory も退役します（`tasks=` を渡さずに作った Loop は、従来どおり `revoke_on_task_end` だけの `TaskService` を自分で作ります）。
 
 ### 組み立て
 
@@ -3739,11 +3739,33 @@ await orchestrator.enqueue_task(task_id, preset=BudgetPreset.STANDARD)
 await orchestrator.serve("worker-1", stop_event)  # または run_once("worker-1")
 ```
 
-**Project state Gate（Issue #83、Decision 0020）は明示的に渡します。** `TaskService` と `TaskQueue` は `project_gate` を必須の keyword にし、`None` を拒否するため、省略に頼る組み立ては起動時に `TypeError`（Queue は `InvalidQueueingArgumentError`）になります。Orchestrator がこの 2 つを作る Production の場所は、Application の Lifespan が起動する `build_project_stop_loop(database, project_gate=...)` だけです。Lifespan は `ProjectStateGate()`（`paw_backend.projects`）を渡し、Loop が自分の `TaskService` と `TaskQueue` を Gate つきで作ります（`project_gate` は既定値のない引数）。Gate を持たない Test（Project を作らない Test）は `tests/gate_support.py` の `ALWAYS_ACTIVE`（何でも Active とする名前つきの Gate）を毎回明示して渡します（`Harness` の `project_gate=` の既定値もそれです）。Production の Code はその名前を持ちません（#83 の Test が確かめます）。`test_orchestrator_wiring.py` が Gate の受け渡しと拒否を、`test_orchestrator_project_sweep_app.py` が Lifespan が実際の `ProjectStateGate` を渡すことを確かめます。
+**Project state Gate（Issue #83、Decision 0020）は明示的に渡します。** `TaskService` と `TaskQueue` は `project_gate` を必須の keyword にし、`None` を拒否するため、省略に頼る組み立ては起動時に `TypeError`（Queue は `InvalidQueueingArgumentError`）になります。この 2 つを作る Production の場所は、`create_app` が呼ぶ `build_task_execution`（Gate の既定は `ProjectStateGate()`。下の「本番の組み立て」）と、Application の Lifespan が起動する `build_project_stop_loop(database, project_gate=...)` です。Lifespan は `ProjectStateGate()`（`paw_backend.projects`）と Application の `TaskService` を渡し、Loop は自分の `TaskQueue` を Gate つきで作ります（`project_gate` は既定値のない引数）。Gate を持たない Test（Project を作らない Test）は `tests/gate_support.py` の `ALWAYS_ACTIVE`（何でも Active とする名前つきの Gate）を毎回明示して渡します（`Harness` の `project_gate=` の既定値もそれです）。Production の Code はその名前を持ちません（#83 の Test が確かめます）。`test_orchestrator_wiring.py` が Gate の受け渡しと拒否を、`test_orchestrator_project_sweep_app.py` が Lifespan が実際の `ProjectStateGate` を渡すことを確かめます。
 
 **Project が Active でないときの Orchestrator（Decision 0020）**: `TaskQueue.claim_next` は Active でない Project の Entry を Claim せず（Entry は `queued` のまま、Unarchive の後に Claim されます）、Start は Gate を通ります。Claim の後に Project が Archive / 削除の開始になり、Gate が Start を拒否した（`ProjectNotActiveError`、または Lock を時間内に取れない `ProjectBusyError`）ときは、Entry を Queue へ**戻し**（`release`。順番と世代は保たれます）、Task は `queued` のままで、Runtime の Timer・Node・Budget・DAG の `epoch` のどれにも触れません（`RunOutcome.SKIPPED`。Project が Active になれば次の Claim が実行します）。すでに**走っている** Task は止めません（`begin_evaluation`・`fail`・`wait` は Gate を通りません）。走っている Task の Worker が死んで Project が Archived のままなら、その Entry は Lease が切れても Claim されず、Unarchive の後に次の Worker が引き継ぎます（Start しないので Gate は通りません）。`enqueue_task` は Active でない Project の Task を `ProjectNotActiveError` で拒否します（`test_orchestrator_project_gate.py`）。
 
 これは Decision 0006 の「後続の課題」（`TaskService` への `revoke_on_task_end` の配線と `PostgresTaskActivity` の注入は PAW-034）の実装の形です。Application の Process が Agent の Runtime へ DB 接続を渡さないこと（Decision 0006 の前提）は、この組み立てを行う側の責務です。
+
+### 本番の組み立て（Composition Root、Issue #125）
+
+**[Decision 0047（Proposed、承認待ち）](../../docs/decisions/0047-task-execution-composition-and-task-end-effects.md)** の推奨どおりに実装しました。承認されない点は実装を変えます。
+
+`create_app` は DB が設定されているとき `build_task_execution`（`orchestrator/composition.py`）で次を 1 回だけ組み立て、`app.state.task_execution`（`TaskExecution`）に置きます。DB がなければ `None` です。
+
+| 部品 | 組み立て |
+| --- | --- |
+| `TaskService` | `ProjectStateGate()`、Listener は `TaskEndCleanup.on_task_event` の 1 つ（承認の取り消しを含む） |
+| `StoredTaskAuthority`（`orchestrator/authority.py`） | 本番の `TaskAuthority`。呼び出しごとに Working Set を `TaskService.restore` で読み直し、`RepositoryService.working_set_acl` / `scope_entries` で各 Repository を解決する（下） |
+| Tool Broker と `ToolRunner` | Application の Authorizer、`TrackerBudgetProvider`、`PostgresTaskActivity`、`RepositoryService`（`registrations`）、`TaskService`（`use_gate`）。Registry は Working Set の Tool だけ（`WorkingSetExecutor`）。組み立ては `build_tool_broker` の 1 か所 |
+| `Orchestrator` | `create_app(agent_runtimes=..., orchestrator_config=...)` を渡したときだけ（Backend に本番の `AgentRuntime` はまだない）。Worker（`serve`）は起動しない |
+| 定期の Loop | `build_freshness_loop`（下）。Lifespan が起動・停止する |
+
+**本番の `TaskAuthority` の Scope**: 保存された Working Set の役割（`with_working_set_roles`）、Scope に入った Checkout の Root（`target` が先）、それらの Remote の Host、Task と各 Repository の Project の現在の状態（Deleted は除く）。登録がない・委任した User の `ready` の Checkout がない Repository は Scope から外し、Root が変わった Checkout は呼び出しを失敗させます（Fail closed）。`scope_entries` が返す他の Checkout（Worktree を囲む・中にある）は、Scope に入っていなければ `excluded_repositories` です。`credential_handles` は空です（Credential を Task に結び付ける仕組みがまだないため）。親の Grant は Node の Role の上限の和（`project.read`、`project.task.run`、`project.repo.write`）で、Task の Run から導いた Agent の id、Scope の Project です。
+
+**Task の終了（`orchestrator/task_end.py`）**: 終了状態（`completed` / `failed` / `cancelled`）への遷移の Commit の直後に、Listener が承認を取り消し（`ApprovalService.revoke_task`）、Task から来た `session_only` の Memory を退役させます（`FreshnessMaintenance.end_task` を、Batch に満たなくなるまで最大 20 回・最長 10 秒。承認の取り消しは自分の Deadline を持つ）。片方が失敗しても、もう片方は行います（失敗は型名だけを Log）。終了状態**から**の遷移（Retry / Restart）では承認だけを取り消します。後処理は遷移の Transaction の外なので、途中で失敗したもの・Process が落ちて走らなかったもの・`SKIP LOCKED` で飛ばされたものが残ります。**再実行できる後処理**（`TaskEndResidue` と `TaskEndCleanup.sweep`）は、保存された状態から「開いた承認」か「`active` の `session_only` の Version の `task` Source」を持つ終了状態の Task を探し（1 回に最大 100）、同じ後処理を行います。印は記録せず、残っているもの自体が記録です。どちらも冪等です。
+
+**定期実行（`orchestrator/freshness_loop.py`）**: `FreshnessJobLoop` が 1 周期に、Task 終了の Sweep、`mark_revalidation_due`、`expire_due` の順に走らせます（各 Job は Batch いっぱいを変えた間だけ繰り返し、最大 20 回。1 つの段の失敗は他を止めない）。間隔は `PAW_FRESHNESS_JOB_INTERVAL_SECONDS`（既定 3,600、0 で停止、60〜86,400）で、最初の周期は起動の 60 秒後（間隔がそれより短ければ間隔）。`end_session`（Session の終了の記録がまだない）と、Event に応じて呼ぶ `mark_triggered`・`mark_repo_head` は含みません。
+
+Test: `test_orchestrator_authority.py`（本番の `TaskAuthority`。最後の Test は Orchestrator と実際の Broker を通す）、`test_orchestrator_task_end.py`（終了の後処理と Sweep、実際の Job の周期）、`test_orchestrator_freshness_loop.py`（Loop・設定・Lifespan）、`test_orchestrator_composition.py`（組み立て）。
 
 ### 制限と未確認の点
 
