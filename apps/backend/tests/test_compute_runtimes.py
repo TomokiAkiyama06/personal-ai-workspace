@@ -23,6 +23,7 @@ from paw_backend.compute import (
     PlacedEmbedder,
     ResourceClass,
     ScheduledMemoryWorker,
+    TrackerLateGpuCharge,
     estimate_context_tokens,
 )
 from paw_backend.compute import runtimes as runtimes_module
@@ -384,6 +385,81 @@ class HybridRuntimeTest(unittest.IsolatedAsyncioTestCase):
             work.budget.charges,
             [(BudgetKind.GPU_SECONDS, 10), (BudgetKind.GPU_SECONDS, 25)],
         )
+
+    async def test_a_late_call_is_charged_through_the_late_charge(self):
+        # The orchestrator closes the node's attempt once run_node returns: its
+        # budget refuses later charges. The time the call went on using is
+        # charged to the task through the late charge instead.
+        release = asyncio.Event()
+
+        class Stubborn:
+            async def run_node(self, assignment):
+                while True:
+                    try:
+                        await release.wait()
+                        return NodeOutcome.succeeded(NodeResult(summary="late"))
+                    except asyncio.CancelledError:
+                        continue
+
+        class ClosingBudget(FakeBudget):
+            closed = False
+
+            async def charge(self, kind, amount):
+                if self.closed:
+                    raise NodeStopped(StopReason.ABANDONED)
+                await super().charge(kind, amount)
+
+        class Late:
+            def __init__(self):
+                self.charges = []
+
+            async def charge(self, task_id, seconds):
+                self.charges.append((task_id, seconds))
+
+        late = Late()
+        runtime = HybridRuntime(
+            self.scheduler,
+            Stubborn(),
+            deployment="main",
+            late_gpu_charge=late,
+            clock=self.clock,
+        )
+        budget = ClosingBudget(gpu_seconds_left=10)
+        work = assignment(budget=budget)
+        try:
+            with mock.patch.object(runtimes_module, "CANCEL_GRACE_SECONDS", 0.01):
+                task = asyncio.create_task(runtime.run_node(work))
+                await settle()
+                await self.clock.advance(10)
+                with self.assertRaises(NodeStopped):
+                    await task
+            budget.closed = True  # the attempt is closed
+            await self.clock.advance(25)
+        finally:
+            release.set()
+            await settle()
+        self.assertEqual(budget.charges, [(BudgetKind.GPU_SECONDS, 10)])
+        self.assertEqual(late.charges, [(work.task_id, 25)])
+        self.assertEqual(self.scheduler.status().leases[ResourceClass.CODING], 0)
+
+    async def test_the_tracker_late_charge_records_gpu_seconds(self):
+        class Tracker:
+            def __init__(self):
+                self.records = []
+
+            async def record(self, task_id, kind, amount, *, run=None):
+                self.records.append((task_id, kind, amount, run))
+
+        tracker = Tracker()
+        task_id = uuid.uuid4()
+        await TrackerLateGpuCharge(tracker).charge(task_id, 7)
+        self.assertEqual(tracker.records, [(task_id, BudgetKind.GPU_SECONDS, 7, None)])
+        with self.assertRaises(TypeError):
+            TrackerLateGpuCharge(object())
+        with self.assertRaises(TypeError):
+            HybridRuntime(
+                self.scheduler, self.local, deployment="main", late_gpu_charge=object()
+            )
 
     async def test_a_second_cancel_during_the_grace_wait_keeps_the_lease(self):
         release = asyncio.Event()

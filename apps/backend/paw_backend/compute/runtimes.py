@@ -146,6 +146,7 @@ class HybridRuntime:
         wait_seconds: float = DEFAULT_NODE_WAIT_SECONDS,
         cloud_after_seconds: float = 0.0,
         charge_gpu_seconds: bool = True,
+        late_gpu_charge: "LateGpuCharge | None" = None,
         clock: Clock | None = None,
     ) -> None:
         if not isinstance(scheduler, ComputeScheduler):
@@ -163,6 +164,8 @@ class HybridRuntime:
             raise ValueError("resource_class")
         if not callable(estimate):
             raise TypeError("estimate must be callable")
+        if late_gpu_charge is not None:
+            require_async_method(late_gpu_charge, "charge", 2)
         # Checked the way the scheduler checks them.
         ComputeRequest(resource_class, deployment=deployment)
         self._scheduler = scheduler
@@ -176,6 +179,7 @@ class HybridRuntime:
         self._wait = check_seconds("wait_seconds", wait_seconds)
         self._cloud_after = check_seconds("cloud_after_seconds", cloud_after_seconds)
         self._charge = bool(charge_gpu_seconds)
+        self._late = late_gpu_charge
         self._clock = clock or SystemClock()
 
     async def run_node(self, assignment: NodeAssignment) -> NodeOutcome:
@@ -293,23 +297,37 @@ class HybridRuntime:
         meter: "_GpuMeter | None",
         run: object,
         seconds: int,
+        *,
+        late: bool = False,
     ) -> None:
-        """Charge the call's GPU time and take it out of the meter, together."""
+        """Charge the call's GPU time and take it out of the meter, together.
+        ``late``: the call ended after its node (see ``_meter_held``)."""
         if meter is None:
             if self._charge and seconds > 0:
-                await assignment.budget.charge(BudgetKind.GPU_SECONDS, seconds)
+                await self._charge_gpu(assignment, seconds, late)
             return
         try:
             async with meter.lock:
                 try:
                     if seconds > 0:
-                        await assignment.budget.charge(BudgetKind.GPU_SECONDS, seconds)
+                        await self._charge_gpu(assignment, seconds, late)
                 finally:
                     meter.finish(run, seconds)
         finally:
             if run in meter.runs:  # the lock was never taken (cancelled)
                 meter.finish(run, seconds)
             self._drop_user(assignment, meter)
+
+    async def _charge_gpu(
+        self, assignment: NodeAssignment, seconds: int, late: bool
+    ) -> None:
+        if late and self._late is not None:
+            # The attempt is closed by now (the orchestrator refuses its node's
+            # charges once it stops waiting for it): the time is charged to the
+            # task through the tracker, as work that happened.
+            await self._late.charge(assignment.task_id, seconds)
+            return
+        await assignment.budget.charge(BudgetKind.GPU_SECONDS, seconds)
 
     def _meter_held(
         self,
@@ -333,7 +351,7 @@ class HybridRuntime:
                 meter.stop(run, end)
             seconds = math.ceil(max(0.0, end - since))
             charge = asyncio.ensure_future(
-                self._settle_charge(assignment, meter, run, seconds)
+                self._settle_charge(assignment, meter, run, seconds, late=True)
             )
             _LATE_CHARGES.add(charge)
             charge.add_done_callback(_late_charge_done)
@@ -455,9 +473,39 @@ def _late_charge_done(charge: asyncio.Future) -> None:
     if charge.cancelled():
         return
     error = charge.exception()
-    if error is not None and not isinstance(error, NodeStopped):
-        # NodeStopped: the budget is now used up; the node has already ended.
-        logger.error("The GPU time of a local call that ended late was not charged")
+    if error is None:
+        return
+    if isinstance(error, NodeStopped) and error.reason is StopReason.BUDGET_EXCEEDED:
+        return  # charged, and the budget is now used up: the node has ended
+    # Without a ``late_gpu_charge`` the node's budget refuses it (its attempt is
+    # closed): the time is lost to the budget.
+    logger.error(
+        "The GPU time of a local call that ended after its node was not charged (%s)",
+        type(error).__name__,
+    )
+
+
+class LateGpuCharge(Protocol):
+    """Charges GPU time to a task after its node's attempt has closed."""
+
+    async def charge(self, task_id: uuid.UUID, seconds: int) -> None: ...
+
+
+class TrackerLateGpuCharge:
+    """A :class:`LateGpuCharge` backed by the task budget tracker.
+
+    Not fenced by the attempt or the run (like the Broker's charge of a tool
+    call that already ran): it records GPU time that was used, by a local call
+    that did not stop when its node was cancelled and held its lease until it
+    ended. Hiding it would let such calls use the GPU beyond the task's
+    ``GPU_SECONDS`` unseen."""
+
+    def __init__(self, tracker: object) -> None:
+        require_async_method(tracker, "record", 3)
+        self._tracker = tracker
+
+    async def charge(self, task_id: uuid.UUID, seconds: int) -> None:
+        await self._tracker.record(task_id, BudgetKind.GPU_SECONDS, seconds)
 
 
 class ScheduledMemoryWorker:

@@ -48,8 +48,10 @@ from paw_backend.compute.probe import (
 from paw_backend.compute.runtimes import (
     CloudPolicy,
     HybridRuntime,
+    LateGpuCharge,
     PlacedEmbedder,
     ScheduledMemoryWorker,
+    TrackerLateGpuCharge,
     estimate_context_tokens,
 )
 from paw_backend.compute.scheduler import (
@@ -84,6 +86,7 @@ __all__ = [
     "GpuSample",
     "HybridRuntime",
     "InvalidComputeArgumentError",
+    "LateGpuCharge",
     "ModelControl",
     "ModelControlError",
     "ModelRole",
@@ -97,6 +100,7 @@ __all__ = [
     "ResourceClass",
     "ScheduledMemoryWorker",
     "SchedulerMode",
+    "TrackerLateGpuCharge",
     "VramView",
     "estimate_context_tokens",
 ]
