@@ -1,0 +1,1245 @@
+"""The forced-command wrapper of Decision 0029 / 0036 §13 (Issue #134).
+
+``apps/backend/deploy/ssh-git-wrapper/paw_git_wrapper.py`` runs on the server as
+a workspace user; here it runs as the test process's own user, in temporary
+directories only (no second Linux user, no ``sshd``, no SSH key, no other
+user's home). Three layers:
+
+* :class:`PlanTest` and friends call ``plan`` directly: every shape the backend
+  sends is accepted, and everything else — other paths for ``--git-dir``,
+  symbolic links that lead out of the root, ``-c`` values outside the fixed list,
+  ``push`` / ``checkout`` and the rest — is refused.
+* :class:`MainTest` checks what is ``exec``-ed (argv, a fixed environment, the
+  directory), the exit status of a refusal, and that nothing secret reaches the
+  log or stderr.
+* :class:`EndToEndTest` puts the real wrapper behind ``SshGitRunner`` (a fake
+  ``ssh`` that does what ``sshd`` does with a forced command: set
+  ``$SSH_ORIGINAL_COMMAND`` and run the wrapper) and drives real git with
+  ``GitClient`` and the worktree commands of Decision 0036.
+"""
+
+import contextlib
+import importlib.util
+import io
+import os
+import shutil
+import sys
+import unittest
+import uuid
+from pathlib import Path
+
+from paw_backend.repositories import GitClient, LinuxAccount, RepositoryPolicy
+from paw_backend.repositories.git import git_config_arguments
+from paw_backend.repositories.ssh import SshGitRunner, build_remote_command
+
+from .repositories_support import World, fs, git, requires_git
+
+WRAPPER_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "deploy"
+    / "ssh-git-wrapper"
+    / "paw_git_wrapper.py"
+)
+
+
+def _load_wrapper():
+    spec = importlib.util.spec_from_file_location("paw_git_wrapper", WRAPPER_PATH)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+wrapper = _load_wrapper()
+
+COMMIT = "0123456789abcdef0123456789abcdef01234567"
+BRANCH = "paw/2f1b2c3d-0000-4000-8000-000000000001/1/build"
+OTHER = "paw/2f1b2c3d-0000-4000-8000-000000000001/1/_integration"
+MERGE_CONFIG = [
+    "-c",
+    "user.name=Personal AI Workspace",
+    "-c",
+    "user.email=integration@paw.invalid",
+    "-c",
+    "commit.gpgSign=false",
+    "-c",
+    "merge.verifySignatures=false",
+]
+
+
+class WrapperTestCase(unittest.TestCase):
+    """A home with ``workspaces/`` (a checkout, a worktree of it) and, next to
+    it, ``outside/`` standing in for everything the wrapper must not reach
+    (another user's home, ``/etc``, ...)."""
+
+    def setUp(self):
+        self.world = World()
+        self.addCleanup(self.world.close)
+        self.home = self.world.make_home("alice")
+        self.root = f"{self.home}/workspaces"
+        self.worktrees = f"{self.root}/.paw-worktrees"
+        self.checkout = f"{self.root}/project"
+        self.worktree = f"{self.worktrees}/task/1/repo/build"
+        self.git_dir = f"{self.checkout}/.git/worktrees/build"
+        self.outside = f"{self.world.root}/outside"
+        for path in (self.worktree, self.git_dir, self.outside):
+            os.makedirs(path)
+        os.makedirs(f"{self.outside}/.git/worktrees/build")
+        self.config = self.make_config()
+
+    def make_config(self, **options):
+        values = {"root": self.root, "home": self.home, "user": "alice"}
+        values.update(options)
+        return wrapper.Config(**values)
+
+    def command(self, args, *, cwd=None, ceiling=None, extra_config=()):
+        """What ``SshGitRunner`` sends for ``args`` (the real encoder)."""
+        return build_remote_command(
+            args,
+            cwd=self.checkout if cwd is None else cwd,
+            ceiling=ceiling,
+            allowed_protocols=("https",),
+            extra_config=extra_config,
+        )
+
+    def plan(self, args, *, config=None, **options):
+        return wrapper.plan(self.command(args, **options), config or self.config)
+
+    def pinned(self, args, *, git_dir=None, work_tree=None, cwd=None):
+        return self.plan(
+            [
+                f"--git-dir={git_dir or self.git_dir}",
+                f"--work-tree={work_tree or self.worktree}",
+                *args,
+            ],
+            cwd=cwd or self.worktree,
+        )
+
+    def assert_rejected(self, reason, call, *args, **kwargs):
+        with self.assertRaises(wrapper.Rejected) as caught:
+            call(*args, **kwargs)
+        if reason is not None:
+            self.assertEqual(caught.exception.reason, reason)
+
+
+class PlanTest(WrapperTestCase):
+    """Every call the backend makes is accepted, exactly as sent."""
+
+    def accepted(self):
+        url = "https://github.com/owner/repo.git"
+        destination = f"{self.root}/new"
+        return [
+            # Decision 0029 §3 (GitClient)
+            (["rev-parse", "--is-bare-repository"], {}),
+            (["rev-parse", "--show-toplevel", "--absolute-git-dir"], {}),
+            (["rev-parse", "--verify", "--quiet", "HEAD^{commit}"], {}),
+            (["symbolic-ref", "--quiet", "--short", "HEAD"], {}),
+            (["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"], {}),
+            (["config", "--local", "--get", "remote.origin.url"], {}),
+            (["clone", "--quiet", "--", url, destination], {"cwd": self.root}),
+            (
+                ["clone", "--quiet", "--branch", "dev", "--", url, destination],
+                {"cwd": self.root},
+            ),
+            (
+                [
+                    "init",
+                    "--quiet",
+                    "--template=",
+                    "--initial-branch=main",
+                    "--",
+                    self.checkout,
+                ],
+                {},
+            ),
+            (["remote", "add", "--", "origin", url], {"ceiling": self.root}),
+            # Decision 0036 §13, on the checkout
+            (
+                ["rev-parse", "--verify", "--quiet", f"refs/heads/{BRANCH}^{{commit}}"],
+                {},
+            ),
+            (["rev-parse", "--verify", "--quiet", "refs/heads/main^{commit}"], {}),
+            (
+                [
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    "refs/remotes/origin/main^{commit}",
+                ],
+                {},
+            ),
+            (["rev-parse", "--path-format=absolute", "--git-common-dir"], {}),
+            (["symbolic-ref", "--quiet", "HEAD"], {}),
+            (["worktree", "list", "--porcelain", "-z"], {}),
+            (["worktree", "prune"], {}),
+            (
+                [
+                    "worktree",
+                    "add",
+                    "--quiet",
+                    "-b",
+                    BRANCH,
+                    "--",
+                    f"{self.worktrees}/task/1/repo/next",
+                    COMMIT,
+                ],
+                {},
+            ),
+            (["worktree", "add", "--quiet", "--", self.worktree + "2", BRANCH], {}),
+            (
+                [
+                    "merge-base",
+                    "--is-ancestor",
+                    f"refs/heads/{BRANCH}",
+                    f"refs/heads/{OTHER}",
+                ],
+                {},
+            ),
+            (
+                [
+                    "merge-tree",
+                    "--write-tree",
+                    "--name-only",
+                    "-z",
+                    "--no-messages",
+                    f"refs/heads/{OTHER}",
+                    f"refs/heads/{BRANCH}",
+                ],
+                {},
+            ),
+            # Decision 0036 §13, unpinned inside a worktree: rev-parse only
+            (["rev-parse", "--show-toplevel"], {"cwd": self.worktree}),
+            (
+                ["rev-parse", "--path-format=absolute", "--git-dir"],
+                {"cwd": self.worktree, "ceiling": os.path.dirname(self.worktree)},
+            ),
+        ]
+
+    def test_every_backend_call_is_accepted_as_sent(self):
+        for args, options in self.accepted():
+            with self.subTest(args=args):
+                invocation = self.plan(args, **options)
+                self.assertEqual(invocation.subcommand, args[0])
+                self.assertEqual(invocation.argv[-len(args) :], args)
+                self.assertEqual(invocation.argv[0], self.config.git)
+
+    def test_pinned_worktree_calls_are_accepted(self):
+        for args in (
+            ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+            ["symbolic-ref", "--quiet", "HEAD"],
+            ["rev-parse", "--verify", "--quiet", "MERGE_HEAD^{commit}"],
+            ["merge", "--abort"],
+            [
+                *MERGE_CONFIG,
+                "merge",
+                "--no-ff",
+                "--no-edit",
+                "--quiet",
+                "-m",
+                f"Integrate {BRANCH}",
+                f"refs/heads/{BRANCH}",
+            ],
+        ):
+            with self.subTest(args=args):
+                invocation = self.pinned(args)
+                self.assertIn(f"--git-dir={self.git_dir}", invocation.argv)
+                self.assertIn(f"--work-tree={self.worktree}", invocation.argv)
+                self.assertEqual(invocation.cwd, self.worktree)
+
+    def test_the_client_hardening_is_replaced_by_the_wrappers_own(self):
+        invocation = self.plan(["rev-parse", "--is-bare-repository"])
+        argv = invocation.argv
+        subcommand_at = argv.index("rev-parse")
+        self.assertEqual(
+            argv[1:subcommand_at],
+            [
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "submodule.recurse=false",
+                "-c",
+                "protocol.allow=never",
+                "-c",
+                "protocol.https.allow=always",
+            ],
+        )
+
+    def test_the_merge_identity_is_the_wrappers_own_even_when_not_sent(self):
+        invocation = self.pinned(
+            [
+                "merge",
+                "--no-ff",
+                "--no-edit",
+                "--quiet",
+                "-m",
+                f"Integrate {BRANCH}",
+                f"refs/heads/{BRANCH}",
+            ]
+        )
+        for word in MERGE_CONFIG[1::2]:
+            self.assertIn(word, invocation.argv)
+
+    def test_the_environment_is_a_fixed_allowlist(self):
+        invocation = self.plan(["rev-parse", "--is-bare-repository"], ceiling=self.root)
+        self.assertEqual(
+            invocation.env,
+            {
+                "PATH": wrapper.SAFE_PATH,
+                "HOME": self.home,
+                "LC_ALL": "C",
+                "LANG": "C",
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_CONFIG_GLOBAL": "/dev/null",
+                "GIT_TERMINAL_PROMPT": "0",
+                "GIT_OPTIONAL_LOCKS": "0",
+                "GIT_ATTR_NOSYSTEM": "1",
+                "GIT_CEILING_DIRECTORIES": self.root,
+            },
+        )
+
+    def test_the_resolved_directory_is_used(self):
+        link = f"{self.root}/link"
+        os.symlink(self.checkout, link)
+        invocation = self.plan(["rev-parse", "--is-bare-repository"], cwd=link)
+        self.assertEqual(invocation.cwd, self.checkout)
+
+    def test_a_credential_helper_is_accepted_only_as_configured(self):
+        config = self.make_config(gh="/usr/bin/gh")
+        args = [
+            "clone",
+            "--quiet",
+            "-c",
+            "credential.helper=!/usr/bin/gh auth git-credential",
+            "--",
+            "https://github.com/o/r.git",
+            f"{self.root}/new",
+        ]
+        self.plan(args, cwd=self.root, config=config)
+        self.assert_rejected(
+            "config_not_allowed", self.plan, args, cwd=self.root
+        )  # no --gh configured
+        other = [*args]
+        other[3] = "credential.helper=!/tmp/evil auth git-credential"
+        self.assert_rejected(
+            "config_not_allowed", self.plan, other, cwd=self.root, config=config
+        )
+
+    def test_extra_configuration_is_accepted_only_when_configured(self):
+        pair = ("url.file:///srv/mirror/.insteadOf", "https://github.com/")
+        args = ["rev-parse", "--is-bare-repository"]
+        config = self.make_config(extra=(pair,))
+        self.plan(args, extra_config=[pair], config=config)
+        self.assert_rejected("config_not_allowed", self.plan, args, extra_config=[pair])
+
+
+class RejectedPathTest(WrapperTestCase):
+    """cwd, ``--git-dir=``, ``--work-tree=`` and path arguments stay in the root."""
+
+    def test_a_cwd_outside_the_root_is_refused(self):
+        args = ["rev-parse", "--is-bare-repository"]
+        for cwd in (
+            self.outside,
+            self.home,
+            "/",
+            "/etc",
+            f"{self.root}/../outside",
+            f"{self.root}/project/",
+            f"{self.root}//project",
+            "project",
+            ".",
+            f"{self.root}/missing",
+        ):
+            with self.subTest(cwd=cwd):
+                self.assert_rejected(None, self.plan, args, cwd=cwd)
+
+    def test_a_symbolic_link_out_of_the_root_is_refused(self):
+        os.symlink(self.outside, f"{self.root}/escape")
+        args = ["rev-parse", "--is-bare-repository"]
+        self.assert_rejected(
+            "path_outside_root", self.plan, args, cwd=f"{self.root}/escape"
+        )
+        os.symlink(f"{self.root}/nowhere", f"{self.root}/dangling")
+        self.assert_rejected(
+            "path_unresolvable", self.plan, args, cwd=f"{self.root}/dangling"
+        )
+        os.symlink(f"{self.root}/loop", f"{self.root}/loop")
+        self.assert_rejected(None, self.plan, args, cwd=f"{self.root}/loop")
+
+    def test_a_linked_worktree_area_refuses_everything(self):
+        shutil.rmtree(self.worktrees)
+        os.symlink(self.checkout, self.worktrees)
+        self.assert_rejected(
+            "bad_worktrees", self.plan, ["rev-parse", "--is-bare-repository"]
+        )
+
+    def test_the_root_itself_being_unavailable_refuses_everything(self):
+        config = self.make_config(root=f"{self.home}/missing")
+        self.assert_rejected(
+            "root_unavailable",
+            self.plan,
+            ["rev-parse", "--is-bare-repository"],
+            config=config,
+        )
+
+    def test_a_git_dir_outside_the_root_is_refused(self):
+        for git_dir in (
+            f"{self.outside}/.git/worktrees/build",
+            f"{self.root}/../outside/.git/worktrees/build",
+            "/etc",
+            "relative/.git/worktrees/build",
+            f"{self.git_dir}/",
+        ):
+            with self.subTest(git_dir=git_dir):
+                self.assert_rejected(
+                    None,
+                    self.pinned,
+                    ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+                    git_dir=git_dir,
+                )
+
+    def test_a_git_dir_through_a_symbolic_link_out_of_the_root_is_refused(self):
+        link = f"{self.checkout}/.git/worktrees/evil"
+        os.symlink(f"{self.outside}/.git/worktrees/build", link)
+        self.assert_rejected(
+            "path_outside_root",
+            self.pinned,
+            ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+            git_dir=link,
+        )
+        # A whole parent directory swapped for a link counts the same.
+        os.symlink(self.outside, f"{self.root}/project2")
+        self.assert_rejected(
+            "path_outside_root",
+            self.pinned,
+            ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+            git_dir=f"{self.root}/project2/.git/worktrees/build",
+        )
+
+    def test_a_git_dir_that_is_not_a_worktree_directory_is_refused(self):
+        os.makedirs(f"{self.worktree}/.git/worktrees/x")
+        for git_dir, reason in (
+            (f"{self.checkout}/.git", "bad_git_dir"),
+            (self.checkout, "bad_git_dir"),
+            # inside .paw-worktrees: an agent writes there
+            (f"{self.worktree}/.git/worktrees/x", "path_in_worktrees"),
+        ):
+            with self.subTest(git_dir=git_dir):
+                self.assert_rejected(
+                    reason,
+                    self.pinned,
+                    ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+                    git_dir=git_dir,
+                )
+
+    def test_a_work_tree_outside_the_worktrees_is_refused(self):
+        os.symlink(self.outside, f"{self.worktrees}/escape")
+        for work_tree in (
+            self.checkout,
+            self.outside,
+            self.worktrees,
+            f"{self.worktrees}/escape",
+        ):
+            with self.subTest(work_tree=work_tree):
+                self.assert_rejected(
+                    None,
+                    self.pinned,
+                    ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+                    work_tree=work_tree,
+                    cwd=work_tree if os.path.isdir(work_tree) else None,
+                )
+
+    def test_a_work_tree_other_than_the_cwd_is_refused(self):
+        other = f"{self.worktrees}/task/1/repo/other"
+        os.makedirs(other)
+        self.assert_rejected(
+            "bad_work_tree",
+            self.pinned,
+            ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+            work_tree=other,
+        )
+
+    def test_git_dir_and_work_tree_come_together_once_and_only_where_allowed(self):
+        status = ["status", "--porcelain=v1", "-z", "--untracked-files=all"]
+        cases = [
+            [f"--git-dir={self.git_dir}", *status],
+            [f"--work-tree={self.worktree}", *status],
+            [
+                f"--git-dir={self.git_dir}",
+                f"--git-dir={self.git_dir}",
+                f"--work-tree={self.worktree}",
+                *status,
+            ],
+            [
+                f"--git-dir={self.git_dir}",
+                f"--work-tree={self.worktree}",
+                "worktree",
+                "prune",
+            ],
+            [
+                f"--git-dir={self.git_dir}",
+                f"--work-tree={self.worktree}",
+                "config",
+                "--local",
+                "--get",
+                "remote.origin.url",
+            ],
+        ]
+        for args in cases:
+            with self.subTest(args=args):
+                self.assert_rejected("bad_option", self.plan, args, cwd=self.worktree)
+
+    def test_an_unpinned_command_inside_a_worktree_is_refused(self):
+        for args in (
+            ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+            ["symbolic-ref", "--quiet", "HEAD"],
+            ["merge", "--abort"],
+            ["worktree", "prune"],
+        ):
+            with self.subTest(args=args):
+                self.assert_rejected(
+                    "unpinned_worktree", self.plan, args, cwd=self.worktree
+                )
+
+    def test_path_arguments_stay_where_they_belong(self):
+        url = "https://github.com/o/r.git"
+        os.symlink(self.outside, f"{self.root}/escape")
+        os.symlink(self.outside, f"{self.worktrees}/escape")
+        cases = [
+            ["clone", "--quiet", "--", url, f"{self.outside}/x"],
+            ["clone", "--quiet", "--", url, f"{self.root}/escape/x"],
+            ["clone", "--quiet", "--", url, f"{self.worktrees}/x"],
+            ["clone", "--quiet", "--", url, self.root],
+            ["clone", "--quiet", "--", url, "relative"],
+            ["init", "--quiet", "--template=", "--initial-branch=main", "--", "/tmp"],
+            [
+                "init",
+                "--quiet",
+                "--template=",
+                "--initial-branch=main",
+                "--",
+                f"{self.root}/escape",
+            ],
+            [
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                BRANCH,
+                "--",
+                f"{self.root}/beside",
+                COMMIT,
+            ],
+            [
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                BRANCH,
+                "--",
+                f"{self.worktrees}/escape/x",
+                COMMIT,
+            ],
+            ["worktree", "add", "--quiet", "--", self.outside, BRANCH],
+            ["worktree", "add", "--quiet", "--", self.worktrees, BRANCH],
+        ]
+        for args in cases:
+            with self.subTest(args=args):
+                self.assert_rejected(None, self.plan, args, cwd=self.root)
+
+
+class RejectedConfigTest(WrapperTestCase):
+    """``-c`` only from the fixed list (the human's condition on Decision 0036 §13)."""
+
+    def test_a_configuration_outside_the_list_is_refused(self):
+        args = ["rev-parse", "--is-bare-repository"]
+        for pair in (
+            "core.hooksPath=/tmp/hooks",
+            "core.fsmonitor=/tmp/monitor",
+            "core.sshCommand=touch /tmp/pwned",
+            "protocol.allow=always",
+            "protocol.file.allow=always",
+            "protocol.ext.allow=always",
+            "core.pager=sh -c id",
+            "alias.x=!sh",
+            "include.path=/tmp/evil",
+            "user.name=Mallory",
+            "core.HOOKSPATH=/dev/null",  # a different spelling is not in the list
+            "core.hooksPath",
+            "",
+        ):
+            with self.subTest(pair=pair):
+                self.assert_rejected(
+                    "config_not_allowed", self.plan, ["-c", pair, *args]
+                )
+
+    def test_the_merge_identity_is_accepted_only_for_merge(self):
+        for args in (
+            [*MERGE_CONFIG, "rev-parse", "--is-bare-repository"],
+            ["-c", "commit.gpgSign=false", "status", "--porcelain=v1", "-z"],
+        ):
+            with self.subTest(args=args):
+                self.assert_rejected(None, self.plan, args, cwd=self.checkout)
+
+    def test_a_merge_identity_with_another_value_is_refused(self):
+        for pair in (
+            "user.name=Someone Else",
+            "user.email=me@example.com",
+            "commit.gpgSign=true",
+            "merge.verifySignatures=true",
+        ):
+            with self.subTest(pair=pair):
+                self.assert_rejected(
+                    "config_not_allowed",
+                    self.pinned,
+                    [
+                        "-c",
+                        pair,
+                        "merge",
+                        "--no-ff",
+                        "--no-edit",
+                        "--quiet",
+                        "-m",
+                        f"Integrate {BRANCH}",
+                        f"refs/heads/{BRANCH}",
+                    ],
+                )
+
+    def test_other_global_options_are_refused(self):
+        for option in (
+            ["-C", "/tmp"],
+            ["-ccore.hooksPath=/tmp"],
+            ["--config-env=core.hooksPath=X"],
+            ["--exec-path=/tmp"],
+            ["--namespace=x"],
+            ["--bare"],
+            ["-p"],
+            ["--paginate"],
+            ["--git-dir", self.git_dir],
+            ["-c"],
+        ):
+            with self.subTest(option=option):
+                self.assert_rejected(
+                    None, self.plan, [*option, "rev-parse", "--is-bare-repository"]
+                )
+
+
+class RejectedCommandTest(WrapperTestCase):
+    """The sub-command allowlist and each sub-command's exact shapes."""
+
+    def test_sub_commands_outside_the_allowlist_are_refused(self):
+        for args in (
+            ["push", "origin", "HEAD"],
+            ["push", "--force", "origin", "main"],
+            ["fetch", "origin"],
+            ["pull"],
+            ["checkout", "main"],
+            ["switch", "main"],
+            ["reset", "--hard", "HEAD"],
+            ["rebase", "main"],
+            ["commit", "-m", "x"],
+            ["branch", "-D", "main"],
+            ["gc"],
+            ["submodule", "update"],
+            ["archive", "HEAD"],
+            ["upload-pack", "."],
+            ["receive-pack", "."],
+            ["daemon"],
+            ["filter-branch"],
+            ["update-ref", "refs/heads/main", COMMIT],
+            ["!sh"],
+            ["help"],
+            ["--version"],
+        ):
+            with self.subTest(args=args):
+                self.assert_rejected(None, self.plan, args)
+
+    def test_other_shapes_of_allowed_sub_commands_are_refused(self):
+        url = "https://github.com/o/r.git"
+        dest = f"{self.root}/new"
+        for args in (
+            ["config", "--global", "user.name", "x"],
+            ["config", "--local", "core.hooksPath", "/tmp"],
+            ["config", "--local", "--get", "core.sshCommand"],
+            ["config", "--add", "remote.origin.url", url],
+            ["remote", "set-url", "origin", url],
+            ["remote", "remove", "origin"],
+            ["remote", "add", "origin", url],
+            ["remote", "add", "--", "origin", "file:///etc"],
+            ["remote", "add", "--", "origin", "ext::sh -c id"],
+            ["clone", "--quiet", "--upload-pack=touch /tmp/x", "--", url, dest],
+            ["clone", "--quiet", "--", "ext::sh -c id", dest],
+            ["clone", "--quiet", "--", "file:///etc", dest],
+            ["clone", "--quiet", "--", "http://github.com/o/r", dest],
+            ["clone", "--quiet", "--", "https://github.com/o r", dest],
+            ["clone", "--quiet", "--branch", "--upload-pack=x", "--", url, dest],
+            ["clone", "--quiet", "--template=/tmp/t", "--", url, dest],
+            ["clone", "--", url, dest],
+            [
+                "init",
+                "--quiet",
+                "--template=/tmp/t",
+                "--initial-branch=main",
+                "--",
+                dest,
+            ],
+            ["init", "--quiet", "--template=", "--initial-branch=-x", "--", dest],
+            ["init", "--bare", "--", dest],
+            ["rev-parse", "--verify", "--quiet", "@{upstream}"],
+            ["rev-parse", "--verify", "--quiet", "HEAD"],
+            ["rev-parse", "--verify", "--quiet", "refs/heads/../x^{commit}"],
+            ["rev-parse", "--git-path", "hooks"],
+            ["rev-parse", "--local-env-vars"],
+            ["symbolic-ref", "HEAD", "refs/heads/evil"],
+            ["symbolic-ref", "--delete", "HEAD"],
+            ["worktree", "remove", self.worktree],
+            ["worktree", "move", self.worktree, f"{self.worktrees}/x"],
+            [
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "main",
+                "--",
+                self.worktree + "3",
+                COMMIT,
+            ],
+            [
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                BRANCH,
+                "--",
+                self.worktree + "3",
+                "HEAD",
+            ],
+            ["worktree", "add", "--quiet", "--", self.worktree + "3", "main"],
+            ["worktree", "add", "--force", "--", self.worktree + "3", BRANCH],
+            ["worktree", "list"],
+            ["worktree", "prune", "--expire=now"],
+            ["merge-base", "--is-ancestor", "refs/heads/main", f"refs/heads/{BRANCH}"],
+            ["merge-base", "--is-ancestor", "HEAD", f"refs/heads/{BRANCH}"],
+            ["merge-base", f"refs/heads/{BRANCH}", f"refs/heads/{OTHER}"],
+            [
+                "merge-tree",
+                "--write-tree",
+                "--name-only",
+                "-z",
+                "--no-messages",
+                "refs/heads/main",
+                f"refs/heads/{BRANCH}",
+            ],
+            [
+                "merge-tree",
+                "--write-tree",
+                f"refs/heads/{OTHER}",
+                f"refs/heads/{BRANCH}",
+            ],
+            ["status"],
+            ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--", "x"],
+        ):
+            with self.subTest(args=args):
+                self.assert_rejected(None, self.plan, args, cwd=self.root)
+
+    def test_other_merge_shapes_are_refused(self):
+        for args in (
+            ["merge", "refs/heads/main"],
+            [
+                "merge",
+                "--no-ff",
+                "--no-edit",
+                "--quiet",
+                "-m",
+                "Integrate main",
+                "refs/heads/main",
+            ],
+            [
+                "merge",
+                "--no-ff",
+                "--no-edit",
+                "--quiet",
+                "-m",
+                f"Integrate {OTHER}",
+                f"refs/heads/{BRANCH}",
+            ],
+            [
+                "merge",
+                "--no-ff",
+                "--no-edit",
+                "--quiet",
+                "-s",
+                "ours",
+                f"refs/heads/{BRANCH}",
+            ],
+            ["merge", "--continue"],
+        ):
+            with self.subTest(args=args):
+                self.assert_rejected("bad_arguments", self.pinned, args)
+
+
+class RejectedWireTest(WrapperTestCase):
+    """The encoding of ``$SSH_ORIGINAL_COMMAND`` itself."""
+
+    def test_malformed_commands_are_refused(self):
+        good = self.command(["rev-parse", "--is-bare-repository"])
+        for original, reason in (
+            (None, "no_command"),
+            ("", "no_command"),
+            ("git-upload-pack 'repo.git'", "bad_protocol"),
+            (good.replace("paw-git-run/v1", "paw-git-run/v2", 1), "bad_protocol"),
+            (good.replace(" -- ", " ++ ", 1), "bad_protocol"),
+            (good + " 'unbalanced", "bad_encoding"),
+            ("paw-git-run/v1 " + "x" * wrapper.MAX_COMMAND_BYTES, "too_long"),
+            (
+                f"paw-git-run/v1 {self.checkout} - -- -c core.fsmonitor=false",
+                "no_subcommand",
+            ),
+            (
+                self.command(["rev-parse", "--is-bare-repository"], ceiling="/"),
+                "bad_ceiling",
+            ),
+        ):
+            with self.subTest(original=(original or "")[:60]):
+                self.assert_rejected(reason, wrapper.plan, original, self.config)
+
+    def test_a_shell_metacharacter_is_just_a_character(self):
+        # Never a shell: `;` and `$(...)` are parts of one word, which then fails
+        # the shape checks like any other wrong word.
+        for word in ("HEAD; touch /tmp/x", "$(touch /tmp/x)", "`id`", "a\nb"):
+            with self.subTest(word=word):
+                self.assert_rejected(
+                    "bad_arguments",
+                    self.plan,
+                    ["rev-parse", "--verify", "--quiet", word],
+                )
+
+
+class ConfigTest(unittest.TestCase):
+    def test_defaults_come_from_this_linux_user(self):
+        config = wrapper.parse_config([])
+        self.assertEqual(config.root, f"{config.home.rstrip('/')}/workspaces")
+        self.assertEqual(config.protocols, ("https",))
+        self.assertIsNone(config.gh)
+
+    def test_options(self):
+        config = wrapper.parse_config(
+            [
+                "--root=/srv/ws",
+                "--home=/srv",
+                "--git=/usr/local/bin/git",
+                "--allow-protocol=https",
+                "--allow-protocol=file",
+                "--config=url.file:///srv/m/.insteadOf=https://github.com/",
+                "--gh=/usr/bin/gh",
+                "--path=/usr/bin:/bin",
+            ]
+        )
+        self.assertEqual(config.root, "/srv/ws")
+        self.assertEqual(config.protocols, ("https", "file"))
+        self.assertEqual(
+            config.extra, (("url.file:///srv/m/.insteadOf", "https://github.com/"),)
+        )
+
+    def test_a_bad_option_refuses_everything(self):
+        for argv in (
+            ["--root"],
+            ["--root="],
+            ["--root=relative"],
+            ["--root=/"],
+            ["--root=/a/../b"],
+            ["--root=/a", "--root=/b"],
+            ["--git=git"],
+            ["--allow-protocol=HTTPS"],
+            ["--config=novalue"],
+            ["--config==x"],
+            ["--path=/usr/bin:bin"],
+            ["--unknown=1"],
+            ["positional"],
+        ):
+            with self.subTest(argv=argv):
+                with self.assertRaises(wrapper.Rejected) as caught:
+                    wrapper.parse_config(argv)
+                self.assertEqual(caught.exception.reason, "misconfigured")
+
+
+class MainTest(WrapperTestCase):
+    """What ``main`` ``exec``-s, returns, logs and prints."""
+
+    SECRET = "ghp_SECRETTOKEN0123456789"
+
+    def run_main(self, original, *, argv=None, environ=None):
+        executed = []
+        logged = []
+        moved = []
+        environment = dict(environ or {})
+        if original is not None:
+            environment["SSH_ORIGINAL_COMMAND"] = original
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            code = wrapper.main(
+                argv
+                if argv is not None
+                else [f"--root={self.root}", f"--home={self.home}"],
+                environment,
+                execve=lambda path, args, env: executed.append((path, args, env)),
+                chdir=moved.append,
+                log=logged.append,
+            )
+        return code, executed, logged, moved, stderr.getvalue()
+
+    def test_an_accepted_call_execs_git_with_a_fixed_environment(self):
+        hostile = {
+            "LD_PRELOAD": "/tmp/evil.so",
+            "GIT_DIR": self.outside,
+            "GIT_CONFIG_PARAMETERS": "'core.hooksPath'='/tmp'",
+            "PAW_DATABASE_URL": f"postgresql://u:{self.SECRET}@db/paw",
+            "LC_ALL": "en_US.UTF-8",
+            "PATH": "/tmp/evil",
+        }
+        code, executed, logged, moved, _ = self.run_main(
+            self.command(["rev-parse", "--is-bare-repository"]), environ=hostile
+        )
+        self.assertEqual(code, 0)
+        [(path, args, env)] = executed
+        self.assertEqual(path, "/usr/bin/git")
+        self.assertEqual(args[0], "/usr/bin/git")
+        self.assertEqual(moved, [self.checkout])
+        for name in hostile:
+            if name in ("LC_ALL", "PATH"):
+                continue
+            self.assertNotIn(name, env)
+        self.assertNotIn("SSH_ORIGINAL_COMMAND", env)
+        self.assertEqual(env["PATH"], wrapper.SAFE_PATH)
+        self.assertEqual(env["LC_ALL"], "C")
+        self.assertEqual(
+            logged, [f"accepted user={self.config_user()} subcommand=rev-parse"]
+        )
+
+    def config_user(self):
+        return wrapper.parse_config([]).user
+
+    def test_a_refused_call_returns_126_and_execs_nothing(self):
+        code, executed, logged, moved, stderr = self.run_main(
+            self.command(["push", "origin", "HEAD"])
+        )
+        self.assertEqual(code, wrapper.REJECTED)
+        self.assertNotEqual(code, 255)
+        self.assertEqual(executed, [])
+        self.assertEqual(moved, [])
+        self.assertEqual(
+            logged,
+            [f"rejected user={self.config_user()} reason=subcommand_not_allowed"],
+        )
+        self.assertEqual(stderr, "paw-git-wrapper: rejected (subcommand_not_allowed)\n")
+
+    def test_an_interactive_login_is_refused(self):
+        code, executed, logged, _, _ = self.run_main(None)
+        self.assertEqual(code, wrapper.REJECTED)
+        self.assertEqual(executed, [])
+        self.assertIn("reason=no_command", logged[0])
+
+    def test_a_misconfigured_wrapper_refuses(self):
+        code, executed, logged, _, _ = self.run_main(
+            self.command(["rev-parse", "--is-bare-repository"]), argv=["--root=x"]
+        )
+        self.assertEqual(code, wrapper.REJECTED)
+        self.assertEqual(executed, [])
+        self.assertEqual(logged, ["rejected user=- reason=misconfigured"])
+
+    def test_nothing_secret_or_client_supplied_is_logged_or_printed(self):
+        url = f"https://x-access-token:{self.SECRET}@github.com/o/r.git"
+        cases = [
+            # accepted: the URL is part of the call
+            self.command(["remote", "add", "--", "origin", url], ceiling=self.root),
+            # refused at the sub-command, at an argument, at a -c value
+            self.command(["push", url, "HEAD"]),
+            self.command(["remote", "add", "--", "origin", f"file://{self.SECRET}"]),
+            self.command(
+                ["-c", f"http.extraHeader=Authorization: {self.SECRET}", "status"]
+            ),
+            self.command([f"{self.SECRET}", "x"]),
+            f"paw-git-run/v1 '{self.SECRET}",
+        ]
+        for original in cases:
+            with self.subTest(original=original[:40]):
+                _, _, logged, _, stderr = self.run_main(original)
+                text = "\n".join(logged) + stderr
+                self.assertNotIn(self.SECRET, text)
+                self.assertNotIn("x-access-token", text)
+                self.assertNotIn(self.root, text)
+                self.assertNotIn(self.home, text)
+
+    def test_an_exec_failure_is_refused_not_255(self):
+        def failing(path, args, env):
+            raise FileNotFoundError(path)
+
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            code = wrapper.main(
+                [
+                    f"--root={self.root}",
+                    f"--home={self.home}",
+                    "--git=/nonexistent/git",
+                ],
+                {
+                    "SSH_ORIGINAL_COMMAND": self.command(
+                        ["rev-parse", "--is-bare-repository"]
+                    )
+                },
+                execve=failing,
+                chdir=lambda path: None,
+                log=lambda message: None,
+            )
+        self.assertEqual(code, wrapper.REJECTED)
+
+
+#: A fake ``ssh``: what ``sshd`` does with a forced command, minus the network.
+#: It puts the remote command (the last argument) in ``$SSH_ORIGINAL_COMMAND``
+#: next to a hostile environment, and runs the real wrapper with the options of
+#: the ``command=`` line. Values are baked in with ``repr`` (``SshGitRunner``
+#: passes its child only ``PATH``).
+_FAKE_SSHD = """#!/usr/bin/env python3
+import os
+import sys
+
+environment = {
+    "SSH_ORIGINAL_COMMAND": sys.argv[-1],
+    "PATH": "/tmp/evil-bin",
+    "GIT_DIR": "/tmp/evil-git-dir",
+    "LD_PRELOAD": "/tmp/evil.so",
+}
+os.execve(
+    __PYTHON__,
+    [__PYTHON__, "-I", __WRAPPER__, *__OPTIONS__],
+    environment,
+)
+"""
+
+
+class _FixedKey:
+    def __init__(self, path: str) -> None:
+        self._path = path
+
+    async def key_path_of(self, account: LinuxAccount) -> str:
+        return self._path
+
+
+@requires_git
+class EndToEndTest(unittest.IsolatedAsyncioTestCase):
+    """The real wrapper behind ``SshGitRunner``, real git, the current user only."""
+
+    def setUp(self):
+        self.world = World()
+        self.addCleanup(self.world.close)
+        self.home = self.world.make_home("alice")
+        self.root = f"{self.home}/workspaces"
+        os.makedirs(self.root)
+        self.account = LinuxAccount(uuid.uuid4(), "alice", os.geteuid(), self.home)
+        key = f"{self.world.root}/alice.key"
+        fs.write(key, "not a real key\n")
+        os.chmod(key, 0o600)
+        options = self.world.runner_options()
+        self.runner = SshGitRunner(
+            _FixedKey(key),
+            ssh_executable=self.fake_sshd(options),
+            **options,
+        )
+        self.client = GitClient(self.runner, RepositoryPolicy())
+
+    def fake_sshd(self, runner_options) -> str:
+        wrapper_options = [
+            f"--root={self.root}",
+            f"--home={self.home}",
+            f"--git={shutil.which('git')}",
+            *(f"--allow-protocol={p}" for p in runner_options["allowed_protocols"]),
+            *(f"--config={k}={v}" for k, v in runner_options["extra_config"]),
+        ]
+        path = f"{self.world.root}/fake-sshd.py"
+        fs.write(
+            path,
+            _FAKE_SSHD.replace("__PYTHON__", repr(sys.executable))
+            .replace("__WRAPPER__", repr(str(WRAPPER_PATH)))
+            .replace("__OPTIONS__", repr(wrapper_options)),
+        )
+        os.chmod(path, 0o755)
+        return path
+
+    async def run_git(self, args, *, cwd, ceiling=None):
+        return await self.runner.run(
+            args, account=self.account, cwd=cwd, timeout_s=60, ceiling=ceiling
+        )
+
+    async def test_git_client_operations_run_through_the_wrapper(self):
+        self.world.make_bare("owner", "repo", {"README.md": "hi\n"})
+        destination = f"{self.root}/repo"
+        os.makedirs(destination)
+        await self.client.clone(
+            "https://github.com/owner/repo.git", destination, self.account
+        )
+        self.assertEqual(fs.read(destination, "README.md"), "hi\n")
+        facts = await self.client.inspect(destination, self.account)
+        self.assertEqual(facts.default_branch, "main")
+        self.assertIsNotNone(facts.head)
+
+        fresh = f"{self.root}/fresh"
+        os.makedirs(fresh)
+        await self.client.init(fresh, self.account, initial_branch="trunk")
+        await self.client.add_origin(
+            fresh, "https://github.com/owner/other.git", self.account
+        )
+        self.assertEqual(
+            git("config", "--local", "--get", "remote.origin.url", cwd=fresh),
+            "https://github.com/owner/other.git",
+        )
+
+    async def test_refused_calls_never_reach_git(self):
+        repo = f"{self.root}/repo"
+        head = self.world.make_repository(repo)
+        outside = f"{self.world.root}/outside"
+        self.world.make_repository(outside)
+        for args, cwd in (
+            (["checkout", "-b", "evil"], repo),
+            (["push", "origin", "HEAD"], repo),
+            (["rev-parse", "--is-bare-repository"], outside),
+            (["-c", "core.hooksPath=/tmp", "rev-parse", "--is-bare-repository"], repo),
+        ):
+            with self.subTest(args=args):
+                result = await self.run_git(args, cwd=cwd)
+                self.assertEqual(result.returncode, wrapper.REJECTED)
+                self.assertEqual(result.stdout, "")
+        self.assertEqual(git("rev-parse", "HEAD", cwd=repo), head)
+        self.assertEqual(git("branch", "--list", "evil", cwd=repo), "")
+
+    async def test_the_worktree_commands_of_decision_0036_run_pinned(self):
+        checkout = f"{self.root}/project"
+        base = self.world.make_repository(checkout)
+        worktree = f"{self.root}/.paw-worktrees/t/1/r/build"
+        integration = f"{self.root}/.paw-worktrees/t/1/r/_integration"
+        branch, target = "paw/t/1/build", "paw/t/1/_integration"
+        for path, name in ((worktree, branch), (integration, target)):
+            result = await self.run_git(
+                ["worktree", "add", "--quiet", "-b", name, "--", path, base],
+                cwd=checkout,
+            )
+            self.assertEqual(result.returncode, 0)
+        fs.write(worktree, "work.txt", "work\n")
+        git("add", "-A", cwd=worktree)
+        git("commit", "--quiet", "-m", "work", cwd=worktree)
+
+        git_dir = (
+            await self.run_git(
+                ["rev-parse", "--path-format=absolute", "--git-dir"], cwd=integration
+            )
+        ).stdout.strip()
+        pin = [f"--git-dir={git_dir}", f"--work-tree={integration}"]
+        status = await self.run_git(
+            [*pin, "status", "--porcelain=v1", "-z", "--untracked-files=all"],
+            cwd=integration,
+        )
+        self.assertEqual((status.returncode, status.stdout), (0, ""))
+        check = await self.run_git(
+            [
+                "merge-tree",
+                "--write-tree",
+                "--name-only",
+                "-z",
+                "--no-messages",
+                f"refs/heads/{target}",
+                f"refs/heads/{branch}",
+            ],
+            cwd=checkout,
+        )
+        self.assertEqual(check.returncode, 0)
+        merged = await self.run_git(
+            [
+                *pin,
+                *MERGE_CONFIG,
+                "merge",
+                "--no-ff",
+                "--no-edit",
+                "--quiet",
+                "-m",
+                f"Integrate {branch}",
+                f"refs/heads/{branch}",
+            ],
+            cwd=integration,
+        )
+        self.assertEqual(merged.returncode, 0)
+        self.assertEqual(fs.read(integration, "work.txt"), "work\n")
+        self.assertEqual(
+            git("log", "-1", "--format=%an <%ae>", cwd=integration),
+            "Personal AI Workspace <integration@paw.invalid>",
+        )
+        listed = await self.run_git(
+            ["worktree", "list", "--porcelain", "-z"], cwd=checkout
+        )
+        self.assertIn(f"worktree {integration}\0", listed.stdout)
+        # The user's checkout never moved.
+        self.assertEqual(git("rev-parse", "HEAD", cwd=checkout), base)
+
+    async def test_a_hostile_worktree_git_file_is_not_followed_when_pinned(self):
+        checkout = f"{self.root}/project"
+        base = self.world.make_repository(checkout)
+        worktree = f"{self.root}/.paw-worktrees/t/1/r/build"
+        await self.run_git(
+            ["worktree", "add", "--quiet", "-b", "paw/t/1/build", "--", worktree, base],
+            cwd=checkout,
+        )
+        git_dir = f"{checkout}/.git/worktrees/build"
+        # An agent points the worktree's .git at a repository outside the root.
+        outside = f"{self.world.root}/outside"
+        self.world.make_repository(outside)
+        fs.write(worktree, ".git", f"gitdir: {outside}/.git\n")
+        unpinned = await self.run_git(
+            ["status", "--porcelain=v1", "-z", "--untracked-files=all"], cwd=worktree
+        )
+        self.assertEqual(unpinned.returncode, wrapper.REJECTED)
+        pinned = await self.run_git(
+            [
+                f"--git-dir={git_dir}",
+                f"--work-tree={worktree}",
+                "symbolic-ref",
+                "--quiet",
+                "HEAD",
+            ],
+            cwd=worktree,
+        )
+        self.assertEqual(pinned.stdout.strip(), "refs/heads/paw/t/1/build")
+
+    async def test_the_worktree_git_of_pr_130_runs_through_the_wrapper(self):
+        try:
+            from paw_backend.integration.git import WorktreeGit
+        except ImportError:
+            self.skipTest("paw_backend.integration (PR #130) is not merged yet")
+        checkout = f"{self.root}/project"
+        base = self.world.make_repository(checkout)
+        worktrees = WorktreeGit(self.runner, timeout_s=60)
+        path = f"{self.root}/.paw-worktrees/t/1/r/build"
+        await worktrees.add_worktree(
+            checkout, path, "paw/t/1/build", base, self.account
+        )
+        pinned = await worktrees.pin(checkout, path, self.account)
+        self.assertIsNotNone(pinned)
+        self.assertEqual(
+            await worktrees.current_branch(pinned, self.account), "paw/t/1/build"
+        )
+        self.assertTrue(await worktrees.is_clean(pinned, self.account))
+        self.assertFalse(await worktrees.merging(pinned, self.account))
+        self.assertEqual(
+            await worktrees.worktree_branch(checkout, path, self.account),
+            "paw/t/1/build",
+        )
+
+
+class WireCompatibilityTest(unittest.TestCase):
+    """The hardening the client sends is exactly what the wrapper accepts."""
+
+    def test_the_client_default_hardening_is_in_the_fixed_list(self):
+        config = wrapper.Config(root="/srv/ws", home="/srv", user="u")
+        sent = git_config_arguments(("https",))
+        allowed = {f"{k}={v}" for k, v in wrapper.hardening(config)}
+        self.assertEqual(set(sent[1::2]), allowed)
+        self.assertEqual(sent[0::2], ["-c"] * len(sent[1::2]))
