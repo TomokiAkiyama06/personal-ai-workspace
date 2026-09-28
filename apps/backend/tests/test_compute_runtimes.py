@@ -461,6 +461,38 @@ class HybridRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 self.scheduler, self.local, deployment="main", late_gpu_charge=object()
             )
 
+    async def test_a_second_cancel_while_the_charge_is_written_keeps_it(self):
+        stored = asyncio.Event()
+        writing = asyncio.Event()
+
+        class SlowBudget(FakeBudget):
+            async def charge(self, kind, amount):
+                writing.set()
+                await stored.wait()
+                await super().charge(kind, amount)
+
+        class Slow:
+            async def run_node(self, assignment):
+                await asyncio.Event().wait()
+
+        runtime = HybridRuntime(
+            self.scheduler, Slow(), deployment="main", clock=self.clock
+        )
+        budget = SlowBudget(gpu_seconds_left=100)
+        work = assignment(budget=budget)
+        task = asyncio.create_task(runtime.run_node(work))
+        await settle()
+        await self.clock.advance(12)
+        task.cancel()  # the local call stops; its time is being charged
+        await writing.wait()
+        task.cancel()  # a second one, while the charge is written
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        stored.set()
+        await settle()
+        self.assertEqual(budget.charges, [(BudgetKind.GPU_SECONDS, 12)])
+        self.assertEqual(self.scheduler.status().leases[ResourceClass.CODING], 0)
+
     async def test_a_second_cancel_during_the_grace_wait_keeps_the_lease(self):
         release = asyncio.Event()
 
@@ -662,6 +694,31 @@ class MemoryWorkerTest(unittest.IsolatedAsyncioTestCase):
         worker = ScheduledMemoryWorker(self.Worker(), scheduler, deployment="memory")
         with self.assertRaises(WorkerUnavailableError):
             await worker.extract("hello")
+
+    async def test_a_revoked_lease_stops_a_running_job(self):
+        scheduler, probe, *_ = build()
+        await scheduler.refresh()
+        started = asyncio.Event()
+
+        class Hung:
+            async def extract(self, input_text):
+                started.set()
+                await asyncio.Event().wait()
+
+        worker = ScheduledMemoryWorker(Hung(), scheduler, deployment="memory")
+        job = asyncio.create_task(worker.extract("hello"))
+        await started.wait()
+        probe.external = 12 * 1024**3
+        refreshing = asyncio.create_task(scheduler.refresh())  # revokes Background
+        await settle()
+        try:
+            self.assertTrue(job.done())
+            with self.assertRaises(WorkerUnavailableError):
+                await job
+            self.assertEqual(scheduler.status().leases[ResourceClass.BACKGROUND], 0)
+        finally:
+            job.cancel()
+            refreshing.cancel()
 
     async def test_an_observation_too_long_for_the_model_is_a_failure(self):
         scheduler, *_ = build()

@@ -231,10 +231,10 @@ class HybridRuntime:
             # charged too, or failing nodes that are retried would bypass the
             # budget's max GPU time. The runtime's error is what propagates.
             with contextlib.suppress(Exception):
-                await self._settle_charge(assignment, meter, run, seconds)
+                await self._settle(assignment, meter, run, seconds)
             raise
         # Raises NodeStopped when the budget is now used up: it passes.
-        await self._settle_charge(assignment, meter, run, seconds)
+        await self._settle(assignment, meter, run, seconds)
         if outcome is _REVOKED:
             # The scheduler took the GPU back (VRAM pressure on Background work):
             # not now, the node may run again later.
@@ -318,6 +318,24 @@ class HybridRuntime:
                 meter.finish(run, seconds)
             self._drop_user(assignment, meter)
 
+    async def _settle(
+        self,
+        assignment: NodeAssignment,
+        meter: "_GpuMeter | None",
+        run: object,
+        seconds: int,
+    ) -> None:
+        """``_settle_charge`` in a task of its own: a cancellation that reaches
+        the node while the charge is being written (a task stop and a shutdown at
+        once) does not interrupt it; the charge completes and the time stays
+        counted by the meter until then."""
+        settle = asyncio.ensure_future(
+            self._settle_charge(assignment, meter, run, seconds)
+        )
+        _CHARGES.add(settle)
+        settle.add_done_callback(_charge_done)
+        await asyncio.shield(settle)
+
     async def _charge_gpu(
         self, assignment: NodeAssignment, seconds: int, late: bool
     ) -> None:
@@ -327,7 +345,14 @@ class HybridRuntime:
             # task through the tracker, as work that happened.
             await self._late.charge(assignment.task_id, seconds)
             return
-        await assignment.budget.charge(BudgetKind.GPU_SECONDS, seconds)
+        try:
+            await assignment.budget.charge(BudgetKind.GPU_SECONDS, seconds)
+        except NodeStopped as stopped:
+            # The attempt closed while the charge was on its way (the node was
+            # cancelled meanwhile): the time was used all the same.
+            if stopped.reason is not StopReason.ABANDONED or self._late is None:
+                raise
+            await self._late.charge(assignment.task_id, seconds)
 
     def _meter_held(
         self,
@@ -353,8 +378,8 @@ class HybridRuntime:
             charge = asyncio.ensure_future(
                 self._settle_charge(assignment, meter, run, seconds, late=True)
             )
-            _LATE_CHARGES.add(charge)
-            charge.add_done_callback(_late_charge_done)
+            _CHARGES.add(charge)
+            charge.add_done_callback(_charge_done)
 
         work.add_done_callback(ended)
 
@@ -463,13 +488,13 @@ _METERS: "weakref.WeakKeyDictionary[ComputeScheduler, dict[uuid.UUID, _GpuMeter]
     weakref.WeakKeyDictionary()
 )
 _EPSILON = 1e-6
-# The charges of local calls that ended after their node (see ``_meter_held``),
-# kept until they are done.
-_LATE_CHARGES: "set[asyncio.Future]" = set()
+# The GPU time charges being written (see ``_settle`` and ``_meter_held``), kept
+# until they are done.
+_CHARGES: "set[asyncio.Future]" = set()
 
 
-def _late_charge_done(charge: asyncio.Future) -> None:
-    _LATE_CHARGES.discard(charge)
+def _charge_done(charge: asyncio.Future) -> None:
+    _CHARGES.discard(charge)
     if charge.cancelled():
         return
     error = charge.exception()
@@ -477,11 +502,10 @@ def _late_charge_done(charge: asyncio.Future) -> None:
         return
     if isinstance(error, NodeStopped) and error.reason is StopReason.BUDGET_EXCEEDED:
         return  # charged, and the budget is now used up: the node has ended
-    # Without a ``late_gpu_charge`` the node's budget refuses it (its attempt is
-    # closed): the time is lost to the budget.
+    # Without a ``late_gpu_charge`` the node's budget refuses a charge once its
+    # attempt is closed: the time is lost to the budget.
     logger.error(
-        "The GPU time of a local call that ended after its node was not charged (%s)",
-        type(error).__name__,
+        "The GPU time of a local call was not charged (%s)", type(error).__name__
     )
 
 
@@ -546,8 +570,21 @@ class ScheduledMemoryWorker:
             raise ComputeUnavailableError(admission.refusal)
         if admission.lease is None:
             raise WorkerUnavailableError()
-        async with admission.lease:
-            return await self._worker.extract(input_text)
+        async with admission.lease as lease:
+            # A revoked lease (VRAM pressure on Background work, or the model is
+            # about to be unloaded) stops the job: it is deferred, not failed,
+            # and the relief steps are not held up by it. A job that does not
+            # stop when it is cancelled keeps the lease until it ends.
+            work = asyncio.ensure_future(self._worker.extract(input_text))
+            revoked = asyncio.ensure_future(lease.revoked.wait())
+            try:
+                await asyncio.wait({work, revoked}, return_when=asyncio.FIRST_COMPLETED)
+                if work.done():
+                    return work.result()
+                raise WorkerUnavailableError()
+            finally:
+                revoked.cancel()
+                await _cancel_and_wait(work, lease)
 
 
 class PlacedEmbedder:
