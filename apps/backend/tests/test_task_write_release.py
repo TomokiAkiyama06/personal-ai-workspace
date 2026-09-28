@@ -726,6 +726,9 @@ class ReleaserTest(ReleaseTestCase):
             dict(reason="  "),
             dict(reason=None),
             dict(reason="x" * 501),
+            # Codex review of #149 (P2): what the service cannot store, too.
+            dict(reason="gone\x00"),
+            dict(reason="gone \ud800"),
             dict(expected_version=0),
             dict(expected_version="1"),
             # Codex review of #149 (P2): the service's upper bound, before the

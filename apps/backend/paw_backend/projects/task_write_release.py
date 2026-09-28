@@ -65,7 +65,7 @@ from paw_backend.tasks import (
     TaskService,
 )
 from paw_backend.tasks.models import TaskRow
-from paw_backend.tasks.service import _MAX_INTEGER, MAX_REASON_LENGTH
+from paw_backend.tasks.service import _MAX_INTEGER, MAX_REASON_LENGTH, _text
 
 CAPABILITY = Capability.PROJECT_TASK_WRITE_RESERVATION_RELEASE
 
@@ -154,15 +154,10 @@ class TaskWriteReleaser:
             if not isinstance(value, uuid.UUID):
                 raise InvalidCommandArgumentError(f"{name} must be a UUID")
         # Checked here too, so that a call refused for them leaves no audit event
-        # (``TaskService`` checks every rule of them again).
-        if (
-            type(reason) is not str
-            or not reason.strip()
-            or len(reason) > MAX_REASON_LENGTH
-        ):
-            raise InvalidCommandArgumentError(
-                f"reason must be 1 to {MAX_REASON_LENGTH} characters"
-            )
+        # (``TaskService`` checks every rule of them again). The reason goes
+        # through the service's own check, so that the two cannot drift apart
+        # (text a column cannot store included; Codex review of #149, P2).
+        _text("reason", reason, MAX_REASON_LENGTH)
         if expected_version is not None and (
             type(expected_version) is not int
             or not 1 <= expected_version <= _MAX_INTEGER
