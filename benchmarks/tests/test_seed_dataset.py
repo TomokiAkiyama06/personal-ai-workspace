@@ -498,6 +498,11 @@ class ForbiddenChangesTest(unittest.TestCase):
                     ["forbidden-changes", "--worktree", str(linked), "--base", base]
                 )
             self.assertEqual(code, 0)
+            # A mode change (the executable bit) is a change too.
+            (repo / "code.py").chmod(0o755)
+            self.assertEqual(run(), 1)
+            (repo / "code.py").chmod(0o644)
+            self.assertEqual(run(), 0)
             # Evaluator caches are not changes.
             (repo / "__pycache__").mkdir()
             (repo / "__pycache__" / "code.cpython-313.pyc").write_bytes(b"x")

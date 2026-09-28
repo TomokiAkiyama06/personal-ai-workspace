@@ -254,8 +254,8 @@ def _blob_id(data: bytes) -> str:
     ).hexdigest()  # Git blob id (SHA-1 object format)
 
 
-def _worktree_blobs(worktree: Path) -> dict[str, str]:
-    """Git blob ids of the files in the worktree, hashed here from the raw bytes.
+def _worktree_blobs(worktree: Path) -> dict[str, tuple[str, str]]:
+    """Git (mode, blob id) of the files in the worktree, hashed here from the raw bytes.
 
     Git's own view (index flags such as ``assume-unchanged`` / ``skip-worktree``,
     ignore rules, attributes and filters) is under the candidate's control, so it
@@ -279,19 +279,20 @@ def _worktree_blobs(worktree: Path) -> dict[str, str]:
             path = here / name
             key = (relative / name).as_posix()
             if path.is_symlink():
-                blobs[key] = _blob_id(os.fsencode(os.readlink(path)))
+                blobs[key] = ("120000", _blob_id(os.fsencode(os.readlink(path))))
             elif path.is_file():
-                blobs[key] = _blob_id(path.read_bytes())
+                mode = "100755" if path.stat().st_mode & 0o111 else "100644"
+                blobs[key] = (mode, _blob_id(path.read_bytes()))
     return blobs
 
 
-def _base_blobs(worktree: Path, base: str) -> dict[str, str]:
+def _base_blobs(worktree: Path, base: str) -> dict[str, tuple[str, str]]:
     blobs = {}
     for entry in _git(worktree, "ls-tree", "-r", "-z", "--full-tree", base):
         meta, _, path = entry.partition("\t")
-        _mode, kind, object_id = meta.split()
+        mode, kind, object_id = meta.split()
         if kind == "blob":
-            blobs[path] = object_id
+            blobs[path] = (mode, object_id)
     return blobs
 
 
