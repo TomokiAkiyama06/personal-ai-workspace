@@ -23,7 +23,8 @@ a registered remote lets no call with a URL through).
 """
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from dataclasses import replace
 
 from paw_backend.authz import AgentGrant, derive_child_grant
 from paw_backend.orchestrator.domain import (
@@ -33,6 +34,7 @@ from paw_backend.orchestrator.domain import (
 )
 from paw_backend.orchestrator.errors import ScopeEscalationError
 from paw_backend.orchestrator.records import NodeRecord
+from paw_backend.orchestrator.workspaces import NodeWorktree
 from paw_backend.tasks import TaskRun
 from paw_backend.tools import TaskScope
 from paw_backend.tools.scope import path_within
@@ -91,12 +93,22 @@ def derive_child_scope(
     *,
     role: NodeRole,
     repositories: Sequence[uuid.UUID] | None,
+    worktrees: Mapping[uuid.UUID, NodeWorktree] | None = None,
 ) -> TaskScope:
     """The scope of a node of ``role`` that asked for ``repositories`` (``None``:
     the whole working set). Raises ``ScopeEscalationError`` for a repository that
-    is not in the parent's working set."""
+    is not in the parent's working set.
+
+    ``worktrees`` (PAW-035) are the dedicated worktrees the backend prepared for
+    a Worker node, by repository: each such repository's root becomes its
+    worktree, the worktree becomes a path root (the first ones, so that a
+    relative path resolves inside a worktree), and the user's own checkout and
+    the task's integration worktree (``NodeWorktree.protected``) become
+    ``excluded_paths``. A worktree of a repository outside the node's
+    repositories, or for a read-only role, is a ``ScopeEscalationError``."""
     if not isinstance(parent, TaskScope):
         raise TypeError("parent must be a TaskScope")
+    worktrees = _checked_worktrees(worktrees, role)
     excluded = parent.excluded_repositories
     if repositories is None:
         chosen = parent.repositories
@@ -119,8 +131,31 @@ def derive_child_scope(
             for repository in parent.repositories
             if repository.repo_id not in chosen_ids
         )
+    path_roots = parent.path_roots
+    excluded_paths = parent.excluded_paths
+    if worktrees:
+        chosen_ids = {repository.repo_id for repository in chosen}
+        if not set(worktrees) <= chosen_ids:
+            raise ScopeEscalationError()
+        chosen = tuple(
+            replace(repository, root=worktrees[repository.repo_id].path)
+            if repository.repo_id in worktrees
+            else repository
+            for repository in chosen
+        )
+        own = [worktrees[r.repo_id].path for r in chosen if r.repo_id in worktrees]
+        path_roots = (*own, *parent.path_roots)
+        excluded_paths = (
+            *parent.excluded_paths,
+            *(
+                path
+                for repository in chosen
+                if repository.repo_id in worktrees
+                for path in worktrees[repository.repo_id].protected
+            ),
+        )
     child = TaskScope(
-        path_roots=parent.path_roots,
+        path_roots=path_roots,
         hosts=parent.hosts,
         projects=dict(parent.projects),
         credential_handles=(
@@ -128,22 +163,69 @@ def derive_child_scope(
         ),
         repositories=chosen,
         excluded_repositories=excluded,
+        excluded_paths=excluded_paths,
     )
-    if not scope_within(child, parent):
+    if not scope_within(child, parent, worktrees=worktrees):
         raise ScopeEscalationError()
     return child
 
 
-def scope_within(child: TaskScope, parent: TaskScope) -> bool:
+def _checked_worktrees(
+    worktrees: Mapping[uuid.UUID, NodeWorktree] | None, role: NodeRole
+) -> dict[uuid.UUID, NodeWorktree]:
+    if worktrees is None:
+        return {}
+    if not isinstance(worktrees, Mapping):
+        raise TypeError("worktrees must map repository ids to NodeWorktree")
+    checked: dict[uuid.UUID, NodeWorktree] = {}
+    for repo_id, worktree in worktrees.items():
+        if not isinstance(worktree, NodeWorktree) or worktree.repo_id != repo_id:
+            raise TypeError("worktrees must map repository ids to NodeWorktree")
+        checked[repo_id] = worktree
+    if checked and role not in ROLES_WITH_CREDENTIALS:
+        # Only a writing role works in a worktree of its own; a read-only role
+        # reads the task's checkout (REQUIREMENTS: an immutable snapshot).
+        raise ScopeEscalationError()
+    return checked
+
+
+def scope_within(
+    child: TaskScope,
+    parent: TaskScope,
+    *,
+    worktrees: Mapping[uuid.UUID, NodeWorktree] | None = None,
+) -> bool:
     """Whether ``child`` reaches nothing that ``parent`` does not: every path root
     is a parent root or lies below one, every host and project (with the same
     state) is the parent's, every credential handle is the parent's with no more
     hosts, and every repository is the parent's, unchanged (its worktree, its ACL
-    and its remotes)."""
+    and its remotes), and every path the parent excludes is excluded.
+
+    ``worktrees`` are the only widening the backend itself makes (PAW-035): the
+    worktree it prepared for a repository may be a path root and that
+    repository's root, with nothing else of the repository changed. A worktree
+    that lies inside a path or a repository the parent excludes is not
+    accepted."""
+    worktrees = worktrees or {}
+    allowed_roots = {worktree.path for worktree in worktrees.values()}
     if not all(
-        any(path_within(root, allowed) for allowed in parent.path_roots)
+        root in allowed_roots
+        or any(path_within(root, allowed) for allowed in parent.path_roots)
         for root in child.path_roots
     ):
+        return False
+    parent_excluded = [*parent.excluded_paths] + [
+        repository.root
+        for repository in parent.excluded_repositories
+        if repository.root is not None
+    ]
+    if any(
+        path_within(root, excluded)
+        for root in allowed_roots
+        for excluded in parent_excluded
+    ):
+        return False
+    if not all(path in child.excluded_paths for path in parent.excluded_paths):
         return False
     if not child.hosts <= parent.hosts:
         return False
@@ -153,11 +235,15 @@ def scope_within(child: TaskScope, parent: TaskScope) -> bool:
         allowed = parent.credential_handles.get(handle)
         if allowed is None or not hosts <= allowed:
             return False
-    if not all(
-        parent.repository(repository.repo_id) == repository
-        for repository in child.repositories
-    ):
-        return False
+    for repository in child.repositories:
+        original = parent.repository(repository.repo_id)
+        if original is None:
+            return False
+        worktree = worktrees.get(repository.repo_id)
+        if original != repository and (
+            worktree is None or replace(original, root=worktree.path) != repository
+        ):
+            return False
     # What the parent may not touch, the child may not either.
     return all(
         repository in child.excluded_repositories

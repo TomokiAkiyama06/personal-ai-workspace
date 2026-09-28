@@ -63,7 +63,8 @@ apps/backend/
 │  │  └─ passkeys/         # Passkey（WebAuthn）: Ceremony の検証、Challenge、登録・認証・失効、Passkey の Step-up の Verifier、Tool Broker の強い承認の Step-up（PAW-023）
 │  ├─ identity/            # 最小の users、One-time Token。`redeemer.py` は Web 側、`operator.py`（Owner の作成・Token の発行）は cli だけが使う（PAW-021）
 │  ├─ cli/                 # server-local の管理コマンド `python -m paw_backend.cli`（PAW-021。`audit-retention-*` は Issue #117）
-│  ├─ orchestrator/        # DAG Agent Orchestrator: Plan、Scheduler、DAG の永続化と Fencing、Runtime の Protocol、Tool・Budget の Gateway、Project 削除の Sweep（PAW-034）
+│  ├─ orchestrator/        # DAG Agent Orchestrator: Plan、Scheduler、DAG の永続化と Fencing、Runtime の Protocol、Tool・Budget の Gateway、Project 削除の Sweep（PAW-034）、worktree と統合の継ぎ目 `workspaces.py`（PAW-035）
+│  ├─ integration/         # Parallel Worktree / Integration Node: Worker ごとの worktree・branch、integration branch への統合と Conflict の検知、統合後の Test → Evaluator → Review の Gate（PAW-035）
 │  ├─ tasks/               # Agent Task の状態遷移と永続化（PAW-032）。`project_gate.py` は Project の状態 Gate の Protocol（Issue #83）
 │  │  └─ queueing/         # Task Queue、Budget、Loop 検知、Escalation の判断（PAW-033）
 │  ├─ memory/              # Memory / Conversation の Model、ACL 条件、vector 型、Pin / Importance / Status / Stale 変更の Actor（PAW-040、#90）、全文検索の式 `fulltext.py`（PAW-043）
@@ -3509,7 +3510,7 @@ await orchestrator.serve("worker-1", stop_event)  # または run_once("worker-1
 - Agent の Runtime、実 Model、実際の Tool の Executor はありません（Fake で Test）。Runtime が `NodeStopped` を通す契約と、Executor の契約（Tool Broker の節）は実装側の責務です。
 - 承認待ち（`NEEDS_APPROVAL`）で Task を `waiting`（`approval`）にする配線はありません（承認の Endpoint が PAW-022 以降）。Runtime は `NEEDS_APPROVAL` の結果を受け取り、承認後に `approval_id` を付けて呼び直します。
 - Node の停止は、Cancel と Stop Now を区別しません（どちらも Node を即座に止めます。成果物は Worktree に残ります）。
-- Worktree の作成・統合（PAW-035）、Evaluator による完了、Resource Scheduler による並列数（PAW-036）、Working Set の永続化（#85）、Node ごとの予算は含みません。
+- Evaluator の実体による完了、Resource Scheduler による並列数（PAW-036）、Working Set の永続化（#85）、Node ごとの予算は含みません。Worktree の作成・統合（PAW-035）は、`Orchestrator(worktrees=...)` に渡す `NodeWorkspaces`（次の節）が行います。渡さなければ PAW-034 のとおり動きます。
 - **実 PostgreSQL 18 で Test しました。** 複数の Process が同じ DAG を触る競合（Lock の順序）は、別の接続 Pool（別の Worker Process の代わり）を使った Test で確かめています。
 - 削除待ちの Project の Sweep は、Task Lane / Queue Lane の Gate（Issue #83）の実装ではありません。競合そのものは閉じず、周期の再実行で止めます。
 - `TaskQueue` の Lease は Database の時計で判定され、Worker の Heartbeat の間隔（既定は Lease の 1/4。`Orchestrator` は、3 回続けて失敗する Heartbeat が Lease の切れる前に終わらない間隔（`heartbeat_seconds × 3 ≥ lease_seconds`）を作成時に拒否します）の間は、Lease を失った Worker が気づかず Node の Runtime を動かし続けることがあります（書き込みは `epoch` が拒否します）。Runtime の副作用（File への書き込み）は At-least-once で、Node の冪等性は Runtime の責務です。
@@ -3518,6 +3519,47 @@ await orchestrator.serve("worker-1", stop_event)  # または run_once("worker-1
 
 `apps/backend/tests/test_orchestrator_*.py`、`orchestrator_support.py`、`test_authz_delegation.py`。標準 `unittest` だけで、`test_orchestrator_plan.py`（Plan の検査の表と、ランダムな DAG の位相順・Cycle 検出）、`test_orchestrator_result.py`、`test_orchestrator_scheduling.py`（純粋な規則と、ランダムな DAG の Property Test）、`test_orchestrator_scope.py`、`test_orchestrator_argument_validation.py`（全 Public Method × 全引数 × 誤った値の表。DB を設定しない Database を渡し、DB に届く前に型付きのエラーになること）、`test_orchestrator_migration.py` の前半と `test_orchestrator_project_sweep.py` の前半は DB を使いません。
 それ以外は実 PostgreSQL（`PAW_TEST_DATABASE_URL`）を使い、未設定なら Skip します: 永続化と Fencing の競合（`test_orchestrator_store.py`: 引き継ぎ・書き込み・Lock 待ちの順序、同時に終わる 2 Node、同じ Node の 2 重の起動）、実行・並列・結果の受け渡し（`test_orchestrator_run.py`）、失敗・Retry・Escalation・Isolation（`test_orchestrator_failures.py`）、Plan の受け入れ（`test_orchestrator_planning.py`）、Budget（`test_orchestrator_budget.py`）、Pause / Cancel / Retry / Restart（`test_orchestrator_control.py`）、Lease・Crash・引き継ぎ（`test_orchestrator_lease.py`）、終了の Command と Start の Fencing（`test_orchestrator_fenced_commands.py`: Barrier で「最後の確認の後、Command の前」に `fail` → Retry → Start を割り込ませる）、`succeeded` の DAG の Retry と予期しない Error の後始末（`test_orchestrator_recovery.py`）、走っている間の Runtime の Budget（`test_orchestrator_runtime_budget.py`）、Gate の明示的な組み立て（`test_orchestrator_wiring.py`）、Project が Active でないときの Claim・Start・走行中の Task（実際の `ProjectStateGate`。`test_orchestrator_project_gate.py`）、Worker の停止と `serve`（`test_orchestrator_shutdown.py`）、実際の Tool Broker と（`test_orchestrator_tools.py`）、ランダムな DAG を Orchestrator 全体で動かす Property Test（`test_orchestrator_property.py`）、Migration の上げ下げと Model との一致（`test_orchestrator_migration.py`）、Sweep（`test_orchestrator_project_sweep.py`）、非 Superuser の Role（`test_orchestrator_grants.py`）。時間は注入した `ManualClock` で、速度に依存する Test はありません（Lock 待ちや非同期の進行は上限を長く取った待機で確かめます）。
+
+## Parallel Worktree / Integration Node
+
+[PAW-035](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/31)（`paw_backend/integration/`、Orchestrator の継ぎ目 `paw_backend/orchestrator/workspaces.py`）で実装しました。**Migration はありません。** 設計は [要件](../../REQUIREMENTS.md)の「Repository isolation」「Review independence」に従い、要件が決めていない選択（置き場所と名前、Worker の branch の起点、統合の base・順序・方法、Conflict と未 Commit の変更の扱い、統合後の検査、PR / Push を行わないこと、後片付け、SSH の Wrapper の許可リストへの追加）は **[Decision 0036（Proposed）](../../docs/decisions/0036-parallel-worktree-integration.md)** にまとめ、人間の判断を待っています。実装は各点で推奨を採っています。
+
+```text
+Worker a ─ worktree .paw-worktrees/<task>/<attempt>/<repo>/a   branch paw/<task>/<attempt>/a ─┐
+Worker b ─ worktree .paw-worktrees/<task>/<attempt>/<repo>/b   branch paw/<task>/<attempt>/b ─┤ merge --no-ff（Node の順）
+                                                                                              ▼
+Integration ─ worktree .paw-worktrees/<task>/<attempt>/<repo>/_integration   branch paw/<task>/<attempt>/_integration
+   ▼  （Conflict / 未 Commit: Task は waiting（user）。git の失敗: failed）
+Task は evaluating ─→ IntegrationGate: Test → Evaluator → Review（integration worktree を検査）
+   ▼
+全部通れば completed（Merge Ready。Human が Merge を判断する）/ 通らなければ failed
+```
+
+- **Worker ごとの worktree / branch**: `Orchestrator` は、Role が `worker` で Grant に `project.repo.write` がある Node の試行の前に、`NodeWorkspaces.prepare_node` を呼びます。実装の `GitWorktreeCoordinator` は、Node の Scope の Checkout を持つ Repository ごとに、`<home>/<workspace_subdir>/.paw-worktrees/<task>/<attempt>/<repository>/<node>` に branch `paw/<task>/<attempt>/<node>` の worktree を作り（または前の試行のものを再利用し）、依存する Worker の branch を取り込みます（Conflict は再試行なしで Node の失敗 `WorktreeConflict`）。Node の Scope は worktree を指し、**利用者の Checkout と integration worktree は `TaskScope.excluded_paths` で Scope の外**になります（`derive_child_scope(worktrees=...)`、`scope_within` はこの広げ方だけを受け入れる）。Runtime は `NodeAssignment.worktrees` で場所を受け取り、そこで Commit します。
+- **Integration worktree への集約と Conflict の検知**: DAG が成功したら、`evaluating` にする前に `NodeWorkspaces.integrate` が、成功した Worker の branch を Repository ごとの integration worktree で Node の順に `git merge --no-ff` します。各 merge の前に `git merge-tree --write-tree` で Conflict を判定し、Conflict する branch で止まって（merge しない）、Node の key と File を返します。Task Log には Repository ID・Node の key・件数だけを書きます。Worker の worktree に未 Commit の変更があれば merge の前に止まります。どちらも Task は `waiting`（`user`）で、Human が integration worktree で解消して Commit し、Unblock して Queue に戻すと、統合は解消済みの branch を通り過ぎます（冪等）。
+- **default branch へ直接統合しない**: Backend が書く branch はすべて `paw/` の下で、default branch が `paw/` の下の Repository は拒否します。`push` / `fetch` / `checkout` / `reset` / `rebase` は使いません。利用者の Checkout の HEAD・作業ツリー・default branch は変わりません（Test が毎回確かめます）。PR の作成と Push はこの Issue に含めません（Decision 0036 の 10）。
+- **統合後の Test / Evaluator / Review**: `IntegrationGate.evaluate(task_id)` は `evaluating` の Task の integration worktree を、Test → Evaluator → Review の順に検査へ渡し（3 種すべて必須）、全部通れば Task を `completed`、通らなければ `failed` にします（Run と Version に Fence。検査の間に integration branch が動いたら `failed`）。結果は試行の `ReviewState`（`evaluation_result`、`review_status`）に記録し、検査の文章は保存しません。実際の検査は別の Issue です（Protocol だけ）。
+- **git は Task の作成者の Linux Account として**、配備の `GitRunner` で動きます（`SubprocessGitRunner`、または他の Linux User には `SshGitRunner`。Decision 0029）。worktree の確認は Local の File System ではなく git に尋ねるので、Backend が他の User の Home を読めなくても成り立ちます。SSH での動作には、Wrapper の許可リストへの追加（Decision 0036 の 13）が要ります。
+- 状態の正本は git です（名前が ID から決まるので、Worker が死んでも次の Worker が同じ worktree を見つけます）。Repository が 1 つの Task は、試行の worktree の状態に integration branch を記録します。
+
+| Module | 内容 |
+| --- | --- |
+| `orchestrator/workspaces.py` | 継ぎ目: `NodeWorkspaces` の Protocol、`NodeWorktree`、`IntegrationReport` / `RepositoryIntegration`、`WorktreeUnavailableError` / `WorktreeConflictError` |
+| `integration/layout.py` | 名前と Path（純粋関数） |
+| `integration/git.py` | `WorktreeGit`: worktree と merge の git の Command（固定の引数、固定の作者、署名しない） |
+| `integration/coordinator.py` | `GitWorktreeCoordinator`: `NodeWorkspaces` の実装、`targets`（統合結果の場所） |
+| `integration/gate.py` | `IntegrationGate`: Test → Evaluator → Review と Task の完了 / 失敗 |
+
+### 制限と未確認の点
+
+- **SSH（他の Linux User）での動作は未検証です。** Test は、Test を実行する User 自身の一時 Repository と `SubprocessGitRunner` だけを使います（他の User の SSH 鍵・Home・Credential は読みません）。Server での確認手順は PR に書きました。
+- Multi-Repo の Task の統合の状態は Task Log だけに残ります（試行の行は worktree を 1 つしか持てないため）。PR #124（Issue #85）の Merge 後は Repository ごとに記録し、Working Set の Role が `working` / `target` の Repository だけに worktree を与えます。
+- worktree と branch は Task の後も残ります。削除は別の操作です（後の Issue）。
+- git 2.38 以降が必要です（`merge-tree --write-tree`）。
+
+### Test
+
+`tests/test_worktrees_git.py`（名前・Path、`WorktreeGit`）、`tests/test_worktrees_coordinator.py`（実 git での worktree の作成・再利用・依存の取り込み・統合・Conflict・未 Commit・Repository ごとの状態・拒否）、`tests/test_orchestrator_worktree_scope.py`（Node の Scope と `excluded_paths`）は DB を使いません。`tests/test_orchestrator_worktrees.py`（Orchestrator が worktree を求める Node、統合、Conflict で `waiting`、再統合、git の失敗で `failed` と Retry、実 git での並列 Worker の統合）と `tests/test_worktrees_gate.py`（Gate）は実 PostgreSQL を使います。git の Test は、Test を実行する User の一時 Directory の Repository だけを使います。
 
 ## Repository Registration / Per-user Checkout
 

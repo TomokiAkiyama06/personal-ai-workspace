@@ -93,6 +93,17 @@ class GitRunner(Protocol):
         ...
 
 
+def command_name(args: Sequence[str]) -> str:
+    """The git sub-command of ``args``: the first word after any leading
+    ``-c key=value`` options (a command that must override the repository's own
+    configuration, PAW-035's ``merge``, puts them first), else ``"git"``. What a
+    failure is logged and reported as, never an argument."""
+    index = 0
+    while index + 1 < len(args) and args[index] == "-c":
+        index += 2
+    return args[index] if index < len(args) else "git"
+
+
 class _OutputTooLarge(Exception):
     pass
 
@@ -277,7 +288,7 @@ class SubprocessGitRunner:
         timeout_s: float,
         ceiling: str | None = None,
     ) -> GitResult:
-        name = args[0] if args else "git"
+        name = command_name(args)
         if account.uid != os.geteuid():
             raise GitCommandError(name, GitFailure.IDENTITY_MISMATCH)
         argv = [

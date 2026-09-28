@@ -79,6 +79,7 @@ from paw_backend.repositories.errors import GitCommandError, GitFailure
 from paw_backend.repositories.git import (
     SAFE_PATH,
     GitResult,
+    command_name,
     git_config_arguments,
     run_subprocess,
     validate_allowed_protocols,
@@ -349,7 +350,7 @@ class SshGitRunner:
         timeout_s: float,
         ceiling: str | None = None,
     ) -> GitResult:
-        name = args[0] if args else "git"
+        name = command_name(args)
         try:
             identity = await self._keys.key_path_of(account)
         except OSError:

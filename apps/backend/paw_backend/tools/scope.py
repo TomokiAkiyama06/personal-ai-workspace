@@ -377,6 +377,13 @@ class TaskScope:
     of one of them, or a URL below one of its remotes, is out of scope
     (fail closed), whatever the roots and hosts say. An excluded repository is
     never also in ``repositories``.
+
+    ``excluded_paths`` are directories the scope may reach through its
+    ``path_roots`` but must not touch, whatever repository they belong to (a
+    Worker node that works in its own worktree must not write to the user's
+    checkout of the same repository, nor to the task's integration worktree:
+    PAW-035). A path in one of them is out of scope, like a path of an excluded
+    repository.
     """
 
     path_roots: tuple[str, ...]
@@ -385,6 +392,7 @@ class TaskScope:
     credential_handles: Mapping[str, frozenset[str]] = field(default_factory=dict)
     repositories: tuple[ScopedRepository, ...] = ()
     excluded_repositories: tuple[ScopedRepository, ...] = ()
+    excluded_paths: tuple[str, ...] = ()
 
     def repository(self, repo_id: uuid.UUID) -> ScopedRepository | None:
         """The working-set repository with this id (``None`` when not in it)."""
@@ -432,8 +440,16 @@ class TaskScope:
             raise ValueError("a repository is excluded twice")
         if excluded_ids & {r.repo_id for r in repositories}:
             raise ValueError("a repository is both in the working set and excluded")
+        excluded_paths: list[str] = []
+        for path in _collection(self.excluded_paths, "excluded_paths"):
+            normalised = normalise_path(path)  # absolute only: no base
+            if normalised == "/":
+                raise ValueError("the file system root cannot be excluded")
+            if normalised not in excluded_paths:
+                excluded_paths.append(normalised)
         if (
             len(roots) > MAX_ROOTS
+            or len(excluded_paths) > MAX_ROOTS
             or len(hosts) > MAX_HOSTS
             or len(projects) > MAX_PROJECTS
             or len(repositories) > MAX_REPOSITORIES
@@ -448,6 +464,7 @@ class TaskScope:
         object.__setattr__(self, "credential_handles", MappingProxyType(handles))
         object.__setattr__(self, "repositories", tuple(repositories))
         object.__setattr__(self, "excluded_repositories", tuple(excluded))
+        object.__setattr__(self, "excluded_paths", tuple(excluded_paths))
 
 
 class PathResolver(Protocol):
@@ -540,6 +557,9 @@ async def classify_targets(
             await _resolve(resolver, repository.root, timeout_seconds)
             for repository in scope.excluded_repositories
             if repository.root is not None
+        ] + [
+            await _resolve(resolver, path, timeout_seconds)
+            for path in scope.excluded_paths
         ]
         for target in paths:
             resolved = await _resolve(resolver, target.value, timeout_seconds)

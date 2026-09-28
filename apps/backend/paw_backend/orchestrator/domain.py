@@ -80,6 +80,12 @@ class RunOutcome(StrEnum):
     LEASE_LOST = "lease_lost"  # the worker lost its lease and stopped writing
     DAG_SUCCEEDED = "dag_succeeded"  # every required node succeeded: evaluating
     DAG_FAILED = "dag_failed"  # a required node did not succeed: the task failed
+    # PAW-035: the DAG succeeded but a Worker branch conflicts (or a worktree has
+    # uncommitted changes) in the integration: the task waits for a human.
+    INTEGRATION_CONFLICT = "integration_conflict"
+    # PAW-035: the DAG succeeded but git could not integrate: the task failed
+    # (a Retry integrates again; the DAG's results stand).
+    INTEGRATION_FAILED = "integration_failed"
     PLAN_FAILED = "plan_failed"  # no acceptable plan: the task failed
     WAITING_FOR_USER = "waiting_for_user"  # budget or loop: a human decides
     BUDGET_FAILED = "budget_failed"  # retries used up: the task failed
