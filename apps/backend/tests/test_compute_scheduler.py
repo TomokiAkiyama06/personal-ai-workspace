@@ -145,6 +145,33 @@ class AdmissionTest(unittest.IsolatedAsyncioTestCase):
             Refusal.CONTEXT_TOO_LONG,
         )
 
+    async def test_the_gpu_kv_share_does_not_limit_a_cpu_lease(self):
+        # A KV pool of 10,000 tokens: Support may take 90% * 85% = 7,650 of it on
+        # the GPU. On the CPU no KV is reserved: only the model's maximum counts.
+        spec = embedding_spec(
+            initial=DeploymentState.CPU,
+            kv_pool_bytes=10_000 * 1024,
+            kv_bytes_per_token=1024,
+        )
+        scheduler, *_ = build((main_spec(), spec), control=False)
+        await scheduler.refresh()
+        admission = await scheduler.try_acquire(request(SU, "embed", tokens=8_000))
+        self.assertIsNotNone(admission.lease)
+        self.assertEqual(admission.lease.placement, Placement.LOCAL_CPU)
+        self.assertEqual(
+            (await scheduler.try_acquire(request(SU, "embed", tokens=8_193))).refusal,
+            Refusal.CONTEXT_TOO_LONG,
+        )
+
+    async def test_on_the_gpu_the_kv_share_still_limits_the_context(self):
+        spec = embedding_spec(kv_pool_bytes=10_000 * 1024, kv_bytes_per_token=1024)
+        scheduler, *_ = build((main_spec(), spec), control=False)
+        await scheduler.refresh()
+        self.assertEqual(
+            (await scheduler.try_acquire(request(SU, "embed", tokens=8_000))).refusal,
+            Refusal.CONTEXT_TOO_LONG,
+        )
+
     async def test_cpu_leases_do_not_need_the_probe(self):
         scheduler, probe, _, clock = build(
             (main_spec(), embedding_spec(initial=DeploymentState.CPU)), control=False

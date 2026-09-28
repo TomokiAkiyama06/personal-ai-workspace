@@ -10,7 +10,10 @@
   task's dependency / permission / quota", which the backend knows and the
   scheduler does not. Without a policy nothing goes to the cloud. The wall time a
   node holds a local lease is charged to the task as ``GPU_SECONDS`` (the budget's
-  "max GPU time"), also when the local runtime raises or is cancelled.
+  "max GPU time"), also when the local runtime raises or is cancelled. A node
+  with no GPU time left does not start locally, and a local call is stopped
+  when it has held the GPU for the time that was left (``NodeStopped`` on the
+  budget in both cases), so one slow call cannot overrun the budget.
 * :class:`ScheduledMemoryWorker` wraps a Memory Worker (PAW-041). A job runs only
   under a Background lease on the Memory Worker's model; when there is none (the
   model is unloaded, background work is stopped under pressure, an Exclusive job
@@ -23,8 +26,10 @@
   (CPU fallback).
 """
 
+import asyncio
 import contextlib
 import json
+import logging
 import math
 from collections.abc import Callable, Sequence
 from typing import Protocol
@@ -50,6 +55,7 @@ from paw_backend.compute.scheduler import (
 from paw_backend.memory.journal.errors import WorkerUnavailableError
 from paw_backend.memory.journal.worker import check_worker
 from paw_backend.orchestrator.config import Clock, SystemClock
+from paw_backend.orchestrator.errors import NodeStopped, StopReason
 from paw_backend.orchestrator.result import upstream_size
 from paw_backend.orchestrator.runtime import (
     AgentRuntime,
@@ -62,6 +68,31 @@ from paw_backend.tools.interfaces import require_async_method
 
 COMPUTE_UNAVAILABLE = "ComputeUnavailable"
 _MAX_ESTIMATE = 1 << 24
+# How long a local runtime stopped on the GPU time left may take to end.
+CANCEL_GRACE_SECONDS = 10.0
+# The local runtime was stopped because the task's GPU time ran out.
+_EXHAUSTED = object()
+
+logger = logging.getLogger(__name__)
+
+
+async def _cancel_and_wait(tasks: Sequence[asyncio.Future]) -> None:
+    """Cancel ``tasks`` and wait for them, at most ``CANCEL_GRACE_SECONDS``. One
+    that swallows its cancellation is abandoned (its end retrieved when it comes)."""
+    for task in tasks:
+        task.cancel()
+    pending = [task for task in tasks if not task.done()]
+    if pending:
+        _, still = await asyncio.wait(pending, timeout=CANCEL_GRACE_SECONDS)
+        if still:
+            logger.error("A local runtime did not stop when it was cancelled")
+    for task in tasks:
+        task.add_done_callback(_retrieve)
+
+
+def _retrieve(task: asyncio.Future) -> None:
+    if not task.cancelled():
+        task.exception()
 
 
 def _tokens(size_bytes: int) -> int:
@@ -158,15 +189,21 @@ class HybridRuntime:
         except ComputeUnavailableError:
             return NodeOutcome.failed(COMPUTE_UNAVAILABLE, retryable=True)
         seconds = 0
+        outcome = None
         try:
             async with lease:
                 if lease.placement is Placement.CLOUD:
                     return await self._cloud.run_node(assignment)
+                left = await self._gpu_seconds_left(assignment)
+                if left is not None and left <= 0:
+                    raise NodeStopped(StopReason.BUDGET_EXCEEDED)
                 started = self._clock.monotonic()
                 try:
-                    outcome = await self._local.run_node(assignment)
+                    outcome = await self._run_local(assignment, left)
                 finally:
                     seconds = math.ceil(max(0.0, self._clock.monotonic() - started))
+                    if outcome is _EXHAUSTED and left is not None:
+                        seconds = max(seconds, left)
         except BaseException:
             # The GPU time was spent although the node failed or was cancelled:
             # charged too, or failing nodes that are retried would bypass the
@@ -178,7 +215,38 @@ class HybridRuntime:
         if self._charge and seconds > 0:
             # Raises NodeStopped when the budget is now used up: it passes.
             await assignment.budget.charge(BudgetKind.GPU_SECONDS, seconds)
+        if outcome is _EXHAUSTED:
+            # The GPU time left was spent and the local runtime was stopped: the
+            # node stops on the budget (the charge may already have said so).
+            raise NodeStopped(StopReason.BUDGET_EXCEEDED)
         return outcome
+
+    async def _gpu_seconds_left(self, assignment: NodeAssignment) -> int | None:
+        """The task's ``GPU_SECONDS`` left (``None``: unlimited, or not charged
+        by this runtime). Raises ``NodeStopped`` as the budget does."""
+        if not self._charge:
+            return None
+        left = (await assignment.budget.remaining()).get(BudgetKind.GPU_SECONDS)
+        if isinstance(left, bool) or not isinstance(left, int):
+            return None
+        return left
+
+    async def _run_local(self, assignment: NodeAssignment, left: int | None):
+        """The local runtime, stopped when it holds the GPU longer than the task's
+        GPU time left (``_EXHAUSTED``): the budget is checked before a local call,
+        not only after it, so one slow or hung call cannot overrun it without
+        bound while it keeps its lease."""
+        if left is None:
+            return await self._local.run_node(assignment)
+        work = asyncio.ensure_future(self._local.run_node(assignment))
+        timer = asyncio.ensure_future(self._clock.sleep(left))
+        try:
+            await asyncio.wait({work, timer}, return_when=asyncio.FIRST_COMPLETED)
+            if work.done():
+                return work.result()
+            return _EXHAUSTED
+        finally:
+            await _cancel_and_wait((work, timer))
 
 
 class ScheduledMemoryWorker:

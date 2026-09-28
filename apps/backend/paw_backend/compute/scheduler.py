@@ -692,8 +692,14 @@ class ComputeScheduler:
         cls = request.resource_class
         tokens = request.context_tokens
         config = self._config
-        too_long = tokens > spec.max_context_tokens or (
-            spec.kv_capacity_tokens
+        if tokens > spec.max_context_tokens:
+            return Refusal.CONTEXT_TOO_LONG, Placement.LOCAL_GPU
+        available = not entry.busy and not entry.draining
+        on_cpu = available and entry.state is DeploymentState.CPU
+        # The GPU KV share limits GPU placements only: a CPU lease reserves no KV.
+        if (
+            not on_cpu
+            and spec.kv_capacity_tokens
             and tokens
             > usable_tokens(
                 self._kv(entry),
@@ -701,11 +707,9 @@ class ComputeScheduler:
                 safety=config.kv_safety,
                 ceilings=config.class_ceilings,
             )
-        )
-        if too_long:
+        ):
             return Refusal.CONTEXT_TOO_LONG, Placement.LOCAL_GPU
-        available = not entry.busy and not entry.draining
-        if available and entry.state is DeploymentState.CPU:
+        if on_cpu:
             # The CPU copy needs neither the probe nor the GPU (it also serves
             # while an Exclusive job holds the GPU).
             if queue and self._queued_ahead(request):

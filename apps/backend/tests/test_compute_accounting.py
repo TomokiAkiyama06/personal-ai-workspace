@@ -139,6 +139,31 @@ class AccountTest(unittest.TestCase):
         self.assertEqual(view.reserved, 50 * GIB)
         self.assertEqual(view.available, 42 * GIB)
 
+    def test_an_exclusive_jobs_use_counts_against_its_reservation(self):
+        # An 80 GiB Exclusive job that uses its 80 GiB: its processes are not a
+        # model's, so what they use is absorbed by its reservation, not counted
+        # again as external (that would say ~160 GiB committed).
+        view = account(
+            device(used=80 * GIB),
+            (proc(77, 80 * GIB),),
+            (),
+            headroom=4 * GIB,
+            extra_reserved=80 * GIB,
+        )
+        self.assertEqual(view.external, 0)
+        self.assertEqual(view.committed, 80 * GIB)
+        self.assertEqual(view.available, 12 * GIB)
+        # Beyond its reservation the rest is still counted.
+        view = account(
+            device(used=94 * GIB),
+            (proc(77, 94 * GIB),),
+            (),
+            headroom=4 * GIB,
+            extra_reserved=80 * GIB,
+        )
+        self.assertEqual(view.committed, 94 * GIB)
+        self.assertTrue(view.under_pressure)
+
     def test_pressure_when_the_headroom_is_eaten(self):
         view = account(
             device(used=93 * GIB), (proc(9, 93 * GIB),), (), headroom=4 * GIB
@@ -167,6 +192,7 @@ class AccountTest(unittest.TestCase):
                 tuple(proc(pid, amount) for pid, amount in used_by.items()),
                 tuple(usages),
                 headroom=4 * GIB,
+                extra_reserved=rng.randrange(0, 20) * GIB,
             )
             self.assertGreaterEqual(view.committed, used)
             self.assertGreaterEqual(view.committed, view.reserved)

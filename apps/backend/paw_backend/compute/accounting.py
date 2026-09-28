@@ -17,7 +17,8 @@ the probe sees that is not the workspace's (``external``: another user's
 workload, a model that was unloaded but whose memory lingers). A model whose
 processes are not known (no model control is configured, or it could not say)
 is assumed to hold its reservation out of what the probe sees, the rest being
-external. So is a model whose known processes hold nothing on the GPU: the pids
+external; so is an Exclusive job (its processes are nobody's model). So is a
+model whose known processes hold nothing on the GPU: the pids
 given are then not the ones that hold its memory (the pids command named only
 the parent of a runtime whose GPU memory sits in a child process, as vLLM and
 SGLang do; or the model is still starting), and counting its reservation *and*
@@ -88,7 +89,9 @@ def account(
     reserved = extra_reserved
     committed_own = extra_reserved
     own_actual = 0
-    unknown_reserved = 0
+    # An Exclusive job's processes are no model's: what it uses shows among the
+    # unknown and is absorbed by its reservation, not counted a second time.
+    unknown_reserved = extra_reserved
     for usage in deployments:
         reserved += usage.reserved_bytes
         actual = (

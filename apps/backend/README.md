@@ -11,7 +11,7 @@ Claim と Source の対応・回答や Task からの追跡（[PAW-052](#evidenc
 Project の作成・招待制の Membership・Lifecycle（Active / Archived / Pending deletion / Deleted）は [PAW-026](#project-crud--membership--lifecycle) で実装済みです（Service のみ。HTTP の Endpoint と Session はまだありません）。
 DAG Agent Orchestrator（Task を Dependency DAG へ分解し、独立した Node を並列に実行し、Node ごとに Retry / Escalate し、Sub-Agent が親の権限と予算を超えない。[PAW-034](#dag-agent-orchestrator)、Agent の Runtime は Protocol で実際の Runtime は別の Issue、HTTP の Endpoint はまだありません）と、削除待ちの Project の Task を周期的に止める Loop も実装済みです。
 
-GPU / Compute Resource Scheduler（KV Cache に応じた動的な並列数、Actual / Reserved の VRAM と Safety Headroom、5 つの Resource class、Memory Worker の Unload と Embedding / Reranker の CPU fallback、Exclusive、Local / Cloud の振り分け）は [PAW-036](#gpu--compute-resource-scheduler) で実装済みです（Library と読み取り専用の確認 Command のみ。Application の Lifespan にはまだ組み込んでいません。選択は [Decision 0037](../../docs/decisions/0037-gpu-compute-scheduler.md)（Proposed））。
+GPU / Compute Resource Scheduler（KV Cache に応じた動的な並列数、Actual / Reserved の VRAM と Safety Headroom、5 つの Resource class、Memory Worker の Unload と Embedding / Reranker の CPU fallback、Exclusive、Local / Cloud の振り分け）は [PAW-036](#gpu--compute-resource-scheduler) で実装済みです（Library と読み取り専用の確認 Command のみ。Application の Lifespan にはまだ組み込んでいません。選択は [Decision 0037](../../docs/decisions/0037-gpu-compute-scheduler.md)（Approved））。
 
 Workspace 共有の Codex / Claude Connection（Credential は不透明な Handle だけ）、User 別 Quota、User と Task への利用量の帰属は [PAW-030](#shared-codex--claude-connection) で実装済みです（Service のみ。実 Adapter と HTTP の Endpoint はまだありません。Quota の意味・期間・実行中の Task の扱いは [Decision 0016](../../docs/decisions/0016-shared-connection-adapter-policy.md)（Approved、2026-09-26）に従います）。
 Project への Repository の登録（GitHub から clone、Ubuntu 上の既存 Repository、新規作成）と、User ごとに分離した Checkout は [PAW-027](#repository-registration--per-user-checkout) で実装済みです（Service のみ）。
@@ -3657,7 +3657,7 @@ await orchestrator.serve("worker-1", stop_event)  # または run_once("worker-1
 
 ## GPU / Compute Resource Scheduler
 
-[PAW-036](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/32)（`paw_backend/compute/`、`paw_backend/cli/compute.py`。Migration はありません）で実装しました。設計は [要件](../../REQUIREMENTS.md)の「GPU / Compute Resource Scheduler」（FIXED）に従い、要件が決めていない選択（状態の置き場所、Admission の単位、Safety Headroom などの数値、Class の取り分と待ち行列の順、縮退を進める・戻す条件、Main Model の構成変更を自動で行わないこと、Exclusive の手順、Cloud へ回す条件、Context の見積もり、GPU 時間の計上）は **[Decision 0037（Proposed。Human の承認待ち）](../../docs/decisions/0037-gpu-compute-scheduler.md)** に推奨つきでまとめ、実装はその推奨どおりです。数値はすべて `compute/limits.py` の暫定値で、`ComputeConfig` の設定で変えられます（DB に書いたものはありません）。
+[PAW-036](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/32)（`paw_backend/compute/`、`paw_backend/cli/compute.py`。Migration はありません）で実装しました。設計は [要件](../../REQUIREMENTS.md)の「GPU / Compute Resource Scheduler」（FIXED）に従い、要件が決めていない選択（状態の置き場所、Admission の単位、Safety Headroom などの数値、Class の取り分と待ち行列の順、縮退を進める・戻す条件、Main Model の構成変更を自動で行わないこと、Exclusive の手順、Cloud へ回す条件、Context の見積もり、GPU 時間の計上）は **[Decision 0037（Approved。2026-09-28 に Human が 14 点すべて推奨どおりと承認）](../../docs/decisions/0037-gpu-compute-scheduler.md)** にまとめ、実装はその決定どおりです。数値はすべて `compute/limits.py` の暫定値で、`ComputeConfig` の設定で変えられます（DB に書いたものはありません）。
 **Library と読み取り専用の確認 Command だけで、Application の Lifespan にはまだ組み込んでいません**（実際の Model と Runtime は Benchmark（PAW-017 / PAW-019）で決まり、Runtime の Adapter は別の Issue です）。
 
 **GPU の安全性**: Scheduler は GPU を**読むだけ**です。Probe（`NvidiaSmiProbe`）が実行するのは `nvidia-smi --query-gpu=index,uuid,name,memory.total,memory.used,utilization.gpu` と `nvidia-smi --query-compute-apps=gpu_uuid,pid,used_memory`（どちらも `--format=csv,noheader,nounits`）の 2 つだけで、Clock・Persistence・Power limit・Compute mode・MIG を変えず、GPU を Reset せず、Process に Signal を送りません（止めるのは Timeout を超えた自分の `nvidia-smi` の子 Process だけ）。`test_compute_probe.py` が 2 つの Command を固定し、`compute/` の Code にそうした Option や `os.kill` がないことを確かめます。Model の Load / Unload / CPU fallback は注入した `ModelControl` を通してだけ行い、**Test は Fake だけを使います**（実際の Model を Load / Unload する Test、VRAM を確保する Test はありません）。
@@ -3693,7 +3693,7 @@ Probe が見る使用量（Actual）と、Scheduler が約束した量（Reserve
 
 ### Local / Cloud の振り分けと、他の領域との接続
 
-- `HybridRuntime(scheduler, local_runtime, deployment="main", cloud=cloud_runtime, cloud_policy=policy)` を Orchestrator の `runtimes` に渡すと、Node ごとに Lease を取ってから Local の Model で走らせます。Local に入れず、`CloudPolicy.allows(assignment)` が許すときは Cloud の Runtime で走らせます（Policy が Task の Permission・Quota・依存を判断します。Policy が無ければ Cloud へは回しません）。Local で待てる上限を超えると Node は `ComputeUnavailable`（Retry 可）で失敗します。Local の Lease を持っていた秒数は Task の Budget の `GPU_SECONDS` に計上します（Local の Runtime が例外を投げた・Cancel されたときも計上し、そのときは Runtime の例外の方を伝えます）。
+- `HybridRuntime(scheduler, local_runtime, deployment="main", cloud=cloud_runtime, cloud_policy=policy)` を Orchestrator の `runtimes` に渡すと、Node ごとに Lease を取ってから Local の Model で走らせます。Local に入れず、`CloudPolicy.allows(assignment)` が許すときは Cloud の Runtime で走らせます（Policy が Task の Permission・Quota・依存を判断します。Policy が無ければ Cloud へは回しません）。Local で待てる上限を超えると Node は `ComputeUnavailable`（Retry 可）で失敗します。Local の Lease を持っていた秒数は Task の Budget の `GPU_SECONDS` に計上します（Local の Runtime が例外を投げた・Cancel されたときも計上し、そのときは Runtime の例外の方を伝えます）。Task の `GPU_SECONDS` が残っていなければ Local では始めず、Local の呼び出しは残りの秒数を過ぎたら Cancel します（どちらも `NodeStopped(BUDGET_EXCEEDED)`。1 回の遅い呼び出しで上限を超え続けないため）。
 - `ScheduledMemoryWorker` は Memory Worker（PAW-041）を包み、Background の Lease が取れないとき（Unload 中、縮退中、Exclusive）は `WorkerUnavailableError` を投げます。Consolidator はこれを失敗に数えずに延期します（Decision 0018）。
 - `PlacedEmbedder` は Embedding Model の GPU と CPU の Copy を包み、Scheduler が置いた方を使います（取れなければ `ComputeUnavailableError` で、Retrieval は Degrade します。Decision 0019）。
 
@@ -3768,9 +3768,10 @@ python -m paw_backend.cli compute-status --headroom-min-mib 8192 --headroom-frac
 - 数値はすべて実測に基づかない暫定値です。Model と Runtime が決まったら Benchmark で見直します。Model の Footprint は Admin が与え、Scheduler は測りません。
 - 実際の Runtime（vLLM / SGLang など）の KV 使用率の取得、Runtime の Adapter、Application への組み込み、Exclusive の認可と API、走っている Task の Safe pause / Drain と `Waiting for Resource` への遷移（PAW-037）、System Health の表示（PAW-066）は含みません。
 - Background の停止は協調的（`revoked`）で、仕事がそれを無視すると VRAM は戻りません。
-- Cloud へ回した Node は、Orchestrator の記録上は Ladder の Label のままです（Placement は Scheduler の Status と Log に出ます）。外部への送信と Audit の正確さに関わるため、Decision 0037 の 14 で扱いを尋ねています。
+- Cloud へ回した Node は、Orchestrator の記録上は Ladder の Label のままです（Placement は Scheduler の Status と Log に出ます）。外部への送信と Audit の正確さに関わるため、Decision 0037 の 14 で、Placement を Orchestrator の記録（Audit）に残す別の Issue が済むまで **`CloudPolicy` を注入しない**（どの Node も Cloud へ回さない）ことに決まっています。
 - `NvidiaSmiProbe` は `nvidia-smi` を PATH から探さず、絶対 Path（既定 `/usr/bin/nvidia-smi`、`executable=` で変更）で実行します。
 - 管理する GPU は `gpu_index` の 1 枚です。MIG は使いません。
+- Probe が読む GPU 利用率（`utilization_percent`）は `status()` に出すだけで、Admission にはまだ使っていません（要件の入力の一つ。使い方の方針は Decision 0037 に無く、別の Decision で提案します）。
 
 ### Test
 

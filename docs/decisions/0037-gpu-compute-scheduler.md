@@ -1,10 +1,10 @@
 # GPU / Compute Resource Scheduler の方針（Admission の単位、VRAM の勘定と Safety Headroom、Class の優先、縮退の段と復帰、Exclusive、Local / Cloud の振り分け）
 
-- Status: Proposed
+- Status: Approved
 - Date: 2026-09-28
 - Scope: PAW-036（[#32](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/32)）の Compute Resource Scheduler（`apps/backend/paw_backend/compute/`、`paw_backend/cli/compute.py`）と、それを使う PAW-037（Kaggle / Full GPU Mode）・PAW-066（System Health）
 - Supersedes: なし。[Decision 0021](0021-dag-orchestrator-policy.md) の `max_parallel_nodes`（静的な上限）は変えない。0021 が「PAW-036 の担当」とした動的な並列数を、上限の内側で決める
-- Approval: 未承認（Human の判断待ち）
+- Approval: 2026-09-28、Human が作業 Session 内で、判断点ごとの説明（推奨つき）を受けたうえで「推奨どおり」と回答して 14 点すべてを承認。14 は推奨どおり、Placement を Audit に残す別の Issue が済むまで `CloudPolicy` を注入しない（末尾の「承認時の決定」）
 
 ## 背景
 
@@ -140,3 +140,26 @@
 承認されたら `Approval` に記録し、Status を Approved に改める。数値は `apps/backend/paw_backend/compute/limits.py` と `ComputeConfig` の設定で変えられる（DB に書いたものはない）。
 方針を変えるときは、この Decision を書き換えず、新しい Decision から `Supersedes` する。
 [REQUIREMENTS.md](../../REQUIREMENTS.md) の原文は書き換えない。
+
+## 承認時の決定（2026-09-28）
+
+Human は、作業 Session で上の 14 点について推奨つきの説明を受け、「推奨どおり」と回答して承認した（14 点を一括で。個別の変更はない）。**14 点すべてが推奨どおり**である。
+
+1. 状態はプロセス内に持ち、Migration を足さない。Scheduler を使う Worker を 1 プロセスに集める制約を受け入れる。
+2. Admission の単位は KV Cache の Token、`kv_safety` は 90%。
+3. Safety Headroom の暫定値は「4 GiB と 5% の大きい方」、戻すときの Margin の既定は Headroom と同じ（Benchmark 後に見直す）。
+4. Class の上限は 100 / 95 / 85 / 70%、待ち行列は Class 順・到着順で追い越させない。
+5. 縮退は 1 回の読み取りで 1 段ずつ進め、戻すときは逆順・Margin つき。Background の停止は協調的（`revoked`）で、Process を殺さない。
+6. 6 段目（Main Model の構成変更）は自動で行わず、`needs_human` で人に知らせる。
+7. Probe が使えない・古い（15 秒）ときは Local GPU の Admission を止める（Fail closed）。
+8. Exclusive は走っている仕事を止めずに待ち、全 Unload の後に Probe で確かめてから渡し、失敗したら通常へ戻す。認可は PAW-037 で Owner / Admin に限る。
+9. Cloud へは注入した `CloudPolicy` が許すときだけ回し、既定は直ちに回す（`cloud_after_seconds` = 0）。
+10. Context の見積もりは Byte ÷ 3 + 8,192、Local の Lease の時間を `GPU_SECONDS` に計上する。
+11. 1 枚の GPU だけを管理し、確認用 Command は Process の数だけを出す。`nvidia-smi` は絶対 Path（既定 `/usr/bin/nvidia-smi`）で実行する。
+12. `ModelControl.processes()` は Runtime の全 Process（Unit の `cgroup.procs`）を返すことを必須にし、返した Process が GPU に何も持たない Model は Process が分からない Model として数える。
+13. Exclusive の Lease に期限を置かず、保持時間の表示と管理操作の強制 Release で扱う。
+14. Cloud へ回した Node の Placement は Orchestrator の記録（Audit）に残す（Orchestrator の変更として別の Issue）。**その Issue で Placement が Audit に記録されるまでは `CloudPolicy` を注入しない**（どの Node も Cloud へ回さない）運用とする。
+
+**承認後の補足（2026-09-28）。** 承認後、Codex Review（838d842）の指摘を反映した変更は、承認した方針を**厳しい方向にだけ**変えている。10 の計上に加えて、Task の `GPU_SECONDS` が残っていなければ Local で始めず、Local の呼び出しは残りの時間を過ぎたら止める（どちらも Budget の `NodeStopped`）。Exclusive の Job が使う VRAM はその予約で吸収し、`external` として二重に数えない（3 の勘定の補正）。CPU に置いた Model の Lease には GPU の KV の取り分を当てない（2 の適用範囲の補正）。GPU 利用率を Admission に使う方針は、この Decision では決めておらず、別途提案する。
+
+承認後に方針を変える場合は、この Decision を書き換えず、新しい Decision から `Supersedes` する。

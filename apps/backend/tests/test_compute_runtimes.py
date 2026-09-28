@@ -35,14 +35,17 @@ IC = ResourceClass.INTERACTIVE
 
 
 class FakeBudget:
-    def __init__(self) -> None:
+    def __init__(self, gpu_seconds_left=None) -> None:
         self.charges: list[tuple[BudgetKind, int]] = []
+        self.gpu_seconds_left = gpu_seconds_left
 
     async def charge(self, kind, amount):
         self.charges.append((kind, amount))
 
     async def remaining(self):
-        return {}
+        if self.gpu_seconds_left is None:
+            return {}
+        return {BudgetKind.GPU_SECONDS: self.gpu_seconds_left}
 
 
 class FakeTools:
@@ -261,6 +264,66 @@ class HybridRuntimeTest(unittest.IsolatedAsyncioTestCase):
             await self.runtime().run_node(work)
         self.assertEqual(work.budget.charges, [])
         self.assertEqual(self.scheduler.status().leases[ResourceClass.CODING], 0)
+
+    async def test_no_gpu_time_left_stops_the_node_before_the_local_runtime(self):
+        work = assignment(budget=FakeBudget(gpu_seconds_left=0))
+        with self.assertRaises(NodeStopped) as caught:
+            await self.runtime().run_node(work)
+        self.assertIs(caught.exception.reason, StopReason.BUDGET_EXCEEDED)
+        self.assertEqual(self.local.calls, [])
+        self.assertEqual(work.budget.charges, [])
+        self.assertEqual(self.scheduler.status().leases[ResourceClass.CODING], 0)
+
+    async def test_the_local_runtime_is_bounded_by_the_gpu_time_left(self):
+        # 60 s left, the local runtime would take 90.5 s: it is cancelled at 60 s,
+        # 60 s are charged (not 91) and the node stops on the budget.
+        work = assignment(budget=FakeBudget(gpu_seconds_left=60))
+        task = asyncio.create_task(self.runtime().run_node(work))
+        await settle()
+        await self.clock.advance(60)
+        await settle()
+        with self.assertRaises(NodeStopped) as caught:
+            await task
+        self.assertIs(caught.exception.reason, StopReason.BUDGET_EXCEEDED)
+        self.assertEqual(work.budget.charges, [(BudgetKind.GPU_SECONDS, 60)])
+        self.assertEqual(self.scheduler.status().leases[ResourceClass.CODING], 0)
+
+    async def test_a_node_within_the_gpu_time_left_runs_as_before(self):
+        work = assignment(budget=FakeBudget(gpu_seconds_left=100))
+        task = asyncio.create_task(self.runtime().run_node(work))
+        await settle()
+        await self.clock.advance(90.5)
+        outcome = await task
+        self.assertEqual(outcome.result.summary, "done by local")
+        self.assertEqual(work.budget.charges, [(BudgetKind.GPU_SECONDS, 91)])
+
+    async def test_a_bounded_node_that_is_cancelled_is_charged_and_released(self):
+        work = assignment(budget=FakeBudget(gpu_seconds_left=100))
+        task = asyncio.create_task(self.runtime().run_node(work))
+        await settle()
+        await self.clock.advance(30)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertEqual(work.budget.charges, [(BudgetKind.GPU_SECONDS, 30)])
+        self.assertEqual(self.scheduler.status().leases[ResourceClass.CODING], 0)
+
+    async def test_the_cloud_does_not_need_gpu_time(self):
+        await fill_main(self.scheduler)
+        work = assignment(goal="x" * 90_000, budget=FakeBudget(gpu_seconds_left=0))
+        outcome = await self.runtime().run_node(work)
+        self.assertEqual(outcome.result.summary, "done by cloud")
+        self.assertEqual(work.budget.charges, [])
+
+    async def test_without_charging_the_gpu_time_is_not_bounded(self):
+        work = assignment(budget=FakeBudget(gpu_seconds_left=0))
+        task = asyncio.create_task(
+            self.runtime(charge_gpu_seconds=False).run_node(work)
+        )
+        await settle()
+        await self.clock.advance(90.5)
+        self.assertEqual((await task).result.summary, "done by local")
+        self.assertEqual(work.budget.charges, [])
 
     async def test_the_resource_class_is_the_runtimes(self):
         runtime = self.runtime(resource_class=IC)
