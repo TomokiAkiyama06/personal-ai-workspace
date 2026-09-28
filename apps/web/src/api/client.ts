@@ -74,6 +74,25 @@ async function errorFrom(response: Response): Promise<ApiError> {
  */
 export const SESSION_ENDED_EVENT = "paw:session-ended";
 
+// Which session the requests belong to. SessionProvider moves it on whenever the
+// session changes (sign-in, sign-out, pairing, expiry); a 401 of a request that
+// started under an earlier session says nothing about the current one.
+let sessionEpoch = 0;
+
+export function nextSessionEpoch(): number {
+  sessionEpoch += 1;
+  return sessionEpoch;
+}
+
+export function currentSessionEpoch(): number {
+  return sessionEpoch;
+}
+
+/** The `detail` of SESSION_ENDED_EVENT: the epoch the failed request started in. */
+export interface SessionEndedDetail {
+  epoch: number;
+}
+
 export type Method = "GET" | "POST" | "PUT" | "DELETE";
 
 export interface RequestOptions {
@@ -105,6 +124,7 @@ export async function apiRequest<T>(
     headers["Content-Type"] = "application/json";
     init.body = JSON.stringify(body);
   }
+  const epoch = sessionEpoch;
   let response: Response;
   try {
     response = await fetch(`${API_BASE}${path}`, init);
@@ -118,7 +138,9 @@ export async function apiRequest<T>(
       error.code === "unauthorized" &&
       options.announceSessionEnd !== false
     ) {
-      window.dispatchEvent(new Event(SESSION_ENDED_EVENT));
+      window.dispatchEvent(
+        new CustomEvent<SessionEndedDetail>(SESSION_ENDED_EVENT, { detail: { epoch } }),
+      );
     }
     throw error;
   }

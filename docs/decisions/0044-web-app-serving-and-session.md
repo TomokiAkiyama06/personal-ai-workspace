@@ -35,7 +35,7 @@ Web App をどこからどう配信するか（同じ Origin か、別の Origin
 
 ### 1. Web App は Backend が API と同じ Origin で配信する
 
-- **推奨**: Build 済みの `apps/web/dist` を Backend（Uvicorn）が配信する（`PAW_WEB_DIST_DIR` に絶対 Path を設定したときだけ。未設定では従来どおり API だけ）。`/api` の外への `GET` / `HEAD` だけを扱い、Build の File、Client 側の Route（最後の Segment に `.` がない Path）には `index.html` を返す。`/api/*` と状態を変える Method は従来どおり API に渡す。`.` で始まる Segment、Directory の外へ出る Path（`..`、Symlink）は配信しない。
+- **推奨**: Build 済みの `apps/web/dist` を Backend（Uvicorn）が配信する（`PAW_WEB_DIST_DIR` に絶対 Path を設定したときだけ。未設定では従来どおり API だけ）。`/api` の外への `GET` / `HEAD` だけを扱い、Build の File、Client 側の Route（最後の Segment に `.` がない Path）には `index.html` を返す。`/api/*` と状態を変える Method は従来どおり API に渡す。`.` で始まる Segment、Directory の外へ出る Path（`..`、Symlink。`index.html` 自身が外への Symlink の場合も、起動時と各 Request で拒否する）は配信しない。
 - 理由: Session Cookie（`__Host-`、`SameSite=Strict`）と Origin 検査は同じ Origin を前提にしている。Backend が配信すれば、TLS を Uvicorn が終端する構成（`PAW_TLS_CERTFILE`）でも Reverse Proxy（`tailscale serve`、Caddy）が終端する構成でも、追加の設定なしで同じ Origin になる。Page の Security Header も Backend の 1 か所で決まる。
 - 代案 A: Reverse Proxy が `dist` を配信し、`/api` を Backend へ転送する。同じ Origin にはなるが、Proxy がない構成（Uvicorn が TLS を終端）で配信する手段がなく、CSP などの Header を Proxy ごとに書くことになる。この推奨でも、Proxy で配信したい運用はそのまま取れる（`PAW_WEB_DIST_DIR` を設定しない）。
 - 代案 B（取らない）: 別の Origin に置き、CORS で API を呼ぶ。`SameSite=Strict` の Cookie は Cross-site の Request に付かず、Origin 検査も拒否するため、Session の方式（Decision 0015）から変える必要がある。
@@ -54,7 +54,7 @@ Web App をどこからどう配信するか（同じ Origin か、別の Origin
 
 ### 4. 権限の最終判定は Backend だけが行い、Web は表示を選ぶだけにする
 
-- **推奨**: Web は `GET /api/v1/auth/session` の `system_role` と Passkey の `gate` を、表示の出し分け（`Admin` の Navigation を Owner / Admin にだけ出す、Gate が `open` でない Session に Passkey の画面だけを出す）にだけ使う。Web に独自の認可規則を持たず、Backend の 401 / 403 はそのまま Message として出す（401 は Login 画面へ戻す）。これは [apps/web/README.md](../../apps/web/README.md) と Decision 0003 の方針の確認で、新しい判断ではない。
+- **推奨**: Web は `GET /api/v1/auth/session` の `system_role` と Passkey の `gate` を、表示の出し分け（`Admin` の Navigation を Owner / Admin にだけ出す、Gate が `open` でない Session に Passkey の画面だけを出す）にだけ使う。Web に独自の認可規則を持たず、Backend の 401 / 403 はそのまま Message として出す（401 は Login 画面へ戻す。ただし、その Request を始めた Session が今も現在の Session のときだけ。起動時の `GET /auth/session` の 401 は「未サインイン」なので戻す合図にしない）。サインアウトは `POST /auth/logout` が成功したとき（または 401 で既に終わっていたとき）だけ画面をサインアウトにする。HttpOnly の Cookie は Server の Logout でしか失効しないため、失敗したらサインイン中のままエラーを出す。これは [apps/web/README.md](../../apps/web/README.md) と Decision 0003 の方針の確認で、新しい判断ではない。
 
 ### 5. Client 側の Routing は History API と Backend の Fallback で行う
 

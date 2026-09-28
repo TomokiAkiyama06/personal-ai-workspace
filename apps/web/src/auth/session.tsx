@@ -12,7 +12,13 @@ import {
   useState,
 } from "react";
 import { authApi, type SessionResponse } from "../api/auth";
-import { isApiError, SESSION_ENDED_EVENT } from "../api/client";
+import {
+  currentSessionEpoch,
+  isApiError,
+  nextSessionEpoch,
+  SESSION_ENDED_EVENT,
+  type SessionEndedDetail,
+} from "../api/client";
 
 export type SessionState =
   | { status: "loading" }
@@ -59,6 +65,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const accept = useCallback(
     (data: SessionResponse) => {
       generation.current++;
+      nextSessionEpoch();
       setState({ status: "signed_in", data });
       // A committed change whose state read failed: fetch the full state.
       if (data.auth === null) void refresh();
@@ -74,21 +81,27 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       if (!isApiError(error, "unauthorized")) throw error;
     }
     generation.current++;
+    nextSessionEpoch();
     setState({ status: "signed_out" });
   }, []);
 
   const expired = useCallback(() => {
     generation.current++;
+    nextSessionEpoch();
     setState({ status: "signed_out", reason: "expired" });
   }, []);
 
   // Any request of a signed-in page that finds the session ended: back to the login.
   useEffect(() => {
-    const onEnded = () => {
+    const onEnded = (event: Event) => {
       // Only a signed-in page's request ends a session; before that (loading,
       // signed out) the event changes nothing and a pending refresh still counts.
       if (stateRef.current.status !== "signed_in") return;
+      // A request of an earlier session (signed out, then in again meanwhile).
+      const detail = (event as CustomEvent<SessionEndedDetail>).detail;
+      if (detail && detail.epoch !== currentSessionEpoch()) return;
       generation.current++;
+      nextSessionEpoch();
       setState({ status: "signed_out", reason: "expired" });
     };
     window.addEventListener(SESSION_ENDED_EVENT, onEnded);

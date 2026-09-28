@@ -124,6 +124,37 @@ class WebDistSettingTest(unittest.TestCase):
             settings = make_settings(web_dist_dir=tmp)
             self.assertEqual(settings.web_dist_dir, Path(tmp).resolve())
 
+    def test_an_index_html_that_links_outside_the_directory_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dist = root / "dist"
+            dist.mkdir()
+            (root / "secret.txt").write_text("secret")
+            os.symlink(root / "secret.txt", dist / "index.html")
+            with self.assertRaises(ValidationError):
+                make_settings(web_dist_dir=str(dist))
+
+    def test_an_index_html_swapped_for_an_outside_link_later_is_not_served(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dist = root / "dist"
+            dist.mkdir()
+            (dist / "index.html").write_bytes(INDEX)
+            (root / "secret.txt").write_text("secret")
+            client = make_client(
+                create_app(
+                    make_settings(web_dist_dir=str(dist)), database=FakeDatabase()
+                )
+            )
+            # Served while it is a file of the build (the middleware is built now).
+            self.assertEqual(client.get("/").content, INDEX)
+            (dist / "index.html").unlink()
+            os.symlink(root / "secret.txt", dist / "index.html")
+            for path in ("/", "/pair", "/index.html"):
+                response = client.get(path)
+                self.assertNotIn(b"secret", response.content, path)
+                self.assertEqual(response.status_code, 404, path)
+
     def test_an_empty_value_means_unset(self):
         self.assertIsNone(make_settings(web_dist_dir="").web_dist_dir)
 

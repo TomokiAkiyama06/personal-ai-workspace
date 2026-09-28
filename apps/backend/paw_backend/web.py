@@ -45,9 +45,25 @@ def validate_dist_dir(path: Path) -> Path:
     if not path.is_absolute():
         raise ValueError("web_dist_dir must be an absolute path")
     resolved = path.resolve()
-    if not resolved.is_dir() or not (resolved / "index.html").is_file():
+    if not resolved.is_dir() or _inside(resolved, resolved / "index.html") is None:
         raise ValueError("web_dist_dir must be a directory that contains index.html")
     return resolved
+
+
+def _inside(root: Path, candidate: Path) -> Path | None:
+    """``candidate`` resolved, if it is a file that stays beneath ``root``.
+
+    Symlinks are followed first, so a link that leaves the build directory
+    (``index.html`` included) is never a file of the build.
+    """
+    try:
+        target = candidate.resolve()
+        if target.is_relative_to(root) and target.is_file():
+            return target
+    except (OSError, ValueError):
+        # A name the file system refuses (too long, say): not a file of the build.
+        pass
+    return None
 
 
 def _is_api_path(path: str) -> bool:
@@ -67,24 +83,22 @@ class WebAppMiddleware:
         if "\x00" in path or "\\" in path:
             return None
         segments = [segment for segment in path.split("/") if segment]
+        # index.html is checked on every request too: it may be replaced after
+        # start-up (a new build), and a link out of the directory is refused.
+        index = _inside(self.dist_dir, self.index)
         if not segments:
-            return self.index, INDEX_CACHE_CONTROL
+            return (index, INDEX_CACHE_CONTROL) if index else None
         if any(segment.startswith(".") for segment in segments):
             return None
-        try:
-            candidate = (self.dist_dir / Path(*segments)).resolve()
-            found = candidate.is_relative_to(self.dist_dir) and candidate.is_file()
-        except (OSError, ValueError):
-            # A name the file system refuses (too long, say): not a file of the build.
-            found = False
-        if found:
-            if candidate == self.index:
-                return self.index, INDEX_CACHE_CONTROL
+        candidate = _inside(self.dist_dir, self.dist_dir / Path(*segments))
+        if candidate is not None:
+            if candidate == index:
+                return index, INDEX_CACHE_CONTROL
             immutable = candidate.is_relative_to(self.dist_dir / "assets")
             return candidate, ASSET_CACHE_CONTROL if immutable else INDEX_CACHE_CONTROL
         if "." not in segments[-1]:
             # A client-side route: the app itself decides what to show.
-            return self.index, INDEX_CACHE_CONTROL
+            return (index, INDEX_CACHE_CONTROL) if index else None
         return None
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
