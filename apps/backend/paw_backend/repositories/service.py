@@ -119,7 +119,14 @@ from types import MappingProxyType
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from paw_backend.authz import Authorizer, Capability, Principal, ProjectState, Resource
+from paw_backend.authz import (
+    Authorizer,
+    Capability,
+    Principal,
+    ProjectState,
+    RepoAcl,
+    Resource,
+)
 from paw_backend.authz.capabilities import REPO_PERMISSION_OF
 from paw_backend.authz.policy import Reason
 from paw_backend.authz.roles import SystemRole
@@ -1443,6 +1450,25 @@ class RepositoryService:
             acl=repository.acl,
             remotes=tuple(remote.url for remote in remotes),
         )
+
+    async def working_set_acl(self, repository_id: uuid.UUID) -> RepoAcl | None:
+        """The stored ACL of a registered repository, for a Working Set change.
+
+        Backend-internal: this service is the Tool Broker's
+        ``WorkingSetRegistrations`` (issue #85):
+        a repository that is not yet in a task's scope is decided on this ACL,
+        which names its project (the broker requires it to be a project of the
+        task). ``None`` when no repository has this id, or its project is Deleted.
+        """
+        repository_id = validate_uuid("repository_id", repository_id)
+        async with self._transaction() as session:
+            repository = await store.get_repository_any_project(session, repository_id)
+            if repository is None:
+                return None
+            project = await projects_store.get_project(session, repository.project_id)
+            if project is None or project.status is ProjectStatus.DELETED:
+                return None
+        return repository.acl
 
     async def purge_projects(self, project_ids: object) -> tuple[uuid.UUID, ...]:
         """Remove the registrations of projects that are **Deleted** (backend-internal).

@@ -36,6 +36,7 @@ from paw_backend.orchestrator.scope import (
     scope_within,
 )
 from paw_backend.tasks import TaskRun
+from paw_backend.tasks.domain import RepoRole
 from paw_backend.tools import ScopedRepository, TaskScope
 from paw_backend.tools.scope import (
     LexicalPathResolver,
@@ -56,13 +57,14 @@ OTHER_HANDLE = "cred_" + "b2" * 16
 ROOT = "/srv/paw/task"
 
 
-def repository(repo_id, project=P1, root=None, acl=None, remotes=()):
+def repository(repo_id, project=P1, root=None, acl=None, remotes=(), role=None):
     return ScopedRepository(
         repo_id,
         project,
         root or f"{ROOT}/{repo_id.int}",
         acl if acl is not None else RepoAcl.inherit(repo_id, project),
         remotes=remotes,
+        role=role,
     )
 
 
@@ -162,6 +164,37 @@ class DeriveScopeTest(unittest.TestCase):
             (),
         )
 
+    def test_the_working_set_role_of_a_repository_reaches_the_node_unchanged(self):
+        # Issue #85: the role (resolved by the backend from the stored Working
+        # Set) caps what the task may do on a repository; a node inherits it and
+        # can never be given another one.
+        parent = parent_scope(
+            repositories=[
+                repository(R1, role=RepoRole.TARGET),
+                repository(R2, role=RepoRole.REFERENCED),
+            ]
+        )
+
+        for repositories in (None, [R2], [R1, R2]):
+            with self.subTest(repositories=repositories):
+                child = derive_child_scope(
+                    parent, role=NodeRole.WORKER, repositories=repositories
+                )
+                for scoped in child.repositories:
+                    self.assertEqual(scoped, parent.repository(scoped.repo_id))
+        child = derive_child_scope(parent, role=NodeRole.WORKER, repositories=[R2])
+        self.assertIs(child.repositories[0].role, RepoRole.REFERENCED)
+        self.assertIs(child.excluded_repositories[0].role, RepoRole.TARGET)
+
+    def test_no_node_role_can_change_the_working_set(self):
+        # A Working Set change is the task's (Decision 0030, 3.4): no role's
+        # ceiling holds the capability, so neither a plan nor a derived grant
+        # gives it to a sub-agent, and a node cannot add a repository it was
+        # left out of.
+        for role, ceiling in ROLE_CEILING.items():
+            with self.subTest(role):
+                self.assertNotIn(C.PROJECT_TASK_WORKING_SET_MANAGE, ceiling)
+
     def test_the_repositories_left_out_stay_known_as_excluded(self):
         parent = parent_scope()
         child = derive_child_scope(parent, role=NodeRole.WORKER, repositories=[R2])
@@ -255,6 +288,27 @@ class ScopeWithinTest(unittest.TestCase):
                 repositories=[repository(R1, root=f"{ROOT}/elsewhere")]
             ),
         }
+        # The Working Set role (issue #85) is part of the repository: a child
+        # that holds a repository in a stronger role, or with a role the parent
+        # did not resolve, is not within.
+        roled = parent_scope(repositories=[repository(R1, role=RepoRole.REFERENCED)])
+        role_cases = {
+            "a stronger role": parent_scope(
+                repositories=[repository(R1, role=RepoRole.TARGET)]
+            ),
+            "another role": parent_scope(
+                repositories=[repository(R1, role=RepoRole.WORKING)]
+            ),
+        }
+        for label, child in role_cases.items():
+            with self.subTest(label):
+                self.assertFalse(scope_within(child, roled))
+        self.assertFalse(
+            scope_within(
+                parent_scope(repositories=[repository(R1, role=RepoRole.WORKING)]),
+                parent_scope(repositories=[repository(R1)]),
+            )
+        )
         for label, child in cases.items():
             with self.subTest(label):
                 self.assertFalse(scope_within(child, parent))

@@ -44,6 +44,7 @@ from . import (
     test_task_races,
     test_task_service,
     test_task_tools,
+    test_task_working_set,
 )
 from .gate_support import ALWAYS_ACTIVE
 from .support import make_settings
@@ -77,7 +78,22 @@ EXPECTED = {
             "updated_at",
         },
     ),
-    "task_attempts": (
+    # The state of a repository in an attempt is ``task_attempt_repositories``
+    # (revision 0085): an attempt row is only ever added.
+    "task_attempts": ({"SELECT", "INSERT"}, set()),
+    "task_repositories": (
+        {"SELECT", "INSERT"},
+        {
+            "role",
+            "starting_commit",
+            "added_by_kind",
+            "added_by",
+            "added_at",
+            "updated_at",
+            "removed_at",
+        },
+    ),
+    "task_attempt_repositories": (
         {"SELECT", "INSERT"},
         {
             "branch",
@@ -88,9 +104,16 @@ EXPECTED = {
             "pr_number",
             "pr_url",
             "pr_state",
+            "strongest_role",
+            "modified",
             "updated_at",
         },
     ),
+    # What the per-attempt columns held before revision 0085 (kept for an
+    # operator and for a downgrade): the application never touches it.
+    "task_attempt_state_archive": (set(), set()),
+    # An admitted repository write in flight (issue #85): only ever released.
+    "task_repository_writes": ({"SELECT", "INSERT"}, {"released_at"}),
     "task_steps": ({"SELECT", "INSERT"}, {"status", "finished_at"}),
     "task_tool_invocations": ({"SELECT", "INSERT"}, {"status", "finished_at"}),
     "task_logs": ({"SELECT", "INSERT"}, set()),
@@ -192,6 +215,50 @@ class InTransactionAsAppRole(AsAppRole, test_task_in_transaction.InTransactionSt
 
 
 class SupersededWorkersAsAppRole(AsAppRole, test_task_races.SupersededWorkerTest):
+    pass
+
+
+# The Working Set (issue #85): every operation of ``TaskService`` on it works with
+# exactly the privileges revision 0085 grants.
+class WorkingSetPersistenceAsAppRole(AsAppRole, test_task_working_set.PersistenceTest):
+    pass
+
+
+class WorkingSetChangesAsAppRole(AsAppRole, test_task_working_set.ChangeTest):
+    pass
+
+
+class WorkingSetConcurrencyAsAppRole(AsAppRole, test_task_working_set.ConcurrencyTest):
+    pass
+
+
+class WorkingSetDiscardAsAppRole(AsAppRole, test_task_working_set.DiscardTest):
+    pass
+
+
+class WorkingSetUsesAsAppRole(AsAppRole, test_task_working_set.RepositoryUseTest):
+    pass
+
+
+class WorkingSetCompletionAsAppRole(AsAppRole, test_task_working_set.CompletionTest):
+    pass
+
+
+class WorkingSetWriteReservationsAsAppRole(
+    AsAppRole, test_task_working_set.WriteReservationTest
+):
+    pass
+
+
+class WorkingSetResultsBoundToRevisionAsAppRole(
+    AsAppRole, test_task_working_set.ResultsBoundToRevisionTest
+):
+    pass
+
+
+class WorkingSetWritesInFlightAsAppRole(
+    AsAppRole, test_task_working_set.WritesInFlightLifecycleTest
+):
     pass
 
 
@@ -306,7 +373,16 @@ class AppRolePrivilegesTest(AsAppRole, PostgresTaskTestCase):
             "UPDATE tasks SET input = '{}'",
             "UPDATE tasks SET project_id = gen_random_uuid()",
             "UPDATE tasks SET created_by = gen_random_uuid()",
-            "UPDATE tasks SET starting_commit = 'x'",
+            # Which repository a Working Set row or an attempt's state is about,
+            # and which task and attempt it belongs to, never changes; nothing of
+            # a Working Set is deleted (a removal sets ``removed_at``).
+            "UPDATE task_repositories SET repository_id = gen_random_uuid()",
+            "UPDATE task_repositories SET task_id = gen_random_uuid()",
+            "DELETE FROM task_repositories",
+            "UPDATE task_attempt_repositories SET repository_id = gen_random_uuid()",
+            "UPDATE task_attempt_repositories SET attempt = 99",
+            "UPDATE task_attempt_repositories SET task_id = gen_random_uuid()",
+            "DELETE FROM task_attempt_repositories",
             "UPDATE tasks SET id = gen_random_uuid()",
             "UPDATE task_steps SET name = 'x'",
             "UPDATE task_steps SET task_id = gen_random_uuid()",
@@ -351,6 +427,7 @@ class AppRolePrivilegesTest(AsAppRole, PostgresTaskTestCase):
         await service.update_attempt(
             task_id,
             run=FIRST_RUN,
+            repository_id=self.repository_id,
             worktree=WorktreeState("agent/task", "/srv/worktrees/task", "a" * 40),
             review=ReviewState(ReviewStatus.APPROVED, EvaluationResult.PASSED),
             pull_request=PullRequestInfo(
@@ -363,12 +440,15 @@ class AppRolePrivilegesTest(AsAppRole, PostgresTaskTestCase):
             task_id, call.id, ToolInvocationStatus.SUCCEEDED
         )
         await service.finish_step(task_id, step.id, StepStatus.SUCCEEDED)
+        # The target has what Complete requires (the update above).
         for command, _ in commands[5:]:
             await service.execute(task_id, command, actor=self.system)
 
         snapshot = await self.service.restore(task_id)
         self.assertEqual(snapshot.state, TaskState.COMPLETED)
-        self.assertEqual(snapshot.attempt.pull_request.number, 5)
+        self.assertEqual(
+            snapshot.attempt.repository(self.repository_id).pull_request.number, 5
+        )
         self.assertEqual(
             snapshot.tool_invocations[0].status, ToolInvocationStatus.SUCCEEDED
         )
