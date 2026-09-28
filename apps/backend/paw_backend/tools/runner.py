@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Protocol
 
+from paw_backend.tasks.working_set import WRITE_RESERVATION_SECONDS
 from paw_backend.tools.broker import ToolBroker
 from paw_backend.tools.calls import ToolCall, ToolInvocation
 from paw_backend.tools.credentials import redact_value
@@ -66,6 +67,11 @@ class ToolOutcome:
 # takes over (a shorter limit is passed per runner).
 DEFAULT_EXECUTION_TIMEOUT = 600.0
 MAX_EXECUTION_TIMEOUT = 86_400.0
+# An allowed repository write keeps its repositories from being narrowed until
+# the call ended or its reservation expired: the reservation must outlive the
+# longest call (issue #85).
+if MAX_EXECUTION_TIMEOUT >= WRITE_RESERVATION_SECONDS:  # pragma: no cover
+    raise RuntimeError("a repository reservation must outlive every tool call")
 
 
 class ToolRunner:

@@ -22,6 +22,19 @@ in a way that would let it skip a check:
   (``broker.py``); a host does not name one, and a URL does so only when it
   lies below a remote the backend registered for a repository (``scope.py``), so
   a tool cannot declare its way into a repository with a URL alone;
+* a project-local ``write`` / ``destructive`` tool that takes a path or a
+  repository must have a capability that writes to a repository
+  (``project.repo.write`` / ``project.pr.create``): those are the two the role
+  ceiling of the Working Set covers (Decision 0030, section 4.2), so no tool can
+  change a repository behind another capability such as ``project.task.run``
+  (the broker also checks every call at run time, whatever names the
+  repository);
+* a change of a task's Working Set is a tool of its own per operation
+  (``working_set_operation``, Decision 0030, section 3): only such a tool has
+  ``project.task.working_set.manage`` and a ``working_set_repository`` argument
+  (one, required, and no other target), and its minimum level is at least the
+  operation's (``SCOPED_AUTO`` to add a ``referenced`` repository,
+  ``STRONG_APPROVAL`` for everything else);
 * a tool declares the arguments it accepts. Anything else in a call is
   refused, so a model cannot smuggle a ``"capability": "read"`` or an
   ``"approved": true`` next to the real arguments.
@@ -35,6 +48,8 @@ from types import MappingProxyType
 
 from paw_backend.authz import Capability, RepoPermission
 from paw_backend.authz.capabilities import REPO_PERMISSION_OF
+from paw_backend.tasks.domain import WorkingSetOperation
+from paw_backend.tasks.working_set import approval_level
 from paw_backend.tools.capabilities import ApprovalLevel, Environment, ToolCapability
 
 TOOL_NAME_PATTERN = r"[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*"
@@ -56,6 +71,9 @@ class ArgumentKind(StrEnum):
     PROJECT = "project"  # a project id: must be a project of the task
     REPOSITORY = "repository"  # a repository id: must be in the task's working set
     CREDENTIAL_HANDLE = "credential_handle"  # an opaque handle, never plaintext
+    # The repository a change of the Working Set is about: a repository id that
+    # need not be in the Working Set yet (only a Working Set tool takes one).
+    WORKING_SET_REPOSITORY = "working_set_repository"
     TEXT = "text"  # free text, bounded
     INTEGER = "integer"
     BOOLEAN = "boolean"
@@ -68,8 +86,12 @@ TARGET_KINDS = frozenset(
         ArgumentKind.HOST,
         ArgumentKind.PROJECT,
         ArgumentKind.REPOSITORY,
+        ArgumentKind.WORKING_SET_REPOSITORY,
     }
 )
+# What names something outside the arguments' own values (every target kind and a
+# credential handle): a Working Set tool takes none but its repository.
+_NAMING_KINDS = TARGET_KINDS | {ArgumentKind.CREDENTIAL_HANDLE}
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +133,9 @@ class ToolSpec:
     # tool is always denied (it can be registered so that the attempt is
     # recognised and audited as such).
     returns_credential_plaintext: bool = False
+    # The change of the task's Working Set this tool makes (``None``: it makes
+    # none). Only a tool with ``project.task.working_set.manage`` has one.
+    working_set_operation: WorkingSetOperation | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -137,6 +162,12 @@ class ToolSpec:
             raise TypeError("requires_budget must be a bool")
         if type(self.returns_credential_plaintext) is not bool:
             raise TypeError("returns_credential_plaintext must be a bool")
+        if self.working_set_operation is not None:
+            object.__setattr__(
+                self,
+                "working_set_operation",
+                WorkingSetOperation(self.working_set_operation),
+            )
 
         if not isinstance(self.arguments, Mapping):
             raise TypeError("arguments must be a mapping")
@@ -195,6 +226,45 @@ class ToolSpec:
             ToolCapability.CREDENTIAL_USE not in caps
         ):
             raise ValueError("only a credential tool can return credential plaintext")
+        if (
+            self.environment is Environment.PROJECT_LOCAL
+            and caps & {ToolCapability.WRITE, ToolCapability.DESTRUCTIVE}
+            and kinds & {ArgumentKind.PATH, ArgumentKind.REPOSITORY}
+            and REPO_PERMISSION_OF.get(self.authz_capability)
+            is not RepoPermission.WRITE
+        ):
+            raise ValueError(
+                "a repository write must have a repository write capability"
+            )
+        self._check_working_set()
+
+    def _check_working_set(self) -> None:
+        manages = self.authz_capability is Capability.PROJECT_TASK_WORKING_SET_MANAGE
+        operation = self.working_set_operation
+        repositories = [
+            a
+            for a in self.arguments.values()
+            if a.kind is ArgumentKind.WORKING_SET_REPOSITORY
+        ]
+        if not manages:
+            if operation is not None or repositories:
+                raise ValueError(
+                    "only a working set tool changes or names a working set entry"
+                )
+            return
+        if operation is None:
+            raise ValueError("a working set tool needs its working_set_operation")
+        if len(repositories) != 1 or not repositories[0].required:
+            raise ValueError("a working set tool requires exactly one repository")
+        if any(
+            a.kind in _NAMING_KINDS
+            and a.kind is not ArgumentKind.WORKING_SET_REPOSITORY
+            for a in self.arguments.values()
+        ):
+            raise ValueError("a working set tool names nothing but its repository")
+        least = ApprovalLevel(approval_level(operation))
+        if self.min_level.severity < least.severity:
+            raise ValueError("a working set tool is below its operation's level")
 
 
 class ToolRegistry:
