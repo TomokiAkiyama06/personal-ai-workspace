@@ -188,7 +188,7 @@ class ErasureNeedsTheTableOwnerTest(WebRole, test_user_erasure.ErasureTestCase):
             self.service_database, clock=lambda: test_user_erasure.DUE
         )
 
-        result = await service.erase_user(bob.id)
+        result = await service.erase_user(bob.id, copies_erased=True)
 
         self.assertIs(result.outcome, ErasureOutcome.FAILED)
         self.assertEqual(result.error_type, "InsufficientPrivilege")

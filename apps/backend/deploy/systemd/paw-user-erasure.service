@@ -3,11 +3,15 @@
 #
 # Erases, for every user deleted 30 or more days ago, the personal data kept in
 # the database (password hash, Passkeys, sessions, private conversations, private
-# Memory, personal settings, ...), verifies it and only then marks the user
-# deleted. It never touches a user's Linux account or home: managed checkouts
-# there block the erasure until the operator removed them and runs
-#   python -m paw_backend.cli user-erasure-run --checkouts-removed <user id>
-# by hand (the same environment file).
+# Memory, personal settings, ...) and verifies it. It never touches a user's
+# Linux account or home, nor the database backups: managed checkouts there block
+# the erasure until the operator removed them, and the user is marked deleted only
+# once the operator erased the copies outside the database (backups / WAL, the
+# user's files and GitHub / SSH credentials, recovery copies) and runs
+#   python -m paw_backend.cli user-erasure-run \
+#     --checkouts-removed <user id> --copies-erased <user id>
+# by hand (the same environment file). Until then the timer's run exits 3 for
+# that user (copies_pending) every day, which starts the failure unit.
 #
 # User: the same dedicated OS user as paw-audit-retention.service (paw-maint),
 # never the user the backend runs as, for the same reasons (see that unit): this

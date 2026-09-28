@@ -73,6 +73,26 @@ class CommandLineTest(unittest.TestCase):
         )
         self.assertEqual(arguments.checkouts_removed, [first, second])
 
+    def test_the_copies_flag_repeats_and_defaults_to_none(self):
+        first, second = uuid.uuid4(), uuid.uuid4()
+        parser = cli.build_parser()
+        self.assertEqual(parser.parse_args(["user-erasure-run"]).copies_erased, [])
+        arguments = parser.parse_args(
+            [
+                "user-erasure-run",
+                "--copies-erased",
+                str(first),
+                "--copies-erased",
+                str(second),
+            ]
+        )
+        self.assertEqual(arguments.copies_erased, [first, second])
+
+    def test_a_malformed_copies_user_id_is_refused_without_echoing_it(self):
+        code, _, err = run(["user-erasure-run", "--copies-erased", "hunter2"])
+        self.assertEqual(code, cli.EXIT_REFUSED)
+        self.assertNotIn("hunter2", err)
+
 
 class DispatchTest(unittest.TestCase):
     def test_the_package_entry_point_routes_the_erasure_command(self):
@@ -154,7 +174,9 @@ class RunCommandTest(ErasureTestCase):
     async def test_a_run_erases_the_due_users(self):
         bob = await self.deleted_long_ago("bob")
 
-        code, out, err = await self.owner_run(["user-erasure-run"])
+        code, out, err = await self.owner_run(
+            ["user-erasure-run", "--copies-erased", str(bob.id)]
+        )
 
         self.assertEqual(code, cli.EXIT_OK, err)
         self.assertEqual(out, "")
@@ -165,6 +187,17 @@ class RunCommandTest(ErasureTestCase):
         code, _, err = await self.owner_run(["user-erasure-run"])
         self.assertEqual(code, cli.EXIT_OK, err)
         self.assertIn("erased=0", err)
+
+    async def test_unconfirmed_copies_keep_the_user_pending_and_fail_the_run(self):
+        bob = await self.deleted_long_ago("bob")
+
+        code, _, err = await self.owner_run(["user-erasure-run"])
+
+        self.assertEqual(code, cli.EXIT_ERASURE_FAILED)
+        self.assertIn(f"NOT DELETED: user {bob.id} (copies_pending)", err)
+        self.assertIn("--copies-erased", err)
+        self.assertEqual(await self.status_of(bob.id), "pending_deletion")
+        self.assertEqual(await self.rows_left(bob.id), {})
 
     async def test_a_user_that_cannot_be_erased_fails_the_run(self):
         bob = await self.deleted_long_ago("bob")

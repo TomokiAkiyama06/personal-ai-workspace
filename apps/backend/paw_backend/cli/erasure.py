@@ -11,9 +11,10 @@ Exit codes (the convention of ``paw_backend.cli.retention``):
   was done);
 * ``2``  environment error: invalid configuration, ``PAW_MIGRATION_DATABASE_URL``
   not set, the database unreachable (nothing was done);
-* ``3``  at least one due user was NOT erased (active tasks, managed checkouts left,
-  a failed verification or step, a lock that was not released in time, or the run
-  was terminated). Each is recorded as ``auth.user.erase`` / deny when the
+* ``3``  at least one due user was NOT erased and marked ``deleted`` (active tasks,
+  managed checkouts left, the copies outside the database not confirmed, a failed
+  verification or step, a lock that was not released in time, or the run was
+  terminated). Each is recorded as ``auth.user.erase`` / deny when the
   database accepts it, and the user stays ``pending_deletion`` (without access)
   for the next run. A non-zero code starts the ``OnFailure=`` unit, which is how
   the Owner hears of it.
@@ -27,6 +28,14 @@ message is printed (only its type).
 managed checkouts from disk (they live in the user's own Linux account, which this
 job does not touch); the job then deletes their ``repository_checkouts`` rows and
 erases the user. Without it such a user is refused (``checkouts_remaining``).
+
+``--copies-erased USER_ID`` (repeatable): the operator erased that user's copies
+outside the database (the database backups and WAL that hold them, their files and
+GitHub / SSH credentials in their Linux account, any recovery copy). REQUIREMENTS.md
+"User Deletion Retention" does not allow ``Deleted`` before that, and this job
+cannot reach or check those copies. Without it the database part is still erased
+(``data_erased``) but the user stays ``pending_deletion`` (``copies_pending``,
+exit 3), every day, until the operator confirms.
 """
 
 import argparse
@@ -98,8 +107,9 @@ def build_parser() -> argparse.ArgumentParser:
     run = commands.add_parser(
         RUN_COMMAND,
         help=(
-            "erase the personal data of every user deleted 30 or more days ago and "
-            "mark them deleted (irreversible)"
+            "erase the personal data of every user deleted 30 or more days ago "
+            "(irreversible); mark deleted those whose copies outside the database "
+            "were confirmed erased (--copies-erased)"
         ),
         allow_abbrev=False,
     )
@@ -112,6 +122,18 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "the managed checkouts of this user were removed from disk: delete their "
             "records and erase the user (repeatable)"
+        ),
+    )
+    run.add_argument(
+        "--copies-erased",
+        metavar="USER_ID",
+        type=_user_id,
+        action="append",
+        default=[],
+        help=(
+            "the copies of this user outside the database (backups / WAL, files and "
+            "credentials in their Linux account, recovery copies) were erased: mark "
+            "the user deleted once the database part is erased (repeatable)"
         ),
     )
     return parser
@@ -171,7 +193,9 @@ def _run(arguments: argparse.Namespace, err: TextIO | None) -> int:
         update={"database_url": settings.migration_database_url}
     )
     try:
-        report = asyncio.run(_erase(connection, arguments.checkouts_removed))
+        report = asyncio.run(
+            _erase(connection, arguments.checkouts_removed, arguments.copies_erased)
+        )
     except asyncio.CancelledError:
         _say(
             err,
@@ -192,12 +216,16 @@ def _run(arguments: argparse.Namespace, err: TextIO | None) -> int:
     return _show(report, err)
 
 
-async def _erase(settings: Settings, checkouts_removed) -> ErasureRunReport:
+async def _erase(
+    settings: Settings, checkouts_removed, copies_erased
+) -> ErasureRunReport:
     database = Database(settings)
     service = UserErasureService(database)
     try:
         with _cancel_on_sigterm():
-            return await service.run(checkouts_removed=checkouts_removed)
+            return await service.run(
+                checkouts_removed=checkouts_removed, copies_erased=copies_erased
+            )
     finally:
         await database.dispose()
 
@@ -224,7 +252,15 @@ def _show(report: ErasureRunReport, err: TextIO | None) -> int:
         _say(err, f"User erasure completed: erased={erased}.")
         return EXIT_OK
     for result in report.results:
-        if not result.ok:
+        if result.outcome is ErasureOutcome.COPIES_PENDING:
+            _say(
+                err,
+                f"NOT DELETED: user {result.user_id} (copies_pending). Its personal "
+                "data in the database is erased; it stays pending deletion until the "
+                "copies outside the database are erased and confirmed with "
+                "--copies-erased.",
+            )
+        elif not result.ok:
             _say(
                 err,
                 f"NOT ERASED: user {result.user_id} ({result.outcome.value}"

@@ -218,7 +218,7 @@ class ErasureTest(ErasureTestCase):
         await self.delete(bob)
         self.assertNotEqual(await self.rows_left(bob.id), {})
 
-        report = await self.erasure().run()
+        report = await self.erasure().run(copies_erased=[bob.id])
 
         self.assertTrue(report.ok)
         self.assertEqual(
@@ -261,11 +261,13 @@ class ErasureTest(ErasureTestCase):
             await self.scalar("SELECT login_name FROM users WHERE id = :id", id=bob.id),
             "bob",
         )
-        self.assertEqual(await self.erase_audit(), [("allow", "erased", bob.id)])
-        erase_row = next(
-            row for row in await self.audit_rows() if row.action == "auth.user.erase"
+        self.assertEqual(
+            await self.erase_audit(),
+            [("allow", "copies_confirmed", bob.id), ("allow", "erased", bob.id)],
         )
-        self.assertIsNone(erase_row.actor_id)
+        for row in await self.audit_rows():
+            if row.action == "auth.user.erase":
+                self.assertIsNone(row.actor_id)
 
     async def test_everyone_else_s_data_is_left_alone(self):
         bob = await self.make_user("bob")
@@ -294,7 +296,7 @@ class ErasureTest(ErasureTestCase):
         await self.tasks.execute(task.task_id, TaskCommand.CANCEL, actor=Actor.system())
         await self.delete(bob)
 
-        report = await self.erasure().run()
+        report = await self.erasure().run(copies_erased=[bob.id])
 
         self.assertTrue(report.ok)
         self.assertEqual(await self.rows_left(bob.id), {})
@@ -357,7 +359,7 @@ class ErasureTest(ErasureTestCase):
         self.assertIn((from_project, "pending"), await self.candidates_of(bob.id))
         self.assertIn((rejected, "rejected"), await self.candidates_of(bob.id))
 
-        report = await self.erasure().run()
+        report = await self.erasure().run(copies_erased=[bob.id])
 
         self.assertTrue(report.ok)
         self.assertEqual(await self.status_of(bob.id), "deleted")
@@ -438,15 +440,67 @@ class ErasureTest(ErasureTestCase):
         bob = await self.make_user("bob")
         await self.personal_data(bob)
         await self.delete(bob)
-        await self.erasure().run()
+        await self.erasure().run(copies_erased=[bob.id])
 
-        report = await self.erasure(DUE + timedelta(days=1)).run()
+        report = await self.erasure(DUE + timedelta(days=1)).run(copies_erased=[bob.id])
 
         self.assertTrue(report.ok)
         self.assertEqual(report.results, ())
         self.assertEqual(await self.status_of(bob.id), "deleted")
         self.assertEqual(len(await self.history_of(bob.id)), 2)
-        self.assertEqual(await self.erase_audit(), [("allow", "erased", bob.id)])
+        self.assertEqual(
+            await self.erase_audit(),
+            [("allow", "copies_confirmed", bob.id), ("allow", "erased", bob.id)],
+        )
+
+    async def test_without_the_copies_confirmed_the_user_stays_pending_deletion(self):
+        # REQUIREMENTS.md "User Deletion Retention": not Deleted before the copies
+        # outside the database (backups / WAL, the Linux account) are erased too.
+        bob = await self.make_user("bob")
+        await self.personal_data(bob)
+        await self.delete(bob)
+
+        report = await self.erasure().run()
+
+        self.assertFalse(report.ok)
+        self.assertEqual(
+            [r.outcome for r in report.results], [ErasureOutcome.COPIES_PENDING]
+        )
+        # The database part does not wait for the operator.
+        self.assertEqual(await self.rows_left(bob.id), {})
+        self.assertEqual(await self.status_of(bob.id), "pending_deletion")
+        self.assertEqual(
+            await self.history_of(bob.id), [("active", "pending_deletion")]
+        )
+        self.assertEqual(
+            await self.erase_audit(),
+            [("allow", "data_erased", bob.id), ("deny", "copies_pending", bob.id)],
+        )
+        # An erased but pending user cannot be restored (past the 30 days).
+        self.clock.now = DUE
+        _, owner_principal, owner_auth = await self.administrator("owner", "the-owner")
+        with self.assertRaises(RetentionExpiredError):
+            await self.lifecycle.restore_user(
+                owner_principal, bob.id, self.context(), session_id=owner_auth.record.id
+            )
+
+        # Refused again every day until the operator confirms; then deleted.
+        again = await self.erasure(DUE + timedelta(days=1)).run()
+        self.assertEqual(
+            [r.outcome for r in again.results], [ErasureOutcome.COPIES_PENDING]
+        )
+        other = uuid.uuid4()  # another id on the list changes nothing for bob
+        report = await self.erasure(DUE + timedelta(days=2)).run(
+            copies_erased=[bob.id, other]
+        )
+
+        self.assertTrue(report.ok)
+        self.assertEqual([r.outcome for r in report.results], [ErasureOutcome.ERASED])
+        self.assertEqual(await self.status_of(bob.id), "deleted")
+        self.assertEqual(
+            (await self.erase_audit())[-2:],
+            [("allow", "copies_confirmed", bob.id), ("allow", "erased", bob.id)],
+        )
 
     async def test_an_erasure_of_a_user_who_is_not_due_is_refused_quietly(self):
         bob = await self.make_user("bob")
@@ -479,7 +533,7 @@ class RefusalTest(ErasureTestCase):
 
         # Once the task is stopped, the next run erases.
         await self.tasks.execute(task.task_id, TaskCommand.CANCEL, actor=Actor.policy())
-        report = await self.erasure(DUE + timedelta(days=1)).run()
+        report = await self.erasure(DUE + timedelta(days=1)).run(copies_erased=[bob.id])
         self.assertTrue(report.ok)
         self.assertEqual(await self.status_of(bob.id), "deleted")
 
@@ -534,7 +588,9 @@ class RefusalTest(ErasureTestCase):
         self.assertIn("password_credentials", await self.rows_left(bob.id))
 
         other = uuid.uuid4()  # another id on the list changes nothing for bob
-        report = await self.erasure().run(checkouts_removed=[bob.id, other])
+        report = await self.erasure().run(
+            checkouts_removed=[bob.id, other], copies_erased=[bob.id]
+        )
 
         self.assertTrue(report.ok)
         self.assertEqual(report.results[0].released_checkouts, 1)
@@ -551,6 +607,7 @@ class RefusalTest(ErasureTestCase):
             [
                 ("deny", "checkouts_remaining", bob.id),
                 ("allow", "checkouts_released", bob.id),
+                ("allow", "copies_confirmed", bob.id),
                 ("allow", "erased", bob.id),
             ],
         )
@@ -566,7 +623,7 @@ class RefusalTest(ErasureTestCase):
 
         service._mark_deleted = broken
 
-        result = await service.erase_user(bob.id)
+        result = await service.erase_user(bob.id, copies_erased=True)
 
         self.assertIs(result.outcome, ErasureOutcome.FAILED)
         self.assertEqual(result.error_type, "RuntimeError")

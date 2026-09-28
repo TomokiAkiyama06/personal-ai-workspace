@@ -51,9 +51,20 @@ What one erasure does (ONE transaction per user)
    settings); the project memberships (the account can never come back).
 4. Verifies, in the same transaction, that no row of those tables is left for the
    user; otherwise the transaction is rolled back (``verification_failed``).
-5. Sets ``users.status`` to ``deleted`` and appends the ``user_status_changes`` row
-   (``changed_by`` NULL: the system), and writes ``auth.user.erase`` / ``erased``.
-   The status, the history and the audit row commit with the erasure or not at all.
+5. Only when the operator confirmed that the copies OUTSIDE the database are erased
+   too (``--copies-erased <user id>``): the database backups and WAL, the user's
+   files and GitHub / SSH credentials in their own Linux account, and any recovery
+   copy. REQUIREMENTS.md "User Deletion Retention" forbids showing ``Deleted``
+   before every copy is erased and verified, and this job can neither reach nor
+   check those copies. Then it sets ``users.status`` to ``deleted``, appends the
+   ``user_status_changes`` row (``changed_by`` NULL: the system) and writes
+   ``auth.user.erase`` / ``copies_confirmed`` and ``erased``. The status, the
+   history and the audit rows commit with the erasure or not at all.
+   Without that confirmation the database erasure still commits (audited
+   ``data_erased``; the personal data in the database does not wait for the
+   operator) but the user stays ``pending_deletion`` (``copies_pending``, a
+   refusal the Owner hears of); a later run with the confirmation re-verifies
+   (nothing is left to delete) and marks the user ``deleted``.
 
 Kept (Decision 0043): the ``users`` row (id, login name, role, timestamps) as the
 minimal deletion record, the status history, ``audit_events`` (ids only), and what
@@ -127,6 +138,9 @@ class ErasureOutcome(StrEnum):
     ERASED = "erased"
     TASKS_ACTIVE = "tasks_active"
     CHECKOUTS_REMAINING = "checkouts_remaining"
+    # The database part was erased and verified (committed), but the operator has
+    # not confirmed the copies outside the database: still ``pending_deletion``.
+    COPIES_PENDING = "copies_pending"
     VERIFICATION_FAILED = "verification_failed"
     # The user's row stayed locked longer than ``LOCK_TIMEOUT_MS``.
     BUSY = "busy"
@@ -139,6 +153,7 @@ class ErasureOutcome(StrEnum):
 _DENY_REASONS = {
     ErasureOutcome.TASKS_ACTIVE: AuthReason.TASKS_ACTIVE,
     ErasureOutcome.CHECKOUTS_REMAINING: AuthReason.CHECKOUTS_REMAINING,
+    ErasureOutcome.COPIES_PENDING: AuthReason.COPIES_PENDING,
     ErasureOutcome.VERIFICATION_FAILED: AuthReason.VERIFICATION_FAILED,
     ErasureOutcome.BUSY: AuthReason.ERASURE_FAILED,
     ErasureOutcome.FAILED: AuthReason.ERASURE_FAILED,
@@ -303,17 +318,28 @@ class UserErasureService:
                     )
 
     async def run(
-        self, *, checkouts_removed: Iterable[uuid.UUID] = ()
+        self,
+        *,
+        checkouts_removed: Iterable[uuid.UUID] = (),
+        copies_erased: Iterable[uuid.UUID] = (),
     ) -> ErasureRunReport:
         """Erase every due user, under the run lock; one result per due user.
 
         ``checkouts_removed``: users whose managed checkouts the operator removed
         from disk (their ``repository_checkouts`` rows are then deleted).
+        ``copies_erased``: users whose copies outside the database the operator
+        erased (backups / WAL, files and credentials in their Linux account,
+        recovery copies); only those are marked ``deleted`` (module docstring).
         """
         released = frozenset(checkouts_removed)
-        for user_id in released:
-            if not isinstance(user_id, uuid.UUID):
-                raise TypeError("checkouts_removed must hold uuid.UUID values")
+        confirmed = frozenset(copies_erased)
+        for name, ids in (
+            ("checkouts_removed", released),
+            ("copies_erased", confirmed),
+        ):
+            for user_id in ids:
+                if not isinstance(user_id, uuid.UUID):
+                    raise TypeError(f"{name} must hold uuid.UUID values")
         results: list[UserErasureResult] = []
         async with self.run_lock():
             after: uuid.UUID | None = None
@@ -322,7 +348,9 @@ class UserErasureService:
                 for user_id in page:
                     results.append(
                         await self.erase_user(
-                            user_id, checkouts_removed=user_id in released
+                            user_id,
+                            checkouts_removed=user_id in released,
+                            copies_erased=user_id in confirmed,
                         )
                     )
                 if len(page) < PAGE_SIZE:
@@ -351,7 +379,11 @@ class UserErasureService:
     # -- one user --------------------------------------------------------------------
 
     async def erase_user(
-        self, user_id: uuid.UUID, *, checkouts_removed: bool = False
+        self,
+        user_id: uuid.UUID,
+        *,
+        checkouts_removed: bool = False,
+        copies_erased: bool = False,
     ) -> UserErasureResult:
         """Erase one user if due (see the module docstring). Never raises for a
         refusal or a database error: the outcome says what happened."""
@@ -359,7 +391,9 @@ class UserErasureService:
             raise TypeError("user_id must be a uuid.UUID")
         correlation_id = uuid.uuid4()
         try:
-            released = await self._erase(user_id, checkouts_removed, correlation_id)
+            released, marked = await self._erase(
+                user_id, checkouts_removed, copies_erased, correlation_id
+            )
         except _Refused as refusal:
             if refusal.outcome is ErasureOutcome.NOT_DUE:
                 return UserErasureResult(user_id, ErasureOutcome.NOT_DUE)
@@ -381,13 +415,24 @@ class UserErasureService:
             return UserErasureResult(
                 user_id, ErasureOutcome.FAILED, type(error).__name__
             )
+        if not marked:
+            # The database part committed; the refusal is what the Owner hears of.
+            await self._deny(user_id, ErasureOutcome.COPIES_PENDING, correlation_id)
+            return UserErasureResult(
+                user_id, ErasureOutcome.COPIES_PENDING, released_checkouts=released
+            )
         return UserErasureResult(
             user_id, ErasureOutcome.ERASED, released_checkouts=released
         )
 
     async def _erase(
-        self, user_id: uuid.UUID, checkouts_removed: bool, correlation_id: uuid.UUID
-    ) -> int:
+        self,
+        user_id: uuid.UUID,
+        checkouts_removed: bool,
+        copies_erased: bool,
+        correlation_id: uuid.UUID,
+    ) -> tuple[int, bool]:
+        """``(released checkouts, marked deleted)``."""
         now = self._now()
         async with self._database.session() as session, session.begin():
             await session.execute(
@@ -423,9 +468,17 @@ class UserErasureService:
                 )
             await self._delete_personal_data(session, user_id, now)
             await self._verify(session, user_id)
+            if not copies_erased:
+                await self._record(
+                    session, AuthReason.DATA_ERASED, user_id, correlation_id
+                )
+                return released, False
+            await self._record(
+                session, AuthReason.COPIES_CONFIRMED, user_id, correlation_id
+            )
             await self._mark_deleted(session, user_id, now)
             await self._record(session, AuthReason.ERASED, user_id, correlation_id)
-            return released
+            return released, True
 
     async def _delete_personal_data(
         self, session: AsyncSession, user_id: uuid.UUID, now: datetime

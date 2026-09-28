@@ -45,7 +45,8 @@ Decision 0033（PR #123）は削除を `pending_deletion` にするところま�
   1. 拒否（何も変えない）: その User の Active な Task / Queue Entry が残る（`tasks_active`。B の Loop が止めるまで消さない。走っている Agent と競わない）。管理下の Checkout（`repository_checkouts`）が残る（`checkouts_remaining`。判断点 7）。
   2. 消す（判断点 5）: Password の Hash、Passkey、Passkey の Challenge、Session、Pairing、招待、Setup / Reset の Token、本人の Conversation とその Message・Session State・Journal（Private Chat。これを出典にした Memory の Source には `source_deleted_at` を付け、参照は外部キーの `SET NULL` で外れる）、`user` Scope の Memory の Version と Version が 1 つも残らない Memory、Consolidation の Key、本人が提案して**承認されなかった** Shared Memory の候補（`shared_memory_candidates` の `pending`・`rejected`。候補は出典の Memory の Title・本文の複製を持つ。`pending` を残すと消去の後に Admin が承認して全員に見える Shared Memory になり、`rejected` を残すと本文がずっと残る）（Private Memory。後から Project へ広げた Memory は広げた Version が残る）、`connection_quotas`（個人設定）、Project の Membership（判断点 9）。
   3. 検証: 同じ Transaction で、それらの Table（と `repository_checkouts`、`user` Scope の Memory、本人の `pending`・`rejected` の候補）にその User の行が 0 行であることを数え直す。違えば全体を戻す（`verification_failed`）。
-  4. `users.status` を `deleted` にし、`user_status_changes` に 1 行（`changed_by` は NULL = System）、`auth.user.erase` / `erased`（Actor なし）を書く。状態・履歴・Audit は消去と一緒に Commit するか、何も残らない。
+  4. **DB の外の複製の消去を運用者が確認したときだけ**（`--copies-erased <user id>`。DB の Backup / WAL、User の Linux Account の中の Files と GitHub / SSH の認証情報、Recovery の複製）: `users.status` を `deleted` にし、`user_status_changes` に 1 行（`changed_by` は NULL = System）、`auth.user.erase` / `copies_confirmed` と `erased`（Actor なし）を書く。状態・履歴・Audit は消去と一緒に Commit するか、何も残らない。
+  5. 確認がないとき: DB の中の消去と検証は Commit する（`auth.user.erase` allow `data_erased`。DB の個人データは運用者を待たずに消す）が、User は `pending_deletion` のまま（deny `copies_pending`、終了コード 3 で Owner に通知）。確認を付けた後の実行が検証をやり直して（消すものは残っていない）`deleted` にする。要件の「消去と検証が終わるまで `Deleted` と表示しない」を守るため（判断点 6）。消去の後の User は 30 日を過ぎているので復元もできない。
 - **User を指す列の全体と、消去での扱い**（判断点 5）。Schema の User を指す列（`user_id`・`owner_user_id`・`created_by`・`requester_user_id`・`proposer_user_id`・`actor_user_id`・`actor_id`・`approver_id`・`decided_by`・`changed_by`・`invited_by`・`revoked_by`・`updated_by`・`added_by`）を持つ Table をすべて挙げる。「ID だけ残す」は、残る行が User の ID を指すが本人の書いた本文を持たないもの。「本文ごと残す」は、本人が書いた・本人に由来する本文が消去の後も残るもの。
 
   | Table（列） | 扱い |
@@ -91,12 +92,12 @@ Decision 0033（PR #123）は削除を `pending_deletion` にするところま�
 - 新しい Module: `paw_backend/orchestrator/user_sweep.py`（Task の停止と Loop）、`paw_backend/auth/onboarding/erasure.py`（消去）、`paw_backend/cli/erasure.py`（Command）。`paw_backend/cli/dispatch.py` が `user-erasure-run` を振り分ける。
 - 新しい設定 `PAW_USER_TASK_STOP_INTERVAL_SECONDS`（既定 60、0 で止める、10〜3600）。
 - 新しい systemd の Unit（例）: `paw-user-erasure.service`・`.timer`・`-failure.service`。Environment File は `/etc/paw/user-erasure.env`（`chmod 600`。`audit-retention.env` と同じ File でもよい）。
-- 新しい Audit の値: `auth.user.task_stop`（`user_deletion`）、`auth.user.erase`（`erased`・`checkouts_released`・`tasks_active`・`checkouts_remaining`・`verification_failed`・`erasure_failed`）。`audit_events` の列・CHECK は変えない。
+- 新しい Audit の値: `auth.user.task_stop`（`user_deletion`）、`auth.user.erase`（`erased`・`checkouts_released`・`data_erased`・`copies_confirmed`・`tasks_active`・`checkouts_remaining`・`copies_pending`・`verification_failed`・`erasure_failed`）。`audit_events` の列・CHECK は変えない。
 - Migration なし。
 
 ## リスク
 
-- **DB の外の複製は消していない**: DB の Backup / WAL、Recovery Projection・Recovery Git の履歴（まだこの System にない）、User の Linux Account の中の Files。要件は、これらの消去と検証まで `Deleted` と表示しないことを求める。この PR は **DB の中の消去と検証が済み、管理下の Checkout が残らないとき**に `deleted` にする（判断点 6）。Backup / Recovery の機能を入れる PR は、自分の消去の手順をこの Job に足す必要がある（例: PR #138 の Memory Markdown Projection は Private Memory を Files に書くので、マージの前に消去の手順が要る）。
+- **DB の外の複製は Job が消さず、確かめられない**: DB の Backup / WAL、Recovery Projection・Recovery Git の履歴（まだこの System にない）、User の Linux Account の中の Files と認証情報。要件は、これらの消去と検証まで `Deleted` と表示しないことを求めるので、Job は**運用者の確認（`--copies-erased`）があるまで `deleted` にしない**（判断点 6）。確認は運用者の申告を信じる（Audit の `copies_confirmed` に残る）。運用者が確認しない限り、その User は毎日 `copies_pending` で通知される。Backup / Recovery の機能を入れる PR は、自分の消去の手順をこの Job に足して、確認の範囲を狭められる（例: PR #138 の Memory Markdown Projection は Private Memory を Files に書くので、マージの前に消去の手順が要る）。
 - 消去は取り消せない。30 日の判定を誤る（時計の誤り）と早く消す。判定は DB の時計と `now` の遅い方（復元の判定と同じ）で、復元できる User は消さない。
 - Checkout の Directory が本当に消えたかは、Job からは確かめられない（`ProtectHome=true`、別の Linux User）。運用者の `--checkouts-removed` の申告を信じ、Audit（`checkouts_released`）に残す。
 - 実際の systemd・通知経路での動作は確かめていない（Unit File は Test で読むだけ）。
@@ -112,7 +113,7 @@ Decision 0033（PR #123）は削除を `pending_deletion` にするところま�
    - **Private から Project へ広げた Memory は、広げた Version が Private の本文を持ったまま残る**（推奨。広げた時点で Project の記録になった）点。
    - 本人の Shared Memory の候補のうち、`pending`・`rejected` を**消し**、`approved` を**本文ごと残す**（推奨。`approved` の本文は既に Shared Memory）点。候補の Table の Migration（0046）は「候補は決定の記録で消さない」としているが、Web の Role の権限は変えず、消すのは消去の Job（Table の Owner）だけである。
    - （追加の選択）削除の開始から消去までの 30 日間、本人の `pending` の候補を Admin が承認できる。これを止める（`approve_candidate` が `active` でない提案者の候補を拒否する、または削除の開始時に `rejected` にする）か、復元できる期間なので止めない（推奨。この PR では変えない）か。
-6. `deleted` にする条件を、**DB の中の消去と検証が済み、管理下の Checkout が残らないこと**とする（推奨。DB の Backup / WAL と Recovery はまだないので、それらを入れる機能が自分の消去の手順を足す）か、Owner が Backup 等の消去を確認して別の Command で `deleted` にするまで `pending_deletion` のままにするか。
+6. `deleted` にする条件を、**DB の中の消去と検証が済み、管理下の Checkout が残らず、運用者が DB の外の複製（Backup / WAL、Linux Account の中の Files と認証情報、Recovery）の消去を `--copies-erased` で確認したこと**とする（推奨。要件の「消去と検証が終わるまで `Deleted` と表示しない」のとおり。確認がなくても DB の中の個人データは 30 日で消し、User は `pending_deletion` のまま毎日通知する）か、DB の中の消去と検証だけで `deleted` にする（要件からの逸脱。Codex Review の P1 の指摘で、推奨をこの案から変えた）か。
 7. 管理下の Checkout が残る User を**拒否し、運用者の `--checkouts-removed <user id>` の申告で続ける**（推奨）か、Checkout の行を消して `deleted` にするか、Checkout の Directory の削除まで自動で行うか。
 8. 消去の拒否・失敗を、**User を `pending_deletion` のまま Audit の deny と終了コード 3（`OnFailure=` の通知）で知らせ、毎日再試行する**（推奨）か、別の方法（Notification Policy の経路）にするか。
 9. 消去で Project の Membership（`project_members`）の行を**消す**（推奨。Account はもう戻らない。Manager の規則は既に `active` の User だけを数える）か、残すか。

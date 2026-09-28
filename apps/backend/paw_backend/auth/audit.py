@@ -148,6 +148,12 @@ class AuthReason(StrEnum):
     TASKS_ACTIVE = "tasks_active"
     CHECKOUTS_REMAINING = "checkouts_remaining"
     ERASURE_FAILED = "erasure_failed"
+    # The database part erased and verified, the user not yet ``deleted``: the
+    # operator has not confirmed the copies outside the database (``copies_pending``)
+    # or has (``copies_confirmed``, recorded with ``erased``).
+    DATA_ERASED = "data_erased"
+    COPIES_PENDING = "copies_pending"
+    COPIES_CONFIRMED = "copies_confirmed"
 
 
 class AuthAudit:
