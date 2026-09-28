@@ -39,6 +39,7 @@
 | [0032](0032-passkey-owner-reset.md) | 他の Account の Passkey の Reset と 1 回限りの Password 再設定の方針（誰が誰を、Password を消して再設定 Token を発行、`setup_tokens` の `password_reset` と Owner を拒否する関数、有効期間。Issue #108） | Approved |
 | [0033](0033-user-invitation-and-device-pairing.md) | User の招待・端末の Pairing（QR / リンク、Owner / Admin の信頼済み端末の承認）・User Lifecycle の方針（招待 Token の期限、Pairing の状態遷移、削除・復元の権限、含めないこと。PAW-024） | Approved |
 | [0034](0034-memory-versioning-freshness.md) | Memory の Relation の意味・手動編集の Version（誰がどの Scope を変えられるか）・手動で書ける鮮度・Stale Candidate / 期限切れ / Session 終了の処理（PAW-042。Issue #36） | Approved |
+| [0038](0038-memory-markdown-projection.md) | Memory Markdown Projection の出力先（`PAW_MEMORY_PROJECTION_DIR`、git の Work Tree・Home の拒否、Marker）・公開範囲ごとの配置・投影する Version・diff-friendly な形式・Secret の置換・`0700` / `0600` の権限・実行と失敗の通知（Audit・終了コード・`OnFailure=`）（PAW-045。Issue #39） | Proposed |
 
 運用は [AGENTS.md](../../AGENTS.md) の「仕様変更」に従います。
 

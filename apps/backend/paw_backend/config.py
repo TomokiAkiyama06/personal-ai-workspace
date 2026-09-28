@@ -131,6 +131,14 @@ class Settings(BaseSettings):
     # would then stay ``in_flight`` (counted as requests, without an end).
     connection_reap_interval_seconds: int = Field(default=600, ge=0, le=86_400)
 
+    # Memory Markdown Projection (PAW-045, Decision 0038 Proposed): the directory
+    # ``python -m paw_backend.cli memory-projection-run`` writes the Markdown view
+    # of PostgreSQL's memories into (on the HDD in the deployment, for example
+    # ``/srv/personal-ai/memory``). Unset: the command refuses to run. The path is
+    # checked when the command runs (``memory/projection/writer.py``): absolute,
+    # canonical, outside every git work tree and every home directory.
+    memory_projection_dir: Path | None = None
+
     # Repository registration (PAW-027, Decision 0017). Where a user's checkouts
     # live below their home; the roots (per user: ``{home}`` and ``{user}``) an
     # existing repository may be registered from; the hosts a repository may be
@@ -232,6 +240,7 @@ class Settings(BaseSettings):
         "app_database_role",
         "operator_database_role",
         "passkey_rp_id",
+        "memory_projection_dir",
         mode="before",
     )
     @classmethod
