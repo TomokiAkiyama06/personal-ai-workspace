@@ -100,6 +100,7 @@ from sqlalchemy import (
     ColumnElement,
     bindparam,
     func,
+    or_,
     select,
     text,
     update,
@@ -1389,6 +1390,7 @@ class TaskService:
         agent_id: uuid.UUID | None = None,
         reason: str | None = None,
         expected_version: int | None = None,
+        run: TaskRun | None = None,
     ) -> TaskEvent:
         """Apply one change of the task's Working Set and record it.
 
@@ -1404,6 +1406,12 @@ class TaskService:
         #85 constraint 4):
 
         * the task is not completed (``IllegalTransitionError``);
+        * with ``run`` (an agent's change: the run its call was decided for,
+          ``WorkingSetExecutor``), that run is still the task's current one
+          (``StaleAttemptError`` / ``StaleRunError``) and the task has not ended
+          (``TaskNotActiveError``): a call delayed past a Retry / Restart, a Fail
+          or a Cancel changes nothing (Codex review of #85). A human's change
+          names no run and may fix a failed task's Working Set before a Retry;
         * the repository's role now is ``expected_role`` (``None``: not in the
           Working Set), else ``WorkingSetConflictError``: what was authorized no
           longer holds;
@@ -1445,11 +1453,17 @@ class TaskService:
             expected_version = _int(
                 "expected_version", expected_version, 1, _MAX_INTEGER
             )
+        if run is not None:
+            run = _run(run)
 
         async with self._database.session() as session, session.begin():
             task = await self._require_task(session, task_id, lock=True)
             if expected_version is not None and task.version != expected_version:
                 raise TaskConflictError()
+            if run is not None:
+                self._require_current_run(task, run)
+                if task.state in _ENDED_STATES:
+                    raise TaskNotActiveError()
             if task.state is TaskState.COMPLETED:
                 raise IllegalTransitionError(
                     task.state.value, TaskCommand.CHANGE_WORKING_SET.value
@@ -1523,7 +1537,18 @@ class TaskService:
                 row.starting_commit = starting_commit
                 if starting_commit is not None:
                     detail["starting_commit"] = starting_commit
-            elif member.starting_commit is None and starting_commit is not None:
+            elif (
+                member.starting_commit is None
+                and starting_commit is not None
+                and not await self._could_ever_have_changed(
+                    session, task.id, repository_id, current
+                )
+            ):
+                # Only a repository that was never writable nor changed gets
+                # its baseline now: the commit a writable one is at may already
+                # hold a change, and taking it as the baseline would let a later
+                # downgrade call that change discarded (Codex review of #85).
+                # The baseline then stays unknown, which is fail-closed.
                 member.starting_commit = starting_commit
                 detail["starting_commit"] = starting_commit
             if new_role is None:
@@ -2036,6 +2061,32 @@ class TaskService:
         if state_row is None:
             return False
         return state_row.modified or state_row.strongest_role is not RepoRole.REFERENCED
+
+    @staticmethod
+    async def _could_ever_have_changed(
+        session: AsyncSession,
+        task_id: uuid.UUID,
+        repository_id: uuid.UUID,
+        current: RepoRole | None,
+    ) -> bool:
+        """Whether any attempt of the task could have changed the repository: it
+        is ``working`` / ``target`` now, or it held such a role or was written to
+        in some attempt (a verified discard resets that attempt's record)."""
+        if current is not None and current is not RepoRole.REFERENCED:
+            return True
+        found = await session.scalar(
+            select(TaskAttemptRepositoryRow.id)
+            .where(
+                TaskAttemptRepositoryRow.task_id == task_id,
+                TaskAttemptRepositoryRow.repository_id == repository_id,
+                or_(
+                    TaskAttemptRepositoryRow.modified.is_(True),
+                    TaskAttemptRepositoryRow.strongest_role != RepoRole.REFERENCED,
+                ),
+            )
+            .limit(1)
+        )
+        return found is not None
 
     async def _require_completion(self, session: AsyncSession, task: TaskRow) -> None:
         """Refuse Complete unless every repository meets its requirements

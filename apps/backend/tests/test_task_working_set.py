@@ -626,6 +626,48 @@ class DiscardTest(WorkingSetTestCase):
         # Nothing was asked: there is nothing to compare with.
         self.assertEqual(self.inspector.calls, [])
 
+    async def test_a_baseline_is_not_filled_in_after_the_repository_could_be_written(
+        self,
+    ):
+        """Codex review of #85 (P1): a repository that joined as ``working`` with
+        an unknown baseline may be changed before a promotion names a commit. That
+        commit is the modified HEAD, not the original: it must not become the
+        baseline, or a later downgrade would find the repository "clean at its
+        baseline" and drop the obligations of a change nobody can see."""
+        task_id = await self.create_task(
+            repositories=[
+                WorkingSetEntry(self.repository_id, TARGET, BASE_A),
+                WorkingSetEntry(self.other, WORKING, None),
+            ]
+        )
+        await self.service.execute(task_id, C.START, actor=self.system)
+        await self.write_to(task_id, self.other)
+        await self.change(
+            task_id, Op.SET_TARGET, self.other, WORKING, starting_commit=BASE_B
+        )
+        snapshot = await self.service.restore(task_id)
+        self.assertIsNone(snapshot.repository(self.other).starting_commit)
+        self.assertNotIn("starting_commit", snapshot.last_event.detail)
+
+        self.inspector.clean_at(self.other, BASE_B)
+        with self.assertRaises(ModifiedRepositoryDowngradeRefusedError):
+            await self.change(task_id, Op.DOWNGRADE_TO_WORKING, self.other, TARGET)
+
+    async def test_a_baseline_is_filled_in_for_a_repository_only_ever_read(self):
+        """The other side: a ``referenced`` repository (never writable, never
+        changed) that is promoted gets the commit it is at as its baseline."""
+        task_id = await self.create_task(
+            repositories=[
+                WorkingSetEntry(self.repository_id, TARGET, BASE_A),
+                WorkingSetEntry(self.other, REFERENCED, None),
+            ]
+        )
+        await self.change(
+            task_id, Op.SET_WORKING, self.other, REFERENCED, starting_commit=BASE_B
+        )
+        snapshot = await self.service.restore(task_id)
+        self.assertEqual(snapshot.repository(self.other).starting_commit, BASE_B)
+
     async def test_without_an_inspector_no_write_role_is_ever_narrowed(self):
         service = TaskService(self.database, project_gate=ALWAYS_ACTIVE)
         task_id = await self.two_targets()
@@ -1687,6 +1729,59 @@ class ToolExecutionTest(WorkingSetTestCase):
             make_call("repo.write_file", write_new, context=context)
         )
         self.assertEqual(write.reason.value, "repository_role_insufficient")
+
+    async def test_a_change_decided_for_a_run_that_ended_or_was_replaced_is_refused(
+        self,
+    ):
+        """Codex review of #85 (P1): an allowed Working Set call whose execution
+        is delayed past a Retry / Restart, a Fail or a Cancel changes nothing. The
+        executor passes the invocation's run, and the service checks it in the
+        transaction that holds the task's row lock."""
+        cases = {
+            "retried": ((C.FAIL, C.RETRY, C.START), StaleRunError),
+            "restarted": ((C.FAIL, C.RESTART, C.START), StaleAttemptError),
+            "failed": ((C.FAIL,), TaskNotActiveError),
+            "cancelled": ((C.CANCEL,), TaskNotActiveError),
+        }
+        for label, (commands, error) in cases.items():
+            with self.subTest(label):
+                self.task_id = await self.task_in_state(S.RUNNING)
+                decision = await self.h.broker.request(
+                    make_call(
+                        "task.working_set.add_referenced",
+                        {"repository": str(self.NEW)},
+                        context=await self.context(),
+                    )
+                )
+                self.assertTrue(decision.allowed)
+                for command in commands:
+                    actor = (
+                        self.user if command in (C.RETRY, C.RESTART) else (self.system)
+                    )
+                    await self.service.execute(self.task_id, command, actor=actor)
+                before = await self.table_counts()
+
+                with self.assertRaises(error):
+                    await self.executor.execute(decision.invocation)
+
+                self.assertEqual(await self.table_counts(), before)
+                self.assertIsNone(
+                    (await self.service.restore(self.task_id)).repository(self.NEW)
+                )
+
+    async def test_a_human_change_names_no_run_and_may_follow_a_failure(self):
+        """The run check is the agent path's: a human's change (no run) keeps the
+        rule it had, so a failed task's Working Set can be fixed before a Retry."""
+        await self.service.execute(self.task_id, C.FAIL, actor=self.system)
+        await self.change(self.task_id, Op.ADD_REFERENCED, self.NEW, None)
+        self.assertIs(
+            (await self.service.restore(self.task_id)).repository(self.NEW).role,
+            REFERENCED,
+        )
+        with self.assertRaises(TaskNotActiveError):
+            await self.change(
+                self.task_id, Op.SET_WORKING, self.NEW, REFERENCED, run=FIRST_RUN
+            )
 
     async def test_a_scope_built_before_a_downgrade_does_not_lift_the_role(self):
         """The Claude review's scenario on the real service: the worker keeps a

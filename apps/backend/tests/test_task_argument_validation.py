@@ -647,6 +647,8 @@ CASES = [
         "expected_version",
         not_an_integer(1, 2**31 - 1, allow_none=True),
     ),
+    # ``None`` is a human's change (no run); anything else must be a TaskRun.
+    case("change_working_set", "run", [v for v in not_a_run() if v is not None]),
     # -- admit_repository_use (issue #85)
     case("admit_repository_use", "task_id", not_a_uuid()),
     case("admit_repository_use", "run", not_a_run()),

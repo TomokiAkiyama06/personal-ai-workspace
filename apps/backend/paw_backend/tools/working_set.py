@@ -155,7 +155,9 @@ class WorkingSetExecutor:
 
     The change is made by ``TaskService.change_working_set`` on the role the
     call was decided on (the role in the invocation's task scope): if the stored
-    role moved meanwhile it refuses (``WorkingSetConflictError``). The actor is
+    role moved meanwhile it refuses (``WorkingSetConflictError``); if the call's
+    run is no longer the task's current one, or the task ended, it refuses too
+    (``StaleRunError`` / ``TaskNotActiveError``). The actor is
     the delegating user; the event also names the agent.
     """
 
@@ -188,6 +190,9 @@ class WorkingSetExecutor:
             expected_role=expected,
             starting_commit=starting_commit,
             agent_id=context.grant.agent_id,
+            # The run the call was decided for: a call delayed past a Retry /
+            # Restart or the task's end changes nothing.
+            run=context.run,
         )
         new_role = role_after(operation)
         return {

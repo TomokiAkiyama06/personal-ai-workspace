@@ -303,8 +303,18 @@ class ToolBroker:
             if isinstance(call.correlation_id, uuid.UUID)
             else uuid.uuid4()
         )
-        decision = await self._evaluate(call, correlation_id, approval_id)
-        decision = await self._audited(decision, call.context)
+        # The reservations this request admitted: a request cancelled before it
+        # returns hands no decision to the runner, so it releases them itself
+        # (Codex review of #85), or they would hold the repositories until
+        # they expire.
+        admitted: list[uuid.UUID] = []
+        try:
+            decision = await self._evaluate(call, correlation_id, approval_id, admitted)
+            decision = await self._audited(decision, call.context)
+        except BaseException:
+            for reservation_id in admitted:
+                await self._release_through_cancellation(call.context, reservation_id)
+            raise
         if not decision.allowed and decision.reservation_id is not None:
             # Admitted, but it does not run after all (its decision could not be
             # recorded): nothing is in flight on the repositories.
@@ -382,6 +392,7 @@ class ToolBroker:
         call: ToolCall,
         correlation_id: uuid.UUID,
         approval_id: uuid.UUID | None,
+        admitted: list[uuid.UUID],
     ) -> BrokerDecision:
         context = call.context
         if approval_id is not None and not isinstance(approval_id, uuid.UUID):
@@ -480,8 +491,22 @@ class ToolBroker:
                 )
 
         if level in (ApprovalLevel.AUTO, ApprovalLevel.SCOPED_AUTO):
+            if spec.working_set_operation is not None:
+                # A Working Set change touches no repository of the scope, so no
+                # use gate asks about the task: an ended or replaced run must not
+                # widen the scope (Codex review of #85). The executor's service
+                # call checks the run again, under the task's row lock.
+                task_reason = await self._task_denial(context)
+                if task_reason is not None:
+                    return self._refuse(
+                        task_reason,
+                        correlation_id,
+                        tool=name,
+                        level=level,
+                        call_hash=call_hash,
+                    )
             use_reason, reservation = await self._admit_use(
-                spec, context, classification
+                spec, context, classification, admitted
             )
             if use_reason is not None:
                 return self._refuse(
@@ -526,7 +551,9 @@ class ToolBroker:
         # that is then not consumed marks the repository changed although the
         # call did not run: that only adds an obligation (fail-closed), and its
         # reservation is released at once.
-        use_reason, reservation = await self._admit_use(spec, context, classification)
+        use_reason, reservation = await self._admit_use(
+            spec, context, classification, admitted
+        )
         if use_reason is not None:
             return self._refuse(
                 use_reason,
@@ -555,6 +582,7 @@ class ToolBroker:
         spec: ToolSpec,
         context: TaskContext,
         classification: Classification,
+        admitted: list[uuid.UUID],
     ) -> tuple[BrokerReason | None, uuid.UUID | None]:
         """Admit the call's use of the repositories it touches on the roles
         stored NOW (``RepositoryUseGate``; Decision 0030, 4.1 / 4.6): the task
@@ -605,7 +633,25 @@ class ToolBroker:
                 logger.error("Repository write admitted without a reservation")
                 return BrokerReason.REPOSITORY_WRITE_UNRECORDED, None
             reservation = None
+        if reservation is not None:
+            admitted.append(reservation)
         return None, reservation
+
+    async def _release_through_cancellation(
+        self, context: TaskContext, reservation_id: uuid.UUID
+    ) -> None:
+        """:meth:`_release`, finished even if the caller is cancelled meanwhile
+        (again): it runs as a task of its own that this coroutine waits for. The
+        caller re-raises what interrupted it; the wait is bounded by the broker's
+        timeout."""
+        release = asyncio.create_task(self._release(context, reservation_id))
+        while not release.done():
+            try:
+                # Unlike awaiting the task, asyncio.wait() does not cancel it.
+                await asyncio.wait({release})
+            except asyncio.CancelledError:
+                continue  # the caller re-raises its own cancellation
+        release.result()  # never raises (``_release`` logs a failure)
 
     async def _release(self, context: TaskContext, reservation_id: uuid.UUID) -> None:
         """Release a repository reservation; never raises (one that cannot be

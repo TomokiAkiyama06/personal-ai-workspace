@@ -17,6 +17,7 @@ The database side (``TaskService.change_working_set``, the executor) is in
 ``test_task_working_set``.
 """
 
+import asyncio
 import unittest
 import uuid
 from datetime import UTC, datetime
@@ -58,12 +59,14 @@ from paw_backend.tools import (
     with_working_set_roles,
 )
 from paw_backend.tools.runner import MAX_EXECUTION_TIMEOUT, ExecutionStatus
+from paw_backend.tools.task_state import TaskActivity
 from paw_backend.tools.working_set import TOOL_OPERATIONS
 
 from .authz_support import P1, P2, U1, U2, FailingSink, StaticDirectory, principal
 from .tools_support import (
     ROOT,
     FakeExecutor,
+    FakeTaskActivity,
     Harness,
     Registrations,
     UseGate,
@@ -591,6 +594,52 @@ class WriteReservationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(h.use_gate.released, [(ctx.task_id, reservation)])
         self.assertEqual(h.use_gate.in_flight(), [])
 
+    async def test_a_request_cancelled_after_the_admission_releases_it(self):
+        """Codex review of #85 (P1): a request cancelled while it consumes the
+        approval (or records its decision) after the use was admitted hands no
+        decision to the runner, so the broker itself releases the reservation,
+        even if the cancellation repeats; else the repository stays "in flight"
+        until the reservation expires."""
+        for stage in ("consume", "audit"):
+            with self.subTest(stage):
+                h = harness()
+                ctx = context()
+                pending = await decide(
+                    "repo.delete_tree", {"path": f"{ROOT}/tgt/a"}, ctx, h
+                )
+                await h.service.approve(
+                    pending.approval_id,
+                    principal(SystemRole.USER, U1, {P1: ProjectRole.CONTRIBUTOR}),
+                )
+                entered = asyncio.Event()
+
+                async def hang(*args, entered=entered, **kwargs):
+                    entered.set()
+                    await asyncio.Event().wait()
+
+                if stage == "consume":
+                    h.approvals.consume = hang
+                else:
+                    h.broker._audited = hang
+                request = asyncio.create_task(
+                    decide(
+                        "repo.delete_tree",
+                        {"path": f"{ROOT}/tgt/a"},
+                        ctx,
+                        h,
+                        approval_id=pending.approval_id,
+                    )
+                )
+                await entered.wait()
+                request.cancel()
+                await asyncio.sleep(0)
+                request.cancel()  # a second cancellation does not skip it
+                with self.assertRaises(asyncio.CancelledError):
+                    await request
+                (reservation,) = h.use_gate.reservations
+                self.assertEqual(h.use_gate.released, [(ctx.task_id, reservation)])
+                self.assertEqual(h.use_gate.in_flight(), [])
+
     async def test_a_decision_that_cannot_be_recorded_releases_the_reservation(self):
         h = harness(broker_sink=FailingSink())
         ctx = context()
@@ -810,6 +859,32 @@ class WorkingSetDecisionTest(unittest.IsolatedAsyncioTestCase):
         # the repository, on its proxy capability (READ): only denials of
         # ``project.read`` are persisted, so the allowed one leaves no row
         self.assertEqual(decision.invocation.arguments["repository"], str(NEW))
+
+    async def test_a_task_that_cannot_act_gets_no_automatic_change(self):
+        """Codex review of #85 (P1): adding a ``referenced`` repository is
+        SCOPED_AUTO and touches no repository of the scope, so no use gate asks
+        about the task. The broker asks itself, for the context's run: an ended,
+        replaced, unknown or unreadable task widens no scope."""
+        cases = {
+            TaskActivity.ENDED: R.TASK_NOT_ACTIVE,
+            TaskActivity.SUPERSEDED: R.TASK_SUPERSEDED,
+            TaskActivity.UNKNOWN: R.TASK_UNKNOWN,
+        }
+        for answer, reason in cases.items():
+            with self.subTest(answer):
+                h = harness(task_activity=FakeTaskActivity(answer))
+                decision = await decide(self.ADD, {"repository": str(NEW)}, h=h)
+                self.assertEqual(outcome(decision), (Verdict.DENY, reason))
+                self.assertIsNone(decision.invocation)
+        h = harness(task_activity=FakeTaskActivity(error=OSError("down")))
+        decision = await decide(self.ADD, {"repository": str(NEW)}, h=h)
+        self.assertEqual(outcome(decision), (Verdict.DENY, R.TASK_STATE_UNAVAILABLE))
+        # An active task: asked once, about the context's run.
+        h = harness()
+        ctx = context()
+        decision = await decide(self.ADD, {"repository": str(NEW)}, ctx=ctx, h=h)
+        self.assertTrue(decision.allowed)
+        self.assertEqual(h.task_activity.runs, [ctx.run])
 
     async def test_every_other_change_needs_strong_approval(self):
         cases = {
