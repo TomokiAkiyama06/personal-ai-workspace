@@ -34,9 +34,22 @@ where it writes and who can read what it wrote:
   nothing. The runner holds it from before the database read to after the write,
   so an older snapshot can never overwrite a newer one.
 
+* **Checked before changing.** ``sync`` first checks every directory and file
+  name the plan needs (no link, no file where a directory belongs, no directory
+  where a file belongs, owned by this user), so a tree the run could not finish
+  fails before anything is written or deleted.
+* **An unfinished write is visible.** Before its first change ``sync`` writes
+  ``.paw-memory-projection-incomplete`` into the root; only ``mark_complete``
+  (called by the runner after the ``completed`` outcome is recorded) removes it.
+  A write that fails midway (a full disk, a kill) or whose outcome could not be
+  recorded leaves the flag, so an older ``completed`` row never vouches for a
+  mixed tree: a reader (PAW-047) copies only with the lock held, the flag absent
+  and the last run ``completed`` (Decision 0038 9).
+
 Unchanged files are not rewritten (their modification time stays), so a run
-without changes touches nothing and a Git commit of the directory shows only what
-changed. Everything here blocks: call it with ``asyncio.to_thread``.
+without changes rewrites no file of the projection and a Git commit of the
+directory shows only what changed. Everything here blocks: call it with
+``asyncio.to_thread``.
 """
 
 import errno
@@ -64,10 +77,15 @@ from paw_backend.memory.projection.render import (
 )
 
 MARKER_NAME = ".paw-memory-projection"
+INCOMPLETE_NAME = ".paw-memory-projection-incomplete"
 MARKER_CONTENT = (
     f"Personal AI Workspace memory projection, format {FORMAT_VERSION}.\n"
     "Generated from PostgreSQL; do not edit. See Decision 0038.\n"
 ).encode()
+INCOMPLETE_CONTENT = (
+    b"A write of the projection did not finish or was not recorded; do not copy.\n"
+)
+_ROOT_FILES = frozenset({MARKER_NAME, INCOMPLETE_NAME})
 TEMPORARY_PREFIX = ".tmp-"
 DIRECTORY_MODE = 0o700
 FILE_MODE = 0o600
@@ -205,6 +223,37 @@ def _open_directory(parent_fd: int, name: str, *, create: bool) -> int:
     return fd
 
 
+def _open_existing(parent_fd: int, name: str) -> int | None:
+    """Open an existing directory of the projection without changing it.
+
+    ``None`` when it is missing; ``unsafe_entry`` when it is not a directory of
+    this user (a link, a file, someone else's)."""
+    entry = _lstat(name, parent_fd)
+    if entry is None:
+        return None
+    if not stat.S_ISDIR(entry.st_mode):
+        raise ProjectionTargetError(TargetProblem.UNSAFE_ENTRY)
+    try:
+        fd = os.open(name, _DIRECTORY_FLAGS, dir_fd=parent_fd)
+    except OSError as error:
+        if error.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise ProjectionTargetError(TargetProblem.UNSAFE_ENTRY) from None
+        raise
+    try:
+        _check_owned(fd, TargetProblem.UNSAFE_ENTRY)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _preflight_leaf(fd: int, files: Iterable[str]) -> None:
+    for name in files:
+        entry = _lstat(name, fd)
+        if entry is not None and stat.S_ISDIR(entry.st_mode):
+            raise ProjectionTargetError(TargetProblem.UNSAFE_ENTRY)
+
+
 def _check_owned(fd: int, problem: TargetProblem) -> None:
     if os.fstat(fd).st_uid != os.geteuid():
         raise ProjectionTargetError(problem)
@@ -309,13 +358,46 @@ class LockedTarget:
                 wanted_tops.setdefault(SHARED_DIRECTORY, {})[""] = files
             else:
                 wanted_tops.setdefault(key[0], {})[key[1]] = files
+        self._preflight(wanted_tops)
+        _write_file(self._root_fd, INCOMPLETE_NAME, INCOMPLETE_CONTENT)
         for top in _ALL_TOP_DIRECTORIES:
             self._sync_top(top, wanted_tops.get(top), counts)
         for name in os.listdir(self._root_fd):
-            if name != MARKER_NAME and name not in _ALL_TOP_DIRECTORIES:
+            if name not in _ROOT_FILES and name not in _ALL_TOP_DIRECTORIES:
                 counts["unmanaged"] += 1
         os.fsync(self._root_fd)
         return WriteReport(**counts)
+
+    def mark_complete(self) -> None:
+        """Remove the incomplete flag: the write finished and was recorded."""
+        if self._closed:
+            raise RuntimeError("the projection target is closed")
+        try:
+            os.unlink(INCOMPLETE_NAME, dir_fd=self._root_fd)
+        except FileNotFoundError:
+            pass
+        os.fsync(self._root_fd)
+
+    def _preflight(self, wanted_tops: Mapping[str, Mapping[str, object]]) -> None:
+        """Refuse, before any change, a tree ``sync`` could not finish."""
+        for top, wanted in wanted_tops.items():
+            fd = _open_existing(self._root_fd, top)
+            if fd is None:
+                continue
+            try:
+                if top == SHARED_DIRECTORY:
+                    _preflight_leaf(fd, wanted.get("", {}))
+                    continue
+                for name, files in wanted.items():
+                    child = _open_existing(fd, name)
+                    if child is None:
+                        continue
+                    try:
+                        _preflight_leaf(child, files)
+                    finally:
+                        os.close(child)
+            finally:
+                os.close(fd)
 
     def _sync_top(
         self,
@@ -492,6 +574,7 @@ def _open_marker(root_fd: int) -> int:
 __all__ = [
     "DIRECTORY_MODE",
     "FILE_MODE",
+    "INCOMPLETE_NAME",
     "MARKER_CONTENT",
     "MARKER_NAME",
     "LockedTarget",

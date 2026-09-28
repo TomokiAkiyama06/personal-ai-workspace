@@ -22,12 +22,12 @@ columns of its current version: ``users/<owner>``, ``projects/<project>``,
 directories (never a title or a login name), so no text of a memory can choose
 where it is written.
 
-Recognisable credentials in titles and texts are replaced by ``[REDACTED]``
-(``tools.credentials.redact_text``) before they reach a file (Decision 0038 5):
-the projection is later committed to the Recovery Repository, which must not hold
-secrets. PostgreSQL keeps the text as it is. A text longer than
-``MAX_TEXT_CHARS`` cannot be scanned whole: its file holds the first
-``MAX_TEXT_CHARS`` characters and ``[TRUNCATED]``, the front matter says
+Recognisable credentials in titles, texts and branch names are replaced by
+``[REDACTED]`` (``tools.credentials.redact_text``) before they reach a file
+(Decision 0038 5): the projection is later committed to the Recovery
+Repository, which must not hold secrets. PostgreSQL keeps the text as it is. A
+text longer than ``MAX_TEXT_CHARS`` cannot be scanned whole: its file holds the
+first ``MAX_TEXT_CHARS`` characters and ``[TRUNCATED]``, the front matter says
 ``truncated: true`` and the run counts it apart from the redactions.
 """
 
@@ -185,7 +185,10 @@ def render_memory_file(memory: ProjectedMemory) -> tuple[bytes, int, bool]:
     whether a text was too long to scan and so was cut (``truncated: true``)."""
     title, title_redactions, title_truncated = _redact(memory.title)
     content, content_redactions, content_truncated = _redact(memory.content)
-    redactions = title_redactions + content_redactions
+    branch, branch_redactions = (
+        (None, 0) if memory.branch is None else redact_text(memory.branch)
+    )
+    redactions = title_redactions + content_redactions + branch_redactions
     truncated = title_truncated or content_truncated
     scope_key = {
         MemoryScope.USER.value: ("owner_user_id", memory.owner_user_id),
@@ -221,7 +224,7 @@ def render_memory_file(memory: ProjectedMemory) -> tuple[bytes, int, bool]:
         ("revalidate_triggers", sorted(memory.revalidate_triggers) or None),
         ("expires_at", memory.expires_at and _time(memory.expires_at)),
         ("commit_sha", memory.commit_sha),
-        ("branch", memory.branch),
+        ("branch", branch),
         ("stale_since", memory.stale_since and _time(memory.stale_since)),
     ]
     fields += [(key, value) for key, value in optional if value is not None]

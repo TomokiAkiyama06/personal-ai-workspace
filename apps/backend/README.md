@@ -3540,7 +3540,7 @@ $PAW_MEMORY_PROJECTION_DIR/                 # 0700。Backend の OS User だけ�
 - 各 Memory の**現在の Version**（`version_number` が最大）を、その公開範囲の Directory に 1 File（`<memory-id>.md`）で書きます。Status は問わず Front Matter と `INDEX.md` に示し、`session_only` は書きません。過去の Version・Relation・Provenance は書きません（PAW-047）。
 - 1 回の実行は `REPEATABLE READ, READ ONLY` の 1 つの Snapshot から作ります。公開範囲を狭めた Memory（`project → user`）は、`projects/` から消えて `users/<編集者>/` に現れます。
 - **diff-friendly**: Front Matter の Key の順は固定で値は JSON、改行は LF、時刻は UTC、実行の時刻は書きません。変わらない File は書き直さない（更新時刻も変えない）ので、Git の差分は変わった Memory だけです。Directory と File の名前は ID だけで、Memory の文字列は Path を選べません。
-- **Secret**: Title と本文の、認識できる Credential（`tools.credentials.redact_text`）を `[REDACTED]` にしてから書き、件数を Front Matter と Audit に残します。PostgreSQL の本文は変えません。
+- **Secret**: Title・本文・Branch 名の、認識できる Credential（`tools.credentials.redact_text`）を `[REDACTED]` にしてから書き、件数を Front Matter と Audit に残します。PostgreSQL の本文は変えません。
 
 ### 書き先の安全（`writer.py`）
 
@@ -3559,7 +3559,7 @@ python -m paw_backend.cli memory-projection-check --max-age-minutes 30   # 監�
 
 - 接続は `PAW_DATABASE_URL`（Application の Role）。`memory_versions` の SELECT と `audit_events` の INSERT / SELECT（Revision `0040` / `0025` / `0086` の権限）だけを使います。
 - 実行ごとに `audit_events` へ 1 行（別の Transaction）: `memory.projection.completed`（`reason = memories=N written=N removed=N redacted=N`、長すぎて検査できない本文を切ったときは続けて ` truncated=N`）か `memory.projection.failed`（`reason = <step>:<code>`。Path・例外の Message・Memory の文字列は書かない）。`resource_kind = memory_projection_run`。
-- 終了コードは `0` 成功、`1` 拒否（同時実行など）、`2` 環境（設定・DB）、`3` 投影の失敗。`run` で DB に届かない（読み取りも失敗の記録も失敗した）ときも `2` です。0 以外で `paw-memory-projection-failure.service`（`OnFailure=`）が `crit` の Journal と `wall` を出します。読み取りの失敗は既存の File を消しません。書き込みの途中の失敗では、File ごとには原子的ですが、Directory によって新旧の Snapshot が混ざることがあり、次に成功した実行が直します（PAW-047 は Marker の Lock を取り、最後の実行が成功したときだけ写す。Decision 0038 の 9）。
+- 終了コードは `0` 成功、`1` 拒否（同時実行など）、`2` 環境（設定・DB）、`3` 投影の失敗。`run` で DB に届かない（読み取りも失敗の記録も失敗した）ときも `2` です。0 以外で `paw-memory-projection-failure.service`（`OnFailure=`）が `crit` の Journal と `wall` を出します。読み取りの失敗は既存の File を消しません。書き込みの途中の失敗では、File ごとには原子的ですが、Directory によって新旧の Snapshot が混ざることがあり、次に成功した実行が直します。書く前に Tree 全体を確かめるので、`unsafe_entry` の実行は何も変えません。書く前に Root へ `.paw-memory-projection-incomplete` を置き、`completed` を記録できた後にだけ消すので、途中で失敗した実行や結果を記録できなかった実行の後は Flag が残ります（PAW-047 は Marker の Lock を取り、Flag がなく最後の実行が成功したときだけ写す。Decision 0038 の 9）。
 - `deploy/systemd/paw-memory-projection.timer` は 5 分ごと（`OnCalendar=*:0/5`、`Persistent=true`）。Service は Backend と同じ OS User で、`ProtectHome=true`・`ProtectSystem=strict`・`ReadWritePaths=/srv/personal-ai/memory`・`UMask=0077` です。`projection_status` は最後の実行と最後の成功を返します（Backup / Recovery の画面の「Last successful projection generation」に使える）。「最後」は Database の時計の `recorded_at` の順で、Host の時計が戻っても、新しい失敗が古い成功の陰に隠れません。
 
 ### 制限と未確認の点

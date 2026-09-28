@@ -6,10 +6,12 @@ followed, only its own files replaced or removed, one run at a time.
 Every test writes below its own ``tempfile`` directory only.
 """
 
+import errno
 import os
 import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from paw_backend.memory.projection import (
     INDEX_FILE,
@@ -20,7 +22,8 @@ from paw_backend.memory.projection import (
     open_target,
     render_projection,
 )
-from paw_backend.memory.projection.writer import MARKER_CONTENT
+from paw_backend.memory.projection import writer as writer_module
+from paw_backend.memory.projection.writer import INCOMPLETE_NAME, MARKER_CONTENT
 
 from .projection_support import TemporaryRoot, memory, mode, moved, tree
 
@@ -38,7 +41,9 @@ class WriterTestCase(unittest.TestCase):
     def sync(self, memories):
         target = open_target(self.root, self.tmp.homes)
         try:
-            return target.sync(render_projection(memories))
+            report = target.sync(render_projection(memories))
+            target.mark_complete()
+            return report
         finally:
             target.close()
 
@@ -331,6 +336,81 @@ class LinkTest(WriterTestCase):
         report = self.sync([value])
         self.assertEqual(report.removed, 1)
         self.assertEqual(victim.read_text(), "original")
+
+
+class IncompleteTest(WriterTestCase):
+    """A failed or unconfirmed write leaves a flag a reader (PAW-047) can see."""
+
+    def test_a_failure_found_before_writing_changes_nothing(self):
+        # Moving a memory from projects/ to users/: the old copy must not be
+        # deleted when users/ turns out to be unusable (checked before any change).
+        project = memory(scope="project")
+        self.sync([project])
+        before = tree(self.root)
+        outside = self.tmp.base / "outside"
+        outside.mkdir()
+        (self.root / "users").symlink_to(outside)
+        with self.assertRaises(ProjectionTargetError) as caught:
+            self.sync([memory()])
+        self.assertEqual(caught.exception.problem, TargetProblem.UNSAFE_ENTRY)
+        self.assertEqual(
+            {k: v for k, v in tree(self.root).items() if k != "users"}, before
+        )
+        self.assertEqual(os.listdir(outside), [])
+        self.assertFalse((self.root / INCOMPLETE_NAME).exists())
+
+    def test_a_directory_where_a_file_belongs_is_found_before_writing(self):
+        value = memory()
+        other = memory(scope="project")
+        self.sync([value, other])
+        before = tree(self.root)
+        user_dir = self.root / "users" / str(value.owner_user_id)
+        (user_dir / f"{value.memory_id}.md").unlink()
+        (user_dir / f"{value.memory_id}.md").mkdir()
+        with self.assertRaises(ProjectionTargetError):
+            self.sync([moved(value, content="new", version_number=2)])
+        self.assertIn(f"projects/{other.project_id}/{other.memory_id}.md", before)
+        self.assertEqual(
+            tree(self.root)[f"projects/{other.project_id}/{other.memory_id}.md"],
+            before[f"projects/{other.project_id}/{other.memory_id}.md"],
+        )
+        self.assertFalse((self.root / INCOMPLETE_NAME).exists())
+
+    def test_the_flag_stays_until_the_write_is_marked_complete(self):
+        target = self.open()
+        report = target.sync(render_projection([memory()]))
+        self.assertTrue((self.root / INCOMPLETE_NAME).is_file())
+        self.assertEqual(mode(self.root / INCOMPLETE_NAME), 0o600)
+        self.assertEqual(report.unmanaged, 0)
+        target.mark_complete()
+        self.assertFalse((self.root / INCOMPLETE_NAME).exists())
+
+    def test_a_write_that_fails_midway_leaves_the_flag(self):
+        self.sync([memory(scope="project")])
+        real = writer_module._write_file
+        calls = []
+
+        def failing(dir_fd, name, data):
+            calls.append(name)
+            if len(calls) == 3:  # the flag, one file, then "the disk is full"
+                raise OSError(errno.ENOSPC, "no space")
+            real(dir_fd, name, data)
+
+        target = self.open()
+        with mock.patch.object(writer_module, "_write_file", failing):
+            with self.assertRaises(OSError):
+                target.sync(render_projection([memory(), memory(scope="shared")]))
+        self.assertEqual(calls[0], INCOMPLETE_NAME)
+        self.assertTrue((self.root / INCOMPLETE_NAME).is_file())
+
+    def test_a_flag_left_by_a_failed_run_is_kept_by_the_next_failure(self):
+        target = self.open()
+        target.sync(render_projection([memory()]))
+        target.close()
+        (self.root / "shared").write_text("not a directory")
+        with self.assertRaises(ProjectionTargetError):
+            self.sync([memory(scope="shared")])
+        self.assertTrue((self.root / INCOMPLETE_NAME).is_file())
 
 
 if __name__ == "__main__":

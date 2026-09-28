@@ -23,10 +23,13 @@ records ``<step>:CancelledError`` and propagates.
 A lock the thread took after the cancellation is released at once (the runner
 may live in a long-lived process, Decision 0038 8).
 
-Each file is replaced atomically, but a run that fails while writing can leave
-some directories of the new snapshot next to others of the old one; the next
-successful run repairs that. A reader that copies the directory (PAW-047) takes
-the marker's lock and copies only after a completed run (Decision 0038 9).
+Each file is replaced atomically, and the writer checks the whole tree before
+its first change, but a run that fails while writing (a full disk, a kill) can
+leave some directories of the new snapshot next to others of the old one; the
+next successful run repairs that. The writer's incomplete flag is removed only
+after a ``completed`` outcome is recorded, so a failed or unrecorded write stays
+flagged. A reader that copies the directory (PAW-047) takes the marker's lock and
+copies only without the flag and after a completed run (Decision 0038 9).
 
 The caller (``paw_backend.cli.memory_projection``) turns ``ok`` into the exit
 code the scheduler watches (Decision 0038 6).
@@ -220,6 +223,15 @@ class MemoryProjectionRunner:
                 self._recorder(action, reason, occurred_at=self._clock())
             )
             cancelled = cancelled or interrupted
+            if audited and action is ProjectionAction.COMPLETED:
+                # Only now may the tree be copied (Decision 0038 9). A failure
+                # leaves the flag: the next completed run clears it.
+                try:
+                    await _in_thread(target.mark_complete)
+                except asyncio.CancelledError as failure:
+                    cancelled = cancelled or failure
+                except OSError:
+                    pass
         finally:
             if target is not None:
                 try:

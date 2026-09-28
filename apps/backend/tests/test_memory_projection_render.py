@@ -229,6 +229,17 @@ class MemoryFileTest(unittest.TestCase):
         self.assertEqual(redactions, 3)
         self.assertEqual(front_matter(data)["redactions"], 3)
 
+    def test_a_credential_in_the_branch_is_redacted_and_counted(self):
+        # A branch is free text (FreshnessSpec) and a valid ref can hold a token.
+        token = "ghp_" + "a1B2" * 9
+        data, redactions = render_memory(
+            memory(freshness_policy="repo_commit", commit_sha="a" * 40, branch=token)
+        )
+        self.assertNotIn(token.encode(), data)
+        self.assertEqual(front_matter(data)["branch"], "[REDACTED]")
+        self.assertEqual(redactions, 1)
+        self.assertEqual(front_matter(data)["redactions"], 1)
+
 
 class IndexTest(unittest.TestCase):
     def test_rows_are_sorted_by_status_type_title_and_id(self):

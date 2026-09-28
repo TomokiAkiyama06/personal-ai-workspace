@@ -21,8 +21,10 @@ from paw_backend.memory.projection import (
     ProjectionDatabaseError,
     ProjectionStep,
     open_target,
+    render_projection,
 )
 from paw_backend.memory.projection import runner as runner_module
+from paw_backend.memory.projection.writer import INCOMPLETE_NAME
 from paw_backend.tools.credentials import MAX_TEXT_CHARS
 
 from .projection_support import T0, TemporaryRoot, memory, tree
@@ -284,6 +286,34 @@ class FailureTest(RunnerTestCase):
             top = f"projects/{value.project_id}" if value.project_id else "shared"
             expected |= {f"{top}/{value.memory_id}.md", f"{top}/INDEX.md"}
         self.assertEqual(set(tree(self.tmp.root)), expected)
+
+    async def test_a_completed_and_recorded_run_clears_the_incomplete_flag(self):
+        result = await self.runner(FakeSource([memory()])).run()
+        self.assertTrue(result.ok)
+        self.assertFalse((self.tmp.root / INCOMPLETE_NAME).exists())
+
+    async def test_an_unrecorded_run_keeps_the_incomplete_flag(self):
+        # An old ``completed`` row must not vouch for a tree whose outcome was
+        # never recorded (PAW-047 copies only without the flag).
+        recorder = FakeRecorder(error=OSError("database down"))
+        result = await self.runner(FakeSource([memory()]), recorder=recorder).run()
+        self.assertFalse(result.ok)
+        self.assertTrue((self.tmp.root / INCOMPLETE_NAME).is_file())
+        result = await self.runner(FakeSource([memory()])).run()
+        self.assertTrue(result.ok)
+        self.assertFalse((self.tmp.root / INCOMPLETE_NAME).exists())
+
+    async def test_a_run_that_fails_while_writing_keeps_the_incomplete_flag(self):
+        await self.runner(FakeSource([memory(scope="project")])).run()
+        target = open_target(self.tmp.root, self.tmp.homes)
+        try:
+            target.sync(render_projection([memory()]))  # a write, never confirmed
+        finally:
+            target.close()
+        (self.tmp.root / "shared").write_text("not a directory")
+        result = await self.runner(FakeSource([memory(scope="shared")])).run()
+        self.assertEqual(result.failed_step, ProjectionStep.WRITE_FILES)
+        self.assertTrue((self.tmp.root / INCOMPLETE_NAME).is_file())
 
     async def test_the_reason_fits_the_audit_column(self):
         many = [memory() for _ in range(3)]
