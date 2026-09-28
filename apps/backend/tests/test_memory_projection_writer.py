@@ -162,9 +162,9 @@ class UnmanagedTest(WriterTestCase):
         value = memory()
         self.sync([value])
         user_dir = self.root / "users" / str(value.owner_user_id)
-        (user_dir / ".tmp-deadbeef").write_text("half")
+        (user_dir / ".tmp-00000000deadbeef").write_text("half")
         report = self.sync([value])
-        self.assertFalse((user_dir / ".tmp-deadbeef").exists())
+        self.assertFalse((user_dir / ".tmp-00000000deadbeef").exists())
         self.assertEqual(report.removed, 0)
 
 
@@ -401,6 +401,40 @@ class IncompleteTest(WriterTestCase):
         self.assertFalse((self.root / "projects").exists())
         self.assertFalse((self.root / INCOMPLETE_NAME).exists())
 
+    def test_the_flag_is_durable_before_the_first_change(self):
+        # A power loss after the first change must not lose the flag: the root
+        # is fsync-ed right after the flag is written, before any mkdir.
+        target = self.open()
+        root_fd = target._root_fd
+        events: list[str] = []
+        real_fsync, real_mkdir, real_write = (
+            os.fsync,
+            os.mkdir,
+            writer_module._write_file,
+        )
+
+        def fsync(fd):
+            events.append("fsync-root" if fd == root_fd else "fsync")
+            real_fsync(fd)
+
+        def mkdir(*args, **kwargs):
+            events.append("mkdir")
+            real_mkdir(*args, **kwargs)
+
+        def write(dir_fd, name, data):
+            real_write(dir_fd, name, data)
+            events.append(f"wrote {name}")
+
+        with (
+            mock.patch.object(writer_module.os, "fsync", fsync),
+            mock.patch.object(writer_module.os, "mkdir", mkdir),
+            mock.patch.object(writer_module, "_write_file", write),
+        ):
+            target.sync(render_projection([memory()]))
+        flag = events.index(f"wrote {INCOMPLETE_NAME}")
+        self.assertEqual(events[flag + 1], "fsync-root")
+        self.assertLess(flag + 1, events.index("mkdir"))
+
     def test_the_flag_stays_until_the_write_is_marked_complete(self):
         target = self.open()
         report = target.sync(render_projection([memory()]))
@@ -436,6 +470,20 @@ class IncompleteTest(WriterTestCase):
         with self.assertRaises(ProjectionTargetError):
             self.sync([memory(scope="shared")])
         self.assertTrue((self.root / INCOMPLETE_NAME).is_file())
+
+
+class TemporaryNameTest(WriterTestCase):
+    def test_only_the_writers_own_temporary_names_are_removed(self):
+        value = memory()
+        self.sync([value])
+        user_dir = self.root / "users" / str(value.owner_user_id)
+        (user_dir / ".tmp-notes").write_text("not ours")
+        (user_dir / ".tmp-0123456789abcdef").write_text("a leftover of ours")
+        report = self.sync([value])
+        self.assertTrue((user_dir / ".tmp-notes").exists())
+        self.assertFalse((user_dir / ".tmp-0123456789abcdef").exists())
+        self.assertEqual(report.unmanaged, 1)
+        self.assertEqual(report.removed, 0)
 
 
 if __name__ == "__main__":

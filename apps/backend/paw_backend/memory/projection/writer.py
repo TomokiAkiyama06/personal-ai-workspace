@@ -27,7 +27,8 @@ where it writes and who can read what it wrote:
   the old name, which replaces a link or hard link instead of writing through it.
 * **Only its own files.** Only names the renderer can produce are replaced or
   deleted (``<uuid>.md``, ``INDEX.md``, the top directories, ``<uuid>``
-  directories, the writer's own temporary files). Anything else is counted as
+  directories, the writer's own temporary files: ``.tmp-`` and exactly 16 hex
+  digits). Anything else is counted as
   ``unmanaged`` and left alone, never read.
 * **One run at a time.** ``open_target`` takes an exclusive ``flock`` on the
   marker (non-blocking): a second run gets ``ProjectionBusyError`` and does
@@ -55,6 +56,7 @@ directory shows only what changed. Everything here blocks: call it with
 import errno
 import fcntl
 import os
+import re
 import secrets
 import stat
 from collections.abc import Collection, Iterable, Mapping
@@ -87,6 +89,10 @@ INCOMPLETE_CONTENT = (
 )
 _ROOT_FILES = frozenset({MARKER_NAME, INCOMPLETE_NAME})
 TEMPORARY_PREFIX = ".tmp-"
+_TEMPORARY_HEX_BYTES = 8
+_TEMPORARY_NAME = re.compile(
+    re.escape(TEMPORARY_PREFIX) + f"[0-9a-f]{{{2 * _TEMPORARY_HEX_BYTES}}}"
+)
 DIRECTORY_MODE = 0o700
 FILE_MODE = 0o600
 
@@ -312,7 +318,7 @@ def _same_file(dir_fd: int, name: str, data: bytes) -> bool:
 
 def _write_file(dir_fd: int, name: str, data: bytes) -> None:
     """Write ``data`` to a temporary name and rename it over ``name`` (atomic)."""
-    temporary = f"{TEMPORARY_PREFIX}{secrets.token_hex(8)}"
+    temporary = f"{TEMPORARY_PREFIX}{secrets.token_hex(_TEMPORARY_HEX_BYTES)}"
     fd = os.open(temporary, _CREATE_FLAGS, FILE_MODE, dir_fd=dir_fd)
     try:
         try:
@@ -365,6 +371,8 @@ class LockedTarget:
                 wanted_tops.setdefault(key[0], {})[key[1]] = files
         self._preflight(wanted_tops)
         _write_file(self._root_fd, INCOMPLETE_NAME, INCOMPLETE_CONTENT)
+        # The flag must survive a power loss that keeps any later change.
+        os.fsync(self._root_fd)
         for top in _ALL_TOP_DIRECTORIES:
             self._sync_top(top, wanted_tops.get(top), counts)
         for name in os.listdir(self._root_fd):
@@ -468,17 +476,18 @@ def _check_key(key: DirectoryKey) -> None:
         raise ValueError("not a directory of the projection")
 
 
+def _is_temporary(name: str) -> bool:
+    """A name ``_write_file`` makes (``.tmp-`` and 16 hex digits), nothing else."""
+    return _TEMPORARY_NAME.fullmatch(name) is not None
+
+
 def _managed_file(name: str) -> bool:
-    return (
-        name == INDEX_FILE
-        or is_memory_file_name(name)
-        or name.startswith(TEMPORARY_PREFIX)
-    )
+    return name == INDEX_FILE or is_memory_file_name(name) or _is_temporary(name)
 
 
 def _sync_leaf(fd: int, files: Mapping[str, bytes], counts: dict[str, int]) -> None:
     for name in sorted(files):
-        if not _managed_file(name) or name.startswith(TEMPORARY_PREFIX):
+        if not _managed_file(name) or _is_temporary(name):
             raise ValueError("not a file name of the projection")
         if _same_file(fd, name, files[name]):
             counts["unchanged"] += 1
@@ -501,7 +510,7 @@ def _sync_leaf(fd: int, files: Mapping[str, bytes], counts: dict[str, int]) -> N
             counts["unmanaged"] += 1
             continue
         os.unlink(name, dir_fd=fd)
-        if not name.startswith(TEMPORARY_PREFIX):
+        if not _is_temporary(name):
             counts["removed"] += 1
 
 
