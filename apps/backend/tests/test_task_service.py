@@ -19,6 +19,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
 from paw_backend.tasks import (
+    Actor,
     ActorKind,
     EvaluationResult,
     IllegalTransitionError,
@@ -27,6 +28,7 @@ from paw_backend.tasks import (
     LogLevel,
     PullRequestInfo,
     PullRequestState,
+    RepoRole,
     ReviewState,
     ReviewStatus,
     StepStatus,
@@ -38,6 +40,7 @@ from paw_backend.tasks import (
     TaskState,
     TaskStepError,
     WaitReason,
+    WorkingSetEntry,
     WorktreeState,
 )
 from paw_backend.tasks import service as service_module
@@ -53,6 +56,7 @@ from .task_support import (
     FIRST_RUN,
     PostgresTaskTestCase,
     command_reason,
+    make_completable,
     requires_postgres,
 )
 from .test_task_domain import EXPECTED
@@ -90,7 +94,9 @@ class CreateTaskTest(PostgresTaskTestCase):
             created_by=self.user_id,
             title="Fix the parser",
             input={"prompt": "Make it faster", "files": ["a.py"]},
-            starting_commit="a" * 40,
+            repositories=[
+                WorkingSetEntry(self.repository_id, RepoRole.TARGET, "a" * 40)
+            ],
             agent="codex",
             model="model-x",
         )
@@ -111,16 +117,34 @@ class CreateTaskTest(PostgresTaskTestCase):
         self.assertEqual(
             snapshot.input, {"prompt": "Make it faster", "files": ["a.py"]}
         )
-        self.assertEqual(snapshot.starting_commit, "a" * 40)
+        # The Working Set: one target, with its own starting commit (issue #85).
+        (entry,) = snapshot.working_set
+        self.assertEqual(
+            (entry.repository_id, entry.role, entry.starting_commit),
+            (self.repository_id, RepoRole.TARGET, "a" * 40),
+        )
+        self.assertEqual(entry.added_by, Actor.user(self.user_id))
+        self.assertEqual(
+            event.detail,
+            {
+                "working_set": [
+                    {"repository_id": str(self.repository_id), "role": "target"}
+                ]
+            },
+        )
         self.assertEqual((snapshot.agent, snapshot.model), ("codex", "model-x"))
         self.assertEqual(
             (snapshot.project_id, snapshot.created_by), (self.project_id, self.user_id)
         )
         self.assertIsNone(snapshot.current_step)
         self.assertEqual(snapshot.recent_logs, ())
-        self.assertEqual(snapshot.attempt.worktree, WorktreeState())
-        self.assertEqual(snapshot.attempt.review, ReviewState())
-        self.assertIsNone(snapshot.attempt.pull_request)
+        self.assertEqual(
+            snapshot.attempt.repository(self.repository_id).worktree, WorktreeState()
+        )
+        self.assertEqual(
+            snapshot.attempt.repository(self.repository_id).review, ReviewState()
+        )
+        self.assertIsNone(snapshot.attempt.repository(self.repository_id).pull_request)
 
     async def test_invalid_creation_arguments_are_rejected_without_echoing_them(self):
         secret = "SECRET-MARKER"
@@ -129,7 +153,11 @@ class CreateTaskTest(PostgresTaskTestCase):
             "long title": {"title": secret * 40},
             "input that is not JSON": {"input": {"x": object()}},
             "oversized input": {"input": {"blob": secret * 40000}},
-            "long commit": {"starting_commit": "c" * 65},
+            "long commit": {
+                "repositories": [
+                    WorkingSetEntry(uuid.uuid4(), RepoRole.TARGET, "c" * 65)
+                ]
+            },
         }
         for name, overrides in cases.items():
             with (
@@ -524,19 +552,28 @@ class UnstorableTextTest(PostgresTaskTestCase):
             "update_attempt branch": (
                 self.idle,
                 lambda: service.update_attempt(
-                    self.idle, run=FIRST_RUN, worktree=WorktreeState(branch=bad)
+                    self.idle,
+                    run=FIRST_RUN,
+                    repository_id=self.repository_id,
+                    worktree=WorktreeState(branch=bad),
                 ),
             ),
             "update_attempt path": (
                 self.idle,
                 lambda: service.update_attempt(
-                    self.idle, run=FIRST_RUN, worktree=WorktreeState(path=bad)
+                    self.idle,
+                    run=FIRST_RUN,
+                    repository_id=self.repository_id,
+                    worktree=WorktreeState(path=bad),
                 ),
             ),
             "update_attempt head_commit": (
                 self.idle,
                 lambda: service.update_attempt(
-                    self.idle, run=FIRST_RUN, worktree=WorktreeState(head_commit=bad)
+                    self.idle,
+                    run=FIRST_RUN,
+                    repository_id=self.repository_id,
+                    worktree=WorktreeState(head_commit=bad),
                 ),
             ),
             "update_attempt pull request url": (
@@ -544,6 +581,7 @@ class UnstorableTextTest(PostgresTaskTestCase):
                 lambda: service.update_attempt(
                     self.idle,
                     run=FIRST_RUN,
+                    repository_id=self.repository_id,
                     pull_request=PullRequestInfo(1, bad, PullRequestState.OPEN),
                 ),
             ),
@@ -564,8 +602,19 @@ class UnstorableTextTest(PostgresTaskTestCase):
             for field in ("title", "starting_commit", "agent", "model"):
                 with self.subTest(f"{field}: {label}"):
                     before = await self.scalar(count, project_id=self.project_id)
+                    overrides = (
+                        {
+                            "repositories": [
+                                WorkingSetEntry(
+                                    self.repository_id, RepoRole.TARGET, bad
+                                )
+                            ]
+                        }
+                        if field == "starting_commit"
+                        else {field: bad}
+                    )
                     with self.assertRaises(InvalidCommandArgumentError) as caught:
-                        await self.create_task(**{field: bad})
+                        await self.create_task(**overrides)
                     self.assertNotIn(self.MARKER, str(caught.exception))
                     self.assertEqual(
                         await self.scalar(count, project_id=self.project_id), before
@@ -574,24 +623,38 @@ class UnstorableTextTest(PostgresTaskTestCase):
     async def test_other_unusual_text_is_still_stored_unchanged(self):
         text = '日本語 \U0001f600 \x01 tab\t newline\n quote" back\\slash é'
         task_id = await self.create_task(
-            title=text, agent=text, model=text, starting_commit=text
+            title=text,
+            agent=text,
+            model=text,
+            repositories=[WorkingSetEntry(self.repository_id, RepoRole.TARGET, text)],
         )
         await self.service.execute(task_id, C.START, actor=self.system)
         await self.service.add_log(task_id, text, run=FIRST_RUN)
         await self.service.update_attempt(
             task_id,
             run=FIRST_RUN,
+            repository_id=self.repository_id,
             worktree=WorktreeState(text, text, text),
             pull_request=PullRequestInfo(1, text, PullRequestState.OPEN),
         )
         snapshot = await self.service.restore(task_id)
         self.assertEqual(
-            (snapshot.title, snapshot.agent, snapshot.model, snapshot.starting_commit),
+            (
+                snapshot.title,
+                snapshot.agent,
+                snapshot.model,
+                snapshot.working_set[0].starting_commit,
+            ),
             (text, text, text, text),
         )
         self.assertEqual([log.message for log in snapshot.recent_logs], [text])
-        self.assertEqual(snapshot.attempt.worktree, WorktreeState(text, text, text))
-        self.assertEqual(snapshot.attempt.pull_request.url, text)
+        self.assertEqual(
+            snapshot.attempt.repository(self.repository_id).worktree,
+            WorktreeState(text, text, text),
+        )
+        self.assertEqual(
+            snapshot.attempt.repository(self.repository_id).pull_request.url, text
+        )
 
 
 @requires_postgres
@@ -605,7 +668,9 @@ class AttemptStateLimitsTest(PostgresTaskTestCase):
     async def assert_refused(self, **groups) -> None:
         before = await self.service.restore(self.task_id)
         with self.assertRaises(InvalidCommandArgumentError):
-            await self.service.update_attempt(self.task_id, run=FIRST_RUN, **groups)
+            await self.service.update_attempt(
+                self.task_id, run=FIRST_RUN, repository_id=self.repository_id, **groups
+            )
         self.assertEqual(await self.service.restore(self.task_id), before)
 
     async def test_worktree_and_pull_request_text_is_accepted_at_the_column_limit(
@@ -614,19 +679,31 @@ class AttemptStateLimitsTest(PostgresTaskTestCase):
         worktree = WorktreeState("b" * 255, "p" * 1024, "c" * 64)
         pull_request = PullRequestInfo(12, "u" * 2048, PullRequestState.OPEN)
         await self.service.update_attempt(
-            self.task_id, run=FIRST_RUN, worktree=worktree, pull_request=pull_request
+            self.task_id,
+            run=FIRST_RUN,
+            repository_id=self.repository_id,
+            worktree=worktree,
+            pull_request=pull_request,
         )
-        attempt = (await self.service.restore(self.task_id)).attempt
+        attempt = (await self.service.restore(self.task_id)).attempt.repository(
+            self.repository_id
+        )
         self.assertEqual(attempt.worktree, worktree)
         self.assertEqual(attempt.pull_request, pull_request)
 
     async def test_limits_count_characters_not_bytes(self):
         worktree = WorktreeState("日" * 255, "é" * 1024, "😀" * 64)
         await self.service.update_attempt(
-            self.task_id, run=FIRST_RUN, worktree=worktree
+            self.task_id,
+            run=FIRST_RUN,
+            repository_id=self.repository_id,
+            worktree=worktree,
         )
         self.assertEqual(
-            (await self.service.restore(self.task_id)).attempt.worktree, worktree
+            (await self.service.restore(self.task_id))
+            .attempt.repository(self.repository_id)
+            .worktree,
+            worktree,
         )
 
     async def test_one_character_over_the_column_limit_is_refused(self):
@@ -647,7 +724,10 @@ class AttemptStateLimitsTest(PostgresTaskTestCase):
                 before = await self.service.restore(self.task_id)
                 with self.assertRaises(InvalidCommandArgumentError) as caught:
                     await self.service.update_attempt(
-                        self.task_id, run=FIRST_RUN, **groups
+                        self.task_id,
+                        run=FIRST_RUN,
+                        repository_id=self.repository_id,
+                        **groups,
                     )
                 self.assertNotIn(secret, str(caught.exception))
                 self.assertEqual(await self.service.restore(self.task_id), before)
@@ -659,9 +739,13 @@ class AttemptStateLimitsTest(PostgresTaskTestCase):
                     number, "https://example.test/pr", PullRequestState.OPEN
                 )
                 await self.service.update_attempt(
-                    self.task_id, run=FIRST_RUN, pull_request=pull_request
+                    self.task_id,
+                    run=FIRST_RUN,
+                    repository_id=self.repository_id,
+                    pull_request=pull_request,
                 )
-                attempt = (await self.service.restore(self.task_id)).attempt
+                snapshot = await self.service.restore(self.task_id)
+                attempt = snapshot.attempt.repository(self.repository_id)
                 self.assertEqual(attempt.pull_request, pull_request)
 
         # A number is a positive integer of at most 2**31 - 1: neither a bool
@@ -686,6 +770,10 @@ class TransitionTest(PostgresTaskTestCase):
                 with self.subTest(state=state.value, command=command.value):
                     checked += 1
                     task_id = await self.task_in_state(state)
+                    if command is C.COMPLETE:
+                        await make_completable(
+                            self.service, task_id, self.repository_id, FIRST_RUN
+                        )
                     before = await self.service.restore(task_id)
                     wait_reason = WaitReason.APPROVAL if command is C.WAIT else None
                     target = EXPECTED[state].get(command)
@@ -717,7 +805,9 @@ class TransitionTest(PostgresTaskTestCase):
                         self.assertEqual(after.state, target)
                         self.assertEqual(after.version, before.version + 1)
                         self.assertEqual(after.last_event, event)
-        self.assertEqual(checked, 8 * 13)
+        # 14 commands: the 13 of PAW-032 and ``change_working_set`` (issue #85),
+        # which, like ``create``, no state accepts as a command.
+        self.assertEqual(checked, 8 * 14)
 
     async def test_completed_task_rejects_every_command(self):
         task_id = await self.task_in_state(S.COMPLETED)
@@ -737,6 +827,7 @@ class TransitionTest(PostgresTaskTestCase):
 
     async def test_history_records_every_transition_with_who_and_what(self):
         task_id = await self.create_task()
+        await make_completable(self.service, task_id, self.repository_id, FIRST_RUN)
         steps = [
             (C.START, self.system, None, None),
             (C.WAIT, self.system, WaitReason.APPROVAL, "needs merge approval"),
@@ -805,7 +896,9 @@ class TransitionTest(PostgresTaskTestCase):
         task_id = await self.task_in_state(S.RUNNING)
         await self.service.begin_step(task_id, "implement", run=FIRST_RUN)
         await self.service.add_log(task_id, "editing parser.py", run=FIRST_RUN)
-        await self.service.update_attempt(task_id, run=FIRST_RUN, worktree=WORKTREE)
+        await self.service.update_attempt(
+            task_id, run=FIRST_RUN, repository_id=self.repository_id, worktree=WORKTREE
+        )
 
         paused = await self.service.execute(
             task_id, C.PAUSE, actor=self.user, reason="lunch"
@@ -820,7 +913,9 @@ class TransitionTest(PostgresTaskTestCase):
         after = await self.service.restore(task_id)
         self.assertEqual(after.state, S.RUNNING)
         self.assertEqual(after.attempt, during.attempt)
-        self.assertEqual(after.attempt.worktree, WORKTREE)
+        self.assertEqual(
+            after.attempt.repository(self.repository_id).worktree, WORKTREE
+        )
         self.assertEqual(after.current_step, during.current_step)
         self.assertEqual(after.current_step.name, "implement")
         self.assertEqual(
@@ -830,7 +925,9 @@ class TransitionTest(PostgresTaskTestCase):
     async def test_cancel_is_graceful_and_keeps_artifacts_and_the_running_step(self):
         task_id = await self.task_in_state(S.RUNNING)
         step = await self.service.begin_step(task_id, "implement", run=FIRST_RUN)
-        await self.service.update_attempt(task_id, run=FIRST_RUN, worktree=WORKTREE)
+        await self.service.update_attempt(
+            task_id, run=FIRST_RUN, repository_id=self.repository_id, worktree=WORKTREE
+        )
 
         event = await self.service.execute(
             task_id, C.CANCEL, actor=self.user, reason="not needed"
@@ -839,7 +936,9 @@ class TransitionTest(PostgresTaskTestCase):
             (event.to_state, event.interruption), (S.CANCELLED, Interruption.GRACEFUL)
         )
         snapshot = await self.service.restore(task_id)
-        self.assertEqual(snapshot.attempt.worktree, WORKTREE)
+        self.assertEqual(
+            snapshot.attempt.repository(self.repository_id).worktree, WORKTREE
+        )
         # The worker finishes its step itself; Cancel does not touch it.
         self.assertEqual(snapshot.current_step.status, StepStatus.RUNNING)
         finished = await self.service.finish_step(
@@ -850,7 +949,9 @@ class TransitionTest(PostgresTaskTestCase):
     async def test_stop_now_interrupts_the_step_immediately_and_logs_why(self):
         task_id = await self.task_in_state(S.RUNNING)
         await self.service.begin_step(task_id, "run-tests", run=FIRST_RUN)
-        await self.service.update_attempt(task_id, run=FIRST_RUN, worktree=WORKTREE)
+        await self.service.update_attempt(
+            task_id, run=FIRST_RUN, repository_id=self.repository_id, worktree=WORKTREE
+        )
 
         event = await self.service.execute(
             task_id, C.STOP_NOW, actor=self.user, reason="agent loop"
@@ -872,7 +973,9 @@ class TransitionTest(PostgresTaskTestCase):
             "Stop Now: interrupted step 'run-tests' (reason: agent loop)",
         )
         # Nothing is deleted: the worktree state is still there.
-        self.assertEqual(snapshot.attempt.worktree, WORKTREE)
+        self.assertEqual(
+            snapshot.attempt.repository(self.repository_id).worktree, WORKTREE
+        )
 
     async def test_stop_now_without_a_running_step_still_logs(self):
         task_id = await self.task_in_state(S.WAITING)
@@ -1104,7 +1207,9 @@ class TransitionTest(PostgresTaskTestCase):
         task_id = await self.create_task(agent="local", model="small")
         await self.service.execute(task_id, C.START, actor=self.system)
         await self.service.begin_step(task_id, "implement", run=FIRST_RUN)
-        await self.service.update_attempt(task_id, run=FIRST_RUN, worktree=WORKTREE)
+        await self.service.update_attempt(
+            task_id, run=FIRST_RUN, repository_id=self.repository_id, worktree=WORKTREE
+        )
         await self.service.add_log(task_id, "compile error", run=FIRST_RUN)
         await self.service.execute(task_id, C.FAIL, actor=self.system)
 
@@ -1122,7 +1227,9 @@ class TransitionTest(PostgresTaskTestCase):
         self.assertEqual(snapshot.retry_count, 1)
         self.assertEqual((snapshot.agent, snapshot.model), ("codex", "small"))
         # Same branch / worktree / logs are reused.
-        self.assertEqual(snapshot.attempt.worktree, WORKTREE)
+        self.assertEqual(
+            snapshot.attempt.repository(self.repository_id).worktree, WORKTREE
+        )
         self.assertEqual(
             [log.message for log in snapshot.recent_logs], ["compile error"]
         )
@@ -1202,7 +1309,10 @@ class TransitionTest(PostgresTaskTestCase):
 
     async def test_restart_starts_a_new_attempt_and_keeps_the_old_one_as_history(self):
         task_id = await self.create_task(
-            starting_commit="a" * 40, input={"prompt": "p"}
+            repositories=[
+                WorkingSetEntry(self.repository_id, RepoRole.TARGET, "a" * 40)
+            ],
+            input={"prompt": "p"},
         )
         await self.service.execute(task_id, C.START, actor=self.system)
         await self.service.begin_step(task_id, "implement", run=FIRST_RUN)
@@ -1210,6 +1320,7 @@ class TransitionTest(PostgresTaskTestCase):
         await self.service.update_attempt(
             task_id,
             run=FIRST_RUN,
+            repository_id=self.repository_id,
             worktree=WORKTREE,
             review=ReviewState(ReviewStatus.CHANGES_REQUESTED, EvaluationResult.FAILED),
             pull_request=PullRequestInfo(
@@ -1231,22 +1342,33 @@ class TransitionTest(PostgresTaskTestCase):
         snapshot = await self.service.restore(task_id)
         self.assertEqual(snapshot.attempt.number, 2)
         # The new attempt has its own (empty) branch / worktree / review / PR.
-        self.assertEqual(snapshot.attempt.worktree, WorktreeState())
-        self.assertEqual(snapshot.attempt.review, ReviewState())
-        self.assertIsNone(snapshot.attempt.pull_request)
+        self.assertEqual(
+            snapshot.attempt.repository(self.repository_id).worktree, WorktreeState()
+        )
+        self.assertEqual(
+            snapshot.attempt.repository(self.repository_id).review, ReviewState()
+        )
+        self.assertIsNone(snapshot.attempt.repository(self.repository_id).pull_request)
         self.assertIsNone(snapshot.current_step)
         self.assertEqual(snapshot.recent_logs, ())
-        # Starting point and input are unchanged, and Restart is not a Retry.
-        self.assertEqual(snapshot.starting_commit, "a" * 40)
+        # Starting point and input are unchanged, and Restart is not a Retry: the
+        # Working Set stays, with each repository's own starting commit.
+        self.assertEqual(
+            [(e.repository_id, e.starting_commit) for e in snapshot.working_set],
+            [(self.repository_id, "a" * 40)],
+        )
         self.assertEqual(snapshot.input, {"prompt": "p"})
         self.assertEqual(snapshot.retry_count, 0)
         self.assertEqual(snapshot.model, "big")
         # The old attempt is kept intact.
         (old,) = snapshot.previous_attempts
         self.assertEqual(old.number, 1)
-        self.assertEqual(old.worktree, WORKTREE)
-        self.assertEqual(old.review.review_status, ReviewStatus.CHANGES_REQUESTED)
-        self.assertEqual(old.pull_request.number, 7)
+        old_repository = old.repository(self.repository_id)
+        self.assertEqual(old_repository.worktree, WORKTREE)
+        self.assertEqual(
+            old_repository.review.review_status, ReviewStatus.CHANGES_REQUESTED
+        )
+        self.assertEqual(old_repository.pull_request.number, 7)
         old_logs = await self.scalar(
             "SELECT count(*) FROM task_logs WHERE task_id = :id AND attempt = 1",
             id=task_id,
@@ -1372,7 +1494,12 @@ class StepAndLogTest(PostgresTaskTestCase):
         with self.assertRaises(TaskNotFoundError):
             await self.service.add_log(unknown, "hello", run=FIRST_RUN)
         with self.assertRaises(TaskNotFoundError):
-            await self.service.update_attempt(unknown, run=FIRST_RUN, worktree=WORKTREE)
+            await self.service.update_attempt(
+                unknown,
+                run=FIRST_RUN,
+                repository_id=self.repository_id,
+                worktree=WORKTREE,
+            )
 
     async def test_recent_logs_are_the_latest_n_in_order(self):
         task_id = await self.task_in_state(S.RUNNING)
@@ -1422,28 +1549,43 @@ class StepAndLogTest(PostgresTaskTestCase):
 
     async def test_attempt_state_updates_replace_only_the_given_groups(self):
         task_id = await self.task_in_state(S.RUNNING)
-        await self.service.update_attempt(task_id, run=FIRST_RUN, worktree=WORKTREE)
+        await self.service.update_attempt(
+            task_id, run=FIRST_RUN, repository_id=self.repository_id, worktree=WORKTREE
+        )
         review = ReviewState(ReviewStatus.APPROVED, EvaluationResult.PASSED)
         result = await self.service.update_attempt(
-            task_id, run=FIRST_RUN, review=review
+            task_id, run=FIRST_RUN, repository_id=self.repository_id, review=review
         )
         self.assertEqual((result.worktree, result.review), (WORKTREE, review))
         self.assertIsNone(result.pull_request)
         pull_request = PullRequestInfo(
             3, "https://example.test/pr/3", PullRequestState.MERGED
         )
-        # A pull request can change after the task is finished.
+        # The target needs an open pull request to complete (Decision 0030)...
+        opened = await self.service.update_attempt(
+            task_id,
+            run=FIRST_RUN,
+            repository_id=self.repository_id,
+            pull_request=PullRequestInfo(
+                3, "https://example.test/pr/3", PullRequestState.OPEN
+            ),
+        )
+        self.assertEqual((opened.worktree, opened.review), (WORKTREE, review))
+        # ... and a pull request can change after the task is finished.
         await self.service.execute(task_id, C.BEGIN_EVALUATION, actor=self.system)
         await self.service.execute(task_id, C.COMPLETE, actor=self.system)
         await self.service.update_attempt(
-            task_id, run=FIRST_RUN, pull_request=pull_request
+            task_id,
+            run=FIRST_RUN,
+            repository_id=self.repository_id,
+            pull_request=pull_request,
         )
         snapshot = await self.service.restore(task_id)
         self.assertEqual(
             (
-                snapshot.attempt.worktree,
-                snapshot.attempt.review,
-                snapshot.attempt.pull_request,
+                snapshot.attempt.repository(self.repository_id).worktree,
+                snapshot.attempt.repository(self.repository_id).review,
+                snapshot.attempt.repository(self.repository_id).pull_request,
             ),
             (WORKTREE, review, pull_request),
         )

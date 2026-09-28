@@ -11,6 +11,8 @@ Claim と Source の対応・回答や Task からの追跡（[PAW-052](#evidenc
 Project の作成・招待制の Membership・Lifecycle（Active / Archived / Pending deletion / Deleted）は [PAW-026](#project-crud--membership--lifecycle) で実装済みです（Service のみ。HTTP の Endpoint と Session はまだありません）。
 DAG Agent Orchestrator（Task を Dependency DAG へ分解し、独立した Node を並列に実行し、Node ごとに Retry / Escalate し、Sub-Agent が親の権限と予算を超えない。[PAW-034](#dag-agent-orchestrator)、Agent の Runtime は Protocol で実際の Runtime は別の Issue、HTTP の Endpoint はまだありません）と、削除待ちの Project の Task を周期的に止める Loop も実装済みです。
 
+GPU / Compute Resource Scheduler（KV Cache に応じた動的な並列数、Actual / Reserved の VRAM と Safety Headroom、5 つの Resource class、Memory Worker の Unload と Embedding / Reranker の CPU fallback、Exclusive、Local / Cloud の振り分け）は [PAW-036](#gpu--compute-resource-scheduler) で実装済みです（Library と読み取り専用の確認 Command のみ。Application の Lifespan にはまだ組み込んでいません。選択は [Decision 0037](../../docs/decisions/0037-gpu-compute-scheduler.md)（Approved））。
+
 Workspace 共有の Codex / Claude Connection（Credential は不透明な Handle だけ）、User 別 Quota、User と Task への利用量の帰属は [PAW-030](#shared-codex--claude-connection) で実装済みです（Service のみ。実 Adapter と HTTP の Endpoint はまだありません。Quota の意味・期間・実行中の Task の扱いは [Decision 0016](../../docs/decisions/0016-shared-connection-adapter-policy.md)（Approved、2026-09-26）に従います）。
 Project への Repository の登録（GitHub から clone、Ubuntu 上の既存 Repository、新規作成）と、User ごとに分離した Checkout は [PAW-027](#repository-registration--per-user-checkout) で実装済みです（Service のみ）。
 Linux User ごとの GitHub 接続状態（`gh auth status`）の認識と、GitHub への新規作成（`create_github`）を対象 User 自身の Identity で実行する経路は [PAW-028](#github-user-connectiongh-auth) で実装済みです（Service のみ。Migration・新しい Capability はありません）。
@@ -49,7 +51,7 @@ Python 側の Package（`pgvector-python`）は使わず、`paw_backend/memory/v
 apps/backend/
 ├─ pyproject.toml          # 依存（完全一致で固定）と Ruff 設定
 ├─ alembic.ini             # Alembic 設定（DB URL は持たない）
-├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0022 は Password / Session / Login Throttle / 認証 Policy、0023 は Passkey / Passkey の Challenge / Session の Gate、0026 は Project、0027 は Repository 登録・Remote・Checkout、0030 は Shared Connection・Quota・Usage、0031 は Tool Approval、0033 は Queue / Budget / Loop、0034 は DAG Agent Orchestrator（Plan・DAG・Node の試行）、0040 は Memory Schema、0041 は Memory Journal / Consolidation Queue、0042 は Memory の鮮度の Job の Index、0043 は `memory_versions` の全文検索の Index、0046 は Shared Memory Candidate、0050 は Research Scratch、0052 は Evidence / Claim Provenance、0071 は Memory の Status / Stale 状態の変更履歴、0083 は `tasks (project_id, state)` の Index、0087 は外部送信の Audit の `audit_events.details`、0108 は他の Account の Passkey の Reset（`admin_reset`）と 1 回限りの Password 再設定 Token（`password_reset`）とその発行の関数、0124 は招待・端末の Pairing・User の状態の履歴）
+├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0022 は Password / Session / Login Throttle / 認証 Policy、0023 は Passkey / Passkey の Challenge / Session の Gate、0026 は Project、0027 は Repository 登録・Remote・Checkout、0030 は Shared Connection・Quota・Usage、0031 は Tool Approval、0033 は Queue / Budget / Loop、0034 は DAG Agent Orchestrator（Plan・DAG・Node の試行）、0040 は Memory Schema、0041 は Memory Journal / Consolidation Queue、0042 は Memory の鮮度の Job の Index、0043 は `memory_versions` の全文検索の Index、0046 は Shared Memory Candidate、0050 は Research Scratch、0052 は Evidence / Claim Provenance、0071 は Memory の Status / Stale 状態の変更履歴、0083 は `tasks (project_id, state)` の Index、0085 は Task の Working Set、0087 は外部送信の Audit の `audit_events.details`、0108 は他の Account の Passkey の Reset（`admin_reset`）と 1 回限りの Password 再設定 Token（`password_reset`）とその発行の関数、0124 は招待・端末の Pairing・User の状態の履歴）
 ├─ paw_backend/
 │  ├─ app.py               # create_app(settings)
 │  ├─ config.py            # PAW_ 環境変数から読む Settings
@@ -64,7 +66,8 @@ apps/backend/
 │  │  ├─ passkeys/         # Passkey（WebAuthn）: Ceremony の検証、Challenge、登録・認証・失効、Passkey の Step-up の Verifier、Tool Broker の強い承認の Step-up（PAW-023）
 │  │  └─ onboarding/       # 招待、QR / リンクの端末の Pairing、User の Lifecycle（削除・復元）、1 回限りの Token（PAW-024）
 │  ├─ identity/            # 最小の users、One-time Token。`redeemer.py` は Web 側、`operator.py`（Owner の作成・Token の発行）は cli だけが使う（PAW-021）
-│  ├─ cli/                 # server-local の管理コマンド `python -m paw_backend.cli`（PAW-021。`audit-retention-*` は Issue #117）
+│  ├─ cli/                 # server-local の管理コマンド `python -m paw_backend.cli`（PAW-021。`audit-retention-*` は Issue #117、`compute-status` は PAW-036）
+│  ├─ compute/             # GPU / Compute Resource Scheduler: 読み取り専用の GPU Probe、VRAM の勘定、KV Cache の Admission、縮退と常駐、Exclusive、Hybrid の Runtime（PAW-036）
 │  ├─ orchestrator/        # DAG Agent Orchestrator: Plan、Scheduler、DAG の永続化と Fencing、Runtime の Protocol、Tool・Budget の Gateway、Project 削除の Sweep（PAW-034）
 │  ├─ tasks/               # Agent Task の状態遷移と永続化（PAW-032）。`project_gate.py` は Project の状態 Gate の Protocol（Issue #83）
 │  │  └─ queueing/         # Task Queue、Budget、Loop 検知、Escalation の判断（PAW-033）
@@ -290,14 +293,8 @@ PAW-032 で実装しました。`paw_backend/tasks/` は Task の状態遷移（
 **HTTP の Endpoint はありません。** 認証と RBAC（PAW-022 / PAW-025）が先に必要なためです。
 `TaskService` は認可を行いません。Endpoint を作る側が、権限を確認してから認証済み User を `Actor` として渡します。
 Queue、Budget、Loop 検知（PAW-033、[別の節](#task-queue--budget--loop-検知)）と DAG Orchestration（PAW-034）は、この節の対象外です。
-**Multi-Repo Task の Working Set（Repo の集合と `referenced` / `working` / `target` の役割、Repo ごとの worktree / Review / PR の状態）は PAW-032 に含みません。**
-PAW-032 の受け入れ条件は Task に 1 組の worktree / review / PR 状態の復元までで（Backlog）、Working Set が指す Repository の登録（PAW-027）はまだなく、
-Repo ごとの worktree / branch の作成と統合の処理は PAW-035、Write 範囲の強制は Tool Broker（PAW-031）の責務だからです。
-Working Set の単位、Single-Repo との関係、Repo 追加の承認、Task の完了条件など、要件が決めていない判断があるため、
-[Decision 0014](../../docs/decisions/0014-task-working-set-persistence.md)（Approved、2026-09-25 に Human が承認）で、PAW-032 に含めないことを決めました。
-実装の担当は、PAW-027 の後・PAW-034 の前に立てる新しい Issue [#85](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/85) です。#85 が Working Set と Repo ごとの Git 状態を**保存する表**を持ち、PAW-035 は worktree・統合の**振る舞い**を持って、その結果を #85 の表へ書きます（PAW-035 には保存の表を含めません）。
-上の未決の判断は、#85 の実装の前に別の Decision で決めます。特に Repo の役割と Write 範囲の対応は、保存より先に決めます。
-したがって、`task_attempts` の worktree / Review / PR は 1 つの Repo の状態で、どの Repo かは記録せず、`TaskSnapshot`（`restore()`）も Working Set を返しません。
+**Task の Working Set（Repo の集合と `referenced` / `working` / `target` の役割、Repo ごとの worktree / Review / PR の状態）は、Issue [#85](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/85) で、[Decision 0030](../../docs/decisions/0030-task-working-set-model.md) が示す形で持ちます**（[下の節](#working-setissue-85)。PAW-032 には含めないことを [Decision 0014](../../docs/decisions/0014-task-working-set-persistence.md) で決めていました）。
+Single-Repo Task も、Working Set に `target` が 1 つだけある Task として同じ表に保存します（`task_attempts` は試行そのものだけを持ち、Repo ごとの状態は `task_attempt_repositories` です）。
 
 ### 状態
 
@@ -335,14 +332,16 @@ Operator の 6 操作は次のように解釈しています（[要件](../../RE
 - **Stop Now（immediate）**: 緊急停止です。Cancel と同じ `cancelled` になりますが、実行中の Step を即座に `interrupted` にし、停止理由と中断した Step を Task Log と履歴 Event へ残します。**`reason` は必須**です（[要件](../../REQUIREMENTS.md)の「停止理由と実行中だったstepをAudit / Task logへ残す」を満たすためで、他の Command では任意です）。`reason` がない（`None`）、空または空白だけ、文字列でない、長さの上限（500 文字）を超える、NUL / Surrogate を含む場合は、Task の状態を見る前に、何も書き込まずに `InvalidCommandArgumentError` で拒否します（エラー文に値は含めません）。受け付けた Stop Now は必ず、履歴 Event の `reason` と Task Log の行の両方に理由を残します。Log の行は `Stop Now: interrupted step '<Step 名>' (reason: <理由>)` です。Step が既に終わっていた場合（Worker が先に閉じた場合を含む）は何も中断していないため、Step 名を記録せず、Log は `Stop Now: no step was running (reason: <理由>)` とします（Fail も、自分が終わらせた Step だけを Event に記録します）。実行中に何かが動きうる状態（running / waiting / evaluating）だけが対象で、queued と paused には Cancel を使います。成果物は削除しません。
   Cancel と Stop Now の違いは Event の Command（`TaskEvent.interruption` が `graceful` / `immediate`）で判別できます。
 - **Retry**: `failed` の Task を、失敗した Step から同じ試行（同じ branch / worktree / Log）で再実行します。`queued` へ戻り、`retry_count` を 1 増やし、Agent / Model を切り替えられます（履歴 Event の `detail` に旧値と新値を残す）。
-- **Restart**: `failed` または `cancelled` の Task を、元の `starting_commit` と Task `input` から最初からやり直します。試行番号（`attempt`）を 1 増やし、新しい branch / worktree / Review / PR の状態を持つ空の試行を作ります。旧試行は `task_attempts` と Step・Log に残り、`TaskSnapshot.previous_attempts` から見えます。
+- **Restart**: `failed` または `cancelled` の Task を、Working Set の各 Repo の `starting_commit` と Task `input` から最初からやり直します。試行番号（`attempt`）を 1 増やし、Working Set の Repo ごとに、新しい branch / worktree / Review / PR の状態を持つ空の行を作ります（Working Set そのものは変わりません）。旧試行は `task_attempts` / `task_attempt_repositories` と Step・Log に残り、`TaskSnapshot.previous_attempts` から見えます。
 
 ### 永続化
 
 | Table | 内容 |
 | --- | --- |
-| `tasks` | 現在の状態、`wait_reason`、`version`、試行番号、`retry_count`、Agent / Model、`starting_commit`、`input`（Restart の基準）。Index `ix_tasks_project_id_state`（`project_id`、`state`。Revision `0083`、Issue #83）が、Project ごとの Task の一覧を受け持つ |
-| `task_attempts` | 試行ごとの branch / worktree / head commit、Review 状態、Evaluator 結果、PR の番号・URL・状態 |
+| `tasks` | 現在の状態、`wait_reason`、`version`、試行番号、`retry_count`、Agent / Model、`input`（Restart の基準）。Index `ix_tasks_project_id_state`（`project_id`、`state`。Revision `0083`、Issue #83）が、Project ごとの Task の一覧を受け持つ |
+| `task_attempts` | 試行（番号と作成時刻）。Repo ごとの状態は `task_attempt_repositories` |
+| `task_repositories` | Working Set（Revision `0085`）。Repo、役割、その Repo の `starting_commit`、追加した（最後に役割を変えた）Actor と時刻、Working Set から外れた時刻（`removed_at`）。行は消さない |
+| `task_attempt_repositories` | 試行と Repo ごとの branch / worktree / head commit、Review 状態、Evaluator 結果、PR の番号・URL・状態、試行中に持った最も強い役割（`strongest_role`）、試行中に書き込みが許可されたか（`modified`） |
 | `task_steps` | Step の実行記録。試行内で最新の行が current step。試行内で `running` は高々 1 つ（Partial Unique Index） |
 | `task_tool_invocations` | Step が呼んだ Tool の実行状態（下記）。ID、Tool 名、状態（`started` / `succeeded` / `failed` / `interrupted`）、開始・終了時刻だけを持つ。`started` の行だけの Partial Index（`step_id`）と、終了済みの行だけの Partial Index（`step_id`、開始の新しい順、`id` の新しい順）がある |
 | `task_logs` | 試行ごとの Log（`debug` / `info` / `warning` / `error`）。行は書いた Run（`attempt` と `retry_count`）を持つ。Index は `(task_id, attempt, seq DESC)`（下記の `restore`） |
@@ -356,7 +355,7 @@ Operator の 6 操作は次のように解釈しています（[要件](../../RE
   - **オブジェクト**: `actor` は `Actor`、`run` は `TaskRun`、`worktree` / `review` / `pull_request` は `WorktreeState` / `ReviewState` / `PullRequestInfo`（省略時は `None`）で、そのフィールドも上の規則で検査します。PR は URL が必須です。branch / path / head commit / PR の URL は、`str` でない値、空・空白だけの値も拒否します（worktree のフィールドの `None` は「未設定」）。名前や `title`、`reason` も空・空白だけは拒否します。Log の `message` は、Worker が出力の空行をそのまま転送することがあるため空文字列を許します（`str` であることだけを要求します）。
   - **DB を読んでから判断する規則が 1 つだけあります**: `execute` の `wait_reason` が Command に合わない場合（Wait に無い、Wait 以外にある）は、不正な遷移（`IllegalTransitionError`）を先に報告する Domain の規則（`test_illegal_transition_is_reported_before_a_bad_argument`）のため、Task を読んだ後に同じ `InvalidCommandArgumentError` で拒否します。何も書き込みません。`wait_reason` の型と値そのものは、Transaction を開く前に検査します。
   - `tests/test_task_argument_validation.py` が、Method × 引数 × 誤った値（`None`、型違い、`int` の代わりの `bool`、bytes、空文字列、未知の Enum 値、`object()`、範囲外の数など）の表で確認します。各値で、型付きエラーであること、エラー文に値が含まれないこと、SQL が 1 文も送られず Session も開かれないこと、Task 関連の全 Table の行が変わらないことを検査します。すべての Public メソッドとすべての引数が表に載っていることも Test しています。
-- **文字列入力の検証**: `TaskService` が受け取る文字列（`title`、`starting_commit`、`agent`、`model`、`reason`（Stop Now では必須）、Step 名、Tool 名、Log の `message`、`update_attempt` の branch / path / head commit / PR の URL）は、NUL（`\u0000`）と Surrogate 文字（不正な Unicode）を含むと `InvalidCommandArgumentError` で拒否します（エラー文に値は含めません）。PostgreSQL の text 列は NUL を保持できず、Surrogate は UTF-8 にできないため、そのままでは書き込み時に DB / 符号化のエラーが漏れます。Log の `message` は、長さの上限で切り捨てる前の全体を検査します。`update_attempt` は、branch（255 文字）、path（1024 文字）、head commit（64 文字）、PR の URL（2048 文字）を、Model の列の長さ（1 か所の定義）で検査して、超えると同じ `InvalidCommandArgumentError` で拒否します（文字数で数えます。空・空白だけの値と `str` でない値も拒否します）。PR の番号は 1 から 2147483647（`INTEGER` 列の最大値）の整数だけを受け付けます（`bool`、`float`、文字列は拒否します）。下限の 1 は、PR の番号が正であることに基づく私の判断で、要件が定める値ではありません。
+- **文字列入力の検証**: `TaskService` が受け取る文字列（`title`、Working Set の各 Repo の `starting_commit`、`agent`、`model`、`reason`（Stop Now では必須）、Step 名、Tool 名、Log の `message`、`update_attempt` の branch / path / head commit / PR の URL）は、NUL（`\u0000`）と Surrogate 文字（不正な Unicode）を含むと `InvalidCommandArgumentError` で拒否します（エラー文に値は含めません）。PostgreSQL の text 列は NUL を保持できず、Surrogate は UTF-8 にできないため、そのままでは書き込み時に DB / 符号化のエラーが漏れます。Log の `message` は、長さの上限で切り捨てる前の全体を検査します。`update_attempt` は、branch（255 文字）、path（1024 文字）、head commit（64 文字）、PR の URL（2048 文字）を、Model の列の長さ（1 か所の定義）で検査して、超えると同じ `InvalidCommandArgumentError` で拒否します（文字数で数えます。空・空白だけの値と `str` でない値も拒否します）。PR の番号は 1 から 2147483647（`INTEGER` 列の最大値）の整数だけを受け付けます（`bool`、`float`、文字列は拒否します）。下限の 1 は、PR の番号が正であることに基づく私の判断で、要件が定める値ではありません。
 - **Task `input` の検証**（`TaskService.create_task`）: `input` は JSON Object で、`json.loads` が返す型（`dict`〔キーは `str`〕、`list`、`str`、`int`、`float`、`bool`、`None`）だけを受け付けます。整数キーや `tuple` などを黙って変換して保存することはしません。次のものは、DB へ書く前に `InvalidCommandArgumentError` で拒否します（エラー文に値は含めません）。
   - `NaN` / `Infinity` / `-Infinity`（PostgreSQL の JSONB は保持できず、書き込み時に DB のエラーになります）、NUL（`\u0000`）を含む文字列やキー、Surrogate 文字（不正な Unicode）を含む文字列やキー
   - 入れ子が `MAX_INPUT_DEPTH`（32 段。最上位の Object を 1 段と数え、Object と List の両方が段になります）を超えるもの、循環参照
@@ -370,8 +369,10 @@ Operator の 6 操作は次のように解釈しています（[要件](../../RE
   | Table | Application の Role の権限 |
   | --- | --- |
   | `task_events`、`task_logs` | SELECT、INSERT だけ（履歴と Log は追記のみ。UPDATE / DELETE / TRUNCATE は `permission denied`） |
-  | `tasks` | SELECT、INSERT、UPDATE は `state`、`wait_reason`、`agent`、`model`、`attempt`、`retry_count`、`version`、`updated_at` の列だけ（`project_id`、`created_by`、`title`、`input`、`starting_commit` は変更できない） |
-  | `task_attempts` | SELECT、INSERT、UPDATE は `branch`、`worktree_path`、`head_commit`、`review_status`、`evaluation_result`、`pr_number`、`pr_url`、`pr_state`、`updated_at` の列だけ |
+  | `tasks` | SELECT、INSERT、UPDATE は `state`、`wait_reason`、`agent`、`model`、`attempt`、`retry_count`、`version`、`updated_at` の列だけ（`project_id`、`created_by`、`title`、`input` は変更できない） |
+  | `task_attempts` | SELECT、INSERT だけ（Revision `0085` から。Repo ごとの状態は下の表） |
+  | `task_repositories` | SELECT、INSERT、UPDATE は `role`、`starting_commit`、`added_by_kind`、`added_by`、`added_at`、`updated_at`、`removed_at` の列だけ（Task と Repo は変更できない。DELETE なし） |
+  | `task_attempt_repositories` | SELECT、INSERT、UPDATE は `branch`、`worktree_path`、`head_commit`、`review_status`、`evaluation_result`、`pr_number`、`pr_url`、`pr_state`、`strongest_role`、`modified`、`updated_at` の列だけ |
   | `task_steps`、`task_tool_invocations` | SELECT、INSERT、UPDATE は `status`、`finished_at` の列だけ（Step 名や Tool 名は変更できない） |
 
   行の Lock（`SELECT ... FOR NO KEY UPDATE`）には UPDATE 権限が要るため、Lock する Table は列単位の UPDATE を持ちます。主キーは UUID か Identity で、Sequence の権限は要りません。
@@ -389,7 +390,7 @@ Operator の 6 操作は次のように解釈しています（[要件](../../RE
   呼び出し側が以前に見た Version を `expected_version` に渡すと、古い判断は Lock を待った後でも `TaskConflictError` で拒否されます。`expected_version` を渡さない Command は、待った後の最新の状態で判定されます。
 - **Run（試行と Retry 回数）**: Worker の記録は、担当する **Run**（`TaskRun(attempt, retry_count)`）を明示します。`attempt` は Restart が 1 増やし、`retry_count` は Retry が 1 増やします。どちらも増えるだけで、失敗または中止した Task の再開は必ずどちらか一方を変えるため、2 つの Run が等しいのは同じ Run のときだけです。Retry は**同じ試行**を再実行する（試行番号は変わらない）ので、試行番号だけでは、失敗した Run の Worker と Retry が始めた Run の Worker を区別できません。`TaskRun`（`paw_backend.tasks.TaskRun`）は Tool Broker（PAW-031）が承認を結びつける Run と**同じクラス**です（Broker に別の `TaskRun` はありません。`paw_backend.tools.TaskRun` はこれの再 Export です）。
   Worker は、自分を開始した Start の `TaskEvent.run`（`task_events` に `attempt` と `retry_count` がある）から Run を受け取ります。`TaskSnapshot.run` も同じ値です。
-  - Run を明示する書き込み（**現在の Run でなければ何も書かずに拒否**）: `begin_step(task_id, name, run=...)`、`add_log(task_id, message, run=...)`、`update_attempt(task_id, run=..., worktree=... / review=... / pull_request=...)`。Restart が新しい試行を始めた後の旧試行の Worker は `StaleAttemptError`（`stale_attempt`）、Retry が新しい Run を始めた後の（同じ試行の）失敗した Run の Worker は `StaleRunError`（`stale_run`）になります。`StaleAttemptError` は `StaleRunError` の派生で、「自分は置き換えられたか」だけを知りたい Worker は `StaleRunError` を捕まえれば両方を扱えます。試行番号を先に、次に Retry 回数を比べます。`run` が `TaskRun` でない値（試行番号だけの整数など）は、DB に触れる前に `InvalidCommandArgumentError` です（古い `attempt=` の引数はなくなりました）。
+  - Run を明示する書き込み（**現在の Run でなければ何も書かずに拒否**）: `begin_step(task_id, name, run=...)`、`add_log(task_id, message, run=...)`、`update_attempt(task_id, run=..., repository_id=..., worktree=... / review=... / pull_request=...)`。Restart が新しい試行を始めた後の旧試行の Worker は `StaleAttemptError`（`stale_attempt`）、Retry が新しい Run を始めた後の（同じ試行の）失敗した Run の Worker は `StaleRunError`（`stale_run`）になります。`StaleAttemptError` は `StaleRunError` の派生で、「自分は置き換えられたか」だけを知りたい Worker は `StaleRunError` を捕まえれば両方を扱えます。試行番号を先に、次に Retry 回数を比べます。`run` が `TaskRun` でない値（試行番号だけの整数など）は、DB に触れる前に `InvalidCommandArgumentError` です（古い `attempt=` の引数はなくなりました）。
     - `update_attempt` と `begin_step` は Task 行の Lock を取った後に Run を比べます。Retry と競合しても、先に Commit された Retry の後の古い Worker が新しい Run の worktree / Review / Evaluator 結果 / PR の状態を上書きしたり、新しい Run の Step として始めたりすることはできません（Test は、Retry を Lock の先頭に並べて、古い Worker の書き込みがその後ろで拒否されることを確認します）。
     - `add_log` は Lock を取らないため（Log の書き込みを Task の状態変更と直列にしないため）、Retry と同時に Commit される行があり得ます。そこで行は、Task の現在の Run ではなく**書いた Worker の Run**を持ちます（`task_logs.retry_count`、`LogEntry.retry_count` / `LogEntry.run`）。Retry は同じ試行の Log を続けるので `restore` の `recent_logs` には前の Run の行も出ますが、どの Run の行かは区別できます（Restart との競合で行が試行番号を保つのと同じ考え方です）。Service が自分で書く Stop Now の行は、その時点の Task の Run を持ちます。
   - Run を明示しない書き込み: `finish_step` は Step の ID、`begin_tool_invocation` は実行中の Step の ID、`finish_tool_invocation` は Tool の ID で対象を指定します。これらは ID だけで Run を区別できます。Retry は Fail の後にしか起きず、Fail は実行中の Step を終わらせ、その Step の `started` の Tool も `interrupted` にするため、前の Run が残した Step や Tool は、Retry 後の Run では `running` / `started` ではありません。前の Run の Worker が後から `finish_step` や Tool の呼び出しをすると `TaskStepError` になり、新しい Run の Step や Tool は変わりません（Test で確認しています）。Restart の場合は、これらも `StaleAttemptError` です。
@@ -413,6 +414,26 @@ Operator の 6 操作は次のように解釈しています（[要件](../../RE
 - `MAX_INPUT_BYTES` = 256 KiB: Task の `input` を JSON にした長さ。
 
 `MAX_RESTORE_TOOL_INVOCATIONS`（`restore` が返す終了済みの Tool の件数、100）、`MAX_RESTORE_LOGS`（1000）も、同じく要件が定めない実装の値です。
+
+### Working Set（Issue #85）
+
+[Decision 0030](../../docs/decisions/0030-task-working-set-model.md)（Approved）と、Issue #85 に引き継いだ 5 つの必須の制約（Codex Review の P1）を実装しました。
+
+- **単位と保存（Decision 0030 の 1・2 節）**: Working Set は Task に属し、Retry でも Restart でも変わりません。`create_task(repositories=[WorkingSetEntry(repository_id, role, starting_commit), ...])` で作り（通常は `target` が 1 つの Single-Repo Task）、後の変更はすべて `TaskService.change_working_set` を通します。`restore()` の `TaskSnapshot.working_set` が Working Set（Repo、役割、`starting_commit`、追加した Actor と時刻。追加順）を、`attempt.repositories`（と `previous_attempts`）が Repo ごとの状態を返します。`update_attempt` は `repository_id` で Repo を指定します（試行にない Repo は `RepositoryNotInAttemptError`）。`task_repositories.repository_id` には `repositories` への外部キーを付けません（Project の Purge は Repo の登録を消しますが、Task の履歴は残すため。`tasks.project_id` と同じ扱い）。Tool Broker は、Working Set への追加の前に Repo の登録を `RepositoryService.working_set_acl` で確かめます。
+- **Repo ごとの開始 Commit（#85 の制約 1）**: `starting_commit` は `tasks` の 1 つの値ではなく Repo ごとに持ちます（Revision `0085` で `tasks.starting_commit` を削除）。途中で加わった Repo は、加わったときの Commit を持ち（`change_working_set(..., starting_commit=...)`。Tool の経路では Executor の `BaselineProvider` が渡す）、Restart はそれを使い回します。開始 Commit が不明な Repo に昇格の時点で Commit を与えるのは、どの試行でも書き込める役割になったことも変更されたこともない Repo だけです。それ以外は、その Commit がすでに変更を含むかもしれないので、不明のまま残します（fail-closed。降格・削除の検証はできず拒否されます）。一度外れて再び加わった Repo は、新しい基準を持ちます。
+- **変更の種類と承認（3 節）**: 変更の種類（`WorkingSetOperation`）ごとに別の Tool（`tools.working_set.WORKING_SET_TOOL_SPECS`）で、結果の役割は Tool で決まり、引数では選べません。`referenced` としての追加だけが `SCOPED_AUTO`、それ以外（`working` / `target` への追加・昇格、降格、削除）は `STRONG_APPROVAL` です（`ToolSpec` は Operation の Level より低い `min_level` を登録で拒否します）。Broker は、Task の Project に対する `project.task.working_set.manage` と、対象 Repo（登録済みの ACL から組み立てる Repository 資源）に対する代理の Capability（追加・`referenced` の削除は `project.read`、それ以外は `project.repo.write`）の**両方**を判定します。Repo は Task の Scope の Project に登録済みでなければなりません（`working_set_repository_unresolved` / `repository_out_of_scope`）。役割に合わない Operation は `working_set_change_invalid`、役割が解決できない Repo の降格・削除は `repository_role_unresolved` です。
+- **`project.task.working_set.manage` の付与と委任（#85 の制約 3）**: Project の Contributor と Manager に与え（Viewer にはない）、`delegable=True` です。Decision 0030 の変更の経路は Agent が呼ぶ Tool なので、既存の `*.manage` と同じく委任不可にすると、`referenced` の追加（`SCOPED_AUTO`）を含むすべての呼び出しが Approval の前に拒否されます。委任しても、Agent が Repo に対してできることは広がりません（対象 Repo の `project.read` / `project.repo.write` も必要で、`referenced` の追加以外は Step-up つきの `STRONG_APPROVAL`）。付与先は、Task を実行し Repo に書き込める Role（`project.task.run` / `project.repo.write` を持つ Contributor 以上）にそろえました。**この付与先と委任は、[Decision 0035](../../docs/decisions/0035-working-set-capability-grants-and-legacy-tasks.md)（Approved、2026-09-28）で Human が承認した方針です**。
+- **最後の `target` の保護の直列化（#85 の制約 4）**: `change_working_set` は、Task 行の Lock（`FOR NO KEY UPDATE`）を取ってから Working Set を読み、検査と変更を同じ Transaction で行います。同時に承認された 2 つの降格は 1 つずつ判定され、後の方が `LastTargetRemovalRefusedError` になります。変更は Task の `version` を 1 増やします。
+- **降格・削除と変更の破棄（3 節）**: その試行で `working` / `target` だった（または書き込みが許可された）Repo の降格・削除は、`RepositoryChangeInspector`（`TaskService(change_inspector=...)`）が Repo を調べて、worktree が clean、HEAD がその Repo の `starting_commit`、branch が push されていない、open の PR がない（保存された PR が `open` / `draft` でもない）と確かめたときだけ許します。Inspector がない（既定の `FailClosedChangeInspector`）、判定できない、失敗する、`starting_commit` が不明のときはすべて拒否します（`ModifiedRepositoryDowngradeRefusedError`）。確かめた内容は Event の `detail["discarded"]` に残し、その Repo の完了義務を外します。
+- **実行中の書き込みの予約（Codex Review の指摘）**: Broker が書き込み（または `execute`）を `admit_repository_use` で許可すると、触れる Repo ごとに `task_repository_writes` に予約を 1 行作り、その id を `BrokerDecision.reservation_id` に載せます。Executor が戻るか失敗した後に `ToolBroker.record_execution` が `release_repository_use` で解放します（許可にならなかった判定は即座に解放）。解放も期限切れ（`WRITE_RESERVATION_SECONDS`: Runner の最長実行時間 24 時間より長い）もしていない予約がある Repo の降格・削除は、どの試行の予約でも `RepositoryWriteInFlightError` で拒否します。許可から実際の書き込みまでの間は worktree がまだ clean なので、その間に「破棄を確認」して義務を外し、許可済みの Executor が `referenced` になった（または Working Set から外れた）Repo に書き込む、という順序を防ぎます。Executor が落ちて予約が残った場合は期限切れの後に降格できますが、書き込みは `modified` として記録済みなので、Repo を調べて破棄を確かめない限り拒否します。
+- **Evaluation / Review の結果は記録した時点の Revision のもの（Codex Review の指摘）**: `admit_repository_use` が書き込み・実行を許可すると、同じ Transaction の中で、その Repo の Evaluation を `not_run`、Review を `not_started` に戻します（Complete には、変更後の結果をもう一度記録する必要がある）。`update_attempt` で worktree の HEAD が動き、同じ呼び出しで結果を記録しないときも同じく戻します。予約中の Repo に `approved` / `passed` を記録しようとすると `RepositoryWriteInFlightError` で拒否します（何も書かない。書き込みの途中で評価した結果になるため）。結果を書く経路は `update_attempt` だけで、完了の判定は `_require_completion` だけです。
+- **実行中の書き込みと Task の Command（Decision 0035 の 5 節、Approved）**: 解放も期限切れもしていない予約がある間は、どの実行の予約でも Begin evaluation と Complete を `RepositoryWriteInFlightError` で拒否します（何も書かない）。Stop Now・Fail・Cancel・Retry・Restart などは止めず、Event の `detail["writes_in_flight"]`（Repo・試行・Retry 回数）に残します（Stop Now は Task log にも書く）。予約は実行（`attempt` / `retry_count`）ごとに記録し、前の実行は予約も試行の状態も書けません。終わった Task（Completed・Failed・Cancelled）には書き込み・実行を許可しません（`TaskNotActiveError`、Broker は `task_not_active`）。Working Set の変更も同じです。Agent の変更（`WorkingSetExecutor`）は判定された実行（`TaskContext.run`）を `change_working_set(..., run=...)` に渡し、Service は Task の行の Lock の中で、その実行が今の実行であること（`StaleRunError` / `StaleAttemptError`）と Task が終わっていないこと（`TaskNotActiveError`）を確かめます。Retry / Restart・Fail・Cancel の後まで遅れた呼び出しは何も変えません。`SCOPED_AUTO` の `referenced` の追加は Scope の Repo に触れないので、Broker が自分で Task の状態を確かめます（`task_not_active` / `task_superseded` / `task_unknown` / `task_state_unavailable`）。Human の変更は実行を名指ししないので、Failed の Task の Working Set を Retry の前に直せます。Broker は、予約を作った後に Approval の消費か Decision の記録の途中で Cancel された要求の予約を、自分で解放します（Cancel が重なっても解放は最後まで行います）。
+- **履歴**: 作成時の Working Set は `create` Event の `detail["working_set"]`、以後の変更は `change_working_set` Event（状態は変わらない）に、Actor、変更前後の役割、Operation、設定した `starting_commit`、Agent の ID（Tool の経路）とともに残します。
+- **Start と Complete（2・5 節、#85 の制約 5）**: `target` のない Task は `running` になりません（Start だけでなく Resume / Unblock も `NoTargetRepositoryError`。Revision `0085` より前の Task は Working Set が空のため）。Complete は、試行のすべての Repo の必要条件を満たすときだけです（`CompletionRequirementsNotMetError`、何も書かない）。`target` は Evaluation が PASS、PR が `open` か `merged`、**Review が `approved`**。変更された `working` は Evaluation が PASS。`referenced` と、**変更されていないと Backend が確かめた** `working` は条件なし。試行中に変更された Repo（書き込みか `execute` の Tool が許可された、PR がある、記録された HEAD が `starting_commit` と違う）は、降格・削除の後も、試行中に持った最も強い役割の義務を負います（変更が確かめられて破棄された場合を除く）。何も記録されていない `working`（または試行中に `working` / `target` だった）Repo は、Complete の時点で `RepositoryChangeInspector` が Repo を調べ、worktree が clean、HEAD が `starting_commit`、branch が push されていない、open の PR がないと確かめたときだけ「変更なし」とします。Inspector がない、判定できない、`starting_commit` が不明のときは「変更あり」として義務を課します（5 節の fail-closed）。`begin_evaluation` の前提は変えていません。
+- **Tool Broker の役割の Ceiling（4 節、#85 の制約 2）**: `ScopedRepository.role` は Backend が保存された Working Set から埋めます（`tools.scope.with_working_set_roles(entries, snapshot.working_set)`。PAW-034 の `TaskScope.repositories` はこの値をそのまま引き継ぎます）。Scope は呼び出し側が持つ値なので古くなり得ます。Broker は、Repository に触れる呼び出しを許可する前に `TaskService.admit_repository_use` で**保存された役割**に対して同じ Ceiling をもう一度掛けます（4.1 / 4.6 節: 表が唯一の正）。詳しくは「[Tool Broker](#tool-broker--capability-policy)」の「Working Set の役割の Ceiling」です。
+- **作成時の Working Set**: `create_task(repositories=...)` は、ほかの `TaskService` の Command と同じく認可をしません（呼び出し側の API 層が、作成者の `project.task.run` と各 Repo の ACL を判定してから呼ぶ前提）。作成時の `working` / `target` に追加の `STRONG_APPROVAL` は求めず、`target` のない作成は認め（`target` がない間は `running` にしない）、Orchestrator が作る Sub-task は親の Working Set の部分集合だけを持てます（`orchestrator.scope.derive_child_scope` が各 Repo の役割も親のまま渡し、どの Node の役割も Working Set を変える Capability を持ちません）。[Decision 0035](../../docs/decisions/0035-working-set-capability-grants-and-legacy-tasks.md)（Approved、2026-09-28）の 3 節です。
+- **Migration**: Revision `0085`（`down_revision` は `0042`。鎖は `0001 → 0025 → 0032 → 0040 → 0021 → 0033 → 0031 → 0050 → 0046 → 0052 → 0026 → 0087 → 0022 → 0083 → 0043 → 0030 → 0027 → 0071 → 0086 → 0088 → 0023 → 0041 → 0034 → 0108 → 0124 → 0042 → 0085`）は、2 つの Table を作り、`task_attempts` の Repo ごとの列と `tasks.starting_commit` を削除し、`task_events.command` に `change_working_set` を加えます。既存の試行の worktree / Review / PR の状態と `tasks.starting_commit` は、どの Repo のものかが記録されていないので Repo に割り当てず、**削除の前に `task_attempt_state_archive` へすべて写します**（捨てません。Application の Role には何の権限もなく、Operator が参照するための表です）。既存の Task は Working Set が空なので、`target` を加えるまで `running` にならず（Start / Resume / Unblock）、Complete できず、Repository に触れる呼び出しはすべて `repository_role_unresolved` です（この扱いは [Decision 0035](../../docs/decisions/0035-working-set-capability-grants-and-legacy-tasks.md) の 4 節として Human が承認しました）。Downgrade は列を戻し、Repo が 1 つだけの試行の値と、Repo のない試行（Revision `0085` より前の試行）の退避した値を書き戻してから、退避の表を削除します。`task_events` は追記専用なので、`change_working_set` の履歴は Downgrade 後も残し、古い値の一覧の CHECK はその行について検証しません（`NOT VALID`）。
+- **Test**: `tests/test_task_working_set.py`（PostgreSQL。同時の降格、破棄の確認、完了条件、Tool から保存まで）、`tests/test_task_working_set_rules.py`、`tests/test_tools_working_set.py`、`tests/test_task_working_set_migration.py`。`tests/test_task_grants.py` が Working Set の Test を Application の Role で実行します。
 
 ### Project の状態 Gate（Issue #83）
 
@@ -1616,6 +1637,22 @@ Broker は、呼び出しがどの Repository に触れるかを **Backend が�
 - 読み取りと Agent 実行（`project.read`、`project.task.run` など）で、触れる Repository がない呼び出しは、これまでどおり Project の Resource で判定します。引数のない Tool は Repository の ACL では判定できないことを、既知の制限に書きます。
 - Repository を表さない Project の Capability（`project.chat`、`project.settings.manage` など）は Project の Resource のままです（PAW-025 は、これらに Repository の Resource を渡すと拒否します）。
 - 判断の理由と、Human が承認した点（2026-09-25）は [Decision 0006](../../docs/decisions/0006-tool-broker-policy.md) の「8. Repository の ACL」。
+
+### Working Set の役割の Ceiling
+
+Issue #85（[Decision 0030](../../docs/decisions/0030-task-working-set-model.md) の 4 節、#85 の制約 2）。Repository の ACL（上）とは別の軸で、呼び出しが触れる Repository ごとに、Task の Working Set での役割（`ScopedRepository.role`）が上限を掛けます。**両方が許すときだけ**許可し（AND）、**Approval があっても超えられません**（Approval を開く前に拒否します）。役割を上げるには Working Set の Tool を通します。
+
+| 役割 | `project.repo.write` | `project.pr.create` | `execute` の Tool |
+| --- | --- | --- | --- |
+| `referenced` | 拒否 | 拒否 | 拒否 |
+| `working` | 可 | 拒否 | 可 |
+| `target` | 可 | 可 | 可 |
+
+- 判定は `authorize_agent_action` の前（Level の表の `DENY` の後）です。役割が解決できない Repository（`role=None`: Working Set にない、壊れた項目）に触れる呼び出しは、読み取りも含めて `repository_role_unresolved` です（`referenced` とは読みません）。上限を超える呼び出しは `repository_role_insufficient`。
+- **書き込みの Capability の一致**: `write` / `destructive` を持ち、Repository に触れる呼び出し（Path、`repository` 引数、Remote の下の URL のどれでも）の `authz_capability` は `project.repo.write` か `project.pr.create` でなければなりません（`repository_write_capability_mismatch`。`project.task.run` などで Ceiling の外から書き換える経路を塞ぐ）。登録時にも、`project_local` で `write` / `destructive` を持ち Path か Repository の引数を持つ Tool は、この 2 つ以外の Capability では `ToolSpec` が `ValueError` です（URL だけで Repository を指す Tool は登録では見えないため、呼び出し時の検査が要ります）。
+- **`execute` の Tool**（Test、Build、任意の Command。#85 の制約 2）は、`authz_capability` に関係なく、触れる Repository が `working` か `target` のときだけ通します。Repository に触れない実行（Task の Root の、どの Repository の外か）は従来どおりです。
+- **保存された役割での再判定と変更の記録**: 上の判定は呼び出し側の `TaskContext.scope` の役割で行うので、Scope を作った後に降格・削除があると古い役割で通ってしまいます。そこで Broker は、Repository に触れる呼び出しを許可する前に（Approval が要る呼び出しでは **Approval を消費する前に**）、`RepositoryUseGate`（`TaskService.admit_repository_use`）で、Task 行の Lock のもとで**いま保存されている役割**に同じ Ceiling を掛けます（Working Set にない・試行の行がない Repo は `repository_role_unresolved`、役割が許さない呼び出しは `repository_role_insufficient`）。書き込み（`project.repo.write` / `project.pr.create`）と `execute` の Tool（Command は書き込めるが Backend には区別できないため）は、同じ Transaction でその試行の Repo を「変更あり」にします。読み取りは何も書きません。Gate が答えられなければ拒否します（変更を記録する呼び出しは `repository_write_unrecorded`、読み取りは `repository_role_unresolved`。既定の `FailClosedUseGate` は常に失敗します）。Approval の消費より前なので、Gate が拒否しても Human の 1 回限りの Approval は残ります（逆に、Gate を通った後で Approval が消費されなかった場合は、実行されていない呼び出しで Repo が「変更あり」になりますが、義務が増えるだけの側です）。完了条件（「[Working Set](#working-setissue-85)」）がこの記録を使います。
+- **Working Set の Tool**（`task.working_set.add_referenced` / `set_working` / `set_target` / `downgrade_to_working` / `downgrade_to_referenced` / `remove`）は、`working_set_repository` 引数（Working Set にまだない Repository も指せる正規形の UUID。Scope の判定からは外れる）を 1 つだけ必須で持ち、ほかの対象の引数を持てません。この引数と `project.task.working_set.manage` は、互いにこの Tool の組でしか使えません（登録時に `ValueError`）。判定は、Task の Project への `project.task.working_set.manage` と、`WorkingSetRegistrations`（`RepositoryService.working_set_acl`、既定は `FailClosedRegistrations`）が返す登録済みの ACL による Repository 資源への代理の Capability の AND です。実行は `WorkingSetExecutor` が `TaskService.change_working_set` を呼び、判定に使った役割（Scope の役割）と保存された役割が違えば `WorkingSetConflictError` で何も変えません。
 
 ### Credential
 
@@ -3621,7 +3658,7 @@ class AgentRuntime(Protocol):
 | --- | --- | --- |
 | 終了した Task へ Tool 呼び出しを渡さない（承認を要しない呼び出しも） | `NodeToolGateway.call` が、**全ての**呼び出しの直前に `TaskActivityProvider.check`（本番は `PostgresTaskActivity`）を確認し、`ACTIVE` 以外・不明・エラー・Timeout は `NodeStopped`（Broker へ渡さない） | `test_orchestrator_control.test_a_cancelled_task_is_never_handed_a_tool_call`、`test_orchestrator_tools.test_an_approval_of_a_task_that_ends_is_revoked_and_no_call_follows` |
 | `TaskContext.run` は `TaskSnapshot.run` / `TaskEvent.run` から組み立てる | Start の `TaskEvent.run`（または引き継ぐ Run の `TaskSnapshot.run`）を `TaskContext.run` に使う。Retry の後は新しい Run | `test_orchestrator_tools.test_a_node_reaches_the_tools_through_a_context_the_backend_built`、`test_a_retried_task_hands_its_new_run_to_the_broker` |
-| 書き込む Repository は `TaskScope.repositories`、Remote を登録する | 呼び出し側の `TaskAuthority.parent_scope(task)`（**Working Set の Seam**。#85 が保存するまで呼び出し側が渡す）。`ScopedRepository`（Worktree、解決済みの ACL、Remote）は Node の Scope へ**そのまま**渡る。Remote のない Repository では URL を伴う呼び出しが通らない（Broker の既定拒否） | `test_a_url_passes_only_under_a_registered_remote_of_the_working_set`、`test_a_repository_without_a_registered_remote_lets_no_url_through` |
+| 書き込む Repository は `TaskScope.repositories`、Remote を登録する | 呼び出し側の `TaskAuthority.parent_scope(task)`（**Working Set の Seam**）。各 Repo の役割は #85 が保存する Working Set から `tools.scope.with_working_set_roles(..., working_set)` で付け、Broker は呼び出しのたびに**今**保存されている役割で許可する（`use_gate` に `TaskService`）。`ScopedRepository`（Worktree、解決済みの ACL、Remote、役割）は Node の Scope へ**そのまま**渡り、どの Node の役割も Working Set を変える Capability を持たない。Remote のない Repository では URL を伴う呼び出しが通らない（Broker の既定拒否） | `test_a_url_passes_only_under_a_registered_remote_of_the_working_set`、`test_a_repository_without_a_registered_remote_lets_no_url_through`、`test_the_stored_working_set_role_caps_what_a_node_may_do`、`test_the_working_set_role_of_a_repository_reaches_the_node_unchanged` |
 
 `TaskContext` は**呼び出しごとに**作り直します（`TaskAuthority` を毎回呼ぶ）。ACL を狭める、Project を Archive する、Grant を縮めるは、次の呼び出しから効きます（`test_an_acl_narrowed_meanwhile_takes_effect_on_the_next_call`）。承認を要する呼び出しの承認は、Task の終了で取り消されます（`TaskService(listeners=[approval_service.revoke_on_task_end])` を配線した構成を Test しています）。
 
@@ -3714,7 +3751,7 @@ await orchestrator.serve("worker-1", stop_event)  # または run_once("worker-1
 - Agent の Runtime、実 Model、実際の Tool の Executor はありません（Fake で Test）。Runtime が `NodeStopped` を通す契約と、Executor の契約（Tool Broker の節）は実装側の責務です。
 - 承認待ち（`NEEDS_APPROVAL`）で Task を `waiting`（`approval`）にする配線はありません（承認の Endpoint が PAW-022 以降）。Runtime は `NEEDS_APPROVAL` の結果を受け取り、承認後に `approval_id` を付けて呼び直します。
 - Node の停止は、Cancel と Stop Now を区別しません（どちらも Node を即座に止めます。成果物は Worktree に残ります）。
-- Worktree の作成・統合（PAW-035）、Evaluator による完了、Resource Scheduler による並列数（PAW-036）、Working Set の永続化（#85）、Node ごとの予算は含みません。
+- Worktree の作成・統合（PAW-035）、Evaluator による完了、Resource Scheduler による並列数（PAW-036 の `HybridRuntime` を Runtime として渡すと、同時に走る Local の Node の数が KV Cache で決まります。[GPU / Compute Resource Scheduler](#gpu--compute-resource-scheduler)）、Working Set の永続化（#85）、Node ごとの予算は含みません。
 - **実 PostgreSQL 18 で Test しました。** 複数の Process が同じ DAG を触る競合（Lock の順序）は、別の接続 Pool（別の Worker Process の代わり）を使った Test で確かめています。
 - 削除待ちの Project の Sweep は、Task Lane / Queue Lane の Gate（Issue #83）の実装ではありません。競合そのものは閉じず、周期の再実行で止めます。
 - `TaskQueue` の Lease は Database の時計で判定され、Worker の Heartbeat の間隔（既定は Lease の 1/4。`Orchestrator` は、3 回続けて失敗する Heartbeat が Lease の切れる前に終わらない間隔（`heartbeat_seconds × 3 ≥ lease_seconds`）を作成時に拒否します）の間は、Lease を失った Worker が気づかず Node の Runtime を動かし続けることがあります（書き込みは `epoch` が拒否します）。Runtime の副作用（File への書き込み）は At-least-once で、Node の冪等性は Runtime の責務です。
@@ -3723,6 +3760,129 @@ await orchestrator.serve("worker-1", stop_event)  # または run_once("worker-1
 
 `apps/backend/tests/test_orchestrator_*.py`、`orchestrator_support.py`、`test_authz_delegation.py`。標準 `unittest` だけで、`test_orchestrator_plan.py`（Plan の検査の表と、ランダムな DAG の位相順・Cycle 検出）、`test_orchestrator_result.py`、`test_orchestrator_scheduling.py`（純粋な規則と、ランダムな DAG の Property Test）、`test_orchestrator_scope.py`、`test_orchestrator_argument_validation.py`（全 Public Method × 全引数 × 誤った値の表。DB を設定しない Database を渡し、DB に届く前に型付きのエラーになること）、`test_orchestrator_migration.py` の前半と `test_orchestrator_project_sweep.py` の前半は DB を使いません。
 それ以外は実 PostgreSQL（`PAW_TEST_DATABASE_URL`）を使い、未設定なら Skip します: 永続化と Fencing の競合（`test_orchestrator_store.py`: 引き継ぎ・書き込み・Lock 待ちの順序、同時に終わる 2 Node、同じ Node の 2 重の起動）、実行・並列・結果の受け渡し（`test_orchestrator_run.py`）、失敗・Retry・Escalation・Isolation（`test_orchestrator_failures.py`）、Plan の受け入れ（`test_orchestrator_planning.py`）、Budget（`test_orchestrator_budget.py`）、Pause / Cancel / Retry / Restart（`test_orchestrator_control.py`）、Lease・Crash・引き継ぎ（`test_orchestrator_lease.py`）、終了の Command と Start の Fencing（`test_orchestrator_fenced_commands.py`: Barrier で「最後の確認の後、Command の前」に `fail` → Retry → Start を割り込ませる）、`succeeded` の DAG の Retry と予期しない Error の後始末（`test_orchestrator_recovery.py`）、走っている間の Runtime の Budget（`test_orchestrator_runtime_budget.py`）、Gate の明示的な組み立て（`test_orchestrator_wiring.py`）、Project が Active でないときの Claim・Start・走行中の Task（実際の `ProjectStateGate`。`test_orchestrator_project_gate.py`）、Worker の停止と `serve`（`test_orchestrator_shutdown.py`）、実際の Tool Broker と（`test_orchestrator_tools.py`）、ランダムな DAG を Orchestrator 全体で動かす Property Test（`test_orchestrator_property.py`）、Migration の上げ下げと Model との一致（`test_orchestrator_migration.py`）、Sweep（`test_orchestrator_project_sweep.py`）、非 Superuser の Role（`test_orchestrator_grants.py`）。時間は注入した `ManualClock` で、速度に依存する Test はありません（Lock 待ちや非同期の進行は上限を長く取った待機で確かめます）。
+
+## GPU / Compute Resource Scheduler
+
+[PAW-036](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/32)（`paw_backend/compute/`、`paw_backend/cli/compute.py`。Migration はありません）で実装しました。設計は [要件](../../REQUIREMENTS.md)の「GPU / Compute Resource Scheduler」（FIXED）に従い、要件が決めていない選択（状態の置き場所、Admission の単位、Safety Headroom などの数値、Class の取り分と待ち行列の順、縮退を進める・戻す条件、Main Model の構成変更を自動で行わないこと、Exclusive の手順、Cloud へ回す条件、Context の見積もり、GPU 時間の計上）は **[Decision 0037（Approved。2026-09-28 に Human が 14 点すべて推奨どおりと承認）](../../docs/decisions/0037-gpu-compute-scheduler.md)** にまとめ、実装はその決定どおりです。数値はすべて `compute/limits.py` の暫定値で、`ComputeConfig` の設定で変えられます（DB に書いたものはありません）。
+**Library と読み取り専用の確認 Command だけで、Application の Lifespan にはまだ組み込んでいません**（実際の Model と Runtime は Benchmark（PAW-017 / PAW-019）で決まり、Runtime の Adapter は別の Issue です）。
+
+**GPU の安全性**: Scheduler は GPU を**読むだけ**です。Probe（`NvidiaSmiProbe`）が実行するのは `nvidia-smi --query-gpu=index,uuid,name,memory.total,memory.used,utilization.gpu` と `nvidia-smi --query-compute-apps=gpu_uuid,pid,used_memory`（どちらも `--format=csv,noheader,nounits`）の 2 つだけで、Clock・Persistence・Power limit・Compute mode・MIG を変えず、GPU を Reset せず、Process に Signal を送りません（止めるのは Timeout を超えた自分の `nvidia-smi` の子 Process だけ）。`test_compute_probe.py` が 2 つの Command を固定し、`compute/` の Code にそうした Option や `os.kill` がないことを確かめます。Model の Load / Unload / CPU fallback は注入した `ModelControl` を通してだけ行い、**Test は Fake だけを使います**（実際の Model を Load / Unload する Test、VRAM を確保する Test はありません）。
+
+| Module | 内容 |
+| --- | --- |
+| `domain.py`、`limits.py`、`errors.py` | Resource class（Interactive / Coding / Support / Background / Exclusive）、Placement（Local GPU / Local CPU / Cloud）、Model の Role と常駐方針、縮退の段（`Relief`）、断る理由（`Refusal`）、暫定値 |
+| `probe.py` | 読み取り専用の `NvidiaSmiProbe`（Command の Runner は注入）と、出力の厳密な Parse（使えない出力は `ProbeUnavailableError`） |
+| `accounting.py` | Actual / Reserved の VRAM と Safety Headroom の勘定（純粋関数） |
+| `concurrency.py` | KV Cache の Token による Admission と、Context 長に応じた並列数（純粋関数） |
+| `config.py` | `DeploymentSpec`（Model の Footprint: Weight + KV Cache Pool + Runtime Buffer + Workspace）、`ComputeConfig` |
+| `control.py` | `ModelControl` の Protocol と、Admin が設定した Command を実行する `CommandModelControl` |
+| `scheduler.py` | `ComputeScheduler`: Admission と待ち行列、縮退と常駐、Exclusive |
+| `runtimes.py` | `HybridRuntime`（Orchestrator の Runtime。Local / Cloud）、`ScheduledMemoryWorker`、`PlacedEmbedder` |
+
+### Admission（KV Cache に応じた動的な並列数）
+
+Local の Agent は Model ごとに 1 つの Runtime を共有します。`acquire(ComputeRequest(class, deployment=..., context_tokens=...))` は、Model が GPU にあり、Probe の読み取りが新しく（15 秒以内）、Context がその Model の KV Cache の Pool（`kv_safety` 90% のうち、Class の取り分: Interactive 100% / Coding 95% / Support 85% / Background 70%）と `max_sequences` に収まるときに `ComputeLease` を返します。Runtime が KV の使用率を報告できるときは、予約と観測の大きい方で数えます。長い Context の Request が多いと同時数が減り、短いものが多いと増えます（`parallelism()` が今の数を返します）。入れない Request は Class 順・到着順の待ち行列で待ち、容量不足で待つ Request を後ろの Request が追い越すことはありません。Priority は開始順だけに効き、走っている仕事は止めません。
+
+### VRAM の勘定と Safety Headroom
+
+Probe が見る使用量（Actual）と、Scheduler が約束した量（Reserved: GPU に置いた Model の Footprint 全体と Exclusive の予約）を分けて持ちます。`committed` は Workspace の各 Model について予約と実使用の大きい方、それに Workspace のものでない使用（他の Workload、Unload したのに残った Memory）を足したもので、`available = total − headroom − committed` が 0 未満なら VRAM pressure です。Safety Headroom の暫定値は「4 GiB と GPU の 5% の大きい方」（96 GB で約 4.8 GiB）です。
+
+`ModelControl.processes()`（`CommandModelControl` の `pids` Command）は、その Runtime の**全 Process**（systemd の Unit なら cgroup の `cgroup.procs`）を返してください。vLLM / SGLang は GPU Memory を `MainPID` の子 Process（EngineCore / TP Worker）が持つため、`MainPID` だけでは Model の Memory が他の Workload に見えます。返した Process が GPU に何も持たない Model は、Process が分からない Model と同じく「予約分を Probe が見る使用のうちに持つ」とみなすので二重には数えませんが（Decision 0037 の 12）、一部の Process だけを返すと、残りは他の Workload と区別できずに二重に数えます。
+
+### 縮退と常駐（Memory Worker の Unload、CPU fallback）
+
+`refresh()`（`serve()` が既定 5 秒ごとに呼びます）は Probe を読み、1 回に 1 段だけ進めます。Model の操作（Load は数分かかりえます）の間も Probe を読み続けるので、GPU にある他の Model（Main）の Admission は止まりません。Pressure の間は要件の順に、1. Background の Admission を止めて Background の Lease に `revoked` を立てる（Process は殺しません）、2. Memory Worker を Drain してから Unload、3. Embedding / Reranker を CPU の Copy へ移す（無ければ `IF_ROOM` のものを Unload）、4. Interactive 以外の新規 Local Request を止める、5. 新しい Request の Context を Model の最大の半分に下げる、6. Main Model の構成変更が必要なことを `needs_human` で知らせる（**自動では変えません**）。余裕が戻ると（Headroom の外にもう 1 つ Headroom 分）逆順に戻します。Pressure も縮退もないときは、常駐方針（Main は `ALWAYS`、Memory Worker・Embedding・Reranker は `IF_ROOM`）に従って Model を Load します。Model の操作が失敗した Deployment は `FAILED`（Memory を持ったままとみなす）になり、60 秒後に再試行します。`ModelControl` を渡さなければ、Scheduler は観察と Admission だけを行います。
+
+### Exclusive
+
+`acquire(ComputeRequest(ResourceClass.EXCLUSIVE, vram_bytes=...), wait_seconds=...)` は、新しい Local GPU の Admission を止め、走っている Local GPU の仕事が終わるのを待ち（止めません。Safe pause は PAW-037）、Memory Worker → Embedding / Reranker（CPU の Copy があれば CPU へ）→ Main の順に Unload し、Probe で Workspace の Process が GPU になく要求した VRAM が空いたことを確かめてから Lease を返します。どこかで失敗すれば通常へ戻して `ExclusiveUnavailableError` です。Lease を返すと、`refresh()` が Model を Load し直します。Exclusive の Lease に期限はありません（走っている Job の Memory を奪わないため）。持ち主が Release しないまま失われたときは、`status().exclusive_age_seconds` で気づき、管理操作の `force_release_exclusive()` で終わらせます（Lease に `revoked` を立てて Release。PAW-037 の API で Owner / Admin に限る。Decision 0037 の 13）。
+
+### Local / Cloud の振り分けと、他の領域との接続
+
+- `HybridRuntime(scheduler, local_runtime, deployment="main", cloud=cloud_runtime, cloud_policy=policy)` を Orchestrator の `runtimes` に渡すと、Node ごとに Lease を取ってから Local の Model で走らせます。Local に入れず、`CloudPolicy.allows(assignment)` が許すときは Cloud の Runtime で走らせます（Policy が Task の Permission・Quota・依存を判断します。Policy が無ければ Cloud へは回しません）。Local で待てる上限を超えると Node は `ComputeUnavailable`（Retry 可）で失敗します。Local の Lease を持っていた秒数は Task の Budget の `GPU_SECONDS` に計上します（Local の Runtime が例外を投げた・Cancel されたときも計上し、そのときは Runtime の例外の方を伝えます）。Task の `GPU_SECONDS` が残っていなければ Local では始めず、同じ Task の Local の呼び出しが同時に走っているときはそれらが合わせて使った秒数を残りから引き、残りを使い切った時点で走っているものをすべて Cancel します（どちらも `NodeStopped(BUDGET_EXCEEDED)`。遅い呼び出しや並列の呼び出しで上限を超え続けないため。同じプロセス内の `HybridRuntime` の間で共有します）。Cancel しても止まらない Local の Runtime は、止まるまで Lease を持ったままにし、その GPU の容量を他へ渡しません（その待ちがもう一度 Cancel されても同じ）。止まるまでに使った秒数も Meter に数え、止まったときに計上します。そのころには Orchestrator が Node の Attempt を閉じて Node の Budget が計上を断るので、`late_gpu_charge=TrackerLateGpuCharge(budget_tracker)` を渡すと Task の Budget へ直接（Attempt と Run の Fence なしに、実際に使った時間として）計上します。渡さなければその秒数は Log に残るだけです。Background の Class で使うときは、VRAM pressure で Lease が `revoked` になると Local の呼び出しを Cancel し、`ComputeUnavailable`（Retry 可）で終えます。`CloudPolicy` は Cloud で走らせる直前にもう一度尋ね（待つ間に Permission や Quota が変わりうるため）、Policy が例外を投げたときは Local に留めます。
+- `ScheduledMemoryWorker` は Memory Worker（PAW-041）を包み、Background の Lease が取れないとき（Unload 中、縮退中、Exclusive）は `WorkerUnavailableError` を投げます。Consolidator はこれを失敗に数えずに延期します（Decision 0018）。走っている Job の Lease が `revoked` になったとき（VRAM pressure、Unload の前）も Job を Cancel して `WorkerUnavailableError` で延期し、縮退の次の段を止めません（Cancel しても止まらない Job は止まるまで Lease を持ったまま）。`PlacedEmbedder` の GPU の呼び出しも、Lease が `revoked` になると（CPU へ移す・Unload する段の前）Cancel して `ComputeUnavailableError` で終え、Retrieval は縮退します。
+- `PlacedEmbedder` は Embedding Model の GPU と CPU の Copy を包み、Scheduler が置いた方を使います（取れなければ `ComputeUnavailableError` で、Retrieval は Degrade します。Decision 0019）。
+
+### 組み立て（例）
+
+```python
+from paw_backend.compute import (
+    CommandModelControl,
+    ComputeConfig,
+    ComputeScheduler,
+    DeploymentCommands,
+    DeploymentSpec,
+    DeploymentState,
+    HybridRuntime,
+    ModelRole,
+    NvidiaSmiProbe,
+    ResidencyPolicy,
+)
+
+GIB = 1024**3
+main = DeploymentSpec(
+    name="main",
+    role=ModelRole.MAIN,
+    weights_bytes=40 * GIB,
+    kv_pool_bytes=20 * GIB,
+    runtime_bytes=4 * GIB,
+    workspace_bytes=2 * GIB,
+    kv_bytes_per_token=160 * 1024,
+    max_sequences=16,
+    max_context_tokens=65_536,
+    residency=ResidencyPolicy.ALWAYS,
+    initial=DeploymentState.GPU,
+)
+control = CommandModelControl(
+    {
+        "main": DeploymentCommands(
+            gpu=("systemctl", "start", "paw-llm-main.service"),
+            unload=("systemctl", "stop", "paw-llm-main.service"),
+            # Unit の cgroup の全 Process（MainPID だけでは足りません）。
+            pids=(
+                "/usr/bin/cat",
+                "/sys/fs/cgroup/system.slice/paw-llm-main.service/cgroup.procs",
+            ),
+        ),
+    }
+)
+scheduler = ComputeScheduler(
+    ComputeConfig(deployments=(main,)), NvidiaSmiProbe(), control=control
+)
+runtime = HybridRuntime(
+    scheduler,
+    local_runtime,
+    deployment="main",
+    cloud=codex_runtime,
+    cloud_policy=policy,
+)
+# Orchestrator(..., runtimes={"local": runtime, ...}) と、別の Task で scheduler.serve(stop)
+```
+
+### 確認用の Command（読み取りだけ）
+
+```bash
+python -m paw_backend.cli compute-status            # JSON: total / used / headroom / available / 利用率 / Process の数
+python -m paw_backend.cli compute-status --headroom-min-mib 8192 --headroom-fraction 0.1
+```
+
+同じ Probe で GPU を読み、Scheduler が数える値を出します。Process の PID や名前は出しません（他の User の Process でありうるため）。DB に接続せず、何も変えません。終了コードは `0` 成功、`1` 引数の誤り、`2` GPU を読めない。
+
+### 制限と未確認の点
+
+- 状態はプロセス内にあり（Decision 0037 の 1）、Scheduler を使う Worker を別プロセスで複数動かすと同じ GPU を二重に数えます。V1 では 1 プロセスに集めます。
+- 数値はすべて実測に基づかない暫定値です。Model と Runtime が決まったら Benchmark で見直します。Model の Footprint は Admin が与え、Scheduler は測りません。
+- 実際の Runtime（vLLM / SGLang など）の KV 使用率の取得、Runtime の Adapter、Application への組み込み、Exclusive の認可と API、走っている Task の Safe pause / Drain と `Waiting for Resource` への遷移（PAW-037）、System Health の表示（PAW-066）は含みません。
+- Background の停止は協調的（`revoked`）で、仕事がそれを無視すると VRAM は戻りません。
+- Cloud へ回した Node は、Orchestrator の記録上は Ladder の Label のままです（Placement は Scheduler の Status と Log に出ます）。外部への送信と Audit の正確さに関わるため、Decision 0037 の 14 で、Placement を Orchestrator の記録（Audit）に残す別の Issue が済むまで **`CloudPolicy` を注入しない**（どの Node も Cloud へ回さない）ことに決まっています。
+- `NvidiaSmiProbe` は `nvidia-smi` を PATH から探さず、絶対 Path（既定 `/usr/bin/nvidia-smi`、`executable=` で変更）で実行します。
+- 管理する GPU は `gpu_index` の 1 枚です。MIG は使いません。
+- Probe が読む GPU 利用率（`utilization_percent`）は `status()` に出すだけで、Admission にはまだ使っていません（要件の入力の一つ。使い方の方針は Decision 0037 に無く、別の Decision で提案します）。
+
+### Test
+
+`apps/backend/tests/test_compute_*.py` と `compute_support.py`（Fake の Probe と Fake の `ModelControl`。Fake の Model を GPU に置くと Fake の Probe の使用量が増え、Unload すると減ります）。DB を使いません。`test_compute_probe.py`（2 つの Command の固定、GPU を変える Option がないこと、Parse）、`test_compute_accounting.py`（勘定と KV の純粋関数、ランダムな Property Test）、`test_compute_config.py`（設定の検査と `CommandModelControl`。Runner は記録するだけで何も実行しません）、`test_compute_scheduler.py`（Admission・Class・待ち行列・Probe の鮮度・Hybrid）、`test_compute_relief.py`（縮退の各段・Drain・復帰・常駐）、`test_compute_exclusive.py`、`test_compute_runtimes.py`（`HybridRuntime`・`ScheduledMemoryWorker`・`PlacedEmbedder`）、`test_compute_cli.py`。時間は注入した Clock で動かします。
+実 GPU を読む Test は `RealProbeTest` の 1 つだけで、`PAW_TEST_REAL_GPU_PROBE=1` のときだけ動き（CI では Skip）、2 つの読み取りの Query だけを実行します。
 
 ## Repository Registration / Per-user Checkout
 

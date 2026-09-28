@@ -13,6 +13,7 @@ from typing import Any
 from paw_backend.tasks.domain import (
     Actor,
     Interruption,
+    RepoRole,
     TaskCommand,
     TaskRun,
     TaskState,
@@ -87,13 +88,83 @@ class PullRequestInfo:
 
 
 @dataclass(frozen=True, slots=True)
-class AttemptSnapshot:
-    """Worktree / review / pull request state of one attempt of a task."""
+class WorkingSetEntry:
+    """One repository of the Working Set a task is created with.
 
-    number: int
+    ``starting_commit`` is the repository's baseline (Decision 0030, #85
+    constraint 1): what "the change was discarded" and "the repository was
+    changed" are judged against, for every attempt (a Restart reuses it).
+    ``None`` means it is not known: nothing can then be verified as discarded
+    (fail-closed). Checked by ``TaskService.create_task``.
+    """
+
+    repository_id: uuid.UUID
+    role: RepoRole
+    starting_commit: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class WorkingSetRepository:
+    """A repository of the task's Working Set as stored (``task_repositories``).
+
+    ``added_by`` is who put it into the Working Set (or last changed its role:
+    ``updated_at``); the history of every change is in ``task_events``.
+    """
+
+    repository_id: uuid.UUID
+    role: RepoRole
+    starting_commit: str | None
+    added_by: Actor
+    added_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class AttemptRepositorySnapshot:
+    """Worktree / review / pull request state of one repository in one attempt.
+
+    ``strongest_role`` is the strongest role the repository held in the attempt
+    and ``modified`` whether a repository write was allowed in it (Decision 0030,
+    section 5): a repository that was changed keeps the obligations of that role
+    after a downgrade or a removal, until the change is verifiably discarded. A
+    repository removed from the Working Set keeps its row here.
+    """
+
+    repository_id: uuid.UUID
     worktree: WorktreeState
     review: ReviewState
     pull_request: PullRequestInfo | None
+    strongest_role: RepoRole
+    modified: bool
+
+
+@dataclass(frozen=True, slots=True)
+class AttemptSnapshot:
+    """The repositories of one attempt of a task, each with its own state."""
+
+    number: int
+    repositories: tuple[AttemptRepositorySnapshot, ...] = field(default=())
+
+    def repository(self, repository_id: uuid.UUID) -> AttemptRepositorySnapshot:
+        """The state of ``repository_id`` in this attempt (``KeyError`` if none)."""
+        for repository in self.repositories:
+            if repository.repository_id == repository_id:
+                return repository
+        raise KeyError("the repository is not part of this attempt")
+
+
+@dataclass(frozen=True, slots=True)
+class RepositoryChangeState:
+    """What the backend found in a repository, to verify a discarded change.
+
+    Reported by a ``RepositoryChangeInspector`` (``tasks.working_set``) from the
+    repository itself, never from what an agent says (AGENTS.md 1.3).
+    """
+
+    clean: bool
+    head_commit: str | None
+    branch_pushed: bool
+    open_pull_request: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,10 +258,11 @@ class TaskEvent:
 class TaskSnapshot:
     """Everything a new process or a reconnecting client needs to see a task.
 
-    Built only from the database by ``TaskService.restore``. It has no working set
-    (the repositories of a Multi-Repo task and their roles): that is outside
-    PAW-032 (approved 2026-09-25, and left to issue #85), see
-    ``docs/decisions/0014-task-working-set-persistence.md``.
+    Built only from the database by ``TaskService.restore``. ``working_set`` is
+    the task's Working Set (issue #85, Decisions 0014 and 0030): the repositories
+    and their roles, ordered by when they were added. The Tool Broker, the UI and
+    the Orchestrator read the roles from here and keep no copy of their own. The
+    state of each repository in an attempt is in ``attempt.repositories``.
     """
 
     id: uuid.UUID
@@ -198,7 +270,6 @@ class TaskSnapshot:
     created_by: uuid.UUID
     title: str
     input: dict[str, Any]
-    starting_commit: str | None
     state: TaskState
     wait_reason: WaitReason | None
     version: int
@@ -217,6 +288,14 @@ class TaskSnapshot:
     # ``started`` (what the backend would have to resume or abort; a step has at
     # most ``MAX_ACTIVE_TOOL_INVOCATIONS`` of them) and the latest 100 finished.
     tool_invocations: tuple[ToolInvocationInfo, ...] = field(default=())
+    working_set: tuple[WorkingSetRepository, ...] = field(default=())
+
+    def repository(self, repository_id: uuid.UUID) -> WorkingSetRepository | None:
+        """The Working Set's entry for ``repository_id`` (``None``: not in it)."""
+        for repository in self.working_set:
+            if repository.repository_id == repository_id:
+                return repository
+        return None
 
     @property
     def run(self) -> TaskRun:
