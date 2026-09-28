@@ -427,6 +427,12 @@ class SeedCheckTest(unittest.TestCase):
 
 
 class ForbiddenChangesTest(unittest.TestCase):
+    def test_allowances_match_whole_paths_or_directories(self):
+        self.assertTrue(seed_check._allowed("tests/test_a.py", ["tests/test_a.py"]))
+        self.assertFalse(seed_check._allowed("tests/test_a.pyx", ["tests/test_a.py"]))
+        self.assertTrue(seed_check._allowed("tests/x/y.py", ["tests/"]))
+        self.assertFalse(seed_check._allowed("tests2/y.py", ["tests/"]))
+
     def test_changes_outside_the_allowed_paths(self):
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
@@ -503,6 +509,17 @@ class ForbiddenChangesTest(unittest.TestCase):
             self.assertEqual(run(), 1)
             (repo / "code.py").chmod(0o644)
             self.assertEqual(run(), 0)
+            # Git takes the executable bit from the owner bit only: group / other
+            # execute bits are no change, and 0o100 alone is one.
+            (repo / "code.py").chmod(0o655)
+            self.assertEqual(run(), 0)
+            (repo / "code.py").chmod(0o700)
+            self.assertEqual(run(), 1)
+            (repo / "code.py").chmod(0o644)
+            # An allowed file does not allow its siblings with a longer name.
+            (repo / "tests" / "test_a.py.backup").write_text("x\n")
+            self.assertEqual(run(), 1)
+            (repo / "tests" / "test_a.py.backup").unlink()
             # Evaluator caches are not changes.
             (repo / "__pycache__").mkdir()
             (repo / "__pycache__" / "code.cpython-313.pyc").write_bytes(b"x")

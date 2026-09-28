@@ -17,7 +17,7 @@ directory is the candidate worktree.  The program never writes into that worktre
 
 ``forbidden-changes``
     Fails when the worktree differs from ``--base`` outside the ``--allow``
-    path prefixes (committed, staged, unstaged and untracked files).  The files
+    paths (an exact path, or a directory ending with ``/``) (committed, staged, unstaged and untracked files).  The files
     are hashed from their bytes; the candidate's index flags, ignore rules and
     attributes are not trusted.
 
@@ -281,7 +281,8 @@ def _worktree_blobs(worktree: Path) -> dict[str, tuple[str, str]]:
             if path.is_symlink():
                 blobs[key] = ("120000", _blob_id(os.fsencode(os.readlink(path))))
             elif path.is_file():
-                mode = "100755" if path.stat().st_mode & 0o111 else "100644"
+                # Git records the executable bit from the owner bit only.
+                mode = "100755" if path.stat().st_mode & 0o100 else "100644"
                 blobs[key] = (mode, _blob_id(path.read_bytes()))
     return blobs
 
@@ -294,6 +295,14 @@ def _base_blobs(worktree: Path, base: str) -> dict[str, tuple[str, str]]:
         if kind == "blob":
             blobs[path] = (mode, object_id)
     return blobs
+
+
+def _allowed(path: str, allowances: list[str]) -> bool:
+    """An allowance is an exact path, or a directory when it ends with ``/``."""
+    return any(
+        path.startswith(allowance) if allowance.endswith("/") else path == allowance
+        for allowance in allowances
+    )
 
 
 def _run_forbidden_changes(arguments: argparse.Namespace) -> int:
@@ -309,8 +318,7 @@ def _run_forbidden_changes(arguments: argparse.Namespace) -> int:
         for path in base.keys() | current.keys()
         if base.get(path) != current.get(path)
     }
-    allowed = tuple(arguments.allow)
-    outside = sorted(path for path in changed if not path.startswith(allowed))
+    outside = sorted(path for path in changed if not _allowed(path, arguments.allow))
     for path in outside:
         print(f"seed_check: change outside the allowed paths: {path}")
     print(f"seed_check: forbidden-changes verdict={'fail' if outside else 'pass'}")
