@@ -331,6 +331,8 @@ export function DevicesSection() {
                   void act(async () => {
                     await authApi.rejectPairing(item.pairing_id);
                     setNotice(t("devices.rejected"));
+                    // The refused claim ends that pairing: its QR code / link is dead.
+                    setPairing(null);
                     await loadPending();
                   })
                 }

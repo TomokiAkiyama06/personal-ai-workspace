@@ -12,7 +12,8 @@ export function QrCode({
   size?: number;
 }) {
   const { path, dimension } = useMemo(() => {
-    const qr = encode(value, { ecc: "M", border: 2 });
+    // A four-module quiet zone, as QR scanners expect.
+    const qr = encode(value, { ecc: "M", border: 4 });
     let d = "";
     qr.data.forEach((row, y) => {
       row.forEach((dark, x) => {

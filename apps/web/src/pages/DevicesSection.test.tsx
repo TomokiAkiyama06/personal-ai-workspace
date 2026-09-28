@@ -208,6 +208,35 @@ describe("設定 › 端末とセッション", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("確認コードが一致しません");
   });
 
+  it("drops the issued QR code after refusing the device that claimed it", async () => {
+    mockApi({
+      ...base,
+      "GET /auth/sessions": reply(200, { sessions: [session().session] }),
+      "GET /auth/pairing/pending": [
+        reply(200, { pending: [] }),
+        reply(200, { pending: [waiting] }),
+        reply(200, { pending: [] }),
+      ],
+      "POST /auth/pairing": reply(201, pairing),
+      "POST /auth/pairing/p-1/reject": reply(204),
+    });
+    renderApp("/settings/devices");
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "新しい端末を追加" }));
+    expect(
+      await screen.findByRole("img", { name: "新しい端末で読み取る QR コード" }),
+    ).toBeVisible();
+    await waitFor(() => expect(screen.getByText("New phone")).toBeInTheDocument(), {
+      timeout: 7000,
+    });
+    await user.click(screen.getByRole("button", { name: "拒否" }));
+    expect(await screen.findByText("端末を拒否しました。")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("img", { name: "新しい端末で読み取る QR コード" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "新しい端末を追加" })).toBeInTheDocument();
+  }, 10000);
+
   it("rejects a waiting device", async () => {
     const { calls } = mockApi({
       ...base,
