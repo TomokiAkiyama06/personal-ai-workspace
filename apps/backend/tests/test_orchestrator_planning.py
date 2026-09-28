@@ -1,0 +1,451 @@
+"""Decomposing a task into a DAG: the planner proposes, the orchestrator decides."""
+
+import asyncio
+import unittest
+import uuid
+
+from paw_backend.orchestrator.domain import NodeRole, RunOutcome
+from paw_backend.orchestrator.errors import (
+    DagAlreadyExistsError,
+    DagStateError,
+    InvalidPlanError,
+    PlanReason,
+)
+from paw_backend.orchestrator.orchestrator import PLANNER_IDENTITY
+from paw_backend.orchestrator.result import NodeResult
+from paw_backend.orchestrator.runtime import NodeOutcome
+from paw_backend.orchestrator.scope import agent_id_of
+from paw_backend.tasks import TaskCommand, TaskNotFoundError, TaskRun, TaskState
+from paw_backend.tasks.queueing import BudgetKind
+
+from .orchestrator_support import (
+    FakeRuntime,
+    FakeTools,
+    PostgresOrchestratorTestCase,
+    diamond,
+    fail,
+    make_plan,
+    node,
+    requires_postgres,
+    until,
+)
+
+Out = RunOutcome
+
+
+def planned(*nodes: dict) -> NodeOutcome:
+    return NodeOutcome.succeeded(NodeResult("a plan"), plan={"nodes": list(nodes)})
+
+
+CYCLE = planned(node("a", "b"), node("b", "a"))
+GOOD = planned(node("a", role="researcher"), node("b", "a"))
+
+
+@requires_postgres
+class PlannerTest(PostgresOrchestratorTestCase):
+    async def test_the_planner_decomposes_the_task_and_the_dag_runs(self):
+        planner = FakeRuntime("local", script={"plan": GOOD})
+        h = self.harness(runtimes={"local": planner})
+        task_id = await self.create_task(title="Fix the parser", input={"issue": 7})
+        await h.orchestrator.enqueue_task(task_id, preset="standard")
+
+        report = await h.orchestrator.run_once("w1")
+
+        self.assertEqual(report.outcome, Out.DAG_SUCCEEDED)
+        (plan_call,) = planner.calls_of("plan")
+        self.assertEqual(plan_call.role, NodeRole.PLANNER)
+        self.assertEqual(
+            (plan_call.title, plan_call.goal), ("Fix the parser", "Fix the parser")
+        )
+        self.assertEqual(dict(plan_call.input), {"issue": 7})
+        self.assertEqual(dict(plan_call.upstream), {})
+        dag = await self.store.get(task_id, 1)
+        self.assertEqual([n.key for n in dag.nodes], ["a", "b"])
+        # The planning call cost a step, like a node.
+        usage = {u.kind: u.consumed for u in await h.budget.usage(task_id)}
+        self.assertEqual(usage[BudgetKind.STEPS], 3)
+        self.assertEqual((await h.tasks.restore(task_id)).state, TaskState.EVALUATING)
+
+    async def test_an_invalid_plan_is_refused_and_the_planner_is_asked_again(self):
+        planner = FakeRuntime("local", script={"plan": [CYCLE, GOOD]})
+        h = self.harness(runtimes={"local": planner})
+        task_id = await self.prepare(h)
+
+        report = await h.orchestrator.run_once("w1")
+
+        self.assertEqual(report.outcome, Out.DAG_SUCCEEDED)
+        self.assertEqual(len(planner.calls_of("plan")), 2)
+        self.assertEqual([a.attempt for a in planner.calls_of("plan")], [1, 2])
+        dag = await self.store.get(task_id, 1)
+        self.assertEqual([n.key for n in dag.nodes], ["a", "b"])
+        (record,) = await h.loops.history(task_id)  # the refused plan was a failure
+        self.assertEqual(record.approach, 0)
+
+    async def test_a_planner_that_never_gives_an_acceptable_plan_fails_the_task(self):
+        for label, script in (
+            ("cycles", CYCLE),
+            ("no plan", NodeOutcome.succeeded(NodeResult("nothing"))),
+            ("an empty plan", planned()),
+            ("an unknown role", planned(node("a", role="boss"))),
+            ("failures", fail("Down", "the model is down")),
+            ("an exception", RuntimeError("boom")),
+        ):
+            with self.subTest(label):
+                planner = FakeRuntime("local", script={"plan": script})
+                h = self.harness(runtimes={"local": planner})
+                task_id = await self.prepare(h)
+
+                report = await h.orchestrator.run_once("w1")
+
+                self.assertEqual(report.outcome, Out.PLAN_FAILED)
+                self.assertEqual(len(planner.calls_of("plan")), 2)  # max_plan_attempts
+                self.assertIsNone(await self.store.get(task_id, 1))
+                snapshot = await h.tasks.restore(task_id)
+                self.assertEqual(snapshot.state, TaskState.FAILED)
+                self.assertEqual(snapshot.last_event.reason, "No acceptable plan")
+                (entry,) = await self.rows(
+                    "SELECT status FROM queue_entries WHERE task_id = :t", t=task_id
+                )
+                self.assertEqual(entry["status"], "completed")
+
+    async def test_a_planner_that_says_it_cannot_is_not_asked_twice(self):
+        planner = FakeRuntime(
+            "local", script={"plan": fail("Refused", "no", retryable=False)}
+        )
+        h = self.harness(runtimes={"local": planner})
+        task_id = await self.prepare(h)
+
+        report = await h.orchestrator.run_once("w1")
+
+        self.assertEqual(report.outcome, Out.PLAN_FAILED)
+        self.assertEqual(len(planner.calls_of("plan")), 1)
+        self.assertEqual((await h.tasks.restore(task_id)).state, TaskState.FAILED)
+
+    async def test_the_second_planning_attempt_is_made_by_the_next_agent(self):
+        weak = FakeRuntime("local", script={"plan": CYCLE})
+        strong = FakeRuntime("codex", script={"plan": GOOD})
+        h = self.harness(
+            runtimes={"local": weak, "codex": strong}, ladder=("local", "codex")
+        )
+        await self.prepare(h)
+
+        report = await h.orchestrator.run_once("w1")
+
+        self.assertEqual(report.outcome, Out.DAG_SUCCEEDED)
+        self.assertEqual(
+            (len(weak.calls_of("plan")), len(strong.calls_of("plan"))), (1, 1)
+        )
+
+    async def retries_used(self, h, task_id) -> int:
+        usage = {u.kind: u.consumed for u in await h.budget.usage(task_id)}
+        return usage[BudgetKind.RETRIES]
+
+    async def set_retries(self, task_id, *, limit):
+        await self.owner_sql(
+            "UPDATE budget_usages SET limit_value = :limit"
+            " WHERE task_id = :t AND kind = 'retries'",
+            limit=limit,
+            t=task_id,
+        )
+
+    async def test_a_second_planning_attempt_is_charged_as_a_retry(self):
+        # Decision 0021, section 3: the planner follows the rules of a node, so
+        # the call after the first is a retry (and, like every call, a step).
+        planner = FakeRuntime("local", script={"plan": [CYCLE, GOOD]})
+        h = self.harness(runtimes={"local": planner})
+        task_id = await self.prepare(h)
+
+        report = await h.orchestrator.run_once("w1")
+
+        self.assertEqual(report.outcome, Out.DAG_SUCCEEDED)
+        self.assertEqual(await self.retries_used(h, task_id), 1)
+        usage = {u.kind: u.consumed for u in await h.budget.usage(task_id)}
+        self.assertEqual(usage[BudgetKind.STEPS], 4)  # two planner calls, two nodes
+
+    async def test_a_plan_on_the_first_attempt_costs_no_retry(self):
+        planner = FakeRuntime("local", script={"plan": GOOD})
+        h = self.harness(runtimes={"local": planner})
+        task_id = await self.prepare(h)
+
+        await h.orchestrator.run_once("w1")
+
+        self.assertEqual(await self.retries_used(h, task_id), 0)
+
+    async def test_a_planner_failure_that_cannot_retry_costs_no_retry(self):
+        planner = FakeRuntime(
+            "local", script={"plan": fail("Refused", "no", retryable=False)}
+        )
+        h = self.harness(runtimes={"local": planner})
+        task_id = await self.prepare(h)
+        await self.set_retries(task_id, limit=0)
+
+        report = await h.orchestrator.run_once("w1")
+
+        # It fails for its plan, not for the budget: no retry was ever made.
+        self.assertEqual(report.outcome, Out.PLAN_FAILED)
+        self.assertEqual(await self.retries_used(h, task_id), 0)
+        self.assertEqual(
+            (await h.tasks.restore(task_id)).last_event.reason, "No acceptable plan"
+        )
+
+    async def test_a_used_up_retry_budget_stops_the_second_planning_attempt(self):
+        planner = FakeRuntime("local", script={"plan": [CYCLE, GOOD]})
+        h = self.harness(runtimes={"local": planner})
+        task_id = await self.prepare(h)
+        await self.set_retries(task_id, limit=0)
+
+        report = await h.orchestrator.run_once("w1")
+
+        # Decision 0007: retries over the limit fail the task; the planner is not
+        # called again and nothing is planned.
+        self.assertEqual(report.outcome, Out.BUDGET_FAILED)
+        self.assertEqual(len(planner.calls_of("plan")), 1)
+        self.assertEqual(await self.retries_used(h, task_id), 0)
+        self.assertIsNone(await self.store.get(task_id, 1))
+        snapshot = await h.tasks.restore(task_id)
+        self.assertEqual(snapshot.state, TaskState.FAILED)
+        self.assertEqual(snapshot.last_event.reason, "The retry budget is used up")
+
+    async def test_the_last_retry_that_fits_makes_the_second_planning_attempt(self):
+        planner = FakeRuntime("local", script={"plan": [CYCLE, GOOD]})
+        h = self.harness(runtimes={"local": planner})
+        task_id = await self.prepare(h)
+        await self.set_retries(task_id, limit=1)
+
+        report = await h.orchestrator.run_once("w1")
+
+        self.assertEqual(report.outcome, Out.DAG_SUCCEEDED)
+        self.assertEqual(await self.retries_used(h, task_id), 1)
+
+    async def test_a_node_keyed_plan_is_not_the_planner(self):
+        # The planner is given the node key ``plan``, and a plan may name a node
+        # ``plan`` too: their agent identities and failure histories stay apart.
+        async def planner(assignment):
+            await assignment.tools.call("repo.read_file", {"path": "a.py"})
+            return planned(node("plan"))
+
+        async def the_node(assignment):
+            await assignment.tools.call("repo.read_file", {"path": "a.py"})
+            return fail("Boom", "same text")
+
+        tools = FakeTools()
+        runtime = FakeRuntime("local", script={"plan": [planner, the_node]})
+        h = self.harness(
+            runtimes={"local": runtime},
+            tools=tools,
+            config={"max_attempts_per_rung": 1},
+        )
+        task_id = await self.prepare(h)
+
+        await h.orchestrator.run_once("w1")
+
+        planner_call, node_call = tools.calls
+        (entry,) = await self.rows("SELECT id, claim_count FROM queue_entries")
+        self.assertEqual(
+            planner_call.context.grant.agent_id,
+            agent_id_of(
+                task_id,
+                TaskRun(1, 0),
+                PLANNER_IDENTITY,
+                1,
+                claim=(entry["id"], entry["claim_count"]),
+            ),
+        )
+        self.assertEqual(
+            node_call.context.grant.agent_id,
+            agent_id_of(task_id, TaskRun(1, 0), "plan", 1),
+        )
+        self.assertNotEqual(
+            planner_call.context.grant.agent_id, node_call.context.grant.agent_id
+        )
+
+    async def test_a_planner_failure_and_a_node_plan_failure_are_told_apart(self):
+        # The same error class and text for the planner and for a node keyed
+        # ``plan`` are two different failure signatures in the loop detector.
+        runtime = FakeRuntime(
+            "local",
+            script={
+                "plan": [
+                    fail("Boom", "same text"),
+                    planned(node("plan")),
+                    fail("Boom", "same text"),
+                ]
+            },
+        )
+        h = self.harness(
+            runtimes={"local": runtime}, config={"max_attempts_per_rung": 1}
+        )
+        task_id = await self.prepare(h)
+
+        await h.orchestrator.run_once("w1")
+
+        history = await h.loops.history(task_id)
+        self.assertEqual(len(history), 2)
+        self.assertNotEqual(history[0].signature, history[1].signature)
+
+    async def agents_of(self, tools: FakeTools) -> list:
+        return [call.context.grant.agent_id for call in tools.calls]
+
+    async def test_a_restarted_task_runs_its_nodes_with_new_agents(self):
+        # Attempt 2 of the task has a new DAG whose nodes count their attempts
+        # from 1 again: the agent of node ``a`` attempt 1 must not be attempt 1's.
+        async def reads(assignment):
+            await assignment.tools.call("repo.read_file", {"path": "a.py"})
+            return fail("Boom", "no", retryable=False)
+
+        tools = FakeTools()
+        runtime = FakeRuntime("local", script={"a": reads})
+        h = self.harness(runtimes={"local": runtime}, tools=tools)
+        task_id = await self.prepare(h, make_plan(node("a")))
+        self.assertEqual((await h.orchestrator.run_once("w1")).outcome, Out.DAG_FAILED)
+
+        await h.tasks.execute(task_id, TaskCommand.RESTART, actor=self.user)
+        await h.orchestrator.submit_plan(task_id, make_plan(node("a")))
+        await h.orchestrator.enqueue_task(task_id, preset="standard")
+        await h.orchestrator.run_once("w1")
+
+        first, second = tools.calls
+        self.assertEqual(
+            [c.context.run for c in (first, second)], [TaskRun(1, 0), TaskRun(2, 0)]
+        )
+        self.assertNotEqual(first.context.grant.agent_id, second.context.grant.agent_id)
+
+    async def test_a_retried_planner_is_a_new_agent(self):
+        # The planning attempts start at 1 again after a Retry: the planner of the
+        # retried run is not the planner that failed.
+        async def reads(assignment):
+            await assignment.tools.call("repo.read_file", {"path": "a.py"})
+            return fail("Boom", "no", retryable=False)
+
+        tools = FakeTools()
+        runtime = FakeRuntime("local", script={"plan": reads})
+        h = self.harness(runtimes={"local": runtime}, tools=tools)
+        task_id = await self.prepare(h)
+        report = await h.orchestrator.run_once("w1")
+        self.assertEqual(report.outcome, Out.PLAN_FAILED)
+
+        await h.tasks.execute(task_id, TaskCommand.RETRY, actor=self.user)
+        await h.orchestrator.enqueue_task(task_id, preset="standard")
+        await h.orchestrator.run_once("w1")
+
+        self.assertEqual([a.attempt for a in runtime.calls_of("plan")], [1, 1])
+        first, second = await self.agents_of(tools)
+        self.assertNotEqual(first, second)
+
+    async def test_a_planner_that_takes_a_run_over_is_a_new_agent(self):
+        # A worker that takes the run over (a new claim of the same entry, same
+        # task run) counts its planning attempts from 1 again.
+        async def reads(assignment):
+            await assignment.tools.call("repo.read_file", {"path": "a.py"})
+            return planned(node("a"))
+
+        tools = FakeTools()
+        runtime = FakeRuntime("local", script={"plan": reads})
+        h = self.harness(runtimes={"local": runtime}, tools=tools)
+        task_id = await self.prepare(h)
+        # A first worker started the task, and planned, and died.
+        entry = await h.queue.claim_next("dead")
+        await h.tasks.execute(task_id, TaskCommand.START, actor=self.system)
+        await self.owner_sql(
+            "UPDATE queue_entries SET claimed_at = now() - interval '10 seconds',"
+            " lease_expires_at = now() - interval '5 seconds'"
+        )
+        dead_planner = agent_id_of(
+            task_id, TaskRun(1, 0), PLANNER_IDENTITY, 1, claim=(entry.id, 1)
+        )
+
+        await h.orchestrator.run_once("w2")
+
+        (planner_agent,) = await self.agents_of(tools)
+        self.assertEqual(runtime.calls_of("plan")[0].attempt, 1)
+        self.assertNotEqual(planner_agent, dead_planner)
+        self.assertEqual(
+            planner_agent,
+            agent_id_of(
+                task_id, TaskRun(1, 0), PLANNER_IDENTITY, 1, claim=(entry.id, 2)
+            ),
+        )
+
+    async def test_a_plan_of_a_replaced_run_is_not_stored(self):
+        # The task is failed and retried while its planner works (before the
+        # orchestrator looks again): the plan belongs to the old run and must not
+        # become the DAG the retried run executes.
+        release = asyncio.Event()
+
+        async def slow(_assignment):
+            await release.wait()
+            return planned(node("stale"))
+
+        runtime = FakeRuntime("local", script={"plan": slow})
+        h = self.harness(runtimes={"local": runtime}, config={"poll_seconds": 3600.0})
+        task_id = await self.prepare(h)
+        run = asyncio.create_task(h.orchestrator.run_once("w1"))
+        await until(lambda: len(runtime.calls_of("plan")) == 1, message="planning")
+
+        other = self.harness()
+        await other.tasks.execute(task_id, TaskCommand.FAIL, actor=self.system)
+        await other.tasks.execute(task_id, TaskCommand.RETRY, actor=self.user)
+        release.set()
+        report = await asyncio.wait_for(run, 120)
+
+        self.assertEqual(report.outcome, Out.SUPERSEDED)
+        self.assertIsNone(await self.store.get(task_id, 1))
+        self.assertEqual(await self.scalar("SELECT count(*) FROM agent_dags"), 0)
+
+    async def test_a_plan_submitted_beforehand_skips_the_planner(self):
+        planner = FakeRuntime("local", script={"plan": CYCLE})
+        h = self.harness(runtimes={"local": planner})
+        await self.prepare(h, diamond())
+
+        report = await h.orchestrator.run_once("w1")
+
+        self.assertEqual(report.outcome, Out.DAG_SUCCEEDED)
+        self.assertEqual(planner.calls_of("plan"), [])
+
+
+@requires_postgres
+class SubmitPlanTest(PostgresOrchestratorTestCase):
+    async def test_a_plan_is_judged_before_anything_is_stored(self):
+        h = self.harness()
+        task_id = await self.create_task()
+        bad = {"nodes": [node("a", "b"), node("b", "a")]}
+
+        with self.assertRaises(InvalidPlanError) as caught:
+            await h.orchestrator.submit_plan(task_id, bad)
+
+        self.assertEqual(caught.exception.reason, PlanReason.CYCLE)
+        self.assertIsNone(await self.store.get(task_id, 1))
+        self.assertEqual(await self.scalar("SELECT count(*) FROM agent_dags"), 0)
+
+    async def test_a_plan_is_accepted_once_per_attempt_and_again_after_a_restart(self):
+        h = self.harness()
+        task_id = await self.create_task()
+        first = await h.orchestrator.submit_plan(task_id, diamond())
+        self.assertEqual(first.attempt, 1)
+
+        with self.assertRaises(DagAlreadyExistsError):
+            await h.orchestrator.submit_plan(task_id, diamond())
+
+        # Fail and Restart the task: attempt 2 has no DAG yet and takes a new plan.
+        await h.tasks.execute(task_id, TaskCommand.START, actor=self.system)
+        await h.tasks.execute(task_id, TaskCommand.FAIL, actor=self.system)
+        await h.tasks.execute(task_id, TaskCommand.RESTART, actor=self.user)
+        second = await h.orchestrator.submit_plan(task_id, make_plan(node("only")))
+        self.assertEqual(second.attempt, 2)
+        self.assertNotEqual(first.id, second.id)
+        self.assertEqual(len((await self.store.get(task_id, 1)).nodes), 5)  # history
+
+    async def test_no_plan_is_accepted_for_a_finished_or_unknown_task(self):
+        h = self.harness()
+        task_id = await self.create_task()
+        await h.tasks.execute(task_id, TaskCommand.CANCEL, actor=self.user)
+
+        with self.assertRaises(DagStateError):
+            await h.orchestrator.submit_plan(task_id, diamond())
+        with self.assertRaises(TaskNotFoundError):
+            await h.orchestrator.submit_plan(uuid.uuid4(), diamond())
+        self.assertEqual(await self.scalar("SELECT count(*) FROM agent_dags"), 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

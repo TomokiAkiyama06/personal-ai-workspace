@@ -14,11 +14,15 @@ Public surface:
 * ``service``: ``AuditRetentionService``, the Store — the only place that runs
   the ``CREATE TABLE ... PARTITION OF`` / ``ATTACH`` / ``DETACH`` / ``DROP TABLE``
   SQL. Needs a privileged (migration-role) connection; see its docstring.
+* ``runner``: ``run_scheduled_maintenance`` (Issue #117) — one scheduled run:
+  the lock, the three steps, the coverage check and the run's own audit row.
+  ``python -m paw_backend.cli audit-retention-run`` calls it.
 """
 
 from paw_backend.authz.retention.audit import RetentionAction, RetentionActor
 from paw_backend.authz.retention.errors import (
     AuditRetentionError,
+    MaintenanceAlreadyRunningError,
     PartitionAlreadyExistsError,
     PartitionNotArchivedError,
     PartitionNotLiveError,
@@ -35,12 +39,18 @@ from paw_backend.authz.retention.rules import (
     BOOKKEEPING_TABLE,
     LEGACY_PARTITION_NAME,
     LIVE_PARENT_TABLE,
+    first_uncovered_moment,
     month_start,
     next_month_start,
     partition_name,
     partitions_due_for_archive,
     partitions_due_for_purge,
     plan_missing_partitions,
+)
+from paw_backend.authz.retention.runner import (
+    MaintenanceRunResult,
+    MaintenanceStep,
+    run_scheduled_maintenance,
 )
 from paw_backend.authz.retention.service import AuditRetentionService
 
@@ -51,7 +61,10 @@ __all__ = [
     "LIVE_PARENT_TABLE",
     "AuditRetentionError",
     "AuditRetentionService",
+    "MaintenanceAlreadyRunningError",
     "MaintenanceReport",
+    "MaintenanceRunResult",
+    "MaintenanceStep",
     "PartitionAlreadyExistsError",
     "PartitionNotArchivedError",
     "PartitionNotLiveError",
@@ -61,10 +74,12 @@ __all__ = [
     "RetentionActor",
     "RetentionPolicy",
     "default_policy",
+    "first_uncovered_moment",
     "month_start",
     "next_month_start",
     "partition_name",
     "partitions_due_for_archive",
     "partitions_due_for_purge",
     "plan_missing_partitions",
+    "run_scheduled_maintenance",
 ]

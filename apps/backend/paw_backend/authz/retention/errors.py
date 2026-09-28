@@ -45,3 +45,17 @@ class PartitionNotArchivedError(AuditRetentionError):
         self.name = name
         self.status = status
         super().__init__(f"partition {name} is not archived (status={status})")
+
+
+class MaintenanceAlreadyRunningError(AuditRetentionError):
+    """Another maintenance run holds the lock (``maintenance_lock``, Issue #117).
+
+    Raised before any step runs: nothing was done by the refused run. Two runs
+    at once (a timer and a manual run, two hosts) would otherwise race on the
+    same partition names (``PartitionAlreadyExistsError`` at best).
+    """
+
+    code = "maintenance_already_running"
+
+    def __init__(self) -> None:
+        super().__init__("another audit retention maintenance run is in progress")

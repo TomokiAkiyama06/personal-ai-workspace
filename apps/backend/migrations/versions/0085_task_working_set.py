@@ -1,7 +1,7 @@
 """The Working Set of a task (issue #85, Decisions 0014 and 0030).
 
 Revision ID: 0085
-Revises: 0041
+Revises: 0034
 Create Date: 2026-09-28
 
 * ``task_repositories``: the repositories of a task and their roles
@@ -46,7 +46,7 @@ from alembic import op
 from paw_backend.db_roles import configured_app_role, grant_app_privileges
 
 revision: str = "0085"
-down_revision: str | Sequence[str] | None = "0041"
+down_revision: str | Sequence[str] | None = "0034"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

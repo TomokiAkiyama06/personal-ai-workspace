@@ -48,6 +48,7 @@ USER_CAPS = {
     "workspace.use",
     "github.use",
     "memory.use",
+    "memory.read",
     "pr.create",
     "shared_memory.read",
     "project.create",
@@ -124,6 +125,7 @@ DELEGABLE_CAPS = {
     "workspace.use",
     "github.use",
     "memory.use",
+    "memory.read",
     "pr.create",
     "shared_memory.read",
     "project.read",
@@ -181,7 +183,7 @@ NON_DELEGABLE_CAPS = {
     "project.lifecycle.manage",
 }
 # The only capabilities whose *allowed* decisions are not persisted.
-READ_ONLY_CAPS = {"shared_memory.read", "project.read", "account.read"}
+READ_ONLY_CAPS = {"memory.read", "shared_memory.read", "project.read", "account.read"}
 
 
 def resource_for(capability: Capability, who: Principal) -> Resource:
@@ -279,6 +281,28 @@ class CapabilityTableTest(unittest.TestCase):
     def test_the_table_agrees_with_the_literal_allowlist(self):
         delegable = {c.value for c in Capability if CAPABILITIES[c].delegable}
         self.assertEqual(delegable, DELEGABLE_CAPS)
+
+    def test_memory_read_is_held_by_exactly_the_roles_that_hold_memory_use(self):
+        # Decision 0024: the two tables are kept separately, so a change to one
+        # alone must fail here.
+        for role, granted in DEFAULT_POLICY.system_grants.items():
+            with self.subTest(role=role.value):
+                self.assertEqual(
+                    Capability.MEMORY_READ in granted,
+                    Capability.MEMORY_USE in granted,
+                )
+        self.assertNotIn(
+            Capability.MEMORY_READ, DEFAULT_POLICY.system_grants[SystemRole.SYSTEM]
+        )
+
+    def test_memory_read_is_a_delegable_read_only_self_capability(self):
+        read = CAPABILITIES[Capability.MEMORY_READ]
+        self.assertEqual(
+            (read.scope, read.delegable, read.audit),
+            (Scope.SELF, True, AuditMode.DENIED_ONLY),
+        )
+        # memory.use keeps recording every decision (Decision 0024, 2).
+        self.assertIs(CAPABILITIES[Capability.MEMORY_USE].audit, AuditMode.REQUIRED)
 
     def test_delegable_has_no_default_so_it_cannot_be_forgotten(self):
         by_name = {f.name: f for f in dataclasses.fields(CapabilityInfo)}
@@ -511,6 +535,16 @@ class IsolationTest(unittest.TestCase):
         denied = decide(owner, Capability.MEMORY_USE, theirs)
         self.assertEqual(denied.reason, Reason.NOT_RESOURCE_OWNER)
         allowed = decide(owner, Capability.MEMORY_USE, mine)
+        self.assertEqual(allowed.reason, Reason.GRANTED_TO_RESOURCE_OWNER)
+
+    def test_reading_private_memory_is_the_owners_alone_even_for_the_owner(self):
+        # memory.read (Decision 0024) is Scope.SELF like memory.use.
+        owner = principal(SystemRole.OWNER, user_id=U1)
+        theirs = Resource.owned_by(U2, "memory")
+        mine = Resource.owned_by(U1, "memory")
+        denied = decide(owner, Capability.MEMORY_READ, theirs)
+        self.assertEqual(denied.reason, Reason.NOT_RESOURCE_OWNER)
+        allowed = decide(owner, Capability.MEMORY_READ, mine)
         self.assertEqual(allowed.reason, Reason.GRANTED_TO_RESOURCE_OWNER)
 
     def test_a_user_cannot_use_another_users_workspace(self):

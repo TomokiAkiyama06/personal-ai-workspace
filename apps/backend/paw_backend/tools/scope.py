@@ -421,6 +421,13 @@ class TaskScope:
     ``repositories`` is the task's working set (:class:`ScopedRepository`, each
     of a project of the scope, each with its resolved ACL). A repository that
     is not listed here cannot be named by a call.
+
+    ``excluded_repositories`` are repositories the scope still reaches through
+    its ``path_roots`` or ``hosts`` but must not touch (a sub-agent that was
+    given a subset of the parent's working set, PAW-034): a path in the worktree
+    of one of them, or a URL below one of its remotes, is out of scope
+    (fail closed), whatever the roots and hosts say. An excluded repository is
+    never also in ``repositories``.
     """
 
     path_roots: tuple[str, ...]
@@ -428,6 +435,7 @@ class TaskScope:
     projects: Mapping[uuid.UUID, ProjectState]
     credential_handles: Mapping[str, frozenset[str]] = field(default_factory=dict)
     repositories: tuple[ScopedRepository, ...] = ()
+    excluded_repositories: tuple[ScopedRepository, ...] = ()
 
     def repository(self, repo_id: uuid.UUID) -> ScopedRepository | None:
         """The working-set repository with this id (``None`` when not in it)."""
@@ -467,11 +475,20 @@ class TaskScope:
             raise ValueError("a repository is listed twice")
         if any(r.project_id not in projects for r in repositories):
             raise ValueError("a repository belongs to a project outside the scope")
+        excluded = _collection(self.excluded_repositories, "excluded_repositories")
+        if not all(isinstance(r, ScopedRepository) for r in excluded):
+            raise TypeError("excluded_repositories must be ScopedRepository objects")
+        excluded_ids = {r.repo_id for r in excluded}
+        if len(excluded_ids) != len(excluded):
+            raise ValueError("a repository is excluded twice")
+        if excluded_ids & {r.repo_id for r in repositories}:
+            raise ValueError("a repository is both in the working set and excluded")
         if (
             len(roots) > MAX_ROOTS
             or len(hosts) > MAX_HOSTS
             or len(projects) > MAX_PROJECTS
             or len(repositories) > MAX_REPOSITORIES
+            or len(excluded) > MAX_REPOSITORIES
             or len(handles) > MAX_CREDENTIAL_HANDLES
             or any(len(valid) > MAX_HOSTS for valid in handles.values())
         ):
@@ -481,6 +498,7 @@ class TaskScope:
         object.__setattr__(self, "projects", MappingProxyType(projects))
         object.__setattr__(self, "credential_handles", MappingProxyType(handles))
         object.__setattr__(self, "repositories", tuple(repositories))
+        object.__setattr__(self, "excluded_repositories", tuple(excluded))
 
 
 class PathResolver(Protocol):
@@ -569,9 +587,16 @@ async def classify_targets(
             for repository in scope.repositories
             if repository.root is not None
         ]
+        excluded_roots = [
+            await _resolve(resolver, repository.root, timeout_seconds)
+            for repository in scope.excluded_repositories
+            if repository.root is not None
+        ]
         for target in paths:
             resolved = await _resolve(resolver, target.value, timeout_seconds)
-            if not any(path_within(resolved, root) for root in roots):
+            if not any(path_within(resolved, root) for root in roots) or any(
+                path_within(resolved, root) for root in excluded_roots
+            ):
                 outside.append(TargetKind.PATH)
             touched.update(
                 repo_id
@@ -597,6 +622,12 @@ async def classify_targets(
     unbound_url = False
     for url in urls:
         canonical = normalise_url(url)[0]
+        if any(
+            url_within(canonical, remote)
+            for repository in scope.excluded_repositories
+            for remote in repository.remotes
+        ):
+            outside.append(TargetKind.URL)
         owners = {
             repository.repo_id
             for repository in scope.repositories

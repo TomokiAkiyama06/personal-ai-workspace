@@ -97,6 +97,24 @@ class StaleRunError(TaskError):
         super().__init__(self.message)
 
 
+class TaskNotRunningError(TaskError):
+    """New work was to start for a run of a task that is not ``running`` now.
+
+    Raised (nothing written) by the writes that START work on behalf of a run:
+    a node's attempt (``DagStore.start_node``), the step charged for starting a
+    node or a planner call (``BudgetTracker.record(..., require_running=True)``)
+    and the runtime timer of a run (``BudgetTracker.start_runtime_in(...,
+    run=...)``). A paused or waiting task quiesces: what already runs may finish
+    and report, but nothing new starts until it runs again.
+    """
+
+    code = "task_not_running"
+    message: ClassVar[str] = "The task is not running"
+
+    def __init__(self) -> None:
+        super().__init__(self.message)
+
+
 class StaleAttemptError(StaleRunError):
     """A ``StaleRunError`` whose attempt is not the task's current one.
 

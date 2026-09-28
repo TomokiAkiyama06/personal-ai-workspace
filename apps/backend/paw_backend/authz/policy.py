@@ -104,6 +104,7 @@ _USER = frozenset(
         C.WORKSPACE_USE,
         C.GITHUB_USE,
         C.MEMORY_USE,
+        C.MEMORY_READ,  # the same roles as memory.use (Decision 0024)
         C.PR_CREATE,
         C.SHARED_MEMORY_READ,
         # Any human user (Owner and Admin include User): create a project, answer
@@ -159,10 +160,10 @@ _CONTRIBUTOR_ONLY = frozenset(
         C.PROJECT_AGENT_USE,
         C.PROJECT_PR_CREATE,
         C.PROJECT_MEMORY_USE,
-        # Who runs a task may shape its Working Set (#85 constraint 3; proposed
-        # in Decision 0035, not approved yet): the
-        # members that may run tasks and write repositories (Contributor, and
-        # Manager, which includes it). A Viewer may do neither.
+        # Who runs a task may shape its Working Set (#85 constraint 3; Decision
+        # 0035, Approved, point 1): the members that may run tasks and write
+        # repositories (Contributor, and Manager, which includes it). A Viewer
+        # may do neither.
         C.PROJECT_TASK_WORKING_SET_MANAGE,
     }
 )

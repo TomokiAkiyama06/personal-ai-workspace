@@ -1,10 +1,10 @@
 # Working Set の Capability の付与・委任、作成時の Working Set、Revision 0085 より前の Task の扱い
 
-- Status: Proposed
+- Status: Approved
 - Date: 2026-09-28
 - Scope: Issue [#85](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/85)（Task Working Set の永続化、PR #124）の実装で、[Decision 0030](0030-task-working-set-model.md) と #85 の必須の制約が決めていない点。#85 の制約 3（「新しい判断が要る場合は Decision で提案する」）と、PR #124 に対する独立 Review（Claude）の指摘による
 - Supersedes: なし（[Decision 0030](0030-task-working-set-model.md)・[Decision 0014](0014-task-working-set-persistence.md)・[Decision 0004](0004-rbac-capability-and-audit-policy.md) は書き換えない。0030 が #85 に送った点を埋める）
-- Approval: 未承認（Human の承認を待つ。承認されるまで、この Decision の推奨は方針として使わない）
+- Approval: 2026-09-28、Human が Main Session 内で、判断点ごとの説明（推奨つき）を受けたうえで「推奨どおり」と直接回答して承認（1〜5 のすべて。末尾の「承認時の決定」）
 
 ## 背景
 
@@ -98,3 +98,15 @@ PR #124 に対する Codex Review は、Broker が書き込み（または `exec
 3. **作成時の Working Set は API 層の作成者の認可（`project.task.run` と各 Repo の ACL）で足り、追加の `STRONG_APPROVAL` は求めない。Orchestrator の Sub-task は親の Working Set の部分集合だけを持てる。`target` のない作成は認め、`target` がない間は `running` にしない**（3 節）でよいか。推奨: はい。
 4. **Revision 0085 より前の試行の状態と `starting_commit` は `task_attempt_state_archive` に退避して Repo に割り当てず、既存の Task は `target` を与えられるまで動かさない**（4 節）でよいか。推奨: はい。
 5. **許可済みの書き込みが実行中の間は、Begin evaluation と Complete を拒否し、停止系の Command と Retry / Restart は止めずに記録する。終わった Task には書き込み・実行を許可しない。落ちた Executor の予約は期限まで残す（Human が解放する操作は今は作らない）**（5 節）でよいか。推奨: はい。
+
+## 承認時の決定（2026-09-28）
+
+Human は、Main Session で上の 5 点について推奨つきの説明を受け、「推奨どおり」と直接回答して承認した（5 点を一括で。個別の変更はない）。**5 点すべてが推奨どおり**である。
+
+1. `project.task.working_set.manage` は Project の Contributor と Manager に与え、Viewer には与えない（1 節）: 推奨どおり。
+2. `project.task.working_set.manage` は委任可能（`delegable=True`）にする（2 節）: 推奨どおり。
+3. 作成時の Working Set は API 層の作成者の認可で足り、追加の `STRONG_APPROVAL` は求めない。Orchestrator の Sub-task は親の Working Set の部分集合だけを持てる。`target` のない作成は認め、`target` がない間は `running` にしない（3 節）: 推奨どおり。
+4. Revision 0085 より前の試行の状態と `starting_commit` は `task_attempt_state_archive` に退避して Repo に割り当てず、既存の Task は `target` を与えられるまで動かさない（4 節）: 推奨どおり。Human は、Migration 0085（退避してから旧い列を削除する）を**推奨どおりに適用する**よう指示した。
+5. 許可済みの書き込みが実行中の間は Begin evaluation と Complete を拒否し、停止系の Command と Retry / Restart は止めずに記録する。終わった Task には書き込み・実行を許可しない。落ちた Executor の予約は期限まで残す（5 節）: 推奨どおり。
+
+承認後に方針を変える場合は、この Decision を書き換えず、新しい Decision から `Supersedes` する。

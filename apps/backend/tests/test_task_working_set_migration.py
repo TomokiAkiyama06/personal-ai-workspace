@@ -138,7 +138,7 @@ class OfflineMigrationTest(unittest.TestCase):
         self.assertNotIn("REVOKE UPDATE (updated_at)", sql)
 
     def test_the_revision_follows_the_head_it_was_written_on(self):
-        self.assertEqual(previous_revision(), "0041")
+        self.assertEqual(previous_revision(), "0034")
 
 
 @requires_postgres
