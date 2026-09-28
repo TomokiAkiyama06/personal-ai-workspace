@@ -5,7 +5,8 @@ trail, the same way the audit retention job does (Decision 0031 4): no new
 column, no CHECK constraint, no migration.
 
 * ``memory.projection.completed``: every step succeeded. ``reason`` is
-  ``memories=N written=N removed=N redacted=N``.
+  ``memories=N written=N removed=N redacted=N``, then `` truncated=N`` when a
+  text too long to scan was cut (Decision 0038 5).
 * ``memory.projection.failed``: a step failed. ``reason`` is
   ``<step>:<code>`` (``check_target:inside_git_work_tree``,
   ``read_database:ProjectionDatabaseError``, ``write_files:PermissionError``): a

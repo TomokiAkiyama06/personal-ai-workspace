@@ -16,12 +16,20 @@ be written over a newer one. The file-system work runs in a thread; a
 cancellation (SIGTERM from systemd) waits for the thread's current step to
 finish, so a file is never left half-written and the lock is never released
 while a write is going on, then records ``<step>:CancelledError`` and propagates.
+A lock the thread took after the cancellation is released at once (the runner
+may live in a long-lived process, Decision 0038 8).
+
+Each file is replaced atomically, but a run that fails while writing can leave
+some directories of the new snapshot next to others of the old one; the next
+successful run repairs that. A reader that copies the directory (PAW-047) takes
+the marker's lock and copies only after a completed run (Decision 0038 9).
 
 The caller (``paw_backend.cli.memory_projection``) turns ``ok`` into the exit
 code the scheduler watches (Decision 0038 6).
 """
 
 import asyncio
+import contextlib
 from collections.abc import Awaitable, Callable, Collection, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -66,8 +74,17 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
-async def _in_thread[T](function: Callable[..., T], *arguments: object) -> T:
-    """Run ``function`` in a thread; a cancellation waits for it, then propagates."""
+async def _in_thread[T](
+    function: Callable[..., T],
+    *arguments: object,
+    discard: Callable[[T], object] | None = None,
+) -> T:
+    """Run ``function`` in a thread; a cancellation waits for it, then propagates.
+
+    What the thread returns after the cancellation never reaches the caller, so
+    ``discard`` gets it (``LockedTarget.close``: the lock the thread took must
+    not stay held by a long-lived process).
+    """
     future = asyncio.ensure_future(asyncio.to_thread(function, *arguments))
     try:
         return await asyncio.shield(future)
@@ -79,7 +96,18 @@ async def _in_thread[T](function: Callable[..., T], *arguments: object) -> T:
                 continue
             except Exception:
                 break
+        if (
+            discard is not None
+            and not future.cancelled()
+            and future.exception() is None
+        ):
+            with contextlib.suppress(Exception):
+                discard(future.result())
         raise
+
+
+def _close(target: LockedTarget) -> None:
+    target.close()
 
 
 def _code(error: BaseException) -> str:
@@ -132,7 +160,9 @@ class MemoryProjectionRunner:
         step = ProjectionStep.CHECK_TARGET
         try:
             try:
-                target = await _in_thread(open_target, self._root, self._protected)
+                target = await _in_thread(
+                    open_target, self._root, self._protected, discard=_close
+                )
                 step = ProjectionStep.READ_DATABASE
                 memories = await self._source.current_versions()
                 step = ProjectionStep.RENDER
@@ -159,6 +189,9 @@ class MemoryProjectionRunner:
                 f"memories={plan.memories} written={report.written} "
                 f"removed={report.removed} redacted={plan.redactions}"
             )
+            if plan.truncations:
+                reason += f" truncated={plan.truncations}"
+
         else:
             action = ProjectionAction.FAILED
             reason = f"{failed_step.value}:{error}"
@@ -172,6 +205,7 @@ class MemoryProjectionRunner:
         return ProjectionRunResult(
             memories=0 if plan is None else plan.memories,
             redactions=0 if plan is None else plan.redactions,
+            truncations=0 if plan is None else plan.truncations,
             report=report,
             failed_step=failed_step,
             error=error,

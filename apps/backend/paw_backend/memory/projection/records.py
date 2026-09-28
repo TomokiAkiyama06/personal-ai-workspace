@@ -54,12 +54,15 @@ class ProjectionPlan:
 
     Only directories that hold at least one memory are in the plan. ``memories``
     is how many memories were rendered and ``redactions`` how many credentials
-    were replaced in their titles and texts (``tools.credentials.redact_text``).
+    were replaced in their titles and texts (``tools.credentials.redact_text``);
+    ``truncations`` how many memories had a text too long to scan, so cut
+    (``truncated: true`` in their front matter; the file is not the whole text).
     """
 
     directories: Mapping[DirectoryKey, Mapping[str, bytes]]
     memories: int
     redactions: int
+    truncations: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,6 +103,7 @@ class ProjectionRunResult:
 
     memories: int = 0
     redactions: int = 0
+    truncations: int = 0
     report: WriteReport = field(default_factory=WriteReport)
     failed_step: ProjectionStep | None = None
     error: str | None = None

@@ -11,7 +11,10 @@ same bytes, whatever order they come in and whenever the run happens.
   sorted by status, type, title and id.
 * LF line ends, UTF-8, exactly one newline at the end. Times are UTC
   (``...Z``). Front matter strings are JSON strings (JSON is valid YAML), so a
-  title with quotes, colons or line breaks cannot break the block.
+  title with quotes, colons or line breaks cannot break the block. The
+  characters JSON leaves as they are but YAML rejects or reads as a line break
+  (DEL, the C1 controls, U+2028, U+2029, U+FEFF, U+FFFE, U+FFFF) are written as
+  ``\\uXXXX``, which both read back as the same character.
 
 The **directory** of a memory is its audience (Decision 0038 2), from the scope
 columns of its current version: ``users/<owner>``, ``projects/<project>``,
@@ -22,7 +25,10 @@ where it is written.
 Recognisable credentials in titles and texts are replaced by ``[REDACTED]``
 (``tools.credentials.redact_text``) before they reach a file (Decision 0038 5):
 the projection is later committed to the Recovery Repository, which must not hold
-secrets. PostgreSQL keeps the text as it is.
+secrets. PostgreSQL keeps the text as it is. A text longer than
+``MAX_TEXT_CHARS`` cannot be scanned whole: its file holds the first
+``MAX_TEXT_CHARS`` characters and ``[TRUNCATED]``, the front matter says
+``truncated: true`` and the run counts it apart from the redactions.
 """
 
 import json
@@ -37,7 +43,7 @@ from paw_backend.memory.projection.records import (
     ProjectedMemory,
     ProjectionPlan,
 )
-from paw_backend.tools.credentials import redact_text
+from paw_backend.tools.credentials import MAX_TEXT_CHARS, redact_text
 
 # Raised when the file format changes; written in every file and the marker.
 FORMAT_VERSION = 1
@@ -118,8 +124,24 @@ def _seconds(value: timedelta) -> int | float:
     return int(seconds) if seconds == int(seconds) else seconds
 
 
+def _yaml_unsafe(character: str) -> bool:
+    code = ord(character)
+    return 0x7F <= code <= 0x9F or character in "\u2028\u2029\ufeff\ufffe\uffff"
+
+
 def _json(value: object) -> str:
-    return json.dumps(value, ensure_ascii=False)
+    """``value`` as JSON that YAML reads back unchanged (see the module docstring).
+
+    Readable characters (Japanese, for example) stay as they are. The escaped
+    characters can only be inside strings: JSON writes none of them elsewhere.
+    """
+    text = json.dumps(value, ensure_ascii=False)
+    if not any(_yaml_unsafe(character) for character in text):
+        return text
+    return "".join(
+        f"\\u{ord(character):04x}" if _yaml_unsafe(character) else character
+        for character in text
+    )
 
 
 def single_line(text: str) -> str:
@@ -151,11 +173,20 @@ def _body(content: str) -> str:
     return text.rstrip("\n") + "\n"
 
 
-def render_memory(memory: ProjectedMemory) -> tuple[bytes, int]:
-    """The file of one memory, and how many credentials were replaced in it."""
-    title, title_redactions = redact_text(memory.title)
-    content, content_redactions = redact_text(memory.content)
+def _redact(text: str) -> tuple[str, int, bool]:
+    """``redact_text``, with its cut of a too long text counted apart."""
+    truncated = len(text) > MAX_TEXT_CHARS
+    result, count = redact_text(text)
+    return result, count - truncated, truncated
+
+
+def render_memory_file(memory: ProjectedMemory) -> tuple[bytes, int, bool]:
+    """The file of one memory, how many credentials were replaced in it, and
+    whether a text was too long to scan and so was cut (``truncated: true``)."""
+    title, title_redactions, title_truncated = _redact(memory.title)
+    content, content_redactions, content_truncated = _redact(memory.content)
     redactions = title_redactions + content_redactions
+    truncated = title_truncated or content_truncated
     scope_key = {
         MemoryScope.USER.value: ("owner_user_id", memory.owner_user_id),
         MemoryScope.PROJECT.value: ("project_id", memory.project_id),
@@ -197,6 +228,8 @@ def render_memory(memory: ProjectedMemory) -> tuple[bytes, int]:
     fields.append(("version_created_at", _time(memory.created_at)))
     if redactions:
         fields.append(("redactions", redactions))
+    if truncated:
+        fields.append(("truncated", True))
     lines = ["---", *(f"{key}: {_json(value)}" for key, value in fields), "---"]
     text = (
         "\n".join(lines)
@@ -207,7 +240,13 @@ def render_memory(memory: ProjectedMemory) -> tuple[bytes, int]:
         + "\n\n"
         + _body(content)
     )
-    return text.encode("utf-8"), redactions
+    return text.encode("utf-8"), redactions, truncated
+
+
+def render_memory(memory: ProjectedMemory) -> tuple[bytes, int]:
+    """The file of one memory, and how many credentials were replaced in it."""
+    data, redactions, _ = render_memory_file(memory)
+    return data, redactions
 
 
 def _status_label(memory: ProjectedMemory) -> str:
@@ -261,17 +300,21 @@ def render_projection(memories: Iterable[ProjectedMemory]) -> ProjectionPlan:
         seen.add(memory.memory_id)
         grouped.setdefault(directory_for(memory), []).append(memory)
     directories: dict[DirectoryKey, dict[str, bytes]] = {}
-    redactions = 0
+    redactions = truncations = 0
     for key in sorted(grouped):
         files: dict[str, bytes] = {}
         for memory in grouped[key]:
-            data, count = render_memory(memory)
+            data, count, truncated = render_memory_file(memory)
             files[memory_file_name(memory.memory_id)] = data
             redactions += count
+            truncations += truncated
         files[INDEX_FILE] = render_index(key, grouped[key])
         directories[key] = files
     return ProjectionPlan(
-        directories=directories, memories=len(seen), redactions=redactions
+        directories=directories,
+        memories=len(seen),
+        redactions=redactions,
+        truncations=truncations,
     )
 
 
@@ -289,6 +332,7 @@ __all__ = [
     "memory_file_name",
     "render_index",
     "render_memory",
+    "render_memory_file",
     "render_projection",
     "single_line",
 ]

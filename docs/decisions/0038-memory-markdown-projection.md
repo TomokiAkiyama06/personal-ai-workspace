@@ -62,8 +62,8 @@ Issue の受け入れ条件は「PostgreSQL を Source of Truth として HDD �
 
 ### 4. 形式: diff-friendly で決定的な Markdown
 
-- 各 File: `---` で囲んだ Front Matter（Key の順は固定。値は JSON の文字列・数値・真偽値。JSON は YAML として読める）、生成の注記（`<!-- Generated from PostgreSQL ... Do not edit ... -->`）、`# <Title>`、本文。
-- Front Matter の Key: `projection_format`（`1`）、`memory_id`、`version`、`scope`、Scope の ID、`title`、`memory_type`、`status`、`confirmation_state`、`importance`、`pinned`、`freshness_policy`、値があるときだけ `verified_at`・`revalidate_after_seconds`・`revalidate_triggers`（整列）・`expires_at`・`commit_sha`・`branch`・`stale_since`、`version_created_at`、置換があったときだけ `redactions`。
+- 各 File: `---` で囲んだ Front Matter（Key の順は固定。値は JSON の文字列・数値・真偽値。JSON は YAML として読める。ただし JSON が Escape しないが YAML が拒む、または改行と読む文字（DEL・C1 制御文字 U+0080〜U+009F・U+2028・U+2029・U+FEFF・U+FFFE・U+FFFF）は `\uXXXX` で書く。日本語などの読める文字はそのまま）、生成の注記（`<!-- Generated from PostgreSQL ... Do not edit ... -->`）、`# <Title>`、本文。
+- Front Matter の Key: `projection_format`（`1`）、`memory_id`、`version`、`scope`、Scope の ID、`title`、`memory_type`、`status`、`confirmation_state`、`importance`、`pinned`、`freshness_policy`、値があるときだけ `verified_at`・`revalidate_after_seconds`・`revalidate_triggers`（整列）・`expires_at`・`commit_sha`・`branch`・`stale_since`、`version_created_at`、置換があったときだけ `redactions`、本文を切ったときだけ `truncated: true`（5）。
 - 改行は LF、UTF-8、末尾の改行は 1 つ。時刻は UTC（`...Z`）。**実行の時刻は File に書かない**（変わらない Memory は同じ bytes になる）。
 - 変わらない File は書き直さない（更新時刻も変えない）。Git の差分には変わった Memory だけが出る。
 - `INDEX.md` は Status・種類・Title・ID の順に並べ、表の区切り文字（`|`）と改行を Escape する。
@@ -73,15 +73,17 @@ Issue の受け入れ条件は「PostgreSQL を Source of Truth として HDD �
 - Title と本文の中の、認識できる Credential（`tools.credentials.redact_text`: GitHub・AWS・OpenAI などの Token、Private Key、`password = ...` の形など）を `[REDACTED]` に置き換えてから File に書く。件数を Front Matter の `redactions` と、Audit の `redacted=N` に残す。
 - PostgreSQL の本文は変えない（Source of Truth）。投影は PAW-047 で Git に入り、要件は Git に Secret を入れないとするため。
 - 検出は最善の努力であり、すべての Secret の形を見つけられるわけではない（`tools/credentials.py` と同じ限界）。
+- **検査できない長さの本文**: `redact_text` は `MAX_TEXT_CHARS`（1,000,000 文字）を超える文字列を検査せず、先頭の `MAX_TEXT_CHARS` 文字に `[TRUNCATED]` を付けて返す（検査していない部分を Git へ出さないため）。`memory_versions.content` には長さの上限がないので、その Memory の File は本文の全体ではない。これを置換（`redactions`）とは数えず、Front Matter の `truncated: true`、Audit の ` truncated=N`（`completed` の `reason` の末尾、1 件以上のときだけ）、`run` の出力で示す。実行は成功のまま（1 件の長い Memory が 5 分ごとに `OnFailure=` を起こし続けないため）。本文の全体は PostgreSQL（正本）と、その Backup にある。
 
 ### 6. 実行と失敗の通知
 
 - Server ローカルの Command `python -m paw_backend.cli memory-projection-run` を、systemd timer（`paw-memory-projection.timer`、`OnCalendar=*:0/5`、`Persistent=true`）が 5 分ごとに起動する（Decision 0031 と同じ型。cron でも同じ Command を使える）。
 - 1 回の実行: 出力先を確かめて Lock（Marker の `flock`、非 Blocking）→ Snapshot を読む → Render → 書く → 結果を Audit へ。Lock は読み取りの前から書き終わるまで持つ（古い Snapshot が新しいものを上書きしない）。同時の 2 つ目の実行は何もしない（終了コード 1、記録しない）。
 - **Audit**: 実行ごとに `audit_events` に 1 行（別の Transaction）。`memory.projection.completed`（`reason = memories=N written=N removed=N redacted=N`）か `memory.projection.failed`（`reason = <step>:<code>`。`<step>` は `check_target` / `read_database` / `render` / `write_files`、`<code>` は閉じた語彙か例外の型の名前。**Path・例外の Message・Memory の文字列は書かない**）。`resource_kind = memory_projection_run`、`decision = allow`、Actor なし。列・制約・Migration は増やさない。
-- **終了コード**: `0` 成功、`1` 拒否（使い方、同時実行）、`2` 環境（設定、URL・Directory が未設定、DB に届かない）、`3` 投影の失敗（出力先の拒否、読み・Render・書きの失敗、SIGTERM、結果を記録できない）。0 以外で `OnFailure=paw-memory-projection-failure.service` が起動し、`crit` の Journal と `wall` を出す（通知先は配備で差し替える）。
+- **終了コード**: `0` 成功、`1` 拒否（使い方、同時実行）、`2` 環境（設定、URL・Directory が未設定、DB に届かない。`run` では「読み取りが失敗し、その失敗の記録もできなかった」を DB に届かないとみなす）、`3` 投影の失敗（出力先の拒否、読み・Render・書きの失敗、SIGTERM、結果を記録できない）。0 以外で `OnFailure=paw-memory-projection-failure.service` が起動し、`crit` の Journal と `wall` を出す（通知先は配備で差し替える）。
 - **監視**: 読み取りだけの `memory-projection-check [--max-age-minutes N]`（既定 30）。最後の実行が失敗、または N 分以内に成功がなければ終了コード 3。Backup / Recovery の画面（後続）は同じ関数（`projection_status`）で「Last successful projection generation」と最後の失敗を示せる。
-- 失敗した実行は既存の File を消さない（読み取りの失敗で投影が空になることはない）。SIGTERM は書いている File を書き終えてから取り消しになり、`<step>:CancelledError` を記録する。
+- 出力先の確認・読み取り・Render で失敗した実行は、既存の File を書き換えも消しもしない（読み取りの失敗で投影が空になることはない）。**書き込みの途中で失敗した実行**（ENOSPC、後の Directory の `unsafe_entry`、`TimeoutStopSec` の後の SIGKILL など）は、File ごとには原子的（一時名に書いて `rename`）だが、Directory を順に処理するので、処理を終えた Directory（削除を含む）と、まだの Directory が混ざった状態を残し得る（例: `INDEX.md` が書かれていない File を指す）。この状態は Audit の `memory.projection.failed` で分かり、次に成功した実行が全体を直す。読む側の条件は 9。
+- SIGTERM は書いている File を書き終えてから取り消しになり、`<step>:CancelledError` を記録する。出力先を開いている間の取り消しでも、取った Lock はすぐ放す（Runner を Backend の Process の中から呼んでも、Lock が残らない。8）。
 
 ### 7. 権限: Backend の OS User だけが読める、Audience ごとの Directory
 
@@ -100,6 +102,7 @@ Issue の受け入れ条件は「PostgreSQL を Source of Truth として HDD �
 ### 9. Recovery Repository（PAW-047）との関係
 
 - Projection の Directory は git の Work Tree の中に置けない（1）。PAW-047 の Batch は、この Directory を Dedicated Recovery Repository の Checkout（別の場所）の `memory/` へ写して commit / push する（MEMORY_ARCHITECTURE.md 5 の図 `/srv/personal-ai/memory/ → Dedicated Recovery Repository / memory/` のとおり）。
+- **PAW-047 が写すときの条件**: 写す間、Marker（`.paw-memory-projection`）の `flock` を取り（投影の実行と重ならない）、その Lock を持ったまま `projection_status` を読み、**最後の実行が `memory.projection.completed`** のときだけ写す（書き込みの途中で失敗した、新旧が混ざった Tree を commit しない。6）。最後の実行が失敗なら、写さずに Backup の失敗として示し、次の回に再び試す。
 - Projection の Directory 自体を Recovery Repository の Work Tree にする方式を PAW-047 が選ぶなら、そのときに 1 の「git の Work Tree の中ではない」を、設定した Recovery Repository だけを許す形に変える Decision を足す。
 
 ## 選定理由
@@ -149,8 +152,10 @@ Issue の受け入れ条件は「PostgreSQL を Source of Truth として HDD �
    推奨: 提案どおり。
 8. **直接編集・即時の再生成・手動実行**: File は毎回上書き（直接編集は取り込まない）。保存ごとの即時の再生成と画面からの手動実行は後続（Memory UI / PAW-047）。
    推奨: 提案どおり（後続の課題）。
-9. **Recovery Repository との関係**: Projection の Directory は Work Tree の外に置き、PAW-047 が Recovery Repository へ写す。別の方式を選ぶなら新しい Decision で 1 を変える。
+9. **Recovery Repository との関係**: Projection の Directory は Work Tree の外に置き、PAW-047 が Recovery Repository へ写す。写す間は Marker の Lock を取り、最後の実行が成功のときだけ写す。別の方式を選ぶなら新しい Decision で 1 を変える。
    推奨: 提案どおり。
+10. **検査できない長さの本文**: 1,000,000 文字を超える本文は先頭だけを投影し、`truncated: true` と Audit の `truncated=N` で示す（置換の件数とは別。実行は成功のまま）。代わりに「分割して検査し全体を出す」（Private Key のように行を跨ぐ Secret を分割の境で見落とし得る）や「実行を失敗にする」（直すまで 5 分ごとに通知が続く）もある。
+   推奨: 提案どおり（本文の長さの上限は Memory の書き込みの側の後続の課題）。
 
 ## 承認後の扱い
 

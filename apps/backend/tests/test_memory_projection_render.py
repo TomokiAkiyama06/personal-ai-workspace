@@ -7,6 +7,7 @@ own directory; credentials never reach a file.
 
 import json
 import random
+import re
 import unittest
 from datetime import timedelta
 from uuid import uuid4
@@ -20,8 +21,25 @@ from paw_backend.memory.projection import (
     render_memory,
     render_projection,
 )
+from paw_backend.tools.credentials import MAX_TEXT_CHARS
 
 from .projection_support import T0, memory
+
+# What a YAML reader rejects (the complement of YAML's printable set, as PyYAML's
+# reader checks it) or reads as a line break inside a quoted scalar.
+_YAML_NOT_PRINTABLE = re.compile(
+    "[^\x09\x0a\x0d\x20-\x7e\x85\xa0-\ud7ff\ue000-\ufffd\U00010000-\U0010ffff]"
+)
+_YAML_LINE_BREAKS = re.compile("[\x85\u2028\u2029]")
+
+
+def assert_reads_as_yaml(test: unittest.TestCase, block: str) -> None:
+    """Each line of ``block`` is ``key: <JSON>`` a YAML reader takes unchanged."""
+    test.assertIsNone(_YAML_NOT_PRINTABLE.search(block))
+    test.assertIsNone(_YAML_LINE_BREAKS.search(block))
+    test.assertNotIn("\ufeff", block)  # a byte order mark
+    for line in block.split("\n"):
+        test.assertRegex(line, r"^[a-z_]+: [\[\"0-9tfn-]")
 
 
 def front_matter(data: bytes) -> dict[str, object]:
@@ -137,6 +155,51 @@ class MemoryFileTest(unittest.TestCase):
         self.assertEqual(fields["title"], title)
         self.assertEqual(fields["status"], "active")
         self.assertIn(b'# He said: "yes" --- status: deprecated\n', data)
+
+    def test_the_front_matter_reads_as_yaml_with_control_characters(self):
+        # JSON leaves DEL and the C1 controls unescaped (ensure_ascii=False); YAML
+        # rejects them or, for NEL / U+2028 / U+2029, reads a line break.
+        for character in ("\x7f", "\x80", "\x85", "\x9f", "\u2028", "\u2029"):
+            title = f"a{character}b 日本語"
+            data = render_memory(memory(title=title, branch=f"x{character}"))[0]
+            text = data.decode("utf-8")
+            block = text[4 : text.index("\n---\n")]
+            with self.subTest(character=hex(ord(character))):
+                assert_reads_as_yaml(self, block)
+                fields = front_matter(data)
+                self.assertEqual(fields["title"], title)
+                self.assertEqual(fields["branch"], f"x{character}")
+                self.assertNotIn(character, block)
+                self.assertIn("日本語", block)  # still readable
+
+    def test_the_whole_front_matter_reads_as_yaml(self):
+        value = memory(
+            title='He said: "yes" # no comment\n- item',
+            revalidate_after=timedelta(days=1),
+            revalidate_triggers=("model_changed",),
+            pinned=True,
+        )
+        data = render_memory(value)[0]
+        text = data.decode("utf-8")
+        assert_reads_as_yaml(self, text[4 : text.index("\n---\n")])
+        self.assertEqual(front_matter(data)["title"], value.title)
+
+    def test_a_text_too_long_to_scan_is_marked_truncated_not_redacted(self):
+        content = "x" * (MAX_TEXT_CHARS + 10)
+        data, redactions = render_memory(memory(content=content))
+        fields = front_matter(data)
+        self.assertEqual(redactions, 0)
+        self.assertNotIn("redactions", fields)
+        self.assertIs(fields["truncated"], True)
+        self.assertIn(b"[TRUNCATED]", data)
+        # A text that fits is not marked.
+        self.assertNotIn("truncated", front_matter(render_memory(memory())[0]))
+
+    def test_truncations_are_counted_apart_from_redactions(self):
+        token = "ghp_" + "a1B2" * 9
+        long = token + "\n" + "x" * MAX_TEXT_CHARS
+        plan = render_projection([memory(content=long), memory(content=token)])
+        self.assertEqual((plan.redactions, plan.truncations), (2, 1))
 
     def test_unicode_is_kept_readable(self):
         data = render_memory(memory(title="日本語のメモ", content="内容"))[0]

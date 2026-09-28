@@ -8,7 +8,9 @@ recorded and the lock released. Temporary directories only.
 
 import asyncio
 import os
+import threading
 import unittest
+from unittest import mock
 
 from paw_backend.db import Database
 from paw_backend.memory.projection import (
@@ -20,6 +22,8 @@ from paw_backend.memory.projection import (
     ProjectionStep,
     open_target,
 )
+from paw_backend.memory.projection import runner as runner_module
+from paw_backend.tools.credentials import MAX_TEXT_CHARS
 
 from .projection_support import T0, TemporaryRoot, memory, tree
 from .support import make_settings
@@ -93,6 +97,16 @@ class SuccessTest(RunnerTestCase):
         files = tree(self.tmp.root)
         self.assertEqual(len(files), 5)  # + the marker
         self.assertFalse(any(token.encode() in data for data in files.values()))
+
+    async def test_a_truncated_text_is_recorded_apart_from_redactions(self):
+        values = [memory(content="x" * (MAX_TEXT_CHARS + 1)), memory()]
+        result = await self.runner(FakeSource(values)).run()
+        self.assertTrue(result.ok)
+        self.assertEqual((result.redactions, result.truncations), (0, 1))
+        self.assertEqual(
+            self.recorder.rows[-1][1],
+            "memories=2 written=4 removed=0 redacted=0 truncated=1",
+        )
 
     async def test_the_lock_is_released_after_the_run(self):
         await self.runner(FakeSource()).run()
@@ -178,6 +192,51 @@ class FailureTest(RunnerTestCase):
             [("memory.projection.failed", "read_database:CancelledError", T0)],
         )
         open_target(self.tmp.root, self.tmp.homes).close()
+
+    async def test_a_cancellation_while_the_target_opens_releases_the_lock(self):
+        entered, gate = threading.Event(), threading.Event()
+        real_open = runner_module.open_target
+
+        def slow_open(root, protected):
+            entered.set()
+            gate.wait(10)
+            return real_open(root, protected)
+
+        source = FakeSource([memory()])
+        with mock.patch.object(runner_module, "open_target", slow_open):
+            task = asyncio.ensure_future(self.runner(source).run())
+            await asyncio.to_thread(entered.wait, 10)
+            task.cancel()
+            await asyncio.sleep(0)
+            gate.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        self.assertEqual(source.calls, 0)
+        self.assertEqual(
+            self.recorder.rows,
+            [("memory.projection.failed", "check_target:CancelledError", T0)],
+        )
+        # The lock the thread took was released, not left with the process.
+        open_target(self.tmp.root, self.tmp.homes).close()
+
+    async def test_a_run_that_fails_while_writing_is_repaired_by_the_next(self):
+        project, shared = memory(scope="project"), memory(scope="shared")
+        await self.runner(FakeSource([project])).run()
+        # ``shared`` (written after ``projects``) cannot be written this time.
+        (self.tmp.root / "shared").write_text("not a directory")
+        changed = [memory(scope="project", project_id=project.project_id), shared]
+        result = await self.runner(FakeSource(changed)).run()
+        self.assertEqual(result.failed_step, ProjectionStep.WRITE_FILES)
+        self.assertEqual(self.recorder.rows[-1][1], "write_files:unsafe_entry")
+        # The next run, once the cause is gone, holds exactly the projection.
+        (self.tmp.root / "shared").unlink()
+        result = await self.runner(FakeSource(changed)).run()
+        self.assertTrue(result.ok)
+        expected = {MARKER_NAME}
+        for value in changed:
+            top = f"projects/{value.project_id}" if value.project_id else "shared"
+            expected |= {f"{top}/{value.memory_id}.md", f"{top}/INDEX.md"}
+        self.assertEqual(set(tree(self.tmp.root)), expected)
 
     async def test_the_reason_fits_the_audit_column(self):
         many = [memory() for _ in range(3)]

@@ -3558,8 +3558,8 @@ python -m paw_backend.cli memory-projection-check --max-age-minutes 30   # 監�
 ```
 
 - 接続は `PAW_DATABASE_URL`（Application の Role）。`memory_versions` の SELECT と `audit_events` の INSERT / SELECT（Revision `0040` / `0025` / `0086` の権限）だけを使います。
-- 実行ごとに `audit_events` へ 1 行（別の Transaction）: `memory.projection.completed`（`reason = memories=N written=N removed=N redacted=N`）か `memory.projection.failed`（`reason = <step>:<code>`。Path・例外の Message・Memory の文字列は書かない）。`resource_kind = memory_projection_run`。
-- 終了コードは `0` 成功、`1` 拒否（同時実行など）、`2` 環境（設定・DB）、`3` 投影の失敗。0 以外で `paw-memory-projection-failure.service`（`OnFailure=`）が `crit` の Journal と `wall` を出します。失敗した実行は既存の File を消しません。
+- 実行ごとに `audit_events` へ 1 行（別の Transaction）: `memory.projection.completed`（`reason = memories=N written=N removed=N redacted=N`、長すぎて検査できない本文を切ったときは続けて ` truncated=N`）か `memory.projection.failed`（`reason = <step>:<code>`。Path・例外の Message・Memory の文字列は書かない）。`resource_kind = memory_projection_run`。
+- 終了コードは `0` 成功、`1` 拒否（同時実行など）、`2` 環境（設定・DB）、`3` 投影の失敗。`run` で DB に届かない（読み取りも失敗の記録も失敗した）ときも `2` です。0 以外で `paw-memory-projection-failure.service`（`OnFailure=`）が `crit` の Journal と `wall` を出します。読み取りの失敗は既存の File を消しません。書き込みの途中の失敗では、File ごとには原子的ですが、Directory によって新旧の Snapshot が混ざることがあり、次に成功した実行が直します（PAW-047 は Marker の Lock を取り、最後の実行が成功したときだけ写す。Decision 0038 の 9）。
 - `deploy/systemd/paw-memory-projection.timer` は 5 分ごと（`OnCalendar=*:0/5`、`Persistent=true`）。Service は Backend と同じ OS User で、`ProtectHome=true`・`ProtectSystem=strict`・`ReadWritePaths=/srv/personal-ai/memory`・`UMask=0077` です。`projection_status` は最後の実行と最後の成功を返します（Backup / Recovery の画面の「Last successful projection generation」に使える）。
 
 ### 制限と未確認の点

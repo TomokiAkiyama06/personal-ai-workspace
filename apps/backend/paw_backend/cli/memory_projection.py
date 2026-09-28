@@ -14,7 +14,8 @@ Exit codes (the convention of ``paw_backend.cli.retention``):
   (nothing was done);
 * ``2``  environment error: the configuration is invalid, ``PAW_DATABASE_URL``
   or ``PAW_MEMORY_PROJECTION_DIR`` is not set, or the database cannot be reached
-  (nothing could be recorded);
+  (``run``: the read failed and its failure could not be recorded either;
+  nothing could be recorded);
 * ``3``  the projection FAILED: the directory was refused (inside a git work
   tree or a home directory, not empty and not the projection's, not owned by this
   user, ...), the read, the rendering or the writing failed, the run was
@@ -50,6 +51,7 @@ from paw_backend.memory.projection import (
     ProjectionAction,
     ProjectionBusyError,
     ProjectionRunResult,
+    ProjectionStep,
     projection_status,
     system_home_directories,
 )
@@ -296,6 +298,11 @@ def _show(result: ProjectionRunResult, err: TextIO | None) -> int:
         f"unchanged={report.unchanged} removed={report.removed} "
         f"unmanaged={report.unmanaged} redacted={result.redactions}"
     )
+    if result.truncations:
+        counts += (
+            f" truncated={result.truncations} (a text too long to scan was cut: "
+            "those files are not the whole memory)"
+        )
     recorded = (
         "The outcome was recorded in audit_events."
         if result.audited
@@ -311,6 +318,15 @@ def _show(result: ProjectionRunResult, err: TextIO | None) -> int:
             "not be recorded in audit_events.",
         )
         return EXIT_PROJECTION_FAILED
+    if result.failed_step is ProjectionStep.READ_DATABASE and not result.audited:
+        # Neither the read nor the failure row reached the database: it cannot
+        # be reached (Decision 0038 6), an environment error like ``check``'s.
+        _say(
+            err,
+            f"Database error ({result.error}): {_DATABASE_HINT} The failure "
+            "could not be recorded in audit_events.",
+        )
+        return EXIT_ENVIRONMENT
     _say(
         err,
         f"FAILED at {result.failed_step.value} ({result.error}). {recorded}",

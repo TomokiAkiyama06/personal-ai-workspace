@@ -86,6 +86,20 @@ class ArgumentTest(unittest.TestCase):
         self.assertEqual(code, cli.EXIT_ENVIRONMENT)
         self.assertNotIn("hunter2", err)
 
+    def test_a_run_against_an_unreachable_database_is_an_environment_error(self):
+        # Decision 0038 6: the database cannot be reached -> 2, not 3.
+        tmp = TemporaryRoot(self)
+        code, _, err = run(
+            ["memory-projection-run"],
+            PAW_DATABASE_URL="postgresql://user:hunter2@127.0.0.1:1/none",
+            PAW_DATABASE_TIMEOUT_SECONDS="1",
+            PAW_MEMORY_PROJECTION_DIR=str(tmp.root),
+        )
+        self.assertEqual(code, cli.EXIT_ENVIRONMENT)
+        self.assertIn("Database error", err)
+        self.assertNotIn("hunter2", err)
+        self.assertNotIn(str(tmp.root), err)
+
 
 @requires_postgres
 class CommandTest(unittest.TestCase):
