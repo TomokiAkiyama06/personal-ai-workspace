@@ -1279,6 +1279,7 @@ class HoldsLeaseTest(QueueTestCase):
         self.assertEqual(caught.exception.parameter, "now")
 
 
+@requires_postgres
 class IndexPlanTest(QueueTestCase):
     """Every queue query can use the index that serves it, whatever the plan mode.
 
