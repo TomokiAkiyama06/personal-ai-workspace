@@ -41,6 +41,7 @@
 | [0034](0034-memory-versioning-freshness.md) | Memory の Relation の意味・手動編集の Version（誰がどの Scope を変えられるか）・手動で書ける鮮度・Stale Candidate / 期限切れ / Session 終了の処理（PAW-042。Issue #36） | Approved |
 | [0035](0035-working-set-capability-grants-and-legacy-tasks.md) | `project.task.working_set.manage` の付与先と委任、作成時の Working Set、Revision 0085 より前の Task の状態の退避（Issue #85。Decision 0030 が決めていない点） | Approved |
 | [0037](0037-gpu-compute-scheduler.md) | GPU / Compute Resource Scheduler の方針（状態をプロセス内に持つ、KV Cache の Token による Admission、Actual / Reserved の VRAM と Safety Headroom の暫定値、Class の優先、縮退の段と復帰、Exclusive、Local / Cloud の振り分け。PAW-036、Issue #32） | Approved |
+| [0042](0042-gpu-free-vram-admission.md) | 観測した空き VRAM による Admission の追加の安全確認（GPU 利用率は使わない、Footprint の外に VRAM を要る仕事は空きが要求量 + Headroom に足りなければ待たせて警告、Exclusive は外の Workload の VRAM が空くまで Unload せずに待つ。Human が方向を直接決定、細部を提案。Decision 0037 への追補。Issue #145） | Proposed |
 
 運用は [AGENTS.md](../../AGENTS.md) の「仕様変更」に従います。
 

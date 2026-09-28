@@ -265,7 +265,13 @@ class ValidationTest(unittest.IsolatedAsyncioTestCase):
             dict(resource_class=CO, deployment=None),
             dict(resource_class=CO, deployment="main", context_tokens=-1),
             dict(resource_class=CO, deployment="main", context_tokens=True),
-            dict(resource_class=CO, deployment="main", vram_bytes=1),
+            # Decision 0042: a shared request may name the VRAM it allocates of
+            # its own (``test_compute_free_vram.py``), never a negative amount,
+            # a bool or more than any GPU.
+            dict(resource_class=CO, deployment="main", vram_bytes=-1),
+            dict(resource_class=CO, deployment="main", vram_bytes=True),
+            dict(resource_class=CO, deployment="main", vram_bytes=(1 << 50) + 1),
+            dict(resource_class=CO, deployment="main", vram_bytes=1.5),
             dict(resource_class=ResourceClass.EXCLUSIVE, vram_bytes=0),
             dict(
                 resource_class=ResourceClass.EXCLUSIVE, deployment="main", vram_bytes=1

@@ -3,8 +3,10 @@
 Admission to the local models by resource class and KV cache, actual / reserved
 VRAM with a safety headroom, model residency with the relief steps under VRAM
 pressure (Memory Worker unload, Embedding / Reranker CPU fallback), the Exclusive
-class, and Local / Cloud hybrid placement. See ``scheduler.py`` and
-``docs/decisions/0037-gpu-compute-scheduler.md`` (Proposed).
+class, and Local / Cloud hybrid placement. See ``scheduler.py``,
+``docs/decisions/0037-gpu-compute-scheduler.md`` (Approved) and, for the check
+on the observed free VRAM, ``docs/decisions/0042-gpu-free-vram-admission.md``
+(Proposed).
 
 GPU safety: the probe only reads (``nvidia-smi --query-*``); models are loaded
 and unloaded only through an injected :class:`ModelControl`, whose real adapter
@@ -13,6 +15,7 @@ changes the GPU's clocks, persistence, power limits or MIG.
 """
 
 from paw_backend.compute.accounting import VramView
+from paw_backend.compute.alerts import DeferredWork, VramDeferral, VramWarningSink
 from paw_backend.compute.config import ComputeConfig, DeploymentSpec
 from paw_backend.compute.control import (
     CommandModelControl,
@@ -74,6 +77,7 @@ __all__ = [
     "ComputeScheduler",
     "ComputeStatus",
     "ComputeUnavailableError",
+    "DeferredWork",
     "DeploymentCommands",
     "DeploymentSpec",
     "DeploymentState",
@@ -101,6 +105,8 @@ __all__ = [
     "ScheduledMemoryWorker",
     "SchedulerMode",
     "TrackerLateGpuCharge",
+    "VramDeferral",
     "VramView",
+    "VramWarningSink",
     "estimate_context_tokens",
 ]

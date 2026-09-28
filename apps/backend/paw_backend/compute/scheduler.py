@@ -39,6 +39,17 @@ Exclusive
     is free, and only then grants the lease. Any failure puts the scheduler back
     to normal. Releasing the lease lets ``refresh()`` load the models again.
 
+Observed free VRAM (Decision 0042, Proposed)
+    Processes the scheduler does not manage are invisible to its leases, but not
+    to the probe. Work that allocates VRAM of its own (a request with
+    ``vram_bytes``) is admitted only when the probe shows that much free beyond
+    the headroom, after what the scheduler promised and the probe does not show
+    yet; otherwise it waits (``INSUFFICIENT_FREE_VRAM``) and a rate-limited
+    warning goes to the log and the injected sink (``alerts.py``). An Exclusive
+    job whose VRAM would not be free even with every model unloaded (another
+    workload holds it) waits the same way before anything is drained or
+    unloaded. The GPU utilisation is never used for admission.
+
 Everything happens on one event loop; the state changes between awaits are
 synchronous, so the only lock serialises the model actions (and the Exclusive
 transition) with each other.
@@ -57,8 +68,11 @@ from paw_backend.compute.accounting import (
     DeploymentUsage,
     VramView,
     account,
+    free_vram_admits,
+    free_vram_after_emptying,
     headroom_bytes,
 )
+from paw_backend.compute.alerts import DeferredWork, VramDeferral, VramWarnings
 from paw_backend.compute.concurrency import (
     KvState,
     kv_refusal,
@@ -115,7 +129,10 @@ class ComputeRequest:
 
     ``deployment``: the model the work runs on (required, except for Exclusive).
     ``context_tokens``: prompt and answer, what the work reserves in the model's
-    KV cache. ``vram_bytes``: what an Exclusive job needs free. ``allow_cloud``:
+    KV cache. ``vram_bytes``: what an Exclusive job needs free; for the other
+    classes, the VRAM the work allocates of its own, outside the model's
+    reserved footprint (0 for work that only uses the model's KV cache; Decision
+    0042). ``allow_cloud``:
     the caller may run the work on a cloud agent instead (it has checked the
     task's permission and quota); never for Exclusive.
     """
@@ -148,7 +165,7 @@ class ComputeRequest:
                 raise InvalidComputeArgumentError("allow_cloud")
             return
         check_name("deployment", self.deployment)
-        if self.vram_bytes != 0:
+        if not 0 <= self.vram_bytes <= _MAX_BYTES:
             raise InvalidComputeArgumentError("vram_bytes")
 
 
@@ -186,7 +203,8 @@ class ComputeLease:
         self.deployment = request.deployment
         self.placement = placement
         self.tokens = tokens
-        self.vram_bytes = request.vram_bytes
+        # Only work on the GPU holds VRAM (a CPU or cloud lease holds none).
+        self.vram_bytes = request.vram_bytes if placement is Placement.LOCAL_GPU else 0
         self.revoked = asyncio.Event()
         self.granted_at = scheduler._clock.monotonic()
         self._scheduler = scheduler
@@ -265,6 +283,10 @@ class ComputeStatus:
     # lease that was never released keeps it for ever: an administrator ends it
     # with ``force_release_exclusive()``.
     exclusive_age_seconds: float | None = None
+    # Waiters whose last refusal was ``INSUFFICIENT_FREE_VRAM``, and whether an
+    # Exclusive job waits for VRAM another workload holds (Decision 0042).
+    vram_waiting: int = 0
+    exclusive_waiting_for_vram: bool = False
 
     def deployment(self, name: str) -> DeploymentStatus | None:
         for deployment in self.deployments:
@@ -332,6 +354,7 @@ class ComputeScheduler:
         *,
         control: object | None = None,
         clock: Clock | None = None,
+        vram_warnings: object | None = None,
     ) -> None:
         if not isinstance(config, ComputeConfig):
             raise TypeError("config must be a ComputeConfig")
@@ -346,6 +369,11 @@ class ComputeScheduler:
         self._probe = probe
         self._control = control
         self._clock = clock
+        self._warnings = VramWarnings(
+            clock.monotonic,
+            interval_seconds=config.vram_warning_interval_seconds,
+            sink=vram_warnings,
+        )
         self._deployments: dict[str, _Deployment] = {
             spec.name: _Deployment(spec, spec.initial) for spec in config.deployments
         }
@@ -357,8 +385,13 @@ class ComputeScheduler:
         self._relief = Relief.NONE
         self._mode = SchedulerMode.NORMAL
         self._exclusive: ComputeLease | None = None
-        # What was external when the Exclusive lease was granted (see account).
-        self._exclusive_baseline = 0
+        # What was external when the VRAM leases (an Exclusive job's, or the
+        # shared ones with ``vram_bytes``) last changed (see account).
+        self._extra_baseline = 0
+        # An Exclusive request is being served (it may be waiting for VRAM
+        # another workload holds while the mode is still normal).
+        self._exclusive_pending = False
+        self._exclusive_waits_for_vram = False
         self._drained: asyncio.Event | None = None
         self._cloud: set[ComputeLease] = set()
         self._waiters: list[_Waiter] = []
@@ -432,6 +465,8 @@ class ComputeScheduler:
             raise InvalidComputeArgumentError("request")
         refusal, placement = self._judge(request, queue=True)
         if refusal is not None:
+            if refusal is Refusal.INSUFFICIENT_FREE_VRAM:
+                self._warn_request(request)
             return Admission(None, refusal)
         return Admission(self._grant(request, placement), None)
 
@@ -460,6 +495,10 @@ class ComputeScheduler:
         refusal, placement = self._judge(request, queue=True)
         if refusal is None:
             return self._grant(request, placement)
+        if refusal is Refusal.INSUFFICIENT_FREE_VRAM and not (
+            request.allow_cloud and cloud_after == 0
+        ):
+            self._warn_request(request, gave_up=timeout == 0)
         if refusal in PERMANENT_REFUSALS or (request.allow_cloud and cloud_after == 0):
             if request.allow_cloud:
                 return self._grant(request, Placement.CLOUD)
@@ -487,6 +526,8 @@ class ComputeScheduler:
         future.cancel()
         if request.allow_cloud:
             return self._grant(request, Placement.CLOUD)
+        if waiter.last is Refusal.INSUFFICIENT_FREE_VRAM:
+            self._warn_request(request, gave_up=True)
         raise ComputeUnavailableError(waiter.last)
 
     def parallelism(
@@ -567,6 +608,12 @@ class ComputeScheduler:
                 if self._exclusive is None
                 else self._clock.monotonic() - self._exclusive.granted_at
             ),
+            vram_waiting=sum(
+                1
+                for waiter in self._waiters
+                if waiter.last is Refusal.INSUFFICIENT_FREE_VRAM
+            ),
+            exclusive_waiting_for_vram=self._exclusive_waits_for_vram,
         )
 
     # -- the probe ------------------------------------------------------------
@@ -675,14 +722,26 @@ class ComputeScheduler:
             for entry in self._ordered
             if entry.counts_on_gpu
         )
-        exclusive = self._exclusive is not None
         return account(
             self._device,
             self._processes,
             usages,
             headroom=self._headroom(),
-            extra_reserved=self._exclusive.vram_bytes if exclusive else 0,
-            extra_baseline=self._exclusive_baseline if exclusive else 0,
+            extra_reserved=self._extra_reserved(),
+            extra_baseline=self._extra_baseline,
+        )
+
+    def _extra_reserved(self) -> int:
+        """VRAM promised outside the models' footprints: the Exclusive job's, or
+        what the shared GPU leases allocate of their own (Decision 0042). The two
+        never meet: an Exclusive lease is granted only once no local GPU lease
+        is left."""
+        if self._exclusive is not None:
+            return self._exclusive.vram_bytes
+        return sum(
+            lease.vram_bytes
+            for entry in self._deployments.values()
+            for lease in entry.leases
         )
 
     # -- admission ------------------------------------------------------------
@@ -769,14 +828,47 @@ class ComputeScheduler:
             safety=config.kv_safety,
             ceilings=config.class_ceilings,
         )
+        if refusal is None and not free_vram_admits(self._vram(), request.vram_bytes):
+            refusal = Refusal.INSUFFICIENT_FREE_VRAM
         return refusal, Placement.LOCAL_GPU
 
     def _queued_ahead(self, request: ComputeRequest) -> bool:
         rank = CLASS_RANK[request.resource_class]
+        needs_vram = request.vram_bytes > 0
         return any(
-            waiter.request.deployment == request.deployment
-            and CLASS_RANK[waiter.request.resource_class] <= rank
+            CLASS_RANK[waiter.request.resource_class] <= rank
+            and (
+                # VRAM is the whole GPU's: work that needs some queues behind
+                # earlier work that needs some, whatever its model ...
+                (needs_vram and waiter.request.vram_bytes > 0)
+                # ... and work on the same model queues behind its waiters,
+                # except those that only wait for VRAM when it needs none.
+                or (
+                    waiter.request.deployment == request.deployment
+                    and (
+                        needs_vram or waiter.last is not Refusal.INSUFFICIENT_FREE_VRAM
+                    )
+                )
+            )
             for waiter in self._waiters
+        )
+
+    def _warn_request(self, request: ComputeRequest, *, gave_up: bool = False) -> None:
+        # The last reading, even a stale one (a wait that ran out); without any
+        # the probe's own warning has been logged.
+        if self._device is None:
+            return
+        view = self._vram()
+        self._warnings.emit(
+            VramDeferral(
+                DeferredWork.REQUEST,
+                request.resource_class,
+                request.vram_bytes,
+                view.observed_free,
+                view.external,
+                view.headroom,
+                gave_up=gave_up,
+            )
         )
 
     def _grant(self, request: ComputeRequest, placement: Placement) -> ComputeLease:
@@ -786,7 +878,7 @@ class ComputeScheduler:
             return lease
         if request.resource_class is ResourceClass.EXCLUSIVE:
             lease = ComputeLease(self, request, placement, 0)
-            self._exclusive_baseline = self._vram().external
+            self._extra_baseline = self._vram().external
             self._exclusive = lease
             return lease
         entry = self._deployments[request.deployment]
@@ -794,6 +886,8 @@ class ComputeScheduler:
         if placement is Placement.LOCAL_GPU and entry.spec.kv_capacity_tokens:
             tokens = request.context_tokens
         lease = ComputeLease(self, request, placement, tokens)
+        if lease.vram_bytes:
+            self._rebase()
         entry.leases.add(lease)
         entry.reserved_tokens += tokens
         return lease
@@ -811,11 +905,19 @@ class ComputeScheduler:
         else:
             entry = self._deployments[lease.deployment]
             if lease in entry.leases:
+                if lease.vram_bytes:
+                    self._rebase()
                 entry.leases.discard(lease)
                 entry.reserved_tokens -= lease.tokens
         if self._drained is not None and not self._local_gpu_leases():
             self._drained.set()
         self._pump()
+
+    def _rebase(self) -> None:
+        """Before the shared VRAM leases change: what is external now is not
+        theirs (see account: only what grows over it is absorbed)."""
+        if self._device is not None:
+            self._extra_baseline = self._vram().external
 
     def _local_gpu_leases(self) -> int:
         return sum(
@@ -828,11 +930,16 @@ class ComputeScheduler:
     def _pump(self) -> None:
         """Admit the waiters that fit, highest class first, FIFO within a class."""
         blocked: set[str] = set()
+        vram_blocked = False
         for waiter in sorted(self._waiters, key=lambda w: w.key):
             if waiter.future.done():
                 continue
             deployment = waiter.request.deployment
+            needs_vram = waiter.request.vram_bytes > 0
             if deployment in blocked:
+                continue
+            if needs_vram and vram_blocked:
+                waiter.last = Refusal.INSUFFICIENT_FREE_VRAM
                 continue
             refusal, placement = self._judge(waiter.request, queue=False)
             if refusal is None:
@@ -842,6 +949,12 @@ class ComputeScheduler:
             waiter.last = refusal
             if refusal in CAPACITY_REFUSALS:
                 blocked.add(deployment)
+            elif refusal is Refusal.INSUFFICIENT_FREE_VRAM:
+                # Later work that needs VRAM does not overtake it (a stream of
+                # small jobs cannot starve a large one); work inside a model's
+                # footprint allocates nothing and goes on.
+                vram_blocked = True
+                self._warn_request(waiter.request)
 
     def _drop(self, waiter: _Waiter) -> None:
         with contextlib.suppress(ValueError):
@@ -1014,9 +1127,22 @@ class ComputeScheduler:
             need = entry.spec.gpu_bytes
             room = view.available + (need if entry.counts_on_gpu else 0)
             always = entry.spec.residency is ResidencyPolicy.ALWAYS
-            if room - need >= (0 if always else self._margin()):
+            floor = 0 if always else self._margin()
+            if room - need >= floor:
                 entry.displaced = False
                 return _Action(entry, "gpu")
+            if room + view.external - need >= floor:
+                # It would fit but for another workload's VRAM (Decision 0042).
+                self._warnings.emit(
+                    VramDeferral(
+                        DeferredWork.MODEL_LOAD,
+                        None,
+                        need,
+                        view.observed_free,
+                        view.external,
+                        view.headroom,
+                    )
+                )
             if always:
                 return None  # a model that must be resident goes first
         return None
@@ -1084,9 +1210,10 @@ class ComputeScheduler:
     async def _acquire_exclusive(
         self, request: ComputeRequest, wait_seconds: float
     ) -> ComputeLease:
-        if self._mode is not SchedulerMode.NORMAL:
+        if self._mode is not SchedulerMode.NORMAL or self._exclusive_pending:
             raise ExclusiveUnavailableError(ExclusiveFailure.BUSY)
-        self._mode = SchedulerMode.DRAINING
+        self._exclusive_pending = True
+        deadline = self._clock.monotonic() + wait_seconds
         try:
             async with self._control_lock:
                 await self._sample()
@@ -1096,30 +1223,95 @@ class ComputeScheduler:
                 entry.counts_on_gpu for entry in self._ordered
             ):
                 raise ExclusiveUnavailableError(ExclusiveFailure.CANNOT_UNLOAD)
-            # Running work is waited for, not stopped (Background work too: its
-            # safe pause / drain is PAW-037's).
-            logger.info("Exclusive GPU job requested: draining local GPU work")
-            if self._local_gpu_leases():
-                self._drained = asyncio.Event()
-                waiter = asyncio.ensure_future(self._drained.wait())
-                try:
-                    drained = await self._wait_for(waiter, wait_seconds)
-                finally:
-                    waiter.cancel()
-                    self._drained = None
-                if not drained:
-                    raise ExclusiveUnavailableError(ExclusiveFailure.DRAIN_TIMEOUT)
-            async with self._control_lock:
-                moved = await self._empty_gpu()
-                await self._verify(request.vram_bytes, moved)
-                lease = self._grant(request, Placement.LOCAL_GPU)
-                self._mode = SchedulerMode.EXCLUSIVE
-                logger.info("Exclusive GPU job started")
-                return lease
+            while True:
+                # Decision 0042: while another workload holds the VRAM the job
+                # needs, nothing is drained or unloaded (it could not help);
+                # local work goes on and the job waits.
+                await self._await_external_room(request, deadline)
+                self._mode = SchedulerMode.DRAINING
+                # Running work is waited for, not stopped (Background work too:
+                # its safe pause / drain is PAW-037's).
+                logger.info("Exclusive GPU job requested: draining local GPU work")
+                await self._drain(deadline)
+                async with self._control_lock:
+                    await self._sample()
+                    if self._fresh() and self._external_room(request):
+                        moved = await self._empty_gpu()
+                        await self._verify(request.vram_bytes, moved)
+                        lease = self._grant(request, Placement.LOCAL_GPU)
+                        self._mode = SchedulerMode.EXCLUSIVE
+                        logger.info("Exclusive GPU job started")
+                        return lease
+                # Another workload took the VRAM while the GPU drained: back to
+                # normal, and wait again.
+                self._mode = SchedulerMode.NORMAL
+                self._pump()
         except BaseException:
             self._mode = SchedulerMode.NORMAL
             self._pump()
             raise
+        finally:
+            self._exclusive_pending = False
+            self._exclusive_waits_for_vram = False
+
+    def _external_room(self, request: ComputeRequest) -> bool:
+        return free_vram_after_emptying(self._vram()) >= request.vram_bytes
+
+    async def _await_external_room(
+        self, request: ComputeRequest, deadline: float
+    ) -> None:
+        """Wait until the VRAM the job needs would be free with every model of
+        the workspace unloaded (Decision 0042). A reading that is missing or
+        stale counts as not free (fail closed). At the deadline: ``NOT_FREED``
+        (``PROBE_UNAVAILABLE`` when there was no fresh reading)."""
+        while not (self._fresh() and self._external_room(request)):
+            self._exclusive_waits_for_vram = True
+            gave_up = self._clock.monotonic() >= deadline
+            if self._fresh():
+                view = self._vram()
+                self._warnings.emit(
+                    VramDeferral(
+                        DeferredWork.EXCLUSIVE,
+                        ResourceClass.EXCLUSIVE,
+                        request.vram_bytes,
+                        view.observed_free,
+                        view.external,
+                        view.headroom,
+                        gave_up=gave_up,
+                    )
+                )
+            if gave_up:
+                raise ExclusiveUnavailableError(
+                    ExclusiveFailure.NOT_FREED
+                    if self._fresh()
+                    else ExclusiveFailure.PROBE_UNAVAILABLE
+                )
+            await self._clock.sleep(
+                min(
+                    self._config.verify_poll_seconds,
+                    deadline - self._clock.monotonic(),
+                )
+            )
+            async with self._control_lock:
+                await self._sample()
+        self._exclusive_waits_for_vram = False
+
+    async def _drain(self, deadline: float) -> None:
+        """Wait for the running local GPU work to end (``DRAIN_TIMEOUT`` at the
+        deadline)."""
+        if not self._local_gpu_leases():
+            return
+        self._drained = asyncio.Event()
+        waiter = asyncio.ensure_future(self._drained.wait())
+        try:
+            drained = await self._wait_for(
+                waiter, max(0.0, deadline - self._clock.monotonic())
+            )
+        finally:
+            waiter.cancel()
+            self._drained = None
+        if not drained:
+            raise ExclusiveUnavailableError(ExclusiveFailure.DRAIN_TIMEOUT)
 
     async def _empty_gpu(self) -> tuple[_Deployment, ...]:
         """Move every model off the GPU; the ones it moved."""

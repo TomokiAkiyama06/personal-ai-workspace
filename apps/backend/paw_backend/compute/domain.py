@@ -113,6 +113,10 @@ class Refusal(StrEnum):
         "queued_behind"  # an earlier request of the same or a higher class waits
     )
     QUEUE_FULL = "queue_full"
+    # Decision 0042: the work needs VRAM of its own (``vram_bytes``) and the
+    # probe does not show that much free beyond the headroom (another workload,
+    # one the scheduler does not manage, may hold it). The request waits.
+    INSUFFICIENT_FREE_VRAM = "insufficient_free_vram"
 
 
 # Refusals that waiting cannot change.

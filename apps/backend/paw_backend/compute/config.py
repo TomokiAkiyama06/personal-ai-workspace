@@ -34,6 +34,7 @@ from paw_backend.compute.limits import (
     DEFAULT_PROBE_MAX_AGE_SECONDS,
     DEFAULT_VERIFY_POLL_SECONDS,
     DEFAULT_VERIFY_TIMEOUT_SECONDS,
+    DEFAULT_VRAM_WARNING_INTERVAL_SECONDS,
     MAX_HEADROOM_FRACTION,
 )
 
@@ -164,6 +165,8 @@ class ComputeConfig:
     ``gpu_index``: the GPU the scheduler manages (V1 manages one GPU; MIG is not
     used). ``restore_margin_bytes``: the room that must stay free after a model
     is brought back or loaded ``IF_ROOM`` (``None``: the headroom again).
+    ``vram_warning_interval_seconds``: how often the warning that work waits for
+    free VRAM is repeated for the same kind of work (Decision 0042).
     """
 
     deployments: tuple[DeploymentSpec, ...]
@@ -181,6 +184,7 @@ class ComputeConfig:
     verify_timeout_seconds: float = DEFAULT_VERIFY_TIMEOUT_SECONDS
     verify_poll_seconds: float = DEFAULT_VERIFY_POLL_SECONDS
     failed_retry_seconds: float = DEFAULT_FAILED_RETRY_SECONDS
+    vram_warning_interval_seconds: float = DEFAULT_VRAM_WARNING_INTERVAL_SECONDS
 
     def __post_init__(self) -> None:
         if not isinstance(self.deployments, tuple) or not self.deployments:
@@ -249,6 +253,7 @@ class ComputeConfig:
             "verify_timeout_seconds",
             "verify_poll_seconds",
             "failed_retry_seconds",
+            "vram_warning_interval_seconds",
         ):
             check_number(
                 parameter,
