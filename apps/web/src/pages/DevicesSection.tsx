@@ -166,9 +166,15 @@ export function DevicesSection() {
   const [sessions, setSessions] = useState<SessionInfo[] | null>(null);
   const [pairing, setPairing] = useState<PairingIssued | null>(null);
   const [pending, setPending] = useState<PendingPairing[]>([]);
-  // An approved device appears only when it completes its pairing (its own
-  // poll), so the list is re-read until then or until the pairing expires.
-  const [awaiting, setAwaiting] = useState<{ until: number; known: number } | null>(null);
+  // A new device appears only when its own pairing completes: right after its
+  // claim when no approval is needed, or after its own poll once approved. The
+  // list is re-read until a session not known before shows up or the pairing
+  // expires; on the no-approval branch the spent QR code / link then goes.
+  const [awaiting, setAwaiting] = useState<{
+    until: number;
+    known: Set<string>;
+    dropsPairing: boolean;
+  } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -201,13 +207,21 @@ export function DevicesSection() {
 
   useEffect(() => {
     if (!awaiting) return;
-    if ((sessions?.length ?? 0) > awaiting.known || Date.now() >= awaiting.until) {
+    if (sessions?.some((session) => !awaiting.known.has(session.id))) {
+      setAwaiting(null);
+      if (awaiting.dropsPairing) {
+        setPairing(null);
+        setNotice(t("devices.paired"));
+      }
+      return;
+    }
+    if (Date.now() >= awaiting.until) {
       setAwaiting(null);
       return;
     }
     const timer = window.setTimeout(() => void loadSessions(), PENDING_POLL_MS);
     return () => window.clearTimeout(timer);
-  }, [awaiting, sessions, loadSessions]);
+  }, [awaiting, sessions, loadSessions, t]);
 
   useEffect(() => {
     if (!pairing?.approval_required) return;
@@ -228,6 +242,15 @@ export function DevicesSection() {
     }
   };
 
+  const watchForNewSession = (expiresAt: string, dropsPairing: boolean) => {
+    const until = new Date(expiresAt).getTime();
+    setAwaiting({
+      until: Number.isNaN(until) ? Date.now() : until,
+      known: new Set((sessions ?? []).map((session) => session.id)),
+      dropsPairing,
+    });
+  };
+
   const others = sessions?.filter((session) => !session.current).length ?? 0;
   return (
     <div className="settings-content">
@@ -241,7 +264,14 @@ export function DevicesSection() {
             type="button"
             className="push-right"
             disabled={busy}
-            onClick={() => void act(async () => setPairing(await authApi.issuePairing()))}
+            onClick={() =>
+              void act(async () => {
+                const issued = await authApi.issuePairing();
+                setPairing(issued);
+                // Without an approval the claim itself signs the new device in.
+                if (!issued.approval_required) watchForNewSession(issued.expires_at, true);
+              })
+            }
           >
             <Icon name="plus" size={15} />
             {t("devices.add")}
@@ -267,6 +297,7 @@ export function DevicesSection() {
             void act(async () => {
               await authApi.revokePairing();
               setPairing(null);
+              setAwaiting(null);
               await loadPending();
             })
           }
@@ -342,11 +373,7 @@ export function DevicesSection() {
                     });
                     setNotice(t("devices.approved"));
                     setPairing(null);
-                    const until = new Date(item.expires_at).getTime();
-                    setAwaiting({
-                      until: Number.isNaN(until) ? Date.now() : until,
-                      known: sessions?.length ?? 0,
-                    });
+                    watchForNewSession(item.expires_at, false);
                     await Promise.all([loadPending(), loadSessions()]);
                   })
                 }

@@ -217,6 +217,34 @@ describe("設定 › 端末とセッション", () => {
     expect(await screen.findByText("Approved phone", {}, { timeout: 7000 })).toBeInTheDocument();
   }, 10000);
 
+  it("drops a QR code that needs no approval once the new device has signed in", async () => {
+    const newDevice = { ...otherSession, id: "s-3", device_name: "Paired phone" };
+    const { calls } = mockApi({
+      ...base,
+      "GET /auth/sessions": [
+        reply(200, { sessions: [session().session] }),
+        reply(200, { sessions: [session().session, newDevice] }),
+      ],
+      "GET /auth/pairing/pending": reply(200, { pending: [] }),
+      "POST /auth/pairing": reply(201, { ...pairing, approval_required: false }),
+    });
+    renderApp("/settings/devices");
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "新しい端末を追加" }));
+    expect(
+      await screen.findByRole("img", { name: "新しい端末で読み取る QR コード" }),
+    ).toBeVisible();
+    // The claim created the session at once (no approval): the spent QR code goes.
+    expect(await screen.findByText("Paired phone", {}, { timeout: 12000 })).toBeInTheDocument();
+    expect(await screen.findByRole("status")).toHaveTextContent("新しい端末がサインインしました。");
+    expect(
+      screen.queryByRole("img", { name: "新しい端末で読み取る QR コード" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "新しい端末を追加" })).toBeInTheDocument();
+    // Nothing to approve on this branch: the waiting list is not polled.
+    expect(calls.filter((call) => call.path === "/auth/pairing/pending")).toHaveLength(1);
+  }, 15000);
+
   it("shows a wrong confirmation code as such", async () => {
     mockApi({
       ...base,

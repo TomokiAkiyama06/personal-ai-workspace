@@ -213,6 +213,7 @@ export const en: Record<MessageKey, string> = {
   "devices.reject": "Refuse",
   "devices.approved": "The device is approved.",
   "devices.rejected": "The device is refused.",
+  "devices.paired": "The new device is signed in.",
   "devices.revokeOthers": "Sign out of all other devices",
   "devices.revokeOthersBody": "Ends the {count} sessions other than this device's.",
   "devices.revokeOthersRun": "Sign out",

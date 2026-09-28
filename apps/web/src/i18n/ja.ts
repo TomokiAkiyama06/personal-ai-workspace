@@ -215,6 +215,7 @@ export const ja = {
   "devices.reject": "拒否",
   "devices.approved": "端末を承認しました。",
   "devices.rejected": "端末を拒否しました。",
+  "devices.paired": "新しい端末がサインインしました。",
   "devices.revokeOthers": "他のすべての端末からサインアウト",
   "devices.revokeOthersBody": "この端末以外の {count} 件のセッションを失効させます。",
   "devices.revokeOthersRun": "サインアウトを実行",
