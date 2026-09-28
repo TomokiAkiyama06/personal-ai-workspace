@@ -82,8 +82,12 @@ class NodeWorktree:
     ``path`` is the worktree (it replaces the checkout as the repository's root in
     the node's scope), ``branch`` its branch (``refs/heads/<branch>``).
     ``protected`` are paths the node must not touch although the task's scope
-    might reach them: the user's own checkout of the repository and the task's
-    integration worktree. They become ``TaskScope.excluded_paths`` of the node.
+    might reach them: the user's own checkout of the repository, the task's
+    integration worktree and the account's whole worktree area (every other
+    node's and task's worktree; the node's own worktree is carved out of it as
+    a path root inside it), and the worktree's ``.git``. They become
+    ``TaskScope.excluded_paths`` of the node (``derive_child_scope`` adds the
+    worktree's ``.git`` whatever this says).
     """
 
     repo_id: uuid.UUID

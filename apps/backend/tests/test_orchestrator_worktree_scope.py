@@ -19,6 +19,7 @@ from paw_backend.orchestrator.scope import derive_child_scope, scope_within
 from paw_backend.orchestrator.workspaces import NodeWorktree
 from paw_backend.tools import ScopedRepository, TaskScope
 from paw_backend.tools.scope import (
+    MAX_EXCLUDED_PATHS,
     LexicalPathResolver,
     ScopeStatus,
     Target,
@@ -32,7 +33,8 @@ R1, R2 = uid(851), uid(852)
 WORKSPACES = "/home/alice/workspaces"
 CHECKOUT_1 = f"{WORKSPACES}/project/one"
 CHECKOUT_2 = f"{WORKSPACES}/project/two"
-AREA = f"{WORKSPACES}/.paw-worktrees/task/1"
+BASE = f"{WORKSPACES}/.paw-worktrees"
+AREA = f"{BASE}/task/1"
 
 
 def repository(repo_id, root):
@@ -51,11 +53,14 @@ def parent_scope(**overrides) -> TaskScope:
 
 
 def worktree(repo_id, key="a", checkout=CHECKOUT_1) -> NodeWorktree:
+    # As GitWorktreeCoordinator makes it: the checkout, the integration
+    # worktree, the whole worktree area and the worktree's own ``.git``.
+    path = f"{AREA}/{repo_id}/{key}"
     return NodeWorktree(
         repo_id,
-        f"{AREA}/{repo_id}/{key}",
+        path,
         f"paw/task/1/{key}",
-        protected=(checkout, f"{AREA}/{repo_id}/_integration"),
+        protected=(checkout, f"{AREA}/{repo_id}/_integration", BASE, f"{path}/.git"),
     )
 
 
@@ -107,6 +112,58 @@ class WorktreeScopeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             (await classify(parent, f"{CHECKOUT_1}/x")).status, ScopeStatus.IN_SCOPE
         )
+
+    async def test_other_worktrees_are_out_of_the_nodes_scope(self):
+        # The task's scope reaches the whole workspace directory, which holds
+        # the worktree area: a Worker still reaches its own worktree only.
+        parent = parent_scope(path_roots=[WORKSPACES])
+        own = worktree(R1)
+        child = derive_child_scope(
+            parent, role=NodeRole.WORKER, repositories=None, worktrees={R1: own}
+        )
+
+        for path in (f"{own.path}/src/x.py", f"{WORKSPACES}/notes.txt"):
+            with self.subTest(path=path):
+                self.assertEqual(
+                    (await classify(child, path)).status, ScopeStatus.IN_SCOPE
+                )
+        for path in (
+            f"{AREA}/{R1}/b/src/x.py",  # a sibling node of the same DAG
+            f"{AREA}/{R1}/_integration/x",  # the task's integration
+            f"{BASE}/other-task/1/{R1}/_integration/x",  # another task's
+            f"{BASE}/x",
+            BASE,
+            f"{own.path}/.git",  # its own git directory / file
+            f"{own.path}/.git/config",
+            f"{CHECKOUT_1}/x",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(
+                    (await classify(child, path)).status, ScopeStatus.OUT_OF_SCOPE
+                )
+
+    async def test_the_worktrees_git_is_excluded_whatever_protected_says(self):
+        path = f"{AREA}/{R1}/a"
+        own = NodeWorktree(R1, path, "paw/task/1/a", protected=(CHECKOUT_1,))
+        child = derive_child_scope(
+            parent_scope(), role=NodeRole.WORKER, repositories=None, worktrees={R1: own}
+        )
+        self.assertIn(f"{path}/.git", child.excluded_paths)
+        self.assertEqual(
+            (await classify(child, f"{path}/.git")).status, ScopeStatus.OUT_OF_SCOPE
+        )
+
+    def test_a_child_root_inside_a_parent_excluded_path_is_not_accepted(self):
+        # A root below an excluded path would carve it out (the node's own
+        # worktree does that inside the worktree area); only the parent may.
+        parent = parent_scope(
+            path_roots=[WORKSPACES], excluded_paths=[f"{WORKSPACES}/private"]
+        )
+        child = derive_child_scope(parent, role=NodeRole.WORKER, repositories=None)
+        wider = replace(
+            child, path_roots=(*child.path_roots, f"{WORKSPACES}/private/sub")
+        )
+        self.assertFalse(scope_within(wider, parent))
 
     def test_a_worktree_outside_the_nodes_repositories_is_an_escalation(self):
         with self.assertRaises(ScopeEscalationError):
@@ -191,6 +248,35 @@ class WorktreeScopeTest(unittest.IsolatedAsyncioTestCase):
 
 
 class ExcludedPathsTest(unittest.IsolatedAsyncioTestCase):
+    async def test_a_root_inside_an_excluded_path_is_carved_out(self):
+        scope = parent_scope(
+            path_roots=[WORKSPACES, f"{BASE}/own"], excluded_paths=[BASE]
+        )
+        cases = {
+            f"{BASE}/own/x": ScopeStatus.IN_SCOPE,
+            f"{BASE}/own": ScopeStatus.IN_SCOPE,
+            f"{BASE}/other/x": ScopeStatus.OUT_OF_SCOPE,
+            f"{BASE}/own-not/x": ScopeStatus.OUT_OF_SCOPE,
+        }
+        for path, status in cases.items():
+            with self.subTest(path=path):
+                self.assertEqual((await classify(scope, path)).status, status)
+        # A root equal to the excluded path carves nothing out.
+        same = parent_scope(path_roots=[WORKSPACES, BASE], excluded_paths=[BASE])
+        self.assertEqual(
+            (await classify(same, f"{BASE}/x")).status, ScopeStatus.OUT_OF_SCOPE
+        )
+        # An excluded repository is never carved out.
+        excluded_repo = parent_scope(
+            path_roots=[WORKSPACES, f"{CHECKOUT_2}/sub"],
+            repositories=[repository(R1, CHECKOUT_1)],
+            excluded_repositories=[repository(R2, CHECKOUT_2)],
+        )
+        self.assertEqual(
+            (await classify(excluded_repo, f"{CHECKOUT_2}/sub/x")).status,
+            ScopeStatus.OUT_OF_SCOPE,
+        )
+
     async def test_a_path_in_an_excluded_path_is_out_of_scope(self):
         scope = parent_scope(excluded_paths=[f"{CHECKOUT_1}/secrets"])
         self.assertEqual(
@@ -202,6 +288,19 @@ class ExcludedPathsTest(unittest.IsolatedAsyncioTestCase):
             ScopeStatus.IN_SCOPE,
         )
 
+    def test_a_worker_of_every_repository_fits_the_bound(self):
+        repositories = [
+            repository(uid(900 + i), f"{WORKSPACES}/project/{i}") for i in range(32)
+        ]
+        parent = parent_scope(path_roots=[WORKSPACES], repositories=repositories)
+        worktrees = {
+            r.repo_id: worktree(r.repo_id, checkout=r.root) for r in repositories[:16]
+        }
+        child = derive_child_scope(
+            parent, role=NodeRole.WORKER, repositories=None, worktrees=worktrees
+        )
+        self.assertLessEqual(len(child.excluded_paths), MAX_EXCLUDED_PATHS)
+
     def test_excluded_paths_are_normalised_and_bounded(self):
         scope = parent_scope(excluded_paths=["/srv/a/./b", "/srv/a/b"])
         self.assertEqual(scope.excluded_paths, ("/srv/a/b",))
@@ -210,6 +309,8 @@ class ExcludedPathsTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             parent_scope(excluded_paths=["relative"])
         with self.assertRaises(ValueError):
-            parent_scope(excluded_paths=[f"/srv/{i}" for i in range(33)])
+            parent_scope(
+                excluded_paths=[f"/srv/{i}" for i in range(MAX_EXCLUDED_PATHS + 1)]
+            )
         with self.assertRaises(TypeError):
             parent_scope(excluded_paths="/srv/a")

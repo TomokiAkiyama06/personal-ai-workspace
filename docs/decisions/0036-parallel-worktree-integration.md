@@ -2,7 +2,7 @@
 
 - Status: Proposed
 - Date: 2026-09-28
-- Scope: PAW-035（[#31](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/31)）の実装（`paw_backend/integration/`、`paw_backend/orchestrator/workspaces.py`、`Orchestrator(worktrees=...)`、`TaskScope.excluded_paths`）。Migration はない
+- Scope: PAW-035（[#31](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/31)）の実装（`paw_backend/integration/`、`paw_backend/orchestrator/workspaces.py`、`Orchestrator(worktrees=...)`、`TaskScope.excluded_paths` とその切り出しの規則）。Migration はない
 - Supersedes: なし（[Decision 0021](0021-dag-orchestrator-policy.md)・[Decision 0017](0017-repository-registration-policy.md)・[Decision 0029](0029-per-user-git-runner-ssh.md) は書き換えない。0029 の 3 の表への追加は下の 13 で提案し、承認されたらその部分だけを Supersede する）
 - Approval: なし（Human の判断待ち）
 
@@ -46,8 +46,11 @@ branch: paw/<task id>/<attempt>/_integration
 ### 2. worktree を与える Node
 
 - Role が `worker` で、Grant に `project.repo.write` があり、Scope に Checkout（`ScopedRepository.root`）を持つ Repository があるときだけ、その Repository ごとに 1 つ。Planner / Researcher / Reviewer と、Plan が読み取りだけを求めた Worker は、既存の Checkout を読む（Grant に書き込みの Capability がないことで Write しないことを保証する。Decision 0021 の 2）。
-- Node の Scope は worktree を指す（`derive_child_scope(worktrees=...)`）。Repository の `root` を worktree にし、worktree を先頭の `path_roots` にし（相対 Path は worktree の中に解決される）、**利用者の Checkout と Task の integration worktree を `TaskScope.excluded_paths`（新しい Field）にする**。Worker は利用者の Checkout にも統合先にも書けない。`scope_within` はこの広げ方だけを受け入れる。
-- **推奨: この形で承認する。** Issue #85（PR #124）が Merge された後は、Working Set の Role が `working` / `target` の Repository だけに worktree を与える（`referenced` には与えない）変更を、統合時に行う。
+- Node の Scope は worktree を指す（`derive_child_scope(worktrees=...)`）。Repository の `root` を worktree にし、worktree を先頭の `path_roots` にし（相対 Path は worktree の中に解決される）、**利用者の Checkout、Task の integration worktree、Account の worktree の置き場所全体（`<home>/<workspace_subdir>/.paw-worktrees`）、自分の worktree の `.git` を `TaskScope.excluded_paths`（新しい Field）にする**。自分の worktree は、置き場所の中にある Path Root として除外から切り出す（**切り出しの規則**: `excluded_paths` の中に厳密に含まれる Path Root の下の Path は、その除外に当たらない。除外された Repository には適用しない）。Worker は利用者の Checkout にも、統合先にも、同じ DAG の兄弟の Node や他の Task の worktree にも、自分の `.git` にも書けない（`.git` を書き換えられると、Backend がそこで動かす git が Agent の設定（Filter Driver などの Command）を読む）。`scope_within` はこの広げ方だけを受け入れ、親が除外した Path の中に Backend が用意した worktree 以外の Root を足すことを拒む。
+- 除外の数の上限は `MAX_EXCLUDED_PATHS`（親の 32 + Repository ごとに 4 × 32）。
+- **読み取り専用の Node は上流の Worker の変更を見ない。** 読み取り専用の Node は利用者の Checkout を読むので、DAG で Worker の後に置いた Reviewer / Researcher（Decision 0021 の DAG の中の Review や Test の Node）は、上流の `NodeResult` は受け取るが、その Worker の変更のない Tree を読む。統合された結果の Review は、DAG の後の `IntegrationGate`（9）が integration worktree で行う。
+- **worktree を受け取らない Worker**（Checkout のない Repository だけを扱う Node、`project.repo.write` のない Worker）の Scope は、親の Scope のまま（worktree の置き場所を除外しない）。
+- **推奨: この形で承認する。** Issue #85（PR #124）が Merge された後は、Working Set の Role が `working` / `target` の Repository だけに worktree を与える（`referenced` には与えない）変更を、統合時に行う。読み取り専用の Node の制限（判断点 15）と、worktree を受け取らない Worker の Scope（判断点 16）は下に別の判断点として挙げる。
 
 ### 3. Worker の branch の起点
 
@@ -66,7 +69,10 @@ branch: paw/<task id>/<attempt>/_integration
 - DAG が成功した直後、Task を `evaluating` にする前に 1 回行う（`Orchestrator._integrate`）。Evaluator と Review は統合された結果を見る。
 - 成功した Worker Node の branch を、Node の順（`ordinal`）に、integration worktree の中で `git merge --no-ff` する（Worker ごとに Merge Commit が 1 つ残る）。merge の前に `git merge-tree --write-tree` で Conflict を判定し、Conflict する merge は始めない（worktree が途中の状態で残らない）。
 - Merge Commit の作者は固定の `Personal AI Workspace <integration@paw.invalid>`、署名しない（`commit.gpgSign=false`。Repository の設定で鍵が要る状態にされても統合が止まらない）。
-- 冪等: integration branch に含まれている branch は merge しない。Crash で残った途中の merge は最初に `merge --abort` する。
+- 冪等: integration branch に含まれている branch は merge しない。
+- **integration worktree に進行中の merge（`MERGE_HEAD`）があれば中断しない**。Backend 自身の merge は `merge-tree` で先に判定し、失敗したらその場で `merge --abort` するので、残っている進行中の merge は Human の（6 の解消の途中）ものとみなし、その Repository を `dirty`（7）として止める（Crash で Backend の merge が残った場合も、Human が `merge --abort` するまで止まる。黙って捨てるより安全）。
+- `merge-tree` が Conflict なしと判定した merge を git が拒んだら（`index.lock` の競合、Timeout、設定の誤りなど）、**Conflict ではなく git の失敗**（8。`failed` で Retry できる）にする。Worker の branch に依存先を取り込む merge（3）も同じで、Conflict の判定は `merge-tree` だけが行う。
+- **worktree の中の `.git` は信用しない。** worktree の中で動かす git の Command（`status`、`merge`、`symbolic-ref`、`rev-parse`）は、Checkout の `.git/worktrees/<name>` を `--git-dir=` / `--work-tree=` で明示して動かす。その Directory は、worktree の `.git` が指すもの（`rev-parse --git-dir`。何も実行しない）を手掛かりに求め、Checkout の共通の git Directory（`rev-parse --git-common-dir`）の `worktrees/` の直下であること、その Directory を通して期待する branch が checkout されていること（1 つの branch は 1 つの worktree にしか checkout できない）を確かめたときだけ使う。違えば `not_the_worktree`。`merge-tree` と `merge-base` は Checkout で動かす。
 - Repository ごとに独立した状態（`nothing` / `merged` / `conflict` / `dirty`）を持つ（要件の Multi-Repo の独立した integration state）。
 - 同じ Process の中で並列に走る Node が同じ integration branch を同時に作らないよう、(Task, 試行, Repository) ごとに Lock する。別の Worker Process の間は、Queue の Lease と DAG の epoch が 1 つの DAG を 1 人にする（git の操作そのものは Fence しない。リスク 2）。
 - **推奨: この形で承認する。** 代替: Rebase で直線にする（Worker の Commit を書き換える）、Squash する（Worker ごとの履歴が消える）、Octopus Merge（どの Worker が Conflict したか分からない）。
@@ -92,7 +98,7 @@ branch: paw/<task id>/<attempt>/_integration
 
 - `IntegrationGate`（`paw_backend/integration/gate.py`）が、`evaluating` の Task の integration worktree（Repository ごとの Path・branch・Commit）を検査に渡す。順序は固定で **Test → Evaluator → Review**、最初に通らなかった検査で止まる。
 - 3 種類すべてに少なくとも 1 つの検査が要る（1 つでも欠けた Gate は作れない）。
-- 全部通れば Task を `completed`（**Merge Ready**。Human の Merge の判断を待つ。何も Merge / Push しない）、どれかが通らなければ `failed`。検査の間に integration branch が動いたら（誰かが Commit した）、検査していない Commit を完了にしないため `failed`。Task の Command は、読んだ Run と Version に Fence する。Cancel / Retry が間に入ったら次の種類の検査を始めない。
+- 全部通れば Task を `completed`（**Merge Ready**。Human の Merge の判断を待つ。何も Merge / Push しない）、どれかが通らなければ `failed`。検査は integration worktree の Directory を読むので、**検査の前に integration worktree に未 Commit・未追跡の変更や進行中の merge があれば検査せずに `failed`**（`dirty`）。検査の間に integration branch が動いたら（誰かが Commit した）、または worktree が書き換わったら、検査していない Commit を完了にしないため `failed`（`changed`）。完了するときは、Repository ごとに検査した Commit を Task Log に書く（Merge Ready なのはその Commit。Multi-Repo でも残る）。Task の Command は、読んだ Run と Version に Fence する。Cancel / Retry が間に入ったら次の種類の検査を始めない。
 - 試行の `ReviewState` に記録する: Test が失敗したとき、または Evaluator の後に `evaluation_result`、Review の前後に `review_status`（`in_review` → `approved` / `changes_requested`）。検査が返した文章は保存しない。
 - 実際の検査（PAW-011 / PAW-013 の Evaluator、Codex / Claude の Reviewer）は別の Issue で、この PR は Protocol（`async check(request) -> CheckVerdict`）だけを定める。Reviewer が実装した Agent と別であること（Review の独立性）は構成の責任で、Gate は強制しない。
 - **推奨: この形で承認する。**
@@ -127,10 +133,10 @@ branch: paw/<task id>/<attempt>/_integration
 | `merge-tree` | `--write-tree --name-only -z --no-messages refs/heads/paw/... refs/heads/paw/...` |
 | `merge-base` | `--is-ancestor refs/heads/paw/... refs/heads/paw/...` |
 | `status` | `--porcelain=v1 -z --untracked-files=all` |
-| `rev-parse`（追加の形） | `--verify --quiet <ref>^{commit}`、`--show-toplevel` |
+| `rev-parse`（追加の形） | `--verify --quiet <ref>^{commit}`、`--show-toplevel`、`--path-format=absolute --git-dir`、`--path-format=absolute --git-common-dir` |
 | `symbolic-ref`（追加の形） | `--quiet HEAD` |
 
-Wrapper の cwd の確認は、その User の `workspaces` の下（`.paw-worktrees` を含む）を許す。`merge` と `worktree add -b` の対象は `paw/` の branch だけにする（Wrapper 自身の防衛線）。git の Log 名（`GitCommandError` の名前）は、先頭の `-c` を読み飛ばした最初の語にした（`repositories.git.command_name`。Wrapper の「最初の非 `-c` 語」と同じ規則）。
+worktree の中で動かす `status`・`merge`・`symbolic-ref`・`rev-parse --verify` は、副コマンドの前に `--git-dir=<Checkout の .git>/worktrees/<name>` と `--work-tree=<.paw-worktrees 配下の Path>` の 2 つの大域 Option を付ける（Wrapper はこの 2 つを、その User の `workspaces` の下の Path に限って許す）。Wrapper の cwd の確認は、その User の `workspaces` の下（`.paw-worktrees` を含む）を許す。`merge` と `worktree add -b` の対象は `paw/` の branch だけにする（Wrapper 自身の防衛線）。git の Log 名（`GitCommandError` の名前）は、先頭の `-c` と `--git-dir=` / `--work-tree=` を読み飛ばした最初の語にした（`repositories.git.command_name`。Wrapper の「最初の非 `-c` 語」と同じ規則）。
 
 - **推奨: この表を承認し、承認されたら Decision 0029 の 3 の表のこの部分を Supersede する。**
 
@@ -154,23 +160,27 @@ Wrapper の cwd の確認は、その User の `workspaces` の下（`.paw-workt
 4. Worker が Commit しないと統合できない（7）。Runtime（別 Issue）が Commit する契約を守る必要がある。
 5. Multi-Repo の Task の統合の状態は、#124 の Merge までは Task Log にしか残らない（11）。
 6. `worktree prune` は利用者自身の、Directory が消えた worktree の登録も片付ける（12）。
+7. Worker の Tool は Path の Scope で worktree の置き場所と `.git` から締め出されるが、Worker が Shell などの任意の実行を持てば Scope の外も書ける（今の Worker の Role に実行の Capability はない）。その場合は Sandbox（別 Issue）が要る。
+8. 読み取り専用の Node が worktree の置き場所（他の Task の worktree を含む、同じ User の File）を読むことは妨げない（書けない）。
 
 ## 判断が必要な点
 
 1. 置き場所と名前（1）。推奨: 承認。
-2. worktree を与える Node と Node の Scope（2。`TaskScope.excluded_paths` の追加を含む）。推奨: 承認。#124 の後は `working` / `target` に限る。
+2. worktree を与える Node と Node の Scope（2。`TaskScope.excluded_paths` の追加と切り出しの規則、worktree の置き場所全体と `.git` の除外を含む）。推奨: 承認。#124 の後は `working` / `target` に限る。
 3. Worker の branch の起点と、依存先との Conflict で Node を再試行なしに失敗させること（3）。推奨: 承認。
 4. Integration の base（4。fetch しない）。推奨: 承認。
-5. Integration の時期・順序・`--no-ff`・固定の作者・署名しない（5）。推奨: 承認。
+5. Integration の時期・順序・`--no-ff`・固定の作者・署名しない、進行中の merge を中断しないこと、Conflict でない merge の失敗を git の失敗にすること、worktree の git を `--git-dir` で固定すること（5）。推奨: 承認。
 6. Conflict で Repository を止め、Task を `waiting`（`user`）にし、Human の解消後に再統合すること（6）。推奨: 承認。
 7. 未 Commit の変更で止め、自動で Commit しないこと（7）。推奨: 承認。
 8. git の失敗で Task を `failed` にすること（8）。推奨: 承認。
-9. 統合後の Test → Evaluator → Review の Gate と、全部通ったら `completed`（Merge Ready）にすること（9）。推奨: 承認。
+9. 統合後の Test → Evaluator → Review の Gate と、全部通ったら `completed`（Merge Ready）にすること、未 Commit の integration worktree を検査しないこと（9）。推奨: 承認。
 10. PR の作成と Push を別 Issue にすること（10）。推奨: 承認。
 11. 新しい Table を作らないこと（11）。推奨: 承認。#124 の後に Repository ごとに記録する。
 12. worktree / branch を残し、削除を別の操作にすること（12）。推奨: 承認。
 13. Wrapper の許可リストへの追加（13。Decision 0029 の 3 の部分的な Supersede）。推奨: 承認。
 14. git 2.38 以降を要件にすること（14）。推奨: 承認。
+15. DAG の中で Worker の後に置いた読み取り専用の Node（Reviewer / Researcher）が上流の Worker の変更を見ないこと（2）。推奨: この PR では制限として明記して承認し、統合された結果の Review は `IntegrationGate`（9）が行う。上流の branch を読み取り専用で見せる（読み取り専用の worktree を作る）ことは、DAG の中の Review が必要になったときに別の Issue で行う。代替: 読み取り専用の Node にも、上流の Worker の branch を merge した読み取り専用の worktree を与える（Write しないことを Backend が保証する必要があり、Scope の変更が大きい）。
+16. worktree を受け取らない Worker の Scope に worktree の置き場所を含めたままにすること（2）。推奨: 承認（その Node は `project.repo.write` がないか、Checkout のある Repository を持たない）。代替: `NodeWorkspaces` が置き場所を返し、Orchestrator がすべての Node の Scope から除外する。
 
 ## 承認後の扱い
 

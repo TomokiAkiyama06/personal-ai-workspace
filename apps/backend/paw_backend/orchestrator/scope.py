@@ -151,7 +151,10 @@ def derive_child_scope(
                 path
                 for repository in chosen
                 if repository.repo_id in worktrees
-                for path in worktrees[repository.repo_id].protected
+                for path in (
+                    *worktrees[repository.repo_id].protected,
+                    f"{worktrees[repository.repo_id].path}/.git",
+                )
             ),
         )
     child = TaskScope(
@@ -226,6 +229,24 @@ def scope_within(
     ):
         return False
     if not all(path in child.excluded_paths for path in parent.excluded_paths):
+        return False
+    # A root strictly inside an excluded path carves it out (``TaskScope``): the
+    # child may add one only for a worktree the backend prepared (and those were
+    # refused above when they lie in what the parent excludes).
+    if any(
+        root not in parent.path_roots
+        and root not in allowed_roots
+        and any(
+            path_within(root, excluded) and root != excluded
+            for excluded in child.excluded_paths
+        )
+        for root in child.path_roots
+    ):
+        return False
+    if any(
+        f"{worktree.path}/.git" not in child.excluded_paths
+        for worktree in worktrees.values()
+    ):
         return False
     if not child.hosts <= parent.hosts:
         return False

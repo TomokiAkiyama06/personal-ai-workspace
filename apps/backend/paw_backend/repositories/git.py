@@ -94,13 +94,21 @@ class GitRunner(Protocol):
 
 
 def command_name(args: Sequence[str]) -> str:
-    """The git sub-command of ``args``: the first word after any leading
-    ``-c key=value`` options (a command that must override the repository's own
-    configuration, PAW-035's ``merge``, puts them first), else ``"git"``. What a
-    failure is logged and reported as, never an argument."""
+    """The git sub-command of ``args``: the first word after any leading global
+    options, ``-c key=value`` (a command that must override the repository's own
+    configuration, PAW-035's ``merge``, puts them first) and ``--git-dir=<path>``
+    / ``--work-tree=<path>`` (PAW-035 runs git in a Worker's worktree with the
+    worktree's git directory in the checkout, never the one the worktree names),
+    else ``"git"``. What a failure is logged and reported as, never an
+    argument."""
     index = 0
-    while index + 1 < len(args) and args[index] == "-c":
-        index += 2
+    while index < len(args):
+        if args[index] == "-c" and index + 1 < len(args):
+            index += 2
+        elif args[index].startswith(("--git-dir=", "--work-tree=")):
+            index += 1
+        else:
+            break
     return args[index] if index < len(args) else "git"
 
 

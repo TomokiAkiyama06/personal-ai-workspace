@@ -4,6 +4,7 @@ The git tests run the real ``git`` on temporary repositories of the user running
 the tests (``SubprocessGitRunner``); nothing uses SSH or another Linux user.
 """
 
+import os
 import shutil
 import unittest
 import uuid
@@ -90,6 +91,19 @@ class CommandNameTest(unittest.TestCase):
         self.assertEqual(command_name(["-c", "a=b", "-c", "c=d", "status"]), "status")
         self.assertEqual(command_name([]), "git")
         self.assertEqual(command_name(["-c"]), "-c")
+
+    def test_the_git_directory_options_are_skipped_too(self):
+        self.assertEqual(
+            command_name(
+                ["--git-dir=/r/.git/worktrees/a", "--work-tree=/w/a", "status"]
+            ),
+            "status",
+        )
+        self.assertEqual(
+            command_name(["--git-dir=/g", "--work-tree=/w", "-c", "a=b", "merge"]),
+            "merge",
+        )
+        self.assertEqual(command_name(["--git-dir=/g"]), "git")
 
 
 @requires_git
@@ -199,6 +213,43 @@ class WorktreeGitTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(InvalidRepositoryInputError):
             await self.git.merge(self.checkout, "--upload-pack=evil", self.account)
         self.assertEqual(self.runner.calls, [])
+
+    async def test_a_worktree_is_pinned_to_its_git_directory_in_the_checkout(self):
+        a = await self.add("a")
+        common = await self.git.common_dir(self.checkout, self.account)
+        self.assertEqual(
+            common,
+            git(
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-common-dir",
+                cwd=self.checkout,
+            ),
+        )
+        pinned = await self.git.pin(self.checkout, a, self.account)
+        self.assertEqual(pinned.path, a)
+        self.assertEqual(os.path.dirname(pinned.git_dir), f"{common}/worktrees")
+        self.assertEqual(await self.git.current_branch(pinned, self.account), "paw/t/a")
+        self.assertTrue(await self.git.is_clean(pinned, self.account))
+
+        # The worktree's own ``.git`` is replaced by a repository of its own:
+        # the pinned commands still see the real one (and its clean index).
+        os.remove(f"{a}/.git")
+        git("init", "--quiet", a)
+        self.assertEqual(await self.git.current_branch(pinned, self.account), "paw/t/a")
+        # git never lists a ``.git`` entry: the pinned status sees the real index.
+        self.assertTrue(await self.git.is_clean(pinned, self.account))
+        # Asked again, the worktree no longer names a git directory of the checkout.
+        self.assertIsNone(await self.git.pin(self.checkout, a, self.account))
+
+    async def test_a_path_that_is_no_worktree_is_not_pinned(self):
+        path = f"{self.ws.base}/plain"
+        os.makedirs(path)
+        self.assertIsNone(await self.git.pin(self.checkout, path, self.account))
+        # The checkout itself is not a worktree of its own git directory.
+        self.assertIsNone(
+            await self.git.pin(self.checkout, self.checkout, self.account)
+        )
 
     def test_the_timeout_is_bounded(self):
         with self.assertRaises(ValueError):

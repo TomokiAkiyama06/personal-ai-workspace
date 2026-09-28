@@ -31,8 +31,10 @@ from .orchestrator_support import (
 REPO = uuid.UUID(int=0x3536)
 
 
-def target(head="a" * 40) -> IntegrationTarget:
-    return IntegrationTarget(REPO, "/srv/w/_integration", "paw/t/1/_integration", head)
+def target(head="a" * 40, *, clean=True) -> IntegrationTarget:
+    return IntegrationTarget(
+        REPO, "/srv/w/_integration", "paw/t/1/_integration", head, clean
+    )
 
 
 class FakeTargets:
@@ -112,6 +114,10 @@ class GateTest(PostgresOrchestratorTestCase):
         self.assertEqual(snapshot.attempt.review.review_status, ReviewStatus.APPROVED)
         messages = await self.messages(task_id)
         self.assertIn("Integration check review passed", messages)
+        # Which commit of each repository is Merge Ready is in the task log.
+        self.assertIn(
+            f"Integration of repository {REPO} checked at {'a' * 40}", messages
+        )
         # What a check said is returned, never stored.
         self.assertFalse(any("summary of" in message for message in messages))
 
@@ -170,6 +176,32 @@ class GateTest(PostgresOrchestratorTestCase):
             self.targets.current = (target("b" * 40),)
 
         self.checks[CheckKind.REVIEW].action = commit_meanwhile
+
+        report = await gate.evaluate(task_id)
+
+        self.assertEqual(report.outcome, GateOutcome.CHANGED)
+        self.assertEqual((await self.service.restore(task_id)).state, TaskState.FAILED)
+
+    async def test_a_dirty_integration_worktree_is_not_checked(self):
+        # Uncommitted changes in the integration worktree: the checks would
+        # read files that are not the commit the task would complete with.
+        task_id = await self.evaluating_task()
+        self.targets.current = (target(clean=False),)
+
+        report = await self.gate().evaluate(task_id)
+
+        self.assertEqual(report.outcome, GateOutcome.DIRTY)
+        self.assertEqual(self.order, [])
+        self.assertEqual((await self.service.restore(task_id)).state, TaskState.FAILED)
+
+    async def test_an_integration_made_dirty_during_the_checks_is_not_completed(self):
+        task_id = await self.evaluating_task()
+        gate = self.gate()
+
+        async def write_meanwhile():
+            self.targets.current = (target(clean=False),)  # the head is unchanged
+
+        self.checks[CheckKind.TEST].action = write_meanwhile
 
         report = await gate.evaluate(task_id)
 

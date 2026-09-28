@@ -74,6 +74,9 @@ MAX_PROJECTS = 32
 MAX_REPOSITORIES = 32
 MAX_REMOTES = 8  # URLs registered for one repository
 MAX_CREDENTIAL_HANDLES = 64
+# The parent's own, plus what a Worker's worktree protects for each repository
+# (the checkout, the integration worktree, the worktree area, its ``.git``).
+MAX_EXCLUDED_PATHS = MAX_ROOTS + 4 * MAX_REPOSITORIES
 
 _FORBIDDEN_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"})
 _PERCENT_SEPARATOR = re.compile(r"%(?:2[eEfF]|5[cC])")
@@ -383,7 +386,12 @@ class TaskScope:
     Worker node that works in its own worktree must not write to the user's
     checkout of the same repository, nor to the task's integration worktree:
     PAW-035). A path in one of them is out of scope, like a path of an excluded
-    repository.
+    repository, **unless** it also lies in a path root that is itself strictly
+    inside that excluded path: such a root is carved out of it (a Worker's own
+    worktree inside the excluded worktree area of the account, PAW-035). An
+    excluded repository is never carved out, and ``orchestrator.scope.
+    scope_within`` lets a child add such a root only for the worktrees the
+    backend prepared.
     """
 
     path_roots: tuple[str, ...]
@@ -449,7 +457,7 @@ class TaskScope:
                 excluded_paths.append(normalised)
         if (
             len(roots) > MAX_ROOTS
-            or len(excluded_paths) > MAX_ROOTS
+            or len(excluded_paths) > MAX_EXCLUDED_PATHS
             or len(hosts) > MAX_HOSTS
             or len(projects) > MAX_PROJECTS
             or len(repositories) > MAX_REPOSITORIES
@@ -557,14 +565,26 @@ async def classify_targets(
             await _resolve(resolver, repository.root, timeout_seconds)
             for repository in scope.excluded_repositories
             if repository.root is not None
-        ] + [
-            await _resolve(resolver, path, timeout_seconds)
-            for path in scope.excluded_paths
         ]
+        excluded_paths = []
+        for path in scope.excluded_paths:
+            excluded = await _resolve(resolver, path, timeout_seconds)
+            carved = [
+                root
+                for root in roots
+                if root != excluded and path_within(root, excluded)
+            ]
+            excluded_paths.append((excluded, carved))
         for target in paths:
             resolved = await _resolve(resolver, target.value, timeout_seconds)
-            if not any(path_within(resolved, root) for root in roots) or any(
-                path_within(resolved, root) for root in excluded_roots
+            if (
+                not any(path_within(resolved, root) for root in roots)
+                or any(path_within(resolved, root) for root in excluded_roots)
+                or any(
+                    path_within(resolved, excluded)
+                    and not any(path_within(resolved, root) for root in carved)
+                    for excluded, carved in excluded_paths
+                )
             ):
                 outside.append(TargetKind.PATH)
             touched.update(

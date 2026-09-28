@@ -18,6 +18,15 @@ bounded output). This module adds the rules of its own:
   are asked of git (``rev-parse --show-toplevel``, ``symbolic-ref``) rather than of
   the local file system, so the checks hold when git runs as another Linux user
   over SSH and the backend cannot read that user's home.
+* **A worktree's own ``.git`` is never trusted.** A Worker's worktree is a
+  directory an agent writes to: a ``.git`` it replaced would bring its own
+  configuration (a filter driver is a command, run by ``status``). Every
+  command that runs *inside* a worktree gets that worktree's git directory in
+  the checkout explicitly (``--git-dir=<common>/worktrees/<name>
+  --work-tree=<path>``: :class:`PinnedWorktree`, :meth:`WorktreeGit.pin`), and
+  the git directory is accepted only when it is one of the checkout's (the
+  checkout's ``.git`` is out of every agent's scope) and has the expected branch
+  checked out (git lets one branch be checked out in one worktree only).
 * **Merge commits have a fixed identity and no signature.** The workspace, not
   a person, makes an integration merge (``MERGE_IDENTITY``); ``commit.gpgSign``
   is off (a repository's own configuration cannot make the merge need a key).
@@ -62,6 +71,19 @@ class MergeCheck:
     conflicted_files: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class PinnedWorktree:
+    """A worktree together with ITS git directory in the checkout
+    (``<common>/worktrees/<name>``): git run with both never reads the
+    ``.git`` in the worktree. Made by :meth:`WorktreeGit.pin` only."""
+
+    path: str
+    git_dir: str
+
+
+Where = str | PinnedWorktree
+
+
 def _ref(branch: str) -> str:
     return f"refs/heads/{validate_branch(branch)}"
 
@@ -78,8 +100,17 @@ class WorktreeGit:
         self._timeout = float(timeout_s)
 
     async def _run(
-        self, args: Sequence[str], account: LinuxAccount, cwd: str
+        self, args: Sequence[str], account: LinuxAccount, where: Where
     ) -> GitResult:
+        if isinstance(where, PinnedWorktree):
+            cwd = where.path
+            args = [
+                f"--git-dir={where.git_dir}",
+                f"--work-tree={where.path}",
+                *args,
+            ]
+        else:
+            cwd = where
         return await self._runner.run(
             args,
             account=account,
@@ -89,9 +120,9 @@ class WorktreeGit:
         )
 
     async def _checked(
-        self, args: Sequence[str], account: LinuxAccount, cwd: str
+        self, args: Sequence[str], account: LinuxAccount, where: Where
     ) -> str:
-        result = await self._run(args, account, cwd)
+        result = await self._run(args, account, where)
         if result.returncode != 0:
             raise GitCommandError(command_name(args), GitFailure.NONZERO_EXIT)
         return result.stdout
@@ -99,7 +130,7 @@ class WorktreeGit:
     # -- reading ------------------------------------------------------------------
 
     async def commit_of(
-        self, path: str, revision: str, account: LinuxAccount
+        self, path: Where, revision: str, account: LinuxAccount
     ) -> str | None:
         """The commit ``revision`` (a full ref name) names, or ``None``."""
         result = await self._run(
@@ -120,9 +151,11 @@ class WorktreeGit:
         """The commit of the local branch ``branch``, or ``None`` (no such branch)."""
         return await self.commit_of(path, _ref(branch), account)
 
-    async def toplevel(self, path: str, account: LinuxAccount) -> str | None:
-        """The work tree git finds at ``path`` (``None``: not a work tree)."""
-        result = await self._run(["rev-parse", "--show-toplevel"], account, path)
+    async def _absolute_path(
+        self, args: Sequence[str], account: LinuxAccount, where: Where
+    ) -> str | None:
+        """The one absolute path a ``rev-parse`` prints (``None``: it failed)."""
+        result = await self._run(args, account, where)
         if result.returncode != 0:
             return None
         lines = result.stdout.split("\n")
@@ -130,7 +163,48 @@ class WorktreeGit:
             raise GitCommandError("rev-parse", GitFailure.UNSAFE_OUTPUT)
         return lines[0]
 
-    async def current_branch(self, path: str, account: LinuxAccount) -> str | None:
+    async def common_dir(self, checkout: str, account: LinuxAccount) -> str:
+        """The git directory the checkout's worktrees share (its ``.git``)."""
+        common = await self._absolute_path(
+            ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+            account,
+            checkout,
+        )
+        if common is None:
+            raise GitCommandError("rev-parse", GitFailure.NONZERO_EXIT)
+        return common
+
+    async def pin(
+        self, checkout: str, path: str, account: LinuxAccount
+    ) -> PinnedWorktree | None:
+        """The worktree at ``path`` with its git directory in ``checkout``, or
+        ``None`` when the git directory ``path`` names is not a worktree
+        directory of the checkout (``<common>/worktrees/<name>``).
+
+        What ``path`` names is only a hint (``rev-parse`` reads the ``.git``
+        there, and runs nothing: no filter, no hook, no monitor); the answer is
+        accepted only inside the checkout's own git directory, and the caller
+        still checks the branch through the pinned git directory (``HEAD`` of a
+        worktree directory is the checkout's, not the agent's)."""
+        common = await self.common_dir(checkout, account)
+        hint = await self._absolute_path(
+            ["rev-parse", "--path-format=absolute", "--git-dir"], account, path
+        )
+        prefix = f"{common}/worktrees/"
+        if hint is None or not hint.startswith(prefix):
+            return None
+        name = hint.removeprefix(prefix)
+        if not name or "/" in name or name in (".", ".."):
+            return None
+        return PinnedWorktree(path, hint)
+
+    async def toplevel(self, path: str, account: LinuxAccount) -> str | None:
+        """The work tree git finds at ``path`` (``None``: not a work tree)."""
+        return await self._absolute_path(
+            ["rev-parse", "--show-toplevel"], account, path
+        )
+
+    async def current_branch(self, path: Where, account: LinuxAccount) -> str | None:
         """The branch checked out at ``path`` (``None``: detached or none)."""
         result = await self._run(["symbolic-ref", "--quiet", "HEAD"], account, path)
         if result.returncode != 0:
@@ -179,7 +253,7 @@ class WorktreeGit:
         """Forget the worktrees whose directory is gone (``worktree prune``)."""
         await self._checked(["worktree", "prune"], account, checkout)
 
-    async def is_clean(self, path: str, account: LinuxAccount) -> bool:
+    async def is_clean(self, path: Where, account: LinuxAccount) -> bool:
         """No staged, unstaged or untracked change (ignored files do not count)."""
         output = await self._checked(
             ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
@@ -188,7 +262,7 @@ class WorktreeGit:
         )
         return output == ""
 
-    async def merging(self, path: str, account: LinuxAccount) -> bool:
+    async def merging(self, path: Where, account: LinuxAccount) -> bool:
         """Whether a merge was left unfinished at ``path`` (``MERGE_HEAD``)."""
         return await self.commit_of(path, "MERGE_HEAD", account) is not None
 
@@ -206,7 +280,7 @@ class WorktreeGit:
         return result.returncode == 0
 
     async def check_merge(
-        self, path: str, into: str, branch: str, account: LinuxAccount
+        self, path: Where, into: str, branch: str, account: LinuxAccount
     ) -> MergeCheck:
         """Would merging ``branch`` into ``into`` conflict? ``merge-tree`` answers
         without touching a work tree, an index or a ref (git 2.38 or later)."""
@@ -273,7 +347,7 @@ class WorktreeGit:
             checkout,
         )
 
-    async def merge(self, path: str, branch: str, account: LinuxAccount) -> bool:
+    async def merge(self, path: Where, branch: str, account: LinuxAccount) -> bool:
         """``git merge --no-ff`` of ``branch`` into the branch checked out at
         ``path``. ``False`` when git did not merge (the merge is then aborted, so
         the worktree is left as it was)."""
@@ -296,7 +370,7 @@ class WorktreeGit:
         await self.abort_merge(path, account)
         return False
 
-    async def abort_merge(self, path: str, account: LinuxAccount) -> None:
+    async def abort_merge(self, path: Where, account: LinuxAccount) -> None:
         """Abort an unfinished merge at ``path`` (nothing to abort is fine)."""
         if await self.merging(path, account):
             await self._checked(["merge", "--abort"], account, path)

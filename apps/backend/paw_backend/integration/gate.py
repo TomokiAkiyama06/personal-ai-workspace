@@ -29,9 +29,14 @@ Guarantees:
 * **Only the run that was evaluated is completed.** The task command is fenced by
   the run the gate read and by the version it read just before (as
   ``Orchestrator._end_task``): a task retried or restarted meanwhile is left alone.
-* **Only what was checked is completed.** The integration branches are read
+* **Only what was checked is completed.** The checks read the integration
+  worktrees, so a worktree must be exactly its commit: one with uncommitted or
+  untracked changes (or a merge in progress) is not checked at all (``DIRTY``:
+  the task fails). The integration branches and the worktrees' state are read
   again after the last check; a branch that moved (a human or an agent committed
-  to it meanwhile) fails the task instead of completing an unchecked commit.
+  to it meanwhile) or a worktree that was written to fails the task instead of
+  completing an unchecked commit (``CHANGED``). The commit of every repository
+  that completes is written to the task log (Merge Ready is that commit).
 * **Every kind must be configured.** A gate without a test, an Evaluator or a
   review check cannot be built (``TypeError``): skipping a kind is not a
   configuration.
@@ -75,6 +80,7 @@ logger = logging.getLogger(__name__)
 REASON_PASSED = "The integrated result passed the tests, the Evaluator and the review"
 REASON_CHECK_FAILED = "A check of the integrated result did not pass"
 REASON_CHANGED = "The integrated result changed while it was checked"
+REASON_DIRTY = "The integrated result has uncommitted changes"
 COMMAND_ATTEMPTS = 5
 MAX_SUMMARY_CHARS = 2000
 
@@ -119,6 +125,9 @@ class GateOutcome(StrEnum):
     COMPLETED = "completed"  # every check passed: the task completed (merge ready)
     FAILED = "failed"  # a check did not pass: the task failed
     CHANGED = "changed"  # an integration branch moved during the checks: failed
+    # An integration worktree is not its commit (uncommitted / untracked changes,
+    # a merge in progress): nothing was checked, failed.
+    DIRTY = "dirty"
     NOT_EVALUATING = "not_evaluating"  # the task is not evaluating: nothing done
     SUPERSEDED = "superseded"  # the task moved on under the gate: nothing written
 
@@ -178,6 +187,8 @@ class IntegrationGate:
         request = await self._request(task)
         targets = await self._worktrees.targets(request)
         verdicts: list[tuple[CheckKind, bool, str]] = []
+        if not all(target.clean for target in targets):
+            return await self._end(task, run, GateOutcome.DIRTY, verdicts, targets)
         try:
             for kind in CHECK_ORDER:
                 if not await self._still_evaluating(task_id, run):
@@ -213,6 +224,16 @@ class IntegrationGate:
             return GateReport(GateOutcome.SUPERSEDED, task_id, tuple(verdicts), targets)
         if await self._worktrees.targets(request) != targets:
             return await self._end(task, run, GateOutcome.CHANGED, verdicts, targets)
+        try:
+            for target in targets:
+                await self._log(
+                    task,
+                    run,
+                    f"Integration of repository {target.repo_id}"
+                    f" checked at {target.head}",
+                )
+        except StaleRunError:
+            return GateReport(GateOutcome.SUPERSEDED, task_id, tuple(verdicts), targets)
         return await self._end(task, run, GateOutcome.COMPLETED, verdicts, targets)
 
     async def _still_evaluating(self, task_id: uuid.UUID, run: TaskRun) -> bool:
@@ -306,6 +327,7 @@ class IntegrationGate:
             GateOutcome.COMPLETED: (TaskCommand.COMPLETE, REASON_PASSED),
             GateOutcome.FAILED: (TaskCommand.FAIL, REASON_CHECK_FAILED),
             GateOutcome.CHANGED: (TaskCommand.FAIL, REASON_CHANGED),
+            GateOutcome.DIRTY: (TaskCommand.FAIL, REASON_DIRTY),
         }[outcome]
         done = await self._command(task.id, run, command, reason)
         return GateReport(

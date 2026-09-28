@@ -7,6 +7,7 @@ here touches SSH, another Linux user or another user's home.
 
 import asyncio
 import os
+import shutil
 import unittest
 import uuid
 
@@ -18,6 +19,7 @@ from paw_backend.orchestrator.workspaces import (
     WorktreeProblem,
     WorktreeUnavailableError,
 )
+from paw_backend.repositories.git import command_name
 from paw_backend.tasks import TaskRun
 
 from .repositories_support import fs, requires_git
@@ -75,10 +77,17 @@ class DedicatedWorktreeTest(CoordinatorTestCase):
             self.assertEqual(
                 git("rev-parse", "HEAD", cwd=worktree.path), self.main_head
             )
-            # The node must stay out of the user's checkout and the integration.
+            # The node must stay out of the user's checkout, the integration,
+            # every other worktree (the whole worktree area but its own
+            # worktree) and its own worktree's ``.git``.
             self.assertEqual(
                 worktree.protected,
-                (self.checkout, self.ws.worktree(self.repo, "_integration")),
+                (
+                    self.checkout,
+                    self.ws.worktree(self.repo, "_integration"),
+                    self.ws.base,
+                    f"{worktree.path}/.git",
+                ),
             )
         self.assertEqual(
             git("rev-parse", self.ws.branch("_integration"), cwd=self.checkout),
@@ -338,23 +347,80 @@ class IntegrationTest(CoordinatorTestCase):
         self.assertEqual(again.repositories[0].merged, ("a", "b"))
         self.assertEqual(fs.read(integration, "code.txt"), "resolved\n")
 
-    async def test_a_merge_left_unfinished_is_aborted_first(self):
+    async def test_a_merge_left_unfinished_is_kept_and_reported(self):
+        # A merge in progress in the integration worktree is a human's (the
+        # backend's own merges never leave one: merge-tree judges them first and
+        # a failed one is aborted at once). It is never aborted for them.
         a = await self.prepare("a")
         b = await self.prepare("b")
         commit_file(a.path, "code.txt", "a's version\n")
         commit_file(b.path, "code.txt", "b's version\n")
         await self.coordinator.integrate(self.ws.integration_request("a"))
         integration = self.ws.worktree(self.repo, "_integration")
-        # A crash in the middle of a conflicting merge.
         git("merge", "--quiet", self.ws.branch("b"), cwd=integration, check=False)
-        self.assertTrue(
-            git("rev-parse", "-q", "--verify", "MERGE_HEAD", cwd=integration)
-        )
+        merge_head = git("rev-parse", "-q", "--verify", "MERGE_HEAD", cwd=integration)
+        self.assertTrue(merge_head)
+        fs.write(integration, "code.txt", "being resolved\n")
 
         report = await self.coordinator.integrate(self.ws.integration_request("a", "b"))
 
-        self.assertEqual(report.repositories[0].state, IntegrationState.CONFLICT)
-        self.assertEqual(git("status", "--porcelain", cwd=integration), "")
+        (result,) = report.repositories
+        self.assertEqual(result.state, IntegrationState.DIRTY)
+        self.assertIsNone(result.blocking_node)
+        self.assertEqual(
+            git("rev-parse", "-q", "--verify", "MERGE_HEAD", cwd=integration),
+            merge_head,
+        )
+        self.assertEqual(fs.read(integration, "code.txt"), "being resolved\n")
+        # The human finishes the merge: the next integration passes it.
+        git("commit", "--quiet", "-am", "Resolve", cwd=integration)
+        again = await self.coordinator.integrate(self.ws.integration_request("a", "b"))
+        self.assertTrue(again.clean)
+
+    async def test_a_merge_that_fails_without_a_conflict_is_a_git_failure(self):
+        # merge-tree says the merge is clean, but git cannot make it (here: the
+        # index is locked, as by a process of an expired lease). That is not a
+        # conflict for a human to resolve: it is a git failure (a Retry).
+        a = await self.prepare("a")
+        commit_file(a.path, "a.txt", "from a\n")
+        integration = self.ws.worktree(self.repo, "_integration")
+        lock = os.path.join(
+            git("rev-parse", "--path-format=absolute", "--git-dir", cwd=integration),
+            "index.lock",
+        )
+        fs.write(lock, "")
+        self.addCleanup(os.remove, lock)
+
+        with self.assertRaises(WorktreeUnavailableError) as caught:
+            await self.coordinator.integrate(self.ws.integration_request("a"))
+
+        self.assertEqual(caught.exception.reason, WorktreeProblem.GIT_FAILED)
+        self.assertFalse(
+            git(
+                "rev-parse",
+                "-q",
+                "--verify",
+                "MERGE_HEAD",
+                cwd=integration,
+                check=False,
+            )
+        )
+
+    async def test_an_upstream_merge_that_fails_without_a_conflict_is_retryable(self):
+        a = await self.prepare("a")
+        commit_file(a.path, "a.txt", "from a\n")
+        c = await self.prepare("c")
+        lock = os.path.join(
+            git("rev-parse", "--path-format=absolute", "--git-dir", cwd=c.path),
+            "index.lock",
+        )
+        fs.write(lock, "")
+        self.addCleanup(os.remove, lock)
+
+        with self.assertRaises(WorktreeUnavailableError) as caught:
+            await self.prepare("c", "a")
+
+        self.assertEqual(caught.exception.reason, WorktreeProblem.GIT_FAILED)
 
     async def test_uncommitted_work_of_a_worker_stops_the_repository(self):
         a = await self.prepare("a")
@@ -430,14 +496,107 @@ class IntegrationTest(CoordinatorTestCase):
 
         result = report.repositories[0]
         self.assertEqual(
-            (target.repo_id, target.path, target.branch, target.head),
-            (self.repo, result.path, result.branch, result.head),
+            (target.repo_id, target.path, target.branch, target.head, target.clean),
+            (self.repo, result.path, result.branch, result.head, True),
         )
+
+    async def test_targets_say_when_the_integration_worktree_is_not_clean(self):
+        a = await self.prepare("a")
+        commit_file(a.path, "a.txt", "from a\n")
+        report = await self.coordinator.integrate(self.ws.integration_request("a"))
+        fs.write(report.repositories[0].path, "stray.txt", "not committed\n")
+
+        (target,) = await self.coordinator.targets(self.ws.integration_request("a"))
+
+        self.assertFalse(target.clean)
+        self.assertEqual(target.head, report.repositories[0].head)
 
     async def test_no_target_before_any_integration_branch_exists(self):
         self.assertEqual(
             await self.coordinator.targets(self.ws.integration_request()), ()
         )
+
+
+@requires_git
+class TamperedWorktreeTest(CoordinatorTestCase):
+    """A Worker's worktree is a directory the agent writes to. The backend runs
+    git there only with the worktree's own git directory in the checkout
+    (``--git-dir``), so a ``.git`` the agent replaced (with a configuration of
+    its own: a filter driver is a command) is never used."""
+
+    def plant_repository(self, path: str, branch: str, marker: str) -> None:
+        # What an agent with only file-write tools can leave behind: a ``.git``
+        # directory of its own, on the node's branch, with a filter driver.
+        shutil.rmtree(f"{path}/.git", ignore_errors=True)
+        if fs.exists(f"{path}/.git"):
+            os.remove(f"{path}/.git")
+        git("init", "--quiet", "--initial-branch=main", path)
+        git("symbolic-ref", "HEAD", f"refs/heads/{branch}", cwd=path)
+        fs.write(path, ".gitattributes", "* filter=evil\n")
+        fs.write(path, "planted.txt", "x\n")
+        git("add", "-A", cwd=path)
+        git("commit", "--quiet", "-m", "planted", cwd=path)
+        git("config", "filter.evil.clean", f"sh -c 'touch {marker}; cat'", cwd=path)
+        # A stale index: the next status must run the clean filter again.
+        fs.write(path, "planted.txt", "y\n")
+
+    async def test_a_replaced_git_directory_of_a_worker_runs_nothing(self):
+        a = await self.prepare("a")
+        commit_file(a.path, "a.txt", "from a\n")
+        marker = f"{self.ws.world.root}/pwned"
+        self.plant_repository(a.path, a.branch, marker)
+        # The checkout still lists the worktree on its branch.
+        self.assertEqual(
+            await self.coordinator._git.worktree_branch(
+                self.checkout, a.path, self.ws.account
+            ),
+            a.branch,
+        )
+
+        with self.assertRaises(WorktreeUnavailableError) as caught:
+            await self.coordinator.integrate(self.ws.integration_request("a"))
+        self.assertEqual(caught.exception.reason, WorktreeProblem.NOT_THE_WORKTREE)
+        with self.assertRaises(WorktreeUnavailableError):
+            await self.prepare("a")
+
+        self.assertFalse(fs.exists(marker))
+
+    async def test_a_git_file_pointing_at_another_worktree_is_refused(self):
+        a = await self.prepare("a")
+        b = await self.prepare("b")
+        commit_file(b.path, "b.txt", "from b\n")
+        other = git("rev-parse", "--path-format=absolute", "--git-dir", cwd=a.path)
+        os.remove(f"{b.path}/.git")
+        fs.write(b.path, ".git", f"gitdir: {other}\n")
+
+        with self.assertRaises(WorktreeUnavailableError) as caught:
+            await self.coordinator.integrate(self.ws.integration_request("a", "b"))
+
+        self.assertEqual(caught.exception.reason, WorktreeProblem.NOT_THE_WORKTREE)
+
+    async def test_git_runs_in_a_worktree_with_its_own_git_directory(self):
+        a = await self.prepare("a")
+        commit_file(a.path, "a.txt", "from a\n")
+        self.ws.runner.calls.clear()
+
+        await self.coordinator.integrate(self.ws.integration_request("a"))
+
+        common = git(
+            "rev-parse", "--path-format=absolute", "--git-common-dir", cwd=self.checkout
+        )
+        pinned = 0
+        for args in self.ws.runner.calls:
+            git_dirs = [a for a in args if a.startswith("--git-dir=")]
+            if command_name(args) in ("status", "merge"):
+                self.assertEqual(len(git_dirs), 1, args)
+            for option in git_dirs:
+                pinned += 1
+                self.assertEqual(
+                    os.path.dirname(option.removeprefix("--git-dir=")),
+                    f"{common}/worktrees",
+                )
+                self.assertTrue(any(a.startswith("--work-tree=/") for a in args))
+        self.assertGreater(pinned, 0)
 
 
 class ConstructionTest(unittest.TestCase):

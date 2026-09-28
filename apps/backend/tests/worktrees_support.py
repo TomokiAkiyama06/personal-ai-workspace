@@ -19,6 +19,7 @@ from paw_backend.orchestrator.workspaces import (
     NodeWorkspaceRequest,
 )
 from paw_backend.repositories import RepositoryPolicy, SubprocessGitRunner
+from paw_backend.repositories.git import command_name
 from paw_backend.tasks import TaskRun
 from paw_backend.tools import ScopedRepository, TaskScope
 
@@ -59,13 +60,7 @@ class RecordingRunner:
         )
 
     def subcommands(self) -> list[str]:
-        names = []
-        for args in self.calls:
-            index = 0
-            while index + 1 < len(args) and args[index] == "-c":
-                index += 2
-            names.append(args[index])
-        return names
+        return [command_name(args) for args in self.calls]
 
 
 class Workspace:
