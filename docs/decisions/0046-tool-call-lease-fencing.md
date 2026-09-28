@@ -35,6 +35,7 @@ Decision 0021 の 8 節は DAG の書き込みを `epoch` で、Decision 0007 �
   - `LOST` は `lease_lost`。`UNKNOWN`、例外、Timeout（Broker の `timeout_seconds`）、`LeaseStatus` でない答えは `lease_unavailable`。どちらも Audit に固定の理由として残る（例外の文言は Log に出さない）。
 - **`TaskQueue.holds_lease`。** 1 つの `SELECT` で、Entry が `task_id` のもの、`claimed`、同じ Worker、同じ `claim_count`、`lease_expires_at > clock_timestamp()` かを返す。`heartbeat` と同じ規則を Database の時計で判定する**読み取り**で、行を Lock せず、Lease を延長しない。Application の Role は `queue_entries` の `SELECT` を既に持つ（Migration も権限の追加もない）。
 - **Gateway の反応。** `NodeToolGateway` は `lease_lost` の拒否を受けたら、Run の Guard を `StopReason.LEASE_LOST` で止めて `NodeStopped` を投げる。同じ Run の他の Node の呼び出しも渡さず、Orchestrator は Heartbeat が Lease を失ったときと同じく `LEASE_LOST` で Run を終える（Entry は完了も返却もしない）。`lease_unavailable` は、その呼び出しだけを拒否する。
+  - Runtime が Tool の呼び出しの `NodeStopped` を捕まえて結果（`NodeOutcome`）を返しても、Orchestrator は Run の Guard が止まっていれば（`LEASE_LOST`、`SUPERSEDED`、`TASK_ENDED`）その結果を DAG に書かない（`_settle`）。Lease が期限切れになっただけで誰も引き継いでいないときは DAG の `epoch` がまだこの Worker のもので、Store の Fencing では拒否されないため。
 - **`tool_calls` の計上。** `BudgetProvider.charge(task_id, run, tool)` とし、Broker は `TaskContext.run` を渡す。`TrackerBudgetProvider` は `BudgetTracker.record(..., run=run)` で記録する（`NodeBudgetHandle.charge` と同じ Fencing: Task の行を `FOR SHARE` で読み、同じ Transaction で現在の Run と終わっていないことを確かめる）。実行中に Run が置き換えられた、または Task が終わった呼び出しは記録せず（`StaleRunError` を Log に 1 行）、Audit には実行として残る。`check(task_id, tool)` は変えない（読み取りで、Run と Lease は別の検査が確かめる）。
 
 ### 3. B11 の再確認

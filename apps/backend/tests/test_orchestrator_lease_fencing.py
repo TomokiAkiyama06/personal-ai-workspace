@@ -277,6 +277,39 @@ class ToolCallAfterLostLeaseTest(LeaseFencingTestCase):
         )
         self.assertEqual(self.tool_rows(stack)[-1], ("deny", "lease_lost"))
 
+    async def test_a_runtime_that_swallows_the_stop_cannot_settle_its_node(self):
+        # A runtime that catches every tool error (NodeStopped included) and still
+        # returns an outcome. The lease only ran out, so nobody took the DAG over
+        # and its epoch is still this worker's: without a look at the guard the
+        # stale worker would complete the node after the Broker told it the lease
+        # was gone (Codex review of PR #144).
+        stack = self.stack()
+        seen, gate = [], asyncio.Event()
+
+        async def swallow(assignment):
+            seen.append(await assignment.tools.call("repo.read_file", READ))
+            await gate.wait()
+            try:
+                await assignment.tools.call("repo.read_file", READ)
+            except NodeStopped as stop:
+                seen.append(stop.reason)
+            return ok("done anyway")
+
+        runtime = FakeRuntime("local", script={"impl": [swallow]})
+        h = self.worker(stack, runtime)
+        task_id = await self.prepare(h, make_plan(node("impl")))
+        running = asyncio.create_task(h.orchestrator.run_once("w1"))
+        await until(lambda: len(seen) == 1, message="the first call")
+
+        await self.expire_the_lease()
+        gate.set()
+        report = await asyncio.wait_for(running, 120)
+
+        self.assertEqual(seen[1], StopReason.LEASE_LOST)
+        self.assertEqual(report.outcome, Out.LEASE_LOST)
+        self.assertNotEqual((await self.states_of(task_id))["impl"], "succeeded")
+        self.assertEqual(await self.entry(), ("claimed", "w1", 1))
+
     async def test_the_context_carries_the_claim_of_the_worker(self):
         stack = self.stack()
         seen, gate = [], asyncio.Event()

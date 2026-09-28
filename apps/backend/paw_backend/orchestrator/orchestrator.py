@@ -148,6 +148,11 @@ from paw_backend.tools.interfaces import require_async_method
 logger = logging.getLogger(__name__)
 
 _RETRYING_STEPS = frozenset({NextStep.RETRY, NextStep.ALTERNATIVE, NextStep.ESCALATE})
+# The guard's stops that end the whole run for this worker: an attempt that ends
+# after one is not settled (``_settle``); the top of the loop closes the run.
+_RUN_ENDING_STOPS = frozenset(
+    {StopReason.TASK_ENDED, StopReason.SUPERSEDED, StopReason.LEASE_LOST}
+)
 
 # Recorded as the reason of the task commands the orchestrator issues (fixed text).
 REASON_DAG_SUCCEEDED = "All required nodes succeeded"
@@ -1594,6 +1599,14 @@ class Orchestrator:
         """Write the outcome of an attempt. ``(dag, stop)``: ``stop`` when the
         outcome means the run must not start more nodes (a budget or a loop)."""
         store, epoch = self._store, run.epoch
+        if run.guard.stop_reason in _RUN_ENDING_STOPS:
+            # The run is over for this worker (its lease is gone, its run was
+            # replaced, or the task ended): nothing of it is written, whatever the
+            # attempt reports. A runtime may have caught the ``NodeStopped`` of a
+            # tool call and returned an outcome anyway; after a lease that only
+            # ran out, nobody has raised the DAG's epoch yet, so the store would
+            # still take it (Decision 0046). The top of the loop closes the run.
+            return dag, None
         if finished.stopped is not None:
             reason = finished.stopped
             if reason is StopReason.BUDGET_EXCEEDED:
@@ -1607,12 +1620,6 @@ class Orchestrator:
                     step=NextStep.HOLD,
                 )
                 return dag, await self._budget_stop(run)
-            if run.guard.stop_reason is reason and reason in (
-                StopReason.TASK_ENDED,
-                StopReason.SUPERSEDED,
-                StopReason.LEASE_LOST,
-            ):
-                return dag, None  # the top of the loop sees it and closes the DAG
             dag = await store.fail_node(
                 dag.id,
                 epoch,
