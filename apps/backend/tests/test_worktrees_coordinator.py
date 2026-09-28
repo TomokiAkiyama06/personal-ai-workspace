@@ -23,7 +23,7 @@ from paw_backend.repositories.git import command_name
 from paw_backend.tasks import RepoRole, TaskRun
 
 from .repositories_support import fs, requires_git
-from .worktrees_support import Workspace, commit_file, git
+from .worktrees_support import RevParseFailingRunner, Workspace, commit_file, git
 
 # git commands that change what a person sees or what others see: the
 # coordinator never runs one of them.
@@ -517,6 +517,24 @@ class IntegrationTest(CoordinatorTestCase):
             (target.repo_id, target.path, target.branch, target.head, target.clean),
             (self.repo, result.path, result.branch, result.head, True),
         )
+
+    async def test_a_failing_rev_parse_is_a_git_failure_not_a_missing_branch(self):
+        # Codex review (P1): when git cannot read the checkout (exit 128), the
+        # worker branches and the integration branch are not "absent": the
+        # integration must not report NOTHING and the targets must not leave the
+        # repository out (the checks would pass without the workers' commits).
+        runner = RevParseFailingRunner()
+        coordinator = self.ws.coordinator(runner=runner)
+        a = await coordinator.prepare_node(self.ws.node_request("a"))
+        commit_file(a[self.repo].path, "a.txt", "from a\n")
+        await coordinator.integrate(self.ws.integration_request("a"))
+        runner.failing = True
+
+        for call in (coordinator.integrate, coordinator.targets):
+            with self.subTest(call=call.__name__):
+                with self.assertRaises(WorktreeUnavailableError) as caught:
+                    await call(self.ws.integration_request("a"))
+                self.assertEqual(caught.exception.reason, WorktreeProblem.GIT_FAILED)
 
     async def test_targets_say_when_the_integration_worktree_is_not_clean(self):
         a = await self.prepare("a")

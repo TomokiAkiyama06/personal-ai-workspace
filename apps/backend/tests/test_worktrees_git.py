@@ -30,7 +30,13 @@ from paw_backend.repositories import (
 from paw_backend.repositories.git import command_name
 
 from .repositories_support import fs, requires_git
-from .worktrees_support import RecordingRunner, Workspace, commit_file, git
+from .worktrees_support import (
+    RecordingRunner,
+    RevParseFailingRunner,
+    Workspace,
+    commit_file,
+    git,
+)
 
 TASK = uuid.UUID("0f5f6a3e-0000-4000-8000-000000000035")
 REPO = uuid.UUID("0f5f6a3e-0000-4000-8000-0000000000aa")
@@ -193,6 +199,24 @@ class WorktreeGitTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(
             await self.git.worktree_branch(self.checkout, a, self.account)
         )
+
+    async def test_a_missing_ref_is_none_but_a_git_failure_is_raised(self):
+        # Codex review of PAW-035 (P1): exit 1 of ``rev-parse --verify --quiet``
+        # is "no such ref"; anything else (exit 128: the checkout is no longer a
+        # repository, it is corrupted, it cannot be read) is a git failure, never
+        # read as an absent branch.
+        self.assertIsNone(
+            await self.git.branch_commit(self.checkout, "paw/t/none", self.account)
+        )
+        runner = RevParseFailingRunner()
+        failing = WorktreeGit(runner, timeout_s=30)
+        runner.failing = True
+        with self.assertRaises(GitCommandError):
+            await failing.branch_commit(self.checkout, "main", self.account)
+        with self.assertRaises(GitCommandError):
+            await failing.commit_of(
+                self.checkout, "refs/heads/paw/t/none", self.account
+            )
 
     async def test_an_existing_branch_is_never_recreated(self):
         await self.add("a")

@@ -19,7 +19,7 @@ from paw_backend.orchestrator.workspaces import (
     NodeWorkspaceRequest,
 )
 from paw_backend.repositories import RepositoryPolicy, SubprocessGitRunner
-from paw_backend.repositories.git import command_name
+from paw_backend.repositories.git import GitResult, command_name
 from paw_backend.tasks import RepoRole, TaskRun
 from paw_backend.tools import ScopedRepository, TaskScope
 
@@ -28,6 +28,7 @@ from .repositories_support import FakeAccounts, World, git
 __all__ = [
     "RUN",
     "RecordingRunner",
+    "RevParseFailingRunner",
     "Workspace",
     "commit_file",
     "git",
@@ -61,6 +62,24 @@ class RecordingRunner:
 
     def subcommands(self) -> list[str]:
         return [command_name(args) for args in self.calls]
+
+
+class RevParseFailingRunner(RecordingRunner):
+    """A runner whose ``rev-parse --verify`` fails as git does when the checkout
+    cannot be read (not a repository any more, corrupted: exit 128), once
+    ``failing`` is set. A missing ref exits 1 instead."""
+
+    def __init__(self, inner: SubprocessGitRunner | None = None) -> None:
+        super().__init__(inner)
+        self.failing = False
+
+    async def run(self, args, *, account, cwd, timeout_s, ceiling=None):
+        if self.failing and command_name(args) == "rev-parse" and "--verify" in args:
+            self.calls.append(tuple(args))
+            return GitResult(128, "fatal: not a git repository\n")
+        return await super().run(
+            args, account=account, cwd=cwd, timeout_s=timeout_s, ceiling=ceiling
+        )
 
 
 class Workspace:

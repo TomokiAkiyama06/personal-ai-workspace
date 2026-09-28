@@ -46,6 +46,8 @@ from paw_backend.repositories.paths import LinuxAccount
 from paw_backend.repositories.validation import validate_branch
 
 _OBJECT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+# ``git rev-parse --verify --quiet``: the revision names no object.
+_NO_SUCH_REVISION = 1
 MERGE_NAME = "Personal AI Workspace"
 MERGE_EMAIL = "integration@paw.invalid"
 # Put in front of the commands that may create a commit (``merge``): a fixed
@@ -132,14 +134,23 @@ class WorktreeGit:
     async def commit_of(
         self, path: Where, revision: str, account: LinuxAccount
     ) -> str | None:
-        """The commit ``revision`` (a full ref name) names, or ``None``."""
+        """The commit ``revision`` (a full ref name) names, or ``None`` when it
+        names none.
+
+        ``rev-parse --verify --quiet`` exits 1 for a revision that does not name a
+        commit; any other failure (128: the checkout is not a repository any
+        more, it is corrupted or cannot be read) is ``GitCommandError``, never an
+        absent ref (Codex review of PAW-035: a branch that could not be read is
+        not a branch to skip)."""
         result = await self._run(
             ["rev-parse", "--verify", "--quiet", f"{revision}^{{commit}}"],
             account,
             path,
         )
-        if result.returncode != 0:
+        if result.returncode == _NO_SUCH_REVISION:
             return None
+        if result.returncode != 0:
+            raise GitCommandError("rev-parse", GitFailure.NONZERO_EXIT)
         commit = result.stdout.strip()
         if _OBJECT_ID.fullmatch(commit) is None:
             raise GitCommandError("rev-parse", GitFailure.UNSAFE_OUTPUT)
