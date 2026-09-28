@@ -953,7 +953,11 @@ class AuthService:
     async def redeem_owner_token(
         self, token: str, new_password: str, context: RequestContext
     ) -> RedeemResult:
-        """Spend an Owner setup / recovery token and set the Owner's password.
+        """Spend a one-time token and set its user's password.
+
+        An Owner setup / recovery token, or the password reset token an Admin or a
+        User was given with the reset of their Passkeys (#108; ``Redemption`` says
+        whose it is, and the audit rows name that user and role).
 
         Public: rate limited per source and in total BEFORE anything else
         (Decision 0005), then the password is checked and hashed, then the token
@@ -1032,6 +1036,8 @@ class AuthService:
         for invalidate in self._invalidators:
             await invalidate(session, user_id)
         recovery = redemption.purpose is TokenPurpose.RECOVERY
+        reset = redemption.purpose is TokenPurpose.PASSWORD_RESET
+        role = redemption.system_role
         revoked = await self._sessions.revoke_all(
             session,
             user_id,
@@ -1045,7 +1051,12 @@ class AuthService:
             {"id": user_id, "now": now},
         )
         policy = await self._policy.get_in(session)
-        reason = AuthReason.RECOVERY if recovery else AuthReason.SETUP
+        if recovery:
+            reason = AuthReason.RECOVERY
+        elif reset:
+            reason = AuthReason.PASSWORD_RESET
+        else:
+            reason = AuthReason.SETUP
         await self._audit.record_in(
             session,
             self._audit.event(
@@ -1055,7 +1066,7 @@ class AuthService:
                 correlation_id=context.correlation_id,
                 client_request_id=context.client_request_id,
                 actor_id=user_id,
-                actor_role=SystemRole.OWNER,
+                actor_role=role,
                 resource_kind="user",
                 resource_id=user_id,
             ),
@@ -1070,7 +1081,7 @@ class AuthService:
                     correlation_id=context.correlation_id,
                     client_request_id=context.client_request_id,
                     actor_id=user_id,
-                    actor_role=SystemRole.OWNER,
+                    actor_role=role,
                     resource_kind="user",
                     resource_id=user_id,
                 ),
@@ -1079,7 +1090,7 @@ class AuthService:
             purpose=redemption.purpose,
             user_id=user_id,
             passkey_required=(
-                policy.requirement_for(SystemRole.OWNER).value == "required"
+                policy.requirement_for(role) is PasskeyRequirement.REQUIRED
             ),
         )
 

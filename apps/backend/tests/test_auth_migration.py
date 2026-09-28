@@ -21,6 +21,7 @@ from sqlalchemy.exc import DBAPIError
 
 from paw_backend.auth import limits
 from paw_backend.auth.models import (
+    STEP_UP_METHODS,
     AuthMethod,
     PasskeyRequirement,
     RevokeReason,
@@ -111,7 +112,10 @@ class ModelsMetadataTest(unittest.TestCase):
     def test_the_allowed_values_of_the_database_are_those_of_the_code(self):
         expected = {
             ("auth_sessions", "auth_method_valid"): {m.value for m in AuthMethod},
-            ("auth_sessions", "stepup_method_valid"): {m.value for m in AuthMethod},
+            # A pairing (0124) is a sign-in method, never a Step-up method.
+            ("auth_sessions", "stepup_method_valid"): {
+                m.value for m in STEP_UP_METHODS
+            },
             ("auth_sessions", "revoked_reason_valid"): {r.value for r in RevokeReason},
             ("auth_throttles", "scope_valid"): {s.value for s in ThrottleScope},
             ("auth_policy", "passkey_owner_valid"): {
@@ -130,10 +134,12 @@ class ModelsMetadataTest(unittest.TestCase):
 
     def test_the_migration_repeats_the_values_of_the_code(self):
         versions = Path(__file__).resolve().parents[1].joinpath("migrations/versions")
-        # 0023 (PAW-023) adds the ``passkey_revoked`` reason to the same constraint.
+        # 0023 (PAW-023) adds the ``passkey_revoked`` reason to the same constraint;
+        # 0124 (PAW-024) the ``pairing`` method and the two ``pairing_*`` scopes.
         source = (
             versions.joinpath("0022_login_session_password.py").read_text()
             + versions.joinpath("0023_passkeys.py").read_text()
+            + versions.joinpath("0124_invitations_and_pairing.py").read_text()
         )
         for method in AuthMethod:
             self.assertIn(f"'{method.value}'", source)

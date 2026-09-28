@@ -498,6 +498,20 @@ class RestoreTest(LifecycleTestCase):
                 self.actor(self.seed_user(), SystemRole.OWNER), self.project_id
             )
 
+    async def test_a_manager_whose_account_is_not_active_does_not_restore_it(self):
+        # The account of the only Manager is being deleted (PAW-024): the project
+        # would come back with nobody able to manage it.
+        with self.engine.begin() as connection:
+            connection.execute(
+                text("UPDATE users SET status = 'pending_deletion' WHERE id = :u"),
+                {"u": self.team.manager},
+            )
+        with self.assertRaises(NoManagerError):
+            await self.service.restore(
+                self.actor(self.seed_user(), SystemRole.OWNER), self.project_id
+            )
+        self.assertEqual(self.status(), "pending_deletion")
+
     async def test_the_last_manager_leaving_a_deleted_project_blocks_its_restore(self):
         await self.service.leave_project(self.manager, self.project_id)
         with self.assertRaises(NoManagerError):

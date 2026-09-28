@@ -17,7 +17,7 @@ The definition repeats the one in ``paw_backend.memory.models``; Alembic's
 autogenerate shows no difference (``tests/test_memory_freshness_migration.py``).
 
 Revision ID: 0042
-Revises: 0034
+Revises: 0124
 Create Date: 2026-09-28
 """
 
@@ -27,7 +27,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "0042"
-down_revision: str | Sequence[str] | None = "0034"
+down_revision: str | Sequence[str] | None = "0124"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
