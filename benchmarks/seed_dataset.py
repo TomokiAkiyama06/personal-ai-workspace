@@ -4,7 +4,7 @@ The public part of the dataset (task manifests and the dataset index) lives in
 ``benchmarks/seed-tasks/paw-seed-v1``.  Everything a candidate must not see (hidden
 tests, bug patches, golden patches and the per-task Git repositories) lives in an
 evaluator-private directory outside this repository, by default
-``/data/datasets/paw-seed-v1`` (Decision 0038).  This module holds none of that
+``/data/datasets/paw-seed-v1`` (Decision 0041).  This module holds none of that
 material; it only knows the layout:
 
 ``<private>/hidden-checks.json``

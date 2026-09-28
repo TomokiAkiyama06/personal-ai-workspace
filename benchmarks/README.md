@@ -405,7 +405,7 @@ tools and raises `TypeError`, so use `to_dict()` instead.
 ## Seed benchmark dataset
 
 [`seed-tasks/paw-seed-v1`](seed-tasks/paw-seed-v1/README.md) is the seed task set of PAW-016
-([Decision 0038](../docs/decisions/0038-seed-benchmark-dataset.md), Proposed): 24 tasks from this
+([Decision 0041](../docs/decisions/0041-seed-benchmark-dataset.md), Proposed): 24 tasks from this
 repository (11 historical from merged PRs, 6 spec, 7 injected bugs), each with its difficulty and
 categories in `manifest.json`.  Only task manifests are public; hidden tests, golden patches and the
 per-task repositories live in the evaluator-private `/data/datasets/paw-seed-v1`.

@@ -1,4 +1,4 @@
-"""Hidden-check helper for the seed benchmark dataset (PAW-016, Decision 0038).
+"""Hidden-check helper for the seed benchmark dataset (PAW-016, Decision 0041).
 
 The evaluator starts this program through ``TestRunner.run_hidden``; the current
 directory is the candidate worktree.  The program never writes into that worktree:

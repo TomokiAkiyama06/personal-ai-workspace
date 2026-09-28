@@ -1,6 +1,6 @@
 {
   "dataset": "paw-seed-v1",
-  "description": "Seed benchmark dataset of the Personal AI Workspace repository (PAW-016, Decision 0038).",
+  "description": "Seed benchmark dataset of the Personal AI Workspace repository (PAW-016, Decision 0041).",
   "base_commit": "eb236c73ca9c9a3b3e5b3465d0594aaef5c7b9a4",
   "private_material": "/data/datasets/paw-seed-v1 (not in this repository)",
   "tasks": [
