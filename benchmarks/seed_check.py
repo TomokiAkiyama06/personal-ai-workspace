@@ -17,7 +17,9 @@ directory is the candidate worktree.  The program never writes into that worktre
 
 ``forbidden-changes``
     Fails when the worktree differs from ``--base`` outside the ``--allow``
-    path prefixes (committed, staged, unstaged and untracked files).
+    path prefixes (committed, staged, unstaged and untracked files).  The files
+    are hashed from their bytes; the candidate's index flags, ignore rules and
+    attributes are not trusted.
 
 The overlay directory, commands and base URL file are evaluator-private material
 (see ``benchmarks/seed_dataset.py``); this module holds none of them.
@@ -26,6 +28,7 @@ The overlay directory, commands and base URL file are evaluator-private material
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import re
 import secrets
@@ -119,14 +122,17 @@ def _create_database(url_file: Path) -> tuple[str, str, str]:
     return admin.render_as_string(hide_password=False), name, test_url
 
 
-def _drop_database(admin_url: str, name: str) -> None:
+def _drop_database(admin_url: str, name: str) -> bool:
+    """Drop the throwaway database; False (and a message without the URL) on failure."""
     import psycopg
 
     try:
         with psycopg.connect(admin_url, autocommit=True) as connection:
             connection.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
-    except Exception:  # noqa: BLE001 - best effort; never print the URL
-        print("seed_check: could not drop the throwaway database", file=sys.stderr)
+    except Exception:  # noqa: BLE001 - never print the URL
+        print("seed_check: could not drop the throwaway database; the check fails")
+        return False
+    return True
 
 
 def _run_bounded(command: list[str], cwd: Path, environment: dict[str, str]):
@@ -165,6 +171,7 @@ def _run_unittest(arguments: argparse.Namespace) -> int:
     overlay = Path(arguments.overlay).resolve() if arguments.overlay else None
     temporary = Path(tempfile.mkdtemp(prefix="paw-seed-check-"))
     database: tuple[str, str] | None = None
+    code = 1
     try:
         tree = temporary / "tree"
         _copy_tree(worktree, tree)
@@ -209,17 +216,22 @@ def _run_unittest(arguments: argparse.Namespace) -> int:
         print(
             f"seed_check: expect={arguments.expect} verdict={'pass' if verdict else 'fail'}"
         )
-        return 0 if verdict else 1
+        code = 0 if verdict else 1
     finally:
-        if database is not None:
-            _drop_database(*database)
+        # A database that could not be dropped would outlive the check and could
+        # leak into later runs, so a failed teardown fails the check.
+        if database is not None and not _drop_database(*database):
+            code = 1
         shutil.rmtree(temporary, ignore_errors=True)
+    return code
 
 
 def _git(worktree: Path, *arguments: str) -> list[str]:
     # GIT_DIR / GIT_INDEX_FILE / GIT_WORK_TREE from a caller (a Git hook, for one)
     # would make Git compare another repository or index than the worktree's.
     environment = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    # refs/replace/ in the candidate's repository must not swap the base commit.
+    environment["GIT_NO_REPLACE_OBJECTS"] = "1"
     completed = subprocess.run(
         ["git", "-c", "core.hooksPath=/dev/null", "-C", str(worktree), *arguments],
         stdout=subprocess.PIPE,
@@ -230,16 +242,72 @@ def _git(worktree: Path, *arguments: str) -> list[str]:
     return [line for line in completed.stdout.decode().split("\0") if line]
 
 
+# Evaluator caches that are never part of a candidate's change.
+_UNTRACKED_CACHES = frozenset(
+    {"__pycache__", ".ruff_cache", ".pytest_cache", ".mypy_cache"}
+)
+
+
+def _blob_id(data: bytes) -> str:
+    return hashlib.sha1(
+        b"blob %d\0" % len(data) + data
+    ).hexdigest()  # Git blob id (SHA-1 object format)
+
+
+def _worktree_blobs(worktree: Path) -> dict[str, str]:
+    """Git blob ids of the files in the worktree, hashed here from the raw bytes.
+
+    Git's own view (index flags such as ``assume-unchanged`` / ``skip-worktree``,
+    ignore rules, attributes and filters) is under the candidate's control, so it
+    is not used to decide what changed.
+    """
+    blobs = {}
+    for directory, subdirectories, files in os.walk(worktree):
+        here = Path(directory)
+        relative = here.relative_to(worktree)
+        linked = [name for name in subdirectories if (here / name).is_symlink()]
+        subdirectories[:] = [
+            name
+            for name in subdirectories
+            if name not in linked
+            and name not in _UNTRACKED_CACHES
+            and not (relative == Path(".") and name == ".git")
+        ]
+        for name in (*files, *linked):
+            if relative == Path(".") and name == ".git":
+                continue  # a linked worktree has a .git file
+            path = here / name
+            key = (relative / name).as_posix()
+            if path.is_symlink():
+                blobs[key] = _blob_id(os.fsencode(os.readlink(path)))
+            elif path.is_file():
+                blobs[key] = _blob_id(path.read_bytes())
+    return blobs
+
+
+def _base_blobs(worktree: Path, base: str) -> dict[str, str]:
+    blobs = {}
+    for entry in _git(worktree, "ls-tree", "-r", "-z", "--full-tree", base):
+        meta, _, path = entry.partition("\t")
+        _mode, kind, object_id = meta.split()
+        if kind == "blob":
+            blobs[path] = object_id
+    return blobs
+
+
 def _run_forbidden_changes(arguments: argparse.Namespace) -> int:
     worktree = Path(arguments.worktree).resolve()
     try:
-        changed = set(_git(worktree, "diff", "-z", "--name-only", arguments.base))
-        changed |= set(
-            _git(worktree, "ls-files", "-z", "--others", "--exclude-standard")
-        )
+        base = _base_blobs(worktree, arguments.base)
     except subprocess.CalledProcessError:
-        print("seed_check: could not compare the worktree with the base commit")
+        print("seed_check: could not read the base commit")
         return 1
+    current = _worktree_blobs(worktree)
+    changed = {
+        path
+        for path in base.keys() | current.keys()
+        if base.get(path) != current.get(path)
+    }
     allowed = tuple(arguments.allow)
     outside = sorted(path for path in changed if not path.startswith(allowed))
     for path in outside:

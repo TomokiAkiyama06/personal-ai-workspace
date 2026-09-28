@@ -57,7 +57,7 @@ Task schema v1 は top level の追加 field を許さない（`additionalProper
 - 公開 Repository に置くのは Task JSON（Task schema v1）と索引だけ。Hidden check は opaque な `reference_id`（`seed-v1-` + 12 桁の 16 進）だけを持つ。
 - Hidden check の中身（`hidden-checks.json`: `reference_id` → 実行方法と期待する結果、`overlays/`: Hidden test の file、`tasks/<task_id>/golden.patch`・`bug.patch`、`repos/<task_id>/`: 下の 5 の Repository）は、Evaluator の OS User だけが読める `/data/datasets/paw-seed-v1`（directory `0700`、file `0600`）に置き、commit しない。
 - Hidden check は `benchmarks/seed_check.py`（Evaluator 側の checkout にある helper。候補の worktree の code ではない）が実行する。候補の worktree を一時 directory へ複製し（`.git` を除く）、その上に Hidden test を重ねて実行する。候補の worktree には何も書かない（Decision 0001 の「hidden の source を worktree へ複製しない」を保つ）。候補が同じ名前の test file を置いても上書きされる。
-- skip された test は失敗として扱う（PostgreSQL の test が skip されて黙って合格にならないように）。PostgreSQL が要る check は、Evaluator が渡す管理用 URL の file から、check ごとに使い捨ての Database（`paw_seed_<乱数>`）を作って test に渡し、終わったら消す。URL は log・出力に出さない。
+- skip された test は失敗として扱う（PostgreSQL の test が skip されて黙って合格にならないように）。PostgreSQL が要る check は、Evaluator が渡す管理用 URL の file から、check ごとに使い捨ての Database（`paw_seed_<乱数>`）を作って test に渡し、終わったら消す（消せなかったら check を失敗にする）。URL は log・出力に出さない。Test に渡す接続は管理用 URL と同じ Role を使う。Hidden test（Grant の test）が Role を作り、Database を作るので、`CREATEDB` / `CREATEROLE` のない Role には絞れない。そのため、この PostgreSQL は **Benchmark 専用の使い捨ての Cluster**（例: Run ごとに作って消す Container、Data は tmpfs）とし、他の用途の Database と共有しない。
 - 退避（Backup）は、公開 Repository ではなく、非公開の場所（例: `/data` の定期 Backup、または非公開の Git Repository）にする。どこにするかは Admin が決める（この Decision では決めない）。
 - 限界: Decision 0001 のとおり、Python の runner は防壁ではない。候補が同じ OS User で動く間は `/data/datasets/paw-seed-v1` を読めてしまう。本番の比較 Run は、候補を別の OS User か Container で動かし、この directory を見えなくする（PAW-017 の前提条件）。
 

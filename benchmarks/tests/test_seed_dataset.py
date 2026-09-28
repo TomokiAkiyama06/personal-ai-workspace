@@ -405,6 +405,26 @@ class SeedCheckTest(unittest.TestCase):
         self.assertTrue(output.endswith(b"END\n"))
         self.assertFalse(output.startswith(b"0"))
 
+    def test_teardown_failure_fails_the_check(self):
+        self.write_test(
+            "    def test_value(self):\n        self.assertEqual(value(), 1)\n"
+        )
+        url_file = self.directory / "url"
+        url_file.write_text("postgresql://user:secret@127.0.0.1:1/postgres\n")
+        with (
+            unittest.mock.patch.object(
+                seed_check,
+                "_create_database",
+                return_value=("admin-url", "paw_seed_x", "postgresql://t@h/paw_seed_x"),
+            ),
+            unittest.mock.patch.object(
+                seed_check, "_drop_database", return_value=False
+            ),
+        ):
+            code, output = self.run_check("--database-url-file", str(url_file))
+        self.assertEqual(code, 1, output)
+        self.assertNotIn("secret", output)
+
 
 class ForbiddenChangesTest(unittest.TestCase):
     def test_changes_outside_the_allowed_paths(self):
@@ -442,6 +462,46 @@ class ForbiddenChangesTest(unittest.TestCase):
             (repo / "code.py").write_text("changed\n")
             git(repo, "commit", "-q", "-am", "candidate commit")
             self.assertEqual(run(), 1)
+            git(repo, "reset", "-q", "--hard", base)
+            self.assertEqual(run(), 0)
+            # Index flags set by the candidate must not hide a change.
+            git(repo, "update-index", "--assume-unchanged", "code.py")
+            (repo / "code.py").write_text("hidden\n")
+            self.assertEqual(run(), 1)
+            git(repo, "update-index", "--no-assume-unchanged", "code.py")
+            git(repo, "checkout", "-q", "--", "code.py")
+            git(repo, "update-index", "--skip-worktree", "code.py")
+            (repo / "code.py").write_text("hidden\n")
+            self.assertEqual(run(), 1)
+            git(repo, "update-index", "--no-skip-worktree", "code.py")
+            git(repo, "checkout", "-q", "--", "code.py")
+            # Nor may ignore rules the candidate writes into .git/info/exclude.
+            (repo / ".git" / "info").mkdir(exist_ok=True)
+            (repo / ".git" / "info" / "exclude").write_text("sneaky.py\n")
+            (repo / "sneaky.py").write_text("s\n")
+            self.assertEqual(run(), 1)
+            (repo / "sneaky.py").unlink()
+            # A replace ref must not swap the base commit for the candidate's commit.
+            (repo / "code.py").write_text("replaced\n")
+            git(repo, "commit", "-q", "-am", "replacement")
+            git(repo, "replace", base, "HEAD")
+            self.assertEqual(run(), 1)
+            git(repo, "replace", "-d", base)
+            git(repo, "reset", "-q", "--hard", base)
+            # A linked worktree (whose .git is a file) is compared the same way.
+            elsewhere = Path(tempfile.mkdtemp())
+            self.addCleanup(shutil.rmtree, elsewhere, True)
+            linked = elsewhere / "linked"
+            git(repo, "worktree", "add", "-q", "--detach", str(linked), base)
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = seed_check.main(
+                    ["forbidden-changes", "--worktree", str(linked), "--base", base]
+                )
+            self.assertEqual(code, 0)
+            # Evaluator caches are not changes.
+            (repo / "__pycache__").mkdir()
+            (repo / "__pycache__" / "code.cpython-313.pyc").write_bytes(b"x")
+            self.assertEqual(run(), 0)
             # Selectors of a calling Git process (a hook) must not redirect the check.
             other = Path(directory) / "other"
             other.mkdir()
