@@ -519,6 +519,13 @@ class MemoryVersioningService:
 
         Only ``_AUDIENCE_COLUMNS`` (see "The ACL in SQL"): the actor is not
         authorized yet.
+
+        The Journal's consolidator writes without the advisory lock: when it holds
+        version ``n`` and commits ``n + 1`` while this statement waits for ``n``,
+        the lock returns ``n`` (the statement's snapshot did not see ``n + 1``).
+        So after the lock the highest number is read again by a new statement,
+        and a newer version is locked in turn (Codex P2): the caller then sees
+        the real current version and reports the optimistic-lock conflict.
         """
         statement = (
             select(*_AUDIENCE_COLUMNS)
@@ -526,12 +533,21 @@ class MemoryVersioningService:
             .order_by(_VERSIONS.c.version_number.desc())
             .limit(1)
         )
-        if lock:
-            statement = statement.with_for_update()
-        row = (await session.execute(statement)).first()
-        if row is None:
-            raise MemoryNotFoundError
-        return _Audience.of(memory_id, row)
+        if not lock:
+            row = (await session.execute(statement)).first()
+            if row is None:
+                raise MemoryNotFoundError
+            return _Audience.of(memory_id, row)
+        highest = select(func.max(_VERSIONS.c.version_number)).where(
+            _VERSIONS.c.memory_id == memory_id
+        )
+        for _ in range(limits.CURRENT_VERSION_RETRIES):
+            row = (await session.execute(statement.with_for_update())).first()
+            if row is None:
+                raise MemoryNotFoundError
+            if (await session.execute(highest)).scalar_one() == row.version_number:
+                return _Audience.of(memory_id, row)
+        raise MemoryBusyError
 
     @staticmethod
     async def _version_audience(
@@ -598,13 +614,32 @@ class MemoryVersioningService:
         )
 
     async def _project_member(
-        self, session: AsyncSession, actor: Principal, project_id: UUID
+        self,
+        session: AsyncSession,
+        actor: Principal,
+        project_id: UUID,
+        *,
+        lock: bool,
     ) -> tuple[Principal, ProjectState] | None:
         """The actor with its role READ FROM THE DATABASE, and the project's state.
 
         ``None`` when the project does not exist or is deleted. An invitation is
         not a membership (the principal then has no role in the project).
+
+        ``lock`` (every write) first locks the project's row ``FOR SHARE``.
+        ``ProjectService`` locks that row ``FOR UPDATE`` in every change of the
+        project's state or of its members, so a write waits for such a change to
+        commit (and the change waits for the write), and the state and the role
+        below are read afterwards by a new statement, which sees the change
+        (Codex P1). Without it an archive or a removal could commit between this
+        read and the write's commit.
         """
+        if lock:
+            await session.execute(
+                select(_PROJECTS.c.id)
+                .where(_PROJECTS.c.id == project_id)
+                .with_for_update(read=True)
+            )
         row = (
             await session.execute(
                 select(_PROJECTS.c.status, _MEMBERS.c.role)
@@ -659,7 +694,9 @@ class MemoryVersioningService:
             )
         elif version.scope is MemoryScope.PROJECT:
             assert version.project_id is not None  # the scope CHECK
-            member = await self._project_member(session, actor, version.project_id)
+            member = await self._project_member(
+                session, actor, version.project_id, lock=write
+            )
             if member is None:
                 raise MemoryNotFoundError
             principal, state = member
@@ -846,7 +883,9 @@ class MemoryVersioningService:
                 )
             else:
                 assert draft.project_id is not None  # MemoryDraft requires it
-                member = await self._project_member(session, actor, draft.project_id)
+                member = await self._project_member(
+                    session, actor, draft.project_id, lock=True
+                )
                 if member is None:
                     raise MemoryPermissionError(Reason.NOT_PROJECT_MEMBER.value)
                 principal, state = member

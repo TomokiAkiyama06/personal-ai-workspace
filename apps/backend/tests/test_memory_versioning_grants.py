@@ -22,7 +22,11 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
 
-from . import test_memory_freshness, test_memory_versioning_service
+from . import (
+    test_memory_freshness,
+    test_memory_versioning_races,
+    test_memory_versioning_service,
+)
 from .task_support import TEST_DATABASE_URL, migrate, new_database
 from .versioning_support import PostgresVersioningTestCase, requires_postgres
 
@@ -98,6 +102,7 @@ for _cls in (
     test_memory_versioning_service.AccessTest,
     test_memory_versioning_service.RestoreDeprecateRevalidateTest,
     test_memory_versioning_service.RelationTest,
+    test_memory_versioning_races.ConcurrentCommitTest,
     test_memory_freshness.RevalidateTest,
     test_memory_freshness.RepoCommitTest,
     test_memory_freshness.ExpiryAndSessionTest,

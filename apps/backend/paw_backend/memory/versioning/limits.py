@@ -33,3 +33,7 @@ MAX_SWEEP_BATCH = 10_000
 
 DEFAULT_LOCK_TIMEOUT_MS = 3_000
 MAX_LOCK_TIMEOUT_MS = 60_000
+
+# How many times a write re-locks the current version when another writer (the
+# Journal) committed a newer one while it waited; then it is ``MemoryBusyError``.
+CURRENT_VERSION_RETRIES = 5

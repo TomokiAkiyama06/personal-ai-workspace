@@ -3464,7 +3464,7 @@ Rerank（Reranker Protocol）→ 構造化 Score（confirmed・鮮度・importan
 | `revalidate_memory` | `active` → `superseded` | 同じ内容で `n + 1`、`verified_at` は今、Stale の印なし | `supersedes` と `revalidated_from` |
 | `relate_memories` | — | 書かない | 2 つの Memory の現在の Version の間に `supersedes`（古い方を `superseded`。同じ公開範囲だけ）、`extends`、`conflicts_with`（両方 `active` のまま） |
 
-- **Optimistic Lock。** 変更はどれも `expected_version`（手動の Relation は両方の Memory の分）を取り、現在の番号と違えば `MemoryVersionConflictError`（何も書かない）。Memory ごとの Advisory Lock と現在の Version の `FOR UPDATE` で、この Service どうしは直列になります。Lock を取らない Journal の Consolidator とは、`UPDATE ... WHERE status = 'active'` の行数と `(memory_id, version_number)` の Unique で、後から来た方が失敗します（Lost Update にならない）。
+- **Optimistic Lock。** 変更はどれも `expected_version`（手動の Relation は両方の Memory の分）を取り、現在の番号と違えば `MemoryVersionConflictError`（何も書かない）。Memory ごとの Advisory Lock と現在の Version の `FOR UPDATE` で、この Service どうしは直列になります。Lock を取らない Journal の Consolidator とは、`UPDATE ... WHERE status = 'active'` の行数と `(memory_id, version_number)` の Unique で、後から来た方が失敗します（Lost Update にならない）。Consolidator が Version `n` を Lock したまま `n + 1` を Commit した場合は、`FOR UPDATE` の後に最大の番号を新しい Statement で読み直し、新しい Version を Lock し直すので、`NOT_ACTIVE` ではなく現在の番号を示す `MemoryVersionConflictError` になります（`tests/test_memory_versioning_races.py`）。
 - **履歴。** Status の変更は Database の Trigger が `memory_metadata_changes` に本人を Actor として記録します（Revision `0071`。`metadata_change_actor` を同じ Transaction で先に実行）。`history` は全 Version を古い順に返します（History Graph の Node）。
 - **Retrieval は `active` だけ。** 編集・復元・廃止・Relation の後の Retrieval（PAW-043）は、新しい `active` の Version だけを返します（`test_memory_versioning_service.py` が Retrieval で確かめます）。
 - **Scope は狭めるだけ。** `edit_memory(..., MemoryChanges(scope=MemoryScope.USER))` は `project` の Memory を編集者本人の `user` の Memory にします（REQUIREMENTS.md「Scope変更」: 即反映）。`user` の `n + 1` を書くのと `project` の `n` を `superseded` にするのは同じ Transaction です。要る権限は `project.memory.use`（Contributor 以上）と自分の `memory.use`（Decision 0034 の 3 と 12。12 は案 A で承認）。以後メンバーには履歴も Not Found で、`project` の Version からの復元は `SCOPE_MISMATCH` です。
@@ -3478,7 +3478,7 @@ Rerank（Reranker Protocol）→ 構造化 Score（confirmed・鮮度・importan
 | Scope | Capability | 備考 |
 | --- | --- | --- |
 | `user` | `memory.use`（Owner 本人） | Owner / Admin でも他人の Private Memory は変えられない |
-| `project` | `project.memory.use`（Contributor 以上）。履歴の閲覧は `project.read` | Role と Project の状態は Database から読む（呼び出し側の Role は信じない）。Archived の Project は拒否 |
+| `project` | `project.memory.use`（Contributor 以上）。履歴の閲覧は `project.read` | Role と Project の状態は Database から読む（呼び出し側の Role は信じない）。Archived の Project は拒否。書き込みは先に `projects` の行を `FOR SHARE` で Lock してから状態と Role を読むので、`ProjectService` の Archive・メンバーの削除・Role の変更（その行を `FOR UPDATE` で Lock する）と直列になる（`tests/test_memory_versioning_races.py`） |
 | `shared` | — | `MemoryScopeNotSupportedError`（`SharedMemoryService` が扱う） |
 | `repo`、`project_group` | — | まだ扱わない（Decision 0034 の 3）。Not Found |
 
@@ -3505,7 +3505,7 @@ Stale Candidate への答えは、まだ正しければ `revalidate_memory`、�
 
 Migration `0042` の `down_revision` は `0124` です（鎖は `0001 → 0025 → 0032 → 0040 → 0021 → 0033 → 0031 → 0050 → 0046 → 0052 → 0026 → 0087 → 0022 → 0083 → 0043 → 0030 → 0027 → 0071 → 0086 → 0088 → 0023 → 0041 → 0034 → 0108 → 0124 → 0042`）。Revision ID は Issue 番号で、鎖の順序ではありません。統合時に Orchestrator が並びを確認します。
 Index を 1 つ足すだけです: `ix_memory_versions_freshness_due`（`memory_versions (freshness_policy) WHERE status = 'active' AND freshness_policy <> 'permanent'`）。Job が履歴全体を読まないためで、Table・列・制約・Trigger・権限は変えません。
-Service と Job は、Revision `0026` / `0040` / `0071` が与えた権限（`memories` / `memory_versions` / `memory_relations` の INSERT、`memory_versions` の `status` と `stale_since` の UPDATE、Trigger の `memory_metadata_changes` の INSERT、`projects` / `project_members` の SELECT）だけを使います。
+Service と Job は、Revision `0026` / `0040` / `0071` が与えた権限（`memories` / `memory_versions` / `memory_relations` の INSERT、`memory_versions` の `status` と `stale_since` の UPDATE、Trigger の `memory_metadata_changes` の INSERT、`projects` / `project_members` の SELECT、`projects` の行の `FOR SHARE`（Revision `0026` の `projects` の列の UPDATE の権限で足りる））だけを使います。
 
 ### Test
 
