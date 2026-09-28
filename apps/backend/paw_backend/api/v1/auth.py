@@ -11,9 +11,9 @@ with the reason):
 
 * ``POST /login``: rate limited per account and per source (progressive
   backoff); the answer never says whether the account exists.
-* ``POST /token/redeem``: spends an Owner setup / recovery token and sets
-  the Owner's password; rate limited per source and in total *before* the token
-  is looked at (Decision 0005).
+* ``POST /token/redeem``: spends an Owner setup / recovery token (or the one-time
+  password reset token of an Admin / a User, #108) and sets the password; rate
+  limited per source and in total *before* the token is looked at (Decision 0005).
 
 Every other route needs a session (``account.read`` / ``account.manage``, held by
 every human role) or a role (``admin.users.manage`` to unlock an account,
@@ -23,7 +23,9 @@ A session that the Passkey policy restricts (PAW-023: a required Passkey not yet
 registered / used) is refused by EVERY route with 403 ``passkey_required`` except
 ``GET /session``, ``POST /logout`` and the Passkey ceremonies of
 ``paw_backend.api.v1.passkeys`` (``require_capability(..., allow_restricted=True)``).
-Unlocking an account and changing the policy need a recent Passkey step-up.
+Unlocking an account, resetting another account's Passkeys (``POST
+/users/{id}/passkeys/reset``, ``admin.users.manage``: the Owner for an Admin or a
+User, an Admin for a User) and changing the policy need a recent Passkey step-up.
 """
 
 import contextlib
@@ -41,12 +43,18 @@ from paw_backend.auth import tokens
 from paw_backend.auth.context import RequestContext
 from paw_backend.auth.errors import (
     AccountNotFoundError,
+    AccountStateError,
     AuthPermissionError,
     AuthUnavailableError,
+    ConfirmationCodeError,
     InvalidAuthInputError,
     InvalidCredentialsError,
+    InvitationNotFoundError,
     LastPasskeyError,
+    LoginNameTakenError,
     NoPasskeyError,
+    OwnershipTransferRequiredError,
+    PairingNotFoundError,
     PasskeyChallengeError,
     PasskeyExistsError,
     PasskeyLimitError,
@@ -56,6 +64,7 @@ from paw_backend.auth.errors import (
     PasskeyVerificationError,
     PasswordPolicyError,
     PolicyVersionConflictError,
+    RetentionExpiredError,
     SessionEndedError,
     SessionNotFoundError,
     StepUpMethodInsufficientError,
@@ -212,6 +221,18 @@ class RedeemResponse(BaseModel):
     next: str = "login"
 
 
+class PasskeyResetResponse(BaseModel):
+    user_id: uuid.UUID
+    passkeys_revoked: int
+    sessions_ended: int
+    # The user's one-time password reset token: shown here once (the response is
+    # ``no-store``), stored only as a salted HMAC. Hand it to the user by another
+    # channel; they set a new password with ``POST /auth/token/redeem``.
+    reset_token: str
+    reset_token_expires_at: datetime
+    next: str = "deliver_reset_token"
+
+
 class PolicyResponse(BaseModel):
     version: int
     passkey_owner: str
@@ -314,6 +335,33 @@ def api_errors(
         ) from None
     except AuthPermissionError:
         raise ApiError(403, "forbidden", "Permission denied") from None
+    # Invitations, pairing and the user lifecycle (PAW-024).
+    except (InvitationNotFoundError, PairingNotFoundError):
+        raise ApiError(404, "not_found", "Not Found") from None
+    except ConfirmationCodeError:
+        raise ApiError(
+            403,
+            "confirmation_code_mismatch",
+            "The confirmation code does not match the new device's",
+        ) from None
+    except LoginNameTakenError:
+        raise ApiError(
+            409, "login_name_taken", "That login name is already in use"
+        ) from None
+    except AccountStateError:
+        raise ApiError(
+            409, "invalid_state", "The account is not in a state for this"
+        ) from None
+    except OwnershipTransferRequiredError:
+        raise ApiError(
+            409,
+            "ownership_transfer_required",
+            "The user is the last manager of a project: transfer it first",
+        ) from None
+    except RetentionExpiredError:
+        raise ApiError(
+            409, "retention_expired", "The account can no longer be restored"
+        ) from None
     except AuthUnavailableError:
         raise ApiError(
             503, "service_unavailable", "Service temporarily unavailable"
@@ -483,7 +531,10 @@ async def login(
 @router.post(
     "/token/redeem",
     response_model=RedeemResponse,
-    summary="Spend an Owner setup / recovery token and set the Owner's password",
+    summary=(
+        "Spend a one-time token (Owner setup / recovery, or a password reset) "
+        "and set the password"
+    ),
 )
 async def redeem_owner_token(
     body: RedeemTokenRequest, request: Request, services: Auth
@@ -641,6 +692,39 @@ async def unlock_account(
             session_id=_session_of(request).session.record.id,
         )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post(
+    "/users/{user_id}/passkeys/reset",
+    response_model=PasskeyResetResponse,
+    summary=(
+        "Reset an account's passkeys and issue a one-time password reset token "
+        "(the Owner for an Admin or a User, an Admin for a User; needs a recent "
+        "Passkey step-up)"
+    ),
+)
+async def reset_account_passkeys(
+    user_id: uuid.UUID,
+    request: Request,
+    services: Auth,
+    principal: Annotated[
+        Principal, Depends(require_capability(Capability.ADMIN_USERS_MANAGE))
+    ],
+) -> PasskeyResetResponse:
+    with api_errors():
+        result = await services.passkeys.reset_account(
+            principal,
+            user_id,
+            _context(request),
+            session_id=_session_of(request).session.record.id,
+        )
+    return PasskeyResetResponse(
+        user_id=result.user_id,
+        passkeys_revoked=result.passkeys_revoked,
+        sessions_ended=result.sessions_ended,
+        reset_token=result.reset_token.token,
+        reset_token_expires_at=result.reset_token.expires_at,
+    )
 
 
 def _policy_out(policy) -> PolicyResponse:

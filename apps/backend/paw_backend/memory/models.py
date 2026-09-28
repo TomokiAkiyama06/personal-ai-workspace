@@ -1,4 +1,5 @@
-"""ORM models of the Memory / Conversation schema (revisions ``0040``, ``0071``).
+"""ORM models of the Memory / Conversation schema (revisions ``0040``, ``0071``,
+``0042``).
 
 The layers are separate tables that never share rows (MEMORY_ARCHITECTURE.md
 sections 10, 14 and REQUIREMENTS.md "Raw Conversation / Long-term Memory
@@ -388,6 +389,16 @@ class MemoryVersion(Base):
             text(search_document_sql()),
             postgresql_using="gin",
             postgresql_where=text("status = 'active'"),
+        ),
+        # The freshness jobs (PAW-042, revision 0042: ``memory/versioning/
+        # freshness.py``) look for the active versions of one policy that is not
+        # ``permanent``; without this index each run would read the whole history.
+        Index(
+            "ix_memory_versions_freshness_due",
+            "freshness_policy",
+            postgresql_where=text(
+                "status = 'active' AND freshness_policy <> 'permanent'"
+            ),
         ),
     )
 

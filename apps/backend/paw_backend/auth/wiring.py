@@ -10,6 +10,9 @@ from fastapi import FastAPI
 from paw_backend.auth.audit import AuthAudit
 from paw_backend.auth.auth_policy import AuthPolicyService
 from paw_backend.auth.models import AuthMethod
+from paw_backend.auth.onboarding.invitations import InvitationService
+from paw_backend.auth.onboarding.lifecycle import UserLifecycleService
+from paw_backend.auth.onboarding.pairing import PairingService
 from paw_backend.auth.passkeys.approvals import PasskeyApprovalStepUp
 from paw_backend.auth.passkeys.config import PasskeyConfig
 from paw_backend.auth.passkeys.service import PasskeyService, PasskeyStepUpVerifier
@@ -50,6 +53,11 @@ class AuthServices:
     # itself: ``ApprovalService`` keeps its fail-closed default until a deployment
     # (the approval endpoint) opts in.
     approval_step_up: PasskeyApprovalStepUp
+    # PAW-024 (Decision 0033, Proposed): invite-only registration, QR / link
+    # pairing of a new device, and the user lifecycle (delete, restore).
+    invitations: InvitationService
+    pairing: PairingService
+    lifecycle: UserLifecycleService
 
     async def start(self) -> None:
         """Make the dummy hash now, so that the first unknown login is not slower."""
@@ -61,7 +69,8 @@ class AuthServices:
                 "Passkeys are not configured (PAW_PASSKEY_RP_ID, PAW_PASSKEY_ORIGINS): "
                 "the Owner / Admin Passkey requirement is NOT enforced and Passkey "
                 "step-up is unavailable, so the sensitive operations that need it "
-                "(policy change, unlocking an account) are refused."
+                "(policy change, unlocking an account, resetting another account's "
+                "passkeys) are refused."
             )
 
     def close(self) -> None:
@@ -149,9 +158,38 @@ def build_auth(
             audit,
             policy,
             timeout_seconds=timeout,
+            reset_token_ttl_seconds=settings.password_reset_token_ttl_seconds,
         ),
         approval_step_up=PasskeyApprovalStepUp(
             database, clock=clock, timeout_seconds=timeout
+        ),
+        invitations=InvitationService(
+            database,
+            hasher=hasher,
+            throttle=throttle,
+            audit=audit,
+            policy=policy,
+            ttl_seconds=settings.invitation_ttl_seconds,
+            max_attempts=settings.setup_token_max_attempts,
+            timeout_seconds=timeout,
+        ),
+        pairing=PairingService(
+            database,
+            sessions=sessions,
+            throttle=throttle,
+            audit=audit,
+            policy=policy,
+            passkeys=registry,
+            ttl_seconds=settings.pairing_token_ttl_seconds,
+            max_attempts=settings.setup_token_max_attempts,
+            timeout_seconds=timeout,
+        ),
+        lifecycle=UserLifecycleService(
+            database,
+            sessions=sessions,
+            audit=audit,
+            policy=policy,
+            timeout_seconds=timeout,
         ),
     )
 

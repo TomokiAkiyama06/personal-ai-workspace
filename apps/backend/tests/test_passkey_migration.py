@@ -99,7 +99,10 @@ class ModelsTest(unittest.TestCase):
         self.assertIn("passkey_revoked", {r.value for r in RevokeReason})
 
     def test_the_migration_repeats_the_values_of_the_code(self):
-        source = VERSIONS.joinpath("0023_passkeys.py").read_text()
+        # 0108 (#108) adds ``admin_reset`` to the Passkey revocation reasons.
+        source = VERSIONS.joinpath("0023_passkeys.py").read_text() + (
+            VERSIONS.joinpath("0108_passkey_owner_reset.py").read_text()
+        )
         for value in (
             *(r.value for r in PasskeyRevokeReason),
             *(p.value for p in PasskeyPurpose),

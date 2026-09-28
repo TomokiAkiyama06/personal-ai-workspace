@@ -32,6 +32,8 @@ class AuditAction(StrEnum):
     RECOVERY_TOKEN_ISSUE = "owner.recovery_token.issue"
     TOKEN_REVOKE = "owner.token.revoke"
     TOKEN_REDEEM = "owner.token.redeem"
+    # An Admin's / a User's one-time password reset token (#108), spent by them.
+    PASSWORD_RESET_TOKEN_REDEEM = "user.password_reset_token.redeem"
 
 
 class AuditReason(StrEnum):

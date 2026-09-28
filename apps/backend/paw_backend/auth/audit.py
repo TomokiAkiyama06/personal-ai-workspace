@@ -55,6 +55,20 @@ class AuthAction(StrEnum):
     PASSKEY_REGISTER = "auth.passkey.register"
     PASSKEY_AUTHENTICATE = "auth.passkey.authenticate"
     PASSKEY_REVOKE = "auth.passkey.revoke"
+    # Invitations, device pairing and the user lifecycle (PAW-024, Decision 0033)
+    INVITATION_ISSUE = "auth.invitation.issue"
+    INVITATION_REVOKE = "auth.invitation.revoke"
+    INVITATION_REDEEM = "auth.invitation.redeem"
+    PAIRING_ISSUE = "auth.pairing.issue"
+    PAIRING_REVOKE = "auth.pairing.revoke"
+    PAIRING_CLAIM = "auth.pairing.claim"
+    PAIRING_APPROVE = "auth.pairing.approve"
+    PAIRING_REJECT = "auth.pairing.reject"
+    PAIRING_COMPLETE = "auth.pairing.complete"
+    USER_DELETE = "auth.user.delete"
+    USER_RESTORE = "auth.user.restore"
+    # Another account's Passkeys (and password) reset by the Owner / an Admin (#108).
+    PASSKEY_RESET = "auth.passkey.reset"
 
 
 class AuthReason(StrEnum):
@@ -71,6 +85,9 @@ class AuthReason(StrEnum):
     UNLOCKED = "unlocked"
     UPDATED = "updated"
     REGISTERED = "registered"
+    # #108: an account's Passkeys reset; a password set with a reset token.
+    RESET = "reset"
+    PASSWORD_RESET = "password_reset"
     # An allowed sign-in whose session is restricted by the Passkey policy.
     PASSKEY_PENDING = "authenticated_passkey_pending"
     ENROLLMENT_ONLY = "authenticated_enrollment_only"
@@ -94,6 +111,32 @@ class AuthReason(StrEnum):
     LAST_PASSKEY = "last_passkey"
     NOT_FOUND = "not_found"
     GATE_NOT_ALLOWED = "gate_not_allowed"
+    # Invitations, pairing, lifecycle (PAW-024)
+    ISSUED = "issued"
+    REISSUED = "reissued"
+    SUPERSEDED = "superseded"
+    CANCELLED = "cancelled"
+    REDEEMED = "redeemed"
+    PENDING_APPROVAL = "pending_approval"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    COMPLETED = "completed"
+    ACCOUNT_CLOSED = "account_closed"
+    DELETION_PENDING = "deletion_pending"
+    INVITATION_CANCELLED = "invitation_cancelled"
+    RESTORED = "restored"
+    TOKEN_MISMATCH = "token_mismatch"
+    TOKEN_EXPIRED = "token_expired"
+    TOKEN_USED = "token_used"
+    TOKEN_REVOKED = "token_revoked"
+    ATTEMPTS_EXHAUSTED = "attempts_exhausted"
+    CONFIRMATION_CODE_MISMATCH = "confirmation_code_mismatch"
+    CONFIRMATION_ATTEMPTS_EXHAUSTED = "confirmation_attempts_exhausted"
+    USER_NOT_ELIGIBLE = "user_not_eligible"
+    LOGIN_NAME_TAKEN = "login_name_taken"
+    OWNERSHIP_TRANSFER_REQUIRED = "ownership_transfer_required"
+    INVALID_STATE = "invalid_state"
+    RETENTION_EXPIRED = "retention_expired"
 
 
 class AuthAudit:

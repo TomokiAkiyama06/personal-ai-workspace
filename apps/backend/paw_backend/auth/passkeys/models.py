@@ -1,4 +1,4 @@
-"""ORM models of the Passkey tables (Alembic revision ``0023``).
+"""ORM models of the Passkey tables (Alembic revisions ``0023`` and ``0108``).
 
 * ``user_passkeys``: the registered WebAuthn credentials, several per user. Only
   what verifying an assertion needs is stored: the credential id, the public key
@@ -53,6 +53,8 @@ class PasskeyRevokeReason(StrEnum):
 
     REVOKED_BY_USER = "revoked_by_user"
     RECOVERY = "recovery"  # Owner Recovery invalidates every Passkey (Decision 0005)
+    # The Owner's (or, for a User, an Admin's) reset of another account (#108).
+    ADMIN_RESET = "admin_reset"
 
 
 class PasskeyPurpose(StrEnum):

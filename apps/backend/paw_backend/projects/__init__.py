@@ -15,6 +15,7 @@ Admin (``admin.projects.manage``).
 """
 
 from paw_backend.projects.errors import (
+    AccountNotActiveError,
     AlreadyInvitedError,
     AlreadyMemberError,
     ConfirmationMismatchError,
@@ -55,6 +56,7 @@ from paw_backend.projects.task_stop import ProjectTaskStopper, TaskStopResult
 __all__ = [
     "AdminProjectPage",
     "AdminProjectSummary",
+    "AccountNotActiveError",
     "AlreadyInvitedError",
     "AlreadyMemberError",
     "ConfirmationMismatchError",
