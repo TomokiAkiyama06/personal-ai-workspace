@@ -23,6 +23,7 @@ Executor の Process が落ちると予約は解放されず、期限（`WRITE_R
 - 解除は「Executor がまだ書き込むかもしれない」という安全装置を外す操作で、外すと評価・Review・降格の判定が、まだ変わり得る Repo に対して行われ得る。Task を実行できる者（Contributor）全員ではなく、Project を管理する者に限る。
 - Owner / Admin は `project.lifecycle.manage` と同じく「System Owner / Admin: administrative operations」として、Member でなくても解除できる（Server の Process を再起動した Operator が、落ちた Process の予約を片付ける経路）。
 - Project の状態: 他の Project Capability と同じく、Active の Project だけで許す（Archived は読み取りのみ、Pending deletion は Lifecycle の操作のみ。Policy の既存の規則）。
+- 判定は 2 回行う。最初の判定（Audit つき）で拒否されれば何も書かない。許可されたら、解除を書く Transaction の中でもう一度、Project の行を `FOR SHARE` で Lock してから Project の状態と操作する人の Membership を読み直して同じ Policy で判定する（Archive・Delete・Member の削除・Role の変更は Project の行を `FOR UPDATE` で Lock するので、その間に割り込めない）。最初の判定の後に Archive・Delete・削除・降格が Commit されていれば、解除はすべて Rollback し、その拒否を Audit に残す（許可の Event は 2 回は残さない）。
 
 検討した他の案: Contributor にも与える（Task を実行する本人が解除できる。上の理由で却下）。Owner / Admin だけ（Project の日常の運用に Admin が要る。Issue #129 が Project Manager を挙げているので却下）。
 
@@ -48,7 +49,22 @@ Executor の Process が落ちると予約は解放されず、期限（`WRITE_R
 - Lease が切れている（または Entry が `queued`・終わっている・ない）ときは、Backend には Executor が止まったことは分からない。そこから先は、**人が確かめたこと（`reason`、必須）を記録して、人の責任で解除する**。Lease だけで自動的に解放はしない（Executor が別の Host で Worker より長く生きる場合がある）。
 - ほかに拒否する場合: 予約がその Task のものでない（`RepositoryWriteNotFoundError`）、解放済み・期限切れ（`RepositoryWriteNotHeldError`）、`expected_version` が古い（`TaskConflictError`）。
 
-確認してほしい影響: Retry の後、新しい実行の Worker が有効な Lease を持っていると、前の実行の（落ちた）Executor の予約も解除できない（どの実行の Lease かを区別しないため）。新しい実行の Begin evaluation / Complete は、Worker を止める（Pause / Stop Now。Lease が切れる）か、期限まで待つことになる。予約を Lease の世代（`claim_count`）に結び付ければ区別できるが、それは Tool の呼び出しを Lease で Fencing する変更（Issue #126、Decision 0046 Proposed）に依るので、この Decision には含めない。
+確認してほしい影響（重要）: 拒否は「どの Worker の Lease か」を区別しない。そのため、**落ちた Worker の Entry を別の Worker が取り直した後は、落ちた Executor の予約も解除できない**。これは Retry の後だけでなく、**通常の落ち方でも起きる**。Queue は Lease が切れた `claimed` の Entry を自動で取り直させる（Decision 0007 の 7 節。`claim_count` が 1 増える。同じ id で再起動した Worker でも同じ）。たとえば:
+
+1. Worker A が Tool の呼び出しの途中で落ちる（予約が残る）。
+2. A の Lease が切れ、Worker B（または再起動した A）が Entry を取り直して続きを実行する。B は Heartbeat で有効な Lease を持つ。
+3. B が Begin evaluation に進むと、A の予約のために `RepositoryWriteInFlightError` で拒否される。
+4. Manager が解除しようとしても、B の Lease が有効なので `RepositoryWriteHolderAliveError` で拒否される。
+
+したがって Issue #129 の主な場面では、多くの場合、解除の前に次の手順が要る:
+
+1. Task を **Pause**（または **Stop Now**）する。Worker は実行中の Node を終えてから Entry を完了させ（Orchestrator の既存の動き）、Lease が終わる。Worker も落ちていれば Lease の期限が切れるのを待つ。
+2. Lease が終わったことを確かめ（解除が `RepositoryWriteHolderAliveError` を返さなくなる）、落ちた Executor の Process / Host がないことを確かめて、`reason` を書いて**解除**する。
+3. **Resume** する（Stop Now の場合は Retry）。解除した Repo は書き込まれたものとして扱われ、Evaluation / Review をやり直す。
+
+何もしなければ、予約の期限（約 24 時間 15 分）まで Task は評価にも完了にも進めない。`test_a_reclaimed_entry_holds_the_dead_executors_reservation` がこの場面（予約 → Lease 切れ → `claim_next` による取り直し → 解除の拒否 → Lease が終わった後の解除）を確かめる。
+
+代わりの案（4B、未実装）: 許可の時点で、その Task の `claimed` の Entry の `(id, claim_count)`（Lease の世代。Decision 0007 の 7 節で main にある）を `task_repository_writes` に記録し、**同じ世代の Lease が有効な間だけ**拒否する。落ちた Holder とその後を継いだ Worker を区別でき、Pause の手順は要らなくなる（後を継いだ Worker の Lease は、落ちた Executor が生きていることの証拠ではないので、Lease が切れた場合と同じ扱いになる）。Issue #126 の Fencing を待たずに実装できるが、`task_repository_writes` に列を 2 つ加える Migration と、許可の Transaction で Entry を読む変更が要る（記録した世代が誤っても、拒否が増える向きにしか誤らない: 許可を出した Worker とは別の Worker の世代を記録した場合、その Worker の Lease の間は拒否される）。承認で 4B を選ぶ場合は、この PR か続きの PR で実装する。
 
 検討した他の案: Lease を見ずに人の判断だけで解除する（生きている Executor の予約を誤って外せるので却下）。予約から一定時間（例: Runner の Timeout）経つまで解除を拒否する（落ちた Process を待たせる理由がない。Lease の方が直接の証拠なので却下）。
 
@@ -73,14 +89,14 @@ Step-up の拒否は、この操作では別の Audit Event にしない（Autho
 
 - 期限（`WRITE_RESERVATION_SECONDS`）を Runner ごとの実行時間に合わせて短くすること（Decision 0035 の 5 節で同じく送られた案。今回も送る）。
 - Lease が切れたときの自動解放（4 節のとおり、人の確認を挟む）。
-- 予約を Lease の世代に結び付けること（4 節。Issue #126 / Decision 0046 の後）。
+- 予約を Lease の世代に結び付けること（4 節の 4B。承認で選ばれた場合に実装する）。
 - HTTP の経路と UI（Task の API はまだない。`projects.TaskWriteReleaser` を API 層から呼ぶ）。
 
 ## 影響
 
-- `authz`: Capability を 1 つ加える（`capabilities.py`、`policy.py` の `_ADMIN_ONLY` と `_MANAGER_ONLY`）。`tests/test_authz_policy.py` の表も同じく変わる。
+- `authz`: Capability を 1 つ加える（`capabilities.py`、`policy.py` の `_ADMIN_ONLY` と `_MANAGER_ONLY`）。`Authorizer.policy`（読み取りのみ）を加える（解除の Transaction の中の 2 回目の判定が、同じ Policy で Audit なしに判定するため）。`tests/test_authz_policy.py` の表も同じく変わる。
 - `tasks`: `TaskCommand.RELEASE_REPOSITORY_WRITE`（どの状態も `execute` の Command としては受け付けない）、`TaskService.release_stale_repository_write`、Error 3 つ。Migration `0129`（`task_events.command` の CHECK に値を加える。権限は変えない）。
-- `projects`: `TaskWriteReleaser`（Authorization → 解除 → 同じ Transaction の中で Step-up）。
+- `projects`: `TaskWriteReleaser`（Authorization → 解除 → 同じ Transaction の中で Project の行を `FOR SHARE` で Lock して Authorization をもう一度 → Step-up）。
 - 1〜3 が変われば、付与の集合・`delegable`・`TaskWriteReleaser` の Step-up を変える。4・5 が変われば `TaskService.release_stale_repository_write` の検査と効果を変える。Schema は変わらない。
 
 ## 承認後の扱い
@@ -92,6 +108,6 @@ Step-up の拒否は、この操作では別の Audit Event にしない（Autho
 1. **解除できるのは Project の Manager と Owner / Admin（新しい Capability `project.task.write_reservation.release`）で、Contributor・Viewer はできない。Active の Project だけ**（1 節）でよいか。推奨: はい。
 2. **Agent には委任できない（`delegable=False`）**（2 節）でよいか。推奨: はい。
 3. **操作する人の Session の Passkey Step-up（Policy の Window 内）を、解除の Transaction の中で確かめる。Manager にも求める**（3 節）でよいか。推奨: はい。
-4. **Task の Queue Entry に有効な Lease を持つ Worker がいる間は解除を拒否する。Lease がなければ、人が確かめたこと（`reason`、必須）を記録して解除を許す**（4 節）でよいか。Retry の後の新しい実行の Lease も区別せず拒否する点を含む。推奨: はい。
+4. **Task の Queue Entry に有効な Lease を持つ Worker がいる間は解除を拒否する。Lease がなければ、人が確かめたこと（`reason`、必須）を記録して解除を許す**（4 節、4A）でよいか。どの Worker の Lease かは区別しないので、**落ちた Worker の Entry を Queue が自動で別の Worker（または再起動した同じ Worker）に取り直させた後（Retry がなくても起きる、通常の落ち方）は解除が拒否され、Pause / Stop Now → Lease が終わる → 解除 → Resume（Stop Now なら Retry）の手順が要る**点を含む。それとも、許可の時点の Lease の世代（Entry の id と `claim_count`）を予約に記録し、同じ世代の Lease が有効な間だけ拒否する 4B（Migration が要る。Pause の手順は要らない）にするか。推奨: 4A（実装済み）。Pause の手順が運用で重すぎると判断する場合は 4B。
 5. **解除した Repo は予約した試行で書き込まれたものとして扱い（`modified`、Evaluation / Review をやり直す）、Task の状態は変えず、どの状態でも解除できる**（5 節）でよいか。推奨: はい。
 6. **Audit は Authorization の判定（`REQUIRED`）と Task の履歴の `release_repository_write` の Event の 2 つ。Step-up の拒否は別の Audit にしない**（6 節）でよいか。推奨: はい。

@@ -21,7 +21,15 @@ it earlier, in this order:
    reservation is not the task's or no longer holds. The repositories count as
    written (evaluation and review again) and a ``release_repository_write`` event
    records who, why and what.
-3. **Passkey Step-up** of the actor's own session inside the policy's window,
+3. **Authorization again, in that transaction** (independent review of #129,
+   P2): the project row is locked ``FOR SHARE`` (every lifecycle change and every
+   change of a membership holds it ``FOR UPDATE``), and the stored state and the
+   actor's membership are read again and decided on the Authorizer's policy. An
+   Archive, a Delete, a removal or a demotion that committed after step 1 makes
+   the release roll back (the denial is audited then, as in step 1); one that
+   comes later waits for the commit. The allowed decision of step 1 is not
+   audited a second time.
+4. **Passkey Step-up** of the actor's own session inside the policy's window,
    checked IN that transaction before its commit (``StepUpGuard``: it locks the
    session row, so a revocation cannot slip in between). Without one, everything
    of step 2 is rolled back (``StepUpRequiredError``).
@@ -40,7 +48,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from paw_backend.authz import Authorizer, Capability, Principal, ProjectState, Resource
-from paw_backend.authz.policy import Reason
+from paw_backend.authz.policy import Reason, decide
 from paw_backend.db import Database
 from paw_backend.projects import store
 from paw_backend.projects.errors import (
@@ -172,7 +180,8 @@ class TaskWriteReleaser:
 
         user_id = actor.user_id
 
-        async def step_up(session: AsyncSession, _task: uuid.UUID, _project: uuid.UUID):
+        async def step_up(session: AsyncSession, _task: uuid.UUID, project: uuid.UUID):
+            await self._authorize(session, actor, project, again=True)
             await self._step_up.require_in(
                 session, session_id=session_id, user_id=user_id, now=self._clock()
             )
@@ -187,10 +196,23 @@ class TaskWriteReleaser:
         )
 
     async def _authorize(
-        self, session: AsyncSession, actor: Principal, project_id: uuid.UUID
+        self,
+        session: AsyncSession,
+        actor: Principal,
+        project_id: uuid.UUID,
+        *,
+        again: bool = False,
     ) -> None:
-        """Ask the Authorizer on the stored project and membership (audited)."""
-        project = await store.get_project(session, project_id)
+        """Ask the Authorizer on the stored project and membership (audited).
+
+        ``again``: the check in the release's transaction (module docstring, step
+        3). The project row is locked ``FOR SHARE`` and the decision is taken on
+        the Authorizer's policy without an audit event; only a denial is asked of
+        the Authorizer (so it is audited) and raised."""
+        if again:
+            project = await store.get_project_for_share(session, project_id)
+        else:
+            project = await store.get_project(session, project_id)
         if project is None or project.status is ProjectStatus.DELETED:
             raise ProjectNotFoundError()
         member = await store.get_member(session, project.id, actor.user_id)
@@ -202,8 +224,17 @@ class TaskWriteReleaser:
             {project.id: member.role} if active and member is not None else {},
         )
         resource = Resource.project(project.id, _AUTHZ_STATE[project.status])
+        if (
+            again
+            and decide(
+                principal, CAPABILITY, resource, policy=self._authorizer.policy
+            ).allowed
+        ):
+            return
         decision = await self._authorizer.authorize(principal, CAPABILITY, resource)
         if decision.allowed:
+            if again:  # pragma: no cover - the same policy decided otherwise
+                raise ProjectPermissionDeniedError(Reason.CAPABILITY_NOT_GRANTED)
             return
         if decision.reason is Reason.AUDIT_UNAVAILABLE:
             raise ProjectPermissionDeniedError(decision.reason)

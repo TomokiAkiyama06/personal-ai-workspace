@@ -251,6 +251,19 @@ class WriteReleaseAsAppRole(AsAppRole, test_task_write_release.ReleaseTest):
     pass
 
 
+# Who may release (authorization read again under the project row's share lock)
+# and the real Passkey Step-up (the auth policy and the session row's share lock),
+# all in the release's transaction, as the app role (independent review of #129).
+class WriteReleaserAsAppRole(AsAppRole, test_task_write_release.ReleaserTest):
+    pass
+
+
+class WriteReleaseStepUpAsAppRole(
+    AsAppRole, test_task_write_release.ReleaserStepUpTest
+):
+    pass
+
+
 class WorkingSetWriteReservationsAsAppRole(
     AsAppRole, test_task_working_set.WriteReservationTest
 ):
