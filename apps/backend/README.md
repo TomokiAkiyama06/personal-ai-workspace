@@ -11,6 +11,8 @@ Claim と Source の対応・回答や Task からの追跡（[PAW-052](#evidenc
 Project の作成・招待制の Membership・Lifecycle（Active / Archived / Pending deletion / Deleted）は [PAW-026](#project-crud--membership--lifecycle) で実装済みです（Service のみ。HTTP の Endpoint と Session はまだありません）。
 DAG Agent Orchestrator（Task を Dependency DAG へ分解し、独立した Node を並列に実行し、Node ごとに Retry / Escalate し、Sub-Agent が親の権限と予算を超えない。[PAW-034](#dag-agent-orchestrator)、Agent の Runtime は Protocol で実際の Runtime は別の Issue、HTTP の Endpoint はまだありません）と、削除待ちの Project の Task を周期的に止める Loop も実装済みです。
 
+GPU / Compute Resource Scheduler（KV Cache に応じた動的な並列数、Actual / Reserved の VRAM と Safety Headroom、5 つの Resource class、Memory Worker の Unload と Embedding / Reranker の CPU fallback、Exclusive、Local / Cloud の振り分け）は [PAW-036](#gpu--compute-resource-scheduler) で実装済みです（Library と読み取り専用の確認 Command のみ。Application の Lifespan にはまだ組み込んでいません。選択は [Decision 0037](../../docs/decisions/0037-gpu-compute-scheduler.md)（Proposed））。
+
 Workspace 共有の Codex / Claude Connection（Credential は不透明な Handle だけ）、User 別 Quota、User と Task への利用量の帰属は [PAW-030](#shared-codex--claude-connection) で実装済みです（Service のみ。実 Adapter と HTTP の Endpoint はまだありません。Quota の意味・期間・実行中の Task の扱いは [Decision 0016](../../docs/decisions/0016-shared-connection-adapter-policy.md)（Approved、2026-09-26）に従います）。
 Project への Repository の登録（GitHub から clone、Ubuntu 上の既存 Repository、新規作成）と、User ごとに分離した Checkout は [PAW-027](#repository-registration--per-user-checkout) で実装済みです（Service のみ）。
 Linux User ごとの GitHub 接続状態（`gh auth status`）の認識と、GitHub への新規作成（`create_github`）を対象 User 自身の Identity で実行する経路は [PAW-028](#github-user-connectiongh-auth) で実装済みです（Service のみ。Migration・新しい Capability はありません）。
@@ -62,7 +64,8 @@ apps/backend/
 │  ├─ auth/                # Login、Session、Password（Argon2id）、Backoff、Step-up、認証 Policy、CSRF の Origin 検査（PAW-022）。`stepup.py` は重要操作の Passkey Step-up の判定（PAW-023）
 │  │  └─ passkeys/         # Passkey（WebAuthn）: Ceremony の検証、Challenge、登録・認証・失効、Passkey の Step-up の Verifier、Tool Broker の強い承認の Step-up（PAW-023）
 │  ├─ identity/            # 最小の users、One-time Token。`redeemer.py` は Web 側、`operator.py`（Owner の作成・Token の発行）は cli だけが使う（PAW-021）
-│  ├─ cli/                 # server-local の管理コマンド `python -m paw_backend.cli`（PAW-021。`audit-retention-*` は Issue #117）
+│  ├─ cli/                 # server-local の管理コマンド `python -m paw_backend.cli`（PAW-021。`audit-retention-*` は Issue #117、`compute-status` は PAW-036）
+│  ├─ compute/             # GPU / Compute Resource Scheduler: 読み取り専用の GPU Probe、VRAM の勘定、KV Cache の Admission、縮退と常駐、Exclusive、Hybrid の Runtime（PAW-036）
 │  ├─ orchestrator/        # DAG Agent Orchestrator: Plan、Scheduler、DAG の永続化と Fencing、Runtime の Protocol、Tool・Budget の Gateway、Project 削除の Sweep（PAW-034）
 │  ├─ tasks/               # Agent Task の状態遷移と永続化（PAW-032）。`project_gate.py` は Project の状態 Gate の Protocol（Issue #83）
 │  │  └─ queueing/         # Task Queue、Budget、Loop 検知、Escalation の判断（PAW-033）
@@ -3509,7 +3512,7 @@ await orchestrator.serve("worker-1", stop_event)  # または run_once("worker-1
 - Agent の Runtime、実 Model、実際の Tool の Executor はありません（Fake で Test）。Runtime が `NodeStopped` を通す契約と、Executor の契約（Tool Broker の節）は実装側の責務です。
 - 承認待ち（`NEEDS_APPROVAL`）で Task を `waiting`（`approval`）にする配線はありません（承認の Endpoint が PAW-022 以降）。Runtime は `NEEDS_APPROVAL` の結果を受け取り、承認後に `approval_id` を付けて呼び直します。
 - Node の停止は、Cancel と Stop Now を区別しません（どちらも Node を即座に止めます。成果物は Worktree に残ります）。
-- Worktree の作成・統合（PAW-035）、Evaluator による完了、Resource Scheduler による並列数（PAW-036）、Working Set の永続化（#85）、Node ごとの予算は含みません。
+- Worktree の作成・統合（PAW-035）、Evaluator による完了、Resource Scheduler による並列数（PAW-036 の `HybridRuntime` を Runtime として渡すと、同時に走る Local の Node の数が KV Cache で決まります。[GPU / Compute Resource Scheduler](#gpu--compute-resource-scheduler)）、Working Set の永続化（#85）、Node ごとの予算は含みません。
 - **実 PostgreSQL 18 で Test しました。** 複数の Process が同じ DAG を触る競合（Lock の順序）は、別の接続 Pool（別の Worker Process の代わり）を使った Test で確かめています。
 - 削除待ちの Project の Sweep は、Task Lane / Queue Lane の Gate（Issue #83）の実装ではありません。競合そのものは閉じず、周期の再実行で止めます。
 - `TaskQueue` の Lease は Database の時計で判定され、Worker の Heartbeat の間隔（既定は Lease の 1/4。`Orchestrator` は、3 回続けて失敗する Heartbeat が Lease の切れる前に終わらない間隔（`heartbeat_seconds × 3 ≥ lease_seconds`）を作成時に拒否します）の間は、Lease を失った Worker が気づかず Node の Runtime を動かし続けることがあります（書き込みは `epoch` が拒否します）。Runtime の副作用（File への書き込み）は At-least-once で、Node の冪等性は Runtime の責務です。
@@ -3518,6 +3521,127 @@ await orchestrator.serve("worker-1", stop_event)  # または run_once("worker-1
 
 `apps/backend/tests/test_orchestrator_*.py`、`orchestrator_support.py`、`test_authz_delegation.py`。標準 `unittest` だけで、`test_orchestrator_plan.py`（Plan の検査の表と、ランダムな DAG の位相順・Cycle 検出）、`test_orchestrator_result.py`、`test_orchestrator_scheduling.py`（純粋な規則と、ランダムな DAG の Property Test）、`test_orchestrator_scope.py`、`test_orchestrator_argument_validation.py`（全 Public Method × 全引数 × 誤った値の表。DB を設定しない Database を渡し、DB に届く前に型付きのエラーになること）、`test_orchestrator_migration.py` の前半と `test_orchestrator_project_sweep.py` の前半は DB を使いません。
 それ以外は実 PostgreSQL（`PAW_TEST_DATABASE_URL`）を使い、未設定なら Skip します: 永続化と Fencing の競合（`test_orchestrator_store.py`: 引き継ぎ・書き込み・Lock 待ちの順序、同時に終わる 2 Node、同じ Node の 2 重の起動）、実行・並列・結果の受け渡し（`test_orchestrator_run.py`）、失敗・Retry・Escalation・Isolation（`test_orchestrator_failures.py`）、Plan の受け入れ（`test_orchestrator_planning.py`）、Budget（`test_orchestrator_budget.py`）、Pause / Cancel / Retry / Restart（`test_orchestrator_control.py`）、Lease・Crash・引き継ぎ（`test_orchestrator_lease.py`）、終了の Command と Start の Fencing（`test_orchestrator_fenced_commands.py`: Barrier で「最後の確認の後、Command の前」に `fail` → Retry → Start を割り込ませる）、`succeeded` の DAG の Retry と予期しない Error の後始末（`test_orchestrator_recovery.py`）、走っている間の Runtime の Budget（`test_orchestrator_runtime_budget.py`）、Gate の明示的な組み立て（`test_orchestrator_wiring.py`）、Project が Active でないときの Claim・Start・走行中の Task（実際の `ProjectStateGate`。`test_orchestrator_project_gate.py`）、Worker の停止と `serve`（`test_orchestrator_shutdown.py`）、実際の Tool Broker と（`test_orchestrator_tools.py`）、ランダムな DAG を Orchestrator 全体で動かす Property Test（`test_orchestrator_property.py`）、Migration の上げ下げと Model との一致（`test_orchestrator_migration.py`）、Sweep（`test_orchestrator_project_sweep.py`）、非 Superuser の Role（`test_orchestrator_grants.py`）。時間は注入した `ManualClock` で、速度に依存する Test はありません（Lock 待ちや非同期の進行は上限を長く取った待機で確かめます）。
+
+## GPU / Compute Resource Scheduler
+
+[PAW-036](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/32)（`paw_backend/compute/`、`paw_backend/cli/compute.py`。Migration はありません）で実装しました。設計は [要件](../../REQUIREMENTS.md)の「GPU / Compute Resource Scheduler」（FIXED）に従い、要件が決めていない選択（状態の置き場所、Admission の単位、Safety Headroom などの数値、Class の取り分と待ち行列の順、縮退を進める・戻す条件、Main Model の構成変更を自動で行わないこと、Exclusive の手順、Cloud へ回す条件、Context の見積もり、GPU 時間の計上）は **[Decision 0037（Proposed。Human の承認待ち）](../../docs/decisions/0037-gpu-compute-scheduler.md)** に推奨つきでまとめ、実装はその推奨どおりです。数値はすべて `compute/limits.py` の暫定値で、`ComputeConfig` の設定で変えられます（DB に書いたものはありません）。
+**Library と読み取り専用の確認 Command だけで、Application の Lifespan にはまだ組み込んでいません**（実際の Model と Runtime は Benchmark（PAW-017 / PAW-019）で決まり、Runtime の Adapter は別の Issue です）。
+
+**GPU の安全性**: Scheduler は GPU を**読むだけ**です。Probe（`NvidiaSmiProbe`）が実行するのは `nvidia-smi --query-gpu=index,uuid,name,memory.total,memory.used,utilization.gpu` と `nvidia-smi --query-compute-apps=gpu_uuid,pid,used_memory`（どちらも `--format=csv,noheader,nounits`）の 2 つだけで、Clock・Persistence・Power limit・Compute mode・MIG を変えず、GPU を Reset せず、Process に Signal を送りません（止めるのは Timeout を超えた自分の `nvidia-smi` の子 Process だけ）。`test_compute_probe.py` が 2 つの Command を固定し、`compute/` の Code にそうした Option や `os.kill` がないことを確かめます。Model の Load / Unload / CPU fallback は注入した `ModelControl` を通してだけ行い、**Test は Fake だけを使います**（実際の Model を Load / Unload する Test、VRAM を確保する Test はありません）。
+
+| Module | 内容 |
+| --- | --- |
+| `domain.py`、`limits.py`、`errors.py` | Resource class（Interactive / Coding / Support / Background / Exclusive）、Placement（Local GPU / Local CPU / Cloud）、Model の Role と常駐方針、縮退の段（`Relief`）、断る理由（`Refusal`）、暫定値 |
+| `probe.py` | 読み取り専用の `NvidiaSmiProbe`（Command の Runner は注入）と、出力の厳密な Parse（使えない出力は `ProbeUnavailableError`） |
+| `accounting.py` | Actual / Reserved の VRAM と Safety Headroom の勘定（純粋関数） |
+| `concurrency.py` | KV Cache の Token による Admission と、Context 長に応じた並列数（純粋関数） |
+| `config.py` | `DeploymentSpec`（Model の Footprint: Weight + KV Cache Pool + Runtime Buffer + Workspace）、`ComputeConfig` |
+| `control.py` | `ModelControl` の Protocol と、Admin が設定した Command を実行する `CommandModelControl` |
+| `scheduler.py` | `ComputeScheduler`: Admission と待ち行列、縮退と常駐、Exclusive |
+| `runtimes.py` | `HybridRuntime`（Orchestrator の Runtime。Local / Cloud）、`ScheduledMemoryWorker`、`PlacedEmbedder` |
+
+### Admission（KV Cache に応じた動的な並列数）
+
+Local の Agent は Model ごとに 1 つの Runtime を共有します。`acquire(ComputeRequest(class, deployment=..., context_tokens=...))` は、Model が GPU にあり、Probe の読み取りが新しく（15 秒以内）、Context がその Model の KV Cache の Pool（`kv_safety` 90% のうち、Class の取り分: Interactive 100% / Coding 95% / Support 85% / Background 70%）と `max_sequences` に収まるときに `ComputeLease` を返します。Runtime が KV の使用率を報告できるときは、予約と観測の大きい方で数えます。長い Context の Request が多いと同時数が減り、短いものが多いと増えます（`parallelism()` が今の数を返します）。入れない Request は Class 順・到着順の待ち行列で待ち、容量不足で待つ Request を後ろの Request が追い越すことはありません。Priority は開始順だけに効き、走っている仕事は止めません。
+
+### VRAM の勘定と Safety Headroom
+
+Probe が見る使用量（Actual）と、Scheduler が約束した量（Reserved: GPU に置いた Model の Footprint 全体と Exclusive の予約）を分けて持ちます。`committed` は Workspace の各 Model について予約と実使用の大きい方、それに Workspace のものでない使用（他の Workload、Unload したのに残った Memory）を足したもので、`available = total − headroom − committed` が 0 未満なら VRAM pressure です。Safety Headroom の暫定値は「4 GiB と GPU の 5% の大きい方」（96 GB で約 4.8 GiB）です。
+
+### 縮退と常駐（Memory Worker の Unload、CPU fallback）
+
+`refresh()`（`serve()` が既定 5 秒ごとに呼びます）は Probe を読み、1 回に 1 段だけ進めます。Pressure の間は要件の順に、1. Background の Admission を止めて Background の Lease に `revoked` を立てる（Process は殺しません）、2. Memory Worker を Drain してから Unload、3. Embedding / Reranker を CPU の Copy へ移す（無ければ `IF_ROOM` のものを Unload）、4. Interactive 以外の新規 Local Request を止める、5. 新しい Request の Context を Model の最大の半分に下げる、6. Main Model の構成変更が必要なことを `needs_human` で知らせる（**自動では変えません**）。余裕が戻ると（Headroom の外にもう 1 つ Headroom 分）逆順に戻します。Pressure も縮退もないときは、常駐方針（Main は `ALWAYS`、Memory Worker・Embedding・Reranker は `IF_ROOM`）に従って Model を Load します。Model の操作が失敗した Deployment は `FAILED`（Memory を持ったままとみなす）になり、60 秒後に再試行します。`ModelControl` を渡さなければ、Scheduler は観察と Admission だけを行います。
+
+### Exclusive
+
+`acquire(ComputeRequest(ResourceClass.EXCLUSIVE, vram_bytes=...), wait_seconds=...)` は、新しい Local GPU の Admission を止め、走っている Local GPU の仕事が終わるのを待ち（止めません。Safe pause は PAW-037）、Memory Worker → Embedding / Reranker（CPU の Copy があれば CPU へ）→ Main の順に Unload し、Probe で Workspace の Process が GPU になく要求した VRAM が空いたことを確かめてから Lease を返します。どこかで失敗すれば通常へ戻して `ExclusiveUnavailableError` です。Lease を返すと、`refresh()` が Model を Load し直します。
+
+### Local / Cloud の振り分けと、他の領域との接続
+
+- `HybridRuntime(scheduler, local_runtime, deployment="main", cloud=cloud_runtime, cloud_policy=policy)` を Orchestrator の `runtimes` に渡すと、Node ごとに Lease を取ってから Local の Model で走らせます。Local に入れず、`CloudPolicy.allows(assignment)` が許すときは Cloud の Runtime で走らせます（Policy が Task の Permission・Quota・依存を判断します。Policy が無ければ Cloud へは回しません）。Local で待てる上限を超えると Node は `ComputeUnavailable`（Retry 可）で失敗します。Local の Lease を持っていた秒数は Task の Budget の `GPU_SECONDS` に計上します。
+- `ScheduledMemoryWorker` は Memory Worker（PAW-041）を包み、Background の Lease が取れないとき（Unload 中、縮退中、Exclusive）は `WorkerUnavailableError` を投げます。Consolidator はこれを失敗に数えずに延期します（Decision 0018）。
+- `PlacedEmbedder` は Embedding Model の GPU と CPU の Copy を包み、Scheduler が置いた方を使います（取れなければ `ComputeUnavailableError` で、Retrieval は Degrade します。Decision 0019）。
+
+### 組み立て（例）
+
+```python
+from paw_backend.compute import (
+    CommandModelControl,
+    ComputeConfig,
+    ComputeScheduler,
+    DeploymentCommands,
+    DeploymentSpec,
+    DeploymentState,
+    HybridRuntime,
+    ModelRole,
+    NvidiaSmiProbe,
+    ResidencyPolicy,
+)
+
+GIB = 1024**3
+main = DeploymentSpec(
+    name="main",
+    role=ModelRole.MAIN,
+    weights_bytes=40 * GIB,
+    kv_pool_bytes=20 * GIB,
+    runtime_bytes=4 * GIB,
+    workspace_bytes=2 * GIB,
+    kv_bytes_per_token=160 * 1024,
+    max_sequences=16,
+    max_context_tokens=65_536,
+    residency=ResidencyPolicy.ALWAYS,
+    initial=DeploymentState.GPU,
+)
+control = CommandModelControl(
+    {
+        "main": DeploymentCommands(
+            gpu=("systemctl", "start", "paw-llm-main.service"),
+            unload=("systemctl", "stop", "paw-llm-main.service"),
+            pids=(
+                "systemctl",
+                "show",
+                "--property=MainPID",
+                "--value",
+                "paw-llm-main.service",
+            ),
+        ),
+    }
+)
+scheduler = ComputeScheduler(
+    ComputeConfig(deployments=(main,)), NvidiaSmiProbe(), control=control
+)
+runtime = HybridRuntime(
+    scheduler,
+    local_runtime,
+    deployment="main",
+    cloud=codex_runtime,
+    cloud_policy=policy,
+)
+# Orchestrator(..., runtimes={"local": runtime, ...}) と、別の Task で scheduler.serve(stop)
+```
+
+### 確認用の Command（読み取りだけ）
+
+```bash
+python -m paw_backend.cli compute-status            # JSON: total / used / headroom / available / 利用率 / Process の数
+python -m paw_backend.cli compute-status --headroom-min-mib 8192 --headroom-fraction 0.1
+```
+
+同じ Probe で GPU を読み、Scheduler が数える値を出します。Process の PID や名前は出しません（他の User の Process でありうるため）。DB に接続せず、何も変えません。終了コードは `0` 成功、`1` 引数の誤り、`2` GPU を読めない。
+
+### 制限と未確認の点
+
+- 状態はプロセス内にあり（Decision 0037 の 1）、Scheduler を使う Worker を別プロセスで複数動かすと同じ GPU を二重に数えます。V1 では 1 プロセスに集めます。
+- 数値はすべて実測に基づかない暫定値です。Model と Runtime が決まったら Benchmark で見直します。Model の Footprint は Admin が与え、Scheduler は測りません。
+- 実際の Runtime（vLLM / SGLang など）の KV 使用率の取得、Runtime の Adapter、Application への組み込み、Exclusive の認可と API、走っている Task の Safe pause / Drain と `Waiting for Resource` への遷移（PAW-037）、System Health の表示（PAW-066）は含みません。
+- Background の停止は協調的（`revoked`）で、仕事がそれを無視すると VRAM は戻りません。
+- Cloud へ回した Node は、Orchestrator の記録上は Ladder の Label のままです（Placement は Scheduler の Status と Log に出ます）。
+- 管理する GPU は `gpu_index` の 1 枚です。MIG は使いません。
+
+### Test
+
+`apps/backend/tests/test_compute_*.py` と `compute_support.py`（Fake の Probe と Fake の `ModelControl`。Fake の Model を GPU に置くと Fake の Probe の使用量が増え、Unload すると減ります）。DB を使いません。`test_compute_probe.py`（2 つの Command の固定、GPU を変える Option がないこと、Parse）、`test_compute_accounting.py`（勘定と KV の純粋関数、ランダムな Property Test）、`test_compute_config.py`（設定の検査と `CommandModelControl`。Runner は記録するだけで何も実行しません）、`test_compute_scheduler.py`（Admission・Class・待ち行列・Probe の鮮度・Hybrid）、`test_compute_relief.py`（縮退の各段・Drain・復帰・常駐）、`test_compute_exclusive.py`、`test_compute_runtimes.py`（`HybridRuntime`・`ScheduledMemoryWorker`・`PlacedEmbedder`）、`test_compute_cli.py`。時間は注入した Clock で動かします。
+実 GPU を読む Test は `RealProbeTest` の 1 つだけで、`PAW_TEST_REAL_GPU_PROBE=1` のときだけ動き（CI では Skip）、2 つの読み取りの Query だけを実行します。
 
 ## Repository Registration / Per-user Checkout
 

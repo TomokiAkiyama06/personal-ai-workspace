@@ -37,6 +37,7 @@
 | [0030](0030-task-working-set-model.md) | Task Working Set（Multi-Repo）の単位・承認・Write範囲・完了条件（Decision 0014「決まっていないこと」1〜5を埋める） | Approved |
 | [0031](0031-audit-retention-scheduler.md) | `audit_events` の保存期間・退避を定期実行する仕組み（systemd timer + Server ローカルの Command `audit-retention-run`、失敗の検知・通知、実行ごとの Audit、Advisory Lock。Decision 0027 の 6 への追補。Issue #117） | Approved |
 | [0032](0032-passkey-owner-reset.md) | 他の Account の Passkey の Reset と 1 回限りの Password 再設定の方針（誰が誰を、Password を消して再設定 Token を発行、`setup_tokens` の `password_reset` と Owner を拒否する関数、有効期間。Issue #108） | Approved |
+| [0037](0037-gpu-compute-scheduler.md) | GPU / Compute Resource Scheduler の方針（状態をプロセス内に持つ、KV Cache の Token による Admission、Actual / Reserved の VRAM と Safety Headroom の暫定値、Class の優先、縮退の段と復帰、Exclusive、Local / Cloud の振り分け。PAW-036、Issue #32） | Proposed |
 
 運用は [AGENTS.md](../../AGENTS.md) の「仕様変更」に従います。
 
