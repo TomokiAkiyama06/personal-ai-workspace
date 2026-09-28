@@ -77,6 +77,8 @@ ADMIN_CAPS = USER_CAPS | {
     "admin.projects.manage",
     "admin.auth_policy.view",
     "project.lifecycle.manage",
+    # Issue #129 (Decision 0048 Proposed): a crashed process's write reservation.
+    "project.task.write_reservation.release",
 }
 OWNER_ONLY_CAPS = {
     "owner.admins.manage",
@@ -112,6 +114,8 @@ MANAGER_CAPS = CONTRIBUTOR_CAPS | {
     "project.agent_policy.manage",
     "project.memory.manage",
     "project.lifecycle.manage",
+    # Issue #129 (Decision 0048 Proposed): the Manager, not every Contributor.
+    "project.task.write_reservation.release",
 }
 PROJECT_MATRIX = {
     ProjectRole.MANAGER: MANAGER_CAPS,
@@ -181,6 +185,8 @@ NON_DELEGABLE_CAPS = {
     "project.members.manage",
     "project.agent_policy.manage",
     "project.lifecycle.manage",
+    # Issue #129 (Decision 0048 Proposed): a person checks the executor is gone.
+    "project.task.write_reservation.release",
 }
 # The only capabilities whose *allowed* decisions are not persisted.
 READ_ONLY_CAPS = {"memory.read", "shared_memory.read", "project.read", "account.read"}

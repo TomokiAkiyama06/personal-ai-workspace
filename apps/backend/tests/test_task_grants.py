@@ -45,6 +45,7 @@ from . import (
     test_task_service,
     test_task_tools,
     test_task_working_set,
+    test_task_write_release,
 )
 from .gate_support import ALWAYS_ACTIVE
 from .support import make_settings
@@ -241,6 +242,12 @@ class WorkingSetUsesAsAppRole(AsAppRole, test_task_working_set.RepositoryUseTest
 
 
 class WorkingSetCompletionAsAppRole(AsAppRole, test_task_working_set.CompletionTest):
+    pass
+
+
+# The manual release of a crashed process's write (issue #129): the release, and
+# the lock and the lease check on ``queue_entries``, need no new privilege.
+class WriteReleaseAsAppRole(AsAppRole, test_task_write_release.ReleaseTest):
     pass
 
 
