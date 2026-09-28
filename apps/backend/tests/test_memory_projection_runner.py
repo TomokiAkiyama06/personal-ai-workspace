@@ -24,7 +24,7 @@ from paw_backend.memory.projection import (
     render_projection,
 )
 from paw_backend.memory.projection import runner as runner_module
-from paw_backend.memory.projection.writer import INCOMPLETE_NAME
+from paw_backend.memory.projection.writer import INCOMPLETE_NAME, LockedTarget
 from paw_backend.tools.credentials import MAX_TEXT_CHARS
 
 from .projection_support import T0, TemporaryRoot, memory, tree
@@ -313,6 +313,22 @@ class FailureTest(RunnerTestCase):
         (self.tmp.root / "shared").write_text("not a directory")
         result = await self.runner(FakeSource([memory(scope="shared")])).run()
         self.assertEqual(result.failed_step, ProjectionStep.WRITE_FILES)
+        self.assertTrue((self.tmp.root / INCOMPLETE_NAME).is_file())
+
+    async def test_a_flag_that_cannot_be_cleared_fails_the_run(self):
+        # The tree stays flagged, so the run must not look healthy (exit 0, check).
+        with mock.patch.object(
+            LockedTarget, "mark_complete", side_effect=PermissionError()
+        ):
+            result = await self.runner(FakeSource([memory()])).run()
+        self.assertFalse(result.ok)
+        self.assertEqual(result.failed_step, ProjectionStep.WRITE_FILES)
+        self.assertEqual(result.error, "PermissionError")
+        self.assertEqual(
+            [row[0] for row in self.recorder.rows],
+            ["memory.projection.completed", "memory.projection.failed"],
+        )
+        self.assertEqual(self.recorder.rows[-1][1], "write_files:PermissionError")
         self.assertTrue((self.tmp.root / INCOMPLETE_NAME).is_file())
 
     async def test_the_reason_fits_the_audit_column(self):

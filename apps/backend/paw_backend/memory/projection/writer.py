@@ -223,16 +223,20 @@ def _open_directory(parent_fd: int, name: str, *, create: bool) -> int:
     return fd
 
 
-def _open_existing(parent_fd: int, name: str) -> int | None:
+def _open_existing(parent_fd: int, name: str, *, required: bool) -> int | None:
     """Open an existing directory of the projection without changing it.
 
-    ``None`` when it is missing; ``unsafe_entry`` when it is not a directory of
-    this user (a link, a file, someone else's)."""
+    ``None`` when it is missing, or is not a directory and not ``required`` (left
+    as unmanaged by ``sync``); ``unsafe_entry`` when a ``required`` one is not a
+    directory, or when it is a directory of someone else. A directory this user
+    cannot read raises the ``OSError`` that ``sync`` would meet."""
     entry = _lstat(name, parent_fd)
     if entry is None:
         return None
     if not stat.S_ISDIR(entry.st_mode):
-        raise ProjectionTargetError(TargetProblem.UNSAFE_ENTRY)
+        if required:
+            raise ProjectionTargetError(TargetProblem.UNSAFE_ENTRY)
+        return None
     try:
         fd = os.open(name, _DIRECTORY_FLAGS, dir_fd=parent_fd)
     except OSError as error:
@@ -241,6 +245,7 @@ def _open_existing(parent_fd: int, name: str) -> int | None:
         raise
     try:
         _check_owned(fd, TargetProblem.UNSAFE_ENTRY)
+        os.listdir(fd)
     except BaseException:
         os.close(fd)
         raise
@@ -379,21 +384,29 @@ class LockedTarget:
         os.fsync(self._root_fd)
 
     def _preflight(self, wanted_tops: Mapping[str, Mapping[str, object]]) -> None:
-        """Refuse, before any change, a tree ``sync`` could not finish."""
-        for top, wanted in wanted_tops.items():
-            fd = _open_existing(self._root_fd, top)
+        """Refuse, before any change, a tree ``sync`` could not finish.
+
+        Visits every directory ``sync`` will open: the wanted ones and the
+        existing managed ones it would clean up (a top directory, a ``<uuid>``
+        directory), exactly as ``_sync_top`` / ``_sync_keyed`` decide."""
+        for top in _ALL_TOP_DIRECTORIES:
+            wanted = wanted_tops.get(top)
+            fd = _open_existing(self._root_fd, top, required=wanted is not None)
             if fd is None:
                 continue
             try:
                 if top == SHARED_DIRECTORY:
-                    _preflight_leaf(fd, wanted.get("", {}))
+                    _preflight_leaf(fd, (wanted or {}).get("", {}))
                     continue
-                for name, files in wanted.items():
-                    child = _open_existing(fd, name)
+                wanted = wanted or {}
+                for name in sorted(set(os.listdir(fd)) | wanted.keys()):
+                    if not is_uuid_name(name):
+                        continue
+                    child = _open_existing(fd, name, required=name in wanted)
                     if child is None:
                         continue
                     try:
-                        _preflight_leaf(child, files)
+                        _preflight_leaf(child, wanted.get(name, {}))
                     finally:
                         os.close(child)
             finally:

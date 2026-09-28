@@ -224,14 +224,25 @@ class MemoryProjectionRunner:
             )
             cancelled = cancelled or interrupted
             if audited and action is ProjectionAction.COMPLETED:
-                # Only now may the tree be copied (Decision 0038 9). A failure
-                # leaves the flag: the next completed run clears it.
+                # Only now may the tree be copied (Decision 0038 9). A flag that
+                # cannot be cleared keeps the tree uncopyable, so the run fails
+                # and says so (a second row, the last one ``projection_status``
+                # reads); the next completed run clears it.
                 try:
                     await _in_thread(target.mark_complete)
                 except asyncio.CancelledError as failure:
                     cancelled = cancelled or failure
-                except OSError:
-                    pass
+                except Exception as failure:
+                    failed_step = ProjectionStep.WRITE_FILES
+                    error = _code(failure)
+                    audited, interrupted = await _to_the_end(
+                        self._recorder(
+                            ProjectionAction.FAILED,
+                            f"{failed_step.value}:{error}",
+                            occurred_at=self._clock(),
+                        )
+                    )
+                    cancelled = cancelled or interrupted
         finally:
             if target is not None:
                 try:

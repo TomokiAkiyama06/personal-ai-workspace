@@ -12,6 +12,7 @@ import threading
 import unittest
 from pathlib import Path
 from unittest import mock
+from uuid import uuid4
 
 from paw_backend.memory.projection import (
     INDEX_FILE,
@@ -374,6 +375,30 @@ class IncompleteTest(WriterTestCase):
             tree(self.root)[f"projects/{other.project_id}/{other.memory_id}.md"],
             before[f"projects/{other.project_id}/{other.memory_id}.md"],
         )
+        self.assertFalse((self.root / INCOMPLETE_NAME).exists())
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads a 0000 directory")
+    def test_an_unreadable_stale_directory_is_found_before_writing(self):
+        first, second = sorted([uuid4(), uuid4()], key=str)
+        stale = memory(owner_user_id=second)
+        self.sync([stale])
+        # The wanted directory sorts before the stale one the run would clean up.
+        stale_dir = self.root / "users" / str(second)
+        os.chmod(stale_dir, 0)
+        self.addCleanup(os.chmod, stale_dir, 0o700)
+        with self.assertRaises(OSError):
+            self.sync([memory(owner_user_id=first)])
+        self.assertFalse((self.root / "users" / str(first)).exists())
+        self.assertFalse((self.root / INCOMPLETE_NAME).exists())
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads a 0000 directory")
+    def test_an_unreadable_stale_top_directory_is_found_before_writing(self):
+        self.sync([memory(scope="shared")])
+        os.chmod(self.root / "shared", 0)
+        self.addCleanup(os.chmod, self.root / "shared", 0o700)
+        with self.assertRaises(OSError):
+            self.sync([memory(scope="project")])
+        self.assertFalse((self.root / "projects").exists())
         self.assertFalse((self.root / INCOMPLETE_NAME).exists())
 
     def test_the_flag_stays_until_the_write_is_marked_complete(self):
