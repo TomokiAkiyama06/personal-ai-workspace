@@ -263,7 +263,9 @@ export function DevicesSection() {
           <button
             type="button"
             className="push-right"
-            disabled={busy}
+            // The sessions known before issuing tell the new device apart, so
+            // issuing waits for the first read of the list.
+            disabled={busy || sessions === null}
             onClick={() =>
               void act(async () => {
                 const issued = await authApi.issuePairing();

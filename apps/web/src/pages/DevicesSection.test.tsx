@@ -35,6 +35,13 @@ const base = {
   "GET /auth/passkeys": reply(200, { passkeys: [] }),
 };
 
+// Issuing waits for the first read of the device list (its sessions are the baseline).
+async function addDevice(user: ReturnType<typeof userEvent.setup>) {
+  const button = await screen.findByRole("button", { name: "新しい端末を追加" });
+  await waitFor(() => expect(button).toBeEnabled());
+  await user.click(button);
+}
+
 function trusted() {
   return screen.getByRole("region", { name: "信頼済み端末" });
 }
@@ -110,7 +117,7 @@ describe("設定 › 端末とセッション", () => {
     });
     renderApp("/settings/devices");
     const user = userEvent.setup();
-    await user.click(await screen.findByRole("button", { name: "新しい端末を追加" }));
+    await addDevice(user);
     expect(
       await screen.findByRole("img", { name: "新しい端末で読み取る QR コード" }),
     ).toBeVisible();
@@ -140,7 +147,7 @@ describe("設定 › 端末とセッション", () => {
     });
     renderApp("/settings/devices");
     const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
-    await user.click(await screen.findByRole("button", { name: "新しい端末を追加" }));
+    await addDevice(user);
     await screen.findByText(/残り 00:0\d で失効/);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(3000);
@@ -230,7 +237,7 @@ describe("設定 › 端末とセッション", () => {
     });
     renderApp("/settings/devices");
     const user = userEvent.setup();
-    await user.click(await screen.findByRole("button", { name: "新しい端末を追加" }));
+    await addDevice(user);
     expect(
       await screen.findByRole("img", { name: "新しい端末で読み取る QR コード" }),
     ).toBeVisible();
@@ -244,6 +251,37 @@ describe("設定 › 端末とセッション", () => {
     // Nothing to approve on this branch: the waiting list is not polled.
     expect(calls.filter((call) => call.path === "/auth/pairing/pending")).toHaveLength(1);
   }, 15000);
+
+  it("waits for the device list before a new device can be added", async () => {
+    mockApi({
+      ...base,
+      "GET /auth/pairing/pending": reply(200, { pending: [] }),
+    });
+    const tableFetch = globalThis.fetch;
+    let answerSessions: (response: Response) => void = () => {};
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        if (String(input).endsWith("/auth/sessions")) {
+          return new Promise<Response>((resolve) => {
+            answerSessions = resolve;
+          });
+        }
+        return tableFetch(input, init);
+      }),
+    );
+    renderApp("/settings/devices");
+    // Without the known sessions, the current one would later look like the new device.
+    expect(await screen.findByRole("button", { name: "新しい端末を追加" })).toBeDisabled();
+    answerSessions(
+      new Response(JSON.stringify({ sessions: [session().session] }), {
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "新しい端末を追加" })).toBeEnabled(),
+    );
+  });
 
   it("shows a wrong confirmation code as such", async () => {
     mockApi({
@@ -273,7 +311,7 @@ describe("設定 › 端末とセッション", () => {
     });
     renderApp("/settings/devices");
     const user = userEvent.setup();
-    await user.click(await screen.findByRole("button", { name: "新しい端末を追加" }));
+    await addDevice(user);
     expect(
       await screen.findByRole("img", { name: "新しい端末で読み取る QR コード" }),
     ).toBeVisible();
@@ -318,7 +356,7 @@ describe("設定 › 端末とセッション", () => {
     );
     renderApp("/settings/devices");
     const user = userEvent.setup();
-    await user.click(await screen.findByRole("button", { name: "新しい端末を追加" }));
+    await addDevice(user);
     // The five-second poll starts and is left hanging.
     await waitFor(() => expect(reads).toBe(2), { timeout: 7000 });
     await user.click(screen.getByRole("button", { name: "拒否" }));
