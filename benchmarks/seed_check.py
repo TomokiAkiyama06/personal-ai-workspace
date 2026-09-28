@@ -9,9 +9,10 @@ directory is the candidate worktree.  The program never writes into that worktre
     ``python -m unittest`` there.  The check fails when a test fails, when no test
     ran, or, unless ``--allow-skips`` is given, when a test was skipped: a skipped
     PostgreSQL test must not turn a hidden check into a silent pass.  With
-    ``--database-url-file`` a throwaway database ``paw_seed_<random>`` is created
-    from the base URL in that file, handed to the tests as
-    ``PAW_TEST_DATABASE_URL`` and dropped afterwards.  The URL is never printed.
+    ``--database-url-file`` a throwaway login and database ``paw_seed_<random>``
+    are created with the evaluator's URL in that file; the tests get only the
+    throwaway login's URL as ``PAW_TEST_DATABASE_URL``, and both are dropped
+    afterwards.  No URL is ever printed.
     ``--expect fail`` inverts the verdict (used to check that a test the candidate
     repaired still detects a known bug).
 
@@ -37,6 +38,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 _IGNORED = shutil.ignore_patterns(".git", "__pycache__", ".venv", "*.pyc")
@@ -107,31 +109,79 @@ def _apply_overlay(overlay: Path, destination: Path) -> int:
     return count
 
 
-def _create_database(url_file: Path) -> tuple[str, str, str]:
-    """Create ``paw_seed_<random>``; return (admin url, database name, test url)."""
+@dataclass(frozen=True)
+class _Database:
+    """A throwaway database and the check-specific login that owns it."""
+
+    admin_url: str
+    name: str
+    role: str
+    test_url: str
+
+
+def _create_database(url_file: Path) -> _Database:
+    """Create a login ``paw_seed_<random>`` and a database of the same name it owns.
+
+    The tests only ever see this login (random name and password), never the
+    evaluator's own credential from ``url_file``; teardown drops both.  The login
+    is a superuser because the migrations under test create and drop the
+    ``vector`` extension, which PostgreSQL does not let other roles do (pgvector
+    is not a trusted extension), and the grant tests create roles.  The cluster
+    therefore still has to be a disposable one used only for the benchmark
+    (Decision 0041).
+    """
     import psycopg
+    from psycopg import sql
     from sqlalchemy.engine import make_url
 
     base = url_file.read_text(encoding="utf-8").strip()
     name = f"paw_seed_{secrets.token_hex(6)}"
+    password = secrets.token_urlsafe(32)
     admin = make_url(base).set(drivername="postgresql")
-    with psycopg.connect(
-        admin.render_as_string(hide_password=False), autocommit=True
-    ) as connection:
-        connection.execute(f'CREATE DATABASE "{name}"')
-    test_url = admin.set(database=name).render_as_string(hide_password=False)
-    return admin.render_as_string(hide_password=False), name, test_url
+    admin_url = admin.render_as_string(hide_password=False)
+    with psycopg.connect(admin_url, autocommit=True) as connection:
+        connection.execute(
+            sql.SQL("CREATE ROLE {} LOGIN SUPERUSER PASSWORD {}").format(
+                sql.Identifier(name), sql.Literal(password)
+            )
+        )
+        try:
+            connection.execute(
+                sql.SQL("CREATE DATABASE {} OWNER {}").format(
+                    sql.Identifier(name), sql.Identifier(name)
+                )
+            )
+        except BaseException:
+            connection.execute(
+                sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(name))
+            )
+            raise
+    test_url = admin.set(
+        username=name, password=password, database=name
+    ).render_as_string(hide_password=False)
+    return _Database(admin_url, name, name, test_url)
 
 
-def _drop_database(admin_url: str, name: str) -> bool:
-    """Drop the throwaway database; False (and a message without the URL) on failure."""
+def _drop_database(database: _Database) -> bool:
+    """Drop the throwaway database and its login; False (and a message without the URL) on failure."""
     import psycopg
+    from psycopg import sql
 
     try:
-        with psycopg.connect(admin_url, autocommit=True) as connection:
-            connection.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
+        with psycopg.connect(database.admin_url, autocommit=True) as connection:
+            connection.execute(
+                sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(
+                    sql.Identifier(database.name)
+                )
+            )
+            connection.execute(
+                sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(database.role))
+            )
     except Exception:  # noqa: BLE001 - never print the URL
-        print("seed_check: could not drop the throwaway database; the check fails")
+        print(
+            "seed_check: could not drop the throwaway database or its login;"
+            " the check fails"
+        )
         return False
     return True
 
@@ -187,7 +237,7 @@ def _run_unittest(arguments: argparse.Namespace) -> int:
     worktree = Path(arguments.worktree).resolve()
     overlay = Path(arguments.overlay).resolve() if arguments.overlay else None
     temporary = Path(tempfile.mkdtemp(prefix="paw-seed-check-"))
-    database: tuple[str, str] | None = None
+    database: _Database | None = None
     code = 1
     try:
         tree = temporary / "tree"
@@ -198,17 +248,14 @@ def _run_unittest(arguments: argparse.Namespace) -> int:
         environment.pop("PAW_TEST_DATABASE_URL", None)
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
         if arguments.database_url_file:
-            admin_url, name, test_url = _create_database(
-                Path(arguments.database_url_file)
-            )
-            database = (admin_url, name)
-            environment["PAW_TEST_DATABASE_URL"] = test_url
+            database = _create_database(Path(arguments.database_url_file))
+            environment["PAW_TEST_DATABASE_URL"] = database.test_url
         command = [sys.executable, "-m", "unittest", "-v", *arguments.tests]
         returncode, output = _run_bounded(
             command, tree / arguments.workdir, environment
         )
         if database is not None:
-            output = output.replace(test_url.encode(), b"<database-url>")
+            output = output.replace(database.test_url.encode(), b"<database-url>")
         _echo(output[-_MAX_ECHO:])
         ran = [int(value) for value in _RAN.findall(output)]
         summaries = _SUMMARY.findall(output)
@@ -245,7 +292,7 @@ def _run_unittest(arguments: argparse.Namespace) -> int:
     finally:
         # A database that could not be dropped would outlive the check and could
         # leak into later runs, so a failed teardown fails the check.
-        if database is not None and not _drop_database(*database):
+        if database is not None and not _drop_database(database):
             code = 1
         shutil.rmtree(temporary, ignore_errors=True)
     return code

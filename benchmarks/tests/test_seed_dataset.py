@@ -428,7 +428,12 @@ class SeedCheckTest(unittest.TestCase):
             unittest.mock.patch.object(
                 seed_check,
                 "_create_database",
-                return_value=("admin-url", "paw_seed_x", "postgresql://t@h/paw_seed_x"),
+                return_value=seed_check._Database(
+                    "admin-url",
+                    "paw_seed_x",
+                    "paw_seed_x",
+                    "postgresql://t@h/paw_seed_x",
+                ),
             ),
             unittest.mock.patch.object(
                 seed_check, "_drop_database", return_value=False
@@ -437,6 +442,65 @@ class SeedCheckTest(unittest.TestCase):
             code, output = self.run_check("--database-url-file", str(url_file))
         self.assertEqual(code, 1, output)
         self.assertNotIn("secret", output)
+
+
+@unittest.skipUnless(
+    os.environ.get("PAW_TEST_DATABASE_URL"), "PAW_TEST_DATABASE_URL is not set"
+)
+class ThrowawayDatabaseTest(unittest.TestCase):
+    """The tests of a hidden check never see the evaluator's own credential."""
+
+    def setUp(self):
+        from sqlalchemy.engine import make_url
+
+        directory = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
+        self.url_file = directory / "url"
+        self.url_file.write_text(os.environ["PAW_TEST_DATABASE_URL"] + "\n")
+        self.admin = make_url(os.environ["PAW_TEST_DATABASE_URL"]).set(
+            drivername="postgresql"
+        )
+
+    def scalar(self, url, query, *parameters):
+        import psycopg
+
+        with psycopg.connect(url, autocommit=True) as connection:
+            return connection.execute(query, parameters).fetchone()[0]
+
+    def test_the_tests_get_a_throwaway_login_that_teardown_removes(self):
+        from sqlalchemy.engine import make_url
+
+        admin_url = self.admin.render_as_string(hide_password=False)
+        database = seed_check._create_database(self.url_file)
+        dropped = False
+        try:
+            given = make_url(database.test_url)
+            self.assertEqual(given.database, database.name)
+            self.assertNotEqual(given.username, self.admin.username)
+            self.assertNotEqual(given.password, self.admin.password)
+            self.assertNotIn(str(self.admin.password), database.test_url)
+            self.assertEqual(
+                self.scalar(database.test_url, "SELECT current_user"), database.role
+            )
+            self.assertEqual(
+                self.scalar(
+                    admin_url,
+                    "SELECT pg_get_userbyid(datdba) FROM pg_database"
+                    " WHERE datname = %s",
+                    database.name,
+                ),
+                database.role,
+            )
+            dropped = seed_check._drop_database(database)
+            self.assertTrue(dropped)
+            for query in (
+                "SELECT count(*) FROM pg_roles WHERE rolname = %s",
+                "SELECT count(*) FROM pg_database WHERE datname = %s",
+            ):
+                self.assertEqual(self.scalar(admin_url, query, database.name), 0)
+        finally:
+            if not dropped:
+                seed_check._drop_database(database)
 
 
 class ForbiddenChangesTest(unittest.TestCase):

@@ -27,5 +27,5 @@ PATH="$VENV/bin:$PATH" python -m benchmarks.seed_dataset verify \
   --database-url-file "$PG_URL_FILE"
 ```
 
-`--database-url-file` は PostgreSQL の管理用 URL を 1 行だけ書いた file です（Backend の Task で、check ごとに使い捨ての Database を作ります）。URL は出力しません。
+`--database-url-file` は PostgreSQL の管理用 URL を 1 行だけ書いた file です（Backend の Task で、check ごとに使い捨ての Login と Database を作り、test にはその Login の URL だけを渡します。Migration が `vector` 拡張を作るので使い捨ての Login は Superuser です。Benchmark 専用の使い捨ての Cluster を使ってください）。URL は出力しません。
 `--work-dir` は Repository の外の、Evaluator だけが使う directory にします。
