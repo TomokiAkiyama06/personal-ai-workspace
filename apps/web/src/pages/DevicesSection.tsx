@@ -2,7 +2,7 @@
 // 新しい端末を追加 (a one-time QR code / link), the trusted devices (the signed-in
 // sessions and the devices waiting for this account's approval), the passkeys and
 // 他のすべての端末からサインアウト.
-import { type FormEvent, useCallback, useEffect, useId, useState } from "react";
+import { type FormEvent, useCallback, useEffect, useId, useRef, useState } from "react";
 import { authApi, type PairingIssued, type PendingPairing, type SessionInfo } from "../api/auth";
 import { StepUpCancelledError, useStepUp } from "../auth/StepUp";
 import { useSession } from "../auth/session";
@@ -178,11 +178,16 @@ export function DevicesSection() {
     }
   }, [t]);
 
+  // Only the newest read of the waiting devices counts: a poll that was in
+  // flight during an approval / refusal must not bring the decided one back.
+  const pendingReads = useRef(0);
   const loadPending = useCallback(async () => {
+    const mine = ++pendingReads.current;
     try {
-      setPending((await authApi.pendingPairings()).pending);
+      const { pending: next } = await authApi.pendingPairings();
+      if (mine === pendingReads.current) setPending(next);
     } catch (caught) {
-      setError(errorMessage(t, caught));
+      if (mine === pendingReads.current) setError(errorMessage(t, caught));
     }
   }, [t]);
 

@@ -237,6 +237,48 @@ describe("設定 › 端末とセッション", () => {
     expect(screen.getByRole("button", { name: "新しい端末を追加" })).toBeInTheDocument();
   }, 10000);
 
+  it("ignores a poll that was in flight while the device was refused", async () => {
+    const { calls } = mockApi({
+      ...base,
+      "GET /auth/sessions": reply(200, { sessions: [session().session] }),
+      "POST /auth/pairing": reply(201, pairing),
+      "POST /auth/pairing/p-1/reject": reply(204),
+    });
+    const tableFetch = globalThis.fetch;
+    let reads = 0;
+    let answerPoll: (response: Response) => void = () => {};
+    const json = (body: unknown) =>
+      new Response(JSON.stringify(body), { headers: { "Content-Type": "application/json" } });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        if (String(input).endsWith("/auth/pairing/pending")) {
+          reads += 1;
+          if (reads === 1) return Promise.resolve(json({ pending: [waiting] }));
+          if (reads === 2) {
+            return new Promise<Response>((resolve) => {
+              answerPoll = resolve;
+            });
+          }
+          return Promise.resolve(json({ pending: [] }));
+        }
+        return tableFetch(input, init);
+      }),
+    );
+    renderApp("/settings/devices");
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "新しい端末を追加" }));
+    // The five-second poll starts and is left hanging.
+    await waitFor(() => expect(reads).toBe(2), { timeout: 7000 });
+    await user.click(screen.getByRole("button", { name: "拒否" }));
+    expect(await screen.findByText("端末を拒否しました。")).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText("New phone")).not.toBeInTheDocument());
+    answerPoll(json({ pending: [waiting] }));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(screen.queryByText("New phone")).not.toBeInTheDocument();
+    expect(calls.some((call) => call.path === "/auth/pairing/p-1/reject")).toBe(true);
+  }, 10000);
+
   it("rejects a waiting device", async () => {
     const { calls } = mockApi({
       ...base,

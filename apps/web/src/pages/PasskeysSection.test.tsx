@@ -156,7 +156,8 @@ describe("Passkeys (設定 › 端末とセッション)", () => {
     fakeWebAuthn();
     const { calls } = mockApi({
       ...devicesPage,
-      "GET /auth/session": reply(200, session()),
+      // The finish answer has no replacement session: the state is read again.
+      "GET /auth/session": [reply(200, session()), reply(200, session({ enrolled: true }))],
       "GET /auth/passkeys": [reply(200, { passkeys: [] }), reply(200, { passkeys: [passkey] })],
       "POST /auth/passkeys/enroll/begin": reply(200, {
         options: {
@@ -177,6 +178,8 @@ describe("Passkeys (設定 › 端末とセッション)", () => {
     await user.type(screen.getByLabelText("端末名"), "MacBook");
     await user.click(screen.getByRole("button", { name: "登録する" }));
     expect(await screen.findByText("Passkey を登録しました。")).toBeInTheDocument();
+    expect(screen.queryByText("Passkey の登録をおすすめします。")).not.toBeInTheDocument();
+    expect(calls.filter((call) => call.path === "/auth/session")).toHaveLength(2);
     expect(calls.find((call) => call.path === "/auth/passkeys/enroll/finish")?.body).toEqual({
       credential: { id: "cred" },
       name: "MacBook",

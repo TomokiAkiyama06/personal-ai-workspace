@@ -10,7 +10,7 @@ import { errorMessage } from "../i18n/errors";
 
 export function PasskeysSection() {
   const { t, formatDate } = useI18n();
-  const { accept, expired } = useSession();
+  const { accept, expired, refresh } = useSession();
   const data = useSignedIn();
   const { run, prompt } = useStepUp();
   const titleId = useId();
@@ -51,7 +51,10 @@ export function PasskeysSection() {
       setVerifying(true);
       const credential = await createPasskey(options);
       const result = await authApi.passkeyEnrollFinish(credential, name.trim() || null);
+      // No replacement session (no rotation was needed): read the new passkey
+      // state, so the Step-up offers the passkey and the recommendation goes.
       if (result.session) accept(result.session);
+      else await refresh();
       setName("");
       setEnrolling(false);
       setNotice(t("passkey.registered"));
