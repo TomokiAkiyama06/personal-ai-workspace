@@ -26,6 +26,8 @@ the memory the probe sees as external would count the model twice and start the
 relief steps for pressure that is not there. A pid set that covers only part of
 the model's processes cannot be told apart from another workload: the pids
 command must list every process of the runtime (the unit's ``cgroup.procs``).
+A model some of whose processes report no usage (``[N/A]``) holds what is left
+of its reservation out of the rest in the same way.
 
 So ``committed`` is never below the actual use nor below the
 reservations: the scheduler cannot promise memory that is in use, and memory it
@@ -83,8 +85,13 @@ def account(
 ) -> VramView:
     """The VRAM view of ``device`` (see the module)."""
     used_by: dict[int, int] = {}
+    unknown_use: set[int] = set()  # on the GPU, but the usage is "[N/A]"
     for process in processes:
-        if process.gpu_uuid == device.uuid and process.used_bytes is not None:
+        if process.gpu_uuid != device.uuid:
+            continue
+        if process.used_bytes is None:
+            unknown_use.add(process.pid)
+        else:
             used_by[process.pid] = used_by.get(process.pid, 0) + process.used_bytes
     reserved = extra_reserved
     committed_own = extra_reserved
@@ -104,6 +111,10 @@ def account(
             continue
         own_actual += actual
         committed_own += max(usage.reserved_bytes, actual)
+        if usage.pids & unknown_use:
+            # Some of its processes report no figure: what they use shows in
+            # the rest and is the model's, up to its reservation.
+            unknown_reserved += max(0, usage.reserved_bytes - actual)
     rest = max(0, device.used_bytes - own_actual)
     external = max(0, rest - unknown_reserved)
     committed = committed_own + external

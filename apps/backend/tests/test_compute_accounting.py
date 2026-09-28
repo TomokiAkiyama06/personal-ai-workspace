@@ -164,6 +164,26 @@ class AccountTest(unittest.TestCase):
         self.assertEqual(view.committed, 94 * GIB)
         self.assertTrue(view.under_pressure)
 
+    def test_a_model_with_a_process_of_unknown_usage_holds_its_reservation(self):
+        # 80 GiB reserved; one of its pids reports 1 GiB, the other "[N/A]" (the
+        # device shows 80 GiB used): the unknown part is the model's, not external.
+        view = account(
+            device(used=80 * GIB),
+            (proc(1, 1 * GIB), GpuProcess(UUID, 2, None)),
+            (DeploymentUsage(80 * GIB, frozenset({1, 2})),),
+            headroom=4 * GIB,
+        )
+        self.assertEqual(view.external, 0)
+        self.assertEqual(view.committed, 80 * GIB)
+        # What is beyond its reservation is still counted.
+        view = account(
+            device(used=90 * GIB),
+            (proc(1, 1 * GIB), GpuProcess(UUID, 2, None)),
+            (DeploymentUsage(80 * GIB, frozenset({1, 2})),),
+            headroom=4 * GIB,
+        )
+        self.assertEqual(view.committed, 90 * GIB)
+
     def test_pressure_when_the_headroom_is_eaten(self):
         view = account(
             device(used=93 * GIB), (proc(9, 93 * GIB),), (), headroom=4 * GIB

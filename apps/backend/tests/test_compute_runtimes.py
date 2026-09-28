@@ -13,6 +13,7 @@
 import asyncio
 import unittest
 import uuid
+from unittest import mock
 
 from paw_backend.compute import (
     ComputeRequest,
@@ -24,6 +25,7 @@ from paw_backend.compute import (
     ScheduledMemoryWorker,
     estimate_context_tokens,
 )
+from paw_backend.compute import runtimes as runtimes_module
 from paw_backend.memory.journal import WorkerUnavailableError
 from paw_backend.orchestrator import NodeOutcome, NodeResult, NodeRole
 from paw_backend.orchestrator.errors import NodeStopped, StopReason
@@ -296,6 +298,78 @@ class HybridRuntimeTest(unittest.IsolatedAsyncioTestCase):
         outcome = await task
         self.assertEqual(outcome.result.summary, "done by local")
         self.assertEqual(work.budget.charges, [(BudgetKind.GPU_SECONDS, 91)])
+
+    async def test_concurrent_nodes_of_a_task_share_the_gpu_time_left(self):
+        # 60 s left and two nodes of the same task at once: the GPU time falls
+        # twice as fast, both are stopped at 30 s (60 in all, not 120).
+        task_id = uuid.uuid4()
+        budget = FakeBudget(gpu_seconds_left=60)
+        first = assignment(task_id=task_id, node_key="a", budget=budget)
+        second = assignment(task_id=task_id, node_key="b", budget=budget)
+        runtime = self.runtime()
+        tasks = [
+            asyncio.create_task(runtime.run_node(first)),
+            asyncio.create_task(runtime.run_node(second)),
+        ]
+        await settle()
+        self.assertEqual(self.scheduler.status().leases[ResourceClass.CODING], 2)
+        await self.clock.advance(30)
+        await settle()
+        for task in tasks:
+            with self.assertRaises(NodeStopped):
+                await task
+        self.assertEqual(
+            budget.charges,
+            [(BudgetKind.GPU_SECONDS, 30), (BudgetKind.GPU_SECONDS, 30)],
+        )
+        self.assertEqual(self.scheduler.status().leases[ResourceClass.CODING], 0)
+
+    async def test_nodes_of_other_tasks_do_not_share_the_gpu_time(self):
+        first = assignment(budget=FakeBudget(gpu_seconds_left=60))
+        second = assignment(budget=FakeBudget(gpu_seconds_left=60))
+        runtime = self.runtime()
+        tasks = [
+            asyncio.create_task(runtime.run_node(first)),
+            asyncio.create_task(runtime.run_node(second)),
+        ]
+        await settle()
+        await self.clock.advance(30)
+        await settle()
+        self.assertFalse(any(task.done() for task in tasks))
+        await self.clock.advance(30)
+        await settle()
+        for task in tasks:
+            with self.assertRaises(NodeStopped):
+                await task
+        self.assertEqual(first.budget.charges, [(BudgetKind.GPU_SECONDS, 60)])
+
+    async def test_a_runtime_that_ignores_cancellation_keeps_its_lease(self):
+        release = asyncio.Event()
+
+        class Stubborn:
+            async def run_node(self, assignment):
+                while True:
+                    try:
+                        await release.wait()
+                        return NodeOutcome.succeeded(NodeResult(summary="late"))
+                    except asyncio.CancelledError:
+                        continue
+
+        runtime = HybridRuntime(
+            self.scheduler, Stubborn(), deployment="main", clock=self.clock
+        )
+        work = assignment(budget=FakeBudget(gpu_seconds_left=10))
+        with mock.patch.object(runtimes_module, "CANCEL_GRACE_SECONDS", 0.01):
+            task = asyncio.create_task(runtime.run_node(work))
+            await settle()
+            await self.clock.advance(10)
+            with self.assertRaises(NodeStopped):
+                await task
+        # The runtime still runs: its GPU capacity is not given away.
+        self.assertEqual(self.scheduler.status().leases[ResourceClass.CODING], 1)
+        release.set()
+        await settle()
+        self.assertEqual(self.scheduler.status().leases[ResourceClass.CODING], 0)
 
     async def test_a_bounded_node_that_is_cancelled_is_charged_and_released(self):
         work = assignment(budget=FakeBudget(gpu_seconds_left=100))

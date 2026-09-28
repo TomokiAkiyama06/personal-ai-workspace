@@ -171,6 +171,7 @@ class ComputeLease:
         "granted_at",
         "_scheduler",
         "_released",
+        "_held",
     )
 
     def __init__(
@@ -190,14 +191,25 @@ class ComputeLease:
         self.granted_at = scheduler._clock.monotonic()
         self._scheduler = scheduler
         self._released = False
+        self._held: asyncio.Future | None = None
 
     @property
     def released(self) -> bool:
         return self._released
 
     async def release(self) -> None:
-        """Give the capacity back. Idempotent."""
+        """Give the capacity back. Idempotent. Waits for :meth:`hold_until`."""
+        if self._held is not None and not self._held.done():
+            return
         self._scheduler._release(self)
+
+    def hold_until(self, work: asyncio.Future) -> None:
+        """Keep the capacity until ``work`` ends, even when ``release`` is called
+        before: work that did not stop when it was cancelled still uses the GPU."""
+        if work.done():
+            return
+        self._held = work
+        work.add_done_callback(lambda _: self._scheduler._release(self))
 
     async def __aenter__(self) -> "ComputeLease":
         return self
