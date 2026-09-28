@@ -31,7 +31,14 @@ from paw_backend.orchestrator import NodeOutcome, NodeResult, NodeRole
 from paw_backend.orchestrator.errors import NodeStopped, StopReason
 from paw_backend.orchestrator.runtime import NodeAssignment, validate_runtime
 from paw_backend.tasks.queueing import BudgetKind
-from tests.compute_support import build, embedding_spec, main_spec, memory_spec, settle
+from tests.compute_support import (
+    GIB,
+    build,
+    embedding_spec,
+    main_spec,
+    memory_spec,
+    settle,
+)
 
 IC = ResourceClass.INTERACTIVE
 
@@ -370,6 +377,99 @@ class HybridRuntimeTest(unittest.IsolatedAsyncioTestCase):
         release.set()
         await settle()
         self.assertEqual(self.scheduler.status().leases[ResourceClass.CODING], 0)
+
+    async def test_a_revoked_background_lease_stops_the_local_work(self):
+        # VRAM pressure revokes Background leases (the first relief step): the
+        # node's local call is stopped, its time charged, the lease given back.
+        runtime = self.runtime(
+            resource_class=ResourceClass.BACKGROUND, cloud=None, cloud_policy=None
+        )
+        work = assignment()
+        task = asyncio.create_task(runtime.run_node(work))
+        await settle()
+        self.assertEqual(self.scheduler.status().leases[ResourceClass.BACKGROUND], 1)
+        await self.clock.advance(20)
+        self.probe.external = 12 * GIB
+        await self.scheduler.refresh()
+        await settle()
+        outcome = await task
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.error_class, "ComputeUnavailable")
+        self.assertTrue(outcome.retryable)
+        self.assertEqual(work.budget.charges, [(BudgetKind.GPU_SECONDS, 20)])
+        self.assertEqual(self.scheduler.status().leases[ResourceClass.BACKGROUND], 0)
+
+    async def test_the_cloud_policy_is_asked_again_before_the_cloud_runs(self):
+        await fill_main(self.scheduler)
+        answers = iter([True, False])
+
+        async def allows(assignment):
+            return next(answers)
+
+        self.policy.allows = allows
+        outcome = await self.runtime().run_node(assignment(goal="x" * 90_000))
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.error_class, "ComputeUnavailable")
+        self.assertEqual(self.cloud.calls, [])
+
+    async def test_a_failing_cloud_policy_keeps_the_node_local(self):
+        async def allows(assignment):
+            raise RuntimeError("policy backend down")
+
+        self.policy.allows = allows
+        work = assignment()
+        task = asyncio.create_task(self.runtime().run_node(work))
+        await settle()
+        await self.clock.advance(90.5)
+        self.assertEqual((await task).result.summary, "done by local")
+
+    async def test_a_charge_in_flight_is_not_counted_twice_by_a_new_node(self):
+        # 100 s left. Node a runs 40 s and charges them; while its charge is
+        # visible but not finished, node b of the same task starts. b must have
+        # the 60 s that are left, not 60 - 40.
+        gate = asyncio.Event()
+        charged = asyncio.Event()
+
+        class Ledger(FakeBudget):
+            async def charge(self, kind, amount):
+                self.charges.append((kind, amount))
+                self.gpu_seconds_left -= amount
+                charged.set()
+                await gate.wait()
+
+        task_id = uuid.uuid4()
+        budget = Ledger(gpu_seconds_left=100)
+        quick = Recorder("local", self.clock, seconds=40)
+        slow = Recorder("local", self.clock, seconds=1_000)
+        first = HybridRuntime(
+            self.scheduler, quick, deployment="main", clock=self.clock
+        )
+        second = HybridRuntime(
+            self.scheduler, slow, deployment="main", clock=self.clock
+        )
+        a = asyncio.create_task(
+            first.run_node(assignment(task_id=task_id, node_key="a", budget=budget))
+        )
+        await settle()
+        await self.clock.advance(40)
+        await settle()
+        self.assertTrue(charged.is_set())
+        await self.scheduler.refresh()  # a fresh sample after the 40 s
+        b = asyncio.create_task(
+            second.run_node(assignment(task_id=task_id, node_key="b", budget=budget))
+        )
+        await settle()
+        gate.set()
+        await settle()
+        self.assertTrue((await a).ok)
+        await self.clock.advance(59)
+        await settle()
+        self.assertFalse(b.done())
+        await self.clock.advance(1)
+        await settle()
+        with self.assertRaises(NodeStopped):
+            await b
+        self.assertEqual(budget.charges[-1], (BudgetKind.GPU_SECONDS, 60))
 
     async def test_a_bounded_node_that_is_cancelled_is_charged_and_released(self):
         work = assignment(budget=FakeBudget(gpu_seconds_left=100))
