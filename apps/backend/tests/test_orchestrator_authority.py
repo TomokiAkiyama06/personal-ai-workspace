@@ -2,13 +2,19 @@
 
 Real: ``TaskService`` on PostgreSQL (the stored Working Set is read with
 ``restore``), and, in the last test, the whole orchestrator with the real Tool
-Broker. Faked: the repository service's backend-internal reads (``working_set_acl``
-and ``scope_entries``, which need checkouts on disk and are tested with
-``RepositoryService``) and the project states.
+Broker. Faked in most tests: the repository service's backend-internal reads
+(``working_set_acl`` and ``scope_entries``) and the project states;
+``StoredAuthorityWithRepositoryServiceTest`` runs the authority over the real
+``RepositoryService`` (checkouts registered on disk, real git) and the real
+project states.
 """
 
+import os
+import shutil
 import unittest
 import uuid
+
+from sqlalchemy import text
 
 from paw_backend.authz import (
     AgentGrant,
@@ -41,6 +47,7 @@ from . import test_orchestrator_tools as through_the_orchestrator
 from .gate_support import ALWAYS_ACTIVE
 from .orchestrator_support import make_plan, node
 from .projects_support import PostgresProjectTestCase
+from .repositories_support import PostgresRepositoryTestCase, fs, requires_git
 from .task_support import BASELINE, PostgresTaskTestCase, requires_postgres
 from .tools_support import REPO, REPO_REMOTE, ROOT
 
@@ -334,6 +341,96 @@ class StoredProjectStatesTest(PostgresProjectTestCase):
                 pending: ProjectState.PENDING_DELETION,
             },
         )
+
+
+@requires_postgres
+@requires_git
+class StoredAuthorityWithRepositoryServiceTest(PostgresRepositoryTestCase):
+    """The authority over the real ``RepositoryService``: checkouts registered on
+    disk, their stored ACLs, real nesting and a real changed root."""
+
+    @classmethod
+    def clean_tables(cls) -> None:
+        with cls.engine.begin() as connection:
+            connection.execute(text("TRUNCATE tasks CASCADE"))
+        super().clean_tables()
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        self.project_id = self.seed_project(name="Alpha")
+        self.manager = self.seed_user_with_account("alice")
+        self.seed_manager(self.project_id, self.manager)
+        self.home = self.account(self.manager).home
+        self.alice = self.actor(self.manager)
+        tasks_database = self.service_database()
+        self.addAsyncCleanup(tasks_database.dispose)
+        self.tasks = TaskService(tasks_database, project_gate=ALWAYS_ACTIVE)
+        states_database = self.service_database()
+        self.addAsyncCleanup(states_database.dispose)
+        self.authority = StoredTaskAuthority(
+            self.tasks, self.service, StoredProjectStates(states_database)
+        )
+
+    async def register(self, relative: str, name: str):
+        """Register an existing repository of Alice's; ``(repository id, path)``."""
+        path = f"{self.home}/{relative}"
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        self.world.make_repository(path)
+        result = await self.service.register_existing(
+            self.alice, self.project_id, path, name=name
+        )
+        return result.repository.id, path
+
+    async def task(self, *members):
+        event = await self.tasks.create_task(
+            project_id=self.project_id,
+            created_by=self.manager,
+            title="Fix the parser",
+            repositories=[
+                WorkingSetEntry(repo_id, role, BASELINE) for repo_id, role in members
+            ],
+        )
+        return await self.tasks.restore(event.task_id)
+
+    async def test_the_scope_comes_from_the_registered_checkouts(self):
+        target, target_path = await self.register("src/app", "app")
+        # A checkout of Alice's inside the target that is not in the Working Set.
+        vendored, _ = await self.register("src/app/vendor/lib", "lib")
+        referenced, referenced_path = await self.register("src/docs", "docs")
+        # Registered, but Alice has no checkout of it: left out of the scope.
+        no_checkout = self.seed_repository(self.project_id, name="elsewhere")
+        snapshot = await self.task(
+            (referenced, RepoRole.REFERENCED),
+            (target, RepoRole.TARGET),
+            (no_checkout, RepoRole.REFERENCED),
+        )
+
+        scope = await self.authority.parent_scope(snapshot)
+        grant = await self.authority.parent_grant(snapshot)
+
+        self.assertEqual(scope.path_roots, (target_path, referenced_path))
+        self.assertEqual(
+            [(r.repo_id, r.role) for r in scope.repositories],
+            [(target, RepoRole.TARGET), (referenced, RepoRole.REFERENCED)],
+        )
+        self.assertEqual([r.repo_id for r in scope.excluded_repositories], [vendored])
+        self.assertEqual(scope.projects, {self.project_id: ProjectState.ACTIVE})
+        self.assertEqual(scope.credential_handles, {})
+        self.assertEqual(grant.agent_id, parent_agent_id(snapshot))
+        self.assertEqual(grant.project_ids, frozenset({self.project_id}))
+
+    async def test_a_changed_root_fails_the_call(self):
+        target, target_path = await self.register("src/app", "app")
+        snapshot = await self.task((target, RepoRole.TARGET))
+        shutil.rmtree(target_path)
+        fs.write(target_path, "now a file\n")
+
+        with self.assertLogs("paw_backend.repositories.service", "WARNING"):
+            with self.assertRaises(CheckoutChangedError):
+                await self.authority.parent_scope(snapshot)
+        with self.assertLogs("paw_backend.repositories.service", "WARNING"):
+            with self.assertRaises(CheckoutChangedError):
+                await self.authority.parent_grant(snapshot)
 
 
 class StoredAuthorityThroughTheOrchestratorTest(
