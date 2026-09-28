@@ -166,6 +166,9 @@ export function DevicesSection() {
   const [sessions, setSessions] = useState<SessionInfo[] | null>(null);
   const [pairing, setPairing] = useState<PairingIssued | null>(null);
   const [pending, setPending] = useState<PendingPairing[]>([]);
+  // An approved device appears only when it completes its pairing (its own
+  // poll), so the list is re-read until then or until the pairing expires.
+  const [awaiting, setAwaiting] = useState<{ until: number; known: number } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -195,6 +198,16 @@ export function DevicesSection() {
     void loadSessions();
     void loadPending();
   }, [loadSessions, loadPending]);
+
+  useEffect(() => {
+    if (!awaiting) return;
+    if ((sessions?.length ?? 0) > awaiting.known || Date.now() >= awaiting.until) {
+      setAwaiting(null);
+      return;
+    }
+    const timer = window.setTimeout(() => void loadSessions(), PENDING_POLL_MS);
+    return () => window.clearTimeout(timer);
+  }, [awaiting, sessions, loadSessions]);
 
   useEffect(() => {
     if (!pairing?.approval_required) return;
@@ -329,6 +342,11 @@ export function DevicesSection() {
                     });
                     setNotice(t("devices.approved"));
                     setPairing(null);
+                    const until = new Date(item.expires_at).getTime();
+                    setAwaiting({
+                      until: Number.isNaN(until) ? Date.now() : until,
+                      known: sessions?.length ?? 0,
+                    });
                     await Promise.all([loadPending(), loadSessions()]);
                   })
                 }
@@ -347,7 +365,7 @@ export function DevicesSection() {
         )}
       </section>
 
-      <PasskeysSection />
+      <PasskeysSection onSessionsChanged={() => void loadSessions()} />
 
       {others > 0 && (
         <section className="card danger-zone" aria-labelledby={othersId}>

@@ -8,7 +8,7 @@ import { createPasskey } from "../auth/webauthn";
 import { useI18n } from "../i18n";
 import { errorMessage } from "../i18n/errors";
 
-export function PasskeysSection() {
+export function PasskeysSection({ onSessionsChanged }: { onSessionsChanged?: () => void }) {
   const { t, formatDate } = useI18n();
   const { accept, expired, refresh } = useSession();
   const data = useSignedIn();
@@ -79,7 +79,10 @@ export function PasskeysSection() {
         return;
       }
       setNotice(t("passkeys.revoked"));
-      await load();
+      // Removing a passkey can change this session's passkey state (the last
+      // one under an optional policy) and end other sessions (sessions_ended).
+      await Promise.all([load(), refresh()]);
+      if (result.sessions_ended > 0) onSessionsChanged?.();
     } catch (caught) {
       fail(caught);
     } finally {

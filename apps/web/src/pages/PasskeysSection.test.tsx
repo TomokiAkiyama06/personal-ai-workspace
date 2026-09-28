@@ -1,4 +1,4 @@
-import { screen, within } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { apiError, mockApi, renderApp, reply, session } from "../test/helpers";
@@ -78,6 +78,34 @@ describe("Passkeys (設定 › 端末とセッション)", () => {
     expect(
       calls.some((call) => call.method === "DELETE" && call.path === "/auth/passkeys/pk-1"),
     ).toBe(true);
+  });
+
+  it("re-reads the session and the devices when removing a passkey ended other sessions", async () => {
+    const other = { ...session().session, id: "s-2", device_name: "Phone", current: false };
+    const { calls } = mockApi({
+      "GET /auth/session": [
+        reply(200, session({ enrolled: true })),
+        reply(200, session({ enrolled: false })),
+      ],
+      "GET /auth/sessions": [
+        reply(200, { sessions: [session().session, other] }),
+        reply(200, { sessions: [session().session] }),
+      ],
+      "GET /auth/pairing/pending": reply(200, { pending: [] }),
+      "GET /auth/passkeys": [reply(200, { passkeys: [passkey] }), reply(200, { passkeys: [] })],
+      "DELETE /auth/passkeys/pk-1": reply(200, {
+        revoked: true,
+        sessions_ended: 1,
+        signed_out: false,
+      }),
+    });
+    renderApp("/settings/devices");
+    const user = userEvent.setup();
+    expect(await screen.findByText("Phone")).toBeInTheDocument();
+    await confirmRemoval(user);
+    expect(await screen.findByText("Passkey を削除しました。")).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText("Phone")).not.toBeInTheDocument());
+    expect(calls.filter((call) => call.path === "/auth/session")).toHaveLength(2);
   });
 
   it("returns to the sign-in page when removing the passkey ended this session", async () => {
