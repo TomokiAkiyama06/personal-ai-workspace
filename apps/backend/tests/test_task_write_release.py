@@ -728,6 +728,9 @@ class ReleaserTest(ReleaseTestCase):
             dict(reason="x" * 501),
             dict(expected_version=0),
             dict(expected_version="1"),
+            # Codex review of #149 (P2): the service's upper bound, before the
+            # authorization is audited.
+            dict(expected_version=2**31),
         ):
             with self.subTest(arguments=list(arguments)):
                 call = dict(

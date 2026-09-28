@@ -65,7 +65,7 @@ from paw_backend.tasks import (
     TaskService,
 )
 from paw_backend.tasks.models import TaskRow
-from paw_backend.tasks.service import MAX_REASON_LENGTH
+from paw_backend.tasks.service import _MAX_INTEGER, MAX_REASON_LENGTH
 
 CAPABILITY = Capability.PROJECT_TASK_WRITE_RESERVATION_RELEASE
 
@@ -164,9 +164,12 @@ class TaskWriteReleaser:
                 f"reason must be 1 to {MAX_REASON_LENGTH} characters"
             )
         if expected_version is not None and (
-            type(expected_version) is not int or expected_version < 1
+            type(expected_version) is not int
+            or not 1 <= expected_version <= _MAX_INTEGER
         ):
-            raise InvalidCommandArgumentError("expected_version must be from 1")
+            raise InvalidCommandArgumentError(
+                f"expected_version must be from 1 to {_MAX_INTEGER}"
+            )
 
         async with self._database.session() as session, session.begin():
             project_id = (
