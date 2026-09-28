@@ -293,6 +293,7 @@ personal-ai-workspace/
 │  │  │  │  ├─ credentials.py
 │  │  │  │  ├─ decisions.py
 │  │  │  │  ├─ interfaces.py
+│  │  │  │  ├─ lease.py
 │  │  │  │  ├─ models.py
 │  │  │  │  ├─ policy.py
 │  │  │  │  ├─ registry.py
@@ -408,6 +409,7 @@ personal-ai-workspace/
 │  │     ├─ test_orchestrator_fenced_commands.py
 │  │     ├─ test_orchestrator_grants.py
 │  │     ├─ test_orchestrator_lease.py
+│  │     ├─ test_orchestrator_lease_fencing.py
 │  │     ├─ test_orchestrator_migration.py
 │  │     ├─ test_orchestrator_plan.py
 │  │     ├─ test_orchestrator_planning.py
@@ -582,6 +584,7 @@ personal-ai-workspace/
 │  │     ├─ test_tools_broker.py
 │  │     ├─ test_tools_credentials.py
 │  │     ├─ test_tools_diagnostics_columns.py
+│  │     ├─ test_tools_lease.py
 │  │     ├─ test_tools_migration.py
 │  │     ├─ test_tools_policy.py
 │  │     ├─ test_tools_postgres.py

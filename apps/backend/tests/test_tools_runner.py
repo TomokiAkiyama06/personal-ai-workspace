@@ -216,7 +216,7 @@ class ExecutorFailureTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_failing_budget_charge_does_not_change_the_outcome(self):
         class ChargeFails(FakeBudget):
-            async def charge(self, task_id, tool):
+            async def charge(self, task_id, run, tool):
                 raise ConnectionError(SECRET)
 
         h = Harness(budget=ChargeFails())

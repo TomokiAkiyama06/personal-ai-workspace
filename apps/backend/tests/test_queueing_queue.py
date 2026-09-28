@@ -16,6 +16,7 @@ from paw_backend.tasks.queueing import (
     LeaseLostError,
     Priority,
     QueueEntry,
+    QueueLease,
     QueueStatus,
     TaskAlreadyQueuedError,
     TaskQueue,
@@ -1165,6 +1166,119 @@ class TrustedClockTest(QueueTestCase):
 
 
 @requires_postgres
+class HoldsLeaseTest(QueueTestCase):
+    """``holds_lease``: the fencing token of a tool call (issue #126). A READ of
+    the same rule as ``heartbeat`` (worker, claim generation, task, expiry by the
+    trusted clock), which changes nothing."""
+
+    async def claimed(self, worker: str = "w1", seconds: float = 0):
+        await self.enqueue()
+        claimed = await self.queue.claim_next(worker, at(seconds))
+        return claimed, QueueLease.of(claimed, worker)
+
+    async def test_a_valid_lease_holds_until_its_expiry_instant(self):
+        entry, lease = await self.claimed()
+        self.assertTrue(await self.queue.holds_lease(entry.task_id, lease, at(1)))
+        just_before = T0 + timedelta(seconds=59, microseconds=999_999)
+        self.assertTrue(await self.queue.holds_lease(entry.task_id, lease, just_before))
+        # At the exact expiry instant the lease is already lost (as heartbeat).
+        self.assertFalse(await self.queue.holds_lease(entry.task_id, lease, at(60)))
+        # A heartbeat extends it: the check follows the stored expiry.
+        await self.queue.heartbeat(entry.id, "w1", 1, at(30))
+        self.assertTrue(await self.queue.holds_lease(entry.task_id, lease, at(60)))
+
+    async def test_the_check_changes_nothing(self):
+        entry, lease = await self.claimed()
+        before = await self.entry_row(entry.id)
+        for seconds in (1, 59, 60, 1000):
+            await self.queue.holds_lease(entry.task_id, lease, at(seconds))
+        self.assertEqual(await self.entry_row(entry.id), before)
+
+    async def test_a_lease_taken_over_by_another_worker_no_longer_holds(self):
+        entry, lease = await self.claimed()
+        replacement = await self.queue.claim_next("w2", at(61))
+        self.assertFalse(await self.queue.holds_lease(entry.task_id, lease, at(62)))
+        self.assertTrue(
+            await self.queue.holds_lease(
+                entry.task_id, QueueLease.of(replacement, "w2"), at(62)
+            )
+        )
+
+    async def test_a_stale_claim_of_the_same_worker_id_no_longer_holds(self):
+        # A restarted worker with a stable id claims the entry again: only the
+        # claim generation tells the old execution from the new one.
+        entry, first = await self.claimed()
+        second = await self.queue.claim_next("w1", at(61))
+        self.assertEqual(second.claim_count, 2)
+        self.assertFalse(await self.queue.holds_lease(entry.task_id, first, at(62)))
+        self.assertTrue(
+            await self.queue.holds_lease(
+                entry.task_id, QueueLease.of(second, "w1"), at(62)
+            )
+        )
+
+    async def test_a_released_completed_or_cancelled_entry_holds_no_lease(self):
+        entry, lease = await self.claimed()
+        await self.queue.release(entry.id, "w1", 1, at(1))
+        self.assertFalse(await self.queue.holds_lease(entry.task_id, lease, at(2)))
+        again = await self.queue.claim_next("w1", at(3))
+        await self.queue.complete(entry.id, "w1", again.claim_count, at(4))
+        self.assertFalse(
+            await self.queue.holds_lease(
+                entry.task_id, QueueLease.of(again, "w1"), at(5)
+            )
+        )
+        other, other_lease = await self.claimed(seconds=10)
+        self.assertTrue(await self.queue.cancel(other.task_id, at(11)))
+        self.assertFalse(
+            await self.queue.holds_lease(other.task_id, other_lease, at(12))
+        )
+
+    async def test_a_lease_is_good_only_for_its_own_task_worker_and_entry(self):
+        entry, lease = await self.claimed()
+        (other_task,) = await self.make_tasks(1)
+        self.assertFalse(await self.queue.holds_lease(other_task, lease, at(1)))
+        for wrong in (
+            QueueLease(entry.id, "w2", 1),
+            QueueLease(entry.id, "w1", 2),
+            QueueLease(entry.id + 10_000, "w1", 1),
+        ):
+            with self.subTest(lease=wrong):
+                self.assertFalse(
+                    await self.queue.holds_lease(entry.task_id, wrong, at(1))
+                )
+
+    async def test_the_database_clock_decides_by_default(self):
+        entry = await self.enqueue()
+        claimed = await self.queue.claim_next("w1")  # the database clock
+        lease = QueueLease.of(claimed, "w1")
+        self.assertTrue(await self.queue.holds_lease(entry.task_id, lease))
+        await self.owner_sql(
+            "UPDATE queue_entries SET claimed_at = now() - interval '10 seconds',"
+            " lease_expires_at = now() - interval '5 seconds' WHERE id = :i",
+            i=entry.id,
+        )
+        self.assertFalse(await self.queue.holds_lease(entry.task_id, lease))
+
+    async def test_arguments_are_validated_before_the_database(self):
+        entry, lease = await self.claimed()
+        for parameter, task_id, value, now in (
+            ("task_id", "not-a-uuid", lease, at(1)),
+            ("task_id", None, lease, at(1)),
+            ("lease", entry.task_id, (entry.id, "w1", 1), at(1)),
+            ("lease", entry.task_id, None, at(1)),
+            ("now", entry.task_id, lease, at(1).replace(tzinfo=None)),
+        ):
+            with self.subTest(parameter=parameter):
+                with self.assertRaises(InvalidQueueingArgumentError) as caught:
+                    await self.queue.holds_lease(task_id, value, now)
+                self.assertEqual(caught.exception.parameter, parameter)
+        production = TaskQueue(self.database, project_gate=ALWAYS_ACTIVE)
+        with self.assertRaises(InvalidQueueingArgumentError) as caught:
+            await production.holds_lease(entry.task_id, lease, at(1))
+        self.assertEqual(caught.exception.parameter, "now")
+
+
 class IndexPlanTest(QueueTestCase):
     """Every queue query can use the index that serves it, whatever the plan mode.
 
@@ -1270,6 +1384,30 @@ class IndexPlanTest(QueueTestCase):
             await self.assert_plans_use_only(
                 statement, "uq_queue_entries_one_active_per_task"
             )
+
+    async def test_the_lease_check_of_a_tool_call_reads_one_entry_by_the_primary_key(
+        self,
+    ):
+        active = await self.busy_queue()
+        entry = await self.queue.claim_next("w1")
+        lease = QueueLease.of(entry, "w1")
+        with self.captured_statements() as captured:
+            self.assertTrue(await self.queue.holds_lease(entry.task_id, lease))
+        self.assertIn(entry.id, [e.id for e in active])
+        checks = self.on_the_queue(captured, containing="queue_entries.id =")
+        self.assertEqual(len(checks), 1)
+        # One row by a unique index: the entry's primary key, or the task's one
+        # active entry (the statement names both); never a scan of the history.
+        ((sql, parameters),) = checks
+        for mode in ("force_custom_plan", "force_generic_plan"):
+            with self.subTest(plan_cache_mode=mode):
+                (explained,) = await self.plan(sql, parameters, mode)
+                nodes = list(self.plan_nodes(explained["Plan"]))
+                self.assertNotIn("Seq Scan", {node["Node Type"] for node in nodes})
+                (index,) = [n["Index Name"] for n in nodes if "Index Name" in n]
+                self.assertIn(
+                    index, {"pk_queue_entries", "uq_queue_entries_one_active_per_task"}
+                )
 
 
 if __name__ == "__main__":

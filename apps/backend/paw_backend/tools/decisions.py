@@ -70,6 +70,10 @@ class BrokerReason(StrEnum):
     TASK_UNKNOWN = "task_unknown"
     TASK_SUPERSEDED = "task_superseded"
     TASK_STATE_UNAVAILABLE = "task_state_unavailable"
+    # --- DENY: the worker that asks no longer holds the task's queue lease (lost,
+    # expired, taken over), or that cannot be found out (issue #126) ---
+    LEASE_LOST = "lease_lost"
+    LEASE_UNAVAILABLE = "lease_unavailable"
     # --- DENY: approvals ---
     APPROVAL_NOT_FOUND = "approval_not_found"
     APPROVAL_MISMATCH = "approval_mismatch"

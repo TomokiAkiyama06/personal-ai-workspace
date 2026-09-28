@@ -28,10 +28,10 @@ from paw_backend.authz import (
 )
 from paw_backend.orchestrator.domain import RunOutcome
 from paw_backend.orchestrator.errors import NodeStopped
-from paw_backend.orchestrator.gateway import TrackerBudgetProvider
+from paw_backend.orchestrator.gateway import QueueLeaseVerifier, TrackerBudgetProvider
 from paw_backend.orchestrator.scope import scope_within
 from paw_backend.tasks import TaskCommand, TaskRun
-from paw_backend.tasks.queueing import BudgetKind, BudgetTracker
+from paw_backend.tasks.queueing import BudgetKind, BudgetTracker, TaskQueue
 from paw_backend.tools import (
     ApprovalService,
     ArgumentKind,
@@ -52,6 +52,7 @@ from paw_backend.tools import (
 )
 
 from .authz_support import StaticDirectory, principal, uid
+from .gate_support import ALWAYS_ACTIVE
 from .orchestrator_support import (
     PARENT_AGENT,
     FakeRuntime,
@@ -142,6 +143,11 @@ class ToolsThroughTheOrchestratorTest(PostgresOrchestratorTestCase):
         store = PostgresApprovalStore(database)
         approvals = ApprovalService(store, sink)
         tracker = BudgetTracker(database)
+        # The queue the orchestrator claims from is the one the Broker asks
+        # about the worker's lease (issue #126).
+        queue = options.pop("queue", None) or TaskQueue(
+            database, project_gate=ALWAYS_ACTIVE
+        )
         executor = FakeExecutor()
         broker = ToolBroker(
             ToolRegistry([*sample_specs(), FETCH]),
@@ -150,6 +156,7 @@ class ToolsThroughTheOrchestratorTest(PostgresOrchestratorTestCase):
             sink,
             budget=TrackerBudgetProvider(tracker),
             task_activity=PostgresTaskActivity(database),
+            lease=QueueLeaseVerifier(queue),
             path_resolver=LexicalPathResolver(),
         )
         authority = options.pop("authority", None) or Authority(self.project_id)
@@ -172,6 +179,7 @@ class ToolsThroughTheOrchestratorTest(PostgresOrchestratorTestCase):
             tools=ToolRunner(broker, executor),
             authority=authority,
             budget=tracker,
+            queue=queue,
             task_listeners=[approvals.revoke_on_task_end],
             **options,
         )

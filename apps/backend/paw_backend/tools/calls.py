@@ -23,6 +23,7 @@ from types import MappingProxyType
 from paw_backend.authz import AgentGrant
 from paw_backend.authz.subjects import to_uuid
 from paw_backend.tasks import TaskRun
+from paw_backend.tasks.queueing import QueueLease
 from paw_backend.tools.approval_types import SummaryItem, summary_value
 from paw_backend.tools.capabilities import ApprovalLevel, ToolCapability
 from paw_backend.tools.credentials import (
@@ -70,7 +71,11 @@ class TaskContext:
     for (``tasks.attempt`` and ``tasks.retry_count`` when the orchestrator
     started it): an approval is requested for, and can only be used by, that
     run, and a worker of a run that a Retry / Restart replaced is refused
-    (``task_superseded``).
+    (``task_superseded``). ``lease`` is the queue lease the worker holds on the
+    task (the entry, the worker id and the claim generation: the fencing token,
+    issue #126, Decision 0046): the broker refuses every call of a worker whose
+    lease is no longer valid (``lease_lost``), also when the run is the same (a
+    take-over keeps the run). Both are required: a context cannot leave them out.
     """
 
     task_id: uuid.UUID
@@ -79,6 +84,7 @@ class TaskContext:
     scope: TaskScope
     primary_project_id: uuid.UUID
     run: TaskRun
+    lease: QueueLease
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "task_id", to_uuid(self.task_id, "task_id"))
@@ -96,6 +102,8 @@ class TaskContext:
             raise TypeError("scope must be a TaskScope")
         if not isinstance(self.run, TaskRun):
             raise TypeError("run must be a TaskRun")
+        if not isinstance(self.lease, QueueLease):
+            raise TypeError("lease must be a QueueLease")
         if self.primary_project_id not in self.scope.projects:
             raise ValueError("the task's project must be part of its scope")
         if self.grant.agent_id == self.delegator_id:

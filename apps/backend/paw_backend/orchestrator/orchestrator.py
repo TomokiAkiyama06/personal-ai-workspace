@@ -23,6 +23,10 @@ The duties that earlier Decisions gave to "the orchestrator" and where each is m
   is reduced to a fixed name (``errors.error_class_of``).
 * **Never hand a tool call to a terminated task** and **build ``TaskContext.run``
   from the task** (Decision 0006, 9): ``gateway.py``.
+* **No tool call of a worker that lost its queue lease** (issue #126, Decision
+  0046): ``_context`` puts this worker's claim in ``TaskContext.lease`` and the
+  Broker checks it for every call (``gateway.QueueLeaseVerifier``); a refusal for
+  a lost lease stops the run (``gateway.NodeToolGateway``).
 * **Write repositories are ``TaskScope.repositories``, with remotes registered**
   (Decision 0006, 8): they come from the caller's ``TaskAuthority.parent_scope``
   (the seam until issue #85 persists the working set, Decision 0014) and reach a
@@ -131,6 +135,7 @@ from paw_backend.tasks.queueing import (
     NextAction,
     Priority,
     QueueEntry,
+    QueueLease,
     StaleRuntimeSessionError,
     TaskQueue,
     decide_next_action,
@@ -1468,7 +1473,8 @@ class Orchestrator:
     async def _context(self, run: _Run, spec: _Spec) -> TaskContext:
         """The ``TaskContext`` of one tool call, from CURRENT values: the run comes
         from the task snapshot the worker was started with (``TaskEvent.run``), the
-        delegator from the task, the grant and scope derived from the parent's."""
+        lease from the claim this worker holds, the delegator from the task, the
+        grant and scope derived from the parent's."""
         parent_grant = await self._authority.parent_grant(run.task)
         parent_scope = await self._authority.parent_scope(run.task)
         grant = node_grant(
@@ -1498,6 +1504,9 @@ class Orchestrator:
             scope=scope,
             primary_project_id=run.task.project_id,
             run=run.run,
+            # The fencing token of every tool call (issue #126, Decision 0046):
+            # the Broker refuses the call once this claim no longer holds.
+            lease=QueueLease.of(run.entry, run.worker_id),
         )
 
     async def _attempt(self, run: _Run, spec: _Spec) -> _Finished:
