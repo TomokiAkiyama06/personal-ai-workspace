@@ -82,20 +82,21 @@ _REVOKED = object()
 logger = logging.getLogger(__name__)
 
 
-async def _cancel_and_wait(work: asyncio.Future) -> bool:
-    """Cancel ``work`` and wait for it, at most ``CANCEL_GRACE_SECONDS``.
-    ``False`` when it has not ended by then (it swallowed its cancellation)."""
+async def _cancel_and_wait(work: asyncio.Future, lease: ComputeLease) -> None:
+    """Cancel ``work`` and wait for it, at most ``CANCEL_GRACE_SECONDS``. The
+    lease is held until ``work`` ends *before* the wait: the wait itself can be
+    cancelled again (a task stop and a shutdown at once), and work that swallowed
+    its cancellation still uses the GPU whatever happens to its caller."""
     work.cancel()
+    work.add_done_callback(_retrieve)
+    lease.hold_until(work)
     if not work.done():
         await asyncio.wait({work}, timeout=CANCEL_GRACE_SECONDS)
-    work.add_done_callback(_retrieve)
-    if work.done():
-        return True
-    logger.error(
-        "A local runtime did not stop when it was cancelled: its lease is kept "
-        "until it ends"
-    )
-    return False
+    if not work.done():
+        logger.error(
+            "A local runtime did not stop when it was cancelled: its lease is "
+            "kept until it ends"
+        )
 
 
 def _retrieve(task: asyncio.Future) -> None:
@@ -349,8 +350,7 @@ class HybridRuntime:
                 if lease.revoked.is_set():
                     return _REVOKED
         finally:
-            if not await _cancel_and_wait(work):
-                lease.hold_until(work)
+            await _cancel_and_wait(work, lease)
 
 
 class _GpuMeter:

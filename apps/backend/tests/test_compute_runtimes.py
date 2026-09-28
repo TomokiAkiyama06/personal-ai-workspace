@@ -378,6 +378,38 @@ class HybridRuntimeTest(unittest.IsolatedAsyncioTestCase):
         await settle()
         self.assertEqual(self.scheduler.status().leases[ResourceClass.CODING], 0)
 
+    async def test_a_second_cancel_during_the_grace_wait_keeps_the_lease(self):
+        release = asyncio.Event()
+
+        class Stubborn:
+            async def run_node(self, assignment):
+                while True:
+                    try:
+                        await release.wait()
+                        return NodeOutcome.succeeded(NodeResult(summary="late"))
+                    except asyncio.CancelledError:
+                        continue
+
+        runtime = HybridRuntime(
+            self.scheduler, Stubborn(), deployment="main", clock=self.clock
+        )
+        work = assignment(budget=FakeBudget(gpu_seconds_left=100))
+        task = asyncio.create_task(runtime.run_node(work))
+        await settle()
+        task.cancel()  # the first cancel: the grace wait starts
+        await settle()
+        self.assertFalse(task.done())
+        task.cancel()  # a second one, during the grace wait
+        try:
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            # The runtime still runs: its GPU capacity is not given away.
+            self.assertEqual(self.scheduler.status().leases[ResourceClass.CODING], 1)
+        finally:
+            release.set()  # the stubborn runtime ends (the test never hangs)
+            await settle()
+        self.assertEqual(self.scheduler.status().leases[ResourceClass.CODING], 0)
+
     async def test_a_revoked_background_lease_stops_the_local_work(self):
         # VRAM pressure revokes Background leases (the first relief step): the
         # node's local call is stopped, its time charged, the lease given back.

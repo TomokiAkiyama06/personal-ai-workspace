@@ -357,6 +357,8 @@ class ComputeScheduler:
         self._relief = Relief.NONE
         self._mode = SchedulerMode.NORMAL
         self._exclusive: ComputeLease | None = None
+        # What was external when the Exclusive lease was granted (see account).
+        self._exclusive_baseline = 0
         self._drained: asyncio.Event | None = None
         self._cloud: set[ComputeLease] = set()
         self._waiters: list[_Waiter] = []
@@ -663,13 +665,14 @@ class ComputeScheduler:
             for entry in self._ordered
             if entry.counts_on_gpu
         )
-        extra = self._exclusive.vram_bytes if self._exclusive is not None else 0
+        exclusive = self._exclusive is not None
         return account(
             self._device,
             self._processes,
             usages,
             headroom=self._headroom(),
-            extra_reserved=extra,
+            extra_reserved=self._exclusive.vram_bytes if exclusive else 0,
+            extra_baseline=self._exclusive_baseline if exclusive else 0,
         )
 
     # -- admission ------------------------------------------------------------
@@ -773,6 +776,7 @@ class ComputeScheduler:
             return lease
         if request.resource_class is ResourceClass.EXCLUSIVE:
             lease = ComputeLease(self, request, placement, 0)
+            self._exclusive_baseline = self._vram().external
             self._exclusive = lease
             return lease
         entry = self._deployments[request.deployment]

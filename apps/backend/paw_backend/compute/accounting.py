@@ -82,6 +82,7 @@ def account(
     *,
     headroom: int,
     extra_reserved: int = 0,
+    extra_baseline: int = 0,
 ) -> VramView:
     """The VRAM view of ``device`` (see the module)."""
     used_by: dict[int, int] = {}
@@ -96,9 +97,7 @@ def account(
     reserved = extra_reserved
     committed_own = extra_reserved
     own_actual = 0
-    # An Exclusive job's processes are no model's: what it uses shows among the
-    # unknown and is absorbed by its reservation, not counted a second time.
-    unknown_reserved = extra_reserved
+    unknown_reserved = 0
     for usage in deployments:
         reserved += usage.reserved_bytes
         actual = (
@@ -115,8 +114,14 @@ def account(
             # Some of its processes report no figure: what they use shows in
             # the rest and is the model's, up to its reservation.
             unknown_reserved += max(0, usage.reserved_bytes - actual)
-    rest = max(0, device.used_bytes - own_actual)
-    external = max(0, rest - unknown_reserved)
+    rest = max(0, device.used_bytes - own_actual - unknown_reserved)
+    # An Exclusive job's processes are no model's: what it uses shows in the
+    # rest and is absorbed by its reservation, not counted a second time. Only
+    # what grew over ``extra_baseline`` (what was external when the lease was
+    # granted) is the job's: another workload that was already there stays
+    # external beside the reservation.
+    exclusive_use = min(extra_reserved, max(0, rest - max(0, extra_baseline)))
+    external = rest - exclusive_use
     committed = committed_own + external
     return VramView(
         total=device.total_bytes,

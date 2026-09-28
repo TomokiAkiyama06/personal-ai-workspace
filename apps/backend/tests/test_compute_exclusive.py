@@ -143,6 +143,15 @@ class ExclusiveTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.failure, ExclusiveFailure.NOT_FREED)
         self.assertEqual(self.scheduler.status().mode, SchedulerMode.NORMAL)
 
+    async def test_memory_from_before_the_lease_is_still_external(self):
+        self.probe.external = 10 * GIB
+        await self.scheduler.refresh()
+        lease = await self.scheduler.acquire(exclusive(80 * GIB), wait_seconds=60)
+        status = await self.scheduler.refresh()
+        self.assertEqual(status.vram.external, 10 * GIB)
+        self.assertEqual(status.vram.committed, 90 * GIB)
+        await lease.release()
+
     async def test_another_workloads_memory_refuses_a_lease_that_would_not_fit(self):
         self.probe.external = 20 * GIB
         with self.assertRaises(ExclusiveUnavailableError) as raised:

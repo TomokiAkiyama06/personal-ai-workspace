@@ -164,6 +164,39 @@ class AccountTest(unittest.TestCase):
         self.assertEqual(view.committed, 94 * GIB)
         self.assertTrue(view.under_pressure)
 
+    def test_external_memory_from_before_the_exclusive_lease_stays_external(self):
+        # 10 GiB of another workload were there before the 80 GiB lease: the
+        # reservation absorbs only what grew over that baseline.
+        idle = account(
+            device(used=10 * GIB),
+            (proc(9, 10 * GIB),),
+            (),
+            headroom=4 * GIB,
+            extra_reserved=80 * GIB,
+            extra_baseline=10 * GIB,
+        )
+        self.assertEqual(idle.external, 10 * GIB)
+        self.assertEqual(idle.committed, 90 * GIB)
+        busy = account(
+            device(used=90 * GIB),
+            (proc(9, 10 * GIB), proc(77, 80 * GIB)),
+            (),
+            headroom=4 * GIB,
+            extra_reserved=80 * GIB,
+            extra_baseline=10 * GIB,
+        )
+        self.assertEqual(busy.external, 10 * GIB)
+        self.assertEqual(busy.committed, 90 * GIB)
+        over = account(
+            device(used=95 * GIB),
+            (proc(9, 10 * GIB), proc(77, 85 * GIB)),
+            (),
+            headroom=4 * GIB,
+            extra_reserved=80 * GIB,
+            extra_baseline=10 * GIB,
+        )
+        self.assertEqual(over.committed, 95 * GIB)
+
     def test_a_model_with_a_process_of_unknown_usage_holds_its_reservation(self):
         # 80 GiB reserved; one of its pids reports 1 GiB, the other "[N/A]" (the
         # device shows 80 GiB used): the unknown part is the model's, not external.
@@ -213,6 +246,7 @@ class AccountTest(unittest.TestCase):
                 tuple(usages),
                 headroom=4 * GIB,
                 extra_reserved=rng.randrange(0, 20) * GIB,
+                extra_baseline=rng.randrange(0, 20) * GIB,
             )
             self.assertGreaterEqual(view.committed, used)
             self.assertGreaterEqual(view.committed, view.reserved)
