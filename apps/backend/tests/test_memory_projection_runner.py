@@ -264,8 +264,40 @@ class FailureTest(RunnerTestCase):
         gate.set()
         with self.assertRaises(asyncio.CancelledError):
             await task
-        self.assertEqual(len(recorder.rows), 1)
-        self.assertEqual(recorder.rows[0][0], "memory.projection.completed")
+        # The completed row is kept, and the termination is recorded after it:
+        # the exit code (3) and the last recorded run agree.
+        self.assertEqual(
+            [row[:2] for row in recorder.rows],
+            [
+                ("memory.projection.completed", recorder.rows[0][1]),
+                ("memory.projection.failed", "write_files:CancelledError"),
+            ],
+        )
+        self.assertTrue((self.tmp.root / INCOMPLETE_NAME).is_file())
+        open_target(self.tmp.root, self.tmp.homes).close()
+
+    async def test_a_cancellation_while_clearing_the_flag_is_recorded(self):
+        entered, gate = threading.Event(), threading.Event()
+        real = LockedTarget.mark_complete
+
+        def slow(target):
+            entered.set()
+            gate.wait(5)
+            real(target)
+
+        with mock.patch.object(LockedTarget, "mark_complete", slow):
+            task = asyncio.ensure_future(self.runner(FakeSource([memory()])).run())
+            await asyncio.to_thread(entered.wait, 5)
+            task.cancel()
+            await asyncio.sleep(0)
+            gate.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        self.assertEqual(
+            [row[0] for row in self.recorder.rows],
+            ["memory.projection.completed", "memory.projection.failed"],
+        )
+        self.assertEqual(self.recorder.rows[-1][1], "write_files:CancelledError")
         open_target(self.tmp.root, self.tmp.homes).close()
 
     async def test_a_run_that_fails_while_writing_is_repaired_by_the_next(self):

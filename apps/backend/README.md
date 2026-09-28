@@ -3547,7 +3547,7 @@ $PAW_MEMORY_PROJECTION_DIR/                 # 0700。Backend の OS User だけ�
 - 出力先は絶対・正規の Path で、**git の Work Tree の中ではなく**（git が Repository とみなす `.git` がその Directory にも上にもない）、**Home の中でも上でもない**（`/home` と `uid >= PAW_REPOSITORY_MIN_LINUX_UID` の Account の Home）こと。既存なら自分の所有で、空か Marker を持つこと。満たさなければ何も書かずに失敗します（`check_target:<理由>`）。拒否した Directory の権限も変えません（`0700` にするのは受け入れた後）。
 - Directory は `0700`、File は `0600`（`fchmod`、umask によらない）。Directory は親の `dir_fd` から `O_NOFOLLOW` で開き、Symbolic Link があれば失敗します（`unsafe_entry`）。File は一時名に書いて `fsync` し `rename` するので、Link・Hard Link の先へは書きません。
 - Projection が作れる名前（`<uuid>.md`、`INDEX.md`、上の Directory、`<uuid>` の Directory、自分の一時 File）以外は読まず消さず、`unmanaged` として数えるだけです。
-- Marker の `flock`（非 Blocking）を読み取りの前から結果を Audit に記録し終えるまで持つので、同時の 2 つ目の実行は何もせず、Lock を取った PAW-047 は目の前の File に対応する結果を必ず読めます。SIGTERM が記録の最中に来ても、記録を終えてから取り消しになります。
+- Marker の `flock`（非 Blocking）を読み取りの前から結果を Audit に記録し終えるまで持つので、同時の 2 つ目の実行は何もせず、Lock を取った PAW-047 は目の前の File に対応する結果を必ず読めます。SIGTERM が記録の最中に来ても、記録を終えてから取り消しになります（すべての Step が成功した後の SIGTERM は、Flag を残して 2 行目の `write_files:CancelledError` を記録します）。
 
 ### 実行と失敗の通知
 

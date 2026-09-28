@@ -80,16 +80,7 @@ async def record_projection_outcome(
 async def projection_status(database: Database) -> ProjectionStatus:
     """The last recorded run and the last completed one (``None`` when none)."""
     table = AuditEventRecord.__table__
-    runs = (
-        select(table.c.action, table.c.occurred_at, table.c.reason)
-        .where(
-            table.c.resource_kind == RESOURCE_KIND,
-            table.c.action.in_([action.value for action in ProjectionAction]),
-        )
-        .order_by(table.c.recorded_at.desc(), table.c.occurred_at.desc())
-        .limit(1)
-    )
-    completed = (
+    last_completed = (
         select(table.c.occurred_at)
         .where(
             table.c.resource_kind == RESOURCE_KIND,
@@ -97,15 +88,31 @@ async def projection_status(database: Database) -> ProjectionStatus:
         )
         .order_by(table.c.recorded_at.desc(), table.c.occurred_at.desc())
         .limit(1)
+        .scalar_subquery()
+    )
+    # One statement, so both answers come from the same snapshot: a run that
+    # commits meanwhile cannot make the last run and the last success disagree.
+    runs = (
+        select(
+            table.c.action,
+            table.c.occurred_at,
+            table.c.reason,
+            last_completed.label("last_completed_at"),
+        )
+        .where(
+            table.c.resource_kind == RESOURCE_KIND,
+            table.c.action.in_([action.value for action in ProjectionAction]),
+        )
+        .order_by(table.c.recorded_at.desc(), table.c.occurred_at.desc())
+        .limit(1)
     )
     async with database.session() as session:
         last = (await session.execute(runs)).first()
-        last_completed = (await session.execute(completed)).scalar()
     return ProjectionStatus(
         last_action=None if last is None else last.action,
         last_run_at=None if last is None else last.occurred_at,
         last_reason=None if last is None else last.reason,
-        last_completed_at=last_completed,
+        last_completed_at=None if last is None else last.last_completed_at,
     )
 
 

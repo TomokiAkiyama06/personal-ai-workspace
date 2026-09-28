@@ -223,26 +223,32 @@ class MemoryProjectionRunner:
                 self._recorder(action, reason, occurred_at=self._clock())
             )
             cancelled = cancelled or interrupted
-            if audited and action is ProjectionAction.COMPLETED:
-                # Only now may the tree be copied (Decision 0038 9). A flag that
-                # cannot be cleared keeps the tree uncopyable, so the run fails
-                # and says so (a second row, the last one ``projection_status``
-                # reads); the next completed run clears it.
+            late: str | None = None
+            if audited and action is ProjectionAction.COMPLETED and not cancelled:
+                # Only now may the tree be copied (Decision 0038 9).
                 try:
                     await _in_thread(target.mark_complete)
                 except asyncio.CancelledError as failure:
-                    cancelled = cancelled or failure
+                    cancelled = failure
                 except Exception as failure:
-                    failed_step = ProjectionStep.WRITE_FILES
-                    error = _code(failure)
-                    audited, interrupted = await _to_the_end(
-                        self._recorder(
-                            ProjectionAction.FAILED,
-                            f"{failed_step.value}:{error}",
-                            occurred_at=self._clock(),
-                        )
+                    late = _code(failure)
+            if late is None and cancelled is not None and failed_step is None:
+                late = _code(cancelled)
+            if late is not None:
+                # Every step succeeded, but the flag stays (it could not be
+                # cleared, or the run was terminated while recording or clearing
+                # it): the tree is not to be copied and the run failed. A second
+                # row says so, the last one ``projection_status`` reads; the
+                # next completed run clears the flag.
+                failed_step, error = ProjectionStep.WRITE_FILES, late
+                audited, interrupted = await _to_the_end(
+                    self._recorder(
+                        ProjectionAction.FAILED,
+                        f"{failed_step.value}:{error}",
+                        occurred_at=self._clock(),
                     )
-                    cancelled = cancelled or interrupted
+                )
+                cancelled = cancelled or interrupted
         finally:
             if target is not None:
                 try:
