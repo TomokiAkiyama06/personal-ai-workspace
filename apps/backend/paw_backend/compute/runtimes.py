@@ -199,6 +199,7 @@ class HybridRuntime:
         outcome = None
         meter: _GpuMeter | None = None
         run = object()
+        held: list[asyncio.Future] = []  # the local call, when it outlives us
         try:
             async with lease:
                 if lease.placement is Placement.CLOUD:
@@ -210,11 +211,17 @@ class HybridRuntime:
                 meter = await self._join_meter(assignment, run)
                 started = self._clock.monotonic()
                 try:
-                    outcome = await self._run_local(assignment, lease, meter)
+                    outcome = await self._run_local(assignment, lease, meter, held)
                 finally:
-                    seconds = math.ceil(max(0.0, self._clock.monotonic() - started))
+                    now = self._clock.monotonic()
+                    seconds = math.ceil(max(0.0, now - started))
+                    if held:
+                        # Still running (it did not stop when it was cancelled):
+                        # the meter keeps counting it, and the time it goes on
+                        # using is charged when it ends.
+                        self._meter_held(assignment, meter, held[0], now)
                     if meter is not None:
-                        meter.stop(run, self._clock.monotonic())
+                        meter.stop(run, now)
         except BaseException:
             # The GPU time was spent although the node failed or was cancelled:
             # charged too, or failing nodes that are retried would bypass the
@@ -304,6 +311,35 @@ class HybridRuntime:
                 meter.finish(run, seconds)
             self._drop_user(assignment, meter)
 
+    def _meter_held(
+        self,
+        assignment: NodeAssignment,
+        meter: "_GpuMeter | None",
+        work: asyncio.Future,
+        since: float,
+    ) -> None:
+        """Keep metering ``work`` (a local call that did not stop when it was
+        cancelled; it holds its lease until it ends) from ``since``, and charge
+        that time when it ends: GPU time it goes on using is not lost to the
+        budget, and the task's other local calls see it spent meanwhile."""
+        run = object()
+        if meter is not None:
+            meter.users += 1
+            meter.start(run, since)
+
+        def ended(_: asyncio.Future) -> None:
+            end = self._clock.monotonic()
+            if meter is not None:
+                meter.stop(run, end)
+            seconds = math.ceil(max(0.0, end - since))
+            charge = asyncio.ensure_future(
+                self._settle_charge(assignment, meter, run, seconds)
+            )
+            _LATE_CHARGES.add(charge)
+            charge.add_done_callback(_late_charge_done)
+
+        work.add_done_callback(ended)
+
     def _drop_user(self, assignment: NodeAssignment, meter: "_GpuMeter") -> None:
         meter.users -= 1
         meters = _METERS.get(self._scheduler, {})
@@ -315,6 +351,7 @@ class HybridRuntime:
         assignment: NodeAssignment,
         lease: ComputeLease,
         meter: "_GpuMeter | None",
+        held: list[asyncio.Future],
     ):
         """The local runtime. It is stopped when the scheduler revokes the lease
         (``_REVOKED``: VRAM pressure on Background work) and when the task's local
@@ -322,7 +359,8 @@ class HybridRuntime:
         budget is checked while a call runs, not only after it, so slow or hung
         calls (one, or several of the same task at once) cannot overrun it
         without bound. A call that does not stop when it is cancelled keeps its
-        lease until it ends (its GPU capacity is not given away)."""
+        lease until it ends (its GPU capacity is not given away) and is put in
+        ``held`` (its time is metered and charged until it ends)."""
         work = asyncio.ensure_future(self._local.run_node(assignment))
         try:
             while True:
@@ -350,7 +388,11 @@ class HybridRuntime:
                 if lease.revoked.is_set():
                     return _REVOKED
         finally:
-            await _cancel_and_wait(work, lease)
+            try:
+                await _cancel_and_wait(work, lease)
+            finally:
+                if not work.done():
+                    held.append(work)
 
 
 class _GpuMeter:
@@ -403,6 +445,19 @@ _METERS: "weakref.WeakKeyDictionary[ComputeScheduler, dict[uuid.UUID, _GpuMeter]
     weakref.WeakKeyDictionary()
 )
 _EPSILON = 1e-6
+# The charges of local calls that ended after their node (see ``_meter_held``),
+# kept until they are done.
+_LATE_CHARGES: "set[asyncio.Future]" = set()
+
+
+def _late_charge_done(charge: asyncio.Future) -> None:
+    _LATE_CHARGES.discard(charge)
+    if charge.cancelled():
+        return
+    error = charge.exception()
+    if error is not None and not isinstance(error, NodeStopped):
+        # NodeStopped: the budget is now used up; the node has already ended.
+        logger.error("The GPU time of a local call that ended late was not charged")
 
 
 class ScheduledMemoryWorker:

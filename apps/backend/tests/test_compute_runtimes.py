@@ -374,9 +374,16 @@ class HybridRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 await task
         # The runtime still runs: its GPU capacity is not given away.
         self.assertEqual(self.scheduler.status().leases[ResourceClass.CODING], 1)
+        self.assertEqual(work.budget.charges, [(BudgetKind.GPU_SECONDS, 10)])
+        await self.clock.advance(25)
         release.set()
         await settle()
         self.assertEqual(self.scheduler.status().leases[ResourceClass.CODING], 0)
+        # The GPU time it went on using is charged when it ends.
+        self.assertEqual(
+            work.budget.charges,
+            [(BudgetKind.GPU_SECONDS, 10), (BudgetKind.GPU_SECONDS, 25)],
+        )
 
     async def test_a_second_cancel_during_the_grace_wait_keeps_the_lease(self):
         release = asyncio.Event()
