@@ -43,6 +43,7 @@ _IGNORED = shutil.ignore_patterns(".git", "__pycache__", ".venv", "*.pyc")
 _RAN = re.compile(rb"^Ran (\d+) tests? in ", re.MULTILINE)
 _SKIPPED = re.compile(rb"skipped=(\d+)")
 _SUMMARY = re.compile(rb"^(OK|FAILED)\b.*$", re.MULTILINE)
+_FAILED_COUNTS = re.compile(rb"^FAILED \(([^)]*)\)\s*$", re.MULTILINE)
 _MAX_ECHO = 48 * 1024
 # Only the end of the unittest output is kept while it streams (the summary is at
 # the end), so a test that prints without bound cannot exhaust the evaluator.
@@ -135,6 +136,22 @@ def _drop_database(admin_url: str, name: str) -> bool:
     return True
 
 
+def _only_assertion_failures(output: bytes) -> bool:
+    """True when the last unittest summary reports failures and no errors."""
+    found = _FAILED_COUNTS.findall(output)
+    if not found:
+        return False
+    counts = {}
+    for part in found[-1].split(b","):
+        key, _, value = part.strip().partition(b"=")
+        counts[key] = int(value) if value.isdigit() else 0
+    return (
+        counts.get(b"failures", 0) > 0
+        and counts.get(b"errors", 0) == 0
+        and (counts.get(b"unexpected successes", 0) == 0)
+    )
+
+
 def _run_bounded(command: list[str], cwd: Path, environment: dict[str, str]):
     """Run ``command`` and return (returncode, the last ``_MAX_CAPTURE`` bytes)."""
     process = subprocess.Popen(
@@ -210,7 +227,15 @@ def _run_unittest(arguments: argparse.Namespace) -> int:
         if arguments.expect == "fail":
             # A skip is refused on its own: skipping the test against the known bug
             # must not count as "the test detects the bug".
-            verdict = not passed and not refused_skips and bool(ran) and ran[-1] > 0
+            # Only assertion failures count: an ERROR (import, setup, a crash) is not
+            # the test detecting the bug.
+            verdict = (
+                not passed
+                and not refused_skips
+                and bool(ran)
+                and ran[-1] > 0
+                and _only_assertion_failures(output)
+            )
         else:
             verdict = passed
         print(

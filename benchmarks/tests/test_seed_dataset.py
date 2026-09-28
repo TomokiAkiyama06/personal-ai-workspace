@@ -340,6 +340,19 @@ class SeedCheckTest(unittest.TestCase):
         )
         self.assertEqual(self.run_check()[0], 1)
 
+    def test_expect_fail_needs_an_assertion_failure(self):
+        # A crash (ERROR) against the known bug is not "the test detects the bug".
+        self.write_test(
+            "    def test_value(self):\n        raise RuntimeError('crash')\n"
+        )
+        code, output = self.run_check("--expect", "fail")
+        self.assertEqual(code, 1, output)
+        self.write_test(
+            "    def test_value(self):\n        self.assertEqual(value(), 2)\n"
+            "    def test_crash(self):\n        raise RuntimeError('crash')\n"
+        )
+        self.assertEqual(self.run_check("--expect", "fail")[0], 1)
+
     def test_expect_fail_refuses_a_skipped_test(self):
         # Skipping the test against the known bug is not "detecting the bug".
         self.write_test(
