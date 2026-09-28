@@ -469,7 +469,8 @@ class StoreArgumentTest(unittest.IsolatedAsyncioTestCase):
             None,
             "x",
             [],
-            [(scope, good)] * 5,
+            # More keys than there are scopes.
+            [(scope, good)] * (len(ThrottleScope) + 1),
             [scope],
             [(scope,)],
             [(scope, good, 1)],
