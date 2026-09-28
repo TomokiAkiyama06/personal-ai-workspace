@@ -31,7 +31,9 @@ from paw_backend.orchestrator.errors import NodeStopped
 from paw_backend.orchestrator.gateway import QueueLeaseVerifier, TrackerBudgetProvider
 from paw_backend.orchestrator.scope import scope_within
 from paw_backend.tasks import TaskCommand, TaskRun
+from paw_backend.tasks.domain import RepoRole
 from paw_backend.tasks.queueing import BudgetKind, BudgetTracker, TaskQueue
+from paw_backend.tasks.records import WorkingSetEntry
 from paw_backend.tools import (
     ApprovalService,
     ArgumentKind,
@@ -50,6 +52,7 @@ from paw_backend.tools import (
     ToolSpec,
     Verdict,
 )
+from paw_backend.tools.scope import with_working_set_roles
 
 from .authz_support import StaticDirectory, principal, uid
 from .gate_support import ALWAYS_ACTIVE
@@ -64,6 +67,7 @@ from .orchestrator_support import (
     requires_postgres,
     until,
 )
+from .task_support import BASELINE
 from .tools_support import (
     HANDLE,
     REPO,
@@ -121,14 +125,40 @@ class Authority:
             hosts=["github.com", "api.github.com"],
             projects={task.project_id: ProjectState.ACTIVE},
             credential_handles={HANDLE: ["github.com"]},
-            repositories=[
-                ScopedRepository(REPO, task.project_id, ROOT, acl, remotes=self.remotes)
-            ],
+            # The role of each repository is the stored Working Set's (#85).
+            repositories=with_working_set_roles(
+                [
+                    ScopedRepository(
+                        REPO, task.project_id, ROOT, acl, remotes=self.remotes
+                    )
+                ],
+                task.working_set,
+            ),
         )
+
+
+class RestoringGate:
+    """The Broker's ``RepositoryUseGate``: the harness's ``TaskService`` (built
+    after the Broker, so it is set once the harness exists)."""
+
+    service = None
+
+    async def admit_repository_use(self, *args, **kwargs):
+        return await self.service.admit_repository_use(*args, **kwargs)
+
+    async def release_repository_use(self, *args, **kwargs):
+        return await self.service.release_repository_use(*args, **kwargs)
 
 
 @requires_postgres
 class ToolsThroughTheOrchestratorTest(PostgresOrchestratorTestCase):
+    # The task's Working Set holds the repository of the tools' scope (#85).
+    working_set = (WorkingSetEntry(REPO, RepoRole.TARGET, BASELINE),)
+
+    async def create_task(self, service=None, **overrides):
+        overrides.setdefault("repositories", list(self.working_set))
+        return await super().create_task(service, **overrides)
+
     async def build(self, **options):
         """A whole stack; returns ``(harness, executor, outcomes, authority)``."""
         database = self.new_database()
@@ -149,6 +179,7 @@ class ToolsThroughTheOrchestratorTest(PostgresOrchestratorTestCase):
             database, project_gate=ALWAYS_ACTIVE
         )
         executor = FakeExecutor()
+        gate = RestoringGate()
         broker = ToolBroker(
             ToolRegistry([*sample_specs(), FETCH]),
             Authorizer(sink, directory=directory),
@@ -158,6 +189,7 @@ class ToolsThroughTheOrchestratorTest(PostgresOrchestratorTestCase):
             task_activity=PostgresTaskActivity(database),
             lease=QueueLeaseVerifier(queue),
             path_resolver=LexicalPathResolver(),
+            use_gate=gate,
         )
         authority = options.pop("authority", None) or Authority(self.project_id)
         scripts = options.pop("scripts", {})
@@ -183,6 +215,7 @@ class ToolsThroughTheOrchestratorTest(PostgresOrchestratorTestCase):
             task_listeners=[approvals.revoke_on_task_end],
             **options,
         )
+        gate.service = h.tasks
         return h, executor, outcomes, authority, runtime
 
     async def test_a_node_reaches_the_tools_through_a_context_the_backend_built(self):
@@ -269,6 +302,35 @@ class ToolsThroughTheOrchestratorTest(PostgresOrchestratorTestCase):
         self.assertEqual(
             dict(invocation.context.scope.credential_handles),
             {HANDLE: frozenset({"github.com"})},
+        )
+
+    async def test_the_stored_working_set_role_caps_what_a_node_may_do(self):
+        # REPO is only ``referenced`` in the stored Working Set (another
+        # repository is the target): a worker, whose grant may write, can read it
+        # and cannot write to it, whatever its ACL allows (Decision 0030, 4.2).
+        self.working_set = (
+            WorkingSetEntry(REPO, RepoRole.REFERENCED, BASELINE),
+            WorkingSetEntry(REPO2, RepoRole.TARGET, BASELINE),
+        )
+        scripts = {
+            "look": ("repo.read_file", READ),
+            "impl": ("repo.write_file", WRITE),
+        }
+        h, executor, outcomes, _, _ = await self.build(scripts=scripts)
+        await self.prepare(h, make_plan(node("look"), node("impl", "look")))
+
+        await h.orchestrator.run_once("w1")
+
+        self.assertEqual(outcomes["look"][0].status, ExecutionStatus.COMPLETED)
+        (write,) = outcomes["impl"]
+        self.assertEqual(write.status, ExecutionStatus.NOT_EXECUTED)
+        self.assertEqual(
+            write.decision.reason, BrokerReason.REPOSITORY_ROLE_INSUFFICIENT
+        )
+        (invocation,) = executor.invocations  # only the read reached it
+        self.assertEqual(
+            [(r.repo_id, r.role) for r in invocation.context.scope.repositories],
+            [(REPO, RepoRole.REFERENCED)],
         )
 
     async def test_a_plan_can_narrow_a_node_and_never_widen_it(self):

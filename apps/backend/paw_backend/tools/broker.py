@@ -24,7 +24,20 @@ narrow what the previous one allowed:
    below no remote of the working set is refused at step 3
    (``remote_not_in_repository``): the executor is never given an endpoint whose
    repository was not authorized. A repository write that touches no repository
-   of the working set is denied (``repository_not_identified``);
+   of the working set is denied (``repository_not_identified``).
+   **Before** that decision, the Working Set's role ceiling (issue #85,
+   Decision 0030, section 4): a call that touches a repository whose role is
+   not resolved is denied (``repository_role_unresolved``); a call that writes
+   or deletes (``write`` / ``destructive``) with a capability that is not a
+   repository write is denied (``repository_write_capability_mismatch``), and
+   so is one whose capability (``project.repo.write`` / ``project.pr.create``)
+   the role does not allow, or that executes something (``execute``) in a
+   ``referenced`` repository (``repository_role_insufficient``, #85 constraint
+   2). An approval cannot lift any of these. A Working Set tool
+   (``ToolSpec.working_set_operation``) is decided instead on the task's
+   project (``project.task.working_set.manage``) AND on the repository it
+   names, resolved from its registration, with the permission of the change
+   (``tasks.working_set.required_permission``);
 5. the task budget (:class:`~.budget.BudgetProvider`); unknown means denied;
 5a. **the worker's queue lease, for every call** (:class:`~.lease.LeaseVerifier`;
    issue #126, Decision 0046): the lease in ``TaskContext.lease`` (the fencing
@@ -33,9 +46,28 @@ narrow what the previous one allowed:
    expired or taken over is ``lease_lost``; an answer that cannot be had (no
    verifier, an error, a timeout) is ``lease_unavailable``. It is checked after
    every other check that can refuse the call on its own (the closer to the
-   hand-over, the smaller the window), and before an approval is opened or used:
-   a stale worker neither runs a call nor asks a human for one;
-6. ``AUTO`` / ``SCOPED_AUTO`` are allowed; ``APPROVAL`` / ``STRONG_APPROVAL``
+   hand-over, the smaller the window), and before a repository use is admitted
+   (6: nothing is reserved or marked changed for it) and an approval is opened or
+   used: a stale worker neither runs a call nor asks a human for one;
+6. a call that touches a repository is admitted on the roles the Working Set
+   holds **now** (:class:`~.working_set.RepositoryUseGate`, i.e.
+   ``TaskService.admit_repository_use``): the roles of step 4 are those of the
+   caller's task scope, which can be older than a downgrade or a removal, and
+   the stored table is the one truth (Decision 0030, 4.1 / 4.6). The same
+   ceiling is applied again (``repository_role_unresolved`` /
+   ``repository_role_insufficient``), and a write or something executed is
+   recorded as a change of the repository in the attempt (section 5; a command
+   can write, and the backend cannot tell). Such a use is also **reserved**
+   (``BrokerDecision.reservation_id``) until :meth:`ToolBroker.record_execution`
+   releases it after the executor returned or failed (or it expires): until
+   then the repositories are not downgraded or removed, so the admission holds
+   through the execution (Codex review of #85). A decision that ends up not
+   allowed releases it at once. A use that cannot be admitted, or a write
+   admitted without a reservation, is denied (``repository_write_unrecorded``,
+   or ``repository_role_unresolved`` for a read). For a call that needs an
+   approval this happens before the approval is consumed, so a refused use
+   leaves it unused;
+7. ``AUTO`` / ``SCOPED_AUTO`` are allowed; ``APPROVAL`` / ``STRONG_APPROVAL``
    need an approval bound to this exact call. **The task must still be able to
    act, in the worker's run** (:class:`~.task_state.TaskActivityProvider`: not
    completed / failed / cancelled, not unknown or unreadable, and the run in
@@ -69,13 +101,28 @@ from paw_backend.authz import (
     CAPABILITIES,
     AuditSink,
     Authorizer,
+    Capability,
     Decision,
     Reason,
+    RepoAcl,
     RepoPermission,
     Resource,
     Scope,
 )
 from paw_backend.authz.capabilities import REPO_PERMISSION_OF
+from paw_backend.tasks.domain import RepoRole, accepts_role
+from paw_backend.tasks.errors import (
+    RepositoryRoleInsufficientError,
+    RepositoryRoleUnresolvedError,
+    StaleRunError,
+    TaskNotActiveError,
+    TaskNotFoundError,
+)
+from paw_backend.tasks.working_set import (
+    marks_changed,
+    required_permission,
+    role_allows,
+)
 from paw_backend.tools.approval_types import (
     ApprovalBinding,
     ApprovalEvent,
@@ -103,7 +150,11 @@ from paw_backend.tools.calls import (
     compute_call_hash,
     parse_arguments,
 )
-from paw_backend.tools.capabilities import ApprovalLevel, most_restrictive
+from paw_backend.tools.capabilities import (
+    ApprovalLevel,
+    ToolCapability,
+    most_restrictive,
+)
 from paw_backend.tools.decisions import BrokerDecision, BrokerReason, Verdict
 from paw_backend.tools.interfaces import require_async_method
 from paw_backend.tools.lease import (
@@ -125,6 +176,12 @@ from paw_backend.tools.task_state import (
     FailClosedTaskActivity,
     TaskActivity,
     TaskActivityProvider,
+)
+from paw_backend.tools.working_set import (
+    FailClosedRegistrations,
+    FailClosedUseGate,
+    RepositoryUseGate,
+    WorkingSetRegistrations,
 )
 
 logger = logging.getLogger(__name__)
@@ -156,6 +213,13 @@ _CONSUME_REASON = {
     ConsumeOutcome.TASK_UNKNOWN: BrokerReason.TASK_UNKNOWN,
     ConsumeOutcome.TASK_SUPERSEDED: BrokerReason.TASK_SUPERSEDED,
 }
+# The capability whose repository permission is this one: the proxy on which a
+# Working Set change is decided on the repository it names (Decision 0030, 3.4).
+_PROXY_CAPABILITY = {
+    RepoPermission.READ: Capability.PROJECT_READ,
+    RepoPermission.WRITE: Capability.PROJECT_REPO_WRITE,
+}
+_CHANGES = frozenset({ToolCapability.WRITE, ToolCapability.DESTRUCTIVE})
 _OPEN_REFUSAL_REASON = {
     OpenOutcome.TOO_MANY_PENDING: BrokerReason.APPROVAL_LIMIT_REACHED,
     OpenOutcome.COOLING_DOWN: BrokerReason.APPROVAL_COOLDOWN,
@@ -182,6 +246,8 @@ class ToolBroker:
         task_activity: TaskActivityProvider | None = None,
         lease: LeaseVerifier | None = None,
         path_resolver: PathResolver | None = None,
+        registrations: WorkingSetRegistrations | None = None,
+        use_gate: RepositoryUseGate | None = None,
         approval_ttl: timedelta = DEFAULT_APPROVAL_TTL,
         max_pending_approvals: int = 10,
         rejection_cooldown: timedelta = timedelta(minutes=5),
@@ -210,6 +276,15 @@ class ToolBroker:
         require_async_method(self._lease, "check", 2)
         self._resolver: PathResolver = path_resolver or RealpathResolver()
         require_async_method(self._resolver, "resolve", 1)
+        # Both fail closed when not wired: no Working Set change is decided, and
+        # no call that touches a repository is allowed.
+        self._registrations: WorkingSetRegistrations = (
+            registrations or FailClosedRegistrations()
+        )
+        require_async_method(self._registrations, "working_set_acl", 1)
+        self._use_gate: RepositoryUseGate = use_gate or FailClosedUseGate()
+        require_async_method(self._use_gate, "admit_repository_use", 3)
+        require_async_method(self._use_gate, "release_repository_use", 2)
         if not isinstance(approval_ttl, timedelta) or not (
             MIN_APPROVAL_TTL <= approval_ttl <= MAX_APPROVAL_TTL
         ):
@@ -248,8 +323,24 @@ class ToolBroker:
             if isinstance(call.correlation_id, uuid.UUID)
             else uuid.uuid4()
         )
-        decision = await self._evaluate(call, correlation_id, approval_id)
-        return await self._audited(decision, call.context)
+        # The reservations this request admitted: a request cancelled before it
+        # returns hands no decision to the runner, so it releases them itself
+        # (Codex review of #85), or they would hold the repositories until
+        # they expire.
+        admitted: list[uuid.UUID] = []
+        try:
+            decision = await self._evaluate(call, correlation_id, approval_id, admitted)
+            decision = await self._audited(decision, call.context)
+        except BaseException:
+            for reservation_id in admitted:
+                await self._release_through_cancellation(call.context, reservation_id)
+            raise
+        if not decision.allowed and decision.reservation_id is not None:
+            # Admitted, but it does not run after all (its decision could not be
+            # recorded): nothing is in flight on the repositories.
+            await self._release(call.context, decision.reservation_id)
+            decision = replace(decision, reservation_id=None)
+        return decision
 
     async def record_execution(
         self, decision: BrokerDecision, *, succeeded: bool
@@ -257,12 +348,16 @@ class ToolBroker:
         """Record that an allowed call ran: the audit row and the budget charge.
 
         Called by the runner after the executor returned or failed. It never
-        raises for a store failure (the call already ran).
+        raises for a store failure (the call already ran). It first releases the
+        call's repository reservation (the write is no longer in flight; one that
+        cannot be released expires, fail-closed).
         """
         invocation = decision.invocation
         if not decision.allowed or invocation is None:
             raise ValueError("only an allowed call can have been executed")
         context = invocation.context
+        if decision.reservation_id is not None:
+            await self._release(context, decision.reservation_id)
         reason = BrokerReason.EXECUTED if succeeded else BrokerReason.EXECUTION_FAILED
         await record_event(
             self._audit,
@@ -319,6 +414,7 @@ class ToolBroker:
         call: ToolCall,
         correlation_id: uuid.UUID,
         approval_id: uuid.UUID | None,
+        admitted: list[uuid.UUID],
     ) -> BrokerDecision:
         context = call.context
         if approval_id is not None and not isinstance(approval_id, uuid.UUID):
@@ -378,9 +474,23 @@ class ToolBroker:
                 call_hash=call_hash,
             )
 
-        denied = await self._authorize(
-            spec, parsed, context, classification, correlation_id
-        )
+        if spec.working_set_operation is not None:
+            denied = await self._authorize_working_set(
+                spec, parsed, context, correlation_id
+            )
+        else:
+            role_reason = self._role_denial(spec, context, classification)
+            if role_reason is not None:
+                return self._refuse(
+                    role_reason,
+                    correlation_id,
+                    tool=name,
+                    level=level,
+                    call_hash=call_hash,
+                )
+            denied = await self._authorize(
+                spec, parsed, context, classification, correlation_id
+            )
         if denied is not None:
             reason, authz_reason = denied
             return self._refuse(
@@ -414,13 +524,45 @@ class ToolBroker:
             )
 
         if level in (ApprovalLevel.AUTO, ApprovalLevel.SCOPED_AUTO):
+            if spec.working_set_operation is not None:
+                # A Working Set change touches no repository of the scope, so no
+                # use gate asks about the task: an ended or replaced run must not
+                # widen the scope (Codex review of #85). The executor's service
+                # call checks the run again, under the task's row lock.
+                task_reason = await self._task_denial(context)
+                if task_reason is not None:
+                    return self._refuse(
+                        task_reason,
+                        correlation_id,
+                        tool=name,
+                        level=level,
+                        call_hash=call_hash,
+                    )
+            use_reason, reservation = await self._admit_use(
+                spec, context, classification, admitted
+            )
+            if use_reason is not None:
+                return self._refuse(
+                    use_reason,
+                    correlation_id,
+                    tool=name,
+                    level=level,
+                    call_hash=call_hash,
+                )
             reason = (
                 BrokerReason.AUTO
                 if level is ApprovalLevel.AUTO
                 else BrokerReason.SCOPED_AUTO
             )
             return self._allow(
-                spec, parsed, context, level, call_hash, correlation_id, reason
+                spec,
+                parsed,
+                context,
+                level,
+                call_hash,
+                correlation_id,
+                reason,
+                reservation_id=reservation,
             )
         task_reason = await self._task_denial(context)
         if task_reason is not None:
@@ -436,9 +578,126 @@ class ToolBroker:
             return await self._open_approval(
                 spec, parsed, context, level, call_hash, correlation_id
             )
-        return await self._consume_approval(
-            spec, parsed, context, level, call_hash, correlation_id, approval_id
+        # Admitted BEFORE the approval is consumed: a use the stored Working Set
+        # refuses (or that cannot be admitted) leaves the human's one-shot
+        # approval unused. The other way round, a use admitted for an approval
+        # that is then not consumed marks the repository changed although the
+        # call did not run: that only adds an obligation (fail-closed), and its
+        # reservation is released at once.
+        use_reason, reservation = await self._admit_use(
+            spec, context, classification, admitted
         )
+        if use_reason is not None:
+            return self._refuse(
+                use_reason,
+                correlation_id,
+                tool=name,
+                level=level,
+                call_hash=call_hash,
+                approval_id=approval_id,
+            )
+        decision = await self._consume_approval(
+            spec,
+            parsed,
+            context,
+            level,
+            call_hash,
+            correlation_id,
+            approval_id,
+            reservation_id=reservation,
+        )
+        if not decision.allowed and reservation is not None:
+            await self._release(context, reservation)
+        return decision
+
+    async def _admit_use(
+        self,
+        spec: ToolSpec,
+        context: TaskContext,
+        classification: Classification,
+        admitted: list[uuid.UUID],
+    ) -> tuple[BrokerReason | None, uuid.UUID | None]:
+        """Admit the call's use of the repositories it touches on the roles
+        stored NOW (``RepositoryUseGate``; Decision 0030, 4.1 / 4.6): the task
+        scope's roles, which :meth:`_role_denial` checked, may be older than a
+        downgrade or a removal. A write or an execution is recorded as a change
+        of the repository (section 5) and reserved until the call ended (Codex
+        review of #85: the repositories are not downgraded or removed while its
+        executor may still write). Returns the refusal (``None`` when admitted)
+        and the reservation to release after the execution (``None``: none)."""
+        if not classification.repositories:
+            return None, None
+        capability = spec.authz_capability
+        executes = ToolCapability.EXECUTE in spec.capabilities
+        changes = marks_changed(capability, executes=executes)
+        try:
+            async with asyncio.timeout(self._timeout_seconds):
+                reservation = await self._use_gate.admit_repository_use(
+                    context.task_id,
+                    context.run,
+                    classification.repositories,
+                    capability=capability,
+                    executes=executes,
+                )
+        except RepositoryRoleUnresolvedError:
+            return BrokerReason.REPOSITORY_ROLE_UNRESOLVED, None
+        except RepositoryRoleInsufficientError:
+            return BrokerReason.REPOSITORY_ROLE_INSUFFICIENT, None
+        except StaleRunError:
+            # A Retry / Restart started another run: this one acts no more.
+            return BrokerReason.TASK_SUPERSEDED, None
+        except TaskNotFoundError:
+            return BrokerReason.TASK_UNKNOWN, None
+        except TaskNotActiveError:
+            # The task ended: nothing more is written for it.
+            return BrokerReason.TASK_NOT_ACTIVE, None
+        except Exception as error:
+            logger.error("Repository use not admitted (%s)", type(error).__name__)
+            # A change that cannot be recorded does not run; a read whose stored
+            # role cannot be read is a role that is not resolved.
+            return (
+                BrokerReason.REPOSITORY_WRITE_UNRECORDED
+                if changes
+                else BrokerReason.REPOSITORY_ROLE_UNRESOLVED
+            ), None
+        if not isinstance(reservation, uuid.UUID):
+            if changes:
+                # A write that holds no reservation could outlive a downgrade.
+                logger.error("Repository write admitted without a reservation")
+                return BrokerReason.REPOSITORY_WRITE_UNRECORDED, None
+            reservation = None
+        if reservation is not None:
+            admitted.append(reservation)
+        return None, reservation
+
+    async def _release_through_cancellation(
+        self, context: TaskContext, reservation_id: uuid.UUID
+    ) -> None:
+        """:meth:`_release`, finished even if the caller is cancelled meanwhile
+        (again): it runs as a task of its own that this coroutine waits for. The
+        caller re-raises what interrupted it; the wait is bounded by the broker's
+        timeout."""
+        release = asyncio.create_task(self._release(context, reservation_id))
+        while not release.done():
+            try:
+                # Unlike awaiting the task, asyncio.wait() does not cancel it.
+                await asyncio.wait({release})
+            except asyncio.CancelledError:
+                continue  # the caller re-raises its own cancellation
+        release.result()  # never raises (``_release`` logs a failure)
+
+    async def _release(self, context: TaskContext, reservation_id: uuid.UUID) -> None:
+        """Release a repository reservation; never raises (one that cannot be
+        released expires: until then the repositories are not narrowed)."""
+        try:
+            async with asyncio.timeout(self._timeout_seconds):
+                await self._use_gate.release_repository_use(
+                    context.task_id, reservation_id
+                )
+        except Exception as error:
+            logger.error(
+                "Repository reservation not released (%s)", type(error).__name__
+            )
 
     def _allow(
         self,
@@ -450,6 +709,8 @@ class ToolBroker:
         correlation_id: uuid.UUID,
         reason: BrokerReason,
         approval_id: uuid.UUID | None = None,
+        *,
+        reservation_id: uuid.UUID | None = None,
     ) -> BrokerDecision:
         return BrokerDecision(
             Verdict.ALLOW,
@@ -459,6 +720,7 @@ class ToolBroker:
             level=level,
             call_hash=call_hash,
             approval_id=approval_id,
+            reservation_id=reservation_id,
             invocation=ToolInvocation(
                 tool=spec.name,
                 arguments=parsed.values,
@@ -542,12 +804,25 @@ class ToolBroker:
         resources = self._resources(spec, parsed, context, classification)
         if isinstance(resources, BrokerReason):
             return resources, None
-        for resource in resources:
+        return await self._decide_all(
+            context,
+            [(spec.authz_capability, resource) for resource in resources],
+            correlation_id,
+        )
+
+    async def _decide_all(
+        self,
+        context: TaskContext,
+        requests: list[tuple[Capability, Resource]],
+        correlation_id: uuid.UUID,
+    ) -> tuple[BrokerReason, Reason | None] | None:
+        """Every (capability, resource) must be allowed; the first denial wins."""
+        for capability, resource in requests:
             try:
                 decision = await self._authorizer.authorize_agent_action(
                     context.delegator_id,
                     context.grant,
-                    spec.authz_capability,
+                    capability,
                     resource,
                     correlation_id=correlation_id,
                 )
@@ -559,6 +834,88 @@ class ToolBroker:
             if not decision.allowed:
                 return BrokerReason.AUTHZ_DENIED, decision.reason
         return None
+
+    @staticmethod
+    def _role_denial(
+        spec: ToolSpec, context: TaskContext, classification: Classification
+    ) -> BrokerReason | None:
+        """The Working Set's role ceiling on the repositories a call touches
+        (Decision 0030, section 4; #85 constraint 2), ``None`` when it allows.
+
+        It only narrows: the repository's ACL is decided after it, and an
+        approval never lifts it.
+        """
+        if not classification.repositories:
+            return None
+        capability = spec.authz_capability
+        if (
+            spec.capabilities & _CHANGES
+            and REPO_PERMISSION_OF.get(capability) is not RepoPermission.WRITE
+        ):
+            return BrokerReason.REPOSITORY_WRITE_CAPABILITY_MISMATCH
+        executes = ToolCapability.EXECUTE in spec.capabilities
+        for repo_id in classification.repositories:
+            repository = context.scope.repository(repo_id)
+            role = repository.role if repository is not None else None
+            if role is None:
+                return BrokerReason.REPOSITORY_ROLE_UNRESOLVED
+            if not role_allows(role, capability, executes=executes):
+                return BrokerReason.REPOSITORY_ROLE_INSUFFICIENT
+        return None
+
+    async def _authorize_working_set(
+        self,
+        spec: ToolSpec,
+        parsed: ParsedArguments,
+        context: TaskContext,
+        correlation_id: uuid.UUID,
+    ) -> tuple[BrokerReason, Reason | None] | None:
+        """A change of the Working Set (Decision 0030, 3.4): ``None`` when the
+        task's project (``project.task.working_set.manage``) AND the repository
+        it names (the permission of the change, on its registered ACL) allow it.
+
+        The role the change is decided on is the one in the task scope, which the
+        backend resolved from the stored Working Set; ``TaskService`` refuses the
+        change if the stored role moved meanwhile.
+        """
+        operation = spec.working_set_operation
+        assert operation is not None
+        (target,) = [
+            t for t in parsed.targets if t.kind is TargetKind.WORKING_SET_REPOSITORY
+        ]
+        repo_id = uuid.UUID(target.value)
+        entry = context.scope.repository(repo_id)
+        current: RepoRole | None = entry.role if entry is not None else None
+        if entry is not None and current is None and not accepts_role(operation, None):
+            # A downgrade or a removal cannot be decided on an unknown role (adding
+            # one is decided as "not in the Working Set").
+            return BrokerReason.REPOSITORY_ROLE_UNRESOLVED, None
+        if not accepts_role(operation, current):
+            return BrokerReason.WORKING_SET_CHANGE_INVALID, None
+        try:
+            async with asyncio.timeout(self._timeout_seconds):
+                acl = await self._registrations.working_set_acl(repo_id)
+        except Exception as error:
+            logger.error("Registration lookup failed (%s)", type(error).__name__)
+            acl = None
+        if not isinstance(acl, RepoAcl) or acl.repo_id != repo_id:
+            return BrokerReason.WORKING_SET_REPOSITORY_UNRESOLVED, None
+        state = context.scope.projects.get(acl.project_id)
+        if state is None or (entry is not None and entry.project_id != acl.project_id):
+            return BrokerReason.REPOSITORY_OUT_OF_SCOPE, None
+        proxy = _PROXY_CAPABILITY[required_permission(operation, current)]
+        primary = context.primary_project_id
+        return await self._decide_all(
+            context,
+            [
+                (
+                    spec.authz_capability,
+                    Resource.project(primary, context.scope.projects[primary]),
+                ),
+                (proxy, Resource.repository(acl.project_id, state, acl)),
+            ],
+            correlation_id,
+        )
 
     async def _budget_denial(
         self, context: TaskContext, tool: str
@@ -725,6 +1082,8 @@ class ToolBroker:
         call_hash: str,
         correlation_id: uuid.UUID,
         approval_id: uuid.UUID,
+        *,
+        reservation_id: uuid.UUID | None = None,
     ) -> BrokerDecision:
         now = self._clock()
         binding = ApprovalBinding(
@@ -764,6 +1123,7 @@ class ToolBroker:
                 correlation_id,
                 BrokerReason.APPROVAL_CONSUMED,
                 approval_id,
+                reservation_id=reservation_id,
             )
         if outcome is ConsumeOutcome.PENDING:
             return BrokerDecision(

@@ -34,7 +34,9 @@ from paw_backend.orchestrator.gateway import (
     TrackerBudgetProvider,
 )
 from paw_backend.tasks import TaskCommand, TaskRun
+from paw_backend.tasks.domain import RepoRole
 from paw_backend.tasks.queueing import BudgetKind, BudgetTracker, QueueLease, TaskQueue
+from paw_backend.tasks.records import WorkingSetEntry
 from paw_backend.tools import (
     ApprovalService,
     BrokerDecision,
@@ -62,8 +64,9 @@ from .orchestrator_support import (
     requires_postgres,
     until,
 )
-from .test_orchestrator_tools import READ, Authority
-from .tools_support import ROOT, FakeExecutor, make_context, sample_specs
+from .task_support import BASELINE
+from .test_orchestrator_tools import READ, Authority, RestoringGate
+from .tools_support import REPO, ROOT, FakeExecutor, make_context, sample_specs
 
 Out = RunOutcome
 DELETE = {"path": f"{ROOT}/build"}
@@ -86,6 +89,14 @@ class GatedExecutor(FakeExecutor):
 
 
 class LeaseFencingTestCase(PostgresOrchestratorTestCase):
+    # The task's Working Set holds the repository of the tools' scope (#85), as
+    # in test_orchestrator_tools.
+    working_set = (WorkingSetEntry(REPO, RepoRole.TARGET, BASELINE),)
+
+    async def create_task(self, service=None, **overrides):
+        overrides.setdefault("repositories", list(self.working_set))
+        return await super().create_task(service, **overrides)
+
     def stack(self, executor=None):
         """The Broker and what it needs, on one database (shared by the workers
         a test builds with ``worker``)."""
@@ -102,6 +113,7 @@ class LeaseFencingTestCase(PostgresOrchestratorTestCase):
         tracker = BudgetTracker(database)
         queue = TaskQueue(database, project_gate=ALWAYS_ACTIVE)
         executor = executor or FakeExecutor()
+        gate = RestoringGate()
         broker = ToolBroker(
             ToolRegistry(sample_specs()),
             Authorizer(sink, directory=directory),
@@ -111,8 +123,10 @@ class LeaseFencingTestCase(PostgresOrchestratorTestCase):
             task_activity=PostgresTaskActivity(database),
             lease=QueueLeaseVerifier(queue),
             path_resolver=LexicalPathResolver(),
+            use_gate=gate,
         )
         return SimpleNamespace(
+            gate=gate,
             sink=sink,
             store=store,
             tracker=tracker,
@@ -123,7 +137,7 @@ class LeaseFencingTestCase(PostgresOrchestratorTestCase):
         )
 
     def worker(self, stack, runtime):
-        return self.harness(
+        h = self.harness(
             runtimes={"local": runtime},
             tools=stack.runner,
             authority=Authority(self.project_id),
@@ -132,6 +146,9 @@ class LeaseFencingTestCase(PostgresOrchestratorTestCase):
             task_listeners=[stack.approvals.revoke_on_task_end],
             config={"poll_seconds": 3600.0},
         )
+        # The Working Set's use gate is a task service's (any worker's will do).
+        stack.gate.service = stack.gate.service or h.tasks
+        return h
 
     def two_calls(self, seen, gate, second=("repo.read_file", READ)):
         """A node that calls a tool, waits for ``gate``, then calls again. Every

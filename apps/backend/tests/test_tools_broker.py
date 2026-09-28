@@ -15,6 +15,7 @@ from paw_backend.authz import (
     RepoPermission,
     SystemRole,
 )
+from paw_backend.tasks import RepoRole
 from paw_backend.tools import (
     DEFAULT_TOOL_POLICY,
     ApprovalLevel,
@@ -67,6 +68,7 @@ from .tools_support import (
 )
 
 R = BrokerReason
+TARGET = RepoRole.TARGET
 MARKER = "zz-unique-content-marker-4711"
 GITHUB_TOKEN = "ghp_" + "a1B2" * 9
 
@@ -1050,6 +1052,8 @@ class RepositoryAclTest(unittest.IsolatedAsyncioTestCase):
                         self.remote(name),
                         f"https://api.github.com/repos/org/{name}",
                     ],
+                    # Both are targets: the ACL is what these tests are about.
+                    role=RepoRole.TARGET,
                 )
                 for repo_id, name, acl in (
                     (self.A, "a", acl_a),
@@ -1348,7 +1352,11 @@ class RepositoryAclTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_repository_that_registered_no_remote_owns_no_url(self):
         scope = make_scope(
-            repositories=[ScopedRepository(self.B, P1, f"{ROOT}/b", None, remotes=[])]
+            repositories=[
+                ScopedRepository(
+                    self.B, P1, f"{ROOT}/b", None, remotes=[], role=RepoRole.TARGET
+                )
+            ]
         )
         decision = await self.decide(
             "git.push", self.push(self.B), make_context(scope=scope)
@@ -1469,8 +1477,12 @@ class RepositoryAclTest(unittest.IsolatedAsyncioTestCase):
                 context = make_context(
                     scope=make_scope(
                         repositories=[
-                            ScopedRepository(outer, P1, f"{ROOT}/o", outer_acl),
-                            ScopedRepository(inner, P1, f"{ROOT}/o/inner", inner_acl),
+                            ScopedRepository(
+                                outer, P1, f"{ROOT}/o", outer_acl, role=TARGET
+                            ),
+                            ScopedRepository(
+                                inner, P1, f"{ROOT}/o/inner", inner_acl, role=TARGET
+                            ),
                         ]
                     )
                 )
@@ -1499,7 +1511,13 @@ class RepositoryAclTest(unittest.IsolatedAsyncioTestCase):
         scope = make_scope(
             projects={P1: ProjectState.ACTIVE, P2: ProjectState.ACTIVE},
             repositories=[
-                ScopedRepository(other, P2, f"{ROOT}/p2", RepoAcl.inherit(other, P2))
+                ScopedRepository(
+                    other,
+                    P2,
+                    f"{ROOT}/p2",
+                    RepoAcl.inherit(other, P2),
+                    role=RepoRole.TARGET,
+                )
             ],
         )
         arguments = {"path": f"{ROOT}/p2/x", "content": "1"}
@@ -1574,10 +1592,12 @@ class RepositoryAclTest(unittest.IsolatedAsyncioTestCase):
         self,
     ):
         # project.chat has no repository permission: the policy would refuse a
-        # repository resource for it, so the call is decided on the project.
+        # repository resource for it, so the call is decided on the project. (A
+        # read: a tool that writes with a path must have a repository write
+        # capability, Decision 0030.)
         spec = ToolSpec(
             "chat.note",
-            frozenset({ToolCapability.WRITE}),
+            frozenset({ToolCapability.READ}),
             Capability.PROJECT_CHAT,
             {"path": ArgumentSpec(ArgumentKind.PATH)},
         )

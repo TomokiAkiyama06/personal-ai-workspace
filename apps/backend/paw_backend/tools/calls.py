@@ -56,6 +56,7 @@ _KIND_LIMITS = {
     ArgumentKind.HOST: (MAX_HOST_LENGTH + 2, BrokerReason.INVALID_TARGET),
     ArgumentKind.PROJECT: (64, BrokerReason.INVALID_TARGET),
     ArgumentKind.REPOSITORY: (64, BrokerReason.INVALID_TARGET),
+    ArgumentKind.WORKING_SET_REPOSITORY: (64, BrokerReason.INVALID_TARGET),
     ArgumentKind.CREDENTIAL_HANDLE: (64, BrokerReason.CREDENTIAL_HANDLE_INVALID),
 }
 
@@ -207,9 +208,11 @@ def _shown(value: object) -> str:
 
 def _parse_value(argument, value: object, base: str | None):
     kind = argument.kind
-    if kind in (ArgumentKind.PROJECT, ArgumentKind.REPOSITORY) and isinstance(
-        value, uuid.UUID
-    ):
+    if kind in (
+        ArgumentKind.PROJECT,
+        ArgumentKind.REPOSITORY,
+        ArgumentKind.WORKING_SET_REPOSITORY,
+    ) and isinstance(value, uuid.UUID):
         value = str(value)
     if kind is ArgumentKind.INTEGER:
         if type(value) is not int or not argument.minimum <= value <= argument.maximum:
@@ -248,6 +251,9 @@ def _parse_value(argument, value: object, base: str | None):
         if kind is ArgumentKind.REPOSITORY:
             repository = str(normalise_repository(value))
             return repository, Target(TargetKind.REPOSITORY, repository)
+        if kind is ArgumentKind.WORKING_SET_REPOSITORY:
+            repository = str(normalise_repository(value))
+            return repository, Target(TargetKind.WORKING_SET_REPOSITORY, repository)
     except TargetError:
         raise ArgumentError(BrokerReason.INVALID_TARGET) from None
     if kind is ArgumentKind.CREDENTIAL_HANDLE:

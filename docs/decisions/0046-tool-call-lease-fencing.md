@@ -31,7 +31,7 @@ Decision 0021 の 8 節は DAG の書き込みを `epoch` で、Decision 0007 �
 - **Fencing Token の形。** `QueueLease(entry_id, worker_id, claim_count)`（`paw_backend.tasks.queueing`。値は Queue と同じ規則で検証する）。`claim_count` だけでは Entry が分からず、Worker ID だけでは同じ ID の再 Claim を区別できないため、3 つで 1 つの Claim を指す。Orchestrator は `QueueLease.of(entry, worker_id)` を作る。
 - **`TaskContext.lease`（必須）。** `TaskContext` に `lease: QueueLease` を足した。`run` と同じく必須で、省略も別の型も `TypeError`。Orchestrator の `_context` が、その Worker が持つ Claim を入れる。
 - **Broker の検査（5a）。** Broker に `LeaseVerifier` の差し込み口を足した（`check(task_id, lease) -> LeaseStatus`。`HELD` / `LOST` / `UNKNOWN`）。既定の `FailClosedLeaseVerifier` は `UNKNOWN` を返し、全ての呼び出しを拒否する（`BudgetProvider` / `TaskActivityProvider` と同じ Fail closed）。本番は `QueueLeaseVerifier(queue)` で、`TaskQueue.holds_lease(task_id, lease)` を呼ぶ。
-  - 判定の順序では、Budget（5）の後、`AUTO` / `SCOPED_AUTO` の許可と Approval を開く・使う処理（6）の前に置く。Budget が不要な Tool の呼び出しも、承認を要する呼び出しも、全て確かめる。
+  - 判定の順序では、Budget（5）の後、Working Set の Repository の利用の Admission（#85 の 6。予約と変更の記録）、`AUTO` / `SCOPED_AUTO` の許可、Approval を開く・使う処理（7）の前に置く。Lease を失った Worker の呼び出しは、Repository の予約も変更の記録も残さない。Budget が不要な Tool の呼び出しも、承認を要する呼び出しも、全て確かめる。
   - `LOST` は `lease_lost`。`UNKNOWN`、例外、Timeout（Broker の `timeout_seconds`）、`LeaseStatus` でない答えは `lease_unavailable`。どちらも Audit に固定の理由として残る（例外の文言は Log に出さない）。
 - **`TaskQueue.holds_lease`。** 1 つの `SELECT` で、Entry が `task_id` のもの、`claimed`、同じ Worker、同じ `claim_count`、`lease_expires_at > clock_timestamp()` かを返す。`heartbeat` と同じ規則を Database の時計で判定する**読み取り**で、行を Lock せず、Lease を延長しない。Application の Role は `queue_entries` の `SELECT` を既に持つ（Migration も権限の追加もない）。
 - **Gateway の反応。** `NodeToolGateway` は `lease_lost` の拒否を受けたら、Run の Guard を `StopReason.LEASE_LOST` で止めて `NodeStopped` を投げる。同じ Run の他の Node の呼び出しも渡さず、Orchestrator は Heartbeat が Lease を失ったときと同じく `LEASE_LOST` で Run を終える（Entry は完了も返却もしない）。`lease_unavailable` は、その呼び出しだけを拒否する。
@@ -73,7 +73,7 @@ Decision 0021 の 8 節は DAG の書き込みを `epoch` で、Decision 0007 �
 ## 判断が必要な点（未承認。推奨つき）
 
 1. **Broker の Interface の変更（PAW-031）**: `TaskContext` に必須の `lease: QueueLease` を足し、`ToolBroker(lease=LeaseVerifier)` を足し、`BudgetProvider.charge` を `(task_id, run, tool)` に変えた。既存の Adapter（`charge(task_id, tool)`）は構築時に `TypeError` になる。推奨: この形で承認する。
-2. **検査の場所と順序**: Broker の 5a（Budget の後、`ALLOW` と Approval の前）。単独で拒否できる検査（形、Scope、認可、Budget）は Lease を尋ねずに拒否する。推奨: この位置（受け渡しに最も近い）。代わりに最初に置けば、Lease を失った Worker の呼び出しは早く拒否されるが、確認から実行までの隙間が広がる。
+2. **検査の場所と順序**: Broker の 5a（Budget の後、Working Set の Admission・`ALLOW`・Approval の前）。単独で拒否できる検査（形、Scope、認可、Budget）は Lease を尋ねずに拒否する。推奨: この位置（受け渡しに最も近い）。代わりに最初に置けば、Lease を失った Worker の呼び出しは早く拒否されるが、確認から実行までの隙間が広がる。
 3. **Transaction の境界**: 確認は Lock しない 1 つの読み取りで、Approval の消費の Transaction には入れず、Lease を延長しない。推奨: この形。確認の後の実行は Fencing できないことを残リスクとして受け入れる。
 4. **失敗の扱い**: `lease_lost` は Run 全体を止める（`LEASE_LOST`）。`lease_unavailable`（読めない、Timeout）はその呼び出しだけを拒否し、Run の継続は Heartbeat が決める。推奨: この形。代わりに `lease_unavailable` でも Run を止める案は、一時的な DB の失敗に厳しすぎる。
 5. **`tool_calls` の Fencing**: 実行中に Run が置き換えられた・Task が終わった呼び出しは記録しない（Log と Audit だけ）。推奨: 記録しない（`NodeBudgetHandle.charge` と同じ規則）。#106 第 8 回の「Fencing しない」を、この Decision で改める。
