@@ -12,10 +12,19 @@ runs while the task is evaluating: it hands the **integration worktrees** (never
 a single Worker's branch, never the user's checkout) to the checks of each kind,
 in the fixed order :data:`CHECK_ORDER` (``test`` -> ``evaluator`` -> ``review``),
 and stops at the first check that does not pass. It records the outcome on the
-task attempt (``ReviewState``: ``evaluation_result`` after the tests and the
-Evaluator, ``review_status`` for the review) and then completes the task (every
+state of every checked repository in the task attempt (``ReviewState``:
+``evaluation_result`` after the tests and the Evaluator, ``review_status`` for the
+review; one per repository since issue #85) and then completes the task (every
 check passed: the result is ready for the human's merge decision; nothing is
 merged or pushed) or fails it.
+
+Complete is the task service's to allow: Decision 0030 (section 5) requires a
+delivered pull request for every ``target`` repository, and this gate does not
+make one (Decision 0036, 10; issue #132). When Complete is refused for that
+reason the task stays ``evaluating`` with its results recorded
+(``REQUIREMENTS_NOT_MET``). When a write the Tool Broker admitted may still be
+running on a repository, a passing result is not recorded and nothing is
+completed or failed (``NOT_RECORDED``): the gate may run again later.
 
 The checks themselves are other issues (PAW-011 / PAW-013 the Evaluator, the
 Codex / Claude reviewers): a check is any object with ``async check(request) ->
@@ -59,9 +68,12 @@ from paw_backend.orchestrator.store import DagStore
 from paw_backend.orchestrator.workspaces import IntegrationRequest
 from paw_backend.tasks import (
     Actor,
+    CompletionRequirementsNotMetError,
     EvaluationResult,
     IllegalTransitionError,
     LogLevel,
+    RepositoryNotInAttemptError,
+    RepositoryWriteInFlightError,
     ReviewState,
     ReviewStatus,
     StaleRunError,
@@ -130,6 +142,15 @@ class GateOutcome(StrEnum):
     DIRTY = "dirty"
     NOT_EVALUATING = "not_evaluating"  # the task is not evaluating: nothing done
     SUPERSEDED = "superseded"  # the task moved on under the gate: nothing written
+    # Every check passed and the results are recorded, but Complete was refused:
+    # a repository lacks what Decision 0030 (section 5) requires (a ``target``
+    # without a delivered pull request). The task stays ``evaluating``.
+    REQUIREMENTS_NOT_MET = "requirements_not_met"
+    # A result could not be recorded (or Complete was refused) because a write the
+    # Tool Broker admitted may still be running on a repository (#85): nothing
+    # completed or failed; the task stays ``evaluating`` and the gate may run
+    # again once the write ended.
+    NOT_RECORDED = "not_recorded"
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,7 +217,9 @@ class IntegrationGate:
                         GateOutcome.SUPERSEDED, task_id, tuple(verdicts), targets
                     )
                 if kind is CheckKind.REVIEW:
-                    await self._record(task, run, review=ReviewStatus.IN_REVIEW)
+                    await self._record(
+                        task, run, targets, review=ReviewStatus.IN_REVIEW
+                    )
                 passed = await self._run_kind(task, run, kind, targets, verdicts)
                 if kind is CheckKind.EVALUATOR or (
                     kind is CheckKind.TEST and not passed
@@ -204,6 +227,7 @@ class IntegrationGate:
                     await self._record(
                         task,
                         run,
+                        targets,
                         evaluation=EvaluationResult.PASSED
                         if passed
                         else EvaluationResult.FAILED,
@@ -212,6 +236,7 @@ class IntegrationGate:
                     await self._record(
                         task,
                         run,
+                        targets,
                         review=ReviewStatus.APPROVED
                         if passed
                         else ReviewStatus.CHANGES_REQUESTED,
@@ -222,6 +247,13 @@ class IntegrationGate:
                     )
         except StaleRunError:
             return GateReport(GateOutcome.SUPERSEDED, task_id, tuple(verdicts), targets)
+        except (RepositoryWriteInFlightError, RepositoryNotInAttemptError):
+            # A write the broker admitted may still change a repository (or the
+            # attempt lost one): what was checked is not known to stay the result.
+            # Nothing is completed or failed; the gate may run again later.
+            return GateReport(
+                GateOutcome.NOT_RECORDED, task_id, tuple(verdicts), targets
+            )
         if await self._worktrees.targets(request) != targets:
             return await self._end(task, run, GateOutcome.CHANGED, verdicts, targets)
         try:
@@ -290,22 +322,33 @@ class IntegrationGate:
         self,
         task: TaskSnapshot,
         run: TaskRun,
+        targets: tuple[IntegrationTarget, ...],
         *,
         evaluation: EvaluationResult | None = None,
         review: ReviewStatus | None = None,
     ) -> None:
-        """Change one field of the attempt's ``ReviewState``: ``evaluation_result``
-        once the tests failed or the Evaluator ran, ``review_status`` for the
-        review. Fenced by the run (``StaleRunError`` after a Retry / Restart)."""
-        current = (await self._tasks.restore(task.id, log_limit=0)).attempt.review
-        await self._tasks.update_attempt(
-            task.id,
-            run=run,
-            review=ReviewState(
-                current.review_status if review is None else review,
-                current.evaluation_result if evaluation is None else evaluation,
-            ),
-        )
+        """Change one field of the ``ReviewState`` of every checked repository in
+        the attempt (``update_attempt`` with its ``repository_id``; the results
+        belong to each repository, issue #85): ``evaluation_result`` once the
+        tests failed or the Evaluator ran, ``review_status`` for the review.
+        Fenced by the run (``StaleRunError`` after a Retry / Restart). An
+        ``approved`` / ``passed`` result is refused while an admitted write on the
+        repository may still be running (``RepositoryWriteInFlightError``)."""
+        attempt = (await self._tasks.restore(task.id, log_limit=0)).attempt
+        for target in targets:
+            try:
+                current = attempt.repository(target.repo_id).review
+            except KeyError:
+                raise RepositoryNotInAttemptError() from None
+            await self._tasks.update_attempt(
+                task.id,
+                run=run,
+                repository_id=target.repo_id,
+                review=ReviewState(
+                    current.review_status if review is None else review,
+                    current.evaluation_result if evaluation is None else evaluation,
+                ),
+            )
 
     async def _log(self, task: TaskSnapshot, run: TaskRun, message: str) -> None:
         try:
@@ -329,7 +372,20 @@ class IntegrationGate:
             GateOutcome.CHANGED: (TaskCommand.FAIL, REASON_CHANGED),
             GateOutcome.DIRTY: (TaskCommand.FAIL, REASON_DIRTY),
         }[outcome]
-        done = await self._command(task.id, run, command, reason)
+        try:
+            done = await self._command(task.id, run, command, reason)
+        except CompletionRequirementsNotMetError:
+            # Every check passed, but a repository lacks what Complete requires
+            # (Decision 0030, section 5: a ``target`` needs a delivered pull
+            # request, which this gate does not make, Decision 0036, 10). The
+            # task stays ``evaluating`` with its results recorded.
+            return GateReport(
+                GateOutcome.REQUIREMENTS_NOT_MET, task.id, tuple(verdicts), targets
+            )
+        except RepositoryWriteInFlightError:
+            return GateReport(
+                GateOutcome.NOT_RECORDED, task.id, tuple(verdicts), targets
+            )
         return GateReport(
             outcome if done else GateOutcome.SUPERSEDED,
             task.id,

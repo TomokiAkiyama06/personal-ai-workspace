@@ -76,6 +76,7 @@ from paw_backend.orchestrator.workspaces import (
     WorktreeConflictError,
     WorktreeProblem,
     WorktreeUnavailableError,
+    gets_worktree,
 )
 from paw_backend.repositories.accounts import AccountDirectory
 from paw_backend.repositories.errors import (
@@ -154,7 +155,7 @@ class GitWorktreeCoordinator:
         base = worktree_base(account, self._subdir)
         prepared: dict[uuid.UUID, NodeWorktree] = {}
         for repository in request.scope.repositories:
-            if repository.root is None:
+            if not gets_worktree(repository):
                 continue
             async with self._lock(request.task.id, request.run, repository.repo_id):
                 prepared[repository.repo_id] = await self._git_errors(
@@ -169,7 +170,7 @@ class GitWorktreeCoordinator:
         base = worktree_base(account, self._subdir)
         results = []
         for repository in request.scope.repositories:
-            if repository.root is None:
+            if not gets_worktree(repository):
                 continue
             async with self._lock(request.task.id, request.run, repository.repo_id):
                 results.append(

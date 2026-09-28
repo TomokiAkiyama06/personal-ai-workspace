@@ -20,7 +20,7 @@ from paw_backend.orchestrator.workspaces import (
     WorktreeUnavailableError,
 )
 from paw_backend.repositories.git import command_name
-from paw_backend.tasks import TaskRun
+from paw_backend.tasks import RepoRole, TaskRun
 
 from .repositories_support import fs, requires_git
 from .worktrees_support import Workspace, commit_file, git
@@ -200,9 +200,27 @@ class DedicatedWorktreeTest(CoordinatorTestCase):
         from paw_backend.tools import ScopedRepository
 
         bare_id = uuid.uuid4()
-        self.ws.repositories.append(ScopedRepository(bare_id, self.ws.project_id))
+        self.ws.repositories.append(
+            ScopedRepository(bare_id, self.ws.project_id, role=RepoRole.WORKING)
+        )
         prepared = await self.coordinator.prepare_node(self.ws.node_request("a"))
         self.assertEqual(set(prepared), {self.repo})
+
+    async def test_only_working_and_target_repositories_get_a_worktree(self):
+        # Decision 0036 (2), after #85: a ``referenced`` repository is only read,
+        # and one whose role is unresolved gets nothing (fail-closed); neither is
+        # integrated.
+        target = self.ws.add_checkout("target", role=RepoRole.TARGET)
+        referenced = self.ws.add_checkout("referenced", role=RepoRole.REFERENCED)
+        unresolved = self.ws.add_checkout("unresolved", role=None)
+
+        prepared = await self.coordinator.prepare_node(self.ws.node_request("a"))
+
+        self.assertEqual(set(prepared), {self.repo, target})
+        for repo_id in (referenced, unresolved):
+            self.assertFalse(fs.exists(self.ws.worktree(repo_id, "a")))
+        report = await self.coordinator.integrate(self.ws.integration_request("a"))
+        self.assertEqual({r.repo_id for r in report.repositories}, {self.repo, target})
 
 
 @requires_git

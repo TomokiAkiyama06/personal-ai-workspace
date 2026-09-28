@@ -55,13 +55,23 @@ import re
 import unicodedata
 import uuid
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Protocol
 
 from paw_backend.authz import ProjectState, RepoAcl
 from paw_backend.authz.subjects import to_uuid
+from paw_backend.tasks.domain import RepoRole
+from paw_backend.tasks.records import WorkingSetRepository
+
+# The role ceiling (Decision 0030, section 4.2) is defined with the Working Set's
+# other rules and re-exported here, where the broker's scope lives.
+from paw_backend.tasks.working_set import EXECUTING_ROLES as EXECUTING_ROLES
+from paw_backend.tasks.working_set import (
+    ROLE_GATED_CAPABILITIES as ROLE_GATED_CAPABILITIES,
+)
+from paw_backend.tasks.working_set import ROLE_WRITE_CEILING as ROLE_WRITE_CEILING
 from paw_backend.tools.capabilities import ScopeStatus
 from paw_backend.tools.credentials import is_credential_handle
 
@@ -284,6 +294,10 @@ class TargetKind(StrEnum):
     # below no remote of a repository the call touches); a call's URL argument
     # is a HOST target, and the URL itself is passed to ``classify_targets``.
     URL = "url"
+    # The repository a change of the Working Set is about (Decision 0030, 3.4):
+    # it need not be in the Working Set yet, so it is not a REPOSITORY target and
+    # ``classify_targets`` passes it by; the broker decides it on its own.
+    WORKING_SET_REPOSITORY = "working_set_repository"
 
 
 @dataclass(frozen=True, slots=True)
@@ -324,6 +338,15 @@ class ScopedRepository:
     below (:func:`url_within`), so that the endpoint an executor is given is
     authorized against the ACL of the repository it belongs to. A repository
     with no remote registered owns no URL.
+
+    ``role`` is the repository's role in the task's Working Set (issue #85,
+    Decision 0030, section 4), resolved by the backend from the stored Working
+    Set (:func:`with_working_set_roles`), never from a model. It caps what the
+    task may do on the repository on top of its ACL (:data:`ROLE_WRITE_CEILING`).
+    ``None`` means it could not be resolved (not in the Working Set, a stale or
+    broken entry): the broker then refuses **every** call that touches the
+    repository (``repository_role_unresolved``); it is never read as
+    ``referenced``.
     """
 
     repo_id: uuid.UUID
@@ -331,6 +354,7 @@ class ScopedRepository:
     root: str | None = None
     acl: RepoAcl | None = None
     remotes: tuple[str, ...] = ()
+    role: RepoRole | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "repo_id", to_uuid(self.repo_id, "repo_id"))
@@ -346,6 +370,8 @@ class ScopedRepository:
                 raise TypeError("acl must be a RepoAcl or None")
             if acl.repo_id != self.repo_id or acl.project_id != self.project_id:
                 raise ValueError("the ACL belongs to another repository")
+        if self.role is not None and type(self.role) is not RepoRole:
+            raise TypeError("role must be a RepoRole or None")
         remotes = _collection(self.remotes, "remotes")
         if len(remotes) > MAX_REMOTES:
             raise ValueError("a repository has too many remotes")
@@ -355,6 +381,31 @@ class ScopedRepository:
             if canonical not in normalised:
                 normalised.append(canonical)
         object.__setattr__(self, "remotes", tuple(normalised))
+
+
+def with_working_set_roles(
+    repositories: Iterable["ScopedRepository"],
+    working_set: Iterable[WorkingSetRepository],
+) -> tuple["ScopedRepository", ...]:
+    """``repositories`` with the role each one has in ``working_set``.
+
+    This is where a task scope gets its roles: ``working_set`` is what
+    ``TaskService.restore`` returned (``TaskSnapshot.working_set``), the one
+    stored truth. A repository that is not in it (another checkout that encloses
+    the task's, a stale entry) gets ``None``, so every call that touches it is
+    refused; nothing is ever given a role the Working Set does not hold.
+    """
+    roles: dict[uuid.UUID, RepoRole] = {}
+    for entry in working_set:
+        if not isinstance(entry, WorkingSetRepository):
+            raise TypeError("working_set must hold WorkingSetRepository objects")
+        roles[entry.repository_id] = entry.role
+    result = []
+    for repository in repositories:
+        if not isinstance(repository, ScopedRepository):
+            raise TypeError("repositories must be ScopedRepository objects")
+        result.append(replace(repository, role=roles.get(repository.repo_id)))
+    return tuple(result)
 
 
 @dataclass(frozen=True, slots=True)

@@ -20,7 +20,7 @@ from paw_backend.orchestrator.workspaces import (
 )
 from paw_backend.repositories import RepositoryPolicy, SubprocessGitRunner
 from paw_backend.repositories.git import command_name
-from paw_backend.tasks import TaskRun
+from paw_backend.tasks import RepoRole, TaskRun
 from paw_backend.tools import ScopedRepository, TaskScope
 
 from .repositories_support import FakeAccounts, World, git
@@ -89,14 +89,23 @@ class Workspace:
     def base(self) -> str:
         return f"{self.home}/workspaces/.paw-worktrees"
 
-    def add_checkout(self, name: str = "repo", *, branch: str = "main") -> uuid.UUID:
-        """A checkout ``<home>/workspaces/project/<name>`` with one commit."""
+    def add_checkout(
+        self,
+        name: str = "repo",
+        *,
+        branch: str = "main",
+        role: RepoRole | None = RepoRole.WORKING,
+    ) -> uuid.UUID:
+        """A checkout ``<home>/workspaces/project/<name>`` with one commit, with
+        ``role`` in the task's Working Set."""
         path = f"{self.home}/workspaces/project/{name}"
         os.makedirs(os.path.dirname(path), exist_ok=True)
         self.world.make_repository(path, branch=branch)
-        return self.add_checkout_at(path)
+        return self.add_checkout_at(path, role=role)
 
-    def add_checkout_at(self, path: str) -> uuid.UUID:
+    def add_checkout_at(
+        self, path: str, *, role: RepoRole | None = RepoRole.WORKING
+    ) -> uuid.UUID:
         """Register the existing repository at ``path`` as a checkout."""
         repo_id = uuid.uuid4()
         self.repositories.append(
@@ -105,6 +114,7 @@ class Workspace:
                 self.project_id,
                 path,
                 RepoAcl.inherit(repo_id, self.project_id),
+                role=role,
             )
         )
         return repo_id

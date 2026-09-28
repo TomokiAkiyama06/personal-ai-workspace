@@ -10,16 +10,17 @@ A node never gets more than the task it belongs to (``REQUIREMENTS.md``: "親Tas
 * **Scope**: :func:`derive_child_scope` copies the parent's scope and narrows it:
   the repositories to the ones the node asked for (an id outside the parent's
   working set is an error), the credential handles to none for a read-only role.
-  The repositories keep the resolved ACL and the registered remotes the caller
-  gave the parent: a node cannot change them.
+  The repositories keep the resolved ACL, the registered remotes and the
+  Working Set role (issue #85) the caller gave the parent: a node cannot change
+  them.
   :func:`scope_within` is the check the orchestrator runs on every derived scope
   (defence in depth) and that the tests run on hand-made ones.
 
 The parent's grant and scope are supplied by the caller for every call
-(``TaskAuthority``): the working set is where the repositories come from until
-issue #85 persists it (Decision 0014), and where the caller registers the
-**remotes** of each repository (Decision 0006, section 8 (d): a repository without
-a registered remote lets no call with a URL through).
+(``TaskAuthority``): it builds the repositories from the stored Working Set
+(issue #85, Decision 0030: each with its role, ``tools.scope.with_working_set_roles``)
+and registers the **remotes** of each repository (Decision 0006, section 8 (d): a
+repository without a registered remote lets no call with a URL through).
 """
 
 import uuid
@@ -201,8 +202,9 @@ def scope_within(
     """Whether ``child`` reaches nothing that ``parent`` does not: every path root
     is a parent root or lies below one, every host and project (with the same
     state) is the parent's, every credential handle is the parent's with no more
-    hosts, and every repository is the parent's, unchanged (its worktree, its ACL
-    and its remotes), and every path the parent excludes is excluded.
+    hosts, and every repository is the parent's, unchanged (its worktree, its ACL,
+    its remotes and its Working Set role), and every path the parent excludes is
+    excluded.
 
     ``worktrees`` are the only widening the backend itself makes (PAW-035): the
     worktree it prepared for a repository may be a path root and that

@@ -20,8 +20,15 @@ from paw_backend.orchestrator.workspaces import (
     WorktreeConflictError,
     WorktreeProblem,
     WorktreeUnavailableError,
+    gets_worktree,
 )
-from paw_backend.tasks import TaskCommand, TaskState, WaitReason
+from paw_backend.tasks import (
+    RepoRole,
+    TaskCommand,
+    TaskState,
+    WaitReason,
+    WorkingSetEntry,
+)
 from paw_backend.tasks.queueing import BudgetPreset
 from paw_backend.tools import ScopedRepository
 
@@ -36,10 +43,10 @@ from .orchestrator_support import (
     requires_postgres,
 )
 from .repositories_support import fs, requires_git
+from .task_support import BASELINE
 from .worktrees_support import Workspace, commit_file, git
 
 Out = RunOutcome
-R1 = uuid.UUID(int=0x3501)
 
 
 class FakeWorkspaces:
@@ -64,7 +71,7 @@ class FakeWorkspaces:
                 protected=(repository.root,),
             )
             for repository in request.scope.repositories
-            if repository.root is not None
+            if gets_worktree(repository)
         }
 
     async def integrate(self, request):
@@ -89,19 +96,30 @@ class FakeWorkspaces:
 
 
 class WorktreeTestCase(PostgresOrchestratorTestCase):
-    def authority(self, **options):
-        repositories = options.pop(
-            "repositories",
-            [
-                ScopedRepository(
-                    R1,
-                    self.project_id,
-                    f"{ROOT}/one",
-                    RepoAcl.inherit(R1, self.project_id),
-                )
-            ],
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        # The task's target (``create_task``: a Single-Repo Working Set).
+        self.r1 = self.repository_id
+
+    def scoped(self, repo_id, name="one", role=RepoRole.TARGET):
+        return ScopedRepository(
+            repo_id,
+            self.project_id,
+            f"{ROOT}/{name}",
+            RepoAcl.inherit(repo_id, self.project_id),
+            role=role,
         )
+
+    def authority(self, **options):
+        repositories = options.pop("repositories", [self.scoped(self.r1)])
         return FakeAuthority(repositories=repositories, **options)
+
+    async def prepare_with(self, h, plan, repositories):
+        """``prepare`` for a task created with the Working Set ``repositories``."""
+        task_id = await self.create_task(repositories=repositories)
+        await h.orchestrator.submit_plan(task_id, plan)
+        await h.orchestrator.enqueue_task(task_id, preset=BudgetPreset.STANDARD)
+        return task_id
 
 
 @requires_postgres
@@ -186,7 +204,9 @@ class NodeWorktreeTest(WorktreeTestCase):
         h = self.harness(
             runtimes={"local": runtime},
             authority=self.authority(
-                repositories=[ScopedRepository(R1, self.project_id)]
+                repositories=[
+                    ScopedRepository(self.r1, self.project_id, role=RepoRole.TARGET)
+                ]
             ),
             worktrees=workspaces,
         )
@@ -194,6 +214,50 @@ class NodeWorktreeTest(WorktreeTestCase):
         self.assertEqual(
             (await h.orchestrator.run_once("w1")).outcome, Out.DAG_SUCCEEDED
         )
+        self.assertEqual(workspaces.prepared, [])
+
+    async def test_a_referenced_repository_gets_no_worktree(self):
+        # Decision 0036 (2), after #85: only ``working`` / ``target`` repositories
+        # get a worktree; a ``referenced`` one is read from its checkout.
+        r2 = uuid.uuid4()
+        runtime = FakeRuntime("local")
+        workspaces = FakeWorkspaces()
+        h = self.harness(
+            runtimes={"local": runtime},
+            authority=self.authority(
+                repositories=[
+                    self.scoped(self.r1),
+                    self.scoped(r2, "two", RepoRole.REFERENCED),
+                ]
+            ),
+            worktrees=workspaces,
+        )
+        await self.prepare_with(
+            h,
+            make_plan(node("a")),
+            [
+                WorkingSetEntry(self.r1, RepoRole.TARGET, BASELINE),
+                WorkingSetEntry(r2, RepoRole.REFERENCED, BASELINE),
+            ],
+        )
+
+        self.assertEqual(
+            (await h.orchestrator.run_once("w1")).outcome, Out.DAG_SUCCEEDED
+        )
+
+        (assignment,) = runtime.calls_of("a")
+        self.assertEqual(set(assignment.worktrees), {self.r1})
+
+    async def test_only_referenced_repositories_ask_for_no_worktree(self):
+        workspaces = FakeWorkspaces()
+        h = self.harness(
+            authority=self.authority(
+                repositories=[self.scoped(self.r1, role=RepoRole.REFERENCED)]
+            ),
+            worktrees=workspaces,
+        )
+        await self.prepare(h, make_plan(node("a")))
+        await h.orchestrator.run_once("w1")
         self.assertEqual(workspaces.prepared, [])
 
     async def test_a_worktree_the_seam_made_up_is_a_scope_escalation(self):
@@ -222,23 +286,25 @@ class IntegrationNodeTest(WorktreeTestCase):
         self.assertEqual(report.outcome, Out.DAG_SUCCEEDED)
         (request,) = workspaces.integrated
         self.assertEqual(request.workers, ("a", "b"))
-        self.assertEqual([r.repo_id for r in request.scope.repositories], [R1])
+        self.assertEqual([r.repo_id for r in request.scope.repositories], [self.r1])
         snapshot = await h.tasks.restore(task_id)
         self.assertEqual(snapshot.state, TaskState.EVALUATING)
         # The attempt names the integration branch, not a worker's branch.
-        worktree = snapshot.attempt.worktree
+        worktree = snapshot.attempt.repository(self.r1).worktree
         self.assertEqual(
             (worktree.branch, worktree.path, worktree.head_commit),
             ("paw/t/1/_integration", "/srv/paw-orch/trees/_integration", "a" * 40),
         )
         messages = [log.message for log in snapshot.recent_logs]
-        self.assertIn(f"Integration of repository {R1}: 2 branch(es) merged", messages)
+        self.assertIn(
+            f"Integration of repository {self.r1}: 2 branch(es) merged", messages
+        )
 
     async def test_a_conflict_puts_the_task_in_waiting_for_a_human(self):
         report = IntegrationReport(
             (
                 RepositoryIntegration(
-                    R1,
+                    self.r1,
                     IntegrationState.CONFLICT,
                     branch="paw/t/1/_integration",
                     path="/srv/paw-orch/trees/_integration",
@@ -262,7 +328,7 @@ class IntegrationNodeTest(WorktreeTestCase):
         self.assertEqual(snapshot.wait_reason, WaitReason.USER)
         messages = [log.message for log in snapshot.recent_logs]
         self.assertIn(
-            f"Integration of repository {R1}: the branch of node b conflicts"
+            f"Integration of repository {self.r1}: the branch of node b conflicts"
             " (1 file(s))",
             messages,
         )
@@ -271,7 +337,11 @@ class IntegrationNodeTest(WorktreeTestCase):
 
     async def test_after_the_human_resolved_it_the_integration_runs_again(self):
         conflict = IntegrationReport(
-            (RepositoryIntegration(R1, IntegrationState.CONFLICT, blocking_node="a"),)
+            (
+                RepositoryIntegration(
+                    self.r1, IntegrationState.CONFLICT, blocking_node="a"
+                ),
+            )
         )
         workspaces = FakeWorkspaces(report=conflict)
         h = self.harness(authority=self.authority(), worktrees=workspaces)
@@ -349,7 +419,59 @@ class IntegrationNodeTest(WorktreeTestCase):
             (await h.orchestrator.run_once("w1")).outcome, Out.DAG_SUCCEEDED
         )
         snapshot = await h.tasks.restore(task_id)
-        self.assertIsNone(snapshot.attempt.worktree.branch)
+        self.assertIsNone(snapshot.attempt.repository(self.r1).worktree.branch)
+
+    async def test_every_integrated_repository_is_recorded_in_the_attempt(self):
+        # Decision 0036 (11), after #85: each repository has its own state in the
+        # attempt, so a Multi-Repo task records every integration.
+        r2 = uuid.uuid4()
+        report = IntegrationReport(
+            tuple(
+                RepositoryIntegration(
+                    repo,
+                    IntegrationState.MERGED,
+                    branch=f"paw/t/1/_integration/{index}",
+                    path=f"/srv/paw-orch/trees/{index}/_integration",
+                    head=str(index) * 40,
+                    merged=("a",),
+                )
+                for index, repo in enumerate((self.r1, r2), start=1)
+            )
+        )
+        h = self.harness(
+            authority=self.authority(
+                repositories=[
+                    self.scoped(self.r1),
+                    self.scoped(r2, "two", RepoRole.WORKING),
+                ]
+            ),
+            worktrees=FakeWorkspaces(report=report),
+        )
+        task_id = await self.prepare_with(
+            h,
+            make_plan(node("a")),
+            [
+                WorkingSetEntry(self.r1, RepoRole.TARGET, BASELINE),
+                WorkingSetEntry(r2, RepoRole.WORKING, BASELINE),
+            ],
+        )
+
+        self.assertEqual(
+            (await h.orchestrator.run_once("w1")).outcome, Out.DAG_SUCCEEDED
+        )
+
+        attempt = (await h.tasks.restore(task_id)).attempt
+        for index, repo in enumerate((self.r1, r2), start=1):
+            with self.subTest(repo=repo):
+                worktree = attempt.repository(repo).worktree
+                self.assertEqual(
+                    (worktree.branch, worktree.path, worktree.head_commit),
+                    (
+                        f"paw/t/1/_integration/{index}",
+                        f"/srv/paw-orch/trees/{index}/_integration",
+                        str(index) * 40,
+                    ),
+                )
 
     def test_the_seam_is_checked_when_the_orchestrator_is_built(self):
         class Broken:
@@ -374,7 +496,8 @@ class RealGitIntegrationTest(WorktreeTestCase):
         await super().asyncSetUp()
         self.ws = Workspace(user_id=self.user_id, project_id=self.project_id)
         self.addCleanup(self.ws.close)
-        self.repo = self.ws.add_checkout("repo")
+        self.repo = self.ws.add_checkout("repo", role=RepoRole.TARGET)
+        self.repository_id = self.repo  # the task's target (``create_task``)
         self.checkout = self.ws.checkout(self.repo)
         self.main_head = git("rev-parse", "HEAD", cwd=self.checkout)
 
@@ -433,7 +556,7 @@ class RealGitIntegrationTest(WorktreeTestCase):
         self.assertNotEqual(a.worktrees[self.repo].path, b.worktrees[self.repo].path)
         snapshot = await h.tasks.restore(task_id)
         self.assertEqual(snapshot.state, TaskState.EVALUATING)
-        integration = snapshot.attempt.worktree
+        integration = snapshot.attempt.repository(self.repo).worktree
         self.assertEqual(integration.branch, f"paw/{task_id}/1/_integration")
         self.assertEqual(fs.read(integration.path, "a.txt"), "from a\n")
         self.assertEqual(fs.read(integration.path, "b.txt"), "from b\n")

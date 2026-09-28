@@ -116,6 +116,7 @@ from paw_backend.orchestrator.workspaces import (
     RepositoryIntegration,
     WorktreeConflictError,
     WorktreeUnavailableError,
+    gets_worktree,
 )
 from paw_backend.projects.errors import ProjectBusyError
 from paw_backend.tasks import (
@@ -272,12 +273,21 @@ class TaskAuthority:
     ``repositories``. The orchestrator asks again for every tool call, so an ACL
     that was narrowed or a project that was archived takes effect on the next call.
 
-    **The working-set seam.** The repositories of a Multi-Repo task are not
-    persisted yet (issue #85, Decision 0014): the caller decides them here, each
-    as a ``ScopedRepository`` with its worktree, its resolved ``RepoAcl`` and the
-    URLs (**remotes**) that address it: a repository without a registered remote
-    lets no call that carries a URL through (Decision 0006, section 8 (d)). When
-    #85 lands, an implementation of this seam reads the stored working set.
+    **The working-set seam.** The caller builds the repositories here, each as
+    a ``ScopedRepository`` with its worktree, its resolved ``RepoAcl``, the URLs
+    (**remotes**) that address it (a repository without a registered remote lets
+    no call that carries a URL through: Decision 0006, section 8 (d)) and its
+    **role** in the stored Working Set (issue #85, Decision 0030):
+    ``tools.scope.with_working_set_roles(repositories, working_set)``. ``task`` is
+    the snapshot the run was started with: its ``working_set`` may predate a
+    change, and an implementation may read the stored one again
+    (``TaskService.restore``) to see a repository added since. Either way no
+    stale role widens anything: a repository without a role is refused by
+    the Tool Broker (``repository_role_unresolved``), and the Broker admits every
+    call that touches a repository on the roles stored **now**
+    (``TaskService.admit_repository_use``), so a scope older than a downgrade or a
+    removal cannot widen anything. A node keeps the roles of its parent
+    (``scope.derive_child_scope``); no node role may change the Working Set.
     """
 
     async def parent_grant(self, task: TaskSnapshot) -> AgentGrant:
@@ -1345,29 +1355,32 @@ class Orchestrator:
         )
 
     async def _record_integration(self, run: _Run, report: IntegrationReport) -> None:
-        """The attempt's worktree state (``TaskService.update_attempt``) names the
-        integration branch when ONE repository was integrated: the attempt has a
-        single worktree field, and for a Multi-Repo task each repository's
-        integration is in the task log (and ``NodeWorkspaces`` can say it again).
-        Best effort: the log already says what happened."""
-        merged = [r for r in report.repositories if r.state is IntegrationState.MERGED]
-        if len(merged) != 1 or len(report.repositories) != 1:
-            return
-        (repository,) = merged
-        try:
-            await self._tasks.update_attempt(
-                run.task.id,
-                run=run.run,
-                worktree=WorktreeState(
-                    repository.branch, repository.path, repository.head
-                ),
-            )
-        except StaleRunError:
-            run.guard.stop(StopReason.SUPERSEDED)
-        except Exception as error:
-            logger.warning(
-                "Recording the integration failed (%s)", error_class_of(error)
-            )
+        """Each integrated repository's integration branch, worktree and commit
+        go into its own state in the attempt (``TaskService.update_attempt`` with
+        its ``repository_id``; Decision 0036, 11): a Multi-Repo task records every
+        repository. The new HEAD resets that repository's review and evaluation
+        results (they belonged to another revision). Best effort: the task log
+        already says what happened; a repository the attempt does not have
+        (``RepositoryNotInAttemptError``) is skipped."""
+        for repository in report.repositories:
+            if repository.state is not IntegrationState.MERGED:
+                continue
+            try:
+                await self._tasks.update_attempt(
+                    run.task.id,
+                    run=run.run,
+                    repository_id=repository.repo_id,
+                    worktree=WorktreeState(
+                        repository.branch, repository.path, repository.head
+                    ),
+                )
+            except StaleRunError:
+                run.guard.stop(StopReason.SUPERSEDED)
+                return
+            except Exception as error:
+                logger.warning(
+                    "Recording the integration failed (%s)", error_class_of(error)
+                )
 
     async def _end_after_stop(
         self, run: _Run, stop: _Stop, dag: DagRecord | None
@@ -1707,14 +1720,15 @@ class Orchestrator:
         self, run: _Run, spec: _Spec, context: TaskContext
     ) -> Mapping[uuid.UUID, NodeWorktree]:
         """The dedicated worktrees of a Worker node that may write (PAW-035): one
-        per repository of its scope that has a checkout. None for any other node,
+        per repository of its scope that has a checkout and is ``working`` /
+        ``target`` (``gets_worktree``). None for any other node,
         or when the orchestrator has no ``NodeWorkspaces``."""
         if (
             self._worktrees is None
             or spec.node is None
             or spec.role is not NodeRole.WORKER
             or Capability.PROJECT_REPO_WRITE not in context.grant.capabilities
-            or not any(r.root is not None for r in context.scope.repositories)
+            or not any(gets_worktree(r) for r in context.scope.repositories)
         ):
             return {}
         prepared = await self._worktrees.prepare_node(

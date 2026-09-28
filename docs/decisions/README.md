@@ -38,6 +38,8 @@
 | [0031](0031-audit-retention-scheduler.md) | `audit_events` の保存期間・退避を定期実行する仕組み（systemd timer + Server ローカルの Command `audit-retention-run`、失敗の検知・通知、実行ごとの Audit、Advisory Lock。Decision 0027 の 6 への追補。Issue #117） | Approved |
 | [0032](0032-passkey-owner-reset.md) | 他の Account の Passkey の Reset と 1 回限りの Password 再設定の方針（誰が誰を、Password を消して再設定 Token を発行、`setup_tokens` の `password_reset` と Owner を拒否する関数、有効期間。Issue #108） | Approved |
 | [0033](0033-user-invitation-and-device-pairing.md) | User の招待・端末の Pairing（QR / リンク、Owner / Admin の信頼済み端末の承認）・User Lifecycle の方針（招待 Token の期限、Pairing の状態遷移、削除・復元の権限、含めないこと。PAW-024） | Approved |
+| [0034](0034-memory-versioning-freshness.md) | Memory の Relation の意味・手動編集の Version（誰がどの Scope を変えられるか）・手動で書ける鮮度・Stale Candidate / 期限切れ / Session 終了の処理（PAW-042。Issue #36） | Approved |
+| [0035](0035-working-set-capability-grants-and-legacy-tasks.md) | `project.task.working_set.manage` の付与先と委任、作成時の Working Set、Revision 0085 より前の Task の状態の退避（Issue #85。Decision 0030 が決めていない点） | Approved |
 | [0036](0036-parallel-worktree-integration.md) | Parallel Worktree / Integration Node の方針（Worker ごとの worktree・branch の置き場所と名前、Worker の branch の起点、統合の base・順序・`--no-ff`、Conflict と未 Commit の変更で `waiting`、統合後の Test → Evaluator → Review、PR / Push を別 Issue にすること、Wrapper の許可リストへの追加。Issue #31） | Approved |
 
 運用は [AGENTS.md](../../AGENTS.md) の「仕様変更」に従います。

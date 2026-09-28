@@ -8,6 +8,7 @@ is the implementation), it asks it for two things and nothing else:
 * :meth:`NodeWorkspaces.prepare_node`, before an attempt of a **Worker** node
   whose grant may write to a repository (``project.repo.write``): a dedicated
   worktree and branch for each repository of the node's scope that has a checkout
+  and is ``working`` or ``target`` in the Working Set (:func:`gets_worktree`)
   (``REQUIREMENTS.md``: "Write可能なSub-Agentは原則それぞれ専用のworktree / branch
   を使用する"). The node's scope then points at the worktree, not at the user's
   own checkout (``scope.derive_child_scope(worktrees=...)``), and the runtime is
@@ -30,13 +31,25 @@ from enum import StrEnum
 from typing import ClassVar, Protocol
 
 from paw_backend.orchestrator.errors import OrchestratorError
-from paw_backend.tasks import TaskRun, TaskSnapshot
-from paw_backend.tools import TaskScope
+from paw_backend.tasks import RepoRole, TaskRun, TaskSnapshot
+from paw_backend.tools import ScopedRepository, TaskScope
 
 # The fixed names recorded for a node attempt that could not get its worktree
 # (``Orchestrator._attempt``). Orchestrator names: a runtime cannot report them.
 WORKTREE_UNAVAILABLE = "WorktreeUnavailable"
 WORKTREE_CONFLICT = "WorktreeConflict"
+
+# The Working Set roles whose repositories get a worktree and an integration
+# branch (Decision 0036, 2; issue #85): a ``referenced`` repository is only read,
+# and one whose role could not be resolved (``None``) gets nothing (fail-closed).
+WORKTREE_ROLES = frozenset({RepoRole.WORKING, RepoRole.TARGET})
+
+
+def gets_worktree(repository: ScopedRepository) -> bool:
+    """Whether a writing node works on ``repository`` in a worktree of its own
+    and its branch is integrated: it has a checkout and its Working Set role is
+    ``working`` or ``target``."""
+    return repository.root is not None and repository.role in WORKTREE_ROLES
 
 
 class WorktreeProblem(StrEnum):
