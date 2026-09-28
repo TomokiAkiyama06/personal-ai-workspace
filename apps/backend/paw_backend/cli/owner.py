@@ -95,6 +95,11 @@ def build_parser() -> argparse.ArgumentParser:
             "Server-local Owner management. Reads PAW_OPERATOR_DATABASE_URL (or "
             "PAW_DATABASE_URL) and the other PAW_* settings from the environment."
         ),
+        epilog=(
+            "Audit retention (Issue #117) has its own commands, audit-retention-run "
+            "and audit-retention-check, which use PAW_MIGRATION_DATABASE_URL: see "
+            "python -m paw_backend.cli audit-retention-run --help."
+        ),
         allow_abbrev=False,
     )
     commands = parser.add_subparsers(dest="command", required=True)

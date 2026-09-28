@@ -80,6 +80,8 @@ class PairingEnd(StrEnum):
     ACCOUNT_CLOSED = "account_closed"
     # The approver entered a wrong confirmation code too many times.
     CONFIRMATION_FAILED = "confirmation_failed"
+    # The Owner / an Admin reset the account's Passkeys and password (#108).
+    CREDENTIALS_RESET = "credentials_reset"
 
 
 def _in(column: str, values: Iterable[str], name: str) -> CheckConstraint:

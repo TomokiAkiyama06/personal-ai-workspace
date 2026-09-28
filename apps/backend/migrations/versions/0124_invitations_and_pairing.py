@@ -1,7 +1,7 @@
 """User invitations, device pairing and the user lifecycle (PAW-024).
 
 Revision ID: 0124
-Revises: 0034
+Revises: 0108
 Create Date: 2026-09-28
 
 The revision id is the issue's (PAW-024), written 0124 so that it is not read as
@@ -74,7 +74,7 @@ from alembic import op
 from paw_backend.db_roles import configured_app_role, grant_app_privileges
 
 revision: str = "0124"
-down_revision: str | Sequence[str] | None = "0034"
+down_revision: str | Sequence[str] | None = "0108"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -88,7 +88,8 @@ NEW_THROTTLE_SCOPES = OLD_THROTTLE_SCOPES + ", 'pairing_source', 'pairing_global
 INVITATION_ENDS = "'revoked', 'superseded', 'cancelled'"
 PAIRING_STATES = "'issued', 'claimed', 'approved', 'completed', 'rejected', 'revoked'"
 PAIRING_ENDS = (
-    "'revoked_by_user', 'superseded', 'account_closed', 'confirmation_failed'"
+    "'revoked_by_user', 'superseded', 'account_closed', 'confirmation_failed', "
+    "'credentials_reset'"
 )
 USER_STATUSES = "'invited', 'active', 'pending_deletion', 'deleted'"
 

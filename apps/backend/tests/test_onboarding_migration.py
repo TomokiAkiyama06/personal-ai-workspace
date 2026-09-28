@@ -36,7 +36,7 @@ from .memory_support import (
 from .test_migrations import offline_config
 
 REVISION = "0124"
-PREVIOUS = "0034"
+PREVIOUS = "0108"
 COMPARED = (*TABLE_NAMES, "auth_sessions", "auth_throttles")
 SCHEMA = "paw_onboarding_drift_check"
 SOURCE = (

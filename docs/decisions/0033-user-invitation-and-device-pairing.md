@@ -170,7 +170,9 @@ Human は、作業 Session で上の 13 点について推奨つきの説明を�
 - **期限**: Code は Claim の行にあり、Claim の期限（Claim から 10 分、`PAW_PAIRING_TOKEN_TTL_SECONDS`）が過ぎれば承認できない。
 - **Log・Audit・例外**: Code は Log、Audit、例外の Message、`repr` のどれにも入らない。Audit は `auth.pairing.approve` の allow `approved`、deny `confirmation_code_mismatch`・`confirmation_attempts_exhausted`（Code なし、`audit_ref` だけ）。
 - **塞いだもの**: QR を盗み見た第三者が正しい端末より先に Token を出すと、承認待ちは第三者の 1 件になり、正しい端末の提出は拒否される。承認する人の手元の新しい端末には Code が表示されないので、承認は通らず、3 回の誤りで Pairing は終わる（判断点 12 が述べた乗っ取り）。
-- **実装が置いた値**: Code の長さ（8 文字）、文字の集合、試行の上限（3 回）は要件にも回答にもない値で、実装が置いた定数（`CONFIRMATION_LENGTH`、`CONFIRMATION_ALPHABET`、`CONFIRMATION_MAX_ATTEMPTS`）である。変えても Schema は変わらない。
+- **実装が置いた値**: Code の長さ（8 文字）、文字の集合、試行の上限（3 回）は、最初の回答にはなく実装が置いた定数（`CONFIRMATION_LENGTH`、`CONFIRMATION_ALPHABET`、`CONFIRMATION_MAX_ATTEMPTS`）で、長さと試行の上限は後に Human が確認した（下記）。変えても Schema は変わらない。
 - Schema: Migration `0124` の `device_pairings` に `confirm_salt`、`confirm_hash`、`confirm_attempts` の列と CHECK 制約（Claim があるときだけ Code があるなど）、`ended_reason` の値 `confirmation_failed` を足した（この Migration はまだ main に入っていないので、新しい Revision にせず 0124 を変えた）。
+
+- **実装の確認（2026-09-28、Human が作業 Session 内で直接回答）**: Human は、上の実装の形を確認して承認した。具体的には、確認 Code を両方の端末に表示して見比べる形ではなく、**新しい端末だけに表示し、承認する信頼済み端末で入力する形**とすること、Code の長さを **8 文字**、試行の上限を **3 回**とすること（`CONFIRMATION_LENGTH`・`CONFIRMATION_MAX_ATTEMPTS`）である。
 
 承認後に方針を変える場合は、この Decision を書き換えず、新しい Decision から `Supersedes` する。

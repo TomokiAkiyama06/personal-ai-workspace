@@ -207,17 +207,31 @@ class PasskeyRegistry:
             )
         ).scalar_one_or_none()
 
-    async def revoke_all_in(self, session: AsyncSession, user_id: uuid.UUID) -> None:
-        """Owner Recovery: every Passkey of the user ends (Decision 0005, point 7).
+    async def revoke_all_in(
+        self,
+        session: AsyncSession,
+        user_id: uuid.UUID,
+        *,
+        reason: PasskeyRevokeReason = PasskeyRevokeReason.RECOVERY,
+    ) -> int:
+        """Every Passkey of the user ends; how many did.
 
-        The ``credential_invalidators`` of ``AuthService`` run this in the
-        redemption's transaction: the token is spent, the password replaced, the
-        sessions ended and the Passkeys revoked together or not at all. The user then
-        signs in with the new password into an enrolment-only session (a required
-        Passkey and none registered), which is the way back, never a dead end.
+        Owner Recovery (Decision 0005, point 7): the ``credential_invalidators`` of
+        ``AuthService`` run this in the redemption's transaction: the token is spent,
+        the password replaced, the sessions ended and the Passkeys revoked together
+        or not at all. The user then signs in with the new password into an
+        enrolment-only session (a required Passkey and none registered), which is
+        the way back, never a dead end. An administrator's reset of another account
+        (#108, ``reason=ADMIN_RESET``) uses it the same way.
+
+        The Passkey rows are locked (by the UPDATE) before the caller touches any
+        session row (the lock order of ``lock_active_in``); the user's open
+        challenges are deleted too.
         """
         _session(session)
         _uuid("user_id", user_id)
+        if not isinstance(reason, PasskeyRevokeReason):
+            raise InvalidAuthInputError("reason")
         result = await session.execute(
             text(
                 f"""UPDATE user_passkeys
@@ -228,7 +242,7 @@ class PasskeyRegistry:
             {
                 "now": self.now(),
                 "user_id": user_id,
-                "reason": PasskeyRevokeReason.RECOVERY.value,
+                "reason": reason.value,
             },
         )
         revoked = len(result.all())
@@ -237,8 +251,9 @@ class PasskeyRegistry:
             {"user_id": user_id},
         )
         if revoked:
-            # Only the count: the credential ids stay out of the logs.
-            logger.info("Owner Recovery revoked %d passkey(s)", revoked)
+            # Only the count and the enum: the credential ids stay out of the logs.
+            logger.info("Revoked %d passkey(s) (%s)", revoked, reason.value)
+        return revoked
 
     # -- challenges -------------------------------------------------------------------
 

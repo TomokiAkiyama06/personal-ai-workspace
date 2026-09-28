@@ -6,8 +6,11 @@ credential here; Login / Session / Password (PAW-022) and Passkey (PAW-023) add
 their own tables and columns.
 
 ``setup_tokens`` holds the one-time tokens of the initial Owner setup and of
-Owner recovery. A token is stored only as a salted HMAC (``salt`` and
-``secret_hash``); the token itself is shown once to the operator and never
+Owner recovery, and (revision ``0108``, #108) the one-time password reset tokens
+of an Admin or a User, which only the database function
+``paw_issue_password_reset_token`` creates (it refuses the Owner). A token is
+stored only as a salted HMAC (``salt`` and ``secret_hash``); the token itself is
+shown once to the operator (or the Owner / Admin who reset the account) and never
 stored.
 
 Two identifiers, never to be mixed up: ``id`` is the token's public lookup key
@@ -59,6 +62,10 @@ class UserStatus(StrEnum):
 class TokenPurpose(StrEnum):
     SETUP = "setup"  # the initial Owner setup
     RECOVERY = "recovery"  # Owner recovery (all Passkeys / devices lost)
+    # An Admin's / a User's one-time password reset, issued by the Owner (or, for a
+    # User, an Admin) with the reset of their Passkeys (#108, revision 0108). Never
+    # for the Owner: the database function that creates it refuses one.
+    PASSWORD_RESET = "password_reset"
 
 
 # A human user has one of these roles. ``SystemRole.SYSTEM`` is the backend's own

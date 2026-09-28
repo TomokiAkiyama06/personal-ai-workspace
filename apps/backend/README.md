@@ -49,7 +49,7 @@ Python 側の Package（`pgvector-python`）は使わず、`paw_backend/memory/v
 apps/backend/
 ├─ pyproject.toml          # 依存（完全一致で固定）と Ruff 設定
 ├─ alembic.ini             # Alembic 設定（DB URL は持たない）
-├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0022 は Password / Session / Login Throttle / 認証 Policy、0023 は Passkey / Passkey の Challenge / Session の Gate、0026 は Project、0027 は Repository 登録・Remote・Checkout、0030 は Shared Connection・Quota・Usage、0031 は Tool Approval、0033 は Queue / Budget / Loop、0034 は DAG Agent Orchestrator（Plan・DAG・Node の試行）、0040 は Memory Schema、0041 は Memory Journal / Consolidation Queue、0043 は `memory_versions` の全文検索の Index、0046 は Shared Memory Candidate、0050 は Research Scratch、0052 は Evidence / Claim Provenance、0071 は Memory の Status / Stale 状態の変更履歴、0083 は `tasks (project_id, state)` の Index、0087 は外部送信の Audit の `audit_events.details`、0124 は招待・端末の Pairing・User の状態の履歴）
+├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0022 は Password / Session / Login Throttle / 認証 Policy、0023 は Passkey / Passkey の Challenge / Session の Gate、0026 は Project、0027 は Repository 登録・Remote・Checkout、0030 は Shared Connection・Quota・Usage、0031 は Tool Approval、0033 は Queue / Budget / Loop、0034 は DAG Agent Orchestrator（Plan・DAG・Node の試行）、0040 は Memory Schema、0041 は Memory Journal / Consolidation Queue、0043 は `memory_versions` の全文検索の Index、0046 は Shared Memory Candidate、0050 は Research Scratch、0052 は Evidence / Claim Provenance、0071 は Memory の Status / Stale 状態の変更履歴、0083 は `tasks (project_id, state)` の Index、0087 は外部送信の Audit の `audit_events.details`、0108 は他の Account の Passkey の Reset（`admin_reset`）と 1 回限りの Password 再設定 Token（`password_reset`）とその発行の関数、0124 は招待・端末の Pairing・User の状態の履歴）
 ├─ paw_backend/
 │  ├─ app.py               # create_app(settings)
 │  ├─ config.py            # PAW_ 環境変数から読む Settings
@@ -64,7 +64,7 @@ apps/backend/
 │  │  ├─ passkeys/         # Passkey（WebAuthn）: Ceremony の検証、Challenge、登録・認証・失効、Passkey の Step-up の Verifier、Tool Broker の強い承認の Step-up（PAW-023）
 │  │  └─ onboarding/       # 招待、QR / リンクの端末の Pairing、User の Lifecycle（削除・復元）、1 回限りの Token（PAW-024）
 │  ├─ identity/            # 最小の users、One-time Token。`redeemer.py` は Web 側、`operator.py`（Owner の作成・Token の発行）は cli だけが使う（PAW-021）
-│  ├─ cli/                 # server-local の管理コマンド `python -m paw_backend.cli`（PAW-021）
+│  ├─ cli/                 # server-local の管理コマンド `python -m paw_backend.cli`（PAW-021。`audit-retention-*` は Issue #117）
 │  ├─ orchestrator/        # DAG Agent Orchestrator: Plan、Scheduler、DAG の永続化と Fencing、Runtime の Protocol、Tool・Budget の Gateway、Project 削除の Sweep（PAW-034）
 │  ├─ tasks/               # Agent Task の状態遷移と永続化（PAW-032）。`project_gate.py` は Project の状態 Gate の Protocol（Issue #83）
 │  │  └─ queueing/         # Task Queue、Budget、Loop 検知、Escalation の判断（PAW-033）
@@ -83,6 +83,7 @@ apps/backend/
 │  └─ api/
 │     ├─ deps.py           # FastAPI Dependency
 │     └─ v1/               # /api/v1 の Router（health、events、auth、passkeys、accounts）
+├─ deploy/systemd/         # Audit の保存期間・退避の定期実行の Unit File の例（Issue #117）
 └─ tests/                  # unittest
 ```
 
@@ -139,7 +140,8 @@ Database には pgvector が必要です（CI は `pgvector/pgvector:pg18` を�
 | `PAW_OPERATOR_DATABASE_URL` | なし | Owner の管理コマンド（`python -m paw_backend.cli`）の接続先（Token を作れる Role）。未設定のときだけ `PAW_DATABASE_URL` を使い、警告する。[Owner の初期設定と復旧](#owner-の初期設定と復旧) |
 | `PAW_OPERATOR_DATABASE_ROLE` | なし | 上の Role 名（`PAW_APP_DATABASE_ROLE` と同じ検証）。Migration `0021` が、実在するこの Role に管理コマンドの権限を与える |
 | `PAW_SETUP_TOKEN_TTL_SECONDS` | `1800` | Owner の Setup / Recovery Token の有効期間（60〜14400 秒） |
-| `PAW_SETUP_TOKEN_MAX_ATTEMPTS` | `5` | 1 つの Token に許す試行回数（1〜20）。使い切った Token は無効になる |
+| `PAW_SETUP_TOKEN_MAX_ATTEMPTS` | `5` | 1 つの Token に許す試行回数（1〜20）。使い切った Token は無効になる（Admin・User の Password 再設定 Token にも適用） |
+| `PAW_PASSWORD_RESET_TOKEN_TTL_SECONDS` | `86400` | Owner / Admin が他の Account の Passkey を Reset したときに発行する、1 回限りの Password 再設定 Token の有効期間（600〜259200 秒）。[他の Account の Passkey の Reset](#他の-account-の-passkey-の-reset108) |
 | `PAW_INVITATION_TTL_SECONDS` / `PAW_PAIRING_TOKEN_TTL_SECONDS` | `259200` / `600` | 招待 Token の有効期間（600 秒〜14 日）と、Pairing Token・承認待ちの有効期間（60〜3600 秒。要件の初期値は 10 分）。試行の上限は `PAW_SETUP_TOKEN_MAX_ATTEMPTS` を共有する。[User Invite / Device Pairing / Lifecycle](#user-invite--device-pairing--lifecycle)（Decision 0033、Approved） |
 | `PAW_PASSWORD_HASH_TIME_COST` / `PAW_PASSWORD_HASH_MEMORY_KIB` / `PAW_PASSWORD_HASH_PARALLELISM` | `3` / `65536` / `4` | Argon2id の Parameter（RFC 9106 の 2 番目の推奨）。メモリは 19456〜1048576 KiB（OWASP の最小以上）。[Login / Session / Password Policy](#login--session--password-policy) |
 | `PAW_PASSWORD_HASH_CONCURRENCY` | `2` | 同時に計算する Hash の数（1〜16）。待つ Job は最大 64 で、超えると 503 |
@@ -796,7 +798,7 @@ Application 起動時に一度、接続 User の権限を確認し、**`WARNING`
 #### 保存期間・Partition・退避（Issue #86、Migration `0086`）
 
 Issue [#86](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/86) と [Decision 0027](../../docs/decisions/0027-audit-retention-and-partitioning.md)（2026-09-27 に Human が承認）が、
-`audit_events` の保存期間・Partition・退避の方針を決める。**定期的に呼び出す仕組み（cron・systemd timer・Admin Capability）は別 Issue で用意するまで無いため、下の仕組みはコードとして持つだけで、まだ実運用では動かない。**
+`audit_events` の保存期間・Partition・退避の方針を決める。定期的に呼び出す仕組みは、下の「定期実行（Issue #117）」（[Decision 0031](../../docs/decisions/0031-audit-retention-scheduler.md)、2026-09-28 承認）にある。**運用者が Timer を有効にするまでは、実運用では動かない。**
 
 - `audit_events` を `recorded_at`（Database の時計。Trigger が強制するので単調に増える）で**月ごとの Range Partition** にする。
   Migration `0086` は、既存の Table を `audit_events_p_legacy`（Migration 適用時までの全行、`FOR VALUES FROM (MINVALUE)`）に改名し、その場所に新しい Partition 化された `audit_events` を作る
@@ -805,7 +807,7 @@ Issue [#86](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/86) 
 - `paw_backend/authz/retention/`（`rules.py` が純粋関数、`service.py` の `AuditRetentionService` が唯一 SQL を実行する Store。PAW-046 の Lifecycle / PAW-053 の Privacy Filter と同じ構成）が、
   `ensure_partitions`（先の月の Partition を用意する）・`archive_due_partitions`・`purge_due_partitions`（既定で無効。明示的に設定したときだけ）を提供する。
   退避・削除の操作自体も、既存の `audit_events` に新しい `action`（`audit.retention.partition_created` / `partition_archived` / `partition_purged`）として記録する（列や CHECK 制約は増やさない。Partition 名は `reason` 列に入る）。
-- **実行スケジューラはない**（Issue の指示どおり）。`AuditRetentionService.run_maintenance()` を、cron・systemd timer・将来の Admin Capability のいずれかから呼ぶ想定。
+- `AuditRetentionService` 自体はスケジューラを持たない。定期実行は下の「定期実行（Issue #117）」の Command と systemd timer が行う。
 - `AuditRetentionService` は `PAW_MIGRATION_DATABASE_URL`（Table の Owner）が要る。Partition の作成・退避・削除はいずれも DDL で、`PAW_APP_DATABASE_ROLE` では実行できない。
 - 追記専用の Trigger は親に 1 つ定義すれば新しい Partition にも自動で複製されるが、**文レベルの TRUNCATE 拒否 Trigger は複製されない**（PostgreSQL の仕様）。
   `AuditRetentionService` が新しい Partition を作る・受け取るたびに、明示的にこの Trigger を作る。
@@ -814,12 +816,49 @@ Issue [#86](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/86) 
 - 詳細・未決点・リスクは [Decision 0027](../../docs/decisions/0027-audit-retention-and-partitioning.md) と、`tests/test_retention_rules.py` / `tests/test_retention_postgres.py` を参照。
 - **Migration の鎖。** Migration `0086` の `down_revision` は `0071` です（鎖は `0001 → 0025 → 0032 → 0040 → 0021 → 0033 → 0031 → 0050 → 0046 → 0052 → 0026 → 0087 → 0022 → 0083 → 0043 → 0030 → 0027 → 0071 → 0086`）。`0071`（このPRが分岐した時点の後にmainへ入った#109）と同様、`audit_events` に触れる直前の Revision（`0025`、`0087`）より後であれば足りるため、mainの最新に合わせて並べています。
 
+##### 定期実行（Issue #117）
+
+Issue [#117](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/117) と [Decision 0031](../../docs/decisions/0031-audit-retention-scheduler.md)（2026-09-28 承認。運用者が Unit File を配備し Timer を有効にしてから実運用で動く）。
+
+- `python -m paw_backend.cli audit-retention-run` が 1 回の保守を行う（`paw_backend/authz/retention/runner.py` の `run_scheduled_maintenance`）。
+  Advisory Lock を取り（別の実行が進行中なら何もせず終了コード 1）、`ensure_partitions` → `archive_due_partitions` → `purge_due_partitions` を順に実行し（最初の失敗で止める）、
+  Live の Partition が翌月末まで途切れずにあるかを確かめ、結果を `audit_events` に 1 行書く（`audit.retention.maintenance_completed`、`reason` は `created=N archived=N purged=N`／
+  `audit.retention.maintenance_failed`、`reason` は `<step>:<例外の型>`。`resource_kind` は `audit_retention_run`。Step とは別の Transaction なので、失敗も記録される）。
+- 接続は **`PAW_MIGRATION_DATABASE_URL` だけ**（Table の Owner）。`PAW_DATABASE_URL` へは Fallback しない（無ければ終了コード 2）。単一 Role の開発環境では両方に同じ URL を設定する。
+- 終了コード: `0` 成功、`1` 拒否（使い方、不正な値、同時実行）、`2` 環境（設定、URL 未設定、Database に到達できない）、`3` 保守の失敗（Step の例外、被覆の不足、結果を Audit に書けない、SIGTERM で打ち切られた）。
+  URL・例外の Message は表示しない（型の名前だけ）。
+- 各 Step の Transaction は `lock_timeout` を 5 秒にする（`paw_backend/cli/retention.py` の `DDL_LOCK_TIMEOUT_MS`）。`audit_events` の親への DDL が長い読み取り（pg_dump など）の後ろで待つと、
+  その間すべての `audit_events` への INSERT が後ろに並ぶため。待ちきれない Step は失敗（`<step>:OperationalError`、終了コード 3）として記録し、翌日の実行がやり直す。
+- SIGTERM（systemd の `TimeoutStartSec`・`systemctl stop`）は実行中の Task の取り消しに変え、止まった Step を `<step>:CancelledError` として記録してから終了コード 3 で終わる。
+  SIGKILL・電源断などで Process が消えた場合は行が残らない（Lock は PostgreSQL が Connection とともに解放する）。
+- Lock 用の Connection が実行中にサーバーに切られた場合（`idle_session_timeout` など）、Lock はそこで外れる。解放の失敗は Log に残すだけで、実行の結果を置き換えない。
+- Purge は `--purge-after-days N`（180 以上）を指定したときだけ。`archive_after_days`・`horizon_months` は Decision 0027 の値で固定。
+- `python -m paw_backend.cli audit-retention-check [--months-ahead N]`（既定 1）は読み取りだけの確認。被覆が足りなければ終了コード 3。外部の監視から呼べる。
+- systemd の Unit File の例は [`deploy/systemd/`](deploy/systemd/)。`paw-audit-retention.timer`（`OnCalendar=daily`、`Persistent=true`）が `paw-audit-retention.service`（oneshot）を起動し、
+  0 以外で終わると `OnFailure=` の `paw-audit-retention-failure.service`（`crit` の Journal Entry と `wall`。通知経路は配備ごとに差し替える）が動く。
+  `PAW_MIGRATION_DATABASE_URL` は root だけが読める `/etc/paw/audit-retention.env`（`chmod 600`）に置く。cron でも同じ Command を使える。
+- **Backend を動かす OS User で実行しない。** この Job は Table の Owner の Credential を持つ。同じ uid の Process は `/proc/<pid>/environ` からそれを読め、
+  Job が実行する Code や venv に書き込める User は次の実行に何でもさせられる。例の Unit は専用の `paw-maint`（`useradd --system --no-create-home --shell /usr/sbin/nologin paw-maint`）で動かす。
+  `/opt/paw/apps/backend` と `/opt/paw/venv` は root が所有し、Backend の User にも `paw-maint` にも書き込ませない（Operator の Credential を Backend の User に読ませないのと同じ規則）。
+
+```bash
+# 配備（root。Path と User は配備に合わせて Unit File を直す）
+cp apps/backend/deploy/systemd/paw-audit-retention*.{service,timer} /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now paw-audit-retention.timer
+systemctl list-timers paw-audit-retention.timer
+journalctl -u paw-audit-retention.service
+```
+
+- Test: `tests/test_retention_schedule.py`（Database なし。被覆の規則、Fake の Service での Runner、Command の終了コード、Unit File の内容）、
+  `tests/test_retention_cli_postgres.py`（実 PostgreSQL。Owner での成功と Audit、冪等性、Lock、別 Process、Owner でない Role での失敗と Audit、`lock_timeout`、Lock の Connection の切断、SIGTERM）。
+
 #### 残っているリスクと既知の制限
 
 - 許可した読み取り（`DENIED_ONLY`。人間の `project.read`、`shared_memory.read`、`memory.read`）は記録しません。誰が何を読んだかは Audit から分かりません（Agent の読み取りは記録します）。
   `memory.read`（自分の Long-term Memory の読み取り。Hybrid Retrieval の `user` Scope）は [Decision 0024](../../docs/decisions/0024-memory-read-capability.md) で足しました。Role は `memory.use` と同じ（User / Admin / Owner。`system` は持たない）で、委任できます。`memory.use`（書き込み・Candidate の提案など）は `REQUIRED` のままです。読める範囲を誤ることへの備えは Audit ではなく、Backend の ACL と Permission Leakage 0 の Test（`test_retrieval_leakage.py`、`test_retrieval_eligibility.py`）です。
 - 認証済みの User の拒否は、1 回ごとに 1 行を書きます。この拒否の回数制限はありません（Login の Backoff と Token の Rate Limit は別で、[Login / Session / Password Policy](#login--session--password-policy)）。未認証の拒否は Log だけです。
-- 保存期間・Partition・古い行の退避は、上の「保存期間・Partition・退避（Issue #86）」のとおり Decision 0027 は承認済みですが、定期的に呼び出す仕組みが別 Issue で用意されるまで、実運用はまだしません。
+- 保存期間・Partition・古い行の退避は、上の「保存期間・Partition・退避（Issue #86）」のとおり Decision 0027 は承認済みです。定期実行の仕組み（「定期実行（Issue #117）」）は Decision 0031 が 2026-09-28 に承認済みですが、運用者が Timer を有効にするまで、実運用はまだしません。
 - Repository の ACL の保存と解決は呼び出す側（PAW-027 など）の責任です。この Backend は、渡された `RepoAcl` を判定するだけです。
   Override が Project の Role を広げてよいか、User 単位の許可リストを持つかは、要件が定めておらず、Decision 0004 で Human が「狭めるだけ・権限の集合」で承認しました（2026-09-25）。
 - `Scope.SELF` の Capability（`chat.use`、`memory.use` など）は `Project` の状態と Member 資格を見ません
@@ -1006,7 +1045,7 @@ Passkey の登録・認証・強制と Step-up の Passkey は PAW-023 で実装
 | Endpoint | 認可 | 内容 |
 | --- | --- | --- |
 | `POST /login` | 公開（`tests/test_authz_routes.py` の公開一覧に理由つき） | Login name と Password（と `remember_me`、`device_name`）で Session を始める。Cookie を設定する |
-| `POST /token/redeem` | 公開（同上） | Owner の Setup / Recovery Token と新しい Password を受け取る |
+| `POST /token/redeem` | 公開（同上） | Owner の Setup / Recovery Token、または Admin・User の 1 回限りの Password 再設定 Token（#108）と新しい Password を受け取る |
 | `GET /session` | `account.read` | 現在の Session、User、`auth`（Passkey の要求、Step-up の状態） |
 | `GET /sessions` | `account.read` | 自分の端末（有効な Session）の一覧。最終利用日時つき |
 | `POST /logout` | `account.manage` | 現在の Session を終える。Cookie を消す |
@@ -1015,6 +1054,7 @@ Passkey の登録・認証・強制と Step-up の Passkey は PAW-023 で実装
 | `POST /password/change` | `account.manage` | 現在の Password で本人確認して変更する（`revoke_other_sessions` で他の端末を Logout） |
 | `POST /step-up` | `account.manage` | **Password を**再入力して Step-up する（Session ID を作り直す。Passkey の Step-up は `/auth/passkeys/authenticate/*`） |
 | `POST /users/{id}/unlock` | `admin.users.manage` | Login の Lock を解除する（Admin は User だけ、Admin と Owner は Owner だけ）。**直近の Passkey の Step-up が要る**（PAW-023） |
+| `POST /users/{id}/passkeys/reset` | `admin.users.manage` | 他の Account の Passkey をすべて失効し、Session をすべて終え、Password を消して 1 回限りの Password 再設定 Token を発行する（Owner は Admin と User、Admin は User だけ。Owner と自分自身は対象外）。**直近の Passkey の Step-up が要る**（#108。[他の Account の Passkey の Reset](#他の-account-の-passkey-の-reset108)） |
 | `GET /policy` | `admin.auth_policy.view`（Admin、Owner） | Workspace の認証 Policy |
 | `PUT /policy` | `owner.auth_policy.manage`（**Owner だけ**） | Policy を変える（`expected_version` と直近の **Passkey の** Step-up が要る。Passkey を設定した環境で使える） |
 
@@ -1177,7 +1217,7 @@ PAW_PASSKEY_ORIGINS=https://paw.example.org
 ```
 
 - `PAW_PASSKEY_RP_ID` は WebAuthn の Relying Party ID（公開 Host 名の Domain。IP は不可）。`PAW_PASSKEY_ORIGINS` は、Browser が Ceremony を実行してよい Origin の完全一致（Scheme・Host・Port。最大 8、`https`。`localhost` だけ `http` も可。Host は RP ID か、その Sub-domain）です。Browser が署名した `clientDataJSON` の Origin がこの一覧のどれかと**文字列として**一致しなければ拒否します。`PAW_ALLOWED_ORIGINS`（CSRF と WebSocket）とは別の設定です。
-- **設定がなければ Passkey の機能は切れ、Passkey の要求は強制されません**（Passkey を登録できない環境で要求を強制すると、Owner が登録だけができる状態から出られず、行き止まりになるため）。起動時に警告を出し、`GET /auth/session` の `auth.passkey.available` が `false` になります。この間は、Passkey の Step-up が要る操作（Policy の変更、Account の Lock の解除）は使えません（Fail Closed）。
+- **設定がなければ Passkey の機能は切れ、Passkey の要求は強制されません**（Passkey を登録できない環境で要求を強制すると、Owner が登録だけができる状態から出られず、行き止まりになるため）。起動時に警告を出し、`GET /auth/session` の `auth.passkey.available` が `false` になります。この間は、Passkey の Step-up が要る操作（Policy の変更、Account の Lock の解除、他の Account の Passkey の Reset）は使えません（Fail Closed）。
 - `PAW_PASSKEY_RP_NAME`（既定 `Personal AI Workspace`）、`PAW_PASSKEY_CHALLENGE_TTL_SECONDS`（既定 300、30〜900）。
 
 ### Endpoint
@@ -1231,6 +1271,7 @@ Owner・Admin の重要操作は、Session に**Passkey の Step-up**（Policy �
 | --- | --- |
 | Policy の変更（`PUT /auth/policy`、Owner） | Passkey の Step-up（0015 で実装済み。**Passkey を設定した環境で端から端まで動く**。`tests/test_passkey_http.py` の Owner の一連の Test） |
 | Account の Lock の解除（`POST /auth/users/{id}/unlock`、Admin・Owner） | Passkey の Step-up。対象を調べる前に判定する（Step-up のない Session に、Account の存在を教えない） |
+| 他の Account の Passkey の Reset（`POST /auth/users/{id}/passkeys/reset`、Owner・Admin。#108） | 同上 |
 | Passkey の追加 | すでに Passkey がある User: Passkey の Step-up。ない User: 直近の認証（Sign-in が有効時間内、または任意の Step-up） |
 | Passkey の失効 | 要求が `required` の Role: Passkey の Step-up。それ以外: 任意の Step-up |
 | Tool Broker の強い承認 | 下記 |
@@ -1262,6 +1303,23 @@ Owner・Admin の重要操作は、Session に**Passkey の Step-up**（Policy �
 
 **Owner Recovery**（Decision 0005 の 7 節）: `AuthService(credential_invalidators=(registry.revoke_all_in,))` が、Token の消費と**同じ Transaction**で、全 Passkey を失効し（`revoked_reason = recovery`）、開いている Challenge を消します。どれか 1 つが失敗すれば全体を Rollback します。Recovery の後の Sign-in は `enrollment_required` の Session です。
 
+### 他の Account の Passkey の Reset（#108）
+
+Passkey の Device をすべて失った Admin（と User）の戻り道です（[Issue #108](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/108)。Decision 0025 の 7 節と「後続の Issue」、Decision 0015 の 14 節）。**方針の選択（誰が誰を Reset できるか、Password の扱い、Token の仕組みと有効期間）は [Decision 0032](../../docs/decisions/0032-passkey-owner-reset.md)（Approved、2026-09-28。Human が 5 点すべてを推奨どおりに承認）にまとめ、そのとおりに実装しています。**
+
+`POST /api/v1/auth/users/{id}/passkeys/reset`（`admin.users.manage`。Agent に委任できない。制限された Session は 403 `passkey_required`）。
+
+- **誰が誰を**: Owner は Admin と User を、Admin は User だけを Reset できます（Lock の解除と同じ規則）。**Owner は対象になりません**（Owner は `owner-recover`）。自分自身も対象になりません。それ以外は 403 `forbidden`、存在しない・`invited` / `active` でない Account は 404 `not_found`。
+- **Step-up**: 操作する人の Session に、Policy の有効時間内の **Passkey の** Step-up が要ります（Password の Step-up は 403 `step_up_method_insufficient`、ない・期限切れは 403 `step_up_required`）。**対象を調べる前に判定します**（Step-up のない Session に、Account の存在を教えない）。
+- **1 つの Transaction で**: 対象の `users` の行を `FOR UPDATE` で Lock し、(1) 全 Passkey を失効し（`revoked_reason = admin_reset`）、開いている Challenge を消し、(2) 全 Session を終え（`revoked_reason = admin`。Passkey の行を Session の行より先に Lock する。Decision 0025 の 15 節）、(3) **Password を消し**、未使用の Token を失効して、**1 回限りの Password 再設定 Token**（`purpose = password_reset`、既定 24 時間、`PAW_PASSWORD_RESET_TOKEN_TTL_SECONDS`）を発行し、(4) Audit（`auth.passkey.reset`）を書きます。どれかが失敗すれば全体を Rollback します。
+- **応答**: `reset_token`（`pawst1.` で始まる Token。**この応答で 1 回だけ**返し、保存するのは Salt 付きの HMAC だけ。応答は `Cache-Control: no-store`）、`reset_token_expires_at`、`passkeys_revoked`、`sessions_ended`。操作した人は、この Token を別の経路で対象の人に渡します。**Owner / Admin は対象の Password を見ることも決めることもできません**（REQUIREMENTS.md）。
+- **対象の人**: `POST /auth/token/redeem` に Token と新しい Password を渡します（Owner の Token と同じ Endpoint、同じ試行回数の上限と Rate Limit）。応答は `{"purpose": "password_reset", "passkey_required": ..., "next": "login"}`。新しい Password で Sign-in すると、要求が `required` の Role（既定は Admin）は `enrollment_required` の Session になり、Passkey を登録し直せます。Login の Lock も消えます。
+- **Password を同時に消す理由**: Passkey だけを Reset すると、最初の 1 つの登録が Password の信頼に戻ります（Decision 0025 の 5 節の限界）。Password を盗んだ者が先に自分の Passkey を登録できないよう、古い Password はその時点で使えなくします。
+- **Owner の Token を作れないこと**: Web の Role は、今も `setup_tokens` に INSERT できません（Decision 0005）。Token の行は `paw_issue_password_reset_token`（Migration `0108`、`SECURITY DEFINER`、`search_path` 固定）だけが作り、この関数は **Owner と、`invited` / `active` でない Account を拒否します**（何も変えずに `false` を返す）。有効期間は 72 時間まで（`created_at` から数えるので、`created_at` も Database の `clock_timestamp()` から前後 5 分以内でなければ拒否する。App と Database の時計が 5 分以上ずれていると Reset は拒否されます）。受け取る側（`TokenRedeemer`）も、Setup / Recovery の Token は Owner だけ、`password_reset` の Token は Admin と User だけに使わせます（役割は受け取るときに、User の行の Lock の下で見直す）。
+- **同時の操作**: 対象の Sign-in（`FOR SHARE`）、登録（`FOR UPDATE`）とは User の行の Lock で、Step-up とは Passkey の行の Lock で順番になり、Reset の後に対象の有効な Session・Passkey は残りません（別の接続で競わせる Test、Lock を保持して待つ Test）。
+- **Audit**: `auth.passkey.reset`（allow `reset` / deny `step_up_required`、`step_up_method_insufficient`、`role_not_allowed`、`not_found`。操作した人の ID と Role、対象の User の ID だけ）。Token の受け取りは `user.password_reset_token.redeem`（Owner の Token の `owner.token.redeem` と同じ理由の列挙値）、Password の設定は `auth.password.set` の `password_reset`（対象の人の ID と Role）。
+- **限界**: Token を受け取った Owner / Admin は、その Token を自分で使って対象の Account を乗っ取れます（Audit の `auth.passkey.reset` と Token の受け取りの行が手掛かり）。Token の配送の経路（Mail など）はありません。
+
 ### Audit
 
 | `action` | 内容 |
@@ -1269,6 +1327,7 @@ Owner・Admin の重要操作は、Session に**Passkey の Step-up**（Policy �
 | `auth.passkey.register` | allow `registered` / deny `challenge_invalid`、`verification_failed`、`already_registered`、`limit_reached`、`gate_not_allowed`、`step_up_required`、`step_up_method_insufficient` |
 | `auth.passkey.authenticate` | allow `verified` / deny `challenge_invalid`、`unknown_credential`、`verification_failed`、`sign_count_regression`、`invalid_credentials` |
 | `auth.passkey.revoke` | allow `revoked` / deny `step_up_required`、`step_up_method_insufficient`、`last_passkey`、`not_found`、`gate_not_allowed` |
+| `auth.passkey.reset`（#108） | allow `reset` / deny `step_up_required`、`step_up_method_insufficient`、`role_not_allowed`、`not_found` |
 
 Credential の ID、公開鍵、Challenge、名前、Origin は入りません（ID と列挙値だけ）。変更は同じ Transaction、拒否は別の短い Transaction で Best Effort に書きます。制限された Session の 403 は書きません（Sign-in の行に理由が残る）。
 
@@ -1288,13 +1347,15 @@ Web の Role（`PAW_APP_DATABASE_ROLE`）の権限は、実際に実行する文
 
 `downgrade()` は 2 つの Table と 2 つの列を破棄します（**登録された Passkey がすべて失われる**。開発・Test 用）。`passkey_revoked` の Session は `admin` に付け替えます。
 
+Migration `0108`（#108。`down_revision` は `0034`。鎖は `... → 0088 → 0023 → 0041 → 0034 → 0108`）は、`user_passkeys.revoked_reason` に `admin_reset`、`setup_tokens.purpose` に `password_reset` を加え、`paw_issue_password_reset_token`（`SECURITY DEFINER`。EXECUTE は Web の Role だけ、PUBLIC からは取り消す）を作ります。Table の権限は変えません（Web の Role は `setup_tokens` に INSERT できず、`password_credentials` を DELETE できないまま。`tests/test_passkey_reset_grants.py`）。`downgrade()` は関数を消し、**`password_reset` の Token を削除し**（受け取る前なら、その User は Password も Token もない状態になる）、`admin_reset` の Passkey を `recovery` に付け替えます。
+
 ### 制限と未確認の点
 
 - **実際の Browser、Authenticator（Touch ID、Windows Hello、Security Key）、Reverse Proxy、TLS を通した動作は確かめていません**（Software Authenticator と `TestClient`、実 PostgreSQL まで）。Counter・Flag・Attestation の匿名化・`transports` の実機の癖は未確認です。
 - 固定した Library（`webauthn` 3.0.1、`cryptography` 50.0.1）は、最新であることと、公開された脆弱性がないことを 2026-09-26 に PyPI と GitHub で確かめましたが、3.0.1 は固定の前日の公開です（Decision 0025）。
 - **Passkey を設定しなければ、要求は強制されません**（上）。
 - Owner が最初の Passkey を登録する前は、Password を盗んだ者が先に自分の Passkey を登録できます（最初の 1 つは Password の信頼に依存する）。
-- **Admin が全 Passkey を失う経路はありません**（Owner が Passkey を Reset する機能は別の Issue）。Owner は `owner-recover` で戻れます。
+- Admin が全 Passkey を失ったときは、Owner が Reset します（#108、上）。Owner は `owner-recover` で戻れます。
 - Attestation を検証しないので、同期される Passkey（`backup_eligible`）も使えます（記録はしている）。
 - Tool Broker の Step-up は User 単位です（上）。
 - Passkey だけの Sign-in、Passkey の名前の変更は含みません（複数端末の追加は PAW-024 の Pairing）。
@@ -1302,7 +1363,7 @@ Web の Role（`PAW_APP_DATABASE_ROLE`）の権限は、実際に実行する文
 
 ### Test
 
-`tests/test_passkey_*.py`。Unit（`settings`、`types`、`ceremony`、`argument_validation`。全 Method × 引数 × 不正な値、DB に届かないことを確認）、実 PostgreSQL の Service（`registration`、`authenticate`、`gate`、`revoke`、`sensitive`。別の接続で競わせる Test、Lock を保持して待つことを確かめる Test を含む）、HTTP（`http`。Owner の一連の流れ、制限された Session の Route の一覧、Error の形、Cookie の配信、CSRF、Body の上限）、Migration（`migration`。Model との差分なし、上げ下げ、全制約の境界）、Query Plan（`plans`）、権限（`grants`。同じ Service と HTTP の Test を非 Superuser の Web の Role で実行し、権限を列まで固定し、してはいけない操作を拒否）。時間は注入した時計で動かします（待たない）。Software Authenticator は `tests/passkey_support.py` です。
+`tests/test_passkey_*.py`。Unit（`settings`、`types`、`ceremony`、`argument_validation`。全 Method × 引数 × 不正な値、DB に届かないことを確認）、実 PostgreSQL の Service（`registration`、`authenticate`、`gate`、`revoke`、`sensitive`。別の接続で競わせる Test、Lock を保持して待つことを確かめる Test を含む）、HTTP（`http`。Owner の一連の流れ、制限された Session の Route の一覧、Error の形、Cookie の配信、CSRF、Body の上限）、Migration（`migration`。Model との差分なし、上げ下げ、全制約の境界）、Query Plan（`plans`）、権限（`grants`。同じ Service と HTTP の Test を非 Superuser の Web の Role で実行し、権限を列まで固定し、してはいけない操作を拒否）。時間は注入した時計で動かします（待たない）。Software Authenticator は `tests/passkey_support.py` です。他の Account の Reset（#108）は `tests/test_passkey_reset*.py`（Service、HTTP、Migration、非 Superuser の Web の Role での権限）です。
 
 ## User Invite / Device Pairing / Lifecycle
 
@@ -1371,6 +1432,7 @@ issued / claimed / approved ──(本人の失効・新しい発行・User の�
   - **防ぐもの**: QR を盗み見た第三者が正しい端末より先に Token を出すと、承認待ちは第三者の 1 件になり、正しい端末の提出は拒否されます。承認する人の端末には Code が表示されていないので、承認は通らず、3 回で Pairing は終わります（判断点 12 の乗っ取り。Test 済み）。
   - **一般 User の Pairing** は承認がないので確認 Code もありません（判断点 5 は推奨どおり Token の所持だけ）。
 - 新しい Session は `auth_method = pairing`（`auth_sessions` の CHECK に追加。Step-up の方法ではない）で、Step-up を持ちません。Passkey の Gate は、一般 User は Password の Sign-in と同じ規則、承認された Owner / Admin は `open`（承認した端末の Passkey の Step-up が、新しい端末での Passkey の認証の代わり）です。Passkey の登録は既存の `/auth/passkeys/enroll/*` で、既存の規則（既に Passkey を持つ User は Passkey の Step-up が要る）のままです（Decision 0033 の判断点 6）。
+- **他の Account の Passkey の Reset（#108）** も、同じ Transaction で対象の生きている Pairing を失効します（`ended_reason = credentials_reset`、Audit は `auth.pairing.revoke` の allow `reset`）。Reset の前に発行した Pairing Token や承認済みの Claim で、Reset の後に Session を得られないようにするためです。
 - Lock の順序は、どの操作も User の行（`FOR UPDATE`。削除・復元は `FOR NO KEY UPDATE`）→ Pairing の行です。
 
 ### User の状態遷移（Lifecycle）
@@ -1396,7 +1458,7 @@ issued / claimed / approved ──(本人の失効・新しい発行・User の�
 | `auth.invitation.issue` | allow `issued` / `reissued`、deny `role_not_allowed`・`step_up_required`・`step_up_method_insufficient`・`login_name_taken`・`invalid_state` |
 | `auth.invitation.revoke` | allow `revoked` / `superseded` / `cancelled` |
 | `auth.invitation.redeem` | allow `redeemed`、deny `token_mismatch`・`token_expired`・`token_used`・`token_revoked`・`attempts_exhausted`・`user_not_eligible` |
-| `auth.pairing.issue`、`auth.pairing.revoke`（`revoked`・`superseded`・`account_closed`） | 発行と失効（確認 Code の試行を使い切った終了は `auth.pairing.approve` の deny `confirmation_attempts_exhausted` で残る） |
+| `auth.pairing.issue`、`auth.pairing.revoke`（`revoked`・`superseded`・`account_closed`・`reset`） | 発行と失効（確認 Code の試行を使い切った終了は `auth.pairing.approve` の deny `confirmation_attempts_exhausted` で残る） |
 | `auth.pairing.claim` | allow `pending_approval`、deny（Token の理由） |
 | `auth.pairing.approve`、`auth.pairing.reject` | allow `approved` / `rejected`、deny `step_up_required`・`confirmation_code_mismatch`・`confirmation_attempts_exhausted` など |
 | `auth.pairing.complete` | allow `completed`（`resource_id` は新しい Session。新規端末の登録）、deny（Claim の理由） |
@@ -1407,7 +1469,7 @@ ID と列挙値だけです（Token、Token ID、Claim、確認 Code、Login nam
 
 ### Database と権限
 
-Migration `0124`（Revision ID は Issue の番号で、Decision 0024 と紛れないよう 124 と書く）の `down_revision` は `0034` です（鎖は `0001 → 0025 → 0032 → 0040 → 0021 → 0033 → 0031 → 0050 → 0046 → 0052 → 0026 → 0087 → 0022 → 0083 → 0043 → 0030 → 0027 → 0071 → 0086 → 0088 → 0023 → 0041 → 0034 → 0124`。統合時に並びを確認します）。
+Migration `0124`（Revision ID は Issue の番号で、Decision 0024 と紛れないよう 124 と書く）の `down_revision` は `0108` です（鎖は `0001 → 0025 → 0032 → 0040 → 0021 → 0033 → 0031 → 0050 → 0046 → 0052 → 0026 → 0087 → 0022 → 0083 → 0043 → 0030 → 0027 → 0071 → 0086 → 0088 → 0023 → 0041 → 0034 → 0108 → 0124`。統合時に並びを確認します）。
 
 | Table | Web の Role の権限 |
 | --- | --- |
@@ -1420,7 +1482,7 @@ Migration `0124`（Revision ID は Issue の番号で、Decision 0024 と紛れ�
 
 ### 制限と未確認の点
 
-- Decision 0033 は **Approved**（2026-09-28）です。判断点 12 だけが推奨から変わり、確認 Code を実装しました。確認 Code の長さ（8 文字）・文字の集合・試行の上限（3 回）は実装が置いた値です（定数。`paw_backend/auth/onboarding/pairing.py`）。
+- Decision 0033 は **Approved**（2026-09-28）です。判断点 12 だけが推奨から変わり、確認 Code を実装しました。確認 Code を新しい端末だけに表示して承認側で入力する形、長さ（8 文字）、試行の上限（3 回）は、2026-09-28 に Human が確認しました（定数。`paw_backend/auth/onboarding/pairing.py`）。
 - 実際の Browser・QR の読み取り・Reverse Proxy を通した動作は確かめていません（`TestClient` と実 PostgreSQL まで）。
 - 一般 User の Pairing は Token の所持だけで Session ができます（QR の盗み見・リンクの転送。10 分以内）。Pairing の完了は Audit に残り、端末の一覧から個別に Logout できます。
 - 招待の取消・削除の後も `users.login_name` は一意のまま予約され、同じ Login name で招待し直せません（Decision 0033 の判断点 10）。
@@ -2338,7 +2400,7 @@ Memory の Query の ACL（`readable_memory_versions`）は、他の User にも
 
 ### Database と権限
 
-Migration `0041` の `down_revision` は `0023` です（鎖は `0001 → 0025 → 0032 → 0040 → 0021 → 0033 → 0031 → 0050 → 0046 → 0052 → 0026 → 0087 → 0022 → 0083 → 0043 → 0030 → 0027 → 0071 → 0086 → 0088 → 0023 → 0041`）。Revision ID は Issue 番号で、鎖の順序ではありません。統合時に Orchestrator が並びを確認します。
+Migration `0041` の `down_revision` は `0023` です（鎖は `0001 → 0025 → 0032 → 0040 → 0021 → 0033 → 0031 → 0050 → 0046 → 0052 → 0026 → 0087 → 0022 → 0083 → 0043 → 0030 → 0027 → 0071 → 0086 → 0088 → 0023 → 0041`。その後に `0034`、`0108` が続く）。Revision ID は Issue 番号で、鎖の順序ではありません。統合時に Orchestrator が並びを確認します。
 Application の Role には、Service が実行する最小の権限だけを与えます（[上の規則](#migration-は-application-の-role-に権限を与えるcontributor-向けの規則)）。
 
 | Table | 与える権限 | 理由 |
@@ -3384,7 +3446,7 @@ Rerank（Reranker Protocol）→ 構造化 Score（confirmed・鮮度・importan
 
 [PAW-034](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/30)（Revision `0034`、`paw_backend/orchestrator/`）で実装しました。設計は [要件](../../REQUIREMENTS.md)の「Agent Orchestration / Parallel-first execution」に従い、要件が決めていない選択（Plan の形、Role の上限、Escalation の段、並列数、結果の大きさ、Sub-Agent の予算、Sweep の周期）は **[Decision 0021（Approved、2026-09-26）](../../docs/decisions/0021-dag-orchestrator-policy.md)** にまとめ、人間が承認しました。数値は暫定値として承認されたもので、`orchestrator/limits.py` と Test の期待値で変えられます（DB の CHECK に書いた項目を除く）。
 **HTTP の Endpoint はありません**（Session は PAW-022）。Orchestrator は Worker Process が `Orchestrator.run_once` / `serve` で駆動し、Agent の Runtime は Protocol で、実際の Codex / Claude / Local の Runtime は別の Issue です（Test は Fake の Runtime で動かします）。認可は行いません（Task の権利は呼び出し側が渡す `TaskAuthority`）。
-Migration `0034` の `down_revision` は `0041` です（鎖は `0001 → 0025 → 0032 → 0040 → 0021 → 0033 → 0031 → 0050 → 0046 → 0052 → 0026 → 0087 → 0022 → 0083 → 0043 → 0030 → 0027 → 0071 → 0086 → 0088 → 0023 → 0041 → 0034`）。Revision ID は Issue 番号で、鎖の順序ではありません。他の PR が先に Merge されたら、統合時に鎖をつなぎ直します（`down_revision`、Migration の Docstring の `Revises`、`tests/test_orchestrator_migration.py` の `PREVIOUS`、この文を同時に変えます）。
+Migration `0034` の `down_revision` は `0041` です（鎖は `0001 → 0025 → 0032 → 0040 → 0021 → 0033 → 0031 → 0050 → 0046 → 0052 → 0026 → 0087 → 0022 → 0083 → 0043 → 0030 → 0027 → 0071 → 0086 → 0088 → 0023 → 0041 → 0034`。その後に `0108` が続く）。Revision ID は Issue 番号で、鎖の順序ではありません。他の PR が先に Merge されたら、統合時に鎖をつなぎ直します（`down_revision`、Migration の Docstring の `Revises`、`tests/test_orchestrator_migration.py` の `PREVIOUS`、この文を同時に変えます）。
 
 ```text
 Queue の Entry を Claim ─→ Task を Start（または、死んだ Worker の Run を引き継ぐ）

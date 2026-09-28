@@ -1,4 +1,9 @@
-"""Redemption of the one-time Owner setup / recovery tokens (the web-facing part).
+"""Redemption of the one-time tokens (the web-facing part).
+
+The Owner's setup / recovery tokens (issued by the server-local operator) and the
+one-time password reset tokens of an Admin or a User (#108: issued, with the reset
+of their Passkeys, by the Owner or, for a User, an Admin, through the database
+function of revision ``0108``, which refuses the Owner).
 
 ``TokenRedeemer`` is all the web flow (PAW-022) gets: it can spend a token it is
 handed, and nothing else. Creating the Owner and issuing tokens is the
@@ -50,8 +55,24 @@ from paw_backend.identity.models import (
 
 logger = logging.getLogger(__name__)
 
-# A user whose Owner token can still be honoured.
+# A user whose token can still be honoured.
 LIVE_STATUSES = (UserStatus.INVITED.value, UserStatus.ACTIVE.value)
+# Whose token each purpose is: the setup and recovery tokens are the Owner's alone; a
+# password reset token (#108) is never the Owner's (the database function that
+# creates one refuses the Owner, and redeeming checks the role again, under the
+# user's lock, in case the role changed since).
+ELIGIBLE_ROLES = {
+    TokenPurpose.SETUP: (SystemRole.OWNER.value,),
+    TokenPurpose.RECOVERY: (SystemRole.OWNER.value,),
+    TokenPurpose.PASSWORD_RESET: (SystemRole.ADMIN.value, SystemRole.USER.value),
+}
+
+
+def redeem_action(purpose: TokenPurpose) -> AuditAction:
+    """The audit action of spending a token of ``purpose``."""
+    if purpose is TokenPurpose.PASSWORD_RESET:
+        return AuditAction.PASSWORD_RESET_TOKEN_REDEEM
+    return AuditAction.TOKEN_REDEEM
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +86,8 @@ class Redemption:
     user_status: UserStatus
     # True for the Owner: registering a Passkey is mandatory (PAW-023).
     passkey_required: bool
+    # The user's system role (the Owner, except for a password reset token).
+    system_role: SystemRole = SystemRole.OWNER
 
 
 # Runs inside the redemption's transaction (see ``TokenRedeemer.redeem``).
@@ -97,7 +120,7 @@ class _Refused(Exception):
 
 
 class TokenRedeemer:
-    """Spends setup / recovery tokens. It cannot create or revoke any."""
+    """Spends setup / recovery / password reset tokens; cannot create or revoke any."""
 
     def __init__(
         self,
@@ -133,8 +156,9 @@ class TokenRedeemer:
 
         Raises ``SetupTokenRejectedError`` (always the same error, whatever
         was wrong) unless the token is well-formed, known, correct, unused,
-        unrevoked, unexpired, not locked out, and its user is (still) the
-        Owner.
+        unrevoked, unexpired, not locked out, and its user is (still) live and
+        of the role the token's purpose is for (``ELIGIBLE_ROLES``: the Owner for
+        a setup / recovery token, an Admin or a User for a password reset).
 
         ``apply`` is how the web flow does its part atomically: it runs inside
         the redemption's transaction, after the token was consumed and before
@@ -266,7 +290,7 @@ class TokenRedeemer:
             ).scalar_one_or_none()
             if (
                 user is None
-                or user.system_role != SystemRole.OWNER.value
+                or user.system_role not in ELIGIBLE_ROLES[attempt.purpose]
                 or user.status not in LIVE_STATUSES
             ):
                 raise _Refused(AuditReason.USER_NOT_ELIGIBLE)
@@ -327,6 +351,7 @@ class TokenRedeemer:
                 purpose=attempt.purpose,
                 user_status=UserStatus(user.status),
                 passkey_required=user.passkey_required,
+                system_role=SystemRole(user.system_role),
             )
             if apply is not None:
                 with _transaction_must_stay_open(session):
@@ -342,11 +367,11 @@ class TokenRedeemer:
                     raise RedeemHookError
             await self._audit.record(
                 self._audit.event(
-                    AuditAction.TOKEN_REDEEM,
+                    redeem_action(attempt.purpose),
                     AuditReason.REDEEMED,
                     correlation_id=correlation_id,
                     actor_id=user.id,
-                    actor_role=SystemRole.OWNER,
+                    actor_role=SystemRole(user.system_role),
                     resource_kind="setup_token",
                     resource_id=attempt.audit_ref,
                 )
@@ -357,9 +382,10 @@ class TokenRedeemer:
     async def _record_failure(
         self, attempt: _Attempt, reason: AuditReason, correlation_id: uuid.UUID
     ) -> None:
+        action = redeem_action(attempt.purpose)
         events = [
             self._audit.token_event(
-                AuditAction.TOKEN_REDEEM,
+                action,
                 reason,
                 correlation_id,
                 attempt.audit_ref,
@@ -371,7 +397,7 @@ class TokenRedeemer:
             # Written once per token: only one attempt can lock it.
             events.append(
                 self._audit.token_event(
-                    AuditAction.TOKEN_REDEEM,
+                    action,
                     AuditReason.ATTEMPTS_EXHAUSTED,
                     correlation_id,
                     attempt.audit_ref,
