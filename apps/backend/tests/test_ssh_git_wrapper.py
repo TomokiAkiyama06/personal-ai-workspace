@@ -23,6 +23,7 @@ import importlib.util
 import io
 import os
 import shutil
+import subprocess
 import sys
 import unittest
 import uuid
@@ -68,6 +69,18 @@ MERGE_CONFIG = [
 ]
 
 
+def run_planned(invocation):
+    """Run what the wrapper would ``exec`` (with this machine's git)."""
+    return subprocess.run(
+        [shutil.which("git"), *invocation.argv[1:]],
+        cwd=invocation.cwd,
+        env={**invocation.env, "PATH": os.environ.get("PATH", "")},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
 class WrapperTestCase(unittest.TestCase):
     """A home with ``workspaces/`` (a checkout, a worktree of it) and, next to
     it, ``outside/`` standing in for everything the wrapper must not reach
@@ -86,6 +99,9 @@ class WrapperTestCase(unittest.TestCase):
         for path in (self.worktree, self.git_dir, self.outside):
             os.makedirs(path)
         os.makedirs(f"{self.outside}/.git/worktrees/build")
+        for git_dir in (self.git_dir, f"{self.outside}/.git/worktrees/build"):
+            with open(f"{git_dir}/commondir", "w", encoding="utf-8") as file:
+                file.write("../..\n")  # what git itself writes
         self.config = self.make_config()
 
     def make_config(self, **options):
@@ -264,6 +280,10 @@ class PlanTest(WrapperTestCase):
                 "protocol.allow=never",
                 "-c",
                 "protocol.https.allow=always",
+                "-c",
+                "diff.ignoreSubmodules=all",
+                "-c",
+                "maintenance.auto=false",
             ],
         )
 
@@ -296,9 +316,12 @@ class PlanTest(WrapperTestCase):
                 "GIT_TERMINAL_PROMPT": "0",
                 "GIT_OPTIONAL_LOCKS": "0",
                 "GIT_ATTR_NOSYSTEM": "1",
-                "GIT_CEILING_DIRECTORIES": self.root,
+                # The client's ceiling, then the parent of the root, always.
+                "GIT_CEILING_DIRECTORIES": f"{self.root}:{self.home}",
             },
         )
+        invocation = self.plan(["rev-parse", "--is-bare-repository"])
+        self.assertEqual(invocation.env["GIT_CEILING_DIRECTORIES"], self.home)
 
     def test_the_resolved_directory_is_used(self):
         link = f"{self.root}/link"
@@ -434,6 +457,42 @@ class RejectedPathTest(WrapperTestCase):
                     git_dir=git_dir,
                 )
 
+    def test_a_git_dir_whose_common_dir_leads_elsewhere_is_refused(self):
+        status = ["status", "--porcelain=v1", "-z", "--untracked-files=all"]
+        commondir = f"{self.git_dir}/commondir"
+        os.makedirs(f"{self.root}/other/.git")
+        cases = (
+            f"{self.outside}/.git\n",  # another repository, outside the root
+            f"{self.root}/other/.git\n",  # another repository, inside the root
+            "../../..\n",  # the checkout, not its .git
+            "\n",
+            "does-not-exist\n",
+            "\xff\n",
+        )
+        for content in cases:
+            with self.subTest(content=content):
+                with open(
+                    commondir, "w", encoding="utf-8", errors="surrogateescape"
+                ) as f:
+                    f.write(content)
+                self.assert_rejected("bad_git_dir", self.pinned, status)
+        # An absolute path to its own .git is what git may write too.
+        with open(commondir, "w", encoding="utf-8") as f:
+            f.write(f"{self.checkout}/.git\n")
+        self.pinned(status)
+        # A link through which it leads out is refused, and so is the file
+        # itself being a link or missing.
+        os.symlink(self.outside, f"{self.root}/escape")
+        with open(commondir, "w", encoding="utf-8") as f:
+            f.write(f"{self.root}/escape/.git\n")
+        self.assert_rejected("bad_git_dir", self.pinned, status)
+        os.remove(commondir)
+        self.assert_rejected("bad_git_dir", self.pinned, status)
+        with open(f"{self.outside}/commondir", "w", encoding="utf-8") as f:
+            f.write(f"{self.checkout}/.git\n")
+        os.symlink(f"{self.outside}/commondir", commondir)
+        self.assert_rejected("bad_git_dir", self.pinned, status)
+
     def test_a_work_tree_outside_the_worktrees_is_refused(self):
         os.symlink(self.outside, f"{self.worktrees}/escape")
         for work_tree in (
@@ -502,6 +561,57 @@ class RejectedPathTest(WrapperTestCase):
                 self.assert_rejected(
                     "unpinned_worktree", self.plan, args, cwd=self.worktree
                 )
+
+    @requires_git
+    def test_repository_discovery_never_leaves_the_root(self):
+        # The home above the root is itself a repository (a dotfiles checkout,
+        # say) whose configuration the wrapper never checked. A cwd in the root
+        # that is not a repository must not reach it, even when the client sends
+        # no ceiling ("-") or a ceiling that is the root itself.
+        git("init", "--quiet", cwd=self.home)
+        plain = f"{self.root}/plain"
+        os.makedirs(plain)
+        for cwd, ceiling in ((plain, None), (plain, self.root), (self.root, None)):
+            with self.subTest(cwd=cwd, ceiling=ceiling):
+                invocation = self.plan(
+                    ["rev-parse", "--show-toplevel"], cwd=cwd, ceiling=ceiling
+                )
+                result = run_planned(invocation)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertNotIn(self.home, result.stdout)
+
+    @requires_git
+    def test_a_repository_planted_in_a_worktree_runs_no_command(self):
+        # An agent writes its worktree: it can commit a gitlink and give the
+        # nested repository a configuration of its own (a clean filter is a
+        # command). The pinned `status` the backend runs there must not start
+        # git in that nested repository, where the filter would run.
+        checkout = f"{self.root}/real"
+        worktree = f"{self.worktrees}/task/2/real/build"
+        git("init", "--quiet", "--initial-branch=main", checkout)
+        git("commit", "--quiet", "--allow-empty", "-m", "init", cwd=checkout)
+        git("worktree", "add", "--quiet", "-b", BRANCH, worktree, cwd=checkout)
+        nested = f"{worktree}/sub"
+        git("init", "--quiet", nested)
+        fs.write(f"{nested}/f", "hi\n")
+        git("add", "f", cwd=nested)
+        git("commit", "--quiet", "-m", "sub", cwd=nested)
+        git("add", "sub", cwd=worktree)
+        git("commit", "--quiet", "-m", "gitlink", cwd=worktree)
+        marker = f"{self.outside}/filter-ran"
+        git("config", "filter.x.clean", f"touch {marker}; cat", cwd=nested)
+        fs.write(f"{nested}/.git/info/attributes", "* filter=x\n")
+        os.utime(f"{nested}/f", (2_000_000_000, 2_000_000_000))  # hash it again
+        git_dir = git("rev-parse", "--path-format=absolute", "--git-dir", cwd=worktree)
+        invocation = self.pinned(
+            ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+            git_dir=git_dir,
+            work_tree=worktree,
+            cwd=worktree,
+        )
+        result = run_planned(invocation)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(os.path.exists(marker))
 
     def test_path_arguments_stay_where_they_belong(self):
         url = "https://github.com/o/r.git"

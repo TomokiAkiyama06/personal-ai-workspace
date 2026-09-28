@@ -26,7 +26,9 @@ undoes ``shlex.quote``) into the words of Decision 0029 §2::
 * the protocol tag must be exactly ``paw-git-run/v1``;
 * ``cwd`` must be a canonical absolute path of an existing directory inside the
   root (``<home>/workspaces`` by default), after every symbolic link is resolved;
-* ``ceiling`` must be ``-`` or exactly the parent directory of ``cwd``;
+* ``ceiling`` must be ``-`` or exactly the parent directory of ``cwd``; the
+  parent of the root is always added to it, so git's repository discovery never
+  leaves the root;
 * global options may only be ``-c <key>=<value>`` whose pair is **in a fixed
   list** (the hardening the client always sends, and — for ``merge`` only — the
   fixed merge identity of Decision 0036), and ``--git-dir=`` / ``--work-tree=``
@@ -61,6 +63,7 @@ import os
 import pwd
 import re
 import shlex
+import stat
 import sys
 import syslog
 from collections.abc import Callable, Mapping, Sequence
@@ -92,6 +95,18 @@ _BRANCH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}")
 _OBJECT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 _PROTOCOL = re.compile(r"[a-z][a-z0-9+.-]{0,15}")
 _CONFIG_KEY = re.compile(r"[A-Za-z][A-Za-z0-9-]*(\.[^\s=]+)*\.[A-Za-z][A-Za-z0-9-]*")
+
+
+#: Settings git gets from the wrapper alone (the client neither sends nor needs
+#: them). ``diff.ignoreSubmodules=all``: ``status`` in an agent's worktree would
+#: otherwise start git inside a nested repository the agent planted (a gitlink
+#: it committed), whose own configuration — a filter driver is a command —
+#: nothing here checked. ``maintenance.auto=false``: ``merge`` would otherwise
+#: leave a detached ``git maintenance`` running after the call.
+OWN_HARDENING = (
+    ("diff.ignoreSubmodules", "all"),
+    ("maintenance.auto", "false"),
+)
 
 
 class Rejected(Exception):
@@ -187,9 +202,10 @@ def parse_config(argv: Sequence[str], *, uid: int | None = None) -> Config:
 
 
 def hardening(config: Config) -> list[tuple[str, str]]:
-    """What git always gets in front of the sub-command (the same rules as
-    ``paw_backend.repositories.git.git_config_arguments``), whatever the client
-    sent."""
+    """What the client must send in front of the sub-command, and git always
+    gets whatever it sent (the rules of
+    ``paw_backend.repositories.git.git_config_arguments``); git also gets
+    :data:`OWN_HARDENING`."""
     pairs = [
         ("core.hooksPath", "/dev/null"),
         ("core.fsmonitor", "false"),
@@ -543,10 +559,17 @@ def plan(original: str | None, config: Config) -> Invocation:
     cwd = places.check(cwd_text, worktree=None, allow_root=True, must_exist=True)
     if not os.path.isdir(cwd):
         raise Rejected("bad_path")
+    # Repository discovery never leaves the root, whatever the client sent: the
+    # parent of the (resolved) root is always a ceiling, so a repository above
+    # it (a dotfiles checkout in the home, say, whose configuration nothing
+    # here checked) is never found from a cwd in the root that is not one.
+    bound = os.path.dirname(places.root)
     if ceiling_text == "-":
-        ceiling = None
+        ceiling = bound
     elif ceiling_text == os.path.dirname(cwd_text):
         ceiling = os.path.dirname(cwd)
+        if ceiling != bound:
+            ceiling = f"{ceiling}:{bound}"
     else:
         raise Rejected("bad_ceiling")
 
@@ -598,6 +621,7 @@ def plan(original: str | None, config: Config) -> Invocation:
         parent = os.path.basename(os.path.dirname(real_dir))
         if parent != "worktrees" or not os.path.isdir(real_dir):
             raise Rejected("bad_git_dir")
+        _check_common_dir(real_dir)
         if not os.path.isdir(real_tree) or real_tree != cwd:
             raise Rejected("bad_work_tree")
         pinned = [f"--git-dir={real_dir}", f"--work-tree={real_tree}"]
@@ -610,7 +634,7 @@ def plan(original: str | None, config: Config) -> Invocation:
     checker(args, places, config)
 
     argv = [config.git]
-    for key, value in hardening(config):
+    for key, value in (*hardening(config), *OWN_HARDENING):
         argv.extend(("-c", f"{key}={value}"))
     if subcommand == "merge":
         for key, value in MERGE_CONFIG:
@@ -619,6 +643,41 @@ def plan(original: str | None, config: Config) -> Invocation:
     argv.append(subcommand)
     argv.extend(args)
     return Invocation(subcommand, argv, git_environment(config, ceiling), cwd)
+
+
+def _check_common_dir(git_dir: str) -> None:
+    """The ``commondir`` file of the worktree directory ``git_dir`` (git reads
+    the repository's objects, refs and configuration from where it points) must
+    lead back to the ``.git`` it sits in (``<.git>/worktrees/<name>``), once
+    every symbolic link is resolved; anything else — missing, not a regular
+    file, a link, another repository — is refused."""
+    common = os.path.dirname(os.path.dirname(git_dir))
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+    try:
+        descriptor = os.open(os.path.join(git_dir, "commondir"), flags)
+    except OSError:
+        raise Rejected("bad_git_dir") from None
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise Rejected("bad_git_dir")
+        data = os.read(descriptor, MAX_PATH_CHARS + 2)
+    except OSError:
+        raise Rejected("bad_git_dir") from None
+    finally:
+        os.close(descriptor)
+    try:
+        text = data.decode("utf-8").removesuffix("\n")
+    except UnicodeDecodeError:
+        raise Rejected("bad_git_dir") from None
+    if not text or len(text) > MAX_PATH_CHARS or not text.isprintable():
+        raise Rejected("bad_git_dir")
+    target = text if text.startswith("/") else os.path.join(git_dir, text)
+    try:
+        real = os.path.realpath(target, strict=True)
+    except (OSError, RuntimeError):
+        raise Rejected("bad_git_dir") from None
+    if real != common:
+        raise Rejected("bad_git_dir")
 
 
 def _syslog(message: str) -> None:

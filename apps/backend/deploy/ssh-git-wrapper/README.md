@@ -24,14 +24,16 @@ Wrapper は Client（Backend）を信用しない。`$SSH_ORIGINAL_COMMAND` を 
 
 1. 先頭の語が `paw-git-run/v1`、4 語目が `--`。
 2. cwd は、その User の Root（既定 `<home>/workspaces`）の中の、既存の Directory。**Symbolic Link をすべて解決した後の Path** で判定する。
-3. `GIT_CEILING_DIRECTORIES` は `-` か、cwd の親 Directory そのもの。
+3. `GIT_CEILING_DIRECTORIES` は `-` か、cwd の親 Directory そのもの。Wrapper は Client の値に関係なく、**Root の親 Directory（Symbolic Link を解決した先）を常に Ceiling に足す**。Root の中の Repository でない Directory から、Home などの Root の外の Repository（Dotfiles の Checkout など。その設定を Wrapper は検査していない）を見つけさせない。
 4. `-c` は**固定の一覧にある `key=value` の組そのもの**だけ（Human の条件）。
    - 常に受け付ける: `core.hooksPath=/dev/null`、`core.fsmonitor=false`、`submodule.recurse=false`、`protocol.allow=never`、`protocol.https.allow=always`（`--allow-protocol=` で足した Transport も同じ形）、`--config=` で配備が足した組。
    - `merge` の前だけ受け付ける: `user.name=Personal AI Workspace`、`user.email=integration@paw.invalid`、`commit.gpgSign=false`、`merge.verifySignatures=false`。
    - 受け付けた `-c` も git には渡さない。git には常に **Wrapper 自身の** Hardening（と `merge` なら Wrapper 自身の固定の作者）を付ける。
+   - さらに Wrapper だけが付ける設定（Client は送らない）: `diff.ignoreSubmodules=all`（Agent が worktree に Commit した Gitlink と、その中に置いた入れ子の Repository の設定 ── Filter Driver は Command ── を、`status` が子の git で読んで実行しないため）、`maintenance.auto=false`（`merge` が呼び出しの後に切り離した `git maintenance` を残さないため）。そのため `status` は Submodule の中の変更を報告しない。
 5. `--git-dir=` / `--work-tree=`（Decision 0036 の 13。Human の条件）は、両方そろっているときだけ、worktree の中で動く副コマンド（`status`・`merge`・`symbolic-ref`・`rev-parse`）にだけ受け付ける。
    - `--work-tree=`: `<Root>/.paw-worktrees` の中で、cwd と同じ Directory。
    - `--git-dir=`: Root の中、かつ `.paw-worktrees` の外にある `.../worktrees/<name>` の Directory（Checkout の `.git/worktrees/<name>`）。
+     さらに、その中の `commondir` File（git が Object・Ref・設定を読む先）が、Symbolic Link を解決した結果、その Directory 自身が置かれた `.git` を指すこと（通常 File で、Link でないこと）。別の Repository を指せば `bad_git_dir` で拒否する。
    - どちらも正規化した Path（`..`・`//`・末尾の `/` を含まない絶対 Path）で、Symbolic Link を解決した先が外に出れば拒否する。
 6. `.paw-worktrees` の中を cwd にするとき、`--git-dir=` / `--work-tree=` なしで動かせるのは `rev-parse` だけ（Agent が書き換えられる worktree の `.git` が、Filter Driver などの Command を持ち込むのを防ぐ）。
 7. 副コマンドは許可リスト（`SUBCOMMANDS`）の中で、引数の並びも決まった形と完全に一致するときだけ。
