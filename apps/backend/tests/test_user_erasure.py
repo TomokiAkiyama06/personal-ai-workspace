@@ -36,7 +36,8 @@ class ErasureTestCase(OnboardingTestCase):
     async def asyncSetUp(self) -> None:
         await super().asyncSetUp()
         await self.execute(
-            "TRUNCATE conversations, memories, tasks, repositories, projects CASCADE"
+            "TRUNCATE conversations, memories, tasks, repositories, projects, "
+            "shared_memory_candidates CASCADE"
         )
         _, self.admin, self.admin_auth = await self.administrator()
         self.tasks = TaskService(self.database, project_gate=ALWAYS_ACTIVE)
@@ -153,6 +154,35 @@ class ErasureTestCase(OnboardingTestCase):
             "conversation": conversation_id,
             "message": message_id,
             "private_memory": private_memory,
+        }
+
+    async def candidate(self, user_id, state: str, *, origin: str = "user"):
+        """A Shared Memory candidate ``user_id`` proposed from a memory (its text
+        is a copy of that memory's)."""
+        candidate_id = uuid.uuid4()
+        decided = state != "pending"
+        await self.execute(
+            "INSERT INTO shared_memory_candidates (id, state, proposer_user_id, "
+            "origin_scope, memory_type, title, content, decided_by, decided_at) "
+            "VALUES (:id, :state, :u, :origin, 'preference', 'private title', "
+            "'my private memory text', :by, :at)",
+            id=candidate_id,
+            state=state,
+            u=user_id,
+            origin=origin,
+            by=self.admin.user_id if decided else None,
+            at=T0 if decided else None,
+        )
+        return candidate_id
+
+    async def candidates_of(self, user_id) -> set[tuple[uuid.UUID, str]]:
+        return {
+            (row.id, row.state)
+            for row in await self.query(
+                "SELECT id, state FROM shared_memory_candidates "
+                "WHERE proposer_user_id = :u",
+                u=user_id,
+            )
         }
 
     async def count(self, sql: str, **params) -> int:
@@ -308,6 +338,58 @@ class ErasureTest(ErasureTestCase):
             ),
             1,
         )
+
+    async def test_undecided_and_rejected_shared_memory_candidates_are_erased(self):
+        # A candidate carries a copy of the private memory it was proposed from.
+        # A pending one could still be approved into a Shared Memory after the
+        # erasure; a rejected one would keep the private text for good. An approved
+        # one is already Shared Memory by decision, and stays as that record.
+        bob = await self.make_user("bob")
+        carol = await self.make_user("carol")
+        await self.personal_data(bob)
+        pending = await self.candidate(bob.id, "pending")
+        from_project = await self.candidate(bob.id, "pending", origin="project")
+        rejected = await self.candidate(bob.id, "rejected")
+        approved = await self.candidate(bob.id, "approved")
+        carols = await self.candidate(carol.id, "pending")
+        await self.delete(bob)
+        self.assertIn((pending, "pending"), await self.candidates_of(bob.id))
+        self.assertIn((from_project, "pending"), await self.candidates_of(bob.id))
+        self.assertIn((rejected, "rejected"), await self.candidates_of(bob.id))
+
+        report = await self.erasure().run()
+
+        self.assertTrue(report.ok)
+        self.assertEqual(await self.status_of(bob.id), "deleted")
+        self.assertEqual(await self.candidates_of(bob.id), {(approved, "approved")})
+        self.assertEqual(await self.candidates_of(carol.id), {(carols, "pending")})
+
+    async def test_a_candidate_left_behind_fails_the_verification(self):
+        bob = await self.make_user("bob")
+        await self.personal_data(bob)
+        await self.candidate(bob.id, "pending")
+        await self.delete(bob)
+        service = self.erasure()
+        original = service._delete_personal_data
+
+        async def forgets_the_candidates(session, user_id, now):
+            await original(session, user_id, now)
+            await session.execute(
+                text(
+                    "INSERT INTO shared_memory_candidates (state, proposer_user_id, "
+                    "origin_scope, memory_type, title, content) VALUES ('pending', "
+                    ":u, 'user', 'preference', 'late', 'late private text')"
+                ),
+                {"u": user_id},
+            )
+
+        service._delete_personal_data = forgets_the_candidates
+
+        result = await service.erase_user(bob.id)
+
+        self.assertIs(result.outcome, ErasureOutcome.VERIFICATION_FAILED)
+        self.assertEqual(await self.status_of(bob.id), "pending_deletion")
+        self.assertEqual(len(await self.candidates_of(bob.id)), 1)
 
     async def test_nothing_happens_before_the_30_days_are_over(self):
         bob = await self.make_user("bob")

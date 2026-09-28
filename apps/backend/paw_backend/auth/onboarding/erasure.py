@@ -45,7 +45,9 @@ What one erasure does (ONE transaction per user)
    state and journal (Private Chat; the Memory sources that cited them are marked
    ``source_deleted_at`` and lose the reference through their foreign keys); the
    ``user`` scope Memory versions and the memories left without a version, the
-   consolidation keys (Private Memory); the per-user connection quotas (personal
+   consolidation keys, the Shared Memory candidates the user proposed that were
+   not approved (``pending`` / ``rejected``: each holds a copy of the memory it
+   came from) (Private Memory); the per-user connection quotas (personal
    settings); the project memberships (the account can never come back).
 4. Verifies, in the same transaction, that no row of those tables is left for the
    user; otherwise the transaction is rolled back (``verification_failed``).
@@ -56,9 +58,13 @@ What one erasure does (ONE transaction per user)
 Kept (Decision 0043): the ``users`` row (id, login name, role, timestamps) as the
 minimal deletion record, the status history, ``audit_events`` (ids only), and what
 belongs to a project rather than to the person (tasks, their logs, research scratch
-items, non-private Memory versions a user wrote, connection usage accounting, tool
-approvals). A later restore from a backup must re-apply ``deleted`` (the
-requirements' "削除記録"); that is the recovery feature's job.
+items, non-private Memory versions a user wrote (a memory widened from private
+to a project keeps the wider versions, which carry the same text), connection
+usage accounting, tool approvals) and the approved Shared Memory candidates (the
+record of a decision whose content is already Shared Memory). Decision 0043 D
+lists every table with a user column and what happens to it. A later restore
+from a backup must re-apply ``deleted`` (the requirements' "削除記録"); that is
+the recovery feature's job.
 
 A refusal or failure writes ``auth.user.erase`` / deny with the reason in a short
 transaction of its own (best effort), leaves the user ``pending_deletion`` (still
@@ -213,6 +219,17 @@ _ANYTHING_ACTIVE = text(
 _PRIVATE_MEMORY_LEFT = text(
     "SELECT count(*) FROM memory_versions WHERE scope = 'user' AND owner_user_id = :id"
 )
+# The Shared Memory candidates the user proposed that were not approved. A
+# candidate holds a copy of the memory it came from (``SharedMemoryService``), so
+# an undecided one could still be approved into a Shared Memory after the erasure
+# and a rejected one would keep the text for good. An approved one is already a
+# Shared Memory by decision and stays as the record of that decision.
+_UNAPPROVED_CANDIDATES = (
+    "FROM shared_memory_candidates "
+    "WHERE proposer_user_id = :id AND state IN ('pending', 'rejected')"
+)
+_DELETE_CANDIDATES = text(f"DELETE {_UNAPPROVED_CANDIDATES}")
+_CANDIDATES_LEFT = text(f"SELECT count(*) {_UNAPPROVED_CANDIDATES}")
 
 
 class UserErasureService:
@@ -447,6 +464,7 @@ class UserErasureService:
                 ),
                 {"ids": list(set(memory_ids))},
             )
+        await session.execute(_DELETE_CANDIDATES, params)
         for table, column in PERSONAL_TABLES:
             # Table and column names are the constants above, never input.
             await session.execute(
@@ -457,6 +475,7 @@ class UserErasureService:
         left = (
             await session.execute(_PRIVATE_MEMORY_LEFT, {"id": user_id})
         ).scalar_one()
+        left += (await session.execute(_CANDIDATES_LEFT, {"id": user_id})).scalar_one()
         for table, column in PERSONAL_TABLES + (("repository_checkouts", "user_id"),):
             left += await self._count(session, table, column, user_id)
         if left:
