@@ -240,6 +240,16 @@ class MemoryFileTest(unittest.TestCase):
         self.assertEqual(redactions, 1)
         self.assertEqual(front_matter(data)["redactions"], 1)
 
+    def test_a_credential_in_the_memory_type_is_redacted_and_counted(self):
+        # validate_memory_type accepts ``[a-z][a-z0-9_]{0,63}``, which a
+        # lower-case token can match: the type is free text too.
+        token = "ghp_" + "a1b2" * 9
+        data, redactions = render_memory(memory(memory_type=token))
+        self.assertNotIn(token.encode(), data)
+        self.assertEqual(front_matter(data)["memory_type"], "[REDACTED]")
+        self.assertEqual(redactions, 1)
+        self.assertEqual(front_matter(data)["redactions"], 1)
+
 
 class IndexTest(unittest.TestCase):
     def test_rows_are_sorted_by_status_type_title_and_id(self):
@@ -264,6 +274,12 @@ class IndexTest(unittest.TestCase):
         token = "ghp_" + "a1B2" * 9
         text = render_index(("shared",), [memory(scope="shared", title=token)])
         self.assertNotIn(token.encode(), text)
+
+    def test_index_memory_types_are_redacted(self):
+        token = "ghp_" + "a1b2" * 9
+        text = render_index(("shared",), [memory(scope="shared", memory_type=token)])
+        self.assertNotIn(token.encode(), text)
+        self.assertIn(b"| [REDACTED] |", text)
 
 
 class ProjectionTest(unittest.TestCase):

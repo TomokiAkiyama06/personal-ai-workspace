@@ -3576,7 +3576,7 @@ $PAW_MEMORY_PROJECTION_DIR/                 # 0700。Backend の OS User だけ�
 - 各 Memory の**現在の Version**（`version_number` が最大）を、その公開範囲の Directory に 1 File（`<memory-id>.md`）で書きます。Status は問わず Front Matter と `INDEX.md` に示し、`session_only` は書きません。過去の Version・Relation・Provenance は書きません（PAW-047）。
 - 1 回の実行は `REPEATABLE READ, READ ONLY` の 1 つの Snapshot から作ります。公開範囲を狭めた Memory（`project → user`）は、`projects/` から消えて `users/<編集者>/` に現れます。
 - **diff-friendly**: Front Matter の Key の順は固定で値は JSON、改行は LF、時刻は UTC、実行の時刻は書きません。変わらない File は書き直さない（更新時刻も変えない）ので、Git の差分は変わった Memory だけです。Directory と File の名前は ID だけで、Memory の文字列は Path を選べません。
-- **Secret**: Title・本文・Branch 名の、認識できる Credential（`tools.credentials.redact_text`）を `[REDACTED]` にしてから書き、件数を Front Matter と Audit に残します。PostgreSQL の本文は変えません。
+- **Secret**: Title・本文・Branch 名・Memory の種類（`memory_type`。`[a-z][a-z0-9_]{0,63}` の自由記述で、小文字の Token も通るため）の、認識できる Credential（`tools.credentials.redact_text`）を `[REDACTED]` にしてから書き、件数を Front Matter と Audit に残します。PostgreSQL の本文は変えません。
 
 ### 書き先の安全（`writer.py`）
 

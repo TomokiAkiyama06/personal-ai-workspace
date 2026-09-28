@@ -22,7 +22,8 @@ columns of its current version: ``users/<owner>``, ``projects/<project>``,
 directories (never a title or a login name), so no text of a memory can choose
 where it is written.
 
-Recognisable credentials in titles, texts and branch names are replaced by
+Recognisable credentials in titles, texts, branch names and memory types (a
+type is free text within ``[a-z][a-z0-9_]{0,63}``) are replaced by
 ``[REDACTED]`` (``tools.credentials.redact_text``) before they reach a file
 (Decision 0038 5): the projection is later committed to the Recovery
 Repository, which must not hold secrets. PostgreSQL keeps the text as it is. A
@@ -188,7 +189,10 @@ def render_memory_file(memory: ProjectedMemory) -> tuple[bytes, int, bool]:
     branch, branch_redactions = (
         (None, 0) if memory.branch is None else redact_text(memory.branch)
     )
-    redactions = title_redactions + content_redactions + branch_redactions
+    memory_type, type_redactions = redact_text(memory.memory_type)
+    redactions = (
+        title_redactions + content_redactions + branch_redactions + type_redactions
+    )
     truncated = title_truncated or content_truncated
     scope_key = {
         MemoryScope.USER.value: ("owner_user_id", memory.owner_user_id),
@@ -206,7 +210,7 @@ def render_memory_file(memory: ProjectedMemory) -> tuple[bytes, int, bool]:
         fields.append((scope_key[0], str(scope_key[1])))
     fields += [
         ("title", title),
-        ("memory_type", memory.memory_type),
+        ("memory_type", memory_type),
         ("status", memory.status),
         ("confirmation_state", memory.confirmation_state),
         ("importance", memory.importance),
@@ -263,14 +267,16 @@ def render_index(key: DirectoryKey, memories: Iterable[ProjectedMemory]) -> byte
     rows = []
     for memory in memories:
         title, _ = redact_text(memory.title)
+        memory_type, _ = redact_text(memory.memory_type)
         rows.append(
             (
                 _STATUS_ORDER.get(memory.status, len(_STATUS_ORDER)),
                 memory.status,
-                memory.memory_type,
+                memory_type,
                 _heading(title).casefold(),
                 str(memory.memory_id),
                 memory,
+                memory_type,
                 title,
             )
         )
@@ -283,11 +289,11 @@ def render_index(key: DirectoryKey, memories: Iterable[ProjectedMemory]) -> byte
         "| Status | Type | Title | Version | File |",
         "| --- | --- | --- | --- | --- |",
     ]
-    for *_, memory, title in rows:
+    for *_, memory, memory_type, title in rows:
         name = memory_file_name(memory.memory_id)
         lines.append(
             f"| {_table_cell(_status_label(memory))} | "
-            f"{_table_cell(memory.memory_type)} | {_table_cell(_heading(title))} | "
+            f"{_table_cell(memory_type)} | {_table_cell(_heading(title))} | "
             f"{memory.version_number} | [{name}]({name}) |"
         )
     return ("\n".join(lines) + "\n").encode("utf-8")
