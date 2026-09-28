@@ -17,7 +17,16 @@ the probe sees that is not the workspace's (``external``: another user's
 workload, a model that was unloaded but whose memory lingers). A model whose
 processes are not known (no model control is configured, or it could not say)
 is assumed to hold its reservation out of what the probe sees, the rest being
-external. So ``committed`` is never below the actual use nor below the
+external. So is a model whose known processes hold nothing on the GPU: the pids
+given are then not the ones that hold its memory (the pids command named only
+the parent of a runtime whose GPU memory sits in a child process, as vLLM and
+SGLang do; or the model is still starting), and counting its reservation *and*
+the memory the probe sees as external would count the model twice and start the
+relief steps for pressure that is not there. A pid set that covers only part of
+the model's processes cannot be told apart from another workload: the pids
+command must list every process of the runtime (the unit's ``cgroup.procs``).
+
+So ``committed`` is never below the actual use nor below the
 reservations: the scheduler cannot promise memory that is in use, and memory it
 promised is not given away because it does not show yet.
 
@@ -82,11 +91,14 @@ def account(
     unknown_reserved = 0
     for usage in deployments:
         reserved += usage.reserved_bytes
-        if usage.pids is None:
+        actual = (
+            0 if usage.pids is None else sum(used_by.get(pid, 0) for pid in usage.pids)
+        )
+        if actual == 0:
+            # Not known, or the known pids hold nothing: see the module.
             unknown_reserved += usage.reserved_bytes
             committed_own += usage.reserved_bytes
             continue
-        actual = sum(used_by.get(pid, 0) for pid in usage.pids)
         own_actual += actual
         committed_own += max(usage.reserved_bytes, actual)
     rest = max(0, device.used_bytes - own_actual)

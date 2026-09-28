@@ -15,6 +15,7 @@ import unittest
 from paw_backend.compute import (
     GpuDevice,
     GpuProcess,
+    InvalidComputeArgumentError,
     NvidiaSmiProbe,
     ProbeUnavailableError,
 )
@@ -61,7 +62,7 @@ class QueryCommandTest(unittest.TestCase):
         self.assertEqual(
             QUERY_GPU_ARGV,
             (
-                "nvidia-smi",
+                "/usr/bin/nvidia-smi",
                 "--query-gpu=index,uuid,name,memory.total,memory.used,utilization.gpu",
                 "--format=csv,noheader,nounits",
             ),
@@ -69,11 +70,33 @@ class QueryCommandTest(unittest.TestCase):
         self.assertEqual(
             QUERY_APPS_ARGV,
             (
-                "nvidia-smi",
+                "/usr/bin/nvidia-smi",
                 "--query-compute-apps=gpu_uuid,pid,used_memory",
                 "--format=csv,noheader,nounits",
             ),
         )
+
+    def test_nvidia_smi_is_run_by_an_absolute_path(self):
+        # Not looked up in PATH, where another user's directory could plant one.
+        runner = RecordingRunner(
+            {
+                ("/opt/nvidia/bin/nvidia-smi", *QUERY_GPU_ARGV[1:]): CommandResult(
+                    0, GPU_LINE + "\n"
+                ),
+                ("/opt/nvidia/bin/nvidia-smi", *QUERY_APPS_ARGV[1:]): CommandResult(
+                    0, APPS_LINE + "\n"
+                ),
+            }
+        )
+        probe = NvidiaSmiProbe(runner=runner, executable="/opt/nvidia/bin/nvidia-smi")
+        asyncio.run(probe.sample())
+        self.assertEqual(
+            [argv[0] for argv, _ in runner.calls], ["/opt/nvidia/bin/nvidia-smi"] * 2
+        )
+        for executable in ("nvidia-smi", "bin/nvidia-smi", "", "/usr/bin/\x00x", 7):
+            with self.subTest(executable=executable):
+                with self.assertRaises(InvalidComputeArgumentError):
+                    NvidiaSmiProbe(runner=runner, executable=executable)
 
     def test_no_compute_module_names_a_command_that_changes_the_gpu(self):
         # Clocks, persistence, MIG, power limits, compute mode, resets, killing a

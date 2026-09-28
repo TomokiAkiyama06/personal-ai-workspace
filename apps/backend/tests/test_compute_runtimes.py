@@ -215,6 +215,44 @@ class HybridRuntimeTest(unittest.IsolatedAsyncioTestCase):
             await self.runtime().run_node(assignment())
         self.assertEqual(self.scheduler.status().leases[ResourceClass.CODING], 0)
 
+    async def test_gpu_time_is_charged_when_the_local_runtime_raises(self):
+        self.local.error = RuntimeError("boom")
+        work = assignment()
+        task = asyncio.create_task(self.runtime().run_node(work))
+        await settle()
+        await self.clock.advance(90.5)
+        with self.assertRaises(RuntimeError):
+            await task
+        self.assertEqual(work.budget.charges, [(BudgetKind.GPU_SECONDS, 91)])
+        self.assertEqual(self.scheduler.status().leases[ResourceClass.CODING], 0)
+
+    async def test_gpu_time_is_charged_when_the_node_is_cancelled(self):
+        work = assignment()
+        task = asyncio.create_task(self.runtime().run_node(work))
+        await settle()
+        await self.clock.advance(30)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertEqual(work.budget.charges, [(BudgetKind.GPU_SECONDS, 30)])
+        self.assertEqual(self.scheduler.status().leases[ResourceClass.CODING], 0)
+
+    async def test_the_runtimes_error_wins_over_a_charge_that_stops_the_node(self):
+        self.local.error = RuntimeError("boom")
+
+        async def charge(kind, amount):
+            work.budget.charges.append((kind, amount))
+            raise NodeStopped(StopReason.TASK_ENDED)
+
+        work = assignment()
+        work.budget.charge = charge
+        task = asyncio.create_task(self.runtime().run_node(work))
+        await settle()
+        await self.clock.advance(90.5)
+        with self.assertRaises(RuntimeError):
+            await task
+        self.assertEqual(work.budget.charges, [(BudgetKind.GPU_SECONDS, 91)])
+
     async def test_node_stopped_passes_through(self):
         self.local.error = NodeStopped(StopReason.TASK_ENDED)
         self.local.seconds = 0

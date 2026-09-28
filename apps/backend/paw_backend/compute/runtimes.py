@@ -10,7 +10,7 @@
   task's dependency / permission / quota", which the backend knows and the
   scheduler does not. Without a policy nothing goes to the cloud. The wall time a
   node holds a local lease is charged to the task as ``GPU_SECONDS`` (the budget's
-  "max GPU time").
+  "max GPU time"), also when the local runtime raises or is cancelled.
 * :class:`ScheduledMemoryWorker` wraps a Memory Worker (PAW-041). A job runs only
   under a Background lease on the Memory Worker's model; when there is none (the
   model is unloaded, background work is stopped under pressure, an Exclusive job
@@ -23,6 +23,7 @@
   (CPU fallback).
 """
 
+import contextlib
 import json
 import math
 from collections.abc import Callable, Sequence
@@ -156,12 +157,24 @@ class HybridRuntime:
             )
         except ComputeUnavailableError:
             return NodeOutcome.failed(COMPUTE_UNAVAILABLE, retryable=True)
-        async with lease:
-            if lease.placement is Placement.CLOUD:
-                return await self._cloud.run_node(assignment)
-            started = self._clock.monotonic()
-            outcome = await self._local.run_node(assignment)
-            seconds = math.ceil(max(0.0, self._clock.monotonic() - started))
+        seconds = 0
+        try:
+            async with lease:
+                if lease.placement is Placement.CLOUD:
+                    return await self._cloud.run_node(assignment)
+                started = self._clock.monotonic()
+                try:
+                    outcome = await self._local.run_node(assignment)
+                finally:
+                    seconds = math.ceil(max(0.0, self._clock.monotonic() - started))
+        except BaseException:
+            # The GPU time was spent although the node failed or was cancelled:
+            # charged too, or failing nodes that are retried would bypass the
+            # budget's max GPU time. The runtime's error is what propagates.
+            if self._charge and seconds > 0:
+                with contextlib.suppress(Exception):
+                    await assignment.budget.charge(BudgetKind.GPU_SECONDS, seconds)
+            raise
         if self._charge and seconds > 0:
             # Raises NodeStopped when the budget is now used up: it passes.
             await assignment.budget.charge(BudgetKind.GPU_SECONDS, seconds)

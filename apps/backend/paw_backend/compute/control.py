@@ -47,7 +47,9 @@ class ModelControl(Protocol):
         ...
 
     async def processes(self, deployment: str) -> frozenset[int]:
-        """The pids of the processes of ``deployment`` (empty: not running). Read
+        """The pids of **every** process of ``deployment`` (empty: not running):
+        the whole unit (its ``cgroup.procs``), not only its main pid, since the
+        runtimes (vLLM, SGLang) hold the GPU memory in child processes. Read
         only; the scheduler matches them against the probe's processes."""
         ...
 
@@ -84,7 +86,9 @@ class DeploymentCommands:
     gpu: tuple[str, ...] | None = None  # start the GPU runtime
     unload: tuple[str, ...] | None = None  # stop every runtime of the deployment
     cpu: tuple[str, ...] | None = None  # stop the GPU runtime, serve from the CPU
-    pids: tuple[str, ...] | None = None  # print the pids, whitespace separated
+    # Print the pids of every process of the runtime, whitespace separated (for
+    # a systemd unit: ``cat .../<unit>/cgroup.procs``, not only its MainPID).
+    pids: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         for parameter in ("gpu", "unload", "cpu", "pids"):

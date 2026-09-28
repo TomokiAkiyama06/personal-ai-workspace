@@ -11,6 +11,7 @@ import unittest
 
 from paw_backend.compute import (
     ComputeRequest,
+    DeploymentState,
     ExclusiveFailure,
     ExclusiveUnavailableError,
     Placement,
@@ -18,7 +19,7 @@ from paw_backend.compute import (
     ResourceClass,
     SchedulerMode,
 )
-from tests.compute_support import GIB, build, settle
+from tests.compute_support import GIB, build, main_spec, memory_spec, settle
 
 EX = ResourceClass.EXCLUSIVE
 CO = ResourceClass.CODING
@@ -175,6 +176,61 @@ class ExclusiveTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ExclusiveUnavailableError) as raised:
             await scheduler.acquire(exclusive(), wait_seconds=60)
         self.assertEqual(raised.exception.failure, ExclusiveFailure.CANNOT_UNLOAD)
+
+    async def test_without_a_model_control_an_empty_gpu_is_granted(self):
+        # Nothing of the workspace is on the GPU: only the free VRAM is checked
+        # (there is nothing to ask a model control about).
+        scheduler, *_ = build(
+            (main_spec(initial=DeploymentState.UNLOADED),), control=False
+        )
+        await scheduler.refresh()
+        lease = await scheduler.acquire(exclusive(GIB), wait_seconds=60)
+        self.assertEqual(scheduler.status().mode, SchedulerMode.EXCLUSIVE)
+        await lease.release()
+        self.assertEqual(scheduler.status().mode, SchedulerMode.NORMAL)
+
+    async def test_models_that_were_never_on_the_gpu_are_not_asked_for_pids(self):
+        # A deployment without a pids command (its processes() raises) that the
+        # Exclusive job did not have to unload does not block the lease.
+        scheduler, probe, control, _ = build(
+            (
+                main_spec(),
+                # Too large to be loaded next to the main model.
+                memory_spec(initial=DeploymentState.UNLOADED, weights_bytes=40 * GIB),
+            )
+        )
+        original = control.processes
+
+        async def processes(name):
+            if name == "memory":
+                raise RuntimeError("no pids command")
+            return await original(name)
+
+        control.processes = processes
+        await scheduler.refresh()
+        self.assertEqual(control.actions, [])
+        lease = await scheduler.acquire(exclusive(), wait_seconds=60)
+        self.assertEqual(scheduler.status().mode, SchedulerMode.EXCLUSIVE)
+        await lease.release()
+
+    async def test_an_abandoned_exclusive_lease_can_be_force_released(self):
+        lease = await self.scheduler.acquire(exclusive(), wait_seconds=60)
+        await self.clock.advance(3_600)
+        status = self.scheduler.status()
+        self.assertEqual(status.mode, SchedulerMode.EXCLUSIVE)
+        self.assertEqual(status.exclusive_age_seconds, 3_600)
+        with self.assertLogs("paw_backend.compute", level="WARNING"):
+            self.assertTrue(self.scheduler.force_release_exclusive())
+        self.assertTrue(lease.revoked.is_set())
+        self.assertTrue(lease.released)
+        status = self.scheduler.status()
+        self.assertEqual(status.mode, SchedulerMode.NORMAL)
+        self.assertIsNone(status.exclusive_age_seconds)
+        self.assertFalse(self.scheduler.force_release_exclusive())  # nothing held
+        await lease.release()  # the holder's late release changes nothing
+        self.control.actions.clear()
+        await self.scheduler.refresh()
+        self.assertEqual(self.control.actions, [("place:local_gpu", "main")])
 
     async def test_without_a_probe_nothing_is_unloaded(self):
         # The release of the VRAM could not be confirmed: refuse before acting.

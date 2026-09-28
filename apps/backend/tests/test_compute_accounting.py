@@ -111,6 +111,29 @@ class AccountTest(unittest.TestCase):
         self.assertEqual(view.external, 30 * GIB)
         self.assertEqual(view.committed, 30 * GIB)
 
+    def test_a_model_whose_pids_hold_nothing_is_not_counted_twice(self):
+        # The pids command named only the parent (MainPID) while the GPU memory
+        # sits on a child: the model is assumed to hold its reservation out of
+        # what the probe sees, not reserved and external both.
+        view = account(
+            device(used=60 * GIB),
+            (proc(43, 60 * GIB),),
+            (DeploymentUsage(reserved_bytes=66 * GIB, pids=frozenset({42})),),
+            headroom=4 * GIB,
+        )
+        self.assertEqual(view.own_actual, 0)
+        self.assertEqual(view.external, 0)
+        self.assertEqual(view.committed, 66 * GIB)
+        # Another workload beyond the reservation still counts.
+        view = account(
+            device(used=76 * GIB),
+            (proc(43, 60 * GIB), proc(77, 16 * GIB)),
+            (DeploymentUsage(reserved_bytes=66 * GIB, pids=frozenset({42})),),
+            headroom=4 * GIB,
+        )
+        self.assertEqual(view.external, 10 * GIB)
+        self.assertEqual(view.committed, 76 * GIB)
+
     def test_extra_reservations(self):
         view = account(device(), (), (), headroom=4 * GIB, extra_reserved=50 * GIB)
         self.assertEqual(view.reserved, 50 * GIB)

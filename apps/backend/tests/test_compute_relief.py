@@ -6,6 +6,7 @@ change the main model), the way back, and the residency policy.
 The fakes simulate the GPU: a model the scheduler unloads frees its memory on the
 fake probe. Nothing loads, unloads or allocates anything real."""
 
+import asyncio
 import unittest
 
 from paw_backend.compute import (
@@ -23,6 +24,7 @@ from tests.compute_support import (
     embedding_spec,
     main_spec,
     memory_spec,
+    settle,
 )
 
 IC = ResourceClass.INTERACTIVE
@@ -352,3 +354,68 @@ class ResidencyTest(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ParentPidTest(unittest.IsolatedAsyncioTestCase):
+    """vLLM / SGLang hold the GPU memory in a child of the unit's MainPID. A pids
+    command that names only the parent must not make the model's memory count
+    twice (once reserved, once external) and start the relief steps."""
+
+    async def test_memory_held_by_a_child_does_not_cause_pressure(self):
+        scheduler, probe, control, _ = build()
+        original = control.processes
+
+        async def parent_only(name):
+            # The parent (not on the GPU), not the child that holds the memory.
+            return frozenset(pid + 100_000 for pid in await original(name))
+
+        control.processes = parent_only
+        for _ in range(8):
+            await scheduler.refresh()
+        status = scheduler.status()
+        self.assertEqual(status.relief, Relief.NONE)
+        self.assertFalse(status.needs_human)
+        self.assertEqual(status.vram.external, 0)
+        self.assertGreater(status.vram.available, 0)
+        self.assertEqual(control.actions, [])
+        admission = await scheduler.try_acquire(request())
+        self.assertIsNotNone(admission.lease)
+        await admission.lease.release()
+
+
+class SlowActionTest(unittest.IsolatedAsyncioTestCase):
+    """A model action (a load can take minutes) does not stop the probe: the
+    main model keeps admitting while another deployment loads."""
+
+    async def test_a_slow_load_of_another_model_does_not_stop_main_admissions(self):
+        scheduler, probe, control, clock = build(
+            (
+                main_spec(),
+                memory_spec(initial=DeploymentState.UNLOADED),
+            )
+        )
+        control.gate = asyncio.Event()
+        refresh = asyncio.create_task(scheduler.refresh())
+        await settle()
+        self.assertEqual(control.actions, [("place:local_gpu", "memory")])
+        self.assertFalse(refresh.done())
+        await clock.advance(20)  # longer than the probe's maximum age (15 s)
+        for _ in range(4):
+            await clock.advance(5)
+        self.assertTrue(scheduler.status().probe_ok)
+        admission = await scheduler.try_acquire(
+            ComputeRequest(IC, deployment="main", context_tokens=1_000)
+        )
+        self.assertIsNone(admission.refusal)
+        await admission.lease.release()
+        self.assertEqual(
+            (await scheduler.try_acquire(request(BG, "memory"))).refusal,
+            Refusal.NOT_RESIDENT,
+        )
+        control.gate.set()
+        await refresh
+        self.assertEqual(
+            scheduler.status().deployment("memory").state, DeploymentState.GPU
+        )
+        # One action at a time: the loop did not start a second one.
+        self.assertEqual(control.actions, [("place:local_gpu", "memory")])

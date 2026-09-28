@@ -3548,17 +3548,19 @@ Local の Agent は Model ごとに 1 つの Runtime を共有します。`acqui
 
 Probe が見る使用量（Actual）と、Scheduler が約束した量（Reserved: GPU に置いた Model の Footprint 全体と Exclusive の予約）を分けて持ちます。`committed` は Workspace の各 Model について予約と実使用の大きい方、それに Workspace のものでない使用（他の Workload、Unload したのに残った Memory）を足したもので、`available = total − headroom − committed` が 0 未満なら VRAM pressure です。Safety Headroom の暫定値は「4 GiB と GPU の 5% の大きい方」（96 GB で約 4.8 GiB）です。
 
+`ModelControl.processes()`（`CommandModelControl` の `pids` Command）は、その Runtime の**全 Process**（systemd の Unit なら cgroup の `cgroup.procs`）を返してください。vLLM / SGLang は GPU Memory を `MainPID` の子 Process（EngineCore / TP Worker）が持つため、`MainPID` だけでは Model の Memory が他の Workload に見えます。返した Process が GPU に何も持たない Model は、Process が分からない Model と同じく「予約分を Probe が見る使用のうちに持つ」とみなすので二重には数えませんが（Decision 0037 の 12）、一部の Process だけを返すと、残りは他の Workload と区別できずに二重に数えます。
+
 ### 縮退と常駐（Memory Worker の Unload、CPU fallback）
 
-`refresh()`（`serve()` が既定 5 秒ごとに呼びます）は Probe を読み、1 回に 1 段だけ進めます。Pressure の間は要件の順に、1. Background の Admission を止めて Background の Lease に `revoked` を立てる（Process は殺しません）、2. Memory Worker を Drain してから Unload、3. Embedding / Reranker を CPU の Copy へ移す（無ければ `IF_ROOM` のものを Unload）、4. Interactive 以外の新規 Local Request を止める、5. 新しい Request の Context を Model の最大の半分に下げる、6. Main Model の構成変更が必要なことを `needs_human` で知らせる（**自動では変えません**）。余裕が戻ると（Headroom の外にもう 1 つ Headroom 分）逆順に戻します。Pressure も縮退もないときは、常駐方針（Main は `ALWAYS`、Memory Worker・Embedding・Reranker は `IF_ROOM`）に従って Model を Load します。Model の操作が失敗した Deployment は `FAILED`（Memory を持ったままとみなす）になり、60 秒後に再試行します。`ModelControl` を渡さなければ、Scheduler は観察と Admission だけを行います。
+`refresh()`（`serve()` が既定 5 秒ごとに呼びます）は Probe を読み、1 回に 1 段だけ進めます。Model の操作（Load は数分かかりえます）の間も Probe を読み続けるので、GPU にある他の Model（Main）の Admission は止まりません。Pressure の間は要件の順に、1. Background の Admission を止めて Background の Lease に `revoked` を立てる（Process は殺しません）、2. Memory Worker を Drain してから Unload、3. Embedding / Reranker を CPU の Copy へ移す（無ければ `IF_ROOM` のものを Unload）、4. Interactive 以外の新規 Local Request を止める、5. 新しい Request の Context を Model の最大の半分に下げる、6. Main Model の構成変更が必要なことを `needs_human` で知らせる（**自動では変えません**）。余裕が戻ると（Headroom の外にもう 1 つ Headroom 分）逆順に戻します。Pressure も縮退もないときは、常駐方針（Main は `ALWAYS`、Memory Worker・Embedding・Reranker は `IF_ROOM`）に従って Model を Load します。Model の操作が失敗した Deployment は `FAILED`（Memory を持ったままとみなす）になり、60 秒後に再試行します。`ModelControl` を渡さなければ、Scheduler は観察と Admission だけを行います。
 
 ### Exclusive
 
-`acquire(ComputeRequest(ResourceClass.EXCLUSIVE, vram_bytes=...), wait_seconds=...)` は、新しい Local GPU の Admission を止め、走っている Local GPU の仕事が終わるのを待ち（止めません。Safe pause は PAW-037）、Memory Worker → Embedding / Reranker（CPU の Copy があれば CPU へ）→ Main の順に Unload し、Probe で Workspace の Process が GPU になく要求した VRAM が空いたことを確かめてから Lease を返します。どこかで失敗すれば通常へ戻して `ExclusiveUnavailableError` です。Lease を返すと、`refresh()` が Model を Load し直します。
+`acquire(ComputeRequest(ResourceClass.EXCLUSIVE, vram_bytes=...), wait_seconds=...)` は、新しい Local GPU の Admission を止め、走っている Local GPU の仕事が終わるのを待ち（止めません。Safe pause は PAW-037）、Memory Worker → Embedding / Reranker（CPU の Copy があれば CPU へ）→ Main の順に Unload し、Probe で Workspace の Process が GPU になく要求した VRAM が空いたことを確かめてから Lease を返します。どこかで失敗すれば通常へ戻して `ExclusiveUnavailableError` です。Lease を返すと、`refresh()` が Model を Load し直します。Exclusive の Lease に期限はありません（走っている Job の Memory を奪わないため）。持ち主が Release しないまま失われたときは、`status().exclusive_age_seconds` で気づき、管理操作の `force_release_exclusive()` で終わらせます（Lease に `revoked` を立てて Release。PAW-037 の API で Owner / Admin に限る。Decision 0037 の 13）。
 
 ### Local / Cloud の振り分けと、他の領域との接続
 
-- `HybridRuntime(scheduler, local_runtime, deployment="main", cloud=cloud_runtime, cloud_policy=policy)` を Orchestrator の `runtimes` に渡すと、Node ごとに Lease を取ってから Local の Model で走らせます。Local に入れず、`CloudPolicy.allows(assignment)` が許すときは Cloud の Runtime で走らせます（Policy が Task の Permission・Quota・依存を判断します。Policy が無ければ Cloud へは回しません）。Local で待てる上限を超えると Node は `ComputeUnavailable`（Retry 可）で失敗します。Local の Lease を持っていた秒数は Task の Budget の `GPU_SECONDS` に計上します。
+- `HybridRuntime(scheduler, local_runtime, deployment="main", cloud=cloud_runtime, cloud_policy=policy)` を Orchestrator の `runtimes` に渡すと、Node ごとに Lease を取ってから Local の Model で走らせます。Local に入れず、`CloudPolicy.allows(assignment)` が許すときは Cloud の Runtime で走らせます（Policy が Task の Permission・Quota・依存を判断します。Policy が無ければ Cloud へは回しません）。Local で待てる上限を超えると Node は `ComputeUnavailable`（Retry 可）で失敗します。Local の Lease を持っていた秒数は Task の Budget の `GPU_SECONDS` に計上します（Local の Runtime が例外を投げた・Cancel されたときも計上し、そのときは Runtime の例外の方を伝えます）。
 - `ScheduledMemoryWorker` は Memory Worker（PAW-041）を包み、Background の Lease が取れないとき（Unload 中、縮退中、Exclusive）は `WorkerUnavailableError` を投げます。Consolidator はこれを失敗に数えずに延期します（Decision 0018）。
 - `PlacedEmbedder` は Embedding Model の GPU と CPU の Copy を包み、Scheduler が置いた方を使います（取れなければ `ComputeUnavailableError` で、Retrieval は Degrade します。Decision 0019）。
 
@@ -3597,12 +3599,10 @@ control = CommandModelControl(
         "main": DeploymentCommands(
             gpu=("systemctl", "start", "paw-llm-main.service"),
             unload=("systemctl", "stop", "paw-llm-main.service"),
+            # Unit の cgroup の全 Process（MainPID だけでは足りません）。
             pids=(
-                "systemctl",
-                "show",
-                "--property=MainPID",
-                "--value",
-                "paw-llm-main.service",
+                "/usr/bin/cat",
+                "/sys/fs/cgroup/system.slice/paw-llm-main.service/cgroup.procs",
             ),
         ),
     }
@@ -3635,7 +3635,8 @@ python -m paw_backend.cli compute-status --headroom-min-mib 8192 --headroom-frac
 - 数値はすべて実測に基づかない暫定値です。Model と Runtime が決まったら Benchmark で見直します。Model の Footprint は Admin が与え、Scheduler は測りません。
 - 実際の Runtime（vLLM / SGLang など）の KV 使用率の取得、Runtime の Adapter、Application への組み込み、Exclusive の認可と API、走っている Task の Safe pause / Drain と `Waiting for Resource` への遷移（PAW-037）、System Health の表示（PAW-066）は含みません。
 - Background の停止は協調的（`revoked`）で、仕事がそれを無視すると VRAM は戻りません。
-- Cloud へ回した Node は、Orchestrator の記録上は Ladder の Label のままです（Placement は Scheduler の Status と Log に出ます）。
+- Cloud へ回した Node は、Orchestrator の記録上は Ladder の Label のままです（Placement は Scheduler の Status と Log に出ます）。外部への送信と Audit の正確さに関わるため、Decision 0037 の 14 で扱いを尋ねています。
+- `NvidiaSmiProbe` は `nvidia-smi` を PATH から探さず、絶対 Path（既定 `/usr/bin/nvidia-smi`、`executable=` で変更）で実行します。
 - 管理する GPU は `gpu_index` の 1 枚です。MIG は使いません。
 
 ### Test

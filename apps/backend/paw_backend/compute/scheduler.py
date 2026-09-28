@@ -168,6 +168,7 @@ class ComputeLease:
         "tokens",
         "vram_bytes",
         "revoked",
+        "granted_at",
         "_scheduler",
         "_released",
     )
@@ -186,6 +187,7 @@ class ComputeLease:
         self.tokens = tokens
         self.vram_bytes = request.vram_bytes
         self.revoked = asyncio.Event()
+        self.granted_at = scheduler._clock.monotonic()
         self._scheduler = scheduler
         self._released = False
 
@@ -247,6 +249,10 @@ class ComputeStatus:
     cloud_leases: int
     waiting: Mapping[ResourceClass, int]
     needs_human: bool
+    # How long the Exclusive job has held the GPU (``None``: none holds it). A
+    # lease that was never released keeps it for ever: an administrator ends it
+    # with ``force_release_exclusive()``.
+    exclusive_age_seconds: float | None = None
 
     def deployment(self, name: str) -> DeploymentStatus | None:
         for deployment in self.deployments:
@@ -352,15 +358,36 @@ class ComputeScheduler:
         return self._config
 
     async def refresh(self) -> ComputeStatus:
-        """Read the GPU, take at most one residency action, admit waiters."""
+        """Read the GPU, take at most one residency action, admit waiters.
+
+        A model action can take minutes (a load); the probe keeps being read
+        while it runs, so the models already on the GPU keep admitting work."""
         async with self._control_lock:
             await self._sample()
             if self._mode is SchedulerMode.NORMAL and self._fresh():
                 action = self._decide()
                 if action is not None:
-                    await self._perform(action)
+                    await self._perform_sampling(action)
             self._pump()
         return self.status()
+
+    def force_release_exclusive(self) -> bool:
+        """End the Exclusive job's lease although its holder has not released it
+        (it crashed, or lost the lease): an administrative action, for PAW-037's
+        API to expose to Owner / Admin only. The holder's lease is ``revoked``
+        and released; the next ``refresh()`` loads the models again (only into
+        memory the probe sees free: a job that still runs keeps its memory as
+        external). ``False`` when no Exclusive job holds the GPU."""
+        lease = self._exclusive
+        if lease is None:
+            return False
+        logger.warning(
+            "Exclusive GPU lease released by force after %.0f s",
+            self._clock.monotonic() - lease.granted_at,
+        )
+        lease.revoked.set()
+        self._release(lease)
+        return True
 
     async def serve(
         self, stop: asyncio.Event, *, interval: float = DEFAULT_REFRESH_SECONDS
@@ -521,6 +548,11 @@ class ComputeScheduler:
             cloud_leases=len(self._cloud),
             waiting=waiting,
             needs_human=self._relief is Relief.MAIN_CHANGE_NEEDED,
+            exclusive_age_seconds=(
+                None
+                if self._exclusive is None
+                else self._clock.monotonic() - self._exclusive.granted_at
+            ),
         )
 
     # -- the probe ------------------------------------------------------------
@@ -1001,6 +1033,22 @@ class ComputeScheduler:
             action.then()
         return ok
 
+    async def _perform_sampling(self, action: _Action) -> bool:
+        """``_perform`` while the probe keeps being read and waiters admitted
+        (the deployment being acted on is ``busy``: it admits nothing)."""
+        task = asyncio.ensure_future(self._perform(action))
+        interval = min(DEFAULT_REFRESH_SECONDS, self._config.probe_max_age_seconds / 3)
+        try:
+            while not await self._wait_for(task, interval):
+                await self._sample()
+                self._pump()
+        except BaseException:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+            raise
+        return task.result()
+
     # -- exclusive ------------------------------------------------------------
 
     async def _acquire_exclusive(
@@ -1031,8 +1079,8 @@ class ComputeScheduler:
                 if not drained:
                     raise ExclusiveUnavailableError(ExclusiveFailure.DRAIN_TIMEOUT)
             async with self._control_lock:
-                await self._empty_gpu()
-                await self._verify(request.vram_bytes)
+                moved = await self._empty_gpu()
+                await self._verify(request.vram_bytes, moved)
                 lease = self._grant(request, Placement.LOCAL_GPU)
                 self._mode = SchedulerMode.EXCLUSIVE
                 logger.info("Exclusive GPU job started")
@@ -1042,39 +1090,52 @@ class ComputeScheduler:
             self._pump()
             raise
 
-    async def _empty_gpu(self) -> None:
+    async def _empty_gpu(self) -> tuple[_Deployment, ...]:
+        """Move every model off the GPU; the ones it moved."""
         order = {role: index for index, role in enumerate(_EXCLUSIVE_ORDER)}
+        moved = []
         for entry in sorted(self._ordered, key=lambda e: order[e.spec.role]):
             if not entry.counts_on_gpu:
                 continue
             operation = "cpu" if entry.spec.cpu_fallback else "unload"
             entry.displaced = False
+            moved.append(entry)
             if not await self._perform(_Action(entry, operation)):
                 raise ExclusiveUnavailableError(ExclusiveFailure.CANNOT_UNLOAD)
+        return tuple(moved)
 
-    async def _verify(self, vram_bytes: int) -> None:
-        """Wait until the probe shows no process of the workspace on the GPU and
-        ``vram_bytes`` free (``NOT_FREED`` after the verify timeout)."""
+    async def _verify(self, vram_bytes: int, moved: tuple[_Deployment, ...]) -> None:
+        """Wait until the probe shows no process of the ``moved`` models on the
+        GPU and ``vram_bytes`` free (``NOT_FREED`` after the verify timeout)."""
         deadline = self._clock.monotonic() + self._config.verify_timeout_seconds
         while True:
             await self._sample()
-            if await self._freed(vram_bytes):
+            if await self._freed(vram_bytes, moved):
                 return
             if self._clock.monotonic() >= deadline:
                 raise ExclusiveUnavailableError(ExclusiveFailure.NOT_FREED)
             await self._clock.sleep(self._config.verify_poll_seconds)
 
-    async def _freed(self, vram_bytes: int) -> bool:
-        if not self._fresh() or self._control is None:
+    async def _freed(self, vram_bytes: int, moved: tuple[_Deployment, ...]) -> bool:
+        # Without a model control nothing of the workspace was on the GPU
+        # (``_acquire_exclusive`` refused otherwise): only the VRAM is checked.
+        # A model that was not on the GPU may have no pids command: only the
+        # ``moved`` ones must say where their processes are.
+        if not self._fresh() or (moved and self._control is None):
             return False
-        on_gpu = {process.pid for process in self._processes}
-        for entry in self._ordered:
-            try:
-                pids = await self._control.processes(entry.spec.name)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                return False
-            if not isinstance(pids, frozenset) or pids & on_gpu:
-                return False
+        if self._control is not None:
+            on_gpu = {process.pid for process in self._processes}
+            for entry in self._ordered:
+                try:
+                    pids = await self._control.processes(entry.spec.name)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    pids = None
+                if not isinstance(pids, frozenset):
+                    if entry in moved:
+                        return False
+                    continue
+                if pids & on_gpu:
+                    return False
         return self._vram().available >= vram_bytes

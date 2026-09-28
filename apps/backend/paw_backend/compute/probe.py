@@ -39,13 +39,16 @@ from paw_backend.compute.limits import (
 
 MIB = 1024**2
 
+# Run by its absolute path, not looked up in the service's PATH (a directory
+# another user can write to there could plant an ``nvidia-smi``).
+DEFAULT_NVIDIA_SMI = "/usr/bin/nvidia-smi"
 QUERY_GPU_ARGV: tuple[str, ...] = (
-    "nvidia-smi",
+    DEFAULT_NVIDIA_SMI,
     "--query-gpu=index,uuid,name,memory.total,memory.used,utilization.gpu",
     "--format=csv,noheader,nounits",
 )
 QUERY_APPS_ARGV: tuple[str, ...] = (
-    "nvidia-smi",
+    DEFAULT_NVIDIA_SMI,
     "--query-compute-apps=gpu_uuid,pid,used_memory",
     "--format=csv,noheader,nounits",
 )
@@ -160,13 +163,23 @@ class NvidiaSmiProbe:
         *,
         runner: CommandRunner | None = None,
         timeout: float = DEFAULT_PROBE_TIMEOUT_SECONDS,
+        executable: str = DEFAULT_NVIDIA_SMI,
     ) -> None:
         self._timeout = check_timeout(timeout)
         self._runner = runner if runner is not None else SubprocessRunner()
+        if (
+            not isinstance(executable, str)
+            or not os.path.isabs(executable)
+            or "\x00" in executable
+            or len(executable) > 4_096
+        ):
+            raise InvalidComputeArgumentError("executable")
+        self._gpu_argv = (executable, *QUERY_GPU_ARGV[1:])
+        self._apps_argv = (executable, *QUERY_APPS_ARGV[1:])
 
     async def sample(self) -> GpuSample:
-        devices = parse_gpu_rows(await self._query(QUERY_GPU_ARGV))
-        processes = parse_process_rows(await self._query(QUERY_APPS_ARGV))
+        devices = parse_gpu_rows(await self._query(self._gpu_argv))
+        processes = parse_process_rows(await self._query(self._apps_argv))
         known = {device.uuid for device in devices}
         if any(process.gpu_uuid not in known for process in processes):
             raise ProbeUnavailableError()
