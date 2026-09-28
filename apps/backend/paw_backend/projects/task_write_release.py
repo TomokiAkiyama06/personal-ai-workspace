@@ -238,7 +238,18 @@ class TaskWriteReleaser:
             return
         if decision.reason is Reason.AUDIT_UNAVAILABLE:
             raise ProjectPermissionDeniedError(decision.reason)
-        if not active:
+        # Only the project's state stands in the way: the same actor would be
+        # allowed on an Active project. An Owner / Admin acts without membership,
+        # so the state is theirs to learn (Codex review of #149, P2).
+        state_only = decision.reason is Reason.PROJECT_STATE_FORBIDS and (
+            decide(
+                principal,
+                CAPABILITY,
+                Resource.project(project.id, ProjectState.ACTIVE),
+                policy=self._authorizer.policy,
+            ).allowed
+        )
+        if not active and not state_only:
             # Not even whether the project exists (as ``ProjectService``).
             raise ProjectNotFoundError()
         if decision.reason is Reason.PROJECT_STATE_FORBIDS:

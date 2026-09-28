@@ -568,6 +568,27 @@ class ReleaserTest(ReleaseTestCase):
             self.decisions()[-1][3:], ("deny", Reason.PROJECT_STATE_FORBIDS.value)
         )
 
+    async def test_an_owner_or_admin_learns_the_state_without_membership(self):
+        # Codex review of #149 (P2): the Owner / Admin act without membership, so
+        # a project that is not Active is a state error for them, not "not found".
+        task_id, reservation = await self.held()
+        await self.owner_sql(
+            "UPDATE projects SET status = 'archived' WHERE id = :p", p=self.project_id
+        )
+        for role in ("owner", "admin"):
+            with self.subTest(role=role):
+                actor = await self.outsider(role)
+                with self.assertRaises(ProjectStateError):
+                    await self.release_as(actor, task_id, reservation)
+                self.assertEqual(await self.live_reservations(task_id), 1)
+                self.assertEqual(
+                    self.decisions()[-1][3:],
+                    ("deny", Reason.PROJECT_STATE_FORBIDS.value),
+                )
+        # A non-member without a system-role grant still learns nothing.
+        with self.assertRaises(ProjectNotFoundError):
+            await self.release_as(await self.outsider(), task_id, reservation)
+
     async def test_without_a_step_up_nothing_is_released(self):
         manager = await self.member("manager")
         task_id, reservation = await self.held()
