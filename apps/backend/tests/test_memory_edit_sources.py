@@ -18,6 +18,7 @@ from paw_backend.authz import SystemRole
 from paw_backend.memory.models import MemoryScope
 from paw_backend.memory.versioning import (
     FreshnessSpec,
+    InvalidMemoryInputError,
     MemoryChanges,
     MemoryDerivation,
     MemoryDraft,
@@ -276,6 +277,46 @@ class EditCopiesSourcesTest(SourcesTestCase):
             sorted(
                 [("conversation", first, None, None), self.confirmation(me)], key=repr
             ),
+        )
+
+    async def test_a_person_s_version_is_never_ended_with_the_session(self):
+        # Decision 0045 pt 1 (session_only): the copied sources would let
+        # end_session / end_task reach a person's version only if it were
+        # session_only, and a person never writes session_only (Decision 0034 pt 4).
+        me = self.user()
+        created = await self.versioning.create_memory(me, draft())
+        talk = self.conversation(me)
+        with self.engine.begin() as connection:
+            # A session_only memory as a worker leaves it (not writable by a person).
+            connection.execute(
+                text(
+                    "UPDATE memory_versions SET freshness_policy = 'session_only'"
+                    " WHERE id = :v"
+                ),
+                {"v": created.version_id},
+            )
+        self.add_source(created.version_id, conversation=talk)
+        with self.assertRaises(InvalidMemoryInputError):
+            await self.versioning.edit_memory(
+                me, created.memory_id, 1, MemoryChanges(content="monday")
+            )
+        edited = await self.versioning.edit_memory(
+            me,
+            created.memory_id,
+            1,
+            MemoryChanges(content="monday", freshness=FreshnessSpec.permanent()),
+        )
+        self.assertIn(
+            ("conversation", talk, None, None), self.sources(edited.version_id)
+        )
+        freshness = self.new_freshness()
+        self.assertEqual(await freshness.end_session(talk), 0)
+        self.assertEqual(
+            [
+                (v.version_number, v.status, v.freshness_policy)
+                for v in self.versions(created.memory_id)
+            ],
+            [(1, "superseded", "session_only"), (2, "active", "permanent")],
         )
 
     async def test_the_system_identity_writes_no_source(self):

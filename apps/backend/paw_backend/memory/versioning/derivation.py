@@ -23,6 +23,13 @@ second rule also finds the versions written before the copies existed, and any
 version whose copy was skipped (a source that named nothing any more), without a
 backfill.
 
+Ordering contract for the deletion flow (Decision 0045, risks): run the lookup
+BEFORE the conversation is deleted (``ON DELETE SET NULL`` clears
+``conversation_id``, after which nothing is found), and serialize it against manual
+edits (e.g. the lookup and the deletion in one transaction, holding the found
+memories' advisory locks), or an edit committed in between copies the sources
+onto a version the lookup never returned. The design is the deletion issue's.
+
 Backend-internal, like the freshness jobs: there is no caller to authorize (the
 deletion flow runs as the ``system`` actor, after its own authorization of the
 deletion), and only ids and numbers are returned, never a version's content. A

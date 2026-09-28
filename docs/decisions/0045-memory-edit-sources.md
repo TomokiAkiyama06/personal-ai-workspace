@@ -1,10 +1,10 @@
 # Memory の編集でできた新しい Version の出典（`memory_sources`）と、会話・Task から由来する Version の検索
 
-- Status: Proposed（1 は Human の決定として伝達済み。2〜5 は推奨つきの提案）
+- Status: Proposed（1 は Human の決定として伝達済み。2〜6 は推奨つきの提案）
 - Date: 2026-09-28
 - Scope: Issue [#128](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/128)（[Decision 0034](0034-memory-versioning-freshness.md) の 9。会話の削除の前提）。関連: PAW-042（#36、PR #122 / #135）、[Decision 0009](0009-shared-memory-administration.md)（Shared Memory の `user_confirmation` の出典）、[Decision 0018](0018-memory-journal-consolidation-policy.md)（Journal）
-- Supersedes: なし（Decision 0034 の 9 は「会話削除の Flow の Issue で決める」とした未決の点で、この Decision がそれを埋める。0034 は書き換えない）
-- Approval: 1 は、2026-09-28 に Orchestrator の作業 Session で Human が AskUserQuestion に直接回答して決めたと、実装 Agent に伝えられた（下の「1 の記録について」）。2〜5 は未承認
+- Supersedes: [Decision 0034](0034-memory-versioning-freshness.md) の 2 のうち「編集・復元・Revalidate の新しい Version に `memory_sources` を写さない」という箇条のみ（承認後）。0034 の 9（「会話削除の Flow の Issue で決める」とした未決の点）はこの Decision が埋める。0034 の File 自体は書き換えない（AGENTS.md 14）
+- Approval: 1 は、2026-09-28 に Orchestrator の作業 Session で Human が AskUserQuestion に直接回答して決めたと、実装 Agent に伝えられた（下の「1 の記録について」）。2〜6 は未承認
 
 ## 背景
 
@@ -26,6 +26,7 @@ Issue #128 は、会話の削除を実装する前にこれを決め、「会話
 - Scope の縮小（`project → user`、Decision 0034 の 2）も編集なので、出典を写す。
 - 何も変えない編集は何も書かない（出典も）。
 - `system` の Identity は、#135 のとおり、どの Method でも Database に触る前に拒否される（出典も書かない）。
+- `FreshnessMaintenance.end_session` / `end_task` は出典で `session_only` の Version を探すが、人は `session_only` を書かない（Decision 0034 の 4。編集で `session_only` を保つと拒否され、新しい鮮度を要する）。そのため、写した出典によって人の Version が Session / Task の終わりに `deprecated` になることはなく、0034 の振る舞いは変わらない（Test: `test_a_person_s_version_is_never_ended_with_the_session`）。
 
 #### 1 の記録について
 
@@ -74,6 +75,13 @@ Database は、何も指さない `conversation` の出典を**新しく INSERT 
 
 - **推奨: この Issue では扱わず、会話の削除の Issue で、4 の検索を Candidate の `origin_version_id` と Shared Memory の Version にも広げるか、Journal の Version をどう扱うかと一緒に決める。** どちらも Decision 0009 / 0018 の規則に関わり、削除時の処理（1 で未決）と切り離せないため。
 
+### 6. 他の User の Private Memory に縮小された Version（提案。削除時の処理は未決）
+
+Project Memory を編集者の User Memory へ縮小すると（1 の Scope の縮小）、Project の Version の出典（別の Member A の会話を指しうる）が編集者 B の Private Memory の Version に写る。A がその会話を削除すると、4 の検索は B の Private の Version も返す。
+
+- **推奨: 設計どおり返す**（検索は Scope と所有者を問わず、見つけることに徹する）。
+- B の Private の Version を削除時に消すか、残すか、B の `user_confirmation` があれば残すかは、他の User の Private Memory に関わる Privacy の問題として、1 の未決の処理と一緒に会話の削除の Issue で決める。
+
 ## 選定理由
 
 - 出典を写すと、会話の削除は `memory_sources` を 1 回引くだけで、編集を重ねた Version まで見つかる（1）。
@@ -84,6 +92,7 @@ Database は、何も指さない `conversation` の出典を**新しく INSERT 
 
 - 編集ごとに出典の行が増える（出典の数 + 最大 1 行）。手動の操作なので量は小さいとみなす。
 - 4 の検索は件数の上限を持たない（削除の Flow はすべてを要する）。巨大な会話で多くの Version が見つかる場合は、削除の Issue で分割を考える。
+- 検索と削除の順序・並行性: 会話を削除すると `ON DELETE SET NULL` で `conversation_id` が消え、その後に検索しても何も見つからない。また、検索と削除の間に手動の編集が Commit されると、検索が返さなかった新しい Version に出典が写る。そのため会話の削除の Flow は、**会話を削除する前に**検索を行い、手動の編集と直列化する（例: 検索と削除を 1 つの Transaction で行い、見つかった Memory の Advisory Lock を取る）必要がある。具体的な設計は会話の削除の Issue で決める。
 - `attributes` の 3 つの Key は `MemoryVersioningService` だけが書く前提（`actor_type = 'user'` の Version に限る）。他の書き手が同じ Key を人の Version に書くようになれば、辿りが広がる（見つける側に倒れる）。
 
 ## 決めてほしいこと
@@ -93,5 +102,6 @@ Database は、何も指さない `conversation` の出典を**新しく INSERT 
 3. 削除済みの会話を指す（何も指さない）出典は写さないこと。推奨: 承認。
 4. 由来の検索を出典と `attributes` の辿りで行い、既存の Version の Backfill（Revision `0128`）を作らないこと。推奨: 承認。
 5. Shared Memory への昇格と Journal の由来をこの Issue の範囲外にし、会話の削除の Issue で決めること。推奨: 承認。
+6. 他の User の Private Memory に縮小された Version も検索で返し、その削除時の処理（他の User の Private Memory の Privacy）は会話の削除の Issue で決めること。推奨: 承認。
 
 承認後に方針を変える場合は、この Decision を書き換えず、新しい Decision から `Supersedes` する。
