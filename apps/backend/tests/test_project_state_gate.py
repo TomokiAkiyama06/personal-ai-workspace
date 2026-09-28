@@ -52,7 +52,7 @@ from paw_backend.tasks.queueing import (
 from . import test_projects_task_stop as stop_tests
 from .gate_support import ALWAYS_ACTIVE
 from .projects_support import T0, requires_postgres
-from .task_support import PostgresTaskTestCase
+from .task_support import PostgresTaskTestCase, single_target
 
 NOT_ACTIVE = (
     ProjectStatus.ARCHIVED,
@@ -175,6 +175,7 @@ class GateTestCase(stop_tests.TaskStopTestCase):
             "project_id": self.project_id,
             "created_by": self.team.manager,
             "title": "Fix the parser",
+            "repositories": single_target(uuid4()),
         }
         arguments.update(overrides)
         return await (service or self.tasks).create_task(**arguments)

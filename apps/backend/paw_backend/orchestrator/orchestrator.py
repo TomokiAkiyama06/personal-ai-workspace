@@ -253,12 +253,21 @@ class TaskAuthority:
     ``repositories``. The orchestrator asks again for every tool call, so an ACL
     that was narrowed or a project that was archived takes effect on the next call.
 
-    **The working-set seam.** The repositories of a Multi-Repo task are not
-    persisted yet (issue #85, Decision 0014): the caller decides them here, each
-    as a ``ScopedRepository`` with its worktree, its resolved ``RepoAcl`` and the
-    URLs (**remotes**) that address it: a repository without a registered remote
-    lets no call that carries a URL through (Decision 0006, section 8 (d)). When
-    #85 lands, an implementation of this seam reads the stored working set.
+    **The working-set seam.** The caller builds the repositories here, each as
+    a ``ScopedRepository`` with its worktree, its resolved ``RepoAcl``, the URLs
+    (**remotes**) that address it (a repository without a registered remote lets
+    no call that carries a URL through: Decision 0006, section 8 (d)) and its
+    **role** in the stored Working Set (issue #85, Decision 0030):
+    ``tools.scope.with_working_set_roles(repositories, working_set)``. ``task`` is
+    the snapshot the run was started with: its ``working_set`` may predate a
+    change, and an implementation may read the stored one again
+    (``TaskService.restore``) to see a repository added since. Either way no
+    stale role widens anything: a repository without a role is refused by
+    the Tool Broker (``repository_role_unresolved``), and the Broker admits every
+    call that touches a repository on the roles stored **now**
+    (``TaskService.admit_repository_use``), so a scope older than a downgrade or a
+    removal cannot widen anything. A node keeps the roles of its parent
+    (``scope.derive_child_scope``); no node role may change the Working Set.
     """
 
     async def parent_grant(self, task: TaskSnapshot) -> AgentGrant:

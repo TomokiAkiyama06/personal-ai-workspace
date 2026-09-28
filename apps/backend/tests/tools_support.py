@@ -12,8 +12,16 @@ from paw_backend.authz import (
     ProjectRole,
     ProjectState,
     RepoAcl,
+    RepoPermission,
     SystemRole,
 )
+from paw_backend.authz.capabilities import REPO_PERMISSION_OF
+from paw_backend.tasks import (
+    RepoRole,
+    RepositoryRoleInsufficientError,
+    RepositoryRoleUnresolvedError,
+)
+from paw_backend.tasks.working_set import marks_changed, role_allows
 from paw_backend.tools import (
     ApprovalLevel,
     ApprovalService,
@@ -195,6 +203,8 @@ def make_scope(**overrides) -> TaskScope:
                 ROOT,
                 RepoAcl.inherit(REPO, P1),
                 remotes=[REPO_REMOTE, REPO_REMOTE + ".git", REPO_API],
+                # The task's target: its role allows everything the ACL does.
+                role=RepoRole.TARGET,
             )
         ],
     }
@@ -333,6 +343,78 @@ class StepUp:
         return self.answer
 
 
+class UseGate:
+    """Admits the repository uses the broker allowed, the way
+    ``TaskService.admit_repository_use`` does: against the roles stored now
+    (``roles``; ``None`` admits every use), or it fails with ``error``."""
+
+    def __init__(self, *, roles=None, error=None) -> None:
+        self.roles = roles
+        self.error = error
+        # ``reserve=False``: a gate that admits a write without a reservation.
+        self.reserve = True
+        self.release_error: Exception | None = None
+        self.uses: list[
+            tuple[uuid.UUID, TaskRun, tuple[uuid.UUID, ...], Capability, bool]
+        ] = []
+        # The reservations handed out, and those released (in order).
+        self.reservations: list[uuid.UUID] = []
+        self.released: list[tuple[uuid.UUID, uuid.UUID]] = []
+
+    async def admit_repository_use(
+        self, task_id, run, repository_ids, *, capability, executes
+    ):
+        if self.error is not None:
+            raise self.error
+        if self.roles is not None:
+            for repository_id in repository_ids:
+                role = self.roles.get(repository_id)
+                if role is None:
+                    raise RepositoryRoleUnresolvedError()
+                if not role_allows(role, capability, executes=executes):
+                    raise RepositoryRoleInsufficientError()
+        self.uses.append((task_id, run, tuple(repository_ids), capability, executes))
+        if not self.reserve or not marks_changed(capability, executes=executes):
+            return None
+        reservation = uuid.uuid4()
+        self.reservations.append(reservation)
+        return reservation
+
+    async def release_repository_use(self, task_id, reservation_id):
+        if self.release_error is not None:
+            raise self.release_error
+        self.released.append((task_id, reservation_id))
+
+    def in_flight(self) -> list[uuid.UUID]:
+        """The reservations handed out and not released."""
+        released = {reservation for _, reservation in self.released}
+        return [r for r in self.reservations if r not in released]
+
+    def changes(self) -> list[tuple[uuid.UUID, TaskRun, tuple[uuid.UUID, ...]]]:
+        """The admitted uses that mark their repositories as changed (a write,
+        or something executed)."""
+        return [
+            (task_id, run, ids)
+            for task_id, run, ids, capability, executes in self.uses
+            if executes or REPO_PERMISSION_OF.get(capability) is RepoPermission.WRITE
+        ]
+
+
+class Registrations:
+    """The registered ACLs a test knows about (anything else is unregistered)."""
+
+    def __init__(self, *acls: RepoAcl, error=None) -> None:
+        self.acls = {acl.repo_id: acl for acl in acls}
+        self.error = error
+        self.asked: list[uuid.UUID] = []
+
+    async def working_set_acl(self, repository_id):
+        self.asked.append(repository_id)
+        if self.error is not None:
+            raise self.error
+        return self.acls.get(repository_id)
+
+
 class Harness:
     """A broker with in-memory adapters, wired the way production wires it."""
 
@@ -357,6 +439,8 @@ class Harness:
         # The broker's own audit sink can be a different (failing) one.
         self.broker_sink = overrides.pop("broker_sink", self.sink)
         self.executor = overrides.pop("executor", FakeExecutor())
+        self.use_gate = overrides.pop("use_gate", UseGate())
+        self.registrations = overrides.pop("registrations", Registrations())
         self.events: list = []
         listeners = overrides.pop("listeners", (self.events.append,))
         self.broker = ToolBroker(
@@ -367,6 +451,8 @@ class Harness:
             budget=self.budget,
             task_activity=self.task_activity,
             path_resolver=overrides.pop("path_resolver", LexicalPathResolver()),
+            registrations=self.registrations,
+            use_gate=self.use_gate,
             clock=self.clock,
             listeners=listeners,
             **overrides,
