@@ -1,0 +1,50 @@
+# Erasure of deleted users' personal data (Issue #127, Decision 0043).
+# Started once a day by paw-user-erasure.timer.
+#
+# Erases, for every user deleted 30 or more days ago, the personal data kept in
+# the database (password hash, Passkeys, sessions, private conversations, private
+# Memory, personal settings, ...), verifies it and only then marks the user
+# deleted. It never touches a user's Linux account or home: managed checkouts
+# there block the erasure until the operator removed them and runs
+#   python -m paw_backend.cli user-erasure-run --checkouts-removed <user id>
+# by hand (the same environment file).
+#
+# User: the same dedicated OS user as paw-audit-retention.service (paw-maint),
+# never the user the backend runs as, for the same reasons (see that unit): this
+# job holds the table owner's credential.
+#
+# Install (as root), adjusting the paths and the User to your deployment:
+#   cp paw-user-erasure.service paw-user-erasure.timer \
+#      paw-user-erasure-failure.service /etc/systemd/system/
+#   systemctl daemon-reload
+#   systemctl enable --now paw-user-erasure.timer
+#
+# /etc/paw/user-erasure.env must set PAW_MIGRATION_DATABASE_URL (the table owner)
+# and be readable by root only (chmod 600). It may be the same file as
+# /etc/paw/audit-retention.env. Never put the URL on the ExecStart line or in
+# Environment=.
+
+[Unit]
+Description=Personal AI Workspace erasure of deleted users' personal data
+Wants=network-online.target
+After=network-online.target postgresql.service
+# A non-zero exit (a user not erased, an unreachable database, a concurrent run)
+# starts the failure unit.
+OnFailure=paw-user-erasure-failure.service
+
+[Service]
+Type=oneshot
+User=paw-maint
+EnvironmentFile=/etc/paw/user-erasure.env
+WorkingDirectory=/opt/paw/apps/backend
+ExecStart=/opt/paw/venv/bin/python -m paw_backend.cli user-erasure-run
+# Each user is one transaction whose lock wait is bounded (LOCK_TIMEOUT_MS of
+# paw_backend.auth.onboarding.erasure). This is the backstop: systemd sends
+# SIGTERM, the command rolls the current user back and exits 3.
+TimeoutStartSec=30min
+KillSignal=SIGTERM
+TimeoutStopSec=60s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true

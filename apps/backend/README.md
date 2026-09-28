@@ -64,7 +64,7 @@ apps/backend/
 │  │  ├─ passkeys/         # Passkey（WebAuthn）: Ceremony の検証、Challenge、登録・認証・失効、Passkey の Step-up の Verifier、Tool Broker の強い承認の Step-up（PAW-023）
 │  │  └─ onboarding/       # 招待、QR / リンクの端末の Pairing、User の Lifecycle（削除・復元）、1 回限りの Token（PAW-024）
 │  ├─ identity/            # 最小の users、One-time Token。`redeemer.py` は Web 側、`operator.py`（Owner の作成・Token の発行）は cli だけが使う（PAW-021）
-│  ├─ cli/                 # server-local の管理コマンド `python -m paw_backend.cli`（PAW-021。`audit-retention-*` は Issue #117）
+│  ├─ cli/                 # server-local の管理コマンド `python -m paw_backend.cli`（PAW-021。`audit-retention-*` は Issue #117、`user-erasure-run` は Issue #127）
 │  ├─ orchestrator/        # DAG Agent Orchestrator: Plan、Scheduler、DAG の永続化と Fencing、Runtime の Protocol、Tool・Budget の Gateway、Project 削除の Sweep（PAW-034）
 │  ├─ tasks/               # Agent Task の状態遷移と永続化（PAW-032）。`project_gate.py` は Project の状態 Gate の Protocol（Issue #83）
 │  │  └─ queueing/         # Task Queue、Budget、Loop 検知、Escalation の判断（PAW-033）
@@ -1445,12 +1445,12 @@ issued / claimed / approved ──(本人の失効・新しい発行・User の�
 | `invited` → `deleted` | 招待の取消（`DELETE /users/{id}`。消す個人データがないので直ちに `deleted`） |
 | `active` → `pending_deletion` | 削除（同じ Route） |
 | `pending_deletion` → `active` | 復元（Owner だけ、30 日 = 720 時間以内。Database の時計で判定） |
-| `pending_deletion` → `deleted` | **この Issue に含めません**（30 日後の個人データの消去と検証が先。Decision 0033 の 3 節） |
+| `pending_deletion` → `deleted` | 30 日後の定期の消去（`user-erasure-run`。Table の Owner が個人データを消して検証してから記録する。下の「削除の後続（Issue #127）」） |
 
 - `users.status` を変えるのは `SECURITY DEFINER` の関数 `paw_change_user_status(user_id, from, to, now, actor)` だけで、上の 4 つの遷移だけを許し、**Owner の行は変えません**。Web の Role に `users.status` の UPDATE 権限はありません。関数は同じ文で `user_status_changes`（追記専用。Trigger が UPDATE・DELETE を拒否し、Web の Role は SELECT だけ）に履歴を 1 行書きます。30 日の起点はこの履歴です。`user_status_changes.user_id` の外部キーは **RESTRICT** で、履歴を持つ User（招待で作った User は全員）の `users` の行は物理削除できず、Tombstone として残ります（後続の消去の設計の制約。Decision 0033 の判断点 11）。
 - 削除は、User の行の Lock（`FOR NO KEY UPDATE`。Project の Service が Member の行を足すときの外部キーの `KEY SHARE` と衝突しない）と、その User が Manager である Project の行の Lock（`FOR UPDATE`、ID の順。Project の Service が Member の変更ごとに取る Lock）の下で、状態の変更、**全 Session の失効**（`account_closed`）、生きている Pairing の失効、Audit を 1 つの Transaction で行います。Active / Archived の Project の**唯一の生きた Manager**（受諾済みで、本人の Account が `active`。削除待ちの共同 Manager は数えない）は削除できません（`ownership_transfer_required`）。同時の 2 人の Manager の削除、Manager の退出・降格との競合は、Project の行の Lock で直列になります。
 - Admin は User を、Owner は User と Admin を削除できます。Owner と自分自身は対象になりません。削除・招待の取消・復元はすべて Passkey の Step-up が要ります。
-- 実行中 Agent の安全停止と、GitHub / Codex / Claude の外部認証の停止は含みません（Decision 0033 の判断点 9。`active` でない User は `SessionPrincipalProvider` が匿名にするので、Session を要る経路は止まります）。
+- 削除の Transaction は、その User の開始済みの Passkey の Ceremony（`passkey_challenges`）も消します。実行中の Task の安全停止と 30 日後の消去は、下の「削除の後続（Issue #127）」です。
 
 ### Audit
 
@@ -1465,6 +1465,8 @@ issued / claimed / approved ──(本人の失効・新しい発行・User の�
 | `auth.pairing.complete` | allow `completed`（`resource_id` は新しい Session。新規端末の登録）、deny（Claim の理由） |
 | `auth.user.delete` | allow `deletion_pending` / `invitation_cancelled`、deny `role_not_allowed`・`step_up_required`・`ownership_transfer_required`・`invalid_state` |
 | `auth.user.restore` | allow `restored`、deny `role_not_allowed`・`retention_expired`・`invalid_state`・`step_up_required` |
+| `auth.user.task_stop`（Issue #127） | allow `user_deletion`（削除中の User の Task を Cancel した。`resource_kind` は `task`、Project つき、Actor なし） |
+| `auth.user.erase`（Issue #127） | allow `erased` / `checkouts_released`、deny `tasks_active`・`checkouts_remaining`・`verification_failed`・`erasure_failed`（`resource_kind` は `user`、Actor なし） |
 
 ID と列挙値だけです（Token、Token ID、Claim、確認 Code、Login name、端末名は入りません。Token は `audit_ref`、Pairing は `audit_ref` を `pairing_id` として外に見せます）。変更は同じ Transaction、拒否は別の短い Transaction で Best Effort に書きます。**未知の Token ID と形式不正の Token、Lock 後の試行は DB に書かず**、Log に固定の 1 行だけです（誰でも作れる行になるため。Owner の Token と同じ方針）。
 
@@ -1487,12 +1489,33 @@ Migration `0124`（Revision ID は Issue の番号で、Decision 0024 と紛れ�
 - 実際の Browser・QR の読み取り・Reverse Proxy を通した動作は確かめていません（`TestClient` と実 PostgreSQL まで）。
 - 一般 User の Pairing は Token の所持だけで Session ができます（QR の盗み見・リンクの転送。10 分以内）。Pairing の完了は Audit に残り、端末の一覧から個別に Logout できます。
 - 招待の取消・削除の後も `users.login_name` は一意のまま予約され、同じ Login name で招待し直せません（Decision 0033 の判断点 10）。
-- `pending_deletion` → `deleted`（30 日後の消去）、実行中 Agent の停止、外部認証の停止、User の一覧の Endpoint、Web の画面は後続の Issue です。
+- 30 日後の消去・実行中の Task の停止は Issue #127 で実装しました（下記。[Decision 0043](../../docs/decisions/0043-user-deletion-follow-ups.md) は **Proposed**）。User の一覧の Endpoint、Web の画面は後続の Issue です。
 - 公開 Route の時間は揃えていません（存在する Token の失敗は Audit の INSERT が加わる）。
+
+### 削除の後続（Issue #127）
+
+[Issue #127](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/127)（Decision 0033 の判断点 9 と 6 の後続）。選択は **[Decision 0043](../../docs/decisions/0043-user-deletion-follow-ups.md)（Proposed）** にまとめました。判断点 6（Pairing した新しい端末での Passkey の追加）は Decision で提案しただけで、**承認まで実装しません**。
+
+- **実行中の Task の停止**（`paw_backend/orchestrator/user_sweep.py`）: Backend の中の定期の Loop（`PAW_USER_TASK_STOP_INTERVAL_SECONDS`、既定 60 秒、0 で止める、10〜3600）が、`pending_deletion`（と `deleted`）の User が作った Active な Task と、その Task の Active な Queue Entry を探し、PAW-032 の **Cancel**（`Actor.policy()`、理由 `User deletion started`）とその Entry の Cancel を 1 つの Transaction で行います。その Transaction は User の行を `FOR SHARE` で Lock するので、復元（`FOR NO KEY UPDATE`）と直列になり、復元の後の Task は止めません。状態から探すので（Outbox の Table はない）、削除と競って後から現れた Task も次の周期で止まります。共有 Project の中の、その User の Task も止めます。1 つ止めるたびに `auth.user.task_stop` を Best Effort で書きます。形は Project の削除の停止（`ProjectTaskStopper` / `ProjectTaskStopLoop`）と同じです。
+- **新しい実行・外部の認証**: 削除の Transaction がすでに全 Session を失効し、`SessionPrincipalProvider` は `active` でない User を匿名にし、`DatabasePrincipalDirectory`（Agent の委任）は `active` 以外を解決しません。GitHub（`gh auth`）・SSH の鍵は DB になく、各 User の Linux Account の中にあります。Backend がその Account として `git` / `gh` を動かす経路（`LoginNameAccountDirectory`）は `active` の User だけを引くので、削除の時点で使えなくなります。鍵そのものの失効（`authorized_keys` の行の削除、`gh auth logout`）は配備側の作業で、この Backend は User の HOME に触れません（Decision 0043 の 4）。
+- **30 日後の消去**（`paw_backend/auth/onboarding/erasure.py`、`python -m paw_backend.cli user-erasure-run`）: systemd の Timer（[`deploy/systemd/paw-user-erasure.*`](deploy/systemd/)、`OnCalendar=daily`）が 1 日 1 回、Table の Owner（`PAW_MIGRATION_DATABASE_URL`）で動かします。対象は `pending_deletion` になってから 720 時間以上経った User（復元が `retention_expired` で拒否されるのとちょうど同じ User。Owner は対象外）です。User ごとに 1 つの Transaction で、User の行を Lock し（`lock_timeout` 5 秒）、次を行います。
+  - Active な Task / Queue Entry が残っていれば拒否（`tasks_active`）。管理下の Checkout（`repository_checkouts`。User の Linux Account の中の Clone）が残っていれば拒否（`checkouts_remaining`）。運用者が Directory を消してから `--checkouts-removed <user id>` を付けて実行すると、その行を消して（`checkouts_released`）続けます。
+  - 個人データを消す: Password の Hash、Passkey とその Challenge、Session、Pairing、招待、Setup / Reset の Token（認証情報）、本人の Conversation（Message、Session State、Journal も。これを出典にした Memory の Source は `source_deleted_at` を付けて参照が外れる）、`user` Scope の Memory の Version と Version が残らない Memory、Consolidation の Key（Private Memory）、`connection_quotas`（個人設定）、Project の Membership。
+  - 同じ Transaction で、それらの Table にその User の行が 0 行であることを数え直し（違えば全体を戻す、`verification_failed`）、`users.status` を `deleted` にして `user_status_changes` に 1 行（`changed_by` は NULL）、`auth.user.erase` / `erased` を書きます。
+  - 残すもの: `users` の行（ID、Login name、Role、時刻。最小限の削除記録で、Login name は予約のまま）、状態の履歴、`audit_events`、Project に属するもの（Task とその Log、Research Scratch、本人以外にも見える Memory の Version、Connection の使用量、Tool の承認）。
+  - 拒否・失敗は `auth.user.erase` の deny を別の短い Transaction で書き、User は `pending_deletion`（Access なし）のまま、Command は終了コード 3 で終わり、`OnFailure=` の Unit が Owner に知らせます。翌日の実行で再試行します。成功した User は `deleted` なので再実行しても何も変わりません。2 つの実行は Advisory Lock で直列になります（2 つ目は終了コード 1）。
+  - Web の Role はこれを実行できません（多くの Table に DELETE がなく、`paw_change_user_status` は `pending_deletion` → `deleted` を許さない。`tests/test_onboarding_grants.py`）。Migration は増やしていません。
+  - DB の Backup / WAL、Recovery Projection・Recovery Git の履歴はまだこの System にないので消去の対象にしていません。それらを入れる機能は、自分の消去の手順を足す必要があります（Decision 0043 の 6）。
+
+```sh
+cp apps/backend/deploy/systemd/paw-user-erasure*.{service,timer} /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now paw-user-erasure.timer
+```
 
 ### Test
 
-`tests/test_onboarding_*.py`。Unit（`units`。Token の形式、状態遷移の表、Role の規則、設定）、実 PostgreSQL の Service（`invitations`、`pairing`、`lifecycle`。別の接続で競わせる Test を含む）、HTTP（`http`）、Migration（`migration`。Model との差分なし、上げ下げ、関数の許す遷移と Owner の保護、履歴の追記専用、外部キーの Index）、権限（`grants`。同じ Service と HTTP の Test を非 Superuser の Web の Role で実行し、権限を列まで固定する）。時間は注入した時計で動かします（待たない）。
+`tests/test_onboarding_*.py`。Unit（`units`。Token の形式、状態遷移の表、Role の規則、設定）、実 PostgreSQL の Service（`invitations`、`pairing`、`lifecycle`。別の接続で競わせる Test を含む）、HTTP（`http`）、Migration（`migration`。Model との差分なし、上げ下げ、関数の許す遷移と Owner の保護、履歴の追記専用、外部キーの Index）、権限（`grants`。同じ Service と HTTP の Test を非 Superuser の Web の Role で実行し、権限を列まで固定する）。時間は注入した時計で動かします（待たない）。Issue #127 は `tests/test_orchestrator_user_sweep.py`（Task の停止。`grants` でも Web の Role で実行）、`tests/test_orchestrator_user_sweep_app.py`（Loop の起動と設定）、`tests/test_user_erasure.py`（消去、拒否、巻き戻し、Lock）、`tests/test_user_erasure_cli.py`（Command、systemd の Unit）です。
 
 ## Tool Broker / Capability Policy
 

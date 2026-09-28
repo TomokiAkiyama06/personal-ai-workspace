@@ -1,0 +1,19 @@
+# Started by systemd when paw-user-erasure.service fails (OnFailure=).
+# The run already recorded each user it could not erase in audit_events whenever
+# the database accepted it (action auth.user.erase, decision deny, the reason)
+# and wrote the user ids and reasons to the journal
+# (journalctl -u paw-user-erasure.service). Those users stay pending deletion,
+# without access, past their 30 days: REQUIREMENTS.md asks that the Owner hears
+# of it.
+#
+# Replace ExecStart with the notification channel of your deployment (mail, a
+# chat webhook, ...) if you have one; keep credentials of that channel out of
+# this file.
+
+[Unit]
+Description=Report a failed user erasure run of the Personal AI Workspace
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemd-cat --identifier=paw-user-erasure --priority=crit /bin/echo "user erasure FAILED: see journalctl -u paw-user-erasure.service and audit_events (action auth.user.erase, decision deny). The users named there are past their 30 days and not erased."
+ExecStart=/usr/bin/wall "Personal AI Workspace: user erasure FAILED (journalctl -u paw-user-erasure.service)."

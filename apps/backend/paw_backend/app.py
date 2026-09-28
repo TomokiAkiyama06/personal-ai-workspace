@@ -27,6 +27,7 @@ from paw_backend.middleware import (
 )
 from paw_backend.orchestrator.connection_reaper import build_connection_reaper
 from paw_backend.orchestrator.project_sweep import build_project_stop_loop
+from paw_backend.orchestrator.user_sweep import build_user_stop_loop
 from paw_backend.projects import ProjectStateGate
 from paw_backend.research.scratch import ScratchJanitor, ScratchStore
 
@@ -71,6 +72,7 @@ def create_app(
         )
         background = {audit_check, token_check}
         stop_loop = None
+        user_stop_loop = None
         reaper = None
         try:
             # Expired Research Scratch items are only hidden until something
@@ -93,6 +95,15 @@ def create_app(
                     interval_seconds=settings.project_task_stop_interval_seconds,
                 )
                 background.add(asyncio.create_task(stop_loop.run()))
+            # Tasks of a user whose deletion began are stopped the same way
+            # (Issue #127, Decision 0043).
+            if database.configured and settings.user_task_stop_interval_seconds > 0:
+                user_stop_loop = build_user_stop_loop(
+                    database,
+                    project_gate=ProjectStateGate(),
+                    interval_seconds=settings.user_task_stop_interval_seconds,
+                )
+                background.add(asyncio.create_task(user_stop_loop.run()))
             # Calls through a shared connection that a crashed process left
             # ``in_flight`` are settled as failed (PAW-034, Decision 0016).
             if database.configured and settings.connection_reap_interval_seconds > 0:
@@ -105,6 +116,8 @@ def create_app(
         finally:
             if stop_loop is not None:
                 stop_loop.stop()
+            if user_stop_loop is not None:
+                user_stop_loop.stop()
             if reaper is not None:
                 reaper.stop()
             # Cancelling aborts the connection each of them is using (a diagnostic

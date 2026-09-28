@@ -98,7 +98,8 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=(
             "Audit retention (Issue #117) has its own commands, audit-retention-run "
             "and audit-retention-check, which use PAW_MIGRATION_DATABASE_URL: see "
-            "python -m paw_backend.cli audit-retention-run --help."
+            "python -m paw_backend.cli audit-retention-run --help. The erasure of "
+            "deleted users (Issue #127) is user-erasure-run, with the same URL."
         ),
         allow_abbrev=False,
     )

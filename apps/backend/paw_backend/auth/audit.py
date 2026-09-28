@@ -67,6 +67,10 @@ class AuthAction(StrEnum):
     PAIRING_COMPLETE = "auth.pairing.complete"
     USER_DELETE = "auth.user.delete"
     USER_RESTORE = "auth.user.restore"
+    # The deletion's follow-ups (Issue #127, Decision 0043): a task of a user whose
+    # deletion began, stopped; the scheduled erasure of a user's personal data.
+    USER_TASK_STOP = "auth.user.task_stop"
+    USER_ERASE = "auth.user.erase"
     # Another account's Passkeys (and password) reset by the Owner / an Admin (#108).
     PASSKEY_RESET = "auth.passkey.reset"
 
@@ -137,6 +141,13 @@ class AuthReason(StrEnum):
     OWNERSHIP_TRANSFER_REQUIRED = "ownership_transfer_required"
     INVALID_STATE = "invalid_state"
     RETENTION_EXPIRED = "retention_expired"
+    # The deletion's follow-ups (Issue #127)
+    USER_DELETION = "user_deletion"
+    ERASED = "erased"
+    CHECKOUTS_RELEASED = "checkouts_released"
+    TASKS_ACTIVE = "tasks_active"
+    CHECKOUTS_REMAINING = "checkouts_remaining"
+    ERASURE_FAILED = "erasure_failed"
 
 
 class AuthAudit:

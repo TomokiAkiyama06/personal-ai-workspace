@@ -125,6 +125,10 @@ class Settings(BaseSettings):
     # began (PAW-034, Decision 0008 section 8). 0 turns it off: tasks that appear
     # after a project's deletion began would then keep running.
     project_task_stop_interval_seconds: int = Field(default=60, ge=0, le=3_600)
+    # How often the tasks of users whose deletion began are stopped (Issue #127,
+    # Decision 0043). 0 turns it off: a deleted user's queued and running tasks
+    # would then keep running.
+    user_task_stop_interval_seconds: int = Field(default=60, ge=0, le=3_600)
     # How often calls through a shared connection that a crashed process left
     # ``in_flight`` are settled as failed (PAW-034, Decision 0016). A row is
     # reaped only a day and an hour after it started. 0 turns it off: such rows
@@ -373,6 +377,15 @@ class Settings(BaseSettings):
         if 0 < value < 10:
             raise ValueError(
                 "project_task_stop_interval_seconds must be 0 (off) or 10 to 3600"
+            )
+        return value
+
+    @field_validator("user_task_stop_interval_seconds")
+    @classmethod
+    def _user_stop_interval_is_off_or_at_least_ten_seconds(cls, value: int) -> int:
+        if 0 < value < 10:
+            raise ValueError(
+                "user_task_stop_interval_seconds must be 0 (off) or 10 to 3600"
             )
         return value
 
