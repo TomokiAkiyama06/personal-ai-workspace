@@ -41,6 +41,9 @@ _RAN = re.compile(rb"^Ran (\d+) tests? in ", re.MULTILINE)
 _SKIPPED = re.compile(rb"skipped=(\d+)")
 _SUMMARY = re.compile(rb"^(OK|FAILED)\b.*$", re.MULTILINE)
 _MAX_ECHO = 48 * 1024
+# Only the end of the unittest output is kept while it streams (the summary is at
+# the end), so a test that prints without bound cannot exhaust the evaluator.
+_MAX_CAPTURE = 1024 * 1024
 
 
 class _Terminated(Exception):
@@ -65,20 +68,37 @@ def _copy_tree(worktree: Path, destination: Path) -> None:
     shutil.copytree(worktree, destination, symlinks=True, ignore=_IGNORED)
 
 
+def _real_directory(destination: Path, relative: Path) -> Path:
+    """Return ``destination / relative`` as a real directory inside the copy.
+
+    Every existing component is checked without following links: a candidate
+    symlink (or file) in the way is removed from the private copy, so a later
+    write can never leave the temporary tree through a linked parent.
+    """
+    current = destination
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink() or (current.exists() and not current.is_dir()):
+            current.unlink()
+        if not current.exists():
+            current.mkdir()
+    return current
+
+
 def _apply_overlay(overlay: Path, destination: Path) -> int:
     count = 0
     for source in sorted(overlay.rglob("*")):
         if source.is_dir():
             continue
         relative = source.relative_to(overlay)
-        target = destination / relative
+        parent = _real_directory(destination, relative.parent)
+        target = parent / relative.name
         if target.is_symlink() or (target.exists() and not target.is_file()):
             if target.is_dir() and not target.is_symlink():
                 shutil.rmtree(target)
             else:
                 target.unlink()
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source, target)
+        shutil.copyfile(source, target, follow_symlinks=False)
         count += 1
     return count
 
@@ -109,6 +129,37 @@ def _drop_database(admin_url: str, name: str) -> None:
         print("seed_check: could not drop the throwaway database", file=sys.stderr)
 
 
+def _run_bounded(command: list[str], cwd: Path, environment: dict[str, str]):
+    """Run ``command`` and return (returncode, the last ``_MAX_CAPTURE`` bytes)."""
+    process = subprocess.Popen(
+        command,
+        cwd=cwd,
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    tail = bytearray()
+    truncated = False
+    try:
+        while chunk := process.stdout.read(64 * 1024):
+            tail += chunk
+            if len(tail) > _MAX_CAPTURE:
+                del tail[: len(tail) - _MAX_CAPTURE]
+                truncated = True
+        returncode = process.wait()
+    except BaseException:
+        process.kill()
+        process.wait()
+        raise
+    finally:
+        process.stdout.close()
+    if truncated:
+        # Drop the partial first line so no cut-off fragment (of a URL, say) is kept.
+        newline = tail.find(b"\n")
+        tail = tail[newline + 1 :] if newline >= 0 else bytearray()
+    return returncode, bytes(tail)
+
+
 def _run_unittest(arguments: argparse.Namespace) -> int:
     worktree = Path(arguments.worktree).resolve()
     overlay = Path(arguments.overlay).resolve() if arguments.overlay else None
@@ -129,15 +180,9 @@ def _run_unittest(arguments: argparse.Namespace) -> int:
             database = (admin_url, name)
             environment["PAW_TEST_DATABASE_URL"] = test_url
         command = [sys.executable, "-m", "unittest", "-v", *arguments.tests]
-        completed = subprocess.run(
-            command,
-            cwd=tree / arguments.workdir,
-            env=environment,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            check=False,
+        returncode, output = _run_bounded(
+            command, tree / arguments.workdir, environment
         )
-        output = completed.stdout
         if database is not None:
             output = output.replace(test_url.encode(), b"<database-url>")
         _echo(output[-_MAX_ECHO:])
@@ -145,17 +190,20 @@ def _run_unittest(arguments: argparse.Namespace) -> int:
         summaries = _SUMMARY.findall(output)
         skipped = sum(int(value) for value in _SKIPPED.findall(output))
         passed = (
-            completed.returncode == 0
+            returncode == 0
             and bool(ran)
             and ran[-1] > 0
             and bool(summaries)
             and summaries[-1] == b"OK"
         )
-        if passed and skipped and not arguments.allow_skips:
+        refused_skips = bool(skipped) and not arguments.allow_skips
+        if refused_skips:
             print(f"seed_check: {skipped} test(s) skipped; skips are not allowed")
             passed = False
         if arguments.expect == "fail":
-            verdict = not passed and bool(ran) and ran[-1] > 0
+            # A skip is refused on its own: skipping the test against the known bug
+            # must not count as "the test detects the bug".
+            verdict = not passed and not refused_skips and bool(ran) and ran[-1] > 0
         else:
             verdict = passed
         print(

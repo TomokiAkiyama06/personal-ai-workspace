@@ -340,6 +340,71 @@ class SeedCheckTest(unittest.TestCase):
         )
         self.assertEqual(self.run_check()[0], 1)
 
+    def test_expect_fail_refuses_a_skipped_test(self):
+        # Skipping the test against the known bug is not "detecting the bug".
+        self.write_test(
+            "    @unittest.skipIf(value() == 1, 'hide the bug')\n"
+            "    def test_value(self):\n        self.assertEqual(value(), 2)\n"
+            "    def test_other(self):\n        self.assertEqual(value(), 2)\n"
+        )
+        code, output = self.run_check("--expect", "fail")
+        self.assertEqual(code, 1, output)
+        self.assertIn("skips are not allowed", output)
+
+    def test_overlay_does_not_follow_a_symlinked_parent(self):
+        # A candidate symlink in place of an overlay directory must not carry the
+        # hidden files outside the private copy.
+        outside = self.directory / "outside"
+        outside.mkdir()
+        shutil.rmtree(self.tree / "pkg")
+        (self.tree / "pkg").symlink_to(outside, target_is_directory=True)
+        (outside / "__init__.py").write_text("")
+        (outside / "code.py").write_text("def value():\n    return 1\n")
+        (self.overlay / "pkg" / "__init__.py").write_text("")
+        (self.overlay / "pkg" / "code.py").write_text("def value():\n    return 1\n")
+        self.write_test(
+            "    def test_value(self):\n        self.assertEqual(value(), 1)\n"
+        )
+        code, output = self.run_check()
+        self.assertEqual(code, 0, output)
+        self.assertFalse((outside / "test_hidden.py").exists())
+        self.assertEqual(
+            sorted(p.name for p in outside.iterdir()), ["__init__.py", "code.py"]
+        )
+
+    def test_real_directory_replaces_links_and_files(self):
+        root = self.directory / "copy"
+        (root / "a").mkdir(parents=True)
+        (root / "a" / "b").write_text("file in the way")
+        (root / "c").symlink_to(self.directory, target_is_directory=True)
+        self.assertTrue(seed_check._real_directory(root, Path("a/b/x")).is_dir())
+        made = seed_check._real_directory(root, Path("c/d"))
+        self.assertFalse((root / "c").is_symlink())
+        self.assertEqual(made, root / "c" / "d")
+        self.assertFalse((self.directory / "d").exists())
+
+    def test_large_output_is_bounded_and_still_judged(self):
+        self.write_test(
+            "    def test_value(self):\n"
+            "        import sys\n"
+            "        for _ in range(40):\n"
+            "            sys.stderr.write('x' * 100_000 + '\\n')\n"
+            "        self.assertEqual(value(), 1)\n"
+        )
+        code, output = self.run_check()
+        self.assertEqual(code, 0)
+        self.assertLessEqual(len(output.encode()), seed_check._MAX_ECHO + 4096)
+
+    def test_run_bounded_keeps_only_the_tail(self):
+        script = "import sys\nfor i in range(30):\n    print(str(i) * 100_000)\nprint('END')\n"
+        code, output = seed_check._run_bounded(
+            [sys.executable, "-c", script], self.directory, dict(os.environ)
+        )
+        self.assertEqual(code, 0)
+        self.assertLessEqual(len(output), seed_check._MAX_CAPTURE)
+        self.assertTrue(output.endswith(b"END\n"))
+        self.assertFalse(output.startswith(b"0"))
+
 
 class ForbiddenChangesTest(unittest.TestCase):
     def test_changes_outside_the_allowed_paths(self):
