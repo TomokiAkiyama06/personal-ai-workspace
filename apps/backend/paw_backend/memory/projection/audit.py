@@ -19,7 +19,10 @@ The row is written in a transaction of its own, after the run. The application
 role already holds INSERT and SELECT on ``audit_events`` (revisions 0025 / 0086),
 which is all this needs. ``projection_status`` reads the last rows back for a
 monitor (``memory-projection-check``) and, later, the Backup / Recovery screen
-("Last successful projection generation", UI_DESIGN.md).
+("Last successful projection generation", UI_DESIGN.md). "Last" is by
+``recorded_at``, the database clock the ``0025`` trigger sets, not by the
+caller's ``occurred_at``: a host clock corrected backwards must not hide a newer
+failure behind an older success.
 """
 
 import uuid
@@ -83,7 +86,7 @@ async def projection_status(database: Database) -> ProjectionStatus:
             table.c.resource_kind == RESOURCE_KIND,
             table.c.action.in_([action.value for action in ProjectionAction]),
         )
-        .order_by(table.c.occurred_at.desc(), table.c.recorded_at.desc())
+        .order_by(table.c.recorded_at.desc(), table.c.occurred_at.desc())
         .limit(1)
     )
     completed = (
@@ -92,7 +95,7 @@ async def projection_status(database: Database) -> ProjectionStatus:
             table.c.resource_kind == RESOURCE_KIND,
             table.c.action == ProjectionAction.COMPLETED.value,
         )
-        .order_by(table.c.occurred_at.desc())
+        .order_by(table.c.recorded_at.desc(), table.c.occurred_at.desc())
         .limit(1)
     )
     async with database.session() as session:

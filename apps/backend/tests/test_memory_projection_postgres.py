@@ -271,3 +271,25 @@ class FailureTest(PostgresProjectionTestCase):
         self.assertEqual(status.last_reason, "check_target:inside_git_work_tree")
         self.assertEqual(status.last_run_at, self.clock())
         self.assertEqual(status.last_completed_at, completed_at)
+
+
+class ClockTest(PostgresProjectionTestCase):
+    async def test_the_last_run_is_the_last_recorded_even_if_the_clock_went_back(
+        self,
+    ):
+        self.after_every_recorded_run()
+        self.seed("x", owner=uuid4(), embed=False)
+        await self.runner().run()
+        completed_at = self.clock()
+        # The host clock is corrected backwards before the next (failed) run.
+        self.clock.now = completed_at - timedelta(hours=1)
+        checkout = self.tmp.base / "checkout"
+        (checkout / ".git").mkdir(parents=True)
+        (checkout / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+        await self.runner(checkout / "memory").run()
+
+        status = await projection_status(self.new_database())
+
+        self.assertEqual(status.last_action, ProjectionAction.FAILED.value)
+        self.assertEqual(status.last_reason, "check_target:inside_git_work_tree")
+        self.assertEqual(status.last_completed_at, completed_at)

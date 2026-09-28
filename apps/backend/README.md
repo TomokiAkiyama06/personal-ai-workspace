@@ -11,7 +11,7 @@ Claim と Source の対応・回答や Task からの追跡（[PAW-052](#evidenc
 Project の作成・招待制の Membership・Lifecycle（Active / Archived / Pending deletion / Deleted）は [PAW-026](#project-crud--membership--lifecycle) で実装済みです（Service のみ。HTTP の Endpoint と Session はまだありません）。
 DAG Agent Orchestrator（Task を Dependency DAG へ分解し、独立した Node を並列に実行し、Node ごとに Retry / Escalate し、Sub-Agent が親の権限と予算を超えない。[PAW-034](#dag-agent-orchestrator)、Agent の Runtime は Protocol で実際の Runtime は別の Issue、HTTP の Endpoint はまだありません）と、削除待ちの Project の Task を周期的に止める Loop も実装済みです。
 
-Memory の Markdown Projection（PostgreSQL を正本として、公開範囲ごとの Directory へ diff-friendly な Markdown を書き、失敗を Audit と終了コードで通知する。[PAW-045](#memory-markdown-projection)、方式は Decision 0038（Proposed））も実装済みです。
+Memory の Markdown Projection（PostgreSQL を正本として、公開範囲ごとの Directory へ diff-friendly な Markdown を書き、失敗を Audit と終了コードで通知する。[PAW-045](#memory-markdown-projection)、方式は Decision 0038（Approved、2026-09-28））も実装済みです。
 
 Workspace 共有の Codex / Claude Connection（Credential は不透明な Handle だけ）、User 別 Quota、User と Task への利用量の帰属は [PAW-030](#shared-codex--claude-connection) で実装済みです（Service のみ。実 Adapter と HTTP の Endpoint はまだありません。Quota の意味・期間・実行中の Task の扱いは [Decision 0016](../../docs/decisions/0016-shared-connection-adapter-policy.md)（Approved、2026-09-26）に従います）。
 Project への Repository の登録（GitHub から clone、Ubuntu 上の既存 Repository、新規作成）と、User ごとに分離した Checkout は [PAW-027](#repository-registration--per-user-checkout) で実装済みです（Service のみ）。
@@ -160,7 +160,7 @@ Database には pgvector が必要です（CI は `pgvector/pgvector:pg18` を�
 | `PAW_PASSKEY_RP_ID` / `PAW_PASSKEY_ORIGINS` | なし | WebAuthn の Relying Party ID（Domain）と、Browser が Ceremony を実行してよい Origin の完全一致（Comma 区切り、最大 8）。**両方か、どちらもなしか**。なしのとき Passkey の機能は切れ、要求は強制されない。[Passkey / Step-up](#passkey--step-up) |
 | `PAW_PASSKEY_RP_NAME` / `PAW_PASSKEY_CHALLENGE_TTL_SECONDS` | `Personal AI Workspace` / `300` | Authenticator に見せる名前と、Challenge に答えられる秒（30〜900） |
 | `PAW_SCRATCH_PURGE_INTERVAL_SECONDS` | `3600` | 期限切れの Research Scratch Item を消す Janitor の間隔（秒）。`0` で Janitor を止める（期限切れの行が DB に残り続ける）。それ以外は 60〜86400。DB が未設定のときも起動しない。[Janitor](#janitor期限切れの削除) |
-| `PAW_MEMORY_PROJECTION_DIR` | なし | Memory Markdown Projection の出力先（絶対 Path。例 `/srv/personal-ai/memory`）。未設定なら `memory-projection-run` は動かない。git の Work Tree の中・Home の中や上・Projection の Marker のない空でない Directory は拒否する。[Memory Markdown Projection](#memory-markdown-projection)（Decision 0038、Proposed） |
+| `PAW_MEMORY_PROJECTION_DIR` | なし | Memory Markdown Projection の出力先（絶対 Path。例 `/srv/personal-ai/memory`）。未設定なら `memory-projection-run` は動かない。git の Work Tree の中・Home の中や上・Projection の Marker のない空でない Directory は拒否する。[Memory Markdown Projection](#memory-markdown-projection)（Decision 0038、Approved） |
 | `PAW_REPOSITORY_WORKSPACE_SUBDIR` | `workspaces` | Backend が作る Checkout の置き場所（`<home>/<この名前>/<project>/<repo>`）。1 つの安全な名前（[Repository 登録](#repository-registration--per-user-checkout)） |
 | `PAW_REPOSITORY_EXISTING_ROOTS` | `{home}` | 既存 Repository を登録してよい Root（Comma 区切り、8 つまで）。各 Root は絶対 Path で `{home}`（先頭だけ）か `{user}` を含む（全員で共有する Directory は拒否） |
 | `PAW_REPOSITORY_CLONE_HOSTS` | `github.com` | Clone してよい Host（Comma 区切り、8 つまで。小文字の DNS 名。IP Address は不可） |
@@ -3521,7 +3521,7 @@ Service と Job は、Revision `0026` / `0040` / `0071` が与えた権限（`me
 
 [PAW-045](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/39)（`paw_backend/memory/projection/`、`paw_backend/cli/memory_projection.py`、`deploy/systemd/paw-memory-projection*`）で実装しました。**Migration はありません。**
 要件は [REQUIREMENTS.md](../../REQUIREMENTS.md) の「Storage / Markdown Projection」「Memory Markdown Backup / Backup Authority」「Storage placement: HDD Model Store / Memory Markdown」と [Memory Architecture](../../docs/MEMORY_ARCHITECTURE.md) の 1・2・4〜7・19 節です。
-要件が決めていない選択（出力先と拒否する場所、配置、投影する Version、形式、Secret、権限、実行と失敗の通知）は [Decision 0038](../../docs/decisions/0038-memory-markdown-projection.md)（**Proposed**）の推奨どおりに実装しました。承認されるまで、実運用の Server で Timer を有効にしません。
+要件が決めていない選択（出力先と拒否する場所、配置、投影する Version、形式、Secret、権限、実行と失敗の通知）は [Decision 0038](../../docs/decisions/0038-memory-markdown-projection.md)（**Approved、2026-09-28**）の推奨どおりに実装し、人間が推奨どおりに承認しました。Timer の有効化は、運用者が出力先と環境 File を用意してから行います（Decision 0038 の「承認後の扱い」）。
 
 PostgreSQL が正本で、Markdown は人が読むための常時生成ビューです（Backup・Recovery の Fallback。Git への commit / push は PAW-047）。Chat の経路からは呼びません。
 
@@ -3544,10 +3544,10 @@ $PAW_MEMORY_PROJECTION_DIR/                 # 0700。Backend の OS User だけ�
 
 ### 書き先の安全（`writer.py`）
 
-- 出力先は絶対・正規の Path で、**git の Work Tree の中ではなく**（git が Repository とみなす `.git` がその Directory にも上にもない）、**Home の中でも上でもない**（`/home` と `uid >= PAW_REPOSITORY_MIN_LINUX_UID` の Account の Home）こと。既存なら自分の所有で、空か Marker を持つこと。満たさなければ何も書かずに失敗します（`check_target:<理由>`）。
+- 出力先は絶対・正規の Path で、**git の Work Tree の中ではなく**（git が Repository とみなす `.git` がその Directory にも上にもない）、**Home の中でも上でもない**（`/home` と `uid >= PAW_REPOSITORY_MIN_LINUX_UID` の Account の Home）こと。既存なら自分の所有で、空か Marker を持つこと。満たさなければ何も書かずに失敗します（`check_target:<理由>`）。拒否した Directory の権限も変えません（`0700` にするのは受け入れた後）。
 - Directory は `0700`、File は `0600`（`fchmod`、umask によらない）。Directory は親の `dir_fd` から `O_NOFOLLOW` で開き、Symbolic Link があれば失敗します（`unsafe_entry`）。File は一時名に書いて `fsync` し `rename` するので、Link・Hard Link の先へは書きません。
 - Projection が作れる名前（`<uuid>.md`、`INDEX.md`、上の Directory、`<uuid>` の Directory、自分の一時 File）以外は読まず消さず、`unmanaged` として数えるだけです。
-- Marker の `flock`（非 Blocking）を読み取りの前から書き終わるまで持つので、同時の 2 つ目の実行は何もしません。
+- Marker の `flock`（非 Blocking）を読み取りの前から結果を Audit に記録し終えるまで持つので、同時の 2 つ目の実行は何もせず、Lock を取った PAW-047 は目の前の File に対応する結果を必ず読めます。SIGTERM が記録の最中に来ても、記録を終えてから取り消しになります。
 
 ### 実行と失敗の通知
 
@@ -3560,7 +3560,7 @@ python -m paw_backend.cli memory-projection-check --max-age-minutes 30   # 監�
 - 接続は `PAW_DATABASE_URL`（Application の Role）。`memory_versions` の SELECT と `audit_events` の INSERT / SELECT（Revision `0040` / `0025` / `0086` の権限）だけを使います。
 - 実行ごとに `audit_events` へ 1 行（別の Transaction）: `memory.projection.completed`（`reason = memories=N written=N removed=N redacted=N`、長すぎて検査できない本文を切ったときは続けて ` truncated=N`）か `memory.projection.failed`（`reason = <step>:<code>`。Path・例外の Message・Memory の文字列は書かない）。`resource_kind = memory_projection_run`。
 - 終了コードは `0` 成功、`1` 拒否（同時実行など）、`2` 環境（設定・DB）、`3` 投影の失敗。`run` で DB に届かない（読み取りも失敗の記録も失敗した）ときも `2` です。0 以外で `paw-memory-projection-failure.service`（`OnFailure=`）が `crit` の Journal と `wall` を出します。読み取りの失敗は既存の File を消しません。書き込みの途中の失敗では、File ごとには原子的ですが、Directory によって新旧の Snapshot が混ざることがあり、次に成功した実行が直します（PAW-047 は Marker の Lock を取り、最後の実行が成功したときだけ写す。Decision 0038 の 9）。
-- `deploy/systemd/paw-memory-projection.timer` は 5 分ごと（`OnCalendar=*:0/5`、`Persistent=true`）。Service は Backend と同じ OS User で、`ProtectHome=true`・`ProtectSystem=strict`・`ReadWritePaths=/srv/personal-ai/memory`・`UMask=0077` です。`projection_status` は最後の実行と最後の成功を返します（Backup / Recovery の画面の「Last successful projection generation」に使える）。
+- `deploy/systemd/paw-memory-projection.timer` は 5 分ごと（`OnCalendar=*:0/5`、`Persistent=true`）。Service は Backend と同じ OS User で、`ProtectHome=true`・`ProtectSystem=strict`・`ReadWritePaths=/srv/personal-ai/memory`・`UMask=0077` です。`projection_status` は最後の実行と最後の成功を返します（Backup / Recovery の画面の「Last successful projection generation」に使える）。「最後」は Database の時計の `recorded_at` の順で、Host の時計が戻っても、新しい失敗が古い成功の陰に隠れません。
 
 ### 制限と未確認の点
 

@@ -219,6 +219,53 @@ class FailureTest(RunnerTestCase):
         # The lock the thread took was released, not left with the process.
         open_target(self.tmp.root, self.tmp.homes).close()
 
+    async def test_the_lock_is_held_until_the_outcome_is_recorded(self):
+        root = self.tmp.root
+        homes = self.tmp.homes
+        seen: list[bool] = []
+
+        class LockCheckingRecorder(FakeRecorder):
+            async def __call__(self, action, reason, *, occurred_at):
+                try:
+                    open_target(root, homes).close()
+                except ProjectionBusyError:
+                    seen.append(True)
+                else:
+                    seen.append(False)
+                await super().__call__(action, reason, occurred_at=occurred_at)
+
+        recorder = LockCheckingRecorder()
+        await self.runner(FakeSource(), recorder=recorder).run()
+        (self.tmp.root / "users").symlink_to(self.tmp.base)
+        await self.runner(FakeSource([memory()]), recorder=recorder).run()
+        # A copier (PAW-047) cannot take the lock before the outcome is visible.
+        self.assertEqual(seen, [True, True])
+        self.assertEqual(recorder.rows[-1][1], "write_files:unsafe_entry")
+        open_target(self.tmp.root, self.tmp.homes).close()
+
+    async def test_a_cancellation_while_recording_still_records_the_outcome(self):
+        entered, gate = asyncio.Event(), asyncio.Event()
+
+        class SlowRecorder(FakeRecorder):
+            async def __call__(self, action, reason, *, occurred_at):
+                entered.set()
+                await gate.wait()
+                await super().__call__(action, reason, occurred_at=occurred_at)
+
+        recorder = SlowRecorder()
+        task = asyncio.ensure_future(
+            self.runner(FakeSource([memory()]), recorder=recorder).run()
+        )
+        await entered.wait()
+        task.cancel()
+        await asyncio.sleep(0)
+        gate.set()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertEqual(len(recorder.rows), 1)
+        self.assertEqual(recorder.rows[0][0], "memory.projection.completed")
+        open_target(self.tmp.root, self.tmp.homes).close()
+
     async def test_a_run_that_fails_while_writing_is_repaired_by_the_next(self):
         project, shared = memory(scope="project"), memory(scope="shared")
         await self.runner(FakeSource([project])).run()

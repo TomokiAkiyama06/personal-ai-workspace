@@ -1,7 +1,8 @@
 # Memory Markdown Projection の出力先・配置・形式・権限・失敗の通知
 
-- Status: Proposed
+- Status: Approved
 - Date: 2026-09-28
+- Approval: 2026-09-28、Human が「決めてほしいこと」の 1〜9 を推奨どおりに承認した（末尾の「承認後の扱い」）
 - Scope: Issue [#39](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/39)（PAW-045: Memory Markdown Projection）。`apps/backend/paw_backend/memory/projection/`、`apps/backend/paw_backend/cli/memory_projection.py`、`apps/backend/deploy/systemd/paw-memory-projection*`。関連: PAW-040（#34、Schema）、PAW-042（#36、[Decision 0034](0034-memory-versioning-freshness.md)）、PAW-047（#41、Recovery Repository）、[Decision 0031](0031-audit-retention-scheduler.md)（定期実行と失敗の通知の型）、[Decision 0009](0009-shared-memory-administration.md)、[Decision 0010](0010-research-privacy-filter-policy.md)、[Decision 0018](0018-memory-journal-consolidation-policy.md)、[Decision 0019](0019-hybrid-retrieval-policy.md)
 - Supersedes: なし（既存の Decision を書き換えない。要件が決めていない点を埋める）
 
@@ -21,6 +22,8 @@
 Issue の受け入れ条件は「PostgreSQL を Source of Truth として HDD へ Projection を生成」「User / Project / Repo / Shared を分離」「direct repo injection なし」「diff-friendly Markdown」「projection failure 通知」。
 要件が決めていないのは、**出力先の決め方と安全の条件**、**どの Version を投影するか**、**ファイルの形式**、**誰が読めるか（ファイルの権限）**、**Secret の扱い**、**いつ・どう実行し、失敗をどう通知するか**である。
 この Decision はその推奨を示す。PR（Issue #39）は推奨どおりに実装しており、承認されない点があれば別の PR で直す。
+
+**この Decision は 2026-09-28 に Human が承認した（Approved）。** 承認は「決めてほしいこと」の 1〜9 を推奨どおりとするもので、下の各選択は承認された方針である（10 の扱いは末尾の「承認後の扱い」）。
 
 ## 提案
 
@@ -78,17 +81,17 @@ Issue の受け入れ条件は「PostgreSQL を Source of Truth として HDD �
 ### 6. 実行と失敗の通知
 
 - Server ローカルの Command `python -m paw_backend.cli memory-projection-run` を、systemd timer（`paw-memory-projection.timer`、`OnCalendar=*:0/5`、`Persistent=true`）が 5 分ごとに起動する（Decision 0031 と同じ型。cron でも同じ Command を使える）。
-- 1 回の実行: 出力先を確かめて Lock（Marker の `flock`、非 Blocking）→ Snapshot を読む → Render → 書く → 結果を Audit へ。Lock は読み取りの前から書き終わるまで持つ（古い Snapshot が新しいものを上書きしない）。同時の 2 つ目の実行は何もしない（終了コード 1、記録しない）。
+- 1 回の実行: 出力先を確かめて Lock（Marker の `flock`、非 Blocking）→ Snapshot を読む → Render → 書く → 結果を Audit へ。Lock は読み取りの前から結果を Audit に記録し終えるまで持つ（古い Snapshot が新しいものを上書きしない。Lock を取った読む側は、目の前の File に対応する結果を必ず読める。9）。同時の 2 つ目の実行は何もしない（終了コード 1、記録しない）。
 - **Audit**: 実行ごとに `audit_events` に 1 行（別の Transaction）。`memory.projection.completed`（`reason = memories=N written=N removed=N redacted=N`）か `memory.projection.failed`（`reason = <step>:<code>`。`<step>` は `check_target` / `read_database` / `render` / `write_files`、`<code>` は閉じた語彙か例外の型の名前。**Path・例外の Message・Memory の文字列は書かない**）。`resource_kind = memory_projection_run`、`decision = allow`、Actor なし。列・制約・Migration は増やさない。
 - **終了コード**: `0` 成功、`1` 拒否（使い方、同時実行）、`2` 環境（設定、URL・Directory が未設定、DB に届かない。`run` では「読み取りが失敗し、その失敗の記録もできなかった」を DB に届かないとみなす）、`3` 投影の失敗（出力先の拒否、読み・Render・書きの失敗、SIGTERM、結果を記録できない）。0 以外で `OnFailure=paw-memory-projection-failure.service` が起動し、`crit` の Journal と `wall` を出す（通知先は配備で差し替える）。
-- **監視**: 読み取りだけの `memory-projection-check [--max-age-minutes N]`（既定 30）。最後の実行が失敗、または N 分以内に成功がなければ終了コード 3。Backup / Recovery の画面（後続）は同じ関数（`projection_status`）で「Last successful projection generation」と最後の失敗を示せる。
+- **監視**: 読み取りだけの `memory-projection-check [--max-age-minutes N]`（既定 30）。「最後の実行」は Database の時計の `recorded_at` の順で決める（呼び出し側の `occurred_at` ではない。Host の時計が戻っても、新しい失敗が古い成功の陰に隠れない）。最後の実行が失敗、または N 分以内に成功がなければ終了コード 3。Backup / Recovery の画面（後続）は同じ関数（`projection_status`）で「Last successful projection generation」と最後の失敗を示せる。
 - 出力先の確認・読み取り・Render で失敗した実行は、既存の File を書き換えも消しもしない（読み取りの失敗で投影が空になることはない）。**書き込みの途中で失敗した実行**（ENOSPC、後の Directory の `unsafe_entry`、`TimeoutStopSec` の後の SIGKILL など）は、File ごとには原子的（一時名に書いて `rename`）だが、Directory を順に処理するので、処理を終えた Directory（削除を含む）と、まだの Directory が混ざった状態を残し得る（例: `INDEX.md` が書かれていない File を指す）。この状態は Audit の `memory.projection.failed` で分かり、次に成功した実行が全体を直す。読む側の条件は 9。
-- SIGTERM は書いている File を書き終えてから取り消しになり、`<step>:CancelledError` を記録する。出力先を開いている間の取り消しでも、取った Lock はすぐ放す（Runner を Backend の Process の中から呼んでも、Lock が残らない。8）。
+- SIGTERM は書いている File を書き終えてから取り消しになり、`<step>:CancelledError` を記録する。結果の記録の最中の SIGTERM は、記録を終えてから取り消しになる（実行ごとの 1 行を欠かさない）。出力先を開いている間の取り消しでも、取った Lock はすぐ放す（Runner を Backend の Process の中から呼んでも、Lock が残らない。8）。
 
 ### 7. 権限: Backend の OS User だけが読める、Audience ごとの Directory
 
 - 投影は Principal の要求ではなく Backend 内部の Job で、**全 Scope を読む**（Decision 0034 の 5 の鮮度の Job と同じ、`memory/acl.py` の ACL 条件の例外）。公開範囲の分離は、**書く場所**（2）と **File の権限**で行う。
-- Root と全 Directory は `0700`、全 File は `0600`（`fchmod`。umask によらない）。所有者は Job を動かす OS User。他の OS User（Linux の各 User を含む）は一覧も読み取りもできない。緩い Mode は次の実行で直す。
+- Root と全 Directory は `0700`、全 File は `0600`（`fchmod`。umask によらない）。所有者は Job を動かす OS User。他の OS User（Linux の各 User を含む）は一覧も読み取りもできない。緩い Mode は次の実行で直す。Root の Mode を `0700` にするのは、出力先として受け入れた（空か、正しい Marker を持つ）後で、拒否した Directory の権限は変えない。
 - **Job は Backend と同じ OS User（例 `paw`）で、`PAW_DATABASE_URL`（Application の Role）で動かす**。必要なのは `memory_versions` の SELECT と `audit_events` の INSERT / SELECT だけで、Backend と同じ Credential なので、別の OS User にしても守るものがない（Decision 0031 は Table の Owner の Credential を持つため専用 User にした。ここは違う）。
 - **Workspace の User ごとに Linux の Owner を分ける（`chown`）ことはしない**（V1）。Root 権限が要り、Workspace の User と Linux の Account の対応（Decision 0017 / 0029）がない User もいるため。User が自分の Memory を読むのは Memory UI（後続）で、この Directory は Server の運用者（Owner）・Backup・Recovery のためのもの。
 - Symbolic Link は辿らない（`O_NOFOLLOW` と `dir_fd`）。Directory の位置に Link があれば失敗（`unsafe_entry`）。File は一時名に書いて `rename` するので、Link や Hard Link の先へ書き込まない。Projection が作れる名前（`<uuid>.md`、`INDEX.md`、上の Directory、`<uuid>` の Directory、自分の一時 File）以外は読まず、消さず、`unmanaged` として数えるだけ。
@@ -159,6 +162,8 @@ Issue の受け入れ条件は「PostgreSQL を Source of Truth として HDD �
 
 ## 承認後の扱い
 
-承認されるまで、Command・Runner・Unit File はコードとして入るが、実運用の Server で Timer を有効化（`systemctl enable --now paw-memory-projection.timer`）しない。
-承認されたら、運用者が出力先の Directory（`install -d -o paw -g paw -m 0700 /srv/personal-ai/memory` など）と環境 File を用意し、Unit File を配備して Timer を有効にする。
+- 2026-09-28 に Human が「決めてほしいこと」の 1〜9 を推奨どおりに承認した。Status を Approved に改めた。
+- 10（検査できない長さの本文の切り詰めと、その明示）は、独立 Review への対応（PR #138）で後から加えた点で、承認として伝えられたのは 1〜9 である。実装は 10 の推奨どおり（切ったことを `truncated: true` と Audit の `truncated=N` で示す）で、Human が別の答えを選ぶなら、背景の段落のとおり別の PR で直す。
+- 承認前は、Command・Runner・Unit File はコードとして入るが、実運用の Server で Timer を有効化（`systemctl enable --now paw-memory-projection.timer`）しないとしていた。
+承認されたので、運用者が出力先の Directory（`install -d -o paw -g paw -m 0700 /srv/personal-ai/memory` など）と環境 File を用意し、Unit File を配備して Timer を有効にする。
 方針を変える場合は、この Decision を書き換えず、新しい Decision から `Supersedes` する。

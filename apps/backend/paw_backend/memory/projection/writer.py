@@ -205,12 +205,19 @@ def _open_directory(parent_fd: int, name: str, *, create: bool) -> int:
     return fd
 
 
-def _own_directory(fd: int, problem: TargetProblem) -> None:
-    status = os.fstat(fd)
-    if status.st_uid != os.geteuid():
+def _check_owned(fd: int, problem: TargetProblem) -> None:
+    if os.fstat(fd).st_uid != os.geteuid():
         raise ProjectionTargetError(problem)
-    if stat.S_IMODE(status.st_mode) != DIRECTORY_MODE:
+
+
+def _tighten(fd: int) -> None:
+    if stat.S_IMODE(os.fstat(fd).st_mode) != DIRECTORY_MODE:
         os.fchmod(fd, DIRECTORY_MODE)
+
+
+def _own_directory(fd: int, problem: TargetProblem) -> None:
+    _check_owned(fd, problem)
+    _tighten(fd)
 
 
 def _lstat(name: str, dir_fd: int) -> os.stat_result | None:
@@ -431,9 +438,17 @@ def open_target(root: str | Path, protected: Collection[str]) -> LockedTarget:
             raise ProjectionTargetError(TargetProblem.NOT_A_DIRECTORY) from None
         raise
     try:
-        _own_directory(root_fd, TargetProblem.NOT_OWNED)
+        # The permissions change only once the root is accepted as ours: a
+        # refused directory (not empty, a foreign marker) is left as it was.
+        _check_owned(root_fd, TargetProblem.NOT_OWNED)
         marker_fd = _open_marker(root_fd)
     except BaseException:
+        os.close(root_fd)
+        raise
+    try:
+        _tighten(root_fd)
+    except BaseException:
+        os.close(marker_fd)
         os.close(root_fd)
         raise
     try:

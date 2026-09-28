@@ -169,6 +169,20 @@ class RootTest(WriterTestCase):
         self.refused(self.root, TargetProblem.NOT_EMPTY)
         self.assertEqual(os.listdir(self.root), ["something.md"])
 
+    def test_a_refused_directory_keeps_its_permissions(self):
+        self.root.mkdir(mode=0o755)
+        os.chmod(self.root, 0o755)
+        (self.root / "something.md").write_text("not ours")
+        self.refused(self.root, TargetProblem.NOT_EMPTY)
+        self.assertEqual(mode(self.root), 0o755)
+
+    def test_a_directory_with_a_tampered_marker_keeps_its_permissions(self):
+        self.sync([])
+        (self.root / MARKER_NAME).write_bytes(b"something else\n")
+        os.chmod(self.root, 0o755)
+        self.refused(self.root, TargetProblem.MARKER_INVALID)
+        self.assertEqual(mode(self.root), 0o755)
+
     def test_an_existing_empty_directory_is_claimed(self):
         self.root.mkdir(mode=0o755)
         self.open()

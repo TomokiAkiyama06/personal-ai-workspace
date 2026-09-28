@@ -11,11 +11,15 @@
    its own: ``memory.projection.completed``, or ``memory.projection.failed`` with
    the step and a closed code. Recording that fails makes the run not ``ok``.
 
-The lock is held from step 1 to the end of step 4, so an older snapshot can never
-be written over a newer one. The file-system work runs in a thread; a
-cancellation (SIGTERM from systemd) waits for the thread's current step to
-finish, so a file is never left half-written and the lock is never released
-while a write is going on, then records ``<step>:CancelledError`` and propagates.
+The lock is held from step 1 until the outcome is recorded, so an older snapshot
+can never be written over a newer one, and a reader that takes the lock (PAW-047)
+always sees the outcome of the files it finds. Recording is not interrupted by a
+cancellation: it finishes, then the cancellation propagates.
+
+The file-system work runs in a thread; a cancellation (SIGTERM from systemd)
+waits for the thread's current step to finish, so a file is never left
+half-written and the lock is never released while a write is going on, then
+records ``<step>:CancelledError`` and propagates.
 A lock the thread took after the cancellation is released at once (the runner
 may live in a long-lived process, Decision 0038 8).
 
@@ -106,6 +110,30 @@ async def _in_thread[T](
         raise
 
 
+async def _to_the_end(
+    awaitable: Awaitable[object],
+) -> tuple[bool, asyncio.CancelledError | None]:
+    """Await ``awaitable`` to its end even if the caller is cancelled meanwhile.
+
+    Returns whether it succeeded and the caller's cancellation (to re-raise once
+    the rest is done). A failure of ``awaitable`` itself (an exception, or its
+    own cancellation) is ``False``, never raised.
+    """
+    task = asyncio.ensure_future(awaitable)
+    interrupted: asyncio.CancelledError | None = None
+    while True:
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as failure:
+            if task.cancelled():
+                return False, interrupted
+            interrupted = interrupted or failure
+            continue
+        except Exception:
+            return False, interrupted
+        return True, interrupted
+
+
 def _close(target: LockedTarget) -> None:
     target.close()
 
@@ -158,6 +186,7 @@ class MemoryProjectionRunner:
         report = WriteReport()
         target: LockedTarget | None = None
         step = ProjectionStep.CHECK_TARGET
+        audited = False
         try:
             try:
                 target = await _in_thread(
@@ -175,6 +204,22 @@ class MemoryProjectionRunner:
                 failed_step, error = step, _code(failure)
             except asyncio.CancelledError as failure:
                 failed_step, error, cancelled = step, _code(failure), failure
+            if failed_step is None and plan is not None:
+                action = ProjectionAction.COMPLETED
+                reason = (
+                    f"memories={plan.memories} written={report.written} "
+                    f"removed={report.removed} redacted={plan.redactions}"
+                )
+                if plan.truncations:
+                    reason += f" truncated={plan.truncations}"
+            else:
+                action = ProjectionAction.FAILED
+                reason = f"{failed_step.value}:{error}"
+            # Still holding the lock (see the module docstring).
+            audited, interrupted = await _to_the_end(
+                self._recorder(action, reason, occurred_at=self._clock())
+            )
+            cancelled = cancelled or interrupted
         finally:
             if target is not None:
                 try:
@@ -183,23 +228,6 @@ class MemoryProjectionRunner:
                     cancelled = cancelled or failure
                 except OSError:
                     pass
-        if failed_step is None and plan is not None:
-            action = ProjectionAction.COMPLETED
-            reason = (
-                f"memories={plan.memories} written={report.written} "
-                f"removed={report.removed} redacted={plan.redactions}"
-            )
-            if plan.truncations:
-                reason += f" truncated={plan.truncations}"
-
-        else:
-            action = ProjectionAction.FAILED
-            reason = f"{failed_step.value}:{error}"
-        try:
-            await self._recorder(action, reason, occurred_at=self._clock())
-            audited = True
-        except Exception:
-            audited = False
         if cancelled is not None:
             raise cancelled
         return ProjectionRunResult(
