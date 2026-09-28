@@ -26,6 +26,7 @@ RESTRICTED_ROUTES = (
     ("POST", f"{API}/password/change"),
     ("POST", f"{API}/step-up"),
     ("POST", f"{API}/users/{uuid.uuid4()}/unlock"),
+    ("POST", f"{API}/users/{uuid.uuid4()}/passkeys/reset"),
     ("GET", f"{API}/policy"),
     ("PUT", f"{API}/policy"),
     ("DELETE", f"{PASSKEYS}/{uuid.uuid4()}"),

@@ -97,7 +97,9 @@ class ModelsMetadataTest(unittest.TestCase):
             {"invited", "active", "pending_deletion", "deleted"},
         )
         self.assertEqual(
-            {purpose.value for purpose in TokenPurpose}, {"setup", "recovery"}
+            {purpose.value for purpose in TokenPurpose},
+            # ``password_reset``: revision 0108 (#108).
+            {"setup", "recovery", "password_reset"},
         )
         self.assertEqual(
             {role.value for role in USER_ROLES}, {"owner", "admin", "user"}

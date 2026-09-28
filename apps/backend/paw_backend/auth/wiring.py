@@ -61,7 +61,8 @@ class AuthServices:
                 "Passkeys are not configured (PAW_PASSKEY_RP_ID, PAW_PASSKEY_ORIGINS): "
                 "the Owner / Admin Passkey requirement is NOT enforced and Passkey "
                 "step-up is unavailable, so the sensitive operations that need it "
-                "(policy change, unlocking an account) are refused."
+                "(policy change, unlocking an account, resetting another account's "
+                "passkeys) are refused."
             )
 
     def close(self) -> None:
@@ -149,6 +150,7 @@ def build_auth(
             audit,
             policy,
             timeout_seconds=timeout,
+            reset_token_ttl_seconds=settings.password_reset_token_ttl_seconds,
         ),
         approval_step_up=PasskeyApprovalStepUp(
             database, clock=clock, timeout_seconds=timeout

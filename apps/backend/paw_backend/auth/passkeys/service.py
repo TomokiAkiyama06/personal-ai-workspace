@@ -29,6 +29,19 @@ The rules (Decision 0025), and where each lives:
   own, best effort. No credential id, key, challenge or name is ever recorded.
 * **Throttle.** A registration attempt counts against the account and the source like
   a wrong password (``Throttle``); a success resets the account's count.
+* **Another account's reset (#108, Decision 0032 proposed).** The Owner may reset an
+  Admin's or a User's Passkeys, an Admin a User's (the rule of unlocking an account);
+  nobody resets the Owner (``owner-recover`` is the Owner's way back) or themselves.
+  It needs a recent Passkey Step-up of the actor's own session, judged before the
+  target is looked at. In ONE transaction: the target's row is locked ``FOR UPDATE``,
+  every Passkey of the target is revoked (``admin_reset``) and its open challenges
+  deleted, then every session ends (``admin``: the Passkey rows before the session
+  rows, the lock order of Decision 0025 section 15), and a one-time password reset
+  token is issued, which also deletes the password (``reset_tokens``). The token is
+  returned once to the actor, who hands it to the target; the target sets a new
+  password with it (``POST /auth/token/redeem``) and signs in into an enrolment-only
+  session when the policy requires a Passkey. The audit row names the actor and the
+  target by id only.
 """
 
 import logging
@@ -45,6 +58,8 @@ from paw_backend.auth.auth_policy import AuthPolicyService
 from paw_backend.auth.context import RequestContext
 from paw_backend.auth.db import run
 from paw_backend.auth.errors import (
+    AccountNotFoundError,
+    AuthPermissionError,
     InvalidAuthInputError,
     LastPasskeyError,
     NoPasskeyError,
@@ -63,6 +78,7 @@ from paw_backend.auth.models import (
     AuthMethod,
     PasskeyGate,
     PasskeyRequirement,
+    RevokeReason,
     ThrottleScope,
 )
 from paw_backend.auth.passkeys import ceremony
@@ -75,6 +91,13 @@ from paw_backend.auth.passkeys.models import (
 )
 from paw_backend.auth.passkeys.store import PasskeyRecord, PasskeyRegistry, UseOutcome
 from paw_backend.auth.passkeys.types import parse_registration_credential
+from paw_backend.auth.reset_tokens import (
+    DEFAULT_RESET_TOKEN_TTL_SECONDS,
+    IssuedResetToken,
+    ResetTokenRefused,
+    issue_in,
+    validate_ttl,
+)
 from paw_backend.auth.service import LoginResult
 from paw_backend.auth.sessions import (
     AuthenticatedSession,
@@ -82,8 +105,14 @@ from paw_backend.auth.sessions import (
     validate_device_label,
 )
 from paw_backend.auth.state import StepUpEvidence, StepUpRefused
-from paw_backend.auth.stepup import Freshness, read_freshness_in
+from paw_backend.auth.stepup import (
+    Freshness,
+    read_freshness_in,
+    require_passkey_step_up_in,
+)
 from paw_backend.auth.throttle import Reservation, Throttle
+from paw_backend.authz.roles import SystemRole
+from paw_backend.authz.subjects import Principal
 from paw_backend.db import Database
 
 logger = logging.getLogger(__name__)
@@ -105,6 +134,27 @@ class RevocationResult:
     sessions_ended: int
     # The session of this request ended too (it was signed in with this Passkey).
     current_session_ended: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ResetResult:
+    """Another account's Passkeys were reset (#108).
+
+    ``reset_token`` is the target's one-time password reset token: shown once to the
+    actor (who hands it to the target), stored nowhere but as its salted HMAC.
+    """
+
+    user_id: uuid.UUID
+    passkeys_revoked: int
+    sessions_ended: int
+    reset_token: IssuedResetToken
+
+
+# The target of a reset, when refused, says why (an enum for the audit row).
+class _ResetRefused(Exception):
+    def __init__(self, reason: AuthReason) -> None:
+        super().__init__(reason.value)
+        self.reason = reason
 
 
 def _require_auth(value: object) -> AuthenticatedSession:
@@ -132,6 +182,7 @@ class PasskeyService:
         policy: AuthPolicyService,
         *,
         timeout_seconds: float = 3.0,
+        reset_token_ttl_seconds: int = DEFAULT_RESET_TOKEN_TTL_SECONDS,
     ) -> None:
         for name, value, kind in (
             ("database", database, Database),
@@ -156,6 +207,7 @@ class PasskeyService:
         self._audit = audit
         self._policy = policy
         self._timeout = float(timeout_seconds)
+        self._reset_ttl = validate_ttl(reset_token_ttl_seconds)
 
     @property
     def available(self) -> bool:
@@ -443,6 +495,134 @@ class PasskeyService:
             )
             raise
 
+    # -- another account's reset (#108) ----------------------------------------------
+
+    async def reset_account(
+        self,
+        actor: Principal,
+        target_user_id: uuid.UUID,
+        context: RequestContext,
+        *,
+        session_id: uuid.UUID,
+    ) -> ResetResult:
+        """Reset another account's Passkeys and password (see the module docstring).
+
+        ``session_id`` is the actor's own session: it must hold a Passkey Step-up
+        inside the policy's window (``StepUpRequiredError`` /
+        ``StepUpMethodInsufficientError``), judged before the target is looked at, so
+        a session without one learns nothing about which accounts exist. Then
+        ``AccountNotFoundError`` (no such live account) or ``AuthPermissionError``
+        (the Owner, the actor, or an Admin reset by an Admin).
+        """
+        if not isinstance(actor, Principal):
+            raise InvalidAuthInputError("actor")
+        if not isinstance(target_user_id, uuid.UUID):
+            raise InvalidAuthInputError("target_user_id")
+        if not isinstance(session_id, uuid.UUID):
+            raise InvalidAuthInputError("session_id")
+        _require_context(context)
+        if actor.system_role not in (SystemRole.OWNER, SystemRole.ADMIN):
+            await self._deny_reset(
+                actor, target_user_id, context, AuthReason.ROLE_NOT_ALLOWED
+            )
+            raise AuthPermissionError
+
+        async def work(session: AsyncSession) -> ResetResult:
+            policy = await self._policy.get_in(session)
+            try:
+                await require_passkey_step_up_in(
+                    session,
+                    session_id=session_id,
+                    user_id=actor.user_id,
+                    window_minutes=policy.stepup_window_minutes,
+                    now=self._audit.now(),
+                )
+            except StepUpMethodInsufficientError:
+                raise _ResetRefused(AuthReason.STEP_UP_METHOD_INSUFFICIENT) from None
+            except StepUpRequiredError:
+                raise _ResetRefused(AuthReason.STEP_UP_REQUIRED) from None
+            role = (
+                await session.execute(
+                    text(
+                        "SELECT system_role FROM users WHERE id = :id "
+                        "AND status IN ('invited', 'active') FOR UPDATE"
+                    ),
+                    {"id": target_user_id},
+                )
+            ).scalar_one_or_none()
+            if role is None:
+                raise _ResetRefused(AuthReason.NOT_FOUND)
+            if (
+                target_user_id == actor.user_id
+                or role == SystemRole.OWNER.value
+                or (
+                    role != SystemRole.USER.value
+                    and actor.system_role is not SystemRole.OWNER
+                )
+            ):
+                raise _ResetRefused(AuthReason.ROLE_NOT_ALLOWED)
+            # The credentials BEFORE the sessions (Decision 0025 section 15): a
+            # Step-up of the target holds its Passkey FOR SHARE and then updates its
+            # session; this waits for it on the Passkey row and then ends that
+            # session too.
+            revoked = await self._registry.revoke_all_in(
+                session, target_user_id, reason=PasskeyRevokeReason.ADMIN_RESET
+            )
+            ended = await self._sessions.revoke_all(
+                session, target_user_id, RevokeReason.ADMIN
+            )
+            try:
+                token = await issue_in(
+                    session,
+                    target_user_id,
+                    now=self._audit.now(),
+                    ttl_seconds=self._reset_ttl,
+                )
+            except ResetTokenRefused:  # (cannot happen: the row is locked)
+                raise _ResetRefused(AuthReason.ROLE_NOT_ALLOWED) from None
+            await self._audit.record_in(
+                session,
+                self._audit.event(
+                    AuthAction.PASSKEY_RESET,
+                    AuthReason.RESET,
+                    allowed=True,
+                    correlation_id=context.correlation_id,
+                    client_request_id=context.client_request_id,
+                    actor_id=actor.user_id,
+                    actor_role=actor.system_role,
+                    resource_kind="user",
+                    resource_id=target_user_id,
+                ),
+            )
+            return ResetResult(target_user_id, revoked, ended, token)
+
+        try:
+            return await run(self._database, work, self._timeout)
+        except _ResetRefused as refused:
+            await self._deny_reset(actor, target_user_id, context, refused.reason)
+            raise _RESET_ERRORS[refused.reason]() from None
+
+    async def _deny_reset(
+        self,
+        actor: Principal,
+        target_user_id: uuid.UUID,
+        context: RequestContext,
+        reason: AuthReason,
+    ) -> None:
+        await self._audit.record_best_effort(
+            self._audit.event(
+                AuthAction.PASSKEY_RESET,
+                reason,
+                allowed=False,
+                correlation_id=context.correlation_id,
+                client_request_id=context.client_request_id,
+                actor_id=actor.user_id,
+                actor_role=actor.system_role,
+                resource_kind="user",
+                resource_id=target_user_id,
+            )
+        )
+
     # -- shared ------------------------------------------------------------------
 
     async def _lock_user_in(self, session: AsyncSession, user_id: uuid.UUID) -> None:
@@ -538,6 +718,14 @@ class PasskeyService:
             )
         for event in events:
             await self._audit.record_best_effort(event)
+
+
+_RESET_ERRORS = {
+    AuthReason.STEP_UP_REQUIRED: StepUpRequiredError,
+    AuthReason.STEP_UP_METHOD_INSUFFICIENT: StepUpMethodInsufficientError,
+    AuthReason.NOT_FOUND: AccountNotFoundError,
+    AuthReason.ROLE_NOT_ALLOWED: AuthPermissionError,
+}
 
 
 def _require_passkey_step_up(freshness: Freshness) -> None:
