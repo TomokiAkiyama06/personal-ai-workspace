@@ -35,6 +35,7 @@ from .task_support import (
     FIRST_RUN,
     PostgresTaskTestCase,
     command_reason,
+    make_completable,
     requires_postgres,
 )
 
@@ -77,6 +78,9 @@ class BeginStepRacesWithEndingCommandsTest(PostgresTaskTestCase):
             for command, start, target in ENDING_COMMANDS:
                 with self.subTest(command=command.value):
                     task_id = await self.task_in_state(start)
+                    await make_completable(
+                        self.service, task_id, self.repository_id, FIRST_RUN
+                    )
                     stepper = TaskService(
                         self.new_database(), project_gate=ALWAYS_ACTIVE
                     )
@@ -150,6 +154,9 @@ class BeginStepRacesWithEndingCommandsTest(PostgresTaskTestCase):
             for command, start, target in ENDING_COMMANDS:
                 with self.subTest(command=command.value):
                     task_id = await self.task_in_state(start)
+                    await make_completable(
+                        self.service, task_id, self.repository_id, FIRST_RUN
+                    )
                     finished = await self.service.begin_step(
                         task_id, "before", run=FIRST_RUN
                     )
@@ -272,6 +279,7 @@ class SupersededWorkerTest(PostgresTaskTestCase):
             self.service.update_attempt(
                 task_id,
                 run=FIRST_RUN,
+                repository_id=self.repository_id,
                 worktree=WorktreeState("stale", "/stale", "c" * 40),
             ),
             self.service.begin_tool_invocation(
@@ -292,7 +300,9 @@ class SupersededWorkerTest(PostgresTaskTestCase):
         self.assertEqual(after.current_step, new_step)
         self.assertEqual(after.current_step.status, StepStatus.RUNNING)
         self.assertEqual(after.recent_logs, ())
-        self.assertEqual(after.attempt.worktree, WorktreeState())
+        self.assertEqual(
+            after.attempt.repository(self.repository_id).worktree, WorktreeState()
+        )
         self.assertEqual(
             await self.scalar(
                 "SELECT count(*) FROM task_logs WHERE task_id = :i AND attempt = 2",
@@ -302,7 +312,7 @@ class SupersededWorkerTest(PostgresTaskTestCase):
         )
         # The old attempt's record is as the restart left it.
         (old,) = after.previous_attempts
-        self.assertEqual(old.worktree, WorktreeState())
+        self.assertEqual(old.repository(self.repository_id).worktree, WorktreeState())
         # The new attempt's own worker is unaffected and can finish its step.
         finished = await self.service.finish_step(
             task_id, new_step.id, StepStatus.SUCCEEDED
@@ -393,6 +403,7 @@ class RetriedRunTest(PostgresTaskTestCase):
         await self.service.update_attempt(
             task_id,
             run=new_run,
+            repository_id=self.repository_id,
             worktree=self.NEW_WORKTREE,
             review=self.NEW_REVIEW,
             pull_request=self.NEW_PULL_REQUEST,
@@ -421,7 +432,9 @@ class RetriedRunTest(PostgresTaskTestCase):
         ) = await self.failed_and_retried()
         before = await self.service.restore(task_id)
         counts = await self.row_counts(task_id)
-        self.assertEqual(before.attempt.worktree, self.NEW_WORKTREE)
+        self.assertEqual(
+            before.attempt.repository(self.repository_id).worktree, self.NEW_WORKTREE
+        )
 
         # What it writes about the attempt names its run: Retry left the attempt
         # number as it was, so the run's retry count is all that tells it apart.
@@ -429,16 +442,19 @@ class RetriedRunTest(PostgresTaskTestCase):
             "worktree": lambda: self.service.update_attempt(
                 task_id,
                 run=old_run,
+                repository_id=self.repository_id,
                 worktree=WorktreeState("stale", "/stale", "c" * 40),
             ),
             "review and evaluation": lambda: self.service.update_attempt(
                 task_id,
                 run=old_run,
+                repository_id=self.repository_id,
                 review=ReviewState(ReviewStatus.APPROVED, EvaluationResult.PASSED),
             ),
             "pull request": lambda: self.service.update_attempt(
                 task_id,
                 run=old_run,
+                repository_id=self.repository_id,
                 pull_request=PullRequestInfo(
                     99, "https://example.test/pr/99", PullRequestState.MERGED
                 ),
@@ -480,9 +496,16 @@ class RetriedRunTest(PostgresTaskTestCase):
         after = await self.service.restore(task_id)
         self.assertEqual(after, before)
         self.assertEqual(await self.row_counts(task_id), counts)
-        self.assertEqual(after.attempt.worktree, self.NEW_WORKTREE)
-        self.assertEqual(after.attempt.review, self.NEW_REVIEW)
-        self.assertEqual(after.attempt.pull_request, self.NEW_PULL_REQUEST)
+        self.assertEqual(
+            after.attempt.repository(self.repository_id).worktree, self.NEW_WORKTREE
+        )
+        self.assertEqual(
+            after.attempt.repository(self.repository_id).review, self.NEW_REVIEW
+        )
+        self.assertEqual(
+            after.attempt.repository(self.repository_id).pull_request,
+            self.NEW_PULL_REQUEST,
+        )
         self.assertEqual(after.current_step.id, new_step.id)
         self.assertEqual(after.current_step.status, StepStatus.RUNNING)
         self.assertEqual(
@@ -502,7 +525,9 @@ class RetriedRunTest(PostgresTaskTestCase):
             new_call,
         ) = await self.failed_and_retried()
         review = ReviewState(ReviewStatus.APPROVED, EvaluationResult.PASSED)
-        result = await self.service.update_attempt(task_id, run=new_run, review=review)
+        result = await self.service.update_attempt(
+            task_id, run=new_run, repository_id=self.repository_id, review=review
+        )
         self.assertEqual(
             (result.worktree, result.review, result.pull_request),
             (self.NEW_WORKTREE, review, self.NEW_PULL_REQUEST),
@@ -538,11 +563,17 @@ class RetriedRunTest(PostgresTaskTestCase):
         for run in (TaskRun(2, 1), TaskRun(2, 0), TaskRun(2, 2), TaskRun(3, 1)):
             with self.subTest(run=run), self.assertRaises(StaleAttemptError) as caught:
                 await self.service.update_attempt(
-                    task_id, run=run, worktree=WorktreeState("stale", "/s", "d" * 40)
+                    task_id,
+                    run=run,
+                    repository_id=self.repository_id,
+                    worktree=WorktreeState("stale", "/s", "d" * 40),
                 )
         self.assertTrue(issubclass(StaleAttemptError, StaleRunError))
         self.assertEqual(
-            (await self.service.restore(task_id)).attempt.worktree, self.NEW_WORKTREE
+            (await self.service.restore(task_id))
+            .attempt.repository(self.repository_id)
+            .worktree,
+            self.NEW_WORKTREE,
         )
 
     async def test_a_restart_after_a_retry_replaces_both_runs_of_the_old_attempt(self):
@@ -566,7 +597,10 @@ class RetriedRunTest(PostgresTaskTestCase):
                     task_id, "line", run=bad
                 ),
                 "update_attempt": lambda bad=bad: self.service.update_attempt(
-                    task_id, run=bad, worktree=WorktreeState("b", "/p", "e" * 40)
+                    task_id,
+                    run=bad,
+                    repository_id=self.repository_id,
+                    worktree=WorktreeState("b", "/p", "e" * 40),
                 ),
             }
             for label, call in calls.items():
@@ -582,7 +616,10 @@ class RetriedRunTest(PostgresTaskTestCase):
             await self.service.add_log(task_id, "line", attempt=1)
         self.assertEqual(await self.row_counts(task_id), (0, 0, 0))
         self.assertEqual(
-            (await self.service.restore(task_id)).attempt.worktree, WorktreeState()
+            (await self.service.restore(task_id))
+            .attempt.repository(self.repository_id)
+            .worktree,
+            WorktreeState(),
         )
 
     async def test_a_stale_write_that_waits_for_the_retry_is_refused_after_it(self):
@@ -611,6 +648,7 @@ class RetriedRunTest(PostgresTaskTestCase):
                 worker.update_attempt(
                     task_id,
                     run=old_run,
+                    repository_id=self.repository_id,
                     worktree=WorktreeState("stale", "/s", "c" * 40),
                 )
             )
@@ -627,7 +665,9 @@ class RetriedRunTest(PostgresTaskTestCase):
         self.assertEqual(retried.run, TaskRun(1, 1))
         snapshot = await self.service.restore(task_id)
         self.assertEqual((snapshot.state, snapshot.run), (S.QUEUED, TaskRun(1, 1)))
-        self.assertEqual(snapshot.attempt.worktree, WorktreeState())
+        self.assertEqual(
+            snapshot.attempt.repository(self.repository_id).worktree, WorktreeState()
+        )
         self.assertIsNone(snapshot.current_step)
 
     async def test_a_retry_racing_a_late_log_keeps_the_line_with_its_own_run(self):

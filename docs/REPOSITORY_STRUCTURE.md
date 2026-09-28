@@ -271,6 +271,7 @@ personal-ai-workspace/
 │  │  │  │     └─ validation.py
 │  │  │  ├─ tasks/
 │  │  │  │  ├─ project_gate.py
+│  │  │  │  ├─ working_set.py
 │  │  │  │  └─ queueing/
 │  │  │  │     ├─ __init__.py
 │  │  │  │     ├─ budget.py
@@ -301,7 +302,8 @@ personal-ai-workspace/
 │  │  │  │  ├─ registry.py
 │  │  │  │  ├─ runner.py
 │  │  │  │  ├─ scope.py
-│  │  │  │  └─ task_state.py
+│  │  │  │  ├─ task_state.py
+│  │  │  │  └─ working_set.py
 │  │  │  └─ api/
 │  │  │     ├─ __init__.py
 │  │  │     ├─ deps.py

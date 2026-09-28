@@ -7,6 +7,8 @@ set.
 import os
 import uuid
 
+from sqlalchemy import text
+
 from paw_backend.authz import Authorizer, Capability, Principal, ProjectState, Resource
 from paw_backend.authz.audit import AuditEvent
 from paw_backend.authz.capabilities import RepoPermission
@@ -544,6 +546,41 @@ class PurgeTest(ManageTestCase):
         for bad in ("x", None, ["x"], [1]):
             with self.assertRaises(InvalidRepositoryInputError):
                 await self.service.purge_projects(bad)
+
+
+@requires_postgres
+class WorkingSetAclTest(ManageTestCase):
+    """``working_set_acl``: the registration the Tool Broker decides a Working Set
+    change on (issue #85)."""
+
+    async def test_a_registered_repository_gives_its_acl_with_its_project(self):
+        acl = await self.service.working_set_acl(self.repository)
+        self.assertEqual(
+            (acl.repo_id, acl.project_id, acl.allowed),
+            (self.repository, self.project_id, None),
+        )
+        with self.engine.begin() as connection:
+            connection.execute(
+                text("UPDATE repositories SET acl_allowed = ARRAY['read']")
+            )
+        acl = await self.service.working_set_acl(self.repository)
+        self.assertEqual(acl.allowed, frozenset({RepoPermission.READ}))
+
+    async def test_an_unknown_one_or_one_of_a_deleted_project_is_none(self):
+        self.assertIsNone(await self.service.working_set_acl(uuid.uuid4()))
+        deleted = self.seed_project(ProjectStatus.DELETED, name="Gone")
+        gone = self.seed_repository(deleted, name="gone")
+        self.assertIsNone(await self.service.working_set_acl(gone))
+        archived = self.seed_project(ProjectStatus.ARCHIVED, name="Kept")
+        kept = self.seed_repository(archived, name="kept")
+        # Archived is decided by the authorization (read-only), not hidden here.
+        self.assertEqual((await self.service.working_set_acl(kept)).repo_id, kept)
+
+    async def test_the_id_is_checked(self):
+        for bad in ("x", None, 1, b"x"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(InvalidRepositoryInputError):
+                    await self.service.working_set_acl(bad)
 
 
 @requires_postgres
