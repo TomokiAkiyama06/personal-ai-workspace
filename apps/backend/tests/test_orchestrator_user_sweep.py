@@ -5,13 +5,19 @@ stopped through the real ``TaskService`` and ``TaskQueue`` (built with the test 
 that admits every project) and read back with SQL.
 """
 
+import asyncio
 import unittest
 import uuid
+from unittest import mock
+
+from sqlalchemy import text
 
 from paw_backend.authz import PostgresAuditSink
+from paw_backend.orchestrator import user_sweep
 from paw_backend.orchestrator.errors import InvalidOrchestratorArgumentError
 from paw_backend.orchestrator.user_sweep import (
     STOP_REASON,
+    UserBusyError,
     UserTaskStopLoop,
     UserTaskStopper,
     build_user_stop_loop,
@@ -19,7 +25,7 @@ from paw_backend.orchestrator.user_sweep import (
 from paw_backend.tasks import Actor, TaskService, TaskState
 from paw_backend.tasks.queueing import TaskQueue
 
-from .auth_support import requires_postgres
+from .auth_support import TEST_DATABASE_URL, requires_postgres
 from .gate_support import ALWAYS_ACTIVE
 from .onboarding_support import OnboardingTestCase
 from .task_support import PATH_TO_STATE
@@ -75,6 +81,18 @@ class UserSweepTestCase(OnboardingTestCase):
             id=task_id,
         )
         return [row.status for row in rows]
+
+    async def wait_until_blocked_on_a_lock(self) -> None:
+        """Until another backend waits for a row lock (the stop's ``FOR SHARE``)."""
+        for _ in range(500):
+            waiting = await self.scalar(
+                "SELECT count(*) FROM pg_stat_activity "
+                "WHERE wait_event_type = 'Lock' AND query LIKE '%FOR SHARE%'"
+            )
+            if waiting:
+                return
+            await asyncio.sleep(0.01)
+        self.fail("the stop never waited for the user's row lock")
 
     async def last_event(self, task_id):
         return (
@@ -164,6 +182,49 @@ class StopTest(UserSweepTestCase):
 
         self.assertEqual((outcome, entry), ("live", False))
         self.assertEqual(await self.state(task), "running")
+
+    async def test_a_restore_holding_the_row_lock_is_waited_for_and_wins(self):
+        # Decision 0043 B: a restore that commits first is never undone. The stop's
+        # FOR SHARE must wait for the restore's FOR NO KEY UPDATE and then read the
+        # restored status inside the cancel's own transaction.
+        task = await self.seed(self.bob, TaskState.RUNNING)
+        await self.delete(self.bob)
+        holder = self.new_database(TEST_DATABASE_URL)
+        async with holder.session() as session, session.begin():
+            await session.execute(
+                text("SELECT 1 FROM users WHERE id = :id FOR NO KEY UPDATE"),
+                {"id": self.bob.id},
+            )
+            await session.execute(
+                text("UPDATE users SET status = 'active' WHERE id = :id"),
+                {"id": self.bob.id},
+            )
+            stop = asyncio.create_task(self.stopper()._stop_task(self.bob.id, task))
+            await self.wait_until_blocked_on_a_lock()
+            self.assertFalse(stop.done())
+
+        self.assertEqual(await stop, ("live", False))
+        self.assertEqual(await self.state(task), "running")
+
+    async def test_a_row_locked_too_long_is_reported_busy_with_nothing_cancelled(self):
+        task = await self.seed(self.bob, TaskState.RUNNING)
+        await self.delete(self.bob)
+        holder = self.new_database(TEST_DATABASE_URL)
+        with mock.patch.object(user_sweep, "USER_LOCK_TIMEOUT_MS", 100):
+            async with holder.session() as session, session.begin():
+                await session.execute(
+                    text("SELECT 1 FROM users WHERE id = :id FOR NO KEY UPDATE"),
+                    {"id": self.bob.id},
+                )
+                with self.assertRaises(UserBusyError):
+                    await self.stopper().stop_user_tasks(self.bob.id)
+
+        self.assertEqual(await self.state(task), "running")
+        self.assertEqual((await self.last_event(task)).command, "start")
+        self.assertEqual(
+            [r for r in await self.audit_rows() if r.action == "auth.user.task_stop"],
+            [],
+        )
 
     async def test_an_entry_left_behind_a_finished_task_is_cancelled(self):
         task = await self.seed(self.bob)
