@@ -824,3 +824,64 @@ class ArgumentsTest(ResetCase):
             )
             self.assertEqual(revoked, 0)
             await session.rollback()
+
+
+@requires_postgres
+class ResetEndsPairingsTest(ResetCase):
+    """A reset also ends the target's live pairings (PAW-024 x #108).
+
+    Otherwise a pairing token issued before the reset (or an Owner's / Admin's
+    approved claim) would still give whoever holds it a new session after every
+    session and credential of the account was ended.
+    """
+
+    async def test_a_users_unused_pairing_token_dies_with_the_reset(self):
+        bob = await self.make_user("bob")
+        trusted = await self.sign_in(bob)
+        issued = await self.services.pairing.issue(trusted, context())
+        owner_session = await self.actor_session(self.owner, OWNER_PASSWORD)
+
+        await self.reset_as(self.owner, bob, owner_session)
+
+        with self.assertRaises(TokenRejectedError):
+            await self.services.pairing.claim(issued.token, "Phone", context())
+        (row,) = await self.query(
+            "SELECT state, ended_reason FROM device_pairings WHERE audit_ref = :r",
+            r=issued.pairing_id,
+        )
+        self.assertEqual(
+            (row.state, row.ended_reason), ("revoked", "credentials_reset")
+        )
+        self.assertEqual(
+            await self.scalar(
+                "SELECT count(*) FROM auth_sessions "
+                "WHERE user_id = :u AND revoked_at IS NULL",
+                u=bob.id,
+            ),
+            0,
+        )
+        summary = await self.audit_summary()
+        self.assertEqual(summary[("auth.pairing.revoke", "allow", "reset")], 1)
+
+    async def test_an_admins_approved_claim_dies_with_the_reset(self):
+        session, _ = await self.fully_stepped_up(self.admin, ADMIN_PASSWORD)
+        issued = await self.services.pairing.issue(session, context())
+        outcome = await self.services.pairing.claim(issued.token, "Tablet", context())
+        await self.services.pairing.approve(
+            session,
+            issued.pairing_id,
+            context(),
+            confirmation_code=outcome.confirmation_code,
+        )
+        owner_session = await self.actor_session(self.owner, OWNER_PASSWORD)
+
+        await self.reset_as(self.owner, self.admin, owner_session)
+
+        with self.assertRaises(TokenRejectedError):
+            await self.services.pairing.complete(outcome.claim, context())
+        self.assertEqual(
+            await self.scalar(
+                "SELECT count(*) FROM auth_sessions WHERE auth_method = 'pairing'"
+            ),
+            0,
+        )
