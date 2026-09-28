@@ -358,3 +358,45 @@ describe("an ended session", () => {
     expect(screen.getByRole("navigation", { name: "設定メニュー" })).toBeInTheDocument();
   });
 });
+
+describe("a sign-out of an earlier session", () => {
+  it("does not sign out the session signed in meanwhile", async () => {
+    mockApi({
+      "GET /auth/session": reply(200, session()),
+      "POST /auth/login": reply(200, session()),
+    });
+    const tableFetch = globalThis.fetch;
+    let logouts = 0;
+    let answerFirst: (response: Response) => void = () => {};
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        if (String(input).endsWith("/auth/logout")) {
+          logouts += 1;
+          if (logouts === 1) {
+            return new Promise<Response>((resolve) => {
+              answerFirst = resolve;
+            });
+          }
+          return Promise.resolve(new Response(null, { status: 204 }));
+        }
+        return tableFetch(input, init);
+      }),
+    );
+    renderApp("/");
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "アカウントメニュー" }));
+    const signOut = screen.getByRole("button", { name: "サインアウト" });
+    // Pressed twice: the first request is slow, the second ends the session.
+    await user.click(signOut);
+    await user.click(signOut);
+    await user.type(await screen.findByLabelText("ユーザー名"), "tomoki");
+    await user.type(screen.getByLabelText("パスワード"), "correct horse");
+    await user.click(screen.getByRole("button", { name: "サインイン" }));
+    expect(await screen.findByRole("navigation", { name: "メインナビゲーション" })).toBeVisible();
+    answerFirst(new Response(null, { status: 204 }));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(screen.getByRole("navigation", { name: "メインナビゲーション" })).toBeInTheDocument();
+    expect(logouts).toBe(2);
+  });
+});

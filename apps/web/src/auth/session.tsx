@@ -74,12 +74,17 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   );
 
   const signOut = useCallback(async () => {
+    const mine = generation.current;
     try {
       await authApi.logout();
     } catch (error) {
+      // A sign-out of an earlier session (another one ended it already).
+      if (mine !== generation.current) return;
       // Already ended on the server: signed out. Anything else: still signed in.
       if (!isApiError(error, "unauthorized")) throw error;
     }
+    // An earlier sign-out's slow answer must not end a session started meanwhile.
+    if (mine !== generation.current) return;
     generation.current++;
     nextSessionEpoch();
     setState({ status: "signed_out" });

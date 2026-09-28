@@ -283,6 +283,48 @@ describe("設定 › 端末とセッション", () => {
     );
   });
 
+  it("ignores a read of the devices that was in flight while one was signed out", async () => {
+    mockApi({
+      ...base,
+      "GET /auth/pairing/pending": reply(200, { pending: [] }),
+      "POST /auth/pairing": reply(201, { ...pairing, approval_required: false }),
+      "DELETE /auth/sessions/s-2": reply(204),
+    });
+    const tableFetch = globalThis.fetch;
+    let reads = 0;
+    let answerPoll: (response: Response) => void = () => {};
+    const json = (body: unknown) =>
+      new Response(JSON.stringify(body), { headers: { "Content-Type": "application/json" } });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        if (String(input).endsWith("/auth/sessions") && (init?.method ?? "GET") === "GET") {
+          reads += 1;
+          if (reads === 1)
+            return Promise.resolve(json({ sessions: [session().session, otherSession] }));
+          if (reads === 2) {
+            return new Promise<Response>((resolve) => {
+              answerPoll = resolve;
+            });
+          }
+          return Promise.resolve(json({ sessions: [session().session] }));
+        }
+        return tableFetch(input, init);
+      }),
+    );
+    renderApp("/settings/devices");
+    const user = userEvent.setup();
+    await addDevice(user);
+    // The watcher's five-second read starts and is left hanging.
+    await waitFor(() => expect(reads).toBe(2), { timeout: 7000 });
+    const row = within(trusted()).getByText("Phone").closest("li") as HTMLElement;
+    await user.click(within(row).getByRole("button", { name: "サインアウト" }));
+    await waitFor(() => expect(within(trusted()).queryByText("Phone")).not.toBeInTheDocument());
+    answerPoll(json({ sessions: [session().session, otherSession] }));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(within(trusted()).queryByText("Phone")).not.toBeInTheDocument();
+  }, 10000);
+
   it("shows a wrong confirmation code as such", async () => {
     mockApi({
       ...base,

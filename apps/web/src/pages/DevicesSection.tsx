@@ -179,11 +179,16 @@ export function DevicesSection() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
+  // Only the newest read of the sessions counts: a watcher's read that was in
+  // flight during a sign-out must not bring the ended session back.
+  const sessionReads = useRef(0);
   const loadSessions = useCallback(async () => {
+    const mine = ++sessionReads.current;
     try {
-      setSessions((await authApi.sessions()).sessions);
+      const { sessions: next } = await authApi.sessions();
+      if (mine === sessionReads.current) setSessions(next);
     } catch (caught) {
-      setError(errorMessage(t, caught));
+      if (mine === sessionReads.current) setError(errorMessage(t, caught));
     }
   }, [t]);
 
