@@ -64,9 +64,14 @@ class UserLoopLifespanTest(LifespanTestCase):
             (loop,) = UserRecordingLoop.instances
             self.assertTrue(await wait_until(loop.started.is_set))
             self.assertIs(loop.database, database)
-            self.assertEqual(set(loop.options), {"project_gate", "interval_seconds"})
+            # The application's own task service (issue #125): a task the loop
+            # cancels ends through the listener that undoes what it held.
+            self.assertEqual(
+                set(loop.options), {"project_gate", "interval_seconds", "tasks"}
+            )
             self.assertIsInstance(loop.options["project_gate"], ProjectStateGate)
             self.assertEqual(loop.options["interval_seconds"], 90)
+            self.assertIs(loop.options["tasks"], app.state.task_execution.tasks)
 
         self.assertEqual(seen, [[(True, True)]])
 

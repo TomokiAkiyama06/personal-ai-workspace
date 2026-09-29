@@ -531,20 +531,27 @@ def build_user_stop_loop(
     project_gate: ProjectGate,
     interval_seconds: float = DEFAULT_STOP_INTERVAL_SECONDS,
     clock: Clock | None = None,
+    tasks: TaskService | None = None,
 ) -> UserTaskStopLoop:
     """The loop the application runs, wired like ``build_project_stop_loop``.
 
-    The task service carries the approval revocation listener (Decision 0006,
-    section 9), so a task this cancels loses its open approvals at once.
+    ``tasks`` is the application's own ``TaskService`` (issue #125: the one of
+    ``composition.build_task_execution``, whose listener does everything a task's
+    end needs, the approval revocation included). Without it the loop builds one
+    with the approval revocation listener only (Decision 0006, section 9), so a
+    task this cancels loses its open approvals at once.
     ``project_gate`` is REQUIRED (the task lane refuses to be built without one).
     """
     audit = PostgresAuditSink(database)
-    approvals = ApprovalService(PostgresApprovalStore(database), audit)
-    tasks = TaskService(
-        database,
-        listeners=[approvals.revoke_on_task_end],
-        project_gate=project_gate,
-    )
+    if tasks is None:
+        approvals = ApprovalService(PostgresApprovalStore(database), audit)
+        tasks = TaskService(
+            database,
+            listeners=[approvals.revoke_on_task_end],
+            project_gate=project_gate,
+        )
+    elif not isinstance(tasks, TaskService):
+        raise TypeError("tasks must be a TaskService")
     queue = TaskQueue(database, project_gate=project_gate)
     return UserTaskStopLoop(
         UserTaskStopper(database, tasks, queue, audit),

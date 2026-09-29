@@ -3,7 +3,7 @@
 import asyncio
 import contextlib
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -25,8 +25,12 @@ from paw_backend.middleware import (
     RequestIdMiddleware,
     SecurityHeadersMiddleware,
 )
+from paw_backend.orchestrator.composition import TaskExecution, build_task_execution
+from paw_backend.orchestrator.config import OrchestratorConfig
 from paw_backend.orchestrator.connection_reaper import build_connection_reaper
+from paw_backend.orchestrator.freshness_loop import build_freshness_loop
 from paw_backend.orchestrator.project_sweep import build_project_stop_loop
+from paw_backend.orchestrator.runtime import AgentRuntime
 from paw_backend.orchestrator.user_sweep import build_user_stop_loop
 from paw_backend.projects import ProjectStateGate
 from paw_backend.research.scratch import ScratchJanitor, ScratchStore
@@ -40,12 +44,20 @@ def create_app(
     database: Database | None = None,
     event_bus: EventBus | None = None,
     auth: AuthServices | None = None,
+    agent_runtimes: Mapping[str, AgentRuntime] | None = None,
+    orchestrator_config: OrchestratorConfig | None = None,
 ) -> FastAPI:
     """Build the FastAPI application.
 
     ``database``, ``event_bus`` and ``auth`` (the authentication services, with
     their clock) can be injected (tests do); by default they are built from
     ``settings``, which itself defaults to the environment.
+
+    With a configured database the task execution is composed here
+    (``app.state.task_execution``, issue #125): the ``TaskService``, the Tool
+    Broker, the production ``TaskAuthority`` and, when ``agent_runtimes`` and
+    ``orchestrator_config`` are given, the ``Orchestrator``. Without a database
+    it is ``None``.
     """
     settings = settings or Settings()
     database = database or Database(settings)
@@ -74,6 +86,7 @@ def create_app(
         stop_loop = None
         user_stop_loop = None
         reaper = None
+        maintenance = None
         try:
             # Expired Research Scratch items are only hidden until something
             # deletes them (PAW-050): purge them regularly, from the start on.
@@ -89,19 +102,24 @@ def create_app(
                 # The Project state gate is given explicitly (Issue #83, Decision
                 # 0020: the task lane requires it): the loop's task service and
                 # queue are built with it, never without.
+                # A task the loop cancels ends through the application's own
+                # task service, whose listener undoes what the task held (#125).
                 stop_loop = build_project_stop_loop(
                     database,
                     project_gate=ProjectStateGate(),
                     interval_seconds=settings.project_task_stop_interval_seconds,
+                    tasks=task_execution.tasks,
                 )
                 background.add(asyncio.create_task(stop_loop.run()))
             # Tasks of a user whose deletion began are stopped the same way
-            # (Issue #127, Decision 0043).
+            # (Issue #127, Decision 0043), also through the application's own
+            # task service (#125).
             if database.configured and settings.user_task_stop_interval_seconds > 0:
                 user_stop_loop = build_user_stop_loop(
                     database,
                     project_gate=ProjectStateGate(),
                     interval_seconds=settings.user_task_stop_interval_seconds,
+                    tasks=task_execution.tasks,
                 )
                 background.add(asyncio.create_task(user_stop_loop.run()))
             # Calls through a shared connection that a crashed process left
@@ -112,6 +130,17 @@ def create_app(
                     interval_seconds=settings.connection_reap_interval_seconds,
                 )
                 background.add(asyncio.create_task(reaper.run()))
+            # The Memory freshness jobs and the sweep that finishes the cleanup of
+            # ended tasks (issue #125, Decision 0047).
+            if (
+                task_execution is not None
+                and settings.freshness_job_interval_seconds > 0
+            ):
+                maintenance = build_freshness_loop(
+                    task_execution,
+                    interval_seconds=settings.freshness_job_interval_seconds,
+                )
+                background.add(asyncio.create_task(maintenance.run()))
             yield
         finally:
             if stop_loop is not None:
@@ -120,6 +149,8 @@ def create_app(
                 user_stop_loop.stop()
             if reaper is not None:
                 reaper.stop()
+            if maintenance is not None:
+                maintenance.stop()
             # Cancelling aborts the connection each of them is using (a diagnostic
             # its own, the janitor the one of its purge transaction: neither waits
             # for a stalled server to answer), and the wait is bounded anyway.
@@ -154,6 +185,18 @@ def create_app(
     app.state.database = database
     app.state.event_bus = event_bus
     install_auth(app, auth, settings=settings, database=database)
+    # The task execution uses the application's Authorizer (its principal
+    # directory reads the delegating user's current rights).
+    task_execution: TaskExecution | None = None
+    if database.configured:
+        task_execution = build_task_execution(
+            settings,
+            database,
+            app.state.authorizer,
+            runtimes=agent_runtimes,
+            orchestrator_config=orchestrator_config,
+        )
+    app.state.task_execution = task_execution
 
     register_error_handlers(app)
     # Added last = outermost. Request ID wraps everything, so the middleware

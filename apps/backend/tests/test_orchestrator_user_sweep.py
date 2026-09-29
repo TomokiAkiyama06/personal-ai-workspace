@@ -13,6 +13,7 @@ from unittest import mock
 from sqlalchemy import text
 
 from paw_backend.authz import PostgresAuditSink
+from paw_backend.db import Database
 from paw_backend.orchestrator import user_sweep
 from paw_backend.orchestrator.errors import InvalidOrchestratorArgumentError
 from paw_backend.orchestrator.user_sweep import (
@@ -25,7 +26,7 @@ from paw_backend.orchestrator.user_sweep import (
 from paw_backend.tasks import Actor, TaskCommand, TaskService, TaskState
 from paw_backend.tasks.queueing import TaskQueue
 
-from .auth_support import TEST_DATABASE_URL, requires_postgres
+from .auth_support import TEST_DATABASE_URL, fast_settings, requires_postgres
 from .gate_support import ALWAYS_ACTIVE
 from .onboarding_support import OnboardingTestCase
 from .task_support import FIRST_RUN, PATH_TO_STATE, make_completable, single_target
@@ -338,6 +339,22 @@ class LoopArgumentTest(unittest.TestCase):
     def test_the_builder_requires_a_project_gate(self):
         with self.assertRaises(TypeError):
             build_user_stop_loop(object())  # type: ignore[call-arg]
+
+    def test_the_builder_uses_the_task_service_it_is_given(self):
+        # The application passes its own (issue #125: its listener undoes what a
+        # cancelled task held); anything else is refused.
+        database = Database(fast_settings(database_url=TEST_DATABASE_URL))
+        tasks = TaskService(database, project_gate=ALWAYS_ACTIVE)
+
+        loop = build_user_stop_loop(database, project_gate=ALWAYS_ACTIVE, tasks=tasks)
+
+        self.assertIs(loop._stopper._tasks, tasks)
+        with self.assertRaises(TypeError):
+            build_user_stop_loop(
+                database,
+                project_gate=ALWAYS_ACTIVE,
+                tasks=object(),  # type: ignore[arg-type]
+            )
 
 
 if __name__ == "__main__":
