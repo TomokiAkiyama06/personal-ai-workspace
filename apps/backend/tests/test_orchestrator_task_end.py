@@ -311,6 +311,37 @@ class TaskEndTest(PostgresVersioningTestCase):
         self.assertEqual(list(found), sorted(found))
         self.assertTrue(set(ended) <= set(found))
 
+    async def test_tasks_that_keep_failing_do_not_starve_the_rest(self):
+        ended = []
+        for _ in range(3):
+            task_id = await self.new_task(self.bare_tasks)
+            await self.open_approval(task_id)
+            await self.end(task_id, TaskState.CANCELLED, self.bare_tasks)
+            ended.append(task_id)
+        # The last in id order: at least two residue tasks come before it.
+        target = max(ended)
+        residue = TaskEndResidue(self._database())
+        pending = await residue.task_ids(100)
+        self.assertIn(target, pending)
+        revoke = self.approvals.revoke_task
+
+        async def fails_but_for_the_target(task_id):
+            if task_id != target:
+                raise RuntimeError("store down")
+            return await revoke(task_id)
+
+        swept = []
+        with (
+            patch.object(self.approvals, "revoke_task", fails_but_for_the_target),
+            self.assertLogs("paw_backend.orchestrator.task_end", "WARNING"),
+        ):
+            # A sweep of two resumes after the last one: every residue task is
+            # reached, however many before it fail each time.
+            for _ in range(len(pending) // 2 + 1):
+                swept.extend(report.task_id for report in await self.cleanup.sweep(2))
+        self.assertIn(target, swept)
+        self.assertNotIn(target, await residue.task_ids(100))
+
     # -- the maintenance loop's cycle, on the real jobs ------------------------------
 
     async def test_a_cycle_sweeps_marks_stale_and_expires(self):
