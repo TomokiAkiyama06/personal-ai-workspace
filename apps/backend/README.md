@@ -1963,7 +1963,7 @@ Health Check の結果は、確認した Credential（Handle）がまだ現在�
 - 始める前の拒否は、使用量の行を書かず、Adapter も Resolver も呼びません: `TaskNotUsableError`（Task が無い・他人の・終了・古い Run・Lease を失った Worker・Lease を読めない。`reason` で区別）、`ConnectionUnavailableError`（未設定・無効・未確認・期限切れ・Adapter 無し。理由は 1 つに揃えます）、`QuotaExceededError`（指標・期間・暦の期間の再開時刻 `resets_at`）、`TaskBudgetError`。
   Database が期限内に答えないときは `ConnectionBusyError`（何も変わっていません。書き込みは COMMIT の前に放棄され、Server も同じ限度で諦めます）。
 
-### Queue の Lease（Issue #153、Decision 0057 Proposed）
+### Queue の Lease（Issue #153、Decision 0057）
 
 `execute` は、Tool Broker（[Decision 0046](../../docs/decisions/0046-tool-call-lease-fencing.md)）と同じ規則で、**全ての呼び出しで** `context.lease`（Worker の Claim。`QueueLease`）がいま有効かを `ConnectionService(lease=LeaseVerifier)` に尋ねます。本番は Tool Broker と同じ `orchestrator.QueueLeaseVerifier(queue)`（`TaskQueue.holds_lease`: Lock しない 1 つの読み取りで、Lease を延長しない）です。渡さなければ `FailClosedLeaseVerifier` で、全ての呼び出しを拒否します。
 

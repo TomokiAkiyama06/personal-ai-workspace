@@ -1,6 +1,6 @@
 """The queue lease of the worker that asks for a shared connection call.
 
-Issue #153, Decision 0057 (Proposed): ``ConnectionService.execute`` asks the
+Issue #153, Decision 0057: ``ConnectionService.execute`` asks the
 service's ``LeaseVerifier`` whether ``context.lease`` is still valid, as the Tool
 Broker does for a tool call (Decision 0046). A worker whose lease was lost,
 expired or taken over is refused before the call starts (``lease_lost``), and so

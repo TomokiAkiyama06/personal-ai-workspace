@@ -1,10 +1,10 @@
 # Shared Connection の呼び出しを Queue の Lease で Fencing し、Node の計上は Lease で Fencing しない（Decision 0046 の 6 の追補）
 
-- Status: Proposed
+- Status: Approved
 - Date: 2026-09-29
 - Scope: Issue [#153](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/153)（[Decision 0046](0046-tool-call-lease-fencing.md) の「判断が必要な点」6 で別の Issue に回したもの）。Shared Connection（PAW-030、`paw_backend/connections/`）の `ConnectionService.execute`、Orchestrator（PAW-034）の `NodeBudgetHandle.charge`、GPU 時間の遅い計上（PAW-036、`TrackerLateGpuCharge`）
 - Supersedes: なし。[Decision 0046](0046-tool-call-lease-fencing.md)（Approved）の 6 への**追補**（Amends）で、0046 は書き換えない。[Decision 0016](0016-shared-connection-adapter-policy.md)（`execute` の手順）、[Decision 0021](0021-dag-orchestrator-policy.md)（7 節の予算、8 節の Fencing）、[Decision 0037](0037-gpu-compute-scheduler.md) の 10（GPU 時間の計上）と [Decision 0050](0050-late-gpu-charge-without-fence.md)（Fence なしの遅い計上）は変えない
-- Approval: 未承認
+- Approval: 2026-09-29、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで「推奨どおり」と回答して承認（1〜8 の全点。末尾の「承認時の決定」）
 
 ## 背景
 
@@ -71,7 +71,7 @@ Decision 0046 は、Tool Broker を通る全ての Tool 呼び出しを Queue �
 - Lease の喪失を知った後に報告された Node の Token・GPU 時間は記録されない（3・4 の最後の段落。今の動作）。数え落としは、その時点で実行中だった仕事の分までで、GPU 時間の遅い計上に回るかどうかは、計上の時点で Attempt が閉じているか（`ABANDONED`）どうかの順序で決まる。
 - `ConnectionService` を Queue の Lease を持たない呼び出し元（例えば PAW-022 以降の対話の Session が Task を介さずに呼ぶ経路）から使うと、全て拒否される。そのような経路を作るときは、別の Decision で Lease の代わりの Fencing を決める。
 
-## 判断が必要な点
+## 判断が必要な点（2026-09-29 に推奨どおり承認）
 
 1. **`ConnectionService.execute` で Lease を確かめるか**: 確かめる（1 節）。`ConnectionService(lease=LeaseVerifier)` を足し、既定は Fail closed（`FailClosedLeaseVerifier`）、本番は `QueueLeaseVerifier(queue)`。推奨: 確かめる。代わりに「今は経路がないので確かめない」とする場合は、経路を作るときに決め直す必要がある。
 2. **検査の位置**: Task の Budget の後、Admission の前（Lease を失った Worker は使用量の行を残さず、Quota を使わない）。推奨: この位置。Admission の Transaction の中で読む案は、Broker と別の実装になるため採らない。
@@ -92,3 +92,7 @@ Decision 0046 は、Tool Broker を通る全ての Tool 呼び出しを Queue �
 - `paw_backend/connections/service.py`（`ConnectionService(lease=)`、`_check_lease`、手順の 4a）、`domain.py`（`RefusalReason.LEASE_LOST` / `LEASE_UNAVAILABLE`）、`errors.py`（`TaskNotUsableError` の説明）。Migration も権限の変更もない（Application の Role は `queue_entries` の `SELECT` を既に持つ。Decision 0046）。
 - `paw_backend/orchestrator/gateway.py`（`NodeBudgetHandle.charge`）と `paw_backend/compute/runtimes.py`（`TrackerLateGpuCharge`）は Docstring だけ。
 - Test: `tests/test_connections_lease.py`（Lease を失った Worker の拒否と Audit、何も始まらないこと、全ての呼び出しで尋ねること、Quota より先に拒否すること、`UNKNOWN`・例外・期限・答えでない値・Verifier なしの `lease_unavailable`、検査の順序、実行中に Lease を失った呼び出しの精算と Budget への加算、本番の `QueueLeaseVerifier` と実際の Queue での引き継ぎ・同じ Worker ID の再 Claim・期限切れ・別の Task の Lease）。既存の Connection の Test は Lease を持つ Verifier を既定にした（`tests/connections_support.py`）。
+
+## 承認時の決定（2026-09-29）
+
+Human は、作業 Session で判断が必要な点について推奨つきの説明を受け、「推奨どおり」と回答して承認した（1〜8 の全点）。**すべて推奨どおり**で、個別の変更はない。
