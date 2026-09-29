@@ -1,0 +1,56 @@
+# Memory Markdown Projection of the Personal AI Workspace (PAW-045,
+# Decision 0038 Proposed). Started every 5 minutes by paw-memory-projection.timer.
+#
+# It writes the Markdown view of every memory in PostgreSQL (the source of
+# truth) into PAW_MEMORY_PROJECTION_DIR: users/<id>/, projects/<id>/,
+# project-groups/<id>/, repos/<id>/ and shared/, directories 0700 and files
+# 0600, owned by the User below. That directory holds every user's private
+# memory: nobody else on the server may be able to read it.
+#
+# User: the OS user the backend runs as (here paw). The job uses the backend's
+# own database credential (PAW_DATABASE_URL, the application role: SELECT on the
+# memory tables, INSERT on audit_events) and nothing more, so a separate user
+# would protect nothing. Never a person's own account.
+#
+# Install (as root), adjusting the paths and the User to your deployment:
+#   install -d -o paw -g paw -m 0700 /srv/personal-ai/memory
+#   cp paw-memory-projection.service paw-memory-projection.timer \
+#      paw-memory-projection-failure.service /etc/systemd/system/
+#   systemctl daemon-reload
+#   systemctl enable --now paw-memory-projection.timer
+#
+# /etc/paw/memory-projection.env sets PAW_DATABASE_URL and
+# PAW_MEMORY_PROJECTION_DIR=/srv/personal-ai/memory, owned by root, mode 0640,
+# group paw (never world-readable). Never put the URL on the ExecStart line or in
+# Environment=. The directory must be outside every git work tree and every home
+# directory: the command refuses such a directory (exit 3, audited).
+
+[Unit]
+Description=Personal AI Workspace Memory Markdown Projection
+Wants=network-online.target
+After=network-online.target postgresql.service
+# A non-zero exit (a refused directory, a failed read or write, an unrecordable
+# outcome, an unreachable database, a concurrent run) starts the failure unit.
+OnFailure=paw-memory-projection-failure.service
+
+[Service]
+Type=oneshot
+User=paw
+EnvironmentFile=/etc/paw/memory-projection.env
+WorkingDirectory=/opt/paw/apps/backend
+ExecStart=/opt/paw/venv/bin/python -m paw_backend.cli memory-projection-run
+UMask=0077
+# systemd sends SIGTERM when this is exceeded: the command waits for the file it
+# is writing, records memory.projection.failed and exits 3 (OnFailure= fires);
+# TimeoutStopSec leaves it time to do so before SIGKILL.
+TimeoutStartSec=10min
+KillSignal=SIGTERM
+TimeoutStopSec=60s
+NoNewPrivileges=true
+PrivateTmp=true
+# Defence in depth for "never write into a repository checkout": homes (where
+# every checkout lives) are not visible, and the only writable path is the
+# projection directory.
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/srv/personal-ai/memory

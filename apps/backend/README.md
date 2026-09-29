@@ -11,6 +11,7 @@ Claim と Source の対応・回答や Task からの追跡（[PAW-052](#evidenc
 Project の作成・招待制の Membership・Lifecycle（Active / Archived / Pending deletion / Deleted）は [PAW-026](#project-crud--membership--lifecycle) で実装済みです（Service のみ。HTTP の Endpoint と Session はまだありません）。
 DAG Agent Orchestrator（Task を Dependency DAG へ分解し、独立した Node を並列に実行し、Node ごとに Retry / Escalate し、Sub-Agent が親の権限と予算を超えない。[PAW-034](#dag-agent-orchestrator)、Agent の Runtime は Protocol で実際の Runtime は別の Issue、HTTP の Endpoint はまだありません）と、削除待ちの Project の Task を周期的に止める Loop も実装済みです。
 
+Memory の Markdown Projection（PostgreSQL を正本として、公開範囲ごとの Directory へ diff-friendly な Markdown を書き、失敗を Audit と終了コードで通知する。[PAW-045](#memory-markdown-projection)、方式は Decision 0038（Approved、2026-09-28））も実装済みです。
 GPU / Compute Resource Scheduler（KV Cache に応じた動的な並列数、Actual / Reserved の VRAM と Safety Headroom、5 つの Resource class、Memory Worker の Unload と Embedding / Reranker の CPU fallback、Exclusive、Local / Cloud の振り分け）は [PAW-036](#gpu--compute-resource-scheduler) で実装済みです（Library と読み取り専用の確認 Command のみ。Application の Lifespan にはまだ組み込んでいません。選択は [Decision 0037](../../docs/decisions/0037-gpu-compute-scheduler.md)（Approved））。
 
 Workspace 共有の Codex / Claude Connection（Credential は不透明な Handle だけ）、User 別 Quota、User と Task への利用量の帰属は [PAW-030](#shared-codex--claude-connection) で実装済みです（Service のみ。実 Adapter と HTTP の Endpoint はまだありません。Quota の意味・期間・実行中の Task の扱いは [Decision 0016](../../docs/decisions/0016-shared-connection-adapter-policy.md)（Approved、2026-09-26）に従います）。
@@ -66,7 +67,7 @@ apps/backend/
 │  │  ├─ passkeys/         # Passkey（WebAuthn）: Ceremony の検証、Challenge、登録・認証・失効、Passkey の Step-up の Verifier、Tool Broker の強い承認の Step-up（PAW-023）
 │  │  └─ onboarding/       # 招待、QR / リンクの端末の Pairing、User の Lifecycle（削除・復元）、1 回限りの Token（PAW-024）
 │  ├─ identity/            # 最小の users、One-time Token。`redeemer.py` は Web 側、`operator.py`（Owner の作成・Token の発行）は cli だけが使う（PAW-021）
-│  ├─ cli/                 # server-local の管理コマンド `python -m paw_backend.cli`（PAW-021。`audit-retention-*` は Issue #117、`compute-status` は PAW-036）
+│  ├─ cli/                 # server-local の管理コマンド `python -m paw_backend.cli`（PAW-021。`audit-retention-*` は Issue #117、`memory-projection-*` は PAW-045、`compute-status` は PAW-036）
 │  ├─ compute/             # GPU / Compute Resource Scheduler: 読み取り専用の GPU Probe、VRAM の勘定、KV Cache の Admission、縮退と常駐、Exclusive、Hybrid の Runtime（PAW-036）
 │  ├─ orchestrator/        # DAG Agent Orchestrator: Plan、Scheduler、DAG の永続化と Fencing、Runtime の Protocol、Tool・Budget の Gateway、Project 削除の Sweep（PAW-034）
 │  ├─ tasks/               # Agent Task の状態遷移と永続化（PAW-032）。`project_gate.py` は Project の状態 Gate の Protocol（Issue #83）
@@ -75,7 +76,8 @@ apps/backend/
 │  │  ├─ journal/          # Immediate Journal と Background Consolidation: Journal、Queue、Consolidator、Worker の契約（PAW-041）
 │  │  ├─ shared/           # Shared Memory の管理: Service、Candidate、Rule 関数、Policy の優先（PAW-046）
 │  │  ├─ retrieval/        # Hybrid Retrieval: 権限の解決、SQL Prefilter、Keyword + Vector、Rerank、重複・矛盾（PAW-043）
-│  │  └─ versioning/       # Memory の Relation・手動編集の Version（Optimistic Lock）・Revalidate、鮮度の Job（Stale Candidate、期限、Session 終了）（PAW-042）
+│  │  ├─ versioning/       # Memory の Relation・手動編集の Version（Optimistic Lock）・Revalidate、鮮度の Job（Stale Candidate、期限、Session 終了）（PAW-042）
+│  │  └─ projection/       # Memory Markdown Projection: 決定的な Renderer、Snapshot の読み取り、安全な Writer（0700 / 0600、Link を辿らない）、実行と Audit（PAW-045）
 │  ├─ projects/            # Project、Membership（招待制）、Lifecycle（PAW-026）、管理者向けの全 Project 一覧（Issue #84）。`task_gate.py` は Task Lane に渡す Project の状態 Gate（Issue #83）、`task_stop.py` は Delete 開始時の Task 停止
 │  ├─ connections/         # Shared Codex / Claude Connection: Adapter の Interface、Secret（Handle）、User 別 Quota、利用量の帰属（PAW-030）
 │  ├─ repositories/        # Repository の登録、Remote、User ごとの Checkout、Path の安全性、git の安全な実行（PAW-027）
@@ -87,7 +89,7 @@ apps/backend/
 │  └─ api/
 │     ├─ deps.py           # FastAPI Dependency
 │     └─ v1/               # /api/v1 の Router（health、events、auth、passkeys、accounts）
-├─ deploy/systemd/         # Audit の保存期間・退避の定期実行の Unit File の例（Issue #117）
+├─ deploy/systemd/         # Audit の保存期間・退避（Issue #117）と Memory Markdown Projection（PAW-045）の定期実行の Unit File の例
 ├─ deploy/ssh-git-wrapper/ # SshGitRunner の Forced Command の Wrapper と配備の手順（Issue #134）
 └─ tests/                  # unittest
 ```
@@ -161,6 +163,7 @@ Database には pgvector が必要です（CI は `pgvector/pgvector:pg18` を�
 | `PAW_PASSKEY_RP_ID` / `PAW_PASSKEY_ORIGINS` | なし | WebAuthn の Relying Party ID（Domain）と、Browser が Ceremony を実行してよい Origin の完全一致（Comma 区切り、最大 8）。**両方か、どちらもなしか**。なしのとき Passkey の機能は切れ、要求は強制されない。[Passkey / Step-up](#passkey--step-up) |
 | `PAW_PASSKEY_RP_NAME` / `PAW_PASSKEY_CHALLENGE_TTL_SECONDS` | `Personal AI Workspace` / `300` | Authenticator に見せる名前と、Challenge に答えられる秒（30〜900） |
 | `PAW_SCRATCH_PURGE_INTERVAL_SECONDS` | `3600` | 期限切れの Research Scratch Item を消す Janitor の間隔（秒）。`0` で Janitor を止める（期限切れの行が DB に残り続ける）。それ以外は 60〜86400。DB が未設定のときも起動しない。[Janitor](#janitor期限切れの削除) |
+| `PAW_MEMORY_PROJECTION_DIR` | なし | Memory Markdown Projection の出力先（絶対 Path。例 `/srv/personal-ai/memory`）。未設定なら `memory-projection-run` は動かない。git の Work Tree の中・Home の中や上・Projection の Marker のない空でない Directory は拒否する。[Memory Markdown Projection](#memory-markdown-projection)（Decision 0038、Approved） |
 | `PAW_REPOSITORY_WORKSPACE_SUBDIR` | `workspaces` | Backend が作る Checkout の置き場所（`<home>/<この名前>/<project>/<repo>`）。1 つの安全な名前（[Repository 登録](#repository-registration--per-user-checkout)） |
 | `PAW_REPOSITORY_EXISTING_ROOTS` | `{home}` | 既存 Repository を登録してよい Root（Comma 区切り、8 つまで）。各 Root は絶対 Path で `{home}`（先頭だけ）か `{user}` を含む（全員で共有する Directory は拒否） |
 | `PAW_REPOSITORY_CLONE_HOSTS` | `github.com` | Clone してよい Host（Comma 区切り、8 つまで。小文字の DNS 名。IP Address は不可） |
@@ -3526,7 +3529,7 @@ Rerank（Reranker Protocol）→ 構造化 Score（confirmed・鮮度・importan
 
 ### 鮮度の Job（`FreshnessMaintenance`）
 
-Backend 内部の Job です（認可はなく、変更は `system` を Actor として記録されます）。1 回の呼び出しで最大 `batch`（既定 500）件を、ロックした CTE（`FOR UPDATE SKIP LOCKED`）で選んで変え、変えた件数を返します。0 になるまで繰り返します。同じ Version に 2 回印を付けません。
+Backend 内部の Job です（認可はなく、変更は `system` を Actor として記録されます）。Application は `mark_revalidation_due` と `expire_due` を周期で、`end_task` を Task の終了で呼びます（Issue #125、Decision 0047。「DAG Agent Orchestrator」の「本番の組み立て」）。1 回の呼び出しで最大 `batch`（既定 500）件を、ロックした CTE（`FOR UPDATE SKIP LOCKED`）で選んで変え、変えた件数を返します。0 になるまで繰り返します。同じ Version に 2 回印を付けません。
 
 | Method | 対象 | 何をするか |
 | --- | --- | --- |
@@ -3550,6 +3553,64 @@ Service と Job は、Revision `0026` / `0040` / `0071` が与えた権限（`me
 `apps/backend/tests/test_memory_versioning_*.py`、`test_memory_freshness*.py`、`versioning_support.py` です。`test_memory_versioning_rules.py` は DB を使いません。
 それ以外は実 PostgreSQL（`PAW_TEST_DATABASE_URL`）を使い、未設定なら Skip します。時刻は注入した Clock です。
 `test_memory_versioning_grants.py` は Service と Job の Test を非 Superuser の Application の Role で実行し、その Role が Version の本文や `verified_at` を書き換えられず、履歴を消せず、Index を落とせないことを確かめます。
+
+## Memory Markdown Projection
+
+[PAW-045](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/39)（`paw_backend/memory/projection/`、`paw_backend/cli/memory_projection.py`、`deploy/systemd/paw-memory-projection*`）で実装しました。**Migration はありません。**
+要件は [REQUIREMENTS.md](../../REQUIREMENTS.md) の「Storage / Markdown Projection」「Memory Markdown Backup / Backup Authority」「Storage placement: HDD Model Store / Memory Markdown」と [Memory Architecture](../../docs/MEMORY_ARCHITECTURE.md) の 1・2・4〜7・19 節です。
+要件が決めていない選択（出力先と拒否する場所、配置、投影する Version、形式、Secret、権限、実行と失敗の通知）は [Decision 0038](../../docs/decisions/0038-memory-markdown-projection.md)（**Approved、2026-09-28**）の推奨どおりに実装し、人間が推奨どおりに承認しました。Timer の有効化は、運用者が出力先と環境 File を用意してから行います（Decision 0038 の「承認後の扱い」）。
+
+PostgreSQL が正本で、Markdown は人が読むための常時生成ビューです（Backup・Recovery の Fallback。Git への commit / push は PAW-047）。Chat の経路からは呼びません。
+
+```text
+$PAW_MEMORY_PROJECTION_DIR/                 # 0700。Backend の OS User だけが読める
+├── .paw-memory-projection                 # Marker: この Directory は Projection のもの
+├── users/<user-id>/<memory-id>.md, INDEX.md
+├── projects/<project-id>/...
+├── project-groups/<project-group-id>/...
+├── repos/<repo-id>/...
+└── shared/...                              # File はすべて 0600
+```
+
+### 何を、どう書くか
+
+- 各 Memory の**現在の Version**（`version_number` が最大）を、その公開範囲の Directory に 1 File（`<memory-id>.md`）で書きます。Status は問わず Front Matter と `INDEX.md` に示し、`session_only` は書きません。過去の Version・Relation・Provenance は書きません（PAW-047）。
+- 1 回の実行は `REPEATABLE READ, READ ONLY` の 1 つの Snapshot から作ります。公開範囲を狭めた Memory（`project → user`）は、`projects/` から消えて `users/<編集者>/` に現れます。
+- **diff-friendly**: Front Matter の Key の順は固定で値は JSON、改行は LF、時刻は UTC、実行の時刻は書きません。変わらない File は書き直さない（更新時刻も変えない）ので、Git の差分は変わった Memory だけです。Directory と File の名前は ID だけで、Memory の文字列は Path を選べません。
+- **Secret**: Title・本文・Branch 名・Memory の種類（`memory_type`。`[a-z][a-z0-9_]{0,63}` の自由記述で、小文字の Token も通るため）の、認識できる Credential（`tools.credentials.redact_text`）を `[REDACTED]` にしてから書き、件数を Front Matter と Audit に残します。PostgreSQL の本文は変えません。
+
+### 書き先の安全（`writer.py`）
+
+- 出力先は絶対・正規の Path で、**git の Work Tree の中ではなく**（git が Repository とみなす `.git` がその Directory にも上にもない）、**Home の中でも上でもない**（`/home` と `uid >= PAW_REPOSITORY_MIN_LINUX_UID` の Account の Home）こと。既存なら自分の所有で、空か Marker を持つこと。満たさなければ何も書かずに失敗します（`check_target:<理由>`）。拒否した Directory の権限も変えません（`0700` にするのは受け入れた後）。
+- 書く前の確認（`sync` の最初）で、Root と Projection が開くすべての Directory（上の Directory・`<uuid>` の Directory）に git が Repository とみなす `.git` があれば、何も書かず消さずに失敗します（`write_files:inside_git_work_tree`）。受け入れた後に中へ作られた Checkout へも書きません。
+- Directory は `0700`、File は `0600`（`fchmod`、umask によらない）。Directory は親の `dir_fd` から `O_NOFOLLOW` で開き、Symbolic Link があれば失敗します（`unsafe_entry`）。File は一時名に書いて `fsync` し `rename` するので、Link・Hard Link の先へは書きません。
+- Projection が作れる名前（`<uuid>.md`、`INDEX.md`、上の Directory、`<uuid>` の Directory、自分の一時 File）以外は読まず消さず、`unmanaged` として数えるだけです。
+- Marker の `flock`（非 Blocking）を読み取りの前から結果を Audit に記録し終えるまで持つので、同時の 2 つ目の実行は何もせず、Lock を取った PAW-047 は目の前の File に対応する結果を必ず読めます。SIGTERM が記録の最中に来ても、記録を終えてから取り消しになります（すべての Step が成功した後の SIGTERM は、Flag を残して 2 行目の `write_files:CancelledError` を記録します）。
+
+### 実行と失敗の通知
+
+```bash
+# /etc/paw/memory-projection.env に PAW_DATABASE_URL と PAW_MEMORY_PROJECTION_DIR を置く
+python -m paw_backend.cli memory-projection-run                 # 1 回の投影
+python -m paw_backend.cli memory-projection-check --max-age-minutes 30   # 監視（読み取りだけ）
+```
+
+- 接続は `PAW_DATABASE_URL`（Application の Role）。`memory_versions` の SELECT と `audit_events` の INSERT / SELECT（Revision `0040` / `0025` / `0086` の権限）だけを使います。
+- 実行ごとに `audit_events` へ 1 行（別の Transaction）: `memory.projection.completed`（`reason = memories=N written=N removed=N redacted=N`、長すぎて検査できない本文を切ったときは続けて ` truncated=N`）か `memory.projection.failed`（`reason = <step>:<code>`。Path・例外の Message・Memory の文字列は書かない）。`resource_kind = memory_projection_run`。
+- 終了コードは `0` 成功、`1` 拒否（同時実行など）、`2` 環境（設定・DB）、`3` 投影の失敗。`run` で DB に届かない（読み取りも失敗の記録も失敗した）ときも `2` です。0 以外で `paw-memory-projection-failure.service`（`OnFailure=`）が `crit` の Journal と `wall` を出します。読み取りの失敗は既存の File を消しません。書き込みの途中の失敗では、File ごとには原子的ですが、Directory によって新旧の Snapshot が混ざることがあり、次に成功した実行が直します。書く前に Tree 全体を確かめるので、`unsafe_entry` の実行は何も変えません。書く前に Root へ `.paw-memory-projection-incomplete` を置き、`completed` を記録できた後にだけ消すので、途中で失敗した実行や結果を記録できなかった実行の後は Flag が残ります。Flag を消せなかった実行は失敗です（2 行目の `write_files:<code>`、終了コード 3）（PAW-047 は Marker の Lock を取り、Flag がなく最後の実行が成功したときだけ写す。Decision 0038 の 9）。
+- `deploy/systemd/paw-memory-projection.timer` は 5 分ごと（`OnCalendar=*:0/5`、`Persistent=true`）。Service は Backend と同じ OS User で、`ProtectHome=true`・`ProtectSystem=strict`・`ReadWritePaths=/srv/personal-ai/memory`・`UMask=0077` です。`projection_status` は最後の実行と最後の成功を返します（Backup / Recovery の画面の「Last successful projection generation」に使える）。「最後」は Database の時計の `recorded_at` の順で、Host の時計が戻っても、新しい失敗が古い成功の陰に隠れません。
+
+### 制限と未確認の点
+
+- Memory の保存ごとの即時の再生成（Event 駆動）と、画面からの手動実行はまだありません（最大 5 分の遅れ。Memory UI / PAW-047）。
+- 投影は毎回全 Memory を読みます。件数が大きくなれば差分の読み取りが要ります。
+- User ごとの Linux の Owner（`chown`）には分けません。Directory は Server の運用者・Backup・Recovery のためのもので、User は Memory UI（後続）で読みます。
+- Secret の検出は最善の努力です（検出できない形は File に入り得る）。
+
+### Test
+
+`apps/backend/tests/test_memory_projection_*.py` と `projection_support.py` です。`test_memory_projection_render.py`・`_writer.py`・`_runner.py` は DB を使わず、`tempfile` の Directory にだけ書きます。
+`test_memory_projection_postgres.py`・`_cli.py`・`_grants.py` は実 PostgreSQL（`PAW_TEST_DATABASE_URL`）を使い、未設定なら Skip します。`_grants.py` は非 Superuser の Application の Role で同じ Test を実行し、その Role が Memory の本文や Audit の行を書き換えられないことを確かめます。
 
 ## DAG Agent Orchestrator
 
@@ -3705,7 +3766,7 @@ Decision 0008 の 8 が Orchestrator に課した「削除待ちの Project に�
 
 - **1 周期**: 未処理の要求（`pending_project_ids`）の Project を先に、次に**削除待ちの全 Project**（要求が処理済みでも。処理の後で作られた Task と Entry を止めるため）を id の順に、前の周期の続きから（Cursor）最大 50 件（`projects_per_cycle`）。1 Project に 1 周期で最大 5 回（`rounds_per_project`）呼び、`done` にならなければ次の周期が続けます。
 - **周期**: 最初の周期は起動の 5 秒後、以降は周期ごと（未完了があれば 5 秒後）。周期全体が失敗したら 10 秒から倍で、周期を上限に待ちます。1 つの Project の失敗は他を止めません（Log は Exception の型名だけ）。
-- 削除待ちの一覧は、状態を Statement に書き込んだ（`literal_execute`）部分 Index `ix_projects_pending_deletion` の Query です（Plan の Test つき）。停止は `TaskService(listeners=[revoke_on_task_end])` で行うので、止めた Task の承認も取り消されます。
+- 削除待ちの一覧は、状態を Statement に書き込んだ（`literal_execute`）部分 Index `ix_projects_pending_deletion` の Query です（Plan の Test つき）。停止は Application の `TaskService`（下の「本番の組み立て」。Listener は Task 終了の後処理）で行うので、止めた Task の承認も取り消され、Task から来た `session_only` の Memory も退役します（`tasks=` を渡さずに作った Loop は、従来どおり `revoke_on_task_end` だけの `TaskService` を自分で作ります）。
 
 ### 組み立て
 
@@ -3740,11 +3801,33 @@ await orchestrator.enqueue_task(task_id, preset=BudgetPreset.STANDARD)
 await orchestrator.serve("worker-1", stop_event)  # または run_once("worker-1")
 ```
 
-**Project state Gate（Issue #83、Decision 0020）は明示的に渡します。** `TaskService` と `TaskQueue` は `project_gate` を必須の keyword にし、`None` を拒否するため、省略に頼る組み立ては起動時に `TypeError`（Queue は `InvalidQueueingArgumentError`）になります。Orchestrator がこの 2 つを作る Production の場所は、Application の Lifespan が起動する `build_project_stop_loop(database, project_gate=...)` だけです。Lifespan は `ProjectStateGate()`（`paw_backend.projects`）を渡し、Loop が自分の `TaskService` と `TaskQueue` を Gate つきで作ります（`project_gate` は既定値のない引数）。Gate を持たない Test（Project を作らない Test）は `tests/gate_support.py` の `ALWAYS_ACTIVE`（何でも Active とする名前つきの Gate）を毎回明示して渡します（`Harness` の `project_gate=` の既定値もそれです）。Production の Code はその名前を持ちません（#83 の Test が確かめます）。`test_orchestrator_wiring.py` が Gate の受け渡しと拒否を、`test_orchestrator_project_sweep_app.py` が Lifespan が実際の `ProjectStateGate` を渡すことを確かめます。
+**Project state Gate（Issue #83、Decision 0020）は明示的に渡します。** `TaskService` と `TaskQueue` は `project_gate` を必須の keyword にし、`None` を拒否するため、省略に頼る組み立ては起動時に `TypeError`（Queue は `InvalidQueueingArgumentError`）になります。この 2 つを作る Production の場所は、`create_app` が呼ぶ `build_task_execution`（Gate の既定は `ProjectStateGate()`。下の「本番の組み立て」）と、Application の Lifespan が起動する `build_project_stop_loop(database, project_gate=...)` です。Lifespan は `ProjectStateGate()`（`paw_backend.projects`）と Application の `TaskService` を渡し、Loop は自分の `TaskQueue` を Gate つきで作ります（`project_gate` は既定値のない引数）。Gate を持たない Test（Project を作らない Test）は `tests/gate_support.py` の `ALWAYS_ACTIVE`（何でも Active とする名前つきの Gate）を毎回明示して渡します（`Harness` の `project_gate=` の既定値もそれです）。Production の Code はその名前を持ちません（#83 の Test が確かめます）。`test_orchestrator_wiring.py` が Gate の受け渡しと拒否を、`test_orchestrator_project_sweep_app.py` が Lifespan が実際の `ProjectStateGate` を渡すことを確かめます。
 
 **Project が Active でないときの Orchestrator（Decision 0020）**: `TaskQueue.claim_next` は Active でない Project の Entry を Claim せず（Entry は `queued` のまま、Unarchive の後に Claim されます）、Start は Gate を通ります。Claim の後に Project が Archive / 削除の開始になり、Gate が Start を拒否した（`ProjectNotActiveError`、または Lock を時間内に取れない `ProjectBusyError`）ときは、Entry を Queue へ**戻し**（`release`。順番と世代は保たれます）、Task は `queued` のままで、Runtime の Timer・Node・Budget・DAG の `epoch` のどれにも触れません（`RunOutcome.SKIPPED`。Project が Active になれば次の Claim が実行します）。すでに**走っている** Task は止めません（`begin_evaluation`・`fail`・`wait` は Gate を通りません）。走っている Task の Worker が死んで Project が Archived のままなら、その Entry は Lease が切れても Claim されず、Unarchive の後に次の Worker が引き継ぎます（Start しないので Gate は通りません）。`enqueue_task` は Active でない Project の Task を `ProjectNotActiveError` で拒否します（`test_orchestrator_project_gate.py`）。
 
 これは Decision 0006 の「後続の課題」（`TaskService` への `revoke_on_task_end` の配線と `PostgresTaskActivity` の注入は PAW-034）の実装の形です。Application の Process が Agent の Runtime へ DB 接続を渡さないこと（Decision 0006 の前提）は、この組み立てを行う側の責務です。
+
+### 本番の組み立て（Composition Root、Issue #125）
+
+**[Decision 0047（Proposed、承認待ち）](../../docs/decisions/0047-task-execution-composition-and-task-end-effects.md)** の推奨どおりに実装しました。承認されない点は実装を変えます。
+
+`create_app` は DB が設定されているとき `build_task_execution`（`orchestrator/composition.py`）で次を 1 回だけ組み立て、`app.state.task_execution`（`TaskExecution`）に置きます。DB がなければ `None` です。
+
+| 部品 | 組み立て |
+| --- | --- |
+| `TaskService` | `ProjectStateGate()`、Listener は `TaskEndCleanup.on_task_event` の 1 つ（承認の取り消しを含む） |
+| `StoredTaskAuthority`（`orchestrator/authority.py`） | 本番の `TaskAuthority`。呼び出しごとに Working Set を `TaskService.restore` で読み直し、`RepositoryService.working_set_acl` / `scope_entries` で各 Repository を解決する（下） |
+| Tool Broker と `ToolRunner` | Application の Authorizer、`TrackerBudgetProvider`、`PostgresTaskActivity`、`RepositoryService`（`registrations`）、`TaskService`（`use_gate`）。Registry は Working Set の Tool だけ（`WorkingSetExecutor`）。組み立ては `build_tool_broker` の 1 か所 |
+| `Orchestrator` | `create_app(agent_runtimes=..., orchestrator_config=...)` を渡したときだけ（Backend に本番の `AgentRuntime` はまだない）。Worker（`serve`）は起動しない |
+| 定期の Loop | `build_freshness_loop`（下）。Lifespan が起動・停止する |
+
+**本番の `TaskAuthority` の Scope**: 保存された Working Set の役割（`with_working_set_roles`）、Scope に入った Checkout の Root（`target` が先）、それらの Remote の Host、Task と各 Repository の Project の現在の状態（Deleted は除く）。登録がない・委任した User の `ready` の Checkout がない Repository は Scope から外し、Root が変わった Checkout は呼び出しを失敗させます（Fail closed）。`scope_entries` が返す他の Checkout（Worktree を囲む・中にある）は、Scope に入っていなければ `excluded_repositories` です。`credential_handles` は空です（Credential を Task に結び付ける仕組みがまだないため）。親の Grant は Node の Role の上限の和（`project.read`、`project.task.run`、`project.repo.write`）で、Task の Run から導いた Agent の id、Scope の Project です。
+
+**Task の終了（`orchestrator/task_end.py`）**: 終了状態（`completed` / `failed` / `cancelled`）への遷移の Commit の直後に、Listener が承認を取り消し（`ApprovalService.revoke_task`）、Task から来た `session_only` の Memory を退役させます（`FreshnessMaintenance.end_task` を、Batch に満たなくなるまで最大 20 回・最長 10 秒。承認の取り消しは自分の Deadline を持つ）。片方が失敗しても、もう片方は行います（失敗は型名だけを Log）。終了状態**から**の遷移（Retry / Restart）では承認だけを取り消します。後処理は遷移の Transaction の外なので、途中で失敗したもの・Process が落ちて走らなかったもの・`SKIP LOCKED` で飛ばされたものが残ります。**再実行できる後処理**（`TaskEndResidue` と `TaskEndCleanup.sweep`）は、保存された状態から「開いた承認」か「`active` の `session_only` の Version の `task` Source」を持つ終了状態の Task を探し（1 回に最大 100）、同じ後処理を行います。印は記録せず、残っているもの自体が記録です。どちらも冪等です。
+
+**定期実行（`orchestrator/freshness_loop.py`）**: `FreshnessJobLoop` が 1 周期に、Task 終了の Sweep、`mark_revalidation_due`、`expire_due` の順に走らせます（各 Job は Batch いっぱいを変えた間だけ繰り返し、最大 20 回。1 つの段の失敗は他を止めない）。間隔は `PAW_FRESHNESS_JOB_INTERVAL_SECONDS`（既定 3,600、0 で停止、60〜86,400）で、最初の周期は起動の 60 秒後（間隔がそれより短ければ間隔）。`end_session`（Session の終了の記録がまだない）と、Event に応じて呼ぶ `mark_triggered`・`mark_repo_head` は含みません。
+
+Test: `test_orchestrator_authority.py`（本番の `TaskAuthority`。最後の Test は Orchestrator と実際の Broker を通す）、`test_orchestrator_task_end.py`（終了の後処理と Sweep、実際の Job の周期）、`test_orchestrator_freshness_loop.py`（Loop・設定・Lifespan）、`test_orchestrator_composition.py`（組み立て）。
 
 ### 制限と未確認の点
 

@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "task_id": "paw-seed-v1-spec-01-result-summary",
+  "kind": "spec",
+  "repository": {
+    "locator": "paw-dataset://paw-seed-v1/paw-seed-v1-spec-01-result-summary",
+    "starting_commit": "eb236c73ca9c9a3b3e5b3465d0594aaef5c7b9a4"
+  },
+  "issue_text": "# Evaluator Resultから候補ごとのResolved@1 / Resolved@Nを集計する\n\n`docs/BENCHMARK_EVALUATOR.md`の比較指標（Resolved@1、Resolved@N、Hidden test pass rate）を、\nEvaluator Result v1（`benchmarks/schemas/result-v1.schema.json`）の文書の列から算出するmoduleを追加してください。\n\n## 仕様\n\n新しいmodule `benchmarks/result_summary.py`:\n\n- `is_resolved(result: dict) -> bool`: `test_outcomes.fail_to_pass`と`test_outcomes.pass_to_pass`がともに`\"passed\"`で、かつ`check_results`のすべての`status`が`\"passed\"`のときだけ`True`（`not_run`も未解決）。\n- `summarize(results: Sequence[dict], n: int) -> dict`:\n  - 候補はResultの`candidate`の`\"<model>/<runtime>/<quantization>\"`で区別する。\n  - 同じ候補・同じ`task_id`のResultは、列に現れた順の試行とみなす。\n  - 戻り値は`{\"n\": n, \"candidates\": {<候補key>: {\"tasks\": <Task数>, \"resolved_at_1\": ..., \"resolved_at_n\": ..., \"hidden_pass_rate\": ...}}}`。候補keyはsort順。\n  - `resolved_at_1`: 最初の試行が解決したTaskの割合。`resolved_at_n`: 最初のn回の試行のいずれかが解決したTaskの割合。\n  - `hidden_pass_rate`: その候補の全Resultの`type`が`\"acceptance\"`のcheck resultのうち`\"passed\"`の割合。acceptanceのcheckが1つもなければ`None`。\n  - `n`が`bool`や整数でなければ`TypeError`、1未満なら`ValueError`。\n  - Result schemaに適合しない文書があれば`ValueError`（messageに列の位置（index）を含め、文書の値は含めない）。\n  - 入力を変更しない。空の列は`{\"n\": n, \"candidates\": {}}`。\n- CLI `python -m benchmarks.result_summary [--n N] FILE...`（`--n`の既定は1）: 集計をJSON（`indent=2`、`sort_keys=True`）でstdoutへ出して終了code 0。読めない・strictなJSONでない（`benchmarks.json_input.decode_json`）・schema不適合のfileがあれば、stderrへ`<path>: invalid result`を出し、stdoutには何も出さず終了code 1。`--n`が1未満ならargparseのusage error（終了code 2）。\n\n## 作業の条件\n\n- 作業はこのRepositoryのstarting commitから始めます。既存のTestを削除・無効化したり、期待値を不当に緩めたりしてはいけません。\n- 評価はExecutable Evaluatorが行います。公開されたcheck（visible checks）に加えて、候補から見えないHidden checkがあります。\n- Credential・秘密情報をcode・log・commitへ入れないでください（SECURITY.md）。\n",
+  "visible_checks": [
+    {
+      "id": "lint",
+      "type": "lint",
+      "command": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "benchmarks"
+      ]
+    }
+  ],
+  "hidden_checks": [
+    {
+      "id": "hidden-acceptance",
+      "type": "acceptance",
+      "reference_id": "seed-v1-2e236ed26d7a"
+    },
+    {
+      "id": "hidden-regression",
+      "type": "regression",
+      "reference_id": "seed-v1-98a66c673b42"
+    }
+  ]
+}

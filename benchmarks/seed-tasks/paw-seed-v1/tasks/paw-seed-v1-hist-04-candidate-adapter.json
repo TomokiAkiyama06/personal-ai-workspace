@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "task_id": "paw-seed-v1-hist-04-candidate-adapter",
+  "kind": "historical",
+  "repository": {
+    "locator": "paw-dataset://paw-seed-v1/paw-seed-v1-hist-04-candidate-adapter",
+    "starting_commit": "5485905173aac3c0fe2a9a069915d87e0301d622"
+  },
+  "issue_text": "# candidate-adapter（元: PR #60）\n\n## Issue\n\n### PAW-015: Coding Agent Candidate Adapter Interfaceを実装する\n\n## Goal\n\n原文にGoal本文の記載なし。\n\n## Acceptance Criteria\n\n- [ ] model/runtime差を共通interfaceで隠蔽\n- [ ] Local model / Codex / Claudeを将来同じTask Runnerから呼べる\n- [ ] prompt/tool schema/context limitを明示設定可能\n- [ ] retry/timeout/cancelをBackendから制御可能\n\n## Dependencies\n\n- PAW-010 (#7)\n\n## Environment\n\n- GPU: not specified（原文未記載）\n- Server: not specified（原文未記載）\n- Human decision: not specified（原文未記載）\n\n## 変更の説明（元のPRの説明から、検証結果と運用上の記述を除いたもの）\n\n### 概要\n\nPAW-015のProvider非依存Candidate Adapter Interfaceを追加します。Refs #12。IssueはCloseしません。\n\n### 変更\n\n- Local / Codex / Claude候補が同じ`CandidateAdapter`契約を実装できるようにする。\n- prompt、tool JSON Schema、context limitをrequestで明示する。\n- Backend所有のretry policy、attempt timeout、cancellation tokenを定義する。\n- credential、provider client、生Provider errorを公開契約から除外する。\n\n実Provider接続・credential読取り・runtime実行・worktree/test runnerは後続Issueの対象です。\n\n## Hidden testが前提にするInterface\n\nHidden testは次のmoduleから次の名前をimportします（既存の名前を含みます）。\n\n- `benchmarks.candidate_adapter`: AttemptControl, CancellationReason, CancellationToken, CandidateAdapter, CandidateErrorCode, CandidateIdentity, CandidateRequest, CandidateResult, CandidateStatus, ContextLimits, PromptConfig, RetryPolicy, ToolDefinition, Usage\n\n## 作業の条件\n\n- 作業はこのRepositoryのstarting commitから始めます。既存のTestを削除・無効化したり、期待値を不当に緩めたりしてはいけません。\n- 評価はExecutable Evaluatorが行います。公開されたcheck（visible checks）に加えて、候補から見えないHidden checkがあります。\n- Credential・秘密情報をcode・log・commitへ入れないでください（SECURITY.md）。\n",
+  "visible_checks": [
+    {
+      "id": "lint",
+      "type": "lint",
+      "command": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "benchmarks"
+      ]
+    }
+  ],
+  "hidden_checks": [
+    {
+      "id": "hidden-acceptance",
+      "type": "acceptance",
+      "reference_id": "seed-v1-51c0b76bf7d0"
+    },
+    {
+      "id": "hidden-regression",
+      "type": "regression",
+      "reference_id": "seed-v1-392503bc3f66"
+    }
+  ]
+}
