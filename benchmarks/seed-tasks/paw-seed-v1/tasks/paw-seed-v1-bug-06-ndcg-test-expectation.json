@@ -1,0 +1,55 @@
+{
+  "schema_version": "1.0",
+  "task_id": "paw-seed-v1-bug-06-ndcg-test-expectation",
+  "kind": "injected_bug",
+  "repository": {
+    "locator": "paw-dataset://paw-seed-v1/paw-seed-v1-bug-06-ndcg-test-expectation",
+    "starting_commit": "80b50b1d1bc694df70578af25dd7299591d55622"
+  },
+  "issue_text": "# test_retrieval_metricsのnDCGのTestが失敗する（Testの期待値の誤り）\n\n`benchmarks/tests/test_retrieval_metrics.py`の`NdcgAtKTest.test_relevant_items_at_ranks_one_and_three`が失敗します。\n実装（`benchmarks/retrieval_metrics.py`）はREADMEの定義（binary relevance、`1 / log2(rank + 1)`の割引）どおりで正しく、Testの期待値の計算が誤っています。\n**実装は変更せず**、Testを正しい期待値に直してください。Testを削除したり、実装の誤りを検出できないほど緩めたりしてはいけません。変更してよいのは`benchmarks/tests/test_retrieval_metrics.py`だけです。\n\n## 作業の条件\n\n- 作業はこのRepositoryのstarting commitから始めます。既存のTestを削除・無効化したり、期待値を不当に緩めたりしてはいけません。\n- 評価はExecutable Evaluatorが行います。公開されたcheck（visible checks）に加えて、候補から見えないHidden checkがあります。\n- Credential・秘密情報をcode・log・commitへ入れないでください（SECURITY.md）。\n",
+  "visible_checks": [
+    {
+      "id": "lint",
+      "type": "lint",
+      "command": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "benchmarks"
+      ]
+    },
+    {
+      "id": "retrieval-metrics-tests",
+      "type": "unit",
+      "command": [
+        "python",
+        "-m",
+        "unittest",
+        "benchmarks.tests.test_retrieval_metrics"
+      ]
+    }
+  ],
+  "hidden_checks": [
+    {
+      "id": "hidden-acceptance",
+      "type": "acceptance",
+      "reference_id": "seed-v1-e7dc11ba3189"
+    },
+    {
+      "id": "hidden-detects-bug",
+      "type": "acceptance",
+      "reference_id": "seed-v1-489513b5266b"
+    },
+    {
+      "id": "hidden-forbidden-changes",
+      "type": "forbidden_changes",
+      "reference_id": "seed-v1-bf07a7dbdef2"
+    },
+    {
+      "id": "hidden-regression",
+      "type": "regression",
+      "reference_id": "seed-v1-6f0b5b57c55d"
+    }
+  ]
+}

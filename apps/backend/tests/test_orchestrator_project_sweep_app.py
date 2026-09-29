@@ -93,12 +93,17 @@ class LifespanTestCase(unittest.IsolatedAsyncioTestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def assert_composed_with_the_project_state_gate(self, loop, interval) -> None:
+    def assert_composed_with_the_project_state_gate(self, loop, interval, app) -> None:
         """The lifespan hands the loop the real gate, explicitly (Issue #83,
-        Decision 0020: the task lane requires one), and the interval."""
-        self.assertEqual(set(loop.options), {"project_gate", "interval_seconds"})
+        Decision 0020: the task lane requires one), the interval and the
+        application's own task service (issue #125: a task the loop cancels ends
+        through the listener that undoes what it held)."""
+        self.assertEqual(
+            set(loop.options), {"project_gate", "interval_seconds", "tasks"}
+        )
         self.assertIsInstance(loop.options["project_gate"], ProjectStateGate)
         self.assertEqual(loop.options["interval_seconds"], interval)
+        self.assertIs(loop.options["tasks"], app.state.task_execution.tasks)
 
     async def run_lifespan(self, app) -> None:
         async with app.router.lifespan_context(app):
@@ -114,7 +119,7 @@ class StartTest(LifespanTestCase):
             (loop,) = RecordingLoop.instances
             self.assertTrue(await wait_until(loop.started.is_set))
             self.assertIs(loop.database, database)
-            self.assert_composed_with_the_project_state_gate(loop, 60)
+            self.assert_composed_with_the_project_state_gate(loop, 60, app)
             self.assertFalse(loop.cancelled)
 
         self.assertTrue(loop.stopped)  # asked to stop ...
@@ -128,7 +133,7 @@ class StartTest(LifespanTestCase):
         await self.run_lifespan(app)
 
         (loop,) = RecordingLoop.instances
-        self.assert_composed_with_the_project_state_gate(loop, 90)
+        self.assert_composed_with_the_project_state_gate(loop, 90, app)
 
     async def test_it_is_stopped_before_the_database_is_disposed(self):
         settings, database = configured()
