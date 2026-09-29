@@ -1865,11 +1865,13 @@ class TaskService:
     async def _queue_lease_alive(session: AsyncSession, task_id: uuid.UUID) -> bool:
         """Whether a worker holds a valid lease on the task's active queue entry.
 
-        The claimed entry is locked first (``FOR SHARE``: a heartbeat, a release
-        or a completion of the queue waits for it, and so does this for them), and
-        the lease is judged afterwards, in the next statement, on the database
-        clock (``clock_timestamp()``), as ``tasks.queueing.task_queue`` judges it:
-        a wait for the lock must not make an expired lease look valid, nor a
+        The active entry, ``queued`` or ``claimed``, is locked first (``FOR
+        SHARE``: a claim, a heartbeat, a release or a completion of the queue
+        waits for it or skips it, and this waits for them): a ``queued`` entry
+        cannot be claimed between this finding and the caller's commit. The
+        lease is judged afterwards, in the next statement, on the database clock
+        (``clock_timestamp()``), as ``tasks.queueing.task_queue`` judges it: a
+        wait for the lock must not make an expired lease look valid, nor a
         process clock a valid one look expired."""
         entry_ids = list(
             (
@@ -1877,7 +1879,9 @@ class TaskService:
                     select(QueueEntryRow.id)
                     .where(
                         QueueEntryRow.task_id == task_id,
-                        QueueEntryRow.status == QueueStatus.CLAIMED,
+                        QueueEntryRow.status.in_(
+                            (QueueStatus.QUEUED, QueueStatus.CLAIMED)
+                        ),
                     )
                     .with_for_update(read=True)
                 )
