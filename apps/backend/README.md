@@ -1856,6 +1856,7 @@ service = ConnectionService(
     adapters,
     secrets,
     budget=budget_tracker,  # 任意。Task の Token Budget（PAW-033）
+    lease=QueueLeaseVerifier(queue),  # Queue の Lease（#153）
     period_timezone="Asia/Tokyo",  # 暦の期間の時間帯。省略すると Asia/Tokyo
 )
 # Owner / Admin。Credential は Handle だけを渡す
@@ -1957,12 +1958,21 @@ Health Check の結果は、確認した Credential（Handle）がまだ現在�
 4. 時計を Database の `clock_timestamp()` で 1 回読む（Lock の後）。この時刻が、期間の始まりの計算と、追加する行の `started_at` の両方です。
 5. 判定（新規の Task の場合）と、`in_flight` の使用量の行の INSERT。
 
-`execute` の全体: 引数の検査、`agent.use`（`Resource.owned_by(context.delegator_id)`: Principal が委任元の User でなければ拒否）、Adapter が登録されていること、Task の Budget（`budget` を渡した場合）、Admission、Credential の Handle を `Secret` へ解決して Adapter を実行（`request.timeout_seconds` の 1 つの期限が、解決と実行の両方にかかります）、
+`execute` の全体: 引数の検査、`agent.use`（`Resource.owned_by(context.delegator_id)`: Principal が委任元の User でなければ拒否）、Adapter が登録されていること、Task の Budget（`budget` を渡した場合）、Worker の Queue の Lease（下の「Queue の Lease」）、Admission、Credential の Handle を `Secret` へ解決して Adapter を実行（`request.timeout_seconds` の 1 つの期限が、解決と実行の両方にかかります）、
 **精算**（`finally` の中で、専用の Task として実行し、`execute` がその Task を保持して終わるまで待つ: Outcome・Token・Database の時計の経過時間を使用量の行へ書き、Token を Task の Budget へ加算。精算が終わる前に届いた Cancel（遅い間の Cancel、繰り返しの Cancel を含む）は、精算が終わってから伝えます。`asyncio.timeout` の中の `execute` は `TimeoutError` になります。`ToolRunner` の記録と同じ方式）、Credential を取り除いた結果の返却。
 
 - 失敗は `ConnectionCallError(failure)`（`FailureCode`: `rate_limited` / `unavailable` / `expired` / `timeout` / `invalid_response` / `internal_error`）。記録され、数えられます。呼び出し側の Cancel は `cancelled` として記録し、Cancel を伝えます。
-- 始める前の拒否は、使用量の行を書かず、Adapter も Resolver も呼びません: `TaskNotUsableError`（Task が無い・他人の・終了・古い Run）、`ConnectionUnavailableError`（未設定・無効・未確認・期限切れ・Adapter 無し。理由は 1 つに揃えます）、`QuotaExceededError`（指標・期間・暦の期間の再開時刻 `resets_at`）、`TaskBudgetError`。
+- 始める前の拒否は、使用量の行を書かず、Adapter も Resolver も呼びません: `TaskNotUsableError`（Task が無い・他人の・終了・古い Run・Lease を失った Worker・Lease を読めない。`reason` で区別）、`ConnectionUnavailableError`（未設定・無効・未確認・期限切れ・Adapter 無し。理由は 1 つに揃えます）、`QuotaExceededError`（指標・期間・暦の期間の再開時刻 `resets_at`）、`TaskBudgetError`。
   Database が期限内に答えないときは `ConnectionBusyError`（何も変わっていません。書き込みは COMMIT の前に放棄され、Server も同じ限度で諦めます）。
+
+### Queue の Lease（Issue #153、Decision 0057）
+
+`execute` は、Tool Broker（[Decision 0046](../../docs/decisions/0046-tool-call-lease-fencing.md)）と同じ規則で、**全ての呼び出しで** `context.lease`（Worker の Claim。`QueueLease`）がいま有効かを `ConnectionService(lease=LeaseVerifier)` に尋ねます。本番は Tool Broker と同じ `orchestrator.QueueLeaseVerifier(queue)`（`TaskQueue.holds_lease`: Lock しない 1 つの読み取りで、Lease を延長しない）です。渡さなければ `FailClosedLeaseVerifier` で、全ての呼び出しを拒否します。
+
+- 位置は Task の Budget の後、Admission の前です。単独で拒否できる検査（引数、`agent.use`、Adapter、Budget）は Lease を尋ねずに拒否し、Lease を失った Worker の呼び出しは使用量の行を書かず、Quota も使いません。
+- `LOST` は `TaskNotUsableError(RefusalReason.LEASE_LOST)`、`UNKNOWN`・例外・期限（`database_timeout_seconds`）・`LeaseStatus` でない答えは `TaskNotUsableError(RefusalReason.LEASE_UNAVAILABLE)`。どちらも `connection.use` の拒否として Audit に残ります（例外の文言は Log に出さず、型名だけ）。
+- 確認は判定の時点の読み取りです。確認を通って実行中の呼び出しは、その間に Lease が切れても止めず、精算（使用量の行、Quota、Task の Budget への Token の加算）は Lease を尋ねずに必ず行います（Provider は Token を消費済みのため）。
+- 呼び出し元の反応（`lease_lost` で Run を `LEASE_LOST` として止める。`NodeToolGateway` と同じ）は、Orchestrator の Node からこの Service を呼ぶ経路を作るときに、その経路の側で行います（今は経路がありません）。
 
 ### Task の Budget との関係（PAW-033）
 

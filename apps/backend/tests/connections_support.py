@@ -45,6 +45,7 @@ from .connections_fakes import (
     T0,
     FakeAdapter,
     FakeClock,
+    FakeLeaseVerifier,
     FakeResolver,
     handle,
 )
@@ -58,6 +59,7 @@ __all__ = [
     "T0",
     "FakeAdapter",
     "FakeClock",
+    "FakeLeaseVerifier",
     "FakeResolver",
     "FailingSink",
     "PostgresConnectionTestCase",
@@ -122,10 +124,13 @@ class PostgresConnectionTestCase(unittest.IsolatedAsyncioTestCase):
 
         ``authorizer_sink`` and ``audit_sink`` replace the sink of the Authorizer
         (the capability decisions) and of the module's own events (default: the
-        same in-memory sink, ``self.sink``).
+        same in-memory sink, ``self.sink``). The queue lease check (issue #153)
+        answers ``HELD`` unless the test passes ``lease=``: the tests of the lease
+        itself are in ``test_connections_lease``.
         """
         database = Database(make_settings(database_url=TEST_DATABASE_URL))
         self.addAsyncCleanup(database.dispose)
+        options.setdefault("lease", FakeLeaseVerifier())
         return ConnectionService(
             database,
             Authorizer(authorizer_sink or self.sink),
@@ -162,8 +167,8 @@ class PostgresConnectionTestCase(unittest.IsolatedAsyncioTestCase):
             ),
             primary_project_id=project_id,
             run=run,
-            # A worker's lease (issue #126): the connection service does not
-            # read it, but every TaskContext carries one.
+            # A worker's lease (issue #126): the connection service asks the
+            # service's lease verifier about it (issue #153, Decision 0057).
             lease=QueueLease(1, "w1", 1),
         )
 
