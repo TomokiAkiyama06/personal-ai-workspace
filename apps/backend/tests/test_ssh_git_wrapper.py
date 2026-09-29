@@ -83,6 +83,12 @@ def run_planned(invocation):
     )
 
 
+def hardened(invocation):
+    """git and the wrapper's own ``-c`` of ``invocation`` (what every check
+    before the call runs with too): everything up to ``credential.helper=``."""
+    return invocation.argv[: invocation.argv.index("credential.helper=") + 1]
+
+
 class WrapperTestCase(unittest.TestCase):
     """A home with ``workspaces/`` (a checkout, a worktree of it) and, next to
     it, ``outside/`` standing in for everything the wrapper must not reach
@@ -984,9 +990,11 @@ class RepositoryConfigurationTest(WrapperTestCase):
         for name, invocation in probed.items():
             with self.subTest(name=name):
                 self.assertEqual(
-                    invocation.probe[-4:], ["config", "--no-includes", "--list", "-z"]
+                    invocation.probe[-5:],
+                    ["config", "--no-includes", "--show-scope", "--list", "-z"],
                 )
-                self.assertEqual(invocation.probe[0], invocation.argv[0])
+                prefix = hardened(invocation)
+                self.assertEqual(invocation.probe[: len(prefix)], prefix)
         pinned = probed["status"].probe
         self.assertIn(f"--git-dir={self.git_dir}", pinned)
         self.assertIn(f"--work-tree={self.worktree}", pinned)
@@ -1050,20 +1058,32 @@ class RepositoryConfigurationTest(WrapperTestCase):
         ):
             with self.subTest(key=key):
                 self.assertTrue(wrapper.unsafe_setting(key))
-                listed = f"core.bare\nfalse\0{key}\ntouch /tmp/x\0".encode()
+                listed = f"local\0core.bare\nfalse\0local\0{key}\ntouch /tmp/x\0"
+                listed = listed.encode()
                 self.assert_rejected("config_unsafe", self.check, listed)
 
     def test_ordinary_configuration_is_accepted(self):
-        listed = (
-            b"core.repositoryformatversion\n0\0core.bare\nfalse\0"
-            b"core.hookspath\n.husky\0core.fsmonitor\ntrue\0"
-            b"remote.origin.url\nhttps://github.com/o/r.git\0"
-            b"credential.helper\n!/usr/bin/gh auth git-credential\0"
-            b"branch.main.merge\nrefs/heads/main\0submodule.lib.path\nlib\0"
-            b"merge.conflictstyle\nzdiff3\0diff.algorithm\nhistogram\0"
-            b"extensions.worktreeconfig\0"
+        entries = (
+            b"core.repositoryformatversion\n0",
+            b"core.bare\nfalse",
+            b"core.hookspath\n.husky",
+            b"core.fsmonitor\ntrue",
+            b"remote.origin.url\nhttps://github.com/o/r.git",
+            b"credential.helper\n!/usr/bin/gh auth git-credential",
+            b"branch.main.merge\nrefs/heads/main",
+            b"submodule.lib.path\nlib",
+            b"merge.conflictstyle\nzdiff3",
+            b"diff.algorithm\nhistogram",
+            b"extensions.worktreeconfig",
         )
-        self.check(listed)
+        self.check(b"".join(b"local\0" + entry + b"\0" for entry in entries))
+        # The wrapper's own -c (a deployment's --config= too) is not the
+        # repository's: its scope is "command".
+        self.check(b"command\0core.sshcommand\nssh -F /etc/paw/ssh\0")
+        self.assert_rejected(
+            "config_unsafe", self.check, b"worktree\0core.sshcommand\nx\0"
+        )
+        self.assert_rejected("config_unreadable", self.check, b"local\0")
 
     def test_a_configuration_that_cannot_be_listed_refuses_the_call(self):
         self.assert_rejected("config_unreadable", self.check, returncode=128)
@@ -1094,9 +1114,16 @@ class RepositoryLocationTest(WrapperTestCase):
         self.assertEqual(kwargs["env"], invocation.env)
 
     def test_which_calls_are_located(self):
+        located = self.plan(["rev-parse", "--show-toplevel"])
         self.assertEqual(
-            self.plan(["rev-parse", "--show-toplevel"]).locate[1:],
-            ["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"],
+            located.locate,
+            [
+                *hardened(located),
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-dir",
+                "--git-common-dir",
+            ],
         )
         self.assertIsNotNone(
             self.plan(
@@ -1211,7 +1238,7 @@ class StatusWithSubmodulesTest(WrapperTestCase):
         self.assertEqual(
             invocation.gitlinks,
             [
-                invocation.argv[0],
+                *hardened(invocation),
                 f"--git-dir={self.git_dir}",
                 f"--work-tree={self.worktree}",
                 "ls-files",
@@ -1977,6 +2004,20 @@ class EndToEndTest(unittest.IsolatedAsyncioTestCase):
         fs.write(worktree, ".env", "SECRET=1\n")
         result = await self.run_git(status, cwd=worktree)
         self.assertEqual((result.returncode, result.stdout), (0, "!! .env\0"))
+        # A repository's `core.fsmonitor` is a command: neither the call nor
+        # any check before it (they run git too) runs it.
+        marker = f"{self.world.root}/fsmonitor-ran"
+        git("config", "core.fsmonitor", f"touch {marker}; true", cwd=worktree)
+        for args, cwd in (
+            (status, worktree),
+            (["rev-parse", "--show-toplevel"], checkout),
+            (["worktree", "list", "--porcelain", "-z"], checkout),
+        ):
+            with self.subTest(args=args):
+                result = await self.run_git(args, cwd=cwd)
+                self.assertEqual(result.returncode, 0)
+                self.assertFalse(_consume(marker))
+        git("config", "--unset", "core.fsmonitor", cwd=worktree)
         # A populated submodule whose own configuration has a filter: git would
         # run it in a child git. The wrapper refuses the call instead.
         nested = f"{self.world.root}/nested"

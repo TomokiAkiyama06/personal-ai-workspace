@@ -748,6 +748,10 @@ def plan(original: str | None, config: Config) -> Invocation:
         # (the repository's own included): only ``clone`` talks to a remote,
         # with the helper its own ``-c`` names.
         argv.extend(("-c", "credential.helper="))
+    # The checks before the call run git too, with the same hardening (a
+    # repository's ``core.fsmonitor`` is a command, which only the hardening's
+    # ``core.fsmonitor=false`` keeps from running).
+    hardened = list(argv) if subcommand != "clone" else []
     if subcommand == "merge":
         for key, value in MERGE_CONFIG:
             argv.extend(("-c", f"{key}={value}"))
@@ -756,16 +760,16 @@ def plan(original: str | None, config: Config) -> Invocation:
     argv.extend(args)
     probe = None
     if subcommand in CONTENT_SUBCOMMANDS and args[:1] not in (["list"], ["prune"]):
-        probe = configuration_probe(config, pinned)
+        probe = configuration_probe(hardened, pinned)
     gitlinks = None
     if subcommand == "status" and args == STATUS_WITH_SUBMODULES:
         if not pinned:
             raise Rejected("bad_arguments")
-        gitlinks = [config.git, *pinned, "ls-files", "--stage", "-z"]
+        gitlinks = [*hardened, *pinned, "ls-files", "--stage", "-z"]
     locate = None
     if not pinned and subcommand != "clone":
         locate = [
-            config.git,
+            *hardened,
             "rev-parse",
             "--path-format=absolute",
             "--git-dir",
@@ -785,12 +789,22 @@ def plan(original: str | None, config: Config) -> Invocation:
     )
 
 
-def configuration_probe(config: Config, pinned: Sequence[str]) -> list[str]:
+def configuration_probe(hardened: Sequence[str], pinned: Sequence[str]) -> list[str]:
     """The ``git config`` call that lists every setting the call itself would
     read (the repository's, the worktree's ``config.worktree``; the system and
-    global ones are off, :func:`git_environment`), without following an
-    ``include`` (an ``include`` is itself refused). It starts no command."""
-    return [config.git, *pinned, "config", "--no-includes", "--list", "-z"]
+    global ones are off, :func:`git_environment`), each with its scope, without
+    following an ``include`` (an ``include`` is itself refused). It starts no
+    command. ``hardened``: git and the wrapper's own ``-c``, whose (``command``
+    scope) settings are not the repository's and are not checked."""
+    return [
+        *hardened,
+        *pinned,
+        "config",
+        "--no-includes",
+        "--show-scope",
+        "--list",
+        "-z",
+    ]
 
 
 def unsafe_setting(key: str) -> bool:
@@ -944,9 +958,16 @@ def check_configuration(
     listed = _probe(invocation, invocation.probe, run, "config_unreadable")
     if listed.returncode != 0:
         raise Rejected("config_unreadable")
-    for entry in listed.stdout.split(b"\0"):
+    words = listed.stdout.split(b"\0")
+    if words[-1:] == [b""]:
+        words.pop()
+    if len(words) % 2:
+        raise Rejected("config_unreadable")
+    for scope, entry in zip(words[::2], words[1::2], strict=True):
+        if scope == b"command":
+            continue  # the wrapper's own ``-c`` (nothing else sets it here)
         key = entry.partition(b"\n")[0].decode("utf-8", "replace")
-        if key and unsafe_setting(key):
+        if unsafe_setting(key):
             raise Rejected("config_unsafe")
 
 

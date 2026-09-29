@@ -47,6 +47,8 @@ Wrapper は Client（Backend）を信用しない。`$SSH_ORIGINAL_COMMAND` を 
    - 拒否しない設定: `core.hooksPath`・`core.fsmonitor`（Wrapper の `-c` が上書きする）、`credential.helper`（`clone -c` が Repository に残す。これらの副コマンドは Credential を使わない）、その他の通常の設定。
 10. Decision 0051（PR #130）の `status` の形（integration worktree が Commit そのものか ── 無視された File と Submodule の中の変更を含めて ── を確かめる）は、pin したときだけ受け付ける。`--ignore-submodules=none` は Wrapper の `diff.ignoreSubmodules=all` を上書きし、git は中身のある Submodule ごとに子の git をその中で動かす（その Repository の設定 ── Filter Driver は Command ── を Wrapper は検査していない）。そのため `exec` の前に同じ pin で `git ls-files --stage -z`（Index を読むだけ）を実行し、Index の Gitlink（Mode `160000`）のどれかの Path に `.git` があれば `populated_submodule` で拒否する。
 
+8〜10 の確認で動かす git（`rev-parse`・`config --list`・`ls-files`）にも、本体の呼び出しと同じ Wrapper 自身の `-c`（`core.fsmonitor=false`・`core.hooksPath=/dev/null`・`credential.helper=` など）と固定の環境を付ける（Repository の `core.fsmonitor` は Command で、確認そのものが実行してしまわないため）。`config --list` は `--show-scope` で Scope を付けて読み、Wrapper 自身の `-c`（Scope `command`）は検査しない。
+
 | 副コマンド | 受け付ける形（これ以外は拒否） |
 | --- | --- |
 | `rev-parse` | `--is-bare-repository`／`--show-toplevel --absolute-git-dir`／`--show-toplevel`／`--path-format=absolute --git-dir`／`--path-format=absolute --git-common-dir`／`--verify --quiet <rev>^{commit}`（`<rev>` は `HEAD`・`MERGE_HEAD`・`refs/heads/<branch>`・`refs/remotes/origin/<branch>`） |
