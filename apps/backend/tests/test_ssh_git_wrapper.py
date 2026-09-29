@@ -1232,6 +1232,19 @@ class RepositoryLocationTest(WrapperTestCase):
             os.makedirs(f"{sub}/objects/ab")
             os.link(f"{self.outside}/victim", f"{sub}/objects/ab/cd")
         wrapper.check_links([common])
+        for name in ("alternates", "http-alternates"):
+            for info in (
+                f"{common}/objects/info",
+                f"{common}/modules/lib/objects/info",
+            ):
+                with self.subTest(name=name, info=info):
+                    os.makedirs(info, exist_ok=True)
+                    with open(f"{info}/{name}", "w", encoding="utf-8") as f:
+                        f.write(f"{self.outside}/.git/objects\n")
+                    self.assert_rejected(
+                        "git_dir_alternates", wrapper.check_links, [common]
+                    )
+                    os.remove(f"{info}/{name}")
         # A ref named like that is no object.
         os.makedirs(f"{common}/refs/heads/modules/x/objects")
         os.link(f"{self.outside}/victim", f"{common}/refs/heads/modules/x/objects/y")
@@ -2281,6 +2294,39 @@ class EndToEndTest(unittest.IsolatedAsyncioTestCase):
         os.remove(f"{git_dir}/MERGE_MSG")
         result = await self.run_git(merge, cwd=integration)
         self.assertEqual(result.returncode, 0)
+
+    async def test_objects_of_a_repository_outside_the_root_are_never_read(self):
+        # `objects/info/alternates` would let git read (and check out) the
+        # objects of any readable repository outside the root.
+        outside = f"{self.world.root}/outside"
+        self.world.make_repository(outside)
+        fs.write(outside, "secret.txt", "secret\n")
+        git("add", "-A", cwd=outside)
+        git("commit", "--quiet", "-m", "secret", cwd=outside)
+        secret = git("rev-parse", "HEAD", cwd=outside)
+        checkout = f"{self.root}/project"
+        self.world.make_repository(checkout)
+        fs.write(checkout, ".git/objects/info/alternates", f"{outside}/.git/objects\n")
+        worktree = f"{self.root}/.paw-worktrees/t/1/r/build"
+        add = [
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            "paw/t/1/build",
+            "--",
+            worktree,
+            secret,
+        ]
+        result = await self.run_git(add, cwd=checkout)
+        self.assertEqual(result.returncode, wrapper.REJECTED)
+        with self.assertRaises(FileNotFoundError):
+            fs.read(worktree, "secret.txt")
+        os.remove(f"{checkout}/.git/objects/info/alternates")
+        result = await self.run_git(add, cwd=checkout)
+        self.assertNotEqual(result.returncode, 0)  # an object it does not have
+        with self.assertRaises(FileNotFoundError):
+            fs.read(worktree, "secret.txt")
 
     async def test_a_work_tree_named_in_the_configuration_is_never_used(self):
         # `core.worktree` in the shared configuration would move an unpinned

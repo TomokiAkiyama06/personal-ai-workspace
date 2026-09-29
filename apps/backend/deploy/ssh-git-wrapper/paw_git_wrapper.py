@@ -920,12 +920,15 @@ def check_repository(
 #: Directories of a git directory that git reads but never writes, where a
 #: symbolic link is left alone (hooks never run here: ``core.hooksPath``).
 _UNWRITTEN = frozenset({"hooks"})
+#: ``objects/info/`` files that name other object directories.
+_ALTERNATES = frozenset({"alternates", "http-alternates"})
 
 
 def check_links(directories: Sequence[str]) -> None:
     """Refuse the call when any of ``directories`` (a git directory, a common
-    directory) holds a symbolic link, or a file with another hard link
-    (``objects/`` aside), ``hooks/`` aside: git creates files under
+    directory) holds a symbolic link, a file with another hard link
+    (``objects/`` aside) or an ``objects/info/alternates`` (``git_dir_alternates``),
+    ``hooks/`` aside: git creates files under
     ``refs/``, ``logs/``, ``objects/``, ``worktrees/``, ... and would follow a
     linked directory there out of the root, and writes ``MERGE_MSG``,
     ``config``, ... whose other link may be outside it, although the
@@ -955,6 +958,11 @@ def check_links(directories: Sequence[str]) -> None:
             linked_ok = parts[0] == "objects" or (
                 parts[0] == "modules" and "objects" in parts[1:]
             )
+            if parts[-2:] == ["objects", "info"] and _ALTERNATES & set(files):
+                # Another object directory (anywhere: another user's
+                # repository, say) whose objects git would read, and a
+                # ``worktree add`` of one of its commits would check out.
+                raise Rejected("git_dir_alternates")
             for name in (*dirs, *files):
                 try:
                     info = os.lstat(os.path.join(path, name))
