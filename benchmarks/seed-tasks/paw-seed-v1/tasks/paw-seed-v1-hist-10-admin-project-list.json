@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "task_id": "paw-seed-v1-hist-10-admin-project-list",
+  "kind": "historical",
+  "repository": {
+    "locator": "paw-dataset://paw-seed-v1/paw-seed-v1-hist-10-admin-project-list",
+    "starting_commit": "f84b975c8f7e8e90607eba0e6a4e210f37bc7db8"
+  },
+  "issue_text": "# admin-project-list（元: PR #95）\n\n## Issue\n\n### 管理者向けの全Project一覧APIを実装する（admin.projects.manage）\n\n## Goal\n\nOwner / Adminが、全Projectを一覧できる管理者向けのAPI（`admin.projects.manage`）を実装する。\n\n## 背景\n\n[Decision 0008](docs/decisions/0008-project-membership-and-lifecycle-policy.md)（PAW-026、#80）の`list_projects`は、自分のMemberの行があるProjectだけを返します。Owner / Adminは、IDを知っているProjectの管理操作（Archive・削除開始・復元）はできますが、IDを知らないProjectを探せません。削除待ちのProjectを復元するには、Managerなどから IDを聞く必要があります。人間が、管理者向けの一覧APIを別Issueにすることを承認しました（2026-09-25）。\n\n## Acceptance Criteria\n\n- [ ] `admin.projects.manage`を持つOwner / Adminが、全Projectを一覧できる（状態・削除待ちの期限を含む）\n- [ ] 一覧にProjectの中身（Chat・Memory・Task）は含めない（Decision 0004: 管理に必要な操作と、中身の閲覧は別）\n- [ ] AuditがREQUIREDで残る\n- [ ] ページングと、応答サイズの上限がある\n\n## Dependencies\n\n- PAW-025 (#22)、PAW-026 (#23)\n\n## Environment\n\n- GPU: not required\n- Server: not required\n- Human decision: not required\n\n## 変更の説明（元のPRの説明から、検証結果と運用上の記述を除いたもの）\n\n### 概要\n\nIssue #84: OwnerとAdminが、Projectのメンバーでなくても、全Projectを一覧できる`ProjectService.list_all_projects`を追加します（Service methodのみで、HTTP routeは追加しません）。\n\n### 内容\n\n- `ProjectService.list_all_projects(actor, *, status=None, limit=50, cursor=None) -> AdminProjectPage`。\n- 各行は5項目（`id`・`name`・`status`・`created_at`・`deletion_scheduled_at`）だけです。SQLも`projects`のこの5列だけを読みます（説明・作成者・メンバー一覧は返しません）。\n- 並びは`created_at`の新しい順、同時刻は`id`の降順のKeyset pagingです。`limit`は1〜200。CursorはOpaqueな正規のbase64で、filterに結びつき、99文字以下です。\n- Deleted（墓標）は除外します（Decision 0008と整合）。`deletion_scheduled_at`は削除待ち（pending_deletion）の間だけ入ります。\n- Authorizerを先に通し、拒否・Audit障害の場合は`projects`を読みません。呼び出しごとにAudit eventを1件書きます（actor・`admin.projects.manage`・判定・`resource_kind`=`project_list_all|active|archived|pending_deletion`）。Project id・名前・件数・Cursorは保存しません。\n- 既存の`list_projects`（メンバー限定）は変更しません（テストで固定）。\n- Migration・新Table・新Grantはありません（100k行で1ページ約12〜14ms。Indexは追加しません）。\n\n### テスト\n\n- `test_projects_admin_list.py`: 内容・Paging・並行変更（Insert/Purge/状態変更の最中にPagingしても行が重複・欠落しない。OFFSETだと重複する例も）。\n- `test_projects_admin_cursor.py`: 敵対的なCursor（表駆動約40件＋seed固定のFuzz）と、実PostgreSQLでの拒否。\n- `test_projects_admin_access.py`: 権限（User・system・Agent・非Principal）、引数検査の表、DB無しでの拒否。\n- `test_projects_admin_grants.py`: 非SuperuserのApplication Roleと、5列のSELECTだけを持つRoleでの実行。\n- 変異テスト23件（並び順・Keyset比較・Deleted filter・先読み・権限・Capability・resource_kind・Cursor検証・引数順・`description`列の追加）は全て検出されます。\n- `run_ci.py`（`PAW_TEST_DATABASE_URL`あり）: 5,473 tests OK、Repository checks passed。\n\n## Hidden testが前提にするInterface\n\nHidden testは次のmoduleから次の名前をimportします（既存の名前を含みます）。\n\n- `paw_backend.authz`: ALL_PROJECTS, AgentGrant, Authorizer, Capability, InMemoryAuditSink, PostgresAuditSink, Principal, ProjectRole, Reason, Resource, SystemRole\n- `paw_backend.authz.roles`: ProjectRole\n- `paw_backend.db`: Database, DatabaseNotConfiguredError\n- `paw_backend.projects`: AdminProjectPage, AdminProjectSummary, InputProblem, InvalidProjectInputError, MemberStatus, ProjectPermissionDeniedError, ProjectService, ProjectStatus\n- `paw_backend.projects.cursor`: Keyset, MAX_MICROS, MIN_MICROS, decode_cursor, encode_cursor, filter_token\n- `paw_backend.projects.limits`: DELETION_RETENTION, MAX_CURSOR_CHARS\n\n## 作業の条件\n\n- 作業はこのRepositoryのstarting commitから始めます。既存のTestを削除・無効化したり、期待値を不当に緩めたりしてはいけません。\n- 評価はExecutable Evaluatorが行います。公開されたcheck（visible checks）に加えて、候補から見えないHidden checkがあります。\n- Credential・秘密情報をcode・log・commitへ入れないでください（SECURITY.md）。\n",
+  "visible_checks": [
+    {
+      "id": "lint",
+      "type": "lint",
+      "command": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "apps/backend"
+      ]
+    }
+  ],
+  "hidden_checks": [
+    {
+      "id": "hidden-acceptance",
+      "type": "acceptance",
+      "reference_id": "seed-v1-e8feec4e48d6"
+    },
+    {
+      "id": "hidden-regression",
+      "type": "regression",
+      "reference_id": "seed-v1-407cebbad9bc"
+    }
+  ]
+}

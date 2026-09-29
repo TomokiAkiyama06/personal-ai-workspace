@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "task_id": "paw-seed-v1-hist-03-metrics-collector",
+  "kind": "historical",
+  "repository": {
+    "locator": "paw-dataset://paw-seed-v1/paw-seed-v1-hist-03-metrics-collector",
+    "starting_commit": "63d28c5c5ecdfe6c983459f024c13d81d8602fb7"
+  },
+  "issue_text": "# metrics-collector（元: PR #64）\n\n## Issue\n\n### PAW-014: Metrics Collectorを実装する\n\n## Goal\n\n原文にGoal本文の記載なし。\n\n## Acceptance Criteria\n\n- [ ] wall clock / steps / retries / tool callsを収集\n- [ ] GPU利用時にPeak VRAM / utilizationを取得\n- [ ] token/context usageを取得可能なRuntimeでは記録\n- [ ] Candidate間で同一formatへ正規化\n\n## Dependencies\n\n- PAW-011 (#8)\n- PAW-012 (#9)\n\n## Environment\n\n- GPU: required\n- Server: required\n- Human decision: not required\n\n## 変更の説明（元のPRの説明から、検証結果と運用上の記述を除いたもの）\n\n### 概要\n\nPAW-014のMetrics Collectorを追加します。Refs #11。IssueはCloseしません。\n\nこのPRは #61（PAW-012）の上に積んだstacked PRです。BaseはPAW-012のbranchで、#61のMerge後にmainへ切り替えます。\n\n### 変更\n\n- Candidate adapterからstep、retry、tool call、Runtime報告の累積token / context usageを受け取り、Result schemaの`metrics`へ正規化する`MetricsCollector`を追加。Provider接続やCredentialは扱わない。\n- GPU telemetryは`GpuSampler`を注入する設計。`NvidiaSmiGpuSampler`が全GPUの使用VRAM合計とutilizationの最大値を観測し、GPUや`nvidia-smi`がない環境ではGPU metricを省略する（計測不能と0を区別）。\n- Result schemaへ`context_tokens`、`retries`、`tool_calls`、`peak_gpu_utilization_percent`を追加し、valid fixtureとtestを更新。READMEへ利用方法を追記。\n\n## Hidden testが前提にするInterface\n\nHidden testは次のmoduleから次の名前をimportします（既存の名前を含みます）。\n\n- `benchmarks.metrics_collector`: GpuSample, MetricsCollector, NvidiaSmiGpuSampler\n- `benchmarks.validate_result`: load_schema, main, validate_document\n\n## 作業の条件\n\n- 作業はこのRepositoryのstarting commitから始めます。既存のTestを削除・無効化したり、期待値を不当に緩めたりしてはいけません。\n- 評価はExecutable Evaluatorが行います。公開されたcheck（visible checks）に加えて、候補から見えないHidden checkがあります。\n- Credential・秘密情報をcode・log・commitへ入れないでください（SECURITY.md）。\n",
+  "visible_checks": [
+    {
+      "id": "lint",
+      "type": "lint",
+      "command": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "benchmarks"
+      ]
+    }
+  ],
+  "hidden_checks": [
+    {
+      "id": "hidden-acceptance",
+      "type": "acceptance",
+      "reference_id": "seed-v1-a3d097bbaf91"
+    },
+    {
+      "id": "hidden-regression",
+      "type": "regression",
+      "reference_id": "seed-v1-34d15c2b61ff"
+    }
+  ]
+}

@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "task_id": "paw-seed-v1-spec-02-task-semantic-validation",
+  "kind": "spec",
+  "repository": {
+    "locator": "paw-dataset://paw-seed-v1/paw-seed-v1-spec-02-task-semantic-validation",
+    "starting_commit": "eb236c73ca9c9a3b3e5b3465d0594aaef5c7b9a4"
+  },
+  "issue_text": "# Task validatorに項目間の検査を足す\n\nTask schema v1（`benchmarks/schemas/task-v1.schema.json`）は各fieldの形式だけを検査します。\nEvaluator Resultの`check_results[].id`はTaskの`visible_checks`または`hidden_checks`の`id`を指すため、\nidの重複などの項目間の不整合も検出してください。Schemaそのものは変更しません。\n\n## 仕様\n\n`benchmarks/validate_task.py`に`semantic_errors(document: dict) -> list[str]`を追加します（schemaに適合した文書が前提）。\n\n- `visible_checks`、続いて`hidden_checks`の順に見て、既に出た`id`を再び使うcheckごとに`$.<field>[<index>].id: duplicate check id`（`<field>`は`visible_checks`か`hidden_checks`）。\n- `hidden_checks`の`reference_id`が既に出た値なら`$.hidden_checks[<index>].reference_id: duplicate reference id`。\n- `repository.known_good_commit`が`repository.starting_commit`と同じなら`$.repository.known_good_commit: must differ from starting_commit`（`known_good_commit`がなければ検査しない）。\n- messageに入力の値を含めない。`validate_document`の結果は変えない。\n\nCLI（`python -m benchmarks.validate_task`）は、schemaのエラーがない文書にだけ`semantic_errors`を行い、見つかったエラーをschemaのエラーと同じ形式（`<path>:<error>`をstderr）で出して終了code 1にします。schemaのエラーがある文書では項目間の検査を行いません。`benchmarks/README.md`のValidatorの説明も更新してください。\n\n## 作業の条件\n\n- 作業はこのRepositoryのstarting commitから始めます。既存のTestを削除・無効化したり、期待値を不当に緩めたりしてはいけません。\n- 評価はExecutable Evaluatorが行います。公開されたcheck（visible checks）に加えて、候補から見えないHidden checkがあります。\n- Credential・秘密情報をcode・log・commitへ入れないでください（SECURITY.md）。\n",
+  "visible_checks": [
+    {
+      "id": "lint",
+      "type": "lint",
+      "command": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "benchmarks"
+      ]
+    }
+  ],
+  "hidden_checks": [
+    {
+      "id": "hidden-acceptance",
+      "type": "acceptance",
+      "reference_id": "seed-v1-555c755fc5c3"
+    },
+    {
+      "id": "hidden-regression",
+      "type": "regression",
+      "reference_id": "seed-v1-f8155ee9951e"
+    }
+  ]
+}

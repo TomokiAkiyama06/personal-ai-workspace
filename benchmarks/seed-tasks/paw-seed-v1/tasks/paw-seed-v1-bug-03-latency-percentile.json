@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "task_id": "paw-seed-v1-bug-03-latency-percentile",
+  "kind": "injected_bug",
+  "repository": {
+    "locator": "paw-dataset://paw-seed-v1/paw-seed-v1-bug-03-latency-percentile",
+    "starting_commit": "d19874b87a51296c4ec8bcb1b87fe2f6029dcc7d"
+  },
+  "issue_text": "# Benchmark Reportのlatency p50 / p95が1つ上の順位の値になっている\n\nRetrieval benchmarkとMemory Worker benchmarkのReportで、latencyのp50とp95が期待より大きい値になります。\nたとえばlatencyが4件（10, 20, 30, 40 ms）のとき、p50は20 msのはずですが30 msになります。\nREADMEのとおり、percentileはnearest-rank（`ceil(p / 100 * n)`番目の値）です。両方のReportを直してください。\n\n## 作業の条件\n\n- 作業はこのRepositoryのstarting commitから始めます。既存のTestを削除・無効化したり、期待値を不当に緩めたりしてはいけません。\n- 評価はExecutable Evaluatorが行います。公開されたcheck（visible checks）に加えて、候補から見えないHidden checkがあります。\n- Credential・秘密情報をcode・log・commitへ入れないでください（SECURITY.md）。\n",
+  "visible_checks": [
+    {
+      "id": "lint",
+      "type": "lint",
+      "command": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "benchmarks"
+      ]
+    }
+  ],
+  "hidden_checks": [
+    {
+      "id": "hidden-acceptance",
+      "type": "acceptance",
+      "reference_id": "seed-v1-7d0b949ed50b"
+    },
+    {
+      "id": "hidden-regression",
+      "type": "regression",
+      "reference_id": "seed-v1-c2da3f2100f0"
+    }
+  ]
+}
