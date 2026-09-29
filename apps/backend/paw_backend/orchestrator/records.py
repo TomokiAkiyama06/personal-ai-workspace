@@ -15,6 +15,7 @@ from paw_backend.authz import Capability
 from paw_backend.orchestrator.domain import (
     AttemptState,
     DagState,
+    ExecutionPlacement,
     NodeRole,
     NodeState,
 )
@@ -88,3 +89,13 @@ class AttemptRecord:
     failure_signature: str | None
     started_at: datetime
     finished_at: datetime | None
+    # Where the attempt ran (issue #133); ``None`` when nothing was recorded.
+    placement: ExecutionPlacement | None = None
+    placement_agent: str | None = None
+    placement_model: str | None = None
+    placed_at: datetime | None = None
+    # The cloud only: the SHA-256 and size of what was sent, and the send's row
+    # in ``audit_events``.
+    content_fingerprint: str | None = None
+    content_bytes: int | None = None
+    placement_audit_id: uuid.UUID | None = None

@@ -14,6 +14,7 @@ from paw_backend.orchestrator.domain import (
     ROLE_CEILING,
     AttemptState,
     DagState,
+    ExecutionPlacement,
     NextStep,
     NodeRole,
     NodeState,
@@ -50,6 +51,7 @@ from paw_backend.orchestrator.orchestrator import (
     format_error_class,
     format_failure_text,
 )
+from paw_backend.orchestrator.placement import NodePlacementHandle
 from paw_backend.orchestrator.plan import Plan, PlanNode
 from paw_backend.orchestrator.project_sweep import (
     PendingDeletionLister,
@@ -64,6 +66,7 @@ from paw_backend.orchestrator.runtime import (
     NodeAssignment,
     NodeBudget,
     NodeOutcome,
+    NodePlacement,
     NodeTools,
     validate_runtime,
 )
@@ -74,8 +77,22 @@ from paw_backend.orchestrator.scope import (
     scope_within,
 )
 from paw_backend.orchestrator.store import DagStore
+from paw_backend.orchestrator.workspaces import (
+    MAX_CONFLICTED_FILES,
+    IntegrationReport,
+    IntegrationRequest,
+    IntegrationState,
+    NodeWorkspaceRequest,
+    NodeWorkspaces,
+    NodeWorktree,
+    RepositoryIntegration,
+    WorktreeConflictError,
+    WorktreeProblem,
+    WorktreeUnavailableError,
+)
 
 __all__ = [
+    "MAX_CONFLICTED_FILES",
     "ROLE_CEILING",
     "AgentRuntime",
     "AttemptRecord",
@@ -87,6 +104,10 @@ __all__ = [
     "DagState",
     "DagStateError",
     "DagStore",
+    "ExecutionPlacement",
+    "IntegrationReport",
+    "IntegrationRequest",
+    "IntegrationState",
     "InvalidNodeResultError",
     "InvalidOrchestratorArgumentError",
     "InvalidPlanError",
@@ -95,6 +116,8 @@ __all__ = [
     "NodeBudget",
     "NodeBudgetHandle",
     "NodeOutcome",
+    "NodePlacement",
+    "NodePlacementHandle",
     "NodeRecord",
     "NodeResult",
     "NodeRole",
@@ -103,6 +126,9 @@ __all__ = [
     "NodeStopped",
     "NodeToolGateway",
     "NodeTools",
+    "NodeWorkspaceRequest",
+    "NodeWorkspaces",
+    "NodeWorktree",
     "Orchestrator",
     "OrchestratorConfig",
     "OrchestratorError",
@@ -111,6 +137,7 @@ __all__ = [
     "PlanNode",
     "PlanReason",
     "ProjectTaskStopLoop",
+    "RepositoryIntegration",
     "ResultReason",
     "RunGuard",
     "RunOutcome",
@@ -124,6 +151,9 @@ __all__ = [
     "TaskAuthority",
     "ToolCaller",
     "TrackerBudgetProvider",
+    "WorktreeConflictError",
+    "WorktreeProblem",
+    "WorktreeUnavailableError",
     "agent_id_of",
     "build_project_stop_loop",
     "derive_child_scope",
