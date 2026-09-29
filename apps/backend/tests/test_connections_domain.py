@@ -89,6 +89,8 @@ class VocabularyTest(unittest.TestCase):
                 "quota_exceeded",
                 "task_budget_exceeded",
                 "task_budget_not_configured",
+                "lease_lost",
+                "lease_unavailable",
             ],
         )
 
