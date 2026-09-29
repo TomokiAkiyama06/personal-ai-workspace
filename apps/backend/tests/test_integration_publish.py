@@ -58,7 +58,8 @@ class FakeGitHub:
     ``fail`` makes every call exit 1 (``gh``'s answer to an HTTP error);
     ``fail_create`` only the creation; ``raises`` makes ``run`` raise it."""
 
-    def __init__(self) -> None:
+    def __init__(self, bare: str) -> None:
+        self.bare = bare  # the "GitHub" repository: a head is its branch's tip
         self.pulls: list[dict] = []
         self.calls: list[tuple[str, ...]] = []
         self.accounts: list = []
@@ -76,8 +77,12 @@ class FakeGitHub:
         draft=False,
         merged=False,
         base="main",
-        sha="e" * 40,
+        sha=None,
     ):
+        live = sha is None and state == "open"
+        if sha is None:  # the tip of the branch on "GitHub" now
+            sha = git("rev-parse", "--verify", "--quiet", f"refs/heads/{branch}",
+                      cwd=self.bare, check=False) or "e" * 40  # fmt: skip
         return {
             "base": {"ref": base},
             "number": number,
@@ -85,6 +90,8 @@ class FakeGitHub:
             "state": state,
             "draft": draft,
             "merged_at": "2026-09-29T00:00:00Z" if merged else None,
+            # An open pull request follows its branch, as on GitHub.
+            "live": live,
             "head": {
                 "ref": branch,
                 "sha": sha,
@@ -107,6 +114,9 @@ class FakeGitHub:
             owner, _, branch = fields["head"].partition(":")
             assert owner == OWNER and fields["state"] == "all"
             found = [p for p in self.pulls if p["head"]["ref"] == branch]
+            for pull in found:
+                if pull["live"]:
+                    pull["head"]["sha"] = self.pull(0, branch)["head"]["sha"]
             return GhResult(0, json.dumps(found))
         assert method == "POST"
         if self.fail_create:
@@ -164,7 +174,7 @@ class PublisherTest(unittest.IsolatedAsyncioTestCase):
         self.head = self.commit("change.txt", "integrated\n")
         self.sink = RecordingSink()
         self.directory = StaticDirectory(self.principal(ProjectRole.CONTRIBUTOR))
-        self.github = FakeGitHub()
+        self.github = FakeGitHub(self.bare)
         self.runner = RecordingRunner(self.world.runner())
 
     def commit(self, name, content):
@@ -320,8 +330,8 @@ class PublisherTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_an_existing_pull_request_is_recorded_as_it_is(self):
         cases = {
-            PullRequestState.OPEN: {},
-            PullRequestState.DRAFT: {"draft": True},
+            PullRequestState.OPEN: {"sha": self.head},
+            PullRequestState.DRAFT: {"draft": True, "sha": self.head},
             # Merged with the checked commit as its head.
             PullRequestState.MERGED: {
                 "state": "closed",
@@ -369,6 +379,19 @@ class PublisherTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(pull_request.number, 2)
         self.assertEqual(pull_request.state, PullRequestState.OPEN)
         self.assertEqual(self.remote_branch(), newer)
+
+    async def test_an_open_pull_request_of_another_head_is_not_delivered(self):
+        # Codex review of #159: the remote branch moved after the push (another
+        # writer): the pull request proposes a commit that was not checked.
+        for fields in ({}, {"draft": True}):
+            with self.subTest(fields=fields):
+                self.github.pulls = [
+                    self.github.pull(5, self.branch, sha="d" * 40, **fields)
+                ]
+                await self.refused(PublishProblem.BRANCH_MOVED)
+        self.github.pulls = []
+        self.github.answer = self.github.pull(1, self.branch, sha="d" * 40)
+        await self.refused(PublishProblem.BRANCH_MOVED)
 
     async def test_a_pull_request_without_a_head_commit_is_refused(self):
         self.github.answer = self.github.pull(1, self.branch, sha="not a sha")

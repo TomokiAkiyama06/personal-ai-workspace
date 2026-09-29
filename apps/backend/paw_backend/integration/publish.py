@@ -107,6 +107,9 @@ class PublishProblem(StrEnum):
     BASE_UNKNOWN = "base_unknown"  # the checkout's default branch is not known
     PUSH_FAILED = "push_failed"  # git refused or failed the push
     GITHUB_FAILED = "github_failed"  # gh failed (not logged in, an HTTP error, ...)
+    # The pull request's head is not the checked commit (the remote branch
+    # moved after the push): it would propose what was not checked.
+    BRANCH_MOVED = "branch_moved"
     INVALID_RESPONSE = "invalid_response"  # gh answered something not understood
 
 
@@ -206,7 +209,9 @@ def parse_pull_request(
     the repository as GitHub spells them). ``None`` when it is against another
     branch than ``base`` (it does not propose the change to the default branch),
     and when it was merged with another head than ``commit`` (the checked
-    commit is not in it): Codex review of #159."""
+    commit is not in it; a new one proposes it). An open or draft one whose head
+    is not ``commit`` is ``BRANCH_MOVED``: the branch moved after the push and
+    the pull request proposes what was not checked (Codex review of #159)."""
     if not isinstance(item, dict):
         raise PullRequestNotPublishedError(PublishProblem.INVALID_RESPONSE)
     number = item.get("number")
@@ -239,8 +244,11 @@ def parse_pull_request(
     if target_ref != base:
         return None
     state = _state_of(item)
-    if state is PullRequestState.MERGED and head_commit != commit:
-        return None
+    if head_commit != commit:
+        if state is PullRequestState.MERGED:
+            return None
+        if state is not PullRequestState.CLOSED:
+            raise PullRequestNotPublishedError(PublishProblem.BRANCH_MOVED)
     return PullRequestInfo(number, url, state)
 
 

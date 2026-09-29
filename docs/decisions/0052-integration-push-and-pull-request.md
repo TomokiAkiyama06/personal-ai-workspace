@@ -66,6 +66,7 @@
 
 - 作る前に、その branch の PR を GitHub に尋ねる（`state=all`）。**Base が default branch の PR だけ**を対象にし（別の branch に向けた PR は、検査した変更を default branch に提案していない）、あればそれを記録し、新しく作らない。作った PR の Base が default branch でなければ `invalid_response`。複数あれば `open` → `merged` → `draft` → `closed` の順に選ぶ。
 - `merged` の PR は、その Head が**検査した Commit** のときだけ使う。Merge された後に integration branch が進んだ（Human が Conflict を解消して Gate をもう一度動かした等）場合、古い `merged` の PR に今の Commit は入っていないので、新しい PR を作る（PR #159 の Codex review）。
+- `open` / `draft` の PR の Head が検査した Commit でなければ（Push の後に別の書き手が GitHub の `paw/` の branch を進めた）、その PR は検査していない変更を提案しているので記録せず、`branch_moved` で止まる（Task は `evaluating` のまま。8）。PR を作った直後の応答の Head も同じく確かめる（PR #159 の Codex review）。
 - `draft` はそのまま `draft` として記録し（届いていないので Task は `evaluating`）、Ready にはしない。**`closed`（Merge されずに閉じられた）の PR があれば、新しい PR を作らない**（Human が閉じた判断を上書きしない）。`closed` を記録し、Task は `evaluating` のまま（`requirements_not_met`）。Human は Task を Cancel するか、GitHub で PR を開き直してから Gate をもう一度動かす。
 - 作る要求が拒まれたら（同時に作られた場合を含む）、もう一度尋ね、あればそれを使う。
 - 新しい試行（Restart）は branch の名前が変わるので、新しい PR になる。
@@ -73,7 +74,7 @@
 
 ### 8. 作れなかったときの Task
 
-- Push や PR の作成が失敗したら（`not_authorized`、`no_github_remote`、`account_unavailable`、`base_unknown`、`push_failed`、`github_failed`、`invalid_response`）、Task は **`evaluating` のまま**（`GateOutcome.NOT_PUBLISHED`）。検査の結果は記録済みで、Gate をもう一度動かすと、検査をやり直してから Push と PR をやり直す（冪等）。`failed` にはしない。
+- Push や PR の作成が失敗したら（`not_authorized`、`no_github_remote`、`account_unavailable`、`base_unknown`、`push_failed`、`github_failed`、`branch_moved`、`invalid_response`）、Task は **`evaluating` のまま**（`GateOutcome.NOT_PUBLISHED`）。検査の結果は記録済みで、Gate をもう一度動かすと、検査をやり直してから Push と PR をやり直す（冪等）。`failed` にはしない。
 - Multi-Repo では、1 つが失敗しても他の `target` の PR は作って記録する（どれも冪等）。
 - **推奨: この形で承認する。** 代替: `failed` にする（Retry は DAG の結果から統合をやり直すが、原因の多くは認証や権限で、Retry では直らない）、`waiting`（`user`）にする（Human の操作が要る原因と要らない原因（GitHub の一時的な失敗）が混ざる）。
 
