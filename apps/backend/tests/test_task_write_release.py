@@ -288,6 +288,30 @@ class ReleaseTest(ReleaseTestCase):
         await self.release(task_id, reservation)
         self.assertEqual(await self.live_reservations(task_id), 0)
 
+    async def test_a_queued_entry_is_not_claimed_before_the_release_commits(self):
+        """The release locks the waiting entry: a claim cannot slip in between
+        the finding that no worker holds it and the release's commit."""
+        task_id = await self.two_targets()
+        reservation = await self.write_to(task_id, self.other, ended=False)
+        await self.queue.enqueue(task_id)
+        claimed_meanwhile = []
+
+        async def claim_everything(session, step_task, project_id):
+            # Entries that earlier tests left waiting are claimed too.
+            for _ in range(1000):
+                entry = await self.queue.claim_next("worker-2")
+                if entry is None:
+                    return
+                claimed_meanwhile.append(entry.task_id)
+            self.fail("the queue never ran out of claimable entries")
+
+        await self.release(task_id, reservation, in_transaction=claim_everything)
+
+        self.assertNotIn(task_id, claimed_meanwhile)
+        self.assertEqual(await self.live_reservations(task_id), 0)
+        # After the commit the entry is claimed as usual.
+        await self.reclaimed(task_id, "worker-2")
+
     async def test_the_holder_of_another_task_does_not_count(self):
         task_id = await self.two_targets()
         other_task = await self.two_targets()
