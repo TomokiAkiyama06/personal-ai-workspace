@@ -604,6 +604,49 @@ class IntegrationTest(CoordinatorTestCase):
         self.assertEqual(target.head, report.repositories[0].head)
         self.assertNotEqual(target, clean)  # the gate sees the change (CHANGED)
 
+    async def test_a_changed_submodule_is_not_clean_whatever_gitmodules_says(self):
+        # Codex review (P1): ``submodule.<name>.ignore = all`` in the tracked
+        # ``.gitmodules`` (the repository's, not the backend's) hid a change
+        # inside an initialized submodule from ``status``.
+        source = f"{self.ws.world.root}/submodule-source"
+        os.makedirs(source)
+        git("init", "--quiet", "--initial-branch=main", source)
+        commit_file(source, "lib.txt", "v1\n")
+        a = await self.prepare("a")
+        git(
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "--quiet",
+            source,
+            "sub",
+            cwd=a.path,
+        )
+        git("config", "-f", ".gitmodules", "submodule.sub.ignore", "all", cwd=a.path)
+        git("add", "-A", cwd=a.path)
+        git("commit", "--quiet", "-m", "submodule", cwd=a.path)
+        report = await self.coordinator.integrate(self.ws.integration_request("a"))
+        integration = report.repositories[0].path
+        git(
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "update",
+            "--init",
+            "--quiet",
+            cwd=integration,
+        )
+        (before,) = await self.coordinator.targets(self.ws.integration_request("a"))
+        self.assertTrue(before.clean)
+        fs.write(integration, "sub/lib.txt", "changed, not committed\n")
+
+        (target,) = await self.coordinator.targets(self.ws.integration_request("a"))
+        again = await self.coordinator.integrate(self.ws.integration_request("a"))
+
+        self.assertFalse(target.clean)
+        self.assertEqual(again.repositories[0].state, IntegrationState.DIRTY)
+
     async def test_no_target_before_any_integration_branch_exists(self):
         self.assertEqual(
             await self.coordinator.targets(self.ws.integration_request()), ()

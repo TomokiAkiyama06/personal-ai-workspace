@@ -282,7 +282,10 @@ class WorktreeGit:
 
         ``--untracked-files=normal`` lists an untracked or ignored directory as
         one entry (``node_modules/``), so the answer stays within the runner's
-        output limit; only whether there is any entry matters."""
+        output limit; only whether there is any entry matters.
+        ``--ignore-submodules=none``: a change inside a submodule counts too,
+        whatever ``submodule.<name>.ignore`` in the repository's own
+        ``.gitmodules`` or configuration says."""
         output = await self._checked(
             [
                 "status",
@@ -290,6 +293,7 @@ class WorktreeGit:
                 "-z",
                 "--untracked-files=normal",
                 "--ignored=traditional",
+                "--ignore-submodules=none",
             ],
             account,
             path,
