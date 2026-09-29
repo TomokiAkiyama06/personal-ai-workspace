@@ -190,6 +190,32 @@ class RepositoryWriteInFlightError(WorkingSetError):
     message = "A write on the repository may still be running"
 
 
+class RepositoryWriteNotFoundError(WorkingSetError):
+    """A manual release names a reservation the task does not have (issue #129)."""
+
+    code = "repository_write_not_found"
+    message = "The task has no such repository write"
+
+
+class RepositoryWriteNotHeldError(WorkingSetError):
+    """A manual release names a reservation that no longer holds anything: its
+    executor released it, it was released by hand before, or it expired
+    (issue #129). Nothing is written."""
+
+    code = "repository_write_not_held"
+    message = "The repository write is no longer reserved"
+
+
+class RepositoryWriteHolderAliveError(WorkingSetError):
+    """A manual release while a worker still holds a valid lease on the task's
+    queue entry (issue #129, Decision 0049): the process that was
+    admitted the write may be alive, so its reservation is not given up by
+    hand. Asked again once the lease ended."""
+
+    code = "repository_write_holder_alive"
+    message = "A worker of the task is still alive"
+
+
 class NoTargetRepositoryError(WorkingSetError):
     """Start of a task whose Working Set has no ``target`` repository."""
 
