@@ -388,6 +388,8 @@ class Fixture:
     failed: uuid.UUID
     user: Actor
     repository: uuid.UUID  # the target of every task of the fixture
+    # A live write reservation of ``idle`` (issue #129: released by hand).
+    reservation: uuid.UUID
 
 
 Baseline = Callable[[Fixture], dict[str, Any]]
@@ -501,6 +503,17 @@ def release_use_baseline(fx: Fixture) -> dict[str, Any]:
     return dict(task_id=fx.running, reservation_id=uuid.uuid4())
 
 
+def release_stale_baseline(fx: Fixture) -> dict[str, Any]:
+    return dict(
+        task_id=fx.idle,
+        reservation_id=fx.reservation,
+        actor=fx.user,
+        reason="the executor's host was rebooted",
+        expected_version=None,
+        in_transaction=None,
+    )
+
+
 def restore_baseline(fx: Fixture) -> dict[str, Any]:
     return dict(task_id=fx.running, log_limit=10)
 
@@ -522,6 +535,10 @@ BASELINES: dict[str, tuple[str, Baseline]] = {
     "change_working_set": ("change_working_set", change_working_set_baseline),
     "admit_repository_use": ("admit_repository_use", admit_use_baseline),
     "release_repository_use": ("release_repository_use", release_use_baseline),
+    "release_stale_repository_write": (
+        "release_stale_repository_write",
+        release_stale_baseline,
+    ),
     "restore": ("restore", restore_baseline),
     "history": ("history", history_baseline),
 }
@@ -658,6 +675,27 @@ CASES = [
     # -- release_repository_use (issue #85)
     case("release_repository_use", "task_id", not_a_uuid()),
     case("release_repository_use", "reservation_id", not_a_uuid()),
+    # -- release_stale_repository_write (issue #129)
+    case("release_stale_repository_write", "task_id", not_a_uuid()),
+    case("release_stale_repository_write", "reservation_id", not_a_uuid()),
+    # Only a person releases by hand: a system or policy actor is refused too.
+    case(
+        "release_stale_repository_write",
+        "actor",
+        [*not_an_actor(), Actor.system(), Actor.policy()],
+    ),
+    # The reason is required (what the person checked).
+    case("release_stale_repository_write", "reason", not_text(MAX_REASON_LENGTH)),
+    case(
+        "release_stale_repository_write",
+        "expected_version",
+        not_an_integer(1, 2**31 - 1, allow_none=True),
+    ),
+    case(
+        "release_stale_repository_write",
+        "in_transaction",
+        [0, 1, True, False, "step", b"step", CANARY, object(), ["step"], {"a": 1}, ()],
+    ),
     # -- restore
     case("restore", "task_id", not_a_uuid()),
     case("restore", "log_limit", not_an_integer(0, 1000)),
@@ -680,6 +718,7 @@ PUBLIC_METHODS = {
     "change_working_set",
     "admit_repository_use",
     "release_repository_use",
+    "release_stale_repository_write",
     "restore",
     "history",
 }
@@ -699,14 +738,23 @@ class ArgumentValidationTest(PostgresTaskTestCase):
         call = await self.service.begin_tool_invocation(
             running, step_id=step.id, tool_name="git"
         )
+        idle = await self.task_in_state(S.RUNNING)
+        reservation = await self.service.admit_repository_use(
+            idle,
+            FIRST_RUN,
+            [self.repository_id],
+            capability=Capability.PROJECT_REPO_WRITE,
+            executes=False,
+        )
         return Fixture(
             running=running,
             step=step,
             call=call,
-            idle=await self.task_in_state(S.RUNNING),
+            idle=idle,
             failed=await self.task_in_state(S.FAILED),
             user=self.user,
             repository=self.repository_id,
+            reservation=reservation,
         )
 
     async def snapshot(self) -> dict[str, tuple[int, str]]:
