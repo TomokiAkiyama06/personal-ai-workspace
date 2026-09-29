@@ -1309,6 +1309,38 @@ class RepositoryLocationTest(WrapperTestCase):
         if not os.access(f"{common}/refs", os.R_OK):  # not when run as root
             self.assert_rejected("git_dir_link", wrapper.check_links, [common])
 
+    def test_the_metadata_walk_is_bounded(self):
+        # Codex review of #150 (P2): a planted fan-out of loose objects (or
+        # refs) must not keep every call walking before git runs.
+        common = f"{self.checkout}/.git"
+        os.makedirs(f"{common}/objects/ab")
+        for n in range(20):
+            fs.write(f"{common}/objects/ab", f"{n:038x}", "x")
+        wrapper.check_links([common])
+        self.assert_rejected(
+            "git_dir_too_large", wrapper.check_links, [common], limit=10
+        )
+        ticks = iter(range(1000))
+        self.assert_rejected(
+            "git_dir_too_large",
+            wrapper.check_links,
+            [common],
+            timeout=5,
+            clock=lambda: next(ticks),
+        )
+        # The bound is across the directories of one call.
+        other = f"{self.root}/other-git"
+        os.makedirs(other)
+        fs.write(other, "HEAD", "ref: refs/heads/main\n")
+        entries = sum(len(d) + len(f) for _, d, f in os.walk(common)) + 1
+        wrapper.check_links([common, other], limit=entries)
+        self.assert_rejected(
+            "git_dir_too_large",
+            wrapper.check_links,
+            [common, other],
+            limit=entries - 1,
+        )
+
     def test_init_never_reuses_an_existing_git(self):
         init = ["init", "--quiet", "--template=", "--initial-branch=main", "--"]
         self.plan([*init, self.fresh], cwd=self.fresh)

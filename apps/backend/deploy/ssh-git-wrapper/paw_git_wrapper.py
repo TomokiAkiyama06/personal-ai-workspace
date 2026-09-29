@@ -941,7 +941,23 @@ _UNWRITTEN = frozenset({"hooks"})
 _ALTERNATES = frozenset({"alternates", "http-alternates"})
 
 
-def check_links(directories: Sequence[str]) -> None:
+#: The most entries :func:`check_links` looks at, and for how long (the probes'
+#: deadline), before git runs: a repository with a planted fan-out of loose
+#: objects or refs is refused (``git_dir_too_large``) instead of being walked
+#: for an unbounded time on every call (Codex review of #150, P2). A repository
+#: git keeps packed (``git gc --auto`` packs loose objects past about 6,700)
+#: stays far below it.
+MAX_METADATA_ENTRIES = 500_000
+METADATA_TIMEOUT_S = PROBE_TIMEOUT_S
+
+
+def check_links(
+    directories: Sequence[str],
+    *,
+    limit: int = MAX_METADATA_ENTRIES,
+    timeout: float = METADATA_TIMEOUT_S,
+    clock: Callable[[], float] = time.monotonic,
+) -> None:
     """Refuse the call when any of ``directories`` (a git directory, a common
     directory) holds a symbolic link, a file with another hard link
     (``objects/`` aside) or an ``objects/info/alternates`` (``git_dir_alternates``),
@@ -949,20 +965,23 @@ def check_links(directories: Sequence[str]) -> None:
     ``refs/``, ``logs/``, ``objects/``, ``worktrees/``, ... and would follow a
     linked directory there out of the root, and writes ``MERGE_MSG``,
     ``config``, ... whose other link may be outside it, although the
-    directory itself was checked to be inside it."""
+    directory itself was checked to be inside it.
+
+    At most ``limit`` entries, within ``timeout`` seconds, over all the
+    directories; beyond either the call is refused (``git_dir_too_large``).
+    Each directory is read one entry at a time, so that one huge directory
+    counts as it is read."""
+    deadline = clock() + timeout
+    seen = 0
     todo = sorted(set(directories))
     for index, top in enumerate(todo):
         if any(_within(top, other, allow_equal=False) for other in todo[:index]):
             continue  # already walked with the directory it is in
         if os.path.islink(top):
             raise Rejected("git_dir_link")
-
-        def fail(error: OSError) -> None:
-            raise Rejected("git_dir_link")
-
-        for path, dirs, files in os.walk(top, onerror=fail, followlinks=False):
-            if path == top:
-                dirs[:] = [name for name in dirs if name not in _UNWRITTEN]
+        pending = [top]
+        while pending:
+            path = pending.pop()
             # Object files are never written once there (a new object is a
             # new file): a hard link among them (``clone --local`` and
             # ``submodule add`` of a local path make them), in the
@@ -975,20 +994,34 @@ def check_links(directories: Sequence[str]) -> None:
             linked_ok = parts[0] == "objects" or (
                 parts[0] == "modules" and "objects" in parts[1:]
             )
-            if parts[-2:] == ["objects", "info"] and _ALTERNATES & set(files):
-                # Another object directory (anywhere: another user's
-                # repository, say) whose objects git would read, and a
-                # ``worktree add`` of one of its commits would check out.
-                raise Rejected("git_dir_alternates")
-            for name in (*dirs, *files):
-                try:
-                    info = os.lstat(os.path.join(path, name))
-                except OSError:
-                    raise Rejected("git_dir_link") from None
-                if stat.S_ISLNK(info.st_mode):
-                    raise Rejected("git_dir_link")
-                if stat.S_ISREG(info.st_mode) and info.st_nlink > 1 and not linked_ok:
-                    raise Rejected("git_dir_link")
+            in_info = parts[-2:] == ["objects", "info"]
+            try:
+                with os.scandir(path) as entries:
+                    for entry in entries:
+                        seen += 1
+                        if seen > limit or clock() > deadline:
+                            raise Rejected("git_dir_too_large")
+                        if path == top and entry.name in _UNWRITTEN:
+                            continue
+                        if in_info and entry.name in _ALTERNATES:
+                            # Another object directory (anywhere: another
+                            # user's repository, say) whose objects git would
+                            # read, and a ``worktree add`` of one of its
+                            # commits would check out.
+                            raise Rejected("git_dir_alternates")
+                        info = entry.stat(follow_symlinks=False)
+                        if stat.S_ISLNK(info.st_mode):
+                            raise Rejected("git_dir_link")
+                        if stat.S_ISDIR(info.st_mode):
+                            pending.append(entry.path)
+                        elif (
+                            stat.S_ISREG(info.st_mode)
+                            and info.st_nlink > 1
+                            and not linked_ok
+                        ):
+                            raise Rejected("git_dir_link")
+            except OSError:
+                raise Rejected("git_dir_link") from None
 
 
 def check_submodules(
