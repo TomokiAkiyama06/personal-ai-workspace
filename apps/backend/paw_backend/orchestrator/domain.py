@@ -62,6 +62,19 @@ class AttemptState(StrEnum):
     INTERRUPTED = "interrupted"
 
 
+class ExecutionPlacement(StrEnum):
+    """Where one attempt of a node actually ran (issue #133, Decision 0037's 14).
+
+    The values are those of the Compute Resource Scheduler's ``Placement``
+    (``paw_backend.compute.domain``), repeated here so that the orchestrator does
+    not depend on the scheduler; ``tests/test_orchestrator_placement.py`` fails
+    when the two differ."""
+
+    LOCAL_GPU = "local_gpu"
+    LOCAL_CPU = "local_cpu"
+    CLOUD = "cloud"  # a Codex / Claude agent: the node's content left the backend
+
+
 class NextStep(StrEnum):
     """What happens to a node after a failed attempt."""
 
@@ -80,6 +93,12 @@ class RunOutcome(StrEnum):
     LEASE_LOST = "lease_lost"  # the worker lost its lease and stopped writing
     DAG_SUCCEEDED = "dag_succeeded"  # every required node succeeded: evaluating
     DAG_FAILED = "dag_failed"  # a required node did not succeed: the task failed
+    # PAW-035: the DAG succeeded but a Worker branch conflicts (or a worktree has
+    # uncommitted changes) in the integration: the task waits for a human.
+    INTEGRATION_CONFLICT = "integration_conflict"
+    # PAW-035: the DAG succeeded but git could not integrate: the task failed
+    # (a Retry integrates again; the DAG's results stand).
+    INTEGRATION_FAILED = "integration_failed"
     PLAN_FAILED = "plan_failed"  # no acceptable plan: the task failed
     WAITING_FOR_USER = "waiting_for_user"  # budget or loop: a human decides
     BUDGET_FAILED = "budget_failed"  # retries used up: the task failed

@@ -8,7 +8,13 @@
   node, the node runs on the cloud runtime instead (Local / Cloud hybrid). The
   policy is the caller's: the requirements allow the cloud only "within the
   task's dependency / permission / quota", which the backend knows and the
-  scheduler does not. Without a policy nothing goes to the cloud. The wall time a
+  scheduler does not. Without a policy nothing goes to the cloud. Where each
+  attempt runs (the local GPU or CPU, or the cloud), on which agent and model,
+  is recorded through the assignment's ``placement`` BEFORE the node runs there
+  (issue #133, Decision 0037's 14): for the cloud that record is also the audit
+  of the external send, so a node whose placement cannot be recorded (an
+  assignment without ``placement``, such as a planner call, or a failed write)
+  never goes to the cloud. The wall time a
   node holds a local lease is charged to the task as ``GPU_SECONDS`` (the budget's
   "max GPU time"), also when the local runtime raises or is cancelled. A node
   with no GPU time left does not start locally, and the task's local calls are
@@ -29,6 +35,7 @@
 
 import asyncio
 import contextlib
+import dataclasses
 import json
 import logging
 import math
@@ -59,14 +66,21 @@ from paw_backend.compute.scheduler import (
 from paw_backend.memory.journal.errors import WorkerUnavailableError
 from paw_backend.memory.journal.worker import check_worker
 from paw_backend.orchestrator.config import Clock, SystemClock
-from paw_backend.orchestrator.errors import NodeStopped, StopReason
+from paw_backend.orchestrator.domain import ExecutionPlacement
+from paw_backend.orchestrator.errors import (
+    InvalidOrchestratorArgumentError,
+    NodeStopped,
+    StopReason,
+)
 from paw_backend.orchestrator.result import upstream_size
 from paw_backend.orchestrator.runtime import (
     AgentRuntime,
     NodeAssignment,
     NodeOutcome,
+    NodePlacement,
     validate_runtime,
 )
+from paw_backend.orchestrator.validation import check_agent_label, check_model
 from paw_backend.tasks.queueing import BudgetKind
 from paw_backend.tools.interfaces import require_async_method
 
@@ -78,6 +92,8 @@ CANCEL_GRACE_SECONDS = 10.0
 _EXHAUSTED = object()
 # The local runtime was stopped because the scheduler revoked the lease.
 _REVOKED = object()
+# The local placement could not be recorded: the node did not run.
+_UNPLACED = object()
 
 logger = logging.getLogger(__name__)
 
@@ -151,7 +167,12 @@ class CloudPolicy(Protocol):
 
 
 class HybridRuntime:
-    """Local first, the cloud when the local GPU is busy (see the module)."""
+    """Local first, the cloud when the local GPU is busy (see the module).
+
+    ``local_model``: the model id recorded for a local attempt (default: the
+    deployment's name). ``cloud_agent`` / ``cloud_model``: the cloud agent's name
+    (``codex``, ``claude``) and model id, recorded for a cloud attempt and in the
+    audit of the send; required with ``cloud``."""
 
     def __init__(
         self,
@@ -161,6 +182,9 @@ class HybridRuntime:
         deployment: str,
         cloud: AgentRuntime | None = None,
         cloud_policy: CloudPolicy | None = None,
+        cloud_agent: str | None = None,
+        cloud_model: str | None = None,
+        local_model: str | None = None,
         resource_class: ResourceClass = ResourceClass.CODING,
         estimate: Callable[[NodeAssignment], int] = estimate_context_tokens,
         wait_seconds: float = DEFAULT_NODE_WAIT_SECONDS,
@@ -176,6 +200,12 @@ class HybridRuntime:
             validate_runtime(cloud, "cloud")
             if cloud_policy is None:
                 raise TypeError("a cloud runtime needs a cloud_policy")
+            if cloud_agent is None or cloud_model is None:
+                raise TypeError("a cloud runtime needs a cloud_agent and cloud_model")
+        if cloud_agent is not None:
+            check_agent_label("cloud_agent", cloud_agent)
+        if cloud_model is not None:
+            check_model("cloud_model", cloud_model)
         if cloud_policy is not None:
             require_async_method(cloud_policy, "allows", 1)
         if not isinstance(resource_class, ResourceClass) or resource_class in (
@@ -193,7 +223,12 @@ class HybridRuntime:
         self._local = local
         self._cloud = cloud
         self._policy = cloud_policy
+        self._cloud_agent = cloud_agent
+        self._cloud_model = cloud_model
         self._deployment = deployment
+        self._local_model = check_model(
+            "local_model", deployment if local_model is None else local_model
+        )
         self._class = resource_class
         self._estimate = estimate
         self._wait = check_seconds("wait_seconds", wait_seconds)
@@ -231,21 +266,42 @@ class HybridRuntime:
                     # while the node waited for the local GPU.
                     if not await self._cloud_allowed(assignment):
                         return NodeOutcome.failed(COMPUTE_UNAVAILABLE, retryable=True)
-                    return await self._cloud.run_node(assignment)
+                    # The placement and the audit of the send, before anything
+                    # leaves the backend; not on record, not sent.
+                    placed = await self._place(
+                        assignment,
+                        ExecutionPlacement.CLOUD,
+                        self._cloud_agent,
+                        self._cloud_model,
+                    )
+                    if placed is None:
+                        return NodeOutcome.failed(COMPUTE_UNAVAILABLE, retryable=True)
+                    return await self._cloud.run_node(placed)
+                # The GPU time first: a node that cannot start locally (its
+                # budget is spent) is not on record as having run there.
                 meter = await self._join_meter(assignment, run)
-                started = self._clock.monotonic()
-                try:
-                    outcome = await self._run_local(assignment, lease, meter, held)
-                finally:
-                    now = self._clock.monotonic()
-                    seconds = math.ceil(max(0.0, now - started))
-                    if held:
-                        # Still running (it did not stop when it was cancelled):
-                        # the meter keeps counting it, and the time it goes on
-                        # using is charged when it ends.
-                        self._meter_held(assignment, meter, held[0], now)
-                    if meter is not None:
-                        meter.stop(run, now)
+                placed = await self._place(
+                    assignment,
+                    ExecutionPlacement(lease.placement.value),
+                    assignment.agent,
+                    self._local_model,
+                )
+                if placed is None:
+                    outcome = _UNPLACED
+                else:
+                    started = self._clock.monotonic()
+                    try:
+                        outcome = await self._run_local(placed, lease, meter, held)
+                    finally:
+                        now = self._clock.monotonic()
+                        seconds = math.ceil(max(0.0, now - started))
+                        if held:
+                            # Still running (it did not stop when it was cancelled):
+                            # the meter keeps counting it, and the time it goes on
+                            # using is charged when it ends.
+                            self._meter_held(assignment, meter, held[0], now)
+                        if meter is not None:
+                            meter.stop(run, now)
         except BaseException:
             # The GPU time was spent although the node failed or was cancelled:
             # charged too, or failing nodes that are retried would bypass the
@@ -255,6 +311,9 @@ class HybridRuntime:
             raise
         # Raises NodeStopped when the budget is now used up: it passes.
         await self._settle(assignment, meter, run, seconds)
+        if outcome is _UNPLACED:
+            # Its placement could not be recorded: it did not run (fail closed).
+            return NodeOutcome.failed(COMPUTE_UNAVAILABLE, retryable=True)
         if outcome is _REVOKED:
             # The scheduler took the GPU back (VRAM pressure on Background work):
             # not now, the node may run again later.
@@ -265,8 +324,46 @@ class HybridRuntime:
             raise NodeStopped(StopReason.BUDGET_EXCEEDED)
         return outcome
 
+    async def _place(
+        self,
+        assignment: NodeAssignment,
+        placement: ExecutionPlacement,
+        agent: str,
+        model: str,
+    ) -> NodeAssignment | None:
+        """Record where the attempt runs (issue #133) and return the assignment
+        for the runtime that runs it there. ``None``: it could not be recorded,
+        and the node must not run there. An assignment without ``placement`` (a
+        planner call, a caller that records nothing) runs locally unrecorded; it
+        never reaches the cloud (``_cloud_allowed``). ``NodeStopped`` passes.
+
+        The returned assignment's ``placement`` is already on record: the chosen
+        runtime may record the same place, agent and model again (the
+        ``NodePlacement`` contract asks a runtime that sends to the cloud to
+        record first), and is refused any other."""
+        recorder = assignment.placement
+        if recorder is None:
+            return None if placement is ExecutionPlacement.CLOUD else assignment
+        try:
+            await recorder.record(placement, agent=agent, model=model)
+        except NodeStopped:
+            raise
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning(
+                "The placement of a node could not be recorded: it does not run"
+            )
+            return None
+        return dataclasses.replace(
+            assignment, placement=_Recorded(recorder, placement, agent, model)
+        )
+
     async def _cloud_allowed(self, assignment: NodeAssignment) -> bool:
         if self._cloud is None or self._policy is None:
+            return False
+        if assignment.placement is None:
+            # Nothing could record the send (Decision 0037's 14): not to the cloud.
             return False
         try:
             return await self._policy.allows(assignment) is True
@@ -458,6 +555,38 @@ class HybridRuntime:
                     held.append(work)
 
 
+class _Recorded:
+    """The ``placement`` that ``HybridRuntime`` hands the runtime it chose: the
+    attempt's placement is already on record through ``recorder``. Recording the
+    same place, agent and model again is accepted while the attempt may still act
+    (``recorder.ensure_active``: an abandoned attempt, or a stopped, replaced or
+    ended run, raises ``NodeStopped`` as the orchestrator's handle does, so a
+    runtime that outlives its attempt cannot send); any other is refused, as the
+    orchestrator refuses a second placement."""
+
+    __slots__ = ("_placement", "_recorder")
+
+    def __init__(
+        self,
+        recorder: NodePlacement,
+        placement: ExecutionPlacement,
+        agent: str,
+        model: str,
+    ) -> None:
+        self._recorder = recorder
+        self._placement = (placement, agent, model)
+
+    async def ensure_active(self) -> None:
+        await self._recorder.ensure_active()
+
+    async def record(
+        self, placement: ExecutionPlacement, *, agent: str, model: str
+    ) -> None:
+        await self._recorder.ensure_active()
+        if (placement, agent, model) != self._placement:
+            raise InvalidOrchestratorArgumentError("placement")
+
+
 class _GpuMeter:
     """The local calls of one task in this process that hold the GPU and whose
     time is not charged yet. ``base`` is the task's ``GPU_SECONDS`` left as the
@@ -542,7 +671,9 @@ class TrackerLateGpuCharge:
     call that already ran): it records GPU time that was used, by a local call
     that did not stop when its node was cancelled and held its lease until it
     ended. Hiding it would let such calls use the GPU beyond the task's
-    ``GPU_SECONDS`` unseen."""
+    ``GPU_SECONDS`` unseen. Nor is it fenced by the queue lease (issue #153,
+    Decision 0057): the lease fences what a worker starts, not the record of
+    what it used."""
 
     def __init__(self, tracker: object) -> None:
         require_async_method(tracker, "record", 3)

@@ -311,6 +311,37 @@ class TaskEndTest(PostgresVersioningTestCase):
         self.assertEqual(list(found), sorted(found))
         self.assertTrue(set(ended) <= set(found))
 
+    async def test_tasks_that_keep_failing_do_not_starve_the_rest(self):
+        ended = []
+        for _ in range(3):
+            task_id = await self.new_task(self.bare_tasks)
+            await self.open_approval(task_id)
+            await self.end(task_id, TaskState.CANCELLED, self.bare_tasks)
+            ended.append(task_id)
+        # The last in id order: at least two residue tasks come before it.
+        target = max(ended)
+        residue = TaskEndResidue(self._database())
+        pending = await residue.task_ids(100)
+        self.assertIn(target, pending)
+        revoke = self.approvals.revoke_task
+
+        async def fails_but_for_the_target(task_id):
+            if task_id != target:
+                raise RuntimeError("store down")
+            return await revoke(task_id)
+
+        swept = []
+        with (
+            patch.object(self.approvals, "revoke_task", fails_but_for_the_target),
+            self.assertLogs("paw_backend.orchestrator.task_end", "WARNING"),
+        ):
+            # A sweep of two resumes after the last one: every residue task is
+            # reached, however many before it fail each time.
+            for _ in range(len(pending) // 2 + 1):
+                swept.extend(report.task_id for report in await self.cleanup.sweep(2))
+        self.assertIn(target, swept)
+        self.assertNotIn(target, await residue.task_ids(100))
+
     # -- the maintenance loop's cycle, on the real jobs ------------------------------
 
     async def test_a_cycle_sweeps_marks_stale_and_expires(self):
@@ -441,6 +472,23 @@ class FinishTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(approvals.calls[-1], reopened.task_id)
         self.assertEqual(freshness.calls, [ended.task_id])  # memories stay retired
         await cleanup.on_task_event(object())  # not an event: ignored
+
+    async def test_a_sweep_past_the_last_task_starts_over_at_once(self):
+        # A full sweep that ended on the last residue task leaves its position
+        # there; the next sweep finds nothing after it and must start over in
+        # the same call, not give up a whole maintenance interval.
+        cleanup, approvals, _ = self.cleanup()
+        pending = tuple(sorted(uuid.uuid4() for _ in range(2)))
+
+        async def task_ids(limit, *, after=None):
+            return tuple(t for t in pending if after is None or t > after)[:limit]
+
+        cleanup._residue.task_ids = task_ids
+        first = await cleanup.sweep(2)
+        second = await cleanup.sweep(2)
+
+        self.assertEqual([r.task_id for r in first], list(pending))
+        self.assertEqual([r.task_id for r in second], list(pending))
 
     def test_it_refuses_what_it_cannot_use(self):
         cleanup, approvals, freshness = self.cleanup()

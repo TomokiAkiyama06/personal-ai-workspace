@@ -66,7 +66,8 @@ personal-ai-workspace/
 │  │  │     ├─ 0052_research_provenance.py
 │  │  │     ├─ 0071_memory_status_history.py
 │  │  │     ├─ 0083_tasks_project_state_index.py
-│  │  │     └─ 0087_audit_external_send_details.py
+│  │  │     ├─ 0087_audit_external_send_details.py
+│  │  │     └─ 0133_node_attempt_placement.py
 │  │  ├─ paw_backend/
 │  │  │  ├─ __init__.py
 │  │  │  ├─ __main__.py
@@ -178,8 +179,15 @@ personal-ai-workspace/
 │  │  │  │     ├─ records.py
 │  │  │  │     ├─ service.py
 │  │  │  │     └─ validation.py
+│  │  │  ├─ integration/
+│  │  │  │  ├─ __init__.py
+│  │  │  │  ├─ coordinator.py
+│  │  │  │  ├─ gate.py
+│  │  │  │  ├─ git.py
+│  │  │  │  └─ layout.py
 │  │  │  ├─ orchestrator/
 │  │  │  │  ├─ __init__.py
+│  │  │  │  ├─ audit.py
 │  │  │  │  ├─ authority.py
 │  │  │  │  ├─ composition.py
 │  │  │  │  ├─ config.py
@@ -191,6 +199,7 @@ personal-ai-workspace/
 │  │  │  │  ├─ limits.py
 │  │  │  │  ├─ models.py
 │  │  │  │  ├─ orchestrator.py
+│  │  │  │  ├─ placement.py
 │  │  │  │  ├─ plan.py
 │  │  │  │  ├─ project_sweep.py
 │  │  │  │  ├─ records.py
@@ -200,7 +209,8 @@ personal-ai-workspace/
 │  │  │  │  ├─ scope.py
 │  │  │  │  ├─ store.py
 │  │  │  │  ├─ task_end.py
-│  │  │  │  └─ validation.py
+│  │  │  │  ├─ validation.py
+│  │  │  │  └─ workspaces.py
 │  │  │  ├─ projects/
 │  │  │  │  ├─ __init__.py
 │  │  │  │  ├─ cursor.py
@@ -298,6 +308,7 @@ personal-ai-workspace/
 │  │  │  │  ├─ credentials.py
 │  │  │  │  ├─ decisions.py
 │  │  │  │  ├─ interfaces.py
+│  │  │  │  ├─ lease.py
 │  │  │  │  ├─ models.py
 │  │  │  │  ├─ policy.py
 │  │  │  │  ├─ registry.py
@@ -417,7 +428,10 @@ personal-ai-workspace/
 │  │     ├─ test_orchestrator_freshness_loop.py
 │  │     ├─ test_orchestrator_grants.py
 │  │     ├─ test_orchestrator_lease.py
+│  │     ├─ test_orchestrator_lease_fencing.py
 │  │     ├─ test_orchestrator_migration.py
+│  │     ├─ test_orchestrator_placement.py
+│  │     ├─ test_orchestrator_placement_migration.py
 │  │     ├─ test_orchestrator_plan.py
 │  │     ├─ test_orchestrator_planning.py
 │  │     ├─ test_orchestrator_project_gate.py
@@ -435,6 +449,8 @@ personal-ai-workspace/
 │  │     ├─ test_orchestrator_task_end.py
 │  │     ├─ test_orchestrator_tools.py
 │  │     ├─ test_orchestrator_wiring.py
+│  │     ├─ test_orchestrator_worktree_scope.py
+│  │     ├─ test_orchestrator_worktrees.py
 │  │     ├─ test_owner_no_web_path.py
 │  │     ├─ test_owner_setup_cli.py
 │  │     ├─ test_owner_setup_service.py
@@ -592,6 +608,7 @@ personal-ai-workspace/
 │  │     ├─ test_tools_broker.py
 │  │     ├─ test_tools_credentials.py
 │  │     ├─ test_tools_diagnostics_columns.py
+│  │     ├─ test_tools_lease.py
 │  │     ├─ test_tools_migration.py
 │  │     ├─ test_tools_policy.py
 │  │     ├─ test_tools_postgres.py
@@ -601,7 +618,11 @@ personal-ai-workspace/
 │  │     ├─ test_tools_runner_accounting.py
 │  │     ├─ test_tools_scope.py
 │  │     ├─ tools_store_contract.py
-│  │     └─ tools_support.py
+│  │     ├─ tools_support.py
+│  │     ├─ test_worktrees_coordinator.py
+│  │     ├─ test_worktrees_gate.py
+│  │     ├─ test_worktrees_git.py
+│  │     └─ worktrees_support.py
 │  ├─ cli/
 │  │  └─ README.md
 │  └─ web/

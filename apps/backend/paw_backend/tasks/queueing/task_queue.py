@@ -172,6 +172,7 @@ from paw_backend.tasks.queueing.domain import (
     ACTIVE_QUEUE_STATUSES,
     Priority,
     QueueEntry,
+    QueueLease,
     QueueStatus,
 )
 from paw_backend.tasks.queueing.errors import (
@@ -563,6 +564,40 @@ class TaskQueue:
             current,
             lease_expires_at=func.greatest(QueueEntryRow.lease_expires_at, lease_end),
         )
+
+    async def holds_lease(
+        self,
+        task_id: uuid.UUID,
+        lease: QueueLease,
+        now: datetime | None = None,
+    ) -> bool:
+        """Does ``lease`` hold a VALID lease on an entry of ``task_id`` now?
+
+        ``True`` exactly when the entry ``lease.entry_id`` belongs to ``task_id``,
+        is ``claimed`` by ``lease.worker_id`` with the claim generation
+        ``lease.claim_count`` and ``lease_expires_at > now`` (the module
+        docstring's "valid lease", judged by the database clock). The Tool Broker
+        asks this before every tool call (issue #126, Decision 0046: the fencing
+        token of a tool call). It is a READ: it takes no lock and changes nothing
+        (a tool call never extends a lease; the heartbeats do). The answer is true
+        at the instant the statement read the clock, and a lease can run out right
+        after it: the caller acts on it at once, and the orchestrator's heartbeats
+        give the lease up before it can expire (invariant I11).
+        """
+        check_uuid("task_id", task_id)
+        if not isinstance(lease, QueueLease):
+            raise InvalidQueueingArgumentError("lease")
+        current, _ = self._instants(now)
+        held = select(QueueEntryRow.id).where(
+            QueueEntryRow.id == lease.entry_id,
+            QueueEntryRow.task_id == task_id,
+            QueueEntryRow.status == QueueStatus.CLAIMED,
+            QueueEntryRow.claimed_by == lease.worker_id,
+            QueueEntryRow.claim_count == lease.claim_count,
+            QueueEntryRow.lease_expires_at > current,
+        )
+        async with self._database.session() as session:
+            return (await session.execute(held)).scalar_one_or_none() is not None
 
     async def release(
         self,

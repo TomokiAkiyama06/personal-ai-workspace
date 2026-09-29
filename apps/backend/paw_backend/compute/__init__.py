@@ -4,7 +4,7 @@ Admission to the local models by resource class and KV cache, actual / reserved
 VRAM with a safety headroom, model residency with the relief steps under VRAM
 pressure (Memory Worker unload, Embedding / Reranker CPU fallback), the Exclusive
 class, and Local / Cloud hybrid placement. See ``scheduler.py`` and
-``docs/decisions/0037-gpu-compute-scheduler.md`` (Proposed).
+``docs/decisions/0037-gpu-compute-scheduler.md`` (Approved).
 
 GPU safety: the probe only reads (``nvidia-smi --query-*``); models are loaded
 and unloaded only through an injected :class:`ModelControl`, whose real adapter

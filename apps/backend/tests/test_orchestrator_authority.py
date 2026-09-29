@@ -41,6 +41,7 @@ from paw_backend.repositories.errors import (
 from paw_backend.tasks import TaskCommand, TaskService, WorkingSetOperation
 from paw_backend.tasks.domain import RepoRole
 from paw_backend.tasks.records import WorkingSetEntry
+from paw_backend.tasks.service import MAX_WORKING_SET_REPOSITORIES
 from paw_backend.tools import ExecutionStatus, ScopedRepository
 
 from . import test_orchestrator_tools as through_the_orchestrator
@@ -286,6 +287,25 @@ class StoredScopeTest(PostgresTaskTestCase):
             {r.repo_id for r in scope.repositories}, {self.target, in_other}
         )
         self.assertEqual(grant.project_ids, {self.project_id, other_project})
+
+    async def test_a_full_working_set_in_other_projects_fits_the_scope(self):
+        # The most repositories a Working Set holds, each in a project other than
+        # the task's: the scope holds their projects and the task's own.
+        members = []
+        for index in range(MAX_WORKING_SET_REPOSITORIES):
+            repo_id = uuid.uuid4()
+            self.repositories.register(repo_id, uuid.uuid4(), f"/srv/w/r{index}")
+            role = RepoRole.TARGET if index == 0 else RepoRole.REFERENCED
+            members.append((repo_id, role))
+        snapshot = await self.task(*members)
+
+        scope = await self.authority.parent_scope(snapshot)
+        grant = await self.authority.parent_grant(snapshot)
+
+        self.assertEqual(len(scope.repositories), MAX_WORKING_SET_REPOSITORIES)
+        self.assertEqual(len(scope.projects), MAX_WORKING_SET_REPOSITORIES + 1)
+        self.assertIn(self.project_id, scope.projects)
+        self.assertEqual(grant.project_ids, frozenset(scope.projects))
 
     async def test_the_parent_grant(self):
         snapshot = await self.task((self.target, RepoRole.TARGET))
