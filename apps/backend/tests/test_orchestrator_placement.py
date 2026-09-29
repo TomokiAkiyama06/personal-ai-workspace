@@ -428,7 +428,6 @@ class PlacementDatabaseGuardTest(PlacementStoreCase):
         self.assertEqual((row["state"], row["placement"]), ("succeeded", "cloud"))
 
 
-@requires_postgres
 class Active:
     """The task and its run may still act."""
 
@@ -436,6 +435,7 @@ class Active:
         return TaskActivity.ACTIVE
 
 
+@requires_postgres
 class PlacementHandleTest(PlacementStoreCase):
     def handle(self, dag, **overrides) -> NodePlacementHandle:
         values = dict(
