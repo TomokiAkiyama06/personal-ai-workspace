@@ -89,6 +89,7 @@ from paw_backend.orchestrator.gateway import (
     ToolCaller,
 )
 from paw_backend.orchestrator.limits import MAX_ERROR_CLASS_CHARS
+from paw_backend.orchestrator.placement import NodePlacementHandle, content_digest
 from paw_backend.orchestrator.plan import Plan
 from paw_backend.orchestrator.records import AttemptRecord, DagRecord, NodeRecord
 from paw_backend.orchestrator.runtime import (
@@ -351,6 +352,8 @@ class _Spec:
     attempt: int
     approach: int
     node: NodeRecord | None
+    # The DAG of a node's attempt (``None`` for the planning call).
+    dag_id: uuid.UUID | None = None
 
 
 @dataclass(slots=True)
@@ -1429,6 +1432,7 @@ class Orchestrator:
             attempt=attempt.number,
             approach=attempt.approach,
             node=node,
+            dag_id=dag.id,
         )
 
     async def _wait_for(
@@ -1550,6 +1554,7 @@ class Orchestrator:
                     run.guard, self._tools, lambda: self._context(run, spec), fence
                 ),
                 budget=NodeBudgetHandle(run.guard, self._budget, run.task.id, fence),
+                placement=self._placement(run, spec, fence),
             )
             outcome = await self._with_timeout(
                 self._runtimes[spec.agent].run_node(assignment)
@@ -1576,6 +1581,33 @@ class Orchestrator:
         if not isinstance(outcome, NodeOutcome):
             return _Finished.failure(INVALID_OUTCOME)
         return _Finished(outcome=outcome)
+
+    def _placement(
+        self, run: _Run, spec: _Spec, fence: AttemptFence
+    ) -> NodePlacementHandle | None:
+        """Where a node's attempt runs is recorded on its attempt row (issue
+        #133); the planning call has no attempt row, so nothing to record it on
+        (``None``: a runtime keeps it off the cloud)."""
+        if spec.node is None or spec.dag_id is None:
+            return None
+        return NodePlacementHandle(
+            run.guard,
+            self._store,
+            dag_id=spec.dag_id,
+            epoch=run.epoch,
+            node_key=spec.key,
+            attempt=spec.attempt,
+            agent_id=agent_id_of(run.task.id, run.run, spec.key, spec.attempt),
+            content=content_digest(
+                node_key=spec.key,
+                role=spec.role,
+                title=spec.title,
+                goal=spec.goal,
+                input=spec.input,
+                upstream=spec.upstream,
+            ),
+            fence=fence,
+        )
 
     async def _with_timeout(self, awaitable):
         work = asyncio.ensure_future(awaitable)

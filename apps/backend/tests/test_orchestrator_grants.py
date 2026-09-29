@@ -30,6 +30,7 @@ from sqlalchemy.exc import DBAPIError
 from paw_backend.authz import InMemoryAuditSink
 from paw_backend.db import Database
 from paw_backend.memory.versioning import FreshnessMaintenance
+from paw_backend.orchestrator.domain import ExecutionPlacement
 from paw_backend.orchestrator.task_end import TaskEndCleanup, TaskEndResidue
 from paw_backend.tasks import TaskCommand, TaskRun, TaskService
 from paw_backend.tools import ApprovalService, PostgresApprovalStore
@@ -43,6 +44,7 @@ from . import (
     test_orchestrator_fenced_commands,
     test_orchestrator_handover,
     test_orchestrator_lease,
+    test_orchestrator_placement,
     test_orchestrator_planning,
     test_orchestrator_project_gate,
     test_orchestrator_project_sweep,
@@ -65,7 +67,8 @@ OTHER_ROLE = f"paw_orch_other_{_RUN}"
 ROLE_PASSWORD = "dummy-test-password-orchestrator"
 
 # table -> (table-level privileges, columns the application may UPDATE). The exact
-# copy of the choices (and their reasons) in migration 0034.
+# copy of the choices (and their reasons) in migration 0034, and in migration 0133
+# for the placement columns of the attempts (issue #133).
 EXPECTED = {
     "agent_dags": (
         {"SELECT", "INSERT"},
@@ -88,7 +91,19 @@ EXPECTED = {
     "agent_dag_edges": ({"SELECT", "INSERT"}, set()),
     "agent_dag_node_attempts": (
         {"SELECT", "INSERT"},
-        {"state", "error_class", "failure_signature", "finished_at"},
+        {
+            "state",
+            "error_class",
+            "failure_signature",
+            "finished_at",
+            "placement",
+            "placement_agent",
+            "placement_model",
+            "placed_at",
+            "content_fingerprint",
+            "content_bytes",
+            "placement_audit_id",
+        },
     ),
 }
 ALL_PRIVILEGES = (
@@ -340,12 +355,30 @@ class ProjectSweepAsAppRole(
     pass
 
 
+class StorePlacementAsAppRole(
+    AsAppRole, test_orchestrator_placement.StorePlacementTest
+):
+    pass
+
+
 class StoredScopeAsAppRole(AsAppRole, test_orchestrator_authority.StoredScopeTest):
     pass
 
 
 class StoredAuthorityThroughTheOrchestratorAsAppRole(
     AsAppRole, test_orchestrator_authority.StoredAuthorityThroughTheOrchestratorTest
+):
+    pass
+
+
+class PlacementHandleAsAppRole(
+    AsAppRole, test_orchestrator_placement.PlacementHandleTest
+):
+    pass
+
+
+class OrchestratorPlacementAsAppRole(
+    AsAppRole, test_orchestrator_placement.OrchestratorPlacementTest
 ):
     pass
 
@@ -469,6 +502,37 @@ class AppRolePrivilegesTest(AsAppRole, PostgresOrchestratorTestCase):
                 await self.refused(self.other, f"SELECT count(*) FROM {table}")
                 await self.refused(self.other, f"DELETE FROM {table}")
 
+    async def test_the_app_role_cannot_rewrite_a_recorded_placement(self):
+        # The column grant lets the store write the placement once; the trigger
+        # refuses to change it afterwards, also for the application role.
+        dag = await self.make_dag(diamond())
+        await self.store.acquire(dag.id, "w1", TaskRun(1, 0))
+        await self.store.start_node(dag.id, 1, "a", max_attempts=6)
+        await self.store.record_placement(
+            dag.id,
+            1,
+            "a",
+            1,
+            placement=ExecutionPlacement.LOCAL_GPU,
+            agent="local",
+            model="main",
+        )
+        for sql in (
+            "UPDATE agent_dag_node_attempts SET placement_model = 'other'",
+            "UPDATE agent_dag_node_attempts SET placement = NULL,"
+            " placement_agent = NULL, placement_model = NULL, placed_at = NULL",
+        ):
+            with self.subTest(sql=sql):
+                async with self.database.session() as session:
+                    with self.assertRaises(DBAPIError) as caught:
+                        await session.execute(text(sql))
+                        await session.commit()
+                self.assertIsInstance(
+                    caught.exception.orig, psycopg.errors.RestrictViolation
+                )
+        (record,) = await self.store.attempts(dag.id, "a")
+        self.assertEqual(record.placement_model, "main")
+
     async def test_the_app_role_cannot_rewrite_the_plan_history_or_the_schema(self):
         dag = await self.make_dag(diamond())
         await self.store.acquire(dag.id, "w1", TaskRun(1, 0))
@@ -514,6 +578,10 @@ class AppRolePrivilegesTest(AsAppRole, PostgresOrchestratorTestCase):
             "ALTER TABLE agent_dag_nodes DROP CONSTRAINT ck_agent_dag_nodes_key_format",
             "DROP TABLE agent_dag_edges",
             "ALTER TABLE agent_dags DISABLE TRIGGER ALL",
+            # The trigger that keeps a recorded placement is the owner's.
+            "ALTER TABLE agent_dag_node_attempts DISABLE TRIGGER ALL",
+            "DROP TRIGGER tr_agent_dag_node_attempts_placement_once"
+            " ON agent_dag_node_attempts",
         ]
         for sql in forbidden:
             with self.subTest(sql=sql):
