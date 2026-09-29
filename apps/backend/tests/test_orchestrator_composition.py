@@ -18,7 +18,13 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import text
 
 from paw_backend.app import create_app
-from paw_backend.authz import Authorizer, InMemoryAuditSink
+from paw_backend.authz import (
+    Authorizer,
+    InMemoryAuditSink,
+    ProjectRole,
+    RepoAcl,
+    SystemRole,
+)
 from paw_backend.db import Database
 from paw_backend.integration import GitWorktreeCoordinator
 from paw_backend.orchestrator import Orchestrator, OrchestratorConfig
@@ -28,7 +34,10 @@ from paw_backend.orchestrator.composition import (
     build_task_execution,
 )
 from paw_backend.orchestrator.domain import RunOutcome
-from paw_backend.orchestrator.gateway import TrackerBudgetProvider
+from paw_backend.orchestrator.gateway import (
+    QueueLeaseVerifier,
+    TrackerBudgetProvider,
+)
 from paw_backend.projects import ProjectStateGate
 from paw_backend.repositories import (
     LoginNameAccountDirectory,
@@ -42,21 +51,26 @@ from paw_backend.tasks import (
     TaskState,
     WorkingSetEntry,
 )
-from paw_backend.tasks.queueing import BudgetPreset
+from paw_backend.tasks.queueing import BudgetPreset, QueueLease
 from paw_backend.tools import (
     WORKING_SET_TOOL_SPECS,
+    BrokerReason,
     PostgresTaskActivity,
     ToolBroker,
     ToolRunner,
+    Verdict,
 )
 
+from .authz_support import P1, U1, StaticDirectory, principal
 from .gate_support import ALWAYS_ACTIVE
 from .orchestrator_support import FakeRuntime, make_plan, node, ok
 from .repositories_support import PostgresRepositoryTestCase, fs, requires_git
 from .support import FakeDatabase, make_settings
 from .task_support import BASELINE, single_target
 from .test_scratch_janitor_lifespan import configured
+from .test_tools_working_set import NEW, context
 from .tools_store_contract import LIMITS, new_approval
+from .tools_support import make_call
 from .versioning_support import PostgresVersioningTestCase, requires_postgres
 from .worktrees_support import RecordingRunner, commit_file, git
 
@@ -92,6 +106,10 @@ class ComposedAppTest(unittest.TestCase):
         self.assertIs(broker._registrations, authority._repositories)
         self.assertIsInstance(broker._budget, TrackerBudgetProvider)
         self.assertIsInstance(broker._task_activity, PostgresTaskActivity)
+        # Every call is fenced on the worker's queue lease, read from the
+        # application's queue (issue #126, Decision 0046; Decision 0047, 7).
+        self.assertIsInstance(broker._lease, QueueLeaseVerifier)
+        self.assertIs(broker._lease._queue, execution.queue)
         self.assertEqual(
             broker._registry.names(),
             {spec.name for spec in WORKING_SET_TOOL_SPECS},
@@ -255,6 +273,78 @@ class ComposedExecutionTest(PostgresVersioningTestCase):
         self.assertEqual(
             (await store.get(approval.approval_id)).status.value, "revoked"
         )
+
+    async def test_the_composed_broker_fences_every_call_on_the_queue_lease(self):
+        """Decision 0047, 7 (issue #126, Decision 0046): the composed Broker asks
+        the application's queue about the worker's lease. A call under the lease
+        the worker holds is allowed; once the lease ran out, the same call is
+        refused as ``lease_lost`` (not ``lease_unavailable``: the lease is read)."""
+
+        class Registered:
+            """The registration of the repository the call adds (only)."""
+
+            async def working_set_acl(self, repository_id):
+                return RepoAcl.inherit(NEW, P1) if repository_id == NEW else None
+
+            async def scope_entries(self, user_id, project_id, repository_id):
+                return ()
+
+        database = self._database()
+        directory = StaticDirectory(
+            principal(SystemRole.USER, U1, {P1: ProjectRole.CONTRIBUTOR})
+        )
+        execution = build_task_execution(
+            make_settings(database_url=self.database_url()),
+            database,
+            Authorizer(InMemoryAuditSink(), directory=directory),
+            project_gate=ALWAYS_ACTIVE,
+            repositories=Registered(),
+        )
+        created = await execution.tasks.create_task(
+            project_id=P1,
+            created_by=U1,
+            title="Fix the parser",
+            repositories=single_target(uuid.uuid4()),
+        )
+        task_id = created.task_id
+        await execution.budget.set_preset(task_id, BudgetPreset.STANDARD)
+        await execution.queue.enqueue(task_id)
+        # The shared test database may hold claimable entries of other tests
+        # (an expired lease is claimable again): claim until this task's own.
+        entry = await execution.queue.claim_next("w1")
+        while entry is not None and entry.task_id != task_id:
+            entry = await execution.queue.claim_next("w1")
+        self.assertIsNotNone(entry)
+        lease = QueueLease(entry.id, "w1", entry.claim_count)
+
+        def add_referenced():
+            return execution.broker.request(
+                make_call(
+                    "task.working_set.add_referenced",
+                    {"repository": str(NEW)},
+                    context=context(task_id=task_id, lease=lease),
+                )
+            )
+
+        held = await add_referenced()
+        self.assertEqual(
+            (held.verdict, held.reason), (Verdict.ALLOW, BrokerReason.SCOPED_AUTO)
+        )
+        with self.engine.begin() as connection:
+            connection.execute(
+                text(
+                    "UPDATE queue_entries SET"
+                    " claimed_at = now() - interval '10 seconds',"
+                    " lease_expires_at = now() - interval '5 seconds'"
+                    " WHERE id = :id"
+                ),
+                {"id": entry.id},
+            )
+        lost = await add_referenced()
+        self.assertEqual(
+            (lost.verdict, lost.reason), (Verdict.DENY, BrokerReason.LEASE_LOST)
+        )
+        self.assertIsNone(lost.invocation)
 
 
 @requires_postgres

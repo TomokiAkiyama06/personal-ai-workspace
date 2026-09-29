@@ -29,9 +29,12 @@ from paw_backend.tasks.queueing.errors import InvalidQueueingArgumentError
 from paw_backend.tasks.queueing.validation import (
     MAX_APPROACH,
     check_approach,
+    check_claim_count,
+    check_entry_id,
     check_int,
     check_member,
     check_signature,
+    check_worker_id,
 )
 
 # ---------------------------------------------------------------------------
@@ -90,6 +93,37 @@ class QueueEntry:
     lease_expires_at: datetime | None
     claim_count: int
     finished_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class QueueLease:
+    """The lease a worker holds on a queue entry, as it presents it: the fencing
+    token of a tool call (issue #126, Decision 0046).
+
+    ``entry_id`` is the claimed entry, ``worker_id`` the worker that claimed it and
+    ``claim_count`` the claim generation ``claim_next`` returned
+    (``QueueEntry.claim_count``). The three together name ONE claim: a reclaim
+    (also by the same worker id) is a new generation, so the lease of an earlier
+    claim never matches again. ``TaskQueue.holds_lease`` says whether it is still
+    valid now. Every field is validated as the queue validates it
+    (``InvalidQueueingArgumentError``).
+    """
+
+    entry_id: int
+    worker_id: str
+    claim_count: int
+
+    def __post_init__(self) -> None:
+        check_entry_id(self.entry_id)
+        check_worker_id(self.worker_id)
+        check_claim_count(self.claim_count)
+
+    @classmethod
+    def of(cls, entry: QueueEntry, worker_id: str) -> "QueueLease":
+        """The lease of ``entry`` as ``worker_id`` claimed it."""
+        if not isinstance(entry, QueueEntry):
+            raise InvalidQueueingArgumentError("entry")
+        return cls(entry.id, worker_id, entry.claim_count)
 
 
 # ---------------------------------------------------------------------------
