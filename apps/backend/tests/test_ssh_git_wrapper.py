@@ -19,12 +19,14 @@ user's home). Three layers:
 """
 
 import contextlib
+import http.server
 import importlib.util
 import io
 import os
 import shutil
 import subprocess
 import sys
+import threading
 import unittest
 import uuid
 from pathlib import Path
@@ -286,8 +288,22 @@ class PlanTest(WrapperTestCase):
                 "diff.ignoreSubmodules=all",
                 "-c",
                 "maintenance.auto=false",
+                # No credential helper of the repository's (only clone has one).
+                "-c",
+                "credential.helper=",
             ],
         )
+        clone = self.plan(
+            [
+                "clone",
+                "--quiet",
+                "--",
+                "https://github.com/o/r.git",
+                f"{self.root}/new",
+            ],
+            cwd=self.root,
+        )
+        self.assertNotIn("credential.helper=", clone.argv)
 
     def test_the_merge_identity_is_the_wrappers_own_even_when_not_sent(self):
         invocation = self.pinned(
@@ -318,6 +334,7 @@ class PlanTest(WrapperTestCase):
                 "GIT_TERMINAL_PROMPT": "0",
                 "GIT_OPTIONAL_LOCKS": "0",
                 "GIT_ATTR_NOSYSTEM": "1",
+                "GIT_NO_LAZY_FETCH": "1",
                 # The client's ceiling, then the parent of the root, always.
                 "GIT_CEILING_DIRECTORIES": f"{self.root}:{self.home}",
             },
@@ -1056,6 +1073,97 @@ class RepositoryConfigurationTest(WrapperTestCase):
         self.assert_rejected("config_unreadable", self.check, error=OSError())
 
 
+class RepositoryLocationTest(WrapperTestCase):
+    """A call not pinned to a git directory first asks git where the git
+    directory it finds is, and is refused unless it is inside the root."""
+
+    def locate(self, stdout=b"", returncode=0, error=None, invocation=None):
+        calls = []
+
+        def run(argv, **kwargs):
+            calls.append((argv, kwargs))
+            if error is not None:
+                raise error
+            return subprocess.CompletedProcess(argv, returncode, stdout, b"")
+
+        invocation = invocation or self.plan(["rev-parse", "--show-toplevel"])
+        wrapper.check_location(invocation, run)
+        [(argv, kwargs)] = calls
+        self.assertEqual(argv, invocation.locate)
+        self.assertEqual(kwargs["cwd"], invocation.cwd)
+        self.assertEqual(kwargs["env"], invocation.env)
+
+    def test_which_calls_are_located(self):
+        self.assertEqual(
+            self.plan(["rev-parse", "--show-toplevel"]).locate[1:],
+            ["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"],
+        )
+        self.assertIsNotNone(
+            self.plan(
+                [
+                    "init",
+                    "--quiet",
+                    "--template=",
+                    "--initial-branch=main",
+                    "--",
+                    self.checkout,
+                ]
+            ).locate
+        )
+        self.assertIsNone(self.pinned(["symbolic-ref", "--quiet", "HEAD"]).locate)
+        clone = self.plan(
+            [
+                "clone",
+                "--quiet",
+                "--",
+                "https://github.com/o/r.git",
+                f"{self.root}/new",
+            ],
+            cwd=self.root,
+        )
+        self.assertIsNone(clone.locate)
+
+    def test_a_git_directory_inside_the_root_is_accepted(self):
+        self.locate(f"{self.checkout}/.git\n{self.checkout}/.git\n".encode())
+        self.locate(f"{self.git_dir}\n{self.checkout}/.git\n".encode())
+        self.locate(b"", returncode=128)  # no repository: git says so itself
+
+    def test_a_git_directory_elsewhere_is_refused(self):
+        os.symlink(self.outside, f"{self.root}/escape")
+        inside = f"{self.checkout}/.git"
+        for git_dir, common in (
+            (f"{self.outside}/.git", f"{self.outside}/.git"),
+            (inside, f"{self.outside}/.git"),
+            (f"{self.root}/escape/.git", inside),
+            (f"{self.worktree}/.git", inside),  # an agent's
+            (inside, self.worktrees),
+            (self.root, inside),
+            (f"{self.root}/missing", inside),
+        ):
+            with self.subTest(git_dir=git_dir, common=common):
+                os.makedirs(f"{self.worktree}/.git", exist_ok=True)
+                os.makedirs(f"{self.outside}/.git", exist_ok=True)
+                os.makedirs(inside, exist_ok=True)
+                self.assert_rejected(
+                    "git_dir_outside_root",
+                    self.locate,
+                    f"{git_dir}\n{common}\n".encode(),
+                )
+        for stdout in (b"", b"\n\n", f"{inside}\n".encode(), b"\xff\n\xff\n"):
+            with self.subTest(stdout=stdout):
+                self.assert_rejected("git_dir_outside_root", self.locate, stdout)
+        self.assert_rejected("probe_failed", self.locate, error=OSError())
+
+    def test_init_runs_only_where_it_creates_the_repository(self):
+        other = f"{self.root}/other"
+        os.makedirs(other)
+        self.assert_rejected(
+            "bad_arguments",
+            self.plan,
+            ["init", "--quiet", "--template=", "--initial-branch=main", "--", other],
+        )
+
+
 class RejectedWireTest(WrapperTestCase):
     """The encoding of ``$SSH_ORIGINAL_COMMAND`` itself."""
 
@@ -1610,6 +1718,129 @@ class EndToEndTest(unittest.IsolatedAsyncioTestCase):
         for args, cwd in calls[:1] + calls[2:]:
             result = await self.run_git(args, cwd=cwd)
             self.assertEqual(result.returncode, 0, args)
+
+    async def test_a_git_directory_outside_the_root_is_never_used(self):
+        # A directory in the root whose `.git` (a `gitdir:` file, or a link)
+        # leads to a repository outside it: git would follow it after the
+        # wrapper checked only the cwd.
+        outside = f"{self.world.root}/outside"
+        self.world.make_repository(outside)
+        before = fs.read(outside, ".git/config")
+        planted = f"{self.root}/planted"
+        os.makedirs(planted)
+        fs.write(planted, ".git", f"gitdir: {outside}/.git\n")
+        linked = f"{self.root}/linked"
+        os.makedirs(linked)
+        os.symlink(f"{outside}/.git", f"{linked}/.git")
+        ref = "refs/heads/paw/t/1/build"
+        calls = (
+            ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+            ["remote", "add", "--", "origin", "https://github.com/o/r.git"],
+            ["rev-parse", "--show-toplevel"],
+            ["config", "--local", "--get", "remote.origin.url"],
+            [
+                "merge-tree",
+                "--write-tree",
+                "--name-only",
+                "-z",
+                "--no-messages",
+                ref,
+                ref,
+            ],
+            ["worktree", "list", "--porcelain", "-z"],
+        )
+        for cwd in (planted, linked):
+            for args in calls:
+                with self.subTest(cwd=cwd, args=args):
+                    result = await self.run_git(args, cwd=cwd)
+                    self.assertEqual(result.returncode, wrapper.REJECTED)
+                    self.assertNotIn(outside, result.stdout)
+        # `init` in a directory whose `.git` leads out would re-initialise the
+        # repository outside.
+        for target in (planted, linked):
+            with self.subTest(init=target):
+                result = await self.run_git(
+                    [
+                        "init",
+                        "--quiet",
+                        "--template=",
+                        "--initial-branch=main",
+                        "--",
+                        target,
+                    ],
+                    cwd=target,
+                )
+                self.assertEqual(result.returncode, wrapper.REJECTED)
+        self.assertEqual(fs.read(outside, ".git/config"), before)
+        # A directory that is no repository at all is still git's to answer.
+        os.makedirs(f"{self.root}/empty")
+        result = await self.run_git(
+            ["rev-parse", "--is-bare-repository"], cwd=f"{self.root}/empty"
+        )
+        self.assertEqual(result.returncode, 128)
+
+    async def test_a_content_command_never_fetches_or_asks_for_credentials(self):
+        # A partial clone lazily fetches a missing object from its promisor
+        # remote, and an HTTP 401 makes git run the repository's credential
+        # helper: a command, from a setting the wrapper otherwise lets through.
+        requests = []
+
+        class Unauthorized(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802 (the stdlib's name)
+                requests.append(self.path)
+                self.send_response(401)
+                self.send_header("WWW-Authenticate", 'Basic realm="x"')
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            do_POST = do_GET
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Unauthorized)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        options = self.world.runner_options()
+        options["allowed_protocols"] = (*options["allowed_protocols"], "http")
+        runner = SshGitRunner(
+            _FixedKey(f"{self.world.root}/alice.key"),
+            ssh_executable=self.fake_sshd(options),
+            **options,
+        )
+        checkout = f"{self.root}/project"
+        base = self.world.make_repository(checkout)
+        marker = f"{self.world.root}/helper-ran"
+        port = server.server_address[1]
+        for key, value in (
+            ("core.repositoryFormatVersion", "1"),
+            ("extensions.partialClone", "origin"),
+            ("remote.origin.url", f"http://127.0.0.1:{port}/r.git"),
+            ("remote.origin.promisor", "true"),
+            ("credential.helper", f"!f() {{ touch {marker}; }}; f"),
+        ):
+            git("config", key, value, cwd=checkout)
+        tree = git("rev-parse", f"{base}^{{tree}}", cwd=checkout)
+        os.remove(f"{checkout}/.git/objects/{tree[:2]}/{tree[2:]}")
+        result = await runner.run(
+            [
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "paw/t/1/build",
+                "--",
+                f"{self.root}/.paw-worktrees/t/1/r/build",
+                base,
+            ],
+            account=self.account,
+            cwd=checkout,
+            timeout_s=60,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(_consume(marker))
+        self.assertEqual(requests, [])
 
     async def test_a_work_tree_named_in_the_configuration_is_never_used(self):
         # `core.worktree` in the shared configuration would move an unpinned

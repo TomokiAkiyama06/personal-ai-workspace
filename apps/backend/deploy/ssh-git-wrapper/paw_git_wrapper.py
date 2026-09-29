@@ -42,6 +42,9 @@ undoes ``shlex.quote``) into the words of Decision 0029 §2::
   is only ever used with its own work tree;
 * the sub-command and its arguments must match one of the fixed shapes of
   Decision 0029 §3 and Decision 0036 §13 (:data:`SUBCOMMANDS`) exactly;
+* for a call not pinned to a git directory (``clone`` aside), the git
+  directory and common directory git finds from the cwd must be inside the
+  root and outside ``.paw-worktrees`` (:func:`check_location`);
 * for a sub-command that reads file content (:data:`CONTENT_SUBCOMMANDS`), the
   configuration git would read must name no command (a ``filter`` driver, a
   ``merge`` driver, an ``include``, ...: :func:`check_configuration`).
@@ -286,6 +289,11 @@ def git_environment(config: Config, ceiling: str | None) -> dict[str, str]:
         "GIT_TERMINAL_PROMPT": "0",
         "GIT_OPTIONAL_LOCKS": "0",
         "GIT_ATTR_NOSYSTEM": "1",
+        # A partial clone would otherwise fetch a missing object on demand from
+        # its promisor remote, from inside ``status`` or ``worktree add``: a
+        # network call (and the repository's credential helper, a command) no
+        # allowed sub-command other than ``clone`` needs.
+        "GIT_NO_LAZY_FETCH": "1",
     }
     if ceiling is not None:
         environment["GIT_CEILING_DIRECTORIES"] = ceiling
@@ -593,6 +601,13 @@ class Invocation:
     #: The ``git config`` call whose output must name no command before
     #: ``argv`` runs (:data:`CONTENT_SUBCOMMANDS`); ``None`` for the others.
     probe: list[str] | None = None
+    #: For a call not pinned to a git directory (``clone`` aside): the
+    #: ``git rev-parse`` call that says which git directory and common
+    #: directory git finds from the cwd; both must be inside ``root`` and
+    #: outside ``worktrees`` (:func:`check_repository`).
+    locate: list[str] | None = None
+    root: str = ""
+    worktrees: str = ""
 
 
 def _split(original: str | None) -> list[str]:
@@ -692,10 +707,20 @@ def plan(original: str | None, config: Config) -> Invocation:
         # pinned to the worktree's git directory in the checkout (Decision 0036).
         raise Rejected("unpinned_worktree")
     checker(args, places, config)
+    if subcommand == "init" and places.check(args[4], worktree=False) != cwd:
+        # ``init`` runs where it creates the repository, so the check of the
+        # repository found from the cwd (:func:`check_repository`) is the
+        # check of the ``.git`` it would write to.
+        raise Rejected("bad_arguments")
 
     argv = [config.git]
     for key, value in (*hardening(config), *OWN_HARDENING):
         argv.extend(("-c", f"{key}={value}"))
+    if subcommand != "clone":
+        # An empty value empties the list of credential helpers read so far
+        # (the repository's own included): only ``clone`` talks to a remote,
+        # with the helper its own ``-c`` names.
+        argv.extend(("-c", "credential.helper="))
     if subcommand == "merge":
         for key, value in MERGE_CONFIG:
             argv.extend(("-c", f"{key}={value}"))
@@ -705,7 +730,25 @@ def plan(original: str | None, config: Config) -> Invocation:
     probe = None
     if subcommand in CONTENT_SUBCOMMANDS and args[:1] not in (["list"], ["prune"]):
         probe = configuration_probe(config, pinned)
-    return Invocation(subcommand, argv, git_environment(config, ceiling), cwd, probe)
+    locate = None
+    if not pinned and subcommand != "clone":
+        locate = [
+            config.git,
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-dir",
+            "--git-common-dir",
+        ]
+    return Invocation(
+        subcommand,
+        argv,
+        git_environment(config, ceiling),
+        cwd,
+        probe,
+        locate,
+        places.root,
+        places.worktrees,
+    )
 
 
 def configuration_probe(config: Config, pinned: Sequence[str]) -> list[str]:
@@ -729,6 +772,69 @@ def unsafe_setting(key: str) -> bool:
     return "." in rest and variable in _REFUSED_VARIABLES
 
 
+def check_repository(
+    invocation: Invocation,
+    run: Callable[..., "subprocess.CompletedProcess[bytes]"] = subprocess.run,
+) -> None:
+    """What must hold of the repository itself before ``invocation`` runs:
+    where its git directory is (:func:`check_location`), and what its
+    configuration names (:func:`check_configuration`)."""
+    check_location(invocation, run)
+    check_configuration(invocation, run)
+
+
+def _probe(
+    invocation: Invocation, argv: list[str], run: Callable[..., object], reason: str
+) -> "subprocess.CompletedProcess[bytes]":
+    try:
+        result = run(
+            argv,
+            cwd=invocation.cwd,
+            env=invocation.env,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=PROBE_TIMEOUT_S,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        raise Rejected(reason) from None
+    return result  # type: ignore[return-value]
+
+
+def check_location(
+    invocation: Invocation,
+    run: Callable[..., "subprocess.CompletedProcess[bytes]"] = subprocess.run,
+) -> None:
+    """Refuse an unpinned ``invocation`` whose git directory or common
+    directory, as git itself finds them from the cwd (a ``.git`` directory, a
+    ``gitdir:`` file, a link, a ``commondir``), is outside the root or inside
+    ``.paw-worktrees`` (where an agent writes). Checking the cwd alone would
+    let a ``.git`` in the root lead git to a repository outside it.
+
+    A cwd in no repository at all is left to git (``rev-parse
+    --is-bare-repository`` answers 128 there, which the backend reads)."""
+    if invocation.locate is None:
+        return
+    found = _probe(invocation, invocation.locate, run, "probe_failed")
+    if found.returncode != 0:
+        return
+    try:
+        lines = found.stdout.decode("utf-8").split("\n")
+    except UnicodeDecodeError:
+        raise Rejected("git_dir_outside_root") from None
+    if len(lines) != 3 or lines[2] != "" or not all(lines[:2]):
+        raise Rejected("git_dir_outside_root")
+    for place in lines[:2]:
+        try:
+            real = os.path.realpath(place, strict=True)
+        except (OSError, RuntimeError):
+            raise Rejected("git_dir_outside_root") from None
+        if not _within(real, invocation.root, allow_equal=False) or _within(
+            real, invocation.worktrees, allow_equal=True
+        ):
+            raise Rejected("git_dir_outside_root")
+
+
 def check_configuration(
     invocation: Invocation,
     run: Callable[..., "subprocess.CompletedProcess[bytes]"] = subprocess.run,
@@ -744,18 +850,7 @@ def check_configuration(
     check and the ``exec``."""
     if invocation.probe is None:
         return
-    try:
-        listed = run(
-            invocation.probe,
-            cwd=invocation.cwd,
-            env=invocation.env,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            timeout=PROBE_TIMEOUT_S,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        raise Rejected("config_unreadable") from None
+    listed = _probe(invocation, invocation.probe, run, "config_unreadable")
     if listed.returncode != 0:
         raise Rejected("config_unreadable")
     for entry in listed.stdout.split(b"\0"):
@@ -839,7 +934,7 @@ def main(
     execve: Callable[[str, list[str], dict[str, str]], object] = os.execve,
     chdir: Callable[[str], object] = os.chdir,
     log: Callable[[str], None] = _syslog,
-    check: Callable[[Invocation], None] = check_configuration,
+    check: Callable[[Invocation], None] = check_repository,
 ) -> int:
     """Decide one call; ``exec`` git or return :data:`REJECTED`."""
     arguments = sys.argv[1:] if argv is None else list(argv)

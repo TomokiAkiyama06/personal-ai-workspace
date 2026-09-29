@@ -38,7 +38,8 @@ Wrapper は Client（Backend）を信用しない。`$SSH_ORIGINAL_COMMAND` を 
    - どちらも正規化した Path（`..`・`//`・末尾の `/` を含まない絶対 Path）で、Symbolic Link を解決した先が外に出れば拒否する。
 6. `.paw-worktrees` の中を cwd にするとき、`--git-dir=` / `--work-tree=` なしで動かせるのは `rev-parse` だけ（Agent が書き換えられる worktree の `.git` が、Filter Driver などの Command を持ち込むのを防ぐ）。
 7. 副コマンドは許可リスト（`SUBCOMMANDS`）の中で、引数の並びも決まった形と完全に一致するときだけ。
-8. File の中身を読み書きする副コマンド（`status`・`merge`（`--abort` を含む）・`merge-tree`・`worktree add`）は、git を `exec` する前に、その呼び出しが読む設定を `git config --no-includes --list -z`（同じ `--git-dir=` / `--work-tree=`・cwd・固定の環境。これ自体は Command を起動しない）で一覧にし、**Command や別の Work Tree を名指しする設定が 1 つでもあれば拒否する**（`config_unsafe`。一覧にできなければ `config_unreadable`）。
+8. `--git-dir=` / `--work-tree=` なしの呼び出し（`clone` を除く。`init` を含む）は、git を `exec` する前に、同じ cwd・固定の環境で `git rev-parse --path-format=absolute --git-dir --git-common-dir` を実行し、git が cwd から見つける git directory と common directory（`.git` の Directory・`gitdir:` File・Symbolic Link・`commondir` を git 自身が辿った先）が、Symbolic Link を解決した結果 Root の中、かつ `.paw-worktrees` の外にあることを確かめる。外なら `git_dir_outside_root` で拒否する（cwd の検査だけでは、Root の中の `.git` が Root の外の Repository を指せば、git はそこを読み書きする）。cwd が Repository でなければ git 自身に答えさせる（`rev-parse --is-bare-repository` の 128 を Backend が読む）。`init` は作る Directory を cwd にしたときだけ受け付ける（その `.git` がこの確認の対象になる）。
+9. File の中身を読み書きする副コマンド（`status`・`merge`（`--abort` を含む）・`merge-tree`・`worktree add`）は、git を `exec` する前に、その呼び出しが読む設定を `git config --no-includes --list -z`（同じ `--git-dir=` / `--work-tree=`・cwd・固定の環境。これ自体は Command を起動しない）で一覧にし、**Command や別の Work Tree を名指しする設定が 1 つでもあれば拒否する**（`config_unsafe`。一覧にできなければ `config_unreadable`）。
    - 理由: Repository の設定（`.git/config`。`extensions.worktreeConfig` なら worktree ごとの `config.worktree` も）は Checkout とすべての worktree で共有され、worktree で作業する Agent が書ける。そこに置いた `filter.<x>.clean` を、Agent が Commit した `.gitattributes` が選べば、許可した `status` がその Command をこの User として実行してしまう。
    - `core.worktree` も拒否する: Checkout で `--git-dir=` / `--work-tree=` なしに動く `status`・`merge` が、検査した cwd の代わりにその Path（Root の外でも）の File を読み書きしてしまうため。
    - 拒否する設定: `core.worktree`・`filter.*`・`include.*`・`includeIf.*`（Wrapper が一覧にしていない別の File を読ませるため）・`hook.*`・`pager.*`・`core.pager`・`core.editor`・`core.askPass`・`core.sshCommand`・`core.gitProxy`・`core.alternateRefsCommand`・`sequence.editor`・`diff.external`・`gpg.program`・`uploadPack.packObjectsHook`、および `<section>.<name>.<key>` の `<key>` が `textconv`・`command`・`driver`・`program`・`cmd`・`uploadpack`・`receivepack` のもの（`diff.<x>.textconv`・`merge.<x>.driver`・`gpg.ssh.program` など）。
@@ -60,7 +61,7 @@ Wrapper は Client（Backend）を信用しない。`$SSH_ORIGINAL_COMMAND` を 
 
 `push`・`fetch`・`pull`・`checkout`・`switch`・`reset`・`rebase`・`commit`・`branch`・`gc`・`submodule` など、表にないものはすべて拒否する。
 
-git の環境は固定の許可リストだけ（`PATH`・`HOME`・`LC_ALL=C`・`GIT_CONFIG_GLOBAL=/dev/null`・`GIT_CONFIG_NOSYSTEM=1` 等。`git.py` の `git_environment` と同じ）。`sshd` の環境（Client が `SendEnv` で送れる `LC_*` などを含む）は git に渡らない。
+git の環境は固定の許可リストだけ（`PATH`・`HOME`・`LC_ALL=C`・`GIT_CONFIG_GLOBAL=/dev/null`・`GIT_CONFIG_NOSYSTEM=1` 等。`git.py` の `git_environment` と同じ）。加えて `GIT_NO_LAZY_FETCH=1`（Partial Clone が `status`・`worktree add` の中で欠けた Object を Promisor Remote から取りに行かない）と、`clone` 以外では `-c credential.helper=`（Repository の設定の Credential Helper ── Command ── を空にする。Remote と通信するのは `clone` だけ）を付ける。`sshd` の環境（Client が `SendEnv` で送れる `LC_*` などを含む）は git に渡らない。
 
 ### 終了コード
 
@@ -78,12 +79,12 @@ paw-git-wrapper[1235]: rejected user=alice reason=config_not_allowed
 
 書くのは、受け付けたか・固定の理由コード・許可リストにある副コマンド名・Linux User 名だけ。**引数・Path・URL・`-c` の値・git の出力は書かない**（URL や設定値は Credential を含み得る）。stderr にも `paw-git-wrapper: rejected (<理由コード>)` しか出さない（`SshGitRunner` は stderr を読まずに捨てる）。
 
-理由コード: `no_command`・`too_long`・`bad_encoding`・`bad_protocol`・`root_unavailable`・`bad_worktrees`・`bad_path`・`path_unresolvable`・`path_outside_root`・`path_outside_worktrees`・`path_in_worktrees`・`bad_ceiling`・`bad_option`・`no_subcommand`・`subcommand_not_allowed`・`config_not_allowed`・`bad_git_dir`・`bad_work_tree`・`unpinned_worktree`・`bad_arguments`・`config_unsafe`・`config_unreadable`・`misconfigured`。
+理由コード: `no_command`・`too_long`・`bad_encoding`・`bad_protocol`・`root_unavailable`・`bad_worktrees`・`bad_path`・`path_unresolvable`・`path_outside_root`・`path_outside_worktrees`・`path_in_worktrees`・`bad_ceiling`・`bad_option`・`no_subcommand`・`subcommand_not_allowed`・`config_not_allowed`・`bad_git_dir`・`bad_work_tree`・`unpinned_worktree`・`bad_arguments`・`git_dir_outside_root`・`probe_failed`・`config_unsafe`・`config_unreadable`・`misconfigured`。
 
 ## 既知の限界
 
 - **検査と実行の間の差し替え（TOCTOU）。** Wrapper は Path を解決して検査し、解決済みの cwd・`--git-dir=`・`--work-tree=` を git に渡すが、検査の後・git が Path を開く前に、Path の途中の Directory を Symbolic Link に差し替えられる余地は残る。差し替えられるのは、その Directory に書ける者（その Linux User 自身と root。Agent がその User として worktree に書く場合はその Agent も）だけで、その場合も git はその Linux User の権限でしか動かない（他の User の Home に書く権限は Unix の権限が拒否する）。
-- **設定の検査と実行の間の書き換え。** 8 の検査の後・git が設定を読む前に Repository の設定を書き換えられる余地は残る。書き換えられるのは、その設定 File に書ける者（その Linux User として動く者。worktree で作業する Agent を含む）だけ。この検査は前もって置かれた設定を防ぐもので、検査と同時に書き換え続ける者までは防がない。
+- **検査と実行の間の書き換え。** 8・9 の検査の後・git が設定を読む前に Repository の設定を書き換えられる余地は残る。書き換えられるのは、その設定 File に書ける者（その Linux User として動く者。worktree で作業する Agent を含む）だけ。この検査は前もって置かれた設定を防ぐもので、検査と同時に書き換え続ける者までは防がない。
 - **`<Root>/.paw-worktrees` 自体を Symbolic Link にした配置は使えない**（`bad_worktrees` で全部拒否）。worktree の置き場所を別の Disk に置きたい場合は、Root ごと（`--root=`）移す。
 - **Signal で終わった git。** git が Signal で終わると、`sshd` は終了コードでなく Signal を返し、`ssh` は 255 で終わる（`SshGitRunner` からは `ssh_unavailable` に見える）。Decision 0029 の 5 の「既知の限界」と同じ。
 - **Decision 0036 の worktree の経路は PR #130 のマージ後に使われる。** Wrapper は PR #130 のコードに依存しない（単独で完結する）。`tests/test_ssh_git_wrapper.py` の `test_the_worktree_git_of_pr_130_runs_through_the_wrapper` は、`paw_backend.integration` が無い間は Skip し、PR #130 のマージ後は自動で動く。
