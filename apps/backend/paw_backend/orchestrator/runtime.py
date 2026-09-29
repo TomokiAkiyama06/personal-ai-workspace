@@ -12,6 +12,9 @@ What a runtime is given (``NodeAssignment``) and what it is **not** given:
 * it gets the goal, the bounded input, the structured results of the nodes it
   depends on (its direct dependencies only), the label of the agent it plays and
   the attempt and approach it is on;
+* a Worker node that may write gets ``worktrees``: where its dedicated worktree
+  and branch of each repository are (PAW-035). It commits its work there; the
+  orchestrator integrates the branches after the DAG;
 * it gets ``tools`` (:class:`NodeTools`) to call tools, and ``budget``
   (:class:`NodeBudget`) to report what it consumed. Both are the orchestrator's:
   every tool call passes the orchestrator's task check and the Tool Broker, and
@@ -39,6 +42,7 @@ from paw_backend.orchestrator.errors import InvalidOrchestratorArgumentError
 from paw_backend.orchestrator.plan import Plan
 from paw_backend.orchestrator.result import NodeResult
 from paw_backend.orchestrator.validation import check_label
+from paw_backend.orchestrator.workspaces import NodeWorktree
 from paw_backend.tasks.queueing import BudgetKind
 from paw_backend.tools import ToolOutcome
 from paw_backend.tools.interfaces import require_async_method
@@ -118,6 +122,10 @@ class NodeAssignment:
     approach: int
     tools: NodeTools = field(repr=False)
     budget: NodeBudget = field(repr=False)
+    # PAW-035: the node's own worktree for each repository it may write to, by
+    # repository id (empty for a read-only role, or without worktrees). The node's
+    # scope already points at these (the user's checkout is out of its scope).
+    worktrees: Mapping[uuid.UUID, NodeWorktree] = field(default_factory=dict)
     # Where the attempt runs, recorded once (``None``: nothing can be recorded,
     # such as a planner call: a runtime must then keep the node off the cloud).
     placement: NodePlacement | None = field(default=None, repr=False)

@@ -40,6 +40,7 @@
 | [0033](0033-user-invitation-and-device-pairing.md) | User の招待・端末の Pairing（QR / リンク、Owner / Admin の信頼済み端末の承認）・User Lifecycle の方針（招待 Token の期限、Pairing の状態遷移、削除・復元の権限、含めないこと。PAW-024） | Approved |
 | [0034](0034-memory-versioning-freshness.md) | Memory の Relation の意味・手動編集の Version（誰がどの Scope を変えられるか）・手動で書ける鮮度・Stale Candidate / 期限切れ / Session 終了の処理（PAW-042。Issue #36） | Approved |
 | [0035](0035-working-set-capability-grants-and-legacy-tasks.md) | `project.task.working_set.manage` の付与先と委任、作成時の Working Set、Revision 0085 より前の Task の状態の退避（Issue #85。Decision 0030 が決めていない点） | Approved |
+| [0036](0036-parallel-worktree-integration.md) | Parallel Worktree / Integration Node の方針（Worker ごとの worktree・branch の置き場所と名前、Worker の branch の起点、統合の base・順序・`--no-ff`、Conflict と未 Commit の変更で `waiting`、統合後の Test → Evaluator → Review、PR / Push を別 Issue にすること、Wrapper の許可リストへの追加。Issue #31） | Approved |
 | [0037](0037-gpu-compute-scheduler.md) | GPU / Compute Resource Scheduler の方針（状態をプロセス内に持つ、KV Cache の Token による Admission、Actual / Reserved の VRAM と Safety Headroom の暫定値、Class の優先、縮退の段と復帰、Exclusive、Local / Cloud の振り分け。PAW-036、Issue #32） | Approved |
 | [0048](0048-node-placement-audit.md) | Node の実行 Placement（local / cloud・Agent / Model）を Orchestrator の記録（`agent_dag_node_attempts` の列、1 回だけ）と外部送信の Audit（`audit_events` の既存の列だけの行、同じ Transaction）に残す方式、記録できなければ走らせない、Planner は Cloud へ回さない（Decision 0037 の 14 の実装。Issue #133） | Approved |
 | [0047](0047-task-execution-composition-and-task-end-effects.md) | 本番の Task 実行の組み立て（本番の `TaskAuthority` の Scope と Grant、App の起動時の `TaskService` / Tool Broker / Orchestrator）、Task 終了時の承認の取り消しと `session_only` の退役（Commit 後の Listener と、残りを探す再実行の Sweep）、鮮度の Job の定期実行（Issue #125） | Approved |
@@ -48,6 +49,7 @@
 | [0045](0045-memory-edit-sources.md) | Memory の編集・復元・Revalidate でできた新しい Version に出典を写し、人の `user_confirmation` を足すこと・会話 / Task から由来する Version の検索（Decision 0034 の 9。Issue #128） | Approved |
 | [0049](0049-manual-write-reservation-release.md) | 落ちた Process が残した Repository の書き込み予約を人が解除する操作（誰が: Project の Manager と Owner / Admin、Passkey Step-up、生きている Worker の Lease がある間は拒否、解除した Repo は書き込まれたものとして扱う、Audit と Task の Event。Issue #129。Decision 0035 の 5 節の最後の一文を Supersede） | Approved |
 | [0050](0050-late-gpu-charge-without-fence.md) | Node の Attempt が閉じた後に、Cancel しても止まらなかった Local の呼び出しの GPU 時間を、`TrackerLateGpuCharge` で Attempt / Run の Fence なしに Task の Budget へ計上する（PAW-036、PR #131。Decision 0037 を補う） | Approved |
+| [0051](0051-integration-worktree-ignored-files.md) | integration worktree の無視された File（`.gitignore`）を未 Commit の変更として扱う方針（`status --ignored` の形を Wrapper の許可リストに足す。Decision 0036 の 7・9・13 への追補。PR #130） | Approved |
 
 運用は [AGENTS.md](../../AGENTS.md) の「仕様変更」に従います。
 

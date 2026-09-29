@@ -179,6 +179,12 @@ personal-ai-workspace/
 │  │  │  │     ├─ records.py
 │  │  │  │     ├─ service.py
 │  │  │  │     └─ validation.py
+│  │  │  ├─ integration/
+│  │  │  │  ├─ __init__.py
+│  │  │  │  ├─ coordinator.py
+│  │  │  │  ├─ gate.py
+│  │  │  │  ├─ git.py
+│  │  │  │  └─ layout.py
 │  │  │  ├─ orchestrator/
 │  │  │  │  ├─ __init__.py
 │  │  │  │  ├─ audit.py
@@ -203,7 +209,8 @@ personal-ai-workspace/
 │  │  │  │  ├─ scope.py
 │  │  │  │  ├─ store.py
 │  │  │  │  ├─ task_end.py
-│  │  │  │  └─ validation.py
+│  │  │  │  ├─ validation.py
+│  │  │  │  └─ workspaces.py
 │  │  │  ├─ projects/
 │  │  │  │  ├─ __init__.py
 │  │  │  │  ├─ cursor.py
@@ -440,6 +447,8 @@ personal-ai-workspace/
 │  │     ├─ test_orchestrator_task_end.py
 │  │     ├─ test_orchestrator_tools.py
 │  │     ├─ test_orchestrator_wiring.py
+│  │     ├─ test_orchestrator_worktree_scope.py
+│  │     ├─ test_orchestrator_worktrees.py
 │  │     ├─ test_owner_no_web_path.py
 │  │     ├─ test_owner_setup_cli.py
 │  │     ├─ test_owner_setup_service.py
@@ -606,7 +615,11 @@ personal-ai-workspace/
 │  │     ├─ test_tools_runner_accounting.py
 │  │     ├─ test_tools_scope.py
 │  │     ├─ tools_store_contract.py
-│  │     └─ tools_support.py
+│  │     ├─ tools_support.py
+│  │     ├─ test_worktrees_coordinator.py
+│  │     ├─ test_worktrees_gate.py
+│  │     ├─ test_worktrees_git.py
+│  │     └─ worktrees_support.py
 │  ├─ cli/
 │  │  └─ README.md
 │  └─ web/
