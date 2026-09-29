@@ -35,6 +35,7 @@
 
 import asyncio
 import contextlib
+import dataclasses
 import json
 import logging
 import math
@@ -66,7 +67,11 @@ from paw_backend.memory.journal.errors import WorkerUnavailableError
 from paw_backend.memory.journal.worker import check_worker
 from paw_backend.orchestrator.config import Clock, SystemClock
 from paw_backend.orchestrator.domain import ExecutionPlacement
-from paw_backend.orchestrator.errors import NodeStopped, StopReason
+from paw_backend.orchestrator.errors import (
+    InvalidOrchestratorArgumentError,
+    NodeStopped,
+    StopReason,
+)
 from paw_backend.orchestrator.result import upstream_size
 from paw_backend.orchestrator.runtime import (
     AgentRuntime,
@@ -86,6 +91,8 @@ CANCEL_GRACE_SECONDS = 10.0
 _EXHAUSTED = object()
 # The local runtime was stopped because the scheduler revoked the lease.
 _REVOKED = object()
+# The local placement could not be recorded: the node did not run.
+_UNPLACED = object()
 
 logger = logging.getLogger(__name__)
 
@@ -260,35 +267,40 @@ class HybridRuntime:
                         return NodeOutcome.failed(COMPUTE_UNAVAILABLE, retryable=True)
                     # The placement and the audit of the send, before anything
                     # leaves the backend; not on record, not sent.
-                    if not await self._place(
+                    placed = await self._place(
                         assignment,
                         ExecutionPlacement.CLOUD,
                         self._cloud_agent,
                         self._cloud_model,
-                    ):
+                    )
+                    if placed is None:
                         return NodeOutcome.failed(COMPUTE_UNAVAILABLE, retryable=True)
-                    return await self._cloud.run_node(assignment)
-                if not await self._place(
+                    return await self._cloud.run_node(placed)
+                # The GPU time first: a node that cannot start locally (its
+                # budget is spent) is not on record as having run there.
+                meter = await self._join_meter(assignment, run)
+                placed = await self._place(
                     assignment,
                     ExecutionPlacement(lease.placement.value),
                     assignment.agent,
                     self._local_model,
-                ):
-                    return NodeOutcome.failed(COMPUTE_UNAVAILABLE, retryable=True)
-                meter = await self._join_meter(assignment, run)
-                started = self._clock.monotonic()
-                try:
-                    outcome = await self._run_local(assignment, lease, meter, held)
-                finally:
-                    now = self._clock.monotonic()
-                    seconds = math.ceil(max(0.0, now - started))
-                    if held:
-                        # Still running (it did not stop when it was cancelled):
-                        # the meter keeps counting it, and the time it goes on
-                        # using is charged when it ends.
-                        self._meter_held(assignment, meter, held[0], now)
-                    if meter is not None:
-                        meter.stop(run, now)
+                )
+                if placed is None:
+                    outcome = _UNPLACED
+                else:
+                    started = self._clock.monotonic()
+                    try:
+                        outcome = await self._run_local(placed, lease, meter, held)
+                    finally:
+                        now = self._clock.monotonic()
+                        seconds = math.ceil(max(0.0, now - started))
+                        if held:
+                            # Still running (it did not stop when it was cancelled):
+                            # the meter keeps counting it, and the time it goes on
+                            # using is charged when it ends.
+                            self._meter_held(assignment, meter, held[0], now)
+                        if meter is not None:
+                            meter.stop(run, now)
         except BaseException:
             # The GPU time was spent although the node failed or was cancelled:
             # charged too, or failing nodes that are retried would bypass the
@@ -298,6 +310,9 @@ class HybridRuntime:
             raise
         # Raises NodeStopped when the budget is now used up: it passes.
         await self._settle(assignment, meter, run, seconds)
+        if outcome is _UNPLACED:
+            # Its placement could not be recorded: it did not run (fail closed).
+            return NodeOutcome.failed(COMPUTE_UNAVAILABLE, retryable=True)
         if outcome is _REVOKED:
             # The scheduler took the GPU back (VRAM pressure on Background work):
             # not now, the node may run again later.
@@ -314,15 +329,20 @@ class HybridRuntime:
         placement: ExecutionPlacement,
         agent: str,
         model: str,
-    ) -> bool:
-        """Record where the attempt runs (issue #133). ``False``: it could not be
-        recorded, and the node must not run there. An assignment without
-        ``placement`` (a planner call, a caller that records nothing) runs
-        locally unrecorded; it never reaches the cloud (``_cloud_allowed``).
-        ``NodeStopped`` passes."""
+    ) -> NodeAssignment | None:
+        """Record where the attempt runs (issue #133) and return the assignment
+        for the runtime that runs it there. ``None``: it could not be recorded,
+        and the node must not run there. An assignment without ``placement`` (a
+        planner call, a caller that records nothing) runs locally unrecorded; it
+        never reaches the cloud (``_cloud_allowed``). ``NodeStopped`` passes.
+
+        The returned assignment's ``placement`` is already on record: the chosen
+        runtime may record the same place, agent and model again (the
+        ``NodePlacement`` contract asks a runtime that sends to the cloud to
+        record first), and is refused any other."""
         recorder = assignment.placement
         if recorder is None:
-            return placement is not ExecutionPlacement.CLOUD
+            return None if placement is ExecutionPlacement.CLOUD else assignment
         try:
             await recorder.record(placement, agent=agent, model=model)
         except NodeStopped:
@@ -333,8 +353,10 @@ class HybridRuntime:
             logger.warning(
                 "The placement of a node could not be recorded: it does not run"
             )
-            return False
-        return True
+            return None
+        return dataclasses.replace(
+            assignment, placement=_Recorded(placement, agent, model)
+        )
 
     async def _cloud_allowed(self, assignment: NodeAssignment) -> bool:
         if self._cloud is None or self._policy is None:
@@ -530,6 +552,24 @@ class HybridRuntime:
             finally:
                 if not work.done():
                     held.append(work)
+
+
+class _Recorded:
+    """The ``placement`` that ``HybridRuntime`` hands the runtime it chose: the
+    attempt's placement is already on record. Recording the same place, agent
+    and model again is accepted (it is on record); any other is refused, as the
+    orchestrator refuses a second placement."""
+
+    __slots__ = ("_placement",)
+
+    def __init__(self, placement: ExecutionPlacement, agent: str, model: str) -> None:
+        self._placement = (placement, agent, model)
+
+    async def record(
+        self, placement: ExecutionPlacement, *, agent: str, model: str
+    ) -> None:
+        if (placement, agent, model) != self._placement:
+            raise InvalidOrchestratorArgumentError("placement")
 
 
 class _GpuMeter:

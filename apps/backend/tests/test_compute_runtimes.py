@@ -81,6 +81,9 @@ class FakePlacement:
     async def record(self, placement, *, agent, model):
         if self.error is not None:
             raise self.error
+        # Once, like the orchestrator's handle.
+        if self.records:
+            raise InvalidOrchestratorArgumentError("placement")
         self.records.append((placement, agent, model))
 
 
@@ -810,6 +813,68 @@ class HybridPlacementTest(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(self.cloud.calls, [])
         self.assertEqual(self.scheduler.status().cloud_leases, 0)
+
+    async def test_a_runtime_that_records_its_own_placement_still_runs(self):
+        # The placement is on record before the chosen runtime starts; a runtime
+        # that follows the ``NodePlacement`` contract and records it again (the
+        # same place, agent and model) is not refused as a second placement.
+        class SelfRecording(Recorder):
+            def __init__(self, name, placement, agent, model):
+                super().__init__(name)
+                self.place = (placement, agent, model)
+
+            async def run_node(self, assignment):
+                placement, agent, model = self.place
+                await assignment.placement.record(placement, agent=agent, model=model)
+                return await super().run_node(assignment)
+
+        self.cloud = SelfRecording(
+            "cloud", ExecutionPlacement.CLOUD, "codex", "gpt-5-codex"
+        )
+        self.local = SelfRecording(
+            "local", ExecutionPlacement.LOCAL_GPU, "local", "main"
+        )
+        outcome = await self.runtime().run_node(assignment(placement=self.placement))
+        self.assertEqual(outcome.result.summary, "done by local")
+        await fill_main(self.scheduler)
+        placement = FakePlacement()
+        outcome = await self.runtime().run_node(
+            assignment(goal="x" * 90_000, placement=placement)
+        )
+        self.assertEqual(outcome.result.summary, "done by cloud")
+        self.assertEqual(
+            placement.records, [(ExecutionPlacement.CLOUD, "codex", "gpt-5-codex")]
+        )
+        self.assertEqual(
+            self.placement.records, [(ExecutionPlacement.LOCAL_GPU, "local", "main")]
+        )
+
+    async def test_a_runtime_cannot_record_another_placement_than_its_own(self):
+        class Lying(Recorder):
+            async def run_node(self, assignment):
+                await assignment.placement.record(
+                    ExecutionPlacement.LOCAL_GPU, agent="local", model="main"
+                )
+                return await super().run_node(assignment)
+
+        self.cloud = Lying("cloud")
+        await fill_main(self.scheduler)
+        with self.assertRaises(InvalidOrchestratorArgumentError):
+            await self.runtime().run_node(
+                assignment(goal="x" * 90_000, placement=self.placement)
+            )
+        self.assertEqual(
+            self.placement.records, [(ExecutionPlacement.CLOUD, "codex", "gpt-5-codex")]
+        )
+
+    async def test_no_gpu_time_left_records_no_local_placement(self):
+        # The node does not start locally (its budget is spent): nothing may say
+        # that it ran there.
+        work = assignment(placement=self.placement, budget=FakeBudget(0))
+        with self.assertRaises(NodeStopped):
+            await self.runtime().run_node(work)
+        self.assertEqual(self.local.calls, [])
+        self.assertEqual(self.placement.records, [])
 
     async def test_a_cloud_runtime_needs_its_agent_and_model(self):
         for missing in ("cloud_agent", "cloud_model"):

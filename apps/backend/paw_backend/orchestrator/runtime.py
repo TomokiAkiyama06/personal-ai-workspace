@@ -86,7 +86,9 @@ class NodePlacement(Protocol):
         returns, the send is on record; when it raises, nothing may be sent.
         Raises ``NodeStopped`` when the attempt can no longer act, and
         ``InvalidOrchestratorArgumentError`` for a wrong argument or a second
-        call."""
+        call. A runtime that hands the node to another one after recording
+        (``HybridRuntime``) passes it a ``placement`` that accepts the same
+        place, agent and model again and refuses any other."""
         ...
 
 
