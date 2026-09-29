@@ -3498,7 +3498,7 @@ Rerank（Reranker Protocol）→ 構造化 Score（confirmed・鮮度・importan
 
 どの変更も**新しい Version**で、古い Version は履歴に残ります（物理的な上書き・削除はしません）。現在の Version は `version_number` が最大のものです。
 
-**本文の長さ（Issue #147、Decision 0053 Proposed）**: `memory_versions.content` は 1〜20,000 文字です。Service は長すぎる本文を `MemoryInputError`（`content`、`TOO_LONG`）で先に拒否し、Migration `0147` が同じ上限を CHECK 制約 `ck_memory_versions_content_length` にします（Application の Role にも効き、Role は制約を外せません。値は `memory.models.MAX_VERSION_CONTENT_CHARS`、`memory.versioning.limits` と `memory.shared.limits` の `MAX_CONTENT_CHARS` と食い違えば Test が失敗します）。上限を超える行が既にあれば、Migration は件数・先頭 5 件の Version の ID・一覧の SQL（`SELECT id, memory_id, status, char_length(content) FROM memory_versions WHERE char_length(content) > 20000 ORDER BY memory_id, id`）を示して止まり、Schema もデータも変えません（切り詰めない）。行を人が片付けてから、もう一度 `alembic upgrade head` を実行します。
+**本文の長さ（Issue #147、Decision 0053）**: `memory_versions.content` は 1〜20,000 文字です。Service は長すぎる本文を `MemoryInputError`（`content`、`TOO_LONG`）で先に拒否し、Migration `0147` が同じ上限を CHECK 制約 `ck_memory_versions_content_length` にします（Application の Role にも効き、Role は制約を外せません。値は `memory.models.MAX_VERSION_CONTENT_CHARS`、`memory.versioning.limits` と `memory.shared.limits` の `MAX_CONTENT_CHARS` と食い違えば Test が失敗します）。上限を超える行が既にあれば、Migration は件数・先頭 5 件の Version の ID・一覧の SQL（`SELECT id, memory_id, status, char_length(content) FROM memory_versions WHERE char_length(content) > 20000 ORDER BY memory_id, id`）を示して止まり、Schema もデータも変えません（切り詰めない）。行を人が片付けてから、もう一度 `alembic upgrade head` を実行します。
 
 | 操作 | 現在の Version `n` | 新しい Version | Relation（新 → 旧） |
 | --- | --- | --- | --- |

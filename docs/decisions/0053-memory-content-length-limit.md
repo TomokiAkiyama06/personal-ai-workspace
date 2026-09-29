@@ -1,9 +1,10 @@
 # Memory の本文（`memory_versions.content`）の DB の長さの上限と、上限を超える既存の行の扱い
 
-- Status: Proposed
+- Status: Approved
 - Date: 2026-09-29
 - Scope: Issue [#147](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/147)（Memory の本文に DB の長さの上限を入れる）。Migration `0147`（`ck_memory_versions_content_length`）
 - Supersedes: なし。[Decision 0038](0038-memory-markdown-projection.md) の 5 の「`memory_versions.content` には長さの上限がない」という前提を、この Decision が補う（0038 は書き換えない。5・10 の切り詰めの処理と表示は変えない）
+- Approval: 2026-09-29、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで「推奨どおり」と回答して承認（1〜3 の全点。1 は案 1A。末尾の「承認時の決定」）
 
 ## 背景
 
@@ -64,8 +65,12 @@ HINT:  Decision 0053: list them with: SELECT id, memory_id, status, char_length(
 - 上限を超える行があると、その環境の `alembic upgrade head` は 0147 で止まり、後続の Revision も適用されない。エラーは件数と一覧の SQL を示すので、手当の後にもう一度実行すれば進む。
 - 20,000 文字を超える本文を Memory に残したい用途（長い手順書など）は、Memory を分けるか、Research Scratch（`research/scratch/limits.py` の 100,000 文字）等の別の置き場所を使うことになる。これは Service の上限としてすでにそうである。
 
-## 決めてほしいこと
+## 決めてほしいこと（2026-09-29 に推奨どおり承認）
 
 1. **上限を超える既存の行**: Migration `0147` は、上限を超える行があれば件数・先頭 5 件の ID・一覧の SQL を示して止まり、何も変えない（案 1A）。切り詰め（1B）・`NOT VALID`（1C）・別の確認 Command（1D）は採らない。手当は Human が行ごとに行う。**推奨: 1A。**
 2. **Projection の切り詰め**: Decision 0038 の 5・10 の切り詰めと表示は、上限の後も防御として残す。**推奨: 残す。**
 3. **上限の値と置き場所**: 20,000 文字。Model の `MAX_VERSION_CONTENT_CHARS` と Migration の数を Schema の値とし、2 つの Service の上限との食い違いを Test で検出する。Journal の 8,000 文字は変えない。**推奨: このとおり。**
+
+## 承認時の決定（2026-09-29）
+
+Human は、作業 Session で判断が必要な点について推奨つきの説明を受け、「推奨どおり」と回答して承認した（1〜3 の全点。1 は案 1A）。**すべて推奨どおり**で、個別の変更はない。1 は案 1A（20,000 文字を超える行があれば Migration を止め、件数と先頭 5 件の id と一覧の SQL を示し、何も変えない。行は人が処理する）とする。
