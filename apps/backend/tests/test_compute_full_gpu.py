@@ -338,6 +338,38 @@ class StartTest(FullGpuTestCase):
         self.assertEqual(self.scheduler.gpu_task_ids(), {lease.task_id})
         await lease.release()
 
+    async def test_a_task_refused_after_the_last_tick_is_held_at_the_end(self):
+        # Codex review (#161, P2): the end forgets the refusals with the lease.
+        await self.mode.start(ADMIN)
+        late = uuid.uuid4()
+        self.holds.running.add(late)
+        with self.assertRaises(ComputeUnavailableError):
+            await self.scheduler.acquire(coding(late), wait_seconds=0)
+        await self.mode.end(ADMIN)
+        self.assertEqual(self.holds.held, [late])
+
+    async def test_a_task_that_runs_again_during_the_mode_is_held_again(self):
+        # Codex review (#161, P2): not running when first looked at (waiting for
+        # something else), then let run by another rule while the mode lasts.
+        await self.mode.start(ADMIN)
+        task_id = uuid.uuid4()
+        waiter = asyncio.create_task(
+            self.scheduler.acquire(coding(task_id), wait_seconds=600)
+        )
+        await settle()
+        await self.mode.tick()
+        self.assertEqual(self.holds.held, [])
+        self.holds.running.add(task_id)  # unblocked by someone else
+        await self.mode.tick()
+        self.assertEqual(self.holds.held, [task_id])
+        self.holds.held.remove(task_id)
+        self.holds.running.add(task_id)  # and once more
+        await self.mode.tick()
+        self.assertEqual(self.holds.held, [task_id])
+        waiter.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await waiter
+
     async def test_a_task_that_cannot_be_held_now_is_tried_again(self):
         self.holds.fail_hold = True
         task_id, lease = await self.running_task()

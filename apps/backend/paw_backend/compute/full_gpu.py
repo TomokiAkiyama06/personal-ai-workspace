@@ -184,7 +184,6 @@ class FullGpuMode:
         self._state = FullGpuState.RESUMING
         self._lease: ComputeLease | None = None
         self._held: set[uuid.UUID] = set()
-        self._tried: set[uuid.UUID] = set()  # not running when looked at
         self._preempted = False
         self._failure: ExclusiveFailure | None = None
         self._ended_at: float | None = None
@@ -251,7 +250,6 @@ class FullGpuMode:
             request = ComputeRequest(ResourceClass.EXCLUSIVE, vram_bytes=vram_bytes)
             if self._state is FullGpuState.OFF:
                 self._held.clear()
-                self._tried.clear()
             self._state = FullGpuState.STARTING
             self._preempted = False
             self._failure = None
@@ -284,6 +282,9 @@ class FullGpuMode:
         async with self._lock:
             if self._state is not FullGpuState.ON or self._lease is None:
                 raise FullGpuModeStateError(self._state.value)
+            # A last sweep: a task refused since the last tick is held before
+            # the scheduler forgets it with the lease (Codex review #161).
+            await self._hold_gpu_tasks()
             lease, self._lease = self._lease, None
             await lease.release()
             self._state = FullGpuState.RESUMING
@@ -384,8 +385,9 @@ class FullGpuMode:
 
     async def _hold_gpu_tasks(self) -> None:
         for task_id in self._scheduler.gpu_task_ids():
-            if task_id in self._held or task_id in self._tried:
-                continue
+            # Asked again at every sweep, also when it was held or not running
+            # before: another rule or a person may have let it run since
+            # (Codex review #161). A task that is not running is not written.
             try:
                 held = await self._holds.hold(task_id)
             except asyncio.CancelledError:
@@ -396,7 +398,8 @@ class FullGpuMode:
                     type(error).__name__,
                 )
                 continue
-            (self._held if held is True else self._tried).add(task_id)
+            if held is True:
+                self._held.add(task_id)
 
     def _main_resident(self) -> bool:
         return all(
