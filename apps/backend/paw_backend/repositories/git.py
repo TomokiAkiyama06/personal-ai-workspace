@@ -26,6 +26,13 @@ The rules, all enforced here and nowhere else:
 * **Bounded.** A timeout (the whole process group is killed), and a limit on how
   much a command may write (a command that writes more is killed). Output is
   strictly UTF-8; anything else is refused.
+* **A push goes where it says.** Before a ``push``, the configuration it would
+  read is listed (``git config --includes --show-scope --list``, with the same
+  ``-c`` options) and the push is refused (``GitFailure.UNSAFE_CONFIGURATION``)
+  when the repository's own configuration has a ``url.<base>.insteadOf`` or
+  ``pushInsteadOf``: it would send the push to another URL than the one named
+  (Decision 0052; the SSH wrapper's ``redirects_push``). The runner's own
+  ``extra_config`` (scope ``command``) is the deployment's, not the repository's.
 * **Only as the account's own user.** git runs as the backend's own Linux user. It
   is refused (``GitFailure.IDENTITY_MISMATCH``) unless that user is the account
   the checkout belongs to: a backend that runs as another user must supply a
@@ -216,6 +223,34 @@ def git_environment(
     return environment
 
 
+def redirects_push(key: str) -> bool:
+    """Whether the configuration ``key`` sends a push elsewhere than the URL it
+    names: ``url.<base>.insteadOf`` / ``pushInsteadOf`` rewrite it (Decision
+    0052). A named remote's ``url`` / ``pushurl`` do not apply: the push names
+    a URL, not a remote."""
+    key = key.lower()
+    section, _, rest = key.partition(".")
+    variable = key.rpartition(".")[2]
+    return (
+        section == "url" and "." in rest and variable in ("insteadof", "pushinsteadof")
+    )
+
+
+def push_redirected(listed: str) -> bool:
+    """Whether the output of ``git config --show-scope --list -z`` has a
+    :func:`redirects_push` key outside the scope ``command``; output that is
+    not that shape counts as one (refused, never guessed)."""
+    words = listed.split("\0")
+    if words[-1:] == [""]:
+        words.pop()
+    if len(words) % 2:
+        return True
+    for scope, entry in zip(words[::2], words[1::2], strict=True):
+        if scope != "command" and redirects_push(entry.partition("\n")[0]):
+            return True
+    return False
+
+
 def validate_allowed_protocols(allowed_protocols: Collection[str]) -> tuple[str, ...]:
     """A non-empty tuple of protocol names, or ``ValueError``.
 
@@ -299,14 +334,25 @@ class SubprocessGitRunner:
         name = command_name(args)
         if account.uid != os.geteuid():
             raise GitCommandError(name, GitFailure.IDENTITY_MISMATCH)
-        argv = [
-            self._git(),
-            *git_config_arguments(self._protocols, self._extra),
-            *args,
-        ]
+        prefix = [self._git(), *git_config_arguments(self._protocols, self._extra)]
+        environment = git_environment(account, path=self._path, ceiling=ceiling)
+        if name == "push":
+            listed = await run_subprocess(
+                [*prefix, "config", "--includes", "--show-scope", "--list", "-z"],
+                env=environment,
+                cwd=cwd,
+                timeout_s=timeout_s,
+                max_output_bytes=self._max_output,
+                log_name=name,
+            )
+            if listed.returncode != 0:
+                raise GitCommandError(name, GitFailure.NONZERO_EXIT)
+            if push_redirected(listed.stdout):
+                logger.warning("git push refused (%s)", "unsafe_configuration")
+                raise GitCommandError(name, GitFailure.UNSAFE_CONFIGURATION)
         return await run_subprocess(
-            argv,
-            env=git_environment(account, path=self._path, ceiling=ceiling),
+            [*prefix, *args],
+            env=environment,
             cwd=cwd,
             timeout_s=timeout_s,
             max_output_bytes=self._max_output,

@@ -253,6 +253,70 @@ class ConfigurationTest(GitTestCase):
         self.assertEqual(result.returncode, 0)
         self.assertEqual(os.listdir(f"{destination}/lib"), [])  # empty: not fetched
 
+    async def test_a_push_the_repository_would_redirect_is_never_run(self):
+        # Decision 0052 / Codex review of #159: the repository's own
+        # ``url.<base>.pushInsteadOf`` / ``insteadOf`` would send the push to
+        # another URL than the one named; the deployment's own rewriting
+        # (``extra_config``, scope ``command``) is not the repository's.
+        named = self.world.make_bare("acme", "named")
+        other = self.world.make_bare("acme", "other")
+        repo = f"{self.home}/repo"
+        self.world.make_repository(repo)
+        head = git("rev-parse", "HEAD", cwd=repo)
+        runner = self.runner(allowed_protocols=("https", "file"))
+        push = ["push", "--quiet", "--", f"file://{named}", f"{head}:refs/heads/x"]
+
+        def pushed(bare):
+            return git("rev-parse", "--verify", "--quiet", "refs/heads/x",
+                       cwd=bare, check=False)  # fmt: skip
+
+        for variable in ("pushInsteadOf", "insteadOf", "PUSHINSTEADOF"):
+            with self.subTest(variable=variable):
+                key = f"url.file://{other}.{variable}"
+                git("config", key, f"file://{named}", cwd=repo)
+                with self.assertRaises(GitCommandError) as caught:
+                    await self.run_git(push, cwd=repo, runner=runner)
+                self.assertEqual(
+                    caught.exception.failure, GitFailure.UNSAFE_CONFIGURATION
+                )
+                self.assertEqual(pushed(other), "")
+                # The trap is armed: plain git follows the rewriting.
+                git("-c", "protocol.file.allow=always", *push, cwd=repo)
+                self.assertEqual(pushed(other), head)
+                git("update-ref", "-d", "refs/heads/x", cwd=other)
+                git("config", "--unset", key, cwd=repo)
+        # Without a rewriting of the repository's own, the push runs.
+        result = await self.run_git(push, cwd=repo, runner=runner)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(git("rev-parse", "refs/heads/x", cwd=named), head)
+        # A rewriting of the deployment's own (scope ``command``) is allowed.
+        rewriting = self.runner(
+            allowed_protocols=("https", "file"),
+            extra_config=[(f"url.file://{named}.insteadOf", "https://example.test/r")],
+        )
+        again = [
+            "push",
+            "--quiet",
+            "--",
+            "https://example.test/r",
+            f"{head}:refs/heads/y",
+        ]
+        result = await self.run_git(again, cwd=repo, runner=rewriting)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(git("rev-parse", "refs/heads/y", cwd=named), head)
+
+    def test_a_listing_that_is_not_the_expected_shape_counts_as_a_redirect(self):
+        redirected = git_module.push_redirected
+        self.assertFalse(redirected(""))
+        self.assertFalse(redirected("local\0remote.origin.url\nhttps://x/r.git\0"))
+        self.assertFalse(redirected("command\0url.file:///a/.insteadof\nhttps://x/\0"))
+        self.assertTrue(redirected("local\0url.file:///a/.insteadof\nhttps://x/\0"))
+        self.assertTrue(redirected("worktree\0url.a.pushinsteadof\nb\0"))
+        self.assertTrue(redirected("local\0x.y\nz\0dangling\0"))
+        # ``url.<base>`` itself, or another variable of it, is not a rewriting.
+        self.assertFalse(git_module.redirects_push("url.insteadof"))
+        self.assertFalse(git_module.redirects_push("remote.origin.pushurl"))
+
 
 @requires_git
 class LimitsTest(GitTestCase):

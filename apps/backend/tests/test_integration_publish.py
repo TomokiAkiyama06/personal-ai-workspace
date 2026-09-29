@@ -292,6 +292,8 @@ class PublisherTest(unittest.IsolatedAsyncioTestCase):
                 "credential.helper=!/opt/gh/bin/gh auth git-credential",
                 "push",
                 "--quiet",
+                "--no-follow-tags",
+                "--no-recurse-submodules",
                 "--",
                 REMOTE,
                 f"{self.head}:refs/heads/{self.branch}",
@@ -302,6 +304,50 @@ class PublisherTest(unittest.IsolatedAsyncioTestCase):
         )
         # Nothing but reads, the push and nothing that moves a local branch.
         self.assertEqual(set(self.runner.subcommands()), {"symbolic-ref", "push"})
+
+    async def test_a_url_rewrite_of_the_checkout_never_redirects_the_push(self):
+        # Codex review of #159: the checkout's own ``url.<base>.pushInsteadOf``
+        # (or ``insteadOf``) would send the checked commit elsewhere; the local
+        # runner refuses the push, as the SSH wrapper does (``redirects_push``).
+        elsewhere = self.world.make_bare("elsewhere", REPO)
+        for variable in ("pushInsteadOf", "insteadOf"):
+            with self.subTest(variable=variable):
+                key = f"url.file://{self.world.bare_root}/elsewhere/.{variable}"
+                git("config", key, f"https://{HOST}/{OWNER}/", cwd=self.checkout)
+                try:
+                    await self.refused(PublishProblem.PUSH_FAILED)
+                finally:
+                    git("config", "--unset", key, cwd=self.checkout)
+                found = git("rev-parse", "--verify", "--quiet",
+                            f"refs/heads/{self.branch}", cwd=elsewhere,
+                            check=False)  # fmt: skip
+                self.assertEqual(found, "")
+                self.assertIsNone(self.remote_branch())
+                self.assertEqual(self.github.calls, [])
+
+    async def test_a_rewrite_in_an_included_file_is_refused_too(self):
+        elsewhere = self.world.make_bare("elsewhere", REPO)
+        included = f"{self.world.root}/rewrite.config"
+        key = f"url.file://{self.world.bare_root}/elsewhere/.pushInsteadOf"
+        git("config", "--file", included, key, f"https://{HOST}/{OWNER}/")
+        git("config", "include.path", included, cwd=self.checkout)
+
+        await self.refused(PublishProblem.PUSH_FAILED)
+
+        found = git("rev-parse", "--verify", "--quiet", f"refs/heads/{self.branch}",
+                    cwd=elsewhere, check=False)  # fmt: skip
+        self.assertEqual(found, "")
+
+    async def test_configured_follow_tags_never_pushes_a_tag(self):
+        # Codex review of #159: ``push.followTags=true`` in the checkout would
+        # also push an annotated tag of the checked commit (outside ``paw/``).
+        git("config", "push.followTags", "true", cwd=self.checkout)
+        git("tag", "-a", "-m", "release", "v9", self.head, cwd=self.checkout)
+
+        await self.publisher().publish(self.request())
+
+        self.assertEqual(self.remote_branch(), self.head)
+        self.assertEqual(git("tag", "--list", cwd=self.bare), "")
 
     async def test_a_commit_made_after_the_checks_is_not_pushed(self):
         checked = self.head

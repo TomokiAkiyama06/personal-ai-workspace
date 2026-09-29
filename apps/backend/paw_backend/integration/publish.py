@@ -172,8 +172,12 @@ def _gh_credential_helper(gh_executable: str) -> str:
 def push_arguments(gh_executable: str, url: str, commit: str, branch: str) -> list[str]:
     """``git push`` of exactly ``commit`` to ``refs/heads/<branch>`` of ``url``,
     with gh's credential helper only (an empty ``credential.helper`` first drops
-    every helper the repository's own configuration names). The form is fixed:
-    the SSH wrapper accepts nothing else (Decision 0052)."""
+    every helper the repository's own configuration names). ``--no-follow-tags``
+    and ``--no-recurse-submodules`` override the checkout's ``push.followTags``
+    (an annotated tag of the commit would be pushed too) and
+    ``push.recurseSubmodules`` (a submodule's commits would be pushed to its own
+    remote): nothing but the one branch is written (Codex review of #159). The
+    form is fixed: the SSH wrapper accepts nothing else (Decision 0052)."""
     return [
         "-c",
         "credential.helper=",
@@ -181,6 +185,8 @@ def push_arguments(gh_executable: str, url: str, commit: str, branch: str) -> li
         _gh_credential_helper(gh_executable),
         "push",
         "--quiet",
+        "--no-follow-tags",
+        "--no-recurse-submodules",
         "--",
         url,
         f"{commit}:refs/heads/{branch}",

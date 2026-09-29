@@ -116,6 +116,8 @@ _PUSH_URL = re.compile(
     r"https://(?P<host>[a-z0-9.-]{1,253})/[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})"
     r"/[A-Za-z0-9._-]{1,100}\.git"
 )
+#: What ``push`` takes in front of its URL and refspec, exactly (:func:`_check_push`).
+PUSH_OPTIONS = ("--quiet", "--no-follow-tags", "--no-recurse-submodules", "--")
 _CONFIG_KEY = re.compile(r"[A-Za-z][A-Za-z0-9-]*(\.[^\s=]+)*\.[A-Za-z][A-Za-z0-9-]*")
 
 
@@ -689,21 +691,25 @@ def gh_credential_helper(config: Config) -> str | None:
 
 
 def _check_push(args: list[str], places: Places, config: Config) -> None:
-    """Decision 0052 (issue #132): ``push --quiet -- <URL> <commit>:refs/heads/
-    paw/...``. One commit id (never a ``+``: no force, no other refspec, no
-    option such as ``--delete``, ``--mirror`` or ``--tags``) to one ``paw/``
-    branch of ``https://<host>/<owner>/<repo>.git`` on a host the administrator
-    allowed (``--push-host``), and only with gh's credential helper configured
-    (``--gh``)."""
+    """Decision 0052 (issue #132): ``push --quiet --no-follow-tags
+    --no-recurse-submodules -- <URL> <commit>:refs/heads/paw/...``. One commit
+    id (never a ``+``: no force, no other refspec, no option such as
+    ``--delete``, ``--mirror`` or ``--tags``) to one ``paw/`` branch of
+    ``https://<host>/<owner>/<repo>.git`` on a host the administrator allowed
+    (``--push-host``), and only with gh's credential helper configured
+    (``--gh``). The two ``--no-`` options are required: they override the
+    repository's ``push.followTags`` (an annotated tag would be pushed too)
+    and ``push.recurseSubmodules`` (a submodule's commits would be pushed to
+    its own remote); a push without them is refused (Codex review of #159)."""
     if config.gh is None:
         raise Rejected("config_not_allowed")
-    if len(args) == 4 and args[:2] == ["--quiet", "--"]:
-        found = _PUSH_URL.fullmatch(args[2])
-        if found is None or not _url(args[2], config) or ".." in args[2]:
+    if len(args) == 6 and tuple(args[:4]) == PUSH_OPTIONS:
+        found = _PUSH_URL.fullmatch(args[4])
+        if found is None or not _url(args[4], config) or ".." in args[4]:
             raise Rejected("bad_arguments")
         if found["host"] not in config.push_hosts:
             raise Rejected("push_host_not_allowed")
-        source, separator, destination = args[3].partition(":")
+        source, separator, destination = args[5].partition(":")
         if separator and _OBJECT_ID.fullmatch(source) and _paw_ref(destination):
             return
     raise Rejected("bad_arguments")

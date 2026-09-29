@@ -1130,7 +1130,7 @@ class PushTest(WrapperTestCase):
         super().setUp()
         self.config = self.make_config(gh="/usr/bin/gh", push_hosts=("github.com",))
 
-    def push(self, *, url=None, refspec=None, prefix=None, tail=None):
+    def push(self, *, url=None, refspec=None, prefix=None, tail=None, options=None):
         return [
             *(
                 ["-c", "credential.helper=", "-c", GH_HELPER]
@@ -1138,12 +1138,12 @@ class PushTest(WrapperTestCase):
                 else prefix
             ),
             "push",
-            "--quiet",
-            "--",
+            *(options if options is not None else ["--quiet", "--no-follow-tags",
+                                                   "--no-recurse-submodules", "--"]),
             url or self.URL,
             refspec or f"{COMMIT}:refs/heads/{PUSHED}",
             *(tail or []),
-        ]
+        ]  # fmt: skip
 
     def test_the_publishers_push_is_accepted_as_sent(self):
         args = push_arguments("/usr/bin/gh", self.URL, COMMIT, PUSHED)
@@ -1232,6 +1232,32 @@ class PushTest(WrapperTestCase):
             "no destination": self.push(refspec=COMMIT),
             "two refspecs": self.push(tail=[f"{COMMIT}:refs/heads/{other}"]),
             "a remote name": self.push(url="origin"),
+            # Codex review of #159: the repository's push.followTags /
+            # push.recurseSubmodules are overridden only by the fixed options.
+            "without --no-follow-tags": self.push(
+                options=["--quiet", "--no-recurse-submodules", "--"]
+            ),
+            "without --no-recurse-submodules": self.push(
+                options=["--quiet", "--no-follow-tags", "--"]
+            ),
+            "the earlier form": self.push(options=["--quiet", "--"]),
+            "--follow-tags": self.push(
+                options=["--quiet", "--follow-tags", "--no-recurse-submodules", "--"]
+            ),
+            "--tags": self.push(
+                options=["--quiet", "--no-follow-tags", "--tags", "--"]
+            ),
+            "reordered": self.push(
+                options=["--no-follow-tags", "--quiet", "--no-recurse-submodules", "--"]
+            ),
+            "--recurse-submodules=on-demand": self.push(
+                options=[
+                    "--quiet",
+                    "--no-follow-tags",
+                    "--recurse-submodules=on-demand",
+                    "--",
+                ]
+            ),  # fmt: skip
             "another transport": self.push(url="ssh://git@github.com/o/r.git"),
             "an option": [
                 "-c",
@@ -1932,6 +1958,10 @@ class EndToEndTest(unittest.IsolatedAsyncioTestCase):
         git("clone", "--quiet", bare, repo)
         git("commit", "--quiet", "--allow-empty", "-m", "checked", cwd=repo)
         commit = git("rev-parse", "HEAD", cwd=repo)
+        # Codex review of #159: the repository's push.followTags would also
+        # push this annotated tag of the commit (outside paw/).
+        git("config", "push.followTags", "true", cwd=repo)
+        git("tag", "-a", "-m", "release", "v9", commit, cwd=repo)
         main = git("rev-parse", "refs/heads/main", cwd=bare)
         args = push_arguments(
             "/usr/bin/gh", "https://github.com/owner/repo.git", commit, PUSHED
@@ -1963,6 +1993,7 @@ class EndToEndTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.returncode, 0)
         self.assertEqual(git("rev-parse", f"refs/heads/{PUSHED}", cwd=bare), commit)
         self.assertEqual(git("rev-parse", "refs/heads/main", cwd=bare), main)
+        self.assertEqual(git("tag", "--list", cwd=bare), "")
 
     async def run_git(self, args, *, cwd, ceiling=None):
         return await self.runner.run(
