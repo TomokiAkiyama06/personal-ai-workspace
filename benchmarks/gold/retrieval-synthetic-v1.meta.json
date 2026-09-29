@@ -1,0 +1,1449 @@
+{
+  "dataset": "retrieval-synthetic-v1",
+  "synthetic": true,
+  "grade_scale": {
+    "3": "directly answers the query",
+    "2": "needed supporting context",
+    "1": "applicable but marginal"
+  },
+  "queries": [
+    {
+      "id": "rq-001",
+      "grades": {
+        "mem-001": 3
+      },
+      "hard_negatives": {
+        "mem-002": "superseded",
+        "mem-003": "leakage",
+        "mem-004": "wrong-scope"
+      },
+      "tags": [
+        "ja",
+        "leakage",
+        "similar-project",
+        "superseded"
+      ]
+    },
+    {
+      "id": "rq-002",
+      "grades": {
+        "mem-005": 3,
+        "mem-006": 2
+      },
+      "hard_negatives": {
+        "mem-007": "superseded",
+        "mem-008": "leakage",
+        "mem-009": "wrong-scope"
+      },
+      "tags": [
+        "en",
+        "leakage",
+        "sibling-repo",
+        "superseded"
+      ]
+    },
+    {
+      "id": "rq-003",
+      "grades": {
+        "mem-005": 1,
+        "mem-006": 3
+      },
+      "hard_negatives": {
+        "mem-007": "superseded",
+        "mem-008": "leakage"
+      },
+      "tags": [
+        "ja",
+        "leakage",
+        "superseded"
+      ]
+    },
+    {
+      "id": "rq-004",
+      "grades": {
+        "mem-010": 1,
+        "mem-011": 3
+      },
+      "hard_negatives": {
+        "mem-012": "wrong-scope",
+        "mem-013": "deprecated"
+      },
+      "tags": [
+        "cross-project",
+        "deprecated",
+        "ja"
+      ]
+    },
+    {
+      "id": "rq-005",
+      "grades": {
+        "mem-010": 3
+      },
+      "hard_negatives": {
+        "mem-011": "near-miss"
+      },
+      "tags": [
+        "en",
+        "paraphrase"
+      ]
+    },
+    {
+      "id": "rq-006",
+      "grades": {
+        "mem-014": 3
+      },
+      "hard_negatives": {
+        "mem-015": "history",
+        "mem-016": "leakage"
+      },
+      "tags": [
+        "en",
+        "history",
+        "leakage",
+        "similar-project"
+      ]
+    },
+    {
+      "id": "rq-007",
+      "grades": {
+        "mem-017": 1,
+        "mem-018": 3
+      },
+      "hard_negatives": {
+        "mem-019": "superseded",
+        "mem-020": "leakage"
+      },
+      "tags": [
+        "cross-lingual",
+        "ja",
+        "leakage",
+        "superseded"
+      ]
+    },
+    {
+      "id": "rq-008",
+      "grades": {
+        "mem-021": 3
+      },
+      "hard_negatives": {
+        "mem-022": "wrong-scope",
+        "mem-023": "near-miss"
+      },
+      "tags": [
+        "ja",
+        "sibling-repo"
+      ]
+    },
+    {
+      "id": "rq-009",
+      "grades": {
+        "mem-023": 3
+      },
+      "hard_negatives": {
+        "mem-024": "leakage"
+      },
+      "tags": [
+        "ja",
+        "leakage",
+        "other-user",
+        "user-scope"
+      ]
+    },
+    {
+      "id": "rq-010",
+      "grades": {
+        "mem-024": 3
+      },
+      "hard_negatives": {
+        "mem-023": "leakage"
+      },
+      "tags": [
+        "en",
+        "leakage",
+        "other-user",
+        "user-scope"
+      ]
+    },
+    {
+      "id": "rq-011",
+      "grades": {
+        "mem-025": 1,
+        "mem-026": 3
+      },
+      "hard_negatives": {
+        "mem-027": "superseded",
+        "mem-028": "wrong-scope"
+      },
+      "tags": [
+        "inherited-scope",
+        "ja",
+        "superseded"
+      ]
+    },
+    {
+      "id": "rq-012",
+      "grades": {
+        "mem-026": 3
+      },
+      "hard_negatives": {
+        "mem-027": "superseded"
+      },
+      "tags": [
+        "en",
+        "inherited-scope",
+        "superseded"
+      ]
+    },
+    {
+      "id": "rq-013",
+      "grades": {
+        "mem-025": 3
+      },
+      "hard_negatives": {
+        "mem-026": "near-miss"
+      },
+      "tags": [
+        "ja"
+      ]
+    },
+    {
+      "id": "rq-014",
+      "grades": {
+        "mem-029": 3
+      },
+      "hard_negatives": {
+        "mem-030": "superseded",
+        "mem-031": "leakage"
+      },
+      "tags": [
+        "ja",
+        "leakage",
+        "similar-project",
+        "superseded"
+      ]
+    },
+    {
+      "id": "rq-015",
+      "grades": {
+        "mem-032": 3
+      },
+      "hard_negatives": {
+        "mem-033": "superseded",
+        "mem-034": "leakage",
+        "mem-035": "leakage"
+      },
+      "tags": [
+        "en",
+        "leakage",
+        "similar-project",
+        "superseded"
+      ]
+    },
+    {
+      "id": "rq-016",
+      "grades": {
+        "mem-035": 3
+      },
+      "hard_negatives": {
+        "mem-032": "wrong-scope",
+        "mem-034": "leakage"
+      },
+      "tags": [
+        "cross-project",
+        "ja",
+        "leakage"
+      ]
+    },
+    {
+      "id": "rq-017",
+      "grades": {
+        "mem-036": 3,
+        "mem-037": 3
+      },
+      "hard_negatives": {},
+      "tags": [
+        "inherited-scope",
+        "ja",
+        "multi-relevant"
+      ]
+    },
+    {
+      "id": "rq-018",
+      "grades": {
+        "mem-038": 3
+      },
+      "hard_negatives": {
+        "mem-039": "superseded",
+        "mem-040": "leakage"
+      },
+      "tags": [
+        "ja",
+        "keyword-overlap",
+        "leakage",
+        "superseded"
+      ]
+    },
+    {
+      "id": "rq-019",
+      "grades": {
+        "mem-041": 3
+      },
+      "hard_negatives": {
+        "mem-042": "superseded",
+        "mem-043": "wrong-scope"
+      },
+      "tags": [
+        "cross-project",
+        "en",
+        "superseded"
+      ]
+    },
+    {
+      "id": "rq-020",
+      "grades": {
+        "mem-044": 2,
+        "mem-045": 3
+      },
+      "hard_negatives": {
+        "mem-046": "history"
+      },
+      "tags": [
+        "conflict-pair",
+        "history",
+        "ja"
+      ]
+    },
+    {
+      "id": "rq-021",
+      "grades": {
+        "mem-047": 3,
+        "mem-048": 1
+      },
+      "hard_negatives": {
+        "mem-049": "leakage"
+      },
+      "tags": [
+        "ja",
+        "leakage",
+        "other-user",
+        "scope-precedence"
+      ]
+    },
+    {
+      "id": "rq-022",
+      "grades": {
+        "mem-047": 3,
+        "mem-049": 1
+      },
+      "hard_negatives": {
+        "mem-048": "leakage"
+      },
+      "tags": [
+        "en",
+        "leakage",
+        "other-user",
+        "scope-precedence"
+      ]
+    },
+    {
+      "id": "rq-023",
+      "grades": {
+        "mem-050": 3,
+        "mem-051": 2
+      },
+      "hard_negatives": {},
+      "tags": [
+        "cross-lingual",
+        "ja",
+        "user-scope"
+      ]
+    },
+    {
+      "id": "rq-024",
+      "grades": {
+        "mem-052": 3
+      },
+      "hard_negatives": {
+        "mem-053": "leakage"
+      },
+      "tags": [
+        "cross-lingual",
+        "en",
+        "leakage",
+        "similar-project"
+      ]
+    },
+    {
+      "id": "rq-025",
+      "grades": {
+        "mem-054": 3
+      },
+      "hard_negatives": {
+        "mem-055": "superseded",
+        "mem-056": "leakage",
+        "mem-057": "wrong-scope"
+      },
+      "tags": [
+        "cross-lingual",
+        "ja",
+        "leakage",
+        "superseded"
+      ]
+    },
+    {
+      "id": "rq-026",
+      "grades": {
+        "mem-054": 3
+      },
+      "hard_negatives": {
+        "mem-055": "superseded",
+        "mem-057": "leakage"
+      },
+      "tags": [
+        "en",
+        "inherited-scope",
+        "leakage",
+        "superseded"
+      ]
+    },
+    {
+      "id": "rq-027",
+      "grades": {
+        "mem-058": 3
+      },
+      "hard_negatives": {
+        "mem-059": "superseded",
+        "mem-060": "wrong-scope"
+      },
+      "tags": [
+        "cross-lingual",
+        "cross-project",
+        "en",
+        "superseded"
+      ]
+    },
+    {
+      "id": "rq-028",
+      "grades": {
+        "mem-058": 3
+      },
+      "hard_negatives": {
+        "mem-059": "superseded",
+        "mem-060": "leakage"
+      },
+      "tags": [
+        "ja",
+        "leakage",
+        "superseded"
+      ]
+    },
+    {
+      "id": "rq-029",
+      "grades": {
+        "mem-061": 2,
+        "mem-062": 3
+      },
+      "hard_negatives": {
+        "mem-063": "deprecated"
+      },
+      "tags": [
+        "conflict-pair",
+        "deprecated",
+        "ja"
+      ]
+    },
+    {
+      "id": "rq-030",
+      "grades": {
+        "mem-061": 3
+      },
+      "hard_negatives": {
+        "mem-062": "near-miss",
+        "mem-063": "deprecated"
+      },
+      "tags": [
+        "deprecated",
+        "en",
+        "keyword-overlap"
+      ]
+    },
+    {
+      "id": "rq-031",
+      "grades": {
+        "mem-064": 3,
+        "mem-065": 2
+      },
+      "hard_negatives": {
+        "mem-066": "leakage"
+      },
+      "tags": [
+        "inherited-scope",
+        "ja",
+        "leakage"
+      ]
+    },
+    {
+      "id": "rq-032",
+      "grades": {
+        "mem-064": 3,
+        "mem-065": 2
+      },
+      "hard_negatives": {
+        "mem-066": "wrong-scope"
+      },
+      "tags": [
+        "ja",
+        "same-text-different-principal"
+      ]
+    },
+    {
+      "id": "rq-033",
+      "grades": {
+        "mem-066": 3
+      },
+      "hard_negatives": {
+        "mem-064": "wrong-scope",
+        "mem-065": "wrong-scope"
+      },
+      "tags": [
+        "ja",
+        "same-text-different-scope"
+      ]
+    },
+    {
+      "id": "rq-034",
+      "grades": {
+        "mem-067": 3
+      },
+      "hard_negatives": {
+        "mem-068": "superseded",
+        "mem-069": "wrong-scope"
+      },
+      "tags": [
+        "cross-lingual",
+        "ja",
+        "sibling-repo",
+        "superseded"
+      ]
+    },
+    {
+      "id": "rq-035",
+      "grades": {
+        "mem-070": 3,
+        "mem-071": 3,
+        "mem-072": 1
+      },
+      "hard_negatives": {},
+      "tags": [
+        "en",
+        "inferred",
+        "multi-relevant"
+      ]
+    },
+    {
+      "id": "rq-036",
+      "grades": {
+        "mem-073": 3
+      },
+      "hard_negatives": {
+        "mem-074": "superseded"
+      },
+      "tags": [
+        "cross-lingual",
+        "ja",
+        "superseded"
+      ]
+    },
+    {
+      "id": "rq-037",
+      "grades": {
+        "mem-075": 3
+      },
+      "hard_negatives": {
+        "mem-076": "stale"
+      },
+      "tags": [
+        "cross-lingual",
+        "en",
+        "stale"
+      ]
+    },
+    {
+      "id": "rq-038",
+      "grades": {
+        "mem-077": 3
+      },
+      "hard_negatives": {
+        "mem-078": "near-miss"
+      },
+      "tags": [
+        "ja"
+      ]
+    },
+    {
+      "id": "rq-039",
+      "grades": {
+        "mem-078": 3
+      },
+      "hard_negatives": {
+        "mem-077": "near-miss"
+      },
+      "tags": [
+        "en"
+      ]
+    },
+    {
+      "id": "rq-040",
+      "grades": {
+        "mem-080": 3
+      },
+      "hard_negatives": {
+        "mem-079": "leakage"
+      },
+      "tags": [
+        "ja",
+        "leakage",
+        "same-scope-acl"
+      ]
+    },
+    {
+      "id": "rq-041",
+      "grades": {
+        "mem-079": 3,
+        "mem-080": 2
+      },
+      "hard_negatives": {},
+      "tags": [
+        "ja",
+        "same-text-different-principal"
+      ]
+    },
+    {
+      "id": "rq-042",
+      "grades": {
+        "mem-082": 3
+      },
+      "hard_negatives": {
+        "mem-083": "superseded",
+        "mem-084": "stale"
+      },
+      "tags": [
+        "cross-lingual",
+        "en",
+        "stale",
+        "superseded"
+      ]
+    },
+    {
+      "id": "rq-043",
+      "grades": {
+        "mem-081": 3
+      },
+      "hard_negatives": {},
+      "tags": [
+        "inherited-scope",
+        "ja"
+      ]
+    },
+    {
+      "id": "rq-044",
+      "grades": {
+        "mem-085": 3
+      },
+      "hard_negatives": {
+        "mem-086": "superseded"
+      },
+      "tags": [
+        "ja",
+        "keyword-overlap",
+        "superseded"
+      ]
+    },
+    {
+      "id": "rq-045",
+      "grades": {
+        "mem-087": 3
+      },
+      "hard_negatives": {
+        "mem-085": "near-miss"
+      },
+      "tags": [
+        "cross-lingual",
+        "inferred",
+        "ja"
+      ]
+    },
+    {
+      "id": "rq-046",
+      "grades": {
+        "mem-088": 3,
+        "mem-089": 3
+      },
+      "hard_negatives": {
+        "mem-090": "superseded"
+      },
+      "tags": [
+        "en",
+        "multi-relevant",
+        "superseded"
+      ]
+    },
+    {
+      "id": "rq-047",
+      "grades": {
+        "mem-091": 1,
+        "mem-093": 3
+      },
+      "hard_negatives": {
+        "mem-092": "history"
+      },
+      "tags": [
+        "history",
+        "ja"
+      ]
+    },
+    {
+      "id": "rq-048",
+      "grades": {
+        "mem-091": 3
+      },
+      "hard_negatives": {
+        "mem-092": "history",
+        "mem-093": "wrong-scope"
+      },
+      "tags": [
+        "en",
+        "history",
+        "restricted-allowed"
+      ]
+    },
+    {
+      "id": "rq-049",
+      "grades": {
+        "mem-094": 2,
+        "mem-095": 3
+      },
+      "hard_negatives": {
+        "mem-096": "superseded"
+      },
+      "tags": [
+        "cross-lingual",
+        "ja",
+        "multi-relevant",
+        "superseded"
+      ]
+    },
+    {
+      "id": "rq-050",
+      "grades": {
+        "mem-099": 3
+      },
+      "hard_negatives": {
+        "mem-098": "stale"
+      },
+      "tags": [
+        "cross-lingual",
+        "ja",
+        "stale"
+      ]
+    },
+    {
+      "id": "rq-051",
+      "grades": {
+        "mem-097": 3
+      },
+      "hard_negatives": {},
+      "tags": [
+        "cross-lingual",
+        "en"
+      ]
+    },
+    {
+      "id": "rq-052",
+      "grades": {
+        "mem-100": 3,
+        "mem-101": 3
+      },
+      "hard_negatives": {},
+      "tags": [
+        "conflict-pair",
+        "en",
+        "inferred",
+        "user-scope"
+      ]
+    },
+    {
+      "id": "rq-053",
+      "grades": {
+        "mem-102": 3
+      },
+      "hard_negatives": {},
+      "tags": [
+        "ja"
+      ]
+    },
+    {
+      "id": "rq-054",
+      "grades": {
+        "mem-003": 3,
+        "mem-104": 3
+      },
+      "hard_negatives": {
+        "mem-001": "leakage"
+      },
+      "tags": [
+        "en",
+        "leakage",
+        "multi-relevant",
+        "similar-project"
+      ]
+    },
+    {
+      "id": "rq-055",
+      "grades": {
+        "mem-105": 3
+      },
+      "hard_negatives": {
+        "mem-102": "leakage"
+      },
+      "tags": [
+        "ja",
+        "leakage",
+        "similar-project"
+      ]
+    },
+    {
+      "id": "rq-056",
+      "grades": {
+        "mem-106": 3
+      },
+      "hard_negatives": {
+        "mem-107": "superseded",
+        "mem-108": "leakage"
+      },
+      "tags": [
+        "ja",
+        "leakage",
+        "shared",
+        "superseded"
+      ]
+    },
+    {
+      "id": "rq-057",
+      "grades": {
+        "mem-106": 3,
+        "mem-108": 3
+      },
+      "hard_negatives": {
+        "mem-107": "superseded"
+      },
+      "tags": [
+        "en",
+        "multi-relevant",
+        "shared",
+        "superseded"
+      ]
+    },
+    {
+      "id": "rq-058",
+      "grades": {
+        "mem-109": 3,
+        "mem-110": 3
+      },
+      "hard_negatives": {},
+      "tags": [
+        "conflict-pair",
+        "cross-lingual",
+        "ja",
+        "shared"
+      ]
+    },
+    {
+      "id": "rq-059",
+      "grades": {
+        "mem-111": 3
+      },
+      "hard_negatives": {
+        "mem-112": "superseded"
+      },
+      "tags": [
+        "cross-lingual",
+        "en",
+        "shared",
+        "superseded"
+      ]
+    },
+    {
+      "id": "rq-060",
+      "grades": {
+        "mem-113": 3
+      },
+      "hard_negatives": {
+        "mem-114": "leakage"
+      },
+      "tags": [
+        "ja",
+        "leakage",
+        "shared"
+      ]
+    },
+    {
+      "id": "rq-061",
+      "grades": {
+        "mem-115": 3
+      },
+      "hard_negatives": {
+        "mem-116": "deprecated"
+      },
+      "tags": [
+        "cross-lingual",
+        "deprecated",
+        "en",
+        "shared",
+        "stale"
+      ]
+    },
+    {
+      "id": "rq-062",
+      "grades": {
+        "mem-117": 3
+      },
+      "hard_negatives": {
+        "mem-118": "superseded"
+      },
+      "tags": [
+        "ja",
+        "shared",
+        "superseded"
+      ]
+    },
+    {
+      "id": "rq-063",
+      "grades": {
+        "mem-120": 3
+      },
+      "hard_negatives": {},
+      "tags": [
+        "ja",
+        "shared"
+      ]
+    },
+    {
+      "id": "rq-064",
+      "grades": {
+        "mem-119": 3
+      },
+      "hard_negatives": {
+        "mem-120": "leakage"
+      },
+      "tags": [
+        "ja",
+        "leakage",
+        "shared"
+      ]
+    },
+    {
+      "id": "rq-065",
+      "grades": {
+        "mem-121": 3,
+        "mem-122": 3,
+        "mem-123": 2
+      },
+      "hard_negatives": {
+        "mem-124": "superseded",
+        "mem-125": "leakage",
+        "mem-126": "leakage"
+      },
+      "tags": [
+        "ja",
+        "leakage",
+        "multi-relevant",
+        "other-user",
+        "superseded"
+      ]
+    },
+    {
+      "id": "rq-066",
+      "grades": {
+        "mem-125": 3
+      },
+      "hard_negatives": {
+        "mem-122": "leakage"
+      },
+      "tags": [
+        "en",
+        "leakage",
+        "other-user"
+      ]
+    },
+    {
+      "id": "rq-067",
+      "grades": {
+        "mem-122": 1,
+        "mem-123": 3
+      },
+      "hard_negatives": {
+        "mem-124": "superseded"
+      },
+      "tags": [
+        "ja",
+        "superseded",
+        "user-scope"
+      ]
+    },
+    {
+      "id": "rq-068",
+      "grades": {
+        "mem-128": 3,
+        "mem-130": 3
+      },
+      "hard_negatives": {
+        "mem-127": "leakage",
+        "mem-129": "superseded"
+      },
+      "tags": [
+        "cross-lingual",
+        "inferred",
+        "ja",
+        "leakage",
+        "superseded"
+      ]
+    },
+    {
+      "id": "rq-069",
+      "grades": {
+        "mem-127": 3
+      },
+      "hard_negatives": {
+        "mem-128": "leakage"
+      },
+      "tags": [
+        "en",
+        "leakage",
+        "other-user"
+      ]
+    },
+    {
+      "id": "rq-070",
+      "grades": {
+        "mem-131": 3
+      },
+      "hard_negatives": {
+        "mem-132": "superseded",
+        "mem-133": "leakage"
+      },
+      "tags": [
+        "ja",
+        "leakage",
+        "other-user",
+        "superseded"
+      ]
+    },
+    {
+      "id": "rq-071",
+      "grades": {
+        "mem-134": 1,
+        "mem-135": 3
+      },
+      "hard_negatives": {},
+      "tags": [
+        "en",
+        "inferred",
+        "scope-precedence"
+      ]
+    },
+    {
+      "id": "rq-072",
+      "grades": {
+        "mem-136": 1,
+        "mem-137": 3
+      },
+      "hard_negatives": {},
+      "tags": [
+        "high-risk",
+        "inferred",
+        "ja",
+        "shared"
+      ]
+    },
+    {
+      "id": "rq-073",
+      "grades": {
+        "mem-138": 3
+      },
+      "hard_negatives": {
+        "mem-139": "superseded",
+        "mem-140": "wrong-scope"
+      },
+      "tags": [
+        "cross-lingual",
+        "en",
+        "keyword-overlap",
+        "superseded"
+      ]
+    },
+    {
+      "id": "rq-074",
+      "grades": {
+        "mem-141": 3
+      },
+      "hard_negatives": {
+        "mem-142": "wrong-scope"
+      },
+      "tags": [
+        "ja",
+        "keyword-overlap",
+        "sibling-repo"
+      ]
+    },
+    {
+      "id": "rq-075",
+      "grades": {
+        "mem-143": 3,
+        "mem-144": 1
+      },
+      "hard_negatives": {
+        "mem-145": "wrong-scope"
+      },
+      "tags": [
+        "cross-lingual",
+        "ja",
+        "keyword-overlap"
+      ]
+    },
+    {
+      "id": "rq-076",
+      "grades": {
+        "mem-146": 3
+      },
+      "hard_negatives": {
+        "mem-147": "wrong-scope"
+      },
+      "tags": [
+        "cross-lingual",
+        "cross-project",
+        "en"
+      ]
+    },
+    {
+      "id": "rq-077",
+      "grades": {
+        "mem-147": 3
+      },
+      "hard_negatives": {
+        "mem-146": "leakage"
+      },
+      "tags": [
+        "cross-lingual",
+        "ja",
+        "leakage"
+      ]
+    },
+    {
+      "id": "rq-078",
+      "grades": {
+        "mem-148": 3
+      },
+      "hard_negatives": {
+        "mem-149": "history"
+      },
+      "tags": [
+        "history",
+        "inherited-scope",
+        "ja"
+      ]
+    },
+    {
+      "id": "rq-079",
+      "grades": {
+        "mem-150": 3
+      },
+      "hard_negatives": {
+        "mem-127": "near-miss"
+      },
+      "tags": [
+        "cross-lingual",
+        "ja",
+        "keyword-overlap"
+      ]
+    },
+    {
+      "id": "rq-080",
+      "grades": {
+        "mem-151": 3
+      },
+      "hard_negatives": {},
+      "tags": [
+        "cross-lingual",
+        "en"
+      ]
+    },
+    {
+      "id": "rq-081",
+      "grades": {
+        "mem-152": 3
+      },
+      "hard_negatives": {
+        "mem-082": "near-miss"
+      },
+      "tags": [
+        "cross-lingual",
+        "en"
+      ]
+    },
+    {
+      "id": "rq-082",
+      "grades": {
+        "mem-153": 3
+      },
+      "hard_negatives": {
+        "mem-075": "wrong-scope",
+        "mem-076": "wrong-scope"
+      },
+      "tags": [
+        "cross-project",
+        "ja"
+      ]
+    },
+    {
+      "id": "rq-083",
+      "grades": {
+        "mem-153": 3
+      },
+      "hard_negatives": {
+        "mem-075": "leakage"
+      },
+      "tags": [
+        "ja",
+        "leakage",
+        "same-text-different-principal"
+      ]
+    },
+    {
+      "id": "rq-084",
+      "grades": {
+        "mem-154": 3
+      },
+      "hard_negatives": {
+        "mem-155": "superseded"
+      },
+      "tags": [
+        "cross-lingual",
+        "en",
+        "superseded"
+      ]
+    },
+    {
+      "id": "rq-085",
+      "grades": {
+        "mem-156": 3
+      },
+      "hard_negatives": {},
+      "tags": [
+        "inherited-scope",
+        "ja"
+      ]
+    },
+    {
+      "id": "rq-086",
+      "grades": {
+        "mem-157": 3
+      },
+      "hard_negatives": {
+        "mem-158": "leakage"
+      },
+      "tags": [
+        "ja",
+        "leakage",
+        "similar-project"
+      ]
+    },
+    {
+      "id": "rq-087",
+      "grades": {
+        "mem-159": 3
+      },
+      "hard_negatives": {},
+      "tags": [
+        "cross-lingual",
+        "en"
+      ]
+    },
+    {
+      "id": "rq-088",
+      "grades": {
+        "mem-160": 3
+      },
+      "hard_negatives": {},
+      "tags": [
+        "ja"
+      ]
+    },
+    {
+      "id": "rq-089",
+      "grades": {
+        "mem-161": 3
+      },
+      "hard_negatives": {},
+      "tags": [
+        "cross-lingual",
+        "en"
+      ]
+    },
+    {
+      "id": "rq-090",
+      "grades": {
+        "mem-128": 1,
+        "mem-162": 3
+      },
+      "hard_negatives": {
+        "mem-127": "leakage"
+      },
+      "tags": [
+        "ja",
+        "leakage",
+        "other-user"
+      ]
+    },
+    {
+      "id": "rq-091",
+      "grades": {
+        "mem-179": 3
+      },
+      "hard_negatives": {
+        "mem-187": "stale"
+      },
+      "tags": [
+        "ja",
+        "stale"
+      ]
+    },
+    {
+      "id": "rq-092",
+      "grades": {
+        "mem-171": 3
+      },
+      "hard_negatives": {
+        "mem-188": "stale"
+      },
+      "tags": [
+        "cross-lingual",
+        "en",
+        "stale"
+      ]
+    },
+    {
+      "id": "rq-093",
+      "grades": {
+        "mem-168": 3
+      },
+      "hard_negatives": {
+        "mem-189": "stale"
+      },
+      "tags": [
+        "cross-lingual",
+        "ja",
+        "stale"
+      ]
+    },
+    {
+      "id": "rq-094",
+      "grades": {
+        "mem-214": 3
+      },
+      "hard_negatives": {
+        "mem-168": "leakage",
+        "mem-189": "leakage"
+      },
+      "tags": [
+        "en",
+        "leakage",
+        "similar-project"
+      ]
+    },
+    {
+      "id": "rq-095",
+      "grades": {
+        "mem-215": 3
+      },
+      "hard_negatives": {
+        "mem-190": "leakage"
+      },
+      "tags": [
+        "ja",
+        "leakage",
+        "same-scope-acl"
+      ]
+    },
+    {
+      "id": "rq-096",
+      "grades": {
+        "mem-216": 3
+      },
+      "hard_negatives": {
+        "mem-191": "leakage"
+      },
+      "tags": [
+        "cross-lingual",
+        "en",
+        "leakage",
+        "same-scope-acl"
+      ]
+    },
+    {
+      "id": "rq-097",
+      "grades": {
+        "mem-217": 3
+      },
+      "hard_negatives": {
+        "mem-192": "leakage"
+      },
+      "tags": [
+        "ja",
+        "leakage",
+        "same-scope-acl"
+      ]
+    },
+    {
+      "id": "rq-098",
+      "grades": {
+        "mem-218": 3
+      },
+      "hard_negatives": {
+        "mem-219": "leakage"
+      },
+      "tags": [
+        "ja",
+        "leakage",
+        "same-scope-acl",
+        "shared"
+      ]
+    },
+    {
+      "id": "rq-099",
+      "grades": {
+        "mem-220": 3
+      },
+      "hard_negatives": {
+        "mem-221": "leakage"
+      },
+      "tags": [
+        "en",
+        "leakage",
+        "same-scope-acl"
+      ]
+    },
+    {
+      "id": "rq-100",
+      "grades": {
+        "mem-220": 2,
+        "mem-221": 3
+      },
+      "hard_negatives": {},
+      "tags": [
+        "en",
+        "same-text-different-principal"
+      ]
+    }
+  ]
+}

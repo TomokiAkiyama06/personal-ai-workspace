@@ -42,6 +42,7 @@
 | [0035](0035-working-set-capability-grants-and-legacy-tasks.md) | `project.task.working_set.manage` の付与先と委任、作成時の Working Set、Revision 0085 より前の Task の状態の退避（Issue #85。Decision 0030 が決めていない点） | Approved |
 | [0037](0037-gpu-compute-scheduler.md) | GPU / Compute Resource Scheduler の方針（状態をプロセス内に持つ、KV Cache の Token による Admission、Actual / Reserved の VRAM と Safety Headroom の暫定値、Class の優先、縮退の段と復帰、Exclusive、Local / Cloud の振り分け。PAW-036、Issue #32） | Approved |
 | [0043](0043-user-deletion-follow-ups.md) | User 削除の後続（30 日後の個人データの消去を Table の Owner の定期 Command `user-erasure-run` で行う、削除中の User の Task の Cancel、外部の認証の止め方）と、Pairing した新しい端末での Passkey の追加（0033 の判断点 6・9。Issue #127） | Proposed |
+| [0050](0050-late-gpu-charge-without-fence.md) | Node の Attempt が閉じた後に、Cancel しても止まらなかった Local の呼び出しの GPU 時間を、`TrackerLateGpuCharge` で Attempt / Run の Fence なしに Task の Budget へ計上する（PAW-036、PR #131。Decision 0037 を補う） | Approved |
 
 運用は [AGENTS.md](../../AGENTS.md) の「仕様変更」に従います。
 
