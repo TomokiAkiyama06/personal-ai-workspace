@@ -60,6 +60,12 @@ from paw_backend.db import Base
 from paw_backend.memory.fulltext import search_document_sql
 from paw_backend.memory.vector import Vector
 
+# The longest ``memory_versions.content``: the CHECK constraint of revision 0147
+# (issue #147, Decision 0053). The services refuse a longer text first with the
+# same number (``memory/versioning/limits.py``, ``memory/shared/limits.py``); a
+# test fails when the three drift apart.
+MAX_VERSION_CONTENT_CHARS = 20_000
+
 
 class MemoryScope(StrEnum):
     """Who may see a memory version; the boundary the ACL filter works on."""
@@ -310,6 +316,10 @@ class MemoryVersion(Base):
         ),
         CheckConstraint("char_length(title) BETWEEN 1 AND 200", name="title_length"),
         CheckConstraint("char_length(content) >= 1", name="content_not_empty"),
+        CheckConstraint(
+            f"char_length(content) <= {MAX_VERSION_CONTENT_CHARS}",
+            name="content_length",
+        ),
         CheckConstraint("importance BETWEEN 0 AND 100", name="importance_range"),
         CheckConstraint(_one_of("status", MemoryStatus), name="status_valid"),
         CheckConstraint(

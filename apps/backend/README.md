@@ -52,7 +52,7 @@ Python 側の Package（`pgvector-python`）は使わず、`paw_backend/memory/v
 apps/backend/
 ├─ pyproject.toml          # 依存（完全一致で固定）と Ruff 設定
 ├─ alembic.ini             # Alembic 設定（DB URL は持たない）
-├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0022 は Password / Session / Login Throttle / 認証 Policy、0023 は Passkey / Passkey の Challenge / Session の Gate、0026 は Project、0027 は Repository 登録・Remote・Checkout、0030 は Shared Connection・Quota・Usage、0031 は Tool Approval、0033 は Queue / Budget / Loop、0034 は DAG Agent Orchestrator（Plan・DAG・Node の試行）、0040 は Memory Schema、0041 は Memory Journal / Consolidation Queue、0042 は Memory の鮮度の Job の Index、0043 は `memory_versions` の全文検索の Index、0046 は Shared Memory Candidate、0050 は Research Scratch、0052 は Evidence / Claim Provenance、0071 は Memory の Status / Stale 状態の変更履歴、0083 は `tasks (project_id, state)` の Index、0085 は Task の Working Set、0087 は外部送信の Audit の `audit_events.details`、0108 は他の Account の Passkey の Reset（`admin_reset`）と 1 回限りの Password 再設定 Token（`password_reset`）とその発行の関数、0124 は招待・端末の Pairing・User の状態の履歴、0133 は Node の試行の Placement（Local / Cloud と Agent・Model）と Cloud の外部送信の Audit の対応）
+├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0022 は Password / Session / Login Throttle / 認証 Policy、0023 は Passkey / Passkey の Challenge / Session の Gate、0026 は Project、0027 は Repository 登録・Remote・Checkout、0030 は Shared Connection・Quota・Usage、0031 は Tool Approval、0033 は Queue / Budget / Loop、0034 は DAG Agent Orchestrator（Plan・DAG・Node の試行）、0040 は Memory Schema、0041 は Memory Journal / Consolidation Queue、0042 は Memory の鮮度の Job の Index、0043 は `memory_versions` の全文検索の Index、0046 は Shared Memory Candidate、0050 は Research Scratch、0052 は Evidence / Claim Provenance、0071 は Memory の Status / Stale 状態の変更履歴、0083 は `tasks (project_id, state)` の Index、0085 は Task の Working Set、0087 は外部送信の Audit の `audit_events.details`、0108 は他の Account の Passkey の Reset（`admin_reset`）と 1 回限りの Password 再設定 Token（`password_reset`）とその発行の関数、0124 は招待・端末の Pairing・User の状態の履歴、0133 は Node の試行の Placement（Local / Cloud と Agent・Model）と Cloud の外部送信の Audit の対応、0147 は `memory_versions.content` の長さの上限（20,000 文字）
 ├─ paw_backend/
 │  ├─ app.py               # create_app(settings)
 │  ├─ config.py            # PAW_ 環境変数から読む Settings
@@ -3510,6 +3510,8 @@ Rerank（Reranker Protocol）→ 構造化 Score（confirmed・鮮度・importan
 ### Version（`MemoryVersioningService`）
 
 どの変更も**新しい Version**で、古い Version は履歴に残ります（物理的な上書き・削除はしません）。現在の Version は `version_number` が最大のものです。
+
+**本文の長さ（Issue #147、Decision 0053）**: `memory_versions.content` は 1〜20,000 文字です。Service は長すぎる本文を `MemoryInputError`（`content`、`TOO_LONG`）で先に拒否し、Migration `0147` が同じ上限を CHECK 制約 `ck_memory_versions_content_length` にします（Application の Role にも効き、Role は制約を外せません。値は `memory.models.MAX_VERSION_CONTENT_CHARS`、`memory.versioning.limits` と `memory.shared.limits` の `MAX_CONTENT_CHARS` と食い違えば Test が失敗します）。上限を超える行が既にあれば、Migration は件数・先頭 5 件の Version の ID・一覧の SQL（`SELECT id, memory_id, status, char_length(content) FROM memory_versions WHERE char_length(content) > 20000 ORDER BY memory_id, id`）を示して止まり、Schema もデータも変えません（切り詰めない）。行を人が片付けてから、もう一度 `alembic upgrade head` を実行します。
 
 | 操作 | 現在の Version `n` | 新しい Version | Relation（新 → 旧） |
 | --- | --- | --- | --- |
