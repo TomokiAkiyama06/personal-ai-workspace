@@ -473,6 +473,23 @@ class FinishTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(freshness.calls, [ended.task_id])  # memories stay retired
         await cleanup.on_task_event(object())  # not an event: ignored
 
+    async def test_a_sweep_past_the_last_task_starts_over_at_once(self):
+        # A full sweep that ended on the last residue task leaves its position
+        # there; the next sweep finds nothing after it and must start over in
+        # the same call, not give up a whole maintenance interval.
+        cleanup, approvals, _ = self.cleanup()
+        pending = tuple(sorted(uuid.uuid4() for _ in range(2)))
+
+        async def task_ids(limit, *, after=None):
+            return tuple(t for t in pending if after is None or t > after)[:limit]
+
+        cleanup._residue.task_ids = task_ids
+        first = await cleanup.sweep(2)
+        second = await cleanup.sweep(2)
+
+        self.assertEqual([r.task_id for r in first], list(pending))
+        self.assertEqual([r.task_id for r in second], list(pending))
+
     def test_it_refuses_what_it_cannot_use(self):
         cleanup, approvals, freshness = self.cleanup()
         residue = cleanup._residue

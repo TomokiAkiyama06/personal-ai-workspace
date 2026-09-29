@@ -283,11 +283,15 @@ class TaskEndCleanup:
         An error of the residue query itself propagates (the loop logs it).
 
         Each sweep resumes after the last task the previous one took (in id
-        order) and starts over once a sweep found fewer than ``limit``: tasks
-        whose cleanup keeps failing cannot hold every sweep and starve the tasks
-        after them. The position is this object's only; a restart begins at the
-        start, which is still correct (the residue is the record)."""
+        order) and starts over once a sweep found fewer than ``limit`` (at once
+        when nothing is left after that task): tasks whose cleanup keeps failing
+        cannot hold every sweep and starve the tasks after them. The position is
+        this object's only; a restart begins at the start, which is still correct
+        (the residue is the record)."""
         task_ids = await self._residue.task_ids(limit, after=self._after)
+        if not task_ids and self._after is not None:
+            # The previous sweep ended on the last task: start over now.
+            task_ids = await self._residue.task_ids(limit)
         self._after = task_ids[-1] if len(task_ids) == limit else None
         reports = []
         for task_id in task_ids:
