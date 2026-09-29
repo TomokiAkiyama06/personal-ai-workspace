@@ -1,0 +1,4045 @@
+{
+  "memories": [
+    {
+      "id": "mem-001",
+      "text": "kumo-notes/api は Python 3.13 を使う。3.12 前提のコードは書かない。",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:kumo-notes/api"
+    },
+    {
+      "id": "mem-002",
+      "text": "kumo-notes/api は Python 3.12 を使う。",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "superseded",
+      "fresh": true,
+      "scope": "repo:kumo-notes/api"
+    },
+    {
+      "id": "mem-003",
+      "text": "kumo-tasks/api は Python 3.11 に固定している（依存ライブラリの都合）。",
+      "acl": [
+        "user:mei"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:kumo-tasks/api"
+    },
+    {
+      "id": "mem-004",
+      "text": "hoshi-ledger/core runs on Python 3.13 as well.",
+      "acl": [
+        "user:mei",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:hoshi-ledger/core"
+    },
+    {
+      "id": "mem-005",
+      "text": "kumo-notes/api のテストは make test で実行する。pytest を直接呼ぶと fixture DB が起動しない。",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:kumo-notes/api"
+    },
+    {
+      "id": "mem-006",
+      "text": "kumo-notes/api の CI は tox -e py313 でテストを実行する。",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:kumo-notes/api"
+    },
+    {
+      "id": "mem-007",
+      "text": "kumo-notes/api のテストは pytest -x で実行する。",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "superseded",
+      "fresh": true,
+      "scope": "repo:kumo-notes/api"
+    },
+    {
+      "id": "mem-008",
+      "text": "kumo-tasks/api のテストは just test で回す。",
+      "acl": [
+        "user:mei"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:kumo-tasks/api"
+    },
+    {
+      "id": "mem-009",
+      "text": "kumo-notes/web のテストは bun test で実行する。",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:kumo-notes/web"
+    },
+    {
+      "id": "mem-010",
+      "text": "kumo-notes/api の lint は make lint。修正後は make test の前に make lint を回す。",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:kumo-notes/api"
+    },
+    {
+      "id": "mem-011",
+      "text": "kumo-notes/api の formatter は ruff format。black は使わない。",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:kumo-notes/api"
+    },
+    {
+      "id": "mem-012",
+      "text": "hoshi-ledger/core uses black with line length 100.",
+      "acl": [
+        "user:mei",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:hoshi-ledger/core"
+    },
+    {
+      "id": "mem-013",
+      "text": "kumo-notes/api のフォーマットは black で行う。",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "deprecated",
+      "fresh": true,
+      "scope": "repo:kumo-notes/api"
+    },
+    {
+      "id": "mem-014",
+      "text": "kumo-notes/api の ORM は SQLAlchemy 2（async）を使う。",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:kumo-notes/api"
+    },
+    {
+      "id": "mem-015",
+      "text": "kumo-notes/api は Tortoise ORM を試験導入していた。",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "history",
+      "fresh": true,
+      "scope": "repo:kumo-notes/api"
+    },
+    {
+      "id": "mem-016",
+      "text": "kumo-tasks/api uses SQLModel on top of SQLAlchemy.",
+      "acl": [
+        "user:mei"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:kumo-tasks/api"
+    },
+    {
+      "id": "mem-017",
+      "text": "kumo-notes/api の HTTP client は httpx。requests は追加しない。",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:kumo-notes/api"
+    },
+    {
+      "id": "mem-018",
+      "text": "kumo-notes/api outbound HTTP calls use a 10 second timeout.",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:kumo-notes/api"
+    },
+    {
+      "id": "mem-019",
+      "text": "kumo-notes/api outbound HTTP calls use a 30 second timeout.",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "superseded",
+      "fresh": true,
+      "scope": "repo:kumo-notes/api"
+    },
+    {
+      "id": "mem-020",
+      "text": "mizu-garden/dashboard の外部API呼び出しは timeout 3 秒。",
+      "acl": [
+        "user:haru",
+        "user:ren"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:mizu-garden/dashboard"
+    },
+    {
+      "id": "mem-021",
+      "text": "kumo-notes/api のブランチ名は feat/ か fix/ で始める。",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:kumo-notes/api"
+    },
+    {
+      "id": "mem-022",
+      "text": "kumo-notes/web のブランチ名は <issue番号>-<slug> 形式。",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:kumo-notes/web"
+    },
+    {
+      "id": "mem-023",
+      "text": "sora の commit message は常に日本語で書く。",
+      "acl": [
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "user:sora"
+    },
+    {
+      "id": "mem-024",
+      "text": "haru prefers commit messages written in English.",
+      "acl": [
+        "user:haru"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "user:haru"
+    },
+    {
+      "id": "mem-025",
+      "text": "kumo-notes の API は /v1/ プレフィックスで versioning する。",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:kumo-notes"
+    },
+    {
+      "id": "mem-026",
+      "text": "kumo-notes の API error response は RFC 9457 の problem+json 形式に揃える。",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:kumo-notes"
+    },
+    {
+      "id": "mem-027",
+      "text": "kumo-notes のエラーレスポンスは {\"error\": \"message\"} 形式。",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "superseded",
+      "fresh": true,
+      "scope": "project:kumo-notes"
+    },
+    {
+      "id": "mem-028",
+      "text": "hoshi-ledger returns errors as {\"code\", \"message\", \"details\"} JSON.",
+      "acl": [
+        "user:mei",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:hoshi-ledger"
+    },
+    {
+      "id": "mem-029",
+      "text": "kumo-notes の認証は Passkey を第一とし、パスワードは fallback のみ。",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:kumo-notes"
+    },
+    {
+      "id": "mem-030",
+      "text": "kumo-notes の認証はメールとパスワードのみ。",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "superseded",
+      "fresh": true,
+      "scope": "project:kumo-notes"
+    },
+    {
+      "id": "mem-031",
+      "text": "kumo-tasks は社内 SSO（OIDC）でログインする。",
+      "acl": [
+        "user:mei"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:kumo-tasks"
+    },
+    {
+      "id": "mem-032",
+      "text": "kumo-notes は毎週火曜にリリースする。",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:kumo-notes"
+    },
+    {
+      "id": "mem-033",
+      "text": "kumo-notes は毎週木曜にリリースする。",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "superseded",
+      "fresh": true,
+      "scope": "project:kumo-notes"
+    },
+    {
+      "id": "mem-034",
+      "text": "kumo-tasks releases every other Monday.",
+      "acl": [
+        "user:mei"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:kumo-tasks"
+    },
+    {
+      "id": "mem-035",
+      "text": "mizu-garden のファームウェアは月初にリリースする。",
+      "acl": [
+        "user:haru",
+        "user:ren"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:mizu-garden"
+    },
+    {
+      "id": "mem-036",
+      "text": "kumo-notes の PR にはスクリーンショットを貼る（UI変更がなくても CLI 出力を貼る）。",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:kumo-notes"
+    },
+    {
+      "id": "mem-037",
+      "text": "kumo-notes/web の PR は .github/pull_request_template.md の項目を全部埋める。",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:kumo-notes/web"
+    },
+    {
+      "id": "mem-038",
+      "text": "kumo-notes/web の package manager は bun。",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:kumo-notes/web"
+    },
+    {
+      "id": "mem-039",
+      "text": "kumo-notes/web の package manager は pnpm のみ。npm install は禁止。",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "superseded",
+      "fresh": true,
+      "scope": "repo:kumo-notes/web"
+    },
+    {
+      "id": "mem-040",
+      "text": "kumo-tasks/api の管理画面は npm workspaces を使う。",
+      "acl": [
+        "user:mei"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:kumo-tasks/api"
+    },
+    {
+      "id": "mem-041",
+      "text": "kumo-notes/web runs on Node.js 24 LTS (engines field).",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:kumo-notes/web"
+    },
+    {
+      "id": "mem-042",
+      "text": "kumo-notes/web runs on Node.js 22.",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "superseded",
+      "fresh": true,
+      "scope": "repo:kumo-notes/web"
+    },
+    {
+      "id": "mem-043",
+      "text": "mizu-garden/dashboard は Node.js 22 で動かす。",
+      "acl": [
+        "user:haru",
+        "user:ren"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:mizu-garden/dashboard"
+    },
+    {
+      "id": "mem-044",
+      "text": "kumo-notes/web の既存画面の styling は Tailwind CSS。",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:kumo-notes/web"
+    },
+    {
+      "id": "mem-045",
+      "text": "kumo-notes/web の新しい設定画面は CSS Modules で書く（どちらに寄せるかは未決定）。",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:kumo-notes/web"
+    },
+    {
+      "id": "mem-046",
+      "text": "kumo-notes/web uses styled-components.",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "history",
+      "fresh": true,
+      "scope": "repo:kumo-notes/web"
+    },
+    {
+      "id": "mem-047",
+      "text": "kumo-notes/web uses 2-space indentation.",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:kumo-notes/web"
+    },
+    {
+      "id": "mem-048",
+      "text": "sora は基本的にインデントをスペース4つにしたい（repo設定がなければ）。",
+      "acl": [
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "user:sora"
+    },
+    {
+      "id": "mem-049",
+      "text": "haru は個人的にはタブインデントが好き（repo 設定が優先）。",
+      "acl": [
+        "user:haru"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "user:haru"
+    },
+    {
+      "id": "mem-050",
+      "text": "haru needs high-contrast colors in UI mockups (low-contrast text is hard to read).",
+      "acl": [
+        "user:haru"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "user:haru"
+    },
+    {
+      "id": "mem-051",
+      "text": "kumo-notes/web の色は design-tokens.json の token だけを使う。直書き禁止。",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:kumo-notes/web"
+    },
+    {
+      "id": "mem-052",
+      "text": "kumo-notes/web の feature flag は {\"flag\": \"name\", \"default\": false} の形で書き、キーは snake_case。",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:kumo-notes/web"
+    },
+    {
+      "id": "mem-053",
+      "text": "kumo-tasks uses LaunchDarkly-style flags named in kebab-case.",
+      "acl": [
+        "user:mei"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:kumo-tasks/api"
+    },
+    {
+      "id": "mem-054",
+      "text": "hoshi-ledger uses PostgreSQL 18.",
+      "acl": [
+        "user:mei",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:hoshi-ledger"
+    },
+    {
+      "id": "mem-055",
+      "text": "hoshi-ledger uses PostgreSQL 17.",
+      "acl": [
+        "user:mei",
+        "user:sora"
+      ],
+      "status": "superseded",
+      "fresh": true,
+      "scope": "project:hoshi-ledger"
+    },
+    {
+      "id": "mem-056",
+      "text": "mizu-garden のセンサーデータはまず SQLite に溜めてから同期する。",
+      "acl": [
+        "user:haru",
+        "user:ren"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:mizu-garden"
+    },
+    {
+      "id": "mem-057",
+      "text": "kumo-tasks は PostgreSQL 16 のまま。",
+      "acl": [
+        "user:mei"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:kumo-tasks"
+    },
+    {
+      "id": "mem-058",
+      "text": "hoshi-ledger の金額は整数の「銭」単位で保持する。float は使わない。",
+      "acl": [
+        "user:mei",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:hoshi-ledger"
+    },
+    {
+      "id": "mem-059",
+      "text": "hoshi-ledger stores amounts as NUMERIC(12,2) yen.",
+      "acl": [
+        "user:mei",
+        "user:sora"
+      ],
+      "status": "superseded",
+      "fresh": true,
+      "scope": "project:hoshi-ledger"
+    },
+    {
+      "id": "mem-060",
+      "text": "kumo-tasks の見積金額は円単位の整数。",
+      "acl": [
+        "user:mei"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:kumo-tasks"
+    },
+    {
+      "id": "mem-061",
+      "text": "hoshi-ledger の外部向け API は REST。GraphQL は使わない。",
+      "acl": [
+        "user:mei",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:hoshi-ledger"
+    },
+    {
+      "id": "mem-062",
+      "text": "hoshi-ledger の社内向け集計 API だけは gRPC で提供する。",
+      "acl": [
+        "user:mei",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:hoshi-ledger"
+    },
+    {
+      "id": "mem-063",
+      "text": "hoshi-ledger exposes a GraphQL API.",
+      "acl": [
+        "user:mei",
+        "user:sora"
+      ],
+      "status": "deprecated",
+      "fresh": true,
+      "scope": "project:hoshi-ledger"
+    },
+    {
+      "id": "mem-064",
+      "text": "hoshi-ledger/core の migration は alembic で作る。手書き SQL ファイルは追加しない。",
+      "acl": [
+        "user:mei",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:hoshi-ledger/core"
+    },
+    {
+      "id": "mem-065",
+      "text": "hoshi-ledger の PR では migration の downgrade、金額の銭単位、CHANGELOG 更新を確認する。",
+      "acl": [
+        "user:mei",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:hoshi-ledger"
+    },
+    {
+      "id": "mem-066",
+      "text": "kumo-notes/api の migration も alembic だが、revision id は日付接頭辞をつける。",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:kumo-notes/api"
+    },
+    {
+      "id": "mem-067",
+      "text": "hoshi-ledger/core requires 90% line coverage in CI.",
+      "acl": [
+        "user:mei",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:hoshi-ledger/core"
+    },
+    {
+      "id": "mem-068",
+      "text": "hoshi-ledger/core keeps line coverage at 85% or higher.",
+      "acl": [
+        "user:mei",
+        "user:sora"
+      ],
+      "status": "superseded",
+      "fresh": true,
+      "scope": "repo:hoshi-ledger/core"
+    },
+    {
+      "id": "mem-069",
+      "text": "hoshi-ledger/cli はカバレッジ閾値を設けていない。",
+      "acl": [
+        "user:mei",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:hoshi-ledger/cli"
+    },
+    {
+      "id": "mem-070",
+      "text": "hoshi-ledger のドキュメントは core も cli も英語で書く。",
+      "acl": [
+        "user:mei",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:hoshi-ledger"
+    },
+    {
+      "id": "mem-071",
+      "text": "hoshi-ledger の設計メモは docs/adr/ に置く傾向がある（推測、未確認）。",
+      "acl": [
+        "user:mei",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:hoshi-ledger"
+    },
+    {
+      "id": "mem-072",
+      "text": "mei は個人メモは日本語で書きたい。",
+      "acl": [
+        "user:mei"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "user:mei"
+    },
+    {
+      "id": "mem-073",
+      "text": "hoshi-ledger の本番デプロイ先は社内 k8s クラスタ kumo-k8s。",
+      "acl": [
+        "user:mei",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:hoshi-ledger"
+    },
+    {
+      "id": "mem-074",
+      "text": "hoshi-ledger deploys production to Fly.io.",
+      "acl": [
+        "user:mei",
+        "user:sora"
+      ],
+      "status": "superseded",
+      "fresh": true,
+      "scope": "project:hoshi-ledger"
+    },
+    {
+      "id": "mem-075",
+      "text": "hoshi-ledger backups run nightly at 02:00 JST.",
+      "acl": [
+        "user:mei",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:hoshi-ledger"
+    },
+    {
+      "id": "mem-076",
+      "text": "hoshi-ledger のバックアップは週1回日曜に取っている。",
+      "acl": [
+        "user:mei",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": false,
+      "scope": "project:hoshi-ledger"
+    },
+    {
+      "id": "mem-077",
+      "text": "hoshi-ledger/cli は Typer で実装する。argparse は使わない。",
+      "acl": [
+        "user:mei",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:hoshi-ledger/cli"
+    },
+    {
+      "id": "mem-078",
+      "text": "hoshi-ledger/cli は uv tool install で配布する。",
+      "acl": [
+        "user:mei",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:hoshi-ledger/cli"
+    },
+    {
+      "id": "mem-079",
+      "text": "（mei の非公開メモ）hoshi-ledger の外注先候補の評価: A社は見積が高い。",
+      "acl": [
+        "user:mei"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:hoshi-ledger"
+    },
+    {
+      "id": "mem-080",
+      "text": "hoshi-ledger の外注は、決まったら #hoshi-dev で共有する。",
+      "acl": [
+        "user:mei",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:hoshi-ledger"
+    },
+    {
+      "id": "mem-081",
+      "text": "mizu-garden では温度は摂氏、土壌水分は % で表す。華氏は出さない。",
+      "acl": [
+        "user:haru",
+        "user:ren"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:mizu-garden"
+    },
+    {
+      "id": "mem-082",
+      "text": "mizu-garden のセンサー送信間隔は 5 分。",
+      "acl": [
+        "user:haru",
+        "user:ren"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:mizu-garden"
+    },
+    {
+      "id": "mem-083",
+      "text": "mizu-garden sensors report every 15 minutes.",
+      "acl": [
+        "user:haru",
+        "user:ren"
+      ],
+      "status": "superseded",
+      "fresh": true,
+      "scope": "project:mizu-garden"
+    },
+    {
+      "id": "mem-084",
+      "text": "mizu-garden のセンサーは 1 分間隔で送る（試験運用時）。",
+      "acl": [
+        "user:haru",
+        "user:ren"
+      ],
+      "status": "active",
+      "fresh": false,
+      "scope": "project:mizu-garden"
+    },
+    {
+      "id": "mem-085",
+      "text": "sensor-fw のビルド対象は esp32-c6 のみ。",
+      "acl": [
+        "user:haru",
+        "user:ren"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:mizu-garden/sensor-fw"
+    },
+    {
+      "id": "mem-086",
+      "text": "sensor-fw は esp32 向けにビルドする。",
+      "acl": [
+        "user:haru",
+        "user:ren"
+      ],
+      "status": "superseded",
+      "fresh": true,
+      "scope": "repo:mizu-garden/sensor-fw"
+    },
+    {
+      "id": "mem-087",
+      "text": "sensor-fw is flashed with espflash (inferred from past sessions).",
+      "acl": [
+        "user:haru",
+        "user:ren"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:mizu-garden/sensor-fw"
+    },
+    {
+      "id": "mem-088",
+      "text": "sensor-fw devices pull OTA updates from the beta channel.",
+      "acl": [
+        "user:haru",
+        "user:ren"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:mizu-garden/sensor-fw"
+    },
+    {
+      "id": "mem-089",
+      "text": "sensor-fw devices check for OTA updates every 6 hours.",
+      "acl": [
+        "user:haru",
+        "user:ren"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:mizu-garden/sensor-fw"
+    },
+    {
+      "id": "mem-090",
+      "text": "sensor-fw の OTA は stable チャンネルのみ。",
+      "acl": [
+        "user:haru",
+        "user:ren"
+      ],
+      "status": "superseded",
+      "fresh": true,
+      "scope": "repo:mizu-garden/sensor-fw"
+    },
+    {
+      "id": "mem-091",
+      "text": "mizu-garden の MQTT broker は mqtt.mizu.example の mosquitto。",
+      "acl": [
+        "user:haru",
+        "user:ren"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:mizu-garden"
+    },
+    {
+      "id": "mem-092",
+      "text": "mizu-garden used a hosted MQTT broker before moving in-house.",
+      "acl": [
+        "user:haru",
+        "user:ren"
+      ],
+      "status": "history",
+      "fresh": true,
+      "scope": "project:mizu-garden"
+    },
+    {
+      "id": "mem-093",
+      "text": "sensor-fw の MQTT 再接続は指数バックオフ（最大 5 分）。",
+      "acl": [
+        "user:haru",
+        "user:ren"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:mizu-garden/sensor-fw"
+    },
+    {
+      "id": "mem-094",
+      "text": "mizu-garden の Slack 通知は正常なら 🌱、異常なら 🥀 を先頭につける。",
+      "acl": [
+        "user:haru",
+        "user:ren"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:mizu-garden"
+    },
+    {
+      "id": "mem-095",
+      "text": "mizu-garden raises a soil-moisture alert below 25%.",
+      "acl": [
+        "user:haru",
+        "user:ren"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:mizu-garden"
+    },
+    {
+      "id": "mem-096",
+      "text": "mizu-garden の土壌水分アラートは 30% 未満。",
+      "acl": [
+        "user:haru",
+        "user:ren"
+      ],
+      "status": "superseded",
+      "fresh": true,
+      "scope": "project:mizu-garden"
+    },
+    {
+      "id": "mem-097",
+      "text": "mizu-garden/dashboard のグラフは uPlot を使う（Chart.js は重いので不採用）。",
+      "acl": [
+        "user:haru",
+        "user:ren"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:mizu-garden/dashboard"
+    },
+    {
+      "id": "mem-098",
+      "text": "mizu-garden/dashboard は Basic 認証の裏に置いている。",
+      "acl": [
+        "user:haru",
+        "user:ren"
+      ],
+      "status": "active",
+      "fresh": false,
+      "scope": "repo:mizu-garden/dashboard"
+    },
+    {
+      "id": "mem-099",
+      "text": "mizu-garden/dashboard is behind the team SSO proxy.",
+      "acl": [
+        "user:haru",
+        "user:ren"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:mizu-garden/dashboard"
+    },
+    {
+      "id": "mem-100",
+      "text": "ren sometimes wants detailed step-by-step explanations (inferred).",
+      "acl": [
+        "user:ren"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "user:ren"
+    },
+    {
+      "id": "mem-101",
+      "text": "ren prefers getting just the diff without long explanations (inferred).",
+      "acl": [
+        "user:ren"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "user:ren"
+    },
+    {
+      "id": "mem-102",
+      "text": "kumo-tasks のジョブキューは Redis Streams。",
+      "acl": [
+        "user:mei"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:kumo-tasks"
+    },
+    {
+      "id": "mem-103",
+      "text": "kumo-tasks tickets must be triaged within 2 hours.",
+      "acl": [
+        "user:mei"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:kumo-tasks"
+    },
+    {
+      "id": "mem-104",
+      "text": "kumo-tasks/api のルーターは app/routers/ 配下に置く。",
+      "acl": [
+        "user:mei"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:kumo-tasks/api"
+    },
+    {
+      "id": "mem-105",
+      "text": "kumo-notes のバックグラウンドジョブは arq（Redis）で動かす。",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:kumo-notes"
+    },
+    {
+      "id": "mem-106",
+      "text": "障害報告は全プロジェクト共通で #sev-desk に書く。",
+      "acl": [
+        "team:engineering"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "shared:engineering"
+    },
+    {
+      "id": "mem-107",
+      "text": "障害報告は全プロジェクト共通で #incident-room に書く。",
+      "acl": [
+        "team:engineering"
+      ],
+      "status": "superseded",
+      "fresh": true,
+      "scope": "shared:engineering"
+    },
+    {
+      "id": "mem-108",
+      "text": "重大障害は leadership の非公開チャンネルにも 30 分以内に報告する。",
+      "acl": [
+        "team:leadership"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "shared:leadership"
+    },
+    {
+      "id": "mem-109",
+      "text": "Code reviews get a first response within one business day.",
+      "acl": [
+        "team:engineering"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "shared:engineering"
+    },
+    {
+      "id": "mem-110",
+      "text": "The platform group announced a 4-hour first-response target for code reviews (not yet confirmed to replace the 1-day rule).",
+      "acl": [
+        "team:engineering"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "shared:engineering"
+    },
+    {
+      "id": "mem-111",
+      "text": "新規ファイルの先頭に SPDX-License-Identifier: Apache-2.0 を入れる（組織の全 repo 共通）。",
+      "acl": [
+        "team:engineering"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "shared:engineering"
+    },
+    {
+      "id": "mem-112",
+      "text": "New files carry an MIT license header.",
+      "acl": [
+        "team:engineering"
+      ],
+      "status": "superseded",
+      "fresh": true,
+      "scope": "shared:engineering"
+    },
+    {
+      "id": "mem-113",
+      "text": "オンコールは週替わりで、交代は月曜 10:00。",
+      "acl": [
+        "team:engineering"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "shared:engineering"
+    },
+    {
+      "id": "mem-114",
+      "text": "オンコール手当の金額は leadership の予算表で管理する。",
+      "acl": [
+        "team:leadership"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "shared:leadership"
+    },
+    {
+      "id": "mem-115",
+      "text": "Credential は repo に commit しない。共有が必要なら secret manager の参照名だけを書く。",
+      "acl": [
+        "team:engineering"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "shared:engineering"
+    },
+    {
+      "id": "mem-116",
+      "text": "Credential は .env に書いて Slack の DM で共有する。",
+      "acl": [
+        "team:engineering"
+      ],
+      "status": "deprecated",
+      "fresh": false,
+      "scope": "shared:engineering"
+    },
+    {
+      "id": "mem-117",
+      "text": "全体定例は毎週水曜 15:00。",
+      "acl": [
+        "team:engineering"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "shared:engineering"
+    },
+    {
+      "id": "mem-118",
+      "text": "All-hands is on Friday at 16:00.",
+      "acl": [
+        "team:engineering"
+      ],
+      "status": "superseded",
+      "fresh": true,
+      "scope": "shared:engineering"
+    },
+    {
+      "id": "mem-119",
+      "text": "採用に関する質問は #hiring チャンネルへ。計画の詳細は leadership が管理する。",
+      "acl": [
+        "team:engineering"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "shared:engineering"
+    },
+    {
+      "id": "mem-120",
+      "text": "来期の採用枠はバックエンド 2 名（非公開）。",
+      "acl": [
+        "team:leadership"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "shared:leadership"
+    },
+    {
+      "id": "mem-121",
+      "text": "sora への返答は日本語、コードのコメントは英語。",
+      "acl": [
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "user:sora"
+    },
+    {
+      "id": "mem-122",
+      "text": "sora への返答は要点だけ 3 行以内。",
+      "acl": [
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "user:sora"
+    },
+    {
+      "id": "mem-123",
+      "text": "sora は比較を表形式で見たい（確定）。",
+      "acl": [
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "user:sora"
+    },
+    {
+      "id": "mem-124",
+      "text": "sora は比較を表形式で見たがる傾向がある（推測）。",
+      "acl": [
+        "user:sora"
+      ],
+      "status": "superseded",
+      "fresh": true,
+      "scope": "user:sora"
+    },
+    {
+      "id": "mem-125",
+      "text": "haru は背景説明を含めた丁寧な返答を好む。",
+      "acl": [
+        "user:haru"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "user:haru"
+    },
+    {
+      "id": "mem-126",
+      "text": "mei prefers replies in English when discussing code.",
+      "acl": [
+        "user:mei"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "user:mei"
+    },
+    {
+      "id": "mem-127",
+      "text": "sora's timezone is Asia/Tokyo.",
+      "acl": [
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "user:sora"
+    },
+    {
+      "id": "mem-128",
+      "text": "ren's timezone is Europe/Berlin.",
+      "acl": [
+        "user:ren"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "user:ren"
+    },
+    {
+      "id": "mem-129",
+      "text": "ren's timezone is Asia/Tokyo.",
+      "acl": [
+        "user:ren"
+      ],
+      "status": "superseded",
+      "fresh": true,
+      "scope": "user:ren"
+    },
+    {
+      "id": "mem-130",
+      "text": "ren は午前 11 時までは集中作業の時間にしている（推測）。",
+      "acl": [
+        "user:ren"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "user:ren"
+    },
+    {
+      "id": "mem-131",
+      "text": "sora のエディタは Zed。設定例は Zed 前提で出す。",
+      "acl": [
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "user:sora"
+    },
+    {
+      "id": "mem-132",
+      "text": "sora のエディタは VS Code。",
+      "acl": [
+        "user:sora"
+      ],
+      "status": "superseded",
+      "fresh": true,
+      "scope": "user:sora"
+    },
+    {
+      "id": "mem-133",
+      "text": "haru uses Neovim with LazyVim.",
+      "acl": [
+        "user:haru"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "user:haru"
+    },
+    {
+      "id": "mem-134",
+      "text": "mei は変数名を snake_case にしたがる（推測）。",
+      "acl": [
+        "user:mei"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "user:mei"
+    },
+    {
+      "id": "mem-135",
+      "text": "hoshi-ledger/core follows PEP 8 naming; public APIs never use camelCase.",
+      "acl": [
+        "user:mei",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:hoshi-ledger/core"
+    },
+    {
+      "id": "mem-136",
+      "text": "sora は CI が通った後にマージを依頼することが多い（推測。マージ権限の既定化ではない）。",
+      "acl": [
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "user:sora"
+    },
+    {
+      "id": "mem-137",
+      "text": "Agent は人間の明示的な指示なしに PR をマージしない。",
+      "acl": [
+        "team:engineering"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "shared:engineering"
+    },
+    {
+      "id": "mem-138",
+      "text": "kumo-notes のノート同期は CRDT（Yjs）で行う。",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:kumo-notes"
+    },
+    {
+      "id": "mem-139",
+      "text": "kumo-notes syncs notes with last-write-wins.",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "superseded",
+      "fresh": true,
+      "scope": "project:kumo-notes"
+    },
+    {
+      "id": "mem-140",
+      "text": "mizu-garden のセンサーデータ同期は 1 時間ごとのバッチ。",
+      "acl": [
+        "user:haru",
+        "user:ren"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:mizu-garden"
+    },
+    {
+      "id": "mem-141",
+      "text": "kumo-notes/api のキャッシュは Redis、TTL は 300 秒。",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:kumo-notes/api"
+    },
+    {
+      "id": "mem-142",
+      "text": "kumo-notes/web は静的アセットを 1 年キャッシュする（hash 付きファイル名）。",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:kumo-notes/web"
+    },
+    {
+      "id": "mem-143",
+      "text": "kumo-notes/api log lines use level=\"info\" msg=\"...\" key-value format.",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:kumo-notes/api"
+    },
+    {
+      "id": "mem-144",
+      "text": "kumo-notes/api の本番ログレベルは info。debug は一時的にのみ。",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:kumo-notes/api"
+    },
+    {
+      "id": "mem-145",
+      "text": "sensor-fw keeps the last 64 log lines in a ring buffer.",
+      "acl": [
+        "user:haru",
+        "user:ren"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:mizu-garden/sensor-fw"
+    },
+    {
+      "id": "mem-146",
+      "text": "kumo-notes の公開 API は 1 ユーザーあたり毎分 60 リクエストに制限する。",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:kumo-notes"
+    },
+    {
+      "id": "mem-147",
+      "text": "hoshi-ledger limits partner API clients to 600 requests per minute.",
+      "acl": [
+        "user:mei",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:hoshi-ledger"
+    },
+    {
+      "id": "mem-148",
+      "text": "kumo-notes の全文検索は PostgreSQL の pg_bigm を使う。",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:kumo-notes"
+    },
+    {
+      "id": "mem-149",
+      "text": "kumo-notes の検索を Meilisearch に移すアイデアがあったが見送り。",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "history",
+      "fresh": true,
+      "scope": "project:kumo-notes"
+    },
+    {
+      "id": "mem-150",
+      "text": "hoshi-ledger stores all timestamps in UTC and converts at the UI edge.",
+      "acl": [
+        "user:mei",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:hoshi-ledger"
+    },
+    {
+      "id": "mem-151",
+      "text": "kumo-notes/web の翻訳ファイルは locales/{ja,en}.json。キーはドット区切り。",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:kumo-notes/web"
+    },
+    {
+      "id": "mem-152",
+      "text": "sensor-fw は電池残量 20% 未満で送信間隔を 30 分に延ばす。",
+      "acl": [
+        "user:haru",
+        "user:ren"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:mizu-garden/sensor-fw"
+    },
+    {
+      "id": "mem-153",
+      "text": "kumo-notes のバックアップは 6 時間ごとに取得し 30 日保持する。",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:kumo-notes"
+    },
+    {
+      "id": "mem-154",
+      "text": "kumo-notes/web の初期表示の JS は gzip 後 170KB 以内。",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:kumo-notes/web"
+    },
+    {
+      "id": "mem-155",
+      "text": "kumo-notes/web keeps the initial JS bundle under 250KB gzip.",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "superseded",
+      "fresh": true,
+      "scope": "repo:kumo-notes/web"
+    },
+    {
+      "id": "mem-156",
+      "text": "hoshi-ledger の請求書番号は INV-YYYYMM-連番（月ごとにリセット）。",
+      "acl": [
+        "user:mei",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:hoshi-ledger"
+    },
+    {
+      "id": "mem-157",
+      "text": "kumo-notes では退会ユーザーのノートを 30 日後に完全削除する。",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:kumo-notes"
+    },
+    {
+      "id": "mem-158",
+      "text": "kumo-tasks keeps closed tickets of deleted users for 1 year.",
+      "acl": [
+        "user:mei"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:kumo-tasks"
+    },
+    {
+      "id": "mem-159",
+      "text": "sensor-fw の CI は実機テストを夜間だけ走らせる。",
+      "acl": [
+        "user:haru",
+        "user:ren"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:mizu-garden/sensor-fw"
+    },
+    {
+      "id": "mem-160",
+      "text": "hoshi-ledger/cli の出力は既定で表形式、--json で JSON。",
+      "acl": [
+        "user:mei",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:hoshi-ledger/cli"
+    },
+    {
+      "id": "mem-161",
+      "text": "kumo-notes/api の OpenAPI は FastAPI から生成し docs/openapi.json に commit する。",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:kumo-notes/api"
+    },
+    {
+      "id": "mem-162",
+      "text": "mizu-garden/dashboard は閲覧者のローカル時刻で表示する。",
+      "acl": [
+        "user:haru",
+        "user:ren"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:mizu-garden/dashboard"
+    },
+    {
+      "id": "mem-163",
+      "text": "haru は火曜のランチは外に出ることが多い。",
+      "acl": [
+        "user:haru"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "user:haru"
+    },
+    {
+      "id": "mem-164",
+      "text": "ren uses a split keyboard with a Colemak layout.",
+      "acl": [
+        "user:ren"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "user:ren"
+    },
+    {
+      "id": "mem-165",
+      "text": "mei は技術書を月に 2 冊読む目標を立てている。",
+      "acl": [
+        "user:mei"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "user:mei"
+    },
+    {
+      "id": "mem-166",
+      "text": "sora listens to lo-fi music while coding.",
+      "acl": [
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "user:sora"
+    },
+    {
+      "id": "mem-167",
+      "text": "kumo-tasks のチケットラベルは bug/feature/chore の 3 種。",
+      "acl": [
+        "user:mei"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:kumo-tasks"
+    },
+    {
+      "id": "mem-168",
+      "text": "kumo-tasks tracks work on a kanban board with WIP limit 3.",
+      "acl": [
+        "user:mei"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:kumo-tasks"
+    },
+    {
+      "id": "mem-169",
+      "text": "kumo-tasks/api の内部 API は mTLS で保護する。",
+      "acl": [
+        "user:mei"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:kumo-tasks/api"
+    },
+    {
+      "id": "mem-170",
+      "text": "kumo-tasks/api writes JSON logs to stdout.",
+      "acl": [
+        "user:mei"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:kumo-tasks/api"
+    },
+    {
+      "id": "mem-171",
+      "text": "mizu-garden の試験圃場は 3 区画ある。",
+      "acl": [
+        "user:haru",
+        "user:ren"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:mizu-garden"
+    },
+    {
+      "id": "mem-172",
+      "text": "sensor-fw drives the water pump through a MOSFET on GPIO 7.",
+      "acl": [
+        "user:haru",
+        "user:ren"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:mizu-garden/sensor-fw"
+    },
+    {
+      "id": "mem-173",
+      "text": "mizu-garden/dashboard はダークテーマを既定にする。",
+      "acl": [
+        "user:haru",
+        "user:ren"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:mizu-garden/dashboard"
+    },
+    {
+      "id": "mem-174",
+      "text": "hoshi-ledger の用語集では「仕訳」を journal entry と訳す。",
+      "acl": [
+        "user:mei",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:hoshi-ledger"
+    },
+    {
+      "id": "mem-175",
+      "text": "hoshi-ledger/cli disables colors when NO_COLOR is set.",
+      "acl": [
+        "user:mei",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:hoshi-ledger/cli"
+    },
+    {
+      "id": "mem-176",
+      "text": "hoshi-ledger/core のパッケージ名は hoshi_ledger。",
+      "acl": [
+        "user:mei",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:hoshi-ledger/core"
+    },
+    {
+      "id": "mem-177",
+      "text": "kumo-notes のロゴは雲のアイコンで、色は #4A7BD0。",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:kumo-notes"
+    },
+    {
+      "id": "mem-178",
+      "text": "kumo-notes/web uses file-based routing under src/routes.",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:kumo-notes/web"
+    },
+    {
+      "id": "mem-179",
+      "text": "kumo-notes/api のヘルスチェックは /healthz。",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:kumo-notes/api"
+    },
+    {
+      "id": "mem-180",
+      "text": "年末年始は 12/29〜1/3 がリリース凍結期間。",
+      "acl": [
+        "team:engineering"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "shared:engineering"
+    },
+    {
+      "id": "mem-181",
+      "text": "Engineering docs use sentence case for headings.",
+      "acl": [
+        "team:engineering"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "shared:engineering"
+    },
+    {
+      "id": "mem-182",
+      "text": "来期のクラウド予算は今期比 +10%（非公開）。",
+      "acl": [
+        "team:leadership"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "shared:leadership"
+    },
+    {
+      "id": "mem-183",
+      "text": "kumo-notes の旧ロゴは紙飛行機だった。",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "history",
+      "fresh": true,
+      "scope": "project:kumo-notes"
+    },
+    {
+      "id": "mem-184",
+      "text": "sensor-fw drove the pump via a relay on GPIO 4.",
+      "acl": [
+        "user:haru",
+        "user:ren"
+      ],
+      "status": "superseded",
+      "fresh": true,
+      "scope": "repo:mizu-garden/sensor-fw"
+    },
+    {
+      "id": "mem-185",
+      "text": "hoshi-ledger/core のパッケージ名は ledger_core だった。",
+      "acl": [
+        "user:mei",
+        "user:sora"
+      ],
+      "status": "superseded",
+      "fresh": true,
+      "scope": "repo:hoshi-ledger/core"
+    },
+    {
+      "id": "mem-186",
+      "text": "Release freeze used to be 12/25 to 1/5.",
+      "acl": [
+        "team:engineering"
+      ],
+      "status": "superseded",
+      "fresh": true,
+      "scope": "shared:engineering"
+    },
+    {
+      "id": "mem-187",
+      "text": "kumo-notes/api のヘルスチェックは /ping。",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": false,
+      "scope": "repo:kumo-notes/api"
+    },
+    {
+      "id": "mem-188",
+      "text": "mizu-garden has a single test plot.",
+      "acl": [
+        "user:haru",
+        "user:ren"
+      ],
+      "status": "active",
+      "fresh": false,
+      "scope": "project:mizu-garden"
+    },
+    {
+      "id": "mem-189",
+      "text": "kumo-tasks は WIP 制限 5。",
+      "acl": [
+        "user:mei"
+      ],
+      "status": "active",
+      "fresh": false,
+      "scope": "project:kumo-tasks"
+    },
+    {
+      "id": "mem-190",
+      "text": "（haru の非公開メモ）kumo-notes の次期リーダー候補について。",
+      "acl": [
+        "user:haru"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:kumo-notes"
+    },
+    {
+      "id": "mem-191",
+      "text": "(ren's private note) mizu-garden grant application draft ideas.",
+      "acl": [
+        "user:ren"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:mizu-garden"
+    },
+    {
+      "id": "mem-192",
+      "text": "（sora の非公開メモ）hoshi-ledger の工数見積の下書き。",
+      "acl": [
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:hoshi-ledger"
+    },
+    {
+      "id": "mem-193",
+      "text": "社内の共通ツール一覧は Wiki の Tools ページにある。",
+      "acl": [
+        "team:engineering"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "shared:engineering"
+    },
+    {
+      "id": "mem-194",
+      "text": "New engineers pair with a buddy for the first two weeks.",
+      "acl": [
+        "team:engineering"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "shared:engineering"
+    },
+    {
+      "id": "mem-195",
+      "text": "kumo-notes/web の本文フォントは Noto Sans JP。",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:kumo-notes/web"
+    },
+    {
+      "id": "mem-196",
+      "text": "kumo-notes/api list endpoints use cursor pagination with a limit of 50.",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:kumo-notes/api"
+    },
+    {
+      "id": "mem-197",
+      "text": "hoshi-ledger/core formats yen with a thousands separator only in the UI layer.",
+      "acl": [
+        "user:mei",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:hoshi-ledger/core"
+    },
+    {
+      "id": "mem-198",
+      "text": "mizu-garden/dashboard から CSV を書き出せる。",
+      "acl": [
+        "user:haru",
+        "user:ren"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:mizu-garden/dashboard"
+    },
+    {
+      "id": "mem-199",
+      "text": "kumo-tasks/api の API は /api/v2/ プレフィックス。",
+      "acl": [
+        "user:mei"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:kumo-tasks/api"
+    },
+    {
+      "id": "mem-200",
+      "text": "mei's timezone is Asia/Tokyo.",
+      "acl": [
+        "user:mei"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "user:mei"
+    },
+    {
+      "id": "mem-201",
+      "text": "haru のタイムゾーンは Asia/Tokyo。",
+      "acl": [
+        "user:haru"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "user:haru"
+    },
+    {
+      "id": "mem-202",
+      "text": "sora はキーボードショートカットを Emacs 風にしている。",
+      "acl": [
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "user:sora"
+    },
+    {
+      "id": "mem-203",
+      "text": "kumo-notes/api uses UUIDv7 primary keys.",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:kumo-notes/api"
+    },
+    {
+      "id": "mem-204",
+      "text": "kumo-notes/web の E2E テストは Playwright で、PR ごとに chromium だけ走らせる。",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:kumo-notes/web"
+    },
+    {
+      "id": "mem-205",
+      "text": "hoshi-ledger/cli reads its config from ~/.config/hoshi/config.toml.",
+      "acl": [
+        "user:mei",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:hoshi-ledger/cli"
+    },
+    {
+      "id": "mem-206",
+      "text": "hoshi-ledger の会計年度は 4 月始まり。",
+      "acl": [
+        "user:mei",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:hoshi-ledger"
+    },
+    {
+      "id": "mem-207",
+      "text": "mizu-garden/dashboard refreshes charts every 60 seconds.",
+      "acl": [
+        "user:haru",
+        "user:ren"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:mizu-garden/dashboard"
+    },
+    {
+      "id": "mem-208",
+      "text": "sensor-fw のバージョンは semver で、タグは fw-v1.2.3 形式。",
+      "acl": [
+        "user:haru",
+        "user:ren"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:mizu-garden/sensor-fw"
+    },
+    {
+      "id": "mem-209",
+      "text": "kumo-tasks/api の外部呼び出しは timeout 5 秒。",
+      "acl": [
+        "user:mei"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:kumo-tasks/api"
+    },
+    {
+      "id": "mem-210",
+      "text": "休暇は 2 週間前までにカレンダーへ登録する。",
+      "acl": [
+        "team:engineering"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "shared:engineering"
+    },
+    {
+      "id": "mem-211",
+      "text": "Sprint retrospectives happen every other Friday.",
+      "acl": [
+        "team:engineering"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "shared:engineering"
+    },
+    {
+      "id": "mem-212",
+      "text": "kumo-notes/web はルーティングに react-router を使っていた。",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "history",
+      "fresh": true,
+      "scope": "repo:kumo-notes/web"
+    },
+    {
+      "id": "mem-213",
+      "text": "hoshi-ledger's fiscal year used to start in January.",
+      "acl": [
+        "user:mei",
+        "user:sora"
+      ],
+      "status": "superseded",
+      "fresh": true,
+      "scope": "project:hoshi-ledger"
+    },
+    {
+      "id": "mem-214",
+      "text": "kumo-notes はカンバンの WIP 制限を設けず、Issue の milestone で進捗を管理する。",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:kumo-notes"
+    },
+    {
+      "id": "mem-215",
+      "text": "kumo-notes のリードは四半期ごとの振り返りで決める。現リードは haru。",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:kumo-notes"
+    },
+    {
+      "id": "mem-216",
+      "text": "mizu-garden の助成金申請は 11 月締切。進捗は定例で共有する。",
+      "acl": [
+        "user:haru",
+        "user:ren"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:mizu-garden"
+    },
+    {
+      "id": "mem-217",
+      "text": "hoshi-ledger の工数見積は共有 Sheet の Estimates タブで管理する。",
+      "acl": [
+        "user:mei",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "project:hoshi-ledger"
+    },
+    {
+      "id": "mem-218",
+      "text": "評価面談の日程は各マネージャーから個別に連絡する。",
+      "acl": [
+        "team:engineering"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "shared:engineering"
+    },
+    {
+      "id": "mem-219",
+      "text": "（leadership 限定）評価面談は 12 月第 2 週に実施する。",
+      "acl": [
+        "team:leadership"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "shared:engineering"
+    },
+    {
+      "id": "mem-220",
+      "text": "kumo-notes/api の認可は Capability ベース。変更するときは先に Decision を書く。",
+      "acl": [
+        "user:haru",
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:kumo-notes/api"
+    },
+    {
+      "id": "mem-221",
+      "text": "(sora's draft) kumo-notes/api authorization refactor plan: split the Capability table.",
+      "acl": [
+        "user:sora"
+      ],
+      "status": "active",
+      "fresh": true,
+      "scope": "repo:kumo-notes/api"
+    }
+  ],
+  "queries": [
+    {
+      "id": "rq-001",
+      "text": "kumo-notes/api の Python バージョンは？",
+      "requester_principals": [
+        "team:engineering",
+        "user:sora"
+      ],
+      "scope": "repo:kumo-notes/api",
+      "allowed_scopes": [
+        "project:kumo-notes",
+        "shared:engineering",
+        "user:sora"
+      ],
+      "relevant_ids": [
+        "mem-001"
+      ]
+    },
+    {
+      "id": "rq-002",
+      "text": "How do I run the test suite for the api repo?",
+      "requester_principals": [
+        "team:engineering",
+        "user:sora"
+      ],
+      "scope": "repo:kumo-notes/api",
+      "allowed_scopes": [
+        "project:kumo-notes",
+        "shared:engineering",
+        "user:sora"
+      ],
+      "relevant_ids": [
+        "mem-005",
+        "mem-006"
+      ]
+    },
+    {
+      "id": "rq-003",
+      "text": "CI でテストが落ちた。CI 上ではどのコマンドでテストしてる？",
+      "requester_principals": [
+        "team:engineering",
+        "user:haru"
+      ],
+      "scope": "repo:kumo-notes/api",
+      "allowed_scopes": [
+        "project:kumo-notes",
+        "shared:engineering",
+        "user:haru"
+      ],
+      "relevant_ids": [
+        "mem-005",
+        "mem-006"
+      ]
+    },
+    {
+      "id": "rq-004",
+      "text": "api のコード整形ツールは何を使う？",
+      "requester_principals": [
+        "team:engineering",
+        "user:sora"
+      ],
+      "scope": "repo:kumo-notes/api",
+      "allowed_scopes": [
+        "project:kumo-notes",
+        "shared:engineering",
+        "user:sora"
+      ],
+      "relevant_ids": [
+        "mem-010",
+        "mem-011"
+      ]
+    },
+    {
+      "id": "rq-005",
+      "text": "before running tests, is there a lint step I should run?",
+      "requester_principals": [
+        "team:engineering",
+        "user:haru"
+      ],
+      "scope": "repo:kumo-notes/api",
+      "allowed_scopes": [
+        "project:kumo-notes",
+        "shared:engineering",
+        "user:haru"
+      ],
+      "relevant_ids": [
+        "mem-010"
+      ]
+    },
+    {
+      "id": "rq-006",
+      "text": "Which ORM does kumo-notes/api use?",
+      "requester_principals": [
+        "team:engineering",
+        "user:sora"
+      ],
+      "scope": "repo:kumo-notes/api",
+      "allowed_scopes": [
+        "project:kumo-notes",
+        "shared:engineering",
+        "user:sora"
+      ],
+      "relevant_ids": [
+        "mem-014"
+      ]
+    },
+    {
+      "id": "rq-007",
+      "text": "外部APIを呼ぶときのタイムアウトは何秒にする？",
+      "requester_principals": [
+        "team:engineering",
+        "user:sora"
+      ],
+      "scope": "repo:kumo-notes/api",
+      "allowed_scopes": [
+        "project:kumo-notes",
+        "shared:engineering",
+        "user:sora"
+      ],
+      "relevant_ids": [
+        "mem-017",
+        "mem-018"
+      ]
+    },
+    {
+      "id": "rq-008",
+      "text": "ブランチを切りたい。命名規則ある？",
+      "requester_principals": [
+        "team:engineering",
+        "user:sora"
+      ],
+      "scope": "repo:kumo-notes/api",
+      "allowed_scopes": [
+        "project:kumo-notes",
+        "shared:engineering",
+        "user:sora"
+      ],
+      "relevant_ids": [
+        "mem-021"
+      ]
+    },
+    {
+      "id": "rq-009",
+      "text": "commit message はどの言語で書けばいい？",
+      "requester_principals": [
+        "team:engineering",
+        "user:sora"
+      ],
+      "scope": "repo:kumo-notes/api",
+      "allowed_scopes": [
+        "project:kumo-notes",
+        "shared:engineering",
+        "user:sora"
+      ],
+      "relevant_ids": [
+        "mem-023"
+      ]
+    },
+    {
+      "id": "rq-010",
+      "text": "What language should my commit messages be in?",
+      "requester_principals": [
+        "team:engineering",
+        "user:haru"
+      ],
+      "scope": "repo:kumo-notes/api",
+      "allowed_scopes": [
+        "project:kumo-notes",
+        "shared:engineering",
+        "user:haru"
+      ],
+      "relevant_ids": [
+        "mem-024"
+      ]
+    },
+    {
+      "id": "rq-011",
+      "text": "新しいエンドポイントのエラーレスポンスはどんな形式で返す？",
+      "requester_principals": [
+        "team:engineering",
+        "user:sora"
+      ],
+      "scope": "repo:kumo-notes/api",
+      "allowed_scopes": [
+        "project:kumo-notes",
+        "shared:engineering",
+        "user:sora"
+      ],
+      "relevant_ids": [
+        "mem-025",
+        "mem-026"
+      ]
+    },
+    {
+      "id": "rq-012",
+      "text": "What error payload shape should the BFF expect from the api?",
+      "requester_principals": [
+        "team:engineering",
+        "user:haru"
+      ],
+      "scope": "repo:kumo-notes/web",
+      "allowed_scopes": [
+        "project:kumo-notes",
+        "shared:engineering",
+        "user:haru"
+      ],
+      "relevant_ids": [
+        "mem-026"
+      ]
+    },
+    {
+      "id": "rq-013",
+      "text": "kumo-notes の API のバージョニング方針",
+      "requester_principals": [
+        "team:engineering",
+        "user:sora"
+      ],
+      "scope": "project:kumo-notes",
+      "allowed_scopes": [
+        "shared:engineering",
+        "user:sora"
+      ],
+      "relevant_ids": [
+        "mem-025"
+      ]
+    },
+    {
+      "id": "rq-014",
+      "text": "ログイン方式はどうなってる？",
+      "requester_principals": [
+        "team:engineering",
+        "user:haru"
+      ],
+      "scope": "project:kumo-notes",
+      "allowed_scopes": [
+        "shared:engineering",
+        "user:haru"
+      ],
+      "relevant_ids": [
+        "mem-029"
+      ]
+    },
+    {
+      "id": "rq-015",
+      "text": "When is the weekly release?",
+      "requester_principals": [
+        "team:engineering",
+        "user:sora"
+      ],
+      "scope": "project:kumo-notes",
+      "allowed_scopes": [
+        "shared:engineering",
+        "user:sora"
+      ],
+      "relevant_ids": [
+        "mem-032"
+      ]
+    },
+    {
+      "id": "rq-016",
+      "text": "リリースのタイミングを教えて",
+      "requester_principals": [
+        "team:engineering",
+        "user:haru"
+      ],
+      "scope": "project:mizu-garden",
+      "allowed_scopes": [
+        "shared:engineering",
+        "user:haru"
+      ],
+      "relevant_ids": [
+        "mem-035"
+      ]
+    },
+    {
+      "id": "rq-017",
+      "text": "PR を出す前に何を準備すればいい？",
+      "requester_principals": [
+        "team:engineering",
+        "user:haru"
+      ],
+      "scope": "repo:kumo-notes/web",
+      "allowed_scopes": [
+        "project:kumo-notes",
+        "shared:engineering",
+        "user:haru"
+      ],
+      "relevant_ids": [
+        "mem-036",
+        "mem-037"
+      ]
+    },
+    {
+      "id": "rq-018",
+      "text": "依存パッケージを追加したい。npm と pnpm と bun のどれ？",
+      "requester_principals": [
+        "team:engineering",
+        "user:haru"
+      ],
+      "scope": "repo:kumo-notes/web",
+      "allowed_scopes": [
+        "project:kumo-notes",
+        "shared:engineering",
+        "user:haru"
+      ],
+      "relevant_ids": [
+        "mem-038"
+      ]
+    },
+    {
+      "id": "rq-019",
+      "text": "Node version for the web app?",
+      "requester_principals": [
+        "team:engineering",
+        "user:haru"
+      ],
+      "scope": "repo:kumo-notes/web",
+      "allowed_scopes": [
+        "project:kumo-notes",
+        "shared:engineering",
+        "user:haru"
+      ],
+      "relevant_ids": [
+        "mem-041"
+      ]
+    },
+    {
+      "id": "rq-020",
+      "text": "設定画面を新しく作る。CSS は何で書く？",
+      "requester_principals": [
+        "team:engineering",
+        "user:haru"
+      ],
+      "scope": "repo:kumo-notes/web",
+      "allowed_scopes": [
+        "project:kumo-notes",
+        "shared:engineering",
+        "user:haru"
+      ],
+      "relevant_ids": [
+        "mem-044",
+        "mem-045"
+      ]
+    },
+    {
+      "id": "rq-021",
+      "text": "web repo のインデント幅は？",
+      "requester_principals": [
+        "team:engineering",
+        "user:sora"
+      ],
+      "scope": "repo:kumo-notes/web",
+      "allowed_scopes": [
+        "project:kumo-notes",
+        "shared:engineering",
+        "user:sora"
+      ],
+      "relevant_ids": [
+        "mem-047",
+        "mem-048"
+      ]
+    },
+    {
+      "id": "rq-022",
+      "text": "indentation rule in this repo",
+      "requester_principals": [
+        "team:engineering",
+        "user:haru"
+      ],
+      "scope": "repo:kumo-notes/web",
+      "allowed_scopes": [
+        "project:kumo-notes",
+        "shared:engineering",
+        "user:haru"
+      ],
+      "relevant_ids": [
+        "mem-047",
+        "mem-049"
+      ]
+    },
+    {
+      "id": "rq-023",
+      "text": "モックアップの配色を決めたい",
+      "requester_principals": [
+        "team:engineering",
+        "user:haru"
+      ],
+      "scope": "repo:kumo-notes/web",
+      "allowed_scopes": [
+        "project:kumo-notes",
+        "shared:engineering",
+        "user:haru"
+      ],
+      "relevant_ids": [
+        "mem-050",
+        "mem-051"
+      ]
+    },
+    {
+      "id": "rq-024",
+      "text": "How should I declare a new feature flag?",
+      "requester_principals": [
+        "team:engineering",
+        "user:sora"
+      ],
+      "scope": "repo:kumo-notes/web",
+      "allowed_scopes": [
+        "project:kumo-notes",
+        "shared:engineering",
+        "user:sora"
+      ],
+      "relevant_ids": [
+        "mem-052"
+      ]
+    },
+    {
+      "id": "rq-025",
+      "text": "hoshi-ledger の DB のバージョンは？",
+      "requester_principals": [
+        "team:engineering",
+        "team:leadership",
+        "user:mei"
+      ],
+      "scope": "project:hoshi-ledger",
+      "allowed_scopes": [
+        "shared:engineering",
+        "user:mei"
+      ],
+      "relevant_ids": [
+        "mem-054"
+      ]
+    },
+    {
+      "id": "rq-026",
+      "text": "which postgres major are we on?",
+      "requester_principals": [
+        "team:engineering",
+        "user:sora"
+      ],
+      "scope": "repo:hoshi-ledger/core",
+      "allowed_scopes": [
+        "project:hoshi-ledger",
+        "shared:engineering",
+        "user:sora"
+      ],
+      "relevant_ids": [
+        "mem-054"
+      ]
+    },
+    {
+      "id": "rq-027",
+      "text": "How are money amounts stored?",
+      "requester_principals": [
+        "team:engineering",
+        "team:leadership",
+        "user:mei"
+      ],
+      "scope": "repo:hoshi-ledger/core",
+      "allowed_scopes": [
+        "project:hoshi-ledger",
+        "shared:engineering",
+        "user:mei"
+      ],
+      "relevant_ids": [
+        "mem-058"
+      ]
+    },
+    {
+      "id": "rq-028",
+      "text": "金額カラムを追加する。型はどうする？",
+      "requester_principals": [
+        "team:engineering",
+        "user:sora"
+      ],
+      "scope": "repo:hoshi-ledger/core",
+      "allowed_scopes": [
+        "project:hoshi-ledger",
+        "shared:engineering",
+        "user:sora"
+      ],
+      "relevant_ids": [
+        "mem-058"
+      ]
+    },
+    {
+      "id": "rq-029",
+      "text": "社内の集計ツールから叩く API のプロトコルは？",
+      "requester_principals": [
+        "team:engineering",
+        "team:leadership",
+        "user:mei"
+      ],
+      "scope": "project:hoshi-ledger",
+      "allowed_scopes": [
+        "shared:engineering",
+        "user:mei"
+      ],
+      "relevant_ids": [
+        "mem-061",
+        "mem-062"
+      ]
+    },
+    {
+      "id": "rq-030",
+      "text": "Is there a GraphQL endpoint for partners?",
+      "requester_principals": [
+        "team:engineering",
+        "user:sora"
+      ],
+      "scope": "project:hoshi-ledger",
+      "allowed_scopes": [
+        "shared:engineering",
+        "user:sora"
+      ],
+      "relevant_ids": [
+        "mem-061"
+      ]
+    },
+    {
+      "id": "rq-031",
+      "text": "migration を追加するときの注意点",
+      "requester_principals": [
+        "team:engineering",
+        "team:leadership",
+        "user:mei"
+      ],
+      "scope": "repo:hoshi-ledger/core",
+      "allowed_scopes": [
+        "project:hoshi-ledger",
+        "shared:engineering",
+        "user:mei"
+      ],
+      "relevant_ids": [
+        "mem-064",
+        "mem-065"
+      ]
+    },
+    {
+      "id": "rq-032",
+      "text": "migration を追加するときの注意点",
+      "requester_principals": [
+        "team:engineering",
+        "user:sora"
+      ],
+      "scope": "repo:hoshi-ledger/core",
+      "allowed_scopes": [
+        "project:hoshi-ledger",
+        "shared:engineering",
+        "user:sora"
+      ],
+      "relevant_ids": [
+        "mem-064",
+        "mem-065"
+      ]
+    },
+    {
+      "id": "rq-033",
+      "text": "migration を追加するときの注意点",
+      "requester_principals": [
+        "team:engineering",
+        "user:sora"
+      ],
+      "scope": "repo:kumo-notes/api",
+      "allowed_scopes": [
+        "project:kumo-notes",
+        "shared:engineering",
+        "user:sora"
+      ],
+      "relevant_ids": [
+        "mem-066"
+      ]
+    },
+    {
+      "id": "rq-034",
+      "text": "CI のカバレッジ閾値はいくつ？",
+      "requester_principals": [
+        "team:engineering",
+        "team:leadership",
+        "user:mei"
+      ],
+      "scope": "repo:hoshi-ledger/core",
+      "allowed_scopes": [
+        "project:hoshi-ledger",
+        "shared:engineering",
+        "user:mei"
+      ],
+      "relevant_ids": [
+        "mem-067"
+      ]
+    },
+    {
+      "id": "rq-035",
+      "text": "Where should I put a design note, and in which language?",
+      "requester_principals": [
+        "team:engineering",
+        "team:leadership",
+        "user:mei"
+      ],
+      "scope": "project:hoshi-ledger",
+      "allowed_scopes": [
+        "shared:engineering",
+        "user:mei"
+      ],
+      "relevant_ids": [
+        "mem-070",
+        "mem-071",
+        "mem-072"
+      ]
+    },
+    {
+      "id": "rq-036",
+      "text": "本番環境はどこにデプロイしてる？",
+      "requester_principals": [
+        "team:engineering",
+        "user:sora"
+      ],
+      "scope": "project:hoshi-ledger",
+      "allowed_scopes": [
+        "shared:engineering",
+        "user:sora"
+      ],
+      "relevant_ids": [
+        "mem-073"
+      ]
+    },
+    {
+      "id": "rq-037",
+      "text": "How often do backups run?",
+      "requester_principals": [
+        "team:engineering",
+        "team:leadership",
+        "user:mei"
+      ],
+      "scope": "project:hoshi-ledger",
+      "allowed_scopes": [
+        "shared:engineering",
+        "user:mei"
+      ],
+      "relevant_ids": [
+        "mem-075"
+      ]
+    },
+    {
+      "id": "rq-038",
+      "text": "CLI のサブコマンドを追加する。フレームワークは？",
+      "requester_principals": [
+        "team:engineering",
+        "team:leadership",
+        "user:mei"
+      ],
+      "scope": "repo:hoshi-ledger/cli",
+      "allowed_scopes": [
+        "project:hoshi-ledger",
+        "shared:engineering",
+        "user:mei"
+      ],
+      "relevant_ids": [
+        "mem-077"
+      ]
+    },
+    {
+      "id": "rq-039",
+      "text": "how do users install the cli",
+      "requester_principals": [
+        "team:engineering",
+        "user:sora"
+      ],
+      "scope": "repo:hoshi-ledger/cli",
+      "allowed_scopes": [
+        "project:hoshi-ledger",
+        "shared:engineering",
+        "user:sora"
+      ],
+      "relevant_ids": [
+        "mem-078"
+      ]
+    },
+    {
+      "id": "rq-040",
+      "text": "外注先の検討状況は？",
+      "requester_principals": [
+        "team:engineering",
+        "user:sora"
+      ],
+      "scope": "project:hoshi-ledger",
+      "allowed_scopes": [
+        "shared:engineering",
+        "user:sora"
+      ],
+      "relevant_ids": [
+        "mem-080"
+      ]
+    },
+    {
+      "id": "rq-041",
+      "text": "外注先の検討状況は？",
+      "requester_principals": [
+        "team:engineering",
+        "team:leadership",
+        "user:mei"
+      ],
+      "scope": "project:hoshi-ledger",
+      "allowed_scopes": [
+        "shared:engineering",
+        "user:mei"
+      ],
+      "relevant_ids": [
+        "mem-079",
+        "mem-080"
+      ]
+    },
+    {
+      "id": "rq-042",
+      "text": "How often do the sensors send data?",
+      "requester_principals": [
+        "team:engineering",
+        "user:ren"
+      ],
+      "scope": "project:mizu-garden",
+      "allowed_scopes": [
+        "shared:engineering",
+        "user:ren"
+      ],
+      "relevant_ids": [
+        "mem-082"
+      ]
+    },
+    {
+      "id": "rq-043",
+      "text": "グラフの温度の単位はどうする？",
+      "requester_principals": [
+        "team:engineering",
+        "user:haru"
+      ],
+      "scope": "repo:mizu-garden/dashboard",
+      "allowed_scopes": [
+        "project:mizu-garden",
+        "shared:engineering",
+        "user:haru"
+      ],
+      "relevant_ids": [
+        "mem-081"
+      ]
+    },
+    {
+      "id": "rq-044",
+      "text": "ビルドターゲットは esp32 と esp32-c6 のどっち？",
+      "requester_principals": [
+        "team:engineering",
+        "user:ren"
+      ],
+      "scope": "repo:mizu-garden/sensor-fw",
+      "allowed_scopes": [
+        "project:mizu-garden",
+        "shared:engineering",
+        "user:ren"
+      ],
+      "relevant_ids": [
+        "mem-085"
+      ]
+    },
+    {
+      "id": "rq-045",
+      "text": "書き込みツールは何を使ってた？",
+      "requester_principals": [
+        "team:engineering",
+        "user:ren"
+      ],
+      "scope": "repo:mizu-garden/sensor-fw",
+      "allowed_scopes": [
+        "project:mizu-garden",
+        "shared:engineering",
+        "user:ren"
+      ],
+      "relevant_ids": [
+        "mem-087"
+      ]
+    },
+    {
+      "id": "rq-046",
+      "text": "OTA update settings for the devices",
+      "requester_principals": [
+        "team:engineering",
+        "user:haru"
+      ],
+      "scope": "repo:mizu-garden/sensor-fw",
+      "allowed_scopes": [
+        "project:mizu-garden",
+        "shared:engineering",
+        "user:haru"
+      ],
+      "relevant_ids": [
+        "mem-088",
+        "mem-089"
+      ]
+    },
+    {
+      "id": "rq-047",
+      "text": "MQTT の接続が切れたときの挙動",
+      "requester_principals": [
+        "team:engineering",
+        "user:ren"
+      ],
+      "scope": "repo:mizu-garden/sensor-fw",
+      "allowed_scopes": [
+        "project:mizu-garden",
+        "shared:engineering",
+        "user:ren"
+      ],
+      "relevant_ids": [
+        "mem-091",
+        "mem-093"
+      ]
+    },
+    {
+      "id": "rq-048",
+      "text": "Which MQTT broker do we connect to?",
+      "requester_principals": [
+        "team:engineering",
+        "user:haru"
+      ],
+      "scope": "project:mizu-garden",
+      "allowed_scopes": [
+        "user:haru"
+      ],
+      "relevant_ids": [
+        "mem-091"
+      ]
+    },
+    {
+      "id": "rq-049",
+      "text": "土が乾いたときのアラートの閾値と通知の書式",
+      "requester_principals": [
+        "team:engineering",
+        "user:ren"
+      ],
+      "scope": "project:mizu-garden",
+      "allowed_scopes": [
+        "shared:engineering",
+        "user:ren"
+      ],
+      "relevant_ids": [
+        "mem-094",
+        "mem-095"
+      ]
+    },
+    {
+      "id": "rq-050",
+      "text": "ダッシュボードの認証どうなってる？",
+      "requester_principals": [
+        "team:engineering",
+        "user:haru"
+      ],
+      "scope": "repo:mizu-garden/dashboard",
+      "allowed_scopes": [
+        "project:mizu-garden",
+        "shared:engineering",
+        "user:haru"
+      ],
+      "relevant_ids": [
+        "mem-099"
+      ]
+    },
+    {
+      "id": "rq-051",
+      "text": "chart library for the dashboard",
+      "requester_principals": [
+        "team:engineering",
+        "user:ren"
+      ],
+      "scope": "repo:mizu-garden/dashboard",
+      "allowed_scopes": [
+        "project:mizu-garden",
+        "shared:engineering",
+        "user:ren"
+      ],
+      "relevant_ids": [
+        "mem-097"
+      ]
+    },
+    {
+      "id": "rq-052",
+      "text": "How much explanation does ren like in answers?",
+      "requester_principals": [
+        "team:engineering",
+        "user:ren"
+      ],
+      "scope": "user:ren",
+      "allowed_scopes": [
+        "shared:engineering"
+      ],
+      "relevant_ids": [
+        "mem-100",
+        "mem-101"
+      ]
+    },
+    {
+      "id": "rq-053",
+      "text": "ジョブキューは何を使ってる？",
+      "requester_principals": [
+        "team:engineering",
+        "team:leadership",
+        "user:mei"
+      ],
+      "scope": "project:kumo-tasks",
+      "allowed_scopes": [
+        "shared:engineering",
+        "user:mei"
+      ],
+      "relevant_ids": [
+        "mem-102"
+      ]
+    },
+    {
+      "id": "rq-054",
+      "text": "Where do new routers go, and which Python version?",
+      "requester_principals": [
+        "team:engineering",
+        "team:leadership",
+        "user:mei"
+      ],
+      "scope": "repo:kumo-tasks/api",
+      "allowed_scopes": [
+        "project:kumo-tasks",
+        "shared:engineering",
+        "user:mei"
+      ],
+      "relevant_ids": [
+        "mem-003",
+        "mem-104"
+      ]
+    },
+    {
+      "id": "rq-055",
+      "text": "バックグラウンドジョブのキューは何？",
+      "requester_principals": [
+        "team:engineering",
+        "user:sora"
+      ],
+      "scope": "project:kumo-notes",
+      "allowed_scopes": [
+        "shared:engineering",
+        "user:sora"
+      ],
+      "relevant_ids": [
+        "mem-105"
+      ]
+    },
+    {
+      "id": "rq-056",
+      "text": "障害が起きたらどこに報告する？",
+      "requester_principals": [
+        "team:engineering",
+        "user:sora"
+      ],
+      "scope": "repo:kumo-notes/api",
+      "allowed_scopes": [
+        "project:kumo-notes",
+        "shared:engineering",
+        "user:sora"
+      ],
+      "relevant_ids": [
+        "mem-106"
+      ]
+    },
+    {
+      "id": "rq-057",
+      "text": "Where do I report a major incident?",
+      "requester_principals": [
+        "team:engineering",
+        "team:leadership",
+        "user:mei"
+      ],
+      "scope": "project:hoshi-ledger",
+      "allowed_scopes": [
+        "shared:engineering",
+        "shared:leadership",
+        "user:mei"
+      ],
+      "relevant_ids": [
+        "mem-106",
+        "mem-108"
+      ]
+    },
+    {
+      "id": "rq-058",
+      "text": "レビューはどれくらいで返すべき？",
+      "requester_principals": [
+        "team:engineering",
+        "user:haru"
+      ],
+      "scope": "repo:kumo-notes/web",
+      "allowed_scopes": [
+        "project:kumo-notes",
+        "shared:engineering",
+        "user:haru"
+      ],
+      "relevant_ids": [
+        "mem-109",
+        "mem-110"
+      ]
+    },
+    {
+      "id": "rq-059",
+      "text": "license header for new source files",
+      "requester_principals": [
+        "team:engineering",
+        "user:ren"
+      ],
+      "scope": "repo:mizu-garden/sensor-fw",
+      "allowed_scopes": [
+        "project:mizu-garden",
+        "shared:engineering",
+        "user:ren"
+      ],
+      "relevant_ids": [
+        "mem-111"
+      ]
+    },
+    {
+      "id": "rq-060",
+      "text": "オンコールの交代はいつ？",
+      "requester_principals": [
+        "team:engineering",
+        "user:haru"
+      ],
+      "scope": "user:haru",
+      "allowed_scopes": [
+        "shared:engineering"
+      ],
+      "relevant_ids": [
+        "mem-113"
+      ]
+    },
+    {
+      "id": "rq-061",
+      "text": "How should I share a credential with a teammate?",
+      "requester_principals": [
+        "team:engineering",
+        "user:sora"
+      ],
+      "scope": "repo:hoshi-ledger/core",
+      "allowed_scopes": [
+        "project:hoshi-ledger",
+        "shared:engineering",
+        "user:sora"
+      ],
+      "relevant_ids": [
+        "mem-115"
+      ]
+    },
+    {
+      "id": "rq-062",
+      "text": "全体定例って何曜日？",
+      "requester_principals": [
+        "team:engineering",
+        "team:leadership",
+        "user:mei"
+      ],
+      "scope": "user:mei",
+      "allowed_scopes": [
+        "shared:engineering"
+      ],
+      "relevant_ids": [
+        "mem-117"
+      ]
+    },
+    {
+      "id": "rq-063",
+      "text": "来期の採用計画",
+      "requester_principals": [
+        "team:engineering",
+        "team:leadership",
+        "user:mei"
+      ],
+      "scope": "shared:leadership",
+      "relevant_ids": [
+        "mem-120"
+      ]
+    },
+    {
+      "id": "rq-064",
+      "text": "来期の採用計画",
+      "requester_principals": [
+        "team:engineering",
+        "user:sora"
+      ],
+      "scope": "shared:engineering",
+      "relevant_ids": [
+        "mem-119"
+      ]
+    },
+    {
+      "id": "rq-065",
+      "text": "返答のスタイルの好み",
+      "requester_principals": [
+        "team:engineering",
+        "user:sora"
+      ],
+      "scope": "user:sora",
+      "allowed_scopes": [
+        "shared:engineering"
+      ],
+      "relevant_ids": [
+        "mem-121",
+        "mem-122",
+        "mem-123"
+      ]
+    },
+    {
+      "id": "rq-066",
+      "text": "How does haru like replies to be written?",
+      "requester_principals": [
+        "team:engineering",
+        "user:haru"
+      ],
+      "scope": "user:haru",
+      "allowed_scopes": [
+        "shared:engineering"
+      ],
+      "relevant_ids": [
+        "mem-125"
+      ]
+    },
+    {
+      "id": "rq-067",
+      "text": "2つのライブラリを比較してまとめて",
+      "requester_principals": [
+        "team:engineering",
+        "user:sora"
+      ],
+      "scope": "project:hoshi-ledger",
+      "allowed_scopes": [
+        "shared:engineering",
+        "user:sora"
+      ],
+      "relevant_ids": [
+        "mem-122",
+        "mem-123"
+      ]
+    },
+    {
+      "id": "rq-068",
+      "text": "ミーティングを入れるなら何時がいい？",
+      "requester_principals": [
+        "team:engineering",
+        "user:ren"
+      ],
+      "scope": "user:ren",
+      "allowed_scopes": [
+        "shared:engineering"
+      ],
+      "relevant_ids": [
+        "mem-128",
+        "mem-130"
+      ]
+    },
+    {
+      "id": "rq-069",
+      "text": "what timezone should you assume for me",
+      "requester_principals": [
+        "team:engineering",
+        "user:sora"
+      ],
+      "scope": "user:sora",
+      "allowed_scopes": [
+        "shared:engineering"
+      ],
+      "relevant_ids": [
+        "mem-127"
+      ]
+    },
+    {
+      "id": "rq-070",
+      "text": "エディタの設定ファイルの例を出して",
+      "requester_principals": [
+        "team:engineering",
+        "user:sora"
+      ],
+      "scope": "user:sora",
+      "allowed_scopes": [
+        "shared:engineering"
+      ],
+      "relevant_ids": [
+        "mem-131"
+      ]
+    },
+    {
+      "id": "rq-071",
+      "text": "variable naming convention",
+      "requester_principals": [
+        "team:engineering",
+        "team:leadership",
+        "user:mei"
+      ],
+      "scope": "repo:hoshi-ledger/core",
+      "allowed_scopes": [
+        "project:hoshi-ledger",
+        "shared:engineering",
+        "user:mei"
+      ],
+      "relevant_ids": [
+        "mem-134",
+        "mem-135"
+      ]
+    },
+    {
+      "id": "rq-072",
+      "text": "CI が通ったら自動でマージしていい？",
+      "requester_principals": [
+        "team:engineering",
+        "user:sora"
+      ],
+      "scope": "repo:kumo-notes/api",
+      "allowed_scopes": [
+        "project:kumo-notes",
+        "shared:engineering",
+        "user:sora"
+      ],
+      "relevant_ids": [
+        "mem-136",
+        "mem-137"
+      ]
+    },
+    {
+      "id": "rq-073",
+      "text": "How do we resolve concurrent edits to the same note?",
+      "requester_principals": [
+        "team:engineering",
+        "user:haru"
+      ],
+      "scope": "project:kumo-notes",
+      "allowed_scopes": [
+        "shared:engineering",
+        "user:haru"
+      ],
+      "relevant_ids": [
+        "mem-138"
+      ]
+    },
+    {
+      "id": "rq-074",
+      "text": "API レスポンスのキャッシュ期間",
+      "requester_principals": [
+        "team:engineering",
+        "user:sora"
+      ],
+      "scope": "repo:kumo-notes/api",
+      "allowed_scopes": [
+        "project:kumo-notes",
+        "shared:engineering",
+        "user:sora"
+      ],
+      "relevant_ids": [
+        "mem-141"
+      ]
+    },
+    {
+      "id": "rq-075",
+      "text": "ログの出力フォーマット",
+      "requester_principals": [
+        "team:engineering",
+        "user:haru"
+      ],
+      "scope": "repo:kumo-notes/api",
+      "allowed_scopes": [
+        "project:kumo-notes",
+        "shared:engineering",
+        "user:haru"
+      ],
+      "relevant_ids": [
+        "mem-143",
+        "mem-144"
+      ]
+    },
+    {
+      "id": "rq-076",
+      "text": "rate limit for the public API",
+      "requester_principals": [
+        "team:engineering",
+        "user:sora"
+      ],
+      "scope": "project:kumo-notes",
+      "allowed_scopes": [
+        "shared:engineering",
+        "user:sora"
+      ],
+      "relevant_ids": [
+        "mem-146"
+      ]
+    },
+    {
+      "id": "rq-077",
+      "text": "パートナー向け API のレート制限",
+      "requester_principals": [
+        "team:engineering",
+        "team:leadership",
+        "user:mei"
+      ],
+      "scope": "project:hoshi-ledger",
+      "allowed_scopes": [
+        "shared:engineering",
+        "user:mei"
+      ],
+      "relevant_ids": [
+        "mem-147"
+      ]
+    },
+    {
+      "id": "rq-078",
+      "text": "ノートの全文検索の実装方式",
+      "requester_principals": [
+        "team:engineering",
+        "user:haru"
+      ],
+      "scope": "repo:kumo-notes/api",
+      "allowed_scopes": [
+        "project:kumo-notes",
+        "shared:engineering",
+        "user:haru"
+      ],
+      "relevant_ids": [
+        "mem-148"
+      ]
+    },
+    {
+      "id": "rq-079",
+      "text": "日時は DB にどのタイムゾーンで保存する？",
+      "requester_principals": [
+        "team:engineering",
+        "user:sora"
+      ],
+      "scope": "repo:hoshi-ledger/core",
+      "allowed_scopes": [
+        "project:hoshi-ledger",
+        "shared:engineering",
+        "user:sora"
+      ],
+      "relevant_ids": [
+        "mem-150"
+      ]
+    },
+    {
+      "id": "rq-080",
+      "text": "where do translation strings live",
+      "requester_principals": [
+        "team:engineering",
+        "user:haru"
+      ],
+      "scope": "repo:kumo-notes/web",
+      "allowed_scopes": [
+        "project:kumo-notes",
+        "shared:engineering",
+        "user:haru"
+      ],
+      "relevant_ids": [
+        "mem-151"
+      ]
+    },
+    {
+      "id": "rq-081",
+      "text": "What happens when the battery is low?",
+      "requester_principals": [
+        "team:engineering",
+        "user:ren"
+      ],
+      "scope": "repo:mizu-garden/sensor-fw",
+      "allowed_scopes": [
+        "project:mizu-garden",
+        "shared:engineering",
+        "user:ren"
+      ],
+      "relevant_ids": [
+        "mem-152"
+      ]
+    },
+    {
+      "id": "rq-082",
+      "text": "バックアップの頻度",
+      "requester_principals": [
+        "team:engineering",
+        "user:sora"
+      ],
+      "scope": "project:kumo-notes",
+      "allowed_scopes": [
+        "shared:engineering",
+        "user:sora"
+      ],
+      "relevant_ids": [
+        "mem-153"
+      ]
+    },
+    {
+      "id": "rq-083",
+      "text": "バックアップの頻度",
+      "requester_principals": [
+        "team:engineering",
+        "user:haru"
+      ],
+      "scope": "project:kumo-notes",
+      "allowed_scopes": [
+        "shared:engineering",
+        "user:haru"
+      ],
+      "relevant_ids": [
+        "mem-153"
+      ]
+    },
+    {
+      "id": "rq-084",
+      "text": "bundle size budget",
+      "requester_principals": [
+        "team:engineering",
+        "user:haru"
+      ],
+      "scope": "repo:kumo-notes/web",
+      "allowed_scopes": [
+        "project:kumo-notes",
+        "shared:engineering",
+        "user:haru"
+      ],
+      "relevant_ids": [
+        "mem-154"
+      ]
+    },
+    {
+      "id": "rq-085",
+      "text": "請求書番号の採番ルール",
+      "requester_principals": [
+        "team:engineering",
+        "team:leadership",
+        "user:mei"
+      ],
+      "scope": "repo:hoshi-ledger/cli",
+      "allowed_scopes": [
+        "project:hoshi-ledger",
+        "shared:engineering",
+        "user:mei"
+      ],
+      "relevant_ids": [
+        "mem-156"
+      ]
+    },
+    {
+      "id": "rq-086",
+      "text": "退会したユーザーのデータはいつ消える？",
+      "requester_principals": [
+        "team:engineering",
+        "user:sora"
+      ],
+      "scope": "project:kumo-notes",
+      "allowed_scopes": [
+        "shared:engineering",
+        "user:sora"
+      ],
+      "relevant_ids": [
+        "mem-157"
+      ]
+    },
+    {
+      "id": "rq-087",
+      "text": "hardware-in-the-loop tests schedule",
+      "requester_principals": [
+        "team:engineering",
+        "user:haru"
+      ],
+      "scope": "repo:mizu-garden/sensor-fw",
+      "allowed_scopes": [
+        "project:mizu-garden",
+        "shared:engineering",
+        "user:haru"
+      ],
+      "relevant_ids": [
+        "mem-159"
+      ]
+    },
+    {
+      "id": "rq-088",
+      "text": "CLI の出力を JSON にしたい",
+      "requester_principals": [
+        "team:engineering",
+        "user:sora"
+      ],
+      "scope": "repo:hoshi-ledger/cli",
+      "allowed_scopes": [
+        "project:hoshi-ledger",
+        "shared:engineering",
+        "user:sora"
+      ],
+      "relevant_ids": [
+        "mem-160"
+      ]
+    },
+    {
+      "id": "rq-089",
+      "text": "API spec file location",
+      "requester_principals": [
+        "team:engineering",
+        "user:haru"
+      ],
+      "scope": "repo:kumo-notes/api",
+      "allowed_scopes": [
+        "project:kumo-notes",
+        "shared:engineering",
+        "user:haru"
+      ],
+      "relevant_ids": [
+        "mem-161"
+      ]
+    },
+    {
+      "id": "rq-090",
+      "text": "ダッシュボードの時刻表示は何時間帯？",
+      "requester_principals": [
+        "team:engineering",
+        "user:ren"
+      ],
+      "scope": "repo:mizu-garden/dashboard",
+      "allowed_scopes": [
+        "project:mizu-garden",
+        "shared:engineering",
+        "user:ren"
+      ],
+      "relevant_ids": [
+        "mem-128",
+        "mem-162"
+      ]
+    },
+    {
+      "id": "rq-091",
+      "text": "ヘルスチェックのエンドポイントは？",
+      "requester_principals": [
+        "team:engineering",
+        "user:sora"
+      ],
+      "scope": "repo:kumo-notes/api",
+      "allowed_scopes": [
+        "project:kumo-notes",
+        "shared:engineering",
+        "user:sora"
+      ],
+      "relevant_ids": [
+        "mem-179"
+      ]
+    },
+    {
+      "id": "rq-092",
+      "text": "How many test plots does the project have?",
+      "requester_principals": [
+        "team:engineering",
+        "user:ren"
+      ],
+      "scope": "project:mizu-garden",
+      "allowed_scopes": [
+        "shared:engineering",
+        "user:ren"
+      ],
+      "relevant_ids": [
+        "mem-171"
+      ]
+    },
+    {
+      "id": "rq-093",
+      "text": "カンバンの WIP 制限はいくつ？",
+      "requester_principals": [
+        "team:engineering",
+        "team:leadership",
+        "user:mei"
+      ],
+      "scope": "project:kumo-tasks",
+      "allowed_scopes": [
+        "shared:engineering",
+        "user:mei"
+      ],
+      "relevant_ids": [
+        "mem-168"
+      ]
+    },
+    {
+      "id": "rq-094",
+      "text": "What is the WIP limit on our kanban board?",
+      "requester_principals": [
+        "team:engineering",
+        "user:haru"
+      ],
+      "scope": "project:kumo-notes",
+      "allowed_scopes": [
+        "shared:engineering",
+        "user:haru"
+      ],
+      "relevant_ids": [
+        "mem-214"
+      ]
+    },
+    {
+      "id": "rq-095",
+      "text": "次のチームリーダーは誰になりそう？",
+      "requester_principals": [
+        "team:engineering",
+        "user:sora"
+      ],
+      "scope": "project:kumo-notes",
+      "allowed_scopes": [
+        "shared:engineering",
+        "user:sora"
+      ],
+      "relevant_ids": [
+        "mem-215"
+      ]
+    },
+    {
+      "id": "rq-096",
+      "text": "grant application status",
+      "requester_principals": [
+        "team:engineering",
+        "user:haru"
+      ],
+      "scope": "project:mizu-garden",
+      "allowed_scopes": [
+        "shared:engineering",
+        "user:haru"
+      ],
+      "relevant_ids": [
+        "mem-216"
+      ]
+    },
+    {
+      "id": "rq-097",
+      "text": "工数見積の最新版はどこにある？",
+      "requester_principals": [
+        "team:engineering",
+        "team:leadership",
+        "user:mei"
+      ],
+      "scope": "project:hoshi-ledger",
+      "allowed_scopes": [
+        "shared:engineering",
+        "user:mei"
+      ],
+      "relevant_ids": [
+        "mem-217"
+      ]
+    },
+    {
+      "id": "rq-098",
+      "text": "評価面談はいつ？",
+      "requester_principals": [
+        "team:engineering",
+        "user:haru"
+      ],
+      "scope": "shared:engineering",
+      "relevant_ids": [
+        "mem-218"
+      ]
+    },
+    {
+      "id": "rq-099",
+      "text": "Is there a plan to refactor authorization?",
+      "requester_principals": [
+        "team:engineering",
+        "user:haru"
+      ],
+      "scope": "repo:kumo-notes/api",
+      "allowed_scopes": [
+        "project:kumo-notes",
+        "shared:engineering",
+        "user:haru"
+      ],
+      "relevant_ids": [
+        "mem-220"
+      ]
+    },
+    {
+      "id": "rq-100",
+      "text": "Is there a plan to refactor authorization?",
+      "requester_principals": [
+        "team:engineering",
+        "user:sora"
+      ],
+      "scope": "repo:kumo-notes/api",
+      "allowed_scopes": [
+        "project:kumo-notes",
+        "shared:engineering",
+        "user:sora"
+      ],
+      "relevant_ids": [
+        "mem-220",
+        "mem-221"
+      ]
+    }
+  ]
+}
