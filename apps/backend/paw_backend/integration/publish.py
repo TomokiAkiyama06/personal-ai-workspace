@@ -6,7 +6,7 @@ repository whose Working Set role is ``target`` gets its integration branch
 pushed to GitHub and a pull request opened against its default branch, so that
 the task can complete (Decision 0030, section 5: a ``target`` completes only with
 a delivered pull request). Merging stays the human's (``AGENTS.md``). Decision
-0052 (Proposed) lists the choices.
+0052 lists the choices.
 
 :class:`GitHubPullRequestPublisher` does it for one repository:
 

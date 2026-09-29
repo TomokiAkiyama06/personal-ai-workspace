@@ -6,7 +6,7 @@ task-owned integration branch / worktree per repository (never into the default
 branch; conflicts are detected and reported), and the integrated result is what
 the tests, the Evaluator and the review check (``gate.py``). Once every check
 passed, the checked commit of each ``target`` repository is pushed and its pull
-request opened (``publish.py``, issue #132, Decision 0052 Proposed). git runs
+request opened (``publish.py``, issue #132, Decision 0052). git runs
 through the deployment's ``GitRunner`` as the task creator's own Linux account. See
 ``apps/backend/README.md`` ("Parallel Worktree / Integration") and
 ``docs/decisions/0036-parallel-worktree-integration.md`` (Approved).

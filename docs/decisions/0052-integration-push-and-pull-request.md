@@ -1,9 +1,10 @@
 # Integration Gate を通った integration branch の Push と PR の作成（Decision 0036 の 10 の後続）
 
-- Status: Proposed
+- Status: Approved
 - Date: 2026-09-29
 - Scope: Issue [#132](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/132)（`paw_backend/integration/publish.py` の `GitHubPullRequestPublisher`、`IntegrationGate(publisher=...)`、SSH の Wrapper の許可リストへの `push` の追加）。Migration はない
 - Supersedes: [Decision 0029](0029-per-user-git-runner-ssh.md) の 3 の表（と、それを Supersede した [Decision 0036](0036-parallel-worktree-integration.md) の 13・[Decision 0051](0051-integration-worktree-ignored-files.md) の 3）に `push` の 1 つの形を足す部分だけ（下の 9）。0029・0036・0051 の本文は書き換えない
+- Approval: 2026-09-29、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで「推奨どおり」と回答して承認（1〜10 の全点。末尾の「承認時の決定」）
 
 ## 背景
 
@@ -113,7 +114,7 @@
 4. Push の後、PR を作る前に失敗すると、GitHub に `paw/` の branch だけが残る。次の Gate の実行で PR が作られる（冪等）。削除はしない（Decision 0036 の 12 と同じく、branch の削除は別の操作）。
 5. PR の状態は作った時点のもの。GitHub で後から閉じられても、記録は `open` のまま（10）。
 
-## 判断が必要な点
+## 判断が必要な点（2026-09-29 に推奨どおり承認）
 
 1. 時期（Review の後、`CHANGED` の確認の後、完了の前）と、検査した Commit を Push すること（1）。推奨: 承認。
 2. 今の Scope で `target` の Repository だけに作ること（2）。推奨: 承認。
@@ -129,3 +130,7 @@
 ## 承認後の扱い
 
 承認されたら `Status` と `Approval` を改める（Human が行う。この Decision を Agent が Approved にしない）。方針を変えるときは、この Decision を書き換えず、新しい Decision から `Supersedes` する。[REQUIREMENTS.md](../../REQUIREMENTS.md) の原文は書き換えない。
+
+## 承認時の決定（2026-09-29）
+
+Human は、作業 Session で判断が必要な点について推奨つきの説明を受け、「推奨どおり」と回答して承認した（1〜10 の全点）。**すべて推奨どおり**で、個別の変更はない。
