@@ -158,6 +158,13 @@ class NodeWorktreeTest(WorktreeTestCase):
             self.assertEqual(worktree.path, f"/srv/paw-orch/trees/{key}")
             # Issue #133: the same assignment carries the placement handle.
             self.assertIsNotNone(assignment.placement)
+            # Codex review (P1): the runtime cannot change the worktrees the
+            # tool calls derive the node's scope from (clearing them would give
+            # back the user's checkout, adding one a new root).
+            with self.assertRaises(TypeError):
+                assignment.worktrees[uuid.uuid4()] = worktree
+            with self.assertRaises((TypeError, AttributeError)):
+                assignment.worktrees.clear()
         for key in ("research", "readonly", "review"):
             (assignment,) = runtime.calls_of(key)
             self.assertEqual(dict(assignment.worktrees), {})

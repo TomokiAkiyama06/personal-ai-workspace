@@ -54,6 +54,7 @@ import uuid
 from collections.abc import Awaitable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
+from types import MappingProxyType
 
 from paw_backend.authz import AgentGrant, Capability, GrantEscalationError
 from paw_backend.orchestrator.config import Clock, OrchestratorConfig, SystemClock
@@ -1670,7 +1671,12 @@ class Orchestrator:
         try:
             # Fail early on a grant / scope problem.
             context = await self._context(run, spec)
-            worktrees = await self._prepare_worktrees(run, spec, context)
+            # Read only, and the one mapping both the runtime and the tool
+            # context see: a runtime cannot clear it (the user's checkout back
+            # in scope) or add a root to it (Codex review of PAW-035).
+            worktrees = MappingProxyType(
+                dict(await self._prepare_worktrees(run, spec, context))
+            )
             assignment = NodeAssignment(
                 task_id=run.task.id,
                 node_key=spec.key,
