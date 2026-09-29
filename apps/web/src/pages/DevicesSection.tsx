@@ -242,6 +242,34 @@ export function DevicesSection() {
     return () => window.clearInterval(timer);
   }, [loadPending]);
 
+  // The claim of the pairing shown here may be decided on another signed-in
+  // device: once it has been seen waiting and then leaves the list, the QR code
+  // / link is spent, and an approved device signs in after its own poll. The
+  // sessions known when the claim was first seen tell that device apart.
+  const claimSeen = useRef<{ pairingId: string; known: Set<string> } | null>(null);
+  useEffect(() => {
+    if (!pairing?.approval_required) return;
+    if (pending.some((item) => item.pairing_id === pairing.pairing_id)) {
+      if (claimSeen.current?.pairingId !== pairing.pairing_id) {
+        claimSeen.current = {
+          pairingId: pairing.pairing_id,
+          known: new Set((sessions ?? []).map((session) => session.id)),
+        };
+      }
+      return;
+    }
+    const seen = claimSeen.current;
+    if (seen?.pairingId !== pairing.pairing_id) return;
+    claimSeen.current = null;
+    setPairing(null);
+    const until = new Date(pairing.expires_at).getTime();
+    setAwaiting({
+      until: Number.isNaN(until) ? Date.now() : until,
+      known: seen.known,
+      dropsPairing: true,
+    });
+  }, [pending, pairing, sessions]);
+
   const act = async (action: () => Promise<void>) => {
     setBusy(true);
     setError(null);

@@ -382,6 +382,40 @@ describe("設定 › 端末とセッション", () => {
     expect(await screen.findByText("New phone", {}, { timeout: 7000 })).toBeInTheDocument();
   }, 10000);
 
+  it("drops the QR code once another device has decided its claim, and shows the new device", async () => {
+    const newDevice = { ...otherSession, id: "s-3", device_name: "Approved phone" };
+    mockApi({
+      ...base,
+      "GET /auth/sessions": [
+        reply(200, { sessions: [session().session] }),
+        reply(200, { sessions: [session().session, newDevice] }),
+      ],
+      // Claimed, then approved on another signed-in device of this account.
+      "GET /auth/pairing/pending": [
+        reply(200, { pending: [] }),
+        reply(200, { pending: [waiting] }),
+        reply(200, { pending: [] }),
+      ],
+      "POST /auth/pairing": reply(201, pairing),
+    });
+    renderApp("/settings/devices");
+    const user = userEvent.setup();
+    await addDevice(user);
+    expect(
+      await screen.findByRole("img", { name: "新しい端末で読み取る QR コード" }),
+    ).toBeVisible();
+    expect(await screen.findByText("New phone", {}, { timeout: 7000 })).toBeInTheDocument();
+    await waitFor(
+      () =>
+        expect(
+          screen.queryByRole("img", { name: "新しい端末で読み取る QR コード" }),
+        ).not.toBeInTheDocument(),
+      { timeout: 7000 },
+    );
+    expect(await screen.findByText("Approved phone", {}, { timeout: 7000 })).toBeInTheDocument();
+    expect(await screen.findByRole("status")).toHaveTextContent("新しい端末がサインインしました。");
+  }, 25000);
+
   it("shows a wrong confirmation code as such", async () => {
     mockApi({
       ...base,
