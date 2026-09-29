@@ -98,7 +98,10 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=(
             "Audit retention (Issue #117) has its own commands, audit-retention-run "
             "and audit-retention-check, which use PAW_MIGRATION_DATABASE_URL: see "
-            "python -m paw_backend.cli audit-retention-run --help."
+            "python -m paw_backend.cli audit-retention-run --help. The Memory "
+            "Markdown Projection (PAW-045) has memory-projection-run and "
+            "memory-projection-check, which use PAW_DATABASE_URL and "
+            "PAW_MEMORY_PROJECTION_DIR."
         ),
         allow_abbrev=False,
     )

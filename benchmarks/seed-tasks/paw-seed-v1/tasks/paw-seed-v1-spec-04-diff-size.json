@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "task_id": "paw-seed-v1-spec-04-diff-size",
+  "kind": "spec",
+  "repository": {
+    "locator": "paw-dataset://paw-seed-v1/paw-seed-v1-spec-04-diff-size",
+    "starting_commit": "eb236c73ca9c9a3b3e5b3465d0594aaef5c7b9a4"
+  },
+  "issue_text": "# 候補の変更行数（metrics.diff_size）を測る\n\nEvaluator Resultの`metrics.diff_size`（変更行数）を測る関数を追加してください。\n\n## 仕様\n\n新しいmodule `benchmarks/diff_stats.py`:\n\n- `diff_size(worktree: Path, base: str) -> int`: `base` commitから作業treeまでの、追加行と削除行の合計。commit済み・staged・unstagedの変更をすべて数え、ignoreされていないuntracked fileはその行数を足します。binary file（Gitがbinaryと判断するもの、untrackedでは先頭にNULを含むもの）は0行です。削除したfileは、その行数が削除行です。\n- Gitの失敗（存在しない`base`など）は`DiffStatsError`（`RuntimeError`のsubclass）にします。messageにGitの出力を含めません。\n- 呼び出し元の`GIT_*`環境変数（`GIT_DIR`・`GIT_WORK_TREE`など）を引き継がず、常に`worktree`のRepositoryを測ります。Git hookは実行しません（`core.hooksPath=/dev/null`）。\n\n## 作業の条件\n\n- 作業はこのRepositoryのstarting commitから始めます。既存のTestを削除・無効化したり、期待値を不当に緩めたりしてはいけません。\n- 評価はExecutable Evaluatorが行います。公開されたcheck（visible checks）に加えて、候補から見えないHidden checkがあります。\n- Credential・秘密情報をcode・log・commitへ入れないでください（SECURITY.md）。\n",
+  "visible_checks": [
+    {
+      "id": "lint",
+      "type": "lint",
+      "command": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "benchmarks"
+      ]
+    }
+  ],
+  "hidden_checks": [
+    {
+      "id": "hidden-acceptance",
+      "type": "acceptance",
+      "reference_id": "seed-v1-a30a5a7d17bb"
+    },
+    {
+      "id": "hidden-regression",
+      "type": "regression",
+      "reference_id": "seed-v1-59c82b12ca95"
+    }
+  ]
+}

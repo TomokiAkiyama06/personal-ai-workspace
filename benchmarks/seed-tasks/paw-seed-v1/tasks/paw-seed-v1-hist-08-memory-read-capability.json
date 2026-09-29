@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "task_id": "paw-seed-v1-hist-08-memory-read-capability",
+  "kind": "historical",
+  "repository": {
+    "locator": "paw-dataset://paw-seed-v1/paw-seed-v1-hist-08-memory-read-capability",
+    "starting_commit": "acfc6fc030f810ca573352fe0a8cd5f57151a2a3"
+  },
+  "issue_text": "# memory-read-capability（元: PR #119）\n\n## Issue\n\n### Decision 0024: 読み取り専用の Capability memory.read を追加し、Retrieval の User Scope の認可を切り替える\n\nDecision 0024（docs/decisions/0024-memory-read-capability.md）は 2026-09-27 に Human が「全部推奨どおり」で承認した。Decision の「承認後の扱い」のとおり、次を 1 つの PR で行う。\n\n- `authz/capabilities.py` に `memory.read`（`DENIED_ONLY`、委任可、`read_only=True`）を足し、`authz/policy.py` の `_USER` に加える（Role は `memory.use` と同じ User / Admin / Owner。`system` は持たない）。Agent の判定は常に `REQUIRED`。Decision 0004 は書き換えない。\n- `retrieval/resolver.py` の User Scope の認可を `memory.use` から `memory.read` にする。`memory.use`（書き込み・提案など）の呼び出しは変えない。\n- `test_authz_*` の Capability・委任・Audit Mode の一覧の Test と、Retrieval の Audit の Test（許可で 0 行、拒否で 1 行）を更新する。Permission Leakage 0 の Test を安全網として維持する。\n- Backend README（認可と Audit の `DENIED_ONLY` の一覧、Hybrid Retrieval）と Decision 0019 の参照を合わせる。\n\n読み取り回数の集計（Metric）は今は扱わない（Decision 0024 の 6）。\n\n## 変更の説明（元のPRの説明から、検証結果と運用上の記述を除いたもの）\n\n### 概要\n\nIssue #115（Closes #115）。Decision 0024（Approved）の「承認後の扱い」のとおり、読み取り専用の Capability `memory.read` を足し、Hybrid Retrieval の User Scope の認可を `memory.use` から `memory.read` に切り替えます。\n\n### 変更点\n\n- `authz/capabilities.py`: `memory.read` を追加（`Scope.SELF`、委任可、`read_only=True` → `DENIED_ONLY`）。\n- `authz/policy.py`: `_USER` に `memory.read` を追加（Role は `memory.use` と同じ User / Admin / Owner。`system` は持たない）。Agent の判定は常に `REQUIRED` のまま（Authorizer の既存の挙動）。\n- `memory/retrieval/resolver.py`: User Scope の認可を `memory.read` に変更。`memory.use` の他の呼び出し（Journal、`propose_candidate`）は変えていません。Retrieval の Docstring（`service.py`、`errors.py`）も合わせました。\n- `apps/backend/README.md`: `DENIED_ONLY` の一覧、残るリスク、Agent の委任可の一覧、Hybrid Retrieval の Scope ごとの認可を更新。\n- `docs/decisions/0019-hybrid-retrieval-policy.md`: 0024 への参照（Proposed のままだった表記）に「Approved、#115 で実装」の注記を追記（本文の判断は書き換えていません）。Decision 0004 は変更していません。\n- Migration なし（Decision 0024 のとおり）。\n\n## Hidden testが前提にするInterface\n\nHidden testは次のmoduleから次の名前をimportします（既存の名前を含みます）。\n\n- `paw_backend.authz`: ALL_PROJECTS, AgentGrant, AuditEvent, AuditMode, Authorizer, CAPABILITIES, Capability, DEFAULT_POLICY, Decision, InMemoryAuditSink, Policy, Principal, ProjectRole, ProjectState, Reason, RepoAcl, RepoPermission, Resource, Scope, SystemRole, parse_capability\n- `paw_backend.authz.audit`: build_event\n- `paw_backend.authz.capabilities`: CapabilityInfo, REPO_PERMISSION_OF\n- `paw_backend.authz.policy`: decide\n- `paw_backend.memory.models`: MemoryScope\n- `paw_backend.memory.retrieval`: Component, RetrievalPermissionError, RetrievalScopeLimitError, RetrievalSourceError, limits\n- `paw_backend.projects`: MemberStatus, ProjectStatus\n\n## 作業の条件\n\n- 作業はこのRepositoryのstarting commitから始めます。既存のTestを削除・無効化したり、期待値を不当に緩めたりしてはいけません。\n- 評価はExecutable Evaluatorが行います。公開されたcheck（visible checks）に加えて、候補から見えないHidden checkがあります。\n- Credential・秘密情報をcode・log・commitへ入れないでください（SECURITY.md）。\n",
+  "visible_checks": [
+    {
+      "id": "lint",
+      "type": "lint",
+      "command": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "apps/backend"
+      ]
+    }
+  ],
+  "hidden_checks": [
+    {
+      "id": "hidden-acceptance",
+      "type": "acceptance",
+      "reference_id": "seed-v1-0d9b4ea46145"
+    },
+    {
+      "id": "hidden-regression",
+      "type": "regression",
+      "reference_id": "seed-v1-1ee2634fd044"
+    }
+  ]
+}
