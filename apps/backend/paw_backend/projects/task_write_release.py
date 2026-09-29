@@ -212,6 +212,23 @@ class TaskWriteReleaser:
         else:
             project = await store.get_project(session, project_id)
         if project is None or project.status is ProjectStatus.DELETED:
+            if again:
+                # Deleted after the first check allowed: record the denial it
+                # became (Decision 0049, 2), still "not found" to the caller. The
+                # Policy has no Deleted state; Pending deletion, the state a
+                # project passes through before it, is denied the same way
+                # (Codex review of #149, P2).
+                member = await store.get_member(session, project_id, actor.user_id)
+                roles = (
+                    {project_id: member.role}
+                    if member is not None and member.status is MemberStatus.ACTIVE
+                    else {}
+                )
+                await self._authorizer.authorize(
+                    Principal(actor.user_id, actor.system_role, roles),
+                    CAPABILITY,
+                    Resource.project(project_id, ProjectState.PENDING_DELETION),
+                )
             raise ProjectNotFoundError()
         member = await store.get_member(session, project.id, actor.user_id)
         active = member is not None and member.status is MemberStatus.ACTIVE

@@ -657,13 +657,15 @@ class ReleaserTest(ReleaseTestCase):
                 self.assertEqual(await self.live_reservations(task_id), 1)
                 self.assertEqual(self.step_up.calls, [])
                 # The authorization was allowed; the second decision is audited
-                # as the denial it became (a Deleted project is not asked about:
-                # it is not found, as in the first check).
-                decisions = [event[3] for event in self.decisions()]
-                if status == "deleted":
-                    self.assertEqual(decisions[-1], "allow")
-                else:
-                    self.assertEqual(decisions[-2:], ["allow", "deny"])
+                # as the denial it became, a Deleted project's too (still "not
+                # found" to the caller; Codex review of #149, P2).
+                self.assertEqual(
+                    [event[2:] for event in self.decisions()[-2:]],
+                    [
+                        (self.project_id, "allow", "granted_by_project_role"),
+                        (self.project_id, "deny", "project_state_forbids"),
+                    ],
+                )
 
     async def test_a_manager_removed_or_demoted_meanwhile(self):
         """Independent review of #129 (P2): the membership is read again in the
