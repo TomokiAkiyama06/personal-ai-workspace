@@ -3715,7 +3715,7 @@ class AgentRuntime(Protocol):
 
 ### Placement（Node をどこで走らせたか。Issue #133）
 
-Decision 0037 の 14（Approved）は、Cloud（Codex / Claude）へ回した Node の実際の Placement を Orchestrator の記録（Audit）に残すこと、それまでは `CloudPolicy` を注入しないことを決めました。記録の方式は **[Decision 0048（Proposed）](../../docs/decisions/0048-node-placement-audit.md)** で承認を待っています。
+Decision 0037 の 14（Approved）は、Cloud（Codex / Claude）へ回した Node の実際の Placement を Orchestrator の記録（Audit）に残すこと、それまでは `CloudPolicy` を注入しないことを決めました。記録の方式は **[Decision 0048（Approved）](../../docs/decisions/0048-node-placement-audit.md)** で決めました（2026-09-29 に承認）。
 
 - DAG の Node の試行の `NodeAssignment` は `placement`（`NodePlacementHandle`）を持ちます（Planner の呼び出しは試行の行がないので `None`）。Runtime は、Node を走らせる**前に** `await assignment.placement.record(ExecutionPlacement.CLOUD, agent="codex", model="gpt-5-codex")` のように 1 回だけ記録します（`local_gpu` / `local_cpu` / `cloud`。Agent は `[a-z][a-z0-9._-]{0,63}`、Model は `[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}` の識別子）。
 - `DagStore.record_placement` が、試行の行（`agent_dag_node_attempts`）の `placement`・`placement_agent`・`placement_model`・`placed_at` に書きます。結果と同じく `epoch`・Task の Run・試行で Fencing し（`StaleDagEpochError` / `StaleRunError` / `StaleNodeAttemptError`）、1 回だけです（2 回目は `InvalidOrchestratorArgumentError("placement")`。DB の Trigger `tr_agent_dag_node_attempts_placement_once` も、記録された Placement の変更を誰が書いても拒否します）。
@@ -3948,7 +3948,7 @@ python -m paw_backend.cli compute-status --headroom-min-mib 8192 --headroom-frac
 - 数値はすべて実測に基づかない暫定値です。Model と Runtime が決まったら Benchmark で見直します。Model の Footprint は Admin が与え、Scheduler は測りません。
 - 実際の Runtime（vLLM / SGLang など）の KV 使用率の取得、Runtime の Adapter、Application への組み込み、Exclusive の認可と API、走っている Task の Safe pause / Drain と `Waiting for Resource` への遷移（PAW-037）、System Health の表示（PAW-066）は含みません。
 - Background の停止は協調的（`revoked`）で、仕事がそれを無視すると VRAM は戻りません。
-- Cloud へ回した Node の Placement は、Issue #133 で Orchestrator の記録（Node の Attempt の行）と `audit_events` に残るようになりました。Decision 0037 の 14 は「この記録ができるまで **`CloudPolicy` を注入しない**」と決めており、その記録の方式は Decision 0048（Proposed）で承認を待っています。承認されるまで、そして本番の組み立て（Codex / Claude の Cloud Runtime、Task の Permission・Quota を判断する `CloudPolicy` の実装、それらを Orchestrator に渡す Wiring）ができるまで、`CloudPolicy` は注入しません。
+- Cloud へ回した Node の Placement は、Issue #133 で Orchestrator の記録（Node の Attempt の行）と `audit_events` に残るようになりました。Decision 0037 の 14 は「この記録ができるまで **`CloudPolicy` を注入しない**」と決めており、その記録の方式は Decision 0048（Approved）で決めました。本番の組み立て（Codex / Claude の Cloud Runtime、Task の Permission・Quota を判断する `CloudPolicy` の実装、それらを Orchestrator に渡す Wiring）ができるまで、`CloudPolicy` は注入しません。
 - `NvidiaSmiProbe` は `nvidia-smi` を PATH から探さず、絶対 Path（既定 `/usr/bin/nvidia-smi`、`executable=` で変更）で実行します。
 - 管理する GPU は `gpu_index` の 1 枚です。MIG は使いません。
 - Probe が読む GPU 利用率（`utilization_percent`）は `status()` に出すだけで、Admission にはまだ使っていません（要件の入力の一つ。使い方の方針は Decision 0037 に無く、別の Decision で提案します）。

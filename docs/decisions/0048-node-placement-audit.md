@@ -1,10 +1,10 @@
 # Node の実行 Placement（local / cloud・Agent / Model）を Orchestrator の記録と Audit に残す方式（Decision 0037 の 14 の実装）
 
-- Status: Proposed
+- Status: Approved
 - Date: 2026-09-28
 - Scope: Issue [#133](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/133)（PAW-036 の後続）。DAG Orchestrator（PAW-034、`paw_backend/orchestrator/`）の Node の試行の記録と、Compute Resource Scheduler（PAW-036、`paw_backend/compute/runtimes.py`）の `HybridRuntime`
 - Supersedes: なし。[Decision 0037](0037-gpu-compute-scheduler.md)（Approved）の 14「Cloud へ回した Node の Placement を Orchestrator の記録（Audit）に残す（Orchestrator の変更として別の Issue）。その Issue で Placement が Audit に記録されるまでは `CloudPolicy` を注入しない」を**実装する方式**の提案で、0037 は書き換えない。[Decision 0021](0021-dag-orchestrator-policy.md)（Node の試行の記録）と [Decision 0023](0023-audit-events-details-for-external-send.md)（外部送信の Audit）への追補
-- Approval: 未承認
+- Approval: 2026-09-29、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで「推奨どおり」と回答して承認（決めてほしいこと 1〜6 の全点。末尾の「承認時の決定」）
 
 ## 背景
 
@@ -75,7 +75,7 @@ Human は 2026-09-28、0037 の 14 を「残す（別の Issue）。それまで
 - 記録の Transaction が失敗すると Node は `ComputeUnavailable` で Retry に回る。DB の一時的な障害が続くと Node が進まない（安全側）。
 - `audit_events` の行は `details` を持たないので、Audit だけを読む人は、Agent・Model・指紋を試行の行と突き合わせる必要がある（`placement_audit_id`）。
 
-## 決めてほしいこと
+## 決めてほしいこと（2026-09-29 に推奨どおり承認）
 
 1. **記録を `agent_dag_node_attempts` の列（7 列）にし、Trigger で 1 回だけにする**（1）でよいか。推奨: はい。
 2. **Local の Model は `local_model`（既定は Deployment 名）、Cloud は `cloud_agent` / `cloud_model` を必須にする**（2）でよいか。推奨: はい。
@@ -87,3 +87,7 @@ Human は 2026-09-28、0037 の 14 を「残す（別の Issue）。それまで
 ## 承認後の扱い
 
 承認されたら `Approval` に記録し、Status を Approved に改める。方針を変えるときは、この Decision を書き換えず、新しい Decision から `Supersedes` する。承認されても、`CloudPolicy` の注入には 6 の (a)〜(c) が要る。
+
+## 承認時の決定（2026-09-29）
+
+Human は、作業 Session で判断が必要な点について推奨つきの説明を受け、「推奨どおり」と回答して承認した（決めてほしいこと 1〜6 の全点）。**すべて推奨どおり**で、個別の変更はない。6 の承認で Decision 0037 の 14 の条件（Cloud の Placement を記録すること）を満たしたとみなす。実際に Cloud へ送るには、Cloud Runtime・`CloudPolicy`・Wiring が別に必要である。
