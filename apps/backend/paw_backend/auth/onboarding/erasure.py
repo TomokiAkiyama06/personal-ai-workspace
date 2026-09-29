@@ -65,6 +65,13 @@ What one erasure does (ONE transaction per user)
    operator) but the user stays ``pending_deletion`` (``copies_pending``, a
    refusal the Owner hears of); a later run with the confirmation re-verifies
    (nothing is left to delete) and marks the user ``deleted``.
+   The confirmation is accepted only when an EARLIER run committed the database
+   erasure (a ``data_erased`` audit row) and this run changes no row: a backup or
+   WAL taken while the deleting transaction is still open holds the rows it
+   deletes, so the operator can only have erased every copy after that commit.
+   A first run given the confirmation therefore commits the erasure and still
+   ends ``copies_pending``; the operator erases the copies made up to then and
+   confirms on a later run.
 
 Kept (Decision 0043): the ``users`` row (id, login name, role, timestamps) as the
 minimal deletion record, the status history, ``audit_events`` (ids only), and what
@@ -93,7 +100,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 
 import psycopg.errors
-from sqlalchemy import func, select, text
+from sqlalchemy import TextClause, func, select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -244,6 +251,13 @@ _UNAPPROVED_CANDIDATES = (
     "WHERE proposer_user_id = :id AND state IN ('pending', 'rejected')"
 )
 _DELETE_CANDIDATES = text(f"DELETE {_UNAPPROVED_CANDIDATES}")
+# A database erasure of the user that an EARLIER run committed (its audit row). The
+# operator's "copies erased" is accepted only after one (see ``_erase``).
+_ERASED_BEFORE = text(
+    "SELECT EXISTS (SELECT 1 FROM audit_events WHERE action = :action "
+    "AND decision = 'allow' AND reason = :reason AND resource_kind = 'user' "
+    "AND resource_id = :id)"
+)
 _CANDIDATES_LEFT = text(f"SELECT count(*) {_UNAPPROVED_CANDIDATES}")
 
 
@@ -466,9 +480,28 @@ class UserErasureService:
                 await self._record(
                     session, AuthReason.CHECKOUTS_RELEASED, user_id, correlation_id
                 )
-            await self._delete_personal_data(session, user_id, now)
+            # Read before this transaction writes anything: only an earlier run's
+            # committed erasure counts.
+            erased_before = (
+                await session.execute(
+                    _ERASED_BEFORE,
+                    {
+                        "action": AuthAction.USER_ERASE.value,
+                        "reason": AuthReason.DATA_ERASED.value,
+                        "id": user_id,
+                    },
+                )
+            ).scalar_one()
+            changed = await self._delete_personal_data(session, user_id, now)
             await self._verify(session, user_id)
-            if not copies_erased:
+            # The operator's confirmation covers the copies outside the database
+            # (backups, WAL) only if they were erased AFTER the database rows were
+            # gone for good: a backup or WAL taken while this transaction is still
+            # open holds the rows it is deleting. So it is accepted only when an
+            # earlier run committed the erasure and this one changed nothing
+            # (Codex P1, PR #142); otherwise this run commits the erasure and the
+            # user stays ``pending_deletion`` until a later confirmed run.
+            if not (copies_erased and erased_before and not changed and not released):
                 await self._record(
                     session, AuthReason.DATA_ERASED, user_id, correlation_id
                 )
@@ -482,11 +515,14 @@ class UserErasureService:
 
     async def _delete_personal_data(
         self, session: AsyncSession, user_id: uuid.UUID, now: datetime
-    ) -> None:
+    ) -> int:
+        """Deletes the personal data; returns how many rows it changed."""
         params = {"id": user_id, "now": now}
+        changed = 0
         # Memory sources that cite a conversation about to go: mark them, the
         # foreign keys then clear the reference (the schema's own "deleted source").
-        await session.execute(
+        changed += await self._changed(
+            session,
             text(
                 "UPDATE memory_sources SET source_deleted_at = :now "
                 "WHERE source_deleted_at IS NULL AND conversation_id IN "
@@ -509,20 +545,29 @@ class UserErasureService:
                 )
             ).scalars()
         )
+        changed += len(memory_ids)
         if memory_ids:
-            await session.execute(
+            changed += await self._changed(
+                session,
                 text(
                     "DELETE FROM memories m WHERE m.id = ANY(:ids) AND NOT EXISTS "
                     "(SELECT 1 FROM memory_versions v WHERE v.memory_id = m.id)"
                 ),
                 {"ids": list(set(memory_ids))},
             )
-        await session.execute(_DELETE_CANDIDATES, params)
+        changed += await self._changed(session, _DELETE_CANDIDATES, params)
         for table, column in PERSONAL_TABLES:
             # Table and column names are the constants above, never input.
-            await session.execute(
-                text(f"DELETE FROM {table} WHERE {column} = :id"), params
+            changed += await self._changed(
+                session, text(f"DELETE FROM {table} WHERE {column} = :id"), params
             )
+        return changed
+
+    @staticmethod
+    async def _changed(
+        session: AsyncSession, statement: TextClause, params: dict
+    ) -> int:
+        return (await session.execute(statement, params)).rowcount
 
     async def _verify(self, session: AsyncSession, user_id: uuid.UUID) -> None:
         left = (

@@ -10,8 +10,11 @@
 # user's files and GitHub / SSH credentials, recovery copies) and runs
 #   python -m paw_backend.cli user-erasure-run \
 #     --checkouts-removed <user id> --copies-erased <user id>
-# by hand (the same environment file). Until then the timer's run exits 3 for
-# that user (copies_pending) every day, which starts the failure unit.
+# by hand (the same environment file). The confirmation counts only on a run
+# after the one that committed the database erasure (backups / WAL taken before
+# that commit still hold the rows): erase the copies made up to that run, then
+# confirm. Until then the timer's run exits 3 for that user (copies_pending)
+# every day, which starts the failure unit.
 #
 # User: the same dedicated OS user as paw-audit-retention.service (paw-maint),
 # never the user the backend runs as, for the same reasons (see that unit): this

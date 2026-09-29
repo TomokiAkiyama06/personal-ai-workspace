@@ -173,6 +173,14 @@ class RunCommandTest(ErasureTestCase):
 
     async def test_a_run_erases_the_due_users(self):
         bob = await self.deleted_long_ago("bob")
+        # The first run commits the database erasure; the confirmation of the
+        # copies outside the database counts only on a later run.
+        code, _, err = await self.owner_run(
+            ["user-erasure-run", "--copies-erased", str(bob.id)]
+        )
+        self.assertEqual(code, cli.EXIT_ERASURE_FAILED)
+        self.assertIn(f"NOT DELETED: user {bob.id} (copies_pending)", err)
+        self.assertEqual(await self.status_of(bob.id), "pending_deletion")
 
         code, out, err = await self.owner_run(
             ["user-erasure-run", "--copies-erased", str(bob.id)]

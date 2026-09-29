@@ -35,7 +35,10 @@ GitHub / SSH credentials in their Linux account, any recovery copy). REQUIREMENT
 "User Deletion Retention" does not allow ``Deleted`` before that, and this job
 cannot reach or check those copies. Without it the database part is still erased
 (``data_erased``) but the user stays ``pending_deletion`` (``copies_pending``,
-exit 3), every day, until the operator confirms.
+exit 3), every day, until the operator confirms. The confirmation counts only on a
+run AFTER the one that committed the database erasure (a backup or WAL taken before
+that commit still holds the rows): the operator runs once, erases the copies made
+up to then, and confirms on a later run.
 """
 
 import argparse
@@ -132,8 +135,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         help=(
             "the copies of this user outside the database (backups / WAL, files and "
-            "credentials in their Linux account, recovery copies) were erased: mark "
-            "the user deleted once the database part is erased (repeatable)"
+            "credentials in their Linux account, recovery copies) were erased after "
+            "an earlier run erased the database part: mark the user deleted "
+            "(repeatable)"
         ),
     )
     return parser
@@ -257,8 +261,9 @@ def _show(report: ErasureRunReport, err: TextIO | None) -> int:
                 err,
                 f"NOT DELETED: user {result.user_id} (copies_pending). Its personal "
                 "data in the database is erased; it stays pending deletion until the "
-                "copies outside the database are erased and confirmed with "
-                "--copies-erased.",
+                "copies outside the database, including the backups and WAL made "
+                "up to this run, are erased and confirmed with --copies-erased on "
+                "a later run.",
             )
         elif not result.ok:
             _say(
