@@ -12,8 +12,8 @@ import { Icon } from "../shell/icons";
 import { QrCode } from "../shell/QrCode";
 import { PasskeysSection } from "./PasskeysSection";
 
-// How often the list of new devices waiting for an approval is re-read while a
-// pairing that needs one is shown.
+// How often the devices waiting for an approval (while this page is shown) and
+// the sessions (while a new device is expected) are re-read.
 export const PENDING_POLL_MS = 5000;
 
 /** Seconds left until `iso`, ticking every second while mounted. */
@@ -222,19 +222,25 @@ export function DevicesSection() {
       }
       return;
     }
-    if (Date.now() >= awaiting.until) {
-      setAwaiting(null);
-      return;
-    }
-    const timer = window.setTimeout(() => void loadSessions(), PENDING_POLL_MS);
-    return () => window.clearTimeout(timer);
-  }, [awaiting, sessions, loadSessions, t]);
+    if (Date.now() >= awaiting.until) setAwaiting(null);
+  }, [awaiting, sessions, t]);
 
+  // The reads go on at a fixed pace while waiting, also after a failed one.
   useEffect(() => {
-    if (!pairing?.approval_required) return;
+    if (!awaiting) return;
+    const timer = window.setInterval(() => {
+      if (Date.now() >= awaiting.until) setAwaiting(null);
+      else void loadSessions();
+    }, PENDING_POLL_MS);
+    return () => window.clearInterval(timer);
+  }, [awaiting, loadSessions]);
+
+  // Any signed-in device of this account may approve a claim, also one whose
+  // code another browser issued, so the waiting devices are read while shown.
+  useEffect(() => {
     const timer = window.setInterval(() => void loadPending(), PENDING_POLL_MS);
     return () => window.clearInterval(timer);
-  }, [pairing, loadPending]);
+  }, [loadPending]);
 
   const act = async (action: () => Promise<void>) => {
     setBusy(true);

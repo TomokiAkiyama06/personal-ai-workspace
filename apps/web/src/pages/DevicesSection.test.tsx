@@ -248,8 +248,7 @@ describe("設定 › 端末とセッション", () => {
       screen.queryByRole("img", { name: "新しい端末で読み取る QR コード" }),
     ).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "新しい端末を追加" })).toBeInTheDocument();
-    // Nothing to approve on this branch: the waiting list is not polled.
-    expect(calls.filter((call) => call.path === "/auth/pairing/pending")).toHaveLength(1);
+    expect(calls.some((call) => call.path === "/auth/pairing")).toBe(true);
   }, 15000);
 
   it("waits for the device list before a new device can be added", async () => {
@@ -346,6 +345,41 @@ describe("設定 › 端末とセッション", () => {
     await user.click(screen.getByRole("button", { name: "承認" }));
     expect(await screen.findByText("端末を承認しました。")).toBeInTheDocument();
     expect(await screen.findByText("Approved phone", {}, { timeout: 7000 })).toBeInTheDocument();
+  }, 10000);
+
+  it("keeps waiting for the new device after a failed read of the list", async () => {
+    const newDevice = { ...otherSession, id: "s-3", device_name: "Paired phone" };
+    mockApi({
+      ...base,
+      "GET /auth/sessions": [
+        reply(200, { sessions: [session().session] }),
+        apiError(503, "service_unavailable"),
+        reply(200, { sessions: [session().session, newDevice] }),
+      ],
+      "GET /auth/pairing/pending": reply(200, { pending: [] }),
+      "POST /auth/pairing": reply(201, { ...pairing, approval_required: false }),
+    });
+    renderApp("/settings/devices");
+    const user = userEvent.setup();
+    await addDevice(user);
+    expect(await screen.findByText("Paired phone", {}, { timeout: 12000 })).toBeInTheDocument();
+    expect(await screen.findByRole("status")).toHaveTextContent("新しい端末がサインインしました。");
+  }, 15000);
+
+  it("shows a device waiting for approval that another browser issued the code for", async () => {
+    mockApi({
+      ...base,
+      "GET /auth/sessions": reply(200, { sessions: [session().session] }),
+      // Nothing waits when the page opens; the claim comes in a little later.
+      "GET /auth/pairing/pending": [
+        reply(200, { pending: [] }),
+        reply(200, { pending: [waiting] }),
+      ],
+    });
+    renderApp("/settings/devices");
+    await screen.findByRole("button", { name: "新しい端末を追加" });
+    expect(screen.queryByText("New phone")).not.toBeInTheDocument();
+    expect(await screen.findByText("New phone", {}, { timeout: 7000 })).toBeInTheDocument();
   }, 10000);
 
   it("shows a wrong confirmation code as such", async () => {

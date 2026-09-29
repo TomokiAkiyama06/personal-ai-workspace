@@ -64,6 +64,8 @@ export function PasskeysSection({ onSessionsChanged }: { onSessionsChanged?: () 
       setEnrolling(false);
       setNotice(t("passkey.registered"));
       await load();
+      // A step-up for the registration rotates this session's id.
+      onSessionsChanged?.();
     } catch (caught) {
       fail(caught);
     } finally {

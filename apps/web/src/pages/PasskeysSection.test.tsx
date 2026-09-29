@@ -208,6 +208,10 @@ describe("Passkeys (設定 › 端末とセッション)", () => {
     expect(await screen.findByText("Passkey を登録しました。")).toBeInTheDocument();
     expect(screen.queryByText("Passkey の登録をおすすめします。")).not.toBeInTheDocument();
     expect(calls.filter((call) => call.path === "/auth/session")).toHaveLength(2);
+    // A step-up for the registration may have rotated this session: the devices are read again.
+    await waitFor(() =>
+      expect(calls.filter((call) => call.path === "/auth/sessions")).toHaveLength(2),
+    );
     expect(calls.find((call) => call.path === "/auth/passkeys/enroll/finish")?.body).toEqual({
       credential: { id: "cred" },
       name: "MacBook",
