@@ -217,7 +217,7 @@ class GitWorktreeCoordinator:
         pinned = await self._pin(checkout, place, account)
         return not await self._git.merging(
             pinned, account
-        ) and await self._git.is_clean(pinned, account)
+        ) and await self._git.is_exactly_committed(pinned, account)
 
     # -- internals ----------------------------------------------------------------
 
@@ -435,9 +435,10 @@ class GitWorktreeCoordinator:
             if not await self._git.is_clean(worker, account):
                 return ended(IntegrationState.DIRTY, blocking_node=key)
         # A merge in progress in the integration worktree is a human's: kept.
-        if await self._git.merging(pinned, account) or not await self._git.is_clean(
+        # Ignored files count there too: the checks read that directory.
+        if await self._git.merging(
             pinned, account
-        ):
+        ) or not await self._git.is_exactly_committed(pinned, account):
             return ended(IntegrationState.DIRTY)
 
         merged: list[str] = []

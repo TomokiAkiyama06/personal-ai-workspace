@@ -39,8 +39,9 @@ Guarantees:
   the run the gate read and by the version it read just before (as
   ``Orchestrator._end_task``): a task retried or restarted meanwhile is left alone.
 * **Only what was checked is completed.** The checks read the integration
-  worktrees, so a worktree must be exactly its commit: one with uncommitted or
-  untracked changes (or a merge in progress) is not checked at all (``DIRTY``:
+  worktrees, so a worktree must be exactly its commit: one with uncommitted,
+  untracked or ignored files (an uncommitted ``.env``, a generated file: Decision
+  0051) or a merge in progress is not checked at all (``DIRTY``:
   the task fails). The integration branches and the worktrees' state are read
   again after the last check; a branch that moved (a human or an agent committed
   to it meanwhile) or a worktree that was written to fails the task instead of

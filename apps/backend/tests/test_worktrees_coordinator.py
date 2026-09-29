@@ -468,6 +468,46 @@ class IntegrationTest(CoordinatorTestCase):
         self.assertEqual(result.state, IntegrationState.DIRTY)
         self.assertIsNone(result.blocking_node)
 
+    async def test_ignored_files_in_the_integration_worktree_stop_it(self):
+        # Codex review (P1): an ignored file (an uncommitted ``.env``, a
+        # generated source) is not in any commit either. ``status`` without
+        # ``--ignored`` does not list it, so it counted as clean.
+        a = await self.prepare("a")
+        commit_file(a.path, ".gitignore", ".env\nbuild/\n")
+        integration = self.ws.worktree(self.repo, "_integration")
+        report = await self.coordinator.integrate(self.ws.integration_request("a"))
+        self.assertTrue(report.clean)
+        for name in (".env", "build/generated.py"):
+            with self.subTest(name=name):
+                os.makedirs(os.path.dirname(f"{integration}/{name}"), exist_ok=True)
+                fs.write(integration, name, "not committed\n")
+
+                again = await self.coordinator.integrate(
+                    self.ws.integration_request("a")
+                )
+
+                (result,) = again.repositories
+                self.assertEqual(result.state, IntegrationState.DIRTY)
+                self.assertIsNone(result.blocking_node)
+                os.remove(f"{integration}/{name}")
+
+    async def test_ignored_files_of_a_worker_are_not_integrated_and_do_not_stop_it(
+        self,
+    ):
+        # Only the Worker's commits are merged: what its tests left behind in
+        # ignored files (caches, a virtualenv) is never part of the result.
+        a = await self.prepare("a")
+        commit_file(a.path, ".gitignore", "__pycache__/\n")
+        commit_file(a.path, "a.txt", "from a\n")
+        os.makedirs(f"{a.path}/__pycache__")
+        fs.write(a.path, "__pycache__/a.pyc", "cache\n")
+
+        report = await self.coordinator.integrate(self.ws.integration_request("a"))
+
+        (result,) = report.repositories
+        self.assertEqual(result.state, IntegrationState.MERGED)
+        self.assertFalse(fs.exists(f"{result.path}/__pycache__"))
+
     async def test_a_repository_no_worker_wrote_to_has_nothing_to_integrate(self):
         other = self.ws.add_checkout("other")
         a = await self.coordinator.prepare_node(
@@ -546,6 +586,23 @@ class IntegrationTest(CoordinatorTestCase):
 
         self.assertFalse(target.clean)
         self.assertEqual(target.head, report.repositories[0].head)
+
+    async def test_targets_count_ignored_files_as_not_clean(self):
+        # Codex review (P1): the checks read the directory, so an ignored file
+        # (an uncommitted ``.env``, an artifact left by an earlier check) would
+        # make Merge Ready name a commit that is not what was checked.
+        a = await self.prepare("a")
+        commit_file(a.path, ".gitignore", ".env\n")
+        report = await self.coordinator.integrate(self.ws.integration_request("a"))
+        (clean,) = await self.coordinator.targets(self.ws.integration_request("a"))
+        self.assertTrue(clean.clean)
+        fs.write(report.repositories[0].path, ".env", "SECRET=not committed\n")
+
+        (target,) = await self.coordinator.targets(self.ws.integration_request("a"))
+
+        self.assertFalse(target.clean)
+        self.assertEqual(target.head, report.repositories[0].head)
+        self.assertNotEqual(target, clean)  # the gate sees the change (CHANGED)
 
     async def test_no_target_before_any_integration_branch_exists(self):
         self.assertEqual(

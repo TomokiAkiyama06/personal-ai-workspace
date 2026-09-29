@@ -32,7 +32,8 @@ bounded output). This module adds the rules of its own:
   is off (a repository's own configuration cannot make the merge need a key).
 
 The sub-commands used here are listed in Decision 0036 (Approved) as additions to
-the Wrapper's allowlist of Decision 0029.
+the Wrapper's allowlist of Decision 0029; the second form of ``status``
+(``--ignored``, :meth:`WorktreeGit.is_exactly_committed`) is Decision 0051's.
 """
 
 import os
@@ -265,9 +266,31 @@ class WorktreeGit:
         await self._checked(["worktree", "prune"], account, checkout)
 
     async def is_clean(self, path: Where, account: LinuxAccount) -> bool:
-        """No staged, unstaged or untracked change (ignored files do not count)."""
+        """No staged, unstaged or untracked change (ignored files do not count:
+        a Worker's worktree, whose commits alone are integrated)."""
         output = await self._checked(
             ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+            account,
+            path,
+        )
+        return output == ""
+
+    async def is_exactly_committed(self, path: Where, account: LinuxAccount) -> bool:
+        """No staged, unstaged, untracked **or ignored** file: the directory is
+        exactly its commit (an integration worktree, which the checks read; an
+        uncommitted ``.env`` or a generated file is in no commit either).
+
+        ``--untracked-files=normal`` lists an untracked or ignored directory as
+        one entry (``node_modules/``), so the answer stays within the runner's
+        output limit; only whether there is any entry matters."""
+        output = await self._checked(
+            [
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--untracked-files=normal",
+                "--ignored=traditional",
+            ],
             account,
             path,
         )
