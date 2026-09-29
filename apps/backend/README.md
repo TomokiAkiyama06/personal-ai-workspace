@@ -91,6 +91,7 @@ apps/backend/
 │     ├─ deps.py           # FastAPI Dependency
 │     └─ v1/               # /api/v1 の Router（health、events、auth、passkeys、accounts）
 ├─ deploy/systemd/         # Audit の保存期間・退避（Issue #117）と Memory Markdown Projection（PAW-045）の定期実行の Unit File の例
+├─ deploy/ssh-git-wrapper/ # SshGitRunner の Forced Command の Wrapper と配備の手順（Issue #134）
 └─ tests/                  # unittest
 ```
 
@@ -4047,7 +4048,7 @@ Project の **Repository** は論理的な共有の記録で、User や Agent �
 | `paths.py` | Path の安全性（Linux Account、Checkout の Path、既存 Repository の検査、`O_NOFOLLOW` での Directory 作成） |
 | `accounts.py` | Workspace の User から Linux Account への対応（`LoginNameAccountDirectory`。継ぎ目は `AccountDirectory`）。最小の uid は `RepositoryPolicy.min_uid` だけ（Directory に別の値はない）。Directory と Service の Policy が食い違うと、Service の構築が `ValueError` |
 | `git.py` | git の実行（許可リストの環境、Hook 無効、Timeout、出力の上限、Shell なし）と、必要な操作（`inspect`、`clone`、`init`、`add_origin`）。`SubprocessGitRunner` と `ssh.py` の `SshGitRunner` が共有する Process 実行（`run_subprocess`）もここにある |
-| `ssh.py` | `GitRunner` のもう 1 つの実装 `SshGitRunner`（Issue #105、[Decision 0029](../../docs/decisions/0029-per-user-git-runner-ssh.md)、承認済み）。User ごとの専用鍵で `ssh <linux user>@127.0.0.1` へ接続し、Forced Command の Wrapper（この Repository には実装しない）に決まった形式（`build_remote_command`）で委ねる。鍵の在り処は `SshKeyDirectory`（継ぎ目。既定は `TemplateSshKeyDirectory`） |
+| `ssh.py` | `GitRunner` のもう 1 つの実装 `SshGitRunner`（Issue #105、[Decision 0029](../../docs/decisions/0029-per-user-git-runner-ssh.md)、承認済み）。User ごとの専用鍵で `ssh <linux user>@127.0.0.1` へ接続し、Forced Command の Wrapper（[`deploy/ssh-git-wrapper/`](deploy/ssh-git-wrapper/)、Issue #134）に決まった形式（`build_remote_command`）で委ねる。鍵の在り処は `SshKeyDirectory`（継ぎ目。既定は `TemplateSshKeyDirectory`） |
 | `github.py` | GitHub の指定の解析、origin URL の登録形式、`GitHubGateway`（PAW-028 の継ぎ目。既定は拒否） |
 | `policy.py` | 設定（`PAW_REPOSITORY_*`）を検証した値 `RepositoryPolicy` |
 | `store.py`、`transaction.py`、`service.py` | SQL（1 文 1 関数）、Lock Timeout 付きの Transaction、`RepositoryService` |
@@ -4106,7 +4107,8 @@ Backend が作る Checkout は、`workspaces` と Project の Directory（0700�
 
 - **接続。** `ssh <linux user>@127.0.0.1`（既定。`SshGitRunnerPolicy.host`）。User ごとの専用鍵（`SshKeyDirectory`。既定は `TemplateSshKeyDirectory`、ひな型 `{user}` を Linux User 名で埋める）。鍵 File は、接続の**前に毎回**「通常 File・group/other の権限ビットが 0・Backend の Process の実効 User の所有」を確認し、満たさなければ `ssh` を起動せず `GitFailure.SSH_KEY_UNAVAILABLE`。
 - **ローカルの `ssh` 自身の環境も `PATH` だけ**（Backend 自身の環境・継承した `SSH_*` は渡らない）。`-F <ssh_config_path>`（既定 `/dev/null`）で Backend の Process の User 自身の `~/.ssh/config` を無視し、固定の Host Key（`known_hosts_path`）、`BatchMode=yes`・`StrictHostKeyChecking=yes`・`IdentitiesOnly=yes`・`RequestTTY=no`・`ForwardAgent=no` などを毎回付ける。
-- **送る内容は 1 本の文字列。** `build_remote_command` が、Protocol Tag・cwd・`GIT_CEILING_DIRECTORIES`・`--`・`git_config_arguments` の列・git の副コマンドを、語ごとに `shlex.quote` してから空白で連結する（`ssh` 自身の連結に依存しない。Decision 0029 の 2）。**Forced Command の Wrapper（この Repository には実装しない）** が、この形式を解釈し、許可した副コマンド（`rev-parse`・`symbolic-ref`・`config`（読み取りだけ）・`clone`・`init`・`remote add`。Decision 0029 の 3 の表）だけを、Client の申告した `-c` を信用せず自分の Hardening で実行する契約になっている。
+- **送る内容は 1 本の文字列。** `build_remote_command` が、Protocol Tag・cwd・`GIT_CEILING_DIRECTORIES`・`--`・`git_config_arguments` の列・git の副コマンドを、語ごとに `shlex.quote` してから空白で連結する（`ssh` 自身の連結に依存しない。Decision 0029 の 2）。**Forced Command の Wrapper（[`deploy/ssh-git-wrapper/paw_git_wrapper.py`](deploy/ssh-git-wrapper/paw_git_wrapper.py)、Issue #134。配備の手順と Human の確認のチェックリストは [`deploy/ssh-git-wrapper/README.md`](deploy/ssh-git-wrapper/README.md)）** が、この形式を解釈し、許可した副コマンド（`rev-parse`・`symbolic-ref`・`config`（読み取りだけ）・`clone`・`init`・`remote add`。Decision 0029 の 3 の表）だけを、Client の申告した `-c` を信用せず自分の Hardening で実行する契約になっている。
+- **Wrapper（Issue #134）。** Decision 0036 の 13（PR #130）で足した `worktree`・`merge`・`merge-tree`・`merge-base`・`status` と `rev-parse` / `symbolic-ref` の追加の形も、Human の承認の条件つきで受け付ける: `-c` は固定の一覧の `key=value` そのものだけ（受け付けても git には渡さず、Wrapper 自身の Hardening と固定の作者を付ける）、`--git-dir=` / `--work-tree=` はその User の `workspaces` の中の正規化した Path だけ（Symbolic Link を解決した先で判定）。拒否は終了コード 126（git の 0/1/128/129 とも `ssh` の 255 とも重ならない）。Log は `syslog` に 1 行（理由コードと副コマンド名だけ。引数・Path・URL・`-c` の値は書かない）。
 - **エラー。** `ssh` 自身が接続・認証を終えられない（Host unreachable、鍵拒否、Host Key 不一致、対象の Linux User が無い）ときは、`ssh` の慣例どおり終了コード 255 になり、`GitFailure.SSH_UNAVAILABLE`。0〜254 は Wrapper 経由の git 自身の終了コードで、これまでどおり `GitResult` として返る（`NONZERO_EXIT` の判定は呼び出し元）。SSH 接続失敗と Linux User 未作成は、この経路からは区別できない（Decision 0029 の 5）。
 - **この PR は配線しない。** `SshGitRunner` は本番の呼び出し経路（`RepositoryService.from_policy` の `runner`）に差し込まれていません。実際に per-user Clone が動くのは、Wrapper Script・鍵・`sshd_config` が揃う配備後の別 Issue からです。`tests/test_repositories_ssh.py` は、実 SSH にも実 Linux User にも依存しない Fake の実行 File で確かめます。
 
@@ -4159,6 +4161,8 @@ Backend が作る Checkout は、`workspaces` と Project の Directory（0700�
 `PAW_TEST_DATABASE_URL` を設定すると、実 PostgreSQL と実 git（一時 Directory の Repository。`https://github.com/` は Local の Bare Repository に向ける）で動きます。設定がなくても、検証・Path・git・GitHub の解析・設定の Test は動きます。
 `tests/test_repositories_grants.py` は、Service の Test Class を **Superuser でない Application の Role** で実行し、Migration が与える権限が過不足ないことを確かめます。
 `tests/test_repositories_ssh.py`（`SshGitRunner`。DB を使わない）は、実 SSH にも実 Linux User にも依存しません。`ssh_executable` を、この Test だけが書く Fake の実行 File に差し替え、Fixed Option（鍵・Port・`BatchMode` 等）の送出、Wire Format の往復（敵対的な文字列を含む）、`ssh` 自身の終了コード 255 の特別扱い、鍵が使えないときに `ssh` を 1 度も起動しないこと、を確かめます。
+
+`tests/test_ssh_git_wrapper.py`（Wrapper。DB を使わない）は、現在の User と一時 Directory だけで、Backend が送るすべての形が受け付けられること、拒否されるべき呼び出し（他の Path への `--git-dir`・Symlink による脱出・一覧にない `-c`・`push` / `checkout` 等）が拒否されること、Log と stderr に Secret・Path が出ないことを確かめ、実際の Wrapper を `SshGitRunner` の後ろに置いて（`sshd` の代わりの Fake が `$SSH_ORIGINAL_COMMAND` を設定して起動する）`GitClient` と Decision 0036 の worktree の操作を本物の git で動かします。
 
 ## GitHub User Connection（`gh auth`）
 
