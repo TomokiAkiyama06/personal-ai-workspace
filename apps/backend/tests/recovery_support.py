@@ -104,6 +104,8 @@ def completed_projection() -> ProjectionStatus:
         last_run_at=T0,
         last_reason="memories=1 written=1 removed=0 redacted=0",
         last_completed_at=T0,
+        last_completed_recorded_at=T0,
+        checked_at=T0,
     )
 
 

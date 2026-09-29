@@ -61,6 +61,8 @@ Issue の受け入れ条件は「30 分の dirty-check batch commit/push」「Ma
 - 読む SQL はすべて**列を名指しする**（`recovery/source.py`）。その列の一覧が Git に入り得るものの全部である。入れるもの: User の `id`・`login_name`・`system_role`・`status`・`passkey_required`・時刻、Connection の Quota、Project と Member、Repository と Remote（DB は `https://host/path` だけを許し、User 情報を含まない）、Memory の全 Version・Relation・Source（`source_ref` など）、Auth Policy の値、Shared Connection の `kind`・`status`・`enabled`、Task の Title・状態・現在の試行の Repository ごとの Branch・PR。
 - 入れないもの: `password_credentials`、Passkey、Session、Setup / Reset / 招待 / Pairing の Token、`shared_connections.secret_handle`、Conversation と Message、Embedding、Checkout（Home の中の Path）、Task の入力・Log・Tool の記録、Usage、`audit_events`、DB の Dump / WAL。
 - **自由記述の値**（Memory の Title・本文・Branch・種類・変更理由・`attributes` の値、Source の参照、Relation の理由、Project の名前と説明、Task の Title・Branch・PR の URL）は、Decision 0038 5 と同じ `tools.credentials.redact_text` / `redact_value` で認識できる Credential を `[REDACTED]` にしてから書く。Version は `redactions`・`truncated` を持つ。PostgreSQL は変えない。**そのため Restore した本文は `[REDACTED]` のまま**になる（Secret を Git に入れないことを優先する）。
+- **Repository の名前・既定の Branch・Remote の URL** も同じく置換する（DB は文字の種類しか確かめず、Token の形の文字列が入り得る）。置換した Repository・Remote は有効な名前で戻せないので、Restore は戻さず、再登録の手作業として表示する（9）。
+- **Login 名**は Identity なので `[REDACTED]` にできない（有効な Login 名ではない）。Login 名が Credential の検出に当たる User は、Login 名を **`redacted-<User ID の先頭 12 桁の 16 進>`**（有効な Login 名の形）にして書き、Record に `login_name_redacted: true` を付ける。Restore はその名前で User を戻し、「**the Owner renames this user**」（Owner がこの User の名前を付け直す）を手作業として表示する。
 - `session_only` の Version（Long-term Memory ではない）と、除いた Version を指す Relation・Source は入れない。
 - Model / Router・Notification の設定は、まだ DB にも設定 File の形式にもないので、形式 1 には入れない（入った時点で形式の Version を上げて足す）。
 
@@ -73,10 +75,11 @@ Issue の受け入れ条件は「30 分の dirty-check batch commit/push」「Ma
 ### 5. 実行と失敗の通知
 
 - `python -m paw_backend.cli recovery-backup-run` を systemd timer（`paw-recovery-backup.timer`、`OnCalendar=*:02/30`、`Persistent=true`）が 30 分ごとに起動する。手で実行すれば手動の Backup になる。分は Memory Projection（5 分ごと、:00 から）とずらし、Projection の Lock を待つことを減らす。
-- 1 回の実行: Checkout を確かめて Lock → **Projection の Marker の Lock を取り（Projection の実行中なら最大 120 秒待つ）、`.paw-memory-projection-incomplete` がなく、`projection_status` の最後の実行が `memory.projection.completed` のときだけ写す**（Decision 0038 9 のとおり。満たさなければ `copy_memory:<理由>` で失敗し、何も書かない）→ DB の 1 つの Snapshot（`REPEATABLE READ, READ ONLY`）→ Render → 書く → 管理する名前だけを Stage → **変更があるときだけ 1 Commit** → `HEAD` が Remote-tracking Branch と違えば **Fast-forward の Push**（前回の Push の失敗は次の実行が Push し直す = Retry）。**`--force` は使わない**。Remote が先に進んでいれば `push:push_rejected` で失敗し、上書きしない。
+- 1 回の実行: Checkout を確かめて Lock → **Projection の Marker の Lock を取り（Projection の実行中なら最大 120 秒待つ）、`.paw-memory-projection-incomplete` がなく、`projection_status` の最後の実行が `memory.projection.completed` のときだけ写す**（Decision 0038 9 のとおり。満たさなければ `copy_memory:<理由>` で失敗し、何も書かない）→ DB の 1 つの Snapshot（`REPEATABLE READ, READ ONLY`）→ Render → 書く → **Render した Bytes から、専用の Index（`.git/paw-recovery-index`）で Tree を作り、Tree が変わったときだけ 1 Commit**（`commit-tree`、元の `HEAD` を条件にした `update-ref` の Compare-and-swap） → `HEAD` が Remote-tracking Branch と違えば **Fast-forward の Push**（前回の Push の失敗は次の実行が Push し直す = Retry）。**`--force` は使わない**。Remote が先に進んでいれば `push:push_rejected` で失敗し、上書きしない。
+- Commit には Render した Bytes だけが入る。書いた後に Work Tree の File が書き換えられても、人が Checkout で `git add` した File（`README.md`、Credential の File など）が Stage されていても、Commit にも Push にも入らない（Stage されたまま残す）。管理する名前の外の Path は `HEAD` のまま。Blob の ID は Repository の Object Format（SHA-1 / SHA-256）で求める。
 - git は `core.hooksPath=/dev/null`（Checkout の Hook を実行しない）、署名なし、呼び出し元の `GIT_*` 環境変数なし、`GIT_TERMINAL_PROMPT=0`、Timeout（`PAW_RECOVERY_GIT_TIMEOUT_SECONDS`、既定 300 秒）で実行する。Commit の作者は固定（`Personal AI Workspace <recovery@personal-ai-workspace.invalid>`）。git の出力（Remote の URL を含み得る）は表示も記録もしない。
 - **Audit**: 実行ごとに `audit_events` に 1 行（別の Transaction）。`recovery.backup.completed`（`reason = files=N written=N removed=N commit=0|1 push=0|1 redacted=N`）か `recovery.backup.failed`（`<step>:<code>`。`<step>` は `check_repository` / `copy_memory` / `read_database` / `render` / `write_files` / `commit` / `push`）。`resource_kind = recovery_backup_run`、Actor なし。列・Migration は増やさない。
-- **終了コード**は Decision 0038 6 と同じ型: `0` 成功、`1` 拒否（使い方・同時実行）、`2` 環境（設定・DB に届かない）、`3` 失敗。0 以外で `OnFailure=paw-recovery-backup-failure.service`（`crit` の Journal と `wall`）。読み取りだけの `recovery-backup-check [--max-age-minutes N]`（既定 90 分 = 3 回分）。
+- **終了コード**は Decision 0038 6 と同じ型: `0` 成功、`1` 拒否（使い方・同時実行）、`2` 環境（設定・DB に届かない）、`3` 失敗。0 以外で `OnFailure=paw-recovery-backup-failure.service`（`crit` の Journal と `wall`）。読み取りだけの `recovery-backup-check [--max-age-minutes N]`（既定 90 分 = 3 回分。経過時間は DB の時計（`recorded_at` と `now()`）で測り、Host の時計によらない）。
 - 接続は `PAW_DATABASE_URL`（Application の Role）。必要なのは読む Table の SELECT と `audit_events` の INSERT / SELECT だけで、Migration も Grant も足さない（Split-role の Test で確かめる）。
 - 書き込みの途中で失敗した実行は Checkout を一部だけ書き換えた状態で残し得るが、**すべての File を書き終えるまで Commit しない**ので、Remote に中途半端な状態は入らない。次の実行が全体を書き直してから Commit する。
 
@@ -98,7 +101,9 @@ Issue の受け入れ条件は「30 分の dirty-check batch commit/push」「Ma
 - `manifest.json` の `recovery_format_version` がこの Code の読める Version であること（`format_unsupported`）。`recovery/checksums.sha256` の Hash が Manifest と合い、列挙されたすべての File が存在して Hash が合い、**列挙されていない File がない**こと（`checksum_mismatch` / `missing_file` / `unlisted_file`）。すべての Record の Key と型が形式どおりで、File 名が ID と合うこと（`record_invalid`）。
 - 戻す先の DB が**この Release の Head**（`alembic upgrade head` 済み）で、Backup の `workspace_schema_version` が**この Release の Migration の鎖にある Revision**であること（`target_schema_mismatch` / `source_schema_unknown`）。
 - 削除中の User の個人データ（User Record、Member、`user` Scope の Version、`memory/users/<id>/`）が Source にあれば拒否する（`deleted_user_data`）。
-- 拒否はすべて `recovery.restore.refused`（`reason` は閉じた語彙の Code）で記録し、何も書かない（終了コード 1）。
+- **Restore は確かめた Commit の Object（`ls-tree`・`cat-file --batch`）から File を読み、Work Tree は読まない**（確認の後に別の Process が Checkout を書き換えても、読む内容は変わらない）。Link・Submodule・上限を超える Blob は拒否する（`unsafe_object`）。
+- Restore は Checkout の Lock を、確認から書き込みと Audit の記録が終わるまで持ち続ける（その間に Backup が Checkout を書き換えたり Push したりしない）。
+- 拒否はすべて `recovery.restore.refused`（`reason` は閉じた語彙の Code）の Audit の行だけを書き、Workspace のデータは書かない（終了コード 1）。表示は「Workspace のデータは書いていない」と、Audit の行を書けたかどうかを分けて示す。
 
 ### 9. 何を戻し、何を戻さないか
 
@@ -110,6 +115,7 @@ Issue の受け入れ条件は「30 分の dirty-check batch commit/push」「Ma
   - **Checkout**: Repository を Clone し直し、各 User が `gh auth login` し直す。
   - **Task**: Summary だけで、Task としては戻さない（実行中の Task の状態の復旧は V1 で保証しない。要件）。
   - **`conversation` の Source**: Conversation を Backup しないので、指す先がない（新しい行は Conversation を名指す必要がある。DB の Trigger）。件数を表示する。
+  - 名前・Branch・URL の Credential を置換した **Repository・Remote**（3）。再登録する。
   - Metadata の変更履歴（`memory_metadata_changes`）、`audit_events`（新しい Install の Audit は Restore の行から始まる）。
 
 ### 10. Credential の再登録
@@ -120,9 +126,11 @@ Issue の受け入れ条件は「30 分の dirty-check batch commit/push」「Ma
 ### 11. 削除状態の独立した確認（V1 の扱い）
 
 - 要件は「復元元とは独立した最新の削除状態」を求める。V1 では、**Restore の元を「最後に Push された状態」（8 の `not_latest`）に限り、その状態の削除記録（`deletions/`）を適用する**。古い Commit からの Restore は拒否されるので、古い Backup から削除済みの User を戻すことはない。
-- ただし、最後の Push の後（最大 30 分）に削除が始まった User は、その Backup では削除中ではない。Recovery Repository とは別に保つ削除記録（Decision 0043（Proposed）の消去の記録）が決まったら、Restore はその記録も確かめる（後続）。それまでは、Restore の後の手作業の表示で、運用者が Backup の外の削除記録を確かめてから運用を再開するよう求める。
+- ただし、最後の Push の後（最大 30 分）に削除が始まった User は、その Backup では削除中ではない。Recovery Repository とは別に保つ削除記録（Decision 0043（Proposed）の消去の記録）が決まったら、Restore はその記録も確かめる（後続）。それまでは、Restore の後の手作業の表示で、運用者が Backup の外の削除記録を確かめて適用してから運用を再開するよう求める。**この表示は、Backup に削除記録がないときも毎回出す**（最後の Push の後に始まった削除は、どの削除記録にもないため）。
 
 ### 12. Audit
+
+- Dry run の `recovery.restore.planned` を書けなければ、Dry run は失敗（`audit_unrecorded`、終了コード 3）とする（実行ごとの Audit の行を黙って欠かさない）。
 
 - Restore は実行ごとに `audit_events` に 1 行: `recovery.restore.planned`（Dry run）、`recovery.restore.applied`（戻した行と同じ Transaction）、`recovery.restore.refused`、`recovery.restore.failed`。`resource_kind = recovery_restore`、`reason` は件数（`users=N projects=N repos=N memories=N versions=N`）か閉じた語彙の Code。Path・URL・行の文字列は書かない。
 
@@ -153,6 +161,8 @@ Issue の受け入れ条件は「30 分の dirty-check batch commit/push」「Ma
 - 削除中の User の個人データは Backup に入らないので、30 日の保留中にサーバーが失われると、その User は戻せない。
 - 最後の Push の後の変更（最大 30 分と、失敗が続いた間）は戻らない。
 - 8 の `not_latest` は Clone の Remote-tracking Branch と比べるだけで、Remote に問い合わせない。古い Clone を `fetch` せずに使うと、古い状態を「最新」とみなす。Restore の直前に Clone または `fetch` することを手順に書く。
+- Login 名を仮の名前にした User は、Owner が名前を付け直すまで元の名前で Login できない。仮の名前 `redacted-<ID の先頭 12 桁>` が、まれに既存の別の User の Login 名と重なると、Restore は一意性の違反で全体を Rollback する（何も書かない）。
+- Commit を Render した Bytes から作るので、Checkout に手で置いた管理外の File は Commit されない（README などを Recovery Repository に入れたいときは、人が Checkout で手で Commit する。以後の Backup は `HEAD` のその File を保つ）。
 - 1 回の Backup は全件を読み、全 File を比べる。件数が大きくなれば差分の方式が要る（形式は変わらない）。
 
 ## 決めてほしいこと

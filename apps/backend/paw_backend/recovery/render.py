@@ -116,12 +116,19 @@ def _fields(row: Row, names: Iterable[str]) -> dict[str, object]:
     return {name: plain(row[name]) for name in names}
 
 
-def _user_file(user: Row, quotas: list[Row]) -> bytes:
+LOGIN_PLACEHOLDER_PREFIX = "redacted-"
+
+
+def login_placeholder(user_id: UUID) -> str:
+    """The login name a user with a credential-shaped one gets in the backup."""
+    return LOGIN_PLACEHOLDER_PREFIX + user_id.hex[:12]
+
+
+def _user_file(user: Row, quotas: list[Row], redactor: _Redactor) -> bytes:
     record = _fields(
         user,
         (
             "id",
-            "login_name",
             "system_role",
             "status",
             "passkey_required",
@@ -129,6 +136,16 @@ def _user_file(user: Row, quotas: list[Row]) -> bytes:
             "updated_at",
         ),
     )
+    # A valid login name can match the credential detector: ``[REDACTED]`` is
+    # not a valid login name, so the user is written under a placeholder made
+    # from the id, and a restore asks the Owner to rename them (Decision 0054 3).
+    _, count = redact_text(user["login_name"])
+    if count:
+        redactor.redactions += count
+        record["login_name"] = login_placeholder(user["id"])
+        record["login_name_redacted"] = True
+    else:
+        record["login_name"] = user["login_name"]
     record["connection_quotas"] = [
         _fields(
             quota,
@@ -348,7 +365,7 @@ def render_recovery(
             counts["deletions"] += 1
             continue
         files[f"{USERS_DIRECTORY}/{user['id']}.json"] = _user_file(
-            user, quotas.get(user["id"], [])
+            user, quotas.get(user["id"], []), redactor
         )
         counts["users"] += 1
 
@@ -524,6 +541,7 @@ __all__ = [
     "SESSION_ONLY",
     "RecoveryPlan",
     "is_record_name",
+    "login_placeholder",
     "plain",
     "render_recovery",
 ]

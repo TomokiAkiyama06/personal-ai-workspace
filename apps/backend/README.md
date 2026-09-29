@@ -52,7 +52,7 @@ Python 側の Package（`pgvector-python`）は使わず、`paw_backend/memory/v
 apps/backend/
 ├─ pyproject.toml          # 依存（完全一致で固定）と Ruff 設定
 ├─ alembic.ini             # Alembic 設定（DB URL は持たない）
-├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0022 は Password / Session / Login Throttle / 認証 Policy、0023 は Passkey / Passkey の Challenge / Session の Gate、0026 は Project、0027 は Repository 登録・Remote・Checkout、0030 は Shared Connection・Quota・Usage、0031 は Tool Approval、0033 は Queue / Budget / Loop、0034 は DAG Agent Orchestrator（Plan・DAG・Node の試行）、0040 は Memory Schema、0041 は Memory Journal / Consolidation Queue、0042 は Memory の鮮度の Job の Index、0043 は `memory_versions` の全文検索の Index、0046 は Shared Memory Candidate、0050 は Research Scratch、0052 は Evidence / Claim Provenance、0071 は Memory の Status / Stale 状態の変更履歴、0083 は `tasks (project_id, state)` の Index、0085 は Task の Working Set、0087 は外部送信の Audit の `audit_events.details`、0108 は他の Account の Passkey の Reset（`admin_reset`）と 1 回限りの Password 再設定 Token（`password_reset`）とその発行の関数、0124 は招待・端末の Pairing・User の状態の履歴、0133 は Node の試行の Placement（Local / Cloud と Agent・Model）と Cloud の外部送信の Audit の対応）
+├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0022 は Password / Session / Login Throttle / 認証 Policy、0023 は Passkey / Passkey の Challenge / Session の Gate、0026 は Project、0027 は Repository 登録・Remote・Checkout、0030 は Shared Connection・Quota・Usage、0031 は Tool Approval、0033 は Queue / Budget / Loop、0034 は DAG Agent Orchestrator（Plan・DAG・Node の試行）、0040 は Memory Schema、0041 は Memory Journal / Consolidation Queue、0042 は Memory の鮮度の Job の Index、0043 は `memory_versions` の全文検索の Index、0046 は Shared Memory Candidate、0050 は Research Scratch、0052 は Evidence / Claim Provenance、0071 は Memory の Status / Stale 状態の変更履歴、0083 は `tasks (project_id, state)` の Index、0085 は Task の Working Set、0087 は外部送信の Audit の `audit_events.details`、0108 は他の Account の Passkey の Reset（`admin_reset`）と 1 回限りの Password 再設定 Token（`password_reset`）とその発行の関数、0124 は招待・端末の Pairing・User の状態の履歴、0133 は Node の試行の Placement（Local / Cloud と Agent・Model）と Cloud の外部送信の Audit の対応、0147 は `memory_versions.content` の長さの上限（20,000 文字）
 ├─ paw_backend/
 │  ├─ app.py               # create_app(settings)
 │  ├─ config.py            # PAW_ 環境変数から読む Settings
@@ -3503,6 +3503,8 @@ Rerank（Reranker Protocol）→ 構造化 Score（confirmed・鮮度・importan
 
 どの変更も**新しい Version**で、古い Version は履歴に残ります（物理的な上書き・削除はしません）。現在の Version は `version_number` が最大のものです。
 
+**本文の長さ（Issue #147、Decision 0053）**: `memory_versions.content` は 1〜20,000 文字です。Service は長すぎる本文を `MemoryInputError`（`content`、`TOO_LONG`）で先に拒否し、Migration `0147` が同じ上限を CHECK 制約 `ck_memory_versions_content_length` にします（Application の Role にも効き、Role は制約を外せません。値は `memory.models.MAX_VERSION_CONTENT_CHARS`、`memory.versioning.limits` と `memory.shared.limits` の `MAX_CONTENT_CHARS` と食い違えば Test が失敗します）。上限を超える行が既にあれば、Migration は件数・先頭 5 件の Version の ID・一覧の SQL（`SELECT id, memory_id, status, char_length(content) FROM memory_versions WHERE char_length(content) > 20000 ORDER BY memory_id, id`）を示して止まり、Schema もデータも変えません（切り詰めない）。行を人が片付けてから、もう一度 `alembic upgrade head` を実行します。
+
 | 操作 | 現在の Version `n` | 新しい Version | Relation（新 → 旧） |
 | --- | --- | --- | --- |
 | `create_memory` | — | `1`、`active`、`confirmed`、Actor は本人 | — |
@@ -3650,12 +3652,13 @@ $PAW_RECOVERY_REPOSITORY_DIR/            # 専用の Private Repository の Clon
 ```bash
 # /etc/paw/recovery-backup.env に PAW_DATABASE_URL・PAW_MEMORY_PROJECTION_DIR・PAW_RECOVERY_REPOSITORY_DIR を置く
 python -m paw_backend.cli recovery-backup-run                          # 1 回の Backup（手動の Backup も同じ）
-python -m paw_backend.cli recovery-backup-check --max-age-minutes 90   # 監視（読み取りだけ）
+python -m paw_backend.cli recovery-backup-check --max-age-minutes 90   # 監視（読み取りだけ。経過時間は DB の時計で測る）
 ```
 
 - Checkout は絶対・正規の Path で、Home・Projection の Directory と重ならず、git の Work Tree の最上位で、Marker を持つこと（Marker がなければ、`.git` しかない空の Clone だけを自分のものにします）。Branch に Upstream が要ります。満たさなければ何も書かずに失敗します（`check_repository:<理由>`）。
 - Memory Projection は、その Marker の Lock を取り（実行中なら最大 120 秒待つ）、`.paw-memory-projection-incomplete` がなく、最後の実行が `memory.projection.completed` のときだけ写します（Decision 0038 の 9）。
 - DB は `REPEATABLE READ, READ ONLY` の 1 つの Snapshot から、**列を名指しした SQL**（`recovery/source.py`）だけで読みます。Password Hash・Passkey・Session・各種 Token・`secret_handle`・Conversation・Embedding・Checkout の Path・Task の入力と Log・Audit は読みません。自由記述の Credential は `[REDACTED]` にします（Decision 0038 の 5 と同じ）。
+- Login 名が Credential の検出に当たる User は、Login 名を `redacted-<User ID の先頭 12 桁>` にして書きます。Restore はその名前で戻し、Owner が名前を付け直す手作業（「the Owner renames this user」）を表示します。
 - Repository の名前・既定の Branch・Remote の URL の Credential も置換します。置換された Repository・Remote は Restore で戻さず、再登録の手作業として表示します。
 - `pending_deletion` / `deleted` の User は削除記録（`id`・`status`）だけで、User Record・Quota・Member・`user` Scope の Memory・`memory/users/<id>/` を入れません。`session_only` の Version も入れません。
 - 変わらない File は書き直さず、`manifest.json` も内容が変わったときだけ変えます。管理する名前だけを Stage し、**変更があるときだけ 1 Commit**、`HEAD` が Remote-tracking Branch と違うときだけ **Fast-forward の Push**（前回の失敗の Retry を兼ねる）。`--force` は使いません。Commit は Render した Bytes から専用の Index で作り（Work Tree や Checkout の Index からは作らない）、管理する名前の外は `HEAD` のままです。書いた後に File が書き換えられても、人が `git add` した `README.md` などが Stage されていても、Commit にも Push にも入りません（Stage されたまま残ります）。Branch は元の `HEAD` からだけ進めます（Compare-and-swap）。git は Hook なし（`core.hooksPath=/dev/null`）・呼び出し元の `GIT_*` なし・`GIT_TERMINAL_PROMPT=0`・Timeout（`PAW_RECOVERY_GIT_TIMEOUT_SECONDS`、既定 300 秒）で、出力は表示も記録もしません。

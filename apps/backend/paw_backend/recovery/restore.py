@@ -101,6 +101,7 @@ from paw_backend.recovery.records import (
     REPO_FIELDS,
     TASK_FIELDS,
     USER_FIELDS,
+    USER_OPTIONAL,
     RecordError,
     parse_fields,
     parse_list,
@@ -175,6 +176,7 @@ class RestoreData:
     deletions: list[dict[str, Any]] = field(default_factory=list)
     skipped_conversation_sources: int = 0
     skipped_repositories: int = 0
+    renamed_users: list[str] = field(default_factory=list)
     skipped_remotes: int = 0
     tasks: int = 0
     auth_policy: dict[str, Any] | None = None
@@ -256,7 +258,7 @@ def _json(data: bytes) -> object:
 
 
 def _records(
-    files: Mapping[str, bytes], directory: str, fields
+    files: Mapping[str, bytes], directory: str, fields, optional=None
 ) -> list[dict[str, Any]]:
     records = []
     prefix = directory + "/"
@@ -266,7 +268,7 @@ def _records(
         name = path[len(prefix) :]
         if "/" in name or not is_record_name(name):
             raise RecordError("a record file name is not the format's")
-        record = parse_fields(_json(files[path]), fields)
+        record = parse_fields(_json(files[path]), fields, optional=optional)
         if str(record["id"]) != name[: -len(".json")]:
             raise RecordError("a record file is not named by its id")
         records.append(record)
@@ -307,7 +309,7 @@ def parse_source(
     for path in files:
         if not _known_path(path):
             raise RecordError("a file the format does not have")
-    users = _records(files, USERS_DIRECTORY, USER_FIELDS)
+    users = _records(files, USERS_DIRECTORY, USER_FIELDS, USER_OPTIONAL)
     deletions = _records(
         files, f"{DELETIONS_DIRECTORY}/{USERS_DIRECTORY}", DELETION_FIELDS
     )
@@ -353,6 +355,8 @@ def parse_source(
     )
     for record in users:
         quotas = record.pop("connection_quotas")
+        if record.pop("login_name_redacted", False):
+            data.renamed_users.append(record["login_name"])
         data.users.append(record)
         for quota in quotas:
             data.quotas.append({"user_id": record["id"], **quota})
@@ -499,6 +503,13 @@ def manual_steps(
         steps.append(
             f"Clone the {len(data.repositories)} repositories again (checkouts "
             "are not restored); each user logs in to GitHub again (gh auth login)."
+        )
+    if data.renamed_users:
+        steps.append(
+            f"{len(data.renamed_users)} user(s) had a credential-shaped login name, "
+            "backed up under a placeholder: the Owner renames this user ("
+            + ", ".join(sorted(data.renamed_users))
+            + ") before they sign in again."
         )
     if data.skipped_repositories or data.skipped_remotes:
         steps.append(

@@ -323,6 +323,37 @@ class RenderTest(unittest.TestCase):
             )
         )
 
+    def test_a_credential_shaped_login_name_is_replaced_by_a_placeholder(self) -> None:
+        # A valid login name can match the credential detector (lower-case
+        # letters and digits after a token prefix). It never reaches Git; the
+        # user comes back under ``redacted-<first 12 hex of the id>`` and the
+        # Owner is told to rename them (Decision 0054 3).
+        token_name = "ghp_" + "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8"
+        shaped = user(login_name=token_name)
+        plain_user = user(login_name="alice")
+        plan = render(snapshot_with(users=[shaped, plain_user]))
+        self.assertNotIn(token_name.encode(), b"".join(plan.files.values()))
+        placeholder = "redacted-" + shaped["id"].hex[:12]
+        record = load(plan.files[f"users/{shaped['id']}.json"])
+        self.assertEqual(placeholder, record["login_name"])
+        self.assertTrue(record["login_name_redacted"])
+        self.assertNotIn(
+            "login_name_redacted", load(plan.files[f"users/{plain_user['id']}.json"])
+        )
+        data = parse_source(plan.files, "c" * 40, verify_files(plan.files))
+        names = {row["id"]: row["login_name"] for row in data.users}
+        self.assertEqual(placeholder, names[shaped["id"]])
+        self.assertEqual("alice", names[plain_user["id"]])
+        self.assertNotIn("login_name_redacted", data.users[0])
+        steps = manual_steps(data, None)
+        self.assertTrue(
+            any(
+                "the Owner renames this user" in step and placeholder in step
+                for step in steps
+            ),
+            steps,
+        )
+
     def test_no_credential_column_can_reach_a_file(self) -> None:
         plan = render(
             snapshot_with(

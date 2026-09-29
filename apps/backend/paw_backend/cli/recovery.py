@@ -294,8 +294,13 @@ async def _check(settings: Settings, max_age_minutes: int, clock, err) -> int:
             f"{_time(status.last_completed_at)}.",
         )
         return EXIT_FAILED
-    limit = clock() - timedelta(minutes=max_age_minutes)
-    if status.last_completed_at is None or status.last_completed_at < limit:
+    # The age is measured on the database clock (``recorded_at`` against
+    # ``now()``), not this host's.
+    if (
+        status.last_completed_recorded_at is None
+        or status.checked_at - status.last_completed_recorded_at
+        > timedelta(minutes=max_age_minutes)
+    ):
         _say(
             err,
             f"FAILED: no recovery backup completed in the last {max_age_minutes} "

@@ -124,6 +124,7 @@ USER_FIELDS: Fields = {
     "updated_at": _time,
     "connection_quotas": lambda value: parse_list(value, QUOTA_FIELDS),
 }
+USER_OPTIONAL: Fields = {"login_name_redacted": _bool}
 DELETION_FIELDS: Fields = {"id": _uuid, "status": _str}
 MEMBER_FIELDS: Fields = {
     "user_id": _uuid,
@@ -264,6 +265,7 @@ __all__ = [
     "REPO_FIELDS",
     "TASK_FIELDS",
     "USER_FIELDS",
+    "USER_OPTIONAL",
     "RecordError",
     "parse_fields",
     "parse_list",

@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 
-from sqlalchemy import insert, select
+from sqlalchemy import func, insert, literal, select, true
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from paw_backend.authz.models import AuditEventRecord
@@ -95,47 +95,67 @@ async def record_recovery_outcome(
 
 @dataclass(frozen=True, slots=True)
 class BackupStatus:
-    """The last backup run and the last completed one (``None`` when none)."""
+    """The last backup run and the last completed one (``None`` when none).
+
+    ``..._at`` are the runs' own (host) times, for display; how long ago the
+    last success was is measured on the database clock only:
+    ``last_completed_recorded_at`` against ``checked_at`` (the database's
+    ``now()``), as ``projection_status`` does."""
 
     last_action: str | None
     last_run_at: datetime | None
     last_reason: str | None
     last_completed_at: datetime | None
+    last_completed_recorded_at: datetime | None
+    checked_at: datetime
 
 
 async def backup_status(database: Database) -> BackupStatus:
     table = AuditEventRecord.__table__
-    last_completed = (
-        select(table.c.occurred_at)
+    completed = (
+        select(table.c.occurred_at, table.c.recorded_at)
         .where(
             table.c.resource_kind == BACKUP_RESOURCE_KIND,
             table.c.action == RecoveryAction.BACKUP_COMPLETED.value,
         )
         .order_by(table.c.recorded_at.desc(), table.c.occurred_at.desc())
         .limit(1)
-        .scalar_subquery()
+        .subquery("last_completed")
     )
     runs = (
-        select(
-            table.c.action,
-            table.c.occurred_at,
-            table.c.reason,
-            last_completed.label("last_completed_at"),
-        )
+        select(table.c.action, table.c.occurred_at, table.c.reason)
         .where(
             table.c.resource_kind == BACKUP_RESOURCE_KIND,
             table.c.action.in_([action.value for action in _BACKUP_ACTIONS]),
         )
         .order_by(table.c.recorded_at.desc(), table.c.occurred_at.desc())
         .limit(1)
+        .subquery("last_run")
+    )
+    # One statement: one snapshot, and ``now()`` is the clock ``recorded_at``
+    # is stamped with.
+    status = select(
+        func.now().label("checked_at"),
+        runs.c.action,
+        runs.c.occurred_at,
+        runs.c.reason,
+        completed.c.occurred_at.label("last_completed_at"),
+        completed.c.recorded_at.label("last_completed_recorded_at"),
+    ).select_from(
+        select(literal(1).label("one"))
+        .subquery("one")
+        .outerjoin(runs, true())
+        .outerjoin(completed, true())
     )
     async with database.session() as session:
-        last = (await session.execute(runs)).first()
+        row = (await session.execute(status)).one()
     return BackupStatus(
-        last_action=None if last is None else last.action,
-        last_run_at=None if last is None else last.occurred_at,
-        last_reason=None if last is None else last.reason,
-        last_completed_at=None if last is None else last.last_completed_at,
+        last_action=row.action,
+        last_run_at=row.occurred_at,
+        last_reason=row.reason,
+        last_completed_at=row.last_completed_at,
+        last_completed_recorded_at=row.last_completed_recorded_at,
+        checked_at=row.checked_at,
     )
 
 

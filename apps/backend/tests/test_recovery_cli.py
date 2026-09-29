@@ -103,14 +103,13 @@ class CommandTest(PostgresProjectTestCase):
         self.assertEqual("", out)
         self.assertNotIn(str(self.world.base), err)
 
-        now = datetime.now(UTC)
-        code, _, err = self.command(["recovery-backup-check"], clock=lambda: now)
-        self.assertEqual(cli.EXIT_OK, code, err)
+        # The age is judged on the database clock: a host clock an hour ahead
+        # does not make the fresh backup look stale.
+        later = datetime.now(UTC) + timedelta(hours=1)
         code, _, err = self.command(
-            ["recovery-backup-check", "--max-age-minutes", "5"],
-            clock=lambda: now + timedelta(hours=1),
+            ["recovery-backup-check", "--max-age-minutes", "5"], clock=lambda: later
         )
-        self.assertEqual(cli.EXIT_FAILED, code)
+        self.assertEqual(cli.EXIT_OK, code, err)
 
         # The checkout is the latest pushed state and the workspace is empty:
         # the dry run shows the plan and writes nothing; once a user exists, a
