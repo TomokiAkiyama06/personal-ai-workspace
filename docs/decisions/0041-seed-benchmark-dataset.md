@@ -1,9 +1,10 @@
 # Seed Benchmark Dataset（paw-seed-v1）の構成
 
-- Status: Proposed
+- Status: Approved
 - Date: 2026-09-28
 - Scope: Issue [#13](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/13)（PAW-016: Seed Benchmark Dataset）。関連: PAW-010（#7、Task schema）、PAW-013（#10、Test / Hidden Acceptance Runner、[Decision 0001](0001-hidden-check-boundary.md)）、PAW-017（#14、Main Coding Model比較Run）
 - Supersedes: なし（[BENCHMARK_EVALUATOR.md](../BENCHMARK_EVALUATOR.md)の「Deferred details」のうち、Seed task数・最初に使うRepo・Hidden testの保管方式を埋める）
+- Approval: 2026-09-29、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで「推奨どおり」と回答して承認（提案 1〜10 と「決まっていないこと」の全点。末尾の「承認時の決定」）
 
 ## 背景
 
@@ -107,7 +108,7 @@ visible check の command は `python` で始まる。Evaluator は、`PATH` の
 - `benchmarks/tests/test_seed_dataset.py`: 公開 Dataset の検査と helper の test（CI で実行。非公開の material は不要）。
 - `/data/datasets/paw-seed-v1`: 非公開の material（commit しない）。
 
-## 決まっていないこと（人の判断が要る）
+## 決まっていないこと（2026-09-29 に推奨どおり承認）
 
 1. 上の 1〜10 の推奨の承認（特に、Historical の `issue_text` に Hidden test の import 名を入れること（1）、規模 24 と v2 の方針（2）、保管先と退避先（4）、Network を遮断した Container を PAW-017 の前提にすること（4・5））。
 2. 非公開の material の退避先（4）。
@@ -116,3 +117,7 @@ visible check の command は `python` で始まる。Evaluator は、`PATH` の
 ## 承認後の扱い
 
 承認されたら Status を Approved にし、PAW-017 はこの版（`paw-seed-v1`）を使う。承認されない点は、別の PR で Dataset・索引・この提案を直す（承認前に比較 Run へ使った結果は、正式な判定に使わない）。
+
+## 承認時の決定（2026-09-29）
+
+Human は、作業 Session で判断が必要な点について推奨つきの説明を受け、「推奨どおり」と回答して承認した（提案 1〜10 と「決まっていないこと」の全点）。**すべて推奨どおり**で、個別の変更はない。「決まっていないこと」の2（非公開の material の退避先）は `/data` の定期 Backup とする。3（人の修正時間を測る対象）は、推奨どおり上位 2 候補の未解決 Task から人が選ぶ。
