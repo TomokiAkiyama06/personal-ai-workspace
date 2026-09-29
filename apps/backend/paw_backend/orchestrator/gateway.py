@@ -255,7 +255,11 @@ class NodeBudgetHandle:
         # fenced by the run (``run=``): the tracker checks the task's current run
         # under the task row's share lock in the transaction of the increment, so
         # a run that a Fail + Retry / Restart replaced since the last look spends
-        # nothing of the run that took over (the usage is kept per task).
+        # nothing of the run that took over (the usage is kept per task). It is
+        # NOT fenced by the queue lease (issue #153, Decision 0057): it records
+        # work that was done, starts nothing, and a take-over keeps the run, so
+        # the work of a worker that lost its lease unseen is the same run's. A
+        # loss this run already knows of stopped the guard above.
         try:
             await self._tracker.record(self._task_id, kind, amount, run=self._guard.run)
         except StaleRunError:

@@ -674,7 +674,9 @@ class TrackerLateGpuCharge:
     call that already ran): it records GPU time that was used, by a local call
     that did not stop when its node was cancelled and held its lease until it
     ended. Hiding it would let such calls use the GPU beyond the task's
-    ``GPU_SECONDS`` unseen."""
+    ``GPU_SECONDS`` unseen. Nor is it fenced by the queue lease (issue #153,
+    Decision 0057): the lease fences what a worker starts, not the record of
+    what it used."""
 
     def __init__(self, tracker: object) -> None:
         require_async_method(tracker, "record", 3)

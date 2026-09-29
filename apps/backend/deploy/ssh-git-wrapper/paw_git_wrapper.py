@@ -46,9 +46,10 @@ undoes ``shlex.quote``) into the words of Decision 0029 §2::
   directory and common directory git finds from the cwd must be inside the
   root and outside ``.paw-worktrees`` (:func:`check_location`), and hold no
   symbolic link (:func:`check_links`; so must a pinned call's);
-* for a sub-command that reads file content (:data:`CONTENT_SUBCOMMANDS`), the
-  configuration git would read must name no command (a ``filter`` driver, a
-  ``merge`` driver, an ``include``, ...: :func:`check_configuration`).
+* for every sub-command but ``clone`` and ``init`` (:data:`UNPROBED_SUBCOMMANDS`),
+  the configuration git would read must name no command (a ``filter`` driver, a
+  ``merge`` driver, an ``include``, ...) and no on-demand fetch (a partial
+  clone's promisor remote): :func:`check_configuration`.
 
 The client's ``-c`` values are checked, then **dropped**: git always gets this
 file's own hardening (:func:`hardening`) and, for ``merge``, this file's own
@@ -122,18 +123,19 @@ OWN_HARDENING = (
 )
 
 
-#: Sub-commands that read or write file content through the repository's
-#: attributes, and so may start a command the repository's own configuration
-#: names (a ``filter`` driver's ``clean`` / ``smudge`` / ``process``, a ``merge``
-#: driver, a ``diff`` ``textconv``, ...): ``status`` (``clean`` on a modified
-#: file), ``merge`` (``merge --abort`` too), ``merge-tree`` (a merge driver) and
-#: ``worktree add`` (``smudge`` on checkout). Before any of them runs, the
+#: Sub-commands whose repository configuration is NOT listed before they run:
+#: ``clone`` and ``init`` read no existing repository (``init`` only in a
+#: directory without a ``.git``). Before every other one runs, the
 #: configuration git would read is listed (:func:`configuration_probe`) and the
-#: call is refused if it names a command, or another work tree
-#: (:func:`unsafe_setting`).
-CONTENT_SUBCOMMANDS = frozenset(
-    {"status", "merge", "merge-tree", "worktree", "submodule"}
-)
+#: call is refused if it names a command, another work tree or an on-demand
+#: fetch (:func:`unsafe_setting`). A sub-command that reads or writes file
+#: content may start a command the configuration names (a ``filter`` driver's
+#: ``clean`` / ``smudge`` / ``process``, a ``merge`` driver, ...); and any
+#: sub-command that resolves an object (``rev-parse --verify``, ``merge-base``,
+#: ...) fetches a missing one from a partial clone's promisor remote on a git
+#: that predates ``GIT_NO_LAZY_FETCH`` (Codex review of #150, P2): so every
+#: call is checked, not only those that read file content.
+UNPROBED_SUBCOMMANDS = frozenset({"clone", "init"})
 
 #: Configuration sections every key of which is (or leads to) a command, or to
 #: another file this wrapper would not have listed.
@@ -707,7 +709,7 @@ class Invocation:
     env: dict[str, str]
     cwd: str
     #: The ``git config`` call whose output must name no command before
-    #: ``argv`` runs (:data:`CONTENT_SUBCOMMANDS`); ``None`` for the others.
+    #: ``argv`` runs; ``None`` for :data:`UNPROBED_SUBCOMMANDS`.
     probe: list[str] | None = None
     #: For a call not pinned to a git directory (``clone`` aside): the
     #: ``git rev-parse`` call that says which git directory and common
@@ -855,7 +857,7 @@ def plan(original: str | None, config: Config) -> Invocation:
     argv.append(subcommand)
     argv.extend(args)
     probe = None
-    if subcommand in CONTENT_SUBCOMMANDS and args[:1] not in (["list"], ["prune"]):
+    if subcommand not in UNPROBED_SUBCOMMANDS:
         probe = configuration_probe(hardened, pinned)
     gitlinks = None
     if (subcommand, args) in (
@@ -939,7 +941,23 @@ _UNWRITTEN = frozenset({"hooks"})
 _ALTERNATES = frozenset({"alternates", "http-alternates"})
 
 
-def check_links(directories: Sequence[str]) -> None:
+#: The most entries :func:`check_links` looks at, and for how long (the probes'
+#: deadline), before git runs: a repository with a planted fan-out of loose
+#: objects or refs is refused (``git_dir_too_large``) instead of being walked
+#: for an unbounded time on every call (Codex review of #150, P2). A repository
+#: git keeps packed (``git gc --auto`` packs loose objects past about 6,700)
+#: stays far below it.
+MAX_METADATA_ENTRIES = 500_000
+METADATA_TIMEOUT_S = PROBE_TIMEOUT_S
+
+
+def check_links(
+    directories: Sequence[str],
+    *,
+    limit: int = MAX_METADATA_ENTRIES,
+    timeout: float = METADATA_TIMEOUT_S,
+    clock: Callable[[], float] = time.monotonic,
+) -> None:
     """Refuse the call when any of ``directories`` (a git directory, a common
     directory) holds a symbolic link, a file with another hard link
     (``objects/`` aside) or an ``objects/info/alternates`` (``git_dir_alternates``),
@@ -947,20 +965,23 @@ def check_links(directories: Sequence[str]) -> None:
     ``refs/``, ``logs/``, ``objects/``, ``worktrees/``, ... and would follow a
     linked directory there out of the root, and writes ``MERGE_MSG``,
     ``config``, ... whose other link may be outside it, although the
-    directory itself was checked to be inside it."""
+    directory itself was checked to be inside it.
+
+    At most ``limit`` entries, within ``timeout`` seconds, over all the
+    directories; beyond either the call is refused (``git_dir_too_large``).
+    Each directory is read one entry at a time, so that one huge directory
+    counts as it is read."""
+    deadline = clock() + timeout
+    seen = 0
     todo = sorted(set(directories))
     for index, top in enumerate(todo):
         if any(_within(top, other, allow_equal=False) for other in todo[:index]):
             continue  # already walked with the directory it is in
         if os.path.islink(top):
             raise Rejected("git_dir_link")
-
-        def fail(error: OSError) -> None:
-            raise Rejected("git_dir_link")
-
-        for path, dirs, files in os.walk(top, onerror=fail, followlinks=False):
-            if path == top:
-                dirs[:] = [name for name in dirs if name not in _UNWRITTEN]
+        pending = [top]
+        while pending:
+            path = pending.pop()
             # Object files are never written once there (a new object is a
             # new file): a hard link among them (``clone --local`` and
             # ``submodule add`` of a local path make them), in the
@@ -973,20 +994,34 @@ def check_links(directories: Sequence[str]) -> None:
             linked_ok = parts[0] == "objects" or (
                 parts[0] == "modules" and "objects" in parts[1:]
             )
-            if parts[-2:] == ["objects", "info"] and _ALTERNATES & set(files):
-                # Another object directory (anywhere: another user's
-                # repository, say) whose objects git would read, and a
-                # ``worktree add`` of one of its commits would check out.
-                raise Rejected("git_dir_alternates")
-            for name in (*dirs, *files):
-                try:
-                    info = os.lstat(os.path.join(path, name))
-                except OSError:
-                    raise Rejected("git_dir_link") from None
-                if stat.S_ISLNK(info.st_mode):
-                    raise Rejected("git_dir_link")
-                if stat.S_ISREG(info.st_mode) and info.st_nlink > 1 and not linked_ok:
-                    raise Rejected("git_dir_link")
+            in_info = parts[-2:] == ["objects", "info"]
+            try:
+                with os.scandir(path) as entries:
+                    for entry in entries:
+                        seen += 1
+                        if seen > limit or clock() > deadline:
+                            raise Rejected("git_dir_too_large")
+                        if path == top and entry.name in _UNWRITTEN:
+                            continue
+                        if in_info and entry.name in _ALTERNATES:
+                            # Another object directory (anywhere: another
+                            # user's repository, say) whose objects git would
+                            # read, and a ``worktree add`` of one of its
+                            # commits would check out.
+                            raise Rejected("git_dir_alternates")
+                        info = entry.stat(follow_symlinks=False)
+                        if stat.S_ISLNK(info.st_mode):
+                            raise Rejected("git_dir_link")
+                        if stat.S_ISDIR(info.st_mode):
+                            pending.append(entry.path)
+                        elif (
+                            stat.S_ISREG(info.st_mode)
+                            and info.st_nlink > 1
+                            and not linked_ok
+                        ):
+                            raise Rejected("git_dir_link")
+            except OSError:
+                raise Rejected("git_dir_link") from None
 
 
 def check_submodules(
@@ -1071,7 +1106,8 @@ def check_configuration(
     run: Callable[..., "subprocess.CompletedProcess[bytes]"] = bounded_run,
 ) -> None:
     """Refuse ``invocation`` when the configuration it would read names a
-    command (:data:`CONTENT_SUBCOMMANDS`), or cannot be listed.
+    command, another work tree or an on-demand fetch (every sub-command but
+    :data:`UNPROBED_SUBCOMMANDS`), or cannot be listed.
 
     The repository's configuration is shared by the checkout and every worktree
     of it, and an agent working in a worktree may write it: a ``filter`` there,

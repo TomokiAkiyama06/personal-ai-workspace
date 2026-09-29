@@ -127,6 +127,17 @@ class StaleAttemptError(StaleRunError):
     message = "The task has moved on to a newer attempt"
 
 
+class TaskStateChangedError(StaleRunError):
+    """A ``StaleRunError`` for a run that is still current, but whose task has
+    left the state the caller works in (``TaskService.update_attempt(...,
+    in_state=...)``): a Cancel, Pause or Wait does not replace the run, and a
+    check that was still running must not record its result into the task
+    that left it (Codex P2 on PR #130). Nothing is written."""
+
+    code = "task_state_changed"
+    message = "The task is no longer in the state the caller works in"
+
+
 class WorkingSetError(TaskError):
     """A change of the Working Set, or a transition it guards, is refused.
 
