@@ -3508,7 +3508,7 @@ Rerank（Reranker Protocol）→ 構造化 Score（confirmed・鮮度・importan
 
 - **Optimistic Lock。** 変更はどれも `expected_version`（手動の Relation は両方の Memory の分）を取り、現在の番号と違えば `MemoryVersionConflictError`（何も書かない）。Memory ごとの Advisory Lock と現在の Version の `FOR UPDATE` で、この Service どうしは直列になります。Lock を取らない Journal の Consolidator とは、`UPDATE ... WHERE status = 'active'` の行数と `(memory_id, version_number)` の Unique で、後から来た方が失敗します（Lost Update にならない）。Consolidator が Version `n` を Lock したまま `n + 1` を Commit した場合は、`FOR UPDATE` の後に最大の番号を新しい Statement で読み直し、新しい Version を Lock し直すので、`NOT_ACTIVE` ではなく現在の番号を示す `MemoryVersionConflictError` になります（`tests/test_memory_versioning_races.py`）。
 - **履歴。** Status の変更は Database の Trigger が `memory_metadata_changes` に本人を Actor として記録します（Revision `0071`。`metadata_change_actor` を同じ Transaction で先に実行）。`history` は全 Version を古い順に返します（History Graph の Node）。
-- **出典を写す（[Decision 0045](../../docs/decisions/0045-memory-edit-sources.md)、Proposed）。** `edit_memory` と `revalidate_memory` は `n` の、`restore_version` は復元した Version の `memory_sources` を新しい Version にすべて写し（`created_at` もそのまま。Database の中の `INSERT ... SELECT` で、値は Backend に届かない）、書いた人の `user_confirmation`（`source_ref = "memory_confirmed_by:<user id>"`）を 1 行足します（写した中に同じ行があれば足さない）。削除済みの会話を指す（何も指さない）`conversation` の出典は写しません（Database が新しい行として拒否するため）。会話・Task の削除でその Version をどう処理するかは、会話の削除の Issue で決めます。
+- **出典を写す（[Decision 0045](../../docs/decisions/0045-memory-edit-sources.md)、Approved）。** `edit_memory` と `revalidate_memory` は `n` の、`restore_version` は復元した Version の `memory_sources` を新しい Version にすべて写し（`created_at` もそのまま。Database の中の `INSERT ... SELECT` で、値は Backend に届かない）、書いた人の `user_confirmation`（`source_ref = "memory_confirmed_by:<user id>"`）を 1 行足します（写した中に同じ行があれば足さない）。削除済みの会話を指す（何も指さない）`conversation` の出典は写しません（Database が新しい行として拒否するため）。会話・Task の削除でその Version をどう処理するかは、会話の削除の Issue で決めます。
 - **由来する Version の検索（`MemoryDerivation`）。** `versions_from_conversation(conversation_id)` / `versions_from_task(task_id)` は、その会話（Message の出典を含む）・Task（`source_type = task`、`source_ref = str(task_id)`）を出典に持つ Version と、そこから人が編集・復元・Revalidate で書いた Version（`attributes` の `edited_from_version` / `restored_from_version` / `revalidated_from_version`、`actor_type = 'user'` だけ）を推移的に、状態・Scope を問わず返します（ID・番号・出典を直接持つか。内容は返さない）。写しのない既存の Version も辿りで見つかるので Backfill の Migration はありません。会話の削除の Flow が `system` として呼ぶ Backend 内部の検索です（認可はない）。
 - **Retrieval は `active` だけ。** 編集・復元・廃止・Relation の後の Retrieval（PAW-043）は、新しい `active` の Version だけを返します（`test_memory_versioning_service.py` が Retrieval で確かめます）。
 - **Scope は狭めるだけ。** `edit_memory(..., MemoryChanges(scope=MemoryScope.USER))` は `project` の Memory を編集者本人の `user` の Memory にします（REQUIREMENTS.md「Scope変更」: 即反映）。`user` の `n + 1` を書くのと `project` の `n` を `superseded` にするのは同じ Transaction です。要る権限は `project.memory.use`（Contributor 以上）と自分の `memory.use`（Decision 0034 の 3 と 12。12 は案 A で承認）。以後メンバーには履歴も Not Found で、`project` の Version からの復元は `SCOPE_MISMATCH` です。
@@ -3823,7 +3823,7 @@ await orchestrator.serve("worker-1", stop_event)  # または run_once("worker-1
 
 ### 本番の組み立て（Composition Root、Issue #125）
 
-**[Decision 0047（Proposed、承認待ち）](../../docs/decisions/0047-task-execution-composition-and-task-end-effects.md)** の推奨どおりに実装しました。承認されない点は実装を変えます。
+**[Decision 0047（Approved）](../../docs/decisions/0047-task-execution-composition-and-task-end-effects.md)** の推奨どおりに実装しました。
 
 `create_app` は DB が設定されているとき `build_task_execution`（`orchestrator/composition.py`）で次を 1 回だけ組み立て、`app.state.task_execution`（`TaskExecution`）に置きます。DB がなければ `None` です。
 

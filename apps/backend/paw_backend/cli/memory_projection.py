@@ -1,6 +1,6 @@
 """``python -m paw_backend.cli memory-projection-run | memory-projection-check``.
 
-The Memory Markdown Projection (PAW-045, Decision 0038 Proposed): the systemd
+The Memory Markdown Projection (PAW-045, Decision 0038 Approved): the systemd
 timer of ``apps/backend/deploy/systemd`` (or a cron entry) runs
 ``memory-projection-run`` every few minutes; ``memory-projection-check`` is a
 read-only probe for monitoring.
