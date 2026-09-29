@@ -1,10 +1,10 @@
 # 本番の Task 実行の組み立て（Composition Root）と、Task 終了時・定期実行の後処理
 
-- Status: Proposed（判断が必要な点 1〜7 は承認待ち）
+- Status: Approved
 - Date: 2026-09-28
 - Scope: Issue [#125](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/125)。本番の `TaskAuthority`、App の起動時の `TaskService` / Tool Broker / Orchestrator の組み立て、Task の終了（Complete / Fail / Cancel）での `FreshnessMaintenance.end_task` と承認の取り消し、鮮度の Job の定期実行（`paw_backend/orchestrator/authority.py`、`task_end.py`、`freshness_loop.py`、`composition.py`、`paw_backend/app.py`）
 - Supersedes: なし。[Decision 0006](0006-tool-broker-policy.md) の 9 節（Task の終了で承認を取り消す）、[Decision 0034](0034-memory-versioning-freshness.md) の 7 節（Job の定期実行と `end_task` の配線を後の Issue にする）、[Decision 0030](0030-task-working-set-model.md)（保存された Working Set から役割を作る）が後続に回した配線の実装で、どれも書き換えない
-- Approval: 未承認
+- Approval: 2026-09-29、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで「推奨どおり」と回答して承認（判断が必要な点 1〜7 の全点。末尾の「承認時の決定」）
 
 ## 背景
 
@@ -96,7 +96,7 @@ Sweep までの間も、残ったものは使えない: Tool Broker は動けな
 - `credential_handles` が空なので、Credential を要する Tool は、Credential の仕組みができるまで本番では使えない。
 - #126（Decision 0046、Tool 呼び出しの Lease の Fencing）が Merge されたら、`build_tool_broker` に `lease=QueueLeaseVerifier(queue)` を足す必要がある。足さないと Broker は全ての呼び出しを `lease_unavailable` で拒否する（Fail closed）。
 
-## 判断が必要な点（未承認。推奨つき）
+## 判断が必要な点（2026-09-29 に推奨どおり承認）
 
 1. **Task 終了の後処理の Transaction の境界**: 遷移の Transaction の外で、Commit の直後の Listener と、保存された状態から残りを見つける Sweep の 2 段にする（1 節）。推奨: この形。代わりに同じ Transaction（Store の Interface の変更）か Outbox の Table（Migration）。
 2. **途中で再起動したとき**: 特別な復旧を持たず、次の Sweep が残りを終わらせる（2 節。起動後の最初の周期は 60 秒後）。推奨: この形。
@@ -110,3 +110,7 @@ Sweep までの間も、残ったものは使えない: Tool Broker は動けな
 
 判断が必要な点が承認されたら、`Approval` に記録し、Status を Approved に改める。承認されない点は実装を変え、新しい Decision を作らずにこの Decision を承認前に改める（承認後に方針を変えるときは、この Decision を書き換えず、新しい Decision から `Supersedes` する）。
 [REQUIREMENTS.md](../../REQUIREMENTS.md) の原文は書き換えない。
+
+## 承認時の決定（2026-09-29）
+
+Human は、作業 Session で判断が必要な点について推奨つきの説明を受け、「推奨どおり」と回答して承認した（判断が必要な点 1〜7 の全点）。**すべて推奨どおり**で、個別の変更はない。7 は #126（Decision 0046）が先に Merge された場合の統合手順として行う。
