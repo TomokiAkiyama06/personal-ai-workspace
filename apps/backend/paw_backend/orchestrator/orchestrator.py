@@ -130,6 +130,7 @@ from paw_backend.tasks import (
     IllegalTransitionError,
     LogLevel,
     ProjectNotActiveError,
+    RepositoryNotInAttemptError,
     StaleAttemptError,
     StaleRunError,
     TaskCommand,
@@ -1337,29 +1338,19 @@ class Orchestrator:
         except asyncio.CancelledError:
             raise
         except Exception as error:
-            if run.lost.is_set():
-                return RunReport(RunOutcome.LEASE_LOST, run.task.id, dag.state)
-            cause = (
-                error.reason.value
-                if isinstance(error, WorktreeUnavailableError)
-                else error_class_of(error)
-            )
-            await self._log(run, LogLevel.ERROR, f"Integration failed ({cause})")
-            ended = await self._end_task(
-                run, TaskCommand.FAIL, Actor.system(), REASON_INTEGRATION_FAILED
-            )
-            return RunReport(
-                RunOutcome.INTEGRATION_FAILED if ended else RunOutcome.TASK_ENDED,
-                run.task.id,
-                dag.state,
-            )
+            return await self._integration_failed(run, dag, error)
         if run.lost.is_set():
             # Another worker may hold the entry now: it integrates again (the
             # merges already made are not repeated) and decides the task.
             return RunReport(RunOutcome.LEASE_LOST, run.task.id, dag.state)
         for repository in report.repositories:
             await self._log(run, *_integration_line(repository))
-        await self._record_integration(run, report)
+        try:
+            await self._record_integration(run, report)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            return await self._integration_failed(run, dag, error)
         if report.clean:
             return None
         ended = await self._end_task(
@@ -1375,14 +1366,39 @@ class Orchestrator:
             dag.state,
         )
 
+    async def _integration_failed(
+        self, run: _Run, dag: DagRecord, error: Exception
+    ) -> RunReport:
+        """Integrating (or recording it) failed: the task fails, and a Retry
+        integrates again (the DAG's results stand). The cause is named by its
+        reason or its class only."""
+        if run.lost.is_set():
+            return RunReport(RunOutcome.LEASE_LOST, run.task.id, dag.state)
+        cause = (
+            error.reason.value
+            if isinstance(error, WorktreeUnavailableError)
+            else error_class_of(error)
+        )
+        await self._log(run, LogLevel.ERROR, f"Integration failed ({cause})")
+        ended = await self._end_task(
+            run, TaskCommand.FAIL, Actor.system(), REASON_INTEGRATION_FAILED
+        )
+        return RunReport(
+            RunOutcome.INTEGRATION_FAILED if ended else RunOutcome.TASK_ENDED,
+            run.task.id,
+            dag.state,
+        )
+
     async def _record_integration(self, run: _Run, report: IntegrationReport) -> None:
         """Each integrated repository's integration branch, worktree and commit
         go into its own state in the attempt (``TaskService.update_attempt`` with
         its ``repository_id``; Decision 0036, 11): a Multi-Repo task records every
         repository. The new HEAD resets that repository's review and evaluation
-        results (they belonged to another revision). Best effort: the task log
-        already says what happened; a repository the attempt does not have
-        (``RepositoryNotInAttemptError``) is skipped."""
+        results (they belonged to another revision). A repository the attempt
+        does not have (``RepositoryNotInAttemptError``) is skipped; any other
+        failure propagates (Codex P2 on PR #130): the task must not go on to
+        evaluate a HEAD the attempt does not name, and the caller fails it so
+        that a Retry integrates and records again."""
         for repository in report.repositories:
             if repository.state is not IntegrationState.MERGED:
                 continue
@@ -1398,10 +1414,8 @@ class Orchestrator:
             except StaleRunError:
                 run.guard.stop(StopReason.SUPERSEDED)
                 return
-            except Exception as error:
-                logger.warning(
-                    "Recording the integration failed (%s)", error_class_of(error)
-                )
+            except RepositoryNotInAttemptError:
+                continue
 
     async def _end_after_stop(
         self, run: _Run, stop: _Stop, dag: DagRecord | None
