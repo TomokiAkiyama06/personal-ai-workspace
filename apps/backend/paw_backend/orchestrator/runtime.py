@@ -88,7 +88,13 @@ class NodePlacement(Protocol):
         ``InvalidOrchestratorArgumentError`` for a wrong argument or a second
         call. A runtime that hands the node to another one after recording
         (``HybridRuntime``) passes it a ``placement`` that accepts the same
-        place, agent and model again and refuses any other."""
+        place, agent and model again while the attempt may still act
+        (``ensure_active``), and refuses any other."""
+        ...
+
+    async def ensure_active(self) -> None:
+        """Raise ``NodeStopped`` when this attempt can no longer act (it was
+        abandoned, or its run stopped, was replaced or ended); record nothing."""
         ...
 
 

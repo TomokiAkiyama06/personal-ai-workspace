@@ -101,6 +101,15 @@ class NodePlacementHandle:
         self._now = now or (lambda: datetime.now(UTC))
         self._recorded = False
 
+    async def ensure_active(self) -> None:
+        """Raise ``NodeStopped`` when the attempt can no longer act: abandoned
+        (its fence is closed), or its run stopped, replaced or ended. Writes
+        nothing (``HybridRuntime`` asks it when the runtime it chose records the
+        placement already on record, just before it sends)."""
+        self._fence.ensure_open()
+        await self._guard.ensure_active()
+        self._fence.ensure_open()
+
     async def record(
         self, placement: ExecutionPlacement, *, agent: str, model: str
     ) -> None:

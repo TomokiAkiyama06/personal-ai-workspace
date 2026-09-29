@@ -77,8 +77,15 @@ class FakePlacement:
     def __init__(self, error=None) -> None:
         self.records: list[tuple[ExecutionPlacement, str, str]] = []
         self.error = error
+        # The attempt was abandoned (the orchestrator closed its fence).
+        self.closed = False
+
+    async def ensure_active(self):
+        if self.closed:
+            raise NodeStopped(StopReason.ABANDONED)
 
     async def record(self, placement, *, agent, model):
+        await self.ensure_active()
         if self.error is not None:
             raise self.error
         # Once, like the orchestrator's handle.
@@ -866,6 +873,49 @@ class HybridPlacementTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             self.placement.records, [(ExecutionPlacement.CLOUD, "codex", "gpt-5-codex")]
         )
+
+    async def test_an_abandoned_attempt_cannot_record_its_placement_again(self):
+        # A runtime that outlives its attempt (it ignored the cancellation) and
+        # records again just before it sends: the attempt is closed, so it is
+        # refused like the orchestrator's handle refuses it, and nothing is sent.
+        placement = self.placement
+        sent = []
+
+        class Late(Recorder):
+            async def run_node(self, assignment):
+                placement.closed = True  # abandoned meanwhile
+                await assignment.placement.record(
+                    ExecutionPlacement.CLOUD, agent="codex", model="gpt-5-codex"
+                )
+                sent.append(assignment.node_key)
+                return await super().run_node(assignment)
+
+        self.cloud = Late("cloud")
+        await fill_main(self.scheduler)
+        with self.assertRaises(NodeStopped) as stopped:
+            await self.runtime().run_node(
+                assignment(goal="x" * 90_000, placement=self.placement)
+            )
+        self.assertIs(stopped.exception.reason, StopReason.ABANDONED)
+        self.assertEqual(sent, [])
+
+    async def test_an_abandoned_local_attempt_cannot_record_again(self):
+        placement = self.placement
+        ran = []
+
+        class Late(Recorder):
+            async def run_node(self, assignment):
+                placement.closed = True
+                await assignment.placement.record(
+                    ExecutionPlacement.LOCAL_GPU, agent="local", model="main"
+                )
+                ran.append(assignment.node_key)
+                return await super().run_node(assignment)
+
+        self.local = Late("local")
+        with self.assertRaises(NodeStopped):
+            await self.runtime().run_node(assignment(placement=self.placement))
+        self.assertEqual(ran, [])
 
     async def test_no_gpu_time_left_records_no_local_placement(self):
         # The node does not start locally (its budget is spent): nothing may say

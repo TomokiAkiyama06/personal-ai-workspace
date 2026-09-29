@@ -429,6 +429,13 @@ class PlacementDatabaseGuardTest(PlacementStoreCase):
 
 
 @requires_postgres
+class Active:
+    """The task and its run may still act."""
+
+    async def check(self, task_id, run):
+        return TaskActivity.ACTIVE
+
+
 class PlacementHandleTest(PlacementStoreCase):
     def handle(self, dag, **overrides) -> NodePlacementHandle:
         values = dict(
@@ -441,7 +448,7 @@ class PlacementHandleTest(PlacementStoreCase):
         )
         values.update(overrides)
         return NodePlacementHandle(
-            RunGuard(dag.task_id, RUN, ALWAYS_ACTIVE), self.store, **values
+            RunGuard(dag.task_id, RUN, Active()), self.store, **values
         )
 
     async def test_the_handle_records_the_cloud_with_the_orchestrators_content(self):
@@ -487,6 +494,36 @@ class PlacementHandleTest(PlacementStoreCase):
         with self.assertRaises(NodeStopped):
             await handle.record(L.CLOUD, agent="codex", model="gpt-5-codex")
         self.assertIsNone((await self.attempt_row(dag.id))["placement"])
+
+    async def test_ensure_active_says_whether_the_attempt_may_still_act(self):
+        # What ``HybridRuntime`` asks when the runtime it chose records the
+        # placement already on record: it writes nothing.
+        dag, _ = await self.running()
+        fence = AttemptFence()
+        handle = self.handle(dag, fence=fence)
+        await handle.record(L.CLOUD, agent="codex", model="gpt-5-codex")
+        await handle.ensure_active()
+        fence.close()
+        with self.assertRaises(NodeStopped) as caught:
+            await handle.ensure_active()
+        self.assertEqual(caught.exception.reason, StopReason.ABANDONED)
+        guard = RunGuard(dag.task_id, RUN, ALWAYS_ACTIVE)
+        guard.stop(StopReason.TASK_ENDED)
+        stopped = NodePlacementHandle(
+            guard,
+            self.store,
+            dag_id=dag.id,
+            epoch=1,
+            node_key="a",
+            attempt=1,
+            agent_id=uuid.uuid4(),
+            content=("sha256:" + "cd" * 32, 42),
+        )
+        with self.assertRaises(NodeStopped) as caught:
+            await stopped.ensure_active()
+        self.assertEqual(caught.exception.reason, StopReason.TASK_ENDED)
+        (record,) = await self.store.attempts(dag.id, "a")
+        self.assertEqual(record.placement, L.CLOUD)
 
     async def test_a_replaced_run_stops_the_node(self):
         dag, _ = await self.running()

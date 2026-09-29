@@ -77,6 +77,7 @@ from paw_backend.orchestrator.runtime import (
     AgentRuntime,
     NodeAssignment,
     NodeOutcome,
+    NodePlacement,
     validate_runtime,
 )
 from paw_backend.orchestrator.validation import check_agent_label, check_model
@@ -355,7 +356,7 @@ class HybridRuntime:
             )
             return None
         return dataclasses.replace(
-            assignment, placement=_Recorded(placement, agent, model)
+            assignment, placement=_Recorded(recorder, placement, agent, model)
         )
 
     async def _cloud_allowed(self, assignment: NodeAssignment) -> bool:
@@ -556,18 +557,32 @@ class HybridRuntime:
 
 class _Recorded:
     """The ``placement`` that ``HybridRuntime`` hands the runtime it chose: the
-    attempt's placement is already on record. Recording the same place, agent
-    and model again is accepted (it is on record); any other is refused, as the
+    attempt's placement is already on record through ``recorder``. Recording the
+    same place, agent and model again is accepted while the attempt may still act
+    (``recorder.ensure_active``: an abandoned attempt, or a stopped, replaced or
+    ended run, raises ``NodeStopped`` as the orchestrator's handle does, so a
+    runtime that outlives its attempt cannot send); any other is refused, as the
     orchestrator refuses a second placement."""
 
-    __slots__ = ("_placement",)
+    __slots__ = ("_placement", "_recorder")
 
-    def __init__(self, placement: ExecutionPlacement, agent: str, model: str) -> None:
+    def __init__(
+        self,
+        recorder: NodePlacement,
+        placement: ExecutionPlacement,
+        agent: str,
+        model: str,
+    ) -> None:
+        self._recorder = recorder
         self._placement = (placement, agent, model)
+
+    async def ensure_active(self) -> None:
+        await self._recorder.ensure_active()
 
     async def record(
         self, placement: ExecutionPlacement, *, agent: str, model: str
     ) -> None:
+        await self._recorder.ensure_active()
         if (placement, agent, model) != self._placement:
             raise InvalidOrchestratorArgumentError("placement")
 
