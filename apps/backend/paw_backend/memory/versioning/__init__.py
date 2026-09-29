@@ -7,6 +7,10 @@
 * ``freshness.FreshnessMaintenance``: the backend-internal jobs of the freshness
   policies (``revalidate`` and ``repo_commit`` stale candidates, ``expiring``
   expiry, ``session_only`` at session or task end).
+* ``derivation.MemoryDerivation``: the backend-internal lookup of every version
+  derived from a conversation or a Task (its sources, and a person's edits,
+  restores and revalidations of such a version), for the deletion flow
+  (Decision 0045).
 * ``rules``: the pure decisions, including what a classification of a new memory
   against an old one (``same`` / ``extends`` / ``supersedes`` / ``conflicts`` /
   ``unrelated``) leads to.
@@ -16,6 +20,7 @@ open choices are decided in Decision 0034 (Approved 2026-09-28). See
 ``apps/backend/README.md`` ("Memory Versioning / Freshness").
 """
 
+from paw_backend.memory.versioning.derivation import DerivedVersion, MemoryDerivation
 from paw_backend.memory.versioning.errors import (
     InputProblem,
     InvalidMemoryInputError,
@@ -46,12 +51,16 @@ from paw_backend.memory.versioning.records import (
 )
 from paw_backend.memory.versioning.rules import plan_relation
 from paw_backend.memory.versioning.service import (
+    CONFIRMATION_SOURCE_PREFIX,
     RELATION_GRAPH_LOCK_KEY,
     MemoryVersioningService,
+    confirmation_source_ref,
     memory_lock_key,
 )
 
 __all__ = [
+    "CONFIRMATION_SOURCE_PREFIX",
+    "DerivedVersion",
     "EDITABLE_SCOPES",
     "FreshnessMaintenance",
     "FreshnessSpec",
@@ -61,6 +70,7 @@ __all__ = [
     "MemoryBusyError",
     "MemoryChanges",
     "MemoryDatabaseError",
+    "MemoryDerivation",
     "MemoryDraft",
     "MemoryNotFoundError",
     "MemoryPermissionError",
@@ -78,6 +88,7 @@ __all__ = [
     "StateProblem",
     "TargetKind",
     "TriggerTarget",
+    "confirmation_source_ref",
     "memory_lock_key",
     "plan_relation",
 ]

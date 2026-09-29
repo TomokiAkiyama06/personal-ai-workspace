@@ -45,6 +45,7 @@
 | [0041](0041-seed-benchmark-dataset.md) | Seed Benchmark Dataset（paw-seed-v1）の構成（出典: この Repository の Merge 済み PR・Spec・Injected Bug、規模 24、難易度・カテゴリ、Hidden test の非公開の保管、候補に見せる Repository、学習データへの混入、License、人の修正時間の測り方。PAW-016） | Approved |
 | [0038](0038-memory-markdown-projection.md) | Memory Markdown Projection の出力先（`PAW_MEMORY_PROJECTION_DIR`、git の Work Tree・Home の拒否、Marker）・公開範囲ごとの配置・投影する Version・diff-friendly な形式・Secret の置換・`0700` / `0600` の権限・実行と失敗の通知（Audit・終了コード・`OnFailure=`）（PAW-045。Issue #39） | Approved |
 | [0043](0043-user-deletion-follow-ups.md) | User 削除の後続（30 日後の個人データの消去を Table の Owner の定期 Command `user-erasure-run` で行う、削除中の User の Task の Cancel、外部の認証の止め方）と、Pairing した新しい端末での Passkey の追加（0033 の判断点 6・9。Issue #127） | Proposed |
+| [0045](0045-memory-edit-sources.md) | Memory の編集・復元・Revalidate でできた新しい Version に出典を写し、人の `user_confirmation` を足すこと・会話 / Task から由来する Version の検索（Decision 0034 の 9。Issue #128） | Approved |
 | [0050](0050-late-gpu-charge-without-fence.md) | Node の Attempt が閉じた後に、Cancel しても止まらなかった Local の呼び出しの GPU 時間を、`TrackerLateGpuCharge` で Attempt / Run の Fence なしに Task の Budget へ計上する（PAW-036、PR #131。Decision 0037 を補う） | Approved |
 
 運用は [AGENTS.md](../../AGENTS.md) の「仕様変更」に従います。
