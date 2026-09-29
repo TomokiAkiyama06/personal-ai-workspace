@@ -104,12 +104,6 @@ PROTOCOL_TAG = "paw-git-run/v1"
 #: status and must never be treated as a transport failure.
 SSH_TRANSPORT_FAILURE_CODE = 255
 
-#: The exit status the server's wrapper (``deploy/ssh-git-wrapper``, its
-#: ``REJECTED``) gives a call it refused without starting git; fixed and
-#: documented there, and distinct from git's own 0/1 and 128/129. A caller that
-#: reads a nonzero git status as an answer tells a refusal apart by it.
-WRAPPER_REJECTED_CODE = 126
-
 _SSH_EXECUTABLE_NAME = "ssh"
 
 

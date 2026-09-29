@@ -33,11 +33,7 @@ from pathlib import Path
 
 from paw_backend.repositories import GitClient, LinuxAccount, RepositoryPolicy
 from paw_backend.repositories.git import git_config_arguments
-from paw_backend.repositories.ssh import (
-    WRAPPER_REJECTED_CODE,
-    SshGitRunner,
-    build_remote_command,
-)
+from paw_backend.repositories.ssh import SshGitRunner, build_remote_command
 
 from .repositories_support import World, fs, git, requires_git
 
@@ -1635,8 +1631,6 @@ class MainTest(WrapperTestCase):
         )
         self.assertEqual(code, wrapper.REJECTED)
         self.assertNotEqual(code, 255)
-        # The backend tells a refusal from git's own failures by this code.
-        self.assertEqual(code, WRAPPER_REJECTED_CODE)
         self.assertEqual(executed, [])
         self.assertEqual(moved, [])
         self.assertEqual(

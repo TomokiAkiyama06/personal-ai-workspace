@@ -72,7 +72,7 @@ git の環境は固定の許可リストだけ（`PATH`・`HOME`・`LC_ALL=C`・
 ### 終了コード
 
 - 受け付けた呼び出し: git 自身の終了コード（Wrapper は git を `exec` する）。
-- 拒否: **126**。git の 0／1（`merge-base --is-ancestor`・`merge-tree` はこれを答えとして読む）、128／129（git 自身の失敗）、255（`ssh` 自身の失敗。`SshGitRunner` は `ssh_unavailable` として扱う。Decision 0029 の 5）のどれとも重ならない。Backend はこの値（`paw_backend.repositories.ssh.WRAPPER_REJECTED_CODE`）で拒否を git 自身の失敗と見分ける（`submodule status --cached` の拒否は、integration worktree が汚れている `dirty` ではなく git の失敗 `git_failed`。Decision 0051 の 5）。変えるときは両方を変える。
+- 拒否: **126**。git の 0／1（`merge-base --is-ancestor`・`merge-tree` はこれを答えとして読む）、128／129（git 自身の失敗）、255（`ssh` 自身の失敗。`SshGitRunner` は `ssh_unavailable` として扱う。Decision 0029 の 5）のどれとも重ならない。
 
 ### Log（Secret を出さない）
 
