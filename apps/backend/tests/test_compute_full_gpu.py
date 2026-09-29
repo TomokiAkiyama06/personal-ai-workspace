@@ -11,12 +11,14 @@ stopped or signalled.
 """
 
 import asyncio
+import dataclasses
 import unittest
 import uuid
 
 from paw_backend.authz import Authorizer, InMemoryAuditSink, Reason, SystemRole
 from paw_backend.compute import (
     ComputeRequest,
+    ComputeUnavailableError,
     DeploymentState,
     ExclusiveFailure,
     ExclusiveUnavailableError,
@@ -260,6 +262,43 @@ class StartTest(FullGpuTestCase):
         granted = await waiter  # its node goes on once the main LLM is back
         self.assertEqual(granted.placement, Placement.LOCAL_GPU)
         await granted.release()
+
+    async def test_a_task_refused_without_waiting_is_held_too(self):
+        # Codex review (#161, P2): a request that does not wait (``wait_seconds``
+        # 0, ``try_acquire``) or finds the line full is never a waiter.
+        await self.mode.start(ADMIN)
+        no_wait, tried, crowded = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+        self.holds.running.update({no_wait, tried, crowded})
+        with self.assertRaises(ComputeUnavailableError):
+            await self.scheduler.acquire(coding(no_wait), wait_seconds=0)
+        refused = await self.scheduler.try_acquire(coding(tried))
+        self.assertEqual(refused.refusal, Refusal.EXCLUSIVE_MODE)
+        self.scheduler._config = dataclasses.replace(
+            self.scheduler.config, max_waiters=1
+        )
+        chat = asyncio.create_task(  # not a task's: fills the line of one
+            self.scheduler.acquire(
+                ComputeRequest(IC, deployment="main", context_tokens=100),
+                wait_seconds=600,
+            )
+        )
+        await settle()
+        with self.assertRaises(ComputeUnavailableError) as caught:
+            await self.scheduler.acquire(coding(crowded), wait_seconds=600)
+        self.assertEqual(caught.exception.reason, Refusal.QUEUE_FULL)
+        chat.cancel()
+        await self.mode.tick()
+        self.assertCountEqual(self.holds.held, [no_wait, tried, crowded])
+        await self.mode.end(ADMIN)
+        # Forgotten once the Exclusive job ended.
+        self.assertEqual(self.scheduler.gpu_task_ids(), frozenset())
+
+    async def test_refusals_outside_the_mode_are_not_remembered(self):
+        _, lease = await self.running_task()
+        too_long = await self.scheduler.try_acquire(coding(uuid.uuid4(), tokens=70_000))
+        self.assertEqual(too_long.refusal, Refusal.CONTEXT_TOO_LONG)
+        self.assertEqual(self.scheduler.gpu_task_ids(), {lease.task_id})
+        await lease.release()
 
     async def test_a_task_that_cannot_be_held_now_is_tried_again(self):
         self.holds.fail_hold = True

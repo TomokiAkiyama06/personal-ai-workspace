@@ -374,6 +374,9 @@ class ComputeScheduler:
         self._drained: asyncio.Event | None = None
         self._cloud: set[ComputeLease] = set()
         self._waiters: list[_Waiter] = []
+        # Tasks whose local GPU request was refused (not queued) while an
+        # Exclusive job drained or held the GPU: Full GPU Mode holds them too.
+        self._refused_tasks: set[uuid.UUID] = set()
         self._sequence = count()
         self._control_lock = asyncio.Lock()
 
@@ -417,10 +420,15 @@ class ComputeScheduler:
 
     def gpu_task_ids(self) -> frozenset[uuid.UUID]:
         """The Agent Tasks whose work holds a local GPU lease or waits for one
-        (their requests named a ``task_id``). Full GPU Mode holds these tasks
+        (their requests named a ``task_id``), and, while an Exclusive job drains
+        or holds the GPU, those whose local GPU request it refused without
+        queuing it (no wait, a full line). Full GPU Mode holds these tasks
         (PAW-037); a lease on a model's CPU copy and a cloud lease are not
         counted: that work does not need the GPU."""
-        tasks = {
+        if self._mode is SchedulerMode.NORMAL:
+            self._refused_tasks.clear()  # of an Exclusive request that ended
+        tasks = set(self._refused_tasks)
+        tasks |= {
             lease.task_id
             for entry in self._deployments.values()
             for lease in entry.leases
@@ -434,6 +442,16 @@ class ComputeScheduler:
             if entry.state is not DeploymentState.CPU:
                 tasks.add(task_id)
         return frozenset(tasks)
+
+    def _note_refused(self, request: ComputeRequest, placement: Placement) -> None:
+        """Remember the task of a local GPU request refused while an Exclusive
+        job drains or holds the GPU (see ``gpu_task_ids``)."""
+        if (
+            request.task_id is not None
+            and placement is Placement.LOCAL_GPU
+            and self._mode is not SchedulerMode.NORMAL
+        ):
+            self._refused_tasks.add(request.task_id)
 
     def revoke_local_gpu(self) -> int:
         """Ask every holder of a local GPU lease to stop (``revoked``): Full GPU
@@ -481,6 +499,7 @@ class ComputeScheduler:
             raise InvalidComputeArgumentError("request")
         refusal, placement = self._judge(request, queue=True)
         if refusal is not None:
+            self._note_refused(request, placement)
             return Admission(None, refusal)
         return Admission(self._grant(request, placement), None)
 
@@ -512,12 +531,15 @@ class ComputeScheduler:
         if refusal in PERMANENT_REFUSALS or (request.allow_cloud and cloud_after == 0):
             if request.allow_cloud:
                 return self._grant(request, Placement.CLOUD)
+            self._note_refused(request, placement)
             raise ComputeUnavailableError(refusal)
         if timeout == 0:
+            self._note_refused(request, placement)
             raise ComputeUnavailableError(refusal)
         if len(self._waiters) >= self._config.max_waiters:
             if request.allow_cloud:
                 return self._grant(request, Placement.CLOUD)
+            self._note_refused(request, placement)
             raise ComputeUnavailableError(Refusal.QUEUE_FULL)
         future = asyncio.get_running_loop().create_future()
         waiter = _Waiter(request, future, next(self._sequence), refusal)
@@ -536,6 +558,7 @@ class ComputeScheduler:
         future.cancel()
         if request.allow_cloud:
             return self._grant(request, Placement.CLOUD)
+        self._note_refused(request, placement)
         raise ComputeUnavailableError(waiter.last)
 
     def parallelism(
@@ -856,6 +879,7 @@ class ComputeScheduler:
         elif lease is self._exclusive:
             self._exclusive = None
             self._mode = SchedulerMode.NORMAL
+            self._refused_tasks.clear()
             logger.info("Exclusive GPU job ended; the models are loaded again")
         else:
             entry = self._deployments[lease.deployment]
