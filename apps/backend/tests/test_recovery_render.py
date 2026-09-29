@@ -354,6 +354,47 @@ class RenderTest(unittest.TestCase):
             steps,
         )
 
+    def test_a_credential_in_any_task_field_is_redacted(self) -> None:
+        # ``head_commit`` is only checked for length when it is stored: a
+        # token-shaped value must not reach Git either (every string value of a
+        # record is scanned, not only the fields listed as free text).
+        task_id = uuid4()
+        plan = render(
+            snapshot_with(
+                tasks=[
+                    {
+                        "id": task_id,
+                        "project_id": uuid4(),
+                        "created_by": uuid4(),
+                        "title": "Deploy",
+                        "state": "completed",
+                        "wait_reason": None,
+                        "attempt": 1,
+                        "retry_count": 0,
+                        "created_at": T0,
+                        "updated_at": T0,
+                    }
+                ],
+                task_repositories=[
+                    {
+                        "task_id": task_id,
+                        "repository_id": uuid4(),
+                        "branch": "main",
+                        "head_commit": SECRET,
+                        "review_status": "approved",
+                        "evaluation_result": "passed",
+                        "pr_number": 1,
+                        "pr_url": None,
+                        "pr_state": "open",
+                    }
+                ],
+            )
+        )
+        self.assertNotIn(SECRET.encode(), b"".join(plan.files.values()))
+        record = load(plan.files[f"tasks/{task_id}.json"])
+        self.assertEqual("[REDACTED]", record["repositories"][0]["head_commit"])
+        self.assertGreaterEqual(plan.redactions, 1)
+
     def test_no_credential_column_can_reach_a_file(self) -> None:
         plan = render(
             snapshot_with(

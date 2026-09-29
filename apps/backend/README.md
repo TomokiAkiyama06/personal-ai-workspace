@@ -3667,7 +3667,7 @@ python -m paw_backend.cli recovery-backup-check --max-age-minutes 90   # 監視�
 
 - Checkout は絶対・正規の Path で、Home・Projection の Directory と重ならず、git の Work Tree の最上位で、Marker を持つこと（Marker がなければ、`.git` しかない空の Clone だけを自分のものにします）。Branch に Upstream が要ります。満たさなければ何も書かずに失敗します（`check_repository:<理由>`）。
 - Memory Projection は、その Marker の Lock を取り（実行中なら最大 120 秒待つ）、`.paw-memory-projection-incomplete` がなく、最後の実行が `memory.projection.completed` のときだけ写します（Decision 0038 の 9）。
-- DB は `REPEATABLE READ, READ ONLY` の 1 つの Snapshot から、**列を名指しした SQL**（`recovery/source.py`）だけで読みます。Password Hash・Passkey・Session・各種 Token・`secret_handle`・Conversation・Embedding・Checkout の Path・Task の入力と Log・Audit は読みません。自由記述の Credential は `[REDACTED]` にします（Decision 0038 の 5 と同じ）。
+- DB は `REPEATABLE READ, READ ONLY` の 1 つの Snapshot から、**列を名指しした SQL**（`recovery/source.py`）だけで読みます。Password Hash・Passkey・Session・各種 Token・`secret_handle`・Conversation・Embedding・Checkout の Path・Task の入力と Log・Audit は読みません。自由記述の Credential は `[REDACTED]` にします（Decision 0038 の 5 と同じ）。最後の防御として、Record のすべての文字列の値（Task の `head_commit` など）も書く前に同じ検出で置換します。
 - Login 名が Credential の検出に当たる User は、Login 名を `redacted-<User ID の先頭 12 桁>` にして書きます。Restore はその名前で戻し、Owner が名前を付け直す手作業（「the Owner renames this user」）を表示します。
 - Repository の名前・既定の Branch・Remote の URL の Credential も置換します。置換された Repository・Remote は Restore で戻さず、再登録の手作業として表示します。
 - `pending_deletion` / `deleted` の User は削除記録（`id`・`status`）だけで、User Record・Quota・Member・`user` Scope の Memory・`memory/users/<id>/` を入れません。`session_only` の Version も入れません。

@@ -54,7 +54,12 @@ from paw_backend.recovery.format import (
     utc_text,
 )
 from paw_backend.recovery.source import RecoverySnapshot, Row
-from paw_backend.tools.credentials import MAX_TEXT_CHARS, redact_text, redact_value
+from paw_backend.tools.credentials import (
+    MAX_TEXT_CHARS,
+    TRUNCATED,
+    redact_text,
+    redact_value,
+)
 
 DELETION_STATUSES = frozenset({"pending_deletion", "deleted"})
 SESSION_ONLY = "session_only"
@@ -92,6 +97,29 @@ class _Redactor:
         result, count = redact_value(value)
         self.redactions += count
         return result, count
+
+    def scrub(self, value: object) -> object:
+        """``value`` with every string scanned (the last line of defence).
+
+        The fields known to be free text are redacted where they are read;
+        this pass also covers every other string of a record (an id, a
+        ``head_commit`` only checked for length, a future column), so nothing
+        the detector recognises reaches a file, whichever field holds it. A
+        text already cut to ``MAX_TEXT_CHARS`` (it ends with ``[TRUNCATED]``)
+        was scanned when it was cut."""
+        if isinstance(value, str):
+            if len(value) > MAX_TEXT_CHARS and value.endswith(TRUNCATED):
+                return value
+            return self.text(value)[0]
+        if isinstance(value, list):
+            return [self.scrub(item) for item in value]
+        if isinstance(value, dict):
+            return {key: self.scrub(item) for key, item in value.items()}
+        return value
+
+    def encode(self, value: object) -> bytes:
+        """A record as the format's JSON, after ``scrub``."""
+        return encode_json(self.scrub(value))
 
 
 def plain(value: object) -> object:
@@ -153,7 +181,7 @@ def _user_file(user: Row, quotas: list[Row], redactor: _Redactor) -> bytes:
         )
         for quota in quotas
     ]
-    return encode_json(record)
+    return redactor.encode(record)
 
 
 def _project_file(project: Row, members: list[Row], redactor: _Redactor) -> bytes:
@@ -186,7 +214,7 @@ def _project_file(project: Row, members: list[Row], redactor: _Redactor) -> byte
         )
         for member in members
     ]
-    return encode_json(record)
+    return redactor.encode(record)
 
 
 def _repo_file(repository: Row, remotes: list[Row], redactor: _Redactor) -> bytes:
@@ -212,7 +240,7 @@ def _repo_file(repository: Row, remotes: list[Row], redactor: _Redactor) -> byte
         entry = _fields(remote, ("created_at",))
         entry["url"] = redactor.plain(remote["url"])
         record["remotes"].append(entry)
-    return encode_json(record)
+    return redactor.encode(record)
 
 
 _VERSION_COLUMNS = (
@@ -303,7 +331,7 @@ def _task_file(task: Row, repositories: list[Row], redactor: _Redactor) -> bytes
         entry["branch"] = redactor.plain(repository["branch"])
         entry["pr_url"] = redactor.plain(repository["pr_url"])
         record["repositories"].append(entry)
-    return encode_json(record)
+    return redactor.encode(record)
 
 
 def _group(rows: Iterable[Row], key: str) -> dict[object, list[Row]]:
@@ -361,7 +389,7 @@ def render_recovery(
         if user["id"] in excluded:
             record = {"id": str(user["id"]), "status": user["status"]}
             path = f"{DELETIONS_DIRECTORY}/{USERS_DIRECTORY}/{user['id']}.json"
-            files[path] = encode_json(record)
+            files[path] = redactor.encode(record)
             counts["deletions"] += 1
             continue
         files[f"{USERS_DIRECTORY}/{user['id']}.json"] = _user_file(
@@ -431,12 +459,14 @@ def render_recovery(
                 entry["reason"] = redactor.plain(relation["reason"])
                 record["relations"].append(entry)
         record["relations"].sort(key=lambda entry: entry["id"])
-        files[f"{MEMORY_RECORDS_DIRECTORY}/{memory['id']}.json"] = encode_json(record)
+        files[f"{MEMORY_RECORDS_DIRECTORY}/{memory['id']}.json"] = redactor.encode(
+            record
+        )
         counts["memories"] += 1
         counts["memory_versions"] += len(versions)
 
     policy = snapshot.auth_policy[0] if snapshot.auth_policy else None
-    files[AUTH_POLICY_PATH] = encode_json(
+    files[AUTH_POLICY_PATH] = redactor.encode(
         None
         if policy is None
         else _fields(
@@ -452,7 +482,7 @@ def render_recovery(
             ),
         )
     )
-    files[SHARED_CONNECTIONS_PATH] = encode_json(
+    files[SHARED_CONNECTIONS_PATH] = redactor.encode(
         [
             _fields(row, ("kind", "status", "enabled", "created_at", "updated_at"))
             for row in snapshot.connections
