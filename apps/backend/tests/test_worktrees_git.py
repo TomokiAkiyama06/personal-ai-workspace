@@ -24,6 +24,7 @@ from paw_backend.orchestrator.workspaces import (
 )
 from paw_backend.repositories import (
     GitCommandError,
+    GitFailure,
     InvalidRepositoryInputError,
     LinuxAccount,
 )
@@ -178,6 +179,33 @@ class WorktreeGitTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(await self.git.merge(into, "paw/t/a", self.account))
 
+        self.assertFalse(await self.git.merging(into, self.account))
+        self.assertEqual(git("status", "--porcelain", cwd=into), "")
+
+    async def test_a_merge_the_runner_cut_off_is_aborted_too(self):
+        # Codex P2 on PR #130 (git.py:409): a timeout or an output limit raises
+        # from the runner instead of returning an exit code. A merge git already
+        # started (``MERGE_HEAD``) must still be aborted, or the next attempt
+        # finds the integration worktree dirty and waits for a human.
+        a = await self.add("a")
+        into = await self.add("into")
+        commit_file(a, "code.txt", "a\n")
+        commit_file(into, "code.txt", "into\n")
+        inner = self.runner
+
+        class CutOff:
+            async def run(self, args, **options):
+                result = await inner.run(args, **options)
+                if command_name(args) == "merge" and "--abort" not in args:
+                    raise GitCommandError("merge", GitFailure.TIMEOUT)
+                return result
+
+        cut_off = WorktreeGit(CutOff(), timeout_s=30)
+
+        with self.assertRaises(GitCommandError) as raised:
+            await cut_off.merge(into, "paw/t/a", self.account)
+
+        self.assertIs(raised.exception.failure, GitFailure.TIMEOUT)
         self.assertFalse(await self.git.merging(into, self.account))
         self.assertEqual(git("status", "--porcelain", cwd=into), "")
 
