@@ -27,6 +27,7 @@ from paw_backend.tasks.queueing.domain import (
     NextAction,
     Priority,
     QueueEntry,
+    QueueLease,
     QueueStatus,
     limit_for,
 )
@@ -73,6 +74,7 @@ __all__ = [
     "NextAction",
     "Priority",
     "QueueEntry",
+    "QueueLease",
     "QueueStatus",
     "QueueingError",
     "StaleRuntimeSessionError",

@@ -50,15 +50,20 @@ class FakeFreshness:
 
 
 class FakeTaskEnd:
-    def __init__(self, finished=0, fail=False) -> None:
+    def __init__(self, finished=0, fail=False, batches=None) -> None:
+        """Each sweep finishes ``finished`` tasks, or the next of ``batches``
+        (then none)."""
         self.finished = finished
         self.fail = fail
+        self.batches = None if batches is None else list(batches)
         self.calls: list[str] = []
 
     async def sweep(self):
         self.calls.append("sweep")
         if self.fail:
             raise RuntimeError("db down: secret detail")
+        if self.batches is not None:
+            return tuple(range(self.batches.pop(0) if self.batches else 0))
         return tuple(range(self.finished))
 
 
@@ -82,6 +87,23 @@ class CycleTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((report.marked_stale, report.expired), (7, 3))
         self.assertEqual(freshness.calls.count("due"), 3)
         self.assertEqual(freshness.calls.count("expire"), 2)
+
+    async def test_the_task_end_sweep_is_repeated_while_it_takes_a_full_batch(self):
+        full = limits.MAX_TASK_END_SWEEP
+        task_end = FakeTaskEnd(batches=[full, full, 5, full])
+
+        report = await FreshnessJobLoop(FakeFreshness(), task_end).run_cycle()
+
+        self.assertEqual(report.finished_tasks, 2 * full + 5)
+        self.assertEqual(task_end.calls.count("sweep"), 3)
+
+    async def test_the_task_end_repetition_is_bounded(self):
+        full = limits.MAX_TASK_END_SWEEP
+        task_end = FakeTaskEnd(finished=full)
+
+        report = await FreshnessJobLoop(FakeFreshness(), task_end).run_cycle()
+
+        self.assertEqual(report.finished_tasks, full * limits.MAX_FRESHNESS_ROUNDS)
 
     async def test_the_repetition_is_bounded(self):
         freshness = FakeFreshness(due=[1] * 100, batch=1)

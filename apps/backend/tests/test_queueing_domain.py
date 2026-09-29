@@ -37,7 +37,9 @@ from paw_backend.tasks.queueing import (
     LoopVerdict,
     NextAction,
     Priority,
+    QueueEntry,
     QueueingError,
+    QueueLease,
     QueueStatus,
     StaleRuntimeSessionError,
     TaskAlreadyQueuedError,
@@ -70,6 +72,59 @@ class PriorityTest(unittest.TestCase):
         self.assertEqual(
             ACTIVE_QUEUE_STATUSES, {QueueStatus.QUEUED, QueueStatus.CLAIMED}
         )
+
+
+class QueueLeaseTest(unittest.TestCase):
+    """The fencing token a tool call carries (issue #126): validated as the queue
+    validates the same values, and never coerced."""
+
+    def test_a_lease_names_one_claim(self):
+        lease = QueueLease(7, "worker-1", 3)
+        self.assertEqual(
+            (lease.entry_id, lease.worker_id, lease.claim_count), (7, "worker-1", 3)
+        )
+        self.assertEqual(lease, QueueLease(7, "worker-1", 3))
+        self.assertNotEqual(lease, QueueLease(7, "worker-1", 4))  # another claim
+        with self.assertRaises(AttributeError):
+            lease.claim_count = 4  # frozen
+
+    def test_every_field_is_validated(self):
+        for parameter, args in (
+            ("entry_id", (0, "w1", 1)),
+            ("entry_id", (True, "w1", 1)),
+            ("entry_id", ("7", "w1", 1)),
+            ("entry_id", (2**63, "w1", 1)),
+            ("worker_id", (1, "bad worker", 1)),
+            ("worker_id", (1, "", 1)),
+            ("worker_id", (1, None, 1)),
+            ("claim_count", (1, "w1", 0)),
+            ("claim_count", (1, "w1", 2**31)),
+            ("claim_count", (1, "w1", 1.0)),
+            ("claim_count", (1, "w1", None)),
+        ):
+            with self.subTest(parameter=parameter, args=args):
+                with self.assertRaises(InvalidQueueingArgumentError) as caught:
+                    QueueLease(*args)
+                self.assertEqual(caught.exception.parameter, parameter)
+
+    def test_the_lease_of_a_claimed_entry(self):
+        now = datetime(2030, 1, 1, tzinfo=UTC)
+        entry = QueueEntry(
+            id=9,
+            task_id=uuid.uuid4(),
+            priority=Priority.NORMAL,
+            status=QueueStatus.CLAIMED,
+            enqueued_at=now,
+            claimed_by="w1",
+            claimed_at=now,
+            lease_expires_at=now + timedelta(seconds=60),
+            claim_count=2,
+            finished_at=None,
+        )
+        self.assertEqual(QueueLease.of(entry, "w1"), QueueLease(9, "w1", 2))
+        with self.assertRaises(InvalidQueueingArgumentError) as caught:
+            QueueLease.of((9, 2), "w1")
+        self.assertEqual(caught.exception.parameter, "entry")
 
 
 class BudgetKindTest(unittest.TestCase):

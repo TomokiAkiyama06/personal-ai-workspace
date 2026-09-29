@@ -4,7 +4,7 @@ The requirements leave the numbers to the Model / Runtime Benchmark ("Safety
 Headroomの具体的なGB / %は要件定義段階では固定せず、Model Benchmark / Runtime
 Benchmark後に決定する"). These are **provisional** values that only set the order
 of magnitude for one 96 GB GPU; ``docs/decisions/0037-gpu-compute-scheduler.md``
-(Proposed) lists them. Every one of them is a field of ``ComputeConfig`` and can
+(Approved) lists them. Every one of them is a field of ``ComputeConfig`` and can
 be changed there without touching this module; nothing is written to a database.
 """
 
