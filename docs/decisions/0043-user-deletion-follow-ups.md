@@ -97,7 +97,7 @@ Decision 0033（PR #123）は削除を `pending_deletion` にするところま�
 
 ## リスク
 
-- **DB の外の複製は Job が消さず、確かめられない**: DB の Backup / WAL、Recovery Projection・Recovery Git の履歴（まだこの System にない）、User の Linux Account の中の Files と認証情報。要件は、これらの消去と検証まで `Deleted` と表示しないことを求めるので、Job は**運用者の確認（`--copies-erased`）があるまで `deleted` にしない**（判断点 6）。確認は運用者の申告を信じる（Audit の `copies_confirmed` に残る）。運用者が確認しない限り、その User は毎日 `copies_pending` で通知される。Backup / Recovery の機能を入れる PR は、自分の消去の手順をこの Job に足して、確認の範囲を狭められる（例: PR #138 の Memory Markdown Projection は Private Memory を Files に書くので、マージの前に消去の手順が要る）。
+- **DB の外の複製は Job が消さず、確かめられない**: DB の Backup / WAL、Recovery Projection・Recovery Git の履歴（まだこの System にない）、User の Linux Account の中の Files と認証情報。要件は、これらの消去と検証まで `Deleted` と表示しないことを求めるので、Job は**運用者の確認（`--copies-erased`）があるまで `deleted` にしない**（判断点 6）。確認は運用者の申告を信じる（Audit の `copies_confirmed` に残る）。運用者が確認しない限り、その User は毎日 `copies_pending` で通知される。Backup / Recovery の機能を入れる PR は、自分の消去の手順をこの Job に足して、確認の範囲を狭められる。PR #138 の Memory Markdown Projection（Decision 0038、main に取り込み済み）は Private Memory を `users/<user-id>/` の Files に書くが、各実行が DB の Snapshot と突き合わせ、DB にない Memory の File と空の Directory を消す。そのため消去の後の次の実行（既定 5 分以内）で、その User の Directory は消える。ただし消去の Job はそれを確かめず、その Directory の Backup も残り得るので、`--copies-erased` の確認の範囲に含める。
 - 消去は取り消せない。30 日の判定を誤る（時計の誤り）と早く消す。判定は DB の時計と `now` の遅い方（復元の判定と同じ）で、復元できる User は消さない。
 - Checkout の Directory が本当に消えたかは、Job からは確かめられない（`ProtectHome=true`、別の Linux User）。運用者の `--checkouts-removed` の申告を信じ、Audit（`checkouts_released`）に残す。
 - 実際の systemd・通知経路での動作は確かめていない（Unit File は Test で読むだけ）。
