@@ -1,0 +1,18 @@
+# Started by systemd when paw-memory-projection.service fails (OnFailure=).
+# The run itself already recorded the failure in audit_events whenever the
+# database accepted it (memory.projection.failed, reason <step>:<code>) and
+# wrote the reason to the journal (journalctl -u paw-memory-projection.service).
+#
+# This unit makes the failure visible to the Owner/Admin on this server: it
+# writes a high-priority journal entry and a wall message. Replace ExecStart
+# with the notification channel of your deployment (mail, a chat webhook, ...)
+# if you have one; keep credentials of that channel out of this file. The
+# message names no memory, path or user.
+
+[Unit]
+Description=Report a failed Memory Markdown Projection run of the Personal AI Workspace
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemd-cat --identifier=paw-memory-projection --priority=crit /bin/echo "Memory Markdown Projection FAILED: see journalctl -u paw-memory-projection.service and audit_events (action memory.projection.failed). The Markdown view and its backup are stale until it succeeds."
+ExecStart=/usr/bin/wall "Personal AI Workspace: Memory Markdown Projection FAILED (journalctl -u paw-memory-projection.service)."
