@@ -42,6 +42,7 @@
 | [0035](0035-working-set-capability-grants-and-legacy-tasks.md) | `project.task.working_set.manage` の付与先と委任、作成時の Working Set、Revision 0085 より前の Task の状態の退避（Issue #85。Decision 0030 が決めていない点） | Approved |
 | [0036](0036-parallel-worktree-integration.md) | Parallel Worktree / Integration Node の方針（Worker ごとの worktree・branch の置き場所と名前、Worker の branch の起点、統合の base・順序・`--no-ff`、Conflict と未 Commit の変更で `waiting`、統合後の Test → Evaluator → Review、PR / Push を別 Issue にすること、Wrapper の許可リストへの追加。Issue #31） | Approved |
 | [0037](0037-gpu-compute-scheduler.md) | GPU / Compute Resource Scheduler の方針（状態をプロセス内に持つ、KV Cache の Token による Admission、Actual / Reserved の VRAM と Safety Headroom の暫定値、Class の優先、縮退の段と復帰、Exclusive、Local / Cloud の振り分け。PAW-036、Issue #32） | Approved |
+| [0050](0050-late-gpu-charge-without-fence.md) | Node の Attempt が閉じた後に、Cancel しても止まらなかった Local の呼び出しの GPU 時間を、`TrackerLateGpuCharge` で Attempt / Run の Fence なしに Task の Budget へ計上する（PAW-036、PR #131。Decision 0037 を補う） | Approved |
 | [0051](0051-integration-worktree-ignored-files.md) | integration worktree の無視された File（`.gitignore`）を未 Commit の変更として扱う方針（`status --ignored` の形を Wrapper の許可リストに足す。Decision 0036 の 7・9・13 への追補。PR #130） | Proposed |
 
 運用は [AGENTS.md](../../AGENTS.md) の「仕様変更」に従います。
