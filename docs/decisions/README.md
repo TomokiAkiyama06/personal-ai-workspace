@@ -50,6 +50,7 @@
 | [0049](0049-manual-write-reservation-release.md) | 落ちた Process が残した Repository の書き込み予約を人が解除する操作（誰が: Project の Manager と Owner / Admin、Passkey Step-up、生きている Worker の Lease がある間は拒否、解除した Repo は書き込まれたものとして扱う、Audit と Task の Event。Issue #129。Decision 0035 の 5 節の最後の一文を Supersede） | Approved |
 | [0050](0050-late-gpu-charge-without-fence.md) | Node の Attempt が閉じた後に、Cancel しても止まらなかった Local の呼び出しの GPU 時間を、`TrackerLateGpuCharge` で Attempt / Run の Fence なしに Task の Budget へ計上する（PAW-036、PR #131。Decision 0037 を補う） | Approved |
 | [0051](0051-integration-worktree-ignored-files.md) | integration worktree の無視された File（`.gitignore`）を未 Commit の変更として扱う方針（`status --ignored` の形を Wrapper の許可リストに足す。Decision 0036 の 7・9・13 への追補。PR #130） | Approved |
+| [0055](0055-kaggle-full-gpu-mode.md) | Kaggle / Full GPU Mode の方針（始める・終えるのは Owner / Admin だけ: Capability `admin.compute.full_gpu`、走っている Task は `waiting`（Resource）にして Drain、Queue 中の Task は GPU を求めた時点で Hold、Preempt は明示したときだけ、Main LLM が戻ってから再開、再起動で解除、HTTP の API は後の Issue。PAW-037、Issue #33。Decision 0037 の 7・13 を補う） | Proposed |
 
 運用は [AGENTS.md](../../AGENTS.md) の「仕様変更」に従います。
 

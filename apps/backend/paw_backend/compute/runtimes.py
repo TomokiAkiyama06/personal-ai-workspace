@@ -247,6 +247,9 @@ class HybridRuntime:
             deployment=self._deployment,
             context_tokens=min(tokens, _MAX_ESTIMATE),
             allow_cloud=allow_cloud,
+            # Full GPU Mode holds the task whose node uses or waits for the GPU
+            # (PAW-037).
+            task_id=assignment.task_id,
         )
         try:
             lease = await self._scheduler.acquire(
