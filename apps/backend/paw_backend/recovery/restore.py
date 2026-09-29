@@ -60,6 +60,7 @@ from paw_backend.recovery.audit import (
     record_recovery_outcome,
 )
 from paw_backend.recovery.files import (
+    RecoveryCheckout,
     RecoveryFilesError,
     check_directory_path,
     open_checkout,
@@ -406,13 +407,17 @@ def parse_source(
     return data
 
 
-def load_source(
+def open_source(
     path: str | Path,
     protected: Collection[str],
     *,
     git_timeout: float = DEFAULT_TIMEOUT_SECONDS,
-) -> RestoreData:
-    """Check and read the checkout at ``path`` (blocking; see the module docstring)."""
+) -> tuple[RecoveryCheckout, RestoreData]:
+    """Lock, check and read the checkout at ``path`` (blocking).
+
+    The checkout is returned **still locked**: the caller holds it until the
+    restore is over, so no backup rewrites or pushes the repository between the
+    check and the write (the caller closes it)."""
     text = check_directory_path(path, protected)
     git = RecoveryGit(text, timeout=git_timeout)
     git.check_top_level()
@@ -420,13 +425,27 @@ def load_source(
     try:
         commit = git.check_restorable()
         files = checkout.read_managed()
-    finally:
+        manifest = verify_files(files)
+        try:
+            data = parse_source(files, commit, manifest)
+        except RecordError:
+            raise _refuse(RestoreProblem.RECORD_INVALID) from None
+    except BaseException:
         checkout.close()
-    manifest = verify_files(files)
-    try:
-        return parse_source(files, commit, manifest)
-    except RecordError:
-        raise _refuse(RestoreProblem.RECORD_INVALID) from None
+        raise
+    return checkout, data
+
+
+def load_source(
+    path: str | Path,
+    protected: Collection[str],
+    *,
+    git_timeout: float = DEFAULT_TIMEOUT_SECONDS,
+) -> RestoreData:
+    """``open_source`` without keeping the lock (for a check only)."""
+    checkout, data = open_source(path, protected, git_timeout=git_timeout)
+    checkout.close()
+    return data
 
 
 def _code(error: BaseException) -> str:
@@ -555,18 +574,26 @@ class RecoveryRestorer:
 
     async def run(self, *, apply: bool = False) -> RestoreResult:
         try:
-            data = await _in_thread(
+            checkout, data = await _in_thread(
                 functools.partial(
-                    load_source,
+                    open_source,
                     self._repository_dir,
                     self._protected,
                     git_timeout=self._git_timeout,
-                )
+                ),
+                discard=lambda value: value[0].close(),
             )
         except (RecoveryRestoreError, RecoveryFilesError, RecoveryGitError) as refusal:
             code = _code(refusal)
             audited = await self._record(RecoveryAction.RESTORE_REFUSED, code)
             return RestoreResult(refused=code, audited=audited)
+        try:
+            return await self._restore(data, apply=apply)
+        finally:
+            # Held through the checks, the write and its audit row.
+            await _in_thread(checkout.close)
+
+    async def _restore(self, data: RestoreData, *, apply: bool) -> RestoreResult:
         try:
             async with self._database.session() as session, session.begin():
                 await self._check_target(session, data)
@@ -646,6 +673,7 @@ __all__ = [
     "RestoreProblem",
     "RestoreResult",
     "load_source",
+    "open_source",
     "manual_steps",
     "parse_source",
     "verify_files",

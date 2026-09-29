@@ -118,6 +118,7 @@ class CommandTest(PostgresProjectTestCase):
         code, _, err = self.command(["recovery-restore"])
         self.assertEqual(cli.EXIT_OK, code, err)
         self.assertIn("Dry run", err)
+        self.assertIn("only the recovery.restore.planned audit row", err)
         self.assertIn("owner-recover", err)
         with self.engine.begin() as connection:
             connection.execute(

@@ -164,6 +164,25 @@ class BackupRunTest(BackupTestCase):
         self.assertEqual("notes\n", readme.read_text())
         self.assertNotIn("README.md", git("ls-files", cwd=self.world.checkout))
 
+    async def test_an_unrelated_staged_path_is_never_committed(self) -> None:
+        await self.runner().run()
+        head = self.world.remote_head()
+        secret = self.world.checkout / "notes.txt"
+        secret.write_text("not for the backup\n")
+        git("add", "notes.txt", cwd=self.world.checkout)
+        self.source.snapshot_value = snapshot_with(users=[user(login_name="other")])
+        result = await self.runner().run()
+        self.assertEqual(
+            ("recovery.backup.failed", "commit:unrelated_staged_changes"),
+            self.recorder.rows[-1],
+        )
+        self.assertFalse(result.committed)
+        self.assertEqual(head, self.world.remote_head())
+        self.assertNotIn(
+            "notes.txt",
+            git("ls-tree", "-r", "--name-only", "HEAD", cwd=self.world.checkout),
+        )
+
     async def test_hooks_of_the_checkout_never_run(self) -> None:
         hooks = self.world.checkout / ".git" / "hooks"
         witness = self.world.base / "hook-ran"

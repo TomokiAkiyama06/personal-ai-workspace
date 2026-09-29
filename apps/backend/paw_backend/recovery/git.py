@@ -43,6 +43,7 @@ class GitProblem(StrEnum):
     NOT_CLEAN = "not_clean"
     NOT_LATEST = "not_latest"
     NO_COMMIT = "no_commit"
+    UNRELATED_STAGED_CHANGES = "unrelated_staged_changes"
 
 
 class RecoveryGitError(Exception):
@@ -161,6 +162,24 @@ class RecoveryGit:
             self._run(["add", "--all", "--force", "--", *present])
         if absent:
             self._run(["rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", *absent])
+
+    def check_only_managed_staged(self, names: Sequence[str]) -> None:
+        """Refuse when the index holds a change outside the managed names.
+
+        Something an operator (or an interrupted manual command) staged, such as
+        a ``README.md`` or a credential file, would otherwise ride along in the
+        automated commit and push. The job neither commits nor unstages it:
+        ``unrelated_staged_changes``, and a person cleans the index."""
+        result = self._run(
+            ["diff", "--cached", "--name-only", "-z", "--no-renames", "--no-ext-diff"]
+        )
+        allowed = set(names)
+        for path in result.stdout.split(b"\0"):
+            if not path:
+                continue
+            top = path.decode("utf-8", "surrogateescape").split("/", 1)[0]
+            if top not in allowed:
+                raise RecoveryGitError(GitProblem.UNRELATED_STAGED_CHANGES)
 
     def has_staged_changes(self) -> bool:
         result = self._run(

@@ -26,7 +26,12 @@ from paw_backend.memory.models import (
 )
 from paw_backend.memory.projection import MemoryProjectionRunner
 from paw_backend.projects.models import ProjectMemberRow, ProjectRow
-from paw_backend.recovery import RecoveryBackupRunner, RecoveryRestorer
+from paw_backend.recovery import (
+    RecoveryBackupRunner,
+    RecoveryBusyError,
+    RecoveryRestorer,
+)
+from paw_backend.recovery.files import open_checkout
 from paw_backend.recovery.restore import TARGET_TABLES
 from paw_backend.repositories.models import RepositoryRemoteRow, RepositoryRow
 
@@ -440,6 +445,30 @@ class RecoveryPostgresTest(PostgresProjectTestCase):
         again = await self.restorer(clone).run(apply=True)
         self.assertEqual("target_not_empty", again.refused)
         self.assertEqual(after, {table: self.rows(table) for table in TARGET_TABLES})
+
+    async def test_the_checkout_stays_locked_until_the_restore_is_done(self) -> None:
+        await self.back_up()
+        clone = self.world.clone()
+        self.clean_tables()
+        busy: list[bool] = []
+        homes = self.world.homes
+
+        class Probing(RecoveryRestorer):
+            async def _check_target(self, session, data):
+                # A backup that starts now must not get the checkout.
+                try:
+                    open_checkout(str(clone), homes).close()
+                    busy.append(False)
+                except RecoveryBusyError:
+                    busy.append(True)
+                await super()._check_target(session, data)
+
+        result = await Probing(
+            self.new_database(), clone, protected_homes=homes, clock=self.clock
+        ).run(apply=True)
+        self.assertTrue(result.applied, result)
+        self.assertEqual([True, True], busy)
+        open_checkout(str(clone), homes).close()  # released afterwards
 
     async def test_a_stale_dirty_or_tampered_clone_is_refused(self) -> None:
         await self.back_up()

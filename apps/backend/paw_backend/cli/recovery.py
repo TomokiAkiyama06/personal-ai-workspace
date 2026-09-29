@@ -416,7 +416,13 @@ def _show_restore(result: RestoreResult, apply: bool, err: TextIO | None) -> int
             f"Dry run: would restore {counts} (tasks: {data.tasks} summaries, "
             "not restored).",
         )
-        _say(err, "Nothing was written. Run again with --apply to restore.")
+        _say(
+            err,
+            (
+                "No workspace data was written (only the recovery.restore.planned "
+                "audit row). Run again with --apply to restore."
+            ),
+        )
     else:
         _say(err, f"Restored: {counts}. Recorded as recovery.restore.applied.")
     _say(err, "Then:" if apply else "After --apply:")
