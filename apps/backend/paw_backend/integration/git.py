@@ -33,7 +33,8 @@ bounded output). This module adds the rules of its own:
 
 The sub-commands used here are listed in Decision 0036 (Approved) as additions to
 the Wrapper's allowlist of Decision 0029; the second form of ``status``
-(``--ignored``, :meth:`WorktreeGit.is_exactly_committed`) is Decision 0051's.
+(``--ignored``) and ``submodule status --cached`` (both
+:meth:`WorktreeGit.is_exactly_committed`) are Decision 0051's.
 """
 
 import os
@@ -285,7 +286,23 @@ class WorktreeGit:
         output limit; only whether there is any entry matters.
         ``--ignore-submodules=none``: a change inside a submodule counts too,
         whatever ``submodule.<name>.ignore`` in the repository's own
-        ``.gitmodules`` or configuration says."""
+        ``.gitmodules`` or configuration says.
+
+        A worktree with an **initialized submodule** is never exactly its
+        commit (Decision 0051, option A: fail closed): no ``status`` of the
+        parent lists a file the submodule's own ``.gitignore`` ignores
+        (``sub/.env``). ``submodule status --cached`` prints one line per
+        submodule of the index without looking into their work trees; a line
+        of a submodule that is not initialized starts with ``-``, any other
+        line (initialized, or a path git split over lines) is not clean. It
+        runs first, so the ``status`` never runs inside an initialized
+        submodule. It fails (``no submodule mapping``) for a gitlink missing
+        from ``.gitmodules``: not clean either."""
+        submodules = await self._run(["submodule", "status", "--cached"], account, path)
+        if submodules.returncode != 0 or any(
+            not line.startswith("-") for line in submodules.stdout.splitlines()
+        ):
+            return False
         output = await self._checked(
             [
                 "status",

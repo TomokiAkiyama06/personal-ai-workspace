@@ -637,8 +637,10 @@ class IntegrationTest(CoordinatorTestCase):
             "--quiet",
             cwd=integration,
         )
+        # Since round 3 (Decision 0051, option A) a worktree with an
+        # initialized submodule is never clean, the change in it included.
         (before,) = await self.coordinator.targets(self.ws.integration_request("a"))
-        self.assertTrue(before.clean)
+        self.assertFalse(before.clean)
         fs.write(integration, "sub/lib.txt", "changed, not committed\n")
 
         (target,) = await self.coordinator.targets(self.ws.integration_request("a"))
@@ -646,6 +648,65 @@ class IntegrationTest(CoordinatorTestCase):
 
         self.assertFalse(target.clean)
         self.assertEqual(again.repositories[0].state, IntegrationState.DIRTY)
+
+    async def _integrated_with_submodule(self, *, initialize: bool) -> str:
+        """An integration worktree whose commit has the submodule ``sub``
+        (``.gitignore`` of its own ignores ``.env``); its path."""
+        source = f"{self.ws.world.root}/submodule-source"
+        os.makedirs(source)
+        git("init", "--quiet", "--initial-branch=main", source)
+        commit_file(source, ".gitignore", ".env\n")
+        a = await self.prepare("a")
+        git(
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "--quiet",
+            source,
+            "sub",
+            cwd=a.path,
+        )
+        git("commit", "--quiet", "-m", "submodule", cwd=a.path)
+        report = await self.coordinator.integrate(self.ws.integration_request("a"))
+        integration = report.repositories[0].path
+        if initialize:
+            git(
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "update",
+                "--init",
+                "--quiet",
+                cwd=integration,
+            )
+        return integration
+
+    async def test_an_initialized_submodule_is_never_clean(self):
+        # Codex review (P1, round 3): a file the submodule's OWN ``.gitignore``
+        # ignores (``sub/.env``) is listed by no ``status`` of the parent. The
+        # integration worktree with an initialized submodule is not clean
+        # (Decision 0051, option A: fail closed).
+        integration = await self._integrated_with_submodule(initialize=True)
+        fs.write(integration, "sub/.env", "SECRET=not committed\n")
+
+        (target,) = await self.coordinator.targets(self.ws.integration_request("a"))
+        again = await self.coordinator.integrate(self.ws.integration_request("a"))
+
+        self.assertFalse(target.clean)
+        self.assertEqual(again.repositories[0].state, IntegrationState.DIRTY)
+
+    async def test_an_uninitialized_submodule_alone_does_not_stop_it(self):
+        # Decision 0051 (option A) stops initialized submodules only: a
+        # repository with a submodule the integration worktree never
+        # initialized (``worktree add`` does not) still integrates.
+        await self._integrated_with_submodule(initialize=False)
+
+        (target,) = await self.coordinator.targets(self.ws.integration_request("a"))
+        again = await self.coordinator.integrate(self.ws.integration_request("a"))
+
+        self.assertTrue(target.clean)
+        self.assertEqual(again.repositories[0].state, IntegrationState.MERGED)
 
     async def test_no_target_before_any_integration_branch_exists(self):
         self.assertEqual(
