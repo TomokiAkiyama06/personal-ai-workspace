@@ -100,6 +100,7 @@ _WITH_OPEN_APPROVALS = text(
     " JOIN tasks t ON t.id = a.task_id"
     f" WHERE a.status IN ({_OPEN_APPROVALS}) AND a.expires_at > now()"
     f" AND t.state IN ({_TERMINAL})"
+    " AND (CAST(:after AS uuid) IS NULL OR a.task_id > :after)"
     " ORDER BY a.task_id LIMIT :limit"
 )
 # Terminal tasks named (by the canonical text of the id, as ``end_task`` matches
@@ -111,6 +112,7 @@ _WITH_SESSION_MEMORIES = text(
     f" WHERE v.status = '{MemoryStatus.ACTIVE.value}'"
     f" AND v.freshness_policy = '{FreshnessPolicy.SESSION_ONLY.value}'"
     f" AND s.source_type = '{SourceType.TASK.value}' AND t.state IN ({_TERMINAL})"
+    " AND (CAST(:after AS uuid) IS NULL OR t.id > :after)"
     " ORDER BY t.id LIMIT :limit"
 )
 
@@ -130,13 +132,20 @@ class TaskEndResidue:
             raise TypeError("database must be a Database")
         self._database = database
 
-    async def task_ids(self, limit: int) -> tuple[uuid.UUID, ...]:
-        """At most ``limit`` ids (1 to ``MAX_TASK_END_SWEEP``), in id order."""
+    async def task_ids(
+        self, limit: int, *, after: uuid.UUID | None = None
+    ) -> tuple[uuid.UUID, ...]:
+        """At most ``limit`` ids (1 to ``MAX_TASK_END_SWEEP``), in id order,
+        only those greater than ``after`` when it is given."""
         check_int("limit", limit, minimum=1, maximum=MAX_TASK_END_SWEEP)
+        if after is not None:
+            check_uuid("after", after)
         found: dict[uuid.UUID, None] = {}
         async with self._database.session() as session, session.begin():
             for statement in (_WITH_OPEN_APPROVALS, _WITH_SESSION_MEMORIES):
-                rows = await session.execute(statement, {"limit": limit})
+                rows = await session.execute(
+                    statement, {"limit": limit, "after": after}
+                )
                 found.update(dict.fromkeys(rows.scalars()))
         return tuple(sorted(found))[:limit]
 
@@ -193,6 +202,8 @@ class TaskEndCleanup:
         self._approvals = approvals
         self._freshness = freshness
         self._residue = residue
+        # Where the next sweep resumes (:meth:`sweep`); ``None``: from the start.
+        self._after: uuid.UUID | None = None
 
     async def on_task_event(self, event: object) -> None:
         """A ``TaskService`` listener (it replaces
@@ -269,8 +280,20 @@ class TaskEndCleanup:
 
     async def sweep(self, limit: int = MAX_TASK_END_SWEEP) -> tuple[TaskEndReport, ...]:
         """Finish the terminal tasks that still hold residue (at most ``limit``).
-        An error of the residue query itself propagates (the loop logs it)."""
+        An error of the residue query itself propagates (the loop logs it).
+
+        Each sweep resumes after the last task the previous one took (in id
+        order) and starts over once a sweep found fewer than ``limit`` (at once
+        when nothing is left after that task): tasks whose cleanup keeps failing
+        cannot hold every sweep and starve the tasks after them. The position is
+        this object's only; a restart begins at the start, which is still correct
+        (the residue is the record)."""
+        task_ids = await self._residue.task_ids(limit, after=self._after)
+        if not task_ids and self._after is not None:
+            # The previous sweep ended on the last task: start over now.
+            task_ids = await self._residue.task_ids(limit)
+        self._after = task_ids[-1] if len(task_ids) == limit else None
         reports = []
-        for task_id in await self._residue.task_ids(limit):
+        for task_id in task_ids:
             reports.append(await self.finish(task_id))
         return tuple(reports)
