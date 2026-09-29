@@ -275,6 +275,54 @@ class RenderTest(unittest.TestCase):
         self.assertGreaterEqual(record["versions"][0]["redactions"], 3)
         self.assertGreaterEqual(plan.redactions, 4)
 
+    def test_a_credential_in_a_repository_name_or_branch_is_redacted(self) -> None:
+        project_id = uuid4()
+        repo_id = uuid4()
+        clean_id = uuid4()
+
+        def repository(identifier, name, branch):
+            return {
+                "id": identifier,
+                "project_id": project_id,
+                "name": name,
+                "default_branch": branch,
+                "source": "github_clone",
+                "acl_allowed": None,
+                "created_by": None,
+                "created_at": T0,
+                "updated_at": T0,
+            }
+
+        plan = render(
+            snapshot_with(
+                repositories=[
+                    repository(repo_id, SECRET, f"feature/{SECRET}"),
+                    repository(clean_id, "app", "main"),
+                ],
+                remotes=[
+                    {
+                        "repository_id": repo_id,
+                        "project_id": project_id,
+                        "url": f"https://github.com/example/{SECRET}",
+                        "created_at": T0,
+                    }
+                ],
+            )
+        )
+        self.assertNotIn(SECRET.encode(), b"".join(plan.files.values()))
+        # A restore cannot give such a repository a valid name: it is left out
+        # and reported, the others come back.
+        data = parse_source(plan.files, "c" * 40, verify_files(plan.files))
+        self.assertEqual([clean_id], [row["id"] for row in data.repositories])
+        self.assertEqual([], data.remotes)
+        self.assertEqual(1, data.skipped_repositories)
+        self.assertTrue(
+            any(
+                "repositor" in step and "register" in step
+                for step in manual_steps(data, None)
+            )
+        )
+
     def test_no_credential_column_can_reach_a_file(self) -> None:
         plan = render(
             snapshot_with(

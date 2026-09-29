@@ -110,6 +110,7 @@ from paw_backend.recovery.schema import (
     migration_head,
 )
 from paw_backend.repositories.models import RepositoryRemoteRow, RepositoryRow
+from paw_backend.tools.credentials import REDACTED
 
 Clock = Callable[[], datetime]
 
@@ -171,6 +172,8 @@ class RestoreData:
     sources: list[dict[str, Any]] = field(default_factory=list)
     deletions: list[dict[str, Any]] = field(default_factory=list)
     skipped_conversation_sources: int = 0
+    skipped_repositories: int = 0
+    skipped_remotes: int = 0
     tasks: int = 0
     auth_policy: dict[str, Any] | None = None
     connections: list[dict[str, Any]] = field(default_factory=list)
@@ -366,8 +369,16 @@ def parse_source(
         remotes = record.pop("remotes")
         if record["created_by"] not in user_ids:
             record["created_by"] = None
+        if REDACTED in record["name"] or REDACTED in record["default_branch"]:
+            # A credential was replaced in its name or branch: the repository
+            # cannot come back under a valid name. Registered again by hand.
+            data.skipped_repositories += 1
+            continue
         data.repositories.append(record)
         for remote in remotes:
+            if REDACTED in remote["url"]:
+                data.skipped_remotes += 1
+                continue
             data.remotes.append(
                 {
                     "repository_id": record["id"],
@@ -482,6 +493,13 @@ def manual_steps(
         steps.append(
             f"Clone the {len(data.repositories)} repositories again (checkouts "
             "are not restored); each user logs in to GitHub again (gh auth login)."
+        )
+    if data.skipped_repositories or data.skipped_remotes:
+        steps.append(
+            f"{data.skipped_repositories} repositor(y/ies) and "
+            f"{data.skipped_remotes} remote URL(s) had a credential in their name, "
+            "branch or URL (redacted in the backup) and were not restored: "
+            "register them again."
         )
     if data.connections:
         kinds = ", ".join(sorted(str(row["kind"]) for row in data.connections))

@@ -388,10 +388,16 @@ async def _restore_run(settings: Settings, apply: bool, homes, clock) -> Restore
 
 def _show_restore(result: RestoreResult, apply: bool, err: TextIO | None) -> int:
     if result.refused is not None:
+        recorded = (
+            "only the recovery.restore.refused audit row was written"
+            if result.audited
+            else "the recovery.restore.refused audit row could not be written"
+        )
         _say(
             err,
-            f"Refused ({result.refused}): nothing was written. See Decision 0054 "
-            "and the README (Recovery Repository) for what each code means.",
+            f"Refused ({result.refused}): no workspace data was written; "
+            f"{recorded}. See Decision 0054 and the README (Recovery Repository) "
+            "for what each code means.",
         )
         return EXIT_REFUSED
     data = result.data

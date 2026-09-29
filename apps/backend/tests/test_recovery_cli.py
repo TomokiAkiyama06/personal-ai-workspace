@@ -132,6 +132,7 @@ class CommandTest(PostgresProjectTestCase):
         code, _, err = self.command(["recovery-restore", "--apply"])
         self.assertEqual(cli.EXIT_REFUSED, code)
         self.assertIn("target_not_empty", err)
+        self.assertIn("only the recovery.restore.refused audit row was written", err)
         self.assertNotIn(str(self.world.base), err)
 
     def test_a_refused_checkout_fails_the_backup(self) -> None:

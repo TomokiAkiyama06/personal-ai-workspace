@@ -18,15 +18,19 @@ and ``.merge``): never ``--force``, never another branch, never a new remote.
 Everything here blocks: call it with ``asyncio.to_thread``.
 """
 
+import contextlib
+import hashlib
 import os
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 
 COMMITTER_NAME = "Personal AI Workspace"
 COMMITTER_EMAIL = "recovery@personal-ai-workspace.invalid"
 DEFAULT_TIMEOUT_SECONDS = 300.0
+# The index a commit is built in (inside ``.git``, never the checkout's own).
+INDEX_NAME = "paw-recovery-index"
 
 
 class GitProblem(StrEnum):
@@ -81,7 +85,12 @@ class RecoveryGit:
         self._timeout = timeout
 
     def _run(
-        self, arguments: Sequence[str], *, check: bool = True
+        self,
+        arguments: Sequence[str],
+        *,
+        check: bool = True,
+        data: bytes | None = None,
+        index: str | None = None,
     ) -> subprocess.CompletedProcess[bytes]:
         command = [
             "git",
@@ -99,12 +108,15 @@ class RecoveryGit:
             f"user.email={COMMITTER_EMAIL}",
             *arguments,
         ]
+        environment = _environment()
+        if index is not None:
+            environment["GIT_INDEX_FILE"] = index
         try:
             result = subprocess.run(
                 command,
-                stdin=subprocess.DEVNULL,
+                input=data if data is not None else b"",
                 capture_output=True,
-                env=_environment(),
+                env=environment,
                 timeout=self._timeout,
                 check=False,
             )
@@ -151,73 +163,97 @@ class RecoveryGit:
             raise RecoveryGitError(GitProblem.NO_UPSTREAM)
         return Upstream(branch=branch, remote=remote, merge=merge)
 
-    def stage(self, names: Sequence[str]) -> None:
-        """Stage the managed names exactly as they are on disk (also removals)."""
-        present = [
-            name for name in names if os.path.lexists(os.path.join(self._path, name))
-        ]
-        absent = [name for name in names if name not in present]
-        if present:
-            self._run(["add", "--all", "--force", "--", *present])
-        if absent:
-            self._run(["rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", *absent])
+    def commit_files(
+        self, files: Mapping[str, bytes], message: str, names: Sequence[str]
+    ) -> bool:
+        """Commit ``files`` as the whole content of the managed ``names``.
 
-    def _pathspec(self, names: Sequence[str]) -> list[str]:
-        """The managed names that exist on disk, in the index or in ``HEAD``.
-
-        A name that is neither would make git refuse the whole pathspec."""
-        known = self._run(["ls-files", "-z", "--", *names]).stdout.split(b"\0")
-        if self.head() is not None:
-            # A name removed from the index is still in ``HEAD``: its removal
-            # is part of the commit.
-            known += self._run(["ls-tree", "-z", "--name-only", "HEAD"]).stdout.split(
-                b"\0"
+        The commit is built from the bytes given (the rendered backup), in an
+        index of its own, never from the work tree or the checkout's index: a
+        file changed after it was written, or a path someone staged (even while
+        this runs), cannot enter the commit. Paths outside ``names`` keep what
+        ``HEAD`` has. Returns ``False`` (and commits nothing) when the tree does
+        not change. The branch is moved only from the ``HEAD`` it was built on
+        (a compare-and-swap), and the checkout's index is then reset to the new
+        commit for the managed names only (other staged changes stay staged).
+        """
+        allowed = set(names)
+        for path in files:
+            if path.split("/", 1)[0] not in allowed:
+                raise ValueError("a file outside the managed names")
+        branch = self._value(["symbolic-ref", "--quiet", "HEAD"])
+        if branch is None:
+            raise RecoveryGitError(GitProblem.DETACHED_HEAD)
+        head = self.head()
+        git_dir = self._value(["rev-parse", "--absolute-git-dir"])
+        if git_dir is None:
+            raise RecoveryGitError(GitProblem.NOT_A_GIT_CHECKOUT)
+        index = os.path.join(git_dir, INDEX_NAME)
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(index)
+        try:
+            self._run(["read-tree", head or "--empty"], index=index)
+            self._run(
+                ["rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", *names],
+                index=index,
             )
-        tracked = {
+            known = set()
+            if head is not None:
+                listing = self._run(["ls-tree", "-r", "-z", head]).stdout
+                for entry in listing.split(b"\0"):
+                    if entry:
+                        known.add(entry.split(b"\t", 1)[0].split()[2].decode())
+            entries = []
+            for path in sorted(files):
+                data = files[path]
+                digest = hashlib.sha1(
+                    b"blob %d\0" % len(data) + data, usedforsecurity=False
+                ).hexdigest()
+                if digest not in known:
+                    written = self._value_of(
+                        self._run(["hash-object", "-w", "--stdin"], data=data)
+                    )
+                    if written != digest:
+                        raise RecoveryGitError(GitProblem.COMMAND_FAILED)
+                    known.add(digest)
+                entries.append(f"100644 {digest}\t{path}".encode() + b"\0")
+            if entries:
+                self._run(
+                    ["update-index", "-z", "--index-info"],
+                    data=b"".join(entries),
+                    index=index,
+                )
+            tree = self._value_of(self._run(["write-tree"], index=index))
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(index)
+        if head is not None and tree == self._value(["rev-parse", f"{head}^{{tree}}"]):
+            return False
+        parents = ["-p", head] if head is not None else []
+        commit = self._value_of(
+            self._run(["commit-tree", tree, *parents], data=message.encode())
+        )
+        self._run(["update-ref", branch, commit, head or "0" * 40])
+        self._run(["reset", "-q", "--", *self._known_names(names)])
+        return True
+
+    def _known_names(self, names: Sequence[str]) -> list[str]:
+        """The managed names in the index or in ``HEAD`` (a pathspec git accepts)."""
+        known = self._run(["ls-files", "-z", "--", *names]).stdout.split(b"\0")
+        known += self._run(["ls-tree", "-z", "--name-only", "HEAD"]).stdout.split(b"\0")
+        present = {
             path.decode("utf-8", "surrogateescape").split("/", 1)[0]
             for path in known
             if path
         }
-        return [
-            name
-            for name in names
-            if name in tracked or os.path.lexists(os.path.join(self._path, name))
-        ]
+        return [name for name in names if name in present]
 
-    def has_staged_changes(self, names: Sequence[str]) -> bool:
-        """The managed names differ from ``HEAD`` (other staged paths do not count)."""
-        pathspec = self._pathspec(names)
-        if not pathspec:
-            return False
-        result = self._run(
-            ["diff", "--cached", "--quiet", "--no-ext-diff", "--", *pathspec],
-            check=False,
-        )
-        if result.returncode not in (0, 1):
+    @staticmethod
+    def _value_of(result: subprocess.CompletedProcess[bytes]) -> str:
+        value = result.stdout.decode("utf-8", "replace").strip()
+        if not value:
             raise RecoveryGitError(GitProblem.COMMAND_FAILED)
-        return result.returncode == 1
-
-    def commit(self, message: str, names: Sequence[str]) -> None:
-        """Commit the managed names **only** (``git commit --only -- <names>``).
-
-        Anything else in the index (an operator's ``git add README.md``, even one
-        made between our staging and this commit) is neither committed nor
-        pushed: it stays staged for a person to deal with."""
-        pathspec = self._pathspec(names)
-        if not pathspec:
-            raise RecoveryGitError(GitProblem.COMMAND_FAILED)
-        self._run(
-            [
-                "commit",
-                "--quiet",
-                "--no-verify",
-                "--only",
-                "--message",
-                message,
-                "--",
-                *pathspec,
-            ]
-        )
+        return value
 
     def needs_push(self, upstream: Upstream) -> bool:
         """``HEAD`` is not what the remote-tracking branch last saw."""

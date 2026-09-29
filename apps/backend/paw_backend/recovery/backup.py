@@ -11,8 +11,9 @@
 4. **render**: every file (``render_recovery``); the manifest is kept when
    nothing changed.
 5. **write_files**: make the checkout's managed names hold exactly that.
-6. **commit**: stage the managed names; commit only when something changed (one
-   commit per run: the dirty check of REQUIREMENTS.md "Git schedule").
+6. **commit**: build the commit from the rendered bytes (never from the work
+   tree or the checkout's index); commit only when the tree changed (one commit
+   per run: the dirty check of REQUIREMENTS.md "Git schedule").
 7. **push**: push when ``HEAD`` is ahead of what the remote last saw (a run
    after a failed push pushes the earlier commit: the retry). Never forced.
 
@@ -266,12 +267,12 @@ class RecoveryBackupRunner:
                 step = BackupStep.WRITE_FILES
                 written, removed = await _in_thread(checkout.sync, plan.files)
                 step = BackupStep.COMMIT
-                await _in_thread(git.stage, MANAGED_ROOT_NAMES)
-                if await _in_thread(git.has_staged_changes, MANAGED_ROOT_NAMES):
-                    await _in_thread(
-                        git.commit, commit_message(plan), MANAGED_ROOT_NAMES
-                    )
-                    committed = True
+                committed = await _in_thread(
+                    git.commit_files,
+                    plan.files,
+                    commit_message(plan),
+                    MANAGED_ROOT_NAMES,
+                )
                 step = BackupStep.PUSH
                 if await _in_thread(git.needs_push, upstream):
                     await _in_thread(git.push, upstream)

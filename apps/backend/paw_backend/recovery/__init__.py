@@ -11,7 +11,8 @@ Repository"). This package writes it and reads it back:
   credentials in free text are redacted).
 * ``files``: the checkout (marker, lock, ``0700`` / ``0600``, no link followed)
   and the reader of the Memory Markdown Projection (Decision 0038 9).
-* ``git``: stage, commit, fast-forward push to the configured upstream only.
+* ``git``: a commit built from the rendered bytes, a fast-forward push to the
+  configured upstream only.
 * ``backup``: one run (``recovery-backup-run``, every 30 minutes).
 * ``records`` / ``restore``: the verified, dry-run-first, all-or-nothing restore
   into an empty workspace (``recovery-restore``).

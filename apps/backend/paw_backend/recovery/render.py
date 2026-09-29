@@ -172,14 +172,12 @@ def _project_file(project: Row, members: list[Row], redactor: _Redactor) -> byte
     return encode_json(record)
 
 
-def _repo_file(repository: Row, remotes: list[Row]) -> bytes:
+def _repo_file(repository: Row, remotes: list[Row], redactor: _Redactor) -> bytes:
     record = _fields(
         repository,
         (
             "id",
             "project_id",
-            "name",
-            "default_branch",
             "source",
             "acl_allowed",
             "created_by",
@@ -187,9 +185,16 @@ def _repo_file(repository: Row, remotes: list[Row]) -> bytes:
             "updated_at",
         ),
     )
-    # The database only holds ``https://host/path`` without user information
-    # (``REMOTE_SQL_PATTERN``): no credential can be in a remote URL.
-    record["remotes"] = [_fields(remote, ("url", "created_at")) for remote in remotes]
+    # A name, a branch or a URL path can hold a token-shaped string (the
+    # database only checks the characters): redacted like every free text. A
+    # restore leaves such a repository or remote out (it has no valid name).
+    record["name"] = redactor.plain(repository["name"])
+    record["default_branch"] = redactor.plain(repository["default_branch"])
+    record["remotes"] = []
+    for remote in remotes:
+        entry = _fields(remote, ("created_at",))
+        entry["url"] = redactor.plain(remote["url"])
+        record["remotes"].append(entry)
     return encode_json(record)
 
 
@@ -360,7 +365,7 @@ def render_recovery(
     remotes = _group(snapshot.remotes, "repository_id")
     for repository in snapshot.repositories:
         files[f"{REPOS_DIRECTORY}/{repository['id']}.json"] = _repo_file(
-            repository, remotes.get(repository["id"], [])
+            repository, remotes.get(repository["id"], []), redactor
         )
         counts["repos"] += 1
 

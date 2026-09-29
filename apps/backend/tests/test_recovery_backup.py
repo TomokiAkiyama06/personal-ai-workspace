@@ -31,7 +31,6 @@ from paw_backend.recovery.files import (
     open_projection,
 )
 from paw_backend.recovery.format import (
-    MANAGED_ROOT_NAMES,
     MARKER_CONTENT,
     MARKER_NAME,
 )
@@ -189,20 +188,38 @@ class BackupRunTest(BackupTestCase):
             git("ls-tree", "-r", "--name-only", "HEAD", cwd=self.world.checkout),
         )
 
-    async def test_a_path_staged_just_before_the_commit_is_not_committed(self) -> None:
-        # The race: something is staged after the managed names were staged
-        # and checked, right before the commit.
+    async def test_the_commit_holds_the_rendered_bytes_only(self) -> None:
+        # Whatever happens to the work tree or the index meanwhile (a file
+        # rewritten after the write, a path staged by someone), the commit holds
+        # exactly the files the backup rendered, and nothing else.
         await self.runner().run()
         checkout = self.world.checkout
-        (checkout / "users" / "x.json").write_text("{}\n")
-        recovery_git = RecoveryGit(str(checkout))
-        recovery_git.stage(MANAGED_ROOT_NAMES)
         (checkout / "notes.txt").write_text("not for the backup\n")
         git("add", "notes.txt", cwd=checkout)
-        recovery_git.commit("Recovery backup\n", MANAGED_ROOT_NAMES)
-        committed = git("ls-tree", "-r", "--name-only", "HEAD", cwd=checkout)
-        self.assertIn("users/x.json", committed)
-        self.assertNotIn("notes.txt", committed)
+        name = next((checkout / "users").iterdir()).name
+        (checkout / "users" / name).write_text('{"secret": "unrendered"}\n')
+        rendered = {
+            "users/x.json": b"{}\n",
+            f"users/{name}": b'{"rendered": true}\n',
+        }
+        recovery_git = RecoveryGit(str(checkout))
+        committed = recovery_git.commit_files(rendered, "Recovery backup\n", ("users",))
+        self.assertTrue(committed)
+        tree = git("ls-tree", "-r", "--name-only", "HEAD", cwd=checkout).split()
+        self.assertNotIn("notes.txt", tree)
+        self.assertEqual(
+            {"users/x.json", f"users/{name}"},
+            {path for path in tree if path.startswith("users/")},
+        )
+        self.assertIn("manifest.json", tree)  # other names are kept as they were
+        self.assertEqual(
+            '{"rendered": true}',
+            git("show", f"HEAD:users/{name}", cwd=checkout),
+        )
+        self.assertEqual(
+            "notes.txt", git("diff", "--cached", "--name-only", cwd=checkout)
+        )
+        self.assertFalse(recovery_git.commit_files(rendered, "again\n", ("users",)))
 
     async def test_hooks_of_the_checkout_never_run(self) -> None:
         hooks = self.world.checkout / ".git" / "hooks"
