@@ -498,12 +498,13 @@ def manual_steps(
             f"{data.skipped_conversation_sources} conversation source(s) of "
             "memories were not restored (conversations are not backed up)."
         )
-    if data.deletions:
-        steps.append(
-            f"{len(data.deletions)} user(s) in deletion were not restored (their "
-            "deletion records in the restored commit were applied). Check the "
-            "deletion records kept outside this backup before resuming operation."
-        )
+    # Always: a deletion that began after the last push is in no record here.
+    steps.append(
+        f"{len(data.deletions)} user(s) in deletion in this backup were not "
+        "restored. A deletion that began after the last push is not in it: check "
+        "the deletion records kept outside this backup, and apply them, before "
+        "resuming operation (Decision 0054, 11)."
+    )
     steps.append("Run memory-projection-run to regenerate the Markdown projection.")
     return steps
 
@@ -611,7 +612,10 @@ class RecoveryRestorer:
         )
         if not apply:
             audited = await self._record(RecoveryAction.RESTORE_PLANNED, reason)
-            return RestoreResult(data=data, manual_steps=steps, audited=audited)
+            if not audited:
+                # Every run leaves its audit row; a dry run without one failed.
+                return RestoreResult(data=data, failed="audit_unrecorded")
+            return RestoreResult(data=data, manual_steps=steps, audited=True)
         try:
             async with self._database.session() as session, session.begin():
                 await session.execute(

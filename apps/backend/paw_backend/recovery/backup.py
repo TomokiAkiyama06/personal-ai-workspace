@@ -267,9 +267,10 @@ class RecoveryBackupRunner:
                 written, removed = await _in_thread(checkout.sync, plan.files)
                 step = BackupStep.COMMIT
                 await _in_thread(git.stage, MANAGED_ROOT_NAMES)
-                await _in_thread(git.check_only_managed_staged, MANAGED_ROOT_NAMES)
-                if await _in_thread(git.has_staged_changes):
-                    await _in_thread(git.commit, commit_message(plan))
+                if await _in_thread(git.has_staged_changes, MANAGED_ROOT_NAMES):
+                    await _in_thread(
+                        git.commit, commit_message(plan), MANAGED_ROOT_NAMES
+                    )
                     committed = True
                 step = BackupStep.PUSH
                 if await _in_thread(git.needs_push, upstream):

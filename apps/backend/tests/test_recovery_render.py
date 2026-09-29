@@ -24,6 +24,7 @@ from paw_backend.recovery.render import render_recovery
 from paw_backend.recovery.restore import (
     RecoveryRestoreError,
     RestoreProblem,
+    manual_steps,
     parse_source,
     verify_files,
 )
@@ -334,6 +335,21 @@ class RenderTest(unittest.TestCase):
         self.assertEqual(T0, data.versions[0]["created_at"])
         self.assertEqual(1, data.skipped_conversation_sources)
         self.assertEqual(["task"], [row["source_type"] for row in data.sources])
+
+
+class ManualStepsTest(unittest.TestCase):
+    def test_the_external_deletion_check_is_always_asked_for(self) -> None:
+        # A deletion that began after the last push is in no deletion record:
+        # the operator must be told to check even when the backup knows none.
+        for users in ([user()], [user(), user(status="deleted", login_name="x")]):
+            with self.subTest(deletions=len(users) - 1):
+                plan = render(snapshot_with(users=users))
+                data = parse_source(plan.files, "c" * 40, verify_files(plan.files))
+                steps = manual_steps(data, None)
+                self.assertTrue(
+                    any("deletion records kept outside" in step for step in steps),
+                    steps,
+                )
 
 
 class VerifyTest(unittest.TestCase):

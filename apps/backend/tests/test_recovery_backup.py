@@ -30,7 +30,12 @@ from paw_backend.recovery.files import (
     open_checkout,
     open_projection,
 )
-from paw_backend.recovery.format import MARKER_CONTENT, MARKER_NAME
+from paw_backend.recovery.format import (
+    MANAGED_ROOT_NAMES,
+    MARKER_CONTENT,
+    MARKER_NAME,
+)
+from paw_backend.recovery.git import RecoveryGit
 
 from .recovery_support import (
     BRANCH,
@@ -172,16 +177,32 @@ class BackupRunTest(BackupTestCase):
         git("add", "notes.txt", cwd=self.world.checkout)
         self.source.snapshot_value = snapshot_with(users=[user(login_name="other")])
         result = await self.runner().run()
-        self.assertEqual(
-            ("recovery.backup.failed", "commit:unrelated_staged_changes"),
-            self.recorder.rows[-1],
-        )
-        self.assertFalse(result.committed)
-        self.assertEqual(head, self.world.remote_head())
+        # The backup goes on with the managed names only; the staged file stays
+        # staged, for a person, and never reaches the remote.
+        self.assertTrue(result.ok, result)
+        self.assertTrue(result.committed)
+        self.assertNotEqual(head, self.world.remote_head())
+        staged = git("diff", "--cached", "--name-only", cwd=self.world.checkout)
+        self.assertEqual("notes.txt", staged)
         self.assertNotIn(
             "notes.txt",
             git("ls-tree", "-r", "--name-only", "HEAD", cwd=self.world.checkout),
         )
+
+    async def test_a_path_staged_just_before_the_commit_is_not_committed(self) -> None:
+        # The race: something is staged after the managed names were staged
+        # and checked, right before the commit.
+        await self.runner().run()
+        checkout = self.world.checkout
+        (checkout / "users" / "x.json").write_text("{}\n")
+        recovery_git = RecoveryGit(str(checkout))
+        recovery_git.stage(MANAGED_ROOT_NAMES)
+        (checkout / "notes.txt").write_text("not for the backup\n")
+        git("add", "notes.txt", cwd=checkout)
+        recovery_git.commit("Recovery backup\n", MANAGED_ROOT_NAMES)
+        committed = git("ls-tree", "-r", "--name-only", "HEAD", cwd=checkout)
+        self.assertIn("users/x.json", committed)
+        self.assertNotIn("notes.txt", committed)
 
     async def test_hooks_of_the_checkout_never_run(self) -> None:
         hooks = self.world.checkout / ".git" / "hooks"

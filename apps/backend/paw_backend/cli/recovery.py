@@ -396,6 +396,13 @@ def _show_restore(result: RestoreResult, apply: bool, err: TextIO | None) -> int
         return EXIT_REFUSED
     data = result.data
     assert data is not None
+    if result.failed == "audit_unrecorded":
+        _say(
+            err,
+            "FAILED (audit_unrecorded): the dry run's audit row could not be "
+            "written; nothing else was written.",
+        )
+        return EXIT_FAILED
     if result.failed is not None:
         _say(
             err,

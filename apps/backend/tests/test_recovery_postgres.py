@@ -470,6 +470,21 @@ class RecoveryPostgresTest(PostgresProjectTestCase):
         self.assertEqual([True, True], busy)
         open_checkout(str(clone), homes).close()  # released afterwards
 
+    async def test_a_dry_run_whose_audit_row_is_lost_fails(self) -> None:
+        await self.back_up()
+        clone = self.world.clone()
+        self.clean_tables()
+
+        class Unrecorded(RecoveryRestorer):
+            async def _record(self, action, reason):
+                return False
+
+        result = await Unrecorded(
+            self.new_database(), clone, protected_homes=self.world.homes
+        ).run()
+        self.assertFalse(result.ok)
+        self.assertEqual("audit_unrecorded", result.failed)
+
     async def test_a_stale_dirty_or_tampered_clone_is_refused(self) -> None:
         await self.back_up()
         stale = self.world.clone("stale")

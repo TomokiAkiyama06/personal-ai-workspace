@@ -43,7 +43,6 @@ class GitProblem(StrEnum):
     NOT_CLEAN = "not_clean"
     NOT_LATEST = "not_latest"
     NO_COMMIT = "no_commit"
-    UNRELATED_STAGED_CHANGES = "unrelated_staged_changes"
 
 
 class RecoveryGitError(Exception):
@@ -163,34 +162,62 @@ class RecoveryGit:
         if absent:
             self._run(["rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", *absent])
 
-    def check_only_managed_staged(self, names: Sequence[str]) -> None:
-        """Refuse when the index holds a change outside the managed names.
+    def _pathspec(self, names: Sequence[str]) -> list[str]:
+        """The managed names that exist on disk, in the index or in ``HEAD``.
 
-        Something an operator (or an interrupted manual command) staged, such as
-        a ``README.md`` or a credential file, would otherwise ride along in the
-        automated commit and push. The job neither commits nor unstages it:
-        ``unrelated_staged_changes``, and a person cleans the index."""
-        result = self._run(
-            ["diff", "--cached", "--name-only", "-z", "--no-renames", "--no-ext-diff"]
-        )
-        allowed = set(names)
-        for path in result.stdout.split(b"\0"):
-            if not path:
-                continue
-            top = path.decode("utf-8", "surrogateescape").split("/", 1)[0]
-            if top not in allowed:
-                raise RecoveryGitError(GitProblem.UNRELATED_STAGED_CHANGES)
+        A name that is neither would make git refuse the whole pathspec."""
+        known = self._run(["ls-files", "-z", "--", *names]).stdout.split(b"\0")
+        if self.head() is not None:
+            # A name removed from the index is still in ``HEAD``: its removal
+            # is part of the commit.
+            known += self._run(["ls-tree", "-z", "--name-only", "HEAD"]).stdout.split(
+                b"\0"
+            )
+        tracked = {
+            path.decode("utf-8", "surrogateescape").split("/", 1)[0]
+            for path in known
+            if path
+        }
+        return [
+            name
+            for name in names
+            if name in tracked or os.path.lexists(os.path.join(self._path, name))
+        ]
 
-    def has_staged_changes(self) -> bool:
+    def has_staged_changes(self, names: Sequence[str]) -> bool:
+        """The managed names differ from ``HEAD`` (other staged paths do not count)."""
+        pathspec = self._pathspec(names)
+        if not pathspec:
+            return False
         result = self._run(
-            ["diff", "--cached", "--quiet", "--no-ext-diff"], check=False
+            ["diff", "--cached", "--quiet", "--no-ext-diff", "--", *pathspec],
+            check=False,
         )
         if result.returncode not in (0, 1):
             raise RecoveryGitError(GitProblem.COMMAND_FAILED)
         return result.returncode == 1
 
-    def commit(self, message: str) -> None:
-        self._run(["commit", "--quiet", "--no-verify", "--message", message])
+    def commit(self, message: str, names: Sequence[str]) -> None:
+        """Commit the managed names **only** (``git commit --only -- <names>``).
+
+        Anything else in the index (an operator's ``git add README.md``, even one
+        made between our staging and this commit) is neither committed nor
+        pushed: it stays staged for a person to deal with."""
+        pathspec = self._pathspec(names)
+        if not pathspec:
+            raise RecoveryGitError(GitProblem.COMMAND_FAILED)
+        self._run(
+            [
+                "commit",
+                "--quiet",
+                "--no-verify",
+                "--only",
+                "--message",
+                message,
+                "--",
+                *pathspec,
+            ]
+        )
 
     def needs_push(self, upstream: Upstream) -> bool:
         """``HEAD`` is not what the remote-tracking branch last saw."""
