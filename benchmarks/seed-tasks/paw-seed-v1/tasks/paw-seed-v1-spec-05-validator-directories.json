@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "task_id": "paw-seed-v1-spec-05-validator-directories",
+  "kind": "spec",
+  "repository": {
+    "locator": "paw-dataset://paw-seed-v1/paw-seed-v1-spec-05-validator-directories",
+    "starting_commit": "eb236c73ca9c9a3b3e5b3465d0594aaef5c7b9a4"
+  },
+  "issue_text": "# Task / Result validatorのCLIがdirectoryを受け付けるようにする\n\nSeed datasetのようにTask JSONが多数あるとき、fileを1つずつ列挙せずに検証できるようにします。\n\n## 仕様\n\n`python -m benchmarks.validate_task`と`python -m benchmarks.validate_result`の両方で:\n\n- 引数にdirectoryを指定すると、その下の`*.json`（再帰的）をpathのsort順ですべて検証します。fileを直接指定した場合は、これまでどおり引数の順に検証します。fileとdirectoryは混在できます。\n- `*.json`が1つもないdirectoryは、stderrへ`<directory>: no task JSON files`（Result validatorでは`<directory>: no result JSON files`）を出して終了code 1にします（他のfileの検証は続けます）。\n- 出力の形式（`<path>: valid`、`<path>:<error>`）と終了codeの意味は変えません。\n- 共通の処理は2つのvalidatorで重複させずに実装し、`benchmarks/README.md`のValidatorの説明を更新してください。\n\n## 作業の条件\n\n- 作業はこのRepositoryのstarting commitから始めます。既存のTestを削除・無効化したり、期待値を不当に緩めたりしてはいけません。\n- 評価はExecutable Evaluatorが行います。公開されたcheck（visible checks）に加えて、候補から見えないHidden checkがあります。\n- Credential・秘密情報をcode・log・commitへ入れないでください（SECURITY.md）。\n",
+  "visible_checks": [
+    {
+      "id": "lint",
+      "type": "lint",
+      "command": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "benchmarks"
+      ]
+    }
+  ],
+  "hidden_checks": [
+    {
+      "id": "hidden-acceptance",
+      "type": "acceptance",
+      "reference_id": "seed-v1-b2157989f951"
+    },
+    {
+      "id": "hidden-regression",
+      "type": "regression",
+      "reference_id": "seed-v1-5358251cce9b"
+    }
+  ]
+}

@@ -79,3 +79,20 @@ MAX_ROUNDS_PER_PROJECT = 50
 DEFAULT_REAP_INTERVAL_SECONDS = 600.0
 MIN_REAP_INTERVAL_SECONDS = 60.0
 MAX_REAP_INTERVAL_SECONDS = 86_400.0
+
+# -- the end of a task and the maintenance loop (issue #125, Decision 0047) --------
+# ``FreshnessMaintenance.end_task`` changes at most one batch (500) per call: the
+# cleanup of one ended task repeats it at most this many times, and the next sweep
+# finishes whatever is left.
+MAX_END_TASK_ROUNDS = 20
+# Terminal tasks with residue that one sweep finishes at most.
+MAX_TASK_END_SWEEP = 100
+# Each freshness job is repeated in a cycle until it changes nothing, at most this
+# many times (a batch each).
+MAX_FRESHNESS_ROUNDS = 20
+# How often the maintenance loop runs (``freshness_loop.py``): a stale candidate is
+# only a lower score until it is marked, and nothing left by an ended task can be
+# used meanwhile, so an hour is enough.
+DEFAULT_FRESHNESS_INTERVAL_SECONDS = 3_600.0
+MIN_FRESHNESS_INTERVAL_SECONDS = 60.0
+MAX_FRESHNESS_INTERVAL_SECONDS = 86_400.0

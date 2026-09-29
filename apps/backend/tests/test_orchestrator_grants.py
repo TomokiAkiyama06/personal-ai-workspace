@@ -5,7 +5,8 @@ NON-superuser application role (``PAW_APP_DATABASE_ROLE``). These tests migrate
 the test database that way, then
 
 * run the DAG store, orchestrator, failure, budget, control, lease, planning,
-  recovery, fenced-command, runtime-budget and tool test classes as that role, so
+  recovery, fenced-command, runtime-budget, tool, production-authority and
+  task-end test classes as that role, so
   every statement the orchestrator executes is proven to work with exactly the
   privileges revision 0034 grants (and, through the real stopper, those of the
   tables it reads), and
@@ -19,18 +20,24 @@ allowed to create roles. Skipped unless ``PAW_TEST_DATABASE_URL`` is set.
 import asyncio
 import unittest
 import uuid
+from datetime import UTC, datetime, timedelta
 
 import psycopg.errors
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
 
+from paw_backend.authz import InMemoryAuditSink
 from paw_backend.db import Database
+from paw_backend.memory.versioning import FreshnessMaintenance
 from paw_backend.orchestrator.domain import ExecutionPlacement
-from paw_backend.tasks import TaskRun
+from paw_backend.orchestrator.task_end import TaskEndCleanup, TaskEndResidue
+from paw_backend.tasks import TaskCommand, TaskRun, TaskService
+from paw_backend.tools import ApprovalService, PostgresApprovalStore
 
 from . import (
     test_orchestrator_abandon,
+    test_orchestrator_authority,
     test_orchestrator_budget,
     test_orchestrator_control,
     test_orchestrator_failures,
@@ -48,9 +55,11 @@ from . import (
     test_orchestrator_store,
     test_orchestrator_tools,
 )
+from .gate_support import ALWAYS_ACTIVE
 from .orchestrator_support import PostgresOrchestratorTestCase, diamond
 from .support import make_settings
 from .task_support import TEST_DATABASE_URL, migrate, new_database, requires_postgres
+from .tools_store_contract import LIMITS, new_approval
 
 _RUN = uuid.uuid4().hex[:10]
 APP_ROLE = f"paw_orch_app_{_RUN}"
@@ -352,6 +361,16 @@ class StorePlacementAsAppRole(
     pass
 
 
+class StoredScopeAsAppRole(AsAppRole, test_orchestrator_authority.StoredScopeTest):
+    pass
+
+
+class StoredAuthorityThroughTheOrchestratorAsAppRole(
+    AsAppRole, test_orchestrator_authority.StoredAuthorityThroughTheOrchestratorTest
+):
+    pass
+
+
 class PlacementHandleAsAppRole(
     AsAppRole, test_orchestrator_placement.PlacementHandleTest
 ):
@@ -362,6 +381,43 @@ class OrchestratorPlacementAsAppRole(
     AsAppRole, test_orchestrator_placement.OrchestratorPlacementTest
 ):
     pass
+
+
+@requires_postgres
+class TaskEndAsAppRole(AsAppRole, PostgresOrchestratorTestCase):
+    """The task-end cleanup and its sweep (issue #125) as the application role:
+    the listener's revocation and retirement, and the residue query."""
+
+    async def test_the_cleanup_and_the_sweep_run_as_the_app_role(self):
+        database = self.new_database()
+        store = PostgresApprovalStore(database)
+        cleanup = TaskEndCleanup(
+            ApprovalService(store, InMemoryAuditSink()),
+            FreshnessMaintenance(database),
+            TaskEndResidue(database),
+        )
+        tasks = TaskService(
+            database, project_gate=ALWAYS_ACTIVE, listeners=[cleanup.on_task_event]
+        )
+        bare = TaskService(database, project_gate=ALWAYS_ACTIVE)
+        ended = []
+        for service in (tasks, bare):
+            task_id = await self.create_task(service)
+            now = datetime.now(UTC)
+            approval = new_approval(
+                task_id=task_id, expires_at=now + timedelta(hours=1)
+            )
+            await store.open_request(approval, now=now, limits=LIMITS)
+            await service.execute(task_id, TaskCommand.CANCEL, actor=self.system)
+            ended.append((task_id, approval.approval_id))
+
+        # The listener revoked the first; the sweep finds and revokes the second.
+        (first, first_approval), (second, second_approval) = ended
+        self.assertEqual((await store.get(first_approval)).status.value, "revoked")
+        self.assertIn(second, await TaskEndResidue(database).task_ids(100))
+        reports = {report.task_id: report for report in await cleanup.sweep()}
+        self.assertTrue(reports[second].done)
+        self.assertEqual((await store.get(second_approval)).status.value, "revoked")
 
 
 @requires_postgres
