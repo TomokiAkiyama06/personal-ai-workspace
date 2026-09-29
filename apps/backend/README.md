@@ -3588,7 +3588,7 @@ $PAW_MEMORY_PROJECTION_DIR/                 # 0700。Backend の OS User だけ�
 - 書く前の確認（`sync` の最初）で、Root と Projection が開くすべての Directory（上の Directory・`<uuid>` の Directory）に git が Repository とみなす `.git` があれば、何も書かず消さずに失敗します（`write_files:inside_git_work_tree`）。受け入れた後に中へ作られた Checkout へも書きません。
 - Directory は `0700`、File は `0600`（`fchmod`、umask によらない）。Directory は親の `dir_fd` から `O_NOFOLLOW` で開き、Symbolic Link があれば失敗します（`unsafe_entry`）。File は一時名に書いて `fsync` し `rename` するので、Link・Hard Link の先へは書きません。
 - Projection が作れる名前（`<uuid>.md`、`INDEX.md`、上の Directory、`<uuid>` の Directory、自分の一時 File）以外は読まず消さず、`unmanaged` として数えるだけです。
-- Marker の `flock`（非 Blocking）を読み取りの前から結果を Audit に記録し終えるまで持つので、同時の 2 つ目の実行は何もせず、Lock を取った PAW-047 は目の前の File に対応する結果を必ず読めます。SIGTERM が記録の最中に来ても、記録を終えてから取り消しになります（すべての Step が成功した後の SIGTERM は、Flag を残して 2 行目の `write_files:CancelledError` を記録します）。
+- Marker の `flock`（非 Blocking）を読み取りの前から結果を Audit に記録し終えるまで持つので、同時の 2 つ目の実行は何もせず（初回の 2 つの実行が同時でも、Marker は一時名に書いて fsync した後に hard link で置くので、後の実行は先の Marker を置き換えずに確かめて同じ File の Lock を待たずに失敗します）、Lock を取った PAW-047 は目の前の File に対応する結果を必ず読めます。SIGTERM が記録の最中に来ても、記録を終えてから取り消しになります（すべての Step が成功した後の SIGTERM は、Flag を残して 2 行目の `write_files:CancelledError` を記録します）。
 
 ### 実行と失敗の通知
 
