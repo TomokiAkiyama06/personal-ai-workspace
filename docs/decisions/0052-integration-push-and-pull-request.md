@@ -29,7 +29,7 @@
 
 ### 2. PR を作る Repository
 
-- 検査した Repository のうち、**Gate が読んだ今の Scope で Working Set の Role が `target`** のものだけ。`working` の Repository は Push も PR もしない（Decision 0030 の 5 節は `working` に PR を求めない）。Scope から外された Repository（Checkout がない、Project が削除された）にも作らない。
+- 検査した Repository のうち、**Push の直前に読み直した Task の Scope で Working Set の Role が `target`** のものだけ（検査の前に読んだ Scope は使わない。検査の間に Project が Archived になった、ACL が狭められた、Remote や Role が変わった場合は、今の状態で判定する）。`working` の Repository は Push も PR もしない（Decision 0030 の 5 節は `working` に PR を求めない）。Scope から外された Repository（Checkout がない、Project が削除された）にも作らない。
 - `target` から降格された Repository は、Decision 0030 の義務（PR）を負い続けるが、Role の上限で `project.pr.create` がないので作らない。Task は `evaluating` のまま（Human が Role を戻すか、変更を破棄して降格を確かめる）。
 - **推奨: この形で承認する。**
 
@@ -64,7 +64,7 @@
 
 ### 7. 既存の PR の扱い（冪等）
 
-- 作る前に、その branch の PR を GitHub に尋ねる（`state=all`）。あればそれを記録し、新しく作らない。複数あれば `open` → `merged` → `draft` → `closed` の順に選ぶ。
+- 作る前に、その branch の PR を GitHub に尋ねる（`state=all`）。**Base が default branch の PR だけ**を対象にし（別の branch に向けた PR は、検査した変更を default branch に提案していない）、あればそれを記録し、新しく作らない。作った PR の Base が default branch でなければ `invalid_response`。複数あれば `open` → `merged` → `draft` → `closed` の順に選ぶ。
 - `draft` はそのまま `draft` として記録し（届いていないので Task は `evaluating`）、Ready にはしない。**`closed`（Merge されずに閉じられた）の PR があれば、新しい PR を作らない**（Human が閉じた判断を上書きしない）。`closed` を記録し、Task は `evaluating` のまま（`requirements_not_met`）。Human は Task を Cancel するか、GitHub で PR を開き直してから Gate をもう一度動かす。
 - 作る要求が拒まれたら（同時に作られた場合を含む）、もう一度尋ね、あればそれを使う。
 - 新しい試行（Restart）は branch の名前が変わるので、新しい PR になる。

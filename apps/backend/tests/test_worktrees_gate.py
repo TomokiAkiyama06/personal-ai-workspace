@@ -591,6 +591,50 @@ class PublishingGateTest(PostgresOrchestratorTestCase):
         self.assertEqual(report.outcome, GateOutcome.REQUIREMENTS_NOT_MET)
         self.assertEqual(self.publisher.requests, [])
 
+    async def test_the_scope_is_read_again_before_publishing(self):
+        # Codex review of #159: the checks may run long; an archived project,
+        # a narrowed ACL, a removed remote or role since the scope was read
+        # for the checks must decide the push, not the old scope.
+        task_id = await self.task_in_state(TaskState.EVALUATING)
+        gate = self.gate()
+        authority = gate._authority
+
+        async def archive_meanwhile():
+            archived = authority.repositories[0]
+            authority.repositories = (
+                ScopedRepository(
+                    archived.repo_id,
+                    archived.project_id,
+                    archived.root,
+                    RepoAcl.override(archived.repo_id, self.project_id, ()),
+                    remotes=(),
+                    role=RepoRole.TARGET,
+                ),
+            )
+
+        self.checks[CheckKind.REVIEW].action = archive_meanwhile
+
+        await gate.evaluate(task_id)
+
+        (request,) = self.publisher.requests
+        self.assertEqual(request.repository.remotes, ())
+        self.assertEqual(request.repository.acl.allowed, frozenset())
+
+    async def test_a_target_removed_while_checking_gets_no_pull_request(self):
+        task_id = await self.task_in_state(TaskState.EVALUATING)
+        gate = self.gate()
+        authority = gate._authority
+
+        async def remove_meanwhile():
+            authority.repositories = ()
+
+        self.checks[CheckKind.REVIEW].action = remove_meanwhile
+
+        report = await gate.evaluate(task_id)
+
+        self.assertEqual(self.publisher.requests, [])
+        self.assertEqual(report.outcome, GateOutcome.REQUIREMENTS_NOT_MET)
+
     async def test_a_task_that_moved_on_while_publishing_is_left_alone(self):
         task_id = await self.task_in_state(TaskState.EVALUATING)
 

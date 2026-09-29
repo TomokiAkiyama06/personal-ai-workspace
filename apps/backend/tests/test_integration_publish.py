@@ -67,8 +67,11 @@ class FakeGitHub:
         self.raises: Exception | None = None
         self.answer: object | None = None  # replaces the created pull request
 
-    def pull(self, number, branch, *, state="open", draft=False, merged=False):
+    def pull(
+        self, number, branch, *, state="open", draft=False, merged=False, base="main"
+    ):
         return {
+            "base": {"ref": base},
             "number": number,
             "html_url": f"https://{HOST}/{OWNER}/{REPO}/pull/{number}",
             "state": state,
@@ -321,6 +324,22 @@ class PublisherTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(pull_request.number, 7)
                 self.assertEqual(pull_request.state, state)
                 self.assertEqual(self.github.methods(), ["GET"])
+
+    async def test_a_pull_request_to_another_base_is_not_the_one(self):
+        # Codex review of #159: a pull request of the branch against another
+        # branch than the default one does not propose the checked changes to
+        # it; a new one is made against the default branch.
+        self.github.pulls = [self.github.pull(5, self.branch, base="dev")]
+
+        pull_request = await self.publisher().publish(self.request())
+
+        self.assertEqual(pull_request.number, 2)
+        self.assertEqual(self.github.pulls[-1]["base"]["ref"], "main")
+        self.assertEqual(self.github.methods(), ["GET", "POST"])
+
+    async def test_a_created_pull_request_to_another_base_is_refused(self):
+        self.github.answer = self.github.pull(1, self.branch, base="dev")
+        await self.refused(PublishProblem.INVALID_RESPONSE)
 
     def test_the_open_pull_request_is_chosen_among_several(self):
         def info(number, state):

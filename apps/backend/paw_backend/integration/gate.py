@@ -308,7 +308,7 @@ class IntegrationGate:
             return GateReport(GateOutcome.SUPERSEDED, task_id, tuple(verdicts), targets)
         publications: tuple[Publication, ...] = ()
         if self._publisher is not None:
-            published = await self._publish(task, run, request, targets, verdicts)
+            published = await self._publish(task, run, targets, verdicts)
             if isinstance(published, GateReport):
                 return published
             publications = published
@@ -320,28 +320,35 @@ class IntegrationGate:
         self,
         task: TaskSnapshot,
         run: TaskRun,
-        request: IntegrationRequest,
         targets: tuple[IntegrationTarget, ...],
         verdicts: list[tuple[CheckKind, bool, str]],
     ) -> tuple[Publication, ...] | GateReport:
         """Push and open the pull request of every checked repository whose
-        Working Set role is ``target`` now, and record each on the repository's
-        state in the attempt (issue #132). A report when the gate must stop: the
-        task moved on (``SUPERSEDED``), the attempt lost a repository
-        (``NOT_RECORDED``) or a pull request was not made (``NOT_PUBLISHED``)."""
+        Working Set role is ``target`` in the task's scope as it is now (read
+        again), and record each on the repository's state in the attempt
+        (issue #132). A report when the gate must stop: the task moved on
+        (``SUPERSEDED``), the attempt lost a repository (``NOT_RECORDED``) or a
+        pull request was not made (``NOT_PUBLISHED``)."""
         counts: dict[str, int] = {}
         for kind, _passed, _summary in verdicts:
             counts[kind.value] = counts.get(kind.value, 0) + 1
         checks = tuple(counts.items())
-        scoped = {
-            repository.repo_id: repository for repository in request.scope.repositories
-        }
         publications: list[Publication] = []
 
         def report(outcome: GateOutcome) -> GateReport:
             return GateReport(
                 outcome, task.id, tuple(verdicts), targets, tuple(publications)
             )
+
+        try:
+            # Read again now, not the scope the checks were given: they may
+            # have run long, and a project archived, an ACL narrowed, a remote
+            # or a role changed since decides the push (Codex review of #159).
+            scope = await self._authority.parent_scope(task)
+        except Exception as error:
+            logger.warning("Task scope unavailable (%s)", error_class_of(error))
+            return report(GateOutcome.NOT_PUBLISHED)
+        scoped = {repository.repo_id: repository for repository in scope.repositories}
 
         for target in targets:
             repository = scoped.get(target.repo_id)
@@ -355,7 +362,7 @@ class IntegrationGate:
                         task=task,
                         run=run,
                         repository=repository,
-                        project_state=request.scope.projects.get(repository.project_id),
+                        project_state=scope.projects.get(repository.project_id),
                         target=target,
                         checks=checks,
                     )
