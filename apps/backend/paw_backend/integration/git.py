@@ -37,6 +37,7 @@ the Wrapper's allowlist of Decision 0029; the second form of ``status``
 :meth:`WorktreeGit.is_exactly_committed`) are Decision 0051's.
 """
 
+import contextlib
 import os
 import re
 from collections.abc import Sequence
@@ -405,21 +406,28 @@ class WorktreeGit:
     async def merge(self, path: Where, branch: str, account: LinuxAccount) -> bool:
         """``git merge --no-ff`` of ``branch`` into the branch checked out at
         ``path``. ``False`` when git did not merge (the merge is then aborted, so
-        the worktree is left as it was)."""
-        result = await self._run(
-            [
-                *_COMMIT_CONFIG,
-                "merge",
-                "--no-ff",
-                "--no-edit",
-                "--quiet",
-                "-m",
-                f"Integrate {validate_branch(branch)}",
-                _ref(branch),
-            ],
-            account,
-            path,
-        )
+        the worktree is left as it was). A ``GitCommandError`` of the runner
+        itself (a timeout, too much output) aborts the merge git may already
+        have started as well, then propagates (Codex P2 on PR #130: a merge left
+        in progress would make the next attempt wait for a human)."""
+        args = [
+            *_COMMIT_CONFIG,
+            "merge",
+            "--no-ff",
+            "--no-edit",
+            "--quiet",
+            "-m",
+            f"Integrate {validate_branch(branch)}",
+            _ref(branch),
+        ]
+        try:
+            result = await self._run(args, account, path)
+        except GitCommandError:
+            # The original error is what the caller reports; a failed abort
+            # leaves the worktree to the next attempt's check (DIRTY).
+            with contextlib.suppress(GitCommandError):
+                await self.abort_merge(path, account)
+            raise
         if result.returncode == 0:
             return True
         await self.abort_merge(path, account)
