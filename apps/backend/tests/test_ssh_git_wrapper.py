@@ -1154,6 +1154,34 @@ class RepositoryLocationTest(WrapperTestCase):
                 self.assert_rejected("git_dir_outside_root", self.locate, stdout)
         self.assert_rejected("probe_failed", self.locate, error=OSError())
 
+    def test_a_link_inside_the_git_directory_is_refused(self):
+        common = f"{self.checkout}/.git"
+        os.makedirs(f"{common}/refs/heads")
+        os.makedirs(f"{common}/hooks")
+        wrapper.check_links([common, self.git_dir])
+        os.symlink(self.outside, f"{common}/hooks/linked")  # never written
+        wrapper.check_links([common, self.git_dir])
+        for place in (
+            f"{common}/refs/heads/paw",
+            f"{self.git_dir}/logs",
+            f"{common}/packed-refs",
+        ):
+            with self.subTest(place=place):
+                os.symlink(self.outside, place)
+                self.assert_rejected("git_dir_link", wrapper.check_links, [common])
+                self.assert_rejected(
+                    "git_dir_link", wrapper.check_links, [self.git_dir, common]
+                )
+                os.remove(place)
+        os.symlink(common, f"{self.root}/linked-git")
+        self.assert_rejected(
+            "git_dir_link", wrapper.check_links, [f"{self.root}/linked-git"]
+        )
+        os.chmod(f"{common}/refs", 0)
+        self.addCleanup(os.chmod, f"{common}/refs", 0o755)
+        if not os.access(f"{common}/refs", os.R_OK):  # not when run as root
+            self.assert_rejected("git_dir_link", wrapper.check_links, [common])
+
     def test_init_runs_only_where_it_creates_the_repository(self):
         other = f"{self.root}/other"
         os.makedirs(other)
@@ -1162,6 +1190,77 @@ class RepositoryLocationTest(WrapperTestCase):
             self.plan,
             ["init", "--quiet", "--template=", "--initial-branch=main", "--", other],
         )
+
+
+class StatusWithSubmodulesTest(WrapperTestCase):
+    """The ``status`` of Decision 0051 (PR #130): pinned only, exactly this
+    form, and never with a populated submodule."""
+
+    FORM = [
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=normal",
+        "--ignored=traditional",
+        "--ignore-submodules=none",
+    ]
+
+    def test_the_form_is_accepted_pinned(self):
+        invocation = self.pinned(self.FORM)
+        self.assertEqual(invocation.argv[-len(self.FORM) :], self.FORM)
+        self.assertEqual(
+            invocation.gitlinks,
+            [
+                invocation.argv[0],
+                f"--git-dir={self.git_dir}",
+                f"--work-tree={self.worktree}",
+                "ls-files",
+                "--stage",
+                "-z",
+            ],
+        )
+        self.assertIsNotNone(invocation.probe)
+        self.assertIsNone(self.pinned(RepositoryConfigurationTest.STATUS).gitlinks)
+
+    def test_other_forms_are_refused(self):
+        form = self.FORM[1:]
+        variants = [
+            form[:-1],
+            form[1:],
+            [form[0], form[1], form[2], form[4], form[3]],
+            [*form[:3], "--ignored", form[4]],
+            [*form[:3], "--ignored=matching", form[4]],
+            [*form[:3], "--ignored=no", form[4]],
+            [form[0], form[1], "--untracked-files=all", *form[3:]],
+            [*form[:4], "--ignore-submodules=dirty"],
+            [*form[:4], "--ignore-submodules"],
+            [*form, "--"],
+            [*form, "."],
+            [*form, "--ignore-submodules=none"],
+        ]
+        for args in variants:
+            with self.subTest(args=args):
+                self.assert_rejected("bad_arguments", self.pinned, ["status", *args])
+        # Not pinned (the checkout, whose submodules git would enter).
+        self.assert_rejected("bad_arguments", self.plan, self.FORM)
+
+    def check(self, stdout, returncode=0):
+        def run(argv, **kwargs):
+            return subprocess.CompletedProcess(argv, returncode, stdout, b"")
+
+        wrapper.check_submodules(self.pinned(self.FORM), run)
+
+    def test_a_populated_submodule_refuses_the_call(self):
+        oid = "0" * 40
+        listed = f"100644 {oid} 0\tcode.txt\x00160000 {oid} 0\tlib/sub\x00".encode()
+        self.check(listed)  # not populated: no `.git` there
+        os.makedirs(f"{self.worktree}/lib/sub/.git")
+        self.assert_rejected("populated_submodule", self.check, listed)
+        os.rmdir(f"{self.worktree}/lib/sub/.git")
+        with open(f"{self.worktree}/lib/sub/.git", "w", encoding="utf-8") as f:
+            f.write("gitdir: /elsewhere\n")
+        self.assert_rejected("populated_submodule", self.check, listed)
+        self.assert_rejected("probe_failed", self.check, b"", returncode=128)
 
 
 class RejectedWireTest(WrapperTestCase):
@@ -1841,6 +1940,124 @@ class EndToEndTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(_consume(marker))
         self.assertEqual(requests, [])
+
+    async def test_the_status_of_decision_0051_runs_pinned_without_submodules(self):
+        checkout = f"{self.root}/project"
+        base = self.world.make_repository(checkout)
+        worktree = f"{self.root}/.paw-worktrees/t/1/r/_integration"
+        result = await self.run_git(
+            [
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "paw/t/1/_integration",
+                "--",
+                worktree,
+                base,
+            ],
+            cwd=checkout,
+        )
+        self.assertEqual(result.returncode, 0)
+        status = [
+            f"--git-dir={checkout}/.git/worktrees/_integration",
+            f"--work-tree={worktree}",
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=normal",
+            "--ignored=traditional",
+            "--ignore-submodules=none",
+        ]
+        result = await self.run_git(status, cwd=worktree)
+        self.assertEqual((result.returncode, result.stdout), (0, ""))
+        fs.write(worktree, ".gitignore", ".env\n")
+        git("add", ".gitignore", cwd=worktree)
+        git("commit", "--quiet", "-m", "ignore", cwd=worktree)
+        fs.write(worktree, ".env", "SECRET=1\n")
+        result = await self.run_git(status, cwd=worktree)
+        self.assertEqual((result.returncode, result.stdout), (0, "!! .env\0"))
+        # A populated submodule whose own configuration has a filter: git would
+        # run it in a child git. The wrapper refuses the call instead.
+        nested = f"{self.world.root}/nested"
+        self.world.make_repository(nested)
+        git(
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "--quiet",
+            nested,
+            "sub",
+            cwd=worktree,
+        )
+        git("commit", "--quiet", "-m", "submodule", cwd=worktree)
+        marker = f"{self.world.root}/filter-ran"
+        git("config", "filter.x.clean", f"touch {marker}; cat", cwd=f"{worktree}/sub")
+        fs.write(f"{worktree}/sub", ".gitattributes", "* filter=x\n")
+        fs.write(f"{worktree}/sub", "code.txt", "changed\n")
+        result = await self.run_git(status, cwd=worktree)
+        self.assertEqual(result.returncode, wrapper.REJECTED)
+        self.assertFalse(_consume(marker))
+
+    async def test_a_link_inside_the_git_directory_is_never_followed(self):
+        # A symbolic link inside the repository's own metadata (planted by
+        # whatever can write the shared .git) would let git create files
+        # outside the root while the git directory itself is inside it.
+        checkout = f"{self.root}/project"
+        base = self.world.make_repository(checkout)
+        outside = f"{self.world.root}/outside-refs"
+        os.makedirs(outside)
+        os.symlink(outside, f"{checkout}/.git/refs/heads/paw")
+        add = [
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            "paw/victim",
+            "--",
+            f"{self.root}/.paw-worktrees/t/1/r/victim",
+            base,
+        ]
+        result = await self.run_git(add, cwd=checkout)
+        self.assertEqual(result.returncode, wrapper.REJECTED)
+        self.assertEqual(os.listdir(outside), [])
+        for args in (
+            ["rev-parse", "--show-toplevel"],
+            ["remote", "add", "--", "origin", "https://github.com/o/r.git"],
+        ):
+            with self.subTest(args=args):
+                result = await self.run_git(args, cwd=checkout)
+                self.assertEqual(result.returncode, wrapper.REJECTED)
+        # Pinned, through the worktree's own directory under .git/worktrees.
+        os.remove(f"{checkout}/.git/refs/heads/paw")
+        worktree = f"{self.root}/.paw-worktrees/t/1/r/build"
+        result = await self.run_git(
+            ["worktree", "add", "--quiet", "-b", "paw/t/1/build", "--", worktree, base],
+            cwd=checkout,
+        )
+        self.assertEqual(result.returncode, 0)
+        git_dir = f"{checkout}/.git/worktrees/build"
+        shutil.rmtree(f"{git_dir}/logs", ignore_errors=True)
+        os.symlink(outside, f"{git_dir}/logs")
+        result = await self.run_git(
+            [
+                f"--git-dir={git_dir}",
+                f"--work-tree={worktree}",
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--untracked-files=all",
+            ],
+            cwd=worktree,
+        )
+        self.assertEqual(result.returncode, wrapper.REJECTED)
+        # A link among the hooks (which git never writes, and never runs
+        # here) is left alone.
+        os.remove(f"{git_dir}/logs")
+        os.symlink(outside, f"{checkout}/.git/hooks/linked")
+        result = await self.run_git(["rev-parse", "--show-toplevel"], cwd=checkout)
+        self.assertEqual(result.returncode, 0)
 
     async def test_a_work_tree_named_in_the_configuration_is_never_used(self):
         # `core.worktree` in the shared configuration would move an unpinned

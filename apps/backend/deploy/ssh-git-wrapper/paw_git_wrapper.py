@@ -44,7 +44,8 @@ undoes ``shlex.quote``) into the words of Decision 0029 §2::
   Decision 0029 §3 and Decision 0036 §13 (:data:`SUBCOMMANDS`) exactly;
 * for a call not pinned to a git directory (``clone`` aside), the git
   directory and common directory git finds from the cwd must be inside the
-  root and outside ``.paw-worktrees`` (:func:`check_location`);
+  root and outside ``.paw-worktrees`` (:func:`check_location`), and hold no
+  symbolic link (:func:`check_links`; so must a pinned call's);
 * for a sub-command that reads file content (:data:`CONTENT_SUBCOMMANDS`), the
   configuration git would read must name no command (a ``filter`` driver, a
   ``merge`` driver, an ``include``, ...: :func:`check_configuration`).
@@ -558,8 +559,25 @@ def _check_merge_base(args: list[str], places: Places, config: Config) -> None:
     raise Rejected("bad_arguments")
 
 
+#: The ``status`` of Decision 0051 (PR #130): whether an integration worktree
+#: is exactly its commit, ignored files and changes inside submodules included.
+#: Only pinned; ``--ignore-submodules=none`` overrides the wrapper's own
+#: ``diff.ignoreSubmodules=all``, so git would start a child git inside every
+#: populated submodule, whose configuration nothing here checked: such a call
+#: is refused when any is populated (:func:`check_submodules`).
+STATUS_WITH_SUBMODULES = [
+    "--porcelain=v1",
+    "-z",
+    "--untracked-files=normal",
+    "--ignored=traditional",
+    "--ignore-submodules=none",
+]
+
+
 def _check_status(args: list[str], places: Places, config: Config) -> None:
-    if not _exactly(args, ["--porcelain=v1", "-z", "--untracked-files=all"]):
+    if not _exactly(
+        args, ["--porcelain=v1", "-z", "--untracked-files=all"], STATUS_WITH_SUBMODULES
+    ):
         raise Rejected("bad_arguments")
 
 
@@ -608,6 +626,13 @@ class Invocation:
     locate: list[str] | None = None
     root: str = ""
     worktrees: str = ""
+    #: For the ``status`` of :data:`STATUS_WITH_SUBMODULES`: the ``git
+    #: ls-files`` call that lists the index, whose submodules (gitlinks) must
+    #: all be unpopulated (:func:`check_submodules`).
+    gitlinks: list[str] | None = None
+    #: The git directory and common directory of a pinned call (checked in
+    #: :func:`plan`), which must hold no symbolic link (:func:`check_links`).
+    metadata: tuple[str, ...] = ()
 
 
 def _split(original: str | None) -> list[str]:
@@ -687,6 +712,7 @@ def plan(original: str | None, config: Config) -> Invocation:
             raise Rejected("config_not_allowed")
 
     pinned: list[str] = []
+    metadata: list[str] = []
     if git_dir is not None or work_tree is not None:
         if git_dir is None or work_tree is None or not pinnable:
             raise Rejected("bad_option")
@@ -699,6 +725,7 @@ def plan(original: str | None, config: Config) -> Invocation:
         if not os.path.isdir(real_tree) or real_tree != cwd:
             raise Rejected("bad_work_tree")
         _check_backlink(real_dir, real_tree)
+        metadata = [real_dir, os.path.dirname(os.path.dirname(real_dir))]
         pinned = [f"--git-dir={real_dir}", f"--work-tree={real_tree}"]
     elif subcommand != "rev-parse" and _within(cwd, places.worktrees, allow_equal=True):
         # A worker's worktree is written by an agent: its ``.git`` may name a
@@ -730,6 +757,11 @@ def plan(original: str | None, config: Config) -> Invocation:
     probe = None
     if subcommand in CONTENT_SUBCOMMANDS and args[:1] not in (["list"], ["prune"]):
         probe = configuration_probe(config, pinned)
+    gitlinks = None
+    if subcommand == "status" and args == STATUS_WITH_SUBMODULES:
+        if not pinned:
+            raise Rejected("bad_arguments")
+        gitlinks = [config.git, *pinned, "ls-files", "--stage", "-z"]
     locate = None
     if not pinned and subcommand != "clone":
         locate = [
@@ -748,6 +780,8 @@ def plan(original: str | None, config: Config) -> Invocation:
         locate,
         places.root,
         places.worktrees,
+        gitlinks,
+        tuple(metadata),
     )
 
 
@@ -779,8 +813,61 @@ def check_repository(
     """What must hold of the repository itself before ``invocation`` runs:
     where its git directory is (:func:`check_location`), and what its
     configuration names (:func:`check_configuration`)."""
-    check_location(invocation, run)
+    found = check_location(invocation, run)
+    check_links([*invocation.metadata, *found])
     check_configuration(invocation, run)
+    check_submodules(invocation, run)
+
+
+#: Directories of a git directory that git reads but never writes, where a
+#: symbolic link is left alone (hooks never run here: ``core.hooksPath``).
+_UNWRITTEN = frozenset({"hooks"})
+
+
+def check_links(directories: Sequence[str]) -> None:
+    """Refuse the call when any of ``directories`` (a git directory, a common
+    directory) holds a symbolic link, ``hooks/`` aside: git creates files
+    under ``refs/``, ``logs/``, ``objects/``, ``worktrees/``, ... and would
+    follow a linked directory there out of the root, although the directory
+    itself was checked to be inside it."""
+    todo = sorted(set(directories))
+    for index, top in enumerate(todo):
+        if any(_within(top, other, allow_equal=False) for other in todo[:index]):
+            continue  # already walked with the directory it is in
+        if os.path.islink(top):
+            raise Rejected("git_dir_link")
+
+        def fail(error: OSError) -> None:
+            raise Rejected("git_dir_link")
+
+        for path, dirs, files in os.walk(top, onerror=fail, followlinks=False):
+            if path == top:
+                dirs[:] = [name for name in dirs if name not in _UNWRITTEN]
+            for name in (*dirs, *files):
+                if os.path.islink(os.path.join(path, name)):
+                    raise Rejected("git_dir_link")
+
+
+def check_submodules(
+    invocation: Invocation,
+    run: Callable[..., "subprocess.CompletedProcess[bytes]"] = subprocess.run,
+) -> None:
+    """Refuse the ``status`` of :data:`STATUS_WITH_SUBMODULES` when a
+    submodule (a gitlink in the index) is populated (has a ``.git`` in the work
+    tree): git would run a child git there, with that repository's own
+    configuration (a ``filter`` is a command), which an agent may have
+    planted. ``ls-files`` reads only the index and starts no command."""
+    if invocation.gitlinks is None:
+        return
+    listed = _probe(invocation, invocation.gitlinks, run, "probe_failed")
+    if listed.returncode != 0:
+        raise Rejected("probe_failed")
+    for entry in listed.stdout.split(b"\0"):
+        if not entry.startswith(b"160000 "):
+            continue
+        path = entry.partition(b"\t")[2].decode("utf-8", "surrogateescape")
+        if not path or os.path.lexists(os.path.join(invocation.cwd, path, ".git")):
+            raise Rejected("populated_submodule")
 
 
 def _probe(
@@ -804,7 +891,7 @@ def _probe(
 def check_location(
     invocation: Invocation,
     run: Callable[..., "subprocess.CompletedProcess[bytes]"] = subprocess.run,
-) -> None:
+) -> list[str]:
     """Refuse an unpinned ``invocation`` whose git directory or common
     directory, as git itself finds them from the cwd (a ``.git`` directory, a
     ``gitdir:`` file, a link, a ``commondir``), is outside the root or inside
@@ -812,18 +899,20 @@ def check_location(
     let a ``.git`` in the root lead git to a repository outside it.
 
     A cwd in no repository at all is left to git (``rev-parse
-    --is-bare-repository`` answers 128 there, which the backend reads)."""
+    --is-bare-repository`` answers 128 there, which the backend reads).
+    Returns the two directories, resolved (none when not located)."""
     if invocation.locate is None:
-        return
+        return []
     found = _probe(invocation, invocation.locate, run, "probe_failed")
     if found.returncode != 0:
-        return
+        return []
     try:
         lines = found.stdout.decode("utf-8").split("\n")
     except UnicodeDecodeError:
         raise Rejected("git_dir_outside_root") from None
     if len(lines) != 3 or lines[2] != "" or not all(lines[:2]):
         raise Rejected("git_dir_outside_root")
+    places = []
     for place in lines[:2]:
         try:
             real = os.path.realpath(place, strict=True)
@@ -833,6 +922,8 @@ def check_location(
             real, invocation.worktrees, allow_equal=True
         ):
             raise Rejected("git_dir_outside_root")
+        places.append(real)
+    return places
 
 
 def check_configuration(
