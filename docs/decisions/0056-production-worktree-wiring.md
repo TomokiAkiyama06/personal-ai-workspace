@@ -1,9 +1,10 @@
 # 本番の組み立てで Orchestrator に Parallel Worktree / Integration Node を配線する方針（無効にする設定を持たない、起動時に置き場所を確かめない、git の Runner と Account、worktree の要らない Task）
 
-- Status: Proposed
+- Status: Approved
 - Date: 2026-09-29
 - Scope: Issue [#155](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/155)。`paw_backend/orchestrator/composition.py`（`build_task_execution`、`build_worktrees`、`TaskExecution.worktrees`）、`paw_backend/app.py`（`create_app(git_runner=...)`）、`paw_backend/integration/coordinator.py`（worktree を受け取る Repository がないときの `prepare_node` / `integrate` / `targets`）。Migration はない
 - Supersedes: なし。[Decision 0036](0036-parallel-worktree-integration.md)（Parallel Worktree / Integration Node）、[Decision 0051](0051-integration-worktree-ignored-files.md)、[Decision 0047](0047-task-execution-composition-and-task-end-effects.md)（本番の組み立て）、[Decision 0029](0029-per-user-git-runner-ssh.md)（Per-user の `GitRunner`）、[Decision 0017](0017-repository-registration-policy.md)（Linux Account の対応）はどれも書き換えない。この Decision はそれらの間の配線だけを扱う
+- Approval: 2026-09-29、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで「推奨どおり」と回答して承認（1〜5 の全点。末尾の「承認時の決定」）
 
 ## 背景
 
@@ -62,7 +63,7 @@ PR #151（#125、Decision 0047 Approved）の `build_task_execution` は、Agent
 2. 起動時に確かめないので、git がない・`workspace_subdir` が書けない配備の誤りは、最初の Task の実行まで見えない（Node の失敗と Task Log の固定の理由で見える）。
 3. SSH（他の Linux User）での統合は未検証（Decision 0036 のリスク 1 と同じ）。この PR の Test は、Test を実行する User 自身の一時 Repository と `SubprocessGitRunner` だけを使う。
 
-## 判断が必要な点
+## 判断が必要な点（2026-09-29 に推奨どおり承認）
 
 1. 本番の Orchestrator は必ず worktree を持ち、無効にする設定を持たないこと（1）。推奨: 承認。
 2. worktree の Root の設定を作らず、起動時に置き場所・git を確かめない（使えなければ Node / Task の単位で Fail closed）こと（2）。推奨: 承認。
@@ -74,3 +75,7 @@ PR #151（#125、Decision 0047 Approved）の `build_task_execution` は、Agent
 
 判断が必要な点が承認されたら、`Approval` に記録し、Status を Approved に改める。承認されない点は実装を変え、新しい Decision を作らずにこの Decision を承認前に改める（承認後に方針を変えるときは、この Decision を書き換えず、新しい Decision から `Supersedes` する）。
 [REQUIREMENTS.md](../../REQUIREMENTS.md) の原文は書き換えない。
+
+## 承認時の決定（2026-09-29）
+
+Human は、作業 Session で判断が必要な点について推奨つきの説明を受け、「推奨どおり」と回答して承認した（1〜5 の全点）。**すべて推奨どおり**で、個別の変更はない。

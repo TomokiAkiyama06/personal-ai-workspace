@@ -30,7 +30,7 @@ objects that run tasks, each wired to the others the way production needs:
   settings (the worktree area ``<home>/<workspace_subdir>/.paw-worktrees``, the
   git timeout). There is no switch to leave it out: every writing Worker node of
   a repository with a checkout gets its own worktree (``REQUIREMENTS.md``), and a
-  task without one runs as before (Decision 0056, Proposed);
+  task without one runs as before (Decision 0056);
 * what the maintenance loop (``freshness_loop.build_freshness_loop``) runs: the
   freshness jobs and the task-end sweep (the application's lifespan starts it).
 
