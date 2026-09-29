@@ -1,10 +1,10 @@
 # Memory の編集でできた新しい Version の出典（`memory_sources`）と、会話・Task から由来する Version の検索
 
-- Status: Proposed（1 は Human の決定として伝達済み。2〜6 は推奨つきの提案）
+- Status: Approved
 - Date: 2026-09-28
 - Scope: Issue [#128](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/128)（[Decision 0034](0034-memory-versioning-freshness.md) の 9。会話の削除の前提）。関連: PAW-042（#36、PR #122 / #135）、[Decision 0009](0009-shared-memory-administration.md)（Shared Memory の `user_confirmation` の出典）、[Decision 0018](0018-memory-journal-consolidation-policy.md)（Journal）
 - Supersedes: [Decision 0034](0034-memory-versioning-freshness.md) の 2 のうち「編集・復元・Revalidate の新しい Version に `memory_sources` を写さない」という箇条のみ（承認後）。0034 の 9（「会話削除の Flow の Issue で決める」とした未決の点）はこの Decision が埋める。0034 の File 自体は書き換えない（AGENTS.md 14）
-- Approval: 1 は、2026-09-28 に Orchestrator の作業 Session で Human が AskUserQuestion に直接回答して決めたと、実装 Agent に伝えられた（下の「1 の記録について」）。2〜6 は未承認
+- Approval: 2026-09-29、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで「推奨どおり」と回答して承認（1 は 2026-09-28 に Human が直接回答して決定済み。2〜6 を 2026-09-29 に承認。末尾の「承認時の決定」）
 
 ## 背景
 
@@ -95,7 +95,7 @@ Project Memory を編集者の User Memory へ縮小すると（1 の Scope の�
 - 検索と削除の順序・並行性: 会話を削除すると `ON DELETE SET NULL` で `conversation_id` が消え、その後に検索しても何も見つからない。また、検索と削除の間に手動の編集が Commit されると、検索が返さなかった新しい Version に出典が写る。そのため会話の削除の Flow は、**会話を削除する前に**検索を行い、手動の編集と直列化する（例: 検索と削除を 1 つの Transaction で行い、見つかった Memory の Advisory Lock を取る）必要がある。具体的な設計は会話の削除の Issue で決める。
 - `attributes` の 3 つの Key は `MemoryVersioningService` だけが書く前提（`actor_type = 'user'` の Version に限る）。他の書き手が同じ Key を人の Version に書くようになれば、辿りが広がる（見つける側に倒れる）。
 
-## 決めてほしいこと
+## 決めてほしいこと（2026-09-29 に推奨どおり承認）
 
 1. （伝達済みの決定の確認）編集の新しい Version に前の Version の出典をすべて写し、編集者の `user_confirmation`（`memory_confirmed_by:<user id>`）を足すこと。削除時の処理は会話の削除の Issue で決めること。
 2. 復元・Revalidate も同じ規則にすること（復元は復元した Version `k` の出典を写す）。推奨: 承認。
@@ -105,3 +105,7 @@ Project Memory を編集者の User Memory へ縮小すると（1 の Scope の�
 6. 他の User の Private Memory に縮小された Version も検索で返し、その削除時の処理（他の User の Private Memory の Privacy）は会話の削除の Issue で決めること。推奨: 承認。
 
 承認後に方針を変える場合は、この Decision を書き換えず、新しい Decision から `Supersedes` する。
+
+## 承認時の決定（2026-09-29）
+
+Human は、作業 Session で判断が必要な点について推奨つきの説明を受け、「推奨どおり」と回答して承認した（1 は 2026-09-28 に Human が直接回答して決定済み。2〜6 を 2026-09-29 に承認）。**すべて推奨どおり**で、個別の変更はない。1 は 2026-09-28 の Human の決定のとおり（編集の新しい Version に出典をすべて写し、編集者の `user_confirmation` を足す。削除時の扱いは会話削除の Issue で決める）。6 の、他 User の Private Memory に縮小された Version の削除時の扱いも、会話削除の Issue で決める。
