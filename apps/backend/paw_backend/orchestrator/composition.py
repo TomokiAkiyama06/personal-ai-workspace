@@ -20,6 +20,17 @@ objects that run tasks, each wired to the others the way production needs:
   orchestrator without one could not run a node. Nothing claims queue entries
   here: starting workers (``Orchestrator.serve``) is left to the issue that brings
   the runtimes (Decision 0047, 5);
+* with that orchestrator, and only with it, the Parallel Worktree / Integration
+  Node (PAW-035, Decision 0036; issue #155): a ``GitWorktreeCoordinator`` that
+  runs git as the task creator's Linux account (``LoginNameAccountDirectory``,
+  Decision 0017) through the deployment's ``GitRunner`` (``git_runner``: the
+  default ``SubprocessGitRunner`` runs git only as the backend's own Linux user
+  and refuses any other account, fail closed; ``SshGitRunner`` reaches the
+  account's own user, Decision 0029), with the ``RepositoryPolicy`` of the
+  settings (the worktree area ``<home>/<workspace_subdir>/.paw-worktrees``, the
+  git timeout). There is no switch to leave it out: every writing Worker node of
+  a repository with a checkout gets its own worktree (``REQUIREMENTS.md``), and a
+  task without one runs as before (Decision 0056, Proposed);
 * what the maintenance loop (``freshness_loop.build_freshness_loop``) runs: the
   freshness jobs and the task-end sweep (the application's lifespan starts it).
 
@@ -33,6 +44,7 @@ from dataclasses import dataclass
 from paw_backend.authz import Authorizer, PostgresAuditSink
 from paw_backend.config import Settings
 from paw_backend.db import Database
+from paw_backend.integration import GitWorktreeCoordinator
 from paw_backend.memory.versioning import FreshnessMaintenance
 from paw_backend.orchestrator.authority import (
     RepositoryScopes,
@@ -47,10 +59,13 @@ from paw_backend.orchestrator.store import DagStore
 from paw_backend.orchestrator.task_end import TaskEndCleanup, TaskEndResidue
 from paw_backend.projects import ProjectStateGate
 from paw_backend.repositories import (
+    LoginNameAccountDirectory,
     RepositoryPolicy,
     RepositoryService,
     SubprocessGitRunner,
 )
+from paw_backend.repositories.accounts import AccountDirectory
+from paw_backend.repositories.git import GitRunner
 from paw_backend.tasks import ProjectGate, TaskService
 from paw_backend.tasks.queueing import BudgetTracker, LoopDetector, TaskQueue
 from paw_backend.tools import (
@@ -68,8 +83,8 @@ from paw_backend.tools.interfaces import require_async_method
 
 @dataclass(frozen=True, slots=True)
 class TaskExecution:
-    """Everything :func:`build_task_execution` built (``orchestrator`` is
-    ``None`` without agent runtimes)."""
+    """Everything :func:`build_task_execution` built (``orchestrator`` and its
+    ``worktrees`` are ``None`` without agent runtimes)."""
 
     tasks: TaskService
     queue: TaskQueue
@@ -81,6 +96,7 @@ class TaskExecution:
     broker: ToolBroker
     tools: ToolRunner
     orchestrator: Orchestrator | None
+    worktrees: GitWorktreeCoordinator | None = None
 
 
 def build_repository_scopes(
@@ -120,6 +136,22 @@ def build_tool_broker(
     )
 
 
+def build_worktrees(
+    settings: Settings,
+    database: Database,
+    *,
+    git_runner: GitRunner,
+    accounts: AccountDirectory | None = None,
+) -> GitWorktreeCoordinator:
+    """The worktrees of the orchestrator (module docstring): one
+    ``RepositoryPolicy`` of the settings for the account directory (its lowest
+    uid of a person) and the coordinator (its worktree area and git timeout)."""
+    policy = RepositoryPolicy.from_settings(settings)
+    if accounts is None:
+        accounts = LoginNameAccountDirectory(database, policy=policy)
+    return GitWorktreeCoordinator(runner=git_runner, accounts=accounts, policy=policy)
+
+
 def build_task_execution(
     settings: Settings,
     database: Database,
@@ -129,12 +161,18 @@ def build_task_execution(
     repositories: RepositoryScopes | None = None,
     runtimes: Mapping[str, AgentRuntime] | None = None,
     orchestrator_config: OrchestratorConfig | None = None,
+    git_runner: GitRunner | None = None,
+    accounts: AccountDirectory | None = None,
 ) -> TaskExecution:
     """Build the task execution of the application (module docstring).
 
     ``project_gate`` defaults to ``ProjectStateGate()`` (a test passes another);
     ``repositories`` to :func:`build_repository_scopes`. ``runtimes`` and
-    ``orchestrator_config`` come together or not at all (``TypeError``)."""
+    ``orchestrator_config`` come together or not at all (``TypeError``).
+    ``git_runner`` is the deployment's ``GitRunner`` for the worktrees (default
+    ``SubprocessGitRunner()``), ``accounts`` their account directory (default
+    ``LoginNameAccountDirectory``; a test passes its own). Both are checked
+    whether or not an orchestrator is built (``TypeError``)."""
     if not isinstance(database, Database):
         raise TypeError("database must be a Database")
     if not isinstance(authorizer, Authorizer):
@@ -146,6 +184,11 @@ def build_task_execution(
         repositories = build_repository_scopes(settings, database, authorizer)
     require_async_method(repositories, "working_set_acl", 1)
     require_async_method(repositories, "scope_entries", 3)
+    if git_runner is None:
+        git_runner = SubprocessGitRunner()
+    require_async_method(git_runner, "run", 1)
+    if accounts is not None:
+        require_async_method(accounts, "account_of", 1)
 
     approval_store = PostgresApprovalStore(database)
     approvals = ApprovalService(approval_store, PostgresAuditSink(database))
@@ -165,7 +208,11 @@ def build_task_execution(
     )
     tools = ToolRunner(broker, WorkingSetExecutor(tasks))
     orchestrator = None
+    worktrees = None
     if runtimes is not None and orchestrator_config is not None:
+        worktrees = build_worktrees(
+            settings, database, git_runner=git_runner, accounts=accounts
+        )
         orchestrator = Orchestrator(
             tasks=tasks,
             queue=queue,
@@ -177,6 +224,7 @@ def build_task_execution(
             authority=authority,
             runtimes=runtimes,
             config=orchestrator_config,
+            worktrees=worktrees,
         )
     return TaskExecution(
         tasks=tasks,
@@ -189,4 +237,5 @@ def build_task_execution(
         broker=broker,
         tools=tools,
         orchestrator=orchestrator,
+        worktrees=worktrees,
     )

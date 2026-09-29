@@ -21,6 +21,7 @@ from paw_backend.orchestrator.workspaces import (
 )
 from paw_backend.repositories.git import command_name
 from paw_backend.tasks import RepoRole, TaskRun
+from paw_backend.tools import ScopedRepository
 
 from .repositories_support import fs, requires_git
 from .worktrees_support import RevParseFailingRunner, Workspace, commit_file, git
@@ -794,6 +795,58 @@ class TamperedWorktreeTest(CoordinatorTestCase):
                 )
                 self.assertTrue(any(a.startswith("--work-tree=/") for a in args))
         self.assertGreater(pinned, 0)
+
+
+@requires_git
+class NoWorktreeRepositoryTest(unittest.IsolatedAsyncioTestCase):
+    """A task none of whose repositories gets a worktree (no checkout, or only
+    ``referenced``) needs no Linux account and runs no git (issue #155): the
+    production orchestrator always has the coordinator, and such a task goes on
+    as it did without one, also when its creator has no Linux account."""
+
+    def setUp(self):
+        self.ws = Workspace()
+        self.addCleanup(self.ws.close)
+        self.ws.add_checkout("referenced", role=RepoRole.REFERENCED)
+        self.ws.repositories.append(
+            ScopedRepository(uuid.uuid4(), self.ws.project_id, role=RepoRole.TARGET)
+        )
+        # The creator has no Linux account: asking for it would be refused.
+        self.ws.task.created_by = uuid.uuid4()
+        self.coordinator = self.ws.coordinator()
+
+    async def test_nothing_is_prepared_and_no_account_is_needed(self):
+        prepared = await self.coordinator.prepare_node(self.ws.node_request("a"))
+        self.assertEqual(prepared, {})
+        self.assertEqual(self.ws.runner.calls, [])
+
+    async def test_nothing_is_integrated_and_no_account_is_needed(self):
+        report = await self.coordinator.integrate(self.ws.integration_request("a"))
+        self.assertEqual(report.repositories, ())
+        self.assertTrue(report.clean)
+        self.assertEqual(self.ws.runner.calls, [])
+
+    async def test_no_checkout_has_no_target_and_needs_no_account(self):
+        without_checkout = [r for r in self.ws.repositories if r.root is None]
+        targets = await self.coordinator.targets(
+            self.ws.integration_request(
+                "a", scope=self.ws.scope(repositories=without_checkout)
+            )
+        )
+        self.assertEqual(targets, ())
+        self.assertEqual(self.ws.runner.calls, [])
+
+    async def test_a_worktree_repository_still_needs_the_account(self):
+        self.ws.add_checkout("repo", role=RepoRole.WORKING)
+        for attempt in (
+            self.coordinator.prepare_node(self.ws.node_request("a")),
+            self.coordinator.integrate(self.ws.integration_request("a")),
+        ):
+            with self.assertRaises(WorktreeUnavailableError) as caught:
+                await attempt
+            self.assertEqual(
+                caught.exception.reason, WorktreeProblem.ACCOUNT_UNAVAILABLE
+            )
 
 
 class ConstructionTest(unittest.TestCase):
