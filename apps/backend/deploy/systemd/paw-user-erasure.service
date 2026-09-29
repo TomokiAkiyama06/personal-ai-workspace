@@ -16,6 +16,13 @@
 # confirm. Until then the timer's run exits 3 for that user (copies_pending)
 # every day, which starts the failure unit.
 #
+# From the first day of a deletion (not only after the 30 days), every run also
+# exits 3 for each pending-deletion user whose own GitHub / SSH credentials are
+# not confirmed revoked (credentials_pending): revoke them (gh auth logout, the
+# backend's line in the user's authorized_keys and the per-user key, or lock the
+# Linux account), then run it with --credentials-revoked <user id>. Run it by
+# hand right after a deletion rather than waiting for the timer.
+#
 # User: the same dedicated OS user as paw-audit-retention.service (paw-maint),
 # never the user the backend runs as, for the same reasons (see that unit): this
 # job holds the table owner's credential.

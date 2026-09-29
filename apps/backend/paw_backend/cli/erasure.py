@@ -11,7 +11,9 @@ Exit codes (the convention of ``paw_backend.cli.retention``):
   was done);
 * ``2``  environment error: invalid configuration, ``PAW_MIGRATION_DATABASE_URL``
   not set, the database unreachable (nothing was done);
-* ``3``  at least one due user was NOT erased and marked ``deleted`` (active tasks,
+* ``3``  at least one ``pending_deletion`` user's GitHub / SSH credentials are not
+  confirmed revoked (``credentials_pending``, from the first day of the deletion),
+  or at least one due user was NOT erased and marked ``deleted`` (active tasks,
   managed checkouts left, the copies outside the database not confirmed, a failed
   verification or step, a lock that was not released in time, or the run was
   terminated). Each is recorded as ``auth.user.erase`` / deny when the
@@ -39,6 +41,15 @@ exit 3), every day, until the operator confirms. The confirmation counts only on
 run AFTER the one that committed the database erasure (a backup or WAL taken before
 that commit still holds the rows): the operator runs once, erases the copies made
 up to then, and confirms on a later run.
+
+``--credentials-revoked USER_ID`` (repeatable): the operator revoked that
+``pending_deletion`` user's own GitHub / SSH credentials in their Linux account
+(``gh auth logout`` / the GitHub token, the backend's line in ``authorized_keys``
+and the per-user key, or the Linux account locked), which this service never
+touches (Decision 0043 C). Until then every run, from the first day of the
+deletion, reports the user (``credentials_pending``, exit 3) so that the Owner
+hears of it (Codex P1, PR #142). A restore and a new deletion need a new
+confirmation.
 """
 
 import argparse
@@ -54,6 +65,7 @@ from pydantic import ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 
 from paw_backend.auth.onboarding.erasure import (
+    CredentialsOutcome,
     ErasureAlreadyRunningError,
     ErasureOutcome,
     ErasureRunReport,
@@ -140,6 +152,18 @@ def build_parser() -> argparse.ArgumentParser:
             "(repeatable)"
         ),
     )
+    run.add_argument(
+        "--credentials-revoked",
+        metavar="USER_ID",
+        type=_user_id,
+        action="append",
+        default=[],
+        help=(
+            "the GitHub / SSH credentials of this pending-deletion user in their "
+            "Linux account were revoked (or the account locked): stop reporting "
+            "it (repeatable)"
+        ),
+    )
     return parser
 
 
@@ -198,7 +222,12 @@ def _run(arguments: argparse.Namespace, err: TextIO | None) -> int:
     )
     try:
         report = asyncio.run(
-            _erase(connection, arguments.checkouts_removed, arguments.copies_erased)
+            _erase(
+                connection,
+                arguments.checkouts_removed,
+                arguments.copies_erased,
+                arguments.credentials_revoked,
+            )
         )
     except asyncio.CancelledError:
         # The erasure of a user commits before its outcome is reported (and the
@@ -229,14 +258,16 @@ def _run(arguments: argparse.Namespace, err: TextIO | None) -> int:
 
 
 async def _erase(
-    settings: Settings, checkouts_removed, copies_erased
+    settings: Settings, checkouts_removed, copies_erased, credentials_revoked
 ) -> ErasureRunReport:
     database = Database(settings)
     service = UserErasureService(database)
     try:
         with _cancel_on_sigterm():
             return await service.run(
-                checkouts_removed=checkouts_removed, copies_erased=copies_erased
+                checkouts_removed=checkouts_removed,
+                copies_erased=copies_erased,
+                credentials_revoked=credentials_revoked,
             )
     finally:
         await database.dispose()
@@ -260,8 +291,31 @@ def _cancel_on_sigterm():
 
 def _show(report: ErasureRunReport, err: TextIO | None) -> int:
     erased = report.count(ErasureOutcome.ERASED)
-    if report.ok:
-        _say(err, f"User erasure completed: erased={erased}.")
+    revoked = sum(result.ok for result in report.credentials)
+    for result in report.credentials:
+        if result.outcome is CredentialsOutcome.PENDING:
+            _say(
+                err,
+                f"ACTION REQUIRED: user {result.user_id} (credentials_pending). Its "
+                "deletion started, but its own GitHub / SSH credentials in its Linux "
+                "account are not confirmed revoked (this service never touches "
+                "them): revoke them (gh auth logout / the GitHub token, the "
+                "backend's line in authorized_keys and the per-user key, or lock "
+                "the Linux account), then confirm with --credentials-revoked.",
+            )
+        elif not result.ok:
+            _say(
+                err,
+                f"NOT RECORDED: the credentials revocation of user {result.user_id} "
+                f"({result.outcome.value}"
+                + (f", {result.error_type}" if result.error_type else "")
+                + "). Confirm it again on the next run.",
+            )
+    if report.ok and report.credentials_ok:
+        _say(
+            err,
+            f"User erasure completed: erased={erased} credentials_revoked={revoked}.",
+        )
         return EXIT_OK
     for result in report.results:
         if result.outcome is ErasureOutcome.COPIES_PENDING:
@@ -282,5 +336,10 @@ def _show(report: ErasureRunReport, err: TextIO | None) -> int:
                 "(action auth.user.erase).",
             )
     failed = sum(not result.ok for result in report.results)
-    _say(err, f"FAILED: erased={erased} not_erased={failed}.")
+    unconfirmed = sum(not result.ok for result in report.credentials)
+    _say(
+        err,
+        f"FAILED: erased={erased} not_erased={failed} "
+        f"credentials_revoked={revoked} credentials_pending={unconfirmed}.",
+    )
     return EXIT_ERASURE_FAILED

@@ -17,6 +17,7 @@ from paw_backend.auth.audit import AuthReason
 from paw_backend.auth.errors import RetentionExpiredError
 from paw_backend.auth.onboarding.erasure import (
     PERSONAL_TABLES,
+    CredentialsOutcome,
     ErasureAlreadyRunningError,
     ErasureOutcome,
     UserErasureService,
@@ -803,6 +804,166 @@ class WebRoleTest(ErasureTestCase):
                 now=DUE,
             )
         self.assertEqual(await self.status_of(bob.id), "pending_deletion")
+
+
+class ExternalCredentialsTest(ErasureTestCase):
+    """Codex P1 (PR #142, REQUIREMENTS.md "User Lifecycle" / "Shared Codex / Claude
+    system connection"): the user's own GitHub / SSH credentials live in their Linux
+    account, which the backend never touches (Decision 0043 C, point 4: revoking
+    them is the deployment's work). The deletion therefore records that work as a
+    required action, and every run of the job tells the Owner (exit 3) about each
+    ``pending_deletion`` user until the operator confirms it
+    (``credentials_revoked``), from the first day, not after the 30 days."""
+
+    async def credentials_audit(self) -> list[tuple]:
+        return [
+            (row.decision, row.reason, row.resource_id)
+            for row in await self.audit_rows()
+            if row.action == "auth.user.credentials"
+        ]
+
+    async def test_the_deletion_records_the_revocation_as_required(self):
+        bob = await self.make_user("bob")
+
+        await self.delete(bob)
+
+        self.assertEqual(
+            await self.credentials_audit(), [("deny", "credentials_pending", bob.id)]
+        )
+        row = next(
+            r for r in await self.audit_rows() if r.action == "auth.user.credentials"
+        )
+        self.assertEqual(row.actor_id, self.admin.user_id)
+
+    async def test_an_unconfirmed_revocation_fails_every_run_from_the_first_day(self):
+        bob = await self.make_user("bob")
+        await self.delete(bob)
+
+        report = await self.erasure(T0 + timedelta(hours=1)).run()
+
+        # Nothing is due for the erasure yet ...
+        self.assertEqual(report.results, ())
+        self.assertTrue(report.ok)
+        # ... but the Owner hears that the credentials are not revoked yet.
+        self.assertFalse(report.credentials_ok)
+        self.assertEqual(
+            [(r.user_id, r.outcome) for r in report.credentials],
+            [(bob.id, CredentialsOutcome.PENDING)],
+        )
+        self.assertEqual(
+            await self.credentials_audit(),
+            [
+                ("deny", "credentials_pending", bob.id),
+                ("deny", "credentials_pending", bob.id),
+            ],
+        )
+        again = await self.erasure(T0 + timedelta(days=1)).run()
+        self.assertFalse(again.credentials_ok)
+
+    async def test_the_operator_s_confirmation_ends_the_reminder(self):
+        bob = await self.make_user("bob")
+        carol = await self.make_user("carol")
+        await self.delete(bob)
+        await self.delete(carol)
+
+        report = await self.erasure(T0 + timedelta(hours=1)).run(
+            credentials_revoked=[bob.id, uuid.uuid4()]
+        )
+
+        self.assertEqual(
+            sorted((r.user_id, r.outcome) for r in report.credentials),
+            sorted(
+                [
+                    (bob.id, CredentialsOutcome.REVOKED),
+                    (carol.id, CredentialsOutcome.PENDING),
+                ]
+            ),
+        )
+        self.assertFalse(report.credentials_ok)  # carol is still pending
+        self.assertIn(
+            ("allow", "credentials_revoked", bob.id), await self.credentials_audit()
+        )
+        credentials = next(
+            r
+            for r in await self.audit_rows()
+            if r.action == "auth.user.credentials" and r.decision == "allow"
+        )
+        self.assertIsNone(credentials.actor_id)
+
+        later = await self.erasure(T0 + timedelta(days=1)).run(
+            credentials_revoked=[carol.id]
+        )
+        self.assertTrue(later.credentials_ok)
+        self.assertEqual(
+            [(r.user_id, r.outcome) for r in later.credentials],
+            [(carol.id, CredentialsOutcome.REVOKED)],
+        )
+        # Once confirmed, a user is not reported again.
+        last = await self.erasure(T0 + timedelta(days=2)).run()
+        self.assertTrue(last.credentials_ok)
+        self.assertEqual(last.credentials, ())
+
+    async def test_a_confirmation_does_not_carry_over_to_a_later_deletion(self):
+        bob = await self.make_user("bob")
+        await self.delete(bob)
+        await self.erasure(T0 + timedelta(hours=1)).run(credentials_revoked=[bob.id])
+        # Restored by the Owner, then deleted again: the credentials were usable
+        # again in between, so the old confirmation does not count.
+        await self.execute(
+            "UPDATE users SET status = 'active' WHERE id = :id", id=bob.id
+        )
+        await self.execute(
+            "INSERT INTO user_status_changes (id, user_id, old_status, new_status, "
+            "changed_at, changed_by, recorded_at) VALUES (gen_random_uuid(), :u, "
+            "'pending_deletion', 'active', :now, NULL, clock_timestamp())",
+            u=bob.id,
+            now=T0,
+        )
+        await self.delete(bob)
+
+        report = await self.erasure(T0 + timedelta(days=1)).run()
+
+        self.assertEqual(
+            [(r.user_id, r.outcome) for r in report.credentials],
+            [(bob.id, CredentialsOutcome.PENDING)],
+        )
+
+    async def test_active_restored_invited_owner_and_deleted_users_are_not_reported(
+        self,
+    ):
+        await self.make_user("alice")
+        await self.make_user("the-owner", role="owner")
+        await self.make_user("ivy", status="invited", password=None)
+        dave = await self.make_user("dave")
+        await self.delete(dave)
+        await self.execute(
+            "UPDATE users SET status = 'active' WHERE id = :id", id=dave.id
+        )
+        erin = await self.make_user("erin", status="deleted")
+
+        report = await self.erasure(T0 + timedelta(hours=1)).run(
+            credentials_revoked=[dave.id, erin.id]
+        )
+
+        self.assertEqual(report.credentials, ())
+        self.assertTrue(report.credentials_ok)
+        self.assertNotIn(
+            ("allow", "credentials_revoked", dave.id), await self.credentials_audit()
+        )
+
+    async def test_a_user_marked_deleted_by_the_run_is_not_reported(self):
+        # The copies confirmation covers the credentials in the Linux account too
+        # (Decision 0043 D 4): once the run marks the user deleted, no reminder.
+        bob = await self.make_user("bob")
+        await self.delete(bob)
+        await self.erasure().run()
+
+        report = await self.erasure(DUE + timedelta(days=1)).run(copies_erased=[bob.id])
+
+        self.assertTrue(report.ok)
+        self.assertEqual(await self.status_of(bob.id), "deleted")
+        self.assertEqual(report.credentials, ())
+        self.assertTrue(report.credentials_ok)
 
 
 if __name__ == "__main__":

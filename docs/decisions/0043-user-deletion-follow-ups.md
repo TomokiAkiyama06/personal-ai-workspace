@@ -36,6 +36,11 @@ Decision 0033（PR #123）は削除を `pending_deletion` にするところま�
 - GitHub（`gh auth`、`~/.config/gh`）と SSH の鍵（Decision 0029 の User ごとの鍵と `authorized_keys`）は DB になく、各 User の Linux Account の中にある。Codex / Claude の Connection は Workspace 共有（Admin の管理）で、User ごとの Credential は DB にない。
 - Backend がその User の Linux Account として `git` / `gh` を動かす経路（`LoginNameAccountDirectory`）は `status = 'active'` の User だけを引くので、**削除の時点でその User として外部に出る経路は止まる**。Agent の委任も止まる（上記）。
 - 鍵そのものの失効（その User の `authorized_keys` から Backend の鍵の行を消す、`gh auth logout`）は配備側の作業とし、Backend は User の HOME に触れない。0029 の「鍵の失効」の手順を運用に使う。
+- その配備側の作業を、Backend の中で**必須の作業として追跡する**（Codex Review の P1、PR #142。判断点 4 の方針 ── 失効は配備側、Backend は HOME に触れない ── は変えず、作業が行われたことの確認と通知だけを足す）:
+  - 削除の開始の Transaction で `auth.user.credentials` / deny `credentials_pending`（Actor つき）を書く。
+  - `user-erasure-run` は、30 日を待たずに**毎回**、`pending_deletion` の User のうち、その削除の開始より後の確認（allow `credentials_revoked`）がない User ごとに deny `credentials_pending` を書き、終了コード 3 で終わる（D の `OnFailure=` の通知で Owner に届く）。
+  - 運用者は鍵を失効した後に `--credentials-revoked <user id>` で確認する（User の行を `FOR NO KEY UPDATE` で Lock し、まだ `pending_deletion` なら allow `credentials_revoked`、Actor なし）。復元して再び削除すれば、もう一度要る。`--copies-erased` で `deleted` になった User は対象から外れる（D の 4 の確認は認証情報を含む）。
+  - OS の Account の自動の Lock（`usermod -L` など）は、Backend に特権が要るので行わない（別の判断）。
 
 ### D. 30 日後の消去（判断点 1・5〜10）
 
@@ -93,7 +98,7 @@ Decision 0033（PR #123）は削除を `pending_deletion` にするところま�
 - 新しい Module: `paw_backend/orchestrator/user_sweep.py`（Task の停止と Loop）、`paw_backend/auth/onboarding/erasure.py`（消去）、`paw_backend/cli/erasure.py`（Command）。`paw_backend/cli/dispatch.py` が `user-erasure-run` を振り分ける。
 - 新しい設定 `PAW_USER_TASK_STOP_INTERVAL_SECONDS`（既定 60、0 で止める、10〜3600）。
 - 新しい systemd の Unit（例）: `paw-user-erasure.service`・`.timer`・`-failure.service`。Environment File は `/etc/paw/user-erasure.env`（`chmod 600`。`audit-retention.env` と同じ File でもよい）。
-- 新しい Audit の値: `auth.user.task_stop`（`user_deletion`）、`auth.user.erase`（`erased`・`checkouts_released`・`data_erased`・`copies_confirmed`・`tasks_active`・`checkouts_remaining`・`copies_pending`・`verification_failed`・`erasure_failed`）。`audit_events` の列・CHECK は変えない。
+- 新しい Audit の値: `auth.user.credentials`（`credentials_pending`・`credentials_revoked`。C 節）、`auth.user.task_stop`（`user_deletion`）、`auth.user.erase`（`erased`・`checkouts_released`・`data_erased`・`copies_confirmed`・`tasks_active`・`checkouts_remaining`・`copies_pending`・`verification_failed`・`erasure_failed`）。`audit_events` の列・CHECK は変えない。
 - Migration なし。
 
 ## リスク

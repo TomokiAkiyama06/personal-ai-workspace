@@ -71,6 +71,11 @@ class AuthAction(StrEnum):
     # deletion began, stopped; the scheduled erasure of a user's personal data.
     USER_TASK_STOP = "auth.user.task_stop"
     USER_ERASE = "auth.user.erase"
+    # The user's own GitHub / SSH credentials (in their Linux account, which the
+    # backend never touches): their revocation is required from the deletion on
+    # (deny ``credentials_pending``) until the operator confirms it to the erasure
+    # job (allow ``credentials_revoked``). Codex P1, PR #142.
+    USER_CREDENTIALS = "auth.user.credentials"
     # Another account's Passkeys (and password) reset by the Owner / an Admin (#108).
     PASSKEY_RESET = "auth.passkey.reset"
 
@@ -154,6 +159,8 @@ class AuthReason(StrEnum):
     DATA_ERASED = "data_erased"
     COPIES_PENDING = "copies_pending"
     COPIES_CONFIRMED = "copies_confirmed"
+    CREDENTIALS_PENDING = "credentials_pending"
+    CREDENTIALS_REVOKED = "credentials_revoked"
 
 
 class AuthAudit:

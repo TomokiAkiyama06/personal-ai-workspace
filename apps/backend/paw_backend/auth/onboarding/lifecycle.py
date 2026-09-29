@@ -227,6 +227,25 @@ class UserLifecycleService:
                 "user",
                 user_id,
             )
+            # The user's own GitHub / SSH credentials live in their Linux account,
+            # which the backend never touches (Decision 0043 C): their revocation
+            # is the deployment's work, recorded here as required with the
+            # deletion. The erasure job reminds the Owner of it on every run until
+            # the operator confirms it (``--credentials-revoked``). Codex P1, PR #142.
+            await self._audit.record_in(
+                session,
+                self._audit.event(
+                    AuthAction.USER_CREDENTIALS,
+                    AuthReason.CREDENTIALS_PENDING,
+                    allowed=False,
+                    correlation_id=context.correlation_id,
+                    client_request_id=context.client_request_id,
+                    actor_id=actor.user_id,
+                    actor_role=actor.system_role,
+                    resource_kind="user",
+                    resource_id=user_id,
+                ),
+            )
             if revoked:
                 await self._record_in(
                     session,

@@ -84,6 +84,27 @@ lists every table with a user column and what happens to it. A later restore
 from a backup must re-apply ``deleted`` (the requirements' "削除記録"); that is
 the recovery feature's job.
 
+The user's own GitHub / SSH credentials (Codex P1, PR #142)
+----------------------------------------------------------
+REQUIREMENTS.md "User Lifecycle" stops the user's external authentication when the
+deletion starts. The platform's own ways out as the user stop at once
+(``LoginNameAccountDirectory`` resolves only ``active`` users, so no git / ``gh``
+runs as a ``pending_deletion`` user, and the agent delegation stops), but the
+credentials themselves (``gh auth``, the SSH keys and ``authorized_keys``) live in
+the user's Linux account, which this service never reads or touches and cannot
+lock (Decision 0043 C, point 4: revoking them is the deployment's work). So that
+work is tracked here, fail closed: the deletion records it as required
+(``auth.user.credentials`` / deny ``credentials_pending``, in the deletion's
+transaction), and EVERY run of this job, from the first day of the deletion and
+not only after the 30 days, reports each ``pending_deletion`` user without a
+confirmation (another deny ``credentials_pending``; the run fails, exit 3, and the
+``OnFailure=`` unit tells the Owner) until the operator confirms it with
+``--credentials-revoked <user id>`` (allow ``credentials_revoked``, no actor,
+under the user's row lock). A confirmation counts only for the deletion it
+follows: a restore and a new deletion need a new one. The ``--copies-erased``
+confirmation of a due user covers the credentials as well (they are among the
+copies in the Linux account); a user it marks ``deleted`` is not reported.
+
 A refusal or failure writes ``auth.user.erase`` / deny with the reason in a short
 transaction of its own (best effort), leaves the user ``pending_deletion`` (still
 without access) and makes the run fail (exit 3, the systemd ``OnFailure=`` unit
@@ -180,14 +201,44 @@ class UserErasureResult:
         return self.outcome in (ErasureOutcome.ERASED, ErasureOutcome.NOT_DUE)
 
 
+class CredentialsOutcome(StrEnum):
+    """Where the revocation of one ``pending_deletion`` user's credentials is."""
+
+    # Not confirmed yet: the Owner is told (the run fails).
+    PENDING = "credentials_pending"
+    # The operator confirmed it in this run (recorded).
+    REVOKED = "credentials_revoked"
+    # The confirmation could not be recorded (a lock held too long, another error).
+    FAILED = "failed"
+
+
+@dataclass(frozen=True, slots=True)
+class CredentialsResult:
+    user_id: uuid.UUID
+    outcome: CredentialsOutcome
+    error_type: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.outcome is CredentialsOutcome.REVOKED
+
+
 @dataclass(frozen=True, slots=True)
 class ErasureRunReport:
     results: tuple[UserErasureResult, ...]
+    # One per ``pending_deletion`` user whose credentials were not confirmed
+    # revoked before this run (module docstring).
+    credentials: tuple[CredentialsResult, ...] = ()
 
     @property
     def ok(self) -> bool:
         """Every due user was erased (also true when nobody was due)."""
         return all(result.ok for result in self.results)
+
+    @property
+    def credentials_ok(self) -> bool:
+        """No ``pending_deletion`` user is left whose credentials are unconfirmed."""
+        return all(result.ok for result in self.credentials)
 
     def count(self, outcome: ErasureOutcome) -> int:
         return sum(result.outcome is outcome for result in self.results)
@@ -259,6 +310,28 @@ _ERASED_BEFORE = text(
     "AND resource_id = :id)"
 )
 _CANDIDATES_LEFT = text(f"SELECT count(*) {_UNAPPROVED_CANDIDATES}")
+# A ``pending_deletion`` user (never the Owner) whose credentials were not
+# confirmed revoked since the latest start of their deletion (both times are the
+# database's clock, ``recorded_at``): a restore and a new deletion need a new one.
+_CREDENTIALS_UNCONFIRMED = """
+    u.status = 'pending_deletion' AND u.system_role <> 'owner'
+    AND NOT EXISTS (
+        SELECT 1 FROM audit_events a
+         WHERE a.action = :action AND a.decision = 'allow' AND a.reason = :reason
+           AND a.resource_kind = 'user' AND a.resource_id = u.id
+           AND a.recorded_at >= (
+               SELECT max(c.recorded_at) FROM user_status_changes c
+                WHERE c.user_id = u.id AND c.new_status = 'pending_deletion'))
+"""
+_CREDENTIALS_USERS = text(
+    f"SELECT u.id FROM users u WHERE {_CREDENTIALS_UNCONFIRMED} "
+    "AND (CAST(:after AS uuid) IS NULL OR u.id > CAST(:after AS uuid)) "
+    "ORDER BY u.id LIMIT :limit"
+)
+_LOCK_CREDENTIALS_USER = text(
+    f"SELECT u.id FROM users u WHERE u.id = :id AND {_CREDENTIALS_UNCONFIRMED} "
+    "FOR NO KEY UPDATE OF u"
+)
 
 
 class UserErasureService:
@@ -336,8 +409,11 @@ class UserErasureService:
         *,
         checkouts_removed: Iterable[uuid.UUID] = (),
         copies_erased: Iterable[uuid.UUID] = (),
+        credentials_revoked: Iterable[uuid.UUID] = (),
     ) -> ErasureRunReport:
         """Erase every due user, under the run lock; one result per due user.
+        Then report every ``pending_deletion`` user whose credentials are not
+        confirmed revoked (``credentials_revoked`` records the confirmations).
 
         ``checkouts_removed``: users whose managed checkouts the operator removed
         from disk (their ``repository_checkouts`` rows are then deleted).
@@ -347,9 +423,11 @@ class UserErasureService:
         """
         released = frozenset(checkouts_removed)
         confirmed = frozenset(copies_erased)
+        revoked = frozenset(credentials_revoked)
         for name, ids in (
             ("checkouts_removed", released),
             ("copies_erased", confirmed),
+            ("credentials_revoked", revoked),
         ):
             for user_id in ids:
                 if not isinstance(user_id, uuid.UUID):
@@ -370,7 +448,95 @@ class UserErasureService:
                 if len(page) < PAGE_SIZE:
                     break
                 after = page[-1]
-        return ErasureRunReport(tuple(results))
+            # After the erasures: a user this run marked ``deleted`` is not listed.
+            credentials: list[CredentialsResult] = []
+            after = None
+            while True:
+                page = await self._credentials_page(after)
+                for user_id in page:
+                    result = await self.check_credentials(
+                        user_id, revoked=user_id in revoked
+                    )
+                    if result is not None:
+                        credentials.append(result)
+                if len(page) < PAGE_SIZE:
+                    break
+                after = page[-1]
+        return ErasureRunReport(tuple(results), tuple(credentials))
+
+    async def _credentials_page(self, after: uuid.UUID | None) -> tuple[uuid.UUID, ...]:
+        async with self._database.session() as session, session.begin():
+            rows = await session.execute(
+                _CREDENTIALS_USERS,
+                {**self._credentials_params(), "after": after, "limit": PAGE_SIZE},
+            )
+            return tuple(rows.scalars())
+
+    @staticmethod
+    def _credentials_params() -> dict:
+        return {
+            "action": AuthAction.USER_CREDENTIALS.value,
+            "reason": AuthReason.CREDENTIALS_REVOKED.value,
+        }
+
+    async def check_credentials(
+        self, user_id: uuid.UUID, *, revoked: bool = False
+    ) -> CredentialsResult | None:
+        """Record the operator's confirmation (``revoked``) that the user's GitHub /
+        SSH credentials are revoked, or remind the Owner that they are not.
+
+        Returns ``None`` when the user is not (any more) ``pending_deletion`` with
+        unconfirmed credentials (restored, erased, confirmed meanwhile). Never
+        raises for a database error: the outcome says so.
+        """
+        if not isinstance(user_id, uuid.UUID):
+            raise TypeError("user_id must be a uuid.UUID")
+        correlation_id = uuid.uuid4()
+        if not revoked:
+            await self._audit.record_best_effort(
+                self._audit.event(
+                    AuthAction.USER_CREDENTIALS,
+                    AuthReason.CREDENTIALS_PENDING,
+                    allowed=False,
+                    correlation_id=correlation_id,
+                    resource_kind="user",
+                    resource_id=user_id,
+                )
+            )
+            return CredentialsResult(user_id, CredentialsOutcome.PENDING)
+        try:
+            async with self._database.session() as session, session.begin():
+                await session.execute(
+                    select(
+                        func.set_config(
+                            "lock_timeout", str(self._lock_timeout_ms), True
+                        )
+                    )
+                )
+                locked = (
+                    await session.execute(
+                        _LOCK_CREDENTIALS_USER,
+                        {**self._credentials_params(), "id": user_id},
+                    )
+                ).first()
+                if locked is None:
+                    return None
+                await self._audit.record_in(
+                    session,
+                    self._audit.event(
+                        AuthAction.USER_CREDENTIALS,
+                        AuthReason.CREDENTIALS_REVOKED,
+                        allowed=True,
+                        correlation_id=correlation_id,
+                        resource_kind="user",
+                        resource_id=user_id,
+                    ),
+                )
+        except Exception as error:
+            error_type = type(getattr(error, "orig", None) or error).__name__
+            logger.error("Recording a credentials revocation failed (%s)", error_type)
+            return CredentialsResult(user_id, CredentialsOutcome.FAILED, error_type)
+        return CredentialsResult(user_id, CredentialsOutcome.REVOKED)
 
     async def due_user_ids(
         self, *, after: uuid.UUID | None = None, limit: int = PAGE_SIZE
@@ -653,6 +819,8 @@ class UserErasureService:
 __all__ = [
     "ERASURE_LOCK_KEY",
     "PERSONAL_TABLES",
+    "CredentialsOutcome",
+    "CredentialsResult",
     "ErasureAlreadyRunningError",
     "ErasureOutcome",
     "ErasureRunReport",

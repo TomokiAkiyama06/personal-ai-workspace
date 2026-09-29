@@ -94,6 +94,28 @@ class CommandLineTest(unittest.TestCase):
         self.assertEqual(code, cli.EXIT_REFUSED)
         self.assertNotIn("hunter2", err)
 
+    def test_the_credentials_flag_repeats_and_defaults_to_none(self):
+        first, second = uuid.uuid4(), uuid.uuid4()
+        parser = cli.build_parser()
+        self.assertEqual(
+            parser.parse_args(["user-erasure-run"]).credentials_revoked, []
+        )
+        arguments = parser.parse_args(
+            [
+                "user-erasure-run",
+                "--credentials-revoked",
+                str(first),
+                "--credentials-revoked",
+                str(second),
+            ]
+        )
+        self.assertEqual(arguments.credentials_revoked, [first, second])
+
+    def test_a_malformed_credentials_user_id_is_refused_without_echoing_it(self):
+        code, _, err = run(["user-erasure-run", "--credentials-revoked", "hunter2"])
+        self.assertEqual(code, cli.EXIT_REFUSED)
+        self.assertNotIn("hunter2", err)
+
 
 class DispatchTest(unittest.TestCase):
     def test_the_package_entry_point_routes_the_erasure_command(self):
@@ -245,6 +267,36 @@ class RunCommandTest(ErasureTestCase):
         self.assertEqual(code, cli.EXIT_ERASURE_FAILED)
         self.assertIn(f"NOT ERASED: user {bob.id} (tasks_active", err)
         self.assertEqual(await self.status_of(bob.id), "pending_deletion")
+
+    async def test_unrevoked_credentials_of_a_recent_deletion_fail_the_run(self):
+        # Codex P1 (PR #142): from the first day of the deletion, not after the 30
+        # days, the Owner hears (exit 3, OnFailure=) until the operator confirms
+        # the user's GitHub / SSH credentials are revoked.
+        bob = await self.make_user("bob", status="pending_deletion")
+        await self.execute(
+            "INSERT INTO user_status_changes (id, user_id, old_status, new_status, "
+            "changed_at, changed_by, recorded_at) VALUES (gen_random_uuid(), :u, "
+            "'active', 'pending_deletion', clock_timestamp(), NULL, "
+            "clock_timestamp())",
+            u=bob.id,
+        )
+
+        code, _, err = await self.owner_run(["user-erasure-run"])
+
+        self.assertEqual(code, cli.EXIT_ERASURE_FAILED)
+        self.assertIn(f"ACTION REQUIRED: user {bob.id} (credentials_pending)", err)
+        self.assertIn("--credentials-revoked", err)
+        self.assertEqual(await self.status_of(bob.id), "pending_deletion")
+
+        code, _, err = await self.owner_run(
+            ["user-erasure-run", "--credentials-revoked", str(bob.id)]
+        )
+        self.assertEqual(code, cli.EXIT_OK, err)
+        self.assertIn("credentials_revoked=1", err)
+
+        code, _, err = await self.owner_run(["user-erasure-run"])
+        self.assertEqual(code, cli.EXIT_OK, err)
+        self.assertNotIn("ACTION REQUIRED", err)
 
     async def test_a_concurrent_run_is_refused(self):
         await self.deleted_long_ago("bob")
