@@ -479,6 +479,9 @@ Reportには文章、ACL、requester principal、例外messageを含めません
 Retrieverの指定・戻り値やReport出力の不備、`-k`の指定誤りが2です。
 Datasetの正式な形式はSeed Benchmark Dataset（PAW-016）で確定するため、現在の形式は暫定です。
 
+架空の人物・Projectで作った合成Gold Dataset（Memory Worker 76 case、Retrieval memory 221件 / query 100件）は
+[`gold/`](gold/README.md)にあります。
+
 ## Evaluator Result schema v1
 
 Result JSONは、Evaluator version、Task ID、Candidateのmodel/runtime/quantization、`FAIL_TO_PASS`と
