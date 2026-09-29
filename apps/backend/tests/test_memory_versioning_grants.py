@@ -5,7 +5,9 @@ NON-superuser application role (``PAW_APP_DATABASE_ROLE``). Revision 0042 create
 no table and grants nothing: versioning and the freshness jobs only use what
 revisions 0026, 0040 and 0071 already give (INSERT of memories, versions and
 relations; UPDATE of ``status`` and ``stale_since``; the history row the trigger
-writes; SELECT of projects and memberships). These tests run the service and job
+writes; SELECT of projects and memberships; SELECT and INSERT of
+``memory_sources`` for the copied sources and the derivation lookup of Decision
+0045). These tests run the service and job
 test classes unchanged as that role, and check that the role still cannot rewrite
 a version or drop the new index.
 
@@ -23,6 +25,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
 
 from . import (
+    test_memory_edit_sources,
     test_memory_freshness,
     test_memory_versioning_races,
     test_memory_versioning_service,
@@ -106,6 +109,8 @@ for _cls in (
     test_memory_freshness.RevalidateTest,
     test_memory_freshness.RepoCommitTest,
     test_memory_freshness.ExpiryAndSessionTest,
+    test_memory_edit_sources.EditCopiesSourcesTest,
+    test_memory_edit_sources.DerivationTest,
 ):
     globals()[f"{_cls.__name__}AsAppRole"] = _as(_cls)
 # The loop variable must not be collected as a test class itself.
