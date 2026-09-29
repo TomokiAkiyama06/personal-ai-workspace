@@ -368,6 +368,11 @@ class _Run:
     proved_at: float = 0.0  # the injected clock when the last lease proof began
     not_before: dict[str, float] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        # A lost lease that the guard learns of (the Broker's ``lease_lost``)
+        # wakes the run loop like one the heartbeats found.
+        self.guard.on_lease_lost(self.lost.set)
+
     def lose(self) -> None:
         self.guard.stop(StopReason.LEASE_LOST)
         self.lost.set()

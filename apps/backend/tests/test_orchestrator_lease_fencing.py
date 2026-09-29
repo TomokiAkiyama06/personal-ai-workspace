@@ -310,6 +310,41 @@ class ToolCallAfterLostLeaseTest(LeaseFencingTestCase):
         self.assertNotEqual((await self.states_of(task_id))["impl"], "succeeded")
         self.assertEqual(await self.entry(), ("claimed", "w1", 1))
 
+    async def test_a_runtime_that_swallows_the_stop_and_hangs_ends_the_run_at_once(
+        self,
+    ):
+        # A runtime that catches the stop and then never returns. The Broker has
+        # read that the lease is gone: the run must end now, not at the next
+        # heartbeat, poll (an hour here) or node timeout (Codex review of PR #144,
+        # P2: the lost lease only stopped the guard, the run loop did not wake).
+        stack = self.stack()
+        seen, gate = [], asyncio.Event()
+
+        async def swallow_and_hang(assignment):
+            seen.append(await assignment.tools.call("repo.read_file", READ))
+            await gate.wait()
+            try:
+                await assignment.tools.call("repo.read_file", READ)
+            except NodeStopped as stop:
+                seen.append(stop.reason)
+            await asyncio.Event().wait()  # never set: only a cancel ends it
+
+        runtime = FakeRuntime("local", script={"impl": [swallow_and_hang]})
+        h = self.worker(stack, runtime)
+        task_id = await self.prepare(h, make_plan(node("impl")))
+        running = asyncio.create_task(h.orchestrator.run_once("w1"))
+        self.addCleanup(running.cancel)
+        await until(lambda: len(seen) == 1, message="the first call")
+
+        await self.expire_the_lease()
+        gate.set()
+        report = await asyncio.wait_for(running, 30)
+
+        self.assertEqual(seen[1], StopReason.LEASE_LOST)
+        self.assertEqual(report.outcome, Out.LEASE_LOST)
+        self.assertNotEqual((await self.states_of(task_id))["impl"], "succeeded")
+        self.assertEqual(await self.entry(), ("claimed", "w1", 1))
+
     async def test_the_context_carries_the_claim_of_the_worker(self):
         stack = self.stack()
         seen, gate = [], asyncio.Event()

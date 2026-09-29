@@ -85,6 +85,7 @@ class RunGuard:
         self._run = run
         self._activity = activity
         self._stop_reason: StopReason | None = None
+        self._on_lease_lost: list[Callable[[], None]] = []
 
     @property
     def stop_reason(self) -> StopReason | None:
@@ -105,9 +106,20 @@ class RunGuard:
         self.stop(StopReason.SUPERSEDED)
         raise NodeStopped(self._stop_reason or StopReason.SUPERSEDED)
 
+    def on_lease_lost(self, callback: Callable[[], None]) -> None:
+        """Call ``callback`` (synchronously, no arguments) whenever the run is
+        stopped for a lost lease. The orchestrator wakes its run loop with it, so
+        that a loss the Broker read (``NodeToolGateway``) ends the run and its
+        other nodes at once, as a loss the heartbeats found does, and not only at
+        the next heartbeat, poll or node timeout (Codex review of PR #144)."""
+        self._on_lease_lost.append(callback)
+
     def stop(self, reason: StopReason) -> None:
         if self._stop_reason is None:
             self._stop_reason = reason
+        if reason is StopReason.LEASE_LOST:
+            for callback in self._on_lease_lost:
+                callback()
 
     async def ensure_active(self) -> None:
         if self._stop_reason is not None:
