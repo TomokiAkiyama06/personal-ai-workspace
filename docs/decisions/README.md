@@ -53,7 +53,7 @@
 | [0051](0051-integration-worktree-ignored-files.md) | integration worktree の無視された File（`.gitignore`）を未 Commit の変更として扱う方針（`status --ignored` の形を Wrapper の許可リストに足す。Decision 0036 の 7・9・13 への追補。PR #130） | Approved |
 | [0057](0057-connection-and-node-charge-lease-fencing.md) | Shared Connection の呼び出し（`ConnectionService.execute`）を Queue の Lease で Fencing し（Fail closed。Admission の前）、`NodeBudgetHandle.charge` と GPU 時間の遅い計上は Lease で Fencing しない（Decision 0046 の 6 への追補。Issue #153） | Approved |
 | [0053](0053-memory-content-length-limit.md) | Memory の本文（`memory_versions.content`）の DB の長さの上限（20,000 文字の CHECK、Migration 0147）・上限を超える既存の行があれば Migration を止めて何も変えない・Projection の切り詰め（Decision 0038 の 5・10）は防御として残す（Issue #147） | Approved |
-| [0054](0054-recovery-repository-projection-restore.md) | Recovery Repository の Backup と Restore の方針（Checkout の置き場所と Marker、1 Entity 1 File の JSON と Manifest・Checksum、列の Allow-list と Secret の置換、削除中の User は削除記録だけ、30 分ごとの 1 Commit と Fast-forward の Push、Restore は Server ローカルで既定は Dry run・空の Workspace へ全体を 1 Transaction で・上書きと削除なし、戻さないもの、Credential の再登録。PAW-047、Issue #41） | Proposed |
+| [0054](0054-recovery-repository-projection-restore.md) | Recovery Repository の Backup と Restore の方針（Checkout の置き場所と Marker、1 Entity 1 File の JSON と Manifest・Checksum、列の Allow-list と Secret の置換、削除中の User は削除記録だけ、30 分ごとの 1 Commit と Fast-forward の Push、Restore は Server ローカルで既定は Dry run・空の Workspace へ全体を 1 Transaction で・上書きと削除なし、戻さないもの、Credential の再登録。PAW-047、Issue #41） | Approved |
 
 運用は [AGENTS.md](../../AGENTS.md) の「仕様変更」に従います。
 

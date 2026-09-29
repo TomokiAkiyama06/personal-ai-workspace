@@ -1,9 +1,10 @@
 # Recovery Repository の Projection（Backup）と Restore の方針
 
-- Status: Proposed
+- Status: Approved
 - Date: 2026-09-29
 - Scope: Issue [#41](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/41)（PAW-047: Recovery Repository Projection / Restore）。`apps/backend/paw_backend/recovery/`、`apps/backend/paw_backend/cli/recovery.py`、`apps/backend/deploy/systemd/paw-recovery-backup*`。関連: [Decision 0038](0038-memory-markdown-projection.md)（Memory Markdown Projection。9 の「PAW-047 が写すときの条件」）、[Decision 0031](0031-audit-retention-scheduler.md)（定期実行と失敗の通知の型）、[Decision 0005](0005-owner-setup-and-recovery.md)（Owner の復旧）、[Decision 0032](0032-passkey-owner-reset.md)（他の Account の Reset）、Decision 0043（Proposed、PR #142。User 削除の消去）
 - Supersedes: なし（既存の Decision を書き換えない。要件が決めていない点を埋める）
+- Approval: 2026-09-29、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで「推奨どおり」と回答して承認（1〜12 の全点。末尾の「承認時の決定」）
 
 ## 背景
 
@@ -70,7 +71,7 @@ Issue の受け入れ条件は「30 分の dirty-check batch commit/push」「Ma
 ### 4. 削除中・削除済みの User: 最小の削除記録だけ
 
 - `status` が `pending_deletion` / `deleted` の User は、`deletions/users/<id>.json`（`id` と `status` だけ）だけを残す。その User の User Record・Quota・Member の行・`user` Scope の Memory の Version・`memory/users/<id>/` は**現在の Backup に入れない**。Project・Repository の `created_by` などの ID は、Audit と同じく不透明な ID として残る。
-- 過去の Commit には削除前の内容が残る。Git の履歴の消去（history rewrite・force push）はこの Job では行わない（User 削除の消去の流れ、Decision 0043（Proposed）と人の承認の範囲）。
+- 過去の Commit には削除前の内容が残る。Git の履歴の消去（history rewrite・force push）はこの Job では行わない（User 削除の消去の流れ、Decision 0043と人の承認の範囲）。
 - `pending_deletion` の間（30 日以内の Restore が可能な期間）にサーバーが失われると、その User の個人データは Recovery からは戻らない。個人データを戻さない側に倒す。
 
 ### 5. 実行と失敗の通知
@@ -127,7 +128,7 @@ Issue の受け入れ条件は「30 分の dirty-check batch commit/push」「Ma
 ### 11. 削除状態の独立した確認（V1 の扱い）
 
 - 要件は「復元元とは独立した最新の削除状態」を求める。V1 では、**Restore の元を「最後に Push された状態」（8 の `not_latest`）に限り、その状態の削除記録（`deletions/`）を適用する**。古い Commit からの Restore は拒否されるので、古い Backup から削除済みの User を戻すことはない。
-- ただし、最後の Push の後（最大 30 分）に削除が始まった User は、その Backup では削除中ではない。Recovery Repository とは別に保つ削除記録（Decision 0043（Proposed）の消去の記録）が決まったら、Restore はその記録も確かめる（後続）。それまでは、Restore の後の手作業の表示で、運用者が Backup の外の削除記録を確かめて適用してから運用を再開するよう求める。**この表示は、Backup に削除記録がないときも毎回出す**（最後の Push の後に始まった削除は、どの削除記録にもないため）。
+- ただし、最後の Push の後（最大 30 分）に削除が始まった User は、その Backup では削除中ではない。Recovery Repository とは別に保つ削除記録（Decision 0043の消去の記録）が決まったら、Restore はその記録も確かめる（後続）。それまでは、Restore の後の手作業の表示で、運用者が Backup の外の削除記録を確かめて適用してから運用を再開するよう求める。**この表示は、Backup に削除記録がないときも毎回出す**（最後の Push の後に始まった削除は、どの削除記録にもないため）。
 
 ### 12. Audit
 
@@ -200,3 +201,7 @@ Issue の受け入れ条件は「30 分の dirty-check batch commit/push」「Ma
 - 承認前は、Command・Unit File はコードとして入るが、実運用の Server で Timer を有効化（`systemctl enable --now paw-recovery-backup.timer`）しない。
 - 承認されたら、運用者が Private Repository・Deploy Key・Checkout・環境 File を用意し、Unit File を配備して Timer を有効にする（README の「Recovery Repository」の手順）。
 - 方針を変える場合は、この Decision を書き換えず、新しい Decision から `Supersedes` する。
+
+## 承認時の決定（2026-09-29）
+
+Human は、作業 Session で判断が必要な点について推奨つきの説明を受け、「推奨どおり」と回答して承認した（1〜12 の全点）。**すべて推奨どおり**で、個別の変更はない。あわせて、承認の後に Codex が指摘した Login 名の P1 について、Human は同じ日に案 a（Credential に見える Login 名は `redacted-<User ID の先頭 12 桁の 16 進>` に置き換え、Restore の後に Owner が名前を付け直す手順を表示する）を選んだ。承認の後に強めた点（書き出した内容だけから Commit を作る、検証済みの Commit の Object から Lock を取って Restore する、伏せ字にした Credential を持つ Repository を飛ばす、削除の確認を常に表示する、Audit なしの Dry run を失敗にする）も承認に含む。
