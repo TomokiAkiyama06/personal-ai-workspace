@@ -21,6 +21,7 @@ from paw_backend.compute import (
     DeploymentState,
     HybridRuntime,
     PlacedEmbedder,
+    Placement,
     ResourceClass,
     ScheduledMemoryWorker,
     TrackerLateGpuCharge,
@@ -28,7 +29,13 @@ from paw_backend.compute import (
 )
 from paw_backend.compute import runtimes as runtimes_module
 from paw_backend.memory.journal import WorkerUnavailableError
-from paw_backend.orchestrator import NodeOutcome, NodeResult, NodeRole
+from paw_backend.orchestrator import (
+    ExecutionPlacement,
+    InvalidOrchestratorArgumentError,
+    NodeOutcome,
+    NodeResult,
+    NodeRole,
+)
 from paw_backend.orchestrator.errors import NodeStopped, StopReason
 from paw_backend.orchestrator.runtime import NodeAssignment, validate_runtime
 from paw_backend.tasks.queueing import BudgetKind
@@ -63,6 +70,30 @@ class FakeTools:
         raise AssertionError("not used")
 
 
+class FakePlacement:
+    """Records the placements a runtime reports (the orchestrator writes them to
+    the attempt row and, for the cloud, to ``audit_events``)."""
+
+    def __init__(self, error=None) -> None:
+        self.records: list[tuple[ExecutionPlacement, str, str]] = []
+        self.error = error
+        # The attempt was abandoned (the orchestrator closed its fence).
+        self.closed = False
+
+    async def ensure_active(self):
+        if self.closed:
+            raise NodeStopped(StopReason.ABANDONED)
+
+    async def record(self, placement, *, agent, model):
+        await self.ensure_active()
+        if self.error is not None:
+            raise self.error
+        # Once, like the orchestrator's handle.
+        if self.records:
+            raise InvalidOrchestratorArgumentError("placement")
+        self.records.append((placement, agent, model))
+
+
 def assignment(goal="Fix the bug", **overrides):
     values = dict(
         task_id=uuid.uuid4(),
@@ -77,6 +108,7 @@ def assignment(goal="Fix the bug", **overrides):
         approach=0,
         tools=FakeTools(),
         budget=FakeBudget(),
+        placement=FakePlacement(),
     )
     values.update(overrides)
     return NodeAssignment(**values)
@@ -157,6 +189,8 @@ class HybridRuntimeTest(unittest.IsolatedAsyncioTestCase):
             deployment="main",
             cloud=self.cloud,
             cloud_policy=self.policy,
+            cloud_agent="codex",
+            cloud_model="gpt-5-codex",
             clock=self.clock,
             wait_seconds=120,
         )
@@ -655,6 +689,259 @@ class HybridRuntimeTest(unittest.IsolatedAsyncioTestCase):
         await task
         with self.assertRaises(ValueError):
             self.runtime(resource_class=ResourceClass.EXCLUSIVE)
+
+
+class HybridPlacementTest(unittest.IsolatedAsyncioTestCase):
+    """Issue #133 (Decision 0037's 14): where each attempt runs is recorded
+    through the assignment's ``placement`` before it runs there; for the cloud
+    that record is the audit of the send, so what cannot be recorded is not
+    sent."""
+
+    async def asyncSetUp(self):
+        self.scheduler, self.probe, self.control, self.clock = build()
+        await self.scheduler.refresh()
+        self.placement = FakePlacement()
+        self.local = Recorder("local")
+        self.cloud = Recorder("cloud")
+        self.policy = Policy()
+        placement = self.placement
+        seen = []
+
+        class Watching(Recorder):
+            async def run_node(self, assignment):
+                # What was on record when the runtime began.
+                seen.append(list(placement.records))
+                return await super().run_node(assignment)
+
+        self.cloud = Watching("cloud")
+        self.seen = seen
+
+    def runtime(self, **options):
+        values = dict(
+            deployment="main",
+            cloud=self.cloud,
+            cloud_policy=self.policy,
+            cloud_agent="codex",
+            cloud_model="gpt-5-codex",
+            clock=self.clock,
+            wait_seconds=120,
+        )
+        values.update(options)
+        return HybridRuntime(self.scheduler, self.local, **values)
+
+    async def test_the_compute_placements_are_the_orchestrators(self):
+        self.assertEqual(
+            [member.value for member in Placement],
+            [member.value for member in ExecutionPlacement],
+        )
+
+    async def test_a_local_attempt_records_the_gpu_its_agent_and_its_model(self):
+        outcome = await self.runtime().run_node(
+            assignment(agent="local-coder", placement=self.placement)
+        )
+        self.assertTrue(outcome.ok)
+        self.assertEqual(
+            self.placement.records,
+            [(ExecutionPlacement.LOCAL_GPU, "local-coder", "main")],
+        )
+
+    async def test_the_local_model_id_can_be_named(self):
+        runtime = self.runtime(local_model="Qwen/Qwen3-Coder-30B-A3B-Instruct")
+        await runtime.run_node(assignment(placement=self.placement))
+        self.assertEqual(
+            self.placement.records,
+            [
+                (
+                    ExecutionPlacement.LOCAL_GPU,
+                    "local",
+                    "Qwen/Qwen3-Coder-30B-A3B-Instruct",
+                )
+            ],
+        )
+
+    async def test_a_cloud_attempt_is_on_record_before_the_cloud_runs(self):
+        await fill_main(self.scheduler)
+        outcome = await self.runtime().run_node(
+            assignment(goal="x" * 90_000, placement=self.placement)
+        )
+        self.assertEqual(outcome.result.summary, "done by cloud")
+        expected = [(ExecutionPlacement.CLOUD, "codex", "gpt-5-codex")]
+        self.assertEqual(self.placement.records, expected)
+        self.assertEqual(self.seen, [expected])
+
+    async def test_without_a_placement_nothing_goes_to_the_cloud(self):
+        # A planner call (or any caller that cannot record the send): the policy
+        # is not even asked, the node waits for the local GPU.
+        held = await fill_main(self.scheduler)
+        task = asyncio.create_task(
+            self.runtime().run_node(assignment(goal="x" * 90_000, placement=None))
+        )
+        await settle()
+        self.assertFalse(task.done())
+        self.assertEqual(self.policy.asked, 0)
+        self.assertEqual(self.scheduler.status().cloud_leases, 0)
+        await held[0].release()
+        await settle()
+        outcome = await task
+        self.assertEqual(outcome.result.summary, "done by local")
+        self.assertEqual(self.cloud.calls, [])
+
+    async def test_a_send_that_cannot_be_recorded_is_not_sent(self):
+        await fill_main(self.scheduler)
+        placement = FakePlacement(error=RuntimeError("database down"))
+        with self.assertLogs("paw_backend.compute.runtimes", "WARNING"):
+            outcome = await self.runtime().run_node(
+                assignment(goal="x" * 90_000, placement=placement)
+            )
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.error_class, "ComputeUnavailable")
+        self.assertTrue(outcome.retryable)
+        self.assertEqual(self.cloud.calls, [])
+        self.assertEqual(self.scheduler.status().cloud_leases, 0)
+
+    async def test_a_local_attempt_that_cannot_be_recorded_does_not_run(self):
+        placement = FakePlacement(error=RuntimeError("database down"))
+        work = assignment(placement=placement, budget=FakeBudget(100))
+        with self.assertLogs("paw_backend.compute.runtimes", "WARNING"):
+            outcome = await self.runtime().run_node(work)
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.error_class, "ComputeUnavailable")
+        self.assertTrue(outcome.retryable)
+        self.assertEqual(self.local.calls, [])
+        self.assertEqual(work.budget.charges, [])
+        self.assertEqual(self.scheduler.status().leases[ResourceClass.CODING], 0)
+
+    async def test_a_stopped_attempt_stops_at_the_record(self):
+        await fill_main(self.scheduler)
+        placement = FakePlacement(error=NodeStopped(StopReason.TASK_ENDED))
+        with self.assertRaises(NodeStopped):
+            await self.runtime().run_node(
+                assignment(goal="x" * 90_000, placement=placement)
+            )
+        self.assertEqual(self.cloud.calls, [])
+        self.assertEqual(self.scheduler.status().cloud_leases, 0)
+
+    async def test_a_runtime_that_records_its_own_placement_still_runs(self):
+        # The placement is on record before the chosen runtime starts; a runtime
+        # that follows the ``NodePlacement`` contract and records it again (the
+        # same place, agent and model) is not refused as a second placement.
+        class SelfRecording(Recorder):
+            def __init__(self, name, placement, agent, model):
+                super().__init__(name)
+                self.place = (placement, agent, model)
+
+            async def run_node(self, assignment):
+                placement, agent, model = self.place
+                await assignment.placement.record(placement, agent=agent, model=model)
+                return await super().run_node(assignment)
+
+        self.cloud = SelfRecording(
+            "cloud", ExecutionPlacement.CLOUD, "codex", "gpt-5-codex"
+        )
+        self.local = SelfRecording(
+            "local", ExecutionPlacement.LOCAL_GPU, "local", "main"
+        )
+        outcome = await self.runtime().run_node(assignment(placement=self.placement))
+        self.assertEqual(outcome.result.summary, "done by local")
+        await fill_main(self.scheduler)
+        placement = FakePlacement()
+        outcome = await self.runtime().run_node(
+            assignment(goal="x" * 90_000, placement=placement)
+        )
+        self.assertEqual(outcome.result.summary, "done by cloud")
+        self.assertEqual(
+            placement.records, [(ExecutionPlacement.CLOUD, "codex", "gpt-5-codex")]
+        )
+        self.assertEqual(
+            self.placement.records, [(ExecutionPlacement.LOCAL_GPU, "local", "main")]
+        )
+
+    async def test_a_runtime_cannot_record_another_placement_than_its_own(self):
+        class Lying(Recorder):
+            async def run_node(self, assignment):
+                await assignment.placement.record(
+                    ExecutionPlacement.LOCAL_GPU, agent="local", model="main"
+                )
+                return await super().run_node(assignment)
+
+        self.cloud = Lying("cloud")
+        await fill_main(self.scheduler)
+        with self.assertRaises(InvalidOrchestratorArgumentError):
+            await self.runtime().run_node(
+                assignment(goal="x" * 90_000, placement=self.placement)
+            )
+        self.assertEqual(
+            self.placement.records, [(ExecutionPlacement.CLOUD, "codex", "gpt-5-codex")]
+        )
+
+    async def test_an_abandoned_attempt_cannot_record_its_placement_again(self):
+        # A runtime that outlives its attempt (it ignored the cancellation) and
+        # records again just before it sends: the attempt is closed, so it is
+        # refused like the orchestrator's handle refuses it, and nothing is sent.
+        placement = self.placement
+        sent = []
+
+        class Late(Recorder):
+            async def run_node(self, assignment):
+                placement.closed = True  # abandoned meanwhile
+                await assignment.placement.record(
+                    ExecutionPlacement.CLOUD, agent="codex", model="gpt-5-codex"
+                )
+                sent.append(assignment.node_key)
+                return await super().run_node(assignment)
+
+        self.cloud = Late("cloud")
+        await fill_main(self.scheduler)
+        with self.assertRaises(NodeStopped) as stopped:
+            await self.runtime().run_node(
+                assignment(goal="x" * 90_000, placement=self.placement)
+            )
+        self.assertIs(stopped.exception.reason, StopReason.ABANDONED)
+        self.assertEqual(sent, [])
+
+    async def test_an_abandoned_local_attempt_cannot_record_again(self):
+        placement = self.placement
+        ran = []
+
+        class Late(Recorder):
+            async def run_node(self, assignment):
+                placement.closed = True
+                await assignment.placement.record(
+                    ExecutionPlacement.LOCAL_GPU, agent="local", model="main"
+                )
+                ran.append(assignment.node_key)
+                return await super().run_node(assignment)
+
+        self.local = Late("local")
+        with self.assertRaises(NodeStopped):
+            await self.runtime().run_node(assignment(placement=self.placement))
+        self.assertEqual(ran, [])
+
+    async def test_no_gpu_time_left_records_no_local_placement(self):
+        # The node does not start locally (its budget is spent): nothing may say
+        # that it ran there.
+        work = assignment(placement=self.placement, budget=FakeBudget(0))
+        with self.assertRaises(NodeStopped):
+            await self.runtime().run_node(work)
+        self.assertEqual(self.local.calls, [])
+        self.assertEqual(self.placement.records, [])
+
+    async def test_a_cloud_runtime_needs_its_agent_and_model(self):
+        for missing in ("cloud_agent", "cloud_model"):
+            with self.subTest(missing), self.assertRaises(TypeError):
+                self.runtime(**{missing: None})
+        for name, value in (
+            ("cloud_agent", "Codex"),
+            ("cloud_agent", "codex\n"),
+            ("cloud_model", "gpt 5"),
+            ("cloud_model", "x" * 129),
+            ("local_model", "-bad"),
+        ):
+            with (
+                self.subTest(name=name, value=value),
+                self.assertRaises(InvalidOrchestratorArgumentError),
+            ):
+                self.runtime(**{name: value})
 
 
 class MemoryWorkerTest(unittest.IsolatedAsyncioTestCase):

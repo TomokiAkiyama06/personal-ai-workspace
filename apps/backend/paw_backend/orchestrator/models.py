@@ -10,7 +10,11 @@
 * ``agent_dag_edges``: ``node_key`` depends on ``depends_on_key`` (insert-only).
 * ``agent_dag_node_attempts``: one row per start of a node (which agent, which
   approach, which epoch started it, how it ended). The text of a failure is never
-  stored: only its class name and its loop signature.
+  stored: only its class name and its loop signature. Since revision ``0133``
+  (issue #133) also where the attempt actually ran (``placement``: the local GPU
+  or CPU, or the cloud), on which agent and model, and, for the cloud, the
+  fingerprint and size of the content that was sent and the id of its row in
+  ``audit_events``. Recorded once (a trigger refuses a change) and never text.
 
 Every table references ``tasks.id`` (or a node) with a real foreign key. The
 tables deliberately do not start with ``task``: the PAW-032 tests inspect every
@@ -47,16 +51,20 @@ from paw_backend.db import Base
 from paw_backend.orchestrator.domain import (
     AttemptState,
     DagState,
+    ExecutionPlacement,
     NodeRole,
     NodeState,
 )
 from paw_backend.orchestrator.limits import (
+    AGENT_LABEL_PATTERN,
     DB_MAX_JSON_BYTES,
     KEY_PATTERN,
     MAX_GOAL_CHARS,
     MAX_LADDER_LENGTH,
+    MAX_MODEL_CHARS,
     MAX_NODES,
     MAX_PLAN_BYTES,
+    MODEL_PATTERN,
 )
 from paw_backend.tasks.queueing.validation import MAX_APPROACH
 
@@ -83,6 +91,46 @@ def _enum(enum_class: type[StrEnum], length: int = 16) -> Enum:
 def _in(column: str, enum_class: type[StrEnum], name: str) -> CheckConstraint:
     values = ", ".join(f"'{member.value}'" for member in enum_class)
     return CheckConstraint(f"{column} IN ({values})", name=name)
+
+
+def placement_checks() -> tuple[CheckConstraint, ...]:
+    """The CHECK constraints of the placement columns (revision 0133)."""
+    return (
+        _in("placement", ExecutionPlacement, "placement_valid"),
+        # The placement, its agent, its model and its time come together.
+        CheckConstraint(
+            "(placement IS NULL) = (placement_agent IS NULL)"
+            " AND (placement IS NULL) = (placement_model IS NULL)"
+            " AND (placement IS NULL) = (placed_at IS NULL)",
+            name="placement_complete",
+        ),
+        # Identifiers, never text.
+        CheckConstraint(
+            f"placement_agent IS NULL OR placement_agent ~ '^{AGENT_LABEL_PATTERN}$'",
+            name="placement_agent_format",
+        ),
+        CheckConstraint(
+            f"placement_model IS NULL OR placement_model ~ '^{MODEL_PATTERN}$'",
+            name="placement_model_format",
+        ),
+        # A cloud placement always has its audit row and the fingerprint and size
+        # of what was sent; a local one never has them.
+        CheckConstraint(
+            "COALESCE(placement = 'cloud', false) = (placement_audit_id IS NOT NULL)"
+            " AND (placement_audit_id IS NULL) = (content_fingerprint IS NULL)"
+            " AND (placement_audit_id IS NULL) = (content_bytes IS NULL)",
+            name="cloud_is_audited",
+        ),
+        CheckConstraint(
+            "content_fingerprint IS NULL"
+            " OR content_fingerprint ~ '^sha256:[0-9a-f]{64}$'",
+            name="content_fingerprint_format",
+        ),
+        CheckConstraint(
+            "content_bytes IS NULL OR content_bytes >= 0",
+            name="content_bytes_not_negative",
+        ),
+    )
 
 
 class DagRow(Base):
@@ -272,6 +320,19 @@ class DagNodeAttemptRow(Base):
         DateTime(timezone=True), server_default=text("now()")
     )
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Where the attempt ran (revision 0133). NULL: nothing was recorded (a runtime
+    # that does not report it, or an attempt that ended before it did).
+    placement: Mapped[ExecutionPlacement | None] = mapped_column(
+        _enum(ExecutionPlacement)
+    )
+    placement_agent: Mapped[str | None] = mapped_column(String(64))
+    placement_model: Mapped[str | None] = mapped_column(String(MAX_MODEL_CHARS))
+    placed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # For the cloud only: what left the backend (a SHA-256 and a size, never the
+    # content) and the ``audit_events`` row of the send.
+    content_fingerprint: Mapped[str | None] = mapped_column(String(71))
+    content_bytes: Mapped[int | None] = mapped_column(Integer)
+    placement_audit_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
 
     __table_args__ = (
         ForeignKeyConstraint(
@@ -297,4 +358,5 @@ class DagNodeAttemptRow(Base):
         CheckConstraint(
             "state <> 'failed' OR error_class IS NOT NULL", name="failed_has_class"
         ),
+        *placement_checks(),
     )

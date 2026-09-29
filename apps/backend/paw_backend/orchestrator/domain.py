@@ -62,6 +62,19 @@ class AttemptState(StrEnum):
     INTERRUPTED = "interrupted"
 
 
+class ExecutionPlacement(StrEnum):
+    """Where one attempt of a node actually ran (issue #133, Decision 0037's 14).
+
+    The values are those of the Compute Resource Scheduler's ``Placement``
+    (``paw_backend.compute.domain``), repeated here so that the orchestrator does
+    not depend on the scheduler; ``tests/test_orchestrator_placement.py`` fails
+    when the two differ."""
+
+    LOCAL_GPU = "local_gpu"
+    LOCAL_CPU = "local_cpu"
+    CLOUD = "cloud"  # a Codex / Claude agent: the node's content left the backend
+
+
 class NextStep(StrEnum):
     """What happens to a node after a failed attempt."""
 
