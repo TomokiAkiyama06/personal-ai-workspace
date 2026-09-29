@@ -14,6 +14,7 @@ from paw_backend.orchestrator.domain import (
     ROLE_CEILING,
     AttemptState,
     DagState,
+    ExecutionPlacement,
     NextStep,
     NodeRole,
     NodeState,
@@ -50,6 +51,7 @@ from paw_backend.orchestrator.orchestrator import (
     format_error_class,
     format_failure_text,
 )
+from paw_backend.orchestrator.placement import NodePlacementHandle
 from paw_backend.orchestrator.plan import Plan, PlanNode
 from paw_backend.orchestrator.project_sweep import (
     PendingDeletionLister,
@@ -64,6 +66,7 @@ from paw_backend.orchestrator.runtime import (
     NodeAssignment,
     NodeBudget,
     NodeOutcome,
+    NodePlacement,
     NodeTools,
     validate_runtime,
 )
@@ -101,6 +104,7 @@ __all__ = [
     "DagState",
     "DagStateError",
     "DagStore",
+    "ExecutionPlacement",
     "IntegrationReport",
     "IntegrationRequest",
     "IntegrationState",
@@ -112,6 +116,8 @@ __all__ = [
     "NodeBudget",
     "NodeBudgetHandle",
     "NodeOutcome",
+    "NodePlacement",
+    "NodePlacementHandle",
     "NodeRecord",
     "NodeResult",
     "NodeRole",

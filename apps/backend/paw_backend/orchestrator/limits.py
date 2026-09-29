@@ -55,6 +55,15 @@ DEFAULT_MAX_PLAN_ATTEMPTS = 2
 MAX_PLAN_ATTEMPTS = 5
 MAX_ERROR_CLASS_CHARS = 100
 
+# -- placement (issue #133): where an attempt ran, on which agent and model -------
+# The agent is a ladder label or a cloud agent's name (``AGENT_LABEL_PATTERN``);
+# the model a runtime's model id, such as ``Qwen/Qwen3-Coder-30B-A3B-Instruct``
+# or ``gpt-5-codex``. Both are identifiers, never text: migration ``0133``
+# repeats the patterns as CHECK constraints.
+AGENT_LABEL_PATTERN = r"[a-z][a-z0-9._-]{0,63}"
+MAX_MODEL_CHARS = 128
+MODEL_PATTERN = r"[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}"
+
 # -- the project task-stop loop ----------------------------------------------------
 DEFAULT_STOP_INTERVAL_SECONDS = 60.0
 MIN_STOP_INTERVAL_SECONDS = 10.0

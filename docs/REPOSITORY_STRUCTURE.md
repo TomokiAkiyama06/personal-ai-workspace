@@ -66,7 +66,8 @@ personal-ai-workspace/
 │  │  │     ├─ 0052_research_provenance.py
 │  │  │     ├─ 0071_memory_status_history.py
 │  │  │     ├─ 0083_tasks_project_state_index.py
-│  │  │     └─ 0087_audit_external_send_details.py
+│  │  │     ├─ 0087_audit_external_send_details.py
+│  │  │     └─ 0133_node_attempt_placement.py
 │  │  ├─ paw_backend/
 │  │  │  ├─ __init__.py
 │  │  │  ├─ __main__.py
@@ -186,6 +187,7 @@ personal-ai-workspace/
 │  │  │  │  └─ layout.py
 │  │  │  ├─ orchestrator/
 │  │  │  │  ├─ __init__.py
+│  │  │  │  ├─ audit.py
 │  │  │  │  ├─ authority.py
 │  │  │  │  ├─ composition.py
 │  │  │  │  ├─ config.py
@@ -197,6 +199,7 @@ personal-ai-workspace/
 │  │  │  │  ├─ limits.py
 │  │  │  │  ├─ models.py
 │  │  │  │  ├─ orchestrator.py
+│  │  │  │  ├─ placement.py
 │  │  │  │  ├─ plan.py
 │  │  │  │  ├─ project_sweep.py
 │  │  │  │  ├─ records.py
@@ -425,6 +428,8 @@ personal-ai-workspace/
 │  │     ├─ test_orchestrator_grants.py
 │  │     ├─ test_orchestrator_lease.py
 │  │     ├─ test_orchestrator_migration.py
+│  │     ├─ test_orchestrator_placement.py
+│  │     ├─ test_orchestrator_placement_migration.py
 │  │     ├─ test_orchestrator_plan.py
 │  │     ├─ test_orchestrator_planning.py
 │  │     ├─ test_orchestrator_project_gate.py

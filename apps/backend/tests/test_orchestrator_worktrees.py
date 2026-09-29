@@ -156,9 +156,12 @@ class NodeWorktreeTest(WorktreeTestCase):
             (assignment,) = runtime.calls_of(key)
             (worktree,) = assignment.worktrees.values()
             self.assertEqual(worktree.path, f"/srv/paw-orch/trees/{key}")
+            # Issue #133: the same assignment carries the placement handle.
+            self.assertIsNotNone(assignment.placement)
         for key in ("research", "readonly", "review"):
             (assignment,) = runtime.calls_of(key)
             self.assertEqual(dict(assignment.worktrees), {})
+            self.assertIsNotNone(assignment.placement)
 
     async def test_a_conflict_between_upstream_branches_fails_the_node_at_once(self):
         runtime = FakeRuntime("local")

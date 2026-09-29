@@ -19,6 +19,12 @@ What a runtime is given (``NodeAssignment``) and what it is **not** given:
   (:class:`NodeBudget`) to report what it consumed. Both are the orchestrator's:
   every tool call passes the orchestrator's task check and the Tool Broker, and
   every charge goes to the parent task's budget;
+* it may get ``placement`` (:class:`NodePlacement`, issue #133) to record where
+  the attempt actually runs (the local GPU or CPU, or a cloud agent) and on which
+  agent and model. The orchestrator gives it to every attempt of a DAG node (not
+  to the planner's calls, which have no attempt row); a runtime that may send a
+  node to the cloud must record the placement first and must not send when it
+  cannot (``HybridRuntime``);
 * it never gets the Tool Broker, the runner, a ``TaskContext``, a grant, a scope,
   a database connection or another node's conversation.
 
@@ -31,7 +37,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from paw_backend.orchestrator.domain import NodeRole
+from paw_backend.orchestrator.domain import ExecutionPlacement, NodeRole
 from paw_backend.orchestrator.errors import InvalidOrchestratorArgumentError
 from paw_backend.orchestrator.plan import Plan
 from paw_backend.orchestrator.result import NodeResult
@@ -72,6 +78,30 @@ class NodeBudget(Protocol):
         ...
 
 
+class NodePlacement(Protocol):
+    async def record(
+        self, placement: ExecutionPlacement, *, agent: str, model: str
+    ) -> None:
+        """Record where this attempt runs, once, BEFORE it runs there: ``agent``
+        is the ladder label (local) or the cloud agent's name
+        (``[a-z][a-z0-9._-]{0,63}``), ``model`` the model id
+        (``[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}``). For ``CLOUD`` the external send
+        is audited in the same transaction (a row in ``audit_events``): when this
+        returns, the send is on record; when it raises, nothing may be sent.
+        Raises ``NodeStopped`` when the attempt can no longer act, and
+        ``InvalidOrchestratorArgumentError`` for a wrong argument or a second
+        call. A runtime that hands the node to another one after recording
+        (``HybridRuntime``) passes it a ``placement`` that accepts the same
+        place, agent and model again while the attempt may still act
+        (``ensure_active``), and refuses any other."""
+        ...
+
+    async def ensure_active(self) -> None:
+        """Raise ``NodeStopped`` when this attempt can no longer act (it was
+        abandoned, or its run stopped, was replaced or ended); record nothing."""
+        ...
+
+
 @dataclass(frozen=True, slots=True)
 class NodeAssignment:
     """What an agent runtime is asked to do for one attempt of one node."""
@@ -96,6 +126,9 @@ class NodeAssignment:
     # repository id (empty for a read-only role, or without worktrees). The node's
     # scope already points at these (the user's checkout is out of its scope).
     worktrees: Mapping[uuid.UUID, NodeWorktree] = field(default_factory=dict)
+    # Where the attempt runs, recorded once (``None``: nothing can be recorded,
+    # such as a planner call: a runtime must then keep the node off the cloud).
+    placement: NodePlacement | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True, slots=True)
