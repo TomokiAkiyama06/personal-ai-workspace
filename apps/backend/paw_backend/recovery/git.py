@@ -47,6 +47,7 @@ class GitProblem(StrEnum):
     NOT_CLEAN = "not_clean"
     NOT_LATEST = "not_latest"
     NO_COMMIT = "no_commit"
+    UNSAFE_OBJECT = "unsafe_object"
 
 
 class RecoveryGitError(Exception):
@@ -177,6 +178,16 @@ class RecoveryGit:
         (a compare-and-swap), and the checkout's index is then reset to the new
         commit for the managed names only (other staged changes stay staged).
         """
+        object_format = self._value(["rev-parse", "--show-object-format"])
+        if object_format not in ("sha1", "sha256"):
+            raise RecoveryGitError(GitProblem.COMMAND_FAILED)
+
+        def object_id(payload: bytes) -> str:
+            # The id git itself gives a blob, in the repository's hash.
+            return hashlib.new(
+                object_format, payload, usedforsecurity=False
+            ).hexdigest()
+
         allowed = set(names)
         for path in files:
             if path.split("/", 1)[0] not in allowed:
@@ -206,9 +217,7 @@ class RecoveryGit:
             entries = []
             for path in sorted(files):
                 data = files[path]
-                digest = hashlib.sha1(
-                    b"blob %d\0" % len(data) + data, usedforsecurity=False
-                ).hexdigest()
+                digest = object_id(b"blob %d\0" % len(data) + data)
                 if digest not in known:
                     written = self._value_of(
                         self._run(["hash-object", "-w", "--stdin"], data=data)
@@ -233,9 +242,50 @@ class RecoveryGit:
         commit = self._value_of(
             self._run(["commit-tree", tree, *parents], data=message.encode())
         )
-        self._run(["update-ref", branch, commit, head or "0" * 40])
+        zero = "0" * (64 if object_format == "sha256" else 40)
+        self._run(["update-ref", branch, commit, head or zero])
         self._run(["reset", "-q", "--", *self._known_names(names)])
         return True
+
+    def read_commit_files(
+        self, commit: str, names: Sequence[str], *, max_bytes: int
+    ) -> dict[str, bytes]:
+        """Every file below ``names`` in ``commit`` (path -> bytes), from git's
+        object store: never the work tree, which another process could change
+        while it is read. A link, a submodule or a file over ``max_bytes`` is
+        refused (``unsafe_entry`` is the caller's; here ``command_failed``)."""
+        listing = self._run(
+            ["ls-tree", "-r", "-z", "--full-tree", "-l", commit, "--", *names]
+        ).stdout
+        wanted: list[tuple[str, str]] = []
+        for entry in listing.split(b"\0"):
+            if not entry:
+                continue
+            meta, _, raw_path = entry.partition(b"\t")
+            mode, kind, oid, size = meta.split()
+            if kind != b"blob" or mode not in (b"100644", b"100755"):
+                raise RecoveryGitError(GitProblem.UNSAFE_OBJECT)
+            if int(size) > max_bytes:
+                raise RecoveryGitError(GitProblem.UNSAFE_OBJECT)
+            wanted.append((raw_path.decode("utf-8", "surrogateescape"), oid.decode()))
+        if not wanted:
+            return {}
+        output = self._run(
+            ["cat-file", "--batch"],
+            data="".join(f"{oid}\n" for _, oid in wanted).encode(),
+        ).stdout
+        files: dict[str, bytes] = {}
+        position = 0
+        for path, oid in wanted:
+            end = output.index(b"\n", position)
+            header = output[position:end].split()
+            if len(header) != 3 or header[0].decode() != oid or header[1] != b"blob":
+                raise RecoveryGitError(GitProblem.COMMAND_FAILED)
+            size = int(header[2])
+            start = end + 1
+            files[path] = output[start : start + size]
+            position = start + size + 1
+        return files
 
     def _known_names(self, names: Sequence[str]) -> list[str]:
         """The managed names in the index or in ``HEAD`` (a pathspec git accepts)."""

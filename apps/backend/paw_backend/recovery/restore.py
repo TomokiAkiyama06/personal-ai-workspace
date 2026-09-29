@@ -60,6 +60,7 @@ from paw_backend.recovery.audit import (
     record_recovery_outcome,
 )
 from paw_backend.recovery.files import (
+    MAX_FILE_BYTES,
     RecoveryCheckout,
     RecoveryFilesError,
     check_directory_path,
@@ -69,6 +70,7 @@ from paw_backend.recovery.format import (
     AUTH_POLICY_PATH,
     CHECKSUMS_PATH,
     DELETIONS_DIRECTORY,
+    MANAGED_ROOT_NAMES,
     MANIFEST_NAME,
     MARKER_NAME,
     MEMORY_DIRECTORY,
@@ -435,7 +437,11 @@ def open_source(
     checkout = open_checkout(text, protected, claim=False)
     try:
         commit = git.check_restorable()
-        files = checkout.read_managed()
+        # From the verified commit's objects, not the work tree: another
+        # process writing the checkout meanwhile cannot change what is read.
+        files = git.read_commit_files(
+            commit, MANAGED_ROOT_NAMES, max_bytes=MAX_FILE_BYTES
+        )
         manifest = verify_files(files)
         try:
             data = parse_source(files, commit, manifest)

@@ -410,10 +410,15 @@ def _show_restore(result: RestoreResult, apply: bool, err: TextIO | None) -> int
         )
         return EXIT_FAILED
     if result.failed is not None:
+        recorded = (
+            "the recovery.restore.failed audit row was written"
+            if result.audited
+            else "the recovery.restore.failed audit row could not be written"
+        )
         _say(
             err,
-            f"FAILED ({result.failed}): the restore was rolled back; nothing was "
-            "written.",
+            f"FAILED ({result.failed}): the restore was rolled back and no "
+            f"workspace data was written; {recorded}.",
         )
         return EXIT_FAILED
     counts = " ".join(f"{key}={value}" for key, value in data.counts.items())

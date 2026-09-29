@@ -35,6 +35,7 @@ from paw_backend.recovery.format import (
     MARKER_NAME,
 )
 from paw_backend.recovery.git import RecoveryGit
+from paw_backend.recovery.restore import load_source
 
 from .recovery_support import (
     BRANCH,
@@ -349,6 +350,43 @@ class BackupRunTest(BackupTestCase):
         )
         # The lock was released: the next run proceeds.
         self.assertTrue((await self.runner().run()).ok)
+
+
+class ObjectFormatTest(BackupTestCase):
+    async def test_a_sha256_repository_can_be_committed_to(self) -> None:
+        repository = self.world.base / "sha256"
+        git(
+            "init", "-q", "--object-format=sha256", str(repository), cwd=self.world.base
+        )
+        git("symbolic-ref", "HEAD", "refs/heads/main", cwd=repository)
+        recovery_git = RecoveryGit(str(repository))
+        files = {"users/a.json": b"{}\n"}
+        self.assertTrue(recovery_git.commit_files(files, "first\n", ("users",)))
+        self.assertEqual(64, len(recovery_git.head()))
+        self.assertEqual(
+            files,
+            recovery_git.read_commit_files(
+                recovery_git.head(), ("users",), max_bytes=1024
+            ),
+        )
+        self.assertFalse(recovery_git.commit_files(files, "again\n", ("users",)))
+
+
+class RestoreSourceTest(BackupTestCase):
+    async def test_the_source_is_read_from_the_verified_commit(self) -> None:
+        # Status says clean (the change is hidden from it), but the files on
+        # disk are not the commit: the restore reads the commit, never the
+        # work tree.
+        await self.runner().run()
+        clone = self.world.clone()
+        path = next((clone / "users").iterdir())
+        original = path.read_bytes()
+        relative = str(path.relative_to(clone))
+        git("update-index", "--assume-unchanged", relative, cwd=clone)
+        path.write_bytes(original.replace(b"alice", b"mallory"))
+        self.assertEqual("", git("status", "--porcelain", cwd=clone))
+        data = load_source(str(clone), self.world.homes)
+        self.assertEqual(["alice"], [row["login_name"] for row in data.users])
 
 
 class CheckoutTest(BackupTestCase):
