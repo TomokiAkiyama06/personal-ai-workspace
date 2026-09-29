@@ -529,7 +529,9 @@ class ComputeScheduler:
                 return self._grant(request, Placement.CLOUD)
             raise ComputeUnavailableError(Refusal.QUEUE_FULL)
         future = asyncio.get_running_loop().create_future()
-        waiter = _Waiter(request, future, next(self._sequence), refusal)
+        waiter = _Waiter(
+            request, future, next(self._sequence), self._queued_reason(request, refusal)
+        )
         self._waiters.append(waiter)
         wait = min(timeout, cloud_after) if request.allow_cloud else timeout
         try:
@@ -681,9 +683,9 @@ class ComputeScheduler:
             # Leases released before this reading, with memory no earlier
             # reading showed: rebased on this one (with the models' processes
             # it found).
-            self._pending_release -= carried
             view = self._vram()
             self._extra_baseline = view.external + min(carried, view.extra_use)
+            self._pending_release -= carried
 
     async def _inspect(
         self, entry: _Deployment
@@ -768,9 +770,11 @@ class ComputeScheduler:
         what the shared GPU leases allocate of their own (Decision 0042). The two
         never meet: an Exclusive lease is granted only once no local GPU lease
         is left."""
+        # A released lease's reservation still counts while no reading has
+        # shown what it left behind (see _rebase).
         if self._exclusive is not None:
-            return self._exclusive.vram_bytes
-        return sum(
+            return self._pending_release + self._exclusive.vram_bytes
+        return self._pending_release + sum(
             lease.vram_bytes
             for entry in self._deployments.values()
             for lease in entry.leases
@@ -893,6 +897,34 @@ class ComputeScheduler:
             )
             for waiter in self._waiters
         )
+
+    def _queued_reason(self, request: ComputeRequest, refusal: Refusal) -> Refusal:
+        """What a new waiter queued behind others waits for, as _pump labels it:
+        its model's capacity, or VRAM (a chain of VRAM waiters must not hold
+        back work that needs none: see _queued_ahead)."""
+        if refusal is not Refusal.QUEUED_BEHIND:
+            return refusal
+        rank = CLASS_RANK[request.resource_class]
+        ahead = [
+            waiter
+            for waiter in sorted(self._waiters, key=lambda w: w.key)
+            if CLASS_RANK[waiter.request.resource_class] <= rank
+            and not waiter.future.done()
+        ]
+        for waiter in ahead:
+            if (
+                waiter.request.deployment == request.deployment
+                and waiter.last in CAPACITY_REFUSALS
+            ):
+                return waiter.last
+        needs_vram = request.vram_bytes > 0 and not self._on_cpu(
+            self._deployments[request.deployment]
+        )
+        if needs_vram and any(
+            waiter.last is Refusal.INSUFFICIENT_FREE_VRAM for waiter in ahead
+        ):
+            return Refusal.INSUFFICIENT_FREE_VRAM
+        return refusal
 
     def _warn_request(self, request: ComputeRequest, *, gave_up: bool = False) -> None:
         # The last reading, even a stale one (a wait that ran out); without any

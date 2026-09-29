@@ -108,6 +108,9 @@ class FreeVramAdmissionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(admitted.lease.vram_bytes, 11 * GIB)
         self.assertEqual(self.scheduler.status().vram.reserved, 91 * GIB)
         await admitted.lease.release()
+        # Its promise stands until a reading shows what it left behind.
+        self.assertEqual(self.scheduler.status().vram.reserved, 91 * GIB)
+        await self.scheduler.refresh()
         self.assertEqual(self.scheduler.status().vram.reserved, 80 * GIB)
 
     async def test_the_resident_models_are_not_counted_twice(self):
@@ -131,6 +134,13 @@ class FreeVramAdmissionTest(unittest.IsolatedAsyncioTestCase):
         refused = await self.scheduler.try_acquire(coding(vram=4 * GIB))
         self.assertEqual(refused.refusal, Refusal.INSUFFICIENT_FREE_VRAM)
         await first.release()
+        # Until a reading shows what the lease left behind, its promise stands
+        # (it may have allocated after the last reading).
+        self.assertEqual(
+            (await self.scheduler.try_acquire(coding(vram=4 * GIB))).refusal,
+            Refusal.INSUFFICIENT_FREE_VRAM,
+        )
+        await self.scheduler.refresh()
         self.assertIsNotNone(
             (await self.scheduler.try_acquire(coding(vram=4 * GIB))).lease
         )
@@ -232,6 +242,26 @@ class FreeVramAdmissionTest(unittest.IsolatedAsyncioTestCase):
         await second.release()
         status = await self.scheduler.refresh()
         self.assertEqual(status.vram.external, 0)
+        self.assertEqual(status.vram.committed, 80 * GIB)
+
+    async def test_an_unseen_release_stays_reserved_until_the_next_reading(self):
+        # Between two readings the first lease allocates its 5 GiB and ends:
+        # until a reading shows what it left, its reservation still counts
+        # (6 GiB would overcommit the GPU once the second lease allocates).
+        first = (await self.scheduler.try_acquire(coding(vram=5 * GIB))).lease
+        second = (await self.scheduler.try_acquire(coding(vram=5 * GIB))).lease
+        self.probe.resident[JOB_PID] = 5 * GIB
+        await first.release()
+        self.assertEqual(self.scheduler.status().vram.committed, 90 * GIB)
+        self.assertEqual(
+            (await self.scheduler.try_acquire(coding(vram=6 * GIB))).refusal,
+            Refusal.INSUFFICIENT_FREE_VRAM,
+        )
+        status = await self.scheduler.refresh()
+        self.assertEqual(status.vram.committed, 90 * GIB)
+        del self.probe.resident[JOB_PID]
+        await second.release()
+        status = await self.scheduler.refresh()
         self.assertEqual(status.vram.committed, 80 * GIB)
 
     async def test_a_reading_started_before_a_release_does_not_settle_it(self):
@@ -575,6 +605,29 @@ class FreeVramAdmissionTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(admitted.lease)
         waiting.cancel()
         ahead.cancel()
+
+    async def test_work_without_vram_passes_a_chain_of_vram_waiters(self):
+        # Two VRAM requests on the memory model wait (the second only behind
+        # the first): work there that needs no VRAM is not held back.
+        self.probe.external = 9 * GIB  # 2.2 GiB left beyond the headroom
+        await self.scheduler.refresh()
+        waiters = [
+            asyncio.create_task(
+                self.scheduler.acquire(
+                    ComputeRequest(SU, deployment="memory", vram_bytes=vram),
+                    wait_seconds=600,
+                )
+            )
+            for vram in (3 * GIB, GIB)
+        ]
+        await settle()
+        self.assertEqual(self.scheduler.status().vram_waiting, 2)
+        admitted = await self.scheduler.try_acquire(
+            ComputeRequest(SU, deployment="memory")
+        )
+        self.assertIsNotNone(admitted.lease)
+        for waiting in waiters:
+            waiting.cancel()
 
 
 class ModelLoadWarningTest(unittest.IsolatedAsyncioTestCase):
