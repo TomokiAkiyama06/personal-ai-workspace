@@ -1,7 +1,7 @@
 """``audit_events`` retention / partitioning on a real PostgreSQL (Issue #86).
 
 Migration 0086 (``docs/decisions/0027-audit-retention-and-partitioning.md``,
-Proposed) and ``AuditRetentionService``. Skipped unless ``PAW_TEST_DATABASE_URL``
+Approved) and ``AuditRetentionService``. Skipped unless ``PAW_TEST_DATABASE_URL``
 is set. The whole database is reused across every test in this file (append-only,
 like every other real-PostgreSQL audit test in this suite); every test that
 creates a partition picks its own year from ``unique_year()`` so no two tests,

@@ -2,7 +2,7 @@
 
 One scheduler per backend process owns the admission to the local models and the
 residency of those models on the GPU (``REQUIREMENTS.md``, "GPU / Compute
-Resource Scheduler", FIXED; the open choices are in Decision 0037, Proposed).
+Resource Scheduler", FIXED; the open choices are in Decision 0037, Approved).
 
 Admission
     A caller asks for a :class:`ComputeRequest` (a resource class, the model it

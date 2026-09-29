@@ -40,6 +40,7 @@ from paw_backend.orchestrator.errors import (
 from paw_backend.orchestrator.gateway import (
     NodeBudgetHandle,
     NodeToolGateway,
+    QueueLeaseVerifier,
     RunGuard,
     ToolCaller,
     TrackerBudgetProvider,
@@ -137,6 +138,7 @@ __all__ = [
     "PlanNode",
     "PlanReason",
     "ProjectTaskStopLoop",
+    "QueueLeaseVerifier",
     "RepositoryIntegration",
     "ResultReason",
     "RunGuard",

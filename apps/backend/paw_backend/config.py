@@ -138,7 +138,7 @@ class Settings(BaseSettings):
     # expired in storage (the retrieval still judges both by time).
     freshness_job_interval_seconds: int = Field(default=3_600, ge=0, le=86_400)
 
-    # Memory Markdown Projection (PAW-045, Decision 0038 Proposed): the directory
+    # Memory Markdown Projection (PAW-045, Decision 0038 Approved): the directory
     # ``python -m paw_backend.cli memory-projection-run`` writes the Markdown view
     # of PostgreSQL's memories into (on the HDD in the deployment, for example
     # ``/srv/personal-ai/memory``). Unset: the command refuses to run. The path is

@@ -178,7 +178,7 @@ _MANAGER_ONLY = frozenset(
         C.PROJECT_MEMORY_MANAGE,
         C.PROJECT_LIFECYCLE_MANAGE,
         # Release a crashed process's repository write (issue #129, Decision 0049
-        # Proposed): who manages the project, not every Contributor.
+        # Approved): who manages the project, not every Contributor.
         C.PROJECT_TASK_WRITE_RESERVATION_RELEASE,
     }
 )

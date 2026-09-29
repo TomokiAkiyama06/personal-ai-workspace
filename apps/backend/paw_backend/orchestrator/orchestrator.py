@@ -25,6 +25,10 @@ The duties that earlier Decisions gave to "the orchestrator" and where each is m
   is reduced to a fixed name (``errors.error_class_of``).
 * **Never hand a tool call to a terminated task** and **build ``TaskContext.run``
   from the task** (Decision 0006, 9): ``gateway.py``.
+* **No tool call of a worker that lost its queue lease** (issue #126, Decision
+  0046): ``_context`` puts this worker's claim in ``TaskContext.lease`` and the
+  Broker checks it for every call (``gateway.QueueLeaseVerifier``); a refusal for
+  a lost lease stops the run (``gateway.NodeToolGateway``).
 * **Write repositories are ``TaskScope.repositories``, with remotes registered**
   (Decision 0006, 8): they come from the caller's ``TaskAuthority.parent_scope``
   (the seam until issue #85 persists the working set, Decision 0014) and reach a
@@ -151,6 +155,7 @@ from paw_backend.tasks.queueing import (
     NextAction,
     Priority,
     QueueEntry,
+    QueueLease,
     StaleRuntimeSessionError,
     TaskQueue,
     decide_next_action,
@@ -163,6 +168,11 @@ from paw_backend.tools.interfaces import require_async_method
 logger = logging.getLogger(__name__)
 
 _RETRYING_STEPS = frozenset({NextStep.RETRY, NextStep.ALTERNATIVE, NextStep.ESCALATE})
+# The guard's stops that end the whole run for this worker: an attempt that ends
+# after one is not settled (``_settle``); the top of the loop closes the run.
+_RUN_ENDING_STOPS = frozenset(
+    {StopReason.TASK_ENDED, StopReason.SUPERSEDED, StopReason.LEASE_LOST}
+)
 
 # Recorded as the reason of the task commands the orchestrator issues (fixed text).
 REASON_DAG_SUCCEEDED = "All required nodes succeeded"
@@ -383,6 +393,11 @@ class _Run:
     generation: int | None = None
     proved_at: float = 0.0  # the injected clock when the last lease proof began
     not_before: dict[str, float] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        # A lost lease that the guard learns of (the Broker's ``lease_lost``)
+        # wakes the run loop like one the heartbeats found.
+        self.guard.on_lease_lost(self.lost.set)
 
     def lose(self) -> None:
         self.guard.stop(StopReason.LEASE_LOST)
@@ -1631,8 +1646,9 @@ class Orchestrator:
     ) -> TaskContext:
         """The ``TaskContext`` of one tool call, from CURRENT values: the run comes
         from the task snapshot the worker was started with (``TaskEvent.run``), the
-        delegator from the task, the grant and scope derived from the parent's
-        (with the node's own worktrees, PAW-035, when it has them)."""
+        lease from the claim this worker holds, the delegator from the task, the
+        grant and scope derived from the parent's (with the node's own worktrees,
+        PAW-035, when it has them)."""
         parent_grant = await self._authority.parent_grant(run.task)
         parent_scope = await self._authority.parent_scope(run.task)
         grant = node_grant(
@@ -1663,6 +1679,9 @@ class Orchestrator:
             scope=scope,
             primary_project_id=run.task.project_id,
             run=run.run,
+            # The fencing token of every tool call (issue #126, Decision 0046):
+            # the Broker refuses the call once this claim no longer holds.
+            lease=QueueLease.of(run.entry, run.worker_id),
         )
 
     async def _attempt(self, run: _Run, spec: _Spec) -> _Finished:
@@ -1816,6 +1835,14 @@ class Orchestrator:
         """Write the outcome of an attempt. ``(dag, stop)``: ``stop`` when the
         outcome means the run must not start more nodes (a budget or a loop)."""
         store, epoch = self._store, run.epoch
+        if run.guard.stop_reason in _RUN_ENDING_STOPS:
+            # The run is over for this worker (its lease is gone, its run was
+            # replaced, or the task ended): nothing of it is written, whatever the
+            # attempt reports. A runtime may have caught the ``NodeStopped`` of a
+            # tool call and returned an outcome anyway; after a lease that only
+            # ran out, nobody has raised the DAG's epoch yet, so the store would
+            # still take it (Decision 0046). The top of the loop closes the run.
+            return dag, None
         if finished.stopped is not None:
             reason = finished.stopped
             if reason is StopReason.BUDGET_EXCEEDED:
@@ -1829,12 +1856,6 @@ class Orchestrator:
                     step=NextStep.HOLD,
                 )
                 return dag, await self._budget_stop(run)
-            if run.guard.stop_reason is reason and reason in (
-                StopReason.TASK_ENDED,
-                StopReason.SUPERSEDED,
-                StopReason.LEASE_LOST,
-            ):
-                return dag, None  # the top of the loop sees it and closes the DAG
             dag = await store.fail_node(
                 dag.id,
                 epoch,

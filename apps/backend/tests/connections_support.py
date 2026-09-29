@@ -36,6 +36,7 @@ from paw_backend.connections import (
 )
 from paw_backend.db import Database
 from paw_backend.tasks import TaskRun
+from paw_backend.tasks.queueing import QueueLease
 from paw_backend.tools import TaskContext, TaskScope
 
 from .connections_fakes import (
@@ -161,6 +162,9 @@ class PostgresConnectionTestCase(unittest.IsolatedAsyncioTestCase):
             ),
             primary_project_id=project_id,
             run=run,
+            # A worker's lease (issue #126): the connection service does not
+            # read it, but every TaskContext carries one.
+            lease=QueueLease(1, "w1", 1),
         )
 
     @staticmethod
