@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "task_id": "paw-seed-v1-spec-06-result-builder",
+  "kind": "spec",
+  "repository": {
+    "locator": "paw-dataset://paw-seed-v1/paw-seed-v1-spec-06-result-builder",
+    "starting_commit": "eb236c73ca9c9a3b3e5b3465d0594aaef5c7b9a4"
+  },
+  "issue_text": "# Check実行の結果からEvaluator Result v1を組み立てる\n\n`benchmarks.test_runner.TestRunner`が返す`CheckExecution`と、Task manifestから、\nEvaluator Result v1（`benchmarks/schemas/result-v1.schema.json`）の文書を組み立てるmoduleを追加してください。\n\n## 仕様\n\n新しいmodule `benchmarks/result_builder.py`:\n\n- `aggregate_status(statuses: Sequence[str]) -> str`: 空なら`\"not_run\"`。`\"error\"`が1つでもあれば`\"error\"`、なければ`\"failed\"`があれば`\"failed\"`、なければ`\"not_run\"`があれば`\"not_run\"`、それ以外は`\"passed\"`。\n- `build_result(task, candidate, executions, *, evaluator_version, metrics=None) -> dict`:\n  - `task`はTask v1の文書。schemaに適合しなければ`ValueError`。\n  - `check_results`はTaskの`visible_checks`、続いて`hidden_checks`の順に1件ずつ。`id`と`type`はTaskのもの（実行側の`type`は使わない）。\n  - 状態は、同じ`id`の`CheckExecution.status`を対応させる: `passed`→`passed`、`failed`→`failed`、`timed_out`→`failed`、`error`→`error`。実行がないcheckは`not_run`。\n  - Taskにない`id`の実行、同じ`id`の2回目の実行、未知の`status`は`ValueError`。\n  - `test_outcomes.fail_to_pass`は`hidden_checks`のうち`type`が`acceptance`のcheckの状態を`aggregate_status`でまとめたもの（visibleのacceptanceは含めない）。`pass_to_pass`はvisible・hiddenを通して`type`が`regression`のcheckの状態をまとめたもの。\n  - `task_id`はTaskから、`candidate`・`evaluator_version`・`metrics`（既定は空のobject）は引数から。`schema_version`は`\"1.0\"`。\n  - 組み立てた文書がResult schemaに適合しなければ`ValueError`（不正なcandidateやmetricなど）。\n  - 引数の`task`・`metrics`を変更せず、戻り値の変更が引数へ波及しない。\n\n## 作業の条件\n\n- 作業はこのRepositoryのstarting commitから始めます。既存のTestを削除・無効化したり、期待値を不当に緩めたりしてはいけません。\n- 評価はExecutable Evaluatorが行います。公開されたcheck（visible checks）に加えて、候補から見えないHidden checkがあります。\n- Credential・秘密情報をcode・log・commitへ入れないでください（SECURITY.md）。\n",
+  "visible_checks": [
+    {
+      "id": "lint",
+      "type": "lint",
+      "command": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "benchmarks"
+      ]
+    }
+  ],
+  "hidden_checks": [
+    {
+      "id": "hidden-acceptance",
+      "type": "acceptance",
+      "reference_id": "seed-v1-6aec02ddc615"
+    },
+    {
+      "id": "hidden-regression",
+      "type": "regression",
+      "reference_id": "seed-v1-13ad4a18c084"
+    }
+  ]
+}

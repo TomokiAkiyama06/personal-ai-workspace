@@ -41,6 +41,8 @@
 | [0034](0034-memory-versioning-freshness.md) | Memory の Relation の意味・手動編集の Version（誰がどの Scope を変えられるか）・手動で書ける鮮度・Stale Candidate / 期限切れ / Session 終了の処理（PAW-042。Issue #36） | Approved |
 | [0035](0035-working-set-capability-grants-and-legacy-tasks.md) | `project.task.working_set.manage` の付与先と委任、作成時の Working Set、Revision 0085 より前の Task の状態の退避（Issue #85。Decision 0030 が決めていない点） | Approved |
 | [0037](0037-gpu-compute-scheduler.md) | GPU / Compute Resource Scheduler の方針（状態をプロセス内に持つ、KV Cache の Token による Admission、Actual / Reserved の VRAM と Safety Headroom の暫定値、Class の優先、縮退の段と復帰、Exclusive、Local / Cloud の振り分け。PAW-036、Issue #32） | Approved |
+| [0041](0041-seed-benchmark-dataset.md) | Seed Benchmark Dataset（paw-seed-v1）の構成（出典: この Repository の Merge 済み PR・Spec・Injected Bug、規模 24、難易度・カテゴリ、Hidden test の非公開の保管、候補に見せる Repository、学習データへの混入、License、人の修正時間の測り方。PAW-016） | Approved |
+| [0038](0038-memory-markdown-projection.md) | Memory Markdown Projection の出力先（`PAW_MEMORY_PROJECTION_DIR`、git の Work Tree・Home の拒否、Marker）・公開範囲ごとの配置・投影する Version・diff-friendly な形式・Secret の置換・`0700` / `0600` の権限・実行と失敗の通知（Audit・終了コード・`OnFailure=`）（PAW-045。Issue #39） | Approved |
 | [0042](0042-gpu-free-vram-admission.md) | 観測した空き VRAM による Admission の追加の安全確認（GPU 利用率は使わない、Footprint の外に VRAM を要る仕事は空きが要求量 + Headroom に足りなければ待たせて警告、Exclusive は外の Workload の VRAM が空くまで Unload せずに待つ。Human が方向を直接決定、細部を提案。Decision 0037 への追補。Issue #145） | Proposed |
 | [0050](0050-late-gpu-charge-without-fence.md) | Node の Attempt が閉じた後に、Cancel しても止まらなかった Local の呼び出しの GPU 時間を、`TrackerLateGpuCharge` で Attempt / Run の Fence なしに Task の Budget へ計上する（PAW-036、PR #131。Decision 0037 を補う） | Approved |
 
