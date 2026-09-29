@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "task_id": "paw-seed-v1-hist-07-memory-worker-benchmark",
+  "kind": "historical",
+  "repository": {
+    "locator": "paw-dataset://paw-seed-v1/paw-seed-v1-hist-07-memory-worker-benchmark",
+    "starting_commit": "1d4cbef6e6710fe305fdd46eeeaf44e4aa211403"
+  },
+  "issue_text": "# memory-worker-benchmark（元: PR #66）\n\n## Issue\n\n### PAW-018: Memory Worker専用Benchmarkを実装・実行する\n\n## Goal\n\n原文にGoal本文の記載なし。\n\n## Acceptance Criteria\n\n- [ ] Memory抽出Recall\n- [ ] 不要Memory生成率\n- [ ] Scope分類精度\n- [ ] Confirmed / Inferred分類精度\n- [ ] Conflict / Supersedes判定\n- [ ] JSON Schema遵守率\n- [ ] latency / VRAM比較\n\n## Dependencies\n\n- PAW-014 (#11)\n\n## Environment\n\n- GPU: required\n- Server: required\n- Human decision: not required\n\n## 変更の説明（元のPRの説明から、検証結果と運用上の記述を除いたもの）\n\n### 概要\n\nPAW-018のMemory Worker benchmark Harnessを追加します。Refs #15。IssueはCloseしません。\n\nこのPRは #64（PAW-014）の上に積んだstacked PRです。BaseはPAW-014のbranchで、#61 → #64の順にMergeした後にmainへ切り替えます。\n\n**このPRはHarnessの実装だけです。** 実Modelを使う比較Runの実行（`needs: gpu` / `needs: server`）は、PAW-016のDatasetとHumanの明示的なGoを待つため、Issueの「実行」部分は未完了です。\n\n### 変更\n\n- `memory_worker_metrics`: Workerの出力とGoldを比較し、抽出Recall、不要Memory率、Scope / Confirmed・Inferred / Supersedesの正解率、JSON Schema遵守率を算出。case単位の比較とmicro平均に対応。\n- `memory_worker_runner` と `memory-worker-output-v1.schema.json`: Gold付きcaseの読み込み、Worker出力のSchema検証、latency（mean / p50 / p95）の計測。`MetricsCollector`（#64）を渡すとresource metricも記録。\n- `run_memory_worker_benchmark`: CLI。終了codeは既存validatorの規約（不備は1、Worker指定・出力の不備は2）に合わせ、Reportとエラーに入力text・Worker出力・例外messageを含めない。\n\nAcceptance Criteriaのうち、Memory抽出Recall、不要Memory生成率、Scope分類精度、Confirmed / Inferred分類精度、Conflict / Supersedes判定、JSON Schema遵守率は算出処理と単体testまで、latency / VRAM比較は計測処理まで実装しました。実Modelでの値はまだありません。\n\n## Hidden testが前提にするInterface\n\nHidden testは次のmoduleから次の名前をimportします（既存の名前を含みます）。\n\n- `benchmarks`: memory_worker_runner\n- `benchmarks.memory_worker_metrics`: MEMORY_SCOPES, MemoryComparison, MemoryRecord, SchemaAdherence, aggregate, compare_memories, schema_adherence\n- `benchmarks.memory_worker_runner`: MemoryWorkerCase, WorkerStuckError, _output_schema, load_cases, parse_worker_output, run_benchmark, validate_worker\n- `benchmarks.metrics_collector`: MetricsCollector\n- `benchmarks.run_memory_worker_benchmark`: main\n\n## 作業の条件\n\n- 作業はこのRepositoryのstarting commitから始めます。既存のTestを削除・無効化したり、期待値を不当に緩めたりしてはいけません。\n- 評価はExecutable Evaluatorが行います。公開されたcheck（visible checks）に加えて、候補から見えないHidden checkがあります。\n- Credential・秘密情報をcode・log・commitへ入れないでください（SECURITY.md）。\n",
+  "visible_checks": [
+    {
+      "id": "lint",
+      "type": "lint",
+      "command": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "benchmarks"
+      ]
+    }
+  ],
+  "hidden_checks": [
+    {
+      "id": "hidden-acceptance",
+      "type": "acceptance",
+      "reference_id": "seed-v1-7e90adcaf97f"
+    },
+    {
+      "id": "hidden-regression",
+      "type": "regression",
+      "reference_id": "seed-v1-657d47d779d5"
+    }
+  ]
+}
