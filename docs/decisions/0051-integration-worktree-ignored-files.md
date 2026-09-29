@@ -1,10 +1,10 @@
 # integration worktree の無視された File（`.gitignore`）を未 Commit の変更として扱う方針（Decision 0036 の 7・9・13 への追補）
 
-- Status: Proposed
+- Status: Approved
 - Date: 2026-09-29
 - Scope: PAW-035（PR #130）の `WorktreeGit.is_exactly_committed` と、`GitWorktreeCoordinator` の integration worktree の確認（`integrate` の merge 前、`targets` の `clean`）。Migration はない
 - Supersedes: [Decision 0036](0036-parallel-worktree-integration.md) の 13 の表の `status` の行（下の 3 の形を足す。今の形は残す）。0036 は書き換えない
-- Approval: 未承認
+- Approval: 2026-09-29、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで「推奨どおり」と回答して承認（3 の形（`status --porcelain=v1 -z --untracked-files=normal --ignored=traditional --ignore-submodules=none`）を integration worktree の確認に使い、0036 の 13 の許可する形に足すこと。末尾の「承認時の決定」）
 
 ## 背景
 
@@ -27,3 +27,7 @@ Decision 0036 の 9 は「検査は integration worktree の Directory を読む
 
 1. 検査の実装が integration worktree に依存を Install する形（`npm install` など）だと、2 回目以降の Gate は毎回 `dirty` になる。検査の実装の Issue で、使い捨ての Copy で動く形にする必要がある（5）。
 2. Human が integration worktree で Conflict を解くときに作った無視された File（Editor の一時 File など）も `dirty` になる。Human が消すまで統合は止まる（黙って消すより安全）。
+
+## 承認時の決定（2026-09-29）
+
+Human は、作業 Session で判断が必要な点について推奨つきの説明を受け、「推奨どおり」と回答して承認した（3 の形（`status --porcelain=v1 -z --untracked-files=normal --ignored=traditional --ignore-submodules=none`）を integration worktree の確認に使い、0036 の 13 の許可する形に足すこと）。**すべて推奨どおり**で、個別の変更はない。Human は 2 回に分けて回答した。1 回目は、無視された File を数える形を承認した。2 回目は、Codex の 2 回目の指摘（`.gitmodules` の `ignore = all`）を受けて、`--ignore-submodules=none` を加えることを承認した。PR #150 の SSH の Wrapper は、この形を許可する。
