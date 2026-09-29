@@ -89,3 +89,5 @@ Decision 0021 の 8 節は DAG の書き込みを `epoch` で、Decision 0007 �
 ## 承認時の決定（2026-09-29）
 
 Human は、作業 Session で判断が必要な点について推奨つきの説明を受け、「推奨どおり」と回答して承認した（決定 1 は 2026-09-28 に Human が直接決定済み。判断が必要な点 1〜7 を 2026-09-29 に承認）。**すべて推奨どおり**で、個別の変更はない。6（`ConnectionService.execute` と `NodeBudgetHandle.charge` の Lease の Fencing）は Issue #153 で扱う。
+
+あわせて Human は 2026-09-29 に、Codex の指摘（並列の Node の一方が結果を書き込む間に、他方の呼び出しで Lease の喪失が分かっても、その結果は書き込まれる）について説明を受け、これを 3 の残リスクに含めて受け入れると回答した。この場合に Tool の呼び出しはどれも Lease の確認を通っている。DAG への書き込みは `epoch` で Fencing されている（Decision 0021 の 8）。DAG への書き込みを Lease でも Fencing するかは、必要になったら別の Decision で決める。
