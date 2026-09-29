@@ -293,6 +293,44 @@ class StartTest(FullGpuTestCase):
         # Forgotten once the Exclusive job ended.
         self.assertEqual(self.scheduler.gpu_task_ids(), frozenset())
 
+    async def test_a_refusal_that_is_not_the_modes_doing_is_not_remembered(self):
+        # Codex review (#161, P2): too long for the model, whatever the mode.
+        await self.mode.start(ADMIN)
+        task_id = uuid.uuid4()
+        self.holds.running.add(task_id)
+        too_long = await self.scheduler.try_acquire(coding(task_id, tokens=70_000))
+        self.assertEqual(too_long.refusal, Refusal.CONTEXT_TOO_LONG)
+        with self.assertRaises(ComputeUnavailableError):
+            await self.scheduler.acquire(coding(task_id, tokens=70_000), wait_seconds=0)
+        await self.mode.tick()
+        self.assertEqual(self.holds.held, [])
+
+    async def test_a_lease_granted_as_the_start_is_cancelled_is_given_back(self):
+        # Codex review (#161, P1): the start is cancelled while it holds a task
+        # and the scheduler grants the lease meanwhile.
+        _, lease = await self.running_task()
+        gate = asyncio.Event()
+        hold = self.holds.hold
+
+        async def slow_hold(task_id):
+            await gate.wait()
+            return await hold(task_id)
+
+        self.holds.hold = slow_hold
+        start = asyncio.create_task(self.mode.start(ADMIN))
+        await settle()
+        self.assertEqual(self.scheduler.status().mode, SchedulerMode.DRAINING)
+        await lease.release()  # drained: the scheduler empties the GPU and grants
+        await settle()
+        self.assertEqual(self.scheduler.status().mode, SchedulerMode.EXCLUSIVE)
+        start.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await start
+        self.assertEqual(self.scheduler.status().mode, SchedulerMode.NORMAL)
+        self.assertEqual(self.scheduler.status().leases[ResourceClass.EXCLUSIVE], 0)
+        self.assertEqual(self.mode.status().state, FullGpuState.RESUMING)
+        gate.set()
+
     async def test_refusals_outside_the_mode_are_not_remembered(self):
         _, lease = await self.running_task()
         too_long = await self.scheduler.try_acquire(coding(uuid.uuid4(), tokens=70_000))

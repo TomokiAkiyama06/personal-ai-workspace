@@ -374,6 +374,11 @@ class FullGpuMode:
             acquire.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await acquire
+            # The lease may have been granted just before the cancellation
+            # reached us (Codex review #161, P1): give it back, or the scheduler
+            # would stay exclusive with a lease nobody holds.
+            if not acquire.cancelled() and acquire.exception() is None:
+                await acquire.result().release()
             raise
         return acquire.result()
 

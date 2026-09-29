@@ -443,12 +443,17 @@ class ComputeScheduler:
                 tasks.add(task_id)
         return frozenset(tasks)
 
-    def _note_refused(self, request: ComputeRequest, placement: Placement) -> None:
+    def _note_refused(
+        self, request: ComputeRequest, placement: Placement, refusal: Refusal
+    ) -> None:
         """Remember the task of a local GPU request refused while an Exclusive
-        job drains or holds the GPU (see ``gpu_task_ids``)."""
+        job drains or holds the GPU (see ``gpu_task_ids``). A refusal that
+        waiting cannot change (a context longer than the model takes) is not
+        the Exclusive job's doing: its task is not held for it."""
         if (
             request.task_id is not None
             and placement is Placement.LOCAL_GPU
+            and refusal not in PERMANENT_REFUSALS
             and self._mode is not SchedulerMode.NORMAL
         ):
             self._refused_tasks.add(request.task_id)
@@ -499,7 +504,7 @@ class ComputeScheduler:
             raise InvalidComputeArgumentError("request")
         refusal, placement = self._judge(request, queue=True)
         if refusal is not None:
-            self._note_refused(request, placement)
+            self._note_refused(request, placement, refusal)
             return Admission(None, refusal)
         return Admission(self._grant(request, placement), None)
 
@@ -531,15 +536,15 @@ class ComputeScheduler:
         if refusal in PERMANENT_REFUSALS or (request.allow_cloud and cloud_after == 0):
             if request.allow_cloud:
                 return self._grant(request, Placement.CLOUD)
-            self._note_refused(request, placement)
+            self._note_refused(request, placement, refusal)
             raise ComputeUnavailableError(refusal)
         if timeout == 0:
-            self._note_refused(request, placement)
+            self._note_refused(request, placement, refusal)
             raise ComputeUnavailableError(refusal)
         if len(self._waiters) >= self._config.max_waiters:
             if request.allow_cloud:
                 return self._grant(request, Placement.CLOUD)
-            self._note_refused(request, placement)
+            self._note_refused(request, placement, Refusal.QUEUE_FULL)
             raise ComputeUnavailableError(Refusal.QUEUE_FULL)
         future = asyncio.get_running_loop().create_future()
         waiter = _Waiter(request, future, next(self._sequence), refusal)
@@ -558,7 +563,7 @@ class ComputeScheduler:
         future.cancel()
         if request.allow_cloud:
             return self._grant(request, Placement.CLOUD)
-        self._note_refused(request, placement)
+        self._note_refused(request, placement, waiter.last)
         raise ComputeUnavailableError(waiter.last)
 
     def parallelism(
