@@ -393,7 +393,7 @@ describe("設定 › 端末とセッション", () => {
       // Claimed, then approved on another signed-in device of this account.
       "GET /auth/pairing/pending": [
         reply(200, { pending: [] }),
-        reply(200, { pending: [waiting] }),
+        reply(200, { pending: [{ ...waiting, device_name: "Approved phone" }] }),
         reply(200, { pending: [] }),
       ],
       "POST /auth/pairing": reply(201, pairing),
@@ -404,7 +404,7 @@ describe("設定 › 端末とセッション", () => {
     expect(
       await screen.findByRole("img", { name: "新しい端末で読み取る QR コード" }),
     ).toBeVisible();
-    expect(await screen.findByText("New phone", {}, { timeout: 7000 })).toBeInTheDocument();
+    expect(await screen.findByText("Approved phone", {}, { timeout: 7000 })).toBeInTheDocument();
     await waitFor(
       () =>
         expect(
@@ -415,6 +415,45 @@ describe("設定 › 端末とセッション", () => {
     expect(await screen.findByText("Approved phone", {}, { timeout: 7000 })).toBeInTheDocument();
     expect(await screen.findByRole("status")).toHaveTextContent("新しい端末がサインインしました。");
   }, 25000);
+
+  it("does not take the approving browser's rotated session for the new device", async () => {
+    const approver = { ...otherSession, id: "s-2", device_name: "Office PC" };
+    const rotated = { ...approver, id: "s-2b" };
+    const newDevice = { ...otherSession, id: "s-3", device_name: "New phone" };
+    mockApi({
+      ...base,
+      "GET /auth/sessions": [
+        reply(200, { sessions: [session().session, approver] }),
+        // The approval's passkey step-up rotated the approver's session first.
+        reply(200, { sessions: [session().session, rotated] }),
+        reply(200, { sessions: [session().session, rotated, newDevice] }),
+      ],
+      "GET /auth/pairing/pending": [
+        reply(200, { pending: [] }),
+        reply(200, { pending: [waiting] }),
+        reply(200, { pending: [] }),
+      ],
+      "POST /auth/pairing": reply(201, pairing),
+    });
+    renderApp("/settings/devices");
+    const user = userEvent.setup();
+    await addDevice(user);
+    expect(await screen.findByText("New phone", {}, { timeout: 7000 })).toBeInTheDocument();
+    await waitFor(
+      () =>
+        expect(
+          screen.queryByRole("img", { name: "新しい端末で読み取る QR コード" }),
+        ).not.toBeInTheDocument(),
+      { timeout: 7000 },
+    );
+    // Only the rotated session is new so far: nothing has signed in yet.
+    await waitFor(() => expect(trusted()).toHaveTextContent("Office PC"), { timeout: 7000 });
+    expect(screen.queryByText("新しい端末がサインインしました。")).not.toBeInTheDocument();
+    expect(
+      await within(trusted()).findByText("New phone", {}, { timeout: 12000 }),
+    ).toBeInTheDocument();
+    expect(await screen.findByRole("status")).toHaveTextContent("新しい端末がサインインしました。");
+  }, 40000);
 
   it("shows a wrong confirmation code as such", async () => {
     mockApi({

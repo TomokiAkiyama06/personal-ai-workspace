@@ -173,6 +173,9 @@ export function DevicesSection() {
   const [awaiting, setAwaiting] = useState<{
     until: number;
     known: Set<string>;
+    // The name the waiting device gave in its claim, when known: its session
+    // carries it, while an approver's step-up only rotates the approver's own.
+    name: string | null;
     dropsPairing: boolean;
   } | null>(null);
   const [busy, setBusy] = useState(false);
@@ -214,7 +217,14 @@ export function DevicesSection() {
     if (!awaiting) return;
     // This device's own session is never the new one: a passkey step-up for
     // the approval rotates its id.
-    if (sessions?.some((session) => !session.current && !awaiting.known.has(session.id))) {
+    if (
+      sessions?.some(
+        (session) =>
+          !session.current &&
+          !awaiting.known.has(session.id) &&
+          (awaiting.name === null || session.device_name === awaiting.name),
+      )
+    ) {
       setAwaiting(null);
       if (awaiting.dropsPairing) {
         setPairing(null);
@@ -246,14 +256,20 @@ export function DevicesSection() {
   // device: once it has been seen waiting and then leaves the list, the QR code
   // / link is spent, and an approved device signs in after its own poll. The
   // sessions known when the claim was first seen tell that device apart.
-  const claimSeen = useRef<{ pairingId: string; known: Set<string> } | null>(null);
+  const claimSeen = useRef<{
+    pairingId: string;
+    known: Set<string>;
+    name: string | null;
+  } | null>(null);
   useEffect(() => {
     if (!pairing?.approval_required) return;
-    if (pending.some((item) => item.pairing_id === pairing.pairing_id)) {
+    const claim = pending.find((item) => item.pairing_id === pairing.pairing_id);
+    if (claim) {
       if (claimSeen.current?.pairingId !== pairing.pairing_id) {
         claimSeen.current = {
           pairingId: pairing.pairing_id,
           known: new Set((sessions ?? []).map((session) => session.id)),
+          name: claim.device_name,
         };
       }
       return;
@@ -266,6 +282,7 @@ export function DevicesSection() {
     setAwaiting({
       until: Number.isNaN(until) ? Date.now() : until,
       known: seen.known,
+      name: seen.name,
       dropsPairing: true,
     });
   }, [pending, pairing, sessions]);
@@ -283,11 +300,16 @@ export function DevicesSection() {
     }
   };
 
-  const watchForNewSession = (expiresAt: string, dropsPairing: boolean) => {
+  const watchForNewSession = (
+    expiresAt: string,
+    dropsPairing: boolean,
+    name: string | null = null,
+  ) => {
     const until = new Date(expiresAt).getTime();
     setAwaiting({
       until: Number.isNaN(until) ? Date.now() : until,
       known: new Set((sessions ?? []).map((session) => session.id)),
+      name,
       dropsPairing,
     });
   };
@@ -416,7 +438,7 @@ export function DevicesSection() {
                     });
                     setNotice(t("devices.approved"));
                     setPairing(null);
-                    watchForNewSession(item.expires_at, false);
+                    watchForNewSession(item.expires_at, false, item.device_name);
                     await Promise.all([loadPending(), loadSessions()]);
                   })
                 }
