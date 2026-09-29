@@ -1,4 +1,4 @@
-"""Memory Markdown Projection (PAW-045, Decision 0038 Proposed).
+"""Memory Markdown Projection (PAW-045, Decision 0038 Approved).
 
 PostgreSQL is the source of truth of Memory; this package writes a human-readable
 Markdown view of it into a dedicated directory (``PAW_MEMORY_PROJECTION_DIR``, on
