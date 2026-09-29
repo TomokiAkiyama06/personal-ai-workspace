@@ -964,7 +964,12 @@ class RepositoryConfigurationTest(WrapperTestCase):
 
     STATUS = ["status", "--porcelain=v1", "-z", "--untracked-files=all"]
 
-    def test_only_content_commands_are_probed(self):
+    def test_every_call_but_clone_and_init_is_probed(self):
+        # Codex review of #150 (P2): not only the calls that read file content.
+        # ``rev-parse --verify`` (or ``merge-base``) resolves an object, which a
+        # git that predates ``GIT_NO_LAZY_FETCH`` fetches from a partial
+        # clone's promisor remote when it is missing; the configuration that
+        # sets that up is refused only by the probe.
         probed = {
             "status": self.pinned(self.STATUS),
             "merge --abort": self.pinned(["merge", "--abort"]),
@@ -991,6 +996,25 @@ class RepositoryConfigurationTest(WrapperTestCase):
                     COMMIT,
                 ]
             ),
+            "rev-parse --verify": self.plan(
+                ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]
+            ),
+            "pinned rev-parse --verify": self.pinned(
+                ["rev-parse", "--verify", "--quiet", "MERGE_HEAD^{commit}"]
+            ),
+            "rev-parse": self.plan(["rev-parse", "--is-bare-repository"]),
+            "worktree list": self.plan(["worktree", "list", "--porcelain", "-z"]),
+            "worktree prune": self.plan(["worktree", "prune"]),
+            "merge-base": self.plan(
+                [
+                    "merge-base",
+                    "--is-ancestor",
+                    f"refs/heads/{OTHER}",
+                    f"refs/heads/{BRANCH}",
+                ]
+            ),
+            "symbolic-ref": self.pinned(["symbolic-ref", "--quiet", "HEAD"]),
+            "config": self.plan(["config", "--local", "--get", "remote.origin.url"]),
         }
         for name, invocation in probed.items():
             with self.subTest(name=name):
@@ -1003,22 +1027,38 @@ class RepositoryConfigurationTest(WrapperTestCase):
         pinned = probed["status"].probe
         self.assertIn(f"--git-dir={self.git_dir}", pinned)
         self.assertIn(f"--work-tree={self.worktree}", pinned)
+        url = "https://github.com/owner/repo.git"
         for invocation in (
-            self.plan(["rev-parse", "--is-bare-repository"]),
-            self.plan(["worktree", "list", "--porcelain", "-z"]),
-            self.plan(["worktree", "prune"]),
+            self.plan(
+                ["clone", "--quiet", "--", url, f"{self.root}/new"], cwd=self.root
+            ),
             self.plan(
                 [
-                    "merge-base",
-                    "--is-ancestor",
-                    f"refs/heads/{OTHER}",
-                    f"refs/heads/{BRANCH}",
-                ]
+                    "init",
+                    "--quiet",
+                    "--template=",
+                    "--initial-branch=main",
+                    "--",
+                    self.fresh,
+                ],
+                cwd=self.fresh,
             ),
-            self.pinned(["symbolic-ref", "--quiet", "HEAD"]),
         ):
             with self.subTest(argv=invocation.argv):
                 self.assertIsNone(invocation.probe)
+
+    def test_a_partial_clone_refuses_a_rev_parse_too(self):
+        invocation = self.plan(["rev-parse", "--verify", "--quiet", "HEAD^{commit}"])
+        for key in ("extensions.partialclone", "remote.origin.promisor"):
+            with self.subTest(key=key):
+                listed = f"local\0{key}\ntrue\0".encode()
+
+                def run(argv, *, listed=listed, **kwargs):
+                    return subprocess.CompletedProcess(argv, 0, listed, b"")
+
+                self.assert_rejected(
+                    "config_unsafe", wrapper.check_configuration, invocation, run
+                )
 
     def check(self, stdout=b"", returncode=0, error=None):
         calls = []

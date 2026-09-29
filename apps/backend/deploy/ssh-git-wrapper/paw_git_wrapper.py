@@ -46,9 +46,10 @@ undoes ``shlex.quote``) into the words of Decision 0029 §2::
   directory and common directory git finds from the cwd must be inside the
   root and outside ``.paw-worktrees`` (:func:`check_location`), and hold no
   symbolic link (:func:`check_links`; so must a pinned call's);
-* for a sub-command that reads file content (:data:`CONTENT_SUBCOMMANDS`), the
-  configuration git would read must name no command (a ``filter`` driver, a
-  ``merge`` driver, an ``include``, ...: :func:`check_configuration`).
+* for every sub-command but ``clone`` and ``init`` (:data:`UNPROBED_SUBCOMMANDS`),
+  the configuration git would read must name no command (a ``filter`` driver, a
+  ``merge`` driver, an ``include``, ...) and no on-demand fetch (a partial
+  clone's promisor remote): :func:`check_configuration`.
 
 The client's ``-c`` values are checked, then **dropped**: git always gets this
 file's own hardening (:func:`hardening`) and, for ``merge``, this file's own
@@ -122,18 +123,19 @@ OWN_HARDENING = (
 )
 
 
-#: Sub-commands that read or write file content through the repository's
-#: attributes, and so may start a command the repository's own configuration
-#: names (a ``filter`` driver's ``clean`` / ``smudge`` / ``process``, a ``merge``
-#: driver, a ``diff`` ``textconv``, ...): ``status`` (``clean`` on a modified
-#: file), ``merge`` (``merge --abort`` too), ``merge-tree`` (a merge driver) and
-#: ``worktree add`` (``smudge`` on checkout). Before any of them runs, the
+#: Sub-commands whose repository configuration is NOT listed before they run:
+#: ``clone`` and ``init`` read no existing repository (``init`` only in a
+#: directory without a ``.git``). Before every other one runs, the
 #: configuration git would read is listed (:func:`configuration_probe`) and the
-#: call is refused if it names a command, or another work tree
-#: (:func:`unsafe_setting`).
-CONTENT_SUBCOMMANDS = frozenset(
-    {"status", "merge", "merge-tree", "worktree", "submodule"}
-)
+#: call is refused if it names a command, another work tree or an on-demand
+#: fetch (:func:`unsafe_setting`). A sub-command that reads or writes file
+#: content may start a command the configuration names (a ``filter`` driver's
+#: ``clean`` / ``smudge`` / ``process``, a ``merge`` driver, ...); and any
+#: sub-command that resolves an object (``rev-parse --verify``, ``merge-base``,
+#: ...) fetches a missing one from a partial clone's promisor remote on a git
+#: that predates ``GIT_NO_LAZY_FETCH`` (Codex review of #150, P2): so every
+#: call is checked, not only those that read file content.
+UNPROBED_SUBCOMMANDS = frozenset({"clone", "init"})
 
 #: Configuration sections every key of which is (or leads to) a command, or to
 #: another file this wrapper would not have listed.
@@ -707,7 +709,7 @@ class Invocation:
     env: dict[str, str]
     cwd: str
     #: The ``git config`` call whose output must name no command before
-    #: ``argv`` runs (:data:`CONTENT_SUBCOMMANDS`); ``None`` for the others.
+    #: ``argv`` runs; ``None`` for :data:`UNPROBED_SUBCOMMANDS`.
     probe: list[str] | None = None
     #: For a call not pinned to a git directory (``clone`` aside): the
     #: ``git rev-parse`` call that says which git directory and common
@@ -855,7 +857,7 @@ def plan(original: str | None, config: Config) -> Invocation:
     argv.append(subcommand)
     argv.extend(args)
     probe = None
-    if subcommand in CONTENT_SUBCOMMANDS and args[:1] not in (["list"], ["prune"]):
+    if subcommand not in UNPROBED_SUBCOMMANDS:
         probe = configuration_probe(hardened, pinned)
     gitlinks = None
     if (subcommand, args) in (
@@ -1071,7 +1073,8 @@ def check_configuration(
     run: Callable[..., "subprocess.CompletedProcess[bytes]"] = bounded_run,
 ) -> None:
     """Refuse ``invocation`` when the configuration it would read names a
-    command (:data:`CONTENT_SUBCOMMANDS`), or cannot be listed.
+    command, another work tree or an on-demand fetch (every sub-command but
+    :data:`UNPROBED_SUBCOMMANDS`), or cannot be listed.
 
     The repository's configuration is shared by the checkout and every worktree
     of it, and an agent working in a worktree may write it: a ``filter`` there,
