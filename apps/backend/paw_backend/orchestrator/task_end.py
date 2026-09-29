@@ -29,6 +29,19 @@ deadline), and a slow cleanup must not hold up or roll back a Cancel. Instead:
    (``SKIP LOCKED``) or a restart in the middle of a cleanup all leave residue the
    next sweep finds. Both steps are idempotent; running them twice changes nothing.
 
+**Fenced to the end** (Decision 0047, 1): a task can be re-opened (Retry /
+Restart) between the moment its end was seen (the listener's event, the sweep's
+query) and the cleanup. The cleanup matches the task's approvals and memories by
+the task id alone, so it would also revoke and retire what the **new** run
+created. :meth:`TaskEndCleanup.finish` therefore holds the task row ``FOR SHARE``
+(:meth:`TaskEndResidue.hold_ended`) while both steps run, and runs them only if
+the task is terminal under that lock. Every transition locks the row ``FOR NO
+KEY UPDATE`` (``TaskService._require_task``), so a re-opening waits until the
+cleanup is over, and a cleanup that comes after a re-opening does nothing. The
+wait is bounded (``FENCE_TIMEOUT_SECONDS`` to take the lock; the steps have
+their own deadlines); a fence that could not be taken is a failed step, and the
+sweep repeats it.
+
 Meanwhile nothing left over can be used: the Tool Broker refuses an approval of a
 task that can no longer act (``tools.task_state``), and the retrieval never offers
 a ``session_only`` memory.
@@ -40,8 +53,10 @@ terminal state) revokes what survived its end.
 """
 
 import asyncio
+import contextlib
 import logging
 import uuid
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 from sqlalchemy import text
@@ -64,6 +79,9 @@ logger = logging.getLogger(__name__)
 # The longest the memories of one ended task are retired for, in one call of
 # :meth:`TaskEndCleanup.finish` (the approval revocation has its own deadline).
 RETIRE_TIMEOUT_SECONDS = 10.0
+# The longest :meth:`TaskEndResidue.hold_ended` waits for the task row (a
+# transition in progress holds it) and for the database to answer.
+FENCE_TIMEOUT_SECONDS = 5.0
 
 
 def _sql_list(values) -> str:
@@ -97,8 +115,15 @@ _WITH_SESSION_MEMORIES = text(
 )
 
 
+# The task row, only while it is terminal, locked against every transition.
+_HOLD_ENDED = text(
+    f"SELECT id FROM tasks WHERE id = :task_id AND state IN ({_TERMINAL}) FOR SHARE"
+)
+
+
 class TaskEndResidue:
-    """Terminal tasks that still hold something their end must undo."""
+    """Terminal tasks that still hold something their end must undo, and the
+    fence that keeps a cleanup inside the task's end."""
 
     def __init__(self, database: Database) -> None:
         if not isinstance(database, Database):
@@ -115,11 +140,30 @@ class TaskEndResidue:
                 found.update(dict.fromkeys(rows.scalars()))
         return tuple(sorted(found))[:limit]
 
+    @contextlib.asynccontextmanager
+    async def hold_ended(self, task_id: uuid.UUID) -> AsyncIterator[bool]:
+        """Yield whether ``task_id`` is terminal, holding its row ``FOR SHARE``
+        until the block ends when it is (module docstring: no transition, a
+        re-opening included, commits meanwhile). Raises ``TimeoutError`` (or the
+        database's error) when the lock or the database took longer than
+        ``FENCE_TIMEOUT_SECONDS``."""
+        check_uuid("task_id", task_id)
+        timeout_ms = int(FENCE_TIMEOUT_SECONDS * 1000)
+        async with contextlib.AsyncExitStack() as stack:
+            async with asyncio.timeout(FENCE_TIMEOUT_SECONDS):
+                session = await stack.enter_async_context(self._database.session())
+                await stack.enter_async_context(session.begin())
+                await session.execute(text(f"SET LOCAL lock_timeout = {timeout_ms}"))
+                row = await session.execute(_HOLD_ENDED, {"task_id": task_id})
+                ended = row.scalar() is not None
+            yield ended
+
 
 @dataclass(frozen=True, slots=True)
 class TaskEndReport:
     """What one :meth:`TaskEndCleanup.finish` did. ``failed`` names the steps
-    that raised (``"approvals"``, ``"memories"``); ``done`` is ``not failed``."""
+    that raised (``"fence"``, ``"approvals"``, ``"memories"``); ``done`` is
+    ``not failed``. A task that is not terminal (any more) gets ``0, 0``."""
 
     task_id: uuid.UUID
     revoked_approvals: int
@@ -178,9 +222,24 @@ class TaskEndCleanup:
 
     async def finish(self, task_id: uuid.UUID) -> TaskEndReport:
         """Revoke the task's open approvals and retire its ``session_only``
-        memories. Each step runs even when the other failed; a failed step is
-        logged by type and named in the report. Idempotent."""
+        memories, fenced to the task's end (module docstring): nothing is done
+        unless the task is terminal while its row is held. Each step runs even
+        when the other failed; a failed step is logged by type and named in the
+        report. Idempotent."""
         check_uuid("task_id", task_id)
+        try:
+            async with self._residue.hold_ended(task_id) as ended:
+                if not ended:
+                    return TaskEndReport(task_id, 0, 0)
+                return await self._undo(task_id)
+        except Exception as error:
+            logger.warning(
+                "Fencing an ended task's cleanup failed (%s)", error_class_of(error)
+            )
+            return TaskEndReport(task_id, 0, 0, ("fence",))
+
+    async def _undo(self, task_id: uuid.UUID) -> TaskEndReport:
+        """The two steps of :meth:`finish` (the caller holds the fence)."""
         failed: list[str] = []
         revoked = retired = 0
         try:

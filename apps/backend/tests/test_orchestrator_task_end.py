@@ -9,6 +9,7 @@ freshness jobs run in the same database.
 """
 
 import asyncio
+import contextlib
 import unittest
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -179,6 +180,76 @@ class TaskEndTest(PostgresVersioningTestCase):
 
         self.assertEqual(await self.approval_status(survivor), "revoked")
 
+    # -- fenced to the end (Codex P1 on PR #151) ------------------------------------
+
+    async def test_a_cleanup_after_a_reopening_leaves_the_new_run_alone(self):
+        # The sweep saw the task ended, then a Retry re-opened it and the new run
+        # opened an approval and wrote a session memory before the cleanup ran.
+        task_id = await self.new_task(self.bare_tasks)
+        await self.end(task_id, TaskState.FAILED, self.bare_tasks)
+        await self.bare_tasks.execute(task_id, TaskCommand.RETRY, actor=SYSTEM)
+        memory = self.session_memory(task_id)
+        approval = await self.open_approval(task_id)
+
+        report = await self.cleanup.finish(task_id)
+
+        self.assertEqual(report, TaskEndReport(task_id, 0, 0))
+        self.assertEqual(self.status_of(memory), "active")
+        self.assertEqual(await self.approval_status(approval), "pending")
+
+    async def test_a_reopening_waits_until_the_cleanup_is_over(self):
+        task_id = await self.new_task(self.bare_tasks)
+        memory = self.session_memory(task_id)
+        await self.end(task_id, TaskState.FAILED, self.bare_tasks)
+        inside, release = asyncio.Event(), asyncio.Event()
+        revoke = self.approvals.revoke_task
+
+        async def slow_revoke(ended_id):
+            inside.set()
+            await release.wait()
+            return await revoke(ended_id)
+
+        with patch.object(self.approvals, "revoke_task", slow_revoke):
+            finishing = asyncio.create_task(self.cleanup.finish(task_id))
+            await asyncio.wait_for(inside.wait(), 10)
+            retrying = asyncio.create_task(
+                self.bare_tasks.execute(task_id, TaskCommand.RETRY, actor=SYSTEM)
+            )
+            done, _ = await asyncio.wait({retrying}, timeout=0.5)
+            self.assertEqual(done, set())  # the Retry waits for the task row
+            release.set()
+            report = await asyncio.wait_for(finishing, 10)
+            await asyncio.wait_for(retrying, 10)
+
+        self.assertEqual(report, TaskEndReport(task_id, 0, 1))
+        self.assertEqual(self.status_of(memory), "deprecated")
+        # After the Retry, a new run's memory is no longer the ended task's.
+        later = self.session_memory(task_id, "new run note")
+        self.assertEqual(
+            await self.cleanup.finish(task_id), TaskEndReport(task_id, 0, 0)
+        )
+        self.assertEqual(self.status_of(later), "active")
+
+    async def test_a_fence_that_cannot_be_taken_is_a_failed_step(self):
+        task_id = await self.new_task(self.bare_tasks)
+        memory = self.session_memory(task_id)
+        await self.end(task_id, TaskState.CANCELLED, self.bare_tasks)
+        with self.engine.connect() as locker:
+            locker.execute(
+                text("SELECT id FROM tasks WHERE id = :t FOR UPDATE"), {"t": task_id}
+            )
+            with (
+                patch("paw_backend.orchestrator.task_end.FENCE_TIMEOUT_SECONDS", 0.2),
+                self.assertLogs("paw_backend.orchestrator.task_end", "WARNING"),
+            ):
+                report = await self.cleanup.finish(task_id)
+            locker.rollback()
+
+        self.assertEqual(report, TaskEndReport(task_id, 0, 0, ("fence",)))
+        self.assertEqual(self.status_of(memory), "active")
+        await self.cleanup.sweep()  # the sweep repeats it
+        self.assertEqual(self.status_of(memory), "deprecated")
+
     # -- the retryable after-step -------------------------------------------------
 
     async def test_the_sweep_finishes_what_the_listener_never_did(self):
@@ -302,9 +373,14 @@ class FinishTest(unittest.IsolatedAsyncioTestCase):
                     raise RuntimeError("db down: secret detail")
                 return 0
 
+        class Residue(TaskEndResidue):
+            @contextlib.asynccontextmanager
+            async def hold_ended(self, task_id):
+                yield True  # the task is terminal (the fence has its own tests)
+
         approvals, freshness = Approvals(), Freshness()
         return (
-            TaskEndCleanup(approvals, freshness, TaskEndResidue(database)),
+            TaskEndCleanup(approvals, freshness, Residue(database)),
             approvals,
             freshness,
         )
