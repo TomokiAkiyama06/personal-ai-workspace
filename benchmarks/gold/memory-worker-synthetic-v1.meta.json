@@ -1,0 +1,619 @@
+{
+  "dataset": "memory-worker-synthetic-v1",
+  "synthetic": true,
+  "cases": [
+    {
+      "id": "mw-ext-001",
+      "tags": [
+        "confirmed",
+        "extraction",
+        "scope-user"
+      ]
+    },
+    {
+      "id": "mw-ext-002",
+      "tags": [
+        "confirmed",
+        "extraction",
+        "scope-repo"
+      ]
+    },
+    {
+      "id": "mw-ext-003",
+      "tags": [
+        "confirmed",
+        "extraction",
+        "scope-project"
+      ]
+    },
+    {
+      "id": "mw-ext-004",
+      "tags": [
+        "confirmed",
+        "extraction",
+        "scope-shared"
+      ]
+    },
+    {
+      "id": "mw-ext-005",
+      "tags": [
+        "confirmed",
+        "english",
+        "extraction",
+        "scope-user"
+      ]
+    },
+    {
+      "id": "mw-ext-006",
+      "tags": [
+        "confirmed",
+        "english",
+        "extraction",
+        "scope-repo"
+      ]
+    },
+    {
+      "id": "mw-ext-007",
+      "tags": [
+        "confirmed",
+        "extraction",
+        "multi",
+        "scope-project"
+      ]
+    },
+    {
+      "id": "mw-ext-008",
+      "tags": [
+        "confirmed",
+        "extraction",
+        "multi",
+        "scope-repo",
+        "scope-user"
+      ]
+    },
+    {
+      "id": "mw-ext-009",
+      "tags": [
+        "confirmed",
+        "extraction",
+        "mixed-language",
+        "scope-repo"
+      ]
+    },
+    {
+      "id": "mw-ext-010",
+      "tags": [
+        "confirmed",
+        "english",
+        "extraction",
+        "scope-shared"
+      ]
+    },
+    {
+      "id": "mw-ext-011",
+      "tags": [
+        "confirmed",
+        "extraction",
+        "scope-user"
+      ]
+    },
+    {
+      "id": "mw-ext-012",
+      "tags": [
+        "confirmed",
+        "extraction",
+        "scope-project"
+      ]
+    },
+    {
+      "id": "mw-ext-013",
+      "tags": [
+        "confirmed",
+        "extraction",
+        "scope-repo"
+      ]
+    },
+    {
+      "id": "mw-ext-014",
+      "tags": [
+        "confirmed",
+        "english",
+        "extraction",
+        "scope-user"
+      ]
+    },
+    {
+      "id": "mw-ext-015",
+      "tags": [
+        "confirmed",
+        "extraction",
+        "mixed-language",
+        "scope-project"
+      ]
+    },
+    {
+      "id": "mw-ext-016",
+      "tags": [
+        "confirmed",
+        "english",
+        "extraction",
+        "scope-repo"
+      ]
+    },
+    {
+      "id": "mw-inf-001",
+      "tags": [
+        "inferred",
+        "scope-repo"
+      ]
+    },
+    {
+      "id": "mw-inf-002",
+      "tags": [
+        "inferred",
+        "scope-user"
+      ]
+    },
+    {
+      "id": "mw-inf-003",
+      "tags": [
+        "inferred",
+        "scope-project"
+      ]
+    },
+    {
+      "id": "mw-inf-004",
+      "tags": [
+        "english",
+        "inferred",
+        "scope-user"
+      ]
+    },
+    {
+      "id": "mw-inf-005",
+      "tags": [
+        "english",
+        "inferred",
+        "scope-repo"
+      ]
+    },
+    {
+      "id": "mw-inf-006",
+      "tags": [
+        "high-risk",
+        "inferred",
+        "scope-user"
+      ]
+    },
+    {
+      "id": "mw-inf-007",
+      "tags": [
+        "confirmed",
+        "inferred",
+        "multi",
+        "scope-user"
+      ]
+    },
+    {
+      "id": "mw-inf-008",
+      "tags": [
+        "inferred",
+        "mixed-language",
+        "scope-project"
+      ]
+    },
+    {
+      "id": "mw-sup-001",
+      "tags": [
+        "confirmed",
+        "scope-repo",
+        "supersedes"
+      ]
+    },
+    {
+      "id": "mw-sup-002",
+      "tags": [
+        "confirmed",
+        "scope-project",
+        "supersedes"
+      ]
+    },
+    {
+      "id": "mw-sup-003",
+      "tags": [
+        "confirmed",
+        "english",
+        "scope-user",
+        "supersedes"
+      ]
+    },
+    {
+      "id": "mw-sup-004",
+      "tags": [
+        "confirmed",
+        "scope-shared",
+        "supersedes"
+      ]
+    },
+    {
+      "id": "mw-sup-005",
+      "tags": [
+        "inferred-to-confirmed",
+        "scope-user",
+        "supersedes"
+      ]
+    },
+    {
+      "id": "mw-sup-006",
+      "tags": [
+        "confirmed",
+        "mixed-language",
+        "scope-repo",
+        "supersedes"
+      ]
+    },
+    {
+      "id": "mw-sup-007",
+      "tags": [
+        "confirmed",
+        "english",
+        "multi",
+        "scope-project",
+        "supersedes"
+      ]
+    },
+    {
+      "id": "mw-sup-008",
+      "tags": [
+        "confirmed",
+        "scope-repo",
+        "supersedes"
+      ]
+    },
+    {
+      "id": "mw-sup-009",
+      "tags": [
+        "confirmed",
+        "scope-user",
+        "supersedes",
+        "unrelated-existing"
+      ]
+    },
+    {
+      "id": "mw-sup-010",
+      "tags": [
+        "confirmed",
+        "english",
+        "scope-repo",
+        "supersedes"
+      ]
+    },
+    {
+      "id": "mw-con-001",
+      "tags": [
+        "confirmed",
+        "conflicts",
+        "scope-repo"
+      ]
+    },
+    {
+      "id": "mw-con-002",
+      "tags": [
+        "conflicts",
+        "english",
+        "inferred",
+        "scope-user"
+      ]
+    },
+    {
+      "id": "mw-con-003",
+      "tags": [
+        "confirmed",
+        "conflicts",
+        "scope-project"
+      ]
+    },
+    {
+      "id": "mw-con-004",
+      "tags": [
+        "confirmed",
+        "conflicts",
+        "mixed-language",
+        "scope-repo"
+      ]
+    },
+    {
+      "id": "mw-con-005",
+      "tags": [
+        "confirmed",
+        "conflicts",
+        "english",
+        "scope-shared"
+      ]
+    },
+    {
+      "id": "mw-con-006",
+      "tags": [
+        "conflicts",
+        "no-conflict",
+        "scope-project"
+      ]
+    },
+    {
+      "id": "mw-trap-001",
+      "tags": [
+        "one-off",
+        "trap"
+      ]
+    },
+    {
+      "id": "mw-trap-002",
+      "tags": [
+        "small-talk",
+        "trap"
+      ]
+    },
+    {
+      "id": "mw-trap-003",
+      "tags": [
+        "secret",
+        "trap"
+      ]
+    },
+    {
+      "id": "mw-trap-004",
+      "tags": [
+        "english",
+        "hypothetical",
+        "trap"
+      ]
+    },
+    {
+      "id": "mw-trap-005",
+      "tags": [
+        "question",
+        "trap"
+      ]
+    },
+    {
+      "id": "mw-trap-006",
+      "tags": [
+        "assistant-claim",
+        "trap"
+      ]
+    },
+    {
+      "id": "mw-trap-007",
+      "tags": [
+        "english",
+        "third-party",
+        "trap"
+      ]
+    },
+    {
+      "id": "mw-trap-008",
+      "tags": [
+        "high-risk",
+        "one-off",
+        "trap"
+      ]
+    },
+    {
+      "id": "mw-trap-009",
+      "tags": [
+        "task-progress",
+        "trap"
+      ]
+    },
+    {
+      "id": "mw-trap-010",
+      "tags": [
+        "english",
+        "explicit-no-save",
+        "trap"
+      ]
+    },
+    {
+      "id": "mw-trap-011",
+      "tags": [
+        "joke",
+        "trap"
+      ]
+    },
+    {
+      "id": "mw-trap-012",
+      "tags": [
+        "already-known",
+        "trap"
+      ]
+    },
+    {
+      "id": "mw-trap-013",
+      "tags": [
+        "quoted-text",
+        "trap"
+      ]
+    },
+    {
+      "id": "mw-trap-014",
+      "tags": [
+        "english",
+        "trap",
+        "vague"
+      ]
+    },
+    {
+      "id": "mw-trap-015",
+      "tags": [
+        "high-risk",
+        "permission",
+        "trap"
+      ]
+    },
+    {
+      "id": "mw-trap-016",
+      "tags": [
+        "english",
+        "temporary-state",
+        "trap"
+      ]
+    },
+    {
+      "id": "mw-scope-001",
+      "tags": [
+        "confirmed",
+        "scope-disambiguation",
+        "scope-user"
+      ]
+    },
+    {
+      "id": "mw-scope-002",
+      "tags": [
+        "confirmed",
+        "english",
+        "scope-disambiguation",
+        "scope-repo"
+      ]
+    },
+    {
+      "id": "mw-scope-003",
+      "tags": [
+        "confirmed",
+        "scope-disambiguation",
+        "scope-project"
+      ]
+    },
+    {
+      "id": "mw-scope-004",
+      "tags": [
+        "confirmed",
+        "scope-disambiguation",
+        "scope-shared"
+      ]
+    },
+    {
+      "id": "mw-scope-005",
+      "tags": [
+        "multi",
+        "scope-disambiguation",
+        "scope-project",
+        "scope-repo"
+      ]
+    },
+    {
+      "id": "mw-scope-006",
+      "tags": [
+        "english",
+        "inferred",
+        "scope-disambiguation",
+        "scope-user"
+      ]
+    },
+    {
+      "id": "mw-schema-001",
+      "tags": [
+        "injection-empty-supersedes",
+        "schema-edge"
+      ]
+    },
+    {
+      "id": "mw-schema-002",
+      "tags": [
+        "english",
+        "injection-extra-field",
+        "schema-edge"
+      ]
+    },
+    {
+      "id": "mw-schema-003",
+      "tags": [
+        "injection-format",
+        "schema-edge"
+      ]
+    },
+    {
+      "id": "mw-schema-004",
+      "tags": [
+        "json-in-input",
+        "schema-edge"
+      ]
+    },
+    {
+      "id": "mw-schema-005",
+      "tags": [
+        "english",
+        "quotes-backslash",
+        "schema-edge"
+      ]
+    },
+    {
+      "id": "mw-schema-006",
+      "tags": [
+        "fullwidth-unicode",
+        "schema-edge"
+      ]
+    },
+    {
+      "id": "mw-schema-007",
+      "tags": [
+        "emoji",
+        "schema-edge"
+      ]
+    },
+    {
+      "id": "mw-schema-008",
+      "tags": [
+        "many-records",
+        "multi",
+        "schema-edge"
+      ]
+    },
+    {
+      "id": "mw-schema-009",
+      "tags": [
+        "long-input",
+        "schema-edge",
+        "trap-mixed"
+      ]
+    },
+    {
+      "id": "mw-schema-010",
+      "tags": [
+        "dotted-keys",
+        "english",
+        "schema-edge"
+      ]
+    },
+    {
+      "id": "mw-schema-011",
+      "tags": [
+        "injection-save-all",
+        "schema-edge",
+        "trap"
+      ]
+    },
+    {
+      "id": "mw-schema-012",
+      "tags": [
+        "multiline-content",
+        "schema-edge"
+      ]
+    },
+    {
+      "id": "mw-schema-013",
+      "tags": [
+        "english",
+        "injection-conflicts-duplicate",
+        "schema-edge"
+      ]
+    },
+    {
+      "id": "mw-schema-014",
+      "tags": [
+        "english",
+        "schema-edge",
+        "zero-memory-noise"
+      ]
+    }
+  ]
+}
