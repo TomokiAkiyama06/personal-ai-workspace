@@ -340,22 +340,24 @@ class IntegrationGate:
                 outcome, task.id, tuple(verdicts), targets, tuple(publications)
             )
 
-        try:
-            # Read again now, not the scope the checks were given: they may
-            # have run long, and a project archived, an ACL narrowed, a remote
-            # or a role changed since decides the push (Codex review of #159).
-            scope = await self._authority.parent_scope(task)
-        except Exception as error:
-            logger.warning("Task scope unavailable (%s)", error_class_of(error))
-            return report(GateOutcome.NOT_PUBLISHED)
-        scoped = {repository.repo_id: repository for repository in scope.repositories}
-
         for target in targets:
-            repository = scoped.get(target.repo_id)
-            if repository is None or repository.role is not RepoRole.TARGET:
-                continue
             if not await self._still_evaluating(task.id, run):
                 return report(GateOutcome.SUPERSEDED)
+            try:
+                # Read again for every repository, never the scope the checks
+                # were given (nor the one read for the repository before): the
+                # checks and an earlier push may have taken long, and a project
+                # archived, an ACL narrowed, a remote or a role changed since
+                # decides this push (Codex review of #159).
+                scope = await self._authority.parent_scope(task)
+            except Exception as error:
+                logger.warning("Task scope unavailable (%s)", error_class_of(error))
+                return report(GateOutcome.NOT_PUBLISHED)
+            repository = next(
+                (r for r in scope.repositories if r.repo_id == target.repo_id), None
+            )
+            if repository is None or repository.role is not RepoRole.TARGET:
+                continue
             try:
                 pull_request = await self._publisher.publish(
                     PublishRequest(

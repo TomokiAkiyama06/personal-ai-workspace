@@ -620,6 +620,40 @@ class PublishingGateTest(PostgresOrchestratorTestCase):
         self.assertEqual(request.repository.remotes, ())
         self.assertEqual(request.repository.acl.allowed, frozenset())
 
+    async def test_the_scope_is_read_again_before_each_target(self):
+        # Codex review of #159: publishing one target may take long; what
+        # changed meanwhile about the next one decides its push.
+        second = uuid.uuid4()
+        task_id = await self.create_task(
+            repositories=[
+                WorkingSetEntry(self.repo, RepoRole.TARGET, BASELINE),
+                WorkingSetEntry(second, RepoRole.TARGET, BASELINE),
+            ]
+        )
+        await self.service.execute(task_id, TaskCommand.START, actor=self.system)
+        await self.service.execute(
+            task_id, TaskCommand.BEGIN_EVALUATION, actor=self.system
+        )
+        self.targets = FakeTargets(self.repo, second)
+        self.scoped = {self.repo: RepoRole.TARGET, second: RepoRole.TARGET}
+        gate = self.gate()
+        authority = gate._authority
+
+        async def narrow_the_second():
+            authority.repositories = (
+                authority.repositories[0],
+                self.scoped_repository(second, RepoRole.WORKING),
+            )
+
+        self.publisher.action = narrow_the_second
+
+        await gate.evaluate(task_id)
+
+        self.assertEqual(
+            [request.target.repo_id for request in self.publisher.requests],
+            [self.repo],
+        )
+
     async def test_a_target_removed_while_checking_gets_no_pull_request(self):
         task_id = await self.task_in_state(TaskState.EVALUATING)
         gate = self.gate()

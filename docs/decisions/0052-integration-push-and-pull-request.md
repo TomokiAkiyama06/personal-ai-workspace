@@ -29,7 +29,7 @@
 
 ### 2. PR を作る Repository
 
-- 検査した Repository のうち、**Push の直前に読み直した Task の Scope で Working Set の Role が `target`** のものだけ（検査の前に読んだ Scope は使わない。検査の間に Project が Archived になった、ACL が狭められた、Remote や Role が変わった場合は、今の状態で判定する）。`working` の Repository は Push も PR もしない（Decision 0030 の 5 節は `working` に PR を求めない）。Scope から外された Repository（Checkout がない、Project が削除された）にも作らない。
+- 検査した Repository のうち、**Repository ごとに Push の直前に読み直した Task の Scope で Working Set の Role が `target`** のものだけ（検査の前に読んだ Scope は使わない。検査の間に Project が Archived になった、ACL が狭められた、Remote や Role が変わった場合は、今の状態で判定する）。`working` の Repository は Push も PR もしない（Decision 0030 の 5 節は `working` に PR を求めない）。Scope から外された Repository（Checkout がない、Project が削除された）にも作らない。
 - `target` から降格された Repository は、Decision 0030 の義務（PR）を負い続けるが、Role の上限で `project.pr.create` がないので作らない。Task は `evaluating` のまま（Human が Role を戻すか、変更を破棄して降格を確かめる）。
 - **推奨: この形で承認する。**
 
