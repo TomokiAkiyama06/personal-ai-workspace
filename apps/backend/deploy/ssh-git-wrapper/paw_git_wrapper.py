@@ -820,6 +820,12 @@ def plan(original: str | None, config: Config) -> Invocation:
         # repository found from the cwd (:func:`check_repository`) is the
         # check of the ``.git`` it would write to.
         raise Rejected("bad_arguments")
+    if subcommand == "init" and os.path.lexists(os.path.join(cwd, ".git")):
+        # ``init`` creates a repository (the backend's is an empty directory);
+        # re-initialising an existing ``.git`` would write through whatever
+        # is planted there, even one git cannot read as a repository (so that
+        # :func:`check_repository` finds nothing to check).
+        raise Rejected("init_existing")
 
     argv = [config.git]
     for key, value in (*hardening(config), *OWN_HARDENING):

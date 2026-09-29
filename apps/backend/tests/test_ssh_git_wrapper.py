@@ -104,7 +104,8 @@ class WrapperTestCase(unittest.TestCase):
         self.worktree = f"{self.worktrees}/task/1/repo/build"
         self.git_dir = f"{self.checkout}/.git/worktrees/build"
         self.outside = f"{self.world.root}/outside"
-        for path in (self.worktree, self.git_dir, self.outside):
+        self.fresh = f"{self.root}/fresh"  # an empty directory, for `init`
+        for path in (self.worktree, self.git_dir, self.outside, self.fresh):
             os.makedirs(path)
         os.makedirs(f"{self.outside}/.git/worktrees/build")
         for git_dir in (self.git_dir, f"{self.outside}/.git/worktrees/build"):
@@ -175,9 +176,9 @@ class PlanTest(WrapperTestCase):
                     "--template=",
                     "--initial-branch=main",
                     "--",
-                    self.checkout,
+                    self.fresh,
                 ],
-                {},
+                {"cwd": self.fresh},
             ),
             (["remote", "add", "--", "origin", url], {"ceiling": self.root}),
             # Decision 0036 §13, on the checkout
@@ -1152,8 +1153,9 @@ class RepositoryLocationTest(WrapperTestCase):
                     "--template=",
                     "--initial-branch=main",
                     "--",
-                    self.checkout,
-                ]
+                    self.fresh,
+                ],
+                cwd=self.fresh,
             ).locate
         )
         self.assertIsNone(self.pinned(["symbolic-ref", "--quiet", "HEAD"]).locate)
@@ -1258,6 +1260,29 @@ class RepositoryLocationTest(WrapperTestCase):
         self.addCleanup(os.chmod, f"{common}/refs", 0o755)
         if not os.access(f"{common}/refs", os.R_OK):  # not when run as root
             self.assert_rejected("git_dir_link", wrapper.check_links, [common])
+
+    def test_init_never_reuses_an_existing_git(self):
+        init = ["init", "--quiet", "--template=", "--initial-branch=main", "--"]
+        self.plan([*init, self.fresh], cwd=self.fresh)
+        cases = {
+            # a directory git may not even read as a repository, whose files
+            # are links out of the root
+            "directory": lambda path: os.makedirs(f"{path}/refs"),
+            "gitdir file": lambda path: fs.write(path, "gitdir: /elsewhere\n"),
+            "link": lambda path: os.symlink(f"{self.outside}/.git", path),
+            "dangling link": lambda path: os.symlink(f"{self.outside}/x", path),
+        }
+        for name, make in cases.items():
+            with self.subTest(case=name):
+                target = f"{self.root}/fresh-{name.replace(' ', '-')}"
+                os.makedirs(target)
+                make(f"{target}/.git")
+                self.assert_rejected(
+                    "init_existing", self.plan, [*init, target], cwd=target
+                )
+        self.assert_rejected(
+            "init_existing", self.plan, [*init, self.checkout], cwd=self.checkout
+        )
 
     def test_init_runs_only_where_it_creates_the_repository(self):
         other = f"{self.root}/other"
@@ -2327,6 +2352,22 @@ class EndToEndTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(result.returncode, 0)  # an object it does not have
         with self.assertRaises(FileNotFoundError):
             fs.read(worktree, "secret.txt")
+
+    async def test_init_never_writes_through_a_planted_git(self):
+        # A `.git` git cannot read as a repository (no HEAD), whose `config`
+        # is a link to a file outside the root: `init` would re-initialise it
+        # and write that file.
+        victim = f"{self.world.root}/victim"
+        fs.write(victim, "untouched\n")
+        target = f"{self.root}/new"
+        os.makedirs(f"{target}/.git")
+        os.symlink(victim, f"{target}/.git/config")
+        result = await self.run_git(
+            ["init", "--quiet", "--template=", "--initial-branch=main", "--", target],
+            cwd=target,
+        )
+        self.assertEqual(result.returncode, wrapper.REJECTED)
+        self.assertEqual(fs.read(victim), "untouched\n")
 
     async def test_a_work_tree_named_in_the_configuration_is_never_used(self):
         # `core.worktree` in the shared configuration would move an unpinned
