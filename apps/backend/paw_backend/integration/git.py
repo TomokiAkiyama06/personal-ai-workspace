@@ -46,6 +46,7 @@ from dataclasses import dataclass
 from paw_backend.repositories.errors import GitCommandError, GitFailure
 from paw_backend.repositories.git import GitResult, GitRunner, command_name
 from paw_backend.repositories.paths import LinuxAccount
+from paw_backend.repositories.ssh import WRAPPER_REJECTED_CODE
 from paw_backend.repositories.validation import validate_branch
 
 _OBJECT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
@@ -300,6 +301,12 @@ class WorktreeGit:
         submodule. It fails (``no submodule mapping``) for a gitlink missing
         from ``.gitmodules``: not clean either."""
         submodules = await self._run(["submodule", "status", "--cached"], account, path)
+        if submodules.returncode == WRAPPER_REJECTED_CODE:
+            # The SSH wrapper refused the call (Decision 0051, 5): git never
+            # ran, and no cleanup by a human would change that (Codex P2 on PR
+            # #130). git's own failures (128) cannot be told from ``no
+            # submodule mapping`` without reading stderr: not clean.
+            raise GitCommandError("submodule", GitFailure.NONZERO_EXIT)
         if submodules.returncode != 0 or any(
             not line.startswith("-") for line in submodules.stdout.splitlines()
         ):

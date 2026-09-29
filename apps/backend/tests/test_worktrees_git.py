@@ -28,7 +28,8 @@ from paw_backend.repositories import (
     InvalidRepositoryInputError,
     LinuxAccount,
 )
-from paw_backend.repositories.git import command_name
+from paw_backend.repositories.git import GitResult, command_name
+from paw_backend.repositories.ssh import WRAPPER_REJECTED_CODE
 
 from .repositories_support import fs, requires_git
 from .worktrees_support import (
@@ -208,6 +209,32 @@ class WorktreeGitTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(raised.exception.failure, GitFailure.TIMEOUT)
         self.assertFalse(await self.git.merging(into, self.account))
         self.assertEqual(git("status", "--porcelain", cwd=into), "")
+
+    async def test_a_refused_submodule_status_is_a_git_failure(self):
+        # Codex P2 on PR #130 (git.py:305): the SSH wrapper refuses a call it
+        # does not allow with its own fixed, documented exit status (126,
+        # ``WRAPPER_REJECTED_CODE``); that is an operational failure (a Retry),
+        # not uncommitted work a human must clean up. git's own 128 (``no
+        # submodule mapping``) still only says the worktree is not clean.
+        into = await self.add("into")
+        self.assertTrue(await self.git.is_exactly_committed(into, self.account))
+        inner = self.runner
+
+        def answering(returncode):
+            class Answering:
+                async def run(self, args, **options):
+                    if command_name(args) == "submodule":
+                        return GitResult(returncode, "")
+                    return await inner.run(args, **options)
+
+            return WorktreeGit(Answering(), timeout_s=30)
+
+        with self.assertRaises(GitCommandError) as raised:
+            await answering(WRAPPER_REJECTED_CODE).is_exactly_committed(
+                into, self.account
+            )
+        self.assertIs(raised.exception.failure, GitFailure.NONZERO_EXIT)
+        self.assertFalse(await answering(128).is_exactly_committed(into, self.account))
 
     async def test_the_worktree_list_is_read_from_git(self):
         a = await self.add("a")
