@@ -80,8 +80,10 @@ MAX_URL_LENGTH = 2048
 MAX_HOST_LENGTH = 253
 MAX_ROOTS = 32
 MAX_HOSTS = 128
-MAX_PROJECTS = 32
 MAX_REPOSITORIES = 32
+# The task's own project, plus one for each repository (a Working Set of
+# ``MAX_REPOSITORIES`` may span that many other projects).
+MAX_PROJECTS = MAX_REPOSITORIES + 1
 MAX_REMOTES = 8  # URLs registered for one repository
 MAX_CREDENTIAL_HANDLES = 64
 # The parent's own, plus what a Worker's worktree protects for each repository
