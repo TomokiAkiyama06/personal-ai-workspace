@@ -50,6 +50,7 @@
 | [0049](0049-manual-write-reservation-release.md) | 落ちた Process が残した Repository の書き込み予約を人が解除する操作（誰が: Project の Manager と Owner / Admin、Passkey Step-up、生きている Worker の Lease がある間は拒否、解除した Repo は書き込まれたものとして扱う、Audit と Task の Event。Issue #129。Decision 0035 の 5 節の最後の一文を Supersede） | Approved |
 | [0050](0050-late-gpu-charge-without-fence.md) | Node の Attempt が閉じた後に、Cancel しても止まらなかった Local の呼び出しの GPU 時間を、`TrackerLateGpuCharge` で Attempt / Run の Fence なしに Task の Budget へ計上する（PAW-036、PR #131。Decision 0037 を補う） | Approved |
 | [0051](0051-integration-worktree-ignored-files.md) | integration worktree の無視された File（`.gitignore`）を未 Commit の変更として扱う方針（`status --ignored` の形を Wrapper の許可リストに足す。Decision 0036 の 7・9・13 への追補。PR #130） | Approved |
+| [0052](0052-integration-push-and-pull-request.md) | Integration Gate を通った integration branch の Push と PR の作成（検査した Commit を `paw/` の branch へ Force なしで Push、`target` だけ、作成者の `gh auth login`、`project.pr.create` を作成者の Agent の行為として判定、作れなければ `evaluating` のまま。Wrapper の許可リストに `push` を足す。Decision 0036 の 10 の後続、#132） | Proposed |
 
 運用は [AGENTS.md](../../AGENTS.md) の「仕様変更」に従います。
 

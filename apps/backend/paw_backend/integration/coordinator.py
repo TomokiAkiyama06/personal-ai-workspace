@@ -95,6 +95,25 @@ from paw_backend.tools.interfaces import require_async_method
 from paw_backend.tools.scope import path_within
 
 
+async def default_branch(git: WorktreeGit, checkout: str, account: LinuxAccount) -> str:
+    """The checkout's default branch: ``origin/HEAD``'s branch, else the branch
+    checked out in the checkout (Decision 0036, 4). The integration branch
+    starts at it and its pull request is opened against it (issue #132). A
+    branch inside ``paw/`` is refused (``DEFAULT_BRANCH_IN_NAMESPACE``)."""
+    default = await git.origin_head(checkout, account)
+    if default is None:
+        default = await git.current_branch(checkout, account)
+    if default is None:
+        raise WorktreeUnavailableError(WorktreeProblem.BASE_UNKNOWN)
+    try:
+        default = validate_branch(default)
+    except InvalidRepositoryInputError:
+        raise WorktreeUnavailableError(WorktreeProblem.BASE_UNKNOWN) from None
+    if in_namespace(default):
+        raise WorktreeUnavailableError(WorktreeProblem.DEFAULT_BRANCH_IN_NAMESPACE)
+    return default
+
+
 @dataclass(frozen=True, slots=True)
 class _Place:
     path: str
@@ -266,19 +285,7 @@ class GitWorktreeCoordinator:
         return _Place(path, branch_name(task_id, run.attempt, key))
 
     async def _default_branch(self, checkout: str, account: LinuxAccount) -> str:
-        """``origin/HEAD``'s branch, else the branch checked out in the checkout."""
-        default = await self._git.origin_head(checkout, account)
-        if default is None:
-            default = await self._git.current_branch(checkout, account)
-        if default is None:
-            raise WorktreeUnavailableError(WorktreeProblem.BASE_UNKNOWN)
-        try:
-            default = validate_branch(default)
-        except InvalidRepositoryInputError:
-            raise WorktreeUnavailableError(WorktreeProblem.BASE_UNKNOWN) from None
-        if in_namespace(default):
-            raise WorktreeUnavailableError(WorktreeProblem.DEFAULT_BRANCH_IN_NAMESPACE)
-        return default
+        return await default_branch(self._git, checkout, account)
 
     async def _base_commit(self, checkout: str, account: LinuxAccount) -> str:
         default = await self._default_branch(checkout, account)
