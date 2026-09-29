@@ -131,7 +131,9 @@ OWN_HARDENING = (
 #: configuration git would read is listed (:func:`configuration_probe`) and the
 #: call is refused if it names a command, or another work tree
 #: (:func:`unsafe_setting`).
-CONTENT_SUBCOMMANDS = frozenset({"status", "merge", "merge-tree", "worktree"})
+CONTENT_SUBCOMMANDS = frozenset(
+    {"status", "merge", "merge-tree", "worktree", "submodule"}
+)
 
 #: Configuration sections every key of which is (or leads to) a command, or to
 #: another file this wrapper would not have listed.
@@ -637,6 +639,19 @@ STATUS_WITH_SUBMODULES = [
 ]
 
 
+#: The ``submodule`` of Decision 0051 (PR #130), run before its ``status``:
+#: which submodules the integration worktree has (any makes it not exactly its
+#: commit). Only this form, only pinned; ``submodule`` runs ``git describe``
+#: inside each populated one, so it is refused like the ``status`` above when
+#: any is populated.
+SUBMODULE_STATUS = ["status", "--cached"]
+
+
+def _check_submodule(args: list[str], places: Places, config: Config) -> None:
+    if not _exactly(args, SUBMODULE_STATUS):
+        raise Rejected("bad_arguments")
+
+
 def _check_status(args: list[str], places: Places, config: Config) -> None:
     if not _exactly(
         args, ["--porcelain=v1", "-z", "--untracked-files=all"], STATUS_WITH_SUBMODULES
@@ -649,7 +664,9 @@ Checker = Callable[[list[str], Places, Config], None]
 #: The allowlist: Decision 0029 §3 (``rev-parse``, ``symbolic-ref``, ``config``,
 #: ``clone``, ``init``, ``remote``) and Decision 0036 §13 (``worktree``,
 #: ``merge``, ``merge-tree``, ``merge-base``, ``status`` and the added
-#: ``rev-parse`` / ``symbolic-ref`` shapes). ``True``: the sub-command may run
+#: ``rev-parse`` / ``symbolic-ref`` shapes), and Decision 0051 (PR #130: the
+#: second ``status`` form and ``submodule status --cached``, pinned only; no
+#: other ``submodule`` sub-command or option). ``True``: the sub-command may run
 #: pinned to a worktree (``--git-dir=`` / ``--work-tree=``, Decision 0036 §13).
 #: Anything not here — ``push``, ``fetch``, ``pull``, ``checkout``, ``switch``,
 #: ``reset``, ``rebase``, ``gc``, ``config`` writes, ... — is refused.
@@ -665,6 +682,7 @@ SUBCOMMANDS: Mapping[str, tuple[Checker, bool]] = {
     "merge-tree": (_check_merge_tree, False),
     "merge-base": (_check_merge_base, False),
     "status": (_check_status, True),
+    "submodule": (_check_submodule, True),
 }
 
 
@@ -825,7 +843,10 @@ def plan(original: str | None, config: Config) -> Invocation:
     if subcommand in CONTENT_SUBCOMMANDS and args[:1] not in (["list"], ["prune"]):
         probe = configuration_probe(hardened, pinned)
     gitlinks = None
-    if subcommand == "status" and args == STATUS_WITH_SUBMODULES:
+    if (subcommand, args) in (
+        ("status", STATUS_WITH_SUBMODULES),
+        ("submodule", SUBMODULE_STATUS),
+    ):
         if not pinned:
             raise Rejected("bad_arguments")
         gitlinks = [*hardened, *pinned, "ls-files", "--stage", "-z"]
@@ -903,10 +924,12 @@ _UNWRITTEN = frozenset({"hooks"})
 
 def check_links(directories: Sequence[str]) -> None:
     """Refuse the call when any of ``directories`` (a git directory, a common
-    directory) holds a symbolic link, ``hooks/`` aside: git creates files
-    under ``refs/``, ``logs/``, ``objects/``, ``worktrees/``, ... and would
-    follow a linked directory there out of the root, although the directory
-    itself was checked to be inside it."""
+    directory) holds a symbolic link, or a file with another hard link
+    (``objects/`` aside), ``hooks/`` aside: git creates files under
+    ``refs/``, ``logs/``, ``objects/``, ``worktrees/``, ... and would follow a
+    linked directory there out of the root, and writes ``MERGE_MSG``,
+    ``config``, ... whose other link may be outside it, although the
+    directory itself was checked to be inside it."""
     todo = sorted(set(directories))
     for index, top in enumerate(todo):
         if any(_within(top, other, allow_equal=False) for other in todo[:index]):
@@ -920,8 +943,26 @@ def check_links(directories: Sequence[str]) -> None:
         for path, dirs, files in os.walk(top, onerror=fail, followlinks=False):
             if path == top:
                 dirs[:] = [name for name in dirs if name not in _UNWRITTEN]
+            # Object files are never written once there (a new object is a
+            # new file): a hard link among them (``clone --local`` and
+            # ``submodule add`` of a local path make them), in the
+            # repository's ``objects/`` or a submodule's under ``modules/``
+            # (or ``worktrees/<name>/modules/``), is left alone. Any other
+            # file git may rewrite in place.
+            parts = os.path.relpath(path, top).split(os.sep)
+            if parts[:1] == ["worktrees"] and parts[2:3] == ["modules"]:
+                parts = parts[2:]
+            linked_ok = parts[0] == "objects" or (
+                parts[0] == "modules" and "objects" in parts[1:]
+            )
             for name in (*dirs, *files):
-                if os.path.islink(os.path.join(path, name)):
+                try:
+                    info = os.lstat(os.path.join(path, name))
+                except OSError:
+                    raise Rejected("git_dir_link") from None
+                if stat.S_ISLNK(info.st_mode):
+                    raise Rejected("git_dir_link")
+                if stat.S_ISREG(info.st_mode) and info.st_nlink > 1 and not linked_ok:
                     raise Rejected("git_dir_link")
 
 
@@ -929,9 +970,10 @@ def check_submodules(
     invocation: Invocation,
     run: Callable[..., "subprocess.CompletedProcess[bytes]"] = bounded_run,
 ) -> None:
-    """Refuse the ``status`` of :data:`STATUS_WITH_SUBMODULES` when a
-    submodule (a gitlink in the index) is populated (has a ``.git`` in the work
-    tree): git would run a child git there, with that repository's own
+    """Refuse the ``status`` of :data:`STATUS_WITH_SUBMODULES` (or the
+    ``submodule`` of :data:`SUBMODULE_STATUS`) when a submodule (a gitlink in
+    the index) is populated (has a ``.git`` in the work tree): git would run a
+    child git there, with that repository's own
     configuration (a ``filter`` is a command), which an agent may have
     planted. ``ls-files`` reads only the index and starts no command."""
     if invocation.gitlinks is None:

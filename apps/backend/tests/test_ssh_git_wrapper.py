@@ -1219,6 +1219,24 @@ class RepositoryLocationTest(WrapperTestCase):
                     "git_dir_link", wrapper.check_links, [self.git_dir, common]
                 )
                 os.remove(place)
+        # A second hard link of a file git rewrites (outside the root, say).
+        with open(f"{self.outside}/victim", "w", encoding="utf-8") as f:
+            f.write("x\n")
+        os.link(f"{self.outside}/victim", f"{self.git_dir}/MERGE_MSG")
+        self.assert_rejected("git_dir_link", wrapper.check_links, [common])
+        os.remove(f"{self.git_dir}/MERGE_MSG")
+        # Object files are never rewritten: their links are left alone.
+        os.makedirs(f"{common}/objects/pack")
+        os.link(f"{self.outside}/victim", f"{common}/objects/pack/p.pack")
+        for sub in (f"{common}/modules/lib", f"{self.git_dir}/modules/lib"):
+            os.makedirs(f"{sub}/objects/ab")
+            os.link(f"{self.outside}/victim", f"{sub}/objects/ab/cd")
+        wrapper.check_links([common])
+        # A ref named like that is no object.
+        os.makedirs(f"{common}/refs/heads/modules/x/objects")
+        os.link(f"{self.outside}/victim", f"{common}/refs/heads/modules/x/objects/y")
+        self.assert_rejected("git_dir_link", wrapper.check_links, [common])
+        os.remove(f"{common}/refs/heads/modules/x/objects/y")
         os.symlink(common, f"{self.root}/linked-git")
         self.assert_rejected(
             "git_dir_link", wrapper.check_links, [f"{self.root}/linked-git"]
@@ -1307,6 +1325,49 @@ class StatusWithSubmodulesTest(WrapperTestCase):
             f.write("gitdir: /elsewhere\n")
         self.assert_rejected("populated_submodule", self.check, listed)
         self.assert_rejected("probe_failed", self.check, b"", returncode=128)
+
+
+class SubmoduleStatusTest(WrapperTestCase):
+    """``submodule status --cached`` of Decision 0051 (PR #130): pinned only,
+    exactly this form, never another ``submodule`` sub-command or option."""
+
+    FORM = ["submodule", "status", "--cached"]
+
+    def test_the_form_is_accepted_pinned(self):
+        invocation = self.pinned(self.FORM)
+        self.assertEqual(invocation.argv[-3:], self.FORM)
+        self.assertEqual(invocation.gitlinks[-3:], ["ls-files", "--stage", "-z"])
+        self.assertIsNotNone(invocation.probe)
+        self.assertIn(f"--git-dir={self.git_dir}", invocation.argv)
+
+    def test_other_submodule_calls_are_refused(self):
+        for args in (
+            ["status"],
+            ["status", "--recursive"],
+            ["status", "--cached", "--recursive"],
+            ["status", "--cached", "--"],
+            ["status", "--cached", "sub"],
+            ["--cached", "status"],
+            ["--quiet", "status", "--cached"],
+            ["status", "--quiet", "--cached"],
+            ["foreach", "touch x"],
+            ["foreach", "--recursive", "touch x"],
+            ["update", "--init"],
+            ["update"],
+            ["init"],
+            ["sync"],
+            ["add", "https://github.com/o/r.git", "sub"],
+            ["deinit", "--all"],
+            ["absorbgitdirs"],
+            ["set-url", "sub", "https://github.com/o/r.git"],
+            ["summary"],
+            [],
+        ):
+            with self.subTest(args=args):
+                self.assert_rejected("bad_arguments", self.pinned, ["submodule", *args])
+        self.assert_rejected(None, self.pinned, ["submodule--helper", "status"])
+        # Not pinned (the checkout, whose submodules git would enter).
+        self.assert_rejected("bad_arguments", self.plan, self.FORM)
 
 
 class RejectedWireTest(WrapperTestCase):
@@ -2059,6 +2120,17 @@ class EndToEndTest(unittest.IsolatedAsyncioTestCase):
         result = await self.run_git(status, cwd=worktree)
         self.assertEqual(result.returncode, wrapper.REJECTED)
         self.assertFalse(_consume(marker))
+        submodules = [*status[:2], "submodule", "status", "--cached"]
+        result = await self.run_git(submodules, cwd=worktree)
+        self.assertEqual(result.returncode, wrapper.REJECTED)
+        # Not populated: the submodule is listed (the backend reads it as
+        # "not exactly its commit"), and nothing inside it ran.
+        shutil.rmtree(f"{worktree}/sub")
+        os.makedirs(f"{worktree}/sub")
+        result = await self.run_git(submodules, cwd=worktree)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn(" sub", result.stdout)
+        self.assertFalse(_consume(marker))
 
     async def test_a_link_inside_the_git_directory_is_never_followed(self):
         # A symbolic link inside the repository's own metadata (planted by
@@ -2169,6 +2241,46 @@ class EndToEndTest(unittest.IsolatedAsyncioTestCase):
         result = await self.run_git(merge, cwd=integration)
         self.assertEqual(result.returncode, 0)
         self.assertFalse(_consume(marker))
+
+    async def test_a_hard_link_inside_the_git_directory_is_never_written(self):
+        # A metadata file hard-linked to a file outside the root: git would
+        # write that file's contents (the link itself is inside the root).
+        checkout = f"{self.root}/project"
+        base = self.world.make_repository(checkout)
+        worktree = f"{self.root}/.paw-worktrees/t/1/r/build"
+        integration = f"{self.root}/.paw-worktrees/t/1/r/_integration"
+        branch, target = "paw/t/1/build", "paw/t/1/_integration"
+        for path, name in ((worktree, branch), (integration, target)):
+            result = await self.run_git(
+                ["worktree", "add", "--quiet", "-b", name, "--", path, base],
+                cwd=checkout,
+            )
+            self.assertEqual(result.returncode, 0)
+        fs.write(worktree, "work.txt", "work\n")
+        git("add", "-A", cwd=worktree)
+        git("commit", "--quiet", "-m", "work", cwd=worktree)
+        victim = f"{self.world.root}/victim.txt"
+        fs.write(victim, "untouched\n")
+        git_dir = f"{checkout}/.git/worktrees/_integration"
+        os.link(victim, f"{git_dir}/MERGE_MSG")
+        merge = [
+            f"--git-dir={git_dir}",
+            f"--work-tree={integration}",
+            *MERGE_CONFIG,
+            "merge",
+            "--no-ff",
+            "--no-edit",
+            "--quiet",
+            "-m",
+            f"Integrate {branch}",
+            f"refs/heads/{branch}",
+        ]
+        result = await self.run_git(merge, cwd=integration)
+        self.assertEqual(result.returncode, wrapper.REJECTED)
+        self.assertEqual(fs.read(victim), "untouched\n")
+        os.remove(f"{git_dir}/MERGE_MSG")
+        result = await self.run_git(merge, cwd=integration)
+        self.assertEqual(result.returncode, 0)
 
     async def test_a_work_tree_named_in_the_configuration_is_never_used(self):
         # `core.worktree` in the shared configuration would move an unpinned
