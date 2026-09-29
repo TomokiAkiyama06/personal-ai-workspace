@@ -43,7 +43,7 @@ Wrapper は Client（Backend）を信用しない。`$SSH_ORIGINAL_COMMAND` を 
 9. File の中身を読み書きする副コマンド（`status`・`merge`（`--abort` を含む）・`merge-tree`・`worktree add`）は、git を `exec` する前に、その呼び出しが読む設定を `git config --no-includes --list -z`（同じ `--git-dir=` / `--work-tree=`・cwd・固定の環境。これ自体は Command を起動しない）で一覧にし、**Command や別の Work Tree を名指しする設定が 1 つでもあれば拒否する**（`config_unsafe`。一覧にできなければ `config_unreadable`）。
    - 理由: Repository の設定（`.git/config`。`extensions.worktreeConfig` なら worktree ごとの `config.worktree` も）は Checkout とすべての worktree で共有され、worktree で作業する Agent が書ける。そこに置いた `filter.<x>.clean` を、Agent が Commit した `.gitattributes` が選べば、許可した `status` がその Command をこの User として実行してしまう。
    - `core.worktree` も拒否する: Checkout で `--git-dir=` / `--work-tree=` なしに動く `status`・`merge` が、検査した cwd の代わりにその Path（Root の外でも）の File を読み書きしてしまうため。
-   - 拒否する設定: `core.worktree`・`gpg.*`（`gpg.ssh.defaultKeyCommand` など、署名の設定は Command を名指しする）・`branch.<name>.mergeOptions`（`merge` に `-S` などを足せる。Command Line の `commit.gpgSign=false` は明示の `-S` を打ち消さない）・`filter.*`・`include.*`・`includeIf.*`（Wrapper が一覧にしていない別の File を読ませるため）・`hook.*`・`pager.*`・`core.pager`・`core.editor`・`core.askPass`・`core.sshCommand`・`core.gitProxy`・`core.alternateRefsCommand`・`sequence.editor`・`diff.external`・`gpg.program`・`uploadPack.packObjectsHook`、および `<section>.<name>.<key>` の `<key>` が `textconv`・`command`・`driver`・`program`・`cmd`・`uploadpack`・`receivepack` のもの（`diff.<x>.textconv`・`merge.<x>.driver`・`gpg.ssh.program` など）。
+   - 拒否する設定: `core.worktree`・`protocol.*`（Repository の `protocol.<name>.allow` は Wrapper の `protocol.allow=never` より優先され、`ext::` は Command を動かす）・`extensions.partialClone`・`remote.<name>.promisor`（欠けた Object の遅延取得）・`gpg.*`（`gpg.ssh.defaultKeyCommand` など、署名の設定は Command を名指しする）・`branch.<name>.mergeOptions`（`merge` に `-S` などを足せる。Command Line の `commit.gpgSign=false` は明示の `-S` を打ち消さない）・`filter.*`・`include.*`・`includeIf.*`（Wrapper が一覧にしていない別の File を読ませるため）・`hook.*`・`pager.*`・`core.pager`・`core.editor`・`core.askPass`・`core.sshCommand`・`core.gitProxy`・`core.alternateRefsCommand`・`sequence.editor`・`diff.external`・`gpg.program`・`uploadPack.packObjectsHook`、および `<section>.<name>.<key>` の `<key>` が `textconv`・`command`・`driver`・`program`・`cmd`・`uploadpack`・`receivepack` のもの（`diff.<x>.textconv`・`merge.<x>.driver`・`gpg.ssh.program` など）。
    - 拒否しない設定: `core.hooksPath`・`core.fsmonitor`（Wrapper の `-c` が上書きする）、`credential.helper`（`clone -c` が Repository に残す。これらの副コマンドは Credential を使わない）、その他の通常の設定。
 10. Decision 0051（PR #130）の `submodule status --cached`（integration worktree にある Submodule を調べる。`status` の前に呼ばれる）と `status` の形（integration worktree が Commit そのものか ── 無視された File と Submodule の中の変更を含めて ── を確かめる）は、pin したときだけ受け付ける。`--ignore-submodules=none` は Wrapper の `diff.ignoreSubmodules=all` を上書きし、git は中身のある Submodule ごとに子の git をその中で動かす（その Repository の設定 ── Filter Driver は Command ── を Wrapper は検査していない）。`submodule status --cached` も中身のある Submodule の中で `git describe` を動かす。そのため、どちらも `exec` の前に同じ pin で `git ls-files --stage -z`（Index を読むだけ）を実行し、Index の Gitlink（Mode `160000`）のどれかの Path に `.git` があれば `populated_submodule` で拒否する。
 
@@ -97,7 +97,7 @@ paw-git-wrapper[1235]: rejected user=alice reason=config_not_allowed
 ## 前提
 
 - OpenSSH の `sshd`（`authorized_keys` の `restrict` を使うため 7.2 以降）。
-- git 2.38 以降（`merge-tree --write-tree`。Decision 0036 の 14）。
+- git 2.45.1 以降（`merge-tree --write-tree` は 2.38 から。Decision 0036 の 14）。Wrapper が付ける `GIT_NO_LAZY_FETCH=1` は 2024-05 の Security Release（2.45.1、および 2.39.4・2.40.2・2.41.1・2.42.2・2.43.4・2.44.1 の各 Maintenance 版）で入ったもので、それより前の git は黙って無視する（Distribution の Backport の有無は配備の前に確かめる）。Wrapper は Partial Clone の設定（`extensions.partialClone`・`remote.<name>.promisor`）と Repository の `protocol.*` も拒否するので、古い git でも遅延取得・`ext::` は起きないが、版の要件は下げない。
 - `/usr/bin/python3` が 3.10 以降（Wrapper は標準ライブラリだけを使う）。
 - 対象の Linux User の Login Shell が `/bin/bash` などの普通の Shell であること。`sshd` は Forced Command を **その User の Login Shell の `-c`** で起動するため、`/usr/sbin/nologin` だと Wrapper が動かない（`ssh` は 1 などで終わり、`SshGitRunner` からは git の失敗に見える）。
 - 対象の Linux User の Home と `workspaces` は、他の User が書けない権限（例: `0750` か `0700`）。Wrapper の Symlink の検査は「その User 自身か root しか Path を差し替えられない」ことを前提にしている。
@@ -211,7 +211,7 @@ W=/home/alice/workspaces
 
 （`/opt/paw/venv` は Backend の仮想環境の Path に読み替える。確認用の Checkout として `alice` で `$W/check` に `git init` した Repository を 1 つ用意し、最初の Commit を作っておく。）
 
-- [ ] 1. 版: `git --version` が 2.38 以上、`ssh -V` が OpenSSH 7.2 以上、`/usr/bin/python3 --version` が 3.10 以上。
+- [ ] 1. 版: `git --version` が 2.45.1 以上（または上の Maintenance 版以降）、`ssh -V` が OpenSSH 7.2 以上、`/usr/bin/python3 --version` が 3.10 以上。
 - [ ] 2. 権限: `stat -c '%U %a' /usr/local/lib/paw/paw-git-wrapper` が `root 755`、`/etc/paw/ssh-keys` が `paw 700`、`/etc/paw/ssh-keys/alice.key` が `paw 600`、`/home/alice/.ssh/authorized_keys` が `alice 600`。
 - [ ] 3. `getent passwd alice` の Login Shell が `nologin` / `false` ではない。
 - [ ] 4. Shell に入れない: `paw_ssh`（Command なし）→ `paw-git-wrapper: rejected (no_command)`・`exit=126`。`ssh -tt ...`（PTY 要求）でも Shell は出ない。

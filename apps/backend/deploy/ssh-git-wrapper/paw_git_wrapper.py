@@ -139,8 +139,11 @@ CONTENT_SUBCOMMANDS = frozenset(
 #: another file this wrapper would not have listed.
 #: ``gpg``: every signing setting (``gpg.program``, ``gpg.<format>.program``,
 #: ``gpg.ssh.defaultKeyCommand``, ...) names or leads to a command.
+#: ``protocol``: a repository's ``protocol.<name>.allow`` would re-enable a
+#: transport (``ext::`` runs a command) over the wrapper's
+#: ``protocol.allow=never``.
 _REFUSED_SECTIONS = frozenset(
-    {"filter", "include", "includeif", "hook", "pager", "gpg"}
+    {"filter", "include", "includeif", "hook", "pager", "gpg", "protocol"}
 )
 #: Two-part keys that name a command, or (``core.worktree``) a work tree other
 #: than the one this wrapper checked: an unpinned ``status`` / ``merge`` in the
@@ -148,6 +151,10 @@ _REFUSED_SECTIONS = frozenset(
 _REFUSED_KEYS = frozenset(
     {
         "core.worktree",
+        # A partial clone fetches missing objects on demand: refused even
+        # where a git without ``GIT_NO_LAZY_FETCH`` would ignore the
+        # environment's ban (:func:`git_environment`).
+        "extensions.partialclone",
         "core.pager",
         "core.editor",
         "core.askpass",
@@ -175,6 +182,8 @@ _REFUSED_VARIABLES = frozenset(
         # ``branch.<name>.mergeOptions`` adds options to ``merge`` (``-S``
         # signs, whatever the command line's ``commit.gpgSign=false`` says).
         "mergeoptions",
+        # ``remote.<name>.promisor``: that remote is fetched from on demand.
+        "promisor",
     }
 )
 PROBE_TIMEOUT_S = 30
