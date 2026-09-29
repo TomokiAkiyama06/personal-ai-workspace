@@ -27,7 +27,7 @@ Commands::
     python -m benchmarks.seed_dataset check
     python -m benchmarks.seed_dataset build --source-repo . --private-root DIR
     python -m benchmarks.seed_dataset verify --private-root DIR --work-dir DIR \\
-        [--database-url-file FILE] [--task TASK_ID ...]
+        [--postgres-image IMAGE] [--task TASK_ID ...]
 """
 
 from __future__ import annotations
@@ -270,7 +270,7 @@ def load_hidden_definitions(private_root: Path) -> dict[str, dict[str, Any]]:
 
 
 def hidden_command(
-    definition: dict[str, Any], private_root: Path, database_url_file: Path | None
+    definition: dict[str, Any], private_root: Path, postgres_image: str | None
 ) -> tuple[str, ...]:
     """Build the evaluator-side argv of one hidden check (never shown to a candidate)."""
     command = [sys.executable, str(SEED_CHECK), definition["mode"]]
@@ -279,11 +279,11 @@ def hidden_command(
             command += ["--overlay", str(private_root / definition["overlay"])]
         command += ["--workdir", definition.get("workdir", ".")]
         if definition.get("postgres"):
-            if database_url_file is None:
+            if not postgres_image:
                 raise SeedDatasetError(
-                    "a PostgreSQL hidden check needs --database-url-file"
+                    "a PostgreSQL hidden check needs --postgres-image"
                 )
-            command += ["--database-url-file", str(database_url_file)]
+            command += ["--postgres-image", postgres_image]
         if definition.get("allow_skips"):
             command.append("--allow-skips")
         command += ["--expect", definition.get("expect", "pass")]
@@ -299,7 +299,7 @@ def hidden_command(
 
 def build_registry(
     private_root: Path,
-    database_url_file: Path | None,
+    postgres_image: str | None,
     references: set[str] | None = None,
 ):
     """Build the evaluator's registry (only ``references`` when given)."""
@@ -312,7 +312,7 @@ def build_registry(
         checks[reference_id] = CheckDefinition(
             id=definition["id"],
             type=definition["type"],
-            command=hidden_command(definition, private_root, database_url_file),
+            command=hidden_command(definition, private_root, postgres_image),
         )
     return HiddenCheckRegistry(checks)
 
@@ -413,7 +413,7 @@ def verify(
     private_root: Path,
     work_dir: Path,
     entries: list[TaskEntry],
-    database_url_file: Path | None,
+    postgres_image: str | None,
     timeout: float = 3600.0,
 ) -> list[dict[str, Any]]:
     """Run every hidden check on the starting and on the golden state.
@@ -433,7 +433,7 @@ def verify(
         )
         references = [c["reference_id"] for c in entry.document["hidden_checks"]]
         # One registry per task: check ids are unique within a task, not across tasks.
-        registry = build_registry(private_root, database_url_file, set(references))
+        registry = build_registry(private_root, postgres_image, set(references))
         report: dict[str, Any] = {"task_id": entry.task_id, "states": {}}
         for state in ("start", "golden"):
             run = runner.create("golden-verify", entry.starting_commit)
@@ -484,7 +484,7 @@ def main(argv: list[str] | None = None) -> int:
         "--private-root", type=Path, default=DEFAULT_PRIVATE_ROOT
     )
     verify_parser.add_argument("--work-dir", type=Path, required=True)
-    verify_parser.add_argument("--database-url-file", type=Path)
+    verify_parser.add_argument("--postgres-image")
     verify_parser.add_argument("--task", action="append", default=[])
     verify_parser.add_argument("--report", type=Path)
     arguments = parser.parse_args(argv)
@@ -514,7 +514,7 @@ def main(argv: list[str] | None = None) -> int:
         arguments.private_root,
         arguments.work_dir.resolve(),
         entries,
-        arguments.database_url_file,
+        arguments.postgres_image,
     )
     for report in reports:
         status = "ok" if report["ok"] else "FAILED"

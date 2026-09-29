@@ -9,10 +9,10 @@ directory is the candidate worktree.  The program never writes into that worktre
     ``python -m unittest`` there.  The check fails when a test fails, when no test
     ran, or, unless ``--allow-skips`` is given, when a test was skipped: a skipped
     PostgreSQL test must not turn a hidden check into a silent pass.  With
-    ``--database-url-file`` a throwaway login and database ``paw_seed_<random>``
-    are created with the evaluator's URL in that file; the tests get only the
-    throwaway login's URL as ``PAW_TEST_DATABASE_URL``, and both are dropped
-    afterwards.  No URL is ever printed.
+    ``--postgres-image`` a throwaway PostgreSQL container of that image is started
+    for this check alone, its URL is handed to the tests as
+    ``PAW_TEST_DATABASE_URL`` and the container is removed afterwards.  No URL is
+    ever printed.
     ``--expect fail`` inverts the verdict (used to check that a test the candidate
     repaired still detects a known bug).
 
@@ -38,6 +38,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -110,78 +111,106 @@ def _apply_overlay(overlay: Path, destination: Path) -> int:
 
 
 @dataclass(frozen=True)
-class _Database:
-    """A throwaway database and the check-specific login that owns it."""
+class _Cluster:
+    """A PostgreSQL cluster (a container) that exists for one hidden check only."""
 
-    admin_url: str
-    name: str
-    role: str
+    container: str
     test_url: str
 
 
-def _create_database(url_file: Path) -> _Database:
-    """Create a login ``paw_seed_<random>`` and a database of the same name it owns.
+_CLUSTER_READY_SECONDS = 120.0
 
-    The tests only ever see this login (random name and password), never the
-    evaluator's own credential from ``url_file``; teardown drops both.  The login
-    is a superuser because the migrations under test create and drop the
-    ``vector`` extension, which PostgreSQL does not let other roles do (pgvector
-    is not a trusted extension), and the grant tests create roles.  The cluster
-    therefore still has to be a disposable one used only for the benchmark
-    (Decision 0041).
+
+def _docker(*arguments: str, timeout: float = 120.0) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["docker", *arguments],
+        capture_output=True,
+        timeout=timeout,
+        check=False,
+    )
+
+
+def _start_cluster(image: str) -> _Cluster:
+    """Start a throwaway PostgreSQL container for one check and return its URL.
+
+    The tests get the superuser of a cluster nobody else uses: the migrations under
+    test create and drop the ``vector`` extension (pgvector is not a trusted
+    extension) and the grant tests create roles, so the login cannot be narrowed.
+    Whatever the tests do to that cluster (extra roles or databases, a changed
+    password) disappears with the container, and no later check or task shares it
+    (Decision 0041).  The data directory is a tmpfs; the port is published on
+    127.0.0.1 only; the password is random and passed through a private env file,
+    not on a command line.
     """
-    import psycopg
-    from psycopg import sql
-    from sqlalchemy.engine import make_url
-
-    base = url_file.read_text(encoding="utf-8").strip()
-    name = f"paw_seed_{secrets.token_hex(6)}"
+    container = f"paw-seed-{secrets.token_hex(6)}"
     password = secrets.token_urlsafe(32)
-    admin = make_url(base).set(drivername="postgresql")
-    admin_url = admin.render_as_string(hide_password=False)
-    with psycopg.connect(admin_url, autocommit=True) as connection:
-        connection.execute(
-            sql.SQL("CREATE ROLE {} LOGIN SUPERUSER PASSWORD {}").format(
-                sql.Identifier(name), sql.Literal(password)
-            )
-        )
-        try:
-            connection.execute(
-                sql.SQL("CREATE DATABASE {} OWNER {}").format(
-                    sql.Identifier(name), sql.Identifier(name)
-                )
-            )
-        except BaseException:
-            connection.execute(
-                sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(name))
-            )
-            raise
-    test_url = admin.set(
-        username=name, password=password, database=name
-    ).render_as_string(hide_password=False)
-    return _Database(admin_url, name, name, test_url)
-
-
-def _drop_database(database: _Database) -> bool:
-    """Drop the throwaway database and its login; False (and a message without the URL) on failure."""
-    import psycopg
-    from psycopg import sql
-
+    directory = Path(tempfile.mkdtemp(prefix="paw-seed-pg-"))
     try:
-        with psycopg.connect(database.admin_url, autocommit=True) as connection:
-            connection.execute(
-                sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(
-                    sql.Identifier(database.name)
-                )
+        env_file = directory / "env"
+        descriptor = os.open(env_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(f"POSTGRES_PASSWORD={password}\n")
+        # From here on a container may exist (even when ``docker run`` times out or
+        # fails half-way), so every failure removes it before re-raising.
+        try:
+            started = _docker(
+                "run",
+                "--detach",
+                "--rm",
+                "--name",
+                container,
+                "--env-file",
+                str(env_file),
+                "--tmpfs",
+                "/var/lib/postgresql",
+                "--publish",
+                "127.0.0.1::5432",
+                image,
             )
-            connection.execute(
-                sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(database.role))
-            )
-    except Exception:  # noqa: BLE001 - never print the URL
-        print(
-            "seed_check: could not drop the throwaway database or its login;"
-            " the check fails"
+        finally:
+            shutil.rmtree(directory, ignore_errors=True)
+        if started.returncode != 0:
+            raise RuntimeError("could not start the PostgreSQL container")
+        port = _docker("port", container, "5432/tcp").stdout.decode().split(":")[-1]
+        test_url = (
+            f"postgresql://postgres:{password}@127.0.0.1:{int(port.strip())}/postgres"
         )
+        _wait_until_ready(test_url)
+    except BaseException:
+        _remove_container(container)
+        raise
+    return _Cluster(container, test_url)
+
+
+def _wait_until_ready(url: str) -> None:
+    """Wait until the final server (not the image's init-time server) accepts TCP."""
+    import psycopg
+
+    deadline = time.monotonic() + _CLUSTER_READY_SECONDS
+    while True:
+        try:
+            with psycopg.connect(url, connect_timeout=5) as connection:
+                connection.execute("SELECT 1")
+            return
+        except psycopg.OperationalError:
+            if time.monotonic() > deadline:
+                raise RuntimeError("the PostgreSQL container did not become ready")
+            time.sleep(0.5)
+
+
+def _remove_container(container: str) -> bool:
+    """Remove a check's container and its anonymous volumes; True when removed."""
+    try:
+        removed = _docker("rm", "--force", "--volumes", container)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return removed.returncode == 0
+
+
+def _stop_cluster(cluster: _Cluster) -> bool:
+    """Remove the check's container; False (and a message without the URL) on failure."""
+    if not _remove_container(cluster.container):
+        print("seed_check: could not remove the PostgreSQL container; the check fails")
         return False
     return True
 
@@ -237,7 +266,7 @@ def _run_unittest(arguments: argparse.Namespace) -> int:
     worktree = Path(arguments.worktree).resolve()
     overlay = Path(arguments.overlay).resolve() if arguments.overlay else None
     temporary = Path(tempfile.mkdtemp(prefix="paw-seed-check-"))
-    database: _Database | None = None
+    cluster: _Cluster | None = None
     code = 1
     try:
         tree = temporary / "tree"
@@ -247,15 +276,15 @@ def _run_unittest(arguments: argparse.Namespace) -> int:
         environment = dict(os.environ)
         environment.pop("PAW_TEST_DATABASE_URL", None)
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
-        if arguments.database_url_file:
-            database = _create_database(Path(arguments.database_url_file))
-            environment["PAW_TEST_DATABASE_URL"] = database.test_url
+        if arguments.postgres_image:
+            cluster = _start_cluster(arguments.postgres_image)
+            environment["PAW_TEST_DATABASE_URL"] = cluster.test_url
         command = [sys.executable, "-m", "unittest", "-v", *arguments.tests]
         returncode, output = _run_bounded(
             command, tree / arguments.workdir, environment
         )
-        if database is not None:
-            output = output.replace(database.test_url.encode(), b"<database-url>")
+        if cluster is not None:
+            output = output.replace(cluster.test_url.encode(), b"<database-url>")
         _echo(output[-_MAX_ECHO:])
         ran = [int(value) for value in _RAN.findall(output)]
         summaries = _SUMMARY.findall(output)
@@ -290,9 +319,9 @@ def _run_unittest(arguments: argparse.Namespace) -> int:
         )
         code = 0 if verdict else 1
     finally:
-        # A database that could not be dropped would outlive the check and could
+        # A cluster that could not be removed would outlive the check and could
         # leak into later runs, so a failed teardown fails the check.
-        if database is not None and not _drop_database(database):
+        if cluster is not None and not _stop_cluster(cluster):
             code = 1
         shutil.rmtree(temporary, ignore_errors=True)
     return code
@@ -404,7 +433,7 @@ def build_parser() -> argparse.ArgumentParser:
     unit.add_argument("--worktree", default=".")
     unit.add_argument("--overlay")
     unit.add_argument("--workdir", default=".")
-    unit.add_argument("--database-url-file")
+    unit.add_argument("--postgres-image")
     unit.add_argument("--allow-skips", action="store_true")
     unit.add_argument("--expect", choices=("pass", "fail"), default="pass")
     unit.add_argument("tests", nargs="+")

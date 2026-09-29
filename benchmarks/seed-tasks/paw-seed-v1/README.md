@@ -24,8 +24,8 @@ python -m benchmarks.seed_dataset build --source-repo . --private-root /data/dat
 # Golden behavior の確認（starting で失敗・Golden で成功）。PATH の先頭は Benchmark 用の仮想環境
 PATH="$VENV/bin:$PATH" python -m benchmarks.seed_dataset verify \
   --private-root /data/datasets/paw-seed-v1 --work-dir "$WORK" \
-  --database-url-file "$PG_URL_FILE"
+  --postgres-image pgvector/pgvector:pg18
 ```
 
-`--database-url-file` は PostgreSQL の管理用 URL を 1 行だけ書いた file です（Backend の Task で、check ごとに使い捨ての Login と Database を作り、test にはその Login の URL だけを渡します。Migration が `vector` 拡張を作るので使い捨ての Login は Superuser です。Benchmark 専用の使い捨ての Cluster を使ってください）。URL は出力しません。
+`--postgres-image` は pgvector 入りの PostgreSQL の Image です（Backend の Task で、check ごとに使い捨ての Container を起こして test にその Superuser の URL を渡し、終わったら Container ごと消します。Docker が要ります）。URL は出力しません。
 `--work-dir` は Repository の外の、Evaluator だけが使う directory にします。

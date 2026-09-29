@@ -420,8 +420,8 @@ per-task repositories live in the evaluator-private `/data/datasets/paw-seed-v1`
 - Hidden checks run `benchmarks/seed_check.py` from the evaluator's checkout.  It copies the
   candidate worktree to a private temporary directory, lays the hidden tests over the copy
   (the candidate worktree is never written), fails on skipped tests, and gives PostgreSQL tests a
-  throwaway login and database `paw_seed_<random>` (never the evaluator's own credential) that it
-  drops afterwards.
+  throwaway PostgreSQL container of its own (`--postgres-image`, tmpfs data, removed afterwards), so
+  nothing a check does to PostgreSQL reaches a later check.
 
 ## Validator
 

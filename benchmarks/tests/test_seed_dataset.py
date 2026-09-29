@@ -204,16 +204,17 @@ class HiddenCommandTest(unittest.TestCase):
                 "tests": ["tests.test_a"],
             },
             private,
-            Path("/private/url"),
+            "example/postgres:tag",
         )
         self.assertEqual(command[0], sys.executable)
         self.assertEqual(Path(command[1]), seed_dataset.SEED_CHECK)
         self.assertIn("--overlay", command)
         self.assertIn(str(private / "overlays/x"), command)
-        self.assertIn("/private/url", command)
+        index = command.index("--postgres-image")
+        self.assertEqual(command[index + 1], "example/postgres:tag")
         self.assertEqual(command[-3:], ("--expect", "pass", "tests.test_a"))
 
-    def test_postgres_check_needs_a_url_file(self):
+    def test_postgres_check_needs_an_image(self):
         with self.assertRaises(SeedDatasetError):
             hidden_command(
                 {"mode": "unittest", "postgres": True, "tests": ["t"]}, Path("/p"), None
@@ -422,85 +423,116 @@ class SeedCheckTest(unittest.TestCase):
         self.write_test(
             "    def test_value(self):\n        self.assertEqual(value(), 1)\n"
         )
-        url_file = self.directory / "url"
-        url_file.write_text("postgresql://user:secret@127.0.0.1:1/postgres\n")
         with (
             unittest.mock.patch.object(
                 seed_check,
-                "_create_database",
-                return_value=seed_check._Database(
-                    "admin-url",
-                    "paw_seed_x",
-                    "paw_seed_x",
-                    "postgresql://t@h/paw_seed_x",
+                "_start_cluster",
+                return_value=seed_check._Cluster(
+                    "paw-seed-x", "postgresql://postgres:secret@127.0.0.1:1/postgres"
                 ),
             ),
             unittest.mock.patch.object(
-                seed_check, "_drop_database", return_value=False
+                seed_check, "_docker", return_value=unittest.mock.Mock(returncode=1)
             ),
         ):
-            code, output = self.run_check("--database-url-file", str(url_file))
+            code, output = self.run_check("--postgres-image", "example/pg")
         self.assertEqual(code, 1, output)
+        self.assertIn("could not remove the PostgreSQL container", output)
         self.assertNotIn("secret", output)
+
+    def test_each_check_gets_its_own_container_without_the_password_in_argv(self):
+        calls = []
+
+        def docker(*arguments, timeout=120.0):
+            calls.append(arguments)
+            if arguments[0] == "run":
+                env_file = Path(arguments[arguments.index("--env-file") + 1])
+                self.assertEqual(env_file.stat().st_mode & 0o777, 0o600)
+                calls.append(("env", env_file.read_text()))
+            stdout = b"127.0.0.1:54321\n" if arguments[0] == "port" else b""
+            return unittest.mock.Mock(returncode=0, stdout=stdout)
+
+        with (
+            unittest.mock.patch.object(seed_check, "_docker", side_effect=docker),
+            unittest.mock.patch.object(seed_check, "_wait_until_ready"),
+        ):
+            first = seed_check._start_cluster("example/pg")
+            second = seed_check._start_cluster("example/pg")
+            self.assertTrue(seed_check._stop_cluster(first))
+        self.assertNotEqual(first.container, second.container)
+        self.assertNotEqual(first.test_url, second.test_url)
+        password = first.test_url.split(":")[2].split("@")[0]
+        runs = [c for c in calls if c[0] == "run"]
+        self.assertEqual(len(runs), 2)
+        for run in runs:
+            self.assertNotIn(password, " ".join(run))
+            self.assertIn("127.0.0.1::5432", run)
+            self.assertIn("--rm", run)
+        self.assertIn(("env", f"POSTGRES_PASSWORD={password}\n"), calls)
+        self.assertIn(("rm", "--force", "--volumes", first.container), calls)
+        self.assertTrue(first.test_url.startswith("postgresql://postgres:"))
+        self.assertTrue(first.test_url.endswith("@127.0.0.1:54321/postgres"))
+
+    def test_a_container_that_fails_to_start_is_removed(self):
+        for failure in ("timeout", "returncode", "not-ready"):
+            with self.subTest(failure=failure):
+                calls = []
+
+                def docker(*arguments, timeout=120.0, failure=failure, calls=calls):
+                    calls.append(arguments)
+                    if arguments[0] == "run" and failure == "timeout":
+                        raise subprocess.TimeoutExpired("docker", timeout)
+                    code = 1 if arguments[0] == "run" and failure == "returncode" else 0
+                    stdout = b"127.0.0.1:54321\n" if arguments[0] == "port" else b""
+                    return unittest.mock.Mock(returncode=code, stdout=stdout)
+
+                ready = unittest.mock.Mock(side_effect=RuntimeError("not ready"))
+                with (
+                    unittest.mock.patch.object(
+                        seed_check, "_docker", side_effect=docker
+                    ),
+                    unittest.mock.patch.object(seed_check, "_wait_until_ready", ready),
+                    self.assertRaises((subprocess.TimeoutExpired, RuntimeError)),
+                ):
+                    seed_check._start_cluster("example/pg")
+                name = calls[0][calls[0].index("--name") + 1]
+                self.assertEqual(calls[-1], ("rm", "--force", "--volumes", name))
 
 
 @unittest.skipUnless(
-    os.environ.get("PAW_TEST_DATABASE_URL"), "PAW_TEST_DATABASE_URL is not set"
+    os.environ.get("PAW_TEST_POSTGRES_IMAGE"), "PAW_TEST_POSTGRES_IMAGE is not set"
 )
-class ThrowawayDatabaseTest(unittest.TestCase):
-    """The tests of a hidden check never see the evaluator's own credential."""
+class ThrowawayClusterTest(unittest.TestCase):
+    """What the tests of one check do to PostgreSQL does not outlive the check."""
 
-    def setUp(self):
-        from sqlalchemy.engine import make_url
-
-        directory = Path(tempfile.mkdtemp())
-        self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
-        self.url_file = directory / "url"
-        self.url_file.write_text(os.environ["PAW_TEST_DATABASE_URL"] + "\n")
-        self.admin = make_url(os.environ["PAW_TEST_DATABASE_URL"]).set(
-            drivername="postgresql"
-        )
-
-    def scalar(self, url, query, *parameters):
+    def test_changes_to_the_cluster_leave_with_its_container(self):
         import psycopg
 
-        with psycopg.connect(url, autocommit=True) as connection:
-            return connection.execute(query, parameters).fetchone()[0]
-
-    def test_the_tests_get_a_throwaway_login_that_teardown_removes(self):
-        from sqlalchemy.engine import make_url
-
-        admin_url = self.admin.render_as_string(hide_password=False)
-        database = seed_check._create_database(self.url_file)
-        dropped = False
+        image = os.environ["PAW_TEST_POSTGRES_IMAGE"]
+        cluster = seed_check._start_cluster(image)
+        stopped = False
         try:
-            given = make_url(database.test_url)
-            self.assertEqual(given.database, database.name)
-            self.assertNotEqual(given.username, self.admin.username)
-            self.assertNotEqual(given.password, self.admin.password)
-            self.assertNotIn(str(self.admin.password), database.test_url)
-            self.assertEqual(
-                self.scalar(database.test_url, "SELECT current_user"), database.role
+            with psycopg.connect(cluster.test_url, autocommit=True) as connection:
+                connection.execute("CREATE ROLE paw_seed_leftover LOGIN SUPERUSER")
+                connection.execute("CREATE DATABASE paw_seed_leftover")
+            stopped = seed_check._stop_cluster(cluster)
+            self.assertTrue(stopped)
+            self.assertNotEqual(
+                seed_check._docker("inspect", cluster.container).returncode, 0
             )
-            self.assertEqual(
-                self.scalar(
-                    admin_url,
-                    "SELECT pg_get_userbyid(datdba) FROM pg_database"
-                    " WHERE datname = %s",
-                    database.name,
-                ),
-                database.role,
-            )
-            dropped = seed_check._drop_database(database)
-            self.assertTrue(dropped)
-            for query in (
-                "SELECT count(*) FROM pg_roles WHERE rolname = %s",
-                "SELECT count(*) FROM pg_database WHERE datname = %s",
-            ):
-                self.assertEqual(self.scalar(admin_url, query, database.name), 0)
+            fresh = seed_check._start_cluster(image)
+            try:
+                with psycopg.connect(fresh.test_url, autocommit=True) as connection:
+                    for query in (
+                        "SELECT count(*) FROM pg_roles WHERE rolname = 'paw_seed_leftover'",
+                        "SELECT count(*) FROM pg_database WHERE datname = 'paw_seed_leftover'",
+                    ):
+                        self.assertEqual(connection.execute(query).fetchone()[0], 0)
+            finally:
+                seed_check._stop_cluster(fresh)
         finally:
-            if not dropped:
-                seed_check._drop_database(database)
+            if not stopped:
+                seed_check._stop_cluster(cluster)
 
 
 class ForbiddenChangesTest(unittest.TestCase):
