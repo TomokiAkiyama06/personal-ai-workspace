@@ -76,6 +76,15 @@ class Authorizer:
         self._live: set[asyncio.Task[Principal | None]] = set()
         self._slots = asyncio.Semaphore(_MAX_LIVE_LOOKUPS)
 
+    @property
+    def policy(self) -> Policy:
+        """The policy this Authorizer decides with (read-only).
+
+        For a caller that must decide again, without auditing, inside its own
+        write transaction what it was already allowed (audited) to do, so that
+        both decisions use the same grants."""
+        return self._policy
+
     async def authorize(
         self,
         principal: Principal | None,

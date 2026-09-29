@@ -278,6 +278,27 @@ class RootTest(WriterTestCase):
         thread.join()
         self.assertEqual(len(errors), 1)
 
+    def test_two_first_runs_at_the_same_time_share_one_marker(self):
+        # Both runs find the marker missing and the directory empty; the one
+        # that loses the race must lock the winner's marker, not replace it
+        # with its own file and lock that (two runs "holding" the lock).
+        real_listdir = os.listdir
+        others = []
+        raced = []
+
+        def listdir(path=".", *args, **kwargs):
+            names = real_listdir(path, *args, **kwargs)
+            if isinstance(path, int) and not raced and MARKER_NAME not in names:
+                raced.append(True)
+                others.append(self.open())
+            return names
+
+        with mock.patch("os.listdir", listdir):
+            with self.assertRaises(ProjectionBusyError):
+                open_target(self.root, self.tmp.homes)
+        self.assertEqual(len(others), 1)
+        self.assertEqual(tree(self.root), {MARKER_NAME: MARKER_CONTENT})
+
 
 class NestedGitTest(WriterTestCase):
     """A git repository found inside the projection fails the run before writing.

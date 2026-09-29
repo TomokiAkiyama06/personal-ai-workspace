@@ -7,9 +7,11 @@ objects that run tasks, each wired to the others the way production needs:
   listener, ``TaskEndCleanup.on_task_event`` (``task_end.py``): a task that ends
   keeps no open approval and no active ``session_only`` memory;
 * the Tool Broker (PAW-031) with the task budget (``TrackerBudgetProvider``), the
-  task's current state (``PostgresTaskActivity``), the registered ACL of a
-  repository that is not yet in a task's scope (``RepositoryService``) and the
-  repository-use gate (``TaskService``), behind a ``ToolRunner``. The registry
+  task's current state (``PostgresTaskActivity``), the worker's queue lease
+  (``QueueLeaseVerifier`` on the same ``TaskQueue``: issue #126, Decision 0046),
+  the registered ACL of a repository that is not yet in a task's scope
+  (``RepositoryService``) and the repository-use gate (``TaskService``), behind
+  a ``ToolRunner``. The registry
   holds the Working Set tools only (``WORKING_SET_TOOL_SPECS``, run by
   ``WorkingSetExecutor``): the tools that touch files, git or the network have no
   executor in the backend yet, and a tool that is not registered is refused;
@@ -40,7 +42,7 @@ from paw_backend.orchestrator.authority import (
     StoredTaskAuthority,
 )
 from paw_backend.orchestrator.config import OrchestratorConfig
-from paw_backend.orchestrator.gateway import TrackerBudgetProvider
+from paw_backend.orchestrator.gateway import QueueLeaseVerifier, TrackerBudgetProvider
 from paw_backend.orchestrator.orchestrator import Orchestrator
 from paw_backend.orchestrator.runtime import AgentRuntime
 from paw_backend.orchestrator.store import DagStore
@@ -103,11 +105,15 @@ def build_tool_broker(
     authorizer: Authorizer,
     *,
     tasks: TaskService,
+    queue: TaskQueue,
     budget: BudgetTracker,
     approvals: PostgresApprovalStore,
     registrations: RepositoryScopes,
 ) -> ToolBroker:
-    """The Tool Broker of the application (module docstring)."""
+    """The Tool Broker of the application (module docstring). Every call is
+    fenced on the worker's lease, read from ``queue`` (issue #126, Decision 0046;
+    Decision 0047, 7): without a verifier the Broker refuses every call
+    (``lease_unavailable``)."""
     return ToolBroker(
         ToolRegistry(WORKING_SET_TOOL_SPECS),
         authorizer,
@@ -115,6 +121,7 @@ def build_tool_broker(
         PostgresAuditSink(database),
         budget=TrackerBudgetProvider(budget),
         task_activity=PostgresTaskActivity(database),
+        lease=QueueLeaseVerifier(queue),
         registrations=registrations,
         use_gate=tasks,
     )
@@ -159,6 +166,7 @@ def build_task_execution(
         database,
         authorizer,
         tasks=tasks,
+        queue=queue,
         budget=budget,
         approvals=approval_store,
         registrations=repositories,

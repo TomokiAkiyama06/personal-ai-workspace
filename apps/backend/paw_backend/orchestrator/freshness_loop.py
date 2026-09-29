@@ -11,7 +11,8 @@ later issue; Decision 0047 wires them here. One cycle runs, in this order:
 3. ``FreshnessMaintenance.expire_due``: ``expiring`` memories at or past
    ``expires_at`` are ``deprecated``.
 
-Each job is repeated while it changes a full batch, at most
+Each job is repeated while it changes a full batch (the sweep: while it took
+``MAX_TASK_END_SWEEP`` tasks; each sweep resumes after the previous one), at most
 ``MAX_FRESHNESS_ROUNDS`` times, so that a backlog is worked off without one cycle
 running for ever. One step that raises does not stop the others (it is logged by
 type only: a database message can quote a memory).
@@ -42,6 +43,7 @@ from paw_backend.orchestrator.limits import (
     DEFAULT_FRESHNESS_INTERVAL_SECONDS,
     MAX_FRESHNESS_INTERVAL_SECONDS,
     MAX_FRESHNESS_ROUNDS,
+    MAX_TASK_END_SWEEP,
     MIN_FRESHNESS_INTERVAL_SECONDS,
 )
 from paw_backend.orchestrator.task_end import TaskEndCleanup
@@ -110,12 +112,14 @@ class FreshnessJobLoop:
         failed: list[str] = []
         finished = marked = expired = 0
         try:
-            finished = len(await self._task_end.sweep())
+            finished = await self._repeat(self._sweep, MAX_TASK_END_SWEEP)
         except Exception as error:
             failed.append("task_end")
             logger.warning("The task-end sweep failed (%s)", error_class_of(error))
         try:
-            marked = await self._repeat(self._freshness.mark_revalidation_due)
+            marked = await self._repeat(
+                self._freshness.mark_revalidation_due, self._batch
+            )
         except Exception as error:
             failed.append("revalidation_due")
             logger.warning(
@@ -123,7 +127,7 @@ class FreshnessJobLoop:
                 error_class_of(error),
             )
         try:
-            expired = await self._repeat(self._freshness.expire_due)
+            expired = await self._repeat(self._freshness.expire_due, self._batch)
         except Exception as error:
             failed.append("expire_due")
             logger.warning("Expiring memories failed (%s)", error_class_of(error))
@@ -137,14 +141,17 @@ class FreshnessJobLoop:
             )
         return MaintenanceReport(finished, marked, expired, tuple(failed))
 
-    async def _repeat(self, job: Callable[[], Awaitable[int]]) -> int:
+    async def _sweep(self) -> int:
+        return len(await self._task_end.sweep())
+
+    async def _repeat(self, job: Callable[[], Awaitable[int]], batch: int) -> int:
         total = 0
         for _ in range(MAX_FRESHNESS_ROUNDS):
             if self._stopping.is_set():
                 break
             changed = await job()
             total += changed
-            if changed < self._batch:
+            if changed < batch:
                 break
         return total
 

@@ -1837,7 +1837,7 @@ class ConstructionTest(unittest.TestCase):
             async def check(self):
                 return None
 
-            async def charge(self, task_id, tool):
+            async def charge(self, task_id, run, tool):
                 return None
 
         for name, value in (

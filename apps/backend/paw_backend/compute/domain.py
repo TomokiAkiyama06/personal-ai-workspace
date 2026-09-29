@@ -3,7 +3,7 @@
 ``REQUIREMENTS.md`` ("GPU / Compute Resource Scheduler", FIXED) names the five
 resource classes, the model residency policy and the order in which VRAM pressure
 is relieved; this module turns them into closed enums. The requirements are the
-source; ``docs/decisions/0037-gpu-compute-scheduler.md`` (Proposed) records the
+source; ``docs/decisions/0037-gpu-compute-scheduler.md`` (Approved) records the
 choices they leave open.
 """
 

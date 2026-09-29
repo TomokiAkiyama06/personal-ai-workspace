@@ -52,6 +52,7 @@ from paw_backend.projects.records import (
 from paw_backend.projects.service import ProjectService
 from paw_backend.projects.task_gate import ProjectStateGate
 from paw_backend.projects.task_stop import ProjectTaskStopper, TaskStopResult
+from paw_backend.projects.task_write_release import StepUpCheck, TaskWriteReleaser
 
 __all__ = [
     "AdminProjectPage",
@@ -78,6 +79,8 @@ __all__ = [
     "PendingInvite",
     "Project",
     "ProjectBusyError",
+    "StepUpCheck",
+    "TaskWriteReleaser",
     "ProjectError",
     "ProjectNotFoundError",
     "ProjectPermissionDeniedError",

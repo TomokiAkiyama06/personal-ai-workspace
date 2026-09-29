@@ -443,6 +443,7 @@ class RepositoryUseTest(unittest.IsolatedAsyncioTestCase):
             h.sink,
             budget=h.budget,
             task_activity=h.task_activity,
+            lease=h.lease,  # the worker holds its lease (issue #126)
             path_resolver=h.broker._resolver,
             registrations=h.registrations,
         )

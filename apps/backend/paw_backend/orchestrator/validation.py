@@ -14,9 +14,11 @@ from enum import Enum
 from typing import Any, NoReturn
 
 from paw_backend.orchestrator.errors import InvalidOrchestratorArgumentError
+from paw_backend.orchestrator.limits import AGENT_LABEL_PATTERN, MODEL_PATTERN
 
 _WORKER_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@/-]*")
-_AGENT_LABEL = re.compile(r"[a-z][a-z0-9._-]{0,63}")
+_AGENT_LABEL = re.compile(AGENT_LABEL_PATTERN)
+_MODEL = re.compile(MODEL_PATTERN)
 _SIGNATURE = re.compile(r"[0-9a-f]{64}")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 _SURROGATE = re.compile("[\ud800-\udfff]")
@@ -88,6 +90,13 @@ def check_worker_id(value: Any, name: str = "worker_id") -> str:
 def check_agent_label(name: str, value: Any) -> str:
     """The label of an agent of a ladder: ``[a-z][a-z0-9._-]{0,63}``."""
     if type(value) is not str or _AGENT_LABEL.fullmatch(value) is None:
+        _reject(name)
+    return value
+
+
+def check_model(name: str, value: Any) -> str:
+    """A model id, ``[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}``: an identifier."""
+    if type(value) is not str or _MODEL.fullmatch(value) is None:
         _reject(name)
     return value
 
