@@ -84,7 +84,7 @@ class Capability(StrEnum):
     # The workspace authentication policy (Passkey requirement per role, Step-up
     # window; Decision 0015): an Admin may look at it, only the Owner changes it.
     ADMIN_AUTH_POLICY_VIEW = "admin.auth_policy.view"
-    # Start and end Kaggle / Full GPU Mode (issue #33, Decision 0055 Proposed):
+    # Start and end Kaggle / Full GPU Mode (issue #33, Decision 0055):
     # every local GPU task of every user is held while an exclusive job has the
     # GPU. Owner / Admin, never an Agent.
     ADMIN_COMPUTE_FULL_GPU = "admin.compute.full_gpu"

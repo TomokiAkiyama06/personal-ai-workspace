@@ -140,7 +140,7 @@ _ADMIN_ONLY = frozenset(
         C.PROJECT_LIFECYCLE_MANAGE,
         # Release a crashed process's repository write (Decision 0049).
         C.PROJECT_TASK_WRITE_RESERVATION_RELEASE,
-        # Kaggle / Full GPU Mode (issue #33, Decision 0055 Proposed).
+        # Kaggle / Full GPU Mode (issue #33, Decision 0055).
         C.ADMIN_COMPUTE_FULL_GPU,
     }
 )

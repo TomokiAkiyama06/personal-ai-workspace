@@ -1,4 +1,4 @@
-"""Kaggle / Full GPU Mode (PAW-037, Decision 0055 Proposed).
+"""Kaggle / Full GPU Mode (PAW-037, Decision 0055).
 
 Start: new local GPU work stops, the tasks whose work holds or waits for the GPU
 are held, running work drains (or, with ``preempt``, is asked to stop after the

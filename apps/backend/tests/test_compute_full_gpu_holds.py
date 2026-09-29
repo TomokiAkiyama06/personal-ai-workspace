@@ -1,5 +1,5 @@
 """Holding and resuming tasks for Full GPU Mode in PostgreSQL (PAW-037,
-Decision 0055 Proposed): ``PostgresTaskHolds`` over the real ``TaskService`` and
+Decision 0055): ``PostgresTaskHolds`` over the real ``TaskService`` and
 ``TaskQueue``.
 
 * A running task is held: ``waiting`` for a resource, by the policy actor, with

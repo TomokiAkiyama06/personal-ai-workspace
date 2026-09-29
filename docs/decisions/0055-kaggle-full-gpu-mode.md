@@ -1,10 +1,10 @@
 # Kaggle / Full GPU Mode の方針（誰が始められるか、走っている Task の止め方と Preemption、Queue 中の Task、戻すときの順、再起動のとき）
 
-- Status: Proposed
+- Status: Approved
 - Date: 2026-09-29
 - Scope: PAW-037（[#33](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/33)）の `FullGpuMode`（`apps/backend/paw_backend/compute/full_gpu.py`）、`PostgresTaskHolds`（`compute/holds.py`）、Capability `admin.compute.full_gpu`、Scheduler の `ComputeRequest.task_id` / `gpu_task_ids()` / `revoke_local_gpu()`
 - Supersedes: なし。[Decision 0037](0037-gpu-compute-scheduler.md)（Approved）は書き換えない。0037 の 7（Exclusive は走っている仕事を**止めずに**待つ。走っている Task の Safe pause / Drain は PAW-037、認可は PAW-037 で Owner / Admin に限る）と 13（Exclusive の Lease に期限を置かない）が PAW-037 に残した点を決める
-- Approval: 未承認
+- Approval: 2026-09-30、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで「推奨どおり」と回答して承認（1〜8 の全点。末尾の「承認時の決定」）
 
 ## 背景
 
@@ -108,3 +108,7 @@
 承認されたら `Approval` に記録し、Status を Approved に改める。数値は `apps/backend/paw_backend/compute/limits.py` と `FullGpuMode` の引数で変えられる（DB に書いたものはない）。
 方針を変えるときは、この Decision を書き換えず、新しい Decision から `Supersedes` する。
 [REQUIREMENTS.md](../../REQUIREMENTS.md) の原文は書き換えない。
+
+## 承認時の決定（2026-09-30）
+
+Human は、作業 Session で判断が必要な点について推奨つきの説明を受け、「推奨どおり」と回答して承認した（1〜8 の全点）。**すべて推奨どおり**で、個別の変更はない。
