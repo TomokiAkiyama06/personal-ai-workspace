@@ -123,15 +123,19 @@ OWN_HARDENING = (
 #: file), ``merge`` (``merge --abort`` too), ``merge-tree`` (a merge driver) and
 #: ``worktree add`` (``smudge`` on checkout). Before any of them runs, the
 #: configuration git would read is listed (:func:`configuration_probe`) and the
-#: call is refused if it names a command (:func:`runs_a_command`).
+#: call is refused if it names a command, or another work tree
+#: (:func:`unsafe_setting`).
 CONTENT_SUBCOMMANDS = frozenset({"status", "merge", "merge-tree", "worktree"})
 
 #: Configuration sections every key of which is (or leads to) a command, or to
 #: another file this wrapper would not have listed.
-_COMMAND_SECTIONS = frozenset({"filter", "include", "includeif", "hook", "pager"})
-#: Two-part keys that name a command.
-_COMMAND_KEYS = frozenset(
+_REFUSED_SECTIONS = frozenset({"filter", "include", "includeif", "hook", "pager"})
+#: Two-part keys that name a command, or (``core.worktree``) a work tree other
+#: than the one this wrapper checked: an unpinned ``status`` / ``merge`` in the
+#: checkout would read and write the files there, outside the root.
+_REFUSED_KEYS = frozenset(
     {
+        "core.worktree",
         "core.pager",
         "core.editor",
         "core.askpass",
@@ -147,7 +151,7 @@ _COMMAND_KEYS = frozenset(
 #: The last part of a ``<section>.<name>.<key>`` key that names a command
 #: (``diff.<driver>.textconv``, ``merge.<driver>.driver``,
 #: ``gpg.<format>.program``, ``remote.<name>.uploadpack``, ...).
-_COMMAND_VARIABLES = frozenset(
+_REFUSED_VARIABLES = frozenset(
     {
         "textconv",
         "command",
@@ -712,16 +716,17 @@ def configuration_probe(config: Config, pinned: Sequence[str]) -> list[str]:
     return [config.git, *pinned, "config", "--no-includes", "--list", "-z"]
 
 
-def runs_a_command(key: str) -> bool:
-    """Whether the configuration ``key`` names a command git may start (or
-    another file of settings). The hardening's own keys (``core.hooksPath``,
-    ``core.fsmonitor``) are not here: the wrapper's ``-c`` overrides them."""
+def unsafe_setting(key: str) -> bool:
+    """Whether the configuration ``key`` names a command git may start, another
+    file of settings (``include``) or another work tree (``core.worktree``).
+    The hardening's own keys (``core.hooksPath``, ``core.fsmonitor``) are not
+    here: the wrapper's ``-c`` overrides them."""
     key = key.lower()
     section, _, rest = key.partition(".")
     variable = key.rpartition(".")[2]
-    if section in _COMMAND_SECTIONS or key in _COMMAND_KEYS:
+    if section in _REFUSED_SECTIONS or key in _REFUSED_KEYS:
         return True
-    return "." in rest and variable in _COMMAND_VARIABLES
+    return "." in rest and variable in _REFUSED_VARIABLES
 
 
 def check_configuration(
@@ -755,8 +760,8 @@ def check_configuration(
         raise Rejected("config_unreadable")
     for entry in listed.stdout.split(b"\0"):
         key = entry.partition(b"\n")[0].decode("utf-8", "replace")
-        if key and runs_a_command(key):
-            raise Rejected("config_runs_command")
+        if key and unsafe_setting(key):
+            raise Rejected("config_unsafe")
 
 
 def _check_backlink(git_dir: str, work_tree: str) -> None:

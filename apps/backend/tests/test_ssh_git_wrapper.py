@@ -1027,12 +1027,14 @@ class RepositoryConfigurationTest(WrapperTestCase):
             "gpg.ssh.program",
             "remote.origin.uploadpack",
             "core.sshcommand",
+            "core.worktree",
+            "Core.WorkTree",
             "Filter.X.Clean",
         ):
             with self.subTest(key=key):
-                self.assertTrue(wrapper.runs_a_command(key))
+                self.assertTrue(wrapper.unsafe_setting(key))
                 listed = f"core.bare\nfalse\0{key}\ntouch /tmp/x\0".encode()
-                self.assert_rejected("config_runs_command", self.check, listed)
+                self.assert_rejected("config_unsafe", self.check, listed)
 
     def test_ordinary_configuration_is_accepted(self):
         listed = (
@@ -1211,7 +1213,7 @@ class MainTest(WrapperTestCase):
 
     def test_a_refused_configuration_execs_nothing(self):
         def refuse(invocation):
-            raise wrapper.Rejected("config_runs_command")
+            raise wrapper.Rejected("config_unsafe")
 
         executed = []
         with contextlib.redirect_stderr(io.StringIO()):
@@ -1608,6 +1610,23 @@ class EndToEndTest(unittest.IsolatedAsyncioTestCase):
         for args, cwd in calls[:1] + calls[2:]:
             result = await self.run_git(args, cwd=cwd)
             self.assertEqual(result.returncode, 0, args)
+
+    async def test_a_work_tree_named_in_the_configuration_is_never_used(self):
+        # `core.worktree` in the shared configuration would move an unpinned
+        # `status` / `merge` in the checkout to a directory outside the root.
+        checkout = f"{self.root}/project"
+        self.world.make_repository(checkout)
+        elsewhere = f"{self.world.root}/elsewhere"
+        os.makedirs(elsewhere)
+        fs.write(elsewhere, "secret.txt", "outside the root\n")
+        git("config", "core.worktree", elsewhere, cwd=checkout)
+        status = ["status", "--porcelain=v1", "-z", "--untracked-files=all"]
+        result = await self.run_git(status, cwd=checkout)
+        self.assertEqual(result.returncode, wrapper.REJECTED)
+        self.assertNotIn("secret.txt", result.stdout)
+        git("config", "--unset", "core.worktree", cwd=checkout)
+        result = await self.run_git(status, cwd=checkout)
+        self.assertEqual((result.returncode, result.stdout), (0, ""))
 
     async def test_a_git_dir_is_used_only_with_its_own_work_tree(self):
         pins = {}

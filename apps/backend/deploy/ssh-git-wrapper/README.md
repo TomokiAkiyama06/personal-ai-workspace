@@ -38,9 +38,10 @@ Wrapper は Client（Backend）を信用しない。`$SSH_ORIGINAL_COMMAND` を 
    - どちらも正規化した Path（`..`・`//`・末尾の `/` を含まない絶対 Path）で、Symbolic Link を解決した先が外に出れば拒否する。
 6. `.paw-worktrees` の中を cwd にするとき、`--git-dir=` / `--work-tree=` なしで動かせるのは `rev-parse` だけ（Agent が書き換えられる worktree の `.git` が、Filter Driver などの Command を持ち込むのを防ぐ）。
 7. 副コマンドは許可リスト（`SUBCOMMANDS`）の中で、引数の並びも決まった形と完全に一致するときだけ。
-8. File の中身を読み書きする副コマンド（`status`・`merge`（`--abort` を含む）・`merge-tree`・`worktree add`）は、git を `exec` する前に、その呼び出しが読む設定を `git config --no-includes --list -z`（同じ `--git-dir=` / `--work-tree=`・cwd・固定の環境。これ自体は Command を起動しない）で一覧にし、**Command を名指しする設定が 1 つでもあれば拒否する**（`config_runs_command`。一覧にできなければ `config_unreadable`）。
+8. File の中身を読み書きする副コマンド（`status`・`merge`（`--abort` を含む）・`merge-tree`・`worktree add`）は、git を `exec` する前に、その呼び出しが読む設定を `git config --no-includes --list -z`（同じ `--git-dir=` / `--work-tree=`・cwd・固定の環境。これ自体は Command を起動しない）で一覧にし、**Command や別の Work Tree を名指しする設定が 1 つでもあれば拒否する**（`config_unsafe`。一覧にできなければ `config_unreadable`）。
    - 理由: Repository の設定（`.git/config`。`extensions.worktreeConfig` なら worktree ごとの `config.worktree` も）は Checkout とすべての worktree で共有され、worktree で作業する Agent が書ける。そこに置いた `filter.<x>.clean` を、Agent が Commit した `.gitattributes` が選べば、許可した `status` がその Command をこの User として実行してしまう。
-   - 拒否する設定: `filter.*`・`include.*`・`includeIf.*`（Wrapper が一覧にしていない別の File を読ませるため）・`hook.*`・`pager.*`・`core.pager`・`core.editor`・`core.askPass`・`core.sshCommand`・`core.gitProxy`・`core.alternateRefsCommand`・`sequence.editor`・`diff.external`・`gpg.program`・`uploadPack.packObjectsHook`、および `<section>.<name>.<key>` の `<key>` が `textconv`・`command`・`driver`・`program`・`cmd`・`uploadpack`・`receivepack` のもの（`diff.<x>.textconv`・`merge.<x>.driver`・`gpg.ssh.program` など）。
+   - `core.worktree` も拒否する: Checkout で `--git-dir=` / `--work-tree=` なしに動く `status`・`merge` が、検査した cwd の代わりにその Path（Root の外でも）の File を読み書きしてしまうため。
+   - 拒否する設定: `core.worktree`・`filter.*`・`include.*`・`includeIf.*`（Wrapper が一覧にしていない別の File を読ませるため）・`hook.*`・`pager.*`・`core.pager`・`core.editor`・`core.askPass`・`core.sshCommand`・`core.gitProxy`・`core.alternateRefsCommand`・`sequence.editor`・`diff.external`・`gpg.program`・`uploadPack.packObjectsHook`、および `<section>.<name>.<key>` の `<key>` が `textconv`・`command`・`driver`・`program`・`cmd`・`uploadpack`・`receivepack` のもの（`diff.<x>.textconv`・`merge.<x>.driver`・`gpg.ssh.program` など）。
    - 拒否しない設定: `core.hooksPath`・`core.fsmonitor`（Wrapper の `-c` が上書きする）、`credential.helper`（`clone -c` が Repository に残す。これらの副コマンドは Credential を使わない）、その他の通常の設定。
 
 | 副コマンド | 受け付ける形（これ以外は拒否） |
@@ -77,7 +78,7 @@ paw-git-wrapper[1235]: rejected user=alice reason=config_not_allowed
 
 書くのは、受け付けたか・固定の理由コード・許可リストにある副コマンド名・Linux User 名だけ。**引数・Path・URL・`-c` の値・git の出力は書かない**（URL や設定値は Credential を含み得る）。stderr にも `paw-git-wrapper: rejected (<理由コード>)` しか出さない（`SshGitRunner` は stderr を読まずに捨てる）。
 
-理由コード: `no_command`・`too_long`・`bad_encoding`・`bad_protocol`・`root_unavailable`・`bad_worktrees`・`bad_path`・`path_unresolvable`・`path_outside_root`・`path_outside_worktrees`・`path_in_worktrees`・`bad_ceiling`・`bad_option`・`no_subcommand`・`subcommand_not_allowed`・`config_not_allowed`・`bad_git_dir`・`bad_work_tree`・`unpinned_worktree`・`bad_arguments`・`config_runs_command`・`config_unreadable`・`misconfigured`。
+理由コード: `no_command`・`too_long`・`bad_encoding`・`bad_protocol`・`root_unavailable`・`bad_worktrees`・`bad_path`・`path_unresolvable`・`path_outside_root`・`path_outside_worktrees`・`path_in_worktrees`・`bad_ceiling`・`bad_option`・`no_subcommand`・`subcommand_not_allowed`・`config_not_allowed`・`bad_git_dir`・`bad_work_tree`・`unpinned_worktree`・`bad_arguments`・`config_unsafe`・`config_unreadable`・`misconfigured`。
 
 ## 既知の限界
 
