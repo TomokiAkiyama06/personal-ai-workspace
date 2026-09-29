@@ -1,10 +1,10 @@
 # Tool 呼び出しを Queue の Lease で Fencing し、Broker の `tool_calls` を Run に計上する（Decision 0021 への追補）
 
-- Status: Approved（2026-09-29、Human / Owner）
+- Status: Proposed（決定 1 は Human が 2026-09-28 に直接決定した Approved の方針。実装で選んだ「判断が必要な点」1〜7 は承認待ち）
 - Date: 2026-09-28
 - Scope: Issue [#126](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/126)（PAW-034 の残リスク B10 / B11）。Tool Broker（PAW-031、`paw_backend/tools/`）、Task Queue（PAW-033、`TaskQueue`）、DAG Orchestrator（PAW-034、`paw_backend/orchestrator/`）
 - Supersedes: なし。[Decision 0021](0021-dag-orchestrator-policy.md)（Approved）の 7 節（Sub-Agent の予算）と 8 節（DAG の永続化と Fencing）への**追補**（Amends）で、0021 は書き換えない。[Decision 0006](0006-tool-broker-policy.md) の Broker の Interface（`TaskContext`、`BudgetProvider`）を拡張する
-- Approval: 決定 1 は 2026-09-28、Human が作業 Session の中で直接決定（「Gap を閉じる」）。判断が必要な点 1〜7 は 2026-09-29、Human / Owner が直接の回答で全て推奨どおりに承認。点 6 の範囲外の 2 つ（`ConnectionService.execute` と `NodeBudgetHandle.charge` の Lease の確認）は Issue [#153](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/153) で扱う
+- Approval: 決定 1 は 2026-09-28、Human が作業 Session の中で直接決定（「Gap を閉じる」）。判断が必要な点 1〜7 は未承認
 
 ## 背景
 
@@ -24,7 +24,7 @@ Decision 0021 の 8 節は DAG の書き込みを `epoch` で、Decision 0007 �
 - **Broker の `tool_calls` の Budget の計上を Run に結び付ける。**
 - Decision 0021 を書き換えず、この Decision を追補とする。
 
-以下は、この決定を実装するときに選んだ点である。選択は実装済みで、2026-09-29 に Human / Owner が推奨どおりに承認した。
+以下は、この決定を実装するときに選んだ点である。選択は実装済みで、承認されなければ実装を変える。
 
 ### 2. 実装の形（下の「判断が必要な点」の対象）
 
@@ -71,14 +71,14 @@ Decision 0021 の 8 節は DAG の書き込みを `epoch` で、Decision 0007 �
 - 呼び出しごとに Queue の 1 行の読み取りが増える（主キーまたは Task の active な Entry の一意 Index。`IndexPlanTest` で確かめた）。
 - `tool_calls` の記録が Run で拒否された呼び出しは Budget に数えられない（Audit には残る）。数え落としは、置き換えの時点で実行中だった呼び出しの数まで。
 
-## 判断が必要な点（2026-09-29、Human / Owner が 1〜7 を全て推奨どおりに承認）
+## 判断が必要な点（未承認。推奨つき）
 
 1. **Broker の Interface の変更（PAW-031）**: `TaskContext` に必須の `lease: QueueLease` を足し、`ToolBroker(lease=LeaseVerifier)` を足し、`BudgetProvider.charge` を `(task_id, run, tool)` に変えた。既存の Adapter（`charge(task_id, tool)`）は構築時に `TypeError` になる。推奨: この形で承認する。
 2. **検査の場所と順序**: Broker の 5a（Budget の後、Working Set の Admission・`ALLOW`・Approval の前）。単独で拒否できる検査（形、Scope、認可、Budget）は Lease を尋ねずに拒否する。推奨: この位置（受け渡しに最も近い）。代わりに最初に置けば、Lease を失った Worker の呼び出しは早く拒否されるが、確認から実行までの隙間が広がる。
 3. **Transaction の境界**: 確認は Lock しない 1 つの読み取りで、Approval の消費の Transaction には入れず、Lease を延長しない。推奨: この形。確認の後の実行は Fencing できないことを残リスクとして受け入れる。
 4. **失敗の扱い**: `lease_lost` は Run 全体を止める（`LEASE_LOST`）。`lease_unavailable`（読めない、Timeout）はその呼び出しだけを拒否し、Run の継続は Heartbeat が決める。推奨: この形。代わりに `lease_unavailable` でも Run を止める案は、一時的な DB の失敗に厳しすぎる。
 5. **`tool_calls` の Fencing**: 実行中に Run が置き換えられた・Task が終わった呼び出しは記録しない（Log と Audit だけ）。推奨: 記録しない（`NodeBudgetHandle.charge` と同じ規則）。#106 第 8 回の「Fencing しない」を、この Decision で改める。
-6. **範囲外にしたもの**: `ConnectionService.execute`（Shared Connection の呼び出し。PAW-022 系）も `TaskContext` を受け取るが、Tool Broker を通らないため Lease を確かめない。`NodeBudgetHandle.charge`（Node が報告する `tokens` / `gpu_seconds`）も Run でだけ Fencing し、Lease は確かめない（行われた仕事の記録のため）。推奨: 両方ともこの Issue では変えず、Shared Connection の Lease の確認が要るかは別の Issue で決める。承認済み: 別の Issue は [#153](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/153)。
+6. **範囲外にしたもの**: `ConnectionService.execute`（Shared Connection の呼び出し。PAW-022 系）も `TaskContext` を受け取るが、Tool Broker を通らないため Lease を確かめない。`NodeBudgetHandle.charge`（Node が報告する `tokens` / `gpu_seconds`）も Run でだけ Fencing し、Lease は確かめない（行われた仕事の記録のため）。推奨: 両方ともこの Issue では変えず、Shared Connection の Lease の確認が要るかは別の Issue で決める。別の Issue の候補として [#153](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/153) を作成した。
 7. **B11 を閉じる**: 3 節のとおり、`start_runtime` は全ての経路で Lease の証明と 1 つの Transaction にあり、B11 に残りはない。推奨: Issue #126 の B11 の項目を「残りなし」として閉じる（追加の変更なし）。
 
 ## 承認後の扱い
