@@ -31,6 +31,7 @@ import unittest
 import uuid
 from pathlib import Path
 
+from paw_backend.integration.publish import push_arguments
 from paw_backend.repositories import GitClient, LinuxAccount, RepositoryPolicy
 from paw_backend.repositories.git import git_config_arguments
 from paw_backend.repositories.ssh import SshGitRunner, build_remote_command
@@ -57,6 +58,8 @@ def _load_wrapper():
 wrapper = _load_wrapper()
 
 COMMIT = "0123456789abcdef0123456789abcdef01234567"
+PUSHED = "paw/2f1b2c3d-0000-4000-8000-000000000001/1/_integration"
+GH_HELPER = "credential.helper=!/usr/bin/gh auth git-credential"
 BRANCH = "paw/2f1b2c3d-0000-4000-8000-000000000001/1/build"
 OTHER = "paw/2f1b2c3d-0000-4000-8000-000000000001/1/_integration"
 MERGE_CONFIG = [
@@ -1117,6 +1120,161 @@ class RepositoryConfigurationTest(WrapperTestCase):
         self.assert_rejected("config_unreadable", self.check, error=OSError())
 
 
+class PushTest(WrapperTestCase):
+    """Decision 0052 (issue #132): one ``push`` form, with gh's credential
+    helper only, of one commit to one ``paw/`` branch, never forced."""
+
+    URL = "https://github.com/owner/repo.git"
+
+    def setUp(self):
+        super().setUp()
+        self.config = self.make_config(gh="/usr/bin/gh")
+
+    def push(self, *, url=None, refspec=None, prefix=None, tail=None):
+        return [
+            *(
+                ["-c", "credential.helper=", "-c", GH_HELPER]
+                if prefix is None
+                else prefix
+            ),
+            "push",
+            "--quiet",
+            "--",
+            url or self.URL,
+            refspec or f"{COMMIT}:refs/heads/{PUSHED}",
+            *(tail or []),
+        ]
+
+    def test_the_publishers_push_is_accepted_as_sent(self):
+        args = push_arguments("/usr/bin/gh", self.URL, COMMIT, PUSHED)
+        self.assertEqual(args, self.push())
+        invocation = self.plan(args)
+        self.assertEqual(invocation.subcommand, "push")
+        argv = invocation.argv
+        at = argv.index("push")
+        self.assertEqual(argv[at:], args[4:])
+        # The repository's helpers are emptied, then gh's (the wrapper's own).
+        self.assertEqual(
+            argv[at - 4 : at], ["-c", "credential.helper=", "-c", GH_HELPER]
+        )
+        # The checks before it run without the helper, and the configuration
+        # it reads is listed first.
+        self.assertNotIn(GH_HELPER, hardened(invocation))
+        self.assertEqual(
+            invocation.probe[-5:],
+            ["config", "--no-includes", "--show-scope", "--list", "-z"],
+        )
+        self.assertIsNotNone(invocation.locate)
+        # The helper is the wrapper's even when the client sends none.
+        bare = self.plan(self.push(prefix=[]))
+        self.assertIn(GH_HELPER, bare.argv)
+
+    def test_without_gh_configured_nothing_is_pushed(self):
+        self.assert_rejected(
+            "config_not_allowed", self.plan, self.push(), config=self.make_config()
+        )
+        self.assert_rejected(
+            "config_not_allowed",
+            self.plan,
+            self.push(prefix=[]),
+            config=self.make_config(),
+        )
+
+    def test_another_helper_or_configuration_is_refused(self):
+        for prefix in (
+            ["-c", "credential.helper=!/tmp/evil auth git-credential"],
+            ["-c", "push.recurseSubmodules=on-demand"],
+            ["-c", "remote.origin.receivepack=/tmp/evil"],
+        ):
+            with self.subTest(prefix=prefix):
+                self.assert_rejected(
+                    "config_not_allowed", self.plan, self.push(prefix=prefix)
+                )
+
+    def test_every_other_push_is_refused(self):
+        other = "paw/2f1b2c3d-0000-4000-8000-000000000001/1/build"
+        for name, args in {
+            "force": self.push(refspec=f"+{COMMIT}:refs/heads/{PUSHED}"),
+            "the default branch": self.push(refspec=f"{COMMIT}:refs/heads/main"),
+            "a tag": self.push(refspec=f"{COMMIT}:refs/tags/{PUSHED}"),
+            "a branch name as source": self.push(
+                refspec=f"{other}:refs/heads/{PUSHED}"
+            ),
+            "a short destination": self.push(refspec=f"{COMMIT}:{PUSHED}"),
+            "a deletion": self.push(refspec=f":refs/heads/{PUSHED}"),
+            "no destination": self.push(refspec=COMMIT),
+            "two refspecs": self.push(tail=[f"{COMMIT}:refs/heads/{other}"]),
+            "a remote name": self.push(url="origin"),
+            "another transport": self.push(url="ssh://git@github.com/o/r.git"),
+            "an option": [
+                "-c",
+                "credential.helper=",
+                "-c",
+                GH_HELPER,
+                "push",
+                "--force",
+                "--quiet",
+                "--",
+                self.URL,
+                f"{COMMIT}:refs/heads/{PUSHED}",
+            ],  # fmt: skip
+            "--mirror": [
+                "-c",
+                "credential.helper=",
+                "-c",
+                GH_HELPER,
+                "push",
+                "--mirror",
+                "--",
+                self.URL,
+            ],  # fmt: skip
+            "no --": [
+                "-c",
+                "credential.helper=",
+                "-c",
+                GH_HELPER,
+                "push",
+                "--quiet",
+                self.URL,
+                f"{COMMIT}:refs/heads/{PUSHED}",
+            ],  # fmt: skip
+        }.items():
+            with self.subTest(name):
+                self.assert_rejected("bad_arguments", self.plan, args)
+
+    def test_a_push_is_never_pinned_or_run_in_a_worktree(self):
+        self.assert_rejected("bad_option", self.pinned, self.push()[4:])
+        self.assert_rejected(
+            "unpinned_worktree", self.plan, self.push(), cwd=self.worktree
+        )
+
+    def check(self, listed):
+        def run(argv, **kwargs):
+            return subprocess.CompletedProcess(argv, 0, listed, b"")
+
+        wrapper.check_configuration(self.plan(self.push()), run)
+
+    def test_a_configuration_that_redirects_or_asks_is_refused(self):
+        for key in (
+            "url.https://evil.example/.insteadof",
+            "url.https://evil.example/.pushInsteadOf",
+            "core.askpass",
+            "core.sshcommand",
+            "remote.origin.receivepack",
+            "protocol.ext.allow",
+        ):
+            with self.subTest(key=key):
+                listed = f"local\0{key}\nhttps://github.com/\0".encode()
+                self.assert_rejected("config_unsafe", self.check, listed)
+        # A named remote's URL is not used (the push names the URL), and the
+        # deployment's own rewriting (scope ``command``) is not the repository's.
+        self.check(b"local\0remote.origin.url\nhttps://github.com/o/r.git\0")
+        self.check(b"command\0url.file:///srv/.insteadof\nhttps://github.com/\0")
+        # Only a push is refused for a rewriting: the other calls do not talk
+        # to a remote.
+        self.assertFalse(wrapper.unsafe_setting("url.https://evil.example/.insteadof"))
+
+
 class RepositoryLocationTest(WrapperTestCase):
     """A call not pinned to a git directory first asks git where the git
     directory it finds is, and is refused unless it is inside the root."""
@@ -1554,8 +1712,9 @@ class MainTest(WrapperTestCase):
         return wrapper.parse_config([]).user
 
     def test_a_refused_call_returns_126_and_execs_nothing(self):
+        # (``push`` has one allowed form since Decision 0052; ``fetch`` none.)
         code, executed, logged, moved, stderr = self.run_main(
-            self.command(["push", "origin", "HEAD"])
+            self.command(["fetch", "origin", "HEAD"])
         )
         self.assertEqual(code, wrapper.REJECTED)
         self.assertNotEqual(code, 255)
@@ -1711,8 +1870,9 @@ class EndToEndTest(unittest.IsolatedAsyncioTestCase):
         )
         self.client = GitClient(self.runner, RepositoryPolicy())
 
-    def fake_sshd(self, runner_options) -> str:
+    def fake_sshd(self, runner_options, *extra_options) -> str:
         wrapper_options = [
+            *extra_options,
             f"--root={self.root}",
             f"--home={self.home}",
             f"--git={shutil.which('git')}",
@@ -1728,6 +1888,45 @@ class EndToEndTest(unittest.IsolatedAsyncioTestCase):
         )
         os.chmod(path, 0o755)
         return path
+
+    async def test_the_integration_push_runs_through_the_wrapper(self):
+        # Decision 0052 (issue #132): the publisher's push, exactly as sent,
+        # moves the paw/ branch of the remote to the checked commit and
+        # nothing else; without --gh the wrapper refuses it.
+        bare = self.world.make_bare("owner", "repo")
+        repo = f"{self.root}/repo"
+        git("clone", "--quiet", bare, repo)
+        git("commit", "--quiet", "--allow-empty", "-m", "checked", cwd=repo)
+        commit = git("rev-parse", "HEAD", cwd=repo)
+        main = git("rev-parse", "refs/heads/main", cwd=bare)
+        args = push_arguments(
+            "/usr/bin/gh", "https://github.com/owner/repo.git", commit, PUSHED
+        )
+
+        refused = await self.run_git(args, cwd=repo)
+        self.assertEqual(refused.returncode, wrapper.REJECTED)
+        self.assertEqual(
+            git(
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                f"refs/heads/{PUSHED}",
+                cwd=bare,
+                check=False,
+            ),  # fmt: skip
+            "",
+        )
+
+        options = self.world.runner_options()
+        runner = SshGitRunner(
+            _FixedKey(f"{self.world.root}/alice.key"),
+            ssh_executable=self.fake_sshd(options, "--gh=/usr/bin/gh"),
+            **options,
+        )
+        result = await runner.run(args, account=self.account, cwd=repo, timeout_s=60)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(git("rev-parse", f"refs/heads/{PUSHED}", cwd=bare), commit)
+        self.assertEqual(git("rev-parse", "refs/heads/main", cwd=bare), main)
 
     async def run_git(self, args, *, cwd, ceiling=None):
         return await self.runner.run(

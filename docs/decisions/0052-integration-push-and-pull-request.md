@@ -86,8 +86,10 @@
 
 - `<https URL>` は Wrapper が許す Transport の URL（`clone` と同じ検査）。`<commit id>` は 40 桁または 64 桁の 16 進、宛先は `refs/heads/paw/` の branch だけ。`+`（Force）、`--force`、`--mirror`、`--all`、`--tags`、`--delete`、他の Option、2 つ以上の Refspec は拒否する。
 - 2 つの `-c` は `push` の前だけ受け入れ（`clone` の Credential Helper と同じく、Wrapper の `--gh` が設定されているときだけ）、受け入れた値は使わず Wrapper 自身が同じ 2 つを付ける。
-- Push は Repository の File の内容を読まない（Filter Driver を起動しない）が、Repository の設定の `url.<base>.pushInsteadOf` などは読む。宛先を変える設定は、Checkout の持ち主（その User 自身）しか書けない（Worker の Scope は Checkout の `.git` を除外する。Decision 0036 の 2）。
-- **推奨: この形を承認し、承認されたら Decision 0029 の 3 の表のこの部分を Supersede する。** Wrapper への実装は PR #150 のマージ後に、この Issue の PR で行う（Test つき）。
+- Push は Repository の File の内容を読まない（Filter Driver を起動しない）が、Repository の設定の `url.<base>.pushInsteadOf` などは読む（下の確認で拒否する）。
+- Wrapper は、`push` の前に、その呼び出しが読む設定を一覧にし（`status` などと同じ確認）、Command を名指しする設定（`core.askPass` など。Credential が得られなければ git が動かしうる）と、宛先を書き換える `url.<base>.insteadOf` / `pushInsteadOf` があれば拒否する。
+- `push` は pin（`--git-dir=` / `--work-tree=`）を受け付けず、worktree の中の cwd では動かない（Checkout で動かす）。
+- **推奨: この形を承認し、承認されたら Decision 0029 の 3 の表のこの部分を Supersede する。** Wrapper（`apps/backend/deploy/ssh-git-wrapper/paw_git_wrapper.py`、PR #150 でマージ済み）への実装と Test は、この Issue の PR に含めた。
 
 ### 10. 永続化
 

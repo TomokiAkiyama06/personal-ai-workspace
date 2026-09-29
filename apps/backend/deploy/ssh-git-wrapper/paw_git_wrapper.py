@@ -46,9 +46,11 @@ undoes ``shlex.quote``) into the words of Decision 0029 §2::
   directory and common directory git finds from the cwd must be inside the
   root and outside ``.paw-worktrees`` (:func:`check_location`), and hold no
   symbolic link (:func:`check_links`; so must a pinned call's);
-* for a sub-command that reads file content (:data:`CONTENT_SUBCOMMANDS`), the
+* for a sub-command that reads file content (:data:`CONTENT_SUBCOMMANDS`) and
+  for ``push`` (which may run ``core.askPass``), the
   configuration git would read must name no command (a ``filter`` driver, a
-  ``merge`` driver, an ``include``, ...: :func:`check_configuration`).
+  ``merge`` driver, an ``include``, ...: :func:`check_configuration`) and, for
+  ``push``, no ``url.<base>.insteadOf`` / ``pushInsteadOf`` (:func:`redirects_push`).
 
 The client's ``-c`` values are checked, then **dropped**: git always gets this
 file's own hardening (:func:`hardening`) and, for ``merge``, this file's own
@@ -661,6 +663,27 @@ def _check_submodule(args: list[str], places: Places, config: Config) -> None:
         raise Rejected("bad_arguments")
 
 
+def gh_credential_helper(config: Config) -> str | None:
+    """The one credential helper accepted (``--gh``), as ``key=value``."""
+    if config.gh is None:
+        return None
+    return f"credential.helper=!{config.gh} auth git-credential"
+
+
+def _check_push(args: list[str], places: Places, config: Config) -> None:
+    """Decision 0052 (issue #132): ``push --quiet -- <URL> <commit>:refs/heads/
+    paw/...``. One commit id (never a ``+``: no force, no other refspec, no
+    option such as ``--delete``, ``--mirror`` or ``--tags``) to one ``paw/``
+    branch, and only with gh's credential helper configured (``--gh``)."""
+    if config.gh is None:
+        raise Rejected("config_not_allowed")
+    if len(args) == 4 and args[:2] == ["--quiet", "--"] and _url(args[2], config):
+        source, separator, destination = args[3].partition(":")
+        if separator and _OBJECT_ID.fullmatch(source) and _paw_ref(destination):
+            return
+    raise Rejected("bad_arguments")
+
+
 def _check_status(args: list[str], places: Places, config: Config) -> None:
     if not _exactly(
         args, ["--porcelain=v1", "-z", "--untracked-files=all"], STATUS_WITH_SUBMODULES
@@ -675,10 +698,11 @@ Checker = Callable[[list[str], Places, Config], None]
 #: ``merge``, ``merge-tree``, ``merge-base``, ``status`` and the added
 #: ``rev-parse`` / ``symbolic-ref`` shapes), and Decision 0051 (PR #130: the
 #: second ``status`` form and ``submodule status --cached``, pinned only; no
-#: other ``submodule`` sub-command or option). ``True``: the sub-command may run
+#: other ``submodule`` sub-command or option), and Decision 0052 (issue #132:
+#: one ``push`` form, never pinned). ``True``: the sub-command may run
 #: pinned to a worktree (``--git-dir=`` / ``--work-tree=``, Decision 0036 §13).
-#: Anything not here — ``push``, ``fetch``, ``pull``, ``checkout``, ``switch``,
-#: ``reset``, ``rebase``, ``gc``, ``config`` writes, ... — is refused.
+#: Anything not here — any other ``push``, ``fetch``, ``pull``, ``checkout``,
+#: ``switch``, ``reset``, ``rebase``, ``gc``, ``config`` writes, ... — is refused.
 SUBCOMMANDS: Mapping[str, tuple[Checker, bool]] = {
     "rev-parse": (_check_rev_parse, True),
     "symbolic-ref": (_check_symbolic_ref, True),
@@ -692,6 +716,7 @@ SUBCOMMANDS: Mapping[str, tuple[Checker, bool]] = {
     "merge-base": (_check_merge_base, False),
     "status": (_check_status, True),
     "submodule": (_check_submodule, True),
+    "push": (_check_push, False),
 }
 
 
@@ -797,6 +822,11 @@ def plan(original: str | None, config: Config) -> Invocation:
     allowed = {f"{key}={value}" for key, value in hardening(config)}
     if subcommand == "merge":
         allowed |= {f"{key}={value}" for key, value in MERGE_CONFIG}
+    helper = gh_credential_helper(config)
+    if subcommand == "push" and helper is not None:
+        # Decision 0052: the push empties the repository's credential helpers
+        # and names gh's own (this file adds both itself, whatever was sent).
+        allowed |= {"credential.helper=", helper}
     for pair in sent_config:
         if pair not in allowed:
             raise Rejected("config_not_allowed")
@@ -848,6 +878,11 @@ def plan(original: str | None, config: Config) -> Invocation:
     # repository's ``core.fsmonitor`` is a command, which only the hardening's
     # ``core.fsmonitor=false`` keeps from running).
     hardened = list(argv) if subcommand != "clone" else []
+    if subcommand == "push":
+        # The only other call that talks to a remote: with gh's helper alone
+        # (``_check_push`` refused the call without ``--gh``).
+        assert helper is not None
+        argv.extend(("-c", helper))
     if subcommand == "merge":
         for key, value in MERGE_CONFIG:
             argv.extend(("-c", f"{key}={value}"))
@@ -855,7 +890,10 @@ def plan(original: str | None, config: Config) -> Invocation:
     argv.append(subcommand)
     argv.extend(args)
     probe = None
-    if subcommand in CONTENT_SUBCOMMANDS and args[:1] not in (["list"], ["prune"]):
+    if (subcommand in CONTENT_SUBCOMMANDS or subcommand == "push") and args[:1] not in (
+        ["list"],
+        ["prune"],
+    ):
         probe = configuration_probe(hardened, pinned)
     gitlinks = None
     if (subcommand, args) in (
@@ -917,6 +955,19 @@ def unsafe_setting(key: str) -> bool:
     if section in _REFUSED_SECTIONS or key in _REFUSED_KEYS:
         return True
     return "." in rest and variable in _REFUSED_VARIABLES
+
+
+def redirects_push(key: str) -> bool:
+    """Whether the configuration ``key`` sends a push somewhere else than the
+    URL the backend named: ``url.<base>.insteadOf`` / ``pushInsteadOf``
+    rewrite it (Decision 0052). A named remote's ``url`` / ``pushurl`` do not
+    apply: the push names a URL, not a remote."""
+    key = key.lower()
+    section, _, rest = key.partition(".")
+    variable = key.rpartition(".")[2]
+    return (
+        section == "url" and "." in rest and variable in ("insteadof", "pushinsteadof")
+    )
 
 
 def check_repository(
@@ -1093,7 +1144,9 @@ def check_configuration(
         if scope == b"command":
             continue  # the wrapper's own ``-c`` (nothing else sets it here)
         key = entry.partition(b"\n")[0].decode("utf-8", "replace")
-        if unsafe_setting(key):
+        if unsafe_setting(key) or (
+            invocation.subcommand == "push" and redirects_push(key)
+        ):
             raise Rejected("config_unsafe")
 
 
