@@ -4,7 +4,7 @@
 - Date: 2026-09-29
 - Scope: PAW-035（PR #130）の `WorktreeGit.is_exactly_committed` と、`GitWorktreeCoordinator` の integration worktree の確認（`integrate` の merge 前、`targets` の `clean`）。Migration はない
 - Supersedes: [Decision 0036](0036-parallel-worktree-integration.md) の 13 の表の `status` の行（下の 3 の形を足す。今の形は残す）。0036 は書き換えない
-- Approval: 2026-09-29、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで「推奨どおり」と回答して承認（3 の形（`status --porcelain=v1 -z --untracked-files=normal --ignored=traditional --ignore-submodules=none`）を integration worktree の確認に使い、0036 の 13 の許可する形に足すこと。末尾の「承認時の決定」）
+- Approval: 2026-09-29、Human が作業 Session 内で、判断点ごとの説明（推奨つき）を受け、3 回に分けて回答して承認した（3 の `status` の形、4 の初期化済み Submodule の扱い（案 A）と `submodule status --cached`、5 の Wrapper の形。末尾の「承認時の決定」）
 
 ## 背景
 
@@ -33,4 +33,10 @@ Decision 0036 の 9 は「検査は integration worktree の Directory を読む
 
 ## 承認時の決定（2026-09-29）
 
-Human は、作業 Session で判断が必要な点について推奨つきの説明を受け、「推奨どおり」と回答して承認した（3 の形（`status --porcelain=v1 -z --untracked-files=normal --ignored=traditional --ignore-submodules=none`）を integration worktree の確認に使い、0036 の 13 の許可する形に足すこと）。**すべて推奨どおり**で、個別の変更はない。Human は 2 回に分けて回答した。1 回目は、無視された File を数える形を承認した。2 回目は、Codex の 2 回目の指摘（`.gitmodules` の `ignore = all`）を受けて、`--ignore-submodules=none` を加えることを承認した。PR #150 の SSH の Wrapper は、この形を許可する。
+Human は作業 Session で、Codex の指摘ごとに推奨つきの説明を受け、3 回に分けて回答した。3 回とも推奨どおりで、個別の変更はない。
+
+1. 無視された File を数える形（`status --porcelain=v1 -z --untracked-files=normal --ignored=traditional`）を integration worktree の確認に使い、0036 の 13 の許可する形に足す: 承認。
+2. Codex の 2 回目の指摘（`.gitmodules` の `ignore = all`）を受けて、同じ `status` に `--ignore-submodules=none` を加える: 承認。
+3. Codex の 3 回目の指摘（初期化済みの Submodule の中で、その Submodule の `.gitignore` が無視する File が親の `status` に出ない）には、案 A（初期化済みの Submodule があれば integration worktree を clean と扱わない。Fail closed）を選ぶ。案 B（Submodule ごとに再帰的に検査する）、C（既知の制約として残す）、D（使い捨ての worktree で検査する）は採らない。検出には読み取り専用の Git の形を 1 つだけ足す。その形は 4 の `submodule status --cached` とする: 承認。
+
+PR #150 の SSH の Wrapper は、5 の 2 つの形（`submodule status --cached` と 3 の `status`）を許可する。
