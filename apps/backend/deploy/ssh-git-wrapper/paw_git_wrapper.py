@@ -72,11 +72,13 @@ URL or a configuration value may carry a credential (Issue #134).
 import os
 import pwd
 import re
+import selectors
 import shlex
 import stat
 import subprocess
 import sys
 import syslog
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 
@@ -133,7 +135,11 @@ CONTENT_SUBCOMMANDS = frozenset({"status", "merge", "merge-tree", "worktree"})
 
 #: Configuration sections every key of which is (or leads to) a command, or to
 #: another file this wrapper would not have listed.
-_REFUSED_SECTIONS = frozenset({"filter", "include", "includeif", "hook", "pager"})
+#: ``gpg``: every signing setting (``gpg.program``, ``gpg.<format>.program``,
+#: ``gpg.ssh.defaultKeyCommand``, ...) names or leads to a command.
+_REFUSED_SECTIONS = frozenset(
+    {"filter", "include", "includeif", "hook", "pager", "gpg"}
+)
 #: Two-part keys that name a command, or (``core.worktree``) a work tree other
 #: than the one this wrapper checked: an unpinned ``status`` / ``merge`` in the
 #: checkout would read and write the files there, outside the root.
@@ -164,9 +170,66 @@ _REFUSED_VARIABLES = frozenset(
         "cmd",
         "uploadpack",
         "receivepack",
+        # ``branch.<name>.mergeOptions`` adds options to ``merge`` (``-S``
+        # signs, whatever the command line's ``commit.gpgSign=false`` says).
+        "mergeoptions",
     }
 )
 PROBE_TIMEOUT_S = 30
+#: The most a check's git may print (a repository's whole configuration, or
+#: its whole index): read as it comes, and refused beyond it, so that a huge
+#: configuration planted in a repository cannot exhaust this process's memory.
+PROBE_OUTPUT_LIMIT = 64 * 1024 * 1024
+
+
+class ProbeOutputTooLarge(subprocess.SubprocessError):
+    """A check's git printed more than :data:`PROBE_OUTPUT_LIMIT`."""
+
+
+def bounded_run(
+    argv: Sequence[str],
+    *,
+    cwd: str,
+    env: Mapping[str, str],
+    timeout: float,
+    limit: int,
+) -> "subprocess.CompletedProcess[bytes]":
+    """Run a check's git, keeping at most ``limit`` bytes of its output and
+    at most ``timeout`` seconds (``ProbeOutputTooLarge`` /
+    ``TimeoutExpired`` beyond either; the process is killed)."""
+    deadline = time.monotonic() + timeout
+    chunks: list[bytes] = []
+    size = 0
+    with subprocess.Popen(
+        list(argv),
+        cwd=cwd,
+        env=dict(env),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    ) as process:
+        assert process.stdout is not None
+        try:
+            with selectors.DefaultSelector() as selector:
+                selector.register(process.stdout, selectors.EVENT_READ)
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired(list(argv), timeout)
+                    if not selector.select(remaining):
+                        continue
+                    chunk = os.read(process.stdout.fileno(), 65536)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    if size > limit:
+                        raise ProbeOutputTooLarge()
+                    chunks.append(chunk)
+            returncode = process.wait(max(0.0, deadline - time.monotonic()))
+        except BaseException:
+            process.kill()
+            raise
+    return subprocess.CompletedProcess(list(argv), returncode, b"".join(chunks), b"")
 
 
 class Rejected(Exception):
@@ -822,7 +885,7 @@ def unsafe_setting(key: str) -> bool:
 
 def check_repository(
     invocation: Invocation,
-    run: Callable[..., "subprocess.CompletedProcess[bytes]"] = subprocess.run,
+    run: Callable[..., "subprocess.CompletedProcess[bytes]"] = bounded_run,
 ) -> None:
     """What must hold of the repository itself before ``invocation`` runs:
     where its git directory is (:func:`check_location`), and what its
@@ -864,7 +927,7 @@ def check_links(directories: Sequence[str]) -> None:
 
 def check_submodules(
     invocation: Invocation,
-    run: Callable[..., "subprocess.CompletedProcess[bytes]"] = subprocess.run,
+    run: Callable[..., "subprocess.CompletedProcess[bytes]"] = bounded_run,
 ) -> None:
     """Refuse the ``status`` of :data:`STATUS_WITH_SUBMODULES` when a
     submodule (a gitlink in the index) is populated (has a ``.git`` in the work
@@ -892,10 +955,8 @@ def _probe(
             argv,
             cwd=invocation.cwd,
             env=invocation.env,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
             timeout=PROBE_TIMEOUT_S,
-            check=False,
+            limit=PROBE_OUTPUT_LIMIT,
         )
     except (OSError, subprocess.SubprocessError):
         raise Rejected(reason) from None
@@ -904,7 +965,7 @@ def _probe(
 
 def check_location(
     invocation: Invocation,
-    run: Callable[..., "subprocess.CompletedProcess[bytes]"] = subprocess.run,
+    run: Callable[..., "subprocess.CompletedProcess[bytes]"] = bounded_run,
 ) -> list[str]:
     """Refuse an unpinned ``invocation`` whose git directory or common
     directory, as git itself finds them from the cwd (a ``.git`` directory, a
@@ -942,7 +1003,7 @@ def check_location(
 
 def check_configuration(
     invocation: Invocation,
-    run: Callable[..., "subprocess.CompletedProcess[bytes]"] = subprocess.run,
+    run: Callable[..., "subprocess.CompletedProcess[bytes]"] = bounded_run,
 ) -> None:
     """Refuse ``invocation`` when the configuration it would read names a
     command (:data:`CONTENT_SUBCOMMANDS`), or cannot be listed.

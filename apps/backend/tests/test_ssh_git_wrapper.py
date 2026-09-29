@@ -1054,6 +1054,9 @@ class RepositoryConfigurationTest(WrapperTestCase):
             "core.sshcommand",
             "core.worktree",
             "Core.WorkTree",
+            "gpg.format",
+            "gpg.ssh.defaultkeycommand",
+            "branch.paw/t/1/_integration.mergeoptions",
             "Filter.X.Clean",
         ):
             with self.subTest(key=key):
@@ -1084,6 +1087,22 @@ class RepositoryConfigurationTest(WrapperTestCase):
             "config_unsafe", self.check, b"worktree\0core.sshcommand\nx\0"
         )
         self.assert_rejected("config_unreadable", self.check, b"local\0")
+
+    def test_a_check_reads_a_bounded_output_in_a_bounded_time(self):
+        def python(code, **options):
+            return wrapper.bounded_run(
+                [sys.executable, "-c", code],
+                cwd=self.root,
+                env={"PATH": os.environ.get("PATH", "")},
+                **{"timeout": 30, "limit": 1024, **options},
+            )
+
+        done = python("import sys; sys.stdout.write('x' * 1024); sys.exit(3)")
+        self.assertEqual((done.returncode, done.stdout), (3, b"x" * 1024))
+        with self.assertRaises(wrapper.ProbeOutputTooLarge):
+            python("import sys\nwhile True: sys.stdout.write('x' * 4096)")
+        with self.assertRaises(subprocess.TimeoutExpired):
+            python("import time; time.sleep(30)", timeout=0.5)
 
     def test_a_configuration_that_cannot_be_listed_refuses_the_call(self):
         self.assert_rejected("config_unreadable", self.check, returncode=128)
@@ -2099,6 +2118,57 @@ class EndToEndTest(unittest.IsolatedAsyncioTestCase):
         os.symlink(outside, f"{checkout}/.git/hooks/linked")
         result = await self.run_git(["rev-parse", "--show-toplevel"], cwd=checkout)
         self.assertEqual(result.returncode, 0)
+
+    async def test_a_signing_command_is_never_run_by_merge(self):
+        # `branch.<name>.mergeOptions=-S` makes `merge` sign (the command
+        # line's commit.gpgSign=false does not undo an explicit -S), and the
+        # signing configuration names commands.
+        checkout = f"{self.root}/project"
+        base = self.world.make_repository(checkout)
+        worktree = f"{self.root}/.paw-worktrees/t/1/r/build"
+        integration = f"{self.root}/.paw-worktrees/t/1/r/_integration"
+        branch, target = "paw/t/1/build", "paw/t/1/_integration"
+        for path, name in ((worktree, branch), (integration, target)):
+            result = await self.run_git(
+                ["worktree", "add", "--quiet", "-b", name, "--", path, base],
+                cwd=checkout,
+            )
+            self.assertEqual(result.returncode, 0)
+        fs.write(worktree, "work.txt", "work\n")
+        git("add", "-A", cwd=worktree)
+        git("commit", "--quiet", "-m", "work", cwd=worktree)
+        marker = f"{self.world.root}/signer-ran"
+        pin = [
+            f"--git-dir={checkout}/.git/worktrees/_integration",
+            f"--work-tree={integration}",
+        ]
+        merge = [
+            *pin,
+            *MERGE_CONFIG,
+            "merge",
+            "--no-ff",
+            "--no-edit",
+            "--quiet",
+            "-m",
+            f"Integrate {branch}",
+            f"refs/heads/{branch}",
+        ]
+        settings = (
+            (f"branch.{target}.mergeOptions", "-S"),
+            ("gpg.format", "ssh"),
+            ("gpg.ssh.defaultKeyCommand", f"sh -c 'touch {marker}; false'"),
+        )
+        for key, value in settings:
+            git("config", key, value, cwd=checkout)
+        for key, _ in settings:
+            with self.subTest(key=key):
+                result = await self.run_git(merge, cwd=integration)
+                self.assertEqual(result.returncode, wrapper.REJECTED)
+                self.assertFalse(_consume(marker))
+            git("config", "--unset", key, cwd=checkout)
+        result = await self.run_git(merge, cwd=integration)
+        self.assertEqual(result.returncode, 0)
+        self.assertFalse(_consume(marker))
 
     async def test_a_work_tree_named_in_the_configuration_is_never_used(self):
         # `core.worktree` in the shared configuration would move an unpinned
