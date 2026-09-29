@@ -192,7 +192,7 @@ def _run(arguments, err, protected_homes, clock) -> int:
     clock = clock or _now
     try:
         if arguments.command == CHECK_COMMAND:
-            return asyncio.run(_check(settings, arguments.max_age_minutes, clock, err))
+            return asyncio.run(_check(settings, arguments.max_age_minutes, err))
         if settings.memory_projection_dir is None:
             _say(
                 err,
@@ -259,7 +259,7 @@ def _time(value: datetime | None) -> str:
     return "never" if value is None else value.isoformat(timespec="seconds")
 
 
-async def _check(settings: Settings, max_age_minutes: int, clock, err) -> int:
+async def _check(settings: Settings, max_age_minutes: int, err) -> int:
     database = Database(settings)
     try:
         status = await projection_status(database)
@@ -273,8 +273,14 @@ async def _check(settings: Settings, max_age_minutes: int, clock, err) -> int:
             f"{_time(status.last_completed_at)}.",
         )
         return EXIT_PROJECTION_FAILED
-    limit = clock() - timedelta(minutes=max_age_minutes)
-    if status.last_completed_at is None or status.last_completed_at < limit:
+    # The age is measured on the database clock (``recorded_at`` against
+    # ``now()``), not this host's: a host clock off by some minutes must neither
+    # hide a stale projection nor flag a fresh one.
+    if (
+        status.last_completed_recorded_at is None
+        or status.checked_at - status.last_completed_recorded_at
+        > timedelta(minutes=max_age_minutes)
+    ):
         _say(
             err,
             "FAILED: no memory projection run completed in the last "
