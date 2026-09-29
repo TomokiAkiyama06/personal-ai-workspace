@@ -51,6 +51,7 @@
 | [0046](0046-tool-call-lease-fencing.md) | Tool 呼び出しを Queue の Lease（`claim_count`）で Fencing し、Broker の `tool_calls` を Run に計上する（Decision 0021 への追補。Issue #126、PAW-034 の B10 / B11） | Approved |
 | [0050](0050-late-gpu-charge-without-fence.md) | Node の Attempt が閉じた後に、Cancel しても止まらなかった Local の呼び出しの GPU 時間を、`TrackerLateGpuCharge` で Attempt / Run の Fence なしに Task の Budget へ計上する（PAW-036、PR #131。Decision 0037 を補う） | Approved |
 | [0051](0051-integration-worktree-ignored-files.md) | integration worktree の無視された File（`.gitignore`）を未 Commit の変更として扱う方針（`status --ignored` の形を Wrapper の許可リストに足す。Decision 0036 の 7・9・13 への追補。PR #130） | Approved |
+| [0057](0057-connection-and-node-charge-lease-fencing.md) | Shared Connection の呼び出し（`ConnectionService.execute`）を Queue の Lease で Fencing し（Fail closed。Admission の前）、`NodeBudgetHandle.charge` と GPU 時間の遅い計上は Lease で Fencing しない（Decision 0046 の 6 への追補。Issue #153） | Proposed |
 
 運用は [AGENTS.md](../../AGENTS.md) の「仕様変更」に従います。
 
