@@ -1,10 +1,10 @@
 # Tool 呼び出しを Queue の Lease で Fencing し、Broker の `tool_calls` を Run に計上する（Decision 0021 への追補）
 
-- Status: Proposed（決定 1 は Human が 2026-09-28 に直接決定した Approved の方針。実装で選んだ「判断が必要な点」1〜7 は承認待ち）
+- Status: Approved
 - Date: 2026-09-28
 - Scope: Issue [#126](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/126)（PAW-034 の残リスク B10 / B11）。Tool Broker（PAW-031、`paw_backend/tools/`）、Task Queue（PAW-033、`TaskQueue`）、DAG Orchestrator（PAW-034、`paw_backend/orchestrator/`）
 - Supersedes: なし。[Decision 0021](0021-dag-orchestrator-policy.md)（Approved）の 7 節（Sub-Agent の予算）と 8 節（DAG の永続化と Fencing）への**追補**（Amends）で、0021 は書き換えない。[Decision 0006](0006-tool-broker-policy.md) の Broker の Interface（`TaskContext`、`BudgetProvider`）を拡張する
-- Approval: 決定 1 は 2026-09-28、Human が作業 Session の中で直接決定（「Gap を閉じる」）。判断が必要な点 1〜7 は未承認
+- Approval: 2026-09-29、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで「推奨どおり」と回答して承認（決定 1 は 2026-09-28 に Human が直接決定済み。判断が必要な点 1〜7 を 2026-09-29 に承認。末尾の「承認時の決定」）
 
 ## 背景
 
@@ -71,7 +71,7 @@ Decision 0021 の 8 節は DAG の書き込みを `epoch` で、Decision 0007 �
 - 呼び出しごとに Queue の 1 行の読み取りが増える（主キーまたは Task の active な Entry の一意 Index。`IndexPlanTest` で確かめた）。
 - `tool_calls` の記録が Run で拒否された呼び出しは Budget に数えられない（Audit には残る）。数え落としは、置き換えの時点で実行中だった呼び出しの数まで。
 
-## 判断が必要な点（未承認。推奨つき）
+## 判断が必要な点（2026-09-29 に推奨どおり承認）
 
 1. **Broker の Interface の変更（PAW-031）**: `TaskContext` に必須の `lease: QueueLease` を足し、`ToolBroker(lease=LeaseVerifier)` を足し、`BudgetProvider.charge` を `(task_id, run, tool)` に変えた。既存の Adapter（`charge(task_id, tool)`）は構築時に `TypeError` になる。推奨: この形で承認する。
 2. **検査の場所と順序**: Broker の 5a（Budget の後、Working Set の Admission・`ALLOW`・Approval の前）。単独で拒否できる検査（形、Scope、認可、Budget）は Lease を尋ねずに拒否する。推奨: この位置（受け渡しに最も近い）。代わりに最初に置けば、Lease を失った Worker の呼び出しは早く拒否されるが、確認から実行までの隙間が広がる。
@@ -85,3 +85,7 @@ Decision 0021 の 8 節は DAG の書き込みを `epoch` で、Decision 0007 �
 
 判断が必要な点が承認されたら、`Approval` に記録し、Status を Approved に改める。承認されない点は実装を変え、新しい Decision を作らずにこの Decision を承認前に改める（承認後に方針を変えるときは、この Decision を書き換えず、新しい Decision から `Supersedes` する）。
 [REQUIREMENTS.md](../../REQUIREMENTS.md) の原文は書き換えない。
+
+## 承認時の決定（2026-09-29）
+
+Human は、作業 Session で判断が必要な点について推奨つきの説明を受け、「推奨どおり」と回答して承認した（決定 1 は 2026-09-28 に Human が直接決定済み。判断が必要な点 1〜7 を 2026-09-29 に承認）。**すべて推奨どおり**で、個別の変更はない。6（`ConnectionService.execute` と `NodeBudgetHandle.charge` の Lease の Fencing）は Issue #153 で扱う。
