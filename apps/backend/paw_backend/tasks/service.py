@@ -1738,7 +1738,7 @@ class TaskService:
         in_transaction: InTransactionStep | None = None,
     ) -> TaskEvent:
         """Release, by hand, the reservation of a process that crashed (issue #129,
-        Decision 0049 Proposed; Decision 0035, section 5 leaves such a reservation
+        Decision 0049; Decision 0035, section 5 leaves such a reservation
         in place until it expires).
 
         Like every command here it does NOT authorize: the caller decided that

@@ -1,10 +1,10 @@
 # 落ちた Process が残した Repository の書き込み予約を人が解除する操作
 
-- Status: Proposed
+- Status: Approved
 - Date: 2026-09-28
 - Scope: Issue [#129](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/129)（落ちた Process が残した Repository 書き込み予約の手動解除）
 - Supersedes: [Decision 0035](0035-working-set-capability-grants-and-legacy-tasks.md) の 5 節の「落ちた Executor の予約は期限まで残す（Human が解放する操作は今は作らない）」の部分だけ。0035 の 5 節のほかの点（予約がある間の Begin evaluation / Complete の拒否、停止系の Command と Retry / Restart の扱い、終わった Task への書き込みの拒否）と 1〜4 節は変えない
-- Approval: 未承認
+- Approval: 2026-09-29、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで「推奨どおり」と回答して承認（1〜6 の全点。4 は案 4A。末尾の「承認時の決定」）
 
 ## 背景
 
@@ -103,7 +103,7 @@ Step-up の拒否は、この操作では別の Audit Event にしない（Autho
 
 承認されたら Status を Approved に改め、`Approval` に日付と承認の様子を記録する。承認後に方針を変える場合は、この Decision を書き換えず、新しい Decision から `Supersedes` する。
 
-## 決めてほしいこと
+## 決めてほしいこと（2026-09-29 に推奨どおり承認）
 
 1. **解除できるのは Project の Manager と Owner / Admin（新しい Capability `project.task.write_reservation.release`）で、Contributor・Viewer はできない。Active の Project だけ**（1 節）でよいか。推奨: はい。
 2. **Agent には委任できない（`delegable=False`）**（2 節）でよいか。推奨: はい。
@@ -111,3 +111,7 @@ Step-up の拒否は、この操作では別の Audit Event にしない（Autho
 4. **Task の Queue Entry に有効な Lease を持つ Worker がいる間は解除を拒否する。Lease がなければ、人が確かめたこと（`reason`、必須）を記録して解除を許す**（4 節、4A）でよいか。どの Worker の Lease かは区別しないので、**落ちた Worker の Entry を Queue が自動で別の Worker（または再起動した同じ Worker）に取り直させた後（Retry がなくても起きる、通常の落ち方）は解除が拒否され、Pause / Stop Now → Lease が終わる → 解除 → Resume（Stop Now なら Retry）の手順が要る**点を含む。それとも、許可の時点の Lease の世代（Entry の id と `claim_count`）を予約に記録し、同じ世代の Lease が有効な間だけ拒否する 4B（Migration が要る。Pause の手順は要らない）にするか。推奨: 4A（実装済み）。Pause の手順が運用で重すぎると判断する場合は 4B。
 5. **解除した Repo は予約した試行で書き込まれたものとして扱い（`modified`、Evaluation / Review をやり直す）、Task の状態は変えず、どの状態でも解除できる**（5 節）でよいか。推奨: はい。
 6. **Audit は Authorization の判定（`REQUIRED`）と Task の履歴の `release_repository_write` の Event の 2 つ。Step-up の拒否は別の Audit にしない**（6 節）でよいか。推奨: はい。
+
+## 承認時の決定（2026-09-29）
+
+Human は、作業 Session で判断が必要な点について推奨つきの説明を受け、「推奨どおり」と回答して承認した（1〜6 の全点。4 は案 4A）。**すべて推奨どおり**で、個別の変更はない。4 は案 4A（有効な Lease の Worker がいる間は解除を拒否する。自動で再 Claim された後は、Pause → Lease の終了 → 解除 → Resume の順に操作する）とする。

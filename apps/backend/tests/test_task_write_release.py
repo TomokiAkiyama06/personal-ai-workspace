@@ -1,6 +1,6 @@
 """Releasing by hand the repository write of a crashed process (issue #129).
 
-Decision 0049 (Proposed). ``TaskService.release_stale_repository_write`` (the
+Decision 0049. ``TaskService.release_stale_repository_write`` (the
 release itself: refused for a live holder, allowed for a stale one, the
 repositories count as written, the history records who and why) and
 ``projects.TaskWriteReleaser`` (who may: authorization, audit, Passkey Step-up).
@@ -442,7 +442,7 @@ class FailingSink:
 
 @requires_postgres
 class ReleaserTest(ReleaseTestCase):
-    """Who may release (Decision 0049 Proposed): the project Manager and the
+    """Who may release (Decision 0049): the project Manager and the
     Owner / Admin, with a Passkey Step-up; every decision is audited."""
 
     async def asyncSetUp(self):

@@ -138,7 +138,7 @@ _ADMIN_ONLY = frozenset(
         C.ADMIN_AUTH_POLICY_VIEW,
         # "System Owner / Admin: administrative operations" on a project.
         C.PROJECT_LIFECYCLE_MANAGE,
-        # Release a crashed process's repository write (Decision 0049 Proposed).
+        # Release a crashed process's repository write (Decision 0049).
         C.PROJECT_TASK_WRITE_RESERVATION_RELEASE,
     }
 )
