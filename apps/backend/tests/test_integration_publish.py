@@ -68,7 +68,15 @@ class FakeGitHub:
         self.answer: object | None = None  # replaces the created pull request
 
     def pull(
-        self, number, branch, *, state="open", draft=False, merged=False, base="main"
+        self,
+        number,
+        branch,
+        *,
+        state="open",
+        draft=False,
+        merged=False,
+        base="main",
+        sha="e" * 40,
     ):
         return {
             "base": {"ref": base},
@@ -77,7 +85,11 @@ class FakeGitHub:
             "state": state,
             "draft": draft,
             "merged_at": "2026-09-29T00:00:00Z" if merged else None,
-            "head": {"ref": branch, "repo": {"full_name": f"{OWNER}/{REPO}"}},
+            "head": {
+                "ref": branch,
+                "sha": sha,
+                "repo": {"full_name": f"{OWNER}/{REPO}"},
+            },
         }
 
     async def run(self, args, *, account, hostname, timeout_s):
@@ -310,7 +322,12 @@ class PublisherTest(unittest.IsolatedAsyncioTestCase):
         cases = {
             PullRequestState.OPEN: {},
             PullRequestState.DRAFT: {"draft": True},
-            PullRequestState.MERGED: {"state": "closed", "merged": True},
+            # Merged with the checked commit as its head.
+            PullRequestState.MERGED: {
+                "state": "closed",
+                "merged": True,
+                "sha": self.head,
+            },
             # A human closed it: it is not replaced by a new one.
             PullRequestState.CLOSED: {"state": "closed"},
         }
@@ -336,6 +353,26 @@ class PublisherTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(pull_request.number, 2)
         self.assertEqual(self.github.pulls[-1]["base"]["ref"], "main")
         self.assertEqual(self.github.methods(), ["GET", "POST"])
+
+    async def test_a_merged_pull_request_of_an_older_commit_is_not_the_one(self):
+        # Codex review of #159: the branch advanced after its pull request was
+        # merged; the newly checked commit is not in that pull request, so a
+        # new one proposes it.
+        older = self.head
+        self.github.pulls = [
+            self.github.pull(5, self.branch, state="closed", merged=True, sha=older)
+        ]
+        newer = self.commit("more.txt", "more\n")
+
+        pull_request = await self.publisher().publish(self.request(head=newer))
+
+        self.assertEqual(pull_request.number, 2)
+        self.assertEqual(pull_request.state, PullRequestState.OPEN)
+        self.assertEqual(self.remote_branch(), newer)
+
+    async def test_a_pull_request_without_a_head_commit_is_refused(self):
+        self.github.answer = self.github.pull(1, self.branch, sha="not a sha")
+        await self.refused(PublishProblem.INVALID_RESPONSE)
 
     async def test_a_created_pull_request_to_another_base_is_refused(self):
         self.github.answer = self.github.pull(1, self.branch, base="dev")

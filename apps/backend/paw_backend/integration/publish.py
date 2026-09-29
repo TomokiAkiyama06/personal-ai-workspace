@@ -33,9 +33,11 @@ a delivered pull request). Merging stays the human's (``AGENTS.md``). Decision
   ``gh api`` as that account (``GhRunner``). The backend never sees a token.
 * **Idempotent.** A pull request of the branch against the default branch
   that already exists is reused (one against another base is not the one): an
-  ``open`` or a ``merged`` one is delivered; a ``draft`` one is recorded as it
-  is; a ``closed`` one that was not merged is recorded and **not** replaced (a
-  human closed it). A second run pushes the same commit again (nothing to do).
+  ``open`` one, or a ``merged`` one whose head is the checked commit, is
+  delivered (a merged one of an older commit is not the one); a ``draft`` one
+  is recorded as it is; a ``closed`` one that was not merged is recorded and
+  **not** replaced (a human closed it). A second run pushes the same commit
+  again (nothing to do).
 * **Nothing it read is stored or logged.** Failures are a closed
   :class:`PublishProblem`; git's and gh's output never leaves this module, and
   the pull request's text carries only the task's title and which kinds of check
@@ -196,14 +198,15 @@ def _state_of(item: dict) -> PullRequestState:
 
 
 def parse_pull_request(
-    item: object, repo: GitHubRepo, branch: str, base: str
+    item: object, repo: GitHubRepo, branch: str, base: str, commit: str
 ) -> PullRequestInfo | None:
     """One pull request of GitHub's REST API, checked: its head is ``branch`` of
     ``repo`` itself, its number is a positive integer and its URL is exactly
     ``https://<host>/<owner>/<repo>/pull/<number>`` (the case of the owner and
     the repository as GitHub spells them). ``None`` when it is against another
-    branch than ``base``: it does not propose the change to the default branch
-    (Codex review of #159)."""
+    branch than ``base`` (it does not propose the change to the default branch),
+    and when it was merged with another head than ``commit`` (the checked
+    commit is not in it): Codex review of #159."""
     if not isinstance(item, dict):
         raise PullRequestNotPublishedError(PublishProblem.INVALID_RESPONSE)
     number = item.get("number")
@@ -226,13 +229,19 @@ def parse_pull_request(
         full_name.lower() != f"{repo.owner}/{repo.repo}".lower()
     ):
         raise PullRequestNotPublishedError(PublishProblem.INVALID_RESPONSE)
+    head_commit = head.get("sha")
+    if not isinstance(head_commit, str) or _OBJECT_ID.fullmatch(head_commit) is None:
+        raise PullRequestNotPublishedError(PublishProblem.INVALID_RESPONSE)
     target = item.get("base")
     target_ref = target.get("ref") if isinstance(target, dict) else None
     if not isinstance(target_ref, str):
         raise PullRequestNotPublishedError(PublishProblem.INVALID_RESPONSE)
     if target_ref != base:
         return None
-    return PullRequestInfo(number, url, _state_of(item))
+    state = _state_of(item)
+    if state is PullRequestState.MERGED and head_commit != commit:
+        return None
+    return PullRequestInfo(number, url, state)
 
 
 # Which of several pull requests of the branch is the one: an open one, else a
@@ -407,7 +416,12 @@ class GitHubPullRequestPublisher:
             ) from None
 
     async def _existing(
-        self, github: GitHubRepo, branch: str, base: str, account: LinuxAccount
+        self,
+        github: GitHubRepo,
+        branch: str,
+        base: str,
+        commit: str,
+        account: LinuxAccount,
     ) -> PullRequestInfo | None:
         listed = await self._gh_api(
             [
@@ -428,7 +442,9 @@ class GitHubPullRequestPublisher:
             raise PullRequestNotPublishedError(PublishProblem.GITHUB_FAILED)
         if not isinstance(listed, list) or len(listed) > MAX_LISTED_PULL_REQUESTS:
             raise PullRequestNotPublishedError(PublishProblem.INVALID_RESPONSE)
-        found = [parse_pull_request(item, github, branch, base) for item in listed]
+        found = [
+            parse_pull_request(item, github, branch, base, commit) for item in listed
+        ]
         return choose_pull_request([item for item in found if item is not None])
 
     async def _pull_request(
@@ -439,7 +455,9 @@ class GitHubPullRequestPublisher:
         base: str,
         account: LinuxAccount,
     ) -> PullRequestInfo:
-        existing = await self._existing(github, branch, base, account)
+        existing = await self._existing(
+            github, branch, base, request.target.head, account
+        )
         if existing is not None:
             return existing
         created = await self._gh_api(
@@ -462,11 +480,13 @@ class GitHubPullRequestPublisher:
         if created is None:
             # Refused (not logged in, no permission) or made meanwhile by another
             # run: what exists now decides.
-            existing = await self._existing(github, branch, base, account)
+            existing = await self._existing(
+                github, branch, base, request.target.head, account
+            )
             if existing is None:
                 raise PullRequestNotPublishedError(PublishProblem.GITHUB_FAILED)
             return existing
-        made = parse_pull_request(created, github, branch, base)
+        made = parse_pull_request(created, github, branch, base, request.target.head)
         if made is None:
             raise PullRequestNotPublishedError(PublishProblem.INVALID_RESPONSE)
         return made

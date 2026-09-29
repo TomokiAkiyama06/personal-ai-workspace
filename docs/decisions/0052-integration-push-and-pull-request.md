@@ -65,6 +65,7 @@
 ### 7. 既存の PR の扱い（冪等）
 
 - 作る前に、その branch の PR を GitHub に尋ねる（`state=all`）。**Base が default branch の PR だけ**を対象にし（別の branch に向けた PR は、検査した変更を default branch に提案していない）、あればそれを記録し、新しく作らない。作った PR の Base が default branch でなければ `invalid_response`。複数あれば `open` → `merged` → `draft` → `closed` の順に選ぶ。
+- `merged` の PR は、その Head が**検査した Commit** のときだけ使う。Merge された後に integration branch が進んだ（Human が Conflict を解消して Gate をもう一度動かした等）場合、古い `merged` の PR に今の Commit は入っていないので、新しい PR を作る（PR #159 の Codex review）。
 - `draft` はそのまま `draft` として記録し（届いていないので Task は `evaluating`）、Ready にはしない。**`closed`（Merge されずに閉じられた）の PR があれば、新しい PR を作らない**（Human が閉じた判断を上書きしない）。`closed` を記録し、Task は `evaluating` のまま（`requirements_not_met`）。Human は Task を Cancel するか、GitHub で PR を開き直してから Gate をもう一度動かす。
 - 作る要求が拒まれたら（同時に作られた場合を含む）、もう一度尋ね、あればそれを使う。
 - 新しい試行（Restart）は branch の名前が変わるので、新しい PR になる。
@@ -82,9 +83,10 @@
 
 | 副コマンド | 引数の形 |
 | --- | --- |
-| `push` | `--quiet -- <https URL> <commit id>:refs/heads/paw/...`（先頭に `-c credential.helper=` と `-c credential.helper=!<Wrapper の --gh> auth git-credential` の 2 つ） |
+| `push` | `--quiet -- https://<host>/<owner>/<repo>.git <commit id>:refs/heads/paw/...`（先頭に `-c credential.helper=` と `-c credential.helper=!<Wrapper の --gh> auth git-credential` の 2 つ） |
 
-- `<https URL>` は Wrapper が許す Transport の URL（`clone` と同じ検査）。`<commit id>` は 40 桁または 64 桁の 16 進、宛先は `refs/heads/paw/` の branch だけ。`+`（Force）、`--force`、`--mirror`、`--all`、`--tags`、`--delete`、他の Option、2 つ以上の Refspec は拒否する。
+- **宛先の Host は、Wrapper の `command=` 行に Admin が書いた `--push-host=`（例 `github.com`）だけ**。無ければ `push` はすべて拒否する。Wrapper は Client（Backend）を信用しないので、宛先を Client に任せると、乗っ取られた Backend が Root の中のどの Repository の Commit でも好きな Server へ送れてしまう（PR #159 の Codex review）。Host の中のどの Repository に Push できるかは、その User の `gh auth login` の権限が決める（書き込める Repository だけ）。代替: Repository の単位の許可リストを Admin が持つ（Repository を登録するたびに Wrapper の設定を変える運用が要る）。
+- URL は `https://<host>/<owner>/<repo>.git` の形だけ（User 情報・Port・余分な Path・`..` は拒否）。`<commit id>` は 40 桁または 64 桁の 16 進、宛先は `refs/heads/paw/` の branch だけ。`+`（Force）、`--force`、`--mirror`、`--all`、`--tags`、`--delete`、他の Option、2 つ以上の Refspec は拒否する。
 - 2 つの `-c` は `push` の前だけ受け入れ（`clone` の Credential Helper と同じく、Wrapper の `--gh` が設定されているときだけ）、受け入れた値は使わず Wrapper 自身が同じ 2 つを付ける。
 - Push は Repository の File の内容を読まない（Filter Driver を起動しない）が、Repository の設定の `url.<base>.pushInsteadOf` などは読む（下の確認で拒否する）。
 - Wrapper は、`push` の前に、その呼び出しが読む設定を一覧にし（`status` などと同じ確認）、Command を名指しする設定（`core.askPass` など。Credential が得られなければ git が動かしうる）と、宛先を書き換える `url.<base>.insteadOf` / `pushInsteadOf` があれば拒否する。

@@ -1128,7 +1128,7 @@ class PushTest(WrapperTestCase):
 
     def setUp(self):
         super().setUp()
-        self.config = self.make_config(gh="/usr/bin/gh")
+        self.config = self.make_config(gh="/usr/bin/gh", push_hosts=("github.com",))
 
     def push(self, *, url=None, refspec=None, prefix=None, tail=None):
         return [
@@ -1168,6 +1168,33 @@ class PushTest(WrapperTestCase):
         # The helper is the wrapper's even when the client sends none.
         bare = self.plan(self.push(prefix=[]))
         self.assertIn(GH_HELPER, bare.argv)
+
+    def test_only_a_repository_on_an_allowed_host_is_pushed_to(self):
+        # Codex review of #159: the client is not trusted with the destination.
+        for url in (
+            "https://evil.example/owner/repo.git",
+            "https://github.com.evil.example/owner/repo.git",
+        ):
+            with self.subTest(url=url):
+                self.assert_rejected(
+                    "push_host_not_allowed", self.plan, self.push(url=url)
+                )
+        self.assert_rejected(
+            "push_host_not_allowed",
+            self.plan,
+            self.push(),
+            config=self.make_config(gh="/usr/bin/gh"),
+        )
+        for url in (
+            "https://github.com/owner/repo",
+            "https://github.com/owner/repo/extra.git",
+            "https://github.com/owner/../repo.git",
+            "https://user@github.com/owner/repo.git",
+            "https://github.com:8443/owner/repo.git",
+            "https://GitHub.com/owner/repo.git",
+        ):
+            with self.subTest(url=url):
+                self.assert_rejected("bad_arguments", self.plan, self.push(url=url))
 
     def test_without_gh_configured_nothing_is_pushed(self):
         self.assert_rejected(
@@ -1613,6 +1640,7 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(config.root, f"{config.home.rstrip('/')}/workspaces")
         self.assertEqual(config.protocols, ("https",))
         self.assertIsNone(config.gh)
+        self.assertEqual(config.push_hosts, ())
 
     def test_options(self):
         config = wrapper.parse_config(
@@ -1625,8 +1653,11 @@ class ConfigTest(unittest.TestCase):
                 "--config=url.file:///srv/m/.insteadOf=https://github.com/",
                 "--gh=/usr/bin/gh",
                 "--path=/usr/bin:/bin",
+                "--push-host=github.com",
+                "--push-host=github.example.com",
             ]
         )
+        self.assertEqual(config.push_hosts, ("github.com", "github.example.com"))
         self.assertEqual(config.root, "/srv/ws")
         self.assertEqual(config.protocols, ("https", "file"))
         self.assertEqual(
@@ -1646,6 +1677,9 @@ class ConfigTest(unittest.TestCase):
             ["--config=novalue"],
             ["--config==x"],
             ["--path=/usr/bin:bin"],
+            ["--push-host=GitHub.com"],
+            ["--push-host=github.com/owner"],
+            ["--push-host=https://github.com"],
             ["--unknown=1"],
             ["positional"],
         ):
@@ -1920,7 +1954,9 @@ class EndToEndTest(unittest.IsolatedAsyncioTestCase):
         options = self.world.runner_options()
         runner = SshGitRunner(
             _FixedKey(f"{self.world.root}/alice.key"),
-            ssh_executable=self.fake_sshd(options, "--gh=/usr/bin/gh"),
+            ssh_executable=self.fake_sshd(
+                options, "--gh=/usr/bin/gh", "--push-host=github.com"
+            ),
             **options,
         )
         result = await runner.run(args, account=self.account, cwd=repo, timeout_s=60)

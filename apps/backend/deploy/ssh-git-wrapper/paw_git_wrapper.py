@@ -109,6 +109,13 @@ MERGE_CONFIG = (
 _BRANCH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}")
 _OBJECT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 _PROTOCOL = re.compile(r"[a-z][a-z0-9+.-]{0,15}")
+_HOST = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,62})(?:\.[a-z0-9](?:[a-z0-9-]{0,62}))*")
+#: ``https://<host>/<owner>/<repo>.git``: what the backend pushes to (the
+#: registered GitHub repository's clone URL), and nothing else.
+_PUSH_URL = re.compile(
+    r"https://(?P<host>[a-z0-9.-]{1,253})/[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})"
+    r"/[A-Za-z0-9._-]{1,100}\.git"
+)
 _CONFIG_KEY = re.compile(r"[A-Za-z][A-Za-z0-9-]*(\.[^\s=]+)*\.[A-Za-z][A-Za-z0-9-]*")
 
 
@@ -268,7 +275,11 @@ class Config:
     ``key=value`` pairs
     git always gets and the client may send (a deployment's own, fixed values).
     ``gh``: the ``gh`` executable whose credential helper ``clone`` may name
-    (PAW-028); ``None`` refuses any credential helper.
+    (PAW-028); ``None`` refuses any credential helper. ``push_hosts``: the hosts
+    a ``push`` may go to (``--push-host=``, Decision 0052); none refuses every
+    push. The client is not trusted with the destination: a backend that is
+    not itself could otherwise push a commit of any repository in the root to
+    a server of its choosing.
     """
 
     root: str
@@ -279,6 +290,7 @@ class Config:
     extra: tuple[tuple[str, str], ...] = ()
     gh: str | None = None
     path: str = SAFE_PATH
+    push_hosts: tuple[str, ...] = ()
 
 
 def _canonical(value: str) -> bool:
@@ -298,6 +310,7 @@ def parse_config(argv: Sequence[str], *, uid: int | None = None) -> Config:
     account = pwd.getpwuid(os.geteuid() if uid is None else uid)
     options: dict[str, object] = {"home": account.pw_dir, "user": account.pw_name}
     protocols: list[str] = []
+    push_hosts: list[str] = []
     extra: list[tuple[str, str]] = []
     seen: set[str] = set()
     for item in argv:
@@ -310,6 +323,10 @@ def parse_config(argv: Sequence[str], *, uid: int | None = None) -> Config:
                 raise Rejected("misconfigured")
             seen.add(name)
             options[name[2:]] = value
+        elif name == "--push-host":
+            if _HOST.fullmatch(value) is None or value != value.lower():
+                raise Rejected("misconfigured")
+            push_hosts.append(value)
         elif name == "--allow-protocol":
             if _PROTOCOL.fullmatch(value) is None:
                 raise Rejected("misconfigured")
@@ -334,6 +351,7 @@ def parse_config(argv: Sequence[str], *, uid: int | None = None) -> Config:
         extra=tuple(extra),
         gh=None if options.get("gh") is None else str(options["gh"]),
         path=str(options.get("path", SAFE_PATH)),
+        push_hosts=tuple(dict.fromkeys(push_hosts)),
     )
 
 
@@ -674,10 +692,17 @@ def _check_push(args: list[str], places: Places, config: Config) -> None:
     """Decision 0052 (issue #132): ``push --quiet -- <URL> <commit>:refs/heads/
     paw/...``. One commit id (never a ``+``: no force, no other refspec, no
     option such as ``--delete``, ``--mirror`` or ``--tags``) to one ``paw/``
-    branch, and only with gh's credential helper configured (``--gh``)."""
+    branch of ``https://<host>/<owner>/<repo>.git`` on a host the administrator
+    allowed (``--push-host``), and only with gh's credential helper configured
+    (``--gh``)."""
     if config.gh is None:
         raise Rejected("config_not_allowed")
-    if len(args) == 4 and args[:2] == ["--quiet", "--"] and _url(args[2], config):
+    if len(args) == 4 and args[:2] == ["--quiet", "--"]:
+        found = _PUSH_URL.fullmatch(args[2])
+        if found is None or not _url(args[2], config) or ".." in args[2]:
+            raise Rejected("bad_arguments")
+        if found["host"] not in config.push_hosts:
+            raise Rejected("push_host_not_allowed")
         source, separator, destination = args[3].partition(":")
         if separator and _OBJECT_ID.fullmatch(source) and _paw_ref(destination):
             return

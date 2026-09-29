@@ -63,7 +63,7 @@ Wrapper は Client（Backend）を信用しない。`$SSH_ORIGINAL_COMMAND` を 
 | `merge-tree` | `--write-tree --name-only -z --no-messages refs/heads/paw/<a> refs/heads/paw/<b>` |
 | `merge-base` | `--is-ancestor refs/heads/paw/<a> refs/heads/paw/<b>` |
 | `submodule` | `status --cached` だけ（Decision 0051（PR #130）による。pin したときだけ。下の 10。`foreach`・`update`・`init` など他の副コマンド・Option はすべて拒否） |
-| `push` | `--quiet -- <https URL> <commit id>:refs/heads/paw/<b>` だけ（[Decision 0052](../../../../docs/decisions/0052-integration-push-and-pull-request.md)、#132。`--gh` を設定したときだけ。先頭の `-c` は `credential.helper=` と `credential.helper=!<--gh> auth git-credential` だけ受け付け、Wrapper 自身が同じ 2 つを付ける。`+`（Force）・`--force`・`--mirror`・`--delete`・Tag・`paw/` 以外の宛先・2 つ以上の Refspec・Remote 名は拒否。pin しない。下の 9 の設定の確認を行い、`url.<base>.insteadOf` / `pushInsteadOf` も拒否） |
+| `push` | `--quiet -- https://<--push-host の Host>/<owner>/<repo>.git <commit id>:refs/heads/paw/<b>` だけ（[Decision 0052](../../../../docs/decisions/0052-integration-push-and-pull-request.md)、#132。`--gh` と `--push-host` を設定したときだけ。先頭の `-c` は `credential.helper=` と `credential.helper=!<--gh> auth git-credential` だけ受け付け、Wrapper 自身が同じ 2 つを付ける。`+`（Force）・`--force`・`--mirror`・`--delete`・Tag・`paw/` 以外の宛先・2 つ以上の Refspec・Remote 名は拒否。pin しない。下の 9 の設定の確認を行い、`url.<base>.insteadOf` / `pushInsteadOf` も拒否） |
 | `status` | `--porcelain=v1 -z --untracked-files=all`／`--porcelain=v1 -z --untracked-files=normal --ignored=traditional --ignore-submodules=none`（Decision 0051（PR #130）による。`--git-dir=` / `--work-tree=` で pin したときだけ。下の 10） |
 
 上の形以外の `push`、`fetch`・`pull`・`checkout`・`switch`・`reset`・`rebase`・`commit`・`branch`・`gc`・`submodule` など、表にないものはすべて拒否する。
@@ -154,6 +154,7 @@ restrict,command="/usr/local/lib/paw/paw-git-wrapper",from="127.0.0.1",no-pty,no
 - Wrapper の Option（`command="..."` の中に空白区切りで足す。どれも省略可）:
   - `--root=/home/alice/<workspace_subdir>`: Backend の `workspace_subdir` が `workspaces` 以外のとき。Backend が送る Path と同じ綴り（Account Database の Home から作った Path）にする。
   - `--gh=/usr/bin/gh`: PAW-028 の `gh` の Credential Helper を `clone` と `push`（Decision 0052）に使うとき。`credential.helper=!/usr/bin/gh auth git-credential` という値そのものだけを受け付ける（Backend の `GitClient(gh_executable=...)` と同じ Path にする）。無ければ Credential Helper はすべて拒否する。
+  - `--push-host=github.com`: `push`（Decision 0052）の宛先として許す Host（繰り返して複数）。無ければ `push` はすべて拒否する（`push_host_not_allowed`）。Client（Backend）が送る宛先は信用しない: 乗っ取られた Backend が Root の中のどの Repository の Commit でも好きな Server へ送れないようにするため。
   - `--git=/usr/bin/git`（既定）、`--allow-protocol=https`（既定。足すと `protocol.<名前>.allow=always` を受け付ける）、`--config=key=value`（配備が固定する追加の設定）、`--home=`、`--path=`（git の `PATH`。既定 `/usr/local/bin:/usr/bin:/bin`）。
   - Option の綴りの誤りは、すべての呼び出しを `misconfigured` で拒否する（黙って緩い既定に戻らない）。
 
