@@ -145,6 +145,15 @@ class Settings(BaseSettings):
     # checked when the command runs (``memory/projection/writer.py``): absolute,
     # canonical, outside every git work tree and every home directory.
     memory_projection_dir: Path | None = None
+    # Recovery Repository (PAW-047, Decision 0054 Proposed): the git checkout of
+    # the dedicated private repository that ``recovery-backup-run`` writes and
+    # commits (every 30 minutes) and ``recovery-restore`` reads (for example
+    # ``/srv/personal-ai/recovery``). Unset: both commands refuse to run. Checked
+    # when a command runs (``recovery/files.py``): absolute, canonical, outside
+    # every home directory and the projection, the top of a git work tree with
+    # the recovery marker. ``recovery_git_timeout_seconds`` bounds one git command.
+    recovery_repository_dir: Path | None = None
+    recovery_git_timeout_seconds: float = Field(default=300.0, gt=0, le=3_600)
 
     # Repository registration (PAW-027, Decision 0017). Where a user's checkouts
     # live below their home; the roots (per user: ``{home}`` and ``{user}``) an
@@ -248,6 +257,7 @@ class Settings(BaseSettings):
         "operator_database_role",
         "passkey_rp_id",
         "memory_projection_dir",
+        "recovery_repository_dir",
         mode="before",
     )
     @classmethod

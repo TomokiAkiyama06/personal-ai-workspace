@@ -1,0 +1,16 @@
+# Runs paw-recovery-backup.service every 30 minutes (PAW-047, Decision 0054).
+# A run without changes commits and pushes nothing. The minutes are offset from
+# the Memory Projection's (every 5 minutes from :00) so that the backup rarely
+# has to wait for the projection's lock.
+
+[Unit]
+Description=Recovery Repository backup of the Personal AI Workspace, every 30 minutes
+
+[Timer]
+OnCalendar=*:02/30
+# Run at the next boot when the server was off at the scheduled time.
+Persistent=true
+Unit=paw-recovery-backup.service
+
+[Install]
+WantedBy=timers.target

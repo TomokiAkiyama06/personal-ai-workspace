@@ -50,6 +50,7 @@
 | [0049](0049-manual-write-reservation-release.md) | 落ちた Process が残した Repository の書き込み予約を人が解除する操作（誰が: Project の Manager と Owner / Admin、Passkey Step-up、生きている Worker の Lease がある間は拒否、解除した Repo は書き込まれたものとして扱う、Audit と Task の Event。Issue #129。Decision 0035 の 5 節の最後の一文を Supersede） | Approved |
 | [0050](0050-late-gpu-charge-without-fence.md) | Node の Attempt が閉じた後に、Cancel しても止まらなかった Local の呼び出しの GPU 時間を、`TrackerLateGpuCharge` で Attempt / Run の Fence なしに Task の Budget へ計上する（PAW-036、PR #131。Decision 0037 を補う） | Approved |
 | [0051](0051-integration-worktree-ignored-files.md) | integration worktree の無視された File（`.gitignore`）を未 Commit の変更として扱う方針（`status --ignored` の形を Wrapper の許可リストに足す。Decision 0036 の 7・9・13 への追補。PR #130） | Approved |
+| [0054](0054-recovery-repository-projection-restore.md) | Recovery Repository の Backup と Restore の方針（Checkout の置き場所と Marker、1 Entity 1 File の JSON と Manifest・Checksum、列の Allow-list と Secret の置換、削除中の User は削除記録だけ、30 分ごとの 1 Commit と Fast-forward の Push、Restore は Server ローカルで既定は Dry run・空の Workspace へ全体を 1 Transaction で・上書きと削除なし、戻さないもの、Credential の再登録。PAW-047、Issue #41） | Proposed |
 
 運用は [AGENTS.md](../../AGENTS.md) の「仕様変更」に従います。
 

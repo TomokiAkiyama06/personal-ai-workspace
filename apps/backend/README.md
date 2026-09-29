@@ -79,6 +79,7 @@ apps/backend/
 │  │  ├─ retrieval/        # Hybrid Retrieval: 権限の解決、SQL Prefilter、Keyword + Vector、Rerank、重複・矛盾（PAW-043）
 │  │  ├─ versioning/       # Memory の Relation・手動編集の Version（Optimistic Lock）・Revalidate、鮮度の Job（Stale Candidate、期限、Session 終了）（PAW-042）、編集で写す出典と会話 / Task から由来する Version の検索（#128）
 │  │  └─ projection/       # Memory Markdown Projection: 決定的な Renderer、Snapshot の読み取り、安全な Writer（0700 / 0600、Link を辿らない）、実行と Audit（PAW-045）
+│  ├─ recovery/            # Recovery Repository: 形式（JSON・Manifest・Checksum）、列の Allow-list の Snapshot、Renderer、Checkout（Marker・Lock）、git（Fast-forward の Push だけ）、Backup、Dry run が既定の Restore（PAW-047）
 │  ├─ projects/            # Project、Membership（招待制）、Lifecycle（PAW-026）、管理者向けの全 Project 一覧（Issue #84）。`task_gate.py` は Task Lane に渡す Project の状態 Gate（Issue #83）、`task_stop.py` は Delete 開始時の Task 停止
 │  ├─ connections/         # Shared Codex / Claude Connection: Adapter の Interface、Secret（Handle）、User 別 Quota、利用量の帰属（PAW-030）
 │  ├─ repositories/        # Repository の登録、Remote、User ごとの Checkout、Path の安全性、git の安全な実行（PAW-027）
@@ -90,7 +91,7 @@ apps/backend/
 │  └─ api/
 │     ├─ deps.py           # FastAPI Dependency
 │     └─ v1/               # /api/v1 の Router（health、events、auth、passkeys、accounts）
-├─ deploy/systemd/         # Audit の保存期間・退避（Issue #117）と Memory Markdown Projection（PAW-045）の定期実行の Unit File の例
+├─ deploy/systemd/         # Audit の保存期間・退避（Issue #117）、Memory Markdown Projection（PAW-045）、Recovery Repository の Backup（PAW-047）の定期実行の Unit File の例
 └─ tests/                  # unittest
 ```
 
@@ -164,6 +165,7 @@ Database には pgvector が必要です（CI は `pgvector/pgvector:pg18` を�
 | `PAW_PASSKEY_RP_NAME` / `PAW_PASSKEY_CHALLENGE_TTL_SECONDS` | `Personal AI Workspace` / `300` | Authenticator に見せる名前と、Challenge に答えられる秒（30〜900） |
 | `PAW_SCRATCH_PURGE_INTERVAL_SECONDS` | `3600` | 期限切れの Research Scratch Item を消す Janitor の間隔（秒）。`0` で Janitor を止める（期限切れの行が DB に残り続ける）。それ以外は 60〜86400。DB が未設定のときも起動しない。[Janitor](#janitor期限切れの削除) |
 | `PAW_MEMORY_PROJECTION_DIR` | なし | Memory Markdown Projection の出力先（絶対 Path。例 `/srv/personal-ai/memory`）。未設定なら `memory-projection-run` は動かない。git の Work Tree の中・Home の中や上・Projection の Marker のない空でない Directory は拒否する。[Memory Markdown Projection](#memory-markdown-projection)（Decision 0038、Approved） |
+| `PAW_RECOVERY_REPOSITORY_DIR` / `PAW_RECOVERY_GIT_TIMEOUT_SECONDS` | なし / `300` | Recovery Repository（専用の Private Repository）の Clone の場所（絶対 Path。例 `/srv/personal-ai/recovery`）と、git の 1 Command の Timeout。未設定なら `recovery-backup-run` と `recovery-restore` は動かない。Home・Projection と重なる場所、Work Tree の最上位でない場所、Marker がなく空でない Checkout は拒否する。[Recovery Repository](#recovery-repositorybackup--restore)（Decision 0054、Proposed） |
 | `PAW_REPOSITORY_WORKSPACE_SUBDIR` | `workspaces` | Backend が作る Checkout の置き場所（`<home>/<この名前>/<project>/<repo>`）。1 つの安全な名前（[Repository 登録](#repository-registration--per-user-checkout)） |
 | `PAW_REPOSITORY_EXISTING_ROOTS` | `{home}` | 既存 Repository を登録してよい Root（Comma 区切り、8 つまで）。各 Root は絶対 Path で `{home}`（先頭だけ）か `{user}` を含む（全員で共有する Directory は拒否） |
 | `PAW_REPOSITORY_CLONE_HOSTS` | `github.com` | Clone してよい Host（Comma 区切り、8 つまで。小文字の DNS 名。IP Address は不可） |
@@ -3614,6 +3616,70 @@ python -m paw_backend.cli memory-projection-check --max-age-minutes 30   # 監�
 
 `apps/backend/tests/test_memory_projection_*.py` と `projection_support.py` です。`test_memory_projection_render.py`・`_writer.py`・`_runner.py` は DB を使わず、`tempfile` の Directory にだけ書きます。
 `test_memory_projection_postgres.py`・`_cli.py`・`_grants.py` は実 PostgreSQL（`PAW_TEST_DATABASE_URL`）を使い、未設定なら Skip します。`_grants.py` は非 Superuser の Application の Role で同じ Test を実行し、その Role が Memory の本文や Audit の行を書き換えられないことを確かめます。
+
+## Recovery Repository（Backup / Restore）
+
+[PAW-047](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/41)（`paw_backend/recovery/`、`paw_backend/cli/recovery.py`、`deploy/systemd/paw-recovery-backup*`）で実装しました。**Migration はありません。**
+要件は [REQUIREMENTS.md](../../REQUIREMENTS.md) の「Memory Markdown Backup / Backup Authority」「Dedicated Recovery Repository」「User Deletion Retention」です。
+要件が決めていない選択（Checkout の置き場所と安全の条件、形式、入れないもの、削除中の User、Restore の範囲・上書き・誰が実行するか、Restore の元の検証、戻さないもの）は [Decision 0054](../../docs/decisions/0054-recovery-repository-projection-restore.md)（**Proposed**）の推奨どおりに実装しました。承認されるまで、実運用の Server で Timer を有効にしません。
+
+PostgreSQL が Operational Source of Truth で、Recovery Repository（専用の Private Repository）は Disaster Recovery Source です。通常時は Git から DB へ同期しません。
+
+```text
+$PAW_RECOVERY_REPOSITORY_DIR/            # 専用の Private Repository の Clone。0700
+├── .paw-recovery-repository            # Marker（Commit される）
+├── manifest.json                       # recovery_format_version: 1、workspace_schema_version（Alembic の Head）、counts、checksums_sha256
+├── recovery/checksums.sha256           # 他の全 File の sha256（sha256sum -c で読める）
+├── memory/                             # Memory Markdown Projection の写し（人が読む）
+├── users/<id>.json                     # User（Credential なし）と Quota
+├── deletions/users/<id>.json           # 削除中の User: id と status だけ
+├── projects/<id>.json                  # Project と Member（ACL）
+├── repos/<id>.json                     # Repository・Remote・acl_allowed
+├── memory-records/<id>.json            # 全 Version（本文）・Relation・Source（Restore はここから戻す）
+├── policies/auth-policy.json, policies/shared-connections.json
+└── tasks/<id>.json                     # Task の Recovery Summary（戻さない）
+```
+
+### Backup（`recovery-backup-run`、30 分ごと）
+
+```bash
+# /etc/paw/recovery-backup.env に PAW_DATABASE_URL・PAW_MEMORY_PROJECTION_DIR・PAW_RECOVERY_REPOSITORY_DIR を置く
+python -m paw_backend.cli recovery-backup-run                          # 1 回の Backup（手動の Backup も同じ）
+python -m paw_backend.cli recovery-backup-check --max-age-minutes 90   # 監視（読み取りだけ）
+```
+
+- Checkout は絶対・正規の Path で、Home・Projection の Directory と重ならず、git の Work Tree の最上位で、Marker を持つこと（Marker がなければ、`.git` しかない空の Clone だけを自分のものにします）。Branch に Upstream が要ります。満たさなければ何も書かずに失敗します（`check_repository:<理由>`）。
+- Memory Projection は、その Marker の Lock を取り（実行中なら最大 120 秒待つ）、`.paw-memory-projection-incomplete` がなく、最後の実行が `memory.projection.completed` のときだけ写します（Decision 0038 の 9）。
+- DB は `REPEATABLE READ, READ ONLY` の 1 つの Snapshot から、**列を名指しした SQL**（`recovery/source.py`）だけで読みます。Password Hash・Passkey・Session・各種 Token・`secret_handle`・Conversation・Embedding・Checkout の Path・Task の入力と Log・Audit は読みません。自由記述の Credential は `[REDACTED]` にします（Decision 0038 の 5 と同じ）。
+- `pending_deletion` / `deleted` の User は削除記録（`id`・`status`）だけで、User Record・Quota・Member・`user` Scope の Memory・`memory/users/<id>/` を入れません。`session_only` の Version も入れません。
+- 変わらない File は書き直さず、`manifest.json` も内容が変わったときだけ変えます。管理する名前だけを Stage し、**変更があるときだけ 1 Commit**、`HEAD` が Remote-tracking Branch と違うときだけ **Fast-forward の Push**（前回の失敗の Retry を兼ねる）。`--force` は使いません。git は Hook なし（`core.hooksPath=/dev/null`）・呼び出し元の `GIT_*` なし・`GIT_TERMINAL_PROMPT=0`・Timeout（`PAW_RECOVERY_GIT_TIMEOUT_SECONDS`、既定 300 秒）で、出力は表示も記録もしません。
+- 実行ごとに `audit_events` へ 1 行: `recovery.backup.completed`（`files=N written=N removed=N commit=0|1 push=0|1 redacted=N`）か `recovery.backup.failed`（`<step>:<code>`）。`resource_kind = recovery_backup_run`。終了コードは `0` 成功、`1` 拒否（同時実行など）、`2` 環境、`3` 失敗で、0 以外で `paw-recovery-backup-failure.service` が `crit` の Journal と `wall` を出します。
+- 接続は `PAW_DATABASE_URL`（Application の Role。SELECT と `audit_events` の INSERT / SELECT だけ）です。
+
+### Restore（`recovery-restore`、既定は Dry run）
+
+新品の Install で、`alembic upgrade head` の後、`owner-setup` の**前に**実行します（Owner を作ると Workspace は空でなくなります）。**戻す先は空の Workspace だけ**で、既存の行を上書きも削除もしません。
+
+```bash
+# PAW_MIGRATION_DATABASE_URL（Table の Owner）と PAW_RECOVERY_REPOSITORY_DIR（直前に Clone した Recovery Repository）
+python -m paw_backend.cli recovery-restore          # Dry run: 確認と件数と手作業の表示（書くのは Audit の 1 行だけ）
+python -m paw_backend.cli recovery-restore --apply  # 1 Transaction で書く
+```
+
+- 元の確認: Marker、Clean な Work Tree、`HEAD` が Remote-tracking Branch と同じ（最後に Push された状態。`not_latest`）、`recovery_format_version` がこの Code の読める版、全 File の Checksum（列挙外の File も拒否）、Record の Key と型、削除中の User の個人データがないこと。先の確認: DB がこの Release の Head、Backup の Schema がこの Release の鎖にあること、対象の Table がすべて空であること（`target_not_empty`）。拒否は `recovery.restore.refused`（終了コード 1）で、何も書きません。
+- `--apply` は対象の Table を Lock して空であることを確かめ直し、User・Quota・Project・Member・Repository・Remote・Memory・Version・Relation・Source（`conversation` を除く）と `recovery.restore.applied` を同じ Transaction で書きます。失敗は Rollback（`recovery.restore.failed`、終了コード 3）。
+- 戻さないもの（表示する手作業）: Credential（Owner は `sudo python -m paw_backend.cli owner-recover --confirm-owner-recovery`、他の Account は Decision 0032 の Reset）、Auth Policy（Owner が設定画面で Step-up して設定し直す）、Shared Connection（再登録）、Checkout（Clone し直し、各 User が `gh auth login`）、Task（Summary だけ）、`conversation` の Source、Audit。Restore の後に `memory-projection-run` を実行します。
+
+### 制限と未確認の点
+
+- 削除状態は「最後に Push された状態」の削除記録を適用します。Backup の外の削除記録（Decision 0043、PR #142）との突き合わせは後続です（Decision 0054 の 11）。
+- `not_latest` は Clone の Remote-tracking Branch と比べるだけです。Restore の直前に Clone か `git fetch` をしてください。
+- Restore した本文は `[REDACTED]` を含み得ます。Model / Router・Notification の設定はまだ形式にありません。
+- 1 回の Backup は全件を読みます。件数が大きくなれば差分の方式が要ります。
+
+### Test
+
+`apps/backend/tests/test_recovery_*.py` と `recovery_support.py` です。`test_recovery_render.py`・`_backup.py` は DB を使わず、`tempfile` の Directory の Bare Repository とその Clone にだけ書きます（git は現在の User で実行し、Remote は Local の Bare Repository）。`test_recovery_postgres.py`・`_cli.py`・`_grants.py` は実 PostgreSQL（`PAW_TEST_DATABASE_URL`）を使い、未設定なら Skip します。`_grants.py` は Backup を非 Superuser の Application の Role で実行し、その Role では Restore できないことを確かめます。
 
 ## DAG Agent Orchestrator
 
