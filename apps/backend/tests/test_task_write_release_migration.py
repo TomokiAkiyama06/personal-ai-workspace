@@ -61,7 +61,7 @@ class OfflineMigrationTest(unittest.TestCase):
         self.assertIn("NOT VALID", sql)
 
     def test_the_revision_follows_the_head_it_was_written_on(self):
-        self.assertEqual(previous_revision(), "0085")
+        self.assertEqual(previous_revision(), "0133")
 
 
 @requires_postgres

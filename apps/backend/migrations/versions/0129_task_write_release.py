@@ -1,7 +1,7 @@
 """The manual release of a crashed process's repository write (issue #129).
 
 Revision ID: 0129
-Revises: 0085
+Revises: 0133
 Create Date: 2026-09-28
 
 Decision 0049 (Proposed): a person may release, by hand, the repository write
@@ -22,7 +22,7 @@ from collections.abc import Sequence
 from alembic import op
 
 revision: str = "0129"
-down_revision: str | Sequence[str] | None = "0085"
+down_revision: str | Sequence[str] | None = "0133"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
