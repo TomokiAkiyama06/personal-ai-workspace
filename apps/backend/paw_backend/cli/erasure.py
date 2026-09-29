@@ -201,10 +201,18 @@ def _run(arguments: argparse.Namespace, err: TextIO | None) -> int:
             _erase(connection, arguments.checkouts_removed, arguments.copies_erased)
         )
     except asyncio.CancelledError:
+        # The erasure of a user commits before its outcome is reported (and the
+        # refusal after it is a write of its own), so a termination can come after
+        # a commit: never claim a rollback (Codex P1, PR #142).
         _say(
             err,
-            "FAILED: the run was terminated (SIGTERM) before it finished. A user "
-            "whose erasure was cut short was rolled back and stays pending deletion.",
+            "FAILED: the run was terminated (SIGTERM) before it finished. The "
+            "erasure of the users it reached may have been committed: check "
+            "audit_events (action auth.user.erase, reason data_erased / erased) "
+            "and each user's status before anything else. A user with a data_erased "
+            "row had the database part erased at that time; confirm with "
+            "--copies-erased only after erasing the backups and WAL made up to "
+            "then.",
         )
         return EXIT_ERASURE_FAILED
     except ErasureAlreadyRunningError:

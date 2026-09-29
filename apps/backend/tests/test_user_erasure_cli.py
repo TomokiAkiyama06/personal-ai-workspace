@@ -12,8 +12,9 @@ import io
 import unittest
 import uuid
 from pathlib import Path
+from unittest import mock
 
-from paw_backend.auth.onboarding.erasure import UserErasureService
+from paw_backend.auth.onboarding.erasure import ErasureOutcome, UserErasureService
 from paw_backend.cli import erasure as cli
 
 from .auth_support import TEST_DATABASE_URL, requires_postgres
@@ -195,6 +196,32 @@ class RunCommandTest(ErasureTestCase):
         code, _, err = await self.owner_run(["user-erasure-run"])
         self.assertEqual(code, cli.EXIT_OK, err)
         self.assertIn("erased=0", err)
+
+    async def test_a_termination_after_the_commit_is_not_reported_as_rolled_back(
+        self,
+    ):
+        # Codex P1 (PR #142): SIGTERM while the refusal after the committed
+        # erasure is written. The database erasure (and its data_erased row) is
+        # committed; telling the operator it rolled back could make them confirm
+        # the copies on the next run without erasing the backups / WAL made by it.
+        bob = await self.deleted_long_ago("bob")
+        deny = UserErasureService._deny
+
+        async def terminated(service, user_id, outcome, correlation_id):
+            if outcome is ErasureOutcome.COPIES_PENDING:
+                raise asyncio.CancelledError
+            await deny(service, user_id, outcome, correlation_id)
+
+        with mock.patch.object(UserErasureService, "_deny", terminated):
+            code, _, err = await self.owner_run(["user-erasure-run"])
+
+        self.assertEqual(code, cli.EXIT_ERASURE_FAILED)
+        self.assertNotIn("rolled back", err)
+        self.assertIn("may have been committed", err)
+        self.assertIn("data_erased", err)
+        self.assertEqual(await self.rows_left(bob.id), {})
+        self.assertEqual(await self.status_of(bob.id), "pending_deletion")
+        self.assertEqual(await self.erase_audit(), [("allow", "data_erased", bob.id)])
 
     async def test_unconfirmed_copies_keep_the_user_pending_and_fail_the_run(self):
         bob = await self.deleted_long_ago("bob")
