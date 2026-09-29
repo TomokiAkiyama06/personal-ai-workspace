@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "task_id": "paw-seed-v1-hist-09-ssh-git-runner",
+  "kind": "historical",
+  "repository": {
+    "locator": "paw-dataset://paw-seed-v1/paw-seed-v1-hist-09-ssh-git-runner",
+    "starting_commit": "f8ff65563122b3558b72c50a2cc3939b171d8006"
+  },
+  "issue_text": "# ssh-git-runner（元: PR #110）\n\n## Issue\n\n### ユーザーごとのLinux Userでgitを実行するGitRunnerを実装する（SSH経由、PAW-027の追補）\n\n## 背景\n\nPAW-027（PR #98、Decision 0017 §3）のRepository登録・Checkoutは、gitをBackendのProcessのUserとして実行します。Backendを1つのサービスUserで動かす配置では、ユーザーごとのCheckout（そのUserのhome配下）をCloneできません。\n\n人間の回答（2026-09-25）: ユーザーごとに割り振られたSSHで、そのUser自身のLinux Userとしてgitを実行する方針でよい（このServerは、すでにLinux Userを分けている）。\n\n## 方針（案。Decisionで承認を得る）\n\n- `GitRunner`の実装を1つ追加する: Backend → `ssh <linux user>@localhost`（Userごとの専用Key）→ git。`LoginNameAccountDirectory`の対応（`login_name`＝Linux User）をそのまま使う。\n- 制約（Backendが全Userのshellを持つ形にしない）: Keyは`command=`で、決まったWrapper（gitの許可した副コマンドと、そのUserのworkspace配下だけ）に固定し、`from=\"127.0.0.1\"`・`no-pty`・`no-agent-forwarding`・`no-port-forwarding`を付ける。Host Keyを固定。Key（秘密鍵）はBackend専用のUserだけが読める場所に置き、Log・Auditに出さない。\n- `sshd`の`AllowUsers`（このServerは現在`uesr`と`newuser`のみ）と、Linux Account・Keyの作成手順（Admin操作）を、運用文書にする。\n- 検証: 所有者の異なる実Accountで、Clone・登録・Checkout・拒否を確認する（PAW-027では、別Linux Userでの実行を確認できていない）。\n\n## 未決\n\n- Wrapperの許可する操作の範囲、Keyの発行・失効・回転の手順、Backendが停止したときの扱い、Windows/他OS（対象外か）。\n\n## 変更の説明（元のPRの説明から、検証結果と運用上の記述を除いたもの）\n\n### 概要\n\nIssue #105（PAW-027 の追補）: `GitRunner`（`apps/backend/paw_backend/repositories/git.py`）の実装として、User ごとの専用 SSH 鍵経由で対象 Linux User 自身として git を実行する `SshGitRunner` を追加します。あわせて、その方針（Wrapper が許可する git 副コマンド、鍵の発行・失効・回転、エラー処理、移行手順）を Decision 0029（Proposed、未承認）として提案します。\n\nDecision 0017 §4（承認済み）は git を Backend の Process の Linux User としてだけ実行し、一致しなければ拒否します。Backend を 1 つの Service 用 User で動かす配備では、これにより User ごとの Checkout（PAW-027 の目的）が実質的に動きません。人間の回答（2026-09-25、Issue #105 で確認済み）どおり、`ssh <linux user>@127.0.0.1`（User ごとの専用鍵）経由で、Forced Command の Wrapper に委ねる形の `GitRunner` 実装を追加しました。\n\n**この PR は、Wrapper Script の実配置・鍵配布・`sshd_config` の変更、および本番の呼び出し経路への配線は行いません**（Issue #105 の指示どおり範囲外）。コード側の `GitRunner` 抽象化・呼び出し側の差し替え・エラー処理だけを実装しています。\n\n### 内容\n\n- `apps/backend/paw_backend/repositories/ssh.py`（新規）: `SshKeyDirectory`（継ぎ目）、`TemplateSshKeyDirectory`（既定実装）、`SshGitRunnerPolicy`（`PAW_REPOSITORY_SSH_*` の検証済み値）、`build_remote_command`（Wire Format の構築。各語を `shlex.quote` してから連結し、`ssh` 自身の連結に依存しない）、`SshGitRunner`（`GitRunner` Protocol の実装）。\n- `apps/backend/paw_backend/repositories/git.py`: `SubprocessGitRunner` と `SshGitRunner` が共有する Process 実行（Timeout・出力上限・Process Group ごとの Kill）を `run_subprocess` として切り出しました（挙動は変えていません。既存の `tests/test_repositories_git.py` がそのまま通ることで確認しています）。`validate_allowed_protocols` も両者で共有します。\n- `apps/backend/paw_backend/repositories/errors.py`: `GitFailure.SSH_UNAVAILABLE`（`ssh` 自身の終了コード 255。接続失敗・鍵拒否・Host Key 不一致・対象 Linux User 不在などをまとめて表す）、`GitFailure.SSH_KEY_UNAVAILABLE`（鍵 File が無い・条件を満たさない）を追加しました。\n- `apps/backend/paw_backend/config.py`: `PAW_REPOSITORY_SSH_HOST` / `_PORT` / `_CONNECT_TIMEOUT_SECONDS` / `_KNOWN_HOSTS_PATH` を追加しました。\n- `apps/backend/paw_backend/repositories/service.py`: `RepositoryService.from_policy` の docstring を更新し、`runner` に `SshGitRunner` を渡すのが移行の全体であることを明記しました（`policy`・`accounts`・DB の行は何も変わりません）。\n- `apps/backend/README.md`: 「Repository Registration / Per-user Checkout」に `ssh.py` の説明、`SshGitRunner` の挙動、設定、Test の節を追記しました。\n- `docs/decisions/0029-per-user-git-runner-ssh.md`（新規、**Proposed**）: Wrapper が許可する git 副コマンドの一覧（`GitClient` が実際に発行する 6 つに限定）、鍵の発行・失効・回転、SSH 接続失敗と Linux User 未作成の扱い（区別できない旨）、既存経路からの移行手順、Human の判断点。`docs/decisions/README.md` に行を追加しました。\n\n### 受け入れ条件\n\n- [x] `GitRunner` Protocol のもう 1 つの実装として `SshGitRunner` を追加する。\n- [x] 既存の git 実行箇所（`GitClient`、`RepositoryService.from_policy` の `runner` 引数）は、実装を差し替えるだけで済む形にする。\n- [x] SSH 接続失敗・鍵が使えない・Linux User 未作成などのエラーを、閉じた `GitFailure` の Enum として扱う。\n- [x] Decision 0029 を提案し、`docs/decisions/README.md` に行を追加する。\n- [x] 既存の PAW-027 実装のテスト（`test_repositories_git.py` ほか）が引き続き通る。\n\n### テスト\n\n```\ncd apps/backend\n.venv/bin/python -m unittest discover -s tests -t .   # 6376 tests, OK (skipped=3196: PAW_TEST_DATABASE_URL 未設定)\n.venv/bin/ruff format --check . && .venv/bin/ruff check .\n```\n\n`tests/test_repositories_ssh.py`（新規、DB を使わない）は、実 SSH にも実 Linux User にも依存しません。`ssh_executable` を、この Test だけが書く Fake の実行 File に差し替え、次を確認します。\n\n- 固定の Option（鍵の Path、Port、`BatchMode=yes`、`StrictHostKeyChecking=yes`、`ConnectTimeout` 等）が毎回送られること。\n- Wire Format（`build_remote_command`）が敵対的な文字列（Shell Metacharacter、改行、引用符）を含めて往復すること。\n- Fake を「Forced Command の Wrapper ならこう読むはず」という契約どおりに実装し（`shlex.split` で分解、Protocol Tag を確認、cwd/`GIT_CEILING_DIRECTORIES` を設定して実 git を起動）、`GitClient.inspect` が `SshGitRunner` 経由でも `SubprocessGitRunner` と同じ結果になること。\n- `ssh` 自身の終了コード 255 が `GitFailure.SSH_UNAVAILABLE` に、それ以外の終了コードは通常の `GitResult`（呼び出し元が `NONZERO_EXIT` を判定）になること。\n- 鍵 File がない・権限が緩い・所有者が違う場合は `ssh` を 1 度も起動せず `GitFailure.SSH_KEY_UNAVAILABLE` になること。\n- Timeout・出力超過などの既存の保護（`run_subprocess` 共有後）が SSH 経路でも働くこと。\n\n`PAW_TEST_DATABASE_URL` を設定した実行はこの環境では行えていません（このサンドボックスに使い捨て PostgreSQL が用意できないため）。ただしこの PR は DB の Schema・Migration を一切変更していないため、影響は無いはずです。DB を使う既存の Repository Registration の Test（`test_repositories_service_*.py` 等）はこの PR で変更していません。\n\n## Hidden testが前提にするInterface\n\nHidden testは次のmoduleから次の名前をimportします（既存の名前を含みます）。\n\n- `paw_backend.config`: Settings\n- `paw_backend.repositories`: GitClient, GitCommandError, GitFailure, LinuxAccount, RepositoryPolicy\n- `paw_backend.repositories.ssh`: PROTOCOL_TAG, SshGitRunner, SshGitRunnerPolicy, SshKeyDirectory, TemplateSshKeyDirectory, build_remote_command, validate_identity_template\n\n## 作業の条件\n\n- 作業はこのRepositoryのstarting commitから始めます。既存のTestを削除・無効化したり、期待値を不当に緩めたりしてはいけません。\n- 評価はExecutable Evaluatorが行います。公開されたcheck（visible checks）に加えて、候補から見えないHidden checkがあります。\n- Credential・秘密情報をcode・log・commitへ入れないでください（SECURITY.md）。\n",
+  "visible_checks": [
+    {
+      "id": "lint",
+      "type": "lint",
+      "command": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "apps/backend"
+      ]
+    }
+  ],
+  "hidden_checks": [
+    {
+      "id": "hidden-acceptance",
+      "type": "acceptance",
+      "reference_id": "seed-v1-d4dd45963cd6"
+    },
+    {
+      "id": "hidden-regression",
+      "type": "regression",
+      "reference_id": "seed-v1-b5fbbd47e57b"
+    }
+  ]
+}

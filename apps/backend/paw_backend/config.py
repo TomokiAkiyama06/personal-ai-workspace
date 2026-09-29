@@ -134,6 +134,21 @@ class Settings(BaseSettings):
     # reaped only a day and an hour after it started. 0 turns it off: such rows
     # would then stay ``in_flight`` (counted as requests, without an end).
     connection_reap_interval_seconds: int = Field(default=600, ge=0, le=86_400)
+    # How often the Memory freshness jobs run (stale candidates, expiry) together
+    # with the sweep that finishes the cleanup of ended tasks (open approvals,
+    # ``session_only`` memories) that did not finish right after the task ended
+    # (issue #125, Decision 0047). 0 turns it off: the cleanup of a task's end
+    # then only runs right after the transition, and nothing is marked stale or
+    # expired in storage (the retrieval still judges both by time).
+    freshness_job_interval_seconds: int = Field(default=3_600, ge=0, le=86_400)
+
+    # Memory Markdown Projection (PAW-045, Decision 0038 Proposed): the directory
+    # ``python -m paw_backend.cli memory-projection-run`` writes the Markdown view
+    # of PostgreSQL's memories into (on the HDD in the deployment, for example
+    # ``/srv/personal-ai/memory``). Unset: the command refuses to run. The path is
+    # checked when the command runs (``memory/projection/writer.py``): absolute,
+    # canonical, outside every git work tree and every home directory.
+    memory_projection_dir: Path | None = None
 
     # Repository registration (PAW-027, Decision 0017). Where a user's checkouts
     # live below their home; the roots (per user: ``{home}`` and ``{user}``) an
@@ -237,6 +252,7 @@ class Settings(BaseSettings):
         "app_database_role",
         "operator_database_role",
         "passkey_rp_id",
+        "memory_projection_dir",
         mode="before",
     )
     @classmethod
@@ -392,6 +408,15 @@ class Settings(BaseSettings):
         if 0 < value < 60:
             raise ValueError(
                 "connection_reap_interval_seconds must be 0 (off) or 60 to 86400"
+            )
+        return value
+
+    @field_validator("freshness_job_interval_seconds")
+    @classmethod
+    def _freshness_interval_is_off_or_at_least_a_minute(cls, value: int) -> int:
+        if 0 < value < 60:
+            raise ValueError(
+                "freshness_job_interval_seconds must be 0 (off) or 60 to 86400"
             )
         return value
 

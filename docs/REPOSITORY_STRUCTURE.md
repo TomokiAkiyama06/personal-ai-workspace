@@ -183,9 +183,12 @@ personal-ai-workspace/
 │  │  │  │     └─ validation.py
 │  │  │  ├─ orchestrator/
 │  │  │  │  ├─ __init__.py
+│  │  │  │  ├─ authority.py
+│  │  │  │  ├─ composition.py
 │  │  │  │  ├─ config.py
 │  │  │  │  ├─ domain.py
 │  │  │  │  ├─ errors.py
+│  │  │  │  ├─ freshness_loop.py
 │  │  │  │  ├─ gateway.py
 │  │  │  │  ├─ jsonvalue.py
 │  │  │  │  ├─ limits.py
@@ -199,6 +202,7 @@ personal-ai-workspace/
 │  │  │  │  ├─ scheduling.py
 │  │  │  │  ├─ scope.py
 │  │  │  │  ├─ store.py
+│  │  │  │  ├─ task_end.py
 │  │  │  │  └─ validation.py
 │  │  │  ├─ projects/
 │  │  │  │  ├─ __init__.py
@@ -407,10 +411,13 @@ personal-ai-workspace/
 │  │     ├─ test_middleware.py
 │  │     ├─ test_migrations.py
 │  │     ├─ test_orchestrator_argument_validation.py
+│  │     ├─ test_orchestrator_authority.py
 │  │     ├─ test_orchestrator_budget.py
+│  │     ├─ test_orchestrator_composition.py
 │  │     ├─ test_orchestrator_control.py
 │  │     ├─ test_orchestrator_failures.py
 │  │     ├─ test_orchestrator_fenced_commands.py
+│  │     ├─ test_orchestrator_freshness_loop.py
 │  │     ├─ test_orchestrator_grants.py
 │  │     ├─ test_orchestrator_lease.py
 │  │     ├─ test_orchestrator_migration.py
@@ -428,6 +435,7 @@ personal-ai-workspace/
 │  │     ├─ test_orchestrator_scope.py
 │  │     ├─ test_orchestrator_shutdown.py
 │  │     ├─ test_orchestrator_store.py
+│  │     ├─ test_orchestrator_task_end.py
 │  │     ├─ test_orchestrator_tools.py
 │  │     ├─ test_orchestrator_wiring.py
 │  │     ├─ test_owner_no_web_path.py

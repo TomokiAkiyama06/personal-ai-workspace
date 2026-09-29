@@ -66,4 +66,7 @@ jobs:
         env:
           # Enables the backend tests that need a real PostgreSQL server.
           PAW_TEST_DATABASE_URL: postgresql://postgres:paw-ci-throwaway@127.0.0.1:5432/postgres
+          # The seed benchmark's hidden checks start one throwaway container of this image
+          # per check (Decision 0041); the same digest as the service above.
+          PAW_TEST_POSTGRES_IMAGE: pgvector/pgvector:pg18@sha256:2ba9ca5f2e7daa0f0e7723cba1ee9167bab54efd3640516a44ac1a928dd67e7a
         run: python -m pre_commit run --all-files

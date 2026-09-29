@@ -289,8 +289,14 @@ def build_project_stop_loop(
     project_gate: ProjectGate,
     interval_seconds: float = DEFAULT_STOP_INTERVAL_SECONDS,
     clock: Clock | None = None,
+    tasks: TaskService | None = None,
 ) -> ProjectTaskStopLoop:
     """The loop the application runs, wired the way production wires it.
+
+    ``tasks`` is the application's own ``TaskService`` (issue #125: the one of
+    ``composition.build_task_execution``, whose listener does everything a task's
+    end needs, the approval revocation included). Without it the loop builds one
+    with the approval revocation listener only, as before.
 
     The task service carries the approval revocation listener (Decision 0006,
     section 9: a task that ends, here by Cancel, keeps no usable approval), so a
@@ -305,14 +311,17 @@ def build_project_stop_loop(
     ``ProjectStateGate()`` (``paw_backend.app``); the tests that have no projects
     pass a gate that admits everything, which production code never has.
     """
-    approvals = ApprovalService(
-        PostgresApprovalStore(database), PostgresAuditSink(database)
-    )
-    tasks = TaskService(
-        database,
-        listeners=[approvals.revoke_on_task_end],
-        project_gate=project_gate,
-    )
+    if tasks is None:
+        approvals = ApprovalService(
+            PostgresApprovalStore(database), PostgresAuditSink(database)
+        )
+        tasks = TaskService(
+            database,
+            listeners=[approvals.revoke_on_task_end],
+            project_gate=project_gate,
+        )
+    elif not isinstance(tasks, TaskService):
+        raise TypeError("tasks must be a TaskService")
     queue = TaskQueue(database, project_gate=project_gate)
     stopper = ProjectTaskStopper(database, tasks, queue)
     return ProjectTaskStopLoop(
