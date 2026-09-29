@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "task_id": "paw-seed-v1-hist-05-worktree-unreaped-child",
+  "kind": "historical",
+  "repository": {
+    "locator": "paw-dataset://paw-seed-v1/paw-seed-v1-hist-05-worktree-unreaped-child",
+    "starting_commit": "8ec22784b90e8d2a035769c059492c013cb6b309"
+  },
+  "issue_text": "# worktree-unreaped-child（元: PR #81）\n\n### 課題\n\n`benchmarks/worktree_runner.py`の`WorktreeRunner.execute()`は、`Popen`の直後に候補Processの監督（`_Leader`の構築など）に失敗したとき、まだ誰も監督していない子を止めるため、`os.killpg(pid)`と`Popen.kill()`を無条件に送っています。\nEvaluatorが`SIGCHLD`を無視している場合や、別のReaperがその子を先に回収している場合、そのPID / Process Group IDは予約されておらず、再利用された無関係のProcessへSignalが届き得ます。\n\n## 変更の説明（元のPRの説明から、検証結果と運用上の記述を除いたもの）\n\n### 概要\n\n#61（PAW-012）で入れた`WorktreeRunner._stop_unsupervised`の欠陥を直します。#63（PAW-013）のCodexレビューが、同じ欠陥を指摘しました。\n\n### 問題\n\n`Popen`の直後に`_Leader`の構築が失敗すると、まだ誰も監督していない子を止めるため、`os.killpg(pid)`と`Popen.kill()`を**無条件に**送っていました。SIGCHLDを無視するEvaluatorや、別のReaperがその子を先に回収していると、そのPID / Process Group IDは予約されておらず、再利用された無関係のProcessへSignalが届き得ます。\n\n### 修正\n\n- `execute()`が、`Popen`の直後に子の開始時刻（`/proc`）を記録します。\n- `_stop_unsupervised(process, started_at)`は、`_is_unreaped_child`（`waitid(WNOWAIT)`で、まだ自分の未回収の子であることと、開始時刻の一致）を確かめてからだけ`killpg`し、回収します。別のReaperが回収済みなら、何も送りません（`Popen`が他人を回収しないよう`returncode`を設定）。Streamは常に閉じます。\n- `Popen.kill()`は呼びません（`killpg`が、独立したSessionのLeaderを含みます）。\n\n### テスト\n\nこの経路には、これまでテストがありませんでした。回収済みの子へ送らない（`os.killpg` / `os.kill` / `Popen.kill`のSpy）、生きている子とそのGroupは止める、記録した同一性が要る、開始時刻がなくても回収済みの子へ送らない、記録した同一性があれば止めて回収する、の5件を追加しました。修正前は失敗し、変異（回収済みの確認を外す、開始時刻の比較を外す、`ChildProcessError`の分岐を外す）も検出されます。`python .github/scripts/run_ci.py`は成功です。\n\n## Hidden testが前提にするInterface\n\nHidden testは次のmoduleから次の名前をimportします（既存の名前を含みます）。\n\n- `benchmarks`: worktree_runner\n- `benchmarks.worktree_runner`: WorktreeRun, WorktreeRunner, WorktreeRunnerError\n\n## 作業の条件\n\n- 作業はこのRepositoryのstarting commitから始めます。既存のTestを削除・無効化したり、期待値を不当に緩めたりしてはいけません。\n- 評価はExecutable Evaluatorが行います。公開されたcheck（visible checks）に加えて、候補から見えないHidden checkがあります。\n- Credential・秘密情報をcode・log・commitへ入れないでください（SECURITY.md）。\n",
+  "visible_checks": [
+    {
+      "id": "lint",
+      "type": "lint",
+      "command": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "benchmarks"
+      ]
+    }
+  ],
+  "hidden_checks": [
+    {
+      "id": "hidden-acceptance",
+      "type": "acceptance",
+      "reference_id": "seed-v1-2d38092c316e"
+    },
+    {
+      "id": "hidden-regression",
+      "type": "regression",
+      "reference_id": "seed-v1-696889365644"
+    }
+  ]
+}
