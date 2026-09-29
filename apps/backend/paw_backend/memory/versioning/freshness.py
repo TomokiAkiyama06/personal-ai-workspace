@@ -108,6 +108,11 @@ class FreshnessMaintenance:
         self._clock = clock
         self._batch = validate_int("batch", batch, low=1, high=limits.MAX_SWEEP_BATCH)
 
+    @property
+    def batch(self) -> int:
+        """The most versions one call changes (a job that changed fewer is done)."""
+        return self._batch
+
     def _now(self) -> datetime:
         return validate_aware_datetime("clock", self._clock())
 
