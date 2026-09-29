@@ -46,7 +46,13 @@ from paw_backend.connections.validation import (
 )
 from paw_backend.db import Database, DatabaseNotConfiguredError
 
-from .connections_support import CANARY, FakeAdapter, FakeResolver, handle
+from .connections_support import (
+    CANARY,
+    FakeAdapter,
+    FakeLeaseVerifier,
+    FakeResolver,
+    handle,
+)
 from .support import make_settings
 
 ADMIN = Principal(uuid.uuid4(), SystemRole.ADMIN)
@@ -140,7 +146,12 @@ def make_service() -> ConnectionService:
     for kind in ConnectionKind:
         adapters.register(FakeAdapter(kind))
     service = ConnectionService(
-        database, Authorizer(sink), sink, adapters, FakeResolver()
+        database,
+        Authorizer(sink),
+        sink,
+        adapters,
+        FakeResolver(),
+        lease=FakeLeaseVerifier(),
     )
     service.audit_events = sink.events  # type: ignore[attr-defined]
     return service
@@ -429,6 +440,10 @@ class ConstructionTest(unittest.TestCase):
             {"clock": lambda: None},  # a clock needs allow_explicit_clock
             {"clock": "not callable", "allow_explicit_clock": True},
             {"allow_explicit_clock": "yes"},
+            # The queue lease check (issue #153): an object with an async
+            # ``check(task_id, lease)``, or nothing (the fail-closed default).
+            {"lease": object()},
+            {"lease": SimpleNamespace(check=lambda task_id, lease: None)},
         ]
         for options in bad:
             with self.subTest(options=str(options)):
@@ -450,6 +465,7 @@ class ConstructionTest(unittest.TestCase):
             health_timeout_seconds=2.5,
             clock=lambda: None,
             allow_explicit_clock=True,
+            lease=FakeLeaseVerifier(),
         )
 
     def test_a_test_clock_needs_its_opt_in_and_must_be_callable(self):

@@ -397,6 +397,40 @@ class IntegrationNodeTest(WorktreeTestCase):
         self.assertEqual(again.outcome, Out.DAG_SUCCEEDED)
         self.assertEqual(len(workspaces.integrated), 2)
 
+    async def test_an_integration_that_cannot_be_recorded_is_not_evaluated(self):
+        # Codex P2 on PR #130 (orchestrator.py:1389): evaluating a HEAD the
+        # attempt does not name (or names only for some repositories) would let
+        # the gate judge a result nobody recorded. The task fails, and a Retry
+        # integrates and records again.
+        workspaces = FakeWorkspaces()
+        h = self.harness(authority=self.authority(), worktrees=workspaces)
+        task_id = await self.prepare(h, make_plan(node("a")))
+        update_attempt = h.tasks.update_attempt
+
+        async def broken(*args, **kwargs):
+            raise RuntimeError("database down: secret detail")
+
+        h.tasks.update_attempt = broken
+        try:
+            report = await h.orchestrator.run_once("w1")
+        finally:
+            h.tasks.update_attempt = update_attempt
+
+        self.assertEqual(report.outcome, Out.INTEGRATION_FAILED)
+        snapshot = await h.tasks.restore(task_id)
+        self.assertEqual(snapshot.state, TaskState.FAILED)
+        messages = [log.message for log in snapshot.recent_logs]
+        self.assertIn("Integration failed (RuntimeError)", messages)
+        self.assertFalse(any("secret detail" in m for m in messages))
+
+        await h.tasks.execute(task_id, TaskCommand.RETRY, actor=self.user)
+        await h.orchestrator.enqueue_task(task_id, preset=BudgetPreset.STANDARD)
+        self.assertEqual(
+            (await h.orchestrator.run_once("w2")).outcome, Out.DAG_SUCCEEDED
+        )
+        worktree = (await h.tasks.restore(task_id)).attempt.repository(self.r1).worktree
+        self.assertEqual(worktree.head_commit, "a" * 40)
+
     async def test_an_unexpected_error_is_named_by_its_class_only(self):
         workspaces = FakeWorkspaces(integrate_error=RuntimeError("token=abc"))
         h = self.harness(authority=self.authority(), worktrees=workspaces)
