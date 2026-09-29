@@ -1,8 +1,9 @@
 """Which module handles a ``python -m paw_backend.cli`` command line.
 
-``owner`` (PAW-021) and ``retention`` (Issue #117) keep their own parsers, exit
-codes and database URLs (``PAW_OPERATOR_DATABASE_URL`` vs.
-``PAW_MIGRATION_DATABASE_URL``); ``compute`` (PAW-036) reads the GPU and uses no
+``owner`` (PAW-021), ``retention`` (Issue #117) and ``memory_projection``
+(PAW-045) keep their own parsers, exit codes and database URLs
+(``PAW_OPERATOR_DATABASE_URL`` vs. ``PAW_MIGRATION_DATABASE_URL`` vs.
+``PAW_DATABASE_URL``); ``compute`` (PAW-036) reads the GPU and uses no
 database: the first argument picks one.
 """
 
@@ -10,14 +11,16 @@ import sys
 from collections.abc import Sequence
 from types import ModuleType
 
-from paw_backend.cli import compute, owner, retention
+from paw_backend.cli import compute, memory_projection, owner, retention
 
 
 def command_module(argv: Sequence[str]) -> ModuleType:
-    """``retention`` and ``compute`` for their commands, ``owner`` for everything
-    else (and help)."""
+    """``retention`` / ``memory_projection`` / ``compute`` for their commands,
+    ``owner`` for everything else (and help)."""
     if argv and argv[0] in retention.COMMANDS:
         return retention
+    if argv and argv[0] in memory_projection.COMMANDS:
+        return memory_projection
     if argv and argv[0] in compute.COMMANDS:
         return compute
     return owner
