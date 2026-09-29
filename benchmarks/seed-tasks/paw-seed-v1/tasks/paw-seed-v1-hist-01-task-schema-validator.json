@@ -1,0 +1,30 @@
+{
+  "schema_version": "1.0",
+  "task_id": "paw-seed-v1-hist-01-task-schema-validator",
+  "kind": "historical",
+  "repository": {
+    "locator": "paw-dataset://paw-seed-v1/paw-seed-v1-hist-01-task-schema-validator",
+    "starting_commit": "c895022bb0d6711442d7170acd2e95a60cc79716"
+  },
+  "issue_text": "# task-schema-validator（元: PR #58）\n\n## Issue\n\n### PAW-010: Benchmark Task Schemaを定義する\n\n## Goal\n\n原文にGoal本文の記載なし。\n\n## Acceptance Criteria\n\n- [ ] Task ID / Repo / starting commit / issue text / visible checks / hidden checks metadataを表現可能\n- [ ] Historical / Spec / Injected Bugを区別可能\n- [ ] Machine-readable schemaを定義\n- [ ] Schema versionを持つ\n\n## Dependencies\n\n- PAW-001 (#3)\n\n## Environment\n\n- GPU: not required\n- Server: not required\n- Human decision: not required\n\n## 変更の説明（元のPRの説明から、検証結果と運用上の記述を除いたもの）\n\n### 概要\n\nPAW-010のBenchmark Task Schema v1と、最初のBenchmark Pythonコードを検証する最小のPAW-004 CI拡張を追加します。\n\nRefs #7 (PAW-010), #6 (PAW-004)。IssueのCloseは行いません。\n\n### 変更\n\n- Draft 2020-12のJSON SchemaでTask ID、Repository locator、starting commit、issue text、visible/hidden checksとschema versionを定義。\n- `historical`、`spec`、`injected_bug`を区別し、3種類のvalid fixtureを追加。\n- Hidden checkはopaqueな`reference_id`のみとし、本文・command・pathを拒否。\n- Taskを実行・Repositoryを取得しないvalue-free validator CLIとinvalid fixtureを追加。\n- `benchmarks/`だけにRuff format/lintを適用し、schema testとJSON構文検証を既存の固定`Repository checks` jobへ追加。\n\nHidden Testの保管先、referenceの解決、Candidateからの隔離、Worktree実行はPAW-012/013の対象で、このPRでは確定・実装しません。\n\n## Hidden testが前提にするInterface\n\nHidden testは次のmoduleから次の名前をimportします（既存の名前を含みます）。\n\n- `benchmarks.validate_task`: load_schema, main, validate_document\n\n## 作業の条件\n\n- 作業はこのRepositoryのstarting commitから始めます。既存のTestを削除・無効化したり、期待値を不当に緩めたりしてはいけません。\n- 評価はExecutable Evaluatorが行います。公開されたcheck（visible checks）に加えて、候補から見えないHidden checkがあります。\n- Credential・秘密情報をcode・log・commitへ入れないでください（SECURITY.md）。\n",
+  "visible_checks": [
+    {
+      "id": "lint",
+      "type": "lint",
+      "command": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "benchmarks"
+      ]
+    }
+  ],
+  "hidden_checks": [
+    {
+      "id": "hidden-acceptance",
+      "type": "acceptance",
+      "reference_id": "seed-v1-770a1528b58b"
+    }
+  ]
+}
