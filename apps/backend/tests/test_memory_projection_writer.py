@@ -279,6 +279,79 @@ class RootTest(WriterTestCase):
         self.assertEqual(len(errors), 1)
 
 
+class NestedGitTest(WriterTestCase):
+    """A git repository found inside the projection fails the run before writing.
+
+    ``open_target`` checks the root and every directory above it; a ``.git``
+    made later inside a managed directory would otherwise let ``sync`` write the
+    projection into that checkout."""
+
+    def assert_refused_unchanged(self, memories) -> None:
+        before = tree(self.root)
+        with self.assertRaises(ProjectionTargetError) as caught:
+            self.sync(memories)
+        self.assertEqual(caught.exception.problem, TargetProblem.INSIDE_GIT_WORK_TREE)
+        self.assertNotIn(str(self.tmp.base), str(caught.exception))
+        self.assertEqual(tree(self.root), before)
+
+    @staticmethod
+    def make_repository(directory: Path) -> None:
+        (directory / ".git").mkdir()
+        (directory / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+
+    def test_a_repository_in_a_user_directory_is_refused(self):
+        value = memory()
+        self.sync([value])
+        self.make_repository(self.root / "users" / str(value.owner_user_id))
+        self.assert_refused_unchanged([moved(value, content="new", version_number=2)])
+
+    def test_a_repository_in_a_directory_being_emptied_is_refused(self):
+        value = memory()
+        self.sync([value])
+        self.make_repository(self.root / "users" / str(value.owner_user_id))
+        self.assert_refused_unchanged([])
+
+    def test_a_repository_in_a_top_directory_is_refused(self):
+        value = memory(scope="project")
+        self.sync([value])
+        self.make_repository(self.root / "projects")
+        self.assert_refused_unchanged([moved(value, content="new", version_number=2)])
+
+    def test_a_repository_in_the_shared_directory_is_refused(self):
+        value = memory(scope="shared")
+        self.sync([value])
+        self.make_repository(self.root / "shared")
+        self.assert_refused_unchanged([moved(value, content="new", version_number=2)])
+
+    def test_a_git_file_of_a_linked_worktree_is_refused(self):
+        value = memory()
+        self.sync([value])
+        user_dir = self.root / "users" / str(value.owner_user_id)
+        (user_dir / ".git").write_text("gitdir: /elsewhere/.git/worktrees/x\n")
+        self.assert_refused_unchanged([moved(value, content="new", version_number=2)])
+
+    def test_a_repository_made_in_the_root_after_opening_is_refused(self):
+        value = memory()
+        self.sync([value])
+        target = self.open()
+        self.make_repository(self.root)
+        with self.assertRaises(ProjectionTargetError) as caught:
+            target.sync(
+                render_projection([moved(value, content="new", version_number=2)])
+            )
+        self.assertEqual(caught.exception.problem, TargetProblem.INSIDE_GIT_WORK_TREE)
+        self.assertFalse((self.root / INCOMPLETE_NAME).exists())
+
+    def test_an_empty_git_directory_in_a_leaf_is_not_a_repository(self):
+        value = memory()
+        self.sync([value])
+        user_dir = self.root / "users" / str(value.owner_user_id)
+        (user_dir / ".git").mkdir()
+        report = self.sync([moved(value, content="new", version_number=2)])
+        self.assertEqual(report.written, 2)
+        self.assertEqual(report.unmanaged, 1)
+
+
 class LinkTest(WriterTestCase):
     def test_a_link_where_a_directory_belongs_fails_and_is_not_followed(self):
         value = memory()

@@ -37,8 +37,9 @@ where it writes and who can read what it wrote:
 
 * **Checked before changing.** ``sync`` first checks every directory and file
   name the plan needs (no link, no file where a directory belongs, no directory
-  where a file belongs, owned by this user), so a tree the run could not finish
-  fails before anything is written or deleted.
+  where a file belongs, owned by this user, no git repository (``.git``) in the
+  root or in any managed directory), so a tree the run could not finish, or a
+  checkout made inside it, fails before anything is written or deleted.
 * **An unfinished write is visible.** Before its first change ``sync`` writes
   ``.paw-memory-projection-incomplete`` into the root; only ``mark_complete``
   (called by the runner after the ``completed`` outcome is recorded) removes it.
@@ -168,15 +169,36 @@ def _is_git_entry(path: str) -> bool:
     directory is not a repository to git (``not a git repository``) and does not
     count, so a stray one in ``/tmp`` does not block every path below it.
     """
+    return _is_git_entry_at(path, None)
+
+
+def _is_git_entry_at(path: str, dir_fd: int | None) -> bool:
+    """``_is_git_entry`` of ``path`` relative to ``dir_fd`` (``None``: absolute)."""
     try:
-        status = os.lstat(path)
+        status = os.lstat(path, dir_fd=dir_fd)
     except (FileNotFoundError, NotADirectoryError):
         return False  # nothing there, or the directory itself is a file
     except OSError:
         return True  # cannot tell: refuse
     if not stat.S_ISDIR(status.st_mode):
         return True
-    return os.path.lexists(os.path.join(path, "HEAD"))
+    try:
+        os.lstat(os.path.join(path, "HEAD"), dir_fd=dir_fd)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError:
+        return True  # cannot tell: refuse
+    return True
+
+
+def _refuse_git(fd: int) -> None:
+    """Refuse a directory of the projection that holds a git repository.
+
+    ``check_root_path`` looks at the root and above when the target is opened; a
+    ``.git`` made later in the root or in any managed directory would make
+    ``sync`` write the projection into that checkout."""
+    if _is_git_entry_at(".git", fd):
+        raise ProjectionTargetError(TargetProblem.INSIDE_GIT_WORK_TREE)
 
 
 def check_root_path(root: str | Path, protected: Collection[str]) -> str:
@@ -396,13 +418,16 @@ class LockedTarget:
 
         Visits every directory ``sync`` will open: the wanted ones and the
         existing managed ones it would clean up (a top directory, a ``<uuid>``
-        directory), exactly as ``_sync_top`` / ``_sync_keyed`` decide."""
+        directory), exactly as ``_sync_top`` / ``_sync_keyed`` decide, and
+        refuses a git repository (``.git``) in the root or in any of them."""
+        _refuse_git(self._root_fd)
         for top in _ALL_TOP_DIRECTORIES:
             wanted = wanted_tops.get(top)
             fd = _open_existing(self._root_fd, top, required=wanted is not None)
             if fd is None:
                 continue
             try:
+                _refuse_git(fd)
                 if top == SHARED_DIRECTORY:
                     _preflight_leaf(fd, (wanted or {}).get("", {}))
                     continue
@@ -414,6 +439,7 @@ class LockedTarget:
                     if child is None:
                         continue
                     try:
+                        _refuse_git(child)
                         _preflight_leaf(child, wanted.get(name, {}))
                     finally:
                         os.close(child)
