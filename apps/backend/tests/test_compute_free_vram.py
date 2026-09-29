@@ -184,6 +184,33 @@ class FreeVramAdmissionTest(unittest.IsolatedAsyncioTestCase):
         status = await self.scheduler.refresh()
         self.assertEqual(status.vram.committed, 80 * GIB)
 
+    async def test_a_release_while_the_probe_is_down_still_leaves_memory_external(
+        self,
+    ):
+        # As above, but the first lease ends while the probe cannot be read:
+        # when it is read again, what the released lease left behind must not
+        # be absorbed by the second lease's reservation.
+        first = (await self.scheduler.try_acquire(coding(vram=5 * GIB))).lease
+        second = (await self.scheduler.try_acquire(coding(vram=5 * GIB))).lease
+        self.probe.resident[JOB_PID] = 5 * GIB
+        await self.scheduler.refresh()
+        self.probe.fail = True
+        await self.scheduler.refresh()
+        await first.release()
+        self.probe.fail = False
+        status = await self.scheduler.refresh()
+        self.assertEqual(status.vram.external, 5 * GIB)
+        self.assertEqual(status.vram.committed, 90 * GIB)
+        self.assertEqual(
+            (await self.scheduler.try_acquire(coding(vram=2 * GIB))).refusal,
+            Refusal.INSUFFICIENT_FREE_VRAM,
+        )
+        del self.probe.resident[JOB_PID]
+        await second.release()
+        status = await self.scheduler.refresh()
+        self.assertEqual(status.vram.external, 0)
+        self.assertEqual(status.vram.committed, 80 * GIB)
+
     async def test_an_ambiguous_release_errs_on_the_safe_side_and_heals(self):
         # Which lease's process holds the memory is not known: when a lease
         # that allocated nothing is released beside one that did, the memory
@@ -433,6 +460,42 @@ class FreeVramAdmissionTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(waiting.done())
         waiting.cancel()
 
+    async def test_a_waiter_held_back_by_its_own_model_no_longer_holds_back_vram(
+        self,
+    ):
+        # A VRAM request on the memory model first waits for VRAM; then its
+        # model fills and a higher class waits ahead of it there. Once the
+        # VRAM is free, it waits for its model only: VRAM work on another
+        # model is not queued behind it.
+        self.probe.external = 9 * GIB  # 2.2 GiB left beyond the headroom
+        await self.scheduler.refresh()
+        waiting = asyncio.create_task(
+            self.scheduler.acquire(
+                ComputeRequest(SU, deployment="memory", vram_bytes=3 * GIB),
+                wait_seconds=600,
+            )
+        )
+        await settle()
+        self.assertEqual(self.scheduler.status().vram_waiting, 1)
+        for _ in range(4):
+            await self.scheduler.try_acquire(ComputeRequest(SU, deployment="memory"))
+        ahead = asyncio.create_task(
+            self.scheduler.acquire(
+                ComputeRequest(CO, deployment="memory"), wait_seconds=600
+            )
+        )
+        await settle()
+        self.probe.external = 0
+        await self.scheduler.refresh()
+        self.assertFalse(waiting.done())
+        self.assertEqual(self.scheduler.status().vram_waiting, 0)
+        admitted = await self.scheduler.try_acquire(
+            ComputeRequest(SU, deployment="embed", vram_bytes=GIB)
+        )
+        self.assertIsNotNone(admitted.lease)
+        waiting.cancel()
+        ahead.cancel()
+
 
 class ModelLoadWarningTest(unittest.IsolatedAsyncioTestCase):
     async def test_a_load_blocked_by_another_workload_warns(self):
@@ -555,6 +618,21 @@ class ExclusiveFreeVramTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.failure, ExclusiveFailure.NOT_FREED)
         self.assertEqual(self.control.actions, [])
         self.assertEqual(self.scheduler.status().mode, SchedulerMode.NORMAL)
+
+    async def test_vram_freed_after_the_deadline_still_warns_that_it_gave_up(self):
+        self.probe.external = 20 * GIB
+        job = asyncio.create_task(
+            self.scheduler.acquire(
+                ComputeRequest(EX, vram_bytes=80 * GIB), wait_seconds=60
+            )
+        )
+        await settle()
+        self.probe.external = 0
+        await self.clock.advance(61)
+        with self.assertRaises(ExclusiveUnavailableError):
+            await job
+        self.assertEqual([e.gave_up for e in self.sink.events], [False, True])
+        self.assertEqual(self.sink.events[-1].work, DeferredWork.EXCLUSIVE)
 
     async def test_a_probe_lost_while_waiting_gives_up_as_unavailable(self):
         self.probe.external = 20 * GIB
