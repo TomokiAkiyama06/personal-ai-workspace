@@ -341,8 +341,6 @@ class IntegrationGate:
             )
 
         for target in targets:
-            if not await self._still_evaluating(task.id, run):
-                return report(GateOutcome.SUPERSEDED)
             try:
                 # Read again for every repository, never the scope the checks
                 # were given (nor the one read for the repository before): the
@@ -358,6 +356,11 @@ class IntegrationGate:
             )
             if repository is None or repository.role is not RepoRole.TARGET:
                 continue
+            # Checked after the scope was read (that read may take long, and a
+            # Cancel or a Retry meanwhile must not push for the old run) and
+            # right before the push (Codex review of #159).
+            if not await self._still_evaluating(task.id, run):
+                return report(GateOutcome.SUPERSEDED)
             try:
                 pull_request = await self._publisher.publish(
                     PublishRequest(

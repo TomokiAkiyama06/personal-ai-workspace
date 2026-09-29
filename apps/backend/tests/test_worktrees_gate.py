@@ -654,6 +654,30 @@ class PublishingGateTest(PostgresOrchestratorTestCase):
             [self.repo],
         )
 
+    async def test_a_task_that_moved_on_while_the_scope_was_read_is_not_published(
+        self,
+    ):
+        # Codex review of #159: the task is cancelled while the scope is read
+        # again for publishing: nothing is pushed for the old run.
+        task_id = await self.task_in_state(TaskState.EVALUATING)
+        gate = self.gate()
+        authority = gate._authority
+        read = authority.parent_scope
+
+        async def cancel_while_reading(task):
+            scope = await read(task)
+            if authority.scope_calls > 1:  # the read before publishing
+                await self.service.execute(task_id, TaskCommand.CANCEL, actor=self.user)
+            return scope
+
+        authority.parent_scope = cancel_while_reading
+
+        report = await gate.evaluate(task_id)
+
+        self.assertEqual(report.outcome, GateOutcome.SUPERSEDED)
+        self.assertEqual(self.publisher.requests, [])
+        self.assertEqual((await self.snapshot(task_id)).state, TaskState.CANCELLED)
+
     async def test_a_target_removed_while_checking_gets_no_pull_request(self):
         task_id = await self.task_in_state(TaskState.EVALUATING)
         gate = self.gate()
