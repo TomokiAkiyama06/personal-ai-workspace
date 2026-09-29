@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "task_id": "paw-seed-v1-hist-11-memory-status-history",
+  "kind": "historical",
+  "repository": {
+    "locator": "paw-dataset://paw-seed-v1/paw-seed-v1-hist-11-memory-status-history",
+    "starting_commit": "fb95d09c78ea22efa9b98e216f8604dda8ce60c6"
+  },
+  "issue_text": "# memory-status-history（元: PR #109）\n\n### 課題（Issue #90 の一部: PAW-040 / PR #71 へのCodex P2指摘）\n\nMemoryの版（`memory_versions`）の`status`と`stale_since`の変更が、履歴（`memory_metadata_changes`）に残りません。今のTriggerは`pinned`と`importance`の変更だけを記録するため、履歴グラフが、いつ・誰が版を非推奨にしたか、古い状態にしたか・戻したかを説明できません。\n\n## 変更の説明（元のPRの説明から、検証結果と運用上の記述を除いたもの）\n\n### 概要\n\nIssue #90（PAW-040・PR #71のCodex P2）: Memoryの版（`memory_versions`）の`status`と`stale_since`の変更が、履歴に残らない問題を直します。今までのTriggerは`pinned`と`importance`の変更だけを記録していたため、履歴グラフが、いつ・誰が版を非推奨にしたか、古い状態にしたか・戻したかを説明できませんでした。Humanが、2026-09-26に、別のPRで今すぐ直すと決めました。\n\n### 内容\n\n- Migration `0071_memory_status_history.py`（`down_revision=\"0030\"`）: 既存の`memory_metadata_changes`に、NULL可の`old_status`・`new_status`・`old_stale_since`・`new_stale_since`を追加します。新しいTableは無く、権限の追加もありません。CHECK（`status_pair`・`status_valid`・`stale_since_needs_status`）を足し、`something_changed`は4列全てを対象にします。古い行は有効なままです（NULLは、当時は記録していなかった印）。\n- Triggerを`UPDATE OF pinned, importance, status, stale_since`に広げました（`CREATE OR REPLACE`、`search_path`は0040と同じく固定）。変更の時刻はDB時計（`clock_timestamp()`）です。値が変わらない更新は何も記録しません。\n- **Actorが無い場合は失敗します**: `status`・`stale_since`の変更も、`pinned`・`importance`と同じく、Actor無しでは失敗します（`actor_type`はNOT NULL）。「system」として黙って記録すると、Actorを付け忘れた書き手を誤って帰属させてしまうためです。\n- Shared Memoryの`_set_status`は、認可されたOwner/Adminを`user`のActorとして名前を付けてから更新します。\n- Downgradeは、状態変更だけを記録した履歴行を削除し、4列を落とします（Pinの変更も伴った行は、行を残して状態の値だけ失います）。開発・テスト用で、docstringとREADMEに記載しました。\n\n### テスト\n\n- `test_memory_status_history.py`: 非推奨・置き換え・復元・古い状態にする・戻す、4列を1回のUPDATEで変える、一連のライフサイクル、変更時刻、値が変わらない更新、Actor無し、Commit後のActor、実際の並行（2接続で行Lockを待つ: 別々の遷移・同じ遷移（1行）・ガードで負ける側・Rollback）。\n- `test_memory_grants.py`（非Superuserのapp role）と`test_shared_memory_status_history.py`。`test_memory_status_history_migration.py`: 既存の版・履歴の行があるDBで、up/down/up。古い行は変わらず残り、downgradeは0040のCatalogと関数を戻します。Autogenerateの差分なし。\n- 既存Testの変更: Actor無しで状態を更新していたテスト（`test_memory_schema.py`の3件、`shared_memory_support.py`、`test_retrieval_leakage.py`）は、Actorを名指すように変えました。「状態・staleを記録しない」と確認していた古いテストは、新しい契約（Actorが要る）のテストに置き換えました。\n- 変異テスト12件を全て検出。`run_ci.py`（`PAW_TEST_DATABASE_URL`あり）: 7,880 tests OK。\n\n## Hidden testが前提にするInterface\n\nHidden testは次のmoduleから次の名前をimportします（既存の名前を含みます）。\n\n- `paw_backend.authz`: Authorizer, Capability, PostgresAuditSink, Principal, ProjectRole, RepoAcl, RepoPermission, SystemRole\n- `paw_backend.db`: Base, Database\n- `paw_backend.memory`: models\n- `paw_backend.memory.acl`: Principal, readable_memory_versions\n- `paw_backend.memory.metadata`: ACTOR_TYPE_SETTING, ACTOR_USER_ID_SETTING, metadata_change_actor\n- `paw_backend.memory.models`: ActorType, Conversation, Memory, MemoryEmbedding, MemoryMetadataChange, MemoryRelation, MemorySource, MemoryVersion, Message, SessionState, TABLE_NAMES\n- `paw_backend.memory.retrieval`: RetrievalQuery, RetrievalResult, limits\n- `paw_backend.memory.shared`: COMPLETED_REASON, CandidateNotFoundError, SharedMemory, SharedMemoryBusyError, SharedMemoryChanges, SharedMemoryNotFoundError, SharedMemoryPermissionError, SharedMemoryStateError, SharedMemoryVersionConflictError, StaticPolicySource, SystemPolicyItem, memory_lock_key\n- `paw_backend.memory.shared.audit`: completion_event\n- `paw_backend.projects`: MemberStatus, ProjectStatus\n\n## 作業の条件\n\n- 作業はこのRepositoryのstarting commitから始めます。既存のTestを削除・無効化したり、期待値を不当に緩めたりしてはいけません。\n- 評価はExecutable Evaluatorが行います。公開されたcheck（visible checks）に加えて、候補から見えないHidden checkがあります。\n- Credential・秘密情報をcode・log・commitへ入れないでください（SECURITY.md）。\n",
+  "visible_checks": [
+    {
+      "id": "lint",
+      "type": "lint",
+      "command": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "apps/backend"
+      ]
+    }
+  ],
+  "hidden_checks": [
+    {
+      "id": "hidden-acceptance",
+      "type": "acceptance",
+      "reference_id": "seed-v1-451b4bc4ce13"
+    },
+    {
+      "id": "hidden-regression",
+      "type": "regression",
+      "reference_id": "seed-v1-1015d15eea57"
+    }
+  ]
+}

@@ -255,6 +255,8 @@ def format_error_class(name: object) -> str:
 
 class TaskAuthority:
     """What the caller supplies about the task's rights (a Protocol in spirit).
+    The application's implementation is ``authority.StoredTaskAuthority``
+    (issue #125).
 
     ``parent_grant(task)``: the grant of the agent that works for the task
     (built by the backend from the task's scope; a model never writes one).
