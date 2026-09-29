@@ -34,7 +34,7 @@
 - 空き VRAM の確認は `vram_bytes` > 0 の仕事にだけ効く。
 - 理由: vLLM / SGLang は Load のときに KV Cache Pool を丸ごと確保するので（`gpu_memory_utilization`）、Probe は常駐 Model の Footprint を**使用中**と見る。この Memory は 0037 の勘定で予約として数えている。KV だけを使う Request にも「空き ≥ Headroom」を求めると、自分の常駐 Model の事前確保をもう一度数えることになり、何も確保しない Request を理由なく止める（96 GB で Footprint を 90% とすると、Scheduler の外に何もなくても空きは約 9.6 GB で、Memory Worker と Embedding を置けば Headroom の 4.8 GB を割りうる）。Footprint の内側の仕事は、外の Workload が増えても自分の Memory は既に持っているので OOM にならない。Pressure への対応は 0037 の縮退の段のままにする。
 - 判定: `観測した空き − (Scheduler が約束したが Probe にまだ見えない量) ≥ 要求量 + Headroom`。「まだ見えない量」は Load 中の Model の予約や、Admission 済みでまだ確保していない仕事の `vram_bytes`（同じ読み取りの間に 2 つの仕事が同じ空きを数えないため）。0037 の `committed` は Probe の使用量を下回らないので、これは `available ≥ 要求量` と同じ値になる（Test が固定する）。
-- `vram_bytes` を持つ Lease は、その量を予約として数える。仕事が実際に確保した VRAM（どの Model の Process でもない）は、0037 の Exclusive と同じく、Lease を与えた時点の `external` を超えた分だけ Lease の予約で吸収し、`external` に二重に数えない（それ以前からある他の Workload の分は `external` のまま）。Lease を返した後に残った Memory は `external` になる。Lease が複数あるときは、どの Lease の Process がどれだけ確保したかは分からないので、返した Lease はその予約の範囲で吸収していた分をすべて持っていたとみなして `external` に移す（残りの Lease がまだ確保していない予約を、返した Lease の残った Memory で埋めない）。残った Lease が確保した分がその Lease の終わりまで二重に数えられることはあるが、GPU を過剰に約束することはない。Probe が読めない間に返した Lease は、読めるようになった最初の読み取りで同じように移す（その間に返した Lease の予約を合わせた範囲で）。
+- `vram_bytes` を持つ Lease は、その量を予約として数える。仕事が実際に確保した VRAM（どの Model の Process でもない）は、0037 の Exclusive と同じく、Lease を与えた時点の `external` を超えた分だけ Lease の予約で吸収し、`external` に二重に数えない（それ以前からある他の Workload の分は `external` のまま）。Lease を返した後に残った Memory は `external` になる。Lease が複数あるときは、どの Lease の Process がどれだけ確保したかは分からないので、返した Lease はその予約の範囲で吸収していた分をすべて持っていたとみなして `external` に移す（残りの Lease がまだ確保していない予約を、返した Lease の残った Memory で埋めない）。残った Lease が確保した分がその Lease の終わりまで二重に数えられることはあるが、GPU を過剰に約束することはない。返した時点の読み取りがまだ見ていない分（Lease がその読み取りの後に確保した分、Probe が読めない間に返した Lease の分）は、返した後に始まった最初の読み取りで同じように移す（見ていなかった予約の範囲で。残った Lease が確保した分を二重に数えることはあるが、過剰には約束しない）。
 - CPU / Cloud に置いた Lease は VRAM を持たない（`vram_bytes` は 0 になる）。
 
 ### 2. 足りない仕事は待ち行列で待ち、VRAM を要る後の仕事に追い越させない
@@ -75,7 +75,7 @@
 ### 7. Probe が使えないときは 0037 の 6 のとおり Fail closed（待たせる）
 
 - VRAM を要る仕事も、Probe が使えない・古いときは入れない（`PROBE_UNAVAILABLE` で待つ。拒否しない）。空きを確かめられないまま VRAM を確保させない。
-- この場合の警告は 0037 の「GPU probe is unavailable」の Log（状態が変わったときに 1 回）に任せ、5 の警告は重ねない。待ちが切れたときに最後の読み取りがあれば、それを使って `gave_up` の警告を出す。
+- この場合の警告は 0037 の「GPU probe is unavailable」の Log（状態が変わったときに 1 回）に任せ、5 の警告は重ねない。待ちが切れたときに最後の読み取りがあれば、それを使って `gave_up` の警告を出す（空き VRAM を待っていた仕事が、その後 Probe を失ったまま切れたときも、Probe を失う前の最後の読み取りで出す）。
 
 ### 8. GPU 利用率は表示だけ
 

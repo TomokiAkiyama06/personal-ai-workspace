@@ -325,6 +325,17 @@ class _Waiter:
     future: asyncio.Future
     seq: int
     last: Refusal
+    # It waited for free VRAM at some point (Decision 0042 §7: a wait that
+    # runs out while the probe is lost still warns that it gave up).
+    waited_for_vram: bool = False
+
+    def __post_init__(self) -> None:
+        self.note(self.last)
+
+    def note(self, refusal: Refusal) -> None:
+        self.last = refusal
+        if refusal is Refusal.INSUFFICIENT_FREE_VRAM:
+            self.waited_for_vram = True
 
     @property
     def key(self) -> tuple[int, int]:
@@ -388,9 +399,14 @@ class ComputeScheduler:
         # What was external when the VRAM leases (an Exclusive job's, or the
         # shared ones with ``vram_bytes``) last changed (see account).
         self._extra_baseline = 0
-        # The reservations of VRAM leases released while there was no reading
-        # to rebase on: applied to the next reading (see _rebase).
+        # What released VRAM leases may have allocated that no reading has
+        # shown yet: rebased on the first reading taken after the release (see
+        # _rebase).
         self._pending_release = 0
+        # The VRAM view of the last reading before the probe was lost: the
+        # final warning of a wait that runs out without a reading (Decision
+        # 0042 §7).
+        self._last_view: VramView | None = None
         # An Exclusive request is being served (it may be waiting for VRAM
         # another workload holds while the mode is still normal).
         self._exclusive_pending = False
@@ -529,7 +545,9 @@ class ComputeScheduler:
         future.cancel()
         if request.allow_cloud:
             return self._grant(request, Placement.CLOUD)
-        if waiter.last is Refusal.INSUFFICIENT_FREE_VRAM:
+        if waiter.last is Refusal.INSUFFICIENT_FREE_VRAM or (
+            waiter.waited_for_vram and waiter.last is Refusal.PROBE_UNAVAILABLE
+        ):
             self._warn_request(request, gave_up=True)
         raise ComputeUnavailableError(waiter.last)
 
@@ -622,6 +640,8 @@ class ComputeScheduler:
     # -- the probe ------------------------------------------------------------
 
     async def _sample(self) -> None:
+        # Only releases made before this reading started can be seen in it.
+        carried = self._pending_release
         try:
             sample = await self._probe.sample()
             device = sample.device(self._config.gpu_index)
@@ -657,10 +677,13 @@ class ComputeScheduler:
                 entry.observed = None
             elif entry in inspected:
                 entry.pids, entry.observed = inspected[entry]
-        if self._pending_release:
-            # Leases released while the probe was lost: rebased on this
-            # reading (with the models' processes it found).
-            self._rebase()
+        if carried:
+            # Leases released before this reading, with memory no earlier
+            # reading showed: rebased on this one (with the models' processes
+            # it found).
+            self._pending_release -= carried
+            view = self._vram()
+            self._extra_baseline = view.external + min(carried, view.extra_use)
 
     async def _inspect(
         self, entry: _Deployment
@@ -699,6 +722,8 @@ class ComputeScheduler:
                 error_class,
             )
         self._probe_failing = True
+        if self._device is not None:
+            self._last_view = self._vram()
         self._sampled_at = None
         self._device = None
         self._processes = ()
@@ -872,9 +897,12 @@ class ComputeScheduler:
     def _warn_request(self, request: ComputeRequest, *, gave_up: bool = False) -> None:
         # The last reading, even a stale one (a wait that ran out); without any
         # the probe's own warning has been logged.
-        if self._device is None:
+        if self._device is not None:
+            view = self._vram()
+        elif gave_up and self._last_view is not None:
+            view = self._last_view
+        else:
             return
-        view = self._vram()
         self._warnings.emit(
             VramDeferral(
                 DeferredWork.REQUEST,
@@ -940,16 +968,18 @@ class ComputeScheduler:
         not known, so the released lease is taken to have absorbed as much as it
         could (``min(released, extra_use)``): memory a remaining lease holds may
         be counted twice until that lease ends, never overcommitted."""
-        released += self._pending_release
         if self._device is None:
-            # No reading (the probe is lost): the release is rebased on the
-            # next one, before its memory could be absorbed by the remaining
-            # leases' reservations.
-            self._pending_release = released
+            # No reading (the probe is lost): the whole release is rebased on
+            # the next one.
+            self._pending_release += released
             return
-        self._pending_release = 0
         view = self._vram()
-        self._extra_baseline = view.external + min(released, view.extra_use)
+        absorbed = min(released, view.extra_use)
+        self._extra_baseline = view.external + absorbed
+        # What the reading does not show yet (the lease may have allocated
+        # after it was taken) is rebased on the next reading, before the
+        # remaining leases' reservations could absorb it.
+        self._pending_release += released - absorbed
 
     def _local_gpu_leases(self) -> int:
         return sum(
@@ -972,21 +1002,21 @@ class ComputeScheduler:
                 # It waits behind its model's earlier waiter now, not for VRAM
                 # (a refusal of an earlier pass must not hold back other
                 # models' VRAM work: see _queued_ahead).
-                waiter.last = blocked[deployment]
+                waiter.note(blocked[deployment])
                 continue
             # A waiter placed on the CPU copy holds no VRAM.
             needs_vram = waiter.request.vram_bytes > 0 and not self._on_cpu(
                 self._deployments[deployment]
             )
             if needs_vram and vram_blocked:
-                waiter.last = Refusal.INSUFFICIENT_FREE_VRAM
+                waiter.note(Refusal.INSUFFICIENT_FREE_VRAM)
                 continue
             refusal, placement = self._judge(waiter.request, queue=False)
             if refusal is None:
                 self._waiters.remove(waiter)
                 waiter.future.set_result(self._grant(waiter.request, placement))
                 continue
-            waiter.last = refusal
+            waiter.note(refusal)
             if refusal in CAPACITY_REFUSALS:
                 blocked[deployment] = refusal
             elif refusal is Refusal.INSUFFICIENT_FREE_VRAM:
@@ -1275,6 +1305,14 @@ class ComputeScheduler:
                 await self._drain(deadline)
                 async with self._control_lock:
                     await self._sample()
+                    if self._clock.monotonic() > deadline:
+                        # The reading ended after the caller's limit: nothing
+                        # is unloaded.
+                        raise ExclusiveUnavailableError(
+                            ExclusiveFailure.NOT_FREED
+                            if self._fresh()
+                            else ExclusiveFailure.PROBE_UNAVAILABLE
+                        )
                     if self._fresh() and self._external_room(request):
                         moved = await self._empty_gpu()
                         await self._verify(request.vram_bytes, moved)

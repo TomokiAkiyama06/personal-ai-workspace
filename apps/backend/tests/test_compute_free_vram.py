@@ -211,6 +211,56 @@ class FreeVramAdmissionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status.vram.external, 0)
         self.assertEqual(status.vram.committed, 80 * GIB)
 
+    async def test_a_release_before_any_reading_saw_the_memory_leaves_it_external(
+        self,
+    ):
+        # The first lease allocates its 5 GiB and ends between two readings:
+        # the reading at the release predates the allocation. The next one
+        # must not let the second lease's reservation absorb what is left.
+        first = (await self.scheduler.try_acquire(coding(vram=5 * GIB))).lease
+        second = (await self.scheduler.try_acquire(coding(vram=5 * GIB))).lease
+        self.probe.resident[JOB_PID] = 5 * GIB
+        await first.release()
+        status = await self.scheduler.refresh()
+        self.assertEqual(status.vram.external, 5 * GIB)
+        self.assertEqual(status.vram.committed, 90 * GIB)
+        self.assertEqual(
+            (await self.scheduler.try_acquire(coding(vram=2 * GIB))).refusal,
+            Refusal.INSUFFICIENT_FREE_VRAM,
+        )
+        del self.probe.resident[JOB_PID]
+        await second.release()
+        status = await self.scheduler.refresh()
+        self.assertEqual(status.vram.external, 0)
+        self.assertEqual(status.vram.committed, 80 * GIB)
+
+    async def test_a_reading_started_before_a_release_does_not_settle_it(self):
+        # The release comes while a reading taken before the allocation is
+        # still being published: only the next reading can show the memory.
+        first = (await self.scheduler.try_acquire(coding(vram=5 * GIB))).lease
+        second = (await self.scheduler.try_acquire(coding(vram=5 * GIB))).lease
+        gate = asyncio.Event()
+        read = self.probe.sample
+
+        async def gated_sample():
+            sample = await read()
+            await gate.wait()
+            return sample
+
+        self.probe.sample = gated_sample
+        refreshing = asyncio.create_task(self.scheduler.refresh())
+        await settle()
+        self.probe.resident[JOB_PID] = 5 * GIB
+        await first.release()
+        gate.set()
+        await refreshing
+        self.probe.sample = read
+        status = await self.scheduler.refresh()
+        self.assertEqual(status.vram.external, 5 * GIB)
+        self.assertEqual(status.vram.committed, 90 * GIB)
+        del self.probe.resident[JOB_PID]
+        await second.release()
+
     async def test_an_ambiguous_release_errs_on_the_safe_side_and_heals(self):
         # Which lease's process holds the memory is not known: when a lease
         # that allocated nothing is released beside one that did, the memory
@@ -299,6 +349,36 @@ class FreeVramAdmissionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.reason, Refusal.INSUFFICIENT_FREE_VRAM)
         self.assertEqual([e.gave_up for e in self.sink.events], [False, True])
         self.assertEqual(self.scheduler.status().waiting[CO], 0)
+
+    async def test_a_wait_that_runs_out_after_the_probe_is_lost_still_warns(self):
+        # Decision 0042 §7: the final warning uses the last reading.
+        self.probe.external = 11 * GIB
+        await self.scheduler.refresh()
+        waiting = asyncio.create_task(
+            self.scheduler.acquire(coding(vram=GIB), wait_seconds=30)
+        )
+        await settle()
+        self.probe.fail = True
+        await self.scheduler.refresh()
+        await self.clock.advance(30)
+        with self.assertRaises(ComputeUnavailableError) as raised:
+            await waiting
+        self.assertEqual(raised.exception.reason, Refusal.PROBE_UNAVAILABLE)
+        self.assertEqual([e.gave_up for e in self.sink.events], [False, True])
+        self.assertEqual(self.sink.events[-1].observed_free_bytes, 5 * GIB)
+
+    async def test_a_wait_only_for_the_probe_does_not_warn_about_vram(self):
+        self.probe.fail = True
+        await self.scheduler.refresh()
+        waiting = asyncio.create_task(
+            self.scheduler.acquire(coding(vram=GIB), wait_seconds=30)
+        )
+        await settle()
+        await self.clock.advance(30)
+        with self.assertRaises(ComputeUnavailableError) as raised:
+            await waiting
+        self.assertEqual(raised.exception.reason, Refusal.PROBE_UNAVAILABLE)
+        self.assertEqual(self.sink.events, [])
 
     async def test_no_wait_means_an_immediate_refusal(self):
         self.probe.external = 11 * GIB
@@ -633,6 +713,37 @@ class ExclusiveFreeVramTest(unittest.IsolatedAsyncioTestCase):
             await job
         self.assertEqual([e.gave_up for e in self.sink.events], [False, True])
         self.assertEqual(self.sink.events[-1].work, DeferredWork.EXCLUSIVE)
+
+    async def test_a_reading_after_the_drain_that_ends_late_unloads_nothing(self):
+        # The drain ends in time, but the reading that follows it completes
+        # after the caller's limit: nothing is unloaded.
+        running = (await self.scheduler.try_acquire(coding())).lease
+        job = asyncio.create_task(
+            self.scheduler.acquire(
+                ComputeRequest(EX, vram_bytes=80 * GIB), wait_seconds=60
+            )
+        )
+        await settle()
+        self.assertEqual(self.scheduler.status().mode, SchedulerMode.DRAINING)
+        gate = asyncio.Event()
+        read = self.probe.sample
+
+        async def gated_sample():
+            sample = await read()
+            await gate.wait()
+            return sample
+
+        self.probe.sample = gated_sample
+        await self.clock.advance(59)
+        await running.release()
+        await settle()
+        await self.clock.advance(2)
+        gate.set()
+        with self.assertRaises(ExclusiveUnavailableError) as raised:
+            await job
+        self.assertEqual(raised.exception.failure, ExclusiveFailure.NOT_FREED)
+        self.assertEqual(self.control.actions, [])
+        self.assertEqual(self.scheduler.status().mode, SchedulerMode.NORMAL)
 
     async def test_a_probe_lost_while_waiting_gives_up_as_unavailable(self):
         self.probe.external = 20 * GIB
