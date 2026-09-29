@@ -102,6 +102,8 @@ class WrapperTestCase(unittest.TestCase):
         for git_dir in (self.git_dir, f"{self.outside}/.git/worktrees/build"):
             with open(f"{git_dir}/commondir", "w", encoding="utf-8") as file:
                 file.write("../..\n")  # what git itself writes
+        with open(f"{self.git_dir}/gitdir", "w", encoding="utf-8") as file:
+            file.write(f"{self.worktree}/.git\n")  # likewise
         self.config = self.make_config()
 
     def make_config(self, **options):
@@ -520,6 +522,44 @@ class RejectedPathTest(WrapperTestCase):
             work_tree=other,
         )
 
+    def test_a_git_dir_of_another_work_tree_is_refused(self):
+        status = ["status", "--porcelain=v1", "-z", "--untracked-files=all"]
+        gitdir = f"{self.git_dir}/gitdir"
+        other = f"{self.worktrees}/task/1/other/build"
+        os.makedirs(other)
+        os.symlink(self.worktree, f"{self.root}/to-worktree")
+        cases = (
+            f"{other}/.git\n",  # another worktree (another repository's, say)
+            f"{self.outside}/.git\n",
+            f"{self.worktree}/.git/x\n",
+            f"{self.worktree}\n",
+            f"{self.worktree}/missing/.git\n",
+            "\n",
+            "\xff\n",
+        )
+        for content in cases:
+            with self.subTest(content=content):
+                with open(gitdir, "w", encoding="utf-8", errors="surrogateescape") as f:
+                    f.write(content)
+                self.assert_rejected("bad_git_dir", self.pinned, status)
+        # The same work tree through a link, or as a relative path (git's
+        # worktree.useRelativePaths), is this work tree.
+        for content in (
+            f"{self.root}/to-worktree/.git\n",
+            os.path.relpath(f"{self.worktree}/.git", self.git_dir) + "\n",
+        ):
+            with self.subTest(content=content):
+                with open(gitdir, "w", encoding="utf-8") as f:
+                    f.write(content)
+                self.pinned(status)
+        # The file itself being a link, or missing, is refused.
+        with open(f"{self.outside}/gitdir", "w", encoding="utf-8") as f:
+            f.write(f"{self.worktree}/.git\n")
+        os.remove(gitdir)
+        self.assert_rejected("bad_git_dir", self.pinned, status)
+        os.symlink(f"{self.outside}/gitdir", gitdir)
+        self.assert_rejected("bad_git_dir", self.pinned, status)
+
     def test_git_dir_and_work_tree_come_together_once_and_only_where_allowed(self):
         status = ["status", "--porcelain=v1", "-z", "--untracked-files=all"]
         cases = [
@@ -890,6 +930,130 @@ class RejectedCommandTest(WrapperTestCase):
                 self.assert_rejected("bad_arguments", self.pinned, args)
 
 
+class RepositoryConfigurationTest(WrapperTestCase):
+    """A call that reads file content first lists the configuration it would
+    read, and is refused when that names a command."""
+
+    STATUS = ["status", "--porcelain=v1", "-z", "--untracked-files=all"]
+
+    def test_only_content_commands_are_probed(self):
+        probed = {
+            "status": self.pinned(self.STATUS),
+            "merge --abort": self.pinned(["merge", "--abort"]),
+            "merge-tree": self.plan(
+                [
+                    "merge-tree",
+                    "--write-tree",
+                    "--name-only",
+                    "-z",
+                    "--no-messages",
+                    f"refs/heads/{OTHER}",
+                    f"refs/heads/{BRANCH}",
+                ]
+            ),
+            "worktree add": self.plan(
+                [
+                    "worktree",
+                    "add",
+                    "--quiet",
+                    "-b",
+                    BRANCH,
+                    "--",
+                    self.worktree,
+                    COMMIT,
+                ]
+            ),
+        }
+        for name, invocation in probed.items():
+            with self.subTest(name=name):
+                self.assertEqual(
+                    invocation.probe[-4:], ["config", "--no-includes", "--list", "-z"]
+                )
+                self.assertEqual(invocation.probe[0], invocation.argv[0])
+        pinned = probed["status"].probe
+        self.assertIn(f"--git-dir={self.git_dir}", pinned)
+        self.assertIn(f"--work-tree={self.worktree}", pinned)
+        for invocation in (
+            self.plan(["rev-parse", "--is-bare-repository"]),
+            self.plan(["worktree", "list", "--porcelain", "-z"]),
+            self.plan(["worktree", "prune"]),
+            self.plan(
+                [
+                    "merge-base",
+                    "--is-ancestor",
+                    f"refs/heads/{OTHER}",
+                    f"refs/heads/{BRANCH}",
+                ]
+            ),
+            self.pinned(["symbolic-ref", "--quiet", "HEAD"]),
+        ):
+            with self.subTest(argv=invocation.argv):
+                self.assertIsNone(invocation.probe)
+
+    def check(self, stdout=b"", returncode=0, error=None):
+        calls = []
+
+        def run(argv, **kwargs):
+            calls.append((argv, kwargs))
+            if error is not None:
+                raise error
+            return subprocess.CompletedProcess(argv, returncode, stdout, b"")
+
+        invocation = self.pinned(self.STATUS)
+        wrapper.check_configuration(invocation, run)
+        [(argv, kwargs)] = calls
+        self.assertEqual(argv, invocation.probe)
+        self.assertEqual(kwargs["env"], invocation.env)
+        self.assertEqual(kwargs["cwd"], invocation.cwd)
+
+    def test_a_command_in_the_configuration_refuses_the_call(self):
+        for key in (
+            "filter.lfs.clean",
+            "filter.x.smudge",
+            "filter.x.process",
+            "filter.x.required",
+            "diff.x.textconv",
+            "diff.x.command",
+            "diff.external",
+            "merge.x.driver",
+            "hook.pre-merge.command",
+            "include.path",
+            "includeif.gitdir:/x/.path",
+            "core.pager",
+            "pager.status",
+            "core.editor",
+            "sequence.editor",
+            "gpg.program",
+            "gpg.ssh.program",
+            "remote.origin.uploadpack",
+            "core.sshcommand",
+            "Filter.X.Clean",
+        ):
+            with self.subTest(key=key):
+                self.assertTrue(wrapper.runs_a_command(key))
+                listed = f"core.bare\nfalse\0{key}\ntouch /tmp/x\0".encode()
+                self.assert_rejected("config_runs_command", self.check, listed)
+
+    def test_ordinary_configuration_is_accepted(self):
+        listed = (
+            b"core.repositoryformatversion\n0\0core.bare\nfalse\0"
+            b"core.hookspath\n.husky\0core.fsmonitor\ntrue\0"
+            b"remote.origin.url\nhttps://github.com/o/r.git\0"
+            b"credential.helper\n!/usr/bin/gh auth git-credential\0"
+            b"branch.main.merge\nrefs/heads/main\0submodule.lib.path\nlib\0"
+            b"merge.conflictstyle\nzdiff3\0diff.algorithm\nhistogram\0"
+            b"extensions.worktreeconfig\0"
+        )
+        self.check(listed)
+
+    def test_a_configuration_that_cannot_be_listed_refuses_the_call(self):
+        self.assert_rejected("config_unreadable", self.check, returncode=128)
+        self.assert_rejected(
+            "config_unreadable", self.check, error=subprocess.TimeoutExpired("git", 30)
+        )
+        self.assert_rejected("config_unreadable", self.check, error=OSError())
+
+
 class RejectedWireTest(WrapperTestCase):
     """The encoding of ``$SSH_ORIGINAL_COMMAND`` itself."""
 
@@ -1045,6 +1209,27 @@ class MainTest(WrapperTestCase):
         )
         self.assertEqual(stderr, "paw-git-wrapper: rejected (subcommand_not_allowed)\n")
 
+    def test_a_refused_configuration_execs_nothing(self):
+        def refuse(invocation):
+            raise wrapper.Rejected("config_runs_command")
+
+        executed = []
+        with contextlib.redirect_stderr(io.StringIO()):
+            code = wrapper.main(
+                [f"--root={self.root}", f"--home={self.home}"],
+                {
+                    "SSH_ORIGINAL_COMMAND": self.command(
+                        ["rev-parse", "--show-toplevel"]
+                    )
+                },
+                execve=lambda path, args, env: executed.append(args),
+                chdir=lambda path: None,
+                log=lambda message: None,
+                check=refuse,
+            )
+        self.assertEqual(code, wrapper.REJECTED)
+        self.assertEqual(executed, [])
+
     def test_an_interactive_login_is_refused(self):
         code, executed, logged, _, _ = self.run_main(None)
         self.assertEqual(code, wrapper.REJECTED)
@@ -1127,6 +1312,15 @@ os.execve(
     environment,
 )
 """
+
+
+def _consume(marker: str) -> bool:
+    """Whether a command left ``marker`` (removed, for the next case)."""
+    try:
+        os.remove(marker)
+    except FileNotFoundError:
+        return False
+    return True
 
 
 class _FixedKey:
@@ -1318,6 +1512,135 @@ class EndToEndTest(unittest.IsolatedAsyncioTestCase):
             cwd=worktree,
         )
         self.assertEqual(pinned.stdout.strip(), "refs/heads/paw/t/1/build")
+
+    async def test_a_command_in_the_repository_configuration_is_never_run(self):
+        # An agent that commits in its worktree writes the checkout's shared
+        # configuration too: a filter driver there (selected by a tracked
+        # .gitattributes) is a command `status`, `merge`, `merge-tree` or
+        # `worktree add` would run. The wrapper refuses those calls instead.
+        checkout = f"{self.root}/project"
+        base = self.world.make_repository(checkout)
+        worktree = f"{self.root}/.paw-worktrees/t/1/r/build"
+        result = await self.run_git(
+            ["worktree", "add", "--quiet", "-b", "paw/t/1/build", "--", worktree, base],
+            cwd=checkout,
+        )
+        self.assertEqual(result.returncode, 0)
+        fs.write(worktree, ".gitattributes", "* filter=x diff=x merge=x\n")
+        fs.write(worktree, "f.txt", "hi\n")
+        git("add", "-A", cwd=worktree)
+        git("commit", "--quiet", "-m", "attributes", cwd=worktree)
+        marker = f"{self.world.root}/command-ran"
+        included = f"{self.world.root}/included"
+        fs.write(included, f'[filter "x"]\n\tclean = touch {marker}; cat\n')
+        pin = [
+            f"--git-dir={checkout}/.git/worktrees/build",
+            f"--work-tree={worktree}",
+        ]
+        ref = "refs/heads/paw/t/1/build"
+        calls = (
+            (
+                [*pin, "status", "--porcelain=v1", "-z", "--untracked-files=all"],
+                worktree,
+            ),
+            ([*pin, "merge", "--abort"], worktree),
+            (
+                [
+                    "merge-tree",
+                    "--write-tree",
+                    "--name-only",
+                    "-z",
+                    "--no-messages",
+                    ref,
+                    ref,
+                ],
+                checkout,
+            ),
+            (
+                [
+                    "worktree",
+                    "add",
+                    "--quiet",
+                    "-b",
+                    "paw/t/1/other",
+                    "--",
+                    f"{self.root}/.paw-worktrees/t/1/r/other",
+                    base,
+                ],
+                checkout,
+            ),
+        )
+        settings = (
+            ("filter.x.clean", f"touch {marker}; cat"),
+            ("filter.x.process", f"touch {marker}"),
+            ("diff.x.textconv", f"touch {marker}; cat"),
+            ("merge.x.driver", f"touch {marker}; true"),
+            ("hook.x.command", f"touch {marker}"),
+            ("core.pager", f"touch {marker}; cat"),
+            ("include.path", included),
+            ("includeIf.gitdir:/.path", included),
+        )
+        for key, value in settings:
+            git("config", key, value, cwd=worktree)  # the shared config
+            os.utime(f"{worktree}/f.txt", (2_000_000_000, 2_000_000_000))
+            for args, cwd in calls:
+                with self.subTest(key=key, args=args):
+                    result = await self.run_git(args, cwd=cwd)
+                    self.assertEqual(result.returncode, wrapper.REJECTED)
+                    self.assertFalse(_consume(marker))
+            git("config", "--unset", key, cwd=worktree)
+        # The same, in the worktree's own configuration (config.worktree).
+        git("config", "extensions.worktreeConfig", "true", cwd=worktree)
+        git(
+            "config",
+            "--worktree",
+            "filter.x.clean",
+            f"touch {marker}; cat",
+            cwd=worktree,
+        )
+        result = await self.run_git(calls[0][0], cwd=worktree)
+        self.assertEqual(result.returncode, wrapper.REJECTED)
+        self.assertFalse(_consume(marker))
+        git("config", "--worktree", "--unset", "filter.x.clean", cwd=worktree)
+        # Without such a setting (and with the credential helper `clone -c`
+        # leaves behind), the same calls run.
+        git("config", "credential.helper", "!gh auth git-credential", cwd=worktree)
+        for args, cwd in calls[:1] + calls[2:]:
+            result = await self.run_git(args, cwd=cwd)
+            self.assertEqual(result.returncode, 0, args)
+
+    async def test_a_git_dir_is_used_only_with_its_own_work_tree(self):
+        pins = {}
+        for name in ("a", "b"):
+            checkout = f"{self.root}/{name}"
+            base = self.world.make_repository(checkout)
+            worktree = f"{self.root}/.paw-worktrees/t/1/{name}/build"
+            result = await self.run_git(
+                [
+                    "worktree",
+                    "add",
+                    "--quiet",
+                    "-b",
+                    "paw/t/1/build",
+                    "--",
+                    worktree,
+                    base,
+                ],
+                cwd=checkout,
+            )
+            self.assertEqual(result.returncode, 0)
+            pins[name] = (f"{checkout}/.git/worktrees/build", worktree)
+        status = ["status", "--porcelain=v1", "-z", "--untracked-files=all"]
+        mixed = await self.run_git(
+            [f"--git-dir={pins['b'][0]}", f"--work-tree={pins['a'][1]}", *status],
+            cwd=pins["a"][1],
+        )
+        self.assertEqual(mixed.returncode, wrapper.REJECTED)
+        own = await self.run_git(
+            [f"--git-dir={pins['a'][0]}", f"--work-tree={pins['a'][1]}", *status],
+            cwd=pins["a"][1],
+        )
+        self.assertEqual(own.returncode, 0)
 
     async def test_the_worktree_git_of_pr_130_runs_through_the_wrapper(self):
         try:

@@ -37,8 +37,14 @@ undoes ``shlex.quote``) into the words of Decision 0029 §2::
   inside ``<root>/.paw-worktrees`` and the git directory a ``worktrees/<name>``
   directory inside the root but outside ``.paw-worktrees``, each checked after
   resolving every symbolic link;
+* the git directory's ``commondir`` must lead back to the ``.git`` it sits in,
+  and its ``gitdir`` must name the work tree's ``.git``: a worktree directory
+  is only ever used with its own work tree;
 * the sub-command and its arguments must match one of the fixed shapes of
-  Decision 0029 §3 and Decision 0036 §13 (:data:`SUBCOMMANDS`) exactly.
+  Decision 0029 §3 and Decision 0036 §13 (:data:`SUBCOMMANDS`) exactly;
+* for a sub-command that reads file content (:data:`CONTENT_SUBCOMMANDS`), the
+  configuration git would read must name no command (a ``filter`` driver, a
+  ``merge`` driver, an ``include``, ...: :func:`check_configuration`).
 
 The client's ``-c`` values are checked, then **dropped**: git always gets this
 file's own hardening (:func:`hardening`) and, for ``merge``, this file's own
@@ -64,6 +70,7 @@ import pwd
 import re
 import shlex
 import stat
+import subprocess
 import sys
 import syslog
 from collections.abc import Callable, Mapping, Sequence
@@ -107,6 +114,51 @@ OWN_HARDENING = (
     ("diff.ignoreSubmodules", "all"),
     ("maintenance.auto", "false"),
 )
+
+
+#: Sub-commands that read or write file content through the repository's
+#: attributes, and so may start a command the repository's own configuration
+#: names (a ``filter`` driver's ``clean`` / ``smudge`` / ``process``, a ``merge``
+#: driver, a ``diff`` ``textconv``, ...): ``status`` (``clean`` on a modified
+#: file), ``merge`` (``merge --abort`` too), ``merge-tree`` (a merge driver) and
+#: ``worktree add`` (``smudge`` on checkout). Before any of them runs, the
+#: configuration git would read is listed (:func:`configuration_probe`) and the
+#: call is refused if it names a command (:func:`runs_a_command`).
+CONTENT_SUBCOMMANDS = frozenset({"status", "merge", "merge-tree", "worktree"})
+
+#: Configuration sections every key of which is (or leads to) a command, or to
+#: another file this wrapper would not have listed.
+_COMMAND_SECTIONS = frozenset({"filter", "include", "includeif", "hook", "pager"})
+#: Two-part keys that name a command.
+_COMMAND_KEYS = frozenset(
+    {
+        "core.pager",
+        "core.editor",
+        "core.askpass",
+        "core.sshcommand",
+        "core.gitproxy",
+        "core.alternaterefscommand",
+        "sequence.editor",
+        "diff.external",
+        "gpg.program",
+        "uploadpack.packobjectshook",
+    }
+)
+#: The last part of a ``<section>.<name>.<key>`` key that names a command
+#: (``diff.<driver>.textconv``, ``merge.<driver>.driver``,
+#: ``gpg.<format>.program``, ``remote.<name>.uploadpack``, ...).
+_COMMAND_VARIABLES = frozenset(
+    {
+        "textconv",
+        "command",
+        "driver",
+        "program",
+        "cmd",
+        "uploadpack",
+        "receivepack",
+    }
+)
+PROBE_TIMEOUT_S = 30
 
 
 class Rejected(Exception):
@@ -534,6 +586,9 @@ class Invocation:
     argv: list[str]
     env: dict[str, str]
     cwd: str
+    #: The ``git config`` call whose output must name no command before
+    #: ``argv`` runs (:data:`CONTENT_SUBCOMMANDS`); ``None`` for the others.
+    probe: list[str] | None = None
 
 
 def _split(original: str | None) -> list[str]:
@@ -624,6 +679,7 @@ def plan(original: str | None, config: Config) -> Invocation:
         _check_common_dir(real_dir)
         if not os.path.isdir(real_tree) or real_tree != cwd:
             raise Rejected("bad_work_tree")
+        _check_backlink(real_dir, real_tree)
         pinned = [f"--git-dir={real_dir}", f"--work-tree={real_tree}"]
     elif subcommand != "rev-parse" and _within(cwd, places.worktrees, allow_equal=True):
         # A worker's worktree is written by an agent: its ``.git`` may name a
@@ -642,7 +698,83 @@ def plan(original: str | None, config: Config) -> Invocation:
     argv.extend(pinned)
     argv.append(subcommand)
     argv.extend(args)
-    return Invocation(subcommand, argv, git_environment(config, ceiling), cwd)
+    probe = None
+    if subcommand in CONTENT_SUBCOMMANDS and args[:1] not in (["list"], ["prune"]):
+        probe = configuration_probe(config, pinned)
+    return Invocation(subcommand, argv, git_environment(config, ceiling), cwd, probe)
+
+
+def configuration_probe(config: Config, pinned: Sequence[str]) -> list[str]:
+    """The ``git config`` call that lists every setting the call itself would
+    read (the repository's, the worktree's ``config.worktree``; the system and
+    global ones are off, :func:`git_environment`), without following an
+    ``include`` (an ``include`` is itself refused). It starts no command."""
+    return [config.git, *pinned, "config", "--no-includes", "--list", "-z"]
+
+
+def runs_a_command(key: str) -> bool:
+    """Whether the configuration ``key`` names a command git may start (or
+    another file of settings). The hardening's own keys (``core.hooksPath``,
+    ``core.fsmonitor``) are not here: the wrapper's ``-c`` overrides them."""
+    key = key.lower()
+    section, _, rest = key.partition(".")
+    variable = key.rpartition(".")[2]
+    if section in _COMMAND_SECTIONS or key in _COMMAND_KEYS:
+        return True
+    return "." in rest and variable in _COMMAND_VARIABLES
+
+
+def check_configuration(
+    invocation: Invocation,
+    run: Callable[..., "subprocess.CompletedProcess[bytes]"] = subprocess.run,
+) -> None:
+    """Refuse ``invocation`` when the configuration it would read names a
+    command (:data:`CONTENT_SUBCOMMANDS`), or cannot be listed.
+
+    The repository's configuration is shared by the checkout and every worktree
+    of it, and an agent working in a worktree may write it: a ``filter`` there,
+    selected by a ``.gitattributes`` the agent committed, would otherwise run
+    as this user during an allowed ``status``. Only something that can already
+    write that file (and so run git itself there) could change it between this
+    check and the ``exec``."""
+    if invocation.probe is None:
+        return
+    try:
+        listed = run(
+            invocation.probe,
+            cwd=invocation.cwd,
+            env=invocation.env,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=PROBE_TIMEOUT_S,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        raise Rejected("config_unreadable") from None
+    if listed.returncode != 0:
+        raise Rejected("config_unreadable")
+    for entry in listed.stdout.split(b"\0"):
+        key = entry.partition(b"\n")[0].decode("utf-8", "replace")
+        if key and runs_a_command(key):
+            raise Rejected("config_runs_command")
+
+
+def _check_backlink(git_dir: str, work_tree: str) -> None:
+    """The ``gitdir`` file of the worktree directory ``git_dir`` (git's record
+    of which work tree it belongs to) must name ``work_tree``'s ``.git``, once
+    every symbolic link is resolved: another repository's worktree directory
+    must never be paired with this work tree (its index and ``HEAD`` would be
+    applied to these files)."""
+    text = _read_small_file(git_dir, "gitdir")
+    target = text if text.startswith("/") else os.path.join(git_dir, text)
+    if os.path.basename(target) != ".git":
+        raise Rejected("bad_git_dir")
+    try:
+        real = os.path.realpath(os.path.dirname(target), strict=True)
+    except (OSError, RuntimeError):
+        raise Rejected("bad_git_dir") from None
+    if real != work_tree:
+        raise Rejected("bad_git_dir")
 
 
 def _check_common_dir(git_dir: str) -> None:
@@ -652,9 +784,22 @@ def _check_common_dir(git_dir: str) -> None:
     every symbolic link is resolved; anything else — missing, not a regular
     file, a link, another repository — is refused."""
     common = os.path.dirname(os.path.dirname(git_dir))
+    text = _read_small_file(git_dir, "commondir")
+    target = text if text.startswith("/") else os.path.join(git_dir, text)
+    try:
+        real = os.path.realpath(target, strict=True)
+    except (OSError, RuntimeError):
+        raise Rejected("bad_git_dir") from None
+    if real != common:
+        raise Rejected("bad_git_dir")
+
+
+def _read_small_file(git_dir: str, name: str) -> str:
+    """The one-line path file ``name`` of ``git_dir`` (a regular file, not a
+    link), or ``Rejected`` (``bad_git_dir``)."""
     flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
     try:
-        descriptor = os.open(os.path.join(git_dir, "commondir"), flags)
+        descriptor = os.open(os.path.join(git_dir, name), flags)
     except OSError:
         raise Rejected("bad_git_dir") from None
     try:
@@ -671,13 +816,7 @@ def _check_common_dir(git_dir: str) -> None:
         raise Rejected("bad_git_dir") from None
     if not text or len(text) > MAX_PATH_CHARS or not text.isprintable():
         raise Rejected("bad_git_dir")
-    target = text if text.startswith("/") else os.path.join(git_dir, text)
-    try:
-        real = os.path.realpath(target, strict=True)
-    except (OSError, RuntimeError):
-        raise Rejected("bad_git_dir") from None
-    if real != common:
-        raise Rejected("bad_git_dir")
+    return text
 
 
 def _syslog(message: str) -> None:
@@ -695,6 +834,7 @@ def main(
     execve: Callable[[str, list[str], dict[str, str]], object] = os.execve,
     chdir: Callable[[str], object] = os.chdir,
     log: Callable[[str], None] = _syslog,
+    check: Callable[[Invocation], None] = check_configuration,
 ) -> int:
     """Decide one call; ``exec`` git or return :data:`REJECTED`."""
     arguments = sys.argv[1:] if argv is None else list(argv)
@@ -704,6 +844,7 @@ def main(
         config = parse_config(arguments)
         user = config.user
         invocation = plan(environment.get("SSH_ORIGINAL_COMMAND"), config)
+        check(invocation)
     except Rejected as rejected:
         log(f"rejected user={user} reason={rejected.reason}")
         sys.stderr.write(f"paw-git-wrapper: rejected ({rejected.reason})\n")
