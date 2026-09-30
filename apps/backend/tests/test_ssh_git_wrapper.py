@@ -1351,6 +1351,8 @@ class PushTest(WrapperTestCase):
         for key in (
             "url.https://evil.example/.insteadof",
             "url.https://evil.example/.pushInsteadOf",
+            "http.proxy",
+            "http.https://github.com/.sslVerify",
             "core.askpass",
             "core.sshcommand",
             "remote.origin.receivepack",

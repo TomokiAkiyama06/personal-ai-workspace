@@ -987,13 +987,17 @@ def unsafe_setting(key: str) -> bool:
 
 
 def redirects_push(key: str) -> bool:
-    """Whether the configuration ``key`` sends a push somewhere else than the
-    URL the backend named: ``url.<base>.insteadOf`` / ``pushInsteadOf``
-    rewrite it (Decision 0052). A named remote's ``url`` / ``pushurl`` do not
-    apply: the push names a URL, not a remote."""
+    """Whether the configuration ``key`` changes where or how a push goes from
+    the URL the backend named: ``url.<base>.insteadOf`` / ``pushInsteadOf``
+    rewrite it, and ``http.*`` (``http.proxy``, ``http.sslVerify``,
+    ``http.extraHeader``, ...) would route it, or its credential, elsewhere
+    (Decision 0052). A named remote's ``url`` / ``pushurl`` do not apply: the
+    push names a URL, not a remote."""
     key = key.lower()
     section, _, rest = key.partition(".")
     variable = key.rpartition(".")[2]
+    if section == "http":
+        return True
     return (
         section == "url" and "." in rest and variable in ("insteadof", "pushinsteadof")
     )

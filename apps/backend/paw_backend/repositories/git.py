@@ -26,13 +26,17 @@ The rules, all enforced here and nowhere else:
 * **Bounded.** A timeout (the whole process group is killed), and a limit on how
   much a command may write (a command that writes more is killed). Output is
   strictly UTF-8; anything else is refused.
-* **A push goes where it says.** Before a ``push``, the configuration it would
-  read is listed (``git config --includes --show-scope --list``, with the same
-  ``-c`` options) and the push is refused (``GitFailure.UNSAFE_CONFIGURATION``)
-  when the repository's own configuration has a ``url.<base>.insteadOf`` or
-  ``pushInsteadOf``: it would send the push to another URL than the one named
-  (Decision 0052; the SSH wrapper's ``redirects_push``). The runner's own
-  ``extra_config`` (scope ``command``) is the deployment's, not the repository's.
+* **A push goes where it says and runs nothing of the repository's.** Before a
+  ``push``, the configuration it would read is listed (``git config
+  --no-includes --show-scope --list``, with the same ``-c`` options) and the push
+  is refused (``GitFailure.UNSAFE_CONFIGURATION``) when the repository's own
+  configuration names a command git may start (``core.askPass`` is run when
+  gh's helper has no credential, ``GIT_TERMINAL_PROMPT=0`` notwithstanding),
+  another file of settings (``include``), or changes where or how the push goes
+  (``url.<base>.insteadOf`` / ``pushInsteadOf``, ``http.*``): the settings the
+  SSH wrapper refuses (Decision 0052; :func:`unsafe_push_setting`). The runner's
+  own ``extra_config`` (scope ``command``) is the deployment's, not the
+  repository's.
 * **Only as the account's own user.** git runs as the backend's own Linux user. It
   is refused (``GitFailure.IDENTITY_MISMATCH``) unless that user is the account
   the checkout belongs to: a backend that runs as another user must supply a
@@ -223,30 +227,87 @@ def git_environment(
     return environment
 
 
-def redirects_push(key: str) -> bool:
-    """Whether the configuration ``key`` sends a push elsewhere than the URL it
-    names: ``url.<base>.insteadOf`` / ``pushInsteadOf`` rewrite it (Decision
-    0052). A named remote's ``url`` / ``pushurl`` do not apply: the push names
-    a URL, not a remote."""
+#: The settings that name a command, another file of settings or another work
+#: tree: the same sets as the SSH wrapper's ``_REFUSED_SECTIONS`` /
+#: ``_REFUSED_KEYS`` / ``_REFUSED_VARIABLES`` (a test keeps them equal; the
+#: wrapper is deployed on its own and imports nothing of this package).
+_COMMAND_SECTIONS = frozenset(
+    {"filter", "include", "includeif", "hook", "pager", "gpg", "protocol"}
+)
+_COMMAND_KEYS = frozenset(
+    {
+        "core.worktree",
+        "extensions.partialclone",
+        "core.pager",
+        "core.editor",
+        "core.askpass",
+        "core.sshcommand",
+        "core.gitproxy",
+        "core.alternaterefscommand",
+        "sequence.editor",
+        "diff.external",
+        "gpg.program",
+        "uploadpack.packobjectshook",
+    }
+)
+_COMMAND_VARIABLES = frozenset(
+    {
+        "textconv",
+        "command",
+        "driver",
+        "program",
+        "cmd",
+        "uploadpack",
+        "receivepack",
+        "mergeoptions",
+        "promisor",
+    }
+)
+
+
+def names_a_command(key: str) -> bool:
+    """Whether the configuration ``key`` names a command git may start, another
+    file of settings (``include``) or another work tree (``core.worktree``)."""
     key = key.lower()
     section, _, rest = key.partition(".")
     variable = key.rpartition(".")[2]
+    if section in _COMMAND_SECTIONS or key in _COMMAND_KEYS:
+        return True
+    return "." in rest and variable in _COMMAND_VARIABLES
+
+
+def redirects_push(key: str) -> bool:
+    """Whether the configuration ``key`` changes where or how a push goes from
+    the URL it names: ``url.<base>.insteadOf`` / ``pushInsteadOf`` rewrite it,
+    and ``http.*`` (``http.proxy``, ``http.sslVerify``, ``http.extraHeader``,
+    ...) would route it, or its credential, elsewhere (Decision 0052). A named
+    remote's ``url`` / ``pushurl`` do not apply: the push names a URL."""
+    key = key.lower()
+    section, _, rest = key.partition(".")
+    variable = key.rpartition(".")[2]
+    if section == "http":
+        return True
     return (
         section == "url" and "." in rest and variable in ("insteadof", "pushinsteadof")
     )
 
 
+def unsafe_push_setting(key: str) -> bool:
+    """:func:`names_a_command` or :func:`redirects_push`."""
+    return names_a_command(key) or redirects_push(key)
+
+
 def push_redirected(listed: str) -> bool:
     """Whether the output of ``git config --show-scope --list -z`` has a
-    :func:`redirects_push` key outside the scope ``command``; output that is
-    not that shape counts as one (refused, never guessed)."""
+    :func:`unsafe_push_setting` key outside the scope ``command``; output that
+    is not that shape counts as one (refused, never guessed)."""
     words = listed.split("\0")
     if words[-1:] == [""]:
         words.pop()
     if len(words) % 2:
         return True
     for scope, entry in zip(words[::2], words[1::2], strict=True):
-        if scope != "command" and redirects_push(entry.partition("\n")[0]):
+        if scope != "command" and unsafe_push_setting(entry.partition("\n")[0]):
             return True
     return False
 
@@ -338,7 +399,7 @@ class SubprocessGitRunner:
         environment = git_environment(account, path=self._path, ceiling=ceiling)
         if name == "push":
             listed = await run_subprocess(
-                [*prefix, "config", "--includes", "--show-scope", "--list", "-z"],
+                [*prefix, "config", "--no-includes", "--show-scope", "--list", "-z"],
                 env=environment,
                 cwd=cwd,
                 timeout_s=timeout_s,
