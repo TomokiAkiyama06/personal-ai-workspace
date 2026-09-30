@@ -23,6 +23,7 @@ from paw_backend.compute import (
     ExclusiveUnavailableError,
     GpuDevice,
     GpuProcess,
+    InvalidComputeArgumentError,
     Placement,
     Refusal,
     ResourceClass,
@@ -827,6 +828,92 @@ class ExclusiveFreeVramTest(unittest.IsolatedAsyncioTestCase):
             await job
         self.assertEqual(raised.exception.failure, ExclusiveFailure.NOT_FREED)
         self.assertEqual(self.control.actions, [])
+        self.assertEqual(self.scheduler.status().mode, SchedulerMode.NORMAL)
+        # The VRAM would have been free: only late, no warning (Codex review
+        # #146).
+        self.assertEqual(self.sink.events, [])
+
+    async def test_a_late_reading_that_shows_another_workload_warns(self):
+        # Codex review (#146, P2): another workload took the VRAM during the
+        # drain and the reading after it ends after the caller's limit.
+        running = (await self.scheduler.try_acquire(coding())).lease
+        job = asyncio.create_task(
+            self.scheduler.acquire(
+                ComputeRequest(EX, vram_bytes=80 * GIB), wait_seconds=60
+            )
+        )
+        await settle()
+        gate = asyncio.Event()
+        read = self.probe.sample
+
+        async def gated_sample():
+            sample = await read()
+            await gate.wait()
+            return sample
+
+        self.probe.sample = gated_sample
+        self.probe.external = 20 * GIB
+        await self.clock.advance(59)
+        await running.release()
+        await settle()
+        await self.clock.advance(2)
+        gate.set()
+        with self.assertRaises(ExclusiveUnavailableError) as raised:
+            await job
+        self.assertEqual(raised.exception.failure, ExclusiveFailure.NOT_FREED)
+        self.assertEqual(self.control.actions, [])
+        [event] = self.sink.events
+        self.assertTrue(event.gave_up)
+        self.assertEqual(event.work, DeferredWork.EXCLUSIVE)
+        self.assertEqual(event.external_bytes, 20 * GIB)
+
+    async def test_the_drain_time_counts_from_the_start_of_the_drain(self):
+        # #164: ``drain_seconds`` gives the drain its whole time, however long
+        # the job waited for another workload's VRAM (``wait_seconds``).
+        self.probe.external = 20 * GIB
+        running = (await self.scheduler.try_acquire(coding())).lease
+        job = asyncio.create_task(
+            self.scheduler.acquire(
+                ComputeRequest(EX, vram_bytes=80 * GIB),
+                wait_seconds=60,
+                drain_seconds=60,
+            )
+        )
+        await settle()
+        await self.clock.advance(50)
+        self.assertEqual(self.scheduler.status().mode, SchedulerMode.NORMAL)
+        self.probe.external = 0
+        await self.clock.advance(2)
+        self.assertEqual(self.scheduler.status().mode, SchedulerMode.DRAINING)
+        await self.clock.advance(50)  # past ``wait_seconds``, within the drain
+        self.assertFalse(job.done())
+        await running.release()
+        lease = await job
+        self.assertEqual(self.scheduler.status().mode, SchedulerMode.EXCLUSIVE)
+        await lease.release()
+
+    async def test_a_drain_longer_than_its_time_gives_up(self):
+        running = (await self.scheduler.try_acquire(coding())).lease
+        job = asyncio.create_task(
+            self.scheduler.acquire(
+                ComputeRequest(EX, vram_bytes=80 * GIB),
+                wait_seconds=600,
+                drain_seconds=30,
+            )
+        )
+        await settle()
+        await self.clock.advance(31)
+        with self.assertRaises(ExclusiveUnavailableError) as raised:
+            await job
+        self.assertEqual(raised.exception.failure, ExclusiveFailure.DRAIN_TIMEOUT)
+        self.assertEqual(self.scheduler.status().mode, SchedulerMode.NORMAL)
+        await running.release()
+
+    async def test_drain_seconds_is_checked(self):
+        with self.assertRaises(InvalidComputeArgumentError):
+            await self.scheduler.acquire(
+                ComputeRequest(EX, vram_bytes=GIB), wait_seconds=60, drain_seconds=-1
+            )
         self.assertEqual(self.scheduler.status().mode, SchedulerMode.NORMAL)
 
     async def test_a_probe_lost_while_waiting_gives_up_as_unavailable(self):

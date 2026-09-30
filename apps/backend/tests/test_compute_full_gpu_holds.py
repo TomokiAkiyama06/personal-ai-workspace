@@ -111,6 +111,7 @@ class PostgresTaskHoldsTest(PostgresQueueingTestCase):
             self.assertEqual(await self.state(task_id), before)
         self.assertFalse(await self.holds.hold(uuid.uuid4()))  # no such task
         self.assertEqual(await self.holds.held(), [])
+        self.assertFalse(await self.holds.any_held())
 
     async def test_only_the_tasks_full_gpu_mode_held_are_held(self):
         held = await self.running_task()
@@ -150,6 +151,7 @@ class PostgresTaskHoldsTest(PostgresQueueingTestCase):
             wait_reason=WaitReason.RESOURCE,
         )
         self.assertEqual([task for task, _ in await self.holds.held()], [held])
+        self.assertTrue(await self.holds.any_held())
 
     async def test_resuming_unblocks_and_queues_again_with_its_priority(self):
         task_id = await self.running_task(priority=Priority.HIGH)

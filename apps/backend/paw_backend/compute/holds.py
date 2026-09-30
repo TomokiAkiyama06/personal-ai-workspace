@@ -3,7 +3,7 @@
 :class:`PostgresTaskHolds` is the :class:`~paw_backend.compute.full_gpu.TaskHolds`
 of production. It uses only the task lifecycle of PAW-032 (``TaskService``) and
 the queue of PAW-033 (``TaskQueue``); there is no table of its own (Decision
-0055, Proposed):
+0055, Approved):
 
 * **hold**: ``wait`` (reason ``resource``) by the policy actor with
   :data:`~paw_backend.compute.full_gpu.HOLD_REASON`. Only a running task can be
@@ -84,10 +84,10 @@ class PostgresTaskHolds:
         return True
 
     async def held(
-        self, *, after: uuid.UUID | None = None
+        self, *, after: uuid.UUID | None = None, limit: int = _BATCH
     ) -> list[tuple[uuid.UUID, int]]:
-        """The held tasks (id and version), by id, at most one batch after
-        ``after``."""
+        """The held tasks (id and version), by id, at most ``limit`` (one batch)
+        after ``after``."""
         latest_wait = (
             select(TaskEventRow.actor_kind, TaskEventRow.reason)
             .where(
@@ -107,13 +107,16 @@ class PostgresTaskHolds:
                 latest_wait.c.reason == HOLD_REASON,
             )
             .order_by(TaskRow.id)
-            .limit(_BATCH)
+            .limit(limit)
         )
         if after is not None:
             query = query.where(TaskRow.id > after)
         async with self._database.session() as session:
             rows = (await session.execute(query)).all()
         return [(row.id, row.version) for row in rows]
+
+    async def any_held(self) -> bool:
+        return bool(await self.held(limit=1))
 
     async def resume_held(self) -> ResumeReport:
         resumed = remaining = 0

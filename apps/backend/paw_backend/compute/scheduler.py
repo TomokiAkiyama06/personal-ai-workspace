@@ -407,6 +407,8 @@ class ComputeScheduler:
         self._probe_failing = False
         self._relief = Relief.NONE
         self._mode = SchedulerMode.NORMAL
+        # Set at the next change of ``_mode`` (see mode_change).
+        self._mode_changed = asyncio.Event()
         self._exclusive: ComputeLease | None = None
         # What was external when the VRAM leases (an Exclusive job's, or the
         # shared ones with ``vram_bytes``) last changed (see account).
@@ -510,6 +512,21 @@ class ComputeScheduler:
         ):
             self._refused_tasks.add(request.task_id)
 
+    def mode_change(self) -> asyncio.Event:
+        """An event set at the next change of ``status().mode``: Full GPU Mode
+        holds the tasks of the local GPU work only once an Exclusive request has
+        left normal (it drains), not while the request waits in normal for VRAM
+        another workload holds (Decision 0042's 6, #164). Take the event before
+        reading the mode, then wait for it."""
+        return self._mode_changed
+
+    def _set_mode(self, mode: SchedulerMode) -> None:
+        if mode is self._mode:
+            return
+        self._mode = mode
+        changed, self._mode_changed = self._mode_changed, asyncio.Event()
+        changed.set()
+
     def revoke_local_gpu(self) -> int:
         """Ask every holder of a local GPU lease to stop (``revoked``): Full GPU
         Mode's preemption of the work that did not drain in time (PAW-037,
@@ -568,6 +585,7 @@ class ComputeScheduler:
         *,
         wait_seconds: float,
         cloud_after_seconds: float = 0.0,
+        drain_seconds: float | None = None,
     ) -> ComputeLease:
         """A lease, waiting at most ``wait_seconds`` for local capacity.
 
@@ -577,13 +595,20 @@ class ComputeScheduler:
         request that can never be admitted (its context is longer than the model
         takes) is refused at once. An Exclusive request raises
         :class:`ExclusiveUnavailableError`; its ``wait_seconds`` bounds the wait for
-        running local work to end.
+        running local work to end. ``drain_seconds`` (Exclusive only): how long
+        that work may take to end, counted from when the drain starts (each time
+        it starts); ``wait_seconds`` then bounds only the wait for VRAM another
+        workload holds (Decision 0042's 6), and a drain does not lose the time
+        spent in that wait (#164). ``None``: what is left of ``wait_seconds``.
         """
         self._check_request(request)
         timeout = check_seconds("wait_seconds", wait_seconds)
         cloud_after = check_seconds("cloud_after_seconds", cloud_after_seconds)
+        drain = None
+        if drain_seconds is not None:
+            drain = check_seconds("drain_seconds", drain_seconds)
         if request.resource_class is ResourceClass.EXCLUSIVE:
-            return await self._acquire_exclusive(request, timeout)
+            return await self._acquire_exclusive(request, timeout, drain)
         refusal, placement = self._judge(request, queue=True)
         if refusal is None:
             return self._grant(request, placement)
@@ -1053,7 +1078,7 @@ class ComputeScheduler:
             self._cloud.discard(lease)
         elif lease is self._exclusive:
             self._exclusive = None
-            self._mode = SchedulerMode.NORMAL
+            self._set_mode(SchedulerMode.NORMAL)
             self._refused_tasks.clear()
             logger.info("Exclusive GPU job ended; the models are loaded again")
         else:
@@ -1392,7 +1417,7 @@ class ComputeScheduler:
     # -- exclusive ------------------------------------------------------------
 
     async def _acquire_exclusive(
-        self, request: ComputeRequest, wait_seconds: float
+        self, request: ComputeRequest, wait_seconds: float, drain_seconds: float | None
     ) -> ComputeLease:
         if self._mode is not SchedulerMode.NORMAL or self._exclusive_pending:
             raise ExclusiveUnavailableError(ExclusiveFailure.BUSY)
@@ -1412,35 +1437,45 @@ class ComputeScheduler:
                 # needs, nothing is drained or unloaded (it could not help);
                 # local work goes on and the job waits.
                 await self._await_external_room(request, deadline)
-                self._mode = SchedulerMode.DRAINING
+                self._set_mode(SchedulerMode.DRAINING)
                 # Running work is waited for, not stopped (Background work too:
                 # Full GPU Mode holds the tasks and may revoke the leases,
                 # PAW-037).
                 logger.info("Exclusive GPU job requested: draining local GPU work")
-                await self._drain(deadline)
+                drain_deadline = (
+                    deadline
+                    if drain_seconds is None
+                    else self._clock.monotonic() + drain_seconds
+                )
+                await self._drain(drain_deadline)
                 async with self._control_lock:
                     await self._sample()
-                    if self._clock.monotonic() > deadline:
+                    if self._clock.monotonic() > drain_deadline:
                         # The reading ended after the caller's limit: nothing
-                        # is unloaded.
-                        raise ExclusiveUnavailableError(
-                            ExclusiveFailure.NOT_FREED
-                            if self._fresh()
-                            else ExclusiveFailure.PROBE_UNAVAILABLE
-                        )
+                        # is unloaded. When it shows that another workload took
+                        # the VRAM meanwhile, the job gave up waiting for it:
+                        # the final warning (Decision 0042's 5; not for a
+                        # reading that was only late, Codex review #146).
+                        if not self._fresh():
+                            raise ExclusiveUnavailableError(
+                                ExclusiveFailure.PROBE_UNAVAILABLE
+                            )
+                        if not self._external_room(request):
+                            self._warn_exclusive(request, gave_up=True)
+                        raise ExclusiveUnavailableError(ExclusiveFailure.NOT_FREED)
                     if self._fresh() and self._external_room(request):
                         moved = await self._empty_gpu()
                         await self._verify(request.vram_bytes, moved)
                         lease = self._grant(request, Placement.LOCAL_GPU)
-                        self._mode = SchedulerMode.EXCLUSIVE
+                        self._set_mode(SchedulerMode.EXCLUSIVE)
                         logger.info("Exclusive GPU job started")
                         return lease
                 # Another workload took the VRAM while the GPU drained: back to
                 # normal, and wait again.
-                self._mode = SchedulerMode.NORMAL
+                self._set_mode(SchedulerMode.NORMAL)
                 self._pump()
         except BaseException:
-            self._mode = SchedulerMode.NORMAL
+            self._set_mode(SchedulerMode.NORMAL)
             self._pump()
             raise
         finally:
