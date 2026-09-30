@@ -303,4 +303,28 @@ describe("Notification Center", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     window.history.replaceState(null, "", "/");
   });
+
+  it("keeps the newest event's content when an older one arrives late", () => {
+    const { source, emit } = manualSource();
+    renderCenter(source);
+    emit({ key: "backup", id: "2", severity: "critical", title: "6 時間成功していません", at });
+    emit({
+      key: "backup",
+      id: "1",
+      severity: "warning",
+      title: "一時的に失敗しました",
+      at: "2026-09-28T01:00:00Z",
+    });
+    expect(screen.getByRole("alert")).toHaveTextContent("6 時間成功していません");
+  });
+
+  it("remembers every id of an entry for dedup", () => {
+    let items = [] as ReturnType<typeof mergeNotification>;
+    for (let i = 0; i < 80; i++) {
+      items = mergeNotification(items, { key: "k", id: `e${i}`, severity: "info", title: "n", at });
+    }
+    expect(mergeNotification(items, { key: "k", id: "e0", severity: "info", title: "n", at })).toBe(
+      items,
+    );
+  });
 });

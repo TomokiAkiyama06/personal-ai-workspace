@@ -83,7 +83,7 @@ export interface NotificationItem extends IncomingNotification {
   count: number;
   /** When the first event of the entry arrived (`at` is the latest). */
   firstAt: string;
-  /** The ids already counted (the latest ones), for dedup. */
+  /** Every id already counted, for dedup. */
   ids: string[];
   read: boolean;
   dismissed: boolean;
@@ -102,6 +102,8 @@ interface NotificationValue {
   push: (notification: IncomingNotification) => void;
   /** The condition is over (approved elsewhere, recovered): the entry goes away. */
   resolve: (key: string) => void;
+  /** Resolve every entry whose key passes `test`. */
+  resolveMatching: (test: (key: string) => boolean) => void;
   markRead: (key: string) => void;
   markAllRead: () => void;
   dismiss: (key: string) => void;
@@ -111,7 +113,6 @@ interface NotificationValue {
 
 const NotificationContext = createContext<NotificationValue | null>(null);
 const MAX_ITEMS = 100;
-const MAX_IDS = 50;
 
 function earlier(a: string, b: string): string {
   return Date.parse(b) < Date.parse(a) ? b : a;
@@ -129,17 +130,24 @@ export function mergeNotification(
   // Dedup: the same event again changes nothing (it stays read if it was read).
   if (existing && incoming.id !== undefined && existing.ids.includes(incoming.id)) return items;
   const ids = incoming.id === undefined ? [] : [incoming.id];
-  const merged: NotificationItem = existing
-    ? {
-        ...incoming,
-        count: existing.count + 1,
-        at: later(existing.at, incoming.at),
-        firstAt: earlier(existing.firstAt, incoming.at),
-        ids: [...ids, ...existing.ids].slice(0, MAX_IDS),
-        read: false,
-        dismissed: false,
-      }
-    : { ...incoming, count: 1, firstAt: incoming.at, ids, read: false, dismissed: false };
+  let merged: NotificationItem;
+  if (!existing) {
+    merged = { ...incoming, count: 1, firstAt: incoming.at, ids, read: false, dismissed: false };
+  } else {
+    // A late, older event (a replay) is counted but does not replace the content
+    // (title, severity, actions) of the newer one.
+    const newer = Date.parse(incoming.at) >= Date.parse(existing.at);
+    merged = {
+      ...(newer ? incoming : existing),
+      key: incoming.key,
+      count: existing.count + 1,
+      at: later(existing.at, incoming.at),
+      firstAt: earlier(existing.firstAt, incoming.at),
+      ids: [...ids, ...existing.ids],
+      read: false,
+      dismissed: false,
+    };
+  }
   const rest = items.filter((item) => item.key !== incoming.key);
   return [merged, ...rest].slice(0, MAX_ITEMS);
 }
@@ -160,6 +168,11 @@ export function NotificationProvider({
       current.some((item) => item.key === key)
         ? current.filter((item) => item.key !== key)
         : current,
+    );
+  }, []);
+  const resolveMatching = useCallback((test: (key: string) => boolean) => {
+    setItems((current) =>
+      current.some((item) => test(item.key)) ? current.filter((item) => !test(item.key)) : current,
     );
   }, []);
   const markRead = useCallback((key: string) => {
@@ -185,12 +198,13 @@ export function NotificationProvider({
       unread: items.filter((item) => !item.read).length,
       push,
       resolve,
+      resolveMatching,
       markRead,
       markAllRead,
       dismiss,
       clear,
     }),
-    [items, push, resolve, markRead, markAllRead, dismiss, clear],
+    [items, push, resolve, resolveMatching, markRead, markAllRead, dismiss, clear],
   );
   return <NotificationContext.Provider value={value}>{children}</NotificationContext.Provider>;
 }

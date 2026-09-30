@@ -16,12 +16,11 @@ const KEY_PREFIX = "pairing:";
 
 export function usePendingApprovalNotifications(): void {
   const { t } = useI18n();
-  const { push, resolve } = useNotifications();
+  const { push, resolveMatching } = useNotifications();
 
   useEffect(() => {
     let cancelled = false;
     let inFlight = false;
-    const shown = new Set<string>();
 
     const load = async () => {
       if (inFlight) return;
@@ -49,11 +48,9 @@ export function usePendingApprovalNotifications(): void {
             ],
           });
         }
-        for (const key of shown) {
-          if (!current.has(key)) resolve(key);
-        }
-        shown.clear();
-        for (const key of current) shown.add(key);
+        // From the store, not from this mount: the device may have been approved
+        // while this was unmounted (設定 is a screen outside the shell).
+        resolveMatching((key) => key.startsWith(KEY_PREFIX) && !current.has(key));
       } catch {
         // Only a hint: a failed read keeps what is shown until the next one.
       } finally {
@@ -74,5 +71,5 @@ export function usePendingApprovalNotifications(): void {
       window.clearInterval(timer);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [t, push, resolve]);
+  }, [t, push, resolveMatching]);
 }

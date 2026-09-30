@@ -114,4 +114,24 @@ describe("pending device approvals as notifications", () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(screen.getByRole("button", { name: "通知" })).toBeInTheDocument();
   });
+
+  it("removes a notification resolved while the settings screen was open", async () => {
+    mockApi({
+      "GET /auth/session": reply(200, session()),
+      "GET /auth/pairing/pending": [
+        reply(200, { pending: [waiting] }),
+        reply(200, { pending: [] }),
+      ],
+      "GET /auth/sessions": reply(200, { sessions: [session().session] }),
+      "GET /auth/passkeys": reply(200, { passkeys: [] }),
+    });
+    renderApp("/");
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "通知 1 件未読" }));
+    await user.click(screen.getByRole("link", { name: "確認する" }));
+    // 設定 is a screen of its own (no shell): the device is approved there.
+    await user.click(await screen.findByRole("link", { name: "ワークスペースへ戻る" }));
+    await user.click(await screen.findByRole("button", { name: "通知" }));
+    expect(await screen.findByText("通知はありません。")).toBeInTheDocument();
+  });
 });
