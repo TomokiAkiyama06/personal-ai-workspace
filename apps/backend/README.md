@@ -52,7 +52,7 @@ Python 側の Package（`pgvector-python`）は使わず、`paw_backend/memory/v
 apps/backend/
 ├─ pyproject.toml          # 依存（完全一致で固定）と Ruff 設定
 ├─ alembic.ini             # Alembic 設定（DB URL は持たない）
-├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0022 は Password / Session / Login Throttle / 認証 Policy、0023 は Passkey / Passkey の Challenge / Session の Gate、0026 は Project、0027 は Repository 登録・Remote・Checkout、0030 は Shared Connection・Quota・Usage、0031 は Tool Approval、0033 は Queue / Budget / Loop、0034 は DAG Agent Orchestrator（Plan・DAG・Node の試行）、0040 は Memory Schema、0041 は Memory Journal / Consolidation Queue、0042 は Memory の鮮度の Job の Index、0043 は `memory_versions` の全文検索の Index、0046 は Shared Memory Candidate、0050 は Research Scratch、0052 は Evidence / Claim Provenance、0071 は Memory の Status / Stale 状態の変更履歴、0083 は `tasks (project_id, state)` の Index、0085 は Task の Working Set、0087 は外部送信の Audit の `audit_events.details`、0108 は他の Account の Passkey の Reset（`admin_reset`）と 1 回限りの Password 再設定 Token（`password_reset`）とその発行の関数、0124 は招待・端末の Pairing・User の状態の履歴、0133 は Node の試行の Placement（Local / Cloud と Agent・Model）と Cloud の外部送信の Audit の対応、0147 は `memory_versions.content` の長さの上限（20,000 文字）
+├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0022 は Password / Session / Login Throttle / 認証 Policy、0023 は Passkey / Passkey の Challenge / Session の Gate、0026 は Project、0027 は Repository 登録・Remote・Checkout、0030 は Shared Connection・Quota・Usage、0031 は Tool Approval、0033 は Queue / Budget / Loop、0034 は DAG Agent Orchestrator（Plan・DAG・Node の試行）、0040 は Memory Schema、0041 は Memory Journal / Consolidation Queue、0042 は Memory の鮮度の Job の Index、0043 は `memory_versions` の全文検索の Index、0046 は Shared Memory Candidate、0050 は Research Scratch、0052 は Evidence / Claim Provenance、0071 は Memory の Status / Stale 状態の変更履歴、0083 は `tasks (project_id, state)` の Index、0085 は Task の Working Set、0087 は外部送信の Audit の `audit_events.details`、0108 は他の Account の Passkey の Reset（`admin_reset`）と 1 回限りの Password 再設定 Token（`password_reset`）とその発行の関数、0124 は招待・端末の Pairing・User の状態の履歴、0133 は Node の試行の Placement（Local / Cloud と Agent・Model）と Cloud の外部送信の Audit の対応、0147 は `memory_versions.content` の長さの上限（20,000 文字）、0154 は承認つきの Pairing の Session の Passkey の登録（`device_pairings.passkey_allowance_ended_at`）
 ├─ paw_backend/
 │  ├─ app.py               # create_app(settings)
 │  ├─ config.py            # PAW_ 環境変数から読む Settings
@@ -1304,7 +1304,7 @@ Owner・Admin の重要操作は、Session に**Passkey の Step-up**（Policy �
 | Policy の変更（`PUT /auth/policy`、Owner） | Passkey の Step-up（0015 で実装済み。**Passkey を設定した環境で端から端まで動く**。`tests/test_passkey_http.py` の Owner の一連の Test） |
 | Account の Lock の解除（`POST /auth/users/{id}/unlock`、Admin・Owner） | Passkey の Step-up。対象を調べる前に判定する（Step-up のない Session に、Account の存在を教えない） |
 | 他の Account の Passkey の Reset（`POST /auth/users/{id}/passkeys/reset`、Owner・Admin。#108） | 同上 |
-| Passkey の追加 | すでに Passkey がある User: Passkey の Step-up。ない User: 直近の認証（Sign-in が有効時間内、または任意の Step-up） |
+| Passkey の追加 | すでに Passkey がある User: Passkey の Step-up（例外: 承認つきの Pairing の Session の最初の 1 つ。下記）。ない User: 直近の認証（Sign-in が有効時間内、または任意の Step-up） |
 | Passkey の失効 | 要求が `required` の Role: Passkey の Step-up。それ以外: 任意の Step-up |
 | Tool Broker の強い承認 | 下記 |
 
@@ -1356,7 +1356,7 @@ Passkey の Device をすべて失った Admin（と User）の戻り道です�
 
 | `action` | 内容 |
 | --- | --- |
-| `auth.passkey.register` | allow `registered` / deny `challenge_invalid`、`verification_failed`、`already_registered`、`limit_reached`、`gate_not_allowed`、`step_up_required`、`step_up_method_insufficient` |
+| `auth.passkey.register` | allow `registered`、`pairing_approved`（承認つきの Pairing の Session の、Step-up なしの最初の 1 つ。#154） / deny `challenge_invalid`、`verification_failed`、`already_registered`、`limit_reached`、`gate_not_allowed`、`step_up_required`、`step_up_method_insufficient` |
 | `auth.passkey.authenticate` | allow `verified` / deny `challenge_invalid`、`unknown_credential`、`verification_failed`、`sign_count_regression`、`invalid_credentials` |
 | `auth.passkey.revoke` | allow `revoked` / deny `step_up_required`、`step_up_method_insufficient`、`last_passkey`、`not_found`、`gate_not_allowed` |
 | `auth.passkey.reset`（#108） | allow `reset` / deny `step_up_required`、`step_up_method_insufficient`、`role_not_allowed`、`not_found` |
@@ -1463,7 +1463,14 @@ issued / claimed / approved ──(本人の失効・新しい発行・User の�
   - **表示しない場所**: 承認待ちの一覧（`GET /pairing/pending`）には Code を出しません。承認する人に「両方の画面を見比べて押す」だけをさせず、自分の新しい端末から読んで入力させるためです。Log、Audit、例外の Message、`repr` のどれにも Code は入りません（Test で確かめる）。
   - **防ぐもの**: QR を盗み見た第三者が正しい端末より先に Token を出すと、承認待ちは第三者の 1 件になり、正しい端末の提出は拒否されます。承認する人の端末には Code が表示されていないので、承認は通らず、3 回で Pairing は終わります（判断点 12 の乗っ取り。Test 済み）。
   - **一般 User の Pairing** は承認がないので確認 Code もありません（判断点 5 は推奨どおり Token の所持だけ）。
-- 新しい Session は `auth_method = pairing`（`auth_sessions` の CHECK に追加。Step-up の方法ではない）で、Step-up を持ちません。Passkey の Gate は、一般 User は Password の Sign-in と同じ規則、承認された Owner / Admin は `open`（承認した端末の Passkey の Step-up が、新しい端末での Passkey の認証の代わり）です。Passkey の登録は既存の `/auth/passkeys/enroll/*` で、既存の規則（既に Passkey を持つ User は Passkey の Step-up が要る）のままです（Decision 0033 の判断点 6）。
+- 新しい Session は `auth_method = pairing`（`auth_sessions` の CHECK に追加。Step-up の方法ではない）で、Step-up を持ちません。Passkey の Gate は、一般 User は Password の Sign-in と同じ規則、承認された Owner / Admin は `open`（承認した端末の Passkey の Step-up が、新しい端末での Passkey の認証の代わり）です。Passkey の登録は既存の `/auth/passkeys/enroll/*` で、既に Passkey を持つ User は Passkey の Step-up が要ります（Decision 0025）。
+- **承認つきの Pairing の Session の Passkey の登録（Issue #154、Decision 0043 の判断点 11 の案 A、承認済み）**: 端末に固定された Passkey しか持たない Owner / Admin が、新しい端末で 2 つ目の Passkey を登録できるように、次をすべて満たす Session は、**その Session での最初の 1 つの登録に限って** Passkey の Step-up なしで登録できます。
+  - Session の `auth_method = pairing` で、それを作った `device_pairings` の行（`created_session`）が `completed` かつ `approval_required`（信頼済み端末の Passkey の Step-up と確認 Code を経た承認）。一般 User の Pairing（承認なし）、Password の Sign-in の Session、承認した側の Session は対象外です。
+  - Session の作成（Pairing の完了）から Policy の `stepup_window_minutes`（既定 30 分）以内。
+  - その Session がまだ Passkey を登録していない（`device_pairings.passkey_allowance_ended_at` が NULL）。Session の登録は、Step-up の有無によらず（同期される Passkey で Step-up して登録した場合も）この列を埋めます。User の Passkey の失効も、全 Session の Passkey の Step-up を消すのと同じ Transaction で、その User の未使用の分を終わらせます（Step-up の代わりなので、Step-up より長く残さない）。
+  - 判定は Begin と、Credential を保存する Transaction（User の行の `FOR UPDATE` の下）の両方で行い、保存の Transaction が `passkey_allowance_ended_at IS NULL` の条件つきで列を埋めます（同時の 2 つの登録でも 1 つだけ通る）。Challenge は従来どおり単回使用です。
+  - 登録は Step-up として記録しません（Decision 0025）。Session に Passkey の Step-up は付かず、Passkey の Step-up が要る操作は、新しい Passkey での認証の後に行います。Audit は `auth.passkey.register` の allow `pairing_approved`（通常の登録は `registered`）です。
+  - Migration `0154`: `device_pairings.passkey_allowance_ended_at`（`timestamptz`、NULL 可）と CHECK `ck_device_pairings_allowance_needs_approval`（`completed` かつ `approval_required` の行だけが持てる）、Web の Role にその列の UPDATE。
 - **他の Account の Passkey の Reset（#108）** も、同じ Transaction で対象の生きている Pairing を失効します（`ended_reason = credentials_reset`、Audit は `auth.pairing.revoke` の allow `reset`）。Reset の前に発行した Pairing Token や承認済みの Claim で、Reset の後に Session を得られないようにするためです。
 - Lock の順序は、どの操作も User の行（`FOR UPDATE`。削除・復元は `FOR NO KEY UPDATE`）→ Pairing の行です。
 
