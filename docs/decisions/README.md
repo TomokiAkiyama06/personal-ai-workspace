@@ -61,6 +61,7 @@
 | [0055](0055-kaggle-full-gpu-mode.md) | Kaggle / Full GPU Mode の方針（始める・終えるのは Owner / Admin だけ: Capability `admin.compute.full_gpu`、走っている Task は `waiting`（Resource）にして Drain、Queue 中の Task は GPU を求めた時点で Hold、Preempt は明示したときだけ、Main LLM が戻ってから再開、再起動で解除、HTTP の API は後の Issue。PAW-037、Issue #33。Decision 0037 の 7・13 を補う） | Approved |
 | [0063](0063-wrapper-populated-submodule-exit-code.md) | SSH の Wrapper が中身のある Submodule を拒否したときの終了コードを 125 に分け、Backend は 125 を `dirty`、それ以外の拒否（126）を `git_failed` にする（Decision 0029 の 5・0051 の 5 の終了コードの約束だけを Supersede。Issue #90 の #130 `git.py:305`） | Approved |
 | [0064](0064-reopened-task-session-only-memories.md) | 再開（Retry / Restart）した後にまだ遷移がない Task の `session_only` の Memory と開いた承認を終わった Run のものとして後処理する（Fence と Sweep の Query を「終了状態、または最新の遷移が終了状態から」に広げる。Migration なし。Decision 0047 の 1 だけを Supersede。Issue #90 の #151 `task_end.py:233`） | Approved |
+| [0062](0062-integration-push-fixed-form-no-options.md) | Integration Gate の Push の固定の形を `push --quiet --no-follow-tags --no-recurse-submodules --no-signed -- <URL> <commit>:refs/heads/paw/...` にし、SSH の Wrapper もこの形だけを受け付ける（Checkout の `push.followTags` / `push.recurseSubmodules` / `push.gpgSign` を打ち消す。Decision 0052 の 3・9 の形だけを Supersede。Issue #90） | Approved |
 
 運用は [AGENTS.md](../../AGENTS.md) の「仕様変更」に従います。
 
