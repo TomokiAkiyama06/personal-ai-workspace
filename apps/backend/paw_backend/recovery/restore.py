@@ -26,7 +26,10 @@ without a password or Passkey: the Owner uses ``owner-recover``, the others are
 reset by the Owner / an Admin), the auth policy (a security setting: changed by
 the Owner with a Step-up), the shared connections (re-registered), the
 checkouts (cloned again), tasks (a summary only), conversation sources of
-memories (conversations are not backed up), the audit trail.
+memories (conversations are not backed up), the audit trail, and the repository
+memories of a repository that is skipped because a credential was redacted in its
+name or branch (Decision 0061: registered again by hand, it gets a new id; its
+memories are listed instead, by the repository's redacted name and old id).
 """
 
 import asyncio
@@ -159,6 +162,19 @@ class RecoveryRestoreError(Exception):
 
 
 @dataclass(slots=True)
+class HeldRepository:
+    """A skipped repository's repo memories, not restored (Decision 0061)."""
+
+    repository_id: UUID
+    # As in the backup: with ``[REDACTED]`` where the credential was.
+    name: str
+    memory_ids: list[UUID] = field(default_factory=list)
+    versions: int = 0
+    relations: int = 0
+    sources: int = 0
+
+
+@dataclass(slots=True)
 class RestoreData:
     """The rows a restore inserts, and what it reports."""
 
@@ -177,6 +193,7 @@ class RestoreData:
     deletions: list[dict[str, Any]] = field(default_factory=list)
     skipped_conversation_sources: int = 0
     skipped_repositories: int = 0
+    held_repositories: list[HeldRepository] = field(default_factory=list)
     renamed_users: list[str] = field(default_factory=list)
     skipped_remotes: int = 0
     tasks: int = 0
@@ -196,6 +213,17 @@ class RestoreData:
             "memory_versions": len(self.versions),
             "memory_relations": len(self.relations),
             "memory_sources": len(self.sources),
+        }
+
+    @property
+    def held_counts(self) -> dict[str, int]:
+        """What ``held_repositories`` keeps out of the restore, in all."""
+        held = self.held_repositories
+        return {
+            "memories": sum(len(entry.memory_ids) for entry in held),
+            "versions": sum(entry.versions for entry in held),
+            "relations": sum(entry.relations for entry in held),
+            "sources": sum(entry.sources for entry in held),
         }
 
 
@@ -372,6 +400,7 @@ def parse_source(
             if member["user_id"] not in user_ids:
                 raise RecordError("a member who is not a user")
             data.members.append({"project_id": record["id"], **member})
+    skipped: dict[UUID, HeldRepository] = {}
     for record in repositories:
         remotes = record.pop("remotes")
         if record["created_by"] not in user_ids:
@@ -380,6 +409,7 @@ def parse_source(
             # A credential was replaced in its name or branch: the repository
             # cannot come back under a valid name. Registered again by hand.
             data.skipped_repositories += 1
+            skipped[record["id"]] = HeldRepository(record["id"], record["name"])
             continue
         data.repositories.append(record)
         for remote in remotes:
@@ -394,15 +424,37 @@ def parse_source(
                 }
             )
     version_ids: set[UUID] = set()
+    # Version id -> the skipped repository whose memory it belongs to.
+    held_versions: dict[UUID, HeldRepository] = {}
+    relations: list[dict[str, Any]] = []
     for record in memories:
         versions = record.pop("versions")
-        relations = record.pop("relations")
+        relations.extend(record.pop("relations"))
         if not versions:
             raise RecordError("a memory without a version")
-        data.memories.append(record)
         for version in versions:
             if version["scope"] == "user" and version["owner_user_id"] in deleted:
                 raise _refuse(RestoreProblem.DELETED_USER_DATA)
+        held = next(
+            (
+                skipped[version["repo_id"]]
+                for version in versions
+                if version["scope"] == "repo" and version["repo_id"] in skipped
+            ),
+            None,
+        )
+        if held is not None:
+            # Restored, it would keep the old repository id, which nothing has
+            # once the repository is registered again: listed, not restored
+            # (the whole memory, all its versions, relations and sources).
+            held.memory_ids.append(record["id"])
+            held.versions += len(versions)
+            for version in versions:
+                held.sources += len(version["sources"])
+                held_versions[version["id"]] = held
+            continue
+        data.memories.append(record)
+        for version in versions:
             sources = version.pop("sources")
             version.pop("redactions", None)
             version.pop("truncated", None)
@@ -415,13 +467,21 @@ def parse_source(
                     data.skipped_conversation_sources += 1
                     continue
                 data.sources.append({"memory_version_id": version["id"], **source})
-        data.relations.extend(relations)
-    for relation in data.relations:
-        if (
-            relation["from_version_id"] not in version_ids
-            or relation["to_version_id"] not in version_ids
-        ):
+    for relation in relations:
+        ends = (relation["from_version_id"], relation["to_version_id"])
+        if all(end in version_ids for end in ends):
+            data.relations.append(relation)
+            continue
+        held = next((held_versions[end] for end in ends if end in held_versions), None)
+        if held is None:
             raise RecordError("a relation to a version that is not restored")
+        # Inside a held memory, or between a restored and a held one.
+        held.relations += 1
+    for held in skipped.values():
+        if held.memory_ids:
+            held.memory_ids.sort(key=str)
+            data.held_repositories.append(held)
+    data.held_repositories.sort(key=lambda held: str(held.repository_id))
     return data
 
 
@@ -490,6 +550,25 @@ async def _target_counts(session: AsyncSession) -> dict[str, int]:
     return counts
 
 
+def restore_reason(data: RestoreData) -> str:
+    """The ``reason`` of ``recovery.restore.planned`` / ``applied``: counts only
+    (the held-back ones when a repository was skipped, Decision 0061)."""
+    counts = data.counts
+    reason = (
+        f"users={counts['users']} projects={counts['projects']} "
+        f"repos={counts['repositories']} memories={counts['memories']} "
+        f"versions={counts['memory_versions']}"
+    )
+    if data.skipped_repositories:
+        held = data.held_counts
+        reason += (
+            f" skipped_repos={data.skipped_repositories}"
+            f" held_memories={held['memories']} held_versions={held['versions']}"
+            f" held_relations={held['relations']} held_sources={held['sources']}"
+        )
+    return reason
+
+
 def manual_steps(
     data: RestoreData, current_policy: Mapping[str, Any] | None
 ) -> list[str]:
@@ -518,6 +597,17 @@ def manual_steps(
             f"{data.skipped_remotes} remote URL(s) had a credential in their name, "
             "branch or URL (redacted in the backup) and were not restored: "
             "register them again."
+        )
+    for held in data.held_repositories:
+        steps.append(
+            f"Repository {held.name} (id {held.repository_id} in the backup, not "
+            f"restored) had {len(held.memory_ids)} repo memor(y/ies), not restored "
+            f"with it ({held.versions} version(s), {held.relations} relation(s), "
+            f"{held.sources} source(s)): "
+            + ", ".join(str(memory_id) for memory_id in held.memory_ids)
+            + ". Once the repository is registered again, recreate what is still "
+            "needed under it from memory-records/<id>.json in the backup "
+            "(Decision 0061)."
         )
     if data.connections:
         kinds = ", ".join(sorted(str(row["kind"]) for row in data.connections))
@@ -671,12 +761,7 @@ class RecoveryRestorer:
             audited = await self._record(RecoveryAction.RESTORE_REFUSED, code)
             return RestoreResult(data=data, refused=code, audited=audited)
         steps = tuple(manual_steps(data, policy))
-        counts = data.counts
-        reason = (
-            f"users={counts['users']} projects={counts['projects']} "
-            f"repos={counts['repositories']} memories={counts['memories']} "
-            f"versions={counts['memory_versions']}"
-        )
+        reason = restore_reason(data)
         if not apply:
             audited = await self._record(RecoveryAction.RESTORE_PLANNED, reason)
             if not audited:
@@ -738,6 +823,7 @@ async def _insert_all(session: AsyncSession, data: RestoreData) -> None:
 
 __all__ = [
     "TARGET_TABLES",
+    "HeldRepository",
     "RecoveryRestoreError",
     "RecoveryRestorer",
     "RestoreData",
@@ -747,5 +833,6 @@ __all__ = [
     "open_source",
     "manual_steps",
     "parse_source",
+    "restore_reason",
     "verify_files",
 ]
