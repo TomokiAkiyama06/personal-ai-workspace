@@ -1,6 +1,7 @@
 # 再開した後にまだ動いていない Task の `session_only` の Memory を、終わった Run のものとして退役させる（Decision 0047 の 1 の変更）
 
-- Status: Proposed
+- Status: Approved
+- Approval: 2026-09-30、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで直接回答して承認（判断が必要な点 1〜4。末尾の「承認時の決定」）
 - Date: 2026-09-30
 - Scope: Issue [#90](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/90) の #151 `orchestrator/task_end.py:233` の保留（PR #163 の説明と #90 のコメント）。`TaskEndResidue`（Fence の `hold_ended` と Sweep の 2 つの Query）と `TaskEndCleanup.finish`（`apps/backend/paw_backend/orchestrator/task_end.py`）だけを扱う。Migration はない
 - Supersedes: [Decision 0047](0047-task-execution-composition-and-task-end-effects.md) の **1 節だけ**（後処理と Sweep の対象を「終了状態の Task」とし、終了状態からの遷移（Retry / Restart）では承認だけを取り消す、という範囲）。0047 のそれ以外（2〜7 節）は変えない。0047 は書き換えない
@@ -27,3 +28,7 @@ Decision 0047 の 1 は、Task の終了の後処理（開いた承認の取り�
 1. 再開した Task が Start の前に別の遷移（Pause、Resource の `waiting` など）をすると、その後は「動いた」とみなし、残った Memory は次にその Task が終わるまで残る（今と同じ扱い。Retrieval は `session_only` を返さない）。
 2. Start の前に Task を Source とする `session_only` の Memory を人が書いた場合、それも終わった Run のものとして退役する（`session_only` は Task の Session の間だけのものなので、実害は小さい）。
 3. Sweep の Query は Task ごとに `task_events` の最新の遷移を読む（`ix_task_events_task_id`（`task_id, seq`）を使う）。対象は開いた承認か `active` の `session_only` を持つ Task だけで、1 回に最大 100 件。
+
+## 承認時の決定（2026-09-30）
+
+Human は、作業 Session で判断が必要な点について推奨つきの説明を受け、直接回答して承認した（判断が必要な点 1〜4）。Human は 2026-09-30、#151 task_end.py:233 の扱いとして、再開した Task がまだ動いていない間はその session_only の記憶を終わった Run のものとして扱う案（推奨）を直接選び、新しい Decision で 0047 §1 を Supersede することを承認した。1〜4 はその実装の詳細。

@@ -1,6 +1,7 @@
 # SSH の Wrapper が中身のある Submodule を拒否したときの終了コードを 125 に分ける（Decision 0029 の 5・Decision 0051 の 5 の終了コードの約束の変更）
 
-- Status: Proposed
+- Status: Approved
+- Approval: 2026-09-30、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで直接回答して承認（判断が必要な点 1〜4。末尾の「承認時の決定」）
 - Date: 2026-09-30
 - Scope: Issue [#90](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/90) の #130 `integration/git.py:305` の保留（PR #163 の説明と #90 のコメント）。SSH の Wrapper（`apps/backend/deploy/ssh-git-wrapper/paw_git_wrapper.py`）の終了コードと、`WorktreeGit.is_exactly_committed`（`apps/backend/paw_backend/integration/git.py`）の読み方だけを扱う。Migration はない
 - Supersedes: [Decision 0029](0029-per-user-git-runner-ssh.md) の 5 と [Decision 0051](0051-integration-worktree-ignored-files.md) の 5 の**終了コードの約束だけ**（Wrapper の拒否は固定の 126 の 1 つ、という前提）。0029・0051 のそれ以外（`ssh_unavailable` の 255、許可する形、Fail closed）は変えない。0029・0051 は書き換えない
@@ -29,3 +30,7 @@ Decision 0051 の 4 は、integration worktree の `submodule status --cached` �
 
 1. 将来 Wrapper に「Human が片付ける」種類の拒否が増えたときは、同じ形で終了コードを足す必要がある（新しい Decision）。
 2. 126 を `git_failed` にしたので、Wrapper の設定の誤り（`--root` の誤りなど）で統合が止まると、Human は Task の失敗（`git_failed`）として気づき、Server の Auth Log（`syslog` の理由コード）で原因を見る。`dirty` の待ちとしては見えない。
+
+## 承認時の決定（2026-09-30）
+
+Human は、作業 Session で判断が必要な点について推奨つきの説明を受け、直接回答して承認した（判断が必要な点 1〜4）。Human は 2026-09-30、#130 git.py:305 の扱いとして、Wrapper の拒否に専用の終了コード（例 125）を作って dirty に対応させ、126 を git_failed にする案（推奨）を直接選び、新しい Decision で 0029 §5 / 0051 §5 を Supersede することを承認した。1〜4 はその実装の詳細。
