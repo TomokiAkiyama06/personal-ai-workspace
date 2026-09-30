@@ -5,7 +5,8 @@ application role (``PAW_APP_DATABASE_ROLE``). These tests
 
 * run the service and HTTP test classes of PAW-024 as that role, so every statement
   of the invitation, pairing and lifecycle code is proven to work with exactly the
-  privileges revision ``0124`` grants;
+  privileges revision ``0124`` grants (and ``0154``: the Passkey registration of an
+  approved pairing's session, #154);
 * pin the privileges of the three new tables, column by column, and of the two
   functions;
 * check what the role must NOT be able to do: change ``users.status`` or create a
@@ -27,6 +28,7 @@ from . import (
     test_onboarding_invitations,
     test_onboarding_lifecycle,
     test_onboarding_pairing,
+    test_passkey_paired_device,
 )
 from .auth_support import (
     ROLE_PASSWORD,
@@ -52,7 +54,7 @@ ALL_PRIVILEGES = (
     "TRIGGER",
 )
 # table -> (table-level privileges, columns the web role may UPDATE). The exact copy
-# of the choices (and their reasons) in migration 0124.
+# of the choices (and their reasons) in migration 0124 (and 0154).
 EXPECTED = {
     "user_invitations": (
         {"SELECT", "INSERT"},
@@ -81,6 +83,8 @@ EXPECTED = {
             "ended_reason",
             "attempts",
             "locked_at",
+            # 0154 (#154): the approved pairing's one Passkey registration.
+            "passkey_allowance_ended_at",
         },
     ),
     "user_status_changes": ({"SELECT"}, set()),
@@ -153,6 +157,7 @@ for _module, _names in (
         test_onboarding_http,
         ("InvitationRoutesTest", "LifecycleRoutesTest", "PairingRoutesTest"),
     ),
+    (test_passkey_paired_device, ("ApprovedPairingTest", "NoAllowanceTest")),
 ):
     for _name in _names:
         _case = as_web_role(getattr(_module, _name))

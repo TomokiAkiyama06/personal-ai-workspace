@@ -85,6 +85,9 @@ class AuthReason(StrEnum):
     UNLOCKED = "unlocked"
     UPDATED = "updated"
     REGISTERED = "registered"
+    # #154 (Decision 0043, 11): the first Passkey of an approved pairing's session,
+    # registered without a Step-up.
+    PAIRING_APPROVED = "pairing_approved"
     # #108: an account's Passkeys reset; a password set with a reset token.
     RESET = "reset"
     PASSWORD_RESET = "password_reset"
