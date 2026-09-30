@@ -176,8 +176,11 @@ def push_arguments(gh_executable: str, url: str, commit: str, branch: str) -> li
     and ``--no-recurse-submodules`` override the checkout's ``push.followTags``
     (an annotated tag of the commit would be pushed too) and
     ``push.recurseSubmodules`` (a submodule's commits would be pushed to its own
-    remote): nothing but the one branch is written (Codex review of #159). The
-    form is fixed: the SSH wrapper accepts nothing else (Decision 0052)."""
+    remote): nothing but the one branch is written (Codex review of #159).
+    ``--no-signed`` overrides its ``push.gpgSign`` (a signed push fails without
+    a key or on a remote that does not accept one, and the task would stay
+    ``evaluating``; Codex review of #159, #90). The form is fixed: the SSH
+    wrapper accepts nothing else (Decision 0052)."""
     return [
         "-c",
         "credential.helper=",
@@ -187,6 +190,7 @@ def push_arguments(gh_executable: str, url: str, commit: str, branch: str) -> li
         "--quiet",
         "--no-follow-tags",
         "--no-recurse-submodules",
+        "--no-signed",
         "--",
         url,
         f"{commit}:refs/heads/{branch}",

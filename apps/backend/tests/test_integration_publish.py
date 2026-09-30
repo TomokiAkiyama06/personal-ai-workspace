@@ -294,6 +294,7 @@ class PublisherTest(unittest.IsolatedAsyncioTestCase):
                 "--quiet",
                 "--no-follow-tags",
                 "--no-recurse-submodules",
+                "--no-signed",
                 "--",
                 REMOTE,
                 f"{self.head}:refs/heads/{self.branch}",
@@ -348,6 +349,16 @@ class PublisherTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(self.remote_branch(), self.head)
         self.assertEqual(git("tag", "--list", cwd=self.bare), "")
+
+    async def test_configured_push_signing_never_fails_the_push(self):
+        # Codex review of #159: ``push.gpgSign=true`` in the checkout would make
+        # git sign the push (no key here, and the remote does not accept signed
+        # pushes): it failed and the task stayed ``evaluating``.
+        git("config", "push.gpgSign", "true", cwd=self.checkout)
+
+        await self.publisher().publish(self.request())
+
+        self.assertEqual(self.remote_branch(), self.head)
 
     async def test_a_commit_made_after_the_checks_is_not_pushed(self):
         checked = self.head
