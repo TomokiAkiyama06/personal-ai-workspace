@@ -59,8 +59,9 @@ allowlist (:func:`git_environment`); nothing of ``sshd``'s environment (and so
 nothing a client could send with ``SendEnv``) reaches it.
 
 Exit status: git's own when a command is accepted (this process ``exec``-s git);
-:data:`REJECTED` (126) when it is refused; never 255, which ``SshGitRunner``
-reads as "ssh itself failed" (Decision 0029 §5).
+:data:`POPULATED_SUBMODULE` (125) when it is refused because a submodule is
+populated, :data:`REJECTED` (126) for every other refusal (Decision 0063); never
+255, which ``SshGitRunner`` reads as "ssh itself failed" (Decision 0029 §5).
 
 What is logged
 --------------
@@ -89,6 +90,10 @@ PROTOCOL_TAG = "paw-git-run/v1"
 #: ``merge-tree`` read those as answers), not 128/129 (git's own failures), not
 #: 255 (``ssh``'s own failure, Decision 0029 §5).
 REJECTED = 126
+#: Exit status of a call refused as ``populated_submodule``: the backend reads it
+#: as a worktree a human must clean up (``dirty``), every other refusal as
+#: ``git_failed`` (Decision 0063). Not git's, not ``ssh``'s either.
+POPULATED_SUBMODULE = 125
 SAFE_PATH = "/usr/local/bin:/usr/bin:/bin"
 WORKTREE_DIRECTORY = ".paw-worktrees"
 BRANCH_NAMESPACE = "paw"
@@ -117,7 +122,13 @@ _PUSH_URL = re.compile(
     r"/[A-Za-z0-9._-]{1,100}\.git"
 )
 #: What ``push`` takes in front of its URL and refspec, exactly (:func:`_check_push`).
-PUSH_OPTIONS = ("--quiet", "--no-follow-tags", "--no-recurse-submodules", "--")
+PUSH_OPTIONS = (
+    "--quiet",
+    "--no-follow-tags",
+    "--no-recurse-submodules",
+    "--no-signed",
+    "--",
+)
 _CONFIG_KEY = re.compile(r"[A-Za-z][A-Za-z0-9-]*(\.[^\s=]+)*\.[A-Za-z][A-Za-z0-9-]*")
 
 
@@ -692,25 +703,29 @@ def gh_credential_helper(config: Config) -> str | None:
 
 
 def _check_push(args: list[str], places: Places, config: Config) -> None:
-    """Decision 0052 (issue #132): ``push --quiet --no-follow-tags
-    --no-recurse-submodules -- <URL> <commit>:refs/heads/paw/...``. One commit
-    id (never a ``+``: no force, no other refspec, no option such as
+    """Decisions 0052 and 0062 (issues #132, #90): ``push --quiet --no-follow-tags
+    --no-recurse-submodules --no-signed -- <URL> <commit>:refs/heads/paw/...``.
+    One commit id (never a ``+``: no force, no other refspec, no option such as
     ``--delete``, ``--mirror`` or ``--tags``) to one ``paw/`` branch of
     ``https://<host>/<owner>/<repo>.git`` on a host the administrator allowed
     (``--push-host``), and only with gh's credential helper configured
-    (``--gh``). The two ``--no-`` options are required: they override the
+    (``--gh``). The ``--no-`` options are required: they override the
     repository's ``push.followTags`` (an annotated tag would be pushed too)
     and ``push.recurseSubmodules`` (a submodule's commits would be pushed to
-    its own remote); a push without them is refused (Codex review of #159)."""
+    its own remote); a push without them is refused (Codex review of #159).
+    ``--no-signed`` likewise overrides ``push.gpgSign`` (a signed push fails
+    without a key, #90)."""
     if config.gh is None:
         raise Rejected("config_not_allowed")
-    if len(args) == 6 and tuple(args[:4]) == PUSH_OPTIONS:
-        found = _PUSH_URL.fullmatch(args[4])
-        if found is None or not _url(args[4], config) or ".." in args[4]:
+    count = len(PUSH_OPTIONS)
+    if len(args) == count + 2 and tuple(args[:count]) == PUSH_OPTIONS:
+        url, refspec = args[count], args[count + 1]
+        found = _PUSH_URL.fullmatch(url)
+        if found is None or not _url(url, config) or ".." in url:
             raise Rejected("bad_arguments")
         if found["host"] not in config.push_hosts:
             raise Rejected("push_host_not_allowed")
-        source, separator, destination = args[5].partition(":")
+        source, separator, destination = refspec.partition(":")
         if separator and _OBJECT_ID.fullmatch(source) and _paw_ref(destination):
             return
     raise Rejected("bad_arguments")
@@ -1294,7 +1309,8 @@ def main(
     log: Callable[[str], None] = _syslog,
     check: Callable[[Invocation], None] = check_repository,
 ) -> int:
-    """Decide one call; ``exec`` git or return :data:`REJECTED`."""
+    """Decide one call; ``exec`` git or return :data:`REJECTED` (or
+    :data:`POPULATED_SUBMODULE`)."""
     arguments = sys.argv[1:] if argv is None else list(argv)
     environment = os.environ if environ is None else environ
     user = "-"
@@ -1306,6 +1322,8 @@ def main(
     except Rejected as rejected:
         log(f"rejected user={user} reason={rejected.reason}")
         sys.stderr.write(f"paw-git-wrapper: rejected ({rejected.reason})\n")
+        if rejected.reason == "populated_submodule":
+            return POPULATED_SUBMODULE
         return REJECTED
     log(f"accepted user={user} subcommand={invocation.subcommand}")
     sys.stdout.flush()

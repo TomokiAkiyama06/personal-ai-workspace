@@ -26,6 +26,7 @@ from paw_backend.recovery.restore import (
     RestoreProblem,
     manual_steps,
     parse_source,
+    restore_reason,
     verify_files,
 )
 
@@ -321,6 +322,129 @@ class RenderTest(unittest.TestCase):
                 "repositor" in step and "register" in step
                 for step in manual_steps(data, None)
             )
+        )
+
+    def test_the_memories_of_a_skipped_repository_are_held_back(self) -> None:
+        # A skipped repository is registered again under a new id: its repo
+        # memories would keep the old one and reach nobody. They are not
+        # restored (versions, relations, sources with them) and are listed as a
+        # manual step (Decision 0061).
+        project_id = uuid4()
+        skipped_id, clean_id = uuid4(), uuid4()
+
+        def repository(identifier, name):
+            return {
+                "id": identifier,
+                "project_id": project_id,
+                "name": name,
+                "default_branch": "main",
+                "source": "github_clone",
+                "acl_allowed": None,
+                "created_by": None,
+                "created_at": T0,
+                "updated_at": T0,
+            }
+
+        held_a, held_b, kept_repo, kept_shared = (uuid4() for _ in range(4))
+        a1 = version(held_a, scope="repo", repo_id=skipped_id)
+        a2 = version(held_a, scope="repo", repo_id=skipped_id, version_number=2)
+        b1 = version(held_b, scope="repo", repo_id=skipped_id)
+        k1 = version(kept_repo, scope="repo", repo_id=clean_id)
+        s1 = version(kept_shared)
+        s2 = version(kept_shared, version_number=2)
+
+        def relation(source, target):
+            return {
+                "id": uuid4(),
+                "from_version_id": source["id"],
+                "to_version_id": target["id"],
+                "relation_type": "extends",
+                "reason": None,
+                "created_at": T0,
+            }
+
+        def source(of, source_type="task"):
+            return {
+                "id": uuid4(),
+                "memory_version_id": of["id"],
+                "source_type": source_type,
+                "source_ref": None if source_type == "conversation" else "task:1",
+                "source_deleted_at": None,
+                "created_at": T0,
+            }
+
+        plan = render(
+            snapshot_with(
+                repositories=[
+                    repository(skipped_id, SECRET),
+                    repository(clean_id, "app"),
+                ],
+                memories=[
+                    {"id": memory, "created_at": T0}
+                    for memory in (held_a, held_b, kept_repo, kept_shared)
+                ],
+                versions=[a1, a2, b1, k1, s1, s2],
+                relations=[
+                    relation(a2, a1),  # inside a held memory
+                    relation(s1, b1),  # from a restored memory to a held one
+                    relation(s2, s1),  # restored
+                ],
+                sources=[
+                    source(a1),
+                    source(a2, "conversation"),
+                    source(k1),
+                ],
+            )
+        )
+        data = parse_source(plan.files, "c" * 40, verify_files(plan.files))
+        self.assertEqual({kept_repo, kept_shared}, {row["id"] for row in data.memories})
+        self.assertEqual(
+            {k1["id"], s1["id"], s2["id"]}, {row["id"] for row in data.versions}
+        )
+        self.assertEqual(
+            [(s2["id"], s1["id"])],
+            [(row["from_version_id"], row["to_version_id"]) for row in data.relations],
+        )
+        self.assertEqual([k1["id"]], [row["memory_version_id"] for row in data.sources])
+        # A held conversation source is counted with the held memory only.
+        self.assertEqual(0, data.skipped_conversation_sources)
+        self.assertEqual(1, data.skipped_repositories)
+        [held] = data.held_repositories
+        self.assertEqual(skipped_id, held.repository_id)
+        self.assertEqual("[REDACTED]", held.name)
+        self.assertEqual(sorted([held_a, held_b], key=str), held.memory_ids)
+        self.assertEqual((3, 2, 2), (held.versions, held.relations, held.sources))
+        self.assertEqual(
+            {"memories": 2, "versions": 3, "relations": 2, "sources": 2},
+            data.held_counts,
+        )
+        steps = manual_steps(data, None)
+        [listed] = [step for step in steps if str(skipped_id) in step]
+        self.assertIn("[REDACTED]", listed)
+        for memory in (held_a, held_b):
+            self.assertIn(str(memory), listed)
+        self.assertIn("2 repo memor", listed)
+        self.assertIn("3 version(s), 2 relation(s), 2 source(s)", listed)
+        self.assertNotIn(SECRET, "\n".join(steps))
+        self.assertEqual(
+            "users=0 projects=0 repos=1 memories=2 versions=3 skipped_repos=1 "
+            "held_memories=2 held_versions=3 held_relations=2 held_sources=2",
+            restore_reason(data),
+        )
+
+    def test_nothing_is_held_back_without_a_skipped_repository(self) -> None:
+        memory_id = uuid4()
+        plan = render(
+            snapshot_with(
+                memories=[{"id": memory_id, "created_at": T0}],
+                versions=[version(memory_id, scope="repo", repo_id=uuid4())],
+            )
+        )
+        data = parse_source(plan.files, "c" * 40, verify_files(plan.files))
+        self.assertEqual([memory_id], [row["id"] for row in data.memories])
+        self.assertEqual([], data.held_repositories)
+        self.assertEqual(
+            "users=0 projects=0 repos=0 memories=1 versions=1", restore_reason(data)
         )
 
     def test_a_credential_shaped_login_name_is_replaced_by_a_placeholder(self) -> None:

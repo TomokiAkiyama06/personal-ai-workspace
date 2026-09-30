@@ -20,7 +20,7 @@ Backend の Process（Service 用 Linux User、例: paw）
                  └─ git（固定の -c・固定の環境。受け付けた形だけ）
 ```
 
-Wrapper は Client（Backend）を信用しない。`$SSH_ORIGINAL_COMMAND` を POSIX の語の規則（`shlex.split`。`eval` しない）で分解し、次の全部を満たすときだけ git を `exec` する。1 つでも外れれば終了コード **126** で拒否する（fail closed。git を起動しない）。
+Wrapper は Client（Backend）を信用しない。`$SSH_ORIGINAL_COMMAND` を POSIX の語の規則（`shlex.split`。`eval` しない）で分解し、次の全部を満たすときだけ git を `exec` する。1 つでも外れれば終了コード **126**（中身のある Submodule の拒否だけは **125**。下の「終了コード」）で拒否する（fail closed。git を起動しない）。
 
 1. 先頭の語が `paw-git-run/v1`、4 語目が `--`。
 2. cwd は、その User の Root（既定 `<home>/workspaces`）の中の、既存の Directory。**Symbolic Link をすべて解決した後の Path** で判定する。
@@ -64,7 +64,7 @@ Wrapper は Client（Backend）を信用しない。`$SSH_ORIGINAL_COMMAND` を 
 | `merge-tree` | `--write-tree --name-only -z --no-messages refs/heads/paw/<a> refs/heads/paw/<b>` |
 | `merge-base` | `--is-ancestor refs/heads/paw/<a> refs/heads/paw/<b>` |
 | `submodule` | `status --cached` だけ（Decision 0051（PR #130）による。pin したときだけ。下の 10。`foreach`・`update`・`init` など他の副コマンド・Option はすべて拒否） |
-| `push` | `--quiet --no-follow-tags --no-recurse-submodules -- https://<--push-host の Host>/<owner>/<repo>.git <commit id>:refs/heads/paw/<b>` だけ（2 つの `--no-` は必須で、Repository の `push.followTags`（Annotated Tag も Push される）と `push.recurseSubmodules`（Submodule の Commit を別の Remote へ Push する）を打ち消す。[Decision 0052](../../../../docs/decisions/0052-integration-push-and-pull-request.md)、#132。`--gh` と `--push-host` を設定したときだけ。先頭の `-c` は `credential.helper=` と `credential.helper=!<--gh> auth git-credential` だけ受け付け、Wrapper 自身が同じ 2 つを付ける。`+`（Force）・`--force`・`--mirror`・`--delete`・Tag・`paw/` 以外の宛先・2 つ以上の Refspec・Remote 名は拒否。pin しない。下の 9 の設定の確認を行い、`url.<base>.insteadOf` / `pushInsteadOf`・`http.*` も拒否） |
+| `push` | `--quiet --no-follow-tags --no-recurse-submodules --no-signed -- https://<--push-host の Host>/<owner>/<repo>.git <commit id>:refs/heads/paw/<b>` だけ（3 つの `--no-` は必須で、Repository の `push.followTags`（Annotated Tag も Push される）、`push.recurseSubmodules`（Submodule の Commit を別の Remote へ Push する）と `push.gpgSign`（鍵がない・署名つきの Push を受け付けない Remote では Push が失敗する。#90）を打ち消す。[Decision 0052](../../../../docs/decisions/0052-integration-push-and-pull-request.md)・[Decision 0062](../../../../docs/decisions/0062-integration-push-fixed-form-no-options.md)（Proposed。形の 3 つの `--no-`）、#132。`--gh` と `--push-host` を設定したときだけ。先頭の `-c` は `credential.helper=` と `credential.helper=!<--gh> auth git-credential` だけ受け付け、Wrapper 自身が同じ 2 つを付ける。`+`（Force）・`--force`・`--mirror`・`--delete`・Tag・`paw/` 以外の宛先・2 つ以上の Refspec・Remote 名は拒否。pin しない。下の 9 の設定の確認を行い、`url.<base>.insteadOf` / `pushInsteadOf`・`http.*` も拒否） |
 | `status` | `--porcelain=v1 -z --untracked-files=all`／`--porcelain=v1 -z --untracked-files=normal --ignored=traditional --ignore-submodules=none`（Decision 0051（PR #130）による。`--git-dir=` / `--work-tree=` で pin したときだけ。下の 10） |
 
 上の形以外の `push`、`fetch`・`pull`・`checkout`・`switch`・`reset`・`rebase`・`commit`・`branch`・`gc`・`submodule` など、表にないものはすべて拒否する。
@@ -75,6 +75,7 @@ git の環境は固定の許可リストだけ（`PATH`・`HOME`・`LC_ALL=C`・
 
 - 受け付けた呼び出し: git 自身の終了コード（Wrapper は git を `exec` する）。
 - 拒否: **126**。git の 0／1（`merge-base --is-ancestor`・`merge-tree` はこれを答えとして読む）、128／129（git 自身の失敗）、255（`ssh` 自身の失敗。`SshGitRunner` は `ssh_unavailable` として扱う。Decision 0029 の 5）のどれとも重ならない。
+- 中身のある Submodule（`populated_submodule`）の拒否: **125**（[Decision 0063](../../../../docs/decisions/0063-wrapper-populated-submodule-exit-code.md)）。Backend は 125 を Human が片付ける `dirty`、それ以外の拒否（126。呼び出し・Wrapper・Server の設定の誤り）を `git_failed` として扱う。125 も上のどれとも重ならない。Wrapper は Backend と同時か先に入れ替える（古い Wrapper の 126 は、新しい Backend では中身のある Submodule でも `git_failed` になる。Fail closed）。
 
 ### Log（Secret を出さない）
 
