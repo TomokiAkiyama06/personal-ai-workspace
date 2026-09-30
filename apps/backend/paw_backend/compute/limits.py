@@ -40,6 +40,10 @@ DEFAULT_MAX_WAITERS = 256
 DEFAULT_PROBE_TIMEOUT_SECONDS = 10.0
 MAX_COMMAND_TIMEOUT_SECONDS = 600.0
 
+# Decision 0042: a warning that work waits for VRAM another workload
+# holds is repeated at most this often for the same kind of work.
+DEFAULT_VRAM_WARNING_INTERVAL_SECONDS = 300.0
+
 # -- models --------------------------------------------------------------------
 DEFAULT_FAILED_RETRY_SECONDS = 60.0  # a failed load is tried again after this
 DEFAULT_CONTROL_TIMEOUT_SECONDS = 300.0  # one load / unload command
