@@ -1,0 +1,995 @@
+/* エージェント / タスク and プルリクエスト (PAW-062): the design canvas's Tasks,
+   PullRequest, MobileTask and Tablet boards, on the shell's tokens (styles.css),
+   so dark and light follow the theme. */
+
+.tasks-screen {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.screen-head {
+  min-height: 56px;
+  flex-shrink: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 16px;
+  padding: 8px 24px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.screen-head h1 {
+  font-size: 17px;
+}
+
+.screen-head .chip {
+  min-height: 30px;
+}
+
+.screen-head .chip.filter-approval:not([aria-pressed="true"]) {
+  color: var(--warning);
+}
+
+.capacity {
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+
+.tasks-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.task-list-pane {
+  width: 330px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 16px;
+  border-right: 1px solid var(--border-soft);
+}
+
+.task-cards,
+.plain-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.task-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.task-card {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--text);
+  text-decoration: none;
+}
+
+.task-card:hover {
+  border-color: var(--border-strong);
+}
+
+.task-card[aria-current="page"] {
+  background: var(--row-current);
+  border-color: var(--selected-border);
+}
+
+.task-card-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.task-card-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.task-card .mono,
+.task-id {
+  font-size: 10.5px;
+  color: var(--text-3);
+}
+
+/* Tones: the text always says the state; colour only supports it. */
+.tone-info {
+  --tone: var(--info-text);
+  --tone-dot: var(--info);
+  --tone-bg: var(--info-bg);
+}
+
+.tone-warning {
+  --tone: var(--warning);
+  --tone-dot: var(--warning);
+  --tone-bg: var(--warning-bg);
+}
+
+.tone-ok {
+  --tone: var(--ok);
+  --tone-dot: var(--ok);
+  --tone-bg: var(--ok-bg);
+}
+
+.tone-error {
+  --tone: var(--error);
+  --tone-dot: var(--error);
+  --tone-bg: var(--error-bg);
+}
+
+.tone-neutral {
+  --tone: var(--text-2);
+  --tone-dot: var(--text-2);
+  --tone-bg: var(--input);
+}
+
+.tone-muted {
+  --tone: var(--text-3);
+  --tone-dot: var(--text-disabled);
+  --tone-bg: var(--input);
+}
+
+.state-dot {
+  width: 7px;
+  height: 7px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--tone-dot, var(--text-3));
+}
+
+.state-tag {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  border-radius: var(--r-chip);
+  background: var(--input);
+  color: var(--tone);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+
+.state-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex-shrink: 0;
+  padding: 3px 10px;
+  border-radius: var(--r-chip);
+  background: var(--tone-bg);
+  color: var(--tone);
+  font-size: 11.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.state-pill .state-dot {
+  width: 6px;
+  height: 6px;
+}
+
+.queue-note {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin-top: 4px;
+  padding: 11px 13px;
+  border-radius: 11px;
+  border: 1px solid var(--border);
+  background: var(--nav);
+}
+
+.queue-note p {
+  font-size: 11.5px;
+  line-height: 1.7;
+  color: var(--text-2);
+}
+
+.task-detail-pane {
+  flex: 1;
+  min-width: 0;
+  padding: 18px 24px;
+}
+
+.task-title-block {
+  grid-column: 1;
+  grid-row: 1;
+}
+
+.task-controls {
+  grid-column: 2;
+  grid-row: 1;
+  align-self: start;
+}
+
+/* The task: title and controls on one line, then the rest at full width. */
+.task-detail {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 14px;
+}
+
+.task-detail > * {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+
+.task-detail > .task-detail > .task-title-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.task-title-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  min-width: 0;
+}
+
+.task-title-line h2 {
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.task-title-line .mono,
+.task-context {
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+
+.task-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.task-controls button {
+  font-size: 12.5px;
+  border-radius: 8px;
+}
+
+.task-controls button.text-button.bordered {
+  border-color: var(--border-strong);
+}
+
+.task-controls .phone-label {
+  display: none;
+}
+
+.task-control-error {
+  margin: 0;
+}
+
+.wait-notice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 14px;
+  border-radius: 11px;
+  border: 1px solid color-mix(in srgb, var(--tone-dot) 30%, var(--border));
+  background: color-mix(in srgb, var(--tone-bg) 60%, var(--surface));
+  color: var(--tone);
+  font-size: 12.5px;
+}
+
+.wait-notice span {
+  color: var(--text);
+}
+
+.task-facts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 18px;
+  margin: 0;
+  padding: 11px 16px;
+  border-radius: 11px;
+  border: 1px solid var(--border);
+  background: var(--nav);
+}
+
+.fact {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+  font-size: 12px;
+}
+
+.fact dt {
+  color: var(--text-2);
+}
+
+.fact dd {
+  margin: 0;
+  color: var(--text);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.fact-link {
+  margin-left: auto;
+  font-size: 12px;
+}
+
+.task-card-panel {
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--nav);
+}
+
+.dag-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 16px;
+}
+
+.panel-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+}
+
+.panel-head h3 {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.panel-head .small {
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+
+.panel-head.padded {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+/* The graph: HTML buttons over an SVG layer of arrows. */
+.dag-scroll {
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.dag {
+  position: relative;
+}
+
+.dag-edges {
+  position: absolute;
+  inset: 0;
+  color: var(--text-disabled);
+}
+
+.dag-edges path {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+}
+
+.dag-edges marker path {
+  fill: currentColor;
+  stroke: none;
+}
+
+.dag-nodes {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.dag-nodes li {
+  position: absolute;
+}
+
+.dag-node {
+  width: 176px;
+  height: 66px;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: center;
+  gap: 2px;
+  padding: 0 14px;
+  border: 1.2px solid var(--border);
+  border-radius: 11px;
+  background: var(--surface);
+  color: var(--text);
+  font-weight: 400;
+  text-align: left;
+}
+
+.dag-node.state-pending,
+.dag-node.state-ready,
+.dag-node.state-cancelled {
+  border-style: dashed;
+  color: var(--text-2);
+}
+
+.dag-node.state-succeeded {
+  background: var(--ok-bg);
+  border-color: color-mix(in srgb, var(--ok) 45%, var(--ok-bg));
+}
+
+.dag-node.state-running {
+  background: color-mix(in srgb, var(--info-bg) 55%, var(--surface));
+  border-color: color-mix(in srgb, var(--info) 40%, var(--border));
+}
+
+.dag-node.state-failed,
+.dag-node.state-blocked {
+  background: var(--error-bg);
+  border-color: var(--danger-border);
+}
+
+.dag-node[aria-pressed="true"] {
+  border-color: var(--selected-border);
+  box-shadow: 0 0 0 1px var(--selected-border);
+}
+
+.dag-node-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.dag-node.state-pending .state-dot {
+  background: var(--text-disabled);
+}
+
+.dag-node-meta {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-3);
+}
+
+.node-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: 11px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.node-detail-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+}
+
+.node-detail-head h4 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.node-detail-head .icon-button {
+  transform: rotate(90deg);
+}
+
+.attempt-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--border-soft);
+  font-size: 12px;
+}
+
+.attempt-row:last-child {
+  border-bottom: 0;
+}
+
+.attempt-row .mono {
+  font-size: 11px;
+}
+
+.attempt-state {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+
+.attempt-state.status-running,
+.attempt-state.status-started {
+  color: var(--info-text);
+}
+
+.attempt-state.status-succeeded {
+  color: var(--ok);
+}
+
+.attempt-state.status-failed {
+  color: var(--error);
+}
+
+.error-text {
+  color: var(--error);
+}
+
+/* Repositories of the Working Set (UI_DESIGN: Multi-Repo Task). */
+.repo-panel {
+  overflow: hidden;
+}
+
+.repo-grid {
+  display: grid;
+  grid-template-columns: 1fr 0.9fr 1.3fr 0.9fr 0.9fr 0.9fr;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+}
+
+.repo-head {
+  padding-top: 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border-soft);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--text-3);
+}
+
+.repo-row {
+  border-bottom: 1px solid var(--border-soft);
+  font-size: 12px;
+}
+
+.repo-row:last-child {
+  border-bottom: 0;
+}
+
+.repo-row .strong {
+  font-size: 12.5px;
+}
+
+.repo-row .mono {
+  font-size: 11.5px;
+}
+
+.repo-row .phone-label {
+  display: none;
+}
+
+.role-tag {
+  justify-self: start;
+  padding: 2px 8px;
+  border-radius: var(--r-chip);
+  font-size: 10.5px;
+  font-weight: 600;
+}
+
+.role-target {
+  background: var(--selected);
+  color: var(--link);
+}
+
+.role-referenced {
+  background: var(--info-bg);
+  color: var(--info-text);
+}
+
+.role-working {
+  background: var(--ok-bg);
+  color: var(--ok);
+}
+
+.result {
+  color: var(--text-3);
+}
+
+.result-passed,
+.review-approved {
+  color: var(--ok);
+}
+
+.result-failed,
+.review-changes_requested {
+  color: var(--error);
+}
+
+.review-in_review {
+  color: var(--info-text);
+}
+
+/* Only one of the graph (wide) and the step list (phone) shows. */
+.phone-only {
+  display: none;
+}
+
+.back-row {
+  display: none;
+}
+
+/* The phone's steps (MobileTask). */
+.step-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+}
+
+.step {
+  width: 100%;
+  min-height: var(--tap);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-3);
+  font-size: 13.5px;
+  font-weight: 400;
+  text-align: left;
+}
+
+.step-title {
+  flex: 1;
+  min-width: 0;
+}
+
+.step.state-succeeded {
+  color: var(--text-2);
+}
+
+.step.state-running {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.step[aria-pressed="true"] .step-title {
+  text-decoration: underline;
+}
+
+.step .mono {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-3);
+}
+
+.step-icon {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 1.5px dashed var(--text-disabled);
+}
+
+.step.state-succeeded .step-icon {
+  border: 0;
+  background: var(--ok-bg);
+  color: var(--ok);
+}
+
+.step.state-running .step-icon {
+  border: 2px solid var(--info);
+  border-right-color: transparent;
+}
+
+.step.state-failed .step-icon,
+.step.state-blocked .step-icon {
+  border: 2px solid var(--error);
+}
+
+.current-work {
+  flex-direction: column;
+  gap: 9px;
+  padding: 13px 15px;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--info) 30%, var(--border));
+  background: color-mix(in srgb, var(--info-bg) 45%, var(--surface));
+}
+
+.current-work .section-label {
+  color: var(--info-text);
+}
+
+.tag-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.tag {
+  padding: 2px 8px;
+  border-radius: var(--r-badge);
+  background: var(--input);
+  color: var(--text-2);
+  font-size: 10.5px;
+}
+
+/* Pull requests (PullRequest board). */
+.pull-detail {
+  display: flex;
+  gap: 20px;
+  align-items: flex-start;
+}
+
+.pull-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.pull-side {
+  width: 336px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.task-card-panel.flush {
+  overflow: hidden;
+}
+
+.condition {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 11px 16px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.condition:last-child {
+  border-bottom: 0;
+}
+
+.condition-icon {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--input);
+}
+
+.condition-done .condition-icon {
+  background: var(--ok-bg);
+  color: var(--ok);
+}
+
+.condition-failed .condition-icon {
+  background: var(--error-bg);
+}
+
+.condition-label {
+  flex: 1;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.condition-value {
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+
+.condition-done .condition-value {
+  color: var(--ok);
+}
+
+.condition-failed .condition-value {
+  color: var(--error);
+}
+
+.merge-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 18px;
+  border-radius: 13px;
+}
+
+.merge-panel h3 {
+  font-size: 14px;
+}
+
+.merge-panel p {
+  line-height: 1.75;
+}
+
+.button-link {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 38px;
+  padding: 0 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 9px;
+  background: var(--input);
+  color: var(--text);
+  font-size: 12.5px;
+  text-decoration: none;
+}
+
+.button-link.quiet {
+  background: transparent;
+  color: var(--text-2);
+}
+
+.authority-note {
+  display: flex;
+  gap: 11px;
+  padding: 16px;
+  border-radius: 13px;
+  border: 1px solid color-mix(in srgb, var(--warning) 22%, var(--border));
+  background: color-mix(in srgb, var(--warning-bg) 55%, var(--bg));
+  color: var(--warning);
+}
+
+.authority-note svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.authority-note p {
+  font-size: 11.5px;
+  line-height: 1.8;
+  color: color-mix(in srgb, var(--warning) 45%, var(--text));
+}
+
+/* 768–1279px (Tablet): the list narrows; the PR's side panel goes below. */
+@media (max-width: 1279px) {
+  .task-list-pane {
+    width: 280px;
+  }
+
+  .task-detail-pane {
+    padding: 16px;
+  }
+
+  .pull-detail {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .pull-side {
+    width: auto;
+  }
+}
+
+/* < 768px (MobileTask): the list, then the task on its own screen. */
+@media (max-width: 767px) {
+  .screen-head {
+    padding: 10px 16px;
+  }
+
+  .screen-head .filter-chips {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    max-width: 100%;
+  }
+
+  .screen-head .chip {
+    min-height: 36px;
+    white-space: nowrap;
+  }
+
+  .tasks-body {
+    flex-direction: column;
+  }
+
+  .task-list-pane {
+    width: auto;
+    border-right: 0;
+    padding: 14px 16px;
+  }
+
+  .task-detail-pane {
+    display: none;
+    padding: 14px;
+  }
+
+  .has-selection .screen-head,
+  .has-selection .task-list-pane {
+    display: none;
+  }
+
+  .has-selection .task-detail-pane {
+    display: block;
+  }
+
+  .phone-only {
+    display: flex;
+  }
+
+  .wide-only {
+    display: none;
+  }
+
+  .back-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-height: var(--tap);
+    color: var(--text-2);
+    font-size: 13px;
+    text-decoration: none;
+  }
+
+  .task-detail {
+    display: flex;
+    flex-direction: column;
+    gap: 13px;
+  }
+
+  .task-title-line h2 {
+    font-size: 17px;
+  }
+
+  .task-detail > .task-controls {
+    order: 99;
+    flex-wrap: nowrap;
+    gap: 8px;
+  }
+
+  .task-controls button {
+    flex: 1;
+    min-height: 48px;
+    border-radius: 12px;
+    font-size: 13.5px;
+  }
+
+  .task-controls .wide-label {
+    display: none;
+  }
+
+  .task-controls .phone-label {
+    display: inline;
+  }
+
+  .step-list {
+    display: block;
+  }
+
+  .fact-link {
+    margin-left: 0;
+  }
+
+  .repo-head {
+    display: none;
+  }
+
+  .repo-grid {
+    grid-template-columns: 1fr auto;
+    gap: 6px 12px;
+  }
+
+  .repo-row .phone-label {
+    display: inline;
+  }
+}

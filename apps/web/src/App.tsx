@@ -9,6 +9,8 @@ import { SettingsPage } from "./pages/SettingsPage";
 import { useRouter } from "./router";
 import { AppShell } from "./shell/AppShell";
 import { isActive, NEW_CHAT_PATH, PRIMARY_NAV, SECONDARY_NAV } from "./shell/navigation";
+import { PULLS_PATH, PullsPage } from "./tasks/PullsPage";
+import { TASKS_PATH, TasksPage } from "./tasks/TasksPage";
 
 // Screens of later issues that are reached from the user menu, not the navigation.
 const OTHER_SCREENS: readonly { path: string; label: MessageKey }[] = [
@@ -21,6 +23,8 @@ const OTHER_SCREENS: readonly { path: string; label: MessageKey }[] = [
 function SignedInPage() {
   const { path } = useRouter();
   if (path === "/notifications") return <NotificationsPage />;
+  if (isActive({ path: TASKS_PATH }, path)) return <TasksPage />;
+  if (isActive({ path: PULLS_PATH }, path)) return <PullsPage />;
   const other = OTHER_SCREENS.find((entry) => entry.path === path);
   if (other) return <PlaceholderPage screen={other.label} />;
   const item = [...PRIMARY_NAV, ...SECONDARY_NAV].find((entry) => isActive(entry, path));

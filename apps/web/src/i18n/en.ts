@@ -1,4 +1,5 @@
 import type { MessageKey } from "./ja";
+import { tasksEn } from "./tasks";
 
 // English. Every key of the Japanese catalog must be here (the type enforces it).
 // V1 shows Japanese only (the PAW-060 design, SettingsLanguage); this catalog keeps
@@ -270,6 +271,8 @@ export const en: Record<MessageKey, string> = {
   "notifications.severity.warning": "WARNING",
   "notifications.severity.error": "ERROR",
   "notifications.severity.critical": "CRITICAL",
+
+  ...tasksEn,
 
   "common.cancel": "Cancel",
   "common.close": "Close",
