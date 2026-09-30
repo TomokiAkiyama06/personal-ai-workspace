@@ -9,16 +9,23 @@ import { authApi } from "../api/auth";
 import { showsAdmin, useSession, useSignedIn } from "../auth/session";
 import { useI18n } from "../i18n";
 import { errorMessage } from "../i18n/errors";
-import { NotificationBanners, NotificationBell } from "../notifications/NotificationCenter";
+import {
+  MarkAllReadButton,
+  NotificationBanners,
+  NotificationBell,
+} from "../notifications/NotificationCenter";
+import { usePendingApprovalNotifications } from "../notifications/pendingApprovals";
 import { useNotifications } from "../notifications/store";
 import { Link, useRouter } from "../router";
 import { useTheme } from "../theme";
 import {
   Avatar,
+  PHONE_QUERY,
   RoleBadge,
   ThemeSegments,
   useDismiss,
   useFooterText,
+  useMediaQuery,
   useRoleLabel,
 } from "./common";
 import { Icon, type IconName } from "./icons";
@@ -281,6 +288,9 @@ export function AppShell({ children }: { children: ReactNode }) {
   const title = useScreenTitle();
   const secondary = SECONDARY_NAV.filter((item) => !item.adminOnly || showsAdmin(user.system_role));
   const close = useCallback(() => setNavOpen(false), []);
+  // MobileNotifications: the full-screen list has 戻る and すべて既読 in the header.
+  const phoneNotifications = useMediaQuery(PHONE_QUERY) && path === "/notifications";
+  usePendingApprovalNotifications();
 
   useEffect(() => {
     if (!navOpen) return;
@@ -294,16 +304,22 @@ export function AppShell({ children }: { children: ReactNode }) {
   return (
     <div className={navOpen ? "shell nav-open" : "shell"}>
       <header className="app-header">
-        <button
-          type="button"
-          className="icon-button nav-toggle"
-          aria-label={navOpen ? t("nav.close") : t("nav.open")}
-          aria-expanded={navOpen}
-          aria-controls={navId}
-          onClick={() => setNavOpen((value) => !value)}
-        >
-          <Icon name="menu" size={20} />
-        </button>
+        {phoneNotifications ? (
+          <Link to="/" className="icon-button nav-toggle" aria-label={t("notifications.back")}>
+            <Icon name="back" size={20} />
+          </Link>
+        ) : (
+          <button
+            type="button"
+            className="icon-button nav-toggle"
+            aria-label={navOpen ? t("nav.close") : t("nav.open")}
+            aria-expanded={navOpen}
+            aria-controls={navId}
+            onClick={() => setNavOpen((value) => !value)}
+          >
+            <Icon name="menu" size={20} />
+          </button>
+        )}
         <Link to="/" className="brand">
           <Icon name="logo" size={22} />
           <span className="brand-name">{t("app.name")}</span>
@@ -324,7 +340,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         </div>
         <div className="header-actions">
           <ThemeToggle />
-          <NotificationBell />
+          {phoneNotifications ? <MarkAllReadButton /> : <NotificationBell />}
           <UserMenu />
         </div>
       </header>

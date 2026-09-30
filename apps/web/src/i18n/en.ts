@@ -1,4 +1,5 @@
 import type { MessageKey } from "./ja";
+import { tasksEn } from "./tasks";
 
 // English. Every key of the Japanese catalog must be here (the type enforces it).
 // V1 shows Japanese only (the PAW-060 design, SettingsLanguage); this catalog keeps
@@ -263,6 +264,15 @@ export const en: Record<MessageKey, string> = {
   "notifications.emptyFiltered": "No matching notifications.",
   "notifications.grouped": "{count} grouped",
   "notifications.read": "read",
+  "notifications.groupedShort": "{count}",
+  "notifications.span": "first {first} · latest {last}",
+  "notifications.back": "Back",
+  "notifications.pairing.title": "A new device is waiting for approval",
+  "notifications.pairing.body":
+    "{device} asks to be added to this account. Compare the confirmation code shown on the new device, then approve it.",
+  "notifications.pairing.unnamed": "An unnamed device",
+  "notifications.pairing.source": "Devices and sessions",
+  "notifications.pairing.review": "Review",
   "notifications.dismiss": "Close the banner",
   "notifications.seeAll": "See all notifications",
   "notifications.rules": "Notification rules",
@@ -270,6 +280,8 @@ export const en: Record<MessageKey, string> = {
   "notifications.severity.warning": "WARNING",
   "notifications.severity.error": "ERROR",
   "notifications.severity.critical": "CRITICAL",
+
+  ...tasksEn,
 
   "common.cancel": "Cancel",
   "common.close": "Close",

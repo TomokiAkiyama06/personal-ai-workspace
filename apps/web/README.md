@@ -17,13 +17,24 @@ Personal AI Workspace の Web UI です。
 | 日本語 Default / i18n-ready | 文言はすべて Catalog（`src/i18n/ja.ts` がキーの正本で Design Canvas の文言、`en.ts` は同じ型）。V1 の表示言語は日本語に固定（Design の SettingsLanguage。English の Catalog は同梱するが画面に切り替えを出さない）。日時は `Intl`。Backend のエラーは `error.code` から文言へ変換 |
 | login / passkey / device management | サインイン（Brand Panel とシステム状態、ユーザー名・パスワード（表示切替）・この端末を信頼する。429 は待ち時間を表示）、Passkey の Gate（`enrollment_required` は登録、`assertion_required` は確認）、設定 › 端末とセッション（信頼済み端末・個別 / 他のすべての端末からサインアウト、新しい端末を追加の QR / リンクと残り時間、承認待ちの端末を確認コードの入力と Passkey の Step-up で承認・拒否、Passkey の一覧・この端末に追加・削除）、新しい端末の `/pair#<token>`（端末名を入れて続ける、承認待ちは確認コードを表示して完了を待つ。拒否・期限切れの `invalid_token` で終える） |
 | responsive layout | Design の 3 段階: 1280px 以上は Sidebar（252px）と Header の検索、768–1279px は Icon Rail（78px、短い Label）、768px 未満は Drawer（320px）と下部 Tab（チャット / タスク / メモリ / 通知 / 設定）、通知は全画面。Theme はシステム / ライト / ダーク（User Menu・言語と外観・サインイン画面。`localStorage` に保存）。Font は IBM Plex Sans JP / IBM Plex Mono を Build に同梱 |
-| Notification Center shell | Header の Bell（未読数）、Non-modal の Dropdown（未読 N・すべて既読・すべて / 未読 / 重要 / タスクの絞り込み・同種の通知をまとめて件数表示・すべての通知を見る / 通知ルール）、スマートフォンでは `/notifications` の全画面、ERROR / CRITICAL の Non-modal Banner。通知の Data は `NotificationSource` で受け、Backend に通知の API がないため今は接続していない（Decision 0044 の 11） |
+| Notification Center shell | Header の Bell（未読数）、Non-modal の Dropdown（未読 N・すべて既読・通知設定・すべて / 未読 / 重要 / タスクの絞り込み・同種の通知をまとめて件数表示・すべての通知を見る / 通知ルール）、スマートフォンでは `/notifications` の全画面、ERROR / CRITICAL の Non-modal Banner。通知の Data は `NotificationSource` で受ける（Decision 0044 の 11） |
+| Notification Center（[PAW-065](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/51)） | INFO / WARNING / ERROR / CRITICAL。重複排除（同じ `id` の通知は数えない。既読のままにする）と集約（同じ `key` の別の通知を 1 件にまとめ、件数と最初 / 最新の時刻を出し、最新の Severity へ昇格する）。通知ごとの操作（タスクを開く・対応するなど）は**画面への Link だけ**で、操作そのものは遷移先の画面の Permission / Step-up に従う（NOTIFICATION_POLICY §6）。今ある API から作る通知は、承認待ちの新しい端末（`GET /api/v1/auth/pairing/pending` を 30 秒ごとと画面へ戻ったときに読む。「確認する」は 端末とセッション を開き、そこで確認コードと Passkey の Step-up で承認する。承認待ちでなくなれば消える）。通知はこの Browser の Tab の中だけにあり、サインアウトと別のアカウントのサインインで消える。スマートフォンの `/notifications` は MobileNotifications のとおり、Header に戻る / すべて既読、未読の件数つきの Chip、Card の一覧 |
 
 Navigation は Design の Roles のとおりです: 新しいチャット、チャット、プロジェクト、エージェント / タスク、メモリ、プルリクエスト、区切り、管理（Owner / Admin だけ。役割の Badge つき）、設定。User Menu はプロフィール・設定・端末とセッション（承認待ち N）・使用状況・キーボードショートカット・ヘルプ・テーマ・サインアウト・Version。設定は「ワークスペースへ戻る」の Header と、アカウント /（Owner / Admin は）ワークスペースの Sidebar です。後続の Issue の画面は Placeholder です。
 
 Step-up が要る操作（Passkey の登録・削除、新しい端末の承認など）は、まず Request を送り、Backend が `step_up_required` / `step_up_method_insufficient` を返したときだけ、同じ画面の中に本人確認（Passkey、許されれば Password）を出して、確認後に再送します。新しい端末の承認は常に Passkey の Step-up が要るので Passkey だけを出し、Password の Step-up のあとの再送が `step_up_method_insufficient` なら Passkey だけでもう一度確認を求めます。
 
 含めていないもの（後続の Issue）: 招待の受け取り・Owner / Password Reset の Token の使用・Password の変更の画面、管理画面、Chat / Project / Agent / Memory / PR / Usage の中身（Placeholder）、PWA / Tauri、実 Browser と実 Authenticator の E2E Test。
+
+## エージェント / タスクとプルリクエスト（PAW-062）
+
+[PAW-062](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/48) で、Design Canvas の Tasks / PullRequest / MobileTask / Tablet に合わせて `エージェント / タスク`（`/agents`、`/agents/<id>`）と `プルリクエスト`（`/pulls`、`/pulls/<id>`）を実装しました（`src/tasks/`）。
+
+- タスク: 状態（Queued / Running / Waiting for User・Approval・Resource / Paused / Evaluating / Completed / Failed / Cancelled）の絞り込みと一覧、Resource 待ちのキューの注記、Agent / Model・現在のステップ・ブランチ・worktree・試行・予算、依存グラフ（ノードを選ぶと試行・Placement・エラーの種類・ツール呼び出し）、リポジトリごとの役割・テスト・レビュー・PR。操作は Backend の遷移表（`tasks/domain.py`）が受け付けるものだけを出し（Pause / Resume / Cancel / Retry / Restart / Stop Now）、結果の状態は Backend の応答で表示する。Stop Now は理由の入力を必須にし（Backend が求め、監査に残る）、Retry / Restart は別の Agent / Model を指定できる。操作には表示中のタスクの Version を添える。終わっていないタスク・タスクの一覧・PR の一覧は表示中 5 秒ごとに読み直す（Push の経路がまだないため。読み直しの失敗は表示を保つ）
+- プルリクエスト: 完了条件（PR・テスト / Evaluator・レビュー・人によるマージ承認）、Merge は人だけという注記。Merge Ready は Backend の判定をそのまま表示する
+- スマートフォンは一覧からタスクの画面へ階層遷移し、依存グラフはステップの一覧、操作は下部タブの上に固定する。タブレットは一覧を狭めた 2 ペイン、PR の操作欄は下に回す
+
+**Backend にタスク・DAG・PR の HTTP API がまだありません**（`/api/v1` は health / events / auth / passkeys / accounts だけ）。画面のデータは `TaskSource`（`src/tasks/source.tsx`）で受け、今は接続していないので、両画面とも「タスクの状態はまだ表示できません」を表示します（Notification Center の `NotificationSource` と同じ扱い）。マージの API もないため、マージのボタンは無効にして GitHub の PR へ誘導します。
 
 ## 構成
 
@@ -48,6 +59,14 @@ apps/web/
 ```
 
 Test は各 Module の隣の `*.test.ts(x)` です。
+
+### 通知の API（未実装）
+
+Backend に通知の API はまだありません。次がそろったら `NotificationSource` を 1 つ足して接続します（Design の ApiContract の案。形は Backend の Issue で決めます）。
+
+- `GET /api/v1/notifications`（Severity・未読・Cursor で絞り込み。Role ごとの配信は Backend が決める）、`POST /api/v1/notifications/read`、`POST /api/v1/notifications/{id}/dismiss`（既読・非表示を端末をまたいで保つ）
+- 認証つきの Event の配信（今の `/api/v1/events/*` は認証がなく System Event だけ）
+- 通知の元になる状態の API: Task の状態と `needs_human`、Tool の承認待ち、Backup / System Health（`GET /api/v1/health/summary` の案）
 
 ## 開発
 

@@ -1,6 +1,8 @@
 // 日本語（既定）の文言。キーの一覧の正本で、他の言語はこの型に合わせる。
 // 文言は PAW-060 の Design Canvas（Login / SettingsDevices / UserMenu / Roles /
 // NotificationCenter など）に合わせる。`{name}` は translate() の引数で置き換える。
+import { tasksJa } from "./tasks";
+
 export const ja = {
   "app.name": "Personal AI Workspace",
   "app.loading": "読み込み中…",
@@ -265,6 +267,15 @@ export const ja = {
   "notifications.emptyFiltered": "該当する通知はありません。",
   "notifications.grouped": "{count} 件をまとめて表示",
   "notifications.read": "既読",
+  "notifications.groupedShort": "{count} 件",
+  "notifications.span": "最初 {first} · 最新 {last}",
+  "notifications.back": "戻る",
+  "notifications.pairing.title": "新しい端末が承認を待っています",
+  "notifications.pairing.body":
+    "{device} がこのアカウントへの追加を求めています。新しい端末に表示された確認コードを照合して承認してください。",
+  "notifications.pairing.unnamed": "名前のない端末",
+  "notifications.pairing.source": "端末とセッション",
+  "notifications.pairing.review": "確認する",
   "notifications.dismiss": "バナーを閉じる",
   "notifications.seeAll": "すべての通知を見る",
   "notifications.rules": "通知ルール",
@@ -272,6 +283,8 @@ export const ja = {
   "notifications.severity.warning": "WARNING",
   "notifications.severity.error": "ERROR",
   "notifications.severity.critical": "CRITICAL",
+
+  ...tasksJa,
 
   "common.cancel": "キャンセル",
   "common.close": "閉じる",
