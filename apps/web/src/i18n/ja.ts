@@ -1,6 +1,8 @@
 // 日本語（既定）の文言。キーの一覧の正本で、他の言語はこの型に合わせる。
 // 文言は PAW-060 の Design Canvas（Login / SettingsDevices / UserMenu / Roles /
 // NotificationCenter など）に合わせる。`{name}` は translate() の引数で置き換える。
+import { tasksJa } from "./tasks";
+
 export const ja = {
   "app.name": "Personal AI Workspace",
   "app.loading": "読み込み中…",
@@ -281,6 +283,8 @@ export const ja = {
   "notifications.severity.warning": "WARNING",
   "notifications.severity.error": "ERROR",
   "notifications.severity.critical": "CRITICAL",
+
+  ...tasksJa,
 
   "common.cancel": "キャンセル",
   "common.close": "閉じる",

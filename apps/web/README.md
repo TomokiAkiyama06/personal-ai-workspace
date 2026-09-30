@@ -26,6 +26,16 @@ Step-up が要る操作（Passkey の登録・削除、新しい端末の承認�
 
 含めていないもの（後続の Issue）: 招待の受け取り・Owner / Password Reset の Token の使用・Password の変更の画面、管理画面、Chat / Project / Agent / Memory / PR / Usage の中身（Placeholder）、PWA / Tauri、実 Browser と実 Authenticator の E2E Test。
 
+## エージェント / タスクとプルリクエスト（PAW-062）
+
+[PAW-062](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/48) で、Design Canvas の Tasks / PullRequest / MobileTask / Tablet に合わせて `エージェント / タスク`（`/agents`、`/agents/<id>`）と `プルリクエスト`（`/pulls`、`/pulls/<id>`）を実装しました（`src/tasks/`）。
+
+- タスク: 状態（Queued / Running / Waiting for User・Approval・Resource / Paused / Evaluating / Completed / Failed / Cancelled）の絞り込みと一覧、Resource 待ちのキューの注記、Agent / Model・現在のステップ・ブランチ・worktree・試行・予算、依存グラフ（ノードを選ぶと試行・Placement・エラーの種類・ツール呼び出し）、リポジトリごとの役割・テスト・レビュー・PR。操作は Backend の遷移表（`tasks/domain.py`）が受け付けるものだけを出し（Pause / Resume / Cancel / Retry / Restart / Stop Now）、結果の状態は Backend の応答で表示する。Stop Now は理由の入力を必須にし（Backend が求め、監査に残る）、Retry / Restart は別の Agent / Model を指定できる。操作には表示中のタスクの Version を添える。終わっていないタスク・タスクの一覧・PR の一覧は表示中 5 秒ごとに読み直す（Push の経路がまだないため。読み直しの失敗は表示を保つ）
+- プルリクエスト: 完了条件（PR・テスト / Evaluator・レビュー・人によるマージ承認）、Merge は人だけという注記。Merge Ready は Backend の判定をそのまま表示する
+- スマートフォンは一覧からタスクの画面へ階層遷移し、依存グラフはステップの一覧、操作は下部タブの上に固定する。タブレットは一覧を狭めた 2 ペイン、PR の操作欄は下に回す
+
+**Backend にタスク・DAG・PR の HTTP API がまだありません**（`/api/v1` は health / events / auth / passkeys / accounts だけ）。画面のデータは `TaskSource`（`src/tasks/source.tsx`）で受け、今は接続していないので、両画面とも「タスクの状態はまだ表示できません」を表示します（Notification Center の `NotificationSource` と同じ扱い）。マージの API もないため、マージのボタンは無効にして GitHub の PR へ誘導します。
+
 ## 構成
 
 ```text
