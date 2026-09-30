@@ -15,10 +15,13 @@ from paw_backend.auth.csrf import OriginCheckMiddleware
 from paw_backend.auth.limits import AUTH_BODY_MAX_BYTES
 from paw_backend.auth.wiring import AuthServices, build_auth, install_auth
 from paw_backend.authz.diagnostics import warn_about_loose_privileges
+from paw_backend.compute.probe import NvidiaSmiProbe
 from paw_backend.config import Settings
 from paw_backend.db import Database
 from paw_backend.errors import ERROR_RESPONSES, register_error_handlers
 from paw_backend.events import EventBus, publish_heartbeats
+from paw_backend.health.sources import ComputeStatusProvider, FullGpuStatusProvider
+from paw_backend.health.wiring import build_system_health
 from paw_backend.identity.diagnostics import warn_if_tokens_can_be_minted
 from paw_backend.middleware import (
     HostValidationMiddleware,
@@ -47,6 +50,8 @@ def create_app(
     agent_runtimes: Mapping[str, AgentRuntime] | None = None,
     orchestrator_config: OrchestratorConfig | None = None,
     git_runner: GitRunner | None = None,
+    compute: ComputeStatusProvider | None = None,
+    full_gpu: FullGpuStatusProvider | None = None,
 ) -> FastAPI:
     """Build the FastAPI application.
 
@@ -61,6 +66,12 @@ def create_app(
     (issue #155): git runs through ``git_runner``, the deployment's ``GitRunner``
     (default ``SubprocessGitRunner``; ``SshGitRunner`` per Decision 0029). Without
     a database it is ``None``.
+
+    System Health (PAW-066) is ``app.state.system_health``: its monitor serves
+    ``/api/v1/system/health*`` and, with a database, samples the metrics in the
+    lifespan. ``compute`` / ``full_gpu`` are the Compute Scheduler and Full GPU
+    Mode whose status it reports (issue #165 builds them); without them, the
+    read-only GPU probe when ``PAW_HEALTH_GPU_PROBE`` is set.
     """
     settings = settings or Settings()
     database = database or Database(settings)
@@ -89,6 +100,7 @@ def create_app(
         stop_loop = None
         reaper = None
         maintenance = None
+        health = app.state.system_health
         try:
             # Expired Research Scratch items are only hidden until something
             # deletes them (PAW-050): purge them regularly, from the start on.
@@ -121,6 +133,7 @@ def create_app(
                     interval_seconds=settings.connection_reap_interval_seconds,
                 )
                 background.add(asyncio.create_task(reaper.run()))
+                health.reaper.attach(reaper)
             # The Memory freshness jobs and the sweep that finishes the cleanup of
             # ended tasks (issue #125, Decision 0047).
             if (
@@ -132,8 +145,13 @@ def create_app(
                     interval_seconds=settings.freshness_job_interval_seconds,
                 )
                 background.add(asyncio.create_task(maintenance.run()))
+            # The System Health history (PAW-066): sample, roll up, purge.
+            if health.sampling:
+                background.add(asyncio.create_task(health.monitor.run()))
             yield
         finally:
+            health.monitor.stop()
+            health.reaper.attach(None)
             if stop_loop is not None:
                 stop_loop.stop()
             if reaper is not None:
@@ -187,6 +205,10 @@ def create_app(
             git_runner=git_runner,
         )
     app.state.task_execution = task_execution
+    probe = NvidiaSmiProbe() if settings.health_gpu_probe and compute is None else None
+    app.state.system_health = build_system_health(
+        settings, database, compute=compute, full_gpu=full_gpu, probe=probe
+    )
 
     register_error_handlers(app)
     # Added last = outermost. Request ID wraps everything, so the middleware

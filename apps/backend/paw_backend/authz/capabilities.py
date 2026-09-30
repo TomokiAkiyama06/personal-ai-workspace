@@ -70,6 +70,10 @@ class Capability(StrEnum):
     # never does. ``account.read`` also covers the read-only view of the sessions.
     ACCOUNT_READ = "account.read"
     ACCOUNT_MANAGE = "account.manage"
+    # The compact System Health state for the Global Header: the overall severity
+    # and whether Codex / Claude are available (PAW-066, Decision 0059
+    # Proposed). Any human role; read-only; never an Agent's.
+    SYSTEM_HEALTH_SUMMARY_READ = "system_health.summary.read"
     # Admin (and Owner): "Admin-only" in docs/SECURITY_RBAC_AUDIT.md.
     ADMIN_USERS_MANAGE = "admin.users.manage"
     ADMIN_USAGE_VIEW = "admin.usage.view"
@@ -88,6 +92,10 @@ class Capability(StrEnum):
     # every local GPU task of every user is held while an exclusive job has the
     # GPU. Owner / Admin, never an Agent.
     ADMIN_COMPUTE_FULL_GPU = "admin.compute.full_gpu"
+    # The System Health detail: every component, its metrics, the time series and
+    # the health events (PAW-066, Decision 0059 Proposed). Owner / Admin;
+    # read-only; never an Agent's.
+    ADMIN_SYSTEM_HEALTH_VIEW = "admin.system_health.view"
     # Owner only.
     OWNER_ADMINS_MANAGE = "owner.admins.manage"
     OWNER_OWNERSHIP_TRANSFER = "owner.ownership.transfer"
@@ -192,6 +200,11 @@ CAPABILITIES: MappingProxyType[Capability, CapabilityInfo] = MappingProxyType(
         # change credentials and sessions). Reading is on the read-only allowlist.
         C.ACCOUNT_READ: _info(Scope.SYSTEM, delegable=False, read_only=True),
         C.ACCOUNT_MANAGE: _info(Scope.SYSTEM, delegable=False),
+        # Operational data, no user content: on the read-only allowlist
+        # (Decision 0059). Not delegable: no agent needs to watch the system.
+        C.SYSTEM_HEALTH_SUMMARY_READ: _info(
+            Scope.SYSTEM, delegable=False, read_only=True
+        ),
         C.SHARED_MEMORY_READ: _info(Scope.SYSTEM, delegable=True, read_only=True),
         C.SHARED_MEMORY_MANAGE: _info(Scope.SYSTEM, delegable=False),
         C.SHARED_MEMORY_CREATE: _info(Scope.SYSTEM, delegable=False),
@@ -212,6 +225,9 @@ CAPABILITIES: MappingProxyType[Capability, CapabilityInfo] = MappingProxyType(
         C.ADMIN_PROJECTS_MANAGE: _info(Scope.SYSTEM, delegable=False),
         C.ADMIN_AUTH_POLICY_VIEW: _info(Scope.SYSTEM, delegable=False),
         C.ADMIN_COMPUTE_FULL_GPU: _info(Scope.SYSTEM, delegable=False),
+        C.ADMIN_SYSTEM_HEALTH_VIEW: _info(
+            Scope.SYSTEM, delegable=False, read_only=True
+        ),
         C.OWNER_ADMINS_MANAGE: _info(Scope.SYSTEM, delegable=False),
         C.OWNER_OWNERSHIP_TRANSFER: _info(Scope.SYSTEM, delegable=False),
         C.OWNER_RECOVERY_MANAGE: _info(Scope.SYSTEM, delegable=False),

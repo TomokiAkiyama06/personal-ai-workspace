@@ -17,6 +17,7 @@ GPU / Compute Resource Scheduler（KV Cache に応じた動的な並列数、Act
 Workspace 共有の Codex / Claude Connection（Credential は不透明な Handle だけ）、User 別 Quota、User と Task への利用量の帰属は [PAW-030](#shared-codex--claude-connection) で実装済みです（Service のみ。実 Adapter と HTTP の Endpoint はまだありません。Quota の意味・期間・実行中の Task の扱いは [Decision 0016](../../docs/decisions/0016-shared-connection-adapter-policy.md)（Approved、2026-09-26）に従います）。
 Project への Repository の登録（GitHub から clone、Ubuntu 上の既存 Repository、新規作成）と、User ごとに分離した Checkout は [PAW-027](#repository-registration--per-user-checkout) で実装済みです（Service のみ）。
 Linux User ごとの GitHub 接続状態（`gh auth status`）の認識と、GitHub への新規作成（`create_github`）を対象 User 自身の Identity で実行する経路は [PAW-028](#github-user-connectiongh-auth) で実装済みです（Service のみ。Migration・新しい Capability はありません）。
+System Health / Observability の Backend（PostgreSQL・GPU と Model・Task Queue・Memory Worker・Codex / Claude の接続・Connection Reaper・Recovery Backup・Memory Projection・Audit retention の状態、Downsampling する時系列、Severity の変化の Event、`/api/v1/system/health*`）は [PAW-066](#system-health--observability) で実装済みです（通知と UI はまだありません。選択は [Decision 0059](../../docs/decisions/0059-system-health-observability.md)（Proposed））。
 User の招待（invite-only registration）、信頼済み端末からの QR / リンクによる新規端末の追加（Owner / Admin は信頼済み端末の承認が必須）、User の状態（Invited / Active / Pending deletion / Deleted）の遷移は [PAW-024](#user-invite--device-pairing--lifecycle) で実装済みです（Backend だけ。値と流れは [Decision 0033](../../docs/decisions/0033-user-invitation-and-device-pairing.md)（Approved、2026-09-28。判断点 12 は確認 Code を要る形に変更）のとおり）。
 
 [Architecture](../../docs/ARCHITECTURE.md) に基づき、最終的に以下の機能を Backend 側で扱います。
@@ -52,7 +53,7 @@ Python 側の Package（`pgvector-python`）は使わず、`paw_backend/memory/v
 apps/backend/
 ├─ pyproject.toml          # 依存（完全一致で固定）と Ruff 設定
 ├─ alembic.ini             # Alembic 設定（DB URL は持たない）
-├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0022 は Password / Session / Login Throttle / 認証 Policy、0023 は Passkey / Passkey の Challenge / Session の Gate、0026 は Project、0027 は Repository 登録・Remote・Checkout、0030 は Shared Connection・Quota・Usage、0031 は Tool Approval、0033 は Queue / Budget / Loop、0034 は DAG Agent Orchestrator（Plan・DAG・Node の試行）、0040 は Memory Schema、0041 は Memory Journal / Consolidation Queue、0042 は Memory の鮮度の Job の Index、0043 は `memory_versions` の全文検索の Index、0046 は Shared Memory Candidate、0050 は Research Scratch、0052 は Evidence / Claim Provenance、0071 は Memory の Status / Stale 状態の変更履歴、0083 は `tasks (project_id, state)` の Index、0085 は Task の Working Set、0087 は外部送信の Audit の `audit_events.details`、0108 は他の Account の Passkey の Reset（`admin_reset`）と 1 回限りの Password 再設定 Token（`password_reset`）とその発行の関数、0124 は招待・端末の Pairing・User の状態の履歴、0133 は Node の試行の Placement（Local / Cloud と Agent・Model）と Cloud の外部送信の Audit の対応、0147 は `memory_versions.content` の長さの上限（20,000 文字）
+├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0022 は Password / Session / Login Throttle / 認証 Policy、0023 は Passkey / Passkey の Challenge / Session の Gate、0026 は Project、0027 は Repository 登録・Remote・Checkout、0030 は Shared Connection・Quota・Usage、0031 は Tool Approval、0033 は Queue / Budget / Loop、0034 は DAG Agent Orchestrator（Plan・DAG・Node の試行）、0040 は Memory Schema、0041 は Memory Journal / Consolidation Queue、0042 は Memory の鮮度の Job の Index、0043 は `memory_versions` の全文検索の Index、0046 は Shared Memory Candidate、0050 は Research Scratch、0052 は Evidence / Claim Provenance、0071 は Memory の Status / Stale 状態の変更履歴、0083 は `tasks (project_id, state)` の Index、0085 は Task の Working Set、0087 は外部送信の Audit の `audit_events.details`、0108 は他の Account の Passkey の Reset（`admin_reset`）と 1 回限りの Password 再設定 Token（`password_reset`）とその発行の関数、0124 は招待・端末の Pairing・User の状態の履歴、0133 は Node の試行の Placement（Local / Cloud と Agent・Model）と Cloud の外部送信の Audit の対応、0147 は `memory_versions.content` の長さの上限（20,000 文字）、0066 は System Health の時系列・Event と `connection_usage` の実行中の行の部分 Index
 ├─ paw_backend/
 │  ├─ app.py               # create_app(settings)
 │  ├─ config.py            # PAW_ 環境変数から読む Settings
@@ -81,6 +82,7 @@ apps/backend/
 │  │  └─ projection/       # Memory Markdown Projection: 決定的な Renderer、Snapshot の読み取り、安全な Writer（0700 / 0600、Link を辿らない）、実行と Audit（PAW-045）
 │  ├─ recovery/            # Recovery Repository: 形式（JSON・Manifest・Checksum）、列の Allow-list の Snapshot、Renderer、Checkout（Marker・Lock）、git（Fast-forward の Push だけ）、Backup、Dry run が既定の Restore（PAW-047）
 │  ├─ projects/            # Project、Membership（招待制）、Lifecycle（PAW-026）、管理者向けの全 Project 一覧（Issue #84）。`task_gate.py` は Task Lane に渡す Project の状態 Gate（Issue #83）、`task_stop.py` は Delete 開始時の Task 停止
+│  ├─ health/              # System Health: Component ごとの Source（読み取りだけ）、Monitor、時系列と Event の Store（PAW-066）
 │  ├─ connections/         # Shared Codex / Claude Connection: Adapter の Interface、Secret（Handle）、User 別 Quota、利用量の帰属（PAW-030）
 │  ├─ repositories/        # Repository の登録、Remote、User ごとの Checkout、Path の安全性、git の安全な実行（PAW-027）
 │  ├─ research/providers/  # Research Provider の Adapter Interface と Broker（PAW-051）
@@ -90,7 +92,7 @@ apps/backend/
 │  ├─ tools/               # Tool Broker、Capability Policy、Approval（PAW-031）
 │  └─ api/
 │     ├─ deps.py           # FastAPI Dependency
-│     └─ v1/               # /api/v1 の Router（health、events、auth、passkeys、accounts）
+│     └─ v1/               # /api/v1 の Router（health、events、auth、passkeys、accounts、system_health）
 ├─ deploy/systemd/         # Audit の保存期間・退避（Issue #117）、Memory Markdown Projection（PAW-045）、Recovery Repository の Backup（PAW-047）の定期実行の Unit File の例
 ├─ deploy/ssh-git-wrapper/ # SshGitRunner の Forced Command の Wrapper と配備の手順（Issue #134）
 └─ tests/                  # unittest
@@ -175,6 +177,9 @@ Database には pgvector が必要です（CI は `pgvector/pgvector:pg18` を�
 | `PAW_REPOSITORY_SSH_HOST` / `PAW_REPOSITORY_SSH_PORT` | `127.0.0.1` / `22` | `SshGitRunner`（Issue #105、Decision 0029、承認済み）が接続する宛先。本番の呼び出し経路にはまだ配線していない（`SshGitRunnerPolicy.from_settings` が使う） |
 | `PAW_REPOSITORY_SSH_CONNECT_TIMEOUT_SECONDS` | `10` | `ssh` の Handshake（接続・認証）だけの Timeout（秒）。呼び出し全体の Timeout は `PAW_REPOSITORY_GIT_TIMEOUT_SECONDS` / `_CLONE_TIMEOUT_SECONDS` と同じ値を使う |
 | `PAW_REPOSITORY_SSH_KNOWN_HOSTS_PATH` | `/etc/paw/ssh_known_hosts` | 固定した Host Key の File（Trust On First Use にしない）。配備側が用意する |
+| `PAW_HEALTH_SAMPLE_INTERVAL_SECONDS` | `30` | System Health の数値を時系列に入れる間隔（秒）。`0` で止める（状態は返すが履歴は残らない）。それ以外は 10〜300。DB が未設定のときも動かない。[System Health](#system-health--observability) |
+| `PAW_HEALTH_RETENTION_DAYS` | `400` | 1 時間の集計と Severity の変化の Event を残す日数（366〜3650） |
+| `PAW_HEALTH_GPU_PROBE` | `false` | Compute Scheduler を Application に組み込んでいない構成で、読み取り専用の GPU の Probe（`nvidia-smi --query-*` だけ）で GPU と VRAM を見る |
 | `PAW_EVENT_HEARTBEAT_SECONDS` | `15` | `system.heartbeat` の間隔 |
 | `PAW_EVENT_QUEUE_SIZE` | `100` | 接続ごとの Event Queue。溢れた場合は古い Event を捨てる |
 | `PAW_EVENT_MAX_SUBSCRIBERS` | `100` | 同時に接続できる SSE / WebSocket の数。超えた接続は SSE が 503、WebSocket が Close Code 1013 |
@@ -210,6 +215,8 @@ Endpoint は `/api/v1` 以下です。OpenAPI Schema は `/api/v1/openapi.json` 
 | `WebSocket /api/v1/events/ws` | WebSocket |
 | `/api/v1/auth/*` | Login、Session、Password、Step-up、Owner の Token、認証 Policy（12 個の Endpoint）。[Login / Session / Password Policy](#login--session--password-policy) |
 | `/api/v1/auth/passkeys/*` | Passkey の登録・認証（Step-up）・一覧・失効（6 個の Endpoint）。[Passkey / Step-up](#passkey--step-up) |
+| `/api/v1/system/health/summary` | 全体の Severity と Codex / Claude の可否（全 User）。[System Health](#system-health--observability) |
+| `/api/v1/system/health`、`/metrics/{name}`、`/events` | 全 Component の状態・時系列・Severity の変化（Owner / Admin） |
 | `/api/v1/auth/invitations/*`、`/api/v1/auth/users/*`、`/api/v1/auth/pairing/*` | 招待、User の削除・復元、端末の Pairing（13 個の Endpoint。うち 3 個が公開）。[User Invite / Device Pairing / Lifecycle](#user-invite--device-pairing--lifecycle) |
 
 Readiness は 200 または 503 で、Body の形は同じです。
@@ -789,7 +796,7 @@ Table は加えて `recorded_at`（Database の時計。INSERT 時に Trigger �
 | Mode | 対象 | 記録 | Audit を書けないとき |
 | --- | --- | --- | --- |
 | `REQUIRED`（既定） | 上記以外のすべて（副作用のある操作、管理系、`admin.audit.view` / `admin.usage.view` も含む） | 許可も拒否も記録する | **許可を拒否に変える**（`audit_unavailable`、HTTP 503）。拒否は拒否のまま |
-| `DENIED_ONLY` | 読み取り専用の許可リスト（`project.read`、`shared_memory.read`、`account.read`、`memory.read`）だけ | 拒否だけを Best Effort で記録し、許可した読み取りは記録しない | 読み取りは止めない |
+| `DENIED_ONLY` | 読み取り専用の許可リスト（`project.read`、`shared_memory.read`、`account.read`、`memory.read`、System Health の `system_health.summary.read` と `admin.system_health.view`（Decision 0059、Proposed））だけ | 拒否だけを Best Effort で記録し、許可した読み取りは記録しない | 読み取りは止めない |
 
 - **認証されていない Request の拒否は Database に書きません。** 誰でも作れる行になり、Table は削除できないためです。
   代わりに `INFO` の Log（Reason、Action、Resource の種類、`correlation_id`、`client_request_id`。例外の文は含めない）に出します。
@@ -2015,7 +2022,7 @@ CHECK 制約が、状態と終了・時間・Token・失敗の種類の対応（
 - **実 Adapter がありません。** 実際の Codex / Claude では動かしていません（Provider の規約は確認済みで、実 Adapter の前提は満たされています）。Adapter の Interface は In-memory の代役でだけ確かめています。
 - 実行中の Task は Quota で止まらない（承認済み。Decision 0016 の 3 節）。`tokens` / `runtime_seconds` は終了後に数える。同時実行数、GPU 時間、期限付きの上限の一時緩和は未実装。
 - Process が Admission と精算の間で落ちた行は、`in_flight` のまま要求数にだけ数えられます。ただし、開始から `ABANDONED_CALL_AGE_SECONDS`（呼び出しの最長 `MAX_CALL_TIMEOUT_SECONDS` = 1 日に、精算の余裕 1 時間を足した時間。Database の時計で測る）を過ぎた行は、Orchestrator の Lane が動かす Reaper（`paw_backend/orchestrator/connection_reaper.py`、Decision 0016 で承認済み）が `failed` / `internal_error` に精算します。
-  - Reaper は `PAW_CONNECTION_REAP_INTERVAL_SECONDS`（既定 600。0 で停止、それ以外は 60〜86,400）ごとに、古い順に最大 1,000 行を 1 つの Statement で精算します（`ConnectionStore.reap_abandoned`。`SKIP LOCKED` を使い、まだ `in_flight` の行だけを変えます）。
+  - Reaper は `PAW_CONNECTION_REAP_INTERVAL_SECONDS`（既定 600。0 で停止、それ以外は 60〜86,400）ごとに、古い順に最大 1,000 行を 1 つの Statement で精算します（`ConnectionStore.reap_abandoned`。`SKIP LOCKED` を使い、まだ `in_flight` の行だけを変えます）。実行中の行は部分 Index（`status = 'in_flight'`、Migration `0066`）で引きます。各 Cycle の結果（片付けた行、連続の失敗、最後の Error の型）は `AbandonedCallReaper.stats` に残り、[System Health](#system-health--observability) の `connection_reaper` が返します。
   - Decision が決めていない精算の中身は、安全な側を選んでいます。Token は不明のまま（NULL）で、誰にも請求しません（Task の Budget への加算も、実行されなかった精算の一部です）。`finished_at` は Reaper が見つけた時刻です。`duration_ms` は開始からの経過時間ですが、呼び出しの最長時間を上限とします（Deadline がそれより前に呼び出しを終わらせているため。実際には常に上限の値になります）。
   - 精算した行は 1 行ずつ Audit に残します（`connection.usage.abandon`、`system` の Role、使用量の行と Project）。Audit は精算の Commit の後に Best Effort で書きます（失敗は型名だけを Log に残し、精算は取り消しません）。
   - `in_flight` の行を探す Index はありません。表の大きさに比例した走査になりますが、周期が長いので許容しています（Index を足すには Migration が必要です）。
@@ -4142,6 +4149,54 @@ python -m paw_backend.cli compute-status --headroom-min-mib 8192 --headroom-frac
 
 `apps/backend/tests/test_compute_*.py` と `compute_support.py`（Fake の Probe と Fake の `ModelControl`。Fake の Model を GPU に置くと Fake の Probe の使用量が増え、Unload すると減ります）。DB を使うのは `test_compute_full_gpu_holds.py`（`PAW_TEST_DATABASE_URL` がないと Skip）だけです。`test_compute_probe.py`（2 つの Command の固定、GPU を変える Option がないこと、Parse）、`test_compute_accounting.py`（勘定と KV の純粋関数、ランダムな Property Test）、`test_compute_config.py`（設定の検査と `CommandModelControl`。Runner は記録するだけで何も実行しません）、`test_compute_scheduler.py`（Admission・Class・待ち行列・Probe の鮮度・Hybrid）、`test_compute_relief.py`（縮退の各段・Drain・復帰・常駐）、`test_compute_exclusive.py`、`test_compute_free_vram.py`（Decision 0042: 空き VRAM による延期、二重に数えないこと、追い越し、警告と頻度、Exclusive の待ち）、`test_compute_runtimes.py`（`HybridRuntime`・`ScheduledMemoryWorker`・`PlacedEmbedder`）、`test_compute_cli.py`、`test_compute_full_gpu.py`（Full GPU Mode: 認可と Audit、Hold と Drain、Preempt、Unload と確認、終了後の Reload と再開。Task の保存は Fake）、`test_compute_full_gpu_holds.py`（実 PostgreSQL の `PostgresTaskHolds`: Hold、Hold した Task の見分け、再開と Queue、End to End）。時間は注入した Clock で動かします。
 実 GPU を読む Test は `RealProbeTest` の 1 つだけで、`PAW_TEST_REAL_GPU_PROBE=1` のときだけ動き（CI では Skip）、2 つの読み取りの Query だけを実行します。
+
+## System Health / Observability
+
+[PAW-066](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/52) の Backend です（`paw_backend/health/`）。方針は [Decision 0059](../../docs/decisions/0059-system-health-observability.md)（Proposed）です。通知（Notification Center）と UI（PAW-067）はまだありません。
+
+### Component
+
+Component ごとに Source が 1 つあり、読むだけです。返すのは Notification Policy の Severity（`info` / `warning` / `error` / `critical`）、閉じた Status（`ok`、`degraded`、`failing`、`stale`、`unavailable`、`not_configured`、`never_ran`、`check_failed`）、理由の Code、数値だけで、依存先の Message、Path、URL、User の文、PID は返しません。閾値は `health/limits.py` です。
+
+| Component | 内容 |
+| --- | --- |
+| `database` | `SELECT 1` と所要時間。応答しなければ `critical` |
+| `compute` | Compute Scheduler の `status()`（VRAM、Utilization、Lease と待ち、Relief、Model ごとの状態）と Full GPU Mode。Scheduler は `create_app(compute=..., full_gpu=...)` か `app.state.system_health.compute.attach(...)` で渡す（#165）。なければ `PAW_HEALTH_GPU_PROBE` の Probe、どちらもなければ `not_configured` |
+| `task_queue` | 全 User の Task の状態別の数と直近の失敗 |
+| `memory_worker` | Memory の Consolidation Queue の待ちと Dead letter |
+| `connections` | Codex / Claude の接続の状態・有効・最後の確認・実行中の呼び出し（Credential と Handle は読まない） |
+| `connection_reaper` | `AbandonedCallReaper.stats`（Cycle の数、片付けた行、連続の失敗、最後の Error の型） |
+| `recovery_backup`、`memory_projection`、`audit_retention` | 各 Job が `audit_events` に書く Run の行から、最後の Run、最後の成功からの時間（DB の時計）、連続の失敗 |
+
+Check は並行に走り、1 つが 5 秒を超える・例外を出すと、その Component だけ `check_failed`（`warning`）になります。Report は 10 秒使い回し、`audit_events` を読む 3 つの Job は 300 秒に 1 回だけ読みます。
+
+### 時系列と Event
+
+DB があり `PAW_HEALTH_SAMPLE_INTERVAL_SECONDS` が 0 でなければ、Lifespan の Loop が Interval ごと（最初は起動の 1 Interval 後）に Report を作り、数値と各 Component の Severity の段階（0〜3）を `health_metric_samples` に入れます（DB の時計の枠に揃え、同じ枠には 1 回だけ）。20 Cycle ごとに、24 時間より古い生の行を 1 分、7 日より古い 1 分を 5 分、30 日より古い 5 分を 1 時間の集計（件数・合計・最小・最大）へ移し、`PAW_HEALTH_RETENTION_DAYS` より古い 1 時間の集計と Event を消します。移す行の削除と Merge は 1 文なので、Process が複数でも 1 つの Sample は 1 回だけ数えます。
+
+Component の Severity が前の Event と変わったときだけ `health_events` に 1 行を残します（集約しない。Advisory Lock の中で「最後の Event と違うときだけ」入れる）。
+
+### Endpoint と権限
+
+| Endpoint | Capability | 内容 |
+| --- | --- | --- |
+| `GET /api/v1/system/health/summary` | `system_health.summary.read`（User・Admin・Owner） | 全体の Severity と `connections.codex` / `connections.claude` の `available` / `unavailable` だけ |
+| `GET /api/v1/system/health` | `admin.system_health.view`（Admin・Owner） | 全 Component の Severity・Status・理由・数値・部分（Model、接続、GPU） |
+| `GET /api/v1/system/health/metrics/{name}` | 同上 | 1 つの Metric（例 `compute.vram_used_bytes`、`task_queue.queued`）の時系列。`since` / `until`（UTC Offset 必須、既定は直近 24 時間、最長 400 日）と `step_seconds`（10〜86400）。最大 1,000 点に集約し、各点は `count`・`mean`・`min`・`max` |
+| `GET /api/v1/system/health/events` | 同上 | Severity の変化（新しい順、`since` の既定は 30 日前、`limit` 1〜500） |
+
+2 つの Capability は委任不可で、読み取り専用の許可リストにあります（許可は Audit に残さず、拒否だけ残す）。DB がなければ時系列と Event は 503 です。
+
+### Database と権限
+
+Migration `0066` が `health_metric_samples`（Application の Role に SELECT / INSERT / UPDATE / DELETE）と `health_events`（SELECT / INSERT / DELETE。更新はできない）を作り、`connection_usage (started_at) WHERE status = 'in_flight'` の部分 Index を加えます（#52 の Comment。Reaper と `connections` が使う）。Source が読むのは Application の Role が既に読める Table だけです。
+
+### 制限と未確認の点
+
+- 通知（Notification Center、Rule）、SSE / WebSocket の Event、UI は後の Issue です。
+- Loop 検知・Escalation・OOM の数はまだ Component にありません（Task の失敗の数で代える）。
+- `task_queue` と `memory_worker` の Dead letter の数は Table を走査します（Index を足していない）。Task が非常に多くなったら Index を検討します。
+- 実 GPU と実際の Timer（Backup、Projection、Audit retention）を使った確認はしていません（Test は Fake と PostgreSQL）。
 
 ## Repository Registration / Per-user Checkout
 

@@ -34,11 +34,18 @@ another cycle, otherwise the loop waits ``interval_seconds``. Errors are logged
 by type and retried after the interval; ``stop`` (or a cancellation) ends it.
 Several Backend processes may each run one: the rows are locked ``SKIP LOCKED``
 and settled only while ``in_flight``.
+
+What each cycle did is kept in :attr:`AbandonedCallReaper.stats` (the time of the
+last cycle and of the last successful one, the rows it settled, the failures in
+a row and the last error's type), for System Health (PAW-066, issue #52's note).
+The rows are found through the partial index on ``connection_usage (started_at)
+WHERE status = 'in_flight'`` (Alembic revision ``0066``).
 """
 
 import asyncio
 import logging
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from paw_backend.authz import AuditEvent, AuditSink, PostgresAuditSink
@@ -67,6 +74,24 @@ AUDIT_TIMEOUT_SECONDS = 3.0
 FIRST_CYCLE_DELAY_SECONDS = 60.0
 
 
+@dataclass(frozen=True, slots=True)
+class ReaperStats:
+    """What the reaper did since the process started (wall-clock times, UTC).
+
+    ``last_error`` is the type of the last failure (``error_class_of``), never its
+    message; ``consecutive_failures`` is reset by a successful cycle.
+    """
+
+    cycles: int = 0
+    last_cycle_at: datetime | None = None
+    last_success_at: datetime | None = None
+    last_reaped: int = 0
+    total_reaped: int = 0
+    consecutive_failures: int = 0
+    total_failures: int = 0
+    last_error: str | None = None
+
+
 class AbandonedCallReaper:
     def __init__(
         self,
@@ -91,6 +116,12 @@ class AbandonedCallReaper:
         self._sink = audit_sink
         self._clock = clock
         self._stopping = asyncio.Event()
+        self._stats = ReaperStats()
+
+    @property
+    def stats(self) -> ReaperStats:
+        """A snapshot of what the cycles did (System Health reads it)."""
+        return self._stats
 
     def stop(self) -> None:
         """Ask the loop to end at its next suspension point."""
@@ -98,13 +129,45 @@ class AbandonedCallReaper:
 
     async def run_cycle(self) -> int:
         """Settle one batch of abandoned rows and audit each; return how many."""
-        reaped = await self._store.reap_abandoned(limit=MAX_REAPED_PER_CYCLE)
+        try:
+            reaped = await self._store.reap_abandoned(limit=MAX_REAPED_PER_CYCLE)
+        except Exception as error:
+            self._record_failure(error)
+            raise
+        self._record_success(len(reaped))
         correlation_id = uuid.uuid4()
         for usage in reaped:
             await self._audit(correlation_id, usage.id, usage.project_id)
         if reaped:
             logger.warning("Settled %d abandoned connection call(s)", len(reaped))
         return len(reaped)
+
+    def _record_success(self, reaped: int) -> None:
+        now = datetime.now(UTC)
+        stats = self._stats
+        self._stats = ReaperStats(
+            cycles=stats.cycles + 1,
+            last_cycle_at=now,
+            last_success_at=now,
+            last_reaped=reaped,
+            total_reaped=stats.total_reaped + reaped,
+            consecutive_failures=0,
+            total_failures=stats.total_failures,
+            last_error=stats.last_error,
+        )
+
+    def _record_failure(self, error: BaseException) -> None:
+        stats = self._stats
+        self._stats = ReaperStats(
+            cycles=stats.cycles + 1,
+            last_cycle_at=datetime.now(UTC),
+            last_success_at=stats.last_success_at,
+            last_reaped=0,
+            total_reaped=stats.total_reaped,
+            consecutive_failures=stats.consecutive_failures + 1,
+            total_failures=stats.total_failures + 1,
+            last_error=error_class_of(error),
+        )
 
     async def _audit(
         self,
