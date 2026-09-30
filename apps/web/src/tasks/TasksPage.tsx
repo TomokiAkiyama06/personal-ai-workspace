@@ -108,6 +108,35 @@ function TasksView({ source }: { source: TaskSource }) {
       .then((data) => setList({ status: "ready", data }))
       .catch(() => {});
   }, [source]);
+  // The task a control answered with replaces its card at once (the list's own
+  // read may fail), then the list is read again.
+  const applyControl = useCallback(
+    (updated: TaskDetail) => {
+      setList((current) =>
+        current.status === "ready"
+          ? {
+              ...current,
+              data: {
+                ...current.data,
+                tasks: current.data.tasks.map((task) =>
+                  task.id === updated.id
+                    ? {
+                        ...task,
+                        state: updated.state,
+                        waitReason: updated.waitReason,
+                        startedAt: updated.startedAt,
+                        updatedAt: updated.updatedAt,
+                      }
+                    : task,
+                ),
+              },
+            }
+          : current,
+      );
+      refreshList();
+    },
+    [refreshList],
+  );
 
   const tasks = list.status === "ready" ? list.data.tasks : [];
   // No push channel yet: the list is read again while a task can still change.
@@ -192,7 +221,7 @@ function TasksView({ source }: { source: TaskSource }) {
         </nav>
         <div className="task-detail-pane">
           {shownId ? (
-            <TaskDetailView key={shownId} source={source} id={shownId} onChanged={refreshList} />
+            <TaskDetailView key={shownId} source={source} id={shownId} onChanged={applyControl} />
           ) : (
             list.status === "ready" && <p className="muted small">{t("tasks.select")}</p>
           )}
@@ -260,7 +289,7 @@ function TaskDetailView({
 }: {
   source: TaskSource;
   id: string;
-  onChanged: () => void;
+  onChanged: (task: TaskDetail) => void;
 }) {
   const { t } = useI18n();
   const [load, setLoad] = useState<Load<TaskDetail>>({ status: "loading" });
@@ -300,6 +329,11 @@ function TaskDetailView({
       })
       .catch(() => {});
   }, [source, id]);
+  // A form of a control the task no longer accepts is closed for good (it must
+  // not come back when the state accepts it again).
+  useEffect(() => {
+    if (form && task && !ACCEPTED_CONTROLS[task.state].includes(form)) setForm(null);
+  }, [form, task]);
   const polling = task !== null && isUnsettled(task.state) && pending === null;
   useEffect(() => {
     if (!polling) return;
@@ -339,7 +373,7 @@ function TaskDetailView({
         generation.current += 1;
         setLoad({ status: "ready", data: updated });
         setForm(null);
-        onChanged();
+        onChanged(updated);
       })
       .catch((error: unknown) => {
         setControlError(errorMessage(t, error));

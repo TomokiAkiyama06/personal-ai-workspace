@@ -17,6 +17,7 @@ import { type TaskSource, TaskSourceProvider } from "./source";
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
 
 function renderTasks(path: string, source?: TaskSource) {
@@ -347,9 +348,10 @@ describe("Tasks page", () => {
       failed.state = "failed";
       failed.waitReason = null;
     }
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     const { source } = fakeTaskSource(tasks);
     renderTasks(`/agents/${TASK_205}`, source);
-    const user = userEvent.setup();
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
     await user.click(await screen.findByRole("button", { name: "最初からやり直す" }));
     if (failed) {
       failed.state = "queued";
@@ -360,6 +362,39 @@ describe("Tasks page", () => {
     await waitFor(() =>
       expect(screen.queryByRole("form", { name: "最初からやり直す" })).not.toBeInTheDocument(),
     );
+    // The task fails again: the old form does not come back by itself.
+    try {
+      if (failed) {
+        failed.state = "failed";
+        failed.version = 5;
+      }
+      await vi.advanceTimersByTimeAsync(5000);
+      const detail = screen.getByRole("article", { name: "メモリ整理ジョブ" });
+      await waitFor(() =>
+        expect(detail.querySelector(".task-title-block .state-pill")).toHaveTextContent("失敗"),
+      );
+      expect(screen.queryByRole("form", { name: "最初からやり直す" })).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("updates the task's card from the control's answer when the list cannot be read", async () => {
+    const tasks = sampleTasks();
+    const failed = tasks.find((task) => task.id === TASK_205);
+    if (failed) {
+      failed.state = "failed";
+      failed.waitReason = null;
+    }
+    const { source } = fakeTaskSource(tasks);
+    renderTasks(`/agents/${TASK_205}`, source);
+    const user = userEvent.setup();
+    const list = await screen.findByRole("navigation", { name: "タスクの一覧" });
+    await user.click(await screen.findByRole("button", { name: "再試行" }));
+    source.listTasks = () => Promise.reject(new ApiError(503, "service_unavailable", "x"));
+    await user.click(screen.getByRole("button", { name: "再試行を実行" }));
+    const card = within(list).getByRole("link", { name: /メモリ整理ジョブ/ });
+    await waitFor(() => expect(card).toHaveTextContent("実行中"));
   });
 
   it("ignores a poll that was in flight when a control answered", async () => {

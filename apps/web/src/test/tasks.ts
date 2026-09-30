@@ -264,7 +264,9 @@ export function fakeTaskSource(
       return { tasks: state, capacity: { parallelLimit: 2, vramUsedGb: 18.2, vramTotalGb: 48 } };
     },
     async getTask(id) {
-      return find(id);
+      // A copy, as a response would be: a test changing the stored task later
+      // does not change what the screen already holds.
+      return { ...find(id) };
     },
     async control(id, command, options) {
       calls.push({ id, command, options });
