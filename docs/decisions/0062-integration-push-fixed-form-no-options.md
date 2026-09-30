@@ -1,6 +1,7 @@
 # Integration の Push の固定の形に `--no-follow-tags` / `--no-recurse-submodules` / `--no-signed` を含める（Decision 0052 の 3・9 の Supersede）
 
-- Status: Proposed
+- Status: Approved
+- Approval: 2026-09-30、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで直接回答して承認（判断が必要な点 1。末尾の「承認時の決定」）
 - Date: 2026-09-30
 - Scope: Issue [#90](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/90)（PR #166）。`paw_backend/integration/publish.py` の `push_arguments`、SSH の Wrapper（`apps/backend/deploy/ssh-git-wrapper/paw_git_wrapper.py`）の `PUSH_OPTIONS` と `_check_push`。Migration はない
 - Supersedes: [Decision 0052](0052-integration-push-and-pull-request.md)（Approved）の **3 の「形は 1 つに固定する」の形** と **9 の表の `push` の引数の形** だけ。0052 のその他の点（宛先、`paw/` の branch、Force なし、`--push-host`、Credential Helper、設定の確認など）は変えない。0052 の本文は書き換えない
@@ -62,3 +63,7 @@ Integration Gate の Push の形を次の 1 つに固定する（0052 の 3 の�
 ## 承認後の扱い
 
 承認されたら `Status` と `Approval` を改める（Human が行う。この Decision を Agent が Approved にしない）。Decision 0052 の本文は書き換えない。方針を変えるときは、この Decision を書き換えず、新しい Decision から `Supersedes` する。
+
+## 承認時の決定（2026-09-30）
+
+Human は、作業 Session で判断が必要な点について推奨つきの説明を受け、直接回答して承認した（判断が必要な点 1）。Human は 2026-09-30、Push の形を承認済みの 0052 から変える扱いについて選択肢（新しい小さな Decision で Supersede する案、推奨）から直接この案を選んだ。
