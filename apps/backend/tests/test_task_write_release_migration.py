@@ -2,8 +2,10 @@
 
 The first class needs no server (the rendered SQL and the Python enum must match).
 The PostgreSQL class (skipped unless ``PAW_TEST_DATABASE_URL`` is set) runs the
-revision down and up again over a recorded release. Nothing here assumes 0129 is
-the head: the previous revision is read from the script directory.
+revision down and up again, and refuses the downgrade over a recorded release
+(the code before 0129 cannot read that event: issue #90, by the human's decision
+of 2026-09-30). Nothing here assumes 0129 is the head: the previous revision is
+read from the script directory.
 """
 
 import asyncio
@@ -13,6 +15,7 @@ import unittest
 
 from alembic import command
 from alembic.script import ScriptDirectory
+from sqlalchemy.exc import DBAPIError
 
 from paw_backend.tasks import TaskCommand
 
@@ -58,7 +61,10 @@ class OfflineMigrationTest(unittest.TestCase):
             command_lists(sql),
             [{c.value for c in TaskCommand} - {"release_repository_write"}],
         )
-        self.assertIn("NOT VALID", sql)
+        # Refused (not a NOT VALID list) when a release is recorded.
+        self.assertNotIn("NOT VALID", sql)
+        self.assertIn("RAISE EXCEPTION", sql)
+        self.assertLess(sql.index("RAISE EXCEPTION"), sql.index("DROP CONSTRAINT"))
 
     def test_the_revision_follows_the_head_it_was_written_on(self):
         self.assertEqual(previous_revision(), "0133")
@@ -66,7 +72,8 @@ class OfflineMigrationTest(unittest.TestCase):
 
 @requires_postgres
 class RoundTripTest(ReleaseTestCase):
-    """Down and up again after a release: the append-only history stays."""
+    """Down and up again; never down over a release (the append-only history
+    would keep an event the code before 0129 cannot read)."""
 
     async def asyncTearDown(self):
         await asyncio.to_thread(migrate)
@@ -78,12 +85,20 @@ class RoundTripTest(ReleaseTestCase):
             "WHERE conname = 'ck_task_events_command_valid'"
         )
 
-    async def test_down_keeps_the_release_and_up_validates_again(self):
+    async def test_down_is_refused_while_a_release_is_recorded(self):
         task_id = await self.two_targets()
         reservation = await self.write_to(task_id, self.other, ended=False)
         await self.release(task_id, reservation)
 
-        await asyncio.to_thread(migrate, previous_revision(), downgrade=True)
+        with self.assertRaises(DBAPIError) as raised:
+            await asyncio.to_thread(migrate, previous_revision(), downgrade=True)
+
+        restrict_violation = "23001"
+        self.assertEqual(
+            getattr(raised.exception.orig, "sqlstate", None), restrict_violation
+        )
+        self.assertIn("release_repository_write", str(raised.exception))
+        # Nothing was changed: the release and the list that accepts it stay.
         self.assertEqual(
             await self.scalar(
                 "SELECT count(*) FROM task_events "
@@ -92,17 +107,26 @@ class RoundTripTest(ReleaseTestCase):
             ),
             1,
         )
-        # The old list does not hold for the kept history: not validated.
-        self.assertFalse(await self.validated())
-
-        await asyncio.to_thread(migrate)
         self.assertTrue(await self.validated())
+        self.assertIn(
+            "release_repository_write",
+            await self.scalar(
+                "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                "WHERE conname = 'ck_task_events_command_valid'"
+            ),
+        )
 
     async def test_down_without_a_release_validates_the_old_list(self):
         await self.two_targets()
-        await asyncio.to_thread(migrate, previous_revision(), downgrade=True)
         released = await self.scalar(
             "SELECT count(*) FROM task_events "
             "WHERE command = 'release_repository_write'"
         )
-        self.assertEqual(await self.validated(), released == 0)
+        if released:  # another test of the same database recorded one
+            with self.assertRaises(DBAPIError):
+                await asyncio.to_thread(migrate, previous_revision(), downgrade=True)
+            return
+        await asyncio.to_thread(migrate, previous_revision(), downgrade=True)
+        self.assertTrue(await self.validated())
+        await asyncio.to_thread(migrate)
+        self.assertTrue(await self.validated())
