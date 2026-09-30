@@ -15,6 +15,14 @@ from paw_backend.auth.csrf import OriginCheckMiddleware
 from paw_backend.auth.limits import AUTH_BODY_MAX_BYTES
 from paw_backend.auth.wiring import AuthServices, build_auth, install_auth
 from paw_backend.authz.diagnostics import warn_about_loose_privileges
+from paw_backend.compute import FullGpuMode, PostgresTaskHolds
+from paw_backend.compute.wiring import (
+    ComputeServices,
+    ComputeSetup,
+    FullGpuController,
+    LocalRuntime,
+    build_compute,
+)
 from paw_backend.config import Settings
 from paw_backend.db import Database
 from paw_backend.errors import ERROR_RESPONSES, register_error_handlers
@@ -48,6 +56,8 @@ def create_app(
     agent_runtimes: Mapping[str, AgentRuntime] | None = None,
     orchestrator_config: OrchestratorConfig | None = None,
     git_runner: GitRunner | None = None,
+    compute: ComputeSetup | None = None,
+    local_runtimes: Mapping[str, LocalRuntime] | None = None,
 ) -> FastAPI:
     """Build the FastAPI application.
 
@@ -62,6 +72,15 @@ def create_app(
     (issue #155): git runs through ``git_runner``, the deployment's ``GitRunner``
     (default ``SubprocessGitRunner``; ``SshGitRunner`` per Decision 0029). Without
     a database it is ``None``.
+
+    ``compute`` turns on the Compute Resource Scheduler (issue #165, Decision
+    0058, Proposed): the process's ``ComputeScheduler`` is built from it
+    (``app.state.compute``), the lifespan runs its ``serve`` and, with a
+    database, Kaggle / Full GPU Mode (``FullGpuMode.serve``; the HTTP routes of
+    ``api/v1/compute.py``). ``local_runtimes`` (with ``compute`` and
+    ``orchestrator_config``) are the orchestrator runtimes on a local model; the
+    composition wraps them in a ``HybridRuntime`` on that scheduler. Without
+    ``compute`` there is no scheduler and the routes answer 503.
     """
     settings = settings or Settings()
     database = database or Database(settings)
@@ -69,6 +88,12 @@ def create_app(
         settings.event_queue_size, settings.event_max_subscribers
     )
     auth = auth or build_auth(settings, database)
+    if local_runtimes is not None and compute is None:
+        raise TypeError("local_runtimes need compute")
+    compute_services: ComputeServices | None = None
+    if compute is not None:
+        scheduler, vram_warnings = build_compute(compute)
+        compute_services = ComputeServices(compute, scheduler, vram_warnings)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -91,7 +116,32 @@ def create_app(
         user_stop_loop = None
         reaper = None
         maintenance = None
+        compute_stop = asyncio.Event()
         try:
+            # The Compute Resource Scheduler, when the deployment configured one
+            # (issue #165): its refresh loop, and Kaggle / Full GPU Mode next to
+            # it (holding tasks needs the task lifecycle, so a database).
+            if compute_services is not None:
+                background.add(
+                    asyncio.create_task(
+                        compute_services.scheduler.serve(
+                            compute_stop,
+                            interval=compute_services.setup.refresh_seconds,
+                        )
+                    )
+                )
+                if task_execution is not None:
+                    # The authorizer of the application, read now (tests swap it).
+                    mode = FullGpuMode(
+                        compute_services.scheduler,
+                        PostgresTaskHolds(task_execution.tasks, task_execution.queue),
+                        app.state.authorizer,
+                        clock=compute_services.setup.clock,
+                    )
+                    compute_services.full_gpu = FullGpuController(
+                        mode, compute_services.scheduler
+                    )
+                    background.add(asyncio.create_task(mode.serve(compute_stop)))
             # Expired Research Scratch items are only hidden until something
             # deletes them (PAW-050): purge them regularly, from the start on.
             if database.configured and settings.scratch_purge_interval_seconds > 0:
@@ -147,6 +197,28 @@ def create_app(
                 background.add(asyncio.create_task(maintenance.run()))
             yield
         finally:
+            if compute_services is not None and compute_services.full_gpu is not None:
+                # A start in progress is abandoned: the scheduler goes back to
+                # normal, the models it unloaded are loaded again and the held
+                # tasks resume, while the loops still run (Codex review #168).
+                # A Full GPU Mode that is on ends with the process.
+                try:
+                    await asyncio.wait_for(
+                        compute_services.full_gpu.close(),
+                        settings.shutdown_timeout_seconds,
+                    )
+                except TimeoutError:
+                    logger.warning(
+                        "The models were not back after an abandoned Full GPU Mode "
+                        "start within the shutdown timeout: the next process "
+                        "resumes the held tasks"
+                    )
+                except Exception as error:
+                    logger.warning(
+                        "Full GPU Mode could not be closed (%s)", type(error).__name__
+                    )
+                compute_services.full_gpu = None
+            compute_stop.set()
             if stop_loop is not None:
                 stop_loop.stop()
             if user_stop_loop is not None:
@@ -200,8 +272,13 @@ def create_app(
             runtimes=agent_runtimes,
             orchestrator_config=orchestrator_config,
             git_runner=git_runner,
+            scheduler=None if compute_services is None else compute_services.scheduler,
+            local_runtimes=local_runtimes,
         )
+    elif local_runtimes is not None:
+        raise TypeError("local_runtimes need a database")
     app.state.task_execution = task_execution
+    app.state.compute = compute_services
 
     register_error_handlers(app)
     # Added last = outermost. Request ID wraps everything, so the middleware

@@ -465,14 +465,21 @@ class FullGpuMode:
 
     def _main_resident(self) -> bool:
         # No main LLM configured: none will come back for the tasks (Codex
-        # review #161); they stay held.
+        # review #161); they stay held. Also seen on the GPU (or placed there
+        # by the scheduler), not only so in the scheduler's state: a process
+        # that starts after one that ended with the main LLM off the GPU has
+        # it ``gpu`` from the configuration (``initial``) until a reading shows
+        # otherwise (Codex review #168). ``None``: no model control, the state
+        # is all there is.
         mains = [
             deployment
             for deployment in self._scheduler.status().deployments
             if deployment.role is ModelRole.MAIN
         ]
         return bool(mains) and all(
-            deployment.state is DeploymentState.GPU and not deployment.draining
+            deployment.state is DeploymentState.GPU
+            and not deployment.draining
+            and deployment.observed_on_gpu is not False
             for deployment in mains
         )
 

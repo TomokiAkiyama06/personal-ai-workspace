@@ -33,6 +33,13 @@ objects that run tasks, each wired to the others the way production needs:
   git timeout). There is no switch to leave it out: every writing Worker node of
   a repository with a checkout gets its own worktree (``REQUIREMENTS.md``), and a
   task without one runs as before (Decision 0056);
+* with the Compute Resource Scheduler (PAW-036, issue #165, Decision 0058) and
+  only with it, the runtimes that run on a local model (``local_runtimes``,
+  :class:`~paw_backend.compute.wiring.LocalRuntime`): each is wrapped in a
+  ``HybridRuntime`` on the process's scheduler, so a node takes a lease before it
+  uses the GPU and holds a Full GPU Mode off, and the GPU time is charged to the
+  task (also late, through ``TrackerLateGpuCharge`` on the same
+  ``BudgetTracker``). No ``CloudPolicy`` is injected (Decision 0037, 14);
 * what the maintenance loop (``freshness_loop.build_freshness_loop``) runs: the
   freshness jobs and the task-end sweep (the application's lifespan starts it).
 
@@ -44,6 +51,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from paw_backend.authz import Authorizer, PostgresAuditSink
+from paw_backend.compute import ComputeScheduler, HybridRuntime, TrackerLateGpuCharge
+from paw_backend.compute.wiring import LocalRuntime
 from paw_backend.config import Settings
 from paw_backend.db import Database
 from paw_backend.integration import GitWorktreeCoordinator
@@ -159,6 +168,35 @@ def build_worktrees(
     return GitWorktreeCoordinator(runner=git_runner, accounts=accounts, policy=policy)
 
 
+def _with_local_runtimes(
+    runtimes: Mapping[str, AgentRuntime] | None,
+    local_runtimes: Mapping[str, LocalRuntime],
+    scheduler: ComputeScheduler,
+    budget: BudgetTracker,
+) -> dict[str, AgentRuntime]:
+    """``runtimes`` and each local runtime in a ``HybridRuntime`` on
+    ``scheduler`` (module docstring). A label given twice is a ``TypeError``."""
+    if not isinstance(local_runtimes, Mapping):
+        raise TypeError("local_runtimes must be a mapping")
+    combined: dict[str, AgentRuntime] = dict(runtimes or {})
+    late_charge = TrackerLateGpuCharge(budget)
+    for label, local in local_runtimes.items():
+        if not isinstance(local, LocalRuntime):
+            raise TypeError("each local runtime must be a LocalRuntime")
+        if label in combined:
+            raise TypeError("a runtime label is given twice")
+        combined[label] = HybridRuntime(
+            scheduler,
+            local.runtime,
+            deployment=local.deployment,
+            local_model=local.local_model,
+            resource_class=local.resource_class,
+            wait_seconds=local.wait_seconds,
+            late_gpu_charge=late_charge,
+        )
+    return combined
+
+
 def build_task_execution(
     settings: Settings,
     database: Database,
@@ -170,12 +208,17 @@ def build_task_execution(
     orchestrator_config: OrchestratorConfig | None = None,
     git_runner: GitRunner | None = None,
     accounts: AccountDirectory | None = None,
+    scheduler: ComputeScheduler | None = None,
+    local_runtimes: Mapping[str, LocalRuntime] | None = None,
 ) -> TaskExecution:
     """Build the task execution of the application (module docstring).
 
     ``project_gate`` defaults to ``ProjectStateGate()`` (a test passes another);
     ``repositories`` to :func:`build_repository_scopes`. ``runtimes`` and
-    ``orchestrator_config`` come together or not at all (``TypeError``).
+    ``orchestrator_config`` come together or not at all (``TypeError``);
+    ``local_runtimes`` (the runtimes on a local model, wrapped in a
+    ``HybridRuntime``) need the ``scheduler`` and ``orchestrator_config`` and
+    may come with or without ``runtimes``, under other labels (``TypeError``).
     ``git_runner`` is the deployment's ``GitRunner`` for the worktrees (default
     ``SubprocessGitRunner()``), ``accounts`` their account directory (default
     ``LoginNameAccountDirectory``; a test passes its own). Both are checked
@@ -184,8 +227,15 @@ def build_task_execution(
         raise TypeError("database must be a Database")
     if not isinstance(authorizer, Authorizer):
         raise TypeError("authorizer must be an Authorizer")
-    if (runtimes is None) != (orchestrator_config is None):
+    if local_runtimes is not None:
+        if scheduler is None:
+            raise TypeError("local_runtimes need the compute scheduler")
+        if orchestrator_config is None:
+            raise TypeError("local_runtimes need an orchestrator_config")
+    elif (runtimes is None) != (orchestrator_config is None):
         raise TypeError("runtimes and orchestrator_config come together")
+    if scheduler is not None and not isinstance(scheduler, ComputeScheduler):
+        raise TypeError("scheduler must be a ComputeScheduler")
     gate = project_gate if project_gate is not None else ProjectStateGate()
     if repositories is None:
         repositories = build_repository_scopes(settings, database, authorizer)
@@ -217,6 +267,8 @@ def build_task_execution(
     tools = ToolRunner(broker, WorkingSetExecutor(tasks))
     orchestrator = None
     worktrees = None
+    if local_runtimes is not None and scheduler is not None:
+        runtimes = _with_local_runtimes(runtimes, local_runtimes, scheduler, budget)
     if runtimes is not None and orchestrator_config is not None:
         worktrees = build_worktrees(
             settings, database, git_runner=git_runner, accounts=accounts
