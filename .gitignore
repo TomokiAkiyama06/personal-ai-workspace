@@ -63,3 +63,5 @@ worktrees/
 recovery/
 recovery-repo/
 memory-projection-private/
+# The backup / restore code (PAW-047) is source, not recovery data.
+!apps/backend/paw_backend/recovery/

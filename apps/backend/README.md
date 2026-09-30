@@ -79,6 +79,7 @@ apps/backend/
 │  │  ├─ retrieval/        # Hybrid Retrieval: 権限の解決、SQL Prefilter、Keyword + Vector、Rerank、重複・矛盾（PAW-043）
 │  │  ├─ versioning/       # Memory の Relation・手動編集の Version（Optimistic Lock）・Revalidate、鮮度の Job（Stale Candidate、期限、Session 終了）（PAW-042）、編集で写す出典と会話 / Task から由来する Version の検索（#128）
 │  │  └─ projection/       # Memory Markdown Projection: 決定的な Renderer、Snapshot の読み取り、安全な Writer（0700 / 0600、Link を辿らない）、実行と Audit（PAW-045）
+│  ├─ recovery/            # Recovery Repository: 形式（JSON・Manifest・Checksum）、列の Allow-list の Snapshot、Renderer、Checkout（Marker・Lock）、git（Fast-forward の Push だけ）、Backup、Dry run が既定の Restore（PAW-047）
 │  ├─ projects/            # Project、Membership（招待制）、Lifecycle（PAW-026）、管理者向けの全 Project 一覧（Issue #84）。`task_gate.py` は Task Lane に渡す Project の状態 Gate（Issue #83）、`task_stop.py` は Delete 開始時の Task 停止
 │  ├─ connections/         # Shared Codex / Claude Connection: Adapter の Interface、Secret（Handle）、User 別 Quota、利用量の帰属（PAW-030）
 │  ├─ repositories/        # Repository の登録、Remote、User ごとの Checkout、Path の安全性、git の安全な実行（PAW-027）
@@ -90,7 +91,7 @@ apps/backend/
 │  └─ api/
 │     ├─ deps.py           # FastAPI Dependency
 │     └─ v1/               # /api/v1 の Router（health、events、auth、passkeys、accounts）
-├─ deploy/systemd/         # Audit の保存期間・退避（Issue #117）と Memory Markdown Projection（PAW-045）の定期実行の Unit File の例
+├─ deploy/systemd/         # Audit の保存期間・退避（Issue #117）、Memory Markdown Projection（PAW-045）、Recovery Repository の Backup（PAW-047）の定期実行の Unit File の例
 ├─ deploy/ssh-git-wrapper/ # SshGitRunner の Forced Command の Wrapper と配備の手順（Issue #134）
 └─ tests/                  # unittest
 ```
@@ -165,6 +166,7 @@ Database には pgvector が必要です（CI は `pgvector/pgvector:pg18` を�
 | `PAW_PASSKEY_RP_NAME` / `PAW_PASSKEY_CHALLENGE_TTL_SECONDS` | `Personal AI Workspace` / `300` | Authenticator に見せる名前と、Challenge に答えられる秒（30〜900） |
 | `PAW_SCRATCH_PURGE_INTERVAL_SECONDS` | `3600` | 期限切れの Research Scratch Item を消す Janitor の間隔（秒）。`0` で Janitor を止める（期限切れの行が DB に残り続ける）。それ以外は 60〜86400。DB が未設定のときも起動しない。[Janitor](#janitor期限切れの削除) |
 | `PAW_MEMORY_PROJECTION_DIR` | なし | Memory Markdown Projection の出力先（絶対 Path。例 `/srv/personal-ai/memory`）。未設定なら `memory-projection-run` は動かない。git の Work Tree の中・Home の中や上・Projection の Marker のない空でない Directory は拒否する。[Memory Markdown Projection](#memory-markdown-projection)（Decision 0038、Approved） |
+| `PAW_RECOVERY_REPOSITORY_DIR` / `PAW_RECOVERY_GIT_TIMEOUT_SECONDS` | なし / `300` | Recovery Repository（専用の Private Repository）の Clone の場所（絶対 Path。例 `/srv/personal-ai/recovery`）と、git の 1 Command の Timeout。未設定なら `recovery-backup-run` と `recovery-restore` は動かない。Home・Projection と重なる場所、Work Tree の最上位でない場所、Marker がなく空でない Checkout は拒否する。[Recovery Repository](#recovery-repositorybackup--restore)（Decision 0054、Proposed） |
 | `PAW_REPOSITORY_WORKSPACE_SUBDIR` | `workspaces` | Backend が作る Checkout の置き場所（`<home>/<この名前>/<project>/<repo>`）。1 つの安全な名前（[Repository 登録](#repository-registration--per-user-checkout)） |
 | `PAW_REPOSITORY_EXISTING_ROOTS` | `{home}` | 既存 Repository を登録してよい Root（Comma 区切り、8 つまで）。各 Root は絶対 Path で `{home}`（先頭だけ）か `{user}` を含む（全員で共有する Directory は拒否） |
 | `PAW_REPOSITORY_CLONE_HOSTS` | `github.com` | Clone してよい Host（Comma 区切り、8 つまで。小文字の DNS 名。IP Address は不可） |
@@ -3656,6 +3658,73 @@ python -m paw_backend.cli memory-projection-check --max-age-minutes 30   # 監�
 `apps/backend/tests/test_memory_projection_*.py` と `projection_support.py` です。`test_memory_projection_render.py`・`_writer.py`・`_runner.py` は DB を使わず、`tempfile` の Directory にだけ書きます。
 `test_memory_projection_postgres.py`・`_cli.py`・`_grants.py` は実 PostgreSQL（`PAW_TEST_DATABASE_URL`）を使い、未設定なら Skip します。`_grants.py` は非 Superuser の Application の Role で同じ Test を実行し、その Role が Memory の本文や Audit の行を書き換えられないことを確かめます。
 
+## Recovery Repository（Backup / Restore）
+
+[PAW-047](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/41)（`paw_backend/recovery/`、`paw_backend/cli/recovery.py`、`deploy/systemd/paw-recovery-backup*`）で実装しました。**Migration はありません。**
+要件は [REQUIREMENTS.md](../../REQUIREMENTS.md) の「Memory Markdown Backup / Backup Authority」「Dedicated Recovery Repository」「User Deletion Retention」です。
+要件が決めていない選択（Checkout の置き場所と安全の条件、形式、入れないもの、削除中の User、Restore の範囲・上書き・誰が実行するか、Restore の元の検証、戻さないもの）は [Decision 0054](../../docs/decisions/0054-recovery-repository-projection-restore.md)（**Proposed**）の推奨どおりに実装しました。承認されるまで、実運用の Server で Timer を有効にしません。
+
+PostgreSQL が Operational Source of Truth で、Recovery Repository（専用の Private Repository）は Disaster Recovery Source です。通常時は Git から DB へ同期しません。
+
+```text
+$PAW_RECOVERY_REPOSITORY_DIR/            # 専用の Private Repository の Clone。0700
+├── .paw-recovery-repository            # Marker（Commit される）
+├── manifest.json                       # recovery_format_version: 1、workspace_schema_version（Alembic の Head）、counts、checksums_sha256
+├── recovery/checksums.sha256           # 他の全 File の sha256（sha256sum -c で読める）
+├── memory/                             # Memory Markdown Projection の写し（人が読む）
+├── users/<id>.json                     # User（Credential なし）と Quota
+├── deletions/users/<id>.json           # 削除中の User: id と status だけ
+├── projects/<id>.json                  # Project と Member（ACL）
+├── repos/<id>.json                     # Repository・Remote・acl_allowed
+├── memory-records/<id>.json            # 全 Version（本文）・Relation・Source（Restore はここから戻す）
+├── policies/auth-policy.json, policies/shared-connections.json
+└── tasks/<id>.json                     # Task の Recovery Summary（戻さない）
+```
+
+### Backup（`recovery-backup-run`、30 分ごと）
+
+```bash
+# /etc/paw/recovery-backup.env に PAW_DATABASE_URL・PAW_MEMORY_PROJECTION_DIR・PAW_RECOVERY_REPOSITORY_DIR を置く
+python -m paw_backend.cli recovery-backup-run                          # 1 回の Backup（手動の Backup も同じ）
+python -m paw_backend.cli recovery-backup-check --max-age-minutes 90   # 監視（読み取りだけ。経過時間は DB の時計で測る）
+```
+
+- Checkout は絶対・正規の Path で、Home・Projection の Directory と重ならず、git の Work Tree の最上位で、Marker を持つこと（Marker がなければ、`.git` しかなく Commit も Ref もない空の Clone だけを自分のものにします。`git clone --no-checkout` した Project の Clone や、Project の Clone の新しい Orphan Branch のように、Work Tree が空でも履歴のある Repository は `not_recovery_repository` で拒否します）。Branch に Upstream が要ります。満たさなければ何も書かずに失敗します（`check_repository:<理由>`）。
+- Memory Projection は、その Marker の Lock を取り（実行中なら最大 120 秒待つ）、`.paw-memory-projection-incomplete` がなく、最後の実行が `memory.projection.completed` のときだけ写します（Decision 0038 の 9）。
+- DB は `REPEATABLE READ, READ ONLY` の 1 つの Snapshot から、**列を名指しした SQL**（`recovery/source.py`）だけで読みます。Password Hash・Passkey・Session・各種 Token・`secret_handle`・Conversation・Embedding・Checkout の Path・Task の入力と Log・Audit は読みません。自由記述の Credential は `[REDACTED]` にします（Decision 0038 の 5 と同じ）。最後の防御として、Record のすべての文字列の値（Task の `head_commit` など）も書く前に同じ検出で置換します。
+- Login 名が Credential の検出に当たる User は、Login 名を `redacted-<User ID の先頭 12 桁>` にして書きます。Restore はその名前で戻し、Owner が名前を付け直す手作業（「the Owner renames this user」）を表示します。
+- Repository の名前・既定の Branch・Remote の URL の Credential も置換します。置換された Repository・Remote は Restore で戻さず、再登録の手作業として表示します。
+- `pending_deletion` / `deleted` の User は削除記録（`id`・`status`）だけで、User Record・Quota・Member・`user` Scope の Memory・`memory/users/<id>/` を入れません。`session_only` の Version も入れません。
+- 変わらない File は書き直さず、`manifest.json` も内容が変わったときだけ変えます。管理する名前だけを Stage し、**変更があるときだけ 1 Commit**、`HEAD` が Remote-tracking Branch と違うときだけ **Fast-forward の Push**（前回の失敗の Retry を兼ねる）。`--force` は使いません。Commit は Render した Bytes から専用の Index で作り（Work Tree や Checkout の Index からは作らない）、管理する名前の外は `HEAD` のままです。書いた後に File が書き換えられても、人が `git add` した `README.md` などが Stage されていても、Commit にも Push にも入りません（Stage されたまま残ります）。Branch は元の `HEAD` からだけ進めます（Compare-and-swap）。git は Hook なし（`core.hooksPath=/dev/null`）・呼び出し元の `GIT_*` なし・`GIT_TERMINAL_PROMPT=0`・Timeout（`PAW_RECOVERY_GIT_TIMEOUT_SECONDS`、既定 300 秒）で、出力は表示も記録もしません。
+- 実行ごとに `audit_events` へ 1 行: `recovery.backup.completed`（`files=N written=N removed=N commit=0|1 push=0|1 redacted=N`）か `recovery.backup.failed`（`<step>:<code>`）。`resource_kind = recovery_backup_run`。終了コードは `0` 成功、`1` 拒否（同時実行など）、`2` 環境、`3` 失敗で、0 以外で `paw-recovery-backup-failure.service` が `crit` の Journal と `wall` を出します。
+- 接続は `PAW_DATABASE_URL`（Application の Role。SELECT と `audit_events` の INSERT / SELECT だけ）です。
+
+### Restore（`recovery-restore`、既定は Dry run）
+
+新品の Install で、`alembic upgrade head` の後、`owner-setup` の**前に**実行します（Owner を作ると Workspace は空でなくなります）。**戻す先は空の Workspace だけ**で、既存の行を上書きも削除もしません。
+
+```bash
+# PAW_MIGRATION_DATABASE_URL（Table の Owner）と PAW_RECOVERY_REPOSITORY_DIR（直前に Clone した Recovery Repository）
+python -m paw_backend.cli recovery-restore          # Dry run: 確認と件数と手作業の表示（書くのは Audit の 1 行だけ）
+python -m paw_backend.cli recovery-restore --apply  # 1 Transaction で書く
+```
+
+- 元の確認: Marker、Clean な Work Tree、`HEAD` が Remote-tracking Branch と同じ（最後に Push された状態。`not_latest`）、`recovery_format_version` がこの Code の読める版、全 File の Checksum（列挙外の File も拒否）、Record の Key と型、削除中の User の個人データがないこと。先の確認: DB がこの Release の Head、Backup の Schema がこの Release の鎖にあること、対象の Table がすべて空であること（`target_not_empty`）。拒否は `recovery.restore.refused` の Audit の行（終了コード 1）だけで、Workspace のデータは書きません。
+- Checkout の Lock は確認から書き込みと Audit の記録が終わるまで持ち続けるので、その間に Backup が Checkout を書き換えたり Push したりしません。
+- Restore は確かめた Commit の Object から File を読みます（Work Tree は読まない）。`--apply` は対象の Table を Lock して空であることを確かめ直し、User・Quota・Project・Member・Repository・Remote・Memory・Version・Relation・Source（`conversation` を除く）と `recovery.restore.applied` を同じ Transaction で書きます。失敗は Rollback（`recovery.restore.failed`、終了コード 3）。Ctrl-C・SIGTERM で打ち切られた Restore も、結果をまだ記録していなければ `recovery.restore.failed`（`CancelledError`）を記録してから終わります（記録の最中なら記録を終えてから。終了コード 3）。
+- 戻さないもの（表示する手作業）: Credential（Owner は `sudo python -m paw_backend.cli owner-recover --confirm-owner-recovery`、他の Account は Decision 0032 の Reset）、Auth Policy（Owner が設定画面で Step-up して設定し直す）、Shared Connection（再登録）、Checkout（Clone し直し、各 User が `gh auth login`）、Task（Summary だけ）、`conversation` の Source、Audit。Restore の後に `memory-projection-run` を実行します。Backup の外の削除記録の確認は、Backup に削除記録がなくても毎回表示します（最後の Push の後に始まった削除はどの記録にもないため）。Dry run の Audit の行を書けなければ、Dry run は失敗です（終了コード 3）。
+
+### 制限と未確認の点
+
+- 削除状態は「最後に Push された状態」の削除記録を適用します。Backup の外の削除記録（Decision 0043、PR #142）との突き合わせは後続です（Decision 0054 の 11）。
+- `not_latest` は Clone の Remote-tracking Branch と比べるだけです。Restore の直前に Clone か `git fetch` をしてください。
+- Restore した本文は `[REDACTED]` を含み得ます。Model / Router・Notification の設定はまだ形式にありません。
+- 1 回の Backup は全件を読みます。件数が大きくなれば差分の方式が要ります。
+
+### Test
+
+`apps/backend/tests/test_recovery_*.py` と `recovery_support.py` です。`test_recovery_render.py`・`_backup.py` は DB を使わず、`tempfile` の Directory の Bare Repository とその Clone にだけ書きます（git は現在の User で実行し、Remote は Local の Bare Repository）。`test_recovery_postgres.py`・`_cli.py`・`_grants.py` は実 PostgreSQL（`PAW_TEST_DATABASE_URL`）を使い、未設定なら Skip します。`_grants.py` は Backup を非 Superuser の Application の Role で実行し、その Role では Restore できないことを確かめます。
+
 ## DAG Agent Orchestrator
 
 [PAW-034](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/30)（Revision `0034`、`paw_backend/orchestrator/`）で実装しました。設計は [要件](../../REQUIREMENTS.md)の「Agent Orchestration / Parallel-first execution」に従い、要件が決めていない選択（Plan の形、Role の上限、Escalation の段、並列数、結果の大きさ、Sub-Agent の予算、Sweep の周期）は **[Decision 0021（Approved、2026-09-26）](../../docs/decisions/0021-dag-orchestrator-policy.md)** にまとめ、人間が承認しました。数値は暫定値として承認されたもので、`orchestrator/limits.py` と Test の期待値で変えられます（DB の CHECK に書いた項目を除く）。
@@ -3981,13 +4050,19 @@ Probe が見る使用量（Actual）と、Scheduler が約束した量（Reserve
 
 `ModelControl.processes()`（`CommandModelControl` の `pids` Command）は、その Runtime の**全 Process**（systemd の Unit なら cgroup の `cgroup.procs`）を返してください。vLLM / SGLang は GPU Memory を `MainPID` の子 Process（EngineCore / TP Worker）が持つため、`MainPID` だけでは Model の Memory が他の Workload に見えます。返した Process が GPU に何も持たない Model は、Process が分からない Model と同じく「予約分を Probe が見る使用のうちに持つ」とみなすので二重には数えませんが（Decision 0037 の 12）、一部の Process だけを返すと、残りは他の Workload と区別できずに二重に数えます。
 
+### 観測した空き VRAM による延期（Decision 0042、Approved）
+
+Scheduler の外で動く Process（他の User の vLLM など）は Lease の勘定に見えませんが、Probe には見えます。[Decision 0042（Approved。方向は 2026-09-28 に Human が直接決定し、1〜8 の細部は 2026-09-29 に承認）](../../docs/decisions/0042-gpu-free-vram-admission.md) の推奨どおり、Model の Footprint の外に自分で VRAM を確保する仕事は `ComputeRequest(class, deployment=..., vram_bytes=...)` で要る量を申告し、Probe が見る空き VRAM から「約束したがまだ見えない量」（Load 中の Model、Admission 済みでまだ確保していない仕事）を引いた量が `vram_bytes` + Safety Headroom に足りなければ、断らずに `INSUFFICIENT_FREE_VRAM` で待ちます（`wait_seconds` を過ぎたら Retry 可の `ComputeUnavailableError`）。GPU 利用率は使いません。KV Cache だけを使う普通の Request（`vram_bytes=0`）は、常駐 Model が事前に確保した Memory を二重に数えないよう、この確認を受けません（Pressure は下の縮退の段で扱います）。VRAM を要る仕事の待ちは、後から来た同じか下の Class の VRAM を要る仕事に追い越されません。`vram_bytes` を持つ Lease はその量を予約として数え、仕事が実際に確保した分は Lease の時点の `external` を超えた分だけ吸収します（二重に数えません）。
+
+延期したときは `paw_backend.compute` の Logger に WARNING を出し（要求量・空き・他の Workload の量・Headroom。PID や Process 名は出しません）、`ComputeScheduler(..., vram_warnings=sink)` に渡した `VramWarningSink.vram_deferred(VramDeferral)` にも伝えます。同じ種類（仕事・Class・諦めたか）の警告は `vram_warning_interval_seconds`（既定 300 秒）に 1 回までです。他の Workload の VRAM が無ければ入る Model の Load を見送ったときも同じく警告します。`status()` の `vram_waiting` と `exclusive_waiting_for_vram`、`vram.observed_free` で状態を見られます。
+
 ### 縮退と常駐（Memory Worker の Unload、CPU fallback）
 
 `refresh()`（`serve()` が既定 5 秒ごとに呼びます）は Probe を読み、1 回に 1 段だけ進めます。Model の操作（Load は数分かかりえます）の間も Probe を読み続けるので、GPU にある他の Model（Main）の Admission は止まりません。Pressure の間は要件の順に、1. Background の Admission を止めて Background の Lease に `revoked` を立てる（Process は殺しません）、2. Memory Worker を Drain してから Unload、3. Embedding / Reranker を CPU の Copy へ移す（無ければ `IF_ROOM` のものを Unload）、4. Interactive 以外の新規 Local Request を止める、5. 新しい Request の Context を Model の最大の半分に下げる、6. Main Model の構成変更が必要なことを `needs_human` で知らせる（**自動では変えません**）。余裕が戻ると（Headroom の外にもう 1 つ Headroom 分）逆順に戻します。Pressure も縮退もないときは、常駐方針（Main は `ALWAYS`、Memory Worker・Embedding・Reranker は `IF_ROOM`）に従って Model を Load します。Model の操作が失敗した Deployment は `FAILED`（Memory を持ったままとみなす）になり、60 秒後に再試行します。`ModelControl` を渡さなければ、Scheduler は観察と Admission だけを行います。
 
 ### Exclusive
 
-`acquire(ComputeRequest(ResourceClass.EXCLUSIVE, vram_bytes=...), wait_seconds=...)` は、新しい Local GPU の Admission を止め、走っている Local GPU の仕事が終わるのを待ち（止めません。Task の Hold と Preempt は次の「Kaggle / Full GPU Mode」）、Memory Worker → Embedding / Reranker（CPU の Copy があれば CPU へ）→ Main の順に Unload し、Probe で Workspace の Process が GPU になく要求した VRAM が空いたことを確かめてから Lease を返します。どこかで失敗すれば通常へ戻して `ExclusiveUnavailableError` です。Lease を返すと、`refresh()` が Model を Load し直します。Exclusive の Lease に期限はありません（走っている Job の Memory を奪わないため）。持ち主が Release しないまま失われたときは、`status().exclusive_age_seconds` で気づき、管理操作の `force_release_exclusive()` で終わらせます（Lease に `revoked` を立てて Release。PAW-037 の API で Owner / Admin に限る。Decision 0037 の 13）。
+`acquire(ComputeRequest(ResourceClass.EXCLUSIVE, vram_bytes=...), wait_seconds=...)` は、新しい Local GPU の Admission を止め、走っている Local GPU の仕事が終わるのを待ち（止めません。Task の Hold と Preempt は次の「Kaggle / Full GPU Mode」）、Memory Worker → Embedding / Reranker（CPU の Copy があれば CPU へ）→ Main の順に Unload し、Probe で Workspace の Process が GPU になく要求した VRAM が空いたことを確かめてから Lease を返します。どこかで失敗すれば通常へ戻して `ExclusiveUnavailableError` です。Workspace の Model をすべて降ろしても他の Workload の VRAM のために要求量が空かないときは、何も Drain・Unload せずに通常のまま待ち（Local の仕事は続きます。Decision 0042 の 6）、空いたら上の手順に進みます。`wait_seconds` は VRAM の待ちと Drain で共有し、過ぎたら何も Unload せずに `NOT_FREED` です。Lease を返すと、`refresh()` が Model を Load し直します。Exclusive の Lease に期限はありません（走っている Job の Memory を奪わないため）。持ち主が Release しないまま失われたときは、`status().exclusive_age_seconds` で気づき、管理操作の `force_release_exclusive()` で終わらせます（Lease に `revoked` を立てて Release。PAW-037 の API で Owner / Admin に限る。Decision 0037 の 13）。
 
 ### Kaggle / Full GPU Mode（PAW-037）
 
@@ -4084,11 +4159,12 @@ python -m paw_backend.cli compute-status --headroom-min-mib 8192 --headroom-frac
 - Cloud へ回した Node の Placement は、Issue #133 で Orchestrator の記録（Node の Attempt の行）と `audit_events` に残るようになりました。Decision 0037 の 14 は「この記録ができるまで **`CloudPolicy` を注入しない**」と決めており、その記録の方式は Decision 0048（Approved）で決めました。本番の組み立て（Codex / Claude の Cloud Runtime、Task の Permission・Quota を判断する `CloudPolicy` の実装、それらを Orchestrator に渡す Wiring）ができるまで、`CloudPolicy` は注入しません。
 - `NvidiaSmiProbe` は `nvidia-smi` を PATH から探さず、絶対 Path（既定 `/usr/bin/nvidia-smi`、`executable=` で変更）で実行します。
 - 管理する GPU は `gpu_index` の 1 枚です。MIG は使いません。
-- Probe が読む GPU 利用率（`utilization_percent`）は `status()` に出すだけで、Admission にはまだ使っていません（要件の入力の一つ。使い方の方針は Decision 0037 に無く、別の Decision で提案します）。
+- Probe が読む GPU 利用率（`utilization_percent`）は `status()` に出すだけで、Admission にも縮退にも使いません（Decision 0042 の Human の決定。追加の安全確認には観測した空き VRAM だけを使います）。
+- `vram_bytes` は呼び出し側の申告で、Scheduler は測りません。KV Cache を事前に確保しない Runtime では、Footprint の内側の Request は外の Workload に先に Memory を取られうるので、そうした Runtime を使うときは Decision 0042 を見直します。
 
 ### Test
 
-`apps/backend/tests/test_compute_*.py` と `compute_support.py`（Fake の Probe と Fake の `ModelControl`。Fake の Model を GPU に置くと Fake の Probe の使用量が増え、Unload すると減ります）。DB を使うのは `test_compute_full_gpu_holds.py`（`PAW_TEST_DATABASE_URL` がないと Skip）だけです。`test_compute_probe.py`（2 つの Command の固定、GPU を変える Option がないこと、Parse）、`test_compute_accounting.py`（勘定と KV の純粋関数、ランダムな Property Test）、`test_compute_config.py`（設定の検査と `CommandModelControl`。Runner は記録するだけで何も実行しません）、`test_compute_scheduler.py`（Admission・Class・待ち行列・Probe の鮮度・Hybrid）、`test_compute_relief.py`（縮退の各段・Drain・復帰・常駐）、`test_compute_exclusive.py`、`test_compute_runtimes.py`（`HybridRuntime`・`ScheduledMemoryWorker`・`PlacedEmbedder`）、`test_compute_cli.py`、`test_compute_full_gpu.py`（Full GPU Mode: 認可と Audit、Hold と Drain、Preempt、Unload と確認、終了後の Reload と再開。Task の保存は Fake）、`test_compute_full_gpu_holds.py`（実 PostgreSQL の `PostgresTaskHolds`: Hold、Hold した Task の見分け、再開と Queue、End to End）。時間は注入した Clock で動かします。
+`apps/backend/tests/test_compute_*.py` と `compute_support.py`（Fake の Probe と Fake の `ModelControl`。Fake の Model を GPU に置くと Fake の Probe の使用量が増え、Unload すると減ります）。DB を使うのは `test_compute_full_gpu_holds.py`（`PAW_TEST_DATABASE_URL` がないと Skip）だけです。`test_compute_probe.py`（2 つの Command の固定、GPU を変える Option がないこと、Parse）、`test_compute_accounting.py`（勘定と KV の純粋関数、ランダムな Property Test）、`test_compute_config.py`（設定の検査と `CommandModelControl`。Runner は記録するだけで何も実行しません）、`test_compute_scheduler.py`（Admission・Class・待ち行列・Probe の鮮度・Hybrid）、`test_compute_relief.py`（縮退の各段・Drain・復帰・常駐）、`test_compute_exclusive.py`、`test_compute_free_vram.py`（Decision 0042: 空き VRAM による延期、二重に数えないこと、追い越し、警告と頻度、Exclusive の待ち）、`test_compute_runtimes.py`（`HybridRuntime`・`ScheduledMemoryWorker`・`PlacedEmbedder`）、`test_compute_cli.py`、`test_compute_full_gpu.py`（Full GPU Mode: 認可と Audit、Hold と Drain、Preempt、Unload と確認、終了後の Reload と再開。Task の保存は Fake）、`test_compute_full_gpu_holds.py`（実 PostgreSQL の `PostgresTaskHolds`: Hold、Hold した Task の見分け、再開と Queue、End to End）。時間は注入した Clock で動かします。
 実 GPU を読む Test は `RealProbeTest` の 1 つだけで、`PAW_TEST_REAL_GPU_PROBE=1` のときだけ動き（CI では Skip）、2 つの読み取りの Query だけを実行します。
 
 ## Repository Registration / Per-user Checkout

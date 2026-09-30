@@ -102,7 +102,9 @@ def build_parser() -> argparse.ArgumentParser:
             "deleted users (Issue #127) is user-erasure-run, with the same URL. "
             "The Memory Markdown Projection (PAW-045) has memory-projection-run "
             "and memory-projection-check, which use PAW_DATABASE_URL and "
-            "PAW_MEMORY_PROJECTION_DIR."
+            "PAW_MEMORY_PROJECTION_DIR. The Recovery Repository (PAW-047) has "
+            "recovery-backup-run, recovery-backup-check and recovery-restore "
+            "(PAW_RECOVERY_REPOSITORY_DIR)."
         ),
         allow_abbrev=False,
     )

@@ -1,0 +1,19 @@
+# Started by systemd when paw-recovery-backup.service fails (OnFailure=).
+# The run itself already recorded the failure in audit_events whenever the
+# database accepted it (recovery.backup.failed, reason <step>:<code>) and wrote
+# the reason to the journal (journalctl -u paw-recovery-backup.service). The
+# next run retries (an earlier commit that was not pushed is pushed then).
+#
+# This unit makes the failure visible to the Owner/Admin on this server: it
+# writes a high-priority journal entry and a wall message. Replace ExecStart
+# with the notification channel of your deployment (mail, a chat webhook, ...)
+# if you have one; keep credentials of that channel out of this file. The
+# message names no memory, path, URL or user.
+
+[Unit]
+Description=Report a failed Recovery Repository backup of the Personal AI Workspace
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemd-cat --identifier=paw-recovery-backup --priority=crit /bin/echo "Recovery Repository backup FAILED: see journalctl -u paw-recovery-backup.service and audit_events (action recovery.backup.failed). The off-server recovery copy is stale until it succeeds."
+ExecStart=/usr/bin/wall "Personal AI Workspace: Recovery Repository backup FAILED (journalctl -u paw-recovery-backup.service)."
