@@ -71,6 +71,29 @@ export type EvaluationResult = "not_run" | "passed" | "failed";
 /** tasks/records.py `PullRequestState`. */
 export type PullRequestState = "draft" | "open" | "merged" | "closed";
 
+/**
+ * The arguments of a control (TaskService.execute): Stop Now needs the
+ * operator's reason (it is kept in the audit); Retry and Restart may switch the
+ * agent or model; `expectedVersion` refuses a control on a task that changed.
+ */
+export interface ControlOptions {
+  expectedVersion: number;
+  reason?: string;
+  agent?: string;
+  model?: string;
+}
+
+/** The Backend's limit of a control's reason (tasks/service.py MAX_REASON_LENGTH). */
+export const MAX_REASON_LENGTH = 500;
+
+/** How often an unfinished task and the list are read again (no push channel yet). */
+export const REFRESH_MS = 5000;
+
+/** States that still change by themselves (polled while shown). */
+export function isUnsettled(state: TaskState): boolean {
+  return state !== "completed" && state !== "failed" && state !== "cancelled";
+}
+
 /** Queue priority (tasks/queueing). */
 export type Priority = "high" | "normal" | "low";
 
@@ -145,6 +168,8 @@ export interface DagNode {
 }
 
 export interface TaskDetail extends TaskSummary {
+  /** The task's version: sent back with a control as the expected version. */
+  version: number;
   project?: string;
   agent: string | null;
   model: string | null;

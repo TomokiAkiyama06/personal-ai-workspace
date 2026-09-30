@@ -4,6 +4,7 @@
 import { ApiError } from "../api/client";
 import type {
   ControlCommand,
+  ControlOptions,
   PullRequestRecord,
   TaskDetail,
   TaskList,
@@ -24,6 +25,7 @@ function ago(now: number, seconds: number): string {
 
 export function sampleTasks(now = Date.now()): TaskDetail[] {
   const base = {
+    version: 3,
     agent: null,
     model: null,
     attempt: 1,
@@ -240,7 +242,7 @@ const AFTER: Partial<Record<ControlCommand, TaskState>> = {
   pause: "paused",
   resume: "running",
   cancel: "cancelled",
-  stop_now: "failed",
+  stop_now: "cancelled",
   retry: "running",
   restart: "queued",
 };
@@ -250,7 +252,7 @@ export function fakeTaskSource(
   tasks: TaskDetail[] = sampleTasks(),
   pullRequests: PullRequestRecord[] = samplePullRequests(),
 ) {
-  const calls: { id: string; command: ControlCommand }[] = [];
+  const calls: { id: string; command: ControlCommand; options: ControlOptions }[] = [];
   const state = [...tasks];
   const find = (id: string) => {
     const task = state.find((entry) => entry.id === id);
@@ -264,13 +266,14 @@ export function fakeTaskSource(
     async getTask(id) {
       return find(id);
     },
-    async control(id, command) {
-      calls.push({ id, command });
+    async control(id, command, options) {
+      calls.push({ id, command, options });
       const task = find(id);
       const updated: TaskDetail = {
         ...task,
         state: AFTER[command] ?? task.state,
         waitReason: null,
+        version: task.version + 1,
       };
       state.splice(state.indexOf(task), 1, updated);
       return updated;

@@ -54,6 +54,15 @@ export const tasksJa = {
   "tasks.control.stop_now": "今すぐ停止",
   "tasks.control.stop_now.short": "停止",
   "tasks.control.sent": "操作を送りました: {command}",
+  "tasks.form.stopHint":
+    "生成・ツールの実行・サブエージェントをすぐに中断し、タスクを終了します。理由は監査ログに残ります。",
+  "tasks.form.agentHint":
+    "別のエージェント・モデルで実行するときだけ入力します（空欄は今のまま）。",
+  "tasks.form.reason": "停止する理由",
+  "tasks.form.agent": "エージェント",
+  "tasks.form.model": "モデル",
+  "tasks.form.submit": "{command}を実行",
+  "tasks.form.close": "操作をやめる",
 
   "tasks.fact.branch": "ブランチ",
   "tasks.fact.worktree": "worktree",
@@ -215,6 +224,14 @@ export const tasksEn: Record<keyof typeof tasksJa, string> = {
   "tasks.control.stop_now": "Stop now",
   "tasks.control.stop_now.short": "Stop",
   "tasks.control.sent": "Sent: {command}",
+  "tasks.form.stopHint":
+    "Interrupts generation, tool calls and sub-agents at once and ends the task. The reason is kept in the audit log.",
+  "tasks.form.agentHint": "Only to run with another agent or model (empty keeps the current ones).",
+  "tasks.form.reason": "Reason for stopping",
+  "tasks.form.agent": "Agent",
+  "tasks.form.model": "Model",
+  "tasks.form.submit": "{command}",
+  "tasks.form.close": "Do not run",
 
   "tasks.fact.branch": "Branch",
   "tasks.fact.worktree": "worktree",

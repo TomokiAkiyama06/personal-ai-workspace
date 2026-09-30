@@ -14,9 +14,13 @@ import { DagGraph, NodeDetail } from "./DagGraph";
 import {
   ACCEPTED_CONTROLS,
   type ControlCommand,
+  type ControlOptions,
   type DagNode,
   elapsed,
+  isUnsettled,
+  MAX_REASON_LENGTH,
   orderedNodes,
+  REFRESH_MS,
   shortId,
   type TaskDetail,
   type TaskList,
@@ -98,6 +102,13 @@ function TasksView({ source }: { source: TaskSource }) {
   useEffect(reload, [reload]);
 
   const tasks = list.status === "ready" ? list.data.tasks : [];
+  // No push channel yet: the list is read again while a task can still change.
+  const unsettled = tasks.some((task) => isUnsettled(task.state));
+  useEffect(() => {
+    if (!unsettled) return;
+    const timer = window.setInterval(reload, REFRESH_MS);
+    return () => window.clearInterval(timer);
+  }, [unsettled, reload]);
   const visible = tasks.filter((task) => matches(task, filter));
   const now = useNow(tasks.some(isLive));
   // On a wide screen the first task is open until one is chosen; on a phone the
@@ -248,6 +259,8 @@ function TaskDetailView({
   const [pending, setPending] = useState<ControlCommand | null>(null);
   const [controlError, setControlError] = useState<string | null>(null);
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
+  // Stop Now asks for the reason, Retry / Restart for another agent / model.
+  const [form, setForm] = useState<ControlCommand | null>(null);
 
   const fetchTask = useCallback(() => {
     setLoad({ status: "loading" });
@@ -260,6 +273,19 @@ function TaskDetailView({
 
   const task = load.status === "ready" ? load.data : null;
   const now = useNow(task !== null && isLive(task));
+  // Read an unfinished task again in the background (its state, DAG, tool calls
+  // and controls change without the operator); a failed refresh keeps what is shown.
+  const polling = task !== null && isUnsettled(task.state) && pending === null;
+  useEffect(() => {
+    if (!polling) return;
+    const timer = window.setInterval(() => {
+      source
+        .getTask(id)
+        .then((data) => setLoad({ status: "ready", data }))
+        .catch(() => {});
+    }, REFRESH_MS);
+    return () => window.clearInterval(timer);
+  }, [polling, source, id]);
 
   if (load.status === "loading") {
     return (
@@ -283,13 +309,14 @@ function TaskDetailView({
   }
   const data = load.data;
 
-  const send = (command: ControlCommand) => {
+  const send = (command: ControlCommand, extra: Omit<ControlOptions, "expectedVersion"> = {}) => {
     setPending(command);
     setControlError(null);
     source
-      .control(data.id, command)
+      .control(data.id, command, { ...extra, expectedVersion: data.version })
       .then((updated) => {
         setLoad({ status: "ready", data: updated });
+        setForm(null);
         onChanged();
       })
       .catch((error: unknown) => setControlError(errorMessage(t, error)))
@@ -323,7 +350,25 @@ function TaskDetailView({
         </span>
       </div>
 
-      <TaskControls task={data} pending={pending} onSend={send} />
+      <TaskControls
+        task={data}
+        pending={pending}
+        open={form}
+        onSend={(command) =>
+          command === "stop_now" || command === "retry" || command === "restart"
+            ? setForm(form === command ? null : command)
+            : send(command)
+        }
+      />
+      {form && (
+        <ControlForm
+          key={form}
+          command={form}
+          pending={pending !== null}
+          onSubmit={(extra) => send(form, extra)}
+          onClose={() => setForm(null)}
+        />
+      )}
       {controlError && (
         <p className="form-error task-control-error" role="alert">
           {controlError}
@@ -440,10 +485,12 @@ function Fact({ label, children }: { label: string; children: ReactNode }) {
 function TaskControls({
   task,
   pending,
+  open,
   onSend,
 }: {
   task: TaskDetail;
   pending: ControlCommand | null;
+  open: ControlCommand | null;
   onSend: (command: ControlCommand) => void;
 }) {
   const { t } = useI18n();
@@ -465,6 +512,11 @@ function TaskControls({
           }
           disabled={pending !== null}
           aria-busy={pending === command}
+          aria-expanded={
+            command === "stop_now" || command === "retry" || command === "restart"
+              ? open === command
+              : undefined
+          }
           onClick={() => onSend(command)}
         >
           {command === "stop_now" ? (
@@ -480,6 +532,92 @@ function TaskControls({
         </button>
       ))}
     </fieldset>
+  );
+}
+
+/**
+ * The arguments a control needs before it is sent: Stop Now the operator's
+ * reason (required by the Backend and kept in the audit), Retry / Restart an
+ * optional other agent or model (empty keeps the current ones).
+ */
+function ControlForm({
+  command,
+  pending,
+  onSubmit,
+  onClose,
+}: {
+  command: ControlCommand;
+  pending: boolean;
+  onSubmit: (extra: Omit<ControlOptions, "expectedVersion">) => void;
+  onClose: () => void;
+}) {
+  const { t } = useI18n();
+  const [reason, setReason] = useState("");
+  const [agent, setAgent] = useState("");
+  const [model, setModel] = useState("");
+  const stop = command === "stop_now";
+  const label = t(`tasks.control.${command}`);
+  return (
+    <form
+      className={stop ? "control-form danger-form" : "control-form"}
+      aria-label={label}
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (stop) {
+          if (reason.trim()) onSubmit({ reason: reason.trim() });
+          return;
+        }
+        onSubmit({
+          ...(agent.trim() ? { agent: agent.trim() } : {}),
+          ...(model.trim() ? { model: model.trim() } : {}),
+        });
+      }}
+    >
+      <p className="small muted">{t(stop ? "tasks.form.stopHint" : "tasks.form.agentHint")}</p>
+      {stop ? (
+        <label className="field">
+          <span>{t("tasks.form.reason")}</span>
+          <textarea
+            required
+            maxLength={MAX_REASON_LENGTH}
+            rows={2}
+            value={reason}
+            onChange={(event) => setReason(event.target.value)}
+          />
+        </label>
+      ) : (
+        <div className="control-form-row">
+          <label className="field">
+            <span>{t("tasks.form.agent")}</span>
+            <input
+              value={agent}
+              maxLength={200}
+              onChange={(event) => setAgent(event.target.value)}
+            />
+          </label>
+          <label className="field">
+            <span>{t("tasks.form.model")}</span>
+            <input
+              value={model}
+              maxLength={200}
+              onChange={(event) => setModel(event.target.value)}
+            />
+          </label>
+        </div>
+      )}
+      <div className="actions">
+        <button
+          type="submit"
+          className={stop ? "danger small-button" : "small-button"}
+          disabled={pending || (stop && !reason.trim())}
+        >
+          {t("tasks.form.submit", { command: label })}
+        </button>
+        <button type="button" className="text-button small-button" onClick={onClose}>
+          {t("tasks.form.close")}
+        </button>
+      </div>
+    </form>
   );
 }
 

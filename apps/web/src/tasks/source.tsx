@@ -4,13 +4,19 @@
 // available. A later issue connects the Backend's API here without changing the
 // screens (as the Notification Center's `NotificationSource`, Decision 0044's 11).
 import { createContext, type ReactNode, useContext } from "react";
-import type { ControlCommand, PullRequestRecord, TaskDetail, TaskList } from "./model";
+import type {
+  ControlCommand,
+  ControlOptions,
+  PullRequestRecord,
+  TaskDetail,
+  TaskList,
+} from "./model";
 
 export interface TaskSource {
   listTasks(): Promise<TaskList>;
   getTask(id: string): Promise<TaskDetail>;
   /** Send an operator control; resolves with the task as the Backend left it. */
-  control(id: string, command: ControlCommand): Promise<TaskDetail>;
+  control(id: string, command: ControlCommand, options: ControlOptions): Promise<TaskDetail>;
   listPullRequests(): Promise<readonly PullRequestRecord[]>;
 }
 

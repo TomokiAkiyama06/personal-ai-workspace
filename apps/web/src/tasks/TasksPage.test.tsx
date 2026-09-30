@@ -192,7 +192,7 @@ describe("Tasks page", () => {
         .map((button) => button.textContent),
     ).toEqual(["一時停止", "キャンセル", expect.stringContaining("今すぐ停止")]);
     await user.click(within(controls).getByRole("button", { name: "一時停止" }));
-    expect(calls).toEqual([{ id: TASK_203, command: "pause" }]);
+    expect(calls).toEqual([{ id: TASK_203, command: "pause", options: { expectedVersion: 3 } }]);
     const detail = await screen.findByRole("article", { name: "認証セッションの修正" });
     await waitFor(() =>
       expect(detail.querySelector(".task-title-block .state-pill")).toHaveTextContent("一時停止中"),
@@ -200,14 +200,80 @@ describe("Tasks page", () => {
     expect(within(detail).getByRole("button", { name: "再開" })).toBeInTheDocument();
   });
 
+  it("asks for the reason before Stop Now and sends it (the Backend requires one)", async () => {
+    const { source, calls } = fakeTaskSource();
+    renderTasks(`/agents/${TASK_203}`, source);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: /今すぐ停止/ }));
+    expect(calls).toEqual([]);
+    const form = screen.getByRole("form", { name: "今すぐ停止" });
+    const submit = within(form).getByRole("button", { name: "今すぐ停止を実行" });
+    expect(submit).toBeDisabled();
+    await user.type(
+      within(form).getByRole("textbox", { name: "停止する理由" }),
+      "  誤った Repo を編集している  ",
+    );
+    await user.click(submit);
+    expect(calls).toEqual([
+      {
+        id: TASK_203,
+        command: "stop_now",
+        options: { expectedVersion: 3, reason: "誤った Repo を編集している" },
+      },
+    ]);
+    const detail = await screen.findByRole("article", { name: "認証セッションの修正" });
+    await waitFor(() =>
+      expect(detail.querySelector(".task-title-block .state-pill")).toHaveTextContent(
+        "キャンセル済み",
+      ),
+    );
+    expect(screen.queryByRole("form", { name: "今すぐ停止" })).not.toBeInTheDocument();
+  });
+
   it("shows the Backend's refusal of a control", async () => {
     const { source } = fakeTaskSource();
     source.control = () => Promise.reject(new ApiError(403, "forbidden", "x"));
     renderTasks(`/agents/${TASK_203}`, source);
     const user = userEvent.setup();
-    await user.click(await screen.findByRole("button", { name: /今すぐ停止/ }));
+    await user.click(await screen.findByRole("button", { name: "一時停止" }));
     expect(await screen.findByRole("alert")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "一時停止" })).toBeEnabled();
+  });
+
+  it("lets Retry and Restart switch the agent or model", async () => {
+    const tasks = sampleTasks();
+    const failed = tasks.find((task) => task.id === TASK_205);
+    if (failed) {
+      failed.state = "failed";
+      failed.waitReason = null;
+    }
+    const { source, calls } = fakeTaskSource(tasks);
+    renderTasks(`/agents/${TASK_205}`, source);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "再試行" }));
+    const form = screen.getByRole("form", { name: "再試行" });
+    await user.type(within(form).getByRole("textbox", { name: "エージェント" }), "Claude");
+    await user.click(within(form).getByRole("button", { name: "再試行を実行" }));
+    expect(calls).toEqual([
+      { id: TASK_205, command: "retry", options: { expectedVersion: 3, agent: "Claude" } },
+    ]);
+  });
+
+  it("reads an unfinished task and the list again while they can change", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const { source } = fakeTaskSource();
+      const getTask = vi.spyOn(source, "getTask");
+      const listTasks = vi.spyOn(source, "listTasks");
+      renderTasks(`/agents/${TASK_203}`, source);
+      await screen.findByRole("article", { name: "認証セッションの修正" });
+      const before = [getTask.mock.calls.length, listTasks.mock.calls.length];
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(getTask.mock.calls.length).toBeGreaterThan(before[0] ?? 0);
+      expect(listTasks.mock.calls.length).toBeGreaterThan(before[1] ?? 0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("offers Retry and Restart for a failed task and nothing for a completed one", async () => {
