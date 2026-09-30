@@ -182,6 +182,7 @@ export function VersionCard({
   layout,
   current,
   selfId,
+  canWrite,
   restoring,
   onRestore,
 }: {
@@ -189,6 +190,8 @@ export function VersionCard({
   layout: GraphLayout;
   current: MemoryVersion;
   selfId: string;
+  /** False when the Backend says the reader may not change the memory. */
+  canWrite: boolean;
   restoring: boolean;
   onRestore: (version: MemoryVersion) => void;
 }) {
@@ -199,6 +202,7 @@ export function VersionCard({
   // Restoring the active current version would change nothing (ALREADY_ACTIVE);
   // a related memory's version belongs to another memory.
   const canRestore =
+    canWrite &&
     node.own &&
     // The Backend restores into an active or deprecated memory only (a memory
     // retired by another one stays retired), from a version of the same audience,

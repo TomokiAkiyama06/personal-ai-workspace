@@ -21,6 +21,8 @@ type Tab = "body" | "history" | "sources" | "details";
 const TABS: readonly Tab[] = ["body", "history", "sources", "details"];
 const EDITABLE_SCOPES = new Set(["user", "project"]);
 
+type Field = "title" | "content";
+
 interface Draft {
   title: string;
   content: string;
@@ -254,9 +256,10 @@ export function MemoryDetail({
   const [selected, setSelected] = useState<string | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [base, setBase] = useState<number | null>(null);
-  // The values the draft started from: only a field the editor changed from its
-  // origin is sent, so a save never writes back a stale copy of another field.
-  const [origin, setOrigin] = useState<Pick<Draft, "title" | "content"> | null>(null);
+  // The fields the editor typed in: only these are sent (when they differ from
+  // the current version), so a save never writes back a stale copy of a field
+  // someone else changed meanwhile.
+  const [touched, setTouched] = useState<ReadonlySet<Field>>(() => new Set());
   const [conflict, setConflict] = useState<MemoryVersion | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -288,8 +291,10 @@ export function MemoryDetail({
     layout.nodes.find((node) => node.version.version_id === selected) ??
     layout.nodes.find((node) => node.current);
   const chip = stateChip(current);
+  // The Backend's answer, when the API gives it (a project Viewer reads, not writes).
+  const canWrite = history.data.can_write !== false;
   const editable =
-    current.status === "active" && EDITABLE_SCOPES.has(current.scope) && draft === null;
+    canWrite && current.status === "active" && EDITABLE_SCOPES.has(current.scope) && draft === null;
 
   const reloadAfterWrite = (written: MemoryVersion) => {
     setSelected(written.version_id);
@@ -299,7 +304,7 @@ export function MemoryDetail({
 
   const startEdit = () => {
     setDraft({ title: current.title, content: current.content, reason: "" });
-    setOrigin({ title: current.title, content: current.content });
+    setTouched(new Set());
     setBase(current.version_number);
     setConflict(null);
     setNotice(null);
@@ -309,13 +314,13 @@ export function MemoryDetail({
 
   const stopEdit = () => {
     setDraft(null);
-    setOrigin(null);
+    setTouched(new Set());
     setBase(null);
     setConflict(null);
     setFailure(null);
   };
 
-  const onConflict = async (pending: { draft: Draft; origin: typeof origin } | null) => {
+  const onConflict = async (pending: { draft: Draft; touched: ReadonlySet<Field> } | null) => {
     // Read the version that won and edit on top of it from now on.
     const latest = await source.history(memoryId);
     const top = latest.versions.reduce<MemoryVersion | null>(
@@ -327,27 +332,21 @@ export function MemoryDetail({
     if (!top) return;
     setConflict(top);
     setBase(top.version_number);
-    if (pending?.origin) {
+    if (pending) {
       // A field the editor did not touch follows the version that won.
-      const from = pending.origin;
-      const keep = (field: "title" | "content") => pending.draft[field] !== from[field];
+      const keep = (field: Field) => pending.touched.has(field);
       setDraft({
         ...pending.draft,
         title: keep("title") ? pending.draft.title : top.title,
         content: keep("content") ? pending.draft.content : top.content,
-      });
-      setOrigin({
-        title: keep("title") ? from.title : top.title,
-        content: keep("content") ? from.content : top.content,
       });
     }
   };
 
   const save = async (event: FormEvent) => {
     event.preventDefault();
-    if (!draft || !origin || base === null) return;
-    const changed = (field: "title" | "content") =>
-      draft[field] !== origin[field] && draft[field] !== current[field];
+    if (!draft || base === null) return;
+    const changed = (field: Field) => touched.has(field) && draft[field] !== current[field];
     const changes = {
       ...(changed("title") ? { title: draft.title } : {}),
       ...(changed("content") ? { content: draft.content } : {}),
@@ -368,7 +367,8 @@ export function MemoryDetail({
       reloadAfterWrite(written);
     } catch (caught) {
       if (isApiError(caught, "memory_version_conflict")) {
-        await onConflict({ draft, origin }).catch(() => {});
+        // If the latest version cannot be read either, say so and keep the draft.
+        await onConflict({ draft, touched }).catch(() => setFailure(errorMessage(t, caught)));
       } else setFailure(errorMessage(t, caught));
     } finally {
       setBusy(false);
@@ -393,8 +393,9 @@ export function MemoryDetail({
       );
       reloadAfterWrite(written);
     } catch (caught) {
-      if (isApiError(caught, "memory_version_conflict")) await onConflict(null).catch(() => {});
-      else setFailure(errorMessage(t, caught));
+      if (isApiError(caught, "memory_version_conflict")) {
+        await onConflict(null).catch(() => setFailure(errorMessage(t, caught)));
+      } else setFailure(errorMessage(t, caught));
     } finally {
       setBusy(false);
     }
@@ -474,7 +475,10 @@ export function MemoryDetail({
                 <input
                   value={draft.title}
                   required
-                  onChange={(event) => setDraft({ ...draft, title: event.target.value })}
+                  onChange={(event) => {
+                    setDraft({ ...draft, title: event.target.value });
+                    setTouched((value) => new Set(value).add("title"));
+                  }}
                 />
               </label>
               <label className="field">
@@ -483,7 +487,10 @@ export function MemoryDetail({
                   value={draft.content}
                   required
                   rows={8}
-                  onChange={(event) => setDraft({ ...draft, content: event.target.value })}
+                  onChange={(event) => {
+                    setDraft({ ...draft, content: event.target.value });
+                    setTouched((value) => new Set(value).add("content"));
+                  }}
                 />
               </label>
               <label className="field">
@@ -531,6 +538,7 @@ export function MemoryDetail({
               layout={layout}
               current={current}
               selfId={user.id}
+              canWrite={canWrite}
               restoring={busy}
               onRestore={(version) => void restore(version)}
             />

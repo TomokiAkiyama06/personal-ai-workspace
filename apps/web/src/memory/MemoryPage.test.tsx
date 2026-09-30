@@ -2,6 +2,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "../App";
+import { ApiError } from "../api/client";
 import { mockApi, Providers, reply, session } from "../test/helpers";
 import { designMemories, FakeMemorySource, REPO_ID } from "../test/memoryFake";
 import { type MemorySource, MemorySourceProvider } from "./source";
@@ -286,6 +287,62 @@ describe("Memory screen", () => {
       [mergeId, 4, { content: "自分の本文" }],
     ]);
     expect(await screen.findByRole("heading", { name: "Merge は Human だけ" })).toBeVisible();
+  });
+
+  it("sends a field the editor set back to its first value after a conflict", async () => {
+    const { source, mergeId } = designSource();
+    renderMemory("/memory/m-merge", source);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "編集" }));
+    const title = screen.getByRole("textbox", { name: "タイトル" });
+    await user.clear(title);
+    await user.type(title, "B");
+    source.write(mergeId, { title: "C" }, null, { actor_user_id: "u-2" });
+    await user.click(screen.getByRole("button", { name: "保存" }));
+    await screen.findByRole("alert");
+    // The editor decides for the first title after all.
+    await user.clear(title);
+    await user.type(title, "Merge は必ず人が承認する");
+    await user.click(screen.getByRole("button", { name: "保存" }));
+    const edits = source.calls.filter((call) => call.method === "edit").map((call) => call.args);
+    expect(edits.at(-1)).toEqual([mergeId, 4, { title: "Merge は必ず人が承認する" }]);
+  });
+
+  it("keeps the draft and says so when the latest version cannot be read after a conflict", async () => {
+    const { source, mergeId } = designSource();
+    renderMemory("/memory/m-merge", source);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "編集" }));
+    await user.type(screen.getByRole("textbox", { name: "本文" }), "追記");
+    source.write(mergeId, { content: "他の人の更新" }, null, { actor_user_id: "u-2" });
+    source.history = async () => {
+      throw new ApiError(503, "service_unavailable", "down");
+    };
+    await user.click(screen.getByRole("button", { name: "保存" }));
+    expect(
+      await screen.findByText("別の更新と重なりました。最新の版を確認してください。"),
+    ).toBeVisible();
+    expect((screen.getByRole("textbox", { name: "本文" }) as HTMLTextAreaElement).value).toContain(
+      "追記",
+    );
+  });
+
+  it("hides editing and restoring when the Backend says the reader cannot write", async () => {
+    const { source } = designSource();
+    const history = source.history.bind(source);
+    source.history = async (id) => ({ ...(await history(id)), can_write: false });
+    renderMemory("/memory/m-merge", source);
+    const user = userEvent.setup();
+    expect(await screen.findByRole("heading", { name: "Merge は必ず人が承認する" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "編集" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "履歴" }));
+    const nodes = within(screen.getByRole("list", { name: "メモリの履歴グラフ" })).getAllByRole(
+      "button",
+    );
+    await user.click(nodes[1] as HTMLElement);
+    expect(
+      screen.queryByRole("button", { name: "この内容で新しい版を作る" }),
+    ).not.toBeInTheDocument();
   });
 
   it("offers restore only where the Backend can restore", async () => {

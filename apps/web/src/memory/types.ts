@@ -79,6 +79,13 @@ export interface MemoryHistory {
   versions: MemoryVersion[];
   relations: MemoryRelation[];
   related: MemoryVersion[];
+  /**
+   * Whether the reader may change the memory (edit / restore), as the Backend
+   * decides it: a project Viewer reads the history (`project.read`) but cannot
+   * edit (`project.memory.use`). Absent: not known, the controls are shown and
+   * the Backend's answer decides.
+   */
+  can_write?: boolean;
 }
 
 /** A `memory_sources` row: why a version exists (UI_DESIGN.md §8). */
