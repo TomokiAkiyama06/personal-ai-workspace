@@ -1,6 +1,7 @@
 # Compute Scheduler を Application に組み込む方針（有効にする方法、VRAM の警告の Sink、Full GPU Mode の HTTP の経路: 非同期の開始・開始の取りやめ・認可・応答の形、Local の Runtime の配線、終了時）
 
-- Status: Proposed
+- Status: Approved
+- Approval: 2026-09-30、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで直接回答して承認（判断が必要な点 1〜8 の全点。末尾の「承認時の決定」）
 - Date: 2026-09-30
 - Scope: Issue [#165](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/165)。`paw_backend/compute/wiring.py`（`ComputeSetup`、`LocalRuntime`、`RecentVramWarnings`、`FullGpuController`、`build_compute`）、`paw_backend/app.py`（`create_app(compute=..., local_runtimes=...)` と Lifespan）、`paw_backend/orchestrator/composition.py`（`build_task_execution(scheduler=..., local_runtimes=...)`）、`paw_backend/api/v1/compute.py`（`/api/v1/admin/compute/full-gpu`）。Migration はない
 - Supersedes: なし。[Decision 0037](0037-gpu-compute-scheduler.md)（Scheduler）、[Decision 0042](0042-gpu-free-vram-admission.md)（空き VRAM と警告）、[Decision 0055](0055-kaggle-full-gpu-mode.md)（Full GPU Mode）、[Decision 0047](0047-task-execution-composition-and-task-end-effects.md) / [Decision 0056](0056-production-worktree-wiring.md)（本番の組み立て）はどれも書き換えない。0042 の 6 と 0055 の 8 が「Scheduler を Application に組み込むとき」に残した点を決める
@@ -109,3 +110,7 @@
 承認されたら `Approval` に記録し、Status を Approved に改める。数値（警告を持つ件数 50、`refresh_seconds` 5 秒）は `ComputeSetup` の引数で変えられる（DB に書いたものはない）。
 方針を変えるときは、この Decision を書き換えず、新しい Decision から `Supersedes` する。
 [REQUIREMENTS.md](../../REQUIREMENTS.md) の原文は書き換えない。
+
+## 承認時の決定（2026-09-30）
+
+Human は、作業 Session で判断が必要な点について推奨つきの説明を受け、直接回答して承認した（判断が必要な点 1〜8 の全点）。8 はレビュー中に改めた版（停止時は resuming なら戻してから止める、起動時は Main が GPU 上にあると確かめてから再開する）を承認した。
