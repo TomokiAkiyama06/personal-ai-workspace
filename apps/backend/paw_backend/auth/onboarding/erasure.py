@@ -6,7 +6,7 @@ data is erased, and the account is not shown as ``Deleted`` until the erasure is
 done and verified. Decision 0033 (Approved) left this to a later issue and fixed two
 things it must respect: the ``users`` row is NOT hard-deleted (a tombstone; the
 foreign keys to it stay RESTRICT, point 11), and the login name stays reserved
-(point 10). Decision 0043 (Proposed) records the choices below.
+(point 10). Decision 0043 records the choices below.
 
 Who runs it
 -----------

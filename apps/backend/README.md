@@ -1517,12 +1517,12 @@ Migration `0124`（Revision ID は Issue の番号で、Decision 0024 と紛れ�
 - 実際の Browser・QR の読み取り・Reverse Proxy を通した動作は確かめていません（`TestClient` と実 PostgreSQL まで）。
 - 一般 User の Pairing は Token の所持だけで Session ができます（QR の盗み見・リンクの転送。10 分以内）。Pairing の完了は Audit に残り、端末の一覧から個別に Logout できます。
 - 招待の取消・削除の後も `users.login_name` は一意のまま予約され、同じ Login name で招待し直せません（Decision 0033 の判断点 10）。
-- 30 日後の消去・実行中の Task の停止は Issue #127 で実装しました（下記。[Decision 0043](../../docs/decisions/0043-user-deletion-follow-ups.md) は **Proposed**）。User の一覧の Endpoint、Web の画面は後続の Issue です。
+- 30 日後の消去・実行中の Task の停止は Issue #127 で実装しました（下記。[Decision 0043](../../docs/decisions/0043-user-deletion-follow-ups.md) は **Approved**）。User の一覧の Endpoint、Web の画面は後続の Issue です。
 - 公開 Route の時間は揃えていません（存在する Token の失敗は Audit の INSERT が加わる）。
 
 ### 削除の後続（Issue #127）
 
-[Issue #127](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/127)（Decision 0033 の判断点 9 と 6 の後続）。選択は **[Decision 0043](../../docs/decisions/0043-user-deletion-follow-ups.md)（Proposed）** にまとめました。判断点 6（Pairing した新しい端末での Passkey の追加）は Decision で提案しただけで、**承認まで実装しません**。
+[Issue #127](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/127)（Decision 0033 の判断点 9 と 6 の後続）。選択は **[Decision 0043](../../docs/decisions/0043-user-deletion-follow-ups.md)（Approved）** にまとめました。判断点 6（Pairing した新しい端末での Passkey の追加）は Decision で提案しただけで、**承認まで実装しません**。
 
 - **実行中の Task の停止**（`paw_backend/orchestrator/user_sweep.py`）: Backend の中の定期の Loop（`PAW_USER_TASK_STOP_INTERVAL_SECONDS`、既定 60 秒、0 で止める、10〜3600）が、`pending_deletion`（と `deleted`）の User が作った Active な Task と、その Task の Active な Queue Entry を探し、PAW-032 の **Cancel**（`Actor.policy()`、理由 `User deletion started`）とその Entry の Cancel を 1 つの Transaction で行います。その Transaction は User の行を `FOR SHARE` で Lock するので、復元（`FOR NO KEY UPDATE`）と直列になり、復元の後の Task は止めません。状態から探すので（Outbox の Table はない）、削除と競って後から現れた Task も次の周期で止まります。共有 Project の中の、その User の Task も止めます。1 つ止めるたびに `auth.user.task_stop` を Best Effort で書きます。形は Project の削除の停止（`ProjectTaskStopper` / `ProjectTaskStopLoop`）と同じです。
 - **新しい実行・外部の認証**: 削除の Transaction がすでに全 Session を失効し、`SessionPrincipalProvider` は `active` でない User を匿名にし、`DatabasePrincipalDirectory`（Agent の委任）は `active` 以外を解決しません。GitHub（`gh auth`）・SSH の鍵は DB になく、各 User の Linux Account の中にあります。Backend がその Account として `git` / `gh` を動かす経路（`LoginNameAccountDirectory`）は `active` の User だけを引くので、削除の時点で使えなくなります。鍵そのものの失効（`authorized_keys` の行の削除、`gh auth logout`）は配備側の作業で、この Backend は User の HOME に触れません（Decision 0043 の 4）。

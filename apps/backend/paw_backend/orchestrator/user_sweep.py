@@ -2,7 +2,7 @@
 
 ``REQUIREMENTS.md`` ("User Lifecycle", "User Deletion Retention"): when a user is
 deleted, running Agents are safe-stopped and no new Agent runs for them. Decision
-0033 (section 3) left the stop to a later issue; Decision 0043 (Proposed) records
+0033 (section 3) left the stop to a later issue; Decision 0043 records
 how it is done here.
 
 ``UserLifecycleService.delete_user`` cannot stop tasks itself (the task service and

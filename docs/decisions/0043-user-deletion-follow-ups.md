@@ -1,9 +1,10 @@
 # User 削除の後続（30 日後の消去・実行中の Task の停止・外部の認証）と、Pairing した新しい端末での Passkey の追加
 
-- Status: Proposed
+- Status: Approved
 - Date: 2026-09-28
 - Scope: Issue [#127](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/127)。[Decision 0033](0033-user-invitation-and-device-pairing.md)（Approved）が後続とした判断点 9（`pending_deletion` → `deleted` の 30 日後の消去、実行中 Agent の停止、外部の認証の停止）と判断点 6（端末に固定された Passkey しか持たない Owner / Admin が、Pairing した新しい端末で Passkey を追加できない）
 - Supersedes: なし（0033 は書き換えない。0033 の判断点 10・11（Login name の予約、`users` の行の Tombstone）はそのまま守る）
+- Approval: 2026-09-29、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで「推奨どおり」と回答して承認（1〜11 の全点。11 は案 A。末尾の「承認時の決定」）
 
 ## 背景
 
@@ -131,3 +132,7 @@ Decision 0033（PR #123）は削除を `pending_deletion` にするところま�
 - 要件の「個人設定」を、今の Schema では `connection_quotas`（User ごとの上限）と解釈した。User ごとの設定の Table はまだない。
 - 要件の「個人用 Files」「GitHub 認証情報」は User の Linux Account の中にあり、DB の中の消去の対象ではないと解釈した（C 節、判断点 4・7）。
 - 「実行中 Agent の安全停止」を、その User が作った Task の Cancel と解釈した（Agent の実行は Task に属する）。
+
+## 承認時の決定（2026-09-29）
+
+Human は、作業 Session で判断が必要な点について推奨つきの説明を受け、「推奨どおり」と回答して承認した（1〜11 の全点。11 は案 A）。**すべて推奨どおり**で、個別の変更はない。11（案 A）は、Migration とともに別の PR で実装する。あわせて、Codex の P1（削除が始まっても HOME の GitHub token / SSH 鍵が使えるまま）への対応としてこの PR に加えた仕組み（削除の開始時に Audit へ `auth.user.credentials` の `credentials_pending` を記録し、消去の Job が確認のない User ごとに ACTION REQUIRED を出して終了コード 3 で OnFailure の通知を起こし、運用者が `--credentials-revoked` で失効の確認を記録する）も、Human が 2026-09-30 に作業 Session で承認に含めた。OS の Account のロック（`usermod -L` など）は自動化しない。必要になったら、特権の Helper と一緒に別の Issue / Decision で扱う。
