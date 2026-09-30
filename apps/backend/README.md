@@ -209,6 +209,7 @@ Endpoint は `/api/v1` 以下です。OpenAPI Schema は `/api/v1/openapi.json` 
 | `/api/v1/auth/*` | Login、Session、Password、Step-up、Owner の Token、認証 Policy（12 個の Endpoint）。[Login / Session / Password Policy](#login--session--password-policy) |
 | `/api/v1/auth/passkeys/*` | Passkey の登録・認証（Step-up）・一覧・失効（6 個の Endpoint）。[Passkey / Step-up](#passkey--step-up) |
 | `/api/v1/auth/invitations/*`、`/api/v1/auth/users/*`、`/api/v1/auth/pairing/*` | 招待、User の削除・復元、端末の Pairing（13 個の Endpoint。うち 3 個が公開）。[User Invite / Device Pairing / Lifecycle](#user-invite--device-pairing--lifecycle) |
+| `/api/v1/admin/compute/full-gpu` | Kaggle / Full GPU Mode の状態・開始・終了（`GET` / `POST` / `DELETE`、`admin.compute.full_gpu`。Scheduler がない構成は 503）。[Application への組み込み](#application-への組み込みissue-165decision-0058proposed) |
 
 Readiness は 200 または 503 で、Body の形は同じです。
 
@@ -3932,7 +3933,7 @@ completed（Merge Ready。Human が Merge を判断する）/ 通らなければ
 ## GPU / Compute Resource Scheduler
 
 [PAW-036](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/32)（`paw_backend/compute/`、`paw_backend/cli/compute.py`。Migration はありません）で実装しました。設計は [要件](../../REQUIREMENTS.md)の「GPU / Compute Resource Scheduler」（FIXED）に従い、要件が決めていない選択（状態の置き場所、Admission の単位、Safety Headroom などの数値、Class の取り分と待ち行列の順、縮退を進める・戻す条件、Main Model の構成変更を自動で行わないこと、Exclusive の手順、Cloud へ回す条件、Context の見積もり、GPU 時間の計上）は **[Decision 0037（Approved。2026-09-28 に Human が 14 点すべて推奨どおりと承認）](../../docs/decisions/0037-gpu-compute-scheduler.md)** にまとめ、実装はその決定どおりです。数値はすべて `compute/limits.py` の暫定値で、`ComputeConfig` の設定で変えられます（DB に書いたものはありません）。
-**Library と読み取り専用の確認 Command だけで、Application の Lifespan にはまだ組み込んでいません**（実際の Model と Runtime は Benchmark（PAW-017 / PAW-019）で決まり、Runtime の Adapter は別の Issue です）。
+**Application への組み込みは Issue #165（下の「Application への組み込み」、[Decision 0058](../../docs/decisions/0058-compute-scheduler-application-wiring.md)、Proposed）です。** Deployment が `create_app(compute=ComputeSetup(...))` を渡したときだけ動きます。本番の起動（`python -m paw_backend`）はまだ渡しません（実際の Model と Runtime は Benchmark（PAW-017 / PAW-019）で決まり、Runtime の Adapter と、`ComputeSetup` を設定から組み立てることは別の Issue です）。
 
 **GPU の安全性**: Scheduler は GPU を**読むだけ**です。Probe（`NvidiaSmiProbe`）が実行するのは `nvidia-smi --query-gpu=index,uuid,name,memory.total,memory.used,utilization.gpu` と `nvidia-smi --query-compute-apps=gpu_uuid,pid,used_memory`（どちらも `--format=csv,noheader,nounits`）の 2 つだけで、Clock・Persistence・Power limit・Compute mode・MIG を変えず、GPU を Reset せず、Process に Signal を送りません（止めるのは Timeout か出力の上限（1 MiB）を超えた自分の `nvidia-smi` の子 Process だけ。出力は最後まで読みます: `nvidia-smi` は 1 行を複数回に分けて書くことがあり、最初の断片だけを読むと Probe が使えないと判断していました。PAW-037 で修正）。`test_compute_probe.py` が 2 つの Command を固定し、`compute/` の Code にそうした Option や `os.kill` がないことを確かめます。Model の Load / Unload / CPU fallback は注入した `ModelControl` を通してだけ行い、**Test は Fake だけを使います**（実際の Model を Load / Unload する Test、VRAM を確保する Test はありません）。
 
@@ -3946,6 +3947,7 @@ completed（Merge Ready。Human が Merge を判断する）/ 通らなければ
 | `control.py` | `ModelControl` の Protocol と、Admin が設定した Command を実行する `CommandModelControl` |
 | `scheduler.py` | `ComputeScheduler`: Admission と待ち行列、縮退と常駐、Exclusive |
 | `runtimes.py` | `HybridRuntime`（Orchestrator の Runtime。Local / Cloud）、`ScheduledMemoryWorker`、`PlacedEmbedder` |
+| `wiring.py` | Application への組み込み（Issue #165）: `ComputeSetup`、`LocalRuntime`、VRAM の警告の Sink `RecentVramWarnings`、HTTP の経路が使う `FullGpuController` |
 
 ### Admission（KV Cache に応じた動的な並列数）
 
@@ -4048,6 +4050,21 @@ runtime = HybridRuntime(
 # Orchestrator(..., runtimes={"local": runtime, ...}) と、別の Task で scheduler.serve(stop)
 ```
 
+### Application への組み込み（Issue #165、Decision 0058、Proposed）
+
+要件と Decision 0037 / 0042 / 0055 が決めていない選択（有効にする方法、警告の Sink、HTTP の経路の非同期の開始・取りやめ・認可・応答の形、Local の Runtime の配線、終了時）は **[Decision 0058（Proposed）](../../docs/decisions/0058-compute-scheduler-application-wiring.md)** にまとめ、実装はその推奨どおりです。
+
+- **有効にする**: `create_app(settings, compute=ComputeSetup(ComputeConfig(...), NvidiaSmiProbe(), control=CommandModelControl(...)))`。渡したときだけ `app.state.compute` に Scheduler（プロセスに 1 つ）ができ、Lifespan が `scheduler.serve`（既定 5 秒ごと、`refresh_seconds`）を動かします。Database があれば `FullGpuMode(scheduler, PostgresTaskHolds(...), authorizer)` も作って `serve` を動かします（Database がなければ Scheduler だけ）。環境変数はありません（`ModelControl` の Command を設定から読む形式と保護は Runtime の Adapter の Issue で決めます）。
+- **Local の Runtime**: `create_app(..., compute=..., local_runtimes={"local": LocalRuntime(runtime, deployment="main", local_model="...")}, orchestrator_config=...)`。組み立て（`build_task_execution`）が `HybridRuntime(scheduler, runtime, deployment=..., late_gpu_charge=TrackerLateGpuCharge(budget))` で包み、`agent_runtimes` と同じ Label の集合に入れます（重複は `TypeError`）。`CloudPolicy` は渡しません（Decision 0037 の 14）。`local_runtimes` は `compute`・Database・`orchestrator_config` がないと `TypeError` です。
+- **VRAM の警告の Sink**（Decision 0042 の 6）: `RecentVramWarnings` が最新 50 件（`kept_vram_warnings`）をプロセス内に持ち、下の `GET` に出します。Log は Scheduler 自身が出します。DB・Audit・Event Bus には書きません（System Health（PAW-066）ができたらその Event に差し替えます）。
+- **HTTP の経路** `/api/v1/admin/compute/full-gpu`（3 つとも `admin.compute.full_gpu`: Owner / Admin、委任不可、Audit 必須。Step-up なし）:
+  - `GET`: 状態（`off` / `starting` / `on` / `resuming`）、`start_pending`、`held_tasks`、`preempted`、`on_seconds`、`last_failure`、`needs_human`、`gpu`（Scheduler の `mode`、`probe_ok`、VRAM の Byte 数、`vram_waiting`、`exclusive_waiting_for_vram`）、`vram_warnings`、`vram_warnings_total`。Task の ID・PID・Model の名前は出しません。
+  - `POST`（Body は任意: `preempt`、`drain_seconds`、`vram_bytes`）: 開始を Background で始めて `202`。済んだかは `GET` の `state`（`on`）か `last_failure` で見ます。開始の途中・`on` の間は `409`（`full_gpu_mode_state`）。
+  - `DELETE`: `on` なら終える（Model が戻り、Main が戻ってから Hold した Task が再開）。開始の途中なら開始を取りやめます（Scheduler は通常へ戻り、Hold した Task は再開）。どちらでもなければ `409`。
+  - Scheduler か Database がない構成は `503`（`compute_not_configured`）。開始と終了は `FullGpuMode` 自身も同じ Capability を判定するので、Audit の行は 1 回の操作で 2 つです。`GET` も読むたびに Audit に残ります。
+- **終了時**: `serve` を止め、開始の途中なら取りやめます。`on` のままなら Full GPU Mode はプロセスとともに終わります（Decision 0055 の 7）。
+- UI（Design Canvas に従う）は別の Issue です。
+
 ### 確認用の Command（読み取りだけ）
 
 ```bash
@@ -4061,7 +4078,7 @@ python -m paw_backend.cli compute-status --headroom-min-mib 8192 --headroom-frac
 
 - 状態はプロセス内にあり（Decision 0037 の 1）、Scheduler を使う Worker を別プロセスで複数動かすと同じ GPU を二重に数えます。V1 では 1 プロセスに集めます。
 - 数値はすべて実測に基づかない暫定値です。Model と Runtime が決まったら Benchmark で見直します。Model の Footprint は Admin が与え、Scheduler は測りません。
-- 実際の Runtime（vLLM / SGLang など）の KV 使用率の取得、Runtime の Adapter、Application への組み込み、Full GPU Mode の HTTP の経路と UI（Decision 0055 の 8）、System Health の表示（PAW-066）は含みません。
+- 実際の Runtime（vLLM / SGLang など）の KV 使用率の取得、Runtime の Adapter、`ComputeSetup` を設定から組み立てること、Full GPU Mode の UI、Memory Worker と Embedder の Scheduler への配線、System Health の表示（PAW-066）は含みません（Application への組み込みと HTTP の経路は Issue #165）。
 - Background の停止は協調的（`revoked`）で、仕事がそれを無視すると VRAM は戻りません。
 - Cloud へ回した Node の Placement は、Issue #133 で Orchestrator の記録（Node の Attempt の行）と `audit_events` に残るようになりました。Decision 0037 の 14 は「この記録ができるまで **`CloudPolicy` を注入しない**」と決めており、その記録の方式は Decision 0048（Approved）で決めました。本番の組み立て（Codex / Claude の Cloud Runtime、Task の Permission・Quota を判断する `CloudPolicy` の実装、それらを Orchestrator に渡す Wiring）ができるまで、`CloudPolicy` は注入しません。
 - `NvidiaSmiProbe` は `nvidia-smi` を PATH から探さず、絶対 Path（既定 `/usr/bin/nvidia-smi`、`executable=` で変更）で実行します。
@@ -4071,7 +4088,7 @@ python -m paw_backend.cli compute-status --headroom-min-mib 8192 --headroom-frac
 
 ### Test
 
-`apps/backend/tests/test_compute_*.py` と `compute_support.py`（Fake の Probe と Fake の `ModelControl`。Fake の Model を GPU に置くと Fake の Probe の使用量が増え、Unload すると減ります）。DB を使うのは `test_compute_full_gpu_holds.py`（`PAW_TEST_DATABASE_URL` がないと Skip）だけです。`test_compute_probe.py`（2 つの Command の固定、GPU を変える Option がないこと、Parse）、`test_compute_accounting.py`（勘定と KV の純粋関数、ランダムな Property Test）、`test_compute_config.py`（設定の検査と `CommandModelControl`。Runner は記録するだけで何も実行しません）、`test_compute_scheduler.py`（Admission・Class・待ち行列・Probe の鮮度・Hybrid）、`test_compute_relief.py`（縮退の各段・Drain・復帰・常駐）、`test_compute_exclusive.py`、`test_compute_free_vram.py`（Decision 0042: 空き VRAM による延期、二重に数えないこと、追い越し、警告と頻度、Exclusive の待ち）、`test_compute_runtimes.py`（`HybridRuntime`・`ScheduledMemoryWorker`・`PlacedEmbedder`）、`test_compute_cli.py`、`test_compute_full_gpu.py`（Full GPU Mode: 認可と Audit、Hold と Drain、Preempt、Unload と確認、終了後の Reload と再開。Task の保存は Fake）、`test_compute_full_gpu_holds.py`（実 PostgreSQL の `PostgresTaskHolds`: Hold、Hold した Task の見分け、再開と Queue、End to End）。時間は注入した Clock で動かします。
+`apps/backend/tests/test_compute_*.py` と `compute_support.py`（Fake の Probe と Fake の `ModelControl`。Fake の Model を GPU に置くと Fake の Probe の使用量が増え、Unload すると減ります）。DB を使うのは `test_compute_full_gpu_holds.py` と `test_compute_app_holds.py`（`PAW_TEST_DATABASE_URL` がないと Skip）だけです。`test_compute_probe.py`（2 つの Command の固定、GPU を変える Option がないこと、Parse）、`test_compute_accounting.py`（勘定と KV の純粋関数、ランダムな Property Test）、`test_compute_config.py`（設定の検査と `CommandModelControl`。Runner は記録するだけで何も実行しません）、`test_compute_scheduler.py`（Admission・Class・待ち行列・Probe の鮮度・Hybrid）、`test_compute_relief.py`（縮退の各段・Drain・復帰・常駐）、`test_compute_exclusive.py`、`test_compute_free_vram.py`（Decision 0042: 空き VRAM による延期、二重に数えないこと、追い越し、警告と頻度、Exclusive の待ち）、`test_compute_runtimes.py`（`HybridRuntime`・`ScheduledMemoryWorker`・`PlacedEmbedder`）、`test_compute_cli.py`、`test_compute_full_gpu.py`（Full GPU Mode: 認可と Audit、Hold と Drain、Preempt、Unload と確認、終了後の Reload と再開。Task の保存は Fake）、`test_compute_full_gpu_holds.py`（実 PostgreSQL の `PostgresTaskHolds`: Hold、Hold した Task の見分け、再開と Queue、End to End）。`test_compute_app.py`（Issue #165: Lifespan での起動と停止、Database がない構成、`local_runtimes` の配線、警告の Sink、HTTP の経路の認可・非同期の開始・取りやめ・失敗・Body の検査）、`test_compute_app_holds.py`（実 PostgreSQL: HTTP で始めて Task が Hold され、終えて再開する）。時間は注入した Clock で動かします。
 実 GPU を読む Test は `RealProbeTest` の 1 つだけで、`PAW_TEST_REAL_GPU_PROBE=1` のときだけ動き（CI では Skip）、2 つの読み取りの Query だけを実行します。
 
 ## Repository Registration / Per-user Checkout

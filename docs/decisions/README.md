@@ -57,6 +57,7 @@
 | [0057](0057-connection-and-node-charge-lease-fencing.md) | Shared Connection の呼び出し（`ConnectionService.execute`）を Queue の Lease で Fencing し（Fail closed。Admission の前）、`NodeBudgetHandle.charge` と GPU 時間の遅い計上は Lease で Fencing しない（Decision 0046 の 6 への追補。Issue #153） | Approved |
 | [0053](0053-memory-content-length-limit.md) | Memory の本文（`memory_versions.content`）の DB の長さの上限（20,000 文字の CHECK、Migration 0147）・上限を超える既存の行があれば Migration を止めて何も変えない・Projection の切り詰め（Decision 0038 の 5・10）は防御として残す（Issue #147） | Approved |
 | [0055](0055-kaggle-full-gpu-mode.md) | Kaggle / Full GPU Mode の方針（始める・終えるのは Owner / Admin だけ: Capability `admin.compute.full_gpu`、走っている Task は `waiting`（Resource）にして Drain、Queue 中の Task は GPU を求めた時点で Hold、Preempt は明示したときだけ、Main LLM が戻ってから再開、再起動で解除、HTTP の API は後の Issue。PAW-037、Issue #33。Decision 0037 の 7・13 を補う） | Approved |
+| [0058](0058-compute-scheduler-application-wiring.md) | Compute Scheduler を Application に組み込む方針（`create_app(compute=...)` の注入だけで有効にする、VRAM の警告の Sink は最新の警告をプロセス内に持って `GET` に出す、Full GPU Mode の HTTP の経路: `POST` は Background で始めて `202`・開始の途中の `DELETE` は取りやめ・3 つとも `admin.compute.full_gpu`・応答の形・Scheduler がなければ 503、Local の Runtime を `HybridRuntime` で包む、終了時。Decision 0042 の 6・0055 の 8 の後続、Issue #165） | Proposed |
 
 運用は [AGENTS.md](../../AGENTS.md) の「仕様変更」に従います。
 
