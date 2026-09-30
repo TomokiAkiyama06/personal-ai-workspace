@@ -208,6 +208,22 @@ class DraftAndChangesTest(InputError):
             lambda: MemoryDraft(MemoryScope.USER, "Rule", "T", "C"),
         )
 
+    def test_the_content_limit_is_the_one_of_the_schema(self):
+        # Revision 0147 (issue #147) repeats this limit as a CHECK constraint,
+        # so an overlong text is refused here before it reaches the database.
+        MemoryDraft(MemoryScope.USER, "rule", "T", "c" * 20_000)
+        MemoryChanges(content="c" * 20_000)
+        self.assertInvalid(
+            "content",
+            InputProblem.TOO_LONG,
+            lambda: MemoryDraft(MemoryScope.USER, "rule", "T", "c" * 20_001),
+        )
+        self.assertInvalid(
+            "content",
+            InputProblem.TOO_LONG,
+            lambda: MemoryChanges(content="c" * 20_001),
+        )
+
     def test_changes_need_at_least_one_field(self):
         self.assertInvalid("changes", InputProblem.REQUIRED, lambda: MemoryChanges())
         self.assertInvalid(

@@ -56,6 +56,11 @@ from paw_backend.tools.credentials import (
     redact_value,
 )
 from paw_backend.tools.decisions import BrokerDecision, BrokerReason, Verdict
+from paw_backend.tools.lease import (
+    FailClosedLeaseVerifier,
+    LeaseStatus,
+    LeaseVerifier,
+)
 from paw_backend.tools.policy import DEFAULT_TOOL_POLICY, ToolPolicy
 from paw_backend.tools.registry import (
     ArgumentKind,
@@ -123,11 +128,14 @@ __all__ = [
     "Environment",
     "ExecutionStatus",
     "FailClosedBudgetProvider",
+    "FailClosedLeaseVerifier",
     "FailClosedRegistrations",
     "FailClosedStepUp",
     "FailClosedTaskActivity",
     "FailClosedUseGate",
     "InMemoryApprovalStore",
+    "LeaseStatus",
+    "LeaseVerifier",
     "LexicalPathResolver",
     "NewApproval",
     "OpenLimits",

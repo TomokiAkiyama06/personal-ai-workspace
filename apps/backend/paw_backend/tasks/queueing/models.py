@@ -217,6 +217,8 @@ class FailureSignatureRow(Base):
 
     __table_args__ = (
         Index(None, "task_id", "seq"),
+        # The loops of the last hour (System Health, revision ``0066``).
+        Index("ix_loop_failure_signatures_created_at", "created_at"),
         CheckConstraint("attempt >= 1", name="attempt_positive"),
         CheckConstraint(
             f"approach >= 0 AND approach <= {MAX_APPROACH}", name="approach_in_range"

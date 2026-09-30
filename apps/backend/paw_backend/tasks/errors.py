@@ -127,6 +127,17 @@ class StaleAttemptError(StaleRunError):
     message = "The task has moved on to a newer attempt"
 
 
+class TaskStateChangedError(StaleRunError):
+    """A ``StaleRunError`` for a run that is still current, but whose task has
+    left the state the caller works in (``TaskService.update_attempt(...,
+    in_state=...)``): a Cancel, Pause or Wait does not replace the run, and a
+    check that was still running must not record its result into the task
+    that left it (Codex P2 on PR #130). Nothing is written."""
+
+    code = "task_state_changed"
+    message = "The task is no longer in the state the caller works in"
+
+
 class WorkingSetError(TaskError):
     """A change of the Working Set, or a transition it guards, is refused.
 
@@ -188,6 +199,32 @@ class RepositoryWriteInFlightError(WorkingSetError):
 
     code = "repository_write_in_flight"
     message = "A write on the repository may still be running"
+
+
+class RepositoryWriteNotFoundError(WorkingSetError):
+    """A manual release names a reservation the task does not have (issue #129)."""
+
+    code = "repository_write_not_found"
+    message = "The task has no such repository write"
+
+
+class RepositoryWriteNotHeldError(WorkingSetError):
+    """A manual release names a reservation that no longer holds anything: its
+    executor released it, it was released by hand before, or it expired
+    (issue #129). Nothing is written."""
+
+    code = "repository_write_not_held"
+    message = "The repository write is no longer reserved"
+
+
+class RepositoryWriteHolderAliveError(WorkingSetError):
+    """A manual release while a worker still holds a valid lease on the task's
+    queue entry (issue #129, Decision 0049): the process that was
+    admitted the write may be alive, so its reservation is not given up by
+    hand. Asked again once the lease ended."""
+
+    code = "repository_write_holder_alive"
+    message = "A worker of the task is still alive"
 
 
 class NoTargetRepositoryError(WorkingSetError):

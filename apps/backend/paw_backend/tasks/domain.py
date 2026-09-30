@@ -62,6 +62,11 @@ class TaskCommand(StrEnum):
     # of the task's Working Set (issue #85, Decision 0030) with it. The state does
     # not change; every state rejects it as a command of ``execute``.
     CHANGE_WORKING_SET = "change_working_set"
+    # Not a transition either: ``TaskService.release_stale_repository_write``
+    # records that a human released, by hand, the repository write reservation of
+    # a process that crashed (issue #129, Decision 0049). The state does
+    # not change; every state rejects it as a command of ``execute``.
+    RELEASE_REPOSITORY_WRITE = "release_repository_write"
 
     # Lifecycle events reported by the orchestrator, a worker or a policy.
     START = "start"

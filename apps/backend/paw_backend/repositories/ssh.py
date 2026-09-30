@@ -79,6 +79,7 @@ from paw_backend.repositories.errors import GitCommandError, GitFailure
 from paw_backend.repositories.git import (
     SAFE_PATH,
     GitResult,
+    command_name,
     git_config_arguments,
     run_subprocess,
     validate_allowed_protocols,
@@ -102,6 +103,15 @@ PROTOCOL_TAG = "paw-git-run/v1"
 #: or is locked); every other code (0-254) is the remote command's own exit
 #: status and must never be treated as a transport failure.
 SSH_TRANSPORT_FAILURE_CODE = 255
+
+#: The SSH wrapper's refusals (``deploy/ssh-git-wrapper``, Decision 0063, which
+#: supersedes the exit-status contract of Decision 0029 §5 / Decision 0051 §5):
+#: a call refused because a submodule of the worktree is populated (a worktree a
+#: human must clean up: ``dirty``) exits 125; every other refusal exits 126 (the
+#: call, the wrapper or the server is wrong: ``git_failed``). git itself uses
+#: neither (0/1 answers, 128/129 its own failures).
+WRAPPER_POPULATED_SUBMODULE_CODE = 125
+WRAPPER_REJECTED_CODE = 126
 
 _SSH_EXECUTABLE_NAME = "ssh"
 
@@ -349,7 +359,7 @@ class SshGitRunner:
         timeout_s: float,
         ceiling: str | None = None,
     ) -> GitResult:
-        name = args[0] if args else "git"
+        name = command_name(args)
         try:
             identity = await self._keys.key_path_of(account)
         except OSError:

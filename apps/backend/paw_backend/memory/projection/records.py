@@ -120,13 +120,18 @@ class ProjectionStatus:
 
     ``last_action`` is ``memory.projection.completed`` / ``...failed`` (``None``
     when no run was ever recorded), ``last_reason`` its ``reason`` (counts, or
-    ``<step>:<code>``).
+    ``<step>:<code>``). ``..._at`` are the runs' own (host) times, for display;
+    how long ago the last success was is measured on the database clock only:
+    ``last_completed_recorded_at`` (its ``recorded_at``) against ``checked_at``
+    (the database's ``now()`` when the status was read).
     """
 
     last_action: str | None
     last_run_at: datetime | None
     last_reason: str | None
     last_completed_at: datetime | None
+    last_completed_recorded_at: datetime | None
+    checked_at: datetime
 
 
 __all__ = [

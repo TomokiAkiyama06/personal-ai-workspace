@@ -154,6 +154,12 @@ class ReapTest(PostgresConnectionTestCase):
             ("connection_usage", usage, self.project_of(self.task)),
         )
         self.assertEqual(await reaper.run_cycle(), 0)
+        # What System Health reads (PAW-066): two cycles, one row settled.
+        stats = reaper.stats
+        self.assertEqual(
+            (stats.cycles, stats.last_reaped, stats.total_reaped), (2, 0, 1)
+        )
+        self.assertIsNotNone(stats.last_success_at)
 
     async def test_a_failed_audit_does_not_undo_the_settlement(self):
         usage = self.seed_usage(self.user, self.task, status="in_flight", started_at=T0)
@@ -183,6 +189,47 @@ class ReapTest(PostgresConnectionTestCase):
         reaper.stop()
         await asyncio.wait_for(loop, 10)
         self.assertEqual(self.row(usage)["status"], "failed")
+
+
+class ScriptedStore(ConnectionStore):
+    """``reap_abandoned`` answers with the next prepared outcome."""
+
+    def __init__(self, *outcomes) -> None:
+        super().__init__(Database(make_settings()))
+        self.outcomes = list(outcomes)
+
+    async def reap_abandoned(self, *, limit=MAX_REAPED_PER_CYCLE):
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+
+class StatsTest(unittest.IsolatedAsyncioTestCase):
+    """What the cycles did, for System Health (PAW-066, issue #52's note)."""
+
+    async def test_successes_and_failures_are_counted(self):
+        store = ScriptedStore((), OSError("password=hunter2"), OSError("x"), ())
+        reaper = AbandonedCallReaper(store, FailingSink(), clock=ManualClock())
+        self.assertEqual(reaper.stats.cycles, 0)
+        self.assertIsNone(reaper.stats.last_cycle_at)
+        await reaper.run_cycle()
+        for _ in range(2):
+            with self.assertRaises(OSError):
+                await reaper.run_cycle()
+        stats = reaper.stats
+        self.assertEqual(
+            (stats.cycles, stats.consecutive_failures, stats.total_failures),
+            (3, 2, 2),
+        )
+        # The type, as the logs name it; never the message.
+        self.assertNotIn("hunter2", repr(stats))
+        self.assertIsNotNone(stats.last_error)
+        self.assertLessEqual(stats.last_success_at, stats.last_cycle_at)
+        await reaper.run_cycle()
+        stats = reaper.stats
+        self.assertEqual((stats.consecutive_failures, stats.total_failures), (0, 2))
+        self.assertEqual(stats.last_success_at, stats.last_cycle_at)
 
 
 class ArgumentTest(unittest.TestCase):

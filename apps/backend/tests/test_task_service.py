@@ -805,9 +805,10 @@ class TransitionTest(PostgresTaskTestCase):
                         self.assertEqual(after.state, target)
                         self.assertEqual(after.version, before.version + 1)
                         self.assertEqual(after.last_event, event)
-        # 14 commands: the 13 of PAW-032 and ``change_working_set`` (issue #85),
-        # which, like ``create``, no state accepts as a command.
-        self.assertEqual(checked, 8 * 14)
+        # 15 commands: the 13 of PAW-032, ``change_working_set`` (issue #85) and
+        # ``release_repository_write`` (issue #129), which, like ``create``, no
+        # state accepts as a command.
+        self.assertEqual(checked, 8 * 15)
 
     async def test_completed_task_rejects_every_command(self):
         task_id = await self.task_in_state(S.COMPLETED)

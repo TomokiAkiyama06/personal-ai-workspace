@@ -1,10 +1,10 @@
 # Web App の配信・Session / CSRF・Frontend の Tooling の方針
 
-- Status: Proposed
+- Status: Approved
 - Date: 2026-09-28
 - Scope: PAW-060（Web UI Application Shell / Authentication UI、Issue [#46](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/46)）の `apps/web` と、それを配信する `apps/backend/paw_backend/web.py`。後続の Web の Issue（PAW-061 以降）が同じ前提を使う
 - Supersedes: なし。[Decision 0003](0003-backend-cli-web-implementation-stack.md) の表のうち「実装Issueが選ぶ既定値」（pnpm、Web の Lint / Format Tool）を、0003 が認める範囲で理由を付けて選び直す（0003 の承認範囲の React + TypeScript + Vite は変えない）
-- Approval: 未承認（Human の回答待ち）
+- Approval: 2026-09-29、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで直接回答して承認（判断が必要な点の全点。末尾の「承認時の決定」）
 
 ## 背景
 
@@ -144,3 +144,7 @@ Web App をどこからどう配信するか（同じ Origin か、別の Origin
 
 承認されたら Status を Approved にし、判断点を変える回答があれば、その点だけを実装と文書に反映する。
 代案を採る場合の影響: 1 の代案 A は `PAW_WEB_DIST_DIR` を使わない運用手順を書くだけ、6 の代案（pnpm）は Lockfile と CI の導入手順の置き換え、8 の代案（ローカルでも必須）は `run_ci.py` の 1 行、10・12 は画面の変更だけで、いずれも Backend の API と Schema は変わらない。
+
+## 承認時の決定（2026-09-29）
+
+Human は、作業 Session で判断が必要な点について推奨つきの説明を受け、直接回答して承認した（判断が必要な点の全点）。画面は、2026-10-01 に Human が確認し、問題ないと回答した（#143 と、その上に積んだ UI の PR）。

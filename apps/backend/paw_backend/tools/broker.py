@@ -39,6 +39,16 @@ narrow what the previous one allowed:
    names, resolved from its registration, with the permission of the change
    (``tasks.working_set.required_permission``);
 5. the task budget (:class:`~.budget.BudgetProvider`); unknown means denied;
+5a. **the worker's queue lease, for every call** (:class:`~.lease.LeaseVerifier`;
+   issue #126, Decision 0046): the lease in ``TaskContext.lease`` (the fencing
+   token: queue entry, worker id, claim generation) must be a valid lease on an
+   entry of the task now, judged by the database clock. A lease that was lost,
+   expired or taken over is ``lease_lost``; an answer that cannot be had (no
+   verifier, an error, a timeout) is ``lease_unavailable``. It is checked after
+   every other check that can refuse the call on its own (the closer to the
+   hand-over, the smaller the window), and before a repository use is admitted
+   (6: nothing is reserved or marked changed for it) and an approval is opened or
+   used: a stale worker neither runs a call nor asks a human for one;
 6. a call that touches a repository is admitted on the roles the Working Set
    holds **now** (:class:`~.working_set.RepositoryUseGate`, i.e.
    ``TaskService.admit_repository_use``): the roles of step 4 are those of the
@@ -147,6 +157,11 @@ from paw_backend.tools.capabilities import (
 )
 from paw_backend.tools.decisions import BrokerDecision, BrokerReason, Verdict
 from paw_backend.tools.interfaces import require_async_method
+from paw_backend.tools.lease import (
+    FailClosedLeaseVerifier,
+    LeaseStatus,
+    LeaseVerifier,
+)
 from paw_backend.tools.policy import DEFAULT_TOOL_POLICY, ToolPolicy
 from paw_backend.tools.registry import ToolRegistry, ToolSpec
 from paw_backend.tools.scope import (
@@ -229,6 +244,7 @@ class ToolBroker:
         policy: ToolPolicy = DEFAULT_TOOL_POLICY,
         budget: BudgetProvider | None = None,
         task_activity: TaskActivityProvider | None = None,
+        lease: LeaseVerifier | None = None,
         path_resolver: PathResolver | None = None,
         registrations: WorkingSetRegistrations | None = None,
         use_gate: RepositoryUseGate | None = None,
@@ -249,11 +265,15 @@ class ToolBroker:
         require_async_method(audit, "record", 1)
         self._budget: BudgetProvider = budget or FailClosedBudgetProvider()
         require_async_method(self._budget, "check", 2)
-        require_async_method(self._budget, "charge", 2)
+        require_async_method(self._budget, "charge", 3)
         self._task_activity: TaskActivityProvider = (
             FailClosedTaskActivity() if task_activity is None else task_activity
         )
         require_async_method(self._task_activity, "check", 2)
+        self._lease: LeaseVerifier = (
+            FailClosedLeaseVerifier() if lease is None else lease
+        )
+        require_async_method(self._lease, "check", 2)
         self._resolver: PathResolver = path_resolver or RealpathResolver()
         require_async_method(self._resolver, "resolve", 1)
         # Both fail closed when not wired: no Working Set change is decided, and
@@ -359,7 +379,9 @@ class ToolBroker:
         if spec is not None and spec.requires_budget:
             try:
                 async with asyncio.timeout(self._timeout_seconds):
-                    await self._budget.charge(context.task_id, invocation.tool)
+                    await self._budget.charge(
+                        context.task_id, context.run, invocation.tool
+                    )
             except Exception as error:
                 logger.error("Budget charge failed (%s)", type(error).__name__)
 
@@ -489,6 +511,17 @@ class ToolBroker:
                     level=level,
                     call_hash=call_hash,
                 )
+
+        lease_reason = await self._lease_denial(context)
+        if lease_reason is not None:
+            return self._refuse(
+                lease_reason,
+                correlation_id,
+                tool=name,
+                level=level,
+                call_hash=call_hash,
+                approval_id=approval_id,
+            )
 
         if level in (ApprovalLevel.AUTO, ApprovalLevel.SCOPED_AUTO):
             if spec.working_set_operation is not None:
@@ -900,6 +933,20 @@ class ToolBroker:
         if status is BudgetStatus.UNKNOWN:
             return BrokerReason.BUDGET_UNKNOWN
         return BrokerReason.BUDGET_UNAVAILABLE  # not a status: an adapter bug
+
+    async def _lease_denial(self, context: TaskContext) -> BrokerReason | None:
+        """Why the worker may not act for the task now (``None``: its lease holds)."""
+        try:
+            async with asyncio.timeout(self._timeout_seconds):
+                status = await self._lease.check(context.task_id, context.lease)
+        except Exception as error:
+            logger.error("Lease check failed (%s)", type(error).__name__)
+            return BrokerReason.LEASE_UNAVAILABLE
+        if status is LeaseStatus.HELD:
+            return None
+        if status is LeaseStatus.LOST:
+            return BrokerReason.LEASE_LOST
+        return BrokerReason.LEASE_UNAVAILABLE  # unknown, or not an answer
 
     async def _task_denial(self, context: TaskContext) -> BrokerReason | None:
         """Why the task cannot ask for or use an approval now (``None``: it can)."""

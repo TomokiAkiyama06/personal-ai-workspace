@@ -175,15 +175,55 @@ class CommandTest(unittest.TestCase):
         self.assertEqual(code, cli.EXIT_OK, err)
         self.assertIn("OK", err)
 
+    def age_projection_rows(self, minutes: int) -> None:
+        """Move every projection row's database time ``minutes`` into the past.
+
+        The trail is append-only and the database sets ``recorded_at``
+        (revision 0025); the test database's owner lifts both guards for this
+        one statement, in the same transaction.
+        """
+        guards = (
+            "tr_audit_events_reject_update_delete",
+            "tr_audit_events_force_recorded_at",
+        )
+        with self.engine.begin() as connection:
+            for guard in guards:
+                connection.execute(
+                    text(f"ALTER TABLE audit_events DISABLE TRIGGER {guard}")
+                )
+            connection.execute(
+                text(
+                    "UPDATE audit_events SET recorded_at = recorded_at"
+                    " - make_interval(mins => :minutes)"
+                    " WHERE resource_kind = 'memory_projection_run'"
+                ),
+                {"minutes": minutes},
+            )
+            for guard in guards:
+                connection.execute(
+                    text(f"ALTER TABLE audit_events ENABLE ALWAYS TRIGGER {guard}")
+                )
+
     def test_the_check_fails_when_no_run_completed_recently(self):
+        code, _, err = self.command(["memory-projection-run"])
+        self.assertEqual(code, cli.EXIT_OK, err)
+        # By the database clock the run was 31 minutes ago, whatever the host's
+        # clock says (it still reads the run's own time).
+        self.age_projection_rows(31)
+        code, _, err = self.command(
+            ["memory-projection-check", "--max-age-minutes", "30"]
+        )
+        self.assertEqual(code, cli.EXIT_PROJECTION_FAILED)
+        self.assertIn("no memory projection run completed", err)
+
+    def test_a_host_clock_ahead_does_not_make_a_recent_run_stale(self):
         code, _, err = self.command(["memory-projection-run"])
         self.assertEqual(code, cli.EXIT_OK, err)
         code, _, err = self.command(
             ["memory-projection-check", "--max-age-minutes", "30"],
             at=self.now + timedelta(minutes=31),
         )
-        self.assertEqual(code, cli.EXIT_PROJECTION_FAILED)
-        self.assertIn("no memory projection run completed", err)
+        self.assertEqual(code, cli.EXIT_OK, err)
 
     def test_a_refused_directory_fails_is_audited_and_the_check_fails(self):
         checkout = self.tmp.base / "checkout"
