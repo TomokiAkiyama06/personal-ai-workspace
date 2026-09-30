@@ -402,10 +402,11 @@ class FullGpuMode:
                 self._held.add(task_id)
 
     def _main_resident(self) -> bool:
-        # Also seen on the GPU, not only so in the scheduler's state: a process
-        # that starts after one that ended with the main LLM off the GPU has it
-        # ``gpu`` from the configuration (``initial``) although its runtime is
-        # not running (Codex review #168).
+        # Also seen on the GPU (or placed there by the scheduler), not only so
+        # in the scheduler's state: a process that starts after one that ended
+        # with the main LLM off the GPU has it ``gpu`` from the configuration
+        # (``initial``) until a reading shows otherwise (Codex review #168).
+        # ``None``: no model control, the state is all there is.
         return all(
             deployment.state is DeploymentState.GPU
             and not deployment.draining

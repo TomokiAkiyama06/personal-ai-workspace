@@ -274,12 +274,12 @@ class DeploymentStatus:
     sequences: int
     max_sequences: int
     observed_kv_fraction: float | None
-    # What the GPU shows, beside ``state`` (what the scheduler did or was
-    # configured with, ``initial``; Codex review #168): ``True`` the latest
-    # reading saw one of its processes on the GPU; ``False`` it did not, or
-    # there has been no reading yet; ``None`` not known (no model control to
-    # ask, its processes could not be asked, it was just placed and not yet
-    # asked, or the latest reading is stale).
+    # Positive evidence that it is on the GPU, beside ``state`` (what the
+    # scheduler did or was configured with, ``initial``; Codex review #168):
+    # ``True`` the last reading saw one of its processes on the GPU, or the
+    # scheduler placed it there since; ``False`` otherwise (no reading yet,
+    # its processes could not be asked, none on the GPU); ``None`` there is no
+    # model control to ask (the state is all there is).
     observed_on_gpu: bool | None = None
 
 
@@ -326,6 +326,8 @@ class _Deployment:
     busy: bool = False  # a model action is running
     displaced: bool = False  # moved off the GPU by a relief step
     retry_at: float | None = None
+    # See ``DeploymentStatus.observed_on_gpu``.
+    seen_on_gpu: bool = False
 
     @property
     def counts_on_gpu(self) -> bool:
@@ -668,15 +670,6 @@ class ComputeScheduler:
             ceilings=self._config.class_ceilings,
         )
 
-    def _observed_on_gpu(self, entry: _Deployment, fresh: bool) -> bool | None:
-        if self._control is None:
-            return None
-        if self._sampled_at is None:
-            return False
-        if not fresh or entry.pids is None:
-            return None
-        return any(process.pid in entry.pids for process in self._processes)
-
     def status(self) -> ComputeStatus:
         fresh = self._fresh()
         leases = dict.fromkeys(ResourceClass, 0)
@@ -712,7 +705,9 @@ class ComputeScheduler:
                     sequences=len(entry.leases),
                     max_sequences=entry.spec.max_sequences,
                     observed_kv_fraction=entry.observed,
-                    observed_on_gpu=self._observed_on_gpu(entry, fresh),
+                    observed_on_gpu=(
+                        None if self._control is None else entry.seen_on_gpu
+                    ),
                 )
                 for entry in self._deployments.values()
             ),
@@ -771,8 +766,13 @@ class ComputeScheduler:
             if not entry.counts_on_gpu:
                 entry.pids = frozenset()
                 entry.observed = None
+                entry.seen_on_gpu = False
             elif entry in inspected:
                 entry.pids, entry.observed = inspected[entry]
+                entry.seen_on_gpu = entry.pids is not None and any(
+                    process.pid in entry.pids for process in self._processes
+                )
+                self._reconcile(entry)
         if carried:
             # Leases released before this reading, with memory no earlier
             # reading showed: rebased on this one (with the models' processes
@@ -780,6 +780,26 @@ class ComputeScheduler:
             view = self._vram()
             self._extra_baseline = view.external + min(carried, view.extra_use)
             self._pending_release -= carried
+
+    def _reconcile(self, entry: _Deployment) -> None:
+        """A model the scheduler holds on the GPU (as configured, ``initial``,
+        or since it placed it) whose runtime says it has no process is not
+        there: it is ``unloaded``, and ``refresh()`` loads it again when it
+        should be resident (Decision 0055, 7: the process after one that ended
+        with the main LLM off the GPU; Codex review #168). Only when nothing
+        uses it: work admitted to it ends first."""
+        if (
+            entry.state is DeploymentState.GPU
+            and entry.pids == frozenset()
+            and not entry.leases
+            and not entry.draining
+        ):
+            entry.state = DeploymentState.UNLOADED
+            logger.warning(
+                "Deployment %s is not running although it is held on the GPU: "
+                "it counts as unloaded",
+                entry.spec.name,
+            )
 
     async def _inspect(
         self, entry: _Deployment
@@ -1366,6 +1386,7 @@ class ComputeScheduler:
         except BaseException as error:
             entry.state = DeploymentState.FAILED
             entry.pids = None
+            entry.seen_on_gpu = False
             entry.retry_at = self._clock.monotonic() + self._config.failed_retry_seconds
             if not isinstance(error, Exception):
                 raise
@@ -1378,6 +1399,7 @@ class ComputeScheduler:
             ok = False
         else:
             entry.state = state
+            entry.seen_on_gpu = state is DeploymentState.GPU
             entry.retry_at = None
             entry.pids = None if state is DeploymentState.GPU else frozenset()
             entry.observed = None

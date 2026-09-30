@@ -289,11 +289,14 @@ class ComputeAppTestCase(unittest.IsolatedAsyncioTestCase):
     settings_overrides = {}
     stopped = ()
     held_before = ()  # tasks an earlier process held
+    gated = False  # the model actions wait for ``self.fake.gate``
 
     async def asyncSetUp(self):
         self.setup, self.probe, self.fake, self.clock = fake_gpu(
             control=self.control, stopped=self.stopped
         )
+        if self.gated:
+            self.fake.gate = asyncio.Event()
         self.holds = FakeHolds()
         self.holds.held.extend(self.held_before)
         patcher = patch("paw_backend.app.PostgresTaskHolds", lambda *_: self.holds)
@@ -309,6 +312,7 @@ class ComputeAppTestCase(unittest.IsolatedAsyncioTestCase):
         self.app.state.principal_provider = StaticProvider(self.who)
         self.app.state.authorizer = Authorizer(self.audit)
         self.scheduler = self.app.state.compute.scheduler
+        self.before_start()
         self.lifespan = self.app.router.lifespan_context(self.app)
         await self.lifespan.__aenter__()
         self.addAsyncCleanup(self.stop_app)
@@ -317,6 +321,9 @@ class ComputeAppTestCase(unittest.IsolatedAsyncioTestCase):
         )
         self.addAsyncCleanup(self.client.aclose)
         await settle()
+
+    def before_start(self):
+        """What a test changes before the lifespan starts (the first reading)."""
 
     async def stop_app(self):
         if self.lifespan is not None:
@@ -715,23 +722,50 @@ HELD_BEFORE = uuid.uuid4()
 
 
 class StoppedMainAtStartupTest(ComputeAppTestCase):
-    # Codex review #168 (round 2, P1): an earlier process held a task and ended
-    # while the main LLM was off the GPU. The configuration says it starts on
-    # the GPU, but its runtime is not running: the task is not resumed until
-    # the main LLM's processes are seen on the GPU.
+    # Codex review #168 (rounds 2 and 3, P1): an earlier process held a task
+    # and ended while the main LLM was off the GPU. The configuration says it
+    # starts on the GPU, but its runtime is not running: the scheduler loads it
+    # (Decision 0055, 7), and the task is resumed only once it is back.
     stopped = ("main",)
     held_before = (HELD_BEFORE,)
+    gated = True
 
-    async def test_held_tasks_wait_for_the_main_llm_to_be_seen(self):
+    async def test_the_main_llm_is_loaded_and_then_held_tasks_resume(self):
         await self.clock.advance(30)
-        self.assertEqual(self.holds.resumed, [])
+        self.assertIn(("place:local_gpu", "main"), self.fake.actions)
+        self.assertEqual(self.holds.resumed, [])  # the load has not finished
         self.assertIs(self.mode_state(), FullGpuState.RESUMING)
-        # The main LLM's runtime is started (by hand, here).
-        self.fake.start_on_gpu("main")
+        self.fake.gate.set()
         self.assertTrue(
             await self.advance_until(lambda: self.mode_state() is FullGpuState.OFF)
         )
         self.assertEqual(self.holds.resumed, [HELD_BEFORE])
+        self.assertIs(
+            self.scheduler.status().deployment("main").state, DeploymentState.GPU
+        )
+
+
+class UnverifiedMainAtStartupTest(ComputeAppTestCase):
+    # Codex review #168 (round 3, P1): the main LLM's processes cannot be asked
+    # (the command fails): whether it runs is not known, so the task an earlier
+    # process held is not resumed.
+    stopped = ("main",)
+    held_before = (HELD_BEFORE,)
+
+    def before_start(self):
+        processes = self.fake.processes
+
+        async def failing(deployment):
+            if deployment == "main":
+                raise RuntimeError("no answer")
+            return await processes(deployment)
+
+        self.fake.processes = failing
+
+    async def test_held_tasks_are_not_resumed(self):
+        await self.clock.advance(30)
+        self.assertEqual(self.holds.resumed, [])
+        self.assertIs(self.mode_state(), FullGpuState.RESUMING)
 
 
 class ShutdownTimeoutTest(ComputeAppTestCase):

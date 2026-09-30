@@ -4163,7 +4163,7 @@ runtime = HybridRuntime(
   - `DELETE`: `on` なら終える（Model が戻り、Main が戻ってから Hold した Task が再開）。開始の途中なら開始を取りやめます（Scheduler は通常へ戻り、Hold した Task は再開）。どちらでもなければ `409`。
   - Scheduler か Database がない構成は `503`（`compute_not_configured`）。開始と終了は `FullGpuMode` 自身も同じ Capability を判定するので、Audit の行は 1 回の操作で 2 つです。`GET` も読むたびに Audit に残ります。
 - **終了時**: 開始の途中なら取りやめます。Full GPU Mode が `resuming` なら（開始を取りやめた後、`DELETE` や失敗の後、終えた直後）、`serve` の Loop を止める前に、Unload された Model を Load し直して Hold した Task を再開します（Scheduler の `refresh()` と Full GPU Mode の `tick()` を、Full GPU Mode が `off` になるまで繰り返す。`PAW_SHUTDOWN_TIMEOUT_SECONDS` まで。間に合わなければ WARNING を出し、残りは次のプロセスが行います。Codex review #168）。その後で Loop を止めます。`on` のままなら Full GPU Mode はプロセスとともに終わります（Decision 0055 の 7）。
-- **起動時**: 前のプロセスが Hold した Task は、Main の状態が `gpu` であることに加えて、Probe の読み取りで Main の Process が GPU に見えてから再開します（`DeploymentStatus.observed_on_gpu`。設定の `initial=gpu` だけでは再開しません）。
+- **起動時**: 前のプロセスが Hold した Task は、Main の状態が `gpu` であることに加えて、GPU にあるという肯定的な証拠があってから再開します。証拠とは、最後の読み取りで Main の Process が GPU に見えたこと、またはその後にこの Scheduler が Main を GPU に置いたことです（`DeploymentStatus.observed_on_gpu` が `True`）。設定の `initial=gpu` だけでは再開しません。Process を尋ねられないときも再開しません。Scheduler は、状態が `gpu` なのに Runtime が「Process はない」と答えた Model を `unloaded` に改め（WARNING。Lease がある間は改めない）、常駐させる Model は空きがあれば Load し直します（Decision 0055 の 7）。
 - UI（Design Canvas に従う）は別の Issue です。
 
 ### 確認用の Command（読み取りだけ）
