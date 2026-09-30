@@ -8,6 +8,7 @@ Linux user.
 """
 
 import asyncio
+import dataclasses
 import json
 import os
 import shutil
@@ -15,6 +16,7 @@ import subprocess
 import unittest
 import uuid
 from types import SimpleNamespace
+from unittest import mock
 
 from paw_backend.authz import (
     Authorizer,
@@ -31,6 +33,7 @@ from paw_backend.integration import (
     PublishRequest,
     PullRequestNotPublishedError,
 )
+from paw_backend.integration import publish as publish_module
 from paw_backend.integration.publish import (
     MAX_TITLE_CHARS,
     choose_pull_request,
@@ -145,8 +148,14 @@ class FakeGitHub:
         if method == "GET":
             owner, _, branch = fields["head"].partition(":")
             assert owner == OWNER and fields["state"] == "all"
-            found = [p for p in self.pulls if p["head"]["ref"] == branch]
-            found = found[: int(fields["per_page"])]
+            found = [
+                p
+                for p in self.pulls
+                if p["head"]["ref"] == branch
+                and fields.get("base", p["base"]["ref"]) == p["base"]["ref"]
+            ]
+            size, page = int(fields["per_page"]), int(fields.get("page", "1"))
+            found = found[(page - 1) * size : page * size]
             for pull in found:
                 if pull["live"]:
                     pull["head"]["sha"] = self.pull(0, branch)["head"]["sha"]
@@ -460,6 +469,39 @@ class PublisherTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual((info.number, info.state), (6, PullRequestState.OPEN))
         self.assertEqual(self.github.methods(), ["GET"])
+
+    async def test_pull_requests_to_other_bases_do_not_hide_the_one(self):
+        # Codex review of #166: only the first page was read; newer pull
+        # requests of the branch to other bases hid the one to the default one.
+        for number in range(1, 151):
+            self.github.pulls.append(
+                self.github.pull(number, self.branch, state="closed", base="dev")
+            )
+        self.github.pulls.append(self.github.pull(151, self.branch))
+
+        info = await self.publisher().publish(self.request())
+
+        self.assertEqual((info.number, info.state), (151, PullRequestState.OPEN))
+        self.assertEqual(self.github.methods(), ["GET"])
+
+    async def test_every_page_is_read_when_fewer_rows_fit(self):
+        # Long names ask for fewer rows at a time (``pull_request_listing``):
+        # the later pages are read too, up to as many as with usual names.
+        for number in range(1, 5):
+            self.github.pulls.append(
+                self.github.pull(number, self.branch, state="closed")
+            )
+        self.github.pulls.append(self.github.pull(5, self.branch))
+        real = publish_module.pull_request_listing
+
+        def small(*args):
+            return dataclasses.replace(real(*args), per_page=2)
+
+        with mock.patch.object(publish_module, "pull_request_listing", small):
+            info = await self.publisher().publish(self.request())
+
+        self.assertEqual((info.number, info.state), (5, PullRequestState.OPEN))
+        self.assertEqual(self.github.methods(), ["GET"] * 3)
 
     async def test_a_longer_listed_url_is_still_refused(self):
         # The listing cuts what it compares to one character more: a longer

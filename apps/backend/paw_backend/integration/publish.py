@@ -91,8 +91,9 @@ _OBJECT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 # GitHub's own limit on a pull request's title.
 MAX_TITLE_CHARS = 256
 TITLE_PREFIX = "[PAW] "
-# Larger than any pull request list of one branch; a longer answer is refused.
-# Fewer are asked for when their rows might not fit (``pull_request_listing``).
+# Larger than any pull request list of one branch: no more are read. Fewer are
+# asked for a page when their rows might not fit (``pull_request_listing``),
+# and the later pages are read up to this many.
 MAX_LISTED_PULL_REQUESTS = 100
 _MAX_PULL_REQUEST_NUMBER = 2_147_483_647
 # What the listing may print: the gh runner's output cap, less the brackets.
@@ -507,28 +508,45 @@ class GitHubPullRequestPublisher:
         commit: str,
         account: LinuxAccount,
     ) -> PullRequestInfo | None:
+        # Only those against ``base`` (GitHub filters; one against another base
+        # is not the one anyway), page after page while a page is full, up to
+        # as many as one page holds with usual names (Codex review of #166).
         listing = pull_request_listing(github, branch, base)
-        listed = await self._gh_api(
-            [
-                "--method",
-                "GET",
-                f"repos/{github.owner}/{github.repo}/pulls",
-                "-f",
-                f"head={github.owner}:{branch}",
-                "-f",
-                "state=all",
-                "-f",
-                f"per_page={listing.per_page}",
-                "--jq",
-                listing.jq,
-            ],
-            github,
-            account,
-        )
-        if listed is None:
-            raise PullRequestNotPublishedError(PublishProblem.GITHUB_FAILED)
-        if not isinstance(listed, list) or len(listed) > listing.per_page:
-            raise PullRequestNotPublishedError(PublishProblem.INVALID_RESPONSE)
+        listed: list[object] = []
+        page = 1
+        while True:
+            answer = await self._gh_api(
+                [
+                    "--method",
+                    "GET",
+                    f"repos/{github.owner}/{github.repo}/pulls",
+                    "-f",
+                    f"head={github.owner}:{branch}",
+                    "-f",
+                    f"base={base}",
+                    "-f",
+                    "state=all",
+                    "-f",
+                    f"per_page={listing.per_page}",
+                    "-f",
+                    f"page={page}",
+                    "--jq",
+                    listing.jq,
+                ],
+                github,
+                account,
+            )
+            if answer is None:
+                raise PullRequestNotPublishedError(PublishProblem.GITHUB_FAILED)
+            if not isinstance(answer, list) or len(answer) > listing.per_page:
+                raise PullRequestNotPublishedError(PublishProblem.INVALID_RESPONSE)
+            listed.extend(answer)
+            if (
+                len(answer) < listing.per_page
+                or len(listed) >= MAX_LISTED_PULL_REQUESTS
+            ):
+                break
+            page += 1
         found = [
             parse_pull_request(item, github, branch, base, commit) for item in listed
         ]
