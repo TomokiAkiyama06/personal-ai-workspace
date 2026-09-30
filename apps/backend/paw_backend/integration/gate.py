@@ -19,12 +19,20 @@ check passed: the result is ready for the human's merge decision; nothing is
 merged or pushed) or fails it.
 
 Complete is the task service's to allow: Decision 0030 (section 5) requires a
-delivered pull request for every ``target`` repository, and this gate does not
-make one (Decision 0036, 10; issue #132). When Complete is refused for that
-reason the task stays ``evaluating`` with its results recorded
-(``REQUIREMENTS_NOT_MET``). When a write the Tool Broker admitted may still be
-running on a repository, a passing result is not recorded and nothing is
-completed or failed (``NOT_RECORDED``): the gate may run again later.
+delivered pull request for every ``target`` repository. With a ``publisher``
+(issue #132, ``publish.py``; Decision 0036, 10 left it out of PAW-035) the gate
+makes it once every check passed: the checked commit of every repository whose
+Working Set role is ``target`` is pushed to its integration branch on GitHub,
+its pull request is opened (or the existing one found) and recorded on the
+repository's state in the attempt (``update_attempt(pull_request=...)``), and
+only then is the task completed. A pull request that could not be made keeps
+the task ``evaluating`` (``NOT_PUBLISHED``: the gate may run again). When
+Complete is still refused (no publisher, a pull request that is a draft or was
+closed, a ``target`` without an integrated result) the task stays
+``evaluating`` with its results recorded (``REQUIREMENTS_NOT_MET``). When a
+write the Tool Broker admitted may still be running on a repository, a passing
+result is not recorded and nothing is completed or failed (``NOT_RECORDED``):
+the gate may run again later.
 
 The checks themselves are other issues (PAW-011 / PAW-013 the Evaluator, the
 Codex / Claude reviewers): a check is any object with ``async check(request) ->
@@ -47,6 +55,9 @@ Guarantees:
   to it meanwhile) or a worktree that was written to fails the task instead of
   completing an unchecked commit (``CHANGED``). The commit of every repository
   that completes is written to the task log (Merge Ready is that commit).
+* **Only a checked commit is published.** The push names the commit the checks
+  read (and found unchanged after them), never the branch; nothing is pushed
+  before the review passed, and nothing but ``paw/`` branches is pushed.
 * **Every kind must be configured.** A gate without a test, an Evaluator or a
   review check cannot be built (``TypeError``): skipping a kind is not a
   configuration.
@@ -62,6 +73,11 @@ from paw_backend.integration.coordinator import (
     GitWorktreeCoordinator,
     IntegrationTarget,
 )
+from paw_backend.integration.publish import (
+    PublishProblem,
+    PublishRequest,
+    PullRequestNotPublishedError,
+)
 from paw_backend.orchestrator.domain import DagState, NodeRole, NodeState
 from paw_backend.orchestrator.errors import error_class_of
 from paw_backend.orchestrator.orchestrator import TaskAuthority
@@ -73,6 +89,8 @@ from paw_backend.tasks import (
     EvaluationResult,
     IllegalTransitionError,
     LogLevel,
+    PullRequestInfo,
+    RepoRole,
     RepositoryNotInAttemptError,
     RepositoryWriteInFlightError,
     ReviewState,
@@ -152,6 +170,21 @@ class GateOutcome(StrEnum):
     # completed or failed; the task stays ``evaluating`` and the gate may run
     # again once the write ended.
     NOT_RECORDED = "not_recorded"
+    # Every check passed, but the pull request of a ``target`` could not be made
+    # (issue #132: not authorized, no GitHub remote, the push or GitHub failed).
+    # Nothing is completed or failed; the task stays ``evaluating`` and the gate
+    # may run again.
+    NOT_PUBLISHED = "not_published"
+
+
+@dataclass(frozen=True, slots=True)
+class Publication:
+    """What happened to the pull request of one ``target`` (issue #132):
+    ``pull_request`` when it exists and was recorded, else ``problem``."""
+
+    repo_id: uuid.UUID
+    pull_request: PullRequestInfo | None = None
+    problem: PublishProblem | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,6 +194,8 @@ class GateReport:
     # ``(kind, passed, summary)`` of every check that ran, in order.
     verdicts: tuple[tuple[CheckKind, bool, str], ...] = ()
     targets: tuple[IntegrationTarget, ...] = ()
+    # The pull requests of the ``target`` repositories (with a publisher).
+    publications: tuple[Publication, ...] = ()
 
 
 class IntegrationGate:
@@ -172,6 +207,7 @@ class IntegrationGate:
         authority: TaskAuthority,
         worktrees: GitWorktreeCoordinator,
         checks: Mapping[CheckKind, Sequence[object]],
+        publisher: object | None = None,
     ) -> None:
         if not isinstance(tasks, TaskService):
             raise TypeError("tasks must be a TaskService")
@@ -191,11 +227,14 @@ class IntegrationGate:
             ordered[kind] = configured
         if set(checks) - set(CHECK_ORDER):
             raise TypeError("checks must map each CheckKind to its checks")
+        if publisher is not None:
+            require_async_method(publisher, "publish", 1)
         self._tasks = tasks
         self._store = store
         self._authority = authority
         self._worktrees = worktrees
         self._checks = ordered
+        self._publisher = publisher
 
     async def evaluate(self, task_id: uuid.UUID) -> GateReport:
         """Run every check on the task's integrated result and complete or fail
@@ -267,7 +306,113 @@ class IntegrationGate:
                 )
         except StaleRunError:
             return GateReport(GateOutcome.SUPERSEDED, task_id, tuple(verdicts), targets)
-        return await self._end(task, run, GateOutcome.COMPLETED, verdicts, targets)
+        publications: tuple[Publication, ...] = ()
+        if self._publisher is not None:
+            published = await self._publish(task, run, targets, verdicts)
+            if isinstance(published, GateReport):
+                return published
+            publications = published
+        return await self._end(
+            task, run, GateOutcome.COMPLETED, verdicts, targets, publications
+        )
+
+    async def _publish(
+        self,
+        task: TaskSnapshot,
+        run: TaskRun,
+        targets: tuple[IntegrationTarget, ...],
+        verdicts: list[tuple[CheckKind, bool, str]],
+    ) -> tuple[Publication, ...] | GateReport:
+        """Push and open the pull request of every checked repository whose
+        Working Set role is ``target`` in the task's scope as it is now (read
+        again), and record each on the repository's state in the attempt
+        (issue #132). A report when the gate must stop: the task moved on
+        (``SUPERSEDED``), the attempt lost a repository (``NOT_RECORDED``) or a
+        pull request was not made (``NOT_PUBLISHED``)."""
+        counts: dict[str, int] = {}
+        for kind, _passed, _summary in verdicts:
+            counts[kind.value] = counts.get(kind.value, 0) + 1
+        checks = tuple(counts.items())
+        publications: list[Publication] = []
+
+        def report(outcome: GateOutcome) -> GateReport:
+            return GateReport(
+                outcome, task.id, tuple(verdicts), targets, tuple(publications)
+            )
+
+        for target in targets:
+            try:
+                # Read again for every repository, never the scope the checks
+                # were given (nor the one read for the repository before): the
+                # checks and an earlier push may have taken long, and a project
+                # archived, an ACL narrowed, a remote or a role changed since
+                # decides this push (Codex review of #159).
+                scope = await self._authority.parent_scope(task)
+            except Exception as error:
+                logger.warning("Task scope unavailable (%s)", error_class_of(error))
+                return report(GateOutcome.NOT_PUBLISHED)
+            repository = next(
+                (r for r in scope.repositories if r.repo_id == target.repo_id), None
+            )
+            if repository is None or repository.role is not RepoRole.TARGET:
+                continue
+            # Checked after the scope was read (that read may take long, and a
+            # Cancel or a Retry meanwhile must not push for the old run) and
+            # right before the push (Codex review of #159).
+            if not await self._still_evaluating(task.id, run):
+                return report(GateOutcome.SUPERSEDED)
+            try:
+                pull_request = await self._publisher.publish(
+                    PublishRequest(
+                        task=task,
+                        run=run,
+                        repository=repository,
+                        project_state=scope.projects.get(repository.project_id),
+                        target=target,
+                        checks=checks,
+                    )
+                )
+                if not isinstance(pull_request, PullRequestInfo):
+                    raise TypeError("a publisher must return a PullRequestInfo")
+            except PullRequestNotPublishedError as error:
+                problem = error.problem
+            except Exception as error:
+                # A publisher that breaks made nothing; what it raised is not kept.
+                logger.warning("Publishing failed (%s)", error_class_of(error))
+                problem = PublishProblem.GITHUB_FAILED
+            else:
+                problem = None
+            try:
+                if problem is not None:
+                    publications.append(Publication(target.repo_id, problem=problem))
+                    await self._log(
+                        task,
+                        run,
+                        f"Pull request of repository {target.repo_id}"
+                        f" not made ({problem.value})",
+                    )
+                    continue
+                await self._tasks.update_attempt(
+                    task.id,
+                    run=run,
+                    repository_id=target.repo_id,
+                    pull_request=pull_request,
+                )
+                publications.append(Publication(target.repo_id, pull_request))
+                await self._log(
+                    task,
+                    run,
+                    f"Pull request #{pull_request.number} of repository"
+                    f" {target.repo_id} ({pull_request.state.value})"
+                    f" at {target.head}: {pull_request.url}",
+                )
+            except StaleRunError:
+                return report(GateOutcome.SUPERSEDED)
+            except RepositoryNotInAttemptError:
+                return report(GateOutcome.NOT_RECORDED)
+        if any(publication.problem is not None for publication in publications):
+            return report(GateOutcome.NOT_PUBLISHED)
+        return tuple(publications)
 
     async def _still_evaluating(self, task_id: uuid.UUID, run: TaskRun) -> bool:
         """The next kind of check runs only while the task is still evaluating
@@ -369,6 +514,7 @@ class IntegrationGate:
         outcome: GateOutcome,
         verdicts: list[tuple[CheckKind, bool, str]],
         targets: tuple[IntegrationTarget, ...],
+        publications: tuple[Publication, ...] = (),
     ) -> GateReport:
         command, reason = {
             GateOutcome.COMPLETED: (TaskCommand.COMPLETE, REASON_PASSED),
@@ -381,20 +527,30 @@ class IntegrationGate:
         except CompletionRequirementsNotMetError:
             # Every check passed, but a repository lacks what Complete requires
             # (Decision 0030, section 5: a ``target`` needs a delivered pull
-            # request, which this gate does not make, Decision 0036, 10). The
-            # task stays ``evaluating`` with its results recorded.
+            # request; without a publisher this gate makes none, and a draft or
+            # a closed one is not delivered). The task stays ``evaluating`` with
+            # its results recorded.
             return GateReport(
-                GateOutcome.REQUIREMENTS_NOT_MET, task.id, tuple(verdicts), targets
+                GateOutcome.REQUIREMENTS_NOT_MET,
+                task.id,
+                tuple(verdicts),
+                targets,
+                publications,
             )
         except RepositoryWriteInFlightError:
             return GateReport(
-                GateOutcome.NOT_RECORDED, task.id, tuple(verdicts), targets
+                GateOutcome.NOT_RECORDED,
+                task.id,
+                tuple(verdicts),
+                targets,
+                publications,
             )
         return GateReport(
             outcome if done else GateOutcome.SUPERSEDED,
             task.id,
             tuple(verdicts),
             targets,
+            publications,
         )
 
     async def _command(

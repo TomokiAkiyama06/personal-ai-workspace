@@ -73,6 +73,10 @@ class GitFailure(StrEnum):
     OUTPUT_TOO_LARGE = "output_too_large"
     NONZERO_EXIT = "nonzero_exit"
     UNSAFE_OUTPUT = "unsafe_output"
+    # A ``push`` refused before it ran: the repository's configuration names a
+    # command (``core.askPass``, ...) or changes where the push goes
+    # (``url.<base>.insteadOf`` / ``pushInsteadOf``, ``http.*``).
+    UNSAFE_CONFIGURATION = "unsafe_configuration"
     # SshGitRunner only (Issue #105 / Decision 0029). ``ssh`` itself exits 255 for a
     # connection-level failure (unreachable host, rejected key, host key mismatch,
     # the account's Linux user missing or locked); 0-254 are the remote command's
