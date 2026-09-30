@@ -1164,8 +1164,9 @@ function ConnectedProjects({ source }: { source: ProjectsSource }) {
       })
       .catch((caught: unknown) => {
         if (cancelled) return;
+        // Not an answer: without the list it is unknown whether the project is
+        // Pending deletion (not readable), so it is not read until a retry succeeds.
         setLoad({ status: "error", message: errorMessage(t, caught) });
-        setAnswered(mine);
       });
     return () => {
       cancelled = true;

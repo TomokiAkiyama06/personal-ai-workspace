@@ -366,6 +366,18 @@ describe("ProjectsPage", () => {
     expect(source.detail).toHaveBeenCalledTimes(2);
   });
 
+  it("does not read the selected project while the list cannot be read", async () => {
+    const source = fakeProjectsSource();
+    source.list.mockRejectedValueOnce(new Error("down"));
+    renderProjects("/projects/p-example", source);
+    const user = userEvent.setup();
+    const retry = await screen.findByRole("button", { name: "再試行" });
+    expect(source.detail).not.toHaveBeenCalled();
+    await user.click(retry);
+    expect(await screen.findByRole("heading", { name: "ExampleProject" })).toBeInTheDocument();
+    expect(source.detail).toHaveBeenCalledTimes(1);
+  });
+
   it("shows a failed read with a retry", async () => {
     const source = fakeProjectsSource();
     source.list.mockRejectedValueOnce(new Error("down"));
