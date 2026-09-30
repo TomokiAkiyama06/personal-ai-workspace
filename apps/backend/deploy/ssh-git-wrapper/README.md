@@ -45,6 +45,7 @@ Wrapper は Client（Backend）を信用しない。`$SSH_ORIGINAL_COMMAND` を 
    - 理由: Repository の設定（`.git/config`。`extensions.worktreeConfig` なら worktree ごとの `config.worktree` も）は Checkout とすべての worktree で共有され、worktree で作業する Agent が書ける。そこに置いた `filter.<x>.clean` を、Agent が Commit した `.gitattributes` が選べば、許可した `status` がその Command をこの User として実行してしまう。
    - `core.worktree` も拒否する: Checkout で `--git-dir=` / `--work-tree=` なしに動く `status`・`merge` が、検査した cwd の代わりにその Path（Root の外でも）の File を読み書きしてしまうため。
    - 拒否する設定: `core.worktree`・`protocol.*`（Repository の `protocol.<name>.allow` は Wrapper の `protocol.allow=never` より優先され、`ext::` は Command を動かす）・`extensions.partialClone`・`remote.<name>.promisor`（欠けた Object の遅延取得）・`gpg.*`（`gpg.ssh.defaultKeyCommand` など、署名の設定は Command を名指しする）・`branch.<name>.mergeOptions`（`merge` に `-S` などを足せる。Command Line の `commit.gpgSign=false` は明示の `-S` を打ち消さない）・`filter.*`・`include.*`・`includeIf.*`（Wrapper が一覧にしていない別の File を読ませるため）・`hook.*`・`pager.*`・`core.pager`・`core.editor`・`core.askPass`・`core.sshCommand`・`core.gitProxy`・`core.alternateRefsCommand`・`sequence.editor`・`diff.external`・`gpg.program`・`uploadPack.packObjectsHook`、および `<section>.<name>.<key>` の `<key>` が `textconv`・`command`・`driver`・`program`・`cmd`・`uploadpack`・`receivepack` のもの（`diff.<x>.textconv`・`merge.<x>.driver`・`gpg.ssh.program` など）。
+   - `push` だけはさらに `url.<base>.insteadOf` / `url.<base>.pushInsteadOf` と `http.*`（`http.proxy`・`http.sslVerify`・`http.extraHeader` など）も拒否する（Backend が名指しした URL を別の宛先に書き換える、または Push とその Credential を別の経路に通すため。Wrapper の `--config=`（Scope `command`）は対象外）。
    - 拒否しない設定: `core.hooksPath`・`core.fsmonitor`（Wrapper の `-c` が上書きする）、`credential.helper`（`clone -c` が Repository に残す。これらの副コマンドは Credential を使わない）、その他の通常の設定。
 10. Decision 0051（PR #130）の `submodule status --cached`（integration worktree にある Submodule を調べる。`status` の前に呼ばれる）と `status` の形（integration worktree が Commit そのものか ── 無視された File と Submodule の中の変更を含めて ── を確かめる）は、pin したときだけ受け付ける。`--ignore-submodules=none` は Wrapper の `diff.ignoreSubmodules=all` を上書きし、git は中身のある Submodule ごとに子の git をその中で動かす（その Repository の設定 ── Filter Driver は Command ── を Wrapper は検査していない）。`submodule status --cached` も中身のある Submodule の中で `git describe` を動かす。そのため、どちらも `exec` の前に同じ pin で `git ls-files --stage -z`（Index を読むだけ）を実行し、Index の Gitlink（Mode `160000`）のどれかの Path に `.git` があれば `populated_submodule` で拒否する。
 
@@ -63,11 +64,12 @@ Wrapper は Client（Backend）を信用しない。`$SSH_ORIGINAL_COMMAND` を 
 | `merge-tree` | `--write-tree --name-only -z --no-messages refs/heads/paw/<a> refs/heads/paw/<b>` |
 | `merge-base` | `--is-ancestor refs/heads/paw/<a> refs/heads/paw/<b>` |
 | `submodule` | `status --cached` だけ（Decision 0051（PR #130）による。pin したときだけ。下の 10。`foreach`・`update`・`init` など他の副コマンド・Option はすべて拒否） |
+| `push` | `--quiet --no-follow-tags --no-recurse-submodules -- https://<--push-host の Host>/<owner>/<repo>.git <commit id>:refs/heads/paw/<b>` だけ（2 つの `--no-` は必須で、Repository の `push.followTags`（Annotated Tag も Push される）と `push.recurseSubmodules`（Submodule の Commit を別の Remote へ Push する）を打ち消す。[Decision 0052](../../../../docs/decisions/0052-integration-push-and-pull-request.md)、#132。`--gh` と `--push-host` を設定したときだけ。先頭の `-c` は `credential.helper=` と `credential.helper=!<--gh> auth git-credential` だけ受け付け、Wrapper 自身が同じ 2 つを付ける。`+`（Force）・`--force`・`--mirror`・`--delete`・Tag・`paw/` 以外の宛先・2 つ以上の Refspec・Remote 名は拒否。pin しない。下の 9 の設定の確認を行い、`url.<base>.insteadOf` / `pushInsteadOf`・`http.*` も拒否） |
 | `status` | `--porcelain=v1 -z --untracked-files=all`／`--porcelain=v1 -z --untracked-files=normal --ignored=traditional --ignore-submodules=none`（Decision 0051（PR #130）による。`--git-dir=` / `--work-tree=` で pin したときだけ。下の 10） |
 
-`push`・`fetch`・`pull`・`checkout`・`switch`・`reset`・`rebase`・`commit`・`branch`・`gc`・`submodule` など、表にないものはすべて拒否する。
+上の形以外の `push`、`fetch`・`pull`・`checkout`・`switch`・`reset`・`rebase`・`commit`・`branch`・`gc`・`submodule` など、表にないものはすべて拒否する。
 
-git の環境は固定の許可リストだけ（`PATH`・`HOME`・`LC_ALL=C`・`GIT_CONFIG_GLOBAL=/dev/null`・`GIT_CONFIG_NOSYSTEM=1` 等。`git.py` の `git_environment` と同じ）。加えて `GIT_NO_LAZY_FETCH=1`（Partial Clone が `status`・`worktree add` の中で欠けた Object を Promisor Remote から取りに行かない）と、`clone` 以外では `-c credential.helper=`（Repository の設定の Credential Helper ── Command ── を空にする。Remote と通信するのは `clone` だけ）を付ける。`sshd` の環境（Client が `SendEnv` で送れる `LC_*` などを含む）は git に渡らない。
+git の環境は固定の許可リストだけ（`PATH`・`HOME`・`LC_ALL=C`・`GIT_CONFIG_GLOBAL=/dev/null`・`GIT_CONFIG_NOSYSTEM=1` 等。`git.py` の `git_environment` と同じ）。加えて `GIT_NO_LAZY_FETCH=1`（Partial Clone が `status`・`worktree add` の中で欠けた Object を Promisor Remote から取りに行かない）と、`clone` 以外では `-c credential.helper=`（Repository の設定の Credential Helper ── Command ── を空にする。Remote と通信するのは `clone` と `push` だけ）を付ける。`push` にはその後に `--gh` の Credential Helper を付ける（Decision 0052）。`sshd` の環境（Client が `SendEnv` で送れる `LC_*` などを含む）は git に渡らない。
 
 ### 終了コード
 
@@ -152,7 +154,8 @@ restrict,command="/usr/local/lib/paw/paw-git-wrapper",from="127.0.0.1",no-pty,no
 - Decision 0029 の 4 の例にある `no-touch-required` は**付けない**。これは FIDO（`sk-*`）鍵の「触れる確認」を**省く**（緩める）Option で、`ed25519` の鍵には効果がない。緩める向きの Option は付けない方針にした（PR で Human に確認する）。
 - Wrapper の Option（`command="..."` の中に空白区切りで足す。どれも省略可）:
   - `--root=/home/alice/<workspace_subdir>`: Backend の `workspace_subdir` が `workspaces` 以外のとき。Backend が送る Path と同じ綴り（Account Database の Home から作った Path）にする。
-  - `--gh=/usr/bin/gh`: PAW-028 の `gh` の Credential Helper を `clone` に使うとき。`credential.helper=!/usr/bin/gh auth git-credential` という値そのものだけを受け付ける（Backend の `GitClient(gh_executable=...)` と同じ Path にする）。無ければ Credential Helper はすべて拒否する。
+  - `--gh=/usr/bin/gh`: PAW-028 の `gh` の Credential Helper を `clone` と `push`（Decision 0052）に使うとき。`credential.helper=!/usr/bin/gh auth git-credential` という値そのものだけを受け付ける（Backend の `GitClient(gh_executable=...)` と同じ Path にする）。無ければ Credential Helper はすべて拒否する。
+  - `--push-host=github.com`: `push`（Decision 0052）の宛先として許す Host（繰り返して複数）。無ければ `push` はすべて拒否する（`push_host_not_allowed`）。Client（Backend）が送る宛先は信用しない: 乗っ取られた Backend が Root の中のどの Repository の Commit でも好きな Server へ送れないようにするため。
   - `--git=/usr/bin/git`（既定）、`--allow-protocol=https`（既定。足すと `protocol.<名前>.allow=always` を受け付ける）、`--config=key=value`（配備が固定する追加の設定）、`--home=`、`--path=`（git の `PATH`。既定 `/usr/local/bin:/usr/bin:/bin`）。
   - Option の綴りの誤りは、すべての呼び出しを `misconfigured` で拒否する（黙って緩い既定に戻らない）。
 
