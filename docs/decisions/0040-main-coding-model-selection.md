@@ -12,7 +12,7 @@ MODEL_CANDIDATES.md は、採用 Model を公開 Benchmark だけで決めず、
 特に Resolved@1・Human correction time・96 GB の GPU 内で Memory Worker / Reranker などと共存できるかを重視することを定める。
 比較 Run は 12 構成（候補 8 Model と追加の 3 Model、Qwen3-Coder-Next は FP8 と Q5_K_M の 2 構成）を、同じ Harness・Prompt・Tool・timeout・Evaluator で 1 回ずつ走らせた。
 
-| 順 | Model | Resolved@1 | 24 Task の所要（並列 4） | 出力 token | Weight（GiB） | KV Pool（GiB） |
+| 順（12 構成で数える） | Model | Resolved@1 | 24 Task の所要（並列 4） | 出力 token | Weight（GiB） | KV Pool（GiB） |
 | ---: | --- | ---: | ---: | ---: | ---: | ---: |
 | 1 | KAT-Coder-V2.5-Dev（BF16） | 14/24 | 30 分 | 323k | 64.7 | 21.1 |
 | 1 | Qwen3.6-27B-FP8 | 14/24 | 31 分 | 203k | 27.6 | 54.7 |
@@ -22,9 +22,9 @@ MODEL_CANDIDATES.md は、採用 Model を公開 Benchmark だけで決めず、
 | 5 | Qwen3-Coder-Next（FP8 / Q5_K_M） | 12/24 | 18 / 32 分 | 219k / 210k | 74.9 / - | 13.6 / - |
 | 5 | gpt-oss-120b | 12/24 | 28 分 | 212k | 66.1 | 18.7 |
 | 5 | Devstral Small 2 24B | 12/24 | 34 分 | 263k | 23.3 | 60.4 |
-| 11 | gpt-oss-20b | 10/24 | 46 分 | 229k | 13.8 | 69.2 |
-| 11 | Nemotron 3.5 Lightning 30B-A3B NVFP4 | 10/24 | 13 分 | 313k | 17.8 | 65.8 |
-| 13 | Qwen3-Coder-30B-A3B-Instruct | 6/24 | 28 分 | 322k | 56.9 | 26.8 |
+| 10 | gpt-oss-20b | 10/24 | 46 分 | 229k | 13.8 | 69.2 |
+| 10 | Nemotron 3.5 Lightning 30B-A3B NVFP4 | 10/24 | 13 分 | 313k | 17.8 | 65.8 |
+| 12 | Qwen3-Coder-30B-A3B-Instruct | 6/24 | 28 分 | 322k | 56.9 | 26.8 |
 
 上位 3 つは同じ 14 Task を解いた（24 Task すべてで結果が一致）。Historical の 11 Task は 10 Task をどの Model も解けず、差は Spec と Injected Bug の一部で決まっている（報告の 3）。
 
@@ -43,7 +43,7 @@ MODEL_CANDIDATES.md は、採用 Model を公開 Benchmark だけで決めず、
 
 ### 3. 採用の前に共存構成の確認 Run を 1 回行う（別の Issue）
 
-- Main（Qwen3.6-27B-FP8）・Memory Worker・Embedding / Reranker を同時に置いた構成で、paw-seed-v1 をもう一度走らせ、Resolved と Peak VRAM が落ちないこと、Footprint（0039 の 1）を確かめる。
+- Main（Qwen3.6-27B-FP8）・Memory Worker・Embedding / Reranker を同時に置いた構成で、paw-seed-v1 をもう一度走らせ、Resolved が今回（14/24）より下がらないこと、Run 中の GPU 使用量のピークに Safety Headroom（0037 の 3）を足しても GPU の容量に収まること（OOM がないこと）を確かめ、その実測から Footprint（0039 の 1）を与える。
 - この Run で上位 3 つ（Qwen3.6-27B-FP8、KAT、Qwen3.8-27B-FP8）の Resolved@3（3 回）も測り、1 回の Run の揺れを見る。
 
 ### 4. 候補から外す Model
@@ -67,7 +67,7 @@ MODEL_CANDIDATES.md は、採用 Model を公開 Benchmark だけで決めず、
 
 ## 決めてほしいこと
 
-1. **Main Coding Model を Qwen3.6-27B-FP8（vLLM、FP8）にする**（1）か。推奨: はい（3 の確認 Run の結果が落ちないことを条件に）。
+1. **Main Coding Model を Qwen3.6-27B-FP8（vLLM、FP8）にする**（1）か。推奨: はい（3 の確認 Run で Resolved が下がらず、ピーク + Headroom が GPU の容量に収まることを条件に）。
 2. **KAT-Coder-V2.5-Dev を次点として残し、FP8 版を 3 の確認 Run で比べる**（2）か。推奨: はい。
 3. **採用の前に共存構成の確認 Run（Resolved@3 を含む）を別の Issue で行う**（3）か。推奨: はい。
 4. **Qwen3-Coder-30B-A3B・gpt-oss-20b・Nemotron 3.5 Lightning を候補から外す**（4）か。推奨: はい。
