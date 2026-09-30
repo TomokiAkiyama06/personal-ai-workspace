@@ -7,8 +7,11 @@ user running the tests (``SubprocessGitRunner``); GitHub's API is a fake
 Linux user.
 """
 
+import asyncio
 import json
 import os
+import shutil
+import subprocess
 import unittest
 import uuid
 from types import SimpleNamespace
@@ -39,6 +42,7 @@ from paw_backend.repositories import RepositoryPolicy
 from paw_backend.repositories.errors import GhCommandError, GhFailure
 from paw_backend.repositories.git import GitResult, command_name
 from paw_backend.repositories.github_connection import GhResult
+from paw_backend.repositories.limits import MAX_GH_OUTPUT_BYTES
 from paw_backend.tasks import PullRequestInfo, PullRequestState, RepoRole, TaskRun
 from paw_backend.tools import ScopedRepository
 
@@ -56,7 +60,10 @@ class FakeGitHub:
     """``gh api`` for one repository: lists and creates pull requests.
 
     ``fail`` makes every call exit 1 (``gh``'s answer to an HTTP error);
-    ``fail_create`` only the creation; ``raises`` makes ``run`` raise it."""
+    ``fail_create`` only the creation; ``raises`` makes ``run`` raise it.
+    ``--jq`` is applied with the real ``jq`` when there is one (gh applies it
+    before printing), and an answer longer than ``SubprocessGhRunner``'s cap
+    is refused as it would be (``OUTPUT_TOO_LARGE``)."""
 
     def __init__(self, bare: str) -> None:
         self.bare = bare  # the "GitHub" repository: a head is its branch's tip
@@ -107,6 +114,28 @@ class FakeGitHub:
         if self.fail:
             return GhResult(1, "")
         assert args[:3] == ["api", "--hostname", HOST] and hostname == HOST
+        args, jq = list(args), None
+        if "--jq" in args:
+            at = args.index("--jq")
+            jq = args[at + 1]
+            del args[at : at + 2]
+        result = self._answer(args)
+        if jq is not None and result.returncode == 0 and shutil.which("jq"):
+            projected = await asyncio.to_thread(
+                subprocess.run,
+                ["jq", "-c", jq],
+                input=result.stdout,
+                capture_output=True,
+                text=True,
+            )
+            if projected.returncode != 0:
+                return GhResult(1, "")
+            result = GhResult(0, projected.stdout)
+        if len(result.stdout.encode()) > MAX_GH_OUTPUT_BYTES:
+            raise GhCommandError("api", GhFailure.OUTPUT_TOO_LARGE)
+        return result
+
+    def _answer(self, args) -> GhResult:
         method, endpoint = args[4], args[5]
         assert endpoint == f"repos/{OWNER}/{REPO}/pulls"
         fields = dict(args[i + 1].split("=", 1) for i in range(6, len(args), 2))
@@ -408,6 +437,25 @@ class PublisherTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(pull_request.number, 7)
                 self.assertEqual(pull_request.state, state)
                 self.assertEqual(self.github.methods(), ["GET"])
+
+    @unittest.skipUnless(shutil.which("jq"), "jq is not installed")
+    async def test_many_long_pull_requests_of_the_branch_fit_in_gh_s_output(self):
+        # Codex review of #159 (#90): GitHub lists every pull request in full
+        # (bodies, both repositories); a branch with a few long ones exceeded
+        # the gh runner's output cap and the task stayed ``evaluating``.
+        for number in range(1, 6):
+            closed = self.github.pull(number, self.branch, state="closed")
+            closed["body"] = "x" * 20_000
+            self.github.pulls.append(closed)
+        self.assertGreater(
+            len(json.dumps(self.github.pulls).encode()), MAX_GH_OUTPUT_BYTES
+        )
+        self.github.pulls.append(self.github.pull(6, self.branch))
+
+        info = await self.publisher().publish(self.request())
+
+        self.assertEqual((info.number, info.state), (6, PullRequestState.OPEN))
+        self.assertEqual(self.github.methods(), ["GET"])
 
     async def test_a_pull_request_to_another_base_is_not_the_one(self):
         # Codex review of #159: a pull request of the branch against another

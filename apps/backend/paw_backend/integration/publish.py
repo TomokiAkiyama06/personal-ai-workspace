@@ -93,6 +93,22 @@ TITLE_PREFIX = "[PAW] "
 # Larger than any pull request list of one branch; a longer answer is refused.
 MAX_LISTED_PULL_REQUESTS = 100
 _MAX_PULL_REQUEST_NUMBER = 2_147_483_647
+# ``gh api --jq`` keeps of each listed pull request only what
+# :func:`parse_pull_request` reads: GitHub lists them in full (the body, both
+# repositories), and a branch with a few long ones would exceed the gh runner's
+# output cap (``MAX_GH_OUTPUT_BYTES``) although the one to reuse is there (Codex
+# review of #159, #90). What is not an array, or an item that is not an object,
+# is kept as it is and refused below as before.
+PULL_REQUEST_FIELDS_JQ = (
+    'if type == "array" then map(if type == "object" then'
+    " {number, html_url, state, merged_at,"
+    ' draft: (if has("draft") then .draft else false end),'
+    " head: {ref: .head.ref, sha: .head.sha,"
+    ' repo: (if (.head.repo | type) == "object"'
+    " then {full_name: .head.repo.full_name} else .head.repo end)},"
+    " base: {ref: .base.ref}}"
+    " else . end) else . end"
+)
 
 
 class PublishProblem(StrEnum):
@@ -452,6 +468,8 @@ class GitHubPullRequestPublisher:
                 "state=all",
                 "-f",
                 f"per_page={MAX_LISTED_PULL_REQUESTS}",
+                "--jq",
+                PULL_REQUEST_FIELDS_JQ,
             ],
             github,
             account,
