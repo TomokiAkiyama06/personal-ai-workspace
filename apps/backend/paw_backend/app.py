@@ -33,6 +33,7 @@ from paw_backend.orchestrator.project_sweep import build_project_stop_loop
 from paw_backend.orchestrator.runtime import AgentRuntime
 from paw_backend.orchestrator.user_sweep import build_user_stop_loop
 from paw_backend.projects import ProjectStateGate
+from paw_backend.repositories.git import GitRunner
 from paw_backend.research.scratch import ScratchJanitor, ScratchStore
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,7 @@ def create_app(
     auth: AuthServices | None = None,
     agent_runtimes: Mapping[str, AgentRuntime] | None = None,
     orchestrator_config: OrchestratorConfig | None = None,
+    git_runner: GitRunner | None = None,
 ) -> FastAPI:
     """Build the FastAPI application.
 
@@ -56,8 +58,10 @@ def create_app(
     With a configured database the task execution is composed here
     (``app.state.task_execution``, issue #125): the ``TaskService``, the Tool
     Broker, the production ``TaskAuthority`` and, when ``agent_runtimes`` and
-    ``orchestrator_config`` are given, the ``Orchestrator``. Without a database
-    it is ``None``.
+    ``orchestrator_config`` are given, the ``Orchestrator`` with its worktrees
+    (issue #155): git runs through ``git_runner``, the deployment's ``GitRunner``
+    (default ``SubprocessGitRunner``; ``SshGitRunner`` per Decision 0029). Without
+    a database it is ``None``.
     """
     settings = settings or Settings()
     database = database or Database(settings)
@@ -195,6 +199,7 @@ def create_app(
             app.state.authorizer,
             runtimes=agent_runtimes,
             orchestrator_config=orchestrator_config,
+            git_runner=git_runner,
         )
     app.state.task_execution = task_execution
 

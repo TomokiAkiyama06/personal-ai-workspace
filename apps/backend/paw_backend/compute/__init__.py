@@ -4,7 +4,10 @@ Admission to the local models by resource class and KV cache, actual / reserved
 VRAM with a safety headroom, model residency with the relief steps under VRAM
 pressure (Memory Worker unload, Embedding / Reranker CPU fallback), the Exclusive
 class, and Local / Cloud hybrid placement. See ``scheduler.py`` and
-``docs/decisions/0037-gpu-compute-scheduler.md`` (Approved).
+``docs/decisions/0037-gpu-compute-scheduler.md`` (Approved). Kaggle / Full GPU
+Mode (PAW-037) holds the local GPU tasks around an Exclusive lease: see
+``full_gpu.py``, ``holds.py`` and ``docs/decisions/0055-kaggle-full-gpu-mode.md``
+(Proposed).
 
 GPU safety: the probe only reads (``nvidia-smi --query-*``); models are loaded
 and unloaded only through an injected :class:`ModelControl`, whose real adapter
@@ -34,10 +37,22 @@ from paw_backend.compute.errors import (
     ComputeError,
     ComputeUnavailableError,
     ExclusiveUnavailableError,
+    FullGpuModeStateError,
+    FullGpuPermissionDeniedError,
     InvalidComputeArgumentError,
     ModelControlError,
     ProbeUnavailableError,
 )
+from paw_backend.compute.full_gpu import (
+    HOLD_REASON,
+    RESUME_REASON,
+    FullGpuMode,
+    FullGpuState,
+    FullGpuStatus,
+    ResumeReport,
+    TaskHolds,
+)
+from paw_backend.compute.holds import PostgresTaskHolds
 from paw_backend.compute.probe import (
     GpuDevice,
     GpuProbe,
@@ -64,6 +79,8 @@ from paw_backend.compute.scheduler import (
 )
 
 __all__ = [
+    "HOLD_REASON",
+    "RESUME_REASON",
     "Admission",
     "CloudPolicy",
     "CommandModelControl",
@@ -80,6 +97,11 @@ __all__ = [
     "DeploymentStatus",
     "ExclusiveFailure",
     "ExclusiveUnavailableError",
+    "FullGpuMode",
+    "FullGpuModeStateError",
+    "FullGpuPermissionDeniedError",
+    "FullGpuState",
+    "FullGpuStatus",
     "GpuDevice",
     "GpuProbe",
     "GpuProcess",
@@ -93,13 +115,16 @@ __all__ = [
     "NvidiaSmiProbe",
     "Placement",
     "PlacedEmbedder",
+    "PostgresTaskHolds",
     "ProbeUnavailableError",
     "Refusal",
     "Relief",
     "ResidencyPolicy",
     "ResourceClass",
+    "ResumeReport",
     "ScheduledMemoryWorker",
     "SchedulerMode",
+    "TaskHolds",
     "TrackerLateGpuCharge",
     "VramView",
     "estimate_context_tokens",

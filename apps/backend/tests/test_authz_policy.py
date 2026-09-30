@@ -79,6 +79,8 @@ ADMIN_CAPS = USER_CAPS | {
     "project.lifecycle.manage",
     # Issue #129 (Decision 0049): a crashed process's write reservation.
     "project.task.write_reservation.release",
+    # Issue #33 (Decision 0055): Kaggle / Full GPU Mode.
+    "admin.compute.full_gpu",
 }
 OWNER_ONLY_CAPS = {
     "owner.admins.manage",
@@ -187,6 +189,8 @@ NON_DELEGABLE_CAPS = {
     "project.lifecycle.manage",
     # Issue #129 (Decision 0049): a person checks the executor is gone.
     "project.task.write_reservation.release",
+    # Issue #33 (Decision 0055): holding every local task for an exclusive job.
+    "admin.compute.full_gpu",
 }
 # The only capabilities whose *allowed* decisions are not persisted.
 READ_ONLY_CAPS = {"memory.read", "shared_memory.read", "project.read", "account.read"}

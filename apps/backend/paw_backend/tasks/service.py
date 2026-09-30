@@ -145,6 +145,7 @@ from paw_backend.tasks.errors import (
     TaskConflictError,
     TaskNotActiveError,
     TaskNotFoundError,
+    TaskStateChangedError,
     TaskStepError,
     WorkingSetChangeInvalidError,
     WorkingSetConflictError,
@@ -1314,6 +1315,7 @@ class TaskService:
         worktree: WorktreeState | None = None,
         review: ReviewState | None = None,
         pull_request: PullRequestInfo | None = None,
+        in_state: TaskState | None = None,
     ) -> AttemptRepositorySnapshot:
         """Replace the worktree / review / pull request state of one repository in
         the run's attempt (``task_attempt_repositories``).
@@ -1335,13 +1337,18 @@ class TaskService:
         completed) but only for the current run
         (``StaleAttemptError`` after a Restart, ``StaleRunError`` after a Retry:
         the new run continues the same attempt's state, so a delayed worker of the
-        failed run must not overwrite it). Text that is not ``str``, blank, longer
-        than its column or that PostgreSQL cannot store (NUL, surrogate
-        characters), a pull request number that is not an integer from 1 to
-        ``MAX_PULL_REQUEST_NUMBER``, a group that is not a ``WorktreeState`` /
-        ``ReviewState`` / ``PullRequestInfo``, and a status that is not one of its
-        enumeration's members or values, raise ``InvalidCommandArgumentError``
-        before anything is read. A pull request needs its URL.
+        failed run must not overwrite it). With ``in_state``, also only while the
+        task is in that state under the task's row lock
+        (``TaskStateChangedError``, a ``StaleRunError``: a Cancel does not
+        replace the run, so the integration gate names ``EVALUATING`` to keep a
+        check that outlived it from recording its result). Text that is not
+        ``str``, blank, longer than its column or that PostgreSQL cannot store
+        (NUL, surrogate characters), a pull request number that is not an
+        integer from 1 to ``MAX_PULL_REQUEST_NUMBER``, a group that is not a
+        ``WorktreeState`` / ``ReviewState`` / ``PullRequestInfo``, and a status
+        that is not one of its enumeration's members or values, raise
+        ``InvalidCommandArgumentError`` before anything is read. A pull request
+        needs its URL.
         """
         task_id = _uuid("task_id", task_id)
         run = _run(run)
@@ -1351,9 +1358,13 @@ class TaskService:
         worktree_fields = _worktree(worktree)
         review_fields = _review(review)
         pull_request_fields = _pull_request(pull_request)
+        if in_state is not None:
+            in_state = enum_member("in_state", TaskState, in_state)
         async with self._database.session() as session, session.begin():
             task = await self._require_task(session, task_id, lock=True)
             self._require_current_run(task, run)
+            if in_state is not None and task.state is not in_state:
+                raise TaskStateChangedError()
             row = await self._attempt_repository_row(
                 session, task, repository_id, lock=True
             )
