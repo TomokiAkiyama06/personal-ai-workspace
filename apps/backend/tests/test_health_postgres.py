@@ -356,6 +356,21 @@ class HealthPostgresTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(recorded, 1)
 
+    async def test_a_time_ahead_of_the_database_is_not_a_barrier(self):
+        # A host whose clock runs ahead must not make the next changes of the
+        # other processes look stale (Codex P2 on PR #170).
+        ahead = datetime.now(UTC) + timedelta(hours=1)
+        await self.store.record_changes(
+            [health(Component.DATABASE, Severity.CRITICAL)], occurred_at=ahead
+        )
+        (event,) = await self.store.events(since=ahead - timedelta(hours=2), limit=5)
+        self.assertLess(event.occurred_at, ahead)
+        recorded = await self.store.record_changes(
+            [health(Component.DATABASE, Severity.INFO)],
+            occurred_at=datetime.now(UTC) + timedelta(seconds=1),
+        )
+        self.assertEqual(recorded, 1)
+
     async def test_connections(self):
         self.sql(
             "INSERT INTO shared_connections (kind, secret_handle, status, enabled,"

@@ -11,7 +11,9 @@ two Backend processes line up, and a sample is never placed in the future.
   transaction-level advisory lock so that two processes do not both record the
   same change. A change seen before the last event (another process recorded
   the same outage and its end first) is dropped: the events of a component stay
-  in the order they were seen, and a late replay opens no second outage.
+  in the order they were seen, and a late replay opens no second outage. A
+  time after the database's ``now()`` (a host clock ahead) is recorded as
+  ``now()``, so that it cannot hold back the changes that follow.
 * :meth:`HealthStore.roll_up`: moves the rows older than a tier's age into the
   next resolution (``DELETE ... RETURNING`` feeding ``INSERT ... ON CONFLICT DO
   UPDATE`` in one statement: a row is moved once and counted once, even when
@@ -160,7 +162,8 @@ _RECORD_CHANGE = """
 INSERT INTO health_events
     (occurred_at, component, severity, previous_severity, status, reasons)
 SELECT change.at, :component, :severity, last.severity, :status, :reasons
-FROM (SELECT COALESCE(CAST(:occurred_at AS timestamptz), now()) AS at) AS change
+FROM (SELECT LEAST(COALESCE(CAST(:occurred_at AS timestamptz), now()), now()) AS at)
+    AS change
 LEFT JOIN LATERAL (
     SELECT severity, occurred_at FROM health_events
     WHERE component = :component

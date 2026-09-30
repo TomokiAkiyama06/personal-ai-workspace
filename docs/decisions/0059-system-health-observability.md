@@ -67,7 +67,7 @@
 
 ### 5. 重要 Event（`health_events`）
 
-- Component の Severity が前の Event と変わったときだけ 1 行を記録する（前後の Severity、Status、理由の Code。数値は持たない）。時系列とは別の Table で、集約しない。2 つの Process が同じ変化を二重に記録しないよう、Transaction の Advisory Lock の中で「最後の Event と違い、それより古くないときだけ」入れる（複数の Process が同じ停止を後から書くとき、古い変化が 2 度目の停止を作らない。Codex の P1、PR #170）。
+- Component の Severity が前の Event と変わったときだけ 1 行を記録する（前後の Severity、Status、理由の Code。数値は持たない）。時系列とは別の Table で、集約しない。2 つの Process が同じ変化を二重に記録しないよう、Transaction の Advisory Lock の中で「最後の Event と違い、それより古くないときだけ」入れる（複数の Process が同じ停止を後から書くとき、古い変化が 2 度目の停止を作らない。Codex の P1、PR #170）。DB の `now()` より先の時刻（時計の進んだ Host）は `now()` として記録し、後の変化を止める壁にしない。
 - PostgreSQL に書けなかった間の Report は Process の中に残し（Severity が変わったものだけ、最大 100）、書けるようになった最初の Cycle で順に、Report を作った時刻で記録する。PostgreSQL 自体の停止（`critical`）も、復旧の後に Event として残る（Codex の P1、PR #170）。Process が再起動すると、残していた分は失われる。
 - 保存期間は 4 と同じ `PAW_HEALTH_RETENTION_DAYS`（1 年以上）。
 - 要件の他の重要 Event（Task の開始・失敗、Permission denial、Security の操作、Recovery の Push 失敗）は、それぞれ既に `task_events`・`audit_events` に残っている。ここでは複製しない。
