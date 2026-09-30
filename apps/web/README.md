@@ -26,6 +26,11 @@ Step-up が要る操作（Passkey の登録・削除、新しい端末の承認�
 
 含めていないもの（後続の Issue）: 招待の受け取り・Owner / Password Reset の Token の使用・Password の変更の画面、管理画面、Chat / Project / Agent / Memory / PR / Usage の中身（Placeholder）、PWA / Tauri、実 Browser と実 Authenticator の E2E Test。
 
+## プロジェクト（PAW-061）
+
+[PAW-061](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/47) のプロジェクトの画面（`/projects`、`/projects/<id>`、`src/projects/`）は Design Canvas の Projects に合わせています: 招待制のプロジェクトの一覧（絞り込み、Archived / Pending deletion は「アーカイブ済みを表示」の後ろ）、選んだプロジェクトの概要・リポジトリ・メンバーのタブ、リポジトリごとの ACL Override（`Project 継承` / `Repo 個別設定` と残る権限）、メンバーの役割（Manager / Contributor / Viewer）と Override で狭まった後に使えるリポジトリ、作成・アーカイブ・Active に戻す・削除（プロジェクト名の入力と 30 日の保留）・復元、リポジトリの登録（GitHub から Clone / 既存のディレクトリ / 新規（ローカル）/ 新規（GitHub））、Manager による役割の変更。
+**Backend にはプロジェクト・リポジトリ・メンバーの HTTP API がまだありません**（Service は `paw_backend/projects`・`paw_backend/repositories` にある）。そのため Notification Center と同じく Data は `ProjectsSource`（`src/projects/model.ts`）で受け、Source がない今は「プロジェクトはまだ表示できません」を表示します。Route ができたら、それを呼ぶ Source を `ProjectsSourceProvider` に渡します。
+
 ## エージェント / タスクとプルリクエスト（PAW-062）
 
 [PAW-062](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/48) で、Design Canvas の Tasks / PullRequest / MobileTask / Tablet に合わせて `エージェント / タスク`（`/agents`、`/agents/<id>`）と `プルリクエスト`（`/pulls`、`/pulls/<id>`）を実装しました（`src/tasks/`）。

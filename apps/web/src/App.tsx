@@ -8,6 +8,7 @@ import { PairPage } from "./pages/PairPage";
 import { PasskeyGatePage } from "./pages/PasskeyGatePage";
 import { PlaceholderPage } from "./pages/PlaceholderPage";
 import { SettingsPage } from "./pages/SettingsPage";
+import { PROJECTS_PATH, ProjectsPage } from "./projects/ProjectsPage";
 import { useRouter } from "./router";
 import { AppShell } from "./shell/AppShell";
 import { isActive, NEW_CHAT_PATH, PRIMARY_NAV, SECONDARY_NAV } from "./shell/navigation";
@@ -24,6 +25,7 @@ const OTHER_SCREENS: readonly { path: string; label: MessageKey }[] = [
 function SignedInPage() {
   const { path } = useRouter();
   if (path === "/notifications") return <NotificationsPage />;
+  if (path === PROJECTS_PATH || path.startsWith(`${PROJECTS_PATH}/`)) return <ProjectsPage />;
   if (isActive({ path: TASKS_PATH }, path)) return <TasksPage />;
   if (isActive({ path: PULLS_PATH }, path)) return <PullsPage />;
   if (path === "/admin" || path.startsWith("/admin/")) return <AdminPage />;
