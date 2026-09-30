@@ -8,7 +8,9 @@ their rules are Decision 0033 section 3 (Approved 2026-09-28):
 * ``invited`` to ``deleted``: the invitation is cancelled;
 * ``active`` to ``pending_deletion``: the user is deleted;
 * ``pending_deletion`` to ``active``: the Owner restores (within 30 days);
-* ``pending_deletion`` to ``deleted``: NOT here (the erasure comes first).
+* ``pending_deletion`` to ``deleted``: NOT here. The scheduled erasure
+  (``paw_backend.auth.onboarding.erasure``, Issue #127) erases the personal data
+  first, as the table owner, and only then records that edge.
 
 ``TRANSITIONS`` is that list; the database function ``paw_change_user_status``
 (migration ``0124``) allows exactly the same edges and is the only way the web role
@@ -17,7 +19,9 @@ changes ``users.status``. The Owner is never a target (the CLI owns that account
 Deleting (``active`` to ``pending_deletion``), in one transaction under the user's
 row lock (``FOR NO KEY UPDATE``) and then the rows of the projects the user manages
 (``FOR UPDATE``, the project module's lock): the status, every session of the user
-ended (``account_closed``), every live pairing ended, the audit rows. A user who is
+ended (``account_closed``), every live pairing ended, the user's open Passkey
+challenges deleted, the audit rows (the user's queued and running tasks are stopped
+by ``paw_backend.orchestrator.user_sweep``, Issue #127). A user who is
 the only live Manager (accepted, and whose account is ``active``) of an active or
 archived project is refused (``OwnershipTransferRequiredError``). Deleting
 an ``invited`` user cancels the invitation: straight to ``deleted`` (there is no
@@ -196,6 +200,12 @@ class UserLifecycleService:
             revoked = await self._sessions.revoke_all(
                 session, user_id, RevokeReason.ACCOUNT_CLOSED
             )
+            # A Passkey ceremony the user began cannot finish any more (Issue
+            # #127): its challenge goes with the sessions.
+            await session.execute(
+                text("DELETE FROM passkey_challenges WHERE user_id = :id"),
+                {"id": user_id},
+            )
             for ref in await end_live_pairings_in(
                 session, user_id, PairingEnd.ACCOUNT_CLOSED, now
             ):
@@ -216,6 +226,25 @@ class UserLifecycleService:
                 context,
                 "user",
                 user_id,
+            )
+            # The user's own GitHub / SSH credentials live in their Linux account,
+            # which the backend never touches (Decision 0043 C): their revocation
+            # is the deployment's work, recorded here as required with the
+            # deletion. The erasure job reminds the Owner of it on every run until
+            # the operator confirms it (``--credentials-revoked``). Codex P1, PR #142.
+            await self._audit.record_in(
+                session,
+                self._audit.event(
+                    AuthAction.USER_CREDENTIALS,
+                    AuthReason.CREDENTIALS_PENDING,
+                    allowed=False,
+                    correlation_id=context.correlation_id,
+                    client_request_id=context.client_request_id,
+                    actor_id=actor.user_id,
+                    actor_role=actor.system_role,
+                    resource_kind="user",
+                    resource_id=user_id,
+                ),
             )
             if revoked:
                 await self._record_in(
