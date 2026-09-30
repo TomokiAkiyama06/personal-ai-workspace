@@ -141,20 +141,20 @@ describe("Tasks page", () => {
     const nodes = within(graph).getAllByRole("button");
     expect(nodes.map((button) => button.textContent)).toEqual([
       expect.stringContaining("調査"),
-      expect.stringContaining("ios 参照の調査"),
       expect.stringContaining("実装"),
+      expect.stringContaining("ios 参照の調査"),
       expect.stringContaining("テスト"),
       expect.stringContaining("レビュー"),
     ]);
-    expect(nodes[1]).toHaveTextContent("任意");
+    expect(nodes[2]).toHaveTextContent("任意");
     expect(nodes[3]).toHaveTextContent("Codex · 標準");
     expect(nodes[3]).toHaveTextContent("待機");
     // One arrow per dependency.
     expect(document.querySelectorAll(".dag-edges > path")).toHaveLength(4);
 
     const user = userEvent.setup();
-    await user.click(nodes[2] as HTMLElement);
-    expect(nodes[2]).toHaveAttribute("aria-pressed", "true");
+    await user.click(nodes[1] as HTMLElement);
+    expect(nodes[1]).toHaveAttribute("aria-pressed", "true");
     const detail = screen.getByRole("region", { name: "実装" });
     expect(within(detail).getByText("依存: 調査")).toBeInTheDocument();
     expect(within(detail).getByText("試行 1")).toBeInTheDocument();

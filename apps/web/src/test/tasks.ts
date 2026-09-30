@@ -93,25 +93,6 @@ export function sampleTasks(now = Date.now()): TaskDetail[] {
           ],
         },
         {
-          key: "ios-research",
-          title: "ios 参照の調査",
-          role: "researcher",
-          state: "succeeded",
-          required: false,
-          dependsOn: ["research"],
-          attempts: [
-            {
-              number: 1,
-              state: "succeeded",
-              agent: "Local",
-              model: "qwen3",
-              placement: "local_gpu",
-              startedAt: ago(now, 200),
-              finishedAt: ago(now, 182),
-            },
-          ],
-        },
-        {
           key: "implement",
           title: "実装",
           role: "worker",
@@ -141,6 +122,25 @@ export function sampleTasks(now = Date.now()): TaskDetail[] {
           toolCalls: [
             { id: "tc-1", name: "read_file", status: "succeeded", startedAt: ago(now, 60) },
             { id: "tc-2", name: "apply_patch", status: "started", startedAt: ago(now, 12) },
+          ],
+        },
+        {
+          key: "ios-research",
+          title: "ios 参照の調査",
+          role: "researcher",
+          state: "succeeded",
+          required: false,
+          dependsOn: ["research"],
+          attempts: [
+            {
+              number: 1,
+              state: "succeeded",
+              agent: "Local",
+              model: "qwen3",
+              placement: "local_gpu",
+              startedAt: ago(now, 200),
+              finishedAt: ago(now, 182),
+            },
           ],
         },
         {
