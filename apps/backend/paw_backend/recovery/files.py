@@ -34,7 +34,7 @@ import errno
 import fcntl
 import os
 import stat
-from collections.abc import Collection, Mapping
+from collections.abc import Callable, Collection, Mapping
 from enum import StrEnum
 from pathlib import Path
 
@@ -387,10 +387,16 @@ def open_checkout(
     protected: Collection[str],
     *,
     projection_dir: str | Path | None = None,
-    claim: bool = False,
+    claim: Callable[[], bool] | None = None,
 ) -> RecoveryCheckout:
     """Verify the checkout's directory, take its lock; with ``claim`` write the
-    marker into a checkout that has nothing but ``.git``.
+    marker into a checkout that has nothing but ``.git`` and no history.
+
+    ``claim`` is called (under the lock) only when the marker is missing and
+    the work tree has nothing but ``.git``; it says whether the repository is
+    an empty clone (no commit, no ref: ``RecoveryGit.has_no_history``). A
+    project's clone made with ``--no-checkout``, or one on a new orphan branch,
+    has only ``.git`` in its work tree too, but a history: it is refused.
 
     Raises ``RecoveryFilesError`` or ``RecoveryBusyError``. That the directory is
     the top of a git work tree is ``git.py``'s check (made before this)."""
@@ -418,7 +424,7 @@ def open_checkout(
                 raise RecoveryBusyError() from None
             if not _check_marker(root_fd):
                 others = [name for name in os.listdir(root_fd) if name != ".git"]
-                if not claim or others:
+                if claim is None or others or not claim():
                     raise RecoveryFilesError(CheckoutProblem.NOT_RECOVERY_REPOSITORY)
                 _write_file(root_fd, MARKER_NAME, MARKER_CONTENT)
                 os.fsync(root_fd)

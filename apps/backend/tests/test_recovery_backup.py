@@ -11,8 +11,10 @@ and never writes through a link or outside its managed names.
 import asyncio
 import os
 import stat
+import threading
 import unittest
 from dataclasses import replace
+from unittest import mock
 from uuid import uuid4
 
 from paw_backend.db import Database
@@ -24,6 +26,7 @@ from paw_backend.recovery import (
     RecoveryBusyError,
     RecoveryRestorer,
 )
+from paw_backend.recovery import restore as restore_module
 from paw_backend.recovery.files import (
     CheckoutProblem,
     RecoveryFilesError,
@@ -311,7 +314,11 @@ class BackupRunTest(BackupTestCase):
         self.assertTrue(result.ok)
 
     async def test_a_second_run_at_the_same_time_does_nothing(self) -> None:
-        checkout = open_checkout(str(self.world.checkout), self.world.homes, claim=True)
+        checkout = open_checkout(
+            str(self.world.checkout),
+            self.world.homes,
+            claim=RecoveryGit(str(self.world.checkout)).has_no_history,
+        )
         self.addCleanup(checkout.close)
         with self.assertRaises(RecoveryBusyError):
             await self.runner().run()
@@ -399,6 +406,63 @@ class CheckoutTest(BackupTestCase):
         self.assertFalse(result.ok)
         self.assertFalse((self.world.checkout / MARKER_NAME).exists())
 
+    def project_clone(self, *options: str) -> tuple:
+        """A project's remote with one commit, and a clone of it (``options``
+        go to ``git clone``)."""
+        project = self.world.base / "project.git"
+        git("init", "--bare", "--quiet", str(project), cwd=self.world.base)
+        seed = self.world.base / "seed"
+        git("clone", "--quiet", str(project), str(seed), cwd=self.world.base)
+        (seed / "src.py").write_text("print()\n")
+        git("add", "src.py", cwd=seed)
+        git("commit", "--quiet", "-m", "project", cwd=seed)
+        git("push", "--quiet", "origin", f"HEAD:refs/heads/{BRANCH}", cwd=seed)
+        before = git("rev-parse", BRANCH, cwd=project)
+        clone = self.world.base / "project"
+        git("clone", "--quiet", *options, str(project), str(clone), cwd=self.world.base)
+        return project, clone, before
+
+    async def assert_project_clone_refused(self, project, clone, before) -> None:
+        self.assertEqual([".git"], os.listdir(clone))
+        recorder = Recorder()
+        values = {
+            "protected_homes": self.world.homes,
+            "clock": lambda: T0,
+            "source": self.source,
+            "recorder": recorder,
+            "projection_state": self.status_now,
+            "schema_version": lambda: "0129",
+        }
+        result = await RecoveryBackupRunner(
+            self.database, clone, self.world.projection, **values
+        ).run()
+        self.assertEqual(
+            ("recovery.backup.failed", "check_repository:not_recovery_repository"),
+            recorder.rows[-1],
+        )
+        self.assertFalse(result.ok)
+        self.assertEqual([".git"], os.listdir(clone))
+        self.assertEqual(
+            [f"refs/heads/{BRANCH}"],
+            git("for-each-ref", "--format=%(refname)", cwd=project).split(),
+        )
+        self.assertEqual(before, git("rev-parse", BRANCH, cwd=project))
+
+    async def test_a_project_clone_without_a_work_tree_is_refused(self) -> None:
+        # ``git clone --no-checkout``: only ``.git`` at the root, but a history.
+        await self.assert_project_clone_refused(*self.project_clone("--no-checkout"))
+
+    async def test_a_project_clone_on_a_new_orphan_branch_is_refused(self) -> None:
+        # No ``HEAD`` commit and nothing in the work tree, but the repository
+        # has refs (the project's history): not an empty clone.
+        project, clone, before = self.project_clone()
+        git("checkout", "--quiet", "--orphan", "backup", cwd=clone)
+        git("rm", "-r", "-q", "--cached", ".", cwd=clone)
+        (clone / "src.py").unlink()
+        git("config", "branch.backup.remote", "origin", cwd=clone)
+        git("config", "branch.backup.merge", "refs/heads/backup", cwd=clone)
+        await self.assert_project_clone_refused(project, clone, before)
+
     async def test_a_directory_inside_a_work_tree_is_refused(self) -> None:
         result = await self.runner().run()
         self.assertTrue(result.ok)
@@ -483,6 +547,88 @@ class CheckoutTest(BackupTestCase):
         with self.assertRaises(RecoveryFilesError) as caught:
             open_projection(str(self.world.projection))
         self.assertIs(CheckoutProblem.MARKER_INVALID, caught.exception.problem)
+
+
+class RestoreCancellationTest(BackupTestCase):
+    """An interrupted restore (Ctrl-C, SIGTERM) leaves its audit row."""
+
+    async def asyncSetUp(self) -> None:
+        await super().asyncSetUp()
+        self.assertTrue((await self.runner().run()).ok)
+        self.clone = self.world.clone()
+        self.rows: list[tuple[str, str]] = []
+        self.release_record = asyncio.Event()
+        self.release_record.set()
+        self.recording = asyncio.Event()
+
+        async def record(database, action, reason, *, occurred_at):
+            self.recording.set()
+            await self.release_record.wait()
+            self.rows.append((str(action), reason))
+
+        patcher = mock.patch(
+            "paw_backend.recovery.restore.record_recovery_outcome", record
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def restorer(self, cls=RecoveryRestorer) -> RecoveryRestorer:
+        return cls(self.database, self.clone, protected_homes=self.world.homes)
+
+    def assert_lock_released(self) -> None:
+        open_checkout(str(self.clone), self.world.homes).close()
+
+    async def test_a_cancellation_while_the_source_is_read_is_recorded(self) -> None:
+        started = threading.Event()
+        release = threading.Event()
+        self.addCleanup(release.set)
+        original = restore_module.open_source
+
+        def slow_open_source(*arguments, **options):
+            started.set()
+            release.wait(10)
+            return original(*arguments, **options)
+
+        with mock.patch.object(restore_module, "open_source", slow_open_source):
+            task = asyncio.ensure_future(self.restorer().run(apply=True))
+            await asyncio.to_thread(started.wait, 10)
+            task.cancel()
+            await asyncio.sleep(0.05)
+            release.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        self.assertEqual([("recovery.restore.failed", "CancelledError")], self.rows)
+        self.assert_lock_released()
+
+    async def test_a_cancellation_while_restoring_is_recorded(self) -> None:
+        started = asyncio.Event()
+
+        class Slow(RecoveryRestorer):
+            async def _restore(self, data, *, apply):
+                started.set()
+                await asyncio.sleep(60)
+
+        task = asyncio.ensure_future(self.restorer(Slow).run(apply=True))
+        await started.wait()
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertEqual([("recovery.restore.failed", "CancelledError")], self.rows)
+        self.assert_lock_released()
+
+    async def test_a_cancellation_while_the_outcome_is_recorded_adds_no_row(
+        self,
+    ) -> None:
+        (self.clone / "stray.txt").write_text("x\n")  # not clean: refused
+        self.release_record.clear()
+        task = asyncio.ensure_future(self.restorer().run())
+        await self.recording.wait()
+        task.cancel()
+        await asyncio.sleep(0.05)
+        self.release_record.set()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertEqual([("recovery.restore.refused", "not_clean")], self.rows)
 
 
 if __name__ == "__main__":

@@ -363,6 +363,14 @@ def _restore(settings: Settings, apply: bool, homes, clock, err) -> int:
     )
     try:
         result = asyncio.run(_restore_run(owner, apply, homes, clock))
+    except asyncio.CancelledError:
+        _say(
+            err,
+            "FAILED: the restore was terminated (SIGTERM) before it finished; "
+            "its transaction, if any, was rolled back. It was recorded as "
+            "recovery.restore.failed if the database accepted it.",
+        )
+        return EXIT_FAILED
     except RecoveryBusyError:
         _say(
             err,
@@ -386,7 +394,8 @@ async def _restore_run(settings: Settings, apply: bool, homes, clock) -> Restore
         git_timeout=settings.recovery_git_timeout_seconds,
     )
     try:
-        return await restorer.run(apply=apply)
+        with _cancel_on_sigterm():
+            return await restorer.run(apply=apply)
     finally:
         await database.dispose()
 

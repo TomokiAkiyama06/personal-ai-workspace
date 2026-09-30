@@ -200,7 +200,10 @@ class RecoveryBackupRunner:
         git.check_top_level()
         upstream = git.upstream()
         checkout = open_checkout(
-            path, self._protected, projection_dir=self._projection_dir, claim=True
+            path,
+            self._protected,
+            projection_dir=self._projection_dir,
+            claim=git.has_no_history,
         )
         return git, checkout, upstream
 

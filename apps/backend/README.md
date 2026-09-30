@@ -3665,7 +3665,7 @@ python -m paw_backend.cli recovery-backup-run                          # 1 回�
 python -m paw_backend.cli recovery-backup-check --max-age-minutes 90   # 監視（読み取りだけ。経過時間は DB の時計で測る）
 ```
 
-- Checkout は絶対・正規の Path で、Home・Projection の Directory と重ならず、git の Work Tree の最上位で、Marker を持つこと（Marker がなければ、`.git` しかない空の Clone だけを自分のものにします）。Branch に Upstream が要ります。満たさなければ何も書かずに失敗します（`check_repository:<理由>`）。
+- Checkout は絶対・正規の Path で、Home・Projection の Directory と重ならず、git の Work Tree の最上位で、Marker を持つこと（Marker がなければ、`.git` しかなく Commit も Ref もない空の Clone だけを自分のものにします。`git clone --no-checkout` した Project の Clone や、Project の Clone の新しい Orphan Branch のように、Work Tree が空でも履歴のある Repository は `not_recovery_repository` で拒否します）。Branch に Upstream が要ります。満たさなければ何も書かずに失敗します（`check_repository:<理由>`）。
 - Memory Projection は、その Marker の Lock を取り（実行中なら最大 120 秒待つ）、`.paw-memory-projection-incomplete` がなく、最後の実行が `memory.projection.completed` のときだけ写します（Decision 0038 の 9）。
 - DB は `REPEATABLE READ, READ ONLY` の 1 つの Snapshot から、**列を名指しした SQL**（`recovery/source.py`）だけで読みます。Password Hash・Passkey・Session・各種 Token・`secret_handle`・Conversation・Embedding・Checkout の Path・Task の入力と Log・Audit は読みません。自由記述の Credential は `[REDACTED]` にします（Decision 0038 の 5 と同じ）。最後の防御として、Record のすべての文字列の値（Task の `head_commit` など）も書く前に同じ検出で置換します。
 - Login 名が Credential の検出に当たる User は、Login 名を `redacted-<User ID の先頭 12 桁>` にして書きます。Restore はその名前で戻し、Owner が名前を付け直す手作業（「the Owner renames this user」）を表示します。
@@ -3687,7 +3687,7 @@ python -m paw_backend.cli recovery-restore --apply  # 1 Transaction で書く
 
 - 元の確認: Marker、Clean な Work Tree、`HEAD` が Remote-tracking Branch と同じ（最後に Push された状態。`not_latest`）、`recovery_format_version` がこの Code の読める版、全 File の Checksum（列挙外の File も拒否）、Record の Key と型、削除中の User の個人データがないこと。先の確認: DB がこの Release の Head、Backup の Schema がこの Release の鎖にあること、対象の Table がすべて空であること（`target_not_empty`）。拒否は `recovery.restore.refused` の Audit の行（終了コード 1）だけで、Workspace のデータは書きません。
 - Checkout の Lock は確認から書き込みと Audit の記録が終わるまで持ち続けるので、その間に Backup が Checkout を書き換えたり Push したりしません。
-- Restore は確かめた Commit の Object から File を読みます（Work Tree は読まない）。`--apply` は対象の Table を Lock して空であることを確かめ直し、User・Quota・Project・Member・Repository・Remote・Memory・Version・Relation・Source（`conversation` を除く）と `recovery.restore.applied` を同じ Transaction で書きます。失敗は Rollback（`recovery.restore.failed`、終了コード 3）。
+- Restore は確かめた Commit の Object から File を読みます（Work Tree は読まない）。`--apply` は対象の Table を Lock して空であることを確かめ直し、User・Quota・Project・Member・Repository・Remote・Memory・Version・Relation・Source（`conversation` を除く）と `recovery.restore.applied` を同じ Transaction で書きます。失敗は Rollback（`recovery.restore.failed`、終了コード 3）。Ctrl-C・SIGTERM で打ち切られた Restore も、結果をまだ記録していなければ `recovery.restore.failed`（`CancelledError`）を記録してから終わります（記録の最中なら記録を終えてから。終了コード 3）。
 - 戻さないもの（表示する手作業）: Credential（Owner は `sudo python -m paw_backend.cli owner-recover --confirm-owner-recovery`、他の Account は Decision 0032 の Reset）、Auth Policy（Owner が設定画面で Step-up して設定し直す）、Shared Connection（再登録）、Checkout（Clone し直し、各 User が `gh auth login`）、Task（Summary だけ）、`conversation` の Source、Audit。Restore の後に `memory-projection-run` を実行します。Backup の外の削除記録の確認は、Backup に削除記録がなくても毎回表示します（最後の Push の後に始まった削除はどの記録にもないため）。Dry run の Audit の行を書けなければ、Dry run は失敗です（終了コード 3）。
 
 ### 制限と未確認の点

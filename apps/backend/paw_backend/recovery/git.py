@@ -148,6 +148,16 @@ class RecoveryGit:
         """The commit of ``HEAD``, ``None`` before the first commit."""
         return self._value(["rev-parse", "--verify", "--quiet", "HEAD^{commit}"])
 
+    def has_no_history(self) -> bool:
+        """No commit at ``HEAD`` and no ref at all: an empty clone (or a new
+        ``git init``), which the backup may claim. A clone of a project's
+        repository has refs even when its work tree is empty (``--no-checkout``,
+        a new orphan branch), so it is never claimed (Decision 0054 1)."""
+        if self.head() is not None:
+            return False
+        refs = self._run(["for-each-ref", "--count=1", "--format=%(refname)"])
+        return not refs.stdout.strip()
+
     def upstream(self) -> Upstream:
         """The current branch and where it is pushed (``no_upstream`` if not set)."""
         branch = self._value(["symbolic-ref", "--quiet", "--short", "HEAD"])

@@ -29,6 +29,7 @@ checkouts (cloned again), tasks (a summary only), conversation sources of
 memories (conversations are not backed up), the audit trail.
 """
 
+import asyncio
 import functools
 import json
 from collections.abc import Callable, Collection, Mapping
@@ -51,7 +52,7 @@ from paw_backend.memory.models import (
     MemorySource,
     MemoryVersion,
 )
-from paw_backend.memory.projection.runner import _in_thread
+from paw_backend.memory.projection.runner import _in_thread, _to_the_end
 from paw_backend.memory.projection.writer import system_home_directories
 from paw_backend.projects.models import ProjectMemberRow, ProjectRow
 from paw_backend.recovery.audit import (
@@ -571,6 +572,8 @@ class RecoveryRestorer:
         self._git_timeout = git_timeout
         self._target_head = target_head
         self._revisions = revisions
+        # Whether this run has recorded (or is recording) its outcome row.
+        self._outcome_recorded = False
 
     async def _check_target(self, session: AsyncSession, data: RestoreData) -> None:
         try:
@@ -600,34 +603,63 @@ class RecoveryRestorer:
         return None if row is None else dict(row._mapping)
 
     async def _record(self, action: RecoveryAction, reason: str) -> bool:
-        try:
-            await record_recovery_outcome(
+        """Record the run's outcome, to the end even when cancelled meanwhile
+        (the cancellation is raised after it: the run then has its row)."""
+        self._outcome_recorded = True
+        audited, interrupted = await _to_the_end(
+            record_recovery_outcome(
                 self._database, action, reason, occurred_at=self._clock()
             )
-        except Exception:
-            return False
-        return True
+        )
+        if interrupted is not None:
+            raise interrupted
+        return audited
 
     async def run(self, *, apply: bool = False) -> RestoreResult:
+        """One restore. Raises ``RecoveryBusyError`` (nothing done, no row).
+
+        A cancellation (Ctrl-C, SIGTERM through the command) before the run
+        recorded its outcome is recorded as ``recovery.restore.failed``
+        (``CancelledError``; the transaction, if any, rolled back) before it
+        propagates, so an interrupted restore still leaves its audit row."""
+        self._outcome_recorded = False
+        checkout: RecoveryCheckout | None = None
         try:
-            checkout, data = await _in_thread(
-                functools.partial(
-                    open_source,
-                    self._repository_dir,
-                    self._protected,
-                    git_timeout=self._git_timeout,
-                ),
-                discard=lambda value: value[0].close(),
-            )
-        except (RecoveryRestoreError, RecoveryFilesError, RecoveryGitError) as refusal:
-            code = _code(refusal)
-            audited = await self._record(RecoveryAction.RESTORE_REFUSED, code)
-            return RestoreResult(refused=code, audited=audited)
-        try:
+            try:
+                checkout, data = await _in_thread(
+                    functools.partial(
+                        open_source,
+                        self._repository_dir,
+                        self._protected,
+                        git_timeout=self._git_timeout,
+                    ),
+                    discard=lambda value: value[0].close(),
+                )
+            except (
+                RecoveryRestoreError,
+                RecoveryFilesError,
+                RecoveryGitError,
+            ) as refusal:
+                code = _code(refusal)
+                audited = await self._record(RecoveryAction.RESTORE_REFUSED, code)
+                return RestoreResult(refused=code, audited=audited)
             return await self._restore(data, apply=apply)
+        except asyncio.CancelledError as cancelled:
+            if not self._outcome_recorded:
+                self._outcome_recorded = True
+                await _to_the_end(
+                    record_recovery_outcome(
+                        self._database,
+                        RecoveryAction.RESTORE_FAILED,
+                        _code(cancelled),
+                        occurred_at=self._clock(),
+                    )
+                )
+            raise
         finally:
-            # Held through the checks, the write and its audit row.
-            await _in_thread(checkout.close)
+            if checkout is not None:
+                # Held through the checks, the write and its audit row.
+                await _in_thread(checkout.close)
 
     async def _restore(self, data: RestoreData, *, apply: bool) -> RestoreResult:
         try:
