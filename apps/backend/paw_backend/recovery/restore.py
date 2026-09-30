@@ -439,7 +439,7 @@ def open_source(
     text = check_directory_path(path, protected)
     git = RecoveryGit(text, timeout=git_timeout)
     git.check_top_level()
-    checkout = open_checkout(text, protected, claim=False)
+    checkout = open_checkout(text, protected)
     try:
         commit = git.check_restorable()
         # From the verified commit's objects, not the work tree: another

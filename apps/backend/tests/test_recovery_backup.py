@@ -397,6 +397,13 @@ class RestoreSourceTest(BackupTestCase):
 
 
 class CheckoutTest(BackupTestCase):
+    async def test_a_restore_never_claims_a_checkout_without_the_marker(self) -> None:
+        # The empty clone a backup would claim: a restore refuses it.
+        with self.assertRaises(RecoveryFilesError) as caught:
+            load_source(str(self.world.checkout), self.world.homes)
+        self.assertIs(CheckoutProblem.NOT_RECOVERY_REPOSITORY, caught.exception.problem)
+        self.assertEqual([".git"], os.listdir(self.world.checkout))
+
     async def test_a_checkout_with_other_content_and_no_marker_is_refused(self) -> None:
         (self.world.checkout / "src.py").write_text("print()\n")
         result = await self.runner().run()
