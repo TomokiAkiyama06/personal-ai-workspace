@@ -4193,8 +4193,8 @@ Component ごとに Source が 1 つあり、読むだけです。返すのは N
 | --- | --- |
 | `database` | `SELECT 1` と所要時間。応答しなければ `critical` |
 | `compute` | Compute Scheduler の `status()`（VRAM、Utilization、Lease と待ち、Relief、Model ごとの状態）と Full GPU Mode。Scheduler は `create_app(compute=..., full_gpu=...)` か `app.state.system_health.compute.attach(...)` で渡す（#165）。なければ `PAW_HEALTH_GPU_PROBE` の Probe、どちらもなければ `not_configured` |
-| `task_queue` | 全 User の Task の状態別の数、直近 1 時間・1 日の失敗（`task_events` の `fail`。Retry された Task も失敗ごとに数える）、直近 1 時間の Retry と Loop（同じ失敗の Signature の繰り返し） |
-| `memory_worker` | Memory の Consolidation Queue の待ちと Dead letter |
+| `task_queue` | 全 User の Task の状態別の数、直近 1 時間・1 日の失敗（`task_events` の `fail`。Retry された Task も失敗ごとに数える）、直近 1 時間の Retry と Loop（同じ失敗の Signature の繰り返し。検知器と同じく保存された Window の中で数え、その最後の失敗が直近 1 時間にあるもの） |
+| `memory_worker` | Memory の Consolidation Queue の待ち、Worker に届かず延期された Job（`worker_unavailable`）、期限の切れた Lease、Dead letter（後の 3 つはどれも `WARNING`） |
 | `connections` | Codex / Claude の接続の状態・有効・最後の確認・実行中の呼び出し（Credential と Handle は読まない） |
 | `connection_reaper` | `AbandonedCallReaper.stats`（Cycle の数、片付けた行、連続の失敗、最後の Error の型） |
 | `recovery_backup`、`memory_projection`、`audit_retention` | 各 Job が `audit_events` に書く Run の行から、最後の Run、最後の成功からの時間（DB の時計）、連続の失敗 |

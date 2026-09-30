@@ -276,15 +276,27 @@ class TaskQueueSourceTest(unittest.IsolatedAsyncioTestCase):
 
 class MemoryWorkerSourceTest(unittest.IsolatedAsyncioTestCase):
     async def test_pending_and_dead_letters(self):
-        database = RowsDatabase([(4, 1, 30.0)], [(0,)])
+        database = RowsDatabase([(4, 1, 30.0, 0, 0)], [(0,)])
         health = await MemoryWorkerSource(database).check()
         self.assertIs(health.severity, Severity.INFO)
         self.assertEqual(health.metrics["pending"], 4)
         self.assertEqual(health.metrics["oldest_pending_seconds"], 30.0)
-        database = RowsDatabase([(0, 0, None)], [(2,)])
+        database = RowsDatabase([(0, 0, None, 0, 0)], [(2,)])
         health = await MemoryWorkerSource(database).check()
         self.assertIs(health.severity, Severity.WARNING)
         self.assertEqual(health.reasons, ("dead_letters",))
+
+    async def test_an_unreachable_or_silent_worker_is_a_warning(self):
+        # A worker that is down defers its jobs and never dead-letters them
+        # (Codex P1 on PR #170).
+        database = RowsDatabase([(6, 1, 900.0, 6, 1)], [(0,)])
+        health = await MemoryWorkerSource(database).check()
+        self.assertIs(health.severity, Severity.WARNING)
+        self.assertEqual(health.reasons, ("worker_unavailable", "expired_leases"))
+        self.assertEqual(
+            (health.metrics["waiting_for_worker"], health.metrics["expired_leases"]),
+            (6, 1),
+        )
 
 
 class ConnectionSourceTest(unittest.IsolatedAsyncioTestCase):
@@ -443,7 +455,7 @@ class MetricNamesTest(unittest.IsolatedAsyncioTestCase):
             await TaskQueueSource(
                 RowsDatabase([TASK_ROW], [NO_EVENTS], [(0,)])
             ).check(),
-            await MemoryWorkerSource(RowsDatabase([(1, 0, 1.0)], [(0,)])).check(),
+            await MemoryWorkerSource(RowsDatabase([(1, 0, 1.0, 0, 0)], [(0,)])).check(),
             await ConnectionSource(
                 RowsDatabase([("codex", "connected", True, 1.0)], [])
             ).check(),

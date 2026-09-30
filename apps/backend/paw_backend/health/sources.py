@@ -12,7 +12,8 @@ The thresholds are ``limits.py`` (Decision 0059, Proposed).
   It never loads or unloads a model and never starts anything but the probe.
 * :class:`TaskQueueSource`: tasks by state, failures (events) of the last
   hour / day, retries and detected loops of the last hour.
-* :class:`MemoryWorkerSource`: the Memory consolidation queue.
+* :class:`MemoryWorkerSource`: the Memory consolidation queue (pending, deferred
+  for an unreachable worker, expired leases, dead letters).
 * :class:`ConnectionSource`: the shared Codex / Claude connections (status,
   enabled, last check, calls in flight). Never the credential or its handle.
 * :class:`ReaperSource`: the reaper of abandoned connection calls (its cycles).
@@ -401,16 +402,26 @@ SELECT
 FROM task_events
 WHERE command IN ('retry', 'fail') AND created_at >= now() - interval '24 hours'
 """
-# Loops of the last hour (PAW-033): a task attempt and approach whose same failure
-# signature was recorded at least the loop policy's ``repeat_threshold`` times,
-# the condition of the detector's TRY_ALTERNATIVE / ESCALATE verdicts. A loop
-# never fails its task, so the failed tasks do not show it.
+# Loops detected in the last hour (PAW-033): a task attempt and approach whose
+# same failure signature is in the task's stored window (``LoopDetector`` keeps at
+# most ``window_size`` rows per task) at least the loop policy's
+# ``repeat_threshold`` times, the latest of them in the last hour: the condition
+# of the detector's TRY_ALTERNATIVE / ESCALATE verdict when that failure was
+# recorded, however long ago the earlier ones were (Codex P1 on PR #170). A loop
+# never fails its task, so the failures do not show it. The tasks with a failure
+# in the last hour come from ``ix_loop_failure_signatures_created_at``, their
+# windows from the index on ``(task_id, seq)``.
 _LOOPS = """
 SELECT count(DISTINCT task_id) FROM (
-    SELECT task_id FROM loop_failure_signatures
-    WHERE created_at >= now() - interval '1 hour'
-    GROUP BY task_id, attempt, approach, signature
+    SELECT window_row.task_id FROM loop_failure_signatures AS window_row
+    WHERE window_row.task_id IN (
+        SELECT task_id FROM loop_failure_signatures
+        WHERE created_at >= now() - interval '1 hour'
+    )
+    GROUP BY window_row.task_id, window_row.attempt, window_row.approach,
+             window_row.signature
     HAVING count(*) >= %(threshold)s
+       AND max(window_row.created_at) >= now() - interval '1 hour'
 ) AS repeated
 """
 
@@ -471,7 +482,10 @@ _MEMORY_QUEUE = """
 SELECT
     count(*) FILTER (WHERE status = 'queued'),
     count(*) FILTER (WHERE status = 'claimed'),
-    extract(epoch FROM now() - min(enqueued_at) FILTER (WHERE status = 'queued'))
+    extract(epoch FROM now() - min(enqueued_at) FILTER (WHERE status = 'queued')),
+    count(*) FILTER (WHERE status = 'queued'
+                     AND last_failure = 'worker_unavailable'),
+    count(*) FILTER (WHERE status = 'claimed' AND lease_expires_at <= now())
 FROM memory_consolidation_queue
 WHERE status IN ('queued', 'claimed')
 """
@@ -483,8 +497,12 @@ WHERE status = 'dead' AND finished_at >= now() - interval '24 hours'
 
 class MemoryWorkerSource:
     """The Memory consolidation queue (PAW-041): pending and leased jobs, the
-    oldest waiting one, and jobs that went to the dead letter in the last day
-    (a warning). The Memory Worker model itself is part of ``compute``."""
+    oldest waiting one, the jobs deferred because the Memory Worker was not
+    reachable (``last_failure = 'worker_unavailable'``), the leases that expired
+    (a worker that took a job and went silent), and jobs that went to the dead
+    letter in the last day. Each of the last three is a warning (Codex P1 on PR
+    #170: a worker that is down defers its jobs and never dead-letters them). The
+    Memory Worker model itself is part of ``compute``."""
 
     component = Component.MEMORY_WORKER
     max_age_seconds = 60.0
@@ -503,17 +521,21 @@ class MemoryWorkerSource:
             "pending": int(queue[0]),
             "claimed": int(queue[1]),
             "oldest_pending_seconds": _seconds(queue[2]),
+            "waiting_for_worker": int(queue[3]),
+            "expired_leases": int(queue[4]),
             "dead_last_day": int(dead),
         }
-        warning = int(dead) >= limits.MEMORY_DEAD_WARNING
-        severity = Severity.WARNING if warning else Severity.INFO
-        return _health(
-            self.component,
-            severity,
-            _status_of(severity),
-            ["dead_letters"] if warning else [],
-            metrics,
-        )
+        reasons = [
+            reason
+            for reason, warning in (
+                ("worker_unavailable", metrics["waiting_for_worker"] > 0),
+                ("expired_leases", metrics["expired_leases"] > 0),
+                ("dead_letters", int(dead) >= limits.MEMORY_DEAD_WARNING),
+            )
+            if warning
+        ]
+        severity = Severity.WARNING if reasons else Severity.INFO
+        return _health(self.component, severity, _status_of(severity), reasons, metrics)
 
 
 # -- Codex / Claude -------------------------------------------------------------------

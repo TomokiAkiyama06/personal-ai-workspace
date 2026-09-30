@@ -30,8 +30,8 @@
 | --- | --- |
 | `database` | `Database.check()`（`SELECT 1`）と所要時間 |
 | `compute` | Compute Scheduler の `status()`（VRAM の actual / reserved / external / headroom / available、Utilization、Lease と待ちの数、Relief、各 Model の Role・状態＝Residency）と Full GPU Mode の `status()`。Scheduler がなければ、`PAW_HEALTH_GPU_PROBE` を有効にしたときだけ読み取り専用の Probe、どちらもなければ `not_configured` |
-| `task_queue` | 全 User の Task の数（状態別、`waiting` は理由別、1 日の `completed` / `cancelled`）、直近 1 時間・1 日の失敗（`task_events` の `fail`。Retry された Task は失敗ごとに数える。Codex の P1、PR #170）、直近 1 時間の Retry（`task_events` の `retry`）と Loop（`loop_failure_signatures` で同じ Attempt・Approach の同じ Signature が Loop Policy の `repeat_threshold` 回以上＝検知器の TRY_ALTERNATIVE / ESCALATE の条件）。ID・題名・Project は返さない |
-| `memory_worker` | Memory の Consolidation Queue（待ち・Lease 中・最古の待ち時間・直近 1 日の Dead letter）。Memory Worker の Model 自体は `compute` |
+| `task_queue` | 全 User の Task の数（状態別、`waiting` は理由別、1 日の `completed` / `cancelled`）、直近 1 時間・1 日の失敗（`task_events` の `fail`。Retry された Task は失敗ごとに数える。Codex の P1、PR #170）、直近 1 時間の Retry（`task_events` の `retry`）と Loop（`loop_failure_signatures` で同じ Attempt・Approach の同じ Signature が Loop Policy の `repeat_threshold` 回以上で、その最後の失敗が直近 1 時間にあるもの＝検知器の TRY_ALTERNATIVE / ESCALATE の条件。検知器は時間で区切らないので、前の失敗が 1 時間より前でも数える。Codex の P1、PR #170）。ID・題名・Project は返さない |
+| `memory_worker` | Memory の Consolidation Queue（待ち・Lease 中・最古の待ち時間・Worker に届かず延期された待ち（`last_failure = 'worker_unavailable'`）・期限の切れた Lease・直近 1 日の Dead letter）。Memory Worker の Model 自体は `compute` |
 | `connections` | Shared Codex / Claude Connection の設定の有無・有効・状態・最後の確認からの時間・実行中の呼び出し。Credential と Handle は読まない |
 | `connection_reaper` | `AbandonedCallReaper` の各 Cycle（片付けた件数、連続の失敗、最後の Error の型）。#52 の Comment（PR #106）への対応 |
 | `recovery_backup` / `memory_projection` / `audit_retention` | Timer で動く 3 つの Job が Run ごとに書く `audit_events` の行から、最後の Run・最後の成功からの時間（DB の時計）・最後の成功以降の連続失敗 |
@@ -44,7 +44,7 @@
 - `database`: 応答しない＝`CRITICAL`（Monitor の 5 秒で終わらない Check も含む。`PAW_DATABASE_TIMEOUT_SECONDS` がそれより長くても `check_failed` にしない。Codex の P1、PR #170）、Check が 1 秒を超える＝`WARNING`。
 - `compute`: Probe が読めない・Main の構成変更が必要（Relief 6）・Model の操作が失敗（`failed`）・通常 Mode で Main が GPU にいない・Full GPU Mode の終了後に Main が戻らない＝`ERROR`。VRAM の圧迫・Relief の実行中・VRAM 待ちの仕事・Full GPU Mode の開始失敗＝`WARNING`。
 - `task_queue`: 直近 1 時間の失敗 1 件＝`WARNING`、5 件以上＝`ERROR`。Loop 1 件＝`WARNING`、3 件以上＝`ERROR`。Retry 1 件以上＝`WARNING`（Notification Policy の「retry」）。
-- `memory_worker`: 直近 1 日の Dead letter 1 件以上＝`WARNING`。
+- `memory_worker`: Worker に届かず延期された待ち 1 件以上・期限の切れた Lease 1 件以上・直近 1 日の Dead letter 1 件以上＝`WARNING`（止まった Worker は Job を延期するだけで Dead letter にしないため。Codex の P1、PR #170）。
 - `connections`: 有効な接続が `expired`＝`ERROR`、`unavailable`＝`WARNING`。無効・未設定は `INFO`（どちらも使わない構成がある）。
 - `connection_reaper`: Cycle の失敗 1〜2 回連続＝`WARNING`、3 回連続＝`ERROR`。1 行でも片付けた＝`WARNING`（Process が呼び出しの途中で落ちた印）。
 - Job: 一度も動いていない＝`INFO`（`never_ran`。その構成で動かしていないことがある）。最後の Run の失敗＝`WARNING`、3 回連続＝`ERROR`（Notification Policy の「継続失敗」）。最後の成功が古い（Backup 2 時間／24 時間、Projection 1 時間／24 時間、Audit retention 2 日／7 日。`WARNING`／`ERROR`）。数値は `deploy/systemd` の Timer（30 分、5 分、毎日）から決めた暫定値。

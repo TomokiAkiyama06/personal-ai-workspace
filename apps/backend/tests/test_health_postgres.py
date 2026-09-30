@@ -318,6 +318,32 @@ class HealthPostgresTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result.reasons, ("loops_detected", "task_retries"))
 
+    async def test_a_loop_whose_earlier_failures_are_old_is_counted(self):
+        # The detector has no time cutoff: the third same failure now is a loop
+        # even when the first two were hours ago (Codex P1 on PR #170).
+        task = self.insert_task("running")
+        signature = "c" * 64
+        for age in ("3 hours", "2 hours", "5 minutes"):
+            self.sql(
+                "INSERT INTO loop_failure_signatures (task_id, attempt, approach,"
+                " signature, created_at) VALUES (:t, 1, 0, :s,"
+                f" now() - interval '{age}')",
+                t=task,
+                s=signature,
+            )
+        # A loop detected hours ago, nothing since: not one of the last hour.
+        old = self.insert_task("running")
+        for age in ("5 hours", "4 hours", "3 hours"):
+            self.sql(
+                "INSERT INTO loop_failure_signatures (task_id, attempt, approach,"
+                " signature, created_at) VALUES (:t, 1, 0, :s,"
+                f" now() - interval '{age}')",
+                t=old,
+                s=signature,
+            )
+        result = await TaskQueueSource(self.database).check()
+        self.assertEqual(result.metrics["loops_last_hour"], 1)
+
     async def test_a_late_event_keeps_the_time_it_was_seen(self):
         seen = datetime(2026, 9, 30, 3, 0, tzinfo=UTC)
         await self.store.record_changes(
@@ -398,6 +424,10 @@ class HealthPostgresTest(unittest.IsolatedAsyncioTestCase):
         result = await MemoryWorkerSource(self.database).check()
         self.assertEqual(
             (result.metrics["pending"], result.metrics["dead_last_day"]), (0, 0)
+        )
+        self.assertEqual(
+            (result.metrics["waiting_for_worker"], result.metrics["expired_leases"]),
+            (0, 0),
         )
 
     async def test_scheduled_job_counts_failures_since_the_last_success(self):
