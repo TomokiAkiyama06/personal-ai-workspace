@@ -439,6 +439,8 @@ describe("Memory screen", () => {
       [mergeId, 3, 1],
       [mergeId, 4, 1],
     ]);
+    expect(await screen.findByText("v1 の内容で新しい版 v5 を作りました。")).toBeVisible();
+    expect(screen.queryByText("編集中に別の更新がありました")).not.toBeInTheDocument();
   });
 
   it("says so when the history cannot be read again after a write", async () => {

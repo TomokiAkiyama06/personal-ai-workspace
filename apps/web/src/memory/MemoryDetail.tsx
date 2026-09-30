@@ -398,6 +398,7 @@ export function MemoryDetail({
           ? conflict.version_number
           : current.version_number;
       const written = await source.restore(memoryId, expected, version.version_number);
+      setConflict(null);
       setNotice(
         t("memory.version.restored", {
           from: version.version_number,
