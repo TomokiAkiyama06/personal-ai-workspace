@@ -1,6 +1,7 @@
 # Restore で飛ばした Repository の Repo 単位の記憶を戻さず、一覧にして手作業の手順にする
 
-- Status: Proposed
+- Status: Approved
+- Approval: 2026-09-30、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで直接回答して承認（判断が必要な点 1〜5 の全点。末尾の「承認時の決定」）
 - Date: 2026-09-30
 - Scope: Issue [#171](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/171)（PR #160 の残りの P2）。`apps/backend/paw_backend/recovery/restore.py`、`apps/backend/paw_backend/recovery/audit.py`。関連: [Decision 0054](0054-recovery-repository-projection-restore.md)（Recovery Repository の Backup と Restore。3・9・12）
 - Supersedes: [Decision 0054](0054-recovery-repository-projection-restore.md) のうち次の点だけ（それ以外は変えない）: 9 の「戻す」の「Memory・全 Version・Relation・`conversation` 以外の Source」（飛ばした Repository の Repo 単位の記憶を除く）と「戻さない」の一覧（その記憶を足す）、12 の `recovery.restore.planned` / `applied` の `reason` の形式（件数を足す）
@@ -86,3 +87,7 @@ Human は 2026-09-30 に作業 Session で次の方針を直接示した（Issue
 
 - 承認前も、PR は推奨どおりに実装して入り得る（Restore の既定は Dry run のまま）。承認されない点があれば別の PR で直す。
 - 方針を変える場合は、この Decision を書き換えず、新しい Decision から `Supersedes` する。
+
+## 承認時の決定（2026-09-30）
+
+Human は、作業 Session で判断が必要な点について推奨つきの説明を受け、直接回答して承認した（判断が必要な点 1〜5 の全点）。方向（飛ばした Repository の記憶は戻さず、一覧にして手作業の手順にする）は 2026-09-30 に先に直接決定しており、実装で詳しく決めた 1〜5 もすべて推奨どおり。
