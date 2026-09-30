@@ -1,11 +1,18 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "../App";
 import { ApiError } from "../api/client";
 import { mockApi, Providers, reply, session } from "../test/helpers";
 import { fakeTaskSource, sampleTasks, TASK_201, TASK_203, TASK_205 } from "../test/tasks";
-import { ACCEPTED_CONTROLS, type DagNode, formatDuration, layoutDag, orderedNodes } from "./model";
+import {
+  ACCEPTED_CONTROLS,
+  type DagNode,
+  formatDuration,
+  layoutDag,
+  orderedNodes,
+  type TaskDetail,
+} from "./model";
 import { type TaskSource, TaskSourceProvider } from "./source";
 
 afterEach(() => {
@@ -271,6 +278,75 @@ describe("Tasks page", () => {
       await vi.advanceTimersByTimeAsync(5000);
       expect(getTask.mock.calls.length).toBeGreaterThan(before[0] ?? 0);
       expect(listTasks.mock.calls.length).toBeGreaterThan(before[1] ?? 0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps the list when a background read fails", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const { source } = fakeTaskSource();
+      renderTasks("/agents", source);
+      const list = await screen.findByRole("navigation", { name: "タスクの一覧" });
+      await within(list).findAllByRole("link");
+      source.listTasks = () => Promise.reject(new ApiError(503, "service_unavailable", "x"));
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(within(list).getAllByRole("link")).toHaveLength(4);
+      expect(within(list).queryByRole("alert")).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("shows the task as it is now after a control is refused (a version conflict)", async () => {
+    const tasks = sampleTasks();
+    const failed = tasks.find((task) => task.id === TASK_205);
+    if (failed) {
+      failed.state = "failed";
+      failed.waitReason = null;
+    }
+    const { source } = fakeTaskSource(tasks);
+    renderTasks(`/agents/${TASK_205}`, source);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "最初からやり直す" }));
+    // Someone else restarted the task meanwhile.
+    if (failed) {
+      failed.state = "queued";
+      failed.version = 4;
+    }
+    source.control = () => Promise.reject(new ApiError(409, "conflict", "x"));
+    await user.click(screen.getByRole("button", { name: "最初からやり直すを実行" }));
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
+    const detail = screen.getByRole("article", { name: "メモリ整理ジョブ" });
+    await waitFor(() =>
+      expect(detail.querySelector(".task-title-block .state-pill")).toHaveTextContent("キュー待ち"),
+    );
+  });
+
+  it("ignores a poll that was in flight when a control answered", async () => {
+    const { source } = fakeTaskSource();
+    let resolveStale: (task: TaskDetail) => void = () => {};
+    const stale = sampleTasks().find((task) => task.id === TASK_203) as TaskDetail;
+    renderTasks(`/agents/${TASK_203}`, source);
+    await screen.findByRole("article", { name: "認証セッションの修正" });
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      source.getTask = () =>
+        new Promise((resolve) => {
+          resolveStale = resolve;
+        });
+      await vi.advanceTimersByTimeAsync(5000);
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      await user.click(screen.getByRole("button", { name: "一時停止" }));
+      const detail = screen.getByRole("article", { name: "認証セッションの修正" });
+      await waitFor(() =>
+        expect(detail.querySelector(".task-title-block .state-pill")).toHaveTextContent(
+          "一時停止中",
+        ),
+      );
+      await act(async () => resolveStale(stale));
+      expect(detail.querySelector(".task-title-block .state-pill")).toHaveTextContent("一時停止中");
     } finally {
       vi.useRealTimers();
     }

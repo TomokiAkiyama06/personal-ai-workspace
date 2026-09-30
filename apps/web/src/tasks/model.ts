@@ -86,6 +86,9 @@ export interface ControlOptions {
 /** The Backend's limit of a control's reason (tasks/service.py MAX_REASON_LENGTH). */
 export const MAX_REASON_LENGTH = 500;
 
+/** The Backend's limit of an agent / model name (tasks/service.py MAX_NAME_LENGTH). */
+export const MAX_NAME_LENGTH = 100;
+
 /** How often an unfinished task and the list are read again (no push channel yet). */
 export const REFRESH_MS = 5000;
 

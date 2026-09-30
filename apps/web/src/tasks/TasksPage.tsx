@@ -4,7 +4,7 @@
 //             steps in dependency order and the controls at the bottom
 // The task, its DAG and its repositories come from the Backend through
 // `TaskSource`; the controls are sent there and the Backend decides them.
-import { type ReactNode, useCallback, useEffect, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { isApiError } from "../api/client";
 import { type MessageKey, useI18n } from "../i18n";
 import { errorMessage } from "../i18n/errors";
@@ -18,6 +18,7 @@ import {
   type DagNode,
   elapsed,
   isUnsettled,
+  MAX_NAME_LENGTH,
   MAX_REASON_LENGTH,
   orderedNodes,
   REFRESH_MS,
@@ -106,9 +107,15 @@ function TasksView({ source }: { source: TaskSource }) {
   const unsettled = tasks.some((task) => isUnsettled(task.state));
   useEffect(() => {
     if (!unsettled) return;
-    const timer = window.setInterval(reload, REFRESH_MS);
+    // A failed background read keeps the last list (and keeps polling).
+    const timer = window.setInterval(() => {
+      source
+        .listTasks()
+        .then((data) => setList({ status: "ready", data }))
+        .catch(() => {});
+    }, REFRESH_MS);
     return () => window.clearInterval(timer);
-  }, [unsettled, reload]);
+  }, [unsettled, source]);
   const visible = tasks.filter((task) => matches(task, filter));
   const now = useNow(tasks.some(isLive));
   // On a wide screen the first task is open until one is chosen; on a phone the
@@ -275,17 +282,29 @@ function TaskDetailView({
   const now = useNow(task !== null && isLive(task));
   // Read an unfinished task again in the background (its state, DAG, tool calls
   // and controls change without the operator); a failed refresh keeps what is shown.
+  // A control moves `generation` on: a read that started before it (a poll in
+  // flight) must not replace the task the control answered with.
+  const generation = useRef(0);
+  const refresh = useCallback(() => {
+    const started = generation.current;
+    source
+      .getTask(id)
+      .then((data) => {
+        if (generation.current !== started) return;
+        setLoad((current) =>
+          current.status === "ready" && current.data.version > data.version
+            ? current
+            : { status: "ready", data },
+        );
+      })
+      .catch(() => {});
+  }, [source, id]);
   const polling = task !== null && isUnsettled(task.state) && pending === null;
   useEffect(() => {
     if (!polling) return;
-    const timer = window.setInterval(() => {
-      source
-        .getTask(id)
-        .then((data) => setLoad({ status: "ready", data }))
-        .catch(() => {});
-    }, REFRESH_MS);
+    const timer = window.setInterval(refresh, REFRESH_MS);
     return () => window.clearInterval(timer);
-  }, [polling, source, id]);
+  }, [polling, refresh]);
 
   if (load.status === "loading") {
     return (
@@ -310,16 +329,22 @@ function TaskDetailView({
   const data = load.data;
 
   const send = (command: ControlCommand, extra: Omit<ControlOptions, "expectedVersion"> = {}) => {
+    generation.current += 1;
     setPending(command);
     setControlError(null);
     source
       .control(data.id, command, { ...extra, expectedVersion: data.version })
       .then((updated) => {
+        generation.current += 1;
         setLoad({ status: "ready", data: updated });
         setForm(null);
         onChanged();
       })
-      .catch((error: unknown) => setControlError(errorMessage(t, error)))
+      .catch((error: unknown) => {
+        setControlError(errorMessage(t, error));
+        // The task may have changed meanwhile (a version conflict): show it as it is now.
+        refresh();
+      })
       .finally(() => setPending(null));
   };
 
@@ -591,7 +616,7 @@ function ControlForm({
             <span>{t("tasks.form.agent")}</span>
             <input
               value={agent}
-              maxLength={200}
+              maxLength={MAX_NAME_LENGTH}
               onChange={(event) => setAgent(event.target.value)}
             />
           </label>
@@ -599,7 +624,7 @@ function ControlForm({
             <span>{t("tasks.form.model")}</span>
             <input
               value={model}
-              maxLength={200}
+              maxLength={MAX_NAME_LENGTH}
               onChange={(event) => setModel(event.target.value)}
             />
           </label>
