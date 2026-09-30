@@ -332,6 +332,38 @@ class GateTest(PostgresOrchestratorTestCase):
             (await self.service.restore(task_id)).state, TaskState.CANCELLED
         )
 
+    async def test_a_result_is_not_recorded_for_a_task_cancelled_during_its_check(
+        self,
+    ):
+        # Codex P2 on PR #130 (gate.py:244): a Cancel does not change the run, so
+        # the run fence alone let a check that was still running write ``passed``
+        # / ``approved`` into the cancelled task.
+        for kind in (CheckKind.EVALUATOR, CheckKind.REVIEW):
+            with self.subTest(kind=kind.value):
+                task_id = await self.evaluating_task()
+                before = await self.review_of(task_id)
+                gate = self.gate()
+
+                async def cancel(task_id=task_id):
+                    await self.service.execute(
+                        task_id, TaskCommand.CANCEL, actor=self.user
+                    )
+
+                self.checks[kind].action = cancel
+
+                report = await gate.evaluate(task_id)
+
+                self.assertEqual(report.outcome, GateOutcome.SUPERSEDED)
+                review = await self.review_of(task_id)
+                if kind is CheckKind.EVALUATOR:
+                    self.assertEqual(review.evaluation_result, before.evaluation_result)
+                else:
+                    self.assertEqual(review.evaluation_result, EvaluationResult.PASSED)
+                    self.assertEqual(review.review_status, ReviewStatus.IN_REVIEW)
+                self.assertEqual(
+                    (await self.service.restore(task_id)).state, TaskState.CANCELLED
+                )
+
     async def test_a_task_that_is_not_evaluating_is_not_checked(self):
         task_id = await self.task_in_state(TaskState.RUNNING)
         report = await self.gate().evaluate(task_id)

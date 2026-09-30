@@ -20,6 +20,8 @@ from paw_backend.orchestrator.workspaces import NodeWorktree
 from paw_backend.tools import ScopedRepository, TaskScope
 from paw_backend.tools.scope import (
     MAX_EXCLUDED_PATHS,
+    MAX_REPOSITORIES,
+    MAX_ROOTS,
     LexicalPathResolver,
     ScopeStatus,
     Target,
@@ -300,6 +302,40 @@ class ExcludedPathsTest(unittest.IsolatedAsyncioTestCase):
             parent, role=NodeRole.WORKER, repositories=None, worktrees=worktrees
         )
         self.assertLessEqual(len(child.excluded_paths), MAX_EXCLUDED_PATHS)
+
+    def test_a_worker_of_the_largest_scope_fits_the_bounds(self):
+        # Codex P2 on PR #130 (tools/scope.py:452, orchestrator/scope.py:148): a
+        # parent with its own root per repository, and a worktree for each of the
+        # ``MAX_REPOSITORIES`` repositories, doubles the roots and adds four
+        # protected paths per repository; the worker must still start.
+        repositories = [
+            repository(uid(900 + i), f"{WORKSPACES}/project/{i}")
+            for i in range(MAX_REPOSITORIES)
+        ]
+        parent = parent_scope(
+            path_roots=[r.root for r in repositories][:MAX_ROOTS],
+            repositories=repositories,
+            excluded_paths=[f"/srv/excluded/{i}" for i in range(MAX_ROOTS)],
+        )
+        worktrees = {
+            r.repo_id: worktree(r.repo_id, checkout=r.root) for r in repositories
+        }
+
+        child = derive_child_scope(
+            parent, role=NodeRole.WORKER, repositories=None, worktrees=worktrees
+        )
+
+        self.assertEqual(len(child.path_roots), MAX_ROOTS + MAX_REPOSITORIES)
+        self.assertEqual(
+            len(child.excluded_paths), MAX_ROOTS + 3 * MAX_REPOSITORIES + 1
+        )
+        # ... and a scope beyond what a worker can reach is still refused.
+        with self.assertRaises(ValueError):
+            parent_scope(
+                path_roots=[
+                    f"/srv/root/{i}" for i in range(MAX_ROOTS + MAX_REPOSITORIES + 1)
+                ]
+            )
 
     def test_excluded_paths_are_normalised_and_bounded(self):
         scope = parent_scope(excluded_paths=["/srv/a/./b", "/srv/a/b"])

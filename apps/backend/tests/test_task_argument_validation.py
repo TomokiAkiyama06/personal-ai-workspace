@@ -650,6 +650,7 @@ CASES = [
     case("update_attempt", "worktree", not_a_worktree()),
     case("update_attempt", "review", not_a_review()),
     case("update_attempt", "pull_request", not_a_pull_request()),
+    case("update_attempt", "in_state", not_an_enum(TaskState, allow_none=True)),
     # -- change_working_set (issue #85)
     case("change_working_set", "task_id", not_a_uuid()),
     case("change_working_set", "operation", not_an_enum(WorkingSetOperation)),

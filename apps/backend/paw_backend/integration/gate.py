@@ -477,7 +477,9 @@ class IntegrationGate:
         the attempt (``update_attempt`` with its ``repository_id``; the results
         belong to each repository, issue #85): ``evaluation_result`` once the
         tests failed or the Evaluator ran, ``review_status`` for the review.
-        Fenced by the run (``StaleRunError`` after a Retry / Restart). An
+        Fenced by the run (``StaleRunError`` after a Retry / Restart) and by the
+        ``evaluating`` state (``TaskStateChangedError``, a ``StaleRunError``,
+        after a Cancel, which does not replace the run). An
         ``approved`` / ``passed`` result is refused while an admitted write on the
         repository may still be running (``RepositoryWriteInFlightError``)."""
         attempt = (await self._tasks.restore(task.id, log_limit=0)).attempt
@@ -490,6 +492,7 @@ class IntegrationGate:
                 task.id,
                 run=run,
                 repository_id=target.repo_id,
+                in_state=TaskState.EVALUATING,
                 review=ReviewState(
                     current.review_status if review is None else review,
                     current.evaluation_result if evaluation is None else evaluation,

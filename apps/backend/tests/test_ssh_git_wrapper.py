@@ -963,7 +963,12 @@ class RepositoryConfigurationTest(WrapperTestCase):
 
     STATUS = ["status", "--porcelain=v1", "-z", "--untracked-files=all"]
 
-    def test_only_content_commands_are_probed(self):
+    def test_every_call_but_clone_and_init_is_probed(self):
+        # Codex review of #150 (P2): not only the calls that read file content.
+        # ``rev-parse --verify`` (or ``merge-base``) resolves an object, which a
+        # git that predates ``GIT_NO_LAZY_FETCH`` fetches from a partial
+        # clone's promisor remote when it is missing; the configuration that
+        # sets that up is refused only by the probe.
         probed = {
             "status": self.pinned(self.STATUS),
             "merge --abort": self.pinned(["merge", "--abort"]),
@@ -990,6 +995,25 @@ class RepositoryConfigurationTest(WrapperTestCase):
                     COMMIT,
                 ]
             ),
+            "rev-parse --verify": self.plan(
+                ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]
+            ),
+            "pinned rev-parse --verify": self.pinned(
+                ["rev-parse", "--verify", "--quiet", "MERGE_HEAD^{commit}"]
+            ),
+            "rev-parse": self.plan(["rev-parse", "--is-bare-repository"]),
+            "worktree list": self.plan(["worktree", "list", "--porcelain", "-z"]),
+            "worktree prune": self.plan(["worktree", "prune"]),
+            "merge-base": self.plan(
+                [
+                    "merge-base",
+                    "--is-ancestor",
+                    f"refs/heads/{OTHER}",
+                    f"refs/heads/{BRANCH}",
+                ]
+            ),
+            "symbolic-ref": self.pinned(["symbolic-ref", "--quiet", "HEAD"]),
+            "config": self.plan(["config", "--local", "--get", "remote.origin.url"]),
         }
         for name, invocation in probed.items():
             with self.subTest(name=name):
@@ -1002,22 +1026,38 @@ class RepositoryConfigurationTest(WrapperTestCase):
         pinned = probed["status"].probe
         self.assertIn(f"--git-dir={self.git_dir}", pinned)
         self.assertIn(f"--work-tree={self.worktree}", pinned)
+        url = "https://github.com/owner/repo.git"
         for invocation in (
-            self.plan(["rev-parse", "--is-bare-repository"]),
-            self.plan(["worktree", "list", "--porcelain", "-z"]),
-            self.plan(["worktree", "prune"]),
+            self.plan(
+                ["clone", "--quiet", "--", url, f"{self.root}/new"], cwd=self.root
+            ),
             self.plan(
                 [
-                    "merge-base",
-                    "--is-ancestor",
-                    f"refs/heads/{OTHER}",
-                    f"refs/heads/{BRANCH}",
-                ]
+                    "init",
+                    "--quiet",
+                    "--template=",
+                    "--initial-branch=main",
+                    "--",
+                    self.fresh,
+                ],
+                cwd=self.fresh,
             ),
-            self.pinned(["symbolic-ref", "--quiet", "HEAD"]),
         ):
             with self.subTest(argv=invocation.argv):
                 self.assertIsNone(invocation.probe)
+
+    def test_a_partial_clone_refuses_a_rev_parse_too(self):
+        invocation = self.plan(["rev-parse", "--verify", "--quiet", "HEAD^{commit}"])
+        for key in ("extensions.partialclone", "remote.origin.promisor"):
+            with self.subTest(key=key):
+                listed = f"local\0{key}\ntrue\0".encode()
+
+                def run(argv, *, listed=listed, **kwargs):
+                    return subprocess.CompletedProcess(argv, 0, listed, b"")
+
+                self.assert_rejected(
+                    "config_unsafe", wrapper.check_configuration, invocation, run
+                )
 
     def check(self, stdout=b"", returncode=0, error=None):
         calls = []
@@ -1475,6 +1515,38 @@ class RepositoryLocationTest(WrapperTestCase):
         self.addCleanup(os.chmod, f"{common}/refs", 0o755)
         if not os.access(f"{common}/refs", os.R_OK):  # not when run as root
             self.assert_rejected("git_dir_link", wrapper.check_links, [common])
+
+    def test_the_metadata_walk_is_bounded(self):
+        # Codex review of #150 (P2): a planted fan-out of loose objects (or
+        # refs) must not keep every call walking before git runs.
+        common = f"{self.checkout}/.git"
+        os.makedirs(f"{common}/objects/ab")
+        for n in range(20):
+            fs.write(f"{common}/objects/ab", f"{n:038x}", "x")
+        wrapper.check_links([common])
+        self.assert_rejected(
+            "git_dir_too_large", wrapper.check_links, [common], limit=10
+        )
+        ticks = iter(range(1000))
+        self.assert_rejected(
+            "git_dir_too_large",
+            wrapper.check_links,
+            [common],
+            timeout=5,
+            clock=lambda: next(ticks),
+        )
+        # The bound is across the directories of one call.
+        other = f"{self.root}/other-git"
+        os.makedirs(other)
+        fs.write(other, "HEAD", "ref: refs/heads/main\n")
+        entries = sum(len(d) + len(f) for _, d, f in os.walk(common)) + 1
+        wrapper.check_links([common, other], limit=entries)
+        self.assert_rejected(
+            "git_dir_too_large",
+            wrapper.check_links,
+            [common, other],
+            limit=entries - 1,
+        )
 
     def test_init_never_reuses_an_existing_git(self):
         init = ["init", "--quiet", "--template=", "--initial-branch=main", "--"]
