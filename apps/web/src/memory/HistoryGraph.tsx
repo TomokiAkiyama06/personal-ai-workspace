@@ -6,7 +6,7 @@ import { useState } from "react";
 import { useI18n } from "../i18n";
 import { DiffView } from "./DiffView";
 import type { GraphEdge, GraphLayout, GraphNode } from "./graph";
-import { actorLabel, freshnessTag, stateChip } from "./labels";
+import { actorLabel, freshnessTag, isExpired, stateChip } from "./labels";
 import type { MemoryVersion } from "./types";
 
 const ROW = 66;
@@ -152,15 +152,28 @@ function relationText(
   layout: GraphLayout,
   t: ReturnType<typeof useI18n>["t"],
 ): string {
-  const out = layout.edges.filter((edge) => edge.from === node);
-  if (out.length === 0) return t("memory.none");
-  return out
-    .map((edge) =>
-      edge.to.own
-        ? `${edge.relation} v${edge.to.version.version_number}`
-        : `${edge.relation} ${edge.to.version.title} v${edge.to.version.version_number}`,
-    )
-    .join(", ");
+  const name = (other: GraphNode) =>
+    other.own
+      ? `v${other.version.version_number}`
+      : `${other.version.title} v${other.version.version_number}`;
+  // Outgoing: "supersedes v2" (this one supersedes v2). Incoming: "v3 supersedes".
+  const lines = layout.edges.flatMap((edge) => {
+    if (edge.from === node) return [`${edge.relation} ${name(edge.to)}`];
+    if (edge.to === node) return [`${name(edge.from)} ${edge.relation}`];
+    return [];
+  });
+  if (lines.length === 0) return t("memory.none");
+  return lines.join(", ");
+}
+
+function sameAudience(a: MemoryVersion, b: MemoryVersion): boolean {
+  return (
+    a.scope === b.scope &&
+    a.owner_user_id === b.owner_user_id &&
+    a.project_id === b.project_id &&
+    a.project_group_id === b.project_group_id &&
+    a.repo_id === b.repo_id
+  );
 }
 
 /** The selected version: its text, who / why / relations / freshness, and restore. */
@@ -185,7 +198,17 @@ export function VersionCard({
   const fresh = freshnessTag(version);
   // Restoring the active current version would change nothing (ALREADY_ACTIVE);
   // a related memory's version belongs to another memory.
-  const canRestore = node.own && !(node.current && version.status === "active");
+  const canRestore =
+    node.own &&
+    // The Backend restores into an active or deprecated memory only (a memory
+    // retired by another one stays retired), from a version of the same audience,
+    // and not a freshness a person cannot write (session_only, or an expiry that
+    // has passed: that needs a new freshness, which this screen does not ask for).
+    (current.status === "active" || current.status === "deprecated") &&
+    !(node.current && version.status === "active") &&
+    sameAudience(version, current) &&
+    version.freshness_policy !== "session_only" &&
+    !isExpired(version);
   const canCompare = version.version_id !== current.version_id;
   return (
     <section className="memory-version" aria-labelledby="memory-version-title">

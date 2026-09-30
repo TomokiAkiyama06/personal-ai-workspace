@@ -254,6 +254,9 @@ export function MemoryDetail({
   const [selected, setSelected] = useState<string | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [base, setBase] = useState<number | null>(null);
+  // The values the draft started from: only a field the editor changed from its
+  // origin is sent, so a save never writes back a stale copy of another field.
+  const [origin, setOrigin] = useState<Pick<Draft, "title" | "content"> | null>(null);
   const [conflict, setConflict] = useState<MemoryVersion | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -296,6 +299,7 @@ export function MemoryDetail({
 
   const startEdit = () => {
     setDraft({ title: current.title, content: current.content, reason: "" });
+    setOrigin({ title: current.title, content: current.content });
     setBase(current.version_number);
     setConflict(null);
     setNotice(null);
@@ -305,12 +309,13 @@ export function MemoryDetail({
 
   const stopEdit = () => {
     setDraft(null);
+    setOrigin(null);
     setBase(null);
     setConflict(null);
     setFailure(null);
   };
 
-  const onConflict = async () => {
+  const onConflict = async (pending: { draft: Draft; origin: typeof origin } | null) => {
     // Read the version that won and edit on top of it from now on.
     const latest = await source.history(memoryId);
     const top = latest.versions.reduce<MemoryVersion | null>(
@@ -319,18 +324,33 @@ export function MemoryDetail({
     );
     history.reload();
     onChanged();
-    if (top) {
-      setConflict(top);
-      setBase(top.version_number);
+    if (!top) return;
+    setConflict(top);
+    setBase(top.version_number);
+    if (pending?.origin) {
+      // A field the editor did not touch follows the version that won.
+      const from = pending.origin;
+      const keep = (field: "title" | "content") => pending.draft[field] !== from[field];
+      setDraft({
+        ...pending.draft,
+        title: keep("title") ? pending.draft.title : top.title,
+        content: keep("content") ? pending.draft.content : top.content,
+      });
+      setOrigin({
+        title: keep("title") ? from.title : top.title,
+        content: keep("content") ? from.content : top.content,
+      });
     }
   };
 
   const save = async (event: FormEvent) => {
     event.preventDefault();
-    if (!draft || base === null) return;
+    if (!draft || !origin || base === null) return;
+    const changed = (field: "title" | "content") =>
+      draft[field] !== origin[field] && draft[field] !== current[field];
     const changes = {
-      ...(draft.title !== current.title ? { title: draft.title } : {}),
-      ...(draft.content !== current.content ? { content: draft.content } : {}),
+      ...(changed("title") ? { title: draft.title } : {}),
+      ...(changed("content") ? { content: draft.content } : {}),
       ...(draft.reason.trim() ? { reason: draft.reason.trim() } : {}),
     };
     // Nothing differs from the current version: there is no new version to write
@@ -347,8 +367,9 @@ export function MemoryDetail({
       setNotice(t("memory.form.saved", { number: written.version_number }));
       reloadAfterWrite(written);
     } catch (caught) {
-      if (isApiError(caught, "memory_version_conflict")) await onConflict().catch(() => {});
-      else setFailure(errorMessage(t, caught));
+      if (isApiError(caught, "memory_version_conflict")) {
+        await onConflict({ draft, origin }).catch(() => {});
+      } else setFailure(errorMessage(t, caught));
     } finally {
       setBusy(false);
     }
@@ -372,7 +393,7 @@ export function MemoryDetail({
       );
       reloadAfterWrite(written);
     } catch (caught) {
-      if (isApiError(caught, "memory_version_conflict")) await onConflict().catch(() => {});
+      if (isApiError(caught, "memory_version_conflict")) await onConflict(null).catch(() => {});
       else setFailure(errorMessage(t, caught));
     } finally {
       setBusy(false);

@@ -162,7 +162,9 @@ describe("Memory screen", () => {
       within(past).getByText("main への Merge はエージェントが自動で実行しない。"),
     ).toBeVisible();
     expect(
-      within(past).getByText("supersedes v1, extends Merge の前に人の確認を求めた v1"),
+      within(past).getByText(
+        "supersedes v1, extends Merge の前に人の確認を求めた v1, v3 supersedes, v3 confirmed_from",
+      ),
     ).toBeVisible();
     await user.click(within(past).getByRole("button", { name: "差分を並べて見る" }));
     expect(within(past).getByText("選択中（v2）")).toBeVisible();
@@ -261,6 +263,97 @@ describe("Memory screen", () => {
     ).toEqual([3, 4]);
     expect(await screen.findByText("新しい版 v5 を保存しました。")).toBeVisible();
     expect(screen.queryByText("編集中に別の更新がありました")).not.toBeInTheDocument();
+  });
+
+  it("keeps the other writer's change of a field the editor did not touch", async () => {
+    const { source, mergeId } = designSource();
+    renderMemory("/memory/m-merge", source);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "編集" }));
+    const content = screen.getByRole("textbox", { name: "本文" });
+    await user.clear(content);
+    await user.type(content, "自分の本文");
+
+    // Someone else renames the memory while the form is open.
+    source.write(mergeId, { title: "Merge は Human だけ" }, null, { actor_user_id: "u-2" });
+    await user.click(screen.getByRole("button", { name: "保存" }));
+    await screen.findByRole("alert");
+    await user.click(screen.getByRole("button", { name: "保存" }));
+
+    const edits = source.calls.filter((call) => call.method === "edit").map((call) => call.args);
+    expect(edits).toEqual([
+      [mergeId, 3, { content: "自分の本文" }],
+      [mergeId, 4, { content: "自分の本文" }],
+    ]);
+    expect(await screen.findByRole("heading", { name: "Merge は Human だけ" })).toBeVisible();
+  });
+
+  it("offers restore only where the Backend can restore", async () => {
+    const { source, mergeId } = designSource();
+    // v3 retired by another memory: the memory's current version is superseded.
+    source.versions = source.versions.map((entry) =>
+      entry.memory_id === mergeId && entry.version_number === 3
+        ? { ...entry, status: "superseded" }
+        : entry,
+    );
+    // v1 was a session-only memory (a person cannot write that freshness).
+    source.versions = source.versions.map((entry) =>
+      entry.memory_id === mergeId && entry.version_number === 1
+        ? { ...entry, freshness_policy: "session_only" }
+        : entry,
+    );
+    renderMemory("/memory/m-merge", source);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("tab", { name: "履歴" }));
+    const nodes = within(screen.getByRole("list", { name: "メモリの履歴グラフ" })).getAllByRole(
+      "button",
+    );
+    for (const index of [0, 1, 3]) {
+      await user.click(nodes[index] as HTMLElement);
+      expect(
+        screen.queryByRole("button", { name: "この内容で新しい版を作る" }),
+        `node ${index}`,
+      ).not.toBeInTheDocument();
+    }
+  });
+
+  it("does not restore an expired expiring version (the Backend needs a new freshness)", async () => {
+    const { source, mergeId } = designSource();
+    source.versions = source.versions.map((entry) =>
+      entry.memory_id === mergeId && entry.version_number === 1
+        ? { ...entry, freshness_policy: "expiring", expires_at: "2026-07-01T00:00:00Z" }
+        : entry,
+    );
+    renderMemory("/memory/m-merge", source);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("tab", { name: "履歴" }));
+    const nodes = within(screen.getByRole("list", { name: "メモリの履歴グラフ" })).getAllByRole(
+      "button",
+    );
+    await user.click(nodes[3] as HTMLElement);
+    expect(
+      screen.queryByRole("button", { name: "この内容で新しい版を作る" }),
+    ).not.toBeInTheDocument();
+    await user.click(nodes[1] as HTMLElement);
+    expect(screen.getByRole("button", { name: "この内容で新しい版を作る" })).toBeVisible();
+  });
+
+  it("shows the relations into the selected version too", async () => {
+    const { source } = designSource();
+    renderMemory("/memory/m-merge", source);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("tab", { name: "履歴" }));
+    const nodes = within(screen.getByRole("list", { name: "メモリの履歴グラフ" })).getAllByRole(
+      "button",
+    );
+    await user.click(nodes[2] as HTMLElement);
+    expect(
+      within(screen.getByRole("region", { name: "選択中のバージョン" })).getByText("v2 extends"),
+    ).toBeVisible();
+    await user.click(nodes[3] as HTMLElement);
+    expect(
+      within(screen.getByRole("region", { name: "選択中のバージョン" })).getByText("v2 supersedes"),
+    ).toBeVisible();
   });
 
   it("discards the draft from the conflict notice", async () => {
