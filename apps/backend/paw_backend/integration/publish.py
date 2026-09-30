@@ -69,6 +69,7 @@ from paw_backend.repositories.errors import (
 from paw_backend.repositories.git import GitRunner
 from paw_backend.repositories.github import GitHubRepo, parse_github_source
 from paw_backend.repositories.github_connection import GhRunner
+from paw_backend.repositories.limits import MAX_GH_OUTPUT_BYTES
 from paw_backend.repositories.paths import LinuxAccount
 from paw_backend.repositories.policy import RepositoryPolicy
 from paw_backend.tasks import (
@@ -91,24 +92,73 @@ _OBJECT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 MAX_TITLE_CHARS = 256
 TITLE_PREFIX = "[PAW] "
 # Larger than any pull request list of one branch; a longer answer is refused.
+# Fewer are asked for when their rows might not fit (``pull_request_listing``).
 MAX_LISTED_PULL_REQUESTS = 100
 _MAX_PULL_REQUEST_NUMBER = 2_147_483_647
-# ``gh api --jq`` keeps of each listed pull request only what
-# :func:`parse_pull_request` reads: GitHub lists them in full (the body, both
-# repositories), and a branch with a few long ones would exceed the gh runner's
-# output cap (``MAX_GH_OUTPUT_BYTES``) although the one to reuse is there (Codex
-# review of #159, #90). What is not an array, or an item that is not an object,
-# is kept as it is and refused below as before.
-PULL_REQUEST_FIELDS_JQ = (
-    'if type == "array" then map(if type == "object" then'
-    " {number, html_url, state, merged_at,"
-    ' draft: (if has("draft") then .draft else false end),'
-    " head: {ref: .head.ref, sha: .head.sha,"
-    ' repo: (if (.head.repo | type) == "object"'
-    " then {full_name: .head.repo.full_name} else .head.repo end)},"
-    " base: {ref: .base.ref}}"
-    " else . end) else . end"
-)
+# What the listing may print: the gh runner's output cap, less the brackets.
+_LISTING_BUDGET_BYTES = MAX_GH_OUTPUT_BYTES - 2
+# A projected pull request's keys, punctuation and the comma between two.
+_ROW_OVERHEAD_BYTES = 160
+# A ref name may hold any UTF-8 character: at most 4 bytes a character (and a
+# ``"`` is 2). What else is kept is ASCII on GitHub: a byte a character.
+_REF_BYTES_PER_CHAR = 4
+_NUMBER_BYTES = 24  # any JSON number as jq prints it
+_STATE_CHARS = 7  # longer than ``closed``
+_TIMESTAMP_CHARS = 32  # longer than GitHub's ``2026-09-29T00:00:00Z``
+_OBJECT_ID_CHARS = 65  # longer than a SHA-256 object id
+
+
+@dataclass(frozen=True, slots=True)
+class PullRequestListing:
+    """How the pull requests of a branch are listed within the gh runner's
+    output cap (Codex review of #159, #90). GitHub lists each in full (the
+    body, both repositories); ``jq`` (``gh api --jq``) keeps only what
+    :func:`parse_pull_request` reads, and cuts every string it compares to a
+    known value to one character more than that value (a longer one stays
+    different, so it is refused or skipped as before). ``per_page`` is then as
+    many rows as surely fit: 100 for usual names, fewer for very long ones."""
+
+    jq: str
+    per_page: int
+
+
+def _cut(field: str, chars: int) -> str:
+    # A string is cut; anything else is kept (refused below, as before).
+    return f'({field} | if type == "string" then .[0:{chars}] else . end)'
+
+
+def pull_request_listing(
+    repo: GitHubRepo, branch: str, base: str
+) -> PullRequestListing:
+    url_chars = len(f"https://{repo.host}/{repo.owner}/{repo.repo}/pull/") + 11
+    name_chars = len(f"{repo.owner}/{repo.repo}") + 1
+    branch_chars, base_chars = len(branch) + 1, len(base) + 1
+    jq = (
+        'if type == "array" then map(if type == "object" then {'
+        f"number, html_url: {_cut('.html_url', url_chars)},"
+        f" state: {_cut('.state', _STATE_CHARS)},"
+        f" merged_at: {_cut('.merged_at', _TIMESTAMP_CHARS)},"
+        ' draft: (if has("draft") then .draft else false end),'
+        f" head: {{ref: {_cut('.head.ref', branch_chars)},"
+        f" sha: {_cut('.head.sha', _OBJECT_ID_CHARS)},"
+        ' repo: (if (.head.repo | type) == "object" then'
+        f" {{full_name: {_cut('.head.repo.full_name', name_chars)}}}"
+        " else .head.repo end)},"
+        f" base: {{ref: {_cut('.base.ref', base_chars)}}}"
+        "} else . end) else . end"
+    )
+    row = (
+        _ROW_OVERHEAD_BYTES
+        + _NUMBER_BYTES
+        + url_chars
+        + _STATE_CHARS
+        + _TIMESTAMP_CHARS
+        + name_chars
+        + _OBJECT_ID_CHARS
+        + _REF_BYTES_PER_CHAR * (branch_chars + base_chars)
+    )
+    per_page = max(1, min(MAX_LISTED_PULL_REQUESTS, _LISTING_BUDGET_BYTES // row))
+    return PullRequestListing(jq, per_page)
 
 
 class PublishProblem(StrEnum):
@@ -457,6 +507,7 @@ class GitHubPullRequestPublisher:
         commit: str,
         account: LinuxAccount,
     ) -> PullRequestInfo | None:
+        listing = pull_request_listing(github, branch, base)
         listed = await self._gh_api(
             [
                 "--method",
@@ -467,16 +518,16 @@ class GitHubPullRequestPublisher:
                 "-f",
                 "state=all",
                 "-f",
-                f"per_page={MAX_LISTED_PULL_REQUESTS}",
+                f"per_page={listing.per_page}",
                 "--jq",
-                PULL_REQUEST_FIELDS_JQ,
+                listing.jq,
             ],
             github,
             account,
         )
         if listed is None:
             raise PullRequestNotPublishedError(PublishProblem.GITHUB_FAILED)
-        if not isinstance(listed, list) or len(listed) > MAX_LISTED_PULL_REQUESTS:
+        if not isinstance(listed, list) or len(listed) > listing.per_page:
             raise PullRequestNotPublishedError(PublishProblem.INVALID_RESPONSE)
         found = [
             parse_pull_request(item, github, branch, base, commit) for item in listed

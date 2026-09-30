@@ -35,12 +35,14 @@ from paw_backend.integration.publish import (
     MAX_TITLE_CHARS,
     choose_pull_request,
     publisher_agent_id,
+    pull_request_listing,
     pull_request_title,
     push_arguments,
 )
 from paw_backend.repositories import RepositoryPolicy
 from paw_backend.repositories.errors import GhCommandError, GhFailure
 from paw_backend.repositories.git import GitResult, command_name
+from paw_backend.repositories.github import GitHubRepo
 from paw_backend.repositories.github_connection import GhResult
 from paw_backend.repositories.limits import MAX_GH_OUTPUT_BYTES
 from paw_backend.tasks import PullRequestInfo, PullRequestState, RepoRole, TaskRun
@@ -54,6 +56,7 @@ RUN = TaskRun(1, 0)
 HOST = "github.com"
 OWNER, REPO = "octo", "repo"
 REMOTE = f"https://{HOST}/{OWNER}/{REPO}.git"
+_MAX_NUMBER = 2_147_483_647
 
 
 class FakeGitHub:
@@ -143,6 +146,7 @@ class FakeGitHub:
             owner, _, branch = fields["head"].partition(":")
             assert owner == OWNER and fields["state"] == "all"
             found = [p for p in self.pulls if p["head"]["ref"] == branch]
+            found = found[: int(fields["per_page"])]
             for pull in found:
                 if pull["live"]:
                     pull["head"]["sha"] = self.pull(0, branch)["head"]["sha"]
@@ -457,6 +461,14 @@ class PublisherTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((info.number, info.state), (6, PullRequestState.OPEN))
         self.assertEqual(self.github.methods(), ["GET"])
 
+    async def test_a_longer_listed_url_is_still_refused(self):
+        # The listing cuts what it compares to one character more: a longer
+        # value stays different.
+        longer = self.github.pull(1, self.branch)
+        longer["html_url"] += "0"
+        self.github.pulls.append(longer)
+        await self.refused(PublishProblem.INVALID_RESPONSE)
+
     async def test_a_pull_request_to_another_base_is_not_the_one(self):
         # Codex review of #159: a pull request of the branch against another
         # branch than the default one does not propose the checked changes to
@@ -505,6 +517,48 @@ class PublisherTest(unittest.IsolatedAsyncioTestCase):
     async def test_a_created_pull_request_to_another_base_is_refused(self):
         self.github.answer = self.github.pull(1, self.branch, base="dev")
         await self.refused(PublishProblem.INVALID_RESPONSE)
+
+    @unittest.skipUnless(shutil.which("jq"), "jq is not installed")
+    def test_the_listed_rows_always_fit_in_gh_s_output(self):
+        # Codex review of #166: projecting alone is not enough; with the
+        # longest names GitHub allows, 100 rows would still be too many.
+        branch = f"paw/{uuid.uuid4()}/2147483647/_integration"
+        for owner, repo, base, per_page in (
+            (OWNER, REPO, "main", 100),
+            ("o" * 39, "r" * 100, "b" * 200, None),
+            ("o" * 39, "r" * 100, "\U0001f600" * 255, None),
+        ):
+            with self.subTest(owner=owner, base=base[:8]):
+                github = GitHubRepo(HOST, owner, repo)
+                listing = pull_request_listing(github, branch, base)
+                if per_page is not None:
+                    self.assertEqual(listing.per_page, per_page)
+                self.assertGreaterEqual(listing.per_page, 20)
+                # The worst a real answer holds: every compared string longer
+                # than what it is compared to, and made of 4-byte characters.
+                emoji = "\U0001f600"
+                row = {
+                    "number": _MAX_NUMBER,
+                    "html_url": f"https://{HOST}/{owner}/{repo}/pull/{_MAX_NUMBER}"
+                    + "9" * 100,
+                    "state": "closed" + "x" * 100,
+                    "draft": False,
+                    "merged_at": "2026-09-29T00:00:00Z" + "x" * 100,
+                    "body": "x" * 20_000,
+                    "head": {
+                        "ref": emoji * (len(branch) + 100),
+                        "sha": "f" * 200,
+                        "repo": {"full_name": f"{owner}/{repo}" + "x" * 100},
+                    },
+                    "base": {"ref": emoji * (len(base) + 100)},
+                }
+                projected = subprocess.run(
+                    ["jq", "-c", listing.jq],
+                    input=json.dumps([row] * listing.per_page).encode(),
+                    capture_output=True,
+                    check=True,
+                ).stdout
+                self.assertLessEqual(len(projected), MAX_GH_OUTPUT_BYTES)
 
     def test_the_open_pull_request_is_chosen_among_several(self):
         def info(number, state):
