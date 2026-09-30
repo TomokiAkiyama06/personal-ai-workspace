@@ -80,13 +80,14 @@ QUIET = dict(
 )
 
 
-def fake_gpu(*, control=True):
-    """A setup over the fake GPU, the resident models already on it."""
+def fake_gpu(*, control=True, stopped=()):
+    """A setup over the fake GPU, the resident models already on it (but the
+    ``stopped`` ones: configured on the GPU, their runtime is not running)."""
     specs = default_specs()
     probe = FakeProbe()
     fake = FakeControl(probe, specs)
     for spec in specs:
-        if spec.initial is DeploymentState.GPU:
+        if spec.initial is DeploymentState.GPU and spec.name not in stopped:
             fake.start_on_gpu(spec.name)
     clock = ManualClock()
     setup = ComputeSetup(
@@ -286,10 +287,15 @@ class ComputeAppTestCase(unittest.IsolatedAsyncioTestCase):
     control = True
     with_database = True
     settings_overrides = {}
+    stopped = ()
+    held_before = ()  # tasks an earlier process held
 
     async def asyncSetUp(self):
-        self.setup, self.probe, self.fake, self.clock = fake_gpu(control=self.control)
+        self.setup, self.probe, self.fake, self.clock = fake_gpu(
+            control=self.control, stopped=self.stopped
+        )
         self.holds = FakeHolds()
+        self.holds.held.extend(self.held_before)
         patcher = patch("paw_backend.app.PostgresTaskHolds", lambda *_: self.holds)
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -567,6 +573,43 @@ class FullGpuHttpTest(ComputeAppTestCase):
         self.assertEqual(self.holds.resumed, [task_id])
         self.assertEqual(self.holds.held, [])
 
+    async def test_a_start_ended_by_delete_is_recovered_at_shutdown(self):
+        # Codex review #168 (round 2, P1): the start emptied the GPU, then a
+        # DELETE abandoned it (Full GPU Mode ``resuming``, no start pending);
+        # the shutdown comes before the loops brought the main LLM back.
+        task_id = uuid.uuid4()
+        self.holds.running.add(task_id)
+        lease = (
+            await self.scheduler.try_acquire(
+                ComputeRequest(
+                    ResourceClass.CODING,
+                    deployment="main",
+                    context_tokens=1_000,
+                    task_id=task_id,
+                )
+            )
+        ).lease
+        main_pid = self.fake.pids["main"]
+        self.fake.linger.add("main")
+        with self.assertLogs("paw_backend.compute", level="WARNING"):
+            self.assertEqual((await self.client.post(URL, json={})).status_code, 202)
+            await settle()
+            await lease.release()
+            self.assertTrue(
+                await self.advance_until(
+                    lambda: ("unload", "main") in self.fake.actions
+                )
+            )
+            self.assertEqual((await self.client.delete(URL)).status_code, 200)
+            self.assertIs(self.mode_state(), FullGpuState.RESUMING)
+            self.fake.linger.clear()
+            self.probe.resident.pop(main_pid)
+            await self.stop_app()
+        self.assertIs(
+            self.scheduler.status().deployment("main").state, DeploymentState.GPU
+        )
+        self.assertEqual(self.holds.resumed, [task_id])
+
     async def test_the_body_is_checked(self):
         for body in (
             {"preempt": "yes"},
@@ -666,6 +709,29 @@ class AdminTest(ComputeAppTestCase):
                 await self.advance_until(lambda: self.mode_state() is FullGpuState.ON)
             )
             self.assertEqual((await self.client.delete(URL)).status_code, 200)
+
+
+HELD_BEFORE = uuid.uuid4()
+
+
+class StoppedMainAtStartupTest(ComputeAppTestCase):
+    # Codex review #168 (round 2, P1): an earlier process held a task and ended
+    # while the main LLM was off the GPU. The configuration says it starts on
+    # the GPU, but its runtime is not running: the task is not resumed until
+    # the main LLM's processes are seen on the GPU.
+    stopped = ("main",)
+    held_before = (HELD_BEFORE,)
+
+    async def test_held_tasks_wait_for_the_main_llm_to_be_seen(self):
+        await self.clock.advance(30)
+        self.assertEqual(self.holds.resumed, [])
+        self.assertIs(self.mode_state(), FullGpuState.RESUMING)
+        # The main LLM's runtime is started (by hand, here).
+        self.fake.start_on_gpu("main")
+        self.assertTrue(
+            await self.advance_until(lambda: self.mode_state() is FullGpuState.OFF)
+        )
+        self.assertEqual(self.holds.resumed, [HELD_BEFORE])
 
 
 class ShutdownTimeoutTest(ComputeAppTestCase):

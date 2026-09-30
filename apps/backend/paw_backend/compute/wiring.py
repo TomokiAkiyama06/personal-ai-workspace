@@ -22,9 +22,9 @@ Decision 0058, 1):
   should wait: the start runs in the background and the route answers at once
   (``202``); the state is read with ``GET`` (Decision 0058, 3). Ending it while
   the start is still in progress abandons the start (Decision 0058, 4). So does
-  the shutdown, which then gives the models back and resumes the held tasks
-  before the scheduler's loops stop, within the shutdown time (Codex review
-  #168): the start may have unloaded some models already.
+  the shutdown, which then, like after any start that did not finish and after
+  an end, gives the models back and resumes the held tasks before the
+  scheduler's loops stop, within the shutdown time (Codex review #168).
 
 GPU safety: nothing here reads or touches the GPU but through the scheduler (its
 read-only probe and the injected ``ModelControl``).
@@ -235,15 +235,15 @@ class FullGpuController:
 
     async def close(self) -> None:
         """At shutdown, before the scheduler's loops stop: abandon a start in
-        progress and undo what it did. The start may have unloaded models
-        already (the scheduler is back to normal, Full GPU Mode ``resuming``):
-        the scheduler is refreshed (it loads the main LLM again) and the mode
-        ticked (it resumes the held tasks) until the mode is ``off``. The
-        caller bounds this with the shutdown timeout; what is left then is done
-        by the next process (it resumes the tasks held by this one)."""
-        if not self.start_pending:
-            return
-        await self._cancel_start()
+        progress, and finish what a Full GPU Mode that is ``resuming`` left
+        undone. A start abandoned now or before (``DELETE``, a failure) may
+        have unloaded models, an end has: the scheduler is refreshed (it loads
+        the main LLM again) and the mode ticked (it resumes the held tasks)
+        until the mode is ``off`` (Codex review #168). The caller bounds this
+        with the shutdown timeout; what is left then is done by the next
+        process (it resumes the tasks held by this one)."""
+        if self.start_pending:
+            await self._cancel_start()
         while self._mode.status().state is FullGpuState.RESUMING:
             try:
                 await self._scheduler.refresh()

@@ -402,8 +402,14 @@ class FullGpuMode:
                 self._held.add(task_id)
 
     def _main_resident(self) -> bool:
+        # Also seen on the GPU, not only so in the scheduler's state: a process
+        # that starts after one that ended with the main LLM off the GPU has it
+        # ``gpu`` from the configuration (``initial``) although its runtime is
+        # not running (Codex review #168).
         return all(
-            deployment.state is DeploymentState.GPU and not deployment.draining
+            deployment.state is DeploymentState.GPU
+            and not deployment.draining
+            and deployment.observed_on_gpu is not False
             for deployment in self._scheduler.status().deployments
             if deployment.role is ModelRole.MAIN
         )

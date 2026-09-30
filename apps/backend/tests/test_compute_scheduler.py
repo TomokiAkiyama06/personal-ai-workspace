@@ -538,5 +538,36 @@ class HybridPlacementTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(lease.placement, Placement.CLOUD)
 
 
+class ObservedOnGpuTest(unittest.IsolatedAsyncioTestCase):
+    """``DeploymentStatus.observed_on_gpu``: what the GPU shows, beside the
+    configured or acted-on ``state`` (Codex review #168)."""
+
+    def observed(self, scheduler, name="main"):
+        return scheduler.status().deployment(name).observed_on_gpu
+
+    async def test_a_running_model_is_seen(self):
+        scheduler, *_ = build()
+        self.assertIs(self.observed(scheduler), False)  # no reading yet
+        await scheduler.refresh()
+        self.assertIs(self.observed(scheduler), True)
+
+    async def test_a_configured_model_whose_runtime_is_not_running(self):
+        scheduler, probe, control, _ = build()
+        probe.resident.pop(control.pids.pop("main"))
+        await scheduler.refresh()
+        state = scheduler.status().deployment("main").state
+        self.assertIs(state, DeploymentState.GPU)  # as configured
+        self.assertIs(self.observed(scheduler), False)
+
+    async def test_unknown_without_a_control_or_on_a_stale_reading(self):
+        scheduler, *_ = build(control=False)
+        await scheduler.refresh()
+        self.assertIsNone(self.observed(scheduler))
+        scheduler, _, _, clock = build()
+        await scheduler.refresh()
+        await clock.advance(3_600)
+        self.assertIsNone(self.observed(scheduler))
+
+
 if __name__ == "__main__":
     unittest.main()

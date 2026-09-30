@@ -274,6 +274,13 @@ class DeploymentStatus:
     sequences: int
     max_sequences: int
     observed_kv_fraction: float | None
+    # What the GPU shows, beside ``state`` (what the scheduler did or was
+    # configured with, ``initial``; Codex review #168): ``True`` the latest
+    # reading saw one of its processes on the GPU; ``False`` it did not, or
+    # there has been no reading yet; ``None`` not known (no model control to
+    # ask, its processes could not be asked, it was just placed and not yet
+    # asked, or the latest reading is stale).
+    observed_on_gpu: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -661,6 +668,15 @@ class ComputeScheduler:
             ceilings=self._config.class_ceilings,
         )
 
+    def _observed_on_gpu(self, entry: _Deployment, fresh: bool) -> bool | None:
+        if self._control is None:
+            return None
+        if self._sampled_at is None:
+            return False
+        if not fresh or entry.pids is None:
+            return None
+        return any(process.pid in entry.pids for process in self._processes)
+
     def status(self) -> ComputeStatus:
         fresh = self._fresh()
         leases = dict.fromkeys(ResourceClass, 0)
@@ -696,6 +712,7 @@ class ComputeScheduler:
                     sequences=len(entry.leases),
                     max_sequences=entry.spec.max_sequences,
                     observed_kv_fraction=entry.observed,
+                    observed_on_gpu=self._observed_on_gpu(entry, fresh),
                 )
                 for entry in self._deployments.values()
             ),
