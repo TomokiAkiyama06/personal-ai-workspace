@@ -128,6 +128,7 @@ export const en: Record<MessageKey, string> = {
   "projects.member.creator": "Creator",
   "projects.member.invited": "Invited",
   "projects.member.invitedUntil": "Invited · until {date}",
+  "projects.access.invited": "None until accepted",
   "projects.access.all": "All repositories",
   "projects.access.readOnly": "Read only",
   "projects.access.none": "No usable repository",

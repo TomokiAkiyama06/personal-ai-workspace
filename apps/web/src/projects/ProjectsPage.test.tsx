@@ -12,8 +12,8 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function renderProjects(path: string, source: ProjectsSource | null) {
-  mockApi({ "GET /auth/session": reply(200, session()) });
+function renderProjects(path: string, source: ProjectsSource | null, role = "user") {
+  mockApi({ "GET /auth/session": reply(200, session({ role })) });
   window.history.replaceState(null, "", path);
   return render(
     <Providers>
@@ -111,6 +111,9 @@ describe("ProjectsPage", () => {
     // A Viewer only reads; a read-only override takes nothing more from it.
     expect(rows[2]).toHaveTextContent("読み取りのみ");
     expect(rows[3]).toHaveTextContent("招待中");
+    // An invitation grants nothing until it is accepted.
+    expect(rows[3]).toHaveTextContent("承諾まではなし");
+    expect(rows[3]).not.toHaveTextContent("backend のみ");
     expect(within(rows[3] as HTMLElement).queryByRole("combobox")).not.toBeInTheDocument();
   });
 
@@ -157,6 +160,32 @@ describe("ProjectsPage", () => {
     expect(screen.queryByRole("button", { name: "プロジェクト設定" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "リポジトリを登録" })).not.toBeInTheDocument();
     expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+  });
+
+  it("offers the lifecycle to an Owner / Admin who is not the project's Manager", async () => {
+    const source = fakeProjectsSource({
+      details: { "p-example": exampleDetail({ my_role: "viewer" }) },
+    });
+    renderProjects("/projects/p-example", source, "admin");
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "プロジェクト設定" }));
+    await user.click(screen.getByRole("button", { name: "アーカイブする" }));
+    expect(source.lifecycle).toHaveBeenCalledWith("p-example", "archive", undefined);
+    // Repositories and members stay the Manager's.
+    expect(screen.queryByRole("button", { name: "リポジトリを登録" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+  });
+
+  it("offers an Owner the restore of a project Pending deletion without being its Manager", async () => {
+    const summaries = SUMMARIES.map((project) =>
+      project.id === "p-legacy" ? { ...project, my_role: "contributor" as const } : project,
+    );
+    const source = fakeProjectsSource({ summaries });
+    renderProjects("/projects/p-legacy", source, "owner");
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "プロジェクト設定" }));
+    await user.click(screen.getByRole("button", { name: "復元する" }));
+    expect(source.lifecycle).toHaveBeenCalledWith("p-legacy", "restore", undefined);
   });
 
   it("switches between the tabs", async () => {

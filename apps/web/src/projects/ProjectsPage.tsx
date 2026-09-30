@@ -6,6 +6,7 @@
 // project, registering a repository and changing a member's role go through the
 // same source. The role only chooses what to SHOW; the Backend decides.
 import { type FormEvent, type ReactNode, useCallback, useEffect, useId, useState } from "react";
+import { showsAdmin, useSignedIn } from "../auth/session";
 import { type MessageKey, useI18n } from "../i18n";
 import { errorMessage } from "../i18n/errors";
 import { Link, useRouter } from "../router";
@@ -702,10 +703,12 @@ function MemberRow({
   busy: boolean;
 }) {
   const { t, formatDate } = useI18n();
-  const access = memberAccess(member.role, detail.repositories);
-  let accessText: string;
+  // An invitation grants nothing until it is accepted (MemberStatus.INVITED).
+  const access =
+    member.status === "invited" ? null : memberAccess(member.role, detail.repositories);
+  let accessText = t("projects.access.invited");
   const notes: string[] = [];
-  switch (access.kind) {
+  switch (access?.kind) {
     case "all":
       accessText = t("projects.access.all");
       break;
@@ -875,14 +878,14 @@ function DetailHeader({
   name,
   status,
   role,
-  canManage,
+  canLifecycle,
   settingsOpen,
   onSettings,
 }: {
   name: string;
   status: ProjectStatus;
   role: ProjectRole | null;
-  canManage: boolean;
+  canLifecycle: boolean;
   settingsOpen: boolean;
   onSettings: () => void;
 }) {
@@ -894,7 +897,7 @@ function DetailHeader({
       {role && (
         <span className="count-chip">{t("projects.youAre", { role: roleLabel(t, role) })}</span>
       )}
-      {canManage && (
+      {canLifecycle && (
         <button
           type="button"
           className="secondary small-button push-right"
@@ -908,6 +911,16 @@ function DetailHeader({
   );
 }
 
+/**
+ * Whether to SHOW the lifecycle operations: a Manager of the project, or an
+ * Owner / Admin, whose system role holds `project.lifecycle.manage` without any
+ * membership (paw_backend.authz.policy). The Backend still decides.
+ */
+function useCanManageLifecycle(role: ProjectRole | null): boolean {
+  const { user } = useSignedIn();
+  return role === "manager" || showsAdmin(user.system_role);
+}
+
 /** A project Pending deletion: nothing can be read, only restored (by a Manager). */
 function PendingDeletionView({
   source,
@@ -919,7 +932,7 @@ function PendingDeletionView({
   onChanged: () => void;
 }) {
   const { t, formatDate } = useI18n();
-  const canManage = project.my_role === "manager";
+  const canLifecycle = useCanManageLifecycle(project.my_role);
   const [settingsOpen, setSettingsOpen] = useState(false);
   return (
     <>
@@ -927,7 +940,7 @@ function PendingDeletionView({
         name={project.name}
         status={project.status}
         role={project.my_role}
-        canManage={canManage}
+        canLifecycle={canLifecycle}
         settingsOpen={settingsOpen}
         onSettings={() => setSettingsOpen((value) => !value)}
       />
@@ -964,6 +977,7 @@ function ProjectDetailView({
 }) {
   const { t } = useI18n();
   const panelId = useId();
+  const isSystemAdmin = useCanManageLifecycle(null);
   const [load, setLoad] = useState<Load<ProjectDetail>>({ status: "loading" });
   const [reloads, setReloads] = useState(0);
   const [tab, setTab] = useState<Tab>("overview");
@@ -1023,13 +1037,14 @@ function ProjectDetailView({
   }
   const detail = load.data;
   const canManage = detail.my_role === "manager";
+  const canLifecycle = canManage || isSystemAdmin;
   return (
     <>
       <DetailHeader
         name={detail.name}
         status={detail.status}
         role={detail.my_role}
-        canManage={canManage}
+        canLifecycle={canLifecycle}
         settingsOpen={settingsOpen}
         onSettings={() => setSettingsOpen((value) => !value)}
       />

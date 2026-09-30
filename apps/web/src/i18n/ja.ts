@@ -126,6 +126,7 @@ export const ja = {
   "projects.member.creator": "作成者",
   "projects.member.invited": "招待中",
   "projects.member.invitedUntil": "招待中 · {date} まで",
+  "projects.access.invited": "承諾まではなし",
   "projects.access.all": "すべての Repo",
   "projects.access.readOnly": "読み取りのみ",
   "projects.access.none": "使える Repo なし",
