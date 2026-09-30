@@ -17,7 +17,7 @@ Decision 0046 は、Tool Broker を通る全ての Tool 呼び出しを Queue �
 
 現在、Orchestrator の Node から `ConnectionService.execute` を呼ぶ経路はなく（本番の組み立てにも `ConnectionService` はない）、1 は実際の穴ではない。
 
-## 決定
+## 決定（提案）
 
 ### 1. `ConnectionService.execute` は Lease を確かめる（Fail closed）
 
