@@ -59,6 +59,7 @@
 | [0053](0053-memory-content-length-limit.md) | Memory の本文（`memory_versions.content`）の DB の長さの上限（20,000 文字の CHECK、Migration 0147）・上限を超える既存の行があれば Migration を止めて何も変えない・Projection の切り詰め（Decision 0038 の 5・10）は防御として残す（Issue #147） | Approved |
 | [0054](0054-recovery-repository-projection-restore.md) | Recovery Repository の Backup と Restore の方針（Checkout の置き場所と Marker、1 Entity 1 File の JSON と Manifest・Checksum、列の Allow-list と Secret の置換、削除中の User は削除記録だけ、30 分ごとの 1 Commit と Fast-forward の Push、Restore は Server ローカルで既定は Dry run・空の Workspace へ全体を 1 Transaction で・上書きと削除なし、戻さないもの、Credential の再登録。PAW-047、Issue #41） | Approved |
 | [0055](0055-kaggle-full-gpu-mode.md) | Kaggle / Full GPU Mode の方針（始める・終えるのは Owner / Admin だけ: Capability `admin.compute.full_gpu`、走っている Task は `waiting`（Resource）にして Drain、Queue 中の Task は GPU を求めた時点で Hold、Preempt は明示したときだけ、Main LLM が戻ってから再開、再起動で解除、HTTP の API は後の Issue。PAW-037、Issue #33。Decision 0037 の 7・13 を補う） | Approved |
+| [0061](0061-restore-skipped-repository-memories.md) | Restore で飛ばした Repository（名前・既定の Branch の Credential を伏せ字にしたもの）の Repo 単位の記憶を戻さず、Dry run と Apply の手作業の手順に一覧で出し、Audit の `reason` に件数を足す（Decision 0054 の 9・12 の該当点を Supersede。Issue #171） | Proposed |
 
 運用は [AGENTS.md](../../AGENTS.md) の「仕様変更」に従います。
 
