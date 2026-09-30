@@ -299,13 +299,14 @@ describe("a 401 of an earlier session", () => {
       "POST /auth/login": reply(200, session()),
     });
     const tableFetch = globalThis.fetch;
-    let answerPending: (response: Response) => void = () => {};
+    // Every read of the pending devices (the user menu's and the notification's).
+    const answerPending: ((response: Response) => void)[] = [];
     vi.stubGlobal(
       "fetch",
       vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
         if (String(input).endsWith("/auth/pairing/pending")) {
           return new Promise<Response>((resolve) => {
-            answerPending = resolve;
+            answerPending.push(resolve);
           });
         }
         return tableFetch(input, init);
@@ -315,17 +316,20 @@ describe("a 401 of an earlier session", () => {
     const user = userEvent.setup();
     // Opening the menu starts GET /auth/pairing/pending under the first session.
     await user.click(await screen.findByRole("button", { name: "アカウントメニュー" }));
+    const underFirstSession = answerPending.length;
     await user.click(screen.getByRole("button", { name: "サインアウト" }));
     await user.type(await screen.findByLabelText("ユーザー名"), "tomoki");
     await user.type(screen.getByLabelText("パスワード"), "correct horse");
     await user.click(screen.getByRole("button", { name: "サインイン" }));
     expect(await screen.findByRole("navigation", { name: "メインナビゲーション" })).toBeVisible();
-    answerPending(
-      new Response(JSON.stringify({ error: { code: "unauthorized", message: "x" } }), {
-        status: 401,
-        headers: { "Content-Type": "application/json" },
-      }),
-    );
+    for (const answer of answerPending.slice(0, underFirstSession)) {
+      answer(
+        new Response(JSON.stringify({ error: { code: "unauthorized", message: "x" } }), {
+          status: 401,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    }
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(screen.getByRole("navigation", { name: "メインナビゲーション" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "サインイン" })).not.toBeInTheDocument();

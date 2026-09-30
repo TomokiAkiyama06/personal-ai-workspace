@@ -970,6 +970,11 @@ fieldset {
   display: none;
 }
 
+a.nav-toggle,
+a.nav-toggle:hover {
+  color: var(--text);
+}
+
 .header-search {
   flex: 1;
   max-width: 500px;
@@ -1496,6 +1501,94 @@ fieldset {
   color: var(--text-3);
 }
 
+.notification-detail {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.7;
+  color: var(--text-3);
+}
+
+.notification-actions,
+.banner-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.notification-actions {
+  margin-top: 2px;
+}
+
+.notification-action,
+.banner-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  text-decoration: none;
+}
+
+.notification-action:hover,
+.banner-action:hover {
+  color: var(--text);
+  background: var(--input);
+}
+
+.notification-action.primary {
+  background: var(--input);
+  font-weight: 600;
+}
+
+.banner-actions {
+  margin-left: auto;
+}
+
+.banner-action {
+  border-color: var(--danger-border);
+  color: var(--danger-title);
+}
+
+.banner-critical .banner-action {
+  border-color: var(--critical-border);
+  color: var(--critical-soft);
+}
+
+.banner-action.primary {
+  border-color: transparent;
+  background: var(--error);
+  color: #ffffff;
+  font-weight: 600;
+}
+
+.notification.severity-critical .notification-action.primary,
+.banner-critical .banner-action.primary {
+  border-color: transparent;
+  background: var(--critical);
+  color: #ffffff;
+  font-weight: 600;
+}
+
+.banner-actions .banner-close {
+  margin-left: 0;
+}
+
+.notification-rules {
+  width: 28px;
+  height: 28px;
+  color: var(--text-2);
+}
+
+.notifications-head .text-button + .notification-rules {
+  margin-left: -6px;
+}
+
 .notifications-empty {
   padding: 24px 16px;
   color: var(--text-2);
@@ -2017,6 +2110,117 @@ fieldset {
 
   .notifications-page {
     padding: 0;
+  }
+
+  /* MobileNotifications: cards, the chips in one scrolling row. */
+  .app-header .mark-all-read {
+    min-height: var(--tap);
+    padding: 0 12px;
+    font-size: 13px;
+  }
+
+  .notifications-page .filter-chips {
+    flex-wrap: nowrap;
+    align-items: center;
+    gap: 7px;
+    min-height: 48px;
+    padding: 0 14px;
+    overflow-x: auto;
+  }
+
+  .notifications-page .chip {
+    flex-shrink: 0;
+    min-height: 30px;
+    padding: 0 13px;
+    white-space: nowrap;
+  }
+
+  .notifications-page .notification-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 14px;
+  }
+
+  .notifications-page .notification,
+  .notifications-page .notification:first-child {
+    padding: 13px 14px;
+    border: 1px solid var(--border);
+    border-radius: var(--r-card);
+    background: var(--surface);
+  }
+
+  .notifications-page .notification.severity-warning {
+    border-left: 3px solid var(--warning);
+  }
+
+  .notifications-page .notification.severity-error {
+    border-left: 3px solid var(--error);
+  }
+
+  .notifications-page .notification.severity-critical {
+    padding: 14px;
+    border-color: var(--critical-border);
+    background: var(--critical-bg);
+  }
+
+  .notifications-page .notification.read {
+    border-color: var(--border-soft);
+    background: var(--nav);
+  }
+
+  .notifications-page .notification-dot {
+    display: none;
+  }
+
+  .notifications-page .notification-body {
+    gap: 8px;
+  }
+
+  .notifications-page .notification-title {
+    font-size: 14px;
+    line-height: 1.7;
+  }
+
+  .notifications-page .severity-critical .notification-title {
+    font-weight: 600;
+    color: var(--critical-text);
+  }
+
+  .notifications-page .severity-critical .notification-text,
+  .notifications-page .severity-critical .notification-time {
+    color: var(--critical-soft);
+  }
+
+  .notifications-page .severity-critical .severity-label {
+    padding: 3px 8px;
+    border-radius: var(--r-badge);
+    background: var(--critical);
+    color: #ffffff;
+    letter-spacing: 0.06em;
+  }
+
+  .notifications-page .notification-action {
+    min-height: 40px;
+    padding: 0 14px;
+    border-radius: 10px;
+    font-size: 13px;
+  }
+
+  .notifications-page .severity-critical .notification-action {
+    flex: 1;
+    min-height: var(--tap);
+    border-color: var(--critical-border);
+    color: var(--critical-soft);
+  }
+
+  .notifications-page .severity-critical .notification-action.primary {
+    border-color: transparent;
+    color: #ffffff;
+  }
+
+  .banner-actions {
+    margin-left: 0;
   }
 
   .bottom-tabs {
