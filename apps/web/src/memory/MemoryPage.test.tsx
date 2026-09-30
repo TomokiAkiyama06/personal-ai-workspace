@@ -345,6 +345,50 @@ describe("Memory screen", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("does not offer 編集 where the Backend would need a new freshness", async () => {
+    for (const change of [
+      { freshness_policy: "session_only" as const },
+      { freshness_policy: "expiring" as const, expires_at: "2026-07-01T00:00:00Z" },
+    ]) {
+      const { source, mergeId } = designSource();
+      source.versions = source.versions.map((entry) =>
+        entry.memory_id === mergeId && entry.version_number === 3 ? { ...entry, ...change } : entry,
+      );
+      const view = renderMemory("/memory/m-merge", source);
+      expect(
+        await screen.findByRole("heading", { name: "Merge は必ず人が承認する" }),
+      ).toBeVisible();
+      expect(screen.queryByRole("button", { name: "編集" })).not.toBeInTheDocument();
+      view.unmount();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("compares a retry with the version that won, before the history reloads", async () => {
+    const { source, mergeId } = designSource();
+    renderMemory("/memory/m-merge", source);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "編集" }));
+    const title = screen.getByRole("textbox", { name: "タイトル" });
+    await user.clear(title);
+    await user.type(title, "B");
+    source.write(mergeId, { title: "C" }, null, { actor_user_id: "u-2" });
+    // The first read after the conflict answers; the reload of the pane hangs.
+    const history = source.history.bind(source);
+    let reads = 0;
+    source.history = (id) => {
+      reads += 1;
+      return reads === 1 ? history(id) : new Promise(() => {});
+    };
+    await user.click(screen.getByRole("button", { name: "保存" }));
+    await screen.findByRole("alert");
+    await user.clear(title);
+    await user.type(title, "Merge は必ず人が承認する");
+    await user.click(screen.getByRole("button", { name: "保存" }));
+    const edits = source.calls.filter((call) => call.method === "edit").map((call) => call.args);
+    expect(edits.at(-1)).toEqual([mergeId, 4, { title: "Merge は必ず人が承認する" }]);
+  });
+
   it("offers restore only where the Backend can restore", async () => {
     const { source, mergeId } = designSource();
     // v3 retired by another memory: the memory's current version is superseded.

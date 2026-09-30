@@ -12,7 +12,7 @@ import { Link } from "../router";
 import { DiffView } from "./DiffView";
 import { layoutHistory } from "./graph";
 import { HistoryGraph, VersionCard } from "./HistoryGraph";
-import { actorLabel, freshnessTag, stateChip } from "./labels";
+import { actorLabel, freshnessTag, isExpired, stateChip } from "./labels";
 import type { MemorySource } from "./source";
 import type { MemorySourceRecord, MemoryVersion } from "./types";
 import { useLoad } from "./useLoad";
@@ -293,8 +293,16 @@ export function MemoryDetail({
   const chip = stateChip(current);
   // The Backend's answer, when the API gives it (a project Viewer reads, not writes).
   const canWrite = history.data.can_write !== false;
+  // An edit carries the freshness over, and a person cannot write session_only or
+  // an expiry that has passed (Decision 0034, 4); this screen does not ask for a
+  // new freshness, so those memories are not offered for editing.
   const editable =
-    canWrite && current.status === "active" && EDITABLE_SCOPES.has(current.scope) && draft === null;
+    canWrite &&
+    current.status === "active" &&
+    EDITABLE_SCOPES.has(current.scope) &&
+    current.freshness_policy !== "session_only" &&
+    !isExpired(current) &&
+    draft === null;
 
   const reloadAfterWrite = (written: MemoryVersion) => {
     setSelected(written.version_id);
@@ -346,7 +354,10 @@ export function MemoryDetail({
   const save = async (event: FormEvent) => {
     event.preventDefault();
     if (!draft || base === null) return;
-    const changed = (field: Field) => touched.has(field) && draft[field] !== current[field];
+    // After a conflict the edit goes on top of the version that won, which the
+    // pane's own reload may not have brought in yet.
+    const target = conflict && conflict.version_number === base ? conflict : current;
+    const changed = (field: Field) => touched.has(field) && draft[field] !== target[field];
     const changes = {
       ...(changed("title") ? { title: draft.title } : {}),
       ...(changed("content") ? { content: draft.content } : {}),
