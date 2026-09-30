@@ -23,12 +23,16 @@ import uuid
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import DBAPIError
 
+from paw_backend.auth.onboarding.erasure import ErasureOutcome, UserErasureService
+
 from . import (
     test_onboarding_http,
     test_onboarding_invitations,
     test_onboarding_lifecycle,
     test_onboarding_pairing,
+    test_orchestrator_user_sweep,
     test_passkey_paired_device,
+    test_user_erasure,
 )
 from .auth_support import (
     ROLE_PASSWORD,
@@ -157,14 +161,44 @@ for _module, _names in (
         test_onboarding_http,
         ("InvitationRoutesTest", "LifecycleRoutesTest", "PairingRoutesTest"),
     ),
+    # Issue #127: the user task sweep runs in the backend, as the web role.
+    (test_orchestrator_user_sweep, ("StopTest",)),
     (test_passkey_paired_device, ("ApprovedPairingTest", "NoAllowanceTest")),
 ):
     for _name in _names:
         _case = as_web_role(getattr(_module, _name))
-        _short = _module.__name__.rpartition(".")[2].removeprefix("test_onboarding_")
+        _short = (
+            _module.__name__.rpartition(".")[2]
+            .removeprefix("test_onboarding_")
+            .removeprefix("test_")
+        )
         _case.__qualname__ = _case.__name__ = f"{_short}_{_name}AsWebRole"
         globals()[_case.__name__] = _case
 del _module, _names, _name, _case, _short
+
+
+@requires_postgres
+class ErasureNeedsTheTableOwnerTest(WebRole, test_user_erasure.ErasureTestCase):
+    """Issue #127: the web role can neither erase an account nor mark it deleted.
+
+    The erasure runs as the table owner (``user-erasure-run``); started with the
+    web role's connection it fails on its first delete and changes nothing.
+    """
+
+    async def test_the_web_role_cannot_erase_a_user(self):
+        bob = await self.make_user("bob")
+        await self.personal_data(bob)
+        await self.delete(bob)
+        service = UserErasureService(
+            self.service_database, clock=lambda: test_user_erasure.DUE
+        )
+
+        result = await service.erase_user(bob.id, copies_erased=True)
+
+        self.assertIs(result.outcome, ErasureOutcome.FAILED)
+        self.assertEqual(result.error_type, "InsufficientPrivilege")
+        self.assertEqual(await self.status_of(bob.id), "pending_deletion")
+        self.assertIn("password_credentials", await self.rows_left(bob.id))
 
 
 @requires_postgres

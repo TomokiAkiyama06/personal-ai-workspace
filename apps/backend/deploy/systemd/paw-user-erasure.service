@@ -1,0 +1,64 @@
+# Erasure of deleted users' personal data (Issue #127, Decision 0043).
+# Started once a day by paw-user-erasure.timer.
+#
+# Erases, for every user deleted 30 or more days ago, the personal data kept in
+# the database (password hash, Passkeys, sessions, private conversations, private
+# Memory, personal settings, ...) and verifies it. It never touches a user's
+# Linux account or home, nor the database backups: managed checkouts there block
+# the erasure until the operator removed them, and the user is marked deleted only
+# once the operator erased the copies outside the database (backups / WAL, the
+# user's files and GitHub / SSH credentials, recovery copies) and runs
+#   python -m paw_backend.cli user-erasure-run \
+#     --checkouts-removed <user id> --copies-erased <user id>
+# by hand (the same environment file). The confirmation counts only on a run
+# after the one that committed the database erasure (backups / WAL taken before
+# that commit still hold the rows): erase the copies made up to that run, then
+# confirm. Until then the timer's run exits 3 for that user (copies_pending)
+# every day, which starts the failure unit.
+#
+# From the first day of a deletion (not only after the 30 days), every run also
+# exits 3 for each pending-deletion user whose own GitHub / SSH credentials are
+# not confirmed revoked (credentials_pending): revoke them (gh auth logout, the
+# backend's line in the user's authorized_keys and the per-user key, or lock the
+# Linux account), then run it with --credentials-revoked <user id>. Run it by
+# hand right after a deletion rather than waiting for the timer.
+#
+# User: the same dedicated OS user as paw-audit-retention.service (paw-maint),
+# never the user the backend runs as, for the same reasons (see that unit): this
+# job holds the table owner's credential.
+#
+# Install (as root), adjusting the paths and the User to your deployment:
+#   cp paw-user-erasure.service paw-user-erasure.timer \
+#      paw-user-erasure-failure.service /etc/systemd/system/
+#   systemctl daemon-reload
+#   systemctl enable --now paw-user-erasure.timer
+#
+# /etc/paw/user-erasure.env must set PAW_MIGRATION_DATABASE_URL (the table owner)
+# and be readable by root only (chmod 600). It may be the same file as
+# /etc/paw/audit-retention.env. Never put the URL on the ExecStart line or in
+# Environment=.
+
+[Unit]
+Description=Personal AI Workspace erasure of deleted users' personal data
+Wants=network-online.target
+After=network-online.target postgresql.service
+# A non-zero exit (a user not erased, an unreachable database, a concurrent run)
+# starts the failure unit.
+OnFailure=paw-user-erasure-failure.service
+
+[Service]
+Type=oneshot
+User=paw-maint
+EnvironmentFile=/etc/paw/user-erasure.env
+WorkingDirectory=/opt/paw/apps/backend
+ExecStart=/opt/paw/venv/bin/python -m paw_backend.cli user-erasure-run
+# Each user is one transaction whose lock wait is bounded (LOCK_TIMEOUT_MS of
+# paw_backend.auth.onboarding.erasure). This is the backstop: systemd sends
+# SIGTERM, the command rolls the current user back and exits 3.
+TimeoutStartSec=30min
+KillSignal=SIGTERM
+TimeoutStopSec=60s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
