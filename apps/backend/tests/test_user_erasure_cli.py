@@ -167,6 +167,18 @@ class SystemdUnitTest(unittest.TestCase):
         failure = unit("paw-user-erasure-failure.service")
         self.assertIn("ExecStart", failure["Service"])
 
+    def test_the_failure_message_names_the_credentials_reminders_too(self):
+        # Codex P2 (PR #142): a run also fails, from the first day of a deletion,
+        # for credentials not confirmed revoked (auth.user.credentials); the
+        # message must not send the Owner only to auth.user.erase.
+        text = (SYSTEMD_DIR / "paw-user-erasure-failure.service").read_text()
+        message = next(
+            line for line in text.splitlines() if line.startswith("ExecStart=")
+        )
+        self.assertIn("auth.user.erase", message)
+        self.assertIn("auth.user.credentials", message)
+        self.assertIn("--credentials-revoked", message)
+
     def test_the_timer_runs_daily_and_catches_up_after_downtime(self):
         timer = unit("paw-user-erasure.timer")
         self.assertEqual(timer["Timer"]["OnCalendar"], "daily")
