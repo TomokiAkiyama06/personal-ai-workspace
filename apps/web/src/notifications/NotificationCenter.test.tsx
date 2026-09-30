@@ -3,27 +3,32 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../i18n";
 import { RouterProvider } from "../router";
-import { NotificationBanners, NotificationBell } from "./NotificationCenter";
+import { NotificationBanners, NotificationBell, NotificationsPage } from "./NotificationCenter";
 import {
   type IncomingNotification,
   mergeNotification,
   NotificationProvider,
   type NotificationSource,
+  useNotificationOwner,
 } from "./store";
 
 function manualSource() {
   let listener: ((notification: IncomingNotification) => void) | null = null;
+  let resolver: ((key: string) => void) | null = null;
   const source: NotificationSource = {
-    subscribe(onNotification) {
+    subscribe(onNotification, onResolve) {
       listener = onNotification;
+      resolver = onResolve ?? null;
       return () => {
         listener = null;
+        resolver = null;
       };
     },
   };
   return {
     source,
     emit: (notification: IncomingNotification) => act(() => listener?.(notification)),
+    resolve: (key: string) => act(() => resolver?.(key)),
   };
 }
 
@@ -163,5 +168,223 @@ describe("Notification Center", () => {
     }
     expect(items).toHaveLength(100);
     expect(items[0]?.key).toBe("k119");
+  });
+
+  it("counts the same event only once (dedup) and aggregates different ones", async () => {
+    const { source, emit } = manualSource();
+    renderCenter(source);
+    const backup = (id: string, time: string) =>
+      emit({
+        key: "backup",
+        id,
+        severity: "warning",
+        title: "Memory Backup が一時的に失敗しました",
+        at: time,
+      });
+    backup("e1", "2026-09-28T01:30:00Z");
+    backup("e1", "2026-09-28T01:30:00Z");
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "通知 1 件未読" }));
+    const panel = screen.getByRole("complementary", { name: "通知" });
+    expect(within(panel).queryByText(/件をまとめて表示/)).not.toBeInTheDocument();
+    backup("e2", "2026-09-28T03:00:00Z");
+    backup("e3", "2026-09-28T02:00:00Z");
+    backup("e2", "2026-09-28T03:00:00Z");
+    expect(within(panel).getAllByRole("listitem")).toHaveLength(1);
+    expect(within(panel).getByText("3 件をまとめて表示")).toBeInTheDocument();
+    // The first and the latest event of the entry (NOTIFICATION_POLICY §4).
+    const first = new Intl.DateTimeFormat("ja-JP", { hour: "2-digit", minute: "2-digit" });
+    expect(
+      within(panel).getByText(
+        `最初 ${first.format(new Date("2026-09-28T01:30:00Z"))} · 最新 ${first.format(new Date("2026-09-28T03:00:00Z"))}`,
+      ),
+    ).toBeInTheDocument();
+    // A duplicate does not make a read entry unread again.
+    await user.click(within(panel).getByRole("button", { name: "すべて既読" }));
+    backup("e3", "2026-09-28T02:00:00Z");
+    expect(screen.getByRole("button", { name: "通知" })).toBeInTheDocument();
+    // A new event does.
+    backup("e4", "2026-09-28T04:00:00Z");
+    expect(screen.getByRole("button", { name: "通知 1 件未読" })).toBeInTheDocument();
+    expect(within(panel).getByText("4 件をまとめて表示")).toBeInTheDocument();
+  });
+
+  it("escalates an entry to the newest severity and shows the banner", () => {
+    const { source, emit } = manualSource();
+    renderCenter(source);
+    emit({ key: "backup", id: "1", severity: "warning", title: "Backup が失敗しました", at });
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    emit({
+      key: "backup",
+      id: "2",
+      severity: "critical",
+      title: "Memory Backup が 6 時間成功していません",
+      detail: "最終成功 07:30 · 連続失敗 12 回",
+      at,
+    });
+    const banner = screen.getByRole("alert");
+    expect(banner).toHaveTextContent("Memory Backup が 6 時間成功していません");
+    expect(banner).toHaveTextContent("最終成功 07:30 · 連続失敗 12 回");
+  });
+
+  it("removes an entry its source resolved", async () => {
+    const { source, emit, resolve } = manualSource();
+    renderCenter(source);
+    emit({ key: "a", severity: "warning", title: "承認待ち", at });
+    expect(screen.getByRole("button", { name: "通知 1 件未読" })).toBeInTheDocument();
+    resolve("a");
+    expect(screen.getByRole("button", { name: "通知" })).toBeInTheDocument();
+    await userEvent.setup().click(screen.getByRole("button", { name: "通知" }));
+    expect(screen.getByText("通知はありません。")).toBeInTheDocument();
+  });
+
+  it("offers the entry's actions as links that mark it read and close the panel", async () => {
+    const { source, emit } = manualSource();
+    renderCenter(source);
+    emit({
+      key: "task",
+      severity: "error",
+      title: "エージェントのジョブが停止しました",
+      body: "同じ修正を 3 回繰り返したためエスカレーションしました。",
+      category: "task",
+      at,
+      actions: [{ label: "タスクを開く", to: "/agents", primary: true }],
+    });
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "通知 1 件未読" }));
+    const panel = screen.getByRole("complementary", { name: "通知" });
+    expect(within(panel).getByRole("link", { name: "通知設定を開く" })).toHaveAttribute(
+      "href",
+      "/settings/notifications",
+    );
+    const open = within(panel).getByRole("link", { name: "タスクを開く" });
+    expect(open).toHaveAttribute("href", "/agents");
+    await user.click(open);
+    expect(window.location.pathname).toBe("/agents");
+    expect(screen.queryByRole("complementary")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "通知" })).toBeInTheDocument();
+    // The banner offers the same action.
+    expect(
+      within(screen.getByRole("status")).getByRole("link", { name: "タスクを開く" }),
+    ).toBeInTheDocument();
+  });
+
+  it("shows the phone layout: the unread count on the 未読 chip and short group counts", () => {
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn((query: string) => ({
+        matches: query === "(max-width: 767px)",
+        media: query,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      })),
+    );
+    const { source, emit } = manualSource();
+    render(
+      <I18nProvider>
+        <RouterProvider>
+          <NotificationProvider source={source}>
+            <NotificationsPage />
+          </NotificationProvider>
+        </RouterProvider>
+      </I18nProvider>,
+    );
+    emit({ key: "w", id: "1", severity: "warning", title: "一時的に失敗しました", at });
+    emit({ key: "w", id: "2", severity: "warning", title: "一時的に失敗しました", at });
+    expect(screen.getByRole("heading", { level: 1, name: "通知" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "未読 1" })).toBeInTheDocument();
+    expect(screen.getByText("2 件")).toBeInTheDocument();
+  });
+
+  it("does not repeat the banners on the notification list itself", () => {
+    window.history.replaceState(null, "", "/notifications");
+    const { source, emit } = manualSource();
+    renderCenter(source);
+    emit({ key: "gpu", severity: "critical", title: "GPUが応答しません", at });
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    window.history.replaceState(null, "", "/");
+  });
+
+  it("keeps the newest event's content when an older one arrives late", () => {
+    const { source, emit } = manualSource();
+    renderCenter(source);
+    emit({ key: "backup", id: "2", severity: "critical", title: "6 時間成功していません", at });
+    emit({
+      key: "backup",
+      id: "1",
+      severity: "warning",
+      title: "一時的に失敗しました",
+      at: "2026-09-28T01:00:00Z",
+    });
+    expect(screen.getByRole("alert")).toHaveTextContent("6 時間成功していません");
+  });
+
+  it("remembers every id of an entry for dedup", () => {
+    let items = [] as ReturnType<typeof mergeNotification>;
+    for (let i = 0; i < 80; i++) {
+      items = mergeNotification(items, { key: "k", id: `e${i}`, severity: "info", title: "n", at });
+    }
+    expect(mergeNotification(items, { key: "k", id: "e0", severity: "info", title: "n", at })).toBe(
+      items,
+    );
+  });
+
+  it("keeps the read / dismissed state and the order when an older event arrives late", async () => {
+    const { source, emit } = manualSource();
+    renderCenter(source);
+    emit({ key: "backup", id: "2", severity: "critical", title: "6 時間成功していません", at });
+    emit({
+      key: "repo",
+      severity: "info",
+      title: "解析が完了しました",
+      at: "2026-09-28T03:00:00Z",
+    });
+    const user = userEvent.setup();
+    await user.click(
+      within(screen.getByRole("alert")).getByRole("button", { name: "バナーを閉じる" }),
+    );
+    await user.click(screen.getByRole("button", { name: "通知 1 件未読" }));
+    const panel = screen.getByRole("complementary", { name: "通知" });
+    await user.click(within(panel).getByRole("button", { name: "すべて既読" }));
+    emit({
+      key: "backup",
+      id: "1",
+      severity: "critical",
+      title: "古い失敗",
+      at: "2026-09-28T01:00:00Z",
+    });
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "通知" })).toBeInTheDocument();
+    const titles = within(panel)
+      .getAllByRole("listitem")
+      .map((item) => item.querySelector(".notification-title")?.textContent);
+    expect(titles).toEqual(["解析が完了しました", "6 時間成功していません"]);
+    expect(within(panel).getByText("2 件をまとめて表示")).toBeInTheDocument();
+  });
+
+  it("forgets the notifications only for another account or a sign-out", () => {
+    function Owner({ userId }: { userId: string | null | undefined }) {
+      useNotificationOwner(userId);
+      return null;
+    }
+    const { source, emit } = manualSource();
+    const view = (userId: string | null | undefined) => (
+      <I18nProvider>
+        <RouterProvider>
+          <NotificationProvider source={source}>
+            <Owner userId={userId} />
+            <NotificationBell />
+          </NotificationProvider>
+        </RouterProvider>
+      </I18nProvider>
+    );
+    const { rerender } = render(view("u-1"));
+    emit({ key: "a", severity: "warning", title: "承認待ち", at });
+    // A transient error (unknown account) keeps them.
+    rerender(view(undefined));
+    rerender(view("u-1"));
+    expect(screen.getByRole("button", { name: "通知 1 件未読" })).toBeInTheDocument();
+    rerender(view("u-2"));
+    expect(screen.getByRole("button", { name: "通知" })).toBeInTheDocument();
   });
 });

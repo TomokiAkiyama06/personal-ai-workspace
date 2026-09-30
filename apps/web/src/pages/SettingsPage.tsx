@@ -10,6 +10,7 @@ import { Link, useRouter } from "../router";
 import { Avatar, RoleBadge, useRoleLabel } from "../shell/common";
 import { Icon } from "../shell/icons";
 import { THEME_PREFERENCES, useTheme } from "../theme";
+import { UsageView } from "../usage/UsageView";
 import { DevicesSection } from "./DevicesSection";
 
 type Audience = "everyone" | "admin" | "owner";
@@ -196,7 +197,13 @@ export function SettingsPage() {
   if (current === "/settings/profile") content = <ProfileSection />;
   else if (current === "/settings/devices") content = <DevicesSection />;
   else if (current === "/settings/appearance") content = <AppearanceSection />;
-  else content = <SettingsPlaceholder label={entry?.label ?? "settings.title"} />;
+  else if (current === "/settings/usage") {
+    content = (
+      <div className="settings-content settings-usage">
+        <UsageView title="settings.usage" />
+      </div>
+    );
+  } else content = <SettingsPlaceholder label={entry?.label ?? "settings.title"} />;
 
   return (
     <div className="settings-screen">
