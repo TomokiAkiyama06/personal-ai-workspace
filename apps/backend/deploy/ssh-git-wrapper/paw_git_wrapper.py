@@ -698,7 +698,7 @@ def gh_credential_helper(config: Config) -> str | None:
 
 
 def _check_push(args: list[str], places: Places, config: Config) -> None:
-    """Decision 0052 (issue #132): ``push --quiet --no-follow-tags
+    """Decisions 0052 and 0062 (issues #132, #90): ``push --quiet --no-follow-tags
     --no-recurse-submodules --no-signed -- <URL> <commit>:refs/heads/paw/...``.
     One commit id (never a ``+``: no force, no other refspec, no option such as
     ``--delete``, ``--mirror`` or ``--tags``) to one ``paw/`` branch of

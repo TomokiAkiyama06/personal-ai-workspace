@@ -247,7 +247,7 @@ def push_arguments(gh_executable: str, url: str, commit: str, branch: str) -> li
     ``--no-signed`` overrides its ``push.gpgSign`` (a signed push fails without
     a key or on a remote that does not accept one, and the task would stay
     ``evaluating``; Codex review of #159, #90). The form is fixed: the SSH
-    wrapper accepts nothing else (Decision 0052)."""
+    wrapper accepts nothing else (Decisions 0052 and 0062)."""
     return [
         "-c",
         "credential.helper=",
