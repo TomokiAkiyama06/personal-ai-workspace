@@ -1,6 +1,7 @@
 // 日本語（既定）の文言。キーの一覧の正本で、他の言語はこの型に合わせる。
 // 文言は PAW-060 の Design Canvas（Login / SettingsDevices / UserMenu / Roles /
 // NotificationCenter など）に合わせる。`{name}` は translate() の引数で置き換える。
+import { memoryJa } from "./memory.ja";
 import { tasksJa } from "./tasks";
 
 export const ja = {
@@ -504,6 +505,8 @@ export const ja = {
   "usage.users.quota": "上限",
   "usage.users.status": "状態",
   "usage.users.empty": "ユーザーの記録はありません。",
+
+  ...memoryJa,
 } as const;
 
 export type MessageKey = keyof typeof ja;

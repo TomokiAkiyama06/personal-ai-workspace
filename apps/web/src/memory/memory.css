@@ -1,0 +1,888 @@
+/* メモリ (PAW-063): the PAW-060 design canvas "Memory" board, on the shell's
+   tokens (styles.css). Kept apart from styles.css so the UI screens of the other
+   issues do not edit the same file. */
+
+.memory-screen {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - var(--header-h));
+  min-height: 0;
+}
+
+.tone-ok {
+  color: var(--ok);
+}
+
+.tone-warning {
+  color: var(--warning);
+}
+
+.tone-info {
+  color: var(--info-text);
+}
+
+.tone-muted {
+  color: var(--text-3);
+}
+
+.tone-error {
+  color: var(--error);
+}
+
+/* Toolbar: title, search, 状態, 要確認 N */
+
+.memory-toolbar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 52px;
+  padding: 0 20px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.memory-toolbar h1 {
+  font-size: 17px;
+}
+
+.memory-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 300px;
+  height: 32px;
+  margin-left: 8px;
+  padding: 0 10px;
+  border-radius: var(--r-input);
+  border: 1px solid var(--border);
+  background: var(--input);
+  color: var(--text-3);
+}
+
+.memory-search:focus-within {
+  border-color: var(--selected-border);
+}
+
+.memory-search input {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font-size: 12.5px;
+}
+
+.memory-search input:focus {
+  box-shadow: none;
+}
+
+.memory-toolbar .chip {
+  min-height: 30px;
+  padding: 0 11px;
+}
+
+.memory-toolbar .review-chip {
+  color: var(--warning);
+}
+
+.memory-status {
+  position: relative;
+}
+
+.memory-status-menu {
+  left: 0;
+  right: auto;
+  padding: 10px;
+  width: max-content;
+}
+
+.memory-scope-select {
+  display: none;
+}
+
+.memory-scope-select select {
+  min-height: 32px;
+  width: auto;
+  max-width: 220px;
+  padding: 0 8px;
+  font-size: 12.5px;
+  background: var(--input);
+}
+
+/* Panes */
+
+.memory-panes {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.memory-scopes {
+  width: 216px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 14px 10px;
+  border-right: 1px solid var(--border-soft);
+  overflow-y: auto;
+}
+
+.memory-scopes-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px 8px;
+}
+
+.memory-scopes-head .section-label {
+  font-size: 10.5px;
+}
+
+button.memory-collapse {
+  margin-left: auto;
+  min-height: 22px;
+  padding: 0 7px;
+  border-radius: 6px;
+  color: var(--text-3);
+  font-size: 10.5px;
+}
+
+.scope-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+button.scope-row {
+  justify-content: flex-start;
+  gap: 8px;
+  width: 100%;
+  min-height: 32px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-2);
+  font-size: 12.5px;
+  font-weight: 400;
+  text-align: left;
+}
+
+button.scope-row.indent {
+  padding-left: 30px;
+}
+
+button.scope-row:hover {
+  background: var(--input);
+}
+
+button.scope-row[aria-current="true"] {
+  background: var(--selected);
+  color: var(--text);
+  font-weight: 600;
+}
+
+.scope-name {
+  flex: 1;
+  min-width: 0;
+}
+
+.scope-count {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-3);
+}
+
+button.scope-row[aria-current="true"] .scope-count {
+  color: var(--link);
+}
+
+.scope-dot {
+  width: 6px;
+  height: 6px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.chevron {
+  flex-shrink: 0;
+  color: var(--text-3);
+  margin-right: -1px;
+}
+
+.chevron.closed {
+  transform: rotate(-90deg);
+}
+
+.memory-list-pane {
+  width: 306px;
+  flex-shrink: 0;
+  padding: 14px;
+  border-right: 1px solid var(--border-soft);
+  overflow-y: auto;
+}
+
+.memory-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.memory-card {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 12px 13px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.memory-card:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+.memory-card[aria-current="page"] {
+  background: var(--row-current);
+  border-color: var(--selected-border);
+}
+
+.memory-card-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.memory-pin {
+  flex-shrink: 0;
+  color: var(--link);
+}
+
+.memory-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.memory-card-meta .mono {
+  font-size: 10px;
+  color: var(--text-3);
+}
+
+.memory-card-date {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.memory-state {
+  padding: 2px 7px;
+  border-radius: 5px;
+  background: var(--input);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.memory-detail-pane {
+  flex: 1;
+  min-width: 0;
+  padding: 18px 22px;
+  overflow-y: auto;
+}
+
+.memory-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 4px;
+  color: var(--text-2);
+  font-size: 12.5px;
+}
+
+/* Detail */
+
+.memory-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.memory-back {
+  display: none;
+}
+
+.memory-detail-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.memory-detail-head h2 {
+  font-size: 17px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.memory-detail-head .status-chip {
+  padding: 3px 9px;
+  font-size: 10.5px;
+}
+
+.status-chip.tone-ok {
+  background: var(--ok-bg);
+}
+
+.status-chip.tone-warning {
+  background: var(--warning-bg);
+}
+
+.status-chip.tone-info {
+  background: var(--info-bg);
+}
+
+.status-chip.tone-error {
+  background: var(--error-bg);
+}
+
+.status-chip.tone-muted,
+.status-chip.scope-chip,
+.status-chip.muted-chip {
+  background: var(--input);
+  color: var(--text-2);
+  font-weight: 400;
+}
+
+.memory-notice {
+  color: var(--ok);
+}
+
+.memory-conflict-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.memory-conflict {
+  display: flex;
+  gap: 10px;
+  padding: 11px 14px;
+  border-radius: 11px;
+  border: 1px solid color-mix(in srgb, var(--warning) 22%, var(--border));
+  background: color-mix(in srgb, var(--warning) 5%, var(--bg));
+  color: var(--warning);
+}
+
+.memory-conflict > svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.memory-conflict-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.memory-conflict-text strong {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: color-mix(in srgb, var(--warning) 45%, var(--text));
+}
+
+.memory-conflict-text span {
+  font-size: 11.5px;
+  line-height: 1.7;
+  color: var(--text-2);
+}
+
+.memory-conflict-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+}
+
+.memory-conflict-actions button.small-button {
+  min-height: 30px;
+  padding: 0 11px;
+}
+
+.memory-tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--border-soft);
+  overflow-x: auto;
+}
+
+.memory-tabs button {
+  min-height: 0;
+  padding: 9px 13px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-2);
+  font-size: 12.5px;
+  font-weight: 400;
+  white-space: nowrap;
+}
+
+.memory-tabs button[aria-selected="true"] {
+  border-bottom-color: var(--accent);
+  color: var(--text);
+  font-weight: 600;
+}
+
+.memory-body-text,
+.memory-version-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.9;
+}
+
+.memory-body-text {
+  padding: 14px 16px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--nav);
+  font-size: 13px;
+}
+
+.memory-edit textarea {
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.8;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-input);
+  padding: 10px 12px;
+  width: 100%;
+  resize: vertical;
+}
+
+.memory-edit textarea:focus {
+  outline: none;
+  border-color: var(--selected-border);
+}
+
+/* History: the graph and the selected version */
+
+.memory-history {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 20px;
+  align-items: flex-start;
+}
+
+.memory-graph {
+  position: relative;
+  flex: 0 0 auto;
+  width: 300px;
+  max-width: 100%;
+  margin: 8px 4px;
+}
+
+.memory-graph-lines {
+  position: absolute;
+  top: 0;
+  left: 0;
+}
+
+.memory-graph-lines path {
+  fill: none;
+  stroke: var(--border);
+  stroke-width: 2;
+}
+
+.memory-graph-lines .edge-conflicts_with {
+  stroke: var(--warning);
+  stroke-dasharray: 4 4;
+}
+
+.memory-graph-lines .node {
+  fill: var(--nav);
+  stroke: var(--accent);
+  stroke-width: 2;
+}
+
+.memory-graph-lines .node.current {
+  fill: var(--accent);
+}
+
+.memory-graph-lines .node.inferred {
+  stroke: var(--info);
+}
+
+.memory-graph-lines .node.observed,
+.memory-graph-lines .node.retired {
+  stroke: var(--text-disabled);
+}
+
+.memory-graph-lines .node.deprecated {
+  stroke: var(--error);
+}
+
+.memory-graph-lines .node-ring {
+  fill: none;
+  stroke: var(--accent);
+  stroke-opacity: 0.45;
+  stroke-width: 2;
+}
+
+.memory-graph-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.memory-graph-rows li {
+  position: absolute;
+  right: 0;
+  display: flex;
+}
+
+button.graph-row {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  max-width: 100%;
+  min-height: 0;
+  padding: 2px 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+}
+
+button.graph-row:hover,
+button.graph-row[aria-pressed="true"] {
+  background: var(--input);
+}
+
+.graph-row-title {
+  max-width: 100%;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+button.graph-row.related .graph-row-title {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-2);
+}
+
+.graph-row-meta {
+  max-width: 100%;
+  font-size: 10.5px;
+  font-weight: 400;
+  color: var(--text-3);
+}
+
+.memory-version {
+  flex: 1 1 260px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--nav);
+}
+
+.memory-version-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 9px;
+}
+
+.memory-version-head h3 {
+  font-size: 13px;
+}
+
+.memory-version-head .mono {
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.version-dot {
+  width: 9px;
+  height: 9px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--text-disabled);
+}
+
+.version-dot.current {
+  background: var(--accent);
+}
+
+.memory-version-text {
+  padding: 12px 14px;
+  border-radius: 9px;
+  background: var(--surface);
+  font-size: 12.5px;
+}
+
+.memory-version-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
+  margin: 0;
+  font-size: 11.5px;
+}
+
+.memory-version-facts div {
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+}
+
+.memory-version-facts dt {
+  flex-shrink: 0;
+  color: var(--text-3);
+}
+
+.memory-version-facts dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.memory-version-facts dd:not([class*="tone-"]) {
+  color: var(--text);
+}
+
+.memory-version .small {
+  font-size: 11.5px;
+  line-height: 1.8;
+  color: var(--text-3);
+}
+
+/* Diff */
+
+.memory-diff {
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  overflow: hidden;
+}
+
+.memory-diff-head,
+.memory-diff-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.memory-diff-head {
+  padding: 6px 0;
+  background: var(--input);
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.memory-diff-head span {
+  padding: 0 10px;
+}
+
+.memory-diff-rows {
+  max-height: 320px;
+  overflow-y: auto;
+  background: var(--surface);
+}
+
+.memory-diff-cell {
+  padding: 2px 10px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  text-decoration: none;
+  color: var(--text);
+}
+
+.memory-diff-cell + .memory-diff-cell {
+  border-left: 1px solid var(--border-soft);
+}
+
+.memory-diff-cell.removed {
+  background: var(--error-bg);
+}
+
+.memory-diff-cell.added {
+  background: var(--ok-bg);
+}
+
+.memory-diff-same {
+  padding: 10px;
+}
+
+/* Sources and details */
+
+.memory-sources {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.memory-sources li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--border-soft);
+  font-size: 12.5px;
+}
+
+.memory-sources li:last-child {
+  border-bottom: 0;
+}
+
+.memory-source-name {
+  font-weight: 600;
+}
+
+.memory-sources li.deleted .memory-source-name {
+  color: var(--text-3);
+}
+
+.memory-facts {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  font-size: 12.5px;
+}
+
+.memory-facts > div {
+  display: contents;
+}
+
+.memory-facts dd {
+  overflow-wrap: anywhere;
+}
+
+/* 768-1279px: the scope tree becomes a select above the list. */
+@media (max-width: 1279px) {
+  .memory-scopes {
+    display: none;
+  }
+
+  .memory-scope-select {
+    display: block;
+  }
+
+  .memory-search {
+    width: 220px;
+  }
+
+  .memory-list-pane {
+    width: 280px;
+  }
+}
+
+/* < 768px: the list and the detail are two levels (UI_DESIGN.md §17). */
+@media (max-width: 767px) {
+  .memory-screen {
+    height: auto;
+  }
+
+  .memory-toolbar {
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 12px 16px;
+  }
+
+  .memory-toolbar h1 {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .memory-search {
+    flex-basis: 100%;
+    width: auto;
+    height: var(--tap);
+    margin-left: 0;
+  }
+
+  .memory-toolbar .chip,
+  .memory-scope-select select {
+    min-height: 36px;
+  }
+
+  .memory-panes {
+    display: block;
+  }
+
+  .memory-list-pane {
+    width: auto;
+    padding: 12px 16px;
+    border-right: 0;
+  }
+
+  .memory-detail-pane {
+    padding: 12px 16px 20px;
+  }
+
+  .has-selection .memory-toolbar,
+  .has-selection .memory-list-pane,
+  .memory-screen:not(.has-selection) .memory-detail-pane {
+    display: none;
+  }
+
+  .memory-back {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-height: var(--tap);
+    font-size: 13px;
+  }
+
+  .memory-graph {
+    width: 100%;
+  }
+
+  .memory-version-facts {
+    grid-template-columns: 1fr;
+  }
+
+  .memory-diff-head,
+  .memory-diff-row {
+    grid-template-columns: 1fr;
+  }
+
+  .memory-diff-cell + .memory-diff-cell {
+    border-left: 0;
+    border-top: 1px dashed var(--border-soft);
+  }
+
+  .memory-tab-panel button.small-button {
+    min-height: var(--tap);
+  }
+}
