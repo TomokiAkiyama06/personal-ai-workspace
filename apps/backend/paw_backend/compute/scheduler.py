@@ -40,7 +40,7 @@ Exclusive
     is free, and only then grants the lease. Any failure puts the scheduler back
     to normal. Releasing the lease lets ``refresh()`` load the models again.
 
-Observed free VRAM (Decision 0042, Proposed)
+Observed free VRAM (Decision 0042)
     Processes the scheduler does not manage are invisible to its leases, but not
     to the probe. Work that allocates VRAM of its own (a request with
     ``vram_bytes``) is admitted only when the probe shows that much free beyond

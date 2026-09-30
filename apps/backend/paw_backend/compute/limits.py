@@ -40,7 +40,7 @@ DEFAULT_MAX_WAITERS = 256
 DEFAULT_PROBE_TIMEOUT_SECONDS = 10.0
 MAX_COMMAND_TIMEOUT_SECONDS = 600.0
 
-# Decision 0042 (Proposed): a warning that work waits for VRAM another workload
+# Decision 0042: a warning that work waits for VRAM another workload
 # holds is repeated at most this often for the same kind of work.
 DEFAULT_VRAM_WARNING_INTERVAL_SECONDS = 300.0
 

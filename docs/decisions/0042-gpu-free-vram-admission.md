@@ -1,11 +1,11 @@
 # 観測した空き VRAM による Admission の追加の安全確認（GPU 利用率は使わない、足りなければ待たせて警告する）
 
-- Status: Proposed
+- Status: Approved
 - Date: 2026-09-28
 - Scope: Issue [#145](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/145)。PAW-036 の Compute Resource Scheduler（`apps/backend/paw_backend/compute/`）の Admission の経路と Exclusive の手順
 - Supersedes: なし。[Decision 0037](0037-gpu-compute-scheduler.md)（Approved）は書き換えない。0037 の承認後の補足が「GPU 利用率を Admission に使う方針は、この Decision では決めておらず、別途提案する」とした点への答えで、0037 の 3（VRAM の勘定）・6（Probe が使えないとき）・7（Exclusive）に追補する
 - Direction: 2026-09-28、Human が作業 Session 内で方向を**直接決めた**（下の「Human が決めたこと」）。この Decision はその記録と、残りの細部の提案である
-- Approval: 未承認（細部の 1〜8 について承認を求める）
+- Approval: 2026-09-29、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで「推奨どおり」と回答して承認（1〜8 の全点。末尾の「承認時の決定」）
 
 ## 背景
 
@@ -112,3 +112,7 @@
 承認されたら `Approval` に記録し、Status を Approved に改める。数値は `apps/backend/paw_backend/compute/limits.py` と `ComputeConfig`（`vram_warning_interval_seconds`、0037 の Headroom と Probe の古さ）で変えられる（DB に書いたものはない）。
 方針を変えるときは、この Decision を書き換えず、新しい Decision から `Supersedes` する。
 [REQUIREMENTS.md](../../REQUIREMENTS.md) の原文は書き換えない。
+
+## 承認時の決定（2026-09-29）
+
+Human は、作業 Session で判断が必要な点について推奨つきの説明を受け、「推奨どおり」と回答して承認した（1〜8 の全点）。**すべて推奨どおり**で、個別の変更はない。

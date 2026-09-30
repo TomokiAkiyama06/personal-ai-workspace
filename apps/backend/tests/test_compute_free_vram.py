@@ -1,4 +1,4 @@
-"""Admission on the observed free VRAM (Decision 0042, Proposed).
+"""Admission on the observed free VRAM (Decision 0042).
 
 Processes the scheduler does not manage (another user's vLLM holding tens of GB)
 are invisible to its leases but not to the probe. Work that allocates VRAM of
