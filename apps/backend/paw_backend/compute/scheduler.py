@@ -399,8 +399,8 @@ class ComputeScheduler:
         # What was external when the VRAM leases (an Exclusive job's, or the
         # shared ones with ``vram_bytes``) last changed (see account).
         self._extra_baseline = 0
-        # What released VRAM leases may have allocated that no reading has
-        # shown yet: rebased on the first reading taken after the release (see
+        # The whole reservations of released VRAM leases, counted until the
+        # first reading started after the release, which rebases them (see
         # _rebase).
         self._pending_release = 0
         # The VRAM view of the last reading before the probe was lost: the
@@ -999,19 +999,23 @@ class ComputeScheduler:
         promised and have not allocated yet. Which lease's process holds what is
         not known, so the released lease is taken to have absorbed as much as it
         could (``min(released, extra_use)``): memory a remaining lease holds may
-        be counted twice until that lease ends, never overcommitted."""
-        if self._device is None:
-            # No reading (the probe is lost): the whole release is rebased on
-            # the next one.
-            self._pending_release += released
-            return
-        view = self._vram()
-        absorbed = min(released, view.extra_use)
-        self._extra_baseline = view.external + absorbed
-        # What the reading does not show yet (the lease may have allocated
-        # after it was taken) is rebased on the next reading, before the
-        # remaining leases' reservations could absorb it.
-        self._pending_release += released - absorbed
+        be counted twice until that lease ends, never overcommitted.
+
+        The whole released reservation also still counts (``_pending_release``)
+        until a reading that started after the release: the last reading may
+        predate what the lease allocated, and what it shows absorbed may be
+        another lease's (another workload that grew under that lease's
+        reservation), so it tells nothing about what the released lease left
+        behind. Until then the release may be counted twice, never less."""
+        if self._device is not None:
+            view = self._vram()
+            absorbed = min(released, view.extra_use)
+            self._extra_baseline = view.external + absorbed
+        # No reading (the probe is lost), or one that may not show what the
+        # lease allocated: the whole release is rebased on the next reading
+        # started after it (see _sample), before the remaining leases'
+        # reservations could absorb what it left behind.
+        self._pending_release += released
 
     def _local_gpu_leases(self) -> int:
         return sum(

@@ -291,6 +291,37 @@ class FreeVramAdmissionTest(unittest.IsolatedAsyncioTestCase):
         del self.probe.resident[JOB_PID]
         await second.release()
 
+    async def test_a_release_is_not_settled_by_what_another_lease_absorbed(self):
+        # Codex P1 on PR #146: the second lease's reservation absorbed another
+        # workload's 5 GiB. The first lease allocates its 5 GiB and ends before
+        # any reading shows it: the 5 GiB the stale reading attributes to the
+        # leases is not the first lease's, so its whole reservation must still
+        # count until a reading taken after the release, and that reading must
+        # not let the second lease absorb what the first left behind.
+        second = (await self.scheduler.try_acquire(coding(vram=5 * GIB))).lease
+        self.probe.external = 5 * GIB  # another workload, after the grant
+        status = await self.scheduler.refresh()
+        self.assertEqual(status.vram.external, 0)  # absorbed by the second
+        first = (await self.scheduler.try_acquire(coding(vram=5 * GIB))).lease
+        self.probe.resident[JOB_PID] = 5 * GIB  # the first lease allocates
+        await first.release()  # ... and ends before any reading shows it
+        self.assertGreaterEqual(self.scheduler.status().vram.committed, 95 * GIB)
+        status = await self.scheduler.refresh()
+        # The other workload and the first lease's memory are external; the
+        # second lease has allocated nothing of its 5 GiB yet.
+        self.assertEqual(status.vram.external, 10 * GIB)
+        self.assertEqual(status.vram.committed, 95 * GIB)
+        self.assertEqual(
+            (await self.scheduler.try_acquire(coding(vram=1 * GIB))).refusal,
+            Refusal.INSUFFICIENT_FREE_VRAM,
+        )
+        del self.probe.resident[JOB_PID]
+        self.probe.external = 0
+        await second.release()
+        status = await self.scheduler.refresh()
+        self.assertEqual(status.vram.external, 0)
+        self.assertEqual(status.vram.committed, 80 * GIB)
+
     async def test_an_ambiguous_release_errs_on_the_safe_side_and_heals(self):
         # Which lease's process holds the memory is not known: when a lease
         # that allocated nothing is released beside one that did, the memory
