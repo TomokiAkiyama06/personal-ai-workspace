@@ -12,6 +12,9 @@ written), so the only schema change is the history:
 
 * ``task_events.command`` accepts ``release_repository_write``.
 
+The downgrade is refused while a release is recorded (the history is
+append-only, and the code before this revision cannot read the event).
+
 No privilege changes: the application role already selects and inserts
 ``task_events``, updates ``task_repository_writes.released_at`` and the attempt
 state columns, and reads (and locks ``FOR SHARE``) ``queue_entries``.
@@ -52,22 +55,34 @@ def upgrade() -> None:
     _replace_command_check(NEW_COMMANDS, validate=True)
 
 
+# The code before this revision (0085's) cannot read a manual release in the
+# history, and ``task_events`` is append-only (a trigger refuses UPDATE and
+# DELETE): a downgrade over a recorded release is refused before anything is
+# changed (issue #90, by the human's decision of 2026-09-30; it used to keep the
+# events under a NOT VALID list).
+_REFUSE_RECORDED_RELEASES = f"""
+DO $$
+DECLARE
+    released bigint;
+BEGIN
+    SELECT count(*) INTO released
+    FROM task_events WHERE command = 'release_repository_write';
+    IF released > 0 THEN
+        RAISE EXCEPTION USING
+            ERRCODE = 'restrict_violation',
+            MESSAGE = format(
+                'revision {revision}: %s task_events row(s) record a'
+                ' release_repository_write, which the code before this revision'
+                ' cannot read; nothing was changed',
+                released
+            ),
+            HINT = 'task_events is append-only: stay on this revision or later.';
+    END IF;
+END
+$$
+"""
+
+
 def downgrade() -> None:
-    # ``task_events`` is append-only (a trigger refuses UPDATE and DELETE), so the
-    # history of manual releases stays; the old list is then not validated
-    # against it (NOT VALID) and still holds for every new row.
-    _replace_command_check(OLD_COMMANDS, validate=False)
-    op.execute(
-        """
-        DO $$
-        BEGIN
-            IF NOT EXISTS (
-                SELECT 1 FROM task_events WHERE command = 'release_repository_write'
-            ) THEN
-                ALTER TABLE task_events
-                    VALIDATE CONSTRAINT ck_task_events_command_valid;
-            END IF;
-        END
-        $$
-        """
-    )
+    op.execute(_REFUSE_RECORDED_RELEASES)
+    _replace_command_check(OLD_COMMANDS, validate=True)
