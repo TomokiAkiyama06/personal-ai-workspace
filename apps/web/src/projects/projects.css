@@ -206,7 +206,7 @@
   padding: 18px 24px 28px;
 }
 
-.projects-back {
+.projects-detail .projects-back {
   display: none;
 }
 
@@ -341,7 +341,7 @@
   border-bottom: 1px solid var(--border-soft);
 }
 
-.project-card .card-row.project-form h4 {
+.project-form h4 {
   font-size: 13px;
 }
 
@@ -387,7 +387,8 @@
 }
 
 .project-role-select {
-  min-height: 30px;
+  min-height: 28px;
+  height: 28px;
   width: auto;
   padding: 0 8px;
   font-size: 12px;
@@ -438,16 +439,16 @@
     border-right: 0;
   }
 
+  .projects-detail {
+    padding: 8px 16px 24px;
+  }
+
   .projects-body.has-selection .projects-list,
   .projects-body:not(.has-selection) .projects-detail {
     display: none;
   }
 
-  .projects-detail {
-    padding: 8px 16px 24px;
-  }
-
-  .projects-back {
+  .projects-detail .projects-back {
     display: flex;
   }
 
@@ -456,24 +457,32 @@
   }
 
   .project-card .table-row {
-    grid-template-columns: max-content minmax(0, 1fr);
-    gap: 4px 12px;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 4px;
+  }
+
+  .project-card .table-row > [data-label] {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    min-width: 0;
   }
 
   .project-card .table-row > [data-label]::before {
     content: attr(data-label);
-    display: block;
+    flex: 0 0 84px;
     color: var(--text-3);
-    font-size: 10px;
-    font-weight: 600;
-    letter-spacing: 0.06em;
+    font-family: var(--font-sans);
+    font-size: 11px;
   }
 
-  .project-card .table-row > [data-label] {
-    grid-column: 1 / -1;
+  /* The first cell (the repository / the member) is the row's title. */
+  .project-card .table-row > :first-child {
+    align-items: center;
+    margin-bottom: 2px;
   }
 
-  .project-card .table-row > .cell-main::before {
+  .project-card .table-row > :first-child::before {
     display: none;
   }
 }

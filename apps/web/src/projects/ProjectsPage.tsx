@@ -988,10 +988,10 @@ function ProjectDetailView({
     };
   }, [source, projectId, pending, listRead, reloads, t]);
 
-  const changed = useCallback(() => {
-    setReloads((value) => value + 1);
-    onListChanged();
-  }, [onListChanged]);
+  // A change reads the list again, and the project once the list has answered
+  // (`listRead` goes false, then true): after a deletion was scheduled the list
+  // says Pending deletion, which cannot be read, before the project is asked for.
+  const changed = onListChanged;
 
   if (pending && summary) {
     return <PendingDeletionView source={source} project={summary} onChanged={onListChanged} />;
@@ -1137,17 +1137,25 @@ function ConnectedProjects({ source }: { source: ProjectsSource }) {
   const selectedId = selectedProjectId(path);
   const [load, setLoad] = useState<Load<ProjectSummary[]>>({ status: "loading" });
   const [reloads, setReloads] = useState(0);
+  // Which read of the list `load` answers: a project is read only once the latest
+  // read answered (the previous list stays shown meanwhile).
+  const [answered, setAnswered] = useState<number | null>(null);
   const [creating, setCreating] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
+    const mine = reloads;
     source
       .list()
       .then((data) => {
-        if (!cancelled) setLoad({ status: "ready", data });
+        if (cancelled) return;
+        setLoad({ status: "ready", data });
+        setAnswered(mine);
       })
       .catch((caught: unknown) => {
-        if (!cancelled) setLoad({ status: "error", message: errorMessage(t, caught) });
+        if (cancelled) return;
+        setLoad({ status: "error", message: errorMessage(t, caught) });
+        setAnswered(mine);
       });
     return () => {
       cancelled = true;
@@ -1209,7 +1217,7 @@ function ConnectedProjects({ source }: { source: ProjectsSource }) {
                 source={source}
                 projectId={selectedId}
                 summary={summary}
-                listRead={load.status !== "loading"}
+                listRead={answered === reloads}
                 onListChanged={reloadList}
               />
             </>

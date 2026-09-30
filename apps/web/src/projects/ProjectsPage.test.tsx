@@ -217,6 +217,30 @@ describe("ProjectsPage", () => {
     expect(source.lifecycle).toHaveBeenCalledWith("p-example", "begin_deletion", "ExampleProject");
   });
 
+  it("shows the hold after scheduling a deletion without reading the project again", async () => {
+    const source = fakeProjectsSource();
+    const pending = SUMMARIES.map((project) =>
+      project.id === "p-example"
+        ? {
+            ...project,
+            status: "pending_deletion" as const,
+            deletion_scheduled_at: "2026-10-30T03:00:00Z",
+          }
+        : project,
+    );
+    source.lifecycle.mockImplementationOnce(async () => {
+      source.list.mockResolvedValue(pending);
+    });
+    renderProjects("/projects/p-example", source);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "プロジェクト設定" }));
+    await user.type(screen.getByRole("textbox", { name: /ExampleProject/ }), "ExampleProject");
+    await user.click(screen.getByRole("button", { name: "削除を予約する" }));
+    expect(await screen.findByText(/削除の保留中です/)).toBeInTheDocument();
+    expect(source.detail).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("offers Active again for an archived project", async () => {
     const source = fakeProjectsSource({
       details: { "p-example": exampleDetail({ status: "archived" }) },
