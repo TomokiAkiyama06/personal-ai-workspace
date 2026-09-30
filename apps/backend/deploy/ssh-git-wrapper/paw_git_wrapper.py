@@ -59,8 +59,9 @@ allowlist (:func:`git_environment`); nothing of ``sshd``'s environment (and so
 nothing a client could send with ``SendEnv``) reaches it.
 
 Exit status: git's own when a command is accepted (this process ``exec``-s git);
-:data:`REJECTED` (126) when it is refused; never 255, which ``SshGitRunner``
-reads as "ssh itself failed" (Decision 0029 §5).
+:data:`POPULATED_SUBMODULE` (125) when it is refused because a submodule is
+populated, :data:`REJECTED` (126) for every other refusal (Decision 0063); never
+255, which ``SshGitRunner`` reads as "ssh itself failed" (Decision 0029 §5).
 
 What is logged
 --------------
@@ -89,6 +90,10 @@ PROTOCOL_TAG = "paw-git-run/v1"
 #: ``merge-tree`` read those as answers), not 128/129 (git's own failures), not
 #: 255 (``ssh``'s own failure, Decision 0029 §5).
 REJECTED = 126
+#: Exit status of a call refused as ``populated_submodule``: the backend reads it
+#: as a worktree a human must clean up (``dirty``), every other refusal as
+#: ``git_failed`` (Decision 0063). Not git's, not ``ssh``'s either.
+POPULATED_SUBMODULE = 125
 SAFE_PATH = "/usr/local/bin:/usr/bin:/bin"
 WORKTREE_DIRECTORY = ".paw-worktrees"
 BRANCH_NAMESPACE = "paw"
@@ -1304,7 +1309,8 @@ def main(
     log: Callable[[str], None] = _syslog,
     check: Callable[[Invocation], None] = check_repository,
 ) -> int:
-    """Decide one call; ``exec`` git or return :data:`REJECTED`."""
+    """Decide one call; ``exec`` git or return :data:`REJECTED` (or
+    :data:`POPULATED_SUBMODULE`)."""
     arguments = sys.argv[1:] if argv is None else list(argv)
     environment = os.environ if environ is None else environ
     user = "-"
@@ -1316,6 +1322,8 @@ def main(
     except Rejected as rejected:
         log(f"rejected user={user} reason={rejected.reason}")
         sys.stderr.write(f"paw-git-wrapper: rejected ({rejected.reason})\n")
+        if rejected.reason == "populated_submodule":
+            return POPULATED_SUBMODULE
         return REJECTED
     log(f"accepted user={user} subcommand={invocation.subcommand}")
     sys.stdout.flush()

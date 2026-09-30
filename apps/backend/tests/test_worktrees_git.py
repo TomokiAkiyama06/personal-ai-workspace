@@ -29,6 +29,10 @@ from paw_backend.repositories import (
     LinuxAccount,
 )
 from paw_backend.repositories.git import GitResult, command_name
+from paw_backend.repositories.ssh import (
+    WRAPPER_POPULATED_SUBMODULE_CODE,
+    WRAPPER_REJECTED_CODE,
+)
 
 from .repositories_support import fs, requires_git
 from .worktrees_support import (
@@ -210,22 +214,36 @@ class WorktreeGitTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(git("status", "--porcelain", cwd=into), "")
 
     async def test_a_refused_submodule_status_is_not_clean(self):
-        # Codex review of PR #163 (P1): the SSH wrapper refuses the call with
-        # the same exit status (126) for a populated submodule (a worktree a
-        # human must clean up) as for any other refusal, so a nonzero status
-        # stays "not exactly committed" (``dirty``), never ``git_failed``.
+        # Codex review of PR #163 (P1) and Decision 0063: the SSH wrapper
+        # refuses a populated submodule (a worktree a human must clean up)
+        # with its own exit status (125): "not exactly committed" (``dirty``).
+        # Any other refusal (126: the wrapper or the server is misconfigured)
+        # is ``git_failed``, not a worktree a human could clean up.
         into = await self.add("into")
         inner = self.runner
 
-        class Refusing:
-            async def run(self, args, **options):
-                if command_name(args) == "submodule":
-                    return GitResult(126, "")
-                return await inner.run(args, **options)
+        def refusing(status):
+            class Refusing:
+                async def run(self, args, **options):
+                    if command_name(args) == "submodule":
+                        return GitResult(status, "")
+                    return await inner.run(args, **options)
 
-        refusing = WorktreeGit(Refusing(), timeout_s=30)
+            return WorktreeGit(Refusing(), timeout_s=30)
+
         self.assertTrue(await self.git.is_exactly_committed(into, self.account))
-        self.assertFalse(await refusing.is_exactly_committed(into, self.account))
+        self.assertFalse(
+            await refusing(WRAPPER_POPULATED_SUBMODULE_CODE).is_exactly_committed(
+                into, self.account
+            )
+        )
+        with self.assertRaises(GitCommandError) as raised:
+            await refusing(WRAPPER_REJECTED_CODE).is_exactly_committed(
+                into, self.account
+            )
+        self.assertIs(raised.exception.failure, GitFailure.NONZERO_EXIT)
+        # git's own failure (``no submodule mapping``) stays "not clean".
+        self.assertFalse(await refusing(128).is_exactly_committed(into, self.account))
 
     async def test_the_worktree_list_is_read_from_git(self):
         a = await self.add("a")
