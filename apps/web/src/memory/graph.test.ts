@@ -58,10 +58,10 @@ describe("diff", () => {
       { kind: "added", text: "d" },
     ]);
     expect(sideBySide(diff ?? [])).toEqual([
-      { left: { kind: "same", text: "a" }, right: { kind: "same", text: "a" } },
-      { left: { kind: "removed", text: "b" }, right: { kind: "added", text: "B" } },
-      { left: { kind: "same", text: "c" }, right: { kind: "same", text: "c" } },
-      { left: null, right: { kind: "added", text: "d" } },
+      { id: 0, left: { kind: "same", text: "a" }, right: { kind: "same", text: "a" } },
+      { id: 1, left: { kind: "removed", text: "b" }, right: { kind: "added", text: "B" } },
+      { id: 2, left: { kind: "same", text: "c" }, right: { kind: "same", text: "c" } },
+      { id: 3, left: null, right: { kind: "added", text: "d" } },
     ]);
   });
 

@@ -50,8 +50,8 @@ export function DiffView({
       </div>
       {changed ? (
         <div className="memory-diff-rows">
-          {rows.map((row, index) => (
-            <div className="memory-diff-row" key={index}>
+          {rows.map((row) => (
+            <div className="memory-diff-row" key={row.id}>
               <Cell line={row.left} />
               <Cell line={row.right} />
             </div>

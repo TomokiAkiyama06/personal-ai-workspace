@@ -10,6 +10,8 @@ export interface DiffLine {
 }
 
 export interface DiffRow {
+  /** The row's position, as a stable React key. */
+  id: number;
   left: DiffLine | null;
   right: DiffLine | null;
 }
@@ -68,7 +70,7 @@ export function sideBySide(diff: readonly DiffLine[]): DiffRow[] {
   const flush = () => {
     const count = Math.max(removed.length, added.length);
     for (let k = 0; k < count; k++) {
-      rows.push({ left: removed[k] ?? null, right: added[k] ?? null });
+      rows.push({ id: rows.length, left: removed[k] ?? null, right: added[k] ?? null });
     }
     removed = [];
     added = [];
@@ -78,7 +80,7 @@ export function sideBySide(diff: readonly DiffLine[]): DiffRow[] {
     else if (line.kind === "added") added.push(line);
     else {
       flush();
-      rows.push({ left: line, right: line });
+      rows.push({ id: rows.length, left: line, right: line });
     }
   }
   flush();

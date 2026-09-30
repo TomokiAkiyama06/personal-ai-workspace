@@ -150,10 +150,18 @@ function SourcesTab({
         <LoadError error={loaded.error} onRetry={loaded.reload} />
       ) : loaded.data && loaded.data.length > 0 ? (
         <ul className="memory-sources">
-          {loaded.data.map((record, index) => {
+          {loaded.data.map((record) => {
             const deleted = record.source_deleted_at !== null;
+            // A source row has no id of its own: what it points at, and when.
+            const key = [
+              record.source_type,
+              record.conversation_id,
+              record.message_id,
+              record.source_ref,
+              record.created_at,
+            ].join("|");
             return (
-              <li key={index} className={deleted ? "deleted" : undefined}>
+              <li key={key} className={deleted ? "deleted" : undefined}>
                 <span className="memory-source-name">{label(record)}</span>
                 {record.source_ref &&
                   record.source_type !== "task" &&

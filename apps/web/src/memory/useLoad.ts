@@ -19,6 +19,7 @@ export function useLoad<T>(load: () => Promise<T>, deps: DependencyList): Loaded
   const [round, setRound] = useState(0);
   const reload = useCallback(() => setRound((value) => value + 1), []);
   const lastRound = useRef(round);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `load` is a new closure on every render; `deps` say when it changes.
   useEffect(() => {
     let cancelled = false;
     // New deps ask for other data: drop the old answer (a reload keeps it on screen).
