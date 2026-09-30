@@ -1,10 +1,10 @@
 # Main Coding Model の採用（PAW-017 の比較 Run の結果から）
 
-- Status: Proposed
+- Status: Approved
 - Date: 2026-09-30
 - Scope: Issue [#14](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/14)（PAW-017: Main Coding Model 比較 Run）。根拠は [PAW-017 比較 Run の報告](../benchmarks/paw-017-main-coding-2026-09.md)
 - Supersedes: なし。[MODEL_CANDIDATES.md](../MODEL_CANDIDATES.md) の「Main Coding Agent candidates」と「Decision timing」（最終採用 Model は Benchmark して決める）への答え。[Decision 0002](0002-start-workspace-implementation-before-model-comparison.md) の「Main Coding Model は Benchmark 後に決定する」を満たす
-- Approval: 未承認
+- Approval: 2026-09-30、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで直接回答して承認（判断が必要な点 1〜6 の全点。末尾の「承認時の決定」）
 
 ## 背景
 
@@ -78,3 +78,7 @@ MODEL_CANDIDATES.md は、採用 Model を公開 Benchmark だけで決めず、
 
 承認されたら `Approval` に記録し、Status を Approved に改め、[MODEL_CANDIDATES.md](../MODEL_CANDIDATES.md) に採用の結果を追記する（別の PR）。Deployment の設定（Model の Path、vLLM の引数、Footprint）は Deployment の手順で与え、DB には書かない。
 方針を変えるときは、この Decision を書き換えず、新しい Decision から `Supersedes` する。
+
+## 承認時の決定（2026-09-30）
+
+Human は、作業 Session で判断が必要な点について推奨つきの説明を受け、直接回答して承認した（判断が必要な点 1〜6 の全点）。1〜3 の確認 Run（同時に動かす Run、上位 3 構成の Resolved@3、KAT の FP8 版）は #180、5 の人が直す時間は #181 で行う。

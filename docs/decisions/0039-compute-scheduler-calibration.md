@@ -1,10 +1,10 @@
 # GPU / Compute Resource Scheduler の暫定値を PAW-017 / PAW-018 / PAW-019 の実測で見直す（Decision 0037 の較正）
 
-- Status: Proposed
+- Status: Approved
 - Date: 2026-09-30
 - Scope: Issue [#14](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/14)（PAW-017: Main Coding Model 比較 Run）の実測値。対象は [Decision 0037](0037-gpu-compute-scheduler.md) が「実測に基づかない暫定値」とした数値と、[Decision 0042](0042-gpu-free-vram-admission.md) が 0037 と同じとした Headroom
 - Supersedes: なし。[Decision 0037](0037-gpu-compute-scheduler.md)（Approved）・[Decision 0042](0042-gpu-free-vram-admission.md)（Approved）は書き換えない。0037 の「リスク」が「Benchmark（PAW-017 / PAW-019）で Model と Runtime が決まったら見直す」とした値への答えで、承認されたら値だけを変える（方針は変えない）
-- Approval: 未承認
+- Approval: 2026-09-30、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで直接回答して承認（判断が必要な点 1〜5 の全点。末尾の「承認時の決定」）
 
 ## 背景
 
@@ -109,3 +109,7 @@ Footprint（weights + KV Cache Pool + Runtime Buffer + Temporary Workspace）は
 
 承認されたら `Approval` に記録し、Status を Approved に改める。2 は `apps/backend/paw_backend/compute/limits.py` の `DEFAULT_CONTROL_TIMEOUT_SECONDS` を 900 にする変更（別の PR）で反映する。1 の Footprint は Admin の設定で、Code は変えない。
 方針を変えるときは、この Decision を書き換えず、新しい Decision から `Supersedes` する。
+
+## 承認時の決定（2026-09-30）
+
+Human は、作業 Session で判断が必要な点について推奨つきの説明を受け、直接回答して承認した（判断が必要な点 1〜5 の全点）。4 のデプロイ手順の Issue は #182。
