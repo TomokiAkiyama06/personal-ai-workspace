@@ -9,6 +9,14 @@ The rules (Decision 0025), and where each lives:
   of the thief's); a user with none needs a recent authentication of any kind (the
   sign-in itself counts: an enrolment-only session that has just been created).
   Checked again under the user's row lock when the credential is stored.
+* **A newly paired device (#154, Decision 0043 point 11, option A).** A session
+  created by a pairing that a trusted device approved (its Passkey Step-up and the
+  confirmation code) may register its FIRST Passkey without a Step-up, inside the
+  policy's Step-up window from its creation (``device_pairings.
+  passkey_allowance_ended_at``, see ``onboarding.pairing``). Any registration of
+  that session spends it (in the storing transaction, at most once); a revoked
+  Passkey ends every unspent one of the user, as it forgets their Step-ups. Such a
+  registration is audited ``pairing_approved`` and is not a Step-up either.
 * **What a registration opens.** The first Passkey registered by a restricted
   session lifts its gate and rotates its id, but is NOT recorded as a Step-up: a
   credential that a password just vouched for proves nothing yet.
@@ -84,7 +92,12 @@ from paw_backend.auth.models import (
     ThrottleScope,
 )
 from paw_backend.auth.onboarding.models import PairingEnd
-from paw_backend.auth.onboarding.pairing import end_live_pairings_in
+from paw_backend.auth.onboarding.pairing import (
+    end_live_pairings_in,
+    end_passkey_allowances_in,
+    paired_passkey_allowance_in,
+    spend_passkey_allowance_in,
+)
 from paw_backend.auth.passkeys import ceremony
 from paw_backend.auth.passkeys.config import PasskeyConfig
 from paw_backend.auth.passkeys.models import (
@@ -319,12 +332,23 @@ class PasskeyService:
 
         async def store(session: AsyncSession) -> RegistrationResult:
             await self._lock_user_in(session, user_id)
-            freshness = await self._require_may_register_in(session, auth)
+            may = await self._require_may_register_in(session, auth)
+            freshness = may.freshness
             record = await self._registry.insert_in(
                 session, user_id=user_id, name=label, registration=verified
             )
             if record is None:
                 raise PasskeyExistsError
+            # Any registration of the session spends its approved pairing's one
+            # (Decision 0043, 11); the one that relies on it must be the spender.
+            spent = await spend_passkey_allowance_in(
+                session,
+                session_id=auth.record.id,
+                user_id=user_id,
+                now=self._audit.now(),
+            )
+            if may.paired and not spent:  # (cannot happen: the user's row is locked)
+                raise StepUpRequiredError
             login: LoginResult | None = None
             if freshness.gate is not PasskeyGate.OPEN:
                 issued = await self._sessions.open_gate(
@@ -343,7 +367,9 @@ class PasskeyService:
                 session,
                 self._audit.event(
                     AuthAction.PASSKEY_REGISTER,
-                    AuthReason.REGISTERED,
+                    AuthReason.PAIRING_APPROVED
+                    if may.paired
+                    else AuthReason.REGISTERED,
                     allowed=True,
                     correlation_id=context.correlation_id,
                     client_request_id=context.client_request_id,
@@ -465,6 +491,7 @@ class PasskeyService:
                 raise LastPasskeyError
             ended = await self._sessions.revoke_bound_to_passkey(session, passkey_id)
             await self._sessions.clear_passkey_step_ups(session, user_id)
+            await end_passkey_allowances_in(session, user_id, self._audit.now())
             await self._registry.delete_challenges_of_in(session, user_id)
             await self._audit.record_in(
                 session,
@@ -663,7 +690,7 @@ class PasskeyService:
 
     async def _require_may_register_in(
         self, session: AsyncSession, auth: AuthenticatedSession
-    ) -> Freshness:
+    ) -> "_MayRegister":
         """The registration rules (see the module docstring); the session's state."""
         user_id = auth.record.user_id
         policy = await self._policy.get_in(session)
@@ -687,11 +714,23 @@ class PasskeyService:
             raise PasskeyRequiredError  # authenticate first
         if count >= MAX_PASSKEYS_PER_USER:
             raise PasskeyLimitError
-        if count > 0:
-            _require_passkey_step_up(freshness)
-        elif not freshness.recently_authenticated:
-            raise StepUpRequiredError
-        return freshness
+        if count == 0:
+            if not freshness.recently_authenticated:
+                raise StepUpRequiredError
+            return _MayRegister(freshness, paired=False)
+        if freshness.passkey_step_up:
+            return _MayRegister(freshness, paired=False)
+        # No Passkey Step-up: an approved pairing's session may still register its
+        # first Passkey inside the window (Decision 0043, 11). Otherwise the
+        # refusal is the one a missing / insufficient Step-up always gets.
+        if not (
+            freshness.signed_in_recently
+            and await paired_passkey_allowance_in(
+                session, session_id=auth.record.id, user_id=user_id
+            )
+        ):
+            _require_passkey_step_up(freshness)  # raises: there is no Passkey one
+        return _MayRegister(freshness, paired=True)
 
     async def _reserve(
         self, context: RequestContext, login_name: str
@@ -751,6 +790,15 @@ _RESET_ERRORS = {
     AuthReason.NOT_FOUND: AccountNotFoundError,
     AuthReason.ROLE_NOT_ALLOWED: AuthPermissionError,
 }
+
+
+@dataclass(frozen=True, slots=True)
+class _MayRegister:
+    """The session's state when it may register, and on what strength."""
+
+    freshness: Freshness
+    # The approved pairing's one registration without a Step-up (Decision 0043, 11).
+    paired: bool
 
 
 def _require_passkey_step_up(freshness: Freshness) -> None:

@@ -114,6 +114,8 @@ _USER = frozenset(
         C.PROJECT_LEAVE,
         C.ACCOUNT_READ,
         C.ACCOUNT_MANAGE,
+        # The compact System Health state (Decision 0059).
+        C.SYSTEM_HEALTH_SUMMARY_READ,
     }
 )
 _ADMIN_ONLY = frozenset(
@@ -138,6 +140,12 @@ _ADMIN_ONLY = frozenset(
         C.ADMIN_AUTH_POLICY_VIEW,
         # "System Owner / Admin: administrative operations" on a project.
         C.PROJECT_LIFECYCLE_MANAGE,
+        # Release a crashed process's repository write (Decision 0049).
+        C.PROJECT_TASK_WRITE_RESERVATION_RELEASE,
+        # Kaggle / Full GPU Mode (issue #33, Decision 0055).
+        C.ADMIN_COMPUTE_FULL_GPU,
+        # The System Health detail (issue #52, Decision 0059).
+        C.ADMIN_SYSTEM_HEALTH_VIEW,
     }
 )
 _OWNER_ONLY = frozenset(
@@ -175,6 +183,9 @@ _MANAGER_ONLY = frozenset(
         C.PROJECT_AGENT_POLICY_MANAGE,
         C.PROJECT_MEMORY_MANAGE,
         C.PROJECT_LIFECYCLE_MANAGE,
+        # Release a crashed process's repository write (issue #129, Decision 0049
+        # Approved): who manages the project, not every Contributor.
+        C.PROJECT_TASK_WRITE_RESERVATION_RELEASE,
     }
 )
 del C

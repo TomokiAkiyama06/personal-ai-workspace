@@ -182,6 +182,12 @@ personal-ai-workspace/
 │  │  │  │     ├─ records.py
 │  │  │  │     ├─ service.py
 │  │  │  │     └─ validation.py
+│  │  │  ├─ integration/
+│  │  │  │  ├─ __init__.py
+│  │  │  │  ├─ coordinator.py
+│  │  │  │  ├─ gate.py
+│  │  │  │  ├─ git.py
+│  │  │  │  └─ layout.py
 │  │  │  ├─ orchestrator/
 │  │  │  │  ├─ __init__.py
 │  │  │  │  ├─ audit.py
@@ -206,7 +212,8 @@ personal-ai-workspace/
 │  │  │  │  ├─ scope.py
 │  │  │  │  ├─ store.py
 │  │  │  │  ├─ task_end.py
-│  │  │  │  └─ validation.py
+│  │  │  │  ├─ validation.py
+│  │  │  │  └─ workspaces.py
 │  │  │  ├─ projects/
 │  │  │  │  ├─ __init__.py
 │  │  │  │  ├─ cursor.py
@@ -304,6 +311,7 @@ personal-ai-workspace/
 │  │  │  │  ├─ credentials.py
 │  │  │  │  ├─ decisions.py
 │  │  │  │  ├─ interfaces.py
+│  │  │  │  ├─ lease.py
 │  │  │  │  ├─ models.py
 │  │  │  │  ├─ policy.py
 │  │  │  │  ├─ registry.py
@@ -423,6 +431,7 @@ personal-ai-workspace/
 │  │     ├─ test_orchestrator_freshness_loop.py
 │  │     ├─ test_orchestrator_grants.py
 │  │     ├─ test_orchestrator_lease.py
+│  │     ├─ test_orchestrator_lease_fencing.py
 │  │     ├─ test_orchestrator_migration.py
 │  │     ├─ test_orchestrator_placement.py
 │  │     ├─ test_orchestrator_placement_migration.py
@@ -443,6 +452,8 @@ personal-ai-workspace/
 │  │     ├─ test_orchestrator_task_end.py
 │  │     ├─ test_orchestrator_tools.py
 │  │     ├─ test_orchestrator_wiring.py
+│  │     ├─ test_orchestrator_worktree_scope.py
+│  │     ├─ test_orchestrator_worktrees.py
 │  │     ├─ test_owner_no_web_path.py
 │  │     ├─ test_owner_setup_cli.py
 │  │     ├─ test_owner_setup_service.py
@@ -600,6 +611,7 @@ personal-ai-workspace/
 │  │     ├─ test_tools_broker.py
 │  │     ├─ test_tools_credentials.py
 │  │     ├─ test_tools_diagnostics_columns.py
+│  │     ├─ test_tools_lease.py
 │  │     ├─ test_tools_migration.py
 │  │     ├─ test_tools_policy.py
 │  │     ├─ test_tools_postgres.py
@@ -610,7 +622,11 @@ personal-ai-workspace/
 │  │     ├─ test_tools_scope.py
 │  │     ├─ test_web_app.py
 │  │     ├─ tools_store_contract.py
-│  │     └─ tools_support.py
+│  │     ├─ tools_support.py
+│  │     ├─ test_worktrees_coordinator.py
+│  │     ├─ test_worktrees_gate.py
+│  │     ├─ test_worktrees_git.py
+│  │     └─ worktrees_support.py
 │  ├─ cli/
 │  │  └─ README.md
 │  └─ web/
@@ -661,6 +677,8 @@ personal-ai-workspace/
 │  ├─ SECURITY_RBAC_AUDIT.md
 │  ├─ SECURITY_TOOL_PERMISSIONS.md
 │  ├─ UI_DESIGN.md
+│  ├─ benchmarks/
+│  │  └─ paw-017-main-coding-2026-09.md
 │  └─ decisions/
 │     ├─ 0002-start-workspace-implementation-before-model-comparison.md
 │     ├─ 0003-backend-cli-web-implementation-stack.md
@@ -691,6 +709,7 @@ personal-ai-workspace/
 | [REQUIREMENTS.md](../REQUIREMENTS.md) / [AGENTS.md](../AGENTS.md) | 要件と Agent の作業ルールの正本 |
 | [docs/](./) | Architecture、各機能の設計、Backlog、Issue 対応表 |
 | [docs/decisions/](decisions/README.md) | 重要な仕様・設計判断の提案と承認経緯 |
+| [docs/benchmarks/](benchmarks/paw-017-main-coding-2026-09.md) | Model 比較 Run の報告（条件・結果・起きた問題。生の結果は Repository に入れない） |
 | [apps/backend/](../apps/backend/README.md) | Core API、認証・権限、Orchestrator、Memory、Tool Broker（現在はSkeleton: REST / Event経路、Health、DB接続、Migration。Owner の初期設定・復旧は server-local の管理コマンド、PAW-021） |
 | [apps/web/](../apps/web/README.md) | Backend API を利用する Web UI |
 | [apps/cli/](../apps/cli/README.md) | Web と同じ Backend API を利用する CLI |

@@ -6,7 +6,9 @@ They are not part of the HTTP API and cannot be reached from a browser or from
 
 ``owner-setup`` / ``owner-recover`` (``owner``, PAW-021),
 ``audit-retention-run`` / ``audit-retention-check`` (``retention``, Issue #117)
-and ``memory-projection-run`` / ``memory-projection-check``
-(``memory_projection``, PAW-045); ``dispatch`` picks the module from the first
+``memory-projection-run`` / ``memory-projection-check``
+(``memory_projection``, PAW-045) and ``recovery-backup-run`` /
+``recovery-backup-check`` / ``recovery-restore`` (``recovery``, PAW-047);
+``dispatch`` picks the module from the first
 argument.
 """

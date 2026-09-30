@@ -45,6 +45,7 @@ from . import (
     test_task_service,
     test_task_tools,
     test_task_working_set,
+    test_task_write_release,
 )
 from .gate_support import ALWAYS_ACTIVE
 from .support import make_settings
@@ -241,6 +242,25 @@ class WorkingSetUsesAsAppRole(AsAppRole, test_task_working_set.RepositoryUseTest
 
 
 class WorkingSetCompletionAsAppRole(AsAppRole, test_task_working_set.CompletionTest):
+    pass
+
+
+# The manual release of a crashed process's write (issue #129): the release, and
+# the lock and the lease check on ``queue_entries``, need no new privilege.
+class WriteReleaseAsAppRole(AsAppRole, test_task_write_release.ReleaseTest):
+    pass
+
+
+# Who may release (authorization read again under the project row's share lock)
+# and the real Passkey Step-up (the auth policy and the session row's share lock),
+# all in the release's transaction, as the app role (independent review of #129).
+class WriteReleaserAsAppRole(AsAppRole, test_task_write_release.ReleaserTest):
+    pass
+
+
+class WriteReleaseStepUpAsAppRole(
+    AsAppRole, test_task_write_release.ReleaserStepUpTest
+):
     pass
 
 
