@@ -141,6 +141,17 @@ class Settings(BaseSettings):
     # then only runs right after the transition, and nothing is marked stale or
     # expired in storage (the retrieval still judges both by time).
     freshness_job_interval_seconds: int = Field(default=3_600, ge=0, le=86_400)
+    # System Health (PAW-066, Decision 0059 Proposed). How often the numeric
+    # metrics are sampled into ``health_metric_samples``: the requirements' "last
+    # 24 hours: 10-30 seconds" (FIXED), so no other value and no "off".
+    health_sample_interval_seconds: int = Field(default=30, ge=10, le=30)
+    # How long the hourly aggregates and the health events are kept (the
+    # requirements: important operational events "1年以上").
+    health_retention_days: int = Field(default=400, ge=366, le=3_650)
+    # Without the Compute Scheduler in the application (issue #165), read the GPU
+    # with the scheduler's read-only probe (``nvidia-smi --query-*`` only) for
+    # the report. Off by default: a host without a GPU would report an error.
+    health_gpu_probe: bool = False
 
     # Memory Markdown Projection (PAW-045, Decision 0038 Approved): the directory
     # ``python -m paw_backend.cli memory-projection-run`` writes the Markdown view

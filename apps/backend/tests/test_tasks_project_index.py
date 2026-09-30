@@ -50,7 +50,12 @@ class IndexDefinitionTest(unittest.TestCase):
     def test_the_model_declares_one_named_index_on_project_and_state(self):
         indexes = {index.name: index for index in TaskRow.__table__.indexes}
 
-        self.assertEqual(list(indexes), [INDEX])
+        # The two partial indexes of System Health (revision 0066) are the only
+        # others; this revision's index is exactly one.
+        self.assertEqual(
+            sorted(indexes),
+            sorted([INDEX, "ix_tasks_active_state", "ix_tasks_ended_updated_at"]),
+        )
         self.assertEqual(
             [column.name for column in indexes[INDEX].columns], ["project_id", "state"]
         )

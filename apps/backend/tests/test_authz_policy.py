@@ -56,6 +56,8 @@ USER_CAPS = {
     "project.leave",
     "account.read",
     "account.manage",
+    # Issue #52 (Decision 0059): the compact System Health state.
+    "system_health.summary.read",
 }
 ADMIN_CAPS = USER_CAPS | {
     "shared_memory.manage",
@@ -81,6 +83,8 @@ ADMIN_CAPS = USER_CAPS | {
     "project.task.write_reservation.release",
     # Issue #33 (Decision 0055): Kaggle / Full GPU Mode.
     "admin.compute.full_gpu",
+    # Issue #52 (Decision 0059): the System Health detail.
+    "admin.system_health.view",
 }
 OWNER_ONLY_CAPS = {
     "owner.admins.manage",
@@ -191,9 +195,20 @@ NON_DELEGABLE_CAPS = {
     "project.task.write_reservation.release",
     # Issue #33 (Decision 0055): holding every local task for an exclusive job.
     "admin.compute.full_gpu",
+    # Issue #52 (Decision 0059): no agent needs to watch the system.
+    "system_health.summary.read",
+    "admin.system_health.view",
 }
 # The only capabilities whose *allowed* decisions are not persisted.
-READ_ONLY_CAPS = {"memory.read", "shared_memory.read", "project.read", "account.read"}
+READ_ONLY_CAPS = {
+    "memory.read",
+    "shared_memory.read",
+    "project.read",
+    "account.read",
+    # Issue #52 (Decision 0059): operational data, no user content.
+    "system_health.summary.read",
+    "admin.system_health.view",
+}
 
 
 def resource_for(capability: Capability, who: Principal) -> Resource:

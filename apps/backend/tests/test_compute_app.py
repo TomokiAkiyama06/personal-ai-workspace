@@ -368,6 +368,16 @@ class LifespanTest(ComputeAppTestCase):
         await self.clock.advance(60)
         self.assertEqual(self.probe.calls, calls)  # the loop has stopped
 
+    async def test_system_health_reports_the_scheduler_and_full_gpu_mode(self):
+        # PAW-066: the compute component reads this app's scheduler and, while
+        # the lifespan runs it, its Full GPU Mode; not after the stop.
+        source = self.app.state.system_health.compute
+        self.assertIs(source._scheduler, self.scheduler)
+        self.assertIs(source._full_gpu, self.app.state.compute.full_gpu)
+        await self.stop_app()
+        self.assertIs(source._scheduler, self.scheduler)
+        self.assertIsNone(source._full_gpu)
+
 
 class WithoutDatabaseTest(ComputeAppTestCase):
     with_database = False
