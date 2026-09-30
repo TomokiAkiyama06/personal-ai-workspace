@@ -23,6 +23,7 @@ from paw_backend.health.domain import Component, Status
 from paw_backend.orchestrator.connection_reaper import ReaperStats
 
 from .support import FakeDatabase, make_settings, paw_environment, wait_until
+from .test_compute_app import fake_gpu
 from .test_orchestrator_project_sweep_app import RecordingLoop
 from .test_scratch_janitor_lifespan import configured
 
@@ -61,11 +62,6 @@ class SettingsTest(unittest.TestCase):
                 make_settings(health_retention_days=value)
 
 
-class StaticScheduler:
-    def status(self):  # never called here
-        raise AssertionError
-
-
 class ProbeWiringTest(unittest.TestCase):
     def test_the_probe_only_when_asked_and_without_a_scheduler(self):
         app = create_app(make_settings(), database=FakeDatabase())
@@ -75,11 +71,12 @@ class ProbeWiringTest(unittest.TestCase):
         app = create_app(
             make_settings(health_gpu_probe=True),
             database=FakeDatabase(),
-            compute=StaticScheduler(),
+            compute=fake_gpu()[0],
         )
         self.assertIsNone(app.state.system_health.compute._probe)
-        self.assertIsInstance(
-            app.state.system_health.compute._scheduler, StaticScheduler
+        # The application's own scheduler (issue #165) is the one reported.
+        self.assertIs(
+            app.state.system_health.compute._scheduler, app.state.compute.scheduler
         )
 
 

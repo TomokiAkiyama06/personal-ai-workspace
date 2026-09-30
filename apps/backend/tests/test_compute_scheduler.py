@@ -538,5 +538,55 @@ class HybridPlacementTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(lease.placement, Placement.CLOUD)
 
 
+class ObservedOnGpuTest(unittest.IsolatedAsyncioTestCase):
+    """``DeploymentStatus.observed_on_gpu``: what the GPU shows, beside the
+    configured or acted-on ``state`` (Codex review #168)."""
+
+    def observed(self, scheduler, name="main"):
+        return scheduler.status().deployment(name).observed_on_gpu
+
+    async def test_a_running_model_is_seen(self):
+        scheduler, *_ = build()
+        self.assertIs(self.observed(scheduler), False)  # no reading yet
+        await scheduler.refresh()
+        self.assertIs(self.observed(scheduler), True)
+
+    async def test_a_configured_model_whose_runtime_is_not_running_is_loaded(self):
+        # Decision 0055, 7: configured on the GPU (``initial``), its runtime
+        # says it has no process: it is not on the GPU, and is loaded again.
+        scheduler, probe, control, _ = build()
+        probe.resident.pop(control.pids.pop("main"))
+        control.gate = asyncio.Event()
+        refresh = asyncio.create_task(scheduler.refresh())
+        await settle()
+        self.assertIn(("place:local_gpu", "main"), control.actions)
+        self.assertIs(self.observed(scheduler), False)
+        control.gate.set()
+        await refresh
+        self.assertIs(scheduler.status().deployment("main").state, DeploymentState.GPU)
+        self.assertIs(self.observed(scheduler), True)  # it placed it itself
+
+    async def test_a_model_whose_processes_cannot_be_asked_is_not_seen(self):
+        scheduler, _, control, _ = build()
+
+        async def failing(deployment):
+            raise RuntimeError("no answer")
+
+        control.processes = failing
+        await scheduler.refresh()
+        self.assertIs(self.observed(scheduler), False)
+        # Not known to be stopped either: nothing is loaded.
+        self.assertNotIn(("place:local_gpu", "main"), control.actions)
+
+    async def test_the_last_reading_counts_and_nothing_without_a_control(self):
+        scheduler, _, _, clock = build()
+        await scheduler.refresh()
+        await clock.advance(3_600)  # stale: what the last reading saw
+        self.assertIs(self.observed(scheduler), True)
+        scheduler, *_ = build(control=False)
+        await scheduler.refresh()
+        self.assertIsNone(self.observed(scheduler))
+
+
 if __name__ == "__main__":
     unittest.main()
