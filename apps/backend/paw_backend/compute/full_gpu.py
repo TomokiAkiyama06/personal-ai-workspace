@@ -186,7 +186,10 @@ class FullGpuMode:
         self._held: set[uuid.UUID] = set()
         self._preempted = False
         self._failure: ExclusiveFailure | None = None
-        self._ended_at: float | None = None
+        # The reload time runs from the start of the process too (the first
+        # state is ``resuming``): tasks an earlier process held and a main LLM
+        # that does not come back ask a human then as well (Codex review #168).
+        self._ended_at: float | None = clock.monotonic()
         self._needs_human = False
         self._lock = asyncio.Lock()  # one start / end / tick at a time
 

@@ -767,6 +767,21 @@ class UnverifiedMainAtStartupTest(ComputeAppTestCase):
         self.assertEqual(self.holds.resumed, [])
         self.assertIs(self.mode_state(), FullGpuState.RESUMING)
 
+    async def test_a_human_is_asked_after_the_reload_time(self):
+        # Codex review #168 (round 4, P1): the reload time is counted from the
+        # start of the process too, not only from an end or a failed start.
+        await self.clock.advance(30)
+        self.assertFalse(self.app.state.compute.full_gpu.status().needs_human)
+        with self.assertLogs("paw_backend.compute", level="WARNING") as logs:
+            await self.advance_until(
+                lambda: self.app.state.compute.full_gpu.status().needs_human,
+                step=30,
+                limit=40,
+            )
+        self.assertTrue(self.app.state.compute.full_gpu.status().needs_human)
+        self.assertIn("keep waiting", "".join(logs.output))
+        self.assertEqual(self.holds.resumed, [])
+
 
 class ShutdownTimeoutTest(ComputeAppTestCase):
     settings_overrides = {"shutdown_timeout_seconds": 1}
