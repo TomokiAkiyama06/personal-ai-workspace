@@ -18,6 +18,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -222,7 +223,9 @@ export function NotificationProvider({
 export function useNotificationOwner(userId: string | null | undefined): void {
   const { clear } = useNotifications();
   const owner = useRef(userId);
-  useEffect(() => {
+  // A layout effect: cleared before the browser paints the new account's shell,
+  // so it never shows the previous account's notifications, even for a frame.
+  useLayoutEffect(() => {
     // `undefined`: not known right now (loading, a transient error).
     if (userId === undefined || owner.current === userId) return;
     owner.current = userId;
