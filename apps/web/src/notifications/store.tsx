@@ -118,10 +118,6 @@ function earlier(a: string, b: string): string {
   return Date.parse(b) < Date.parse(a) ? b : a;
 }
 
-function later(a: string, b: string): string {
-  return Date.parse(b) > Date.parse(a) ? b : a;
-}
-
 export function mergeNotification(
   items: NotificationItem[],
   incoming: IncomingNotification,
@@ -130,24 +126,33 @@ export function mergeNotification(
   // Dedup: the same event again changes nothing (it stays read if it was read).
   if (existing && incoming.id !== undefined && existing.ids.includes(incoming.id)) return items;
   const ids = incoming.id === undefined ? [] : [incoming.id];
-  let merged: NotificationItem;
   if (!existing) {
-    merged = { ...incoming, count: 1, firstAt: incoming.at, ids, read: false, dismissed: false };
-  } else {
-    // A late, older event (a replay) is counted but does not replace the content
-    // (title, severity, actions) of the newer one.
-    const newer = Date.parse(incoming.at) >= Date.parse(existing.at);
-    merged = {
-      ...(newer ? incoming : existing),
-      key: incoming.key,
-      count: existing.count + 1,
-      at: later(existing.at, incoming.at),
-      firstAt: earlier(existing.firstAt, incoming.at),
-      ids: [...ids, ...existing.ids],
-      read: false,
-      dismissed: false,
-    };
+    const created = { ...incoming, count: 1, firstAt: incoming.at, ids, read: false };
+    return [{ ...created, dismissed: false }, ...items].slice(0, MAX_ITEMS);
   }
+  const newer = Date.parse(incoming.at) >= Date.parse(existing.at);
+  if (!newer) {
+    // A late, older event (a replay) is only counted: the newer content (title,
+    // severity, actions), the read / dismissed state and the position stay.
+    return items.map((item) =>
+      item === existing
+        ? {
+            ...existing,
+            count: existing.count + 1,
+            firstAt: earlier(existing.firstAt, incoming.at),
+            ids: [...ids, ...existing.ids],
+          }
+        : item,
+    );
+  }
+  const merged: NotificationItem = {
+    ...incoming,
+    count: existing.count + 1,
+    firstAt: earlier(existing.firstAt, incoming.at),
+    ids: [...ids, ...existing.ids],
+    read: false,
+    dismissed: false,
+  };
   const rest = items.filter((item) => item.key !== incoming.key);
   return [merged, ...rest].slice(0, MAX_ITEMS);
 }

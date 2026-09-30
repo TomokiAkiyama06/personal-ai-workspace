@@ -327,4 +327,37 @@ describe("Notification Center", () => {
       items,
     );
   });
+
+  it("keeps the read / dismissed state and the order when an older event arrives late", async () => {
+    const { source, emit } = manualSource();
+    renderCenter(source);
+    emit({ key: "backup", id: "2", severity: "critical", title: "6 時間成功していません", at });
+    emit({
+      key: "repo",
+      severity: "info",
+      title: "解析が完了しました",
+      at: "2026-09-28T03:00:00Z",
+    });
+    const user = userEvent.setup();
+    await user.click(
+      within(screen.getByRole("alert")).getByRole("button", { name: "バナーを閉じる" }),
+    );
+    await user.click(screen.getByRole("button", { name: "通知 1 件未読" }));
+    const panel = screen.getByRole("complementary", { name: "通知" });
+    await user.click(within(panel).getByRole("button", { name: "すべて既読" }));
+    emit({
+      key: "backup",
+      id: "1",
+      severity: "critical",
+      title: "古い失敗",
+      at: "2026-09-28T01:00:00Z",
+    });
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "通知" })).toBeInTheDocument();
+    const titles = within(panel)
+      .getAllByRole("listitem")
+      .map((item) => item.querySelector(".notification-title")?.textContent);
+    expect(titles).toEqual(["解析が完了しました", "6 時間成功していません"]);
+    expect(within(panel).getByText("2 件をまとめて表示")).toBeInTheDocument();
+  });
 });
