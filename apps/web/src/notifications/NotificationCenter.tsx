@@ -257,10 +257,16 @@ export function NotificationsPage() {
   );
 }
 
-/** ERROR / CRITICAL notifications that are not dismissed, as non-modal banners. */
+/**
+ * ERROR / CRITICAL notifications that are not dismissed, as non-modal banners.
+ * Not on the full notification list itself, which already shows them (the
+ * design's MobileNotifications has no banner).
+ */
 export function NotificationBanners() {
   const { t } = useI18n();
+  const { path } = useRouter();
   const { items, dismiss, markRead } = useNotifications();
+  if (path === "/notifications") return null;
   const shown = items.filter(
     (item) => !item.dismissed && (item.severity === "error" || item.severity === "critical"),
   );

@@ -294,4 +294,13 @@ describe("Notification Center", () => {
     expect(screen.getByRole("button", { name: "未読 1" })).toBeInTheDocument();
     expect(screen.getByText("2 件")).toBeInTheDocument();
   });
+
+  it("does not repeat the banners on the notification list itself", () => {
+    window.history.replaceState(null, "", "/notifications");
+    const { source, emit } = manualSource();
+    renderCenter(source);
+    emit({ key: "gpu", severity: "critical", title: "GPUが応答しません", at });
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    window.history.replaceState(null, "", "/");
+  });
 });
