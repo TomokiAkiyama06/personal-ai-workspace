@@ -979,7 +979,6 @@ function ProjectDetailView({
   const panelId = useId();
   const isSystemAdmin = useCanManageLifecycle(null);
   const [load, setLoad] = useState<Load<ProjectDetail>>({ status: "loading" });
-  const [reloads, setReloads] = useState(0);
   const [tab, setTab] = useState<Tab>("overview");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const pending = summary?.status === "pending_deletion";
@@ -1000,9 +999,9 @@ function ProjectDetailView({
     return () => {
       cancelled = true;
     };
-  }, [source, projectId, pending, listRead, reloads, t]);
+  }, [source, projectId, pending, listRead, t]);
 
-  // A change reads the list again, and the project once the list has answered
+  // A change (and 再試行) reads the list again, and the project once the list has answered
   // (`listRead` goes false, then true): after a deletion was scheduled the list
   // says Pending deletion, which cannot be read, before the project is asked for.
   const changed = onListChanged;
@@ -1024,11 +1023,7 @@ function ProjectDetailView({
           {load.message}
         </p>
         <div className="actions">
-          <button
-            type="button"
-            className="secondary"
-            onClick={() => setReloads((value) => value + 1)}
-          >
+          <button type="button" className="secondary" onClick={onListChanged}>
             {t("app.retry")}
           </button>
         </div>

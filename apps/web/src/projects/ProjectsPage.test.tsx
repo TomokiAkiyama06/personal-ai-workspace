@@ -356,6 +356,16 @@ describe("ProjectsPage", () => {
     expect(screen.queryByRole("heading", { name: "Stale" })).not.toBeInTheDocument();
   });
 
+  it("reads a project again after a failed read", async () => {
+    const source = fakeProjectsSource();
+    source.detail.mockRejectedValueOnce(new Error("down"));
+    renderProjects("/projects/p-example", source);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "再試行" }));
+    expect(await screen.findByRole("heading", { name: "ExampleProject" })).toBeInTheDocument();
+    expect(source.detail).toHaveBeenCalledTimes(2);
+  });
+
   it("shows a failed read with a retry", async () => {
     const source = fakeProjectsSource();
     source.list.mockRejectedValueOnce(new Error("down"));
