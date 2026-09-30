@@ -1,5 +1,6 @@
 import { useSession } from "./auth/session";
 import { type MessageKey, useI18n } from "./i18n";
+import { MemoryPage } from "./memory/MemoryPage";
 import { NotificationsPage } from "./notifications/NotificationCenter";
 import { LoginPage } from "./pages/LoginPage";
 import { PairPage } from "./pages/PairPage";
@@ -21,6 +22,7 @@ const OTHER_SCREENS: readonly { path: string; label: MessageKey }[] = [
 function SignedInPage() {
   const { path } = useRouter();
   if (path === "/notifications") return <NotificationsPage />;
+  if (path === "/memory" || path.startsWith("/memory/")) return <MemoryPage />;
   const other = OTHER_SCREENS.find((entry) => entry.path === path);
   if (other) return <PlaceholderPage screen={other.label} />;
   const item = [...PRIMARY_NAV, ...SECONDARY_NAV].find((entry) => isActive(entry, path));

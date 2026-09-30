@@ -1,4 +1,5 @@
 import type { MessageKey } from "./ja";
+import { memoryEn } from "./memory.en";
 
 // English. Every key of the Japanese catalog must be here (the type enforces it).
 // V1 shows Japanese only (the PAW-060 design, SettingsLanguage); this catalog keeps
@@ -273,4 +274,5 @@ export const en: Record<MessageKey, string> = {
 
   "common.cancel": "Cancel",
   "common.close": "Close",
+  ...memoryEn,
 };
