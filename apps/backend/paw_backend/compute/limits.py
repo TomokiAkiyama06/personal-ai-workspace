@@ -53,6 +53,16 @@ DEFAULT_MAX_CONTEXT_TOKENS = 32_768
 DEFAULT_VERIFY_TIMEOUT_SECONDS = 60.0  # to see the VRAM free after the unloads
 DEFAULT_VERIFY_POLL_SECONDS = 2.0
 
+# -- Kaggle / Full GPU Mode (PAW-037, Decision 0055) ---------------------------
+# How long running local GPU work may take to end before Full GPU Mode gives up
+# (or, with ``preempt``, asks it to stop) ...
+DEFAULT_FULL_GPU_DRAIN_SECONDS = 600.0
+# ... how long the preempted work then has to stop and release ...
+DEFAULT_FULL_GPU_PREEMPT_SECONDS = 60.0
+# ... and how long the main LLM may take to come back after the end before a
+# human is asked to look (the held tasks keep waiting for it).
+DEFAULT_FULL_GPU_RELOAD_SECONDS = 900.0
+
 # -- runtimes ------------------------------------------------------------------
 # A node's context is estimated as its input in bytes / 3 (a conservative
 # tokens-per-byte ratio for code and mixed Japanese / English text) plus a

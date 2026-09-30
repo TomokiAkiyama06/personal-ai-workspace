@@ -78,6 +78,8 @@ from paw_backend.tools.credentials import is_credential_handle
 MAX_PATH_LENGTH = 1024
 MAX_URL_LENGTH = 2048
 MAX_HOST_LENGTH = 253
+# The parent's own path roots; a Worker's scope adds its worktree for each
+# repository in front of them (``orchestrator.scope.derive_child_scope``).
 MAX_ROOTS = 32
 MAX_HOSTS = 128
 MAX_REPOSITORIES = 32
@@ -89,6 +91,8 @@ MAX_CREDENTIAL_HANDLES = 64
 # The parent's own, plus what a Worker's worktree protects for each repository
 # (the checkout, the integration worktree, the worktree area, its ``.git``).
 MAX_EXCLUDED_PATHS = MAX_ROOTS + 4 * MAX_REPOSITORIES
+# The parent's own roots, plus a Worker's worktree for each repository.
+MAX_PATH_ROOTS = MAX_ROOTS + MAX_REPOSITORIES
 
 _FORBIDDEN_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"})
 _PERCENT_SEPARATOR = re.compile(r"%(?:2[eEfF]|5[cC])")
@@ -509,7 +513,7 @@ class TaskScope:
             if normalised not in excluded_paths:
                 excluded_paths.append(normalised)
         if (
-            len(roots) > MAX_ROOTS
+            len(roots) > MAX_PATH_ROOTS
             or len(excluded_paths) > MAX_EXCLUDED_PATHS
             or len(hosts) > MAX_HOSTS
             or len(projects) > MAX_PROJECTS

@@ -84,6 +84,10 @@ class Capability(StrEnum):
     # The workspace authentication policy (Passkey requirement per role, Step-up
     # window; Decision 0015): an Admin may look at it, only the Owner changes it.
     ADMIN_AUTH_POLICY_VIEW = "admin.auth_policy.view"
+    # Start and end Kaggle / Full GPU Mode (issue #33, Decision 0055):
+    # every local GPU task of every user is held while an exclusive job has the
+    # GPU. Owner / Admin, never an Agent.
+    ADMIN_COMPUTE_FULL_GPU = "admin.compute.full_gpu"
     # Owner only.
     OWNER_ADMINS_MANAGE = "owner.admins.manage"
     OWNER_OWNERSHIP_TRANSFER = "owner.ownership.transfer"
@@ -207,6 +211,7 @@ CAPABILITIES: MappingProxyType[Capability, CapabilityInfo] = MappingProxyType(
         C.ADMIN_CONFIG_MANAGE: _info(Scope.SYSTEM, delegable=False),
         C.ADMIN_PROJECTS_MANAGE: _info(Scope.SYSTEM, delegable=False),
         C.ADMIN_AUTH_POLICY_VIEW: _info(Scope.SYSTEM, delegable=False),
+        C.ADMIN_COMPUTE_FULL_GPU: _info(Scope.SYSTEM, delegable=False),
         C.OWNER_ADMINS_MANAGE: _info(Scope.SYSTEM, delegable=False),
         C.OWNER_OWNERSHIP_TRANSFER: _info(Scope.SYSTEM, delegable=False),
         C.OWNER_RECOVERY_MANAGE: _info(Scope.SYSTEM, delegable=False),
