@@ -2,6 +2,7 @@ import { useSession } from "./auth/session";
 import { type MessageKey, useI18n } from "./i18n";
 import { NotificationsPage } from "./notifications/NotificationCenter";
 import { useNotificationOwner } from "./notifications/store";
+import { AdminPage } from "./pages/AdminPage";
 import { LoginPage } from "./pages/LoginPage";
 import { PairPage } from "./pages/PairPage";
 import { PasskeyGatePage } from "./pages/PasskeyGatePage";
@@ -16,7 +17,6 @@ import { TASKS_PATH, TasksPage } from "./tasks/TasksPage";
 // Screens of later issues that are reached from the user menu, not the navigation.
 const OTHER_SCREENS: readonly { path: string; label: MessageKey }[] = [
   { path: NEW_CHAT_PATH, label: "nav.newChat" },
-  { path: "/admin/usage", label: "screen.adminUsage" },
   { path: "/help/shortcuts", label: "screen.shortcuts" },
   { path: "/help", label: "screen.help" },
 ];
@@ -26,6 +26,7 @@ function SignedInPage() {
   if (path === "/notifications") return <NotificationsPage />;
   if (isActive({ path: TASKS_PATH }, path)) return <TasksPage />;
   if (isActive({ path: PULLS_PATH }, path)) return <PullsPage />;
+  if (path === "/admin" || path.startsWith("/admin/")) return <AdminPage />;
   const other = OTHER_SCREENS.find((entry) => entry.path === path);
   if (other) return <PlaceholderPage screen={other.label} />;
   const item = [...PRIMARY_NAV, ...SECONDARY_NAV].find((entry) => isActive(entry, path));

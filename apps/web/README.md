@@ -92,3 +92,16 @@ Web App を別の Origin に置く構成は取りません（Session Cookie が 
 
 [run_ci.py](../../.github/scripts/run_ci.py)（pre-commit と GitHub Actions の共通の検証）が、最後に `npm ci` と `npm run ci` を実行します。
 GitHub Actions では必須です。ローカルで `npm` がなければ、警告を出して Web の検証だけを Skip します（`PAW_REQUIRE_WEB_CHECKS=1` で必須にできます）。詳細は [CI](../../.github/CI.md) を参照してください。
+
+## 使用状況と上限（PAW-064）
+
+[PAW-064](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/50) で、Design Canvas の Usage Board（と Admin Board の「ユーザーと上限」の表）を実装しました。
+
+- `管理 › 使用状況`（`/admin/usage`、Owner / Admin）: 管理のタブ、`自分 / ワークスペース`、期間（直近 14 日 / 直近 30 日 / 今月）、集計の Card（タスク・トークン・GPU 時間・エスカレーション）、日別のタスク実行数（Local / Codex / Claude の積み上げ。Hover / Keyboard の Focus で日ごとの値、`表で見る` で同じ値の表）、エージェント別の合計、用途の内訳、上限（Quota）。`ワークスペース` では上限の代わりに User 別の表（タスク・トークン・上限・状態）を出します。
+- `設定 › 自分の使用状況`（`/settings/usage`、すべての User）: 同じ画面の `自分` だけ。
+- 上限は [Decision 0016](../../docs/decisions/0016-shared-connection-adapter-policy.md)（Approved）のとおりです: 数値か **無制限**（`unlimited`。Meter を出さず「無制限」と表示）、設定のない User・項目は無制限、80% から「上限に接近」、上限に達したら「上限に到達」と再開の時刻（暦の期間）。色だけで状態を伝えず文字を併記します。
+- Privacy: 画面が受け取るのは件数・閉じた用途の Category（Decision 0016 §6 の `chat` / `coding` / `review` / `research` / `evaluation` / `other`。それ以外の値は「その他」に数える）・Login 名だけで、会話の本文・Private Memory・Prompt は受け取らず、表示もしません。
+
+**Backend に使用状況と上限の HTTP API がまだありません**（`ConnectionService.quota_status` / `list_usage` は Service 層だけ）。そのため画面は `UsageSource`（`src/usage/model.tsx`）でデータを受け、今は接続していないので「使用状況はまだ表示できません」を表示します（通知の `NotificationSource` と同じ扱い）。API ができたら、その応答を `UsageReport` に変換する `UsageSource` を `UsageSourceProvider` に渡します。
+
+Design Canvas との差分（Backend が優先）: 上限の「GPU 時間（今月）」と「同時実行」は Backend に無い指標（Decision 0016 §5 で未実装）なので、上限には Backend の指標（呼び出し・タスク・トークン・実行時間）× 期間（直近 5 時間・今日・今週・今月）だけを出します。Local の使用量・GPU 時間・エスカレーションは記録が無ければ「—」「記録なし」と表示します。管理の他のタブ（概要・ユーザー・サーバー監視・上限と課金・モデルとルーター・バックアップ・監査ログ）は後続の Issue の Placeholder です。
