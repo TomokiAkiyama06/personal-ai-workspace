@@ -478,6 +478,12 @@ class TaskEventRow(Base):
 
     __table_args__ = (
         Index(None, "task_id", "seq"),
+        # The retries of the last hour (System Health, revision ``0066``).
+        Index(
+            "ix_task_events_retry_created_at",
+            "created_at",
+            postgresql_where=text("command = 'retry'"),
+        ),
         _in("command", TaskCommand, "command_valid"),
         _in("from_state", TaskState, "from_state_valid"),
         _in("to_state", TaskState, "to_state_valid"),

@@ -22,6 +22,9 @@ DATABASE_SLOW_MS = 1_000
 # Tasks that failed in the last hour: one is a warning (a single failure), this
 # many an error (a continuing failure).
 TASK_FAILURES_ERROR = 5
+# Tasks in a detected loop (repeated failures) in the last hour: one is a
+# warning, this many an error. A retry is always a warning.
+TASK_LOOPS_ERROR = 3
 
 # Shared connections: failed calls in the last hour are a warning when there
 # are at least this many and they are at least half of the calls.
@@ -55,7 +58,7 @@ MAX_COUNTED_FAILURES = 100
 # "last 24 hours: 10-30 seconds".
 DEFAULT_SAMPLE_INTERVAL_SECONDS = 30
 MIN_SAMPLE_INTERVAL_SECONDS = 10
-MAX_SAMPLE_INTERVAL_SECONDS = 300
+MAX_SAMPLE_INTERVAL_SECONDS = 30
 
 # (resolution in seconds, how long rows of that resolution are kept before
 # they are rolled up into the next one). 0 is the raw samples.

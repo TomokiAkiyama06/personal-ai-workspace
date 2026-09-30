@@ -78,12 +78,24 @@ class OfflineMigrationTest(unittest.TestCase):
         samples = "GRANT DELETE, INSERT, SELECT, UPDATE ON health_metric_samples"
         self.assertIn(f'{samples} TO "paw_app"', sql)
         self.assertIn('GRANT DELETE, INSERT, SELECT ON health_events TO "paw_app"', sql)
+        self.assertIn(
+            "CREATE INDEX ix_task_events_retry_created_at ON task_events (created_at)"
+            " WHERE command = 'retry'",
+            sql,
+        )
+        self.assertIn(
+            "CREATE INDEX ix_loop_failure_signatures_created_at ON"
+            " loop_failure_signatures (created_at)",
+            sql,
+        )
         # Nothing on another table.
         self.assertEqual(sql.count("GRANT "), 2)
 
     def test_downgrade(self):
         sql = self.sql("downgrade", f"{REVISION}:{previous_revision()}")
         self.assertIn("DROP INDEX ix_connection_usage_in_flight_started_at", sql)
+        self.assertIn("DROP INDEX ix_task_events_retry_created_at", sql)
+        self.assertIn("DROP INDEX ix_loop_failure_signatures_created_at", sql)
         self.assertIn("DROP TABLE health_events", sql)
         self.assertIn("DROP TABLE health_metric_samples", sql)
         self.assertNotIn("connection_usage DROP", sql)

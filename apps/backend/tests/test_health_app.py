@@ -1,11 +1,12 @@
 """System Health in the application (PAW-066): settings and the lifespan.
 
-``PAW_HEALTH_SAMPLE_INTERVAL_SECONDS`` (0 off, otherwise 10 to 300, default 30),
+``PAW_HEALTH_SAMPLE_INTERVAL_SECONDS`` (10 to 30, default 30: the requirements'
+fixed resolution of the last 24 hours, so there is no "off"),
 ``PAW_HEALTH_RETENTION_DAYS`` (366 to 3650, default 400) and
 ``PAW_HEALTH_GPU_PROBE`` (default off). With a database the sampling loop runs in
 the lifespan and is stopped and cancelled at shutdown; the connection reaper the
 lifespan starts is reported on while it runs. Without a database or with the
-sampling off, no loop starts; the GPU probe is used only when asked for and only
+no loop starts; the GPU probe is used only when asked for and only
 without a Compute Scheduler.
 """
 
@@ -50,9 +51,9 @@ class SettingsTest(unittest.TestCase):
         )
 
     def test_bounds(self):
-        for value in (0, 10, 300):
+        for value in (10, 30):
             make_settings(health_sample_interval_seconds=value)
-        for value in (-1, 1, 9, 301):
+        for value in (-1, 0, 9, 31, 300):
             with self.subTest(value), self.assertRaises(ValidationError):
                 make_settings(health_sample_interval_seconds=value)
         for value in (365, 3_651):
@@ -128,17 +129,13 @@ class LifespanTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(health.monitor._stopping.is_set())
         self.assertEqual((await health.reaper.check()).status, Status.NOT_CONFIGURED)
 
-    async def test_no_loop_when_off_or_without_a_database(self):
-        for settings, database in (
-            configured(health_sample_interval_seconds=0),
-            (make_settings(), FakeDatabase()),
-        ):
-            app = create_app(settings, database=database)
-            health = app.state.system_health
-            self.assertFalse(health.sampling)
-            with patch.object(health.monitor, "run", side_effect=AssertionError):
-                async with app.router.lifespan_context(app):
-                    await asyncio.sleep(0.05)
+    async def test_no_loop_without_a_database(self):
+        app = create_app(make_settings(), database=FakeDatabase())
+        health = app.state.system_health
+        self.assertFalse(health.sampling)
+        with patch.object(health.monitor, "run", side_effect=AssertionError):
+            async with app.router.lifespan_context(app):
+                await asyncio.sleep(0.05)
 
     def test_every_source_with_a_database(self):
         settings, database = configured()

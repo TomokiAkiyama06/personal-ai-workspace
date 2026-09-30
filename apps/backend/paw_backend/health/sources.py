@@ -10,7 +10,8 @@ The thresholds are ``limits.py`` (Decision 0059, Proposed).
   :class:`FullGpuStatusProvider` protocols; without a scheduler, optionally the
   read-only GPU probe (``nvidia-smi --query-*``) alone; else ``not_configured``.
   It never loads or unloads a model and never starts anything but the probe.
-* :class:`TaskQueueSource`: tasks by state, failures of the last hour / day.
+* :class:`TaskQueueSource`: tasks by state, failures of the last hour / day,
+  retries and detected loops of the last hour.
 * :class:`MemoryWorkerSource`: the Memory consolidation queue.
 * :class:`ConnectionSource`: the shared Codex / Claude connections (status,
   enabled, last check, calls in flight). Never the credential or its handle.
@@ -47,6 +48,7 @@ from paw_backend.health.domain import (
     worst,
 )
 from paw_backend.orchestrator.connection_reaper import ReaperStats
+from paw_backend.tasks.queueing.domain import DEFAULT_LOOP_POLICY
 
 
 class HealthSource(Protocol):
@@ -378,37 +380,75 @@ _TASK_COLUMNS = (
 )
 
 
+# Retries (the ``retry`` command) of the last hour: the partial index
+# ``ix_task_events_retry_created_at`` (revision ``0066``) holds only those rows.
+_RETRIES = """
+SELECT count(*) FROM task_events
+WHERE command = 'retry' AND created_at >= now() - interval '1 hour'
+"""
+# Loops of the last hour (PAW-033): a task attempt and approach whose same failure
+# signature was recorded at least the loop policy's ``repeat_threshold`` times,
+# the condition of the detector's TRY_ALTERNATIVE / ESCALATE verdicts. A loop
+# never fails its task, so the failed tasks do not show it.
+_LOOPS = """
+SELECT count(DISTINCT task_id) FROM (
+    SELECT task_id FROM loop_failure_signatures
+    WHERE created_at >= now() - interval '1 hour'
+    GROUP BY task_id, attempt, approach, signature
+    HAVING count(*) >= %(threshold)s
+) AS repeated
+"""
+
+
 class TaskQueueSource:
-    """Every user's tasks, counted (no id, title or project). One failure in the
-    last hour is a warning, ``TASK_FAILURES_ERROR`` an error."""
+    """Every user's tasks, counted (no id, title or project), with the retries
+    and the detected loops of the last hour.
+
+    A failure, a retry or a loop in the last hour is a warning (the Notification
+    Policy's "単発の軽微なfailure、retry"); ``TASK_FAILURES_ERROR`` failures or
+    ``TASK_LOOPS_ERROR`` loops an error."""
 
     component = Component.TASK_QUEUE
     max_age_seconds = limits.REPORT_MAX_AGE_SECONDS
 
-    def __init__(self, database: Database) -> None:
+    def __init__(
+        self,
+        database: Database,
+        *,
+        loop_threshold: int = DEFAULT_LOOP_POLICY.repeat_threshold,
+    ) -> None:
         self._database = database
+        self._loop_threshold = loop_threshold
 
     async def check(self) -> ComponentHealth:
-        (row,) = await self._database.fetch_abortable(
-            _TASKS, timeout_seconds=limits.CHECK_TIMEOUT_SECONDS
+        timeout = limits.CHECK_TIMEOUT_SECONDS
+        (row,) = await self._database.fetch_abortable(_TASKS, timeout_seconds=timeout)
+        ((retries,),) = await self._database.fetch_abortable(
+            _RETRIES, timeout_seconds=timeout
+        )
+        ((loops,),) = await self._database.fetch_abortable(
+            _LOOPS, {"threshold": self._loop_threshold}, timeout_seconds=timeout
         )
         metrics = {
             name: int(value) for name, value in zip(_TASK_COLUMNS, row, strict=True)
         }
+        metrics["retries_last_hour"] = int(retries)
+        metrics["loops_last_hour"] = int(loops)
         failed = metrics["failed_last_hour"]
-        if failed >= limits.TASK_FAILURES_ERROR:
-            severity = Severity.ERROR
-        elif failed:
-            severity = Severity.WARNING
-        else:
-            severity = Severity.INFO
-        return _health(
-            self.component,
-            severity,
-            _status_of(severity),
-            ["task_failures"] if failed else [],
-            metrics,
-        )
+        reasons = []
+        severities = [Severity.INFO]
+        for count, reason, error_at in (
+            (failed, "task_failures", limits.TASK_FAILURES_ERROR),
+            (int(loops), "loops_detected", limits.TASK_LOOPS_ERROR),
+            (int(retries), "task_retries", None),
+        ):
+            if not count:
+                continue
+            reasons.append(reason)
+            error = error_at is not None and count >= error_at
+            severities.append(Severity.ERROR if error else Severity.WARNING)
+        severity = worst(severities)
+        return _health(self.component, severity, _status_of(severity), reasons, metrics)
 
 
 _MEMORY_QUEUE = """

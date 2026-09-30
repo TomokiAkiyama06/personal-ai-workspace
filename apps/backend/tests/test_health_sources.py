@@ -239,18 +239,35 @@ TASK_ROW = (1, 2, 3, 1, 1, 1, 0, 1, 0, 2, 7, 1)
 
 class TaskQueueSourceTest(unittest.IsolatedAsyncioTestCase):
     async def test_counts_and_failures(self):
-        health = await TaskQueueSource(RowsDatabase([TASK_ROW])).check()
+        health = await TaskQueueSource(RowsDatabase([TASK_ROW], [(0,)], [(0,)])).check()
         self.assertIs(health.severity, Severity.INFO)
         self.assertEqual(health.metrics["queued"], 1)
         self.assertEqual(health.metrics["waiting_resource"], 1)
         self.assertEqual(health.metrics["failed_last_day"], 2)
         one = TASK_ROW[:8] + (1,) + TASK_ROW[9:]
-        health = await TaskQueueSource(RowsDatabase([one])).check()
+        health = await TaskQueueSource(RowsDatabase([one], [(0,)], [(0,)])).check()
         self.assertIs(health.severity, Severity.WARNING)
         many = TASK_ROW[:8] + (limits.TASK_FAILURES_ERROR,) + TASK_ROW[9:]
-        health = await TaskQueueSource(RowsDatabase([many])).check()
+        health = await TaskQueueSource(RowsDatabase([many], [(0,)], [(0,)])).check()
         self.assertIs(health.severity, Severity.ERROR)
         self.assertEqual(health.reasons, ("task_failures",))
+
+    async def test_retries_and_loops(self):
+        # A loop never fails its task: it shows by itself (Codex P1 on PR #170).
+        database = RowsDatabase([TASK_ROW], [(2,)], [(1,)])
+        health = await TaskQueueSource(database, loop_threshold=4).check()
+        self.assertIs(health.severity, Severity.WARNING)
+        self.assertEqual(health.reasons, ("loops_detected", "task_retries"))
+        self.assertEqual(
+            (health.metrics["retries_last_hour"], health.metrics["loops_last_hour"]),
+            (2, 1),
+        )
+        self.assertEqual(database.calls[2][1], {"threshold": 4})
+        loops = RowsDatabase([TASK_ROW], [(0,)], [(limits.TASK_LOOPS_ERROR,)])
+        health = await TaskQueueSource(loops).check()
+        self.assertEqual(
+            (health.severity, health.reasons), (Severity.ERROR, ("loops_detected",))
+        )
 
 
 class MemoryWorkerSourceTest(unittest.IsolatedAsyncioTestCase):
@@ -419,7 +436,7 @@ class MetricNamesTest(unittest.IsolatedAsyncioTestCase):
             await DatabaseSource(RowsDatabase()).check(),
             await ComputeSource(scheduler, StaticScheduler(full)).check(),
             await ComputeSource(probe=FakeProbe()).check(),
-            await TaskQueueSource(RowsDatabase([TASK_ROW])).check(),
+            await TaskQueueSource(RowsDatabase([TASK_ROW], [(0,)], [(0,)])).check(),
             await MemoryWorkerSource(RowsDatabase([(1, 0, 1.0)], [(0,)])).check(),
             await ConnectionSource(
                 RowsDatabase([("codex", "connected", True, 1.0)], [])

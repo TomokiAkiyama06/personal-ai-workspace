@@ -57,7 +57,8 @@ class HealthPostgresTest(unittest.IsolatedAsyncioTestCase):
             connection.execute(
                 text(
                     "TRUNCATE health_metric_samples, health_events, connection_usage,"
-                    " shared_connections, tasks CASCADE"
+                    " shared_connections, loop_failure_signatures, task_events,"
+                    " tasks CASCADE"
                 )
             )
 
@@ -262,6 +263,40 @@ class HealthPostgresTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(metrics["completed_last_day"], 1)
         self.assertIs(result.severity, Severity.WARNING)
 
+    async def test_retries_and_loops(self):
+        task = self.insert_task("running")
+        for age in ("5 minutes", "2 hours"):
+            self.sql(
+                "INSERT INTO task_events (task_id, attempt, retry_count, command,"
+                " from_state, to_state, actor_kind, task_version, created_at)"
+                " VALUES (:t, 1, 1, 'retry', 'failed', 'queued', 'system', 2,"
+                f" now() - interval '{age}')",
+                t=task,
+            )
+        signature = "a" * 64
+        # Three times the same failure (a loop), once another one.
+        for sig in (signature, signature, signature, "b" * 64):
+            self.sql(
+                "INSERT INTO loop_failure_signatures (task_id, attempt, approach,"
+                " signature) VALUES (:t, 1, 0, :s)",
+                t=task,
+                s=sig,
+            )
+        result = await TaskQueueSource(self.database).check()
+        self.assertEqual(
+            (result.metrics["retries_last_hour"], result.metrics["loops_last_hour"]),
+            (1, 1),
+        )
+        self.assertEqual(result.reasons, ("loops_detected", "task_retries"))
+
+    async def test_a_late_event_keeps_the_time_it_was_seen(self):
+        seen = datetime(2026, 9, 30, 3, 0, tzinfo=UTC)
+        await self.store.record_changes(
+            [health(Component.DATABASE, Severity.CRITICAL)], occurred_at=seen
+        )
+        (event,) = await self.store.events(since=seen, limit=5)
+        self.assertEqual(event.occurred_at, seen)
+
     async def test_connections(self):
         self.sql(
             "INSERT INTO shared_connections (kind, secret_handle, status, enabled,"
@@ -323,6 +358,20 @@ class HealthPostgresTest(unittest.IsolatedAsyncioTestCase):
             (result.severity, result.metrics["consecutive_failures"]),
             (Severity.INFO, 0),
         )
+
+    def test_the_indexes_of_the_sources(self):
+        indexes = dict(
+            self.sql(
+                "SELECT indexname, indexdef FROM pg_indexes WHERE indexname IN"
+                " ('ix_task_events_retry_created_at',"
+                " 'ix_loop_failure_signatures_created_at')"
+            )
+        )
+        self.assertIn(
+            "WHERE ((command)::text = 'retry'::text)",
+            indexes["ix_task_events_retry_created_at"],
+        )
+        self.assertIn("(created_at)", indexes["ix_loop_failure_signatures_created_at"])
 
     def test_the_in_flight_index_is_partial(self):
         ((definition,),) = self.sql(

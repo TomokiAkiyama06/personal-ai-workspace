@@ -7,7 +7,7 @@ refresh. A source that raises or times out is ``check_failed`` (``WARNING``),
 named by its component only: nothing the error says is kept or logged.
 
 :meth:`HealthMonitor.run` is the sampling loop of the application (when
-``PAW_HEALTH_SAMPLE_INTERVAL_SECONDS`` is not 0 and a database is configured):
+a database is configured; ``PAW_HEALTH_SAMPLE_INTERVAL_SECONDS``, 10 to 30):
 every interval (the first one interval after the start) it refreshes the
 report, stores one sample of every numeric metric, records the components whose
 severity changed, and every ``ROLLUP_EVERY_CYCLES`` cycles rolls the old samples
@@ -38,6 +38,9 @@ from paw_backend.health.limits import (
 from paw_backend.health.sources import HealthSource
 from paw_backend.health.store import HealthStore
 
+# How many reports with changes wait for PostgreSQL at most (``run_cycle``).
+MAX_UNRECORDED_REPORTS = 100
+
 logger = logging.getLogger(__name__)
 
 
@@ -64,6 +67,8 @@ class HealthMonitor:
         self._report: HealthReport | None = None
         self._reported_at: float | None = None
         self._lock = asyncio.Lock()
+        # Reports whose severity changes are not in ``health_events`` yet.
+        self._unrecorded: list[HealthReport] = []
         self._stopping = asyncio.Event()
 
     @property
@@ -134,18 +139,41 @@ class HealthMonitor:
         self._stopping.set()
 
     async def run_cycle(self, cycle: int) -> None:
-        """Refresh, store the samples and the changes; roll up now and then."""
+        """Refresh, record the changes and store the samples; roll up now and then.
+
+        The changes are recorded first, and every report whose changes could not
+        be recorded (PostgreSQL did not answer) is kept and recorded, in order and
+        with the time it was taken, at the next cycle that can: an outage of
+        PostgreSQL itself is then in ``health_events`` once it is back."""
         if self._store is None:
             raise RuntimeError("no store to sample into")
         async with self._lock:
             report = await self._refresh()
+        self._keep_unrecorded(report)
+        while self._unrecorded:
+            pending = self._unrecorded[0]
+            await self._store.record_changes(
+                pending.components, occurred_at=pending.checked_at
+            )
+            self._unrecorded.pop(0)
         values: dict[str, float] = {}
         for health in report.components:
             values.update(numeric_metrics(health))
         await self._store.add_samples(values, interval_seconds=self._interval)
-        await self._store.record_changes(report.components)
         if cycle % ROLLUP_EVERY_CYCLES == 0:
             await self._store.roll_up(retention_days=self._retention_days)
+
+    def _keep_unrecorded(self, report: HealthReport) -> None:
+        """Queue ``report`` for recording, unless no severity changed since the
+        last queued one. At most ``MAX_UNRECORDED_REPORTS`` wait: the first one
+        (the start of an outage) is kept, the oldest after it are dropped."""
+        if self._unrecorded and _severities(self._unrecorded[-1]) == _severities(
+            report
+        ):
+            return
+        self._unrecorded.append(report)
+        if len(self._unrecorded) > MAX_UNRECORDED_REPORTS:
+            del self._unrecorded[1]
 
     async def run(self) -> None:
         # The first cycle comes one interval after the start: nothing is urgent
@@ -167,3 +195,7 @@ class HealthMonitor:
             await asyncio.wait_for(self._stopping.wait(), timeout=seconds)
         except TimeoutError:
             pass
+
+
+def _severities(report: HealthReport) -> tuple[tuple[object, Severity], ...]:
+    return tuple((h.component, h.severity) for h in report.components)

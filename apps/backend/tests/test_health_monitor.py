@@ -52,14 +52,19 @@ class RecordingStore:
         self.changes: list[tuple] = []
         self.rollups = 0
         self.fail = fail
+        self.changes_fail = False
 
     async def add_samples(self, values, *, interval_seconds):
         if self.fail:
             raise ConnectionError("secret-looking message")
         self.samples.append(dict(values))
 
-    async def record_changes(self, components):
-        self.changes.append(tuple(components))
+    async def record_changes(self, components, *, occurred_at=None):
+        if self.changes_fail:
+            raise ConnectionError()
+        self.changes.append(
+            (tuple((h.component, h.severity) for h in components), occurred_at)
+        )
         return 0
 
     async def roll_up(self, *, retention_days):
@@ -131,6 +136,27 @@ class SamplingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(store.rollups, 1)
         await monitor.run_cycle(limits.ROLLUP_EVERY_CYCLES)
         self.assertEqual(store.rollups, 2)
+
+    async def test_changes_seen_while_postgresql_was_down_are_recorded_later(self):
+        # Codex P1 on PR #170: an outage must reach health_events once it is over.
+        store = RecordingStore()
+        source = CountingSource(Component.DATABASE, max_age=0)
+        monitor = HealthMonitor([source], store=store)
+        await monitor.run_cycle(1)
+        store.changes_fail = True
+        source.severity = Severity.CRITICAL
+        for cycle in (2, 3):  # the same outage, twice: kept once
+            with self.assertRaises(ConnectionError):
+                await monitor.run_cycle(cycle)
+        store.changes_fail = False
+        source.severity = Severity.INFO
+        await monitor.run_cycle(4)
+        severities = [changes[0][0][1] for changes in store.changes]
+        self.assertEqual(severities, [Severity.INFO, Severity.CRITICAL, Severity.INFO])
+        # Each with the time its report was taken, in order.
+        times = [changes[1] for changes in store.changes]
+        self.assertEqual(times, sorted(times))
+        self.assertIsNotNone(times[1])
 
     async def test_the_loop_survives_a_failing_cycle_and_stops(self):
         store = RecordingStore(fail=True)

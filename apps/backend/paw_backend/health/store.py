@@ -154,8 +154,10 @@ SELECT count(*) FROM gone
 """
 
 _RECORD_CHANGE = """
-INSERT INTO health_events (component, severity, previous_severity, status, reasons)
-SELECT :component, :severity, last.severity, :status, :reasons
+INSERT INTO health_events
+    (occurred_at, component, severity, previous_severity, status, reasons)
+SELECT COALESCE(CAST(:occurred_at AS timestamptz), now()),
+       :component, :severity, last.severity, :status, :reasons
 FROM (SELECT 1) AS one
 LEFT JOIN LATERAL (
     SELECT severity FROM health_events
@@ -219,9 +221,16 @@ class HealthStore:
             timeout_seconds=CHECK_TIMEOUT_SECONDS,
         )
 
-    async def record_changes(self, components: Sequence[ComponentHealth]) -> int:
+    async def record_changes(
+        self,
+        components: Sequence[ComponentHealth],
+        *,
+        occurred_at: datetime | None = None,
+    ) -> int:
         """An event for each component whose severity is not the one of its last
-        event (or that has none); return how many were recorded."""
+        event (or that has none); return how many were recorded. ``occurred_at``
+        is when the report was taken (a report recorded late, after PostgreSQL
+        came back); ``None`` is the database's ``now()``."""
         if not components:
             return 0
 
@@ -238,6 +247,7 @@ class HealthStore:
                         "severity": health.severity.value,
                         "status": health.status.value,
                         "reasons": _reasons(health.reasons),
+                        "occurred_at": occurred_at,
                     },
                 )
                 recorded += len(rows.fetchall())

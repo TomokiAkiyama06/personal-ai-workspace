@@ -177,7 +177,7 @@ Database には pgvector が必要です（CI は `pgvector/pgvector:pg18` を�
 | `PAW_REPOSITORY_SSH_HOST` / `PAW_REPOSITORY_SSH_PORT` | `127.0.0.1` / `22` | `SshGitRunner`（Issue #105、Decision 0029、承認済み）が接続する宛先。本番の呼び出し経路にはまだ配線していない（`SshGitRunnerPolicy.from_settings` が使う） |
 | `PAW_REPOSITORY_SSH_CONNECT_TIMEOUT_SECONDS` | `10` | `ssh` の Handshake（接続・認証）だけの Timeout（秒）。呼び出し全体の Timeout は `PAW_REPOSITORY_GIT_TIMEOUT_SECONDS` / `_CLONE_TIMEOUT_SECONDS` と同じ値を使う |
 | `PAW_REPOSITORY_SSH_KNOWN_HOSTS_PATH` | `/etc/paw/ssh_known_hosts` | 固定した Host Key の File（Trust On First Use にしない）。配備側が用意する |
-| `PAW_HEALTH_SAMPLE_INTERVAL_SECONDS` | `30` | System Health の数値を時系列に入れる間隔（秒）。`0` で止める（状態は返すが履歴は残らない）。それ以外は 10〜300。DB が未設定のときも動かない。[System Health](#system-health--observability) |
+| `PAW_HEALTH_SAMPLE_INTERVAL_SECONDS` | `30` | System Health の数値を時系列に入れる間隔（秒、10〜30。要件の直近 24 時間の粒度なので止められない）。DB が未設定のときは動かない。[System Health](#system-health--observability) |
 | `PAW_HEALTH_RETENTION_DAYS` | `400` | 1 時間の集計と Severity の変化の Event を残す日数（366〜3650） |
 | `PAW_HEALTH_GPU_PROBE` | `false` | Compute Scheduler を Application に組み込んでいない構成で、読み取り専用の GPU の Probe（`nvidia-smi --query-*` だけ）で GPU と VRAM を見る |
 | `PAW_EVENT_HEARTBEAT_SECONDS` | `15` | `system.heartbeat` の間隔 |
@@ -4162,7 +4162,7 @@ Component ごとに Source が 1 つあり、読むだけです。返すのは N
 | --- | --- |
 | `database` | `SELECT 1` と所要時間。応答しなければ `critical` |
 | `compute` | Compute Scheduler の `status()`（VRAM、Utilization、Lease と待ち、Relief、Model ごとの状態）と Full GPU Mode。Scheduler は `create_app(compute=..., full_gpu=...)` か `app.state.system_health.compute.attach(...)` で渡す（#165）。なければ `PAW_HEALTH_GPU_PROBE` の Probe、どちらもなければ `not_configured` |
-| `task_queue` | 全 User の Task の状態別の数と直近の失敗 |
+| `task_queue` | 全 User の Task の状態別の数、直近の失敗、直近 1 時間の Retry と Loop（同じ失敗の Signature の繰り返し） |
 | `memory_worker` | Memory の Consolidation Queue の待ちと Dead letter |
 | `connections` | Codex / Claude の接続の状態・有効・最後の確認・実行中の呼び出し（Credential と Handle は読まない） |
 | `connection_reaper` | `AbandonedCallReaper.stats`（Cycle の数、片付けた行、連続の失敗、最後の Error の型） |
@@ -4172,9 +4172,9 @@ Check は並行に走り、1 つが 5 秒を超える・例外を出すと、そ
 
 ### 時系列と Event
 
-DB があり `PAW_HEALTH_SAMPLE_INTERVAL_SECONDS` が 0 でなければ、Lifespan の Loop が Interval ごと（最初は起動の 1 Interval 後）に Report を作り、数値と各 Component の Severity の段階（0〜3）を `health_metric_samples` に入れます（DB の時計の枠に揃え、同じ枠には 1 回だけ）。20 Cycle ごとに、24 時間より古い生の行を 1 分、7 日より古い 1 分を 5 分、30 日より古い 5 分を 1 時間の集計（件数・合計・最小・最大）へ移し、`PAW_HEALTH_RETENTION_DAYS` より古い 1 時間の集計と Event を消します。移す行の削除と Merge は 1 文なので、Process が複数でも 1 つの Sample は 1 回だけ数えます。
+DB があれば、Lifespan の Loop が `PAW_HEALTH_SAMPLE_INTERVAL_SECONDS` の Interval ごと（最初は起動の 1 Interval 後）に Report を作り、数値と各 Component の Severity の段階（0〜3）を `health_metric_samples` に入れます（DB の時計の枠に揃え、同じ枠には 1 回だけ）。20 Cycle ごとに、24 時間より古い生の行を 1 分、7 日より古い 1 分を 5 分、30 日より古い 5 分を 1 時間の集計（件数・合計・最小・最大）へ移し、`PAW_HEALTH_RETENTION_DAYS` より古い 1 時間の集計と Event を消します。移す行の削除と Merge は 1 文なので、Process が複数でも 1 つの Sample は 1 回だけ数えます。
 
-Component の Severity が前の Event と変わったときだけ `health_events` に 1 行を残します（集約しない。Advisory Lock の中で「最後の Event と違うときだけ」入れる）。
+Component の Severity が前の Event と変わったときだけ `health_events` に 1 行を残します（集約しない。Advisory Lock の中で「最後の Event と違うときだけ」入れる）。PostgreSQL に書けなかった間の Report は Process の中に残し（最大 100）、書けるようになってから Report の時刻で順に記録します（PostgreSQL の停止も残る）。
 
 ### Endpoint と権限
 
@@ -4189,12 +4189,12 @@ Component の Severity が前の Event と変わったときだけ `health_event
 
 ### Database と権限
 
-Migration `0066` が `health_metric_samples`（Application の Role に SELECT / INSERT / UPDATE / DELETE）と `health_events`（SELECT / INSERT / DELETE。更新はできない）を作り、`connection_usage (started_at) WHERE status = 'in_flight'` の部分 Index を加えます（#52 の Comment。Reaper と `connections` が使う）。Source が読むのは Application の Role が既に読める Table だけです。
+Migration `0066` が `health_metric_samples`（Application の Role に SELECT / INSERT / UPDATE / DELETE）と `health_events`（SELECT / INSERT / DELETE。更新はできない）を作り、`connection_usage (started_at) WHERE status = 'in_flight'` の部分 Index（#52 の Comment。Reaper と `connections` が使う）、`task_events (created_at) WHERE command = 'retry'` の部分 Index と `loop_failure_signatures (created_at)` の Index（`task_queue` の Retry と Loop）を加えます。Source が読むのは Application の Role が既に読める Table だけです。
 
 ### 制限と未確認の点
 
 - 通知（Notification Center、Rule）、SSE / WebSocket の Event、UI は後の Issue です。
-- Loop 検知・Escalation・OOM の数はまだ Component にありません（Task の失敗の数で代える）。
+- OOM と Escalation の実行の数はまだありません（記録する場所がない）。
 - `task_queue` と `memory_worker` の Dead letter の数は Table を走査します（Index を足していない）。Task が非常に多くなったら Index を検討します。
 - 実 GPU と実際の Timer（Backup、Projection、Audit retention）を使った確認はしていません（Test は Fake と PostgreSQL）。
 

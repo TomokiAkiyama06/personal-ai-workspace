@@ -138,10 +138,9 @@ class Settings(BaseSettings):
     # expired in storage (the retrieval still judges both by time).
     freshness_job_interval_seconds: int = Field(default=3_600, ge=0, le=86_400)
     # System Health (PAW-066, Decision 0059 Proposed). How often the numeric
-    # metrics are sampled into ``health_metric_samples`` (the requirements' "last
-    # 24 hours: 10-30 seconds"; up to 300 when storage is short). 0 turns the
-    # sampling off: the report is still served, but no history is kept.
-    health_sample_interval_seconds: int = Field(default=30, ge=0, le=300)
+    # metrics are sampled into ``health_metric_samples``: the requirements' "last
+    # 24 hours: 10-30 seconds" (FIXED), so no other value and no "off".
+    health_sample_interval_seconds: int = Field(default=30, ge=10, le=30)
     # How long the hourly aggregates and the health events are kept (the
     # requirements: important operational events "1年以上").
     health_retention_days: int = Field(default=400, ge=366, le=3_650)
@@ -429,15 +428,6 @@ class Settings(BaseSettings):
         if 0 < value < 60:
             raise ValueError(
                 "freshness_job_interval_seconds must be 0 (off) or 60 to 86400"
-            )
-        return value
-
-    @field_validator("health_sample_interval_seconds")
-    @classmethod
-    def _health_interval_is_off_or_at_least_ten_seconds(cls, value: int) -> int:
-        if 0 < value < 10:
-            raise ValueError(
-                "health_sample_interval_seconds must be 0 (off) or 10 to 300"
             )
         return value
 

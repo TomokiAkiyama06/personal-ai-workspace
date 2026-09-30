@@ -15,6 +15,9 @@ Create Date: 2026-09-30
   abandoned calls (``orchestrator/connection_reaper.py``) and System Health look
   for the rows that are still ``in_flight`` (issue #52's note from PR #106): the
   index holds only those, so it stays small as the settled rows grow.
+* ``ix_task_events_retry_created_at`` (``task_events (created_at) WHERE command =
+  'retry'``) and ``ix_loop_failure_signatures_created_at``: System Health counts
+  the retries and the detected loops of the last hour (Codex P1 on PR #170).
 
 Privileges of the application role (``PAW_APP_DATABASE_ROLE``): SELECT, INSERT,
 UPDATE and DELETE on ``health_metric_samples`` (the roll-up merges rows with
@@ -23,9 +26,9 @@ aggregates), SELECT, INSERT and DELETE on ``health_events`` (the purge after the
 retention period; an event is never updated). No privilege on ``connection_usage``
 changes.
 
-``CREATE INDEX`` on ``connection_usage`` blocks its writes while it runs (not
-``CONCURRENTLY``: Alembic runs the revision in a transaction); the index holds
-only the in-flight rows, so the build reads the table once and is short.
+``CREATE INDEX`` blocks the writes of ``connection_usage``, ``task_events`` and
+``loop_failure_signatures`` while it runs (not ``CONCURRENTLY``: Alembic runs the
+revision in a transaction); each build reads its table once.
 """
 
 from collections.abc import Sequence
@@ -68,6 +71,8 @@ STATUSES = (
 )
 MAX_REASONS_CHARS = 500
 IN_FLIGHT_INDEX = "ix_connection_usage_in_flight_started_at"
+RETRY_INDEX = "ix_task_events_retry_created_at"
+LOOP_INDEX = "ix_loop_failure_signatures_created_at"
 
 
 def _listed(values: Sequence[str]) -> str:
@@ -172,9 +177,18 @@ def upgrade() -> None:
         ["started_at"],
         postgresql_where=sa.text("status = 'in_flight'"),
     )
+    op.create_index(
+        RETRY_INDEX,
+        "task_events",
+        ["created_at"],
+        postgresql_where=sa.text("command = 'retry'"),
+    )
+    op.create_index(LOOP_INDEX, "loop_failure_signatures", ["created_at"])
 
 
 def downgrade() -> None:
+    op.drop_index(LOOP_INDEX, table_name="loop_failure_signatures")
+    op.drop_index(RETRY_INDEX, table_name="task_events")
     op.drop_index(IN_FLIGHT_INDEX, table_name="connection_usage")
     op.drop_table("health_events")
     op.drop_table("health_metric_samples")

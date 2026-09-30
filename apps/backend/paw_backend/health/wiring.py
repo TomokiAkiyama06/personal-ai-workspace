@@ -91,15 +91,12 @@ def build_system_health(
     sources.append(reaper_source)
     if database.configured:
         sources += [ScheduledJobSource(database, job) for job in SCHEDULED_JOBS]
-    sampling = database.configured and settings.health_sample_interval_seconds > 0
+    sampling = database.configured
     store = HealthStore(database) if database.configured else None
     monitor = HealthMonitor(
         sources,
         store=store,
-        sample_interval_seconds=(
-            settings.health_sample_interval_seconds
-            or limits.DEFAULT_SAMPLE_INTERVAL_SECONDS
-        ),
+        sample_interval_seconds=settings.health_sample_interval_seconds,
         retention_days=settings.health_retention_days,
     )
     return SystemHealth(monitor, compute_source, reaper_source, store, sampling)
